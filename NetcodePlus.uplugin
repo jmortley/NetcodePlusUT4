@@ -1,0 +1,17 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "2.0",
+  "FriendlyName": "NetcodePlus",
+  "Description": "Custom netcode enhancements for UT4.",
+  "Category": "Gameplay",
+  "CreatedBy": "phantaci",
+  "CreatedByURL": "",
+  "Modules": [
+    {
+      "Name": "NetcodePlus",
+      "Type" : "Runtime",
+			"WhitelistPlatforms" : [ "Win32", "Win64", "Linux" ]
+		}
+	]
+}

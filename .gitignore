@@ -1,0 +1,27 @@
+# Unreal Engine plugin ignore rules
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userprefs
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.VC.opendb
+
+# Ignore build artifacts
+*.dll
+*.lib
+*.exp
+*.pdb
+
+# Ignore temporary Unreal files
+*.log
+*.vs/
+*.uo
+*.uasset
+*.umap
