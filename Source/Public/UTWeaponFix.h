@@ -182,4 +182,7 @@ protected:
 
     /** Setup replication */
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+    /** Impressive Add On */
+    virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime);
 };

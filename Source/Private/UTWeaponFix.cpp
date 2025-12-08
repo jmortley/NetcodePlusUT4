@@ -782,14 +782,14 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
         return 0.0f;
     }
 
-    const float RTTms = PS->ExactPing;   // no full RTT
-    const float SmoothingMs = 85.0f;          // visual smoothing
-    const float MaxRewindMs = 160.0f;         // keep this sane
+	const float RTTms = PS->ExactPing;   // this is RTT in ms
+    const float SmoothingMs = 100.0f;          // visual smoothing is 0.1s in ut character movement
+	const float MaxRewindAmountMs = 190.0f;         // renamed to shot what this actually does. the max rewind time for hit validation
     //const float FudgeMs = 10.0f;
 
     // clamped to max
     float IdealMs = (RTTms / 2) + SmoothingMs;
-    float RewindMs = FMath::Clamp(IdealMs, 0.0f, MaxRewindMs);
+    float RewindMs = FMath::Clamp(IdealMs, 0.0f, MaxRewindAmountMs);
 
     return RewindMs * 0.001f;
 }
@@ -906,7 +906,19 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         Hit.ImpactPoint = BestPoint;
         Hit.Time = (BestPoint - StartLocation).Size() / (EndTrace - StartLocation).Size();
     }
+
+    if (Role == ROLE_Authority)
+    {
+        OnServerHitScanResult(Hit, ActualPredictionTime);
+    }
 }
+
+
+void AUTWeaponFix::OnServerHitScanResult(const FHitResult& Hit, float PredictionTime)
+{
+    // Default: do nothing. Custom weapons (Shock/Sniper) override this.
+}
+
 
 FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 {

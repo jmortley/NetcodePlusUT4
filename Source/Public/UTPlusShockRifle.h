@@ -13,6 +13,24 @@ UCLASS(abstract)
 class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 {
 	GENERATED_UCLASS_BODY()
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Impressive")
+	bool bTrackImpressive = true;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Impressive", meta = (ClampMin = "1"))
+	int32 ImpressiveThreshold = 5;
+
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Impressive")
+	int32 ImpressiveStreak = 0;
+
+	// BP event you’ll use to play the sound / widget
+	UFUNCTION(BlueprintImplementableEvent, Category = "Impressive")
+	void OnImpressive();
+
+	// internal RPC: server to owning client, then calls OnImpressive()
+	UFUNCTION(Client, Reliable)
+	void ClientNotifyImpressive();
+
 	/** shock ball bot is waiting to combo */
 	UPROPERTY()
 	class AUTProj_ShockBall* ComboTarget;
@@ -92,7 +110,7 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	virtual bool WaitingForCombo();
 
 	virtual void DoCombo();
-
+	virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime) override;
 	virtual float SuggestAttackStyle_Implementation() override;
 	virtual float GetAISelectRating_Implementation() override;
 	virtual bool CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc) override;

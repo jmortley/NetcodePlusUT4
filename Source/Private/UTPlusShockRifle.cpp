@@ -7,6 +7,7 @@
 #include "Engine.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "Net/UnrealNetwork.h"
 
 // Suppress DLL linkage warnings when overriding base game functions in a plugin
 #ifdef _MSC_VER
@@ -45,6 +46,44 @@ AUTPlusShockRifle::AUTPlusShockRifle(const FObjectInitializer& ObjectInitializer
 	HighlightText = NSLOCTEXT("Weapon", "ShockHighlightText", "Don't Tase Me Bro");
 	LowMeshOffset = FVector(0.f, 0.f, -4.f);
 	VeryLowMeshOffset = FVector(0.f, 0.f, -15.f);
+}
+
+
+void AUTPlusShockRifle::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AUTPlusShockRifle, ImpressiveStreak);
+}
+
+void AUTPlusShockRifle::OnServerHitScanResult(const FHitResult& Hit, float PredictionTime)
+{
+	if (!bTrackImpressive || Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	AUTCharacter* HitChar = Cast<AUTCharacter>(Hit.GetActor());
+	const bool bHitEnemyPawn = (HitChar != nullptr && HitChar != UTOwner);
+
+	if (bHitEnemyPawn)
+	{
+		ImpressiveStreak++;
+
+		if (ImpressiveStreak >= ImpressiveThreshold)
+		{
+			// Tell owning client to fire BP event
+			AUTPlayerController* PC = UTOwner ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
+			if (PC && PC->IsLocalController())
+			{
+				ClientNotifyImpressive();
+			}
+		}
+	}
+	else
+	{
+		ImpressiveStreak = 0;
+	}
 }
 
 void AUTPlusShockRifle::SetupSpecialMaterials()
@@ -142,6 +181,15 @@ void AUTPlusShockRifle::HitScanTrace(const FVector& StartLocation, const FVector
 
 	bPlayComboEffects = (Cast<AUTProj_ShockBall>(Hit.GetActor()) != NULL);
 }
+
+
+void AUTPlusShockRifle::ClientNotifyImpressive_Implementation()
+{
+	OnImpressive();
+}
+
+
+
 
 float AUTPlusShockRifle::GetHitValidationPredictionTime() const
 {
