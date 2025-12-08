@@ -58,32 +58,7 @@ void AUTPlusShockRifle::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 
 void AUTPlusShockRifle::OnServerHitScanResult(const FHitResult& Hit, float PredictionTime)
 {
-	if (!bTrackImpressive || Role != ROLE_Authority)
-	{
-		return;
-	}
 
-	AUTCharacter* HitChar = Cast<AUTCharacter>(Hit.GetActor());
-	const bool bHitEnemyPawn = (HitChar != nullptr && HitChar != UTOwner);
-
-	if (bHitEnemyPawn)
-	{
-		ImpressiveStreak++;
-
-		if (ImpressiveStreak >= ImpressiveThreshold)
-		{
-			// Tell owning client to fire BP event
-			AUTPlayerController* PC = UTOwner ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
-			if (PC && PC->IsLocalController())
-			{
-				ClientNotifyImpressive();
-			}
-		}
-	}
-	else
-	{
-		ImpressiveStreak = 0;
-	}
 }
 
 void AUTPlusShockRifle::SetupSpecialMaterials()
@@ -475,12 +450,34 @@ void AUTPlusShockRifle::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	// Store this now since it might get cleared below
 	bool bIsCombo = bPlayComboEffects;
 
+	Super::FireInstantHit(bDealDamage, OutHit);
+
+	if (Role == ROLE_Authority && bTrackImpressive && OutHit && OutHit->bBlockingHit)
+	{
+		AUTCharacter* HitChar = Cast<AUTCharacter>(OutHit->Actor.Get());
+		bool bHitEnemyPawn = (HitChar != nullptr && HitChar != UTOwner && !HitChar->IsDead());
+
+		if (bHitEnemyPawn)
+		{
+			ImpressiveStreak++;
+
+			if (ImpressiveStreak >= ImpressiveThreshold)
+			{
+				// Tell owning client to fire BP event
+				ClientNotifyImpressive();
+			}
+		}
+		else
+		{
+			ImpressiveStreak = 0;
+		}
+	}
 	// Parent (UTWeaponFix) handles all the hybrid networking:
 	// - Transaction validation (event indices, correction)
 	// - Epic's lag compensation (GetRewindLocation with hit validation time)
 	// - Split prediction (uses GetHitValidationPredictionTime() we override)
-	Super::FireInstantHit(bDealDamage, OutHit);
-
+	
+	//OnServerHitScanResult(OutHit, GetHitValidationPredictionTime());
 	// FlashExtra 1 will play the ComboEffects for the other clients
 	if (Role == ROLE_Authority && UTOwner != nullptr && bIsCombo)
 	{

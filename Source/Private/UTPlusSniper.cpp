@@ -260,7 +260,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	{
 		*OutHit = Hit;
 	}
-	/*
+
 	if (Role == ROLE_Authority && bTrackImpressive)
 	{
 		if (bHitEnemyPawn)
@@ -278,7 +278,6 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 			ImpressiveStreak = 0;
 		}
 	}
-	*/
 	// Clean up caches from UTWeaponFix
 	if (UTOwner)
 	{
@@ -294,7 +293,7 @@ void AUTPlusSniper::OnServerHitScanResult(const FHitResult& Hit, float Predictio
 	{
 		return;
 	}
-
+	/*
 	AUTCharacter* HitChar = Cast<AUTCharacter>(Hit.GetActor());
 	const bool bHitEnemyPawn = (HitChar != nullptr && HitChar != UTOwner);
 
@@ -315,6 +314,7 @@ void AUTPlusSniper::OnServerHitScanResult(const FHitResult& Hit, float Predictio
 	{
 		ImpressiveStreak = 0;
 	}
+	*/
 }
 
 

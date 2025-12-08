@@ -1056,8 +1056,16 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 
     if (Role == ROLE_Authority)
     {
-        // SERVER: use our hit validation time (RTT/2 + fudge, clamped)
-        CatchupTickDelta = GetHitValidationPredictionTime();
+        // SERVER: use our hit validation time (RTT/2)
+        float PingSeconds = 0.0f;
+        if (UTOwner && UTOwner->PlayerState)
+        {
+            // ExactPing is RTT in ms. Convert to seconds and divide by 2.
+            PingSeconds = (UTOwner->PlayerState->ExactPing * 0.001f) / 2.0f;
+        }
+
+        // Clamp to a sane max (e.g. 200ms) to prevent shooting through walls on lag spikes
+        CatchupTickDelta = FMath::Clamp(PingSeconds, 0.0f, 0.200f);
     }
     else
     {
