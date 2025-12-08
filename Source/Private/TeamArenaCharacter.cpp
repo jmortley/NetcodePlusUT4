@@ -87,6 +87,12 @@ void ATeamArenaCharacter::FiringInfoUpdated()
         AnimInstance->Montage_Stop(0.2f);
     }
 
+    //if (Weapon && Weapon->ZoomState != EZoomState::EZS_NotZoomed)
+    //{
+        // Prevent any FiringInfoUpdated visual calls while zoomed
+    //    return;
+    //}
+
     if (IsLocallyControlled() && !bLocalFlashLoc)
     {
         // If this is our custom weapon, we know we handled visuals locally in FireShot.

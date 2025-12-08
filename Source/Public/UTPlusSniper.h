@@ -80,6 +80,8 @@ public:
 
 	virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime) override;
 
+	virtual void SetFlashExtra(AActor* HitActor) {};
+
 	/** Return hitscan damage amount. */
 	virtual int32 GetHitScanDamage();
 };

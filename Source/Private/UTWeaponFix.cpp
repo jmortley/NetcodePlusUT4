@@ -7,7 +7,7 @@
 #include "TimerManager.h"
 #include "Net/UnrealNetwork.h"
 #include "UTWeaponStateFiring_Transactional.h"
-#include "TeamArenaPredictionPC.h"
+#include "UTWeaponStateZooming.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
@@ -84,6 +84,23 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
 
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
+	// Bypass for Zooming State
+    if (FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum])
+    {
+        // Check 1: Is it a child of the Zooming Class? (Standard Check)
+        // Check 2: Does the name contain "Zoom"? (Safety net for BP variations)
+        if (FiringState[FireModeNum]->IsA(UUTWeaponStateZooming::StaticClass()) ||
+            FiringState[FireModeNum]->GetName().Contains(TEXT("Zoom")))
+        {
+            // SUCCESS: Identified as Zoom. 
+            // Hand off to parent (AUTWeapon) to handle state transition.
+            // This prevents entering the Transactional Fire loop.
+            UE_LOG(LogUTWeaponFix, Log, TEXT("Early exit for zoom"));
+            Super::StartFire(FireModeNum);
+            return;
+        }
+    }
+
     // Critical Fix #1: Prevent simultaneous fire modes
     if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
     {
@@ -319,7 +336,16 @@ void AUTWeaponFix::FireShot()
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
     
-
+    if (FiringState.IsValidIndex(FireModeNum))
+    {
+        if (FiringState[FireModeNum] &&
+            FiringState[FireModeNum]->IsA(UUTWeaponStateZooming::StaticClass()))
+        {
+            //UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d is Zoom – bypassing transactional stop"), FireModeNum);
+            Super::StopFire(FireModeNum);
+            return;
+        }
+    }
     
     if (FireModeNum < 2)
     {
@@ -784,7 +810,7 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
 
 	const float RTTms = PS->ExactPing;   // this is RTT in ms
     const float SmoothingMs = 100.0f;          // visual smoothing is 0.1s in ut character movement
-	const float MaxRewindAmountMs = 190.0f;         // renamed to shot what this actually does. the max rewind time for hit validation
+	const float MaxRewindAmountMs = 250.0f;         // renamed to show what this actually does. the max rewind time for hit validation
     //const float FudgeMs = 10.0f;
 
     // clamped to max
@@ -843,7 +869,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             if (bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target))
             {
                 // Calculate padding ONCE before the loop logic
-                float ExtraHitPadding = (Target == ReceivedHitScanHitChar) ? 40.f : 0.f;
+                float ExtraHitPadding = (Target == ReceivedHitScanHitChar) ? 45.f : 0.f;
 
                 // find appropriate rewind position, and test against trace from StartLocation to Hit.Location
                 FVector TargetLocation = ((ActualPredictionTime > 0.f) && (Role == ROLE_Authority)) ? Target->GetRewindLocation(ActualPredictionTime) : Target->GetActorLocation();
@@ -1011,61 +1037,7 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 
 
 
-/*
 
-AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(TSubclassOf<AUTProjectile> ProjectileClass, FVector SpawnLocation, FRotator SpawnRotation)
-{
-    // 1. Let Super spawn the projectile
-    // If Authority: Super ALREADY handles the catch-up tick here.
-    // If Client: Super spawns it at the muzzle (no catch-up).
-    AUTProjectile* NewProj = Super::SpawnNetPredictedProjectile(ProjectileClass, SpawnLocation, SpawnRotation);
-
-    if (NewProj && NewProj->ProjectileMovement)
-    {
-        // ---------------------------------------------------------
-        // FIX PART 1: High-FPS Stability (Always Apply)
-        // ---------------------------------------------------------
-        // This prevents the "curve" during the projectile's flight by 
-        // locking physics updates to 120Hz, regardless of render FPS.
-        const float StableRate = 1.f / 120.f;
-
-        NewProj->PrimaryActorTick.TickInterval = StableRate;
-        NewProj->ProjectileMovement->PrimaryComponentTick.TickInterval = StableRate;
-
-        // ---------------------------------------------------------
-        // FIX PART 2: Manual Catchup (CLIENTS ONLY)
-        // ---------------------------------------------------------
-        // Only run this for Fake Projectiles (Role != ROLE_Authority).
-        // Authority projectiles were already ticked by Super, so touching them
-        // causes the "Very Far Away" / Double-Tick artifacts.
-        if (Role != ROLE_Authority)
-        {
-            AUTPlayerController* OwningPlayer = UTOwner ? Cast<AUTPlayerController>(UTOwner->GetController()) : NULL;
-            if (OwningPlayer)
-            {
-                float CatchupTime = GetHitValidationPredictionTime();//OwningPlayer->GetPredictionTime();
-                if (CatchupTime > 0.f)
-                {
-                    // Note: We do NOT need to Reset (SetActorLocation) here because 
-                    // Super didn't move the Fake projectile. It's still at the muzzle.
-
-                    // Run the stable simulation loop
-                    float TimeRemaining = CatchupTime;
-                    while (TimeRemaining > 0.f)
-                    {
-                        float DT = FMath::Min(TimeRemaining, StableRate);
-                        NewProj->ProjectileMovement->TickComponent(DT, LEVELTICK_All, NULL);
-                        TimeRemaining -= DT;
-                    }
-                }
-            }
-        }
-    }
-
-    return NewProj;
-}
-
-*/
 
 
 
@@ -1222,12 +1194,12 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     }
 
     // ----------------------------------------
-    // 6) High-FPS stability (120 Hz lock)
+    // 6) High-FPS stability (240 Hz lock)
     // ----------------------------------------
     if (NewProjectile->ProjectileMovement)
     {
-        const float StableRate = 1.f / 120.f;
-        //NewProjectile->PrimaryActorTick.TickInterval = StableRate;
+        const float StableRate = 1.f / 240.f;
+        NewProjectile->PrimaryActorTick.TickInterval = StableRate;
         NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval =
             StableRate;
     }
@@ -1357,6 +1329,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
         }
         UTOwner->SetFlashLocation(Hit.Location, CurrentFireMode);
         UTOwner->SetFlashExtra(0, CurrentFireMode);
+        UTOwner->ForceNetUpdate();
         // Bot warnings
         if (UTPC != nullptr)
         {

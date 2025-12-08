@@ -58,33 +58,7 @@ void UUTWeaponStateFiring_Transactional::EndState()
 }
 
 
-/*
-void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
-{
-	// --- CLIENT SIDE ---
-	// We MUST keep the timer running here.
-	// The Client uses this timer to trigger 'FireShot()', which generates 
-	// the next 'ServerStartFireFixed' RPC.
-	//if (GetOuterAUTWeapon()->Role < ROLE_Authority)
-	//{
-		// Call the parent logic to check ammo, input, and trigger FireShot()
-	if (GetOuterAUTWeapon()->GetUTOwner())
-	{
-		AUTCharacter* UTC = GetOuterAUTWeapon()->GetUTOwner();
-		AUTPlayerController* PC = UTC ? Cast<AUTPlayerController>(UTC->Controller) : nullptr;
-		if (PC)
-		{
-			PC->LastShotTargetGuess = nullptr;
-		}
-		GetOuterAUTWeapon()->TargetedCharacter = nullptr;
-	}
-	Super::RefireCheckTimer();
-	return;
-	//}
 
-
-}
-*/
 
 void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 {
@@ -106,8 +80,45 @@ void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 		return;
 	}
 
+	if (GetOuterAUTWeapon()->HandleContinuedFiring())
+	{
+		FireShot();
+	}
+	else
+	{
+		// 2. JAM PROTECTION (Sniper Only)
+		// We use a string check so we don't need to mess with header includes/dependencies
+		bool bIsSniper = GetOuterAUTWeapon()->GetClass()->GetName().Contains(TEXT("Sniper"));
 
-	// Check if we should continue firing (button still held, has ammo, etc.)
+		if (bIsSniper)
+		{
+			// Check if player is holding the button
+			uint8 CurrentMode = GetOuterAUTWeapon()->GetCurrentFireMode();
+			bool bIsHoldingFire = false;
+			if (GetOuterAUTWeapon()->GetUTOwner())
+			{
+				bIsHoldingFire = GetOuterAUTWeapon()->GetUTOwner()->IsPendingFire(CurrentMode);
+			}
+
+			if (bIsHoldingFire)
+			{
+				// RETRY LOGIC:
+				// Sniper logic: If holding button but blocked by cooldown (Timer Jitter), wait 1 frame.
+				GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(RefireCheckHandle, this, &UUTWeaponStateFiring_Transactional::RefireCheckTimer, 0.01f, true);
+				return; // Exit here so we don't call StopFire
+			}
+		}
+
+		// 3. STANDARD STOP (Shock Rifle, Link Gun, etc.)
+		// If it's not a sniper, OR if the player released the button, we stop naturally.
+		AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+		if (W)
+		{
+			W->StopFire(W->GetCurrentFireMode());
+		}
+	}
+
+	/* Check if we should continue firing(button still held, has ammo, etc.)
 	if (GetOuterAUTWeapon()->HandleContinuedFiring())
 	{
 		// Send the next shot RPC to server - don't fire locally
@@ -123,6 +134,7 @@ void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 		}
 		//GetOuterAUTWeapon()->GotoActiveState();
 	}
+	*/
 }
 
 void UUTWeaponStateFiring_Transactional::TransactionalFire()

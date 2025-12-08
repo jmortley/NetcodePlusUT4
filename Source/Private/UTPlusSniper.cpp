@@ -17,10 +17,10 @@ AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 	BringUpTime = 0.45f;
 	PutDownTime = 0.4f;
 	
-	StoppedHeadshotScale = 1.4f;
-	SlowHeadshotScale = 1.4f;
-	AimedHeadshotScale = 1.f;
-	RunningHeadshotScale = 1.0f;
+	StoppedHeadshotScale = 1.1f;
+	SlowHeadshotScale = 1.1f;
+	AimedHeadshotScale = 1.1f;
+	RunningHeadshotScale = 1.1f;
 	
 	HeadshotDamage = 125;
 	BlockedHeadshotDamage = 45;
@@ -33,7 +33,7 @@ AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 	BaseAISelectRating = 0.7f;
 	BasePickupDesireability = 0.63f;
 	
-	FiringViewKickback = -50.f;
+	FiringViewKickback = 0.f;
 	FiringViewKickbackY = 0.f;
 	bSniping = true;
 	HUDViewKickback = FVector2D(0.f, 0.2f);
@@ -163,7 +163,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
 		UTOwner->SetFlashLocation(Hit.Location, CurrentFireMode);
 		UTOwner->SetFlashExtra(FlashExtra, CurrentFireMode);
-
+		UTOwner->ForceNetUpdate();
 
 		// Warn Bots
 		if (UTPC != NULL)
@@ -260,6 +260,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	{
 		*OutHit = Hit;
 	}
+	/*
 	if (Role == ROLE_Authority && bTrackImpressive)
 	{
 		if (bHitEnemyPawn)
@@ -277,6 +278,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 			ImpressiveStreak = 0;
 		}
 	}
+	*/
 	// Clean up caches from UTWeaponFix
 	if (UTOwner)
 	{
@@ -333,11 +335,13 @@ int32 AUTPlusSniper::GetHitScanDamage()
 void AUTPlusSniper::PlayPredictedImpactEffects(FVector ImpactLoc)
 {
 	// Clear the flash extra so we don't accidentally predict a "flesh hit" 
-	// on the client before the server confirms it.
+	/* on the client before the server confirms it.
 	if (UTOwner)
 	{
 		UTOwner->SetFlashExtra(0, CurrentFireMode);
 	}
+	*/
+	SetFlashExtra(nullptr);
 	Super::PlayPredictedImpactEffects(ImpactLoc);
 }
 
@@ -347,7 +351,11 @@ void AUTPlusSniper::OnRep_ZoomState_Implementation()
 {
 	// Note: We call Super (UTWeapon) but we want the Zoom specific logic here
 	// UTWeaponFix doesn't override this, so it goes to UTWeapon's implementation which is fine
-	Super::OnRep_ZoomState_Implementation();
+	//Super::OnRep_ZoomState_Implementation();
+	if (GetNetMode() != NM_DedicatedServer && ZoomState == EZoomState::EZS_NotZoomed && GetUTOwner() && GetUTOwner()->GetPlayerCameraManager())
+	{
+		GetUTOwner()->GetPlayerCameraManager()->UnlockFOV();
+	}
 
 	if (GetNetMode() != NM_DedicatedServer)
 	{

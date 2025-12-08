@@ -52,7 +52,7 @@ void AUTPlusProj_ShockBall::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 1. Find the component named "FlightEffect" that you created in Blueprint
+	/* 1. Find the component named "FlightEffect" that you created in Blueprint
 	TArray<UParticleSystemComponent*> Components;
 	GetComponents(Components);
 
@@ -72,7 +72,7 @@ void AUTPlusProj_ShockBall::BeginPlay()
 	{
 		FlightEffectVisual = Cast<UParticleSystemComponent>(Components[0]);
 	}
-
+	*/
 }
 
 
@@ -80,7 +80,7 @@ void AUTPlusProj_ShockBall::BeginPlay()
 void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-
+	/*
 	if (GetNetMode() != NM_DedicatedServer && FlightEffectVisual)
 	{
 		// 1. INITIALIZATION: Run this ONCE when the projectile is actually valid
@@ -121,6 +121,7 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 
 		FlightEffectVisual->SetWorldLocation(NewPos);
 	}
+	*/
 }
 
 
