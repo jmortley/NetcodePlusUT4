@@ -142,6 +142,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
     if (LinkGun->Role == ROLE_Authority && !LinkGun->GetUTOwner()->IsLocallyControlled())
     {
         LinkGun->ConsumeAmmo(LinkGun->GetCurrentFireMode());
+
         return;
     }
 

@@ -7,7 +7,8 @@ UCLASS()
 class UUTWeaponStateFiringCharged_Transactional : public UUTWeaponStateFiringChargedRocket
 {
     GENERATED_UCLASS_BODY()
-
+    UPROPERTY()
+    AUTWeap_RocketLauncher* RocketLauncher;
     // Override to prevent standard RPCs
     virtual void BeginState(const UUTWeaponState* PrevState) override;
     
