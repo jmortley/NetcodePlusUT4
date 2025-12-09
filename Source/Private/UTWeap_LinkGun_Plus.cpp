@@ -127,6 +127,10 @@ void AUTWeap_LinkGun_Plus::ProcessClientSideHit(float DeltaTime, AActor* HitActo
 
 
 
+
+
+
+
 bool AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Validate(AActor* HitActor, FVector_NetQuantize HitLocation, int32 DamageAmount)
 {
 	// Basic anti-cheat sanity checks
@@ -513,6 +517,22 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 	}
 }
 
+
+void AUTWeap_LinkGun_Plus::StopFire(uint8 FireModeNum)
+{
+	if (FireModeNum == 1)
+	{
+		// Beam mode - use standard UT logic, skip transactional stuff
+		AUTWeapon::StopFire(FireModeNum);
+	}
+	else
+	{
+		// Plasma - use Fix logic
+		AUTWeapon::StopFire(FireModeNum);
+	}
+}
+
+
 void AUTWeap_LinkGun_Plus::StartLinkPull()
 {
 	bReadyToPull = false;
@@ -737,3 +757,4 @@ void AUTWeap_LinkGun_Plus::DrawWeaponCrosshair_Implementation(UUTHUDWidget* Weap
 		WeaponHudWidget->DrawTexture(WeaponHudWidget->UTHUDOwner->HUDAtlas, 0, 0, 0.75f * CircleSize * CrosshairScale, 0.75f * CircleSize * CrosshairScale, 98, 936, CircleSize, CircleSize, 1.f, FLinearColor::Red, FVector2D(0.5f, 0.5f));
 	}
 }
+

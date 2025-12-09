@@ -13,7 +13,14 @@ public:
     virtual void BeginState(const UUTWeaponState* Prev) override;
     // Accumulator for client-side damage batching
     float ClientDamageAccumulator;
-
+    virtual void RefireCheckTimer() override;
+    bool bPendingEndFire;
+    bool bPendingStartFire;
+    //bool bHasBegun;
+    float ClientDamageAccumulator;
+    virtual void EndFiringSequence(uint8 FireModeNum) override;
+    virtual void PendingFireStarted() override;
+    virtual void EndState() override;
 protected:
     bool bHasBegun;
 

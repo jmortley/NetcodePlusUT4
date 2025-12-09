@@ -14,33 +14,107 @@ UUTWeaponStateFiringLinkBeamPlus::UUTWeaponStateFiringLinkBeamPlus(const FObject
 }
 
 
+void UUTWeaponStateFiringLinkBeamPlus::RefireCheckTimer()
+{
+    UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer START ==="));
+
+    AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+
+    UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - LinkGun=%s"), *GetNameSafe(LinkGun));
+
+    if (!LinkGun)
+    {
+        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - NO LINKGUN, ABORT"));
+        return;
+    }
+
+    UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - UTOwner=%s"), *GetNameSafe(LinkGun->GetUTOwner()));
+
+    if (!LinkGun->GetUTOwner())
+    {
+        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - NO OWNER, going to ActiveState"));
+        LinkGun->GotoActiveState();
+        return;
+    }
+
+    UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - IsPendingFire(1)=%d"),
+        LinkGun->GetUTOwner()->IsPendingFire(1));
+
+    // Beam-specific: just check if we should stop firing
+    if (!LinkGun->GetUTOwner()->IsPendingFire(LinkGun->GetCurrentFireMode()))
+    {
+        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - Not pending fire, ending sequence"));
+        EndFiringSequence(LinkGun->GetCurrentFireMode());
+        return;
+    }
+
+    // Check ammo
+    if (!LinkGun->HasAmmo(LinkGun->GetCurrentFireMode()))
+    {
+        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - No ammo, going to ActiveState"));
+        LinkGun->GotoActiveState();
+        return;
+    }
+
+    UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer END ==="));
+}
+
+
 void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
 {
     AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
-    UE_LOG(LogUTWeaponState, Warning, TEXT("LinkBeam BeginState Outer=%s (Role=%d)"),
-        *GetNameSafe(GetOuter()), (LinkGun ? LinkGun->Role : -1));
+
     if (LinkGun)
     {
         LinkGun->CurrentLinkedTarget = nullptr;
         LinkGun->LinkStartTime = -100.f;
     }
 
+    // Do what UUTWeaponStateFiring::BeginState does, but SKIP FireShot()
+    GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+        RefireCheckHandle,
+        this,
+        &UUTWeaponStateFiring::RefireCheckTimer,
+        GetOuterAUTWeapon()->GetRefireTime(GetOuterAUTWeapon()->GetCurrentFireMode()),
+        true
+    );
+    ToggleLoopingEffects(true);
+    PendingFireSequence = -1;
+    bDelayShot = false;
+    GetOuterAUTWeapon()->OnStartedFiring();
+    // NO FireShot() - beam handles this in Tick()
+    GetOuterAUTWeapon()->bNetDelayedShot = false;
 
-    UUTWeaponStateFiringBeam::BeginState(Prev);
     bHasBegun = true;
 }
 
 
+
+
+
 void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
 {
-    // Call parent to handle animation / delayed shot logic
-    // But we are hijacking the damage logic.
-    if (!bHasBegun) { return; }
-    HandleDelayedShot();
+    UE_LOG(LogUTWeaponState, Warning, TEXT("=== Tick START ==="));
+
+    if (!bHasBegun)
+    {
+        UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - not begun, skip"));
+        return;
+    }
 
     AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+
+    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - LinkGun=%s"), *GetNameSafe(LinkGun));
+
     if (!LinkGun) { return; }
-    //HandleDelayedShot(); 
+
+    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - UTOwner=%s"), *GetNameSafe(LinkGun->GetUTOwner()));
+
+    if (!LinkGun->GetUTOwner()) { return; }
+
+    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - About to check Role"));
+    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - Role=%d"), (int32)LinkGun->Role);
+    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - IsLocallyControlled=%d"), LinkGun->GetUTOwner()->IsLocallyControlled());
 
 
     // --- SERVER ---
@@ -76,4 +150,39 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
             // For bandwidth, we usually just don't send hits.
         }
     }
+}
+
+
+void UUTWeaponStateFiringLinkBeamPlus::PendingFireStarted()
+{
+    AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+    if (LinkGun && LinkGun->IsLinkPulsing())
+    {
+        bPendingStartFire = true;
+    }
+    else
+    {
+        bPendingEndFire = false;
+    }
+}
+
+
+void UUTWeaponStateFiringLinkBeamPlus::EndState()
+{
+    bPendingStartFire = false;
+    bPendingEndFire = false;
+    bHasBegun = false;
+    ClientDamageAccumulator = 0.f;
+
+    AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+    if (LinkGun)
+    {
+        LinkGun->bReadyToPull = false;
+        LinkGun->CurrentLinkedTarget = nullptr;
+        LinkGun->bLinkBeamImpacting = false;
+        LinkGun->bLinkCausingDamage = false;
+    }
+
+    // Call grandparent - skip UUTWeaponStateFiringLinkBeam::EndState
+    UUTWeaponStateFiringBeam::EndState();
 }

@@ -23,10 +23,12 @@ public:
     // ===========================================
     // CSHD / NetcodePlus Configuration
     // ===========================================
-    virtual void FireInstantHit(bool bDealDamage, FHitResult* OutHit = nullptr) override;
+    //virtual void FireInstantHit(bool bDealDamage, FHitResult* OutHit = nullptr) override;
     /** Ping threshold below which we trust client hits (CSHD mode) */
     UPROPERTY(EditDefaultsOnly, Category = "NetcodePlus")
     float LowPingThreshold;
+
+    virtual void StopFire(uint8 FireModeNum) override;
 
     /** Buffer zone for ping mode switching to prevent oscillation */
     UPROPERTY(EditDefaultsOnly, Category = "NetcodePlus")
