@@ -1,30 +1,52 @@
 // UTWeaponStateFiringLinkBeam_Plus.cpp
-
+#include "UTWeaponStateFiringLinkBeamPlus.h"
 #include "UnrealTournament.h"
-#include "UTWeaponStateFiringLinkBeam_Plus.h"
 #include "UTWeap_LinkGun_Plus.h"
+#include "Animation/AnimInstance.h"
 
-UUTWeaponStateFiringLinkBeam_Plus::UUTWeaponStateFiringLinkBeam_Plus(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
+
+DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponState, Log, All);
+
+UUTWeaponStateFiringLinkBeamPlus::UUTWeaponStateFiringLinkBeamPlus(const FObjectInitializer& ObjectInitializer)
+    : Super(ObjectInitializer)
 {
     ClientDamageAccumulator = 0.f;
 }
 
-void UUTWeaponStateFiringLinkBeam_Plus::Tick(float DeltaTime)
+
+void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
+{
+    AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+    UE_LOG(LogUTWeaponState, Warning, TEXT("LinkBeam BeginState Outer=%s (Role=%d)"),
+        *GetNameSafe(GetOuter()), (LinkGun ? LinkGun->Role : -1));
+    if (LinkGun)
+    {
+        LinkGun->CurrentLinkedTarget = nullptr;
+        LinkGun->LinkStartTime = -100.f;
+    }
+
+
+    UUTWeaponStateFiringBeam::BeginState(Prev);
+    bHasBegun = true;
+}
+
+
+void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
 {
     // Call parent to handle animation / delayed shot logic
     // But we are hijacking the damage logic.
-    HandleDelayedShot(); 
+    if (!bHasBegun) { return; }
+    HandleDelayedShot();
 
     AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
-    if (!LinkGun) return;
+    if (!LinkGun) { return; }
+    //HandleDelayedShot(); 
+
 
     // --- SERVER ---
-    if (LinkGun->Role == ROLE_Authority)
+    if (LinkGun->Role == ROLE_Authority && !LinkGun->GetUTOwner()->IsLocallyControlled())
     {
-        // On Server, we DO NOT TRACE. 
-        // We only consume ammo and wait for the RPC from the client.
-        // We must tick ammo consumption here or infinite ammo cheats are easy.
+        // Dedicated server only - wait for client RPC
         LinkGun->ConsumeAmmo(LinkGun->GetCurrentFireMode());
         return;
     }
@@ -49,7 +71,7 @@ void UUTWeaponStateFiringLinkBeam_Plus::Tick(float DeltaTime)
         {
             // We missed. Clear the accumulator so we don't store damage while aiming at a wall
             ClientDamageAccumulator = 0.f;
-            
+
             // Tell server we missed (optional, but good for resetting Link Pull state)
             // For bandwidth, we usually just don't send hits.
         }

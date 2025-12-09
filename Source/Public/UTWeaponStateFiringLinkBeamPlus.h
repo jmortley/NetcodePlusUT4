@@ -1,5 +1,5 @@
 #pragma once
-
+#include "NetcodePlus.h"
 #include "UTWeaponStateFiringLinkBeam.h"
 #include "UTWeaponStateFiringLinkBeamPlus.generated.h"
 
@@ -10,7 +10,11 @@ class NETCODEPLUS_API UUTWeaponStateFiringLinkBeamPlus : public UUTWeaponStateFi
 
 public:
 	virtual void Tick(float DeltaTime) override;
-    
+    virtual void BeginState(const UUTWeaponState* Prev) override;
     // Accumulator for client-side damage batching
     float ClientDamageAccumulator;
+
+protected:
+    bool bHasBegun;
+
 };
