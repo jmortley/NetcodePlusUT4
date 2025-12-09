@@ -12,6 +12,9 @@
 #include "UTRewardMessage.h"
 #include "UTCharacter.h"
 
+
+
+
 AUTWeap_LinkGun_Plus::AUTWeap_LinkGun_Plus(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -23,7 +26,7 @@ AUTWeap_LinkGun_Plus::AUTWeap_LinkGun_Plus(const FObjectInitializer& ObjectIniti
 	MaxHitDistanceTolerance = 200.0f;
 	HighPingBeamWidthPadding = 2.5f;
 	//MaxHitDistanceTolerance = 300.0f; // Allow 3 meters of lag discrepancy
-	ClientDamageBatchSize = 5;
+	ClientDamageBatchSize = 15;
 	CurrentLinkedTarget = nullptr;
 	LinkStartTime = -100.f;
 	if (FiringState.Num() > 0)
@@ -130,42 +133,83 @@ void AUTWeap_LinkGun_Plus::ProcessClientSideHit(float DeltaTime, AActor* HitActo
 
 
 
-
+/*
 bool AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Validate(AActor* HitActor, FVector_NetQuantize HitLocation, int32 DamageAmount)
 {
-	// Basic anti-cheat sanity checks
 	if (!HitActor) return false;
 
-	// 1. Determine Base Cap
-	int32 DamageCap = 40;
-
-	// 2. Check for Berserk / Fire Rate Buffs
-	// GetFireRateMultiplier() returns 1.0 normally, and 2.0 for Berserk.
+	// Base cap = BatchSize + one tick's worth of damage as buffer
+	// At 233 DPS and 120 tick: ~2 damage per tick max
+	// Add generous headroom for frame spikes
+	int32 DamageCap = ClientDamageBatchSize + 10;
 
 	if (UTOwner)
 	{
 		float FireRateMult = UTOwner->GetFireRateMultiplier();
-
-		// If they have Berserk (2.0), this becomes 40 * 2 = 80.
-		// If they have a custom rune (e.g. 1.5), this becomes 60.
-		// We use CeilToInt to ensure we don't accidentally round down on edge cases.
-		DamageCap = FMath::CeilToInt(40 * FireRateMult);
+		DamageCap = FMath::CeilToInt(DamageCap * FireRateMult);
 	}
-	// 3. Validate
+
 	if (DamageAmount > DamageCap)
 	{
-		// Optional: Log cheat attempt
-		// UE_LOG(LogUTWeapon, Warning, TEXT("Link Gun Damage exploit! Value: %d (Cap: %d)"), DamageAmount, DamageCap);
 		return false;
+	}
+
+	return true;
+}
+*/
+
+
+bool AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Validate(
+	AActor* HitActor,
+	FVector_NetQuantize HitLocation,
+	int32 DamageAmount)
+{
+	// If the actor is gone, just ignore this batch.
+	if (!HitActor)
+	{
+
+		return true; // allow, but do nothing in _Implementation when HitActor is null
+	}
+
+	int32 DamageCap = 40;
+	if (UTOwner)
+	{
+		float FireRateMult = UTOwner->GetFireRateMultiplier();
+		DamageCap = FMath::CeilToInt(40 * FireRateMult);
+	}
+
+	if (DamageAmount > DamageCap)
+	{
+
+		// don’t kick – just clamp in _Implementation
+		return true;
 	}
 
 	return true;
 }
 
 
+
 void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor, FVector_NetQuantize HitLocation, int32 DamageAmount)
 {
 	if (!UTOwner || !InstantHitInfo.IsValidIndex(1)) return;
+
+
+	if (!HitActor)
+	{
+		// actor already dead or gone, nothing to do
+		return;
+	}
+
+	int32 DamageCap = 40;
+	if (UTOwner)
+	{
+		float FireRateMult = UTOwner->GetFireRateMultiplier();
+		DamageCap = FMath::CeilToInt(40 * FireRateMult);
+	}
+
+	DamageAmount = FMath::Min(DamageAmount, DamageCap);
+
 
 	AUTPlayerState* PS = UTOwner->Controller ? Cast<AUTPlayerState>(UTOwner->Controller->PlayerState) : nullptr;
 	if (!PS) return;

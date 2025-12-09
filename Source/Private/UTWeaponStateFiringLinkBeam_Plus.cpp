@@ -11,6 +11,9 @@ UUTWeaponStateFiringLinkBeamPlus::UUTWeaponStateFiringLinkBeamPlus(const FObject
     : Super(ObjectInitializer)
 {
     ClientDamageAccumulator = 0.f;
+    bPendingEndFire = false;
+    bPendingStartFire = false;
+    bHasBegun = false;
 }
 
 
@@ -94,63 +97,128 @@ void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
 
 void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
 {
-    UE_LOG(LogUTWeaponState, Warning, TEXT("=== Tick START ==="));
-
-    if (!bHasBegun)
-    {
-        UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - not begun, skip"));
-        return;
-    }
+    if (!bHasBegun) { return; }
 
     AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+    if (!LinkGun || !LinkGun->GetUTOwner()) { return; }
 
-    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - LinkGun=%s"), *GetNameSafe(LinkGun));
+    // --- Handle Pending End Fire (Pull Logic) ---
+    if (bPendingEndFire)
+    {
+        if (LinkGun->IsLinkPulsing())
+        {
+            // Currently pulsing - update beam endpoint and wait
+            LinkGun->GetUTOwner()->SetFlashLocation(LinkGun->PulseLoc, LinkGun->GetCurrentFireMode());
+            return;
+        }
+        else if (LinkGun->bReadyToPull && LinkGun->CurrentLinkedTarget)
+        {
+            // Ready to pull - execute it!
+            LinkGun->StartLinkPull();
+            return;
+        }
 
-    if (!LinkGun) { return; }
+        if (bPendingStartFire)
+        {
+            // Player pressed fire again during pulse
+            bPendingEndFire = false;
+        }
+        else
+        {
+            // Actually end now
+            EndFiringSequence(LinkGun->GetCurrentFireMode());
+            return;
+        }
+    }
+    bPendingStartFire = false;
 
-    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - UTOwner=%s"), *GetNameSafe(LinkGun->GetUTOwner()));
+    // Reset beam state flags each tick (server)
+    if (LinkGun->Role == ROLE_Authority)
+    {
+        LinkGun->bLinkCausingDamage = false;
+    }
 
-    if (!LinkGun->GetUTOwner()) { return; }
-
-    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - About to check Role"));
-    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - Role=%d"), (int32)LinkGun->Role);
-    UE_LOG(LogUTWeaponState, Warning, TEXT("Tick - IsLocallyControlled=%d"), LinkGun->GetUTOwner()->IsLocallyControlled());
-
-
-    // --- SERVER ---
+    // --- SERVER (Dedicated only) ---
     if (LinkGun->Role == ROLE_Authority && !LinkGun->GetUTOwner()->IsLocallyControlled())
     {
-        // Dedicated server only - wait for client RPC
         LinkGun->ConsumeAmmo(LinkGun->GetCurrentFireMode());
         return;
     }
 
     // --- CLIENT (and Listen Server Host) ---
-    // We are the authority on "Did we hit?"
-    if (LinkGun->GetUTOwner() && LinkGun->GetUTOwner()->IsLocallyControlled())
+    if (LinkGun->GetUTOwner()->IsLocallyControlled())
     {
-        // Perform the trace locally
         FHitResult Hit;
-        LinkGun->FireInstantHit(false, &Hit); // bDealDamage = false, we handle it manually
+        LinkGun->FireInstantHit(false, &Hit);
 
-        // Update visual beam location immediately so it looks responsive
+        // Update visual beam location immediately
         LinkGun->GetUTOwner()->SetFlashLocation(Hit.Location, LinkGun->GetCurrentFireMode());
+
+        // Track beam impact state
+        LinkGun->bLinkBeamImpacting = (Hit.Time < 1.f);
+
+        // Track previous target for link timing
+        AActor* OldLinkedTarget = LinkGun->CurrentLinkedTarget;
+        LinkGun->CurrentLinkedTarget = nullptr;
 
         if (Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged)
         {
-            // We hit something! Process it.
+            // Check if valid link target (for pull mechanic)
+            if (LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
+            {
+                LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
+            }
+
+            LinkGun->bLinkCausingDamage = true;
             LinkGun->ProcessClientSideHit(DeltaTime, Hit.Actor.Get(), Hit.Location, LinkGun->InstantHitInfo[LinkGun->GetCurrentFireMode()]);
         }
         else
         {
-            // We missed. Clear the accumulator so we don't store damage while aiming at a wall
+            // Missed - clear accumulator
             ClientDamageAccumulator = 0.f;
+        }
 
-            // Tell server we missed (optional, but good for resetting Link Pull state)
-            // For bandwidth, we usually just don't send hits.
+        // --- Pull Warmup Logic ---
+        if (OldLinkedTarget != LinkGun->CurrentLinkedTarget)
+        {
+            // Target changed - reset link timer
+            LinkGun->LinkStartTime = GetWorld()->GetTimeSeconds();
+            LinkGun->bReadyToPull = false;
+        }
+        else if (LinkGun->CurrentLinkedTarget && !LinkGun->IsLinkPulsing())
+        {
+            // Same target - check if we've held long enough to pull
+            LinkGun->bReadyToPull = (GetWorld()->GetTimeSeconds() - LinkGun->LinkStartTime > LinkGun->PullWarmupTime);
         }
     }
 }
+
+
+
+void UUTWeaponStateFiringLinkBeamPlus::EndFiringSequence(uint8 FireModeNum)
+{
+    if (FireModeNum == GetFireMode())
+    {
+        AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+
+        if (!LinkGun || (!LinkGun->bReadyToPull && !LinkGun->IsLinkPulsing()))
+        {
+            // Normal end - not pulling
+            // Skip parent classes, just go to active state
+            if (FireModeNum == GetOuterAUTWeapon()->GetCurrentFireMode())
+            {
+                GetOuterAUTWeapon()->GotoActiveState();
+            }
+        }
+        else
+        {
+            // Ready to pull or currently pulsing - delay end
+            bPendingEndFire = true;
+            bPendingStartFire = false;
+        }
+    }
+}
+
 
 
 void UUTWeaponStateFiringLinkBeamPlus::PendingFireStarted()
