@@ -1,308 +1,310 @@
 #pragma once
 #include "NetcodePlus.h"
-#include "UTWeaponFix.h" // Inherit from your Fix class
-//#include "UTWeap_RocketLauncher.h" // Needed for some structs/enums if accessible, otherwise copy them
+#include "UTWeaponFix.h" // Inherit from fixed class
+#include "UTProj_Rocket.h"
 #include "UTPlusWeap_RocketLauncher.generated.h"
 
 
 
-USTRUCT()
+// Forward declarations
+class UUTWeaponStateFiringChargedRocket_Transactional;
+class AUTProj_RocketSpiral;
+
+/**
+ * Rocket Fire Mode Configuration
+ * Supports: Standard Spread (0), Grenades (1), Spiral (2)
+ */
+USTRUCT(BlueprintType)
 struct FPlusRocketFireMode
 {
-	GENERATED_USTRUCT_BODY()
+    GENERATED_BODY()
 
-	/** The string shown in the HUD when this firemode is selected*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Rocket)
-	FText DisplayString;
+    /** Projectile class to spawn for this mode */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
+    TSubclassOf<AUTProjectile> ProjClass;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Rocket)
-	TSubclassOf<AUTProjectile> ProjClass;
+    /** Whether this mode causes muzzle flash */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
+    bool bCauseMuzzleFlash;
 
-	/** First Person Sound to play each time we fire */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Rocket)
-	USoundBase* FPFireSound;
+    /** Spread amount for this mode */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
+    float Spread;
 
-	/** Sound to play each time we fire */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Rocket)
-	USoundBase* FireSound;
+    /** Fire sound for this mode */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
+    USoundBase* FireSound;
 
-	/** Can this Rocket mode be a seeking rocket? No for grenade*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Rocket)
-	bool bCanBeSeekingRocket;
+    /** First person fire sound (optional) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
+    USoundBase* FPFireSound;
 
-	/** Should show muzzle flashes when fired? No for grenade */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Rocket)
-	bool bCauseMuzzleFlash;
+    /** Display name for HUD */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
+    FText ModeName;
 
-	/** Spread for this firemode. Does Different things for each mode*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Rocket)
-	float Spread;
-
-	FPlusRocketFireMode()
-		: DisplayString(FText::GetEmpty())
-		, ProjClass(nullptr)
-		, FPFireSound(nullptr)
-		, FireSound(nullptr)
-		, bCanBeSeekingRocket(false)
-		, bCauseMuzzleFlash(true)
-		, Spread(0.f)
-	{
-	}
+    FPlusRocketFireMode()
+        : ProjClass(nullptr)
+        , bCauseMuzzleFlash(true)
+        , Spread(0.0f)
+        , FireSound(nullptr)
+        , FPFireSound(nullptr)
+        , ModeName(FText::GetEmpty())
+    {
+    }
 };
 
-
-UCLASS(abstract)
-class NETCODEPLUS_API AUTPlusWeap_RocketLauncher : public AUTWeaponFix
+UCLASS(Abstract, Config = Game)
+class AUTPlusWeap_RocketLauncher : public AUTWeaponFix
 {
-	GENERATED_UCLASS_BODY()
+    GENERATED_BODY()
 
+public:
+    AUTPlusWeap_RocketLauncher(const FObjectInitializer& ObjectInitializer);
 
-	virtual void PostInitProperties() override;
-	/**The loading animations per NumLoadedRockets*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<UAnimMontage*> LoadingAnimation;
+    virtual void PostInitProperties() override;
+    virtual void Destroyed() override;
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	/**The loading animations for hands per NumLoadedRockets*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<UAnimMontage*> LoadingAnimationHands;
+    // === ROCKET LOADING ===
 
-	/**Empty loading animations per NumLoadedRockets (RL running out of ammo)*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<UAnimMontage*> EmptyLoadingAnimation;
+    /** Number of rockets currently loaded and ready to fire */
+    UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher")
+    int32 NumLoadedRockets;
 
-	/**Empty loading animations for hands per NumLoadedRockets (RL running out of ammo)*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<UAnimMontage*> EmptyLoadingAnimationHands;
+    /** Number of barrel positions used (for animation sync) */
+    UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher")
+    int32 NumLoadedBarrels;
 
-	/**The sound that indicates a rocket was loaded*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	USoundBase* RocketLoadedSound;
+    /** Maximum rockets that can be loaded */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    int32 MaxLoadedRockets;
 
-	/** The sound to play when alt-fire mode is changed */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	USoundBase* AltFireModeChangeSound;
+    /** Time to load subsequent rockets */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float RocketLoadTime;
 
-	/**The firing animations per NumLoadedRockets*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<UAnimMontage*> FiringAnimation;
+    /** Time to load the first rocket (usually faster) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float FirstRocketLoadTime;
 
-	/**The firing animations for hands per NumLoadedRockets*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<UAnimMontage*> FiringAnimationHands;
+    /** Grace period after full load before auto-fire */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float GracePeriod;
 
-	/**The textures used for drawing the HUD*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<UTexture2D*> LoadCrosshairTextures;
+    /** Interval between rockets in a burst (0 = instant) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float BurstInterval;
 
-	/**The texture for locking on a target*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	UTexture2D* LockCrosshairTexture;
+    /** Interval between grenades in a burst */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float GrenadeBurstInterval;
 
-	/**The texture for locking on a target*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	UTexture2D* PendingLockCrosshairTexture;
+    /** Timestamp of last rocket load (for animation timing) */
+    UPROPERTY()
+    float LastLoadTime;
 
+    // === FIRE MODES ===
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float CrosshairScale;
+    /** Current rocket fire mode: 0=Spread, 1=Grenades, 2=Spiral */
+    UPROPERTY(BlueprintReadOnly, Replicated, Category = "Rocket Launcher")
+    int32 CurrentRocketFireMode;
 
-	/**The time it takes to rotate the crosshair when loading a rocket*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float CrosshairRotationTime;
+    /** Whether to show the mode string on HUD */
+    UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher")
+    bool bDrawRocketModeString;
 
-	/**The last time we loaded a rocket. For the HUD crosshair*/
-	float LastLoadTime;
+    /** Available rocket fire modes */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    TArray<FPlusRocketFireMode> RocketFireModes;
 
-	float CurrentRotation;
+    /** Enable alternate fire modes (grenades, spiral) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    bool bAllowAltModes;
 
-	/** Whether can switch to grenades. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	bool bAllowGrenades;
+    // Legacy compatibility
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    bool bAllowGrenades;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	TArray<FPlusRocketFireMode> RocketFireModes;
-	int32 CurrentRocketFireMode;
+    // === SPREAD SETTINGS ===
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	int32 MaxLoadedRockets;
+    /** Spread amount for loaded rockets (non-seeking) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float FullLoadSpread;
 
-	UPROPERTY(BlueprintReadOnly, Category = RocketLauncher)
-	int32 NumLoadedRockets;
+    /** Spread amount for seeking rockets */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float SeekingLoadSpread;
 
-	/** NumLoadedBarrels equals NumLoadedRockets unless running out of ammo. */
-	UPROPERTY(BlueprintReadOnly, Category = RocketLauncher)
-	int32 NumLoadedBarrels;
+    /** Radius of rocket barrels (for spawn offset) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    float BarrelRadius;
 
-	/** Spread in degrees when unloading loaded rockets on player death. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = RocketLauncher)
-	float FullLoadSpread;
+    // === SPIRAL ROCKET SETTINGS ===
 
-	/** Spread in degrees when unloading loaded rockets on player death. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = RocketLauncher)
-	float SeekingLoadSpread;
+    /** Projectile class for spiral rockets (if not set in RocketFireModes[2]) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Spiral")
+    TSubclassOf<AUTProjectile> SpiralRocketClass;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float RocketLoadTime;
+    /** Burst interval for spiral rockets (0 = all fire instantly) */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Spiral")
+    float SpiralBurstInterval;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float FirstRocketLoadTime;
+    // === TARGET LOCKING ===
 
-	/** How much grace at the end of loading should be given before the weapon auto-fires */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float GracePeriod;
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_LockedTarget, Category = "Rocket Launcher")
+    AActor* LockedTarget;
 
-	/** Burst rocket firing interval */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float BurstInterval;
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_PendingLockedTarget, Category = "Rocket Launcher")
+    AActor* PendingLockedTarget;
 
-	/** Burst grenade firing interval */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float GrenadeBurstInterval;
-
-	/**Distance from the center of the launcher to where the rockets fire from*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float BarrelRadius;
-
-	UPROPERTY()
-	TArray<class AUTProj_Rocket*> TrackingRockets;
-
-	/** AI skill checks in firing are on an interval since firing is queried often when weapon is ready to fire */
-	float LastAttackSkillCheckTime;
-	bool bAttackSkillCheckResult;
-
-	/** AI's target for predictive firing (grenades around corner, etc) */
-	FVector PredicitiveTargetLoc;
-
-	UFUNCTION(BlueprintCallable, Category = Firing)
-	virtual AUTProjectile* FireRocketProjectile();
-
-	virtual float GetLoadTime(int32 InNumLoadedRockets);
-	virtual void BeginLoadRocket();
-	virtual void EndLoadRocket();
-	UFUNCTION(BlueprintCallable, Category = RocketLauncher)
-	virtual void ClearLoadedRockets();
-	/** called by server to tell client to stop loading rockets early, generally because we're out of ammo */
-	UFUNCTION(Reliable, Client)
-	virtual void ClientAbortLoad();
-	virtual float GetSpread(int32 ModeIndex);
-	virtual void FireShot() override;
-	virtual AUTProjectile* FireProjectile() override;
-	virtual void PlayFiringEffects() override;
-	virtual void OnMultiPress_Implementation(uint8 OtherFireMode) override;
-
-	virtual void PlayDelayedFireSound();
-
-	/**HUD*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	UFont* RocketModeFont;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
-	float UnderReticlePadding;
-	bool  bDrawRocketModeString;
-
-	virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta) override;
-
-
-	//Targeting
-	virtual void StateChanged() override;
-
-	FTimerHandle UpdateLockHandle;
-	virtual void UpdateLock();
-	virtual void SetLockTarget(AActor* NewTarget);
-	virtual bool CanLockTarget(AActor* Target);
-	bool HasLockedTarget()
-	{
-		return bLockedOnTarget && LockedTarget != NULL;
-	}
-
-	bool WithinLockAim(AActor* Target);
-
-	/** The frequency with which we will check for a lock */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	float		LockCheckTime;
-
-	/** How far out should we be considering actors for a lock */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	float		LockRange;
-
-	/** How wide a miss should we be considering actors for a lock */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	float		LockOffset;
-
-	/** How long does the player need to target an actor to lock on to it*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	float		LockAcquireTime;
-
-	/** Once locked, how long can the player go without painting the object before they lose the lock */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	float		LockTolerance;
-
-	/** When true, this weapon is locked on target */
-	UPROPERTY(BlueprintReadWrite, Category = Lock)
-	bool 		bLockedOnTarget;
-
-	/** What "target" is this weapon locked on to */
-	UPROPERTY(BlueprintReadWrite, Replicated, ReplicatedUsing = OnRep_LockedTarget, Category = Lock)
-	AActor* LockedTarget;
-	UFUNCTION()
-	virtual void OnRep_LockedTarget();
-
-	/** What "target" is current pending to be locked on to */
-	UPROPERTY(BlueprintReadWrite, ReplicatedUsing = OnRep_PendingLockedTarget, Category = Lock)
-	AActor* PendingLockedTarget;
-	UFUNCTION()
-	virtual void OnRep_PendingLockedTarget();
-
-	/** How long since the Lock Target has been valid */
-	UPROPERTY(BlueprintReadWrite, Category = Lock)
-	float  				LastLockedOnTime;
-
-	/** When did the pending Target become valid */
-	UPROPERTY(BlueprintReadWrite, Category = Lock)
-	float				PendingLockedTargetTime;
-
-	/** When was the last time we had a valid target */
-	UPROPERTY(BlueprintReadWrite, Category = Lock)
-	float				LastValidTargetTime;
-
-	/** angle for locking for lock targets */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	float 				LockAim;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	TSubclassOf<AUTProjectile> SeekingRocketClass;
-
-	/** Sound Effects to play when Locking */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	USoundBase* LockAcquiredSound;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	USoundBase* LockLostSound;
-
-	/** If true, weapon will try to lock onto targets */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Lock)
-	bool bTargetLockingActive;
-
-	/** Last time target lock was checked */
-	UPROPERTY(BlueprintReadWrite, Category = Lock)
-	float LastTargetLockCheckTime;
-
-	/** Returns true if should fire all loaded rockets immediately. */
-	virtual bool ShouldFireLoad();
-
-	virtual float SuggestAttackStyle_Implementation() override;
-	virtual float GetAISelectRating_Implementation() override;
-	virtual bool CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc) override;
-
-	virtual bool IsPreparingAttack_Implementation() override;
-
-	virtual void Destroyed() override;
-
-	virtual void FiringInfoUpdated_Implementation(uint8 InFireMode, uint8 FlashCount, FVector InFlashLocation) override;
-	virtual void FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode) override;
-
-	/** Rocket FlashExtra bits
-	*	High bit = bDrawRocketModeString
-	*	3 bits = CurrentRocketFireMode
-	*	low 4 bits = NumLoadedRockets*/
-	virtual void SetRocketFlashExtra(uint8 InFireMode, int32 InNumLoadedRockets, int32 InCurrentRocketFireMode, bool bInDrawRocketModeString);
-	virtual void GetRocketFlashExtra(uint8 InFlashExtra, uint8 InFireMode, int32& OutNumLoadedRockets, int32& OutCurrentRocketFireMode, bool& bOutDrawRocketModeString);
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    TSubclassOf<AUTProjectile> SeekingRocketClass;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockCheckTime;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockRange;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockAcquireTime;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockTolerance;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockAim;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockOffset;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    bool bLockedOnTarget;
+
+    UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    bool bTargetLockingActive;
+
+    UPROPERTY()
+    float LastLockedOnTime;
+
+    UPROPERTY()
+    float PendingLockedTargetTime;
+
+    UPROPERTY()
+    float LastValidTargetTime;
+
+    UPROPERTY()
+    float LastTargetLockCheckTime;
+
+    UPROPERTY()
+    TArray<AUTProj_Rocket*> TrackingRockets;
+
+    FTimerHandle UpdateLockHandle;
+
+    // === ANIMATIONS ===
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    TArray<UAnimMontage*> LoadingAnimation;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    TArray<UAnimMontage*> LoadingAnimationHands;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    TArray<UAnimMontage*> EmptyLoadingAnimation;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    TArray<UAnimMontage*> EmptyLoadingAnimationHands;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    TArray<UAnimMontage*> FiringAnimation;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    TArray<UAnimMontage*> FiringAnimationHands;
+
+    // === SOUNDS ===
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Sound")
+    USoundBase* RocketLoadedSound;
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Sound")
+    USoundBase* AltFireModeChangeSound;
+
+    // === HUD/VISUAL ===
+
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|HUD")
+    float CrosshairRotationTime;
+
+    UPROPERTY()
+    float CurrentRotation;
+
+    //UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|HUD")
+   // FVector2D HUDViewKickback;
+
+    // === TIMER HANDLES ===
+
+    FTimerHandle SpawnDelayedFakeProjHandle;
+    FTimerHandle PlayLowAmmoSoundHandle;
+
+    // === FUNCTIONS ===
+
+    // Loading
+    virtual void BeginLoadRocket();
+    virtual void EndLoadRocket();
+    virtual void ClearLoadedRockets();
+    virtual float GetLoadTime(int32 InNumLoadedRockets);
+
+    UFUNCTION(Client, Reliable)
+    void ClientAbortLoad();
+
+    // Firing
+    virtual void FireShot() override;
+    virtual AUTProjectile* FireProjectile() override;
+    virtual AUTProjectile* FireRocketProjectile();
+    virtual void PlayFiringEffects() override;
+    virtual void PlayDelayedFireSound();
+
+    /** Check if we should dump all rockets immediately (death, ragdoll, etc) */
+    virtual bool ShouldFireLoad();
+
+    // Fire Mode
+    virtual void OnMultiPress_Implementation(uint8 OtherFireMode) override;
+    virtual void SetRocketFlashExtra(uint8 InFireMode, int32 InNumLoadedRockets, int32 InCurrentRocketFireMode, bool bInDrawRocketModeString);
+    virtual void GetRocketFlashExtra(uint8 InFlashExtra, uint8 InFireMode, int32& OutNumLoadedRockets, int32& OutCurrentRocketFireMode, bool& bOutDrawRocketModeString);
+    virtual void FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode) override;
+    virtual void FiringInfoUpdated_Implementation(uint8 InFireMode, uint8 FlashCount, FVector InFlashLocation) override;
+
+    // Spread Helper
+    virtual float GetSpread(int32 ModeIndex);
+
+    // Target Locking
+    virtual void StateChanged() override;
+    virtual bool CanLockTarget(AActor* Target);
+    virtual bool WithinLockAim(AActor* Target);
+    virtual void SetLockTarget(AActor* NewTarget);
+    virtual void UpdateLock();
+    virtual bool HasLockedTarget() const { return LockedTarget != nullptr && bLockedOnTarget; }
+
+    UFUNCTION()
+    void OnRep_LockedTarget();
+
+    UFUNCTION()
+    void OnRep_PendingLockedTarget();
+
+    // AI
+    virtual float GetAISelectRating_Implementation() override;
+    virtual float SuggestAttackStyle_Implementation() override;
+    virtual bool CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc) override;
+    virtual bool IsPreparingAttack_Implementation() override;
+
+protected:
+    // AI helpers
+    UPROPERTY()
+    FVector PredicitiveTargetLoc;
+
+    UPROPERTY()
+    float LastAttackSkillCheckTime;
+
+    UPROPERTY()
+    bool bAttackSkillCheckResult;
 };

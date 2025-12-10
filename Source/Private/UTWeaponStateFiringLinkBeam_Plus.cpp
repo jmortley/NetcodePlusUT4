@@ -94,7 +94,7 @@ void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
 
 
 
-
+/*old working tick
 void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
 {
     if (!bHasBegun) { return; }
@@ -193,6 +193,183 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
         }
     }
 }
+*/
+
+
+
+void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
+{
+    if (!bHasBegun)
+    {
+        return;
+    }
+
+    // Keep base firing state timing (delay shot logic, etc.)
+    HandleDelayedShot();
+
+    AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+    if (!LinkGun || !LinkGun->GetUTOwner())
+    {
+        return;
+    }
+
+    // Server: clear damage flag each tick
+    if (LinkGun->Role == ROLE_Authority)
+    {
+        LinkGun->bLinkCausingDamage = false;
+    }
+
+    // -------------------------
+    // Handle Pending End Fire / Pull Logic (same as your version)
+    // -------------------------
+    if (bPendingEndFire)
+    {
+        // Still pulsing: just keep drawing to PulseLoc
+        if (LinkGun->IsLinkPulsing())
+        {
+            LinkGun->GetUTOwner()->SetFlashLocation(LinkGun->PulseLoc, LinkGun->GetCurrentFireMode());
+            return;
+        }
+        // Ready to pull and still linked  fire the yoink
+        else if (LinkGun->bReadyToPull && LinkGun->CurrentLinkedTarget)
+        {
+            LinkGun->StartLinkPull();
+            return;
+        }
+
+        if (bPendingStartFire)
+        {
+            // Player pressed fire again during pulse
+            bPendingEndFire = false;
+        }
+        else
+        {
+            // Actually end now
+            EndFiringSequence(LinkGun->GetCurrentFireMode());
+            return;
+        }
+    }
+    bPendingStartFire = false;
+
+    // --------------------------------------------------------
+    // 1) SERVER: dedicated / remote simulation for visuals only
+    // --------------------------------------------------------
+    if (LinkGun->Role == ROLE_Authority && !LinkGun->GetUTOwner()->IsLocallyControlled())
+    {
+        // We DO NOT consume ammo here – the owning server context
+        // already handled ammo and damage. This branch is purely
+        // to drive replicated beam state for other clients.
+
+        FHitResult Hit;
+        const uint8 FireMode = LinkGun->GetCurrentFireMode();
+
+        // Suppress stats so beam traces don't spam accuracy
+        FName RealShots = LinkGun->ShotsStatsName;
+        FName RealHits = LinkGun->HitsStatsName;
+        LinkGun->ShotsStatsName = NAME_None;
+        LinkGun->HitsStatsName = NAME_None;
+
+        LinkGun->FireInstantHit(false, &Hit);
+
+        LinkGun->ShotsStatsName = RealShots;
+        LinkGun->HitsStatsName = RealHits;
+
+        // Replicated beam is hitting flag
+        LinkGun->bLinkBeamImpacting = (Hit.Time < 1.f);
+
+        // Replicated linked target (for HUD / SFX on others)
+        AActor* OldLinked = LinkGun->CurrentLinkedTarget;
+        LinkGun->CurrentLinkedTarget = nullptr;
+
+        if (Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged && LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
+        {
+            LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
+        }
+
+        // For other clients’ audio/HUD we still want to know if beam is hitting something
+        LinkGun->bLinkCausingDamage = Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged;
+
+        // OPTIONAL: you can mirror the warmup timer here if you ever
+        // need server-auth decisions about pull readiness for spectators.
+        if (OldLinked != LinkGun->CurrentLinkedTarget)
+        {
+            LinkGun->LinkStartTime = GetWorld()->GetTimeSeconds();
+            LinkGun->bReadyToPull = false;
+        }
+        else if (LinkGun->CurrentLinkedTarget && !LinkGun->IsLinkPulsing())
+        {
+            LinkGun->bReadyToPull = (GetWorld()->GetTimeSeconds() - LinkGun->LinkStartTime > LinkGun->PullWarmupTime);
+        }
+
+        return;
+    }
+
+    // --------------------------------------------------------
+    // 2) CLIENT (and listen server owner): real aim + CSHD damage
+    // --------------------------------------------------------
+    if (LinkGun->GetUTOwner()->IsLocallyControlled())
+    {
+        FHitResult Hit;
+        const uint8 FireMode = LinkGun->GetCurrentFireMode();
+
+        // Same stats suppression as Epic
+        FName RealShots = LinkGun->ShotsStatsName;
+        FName RealHits = LinkGun->HitsStatsName;
+        LinkGun->ShotsStatsName = NAME_None;
+        LinkGun->HitsStatsName = NAME_None;
+
+        LinkGun->FireInstantHit(false, &Hit);
+
+        LinkGun->ShotsStatsName = RealShots;
+        LinkGun->HitsStatsName = RealHits;
+
+        // 2a) Update visual beam location immediately (owner)
+        LinkGun->GetUTOwner()->SetFlashLocation(Hit.Location, FireMode);
+
+        // 2b) Track beam impact + linked target for pull logic
+        LinkGun->bLinkBeamImpacting = (Hit.Time < 1.f);
+
+        AActor* OldLinkedTarget = LinkGun->CurrentLinkedTarget;
+        LinkGun->CurrentLinkedTarget = nullptr;
+
+        if (Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged)
+        {
+            // Check if valid link target (for pull + reward)
+            if (LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
+            {
+                LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
+            }
+
+            LinkGun->bLinkCausingDamage = true;
+
+            // 2c) Your client-side damage batching
+            LinkGun->ProcessClientSideHit(
+                DeltaTime,
+                Hit.Actor.Get(),
+                Hit.Location,
+                LinkGun->InstantHitInfo[FireMode]);
+        }
+        else
+        {
+            // Miss: clear accumulator so we don’t store damage off-target
+            ClientDamageAccumulator = 0.f;
+        }
+
+        // 2d) Pull warmup logic (same semantics as stock Link)
+        if (OldLinkedTarget != LinkGun->CurrentLinkedTarget)
+        {
+            // Target changed – reset timer
+            LinkGun->LinkStartTime = GetWorld()->GetTimeSeconds();
+            LinkGun->bReadyToPull = false;
+        }
+        else if (LinkGun->CurrentLinkedTarget && !LinkGun->IsLinkPulsing())
+        {
+            LinkGun->bReadyToPull =
+                (GetWorld()->GetTimeSeconds() - LinkGun->LinkStartTime > LinkGun->PullWarmupTime);
+        }
+    }
+}
+
 
 
 
