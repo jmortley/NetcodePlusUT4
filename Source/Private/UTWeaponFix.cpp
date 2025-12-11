@@ -13,6 +13,31 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
 
+
+static TAutoConsoleVariable<int32> CVarProjectileTickRate(
+    TEXT("ut.ProjectileTickRate"),
+    240,
+    TEXT("Client-side projectile simulation rate in Hz.\n")
+    TEXT("Snapped to nearest multiple of 60. Range: 60-480.\n")
+    TEXT("Server always uses native 120Hz tick."),
+    ECVF_Scalability
+);
+
+// Helper function (can be static or inline)
+static int32 GetSnappedProjectileHz()
+{
+    int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
+
+    // Clamp range
+    TargetHz = FMath::Clamp(TargetHz, 60, 480);
+
+    // Snap to nearest multiple of 60
+    TargetHz = FMath::RoundToInt(TargetHz / 60.f) * 60;
+
+    return TargetHz;
+}
+
+
 //extern FCollisionResponseParams WorldResponseParams;
 
 AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
@@ -1318,13 +1343,34 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     // ----------------------------------------
     // 6) High-FPS stability (240 Hz lock)
     // ----------------------------------------
-    if (NewProjectile->ProjectileMovement)
+    /*if (NewProjectile->ProjectileMovement)
     {
         const float StableRate = 1.f / 240.f;
         NewProjectile->PrimaryActorTick.TickInterval = StableRate;
         NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval =
             StableRate;
     }
+    */
+    // Apply to anyone rendering graphics (Client OR Listen Server Host)
+    // Skip only the Dedicated Server (which has no screen/FPS issues)
+    if (NewProjectile->ProjectileMovement && GetNetMode() != NM_DedicatedServer)
+    {
+        const int32 ClientHz = GetSnappedProjectileHz();
+
+        // Safety Logic:
+        // If we are the Host (Authority), we must be careful not to lower the tick 
+        // below the Server Tick Rate (usually 120).
+        // Your CVar defaults to 240, so this is safe (240 > 120).
+        // If user sets CVar to 60, the Host's physics would stutter. 
+        // This is an acceptable risk for a user-config setting.
+
+        const float StableInterval = 1.f / static_cast<float>(ClientHz);
+
+        NewProjectile->PrimaryActorTick.TickInterval = StableInterval;
+        NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = StableInterval;
+    }
+
+
 
     return NewProjectile;
 }
