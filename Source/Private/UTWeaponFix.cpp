@@ -158,6 +158,18 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     }
 
 
+    if (GetCurrentState() == ActiveState && CurrentlyFiringMode != 255)
+    {
+        UE_LOG(LogUTWeaponFix, Warning, TEXT("[StartFire] Fixing Stale FiringMode: Was %d, Resetting to 255"), CurrentlyFiringMode);
+        CurrentlyFiringMode = 255;
+        for (int32 i = 0; i < FireModeActiveState.Num(); i++)
+        {
+            FireModeActiveState[i] = 0;
+        }
+    }
+
+
+
     // Critical Fix #1: Prevent simultaneous fire modes
     if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
     {
@@ -1547,11 +1559,25 @@ bool AUTWeaponFix::PutDown()
     // goes off 0.1s after you switched weapons.
     if (bPutDownResult)
     {
+        // A) Kill any pending retry timers
         for (int32 i = 0; i < 2; i++)
         {
             GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
         }
+
+        // B) Reset the Gatekeeper Flags
+        // This fixes the "Jam" bug where the weapon remembers it was firing Mode 1.
+        CurrentlyFiringMode = 255;
+
+        // C) Clear Replication Flags
+        // Ensures the server state is clean for this weapon instance.
+        for (int32 i = 0; i < FireModeActiveState.Num(); i++)
+        {
+            FireModeActiveState[i] = 0;
+        }
+
     }
+
 
     return bPutDownResult;
 }
