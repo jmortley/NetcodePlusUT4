@@ -146,7 +146,12 @@ protected:
      */
     bool ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime);
 
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
+    float SmoothingMs = 20.0f;
 
+    /** Maximum rewind time allowed in milliseconds */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
+    float MaxRewindMs = 250.0f;
 
     /**
      * Generates next event index for client-side fire prediction.

@@ -913,16 +913,13 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
         return 0.0f;
     }
 
-	const float RTTms = PS->ExactPing;   // this is RTT in ms
-    const float SmoothingMs = 100.0f;          // visual smoothing is 0.1s in ut character movement
-	const float MaxRewindAmountMs = 250.0f;         // renamed to show what this actually does. the max rewind time for hit validation
-    //const float FudgeMs = 10.0f;
+    const float RTTms = PS->ExactPing;
 
-    // clamped to max
-    float IdealMs = (RTTms / 2) + SmoothingMs;
-    float RewindMs = FMath::Clamp(IdealMs, 0.0f, MaxRewindAmountMs);
+    float IdealMs = (RTTms / 2.0f) + SmoothingMs;
+    float RewindMs = FMath::Clamp(IdealMs, 0.0f, MaxRewindMs);
 
     return RewindMs * 0.001f;
+
 }
 
 
