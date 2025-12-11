@@ -103,7 +103,7 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
 {
     
     bHandlingRetry = true;
-    UE_LOG(LogUTWeaponFix, Log, TEXT("[Timer] Retry Timer Firing! Calling StartFire..."));
+    //UE_LOG(LogUTWeaponFix, Log, TEXT("[Timer] Retry Timer Firing! Calling StartFire..."));
     StartFire(FireModeNum);
     bHandlingRetry = false;
 }
@@ -121,7 +121,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             // SUCCESS: Identified as Zoom. 
             // Hand off to parent (AUTWeapon) to handle state transition.
             // This prevents entering the Transactional Fire loop.
-            UE_LOG(LogUTWeaponFix, Log, TEXT("Early exit for zoom"));
+            //UE_LOG(LogUTWeaponFix, Log, TEXT("Early exit for zoom"));
             Super::StartFire(FireModeNum);
             return;
         }
@@ -133,7 +133,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         if (FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
             FiringState[FireModeNum]->GetName().Contains(TEXT("Charged")))
         {
-            UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Bypassing transactional for Charged state on Mode %d"), FireModeNum);
+           // UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Bypassing transactional for Charged state on Mode %d"), FireModeNum);
             Super::StartFire(FireModeNum);
             return;
         }
@@ -168,7 +168,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         {
             // We're charging rockets and player pressed the other fire button
             // This should switch modes (spread -> grenades -> spiral), not start new fire
-            UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] In charged state, calling OnMultiPress for mode %d"), FireModeNum);
+            //UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] In charged state, calling OnMultiPress for mode %d"), FireModeNum);
 
             // Set pending fire so the weapon knows the button is pressed
             if (UTOwner)
@@ -185,7 +185,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
     if (GetCurrentState() == ActiveState && CurrentlyFiringMode != 255)
     {
-        UE_LOG(LogUTWeaponFix, Warning, TEXT("[StartFire] Fixing Stale FiringMode: Was %d, Resetting to 255"), CurrentlyFiringMode);
+        //UE_LOG(LogUTWeaponFix, Warning, TEXT("[StartFire] Fixing Stale FiringMode: Was %d, Resetting to 255"), CurrentlyFiringMode);
         CurrentlyFiringMode = 255;
         for (int32 i = 0; i < FireModeActiveState.Num(); i++)
         {
@@ -211,7 +211,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
     if (FiringState.IsValidIndex(FireModeNum) && CurrentState == FiringState[FireModeNum])
     {
-        UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Already in firing state for Mode %d - ignoring"), FireModeNum);
+        //UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Already in firing state for Mode %d - ignoring"), FireModeNum);
         return;
     }
 
@@ -299,7 +299,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                 // Add a tiny buffer so we land explicitly AFTER the cooldown
                 float WaitTime = Delay + 0.01f;
 
-                UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] BLOCKED by Global Cooldown. Smart Wait: %.4fs."), WaitTime);
+                //UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] BLOCKED by Global Cooldown. Smart Wait: %.4fs."), WaitTime);
 
                 FTimerDelegate RetryDel;
                 RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
@@ -338,7 +338,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     {
         UTOwner->SetPendingFire(FireModeNum, true);
     }
-    UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] SUCCESS! Starting Sequence for Mode %d"), FireModeNum);
+    //UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] SUCCESS! Starting Sequence for Mode %d"), FireModeNum);
     BeginFiringSequence(FireModeNum, false);
 }
 
@@ -366,7 +366,7 @@ void AUTWeaponFix::FireShot()
         FRotator ClientRot = GetUTOwner() ? GetUTOwner()->GetViewRotation() : FRotator::ZeroRotator;
         // 3. SEND THE PACKET
         // This ensures Shot #2, Shot #3, etc. are actually sent to the server.
-        UE_LOG(LogUTWeaponFix, Log, TEXT("[FireShot] Sending RPC. EventID: %d"), NextEventIndex);
+        //UE_LOG(LogUTWeaponFix, Log, TEXT("[FireShot] Sending RPC. EventID: %d"), NextEventIndex);
 
         uint8 ZOffset = 0;
         if (UTOwner)
@@ -472,7 +472,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         // Don't log for Mode 0 stops (normal during swaps), but log for Mode 1
         if (FireModeNum == 1)
         {
-            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Bypassing Transactional Stop for Charged State (Mode 1)"));
+            //UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Bypassing Transactional Stop for Charged State (Mode 1)"));
         }
 
         // Standard UT logic handles the release (launching rockets or clearing pending fire)
@@ -493,7 +493,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         GotoActiveState();
     }
     // Critical Fix #4: Immediate state clearing
-    UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Called for Mode %d. KEEPING TIMER ALIVE."), FireModeNum);
+    //UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Called for Mode %d. KEEPING TIMER ALIVE."), FireModeNum);
     if (FireModeActiveState.IsValidIndex(FireModeNum))
     {
         FireModeActiveState[FireModeNum] = 0;
@@ -529,8 +529,8 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     // Validate event sequence
     if (!IsFireEventSequenceValid(FireModeNum, InEventIndex))
     {
-        UE_LOG(LogTemp, Warning, TEXT("WeaponFix: Invalid fire event sequence %d for mode %d"),
-            InEventIndex, FireModeNum);
+        //UE_LOG(LogTemp, Warning, TEXT("WeaponFix: Invalid fire event sequence %d for mode %d"),
+        //    InEventIndex, FireModeNum);
         return false;
     }
 
@@ -1433,12 +1433,13 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
             ClosestDist = FVector::Dist(ClosestPointOnRay, ClosestPointOnCapsule);
             float MissMargin = ClosestDist - CapRadius; // How far off the "skin" of the capsule
-
+            /*
             UE_LOG(LogUTWeaponFix, Warning, TEXT("[DEBUG] HIT REJECTED! Client Claimed: %s | Server Hit: %s | RewindTime: %.3fms | Missed Capsule By: %.2f units"),
                 *ReceivedHitScanHitChar->GetName(),
                 Hit.Actor.Get() ? *Hit.Actor->GetName() : TEXT("None"),
                 PredictionTime * 1000.f,
-                MissMargin);
+                MissMargin); 
+			*/
         }
 
         // Case 2: Ghost Miss (Both missed, but maybe it was close?)
@@ -1463,8 +1464,8 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
             if (NearestChar && BestDist < 80.0f) // Only log if reasonably close (e.g. < 80 units)
             {
-                UE_LOG(LogUTWeaponFix, Log, TEXT("[DEBUG] NEAR MISS. Nearest: %s | Dist: %.2f | RewindTime: %.3fms"),
-                    *NearestChar->GetName(), BestDist, PredictionTime * 1000.f);
+                //UE_LOG(LogUTWeaponFix, Log, TEXT("[DEBUG] NEAR MISS. Nearest: %s | Dist: %.2f | RewindTime: %.3fms"),
+                //    *NearestChar->GetName(), BestDist, PredictionTime * 1000.f);
             }
         }
     }

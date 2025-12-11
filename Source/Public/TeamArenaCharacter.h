@@ -10,6 +10,9 @@
 #include "UTEyewear.h"
 #include "TeamArenaCharacter.generated.h"
 
+
+class UTeamArenaCharacterMovement;
+
 /**
  * Enhanced character that uses split prediction for movement.
  * 
@@ -44,6 +47,20 @@ public:
 
     // Override to use custom prediction time for position rewinding
     virtual FVector GetRewindLocation(float PredictionTime, AUTPlayerController* DebugViewer = NULL) override;
+
+    virtual void PositionUpdated(bool bShotSpawned) override;
+
+    /** Rate at which to save positions for lag compensation (Hz). Default 120. */
+    UPROPERTY(EditAnywhere, Category = "Team Arena|Optimization")
+    float PositionSaveRate;
+
+    // Add to protected section:
+    /** Last time we saved a position (for throttling) */
+    float LastPositionSaveTime;
+
+    /** Calculated interval between position saves */
+    float PositionSaveInterval;
+
 
 protected:
     /**

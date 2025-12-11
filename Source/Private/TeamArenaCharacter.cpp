@@ -4,15 +4,19 @@
 #include "UTWeaponAttachment.h"
 #include "UTWeaponFix.h"
 #include "GameFramework/PlayerController.h"
+#include "TeamArenaCharacterMovement.h"
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
-    : Super(ObjectInitializer)
+    : Super(ObjectInitializer.SetDefaultSubobjectClass<UTeamArenaCharacterMovement>(ACharacter::CharacterMovementComponentName))
 {
     CachedPredictionPC = nullptr;
     bHasCachedPC = false;
     NetUpdateFrequency = 100.0f;
     MinNetUpdateFrequency = 100.0f;
     MaxSavedPositionAge = 0.35f;
+    PositionSaveRate = 120.0f;
+    PositionSaveInterval = 1.0f / PositionSaveRate;
+    LastPositionSaveTime = 0.0f;
 }
 
 
@@ -21,6 +25,47 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 {
     return 0.0f;
+}
+
+
+void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
+{
+    // --- HIGH-FPS FIX: Throttle SavedPositions to 120Hz ---
+    // This reduces array size and RemoveAt(0) frequency by 4x at 480 FPS
+
+    const float WorldTime = GetWorld()->GetTimeSeconds();
+
+    // ALWAYS save positions when shots are fired (required for hit validation)
+    // Otherwise, throttle to PositionSaveRate Hz
+    if (!bShotSpawned)
+    {
+        if ((WorldTime - LastPositionSaveTime) < PositionSaveInterval)
+        {
+            return;  // Skip this frame, not enough time elapsed
+        }
+    }
+
+    LastPositionSaveTime = WorldTime;
+
+    // --- Original Epic logic below ---
+    if (GetCharacterMovement())
+    {
+        new(SavedPositions) FSavedPosition(
+            GetActorLocation(),
+            GetViewRotation(),
+            GetCharacterMovement()->Velocity,
+            GetCharacterMovement()->bJustTeleported,
+            bShotSpawned,
+            WorldTime,
+            (UTCharacterMovement ? UTCharacterMovement->GetCurrentSynchTime() : 0.f)
+        );
+    }
+
+    // Maintain one position beyond MaxSavedPositionAge for interpolation
+    if (SavedPositions.Num() > 1 && SavedPositions[1].Time < WorldTime - MaxSavedPositionAge)
+    {
+        SavedPositions.RemoveAt(0);
+    }
 }
 
 
