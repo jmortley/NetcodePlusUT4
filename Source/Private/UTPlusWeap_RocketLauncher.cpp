@@ -14,11 +14,12 @@
 #include "Net/UnrealNetwork.h"
 #include "UTWeaponStateEquipping.h"
 #include "UTProj_Rocket.h"
-#include "UTProj_RocketSpiral.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Animation/AnimMontage.h"
 #include "UTBot.h"
 #include "UTGameState.h"
+#include "UTHUDWidget.h"
+#include "CanvasItem.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTRocketLauncher, Log, All);
 
@@ -116,6 +117,10 @@ void AUTPlusWeap_RocketLauncher::PostInitProperties()
         FiringState[1] = NewObject<UUTWeaponStateFiringChargedRocket_Transactional>(this, UUTWeaponStateFiringChargedRocket_Transactional::StaticClass());
     }
 }
+
+
+
+
 
 void AUTPlusWeap_RocketLauncher::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
@@ -311,6 +316,43 @@ bool AUTPlusWeap_RocketLauncher::ShouldFireLoad()
 
 void AUTPlusWeap_RocketLauncher::FireShot()
 {
+    Super::FireShot();
+}
+
+
+void AUTPlusWeap_RocketLauncher::FireShotDirect()
+{
+    if (UTOwner)
+    {
+        UTOwner->DeactivateSpawnProtection();
+    }
+
+    // 1. Fire the projectile directly
+    // (This function has internal logic to NOT consume ammo for Alt-Fire)
+    FireProjectile();
+
+    // 2. We must manually play effects since we skipped the base FireShot
+    PlayFiringEffects();
+
+    // 3. Trigger inventory event
+    if (GetUTOwner())
+    {
+        GetUTOwner()->InventoryEvent(InventoryEventName::FiredWeapon);
+    }
+
+    // Reset offset logic (from base class)
+    FireZOffsetTime = 0.f;
+}
+
+
+AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
+{
+    if (GetUTOwner() == nullptr)
+    {
+        UE_LOG(LogUTRocketLauncher, Warning, TEXT("%s::FireProjectile(): Weapon is not owned"), *GetName());
+        return nullptr;
+    }
+
     if (UTOwner)
     {
         UTOwner->DeactivateSpawnProtection();
@@ -322,32 +364,6 @@ void AUTPlusWeap_RocketLauncher::FireShot()
         ConsumeAmmo(CurrentFireMode);
     }
 
-    if (!FireShotOverride())
-    {
-        AUTProj_Rocket* NewRocket = Cast<AUTProj_Rocket>(FireProjectile());
-        PlayFiringEffects();
-
-        if (NumLoadedRockets <= 0)
-        {
-            ClearLoadedRockets();
-        }
-    }
-
-    if (GetUTOwner() != nullptr)
-    {
-        GetUTOwner()->InventoryEvent(InventoryEventName::FiredWeapon);
-    }
-
-    FireZOffsetTime = 0.f;
-}
-
-AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
-{
-    if (GetUTOwner() == nullptr)
-    {
-        UE_LOG(LogUTRocketLauncher, Warning, TEXT("%s::FireProjectile(): Weapon is not owned"), *GetName());
-        return nullptr;
-    }
 
     UTOwner->SetFlashExtra(0, CurrentFireMode);
     AUTPlayerState* PS = UTOwner->Controller ? Cast<AUTPlayerState>(UTOwner->Controller->PlayerState) : nullptr;
@@ -433,42 +449,41 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 
     switch (CurrentRocketFireMode)
     {
-    case 0: // Standard Spread
+    case 0: // Spread
         if (HasLockedTarget() && SeekingRocketClass)
-        {
             RocketProjClass = SeekingRocketClass;
-        }
         else if (RocketFireModes.IsValidIndex(0))
-        {
             RocketProjClass = RocketFireModes[0].ProjClass;
-        }
         break;
 
     case 1: // Grenades
-        if (RocketFireModes.IsValidIndex(1))
-        {
+        if (RocketFireModes.IsValidIndex(1) && RocketFireModes[1].ProjClass)
             RocketProjClass = RocketFireModes[1].ProjClass;
-        }
+        else if (RocketFireModes.IsValidIndex(0)) // Fallback to Spread
+            RocketProjClass = RocketFireModes[0].ProjClass;
         break;
 
-    case 2: // Spiral - just get the class, spawning happens below
+    case 2: // Spiral
         if (RocketFireModes.IsValidIndex(2) && RocketFireModes[2].ProjClass)
-        {
             RocketProjClass = RocketFireModes[2].ProjClass;
-        }
         else if (SpiralRocketClass)
-        {
             RocketProjClass = SpiralRocketClass;
-        }
-        break;
-
-    default:
-        UE_LOG(LogUTRocketLauncher, Warning, TEXT("Invalid CurrentRocketFireMode: %d"), CurrentRocketFireMode);
+        else if (RocketFireModes.IsValidIndex(0)) // Fallback to Spread
+            RocketProjClass = RocketFireModes[0].ProjClass;
         break;
     }
 
     if (!RocketProjClass)
     {
+        // --- FIX START: INFINITE LOOP PREVENTION ---
+        // We must decrement this, otherwise the "Fire all rockets" while-loop
+        // in the firing state will run forever and freeze the editor.
+        if (NumLoadedRockets > 0)
+        {
+            NumLoadedRockets--;
+        }
+        // --- FIX END ---
+
         UE_LOG(LogUTRocketLauncher, Warning, TEXT("No valid projectile class for fire mode %d"), CurrentRocketFireMode);
         return nullptr;
     }
@@ -574,10 +589,17 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
         NumLoadedRockets = 0;
         break;
     }
+    }
 
-    default:
-        UE_LOG(LogUTRocketLauncher, Warning, TEXT("%s::FireRocketProjectile(): Invalid CurrentRocketFireMode"), *GetName());
-        break;
+
+    if (NumLoadedRockets <= 0)
+    {
+        CurrentRocketFireMode = 0; // Reset to Spread
+        bDrawRocketModeString = false;
+        if (Role == ROLE_Authority)
+        {
+            SetRocketFlashExtra(CurrentFireMode, 0, 0, false);
+        }
     }
 
     return ResultProj;
@@ -609,10 +631,10 @@ void AUTPlusWeap_RocketLauncher::PlayFiringEffects()
         UTOwner->TargetEyeOffset.Y = FiringViewKickbackY;
 
         AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->Controller);
-        if (PC != nullptr)
-        {
-            PC->AddHUDImpulse(HUDViewKickback);
-        }
+        //if (PC != nullptr)
+        //{ remove for now. this causes netstats to show up for some insane reason
+        //   PC->AddHUDImpulse(HUDViewKickback);
+        //}
 
         // Delayed sound based on rockets remaining
         if (NumLoadedRockets > 0)
@@ -680,7 +702,7 @@ void AUTPlusWeap_RocketLauncher::PlayFiringEffects()
 // =============================================================================
 // FIRE MODE SWITCHING
 // =============================================================================
-
+/*
 void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode)
 {
     if ((bAllowAltModes || bAllowGrenades) && (CurrentFireMode == 1))
@@ -733,6 +755,69 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
         }
     }
 }
+*/
+
+
+void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode)
+{
+    if ((bAllowAltModes || bAllowGrenades) && (CurrentFireMode == 1))
+    {
+        // Check state
+        UUTWeaponStateFiringChargedRocket_Transactional* TransactionalAltState =
+            Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
+
+        bool bIsCharging = false;
+        FTimerHandle* GraceHandle = nullptr;
+
+        if (TransactionalAltState != nullptr)
+        {
+            bIsCharging = TransactionalAltState->bCharging;
+            GraceHandle = &TransactionalAltState->GraceTimerHandle;
+        }
+
+        if (bIsCharging && GraceHandle != nullptr)
+        {
+            // Timing safety
+            if ((GetWorldTimerManager().IsTimerActive(*GraceHandle) &&
+                GetWorldTimerManager().GetTimerRemaining(*GraceHandle) < 0.05f) ||
+                GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
+            {
+                return;
+            }
+
+            // Cycle to next mode
+            CurrentRocketFireMode++;
+            bDrawRocketModeString = true;
+
+            // --- FIX START: FORCE MAX MODES TO 3 FOR SPIRAL ---
+            // Even if RocketFireModes array only has 2 entries (Normal, Grenade),
+            // we want to allow Mode 2 (Spiral) if the class is set up.
+            int32 MaxModes = RocketFireModes.Num();
+
+            // If we have a Spiral Class defined in defaults, ensure we can cycle to it (Index 2)
+            if (SpiralRocketClass != nullptr || MaxModes < 3)
+            {
+                MaxModes = 3; // 0=Spread, 1=Grenade, 2=Spiral
+            }
+            // --- FIX END ---
+
+            if (CurrentRocketFireMode >= MaxModes)
+            {
+                CurrentRocketFireMode = 0;
+            }
+
+            // Play sound
+            UUTGameplayStatics::UTPlaySound(GetWorld(), AltFireModeChangeSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, NULL, NULL, true, SAT_WeaponFoley);
+
+            // Update flash
+            if (Role == ROLE_Authority)
+            {
+                SetRocketFlashExtra(CurrentFireMode, NumLoadedRockets + 1, CurrentRocketFireMode, bDrawRocketModeString);
+            }
+        }
+    }
+}
+
 
 float AUTPlusWeap_RocketLauncher::GetSpread(int32 ModeIndex)
 {
@@ -976,4 +1061,102 @@ bool AUTPlusWeap_RocketLauncher::CanAttack_Implementation(AActor* Target, const 
 {
     // Simplified AI attack logic - full implementation would include predictive firing
     return Super::CanAttack_Implementation(Target, TargetLoc, bDirectOnly, bPreferCurrentMode, BestFireMode, OptimalTargetLoc);
+}
+
+
+void AUTPlusWeap_RocketLauncher::DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta)
+{
+    if (!WeaponHudWidget || !WeaponHudWidget->UTHUDOwner) return;
+
+    float ScaledPadding = 50.f * WeaponHudWidget->GetRenderScale();
+
+    // 1. Draw the Rocket Firemode Text (e.g. "Grenades", "Spiral")
+    if (bDrawRocketModeString && RocketModeFont != nullptr && RocketFireModes.IsValidIndex(CurrentRocketFireMode))
+    {
+        FText RocketModeText = RocketFireModes[CurrentRocketFireMode].DisplayString;
+        float PosY = 0.3f * ScaledPadding;
+        WeaponHudWidget->DrawText(RocketModeText, 0.0f, PosY, RocketModeFont, FLinearColor::Black, 1.0f, 1.0f, FLinearColor::White, ETextHorzPos::Center, ETextVertPos::Top);
+    }
+
+    // 2. Draw the Standard Crosshair
+    Super::DrawWeaponCrosshair_Implementation(WeaponHudWidget, RenderDelta);
+
+    // 3. Draw Loaded Rocket Indicators (The 3 dots)
+    float Scale = GetCrosshairScale(WeaponHudWidget->UTHUDOwner);
+    if ((CurrentFireMode == 1) && (NumLoadedRockets > 0))
+    {
+        float DotSize = 12.f * Scale;
+        // Draw 1st Dot
+        WeaponHudWidget->DrawTexture(WeaponHudWidget->UTHUDOwner->HUDAtlas, 0.f, ScaledPadding, DotSize, DotSize, 894.f, 38.f, 26.f, 26.f, 1.f, FLinearColor::White, FVector2D(0.5f, 0.5f));
+
+        // Draw 2nd Dot
+        if (NumLoadedRockets > 1)
+        {
+            WeaponHudWidget->DrawTexture(WeaponHudWidget->UTHUDOwner->HUDAtlas, 50.f * Scale, ScaledPadding, DotSize, DotSize, 894.f, 38.f, 26.f, 26.f, 1.f, FLinearColor::White, FVector2D(0.5f, 0.5f));
+
+            // Draw 3rd Dot
+            if (NumLoadedRockets > 2)
+            {
+                WeaponHudWidget->DrawTexture(WeaponHudWidget->UTHUDOwner->HUDAtlas, -50.f * Scale, ScaledPadding, DotSize, DotSize, 894.f, 38.f, 26.f, 26.f, 1.f, FLinearColor::White, FVector2D(0.5f, 0.5f));
+            }
+        }
+    }
+
+    // 4. Draw Lock-On Reticles
+    if (LockCrosshairTexture && WeaponHudWidget->GetCanvas())
+    {
+        float ResScaling = WeaponHudWidget->GetCanvas()->ClipX / 1920.f;
+        float W = LockCrosshairTexture->GetSurfaceWidth();
+        float H = LockCrosshairTexture->GetSurfaceHeight();
+        float CrosshairRot = GetWorld()->TimeSeconds * 90.0f;
+        const float AcquireDisplayTime = 0.6f;
+
+        // A. Draw Locked Target (Solid Red)
+        if (HasLockedTarget() && LockedTarget)
+        {
+            FVector ScreenTarget = WeaponHudWidget->GetCanvas()->Project(LockedTarget->GetActorLocation());
+
+            // Adjust for canvas center offset if necessary, though Project usually returns absolute screen coordinates.
+            // Stock UT offset logic:
+            ScreenTarget.X -= WeaponHudWidget->GetCanvas()->SizeX * 0.5f;
+            ScreenTarget.Y -= WeaponHudWidget->GetCanvas()->SizeY * 0.5f;
+
+            WeaponHudWidget->DrawTexture(LockCrosshairTexture, ScreenTarget.X, ScreenTarget.Y, W * ResScaling, H * ResScaling, 0.f, 0.f, W, H, 1.f, FLinearColor::Red, FVector2D(0.5f, 0.5f), CrosshairRot);
+        }
+        // B. Draw Pending Target (Fading/Scaling White)
+        else if (PendingLockedTarget && (GetWorld()->GetTimeSeconds() - PendingLockedTargetTime > LockAcquireTime - AcquireDisplayTime))
+        {
+            FVector ScreenTarget = WeaponHudWidget->GetCanvas()->Project(PendingLockedTarget->GetActorLocation());
+            ScreenTarget.X -= WeaponHudWidget->GetCanvas()->SizeX * 0.5f;
+            ScreenTarget.Y -= WeaponHudWidget->GetCanvas()->SizeY * 0.5f;
+
+            float Opacity = (GetWorld()->GetTimeSeconds() - PendingLockedTargetTime - LockAcquireTime + AcquireDisplayTime) / AcquireDisplayTime;
+            float PendingScale = 1.f + 5.f * (1.f - Opacity);
+
+            WeaponHudWidget->DrawTexture(LockCrosshairTexture, ScreenTarget.X, ScreenTarget.Y, W * PendingScale * ResScaling, H * PendingScale * ResScaling, 0.f, 0.f, W, H, 0.2f + 0.5f * Opacity, FLinearColor::White, FVector2D(0.5f, 0.5f), 2.5f * CrosshairRot);
+        }
+
+        // C. Draw Seeking Rockets (Reticles following missiles)
+        for (int32 i = 0; i < TrackingRockets.Num(); i++)
+        {
+            if (TrackingRockets[i] && TrackingRockets[i]->MasterProjectile)
+            {
+                TrackingRockets[i] = Cast<AUTProj_Rocket>(TrackingRockets[i]->MasterProjectile);
+            }
+
+            if ((TrackingRockets[i] == nullptr) || TrackingRockets[i]->bExploded || TrackingRockets[i]->IsPendingKillPending() || (TrackingRockets[i]->TargetActor == nullptr) || TrackingRockets[i]->TargetActor->IsPendingKillPending())
+            {
+                TrackingRockets.RemoveAt(i, 1);
+                i--;
+            }
+            else
+            {
+                FVector ScreenTarget = WeaponHudWidget->GetCanvas()->Project(TrackingRockets[i]->TargetActor->GetActorLocation());
+                ScreenTarget.X -= WeaponHudWidget->GetCanvas()->SizeX * 0.5f;
+                ScreenTarget.Y -= WeaponHudWidget->GetCanvas()->SizeY * 0.5f;
+
+                WeaponHudWidget->DrawTexture(LockCrosshairTexture, ScreenTarget.X, ScreenTarget.Y, 2.f * W * ResScaling, 2.f * H * ResScaling, 0.f, 0.f, W, H, 1.f, FLinearColor::Red, FVector2D(0.5f, 0.5f), CrosshairRot);
+            }
+        }
+    }
 }

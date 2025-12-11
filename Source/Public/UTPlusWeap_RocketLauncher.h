@@ -39,9 +39,8 @@ struct FPlusRocketFireMode
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
     USoundBase* FPFireSound;
 
-    /** Display name for HUD */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Mode")
-    FText ModeName;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rocket Mode")
+    FText DisplayString;
 
     FPlusRocketFireMode()
         : ProjClass(nullptr)
@@ -49,7 +48,7 @@ struct FPlusRocketFireMode
         , Spread(0.0f)
         , FireSound(nullptr)
         , FPFireSound(nullptr)
-        , ModeName(FText::GetEmpty())
+        , DisplayString(FText::GetEmpty())
     {
     }
 };
@@ -67,7 +66,16 @@ public:
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
     // === ROCKET LOADING ===
+    /** Font used to draw the firemode text (Grenades/Spiral) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD")
+    UFont* RocketModeFont;
 
+    /** Texture used for the lock-on reticle */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD")
+    UTexture2D* LockCrosshairTexture;
+
+    // This definition fixes the "inherited member is not allowed" error
+    virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta) override;
     /** Number of rockets currently loaded and ready to fire */
     UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher")
     int32 NumLoadedRockets;
@@ -202,26 +210,26 @@ public:
 
     FTimerHandle UpdateLockHandle;
 
-    // === ANIMATIONS ===
+  
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     TArray<UAnimMontage*> LoadingAnimation;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     TArray<UAnimMontage*> LoadingAnimationHands;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     TArray<UAnimMontage*> EmptyLoadingAnimation;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     TArray<UAnimMontage*> EmptyLoadingAnimationHands;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     TArray<UAnimMontage*> FiringAnimation;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Animation")
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     TArray<UAnimMontage*> FiringAnimationHands;
-
+    
     // === SOUNDS ===
 
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Sound")
@@ -235,11 +243,21 @@ public:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|HUD")
     float CrosshairRotationTime;
 
+    /**The textures used for drawing the HUD*/
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
+    TArray<UTexture2D*> LoadCrosshairTextures;
+
+
+    /**The texture for locking on a target*/
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = RocketLauncher)
+    UTexture2D* PendingLockCrosshairTexture;
+
+
     UPROPERTY()
     float CurrentRotation;
 
     //UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|HUD")
-   // FVector2D HUDViewKickback;
+    //FVector2D HUDViewKickback;
 
     // === TIMER HANDLES ===
 
@@ -263,6 +281,7 @@ public:
     virtual AUTProjectile* FireRocketProjectile();
     virtual void PlayFiringEffects() override;
     virtual void PlayDelayedFireSound();
+    void FireShotDirect();
 
     /** Check if we should dump all rockets immediately (death, ragdoll, etc) */
     virtual bool ShouldFireLoad();

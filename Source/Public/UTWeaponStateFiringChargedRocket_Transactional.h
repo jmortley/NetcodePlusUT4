@@ -74,7 +74,7 @@ public:
     virtual void RefireCheckTimer() override;
 
     /** Override FireShot to route through transactional system */
-    virtual void FireShot() override;
+    //virtual void FireShot() override;
 
     /** Updates timing when fire rate changes (powerups, etc) */
     virtual void UpdateTiming() override;

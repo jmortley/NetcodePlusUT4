@@ -21,6 +21,7 @@ public:
     virtual void EndFiringSequence(uint8 FireModeNum) override;
     virtual void PendingFireStarted() override;
     virtual void EndState() override;
+	virtual void FireShot() override;
 protected:
     bool bHasBegun;
 

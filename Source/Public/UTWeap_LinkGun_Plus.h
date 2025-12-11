@@ -25,6 +25,34 @@ public:
     // ===========================================
     //virtual void FireInstantHit(bool bDealDamage, FHitResult* OutHit = nullptr) override;
     /** Ping threshold below which we trust client hits (CSHD mode) */
+    /** Called by beam state to process a client-side hit */
+    // ===========================================
+    // CSHD Hit Processing
+    // ===========================================
+
+    /** Called by beam state to process a client-side hit */
+    void ProcessClientSideHit(float DeltaTime, AActor* HitActor, FVector HitLoc, const FInstantHitDamageInfo& DamageInfo);
+
+    /** Server RPC to validate and apply beam damage */
+    UFUNCTION(Server, WithValidation, Reliable)
+    void ServerProcessBeamHit(AActor* HitActor, FVector_NetQuantize HitLocation, int32 DamageAmount);
+
+
+    // === Link Pull System ===
+    UFUNCTION(Server, WithValidation, Reliable)
+    void ServerSetPulseTarget(AActor* InTarget);
+
+    // === Beam State Control === (ADD NEW RPCS AT THE END)
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerStopBeamFiring();
+
+    UPROPERTY()
+    float LastBeamActivityTime;
+
+    /** How long server waits before auto-exiting beam state (seconds) */
+    UPROPERTY(EditDefaultsOnly, Category = "Weapon")
+    float BeamTimeoutDuration;
+
     UPROPERTY(EditDefaultsOnly, Category = "NetcodePlus")
     float LowPingThreshold;
 
@@ -122,6 +150,7 @@ public:
 
     UPROPERTY(BlueprintReadWrite, Category = Mesh)
     float LastClientKillTime;
+
 
     virtual void NotifyKillWhileHolding_Implementation(TSubclassOf<UDamageType> DmgType) override
     {
@@ -228,16 +257,7 @@ public:
     virtual void Tick(float DeltaTime) override;
     virtual void PlayWeaponAnim(UAnimMontage* WeaponAnim, UAnimMontage* HandsAnim, float RateOverride = 0.0f) override;
 
-    // ===========================================
-    // CSHD Hit Processing
-    // ===========================================
 
-    /** Called by beam state to process a client-side hit */
-    void ProcessClientSideHit(float DeltaTime, AActor* HitActor, FVector HitLoc, const FInstantHitDamageInfo& DamageInfo);
-
-    /** Server RPC to validate and apply beam damage */
-    UFUNCTION(Server, WithValidation, Reliable)
-    void ServerProcessBeamHit(AActor* HitActor, FVector_NetQuantize HitLocation, int32 DamageAmount);
 
     // ===========================================
     // Link Pull System
@@ -252,9 +272,7 @@ public:
     /** Returns true if currently in pulse animation */
     bool IsLinkPulsing();
 
-    /** Server RPC to set pulse target */
-    UFUNCTION(Server, WithValidation, Reliable)
-    void ServerSetPulseTarget(AActor* InTarget);
+
 
     // ===========================================
     // State & Lifecycle

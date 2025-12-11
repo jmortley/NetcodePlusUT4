@@ -25,6 +25,8 @@ AUTWeap_LinkGun_Plus::AUTWeap_LinkGun_Plus(const FObjectInitializer& ObjectIniti
 	HysteresisBuffer = 5.0f;
 	MaxHitDistanceTolerance = 200.0f;
 	HighPingBeamWidthPadding = 2.5f;
+	BeamTimeoutDuration = 0.5f;
+	LastBeamActivityTime = 0.f;
 	//MaxHitDistanceTolerance = 300.0f; // Allow 3 meters of lag discrepancy
 	ClientDamageBatchSize = 15;
 	CurrentLinkedTarget = nullptr;
@@ -107,6 +109,22 @@ void AUTWeap_LinkGun_Plus::FireShot()
 
 
 
+bool AUTWeap_LinkGun_Plus::ServerStopBeamFiring_Validate() { return true; }
+
+void AUTWeap_LinkGun_Plus::ServerStopBeamFiring_Implementation()
+{
+	if (UTOwner)
+	{
+		UTOwner->ClearFiringInfo();
+	}
+	// Force exit to active state if still in beam firing
+	if (CurrentFireMode == 1 && CurrentState != ActiveState)
+	{
+		GotoActiveState();
+	}
+}
+
+
 
 void AUTWeap_LinkGun_Plus::ProcessClientSideHit(float DeltaTime, AActor* HitActor, FVector HitLoc, const FInstantHitDamageInfo& DamageInfo)
 {
@@ -165,6 +183,7 @@ bool AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Validate(
 	int32 DamageAmount)
 {
 	// If the actor is gone, just ignore this batch.
+
 	if (!HitActor)
 	{
 
@@ -193,7 +212,7 @@ bool AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Validate(
 void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor, FVector_NetQuantize HitLocation, int32 DamageAmount)
 {
 	if (!UTOwner || !InstantHitInfo.IsValidIndex(1)) return;
-
+	LastBeamActivityTime = GetWorld()->GetTimeSeconds();
 
 	if (!HitActor)
 	{
@@ -484,6 +503,22 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 		bIsInCoolDown = (OverheatFactor > 1.f);
 
 	}
+
+	if (!IsLinkPulsing())
+	{
+		// Identify the Pulse MuzzleFlash Index (It is always at the end of the array)
+		int32 PulseIndex = FiringState.Num();
+
+		if (MuzzleFlash.IsValidIndex(PulseIndex) && MuzzleFlash[PulseIndex] != nullptr)
+		{
+			if (MuzzleFlash[PulseIndex]->IsActive())
+			{
+				MuzzleFlash[PulseIndex]->DeactivateSystem();
+				// Optional: Reset template if needed, though Deactivate is usually enough
+			}
+		}
+	}
+
 	if (ScreenTexture != NULL && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
 	{
 		ScreenTexture->FastUpdateResource();
@@ -559,6 +594,27 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 			LoopingState->ExitCooldown();
 		}
 	}
+	if (Role == ROLE_Authority && CurrentFireMode == 1 && CurrentState != ActiveState)
+	{
+		// Only check if we're handling a remote client (not listen server host)
+		if (UTOwner && !UTOwner->IsLocallyControlled())
+		{
+			float TimeSinceActivity = GetWorld()->GetTimeSeconds() - LastBeamActivityTime;
+
+			if (LastBeamActivityTime > 0.f && TimeSinceActivity > BeamTimeoutDuration)
+			{
+				// Timeout - client probably stopped firing but RPC was lost
+				//UE_LOG(LogTemp, Warning, TEXT("LinkGun: Beam timeout - no activity for %.2fs, forcing exit"), TimeSinceActivity);
+
+				if (UTOwner)
+				{
+					UTOwner->ClearFiringInfo();
+				}
+				GotoActiveState();
+				LastBeamActivityTime = 0.f;
+			}
+		}
+	}
 }
 
 
@@ -594,10 +650,10 @@ void AUTWeap_LinkGun_Plus::StartLinkPull()
 		MuzzleFlash[FiringState.Num()]->SetActorParameter(FName(TEXT("Player")), CurrentLinkedTarget);
 		PlayWeaponAnim(PulseAnim, PulseAnimHands);
 		AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->Controller);
-		if (PC != NULL)
-		{
-			PC->AddHUDImpulse(FVector2D(0.f, 0.3f));
-		}
+		//if (PC != NULL)
+		//{
+		//	PC->AddHUDImpulse(FVector2D(0.f, 0.3f));
+		//}
 	}
 	CurrentLinkedTarget = nullptr;
 	LinkStartTime = -100.f;
@@ -655,7 +711,11 @@ void AUTWeap_LinkGun_Plus::ServerSetPulseTarget_Implementation(AActor* InTarget)
 				TSubclassOf<UUTDamageType> UTDamage(*BeamPulseDamageType);
 				if (UTDamage && UTDamage.GetDefaultObject()->RewardAnnouncementClass)
 				{
-					((AUTPlayerController*)(UTOwner->GetController()))->SendPersonalMessage(UTDamage.GetDefaultObject()->RewardAnnouncementClass, 0, ((AUTPlayerController*)(UTOwner->GetController()))->UTPlayerState, nullptr);
+					AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->GetController());
+					if (PC)
+					{
+						PC->SendPersonalMessage(UTDamage.GetDefaultObject()->RewardAnnouncementClass, 0, PC->UTPlayerState, nullptr);
+					}
 				}
 			}
 			AUTGameMode* GameMode = GetWorld()->GetAuthGameMode<AUTGameMode>();
@@ -742,6 +802,15 @@ void AUTWeap_LinkGun_Plus::CheckBotPulseFire()
 
 void AUTWeap_LinkGun_Plus::FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode)
 {
+
+	if (GetUTOwner() && GetUTOwner()->IsLocallyControlled())
+	{
+		// If we are not in a firing state, we are done. Do not let the server drag us back in.
+		if (!IsFiring() || GetCurrentState() == ActiveState)
+		{
+			return;
+		}
+	}
 	if (NewFlashExtra > 0 && InFireMode == 1)
 	{
 		LastBeamPulseTime = GetWorld()->TimeSeconds;

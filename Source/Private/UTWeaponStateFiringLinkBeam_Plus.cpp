@@ -2,6 +2,7 @@
 #include "UTWeaponStateFiringLinkBeamPlus.h"
 #include "UnrealTournament.h"
 #include "UTWeap_LinkGun_Plus.h"
+#include "UTWeaponFix.h"
 #include "Animation/AnimInstance.h"
 
 
@@ -19,34 +20,34 @@ UUTWeaponStateFiringLinkBeamPlus::UUTWeaponStateFiringLinkBeamPlus(const FObject
 
 void UUTWeaponStateFiringLinkBeamPlus::RefireCheckTimer()
 {
-    UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer START ==="));
+    //UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer START ==="));
 
     AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
 
-    UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - LinkGun=%s"), *GetNameSafe(LinkGun));
+    //UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - LinkGun=%s"), *GetNameSafe(LinkGun));
 
     if (!LinkGun)
     {
-        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - NO LINKGUN, ABORT"));
+        //UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - NO LINKGUN, ABORT"));
         return;
     }
 
-    UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - UTOwner=%s"), *GetNameSafe(LinkGun->GetUTOwner()));
+   // UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - UTOwner=%s"), *GetNameSafe(LinkGun->GetUTOwner()));
 
     if (!LinkGun->GetUTOwner())
     {
-        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - NO OWNER, going to ActiveState"));
+        //UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - NO OWNER, going to ActiveState"));
         LinkGun->GotoActiveState();
         return;
     }
 
-    UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - IsPendingFire(1)=%d"),
-        LinkGun->GetUTOwner()->IsPendingFire(1));
+    //UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - IsPendingFire(1)=%d"),
+       // LinkGun->GetUTOwner()->IsPendingFire(1));
 
     // Beam-specific: just check if we should stop firing
     if (!LinkGun->GetUTOwner()->IsPendingFire(LinkGun->GetCurrentFireMode()))
     {
-        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - Not pending fire, ending sequence"));
+        //UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - Not pending fire, ending sequence"));
         EndFiringSequence(LinkGun->GetCurrentFireMode());
         return;
     }
@@ -54,13 +55,31 @@ void UUTWeaponStateFiringLinkBeamPlus::RefireCheckTimer()
     // Check ammo
     if (!LinkGun->HasAmmo(LinkGun->GetCurrentFireMode()))
     {
-        UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - No ammo, going to ActiveState"));
+        //UE_LOG(LogUTWeaponState, Warning, TEXT("RefireCheck - No ammo, going to ActiveState"));
         LinkGun->GotoActiveState();
         return;
     }
-
-    UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer END ==="));
+    GetOuterAUTWeapon()->FireShot();
+    AUTWeaponFix* WeaponFix = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+    if (WeaponFix && WeaponFix->LastFireTime.IsValidIndex(WeaponFix->GetCurrentFireMode()))
+    {
+        WeaponFix->LastFireTime[WeaponFix->GetCurrentFireMode()] = GetWorld()->GetTimeSeconds();
+    }
+    //UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer END ==="));
 }
+
+
+void UUTWeaponStateFiringLinkBeamPlus::FireShot()
+{
+    AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
+    if (LinkGun)
+    {
+        // This starts the muzzle flash / beam particle system
+        LinkGun->PlayFiringEffects();
+        LinkGun->ConsumeAmmo(LinkGun->GetCurrentFireMode());
+    }
+}
+
 
 
 void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
@@ -71,6 +90,7 @@ void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
     {
         LinkGun->CurrentLinkedTarget = nullptr;
         LinkGun->LinkStartTime = -100.f;
+        LinkGun->LastBeamActivityTime = GetWorld()->GetTimeSeconds();
     }
 
     // Do what UUTWeaponStateFiring::BeginState does, but SKIP FireShot()
@@ -86,6 +106,13 @@ void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
     bDelayShot = false;
     GetOuterAUTWeapon()->OnStartedFiring();
     // NO FireShot() - beam handles this in Tick()
+    GetOuterAUTWeapon()->FireShot();
+    AUTWeaponFix* WeaponFix = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+    if (WeaponFix && WeaponFix->LastFireTime.IsValidIndex(GetOuterAUTWeapon()->GetCurrentFireMode()))
+    {
+        WeaponFix->LastFireTime[GetOuterAUTWeapon()->GetCurrentFireMode()] = GetOuterAUTWeapon()->GetWorld()->GetTimeSeconds();
+    }
+
     GetOuterAUTWeapon()->bNetDelayedShot = false;
 
     bHasBegun = true;
@@ -427,6 +454,19 @@ void UUTWeaponStateFiringLinkBeamPlus::EndState()
         LinkGun->CurrentLinkedTarget = nullptr;
         LinkGun->bLinkBeamImpacting = false;
         LinkGun->bLinkCausingDamage = false;
+        // --- FIX: Force kill effects immediately ---
+        // This ensures MuzzleFlash[1] (Beam) and MuzzleFlash[2] (Pulse) both die.
+        LinkGun->StopFiringEffects();
+        if (LinkGun->Role < ROLE_Authority && LinkGun->GetUTOwner() && LinkGun->GetUTOwner()->IsLocallyControlled())
+        {
+            LinkGun->ServerStopBeamFiring();
+        }
+        // 2. Clear Replication Data on the Pawn
+        else if (LinkGun->Role == ROLE_Authority && LinkGun->GetUTOwner())
+        {
+            // FIX: Call ClearFiringInfo on the Character (Owner), not the Weapon
+            LinkGun->GetUTOwner()->ClearFiringInfo();
+        }
     }
 
     // Call grandparent - skip UUTWeaponStateFiringLinkBeam::EndState

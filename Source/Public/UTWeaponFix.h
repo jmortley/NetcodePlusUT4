@@ -49,7 +49,8 @@ public:
     virtual FVector GetFireStartLoc(uint8 FireMode = 255) override;
     virtual FRotator GetBaseFireRotation() override;
     //~ End AUTWeapon Interface
-    
+    UPROPERTY()
+    TArray<float> LastFireTime;
      /**
      * Checks if a fire mode is currently on cooldown.
      *
@@ -59,6 +60,7 @@ public:
      */
     bool IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime);
     void OnRetryTimer(uint8 FireModeNum);
+    bool bIsTransactionalFire;
 
 protected:
     /**
@@ -66,7 +68,7 @@ protected:
      * This is the ground truth that clients must sync to.
      * Replicated to clients for verification.
      */
-    bool bIsTransactionalFire;
+    
     bool bHandlingRetry;
     FTimerHandle RetryFireHandle[2];
     UPROPERTY(Transient)
@@ -86,8 +88,7 @@ protected:
      * Timestamp of last successful fire for each mode (server time).
      * Used for refire rate validation on server.
      */
-    UPROPERTY()
-    TArray<float> LastFireTime;
+
 
     /**
      * Replicated active state for each fire mode (0 = inactive, 1 = active).

@@ -7,6 +7,7 @@
 #include "TimerManager.h"
 #include "Net/UnrealNetwork.h"
 #include "UTWeaponStateFiring_Transactional.h"
+#include "UTWeaponStateFiringChargedRocket_Transactional.h"
 #include "UTWeaponStateZooming.h"
 
 
@@ -100,6 +101,62 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             return;
         }
     }
+
+
+    if (FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum])
+    {
+        if (FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            FiringState[FireModeNum]->GetName().Contains(TEXT("Charged")))
+        {
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Bypassing transactional for Charged state on Mode %d"), FireModeNum);
+            Super::StartFire(FireModeNum);
+            return;
+        }
+    }
+
+
+    if (GetCurrentState() &&
+        (GetCurrentState()->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            GetCurrentState()->GetName().Contains(TEXT("Charged"))))
+    {
+        // Pass to Super. AUTWeapon::StartFire -> BeginFiringSequence -> OnMultiPress
+        Super::StartFire(FireModeNum);
+        return;
+    }
+
+
+
+
+
+    if (CurrentState != nullptr && CurrentState != ActiveState)
+    {
+        // Check if current state is a charged state
+        bool bInChargedState = false;
+
+        if (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            CurrentState->GetName().Contains(TEXT("Charged")))
+        {
+            bInChargedState = true;
+        }
+
+        if (bInChargedState && CurrentState->IsFiring() && CurrentFireMode != FireModeNum)
+        {
+            // We're charging rockets and player pressed the other fire button
+            // This should switch modes (spread -> grenades -> spiral), not start new fire
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] In charged state, calling OnMultiPress for mode %d"), FireModeNum);
+
+            // Set pending fire so the weapon knows the button is pressed
+            if (UTOwner)
+            {
+                UTOwner->SetPendingFire(FireModeNum, true);
+            }
+
+            // Call OnMultiPress to handle mode switching
+            OnMultiPress(FireModeNum);
+            return;
+        }
+    }
+
 
     // Critical Fix #1: Prevent simultaneous fire modes
     if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
@@ -319,9 +376,19 @@ void AUTWeaponFix::FireShot()
         // We block auto-firing, BUT we must allow:
         // 1. bIsTransactionalFire (The standard path from RPC)
         // 2. bNetDelayedShot (The delayed path from Tick/HandleDelayedShot)
+        bool bInChargedState = false;
+        if (CurrentState != nullptr)
+        {
+            if (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+                CurrentState->GetName().Contains(TEXT("Charged")))
+            {
+                bInChargedState = true;
+            }
+        }
         bool bIsListenServerHost = (UTOwner && UTOwner->IsLocallyControlled());
 
-        if (!bIsTransactionalFire && !bNetDelayedShot && !bIsListenServerHost)
+        if (!bIsTransactionalFire && !bNetDelayedShot && !bIsListenServerHost && !bInChargedState)
+
         {
             return;
         }
@@ -347,6 +414,37 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         }
     }
     
+    bool bIsChargedMode = false;
+
+    // Check if the mode we are stopping is configured as a Charged State
+    if (FiringState.IsValidIndex(FireModeNum) &&
+        FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()))
+    {
+        bIsChargedMode = true;
+    }
+
+    // Check if the weapon is ACTUALLY in a Charged State right now
+    if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+        CurrentState->GetName().Contains(TEXT("Charged"))))
+    {
+        bIsChargedMode = true;
+    }
+
+    if (bIsChargedMode)
+    {
+        // Don't log for Mode 0 stops (normal during swaps), but log for Mode 1
+        if (FireModeNum == 1)
+        {
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Bypassing Transactional Stop for Charged State (Mode 1)"));
+        }
+
+        // Standard UT logic handles the release (launching rockets or clearing pending fire)
+        Super::StopFire(FireModeNum);
+
+        // CRITICAL: Return here so we don't hit GotoActiveState() below
+        return;
+    }
+
     if (FireModeNum < 2)
     {
         GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
@@ -662,6 +760,13 @@ void AUTWeaponFix::Tick(float DeltaTime)
     // WATCHDOG: Prevent "Infinite Loop" audio/anim if Client disconnects or loses Stop packet.
     if (Role == ROLE_Authority && IsFiring())
     {
+        
+        if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            CurrentState->GetName().Contains(TEXT("Charged"))))
+        {
+            return;
+        }
+        
         float RefireTime = GetRefireTime(CurrentFireMode);
 
         // If we haven't received a valid RPC in > 2.5x the refire time, assume connection loss.

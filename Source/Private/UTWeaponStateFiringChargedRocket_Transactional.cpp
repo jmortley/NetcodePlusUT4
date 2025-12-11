@@ -37,7 +37,15 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
 {
     // 1. Notify weapon that firing has started
     GetOuterAUTWeapon()->OnStartedFiring();
-
+    if (GetOuterAUTWeapon())
+ 
+    GetOuterAUTWeapon()->DeactivateSpawnProtection();
+    
+    AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+    if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
+    {
+        W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+    }
     // 2. Safety checks
     if (GetUTOwner() == nullptr || GetOuterAUTWeapon()->GetCurrentState() != this)
     {
@@ -124,7 +132,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
         if (!GetUTOwner()->IsPendingFire(GetFireMode()))
         {
             // Player released - fire whatever we have loaded
-            EndFiringSequence(GetFireMode());
+            GetOuterAUTWeapon()->StopFire(GetFireMode());
         }
     }
 }
@@ -194,6 +202,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::GraceTimer()
     EndFiringSequence(GetFireMode());
 }
 
+
 void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
 {
     if (FireModeNum != GetFireMode())
@@ -201,18 +210,23 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
         return;
     }
 
-    // 1. Stop charging
     bCharging = false;
 
-    // 2. Check if we have anything to fire
+    // If we have 0 rockets, but the Load Timer is still running, the user released the button "early".
+    // WE MUST NOT EXIT YET. We must wait for the LoadTimer to finish tick, 
+    // which will increment the rocket count to 1 and then call this function again to fire.
+    if (RocketLauncher && RocketLauncher->NumLoadedRockets <= 0 && GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(LoadTimerHandle))
+    {
+        return;
+    }
+
+
     if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
     {
-        // Nothing loaded - just exit to active state
         GetOuterAUTWeapon()->GotoActiveState();
         return;
     }
 
-    // 3. Check for match end/intermission
     AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
     if (GameState && (GameState->HasMatchEnded() || GameState->IsMatchIntermission()))
     {
@@ -221,10 +235,11 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
         return;
     }
 
-    // 4. Fire the loaded rockets!
+    // Just use stock UT firing - no transactional needed for charged weapons
     FireLoadedRocket();
 }
 
+/*
 void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 {
     // Safety check for match state
@@ -319,32 +334,115 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
     GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
     GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
 }
+*/
 
+
+void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
+{
+    if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
+    {
+        // Done firing - cleanup
+        ChargeTime = 0.0f;
+        GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
+        GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
+
+        if (GetOuterAUTWeapon()->GetCurrentState() == this)
+        {
+            GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+                RefireCheckHandle,
+                this,
+                &UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer,
+                GetOuterAUTWeapon()->GetRefireTime(GetOuterAUTWeapon()->GetCurrentFireMode()),
+                false
+            );
+        }
+        return;
+    }
+
+    // Fire one rocket using stock UT logic (bypasses UTWeaponFix transactional)
+    RocketLauncher->FireShotDirect();
+
+    // Handle burst
+    if (RocketLauncher->NumLoadedRockets > 0)
+    {
+        if (RocketLauncher->BurstInterval <= 0.f || RocketLauncher->ShouldFireLoad())
+        {
+            // --- FIX START: SAFETY COUNTER ---
+            int32 SafetyCounter = 0;
+            while (RocketLauncher->NumLoadedRockets > 0)
+            {
+                int32 OldCount = RocketLauncher->NumLoadedRockets;
+
+                RocketLauncher->FireShotDirect();
+
+                // If the weapon failed to decrement (bug), force it down to prevent infinite loop
+                if (RocketLauncher->NumLoadedRockets >= OldCount)
+                {
+                    RocketLauncher->NumLoadedRockets--;
+                }
+
+                // Hard limit to prevent editor freeze (e.g., if decrement logic is completely broken)
+                SafetyCounter++;
+                if (SafetyCounter > 50)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("Infinite Loop Detected in FireLoadedRocket! Breaking loop."));
+                    RocketLauncher->NumLoadedRockets = 0;
+                    break;
+                }
+            }
+            // --- FIX END ---
+        }
+        else
+        {
+            float BurstTime = (RocketLauncher->CurrentRocketFireMode == 0)
+                ? RocketLauncher->BurstInterval
+                : RocketLauncher->GrenadeBurstInterval;
+
+            GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+                FireLoadedRocketHandle,
+                this,
+                &UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket,
+                BurstTime,
+                false
+            );
+            return;
+        }
+    }
+
+    // All rockets fired
+    ChargeTime = 0.0f;
+    GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
+    GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
+
+    if (GetOuterAUTWeapon()->GetCurrentState() == this)
+    {
+        GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+            RefireCheckHandle,
+            this,
+            &UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer,
+            GetOuterAUTWeapon()->GetRefireTime(GetOuterAUTWeapon()->GetCurrentFireMode()),
+            false
+        );
+    }
+}
+
+
+
+/*
 void UUTWeaponStateFiringChargedRocket_Transactional::FireShot()
 {
-    // === TRANSACTIONAL FIRE ===
-    // Route through UTWeaponFix::FireShot() which handles:
-    // - Client: Sends RPC to server with transaction data
-    // - Server: Validates and executes the fire
 
-    AUTWeaponFix* WeaponFix = GetWeaponFix();
-    if (WeaponFix)
-    {
-        // This goes through your transactional system
-        WeaponFix->FireShot();
-    }
-    else
-    {
-        // Fallback for non-transactional weapons (shouldn't happen)
-        GetOuterAUTWeapon()->FireShot();
-    }
+    //AUTWeapon::FireShot();
+    // NOTE: Don't decrement here - FireProjectile/FireRocketProjectile handles it
+    // The double-decrement was causing issues
 
-    // Decrement loaded rockets (the weapon's FireShot handles the actual projectile)
+    Decrement loaded rockets(the weapon's FireShot handles the actual projectile)
     if (RocketLauncher && RocketLauncher->NumLoadedRockets > 0)
     {
         RocketLauncher->NumLoadedRockets--;
     }
-}
+    
+}*/
 
 void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
 {
