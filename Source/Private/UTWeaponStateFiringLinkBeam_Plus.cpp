@@ -450,6 +450,20 @@ void UUTWeaponStateFiringLinkBeamPlus::EndState()
     AUTWeap_LinkGun_Plus* LinkGun = Cast<AUTWeap_LinkGun_Plus>(GetOuterAUTWeapon());
     if (LinkGun)
     {
+
+        // If we have damage leftover (e.g. 14 damage on a 15 batch), send it NOW.
+        // We must do this BEFORE clearing CurrentLinkedTarget.
+        if (ClientDamageAccumulator >= 1.0f && LinkGun->CurrentLinkedTarget != nullptr)
+        {
+            int32 FinalDamage = FMath::TruncToInt(ClientDamageAccumulator);
+            if (FinalDamage > 0)
+            {
+                // We use PulseLoc as an approximation of the hit location since we don't store the last exact impact point
+                // For a beam, the current end point is usually accurate enough.
+                LinkGun->ServerProcessBeamHit(LinkGun->CurrentLinkedTarget, LinkGun->GetUTOwner()->FlashLocation.Position, FinalDamage);
+            }
+        }
+
         LinkGun->bReadyToPull = false;
         LinkGun->CurrentLinkedTarget = nullptr;
         LinkGun->bLinkBeamImpacting = false;

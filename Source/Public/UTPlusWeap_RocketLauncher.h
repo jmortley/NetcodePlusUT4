@@ -287,6 +287,9 @@ public:
     virtual bool ShouldFireLoad();
 
     // Fire Mode
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerCycleRocketMode();
+
     virtual void OnMultiPress_Implementation(uint8 OtherFireMode) override;
     virtual void SetRocketFlashExtra(uint8 InFireMode, int32 InNumLoadedRockets, int32 InCurrentRocketFireMode, bool bInDrawRocketModeString);
     virtual void GetRocketFlashExtra(uint8 InFlashExtra, uint8 InFireMode, int32& OutNumLoadedRockets, int32& OutCurrentRocketFireMode, bool& bOutDrawRocketModeString);

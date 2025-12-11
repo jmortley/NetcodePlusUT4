@@ -1,19 +1,18 @@
-#include "UTPlusWeap_FlakCannon.h"
-#include "UTWeaponStateFiring_Transactional.h"
+// Copyright 1998-2016 Epic Games, Inc. All Rights Reserved.
+
+#include "UTPlusFlakCannon.h"
+#include "UnrealTournament.h"
+#include "UTProj_FlakShard.h"
+#include "UTProj_FlakShell.h"
 #include "StatNames.h"
-#include "Core.h"
-#include "Engine.h"
+#include "UTBot.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "Net/UnrealNetwork.h"
 
-// Includes from the original file, useful if you access specific projectile defaults
-#include "UTProj_FlakShard.h" 
-#include "UTProj_FlakShell.h"
-
-AUTPlusWeap_FlakCannon::AUTPlusWeap_FlakCannon(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
-{
+AUTPlusFlakCannon::AUTPlusFlakCannon(const FObjectInitializer& ObjectInitializer)
+: Super(ObjectInitializer)
+{ 
 	DefaultGroup = 7;
 	HUDIcon = MakeCanvasIcon(HUDIcon.Texture, 131.000000, 429.000000, 132.000000, 52.000000);
 
@@ -37,10 +36,10 @@ AUTPlusWeap_FlakCannon::AUTPlusWeap_FlakCannon(const FObjectInitializer& ObjectI
 
 	FireOffset = FVector(75.f, 18.f, -15.f);
 	FiringViewKickback = -50.f;
-	FiringViewKickbackY = 30.f;
+	FiringViewKickbackY =  30.f;
 	HUDViewKickback = FVector2D(0.f, 0.2f);
 
-	// MultiShot
+	// MultiShot Setup (Flak Shards)
 	MultiShotLocationSpread.SetNum(1);
 	MultiShotLocationSpread[0] = FVector(0.f, 36.f, 36.f);
 
@@ -73,17 +72,12 @@ AUTPlusWeap_FlakCannon::AUTPlusWeap_FlakCannon(const FObjectInitializer& ObjectI
 	VeryLowMeshOffset = FVector(0.f, 0.f, -12.f);
 }
 
-// ... [PostInitProperties and FireProjectile go here] ...
-
-
-// --- HELPER FUNCTIONS (Must be implemented for the Loop to work) ---
-
-FVector AUTPlusWeap_FlakCannon::GetFireLocationForMultiShot_Implementation(int32 MultiShotIndex, const FVector& FireLocation, const FRotator& FireRotation)
+FVector AUTPlusFlakCannon::GetFireLocationForMultiShot_Implementation(int32 MultiShotIndex, const FVector& FireLocation, const FRotator& FireRotation)
 {
 	if (MultiShotIndex > 0 && MultiShotLocationSpread.IsValidIndex(CurrentFireMode))
 	{
 		// Randomize each projectile's spawn location if needed.
-		FVector NewFireLocation = FireLocation + FireRotation.RotateVector((FVector(0.25f, 0.25f, 0.25f) + 0.5f * FMath::VRand()) * MultiShotLocationSpread[CurrentFireMode]);
+		FVector NewFireLocation = FireLocation + FireRotation.RotateVector((FVector(0.25f, 0.25f, 0.25f) + 0.5f*FMath::VRand()) * MultiShotLocationSpread[CurrentFireMode]);
 
 		// trace from FireLocation to desired location, checking for intervening world geometry
 		FCollisionShape Collider;
@@ -110,7 +104,7 @@ FVector AUTPlusWeap_FlakCannon::GetFireLocationForMultiShot_Implementation(int32
 	return FireLocation;
 }
 
-FRotator AUTPlusWeap_FlakCannon::GetFireRotationForMultiShot_Implementation(int32 MultiShotIndex, const FVector& FireLocation, const FRotator& FireRotation)
+FRotator AUTPlusFlakCannon::GetFireRotationForMultiShot_Implementation(int32 MultiShotIndex, const FVector& FireLocation, const FRotator& FireRotation)
 {
 	if (MultiShotIndex > 0 && MultiShotAngle.IsValidIndex(CurrentFireMode))
 	{
@@ -137,22 +131,30 @@ FRotator AUTPlusWeap_FlakCannon::GetFireRotationForMultiShot_Implementation(int3
 	return FireRotation;
 }
 
-AUTProjectile* AUTPlusWeap_FlakCannon::FireProjectile()
+AUTProjectile* AUTPlusFlakCannon::FireProjectile()
 {
-	if (GetUTOwner() == NULL || !MultiShotCount.IsValidIndex(CurrentFireMode) || MultiShotCount[CurrentFireMode] <= 1)
+	if (GetUTOwner() == NULL)
 	{
+		return NULL;
+	}
+
+	// If this isn't a multishot mode (like Secondary Fire), use the base logic
+	if (!MultiShotCount.IsValidIndex(CurrentFireMode) || MultiShotCount[CurrentFireMode] <= 1)
+	{
+		// IMPORTANT: We call Super::FireProjectile() here which routes to 
+		// AUTWeaponFix::FireProjectile -> SpawnNetPredictedProjectile
+		// This ensures transactional networking works for the secondary shell.
 		return Super::FireProjectile();
 	}
 	else
 	{
-		// try and fire a projectile
+		// -- MULTISHOT LOGIC (Primary Fire) --
 		checkSlow(ProjClass.IsValidIndex(CurrentFireMode) && ProjClass[CurrentFireMode] != NULL);
 
-		// increment 3rd person muzzle flash count
-		UTOwner->IncrementFlashCount(CurrentFireMode);
-
+		// increment 3rd person muzzle flash count (Server only usually, but handled by weapon state)
 		if (Role == ROLE_Authority)
 		{
+			UTOwner->IncrementFlashCount(CurrentFireMode);
 			AUTPlayerState* PS = UTOwner->Controller ? Cast<AUTPlayerState>(UTOwner->Controller->PlayerState) : NULL;
 			if (PS && (ShotsStatsName != NAME_None))
 			{
@@ -161,12 +163,14 @@ AUTProjectile* AUTPlusWeap_FlakCannon::FireProjectile()
 		}
 
 		// Get muzzle location and rotation
+		// AUTWeaponFix overrides GetAdjustedAim to use the cached transactional rotation from the client
 		const FVector SpawnLocation = GetFireStartLoc();
 		const FRotator SpawnRotation = GetAdjustedAim(SpawnLocation);
 
 		// Fire projectiles
 		AUTProjectile* MainProjectile = NULL;
 		NetSynchRandomSeed();
+		
 		for (int32 i = 0; i < MultiShotCount[CurrentFireMode]; ++i)
 		{
 			// Get firing location and rotation for this projectile
@@ -181,7 +185,12 @@ AUTProjectile* AUTPlusWeap_FlakCannon::FireProjectile()
 			}
 
 			// Spawn projectile
+			// CRITICAL CHANGE: 
+			// We call SpawnNetPredictedProjectile() directly (from AUTWeaponFix).
+			// This function handles the "CatchupTickDelta" logic to fast-forward projectiles 
+			// on the server based on the client's timestamp/RTT.
 			AUTProjectile* MultiShot = SpawnNetPredictedProjectile(ProjectileClass, MultiShotLocation, MultiShotRotation);
+			
 			if (MainProjectile == NULL)
 			{
 				MainProjectile = MultiShot;
@@ -192,16 +201,18 @@ AUTProjectile* AUTPlusWeap_FlakCannon::FireProjectile()
 	}
 }
 
-float AUTPlusWeap_FlakCannon::SuggestAttackStyle_Implementation()
+float AUTPlusFlakCannon::SuggestAttackStyle_Implementation()
 {
 	AUTBot* B = Cast<AUTBot>(UTOwner->Controller);
 	return (B != nullptr && B->Skill < 3.0f) ? 0.4f : 0.8f;
 }
-float AUTPlusWeap_FlakCannon::SuggestDefenseStyle_Implementation()
+
+float AUTPlusFlakCannon::SuggestDefenseStyle_Implementation()
 {
 	return -0.4f;
 }
-float AUTPlusWeap_FlakCannon::GetAISelectRating_Implementation()
+
+float AUTPlusFlakCannon::GetAISelectRating_Implementation()
 {
 	AUTBot* B = Cast<AUTBot>(UTOwner->Controller);
 	if (B == nullptr)
@@ -257,12 +268,13 @@ float AUTPlusWeap_FlakCannon::GetAISelectRating_Implementation()
 			{
 				return (BaseAISelectRating + 0.2f);
 			}
-
+			
 			return FMath::Max<float>(BaseAISelectRating + 0.2f - (EnemyDist - 880.0f) * 0.00035, 0.2f);
 		}
 	}
 }
-bool AUTPlusWeap_FlakCannon::CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc)
+
+bool AUTPlusFlakCannon::CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc)
 {
 	AUTBot* B = Cast<AUTBot>(UTOwner->Controller);
 	if (Super::CanAttack_Implementation(Target, TargetLoc, bDirectOnly, bPreferCurrentMode, BestFireMode, OptimalTargetLoc))

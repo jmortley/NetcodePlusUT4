@@ -699,70 +699,26 @@ void AUTPlusWeap_RocketLauncher::PlayFiringEffects()
 
 
 
-// =============================================================================
-// FIRE MODE SWITCHING
-// =============================================================================
-/*
-void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode)
+bool AUTPlusWeap_RocketLauncher::ServerCycleRocketMode_Validate()
 {
-    if ((bAllowAltModes || bAllowGrenades) && (CurrentFireMode == 1))
-    {
-        // Check NEW transactional state first
-        UUTWeaponStateFiringChargedRocket_Transactional* TransactionalAltState =
-            Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
-
-        bool bIsCharging = false;
-        FTimerHandle* GraceHandle = nullptr;
-
-        if (TransactionalAltState != nullptr)
-        {
-            bIsCharging = TransactionalAltState->bCharging;
-            GraceHandle = &TransactionalAltState->GraceTimerHandle;
-        }
-
-
-        if (bIsCharging && GraceHandle != nullptr)
-        {
-            // Timing safety check - don't switch modes too close to firing
-            if ((GetWorldTimerManager().IsTimerActive(*GraceHandle) &&
-                GetWorldTimerManager().GetTimerRemaining(*GraceHandle) < 0.05f) ||
-                GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
-            {
-                return;
-            }
-
-            // Cycle to next mode
-            CurrentRocketFireMode++;
-            bDrawRocketModeString = true;
-
-            // Determine max modes based on what's configured
-            int32 MaxModes = RocketFireModes.Num();
-            if (MaxModes < 2) MaxModes = 2; // At least spread + grenades
-
-            if (CurrentRocketFireMode >= MaxModes)
-            {
-                CurrentRocketFireMode = 0;
-            }
-
-            // Play mode switch sound
-            UUTGameplayStatics::UTPlaySound(GetWorld(), AltFireModeChangeSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, NULL, NULL, true, SAT_WeaponFoley);
-
-            // Update flash for spectators
-            if (Role == ROLE_Authority)
-            {
-                SetRocketFlashExtra(CurrentFireMode, NumLoadedRockets + 1, CurrentRocketFireMode, bDrawRocketModeString);
-            }
-        }
-    }
+    return true;
 }
-*/
 
+void AUTPlusWeap_RocketLauncher::ServerCycleRocketMode_Implementation()
+{
+    // The server just needs to run the exact same logic
+    OnMultiPress_Implementation(0);
+}
 
+// ---------------------------------------------------------
+// UPDATED OnMultiPress
+// ---------------------------------------------------------
 void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode)
 {
+    // Only allow mode switch if currently in Alt-Fire (Mode 1)
     if ((bAllowAltModes || bAllowGrenades) && (CurrentFireMode == 1))
     {
-        // Check state
+        // 1. Check State Validity
         UUTWeaponStateFiringChargedRocket_Transactional* TransactionalAltState =
             Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
 
@@ -775,9 +731,9 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
             GraceHandle = &TransactionalAltState->GraceTimerHandle;
         }
 
+        // 2. Perform Timing Safety Check (Prevent switching right as you fire)
         if (bIsCharging && GraceHandle != nullptr)
         {
-            // Timing safety
             if ((GetWorldTimerManager().IsTimerActive(*GraceHandle) &&
                 GetWorldTimerManager().GetTimerRemaining(*GraceHandle) < 0.05f) ||
                 GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
@@ -785,31 +741,34 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
                 return;
             }
 
-            // Cycle to next mode
-            CurrentRocketFireMode++;
-            bDrawRocketModeString = true;
-
-            // --- FIX START: FORCE MAX MODES TO 3 FOR SPIRAL ---
-            // Even if RocketFireModes array only has 2 entries (Normal, Grenade),
-            // we want to allow Mode 2 (Spiral) if the class is set up.
-            int32 MaxModes = RocketFireModes.Num();
-
-            // If we have a Spiral Class defined in defaults, ensure we can cycle to it (Index 2)
-            if (SpiralRocketClass != nullptr || MaxModes < 3)
+            // --- FIX START: SYNC WITH SERVER ---
+            // If we are a client, tell the server we pushed the button.
+            if (Role < ROLE_Authority)
             {
-                MaxModes = 3; // 0=Spread, 1=Grenade, 2=Spiral
+                ServerCycleRocketMode();
             }
             // --- FIX END ---
 
+            // 3. Cycle Mode Locally
+            CurrentRocketFireMode++;
+            bDrawRocketModeString = true;
+
+            // Determine Max Modes (Spread, Grenade, Spiral)
+            int32 MaxModes = RocketFireModes.Num();
+            if (SpiralRocketClass != nullptr || MaxModes < 3)
+            {
+                MaxModes = 3;
+            }
+
             if (CurrentRocketFireMode >= MaxModes)
             {
                 CurrentRocketFireMode = 0;
             }
 
-            // Play sound
+            // 4. Feedback
             UUTGameplayStatics::UTPlaySound(GetWorld(), AltFireModeChangeSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, NULL, NULL, true, SAT_WeaponFoley);
 
-            // Update flash
+            // 5. Update Server-Side Flash (so other clients see the text change)
             if (Role == ROLE_Authority)
             {
                 SetRocketFlashExtra(CurrentFireMode, NumLoadedRockets + 1, CurrentRocketFireMode, bDrawRocketModeString);

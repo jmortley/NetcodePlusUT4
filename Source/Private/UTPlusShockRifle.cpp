@@ -9,6 +9,9 @@
 #include "UTCharacter.h"
 #include "Net/UnrealNetwork.h"
 
+const FName NAME_ShockPrimaryShots(TEXT("ShockPrimaryShots"));
+const FName NAME_ShockPrimaryHits(TEXT("ShockPrimaryHits"));
+
 // Suppress DLL linkage warnings when overriding base game functions in a plugin
 #ifdef _MSC_VER
 #pragma warning(disable: 4273)
@@ -445,6 +448,7 @@ int32 AUTPlusShockRifle::GetWeaponDeathStats(AUTPlayerState* PS) const
 	return DeathCount;
 }
 
+/*
 void AUTPlusShockRifle::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 {
 	// Store this now since it might get cleared below
@@ -484,6 +488,71 @@ void AUTPlusShockRifle::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		UTOwner->SetFlashExtra(1, CurrentFireMode);
 	}
 }
+*/
+
+
+void AUTPlusShockRifle::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
+{
+	// Store this now since it might get cleared below
+	bool bIsCombo = bPlayComboEffects;
+
+	Super::FireInstantHit(bDealDamage, OutHit);
+
+	// --- SERVER ONLY LOGIC (Stats & Impressive) ---
+	if (Role == ROLE_Authority)
+	{
+		AUTPlayerState* PS = UTOwner ? Cast<AUTPlayerState>(UTOwner->PlayerState) : nullptr;
+
+		// 1. Record Primary SHOT Attempt
+		// We do this before checking hits. If we fired mode 0, count it.
+		if (CurrentFireMode == 0 && PS)
+		{
+			PS->ModifyStatsValue(NAME_ShockPrimaryShots, 1);
+		}
+
+		// 2. Process Hit Results (for both Impressive Streak AND Accuracy)
+		if (OutHit && OutHit->bBlockingHit)
+		{
+			AUTCharacter* HitChar = Cast<AUTCharacter>(OutHit->Actor.Get());
+			// Define a valid hit: Must be a character, not us, and not dead
+			bool bHitEnemyPawn = (HitChar != nullptr && HitChar != UTOwner && !HitChar->IsDead());
+
+			// A) Impressive Logic
+			if (bTrackImpressive)
+			{
+				if (bHitEnemyPawn)
+				{
+					ImpressiveStreak++;
+					if (ImpressiveStreak >= ImpressiveThreshold)
+					{
+						ClientNotifyImpressive();
+					}
+				}
+				else
+				{
+					// Hit something else (wall, core, etc) -> Reset Streak
+					ImpressiveStreak = 0;
+				}
+			}
+
+			// B) Primary Accuracy Hit Logic
+			// If we hit an enemy pawn while using Primary Fire, count the hit.
+			// (Intentionally ignores Cores/Combos because bHitEnemyPawn is false for cores)
+			if (CurrentFireMode == 0 && bHitEnemyPawn && PS && bDealDamage)
+			{
+				PS->ModifyStatsValue(NAME_ShockPrimaryHits, 1);
+			}
+		}
+	}
+
+	// --- COMBO FX REPLICATION ---
+	// FlashExtra 1 will play the ComboEffects for the other clients
+	if (Role == ROLE_Authority && UTOwner != nullptr && bIsCombo)
+	{
+		UTOwner->SetFlashExtra(1, CurrentFireMode);
+	}
+}
+
 
 void AUTPlusShockRifle::FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode)
 {
