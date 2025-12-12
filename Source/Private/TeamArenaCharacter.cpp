@@ -201,15 +201,55 @@ void ATeamArenaCharacter::FiringInfoUpdated()
         }
     }
     // 4. Standard Third Person Effects (Always Safe)
+    // 4. Play 3P Effects (Enemies / Other Players)
     else if (WeaponAttachment != NULL)
     {
         if (FlashCount != 0 || !FlashLocation.Position.IsZero())
         {
-            // Only play if not locally controlled OR if viewing from behind
-            // Note: UTPC usage here is safe because IsBehindView() handles null checks internally or we rely on !IsLocallyControlled
-            if ((!IsLocallyControlled() || UTPC == NULL || UTPC->IsBehindView()))
+            // A. Always run standard logic (Audio, Muzzle Flash, etc.)
+            WeaponAttachment->PlayFiringEffects();
+
+            // B. ALWAYS FORCE BEAM VISIBILITY
+            // We removed the 'bEngineHandledIt' check. We now force this 100% of the time.
+            // This ensures hits on yourself (close range) are drawn even if the engine 
+            // glitches out on the Enemy mesh visibility.
+
+            if (!FlashLocation.Position.IsZero() &&
+                WeaponAttachment->FireEffect.IsValidIndex(FireMode) &&
+                WeaponAttachment->FireEffect[FireMode] != nullptr)
             {
-                WeaponAttachment->PlayFiringEffects();
+                FVector SpawnLocation = GetActorLocation();
+
+                // Calculate Start Location from Attachment
+                if (WeaponAttachment->MuzzleFlash.IsValidIndex(FireMode) && WeaponAttachment->MuzzleFlash[FireMode] != nullptr)
+                {
+                    SpawnLocation = WeaponAttachment->MuzzleFlash[FireMode]->GetComponentLocation();
+                }
+                else if (WeaponAttachment->Mesh != nullptr)
+                {
+                    SpawnLocation = WeaponAttachment->Mesh->GetSocketLocation(WeaponAttachment->AttachSocket);
+                }
+
+                // Force Spawn the Beam
+                UParticleSystemComponent* PSC = UGameplayStatics::SpawnEmitterAtLocation(
+                    GetWorld(),
+                    WeaponAttachment->FireEffect[FireMode],
+                    SpawnLocation,
+                    (FlashLocation.Position - SpawnLocation).Rotation(),
+                    true
+                );
+
+                if (PSC)
+                {
+                    static FName NAME_HitLocation(TEXT("HitLocation"));
+                    static FName NAME_LocalHitLocation(TEXT("LocalHitLocation"));
+
+                    PSC->SetVectorParameter(NAME_HitLocation, FlashLocation.Position);
+                    PSC->SetVectorParameter(NAME_LocalHitLocation, PSC->ComponentToWorld.InverseTransformPosition(FlashLocation.Position));
+
+                    // CRITICAL: Ensure visual parameters (Colors, Lightning Arcs) are applied
+                    WeaponAttachment->ModifyFireEffect(PSC);
+                }
             }
         }
         else

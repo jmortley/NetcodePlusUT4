@@ -326,7 +326,10 @@ void AUTPlusWeap_RocketLauncher::FireShotDirect()
     {
         UTOwner->DeactivateSpawnProtection();
     }
-
+    if (LastFireTime.IsValidIndex(CurrentFireMode))
+    {
+        LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+    }
     // 1. Fire the projectile directly
     // (This function has internal logic to NOT consume ammo for Alt-Fire)
     FireProjectile();
@@ -342,10 +345,7 @@ void AUTPlusWeap_RocketLauncher::FireShotDirect()
     // We must tell the WeaponFix system that we just fired NOW.
     // Otherwise, it calculates cooldown from when we STARTED charging (seconds ago),
     // allowing an instant double-tap after release.
-    if (LastFireTime.IsValidIndex(CurrentFireMode))
-    {
-        LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
-    }
+
     // Reset offset logic (from base class)
     FireZOffsetTime = 0.f;
 }

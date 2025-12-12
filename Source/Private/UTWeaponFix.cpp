@@ -110,9 +110,38 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
     bHandlingRetry = false;
 }
 
+
+
+
+
+/*
+
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
-	// Bypass for Zooming State
+
+ 
+
+    if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
+    {
+        // EXCEPTION: Allow multi-press if we are currently in a Charged State (Rocket Launcher Mode Switching)
+        // We check if the *current* state is a charged state.
+        bool bIsChargedState = false;
+        if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            CurrentState->GetName().Contains(TEXT("Charged"))))
+        {
+            bIsChargedState = true;
+        }
+
+        // If we are NOT in a charged state, block the input.
+        // If we ARE in a charged state, we let it pass so it hits the "OnMultiPress" logic further down.
+        if (!bIsChargedState)
+        {
+            return;
+        }
+    }
+    
+    
+    // Bypass for Zooming State
     if (FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum])
     {
         // Check 1: Is it a child of the Zooming Class? (Standard Check)
@@ -146,8 +175,28 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         (GetCurrentState()->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
             GetCurrentState()->GetName().Contains(TEXT("Charged"))))
     {
-        // Pass to Super. AUTWeapon::StartFire -> BeginFiringSequence -> OnMultiPress
-        Super::StartFire(FireModeNum);
+        // Do NOT call Super::StartFire. That sets PendingFire=true, which queues a shot 
+            // that will fire immediately after you release the charge.
+
+            // Instead, manually check for mode switch:
+        if (FireModeNum != CurrentFireMode)
+        {
+            // 1. Clear any retry timers for this mode so it doesn't fire later
+            if (FireModeNum < 2)
+            {
+                GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+            }
+
+            // 2. Explicitly ensure PendingFire is FALSE for this mode
+            if (UTOwner)
+            {
+                UTOwner->SetPendingFire(FireModeNum, false);
+            }
+
+            // 3. Perform the switch
+            OnMultiPress(FireModeNum);
+        }
+
         return;
     }
 
@@ -247,28 +296,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             return;
             
         }
-           /*if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
-            {
-                // 1. Calculate how long until we are ready
-                // Ensure we have a valid last fire time, otherwise default to tiny delay
-                float LastTime = LastFireTime.IsValidIndex(FireModeNum) ? LastFireTime[FireModeNum] : CurrentTime;
-                float RefireRate = GetRefireTime(FireModeNum);
 
-                float Delay = (LastTime + RefireRate) - CurrentTime;
-
-                // 2. Clamp to a safe minimum (e.g. one frame) to avoid timer errors
-                Delay = FMath::Max(0.01f, Delay);
-                UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] BLOCKED by Cooldown. Scheduling Retry in %.4fs. (Refire: %.3f)"), Delay, RefireRate);
-                // 3. Set the timer to call StartFire(FireModeNum) automatically
-                // We use a TimerDelegate to pass the 'FireModeNum' argument
-                //FTimerDelegate RetryDel;
-                //RetryDel.BindUObject(this, &AUTWeaponFix::StartFire, FireModeNum);
-                //GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, Delay, false);
-                FTimerDelegate RetryDel;
-                RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum); // CHANGED to wrapper for logging
-                GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, Delay, false);
-            }
-            */
         if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
         {
             // --- STEP 1: Find the REAL cooldown end time ---
@@ -343,6 +371,202 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     //UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] SUCCESS! Starting Sequence for Mode %d"), FireModeNum);
     BeginFiringSequence(FireModeNum, false);
 }
+
+
+*/
+
+
+
+void AUTWeaponFix::StartFire(uint8 FireModeNum)
+{
+    // ---------------------------------------------------------
+    // 1. SAFETY CHECKS
+    // ---------------------------------------------------------
+    if (UTOwner && UTOwner->IsFiringDisabled())
+    {
+        return;
+    }
+
+    AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+    if (GS && GS->PreventWeaponFire())
+    {
+        return;
+    }
+
+    // ---------------------------------------------------------
+    // 2. COOLDOWN VALIDATION (MOVED TO TOP)
+    // ---------------------------------------------------------
+    // We check this FIRST to prevent any "Bypass" logic (like Charged States)
+    // from entering a new firing sequence illegally.
+
+    float CurrentTime = GetWorld()->GetTimeSeconds();
+
+    if (IsFireModeOnCooldown(FireModeNum, CurrentTime))
+    {
+        // If we are already in the firing state for this mode, 
+        // we don't need to do anything (just let the state run).
+        if (GetCurrentState() == FiringState[FireModeNum])
+        {
+            if (FireModeNum < 2)
+            {
+                GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+            }
+            return;
+        }
+
+        // RETRY LOGIC (Smart Wait for Local Client)
+        if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
+        {
+            // Find when the cooldown actually ends
+            float MaxReadyTime = 0.f;
+            for (int32 i = 0; i < LastFireTime.Num(); i++)
+            {
+                if (LastFireTime[i] > 0.0f)
+                {
+                    float ModeReadyTime = LastFireTime[i] + GetRefireTime(i);
+                    if (ModeReadyTime > MaxReadyTime)
+                    {
+                        MaxReadyTime = ModeReadyTime;
+                    }
+                }
+            }
+
+            float Delay = MaxReadyTime - CurrentTime;
+
+            // Schedule a retry if the delay is significant
+            if (Delay > 0.01f)
+            {
+                float WaitTime = Delay + 0.01f;
+                FTimerDelegate RetryDel;
+                RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
+                GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, WaitTime, false);
+            }
+            else
+            {
+                // Poll next frame if delay is tiny (animation lag)
+                FTimerDelegate RetryDel;
+                RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
+                GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, 0.01f, false);
+            }
+        }
+        return;
+    }
+
+    // If we passed cooldown check, clear any pending retries
+    if (FireModeNum < 2)
+    {
+        GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+    }
+
+    // ---------------------------------------------------------
+    // 3. MODE SWITCHING LOGIC (Charged State)
+    // ---------------------------------------------------------
+    if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
+    {
+        // Check if we are in a Charged State (e.g., holding Right Click)
+        bool bIsChargedState = false;
+        if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            CurrentState->GetName().Contains(TEXT("Charged"))))
+        {
+            bIsChargedState = true;
+        }
+
+        // If NOT charged, block simultaneous input
+        if (!bIsChargedState)
+        {
+            return;
+        }
+    }
+
+    // Handle the specific "Mode Switch" action
+    if (CurrentState != nullptr && CurrentState != ActiveState)
+    {
+        bool bInChargedState = false;
+        if (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            CurrentState->GetName().Contains(TEXT("Charged")))
+        {
+            bInChargedState = true;
+        }
+
+        if (bInChargedState && CurrentState->IsFiring() && CurrentFireMode != FireModeNum)
+        {
+            // FIX: Explicitly set PendingFire to FALSE.
+            // This prevents the "Ghost Shot" bug where release triggers primary fire.
+            if (UTOwner)
+            {
+                UTOwner->SetPendingFire(FireModeNum, false);
+            }
+
+            // Perform the switch (Spread -> Grenades -> Spiral)
+            OnMultiPress(FireModeNum);
+            return;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 4. ZOOM BYPASS
+    // ---------------------------------------------------------
+    if (FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum])
+    {
+        if (FiringState[FireModeNum]->IsA(UUTWeaponStateZooming::StaticClass()) ||
+            FiringState[FireModeNum]->GetName().Contains(TEXT("Zoom")))
+        {
+            Super::StartFire(FireModeNum);
+            return;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 5. CHARGED STATE ENTRY
+    // ---------------------------------------------------------
+    // Safe to run now because we validated cooldowns at the top.
+    if (FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum])
+    {
+        if (FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+            FiringState[FireModeNum]->GetName().Contains(TEXT("Charged")))
+        {
+            Super::StartFire(FireModeNum);
+            return;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 6. STANDARD FIRING LOGIC
+    // ---------------------------------------------------------
+
+    // Clean up stale flags
+    if (GetCurrentState() == ActiveState && CurrentlyFiringMode != 255)
+    {
+        CurrentlyFiringMode = 255;
+        for (int32 i = 0; i < FireModeActiveState.Num(); i++)
+        {
+            FireModeActiveState[i] = 0;
+        }
+    }
+
+    // Prevent re-entry if already firing this mode
+    if (FiringState.IsValidIndex(FireModeNum) && CurrentState == FiringState[FireModeNum])
+    {
+        return;
+    }
+
+    // Set Active State Flags
+    if (FireModeActiveState.IsValidIndex(FireModeNum))
+    {
+        FireModeActiveState[FireModeNum] = 1;
+        CurrentlyFiringMode = FireModeNum;
+    }
+
+    // Set Input Flag
+    if (UTOwner)
+    {
+        UTOwner->SetPendingFire(FireModeNum, true);
+    }
+
+    // Begin the Sequence (Calls BeginState -> FireShot)
+    BeginFiringSequence(FireModeNum, false);
+}
+
 
 
 
@@ -796,6 +1020,22 @@ void AUTWeaponFix::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
+    // --- WATCHDOG UNLOCK ---
+    // If the weapon is marked as firing a mode, but the state machine says we are "Active" (Idle),
+    // it means the Charged State finished (rockets fired/loaded) and returned to idle
+    // without explicitly clearing the CurrentlyFiringMode flag.
+    // We must clear it here to unlock the weapon for the next shot.
+    if (CurrentlyFiringMode != 255 && GetCurrentState() == ActiveState)
+    {
+        CurrentlyFiringMode = 255;
+        // Clean up the active state array as well just to be safe
+        if (FireModeActiveState.IsValidIndex(CurrentlyFiringMode))
+        {
+            FireModeActiveState[CurrentlyFiringMode] = 0;
+        }
+    }
+
+
     // WATCHDOG: Prevent "Infinite Loop" audio/anim if Client disconnects or loses Stop packet.
     if (Role == ROLE_Authority && IsFiring())
     {
@@ -1028,11 +1268,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                     float RTTms = UTOwner && UTOwner->PlayerState ? Cast<APlayerState>(UTOwner->PlayerState)->ExactPing : 0.f;
                     float RewindDistance = (Target->GetActorLocation() - TargetLocation).Size();
 
-                    UE_LOG(LogUTWeaponFix, Warning, TEXT("REWIND: Ping=%.1fms, RewindTime=%.1fms, TargetMovedSince=%.1fu, Target=%s"),
-                        RTTms,
-                        ActualPredictionTime * 1000.f,
-                        RewindDistance,
-                        *Target->GetName());
+      
                 }
                 // now see if trace would hit the capsule
                 float CollisionHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
@@ -1231,7 +1467,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
         {
             // FIX: Multiply by 0.7 to be conservative and prevent overshooting/tunneling.
                 // This reduces "dusting" where the rocket passes through a target during the catch-up tick.
-            float IdealCatchup = (PingSeconds * 0.7f) / 2.0f;
+            float IdealCatchup = (PingSeconds * 0.6f) / 2.0f;
 
             // FIX: Hard clamp to 150ms (0.15f) to prevent massive jumps on lag spikes
             CatchupTickDelta = FMath::Clamp(IdealCatchup, 0.0f, 0.15f);
