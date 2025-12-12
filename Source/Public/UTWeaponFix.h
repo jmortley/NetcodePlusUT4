@@ -153,6 +153,14 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
     float MaxRewindMs = 250.0f;
 
+    /** * Extra radius added to the target capsule during hit validation.
+     * Applied ONLY if:
+     * 1. The Client claimed a hit on this specific target.
+     * 2. The Target is moving (Velocity > 1.0).
+     * * Default UT4 value is 40.0f. 
+     */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
+    float HitScanPadding = 45.0f;
     /**
      * Generates next event index for client-side fire prediction.
      * Uses int32 to prevent overflow issues (stock code used uint8).
@@ -160,6 +168,13 @@ protected:
      * @return Next sequential event index
      */
     int32 GetNextClientFireEventIndex(uint8 FireModeNum);
+
+
+    /** * Radius added to STATIONARY targets if client claimed a hit.
+     * Small value (e.g. 10.0) to cover idle anims/jitter without allowing "magic hits".
+     */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
+    float HitScanPaddingStationary = 10.0f;
 
     /**
      * Validates that a fire event index is in valid sequence.

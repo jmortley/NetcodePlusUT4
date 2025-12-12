@@ -50,6 +50,8 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     FireModeActiveState.SetNum(2);
     bIsTransactionalFire = false;
     bHandlingRetry = false;
+    HitScanPadding = 30.f;
+    HitScanPaddingStationary = 10.0f;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -1007,12 +1009,31 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             // Standard logic: Teammate checks, etc.
             if (bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target))
             {
-                // Calculate padding ONCE before the loop logic
-                float ExtraHitPadding = (Target == ReceivedHitScanHitChar) ? 45.f : 0.f;
+                
+                float ExtraHitPadding = 0.f;
 
+                // Only apply padding if the client explicitly claimed THIS target.
+                // If client missed (ReceivedHitScanHitChar is null), this block is skipped (Padding = 0).
+                if (Target == ReceivedHitScanHitChar)
+                {
+                    // Check velocity to decide WHICH padding to use
+                    bool bIsMoving = !Target->GetVelocity().IsNearlyZero(1.0f);
+
+                    ExtraHitPadding = bIsMoving ? HitScanPadding : HitScanPaddingStationary;
+                }
                 // find appropriate rewind position, and test against trace from StartLocation to Hit.Location
                 FVector TargetLocation = ((ActualPredictionTime > 0.f) && (Role == ROLE_Authority)) ? Target->GetRewindLocation(ActualPredictionTime) : Target->GetActorLocation();
+                if (Role == ROLE_Authority && ActualPredictionTime > 0.f)
+                {
+                    float RTTms = UTOwner && UTOwner->PlayerState ? Cast<APlayerState>(UTOwner->PlayerState)->ExactPing : 0.f;
+                    float RewindDistance = (Target->GetActorLocation() - TargetLocation).Size();
 
+                    UE_LOG(LogUTWeaponFix, Warning, TEXT("REWIND: Ping=%.1fms, RewindTime=%.1fms, TargetMovedSince=%.1fu, Target=%s"),
+                        RTTms,
+                        ActualPredictionTime * 1000.f,
+                        RewindDistance,
+                        *Target->GetName());
+                }
                 // now see if trace would hit the capsule
                 float CollisionHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
                 if (Target->UTCharacterMovement && Target->UTCharacterMovement->bIsFloorSliding)
@@ -1199,12 +1220,22 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
         float PingSeconds = 0.0f;
         if (UTOwner && UTOwner->PlayerState)
         {
-            // ExactPing is RTT in ms. Convert to seconds and divide by 2.
-            PingSeconds = (UTOwner->PlayerState->ExactPing * 0.001f) / 2.0f;
+            // ExactPing is RTT in ms. 
+            PingSeconds = (UTOwner->PlayerState->ExactPing * 0.001f);
         }
+        if (PingSeconds < 0.040f)
+        {
+            CatchupTickDelta = 0.0f;
+        }
+        else
+        {
+            // FIX: Multiply by 0.7 to be conservative and prevent overshooting/tunneling.
+                // This reduces "dusting" where the rocket passes through a target during the catch-up tick.
+            float IdealCatchup = (PingSeconds * 0.7f) / 2.0f;
 
-        // Clamp to a sane max (e.g. 200ms) to prevent shooting through walls on lag spikes
-        CatchupTickDelta = FMath::Clamp(PingSeconds, 0.0f, 0.200f);
+            // FIX: Hard clamp to 150ms (0.15f) to prevent massive jumps on lag spikes
+            CatchupTickDelta = FMath::Clamp(IdealCatchup, 0.0f, 0.15f);
+        }
     }
     else
     {
@@ -1788,7 +1819,10 @@ void AUTWeaponFix::FireCone()
         {
             PS->ModifyStatsValue(ShotsStatsName, 1);
         }
-        UTOwner->IncrementFlashCount(CurrentFireMode);
+        //UTOwner->IncrementFlashCount(CurrentFireMode);
+        // fix projectile spawning of flak shards for others
+        FVector FlashLoc = RealHits.Num() > 0 ? RealHits[0].Location : EndTrace;
+        UTOwner->SetFlashLocation(FlashLoc, CurrentFireMode);
         // warn bot target, if any
         if (UTPC != nullptr)
         {
