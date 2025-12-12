@@ -758,10 +758,12 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
 
             // --- FIX START: SYNC WITH SERVER ---
             // If we are a client, tell the server we pushed the button.
-            //if (Role < ROLE_Authority)
-           // {
-            //    ServerCycleRocketMode();
-           // }
+            //
+            
+            if (Role < ROLE_Authority)
+            {
+               ServerCycleRocketMode();
+            }
             // --- FIX END ---
 
             // 3. Cycle Mode Locally

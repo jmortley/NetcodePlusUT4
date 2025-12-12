@@ -401,7 +401,21 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
     float CurrentTime = GetWorld()->GetTimeSeconds();
 
-    if (IsFireModeOnCooldown(FireModeNum, CurrentTime))
+    bool bIsSwitchingModes = false;
+
+    // Are we currently in a Charged State?
+    if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+        CurrentState->GetName().Contains(TEXT("Charged"))))
+    {
+        // If we are charging Mode 1, and the player pressed Mode 0, that is a Switch.
+        if (FireModeNum != CurrentFireMode)
+        {
+            bIsSwitchingModes = true;
+        }
+    }
+
+
+    if (!bIsSwitchingModes &&  IsFireModeOnCooldown(FireModeNum, CurrentTime))
     {
         // If we are already in the firing state for this mode, 
         // we don't need to do anything (just let the state run).
