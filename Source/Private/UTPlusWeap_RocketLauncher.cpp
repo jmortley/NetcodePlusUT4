@@ -499,108 +499,117 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
     AUTProjectile* ResultProj = nullptr;
     switch (CurrentRocketFireMode)
     {
-    case 0: // STANDARD SPREAD
+    case 0: // SPREAD
     {
-        if (NumLoadedRockets > 1)
+        // --- FIX: Only spawn on Server to prevent Ghosting ---
+        if (Role == ROLE_Authority)
         {
-            FVector FireDir = SpawnRotation.Vector();
-            FVector SideDir = (FireDir ^ FVector(0.f, 0.f, 1.f)).GetSafeNormal();
-            float SpreadAmount = HasLockedTarget() ? SeekingLoadSpread : FullLoadSpread;
-            FireDir = FireDir + 0.01f * SideDir * float((NumLoadedRockets % 3) - 1.f) * SpreadAmount;
-            SpawnRotation = FireDir.Rotation();
+            if (NumLoadedRockets > 1)
+            {
+                FVector FireDir = SpawnRotation.Vector();
+                FVector SideDir = (FireDir ^ FVector(0.f, 0.f, 1.f)).GetSafeNormal();
+                float SpreadAmount = HasLockedTarget() ? SeekingLoadSpread : FullLoadSpread;
+                FireDir = FireDir + 0.01f * SideDir * float((NumLoadedRockets % 3) - 1.f) * SpreadAmount;
+                SpawnRotation = FireDir.Rotation();
+            }
+
+            NetSynchRandomSeed();
+            FVector Offset = (FMath::Sin(NumLoadedRockets * PI * 0.667f) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::Z) +
+                FMath::Cos(NumLoadedRockets * PI * 0.667f) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::X)) * BarrelRadius * 2.f;
+
+            ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation + Offset, SpawnRotation);
+
+            // Setup seeking
+            AUTProj_Rocket* SpawnedRocket = Cast<AUTProj_Rocket>(ResultProj);
+            if (HasLockedTarget() && SpawnedRocket)
+            {
+                SpawnedRocket->TargetActor = LockedTarget;
+                TrackingRockets.AddUnique(SpawnedRocket);
+            }
         }
 
-        NetSynchRandomSeed();
-
-        // Calculate barrel offset
-        FVector Offset = (FMath::Sin(NumLoadedRockets * PI * 0.667f) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::Z) +
-            FMath::Cos(NumLoadedRockets * PI * 0.667f) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::X)) * BarrelRadius * 2.f;
-
-        ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation + Offset, SpawnRotation);
-
-        // Setup seeking target
-        AUTProj_Rocket* SpawnedRocket = Cast<AUTProj_Rocket>(ResultProj);
-        if (HasLockedTarget() && SpawnedRocket)
-        {
-            SpawnedRocket->TargetActor = LockedTarget;
-            TrackingRockets.AddUnique(SpawnedRocket);
-        }
-
+        // IMPORTANT: Decrement on BOTH Client and Server to prevent infinite loops
         NumLoadedRockets--;
         break;
     }
 
     case 1: // GRENADES
     {
-        float GrenadeSpread = GetSpread(1);
-        float RotDegree = 360.0f / MaxLoadedRockets;
-        SpawnRotation.Roll = RotDegree * MaxLoadedRockets;
-        FRotator SpreadRot = SpawnRotation;
-        SpreadRot.Yaw += GrenadeSpread * float(MaxLoadedRockets) - GrenadeSpread;
-
-        ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation, SpreadRot);
-
-        if (ResultProj != nullptr && ResultProj->ProjectileMovement)
+        // --- FIX: Only spawn on Server ---
+        if (Role == ROLE_Authority)
         {
-            ResultProj->ProjectileMovement->Velocity.Z += (MaxLoadedRockets % 2) * GetSpread(2);
+            float GrenadeSpread = GetSpread(1);
+            float RotDegree = 360.0f / MaxLoadedRockets;
+            SpawnRotation.Roll = RotDegree * MaxLoadedRockets;
+            FRotator SpreadRot = SpawnRotation;
+            SpreadRot.Yaw += GrenadeSpread * float(MaxLoadedRockets) - GrenadeSpread;
+
+            ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation, SpreadRot);
+
+            if (ResultProj != nullptr && ResultProj->ProjectileMovement)
+            {
+                ResultProj->ProjectileMovement->Velocity.Z += (MaxLoadedRockets % 2) * GetSpread(2);
+            }
         }
 
+        // IMPORTANT: Decrement on BOTH Client and Server
         NumLoadedRockets--;
         break;
     }
 
-    case 2: // SPIRAL (FLOCKING)
+    case 2: // SPIRAL
     {
-        TArray<AUTProj_RocketSpiral*> SpiralRockets;
-        int32 RocketsToSpawn = NumLoadedRockets;
-
-        for (int32 i = 0; i < RocketsToSpawn; i++)
+        // --- FIX: Only spawn on Server ---
+        if (Role == ROLE_Authority)
         {
-            float Angle = (i * 360.0f / RocketsToSpawn) * (PI / 180.0f);
-            FVector Offset = (FMath::Sin(Angle) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::Z) +
-                FMath::Cos(Angle) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::X)) * BarrelRadius;
+            TArray<AUTProj_RocketSpiral*> SpiralRockets;
+            int32 RocketsToSpawn = NumLoadedRockets;
 
-            AUTProjectile* NewProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation + Offset, SpawnRotation);
-
-            AUTProj_RocketSpiral* SpiralProj = Cast<AUTProj_RocketSpiral>(NewProj);
-            if (SpiralProj)
+            for (int32 i = 0; i < RocketsToSpawn; i++)
             {
-                SpiralRockets.Add(SpiralProj);
-            }
+                float Angle = (i * 360.0f / RocketsToSpawn) * (PI / 180.0f);
+                FVector Offset = (FMath::Sin(Angle) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::Z) +
+                    FMath::Cos(Angle) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::X)) * BarrelRadius;
 
-            if (i == 0)
-            {
-                ResultProj = NewProj;
-            }
-        }
+                AUTProjectile* NewProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation + Offset, SpawnRotation);
 
-        // Link using Epic's fixed Flock[3] array
-        for (int32 i = 0; i < SpiralRockets.Num(); i++)
-        {
-            AUTProj_RocketSpiral* RocketA = SpiralRockets[i];
-            if (RocketA)
-            {
-                int32 FlockIndex = 0;
-                for (int32 j = 0; j < SpiralRockets.Num() && FlockIndex < 3; j++)
+                AUTProj_RocketSpiral* SpiralProj = Cast<AUTProj_RocketSpiral>(NewProj);
+                if (SpiralProj)
                 {
-                    if (i != j && SpiralRockets[j])
-                    {
-                        RocketA->Flock[FlockIndex++] = SpiralRockets[j];
-                    }
+                    SpiralRockets.Add(SpiralProj);
                 }
-                RocketA->bCurl = (i % 2 == 0);
+                if (i == 0) ResultProj = NewProj;
+            }
+
+            // Link Flocking
+            for (int32 i = 0; i < SpiralRockets.Num(); i++)
+            {
+                AUTProj_RocketSpiral* RocketA = SpiralRockets[i];
+                if (RocketA)
+                {
+                    int32 FlockIndex = 0;
+                    for (int32 j = 0; j < SpiralRockets.Num() && FlockIndex < 3; j++)
+                    {
+                        if (i != j && SpiralRockets[j])
+                        {
+                            RocketA->Flock[FlockIndex++] = SpiralRockets[j];
+                        }
+                    }
+                    RocketA->bCurl = (i % 2 == 0);
+                }
             }
         }
 
+        // IMPORTANT: Clear on BOTH Client and Server
         NumLoadedRockets = 0;
         break;
     }
     }
 
-
+    // Reset Mode when empty
     if (NumLoadedRockets <= 0)
     {
-        CurrentRocketFireMode = 0; // Reset to Spread
+        CurrentRocketFireMode = 0;
         bDrawRocketModeString = false;
         if (Role == ROLE_Authority)
         {
