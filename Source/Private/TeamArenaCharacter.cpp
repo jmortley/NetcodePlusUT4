@@ -4,10 +4,10 @@
 #include "UTWeaponAttachment.h"
 #include "UTWeaponFix.h"
 #include "GameFramework/PlayerController.h"
-#include "TeamArenaCharacterMovement.h"
+
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
-    : Super(ObjectInitializer.SetDefaultSubobjectClass<UTeamArenaCharacterMovement>(ACharacter::CharacterMovementComponentName))
+    : Super(ObjectInitializer)
 {
     CachedPredictionPC = nullptr;
     bHasCachedPC = false;
