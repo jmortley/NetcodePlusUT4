@@ -380,6 +380,27 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
     // ---------------------------------------------------------
+    // ZOOM BYPASS (MUST BE FIRST)
+    // ---------------------------------------------------------
+    // STOCK CODE CONFIRMATION: UTWeaponStateZooming.cpp shows that Zooming
+    // does not fire a shot (BeginFiringSequence returns false).
+    // Therefore, it should NOT be gated by the weapon's Refire Time.
+    if (FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum])
+    {
+        // Check 1: Is it a child of the Zooming Class?
+        // Check 2: Does the name contain "Zoom"? (Safety for BPs)
+        if (FiringState[FireModeNum]->IsA(UUTWeaponStateZooming::StaticClass()) ||
+            FiringState[FireModeNum]->GetName().Contains(TEXT("Zoom")))
+        {
+            // Hand off to standard UT Zoom logic immediately
+            Super::StartFire(FireModeNum);
+            return;
+        }
+    }
+    
+    
+    
+    // ---------------------------------------------------------
     // 1. SAFETY CHECKS
     // ---------------------------------------------------------
     if (UTOwner && UTOwner->IsFiringDisabled())
@@ -517,18 +538,6 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         }
     }
 
-    // ---------------------------------------------------------
-    // 4. ZOOM BYPASS
-    // ---------------------------------------------------------
-    if (FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum])
-    {
-        if (FiringState[FireModeNum]->IsA(UUTWeaponStateZooming::StaticClass()) ||
-            FiringState[FireModeNum]->GetName().Contains(TEXT("Zoom")))
-        {
-            Super::StartFire(FireModeNum);
-            return;
-        }
-    }
 
     // ---------------------------------------------------------
     // 5. CHARGED STATE ENTRY
@@ -680,6 +689,13 @@ void AUTWeaponFix::FireShot()
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
     
+
+    if (FireModeNum < 2)
+    {
+        GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+    }
+
+
     if (FiringState.IsValidIndex(FireModeNum))
     {
         if (FiringState[FireModeNum] &&
@@ -722,10 +738,10 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         return;
     }
 
-    if (FireModeNum < 2)
-    {
-        GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
-    }
+   //if (FireModeNum < 2)
+    //{
+    //    GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+    //}
 
     EndFiringSequence(FireModeNum);
     if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
@@ -1904,9 +1920,16 @@ bool AUTWeaponFix::PutDown()
             FireModeActiveState[i] = 0;
         }
 
+        // --- FIX: CLEAR PAWN INPUT ---
+            // This stops the "PendingFire" flag from bleeding into the next weapon
+            // causing it to auto-fire immediately upon equip.
+        if (UTOwner)
+        {
+            UTOwner->SetPendingFire(0, false);
+            UTOwner->SetPendingFire(1, false);
+        }
+
     }
-
-
     return bPutDownResult;
 }
 
