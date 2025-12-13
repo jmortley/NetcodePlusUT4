@@ -685,7 +685,7 @@ void AUTWeaponFix::FireShot()
 }
 
 
-
+/*
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
     // FIX: Fast Weapon Switch Exploit (Refire Preservation)
@@ -748,7 +748,7 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 
     Super::BringUp(OverflowTime);
 }
-
+*/
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
