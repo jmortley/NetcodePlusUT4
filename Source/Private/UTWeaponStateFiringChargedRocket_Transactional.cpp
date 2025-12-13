@@ -65,6 +65,12 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
     bCharging = true;
     ChargeTime = 0.0f;
 
+    // If we entered via RefireCheckTimer, EndState() was NOT called, 
+    // so NumLoadedBarrels might still be at Max from the previous shot.
+    // We must force a clean slate here to prevent immediate Grace Timer triggers.
+    RocketLauncher->NumLoadedRockets = 0;
+    RocketLauncher->NumLoadedBarrels = 0;
+
     // 5. Setup visual feedback - flash extra shows loading progress to other players
     RocketLauncher->SetRocketFlashExtra(GetFireMode(), 1, RocketLauncher->CurrentRocketFireMode, RocketLauncher->bDrawRocketModeString);
 
