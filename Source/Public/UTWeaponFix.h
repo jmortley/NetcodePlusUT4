@@ -48,6 +48,7 @@ public:
     virtual void FireCone() override;
     virtual FVector GetFireStartLoc(uint8 FireMode = 255) override;
     virtual FRotator GetBaseFireRotation() override;
+    virtual void BringUp(float OverflowTime) override;
     //~ End AUTWeapon Interface
     UPROPERTY()
     TArray<float> LastFireTime;

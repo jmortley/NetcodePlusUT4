@@ -686,6 +686,70 @@ void AUTWeaponFix::FireShot()
 
 
 
+void AUTWeaponFix::BringUp(float OverflowTime)
+{
+    // FIX: Fast Weapon Switch Exploit (Refire Preservation)
+    if (UTOwner)
+    {
+        float MaxBlockTime = 0.f;
+        float CurrentTime = GetWorld()->GetTimeSeconds();
+
+        // Use Iterator to safely find "Hot" weapons currently in inventory
+        for (TInventoryIterator<AUTWeapon> It(UTOwner); It; ++It)
+        {
+            AUTWeapon* OtherWeapon = *It;
+
+            // Only check valid AUTWeaponFix weapons (avoiding self and incompatible types)
+            if (OtherWeapon && OtherWeapon != this && OtherWeapon->IsA(AUTWeaponFix::StaticClass()))
+            {
+                AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(OtherWeapon);
+                if (FixWeapon)
+                {
+                    // 1. Back-calculate when the switch actually started.
+                    // This finds the exact moment the player pressed the switch key relative to the fire cycle.
+                    float PutDownDuration = FixWeapon->GetPutDownTime();
+                    float SwitchStartTime = CurrentTime - OverflowTime - PutDownDuration;
+
+                    for (int32 i = 0; i < FixWeapon->LastFireTime.Num(); i++)
+                    {
+                        if (FixWeapon->LastFireTime[i] > 0.f)
+                        {
+                            float RefireEnd = FixWeapon->LastFireTime[i] + FixWeapon->GetRefireTime(i);
+                            float RemainingAtSwitch = RefireEnd - SwitchStartTime;
+
+                            // 2. Only penalize if there was actual debt remaining at the moment of switch
+                            if (RemainingAtSwitch > 0.f)
+                            {
+                                // 3. Apply the scaling (e.g., 0.65 for fast-switch gamemodes)
+                                float ScaledRemaining = RemainingAtSwitch * FixWeapon->RefirePutDownTimePercent;
+
+                                // 4. Determine when the new weapon is allowed to fire
+                                float TheoreticalReadyTime = SwitchStartTime + ScaledRemaining;
+                                if (TheoreticalReadyTime > MaxBlockTime)
+                                {
+                                    MaxBlockTime = TheoreticalReadyTime;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply the restriction if it extends into the future
+        if (MaxBlockTime > CurrentTime)
+        {
+            if (MaxBlockTime > EarliestFireTime)
+            {
+                EarliestFireTime = MaxBlockTime;
+            }
+        }
+    }
+
+    Super::BringUp(OverflowTime);
+}
+
+
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
     
