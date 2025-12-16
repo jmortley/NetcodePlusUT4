@@ -1,0 +1,24 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UE4Editor-NetcodePlus.dll"
+/LIBPATH:"D:\UnrealTournament\UnrealTournament\Source\UnrealTournament/ThirdParty/sqlite/Windows"
+/LIBPATH:"C:\Program Files (x86)\Windows Kits\NETFXSDK\4.8/Lib/um/x64"
+/NODEFAULTLIB:"LIBCMT"
+/NODEFAULTLIB:"LIBCPMT"
+/NODEFAULTLIB:"LIBCMTD"
+/NODEFAULTLIB:"LIBCPMTD"
+/NODEFAULTLIB:"MSVCRTD"
+/NODEFAULTLIB:"MSVCPRTD"
+/NODEFAULTLIB:"LIBC"
+/NODEFAULTLIB:"LIBCP"
+/NODEFAULTLIB:"LIBCD"
+/NODEFAULTLIB:"LIBCPD"
+"D:\UnrealTournament\Engine\Intermediate\Build\Win64\UE4Editor\Development\Engine\SharedPCH.Engine.h.obj"
+"D:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Intermediate\Build\Win64\UE4Editor\Development\NetcodePlus\Module.NetcodePlus.cpp.obj"
+"D:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Intermediate\Build\Win64\UE4Editor\Development\NetcodePlus\NetcodePlus.generated.cpp.obj"
+"D:\UnrealTournament\Engine\Intermediate\Build\Win64\UE4Editor\Development\NetcodePlus\PCLaunch.rc.res"
+"D:\UnrealTournament\Engine\Intermediate\Build\Win64\UE4Editor\Development\ModuleVersionResource.rc.inl.res"
+/OUT:"D:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Intermediate\Build\Win64\UE4Editor\Development\UE4Editor-NetcodePlus.lib"

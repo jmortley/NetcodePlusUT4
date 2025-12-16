@@ -1,0 +1,8 @@
+{
+	"Changelist" : 3228288,
+	"BuildId" : "13aa44b6-540c-4728-b3b4-f8dde45d9579",
+	"Modules" : 
+	{
+		"NetcodePlus" : "libUE4Server-NetcodePlus-Linux-Shipping.so"
+	}
+}
