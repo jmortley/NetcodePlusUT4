@@ -14,6 +14,7 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
     bHasCachedPC = false;
     NetUpdateFrequency = 100.0f;
     MinNetUpdateFrequency = 100.0f;
+	//MinTimeBetweenClientAdjustments = 0.15f
     //MaxSavedPositionAge = 0.35f;
     //PositionSaveRate = 120.0f;
     //PositionSaveInterval = 1.0f / PositionSaveRate;
@@ -69,6 +70,47 @@ void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
     }
 }
 */
+
+bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling,
+	AUTCharacter* ShotInstigator, float PredictionTime)
+{
+	// Team check (same as Epic)
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	if (ShotInstigator && GS && GS->OnSameTeam(this, ShotInstigator))
+	{
+		return false;
+	}
+
+	// CRITICAL FIX: Pass PredictionTime to GetHeadLocation!
+	// Epic's bug: FVector HeadLocation = GetHeadLocation(); // Never passed PredictionTime!
+	FVector HeadLocation = GetHeadLocation(PredictionTime);
+
+	bool bHeadShot = FMath::PointDistToLine(HeadLocation, ShotDirection, HitLocation)
+		< HeadRadius * HeadScale * WeaponHeadScaling;
+
+#if ENABLE_DRAW_DEBUG
+	static IConsoleVariable* CVarDebugHeadshots = IConsoleManager::Get().FindConsoleVariable(TEXT("ut.DebugHeadshots"));
+	if (CVarDebugHeadshots && CVarDebugHeadshots->GetInt() != 0)
+	{
+		DrawDebugLine(GetWorld(), HitLocation + (ShotDirection * 1000.f),
+			HitLocation - (ShotDirection * 1000.f), FColor::White, true);
+
+		if (bHeadShot)
+		{
+			DrawDebugSphere(GetWorld(), HeadLocation, HeadRadius * HeadScale * WeaponHeadScaling,
+				10, FColor::Green, true);
+		}
+		else
+		{
+			DrawDebugSphere(GetWorld(), HeadLocation, HeadRadius * HeadScale * WeaponHeadScaling,
+				10, FColor::Red, true);
+		}
+	}
+#endif
+
+	return bHeadShot;
+}
+
 
 void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, const FRotator& NewRotation, const FVector& NewVelocity)
 {

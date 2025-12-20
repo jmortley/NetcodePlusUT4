@@ -13,6 +13,11 @@ class NETCODEPLUS_API AUTPlusSniper : public AUTWeaponFix
 	GENERATED_UCLASS_BODY()
 
 public:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Headshot")
+	float HeadSphereHitPadding = 4.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Headshot")
+	float HeadSphereHitPaddingStationary = 2.0f;
 	
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Impressive")
 	bool bTrackImpressive = true;

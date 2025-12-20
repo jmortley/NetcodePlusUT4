@@ -46,6 +46,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawn Protection", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float SpawnProtectionOpacity = 0.7f;
 
+	virtual bool IsHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling,
+		AUTCharacter* ShotInstigator, float PredictionTime) override;
+
 	virtual void Tick(float DeltaTime) override;
 
     /**

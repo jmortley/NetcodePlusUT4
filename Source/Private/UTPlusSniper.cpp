@@ -136,6 +136,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	// PART 3: SNIPER SPECIFIC HEAD SEARCH (Standard UT Sniper logic)
 	// ----------------------------------------------------------------------
 	// Do a second search specifically for the Head Sphere if the capsule miss was close
+	/* stock code
 	if (UTOwner && Cast<AUTCharacter>(Hit.Actor.Get()) == NULL)
 	{
 		AUTCharacter* AltTarget = Cast<AUTCharacter>(UUTGameplayStatics::ChooseBestAimTarget(GetUTOwner()->Controller, SpawnLocation, FireDir, 0.7f, (Hit.Location - SpawnLocation).Size(), 150.0f, AUTCharacter::StaticClass()));
@@ -144,7 +145,57 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 			Hit = FHitResult(AltTarget, AltTarget->GetCapsuleComponent(), SpawnLocation + FireDir * ((AltTarget->GetHeadLocation() - SpawnLocation).Size() - AltTarget->GetCapsuleComponent()->GetUnscaledCapsuleRadius()), -FireDir);
 		}
 	}
+	*/
+	if (UTOwner && Cast<AUTCharacter>(Hit.Actor.Get()) == NULL)
+	{
+		// Find potential head targets using Epic's ChooseBestAimTarget
+		AUTCharacter* AltTarget = Cast<AUTCharacter>(UUTGameplayStatics::ChooseBestAimTarget(
+			GetUTOwner()->Controller, SpawnLocation, FireDir, 0.7f,
+			(Hit.Location - SpawnLocation).Size(), 150.0f, AUTCharacter::StaticClass()));
 
+		if (AltTarget != NULL)
+		{
+			// Calculate effective head scale
+			float EffectiveHeadScale = GetHeadshotScale(AltTarget);
+
+			// Apply padding for client-claimed targets
+			if (AltTarget == ReceivedHitScanHitChar)
+			{
+				bool bTargetMoving = !AltTarget->GetVelocity().IsNearlyZero(10.0f);
+				float HeadPadding = bTargetMoving ? HeadSphereHitPadding : HeadSphereHitPaddingStationary;
+
+				// Convert padding to scale factor: NewRadius = OldRadius * NewScale
+				// OldRadius + Padding = OldRadius * NewScale
+				// NewScale = (OldRadius + Padding) / OldRadius = 1 + Padding/OldRadius
+				if (AltTarget->HeadRadius > 0.f)
+				{
+					float PaddingAsScale = HeadPadding / (AltTarget->HeadRadius * AltTarget->HeadScale);
+					EffectiveHeadScale += PaddingAsScale;
+				}
+			}
+
+			// NOW IsHeadShot will properly rewind (with our TeamArenaCharacter fix)
+			if (AltTarget->IsHeadShot(SpawnLocation, FireDir, EffectiveHeadScale, UTOwner, PredictionTime))
+			{
+				// Construct hit result using REWOUND head position
+				FVector RewoundHeadLoc = AltTarget->GetHeadLocation(PredictionTime);
+
+				float HitDist = (RewoundHeadLoc - SpawnLocation).Size()
+					- AltTarget->GetCapsuleComponent()->GetUnscaledCapsuleRadius();
+
+				Hit = FHitResult(AltTarget, AltTarget->GetCapsuleComponent(),
+					SpawnLocation + FireDir * FMath::Max(0.f, HitDist), -FireDir);
+
+#if !UE_BUILD_SHIPPING
+				if (Role == ROLE_Authority)
+				{
+					UE_LOG(LogTemp, Verbose, TEXT("[Sniper] Secondary head hit on %s, Scale=%.2f (base %.2f + padding)"),
+						*AltTarget->GetName(), EffectiveHeadScale, GetHeadshotScale(AltTarget));
+				}
+#endif
+			}
+		}
+	}
 
 	// ----------------------------------------------------------------------
 	// PART 4: SERVER SIDE VISUALS & WARNINGS
