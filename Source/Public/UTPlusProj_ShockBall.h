@@ -17,6 +17,7 @@ public:
 	AUTPlusProj_ShockBall(const FObjectInitializer& ObjectInitializer);
 	virtual void Tick(float DeltaTime) override;
 	virtual void BeginPlay() override;
+	virtual void NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage) override;
 
 private:
 	// Forward declaration for safety

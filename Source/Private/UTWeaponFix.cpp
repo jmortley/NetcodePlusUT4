@@ -140,8 +140,16 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             return;
         }
     }
-    
-    
+
+	// If the weapon is in Active (Idle) state, it cannot possibly be firing.
+	// Any "CurrentlyFiring" flags here are bugs from the Auto-Fire/GraceTimer path.
+	// We clear them immediately so they don't block your new input.
+	if (GetCurrentState() == ActiveState)
+	{
+		CurrentlyFiringMode = 255;
+		if (FireModeActiveState.IsValidIndex(0)) FireModeActiveState[0] = 0;
+		if (FireModeActiveState.IsValidIndex(1)) FireModeActiveState[1] = 0;
+	}
     
     // ---------------------------------------------------------
     // 1. SAFETY CHECKS
@@ -157,6 +165,17 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         return;
     }
 
+	bool bIsSwitching = (CurrentState == UnequippingState) || (UTOwner && UTOwner->GetPendingWeapon());
+
+	if (bIsSwitching)
+	{
+		if (UTOwner)
+		{
+			UTOwner->SetPendingFire(FireModeNum, true);
+			UE_LOG(LogUTWeaponFix, Verbose, TEXT("Setting pending fire on swap %d"), FireModeNum);
+		}
+		return;
+	}
     // ---------------------------------------------------------
     // 2. COOLDOWN VALIDATION (MOVED TO TOP)
     // ---------------------------------------------------------
@@ -239,6 +258,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     // ---------------------------------------------------------
     // 3. MODE SWITCHING LOGIC (Charged State)
     // ---------------------------------------------------------
+	/*old version 
     if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
     {
         // Check if we are in a Charged State (e.g., holding Right Click)
@@ -280,7 +300,62 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             return;
         }
     }
+	*/
+	if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
+	{
+		// 1. IDENTIFY STATE
+		UUTWeaponStateFiringChargedRocket_Transactional* TransState =
+			Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
 
+		// Generic check for compatibility/safety
+		bool bIsChargedState = (TransState != nullptr) ||
+			(CurrentState && CurrentState->GetName().Contains(TEXT("Charged")));
+
+		// 2. BLOCK STANDARD WEAPONS
+		// If this isn't a Charged weapon (like Link/Shock), strictly forbid dual firing.
+		if (!bIsChargedState)
+		{
+			return;
+		}
+
+		// 3. HANDLE ROCKET LAUNCHER LOGIC
+		// We know we are in a Charged State. Now we decide: Cycle Mode or Queue Shot?
+
+		// A) Transactional State Logic (The Fix)
+		if (TransState)
+		{
+			if (TransState->bCharging)
+			{
+				// LOADING: User input cycles the rocket mode (Spread -> Grenade -> Spiral)
+				if (CurrentState->IsFiring())
+				{
+					// Clear flag to prevent "Ghost Fire" on release
+					if (UTOwner) UTOwner->SetPendingFire(FireModeNum, false);
+					OnMultiPress(FireModeNum);
+				}
+				return; // Consumed input
+			}
+			else
+			{
+				// BURSTING: User released load and is unloading rockets.
+				// Input intent is to fire Primary immediately after burst.
+				// We Buffer the input and Return to prevent Double Drawing.
+				if (UTOwner)
+				{
+					UTOwner->SetPendingFire(FireModeNum, true);
+				}
+				return; // Consumed input
+			}
+		}
+
+		// B) Legacy/Fallback Logic (Standard UT behavior)
+		if (CurrentState->IsFiring())
+		{
+			if (UTOwner) UTOwner->SetPendingFire(FireModeNum, false);
+			OnMultiPress(FireModeNum);
+			return;
+		}
+	}
 
     // ---------------------------------------------------------
     // 5. CHARGED STATE ENTRY
@@ -326,7 +401,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     // Set Input Flag
     if (UTOwner)
     {
-        UTOwner->SetPendingFire(FireModeNum, true);
+      UTOwner->SetPendingFire(FireModeNum, true);
     }
 
 	// --- FIX: AUTHORIZE LOGICAL SHOTS ---
@@ -465,7 +540,11 @@ void AUTWeaponFix::FireShot()
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
     
-
+	if (UTOwner)
+	{
+		UTOwner->SetPendingFire(FireModeNum, false);
+		UE_LOG(LogUTWeaponFix, Verbose, TEXT("clearing pending fire on swap %d"), FireModeNum);
+	}
     if (FireModeNum < 2)
     {
         GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
@@ -1429,14 +1508,14 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 
 
 
-
+/*
 AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	TSubclassOf<AUTProjectile> ProjectileClass,
 	FVector SpawnLocation,
 	FRotator SpawnRotation)
 {
 
-	/*
+	
 	if (UTOwner && UTOwner->GetCapsuleComponent())
 	{
 		// 1. CAPSULE SAFETY CHECK: Prevent spawning inside self (Apex/Suicide fix)
@@ -1490,7 +1569,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			SpawnLocation = ClipHit.Location + (ClipHit.Normal * 2.0f);
 		}
 	}
-	*/
+	
 
 	FRotator AdjustedRot = SpawnRotation;
 	AdjustedRot.Normalize();
@@ -1686,6 +1765,226 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	}
 	return NewProjectile;
 }
+*/
+
+
+
+
+AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
+	TSubclassOf<AUTProjectile> ProjectileClass,
+	FVector SpawnLocation,
+	FRotator SpawnRotation)
+{
+	// Pitch clamp for shells/rockets firing straight down
+	FRotator AdjustedRot = SpawnRotation;
+	AdjustedRot.Normalize();
+	bool bIsShellOrRocket = ProjectileClass &&
+		(ProjectileClass->GetName().Contains(TEXT("Shell")) ||
+			ProjectileClass->GetName().Contains(TEXT("Rocket")));
+	if (bIsShellOrRocket && AdjustedRot.Pitch < -83.5f)
+	{
+		SpawnRotation.Pitch = -85.0f;
+	}
+
+	AUTPlayerController* OwningPlayer = UTOwner ? Cast<AUTPlayerController>(UTOwner->GetController()) : nullptr;
+
+	// ----------------------------------------
+	// 1) Get Current Ping
+	// ----------------------------------------
+	float CurrentPing = 0.0f;
+	if (UTOwner && UTOwner->PlayerState)
+	{
+		CurrentPing = UTOwner->PlayerState->ExactPing;
+	}
+
+	// ----------------------------------------
+	// 2) Compute CatchupTickDelta (Half RTT)
+	// ----------------------------------------
+	float CatchupTickDelta = 0.0f;
+
+	if (CurrentPing >= 20.0f)
+	{
+		float AdjustedPing = CurrentPing - FudgeFactorMs;
+		float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, ProjectilePredictionCapMs);
+		CatchupTickDelta = CappedPing * 0.0005f;  // Half RTT in seconds
+	}
+
+	// ----------------------------------------
+	// 3) Client: Check if we should delay spawn for extreme ping
+	// ----------------------------------------
+	if ((Role != ROLE_Authority) && OwningPlayer)
+	{
+		float ExcessPing = CurrentPing - FudgeFactorMs - ProjectilePredictionCapMs;
+
+		if (ExcessPing > 10.0f)  // More than 10ms over cap
+		{
+			float SleepTime = ExcessPing * 0.001f;
+
+			if (!GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
+			{
+				DelayedProjectile.ProjectileClass = ProjectileClass;
+				DelayedProjectile.SpawnLocation = SpawnLocation;
+				DelayedProjectile.SpawnRotation = SpawnRotation;
+
+				GetWorldTimerManager().SetTimer(
+					SpawnDelayedFakeProjHandle,
+					this,
+					&AUTWeaponFix::SpawnDelayedFakeProjectile,
+					SleepTime,
+					false);
+			}
+			return nullptr;
+		}
+	}
+
+	// ----------------------------------------
+	// 4) Spawn the projectile
+	// ----------------------------------------
+	FActorSpawnParameters Params;
+	Params.Instigator = UTOwner;
+	Params.Owner = UTOwner;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	AUTProjectile* NewProjectile = GetWorld()->SpawnActor<AUTProjectile>(
+		ProjectileClass,
+		SpawnLocation,
+		SpawnRotation,
+		Params);
+
+	if (!NewProjectile)
+	{
+		return nullptr;
+	}
+
+	// ----------------------------------------
+	// 5) Visual offsets (weapon hand)
+	// ----------------------------------------
+	if (NewProjectile->OffsetVisualComponent)
+	{
+		switch (GetWeaponHand())
+		{
+		case EWeaponHand::HAND_Center:
+			NewProjectile->InitialVisualOffset = NewProjectile->InitialVisualOffset + LowMeshOffset;
+			NewProjectile->OffsetVisualComponent->RelativeLocation = NewProjectile->InitialVisualOffset;
+			break;
+		case EWeaponHand::HAND_Hidden:
+			NewProjectile->InitialVisualOffset = NewProjectile->InitialVisualOffset + VeryLowMeshOffset;
+			NewProjectile->OffsetVisualComponent->RelativeLocation = NewProjectile->InitialVisualOffset;
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (UTOwner)
+	{
+		UTOwner->LastFiredProjectile = NewProjectile;
+		NewProjectile->ShooterLocation = UTOwner->GetActorLocation();
+		NewProjectile->ShooterRotation = UTOwner->GetActorRotation();
+	}
+
+	// ----------------------------------------
+	// 6) SERVER: Fast-forward authoritative projectile
+	// ----------------------------------------
+	if (Role == ROLE_Authority)
+	{
+		NewProjectile->HitsStatsName = HitsStatsName;
+
+		if ((CatchupTickDelta > 0.f) && NewProjectile->ProjectileMovement)
+		{
+			const float ScaledDelta = CatchupTickDelta * NewProjectile->CustomTimeDilation;
+
+			if (NewProjectile->PrimaryActorTick.IsTickFunctionEnabled())
+			{
+				NewProjectile->TickActor(ScaledDelta, LEVELTICK_All, NewProjectile->PrimaryActorTick);
+			}
+
+			NewProjectile->ProjectileMovement->TickComponent(ScaledDelta, LEVELTICK_All, nullptr);
+			NewProjectile->SetForwardTicked(true);
+
+			if (NewProjectile->GetLifeSpan() > 0.f)
+			{
+				NewProjectile->SetLifeSpan(
+					0.1f + FMath::Max(0.01f, NewProjectile->GetLifeSpan() - CatchupTickDelta)
+				);
+			}
+		}
+		else
+		{
+			NewProjectile->SetForwardTicked(false);
+		}
+	}
+	// ----------------------------------------
+	// 7) CLIENT: Setup fake projectile
+	// ----------------------------------------
+	else
+	{
+		NewProjectile->InitFakeProjectile(OwningPlayer);
+
+		// RETRACE FIX: For high ping players, delay the fake spawn slightly
+		// so it doesn't get too far ahead before server corrections arrive.
+		//
+		// If bReplicateUTMovement is ON in the projectile BP, corrections are
+		// frequent (100Hz) and small - the fake will smoothly track server.
+		//
+		// If bReplicateUTMovement is OFF, we only get one correction when
+		// server rocket first replicates - that's where the big snap happens.
+		//
+		// OPTION A: Delay fake spawn by half RTT (uncomment to enable)
+		// This eliminates retrace but adds perceived input lag.
+		/*
+		if (CatchupTickDelta > 0.04f)  // Only for 80ms+ ping
+		{
+			// Destroy this fake, spawn delayed one instead
+			NewProjectile->Destroy();
+
+			if (!GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
+			{
+				DelayedProjectile.ProjectileClass = ProjectileClass;
+				DelayedProjectile.SpawnLocation = SpawnLocation;
+				DelayedProjectile.SpawnRotation = SpawnRotation;
+
+				GetWorldTimerManager().SetTimer(
+					SpawnDelayedFakeProjHandle,
+					this,
+					&AUTWeaponFix::SpawnDelayedFakeProjectile,
+					CatchupTickDelta,  // Delay by half RTT
+					false);
+			}
+			return nullptr;
+		}
+		*/
+
+		// OPTION B: Shorten fake lifespan so it dies before big correction
+		// Server position arrives at ~FullRTT. Kill fake just before that.
+		// Real rocket will seamlessly take over from server replication.
+
+	}
+
+	// ----------------------------------------
+	// 8) High-FPS stability (Fixed Tick Rate)
+	// ----------------------------------------
+	if (NewProjectile->ProjectileMovement)
+	{
+		if (Role == ROLE_Authority)
+		{
+			const float ServerRate = 1.f / 240.f;
+			NewProjectile->PrimaryActorTick.TickInterval = ServerRate;
+			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ServerRate;
+		}
+		else if (GetNetMode() != NM_DedicatedServer)
+		{
+			const int32 ClientHz = GetSnappedProjectileHz();
+			const float ClientInterval = 1.f / static_cast<float>(ClientHz);
+			NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
+			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
+		}
+	}
+
+	return NewProjectile;
+}
+
+
 
 
 
@@ -1916,7 +2215,24 @@ bool AUTWeaponFix::PutDown()
     // goes off 0.1s after you switched weapons.
     if (bPutDownResult)
     {
-        // A) Kill any pending retry timers
+
+		// If we have a Retry Timer running, it means the user is holding Fire 
+		// waiting for cooldown. Since we are putting this gun away, we must 
+		// tell the Pawn "User is holding fire" so the NEXT gun picks it up.
+		if (UTOwner)
+		{
+			for (int32 i = 0; i < 2; i++)
+			{
+				if (GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]))
+				{
+					// "Graduate" the local retry timer to a persistent Pawn flag
+					UTOwner->SetPendingFire(i, true);
+					UE_LOG(LogUTWeaponFix, Warning, TEXT("PutDown: Transferring Retry %d to Pawn PendingFire"), i);
+				}
+			}
+		}
+
+		// A) Kill any pending retry timers
         for (int32 i = 0; i < 2; i++)
         {
             GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);

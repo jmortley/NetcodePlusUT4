@@ -380,7 +380,8 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
     else
     {
         // Player stopped firing - return to active state
-        GetOuterAUTWeapon()->GotoActiveState();
+        //GetOuterAUTWeapon()->GotoActiveState();
+		GetOuterAUTWeapon()->StopFire(GetFireMode());
     }
 }
 
