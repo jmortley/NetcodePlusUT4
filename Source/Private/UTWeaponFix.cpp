@@ -38,6 +38,9 @@ static int32 GetSnappedProjectileHz()
 }
 
 
+
+
+
 //extern FCollisionResponseParams WorldResponseParams;
 
 AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
@@ -141,6 +144,46 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         }
     }
 
+	if (GetCurrentState() &&
+		(GetCurrentState()->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+			GetCurrentState()->GetName().Contains(TEXT("Charged"))))
+	{
+		if (FireModeNum != CurrentFireMode)
+		{
+			UUTWeaponStateFiringChargedRocket_Transactional* TransState =
+				Cast<UUTWeaponStateFiringChargedRocket_Transactional>(GetCurrentState());
+
+			if (TransState && !TransState->bCharging)
+			{
+				// BURSTING: Buffer M1 input for after burst completes
+				if (UTOwner)
+				{
+					UTOwner->SetPendingFire(FireModeNum, true);
+				}
+				return;
+			}
+
+			// LOADING: Cycle rocket mode
+			if (FireModeNum < 2)
+			{
+				GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+			}
+			if (UTOwner)
+			{
+				UTOwner->SetPendingFire(FireModeNum, false);
+			}
+			OnMultiPress(FireModeNum);
+			return;
+		}
+
+		// Same mode - register intent so RefireCheckTimer sees it
+		if (UTOwner)
+		{
+			UTOwner->SetPendingFire(FireModeNum, true);
+		}
+		return;
+	}
+
 	// If the weapon is in Active (Idle) state, it cannot possibly be firing.
 	// Any "CurrentlyFiring" flags here are bugs from the Auto-Fire/GraceTimer path.
 	// We clear them immediately so they don't block your new input.
@@ -204,7 +247,15 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         // we don't need to do anything (just let the state run).
         if (GetCurrentState() == FiringState[FireModeNum])
         {
-            if (FireModeNum < 2)
+			if (UTOwner &&
+				(FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
+					FiringState[FireModeNum]->GetName().Contains(TEXT("Charged"))))
+			{
+				UTOwner->SetPendingFire(FireModeNum, true);
+			}
+
+
+			if (FireModeNum < 2)
             {
                 GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
             }
@@ -255,52 +306,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
     }
 
-    // ---------------------------------------------------------
-    // 3. MODE SWITCHING LOGIC (Charged State)
-    // ---------------------------------------------------------
-	/*old version 
-    if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
-    {
-        // Check if we are in a Charged State (e.g., holding Right Click)
-        bool bIsChargedState = false;
-        if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
-            CurrentState->GetName().Contains(TEXT("Charged"))))
-        {
-            bIsChargedState = true;
-        }
 
-        // If NOT charged, block simultaneous input
-        if (!bIsChargedState)
-        {
-            return;
-        }
-    }
-
-    // Handle the specific "Mode Switch" action
-    if (CurrentState != nullptr && CurrentState != ActiveState)
-    {
-        bool bInChargedState = false;
-        if (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
-            CurrentState->GetName().Contains(TEXT("Charged")))
-        {
-            bInChargedState = true;
-        }
-
-        if (bInChargedState && CurrentState->IsFiring() && CurrentFireMode != FireModeNum)
-        {
-            // FIX: Explicitly set PendingFire to FALSE.
-            // This prevents the "Ghost Shot" bug where release triggers primary fire.
-            if (UTOwner)
-            {
-                UTOwner->SetPendingFire(FireModeNum, false);
-            }
-
-            // Perform the switch (Spread -> Grenades -> Spiral)
-            OnMultiPress(FireModeNum);
-            return;
-        }
-    }
-	*/
 	if (CurrentlyFiringMode != 255 && CurrentlyFiringMode != FireModeNum)
 	{
 		// 1. IDENTIFY STATE
@@ -1125,8 +1131,37 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 {
                     // Check velocity to decide WHICH padding to use
                     bool bIsMoving = !Target->GetVelocity().IsNearlyZero(1.0f);
+					//ExtraHitPadding = bIsMoving ? HitScanPadding : HitScanPaddingStationary;
+					if (bIsMoving)
+					{
+						float OwnerPing = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->ExactPing : 0.0f;
 
-                    ExtraHitPadding = bIsMoving ? HitScanPadding : HitScanPaddingStationary;
+						// TIERED PADDING SYSTEM
+						// Running (940 u/s): 55 units = ~59ms jitter protection
+						// Dodging (1700 u/s): 55 units = ~32ms jitter protection
+
+						if (OwnerPing > 120.0f)
+						{
+							ExtraHitPadding = 60.0f; // Extreme Latency (Bad internet)
+						}
+						else if (OwnerPing > 90.0f)
+						{
+							ExtraHitPadding = 50.0f; // High Latency
+						}
+						else if (OwnerPing > 60.0f)
+						{
+							ExtraHitPadding = 45.0f; // Moderate Latency
+						}
+						else
+						{
+							ExtraHitPadding = 40.0f; // Low Ping / LAN
+						}
+					}
+					else
+					{
+						// Stationary targets don't need velocity compensation
+						ExtraHitPadding = HitScanPaddingStationary;
+					}
                 }
                 // find appropriate rewind position, and test against trace from StartLocation to Hit.Location
                 FVector TargetLocation = ((ActualPredictionTime > 0.f) && (Role == ROLE_Authority)) ? Target->GetRewindLocation(ActualPredictionTime) : Target->GetActorLocation();
@@ -1301,340 +1336,73 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 }
 
 
-
-
-
-/*
-AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
-    TSubclassOf<AUTProjectile> ProjectileClass,
-    FVector SpawnLocation,
-    FRotator SpawnRotation)
+void AUTWeaponFix::SpawnDelayedFakeProjectile()
 {
-    AUTPlayerController* OwningPlayer =
-        UTOwner ? Cast<AUTPlayerController>(UTOwner->GetController()) : nullptr;
-
-    // ----------------------------------------
-    // 1) Compute CatchupTickDelta
-    // ----------------------------------------
-    float CatchupTickDelta = 0.0f;
-
-    if (Role == ROLE_Authority)
-    {
-        // SERVER: use our hit validation time (RTT/2)
-        float PingSeconds = 0.0f;
-        if (UTOwner && UTOwner->PlayerState)
-        {
-            // ExactPing is RTT in ms. 
-            PingSeconds = (UTOwner->PlayerState->ExactPing * 0.001f);
-        }
-
-        // FIX: Multiply by 0.7 to be conservative and prevent overshooting/tunneling.
-        // This reduces "dusting" where the rocket passes through a target during the catch-up tick.
-        float IdealCatchup = (PingSeconds * 0.9f) / 2.0f;
-
-        // FIX: Hard clamp to 150ms (0.15f) to prevent massive jumps on lag spikes
-        CatchupTickDelta = FMath::Clamp(IdealCatchup, 0.0f, 0.12f);
-        
-    }
-    else
-    {
-        // CLIENT: no forward prediction for projectiles
-        // (still spawn immediately for visuals)
-        CatchupTickDelta = 0.0f;
-    }
-
-    // Optional: if you still want super-high-lag "sleep" behavior on the client:
-    if ((CatchupTickDelta > 0.f) && (Role != ROLE_Authority) && OwningPlayer)
-    {
-        float SleepTime = OwningPlayer->GetProjectileSleepTime();
-        if (SleepTime > 0.f)
-        {
-            if (!GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
-            {
-                DelayedProjectile.ProjectileClass = ProjectileClass;
-                DelayedProjectile.SpawnLocation = SpawnLocation;
-                DelayedProjectile.SpawnRotation = SpawnRotation;
-                GetWorldTimerManager().SetTimer(
-                    SpawnDelayedFakeProjHandle,
-                    this,
-                    &AUTWeaponFix::SpawnDelayedFakeProjectile,
-                    SleepTime,
-                    false);
-            }
-            return nullptr;
-        }
-    }
-
-    // ----------------------------------------
-    // 2) Spawn the projectile
-    // ----------------------------------------
-    FActorSpawnParameters Params;
-    Params.Instigator = UTOwner;
-    Params.Owner = UTOwner;
-    Params.SpawnCollisionHandlingOverride =
-        ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-    // IMPORTANT: always spawn on server AND owning client
-    AUTProjectile* NewProjectile =
-        GetWorld()->SpawnActor<AUTProjectile>(ProjectileClass,
-            SpawnLocation,
-            SpawnRotation,
-            Params);
-
-    if (!NewProjectile)
-    {
-        return nullptr;
-    }
-
-    // ----------------------------------------
-    // 3) Visual offsets (same as stock)
-    // ----------------------------------------
-    if (NewProjectile->OffsetVisualComponent)
-    {
-        switch (GetWeaponHand())
-        {
-        case EWeaponHand::HAND_Center:
-            NewProjectile->InitialVisualOffset =
-                NewProjectile->InitialVisualOffset + LowMeshOffset;
-            NewProjectile->OffsetVisualComponent->RelativeLocation =
-                NewProjectile->InitialVisualOffset;
-            break;
-        case EWeaponHand::HAND_Hidden:
-            NewProjectile->InitialVisualOffset =
-                NewProjectile->InitialVisualOffset + VeryLowMeshOffset;
-            NewProjectile->OffsetVisualComponent->RelativeLocation =
-                NewProjectile->InitialVisualOffset;
-            break;
-        default:
-            break;
-        }
-    }
-
-    if (UTOwner)
-    {
-        UTOwner->LastFiredProjectile = NewProjectile;
-        NewProjectile->ShooterLocation = UTOwner->GetActorLocation();
-        NewProjectile->ShooterRotation = UTOwner->GetActorRotation();
-    }
-
-    // ----------------------------------------
-    // 4) Server catch-up tick
-    // ----------------------------------------
-    if (Role == ROLE_Authority)
-    {
-        NewProjectile->HitsStatsName = HitsStatsName;
-
-        if ((CatchupTickDelta > 0.f) && NewProjectile->ProjectileMovement)
-        {
-            const float ScaledDelta =
-                CatchupTickDelta * NewProjectile->CustomTimeDilation;
-
-            if (NewProjectile->PrimaryActorTick.IsTickFunctionEnabled())
-            {
-                NewProjectile->TickActor(
-                    ScaledDelta, LEVELTICK_All, NewProjectile->PrimaryActorTick);
-            }
-
-            NewProjectile->ProjectileMovement->TickComponent(
-                ScaledDelta, LEVELTICK_All, nullptr);
-
-            NewProjectile->SetForwardTicked(true);
-
-            if (NewProjectile->GetLifeSpan() > 0.f)
-            {
-                NewProjectile->SetLifeSpan(
-                    0.1f + FMath::Max(
-                        0.01f,
-                        NewProjectile->GetLifeSpan() - CatchupTickDelta));
-            }
-        }
-        else
-        {
-            NewProjectile->SetForwardTicked(false);
-        }
-    }
-    else
-    {
-        // ----------------------------------------
-        // 5) Client fake projectile
-        // ----------------------------------------
-        // CatchupTickDelta is 0 here, so this just marks it as fake
-        // and optionally clamps lifespan a bit.
-        NewProjectile->InitFakeProjectile(OwningPlayer);
-
-        if (CatchupTickDelta > 0.f)
-        {
-            NewProjectile->SetLifeSpan(
-                FMath::Min(NewProjectile->GetLifeSpan(),
-                    2.f * FMath::Max(0.f, CatchupTickDelta)));
-        }
-    }
-
-    // ----------------------------------------
-    // 6) High-FPS stability (240 Hz lock)
-    // ----------------------------------------
-    if (NewProjectile->ProjectileMovement)
-    {
-        const float StableRate = 1.f / 240.f;
-        NewProjectile->PrimaryActorTick.TickInterval = StableRate;
-        NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval =
-            StableRate;
-    }
-    
-    // Apply to anyone rendering graphics (Client OR Listen Server Host)
-    // Skip only the Dedicated Server (which has no screen/FPS issues)
-    if (NewProjectile->ProjectileMovement && GetNetMode() != NM_DedicatedServer)
-    {
-        const int32 ClientHz = GetSnappedProjectileHz();
-
-        // Safety Logic:
-        // If we are the Host (Authority), we must be careful not to lower the tick 
-        // below the Server Tick Rate (usually 120).
-        // Your CVar defaults to 240, so this is safe (240 > 120).
-        // If user sets CVar to 60, the Host's physics would stutter. 
-        // This is an acceptable risk for a user-config setting.
-
-        const float StableInterval = 1.f / static_cast<float>(ClientHz);
-
-        NewProjectile->PrimaryActorTick.TickInterval = StableInterval;
-        NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = StableInterval;
-    }
-
-
-
-    return NewProjectile;
+	// Updated variable name
+	if (NetcodeDelayedProjectile.ProjectileClass != nullptr)
+	{
+		SpawnNetPredictedProjectile(NetcodeDelayedProjectile.ProjectileClass, NetcodeDelayedProjectile.SpawnLocation, NetcodeDelayedProjectile.SpawnRotation);
+	}
 }
-*/
 
 
-
-/*
 AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	TSubclassOf<AUTProjectile> ProjectileClass,
 	FVector SpawnLocation,
 	FRotator SpawnRotation)
 {
-
-	
-	if (UTOwner && UTOwner->GetCapsuleComponent())
-	{
-		// 1. CAPSULE SAFETY CHECK: Prevent spawning inside self (Apex/Suicide fix)
-		// Only run this check if aiming steep down
-		if (SpawnRotation.Pitch < -70.0f)
-		{
-			float CapRadius = UTOwner->GetCapsuleComponent()->GetScaledCapsuleRadius();
-			FVector ActorLoc = UTOwner->GetActorLocation();
-
-			// Calculate horizontal distance from Player Center to Spawn Point
-			FVector2D ActorLoc2D(ActorLoc.X, ActorLoc.Y);
-			FVector2D SpawnLoc2D(SpawnLocation.X, SpawnLocation.Y);
-			float DistXY = FVector2D::Distance(ActorLoc2D, SpawnLoc2D);
-
-			// Flak Shell Radius is approx 15-20 units. 
-			// We need: Dist > (CapsuleRadius + ShellRadius + Buffer)
-			float RequiredDist = CapRadius + 20.0f;
-
-			if (DistXY < RequiredDist)
-			{
-				// We are inside! Push the spawn point out horizontally.
-				FVector ForwardDir = SpawnRotation.Vector();
-				ForwardDir.Z = 0.0f; // Flatten to horizontal only
-				if (ForwardDir.IsNearlyZero())
-				{
-					ForwardDir = UTOwner->GetActorForwardVector();
-				}
-				ForwardDir.Normalize();
-
-				// Move it just enough to clear the capsule
-				float PushAmount = RequiredDist - DistXY;
-				SpawnLocation += (ForwardDir * PushAmount);
-
-				// Optional: Nudge down slightly to ensure we don't snag the bottom hemisphere
-				SpawnLocation.Z -= 5.0f;
-			}
-		}
-
-		// 2. GEOMETRY CHECK: Prevent spawning inside walls/floors (Jump Pad fix)
-		FVector EyeLoc;
-		FRotator EyeRot;
-		UTOwner->GetActorEyesViewPoint(EyeLoc, EyeRot);
-
-		FCollisionQueryParams ClipParams(FName(TEXT("MuzzleClipTrace")), true, UTOwner);
-		FHitResult ClipHit;
-
-		// Trace from Eyes to the (potentially adjusted) SpawnLocation
-		if (GetWorld()->LineTraceSingleByChannel(ClipHit, EyeLoc, SpawnLocation, ECC_WorldStatic, ClipParams))
-		{
-			// We hit a wall/floor/pad! Pull back to surface + buffer
-			SpawnLocation = ClipHit.Location + (ClipHit.Normal * 2.0f);
-		}
-	}
-	
-
+	// Pitch clamp for shells/rockets firing straight down
 	FRotator AdjustedRot = SpawnRotation;
 	AdjustedRot.Normalize();
-	AUTProjectile* DefaultProj = ProjectileClass ? ProjectileClass->GetDefaultObject<AUTProjectile>() : nullptr;
-	bool bIsFlakShell = ProjectileClass && (ProjectileClass->GetName().Contains(TEXT("Shell")) || ProjectileClass->GetName().Contains(TEXT("Rocket")));
-	if (bIsFlakShell && AdjustedRot.Pitch < -83.5f)
+	bool bIsShellOrRocket = ProjectileClass &&
+		(ProjectileClass->GetName().Contains(TEXT("Shell")) ||
+			ProjectileClass->GetName().Contains(TEXT("Rocket")));
+	if (bIsShellOrRocket && AdjustedRot.Pitch < -83.5f)
 	{
-
 		SpawnRotation.Pitch = -85.0f;
-		
 	}
 
 	AUTPlayerController* OwningPlayer = UTOwner ? Cast<AUTPlayerController>(UTOwner->GetController()) : nullptr;
+	// --- ADDED: Needed for Team Checks during Tunnel Sweep ---
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 
 	// ----------------------------------------
-	// 1) Compute CatchupTickDelta (Configurable)
+	// 1) Get Current Ping
 	// ----------------------------------------
-
-	float CatchupTickDelta = 0.0f;
 	float CurrentPing = 0.0f;
-
-	if (Role == ROLE_Authority)
+	if (UTOwner && UTOwner->PlayerState)
 	{
-		// UTOwner->PlayerState->ExactPing;
-		if (UTOwner && UTOwner->PlayerState)
-		{
-			CurrentPing = UTOwner->PlayerState->ExactPing;
-		}
-		if (CurrentPing < 20.0f)
-		{
-			CatchupTickDelta = 0.0f;
-		}
-		else
-		{
-			float AdjustedPing = CurrentPing - FudgeFactorMs;
-			float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, ProjectilePredictionCapMs);
-			CatchupTickDelta = CappedPing * 0.0005f;
-		}
-
-
+		CurrentPing = UTOwner->PlayerState->ExactPing;
 	}
-	else
+
+	// ----------------------------------------
+	// 2) Compute CatchupTickDelta (Half RTT)
+	// ----------------------------------------
+	float CatchupTickDelta = 0.0f;
+
+	if (CurrentPing >= 20.0f)
 	{
-		// CLIENT: always 0
-		CatchupTickDelta = 0.0f;
+		float AdjustedPing = CurrentPing; // -FudgeFactorMs;
+		float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, ProjectilePredictionCapMs);
+		CatchupTickDelta = CappedPing * 0.0005f;  // Half RTT in seconds
 	}
-	// ----------------------------------------
-	// 2) Client High-Ping "Sleep" Check
-	// ----------------------------------------
 
-	if ((CatchupTickDelta > 0.f) && (Role != ROLE_Authority) && OwningPlayer)
+	// ----------------------------------------
+	// 3) Client: Check if we should delay spawn for extreme ping
+	// ----------------------------------------
+	if ((Role != ROLE_Authority) && OwningPlayer)
 	{
-		// Calculate Sleep based on BP variables
-		// Logic: If Ping > (Cap + Fudge), we sleep the excess
-		// 0.001f * FMath::Max(0.f, PlayerState->ExactPing - PredictionFudgeFactor - MaxPredictionPing)
-		float ExcessPing = (CurrentPing - FudgeFactorMs) - ProjectilePredictionCapMs;
-		float SleepTime = FMath::Max(0.0f, ExcessPing * 0.001f);
+		float ExcessPing = CurrentPing - FudgeFactorMs - ProjectilePredictionCapMs;
 
-		if (SleepTime > 0.f)
+		if (ExcessPing > 10.0f)  // More than 10ms over cap
 		{
+			float SleepTime = ExcessPing * 0.001f;
+
 			if (!GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
 			{
-				DelayedProjectile.ProjectileClass = ProjectileClass;
-				DelayedProjectile.SpawnLocation = SpawnLocation;
-				DelayedProjectile.SpawnRotation = SpawnRotation;
+				NetcodeDelayedProjectile.ProjectileClass = ProjectileClass;
+				NetcodeDelayedProjectile.SpawnLocation = SpawnLocation;
+				NetcodeDelayedProjectile.SpawnRotation = SpawnRotation;
 
 				GetWorldTimerManager().SetTimer(
 					SpawnDelayedFakeProjHandle,
@@ -1648,7 +1416,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	}
 
 	// ----------------------------------------
-	// 3) Spawn the projectile
+	// 4) Spawn the projectile
 	// ----------------------------------------
 	FActorSpawnParameters Params;
 	Params.Instigator = UTOwner;
@@ -1667,7 +1435,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	}
 
 	// ----------------------------------------
-	// 4) Visual offsets
+	// 5) Visual offsets (weapon hand)
 	// ----------------------------------------
 	if (NewProjectile->OffsetVisualComponent)
 	{
@@ -1694,33 +1462,130 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	}
 
 	// ----------------------------------------
-	// 5) Server catch-up tick (Fast Forward)
+	// 6) SERVER: Fast-forward authoritative projectile
 	// ----------------------------------------
 	if (Role == ROLE_Authority)
 	{
 		NewProjectile->HitsStatsName = HitsStatsName;
 
+		// GUARD RAIL: Minimum Threshold (prevents 0-ping PIE physics bugs)
+		const float MinCatchupThreshold = 0.005f;
 
-
-		if ((CatchupTickDelta > 0.f) && NewProjectile->ProjectileMovement)
+		if ((CatchupTickDelta > MinCatchupThreshold) && NewProjectile->ProjectileMovement)
 		{
+			// =========================================================================
+			// ANTI-DUSTING: TUNNEL CHECK
+			// Before fast-forwarding, check if we passed through an enemy in the past.
+			// This prevents "dusting" where fast projectiles skip over targets due to
+			// the server fast-forwarding past their collision point.
+			// =========================================================================
 
-			const float ScaledDelta = CatchupTickDelta * NewProjectile->CustomTimeDilation;
+			FVector CatchupStart = SpawnLocation;
+			FVector CatchupVelocity = NewProjectile->ProjectileMovement->Velocity;
 
-			if (NewProjectile->PrimaryActorTick.IsTickFunctionEnabled())
+			// Handle case where Velocity isn't set yet (uses InitialSpeed)
+			if (CatchupVelocity.IsZero())
 			{
-				NewProjectile->TickActor(ScaledDelta, LEVELTICK_All, NewProjectile->PrimaryActorTick);
+				CatchupVelocity = SpawnRotation.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
+			}
+			FVector CatchupEnd = CatchupStart + (CatchupVelocity * CatchupTickDelta);
+
+			// Get projectile collision radius safely
+			float ProjRadius = (NewProjectile->CollisionComp) ? NewProjectile->CollisionComp->GetScaledSphereRadius() : 10.f;
+
+			// Optimize Search Area - only check pawns near the projectile path
+			FVector MinVec = CatchupStart.ComponentMin(CatchupEnd);
+			FVector MaxVec = CatchupStart.ComponentMax(CatchupEnd);
+			FBox PathBounds(MinVec, MaxVec);
+			PathBounds = PathBounds.ExpandBy(200.0f); // Margin for capsule radius
+
+			bool bHitRegistered = false;
+
+			for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+			{
+				AUTCharacter* Target = Cast<AUTCharacter>(*It);
+
+				// Filter invalid targets
+				if (Target && Target != UTOwner && !Target->IsDead() &&
+					PathBounds.IsInside(Target->GetActorLocation()))
+				{
+					// Skip teammates
+					if (GS && GS->OnSameTeam(UTOwner, Target)) continue;
+
+					// 1. REWIND: Where was the target 'CatchupTickDelta' seconds ago?
+					FVector RewoundLoc = Target->GetRewindLocation(CatchupTickDelta);
+
+					// 2. GEOMETRY: Construct Rewound Capsule
+					float CapRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+					float CapHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+
+					FVector CapsuleTop = RewoundLoc + FVector(0, 0, CapHeight - CapRadius);
+					FVector CapsuleBot = RewoundLoc - FVector(0, 0, CapHeight - CapRadius);
+
+					// 3. MATH: Segment vs Segment Intersection
+					FVector PointOnPath, PointOnCapsule;
+					FMath::SegmentDistToSegmentSafe(
+						CatchupStart, CatchupEnd,
+						CapsuleBot, CapsuleTop,
+						PointOnPath, PointOnCapsule
+					);
+
+					float DistSqr = FVector::DistSquared(PointOnPath, PointOnCapsule);
+					float CombinedRadius = CapRadius + ProjRadius;
+
+					// 4. HIT: Did we intersect the rewound capsule?
+					if (DistSqr < (CombinedRadius * CombinedRadius))
+					{
+						// Construct synthetic hit result
+						FVector HitNormal = (CatchupStart - CatchupEnd).GetSafeNormal();
+						FVector HitLocation = PointOnCapsule + ((PointOnPath - PointOnCapsule).GetSafeNormal() * CapRadius);
+
+						// =========================================================
+						// CRITICAL FIX: Use ProcessHit instead of Explode
+						// 
+						// ProcessHit handles damage correctly for ALL projectile types:
+						// - Flak shards (OuterRadius = 0): Point damage via DamageImpactedActor
+						// - Rockets/Shells (OuterRadius > 0): Direct hit + radial splash
+						// 
+						// Calling Explode() directly skips DamageImpactedActor(), which
+						// is why flak shards were dealing no damage (no-regs).
+						// =========================================================
+						NewProjectile->ProcessHit(Target, Target->GetCapsuleComponent(), HitLocation, HitNormal);
+
+						bHitRegistered = true;
+						break; // Stop checking, we hit someone
+					}
+				}
 			}
 
-			NewProjectile->ProjectileMovement->TickComponent(ScaledDelta, LEVELTICK_All, nullptr);
+			// =========================================================================
+			// END TUNNEL CHECK
+			// =========================================================================
 
-			NewProjectile->SetForwardTicked(true);
-
-			if (NewProjectile->GetLifeSpan() > 0.f)
+			// Only proceed with Fast-Forward if we didn't hit a rewound target
+			if (!bHitRegistered)
 			{
-				NewProjectile->SetLifeSpan(
-					0.1f + FMath::Max(0.01f, NewProjectile->GetLifeSpan() - CatchupTickDelta)
-				);
+				const float ScaledDelta = CatchupTickDelta * NewProjectile->CustomTimeDilation;
+
+				if (NewProjectile->PrimaryActorTick.IsTickFunctionEnabled())
+				{
+					NewProjectile->TickActor(ScaledDelta, LEVELTICK_All, NewProjectile->PrimaryActorTick);
+				}
+
+				NewProjectile->ProjectileMovement->TickComponent(ScaledDelta, LEVELTICK_All, nullptr);
+				NewProjectile->SetForwardTicked(true);
+
+				if (NewProjectile->GetLifeSpan() > 0.f)
+				{
+					NewProjectile->SetLifeSpan(
+						0.1f + FMath::Max(0.01f, NewProjectile->GetLifeSpan() - CatchupTickDelta)
+					);
+				}
+			}
+			else
+			{
+				// We hit something in the tunnel check - projectile already processed
+				return nullptr;
 			}
 		}
 		else
@@ -1728,47 +1593,51 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			NewProjectile->SetForwardTicked(false);
 		}
 	}
+	// ----------------------------------------
+	// 7) CLIENT: Setup fake projectile
+	// ----------------------------------------
 	else
 	{
-		// ----------------------------------------
-		// 6) Client fake projectile
-		// ----------------------------------------
 		NewProjectile->InitFakeProjectile(OwningPlayer);
 
 		if (CatchupTickDelta > 0.f)
 		{
+			// Optional: Shorten fake lifespan so it dies before big correction
 			NewProjectile->SetLifeSpan(
 				FMath::Min(NewProjectile->GetLifeSpan(), 2.f * FMath::Max(0.f, CatchupTickDelta))
 			);
 		}
 	}
 
-	// -----------------------------------------------------------
-	// 7) High-FPS stability (Fixed Tick Rate)
-	// -----------------------------------------------------------
+	// ----------------------------------------
+	// 8) High-FPS stability (Fixed Tick Rate)
+	// ----------------------------------------
 	if (NewProjectile->ProjectileMovement)
 	{
-		const float StableRate = 1.f / 240.f;
-		NewProjectile->PrimaryActorTick.TickInterval = StableRate;
-		NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval =
-			StableRate;
+		if (Role == ROLE_Authority)
+		{
+			const float ServerRate = 1.f / 240.f;
+			NewProjectile->PrimaryActorTick.TickInterval = ServerRate;
+			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ServerRate;
+		}
+		else if (GetNetMode() != NM_DedicatedServer)
+		{
+			const int32 ClientHz = GetSnappedProjectileHz();
+			const float ClientInterval = 1.f / static_cast<float>(ClientHz);
+			NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
+			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
+		}
 	}
-	if (NewProjectile->ProjectileMovement && GetNetMode() != NM_DedicatedServer)
-	{
 
-		const int32 ClientHz = GetSnappedProjectileHz();
-		const float StableInterval = 1.f / static_cast<float>(ClientHz);
-
-		NewProjectile->PrimaryActorTick.TickInterval = StableInterval;
-		NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = StableInterval;
-
-	}
 	return NewProjectile;
 }
-*/
 
 
 
+
+
+
+/*
 
 AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	TSubclassOf<AUTProjectile> ProjectileClass,
@@ -1804,7 +1673,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 
 	if (CurrentPing >= 20.0f)
 	{
-		float AdjustedPing = CurrentPing - FudgeFactorMs;
+		float AdjustedPing = CurrentPing; // -FudgeFactorMs;
 		float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, ProjectilePredictionCapMs);
 		CatchupTickDelta = CappedPing * 0.0005f;  // Half RTT in seconds
 	}
@@ -1932,28 +1801,9 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 		//
 		// OPTION A: Delay fake spawn by half RTT (uncomment to enable)
 		// This eliminates retrace but adds perceived input lag.
-		/*
-		if (CatchupTickDelta > 0.04f)  // Only for 80ms+ ping
-		{
-			// Destroy this fake, spawn delayed one instead
-			NewProjectile->Destroy();
+		
 
-			if (!GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
-			{
-				DelayedProjectile.ProjectileClass = ProjectileClass;
-				DelayedProjectile.SpawnLocation = SpawnLocation;
-				DelayedProjectile.SpawnRotation = SpawnRotation;
-
-				GetWorldTimerManager().SetTimer(
-					SpawnDelayedFakeProjHandle,
-					this,
-					&AUTWeaponFix::SpawnDelayedFakeProjectile,
-					CatchupTickDelta,  // Delay by half RTT
-					false);
-			}
-			return nullptr;
-		}
-		*/
+		
 
 		// OPTION B: Shorten fake lifespan so it dies before big correction
 		// Server position arrives at ~FullRTT. Kill fake just before that.
@@ -1984,6 +1834,8 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	return NewProjectile;
 }
 
+
+*/
 
 
 

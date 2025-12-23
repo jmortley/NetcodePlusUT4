@@ -14,7 +14,7 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     MaxPositionErrorSquared = 10.f;
 
     // --- Throttle settings ---
-    TeamCollisionUpdateInterval = 0.0167f;  // 10 updates/sec instead of 480
+	TeamCollisionUpdateInterval = 0.0167f;  // instead of fps dependent
     LastTeamCollisionUpdateTime = -1.0f;  // Force immediate first update
 	MinTimeBetweenClientAdjustments = 0.15f;  //stock 0.1f
 	LargeCorrectionThreshold = 20.f;  //stock 15.f

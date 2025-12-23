@@ -23,6 +23,32 @@
  * 
  * Works with TeamArenaPredictionPC and TeamArenaCharacter for complete hybrid system.
  */
+
+ // --- Forward Declaration ---
+class AUTProjectile;
+
+// --- Struct Definition (MUST BE BEFORE THE CLASS) ---
+USTRUCT(BlueprintType)
+struct FNetcodeDelayedProjectile
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	TSubclassOf<AUTProjectile> ProjectileClass;
+
+	UPROPERTY()
+	FVector SpawnLocation;
+
+	UPROPERTY()
+	FRotator SpawnRotation;
+
+	FNetcodeDelayedProjectile()
+		: ProjectileClass(nullptr), SpawnLocation(FVector::ZeroVector), SpawnRotation(FRotator::ZeroRotator)
+	{
+	}
+};
+
+
 UCLASS(Abstract)
 class NETCODEPLUS_API AUTWeaponFix : public AUTWeapon
 {
@@ -222,4 +248,17 @@ protected:
 
     /** Impressive Add On */
     virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime);
+
+	// Helper function for the timer
+	void SpawnDelayedFakeProjectile();
+
+	// Timer handle
+	FTimerHandle SpawnDelayedFakeProjHandle;
+
+	// RENAMED TO AVOID SHADOWING PARENT CLASS VARIABLE
+	UPROPERTY()
+	FNetcodeDelayedProjectile NetcodeDelayedProjectile;
+
+	// Guard Rail Cap (120ms)
+	const float MaxCatchupTime = 0.12f;
 };

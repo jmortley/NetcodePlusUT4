@@ -205,8 +205,8 @@ void AMutHitsounds::PlaySampleHitsound()
 void AMutHitsounds::ReadConfig()
 {
 	BuildHitsounds();
-	Config.Enemy = ReadConfigSection(TEXT("MutHitsounds.Enemy"), HitsoundsDefaults.Enemy);
-	Config.Friendly = ReadConfigSection(TEXT("MutHitsounds.Friendly"), HitsoundsDefaults.Friendly);
+	Config.Enemy = ReadConfigSection(TEXT("Hitsounds.Enemy"), HitsoundsDefaults.Enemy);
+	Config.Friendly = ReadConfigSection(TEXT("Hitsounds.Friendly"), HitsoundsDefaults.Friendly);
 
 	float UserMult = 1.0f;
 	UUTGameplayStatics::GetModConfigFloat(ConfigSection, TEXT("UserMultiplier"), UserMult);
@@ -236,8 +236,8 @@ FHitsound AMutHitsounds::ReadConfigSection(const FString& Section, const FHitsou
 
 void AMutHitsounds::WriteConfig()
 {
-	WriteConfigSection(TEXT("MutHitsounds.Enemy"), Config.Enemy);
-	WriteConfigSection(TEXT("MutHitsounds.Friendly"), Config.Friendly);
+	WriteConfigSection(TEXT("Hitsounds.Enemy"), Config.Enemy);
+	WriteConfigSection(TEXT("Hitsounds.Friendly"), Config.Friendly);
 	UUTGameplayStatics::SetModConfigFloat(ConfigSection, TEXT("UserMultiplier"), Config.UserMultiplier);
 	UUTGameplayStatics::SetModConfigInt(ConfigSection, TEXT("PlayZeroFriendly"), Config.bPlayZeroFriendly ? 1 : 0);
 	UUTGameplayStatics::SaveModConfig();

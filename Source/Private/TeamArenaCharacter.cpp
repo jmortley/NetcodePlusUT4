@@ -6,6 +6,13 @@
 #include "GameFramework/PlayerController.h"
 #include "UTWorldSettings.h"
 
+static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
+	TEXT("ut.EnableProjectilePrediction"),
+	0, // Default: 1 (Enabled by default)
+	TEXT("If 1, enables one-way latency visual prediction for non hitscan weapons.\n")
+	TEXT("Players can set to 0 to opt-out (force server positions)."),
+	ECVF_Default); // Saves to user config
+
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer.SetDefaultSubobjectClass<UTeamArenaCharacterMovement>(ACharacter::CharacterMovementComponentName))
@@ -14,7 +21,6 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
     bHasCachedPC = false;
     NetUpdateFrequency = 100.0f;
     MinNetUpdateFrequency = 100.0f;
-	//MinTimeBetweenClientAdjustments = 0.15f
     //MaxSavedPositionAge = 0.35f;
     //PositionSaveRate = 120.0f;
     //PositionSaveInterval = 1.0f / PositionSaveRate;
@@ -23,11 +29,53 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 
 
 
-
+/*
 float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 {
     return 0.0f;
 }
+*/
+
+float ATeamArenaCharacter::GetClientVisualPredictionTime() const
+{
+	if (PlayerState && GetNetMode() == NM_Client)
+	{
+		// 1. Opt-Out Check
+		if (CVarEnableProjectilePrediction.GetValueOnGameThread() == 0)
+		{
+			return 0.0f;
+		}
+
+		// 2. Weapon Logic
+		AUTWeapon* MyWeapon = GetWeapon();
+		if (MyWeapon)
+		{
+			FString WeapName = MyWeapon->GetClass()->GetName();
+
+			// Only apply to "Lead" weapons (Rocket / Flak)
+			if (!WeapName.Contains(TEXT("Sniper")) && !WeapName.Contains(TEXT("Shock")))
+			{
+				// EPIC STANDARD MATH:
+				// PredictionFudgeFactor defaults to 20.0f in UTPlayerController.
+				// We subtract it to isolate "Wire Time" from "Frame Time".
+				float Fudge = 20.0f;
+
+				// Clamp at 0 to prevent negative prediction on LAN
+				float AdjustedPing = FMath::Max(0.0f, PlayerState->ExactPing - Fudge);
+
+				// Convert to One-Way Seconds: (Ping / 2) / 1000.0f
+				float OneWayLatency = AdjustedPing * 0.0005f; // AdjustedPing / 3000.0f;  //using a 3rd of ping instead.
+
+				// Safety Clamp (Max 120ms prediction)
+				return FMath::Min(OneWayLatency, 0.12f);
+			}
+		}
+	}
+
+	// Default: Strict Server Authority (Predict 0) for Hitscan & Idle
+	return 0.0f;
+}
+
 
 /*
 void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
@@ -111,7 +159,7 @@ bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection,
 	return bHeadShot;
 }
 
-
+/*
 void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, const FRotator& NewRotation, const FVector& NewVelocity)
 {
     // 1. Update Velocity (Standard UT logic)
@@ -140,23 +188,42 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
             SetActorLocationAndRotation(NewLocation, NewRotation, false);
 
             // B. Notify Movement Component
-            if (GetCharacterMovement())
-            {
-                GetCharacterMovement()->bJustTeleported = true;
-				//UTSimulateMovement
-                // --- CRITICAL CHANGE ---
-                // The base game (AUTCharacter.cpp) fetches the PC here and calls 
-                // UTSimulateMovement(PredictionTime) to forecast ahead.
-                //
-                // WE DO NOTHING HERE.
-                //
-                // By deleting the UTSimulateMovement call, we force the capsule 
-                // to stay exactly where the server said it was (NewLocation).
-                // 
-                // The Engine's "SmoothCorrection" (triggered by Super::OnRep) 
-                // will now take over and smoothly slide the visual mesh 
-                // from the Old Location to this New Location.
-            }
+			if (GetCharacterMovement())
+			{
+				GetCharacterMovement()->bJustTeleported = true;
+
+				// --- NEW PROJECTILE PREDICTION LOGIC ---
+				// We default to 0.0f (Predict 0 / Server Authoritative)
+				float PredictionTime = 0.0f;
+
+				// Client-Side Only: Check if the LOCAL player wants to predict this enemy
+				if (GetNetMode() != NM_DedicatedServer)
+				{
+					// Get the Local Viewer (Player 0)
+					APlayerController* LocalPC = GEngine ? GEngine->GetFirstLocalPlayerController(GetWorld()) : nullptr;
+
+					if (LocalPC && LocalPC->GetPawn())
+					{
+						// Get the local player's pawn (The Viewer)
+						ATeamArenaCharacter* ViewerChar = Cast<ATeamArenaCharacter>(LocalPC->GetPawn());
+
+						if (ViewerChar)
+						{
+							// Ask the Viewer: "Based on YOUR weapon/ping, how much should we predict?"
+							// This uses the function we wrote earlier (with Fudge Factor + CVar checks)
+							PredictionTime = ViewerChar->GetClientVisualPredictionTime();
+						}
+					}
+				}
+
+				// If PredictionTime > 0 (Rocket/Flak + High Ping), simulate forward.
+				// If PredictionTime == 0 (Sniper/Low Ping), skip simulation (Force Server Position).
+				if (PredictionTime > 0.0f)
+				{
+					UTCharacterMovement->UTSimulateMovement(PredictionTime);
+				}
+				
+			}
         }
         else if (NewRotation != GetActorRotation())
         {
@@ -164,6 +231,90 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
         }
     }
 }
+*/
+
+
+void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, const FRotator& NewRotation, const FVector& NewVelocity)
+{
+	if (UTCharacterMovement)
+	{
+		// Cache the OLD velocity before we update it
+		FVector OldVelocity = GetVelocity();
+
+		UTCharacterMovement->SimulatedVelocity = NewVelocity;
+
+		// If location changed or just spawned...
+		if ((NewLocation != GetActorLocation()) || (CreationTime == GetWorld()->TimeSeconds))
+		{
+			// Standard geometry check
+			if (GetWorld()->EncroachingBlockingGeometry(this, NewLocation, NewRotation))
+			{
+				bSimGravityDisabled = true;
+			}
+			else
+			{
+				bSimGravityDisabled = false;
+			}
+
+			// 1. Move Capsule to EXACT Server Location (The Anchor)
+			SetActorLocationAndRotation(NewLocation, NewRotation, false);
+
+			// 2. Prediction Logic
+			if (GetCharacterMovement())
+			{
+				GetCharacterMovement()->bJustTeleported = true;
+
+				float PredictionTime = 0.0f;
+
+				// --- A. VELOCITY AGREEMENT CHECK (Fixes ADAD Spam) ---
+				// Only predict if Client and Server roughly agree on direction.
+				// If they are moving opposite directions (ADAD spam), DotProduct will be negative.
+				// We disable prediction in that case to prevent "Overshoot Jitter."
+				float VelocityDot = OldVelocity.GetSafeNormal() | NewVelocity.GetSafeNormal();
+				bool bStableDirection = (VelocityDot > 0.0f); // True if moving roughly same direction
+
+				if (bStableDirection && GetNetMode() != NM_DedicatedServer)
+				{
+					APlayerController* LocalPC = GEngine ? GEngine->GetFirstLocalPlayerController(GetWorld()) : nullptr;
+					if (LocalPC && LocalPC->GetPawn())
+					{
+						ATeamArenaCharacter* ViewerChar = Cast<ATeamArenaCharacter>(LocalPC->GetPawn());
+						if (ViewerChar)
+						{
+							PredictionTime = ViewerChar->GetClientVisualPredictionTime();
+						}
+					}
+				}
+
+				// --- B. RUN SIMULATION & TETHER ---
+				if (PredictionTime > 0.0f)
+				{
+					// 1. Simulate Forward
+					UTCharacterMovement->UTSimulateMovement(PredictionTime);
+
+					// 2. THE TETHER (Clamp Max Distance)
+					// Even with valid prediction, don't let the visual ghost get too far 
+					// from the Server Reality. This stops "Warps".
+					FVector PredictedLocation = GetActorLocation();
+					FVector ErrorDelta = PredictedLocation - NewLocation; // Difference between Predict & Server
+					float MaxDistance = 40.0f; // 40 units (Capsule Radius) is a safe limit
+
+					if (ErrorDelta.SizeSquared() > MaxDistance * MaxDistance)
+					{
+						// Pull them back towards the server position
+						FVector ClampedLocation = NewLocation + (ErrorDelta.GetSafeNormal() * MaxDistance);
+						SetActorLocation(ClampedLocation);
+					}
+				}
+			}
+		}
+		else if (NewRotation != GetActorRotation())
+		{
+			GetRootComponent()->MoveComponent(FVector::ZeroVector, NewRotation, false);
+		}
+	}
+}
+
 
 
 void ATeamArenaCharacter::FiringInfoUpdated()
