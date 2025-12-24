@@ -449,6 +449,7 @@ void AUTWeaponFix::FireShot()
 		if (LastFireTime.IsValidIndex(CurrentFireMode))
 			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
 		FRotator ClientRot = GetUTOwner() ? GetUTOwner()->GetViewRotation() : FRotator::ZeroRotator;
+		EarliestFireTime = 0.f;
 
 		uint8 ZOffset = 0;
 		if (UTOwner)
@@ -537,6 +538,7 @@ void AUTWeaponFix::FireShot()
 		}
 
 		// 3. SPAWN PROJECTILE
+		EarliestFireTime = 0.f;
 		Super::FireShot();
 	}
 }
@@ -733,7 +735,13 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
 
 bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
 {
-    // GLOBAL COOLDOWN CHECK
+	// CHECK 1: Weapon switch penalty (EarliestFireTime)
+	if (EarliestFireTime > CurrentTime)
+	{
+		return true;
+	}
+
+	// GLOBAL COOLDOWN CHECK
     // Iterate through ALL fire modes. If the weapon is recovering from ANY shot,
     // it cannot fire again.
     for (int32 i = 0; i < LastFireTime.Num(); i++)
@@ -1474,55 +1482,75 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 		if ((CatchupTickDelta > MinCatchupThreshold) && NewProjectile->ProjectileMovement)
 		{
 			// =========================================================================
-			// ANTI-DUSTING: TUNNEL CHECK
-			// Before fast-forwarding, check if we passed through an enemy in the past.
-			// This prevents "dusting" where fast projectiles skip over targets due to
-			// the server fast-forwarding past their collision point.
+			// LAG COMPENSATION: REWIND CHECK
+			// 
+			// Because clients don't predict enemy positions (GetClientVisualPredictionTime = 0),
+			// targets on the client's screen are behind their actual server position.
+			// 
+			// This check rewinds enemies to where they were when the client fired,
+			// then tests if the projectile path would have hit them. This provides
+			// lag compensation for both:
+			// - Fast projectiles that could tunnel through targets
+			// - Projectiles aimed at where the enemy appeared on screen
 			// =========================================================================
 
 			FVector CatchupStart = SpawnLocation;
 			FVector CatchupVelocity = NewProjectile->ProjectileMovement->Velocity;
 
-			// Handle case where Velocity isn't set yet (uses InitialSpeed)
 			if (CatchupVelocity.IsZero())
 			{
 				CatchupVelocity = SpawnRotation.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
 			}
 			FVector CatchupEnd = CatchupStart + (CatchupVelocity * CatchupTickDelta);
 
-			// Get projectile collision radius safely
-			float ProjRadius = (NewProjectile->CollisionComp) ? NewProjectile->CollisionComp->GetScaledSphereRadius() : 10.f;
+			// Get projectile's effective hit detection radius
+			// Priority: CollisionComp > PawnOverlapSphere > fallback
+			float ProjHitRadius = 0.f;
+			if (NewProjectile->CollisionComp)
+			{
+				ProjHitRadius = NewProjectile->CollisionComp->GetScaledSphereRadius();
+			}
+			// Flak shards have CollisionComp = 0 but use PawnOverlapSphere (36 units) for hit detection
+			if (ProjHitRadius <= 0.f && NewProjectile->PawnOverlapSphere)
+			{
+				ProjHitRadius = NewProjectile->PawnOverlapSphere->GetScaledSphereRadius();
+			}
+			// Final fallback for projectiles with neither
+			if (ProjHitRadius <= 0.f)
+			{
+				ProjHitRadius = 10.f;
+			}
 
-			// Optimize Search Area - only check pawns near the projectile path
+			// Optimize Search Area
 			FVector MinVec = CatchupStart.ComponentMin(CatchupEnd);
 			FVector MaxVec = CatchupStart.ComponentMax(CatchupEnd);
 			FBox PathBounds(MinVec, MaxVec);
-			PathBounds = PathBounds.ExpandBy(200.0f); // Margin for capsule radius
-
+			PathBounds = PathBounds.ExpandBy(200.0f);
+			const float MaxRewindTime = 0.1f;
+			float RewindTime = FMath::Min(CatchupTickDelta, MaxRewindTime);
 			bool bHitRegistered = false;
 
 			for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 			{
 				AUTCharacter* Target = Cast<AUTCharacter>(*It);
 
-				// Filter invalid targets
 				if (Target && Target != UTOwner && !Target->IsDead() &&
 					PathBounds.IsInside(Target->GetActorLocation()))
 				{
 					// Skip teammates
 					if (GS && GS->OnSameTeam(UTOwner, Target)) continue;
 
-					// 1. REWIND: Where was the target 'CatchupTickDelta' seconds ago?
-					FVector RewoundLoc = Target->GetRewindLocation(CatchupTickDelta);
-
-					// 2. GEOMETRY: Construct Rewound Capsule
+					// 1. REWIND: Where was the target when the client fired?
+					//FVector RewoundLoc = Target->GetRewindLocation(CatchupTickDelta);
+					FVector RewoundLoc = Target->GetRewindLocation(RewindTime);
+					// 2. GEOMETRY: Construct Rewound Capsule centerline
 					float CapRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
 					float CapHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
 					FVector CapsuleTop = RewoundLoc + FVector(0, 0, CapHeight - CapRadius);
 					FVector CapsuleBot = RewoundLoc - FVector(0, 0, CapHeight - CapRadius);
 
-					// 3. MATH: Segment vs Segment Intersection
+					// 3. MATH: Find closest points between projectile path and capsule centerline
 					FVector PointOnPath, PointOnCapsule;
 					FMath::SegmentDistToSegmentSafe(
 						CatchupStart, CatchupEnd,
@@ -1531,38 +1559,41 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 					);
 
 					float DistSqr = FVector::DistSquared(PointOnPath, PointOnCapsule);
-					float CombinedRadius = CapRadius + ProjRadius;
 
-					// 4. HIT: Did we intersect the rewound capsule?
+					// 4. COLLISION CHECK: Replicate what the actual collision system would do
+					// Combined radius = capsule surface + projectile hit detection sphere
+					float CombinedRadius = CapRadius + ProjHitRadius;
+
 					if (DistSqr < (CombinedRadius * CombinedRadius))
 					{
-						// Construct synthetic hit result
+						// Construct hit location on capsule surface
+						FVector DirToPath = (PointOnPath - PointOnCapsule).GetSafeNormal();
+						FVector HitLocation = PointOnCapsule + (DirToPath * CapRadius);
 						FVector HitNormal = (CatchupStart - CatchupEnd).GetSafeNormal();
-						FVector HitLocation = PointOnCapsule + ((PointOnPath - PointOnCapsule).GetSafeNormal() * CapRadius);
 
 						// =========================================================
-						// CRITICAL FIX: Use ProcessHit instead of Explode
+						// CRITICAL: Use ProcessHit, not Explode
 						// 
-						// ProcessHit handles damage correctly for ALL projectile types:
-						// - Flak shards (OuterRadius = 0): Point damage via DamageImpactedActor
-						// - Rockets/Shells (OuterRadius > 0): Direct hit + radial splash
+						// ProcessHit correctly handles ALL projectile types:
+						// - Calls DamageImpactedActor() for direct damage
+						// - Sets ImpactedActor to avoid double-damage
+						// - Then calls Explode() for splash/visuals
 						// 
-						// Calling Explode() directly skips DamageImpactedActor(), which
-						// is why flak shards were dealing no damage (no-regs).
+						// Direct damage projectiles (flak shards, OuterRadius = 0):
+						//   -> FUTPointDamageEvent
+						// 
+						// Splash damage projectiles (rockets, OuterRadius > 0):
+						//   -> FUTRadialDamageEvent + radial splash
 						// =========================================================
 						NewProjectile->ProcessHit(Target, Target->GetCapsuleComponent(), HitLocation, HitNormal);
 
 						bHitRegistered = true;
-						break; // Stop checking, we hit someone
+						break;
 					}
 				}
 			}
 
-			// =========================================================================
-			// END TUNNEL CHECK
-			// =========================================================================
-
-			// Only proceed with Fast-Forward if we didn't hit a rewound target
+			// Only fast-forward if we didn't hit a rewound target
 			if (!bHitRegistered)
 			{
 				const float ScaledDelta = CatchupTickDelta * NewProjectile->CustomTimeDilation;
@@ -1584,7 +1615,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			}
 			else
 			{
-				// We hit something in the tunnel check - projectile already processed
+				// Hit registered via rewind check - projectile already processed
 				return nullptr;
 			}
 		}

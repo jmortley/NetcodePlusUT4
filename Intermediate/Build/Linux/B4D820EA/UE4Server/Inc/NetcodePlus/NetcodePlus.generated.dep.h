@@ -6,6 +6,9 @@
 ===========================================================================*/
 
 #include "GeneratedCppIncludes.h"
+#ifndef NETCODEPLUS_MutHitsounds_generated_h
+	#include "Public/MutHitsounds.h"
+#endif
 #ifndef NETCODEPLUS_TeamArenaCharacter_generated_h
 	#include "Public/TeamArenaCharacter.h"
 #endif
@@ -14,6 +17,9 @@
 #endif
 #ifndef NETCODEPLUS_TeamArenaPredictionPC_generated_h
 	#include "Public/TeamArenaPredictionPC.h"
+#endif
+#ifndef NETCODEPLUS_UTHitsoundMessage_generated_h
+	#include "Public/UTHitsoundMessage.h"
 #endif
 #ifndef NETCODEPLUS_UTPlusProj_ShockBall_generated_h
 	#include "Public/UTPlusProj_ShockBall.h"

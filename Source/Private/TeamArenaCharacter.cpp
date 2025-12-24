@@ -623,58 +623,79 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	{
 		bHasSpawnOverlay = true;
 
-		// SERVER: Turn on the Shell (Now warning-free!)
+		// SERVER: Turn on the Shell (Replicates to everyone)
 		if (Role == ROLE_Authority && SpawnProtectionMaterial)
 		{
 			SetCharacterOverlayEffect(FOverlayEffect(SpawnProtectionMaterial), true);
-			// ENABLE OUTLINE
-			// Param 1: bNowOutlined = true (Turn it on)
-			// Param 2: bWhenUnoccluded = false (Do NOT draw through walls)
-			// Param 3: TeamMask = 255 (Show for everyone)
-			//SetOutlineServer(true, false, 255);
 		}
 
-		// CLIENT: Tweak Visuals (Hide Skin + Set Opacity)
+		// CLIENT: Handle Visuals & Team Filtering
 		if (GetNetMode() != NM_DedicatedServer)
 		{
-			// 1. Hide the Cyan Skin
+			// 1. Always Hide the Default Skin Effect (Cyan Pulse)
 			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
 			for (UMaterialInstanceDynamic* MI : BodyMIs)
 			{
 				if (MI) MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
 			}
 
-			// 2. Apply Custom Color/Opacity to the Mesh the System Created
-			// Note: We don't create the mesh. We just tweak the one SetCharacterOverlayEffect made.
-			if (OverlayMesh && OverlayMesh->IsVisible())
-			{
-				static FName NAME_Color(TEXT("Color"));
-				FLinearColor FinalColor = SpawnProtectionColor;
-				FinalColor.A = SpawnProtectionOpacity;
+			// 2. Determine Visibility (Show Enemy Only)
+			bool bShowShell = true;
+			AUTPlayerController* LocalViewer = GetLocalViewer();
+			AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 
-				// Loop needed if your mesh has multiple material slots
-				const int32 NumMaterials = OverlayMesh->GetNumMaterials();
-				for (int32 i = 0; i < NumMaterials; i++)
+			// If viewing a Teammate (or Self), HIDE the shell.
+			if (GS && LocalViewer && GS->OnSameTeam(this, LocalViewer))
+			{
+				bShowShell = false;
+			}
+
+			// 3. Apply Visuals to the Mesh
+			if (OverlayMesh)
+			{
+				if (bShowShell)
 				{
-					UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(i));
-					if (MID)
+					// --- ENEMY: Show & Color ---
+					if (OverlayMesh->bHiddenInGame)
 					{
-						MID->SetVectorParameterValue(NAME_Color, FinalColor);
+						OverlayMesh->SetHiddenInGame(false);
+					}
+
+					// Apply Color/Opacity to all materials
+					static FName NAME_Color(TEXT("Color"));
+					FLinearColor FinalColor = SpawnProtectionColor;
+					FinalColor.A = SpawnProtectionOpacity;
+
+					const int32 NumMaterials = OverlayMesh->GetNumMaterials();
+					for (int32 i = 0; i < NumMaterials; i++)
+					{
+						UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(i));
+						if (MID)
+						{
+							MID->SetVectorParameterValue(NAME_Color, FinalColor);
+						}
+					}
+				}
+				else
+				{
+					// --- TEAMMATE: Hide ---
+					if (!OverlayMesh->bHiddenInGame)
+					{
+						OverlayMesh->SetHiddenInGame(true);
 					}
 				}
 			}
 		}
 	}
-	// --- CASE 2: Protection Just Ended (Cleanup) ---
+	// --- CASE 2: Cleanup ---
 	else if (bHasSpawnOverlay)
 	{
 		bHasSpawnOverlay = false;
 
-		// SERVER: Turn off the effect
+		// SERVER: Turn off effect
 		if (Role == ROLE_Authority && SpawnProtectionMaterial)
 		{
 			SetCharacterOverlayEffect(FOverlayEffect(SpawnProtectionMaterial), false);
-			//SetOutlineServer(false, false, 255);
 			UpdateArmorOverlay(); // Restore standard armor visuals
 		}
 

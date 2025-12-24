@@ -10,10 +10,12 @@
 PRAGMA_DISABLE_OPTIMIZATION
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void EmptyLinkFunctionForGeneratedCode1NetcodePlus() {}
+FName NETCODEPLUS_BuildHitsounds = FName(TEXT("BuildHitsounds"));
 FName NETCODEPLUS_ClientAbortLoad = FName(TEXT("ClientAbortLoad"));
 FName NETCODEPLUS_ClientConfirmFireEvent = FName(TEXT("ClientConfirmFireEvent"));
 FName NETCODEPLUS_ClientNotifyImpressive = FName(TEXT("ClientNotifyImpressive"));
 FName NETCODEPLUS_DrawWeaponCrosshair = FName(TEXT("DrawWeaponCrosshair"));
+FName NETCODEPLUS_EventMutateClientSide = FName(TEXT("EventMutateClientSide"));
 FName NETCODEPLUS_FiringExtraUpdated = FName(TEXT("FiringExtraUpdated"));
 FName NETCODEPLUS_GetFireLocationForMultiShot = FName(TEXT("GetFireLocationForMultiShot"));
 FName NETCODEPLUS_GetFireRotationForMultiShot = FName(TEXT("GetFireRotationForMultiShot"));
@@ -25,6 +27,101 @@ FName NETCODEPLUS_ServerSetPulseTarget = FName(TEXT("ServerSetPulseTarget"));
 FName NETCODEPLUS_ServerStartFireFixed = FName(TEXT("ServerStartFireFixed"));
 FName NETCODEPLUS_ServerStopBeamFiring = FName(TEXT("ServerStopBeamFiring"));
 FName NETCODEPLUS_ServerStopFireFixed = FName(TEXT("ServerStopFireFixed"));
+class UScriptStruct* FFlakHitEvent::StaticStruct()
+{
+	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
+	static class UScriptStruct* Singleton = NULL;
+	if (!Singleton)
+	{
+		extern NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FFlakHitEvent();
+		extern NETCODEPLUS_API uint32 Get_Z_Construct_UScriptStruct_FFlakHitEvent_CRC();
+		Singleton = GetStaticStruct(Z_Construct_UScriptStruct_FFlakHitEvent, Z_Construct_UPackage__Script_NetcodePlus(), TEXT("FlakHitEvent"), sizeof(FFlakHitEvent), Get_Z_Construct_UScriptStruct_FFlakHitEvent_CRC());
+	}
+	return Singleton;
+}
+static FCompiledInDeferStruct Z_CompiledInDeferStruct_UScriptStruct_FFlakHitEvent(FFlakHitEvent::StaticStruct, TEXT("/Script/NetcodePlus"), TEXT("FlakHitEvent"), false, nullptr, nullptr);
+static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFFlakHitEvent
+{
+	FScriptStruct_NetcodePlus_StaticRegisterNativesFFlakHitEvent()
+	{
+		UScriptStruct::DeferCppStructOps(FName(TEXT("FlakHitEvent")),new UScriptStruct::TCppStructOps<FFlakHitEvent>);
+	}
+} ScriptStruct_NetcodePlus_StaticRegisterNativesFFlakHitEvent;
+class UScriptStruct* FHitsoundsConfig::StaticStruct()
+{
+	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
+	static class UScriptStruct* Singleton = NULL;
+	if (!Singleton)
+	{
+		extern NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FHitsoundsConfig();
+		extern NETCODEPLUS_API uint32 Get_Z_Construct_UScriptStruct_FHitsoundsConfig_CRC();
+		Singleton = GetStaticStruct(Z_Construct_UScriptStruct_FHitsoundsConfig, Z_Construct_UPackage__Script_NetcodePlus(), TEXT("HitsoundsConfig"), sizeof(FHitsoundsConfig), Get_Z_Construct_UScriptStruct_FHitsoundsConfig_CRC());
+	}
+	return Singleton;
+}
+static FCompiledInDeferStruct Z_CompiledInDeferStruct_UScriptStruct_FHitsoundsConfig(FHitsoundsConfig::StaticStruct, TEXT("/Script/NetcodePlus"), TEXT("HitsoundsConfig"), false, nullptr, nullptr);
+static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsoundsConfig
+{
+	FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsoundsConfig()
+	{
+		UScriptStruct::DeferCppStructOps(FName(TEXT("HitsoundsConfig")),new UScriptStruct::TCppStructOps<FHitsoundsConfig>);
+	}
+} ScriptStruct_NetcodePlus_StaticRegisterNativesFHitsoundsConfig;
+class UScriptStruct* FHitsound::StaticStruct()
+{
+	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
+	static class UScriptStruct* Singleton = NULL;
+	if (!Singleton)
+	{
+		extern NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FHitsound();
+		extern NETCODEPLUS_API uint32 Get_Z_Construct_UScriptStruct_FHitsound_CRC();
+		Singleton = GetStaticStruct(Z_Construct_UScriptStruct_FHitsound, Z_Construct_UPackage__Script_NetcodePlus(), TEXT("Hitsound"), sizeof(FHitsound), Get_Z_Construct_UScriptStruct_FHitsound_CRC());
+	}
+	return Singleton;
+}
+static FCompiledInDeferStruct Z_CompiledInDeferStruct_UScriptStruct_FHitsound(FHitsound::StaticStruct, TEXT("/Script/NetcodePlus"), TEXT("Hitsound"), false, nullptr, nullptr);
+static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsound
+{
+	FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsound()
+	{
+		UScriptStruct::DeferCppStructOps(FName(TEXT("Hitsound")),new UScriptStruct::TCppStructOps<FHitsound>);
+	}
+} ScriptStruct_NetcodePlus_StaticRegisterNativesFHitsound;
+	void AMutHitsounds::BuildHitsounds()
+	{
+		ProcessEvent(FindFunctionChecked(NETCODEPLUS_BuildHitsounds),NULL);
+	}
+	void AMutHitsounds::EventMutateClientSide(const FString& MutateString, APlayerController* Sender)
+	{
+		MutHitsounds_eventEventMutateClientSide_Parms Parms;
+		Parms.MutateString=MutateString;
+		Parms.Sender=Sender;
+		ProcessEvent(FindFunctionChecked(NETCODEPLUS_EventMutateClientSide),&Parms);
+	}
+	void AMutHitsounds::StaticRegisterNativesAMutHitsounds()
+	{
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "AppendFlakQueue",(Native)&AMutHitsounds::execAppendFlakQueue);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "BuildHitsounds",(Native)&AMutHitsounds::execBuildHitsounds);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "EventMutateClientSide",(Native)&AMutHitsounds::execEventMutateClientSide);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "GetConfig",(Native)&AMutHitsounds::execGetConfig);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "GetHitsoundByName",(Native)&AMutHitsounds::execGetHitsoundByName);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "GetScaledDamage",(Native)&AMutHitsounds::execGetScaledDamage);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "HandleDamage",(Native)&AMutHitsounds::execHandleDamage);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "IsFlakDamage",(Native)&AMutHitsounds::execIsFlakDamage);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "MakeHitsound",(Native)&AMutHitsounds::execMakeHitsound);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "NotifyDamage",(Native)&AMutHitsounds::execNotifyDamage);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "PlayHitsound",(Native)&AMutHitsounds::execPlayHitsound);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "PlaySampleHitsound",(Native)&AMutHitsounds::execPlaySampleHitsound);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "ProcessFlakQueue",(Native)&AMutHitsounds::execProcessFlakQueue);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "ReadConfig",(Native)&AMutHitsounds::execReadConfig);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "ReadConfigSection",(Native)&AMutHitsounds::execReadConfigSection);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "SelectSoundForDamage",(Native)&AMutHitsounds::execSelectSoundForDamage);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "ShouldPlayHitsound",(Native)&AMutHitsounds::execShouldPlayHitsound);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "ShowMenu",(Native)&AMutHitsounds::execShowMenu);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "WriteConfig",(Native)&AMutHitsounds::execWriteConfig);
+		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "WriteConfigSection",(Native)&AMutHitsounds::execWriteConfigSection);
+	}
+	IMPLEMENT_CLASS(AMutHitsounds, 2138622872);
 	void ATeamArenaCharacter::StaticRegisterNativesATeamArenaCharacter()
 	{
 	}
@@ -37,10 +134,46 @@ FName NETCODEPLUS_ServerStopFireFixed = FName(TEXT("ServerStopFireFixed"));
 	{
 	}
 	IMPLEMENT_CLASS(ATeamArenaPredictionPC, 1568488174);
+static class UEnum* EHitsoundMessageType_StaticEnum()
+{
+	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
+	static class UEnum* Singleton = NULL;
+	if (!Singleton)
+	{
+		extern NETCODEPLUS_API class UEnum* Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType();
+		Singleton = GetStaticEnum(Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType, Z_Construct_UPackage__Script_NetcodePlus(), TEXT("EHitsoundMessageType"));
+	}
+	return Singleton;
+}
+static FCompiledInDeferEnum Z_CompiledInDeferEnum_UEnum_EHitsoundMessageType(EHitsoundMessageType_StaticEnum, TEXT("/Script/NetcodePlus"), TEXT("EHitsoundMessageType"), false, nullptr, nullptr);
+	void UUTHitsoundMessage::StaticRegisterNativesUUTHitsoundMessage()
+	{
+	}
+	IMPLEMENT_CLASS(UUTHitsoundMessage, 3300249145);
 	void AUTPlusProj_ShockBall::StaticRegisterNativesAUTPlusProj_ShockBall()
 	{
 	}
 	IMPLEMENT_CLASS(AUTPlusProj_ShockBall, 4085479409);
+class UScriptStruct* FNetcodeDelayedProjectile::StaticStruct()
+{
+	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
+	static class UScriptStruct* Singleton = NULL;
+	if (!Singleton)
+	{
+		extern NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FNetcodeDelayedProjectile();
+		extern NETCODEPLUS_API uint32 Get_Z_Construct_UScriptStruct_FNetcodeDelayedProjectile_CRC();
+		Singleton = GetStaticStruct(Z_Construct_UScriptStruct_FNetcodeDelayedProjectile, Z_Construct_UPackage__Script_NetcodePlus(), TEXT("NetcodeDelayedProjectile"), sizeof(FNetcodeDelayedProjectile), Get_Z_Construct_UScriptStruct_FNetcodeDelayedProjectile_CRC());
+	}
+	return Singleton;
+}
+static FCompiledInDeferStruct Z_CompiledInDeferStruct_UScriptStruct_FNetcodeDelayedProjectile(FNetcodeDelayedProjectile::StaticStruct, TEXT("/Script/NetcodePlus"), TEXT("NetcodeDelayedProjectile"), false, nullptr, nullptr);
+static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProjectile
+{
+	FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProjectile()
+	{
+		UScriptStruct::DeferCppStructOps(FName(TEXT("NetcodeDelayedProjectile")),new UScriptStruct::TCppStructOps<FNetcodeDelayedProjectile>);
+	}
+} ScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProjectile;
 	void AUTWeaponFix::ClientConfirmFireEvent(uint8 FireModeNum, int32 InAuthorizedEventIndex)
 	{
 		UTWeaponFix_eventClientConfirmFireEvent_Parms Parms;
@@ -75,7 +208,7 @@ FName NETCODEPLUS_ServerStopFireFixed = FName(TEXT("ServerStopFireFixed"));
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ServerStartFireFixed",(Native)&AUTWeaponFix::execServerStartFireFixed);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ServerStopFireFixed",(Native)&AUTWeaponFix::execServerStopFireFixed);
 	}
-	IMPLEMENT_CLASS(AUTWeaponFix, 902675174);
+	IMPLEMENT_CLASS(AUTWeaponFix, 2211846058);
 	FVector AUTPlusFlakCannon::GetFireLocationForMultiShot(int32 MultiShotIndex, FVector const& FireLocation, FRotator const& FireRotation)
 	{
 		UTPlusFlakCannon_eventGetFireLocationForMultiShot_Parms Parms;
@@ -99,7 +232,7 @@ FName NETCODEPLUS_ServerStopFireFixed = FName(TEXT("ServerStopFireFixed"));
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusFlakCannon::StaticClass(), "GetFireLocationForMultiShot",(Native)&AUTPlusFlakCannon::execGetFireLocationForMultiShot);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusFlakCannon::StaticClass(), "GetFireRotationForMultiShot",(Native)&AUTPlusFlakCannon::execGetFireRotationForMultiShot);
 	}
-	IMPLEMENT_CLASS(AUTPlusFlakCannon, 1564738736);
+	IMPLEMENT_CLASS(AUTPlusFlakCannon, 1506517588);
 	void AUTPlusShockRifle::ClientNotifyImpressive()
 	{
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ClientNotifyImpressive),NULL);
@@ -117,7 +250,7 @@ FName NETCODEPLUS_ServerStopFireFixed = FName(TEXT("ServerStopFireFixed"));
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "ClientNotifyImpressive",(Native)&AUTPlusShockRifle::execClientNotifyImpressive);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "UpdateScreenTexture",(Native)&AUTPlusShockRifle::execUpdateScreenTexture);
 	}
-	IMPLEMENT_CLASS(AUTPlusShockRifle, 3834240038);
+	IMPLEMENT_CLASS(AUTPlusShockRifle, 120931133);
 	void AUTPlusSniper::ClientNotifyImpressive()
 	{
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ClientNotifyImpressive),NULL);
@@ -130,7 +263,7 @@ FName NETCODEPLUS_ServerStopFireFixed = FName(TEXT("ServerStopFireFixed"));
 	{
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusSniper::StaticClass(), "ClientNotifyImpressive",(Native)&AUTPlusSniper::execClientNotifyImpressive);
 	}
-	IMPLEMENT_CLASS(AUTPlusSniper, 2633198460);
+	IMPLEMENT_CLASS(AUTPlusSniper, 371174707);
 class UScriptStruct* FPlusRocketFireMode::StaticStruct()
 {
 	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
@@ -166,7 +299,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "OnRep_PendingLockedTarget",(Native)&AUTPlusWeap_RocketLauncher::execOnRep_PendingLockedTarget);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "ServerCycleRocketMode",(Native)&AUTPlusWeap_RocketLauncher::execServerCycleRocketMode);
 	}
-	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 794530006);
+	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 1756732399);
 	void AUTWeap_LinkGun_Plus::DrawWeaponCrosshair(UUTHUDWidget* WeaponHudWidget, float RenderDelta)
 	{
 		UTWeap_LinkGun_Plus_eventDrawWeaponCrosshair_Parms Parms;
@@ -209,7 +342,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeap_LinkGun_Plus::StaticClass(), "ServerStopBeamFiring",(Native)&AUTWeap_LinkGun_Plus::execServerStopBeamFiring);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeap_LinkGun_Plus::StaticClass(), "UpdateScreenTexture",(Native)&AUTWeap_LinkGun_Plus::execUpdateScreenTexture);
 	}
-	IMPLEMENT_CLASS(AUTWeap_LinkGun_Plus, 1006710852);
+	IMPLEMENT_CLASS(AUTWeap_LinkGun_Plus, 4253033214);
 	void UUTWeaponStateFiring_Transactional::StaticRegisterNativesUUTWeaponStateFiring_Transactional()
 	{
 	}
@@ -231,18 +364,28 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	IMPLEMENT_CLASS(UUTWeaponStateZoomingFix, 1712361309);
 #if USE_COMPILED_IN_NATIVES
 // Cross Module References
+	ENGINE_API class UClass* Z_Construct_UClass_APawn_NoRegister();
+	ENGINE_API class UClass* Z_Construct_UClass_AController_NoRegister();
+	ENGINE_API class UClass* Z_Construct_UClass_USoundBase_NoRegister();
+	ENGINE_API class UClass* Z_Construct_UClass_APlayerController_NoRegister();
+	ENGINE_API class UClass* Z_Construct_UClass_UDamageType_NoRegister();
+	ENGINE_API class UClass* Z_Construct_UClass_AActor_NoRegister();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTMutator();
+	ENGINE_API class UScriptStruct* Z_Construct_UScriptStruct_FTimerHandle();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTLocalMessage_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTCharacter();
 	COREUOBJECT_API class UScriptStruct* Z_Construct_UScriptStruct_FLinearColor();
 	ENGINE_API class UClass* Z_Construct_UClass_UMaterialInterface_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTCharacterMovement();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTPlayerController();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTLocalMessage();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProj_ShockBall();
 	ENGINE_API class UClass* Z_Construct_UClass_UParticleSystemComponent_NoRegister();
-	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTCharacter_NoRegister();
 	COREUOBJECT_API class UScriptStruct* Z_Construct_UScriptStruct_FRotator();
-	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTWeapon();
 	COREUOBJECT_API class UScriptStruct* Z_Construct_UScriptStruct_FVector();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProjectile_NoRegister();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTCharacter_NoRegister();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTWeapon();
 	ENGINE_API class UClass* Z_Construct_UClass_UCanvas_NoRegister();
 	ENGINE_API class UClass* Z_Construct_UClass_UAnimMontage_NoRegister();
 	ENGINE_API class UClass* Z_Construct_UClass_UMaterialInstanceDynamic_NoRegister();
@@ -250,10 +393,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	ENGINE_API class UClass* Z_Construct_UClass_UTexture2D_NoRegister();
 	ENGINE_API class UClass* Z_Construct_UClass_UCanvasRenderTarget2D_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProj_ShockBall_NoRegister();
-	ENGINE_API class UClass* Z_Construct_UClass_UDamageType_NoRegister();
-	ENGINE_API class UClass* Z_Construct_UClass_USoundBase_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProj_Rocket_NoRegister();
-	ENGINE_API class UClass* Z_Construct_UClass_AActor_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTHUDWidget_NoRegister();
 	ENGINE_API class UScriptStruct* Z_Construct_UScriptStruct_FVector_NetQuantize();
 	ENGINE_API class UClass* Z_Construct_UClass_UParticleSystem_NoRegister();
@@ -261,14 +401,43 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTWeaponStateFiringLinkBeam();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTWeaponStateZooming();
 
+	NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FFlakHitEvent();
+	NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FHitsoundsConfig();
+	NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FHitsound();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_AppendFlakQueue();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_BuildHitsounds();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_EventMutateClientSide();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_GetConfig();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_GetHitsoundByName();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_GetScaledDamage();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_HandleDamage();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_IsFlakDamage();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_MakeHitsound();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_NotifyDamage();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_PlayHitsound();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_PlaySampleHitsound();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_ProcessFlakQueue();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_ReadConfig();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_ReadConfigSection();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_SelectSoundForDamage();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_ShouldPlayHitsound();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_ShowMenu();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_WriteConfig();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_WriteConfigSection();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds_NoRegister();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_UTeamArenaCharacterMovement_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_UTeamArenaCharacterMovement();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaPredictionPC_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaPredictionPC();
+	NETCODEPLUS_API class UEnum* Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_UUTHitsoundMessage_NoRegister();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_UUTHitsoundMessage();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_ShockBall_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_ShockBall();
+	NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FNetcodeDelayedProjectile();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ClientConfirmFireEvent();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_OnRep_FireModeState();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ServerStartFireFixed();
@@ -317,6 +486,725 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_UUTWeaponStateZoomingFix_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_UUTWeaponStateZoomingFix();
 	NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
+	UScriptStruct* Z_Construct_UScriptStruct_FFlakHitEvent()
+	{
+		UPackage* Outer = Z_Construct_UPackage__Script_NetcodePlus();
+		extern uint32 Get_Z_Construct_UScriptStruct_FFlakHitEvent_CRC();
+		static UScriptStruct* ReturnStruct = FindExistingStructIfHotReloadOrDynamic(Outer, TEXT("FlakHitEvent"), sizeof(FFlakHitEvent), Get_Z_Construct_UScriptStruct_FFlakHitEvent_CRC(), false);
+		if (!ReturnStruct)
+		{
+			ReturnStruct = new(EC_InternalUseOnlyConstructor, Outer, TEXT("FlakHitEvent"), RF_Public|RF_Transient|RF_MarkAsNative) UScriptStruct(FObjectInitializer(), NULL, new UScriptStruct::TCppStructOps<FFlakHitEvent>, EStructFlags(0x00000001));
+			UProperty* NewProp_Victim = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Victim"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Victim, FFlakHitEvent), 0x0010000000000000, Z_Construct_UClass_APawn_NoRegister());
+			UProperty* NewProp_CausedBy = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("CausedBy"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(CausedBy, FFlakHitEvent), 0x0010000000000000, Z_Construct_UClass_AController_NoRegister());
+			UProperty* NewProp_WorldTime = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("WorldTime"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(WorldTime, FFlakHitEvent), 0x0010000000000000);
+			UProperty* NewProp_Damage = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Damage"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(Damage, FFlakHitEvent), 0x0010000000000000);
+			ReturnStruct->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnStruct->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnStruct, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnStruct, TEXT("ToolTip"), TEXT("Flak hit event for batching multiple shard hits"));
+			MetaData->SetValue(NewProp_Victim, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_CausedBy, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_WorldTime, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_Damage, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+#endif
+		}
+		return ReturnStruct;
+	}
+	uint32 Get_Z_Construct_UScriptStruct_FFlakHitEvent_CRC() { return 3488981448U; }
+	UScriptStruct* Z_Construct_UScriptStruct_FHitsoundsConfig()
+	{
+		UPackage* Outer = Z_Construct_UPackage__Script_NetcodePlus();
+		extern uint32 Get_Z_Construct_UScriptStruct_FHitsoundsConfig_CRC();
+		static UScriptStruct* ReturnStruct = FindExistingStructIfHotReloadOrDynamic(Outer, TEXT("HitsoundsConfig"), sizeof(FHitsoundsConfig), Get_Z_Construct_UScriptStruct_FHitsoundsConfig_CRC(), false);
+		if (!ReturnStruct)
+		{
+			ReturnStruct = new(EC_InternalUseOnlyConstructor, Outer, TEXT("HitsoundsConfig"), RF_Public|RF_Transient|RF_MarkAsNative) UScriptStruct(FObjectInitializer(), NULL, new UScriptStruct::TCppStructOps<FHitsoundsConfig>, EStructFlags(0x00000001));
+			UProperty* NewProp_UserMultiplier = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("UserMultiplier"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(UserMultiplier, FHitsoundsConfig), 0x0010000000000005);
+			CPP_BOOL_PROPERTY_BITMASK_STRUCT(bPlayZeroFriendly, FHitsoundsConfig, bool);
+			UProperty* NewProp_bPlayZeroFriendly = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("bPlayZeroFriendly"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(bPlayZeroFriendly, FHitsoundsConfig), 0x0010000000000005, CPP_BOOL_PROPERTY_BITMASK(bPlayZeroFriendly, FHitsoundsConfig), sizeof(bool), true);
+			UProperty* NewProp_Friendly = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Friendly"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(Friendly, FHitsoundsConfig), 0x0010000000000005, Z_Construct_UScriptStruct_FHitsound());
+			UProperty* NewProp_Enemy = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Enemy"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(Enemy, FHitsoundsConfig), 0x0010000000000005, Z_Construct_UScriptStruct_FHitsound());
+			ReturnStruct->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnStruct->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnStruct, TEXT("BlueprintType"), TEXT("true"));
+			MetaData->SetValue(ReturnStruct, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnStruct, TEXT("ToolTip"), TEXT("Hitsound configuration structure\nStores settings for enemy/friendly hitsound playback"));
+			MetaData->SetValue(NewProp_UserMultiplier, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(NewProp_UserMultiplier, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_UserMultiplier, TEXT("ToolTip"), TEXT("User-defined volume multiplier (applied on top of preset volume)"));
+			MetaData->SetValue(NewProp_bPlayZeroFriendly, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(NewProp_bPlayZeroFriendly, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_bPlayZeroFriendly, TEXT("ToolTip"), TEXT("Whether to play hitsound on zero damage (e.g., friendly fire with 0 damage)"));
+			MetaData->SetValue(NewProp_Friendly, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(NewProp_Friendly, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_Friendly, TEXT("ToolTip"), TEXT("Hitsound preset for friendly fire hits"));
+			MetaData->SetValue(NewProp_Enemy, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(NewProp_Enemy, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_Enemy, TEXT("ToolTip"), TEXT("Hitsound preset for enemy hits"));
+#endif
+		}
+		return ReturnStruct;
+	}
+	uint32 Get_Z_Construct_UScriptStruct_FHitsoundsConfig_CRC() { return 551089311U; }
+	UScriptStruct* Z_Construct_UScriptStruct_FHitsound()
+	{
+		UPackage* Outer = Z_Construct_UPackage__Script_NetcodePlus();
+		extern uint32 Get_Z_Construct_UScriptStruct_FHitsound_CRC();
+		static UScriptStruct* ReturnStruct = FindExistingStructIfHotReloadOrDynamic(Outer, TEXT("Hitsound"), sizeof(FHitsound), Get_Z_Construct_UScriptStruct_FHitsound_CRC(), false);
+		if (!ReturnStruct)
+		{
+			ReturnStruct = new(EC_InternalUseOnlyConstructor, Outer, TEXT("Hitsound"), RF_Public|RF_Transient|RF_MarkAsNative) UScriptStruct(FObjectInitializer(), NULL, new UScriptStruct::TCppStructOps<FHitsound>, EStructFlags(0x00000001));
+			UProperty* NewProp_DisplayName = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("DisplayName"), RF_Public|RF_Transient|RF_MarkAsNative) UStrProperty(CPP_PROPERTY_BASE(DisplayName, FHitsound), 0x0010000000000005);
+			UProperty* NewProp_High = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("High"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(High, FHitsound), 0x0010000000000005, Z_Construct_UClass_USoundBase_NoRegister());
+			UProperty* NewProp_Med = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Med"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Med, FHitsound), 0x0010000000000005, Z_Construct_UClass_USoundBase_NoRegister());
+			UProperty* NewProp_Low = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Low"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Low, FHitsound), 0x0010000000000005, Z_Construct_UClass_USoundBase_NoRegister());
+			UProperty* NewProp_Pitch = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Pitch"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(Pitch, FHitsound), 0x0010000000000005);
+			UProperty* NewProp_Volume = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Volume"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(Volume, FHitsound), 0x0010000000000005);
+			ReturnStruct->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnStruct->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnStruct, TEXT("BlueprintType"), TEXT("true"));
+			MetaData->SetValue(ReturnStruct, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnStruct, TEXT("ToolTip"), TEXT("Individual hitsound preset with volume/pitch and damage-scaled sounds"));
+			MetaData->SetValue(NewProp_DisplayName, TEXT("Category"), TEXT("Hitsound"));
+			MetaData->SetValue(NewProp_DisplayName, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_DisplayName, TEXT("ToolTip"), TEXT("Display name for UI"));
+			MetaData->SetValue(NewProp_High, TEXT("Category"), TEXT("Hitsound"));
+			MetaData->SetValue(NewProp_High, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_High, TEXT("ToolTip"), TEXT("Sound for high damage hits"));
+			MetaData->SetValue(NewProp_Med, TEXT("Category"), TEXT("Hitsound"));
+			MetaData->SetValue(NewProp_Med, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_Med, TEXT("ToolTip"), TEXT("Sound for medium damage hits"));
+			MetaData->SetValue(NewProp_Low, TEXT("Category"), TEXT("Hitsound"));
+			MetaData->SetValue(NewProp_Low, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_Low, TEXT("ToolTip"), TEXT("Sound for low damage hits"));
+			MetaData->SetValue(NewProp_Pitch, TEXT("Category"), TEXT("Hitsound"));
+			MetaData->SetValue(NewProp_Pitch, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_Pitch, TEXT("ToolTip"), TEXT("Pitch multiplier (default 1.0)"));
+			MetaData->SetValue(NewProp_Volume, TEXT("Category"), TEXT("Hitsound"));
+			MetaData->SetValue(NewProp_Volume, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(NewProp_Volume, TEXT("ToolTip"), TEXT("Volume multiplier (default 1.0)"));
+#endif
+		}
+		return ReturnStruct;
+	}
+	uint32 Get_Z_Construct_UScriptStruct_FHitsound_CRC() { return 1196304624U; }
+	UFunction* Z_Construct_UFunction_AMutHitsounds_AppendFlakQueue()
+	{
+		struct MutHitsounds_eventAppendFlakQueue_Parms
+		{
+			int32 Damage;
+			AController* CausedBy;
+			APawn* Victim;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("AppendFlakQueue"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535, sizeof(MutHitsounds_eventAppendFlakQueue_Parms));
+			UProperty* NewProp_Victim = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Victim"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Victim, MutHitsounds_eventAppendFlakQueue_Parms), 0x0010000000000080, Z_Construct_UClass_APawn_NoRegister());
+			UProperty* NewProp_CausedBy = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("CausedBy"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(CausedBy, MutHitsounds_eventAppendFlakQueue_Parms), 0x0010000000000080, Z_Construct_UClass_AController_NoRegister());
+			UProperty* NewProp_Damage = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Damage"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(Damage, MutHitsounds_eventAppendFlakQueue_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Server"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Add a flak hit to the batching queue"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_BuildHitsounds()
+	{
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("BuildHitsounds"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x0C020C00, 65535);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Config"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Build hitsounds array from available presets (override in BP to add custom sounds)"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_EventMutateClientSide()
+	{
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("EventMutateClientSide"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x00024CC0, 65535, sizeof(MutHitsounds_eventEventMutateClientSide_Parms));
+			UProperty* NewProp_Sender = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Sender"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Sender, MutHitsounds_eventEventMutateClientSide_Parms), 0x0010000000000080, Z_Construct_UClass_APlayerController_NoRegister());
+			UProperty* NewProp_MutateString = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("MutateString"), RF_Public|RF_Transient|RF_MarkAsNative) UStrProperty(CPP_PROPERTY_BASE(MutateString, MutHitsounds_eventEventMutateClientSide_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Replicate mutate command to all clients"));
+			MetaData->SetValue(NewProp_MutateString, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_GetConfig()
+	{
+		struct MutHitsounds_eventGetConfig_Parms
+		{
+			FHitsoundsConfig ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("GetConfig"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x54020401, 65535, sizeof(MutHitsounds_eventGetConfig_Parms));
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(ReturnValue, MutHitsounds_eventGetConfig_Parms), 0x0010000008000582, Z_Construct_UScriptStruct_FHitsoundsConfig());
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Get current config (for LocalMessage access)"));
+			MetaData->SetValue(NewProp_ReturnValue, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_GetHitsoundByName()
+	{
+		struct MutHitsounds_eventGetHitsoundByName_Parms
+		{
+			FString Name;
+			FHitsound ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("GetHitsoundByName"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535, sizeof(MutHitsounds_eventGetHitsoundByName_Parms));
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(ReturnValue, MutHitsounds_eventGetHitsoundByName_Parms), 0x0010000000000580, Z_Construct_UScriptStruct_FHitsound());
+			UProperty* NewProp_Name = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Name"), RF_Public|RF_Transient|RF_MarkAsNative) UStrProperty(CPP_PROPERTY_BASE(Name, MutHitsounds_eventGetHitsoundByName_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Config"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Get hitsound preset by display name"));
+			MetaData->SetValue(NewProp_Name, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_GetScaledDamage()
+	{
+		struct MutHitsounds_eventGetScaledDamage_Parms
+		{
+			AController* InstigatorController;
+			int32 BaseDamage;
+			int32 ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("GetScaledDamage"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535, sizeof(MutHitsounds_eventGetScaledDamage_Parms));
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(ReturnValue, MutHitsounds_eventGetScaledDamage_Parms), 0x0010000000000580);
+			UProperty* NewProp_BaseDamage = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("BaseDamage"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(BaseDamage, MutHitsounds_eventGetScaledDamage_Parms), 0x0010000000000080);
+			UProperty* NewProp_InstigatorController = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("InstigatorController"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(InstigatorController, MutHitsounds_eventGetScaledDamage_Parms), 0x0010000000000080, Z_Construct_UClass_AController_NoRegister());
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Server"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Get scaled damage value (can be overridden for damage scaling)"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_HandleDamage()
+	{
+		struct MutHitsounds_eventHandleDamage_Parms
+		{
+			AController* CausedBy;
+			APawn* Victim;
+			int32 Damage;
+			TSubclassOf<UDamageType>  Type;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("HandleDamage"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535, sizeof(MutHitsounds_eventHandleDamage_Parms));
+			UProperty* NewProp_Type = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Type"), RF_Public|RF_Transient|RF_MarkAsNative) UClassProperty(CPP_PROPERTY_BASE(Type, MutHitsounds_eventHandleDamage_Parms), 0x0014000000000080, Z_Construct_UClass_UDamageType_NoRegister(), UClass::StaticClass());
+			UProperty* NewProp_Damage = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Damage"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(Damage, MutHitsounds_eventHandleDamage_Parms), 0x0010000000000080);
+			UProperty* NewProp_Victim = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Victim"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Victim, MutHitsounds_eventHandleDamage_Parms), 0x0010000000000080, Z_Construct_UClass_APawn_NoRegister());
+			UProperty* NewProp_CausedBy = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("CausedBy"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(CausedBy, MutHitsounds_eventHandleDamage_Parms), 0x0010000000000080, Z_Construct_UClass_AController_NoRegister());
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Server"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Handle damage event and trigger hitsound"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_IsFlakDamage()
+	{
+		struct MutHitsounds_eventIsFlakDamage_Parms
+		{
+			TSubclassOf<UDamageType>  DamageType;
+			bool ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("IsFlakDamage"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x54080401, 65535, sizeof(MutHitsounds_eventIsFlakDamage_Parms));
+			CPP_BOOL_PROPERTY_BITMASK_STRUCT(ReturnValue, MutHitsounds_eventIsFlakDamage_Parms, bool);
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(ReturnValue, MutHitsounds_eventIsFlakDamage_Parms), 0x0010000000000580, CPP_BOOL_PROPERTY_BITMASK(ReturnValue, MutHitsounds_eventIsFlakDamage_Parms), sizeof(bool), true);
+			UProperty* NewProp_DamageType = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("DamageType"), RF_Public|RF_Transient|RF_MarkAsNative) UClassProperty(CPP_PROPERTY_BASE(DamageType, MutHitsounds_eventIsFlakDamage_Parms), 0x0014000000000080, Z_Construct_UClass_UDamageType_NoRegister(), UClass::StaticClass());
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Util"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Check if damage type is from flak shards"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_MakeHitsound()
+	{
+		struct MutHitsounds_eventMakeHitsound_Parms
+		{
+			float Volume;
+			float Pitch;
+			USoundBase* Low;
+			USoundBase* Med;
+			USoundBase* High;
+			FString InDisplayName;
+			FHitsound ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("MakeHitsound"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x14022401, 65535, sizeof(MutHitsounds_eventMakeHitsound_Parms));
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(ReturnValue, MutHitsounds_eventMakeHitsound_Parms), 0x0010000000000580, Z_Construct_UScriptStruct_FHitsound());
+			UProperty* NewProp_InDisplayName = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("InDisplayName"), RF_Public|RF_Transient|RF_MarkAsNative) UStrProperty(CPP_PROPERTY_BASE(InDisplayName, MutHitsounds_eventMakeHitsound_Parms), 0x0010000000000080);
+			UProperty* NewProp_High = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("High"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(High, MutHitsounds_eventMakeHitsound_Parms), 0x0010000000000080, Z_Construct_UClass_USoundBase_NoRegister());
+			UProperty* NewProp_Med = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Med"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Med, MutHitsounds_eventMakeHitsound_Parms), 0x0010000000000080, Z_Construct_UClass_USoundBase_NoRegister());
+			UProperty* NewProp_Low = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Low"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Low, MutHitsounds_eventMakeHitsound_Parms), 0x0010000000000080, Z_Construct_UClass_USoundBase_NoRegister());
+			UProperty* NewProp_Pitch = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Pitch"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(Pitch, MutHitsounds_eventMakeHitsound_Parms), 0x0010000000000080);
+			UProperty* NewProp_Volume = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Volume"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(Volume, MutHitsounds_eventMakeHitsound_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Config"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Make a hitsound struct (helper for Blueprint)"));
+			MetaData->SetValue(NewProp_InDisplayName, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_NotifyDamage()
+	{
+		struct MutHitsounds_eventNotifyDamage_Parms
+		{
+			int32 Damage;
+			AController* CausedBy;
+			APawn* Victim;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("NotifyDamage"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535, sizeof(MutHitsounds_eventNotifyDamage_Parms));
+			UProperty* NewProp_Victim = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Victim"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(Victim, MutHitsounds_eventNotifyDamage_Parms), 0x0010000000000080, Z_Construct_UClass_APawn_NoRegister());
+			UProperty* NewProp_CausedBy = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("CausedBy"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(CausedBy, MutHitsounds_eventNotifyDamage_Parms), 0x0010000000000080, Z_Construct_UClass_AController_NoRegister());
+			UProperty* NewProp_Damage = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Damage"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(Damage, MutHitsounds_eventNotifyDamage_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Server"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Notify damage to attacker and replay spectators"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_PlayHitsound()
+	{
+		struct MutHitsounds_eventPlayHitsound_Parms
+		{
+			int32 Damage;
+			bool bIsFriendly;
+			TSubclassOf<UDamageType>  Type;
+			AActor* HitsoundPlayer;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("PlayHitsound"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535, sizeof(MutHitsounds_eventPlayHitsound_Parms));
+			UProperty* NewProp_HitsoundPlayer = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("HitsoundPlayer"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(HitsoundPlayer, MutHitsounds_eventPlayHitsound_Parms), 0x0010000000000080, Z_Construct_UClass_AActor_NoRegister());
+			UProperty* NewProp_Type = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Type"), RF_Public|RF_Transient|RF_MarkAsNative) UClassProperty(CPP_PROPERTY_BASE(Type, MutHitsounds_eventPlayHitsound_Parms), 0x0014000000000080, Z_Construct_UClass_UDamageType_NoRegister(), UClass::StaticClass());
+			CPP_BOOL_PROPERTY_BITMASK_STRUCT(bIsFriendly, MutHitsounds_eventPlayHitsound_Parms, bool);
+			UProperty* NewProp_bIsFriendly = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("bIsFriendly"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(bIsFriendly, MutHitsounds_eventPlayHitsound_Parms), 0x0010000000000080, CPP_BOOL_PROPERTY_BITMASK(bIsFriendly, MutHitsounds_eventPlayHitsound_Parms), sizeof(bool), true);
+			UProperty* NewProp_Damage = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Damage"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(Damage, MutHitsounds_eventPlayHitsound_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Play hitsound for a specific player\n@param Damage - Damage amount (used to select Low/Med/High sound)\n@param bIsFriendly - Whether this was friendly fire\n@param Type - Damage type\n@param HitsoundPlayer - Actor to play sound through (implements interface or uses fallback)"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_PlaySampleHitsound()
+	{
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("PlaySampleHitsound"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Play a sample hitsound (for menu preview)"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_ProcessFlakQueue()
+	{
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("ProcessFlakQueue"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Server"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Process queued flak hits"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_ReadConfig()
+	{
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("ReadConfig"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Config"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Read configuration from mod config (uses UT4's mod config system)"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_ReadConfigSection()
+	{
+		struct MutHitsounds_eventReadConfigSection_Parms
+		{
+			FString Section;
+			FHitsound Default;
+			FHitsound ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("ReadConfigSection"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04420401, 65535, sizeof(MutHitsounds_eventReadConfigSection_Parms));
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(ReturnValue, MutHitsounds_eventReadConfigSection_Parms), 0x0010000000000580, Z_Construct_UScriptStruct_FHitsound());
+			UProperty* NewProp_Default = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Default"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(Default, MutHitsounds_eventReadConfigSection_Parms), 0x0010000008000182, Z_Construct_UScriptStruct_FHitsound());
+			UProperty* NewProp_Section = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Section"), RF_Public|RF_Transient|RF_MarkAsNative) UStrProperty(CPP_PROPERTY_BASE(Section, MutHitsounds_eventReadConfigSection_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Config"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Read a single config section into an FHitsound struct\n@param Section - Config section name (e.g., \"Enemy\", \"Friendly\")\n@param Default - Default FHitsound to use if config missing\n@return Configured FHitsound"));
+			MetaData->SetValue(NewProp_Default, TEXT("NativeConst"), TEXT(""));
+			MetaData->SetValue(NewProp_Section, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_SelectSoundForDamage()
+	{
+		struct MutHitsounds_eventSelectSoundForDamage_Parms
+		{
+			FHitsound Hitsound;
+			int32 Damage;
+			USoundBase* ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("SelectSoundForDamage"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x54420401, 65535, sizeof(MutHitsounds_eventSelectSoundForDamage_Parms));
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(ReturnValue, MutHitsounds_eventSelectSoundForDamage_Parms), 0x0010000000000580, Z_Construct_UClass_USoundBase_NoRegister());
+			UProperty* NewProp_Damage = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Damage"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(Damage, MutHitsounds_eventSelectSoundForDamage_Parms), 0x0010000000000080);
+			UProperty* NewProp_Hitsound = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Hitsound"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(Hitsound, MutHitsounds_eventSelectSoundForDamage_Parms), 0x0010000008000182, Z_Construct_UScriptStruct_FHitsound());
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Select appropriate sound from hitsound based on damage\n@param Hitsound - The hitsound preset\n@param Damage - Damage dealt\n@return Sound to play (Low, Med, or High based on thresholds)"));
+			MetaData->SetValue(NewProp_Hitsound, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_ShouldPlayHitsound()
+	{
+		struct MutHitsounds_eventShouldPlayHitsound_Parms
+		{
+			TSubclassOf<UDamageType>  DamageType;
+			bool ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("ShouldPlayHitsound"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x54080401, 65535, sizeof(MutHitsounds_eventShouldPlayHitsound_Parms));
+			CPP_BOOL_PROPERTY_BITMASK_STRUCT(ReturnValue, MutHitsounds_eventShouldPlayHitsound_Parms, bool);
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(ReturnValue, MutHitsounds_eventShouldPlayHitsound_Parms), 0x0010000000000580, CPP_BOOL_PROPERTY_BITMASK(ReturnValue, MutHitsounds_eventShouldPlayHitsound_Parms), sizeof(bool), true);
+			UProperty* NewProp_DamageType = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("DamageType"), RF_Public|RF_Transient|RF_MarkAsNative) UClassProperty(CPP_PROPERTY_BASE(DamageType, MutHitsounds_eventShouldPlayHitsound_Parms), 0x0014000000000080, Z_Construct_UClass_UDamageType_NoRegister(), UClass::StaticClass());
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Util"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Check if damage type should play a hitsound"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_ShowMenu()
+	{
+		struct MutHitsounds_eventShowMenu_Parms
+		{
+			FString Command;
+			APlayerController* InPlayerOwner;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("ShowMenu"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535, sizeof(MutHitsounds_eventShowMenu_Parms));
+			UProperty* NewProp_InPlayerOwner = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("InPlayerOwner"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(InPlayerOwner, MutHitsounds_eventShowMenu_Parms), 0x0010000000000080, Z_Construct_UClass_APlayerController_NoRegister());
+			UProperty* NewProp_Command = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Command"), RF_Public|RF_Transient|RF_MarkAsNative) UStrProperty(CPP_PROPERTY_BASE(Command, MutHitsounds_eventShowMenu_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Menu"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Show the hitsounds configuration menu"));
+			MetaData->SetValue(NewProp_Command, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_WriteConfig()
+	{
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("WriteConfig"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04020401, 65535);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Config"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Write configuration to mod config"));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UFunction* Z_Construct_UFunction_AMutHitsounds_WriteConfigSection()
+	{
+		struct MutHitsounds_eventWriteConfigSection_Parms
+		{
+			FString Section;
+			FHitsound Hitsound;
+		};
+		UObject* Outer=Z_Construct_UClass_AMutHitsounds();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("WriteConfigSection"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x04420401, 65535, sizeof(MutHitsounds_eventWriteConfigSection_Parms));
+			UProperty* NewProp_Hitsound = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Hitsound"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(Hitsound, MutHitsounds_eventWriteConfigSection_Parms), 0x0010000008000182, Z_Construct_UScriptStruct_FHitsound());
+			UProperty* NewProp_Section = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("Section"), RF_Public|RF_Transient|RF_MarkAsNative) UStrProperty(CPP_PROPERTY_BASE(Section, MutHitsounds_eventWriteConfigSection_Parms), 0x0010000000000080);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Hitsounds|Config"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Write a single config section from an FHitsound struct\n@param Section - Config section name\n@param Hitsound - FHitsound to write"));
+			MetaData->SetValue(NewProp_Hitsound, TEXT("NativeConst"), TEXT(""));
+			MetaData->SetValue(NewProp_Section, TEXT("NativeConst"), TEXT(""));
+#endif
+		}
+		return ReturnFunction;
+	}
+	UClass* Z_Construct_UClass_AMutHitsounds_NoRegister()
+	{
+		return AMutHitsounds::StaticClass();
+	}
+	UClass* Z_Construct_UClass_AMutHitsounds()
+	{
+		static UClass* OuterClass = NULL;
+		if (!OuterClass)
+		{
+			Z_Construct_UClass_AUTMutator();
+			Z_Construct_UPackage__Script_NetcodePlus();
+			OuterClass = AMutHitsounds::StaticClass();
+			if (!(OuterClass->ClassFlags & CLASS_Constructed))
+			{
+				UObjectForceRegistration(OuterClass);
+				OuterClass->ClassFlags |= 0x20900080;
+
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_AppendFlakQueue());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_BuildHitsounds());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_EventMutateClientSide());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_GetConfig());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_GetHitsoundByName());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_GetScaledDamage());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_HandleDamage());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_IsFlakDamage());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_MakeHitsound());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_NotifyDamage());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_PlayHitsound());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_PlaySampleHitsound());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_ProcessFlakQueue());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_ReadConfig());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_ReadConfigSection());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_SelectSoundForDamage());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_ShouldPlayHitsound());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_ShowMenu());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_WriteConfig());
+				OuterClass->LinkChild(Z_Construct_UFunction_AMutHitsounds_WriteConfigSection());
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				UProperty* NewProp_FlakHitMinAge = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FlakHitMinAge"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(FlakHitMinAge, AMutHitsounds), 0x0020080000000005);
+				UProperty* NewProp_FlakTimer = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FlakTimer"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(FlakTimer, AMutHitsounds), 0x0020080000000000, Z_Construct_UScriptStruct_FTimerHandle());
+				UProperty* NewProp_FlakHitQueue = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FlakHitQueue"), RF_Public|RF_Transient|RF_MarkAsNative) UArrayProperty(CPP_PROPERTY_BASE(FlakHitQueue, AMutHitsounds), 0x0020080000000000);
+				UProperty* NewProp_FlakHitQueue_Inner = new(EC_InternalUseOnlyConstructor, NewProp_FlakHitQueue, TEXT("FlakHitQueue"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(FObjectInitializer(), EC_CppProperty, 0, 0x0000000000000000, Z_Construct_UScriptStruct_FFlakHitEvent());
+				UProperty* NewProp_HighDamageThreshold = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("HighDamageThreshold"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(HighDamageThreshold, AMutHitsounds), 0x0020080000000005);
+				UProperty* NewProp_MedDamageThreshold = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("MedDamageThreshold"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(MedDamageThreshold, AMutHitsounds), 0x0020080000000005);
+				UProperty* NewProp_AllHitsounds = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("AllHitsounds"), RF_Public|RF_Transient|RF_MarkAsNative) UArrayProperty(CPP_PROPERTY_BASE(AllHitsounds, AMutHitsounds), 0x0020080000000005);
+				UProperty* NewProp_AllHitsounds_Inner = new(EC_InternalUseOnlyConstructor, NewProp_AllHitsounds, TEXT("AllHitsounds"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(FObjectInitializer(), EC_CppProperty, 0, 0x0000000000000000, Z_Construct_UScriptStruct_FHitsound());
+				UProperty* NewProp_HitsoundsDefaults = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("HitsoundsDefaults"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(HitsoundsDefaults, AMutHitsounds), 0x0020080000000005, Z_Construct_UScriptStruct_FHitsoundsConfig());
+				UProperty* NewProp_Config = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("Config"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(Config, AMutHitsounds), 0x0020080000000005, Z_Construct_UScriptStruct_FHitsoundsConfig());
+				UProperty* NewProp_HitsoundMessageClass = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("HitsoundMessageClass"), RF_Public|RF_Transient|RF_MarkAsNative) UClassProperty(CPP_PROPERTY_BASE(HitsoundMessageClass, AMutHitsounds), 0x0024080000010001, Z_Construct_UClass_UUTLocalMessage_NoRegister(), UClass::StaticClass());
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_AppendFlakQueue(), "AppendFlakQueue"); // 3571403411
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_BuildHitsounds(), "BuildHitsounds"); // 720959878
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_EventMutateClientSide(), "EventMutateClientSide"); // 493966361
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_GetConfig(), "GetConfig"); // 4167836915
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_GetHitsoundByName(), "GetHitsoundByName"); // 3789119144
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_GetScaledDamage(), "GetScaledDamage"); // 4090419260
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_HandleDamage(), "HandleDamage"); // 3998065900
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_IsFlakDamage(), "IsFlakDamage"); // 1264658769
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_MakeHitsound(), "MakeHitsound"); // 44720134
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_NotifyDamage(), "NotifyDamage"); // 3603889418
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_PlayHitsound(), "PlayHitsound"); // 3635643605
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_PlaySampleHitsound(), "PlaySampleHitsound"); // 2410130300
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_ProcessFlakQueue(), "ProcessFlakQueue"); // 1224632992
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_ReadConfig(), "ReadConfig"); // 3056166900
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_ReadConfigSection(), "ReadConfigSection"); // 1563428881
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_SelectSoundForDamage(), "SelectSoundForDamage"); // 3247185504
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_ShouldPlayHitsound(), "ShouldPlayHitsound"); // 3309377850
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_ShowMenu(), "ShowMenu"); // 3255629242
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_WriteConfig(), "WriteConfig"); // 1959657194
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AMutHitsounds_WriteConfigSection(), "WriteConfigSection"); // 1749901862
+				OuterClass->StaticLink();
+#if WITH_METADATA
+				UMetaData* MetaData = OuterClass->GetOutermost()->GetMetaData();
+				MetaData->SetValue(OuterClass, TEXT("BlueprintType"), TEXT("true"));
+				MetaData->SetValue(OuterClass, TEXT("ChildCanTick"), TEXT(""));
+				MetaData->SetValue(OuterClass, TEXT("HideCategories"), TEXT("Input Movement Collision Rendering Utilities|Transformation"));
+				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("MutHitsounds.h"));
+				MetaData->SetValue(OuterClass, TEXT("IsBlueprintBase"), TEXT("true"));
+				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(OuterClass, TEXT("ObjectInitializerConstructorDeclared"), TEXT(""));
+				MetaData->SetValue(OuterClass, TEXT("ShowCategories"), TEXT("Input|MouseInput Input|TouchInput"));
+				MetaData->SetValue(OuterClass, TEXT("ToolTip"), TEXT("MutHitsounds - Hitsound Mutator\n\nProvides configurable hitsound feedback for damage dealt.\nFeatures:\n- Per-player configuration via INI\n- Separate sounds for enemy/friendly hits\n- Flak shard batching to prevent sound spam\n- Replay spectator support\n- Menu system for configuration"));
+				MetaData->SetValue(NewProp_FlakHitMinAge, TEXT("Category"), TEXT("Flak"));
+				MetaData->SetValue(NewProp_FlakHitMinAge, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_FlakHitMinAge, TEXT("ToolTip"), TEXT("Minimum age (seconds) before flak hits are processed"));
+				MetaData->SetValue(NewProp_FlakTimer, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_FlakTimer, TEXT("ToolTip"), TEXT("Timer handle for flak queue processing"));
+				MetaData->SetValue(NewProp_FlakHitQueue, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_FlakHitQueue, TEXT("ToolTip"), TEXT("Queue for batching flak shard hits"));
+				MetaData->SetValue(NewProp_HighDamageThreshold, TEXT("Category"), TEXT("Config"));
+				MetaData->SetValue(NewProp_HighDamageThreshold, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_HighDamageThreshold, TEXT("ToolTip"), TEXT("Damage threshold for high sound (damage >= this uses High)"));
+				MetaData->SetValue(NewProp_MedDamageThreshold, TEXT("Category"), TEXT("Config"));
+				MetaData->SetValue(NewProp_MedDamageThreshold, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_MedDamageThreshold, TEXT("ToolTip"), TEXT("Damage threshold for medium sound (damage >= this uses Med)"));
+				MetaData->SetValue(NewProp_AllHitsounds, TEXT("Category"), TEXT("Config"));
+				MetaData->SetValue(NewProp_AllHitsounds, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_AllHitsounds, TEXT("ToolTip"), TEXT("Array of all available hitsound presets"));
+				MetaData->SetValue(NewProp_HitsoundsDefaults, TEXT("Category"), TEXT("Config"));
+				MetaData->SetValue(NewProp_HitsoundsDefaults, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_HitsoundsDefaults, TEXT("ToolTip"), TEXT("Default hitsounds configuration (set in BuildHitsounds)"));
+				MetaData->SetValue(NewProp_Config, TEXT("Category"), TEXT("Config"));
+				MetaData->SetValue(NewProp_Config, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_Config, TEXT("ToolTip"), TEXT("Current hitsounds configuration"));
+				MetaData->SetValue(NewProp_HitsoundMessageClass, TEXT("Category"), TEXT("Hitsounds"));
+				MetaData->SetValue(NewProp_HitsoundMessageClass, TEXT("ModuleRelativePath"), TEXT("Public/MutHitsounds.h"));
+				MetaData->SetValue(NewProp_HitsoundMessageClass, TEXT("ToolTip"), TEXT("LocalMessage class used to send hitsound notifications to clients"));
+#endif
+			}
+		}
+		check(OuterClass->GetClass());
+		return OuterClass;
+	}
+	static FCompiledInDefer Z_CompiledInDefer_UClass_AMutHitsounds(Z_Construct_UClass_AMutHitsounds, &AMutHitsounds::StaticClass, TEXT("AMutHitsounds"), false, nullptr, nullptr, nullptr);
+	DEFINE_VTABLE_PTR_HELPER_CTOR(AMutHitsounds);
 	UClass* Z_Construct_UClass_ATeamArenaCharacter_NoRegister()
 	{
 		return ATeamArenaCharacter::StaticClass();
@@ -468,6 +1356,63 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	static FCompiledInDefer Z_CompiledInDefer_UClass_ATeamArenaPredictionPC(Z_Construct_UClass_ATeamArenaPredictionPC, &ATeamArenaPredictionPC::StaticClass, TEXT("ATeamArenaPredictionPC"), false, nullptr, nullptr, nullptr);
 	DEFINE_VTABLE_PTR_HELPER_CTOR(ATeamArenaPredictionPC);
+	UEnum* Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType()
+	{
+		UPackage* Outer=Z_Construct_UPackage__Script_NetcodePlus();
+		extern uint32 Get_Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType_CRC();
+		static UEnum* ReturnEnum = FindExistingEnumIfHotReloadOrDynamic(Outer, TEXT("EHitsoundMessageType"), 0, Get_Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType_CRC(), false);
+		if (!ReturnEnum)
+		{
+			ReturnEnum = new(EC_InternalUseOnlyConstructor, Outer, TEXT("EHitsoundMessageType"), RF_Public|RF_Transient|RF_MarkAsNative) UEnum(FObjectInitializer());
+			TArray<TPair<FName, int64>> EnumNames;
+			EnumNames.Add(TPairInitializer<FName, int64>(FName(TEXT("EHitsoundMessageType::Enemy")), 0));
+			EnumNames.Add(TPairInitializer<FName, int64>(FName(TEXT("EHitsoundMessageType::Friendly")), 1));
+			EnumNames.Add(TPairInitializer<FName, int64>(FName(TEXT("EHitsoundMessageType::EHitsoundMessageType_MAX")), 2));
+			ReturnEnum->SetEnums(EnumNames, UEnum::ECppForm::EnumClass);
+			ReturnEnum->CppType = TEXT("EHitsoundMessageType");
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnEnum->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnEnum, TEXT("BlueprintType"), TEXT("true"));
+			MetaData->SetValue(ReturnEnum, TEXT("ModuleRelativePath"), TEXT("Public/UTHitsoundMessage.h"));
+			MetaData->SetValue(ReturnEnum, TEXT("ToolTip"), TEXT("Message switches for hitsound types"));
+#endif
+		}
+		return ReturnEnum;
+	}
+	uint32 Get_Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType_CRC() { return 1911361774U; }
+	UClass* Z_Construct_UClass_UUTHitsoundMessage_NoRegister()
+	{
+		return UUTHitsoundMessage::StaticClass();
+	}
+	UClass* Z_Construct_UClass_UUTHitsoundMessage()
+	{
+		static UClass* OuterClass = NULL;
+		if (!OuterClass)
+		{
+			Z_Construct_UClass_UUTLocalMessage();
+			Z_Construct_UPackage__Script_NetcodePlus();
+			OuterClass = UUTHitsoundMessage::StaticClass();
+			if (!(OuterClass->ClassFlags & CLASS_Constructed))
+			{
+				UObjectForceRegistration(OuterClass);
+				OuterClass->ClassFlags |= 0x20100280;
+
+
+				OuterClass->StaticLink();
+#if WITH_METADATA
+				UMetaData* MetaData = OuterClass->GetOutermost()->GetMetaData();
+				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("UTHitsoundMessage.h"));
+				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/UTHitsoundMessage.h"));
+				MetaData->SetValue(OuterClass, TEXT("ObjectInitializerConstructorDeclared"), TEXT(""));
+				MetaData->SetValue(OuterClass, TEXT("ToolTip"), TEXT("UTHitsoundMessage\n\nUses UT4's built-in LocalMessage system to deliver hitsound events.\nServer calls ClientReceiveLocalizedMessage, client receives and plays sound.\n\nSwitch: 0 = Enemy hit, 1 = Friendly hit\nOptionalObject: The MutHitsounds actor (to access config)\nRelatedPlayerState_1: Attacker (for spectator routing)\nValue: Damage amount (packed into MessageIndex or use OptionalValue if available)"));
+#endif
+			}
+		}
+		check(OuterClass->GetClass());
+		return OuterClass;
+	}
+	static FCompiledInDefer Z_CompiledInDefer_UClass_UUTHitsoundMessage(Z_Construct_UClass_UUTHitsoundMessage, &UUTHitsoundMessage::StaticClass, TEXT("UUTHitsoundMessage"), false, nullptr, nullptr, nullptr);
+	DEFINE_VTABLE_PTR_HELPER_CTOR(UUTHitsoundMessage);
 	UClass* Z_Construct_UClass_AUTPlusProj_ShockBall_NoRegister()
 	{
 		return AUTPlusProj_ShockBall::StaticClass();
@@ -512,6 +1457,31 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	static FCompiledInDefer Z_CompiledInDefer_UClass_AUTPlusProj_ShockBall(Z_Construct_UClass_AUTPlusProj_ShockBall, &AUTPlusProj_ShockBall::StaticClass, TEXT("AUTPlusProj_ShockBall"), false, nullptr, nullptr, nullptr);
 	DEFINE_VTABLE_PTR_HELPER_CTOR(AUTPlusProj_ShockBall);
+	UScriptStruct* Z_Construct_UScriptStruct_FNetcodeDelayedProjectile()
+	{
+		UPackage* Outer = Z_Construct_UPackage__Script_NetcodePlus();
+		extern uint32 Get_Z_Construct_UScriptStruct_FNetcodeDelayedProjectile_CRC();
+		static UScriptStruct* ReturnStruct = FindExistingStructIfHotReloadOrDynamic(Outer, TEXT("NetcodeDelayedProjectile"), sizeof(FNetcodeDelayedProjectile), Get_Z_Construct_UScriptStruct_FNetcodeDelayedProjectile_CRC(), false);
+		if (!ReturnStruct)
+		{
+			ReturnStruct = new(EC_InternalUseOnlyConstructor, Outer, TEXT("NetcodeDelayedProjectile"), RF_Public|RF_Transient|RF_MarkAsNative) UScriptStruct(FObjectInitializer(), NULL, new UScriptStruct::TCppStructOps<FNetcodeDelayedProjectile>, EStructFlags(0x00000001));
+			UProperty* NewProp_SpawnRotation = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("SpawnRotation"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(SpawnRotation, FNetcodeDelayedProjectile), 0x0010000000000000, Z_Construct_UScriptStruct_FRotator());
+			UProperty* NewProp_SpawnLocation = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("SpawnLocation"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(SpawnLocation, FNetcodeDelayedProjectile), 0x0010000000000000, Z_Construct_UScriptStruct_FVector());
+			UProperty* NewProp_ProjectileClass = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("ProjectileClass"), RF_Public|RF_Transient|RF_MarkAsNative) UClassProperty(CPP_PROPERTY_BASE(ProjectileClass, FNetcodeDelayedProjectile), 0x0014000000000000, Z_Construct_UClass_AUTProjectile_NoRegister(), UClass::StaticClass());
+			ReturnStruct->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnStruct->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnStruct, TEXT("BlueprintType"), TEXT("true"));
+			MetaData->SetValue(ReturnStruct, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+			MetaData->SetValue(ReturnStruct, TEXT("ToolTip"), TEXT("--- Struct Definition (MUST BE BEFORE THE CLASS) ---"));
+			MetaData->SetValue(NewProp_SpawnRotation, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+			MetaData->SetValue(NewProp_SpawnLocation, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+			MetaData->SetValue(NewProp_ProjectileClass, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+#endif
+		}
+		return ReturnStruct;
+	}
+	uint32 Get_Z_Construct_UScriptStruct_FNetcodeDelayedProjectile_CRC() { return 3823112192U; }
 	UFunction* Z_Construct_UFunction_AUTWeaponFix_ClientConfirmFireEvent()
 	{
 		UObject* Outer=Z_Construct_UClass_AUTWeaponFix();
@@ -616,6 +1586,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				OuterClass->LinkChild(Z_Construct_UFunction_AUTWeaponFix_ServerStopFireFixed());
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				UProperty* NewProp_NetcodeDelayedProjectile = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("NetcodeDelayedProjectile"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(NetcodeDelayedProjectile, AUTWeaponFix), 0x0020080000000000, Z_Construct_UScriptStruct_FNetcodeDelayedProjectile());
 				UProperty* NewProp_HitScanPaddingStationary = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("HitScanPaddingStationary"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(HitScanPaddingStationary, AUTWeaponFix), 0x0020080000010005);
 				UProperty* NewProp_HitScanPadding = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("HitScanPadding"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(HitScanPadding, AUTWeaponFix), 0x0020080000010005);
 				UProperty* NewProp_FudgeFactorMs = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FudgeFactorMs"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(FudgeFactorMs, AUTWeaponFix), 0x0020080000010005);
@@ -645,7 +1616,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("UTWeaponFix.h"));
 				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
 				MetaData->SetValue(OuterClass, TEXT("ObjectInitializerConstructorDeclared"), TEXT(""));
-				MetaData->SetValue(OuterClass, TEXT("ToolTip"), TEXT("Enhanced weapon base class combining three critical fixes:\n\n1. Transaction Validation: Fixes high-FPS desync with unique event indices\n2. Epic's Lag Compensation: Uses built-in GetRewindLocation() for hit validation\n3. Split Prediction: Separates visual (0ms) from hit validation (120ms) time\n\nKey improvements:\n- Transactional fire events with unique event indexing per fire mode\n- Server-authoritative validation with client correction feedback loop\n- Prevention of simultaneous fire mode activation\n- Strict cooldown enforcement on server side\n- Automatic desync recovery via ClientConfirmFireEvent RPC\n- Forgiving hit detection using split prediction's hit validation time\n\nWorks with TeamArenaPredictionPC and TeamArenaCharacter for complete hybrid system."));
+				MetaData->SetValue(NewProp_NetcodeDelayedProjectile, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_NetcodeDelayedProjectile, TEXT("ToolTip"), TEXT("RENAMED TO AVOID SHADOWING PARENT CLASS VARIABLE"));
 				MetaData->SetValue(NewProp_HitScanPaddingStationary, TEXT("Category"), TEXT("Lag Compensation"));
 				MetaData->SetValue(NewProp_HitScanPaddingStationary, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
 				MetaData->SetValue(NewProp_HitScanPaddingStationary, TEXT("ToolTip"), TEXT("Radius added to STATIONARY targets if client claimed a hit.\nSmall value (e.g. 10.0) to cover idle anims/jitter without allowing \"magic hits\"."));
@@ -1034,6 +2006,8 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				UProperty* NewProp_ImpressiveThreshold = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("ImpressiveThreshold"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(ImpressiveThreshold, AUTPlusSniper), 0x0010000000010005);
 				CPP_BOOL_PROPERTY_BITMASK_STRUCT(bTrackImpressive, AUTPlusSniper, bool);
 				UProperty* NewProp_bTrackImpressive = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("bTrackImpressive"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(bTrackImpressive, AUTPlusSniper), 0x0010000000010005, CPP_BOOL_PROPERTY_BITMASK(bTrackImpressive, AUTPlusSniper), sizeof(bool), true);
+				UProperty* NewProp_HeadSphereHitPaddingStationary = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("HeadSphereHitPaddingStationary"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(HeadSphereHitPaddingStationary, AUTPlusSniper), 0x0010000000000005);
+				UProperty* NewProp_HeadSphereHitPadding = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("HeadSphereHitPadding"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(HeadSphereHitPadding, AUTPlusSniper), 0x0010000000000005);
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTPlusSniper_ClientNotifyImpressive(), "ClientNotifyImpressive"); // 1924444216
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTPlusSniper_OnImpressive(), "OnImpressive"); // 101504151
@@ -1071,6 +2045,10 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				MetaData->SetValue(NewProp_ImpressiveThreshold, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusSniper.h"));
 				MetaData->SetValue(NewProp_bTrackImpressive, TEXT("Category"), TEXT("Impressive"));
 				MetaData->SetValue(NewProp_bTrackImpressive, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusSniper.h"));
+				MetaData->SetValue(NewProp_HeadSphereHitPaddingStationary, TEXT("Category"), TEXT("Weapon|Headshot"));
+				MetaData->SetValue(NewProp_HeadSphereHitPaddingStationary, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusSniper.h"));
+				MetaData->SetValue(NewProp_HeadSphereHitPadding, TEXT("Category"), TEXT("Weapon|Headshot"));
+				MetaData->SetValue(NewProp_HeadSphereHitPadding, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusSniper.h"));
 #endif
 			}
 		}
@@ -1969,8 +2947,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			ReturnPackage = CastChecked<UPackage>(StaticFindObjectFast(UPackage::StaticClass(), NULL, FName(TEXT("/Script/NetcodePlus")), false, false));
 			ReturnPackage->SetPackageFlags(PKG_CompiledIn | 0x00000000);
 			FGuid Guid;
-			Guid.A = 0x36AAB84F;
-			Guid.B = 0x41BF0CA1;
+			Guid.A = 0x34A27907;
+			Guid.B = 0x35F83367;
 			Guid.C = 0x00000000;
 			Guid.D = 0x00000000;
 			ReturnPackage->SetGuid(Guid);

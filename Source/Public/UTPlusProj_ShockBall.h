@@ -18,6 +18,9 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual void BeginPlay() override;
 	virtual void NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage) override;
+	virtual void OnRep_Slomo() override;
+	virtual void PostNetReceiveVelocity(const FVector& NewVelocity) override;
+	virtual void Explode_Implementation(const FVector& HitLocation, const FVector& HitNormal, UPrimitiveComponent* HitComp = nullptr) override;
 
 private:
 	// Forward declaration for safety

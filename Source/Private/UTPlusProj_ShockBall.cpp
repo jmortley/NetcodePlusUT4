@@ -78,3 +78,74 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 }
 
 
+// 1. SHIELD / SLOWMO FIX (Replicated Variable)
+void AUTPlusProj_ShockBall::OnRep_Slomo()
+{
+	Super::OnRep_Slomo();
+
+	if (GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile && !MyFakeProjectile->IsPendingKillPending())
+	{
+		MyFakeProjectile->Slomo = Slomo;
+		MyFakeProjectile->OnRep_Slomo();
+	}
+}
+
+
+
+// 2. WALL / STOP FIX (Velocity Replication)
+void AUTPlusProj_ShockBall::PostNetReceiveVelocity(const FVector& NewVelocity)
+{
+	Super::PostNetReceiveVelocity(NewVelocity);
+
+	if (GetNetMode() != NM_Client || bFakeClientProjectile || !MyFakeProjectile || MyFakeProjectile->IsPendingKillPending())
+	{
+		return;
+	}
+
+	const float StopThresh = 2.0f;
+
+	// Server says "I stopped"
+	if (NewVelocity.IsNearlyZero(StopThresh))
+	{
+		// Snap + stop fake
+		MyFakeProjectile->SetActorLocation(GetActorLocation(), false, nullptr, ETeleportType::TeleportPhysics);
+
+		if (MyFakeProjectile->ProjectileMovement)
+		{
+			MyFakeProjectile->ProjectileMovement->StopMovementImmediately();
+			MyFakeProjectile->ProjectileMovement->UpdateComponentVelocity();
+		}
+		return;
+	}
+
+	// Optional fail-safe: only if drift is huge (don't fight prediction)
+	const float MaxDrift = 120.f;
+	if (FVector::DistSquared(MyFakeProjectile->GetActorLocation(), GetActorLocation()) > FMath::Square(MaxDrift))
+	{
+		MyFakeProjectile->SetActorLocation(GetActorLocation(), false, nullptr, ETeleportType::TeleportPhysics);
+		if (MyFakeProjectile->ProjectileMovement)
+		{
+			MyFakeProjectile->ProjectileMovement->Velocity = NewVelocity;
+			MyFakeProjectile->ProjectileMovement->UpdateComponentVelocity();
+		}
+	}
+}
+
+// 3. MID-AIR COLLISION / CANCELLATION FIX (Explosion Replication)
+void AUTPlusProj_ShockBall::Explode_Implementation(const FVector& HitLocation, const FVector& HitNormal, UPrimitiveComponent* HitComp)
+{
+	// CRITICAL FIX: If this is a combo, DO NOT touch the fake projectile.
+	bool bIsCombo = bComboExplosion || (MyDamageType && MyDamageType->GetName().Contains(TEXT("Combo")));
+
+	if (!bIsCombo && GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile && !MyFakeProjectile->IsPendingKillPending())
+	{
+		MyFakeProjectile->SetActorLocation(HitLocation, false, nullptr, ETeleportType::TeleportPhysics);
+
+		if (MyFakeProjectile->ProjectileMovement)
+		{
+			MyFakeProjectile->ProjectileMovement->Velocity = FVector::ZeroVector;
+		}
+	}
+
+	Super::Explode_Implementation(HitLocation, HitNormal, HitComp);
+}
