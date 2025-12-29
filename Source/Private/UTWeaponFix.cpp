@@ -649,7 +649,16 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime)
 {
     // Critical Fix #5: Multi-layer validation
-
+    // Get player name for logging (do this once at the top)
+	FString PlayerName = TEXT("Unknown");
+	if (UTOwner && UTOwner->Controller)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->Controller);
+		if (PC && PC->PlayerState)
+		{
+			PlayerName = PC->PlayerState->PlayerName;
+		}
+	}
     // Validate fire mode
     if (!FireModeActiveState.IsValidIndex(FireModeNum))
     {
@@ -696,13 +705,13 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
             float TimeSinceLastFire = ServerTime - LastFireTime[i];
 
             // Get the refire time for mode [i] (the one that was fired previously)
-            // Subtract 60ms (0.06f) for network tolerance
-            float MinInterval = GetRefireTime(i) - 0.06f;
+            // Subtract 65ms (0.06f) for network tolerance
+            float MinInterval = GetRefireTime(i) - 0.065f;
 
             if (TimeSinceLastFire < MinInterval)
             {
-                UE_LOG(LogUTWeaponFix, Warning, TEXT("[Server] REJECTED Rapid Fire. Mode %d blocked by Mode %d recovery. Delta: %.3f < Min: %.3f"),
-                    FireModeNum, i, TimeSinceLastFire, MinInterval);
+                UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] REJECTED Rapid Fire. Mode %d blocked by Mode %d recovery. Delta: %.3f < Min: %.3f"),
+					*PlayerName, FireModeNum, i, TimeSinceLastFire, MinInterval);
                 return false;
             }
         }
@@ -2361,7 +2370,7 @@ void AUTWeaponFix::FireCone()
 
 
 
-
+/*
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
 	// FIX: Fast Weapon Switch Exploit (Refire Preservation)
@@ -2419,6 +2428,95 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 			{
 				EarliestFireTime = MaxBlockTime;
 			}
+		}
+	}
+
+	Super::BringUp(OverflowTime);
+}
+*/
+
+void AUTWeaponFix::BringUp(float OverflowTime)
+{
+	float CurrentTime = GetWorld()->GetTimeSeconds();
+	float MaxBlockTime = 0.f;
+
+	// =======================================================================
+	// FIX #1: CHECK THIS WEAPON'S OWN COOLDOWN DEBT FIRST
+	// =======================================================================
+	// When switching Sniper → Shock → Sniper, the Sniper's own LastFireTime
+	// still has the cooldown debt from before the switch.
+	for (int32 i = 0; i < LastFireTime.Num(); i++)
+	{
+		if (LastFireTime[i] > 0.f)
+		{
+			float RefireEnd = LastFireTime[i] + GetRefireTime(i);
+
+			// If cooldown hasn't expired yet, we must wait
+			if (RefireEnd > CurrentTime && RefireEnd > MaxBlockTime)
+			{
+				MaxBlockTime = RefireEnd;
+			}
+		}
+	}
+
+	// =======================================================================
+	// FIX #2: CHECK OTHER WEAPONS 
+	// =======================================================================
+	// This handles the case where you fire Shock → switch to Sniper
+	// The Sniper inherits the Shock's remaining cooldown (scaled)
+	if (UTOwner)
+	{
+		for (TInventoryIterator<AUTWeapon> It(UTOwner); It; ++It)
+		{
+			AUTWeapon* OtherWeapon = *It;
+
+			// Only check OTHER valid AUTWeaponFix weapons
+			if (OtherWeapon && OtherWeapon != this && OtherWeapon->IsA(AUTWeaponFix::StaticClass()))
+			{
+				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(OtherWeapon);
+				if (FixWeapon)
+				{
+					// Back-calculate when the switch actually started
+					float PutDownDuration = FixWeapon->GetPutDownTime();
+					float SwitchStartTime = CurrentTime - OverflowTime - PutDownDuration;
+
+					for (int32 i = 0; i < FixWeapon->LastFireTime.Num(); i++)
+					{
+						if (FixWeapon->LastFireTime[i] > 0.f)
+						{
+							float RefireEnd = FixWeapon->LastFireTime[i] + FixWeapon->GetRefireTime(i);
+							float RemainingAtSwitch = RefireEnd - SwitchStartTime;
+
+							// Only penalize if there was actual debt at moment of switch
+							if (RemainingAtSwitch > 0.f)
+							{
+								// Apply scaling (e.g., 0.65 for fast-switch gamemodes)
+								float ScaledRemaining = RemainingAtSwitch * FixWeapon->RefirePutDownTimePercent;
+								float TheoreticalReadyTime = SwitchStartTime + ScaledRemaining;
+
+								if (TheoreticalReadyTime > MaxBlockTime)
+								{
+									MaxBlockTime = TheoreticalReadyTime;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// =======================================================================
+	// APPLY THE RESTRICTION
+	// =======================================================================
+	if (MaxBlockTime > CurrentTime)
+	{
+		if (MaxBlockTime > EarliestFireTime)
+		{
+			EarliestFireTime = MaxBlockTime;
+			UE_LOG(LogUTWeaponFix, Verbose,
+				TEXT("[BringUp] %s: EarliestFireTime set to %.3f (blocks for %.3fms)"),
+				*GetName(), EarliestFireTime, (MaxBlockTime - CurrentTime) * 1000.f);
 		}
 	}
 

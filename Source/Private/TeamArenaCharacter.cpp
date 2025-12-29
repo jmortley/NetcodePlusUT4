@@ -5,6 +5,8 @@
 #include "UTWeaponFix.h"
 #include "GameFramework/PlayerController.h"
 #include "UTWorldSettings.h"
+#include "UTPlusSniper.h"
+#include "UTPlusShockRifle.h"
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -29,12 +31,7 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 
 
 
-/*
-float ATeamArenaCharacter::GetClientVisualPredictionTime() const
-{
-    return 0.0f;
-}
-*/
+
 
 float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 {
@@ -46,78 +43,29 @@ float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 			return 0.0f;
 		}
 
-		// 2. Weapon Logic
+		// 2. Weapon Logic - Hitscan weapons get 0 prediction
 		AUTWeapon* MyWeapon = GetWeapon();
 		if (MyWeapon)
 		{
-			FString WeapName = MyWeapon->GetClass()->GetName();
-
-			// Only apply to "Lead" weapons (Rocket / Flak)
-			if (!WeapName.Contains(TEXT("Sniper")) && !WeapName.Contains(TEXT("Shock")))
+			// Hitscan weapons: No visual prediction (server authoritative)
+			if (Cast<AUTPlusSniper>(MyWeapon) || Cast<AUTPlusShockRifle>(MyWeapon))
 			{
-				// EPIC STANDARD MATH:
-				// PredictionFudgeFactor defaults to 20.0f in UTPlayerController.
-				// We subtract it to isolate "Wire Time" from "Frame Time".
-				float Fudge = 20.0f;
-
-				// Clamp at 0 to prevent negative prediction on LAN
-				float AdjustedPing = FMath::Max(0.0f, PlayerState->ExactPing - Fudge);
-
-				// Convert to One-Way Seconds: (Ping / 2) / 1000.0f
-				float OneWayLatency = AdjustedPing * 0.0005f; // AdjustedPing / 3000.0f;  //using a 3rd of ping instead.
-
-				// Safety Clamp (Max 120ms prediction)
-				return FMath::Min(OneWayLatency, 0.12f);
+				return 0.0f;
 			}
+
+			// Projectile weapons: Apply visual prediction
+			float Fudge = 20.0f;
+			float AdjustedPing = FMath::Max(0.0f, PlayerState->ExactPing - Fudge);
+			float OneWayLatency = AdjustedPing * 0.0005f;
+			return FMath::Min(OneWayLatency, 0.12f);
 		}
 	}
 
-	// Default: Strict Server Authority (Predict 0) for Hitscan & Idle
 	return 0.0f;
 }
 
 
-/*
-void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
-{
-    // --- HIGH-FPS FIX: Throttle SavedPositions to 120Hz ---
-    // This reduces array size and RemoveAt(0) frequency by 4x at 480 FPS
 
-    const float WorldTime = GetWorld()->GetTimeSeconds();
-
-    // ALWAYS save positions when shots are fired (required for hit validation)
-    // Otherwise, throttle to PositionSaveRate Hz
-    if (!bShotSpawned)
-    {
-        if ((WorldTime - LastPositionSaveTime) < PositionSaveInterval)
-        {
-            return;  // Skip this frame, not enough time elapsed
-        }
-    }
-
-    LastPositionSaveTime = WorldTime;
-
-    // --- Original Epic logic below ---
-    if (GetCharacterMovement())
-    {
-        new(SavedPositions) FSavedPosition(
-            GetActorLocation(),
-            GetViewRotation(),
-            GetCharacterMovement()->Velocity,
-            GetCharacterMovement()->bJustTeleported,
-            bShotSpawned,
-            WorldTime,
-            (UTCharacterMovement ? UTCharacterMovement->GetCurrentSynchTime() : 0.f)
-        );
-    }
-
-    // Maintain one position beyond MaxSavedPositionAge for interpolation
-    if (SavedPositions.Num() > 1 && SavedPositions[1].Time < WorldTime - MaxSavedPositionAge)
-    {
-        SavedPositions.RemoveAt(0);
-    }
-}
-*/
 
 bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling,
 	AUTCharacter* ShotInstigator, float PredictionTime)
@@ -159,79 +107,7 @@ bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection,
 	return bHeadShot;
 }
 
-/*
-void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, const FRotator& NewRotation, const FVector& NewVelocity)
-{
-    // 1. Update Velocity (Standard UT logic)
-    if (UTCharacterMovement)
-    {
-        UTCharacterMovement->SimulatedVelocity = NewVelocity;
 
-        // 2. Update Location (The "Correction" Logic)
-        // If the location has changed, or we just spawned...
-        if ((NewLocation != GetActorLocation()) || (CreationTime == GetWorld()->TimeSeconds))
-        {
-            // Standard check to disable gravity if we are stuck in geometry
-            if (GetWorld()->EncroachingBlockingGeometry(this, NewLocation, NewRotation))
-            {
-                bSimGravityDisabled = true;
-            }
-            else
-            {
-                bSimGravityDisabled = false;
-            }
-
-            // --- FORCE PREDICT 0 LOGIC STARTS HERE ---
-
-            // A. Move the Capsule to the EXACT Server Location.
-            // This sets the "Target" for the interpolation smoothing.
-            SetActorLocationAndRotation(NewLocation, NewRotation, false);
-
-            // B. Notify Movement Component
-			if (GetCharacterMovement())
-			{
-				GetCharacterMovement()->bJustTeleported = true;
-
-				// --- NEW PROJECTILE PREDICTION LOGIC ---
-				// We default to 0.0f (Predict 0 / Server Authoritative)
-				float PredictionTime = 0.0f;
-
-				// Client-Side Only: Check if the LOCAL player wants to predict this enemy
-				if (GetNetMode() != NM_DedicatedServer)
-				{
-					// Get the Local Viewer (Player 0)
-					APlayerController* LocalPC = GEngine ? GEngine->GetFirstLocalPlayerController(GetWorld()) : nullptr;
-
-					if (LocalPC && LocalPC->GetPawn())
-					{
-						// Get the local player's pawn (The Viewer)
-						ATeamArenaCharacter* ViewerChar = Cast<ATeamArenaCharacter>(LocalPC->GetPawn());
-
-						if (ViewerChar)
-						{
-							// Ask the Viewer: "Based on YOUR weapon/ping, how much should we predict?"
-							// This uses the function we wrote earlier (with Fudge Factor + CVar checks)
-							PredictionTime = ViewerChar->GetClientVisualPredictionTime();
-						}
-					}
-				}
-
-				// If PredictionTime > 0 (Rocket/Flak + High Ping), simulate forward.
-				// If PredictionTime == 0 (Sniper/Low Ping), skip simulation (Force Server Position).
-				if (PredictionTime > 0.0f)
-				{
-					UTCharacterMovement->UTSimulateMovement(PredictionTime);
-				}
-				
-			}
-        }
-        else if (NewRotation != GetActorRotation())
-        {
-            GetRootComponent()->MoveComponent(FVector::ZeroVector, NewRotation, false);
-        }
-    }
-}
-*/
 
 
 void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, const FRotator& NewRotation, const FVector& NewVelocity)
@@ -456,78 +332,7 @@ void ATeamArenaCharacter::FiringInfoUpdated()
 }
 
 
-/*
-void ATeamArenaCharacter::FiringInfoUpdated()
-{
-    // 1. Interrupt Animation (Standard UT behavior)
-    UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
-    if (AnimInstance != NULL)
-    {
-        AnimInstance->Montage_Stop(0.2f);
-    }
 
-    AUTPlayerController* UTPC = GetLocalViewer();
-
-    // --- FIX START ---
-    // Instead of UTPC->GetPredictionTime(), we use my custom getter.
-    // Since you return 0.0f, MyPredictionTime will be 0.
-    float MyPredictionTime = GetClientVisualPredictionTime();
-
-    // The Logic: 
-    // If MyPredictionTime == 0.f, the condition becomes TRUE.
-    // This BYPASSES the suppression logic that normally hides server packets when prediction is on.
-    if ((bLocalFlashLoc || UTPC == NULL || MyPredictionTime == 0.f || !IsLocallyControlled()) && Weapon != NULL && Weapon->ShouldPlay1PVisuals())
-    {
-        if (!FlashLocation.Position.IsZero())
-        {
-            uint8 EffectFiringMode = Weapon->GetCurrentFireMode();
-
-            // If non-local first person spectator, use replicated FireMode
-            if (Controller == NULL)
-            {
-                EffectFiringMode = FireMode;
-                Weapon->FiringInfoUpdated(FireMode, FlashCount, FlashLocation.Position);
-                Weapon->FiringEffectsUpdated(FireMode, FlashLocation.Position);
-            }
-            else
-            {
-                FVector SpawnLocation;
-                FRotator SpawnRotation;
-                Weapon->GetImpactSpawnPosition(FlashLocation.Position, SpawnLocation, SpawnRotation);
-                Weapon->PlayImpactEffects(FlashLocation.Position, EffectFiringMode, SpawnLocation, SpawnRotation);
-            }
-        }
-        else if (Controller == NULL)
-        {
-            Weapon->FiringInfoUpdated(FireMode, FlashCount, FlashLocation.Position);
-        }
-
-        if (FlashCount == 0 && FlashLocation.Position.IsZero() && WeaponAttachment != NULL)
-        {
-            WeaponAttachment->StopFiringEffects();
-        }
-    }
-    // --- FIX END ---
-    else if (WeaponAttachment != NULL)
-    {
-        if (FlashCount != 0 || !FlashLocation.Position.IsZero())
-        {
-            // Standard Third Person Logic (Other players)
-            if ((!IsLocallyControlled() || UTPC == NULL || UTPC->IsBehindView()))
-            {
-                WeaponAttachment->PlayFiringEffects();
-            }
-        }
-        else
-        {
-            // Always call Stop to avoid effects mismatches
-            WeaponAttachment->StopFiringEffects();
-        }
-    }
-
-    K2_FiringInfoUpdated();
-}
-*/
 
 FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerController* DebugViewer)
 {
@@ -593,6 +398,36 @@ FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerCo
     }
 
     return TargetLocation;
+}
+
+
+FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime) const
+{
+	if (PredictionTime <= 0.f)
+	{
+		// No rewind - return actual head bone position
+		if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
+		{
+			return GetMesh()->GetSocketLocation(FName("head"));
+		}
+		return GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
+	}
+
+	// --- REWOUND HEAD ---
+	FVector RewoundBodyLoc = const_cast<ATeamArenaCharacter*>(this)->GetRewindLocation(PredictionTime);
+
+	// Get current head offset from body center (captures lean, crouch, animation)
+	FVector CurrentHeadWorld = GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
+	if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
+	{
+		CurrentHeadWorld = GetMesh()->GetSocketLocation(FName("head"));
+	}
+
+	// Calculate head offset relative to current body
+	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
+
+	// Apply that offset to rewound position
+	return RewoundBodyLoc + HeadOffset;
 }
 
 

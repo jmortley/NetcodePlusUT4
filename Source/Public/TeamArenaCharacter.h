@@ -68,6 +68,8 @@ public:
 
     //virtual void PositionUpdated(bool bShotSpawned) override;
 	virtual void BeginPlay() override;
+
+	virtual FVector GetHeadLocation(float PredictionTime = 0.f) const override;
     /** Rate at which to save positions for lag compensation (Hz). Default 120. */
     //UPROPERTY(EditAnywhere, Category = "Team Arena|Optimization")
     //float PositionSaveRate;
