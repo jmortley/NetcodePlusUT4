@@ -278,7 +278,10 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                     }
                 }
             }
-
+			if (EarliestFireTime > MaxReadyTime)
+			{
+				MaxReadyTime = EarliestFireTime;
+			}
             float Delay = MaxReadyTime - CurrentTime;
 
             // Schedule a retry if the delay is significant
@@ -706,7 +709,7 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
 
             // Get the refire time for mode [i] (the one that was fired previously)
             // Subtract 65ms (0.06f) for network tolerance
-            float MinInterval = GetRefireTime(i) - 0.065f;
+            float MinInterval = GetRefireTime(i) - 0.085f;
 
             if (TimeSinceLastFire < MinInterval)
             {
@@ -721,25 +724,7 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     return true;
 }
 
-/*
-bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
-{
-    if (!LastFireTime.IsValidIndex(FireModeNum) || LastFireTime[FireModeNum] <= 0.0f)
-    {
-        return false;
-    }
-    
-    float TimeSinceLastFire = CurrentTime - LastFireTime[FireModeNum];
-    float RequiredInterval = GetRefireTime(FireModeNum);
 
-    // QUICK FIX: Client Tolerance
-    // We allow the client to fire 50ms early. 
-    // The server allows 60ms early, so this is safe.
-    return TimeSinceLastFire < (RequiredInterval - 0.05f);
-
-    //return TimeSinceLastFire < RequiredInterval;
-}
-*/
 
 
 bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
@@ -760,9 +745,9 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
             float TimeSinceLastFire = CurrentTime - LastFireTime[i];
             float RequiredInterval = GetRefireTime(i); // Get refire time for the mode that WAS fired
 
-            // Client Tolerance (50ms)
+            // Client Tolerance (60ms)
             // If we are within the refire window of ANY mode, block the shot.
-            if (TimeSinceLastFire < (RequiredInterval - 0.05f))
+            if (TimeSinceLastFire < (RequiredInterval - 0.06f))
             {
                 return true;
             }
@@ -1026,33 +1011,6 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
     DOREPLIFETIME(AUTWeaponFix, FireModeActiveState);
 }
 
-/*
-float AUTWeaponFix::GetHitValidationPredictionTime() const
-{
-    // 1. Must have an Owner (Pawn) and a Controller to calculate Ping
-    if (UTOwner && UTOwner->GetController())
-    {
-        // 2. Priority: Try your Custom Controller (Handles the 0ms vs 120ms split)
-        ATeamArenaPredictionPC* TeamPC = Cast<ATeamArenaPredictionPC>(UTOwner->GetController());
-        if (TeamPC)
-        {
-            return TeamPC->GetVisualPredictionTime();
-        }
-
-        // 3. Fallback: Standard Controller (Standard UT4 Ping Logic)
-        // Use Cast<> instead of (AUTPlayerController*) for crash safety
-        AUTPlayerController* StandardPC = Cast<AUTPlayerController>(UTOwner->GetController());
-        if (StandardPC)
-        {
-            return StandardPC->GetPredictionTime();
-        }
-    }
-
-    // 4. Safety Net: Dropped weapon, Dead pawn, or Disconnected player.
-    // No ping data available, so return 0.
-    return 0.0f;
-}
-*/
 
 
 
@@ -1069,14 +1027,7 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
     {
         return 0.0f;
     }
-	/*
-    const float RTTms = PS->ExactPing;
 
-    float IdealMs = (RTTms / 2.0f) + SmoothingMs;
-    float RewindMs = FMath::Clamp(IdealMs, 0.0f, MaxRewindMs);
-
-    return RewindMs * 0.001f;
-	*/
 	float ExactPing = UTOwner->PlayerState->ExactPing;
 
 	// 2. Subtract Fudge Factor (Epic uses 20ms)
@@ -1230,6 +1181,85 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         }
         // --- FIX END ---
     }
+
+	// ============================================================
+	// NEWNET-STYLE BIDIRECTIONAL TIME SEARCH
+	// If client claimed a hit but we didn't find it, search through time
+	// ============================================================
+	if (Role == ROLE_Authority &&
+		ReceivedHitScanHitChar != nullptr &&
+		BestTarget != ReceivedHitScanHitChar)
+	{
+		AUTCharacter* ClaimedTarget = ReceivedHitScanHitChar;
+
+		float CapRadius = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
+		float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+
+		const float SearchStep = 0.015f;      // 15ms steps
+		const float MaxSearchOffset = 0.050f; // ±50ms max search
+		float SearchOffset = SearchStep;
+
+		while (FMath::Abs(SearchOffset) <= MaxSearchOffset)
+		{
+			float AltRewindTime = ActualPredictionTime + SearchOffset;
+
+			// Sanity bounds
+			if (AltRewindTime > 0.0f && AltRewindTime < 0.25f)
+			{
+				FVector AltTargetLoc = ClaimedTarget->GetRewindLocation(AltRewindTime);
+
+				// Handle floor sliding at alternate time
+				float AltCapHeight = CapHeight;
+				if (ClaimedTarget->UTCharacterMovement && ClaimedTarget->UTCharacterMovement->bIsFloorSliding)
+				{
+					AltTargetLoc.Z = AltTargetLoc.Z - CapHeight + ClaimedTarget->SlideTargetHeight;
+					AltCapHeight = ClaimedTarget->SlideTargetHeight;
+				}
+
+				// Capsule-to-line distance check
+				FVector ClosestPoint, ClosestCapsulePoint;
+
+				if (CapRadius >= AltCapHeight)
+				{
+					ClosestPoint = FMath::ClosestPointOnSegment(AltTargetLoc, StartLocation, Hit.Location);
+					ClosestCapsulePoint = AltTargetLoc;
+				}
+				else
+				{
+					FVector CapsuleSegment = FVector(0.f, 0.f, AltCapHeight - CapRadius);
+					FMath::SegmentDistToSegmentSafe(
+						StartLocation, Hit.Location,
+						AltTargetLoc - CapsuleSegment, AltTargetLoc + CapsuleSegment,
+						ClosestPoint, ClosestCapsulePoint);
+				}
+
+				// Generous padding for fallback search
+				float SearchPadding = 50.0f;
+				float CombinedRadius = CapRadius + TraceRadius + SearchPadding;
+
+				if ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CombinedRadius))
+				{
+					// Found the hit at alternate time
+					BestTarget = ClaimedTarget;
+					BestPoint = ClosestPoint;
+					BestCapsulePoint = ClosestCapsulePoint;
+					BestCollisionRadius = CapRadius;
+
+					UE_LOG(LogUTWeaponFix, Verbose,
+						TEXT("TimeSearch: Found claimed hit at offset %.1fms (base %.1fms)"),
+						SearchOffset * 1000.f, ActualPredictionTime * 1000.f);
+					break;
+				}
+			}
+
+			// Oscillate: +15ms, -15ms, +30ms, -30ms, +45ms, -45ms, +60ms, -60ms
+			if (SearchOffset > 0.f)
+				SearchOffset = -SearchOffset;
+			else
+				SearchOffset = -SearchOffset + SearchStep;
+		}
+	}
+
 
     if (BestTarget)
     {
@@ -1671,211 +1701,6 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 
 	return NewProjectile;
 }
-
-
-
-
-
-
-/*
-
-AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
-	TSubclassOf<AUTProjectile> ProjectileClass,
-	FVector SpawnLocation,
-	FRotator SpawnRotation)
-{
-	// Pitch clamp for shells/rockets firing straight down
-	FRotator AdjustedRot = SpawnRotation;
-	AdjustedRot.Normalize();
-	bool bIsShellOrRocket = ProjectileClass &&
-		(ProjectileClass->GetName().Contains(TEXT("Shell")) ||
-			ProjectileClass->GetName().Contains(TEXT("Rocket")));
-	if (bIsShellOrRocket && AdjustedRot.Pitch < -83.5f)
-	{
-		SpawnRotation.Pitch = -85.0f;
-	}
-
-	AUTPlayerController* OwningPlayer = UTOwner ? Cast<AUTPlayerController>(UTOwner->GetController()) : nullptr;
-
-	// ----------------------------------------
-	// 1) Get Current Ping
-	// ----------------------------------------
-	float CurrentPing = 0.0f;
-	if (UTOwner && UTOwner->PlayerState)
-	{
-		CurrentPing = UTOwner->PlayerState->ExactPing;
-	}
-
-	// ----------------------------------------
-	// 2) Compute CatchupTickDelta (Half RTT)
-	// ----------------------------------------
-	float CatchupTickDelta = 0.0f;
-
-	if (CurrentPing >= 20.0f)
-	{
-		float AdjustedPing = CurrentPing; // -FudgeFactorMs;
-		float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, ProjectilePredictionCapMs);
-		CatchupTickDelta = CappedPing * 0.0005f;  // Half RTT in seconds
-	}
-
-	// ----------------------------------------
-	// 3) Client: Check if we should delay spawn for extreme ping
-	// ----------------------------------------
-	if ((Role != ROLE_Authority) && OwningPlayer)
-	{
-		float ExcessPing = CurrentPing - FudgeFactorMs - ProjectilePredictionCapMs;
-
-		if (ExcessPing > 10.0f)  // More than 10ms over cap
-		{
-			float SleepTime = ExcessPing * 0.001f;
-
-			if (!GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
-			{
-				DelayedProjectile.ProjectileClass = ProjectileClass;
-				DelayedProjectile.SpawnLocation = SpawnLocation;
-				DelayedProjectile.SpawnRotation = SpawnRotation;
-
-				GetWorldTimerManager().SetTimer(
-					SpawnDelayedFakeProjHandle,
-					this,
-					&AUTWeaponFix::SpawnDelayedFakeProjectile,
-					SleepTime,
-					false);
-			}
-			return nullptr;
-		}
-	}
-
-	// ----------------------------------------
-	// 4) Spawn the projectile
-	// ----------------------------------------
-	FActorSpawnParameters Params;
-	Params.Instigator = UTOwner;
-	Params.Owner = UTOwner;
-	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	AUTProjectile* NewProjectile = GetWorld()->SpawnActor<AUTProjectile>(
-		ProjectileClass,
-		SpawnLocation,
-		SpawnRotation,
-		Params);
-
-	if (!NewProjectile)
-	{
-		return nullptr;
-	}
-
-	// ----------------------------------------
-	// 5) Visual offsets (weapon hand)
-	// ----------------------------------------
-	if (NewProjectile->OffsetVisualComponent)
-	{
-		switch (GetWeaponHand())
-		{
-		case EWeaponHand::HAND_Center:
-			NewProjectile->InitialVisualOffset = NewProjectile->InitialVisualOffset + LowMeshOffset;
-			NewProjectile->OffsetVisualComponent->RelativeLocation = NewProjectile->InitialVisualOffset;
-			break;
-		case EWeaponHand::HAND_Hidden:
-			NewProjectile->InitialVisualOffset = NewProjectile->InitialVisualOffset + VeryLowMeshOffset;
-			NewProjectile->OffsetVisualComponent->RelativeLocation = NewProjectile->InitialVisualOffset;
-			break;
-		default:
-			break;
-		}
-	}
-
-	if (UTOwner)
-	{
-		UTOwner->LastFiredProjectile = NewProjectile;
-		NewProjectile->ShooterLocation = UTOwner->GetActorLocation();
-		NewProjectile->ShooterRotation = UTOwner->GetActorRotation();
-	}
-
-	// ----------------------------------------
-	// 6) SERVER: Fast-forward authoritative projectile
-	// ----------------------------------------
-	if (Role == ROLE_Authority)
-	{
-		NewProjectile->HitsStatsName = HitsStatsName;
-
-		if ((CatchupTickDelta > 0.f) && NewProjectile->ProjectileMovement)
-		{
-			const float ScaledDelta = CatchupTickDelta * NewProjectile->CustomTimeDilation;
-
-			if (NewProjectile->PrimaryActorTick.IsTickFunctionEnabled())
-			{
-				NewProjectile->TickActor(ScaledDelta, LEVELTICK_All, NewProjectile->PrimaryActorTick);
-			}
-
-			NewProjectile->ProjectileMovement->TickComponent(ScaledDelta, LEVELTICK_All, nullptr);
-			NewProjectile->SetForwardTicked(true);
-
-			if (NewProjectile->GetLifeSpan() > 0.f)
-			{
-				NewProjectile->SetLifeSpan(
-					0.1f + FMath::Max(0.01f, NewProjectile->GetLifeSpan() - CatchupTickDelta)
-				);
-			}
-		}
-		else
-		{
-			NewProjectile->SetForwardTicked(false);
-		}
-	}
-	// ----------------------------------------
-	// 7) CLIENT: Setup fake projectile
-	// ----------------------------------------
-	else
-	{
-		NewProjectile->InitFakeProjectile(OwningPlayer);
-
-		// RETRACE FIX: For high ping players, delay the fake spawn slightly
-		// so it doesn't get too far ahead before server corrections arrive.
-		//
-		// If bReplicateUTMovement is ON in the projectile BP, corrections are
-		// frequent (100Hz) and small - the fake will smoothly track server.
-		//
-		// If bReplicateUTMovement is OFF, we only get one correction when
-		// server rocket first replicates - that's where the big snap happens.
-		//
-		// OPTION A: Delay fake spawn by half RTT (uncomment to enable)
-		// This eliminates retrace but adds perceived input lag.
-		
-
-		
-
-		// OPTION B: Shorten fake lifespan so it dies before big correction
-		// Server position arrives at ~FullRTT. Kill fake just before that.
-		// Real rocket will seamlessly take over from server replication.
-
-	}
-
-	// ----------------------------------------
-	// 8) High-FPS stability (Fixed Tick Rate)
-	// ----------------------------------------
-	if (NewProjectile->ProjectileMovement)
-	{
-		if (Role == ROLE_Authority)
-		{
-			const float ServerRate = 1.f / 240.f;
-			NewProjectile->PrimaryActorTick.TickInterval = ServerRate;
-			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ServerRate;
-		}
-		else if (GetNetMode() != NM_DedicatedServer)
-		{
-			const int32 ClientHz = GetSnappedProjectileHz();
-			const float ClientInterval = 1.f / static_cast<float>(ClientHz);
-			NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
-			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
-		}
-	}
-
-	return NewProjectile;
-}
-
-
-*/
 
 
 
@@ -2370,70 +2195,7 @@ void AUTWeaponFix::FireCone()
 
 
 
-/*
-void AUTWeaponFix::BringUp(float OverflowTime)
-{
-	// FIX: Fast Weapon Switch Exploit (Refire Preservation)
-	if (UTOwner)
-	{
-		float MaxBlockTime = 0.f;
-		float CurrentTime = GetWorld()->GetTimeSeconds();
 
-		// Use Iterator to safely find "Hot" weapons currently in inventory
-		for (TInventoryIterator<AUTWeapon> It(UTOwner); It; ++It)
-		{
-			AUTWeapon* OtherWeapon = *It;
-
-			// Only check valid AUTWeaponFix weapons (avoiding self and incompatible types)
-			if (OtherWeapon && OtherWeapon != this && OtherWeapon->IsA(AUTWeaponFix::StaticClass()))
-			{
-				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(OtherWeapon);
-				if (FixWeapon)
-				{
-					// 1. Back-calculate when the switch actually started.
-					// This finds the exact moment the player pressed the switch key relative to the fire cycle.
-					float PutDownDuration = FixWeapon->GetPutDownTime();
-					float SwitchStartTime = CurrentTime - OverflowTime - PutDownDuration;
-
-					for (int32 i = 0; i < FixWeapon->LastFireTime.Num(); i++)
-					{
-						if (FixWeapon->LastFireTime[i] > 0.f)
-						{
-							float RefireEnd = FixWeapon->LastFireTime[i] + FixWeapon->GetRefireTime(i);
-							float RemainingAtSwitch = RefireEnd - SwitchStartTime;
-
-							// 2. Only penalize if there was actual debt remaining at the moment of switch
-							if (RemainingAtSwitch > 0.f)
-							{
-								// 3. Apply the scaling (e.g., 0.65 for fast-switch gamemodes)
-								float ScaledRemaining = RemainingAtSwitch * FixWeapon->RefirePutDownTimePercent;
-
-								// 4. Determine when the new weapon is allowed to fire
-								float TheoreticalReadyTime = SwitchStartTime + ScaledRemaining;
-								if (TheoreticalReadyTime > MaxBlockTime)
-								{
-									MaxBlockTime = TheoreticalReadyTime;
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Apply the restriction if it extends into the future
-		if (MaxBlockTime > CurrentTime)
-		{
-			if (MaxBlockTime > EarliestFireTime)
-			{
-				EarliestFireTime = MaxBlockTime;
-			}
-		}
-	}
-
-	Super::BringUp(OverflowTime);
-}
-*/
 
 void AUTWeaponFix::BringUp(float OverflowTime)
 {

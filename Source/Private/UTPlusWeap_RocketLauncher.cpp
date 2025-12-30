@@ -497,6 +497,127 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
     const FVector SpawnLocation = GetFireStartLoc();
     FRotator SpawnRotation = GetAdjustedAim(SpawnLocation);
     AUTProjectile* ResultProj = nullptr;
+	switch (CurrentRocketFireMode)
+	{
+	case 0: // SPREAD
+	{
+		// Calculate spread direction (both client and server need identical logic)
+		if (NumLoadedRockets > 1)
+		{
+			FVector FireDir = SpawnRotation.Vector();
+			FVector SideDir = (FireDir ^ FVector(0.f, 0.f, 1.f)).GetSafeNormal();
+			float SpreadAmount = HasLockedTarget() ? SeekingLoadSpread : FullLoadSpread;
+			FireDir = FireDir + 0.01f * SideDir * float((NumLoadedRockets % 3) - 1.f) * SpreadAmount;
+			SpawnRotation = FireDir.Rotation();
+		}
+
+		// Server-only: sync random seed for deterministic barrel offset
+		if (Role == ROLE_Authority)
+		{
+			NetSynchRandomSeed();
+		}
+
+		// Calculate barrel offset (deterministic based on NumLoadedRockets)
+		FVector Offset = (FMath::Sin(NumLoadedRockets * PI * 0.667f) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::Z) +
+			FMath::Cos(NumLoadedRockets * PI * 0.667f) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::X)) * BarrelRadius * 2.f;
+
+		// SpawnNetPredictedProjectile handles client fake + server authoritative
+		ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation + Offset, SpawnRotation);
+
+		// Server-only: setup seeking target
+		if (Role == ROLE_Authority && ResultProj)
+		{
+			AUTProj_Rocket* SpawnedRocket = Cast<AUTProj_Rocket>(ResultProj);
+			if (HasLockedTarget() && SpawnedRocket)
+			{
+				SpawnedRocket->TargetActor = LockedTarget;
+				TrackingRockets.AddUnique(SpawnedRocket);
+			}
+		}
+
+		NumLoadedRockets--;
+		break;
+	}
+
+	case 1: // GRENADES
+	{
+		// Calculate grenade spread (both client and server)
+		float GrenadeSpread = GetSpread(1);
+		float RotDegree = 360.0f / MaxLoadedRockets;
+		SpawnRotation.Roll = RotDegree * MaxLoadedRockets;
+		FRotator SpreadRot = SpawnRotation;
+		SpreadRot.Yaw += GrenadeSpread * float(MaxLoadedRockets) - GrenadeSpread;
+
+		// SpawnNetPredictedProjectile handles client fake + server authoritative
+		ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation, SpreadRot);
+
+		// Server-only: adjust velocity for arc
+		if (Role == ROLE_Authority && ResultProj != nullptr && ResultProj->ProjectileMovement)
+		{
+			ResultProj->ProjectileMovement->Velocity.Z += (MaxLoadedRockets % 2) * GetSpread(2);
+		}
+
+		NumLoadedRockets--;
+		break;
+	}
+
+	case 2: // SPIRAL
+	{
+		TArray<AUTProj_RocketSpiral*> SpiralRockets;
+		int32 RocketsToSpawn = NumLoadedRockets;
+
+		for (int32 i = 0; i < RocketsToSpawn; i++)
+		{
+			// Calculate spiral offset (deterministic, both client and server)
+			float Angle = (i * 360.0f / RocketsToSpawn) * (PI / 180.0f);
+			FVector Offset = (FMath::Sin(Angle) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::Z) +
+				FMath::Cos(Angle) * FRotationMatrix(SpawnRotation).GetUnitAxis(EAxis::X)) * BarrelRadius;
+
+			// SpawnNetPredictedProjectile handles client fake + server authoritative
+			AUTProjectile* NewProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation + Offset, SpawnRotation);
+
+			if (i == 0)
+			{
+				ResultProj = NewProj;
+			}
+
+			// Server-only: collect for flocking linkage
+			if (Role == ROLE_Authority && NewProj)
+			{
+				AUTProj_RocketSpiral* SpiralProj = Cast<AUTProj_RocketSpiral>(NewProj);
+				if (SpiralProj)
+				{
+					SpiralRockets.Add(SpiralProj);
+				}
+			}
+		}
+
+		// Server-only: link flocking behavior
+		if (Role == ROLE_Authority)
+		{
+			for (int32 i = 0; i < SpiralRockets.Num(); i++)
+			{
+				AUTProj_RocketSpiral* RocketA = SpiralRockets[i];
+				if (RocketA)
+				{
+					int32 FlockIndex = 0;
+					for (int32 j = 0; j < SpiralRockets.Num() && FlockIndex < 3; j++)
+					{
+						if (i != j && SpiralRockets[j])
+						{
+							RocketA->Flock[FlockIndex++] = SpiralRockets[j];
+						}
+					}
+					RocketA->bCurl = (i % 2 == 0);
+				}
+			}
+		}
+
+		NumLoadedRockets = 0;
+		break;
+	}
+	}
+	/*
     switch (CurrentRocketFireMode)
     {
     case 0: // SPREAD
@@ -604,8 +725,8 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
         NumLoadedRockets = 0;
         break;
     }
-    }
-
+  }
+  */
     // Reset Mode when empty
     if (NumLoadedRockets <= 0)
     {

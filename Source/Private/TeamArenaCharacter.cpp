@@ -400,7 +400,7 @@ FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerCo
     return TargetLocation;
 }
 
-
+/*
 FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime) const
 {
 	if (PredictionTime <= 0.f)
@@ -429,7 +429,7 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime) const
 	// Apply that offset to rewound position
 	return RewoundBodyLoc + HeadOffset;
 }
-
+*/
 
 void ATeamArenaCharacter::BeginPlay()
 {

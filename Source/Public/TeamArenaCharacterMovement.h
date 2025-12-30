@@ -31,6 +31,8 @@ public:
     UPROPERTY(EditAnywhere, Category = "Team Arena|Optimization")
     float DodgeCooldownTolerance;
 
+
+
 protected:
     /** Last time we updated team collision ignores */
     float LastTeamCollisionUpdateTime;
