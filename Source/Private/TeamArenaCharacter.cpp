@@ -29,7 +29,11 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
     //LastPositionSaveTime = 0.0f;
 }
 
-
+int32 ATeamArenaCharacter::GetNetcodeVersion()
+{
+	// Reads the #define NETCODE_PLUGIN_VERSION from NetcodePlus.h
+	return NETCODE_PLUGIN_VERSION;
+}
 
 
 
@@ -400,12 +404,11 @@ FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerCo
     return TargetLocation;
 }
 
-/*
-FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime) const
+
+FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 {
 	if (PredictionTime <= 0.f)
 	{
-		// No rewind - return actual head bone position
 		if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
 		{
 			return GetMesh()->GetSocketLocation(FName("head"));
@@ -414,7 +417,8 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime) const
 	}
 
 	// --- REWOUND HEAD ---
-	FVector RewoundBodyLoc = const_cast<ATeamArenaCharacter*>(this)->GetRewindLocation(PredictionTime);
+	// no longer need const_cast<ATeamArenaCharacter*>(this) because the function is not const!
+	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
 
 	// Get current head offset from body center (captures lean, crouch, animation)
 	FVector CurrentHeadWorld = GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
@@ -429,7 +433,7 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime) const
 	// Apply that offset to rewound position
 	return RewoundBodyLoc + HeadOffset;
 }
-*/
+
 
 void ATeamArenaCharacter::BeginPlay()
 {

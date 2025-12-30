@@ -525,6 +525,7 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 		ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation + Offset, SpawnRotation);
 
 		// Server-only: setup seeking target
+		/*
 		if (Role == ROLE_Authority && ResultProj)
 		{
 			AUTProj_Rocket* SpawnedRocket = Cast<AUTProj_Rocket>(ResultProj);
@@ -532,6 +533,23 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 			{
 				SpawnedRocket->TargetActor = LockedTarget;
 				TrackingRockets.AddUnique(SpawnedRocket);
+			}
+		}
+		*/
+
+		// Setup seeking target (both client fake and server real)
+		if (ResultProj)
+		{
+			AUTProj_Rocket* SpawnedRocket = Cast<AUTProj_Rocket>(ResultProj);
+			if (HasLockedTarget() && SpawnedRocket)
+			{
+				SpawnedRocket->TargetActor = LockedTarget;
+
+				// Server tracks for HUD indicators
+				if (Role == ROLE_Authority)
+				{
+					TrackingRockets.AddUnique(SpawnedRocket);
+				}
 			}
 		}
 
@@ -551,8 +569,9 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 		// SpawnNetPredictedProjectile handles client fake + server authoritative
 		ResultProj = SpawnNetPredictedProjectile(RocketProjClass, SpawnLocation, SpreadRot);
 
-		// Server-only: adjust velocity for arc
-		if (Role == ROLE_Authority && ResultProj != nullptr && ResultProj->ProjectileMovement)
+		
+		// Adjust velocity for arc (BOTH client and server for prediction match)
+		if (ResultProj != nullptr && ResultProj->ProjectileMovement)
 		{
 			ResultProj->ProjectileMovement->Velocity.Z += (MaxLoadedRockets % 2) * GetSpread(2);
 		}
@@ -1043,16 +1062,241 @@ bool AUTPlusWeap_RocketLauncher::WithinLockAim(AActor* Target)
     return false;
 }
 
-void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
-{
-    LockedTarget = NewTarget;
-    bLockedOnTarget = (LockedTarget != nullptr);
-}
 
 void AUTPlusWeap_RocketLauncher::UpdateLock()
 {
-    // Implementation would go here - keeping it simple for now
-    // This is called on a timer to update target lock state
+	// 1. AUTHORITY CHECK - Only server manages lock state
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	// 2. VALIDITY CHECKS - Must be in valid state to maintain/acquire lock
+	if (UTOwner == nullptr ||
+		UTOwner->Controller == nullptr ||
+		UTOwner->IsFiringDisabled() ||
+		(CurrentFireMode != 1) ||    // Must be alt-fire mode
+		!IsFiring() ||
+		(NumLoadedRockets == 0))     // Must have rockets loaded
+	{
+		SetLockTarget(nullptr);
+		PendingLockedTarget = nullptr;
+		PendingLockedTargetTime = 0.f;
+		return;
+	}
+
+	// 3. CHECK CHARGING STATE - Don't update lock while rockets are being released
+	UUTWeaponStateFiringChargedRocket_Transactional* ChargeState =
+		Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
+	if (ChargeState != nullptr && !ChargeState->bCharging)
+	{
+		// Rockets are being released, don't change lock at this time
+		return;
+	}
+
+	// 4. GET FIRING PARAMETERS
+	const FVector FireLoc = UTOwner->GetPawnViewLocation();
+	const FVector FireDir = GetBaseFireRotation().Vector();
+	AActor* NewTarget = nullptr;
+
+	// 5. PRIORITIZE KEEPING EXISTING LOCK
+	AUTCharacter* LockedPawn = Cast<AUTCharacter>(LockedTarget);
+	if (LockedPawn != nullptr)
+	{
+		bool bKeepLock = false;
+
+		if (!LockedPawn->IsDead())
+		{
+			// Check if target is still within lock parameters
+			FVector AimDir = LockedPawn->GetActorLocation() - FireLoc;
+			float TestAim = FVector::DotProduct(FireDir, AimDir);
+
+			if (TestAim > 0.0f)  // Target is in front of us
+			{
+				float FireDist = AimDir.SizeSquared();
+
+				if (FireDist < FMath::Square(LockRange))
+				{
+					FireDist = FMath::Sqrt(FireDist);
+					TestAim /= FireDist;
+
+					// If aim is slightly off but close, try adjusting for eye height
+					if ((TestAim < LockAim) && (FireDist < 2.f * LockOffset))
+					{
+						AimDir.Z += LockedPawn->BaseEyeHeight;
+						AimDir = AimDir.GetSafeNormal();
+						TestAim = FVector::DotProduct(FireDir, AimDir);
+					}
+
+					if (TestAim >= LockAim)
+					{
+						// Check offset distance from aim line
+						float OffsetDist = FMath::PointDistToLine(LockedPawn->GetActorLocation(), FireDir, FireLoc);
+
+						if (OffsetDist < LockOffset)
+						{
+							// VISIBILITY CHECK: Try head, center, and actual fire line
+							FCollisionQueryParams TraceParams(FName(TEXT("RocketLockTrace")), false);
+							TraceParams.AddIgnoredActor(UTOwner);
+
+							// Try head first
+							FVector HeadLoc = LockedPawn->GetActorLocation() +
+								FVector(0.0f, 0.0f, LockedPawn->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight());
+							bool bHit = GetWorld()->LineTraceTestByChannel(
+								FireLoc, HeadLoc, COLLISION_TRACE_WEAPONNOCHARACTER, TraceParams);
+
+							if (bHit)
+							{
+								// Try center
+								bHit = GetWorld()->LineTraceTestByChannel(
+									FireLoc, LockedPawn->GetActorLocation(),
+									COLLISION_TRACE_WEAPONNOCHARACTER, TraceParams);
+
+								if (bHit)
+								{
+									// Try spot on capsule nearest to where shot is firing
+									FVector ClosestPoint = FMath::ClosestPointOnSegment(
+										LockedPawn->GetActorLocation(),
+										FireLoc,
+										FireLoc + FireDir * (FireDist + 500.f));
+
+									FVector TestPoint = LockedPawn->GetActorLocation() +
+										LockedPawn->GetCapsuleComponent()->GetUnscaledCapsuleRadius() *
+										(ClosestPoint - LockedPawn->GetActorLocation()).GetSafeNormal();
+
+									float CharZ = LockedPawn->GetActorLocation().Z;
+									float CapsuleHeight = LockedPawn->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+									TestPoint.Z = FMath::Clamp(ClosestPoint.Z, CharZ - CapsuleHeight, CharZ + CapsuleHeight);
+
+									bHit = GetWorld()->LineTraceTestByChannel(
+										FireLoc, TestPoint, COLLISION_TRACE_WEAPONNOCHARACTER, TraceParams);
+								}
+							}
+
+							// If any trace succeeded (didn't hit), keep the lock
+							if (!bHit)
+							{
+								bKeepLock = true;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if (!bKeepLock)
+		{
+			LockedPawn = nullptr;
+		}
+	}
+
+	// 6. DETERMINE NEW TARGET
+	if (LockedPawn != nullptr)
+	{
+		// Keep existing locked target
+		NewTarget = LockedPawn;
+	}
+	else
+	{
+		// Search for a new target using UT's targeting system
+		NewTarget = UUTGameplayStatics::ChooseBestAimTarget(
+			UTOwner->Controller,
+			FireLoc,
+			FireDir,
+			LockAim,
+			LockRange,
+			LockOffset,
+			AUTCharacter::StaticClass());
+	}
+
+	// 7. UPDATE LOCKED TARGET STATE
+	if (LockedTarget != nullptr)
+	{
+		if (LockedTarget == NewTarget)
+		{
+			// Still valid - update timestamp
+			LastLockedOnTime = GetWorld()->TimeSeconds;
+		}
+		else if ((LockTolerance + LastLockedOnTime) < GetWorld()->TimeSeconds)
+		{
+			// Lost the target for too long - clear lock
+			SetLockTarget(nullptr);
+		}
+		// else: within tolerance window, keep current lock
+	}
+
+	// 8. UPDATE PENDING TARGET STATE
+	if (PendingLockedTarget != nullptr && PendingLockedTarget == NewTarget)
+	{
+		// Still looking at pending target - check if lock time has elapsed
+		if ((PendingLockedTargetTime + LockAcquireTime) < GetWorld()->TimeSeconds)
+		{
+			// Lock acquired!
+			SetLockTarget(PendingLockedTarget);
+			PendingLockedTarget = nullptr;
+			PendingLockedTargetTime = 0.f;
+		}
+		// else: still acquiring, keep waiting
+	}
+	else
+	{
+		// Looking at a different target (or no target) - update pending
+		PendingLockedTarget = NewTarget;
+		PendingLockedTargetTime = (NewTarget != nullptr) ? GetWorld()->TimeSeconds : 0.0f;
+	}
+}
+
+
+// =============================================================================
+// ALSO VERIFY: SetLockTarget() should play sounds
+// =============================================================================
+// Your SetLockTarget looks incomplete. Here's what Epic's does:
+
+void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
+{
+	LockedTarget = NewTarget;
+
+	if (LockedTarget != nullptr)
+	{
+		if (!bLockedOnTarget)
+		{
+			// Just acquired lock
+			bLockedOnTarget = true;
+			LastLockedOnTime = GetWorld()->TimeSeconds;
+
+			// Play lock acquired sound for local player
+			if (GetNetMode() != NM_DedicatedServer &&
+				UTOwner != nullptr &&
+				UTOwner->IsLocallyControlled())
+			{
+				AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->GetController());
+				if (PC != nullptr && LockAcquiredSound != nullptr)
+				{
+					PC->UTClientPlaySound(LockAcquiredSound);
+				}
+			}
+		}
+	}
+	else
+	{
+		if (bLockedOnTarget)
+		{
+			// Just lost lock
+			bLockedOnTarget = false;
+
+			// Play lock lost sound for local player
+			if (GetNetMode() != NM_DedicatedServer &&
+				UTOwner != nullptr &&
+				UTOwner->IsLocallyControlled())
+			{
+				AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->GetController());
+				if (PC != nullptr && LockLostSound != nullptr)
+				{
+					PC->UTClientPlaySound(LockLostSound);
+				}
+			}
+		}
+	}
 }
 
 void AUTPlusWeap_RocketLauncher::OnRep_LockedTarget()

@@ -124,8 +124,9 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsound
 	IMPLEMENT_CLASS(AMutHitsounds, 2138622872);
 	void ATeamArenaCharacter::StaticRegisterNativesATeamArenaCharacter()
 	{
+		FNativeFunctionRegistrar::RegisterFunction(ATeamArenaCharacter::StaticClass(), "GetNetcodeVersion",(Native)&ATeamArenaCharacter::execGetNetcodeVersion);
 	}
-	IMPLEMENT_CLASS(ATeamArenaCharacter, 2172381427);
+	IMPLEMENT_CLASS(ATeamArenaCharacter, 2280779020);
 	void UTeamArenaCharacterMovement::StaticRegisterNativesUTeamArenaCharacterMovement()
 	{
 	}
@@ -299,7 +300,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "OnRep_PendingLockedTarget",(Native)&AUTPlusWeap_RocketLauncher::execOnRep_PendingLockedTarget);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "ServerCycleRocketMode",(Native)&AUTPlusWeap_RocketLauncher::execServerCycleRocketMode);
 	}
-	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 1756732399);
+	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 2612433489);
 	void AUTWeap_LinkGun_Plus::DrawWeaponCrosshair(UUTHUDWidget* WeaponHudWidget, float RenderDelta)
 	{
 		UTWeap_LinkGun_Plus_eventDrawWeaponCrosshair_Parms Parms;
@@ -426,6 +427,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_WriteConfigSection();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_UTeamArenaCharacterMovement_NoRegister();
@@ -1205,6 +1207,29 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	static FCompiledInDefer Z_CompiledInDefer_UClass_AMutHitsounds(Z_Construct_UClass_AMutHitsounds, &AMutHitsounds::StaticClass, TEXT("AMutHitsounds"), false, nullptr, nullptr, nullptr);
 	DEFINE_VTABLE_PTR_HELPER_CTOR(AMutHitsounds);
+	UFunction* Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion()
+	{
+		struct TeamArenaCharacter_eventGetNetcodeVersion_Parms
+		{
+			int32 ReturnValue;
+		};
+		UObject* Outer=Z_Construct_UClass_ATeamArenaCharacter();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("GetNetcodeVersion"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x14022401, 65535, sizeof(TeamArenaCharacter_eventGetNetcodeVersion_Parms));
+			UProperty* NewProp_ReturnValue = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ReturnValue"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(ReturnValue, TeamArenaCharacter_eventGetNetcodeVersion_Parms), 0x0010000000000580);
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("NetcodePlus"));
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/TeamArenaCharacter.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Allow Blueprints to read the version number from your header file"));
+#endif
+		}
+		return ReturnFunction;
+	}
 	UClass* Z_Construct_UClass_ATeamArenaCharacter_NoRegister()
 	{
 		return ATeamArenaCharacter::StaticClass();
@@ -1222,6 +1247,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				UObjectForceRegistration(OuterClass);
 				OuterClass->ClassFlags |= 0x20902080;
 
+				OuterClass->LinkChild(Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion());
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				UProperty* NewProp_CachedPredictionPC = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("CachedPredictionPC"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(CachedPredictionPC, ATeamArenaCharacter), 0x0020080000000000, Z_Construct_UClass_ATeamArenaPredictionPC_NoRegister());
@@ -1229,6 +1255,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				UProperty* NewProp_SpawnProtectionColor = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SpawnProtectionColor"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(SpawnProtectionColor, ATeamArenaCharacter), 0x0010000000010015, Z_Construct_UScriptStruct_FLinearColor());
 				UProperty* NewProp_SpawnProtectionMaterial = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SpawnProtectionMaterial"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(SpawnProtectionMaterial, ATeamArenaCharacter), 0x0010000000010015, Z_Construct_UClass_UMaterialInterface_NoRegister());
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion(), "GetNetcodeVersion"); // 2198768446
 				OuterClass->StaticLink();
 #if WITH_METADATA
 				UMetaData* MetaData = OuterClass->GetOutermost()->GetMetaData();
@@ -2197,6 +2224,8 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				UProperty* NewProp_LoadCrosshairTextures = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("LoadCrosshairTextures"), RF_Public|RF_Transient|RF_MarkAsNative) UArrayProperty(CPP_PROPERTY_BASE(LoadCrosshairTextures, AUTPlusWeap_RocketLauncher), 0x0010000000000005);
 				UProperty* NewProp_LoadCrosshairTextures_Inner = new(EC_InternalUseOnlyConstructor, NewProp_LoadCrosshairTextures, TEXT("LoadCrosshairTextures"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(FObjectInitializer(), EC_CppProperty, 0, 0x0000000000000000, Z_Construct_UClass_UTexture2D_NoRegister());
 				UProperty* NewProp_CrosshairRotationTime = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("CrosshairRotationTime"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(CrosshairRotationTime, AUTPlusWeap_RocketLauncher), 0x0010000000010015);
+				UProperty* NewProp_LockLostSound = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("LockLostSound"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(LockLostSound, AUTPlusWeap_RocketLauncher), 0x0010000000010015, Z_Construct_UClass_USoundBase_NoRegister());
+				UProperty* NewProp_LockAcquiredSound = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("LockAcquiredSound"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(LockAcquiredSound, AUTPlusWeap_RocketLauncher), 0x0010000000010015, Z_Construct_UClass_USoundBase_NoRegister());
 				UProperty* NewProp_AltFireModeChangeSound = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("AltFireModeChangeSound"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(AltFireModeChangeSound, AUTPlusWeap_RocketLauncher), 0x0010000000010015, Z_Construct_UClass_USoundBase_NoRegister());
 				UProperty* NewProp_RocketLoadedSound = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("RocketLoadedSound"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(RocketLoadedSound, AUTPlusWeap_RocketLauncher), 0x0010000000010015, Z_Construct_UClass_USoundBase_NoRegister());
 				UProperty* NewProp_FiringAnimationHands = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FiringAnimationHands"), RF_Public|RF_Transient|RF_MarkAsNative) UArrayProperty(CPP_PROPERTY_BASE(FiringAnimationHands, AUTPlusWeap_RocketLauncher), 0x0010000000010015);
@@ -2283,6 +2312,10 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				MetaData->SetValue(NewProp_CrosshairRotationTime, TEXT("Category"), TEXT("Rocket Launcher|HUD"));
 				MetaData->SetValue(NewProp_CrosshairRotationTime, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusWeap_RocketLauncher.h"));
 				MetaData->SetValue(NewProp_CrosshairRotationTime, TEXT("ToolTip"), TEXT("=== HUD/VISUAL ==="));
+				MetaData->SetValue(NewProp_LockLostSound, TEXT("Category"), TEXT("Rocket Launcher|Sound"));
+				MetaData->SetValue(NewProp_LockLostSound, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusWeap_RocketLauncher.h"));
+				MetaData->SetValue(NewProp_LockAcquiredSound, TEXT("Category"), TEXT("Rocket Launcher|Sound"));
+				MetaData->SetValue(NewProp_LockAcquiredSound, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusWeap_RocketLauncher.h"));
 				MetaData->SetValue(NewProp_AltFireModeChangeSound, TEXT("Category"), TEXT("Rocket Launcher|Sound"));
 				MetaData->SetValue(NewProp_AltFireModeChangeSound, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusWeap_RocketLauncher.h"));
 				MetaData->SetValue(NewProp_RocketLoadedSound, TEXT("Category"), TEXT("Rocket Launcher|Sound"));
@@ -2947,8 +2980,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			ReturnPackage = CastChecked<UPackage>(StaticFindObjectFast(UPackage::StaticClass(), NULL, FName(TEXT("/Script/NetcodePlus")), false, false));
 			ReturnPackage->SetPackageFlags(PKG_CompiledIn | 0x00000000);
 			FGuid Guid;
-			Guid.A = 0x34A27907;
-			Guid.B = 0x35F83367;
+			Guid.A = 0xD25ECD66;
+			Guid.B = 0xD2B59385;
 			Guid.C = 0x00000000;
 			Guid.D = 0x00000000;
 			ReturnPackage->SetGuid(Guid);

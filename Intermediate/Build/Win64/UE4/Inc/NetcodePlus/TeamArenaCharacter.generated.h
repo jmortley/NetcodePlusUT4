@@ -11,8 +11,28 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #endif
 #define NETCODEPLUS_TeamArenaCharacter_generated_h
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS_NO_PURE_DECLS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS \
+ \
+	DECLARE_FUNCTION(execGetNetcodeVersion) \
+	{ \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		*(int32*)Z_Param__Result=ATeamArenaCharacter::GetNetcodeVersion(); \
+		P_NATIVE_END; \
+	}
+
+
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS_NO_PURE_DECLS \
+ \
+	DECLARE_FUNCTION(execGetNetcodeVersion) \
+	{ \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		*(int32*)Z_Param__Result=ATeamArenaCharacter::GetNetcodeVersion(); \
+		P_NATIVE_END; \
+	}
+
+
 #define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_INCLASS_NO_PURE_DECLS \
 	private: \
 	static void StaticRegisterNativesATeamArenaCharacter(); \

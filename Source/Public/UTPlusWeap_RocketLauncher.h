@@ -237,6 +237,11 @@ public:
 
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Sound")
     USoundBase* AltFireModeChangeSound;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Sound")
+	USoundBase* LockAcquiredSound;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Sound")
+	USoundBase* LockLostSound;
 
     // === HUD/VISUAL ===
 

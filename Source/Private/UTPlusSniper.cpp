@@ -167,6 +167,12 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 				// Convert padding to scale factor: NewRadius = OldRadius * NewScale
 				// OldRadius + Padding = OldRadius * NewScale
 				// NewScale = (OldRadius + Padding) / OldRadius = 1 + Padding/OldRadius
+				// Extra padding for vertical movement (falling/dodging)
+				bool bVerticalMovement = FMath::Abs(AltTarget->GetVelocity().Z) > 300.f;
+				if (bVerticalMovement)
+				{
+					HeadPadding *= 1.2f;  // 20% more padding during vertical movement
+				}
 				if (AltTarget->HeadRadius > 0.f)
 				{
 					float PaddingAsScale = HeadPadding / (AltTarget->HeadRadius * AltTarget->HeadScale);
@@ -263,30 +269,53 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	{
 		int32 Damage = GetHitScanDamage();
 		TSubclassOf<UDamageType> DamageType = InstantHitInfo[CurrentFireMode].DamageType;
-
 		bool bIsHeadShot = false;
 		bool bBlockedHeadshot = false;
 		AUTCharacter* C = Cast<AUTCharacter>(Hit.Actor.Get());
 
-		if (C != NULL && CanHeadShot() && C->IsHeadShot(Hit.Location, FireDir, GetHeadshotScale(C), UTOwner, PredictionTime))
+		if (C != NULL && CanHeadShot())
 		{
-			bIsHeadShot = true;
-			if (C->BlockedHeadShot(Hit.Location, FireDir, GetHeadshotScale(C), true, UTOwner))
+			// Calculate effective head scale with padding (same as Part 3)
+			float EffectiveHeadScale = GetHeadshotScale(C);
+
+			if (C == ReceivedHitScanHitChar)
 			{
-				Damage = BlockedHeadshotDamage;
-				bBlockedHeadshot = true;
-			}
-			else
-			{
-				AUTBot* B = UTOwner ? Cast<AUTBot>(UTOwner->Controller) : nullptr;
-				if (!B || (B->Skill + B->Personality.Accuracy > 3.5f))
+				bool bTargetMoving = !C->GetVelocity().IsNearlyZero(10.0f);
+				float HeadPadding = bTargetMoving ? HeadSphereHitPadding : HeadSphereHitPaddingStationary;
+
+				bool bVerticalMovement = FMath::Abs(C->GetVelocity().Z) > 300.f;
+				if (bVerticalMovement)
 				{
-					Damage = HeadshotDamage;
+					HeadPadding *= 1.2f;
+				}
+
+				if (C->HeadRadius > 0.f)
+				{
+					float PaddingAsScale = HeadPadding / (C->HeadRadius * C->HeadScale);
+					EffectiveHeadScale += PaddingAsScale;
 				}
 			}
-			if (HeadshotDamageType != NULL)
+
+			if (C->IsHeadShot(Hit.Location, FireDir, EffectiveHeadScale, UTOwner, PredictionTime))
 			{
-				DamageType = HeadshotDamageType;
+				bIsHeadShot = true;
+				if (C->BlockedHeadShot(Hit.Location, FireDir, EffectiveHeadScale, true, UTOwner))
+				{
+					Damage = BlockedHeadshotDamage;
+					bBlockedHeadshot = true;
+				}
+				else
+				{
+					AUTBot* B = UTOwner ? Cast<AUTBot>(UTOwner->Controller) : nullptr;
+					if (!B || (B->Skill + B->Personality.Accuracy > 3.5f))
+					{
+						Damage = HeadshotDamage;
+					}
+				}
+				if (HeadshotDamageType != NULL)
+				{
+					DamageType = HeadshotDamageType;
+				}
 			}
 		}
 
