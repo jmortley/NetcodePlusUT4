@@ -208,7 +208,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::GraceTimer()
     EndFiringSequence(GetFireMode());
 }
 
-
+/*
 void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
 {
     if (FireModeNum != GetFireMode())
@@ -244,6 +244,72 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
     // Just use stock UT firing - no transactional needed for charged weapons
     FireLoadedRocket();
 }
+*/
+void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
+{
+	if (FireModeNum != GetFireMode()) return;
+
+	bCharging = false;
+
+	// --- FIX START: DYNAMIC GHOST ROCKET COMPENSATION ---
+	if (RocketLauncher && RocketLauncher->NumLoadedRockets <= 0 && GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(LoadTimerHandle))
+	{
+		float Remaining = GetOuterAUTWeapon()->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle);
+
+		float RTT_ms = 0.0f;
+		//FString PlayerName = "Unknown"; // For debug logging
+
+		if (GetUTOwner() && GetUTOwner()->PlayerState)
+		{
+			RTT_ms = GetUTOwner()->PlayerState->ExactPing;
+			//PlayerName = GetUTOwner()->PlayerState->PlayerName;
+		}
+
+		// Convert RTT to One-Way Seconds
+		float OneWaySeconds = RTT_ms * 0.0005f;
+
+		// Add 20ms Jitter Buffer
+		float Tolerance = OneWaySeconds + 0.02f;
+
+		// Clamp Tolerance (Max 200ms)
+		Tolerance = FMath::Clamp(Tolerance, 0.0f, 0.20f);
+
+		// Debug Log to verify values in Output Log
+		// UE_LOG(LogTemp, Log, TEXT("Rocket Check - Player: %s | RTT: %.2f | OneWay: %.4f | Tolerance: %.4f | Remaining: %.4f"), 
+		//    *PlayerName, RTT_ms, OneWaySeconds, Tolerance, Remaining);
+
+		if (Remaining < Tolerance)
+		{
+			GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
+			LoadTimer();
+			return;
+		}
+		else
+		{
+			// Legit early release (or latency too high) - RESET STATE to prevent jam
+			GetOuterAUTWeapon()->GotoActiveState();
+			return;
+		}
+	}
+	// --- FIX END ---
+
+	if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
+	{
+		GetOuterAUTWeapon()->GotoActiveState();
+		return;
+	}
+
+	AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
+	if (GameState && (GameState->HasMatchEnded() || GameState->IsMatchIntermission()))
+	{
+		RocketLauncher->NumLoadedRockets = 0;
+		GetOuterAUTWeapon()->GotoActiveState();
+		return;
+	}
+
+	FireLoadedRocket();
+}
+
 
 
 
@@ -353,6 +419,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
 	// This catches the switch effectively "instantly" before state transitions finish.
 	if (GetUTOwner() && GetUTOwner()->GetPendingWeapon() != nullptr)
 	{
+		GetOuterAUTWeapon()->GotoActiveState();
 		return;
 	}
 
@@ -429,6 +496,8 @@ void UUTWeaponStateFiringChargedRocket_Transactional::UpdateTiming()
     }
 }
 
+
+/*
 void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
 {
     // Don't allow putdown while:
@@ -452,7 +521,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
 		// --- FIX: DO NOT SCHEDULE REFIRE TIMER HERE ---
 		// We are switching weapons. We just dumped the ammo. 
 		// We do NOT want to check if we should fire again.
-		/*
+		
         if (GetOuterAUTWeapon()->GetCurrentState() == this)
         {
             GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
@@ -463,7 +532,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
                 false
             );
         }
-	*/
+
     }
     else
     {
@@ -488,4 +557,73 @@ void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
             );
         }
     }
+}
+*/
+
+
+void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
+{
+	// Mid-burst: wait for it to complete
+	if (GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(FireLoadedRocketHandle))
+	{
+		return;
+	}
+
+	// Still charging: let them finish loading, switch will happen after firing
+	if (bCharging)
+	{
+		return;
+	}
+
+	// Grace timer active: waiting to auto-fire, let it complete
+	if (GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(GraceTimerHandle))
+	{
+		return;
+	}
+
+	// Have loaded rockets ready to fire: fire them, then switch
+	if (RocketLauncher && RocketLauncher->NumLoadedRockets > 0)
+	{
+		int32 SafetyCounter = 0;
+		while (RocketLauncher->NumLoadedRockets > 0)
+		{
+			int32 OldCount = RocketLauncher->NumLoadedRockets;
+			RocketLauncher->FireShotDirect();
+
+			if (RocketLauncher->NumLoadedRockets >= OldCount)
+			{
+				RocketLauncher->NumLoadedRockets--;
+			}
+			SafetyCounter++;
+			if (SafetyCounter > 50)
+			{
+				RocketLauncher->NumLoadedRockets = 0;
+				break;
+			}
+		}
+
+		GetOuterAUTWeapon()->UnEquip();
+		return;
+	}
+
+	// Nothing loaded, not charging: standard putdown with refire timing
+	float TimeTillPutDown = GetOuterAUTWeapon()->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle)
+		* GetOuterAUTWeapon()->RefirePutDownTimePercent;
+
+	if (TimeTillPutDown <= GetOuterAUTWeapon()->GetPutDownTime())
+	{
+		GetOuterAUTWeapon()->EarliestFireTime = GetWorld()->GetTimeSeconds() + TimeTillPutDown;
+		UUTWeaponState::PutDown();
+	}
+	else
+	{
+		TimeTillPutDown -= GetOuterAUTWeapon()->GetPutDownTime();
+		GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+			PutDownHandle,
+			this,
+			&UUTWeaponStateFiringChargedRocket_Transactional::PutDown,
+			TimeTillPutDown,
+			false
+		);
+	}
 }

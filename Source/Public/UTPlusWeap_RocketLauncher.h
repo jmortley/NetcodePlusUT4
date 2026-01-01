@@ -64,7 +64,6 @@ public:
     virtual void PostInitProperties() override;
     virtual void Destroyed() override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
-
     // === ROCKET LOADING ===
     /** Font used to draw the firemode text (Grenades/Spiral) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD")
