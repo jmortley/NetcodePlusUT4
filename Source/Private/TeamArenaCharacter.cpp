@@ -404,7 +404,7 @@ FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerCo
     return TargetLocation;
 }
 
-
+/*
 FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 {
 	if (PredictionTime <= 0.f)
@@ -433,7 +433,45 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 	// Apply that offset to rewound position
 	return RewoundBodyLoc + HeadOffset;
 }
+*/
 
+FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
+{
+	// Force mesh update if necessary (from Epic's implementation)
+	if (GetMesh()->IsRegistered() && GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones && !GetMesh()->bRecentlyRendered)
+	{
+		if (GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPose)
+		{
+			const float Step = 0.1f;
+			for (float TickTime = FMath::Min<float>(GetWorld()->TimeSeconds - GetMesh()->LastRenderTime, 1.0f); TickTime > 0.0f; TickTime -= Step)
+			{
+				GetMesh()->TickAnimation(FMath::Min<float>(TickTime, Step), false);
+			}
+		}
+		GetMesh()->AnimUpdateRateParams->bSkipEvaluation = false;
+		GetMesh()->AnimUpdateRateParams->bInterpolateSkippedFrames = false;
+		GetMesh()->RefreshBoneTransforms();
+		GetMesh()->UpdateComponentToWorld();
+	}
+
+	if (PredictionTime <= 0.f)
+	{
+		// Current head position: socket + HeadHeight offset
+		return GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
+	}
+
+	// --- REWOUND HEAD ---
+	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
+
+	// Get current head world position (with HeadHeight!)
+	FVector CurrentHeadWorld = GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
+
+	// Calculate head offset relative to current body
+	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
+
+	// Apply that offset to rewound position
+	return RewoundBodyLoc + HeadOffset;
+}
 
 void ATeamArenaCharacter::BeginPlay()
 {

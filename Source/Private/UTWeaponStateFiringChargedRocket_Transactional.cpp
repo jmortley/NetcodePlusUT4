@@ -448,7 +448,6 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
     {
         // Player stopped firing - return to active state
         GetOuterAUTWeapon()->GotoActiveState();
-		//GetOuterAUTWeapon()->StopFire(GetFireMode());
 		if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
 		{
 			GetOuterAUTWeapon()->StartFire(0);

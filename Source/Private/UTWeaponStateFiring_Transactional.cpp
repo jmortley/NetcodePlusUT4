@@ -47,14 +47,40 @@ void UUTWeaponStateFiring_Transactional::BeginState(const UUTWeaponState* PrevSt
 
 void UUTWeaponStateFiring_Transactional::EndState()
 {
-	// Clean up the timer immediately when leaving this state
-	// This prevents RefireCheckTimer from ticking one last time after the user released the button
 	if (GetOuterAUTWeapon())
 	{
 		GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(RefireCheckHandle);
 	}
 
-	Super::EndState();
+	// Manual cleanup - same as parent but defer ClearFiringInfo
+	bDelayShot = false;
+	ToggleLoopingEffects(false);
+	GetOuterAUTWeapon()->OnStoppedFiring();
+	GetOuterAUTWeapon()->StopFiringEffects();
+
+	// Defer ClearFiringInfo to next frame so visual can render
+	AUTCharacter* Owner = GetOuterAUTWeapon()->GetUTOwner();
+	if (Owner)
+	{
+		TWeakObjectPtr<AUTCharacter> WeakOwner = Owner;
+		TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+
+		Owner->GetWorldTimerManager().SetTimerForNextTick(
+			FTimerDelegate::CreateLambda([WeakOwner, WeakWeapon]()
+				{
+					if (WeakOwner.IsValid())
+					{
+						// Only clear if owner hasn't started firing a new weapon
+						if (WeakOwner->GetWeapon() != WeakWeapon.Get())
+						{
+							WeakOwner->ClearFiringInfo();
+						}
+					}
+				})
+		);
+	}
+
+	GetOuterAUTWeapon()->GetWorldTimerManager().ClearAllTimersForObject(this);
 }
 
 
