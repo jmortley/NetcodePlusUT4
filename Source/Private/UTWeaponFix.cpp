@@ -452,7 +452,7 @@ void AUTWeaponFix::FireShot()
 		if (LastFireTime.IsValidIndex(CurrentFireMode))
 			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
 		FRotator ClientRot = GetUTOwner() ? GetUTOwner()->GetViewRotation() : FRotator::ZeroRotator;
-		EarliestFireTime = 0.f;
+		//EarliestFireTime = 0.f;
 
 		uint8 ZOffset = 0;
 		if (UTOwner)
@@ -541,7 +541,6 @@ void AUTWeaponFix::FireShot()
 		}
 
 		// 3. SPAWN PROJECTILE
-		EarliestFireTime = 0.f;
 		Super::FireShot();
 	}
 }
@@ -709,7 +708,7 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
 
             // Get the refire time for mode [i] (the one that was fired previously)
             // Subtract 65ms (0.06f) for network tolerance
-            float MinInterval = GetRefireTime(i) - 0.085f;
+            float MinInterval = GetRefireTime(i) - 0.12f;
 
             if (TimeSinceLastFire < MinInterval)
             {
@@ -747,7 +746,7 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
 
             // Client Tolerance (60ms)
             // If we are within the refire window of ANY mode, block the shot.
-            if (TimeSinceLastFire < (RequiredInterval - 0.06f))
+            if (TimeSinceLastFire < (RequiredInterval - 0.08f))
             {
                 return true;
             }
