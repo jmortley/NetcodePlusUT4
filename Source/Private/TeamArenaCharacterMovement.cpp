@@ -16,8 +16,8 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.0167f;  // instead of fps dependent
     LastTeamCollisionUpdateTime = -1.0f;  // Force immediate first update
-	MinTimeBetweenClientAdjustments = 0.15f;  //stock 0.1f
-	LargeCorrectionThreshold = 20.f;  //stock 15.f
+	MinTimeBetweenClientAdjustments = 0.1f;  //stock 0.1f
+	LargeCorrectionThreshold = 17.f;  //stock 15.f
     // --- HIGH-FPS FIX #2: Dodge timing tolerance ---
     // Prevents server rejection when client/server timestamps differ by microseconds
     DodgeCooldownTolerance = 0.05f;

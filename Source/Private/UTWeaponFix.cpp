@@ -480,7 +480,7 @@ void AUTWeaponFix::FireShot()
 			ClientHitChar = Cast<AUTCharacter>(PreHit.Actor.Get());
 		}
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset);
-
+        QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
 		Super::FireShot();
 	}
 	else
@@ -644,6 +644,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
             ClientFireEventIndex[FireModeNum] : 0;
         float CurrentTime = GetWorld()->GetTimeSeconds();
         ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime);
+        QueueResendFireFixed(false, FireModeNum, EventIndex, CurrentTime, FRotator::ZeroRotator, 0, nullptr);
     }
     
 }
@@ -977,14 +978,7 @@ bool AUTWeaponFix::ServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireE
     return FireModeNum < GetNumFireModes();
 }
 
-void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
-{
-    // Critical Fix #8: Sync client with server's authoritative state
-    if (ClientFireEventIndex.IsValidIndex(FireModeNum))
-    {
-        ClientFireEventIndex[FireModeNum] = InAuthorizedEventIndex;
-    }
-}
+
 
 void AUTWeaponFix::OnRep_FireModeState()
 {
@@ -1109,15 +1103,15 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
 						if (OwnerPing > 120.0f)
 						{
-							ExtraHitPadding = 60.0f; // Extreme Latency (Bad internet)
+							ExtraHitPadding = 49.0f; // Extreme Latency (Bad internet)
 						}
 						else if (OwnerPing > 90.0f)
 						{
-							ExtraHitPadding = 50.0f; // High Latency
+							ExtraHitPadding = 46.0f; // High Latency
 						}
 						else if (OwnerPing > 60.0f)
 						{
-							ExtraHitPadding = 45.0f; // Moderate Latency
+							ExtraHitPadding = 43.0f; // Moderate Latency
 						}
 						else
 						{
@@ -1195,7 +1189,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 		float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
 		const float SearchStep = 0.015f;      // 15ms steps
-		const float MaxSearchOffset = 0.050f; // ±50ms max search
+		const float MaxSearchOffset = 0.060f; // ±60ms max search
 		float SearchOffset = SearchStep;
 
 		while (FMath::Abs(SearchOffset) <= MaxSearchOffset)
@@ -1676,8 +1670,11 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 				FMath::Min(NewProjectile->GetLifeSpan(), 2.f * FMath::Max(0.f, CatchupTickDelta))
 			);
 		}
-	}
-
+	
+    PendingFakeProjectile = NewProjectile;
+    PendingFakeProjectileEventIndex = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
+        ? ClientFireEventIndex[CurrentFireMode] : -1;
+    }
 	// ----------------------------------------
 	// 8) High-FPS stability (Fixed Tick Rate)
 	// ----------------------------------------
@@ -2282,4 +2279,182 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 	}
 
 	Super::BringUp(OverflowTime);
+}
+
+
+
+// ============================================================================
+// UTWeaponFix.cpp - Transactional Retry System Implementation
+// ============================================================================
+
+// 1. QUEUE LOGIC (Client Side)
+// Call this inside your FireShot() client block
+void AUTWeaponFix::QueueResendFireFixed(bool bIsStartFire, uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar)
+{
+    // Only the owning client needs to queue retries
+    if (Role == ROLE_Authority && GetNetMode() != NM_Standalone) return;
+
+    // Create the payload
+    FPendingFireEventFix NewEvent(bIsStartFire, FireModeNum, InFireEventIndex, ClientTimestamp, ClientViewRot, ZOffset, ClientHitChar);
+
+    // Queue 2 copies. This gives us 2 retry attempts (spaced by the timer delay)
+    // before we give up. This prevents infinite network flooding if the connection is dead.
+    ResendFireEvents.Add(NewEvent);
+    ResendFireEvents.Add(NewEvent);
+
+    // Start the heartbeat timer if it's not running
+    if (!GetWorldTimerManager().IsTimerActive(ResendFireHandle))
+    {
+        GetWorldTimerManager().SetTimer(ResendFireHandle, this, &AUTWeaponFix::ResendNextFireEventFixed, 0.04f, true);
+    }
+}
+
+// 2. TIMER LOOP (Client Side)
+// This runs every 0.04s (40ms) to check if we need to resend
+void AUTWeaponFix::ResendNextFireEventFixed()
+{
+    // Safety Check: If weapon is invalid or owner is dead, abort everything
+    if (!UTOwner || UTOwner->IsPendingKillPending() || UTOwner->GetWeapon() != this)
+    {
+        ClearFireEventsFixed();
+        return;
+    }
+
+    if (ResendFireEvents.Num() > 0)
+    {
+        // Get the next event in the queue
+        FPendingFireEventFix Event = ResendFireEvents[0];
+        ResendFireEvents.RemoveAt(0);
+
+        // SEND THE PACKET
+        // NOTE: calling this Server function from the Client ONLY sends a packet.
+        // It does NOT execute the fire logic locally again.
+        if (Event.bIsStartFire)
+        {
+            ResendServerStartFireFixed(Event.FireModeNum, Event.FireEventIndex, Event.ClientTimestamp, Event.ClientViewRot, Event.ZOffset, Event.HitChar.Get());
+        }
+        else
+        {
+            ResendServerStopFireFixed(Event.FireModeNum, Event.FireEventIndex, Event.ClientTimestamp);
+        }
+    }
+
+    // If we have drained the queue, stop the timer to save CPU
+    if (ResendFireEvents.Num() == 0)
+    {
+        GetWorldTimerManager().ClearTimer(ResendFireHandle);
+    }
+}
+
+// 3. CLEANUP (Client Side)
+// Call this in DetachFromOwner or PutDown
+void AUTWeaponFix::ClearFireEventsFixed()
+{
+    ResendFireEvents.Empty();
+    GetWorldTimerManager().ClearTimer(ResendFireHandle);
+}
+
+// 4. CONFIRMATION (Client Side)
+// When server ACKs a shot, remove it from the retry queue so we stop bothering the server
+void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
+{
+    // Existing logic...
+    if (ClientFireEventIndex.IsValidIndex(FireModeNum))
+    {
+        ClientFireEventIndex[FireModeNum] = InAuthorizedEventIndex;
+        int32 ExpectedIndex = ClientFireEventIndex[FireModeNum];
+        // If server sent back an index LESS than what we sent, our shot was rejected
+        if (InAuthorizedEventIndex < ExpectedIndex)
+        {
+            // Kill the pending fake projectile if it exists
+            if (PendingFakeProjectile.IsValid() && PendingFakeProjectileEventIndex == ExpectedIndex)
+            {
+                PendingFakeProjectile->Destroy();
+                PendingFakeProjectile.Reset();
+                PendingFakeProjectileEventIndex = -1;
+
+                UE_LOG(LogUTWeaponFix, Verbose, TEXT("Destroyed rejected fake projectile (Event %d rejected, server at %d)"),
+                    ExpectedIndex, InAuthorizedEventIndex);
+            }
+        }
+        else
+        {
+            // Shot was accepted - clear the pending reference (let projectile live)
+            if (PendingFakeProjectile.IsValid() && PendingFakeProjectileEventIndex == InAuthorizedEventIndex)
+            {
+                PendingFakeProjectile.Reset();
+                PendingFakeProjectileEventIndex = -1;
+            }
+        }
+    }   
+    // NEW: Clear retries for this specific event
+    // We iterate backwards to safely remove items from the array
+    for (int32 i = ResendFireEvents.Num() - 1; i >= 0; i--)
+    {
+        // If the queued event matches the mode, AND the index is older or equal to
+        // what the server just confirmed, we can delete it.
+        if (ResendFireEvents[i].FireModeNum == FireModeNum &&
+            ResendFireEvents[i].FireEventIndex <= InAuthorizedEventIndex)
+        {
+            ResendFireEvents.RemoveAt(i);
+        }
+    }
+
+    // If queue is empty, stop the timer
+    if (ResendFireEvents.Num() == 0)
+    {
+        GetWorldTimerManager().ClearTimer(ResendFireHandle);
+    }
+}
+
+// 5. SERVER HANDLER (Start Fire)
+// This receives the retry packet
+void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar)
+{
+    // DUPLICATE CHECK
+    // If the server already processed this index (or a newer one), ignore this packet.
+    if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum))
+    {
+        int32 LastIdx = AuthoritativeFireEventIndex[FireModeNum];
+
+        // Wrap-around safe check: if the index is <= last seen, it's old.
+        if (InFireEventIndex <= LastIdx && (LastIdx - InFireEventIndex) < 100)
+        {
+            return; // SILENT REJECT - Already fired this shot
+        }
+    }
+
+    // Set flag so internal logic knows this is a delayed/retry shot
+    bNetDelayedShot = true;
+
+    // Execute the actual fire logic
+    // This calculates the delay and fast-forwards the projectile to catch up
+    ServerStartFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, true, ClientViewRot, ClientHitChar, ZOffset);
+
+    bNetDelayedShot = false;
+}
+
+// 6. SERVER HANDLER (Stop Fire)
+void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp)
+{
+    // Duplicate check for Stop Fire is less critical but good for consistency
+    if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum))
+    {
+        int32 LastIdx = AuthoritativeFireEventIndex[FireModeNum];
+        if (InFireEventIndex <= LastIdx && (LastIdx - InFireEventIndex) < 100) return;
+    }
+
+    bNetDelayedShot = true;
+    ServerStopFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp);
+    bNetDelayedShot = false;
+}
+
+bool AUTWeaponFix::ResendServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar)
+{
+    return true;
+}
+
+bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp)
+{
+    return true;
 }

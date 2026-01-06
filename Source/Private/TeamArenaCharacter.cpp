@@ -211,7 +211,7 @@ void ATeamArenaCharacter::FiringInfoUpdated()
         // Prevent any FiringInfoUpdated visual calls while zoomed
     //    return;
     //}
-
+	/*
     if (IsLocallyControlled() && !bLocalFlashLoc)
     {
         // If this is our custom weapon, we know we handled visuals locally in FireShot.
@@ -224,6 +224,7 @@ void ATeamArenaCharacter::FiringInfoUpdated()
         // If this is a Stock Weapon (Sniper, etc), it DOES NOT predict locally.
         // It relies on this server echo to draw the beam. We let it pass.
     }
+	*/
 
 
     // 2. Safe Getters
@@ -234,6 +235,21 @@ void ATeamArenaCharacter::FiringInfoUpdated()
 
     // --- FIX START: NULL-SAFE LOGIC ---
     bool bShouldPlayServerEffect = true;
+	
+	if (UTPC != nullptr && bLocalFlashLoc)
+	{
+		// 1. Default Rule: Suppress the server echo to prevent double audio/flash.
+		//    (This handles Rockets, Flak, Link, Minigun, etc.)
+		bShouldPlayServerEffect = false;
+
+		// 2. Exception: Shock Rifle
+		//    The Shock Beam relies on the server replication to look "Thick" and correct.
+		//    We allow the server echo to play ON TOP of the local effect.
+		if (Weapon && Weapon->IsA(AUTPlusShockRifle::StaticClass()))
+		{
+			bShouldPlayServerEffect = true;
+		}
+	}
 
 
     if (UTPC != nullptr && !bLocalFlashLoc && MyPredictionTime > 0.f)

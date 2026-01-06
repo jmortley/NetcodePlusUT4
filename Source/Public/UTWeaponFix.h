@@ -48,6 +48,22 @@ struct FNetcodeDelayedProjectile
 	}
 };
 
+struct FPendingFireEventFix
+{
+    bool bIsStartFire;
+    uint8 FireModeNum;
+    int32 FireEventIndex;
+    float ClientTimestamp;
+    FRotator ClientViewRot;
+    uint8 ZOffset;
+    TWeakObjectPtr<AUTCharacter> HitChar; // <--- ADDED THIS
+
+    FPendingFireEventFix(bool bStart, uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot, uint8 Z, AUTCharacter* InChar)
+        : bIsStartFire(bStart), FireModeNum(Mode), FireEventIndex(EventIdx), ClientTimestamp(Timestamp), ClientViewRot(ViewRot), ZOffset(Z), HitChar(InChar)
+    {
+    }
+};
+
 
 UCLASS(Abstract)
 class NETCODEPLUS_API AUTWeaponFix : public AUTWeapon
@@ -88,6 +104,10 @@ public:
     bool IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime);
     void OnRetryTimer(uint8 FireModeNum);
     bool bIsTransactionalFire;
+    UPROPERTY()
+    TWeakObjectPtr<AUTProjectile> PendingFakeProjectile;
+
+    int32 PendingFakeProjectileEventIndex;
 
 protected:
     /**
@@ -260,5 +280,18 @@ protected:
 	FNetcodeDelayedProjectile NetcodeDelayedProjectile;
 
 	// Guard Rail Cap (120ms)
-	const float MaxCatchupTime = 0.12f;
+	const float MaxCatchupTime = 0.10f;
+
+    TArray<FPendingFireEventFix> ResendFireEvents;
+    FTimerHandle ResendFireHandle;
+
+    void QueueResendFireFixed(bool bIsStartFire, uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar);
+    void ResendNextFireEventFixed();
+    void ClearFireEventsFixed();
+
+    UFUNCTION(Server, Unreliable, WithValidation)
+    void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar);
+
+    UFUNCTION(Server, Unreliable, WithValidation)
+    void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp);
 };
