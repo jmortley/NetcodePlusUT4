@@ -107,6 +107,15 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
     {
         RocketLauncher->NumLoadedRockets = 0;
         RocketLauncher->NumLoadedBarrels = 0;
+        // FIX: Clear visual state flags to prevent stale HUD text
+        RocketLauncher->CurrentRocketFireMode = 0;
+        RocketLauncher->bDrawRocketModeString = false;
+        
+        if (RocketLauncher->Role == ROLE_Authority)
+        {
+            RocketLauncher->SetRocketFlashExtra(
+                RocketLauncher->GetCurrentFireMode(), 0, 0, false);
+        }
     }
 
     // 4. Standard cleanup
@@ -245,6 +254,12 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
     FireLoadedRocket();
 }
 */
+
+
+
+
+
+/*
 void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
 {
 	if (FireModeNum != GetFireMode()) return;
@@ -288,6 +303,20 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 		{
 			// Legit early release (or latency too high) - RESET STATE to prevent jam
 			GetOuterAUTWeapon()->GotoActiveState();
+            if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
+            {
+                TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+                GetOuterAUTWeapon()->GetWorldTimerManager().SetTimerForNextTick(
+                    FTimerDelegate::CreateLambda([WeakWeapon]()
+                        {
+                            if (WeakWeapon.IsValid() && WeakWeapon->GetUTOwner() &&
+                                WeakWeapon->GetUTOwner()->IsPendingFire(0))
+                            {
+                                WeakWeapon->StartFire(0);
+                            }
+                        })
+                );
+            }
 			return;
 		}
 	}
@@ -296,6 +325,20 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 	if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
 	{
 		GetOuterAUTWeapon()->GotoActiveState();
+        if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
+        {
+            TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+            GetOuterAUTWeapon()->GetWorldTimerManager().SetTimerForNextTick(
+                FTimerDelegate::CreateLambda([WeakWeapon]()
+                    {
+                        if (WeakWeapon.IsValid() && WeakWeapon->GetUTOwner() &&
+                            WeakWeapon->GetUTOwner()->IsPendingFire(0))
+                        {
+                            WeakWeapon->StartFire(0);
+                        }
+                    })
+            );
+        }
 		return;
 	}
 
@@ -304,12 +347,110 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 	{
 		RocketLauncher->NumLoadedRockets = 0;
 		GetOuterAUTWeapon()->GotoActiveState();
+        if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
+        {
+            TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+            GetOuterAUTWeapon()->GetWorldTimerManager().SetTimerForNextTick(
+                FTimerDelegate::CreateLambda([WeakWeapon]()
+                    {
+                        if (WeakWeapon.IsValid() && WeakWeapon->GetUTOwner() &&
+                            WeakWeapon->GetUTOwner()->IsPendingFire(0))
+                        {
+                            WeakWeapon->StartFire(0);
+                        }
+                    })
+            );
+        }
 		return;
 	}
 
 	FireLoadedRocket();
 }
+*/
 
+
+void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
+{
+    if (FireModeNum != GetFireMode()) return;
+
+    bCharging = false;
+
+    // --- HELPER LAMBDA FOR BUFFERED FIRE ---
+    // Fixes the "Dead End" where holding M1 after a cancelled load does nothing.
+    auto AttemptBufferedFire = [this]()
+        {
+            if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
+            {
+                TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+
+                // Syntax Fix: [Capture List] (Params) { Body }
+                GetOuterAUTWeapon()->GetWorldTimerManager().SetTimerForNextTick(
+                    FTimerDelegate::CreateLambda([WeakWeapon]()
+                        {
+                            if (WeakWeapon.IsValid() && WeakWeapon->GetUTOwner() &&
+                                WeakWeapon->GetUTOwner()->IsPendingFire(0))
+                            {
+                                // Fix: Reset the lock flag so StartFire doesn't reject the input
+                                AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(WeakWeapon.Get());
+                                if (FixWeapon)
+                                {
+                                    // Use the public setter or direct access if you made it public
+                                    // FixWeapon->CurrentlyFiringMode = 255; 
+                                    FixWeapon->ResetFiringModeTracker();
+                                }
+
+                                WeakWeapon->StartFire(0);
+                            }
+                        })
+                );
+            }
+        };
+
+    // --- FIX START: DYNAMIC GHOST ROCKET COMPENSATION ---
+    if (RocketLauncher && RocketLauncher->NumLoadedRockets <= 0 && GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(LoadTimerHandle))
+    {
+        float Remaining = GetOuterAUTWeapon()->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle);
+        float RTT_ms = (GetUTOwner() && GetUTOwner()->PlayerState) ? GetUTOwner()->PlayerState->ExactPing : 0.0f;
+
+        // Convert RTT to One-Way Seconds + Jitter Buffer
+        float Tolerance = FMath::Clamp((RTT_ms * 0.0005f) + 0.02f, 0.0f, 0.20f);
+
+        if (Remaining < Tolerance)
+        {
+            GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
+            LoadTimer();
+            return;
+        }
+        else
+        {
+            // Legit early release (or latency too high) - RESET STATE
+            GetOuterAUTWeapon()->GotoActiveState();
+            AttemptBufferedFire(); // <--- Check input
+            return;
+        }
+    }
+    // --- FIX END ---
+
+    if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
+    {
+        GetOuterAUTWeapon()->GotoActiveState();
+        AttemptBufferedFire(); // <--- Check input
+        return;
+    }
+
+    AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
+    if (GameState && (GameState->HasMatchEnded() || GameState->IsMatchIntermission()))
+    {
+        RocketLauncher->NumLoadedRockets = 0;
+        GetOuterAUTWeapon()->GotoActiveState();
+        AttemptBufferedFire(); // <--- Check input
+        return;
+    }
+
+    // Normal path: Fire the rockets.
+    // NOTE: The transition logic for a SUCCESSFUL fire happens in RefireCheckTimer().
+    FireLoadedRocket();
+}
 
 
 
@@ -406,7 +547,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
 
 
-
+/*
 void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
 {
 	// 1. Weapon State Check: If we aren't the current state, abort.
@@ -448,12 +589,93 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
     {
         // Player stopped firing - return to active state
         GetOuterAUTWeapon()->GotoActiveState();
-		if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
-		{
-			GetOuterAUTWeapon()->StartFire(0);
-		}
+        // --- FIX: USE NEXT TICK FOR BUFFERED INPUT ---
+        if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
+        {
+            TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+            GetOuterAUTWeapon()->GetWorldTimerManager().SetTimerForNextTick(
+                FTimerDelegate::CreateLambda([WeakWeapon]()
+                    {
+                        if (WeakWeapon.IsValid() && WeakWeapon->GetUTOwner() &&
+                            WeakWeapon->GetUTOwner()->IsPendingFire(0))
+                        {
+                            AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(WeakWeapon.Get());
+                            if (FixWeapon) FixWeapon->ResetFiringModeTracker();
+
+                            WeakWeapon->StartFire(0);
+                        }
+                    })
+            );
+        }
     }
 }
+*/
+
+
+void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
+{
+    // 1. Integrity Check
+    if (GetOuterAUTWeapon()->GetCurrentState() != this) return;
+
+    // 2. Switch Check
+    if (GetUTOwner() && GetUTOwner()->GetPendingWeapon() != nullptr)
+    {
+        GetOuterAUTWeapon()->GotoActiveState();
+        return;
+    }
+
+    // AI Check
+    AUTBot* B = Cast<AUTBot>(GetUTOwner() ? GetUTOwner()->Controller : nullptr);
+    if (B != nullptr) B->CheckWeaponFiring();
+
+    if (GetUTOwner() == nullptr) return;
+
+    // -----------------------------------------------------------
+    // LOGIC START
+    // -----------------------------------------------------------
+
+    // A. PRIORITY 1: CONTINUE CHARGING (Mode 1)
+    if (GetOuterAUTWeapon()->HandleContinuedFiring())
+    {
+        bCharging = true;
+        BeginState(this);
+        return;
+    }
+
+    // B. CLEANUP (Fixes the "Client 1: 1" stuck log)
+    // Force the Transactional Gatekeeper to reset so it accepts new input
+    AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+    if (FixWeapon)
+    {
+        FixWeapon->ResetFiringModeTracker();
+        // Uses the new public helper
+    }
+
+    // C. PRIORITY 2: SWITCH TO PRIMARY (Mode 0)
+    // Critical Fix: prevent ActiveState from firing a "Ghost Shot" that ignores cooldowns
+    bool bWantsPrimary = GetUTOwner()->IsPendingFire(0);
+
+    if (bWantsPrimary)
+    {
+        // 1. Temporarily hide input so ActiveState doesn't auto-fire immediately
+        GetUTOwner()->SetPendingFire(0, false);
+
+        // 2. Transition to Active (safe now because input is hidden)
+        GetOuterAUTWeapon()->GotoActiveState();
+
+        // 3. Restore input and trigger Transactional Fire
+        GetUTOwner()->SetPendingFire(0, true);
+
+        // This call will now succeed. If cooldown is active (due to Grenade),
+        // it will queue the RetryTimer. If no cooldown, it fires immediately.
+        GetOuterAUTWeapon()->StartFire(0);
+        return;
+    }
+
+    // D. NO INPUT - Return to Idle
+    GetOuterAUTWeapon()->GotoActiveState();
+}
+
 
 void UUTWeaponStateFiringChargedRocket_Transactional::UpdateTiming()
 {

@@ -9,6 +9,7 @@
 #include "UTWeaponStateFiring_Transactional.h"
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
 #include "UTWeaponStateZooming.h"
+#include "UTPlusProj_ShockBall.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
@@ -57,6 +58,7 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     HitScanPaddingStationary = 10.0f;
 	FudgeFactorMs = 20;
 	ProjectilePredictionCapMs = 120.0f;
+    LastMultiPressTime = 0.f;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -143,10 +145,9 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             return;
         }
     }
-
+ 
 	if (GetCurrentState() &&
-		(GetCurrentState()->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
-			GetCurrentState()->GetName().Contains(TEXT("Charged"))))
+		(GetCurrentState()->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass())))
 	{
 		if (FireModeNum != CurrentFireMode)
 		{
@@ -170,9 +171,15 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 			}
 			if (UTOwner)
 			{
-				UTOwner->SetPendingFire(FireModeNum, false);
+				UTOwner->SetPendingFire(FireModeNum, true);
 			}
-			OnMultiPress(FireModeNum);
+            float CurrentTime = GetWorld()->GetTimeSeconds();
+			//OnMultiPress(FireModeNum);
+            if (CurrentTime - LastMultiPressTime > 0.25f)
+            {
+                LastMultiPressTime = CurrentTime;
+                OnMultiPress(FireModeNum);
+            }
 			return;
 		}
 
@@ -183,6 +190,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		}
 		return;
 	}
+
 
 	// If the weapon is in Active (Idle) state, it cannot possibly be firing.
 	// Any "CurrentlyFiring" flags here are bugs from the Auto-Fire/GraceTimer path.
@@ -248,8 +256,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         if (GetCurrentState() == FiringState[FireModeNum])
         {
 			if (UTOwner &&
-				(FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
-					FiringState[FireModeNum]->GetName().Contains(TEXT("Charged"))))
+				(FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass())))
 			{
 				UTOwner->SetPendingFire(FireModeNum, true);
 			}
@@ -340,7 +347,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 				{
 					// Clear flag to prevent "Ghost Fire" on release
 					if (UTOwner) UTOwner->SetPendingFire(FireModeNum, false);
-					OnMultiPress(FireModeNum);
+					//OnMultiPress(FireModeNum);
 				}
 				return; // Consumed input
 			}
@@ -375,6 +382,9 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         if (FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
             FiringState[FireModeNum]->GetName().Contains(TEXT("Charged")))
         {
+
+            FireModeActiveState[FireModeNum] = 1;
+            CurrentlyFiringMode = FireModeNum;
             Super::StartFire(FireModeNum);
             return;
         }
@@ -490,8 +500,7 @@ void AUTWeaponFix::FireShot()
 		bool bInChargedState = false;
 		if (CurrentState != nullptr)
 		{
-			if (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
-				CurrentState->GetName().Contains(TEXT("Charged")))
+			if (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()))
 			{
 				bInChargedState = true;
 			}
@@ -1394,6 +1403,22 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	// Pitch clamp for shells/rockets firing straight down
 	FRotator AdjustedRot = SpawnRotation;
 	AdjustedRot.Normalize();
+    bool bIsShockCore = ProjectileClass &&
+        ProjectileClass->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
+    bool bIsFlakShell = ProjectileClass &&
+        (ProjectileClass->GetName().Contains(TEXT("FlakShell")) ||
+            ProjectileClass->GetName().Contains(TEXT("Shell")));
+    if (bIsShockCore || bIsFlakShell)
+    {
+        static float LastSpecialSpawnTime = 0.0f;
+        float CurrentTime = GetWorld()->GetTimeSeconds();
+
+        if (CurrentTime - LastSpecialSpawnTime < 0.1f)
+        {
+            return nullptr; // Block the ghost spawn
+        }
+        LastSpecialSpawnTime = CurrentTime;
+    }
 	bool bIsShellOrRocket = ProjectileClass &&
 		(ProjectileClass->GetName().Contains(TEXT("Shell")) ||
 			ProjectileClass->GetName().Contains(TEXT("Rocket")));
@@ -1659,21 +1684,29 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	// ----------------------------------------
 	// 7) CLIENT: Setup fake projectile
 	// ----------------------------------------
-	else
-	{
-		NewProjectile->InitFakeProjectile(OwningPlayer);
+    else
+    {
+        NewProjectile->InitFakeProjectile(OwningPlayer);
 
-		if (CatchupTickDelta > 0.f)
-		{
-			// Optional: Shorten fake lifespan so it dies before big correction
-			NewProjectile->SetLifeSpan(
-				FMath::Min(NewProjectile->GetLifeSpan(), 2.f * FMath::Max(0.f, CatchupTickDelta))
-			);
-		}
-	
-    PendingFakeProjectile = NewProjectile;
-    PendingFakeProjectileEventIndex = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
-        ? ClientFireEventIndex[CurrentFireMode] : -1;
+        // Shock cores need pristine trajectories - don't mess with their lifespan
+        // or track them for fake projectile confirmation
+        if (!bIsShockCore)
+        {
+            
+            if (CatchupTickDelta > 0.f)
+            {
+                //NewProjectile->SetLifeSpan(
+                //    FMath::Min(NewProjectile->GetLifeSpan(), 2.f * FMath::Max(0.f, CatchupTickDelta))
+                //);
+                float PingSeconds = (OwningPlayer->PlayerState) ? OwningPlayer->PlayerState->ExactPing * 0.001f : 0.0f;
+                NewProjectile->SetLifeSpan(PingSeconds + 0.10f);
+            }
+            
+
+            PendingFakeProjectile = NewProjectile;
+            PendingFakeProjectileEventIndex = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
+                ? ClientFireEventIndex[CurrentFireMode] : -1;
+        }
     }
 	// ----------------------------------------
 	// 8) High-FPS stability (Fixed Tick Rate)

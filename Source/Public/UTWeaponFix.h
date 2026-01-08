@@ -104,10 +104,20 @@ public:
     bool IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime);
     void OnRetryTimer(uint8 FireModeNum);
     bool bIsTransactionalFire;
+    float LastMultiPressTime;
     UPROPERTY()
     TWeakObjectPtr<AUTProjectile> PendingFakeProjectile;
 
     int32 PendingFakeProjectileEventIndex;
+    void ResetFiringModeTracker() { CurrentlyFiringMode = 255; }
+    void ForceResetTransactionalState(uint8 ModeToClear)
+    {
+        CurrentlyFiringMode = 255;
+        if (FireModeActiveState.IsValidIndex(ModeToClear))
+        {
+            FireModeActiveState[ModeToClear] = 0;
+        }
+    }
 
 protected:
     /**

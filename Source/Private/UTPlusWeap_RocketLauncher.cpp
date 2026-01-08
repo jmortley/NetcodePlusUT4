@@ -600,37 +600,41 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 				ResultProj = NewProj;
 			}
 
-			// Server-only: collect for flocking linkage
-			if (Role == ROLE_Authority && NewProj)
-			{
-				AUTProj_RocketSpiral* SpiralProj = Cast<AUTProj_RocketSpiral>(NewProj);
-				if (SpiralProj)
-				{
-					SpiralRockets.Add(SpiralProj);
-				}
-			}
+            // --- FIX START ---
+                        // Collect projectiles on BOTH Server (Real) and Client (Fake)
+            if (NewProj)
+            {
+                AUTProj_RocketSpiral* SpiralProj = Cast<AUTProj_RocketSpiral>(NewProj);
+                if (SpiralProj)
+                {
+                    SpiralRockets.Add(SpiralProj);
+                }
+            }
+            // --- FIX END ---
 		}
 
-		// Server-only: link flocking behavior
-		if (Role == ROLE_Authority)
-		{
-			for (int32 i = 0; i < SpiralRockets.Num(); i++)
-			{
-				AUTProj_RocketSpiral* RocketA = SpiralRockets[i];
-				if (RocketA)
-				{
-					int32 FlockIndex = 0;
-					for (int32 j = 0; j < SpiralRockets.Num() && FlockIndex < 3; j++)
-					{
-						if (i != j && SpiralRockets[j])
-						{
-							RocketA->Flock[FlockIndex++] = SpiralRockets[j];
-						}
-					}
-					RocketA->bCurl = (i % 2 == 0);
-				}
-			}
-		}
+        // --- FIX START ---
+                // Link flocking behavior on BOTH Server and Client
+                // Removed: if (Role == ROLE_Authority)
+        {
+            for (int32 i = 0; i < SpiralRockets.Num(); i++)
+            {
+                AUTProj_RocketSpiral* RocketA = SpiralRockets[i];
+                if (RocketA)
+                {
+                    int32 FlockIndex = 0;
+                    for (int32 j = 0; j < SpiralRockets.Num() && FlockIndex < 3; j++)
+                    {
+                        if (i != j && SpiralRockets[j])
+                        {
+                            RocketA->Flock[FlockIndex++] = SpiralRockets[j];
+                        }
+                    }
+                    RocketA->bCurl = (i % 2 == 0);
+                }
+            }
+        }
+        // --- FIX END ---
 
 		NumLoadedRockets = 0;
 		break;
@@ -861,7 +865,6 @@ bool AUTPlusWeap_RocketLauncher::ServerCycleRocketMode_Validate()
 
 void AUTPlusWeap_RocketLauncher::ServerCycleRocketMode_Implementation()
 {
-    // The server just needs to run the exact same logic
     OnMultiPress_Implementation(0);
 }
 
