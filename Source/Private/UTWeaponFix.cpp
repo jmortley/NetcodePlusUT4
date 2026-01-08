@@ -59,6 +59,7 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
 	FudgeFactorMs = 20;
 	ProjectilePredictionCapMs = 120.0f;
     LastMultiPressTime = 0.f;
+    LastSpecialProjectileTime = 0.0f;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -169,16 +170,26 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 			{
 				GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
 			}
+            /*
 			if (UTOwner)
 			{
 				UTOwner->SetPendingFire(FireModeNum, true);
 			}
             float CurrentTime = GetWorld()->GetTimeSeconds();
 			//OnMultiPress(FireModeNum);
-            if (CurrentTime - LastMultiPressTime > 0.25f)
+            if (CurrentTime - LastMultiPressTime > 0.35f)
             {
                 LastMultiPressTime = CurrentTime;
                 OnMultiPress(FireModeNum);
+            }
+			*/
+            if (UTOwner)
+            {
+                // [FIX] Set to false to consume the "Click" immediately.
+                // This prevents the engine from re-running StartFire on the next frame.
+                UTOwner->SetPendingFire(FireModeNum, false);
+                OnMultiPress(FireModeNum);
+                return;
             }
 			return;
 		}
@@ -1410,14 +1421,16 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
             ProjectileClass->GetName().Contains(TEXT("Shell")));
     if (bIsShockCore || bIsFlakShell)
     {
-        static float LastSpecialSpawnTime = 0.0f;
+        // Removed: static float LastSpecialSpawnTime = 0.0f;
+
         float CurrentTime = GetWorld()->GetTimeSeconds();
 
-        if (CurrentTime - LastSpecialSpawnTime < 0.1f)
+        // Use member variable 'LastSpecialProjectileTime'
+        if (CurrentTime - LastSpecialProjectileTime < 0.2f)
         {
-            return nullptr; // Block the ghost spawn
+            return nullptr;
         }
-        LastSpecialSpawnTime = CurrentTime;
+        LastSpecialProjectileTime = CurrentTime;
     }
 	bool bIsShellOrRocket = ProjectileClass &&
 		(ProjectileClass->GetName().Contains(TEXT("Shell")) ||
@@ -1684,6 +1697,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	// ----------------------------------------
 	// 7) CLIENT: Setup fake projectile
 	// ----------------------------------------
+    /*
     else
     {
         NewProjectile->InitFakeProjectile(OwningPlayer);
@@ -1708,6 +1722,41 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
                 ? ClientFireEventIndex[CurrentFireMode] : -1;
         }
     }
+    */
+else
+{
+    NewProjectile->InitFakeProjectile(OwningPlayer);
+
+    // Apply lifespan ONLY to non-Shock projectiles.
+    if (CatchupTickDelta > 0.f && !bIsShockCore)
+    {
+        float PingSeconds = (OwningPlayer->PlayerState) ? OwningPlayer->PlayerState->ExactPing * 0.001f : 0.0f;
+        NewProjectile->SetLifeSpan(PingSeconds + 0.10f);
+    }
+
+    // Track this projectile for potential rejection cleanup
+    int32 EventIdx = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
+        ? ClientFireEventIndex[CurrentFireMode] : -1;
+
+    PendingFakeProjectiles.Add(FPendingFakeProjectile(NewProjectile, EventIdx, CurrentFireMode));
+
+    // Cleanup: Remove stale entries (destroyed projectiles or old indices)
+    // Keep array from growing indefinitely
+    for (int32 i = PendingFakeProjectiles.Num() - 1; i >= 0; i--)
+    {
+        if (!PendingFakeProjectiles[i].Projectile.IsValid())
+        {
+            PendingFakeProjectiles.RemoveAt(i);
+        }
+    }
+
+    // Safety cap - if somehow we have too many pending, trim oldest
+    while (PendingFakeProjectiles.Num() > 10)
+    {
+        PendingFakeProjectiles.RemoveAt(0);
+    }
+}
+
 	// ----------------------------------------
 	// 8) High-FPS stability (Fixed Tick Rate)
 	// ----------------------------------------
@@ -1946,7 +1995,7 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
     {
         GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
     }
-
+    ClearPendingFakeProjectiles();
     // Call the base class implementation (which does the unregistering/holstering logic you pasted)
     Super::DetachFromOwner_Implementation();
 }
@@ -2005,6 +2054,7 @@ bool AUTWeaponFix::PutDown()
         //}
 
     }
+    ClearPendingFakeProjectiles();
     return bPutDownResult;
 }
 
@@ -2228,7 +2278,11 @@ void AUTWeaponFix::FireCone()
 
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
-	float CurrentTime = GetWorld()->GetTimeSeconds();
+ 
+
+
+    
+    float CurrentTime = GetWorld()->GetTimeSeconds();
 	float MaxBlockTime = 0.f;
 
 	// =======================================================================
@@ -2391,41 +2445,56 @@ void AUTWeaponFix::ClearFireEventsFixed()
 // When server ACKs a shot, remove it from the retry queue so we stop bothering the server
 void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
 {
-    // Existing logic...
     if (ClientFireEventIndex.IsValidIndex(FireModeNum))
     {
-        ClientFireEventIndex[FireModeNum] = InAuthorizedEventIndex;
+        // Capture expected index BEFORE overwriting
         int32 ExpectedIndex = ClientFireEventIndex[FireModeNum];
-        // If server sent back an index LESS than what we sent, our shot was rejected
+
+        // Update to server's authoritative value
+        ClientFireEventIndex[FireModeNum] = InAuthorizedEventIndex;
+
+        // If server sent back an index LESS than what we sent, shots were rejected
         if (InAuthorizedEventIndex < ExpectedIndex)
         {
-            // Kill the pending fake projectile if it exists
-            if (PendingFakeProjectile.IsValid() && PendingFakeProjectileEventIndex == ExpectedIndex)
+            // Find and destroy ALL fake projectiles with rejected indices
+            for (int32 i = PendingFakeProjectiles.Num() - 1; i >= 0; i--)
             {
-                PendingFakeProjectile->Destroy();
-                PendingFakeProjectile.Reset();
-                PendingFakeProjectileEventIndex = -1;
+                FPendingFakeProjectile& Pending = PendingFakeProjectiles[i];
 
-                UE_LOG(LogUTWeaponFix, Verbose, TEXT("Destroyed rejected fake projectile (Event %d rejected, server at %d)"),
-                    ExpectedIndex, InAuthorizedEventIndex);
+                // If this projectile's event index is GREATER than what server accepted,
+                // it was rejected
+                if (Pending.FireMode == FireModeNum && Pending.EventIndex > InAuthorizedEventIndex)
+                {
+                    if (Pending.Projectile.IsValid())
+                    {
+                        UE_LOG(LogUTWeaponFix, Verbose,
+                            TEXT("Destroying rejected fake projectile (Event %d > Server accepted %d)"),
+                            Pending.EventIndex, InAuthorizedEventIndex);
+                        Pending.Projectile->Destroy();
+                    }
+                    PendingFakeProjectiles.RemoveAt(i);
+                }
             }
         }
         else
         {
-            // Shot was accepted - clear the pending reference (let projectile live)
-            if (PendingFakeProjectile.IsValid() && PendingFakeProjectileEventIndex == InAuthorizedEventIndex)
+            // Shot was accepted - remove from pending list (let projectile live)
+            for (int32 i = PendingFakeProjectiles.Num() - 1; i >= 0; i--)
             {
-                PendingFakeProjectile.Reset();
-                PendingFakeProjectileEventIndex = -1;
+                FPendingFakeProjectile& Pending = PendingFakeProjectiles[i];
+
+                if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
+                {
+                    // This projectile was accepted, stop tracking it
+                    PendingFakeProjectiles.RemoveAt(i);
+                }
             }
         }
-    }   
-    // NEW: Clear retries for this specific event
-    // We iterate backwards to safely remove items from the array
+    }
+
+    // Clear retries for confirmed events (unchanged)
     for (int32 i = ResendFireEvents.Num() - 1; i >= 0; i--)
     {
-        // If the queued event matches the mode, AND the index is older or equal to
-        // what the server just confirmed, we can delete it.
         if (ResendFireEvents[i].FireModeNum == FireModeNum &&
             ResendFireEvents[i].FireEventIndex <= InAuthorizedEventIndex)
         {
@@ -2433,12 +2502,20 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
         }
     }
 
-    // If queue is empty, stop the timer
     if (ResendFireEvents.Num() == 0)
     {
         GetWorldTimerManager().ClearTimer(ResendFireHandle);
     }
 }
+
+
+void AUTWeaponFix::ClearPendingFakeProjectiles()
+{
+    // Don't destroy - just stop tracking. 
+    // Valid projectiles should live, rejected ones will have been destroyed already.
+    PendingFakeProjectiles.Empty();
+}
+
 
 // 5. SERVER HANDLER (Start Fire)
 // This receives the retry packet

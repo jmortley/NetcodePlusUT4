@@ -64,6 +64,34 @@ struct FPendingFireEventFix
     }
 };
 
+USTRUCT()
+struct FPendingFakeProjectile
+{
+    GENERATED_BODY()
+
+    UPROPERTY()
+    TWeakObjectPtr<AUTProjectile> Projectile;
+
+    UPROPERTY()
+    int32 EventIndex;
+
+    UPROPERTY()
+    uint8 FireMode;
+
+    FPendingFakeProjectile()
+        : EventIndex(-1)
+        , FireMode(0)
+    {
+    }
+
+    FPendingFakeProjectile(AUTProjectile* InProj, int32 InIndex, uint8 InMode)
+        : Projectile(InProj)
+        , EventIndex(InIndex)
+        , FireMode(InMode)
+    {
+    }
+};
+
 
 UCLASS(Abstract)
 class NETCODEPLUS_API AUTWeaponFix : public AUTWeapon
@@ -91,6 +119,7 @@ public:
     virtual FVector GetFireStartLoc(uint8 FireMode = 255) override;
     virtual FRotator GetBaseFireRotation() override;
     virtual void BringUp(float OverflowTime) override;
+    void ClearPendingFakeProjectiles();
     //~ End AUTWeapon Interface
     UPROPERTY()
     TArray<float> LastFireTime;
@@ -106,9 +135,12 @@ public:
     bool bIsTransactionalFire;
     float LastMultiPressTime;
     UPROPERTY()
-    TWeakObjectPtr<AUTProjectile> PendingFakeProjectile;
+    float LastSpecialProjectileTime;
+    //UPROPERTY()
+    //TWeakObjectPtr<AUTProjectile> PendingFakeProjectile;
 
-    int32 PendingFakeProjectileEventIndex;
+    //int32 PendingFakeProjectileEventIndex;
+
     void ResetFiringModeTracker() { CurrentlyFiringMode = 255; }
     void ForceResetTransactionalState(uint8 ModeToClear)
     {
@@ -304,4 +336,7 @@ protected:
 
     UFUNCTION(Server, Unreliable, WithValidation)
     void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp);
+
+    UPROPERTY()
+    TArray<FPendingFakeProjectile> PendingFakeProjectiles;
 };
