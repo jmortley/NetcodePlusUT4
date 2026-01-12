@@ -212,7 +212,7 @@ protected:
      * @param ClientTimestamp - Client's timestamp when fire was stopped
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp);
+    void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
 
     /**
      * Client RPC to confirm a fire event or correct client's event index.
@@ -335,7 +335,7 @@ protected:
     void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar);
 
     UFUNCTION(Server, Unreliable, WithValidation)
-    void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp);
+    void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
 
     UPROPERTY()
     TArray<FPendingFakeProjectile> PendingFakeProjectiles;

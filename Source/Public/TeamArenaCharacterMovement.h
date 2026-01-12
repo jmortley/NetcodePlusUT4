@@ -31,6 +31,7 @@ public:
     UPROPERTY(EditAnywhere, Category = "Team Arena|Optimization")
     float DodgeCooldownTolerance;
 
+    virtual class FNetworkPredictionData_Client* GetPredictionData_Client() const override;
 
 
 protected:

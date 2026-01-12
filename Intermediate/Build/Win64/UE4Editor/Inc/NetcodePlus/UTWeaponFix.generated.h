@@ -24,13 +24,13 @@ class AUTCharacter;
 
 
 #define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_RPC_WRAPPERS \
-	virtual bool ResendServerStopFireFixed_Validate(uint8 , int32 , float ); \
-	virtual void ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp); \
+	virtual bool ResendServerStopFireFixed_Validate(uint8 , int32 , float , FRotator ); \
+	virtual void ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ResendServerStartFireFixed_Validate(uint8 , int32 , float , FRotator , uint8 , AUTCharacter* ); \
 	virtual void ResendServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar); \
 	virtual void ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex); \
-	virtual bool ServerStopFireFixed_Validate(uint8 , int32 , float ); \
-	virtual void ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp); \
+	virtual bool ServerStopFireFixed_Validate(uint8 , int32 , float , FRotator ); \
+	virtual void ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ServerStartFireFixed_Validate(uint8 , int32 , float , bool , FRotator , AUTCharacter* , uint8 ); \
 	virtual void ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset); \
  \
@@ -39,14 +39,15 @@ class AUTCharacter;
 		P_GET_PROPERTY(UByteProperty,Z_Param_FireModeNum); \
 		P_GET_PROPERTY(UIntProperty,Z_Param_InFireEventIndex); \
 		P_GET_PROPERTY(UFloatProperty,Z_Param_ClientTimestamp); \
+		P_GET_STRUCT(FRotator,Z_Param_ClientViewRot); \
 		P_FINISH; \
 		P_NATIVE_BEGIN; \
-		if (!this->ResendServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp)) \
+		if (!this->ResendServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot)) \
 		{ \
 			RPC_ValidateFailed(TEXT("ResendServerStopFireFixed_Validate")); \
 			return; \
 		} \
-		this->ResendServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp); \
+		this->ResendServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot); \
 		P_NATIVE_END; \
 	} \
  \
@@ -92,14 +93,15 @@ class AUTCharacter;
 		P_GET_PROPERTY(UByteProperty,Z_Param_FireModeNum); \
 		P_GET_PROPERTY(UIntProperty,Z_Param_InFireEventIndex); \
 		P_GET_PROPERTY(UFloatProperty,Z_Param_ClientTimestamp); \
+		P_GET_STRUCT(FRotator,Z_Param_ClientViewRot); \
 		P_FINISH; \
 		P_NATIVE_BEGIN; \
-		if (!this->ServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp)) \
+		if (!this->ServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot)) \
 		{ \
 			RPC_ValidateFailed(TEXT("ServerStopFireFixed_Validate")); \
 			return; \
 		} \
-		this->ServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp); \
+		this->ServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot); \
 		P_NATIVE_END; \
 	} \
  \
@@ -125,13 +127,13 @@ class AUTCharacter;
 
 
 #define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_RPC_WRAPPERS_NO_PURE_DECLS \
-	virtual bool ResendServerStopFireFixed_Validate(uint8 , int32 , float ); \
-	virtual void ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp); \
+	virtual bool ResendServerStopFireFixed_Validate(uint8 , int32 , float , FRotator ); \
+	virtual void ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ResendServerStartFireFixed_Validate(uint8 , int32 , float , FRotator , uint8 , AUTCharacter* ); \
 	virtual void ResendServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar); \
 	virtual void ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex); \
-	virtual bool ServerStopFireFixed_Validate(uint8 , int32 , float ); \
-	virtual void ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp); \
+	virtual bool ServerStopFireFixed_Validate(uint8 , int32 , float , FRotator ); \
+	virtual void ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ServerStartFireFixed_Validate(uint8 , int32 , float , bool , FRotator , AUTCharacter* , uint8 ); \
 	virtual void ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset); \
  \
@@ -140,14 +142,15 @@ class AUTCharacter;
 		P_GET_PROPERTY(UByteProperty,Z_Param_FireModeNum); \
 		P_GET_PROPERTY(UIntProperty,Z_Param_InFireEventIndex); \
 		P_GET_PROPERTY(UFloatProperty,Z_Param_ClientTimestamp); \
+		P_GET_STRUCT(FRotator,Z_Param_ClientViewRot); \
 		P_FINISH; \
 		P_NATIVE_BEGIN; \
-		if (!this->ResendServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp)) \
+		if (!this->ResendServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot)) \
 		{ \
 			RPC_ValidateFailed(TEXT("ResendServerStopFireFixed_Validate")); \
 			return; \
 		} \
-		this->ResendServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp); \
+		this->ResendServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot); \
 		P_NATIVE_END; \
 	} \
  \
@@ -193,14 +196,15 @@ class AUTCharacter;
 		P_GET_PROPERTY(UByteProperty,Z_Param_FireModeNum); \
 		P_GET_PROPERTY(UIntProperty,Z_Param_InFireEventIndex); \
 		P_GET_PROPERTY(UFloatProperty,Z_Param_ClientTimestamp); \
+		P_GET_STRUCT(FRotator,Z_Param_ClientViewRot); \
 		P_FINISH; \
 		P_NATIVE_BEGIN; \
-		if (!this->ServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp)) \
+		if (!this->ServerStopFireFixed_Validate(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot)) \
 		{ \
 			RPC_ValidateFailed(TEXT("ServerStopFireFixed_Validate")); \
 			return; \
 		} \
-		this->ServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp); \
+		this->ServerStopFireFixed_Implementation(Z_Param_FireModeNum,Z_Param_InFireEventIndex,Z_Param_ClientTimestamp,Z_Param_ClientViewRot); \
 		P_NATIVE_END; \
 	} \
  \
@@ -245,6 +249,7 @@ class AUTCharacter;
 		uint8 FireModeNum; \
 		int32 InFireEventIndex; \
 		float ClientTimestamp; \
+		FRotator ClientViewRot; \
 	}; \
 	struct UTWeaponFix_eventServerStartFireFixed_Parms \
 	{ \
@@ -261,6 +266,7 @@ class AUTCharacter;
 		uint8 FireModeNum; \
 		int32 InFireEventIndex; \
 		float ClientTimestamp; \
+		FRotator ClientViewRot; \
 	};
 
 

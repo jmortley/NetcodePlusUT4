@@ -470,8 +470,26 @@ void AUTWeaponFix::FireShot()
 		if (ClientFireEventIndex.IsValidIndex(CurrentFireMode))
 			ClientFireEventIndex[CurrentFireMode] = NextEventIndex;
 
-		if (LastFireTime.IsValidIndex(CurrentFireMode))
-			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+        if (LastFireTime.IsValidIndex(CurrentFireMode))
+        {
+            float CurrentTime = World->GetTimeSeconds();
+            float Refire = GetRefireTime(CurrentFireMode);
+            float OldTime = LastFireTime[CurrentFireMode];
+
+            // If this isn't the first shot, and we haven't paused firing for a long time...
+            if (OldTime > 0.0f && (CurrentTime - OldTime) < (Refire + 0.2f))
+            {
+                // Snap the timer to the Theoretical Time.
+                // Even if we fired 0.08s early, the clock is set as if we fired on time.
+                // The NEXT shot will be calculated relative to this Theoretical Time.
+                LastFireTime[CurrentFireMode] = OldTime + Refire;
+            }
+            else
+            {
+                // First shot or resuming after a pause, reset clock to Now.
+                LastFireTime[CurrentFireMode] = CurrentTime;
+            }
+        }
 		FRotator ClientRot = GetUTOwner() ? GetUTOwner()->GetViewRotation() : FRotator::ZeroRotator;
 		//EarliestFireTime = 0.f;
 
@@ -629,7 +647,29 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 
         // Standard UT logic handles the release (launching rockets or clearing pending fire)
         Super::StopFire(FireModeNum);
+        // --- FIX START: Send Transactional Stop Packet for Charged Release ---
+        if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
+        {
+            // A. Manually Increment Index 
+            // Crucial because charged weapons skip the standard FireShot() which usually does this.
+            int32 EventIndex = 0;
+            if (ClientFireEventIndex.IsValidIndex(FireModeNum))
+            {
+                ClientFireEventIndex[FireModeNum]++;
+                EventIndex = ClientFireEventIndex[FireModeNum];
+            }
 
+            // B. Capture Data
+            float CurrentTime = GetWorld()->GetTimeSeconds();
+            FRotator ClientRot = UTOwner->GetViewRotation();
+
+            // C. Send RPC (With Rotation)
+            ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime, ClientRot);
+
+            // D. Queue Retry (With Rotation)
+            QueueResendFireFixed(false, FireModeNum, EventIndex, CurrentTime, ClientRot, 0, nullptr);
+        }
+        // --- FIX END ---
         // CRITICAL: Return here so we don't hit GotoActiveState() below
         return;
     }
@@ -663,7 +703,11 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         int32 EventIndex = ClientFireEventIndex.IsValidIndex(FireModeNum) ?
             ClientFireEventIndex[FireModeNum] : 0;
         float CurrentTime = GetWorld()->GetTimeSeconds();
-        ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime);
+        // Capture aim at the moment of release
+        FRotator ClientRot = UTOwner->GetViewRotation();
+
+        // Pass ClientRot to the server
+        ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime, ClientRot);
         QueueResendFireFixed(false, FireModeNum, EventIndex, CurrentTime, FRotator::ZeroRotator, 0, nullptr);
     }
     
@@ -767,7 +811,7 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
 
             // Client Tolerance (60ms)
             // If we are within the refire window of ANY mode, block the shot.
-            if (TimeSinceLastFire < (RequiredInterval - 0.08f))
+            if (TimeSinceLastFire < (RequiredInterval - 0.06f))
             {
                 return true;
             }
@@ -955,8 +999,18 @@ bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFire
 
 
 
-void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp)
+void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
 {
+    // FIX: Update sequence ID to reject late Start packets
+    if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum))
+    {
+        // Only update if this Stop is newer than what we've seen
+        if (InFireEventIndex > AuthoritativeFireEventIndex[FireModeNum])
+        {
+            AuthoritativeFireEventIndex[FireModeNum] = InFireEventIndex;
+        }
+    }
+    
     // 1. Clear authoritative state flags
     if (FireModeActiveState.IsValidIndex(FireModeNum))
     {
@@ -967,9 +1021,18 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
         CurrentlyFiringMode = 255;
     }
 
+    // --- FIX START: Inject Rotation ---
+    if (!ClientViewRot.IsZero())
+    {
+        CachedTransactionalRotation = ClientViewRot;
+        bIsTransactionalFire = true; // Gatekeeper: Allow GetAdjustedAim to use the cached value
+    }
+    // --- FIX END ---
+
     // 2. Standard cleanup
     EndFiringSequence(FireModeNum);
-
+    bIsTransactionalFire = false;
+    CachedTransactionalRotation = FRotator::ZeroRotator;
     // 3. FORCE STATE EXIT (Critical for Transactional Logic)
     // Since the server has no timer loop to transition naturally, 
     // we must force it back to 'Active' (Idle) immediately.
@@ -993,7 +1056,7 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
 
 
-bool AUTWeaponFix::ServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp)
+bool AUTWeaponFix::ServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
 {
     return FireModeNum < GetNumFireModes();
 }
@@ -2422,7 +2485,7 @@ void AUTWeaponFix::ResendNextFireEventFixed()
         }
         else
         {
-            ResendServerStopFireFixed(Event.FireModeNum, Event.FireEventIndex, Event.ClientTimestamp);
+            ResendServerStopFireFixed(Event.FireModeNum, Event.FireEventIndex, Event.ClientTimestamp, Event.ClientViewRot);
         }
     }
 
@@ -2545,7 +2608,7 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum, 
 }
 
 // 6. SERVER HANDLER (Stop Fire)
-void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp)
+void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
 {
     // Duplicate check for Stop Fire is less critical but good for consistency
     if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum))
@@ -2553,9 +2616,14 @@ void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum, i
         int32 LastIdx = AuthoritativeFireEventIndex[FireModeNum];
         if (InFireEventIndex <= LastIdx && (LastIdx - InFireEventIndex) < 100) return;
     }
-
+    if (UTOwner && UTOwner->PlayerState)
+    {
+        float CurrentPing = UTOwner->PlayerState->ExactPing;
+        UE_LOG(LogUTWeaponFix, Verbose, TEXT("[Retry] STOP Fire Accepted for %s. Index: %d | Ping: %.2f ms | RTT Correction Applied"),
+            *UTOwner->PlayerState->PlayerName, InFireEventIndex, CurrentPing);
+    }
     bNetDelayedShot = true;
-    ServerStopFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp);
+    ServerStopFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, ClientViewRot);
     bNetDelayedShot = false;
 }
 
@@ -2564,7 +2632,7 @@ bool AUTWeaponFix::ResendServerStartFireFixed_Validate(uint8 FireModeNum, int32 
     return true;
 }
 
-bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp)
+bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
 {
     return true;
 }

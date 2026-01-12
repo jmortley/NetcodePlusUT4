@@ -7,21 +7,53 @@
 #include "UTCharacter.h"
 #include "Engine/World.h"
 
+
+// This prevents visual jitter when the server sends small corrections
+class FNetworkPredictionData_Client_TeamArena : public FNetworkPredictionData_Client_UTChar
+{
+public:
+    FNetworkPredictionData_Client_TeamArena(const UCharacterMovementComponent& ClientMovement)
+        : FNetworkPredictionData_Client_UTChar(ClientMovement)
+    {
+        // --- FIX: Set variables directly in constructor instead of overriding functions ---
+
+        // Default is 92.f. Increase to allow larger smooth corrections.
+        MaxSmoothNetUpdateDist = 140.f;
+
+        // Default is 140.f. Increase to prevent snapping on medium corrections.
+        NoSmoothNetUpdateDist = 256.f;
+    }
+
+    typedef FNetworkPredictionData_Client_UTChar Super;
+};
+
+
 UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    MaxPositionErrorSquared = 10.f;
+    MaxPositionErrorSquared = 15.f;
 
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.0167f;  // instead of fps dependent
     LastTeamCollisionUpdateTime = -1.0f;  // Force immediate first update
 	MinTimeBetweenClientAdjustments = 0.1f;  //stock 0.1f
-	LargeCorrectionThreshold = 17.f;  //stock 15.f
+	LargeCorrectionThreshold = 20.f;  //stock 15.f
     // --- HIGH-FPS FIX #2: Dodge timing tolerance ---
     // Prevents server rejection when client/server timestamps differ by microseconds
     DodgeCooldownTolerance = 0.05f;
 }
+
+FNetworkPredictionData_Client* UTeamArenaCharacterMovement::GetPredictionData_Client() const
+{
+    if (!ClientPredictionData)
+    {
+        UTeamArenaCharacterMovement* MutableThis = const_cast<UTeamArenaCharacterMovement*>(this);
+        MutableThis->ClientPredictionData = new FNetworkPredictionData_Client_TeamArena(*this);
+    }
+    return ClientPredictionData;
+}
+
 
 void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {

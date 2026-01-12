@@ -127,6 +127,11 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
     {
         GetOuterAUTWeapon()->GetUTOwner()->ClearFiringInfo();
     }
+    AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+    if (FixWeapon)
+    {
+        FixWeapon->ResetFiringModeTracker();
+    }
 }
 
 void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
@@ -668,6 +673,11 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
 
         // This call will now succeed. If cooldown is active (due to Grenade),
         // it will queue the RetryTimer. If no cooldown, it fires immediately.
+        AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+        if (FixWeapon)
+        {
+            FixWeapon->ResetFiringModeTracker();
+        }
         GetOuterAUTWeapon()->StartFire(0);
         return;
     }
