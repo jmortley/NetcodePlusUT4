@@ -252,8 +252,22 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
         CurrentState->GetName().Contains(TEXT("Charged"))))
     {
-        // If we are charging Mode 1, and the player pressed Mode 0, that is a Switch.
-        if (FireModeNum != CurrentFireMode)
+        // Only allow bypassing cooldowns if we are ACTIVELY CHARGING (holding the load).
+        // If we are unloading/firing (bCharging == false), we must respect the rate of fire.
+        bool bIsActivelyCharging = false;
+
+        UUTWeaponStateFiringChargedRocket_Transactional* TransState =
+            Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
+
+        if (TransState)
+        {
+            bIsActivelyCharging = TransState->bCharging;
+        }
+
+        // Only flag as a "Mode Switch" if we are holding the charge.
+        // If we fired, bIsActivelyCharging is false, so this block is skipped,
+        // and the Cooldown Check below will correctly block the rapid-fire attempt.
+        if (bIsActivelyCharging && FireModeNum != CurrentFireMode)
         {
             bIsSwitchingModes = true;
         }

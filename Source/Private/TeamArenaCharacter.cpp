@@ -61,7 +61,7 @@ float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 			float Fudge = 20.0f;
 			float AdjustedPing = FMath::Max(0.0f, PlayerState->ExactPing - Fudge);
 			float OneWayLatency = AdjustedPing * 0.0005f;
-			return FMath::Min(OneWayLatency, 0.12f);
+			return FMath::Min(OneWayLatency, 0.10f);
 		}
 	}
 
