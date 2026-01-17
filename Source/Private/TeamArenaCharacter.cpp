@@ -7,6 +7,7 @@
 #include "UTWorldSettings.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
+#include "UTGameState.h"
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -493,7 +494,7 @@ void ATeamArenaCharacter::BeginPlay()
 	}
 }
 
-
+/*
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -583,6 +584,99 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		if (GetNetMode() != NM_DedicatedServer)
 		{
 			UpdateArmorOverlay();
+		}
+	}
+}
+*/
+
+
+
+void ATeamArenaCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime); // Runs stock logic (sets Green shell parameter)
+
+	// Visuals are for clients only
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	// --- CASE 1: Active Spawn Protection ---
+	if (bSpawnProtectionEligible)
+	{
+		bHasSpawnOverlay = true;
+
+		// --- TEAM FILTERING: Only show glow to enemies ---
+		bool bShowGlowToViewer = true;
+		AUTPlayerController* LocalViewer = GetLocalViewer();
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+
+		// If viewing a Teammate (or Self), HIDE the glow
+		if (GS && LocalViewer && GS->OnSameTeam(this, LocalViewer))
+		{
+			bShowGlowToViewer = false;
+		}
+
+		if (bShowGlowToViewer)
+		{
+			// Define your custom color (Bright Gold/Yellow Bloom) - ENEMIES ONLY
+			FLinearColor ObviousColor = FLinearColor(20.0f, 15.0f, 2.0f, 1.0f);
+
+			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
+			static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
+			static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
+
+			for (UMaterialInstanceDynamic* MI : BodyMIs)
+			{
+				if (MI)
+				{
+					// 1. SUPPRESS the stock "Greenish" effect (override Super::Tick)
+					MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
+
+					// 2. APPLY our "Obvious" color using the HitFlash system
+					MI->SetVectorParameterValue(NAME_HitFlashColor, ObviousColor);
+					MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.4f);
+				}
+			}
+		}
+		else
+		{
+			// TEAMMATES/SELF: Show no glow at all
+			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
+			static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
+			static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
+
+			for (UMaterialInstanceDynamic* MI : BodyMIs)
+			{
+				if (MI)
+				{
+					// Suppress all glow effects
+					MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
+					MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor::Black);
+					MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.0f);
+				}
+			}
+		}
+	}
+	// --- CASE 2: Cleanup (Runs once when protection ends) ---
+	else if (bHasSpawnOverlay)
+	{
+		bHasSpawnOverlay = false;
+
+		static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
+		static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
+
+		for (UMaterialInstanceDynamic* MI : BodyMIs)
+		{
+			if (MI)
+			{
+				// Reset HitFlash (removes the glow)
+				MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor::Black);
+				MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.0f);
+
+				// Note: We don't need to reset SpawnProtectionPct manually.
+				// Super::Tick() handles that automatically when bSpawnProtectionEligible is false.
+			}
 		}
 	}
 }

@@ -109,6 +109,7 @@ public:
     virtual void Tick(float DeltaTime) override;
     virtual void DetachFromOwner_Implementation() override;
     virtual bool PutDown() override;
+    void PutDownDelayed();
     virtual void FireInstantHit(bool bDealDamage, FHitResult* OutHit) override;
     virtual void FireShot() override;
     virtual FRotator GetAdjustedAim_Implementation(FVector StartFireLoc) override;
@@ -152,17 +153,17 @@ public:
     }
 
 protected:
-    /**
-     * Server-side authoritative fire event index for each fire mode.
-     * This is the ground truth that clients must sync to.
-     * Replicated to clients for verification.
-     */
-    
+
+    FTimerHandle DelayedPutDownHandle;
     bool bHandlingRetry;
     FTimerHandle RetryFireHandle[2];
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
-
+    /**
+ * Server-side authoritative fire event index for each fire mode.
+ * This is the ground truth that clients must sync to.
+ * Replicated to clients for verification.
+ */
     UPROPERTY(Replicated)
     TArray<int32> AuthoritativeFireEventIndex;
 

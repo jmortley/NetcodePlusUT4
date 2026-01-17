@@ -127,11 +127,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
     {
         GetOuterAUTWeapon()->GetUTOwner()->ClearFiringInfo();
     }
-    AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
-    if (FixWeapon)
-    {
-        FixWeapon->ResetFiringModeTracker();
-    }
+
 }
 
 void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
@@ -230,19 +226,6 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 
     bCharging = false;
 
-    AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
-    if (FixWeapon && RocketLauncher && RocketLauncher->NumLoadedRockets > 0)
-    {
-        float CurrentTime = GetWorld()->GetTimeSeconds();
-        if (FixWeapon->LastFireTime.IsValidIndex(0))
-        {
-            FixWeapon->LastFireTime[0] = CurrentTime;
-        }
-        if (FixWeapon->LastFireTime.IsValidIndex(1))
-        {
-            FixWeapon->LastFireTime[1] = CurrentTime;
-        }
-    }
 
     // --- HELPER LAMBDA FOR BUFFERED FIRE ---
     // Fixes the "Dead End" where holding M1 after a cancelled load does nothing.
@@ -335,11 +318,16 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
         if (GetOuterAUTWeapon()->GetCurrentState() == this)
         {
+            // --- SYNC REFIRE TIMER ---
+            // Ensure the Refire Timer strictly respects the timestamp set in FireShotDirect.
+            // This prevents "Drift" where the timer expires slightly before IsFireModeOnCooldown thinks it should.
+            float RefireDelay = GetOuterAUTWeapon()->GetRefireTime(GetOuterAUTWeapon()->GetCurrentFireMode());
+
             GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
                 RefireCheckHandle,
                 this,
                 &UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer,
-                GetOuterAUTWeapon()->GetRefireTime(GetOuterAUTWeapon()->GetCurrentFireMode()),
+                RefireDelay,
                 false
             );
         }

@@ -59,7 +59,17 @@ void AUTPlusProj_ShockBall::PerformCombo(class AController* InstigatedBy, class 
 }
 
 
+bool AUTPlusProj_ShockBall::ShouldIgnoreHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp)
+{
+	// If we're a fake projectile hitting another shock ball, ignore it locally.
+	// Let the server be authoritative on core-vs-core collisions.
+	if (bFakeClientProjectile && Cast<AUTProj_ShockBall>(OtherActor))
+	{
+		return true;
+	}
 
+	return Super::ShouldIgnoreHit_Implementation(OtherActor, OtherComp);
+}
 
 
 void AUTPlusProj_ShockBall::BeginPlay()

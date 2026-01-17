@@ -650,7 +650,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     {
         bIsChargedMode = true;
     }
-
+/*
     if (bIsChargedMode)
     {
         // Don't log for Mode 0 stops (normal during swaps), but log for Mode 1
@@ -687,7 +687,41 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         // CRITICAL: Return here so we don't hit GotoActiveState() below
         return;
     }
+*/
+    if (bIsChargedMode)
+    {
+        if (FireModeNum == 1)
+        {
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Bypassing Transactional Stop for Charged State (Mode 1)"));
+        }
+        // CLIENT: Execute locally AND send transactional packet with rotation
+        if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
+        {
+            // 1. Local execution only (no Epic RPC)
+            //EndFiringSequence(FireModeNum);
+            Super::StopFire(FireModeNum);
+            // 2. Increment index (charged weapons skip FireShot)
+            int32 EventIndex = 0;
+            if (ClientFireEventIndex.IsValidIndex(FireModeNum))
+            {
+                ClientFireEventIndex[FireModeNum]++;
+                EventIndex = ClientFireEventIndex[FireModeNum];
+            }
 
+            // 3. Send transactional packet WITH rotation
+            float CurrentTime = GetWorld()->GetTimeSeconds();
+            FRotator ClientRot = UTOwner->GetViewRotation();
+            ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime, ClientRot);
+            QueueResendFireFixed(false, FireModeNum, EventIndex, CurrentTime, ClientRot, 0, nullptr);
+        }
+        else
+        {
+            // SERVER/Listen host: Just execute locally
+            EndFiringSequence(FireModeNum);
+        }
+
+        return;
+    }
    //if (FireModeNum < 2)
     //{
     //    GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
@@ -807,24 +841,30 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
 
 bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
 {
-	// CHECK 1: Weapon switch penalty (EarliestFireTime)
-	if (EarliestFireTime > CurrentTime)
-	{
-		return true;
-	}
+    // CHECK 1: Weapon switch penalty (EarliestFireTime)
+    if (EarliestFireTime > CurrentTime)
+    {
+        return true;
+    }
 
-	// GLOBAL COOLDOWN CHECK
-    // Iterate through ALL fire modes. If the weapon is recovering from ANY shot,
-    // it cannot fire again.
+    // GLOBAL COOLDOWN CHECK
     for (int32 i = 0; i < LastFireTime.Num(); i++)
     {
         if (LastFireTime[i] > 0.0f)
         {
             float TimeSinceLastFire = CurrentTime - LastFireTime[i];
-            float RequiredInterval = GetRefireTime(i); // Get refire time for the mode that WAS fired
+            float RequiredInterval = GetRefireTime(i);
+
+            // LOGGING ADDED HERE
+            // We only log if the check is close to failing (within 1 second) to prevent log spam
+            if (TimeSinceLastFire < 1.0f)
+            {
+                UE_LOG(LogUTWeaponFix, Log, TEXT("[CooldownCheck] Request Mode: %d | Checking History Mode: %d | Delta: %.4f | Req: %.4f | BLOCKED: %s"),
+                    FireModeNum, i, TimeSinceLastFire, RequiredInterval,
+                    (TimeSinceLastFire < (RequiredInterval - 0.06f)) ? TEXT("TRUE") : TEXT("FALSE"));
+            }
 
             // Client Tolerance (60ms)
-            // If we are within the refire window of ANY mode, block the shot.
             if (TimeSinceLastFire < (RequiredInterval - 0.06f))
             {
                 return true;
@@ -2067,6 +2107,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
 void AUTWeaponFix::DetachFromOwner_Implementation()
 {
+    GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
     // Safety: Kill timers if the weapon is destroyed or dropped
     for (int32 i = 0; i < 2; i++)
     {
@@ -2077,6 +2118,8 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
     Super::DetachFromOwner_Implementation();
 }
 
+
+/*
 bool AUTWeaponFix::PutDown()
 {
     // 1. Try to put the weapon down via the base class
@@ -2134,6 +2177,111 @@ bool AUTWeaponFix::PutDown()
     ClearPendingFakeProjectiles();
     return bPutDownResult;
 }
+*/
+
+
+bool AUTWeaponFix::PutDown()
+{
+    // 1. Gatekeeper: Abort if we are already in a wait loop
+    if (GetWorldTimerManager().IsTimerActive(DelayedPutDownHandle))
+    {
+        return false;
+    }
+
+    // 2. Calculate the maximum required delay across ALL fire modes
+    float CurrentTime = GetWorld()->GetTimeSeconds();
+    float MaxRequiredDelay = 0.f;
+
+    // Only run calculation if we are in a firing state (or was just firing)
+    if (CurrentState && CurrentState->IsFiring())
+    {
+        // Iterate through ALL modes, not just the current one
+        for (int32 i = 0; i < LastFireTime.Num(); i++)
+        {
+            if (LastFireTime[i] > 0.f)
+            {
+                // Calculate when this specific mode is ready
+                float RefireInterval = GetRefireTime(i);
+                float ModeReadyTime = LastFireTime[i] + RefireInterval;
+                float TimeRemaining = ModeReadyTime - CurrentTime;
+
+                // If this mode is still cooling down, check if it's the limiting factor
+                if (TimeRemaining > 0.f)
+                {
+                    // Calculate penalty (Standard UT logic scales this by RefirePutDownTimePercent)
+                    float Penalty = TimeRemaining * RefirePutDownTimePercent;
+                    if (Penalty > MaxRequiredDelay)
+                    {
+                        MaxRequiredDelay = Penalty;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Case A: The penalty is too long. We must BLOCK the switch.
+    if (MaxRequiredDelay > GetPutDownTime())
+    {
+        float WaitDuration = MaxRequiredDelay - GetPutDownTime();
+
+        // Both Client and Server set this timer to wait it out visually and logically
+        GetWorldTimerManager().SetTimer(DelayedPutDownHandle, this, &AUTWeaponFix::PutDownDelayed, WaitDuration, false);
+        return false;
+    }
+
+    // 4. Case B: The penalty is short enough to fit in the put-down animation.
+    // Proceed with the standard put down.
+    bool bPutDownResult = Super::PutDown();
+
+    // 5. CRITICAL FIX: The Inheritance Correction
+    if (bPutDownResult)
+    {
+        // PROBLEM: Super::PutDown() -> State->PutDown() likely read the invalid RefireCheckHandle
+        // and set EarliestFireTime to -1.0 (the past). We must fix this now.
+
+        if (MaxRequiredDelay > 0.f)
+        {
+            // Apply the correct delay we calculated from LastFireTime
+            //EarliestFireTime = CurrentTime + MaxRequiredDelay;
+            EarliestFireTime = FMath::Max(EarliestFireTime, CurrentTime + MaxRequiredDelay);
+        }
+
+        // 6. Cleanup Flags (Transfer retry intent, clear timers)
+        if (UTOwner)
+        {
+            for (int32 i = 0; i < 2; i++)
+            {
+                if (GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]))
+                {
+                    UTOwner->SetPendingFire(i, true);
+                }
+            }
+        }
+
+        for (int32 i = 0; i < 2; i++)
+        {
+            GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
+        }
+
+        CurrentlyFiringMode = 255;
+
+        for (int32 i = 0; i < FireModeActiveState.Num(); i++)
+        {
+            FireModeActiveState[i] = 0;
+        }
+
+        ClearPendingFakeProjectiles();
+    }
+
+    return bPutDownResult;
+}
+
+// Add this helper function to call PutDown again after the timer
+void AUTWeaponFix::PutDownDelayed()
+{
+    PutDown();
+}
+
 
 
 void AUTWeaponFix::FireCone()
