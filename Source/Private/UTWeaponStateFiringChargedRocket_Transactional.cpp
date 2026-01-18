@@ -313,6 +313,12 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
     {
         // Done firing - cleanup
         ChargeTime = 0.0f;
+        AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+        if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
+        {
+            W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+        }
+
         GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
         GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
 
@@ -388,6 +394,11 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
     ChargeTime = 0.0f;
     GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
     GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
+    AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+    if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
+    {
+        W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+    }
 
     if (GetOuterAUTWeapon()->GetCurrentState() == this)
     {

@@ -254,7 +254,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ServerStartFireFixed",(Native)&AUTWeaponFix::execServerStartFireFixed);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ServerStopFireFixed",(Native)&AUTWeaponFix::execServerStopFireFixed);
 	}
-	IMPLEMENT_CLASS(AUTWeaponFix, 2593113339);
+	IMPLEMENT_CLASS(AUTWeaponFix, 582847049);
 	FVector AUTPlusFlakCannon::GetFireLocationForMultiShot(int32 MultiShotIndex, FVector const& FireLocation, FRotator const& FireRotation)
 	{
 		UTPlusFlakCannon_eventGetFireLocationForMultiShot_Parms Parms;
@@ -278,7 +278,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusFlakCannon::StaticClass(), "GetFireLocationForMultiShot",(Native)&AUTPlusFlakCannon::execGetFireLocationForMultiShot);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusFlakCannon::StaticClass(), "GetFireRotationForMultiShot",(Native)&AUTPlusFlakCannon::execGetFireRotationForMultiShot);
 	}
-	IMPLEMENT_CLASS(AUTPlusFlakCannon, 442142883);
+	IMPLEMENT_CLASS(AUTPlusFlakCannon, 2973537861);
 	void AUTPlusShockRifle::ClientNotifyImpressive()
 	{
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ClientNotifyImpressive),NULL);
@@ -296,7 +296,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "ClientNotifyImpressive",(Native)&AUTPlusShockRifle::execClientNotifyImpressive);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "UpdateScreenTexture",(Native)&AUTPlusShockRifle::execUpdateScreenTexture);
 	}
-	IMPLEMENT_CLASS(AUTPlusShockRifle, 1151627722);
+	IMPLEMENT_CLASS(AUTPlusShockRifle, 150032083);
 	void AUTPlusSniper::ClientNotifyImpressive()
 	{
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ClientNotifyImpressive),NULL);
@@ -309,7 +309,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 	{
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusSniper::StaticClass(), "ClientNotifyImpressive",(Native)&AUTPlusSniper::execClientNotifyImpressive);
 	}
-	IMPLEMENT_CLASS(AUTPlusSniper, 1435410372);
+	IMPLEMENT_CLASS(AUTPlusSniper, 7841339);
 class UScriptStruct* FPlusRocketFireMode::StaticStruct()
 {
 	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
@@ -345,7 +345,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "OnRep_PendingLockedTarget",(Native)&AUTPlusWeap_RocketLauncher::execOnRep_PendingLockedTarget);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "ServerCycleRocketMode",(Native)&AUTPlusWeap_RocketLauncher::execServerCycleRocketMode);
 	}
-	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 3626475686);
+	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 331605778);
 	void AUTWeap_LinkGun_Plus::DrawWeaponCrosshair(UUTHUDWidget* WeaponHudWidget, float RenderDelta)
 	{
 		UTWeap_LinkGun_Plus_eventDrawWeaponCrosshair_Parms Parms;
@@ -388,7 +388,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeap_LinkGun_Plus::StaticClass(), "ServerStopBeamFiring",(Native)&AUTWeap_LinkGun_Plus::execServerStopBeamFiring);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeap_LinkGun_Plus::StaticClass(), "UpdateScreenTexture",(Native)&AUTWeap_LinkGun_Plus::execUpdateScreenTexture);
 	}
-	IMPLEMENT_CLASS(AUTWeap_LinkGun_Plus, 3188789257);
+	IMPLEMENT_CLASS(AUTWeap_LinkGun_Plus, 3497632433);
 	void UUTWeaponStateFiring_Transactional::StaticRegisterNativesUUTWeaponStateFiring_Transactional()
 	{
 	}
@@ -1792,6 +1792,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				MetaData->SetValue(NewProp_ClientFireEventIndex, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
 				MetaData->SetValue(NewProp_ClientFireEventIndex, TEXT("ToolTip"), TEXT("Client-side fire event counter for each fire mode.\nIncremented locally on each fire attempt, then validated by server."));
 				MetaData->SetValue(NewProp_AuthoritativeFireEventIndex, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_AuthoritativeFireEventIndex, TEXT("ToolTip"), TEXT("Server-side authoritative fire event index for each fire mode.\nThis is the ground truth that clients must sync to.\nReplicated to clients for verification."));
 				MetaData->SetValue(NewProp_CachedTransactionalRotation, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
 				MetaData->SetValue(NewProp_LastSpecialProjectileTime, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
 				MetaData->SetValue(NewProp_LastFireTime, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
@@ -3104,7 +3105,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			ReturnPackage = CastChecked<UPackage>(StaticFindObjectFast(UPackage::StaticClass(), NULL, FName(TEXT("/Script/NetcodePlus")), false, false));
 			ReturnPackage->SetPackageFlags(PKG_CompiledIn | 0x00000000);
 			FGuid Guid;
-			Guid.A = 0xD8BF39FA;
+			Guid.A = 0x77A03D6F;
 			Guid.B = 0x5A2FD302;
 			Guid.C = 0x00000000;
 			Guid.D = 0x00000000;

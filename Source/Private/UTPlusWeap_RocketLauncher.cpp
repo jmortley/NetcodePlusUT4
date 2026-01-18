@@ -316,6 +316,32 @@ bool AUTPlusWeap_RocketLauncher::ShouldFireLoad()
 
 void AUTPlusWeap_RocketLauncher::FireShot()
 {
+    float CurrentTime = GetWorld()->GetTimeSeconds();
+    float PrevLFT0 = LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.0f;
+    float PrevLFT1 = LastFireTime.IsValidIndex(1) ? LastFireTime[1] : -1.0f;
+    // ----------------------------------------------------------------
+    // FINAL SAFETY CHECK
+    // ----------------------------------------------------------------
+    // If StartFire() mistakenly allowed this shot (e.g. due to mode switch bypass),
+    // we double-check the cooldown here. If we are supposed to be waiting,
+    // we ABORT immediately to protect the Rhythm Logic.
+    // ----------------------------------------------------------------
+    AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(this);
+    if (FixWeapon)
+    {
+        // Check if we are physically allowed to fire right now
+        if (FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime))
+        {
+            // LOG AND ABORT
+            //UE_LOG(LogUTRocketLauncher, Warning, TEXT("[FireShot] ABORTING ILLEGAL SHOT! IsFireModeOnCooldown=TRUE. Time: %.4f"), CurrentTime);
+
+            // OPTIONAL: Force the timer to stay clean
+            // If the rhythm logic is aggressive, ensure we don't snap things here.
+            return;
+        }
+    }
+    //UE_LOG(LogUTRocketLauncher, Log, TEXT("[FireShot] Mode: %d | Time: %.4f | Prev LFT[0]: %.4f | Prev LFT[1]: %.4f"),
+    //    CurrentFireMode, CurrentTime, PrevLFT0, PrevLFT1);
     Super::FireShot();
 }
 
@@ -327,17 +353,46 @@ void AUTPlusWeap_RocketLauncher::FireShotDirect()
         UTOwner->DeactivateSpawnProtection();
     }
     float CurrentTime = GetWorld()->GetTimeSeconds();
+    // --- NEW LOGGING START ---
+    float PrevLFT0 = LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.0f;
+    float PrevLFT1 = LastFireTime.IsValidIndex(1) ? LastFireTime[1] : -1.0f;
+
+    //UE_LOG(LogUTRocketLauncher, Log, TEXT("[FireShotDirect] Mode: %d | Time: %.4f | Prev LFT[0]: %.4f | Prev LFT[1]: %.4f"),
+    //    CurrentFireMode, CurrentTime, PrevLFT0, PrevLFT1);
+    // --- NEW LOGGING END ---
+// -------------------------------------------------------------------------
+    // ROBUST FIX: ENFORCE GLOBAL COOLDOWN
+    // -------------------------------------------------------------------------
+    // When we fire the burst (Mode 1), we must treat it as if we also just fired 
+    // Primary (Mode 0) to prevent an immediate follow-up shot.
+    //
+    // Problem: If we just set it to 'CurrentTime', the RefireCheckTimer (which runs 
+    // on Mode 1's faster schedule) might wake up and call StartFire(0) too early. 
+    // Small tolerances allow the shot to slip through.
+    //
+    // Solution: Set Mode 0's timer slightly into the FUTURE. 
+    // This guarantees that (CurrentTime - LastFireTime) is negative or very small,
+    // causing IsFireModeOnCooldown() to forcefully BLOCK the shot.
+    // -------------------------------------------------------------------------
+    if (LastFireTime.IsValidIndex(0))
+    {
+        // Add 0.2s padding. This defeats the 0.06s network tolerance 
+        // in UTWeaponFix and ensures the cooldown math always results in a block.
+        LastFireTime[0] = CurrentTime;
+
+    }
+
     if (LastFireTime.IsValidIndex(CurrentFireMode))
     {
         LastFireTime[CurrentFireMode] = CurrentTime;
 
         // LOGGING ADDED HERE
-        UE_LOG(LogUTRocketLauncher, Log, TEXT("[FireShotDirect] Forcing LastFireTime Update. Mode: %d | Time: %f | LastFireTime: %f"),
-            CurrentFireMode, CurrentTime, LastFireTime[CurrentFireMode]);
+        //UE_LOG(LogUTRocketLauncher, Log, TEXT("[FireShotDirect] Forcing LastFireTime Update. Mode: %d | Time: %f | LastFireTime: %f"),
+        //    CurrentFireMode, CurrentTime, LastFireTime[CurrentFireMode]);
     }
     else
     {
-        UE_LOG(LogUTRocketLauncher, Warning, TEXT("[FireShotDirect] Invalid FireMode Index! Mode: %d"), CurrentFireMode);
+        //UE_LOG(LogUTRocketLauncher, Warning, TEXT("[FireShotDirect] Invalid FireMode Index! Mode: %d"), CurrentFireMode);
     }
     // 1. Fire the projectile directly
     // (This function has internal logic to NOT consume ammo for Alt-Fire)
