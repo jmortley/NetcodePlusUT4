@@ -18,10 +18,10 @@ public:
         // --- FIX: Set variables directly in constructor instead of overriding functions ---
 
         // Default is 92.f. Increase to allow larger smooth corrections.
-        MaxSmoothNetUpdateDist = 140.f;
+        MaxSmoothNetUpdateDist = 92.f;
 
         // Default is 140.f. Increase to prevent snapping on medium corrections.
-        NoSmoothNetUpdateDist = 256.f;
+        NoSmoothNetUpdateDist = 140.f;
     }
 
     typedef FNetworkPredictionData_Client_UTChar Super;
@@ -32,7 +32,7 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    MaxPositionErrorSquared = 15.f;
+    MaxPositionErrorSquared = 20.f;
 
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.0167f;  // instead of fps dependent

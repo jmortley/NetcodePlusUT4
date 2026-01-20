@@ -594,7 +594,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
-	Super::Tick(DeltaTime); // Runs stock logic (sets Green shell parameter)
+	Super::Tick(DeltaTime); // Runs stock logic
 
 	// Visuals are for clients only
 	if (GetNetMode() == NM_DedicatedServer)
@@ -607,12 +607,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	{
 		bHasSpawnOverlay = true;
 
-		// --- TEAM FILTERING: Only show glow to enemies ---
+		// --- TEAM FILTERING ---
 		bool bShowGlowToViewer = true;
 		AUTPlayerController* LocalViewer = GetLocalViewer();
 		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 
-		// If viewing a Teammate (or Self), HIDE the glow
 		if (GS && LocalViewer && GS->OnSameTeam(this, LocalViewer))
 		{
 			bShowGlowToViewer = false;
@@ -620,8 +619,18 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 		if (bShowGlowToViewer)
 		{
-			// Define your custom color (Bright Gold/Yellow Bloom) - ENEMIES ONLY
-			FLinearColor ObviousColor = FLinearColor(20.0f, 15.0f, 2.0f, 1.0f);
+			// 1. Get Base Team Color
+			FLinearColor BaseTeamColor = GetTeamColor();
+
+			// 2. Make it SUPER BRIGHT (Emissive Bloom)
+			// Multiply RGB by 20.0 to blow out HDR bloom, keep Alpha 1.0 for visibility
+			float BrightnessMult = 20.0f;
+			FLinearColor ObviousColor = FLinearColor(
+				BaseTeamColor.R * BrightnessMult,
+				BaseTeamColor.G * BrightnessMult,
+				BaseTeamColor.B * BrightnessMult,
+				1.0f
+			);
 
 			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
 			static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
@@ -631,10 +640,10 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			{
 				if (MI)
 				{
-					// 1. SUPPRESS the stock "Greenish" effect (override Super::Tick)
+					// Suppress stock effect
 					MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
 
-					// 2. APPLY our "Obvious" color using the HitFlash system
+					// Apply Super Bright Team Color
 					MI->SetVectorParameterValue(NAME_HitFlashColor, ObviousColor);
 					MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.4f);
 				}
@@ -642,7 +651,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 		else
 		{
-			// TEAMMATES/SELF: Show no glow at all
+			// TEAMMATES/SELF: Hide everything
 			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
 			static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
 			static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
@@ -651,9 +660,9 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			{
 				if (MI)
 				{
-					// Suppress all glow effects
 					MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
-					MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor::Black);
+					// Use Transparent Black here too to prevent self-view artifacts
+					MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor(0.f, 0.f, 0.f, 0.f));
 					MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.0f);
 				}
 			}
@@ -666,17 +675,22 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 		static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
 		static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
+		static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
 
 		for (UMaterialInstanceDynamic* MI : BodyMIs)
 		{
 			if (MI)
 			{
-				// Reset HitFlash (removes the glow)
-				MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor::Black);
+				// FIX: Use Transparent Black (0,0,0,0) instead of FLinearColor::Black (0,0,0,1).
+				// FLinearColor::Black has Alpha=1, which can cause the shader to blend a "Dark Layer" 
+				// onto the mesh depending on how the material is set up.
+				MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor(0.f, 0.f, 0.f, 0.f));
+
+				// Reset interpolation alpha
 				MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.0f);
 
-				// Note: We don't need to reset SpawnProtectionPct manually.
-				// Super::Tick() handles that automatically when bSpawnProtectionEligible is false.
+				// Explicitly ensure stock effect is off (safety check)
+				MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
 			}
 		}
 	}

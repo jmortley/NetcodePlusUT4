@@ -7,7 +7,7 @@
 
 
 // CHANGE THIS NUMBER WHEN YOU RELEASE AN UPDATE
-#define NETCODE_PLUGIN_VERSION 311
+#define NETCODE_PLUGIN_VERSION 312
 
 class FNetcodePlus : public IModuleInterface
 {

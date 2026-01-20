@@ -839,8 +839,8 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
             float TimeSinceLastFire = ServerTime - LastFireTime[i];
 
             // Get the refire time for mode [i] (the one that was fired previously)
-            // Subtract 65ms (0.06f) for network tolerance
-            float MinInterval = GetRefireTime(i) - 0.12f;
+            // Subtract 100ms (0.1f) for network tolerance
+            float MinInterval = GetRefireTime(i) - 0.1f;
 
             if (TimeSinceLastFire < MinInterval)
             {
@@ -866,6 +866,10 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
         return true;
     }
 
+    // Authority needs looser tolerance to match ValidateFireRequest
+    // Client can be strict since it knows its own timing precisely
+    const float Tolerance = (Role == ROLE_Authority) ? 0.1f : 0.05f;
+
     // GLOBAL COOLDOWN CHECK
     for (int32 i = 0; i < LastFireTime.Num(); i++)
     {
@@ -874,17 +878,7 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
             float TimeSinceLastFire = CurrentTime - LastFireTime[i];
             float RequiredInterval = GetRefireTime(i);
 
-            // LOGGING ADDED HERE
-            // We only log if the check is close to failing (within 1 second) to prevent log spam
-            if (TimeSinceLastFire < 1.0f)
-            {
-                UE_LOG(LogUTWeaponFix, Log, TEXT("[CooldownCheck] Request Mode: %d | Checking History Mode: %d | Delta: %.4f | Req: %.4f | BLOCKED: %s"),
-                    FireModeNum, i, TimeSinceLastFire, RequiredInterval,
-                    (TimeSinceLastFire < (RequiredInterval - 0.06f)) ? TEXT("TRUE") : TEXT("FALSE"));
-            }
-
-            // Client Tolerance (60ms)
-            if (TimeSinceLastFire < (RequiredInterval - 0.06f))
+            if (TimeSinceLastFire < (RequiredInterval - Tolerance))
             {
                 return true;
             }
@@ -1009,7 +1003,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     bIsTransactionalFire = false;
 	ReceivedHitScanHitChar = nullptr;
     // 4. CONFIRM
-    if (UTOwner && UTOwner->IsLocallyControlled())
+    if (UTOwner)
     {
         ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
     }
@@ -1514,20 +1508,24 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
     // 1. Get the standard start location (Muzzle offset, etc applied to CURRENT Actor Location)
     FVector StartLoc = Super::GetFireStartLoc(FireMode);
 
-    // 2. If this is a Transactional Shot on the Server, we must rewind the SHOOTER 
-    /* to where they were when they fired, to align with the Client's Rotation.
-    if (Role == ROLE_Authority && bIsTransactionalFire && UTOwner)
+    // 2. PARALLAX FIX (PROJECTILES ONLY)
+        // We check if a Projectile Class is assigned to this mode. 
+        // If ProjClass is NULL, it's likely a Hitscan mode (Sniper, Shock Beam), so we skip.
+    bool bIsProjectile = (ProjClass.IsValidIndex(FireMode) && ProjClass[FireMode] != nullptr);
+
+    if (bIsProjectile && Role == ROLE_Authority && bIsTransactionalFire && UTOwner)
     {
         float PredictionTime = GetHitValidationPredictionTime();
 
-        // Use the same rewind logic used for targets to find where the Shooter was
+        // Rewind the shooter to where they were when they clicked
         FVector RewoundShooterLoc = UTOwner->GetRewindLocation(PredictionTime);
 
-        // Apply the difference. 
-        // This shifts the Muzzle Position by the distance the player moved during the RTT.
-        StartLoc += (RewoundShooterLoc - UTOwner->GetActorLocation());
+        // Calculate the shift (Parallax Error)
+        FVector MovementDelta = (RewoundShooterLoc - UTOwner->GetActorLocation());
+
+        // Shift the muzzle origin back to that spot
+        StartLoc += MovementDelta;
     }
-    */
     return StartLoc;
 }
 
@@ -1647,7 +1645,25 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	{
 		return nullptr;
 	}
-
+    // ----------------------------------------
+    // 4b) High-FPS stability (Fixed Tick Rate)
+    // ----------------------------------------
+    if (NewProjectile->ProjectileMovement)
+    {
+        if (Role == ROLE_Authority)
+        {
+            const float ServerRate = 1.f / 240.f;
+            NewProjectile->PrimaryActorTick.TickInterval = ServerRate;
+            NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ServerRate;
+        }
+        else if (GetNetMode() != NM_DedicatedServer)
+        {
+            const int32 ClientHz = GetSnappedProjectileHz();
+            const float ClientInterval = 1.f / static_cast<float>(ClientHz);
+            NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
+            NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
+        }
+    }
 	// ----------------------------------------
 	// 5) Visual offsets (weapon hand)
 	// ----------------------------------------
@@ -1867,7 +1883,7 @@ else
     if (CatchupTickDelta > 0.f && !bIsShockCore)
     {
         float PingSeconds = (OwningPlayer->PlayerState) ? OwningPlayer->PlayerState->ExactPing * 0.001f : 0.0f;
-        NewProjectile->SetLifeSpan(PingSeconds + 0.10f);
+        NewProjectile->SetLifeSpan(PingSeconds + 0.25f);
     }
 
     // Track this projectile for potential rejection cleanup
@@ -1893,25 +1909,7 @@ else
     }
 }
 
-	// ----------------------------------------
-	// 8) High-FPS stability (Fixed Tick Rate)
-	// ----------------------------------------
-	if (NewProjectile->ProjectileMovement)
-	{
-		if (Role == ROLE_Authority)
-		{
-			const float ServerRate = 1.f / 240.f;
-			NewProjectile->PrimaryActorTick.TickInterval = ServerRate;
-			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ServerRate;
-		}
-		else if (GetNetMode() != NM_DedicatedServer)
-		{
-			const int32 ClientHz = GetSnappedProjectileHz();
-			const float ClientInterval = 1.f / static_cast<float>(ClientHz);
-			NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
-			NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
-		}
-	}
+
 
 	return NewProjectile;
 }
