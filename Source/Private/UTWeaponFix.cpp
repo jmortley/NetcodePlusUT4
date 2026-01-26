@@ -1615,16 +1615,29 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	// ----------------------------------------
 	// 4) Spawn the projectile
 	// ----------------------------------------
+    /*
 	FActorSpawnParameters Params;
 	Params.Instigator = UTOwner;
 	Params.Owner = UTOwner;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    Params.bDeferConstruction = true;
 
 	AUTProjectile* NewProjectile = GetWorld()->SpawnActor<AUTProjectile>(
 		ProjectileClass,
 		SpawnLocation,
 		SpawnRotation,
 		Params);
+    */
+
+    FRotator NormalizedRot = SpawnRotation;
+    NormalizedRot.Normalize();
+
+    AUTProjectile* NewProjectile = GetWorld()->SpawnActorDeferred<AUTProjectile>(
+        ProjectileClass,
+        FTransform(NormalizedRot, SpawnLocation),
+        UTOwner,
+        UTOwner,
+        ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 
 	if (!NewProjectile)
 	{
@@ -1635,6 +1648,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     // ----------------------------------------
     if (NewProjectile->ProjectileMovement)
     {
+        NewProjectile->ProjectileMovement->Velocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
         if (Role == ROLE_Authority)
         {
             const float ServerRate = 1.f / 240.f;
@@ -1649,6 +1663,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
             NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
         }
     }
+    NewProjectile->FinishSpawning(FTransform(NormalizedRot, SpawnLocation)); //instead of SpawnRotation 
 	// ----------------------------------------
 	// 5) Visual offsets (weapon hand)
 	// ----------------------------------------
@@ -1702,7 +1717,8 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			// =========================================================================
 
 			FVector CatchupStart = SpawnLocation;
-			FVector CatchupVelocity = NewProjectile->ProjectileMovement->Velocity;
+			//FVector CatchupVelocity = NewProjectile->ProjectileMovement->Velocity;
+            FVector CatchupVelocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
 
 			if (CatchupVelocity.IsZero())
 			{

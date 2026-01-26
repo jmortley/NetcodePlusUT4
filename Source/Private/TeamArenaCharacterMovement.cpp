@@ -32,13 +32,13 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    MaxPositionErrorSquared = 20.f;
+    MaxPositionErrorSquared = 17.f;
 
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.0167f;  // instead of fps dependent
     LastTeamCollisionUpdateTime = -1.0f;  // Force immediate first update
-	MinTimeBetweenClientAdjustments = 0.1f;  //stock 0.1f
-	LargeCorrectionThreshold = 20.f;  //stock 15.f
+	MinTimeBetweenClientAdjustments = 0.09f;  //stock 0.1f
+	LargeCorrectionThreshold = 15.f;  //stock 15.f
     // --- HIGH-FPS FIX #2: Dodge timing tolerance ---
     // Prevents server rejection when client/server timestamps differ by microseconds
     DodgeCooldownTolerance = 0.05f;
