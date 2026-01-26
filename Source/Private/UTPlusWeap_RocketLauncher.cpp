@@ -429,10 +429,10 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
     }
 
     // Alt-fire already consumed ammo during loading
-    if (CurrentFireMode != 1)
-    {
-        ConsumeAmmo(CurrentFireMode);
-    }
+    //if (CurrentFireMode != 1)
+    //{
+    //    ConsumeAmmo(CurrentFireMode);
+   // }
 
 
     UTOwner->SetFlashExtra(0, CurrentFireMode);

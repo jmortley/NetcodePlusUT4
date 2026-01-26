@@ -63,11 +63,14 @@ bool AUTPlusProj_ShockBall::ShouldIgnoreHit_Implementation(AActor* OtherActor, U
 {
 	// If we're a fake projectile hitting another shock ball, ignore it locally.
 	// Let the server be authoritative on core-vs-core collisions.
-	if (bFakeClientProjectile && Cast<AUTProj_ShockBall>(OtherActor))
+	//if (bFakeClientProjectile && Cast<AUTProj_ShockBall>(OtherActor))
+	//{
+	//	return true;
+	//}
+	if (bFakeClientProjectile && Cast<AUTProjectile>(OtherActor))
 	{
 		return true;
 	}
-
 	return Super::ShouldIgnoreHit_Implementation(OtherActor, OtherComp);
 }
 

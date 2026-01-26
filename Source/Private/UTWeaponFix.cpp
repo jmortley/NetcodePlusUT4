@@ -1634,7 +1634,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 
     AUTProjectile* NewProjectile = GetWorld()->SpawnActorDeferred<AUTProjectile>(
         ProjectileClass,
-        FTransform(NormalizedRot, SpawnLocation),
+        FTransform(SpawnRotation, SpawnLocation),
         UTOwner,
         UTOwner,
         ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
@@ -1648,7 +1648,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     // ----------------------------------------
     if (NewProjectile->ProjectileMovement)
     {
-        NewProjectile->ProjectileMovement->Velocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
+        //NewProjectile->ProjectileMovement->Velocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
         if (Role == ROLE_Authority)
         {
             const float ServerRate = 1.f / 240.f;
@@ -1663,7 +1663,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
             NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
         }
     }
-    NewProjectile->FinishSpawning(FTransform(NormalizedRot, SpawnLocation)); //instead of SpawnRotation 
+    NewProjectile->FinishSpawning(FTransform(SpawnRotation, SpawnLocation)); //instead of SpawnRotation 
 	// ----------------------------------------
 	// 5) Visual offsets (weapon hand)
 	// ----------------------------------------
@@ -1717,8 +1717,8 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			// =========================================================================
 
 			FVector CatchupStart = SpawnLocation;
-			//FVector CatchupVelocity = NewProjectile->ProjectileMovement->Velocity;
-            FVector CatchupVelocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
+			FVector CatchupVelocity = NewProjectile->ProjectileMovement->Velocity;
+            //FVector CatchupVelocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
 
 			if (CatchupVelocity.IsZero())
 			{
@@ -1884,7 +1884,7 @@ else
     if (CatchupTickDelta > 0.f && !bIsShockCore)
     {
         float PingSeconds = (OwningPlayer->PlayerState) ? OwningPlayer->PlayerState->ExactPing * 0.001f : 0.0f;
-        NewProjectile->SetLifeSpan(PingSeconds + 0.25f);
+        NewProjectile->SetLifeSpan(PingSeconds + 0.4f);
     }
 
     // Track this projectile for potential rejection cleanup
@@ -2701,6 +2701,8 @@ void AUTWeaponFix::ClearFireEventsFixed()
     GetWorldTimerManager().ClearTimer(ResendFireHandle);
 }
 
+
+/*
 // 4. CONFIRMATION (Client Side)
 // When server ACKs a shot, remove it from the retry queue so we stop bothering the server
 void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
@@ -2767,6 +2769,58 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
         GetWorldTimerManager().ClearTimer(ResendFireHandle);
     }
 }
+*/
+
+
+
+void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
+{
+    // FIX 1: Do NOT rollback the local sequence generator.
+    // Only update if server is AHEAD (rare resync case).
+    if (ClientFireEventIndex.IsValidIndex(FireModeNum))
+    {
+        if (InAuthorizedEventIndex > ClientFireEventIndex[FireModeNum])
+        {
+            ClientFireEventIndex[FireModeNum] = InAuthorizedEventIndex;
+        }
+    }
+
+    // FIX 2: Destroy CONFIRMED fakes only (server spawned the real one).
+    // Do NOT touch fakes with index > authorized - those are still in-flight, not rejected.
+    for (int32 i = PendingFakeProjectiles.Num() - 1; i >= 0; i--)
+    {
+        FPendingFakeProjectile& Pending = PendingFakeProjectiles[i];
+
+        if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
+        {
+            // Confirmed - destroy fake, real projectile is replicating
+            if (Pending.Projectile.IsValid())
+            {
+                Pending.Projectile->Destroy();
+            }
+            PendingFakeProjectiles.RemoveAt(i);
+        }
+        // Fakes with EventIndex > InAuthorizedEventIndex: LEAVE ALONE
+        // They're not rejected, just not processed yet
+    }
+
+    // Clear confirmed retries from queue
+    for (int32 i = ResendFireEvents.Num() - 1; i >= 0; i--)
+    {
+        if (ResendFireEvents[i].FireModeNum == FireModeNum &&
+            ResendFireEvents[i].FireEventIndex <= InAuthorizedEventIndex)
+        {
+            ResendFireEvents.RemoveAt(i);
+        }
+    }
+
+    if (ResendFireEvents.Num() == 0)
+    {
+        GetWorldTimerManager().ClearTimer(ResendFireHandle);
+    }
+}
+
+
 
 
 void AUTWeaponFix::ClearPendingFakeProjectiles()

@@ -342,7 +342,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
     // Fire one rocket using stock UT logic (bypasses UTWeaponFix transactional)
     RocketLauncher->FireShotDirect();
-
+   
     // Handle burst
     if (RocketLauncher->NumLoadedRockets > 0)
     {
@@ -389,6 +389,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
             return;
         }
     }
+
 
     // All rockets fired
     ChargeTime = 0.0f;
