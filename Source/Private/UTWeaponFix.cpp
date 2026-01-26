@@ -504,7 +504,7 @@ void AUTWeaponFix::FireShot()
             float OldTime = LastFireTime[CurrentFireMode];
 
             // If this isn't the first shot, and we haven't paused firing for a long time...
-            if (OldTime > 0.0f && (CurrentTime - OldTime) < (Refire + 0.2f))
+            if (OldTime > 0.0f && (CurrentTime - OldTime) < (Refire + 0.06f))
             {
                 // Snap the timer to the Theoretical Time.
                 // Even if we fired 0.08s early, the clock is set as if we fired on time.
@@ -580,8 +580,8 @@ void AUTWeaponFix::FireShot()
 
 			// If this is the first shot (OldTime <= 0) OR if the player stopped firing for a while,
 			// reset the clock to NOW.
-			// (Tolerance: If gap is > Refire + 0.2s, assume they stopped firing).
-			if (OldTime <= 0.0f || (CurrentTime - OldTime) > (Refire + 0.2f))
+			// (Tolerance: If gap is > Refire + 0.06s, assume they stopped firing).
+			if (OldTime <= 0.0f || (CurrentTime - OldTime) > (Refire + 0.06f))
 			{
 				LastFireTime[CurrentFireMode] = CurrentTime;
 			}
@@ -1250,23 +1250,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 						// TIERED PADDING SYSTEM
 						// Running (940 u/s): 55 units = ~59ms jitter protection
 						// Dodging (1700 u/s): 55 units = ~32ms jitter protection
-
-						if (OwnerPing > 120.0f)
-						{
-							ExtraHitPadding = 43.0f; // Extreme Latency (Bad internet)
-						}
-						else if (OwnerPing > 90.0f)
-						{
-							ExtraHitPadding = 42.0f; // High Latency
-						}
-						else if (OwnerPing > 60.0f)
-						{
-							ExtraHitPadding = 41.0f; // Moderate Latency
-						}
-						else
-						{
-							ExtraHitPadding = 40.0f; // Low Ping / LAN
-						}
+                        ExtraHitPadding = 40.0f;
+				
 					}
 					else
 					{
@@ -1339,7 +1324,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 		float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
 		const float SearchStep = 0.015f;      // 15ms steps
-		const float MaxSearchOffset = 0.060f; // ±60ms max search
+		const float MaxSearchOffset = 0.045f; // ±45ms max search
 		float SearchOffset = SearchStep;
 
 		while (FMath::Abs(SearchOffset) <= MaxSearchOffset)
@@ -1395,7 +1380,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 				}
 			}
 
-			// Oscillate: +15ms, -15ms, +30ms, -30ms, +45ms, -45ms, +60ms, -60ms
+			// Oscillate: +15ms, -15ms, +30ms, -30ms, +45ms, -45ms
 			if (SearchOffset > 0.f)
 				SearchOffset = -SearchOffset;
 			else

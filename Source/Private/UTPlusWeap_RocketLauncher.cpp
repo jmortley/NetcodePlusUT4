@@ -515,6 +515,14 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
 
 AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 {
+    // --- FIX: The Guard Clause ---
+    // This stops the client from drawing that one "ghost" spread rocket
+    // that happens right after the ammo counter hits 0.
+    if (NumLoadedRockets <= 0)
+    {
+        return nullptr;
+    }
+    
     TSubclassOf<AUTProjectile> RocketProjClass = nullptr;
 
     switch (CurrentRocketFireMode)

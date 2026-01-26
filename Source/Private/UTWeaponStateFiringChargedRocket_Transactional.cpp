@@ -343,34 +343,12 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
     // Fire one rocket using stock UT logic (bypasses UTWeaponFix transactional)
     RocketLauncher->FireShotDirect();
 
-
-    // 2. Decide if we need to wait before firing the next one
+    // Handle burst
     if (RocketLauncher->NumLoadedRockets > 0)
     {
-        // --- FIX STARTS HERE ---
-
-        // Step A: Pick the correct interval variable based on the current mode.
-        // Mode 0 = Spread (Uses "Burst Interval" from your screenshot -> 0.0)
-        // Mode 1 = Grenades (Uses "Grenade Burst Interval" from your screenshot -> 0.15)
-        float IntervalToCheck = RocketLauncher->BurstInterval;
-
-        if (RocketLauncher->CurrentRocketFireMode == 1)
+        if (RocketLauncher->BurstInterval <= 0.f || RocketLauncher->ShouldFireLoad())
         {
-            IntervalToCheck = RocketLauncher->GrenadeBurstInterval;
-        }
-        else if (RocketLauncher->CurrentRocketFireMode == 2)
-        {
-            // Optional: If you ever change Spiral to be sequential, use its interval too.
-            // Currently Spiral dumps all at once in FireShotDirect, so this might not be hit.
-            IntervalToCheck = RocketLauncher->SpiralBurstInterval;
-        }
-
-        // Step B: Check the CHOSEN interval
-        // For Grenades, IntervalToCheck is now 0.15, so this check fails (correctly).
-        // For Spread, IntervalToCheck is 0.0, so this check passes (correctly).
-        if (IntervalToCheck <= 0.f || RocketLauncher->ShouldFireLoad())
-        {
-            // INSTANT DUMP (Spread Mode)
+            // --- FIX START: SAFETY COUNTER ---
             int32 SafetyCounter = 0;
             while (RocketLauncher->NumLoadedRockets > 0)
             {
@@ -378,37 +356,39 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
                 RocketLauncher->FireShotDirect();
 
-                // Safety check to prevent infinite loops if ammo doesn't decrease
+                // If the weapon failed to decrement (bug), force it down to prevent infinite loop
                 if (RocketLauncher->NumLoadedRockets >= OldCount)
                 {
                     RocketLauncher->NumLoadedRockets--;
                 }
 
+                // Hard limit to prevent editor freeze (e.g., if decrement logic is completely broken)
                 SafetyCounter++;
                 if (SafetyCounter > 50)
                 {
-                    UE_LOG(LogTemp, Warning, TEXT("Infinite Loop in FireLoadedRocket"));
+                    UE_LOG(LogTemp, Warning, TEXT("Infinite Loop Detected in FireLoadedRocket! Breaking loop."));
                     RocketLauncher->NumLoadedRockets = 0;
                     break;
                 }
             }
+            // --- FIX END ---
         }
         else
         {
-            // TIMED BURST (Grenade Mode)
-            // Set the timer to fire the next rocket after 'IntervalToCheck' seconds (0.15)
+            float BurstTime = (RocketLauncher->CurrentRocketFireMode == 0)
+                ? RocketLauncher->BurstInterval
+                : RocketLauncher->GrenadeBurstInterval;
+
             GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
                 FireLoadedRocketHandle,
                 this,
                 &UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket,
-                IntervalToCheck,
+                BurstTime,
                 false
             );
-            return; // Exit here; the timer will call this function again
+            return;
         }
-        // --- FIX ENDS HERE ---
     }
-
 
     // All rockets fired
     ChargeTime = 0.0f;
@@ -431,6 +411,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
         );
     }
 }
+
 
 
 
