@@ -124,7 +124,8 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 		FVector OldVelocity = GetVelocity();
 
 		UTCharacterMovement->SimulatedVelocity = NewVelocity;
-
+		float NoSmoothThreshold = UTCharacterMovement->NetworkNoSmoothUpdateDistance; 
+		float SmoothThreshold = UTCharacterMovement->NetworkMaxSmoothUpdateDistance;  
 		// If location changed or just spawned...
 		if ((NewLocation != GetActorLocation()) || (CreationTime == GetWorld()->TimeSeconds))
 		{
@@ -153,7 +154,10 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 				// If they are moving opposite directions (ADAD spam), DotProduct will be negative.
 				// We disable prediction in that case to prevent "Overshoot Jitter."
 				float VelocityDot = OldVelocity.GetSafeNormal() | NewVelocity.GetSafeNormal();
-				bool bStableDirection = (VelocityDot > 0.0f); // True if moving roughly same direction
+				//bool bStableDirection = (VelocityDot > 0.0f); // True if moving roughly same direction
+				// Require opposite direction to disable, not just perpendicular
+				bool bStableDirection = (VelocityDot > -0.3f);
+
 
 				if (bStableDirection && GetNetMode() != NM_DedicatedServer)
 				{
@@ -179,7 +183,17 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 					// from the Server Reality. This stops "Warps".
 					FVector PredictedLocation = GetActorLocation();
 					FVector ErrorDelta = PredictedLocation - NewLocation; // Difference between Predict & Server
-					float MaxDistance = 40.0f; // 40 units (Capsule Radius) is a safe limit
+					//float MaxDistance = 40.0f; // 40 units (Capsule Radius) is a safe limit
+					// Dynamic tether based on velocity and prediction time
+					float Speed = NewVelocity.Size();
+					float ExpectedDisplacement = Speed * PredictionTime;
+
+					// Allow full predicted displacement plus some tolerance for acceleration
+					float MaxDistance = ExpectedDisplacement;
+
+					// Hard cap to prevent insane values on bad data
+					//MaxDistance = FMath::Clamp(MaxDistance, 40.0f, 150.0f);
+					MaxDistance = FMath::Clamp(Speed * PredictionTime, 40.0f, NoSmoothThreshold);
 
 					if (ErrorDelta.SizeSquared() > MaxDistance * MaxDistance)
 					{

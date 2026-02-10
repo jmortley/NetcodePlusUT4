@@ -78,7 +78,27 @@ bool AUTPlusProj_ShockBall::ShouldIgnoreHit_Implementation(AActor* OtherActor, U
 void AUTPlusProj_ShockBall::BeginPlay()
 {
 	Super::BeginPlay();
+	if (Role == ROLE_Authority)
+	{
+		// Server: Fixed 240Hz
+		PrimaryActorTick.TickInterval = 1.f / 240.f;
+		if (ProjectileMovement) ProjectileMovement->PrimaryComponentTick.TickInterval = 1.f / 240.f;
+	}
+	else if (GetNetMode() != NM_DedicatedServer)
+	{
+		// CLIENT: Ask the Weapon Class for the rate
+		int32 TargetHz = AUTWeaponFix::GetTargetProjectileTickRate();
 
+		float ClientInterval = 1.f / static_cast<float>(TargetHz);
+
+		PrimaryActorTick.TickInterval = ClientInterval;
+		if (ProjectileMovement)
+		{
+			ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
+			// Force update immediately
+			ProjectileMovement->SetComponentTickInterval(ClientInterval);
+		}
+	}
 
 }
 

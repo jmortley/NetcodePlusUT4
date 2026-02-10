@@ -101,7 +101,7 @@ public:
     AUTWeaponFix(const FObjectInitializer& ObjectInitializer);
 
     virtual void BeginPlay() override;
-
+    static int32 GetTargetProjectileTickRate();
     //~ Begin AUTWeapon Interface
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;

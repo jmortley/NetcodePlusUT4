@@ -24,6 +24,14 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
     ECVF_Scalability
 );
 
+int32 AUTWeaponFix::GetTargetProjectileTickRate()
+{
+    // Use your existing logic here
+    int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
+    TargetHz = FMath::Clamp(TargetHz, 60, 480);
+    return FMath::RoundToInt(TargetHz / 60.f) * 60;
+}
+
 // Helper function (can be static or inline)
 static int32 GetSnappedProjectileHz()
 {
@@ -1002,10 +1010,23 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
     bIsTransactionalFire = false;
 	ReceivedHitScanHitChar = nullptr;
+    /*
     // 4. CONFIRM
     if (UTOwner)
     {
         ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
+    }
+    */
+    if (UTOwner)
+    {
+        bool bIsShockBallFire = ProjClass.IsValidIndex(FireModeNum) &&
+            ProjClass[FireModeNum] &&
+            ProjClass[FireModeNum]->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
+
+        if (!bIsShockBallFire)
+        {
+            ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
+        }
     }
 }
 
@@ -1646,6 +1667,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     // ----------------------------------------
     // 4b) High-FPS stability (Fixed Tick Rate)
     // ----------------------------------------
+
     if (NewProjectile->ProjectileMovement)
     {
         //NewProjectile->ProjectileMovement->Velocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
@@ -1655,6 +1677,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
             NewProjectile->PrimaryActorTick.TickInterval = ServerRate;
             NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ServerRate;
         }
+        
         else if (GetNetMode() != NM_DedicatedServer)
         {
             const int32 ClientHz = GetSnappedProjectileHz();
@@ -1662,8 +1685,9 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
             NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
             NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
         }
+        
     }
-    NewProjectile->FinishSpawning(FTransform(SpawnRotation, SpawnLocation)); //instead of SpawnRotation 
+    NewProjectile->FinishSpawning(FTransform(SpawnRotation, SpawnLocation));
 	// ----------------------------------------
 	// 5) Visual offsets (weapon hand)
 	// ----------------------------------------
@@ -1884,7 +1908,7 @@ else
     if (CatchupTickDelta > 0.f && !bIsShockCore)
     {
         float PingSeconds = (OwningPlayer->PlayerState) ? OwningPlayer->PlayerState->ExactPing * 0.001f : 0.0f;
-        NewProjectile->SetLifeSpan(PingSeconds + 0.4f);
+        NewProjectile->SetLifeSpan(PingSeconds + 0.3f);
     }
 
     // Track this projectile for potential rejection cleanup
