@@ -255,7 +255,7 @@ void ATeamArenaCharacter::FiringInfoUpdated()
     bool bShouldPlayServerEffect = true;
 
 
-    if (UTPC != nullptr && !bLocalFlashLoc && MyPredictionTime > 0.f)
+    if (UTPC != nullptr && !bLocalFlashLoc && MyPredictionTime > 0.f && Controller != nullptr)
     {
         bShouldPlayServerEffect = false;
     }
