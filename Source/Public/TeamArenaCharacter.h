@@ -33,7 +33,7 @@ class NETCODEPLUS_API ATeamArenaCharacter : public AUTCharacter
 public:
     ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer);
 
-
+    virtual void BecomeViewTarget(APlayerController* PC) override;
 	// The material to use for the overlay (Assign M_ShieldBelt_Overlay here in BP)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawn Protection")
 	UMaterialInterface* SpawnProtectionMaterial;
@@ -59,7 +59,8 @@ public:
     // Add override declaration
     virtual void UTUpdateSimulatedPosition(const FVector& NewLocation, const FRotator& NewRotation, const FVector& NewVelocity) override;
 
-
+    UPROPERTY()
+    float SmoothedStabilityFactor = 1.0f;
     // Override to decouple visual effects from standard UTPlayerController prediction
     virtual void FiringInfoUpdated() override;
 

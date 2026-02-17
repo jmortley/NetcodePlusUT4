@@ -99,7 +99,6 @@ void AUTPlusProj_ShockBall::BeginPlay()
 			ProjectileMovement->SetComponentTickInterval(ClientInterval);
 		}
 	}
-
 }
 
 

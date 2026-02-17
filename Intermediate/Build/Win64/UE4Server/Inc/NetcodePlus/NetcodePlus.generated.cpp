@@ -128,7 +128,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsound
 	{
 		FNativeFunctionRegistrar::RegisterFunction(ATeamArenaCharacter::StaticClass(), "GetNetcodeVersion",(Native)&ATeamArenaCharacter::execGetNetcodeVersion);
 	}
-	IMPLEMENT_CLASS(ATeamArenaCharacter, 212888603);
+	IMPLEMENT_CLASS(ATeamArenaCharacter, 2687719762);
 	void UTeamArenaCharacterMovement::StaticRegisterNativesUTeamArenaCharacterMovement()
 	{
 	}
@@ -1299,6 +1299,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				UProperty* NewProp_CachedPredictionPC = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("CachedPredictionPC"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(CachedPredictionPC, ATeamArenaCharacter), 0x0020080000000000, Z_Construct_UClass_ATeamArenaPredictionPC_NoRegister());
+				UProperty* NewProp_SmoothedStabilityFactor = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SmoothedStabilityFactor"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(SmoothedStabilityFactor, ATeamArenaCharacter), 0x0010000000000000);
 				UProperty* NewProp_SpawnProtectionOpacity = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SpawnProtectionOpacity"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(SpawnProtectionOpacity, ATeamArenaCharacter), 0x0010000000010015);
 				UProperty* NewProp_SpawnProtectionColor = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SpawnProtectionColor"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(SpawnProtectionColor, ATeamArenaCharacter), 0x0010000000010015, Z_Construct_UScriptStruct_FLinearColor());
 				UProperty* NewProp_SpawnProtectionMaterial = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SpawnProtectionMaterial"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(SpawnProtectionMaterial, ATeamArenaCharacter), 0x0010000000010015, Z_Construct_UClass_UMaterialInterface_NoRegister());
@@ -1314,6 +1315,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				MetaData->SetValue(OuterClass, TEXT("ToolTip"), TEXT("Enhanced character that uses split prediction for movement.\n\nKey change: OnRep_ReplicatedMovement() uses GetVisualPredictionTime()\ninstead of GetPredictionTime() for client-side extrapolation.\n\nThis eliminates the \"dual hitbox\" bug where enemies appear to have\ndifferent positions visually vs where the server validates hits.\n\nVisual position (predict 0) \x2248 Server position (now)\nHit validation (predict 120) \x2248 What shooter saw when they fired"));
 				MetaData->SetValue(NewProp_CachedPredictionPC, TEXT("ModuleRelativePath"), TEXT("Public/TeamArenaCharacter.h"));
 				MetaData->SetValue(NewProp_CachedPredictionPC, TEXT("ToolTip"), TEXT("Cached reference to viewing controller (for performance).\nUpdated when controller changes."));
+				MetaData->SetValue(NewProp_SmoothedStabilityFactor, TEXT("ModuleRelativePath"), TEXT("Public/TeamArenaCharacter.h"));
 				MetaData->SetValue(NewProp_SpawnProtectionOpacity, TEXT("Category"), TEXT("Spawn Protection"));
 				MetaData->SetValue(NewProp_SpawnProtectionOpacity, TEXT("ClampMax"), TEXT("1.0"));
 				MetaData->SetValue(NewProp_SpawnProtectionOpacity, TEXT("ClampMin"), TEXT("0.0"));
@@ -3105,7 +3107,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			ReturnPackage = CastChecked<UPackage>(StaticFindObjectFast(UPackage::StaticClass(), NULL, FName(TEXT("/Script/NetcodePlus")), false, false));
 			ReturnPackage->SetPackageFlags(PKG_CompiledIn | 0x00000000);
 			FGuid Guid;
-			Guid.A = 0x77A03D6F;
+			Guid.A = 0x6CA64D66;
 			Guid.B = 0x5A2FD302;
 			Guid.C = 0x00000000;
 			Guid.D = 0x00000000;

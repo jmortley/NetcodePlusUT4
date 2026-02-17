@@ -24,4 +24,5 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	// The new "Tick": Called explicitly when a valid RPC arrives
 	virtual void TransactionalFire();
+	virtual void PutDown() override;
 };

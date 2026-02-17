@@ -121,6 +121,7 @@ public:
     virtual FRotator GetBaseFireRotation() override;
     virtual void BringUp(float OverflowTime) override;
     void ClearPendingFakeProjectiles();
+    void DeferredGotoActiveState();
     //~ End AUTWeapon Interface
     UPROPERTY()
     TArray<float> LastFireTime;
@@ -159,6 +160,7 @@ protected:
     FTimerHandle RetryFireHandle[2];
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
+    FTimerHandle DeferredActiveStateHandle;
     /**
  * Server-side authoritative fire event index for each fire mode.
  * This is the ground truth that clients must sync to.

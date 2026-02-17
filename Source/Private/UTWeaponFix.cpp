@@ -1123,11 +1123,43 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     CachedTransactionalRotation = FRotator::ZeroRotator;
     // 3. FORCE STATE EXIT (Critical for Transactional Logic)
     // Since the server has no timer loop to transition naturally, 
-    // we must force it back to 'Active' (Idle) immediately.
+    /* we must force it back to 'Active' (Idle)immediately.
     if (GetCurrentState() == FiringState[FireModeNum])
     {
         GotoActiveState();
     }
+    */
+    // Only apply deferred exit if we are actually in the state associated with this mode
+    if (GetCurrentState() == FiringState[FireModeNum])
+    {
+        float CurrentTime = GetWorld()->GetTimeSeconds();
+        float ReadyTime = 0.f;
+
+        if (LastFireTime.IsValidIndex(FireModeNum))
+        {
+            ReadyTime = LastFireTime[FireModeNum] + GetRefireTime(FireModeNum);
+        }
+
+        float TimeRemaining = ReadyTime - CurrentTime;
+
+        if (TimeRemaining > 0.01f) // Small epsilon to prevent pointless 1-frame timers
+        {
+            // STAY in FiringState.
+            // This allows the PutDown override (Part A) to function correctly if called now.
+
+            // Set safety timer to exit state once cooldown finishes
+            FTimerDelegate Del;
+            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState);
+            GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
+        }
+        else
+        {
+            // Cooldown finished, exit immediately
+            GotoActiveState();
+        }
+    }
+
+
 
     TargetedCharacter = nullptr; // Clear Weapon's cached target
     if (UTOwner && UTOwner->Controller)
@@ -1142,6 +1174,15 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 }
 
 
+
+void AUTWeaponFix::DeferredGotoActiveState()
+{
+    if (GetCurrentState() != ActiveState && GetCurrentState() != UnequippingState
+        && GetCurrentState() != InactiveState && GetCurrentState() != EquippingState)
+    {
+        GotoActiveState();
+    }
+}
 
 
 bool AUTWeaponFix::ServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
@@ -2149,6 +2190,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
 void AUTWeaponFix::DetachFromOwner_Implementation()
 {
+    GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
     // Safety: Kill timers if the weapon is destroyed or dropped
     for (int32 i = 0; i < 2; i++)
@@ -2163,137 +2205,9 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
 
 
 
-/*
 bool AUTWeaponFix::PutDown()
 {
-    // 0. Stock Safety Check
-    if (eventPreventPutDown())
-    {
-        return false;
-    }
-
-    // 1. If we are already waiting for a delayed putdown, return TRUE.
-    // This tells the system "We are handling it, set the PendingWeapon and wait."
-    if (GetWorldTimerManager().IsTimerActive(DelayedPutDownHandle))
-    {
-        return true;
-    }
-
-    // 2. Transactional Delay Logic (Client & Server)
-    float CurrentTime = GetWorld()->GetTimeSeconds();
-    float MaxRequiredDelay = 0.f;
-
-    if (CurrentState && CurrentState->IsFiring())
-    {
-        for (int32 i = 0; i < LastFireTime.Num(); i++)
-        {
-            if (LastFireTime[i] > 0.f)
-            {
-                float ReadyTime = LastFireTime[i] + GetRefireTime(i);
-                float TimeRemaining = ReadyTime - CurrentTime;
-
-                if (TimeRemaining > 0.f)
-                {
-                    float Penalty = TimeRemaining * RefirePutDownTimePercent;
-                    if (Penalty > MaxRequiredDelay)
-                    {
-                        MaxRequiredDelay = Penalty;
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Case A: Penalty Exists. Defer logic, but Accept Command.
-    if (MaxRequiredDelay > GetPutDownTime())
-    {
-        float WaitDuration = MaxRequiredDelay - GetPutDownTime();
-
-        GetWorldTimerManager().SetTimer(DelayedPutDownHandle, this, &AUTWeaponFix::PutDownDelayed, WaitDuration, false);
-
-        // Instant visual feedback (optional but recommended)
-        SetZoomState(EZoomState::EZS_NotZoomed);
-        if (ActiveCrosshair == nullptr)
-        {
-            ActiveCrosshair = nullptr;
-        }
-
-        return true; // Accept the switch!
-    }
-
-    // 4. Case B: Proceed with Standard PutDown
-    // --- CRITICAL FIX START: PRESERVE FIRING INPUT ---
-    // Capture intent BEFORE calling Super, just in case Super clears it.
-    bool bUserWasFiring[2] = { false, false };
-    if (UTOwner)
-    {
-        for (int32 i = 0; i < 2; i++)
-        {
-            // We save intent if:
-            // A) The user is physically holding the button (IsPendingFire)
-            // B) The user queued a shot in our retry system (IsTimerActive)
-            if (UTOwner->IsPendingFire(i) || GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]))
-            {
-                bUserWasFiring[i] = true;
-            }
-        }
-    }
-
-    bool bPutDownResult = Super::PutDown();
-
-    // 5. Post-PutDown Fixes
-    if (bPutDownResult)
-    {
-        // Fix EarliestFireTime penalty
-        if (MaxRequiredDelay > 0.f)
-        {
-            EarliestFireTime = FMath::Max(EarliestFireTime, CurrentTime + MaxRequiredDelay);
-        }
-
-        // --- CRITICAL FIX: RESTORE FIRING INPUT ---
-        if (UTOwner)
-        {
-            for (int32 i = 0; i < 2; i++)
-            {
-                // If they were firing before, FORCE it to remain true.
-                // This bridges the gap to the next weapon.
-                if (bUserWasFiring[i])
-                {
-                    UTOwner->SetPendingFire(i, true);
-                    UE_LOG(LogUTWeaponFix, Verbose, TEXT("PutDown: Preserving fire input for mode %d"), i);
-                }
-            }
-        }
-
-        // Cleanup
-        for (int32 i = 0; i < 2; i++)
-        {
-            GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
-        }
-        CurrentlyFiringMode = 255;
-        for (int32 i = 0; i < FireModeActiveState.Num(); i++)
-        {
-            FireModeActiveState[i] = 0;
-        }
-        ClearPendingFakeProjectiles();
-    }
-    // --- CRITICAL FIX END ---
-
-    return bPutDownResult;
-}
-
-void AUTWeaponFix::PutDownDelayed()
-{
-    // Simply call PutDown again.
-    // The delay check will now fail (MaxRequiredDelay <= GetPutDownTime),
-    // causing it to fall through to Super::PutDown().
-    PutDown();
-}
-
-*/
-
-bool AUTWeaponFix::PutDown()
-{
+    GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     // 1. Try to put the weapon down via the base class
     bool bPutDownResult = Super::PutDown();
     // 2. If it succeeded, kill the timers immediately.

@@ -85,6 +85,65 @@ void UUTWeaponStateFiring_Transactional::EndState()
 
 
 
+void UUTWeaponStateFiring_Transactional::PutDown()
+{
+	// Ensure any delayed logic (like pending replicated shots) is processed first
+	HandleDelayedShot();
+
+	AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
+	if (!W)
+	{
+		Super::PutDown();
+		return;
+	}
+
+	// 1. Calculate cooldown using timestamps (Works on Server & Client)
+	float TimeRemaining = 0.f;
+	uint8 Mode = GetOuterAUTWeapon()->GetCurrentFireMode();
+
+	// Check LastFireTime to determine when the weapon is actually ready
+	if (W->LastFireTime.IsValidIndex(Mode) && W->LastFireTime[Mode] > 0.f)
+	{
+		float ReadyTime = W->LastFireTime[Mode] + GetOuterAUTWeapon()->GetRefireTime(Mode);
+		TimeRemaining = FMath::Max(0.f, ReadyTime - GetWorld()->GetTimeSeconds());
+	}
+
+	// 2. Calculate the penalty overlap
+	// (If the cooldown is longer than the PutDown animation, we must wait)
+	float TimeTillPutDown = TimeRemaining * GetOuterAUTWeapon()->RefirePutDownTimePercent;
+
+	if (TimeTillPutDown <= GetOuterAUTWeapon()->GetPutDownTime())
+	{
+		// CASE A: Cooldown is short enough to be hidden by the PutDown animation.
+		// We can start unequipping immediately, but we set a flag (EarliestFireTime)
+		// to prevent the *next* weapon from firing until this penalty is paid.
+
+		GetOuterAUTWeapon()->EarliestFireTime = GetWorld()->GetTimeSeconds() + TimeTillPutDown;
+
+		// CRITICAL: Call UUTWeaponState::PutDown (Grandparent).
+		// We skip UUTWeaponStateFiring::PutDown (Parent) entirely because it relies
+		// on the broken RefireCheckTimer logic.
+		UUTWeaponState::PutDown();
+	}
+	else
+	{
+		// CASE B: Cooldown is too long. We must physically wait before lowering the weapon.
+		float WaitDuration = TimeTillPutDown - GetOuterAUTWeapon()->GetPutDownTime();
+
+		// Schedule this function to run again exactly when the wait is over.
+		// When it runs again, TimeRemaining will be smaller, falling into Case A.
+		GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+			PutDownHandle,
+			this,
+			&UUTWeaponStateFiring_Transactional::PutDown, // Correct callback
+			WaitDuration,
+			false
+		);
+	}
+}
+
+
+
 
 void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 {

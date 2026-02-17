@@ -8,6 +8,7 @@
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
 #include "UTGameState.h"
+#include "UTWeap_LinkGun.h"
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -124,8 +125,8 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 		FVector OldVelocity = GetVelocity();
 
 		UTCharacterMovement->SimulatedVelocity = NewVelocity;
-		float NoSmoothThreshold = UTCharacterMovement->NetworkNoSmoothUpdateDistance; 
-		float SmoothThreshold = UTCharacterMovement->NetworkMaxSmoothUpdateDistance;  
+		float NoSmoothThreshold = UTCharacterMovement->NetworkNoSmoothUpdateDistance;
+		float SmoothThreshold = UTCharacterMovement->NetworkMaxSmoothUpdateDistance;
 		// If location changed or just spawned...
 		if ((NewLocation != GetActorLocation()) || (CreationTime == GetWorld()->TimeSeconds))
 		{
@@ -149,17 +150,7 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 
 				float PredictionTime = 0.0f;
 
-				// --- A. VELOCITY AGREEMENT CHECK (Fixes ADAD Spam) ---
-				// Only predict if Client and Server roughly agree on direction.
-				// If they are moving opposite directions (ADAD spam), DotProduct will be negative.
-				// We disable prediction in that case to prevent "Overshoot Jitter."
-				float VelocityDot = OldVelocity.GetSafeNormal() | NewVelocity.GetSafeNormal();
-				//bool bStableDirection = (VelocityDot > 0.0f); // True if moving roughly same direction
-				// Require opposite direction to disable, not just perpendicular
-				bool bStableDirection = (VelocityDot > -0.3f);
-
-
-				if (bStableDirection && GetNetMode() != NM_DedicatedServer)
+				if (GetNetMode() != NM_DedicatedServer)
 				{
 					APlayerController* LocalPC = GEngine ? GEngine->GetFirstLocalPlayerController(GetWorld()) : nullptr;
 					if (LocalPC && LocalPC->GetPawn())
@@ -167,37 +158,45 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 						ATeamArenaCharacter* ViewerChar = Cast<ATeamArenaCharacter>(LocalPC->GetPawn());
 						if (ViewerChar)
 						{
-							PredictionTime = ViewerChar->GetClientVisualPredictionTime();
+							float BasePrediction = ViewerChar->GetClientVisualPredictionTime();
+
+							if (BasePrediction > 0.0f)
+							{
+								// --- ADAPTIVE SCALING (replaces binary bStableDirection) ---
+								float VelocityDot = OldVelocity.GetSafeNormal() | NewVelocity.GetSafeNormal();
+
+								// Map dot [-1, 1] -> scale [0, 1]
+								// -1 (opposite dir) = 0% prediction
+								//  0 (perpendicular) = ~50% prediction
+								// +1 (same dir)      = 100% prediction
+								float StabilityFactor = FMath::Clamp((VelocityDot + 1.0f) * 0.5f, 0.0f, 1.0f);
+
+								// Smooth the factor itself to prevent frame-to-frame flickering
+								// Rate 6.0 = converges in roughly 150-200ms
+								SmoothedStabilityFactor = FMath::FInterpTo(
+									SmoothedStabilityFactor, StabilityFactor,
+									GetWorld()->GetDeltaSeconds(), 6.0f);
+
+								PredictionTime = BasePrediction * SmoothedStabilityFactor;
+							}
 						}
 					}
 				}
 
-				// --- B. RUN SIMULATION & TETHER ---
-				if (PredictionTime > 0.0f)
+				// --- RUN SIMULATION & TETHER ---
+				if (PredictionTime > 0.005f)
 				{
 					// 1. Simulate Forward
 					UTCharacterMovement->UTSimulateMovement(PredictionTime);
 
-					// 2. THE TETHER (Clamp Max Distance)
-					// Even with valid prediction, don't let the visual ghost get too far 
-					// from the Server Reality. This stops "Warps".
+					// 2. Tether (unchanged)
 					FVector PredictedLocation = GetActorLocation();
-					FVector ErrorDelta = PredictedLocation - NewLocation; // Difference between Predict & Server
-					//float MaxDistance = 40.0f; // 40 units (Capsule Radius) is a safe limit
-					// Dynamic tether based on velocity and prediction time
+					FVector ErrorDelta = PredictedLocation - NewLocation;
 					float Speed = NewVelocity.Size();
-					float ExpectedDisplacement = Speed * PredictionTime;
-
-					// Allow full predicted displacement plus some tolerance for acceleration
-					float MaxDistance = ExpectedDisplacement;
-
-					// Hard cap to prevent insane values on bad data
-					//MaxDistance = FMath::Clamp(MaxDistance, 40.0f, 150.0f);
-					MaxDistance = FMath::Clamp(Speed * PredictionTime, 40.0f, NoSmoothThreshold);
+					float MaxDistance = FMath::Clamp(Speed * PredictionTime, 40.0f, NoSmoothThreshold);
 
 					if (ErrorDelta.SizeSquared() > MaxDistance * MaxDistance)
 					{
-						// Pull them back towards the server position
 						FVector ClampedLocation = NewLocation + (ErrorDelta.GetSafeNormal() * MaxDistance);
 						SetActorLocation(ClampedLocation);
 					}
@@ -254,8 +253,9 @@ void ATeamArenaCharacter::FiringInfoUpdated()
     // --- FIX START: NULL-SAFE LOGIC ---
     bool bShouldPlayServerEffect = true;
 
+	//bool bIsSpectating = (UTPC != nullptr && UTPC->UTPlayerState && UTPC->UTPlayerState->bIsSpectator);
 
-    if (UTPC != nullptr && !bLocalFlashLoc && MyPredictionTime > 0.f && Controller != nullptr)
+    if (UTPC != nullptr && !bLocalFlashLoc && MyPredictionTime > 0.f)
     {
         bShouldPlayServerEffect = false;
     }
@@ -509,100 +509,7 @@ void ATeamArenaCharacter::BeginPlay()
 	}
 }
 
-/*
-void ATeamArenaCharacter::Tick(float DeltaTime)
-{
-	Super::Tick(DeltaTime);
 
-	// --- CASE 1: Active Spawn Protection ---
-	if (bSpawnProtectionEligible)
-	{
-		bHasSpawnOverlay = true;
-
-		// SERVER: Turn on the Shell (Replicates to everyone)
-		if (Role == ROLE_Authority && SpawnProtectionMaterial)
-		{
-			SetCharacterOverlayEffect(FOverlayEffect(SpawnProtectionMaterial), true);
-		}
-
-		// CLIENT: Handle Visuals & Team Filtering
-		if (GetNetMode() != NM_DedicatedServer)
-		{
-			// 1. Always Hide the Default Skin Effect (Cyan Pulse)
-			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
-			for (UMaterialInstanceDynamic* MI : BodyMIs)
-			{
-				if (MI) MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
-			}
-
-			// 2. Determine Visibility (Show Enemy Only)
-			bool bShowShell = true;
-			AUTPlayerController* LocalViewer = GetLocalViewer();
-			AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-
-			// If viewing a Teammate (or Self), HIDE the shell.
-			if (GS && LocalViewer && GS->OnSameTeam(this, LocalViewer))
-			{
-				bShowShell = false;
-			}
-
-			// 3. Apply Visuals to the Mesh
-			if (OverlayMesh)
-			{
-				if (bShowShell)
-				{
-					// --- ENEMY: Show & Color ---
-					if (OverlayMesh->bHiddenInGame)
-					{
-						OverlayMesh->SetHiddenInGame(false);
-					}
-
-					// Apply Color/Opacity to all materials
-					static FName NAME_Color(TEXT("Color"));
-					FLinearColor FinalColor = SpawnProtectionColor;
-					FinalColor.A = SpawnProtectionOpacity;
-
-					const int32 NumMaterials = OverlayMesh->GetNumMaterials();
-					for (int32 i = 0; i < NumMaterials; i++)
-					{
-						UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(i));
-						if (MID)
-						{
-							MID->SetVectorParameterValue(NAME_Color, FinalColor);
-						}
-					}
-				}
-				else
-				{
-					// --- TEAMMATE: Hide ---
-					if (!OverlayMesh->bHiddenInGame)
-					{
-						OverlayMesh->SetHiddenInGame(true);
-					}
-				}
-			}
-		}
-	}
-	// --- CASE 2: Cleanup ---
-	else if (bHasSpawnOverlay)
-	{
-		bHasSpawnOverlay = false;
-
-		// SERVER: Turn off effect
-		if (Role == ROLE_Authority && SpawnProtectionMaterial)
-		{
-			SetCharacterOverlayEffect(FOverlayEffect(SpawnProtectionMaterial), false);
-			UpdateArmorOverlay(); // Restore standard armor visuals
-		}
-
-		// CLIENT: Instant Reset
-		if (GetNetMode() != NM_DedicatedServer)
-		{
-			UpdateArmorOverlay();
-		}
-	}
-}
-*/
 
 
 
@@ -708,4 +615,20 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			}
 		}
 	}
+}
+
+
+void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
+{
+	Super::BecomeViewTarget(PC);
+
+
+	AUTWeap_LinkGun* LinkGun = Cast<AUTWeap_LinkGun>(Weapon);
+	if (LinkGun)
+	{
+		LinkGun->OverheatFactor = 0.0f;
+	}
+
+	// Clear any stuck audio on the pawn
+	SetAmbientSound(nullptr);
 }
