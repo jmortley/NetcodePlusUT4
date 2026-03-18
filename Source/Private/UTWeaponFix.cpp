@@ -67,7 +67,8 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
 	FudgeFactorMs = 20;
 	ProjectilePredictionCapMs = 120.0f;
     LastMultiPressTime = 0.f;
-    LastSpecialProjectileTime = 0.0f;
+    LastShockCoreSpawnTime = 0.0f;
+    LastFlakShellSpawnTime = 0.0f;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -754,21 +755,42 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     //    GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
     //}
 
-    EndFiringSequence(FireModeNum);
+    // Defer EndFiringSequence + GotoActiveState until cooldown elapses.
+    // This keeps the weapon in FiringState during cooldown so that if PutDown()
+    // is called (weapon switch), it routes to the cooldown-aware PutDown override
+    // in UUTWeaponStateFiring_Transactional instead of the default ActiveState path.
+    // Mirrors the server-side deferred logic in ServerStopFireFixed_Implementation.
     if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
     {
-        GotoActiveState();
-    }
-    // Critical Fix #4: Immediate state clearing
-    //UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Called for Mode %d. KEEPING TIMER ALIVE."), FireModeNum);
-    if (FireModeActiveState.IsValidIndex(FireModeNum))
-    {
-        FireModeActiveState[FireModeNum] = 0;
-    }
+        float CurrentTime = GetWorld()->GetTimeSeconds();
+        float ReadyTime = 0.f;
 
-    if (CurrentlyFiringMode == FireModeNum)
+        if (LastFireTime.IsValidIndex(FireModeNum))
+        {
+            ReadyTime = LastFireTime[FireModeNum] + GetRefireTime(FireModeNum);
+        }
+
+        float TimeRemaining = ReadyTime - CurrentTime;
+
+        if (TimeRemaining > 0.01f)
+        {
+            // Stay in FiringState — PutDown cooldown logic will work correctly.
+            // Schedule deferred exit once cooldown finishes.
+            FTimerDelegate Del;
+            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState);
+            GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
+        }
+        else
+        {
+            // Cooldown already elapsed — exit immediately.
+            EndFiringSequence(FireModeNum);
+            GotoActiveState();
+        }
+    }
+    else
     {
-        CurrentlyFiringMode = 255;
+        // Not in the firing state for this mode — just clean up.
+        EndFiringSequence(FireModeNum);
     }
 
     
@@ -989,7 +1011,10 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     {
         UTOwner->SetPendingFire(FireModeNum, true);
     }
-
+    // FIX: Cancel any deferred ActiveState transition from a previous stop.
+    // Without this, the old timer fires mid-sequence and triggers a ghost shot
+    // via ActiveState::BeginState's PendingFire auto-fire check.
+    GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     bIsTransactionalFire = true;
     // 3. EXECUTE FIRE (The New Logic)
 
@@ -1019,14 +1044,14 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     */
     if (UTOwner)
     {
-        bool bIsShockBallFire = ProjClass.IsValidIndex(FireModeNum) &&
-            ProjClass[FireModeNum] &&
-            ProjClass[FireModeNum]->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
+        //bool bIsShockBallFire = ProjClass.IsValidIndex(FireModeNum) &&
+        //    ProjClass[FireModeNum] &&
+        //    ProjClass[FireModeNum]->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
 
-        if (!bIsShockBallFire)
-        {
-            ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
-        }
+        //if (!bIsShockBallFire)
+        //{
+        ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
+        //}
     }
 }
 
@@ -1117,19 +1142,12 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     }
     // --- FIX END ---
 
-    // 2. Standard cleanup
-    EndFiringSequence(FireModeNum);
+    // 2. Clear transactional rotation state
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
-    // 3. FORCE STATE EXIT (Critical for Transactional Logic)
-    // Since the server has no timer loop to transition naturally, 
-    /* we must force it back to 'Active' (Idle)immediately.
-    if (GetCurrentState() == FiringState[FireModeNum])
-    {
-        GotoActiveState();
-    }
-    */
-    // Only apply deferred exit if we are actually in the state associated with this mode
+
+    // 3. Defer EndFiringSequence + GotoActiveState until cooldown elapses.
+    // Keeps weapon in FiringState so PutDown cooldown-aware override works.
     if (GetCurrentState() == FiringState[FireModeNum])
     {
         float CurrentTime = GetWorld()->GetTimeSeconds();
@@ -1142,24 +1160,26 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
         float TimeRemaining = ReadyTime - CurrentTime;
 
-        if (TimeRemaining > 0.01f) // Small epsilon to prevent pointless 1-frame timers
+        if (TimeRemaining > 0.01f)
         {
-            // STAY in FiringState.
-            // This allows the PutDown override (Part A) to function correctly if called now.
-
-            // Set safety timer to exit state once cooldown finishes
+            // STAY in FiringState — do NOT call EndFiringSequence yet.
+            // DeferredGotoActiveState will call EndFiringSequence when timer fires.
             FTimerDelegate Del;
             Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState);
             GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
         }
         else
         {
-            // Cooldown finished, exit immediately
+            // Cooldown finished — clean up and exit immediately.
+            EndFiringSequence(FireModeNum);
             GotoActiveState();
         }
     }
-
-
+    else
+    {
+        // Not in the firing state for this mode — just clean up.
+        EndFiringSequence(FireModeNum);
+    }
 
     TargetedCharacter = nullptr; // Clear Weapon's cached target
     if (UTOwner && UTOwner->Controller)
@@ -1178,8 +1198,11 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 void AUTWeaponFix::DeferredGotoActiveState()
 {
     if (GetCurrentState() != ActiveState && GetCurrentState() != UnequippingState
-        && GetCurrentState() != InactiveState && GetCurrentState() != EquippingState)
+        && GetCurrentState() != InactiveState)
     {
+        // EndFiringSequence was deferred along with the state transition.
+        // Clean up firing effects/state before going idle.
+        EndFiringSequence(CurrentFireMode);
         GotoActiveState();
     }
 }
@@ -1487,20 +1510,15 @@ FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
     // This relies on the controller's view rotation, not a cached target.
     FRotator BaseAim;
 
-    // 1. USE TRANSACTIONAL ROTATION
-    // If we are processing a Transactional Shot (bIsTransactionalFire is set in ServerStartFireFixed),
-    // use the explicit rotation provided by the client.
     if (Role == ROLE_Authority && bIsTransactionalFire)
     {
-		BaseAim = CachedTransactionalRotation;
+        BaseAim = CachedTransactionalRotation;
 
-
-
-		if (BaseAim.IsZero())
-		{
-			BaseAim = GetBaseFireRotation();
-			UE_LOG(LogTemp, Error, TEXT("Cached was zero, using base: %s"), *BaseAim.ToString());
-		}
+        // Sanity Check: If zero (e.g. from old packet), fall back to standard
+        if (BaseAim.IsZero())
+        {
+            BaseAim = GetBaseFireRotation();
+        }
     }
     else
     {
@@ -1600,18 +1618,25 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     bool bIsFlakShell = ProjectileClass &&
         (ProjectileClass->GetName().Contains(TEXT("FlakShell")) ||
             ProjectileClass->GetName().Contains(TEXT("Shell")));
-    if (bIsShockCore || bIsFlakShell)
+    // Anti-duplicate guards: each type has its own timestamp so fast weapon-switching
+    // cannot block a legitimate first-fire on the other weapon type.
+    if (bIsShockCore)
     {
-        // Removed: static float LastSpecialSpawnTime = 0.0f;
-
         float CurrentTime = GetWorld()->GetTimeSeconds();
-
-        // Use member variable 'LastSpecialProjectileTime'
-        if (CurrentTime - LastSpecialProjectileTime < 0.2f)
+        if (CurrentTime - LastShockCoreSpawnTime < 0.2f)
         {
             return nullptr;
         }
-        LastSpecialProjectileTime = CurrentTime;
+        LastShockCoreSpawnTime = CurrentTime;
+    }
+    else if (bIsFlakShell)
+    {
+        float CurrentTime = GetWorld()->GetTimeSeconds();
+        if (CurrentTime - LastFlakShellSpawnTime < 0.2f)
+        {
+            return nullptr;
+        }
+        LastFlakShellSpawnTime = CurrentTime;
     }
 	bool bIsShellOrRocket = ProjectileClass &&
 		(ProjectileClass->GetName().Contains(TEXT("Shell")) ||
@@ -1729,6 +1754,21 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
         
     }
     NewProjectile->FinishSpawning(FTransform(SpawnRotation, SpawnLocation));
+
+    // CRITICAL: Explicitly enforce velocity to match SpawnRotation.
+    // SpawnActorDeferred + FinishSpawning does not reliably propagate the spawn
+    // rotation to ProjectileMovement->Velocity. The movement component may
+    // initialize from the instigator's current rotation (stale on server) instead
+    // of the projectile's own spawn rotation. At 400+ FPS this causes projectiles
+    // to travel in the wrong direction (stale aim), and shock cores to appear twice
+    // (client fake correct, server auth wrong).
+    if (NewProjectile->ProjectileMovement && NewProjectile->ProjectileMovement->InitialSpeed > 0.f)
+    {
+        FVector CorrectVelocity = SpawnRotation.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
+        NewProjectile->ProjectileMovement->Velocity = CorrectVelocity;
+        NewProjectile->ProjectileMovement->UpdateComponentVelocity();
+    }
+
 	// ----------------------------------------
 	// 5) Visual offsets (weapon hand)
 	// ----------------------------------------
@@ -1782,13 +1822,9 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			// =========================================================================
 
 			FVector CatchupStart = SpawnLocation;
-			FVector CatchupVelocity = NewProjectile->ProjectileMovement->Velocity;
-            //FVector CatchupVelocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
-
-			if (CatchupVelocity.IsZero())
-			{
-				CatchupVelocity = SpawnRotation.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
-			}
+			// Use SpawnRotation directly — velocity was already enforced after FinishSpawning,
+			// but deriving from SpawnRotation is authoritative and avoids any edge cases.
+			FVector CatchupVelocity = SpawnRotation.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
 			FVector CatchupEnd = CatchupStart + (CatchupVelocity * CatchupTickDelta);
 
 			// Get projectile's effective hit detection radius
@@ -1809,74 +1845,81 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 				ProjHitRadius = 10.f;
 			}
 
-			// Optimize Search Area
+			// Optimize Search Area — expanded to 350 to cover dodge-speed targets
+			// (1700 u/s * 60ms = 102u, plus capsule radius)
 			FVector MinVec = CatchupStart.ComponentMin(CatchupEnd);
 			FVector MaxVec = CatchupStart.ComponentMax(CatchupEnd);
 			FBox PathBounds(MinVec, MaxVec);
-			PathBounds = PathBounds.ExpandBy(200.0f);
-			const float MaxRewindTime = 0.1f;
-			float RewindTime = FMath::Min(CatchupTickDelta, MaxRewindTime);
+			PathBounds = PathBounds.ExpandBy(350.0f);
+
+			// CatchupTickDelta is already capped by ProjectilePredictionCapMs (120ms -> 60ms half-RTT).
+			// No additional cap needed.
+			float RewindTime = CatchupTickDelta;
 			bool bHitRegistered = false;
 
-			for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+			// =========================================================================
+			// MULTI-TIME-SAMPLE REWIND CHECK
+			//
+			// Same pattern as hitscan (HitScanTrace lines 1378-1454): if the primary
+			// rewind time misses, try nearby timestamps. This handles clock drift and
+			// SavedPosition gaps without expanding hitboxes (no ghost hits).
+			// =========================================================================
+			static const float RewindOffsets[] = { 0.0f, 0.015f, -0.015f, 0.030f, -0.030f };
+			static const int32 NumRewindSamples = UE_ARRAY_COUNT(RewindOffsets);
+
+			for (int32 SampleIdx = 0; SampleIdx < NumRewindSamples && !bHitRegistered; ++SampleIdx)
 			{
-				AUTCharacter* Target = Cast<AUTCharacter>(*It);
+				float SampleRewindTime = FMath::Max(0.0f, RewindTime + RewindOffsets[SampleIdx]);
+				// Skip duplicate zero-offset samples
+				if (SampleIdx > 0 && SampleRewindTime <= 0.0f) continue;
 
-				if (Target && Target != UTOwner && !Target->IsDead() &&
-					PathBounds.IsInside(Target->GetActorLocation()))
+				for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 				{
-					// Skip teammates
-					if (GS && GS->OnSameTeam(UTOwner, Target)) continue;
+					AUTCharacter* Target = Cast<AUTCharacter>(*It);
 
-					// 1. REWIND: Where was the target when the client fired?
-					//FVector RewoundLoc = Target->GetRewindLocation(CatchupTickDelta);
-					FVector RewoundLoc = Target->GetRewindLocation(RewindTime);
-					// 2. GEOMETRY: Construct Rewound Capsule centerline
-					float CapRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
-					float CapHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-
-					FVector CapsuleTop = RewoundLoc + FVector(0, 0, CapHeight - CapRadius);
-					FVector CapsuleBot = RewoundLoc - FVector(0, 0, CapHeight - CapRadius);
-
-					// 3. MATH: Find closest points between projectile path and capsule centerline
-					FVector PointOnPath, PointOnCapsule;
-					FMath::SegmentDistToSegmentSafe(
-						CatchupStart, CatchupEnd,
-						CapsuleBot, CapsuleTop,
-						PointOnPath, PointOnCapsule
-					);
-
-					float DistSqr = FVector::DistSquared(PointOnPath, PointOnCapsule);
-
-					// 4. COLLISION CHECK: Replicate what the actual collision system would do
-					// Combined radius = capsule surface + projectile hit detection sphere
-					float CombinedRadius = CapRadius + ProjHitRadius;
-
-					if (DistSqr < (CombinedRadius * CombinedRadius))
+					if (Target && Target != UTOwner && !Target->IsDead() &&
+						PathBounds.IsInside(Target->GetActorLocation()))
 					{
-						// Construct hit location on capsule surface
-						FVector DirToPath = (PointOnPath - PointOnCapsule).GetSafeNormal();
-						FVector HitLocation = PointOnCapsule + (DirToPath * CapRadius);
-						FVector HitNormal = (CatchupStart - CatchupEnd).GetSafeNormal();
+						// Skip teammates
+						if (GS && GS->OnSameTeam(UTOwner, Target)) continue;
 
-						// =========================================================
-						// CRITICAL: Use ProcessHit, not Explode
-						// 
-						// ProcessHit correctly handles ALL projectile types:
-						// - Calls DamageImpactedActor() for direct damage
-						// - Sets ImpactedActor to avoid double-damage
-						// - Then calls Explode() for splash/visuals
-						// 
-						// Direct damage projectiles (flak shards, OuterRadius = 0):
-						//   -> FUTPointDamageEvent
-						// 
-						// Splash damage projectiles (rockets, OuterRadius > 0):
-						//   -> FUTRadialDamageEvent + radial splash
-						// =========================================================
-						NewProjectile->ProcessHit(Target, Target->GetCapsuleComponent(), HitLocation, HitNormal);
+						// 1. REWIND: Where was the target when the client fired?
+						FVector RewoundLoc = Target->GetRewindLocation(SampleRewindTime);
 
-						bHitRegistered = true;
-						break;
+						// 2. GEOMETRY: Construct Rewound Capsule centerline
+						float CapRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+						float CapHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+
+						FVector CapsuleTop = RewoundLoc + FVector(0, 0, CapHeight - CapRadius);
+						FVector CapsuleBot = RewoundLoc - FVector(0, 0, CapHeight - CapRadius);
+
+						// 3. MATH: Find closest points between projectile path and capsule centerline
+						FVector PointOnPath, PointOnCapsule;
+						FMath::SegmentDistToSegmentSafe(
+							CatchupStart, CatchupEnd,
+							CapsuleBot, CapsuleTop,
+							PointOnPath, PointOnCapsule
+						);
+
+						float DistSqr = FVector::DistSquared(PointOnPath, PointOnCapsule);
+
+						// 4. COLLISION CHECK: exact capsule dimensions (no expansion)
+						float CombinedRadius = CapRadius + ProjHitRadius;
+
+						if (DistSqr < (CombinedRadius * CombinedRadius))
+						{
+							FVector DirToPath = (PointOnPath - PointOnCapsule).GetSafeNormal();
+							FVector HitLocation = PointOnCapsule + (DirToPath * CapRadius);
+							FVector HitNormal = (CatchupStart - CatchupEnd).GetSafeNormal();
+
+							// ProcessHit handles all projectile types correctly:
+							// direct damage (flak: FUTPointDamageEvent) and
+							// splash damage (rockets: FUTRadialDamageEvent)
+							NewProjectile->ProcessHit(Target, Target->GetCapsuleComponent(), HitLocation, HitNormal);
+
+							bHitRegistered = true;
+							break;
+						}
 					}
 				}
 			}
@@ -1886,13 +1929,59 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			{
 				const float ScaledDelta = CatchupTickDelta * NewProjectile->CustomTimeDilation;
 
-				if (NewProjectile->PrimaryActorTick.IsTickFunctionEnabled())
-				{
-					NewProjectile->TickActor(ScaledDelta, LEVELTICK_All, NewProjectile->PrimaryActorTick);
-				}
-
+				// FIX: Only tick ProjectileMovement, NOT TickActor.
+				// TickActor ticks all components (including ProjectileMovement), so calling
+				// both TickActor + TickComponent moves the projectile at 2x speed, causing
+				// tunneling and overshooting. ProjectileMovement::TickComponent handles
+				// substeps internally via MaxSimulationTimeStep.
+				NewProjectile->ProjectileMovement->MaxSimulationTimeStep = 1.f / 240.f;
 				NewProjectile->ProjectileMovement->TickComponent(ScaledDelta, LEVELTICK_All, nullptr);
 				NewProjectile->SetForwardTicked(true);
+
+				// =========================================================================
+				// POST-FAST-FORWARD OVERLAP CHECK
+				//
+				// Catches mid-range hits where the spawn-time rewind check missed because
+				// the projectile hadn't reached the target yet. Now that the projectile has
+				// been fast-forwarded, check if its new position overlaps a rewound capsule.
+				// Uses exact capsule dimensions (no expansion) — just checks at a new point.
+				// =========================================================================
+				FVector PostTickLoc = NewProjectile->GetActorLocation();
+				for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+				{
+					AUTCharacter* Target = Cast<AUTCharacter>(*It);
+					if (Target && Target != UTOwner && !Target->IsDead())
+					{
+						if (GS && GS->OnSameTeam(UTOwner, Target)) continue;
+
+						FVector RewoundLoc = Target->GetRewindLocation(RewindTime);
+						float CapRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+						float CapHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+
+						// Point-to-capsule distance check
+						FVector CapsuleTop = RewoundLoc + FVector(0, 0, CapHeight - CapRadius);
+						FVector CapsuleBot = RewoundLoc - FVector(0, 0, CapHeight - CapRadius);
+						FVector ClosestOnCapsule = FMath::ClosestPointOnSegment(PostTickLoc, CapsuleBot, CapsuleTop);
+						float DistSqr = FVector::DistSquared(PostTickLoc, ClosestOnCapsule);
+
+						float CombinedRadius = CapRadius + ProjHitRadius;
+						if (DistSqr < (CombinedRadius * CombinedRadius))
+						{
+							FVector DirToProj = (PostTickLoc - ClosestOnCapsule).GetSafeNormal();
+							FVector HitLocation = ClosestOnCapsule + (DirToProj * CapRadius);
+							FVector HitNormal = -CatchupVelocity.GetSafeNormal();
+
+							NewProjectile->ProcessHit(Target, Target->GetCapsuleComponent(), HitLocation, HitNormal);
+							bHitRegistered = true;
+							break;
+						}
+					}
+				}
+
+				if (bHitRegistered)
+				{
+					return nullptr;
+				}
 
 				if (NewProjectile->GetLifeSpan() > 0.f)
 				{

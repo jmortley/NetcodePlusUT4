@@ -18,10 +18,10 @@ public:
         // --- FIX: Set variables directly in constructor instead of overriding functions ---
 
         // Default is 92.f. Increase to allow larger smooth corrections.
-        MaxSmoothNetUpdateDist = 92.f;
+        MaxSmoothNetUpdateDist = 108.f;
 
         // Default is 140.f. Increase to prevent snapping on medium corrections.
-        NoSmoothNetUpdateDist = 140.f;
+        NoSmoothNetUpdateDist = 166.f;
     }
 
     typedef FNetworkPredictionData_Client_UTChar Super;
@@ -32,16 +32,23 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    MaxPositionErrorSquared = 10.f;
+    // 6 units (was 3.16). Absorbs minor velocity prediction errors at 400+ FPS
+    // without masking real desyncs (cheats/packet loss still exceed 6u).
+    MaxPositionErrorSquared = 36.f;
 
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.0167f;  // instead of fps dependent
     LastTeamCollisionUpdateTime = -1.0f;  // Force immediate first update
-	MinTimeBetweenClientAdjustments = 0.09f;  //stock 0.1f
-	LargeCorrectionThreshold = 20.f;  //stock 15.f
+    // 50ms (was 100ms). At 400 FPS, halves accumulated prediction error per
+    // correction (20 predicted frames instead of 40). Negligible bandwidth cost.
+	MinTimeBetweenClientAdjustments = 0.05f;
+    // 40 units (was 15). Rocket knockback at 400+ FPS produces 20-35u corrections.
+    // These now smooth-blend instead of hard-snapping. At 60 FPS corrections are
+    // typically <15u so behavior is unchanged.
+	LargeCorrectionThreshold = 40.f;
     // --- HIGH-FPS FIX #2: Dodge timing tolerance ---
     // Prevents server rejection when client/server timestamps differ by microseconds
-    DodgeCooldownTolerance = 0.08f;
+    DodgeCooldownTolerance = 0.1f;
 }
 
 FNetworkPredictionData_Client* UTeamArenaCharacterMovement::GetPredictionData_Client() const

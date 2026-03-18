@@ -137,7 +137,9 @@ public:
     bool bIsTransactionalFire;
     float LastMultiPressTime;
     UPROPERTY()
-    float LastSpecialProjectileTime;
+    float LastShockCoreSpawnTime;
+    UPROPERTY()
+    float LastFlakShellSpawnTime;
     //UPROPERTY()
     //TWeakObjectPtr<AUTProjectile> PendingFakeProjectile;
 
