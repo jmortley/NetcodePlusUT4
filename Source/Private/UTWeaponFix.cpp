@@ -776,8 +776,10 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         {
             // Stay in FiringState — PutDown cooldown logic will work correctly.
             // Schedule deferred exit once cooldown finishes.
+            // Capture FireModeNum now so EndFiringSequence cleans up the right mode
+            // even if the player switches fire modes before the timer fires.
             FTimerDelegate Del;
-            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState);
+            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
             GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
         }
         else
@@ -1164,8 +1166,9 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
         {
             // STAY in FiringState — do NOT call EndFiringSequence yet.
             // DeferredGotoActiveState will call EndFiringSequence when timer fires.
+            // Capture FireModeNum now so the correct mode is cleaned up later.
             FTimerDelegate Del;
-            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState);
+            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
             GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
         }
         else
@@ -1195,13 +1198,15 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
 
 
-void AUTWeaponFix::DeferredGotoActiveState()
+void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
 {
     // Always clean up firing sequence state — EndFiringSequence clears
     // PendingFire and effects, which must run even if we are already unequipping.
-    if (CurrentFireMode < GetNumFireModes())
+    // FireModeNum was captured at timer-set time so it's the correct mode even if
+    // the player switched fire modes between StopFire and timer expiry.
+    if (FireModeNum < GetNumFireModes())
     {
-        EndFiringSequence(CurrentFireMode);
+        EndFiringSequence(FireModeNum);
     }
 
     // Only transition to ActiveState if we are actually still in a firing state.

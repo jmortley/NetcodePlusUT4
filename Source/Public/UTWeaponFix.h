@@ -121,7 +121,7 @@ public:
     virtual FRotator GetBaseFireRotation() override;
     virtual void BringUp(float OverflowTime) override;
     void ClearPendingFakeProjectiles();
-    void DeferredGotoActiveState();
+    void DeferredGotoActiveState(uint8 FireModeNum);
     //~ End AUTWeapon Interface
     UPROPERTY()
     TArray<float> LastFireTime;
