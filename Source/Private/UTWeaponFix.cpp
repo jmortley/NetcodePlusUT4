@@ -1877,7 +1877,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			// SavedPosition gaps without expanding hitboxes (no ghost hits).
 			// =========================================================================
 			static const float RewindOffsets[] = { 0.0f, 0.015f, -0.015f, 0.030f, -0.030f };
-			static const int32 NumRewindSamples = UE_ARRAY_COUNT(RewindOffsets);
+			static const int32 NumRewindSamples = ARRAY_COUNT(RewindOffsets);
 
 			for (int32 SampleIdx = 0; SampleIdx < NumRewindSamples && !bHitRegistered; ++SampleIdx)
 			{
