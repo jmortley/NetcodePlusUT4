@@ -1635,8 +1635,10 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     if (bIsShockCore)
     {
         float CurrentTime = GetWorld()->GetTimeSeconds();
-        if (CurrentTime - LastShockCoreSpawnTime < 0.2f)
+        float TimeSinceLast = CurrentTime - LastShockCoreSpawnTime;
+        if (TimeSinceLast < 0.2f)
         {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("ShockCore anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
             return nullptr;
         }
         LastShockCoreSpawnTime = CurrentTime;
