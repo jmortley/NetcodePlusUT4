@@ -1197,12 +1197,19 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
 void AUTWeaponFix::DeferredGotoActiveState()
 {
-    if (GetCurrentState() != ActiveState && GetCurrentState() != UnequippingState
+    // Always clean up firing sequence state — EndFiringSequence clears
+    // PendingFire and effects, which must run even if we are already unequipping.
+    if (CurrentFireMode < GetNumFireModes())
+    {
+        EndFiringSequence(CurrentFireMode);
+    }
+
+    // Only transition to ActiveState if we are actually still in a firing state.
+    // If we are already unequipping or inactive, GotoActiveState would be wrong.
+    if (GetCurrentState() != ActiveState
+        && GetCurrentState() != UnequippingState
         && GetCurrentState() != InactiveState)
     {
-        // EndFiringSequence was deferred along with the state transition.
-        // Clean up firing effects/state before going idle.
-        EndFiringSequence(CurrentFireMode);
         GotoActiveState();
     }
 }
@@ -2296,7 +2303,12 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
 
 bool AUTWeaponFix::PutDown()
 {
-    GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
+    // NOTE: Do NOT clear DeferredActiveStateHandle here.
+    // The deferred timer keeps us in FiringState so Super::PutDown() routes to
+    // UUTWeaponStateFiring_Transactional::PutDown(), which has cooldown-aware
+    // weapon switch timing. Clearing it would bypass that logic.
+    // The timer firing later is harmless — DeferredGotoActiveState guards against
+    // running in wrong states (UnequippingState, InactiveState, ActiveState).
     // 1. Try to put the weapon down via the base class
     bool bPutDownResult = Super::PutDown();
     // 2. If it succeeded, kill the timers immediately.
