@@ -92,6 +92,35 @@ struct FPendingFakeProjectile
     }
 };
 
+/** Server-side tracking of authoritative projectiles for rewind validation */
+USTRUCT()
+struct FActiveServerProjectile
+{
+    GENERATED_BODY()
+
+    UPROPERTY()
+    TWeakObjectPtr<AUTProjectile> Projectile;
+
+    UPROPERTY()
+    int32 EventIndex;
+
+    UPROPERTY()
+    uint8 FireMode;
+
+    FActiveServerProjectile()
+        : EventIndex(-1)
+        , FireMode(0)
+    {
+    }
+
+    FActiveServerProjectile(AUTProjectile* InProj, int32 InIndex, uint8 InMode)
+        : Projectile(InProj)
+        , EventIndex(InIndex)
+        , FireMode(InMode)
+    {
+    }
+};
+
 
 UCLASS(Abstract)
 class NETCODEPLUS_API AUTWeaponFix : public AUTWeapon
@@ -123,6 +152,13 @@ public:
     void ClearPendingFakeProjectiles();
     void DeferredGotoActiveState(uint8 FireModeNum);
     //~ End AUTWeapon Interface
+
+    // =========================================================================
+    // PROJECTILE REWIND SYSTEM
+    // Called by UTPlusProj_Rocket / UTPlusProj_FlakShell when fake hits a pawn.
+    // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
+    // =========================================================================
+    void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum);
     UPROPERTY()
     TArray<float> LastFireTime;
      /**
@@ -344,4 +380,41 @@ protected:
 
     UPROPERTY()
     TArray<FPendingFakeProjectile> PendingFakeProjectiles;
+
+    // =========================================================================
+    // PROJECTILE REWIND LAG COMPENSATION
+    //
+    // When a client's fake projectile hits an enemy, the client sends an RPC.
+    // The server validates by rewinding the target and checking proximity to
+    // the real (authoritative) projectile. Gated by bEnableProjectileRewind.
+    // =========================================================================
+
+    /** Master toggle. Set to true in BP defaults to activate projectile rewind. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
+    bool bEnableProjectileRewind = false;
+
+    /** Max rewind scale at low ping (0.85 = 85% of half-RTT). Never full rewind. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
+    float ProjectileRewindMaxScale = 0.85f;
+
+    /** Ping (ms) below which max scale is applied */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
+    float ProjectileRewindFullPingMs = 80.0f;
+
+    /** Ping (ms) above which NO rewind is applied. Linear falloff between Full and Max. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
+    float ProjectileRewindMaxPingMs = 120.0f;
+
+    /** Minimum rewind scale at the falloff boundary */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
+    float ProjectileRewindMinScale = 0.15f;
+
+    /** Server RPC: Client's fake projectile hit a target, validate with rewind */
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+        int32 ClaimedEventIndex, uint8 ClaimedFireMode);
+
+    /** Server-side tracking of authoritative projectiles by EventIndex */
+    UPROPERTY()
+    TArray<FActiveServerProjectile> ActiveServerProjectiles;
 };

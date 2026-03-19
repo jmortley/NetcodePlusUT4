@@ -1927,6 +1927,27 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	{
 		NewProjectile->HitsStatsName = HitsStatsName;
 
+		// Track server projectile for rewind validation (if enabled)
+		if (bEnableProjectileRewind)
+		{
+			int32 ServerEventIdx = AuthoritativeFireEventIndex.IsValidIndex(CurrentFireMode)
+				? AuthoritativeFireEventIndex[CurrentFireMode] : -1;
+			ActiveServerProjectiles.Add(FActiveServerProjectile(NewProjectile, ServerEventIdx, CurrentFireMode));
+
+			// Cleanup stale entries
+			for (int32 i = ActiveServerProjectiles.Num() - 1; i >= 0; i--)
+			{
+				if (!ActiveServerProjectiles[i].Projectile.IsValid())
+				{
+					ActiveServerProjectiles.RemoveAt(i);
+				}
+			}
+			while (ActiveServerProjectiles.Num() > 10)
+			{
+				ActiveServerProjectiles.RemoveAt(0);
+			}
+		}
+
 		// GUARD RAIL: Minimum Threshold (prevents 0-ping PIE physics bugs)
 		const float MinCatchupThreshold = 0.005f;
 
@@ -3044,4 +3065,197 @@ bool AUTWeaponFix::ResendServerStartFireFixed_Validate(uint8 FireModeNum, int32 
 bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
 {
     return true;
+}
+
+
+// =========================================================================
+// PROJECTILE REWIND LAG COMPENSATION
+// =========================================================================
+
+void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum)
+{
+	if (!bEnableProjectileRewind || !HitTarget)
+	{
+		return;
+	}
+
+	// Find the matching fake in PendingFakeProjectiles to get the EventIndex
+	int32 EventIdx = -1;
+	for (const FPendingFakeProjectile& Pending : PendingFakeProjectiles)
+	{
+		if (Pending.FireMode == FireModeNum && Pending.Projectile.IsValid())
+		{
+			EventIdx = Pending.EventIndex;
+			break; // Use the oldest matching fake (FIFO)
+		}
+	}
+
+	if (EventIdx >= 0)
+	{
+		ServerProjectileHitClaim(HitTarget, HitLocation, EventIdx, FireModeNum);
+	}
+}
+
+bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+	int32 ClaimedEventIndex, uint8 ClaimedFireMode)
+{
+	return true;
+}
+
+void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+	int32 ClaimedEventIndex, uint8 ClaimedFireMode)
+{
+	if (!bEnableProjectileRewind)
+	{
+		return;
+	}
+
+	// 1. Validate target
+	if (!ClaimedTarget || ClaimedTarget->IsDead())
+	{
+		return;
+	}
+
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	if (GS && GS->OnSameTeam(UTOwner, ClaimedTarget))
+	{
+		return;
+	}
+
+	// 2. Check ping and calculate rewind scale
+	float PingMs = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->ExactPing : 0.0f;
+
+	if (PingMs > ProjectileRewindMaxPingMs || PingMs < 1.0f)
+	{
+		return;
+	}
+
+	float RewindScale;
+	if (PingMs <= ProjectileRewindFullPingMs)
+	{
+		RewindScale = ProjectileRewindMaxScale;
+	}
+	else
+	{
+		RewindScale = FMath::Lerp(ProjectileRewindMaxScale, ProjectileRewindMinScale,
+			(PingMs - ProjectileRewindFullPingMs) / (ProjectileRewindMaxPingMs - ProjectileRewindFullPingMs));
+	}
+
+	float HalfRTT = FMath::Max(0.0f, (PingMs - FudgeFactorMs) * 0.0005f);
+	float ScaledRewindTime = HalfRTT * RewindScale;
+
+	if (ScaledRewindTime <= 0.0f)
+	{
+		return;
+	}
+
+	// 3. Find the real (authoritative) projectile by EventIndex
+	AUTProjectile* RealProjectile = nullptr;
+	int32 FoundIndex = -1;
+
+	for (int32 i = 0; i < ActiveServerProjectiles.Num(); i++)
+	{
+		FActiveServerProjectile& Entry = ActiveServerProjectiles[i];
+		if (!Entry.Projectile.IsValid())
+		{
+			continue;
+		}
+		if (Entry.EventIndex == ClaimedEventIndex && Entry.FireMode == ClaimedFireMode)
+		{
+			AUTProjectile* Candidate = Entry.Projectile.Get();
+			if (Candidate && !Candidate->bExploded && !Candidate->IsPendingKillPending())
+			{
+				RealProjectile = Candidate;
+				FoundIndex = i;
+				break;
+			}
+		}
+	}
+
+	if (!RealProjectile)
+	{
+		return;
+	}
+
+	// 4. Rewind target to where they were when the client saw them
+	FVector RewoundLoc = ClaimedTarget->GetRewindLocation(ScaledRewindTime);
+
+	// 5. Build rewound capsule geometry
+	float CapRadius = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
+	float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	FVector CapsuleTop = RewoundLoc + FVector(0.f, 0.f, CapHeight - CapRadius);
+	FVector CapsuleBot = RewoundLoc - FVector(0.f, 0.f, CapHeight - CapRadius);
+
+	// 6. Get real projectile's collision radius
+	float ProjHitRadius = 0.f;
+	if (RealProjectile->CollisionComp)
+	{
+		ProjHitRadius = RealProjectile->CollisionComp->GetScaledSphereRadius();
+	}
+	if (ProjHitRadius <= 0.f && RealProjectile->PawnOverlapSphere)
+	{
+		ProjHitRadius = RealProjectile->PawnOverlapSphere->GetScaledSphereRadius();
+	}
+	if (ProjHitRadius <= 0.f)
+	{
+		ProjHitRadius = 10.f;
+	}
+
+	// 7. Check proximity: real projectile position vs rewound capsule
+	FVector ProjLoc = RealProjectile->GetActorLocation();
+	FVector PointOnCapsule = FMath::ClosestPointOnSegment(ProjLoc, CapsuleBot, CapsuleTop);
+	float DistSqr = FVector::DistSquared(ProjLoc, PointOnCapsule);
+	float CombinedRadius = CapRadius + ProjHitRadius; // Exact radii, no padding
+
+	if (DistSqr >= CombinedRadius * CombinedRadius)
+	{
+		// Point check failed — try segment check using projectile velocity
+		// (projectile may be heading toward the rewound capsule)
+		FVector ProjVel = RealProjectile->GetVelocity();
+		if (!ProjVel.IsNearlyZero())
+		{
+			// Check a short path segment ahead (one tick at 240Hz)
+			float LookAhead = 1.f / 240.f;
+			FVector ProjEnd = ProjLoc + ProjVel * LookAhead;
+			FVector PointOnPath, PointOnCap;
+			FMath::SegmentDistToSegmentSafe(ProjLoc, ProjEnd, CapsuleBot, CapsuleTop, PointOnPath, PointOnCap);
+			DistSqr = FVector::DistSquared(PointOnPath, PointOnCap);
+		}
+	}
+
+	if (DistSqr >= CombinedRadius * CombinedRadius)
+	{
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("ProjectileRewind REJECTED: Dist=%.1f Combined=%.1f Ping=%.0f Scale=%.2f Rewind=%.1fms"),
+			FMath::Sqrt(DistSqr), CombinedRadius, PingMs, RewindScale, ScaledRewindTime * 1000.f);
+		return;
+	}
+
+	// 8. Wall check: make sure we're not hitting through geometry
+	FCollisionQueryParams WallParams(TEXT("ProjectileRewindWallCheck"), true, RealProjectile);
+	WallParams.AddIgnoredActor(ClaimedTarget);
+	WallParams.AddIgnoredActor(UTOwner);
+
+	if (GetWorld()->LineTraceTestByChannel(ProjLoc, RewoundLoc, COLLISION_TRACE_WEAPON, WallParams))
+	{
+		UE_LOG(LogUTWeaponFix, Verbose, TEXT("ProjectileRewind REJECTED: Wall between projectile and target"));
+		return;
+	}
+
+	// 9. HIT! Process the real projectile's hit
+	FVector HitNormal = (ProjLoc - PointOnCapsule).GetSafeNormal();
+	FVector HitLocation = PointOnCapsule + (HitNormal * CapRadius);
+
+	UE_LOG(LogUTWeaponFix, Log,
+		TEXT("ProjectileRewind HIT: Target=%s Ping=%.0f Scale=%.2f Rewind=%.1fms Dist=%.1f"),
+		*ClaimedTarget->GetName(), PingMs, RewindScale, ScaledRewindTime * 1000.f, FMath::Sqrt(DistSqr));
+
+	RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(),
+		HitLocation, -RealProjectile->GetVelocity().GetSafeNormal());
+
+	// 10. Clean up tracking entry
+	if (FoundIndex >= 0 && FoundIndex < ActiveServerProjectiles.Num())
+	{
+		ActiveServerProjectiles.RemoveAt(FoundIndex);
+	}
 }
