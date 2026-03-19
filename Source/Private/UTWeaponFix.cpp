@@ -2908,11 +2908,12 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
         if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
         {
-            // Confirmed - destroy fake, real projectile is replicating
-            if (Pending.Projectile.IsValid())
-            {
-                Pending.Projectile->Destroy();
-            }
+            // Confirmed — stop tracking, but do NOT destroy the fake projectile.
+            // This RPC arrives faster than actor replication. If we destroy the fake
+            // now, it vanishes before the auth projectile has materialized on the
+            // client, causing a visible gap ("nothing came out"). The stock
+            // BeginFakeProjectileSynch system will pair the fake with the auth
+            // projectile when it replicates and handle the handoff smoothly.
             PendingFakeProjectiles.RemoveAt(i);
         }
         // Fakes with EventIndex > InAuthorizedEventIndex: LEAVE ALONE
