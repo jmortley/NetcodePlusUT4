@@ -122,7 +122,7 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
 {
     
     bHandlingRetry = true;
-    UE_LOG(LogUTWeaponFix, Log, TEXT("[OnRetryTimer] Mode %d: Retry firing — calling StartFire"), FireModeNum);
+    UE_LOG(LogUTWeaponFix, Verbose, TEXT("[OnRetryTimer] Mode %d: Retry firing — calling StartFire"), FireModeNum);
     StartFire(FireModeNum);
     bHandlingRetry = false;
 }
@@ -370,7 +370,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		// This mirrors what the client does: release primary → StopFire → then StartFire secondary.
 		if (!bIsChargedState)
 		{
-			UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Mode %d: Cross-mode switch from Mode %d — stopping current mode first"), FireModeNum, CurrentlyFiringMode);
+			UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StartFire] Mode %d: Cross-mode switch from Mode %d — stopping current mode first"), FireModeNum, CurrentlyFiringMode);
 			StopFire(CurrentlyFiringMode);
 			// CurrentlyFiringMode is now 255, fall through to fire the new mode
 		}
@@ -480,7 +480,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     {
         if (GetWorldTimerManager().IsTimerActive(DeferredActiveStateHandle))
         {
-            UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Mode %d: Re-fire during deferred cooldown — cancelling timer, transitioning to ActiveState"), FireModeNum);
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StartFire] Mode %d: Re-fire during deferred cooldown — cancelling timer, transitioning to ActiveState"), FireModeNum);
             GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
             GotoActiveState();
             // Fall through — ActiveState will now allow BeginFiringSequence below
@@ -654,7 +654,7 @@ void AUTWeaponFix::FireShot()
 		}
 
 		// 3. SPAWN PROJECTILE
-		UE_LOG(LogUTWeaponFix, Log, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
+		UE_LOG(LogUTWeaponFix, Verbose, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
 		Super::FireShot();
 	}
 }
@@ -672,7 +672,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         if (!bIsSwitchingWeapons)
         {
             UTOwner->SetPendingFire(FireModeNum, false);
-            UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Clearing PendingFire %d"), FireModeNum);
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Clearing PendingFire %d"), FireModeNum);
         }
     }
     if (FireModeNum < 2)
@@ -801,7 +801,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     // already started) would land on the wrong state object.
     if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
     {
-        UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: In FiringState — EndFiringSequence + kill RefireCheckTimer + defer GotoActiveState"), FireModeNum);
+        UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d: In FiringState — EndFiringSequence + kill RefireCheckTimer + defer GotoActiveState"), FireModeNum);
 
         // Clean up firing effects and PendingFire immediately (not deferred).
         EndFiringSequence(FireModeNum);
@@ -829,20 +829,20 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 
         if (TimeRemaining > 0.01f)
         {
-            UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: Deferring GotoActiveState by %.3fs"), FireModeNum, TimeRemaining);
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d: Deferring GotoActiveState by %.3fs"), FireModeNum, TimeRemaining);
             FTimerDelegate Del;
             Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
             GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
         }
         else
         {
-            UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: Cooldown elapsed — immediate GotoActiveState"), FireModeNum);
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d: Cooldown elapsed — immediate GotoActiveState"), FireModeNum);
             GotoActiveState();
         }
     }
     else
     {
-        UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: NOT in FiringState (State=%s) — clearing PendingFire only"),
+        UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d: NOT in FiringState (State=%s) — clearing PendingFire only"),
             FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
         if (UTOwner)
         {
@@ -1106,7 +1106,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         // → no state transition → shot never fires → dud projectile.
         if (TransState && GetCurrentFireMode() != FireModeNum)
         {
-            UE_LOG(LogUTWeaponFix, Log, TEXT("[ServerStartFireFixed] Cross-mode: stopping Mode %d before entering Mode %d"),
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[ServerStartFireFixed] Cross-mode: stopping Mode %d before entering Mode %d"),
                 GetCurrentFireMode(), FireModeNum);
             EndFiringSequence(GetCurrentFireMode());
             GotoActiveState();
@@ -1117,13 +1117,11 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
     bIsTransactionalFire = false;
 	ReceivedHitScanHitChar = nullptr;
-    /*
-    // 4. CONFIRM
-    if (UTOwner)
-    {
-        ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
-    }
-    */
+
+    // 4. CONFIRM — always sent, including shock balls. Keeps event indices synced
+    // and clears the resend queue. Shock ball fakes are preserved in
+    // ClientConfirmFireEvent_Implementation (not destroyed) to prevent the
+    // 80+ ping visual hitch. See that function for details.
     if (UTOwner)
     {
         ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
@@ -1280,7 +1278,7 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
     // EndFiringSequence already ran in StopFire/ServerStopFireFixed — no need to call it again.
     // Only transition to ActiveState if we are actually still in a firing state.
     // If we are already unequipping or inactive, GotoActiveState would be wrong.
-    UE_LOG(LogUTWeaponFix, Log, TEXT("[DeferredGotoActiveState] Mode %d: State=%s PendingFire[%d]=%d"),
+    UE_LOG(LogUTWeaponFix, Verbose, TEXT("[DeferredGotoActiveState] Mode %d: State=%s PendingFire[%d]=%d"),
         FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"),
         FireModeNum, (UTOwner && UTOwner->IsPendingFire(FireModeNum)) ? 1 : 0);
 
@@ -1314,7 +1312,7 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
     }
     else
     {
-        UE_LOG(LogUTWeaponFix, Log, TEXT("[DeferredGotoActiveState] Mode %d: STALE — weapon in %s, expected %s. Ignoring."),
+        UE_LOG(LogUTWeaponFix, Verbose, TEXT("[DeferredGotoActiveState] Mode %d: STALE — weapon in %s, expected %s. Ignoring."),
             FireModeNum,
             GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"),
             FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum] ? *FiringState[FireModeNum]->GetName() : TEXT("null"));
