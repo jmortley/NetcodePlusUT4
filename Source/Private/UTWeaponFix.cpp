@@ -122,7 +122,7 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
 {
     
     bHandlingRetry = true;
-    //UE_LOG(LogUTWeaponFix, Log, TEXT("[Timer] Retry Timer Firing! Calling StartFire..."));
+    UE_LOG(LogUTWeaponFix, Log, TEXT("[OnRetryTimer] Mode %d: Retry firing — calling StartFire"), FireModeNum);
     StartFire(FireModeNum);
     bHandlingRetry = false;
 }
@@ -664,7 +664,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         if (!bIsSwitchingWeapons)
         {
             UTOwner->SetPendingFire(FireModeNum, false);
-            UE_LOG(LogUTWeaponFix, Verbose, TEXT("clearing pending fire %d"), FireModeNum);
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Clearing PendingFire %d"), FireModeNum);
         }
     }
     if (FireModeNum < 2)
@@ -793,18 +793,13 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     // already started) would land on the wrong state object.
     if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
     {
+        UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: In FiringState — EndFiringSequence + kill RefireCheckTimer + defer GotoActiveState"), FireModeNum);
+
         // Clean up firing effects and PendingFire immediately (not deferred).
-        // Deferring EndFiringSequence causes: (1) tap-then-hold input loss because
-        // StartFire sees PendingFire still set, and (2) auto-fire on weapon swap.
         EndFiringSequence(FireModeNum);
 
-        // CRITICAL: Kill the RefireCheckTimer. Since we're deferring GotoActiveState
-        // (EndState won't run yet), the RefireCheckTimer is still alive and will fire
-        // at the next refire interval. If the player re-presses fire before then,
-        // PendingFire becomes true and RefireCheckTimer fires a shot — then moments
-        // later DeferredGotoActiveState fires, CheckAutoFire fires ANOTHER shot, and
-        // the anti-dup guard blocks the second spawn. Result: animation plays but no
-        // projectile appears. Killing the timer here prevents the overlap entirely.
+        // Kill the RefireCheckTimer — EndState won't run yet (deferred), so the
+        // timer is still alive and would cause double-fire overlap.
         UUTWeaponStateFiring* FiringStateObj = Cast<UUTWeaponStateFiring>(FiringState[FireModeNum]);
         if (FiringStateObj)
         {
@@ -826,21 +821,21 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 
         if (TimeRemaining > 0.01f)
         {
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: Deferring GotoActiveState by %.3fs"), FireModeNum, TimeRemaining);
             FTimerDelegate Del;
             Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
             GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
         }
         else
         {
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: Cooldown elapsed — immediate GotoActiveState"), FireModeNum);
             GotoActiveState();
         }
     }
     else
     {
-        // Safety net: if StopFire is called while NOT in FiringState (e.g. the Tick
-        // watchdog fires StopFire(CurrentFireMode) after a timeout, or a new StartFire
-        // already transitioned us), PendingFire may still be set on the pawn. Clear it
-        // so the weapon doesn't auto-fire when ActiveState::BeginState runs CheckAutoFire.
+        UE_LOG(LogUTWeaponFix, Log, TEXT("[StopFire] Mode %d: NOT in FiringState (State=%s) — clearing PendingFire only"),
+            FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
         if (UTOwner)
         {
             UTOwner->SetPendingFire(FireModeNum, false);
@@ -1257,7 +1252,7 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
     // EndFiringSequence already ran in StopFire/ServerStopFireFixed — no need to call it again.
     // Only transition to ActiveState if we are actually still in a firing state.
     // If we are already unequipping or inactive, GotoActiveState would be wrong.
-    UE_LOG(LogUTWeaponFix, Verbose, TEXT("[DeferredGotoActiveState] Mode %d: State=%s"),
+    UE_LOG(LogUTWeaponFix, Log, TEXT("[DeferredGotoActiveState] Mode %d: State=%s"),
         FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
 
     if (GetCurrentState() != ActiveState
@@ -1695,8 +1690,10 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
     else if (bIsFlakShell)
     {
         float CurrentTime = GetWorld()->GetTimeSeconds();
-        if (CurrentTime - LastFlakShellSpawnTime < 0.2f)
+        float TimeSinceLast = CurrentTime - LastFlakShellSpawnTime;
+        if (TimeSinceLast < 0.2f)
         {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("FlakShell anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
             return nullptr;
         }
         LastFlakShellSpawnTime = CurrentTime;
