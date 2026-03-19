@@ -3079,21 +3079,10 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 		return;
 	}
 
-	// Find the matching fake in PendingFakeProjectiles to get the EventIndex
-	int32 EventIdx = -1;
-	for (const FPendingFakeProjectile& Pending : PendingFakeProjectiles)
-	{
-		if (Pending.FireMode == FireModeNum && Pending.Projectile.IsValid())
-		{
-			EventIdx = Pending.EventIndex;
-			break; // Use the oldest matching fake (FIFO)
-		}
-	}
-
-	if (EventIdx >= 0)
-	{
-		ServerProjectileHitClaim(HitTarget, HitLocation, EventIdx, FireModeNum);
-	}
+	// Send the claim with FireMode only — server matches against ActiveServerProjectiles
+	// by fire mode (oldest first). No EventIndex needed from the client since we're
+	// using the replicated real projectile, not the fake (which is already destroyed).
+	ServerProjectileHitClaim(HitTarget, HitLocation, -1, FireModeNum);
 }
 
 bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
@@ -3149,7 +3138,8 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		return;
 	}
 
-	// 3. Find the real (authoritative) projectile by EventIndex
+	// 3. Find the real (authoritative) projectile
+	// Match by FireMode, oldest first (FIFO). EventIndex match preferred if provided.
 	AUTProjectile* RealProjectile = nullptr;
 	int32 FoundIndex = -1;
 
@@ -3160,15 +3150,21 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		{
 			continue;
 		}
-		if (Entry.EventIndex == ClaimedEventIndex && Entry.FireMode == ClaimedFireMode)
+		if (Entry.FireMode != ClaimedFireMode)
 		{
-			AUTProjectile* Candidate = Entry.Projectile.Get();
-			if (Candidate && !Candidate->bExploded && !Candidate->IsPendingKillPending())
-			{
-				RealProjectile = Candidate;
-				FoundIndex = i;
-				break;
-			}
+			continue;
+		}
+		// If client sent a specific EventIndex, require exact match
+		if (ClaimedEventIndex >= 0 && Entry.EventIndex != ClaimedEventIndex)
+		{
+			continue;
+		}
+		AUTProjectile* Candidate = Entry.Projectile.Get();
+		if (Candidate && !Candidate->bExploded && !Candidate->IsPendingKillPending())
+		{
+			RealProjectile = Candidate;
+			FoundIndex = i;
+			break; // Oldest first (array is insertion-ordered)
 		}
 	}
 

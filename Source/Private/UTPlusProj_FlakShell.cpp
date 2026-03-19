@@ -13,10 +13,11 @@ AUTPlusProj_FlakShell::AUTPlusProj_FlakShell(const FObjectInitializer& ObjectIni
 void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp,
 	const FVector& HitLocation, const FVector& HitNormal)
 {
-	// CLIENT FAKE PROJECTILE: Notify weapon that we hit an enemy
-	// This runs BEFORE Super, which will Explode the fake (visual only, no damage).
-	// The weapon sends an RPC so the server can validate with rewind.
-	if (bFakeClientProjectile && OtherActor)
+	// CLIENT-SIDE HIT: Notify weapon so server can validate with rewind.
+	// This fires on the CLIENT when the replicated (real) flak shell overlaps an enemy
+	// on the client's local pawn positions. The server may disagree because its
+	// capsule positions are different — the RPC gives it a second chance with rewind.
+	if (Role != ROLE_Authority && OtherActor && !bFakeClientProjectile)
 	{
 		AUTCharacter* HitChar = Cast<AUTCharacter>(OtherActor);
 		if (HitChar)

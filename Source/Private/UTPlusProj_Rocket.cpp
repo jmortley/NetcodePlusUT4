@@ -13,10 +13,12 @@ AUTPlusProj_Rocket::AUTPlusProj_Rocket(const FObjectInitializer& ObjectInitializ
 void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp,
 	const FVector& HitLocation, const FVector& HitNormal)
 {
-	// CLIENT FAKE PROJECTILE: Notify weapon that we hit an enemy
-	// This runs BEFORE Super, which will Explode the fake (visual only, no damage).
-	// The weapon sends an RPC so the server can validate with rewind.
-	if (bFakeClientProjectile && OtherActor)
+	// CLIENT-SIDE HIT: Notify weapon so server can validate with rewind.
+	// This fires on the CLIENT when the replicated (real) rocket overlaps an enemy
+	// on the client's local pawn positions. The server may disagree because its
+	// capsule positions are different — the RPC gives it a second chance with rewind.
+	// Role != ROLE_Authority means we're on the client viewing the replicated rocket.
+	if (Role != ROLE_Authority && OtherActor && !bFakeClientProjectile)
 	{
 		AUTCharacter* HitChar = Cast<AUTCharacter>(OtherActor);
 		if (HitChar)
@@ -30,6 +32,6 @@ void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiv
 		}
 	}
 
-	// Standard processing: damage, explode, etc.
+	// Standard processing: damage (server only), explode, etc.
 	Super::ProcessHit_Implementation(OtherActor, OtherComp, HitLocation, HitNormal);
 }
