@@ -2945,12 +2945,29 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
         if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
         {
-            // Confirmed — stop tracking, but do NOT destroy the fake projectile.
-            // This RPC arrives faster than actor replication. If we destroy the fake
-            // now, it vanishes before the auth projectile has materialized on the
-            // client, causing a visible gap ("nothing came out"). The stock
-            // BeginFakeProjectileSynch system will pair the fake with the auth
-            // projectile when it replicates and handle the handoff smoothly.
+            if (Pending.Projectile.IsValid())
+            {
+                // Check if this projectile type uses BeginFakeProjectileSynch.
+                // Rockets and flak DO — the stock system automatically pairs fakes
+                // with incoming auth projectiles. Shock cores do NOT — Epic never
+                // implemented fake synch for them. Without synch, leaving the fake
+                // alive creates two cores on the client (fake + auth) where the
+                // fake is visual-only and can't combo.
+                //
+                // For synched projectiles: leave the fake alive, let the stock
+                // system handle the handoff when the auth replicates.
+                // For shock cores: destroy with a short delay so the auth has
+                // time to replicate before the fake disappears.
+                bool bIsShockCore = Pending.Projectile->GetClass()->GetName().Contains(TEXT("ShockBall"));
+                if (bIsShockCore)
+                {
+                    // Short lifespan gives the auth ~100ms to replicate before
+                    // the fake vanishes. Better than instant destroy (visual gap)
+                    // and better than never destroy (two cores, can't combo).
+                    Pending.Projectile->SetLifeSpan(0.1f);
+                }
+                // else: rockets, flak, etc. — leave alive for BeginFakeProjectileSynch
+            }
             PendingFakeProjectiles.RemoveAt(i);
         }
         // Fakes with EventIndex > InAuthorizedEventIndex: LEAVE ALONE
