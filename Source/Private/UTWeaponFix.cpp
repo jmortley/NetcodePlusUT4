@@ -928,7 +928,9 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
         // 150ms tolerance: network jitter (~50ms) + rhythm compensation drift (~100ms).
         float MinInterval = GetRefireTime(FireModeNum) - 0.15f;
 
-        if (TimeSinceLastFire < MinInterval)
+        // Use < with SMALL_NUMBER epsilon to avoid floating-point edge case where
+        // rhythm compensation snaps Delta to exactly MinInterval (e.g., 0.550 < 0.550).
+        if (TimeSinceLastFire < MinInterval - SMALL_NUMBER)
         {
             UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] REJECTED Rapid Fire. Mode %d. Delta: %.3f < Min: %.3f"),
                 *PlayerName, FireModeNum, TimeSinceLastFire, MinInterval);
