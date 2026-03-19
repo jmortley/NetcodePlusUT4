@@ -1275,11 +1275,25 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
         UTOwner->SetPendingFire(FireModeNum, false);
     }
 
-    if (GetCurrentState() != ActiveState
-        && GetCurrentState() != UnequippingState
-        && GetCurrentState() != InactiveState)
+    // CRITICAL: Only transition if we're still in the firing state that SET this
+    // timer. There is only ONE DeferredActiveStateHandle shared by both fire modes.
+    // When alternating primary→secondary quickly, Mode 0's deferred can fire while
+    // the weapon is in FiringState[1] (Mode 1), yanking it out mid-shot. This kills
+    // the Mode 1 fire — the auth projectile may have spawned but the state machine
+    // is corrupted, causing the server to miss subsequent fires for that mode.
+    //
+    // By checking FiringState[FireModeNum], stale deferreds from the OTHER mode
+    // are harmlessly ignored.
+    if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
     {
         GotoActiveState();
+    }
+    else
+    {
+        UE_LOG(LogUTWeaponFix, Log, TEXT("[DeferredGotoActiveState] Mode %d: STALE — weapon in %s, expected %s. Ignoring."),
+            FireModeNum,
+            GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"),
+            FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum] ? *FiringState[FireModeNum]->GetName() : TEXT("null"));
     }
 }
 
