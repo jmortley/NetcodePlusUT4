@@ -1114,14 +1114,18 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     */
     if (UTOwner)
     {
-        //bool bIsShockBallFire = ProjClass.IsValidIndex(FireModeNum) &&
-        //    ProjClass[FireModeNum] &&
-        //    ProjClass[FireModeNum]->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
+        // Don't confirm shock ball fires — let fake live until replication links up.
+        // BeginFakeProjectileSynch pairs the fake with the auth when it replicates.
+        // Sending confirmation destroys the fake before the auth arrives, causing
+        // a visual hitch at 80+ ping where the core "catches up" to the server position.
+        bool bIsShockBallFire = ProjClass.IsValidIndex(FireModeNum) &&
+            ProjClass[FireModeNum] &&
+            ProjClass[FireModeNum]->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
 
-        //if (!bIsShockBallFire)
-        //{
-        ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
-        //}
+        if (!bIsShockBallFire)
+        {
+            ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
+        }
     }
 }
 
