@@ -2155,13 +2155,15 @@ else
 {
     NewProjectile->InitFakeProjectile(OwningPlayer);
 
-    // DO NOT set a shortened lifespan on fakes. The stock BeginFakeProjectileSynch
-    // system (AUTProjectile::BeginPlay) matches fakes against incoming auth projectiles
-    // by class + velocity direction. If the fake dies before the auth replicates,
-    // the match fails and the player sees duplicate projectiles. Let fakes live
-    // their full default lifespan — BeginFakeProjectileSynch will pair them correctly.
+    // CRITICAL: Set the STOCK singular PendingFakeProjectile member.
+    // Stock Epic code paths (combo detection, certain cleanup flows) check this
+    // member directly. Commit 242e5b1 set this and everything worked. Removing
+    // it broke fake-to-auth pairing for shock cores.
+    PendingFakeProjectile = NewProjectile;
+    PendingFakeProjectileEventIndex = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
+        ? ClientFireEventIndex[CurrentFireMode] : -1;
 
-    // Track this projectile for potential rejection cleanup
+    // Also track in our custom array for rejection cleanup
     int32 EventIdx = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
         ? ClientFireEventIndex[CurrentFireMode] : -1;
 
@@ -2945,29 +2947,10 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
         if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
         {
-            if (Pending.Projectile.IsValid())
-            {
-                // Check if this projectile type uses BeginFakeProjectileSynch.
-                // Rockets and flak DO — the stock system automatically pairs fakes
-                // with incoming auth projectiles. Shock cores do NOT — Epic never
-                // implemented fake synch for them. Without synch, leaving the fake
-                // alive creates two cores on the client (fake + auth) where the
-                // fake is visual-only and can't combo.
-                //
-                // For synched projectiles: leave the fake alive, let the stock
-                // system handle the handoff when the auth replicates.
-                // For shock cores: destroy with a short delay so the auth has
-                // time to replicate before the fake disappears.
-                bool bIsShockCore = Pending.Projectile->GetClass()->GetName().Contains(TEXT("ShockBall"));
-                if (bIsShockCore)
-                {
-                    // Short lifespan gives the auth ~100ms to replicate before
-                    // the fake vanishes. Better than instant destroy (visual gap)
-                    // and better than never destroy (two cores, can't combo).
-                    Pending.Projectile->SetLifeSpan(0.1f);
-                }
-                // else: rockets, flak, etc. — leave alive for BeginFakeProjectileSynch
-            }
+            // Confirmed — stop tracking. Do NOT destroy the fake.
+            // Stock BeginFakeProjectileSynch (via InitFakeProjectile + PendingFakeProjectile)
+            // handles the fake-to-auth handoff for ALL projectile types including shock cores.
+            // The key was restoring PendingFakeProjectile = NewProjectile in SpawnNetPredictedProjectile.
             PendingFakeProjectiles.RemoveAt(i);
         }
         // Fakes with EventIndex > InAuthorizedEventIndex: LEAVE ALONE
