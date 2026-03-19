@@ -1252,8 +1252,24 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
     // EndFiringSequence already ran in StopFire/ServerStopFireFixed — no need to call it again.
     // Only transition to ActiveState if we are actually still in a firing state.
     // If we are already unequipping or inactive, GotoActiveState would be wrong.
-    UE_LOG(LogUTWeaponFix, Log, TEXT("[DeferredGotoActiveState] Mode %d: State=%s"),
-        FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
+    UE_LOG(LogUTWeaponFix, Log, TEXT("[DeferredGotoActiveState] Mode %d: State=%s PendingFire[%d]=%d"),
+        FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"),
+        FireModeNum, (UTOwner && UTOwner->IsPendingFire(FireModeNum)) ? 1 : 0);
+
+    // CRITICAL: Clear PendingFire before GotoActiveState to prevent CheckAutoFire
+    // from ghost-firing. ActiveState::BeginState calls CheckAutoFire, which sees
+    // PendingFire=true and re-enters FiringState — firing a shot the player never
+    // intended. This ghost fire consumes the anti-dup guard window, causing the
+    // player's NEXT intentional shot to be blocked (animation plays, no projectile).
+    //
+    // If the player IS holding the button (tap-then-hold), StartFire already
+    // scheduled a retry timer which will fire the shot ~10ms after cooldown.
+    // Clearing PendingFire here only prevents the CheckAutoFire ghost path;
+    // the retry timer is unaffected and handles the real shot.
+    if (UTOwner)
+    {
+        UTOwner->SetPendingFire(FireModeNum, false);
+    }
 
     if (GetCurrentState() != ActiveState
         && GetCurrentState() != UnequippingState
