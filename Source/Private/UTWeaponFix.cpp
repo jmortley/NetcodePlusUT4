@@ -363,11 +363,16 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		bool bIsChargedState = (TransState != nullptr) ||
 			(CurrentState && CurrentState->GetName().Contains(TEXT("Charged")));
 
-		// 2. BLOCK STANDARD WEAPONS
-		// If this isn't a Charged weapon (like Link/Shock), strictly forbid dual firing.
+		// 2. HANDLE MODE SWITCH FOR STANDARD WEAPONS
+		// On the server, the Mode 1 Start RPC can arrive before Mode 0 Stop is
+		// processed (RPC timing). Instead of silently dropping Mode 1 (which causes
+		// the "fake core with no auth" bug), stop the current mode and proceed.
+		// This mirrors what the client does: release primary → StopFire → then StartFire secondary.
 		if (!bIsChargedState)
 		{
-			return;
+			UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Mode %d: Cross-mode switch from Mode %d — stopping current mode first"), FireModeNum, CurrentlyFiringMode);
+			StopFire(CurrentlyFiringMode);
+			// CurrentlyFiringMode is now 255, fall through to fire the new mode
 		}
 
 		// 3. HANDLE ROCKET LAUNCHER LOGIC
