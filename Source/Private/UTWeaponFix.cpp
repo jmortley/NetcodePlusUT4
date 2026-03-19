@@ -604,6 +604,8 @@ void AUTWeaponFix::FireShot()
 
 		if (!bIsTransactionalFire && !bNetDelayedShot && !bIsListenServerHost && !bInChargedState && !bIsStateFiring)
 		{
+			UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireShot] GATEKEEPER BLOCKED Mode %d. Trans=%d Delayed=%d Listen=%d Charged=%d StateFiring=%d"),
+				CurrentFireMode, bIsTransactionalFire, bNetDelayedShot, bIsListenServerHost, bInChargedState, bIsStateFiring);
 			return;
 		}
 
@@ -647,6 +649,7 @@ void AUTWeaponFix::FireShot()
 		}
 
 		// 3. SPAWN PROJECTILE
+		UE_LOG(LogUTWeaponFix, Log, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
 		Super::FireShot();
 	}
 }
@@ -879,8 +882,9 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     // Validate event sequence
     if (!IsFireEventSequenceValid(FireModeNum, InEventIndex))
     {
-        //UE_LOG(LogTemp, Warning, TEXT("WeaponFix: Invalid fire event sequence %d for mode %d"),
-        //    InEventIndex, FireModeNum);
+        int32 LastProcessed = AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1;
+        UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] STALE EVENT. Mode %d EventIndex %d vs LastProcessed %d"),
+            *PlayerName, FireModeNum, InEventIndex, LastProcessed);
         return false;
     }
 
