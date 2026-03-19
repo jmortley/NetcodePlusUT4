@@ -44,4 +44,5 @@ protected:
 	// Store the offset so the ball doesn't snap to the center of the actor
 	FVector InitialVisualOffset;
 	bool bVisualInitialized;
+
 };

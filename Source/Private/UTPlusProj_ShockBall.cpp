@@ -4,6 +4,7 @@
 #include "Particles/ParticleSystemComponent.h"
 
 
+
 AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -107,6 +108,28 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Stuck-ball handoff: when the real stops (bio goo, wall) but the fake is
+	// still the rendering authority (bMoveFakeToReplicatedPos = false), the
+	// fake's flight particle stops emitting → invisible to the shooter.
+	// Detect the stop and hand rendering back to the real so the shooter
+	// sees the same "stuck ball" visual as everyone else.
+	if (GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
+		&& !MyFakeProjectile->IsPendingKillPending()
+		&& ProjectileMovement && ProjectileMovement->Velocity.IsNearlyZero(2.0f))
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[ShockBall] HANDOFF: Real stopped, unhiding real and destroying fake"));
+		SetActorHiddenInGame(false);
+		// BeginFakeProjectileSynch also set every USceneComponent visibility to false —
+		// SetActorHiddenInGame alone doesn't undo that.
+		TArray<USceneComponent*> Components;
+		GetComponents<USceneComponent>(Components);
+		for (int32 i = 0; i < Components.Num(); i++)
+		{
+			Components[i]->SetVisibility(true);
+		}
+		MyFakeProjectile->Destroy();
+		MyFakeProjectile = nullptr;
+	}
 }
 
 
