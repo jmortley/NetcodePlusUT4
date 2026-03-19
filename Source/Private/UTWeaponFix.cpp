@@ -2155,15 +2155,7 @@ else
 {
     NewProjectile->InitFakeProjectile(OwningPlayer);
 
-    // CRITICAL: Set the STOCK singular PendingFakeProjectile member.
-    // Stock Epic code paths (combo detection, certain cleanup flows) check this
-    // member directly. Commit 242e5b1 set this and everything worked. Removing
-    // it broke fake-to-auth pairing for shock cores.
-    PendingFakeProjectile = NewProjectile;
-    PendingFakeProjectileEventIndex = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
-        ? ClientFireEventIndex[CurrentFireMode] : -1;
-
-    // Also track in our custom array for rejection cleanup
+    // Track in our custom array for rejection cleanup via ClientConfirmFireEvent
     int32 EventIdx = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
         ? ClientFireEventIndex[CurrentFireMode] : -1;
 
@@ -2947,10 +2939,16 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
         if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
         {
-            // Confirmed — stop tracking. Do NOT destroy the fake.
-            // Stock BeginFakeProjectileSynch (via InitFakeProjectile + PendingFakeProjectile)
-            // handles the fake-to-auth handoff for ALL projectile types including shock cores.
-            // The key was restoring PendingFakeProjectile = NewProjectile in SpawnNetPredictedProjectile.
+            // Confirmed — destroy fake, auth projectile is replicating.
+            // This matches commit 242e5b1 behavior which worked correctly.
+            // Stock BeginFakeProjectileSynch (via InitFakeProjectile → OwningPlayer->FakeProjectiles)
+            // handles the fake-to-auth pairing. Actor replication is processed before RPCs
+            // in the same network update, so by the time this confirm arrives, the synch
+            // has already paired the fake with the auth. Destroying the fake here is safe.
+            if (Pending.Projectile.IsValid())
+            {
+                Pending.Projectile->Destroy();
+            }
             PendingFakeProjectiles.RemoveAt(i);
         }
         // Fakes with EventIndex > InAuthorizedEventIndex: LEAVE ALONE
