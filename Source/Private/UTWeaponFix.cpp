@@ -1099,6 +1099,18 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     else
     {
         // STATE IS INACTIVE: Enter the state.
+        // If we're currently firing a DIFFERENT mode, stop it first — mirrors
+        // the client's cross-mode fix in StartFire. Without this, Mode 1 Start
+        // arriving while Mode 0 is still active calls BeginFiringSequence(1)
+        // which delegates to FiringState[0]->BeginFiringSequence(1) → OnMultiPress
+        // → no state transition → shot never fires → dud projectile.
+        if (TransState && GetCurrentFireMode() != FireModeNum)
+        {
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[ServerStartFireFixed] Cross-mode: stopping Mode %d before entering Mode %d"),
+                GetCurrentFireMode(), FireModeNum);
+            EndFiringSequence(GetCurrentFireMode());
+            GotoActiveState();
+        }
         // BeginState() inside the new class will fire the first shot automatically.
         BeginFiringSequence(FireModeNum, bClientPredicted);
     }
@@ -1114,18 +1126,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     */
     if (UTOwner)
     {
-        // Don't confirm shock ball fires — let fake live until replication links up.
-        // BeginFakeProjectileSynch pairs the fake with the auth when it replicates.
-        // Sending confirmation destroys the fake before the auth arrives, causing
-        // a visual hitch at 80+ ping where the core "catches up" to the server position.
-        bool bIsShockBallFire = ProjClass.IsValidIndex(FireModeNum) &&
-            ProjClass[FireModeNum] &&
-            ProjClass[FireModeNum]->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
-
-        if (!bIsShockBallFire)
-        {
-            ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
-        }
+        ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
     }
 }
 
@@ -2943,15 +2944,19 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
         if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
         {
-            // Confirmed — destroy fake, auth projectile is replicating.
-            // This matches commit 242e5b1 behavior which worked correctly.
-            // Stock BeginFakeProjectileSynch (via InitFakeProjectile → OwningPlayer->FakeProjectiles)
-            // handles the fake-to-auth pairing. Actor replication is processed before RPCs
-            // in the same network update, so by the time this confirm arrives, the synch
-            // has already paired the fake with the auth. Destroying the fake here is safe.
+            // Confirmed — server spawned the real projectile.
+            // For shock balls: DON'T destroy the fake. BeginFakeProjectileSynch has
+            // already paired it with the auth. The fake renders smoothly while the
+            // real is hidden. Destroying the fake would cause a visual hitch at 80+ ping
+            // as the real un-hides at its forward-ticked position. The fake is cleaned
+            // up naturally when the real explodes/expires.
+            // For all other projectiles: destroy the fake as before.
             if (Pending.Projectile.IsValid())
             {
-                Pending.Projectile->Destroy();
+                if (!Cast<AUTPlusProj_ShockBall>(Pending.Projectile.Get()))
+                {
+                    Pending.Projectile->Destroy();
+                }
             }
             PendingFakeProjectiles.RemoveAt(i);
         }
