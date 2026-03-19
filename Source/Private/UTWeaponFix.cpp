@@ -938,6 +938,18 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
         }
     }
 
+    // CRITICAL: Update AuthoritativeFireEventIndex HERE, atomically with the check.
+    // UE4 processes all queued RPCs in a batch within one server frame. If the
+    // original fire + a resend both arrive on the same frame, they both pass
+    // IsFireEventSequenceValid BEFORE either updates the index in
+    // ServerStartFireFixed_Implementation. This causes the server to fire twice
+    // for the same event — the anti-dup guard blocks the second spawn, leaving
+    // the client's second fake with no auth to pair against.
+    if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum))
+    {
+        AuthoritativeFireEventIndex[FireModeNum] = InEventIndex;
+    }
+
     return true;
 }
 
