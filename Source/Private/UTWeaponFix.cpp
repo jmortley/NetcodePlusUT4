@@ -273,16 +273,30 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
     if (!bIsSwitchingModes &&  IsFireModeOnCooldown(FireModeNum, CurrentTime))
     {
-        // If we are already in the firing state for this mode, 
-        // we don't need to do anything (just let the state run).
-        if (GetCurrentState() == FiringState[FireModeNum])
+        // If we are in FiringState for this mode with a deferred GotoActiveState
+        // timer active, the user tapped and is re-pressing during cooldown.
+        // Do NOT return early — fall through to the retry logic below so a
+        // retry timer is scheduled. Without this, the input is silently eaten
+        // because PendingFire never gets set and no retry is scheduled.
+        if (GetCurrentState() == FiringState[FireModeNum]
+            && GetWorldTimerManager().IsTimerActive(DeferredActiveStateHandle))
+        {
+            // Set PendingFire so the retry/auto-fire path will pick it up
+            if (UTOwner)
+            {
+                UTOwner->SetPendingFire(FireModeNum, true);
+            }
+            // Fall through to retry logic at line ~294
+        }
+        // If we are actively in the firing state (no deferred timer — genuinely
+        // mid-fire-sequence), let the state run its course.
+        else if (GetCurrentState() == FiringState[FireModeNum])
         {
 			if (UTOwner &&
 				(FiringState[FireModeNum]->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass())))
 			{
 				UTOwner->SetPendingFire(FireModeNum, true);
 			}
-
 
 			if (FireModeNum < 2)
             {
@@ -453,10 +467,23 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         }
     }
 
-    // Prevent re-entry if already firing this mode
+    // Prevent re-entry if already firing this mode.
+    // BUT: if we're in FiringState with a deferred GotoActiveState timer running,
+    // the player tapped and is now re-pressing. Cancel the deferred timer,
+    // transition to ActiveState, then fall through to start the new fire sequence.
     if (FiringState.IsValidIndex(FireModeNum) && CurrentState == FiringState[FireModeNum])
     {
-        return;
+        if (GetWorldTimerManager().IsTimerActive(DeferredActiveStateHandle))
+        {
+            UE_LOG(LogUTWeaponFix, Log, TEXT("[StartFire] Mode %d: Re-fire during deferred cooldown — cancelling timer, transitioning to ActiveState"), FireModeNum);
+            GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
+            GotoActiveState();
+            // Fall through — ActiveState will now allow BeginFiringSequence below
+        }
+        else
+        {
+            return;
+        }
     }
 
     // Set Active State Flags
@@ -602,9 +629,14 @@ void AUTWeaponFix::FireShot()
 				// If the actual fire time is close to the theoretical time (within 200ms jitter),
 				// we snap the timer to the Theoretical Time.
 				// This ensures that network jitter doesn't lower the player's DPS over time.
+				// CRITICAL: Cap to CurrentTime on the server so LastFireTime never ends up
+				// in the future. A future LastFireTime poisons the next ValidateFireRequest
+				// check with a negative delta, causing spurious rejections.
 				if (CurrentTime < TheoreticalTime + 0.2f)
 				{
-					LastFireTime[CurrentFireMode] = TheoreticalTime;
+					LastFireTime[CurrentFireMode] = (Role == ROLE_Authority)
+						? FMath::Min(TheoreticalTime, CurrentTime)
+						: TheoreticalTime;
 				}
 				else
 				{
@@ -755,13 +787,33 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     //    GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
     //}
 
-    // Defer EndFiringSequence + GotoActiveState until cooldown elapses.
-    // This keeps the weapon in FiringState during cooldown so that if PutDown()
-    // is called (weapon switch), it routes to the cooldown-aware PutDown override
-    // in UUTWeaponStateFiring_Transactional instead of the default ActiveState path.
-    // Mirrors the server-side deferred logic in ServerStopFireFixed_Implementation.
+    // Guard: only call EndFiringSequence if we're actually in the firing state
+    // for this mode. Stock EndFiringSequence dispatches to CurrentState->EndFiringSequence(),
+    // so calling it when in the wrong state (e.g. a new StartFire arrived, or PutDown
+    // already started) would land on the wrong state object.
     if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
     {
+        // Clean up firing effects and PendingFire immediately (not deferred).
+        // Deferring EndFiringSequence causes: (1) tap-then-hold input loss because
+        // StartFire sees PendingFire still set, and (2) auto-fire on weapon swap.
+        EndFiringSequence(FireModeNum);
+
+        // CRITICAL: Kill the RefireCheckTimer. Since we're deferring GotoActiveState
+        // (EndState won't run yet), the RefireCheckTimer is still alive and will fire
+        // at the next refire interval. If the player re-presses fire before then,
+        // PendingFire becomes true and RefireCheckTimer fires a shot — then moments
+        // later DeferredGotoActiveState fires, CheckAutoFire fires ANOTHER shot, and
+        // the anti-dup guard blocks the second spawn. Result: animation plays but no
+        // projectile appears. Killing the timer here prevents the overlap entirely.
+        UUTWeaponStateFiring* FiringStateObj = Cast<UUTWeaponStateFiring>(FiringState[FireModeNum]);
+        if (FiringStateObj)
+        {
+            GetWorldTimerManager().ClearTimer(FiringStateObj->RefireCheckHandle);
+        }
+
+        // Only defer the STATE TRANSITION (GotoActiveState). This keeps the weapon
+        // in FiringState during cooldown so PutDown() routes to the cooldown-aware
+        // override in UUTWeaponStateFiring_Transactional.
         float CurrentTime = GetWorld()->GetTimeSeconds();
         float ReadyTime = 0.f;
 
@@ -774,28 +826,26 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 
         if (TimeRemaining > 0.01f)
         {
-            // Stay in FiringState — PutDown cooldown logic will work correctly.
-            // Schedule deferred exit once cooldown finishes.
-            // Capture FireModeNum now so EndFiringSequence cleans up the right mode
-            // even if the player switches fire modes before the timer fires.
             FTimerDelegate Del;
             Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
             GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
         }
         else
         {
-            // Cooldown already elapsed — exit immediately.
-            EndFiringSequence(FireModeNum);
             GotoActiveState();
         }
     }
     else
     {
-        // Not in the firing state for this mode — just clean up.
-        EndFiringSequence(FireModeNum);
+        // Safety net: if StopFire is called while NOT in FiringState (e.g. the Tick
+        // watchdog fires StopFire(CurrentFireMode) after a timeout, or a new StartFire
+        // already transitioned us), PendingFire may still be set on the pawn. Clear it
+        // so the weapon doesn't auto-fire when ActiveState::BeginState runs CheckAutoFire.
+        if (UTOwner)
+        {
+            UTOwner->SetPendingFire(FireModeNum, false);
+        }
     }
-
-    
 
     if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
     {
@@ -864,25 +914,23 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
         }
     }
     */
-    for (int32 i = 0; i < LastFireTime.Num(); i++)
+    // SAME-MODE refire check only. Stock UT4 has independent per-mode cooldowns.
+    // Cross-mode blocking prevents legitimate alternating fire (shock primary→secondary).
+    // The weapon state machine already prevents simultaneous firing.
+    if (LastFireTime.IsValidIndex(FireModeNum) && LastFireTime[FireModeNum] > 0.0f)
     {
-        if (LastFireTime[i] > 0.0f)
+        float TimeSinceLastFire = ServerTime - LastFireTime[FireModeNum];
+
+        // 150ms tolerance: network jitter (~50ms) + rhythm compensation drift (~100ms).
+        float MinInterval = GetRefireTime(FireModeNum) - 0.15f;
+
+        if (TimeSinceLastFire < MinInterval)
         {
-            float TimeSinceLastFire = ServerTime - LastFireTime[i];
-
-            // Get the refire time for mode [i] (the one that was fired previously)
-            // Subtract 100ms (0.1f) for network tolerance
-            float MinInterval = GetRefireTime(i) - 0.1f;
-
-            if (TimeSinceLastFire < MinInterval)
-            {
-                UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] REJECTED Rapid Fire. Mode %d blocked by Mode %d recovery. Delta: %.3f < Min: %.3f"),
-					*PlayerName, FireModeNum, i, TimeSinceLastFire, MinInterval);
-                return false;
-            }
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] REJECTED Rapid Fire. Mode %d. Delta: %.3f < Min: %.3f"),
+                *PlayerName, FireModeNum, TimeSinceLastFire, MinInterval);
+            return false;
         }
     }
-
 
     return true;
 }
@@ -898,22 +946,24 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
         return true;
     }
 
-    // Authority needs looser tolerance to match ValidateFireRequest
+    // Authority needs looser tolerance to match ValidateFireRequest (0.15)
     // Client can be strict since it knows its own timing precisely
-    const float Tolerance = (Role == ROLE_Authority) ? 0.1f : 0.05f;
+    const float Tolerance = (Role == ROLE_Authority) ? 0.15f : 0.05f;
 
-    // GLOBAL COOLDOWN CHECK
-    for (int32 i = 0; i < LastFireTime.Num(); i++)
+    // SAME-MODE COOLDOWN CHECK ONLY.
+    // Stock UT4 has independent per-mode cooldowns — the state machine prevents
+    // simultaneous firing, but nothing stops secondary immediately after primary.
+    // A cross-mode check here blocks legitimate alternating fire (e.g., shock
+    // primary then secondary) because the release kills the retry timer before
+    // the other mode's cooldown expires.
+    if (LastFireTime.IsValidIndex(FireModeNum) && LastFireTime[FireModeNum] > 0.0f)
     {
-        if (LastFireTime[i] > 0.0f)
-        {
-            float TimeSinceLastFire = CurrentTime - LastFireTime[i];
-            float RequiredInterval = GetRefireTime(i);
+        float TimeSinceLastFire = CurrentTime - LastFireTime[FireModeNum];
+        float RequiredInterval = GetRefireTime(FireModeNum);
 
-            if (TimeSinceLastFire < (RequiredInterval - Tolerance))
-            {
-                return true;
-            }
+        if (TimeSinceLastFire < (RequiredInterval - Tolerance))
+        {
+            return true;
         }
     }
 
@@ -1148,10 +1198,24 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
 
-    // 3. Defer EndFiringSequence + GotoActiveState until cooldown elapses.
-    // Keeps weapon in FiringState so PutDown cooldown-aware override works.
-    if (GetCurrentState() == FiringState[FireModeNum])
+    // 3. Guard: only call EndFiringSequence if we're actually in the firing state
+    // for this mode. Stock EndFiringSequence dispatches to CurrentState->EndFiringSequence(),
+    // so calling it when in the wrong state would land on the wrong state object.
+    if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
     {
+        // Clean up firing effects and PendingFire immediately (not deferred).
+        EndFiringSequence(FireModeNum);
+
+        // Kill RefireCheckTimer to prevent overlap with DeferredGotoActiveState
+        // (same reasoning as client-side StopFire — see comment there).
+        UUTWeaponStateFiring* FiringStateObj = Cast<UUTWeaponStateFiring>(FiringState[FireModeNum]);
+        if (FiringStateObj)
+        {
+            GetWorldTimerManager().ClearTimer(FiringStateObj->RefireCheckHandle);
+        }
+
+        // Only defer GotoActiveState — keeps weapon in FiringState during cooldown
+        // so PutDown() routes to the cooldown-aware override.
         float CurrentTime = GetWorld()->GetTimeSeconds();
         float ReadyTime = 0.f;
 
@@ -1164,24 +1228,14 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
         if (TimeRemaining > 0.01f)
         {
-            // STAY in FiringState — do NOT call EndFiringSequence yet.
-            // DeferredGotoActiveState will call EndFiringSequence when timer fires.
-            // Capture FireModeNum now so the correct mode is cleaned up later.
             FTimerDelegate Del;
             Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
             GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
         }
         else
         {
-            // Cooldown finished — clean up and exit immediately.
-            EndFiringSequence(FireModeNum);
             GotoActiveState();
         }
-    }
-    else
-    {
-        // Not in the firing state for this mode — just clean up.
-        EndFiringSequence(FireModeNum);
     }
 
     TargetedCharacter = nullptr; // Clear Weapon's cached target
@@ -1200,17 +1254,12 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
 void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
 {
-    // Always clean up firing sequence state — EndFiringSequence clears
-    // PendingFire and effects, which must run even if we are already unequipping.
-    // FireModeNum was captured at timer-set time so it's the correct mode even if
-    // the player switched fire modes between StopFire and timer expiry.
-    if (FireModeNum < GetNumFireModes())
-    {
-        EndFiringSequence(FireModeNum);
-    }
-
+    // EndFiringSequence already ran in StopFire/ServerStopFireFixed — no need to call it again.
     // Only transition to ActiveState if we are actually still in a firing state.
     // If we are already unequipping or inactive, GotoActiveState would be wrong.
+    UE_LOG(LogUTWeaponFix, Verbose, TEXT("[DeferredGotoActiveState] Mode %d: State=%s"),
+        FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
+
     if (GetCurrentState() != ActiveState
         && GetCurrentState() != UnequippingState
         && GetCurrentState() != InactiveState)
@@ -1730,34 +1779,46 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 		Params);
     */
 
-    FRotator NormalizedRot = SpawnRotation;
-    NormalizedRot.Normalize();
+    // ----------------------------------------
+    // 4) Spawn the projectile (standard SpawnActor)
+    // ----------------------------------------
+    // We use regular SpawnActor instead of SpawnActorDeferred because:
+    // - SpawnActorDeferred separates construction from BeginPlay, which causes
+    //   ProjectileMovement to initialize velocity from the instigator's stale
+    //   rotation instead of the spawn transform. This made shock cores and flak
+    //   balls fly in the wrong direction on the server at high FPS.
+    // - Regular SpawnActor lets BeginPlay run immediately with the correct
+    //   transform, so velocity initializes correctly from the start.
+    // - Tick intervals are set AFTER spawn — they take effect on the next frame.
+    //   One tick at the default interval is acceptable.
+    FActorSpawnParameters Params;
+    Params.Instigator = UTOwner;
+    Params.Owner = UTOwner;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-    AUTProjectile* NewProjectile = GetWorld()->SpawnActorDeferred<AUTProjectile>(
+    AUTProjectile* NewProjectile = GetWorld()->SpawnActor<AUTProjectile>(
         ProjectileClass,
-        FTransform(SpawnRotation, SpawnLocation),
-        UTOwner,
-        UTOwner,
-        ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+        SpawnLocation,
+        SpawnRotation,
+        Params);
 
 	if (!NewProjectile)
 	{
 		return nullptr;
 	}
+
     // ----------------------------------------
     // 4b) High-FPS stability (Fixed Tick Rate)
     // ----------------------------------------
-
+    // Set after spawn — takes effect starting next frame.
     if (NewProjectile->ProjectileMovement)
     {
-        //NewProjectile->ProjectileMovement->Velocity = NormalizedRot.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
         if (Role == ROLE_Authority)
         {
             const float ServerRate = 1.f / 240.f;
             NewProjectile->PrimaryActorTick.TickInterval = ServerRate;
             NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ServerRate;
         }
-        
         else if (GetNetMode() != NM_DedicatedServer)
         {
             const int32 ClientHz = GetSnappedProjectileHz();
@@ -1765,20 +1826,16 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
             NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
             NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
         }
-        
     }
-    NewProjectile->FinishSpawning(FTransform(SpawnRotation, SpawnLocation));
 
-    // CRITICAL: Explicitly enforce velocity to match SpawnRotation.
-    // SpawnActorDeferred + FinishSpawning does not reliably propagate the spawn
-    // rotation to ProjectileMovement->Velocity. The movement component may
-    // initialize from the instigator's current rotation (stale on server) instead
-    // of the projectile's own spawn rotation. At 400+ FPS this causes projectiles
-    // to travel in the wrong direction (stale aim), and shock cores to appear twice
-    // (client fake correct, server auth wrong).
+    // Safety belt: enforce velocity to match SpawnRotation.
+    // With regular SpawnActor this should already be correct (BeginPlay initializes
+    // from the spawn transform), but we enforce it to be absolutely sure.
     if (NewProjectile->ProjectileMovement && NewProjectile->ProjectileMovement->InitialSpeed > 0.f)
     {
         FVector CorrectVelocity = SpawnRotation.Vector() * NewProjectile->ProjectileMovement->InitialSpeed;
+        // Preserve TossZ applied during BeginPlay (e.g., FlakShell TossZ=430 for its arc).
+        CorrectVelocity.Z += NewProjectile->TossZ;
         NewProjectile->ProjectileMovement->Velocity = CorrectVelocity;
         NewProjectile->ProjectileMovement->UpdateComponentVelocity();
     }
@@ -2048,12 +2105,11 @@ else
 {
     NewProjectile->InitFakeProjectile(OwningPlayer);
 
-    // Apply lifespan ONLY to non-Shock projectiles.
-    if (CatchupTickDelta > 0.f && !bIsShockCore)
-    {
-        float PingSeconds = (OwningPlayer->PlayerState) ? OwningPlayer->PlayerState->ExactPing * 0.001f : 0.0f;
-        NewProjectile->SetLifeSpan(PingSeconds + 0.3f);
-    }
+    // DO NOT set a shortened lifespan on fakes. The stock BeginFakeProjectileSynch
+    // system (AUTProjectile::BeginPlay) matches fakes against incoming auth projectiles
+    // by class + velocity direction. If the fake dies before the auth replicates,
+    // the match fails and the player sees duplicate projectiles. Let fakes live
+    // their full default lifespan — BeginFakeProjectileSynch will pair them correctly.
 
     // Track this projectile for potential rejection cleanup
     int32 EventIdx = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
