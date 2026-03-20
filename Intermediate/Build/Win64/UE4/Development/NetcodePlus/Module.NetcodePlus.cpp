@@ -6,6 +6,8 @@
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\TeamArenaPredictionPC.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\UTHitsoundMessage.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\UTPlusFlakCannon.cpp"
+#include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\UTPlusProj_FlakShell.cpp"
+#include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\UTPlusProj_Rocket.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\UTPlusProj_ShockBall.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\UTPlusShockRifle.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\UTPlusSniper.cpp"

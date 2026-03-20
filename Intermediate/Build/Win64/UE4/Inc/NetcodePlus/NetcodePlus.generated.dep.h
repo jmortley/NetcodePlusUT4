@@ -21,6 +21,12 @@
 #ifndef NETCODEPLUS_UTHitsoundMessage_generated_h
 	#include "Public/UTHitsoundMessage.h"
 #endif
+#ifndef NETCODEPLUS_UTPlusProj_FlakShell_generated_h
+	#include "Public/UTPlusProj_FlakShell.h"
+#endif
+#ifndef NETCODEPLUS_UTPlusProj_Rocket_generated_h
+	#include "Public/UTPlusProj_Rocket.h"
+#endif
 #ifndef NETCODEPLUS_UTPlusProj_ShockBall_generated_h
 	#include "Public/UTPlusProj_ShockBall.h"
 #endif

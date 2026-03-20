@@ -25,6 +25,7 @@ FName NETCODEPLUS_ResendServerStartFireFixed = FName(TEXT("ResendServerStartFire
 FName NETCODEPLUS_ResendServerStopFireFixed = FName(TEXT("ResendServerStopFireFixed"));
 FName NETCODEPLUS_ServerCycleRocketMode = FName(TEXT("ServerCycleRocketMode"));
 FName NETCODEPLUS_ServerProcessBeamHit = FName(TEXT("ServerProcessBeamHit"));
+FName NETCODEPLUS_ServerProjectileHitClaim = FName(TEXT("ServerProjectileHitClaim"));
 FName NETCODEPLUS_ServerSetPulseTarget = FName(TEXT("ServerSetPulseTarget"));
 FName NETCODEPLUS_ServerStartFireFixed = FName(TEXT("ServerStartFireFixed"));
 FName NETCODEPLUS_ServerStopBeamFiring = FName(TEXT("ServerStopBeamFiring"));
@@ -124,6 +125,10 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsound
 		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "WriteConfigSection",(Native)&AMutHitsounds::execWriteConfigSection);
 	}
 	IMPLEMENT_CLASS(AMutHitsounds, 2138622872);
+	void ANCPlusCTFGameMode::StaticRegisterNativesANCPlusCTFGameMode()
+	{
+	}
+	IMPLEMENT_CLASS(ANCPlusCTFGameMode, 1370665464);
 	void ATeamArenaCharacter::StaticRegisterNativesATeamArenaCharacter()
 	{
 		FNativeFunctionRegistrar::RegisterFunction(ATeamArenaCharacter::StaticClass(), "GetNetcodeVersion",(Native)&ATeamArenaCharacter::execGetNetcodeVersion);
@@ -153,10 +158,38 @@ static FCompiledInDeferEnum Z_CompiledInDeferEnum_UEnum_EHitsoundMessageType(EHi
 	{
 	}
 	IMPLEMENT_CLASS(UUTHitsoundMessage, 3300249145);
+	void AUTPlusProj_FlakShell::StaticRegisterNativesAUTPlusProj_FlakShell()
+	{
+	}
+	IMPLEMENT_CLASS(AUTPlusProj_FlakShell, 3978975414);
+	void AUTPlusProj_Rocket::StaticRegisterNativesAUTPlusProj_Rocket()
+	{
+	}
+	IMPLEMENT_CLASS(AUTPlusProj_Rocket, 1036557589);
 	void AUTPlusProj_ShockBall::StaticRegisterNativesAUTPlusProj_ShockBall()
 	{
 	}
 	IMPLEMENT_CLASS(AUTPlusProj_ShockBall, 4085479409);
+class UScriptStruct* FActiveServerProjectile::StaticStruct()
+{
+	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
+	static class UScriptStruct* Singleton = NULL;
+	if (!Singleton)
+	{
+		extern NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FActiveServerProjectile();
+		extern NETCODEPLUS_API uint32 Get_Z_Construct_UScriptStruct_FActiveServerProjectile_CRC();
+		Singleton = GetStaticStruct(Z_Construct_UScriptStruct_FActiveServerProjectile, Z_Construct_UPackage__Script_NetcodePlus(), TEXT("ActiveServerProjectile"), sizeof(FActiveServerProjectile), Get_Z_Construct_UScriptStruct_FActiveServerProjectile_CRC());
+	}
+	return Singleton;
+}
+static FCompiledInDeferStruct Z_CompiledInDeferStruct_UScriptStruct_FActiveServerProjectile(FActiveServerProjectile::StaticStruct, TEXT("/Script/NetcodePlus"), TEXT("ActiveServerProjectile"), false, nullptr, nullptr);
+static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFActiveServerProjectile
+{
+	FScriptStruct_NetcodePlus_StaticRegisterNativesFActiveServerProjectile()
+	{
+		UScriptStruct::DeferCppStructOps(FName(TEXT("ActiveServerProjectile")),new UScriptStruct::TCppStructOps<FActiveServerProjectile>);
+	}
+} ScriptStruct_NetcodePlus_StaticRegisterNativesFActiveServerProjectile;
 class UScriptStruct* FPendingFakeProjectile::StaticStruct()
 {
 	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
@@ -224,6 +257,15 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		Parms.ClientViewRot=ClientViewRot;
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ResendServerStopFireFixed),&Parms);
 	}
+	void AUTWeaponFix::ServerProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation, int32 ClaimedEventIndex, uint8 ClaimedFireMode)
+	{
+		UTWeaponFix_eventServerProjectileHitClaim_Parms Parms;
+		Parms.ClaimedTarget=ClaimedTarget;
+		Parms.ClaimedHitLocation=ClaimedHitLocation;
+		Parms.ClaimedEventIndex=ClaimedEventIndex;
+		Parms.ClaimedFireMode=ClaimedFireMode;
+		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ServerProjectileHitClaim),&Parms);
+	}
 	void AUTWeaponFix::ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset)
 	{
 		UTWeaponFix_eventServerStartFireFixed_Parms Parms;
@@ -251,10 +293,11 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "OnRep_FireModeState",(Native)&AUTWeaponFix::execOnRep_FireModeState);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ResendServerStartFireFixed",(Native)&AUTWeaponFix::execResendServerStartFireFixed);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ResendServerStopFireFixed",(Native)&AUTWeaponFix::execResendServerStopFireFixed);
+		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ServerProjectileHitClaim",(Native)&AUTWeaponFix::execServerProjectileHitClaim);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ServerStartFireFixed",(Native)&AUTWeaponFix::execServerStartFireFixed);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeaponFix::StaticClass(), "ServerStopFireFixed",(Native)&AUTWeaponFix::execServerStopFireFixed);
 	}
-	IMPLEMENT_CLASS(AUTWeaponFix, 3566290430);
+	IMPLEMENT_CLASS(AUTWeaponFix, 1834956425);
 	FVector AUTPlusFlakCannon::GetFireLocationForMultiShot(int32 MultiShotIndex, FVector const& FireLocation, FRotator const& FireRotation)
 	{
 		UTPlusFlakCannon_eventGetFireLocationForMultiShot_Parms Parms;
@@ -278,7 +321,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusFlakCannon::StaticClass(), "GetFireLocationForMultiShot",(Native)&AUTPlusFlakCannon::execGetFireLocationForMultiShot);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusFlakCannon::StaticClass(), "GetFireRotationForMultiShot",(Native)&AUTPlusFlakCannon::execGetFireRotationForMultiShot);
 	}
-	IMPLEMENT_CLASS(AUTPlusFlakCannon, 973282164);
+	IMPLEMENT_CLASS(AUTPlusFlakCannon, 551011929);
 	void AUTPlusShockRifle::ClientNotifyImpressive()
 	{
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ClientNotifyImpressive),NULL);
@@ -296,7 +339,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "ClientNotifyImpressive",(Native)&AUTPlusShockRifle::execClientNotifyImpressive);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "UpdateScreenTexture",(Native)&AUTPlusShockRifle::execUpdateScreenTexture);
 	}
-	IMPLEMENT_CLASS(AUTPlusShockRifle, 1694366237);
+	IMPLEMENT_CLASS(AUTPlusShockRifle, 2116626224);
 	void AUTPlusSniper::ClientNotifyImpressive()
 	{
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ClientNotifyImpressive),NULL);
@@ -309,7 +352,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 	{
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusSniper::StaticClass(), "ClientNotifyImpressive",(Native)&AUTPlusSniper::execClientNotifyImpressive);
 	}
-	IMPLEMENT_CLASS(AUTPlusSniper, 1977029651);
+	IMPLEMENT_CLASS(AUTPlusSniper, 1862519102);
 class UScriptStruct* FPlusRocketFireMode::StaticStruct()
 {
 	extern NETCODEPLUS_API class UPackage* Z_Construct_UPackage__Script_NetcodePlus();
@@ -345,7 +388,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "OnRep_PendingLockedTarget",(Native)&AUTPlusWeap_RocketLauncher::execOnRep_PendingLockedTarget);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusWeap_RocketLauncher::StaticClass(), "ServerCycleRocketMode",(Native)&AUTPlusWeap_RocketLauncher::execServerCycleRocketMode);
 	}
-	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 4169018225);
+	IMPLEMENT_CLASS(AUTPlusWeap_RocketLauncher, 3802855004);
 	void AUTWeap_LinkGun_Plus::DrawWeaponCrosshair(UUTHUDWidget* WeaponHudWidget, float RenderDelta)
 	{
 		UTWeap_LinkGun_Plus_eventDrawWeaponCrosshair_Parms Parms;
@@ -388,7 +431,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeap_LinkGun_Plus::StaticClass(), "ServerStopBeamFiring",(Native)&AUTWeap_LinkGun_Plus::execServerStopBeamFiring);
 		FNativeFunctionRegistrar::RegisterFunction(AUTWeap_LinkGun_Plus::StaticClass(), "UpdateScreenTexture",(Native)&AUTWeap_LinkGun_Plus::execUpdateScreenTexture);
 	}
-	IMPLEMENT_CLASS(AUTWeap_LinkGun_Plus, 2655558622);
+	IMPLEMENT_CLASS(AUTWeap_LinkGun_Plus, 2224834291);
 	void UUTWeaponStateFiring_Transactional::StaticRegisterNativesUUTWeaponStateFiring_Transactional()
 	{
 	}
@@ -419,12 +462,15 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTMutator();
 	ENGINE_API class UScriptStruct* Z_Construct_UScriptStruct_FTimerHandle();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTLocalMessage_NoRegister();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTCTFBaseGame();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTCharacter();
 	COREUOBJECT_API class UScriptStruct* Z_Construct_UScriptStruct_FLinearColor();
 	ENGINE_API class UClass* Z_Construct_UClass_UMaterialInterface_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTCharacterMovement();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTPlayerController();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTLocalMessage();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProj_FlakShell();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProj_Rocket();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProj_ShockBall();
 	ENGINE_API class UClass* Z_Construct_UClass_UParticleSystemComponent_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTProjectile_NoRegister();
@@ -472,6 +518,8 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_WriteConfigSection();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_ANCPlusCTFGameMode_NoRegister();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_ANCPlusCTFGameMode();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter();
@@ -482,14 +530,20 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	NETCODEPLUS_API class UEnum* Z_Construct_UEnum_NetcodePlus_EHitsoundMessageType();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_UUTHitsoundMessage_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_UUTHitsoundMessage();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_FlakShell_NoRegister();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_FlakShell();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_Rocket_NoRegister();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_Rocket();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_ShockBall_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTPlusProj_ShockBall();
+	NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FActiveServerProjectile();
 	NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FPendingFakeProjectile();
 	NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FNetcodeDelayedProjectile();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ClientConfirmFireEvent();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_OnRep_FireModeState();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ResendServerStartFireFixed();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ResendServerStopFireFixed();
+	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ServerProjectileHitClaim();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ServerStartFireFixed();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AUTWeaponFix_ServerStopFireFixed();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTWeaponFix_NoRegister();
@@ -1255,6 +1309,55 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	static FCompiledInDefer Z_CompiledInDefer_UClass_AMutHitsounds(Z_Construct_UClass_AMutHitsounds, &AMutHitsounds::StaticClass, TEXT("AMutHitsounds"), false, nullptr, nullptr, nullptr);
 	DEFINE_VTABLE_PTR_HELPER_CTOR(AMutHitsounds);
+	UClass* Z_Construct_UClass_ANCPlusCTFGameMode_NoRegister()
+	{
+		return ANCPlusCTFGameMode::StaticClass();
+	}
+	UClass* Z_Construct_UClass_ANCPlusCTFGameMode()
+	{
+		static UClass* OuterClass = NULL;
+		if (!OuterClass)
+		{
+			Z_Construct_UClass_AUTCTFBaseGame();
+			Z_Construct_UPackage__Script_NetcodePlus();
+			OuterClass = ANCPlusCTFGameMode::StaticClass();
+			if (!(OuterClass->ClassFlags & CLASS_Constructed))
+			{
+				UObjectForceRegistration(OuterClass);
+				OuterClass->ClassFlags |= 0x2090028D;
+
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				CPP_BOOL_PROPERTY_BITMASK_STRUCT(bEndGameAdvantageOnlyWithinOneCap, ANCPlusCTFGameMode, bool);
+				UProperty* NewProp_bEndGameAdvantageOnlyWithinOneCap = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("bEndGameAdvantageOnlyWithinOneCap"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(bEndGameAdvantageOnlyWithinOneCap, ANCPlusCTFGameMode), 0x0010000000010005, CPP_BOOL_PROPERTY_BITMASK(bEndGameAdvantageOnlyWithinOneCap, ANCPlusCTFGameMode), sizeof(bool), true);
+				UProperty* NewProp_GracePeriodDuration = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("GracePeriodDuration"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(GracePeriodDuration, ANCPlusCTFGameMode), 0x0010000000010005);
+				UProperty* NewProp_AdvantageMaxDuration = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("AdvantageMaxDuration"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(AdvantageMaxDuration, ANCPlusCTFGameMode), 0x0010000000010005);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				OuterClass->ClassConfigName = FName(TEXT("Game"));
+				OuterClass->StaticLink();
+#if WITH_METADATA
+				UMetaData* MetaData = OuterClass->GetOutermost()->GetMetaData();
+				MetaData->SetValue(OuterClass, TEXT("HideCategories"), TEXT("Info Rendering MovementReplication Replication Actor Input Movement Collision Rendering Utilities|Transformation"));
+				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("NCPlusCTFGameMode.h"));
+				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(OuterClass, TEXT("ShowCategories"), TEXT("Input|MouseInput Input|TouchInput"));
+				MetaData->SetValue(NewProp_bEndGameAdvantageOnlyWithinOneCap, TEXT("Category"), TEXT("CTF|Advantage"));
+				MetaData->SetValue(NewProp_bEndGameAdvantageOnlyWithinOneCap, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_bEndGameAdvantageOnlyWithinOneCap, TEXT("ToolTip"), TEXT("If true, end-of-game advantage only triggers if score difference is <= 1 cap. Halftime always allows advantage."));
+				MetaData->SetValue(NewProp_GracePeriodDuration, TEXT("Category"), TEXT("CTF|Advantage"));
+				MetaData->SetValue(NewProp_GracePeriodDuration, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_GracePeriodDuration, TEXT("ToolTip"), TEXT("Seconds after all flags return home before ending the half/game. Picking up a flag cancels it."));
+				MetaData->SetValue(NewProp_AdvantageMaxDuration, TEXT("Category"), TEXT("CTF|Advantage"));
+				MetaData->SetValue(NewProp_AdvantageMaxDuration, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_AdvantageMaxDuration, TEXT("ToolTip"), TEXT("Max seconds advantage lasts while a flag is held before forcing grace period."));
+#endif
+			}
+		}
+		check(OuterClass->GetClass());
+		return OuterClass;
+	}
+	static FCompiledInDefer Z_CompiledInDefer_UClass_ANCPlusCTFGameMode(Z_Construct_UClass_ANCPlusCTFGameMode, &ANCPlusCTFGameMode::StaticClass, TEXT("ANCPlusCTFGameMode"), false, nullptr, nullptr, nullptr);
+	DEFINE_VTABLE_PTR_HELPER_CTOR(ANCPlusCTFGameMode);
 	UFunction* Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion()
 	{
 		struct TeamArenaCharacter_eventGetNetcodeVersion_Parms
@@ -1490,6 +1593,73 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	static FCompiledInDefer Z_CompiledInDefer_UClass_UUTHitsoundMessage(Z_Construct_UClass_UUTHitsoundMessage, &UUTHitsoundMessage::StaticClass, TEXT("UUTHitsoundMessage"), false, nullptr, nullptr, nullptr);
 	DEFINE_VTABLE_PTR_HELPER_CTOR(UUTHitsoundMessage);
+	UClass* Z_Construct_UClass_AUTPlusProj_FlakShell_NoRegister()
+	{
+		return AUTPlusProj_FlakShell::StaticClass();
+	}
+	UClass* Z_Construct_UClass_AUTPlusProj_FlakShell()
+	{
+		static UClass* OuterClass = NULL;
+		if (!OuterClass)
+		{
+			Z_Construct_UClass_AUTProj_FlakShell();
+			Z_Construct_UPackage__Script_NetcodePlus();
+			OuterClass = AUTPlusProj_FlakShell::StaticClass();
+			if (!(OuterClass->ClassFlags & CLASS_Constructed))
+			{
+				UObjectForceRegistration(OuterClass);
+				OuterClass->ClassFlags |= 0x20900081;
+
+
+				OuterClass->StaticLink();
+#if WITH_METADATA
+				UMetaData* MetaData = OuterClass->GetOutermost()->GetMetaData();
+				MetaData->SetValue(OuterClass, TEXT("ChildCanTick"), TEXT(""));
+				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("UTPlusProj_FlakShell.h"));
+				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusProj_FlakShell.h"));
+				MetaData->SetValue(OuterClass, TEXT("ObjectInitializerConstructorDeclared"), TEXT(""));
+				MetaData->SetValue(OuterClass, TEXT("ToolTip"), TEXT("Enhanced flak shell (alt-fire ball) for NetcodePlus.\n\nAdds client-notify projectile rewind: when the client's fake flak ball\nhits an enemy, sends an RPC so the server can validate with rewind.\n\nReparent your flak shell Blueprint to this class to enable projectile\nlag compensation. No behavioral change until reparented."));
+#endif
+			}
+		}
+		check(OuterClass->GetClass());
+		return OuterClass;
+	}
+	static FCompiledInDefer Z_CompiledInDefer_UClass_AUTPlusProj_FlakShell(Z_Construct_UClass_AUTPlusProj_FlakShell, &AUTPlusProj_FlakShell::StaticClass, TEXT("AUTPlusProj_FlakShell"), false, nullptr, nullptr, nullptr);
+	DEFINE_VTABLE_PTR_HELPER_CTOR(AUTPlusProj_FlakShell);
+	UClass* Z_Construct_UClass_AUTPlusProj_Rocket_NoRegister()
+	{
+		return AUTPlusProj_Rocket::StaticClass();
+	}
+	UClass* Z_Construct_UClass_AUTPlusProj_Rocket()
+	{
+		static UClass* OuterClass = NULL;
+		if (!OuterClass)
+		{
+			Z_Construct_UClass_AUTProj_Rocket();
+			Z_Construct_UPackage__Script_NetcodePlus();
+			OuterClass = AUTPlusProj_Rocket::StaticClass();
+			if (!(OuterClass->ClassFlags & CLASS_Constructed))
+			{
+				UObjectForceRegistration(OuterClass);
+				OuterClass->ClassFlags |= 0x20900080;
+
+
+				OuterClass->StaticLink();
+#if WITH_METADATA
+				UMetaData* MetaData = OuterClass->GetOutermost()->GetMetaData();
+				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("UTPlusProj_Rocket.h"));
+				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusProj_Rocket.h"));
+				MetaData->SetValue(OuterClass, TEXT("ObjectInitializerConstructorDeclared"), TEXT(""));
+				MetaData->SetValue(OuterClass, TEXT("ToolTip"), TEXT("Enhanced rocket projectile for NetcodePlus.\n\nAdds client-notify projectile rewind: when the client's fake rocket\nhits an enemy, sends an RPC so the server can validate with rewind.\n\nReparent your rocket Blueprint to this class to enable projectile\nlag compensation. No behavioral change until reparented."));
+#endif
+			}
+		}
+		check(OuterClass->GetClass());
+		return OuterClass;
+	}
+	static FCompiledInDefer Z_CompiledInDefer_UClass_AUTPlusProj_Rocket(Z_Construct_UClass_AUTPlusProj_Rocket, &AUTPlusProj_Rocket::StaticClass, TEXT("AUTPlusProj_Rocket"), false, nullptr, nullptr, nullptr);
+	DEFINE_VTABLE_PTR_HELPER_CTOR(AUTPlusProj_Rocket);
 	UClass* Z_Construct_UClass_AUTPlusProj_ShockBall_NoRegister()
 	{
 		return AUTPlusProj_ShockBall::StaticClass();
@@ -1534,6 +1704,30 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	static FCompiledInDefer Z_CompiledInDefer_UClass_AUTPlusProj_ShockBall(Z_Construct_UClass_AUTPlusProj_ShockBall, &AUTPlusProj_ShockBall::StaticClass, TEXT("AUTPlusProj_ShockBall"), false, nullptr, nullptr, nullptr);
 	DEFINE_VTABLE_PTR_HELPER_CTOR(AUTPlusProj_ShockBall);
+	UScriptStruct* Z_Construct_UScriptStruct_FActiveServerProjectile()
+	{
+		UPackage* Outer = Z_Construct_UPackage__Script_NetcodePlus();
+		extern uint32 Get_Z_Construct_UScriptStruct_FActiveServerProjectile_CRC();
+		static UScriptStruct* ReturnStruct = FindExistingStructIfHotReloadOrDynamic(Outer, TEXT("ActiveServerProjectile"), sizeof(FActiveServerProjectile), Get_Z_Construct_UScriptStruct_FActiveServerProjectile_CRC(), false);
+		if (!ReturnStruct)
+		{
+			ReturnStruct = new(EC_InternalUseOnlyConstructor, Outer, TEXT("ActiveServerProjectile"), RF_Public|RF_Transient|RF_MarkAsNative) UScriptStruct(FObjectInitializer(), NULL, new UScriptStruct::TCppStructOps<FActiveServerProjectile>, EStructFlags(0x00000001));
+			UProperty* NewProp_FireMode = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("FireMode"), RF_Public|RF_Transient|RF_MarkAsNative) UByteProperty(CPP_PROPERTY_BASE(FireMode, FActiveServerProjectile), 0x0010000000000000);
+			UProperty* NewProp_EventIndex = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("EventIndex"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(EventIndex, FActiveServerProjectile), 0x0010000000000000);
+			UProperty* NewProp_Projectile = new(EC_InternalUseOnlyConstructor, ReturnStruct, TEXT("Projectile"), RF_Public|RF_Transient|RF_MarkAsNative) UWeakObjectProperty(CPP_PROPERTY_BASE(Projectile, FActiveServerProjectile), 0x0014000000000000, Z_Construct_UClass_AUTProjectile_NoRegister());
+			ReturnStruct->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnStruct->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnStruct, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+			MetaData->SetValue(ReturnStruct, TEXT("ToolTip"), TEXT("Server-side tracking of authoritative projectiles for rewind validation"));
+			MetaData->SetValue(NewProp_FireMode, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+			MetaData->SetValue(NewProp_EventIndex, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+			MetaData->SetValue(NewProp_Projectile, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+#endif
+		}
+		return ReturnStruct;
+	}
+	uint32 Get_Z_Construct_UScriptStruct_FActiveServerProjectile_CRC() { return 3542904659U; }
 	UScriptStruct* Z_Construct_UScriptStruct_FPendingFakeProjectile()
 	{
 		UPackage* Outer = Z_Construct_UPackage__Script_NetcodePlus();
@@ -1660,6 +1854,27 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		}
 		return ReturnFunction;
 	}
+	UFunction* Z_Construct_UFunction_AUTWeaponFix_ServerProjectileHitClaim()
+	{
+		UObject* Outer=Z_Construct_UClass_AUTWeaponFix();
+		static UFunction* ReturnFunction = NULL;
+		if (!ReturnFunction)
+		{
+			ReturnFunction = new(EC_InternalUseOnlyConstructor, Outer, TEXT("ServerProjectileHitClaim"), RF_Public|RF_Transient|RF_MarkAsNative) UFunction(FObjectInitializer(), NULL, 0x80A80CC0, 65535, sizeof(UTWeaponFix_eventServerProjectileHitClaim_Parms));
+			UProperty* NewProp_ClaimedFireMode = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ClaimedFireMode"), RF_Public|RF_Transient|RF_MarkAsNative) UByteProperty(CPP_PROPERTY_BASE(ClaimedFireMode, UTWeaponFix_eventServerProjectileHitClaim_Parms), 0x0010000000000080);
+			UProperty* NewProp_ClaimedEventIndex = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ClaimedEventIndex"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(ClaimedEventIndex, UTWeaponFix_eventServerProjectileHitClaim_Parms), 0x0010000000000080);
+			UProperty* NewProp_ClaimedHitLocation = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ClaimedHitLocation"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(ClaimedHitLocation, UTWeaponFix_eventServerProjectileHitClaim_Parms), 0x0010000000000080, Z_Construct_UScriptStruct_FVector());
+			UProperty* NewProp_ClaimedTarget = new(EC_InternalUseOnlyConstructor, ReturnFunction, TEXT("ClaimedTarget"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(ClaimedTarget, UTWeaponFix_eventServerProjectileHitClaim_Parms), 0x0010000000000080, Z_Construct_UClass_AUTCharacter_NoRegister());
+			ReturnFunction->Bind();
+			ReturnFunction->StaticLink();
+#if WITH_METADATA
+			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
+			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("Server RPC: Client's fake projectile hit a target, validate with rewind"));
+#endif
+		}
+		return ReturnFunction;
+	}
 	UFunction* Z_Construct_UFunction_AUTWeaponFix_ServerStartFireFixed()
 	{
 		UObject* Outer=Z_Construct_UClass_AUTWeaponFix();
@@ -1727,10 +1942,19 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				OuterClass->LinkChild(Z_Construct_UFunction_AUTWeaponFix_OnRep_FireModeState());
 				OuterClass->LinkChild(Z_Construct_UFunction_AUTWeaponFix_ResendServerStartFireFixed());
 				OuterClass->LinkChild(Z_Construct_UFunction_AUTWeaponFix_ResendServerStopFireFixed());
+				OuterClass->LinkChild(Z_Construct_UFunction_AUTWeaponFix_ServerProjectileHitClaim());
 				OuterClass->LinkChild(Z_Construct_UFunction_AUTWeaponFix_ServerStartFireFixed());
 				OuterClass->LinkChild(Z_Construct_UFunction_AUTWeaponFix_ServerStopFireFixed());
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				UProperty* NewProp_ActiveServerProjectiles = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("ActiveServerProjectiles"), RF_Public|RF_Transient|RF_MarkAsNative) UArrayProperty(CPP_PROPERTY_BASE(ActiveServerProjectiles, AUTWeaponFix), 0x0020080000000000);
+				UProperty* NewProp_ActiveServerProjectiles_Inner = new(EC_InternalUseOnlyConstructor, NewProp_ActiveServerProjectiles, TEXT("ActiveServerProjectiles"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(FObjectInitializer(), EC_CppProperty, 0, 0x0000000000000000, Z_Construct_UScriptStruct_FActiveServerProjectile());
+				UProperty* NewProp_ProjectileRewindMinScale = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("ProjectileRewindMinScale"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(ProjectileRewindMinScale, AUTWeaponFix), 0x0020080000010005);
+				UProperty* NewProp_ProjectileRewindMaxPingMs = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("ProjectileRewindMaxPingMs"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(ProjectileRewindMaxPingMs, AUTWeaponFix), 0x0020080000010005);
+				UProperty* NewProp_ProjectileRewindFullPingMs = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("ProjectileRewindFullPingMs"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(ProjectileRewindFullPingMs, AUTWeaponFix), 0x0020080000010005);
+				UProperty* NewProp_ProjectileRewindMaxScale = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("ProjectileRewindMaxScale"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(ProjectileRewindMaxScale, AUTWeaponFix), 0x0020080000010005);
+				CPP_BOOL_PROPERTY_BITMASK_STRUCT(bEnableProjectileRewind, AUTWeaponFix, bool);
+				UProperty* NewProp_bEnableProjectileRewind = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("bEnableProjectileRewind"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(bEnableProjectileRewind, AUTWeaponFix), 0x0020080000010005, CPP_BOOL_PROPERTY_BITMASK(bEnableProjectileRewind, AUTWeaponFix), sizeof(bool), true);
 				UProperty* NewProp_PendingFakeProjectiles = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("PendingFakeProjectiles"), RF_Public|RF_Transient|RF_MarkAsNative) UArrayProperty(CPP_PROPERTY_BASE(PendingFakeProjectiles, AUTWeaponFix), 0x0020080000000000);
 				UProperty* NewProp_PendingFakeProjectiles_Inner = new(EC_InternalUseOnlyConstructor, NewProp_PendingFakeProjectiles, TEXT("PendingFakeProjectiles"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(FObjectInitializer(), EC_CppProperty, 0, 0x0000000000000000, Z_Construct_UScriptStruct_FPendingFakeProjectile());
 				UProperty* NewProp_NetcodeDelayedProjectile = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("NetcodeDelayedProjectile"), RF_Public|RF_Transient|RF_MarkAsNative) UStructProperty(CPP_PROPERTY_BASE(NetcodeDelayedProjectile, AUTWeaponFix), 0x0020080000000000, Z_Construct_UScriptStruct_FNetcodeDelayedProjectile());
@@ -1758,6 +1982,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTWeaponFix_OnRep_FireModeState(), "OnRep_FireModeState"); // 1980539534
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTWeaponFix_ResendServerStartFireFixed(), "ResendServerStartFireFixed"); // 1625835918
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTWeaponFix_ResendServerStopFireFixed(), "ResendServerStopFireFixed"); // 637136163
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTWeaponFix_ServerProjectileHitClaim(), "ServerProjectileHitClaim"); // 2922243742
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTWeaponFix_ServerStartFireFixed(), "ServerStartFireFixed"); // 2280730651
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTWeaponFix_ServerStopFireFixed(), "ServerStopFireFixed"); // 91513006
 				OuterClass->ClassConfigName = FName(TEXT("Game"));
@@ -1767,6 +1992,23 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("UTWeaponFix.h"));
 				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
 				MetaData->SetValue(OuterClass, TEXT("ObjectInitializerConstructorDeclared"), TEXT(""));
+				MetaData->SetValue(NewProp_ActiveServerProjectiles, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_ActiveServerProjectiles, TEXT("ToolTip"), TEXT("Server-side tracking of authoritative projectiles by EventIndex"));
+				MetaData->SetValue(NewProp_ProjectileRewindMinScale, TEXT("Category"), TEXT("Lag Compensation|Projectile Rewind"));
+				MetaData->SetValue(NewProp_ProjectileRewindMinScale, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_ProjectileRewindMinScale, TEXT("ToolTip"), TEXT("Minimum rewind scale at the falloff boundary"));
+				MetaData->SetValue(NewProp_ProjectileRewindMaxPingMs, TEXT("Category"), TEXT("Lag Compensation|Projectile Rewind"));
+				MetaData->SetValue(NewProp_ProjectileRewindMaxPingMs, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_ProjectileRewindMaxPingMs, TEXT("ToolTip"), TEXT("Ping (ms) above which NO rewind is applied. Linear falloff between Full and Max."));
+				MetaData->SetValue(NewProp_ProjectileRewindFullPingMs, TEXT("Category"), TEXT("Lag Compensation|Projectile Rewind"));
+				MetaData->SetValue(NewProp_ProjectileRewindFullPingMs, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_ProjectileRewindFullPingMs, TEXT("ToolTip"), TEXT("Ping (ms) below which max scale is applied"));
+				MetaData->SetValue(NewProp_ProjectileRewindMaxScale, TEXT("Category"), TEXT("Lag Compensation|Projectile Rewind"));
+				MetaData->SetValue(NewProp_ProjectileRewindMaxScale, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_ProjectileRewindMaxScale, TEXT("ToolTip"), TEXT("Max rewind scale at low ping (0.85 = 85% of half-RTT). Never full rewind."));
+				MetaData->SetValue(NewProp_bEnableProjectileRewind, TEXT("Category"), TEXT("Lag Compensation|Projectile Rewind"));
+				MetaData->SetValue(NewProp_bEnableProjectileRewind, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
+				MetaData->SetValue(NewProp_bEnableProjectileRewind, TEXT("ToolTip"), TEXT("Master toggle. Set to true in BP defaults to activate projectile rewind."));
 				MetaData->SetValue(NewProp_PendingFakeProjectiles, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
 				MetaData->SetValue(NewProp_PendingFakeProjectiles, TEXT("ToolTip"), TEXT("Added ClientViewRot"));
 				MetaData->SetValue(NewProp_NetcodeDelayedProjectile, TEXT("ModuleRelativePath"), TEXT("Public/UTWeaponFix.h"));
@@ -3109,8 +3351,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			ReturnPackage = CastChecked<UPackage>(StaticFindObjectFast(UPackage::StaticClass(), NULL, FName(TEXT("/Script/NetcodePlus")), false, false));
 			ReturnPackage->SetPackageFlags(PKG_CompiledIn | 0x00000000);
 			FGuid Guid;
-			Guid.A = 0x9E22EC4E;
-			Guid.B = 0x5A2FD302;
+			Guid.A = 0xD2AF26D1;
+			Guid.B = 0x04694EBB;
 			Guid.C = 0x00000000;
 			Guid.D = 0x00000000;
 			ReturnPackage->SetGuid(Guid);
