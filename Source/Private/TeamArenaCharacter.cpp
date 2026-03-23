@@ -515,7 +515,92 @@ void ATeamArenaCharacter::BeginPlay()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
-	Super::Tick(DeltaTime); // Runs stock logic
+	// --- Per-weapon hide: detect weapon switch and apply hide state ---
+	// Works for ALL weapons (stock and NetcodePlus) since TeamArenaCharacter
+	// is the character class for all players.
+	// UPROPERTY ensures LastEquippedWeapon is nulled by GC on weapon destroy (death/drop).
+	if (GetNetMode() != NM_DedicatedServer && IsLocallyControlled())
+	{
+		AUTWeapon* CurrentWeapon = GetWeapon();
+		// Only check when weapon actually changes — the pointer comparison
+		// is near-zero cost and skips 99.9% of frames instantly.
+		if (CurrentWeapon && CurrentWeapon != LastEquippedWeapon
+			&& !CurrentWeapon->IsPendingKillPending()
+			&& CurrentWeapon->GetMesh() && CurrentWeapon->GetMesh()->IsRegistered())
+		{
+			LastEquippedWeapon = CurrentWeapon;
+			// Check hide by class name (allows Lightning Gun and Sniper to hide independently)
+			FName HideKey = FName(*CurrentWeapon->GetClass()->GetName());
+			bool bShouldHide = false;
+			{
+				bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(HideKey);
+				bShouldHide = bHidden && *bHidden;
+			}
+
+			if (bShouldHide)
+			{
+				CurrentWeapon->GetMesh()->SetHiddenInGame(true);
+				if (FirstPersonMesh)
+				{
+					FirstPersonMesh->SetHiddenInGame(true);
+				}
+			}
+			else
+			{
+				CurrentWeapon->GetMesh()->SetHiddenInGame(false);
+				if (FirstPersonMesh)
+				{
+					FirstPersonMesh->SetHiddenInGame(false);
+				}
+			}
+		}
+		// Clear stale reference if weapon was removed (death, drop)
+		if (LastEquippedWeapon && (!CurrentWeapon || CurrentWeapon->IsPendingKillPending()))
+		{
+			LastEquippedWeapon = nullptr;
+		}
+	}
+
+	// --- PERF: Skip base class spawn protection material loop ---
+	// Base AUTCharacter::Tick (line 4698-4734) loops BodyMIs setting SpawnProtectionPct
+	// every frame. We handle spawn protection ourselves, so skip the base class work
+	// by temporarily clearing the flag. Saves ~27K material calls/sec.
+	bool bSavedSpawnProtectionEligible = bSpawnProtectionEligible;
+	if (bSpawnProtectionEligible && GetNetMode() != NM_DedicatedServer)
+	{
+		bSpawnProtectionEligible = false;
+	}
+
+	// --- PERF: Throttle OverlayMesh->MarkRenderStateDirty() ---
+	// Base AUTCharacter::Tick (line 4743) calls this EVERY FRAME as a workaround for
+	// an engine bug. We throttle to every 8th frame (60Hz at 480fps).
+	USkeletalMeshComponent* SavedOverlayMesh = nullptr;
+	if (OverlayMesh && OverlayMesh->IsRegistered() && GetNetMode() != NM_DedicatedServer)
+	{
+		OverlayDirtyFrameCounter++;
+		if (OverlayDirtyFrameCounter < 8)
+		{
+			// Hide OverlayMesh from Super::Tick so it won't MarkRenderStateDirty
+			SavedOverlayMesh = OverlayMesh;
+			OverlayMesh = nullptr;
+		}
+		else
+		{
+			OverlayDirtyFrameCounter = 0;
+			// Let Super::Tick handle it this frame (every 8th)
+		}
+	}
+
+	Super::Tick(DeltaTime);
+
+	// Restore OverlayMesh if we hid it
+	if (SavedOverlayMesh)
+	{
+		OverlayMesh = SavedOverlayMesh;
+	}
+
+	// Restore spawn protection flag
+	bSpawnProtectionEligible = bSavedSpawnProtectionEligible;
 
 	// Visuals are for clients only
 	if (GetNetMode() == NM_DedicatedServer)
@@ -538,13 +623,23 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			bShowGlowToViewer = false;
 		}
 
+		// --- PERF: Dirty flag — only update materials when state changes ---
+		// Values are constant within each state (glow on vs glow off).
+		// bLastShowGlowState initialized to 0xFF to force first-frame apply.
+		uint8 CurrentState = bShowGlowToViewer ? 1 : 0;
+		if (CurrentState == bLastShowGlowState)
+		{
+			return; // No state change, skip all material work
+		}
+		bLastShowGlowState = CurrentState;
+
+		static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
+		static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
+		static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
+
 		if (bShowGlowToViewer)
 		{
-			// 1. Get Base Team Color
 			FLinearColor BaseTeamColor = GetTeamColor();
-
-			// 2. Make it SUPER BRIGHT (Emissive Bloom)
-			// Multiply RGB by 20.0 to blow out HDR bloom, keep Alpha 1.0 for visibility
 			float BrightnessMult = 20.0f;
 			FLinearColor ObviousColor = FLinearColor(
 				BaseTeamColor.R * BrightnessMult,
@@ -553,18 +648,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				1.0f
 			);
 
-			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
-			static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
-			static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
-
 			for (UMaterialInstanceDynamic* MI : BodyMIs)
 			{
 				if (MI)
 				{
-					// Suppress stock effect
 					MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
-
-					// Apply Super Bright Team Color
 					MI->SetVectorParameterValue(NAME_HitFlashColor, ObviousColor);
 					MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.4f);
 				}
@@ -572,17 +660,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 		else
 		{
-			// TEAMMATES/SELF: Hide everything
-			static FName NAME_SpawnProtectionPct(TEXT("SpawnProtectionPct"));
-			static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
-			static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
-
 			for (UMaterialInstanceDynamic* MI : BodyMIs)
 			{
 				if (MI)
 				{
 					MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
-					// Use Transparent Black here too to prevent self-view artifacts
 					MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor(0.f, 0.f, 0.f, 0.f));
 					MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.0f);
 				}
@@ -593,6 +675,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	else if (bHasSpawnOverlay)
 	{
 		bHasSpawnOverlay = false;
+		bLastShowGlowState = 0xFF; // Reset dirty flag for next spawn
 
 		static FName NAME_HitFlashColor(TEXT("HitFlashColor"));
 		static FName NAME_FullBodyFlashPct(TEXT("FullBodyFlashPct"));
@@ -602,15 +685,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		{
 			if (MI)
 			{
-				// FIX: Use Transparent Black (0,0,0,0) instead of FLinearColor::Black (0,0,0,1).
-				// FLinearColor::Black has Alpha=1, which can cause the shader to blend a "Dark Layer" 
-				// onto the mesh depending on how the material is set up.
 				MI->SetVectorParameterValue(NAME_HitFlashColor, FLinearColor(0.f, 0.f, 0.f, 0.f));
-
-				// Reset interpolation alpha
 				MI->SetScalarParameterValue(NAME_FullBodyFlashPct, 0.0f);
-
-				// Explicitly ensure stock effect is off (safety check)
 				MI->SetScalarParameterValue(NAME_SpawnProtectionPct, 0.0f);
 			}
 		}

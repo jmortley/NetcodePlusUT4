@@ -17,11 +17,15 @@ public:
     {
         // --- FIX: Set variables directly in constructor instead of overriding functions ---
 
-        // Default is 92.f. Increase to allow larger smooth corrections.
-        MaxSmoothNetUpdateDist = 108.f;
+        // Default is 92.f. At 600fps, jumppad launches (1200-1800 u/s) produce
+        // corrections up to 180u due to tick-timing differences. Must smooth-blend
+        // all of these instead of clamping.
+        MaxSmoothNetUpdateDist = 180.f;
 
-        // Default is 140.f. Increase to prevent snapping on medium corrections.
-        NoSmoothNetUpdateDist = 166.f;
+        // Default is 140.f. Above this distance, corrections HARD SNAP with zero
+        // smoothing. At 600fps on a jumppad, errors can reach 160u+. Set high enough
+        // that only cheats/teleports trigger hard snap.
+        NoSmoothNetUpdateDist = 300.f;
     }
 
     typedef FNetworkPredictionData_Client_UTChar Super;
@@ -42,10 +46,11 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     // 50ms (was 100ms). At 400 FPS, halves accumulated prediction error per
     // correction (20 predicted frames instead of 40). Negligible bandwidth cost.
 	MinTimeBetweenClientAdjustments = 0.05f;
-    // 40 units (was 15). Rocket knockback at 400+ FPS produces 20-35u corrections.
-    // These now smooth-blend instead of hard-snapping. At 60 FPS corrections are
-    // typically <15u so behavior is unchanged.
-	LargeCorrectionThreshold = 40.f;
+    // 80 units (was 15, then 40). At 600fps, jumppad corrections can reach 60-80u.
+    // Above this threshold, server sends corrections more aggressively (every 50ms
+    // instead of 100ms), which is desirable during high-velocity events — more
+    // frequent corrections means each one is smaller.
+	LargeCorrectionThreshold = 80.f;
     // --- HIGH-FPS FIX #2: Dodge timing tolerance ---
     // Prevents server rejection when client/server timestamps differ by microseconds
     DodgeCooldownTolerance = 0.1f;

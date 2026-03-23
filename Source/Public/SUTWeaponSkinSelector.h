@@ -1,4 +1,4 @@
-// SUTWeaponSkinSelector.h — Slate weapon skin picker for NetcodePlus
+// SUTWeaponSkinSelector.h — NetcodePlus weapon settings panel (skins + hide)
 #pragma once
 
 #include "SlateBasics.h"
@@ -6,10 +6,24 @@
 
 class UUTLocalPlayer;
 
+/** Free all cached skin assets (call on module shutdown or map change) */
+void SUTWeaponSkinSelector_CleanupCache();
+
+/** Info about a discovered NetcodePlus weapon */
+struct FNetcodePlusWeaponInfo
+{
+	FName Tag;               // WeaponSkinCustomizationTag (used for skin matching)
+	FName HideKey;           // Unique key for hide state (class name — avoids shared-tag collisions)
+	FString DisplayName;     // Human-readable name
+	UClass* WeaponClass;     // The UClass itself
+	bool bHasSkins;          // Whether any skin data assets exist for this weapon
+};
+
 /**
- * Simple weapon skin selector overlay.
- * Opens via "weaponskins" console command, groups skins by weapon tag,
- * applies via the existing ServerReceiveWeaponSkin RPC.
+ * Weapon settings panel for NetcodePlus.
+ * Shows all weapons inheriting AUTWeaponFix.
+ * Weapons with skins get a skin selector. All weapons get a hide checkbox.
+ * Settings persist to Mod.ini.
  */
 class SUTWeaponSkinSelector : public SCompoundWidget
 {
@@ -18,8 +32,6 @@ class SUTWeaponSkinSelector : public SCompoundWidget
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);
-
-	/** Remove this widget from the viewport */
 	void ClosePanel();
 
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
@@ -28,51 +40,48 @@ class SUTWeaponSkinSelector : public SCompoundWidget
 private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
 
-	/** All discovered weapon skin assets grouped by customization tag */
-	TMap<FName, TArray<UUTWeaponSkin*>> SkinsByWeapon;
+	/** Discovered NetcodePlus weapons */
+	TArray<FNetcodePlusWeaponInfo> Weapons;
 
-	/** Ordered list of weapon tags for display */
-	TArray<FName> WeaponTags;
+	/** Skins grouped by weapon tag */
+	TMap<FName, TArray<UUTWeaponSkin*>> SkinsByTag;
 
-	/** Human-readable names for weapon tags */
-	TMap<FName, FString> WeaponDisplayNames;
-
-	/** Currently selected weapon tag index */
+	/** Currently selected weapon index */
 	int32 CurrentWeaponIndex;
 
-	/** Currently selected skin index within the weapon's skin list */
-	int32 CurrentSkinIndex;
+	/** Currently selected skin index per weapon tag (0 = default) */
+	TMap<FName, int32> SelectedSkinIndex;
 
-	/** Container for skin buttons — rebuilt when weapon selection changes */
-	TSharedPtr<SVerticalBox> SkinListContainer;
+	/** Per-weapon hide state (mirrors AUTWeaponFix::HiddenWeaponsByTag) */
+	TMap<FName, bool> HideState;
 
-	/** Container for weapon buttons */
+	/** UI containers */
 	TSharedPtr<SVerticalBox> WeaponListContainer;
+	TSharedPtr<SVerticalBox> SkinListContainer;
+	TSharedPtr<STextBlock> StatusText;
 
-	/** Preview text showing current selection */
-	TSharedPtr<STextBlock> PreviewText;
+	/** Discover all weapon classes inheriting AUTWeaponFix */
+	void GatherWeapons();
 
-	/** Gather all UUTWeaponSkin assets from the asset registry */
-	void GatherWeaponSkins();
+	/** Find matching weapon skin data assets */
+	void GatherSkins();
 
-	/** Derive a display name from the weapon class path */
-	FString GetWeaponDisplayName(const FString& WeaponClassPath);
+	/** Load current settings from Mod.ini + AUTWeaponFix statics */
+	void LoadSettings();
 
-	/** Rebuild the skin list for the currently selected weapon */
+	/** Save settings to Mod.ini and apply */
+	void SaveAndApply();
+
+	/** Rebuild UI lists */
+	void RebuildWeaponList();
 	void RebuildSkinList();
 
-	/** Rebuild the weapon list (highlights current selection) */
-	void RebuildWeaponList();
-
-	/** Apply the currently selected skin */
-	void ApplySelectedSkin();
-
-	/** Button handlers */
+	/** Handlers */
 	FReply OnWeaponClicked(int32 Index);
 	FReply OnSkinClicked(int32 Index);
 	FReply OnApplyClicked();
 	FReply OnCloseClicked();
+	void OnHideCheckChanged(ECheckBoxState NewState, FName Tag);
 
-	/** Style helpers */
 	FSlateBrush BackgroundBrush;
 };

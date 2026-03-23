@@ -110,4 +110,24 @@ protected:
     bool bHasCachedPC;
 
 	bool bHasSpawnOverlay = false;
+
+	// --- Performance: Spawn protection dirty flag ---
+	// Tracks last bShowGlowToViewer state to skip redundant material updates
+	// Initialized to 0xFF (invalid) to force first-frame apply
+	uint8 bLastShowGlowState = 0xFF;
+
+	// --- Performance: OverlayMesh throttle ---
+	// Counter for throttling OverlayMesh->MarkRenderStateDirty() to every 8th frame
+	uint8 OverlayDirtyFrameCounter = 0;
+
+	// --- Per-weapon hide tracking ---
+	// Tracks last equipped weapon to detect weapon switches and apply hide state
+	UPROPERTY()
+	AUTWeapon* LastEquippedWeapon = nullptr;
+
+	// Whether the 1P mesh transform is currently offset for hidden weapon beam origin
+	bool bHiddenWeaponTransformApplied = false;
+
+	// Saved original transform to restore when weapon is shown
+	FTransform SavedFirstPersonMeshTransform;
 };

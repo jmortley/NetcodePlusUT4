@@ -18,6 +18,7 @@
 #include "UTCTFScoreboard.h"
 #include "UTCharacterVoice.h"
 #include "UTCTFScoring.h"
+#include "UTFlag.h"
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -35,12 +36,20 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	GracePeriodDuration = 10;
 	bEndGameAdvantageOnlyWithinOneCap = true;
 
+	// Spawn configuration
+	FlagBaseProximityRadius = 4000.f;
+	FlagSpawnPenaltyRadius = 3500.f;
+	FlagCarrierSpawnPenalty = 15.f;
+	DroppedFlagSpawnPenalty = 10.f;
+	FlagCarrierLOSPenalty = 5.f;
+
 	// Internal state
 	AdvantageTimeRemaining = 0;
 	GracePeriodTimeRemaining = 0;
 	bGracePeriodActive = false;
 	LastAdvantageCapTime = 0.f;
 	bAdvantageCapEndedPeriod = false;
+	LastScoreObjectTime = 0.f;
 }
 
 void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -65,6 +74,98 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 bool ANCPlusCTFGameMode::SupportsInstantReplay() const
 {
 	return true;
+}
+
+// ── Spawn System ────────────────────────────────────────────────────
+
+float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
+{
+	float Result = Super::RatePlayerStart(P, Player);
+
+	if (Result <= 0.f || !CTFGameState || !Player)
+	{
+		return Result;
+	}
+
+	AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+	if (!PS || !PS->Team)
+	{
+		return Result;
+	}
+
+	const uint8 PlayerTeamNum = PS->Team->TeamIndex;
+	const FVector StartLoc = P->GetActorLocation();
+	static FName NAME_CTFSpawnCheck = FName(TEXT("CTFSpawnCheck"));
+
+	for (AUTCTFFlagBase* FlagBase : CTFGameState->FlagBases)
+	{
+		if (!FlagBase || !FlagBase->MyFlag)
+		{
+			continue;
+		}
+
+		AUTFlag* Flag = FlagBase->MyFlag;
+		const uint8 FlagTeamNum = FlagBase->GetTeamNum();
+		const FName FlagState = FlagBase->GetCarriedObjectState();
+		const FVector FlagBaseLoc = FlagBase->GetActorLocation();
+
+		// Only process OUR flag — "what is the enemy doing with our flag?"
+		if (FlagTeamNum != PlayerTeamNum)
+		{
+			continue;
+		}
+
+		if (FlagState == CarriedObjectState::Held && Flag->HoldingPawn)
+		{
+			// Enemy is carrying our flag
+			const FVector CarrierLoc = Flag->HoldingPawn->GetActorLocation();
+
+			// Don't let defenders spawn near the enemy flag carrier when carrier is in our base
+			float CarrierToBaseDist = (CarrierLoc - FlagBaseLoc).Size();
+			if (CarrierToBaseDist < FlagBaseProximityRadius)
+			{
+				float SpawnToCarrierDist = (StartLoc - CarrierLoc).Size();
+				if (SpawnToCarrierDist < FlagSpawnPenaltyRadius)
+				{
+					float DistanceFactor = 1.f - (SpawnToCarrierDist / FlagSpawnPenaltyRadius);
+					Result -= FlagCarrierSpawnPenalty * DistanceFactor;
+				}
+			}
+
+			// LOS check: penalize spawns with direct sightline to enemy flag carrier (anywhere on map)
+			FVector EyeLoc = StartLoc + FVector(0.f, 0.f, 64.f); // approximate eye height
+			FVector CarrierEyeLoc = CarrierLoc + FVector(0.f, 0.f, Flag->HoldingPawn->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+
+			if (!GetWorld()->LineTraceTestByChannel(
+				EyeLoc,
+				CarrierEyeLoc,
+				COLLISION_TRACE_WEAPONNOCHARACTER,
+				FCollisionQueryParams(NAME_CTFSpawnCheck, false)))
+			{
+				// Clear LOS to enemy flag carrier — bad spawn
+				Result -= FlagCarrierLOSPenalty;
+			}
+		}
+		else if (FlagState == CarriedObjectState::Dropped)
+		{
+			// Our flag is dropped — don't let friendlies spawn near it if it's in our base area
+			// Prevents free flag returns from spawn
+			const FVector DroppedFlagLoc = Flag->GetActorLocation();
+			float FlagToBaseDist = (DroppedFlagLoc - FlagBaseLoc).Size();
+
+			if (FlagToBaseDist < FlagBaseProximityRadius)
+			{
+				float SpawnToFlagDist = (StartLoc - DroppedFlagLoc).Size();
+				if (SpawnToFlagDist < FlagSpawnPenaltyRadius)
+				{
+					float DistanceFactor = 1.f - (SpawnToFlagDist / FlagSpawnPenaltyRadius);
+					Result -= DroppedFlagSpawnPenalty * DistanceFactor;
+				}
+			}
+		}
+	}
+
+	return FMath::Max(Result, 0.2f);
 }
 
 float ANCPlusCTFGameMode::GetTravelDelay()
@@ -329,6 +430,19 @@ void ANCPlusCTFGameMode::DefaultTimer()
 
 void ANCPlusCTFGameMode::ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn, AUTPlayerState* Holder, FName Reason)
 {
+	// Double-capture prevention: reject FlagCapture within 0.5s of last cap.
+	// Handles maps with no geometry between flag bases where both teams
+	// could trigger OnOverlapBegin on the same frame.
+	if (Reason == FName("FlagCapture"))
+	{
+		float CurrentTime = GetWorld()->GetTimeSeconds();
+		if (CurrentTime < LastScoreObjectTime)
+		{
+			return;
+		}
+		LastScoreObjectTime = CurrentTime + 0.5f;
+	}
+
 	Super::ScoreObject_Implementation(GameObject, HolderPawn, Holder, Reason);
 
 	if (Holder != nullptr && Holder->Team != nullptr && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())

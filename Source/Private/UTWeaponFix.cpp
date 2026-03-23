@@ -12,6 +12,7 @@
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
 #include "UTWeaponSkin.h"
+#include "UObject/UObjectIterator.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
@@ -52,6 +53,51 @@ static int32 GetSnappedProjectileHz()
 
 
 //extern FCollisionResponseParams WorldResponseParams;
+
+TMap<FName, bool> AUTWeaponFix::HiddenWeaponsByTag;
+bool AUTWeaponFix::bWeaponSettingsLoaded = false;
+
+static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings");
+
+void AUTWeaponFix::LoadWeaponSettings()
+{
+	if (bWeaponSettingsLoaded) return;
+	bWeaponSettingsLoaded = true;
+
+	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// Load hide settings — read keys by class name
+	// We iterate weapon classes to get all possible class names, then check Mod.ini for each
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		if (It->IsChildOf(AUTWeapon::StaticClass()) && !It->HasAnyClassFlags(CLASS_Abstract))
+		{
+			FName HideKey = FName(*It->GetName());
+			if (HiddenWeaponsByTag.Contains(HideKey)) continue;
+
+			FString Key = FString::Printf(TEXT("Hide.%s"), *HideKey.ToString());
+			FString Value;
+			if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *Key, Value, ModIniPath))
+			{
+				HiddenWeaponsByTag.Add(HideKey, Value == TEXT("1"));
+			}
+		}
+	}
+}
+
+void AUTWeaponFix::SaveWeaponSettings()
+{
+	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// Save hide settings
+	for (auto& Pair : HiddenWeaponsByTag)
+	{
+		FString Key = FString::Printf(TEXT("Hide.%s"), *Pair.Key.ToString());
+		GConfig->SetString(WEAPON_SETTINGS_SECTION, *Key, Pair.Value ? TEXT("1") : TEXT("0"), ModIniPath);
+	}
+
+	GConfig->Flush(false, ModIniPath);
+}
 
 AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
@@ -2818,38 +2864,109 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 
 	Super::BringUp(OverflowTime);
 
+	// Load settings from Mod.ini on first weapon equip
+	if (!bWeaponSettingsLoaded)
+	{
+		LoadWeaponSettings();
+	}
+
+	// Per-weapon hide: check if this weapon's class is marked hidden
+	FName HideKey = FName(*GetClass()->GetName());
+	if (UTOwner)
+	{
+		bool* bHidden = HiddenWeaponsByTag.Find(HideKey);
+		if (bHidden && *bHidden)
+		{
+			if (Mesh)
+			{
+				Mesh->SetHiddenInGame(true);
+			}
+			if (UTOwner->FirstPersonMesh)
+			{
+				UTOwner->FirstPersonMesh->SetHiddenInGame(true);
+
+				// Reset 1P mesh to default relative transform so the muzzle socket
+				// is at a consistent position regardless of which weapon's VeryLowMeshOffset
+				// was applied by UpdateWeaponHand. Without this, swapping between
+				// hidden weapons shifts the beam origin because each weapon has different offsets.
+				USkeletalMeshComponent* FPMesh = UTOwner->FirstPersonMesh;
+				USkeletalMeshComponent* FPMeshArchetype = Cast<USkeletalMeshComponent>(FPMesh->GetArchetype());
+				if (FPMeshArchetype)
+				{
+					FPMesh->SetRelativeLocationAndRotation(
+						FPMeshArchetype->RelativeLocation,
+						FPMeshArchetype->RelativeRotation
+					);
+				}
+			}
+		}
+	}
+
 	// FIX: Weapon skin 1st person material gets clobbered by SetSkin() inside
 	// AttachToOwner_Implementation (UTWeapon.cpp:956). SetSkin saves the default
 	// mesh materials to SavedMeshMaterials BEFORE weapon skins are applied.
 	// Later SetSkin(null) calls restore from SavedMeshMaterials, overwriting
 	// the weapon skin. Fix: re-apply weapon skin after BringUp and patch
 	// SavedMeshMaterials so future restores preserve the skin.
+	// Apply to ALL material slots — some weapons (Flak Cannon) have multiple
+	// slots that all need the skin material. Epic's UpdateWeaponSkin only does slot 0.
 	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
 	{
-		Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(0, WeaponSkin->FPSMaterial);
-		if (SavedMeshMaterials.Num() > 0)
+		int32 NumSlots = Mesh->GetNumMaterials();
+		for (int32 i = 0; i < NumSlots; i++)
 		{
-			SavedMeshMaterials[0] = Mesh->GetMaterial(0);
+			Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
+			if (SavedMeshMaterials.IsValidIndex(i))
+			{
+				SavedMeshMaterials[i] = Mesh->GetMaterial(i);
+			}
 		}
 	}
 }
 
 
 
+void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation)
+{
+	// When weapon is hidden, spawn beam effects from camera center
+	// instead of the muzzle socket (which is at a wrong position due to VeryLowMeshOffset).
+	// This makes beams fire straight from the crosshair, matching projectile behavior.
+	FName HideKey = FName(*GetClass()->GetName());
+	bool* bHidden = HiddenWeaponsByTag.Find(HideKey);
+	if (bHidden && *bHidden && UTOwner && UTOwner->CharacterCameraComponent)
+	{
+		SpawnRotation = UTOwner->CharacterCameraComponent->GetComponentRotation();
+		// Offset forward and slightly down from camera so the beam is visible
+		// (spawning at exact camera position makes the beam edge-on/invisible when stationary)
+		FVector Forward = SpawnRotation.Vector();
+		FVector Down = FVector(0.0f, 0.0f, -1.0f);
+		SpawnLocation = UTOwner->CharacterCameraComponent->GetComponentLocation()
+			+ Forward * 25.0f   // Forward from camera
+			+ Down * 35.0f;     // Stomach height — roughly halfway between eye and feet
+		return;
+	}
+
+	Super::GetImpactSpawnPosition(TargetLoc, SpawnLocation, SpawnRotation);
+}
+
 void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
 	Super::SetSkin(NewSkin);
 
 	// FIX: Super::SetSkin restores from SavedMeshMaterials when NewSkin is null,
-	// which overwrites the weapon skin on slot 0. Re-apply weapon skin after
-	// every SetSkin call to ensure it persists through body color flashes,
-	// team overlays, and any other material restore cycle.
+	// which overwrites the weapon skin. Re-apply weapon skin after every SetSkin
+	// call to persist through body color flashes, team overlays, etc.
+	// Apply to ALL slots — Flak Cannon and others have multiple material slots.
 	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
 	{
-		Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(0, WeaponSkin->FPSMaterial);
-		if (SavedMeshMaterials.Num() > 0)
+		int32 NumSlots = Mesh->GetNumMaterials();
+		for (int32 i = 0; i < NumSlots; i++)
 		{
-			SavedMeshMaterials[0] = Mesh->GetMaterial(0);
+			Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
+			if (SavedMeshMaterials.IsValidIndex(i))
+			{
+				SavedMeshMaterials[i] = Mesh->GetMaterial(i);
+			}
 		}
 	}
 }

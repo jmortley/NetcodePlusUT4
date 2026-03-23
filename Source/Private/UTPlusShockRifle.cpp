@@ -122,9 +122,15 @@ void AUTPlusShockRifle::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Throttle screen texture updates to 30Hz — ammo counter doesn't need 480fps updates
 	if (ScreenTexture != NULL && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
 	{
-		ScreenTexture->FastUpdateResource();
+		const float ScreenUpdateInterval = 1.0f / 30.0f;
+		if (GetWorld()->TimeSeconds - LastScreenUpdateTime >= ScreenUpdateInterval)
+		{
+			LastScreenUpdateTime = GetWorld()->TimeSeconds;
+			ScreenTexture->FastUpdateResource();
+		}
 	}
 }
 

@@ -23,7 +23,7 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Impressive")
 	int32 ImpressiveStreak = 0;
 
-	// BP event you’ll use to play the sound / widget
+	// BP event youï¿½ll use to play the sound / widget
 	UFUNCTION(BlueprintImplementableEvent, Category = "Impressive")
 	void OnImpressive();
 
@@ -85,6 +85,9 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	UPROPERTY(BlueprintReadWrite, Category = Mesh)
 	float LastClientKillTime;
 
+	/** Last time screen texture was updated (for 30Hz throttle) */
+	float LastScreenUpdateTime = 0.0f;
+
 	virtual void SetupSpecialMaterials() override;
 
 	UFUNCTION()
@@ -95,6 +98,8 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	virtual void NotifyKillWhileHolding_Implementation(TSubclassOf<UDamageType> DmgType) override
 	{
 		LastClientKillTime = GetWorld()->TimeSeconds;
+		// Force immediate screen update so kill notification displays instantly
+		LastScreenUpdateTime = 0.0f;
 	}
 
 	virtual UAnimMontage* GetFiringAnim(uint8 FireMode, bool bOnHands = false) const;

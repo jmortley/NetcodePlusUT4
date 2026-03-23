@@ -131,7 +131,22 @@ public:
 
     virtual void BeginPlay() override;
     static int32 GetTargetProjectileTickRate();
+
+    /** Per-weapon hide state — keyed by WeaponSkinCustomizationTag.
+     *  Set via "weaponskins" menu or "weaponhand hidden/show" console command.
+     *  BringUp() checks this to hide 1P mesh on weapon switch. */
+    static TMap<FName, bool> HiddenWeaponsByTag;
+
+    /** Load weapon settings (skins + hide state) from Mod.ini. Called once on first BringUp. */
+    static void LoadWeaponSettings();
+
+    /** Save weapon settings to Mod.ini. */
+    static void SaveWeaponSettings();
+
+    /** Whether settings have been loaded from Mod.ini this session */
+    static bool bWeaponSettingsLoaded;
     //~ Begin AUTWeapon Interface
+    virtual void GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation) override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
     virtual void PostInitProperties() override;
@@ -149,6 +164,7 @@ public:
     virtual FVector GetFireStartLoc(uint8 FireMode = 255) override;
     virtual FRotator GetBaseFireRotation() override;
     virtual void BringUp(float OverflowTime) override;
+    virtual void SetSkin(UMaterialInterface* NewSkin) override;
     void ClearPendingFakeProjectiles();
     void DeferredGotoActiveState(uint8 FireModeNum);
     //~ End AUTWeapon Interface

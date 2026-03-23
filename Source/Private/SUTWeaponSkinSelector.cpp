@@ -1,43 +1,49 @@
-// SUTWeaponSkinSelector.cpp — Slate weapon skin picker implementation
+// SUTWeaponSkinSelector.cpp — NetcodePlus weapon settings implementation
 #include "SUTWeaponSkinSelector.h"
 #include "UTLocalPlayer.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
+#include "UTWeaponFix.h"
 #include "UTWeaponSkin.h"
 #include "UTProfileSettings.h"
+#include "UTGameplayStatics.h"
 #include "AssetRegistryModule.h"
 
 #define LOCTEXT_NAMESPACE "WeaponSkins"
+
+/** Static cache — skins only loaded once per session.
+ *  Skin pointers are AddToRoot'd to prevent GC while cached. */
+static bool bSkinsCached = false;
+static TMap<FName, TArray<UUTWeaponSkin*>> CachedSkinsByTag;
+static TArray<FNetcodePlusWeaponInfo> CachedWeapons;
+static TArray<UUTWeaponSkin*> CachedSkinGCRefs; // Prevents GC of cached skin assets
 
 void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
 	CurrentWeaponIndex = 0;
-	CurrentSkinIndex = 0;
 
-	// Semi-transparent dark background
 	BackgroundBrush.TintColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.85f);
 
-	GatherWeaponSkins();
+	GatherWeapons();
+	GatherSkins();
+	LoadSettings();
 
 	ChildSlot
 	[
-		// Full-screen overlay with centered panel
 		SNew(SOverlay)
 		+ SOverlay::Slot()
 		[
-			// Dim background
 			SNew(SBorder)
 			.BorderImage(&BackgroundBrush)
 			.HAlign(HAlign_Center)
 			.VAlign(VAlign_Center)
 			[
-				// Main panel — fixed size
 				SNew(SBox)
-				.WidthOverride(700.0f)
-				.HeightOverride(500.0f)
+				.WidthOverride(750.0f)
+				.HeightOverride(520.0f)
 				[
 					SNew(SBorder)
 					.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
@@ -52,8 +58,8 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 						.Padding(0, 0, 0, 8)
 						[
 							SNew(STextBlock)
-							.Text(LOCTEXT("Title", "Weapon Skins"))
-							.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 20))
+							.Text(LOCTEXT("Title", "NetcodePlus Weapon Settings"))
+							.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 18))
 							.ColorAndOpacity(FLinearColor::White)
 						]
 
@@ -63,9 +69,9 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 						[
 							SNew(SHorizontalBox)
 
-							// Left: Weapon list
+							// Left: Weapon list with hide checkboxes
 							+ SHorizontalBox::Slot()
-							.FillWidth(0.35f)
+							.FillWidth(0.40f)
 							.Padding(0, 0, 6, 0)
 							[
 								SNew(SBorder)
@@ -83,7 +89,7 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 
 							// Right: Skin list for selected weapon
 							+ SHorizontalBox::Slot()
-							.FillWidth(0.65f)
+							.FillWidth(0.60f)
 							[
 								SNew(SBorder)
 								.BorderImage(FCoreStyle::Get().GetBrush("GenericWhiteBox"))
@@ -104,13 +110,13 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 						.AutoHeight()
 						.Padding(0, 6, 0, 4)
 						[
-							SAssignNew(PreviewText, STextBlock)
-							.Text(LOCTEXT("SelectSkin", "Select a weapon, then choose a skin."))
+							SAssignNew(StatusText, STextBlock)
+							.Text(LOCTEXT("SelectWeapon", "Select a weapon to configure skins and visibility."))
 							.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
 							.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.0f))
 						]
 
-						// Buttons: Apply | Close
+						// Buttons
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.HAlign(HAlign_Right)
@@ -124,7 +130,7 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 								.OnClicked(this, &SUTWeaponSkinSelector::OnApplyClicked)
 								[
 									SNew(STextBlock)
-									.Text(LOCTEXT("Apply", "Apply"))
+									.Text(LOCTEXT("Apply", "Apply & Save"))
 									.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 14))
 								]
 							]
@@ -150,79 +156,337 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 	RebuildSkinList();
 }
 
-/** Static cache — persists across open/close so assets only load once per session */
-static TMap<FName, TArray<UUTWeaponSkin*>> CachedSkinsByWeapon;
-static TArray<FName> CachedWeaponTags;
-static TMap<FName, FString> CachedWeaponDisplayNames;
-static bool bSkinsCached = false;
-
-void SUTWeaponSkinSelector::GatherWeaponSkins()
+void SUTWeaponSkinSelector::GatherWeapons()
 {
-	// Use cached data if available — no loading freeze on subsequent opens
+	Weapons.Empty();
+
+	bool bHasInventory = false;
+
+	// PRIMARY: Discover weapons from player's current inventory (in-game)
+	// One entry per weapon INSTANCE — no deduplication by tag.
+	// This means Lightning Gun and Sniper show separately even if they share a tag.
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		AUTCharacter* UTChar = Cast<AUTCharacter>(PlayerOwner->PlayerController->GetPawn());
+		if (UTChar)
+		{
+			for (TInventoryIterator<AUTWeapon> It(UTChar); It; ++It)
+			{
+				AUTWeapon* Weapon = *It;
+				if (!Weapon) continue;
+				FName Tag = Weapon->WeaponSkinCustomizationTag;
+				if (Tag == NAME_None) continue;
+
+				FNetcodePlusWeaponInfo Info;
+				Info.Tag = Tag;
+				Info.HideKey = FName(*Weapon->GetClass()->GetName());
+				Info.WeaponClass = Weapon->GetClass();
+				Info.bHasSkins = false;
+
+				// Use the weapon's actual display name or clean class name
+				FString ClassName = Weapon->GetClass()->GetName();
+				// Strip common prefixes for cleaner display
+				ClassName.ReplaceInline(TEXT("BP_"), TEXT(""));
+				ClassName.ReplaceInline(TEXT("_C"), TEXT(""));
+				ClassName.ReplaceInline(TEXT("UTWeap_"), TEXT(""));
+				ClassName.ReplaceInline(TEXT("UTPlusShockRifle"), TEXT("Shock Rifle"));
+				ClassName.ReplaceInline(TEXT("UTPlusSniper"), TEXT("Sniper Rifle"));
+				ClassName.ReplaceInline(TEXT("UTPlusFlakCannon"), TEXT("Flak Cannon"));
+				ClassName.ReplaceInline(TEXT("UTWeap_LinkGun_Plus"), TEXT("Link Gun"));
+				ClassName.ReplaceInline(TEXT("LinkGun_Plus"), TEXT("Link Gun"));
+				ClassName.ReplaceInline(TEXT("_"), TEXT(" "));
+				Info.DisplayName = ClassName;
+
+				Weapons.Add(Info);
+				bHasInventory = true;
+			}
+		}
+	}
+
+	// FALLBACK: If not in-game (main menu), use cached weapon tags from Mod.ini
+	if (!bHasInventory)
+	{
+		// Use cached weapons from last session if available
+		if (CachedWeapons.Num() > 0)
+		{
+			Weapons = CachedWeapons;
+		}
+		else
+		{
+			// Last resort: read weapon tags from Mod.ini keys
+			FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+			TSet<FName> SeenTags;
+
+			// Scan for Hide.* and Skin.* keys to discover known weapons
+			// This is imperfect but gives us something to show
+			for (const auto& Prefix : { TEXT("Hide."), TEXT("Skin.") })
+			{
+				// We can't enumerate keys easily, but the tags we know about
+				// from a previous session are in the static HiddenWeaponsByTag
+				for (auto& Pair : AUTWeaponFix::HiddenWeaponsByTag)
+				{
+					if (SeenTags.Contains(Pair.Key)) continue;
+					SeenTags.Add(Pair.Key);
+
+					FNetcodePlusWeaponInfo Info;
+					Info.Tag = Pair.Key;
+					Info.HideKey = Pair.Key; // Fallback: use tag as hide key
+					Info.WeaponClass = nullptr;
+					Info.bHasSkins = false;
+
+					FString TagStr = Pair.Key.ToString();
+					TagStr.ReplaceInline(TEXT("_Skins"), TEXT(""));
+					TagStr.ReplaceInline(TEXT("_"), TEXT(" "));
+					Info.DisplayName = TagStr;
+
+					Weapons.Add(Info);
+				}
+			}
+		}
+	}
+
+	// Sort alphabetically
+	Weapons.Sort([](const FNetcodePlusWeaponInfo& A, const FNetcodePlusWeaponInfo& B)
+	{
+		return A.DisplayName < B.DisplayName;
+	});
+
+	// Cache for main menu fallback next time
+	if (bHasInventory)
+	{
+		CachedWeapons = Weapons;
+	}
+}
+
+void SUTWeaponSkinSelector::GatherSkins()
+{
 	if (bSkinsCached)
 	{
-		SkinsByWeapon = CachedSkinsByWeapon;
-		WeaponTags = CachedWeaponTags;
-		WeaponDisplayNames = CachedWeaponDisplayNames;
+		SkinsByTag = CachedSkinsByTag;
+		// Update bHasSkins on weapons
+		for (auto& W : Weapons)
+		{
+			W.bHasSkins = SkinsByTag.Contains(W.Tag) && SkinsByTag[W.Tag].Num() > 0;
+		}
 		return;
 	}
 
-	SkinsByWeapon.Empty();
-	WeaponTags.Empty();
-	WeaponDisplayNames.Empty();
+	SkinsByTag.Empty();
 
-	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AR = ARM.Get();
 
 	TArray<FAssetData> AssetList;
-	AssetRegistry.GetAssetsByClass(UUTWeaponSkin::StaticClass()->GetFName(), AssetList, true);
+	AR.GetAssetsByClass(UUTWeaponSkin::StaticClass()->GetFName(), AssetList, true);
 
+	// Build a map of weapon class → tag from our weapon list
+	// Also build set of valid weapon classes for skin matching
+	TMap<FString, FName> WeaponClassToTag; // WeaponType class path → tag
+	for (const auto& W : Weapons)
+	{
+		if (W.WeaponClass)
+		{
+			WeaponClassToTag.Add(W.WeaponClass->GetPathName(), W.Tag);
+		}
+	}
+
+	TSet<FString> SeenSkinPaths; // Deduplicate
 	for (const FAssetData& Asset : AssetList)
 	{
 		UUTWeaponSkin* Skin = Cast<UUTWeaponSkin>(Asset.GetAsset());
 		if (!Skin) continue;
+		if (Skin->WeaponSkinCustomizationTag == NAME_None) continue;
 
-		FName Tag = Skin->WeaponSkinCustomizationTag;
-		if (Tag == NAME_None) continue;
+		// Check if this skin's WeaponType matches any weapon in our inventory
+		FString SkinWeaponType = Skin->WeaponType.ToString();
+		if (SkinWeaponType.IsEmpty()) continue;
 
-		TArray<UUTWeaponSkin*>& Skins = SkinsByWeapon.FindOrAdd(Tag);
-		Skins.Add(Skin);
+		// Try to match: the skin's WeaponType might be a parent class of our weapon
+		// or it might be the exact class. Check if any of our weapon classes
+		// match or are children of the skin's WeaponType.
+		bool bMatchesInventory = false;
+		FName MatchedTag = NAME_None;
 
-		if (!WeaponTags.Contains(Tag))
+		for (const auto& W : Weapons)
 		{
-			WeaponTags.Add(Tag);
-			FString TagStr = Tag.ToString();
-			TagStr.ReplaceInline(TEXT("_Skins"), TEXT(""));
-			TagStr.ReplaceInline(TEXT("_"), TEXT(" "));
-			WeaponDisplayNames.Add(Tag, TagStr);
+			if (!W.WeaponClass) continue;
+
+			// Direct class path match
+			if (SkinWeaponType.Contains(W.WeaponClass->GetName()))
+			{
+				bMatchesInventory = true;
+				MatchedTag = W.Tag;
+				break;
+			}
+
+			// Check if our weapon is a child of the skin's target class
+			UClass* SkinTargetClass = Skin->WeaponType.TryLoadClass<AUTWeapon>();
+			if (SkinTargetClass && W.WeaponClass->IsChildOf(SkinTargetClass))
+			{
+				bMatchesInventory = true;
+				MatchedTag = W.Tag;
+				break;
+			}
 		}
+
+		if (!bMatchesInventory || MatchedTag == NAME_None) continue;
+
+		// Deduplicate
+		FString SkinPath = Skin->GetPathName();
+		if (SeenSkinPaths.Contains(SkinPath)) continue;
+		SeenSkinPaths.Add(SkinPath);
+
+		SkinsByTag.FindOrAdd(MatchedTag).Add(Skin);
 	}
 
-	// Sort tags alphabetically
-	WeaponTags.Sort([this](const FName& A, const FName& B)
+	// Update bHasSkins
+	for (auto& W : Weapons)
 	{
-		return WeaponDisplayNames[A] < WeaponDisplayNames[B];
-	});
+		W.bHasSkins = SkinsByTag.Contains(W.Tag) && SkinsByTag[W.Tag].Num() > 0;
+	}
 
-	// Cache for future opens
-	CachedSkinsByWeapon = SkinsByWeapon;
-	CachedWeaponTags = WeaponTags;
-	CachedWeaponDisplayNames = WeaponDisplayNames;
+	// Sort skins alphabetically within each weapon tag for consistent UI ordering
+	// (AssetRegistry does not guarantee deterministic return order)
+	for (auto& Pair : SkinsByTag)
+	{
+		Pair.Value.Sort([](UUTWeaponSkin& A, UUTWeaponSkin& B)
+		{
+			FString NameA = A.DisplayName.IsEmpty() ? A.GetName() : A.DisplayName.ToString();
+			FString NameB = B.DisplayName.IsEmpty() ? B.GetName() : B.DisplayName.ToString();
+			return NameA < NameB;
+		});
+	}
+
+	// Cache and prevent GC on skin assets
+	CachedSkinsByTag = SkinsByTag;
+	CachedWeapons = Weapons;
+	// Clean up any previous root refs before adding new ones
+	for (UUTWeaponSkin* OldSkin : CachedSkinGCRefs)
+	{
+		if (OldSkin && OldSkin->IsRooted())
+		{
+			OldSkin->RemoveFromRoot();
+		}
+	}
+	CachedSkinGCRefs.Empty();
+	for (auto& Pair : SkinsByTag)
+	{
+		for (UUTWeaponSkin* Skin : Pair.Value)
+		{
+			if (Skin)
+			{
+				Skin->AddToRoot();
+				CachedSkinGCRefs.Add(Skin);
+			}
+		}
+	}
 	bSkinsCached = true;
 }
 
-FString SUTWeaponSkinSelector::GetWeaponDisplayName(const FString& WeaponClassPath)
+void SUTWeaponSkinSelector::LoadSettings()
 {
-	// Extract class name from path like "/Script/UnrealTournament.UTWeap_RocketLauncher"
-	FString Name = WeaponClassPath;
-	int32 DotIndex;
-	if (Name.FindLastChar('.', DotIndex))
+	// Ensure weapon settings are loaded
+	AUTWeaponFix::LoadWeaponSettings();
+
+	// Copy hide state from the static map (keyed by class name)
+	HideState = AUTWeaponFix::HiddenWeaponsByTag;
+
+	// Load skin selections from Mod.ini
+	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	for (const auto& W : Weapons)
 	{
-		Name = Name.Mid(DotIndex + 1);
+		FString Key = FString::Printf(TEXT("Skin.%s"), *W.Tag.ToString());
+		FString Value;
+		if (GConfig->GetString(TEXT("NetcodePlus.WeaponSettings"), *Key, Value, ModIniPath) && !Value.IsEmpty())
+		{
+			// Find matching skin index
+			TArray<UUTWeaponSkin*>* Skins = SkinsByTag.Find(W.Tag);
+			if (Skins)
+			{
+				for (int32 i = 0; i < Skins->Num(); i++)
+				{
+					if ((*Skins)[i] && (*Skins)[i]->GetPathName() == Value)
+					{
+						SelectedSkinIndex.Add(W.Tag, i + 1); // +1 because 0 = default
+						break;
+					}
+				}
+			}
+		}
 	}
-	Name.ReplaceInline(TEXT("UTWeap_"), TEXT(""));
-	Name.ReplaceInline(TEXT("_"), TEXT(" "));
-	return Name;
+}
+
+void SUTWeaponSkinSelector::SaveAndApply()
+{
+	if (!PlayerOwner.IsValid()) return;
+
+	AUTPlayerController* PC = Cast<AUTPlayerController>(PlayerOwner->PlayerController);
+	if (!PC) return;
+
+	AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+
+	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	for (const auto& W : Weapons)
+	{
+		// Save hide state — keyed by HideKey (class name) for per-weapon granularity
+		bool bHidden = HideState.Contains(W.HideKey) ? HideState[W.HideKey] : false;
+		AUTWeaponFix::HiddenWeaponsByTag.Add(W.HideKey, bHidden);
+
+		FString HideKeyStr = FString::Printf(TEXT("Hide.%s"), *W.HideKey.ToString());
+		GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *HideKeyStr, bHidden ? TEXT("1") : TEXT("0"), ModIniPath);
+
+		// Save and apply skin
+		if (W.bHasSkins)
+		{
+			int32 SkinIdx = SelectedSkinIndex.Contains(W.Tag) ? SelectedSkinIndex[W.Tag] : 0;
+			FString SkinKey = FString::Printf(TEXT("Skin.%s"), *W.Tag.ToString());
+
+			if (SkinIdx == 0)
+			{
+				// Default — clear skin
+				GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *SkinKey, TEXT(""), ModIniPath);
+				if (PS) PS->ServerReceiveWeaponSkin(TEXT(""));
+			}
+			else
+			{
+				TArray<UUTWeaponSkin*>* Skins = SkinsByTag.Find(W.Tag);
+				if (Skins && Skins->IsValidIndex(SkinIdx - 1))
+				{
+					FString SkinPath = (*Skins)[SkinIdx - 1]->GetPathName();
+					GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *SkinKey, *SkinPath, ModIniPath);
+					if (PS) PS->ServerReceiveWeaponSkin(SkinPath);
+				}
+			}
+		}
+	}
+
+	GConfig->Flush(false, ModIniPath);
+
+	// Apply hide to current weapon immediately
+	AUTCharacter* UTChar = PC ? Cast<AUTCharacter>(PC->GetPawn()) : nullptr;
+	if (UTChar && UTChar->GetWeapon())
+	{
+		AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
+		if (FixWeapon)
+		{
+			FName Tag = FixWeapon->WeaponSkinCustomizationTag;
+			bool bHide = AUTWeaponFix::HiddenWeaponsByTag.Contains(Tag) && AUTWeaponFix::HiddenWeaponsByTag[Tag];
+			if (FixWeapon->GetMesh())
+			{
+				FixWeapon->GetMesh()->SetVisibility(!bHide, true);
+			}
+			if (UTChar->FirstPersonMesh)
+			{
+				UTChar->FirstPersonMesh->SetVisibility(!bHide, true);
+			}
+		}
+	}
+
+	if (StatusText.IsValid())
+	{
+		StatusText->SetText(FText::FromString(TEXT("Settings saved to Mod.ini and applied.")));
+	}
 }
 
 void SUTWeaponSkinSelector::RebuildWeaponList()
@@ -230,25 +494,53 @@ void SUTWeaponSkinSelector::RebuildWeaponList()
 	if (!WeaponListContainer.IsValid()) return;
 	WeaponListContainer->ClearChildren();
 
-	for (int32 i = 0; i < WeaponTags.Num(); i++)
+	for (int32 i = 0; i < Weapons.Num(); i++)
 	{
+		const auto& W = Weapons[i];
 		const bool bSelected = (i == CurrentWeaponIndex);
 		FLinearColor BgColor = bSelected ? FLinearColor(0.15f, 0.4f, 0.7f, 1.0f) : FLinearColor(0.08f, 0.08f, 0.08f, 1.0f);
 		FLinearColor TextColor = bSelected ? FLinearColor::White : FLinearColor(0.7f, 0.7f, 0.7f, 1.0f);
+
+		bool bHidden = HideState.Contains(W.HideKey) ? HideState[W.HideKey] : false;
 
 		WeaponListContainer->AddSlot()
 		.AutoHeight()
 		.Padding(1)
 		[
-			SNew(SButton)
-			.ButtonColorAndOpacity(BgColor)
-			.OnClicked(this, &SUTWeaponSkinSelector::OnWeaponClicked, i)
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			[
+				SNew(SButton)
+				.ButtonColorAndOpacity(BgColor)
+				.OnClicked(this, &SUTWeaponSkinSelector::OnWeaponClicked, i)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(W.DisplayName))
+					.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
+					.ColorAndOpacity(TextColor)
+					.Margin(FMargin(6.0f, 4.0f))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(4, 0, 2, 0)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bHidden ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTWeaponSkinSelector::OnHideCheckChanged, W.HideKey)
+				.ToolTipText(LOCTEXT("HideTooltip", "Hide weapon in first person"))
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 4, 0)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(WeaponDisplayNames[WeaponTags[i]]))
-				.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
-				.ColorAndOpacity(TextColor)
-				.Margin(FMargin(6.0f, 4.0f))
+				.Text(LOCTEXT("Hide", "Hide"))
+				.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 10))
+				.ColorAndOpacity(FLinearColor(0.5f, 0.5f, 0.5f, 1.0f))
 			]
 		];
 	}
@@ -259,17 +551,31 @@ void SUTWeaponSkinSelector::RebuildSkinList()
 	if (!SkinListContainer.IsValid()) return;
 	SkinListContainer->ClearChildren();
 
-	if (!WeaponTags.IsValidIndex(CurrentWeaponIndex)) return;
+	if (!Weapons.IsValidIndex(CurrentWeaponIndex)) return;
 
-	FName CurrentTag = WeaponTags[CurrentWeaponIndex];
-	TArray<UUTWeaponSkin*>* Skins = SkinsByWeapon.Find(CurrentTag);
-	if (!Skins) return;
+	const auto& W = Weapons[CurrentWeaponIndex];
 
-	// Add "Default (No Skin)" option
+	if (!W.bHasSkins)
 	{
-		const bool bSelected = (CurrentSkinIndex == 0);
-		FLinearColor BgColor = bSelected ? FLinearColor(0.15f, 0.6f, 0.15f, 1.0f) : FLinearColor(0.08f, 0.08f, 0.08f, 1.0f);
+		// No skins for this weapon — show message
+		SkinListContainer->AddSlot()
+		.AutoHeight()
+		.Padding(8)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(FString::Printf(TEXT("No skins available for %s.\nUse the Hide checkbox to hide this weapon."), *W.DisplayName)))
+			.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
+			.ColorAndOpacity(FLinearColor(0.5f, 0.5f, 0.5f, 1.0f))
+			.AutoWrapText(true)
+		];
+		return;
+	}
 
+	int32 CurrentSkin = SelectedSkinIndex.Contains(W.Tag) ? SelectedSkinIndex[W.Tag] : 0;
+
+	// Default option
+	{
+		FLinearColor BgColor = (CurrentSkin == 0) ? FLinearColor(0.15f, 0.6f, 0.15f, 1.0f) : FLinearColor(0.08f, 0.08f, 0.08f, 1.0f);
 		SkinListContainer->AddSlot()
 		.AutoHeight()
 		.Padding(1)
@@ -287,21 +593,19 @@ void SUTWeaponSkinSelector::RebuildSkinList()
 		];
 	}
 
-	// Add each skin
+	TArray<UUTWeaponSkin*>* Skins = SkinsByTag.Find(W.Tag);
+	if (!Skins) return;
+
 	for (int32 i = 0; i < Skins->Num(); i++)
 	{
 		UUTWeaponSkin* Skin = (*Skins)[i];
 		if (!Skin) continue;
 
-		const int32 SkinIdx = i + 1; // +1 because index 0 is "Default"
-		const bool bSelected = (CurrentSkinIndex == SkinIdx);
-		FLinearColor BgColor = bSelected ? FLinearColor(0.15f, 0.6f, 0.15f, 1.0f) : FLinearColor(0.08f, 0.08f, 0.08f, 1.0f);
+		const int32 SkinIdx = i + 1;
+		FLinearColor BgColor = (CurrentSkin == SkinIdx) ? FLinearColor(0.15f, 0.6f, 0.15f, 1.0f) : FLinearColor(0.08f, 0.08f, 0.08f, 1.0f);
 
 		FString DisplayStr = Skin->DisplayName.ToString();
-		if (DisplayStr.IsEmpty())
-		{
-			DisplayStr = Skin->GetName();
-		}
+		if (DisplayStr.IsEmpty()) DisplayStr = Skin->GetName();
 		if (!Skin->ItemAuthor.IsEmpty())
 		{
 			DisplayStr += FString::Printf(TEXT("  (by %s)"), *Skin->ItemAuthor);
@@ -325,69 +629,9 @@ void SUTWeaponSkinSelector::RebuildSkinList()
 	}
 }
 
-void SUTWeaponSkinSelector::ApplySelectedSkin()
-{
-	if (!PlayerOwner.IsValid()) return;
-
-	AUTPlayerController* PC = Cast<AUTPlayerController>(PlayerOwner->PlayerController);
-	if (!PC) return;
-
-	AUTPlayerState* PS = Cast<AUTPlayerState>(PC->PlayerState);
-	if (!PS) return;
-
-	if (!WeaponTags.IsValidIndex(CurrentWeaponIndex)) return;
-
-	FName CurrentTag = WeaponTags[CurrentWeaponIndex];
-
-	if (CurrentSkinIndex == 0)
-	{
-		// Default — clear skin for this weapon
-		PS->ServerReceiveWeaponSkin(TEXT(""));
-
-		// Also update profile
-		UUTProfileSettings* ProfileSettings = PC->GetProfileSettings();
-		if (ProfileSettings)
-		{
-			ProfileSettings->WeaponSkins.Remove(CurrentTag);
-		}
-
-		if (PreviewText.IsValid())
-		{
-			PreviewText->SetText(FText::FromString(FString::Printf(TEXT("Cleared skin for %s"), *WeaponDisplayNames[CurrentTag])));
-		}
-	}
-	else
-	{
-		TArray<UUTWeaponSkin*>* Skins = SkinsByWeapon.Find(CurrentTag);
-		if (!Skins || !Skins->IsValidIndex(CurrentSkinIndex - 1)) return;
-
-		UUTWeaponSkin* SelectedSkin = (*Skins)[CurrentSkinIndex - 1];
-		if (!SelectedSkin) return;
-
-		FString SkinPath = SelectedSkin->GetPathName();
-		PS->ServerReceiveWeaponSkin(SkinPath);
-
-		// Also update profile so it persists
-		UUTProfileSettings* ProfileSettings = PC->GetProfileSettings();
-		if (ProfileSettings)
-		{
-			ProfileSettings->WeaponSkins.Add(CurrentTag, SkinPath);
-		}
-
-		FString SkinName = SelectedSkin->DisplayName.ToString();
-		if (SkinName.IsEmpty()) SkinName = SelectedSkin->GetName();
-
-		if (PreviewText.IsValid())
-		{
-			PreviewText->SetText(FText::FromString(FString::Printf(TEXT("Applied '%s' to %s"), *SkinName, *WeaponDisplayNames[CurrentTag])));
-		}
-	}
-}
-
 FReply SUTWeaponSkinSelector::OnWeaponClicked(int32 Index)
 {
 	CurrentWeaponIndex = Index;
-	CurrentSkinIndex = 0;
 	RebuildWeaponList();
 	RebuildSkinList();
 	return FReply::Handled();
@@ -395,14 +639,23 @@ FReply SUTWeaponSkinSelector::OnWeaponClicked(int32 Index)
 
 FReply SUTWeaponSkinSelector::OnSkinClicked(int32 Index)
 {
-	CurrentSkinIndex = Index;
+	if (Weapons.IsValidIndex(CurrentWeaponIndex))
+	{
+		SelectedSkinIndex.Add(Weapons[CurrentWeaponIndex].Tag, Index);
+	}
 	RebuildSkinList();
 	return FReply::Handled();
 }
 
+void SUTWeaponSkinSelector::OnHideCheckChanged(ECheckBoxState NewState, FName HideKey)
+{
+	HideState.Add(HideKey, NewState == ECheckBoxState::Checked);
+}
+
 FReply SUTWeaponSkinSelector::OnApplyClicked()
 {
-	ApplySelectedSkin();
+	SaveAndApply();
+	RebuildWeaponList(); // Refresh checkbox visuals
 	return FReply::Handled();
 }
 
@@ -422,6 +675,22 @@ FReply SUTWeaponSkinSelector::OnKeyDown(const FGeometry& MyGeometry, const FKeyE
 	return FReply::Unhandled();
 }
 
+/** Static cleanup — call when module shuts down or cache should be invalidated */
+void SUTWeaponSkinSelector_CleanupCache()
+{
+	for (UUTWeaponSkin* Skin : CachedSkinGCRefs)
+	{
+		if (Skin && Skin->IsRooted())
+		{
+			Skin->RemoveFromRoot();
+		}
+	}
+	CachedSkinGCRefs.Empty();
+	CachedSkinsByTag.Empty();
+	CachedWeapons.Empty();
+	bSkinsCached = false;
+}
+
 void SUTWeaponSkinSelector::ClosePanel()
 {
 	UWorld* World = nullptr;
@@ -436,7 +705,6 @@ void SUTWeaponSkinSelector::ClosePanel()
 			}
 		}
 	}
-
 	if (World)
 	{
 		UGameViewportClient* ViewportClient = World->GetGameViewport();

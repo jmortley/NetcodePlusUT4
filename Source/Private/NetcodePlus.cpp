@@ -6,6 +6,9 @@
 #include "UTPlayerController.h"
 #include "UTProfileSettings.h"
 #include "UTLocalPlayer.h"
+#include "UTCharacter.h"
+#include "UTWeapon.h"
+#include "UTWeaponFix.h"
 #include "UTATypes.h"
 #include "SUTWeaponSkinSelector.h"
 
@@ -55,12 +58,57 @@ static void HandleWeaponHand(const TArray<FString>& Args)
 		}
 		else if (Hand == TEXT("hidden") || Hand == TEXT("h") || Hand == TEXT("hide"))
 		{
-			NewHand = EWeaponHand::HAND_Hidden;
-			HandName = TEXT("Hidden");
+			// Per-weapon hide — hides the CURRENT weapon by its tag
+			AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
+			if (UTChar && UTChar->GetWeapon())
+			{
+				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
+				if (FixWeapon && FixWeapon->WeaponSkinCustomizationTag != NAME_None)
+				{
+					AUTWeaponFix::HiddenWeaponsByTag.Add(FixWeapon->WeaponSkinCustomizationTag, true);
+					AUTWeaponFix::SaveWeaponSettings();
+
+					if (FixWeapon->GetMesh())
+						FixWeapon->GetMesh()->SetVisibility(false, true);
+					if (UTChar->FirstPersonMesh)
+						UTChar->FirstPersonMesh->SetVisibility(false, true);
+
+					PC->ClientMessage(FString::Printf(TEXT("Hidden: %s (saved to Mod.ini)"), *FixWeapon->WeaponSkinCustomizationTag.ToString()));
+				}
+				else
+				{
+					PC->ClientMessage(TEXT("Current weapon is not a NetcodePlus weapon."));
+				}
+			}
+			return;
+		}
+		else if (Hand == TEXT("show") || Hand == TEXT("s"))
+		{
+			// Per-weapon show — unhides the CURRENT weapon by its tag
+			AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
+			if (UTChar && UTChar->GetWeapon())
+			{
+				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
+				if (FixWeapon && FixWeapon->WeaponSkinCustomizationTag != NAME_None)
+				{
+					AUTWeaponFix::HiddenWeaponsByTag.Add(FixWeapon->WeaponSkinCustomizationTag, false);
+					AUTWeaponFix::SaveWeaponSettings();
+
+					if (FixWeapon->GetMesh())
+						FixWeapon->GetMesh()->SetVisibility(true, true);
+					if (UTChar->FirstPersonMesh)
+						UTChar->FirstPersonMesh->SetVisibility(true, true);
+
+					PC->ClientMessage(FString::Printf(TEXT("Shown: %s (saved to Mod.ini)"), *FixWeapon->WeaponSkinCustomizationTag.ToString()));
+				}
+			}
+			// Re-apply current hand position
+			NewHand = PC->GetWeaponHand();
+			HandName = TEXT("Shown");
 		}
 		else
 		{
-			PC->ClientMessage(TEXT("Usage: weaponhand [right|left|center|hidden]"));
+			PC->ClientMessage(TEXT("Usage: weaponhand [right|left|center|hidden|show]"));
 			return;
 		}
 
@@ -158,12 +206,13 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
-	// Close skin selector if open
+	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())
 	{
 		ActiveSkinSelector.Pin()->ClosePanel();
 		ActiveSkinSelector.Reset();
 	}
+	SUTWeaponSkinSelector_CleanupCache();
 
 	IConsoleObject* Cmd = IConsoleManager::Get().FindConsoleObject(TEXT("weaponhand"));
 	if (Cmd) { IConsoleManager::Get().UnregisterConsoleObject(Cmd, false); }

@@ -25,9 +25,32 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Advantage")
 	bool bEndGameAdvantageOnlyWithinOneCap;
 
+	// ── Spawn Configuration ─────────────────────────────────────────
+
+	/** Distance from a flag base within which an actor is considered "in the base area." */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float FlagBaseProximityRadius;
+
+	/** Distance from a flag carrier or dropped flag within which spawns are penalized. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float FlagSpawnPenaltyRadius;
+
+	/** Score penalty applied when a spawn is near a flag carrier in the base area. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float FlagCarrierSpawnPenalty;
+
+	/** Score penalty applied when a spawn is near a dropped flag in its own base. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float DroppedFlagSpawnPenalty;
+
+	/** Score penalty for spawns with direct LOS to an enemy flag carrier. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float FlagCarrierLOSPenalty;
+
 	// ── Game Flow Overrides ──────────────────────────────────────────
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
+	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn, AUTPlayerState* Holder, FName Reason) override;
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer);
 	virtual void CheckGameTime() override;
@@ -97,6 +120,9 @@ protected:
 
 	/** True if an advantage cap ended the game or half. */
 	bool bAdvantageCapEndedPeriod;
+
+	/** World time before which a FlagCapture ScoreObject is rejected. Prevents double caps on maps with no geometry between bases. */
+	float LastScoreObjectTime;
 
 public:
 	virtual void CreateGameURLOptions(TArray<TSharedPtr<TAttributePropertyBase>>& MenuProps);
