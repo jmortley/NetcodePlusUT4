@@ -22,12 +22,13 @@ namespace UnrealBuildTool.Rules
 				"CoreUObject",
 				"Engine",
 				"UnrealTournament",
-				"InputCore"
+				"InputCore",
+				"Slate",
+				"SlateCore"
 			});
 
-			// Add any additional UT dependencies
-			PrivateDependencyModuleNames.AddRange(new string[] { 
-                // Add specific modules if needed
+			PrivateDependencyModuleNames.AddRange(new string[] {
+				"AssetRegistry"
             });
 		}
 	}

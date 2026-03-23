@@ -10,6 +10,8 @@
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
 #include "UTWeaponStateZooming.h"
 #include "UTPlusProj_ShockBall.h"
+#include "UTPlusProj_Rocket.h"
+#include "UTWeaponSkin.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
@@ -19,16 +21,15 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
     TEXT("ut.ProjectileTickRate"),
     240,
     TEXT("Client-side projectile simulation rate in Hz.\n")
-    TEXT("Snapped to nearest multiple of 60. Range: 60-480.\n")
+    TEXT("Snapped to nearest multiple of 60. Range: 60-600.\n")
     TEXT("Server always uses native 120Hz tick."),
     ECVF_Scalability
 );
 
 int32 AUTWeaponFix::GetTargetProjectileTickRate()
 {
-    // Use your existing logic here
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
-    TargetHz = FMath::Clamp(TargetHz, 60, 480);
+    TargetHz = FMath::Clamp(TargetHz, 60, 600);
     return FMath::RoundToInt(TargetHz / 60.f) * 60;
 }
 
@@ -38,7 +39,7 @@ static int32 GetSnappedProjectileHz()
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
 
     // Clamp range
-    TargetHz = FMath::Clamp(TargetHz, 60, 480);
+    TargetHz = FMath::Clamp(TargetHz, 60, 600);
 
     // Snap to nearest multiple of 60
     TargetHz = FMath::RoundToInt(TargetHz / 60.f) * 60;
@@ -588,7 +589,14 @@ void AUTWeaponFix::FireShot()
 		}
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset);
         QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
+
+		// Cache the client's exact aim direction at fire-press time.
+		// GetBaseFireRotation() will use this for the fake projectile spawn,
+		// ensuring the fake fires exactly where the crosshair was — no curve from
+		// mouse movement between fire input and SpawnNetPredictedProjectile call.
+		CachedTransactionalRotation = ClientRot;
 		Super::FireShot();
+		CachedTransactionalRotation = FRotator::ZeroRotator; // Clear after spawn
 	}
 	else
 		// --- SERVER SIDE ---
@@ -1668,11 +1676,24 @@ FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 
 FRotator AUTWeaponFix::GetBaseFireRotation()
 {
-    // Only hijack it for transactional shots on the server,
-    // and only if the cached value is actually valid.
-    if (Role == ROLE_Authority && bIsTransactionalFire && !CachedTransactionalRotation.IsZero())
+    // Use cached rotation for both server (transactional) and client (fake projectile).
+    // This ensures the fake projectile fires in the exact direction the client was aiming
+    // when they pressed fire, not where they're aiming a few frames later when
+    // FireProjectile() actually runs. At 540fps the rotation can shift between frames,
+    // causing a visible curve on the fake projectile.
+    if (!CachedTransactionalRotation.IsZero())
     {
-        return CachedTransactionalRotation;
+        // Server: use the rotation sent by the client's fire RPC
+        if (Role == ROLE_Authority && bIsTransactionalFire)
+        {
+            return CachedTransactionalRotation;
+        }
+        // Client: use the rotation we cached at fire-press time
+        // Prevents fake projectile curving if mouse moves between fire input and SpawnNetPredictedProjectile
+        if (Role < ROLE_Authority)
+        {
+            return CachedTransactionalRotation;
+        }
     }
 
     return Super::GetBaseFireRotation();
@@ -2796,9 +2817,42 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 	}
 
 	Super::BringUp(OverflowTime);
+
+	// FIX: Weapon skin 1st person material gets clobbered by SetSkin() inside
+	// AttachToOwner_Implementation (UTWeapon.cpp:956). SetSkin saves the default
+	// mesh materials to SavedMeshMaterials BEFORE weapon skins are applied.
+	// Later SetSkin(null) calls restore from SavedMeshMaterials, overwriting
+	// the weapon skin. Fix: re-apply weapon skin after BringUp and patch
+	// SavedMeshMaterials so future restores preserve the skin.
+	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
+	{
+		Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(0, WeaponSkin->FPSMaterial);
+		if (SavedMeshMaterials.Num() > 0)
+		{
+			SavedMeshMaterials[0] = Mesh->GetMaterial(0);
+		}
+	}
 }
 
 
+
+void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
+{
+	Super::SetSkin(NewSkin);
+
+	// FIX: Super::SetSkin restores from SavedMeshMaterials when NewSkin is null,
+	// which overwrites the weapon skin on slot 0. Re-apply weapon skin after
+	// every SetSkin call to ensure it persists through body color flashes,
+	// team overlays, and any other material restore cycle.
+	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
+	{
+		Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(0, WeaponSkin->FPSMaterial);
+		if (SavedMeshMaterials.Num() > 0)
+		{
+			SavedMeshMaterials[0] = Mesh->GetMaterial(0);
+		}
+	}
+}
 
 // ============================================================================
 // UTWeaponFix.cpp - Transactional Retry System Implementation
@@ -2972,7 +3026,8 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
             // For all other projectiles: destroy the fake as before.
             if (Pending.Projectile.IsValid())
             {
-                if (!Cast<AUTPlusProj_ShockBall>(Pending.Projectile.Get()))
+                if (!Cast<AUTPlusProj_ShockBall>(Pending.Projectile.Get())
+                    && !Cast<AUTPlusProj_Rocket>(Pending.Projectile.Get()))
                 {
                     Pending.Projectile->Destroy();
                 }

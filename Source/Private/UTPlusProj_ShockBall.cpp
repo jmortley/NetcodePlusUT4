@@ -79,6 +79,15 @@ bool AUTPlusProj_ShockBall::ShouldIgnoreHit_Implementation(AActor* OtherActor, U
 void AUTPlusProj_ShockBall::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Cache the original fire direction for drift correction at high fps
+	bHasCachedFireDirection = false;
+	if (ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero())
+	{
+		OriginalFireDirection = ProjectileMovement->Velocity.GetSafeNormal();
+		bHasCachedFireDirection = true;
+	}
+
 	if (Role == ROLE_Authority)
 	{
 		// Server: Fixed 240Hz
@@ -107,6 +116,24 @@ void AUTPlusProj_ShockBall::BeginPlay()
 void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// High-FPS drift correction: at 480+ fps, floating point accumulation in
+	// ProjectileMovementComponent causes the velocity direction to drift slightly
+	// per tick. Over 1000+ ticks the shock ball visibly curves upward/sideways.
+	// Fix: snap velocity back to original fire direction, preserving speed.
+	// Only applies to zero-gravity projectiles (shock balls have no arc).
+	if (bHasCachedFireDirection && ProjectileMovement
+		&& !ProjectileMovement->Velocity.IsNearlyZero()
+		&& FMath::IsNearlyZero(ProjectileMovement->ProjectileGravityScale))
+	{
+		float Speed = ProjectileMovement->Velocity.Size();
+		FVector CurrentDir = ProjectileMovement->Velocity / Speed;
+		// Only correct if drift is small (< 1 degree) — larger changes are intentional (bounces, etc.)
+		if ((CurrentDir | OriginalFireDirection) > 0.9998f) // ~1 degree
+		{
+			ProjectileMovement->Velocity = OriginalFireDirection * Speed;
+		}
+	}
 
 	// Stuck-ball handoff: when the real stops (bio goo, wall) but the fake is
 	// still the rendering authority (bMoveFakeToReplicatedPos = false), the

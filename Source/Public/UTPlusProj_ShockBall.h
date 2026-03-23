@@ -45,4 +45,8 @@ protected:
 	FVector InitialVisualOffset;
 	bool bVisualInitialized;
 
+	/** Original fire direction — used to correct floating point drift at high fps */
+	FVector OriginalFireDirection;
+	bool bHasCachedFireDirection;
+
 };
