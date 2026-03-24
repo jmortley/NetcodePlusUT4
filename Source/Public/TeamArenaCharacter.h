@@ -130,4 +130,16 @@ protected:
 
 	// Saved original transform to restore when weapon is shown
 	FTransform SavedFirstPersonMeshTransform;
+
+	// --- Spectator rotation smoothing ---
+	// Smoothed rotation for spectators viewing this character (prevents jitter at 480fps)
+	mutable FRotator SmoothedViewRotation;
+	mutable bool bSmoothedViewRotationInitialized = false;
+
+public:
+	// Override to smooth rotation for spectators at high FPS
+	virtual FRotator GetViewRotation() const override;
+
+	// Override to clear all ambient sounds on death (prevents link gun overheat loop)
+	virtual bool Died(AController* EventInstigator, const FDamageEvent& DamageEvent, AActor* DamageCauser = nullptr) override;
 };

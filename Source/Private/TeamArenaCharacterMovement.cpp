@@ -18,14 +18,14 @@ public:
         // --- FIX: Set variables directly in constructor instead of overriding functions ---
 
         // Default is 92.f. At 600fps, jumppad launches (1200-1800 u/s) produce
-        // corrections up to 180u due to tick-timing differences. Must smooth-blend
-        // all of these instead of clamping.
-        MaxSmoothNetUpdateDist = 180.f;
+        // corrections up to 240u due to tick-timing differences and ping-scaled
+        // prediction error. Must smooth-blend all of these instead of clamping.
+        MaxSmoothNetUpdateDist = 240.f;
 
         // Default is 140.f. Above this distance, corrections HARD SNAP with zero
-        // smoothing. At 600fps on a jumppad, errors can reach 160u+. Set high enough
-        // that only cheats/teleports trigger hard snap.
-        NoSmoothNetUpdateDist = 300.f;
+        // smoothing. At 600fps on a jumppad with higher ping, errors can reach 200u+.
+        // Set high enough that only cheats/teleports trigger hard snap.
+        NoSmoothNetUpdateDist = 400.f;
     }
 
     typedef FNetworkPredictionData_Client_UTChar Super;
@@ -36,12 +36,13 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    // 6 units (was 3.16). Absorbs minor velocity prediction errors at 400+ FPS
-    // without masking real desyncs (cheats/packet loss still exceed 6u).
-    MaxPositionErrorSquared = 36.f;
+    // 8 units (was 3.16, then 6). At 400+ FPS with moderate ping, float drift
+    // across many predicted frames can exceed 6u during fast movement/knockback.
+    // 8u still well below cheat/packet-loss thresholds.
+    MaxPositionErrorSquared = 64.f;
 
     // --- Throttle settings ---
-	TeamCollisionUpdateInterval = 0.0167f;  // instead of fps dependent
+	TeamCollisionUpdateInterval = 0.01111f;  // instead of fps dependent
     LastTeamCollisionUpdateTime = -1.0f;  // Force immediate first update
     // 50ms (was 100ms). At 400 FPS, halves accumulated prediction error per
     // correction (20 predicted frames instead of 40). Negligible bandwidth cost.
@@ -53,7 +54,7 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
 	LargeCorrectionThreshold = 80.f;
     // --- HIGH-FPS FIX #2: Dodge timing tolerance ---
     // Prevents server rejection when client/server timestamps differ by microseconds
-    DodgeCooldownTolerance = 0.1f;
+    DodgeCooldownTolerance = 0.06f;
 }
 
 FNetworkPredictionData_Client* UTeamArenaCharacterMovement::GetPredictionData_Client() const
@@ -71,7 +72,7 @@ void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick Tick
 {
     // --- HIGH-FPS FIX #3: Throttle team collision updates ---
     // Epic's code runs GetPawnIterator() + IgnoreActorWhenMoving() EVERY TICK
-    // At 480 FPS with 8 players = 30,720 calls/sec. We reduce to ~32 calls/sec.
+    // At 480 FPS with 8 players = 30,720 calls/sec. We reduce.
     
     // Temporarily force team collision flag to skip Epic's per-tick iterator
     bool bOriginalForceTeamCollision = bForceTeamCollision;
@@ -128,6 +129,121 @@ void UTeamArenaCharacterMovement::UpdateTeamCollisionIgnores()
                                  !Char->IsRagdoll();
             Capsule->IgnoreActorWhenMoving(Char, bShouldIgnore);
         }
+    }
+}
+
+void UTeamArenaCharacterMovement::UTCallServerMove()
+{
+    AUTCharacter* UTCharacterOwner = Cast<AUTCharacter>(CharacterOwner);
+    FNetworkPredictionData_Client_Character* ClientData = GetPredictionData_Client_Character();
+    if (!UTCharacterOwner || !ClientData || (ClientData->SavedMoves.Num() == 0))
+    {
+        return;
+    }
+    APlayerController* PC = Cast<APlayerController>(CharacterOwner->GetController());
+
+    // Decide whether to hold off on move
+    const FSavedMovePtr& NewMove = ClientData->SavedMoves.Last();
+    if (CanDelaySendingMove(NewMove))
+    {
+        // --- HIGH-FPS FIX #5: Adaptive move send rate ---
+        // Stock UT4: 60Hz important, 30Hz normal. At 400+ FPS the 30Hz floor
+        // leaves 66u gaps at sprint speed — too much room for float drift.
+        //
+        // New rates:
+        //   60Hz (17ms) — airborne, high-speed (>1500 u/s), or important moves
+        //   40Hz (25ms) — normal ground movement
+        //
+        // Dodges and shots still bypass this entirely via CanDelaySendingMove.
+        bool bNeedsHighRate = NewMove->IsImportantMove(ClientData->LastAckedMove)
+                           || IsFalling()
+                           || Velocity.SizeSquared() > 1500.f * 1500.f;
+        float NetMoveDelta = bNeedsHighRate ? 0.017f : 0.025f;
+
+        if (((NewMove->TimeStamp - ClientData->ClientUpdateTime) * CharacterOwner->GetWorldSettings()->GetEffectiveTimeDilation() < NetMoveDelta))
+        {
+            return;
+        }
+    }
+
+    // Find the oldest unacknowledged sent important move (OldMove).
+    // Don't include the last move because it may be combined with the next new move.
+    FSavedMovePtr OldMovePtr = NULL;
+    if (ClientData->LastAckedMove.IsValid())
+    {
+        bool bHaveCriticalMove = false;
+        for (int32 i = 0; i < ClientData->SavedMoves.Num() - 1; i++)
+        {
+            const FSavedMovePtr& CurrentMove = ClientData->SavedMoves[i];
+            if (CurrentMove->TimeStamp > ClientData->ClientUpdateTime)
+            {
+                break;
+            }
+            else if (CurrentMove->IsImportantMove(ClientData->LastAckedMove))
+            {
+                bool bNewCriticalMove = ((FSavedMove_UTCharacter*)(CurrentMove.Get()))->IsCriticalMove(ClientData->LastAckedMove);
+                if (bNewCriticalMove || !bHaveCriticalMove)
+                {
+                    OldMovePtr = CurrentMove;
+                    bHaveCriticalMove = bNewCriticalMove;
+                }
+            }
+        }
+    }
+
+    // Send old move if it exists
+    if (OldMovePtr.IsValid())
+    {
+        const FSavedMove_Character* OldMove = OldMovePtr.Get();
+        UTCharacterOwner->UTServerMoveOld(OldMove->TimeStamp, OldMove->Acceleration, OldMove->SavedControlRotation.Yaw, OldMove->GetCompressedFlags());
+    }
+
+    for (int32 i = 0; i < ClientData->SavedMoves.Num() - 1; i++)
+    {
+        const FSavedMovePtr& MoveToSend = ClientData->SavedMoves[i];
+        if (MoveToSend.IsValid() && (MoveToSend->TimeStamp > ClientData->ClientUpdateTime))
+        {
+            ClientData->ClientUpdateTime = MoveToSend->TimeStamp;
+            if (((FSavedMove_UTCharacter*)(MoveToSend.Get()))->NeedsRotationSent())
+            {
+                UTCharacterOwner->UTServerMoveSaved(MoveToSend->TimeStamp, MoveToSend->Acceleration, MoveToSend->GetCompressedFlags(), MoveToSend->SavedControlRotation.Yaw, MoveToSend->SavedControlRotation.Pitch);
+            }
+            else
+            {
+                UTCharacterOwner->UTServerMoveQuick(MoveToSend->TimeStamp, MoveToSend->Acceleration, MoveToSend->GetCompressedFlags());
+            }
+        }
+    }
+
+    if (NewMove.IsValid() && (NewMove->TimeStamp > ClientData->ClientUpdateTime))
+    {
+        UPrimitiveComponent* ClientMovementBase = NewMove->EndBase.Get();
+        bool bUseRelativeLocation = MovementBaseUtility::UseRelativeLocation(ClientMovementBase);
+        const FVector SendLocation = bUseRelativeLocation ? NewMove->SavedRelativeLocation : NewMove->SavedLocation;
+        if (!bUseRelativeLocation)
+        {
+            ClientMovementBase = NULL;
+            NewMove->EndBoneName = NAME_None;
+        }
+        ClientData->ClientUpdateTime = NewMove->TimeStamp;
+        UTCharacterOwner->UTServerMove
+            (
+            NewMove->TimeStamp,
+            NewMove->Acceleration,
+            SendLocation,
+            NewMove->GetCompressedFlags(),
+            NewMove->SavedControlRotation.Yaw,
+            NewMove->SavedControlRotation.Pitch,
+            ClientMovementBase,
+            NewMove->EndBoneName,
+            NewMove->MovementMode
+            );
+    }
+
+    APlayerCameraManager* PlayerCameraManager = (PC ? PC->PlayerCameraManager : NULL);
+    if (PlayerCameraManager != NULL && PlayerCameraManager->bUseClientSideCameraUpdates)
+    {
+        PlayerCameraManager->bShouldSendClientSideCameraUpdate = true;
     }
 }
 

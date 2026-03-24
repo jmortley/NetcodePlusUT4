@@ -9,6 +9,9 @@
 #ifndef NETCODEPLUS_MutHitsounds_generated_h
 	#include "Public/MutHitsounds.h"
 #endif
+#ifndef NETCODEPLUS_NCPlusCTFGameMode_generated_h
+	#include "Public/NCPlusCTFGameMode.h"
+#endif
 #ifndef NETCODEPLUS_TeamArenaCharacter_generated_h
 	#include "Public/TeamArenaCharacter.h"
 #endif

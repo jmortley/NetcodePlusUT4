@@ -6,12 +6,18 @@
 ===========================================================================*/
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
-struct FRotator;
 class AUTCharacter;
+struct FVector;
+struct FRotator;
 #ifdef NETCODEPLUS_UTWeaponFix_generated_h
 #error "UTWeaponFix.generated.h already included, missing '#pragma once' in UTWeaponFix.h"
 #endif
 #define NETCODEPLUS_UTWeaponFix_generated_h
+
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_GENERATED_BODY \
+	friend NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FActiveServerProjectile(); \
+	NETCODEPLUS_API static class UScriptStruct* StaticStruct();
+
 
 #define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_70_GENERATED_BODY \
 	friend NETCODEPLUS_API class UScriptStruct* Z_Construct_UScriptStruct_FPendingFakeProjectile(); \
@@ -23,7 +29,9 @@ class AUTCharacter;
 	NETCODEPLUS_API static class UScriptStruct* StaticStruct();
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_RPC_WRAPPERS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_RPC_WRAPPERS \
+	virtual bool ServerProjectileHitClaim_Validate(AUTCharacter* , FVector , int32 , uint8 ); \
+	virtual void ServerProjectileHitClaim_Implementation(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation, int32 ClaimedEventIndex, uint8 ClaimedFireMode); \
 	virtual bool ResendServerStopFireFixed_Validate(uint8 , int32 , float , FRotator ); \
 	virtual void ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ResendServerStartFireFixed_Validate(uint8 , int32 , float , FRotator , uint8 , AUTCharacter* ); \
@@ -33,6 +41,23 @@ class AUTCharacter;
 	virtual void ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ServerStartFireFixed_Validate(uint8 , int32 , float , bool , FRotator , AUTCharacter* , uint8 ); \
 	virtual void ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset); \
+ \
+	DECLARE_FUNCTION(execServerProjectileHitClaim) \
+	{ \
+		P_GET_OBJECT(AUTCharacter,Z_Param_ClaimedTarget); \
+		P_GET_STRUCT(FVector,Z_Param_ClaimedHitLocation); \
+		P_GET_PROPERTY(UIntProperty,Z_Param_ClaimedEventIndex); \
+		P_GET_PROPERTY(UByteProperty,Z_Param_ClaimedFireMode); \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		if (!this->ServerProjectileHitClaim_Validate(Z_Param_ClaimedTarget,Z_Param_ClaimedHitLocation,Z_Param_ClaimedEventIndex,Z_Param_ClaimedFireMode)) \
+		{ \
+			RPC_ValidateFailed(TEXT("ServerProjectileHitClaim_Validate")); \
+			return; \
+		} \
+		this->ServerProjectileHitClaim_Implementation(Z_Param_ClaimedTarget,Z_Param_ClaimedHitLocation,Z_Param_ClaimedEventIndex,Z_Param_ClaimedFireMode); \
+		P_NATIVE_END; \
+	} \
  \
 	DECLARE_FUNCTION(execResendServerStopFireFixed) \
 	{ \
@@ -126,7 +151,9 @@ class AUTCharacter;
 	}
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_RPC_WRAPPERS_NO_PURE_DECLS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_RPC_WRAPPERS_NO_PURE_DECLS \
+	virtual bool ServerProjectileHitClaim_Validate(AUTCharacter* , FVector , int32 , uint8 ); \
+	virtual void ServerProjectileHitClaim_Implementation(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation, int32 ClaimedEventIndex, uint8 ClaimedFireMode); \
 	virtual bool ResendServerStopFireFixed_Validate(uint8 , int32 , float , FRotator ); \
 	virtual void ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ResendServerStartFireFixed_Validate(uint8 , int32 , float , FRotator , uint8 , AUTCharacter* ); \
@@ -136,6 +163,23 @@ class AUTCharacter;
 	virtual void ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); \
 	virtual bool ServerStartFireFixed_Validate(uint8 , int32 , float , bool , FRotator , AUTCharacter* , uint8 ); \
 	virtual void ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset); \
+ \
+	DECLARE_FUNCTION(execServerProjectileHitClaim) \
+	{ \
+		P_GET_OBJECT(AUTCharacter,Z_Param_ClaimedTarget); \
+		P_GET_STRUCT(FVector,Z_Param_ClaimedHitLocation); \
+		P_GET_PROPERTY(UIntProperty,Z_Param_ClaimedEventIndex); \
+		P_GET_PROPERTY(UByteProperty,Z_Param_ClaimedFireMode); \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		if (!this->ServerProjectileHitClaim_Validate(Z_Param_ClaimedTarget,Z_Param_ClaimedHitLocation,Z_Param_ClaimedEventIndex,Z_Param_ClaimedFireMode)) \
+		{ \
+			RPC_ValidateFailed(TEXT("ServerProjectileHitClaim_Validate")); \
+			return; \
+		} \
+		this->ServerProjectileHitClaim_Implementation(Z_Param_ClaimedTarget,Z_Param_ClaimedHitLocation,Z_Param_ClaimedEventIndex,Z_Param_ClaimedFireMode); \
+		P_NATIVE_END; \
+	} \
  \
 	DECLARE_FUNCTION(execResendServerStopFireFixed) \
 	{ \
@@ -229,7 +273,7 @@ class AUTCharacter;
 	}
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_EVENT_PARMS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_EVENT_PARMS \
 	struct UTWeaponFix_eventClientConfirmFireEvent_Parms \
 	{ \
 		uint8 FireModeNum; \
@@ -250,6 +294,13 @@ class AUTCharacter;
 		int32 InFireEventIndex; \
 		float ClientTimestamp; \
 		FRotator ClientViewRot; \
+	}; \
+	struct UTWeaponFix_eventServerProjectileHitClaim_Parms \
+	{ \
+		AUTCharacter* ClaimedTarget; \
+		FVector ClaimedHitLocation; \
+		int32 ClaimedEventIndex; \
+		uint8 ClaimedFireMode; \
 	}; \
 	struct UTWeaponFix_eventServerStartFireFixed_Parms \
 	{ \
@@ -273,10 +324,11 @@ class AUTCharacter;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ClientConfirmFireEvent;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ResendServerStartFireFixed;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ResendServerStopFireFixed;
+extern NETCODEPLUS_API  FName NETCODEPLUS_ServerProjectileHitClaim;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ServerStartFireFixed;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ServerStopFireFixed;
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_CALLBACK_WRAPPERS
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_INCLASS_NO_PURE_DECLS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_CALLBACK_WRAPPERS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_INCLASS_NO_PURE_DECLS \
 	private: \
 	static void StaticRegisterNativesAUTWeaponFix(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTWeaponFix(); \
@@ -287,7 +339,7 @@ extern NETCODEPLUS_API  FName NETCODEPLUS_ServerStopFireFixed;
 	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_INCLASS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_INCLASS \
 	private: \
 	static void StaticRegisterNativesAUTWeaponFix(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTWeaponFix(); \
@@ -298,7 +350,7 @@ extern NETCODEPLUS_API  FName NETCODEPLUS_ServerStopFireFixed;
 	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_STANDARD_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_STANDARD_CONSTRUCTORS \
 	/** Standard constructor, called after all reflected properties have been initialized */ \
 	NO_API AUTWeaponFix(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get()); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(AUTWeaponFix) \
@@ -311,7 +363,7 @@ private: \
 public:
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_ENHANCED_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_ENHANCED_CONSTRUCTORS \
 private: \
 	/** Private move- and copy-constructors, should never be used */ \
 	NO_API AUTWeaponFix(AUTWeaponFix&&); \
@@ -322,7 +374,7 @@ DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(AUTWeaponFix); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(AUTWeaponFix)
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_PRIVATE_PROPERTY_OFFSET \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_PRIVATE_PROPERTY_OFFSET \
 	FORCEINLINE static uint32 __PPO__CachedTransactionalRotation() { return STRUCT_OFFSET(AUTWeaponFix, CachedTransactionalRotation); } \
 	FORCEINLINE static uint32 __PPO__AuthoritativeFireEventIndex() { return STRUCT_OFFSET(AUTWeaponFix, AuthoritativeFireEventIndex); } \
 	FORCEINLINE static uint32 __PPO__ClientFireEventIndex() { return STRUCT_OFFSET(AUTWeaponFix, ClientFireEventIndex); } \
@@ -335,33 +387,39 @@ DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(AUTWeaponFix); \
 	FORCEINLINE static uint32 __PPO__HitScanPadding() { return STRUCT_OFFSET(AUTWeaponFix, HitScanPadding); } \
 	FORCEINLINE static uint32 __PPO__HitScanPaddingStationary() { return STRUCT_OFFSET(AUTWeaponFix, HitScanPaddingStationary); } \
 	FORCEINLINE static uint32 __PPO__NetcodeDelayedProjectile() { return STRUCT_OFFSET(AUTWeaponFix, NetcodeDelayedProjectile); } \
-	FORCEINLINE static uint32 __PPO__PendingFakeProjectiles() { return STRUCT_OFFSET(AUTWeaponFix, PendingFakeProjectiles); }
+	FORCEINLINE static uint32 __PPO__PendingFakeProjectiles() { return STRUCT_OFFSET(AUTWeaponFix, PendingFakeProjectiles); } \
+	FORCEINLINE static uint32 __PPO__bEnableProjectileRewind() { return STRUCT_OFFSET(AUTWeaponFix, bEnableProjectileRewind); } \
+	FORCEINLINE static uint32 __PPO__ProjectileRewindMaxScale() { return STRUCT_OFFSET(AUTWeaponFix, ProjectileRewindMaxScale); } \
+	FORCEINLINE static uint32 __PPO__ProjectileRewindFullPingMs() { return STRUCT_OFFSET(AUTWeaponFix, ProjectileRewindFullPingMs); } \
+	FORCEINLINE static uint32 __PPO__ProjectileRewindMaxPingMs() { return STRUCT_OFFSET(AUTWeaponFix, ProjectileRewindMaxPingMs); } \
+	FORCEINLINE static uint32 __PPO__ProjectileRewindMinScale() { return STRUCT_OFFSET(AUTWeaponFix, ProjectileRewindMinScale); } \
+	FORCEINLINE static uint32 __PPO__ActiveServerProjectiles() { return STRUCT_OFFSET(AUTWeaponFix, ActiveServerProjectiles); }
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_96_PROLOG \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_EVENT_PARMS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_125_PROLOG \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_EVENT_PARMS
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_GENERATED_BODY_LEGACY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_GENERATED_BODY_LEGACY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_RPC_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_CALLBACK_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_INCLASS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_STANDARD_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_RPC_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_CALLBACK_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_INCLASS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_STANDARD_CONSTRUCTORS \
 public: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_GENERATED_BODY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_GENERATED_BODY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_RPC_WRAPPERS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_CALLBACK_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_INCLASS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_99_ENHANCED_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_RPC_WRAPPERS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_CALLBACK_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_INCLASS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeaponFix_h_128_ENHANCED_CONSTRUCTORS \
 private: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 

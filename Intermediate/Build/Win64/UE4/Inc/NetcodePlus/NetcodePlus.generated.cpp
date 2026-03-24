@@ -125,11 +125,15 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFHitsound
 		FNativeFunctionRegistrar::RegisterFunction(AMutHitsounds::StaticClass(), "WriteConfigSection",(Native)&AMutHitsounds::execWriteConfigSection);
 	}
 	IMPLEMENT_CLASS(AMutHitsounds, 2138622872);
+	void ANCPlusCTFGameMode::StaticRegisterNativesANCPlusCTFGameMode()
+	{
+	}
+	IMPLEMENT_CLASS(ANCPlusCTFGameMode, 1475332928);
 	void ATeamArenaCharacter::StaticRegisterNativesATeamArenaCharacter()
 	{
 		FNativeFunctionRegistrar::RegisterFunction(ATeamArenaCharacter::StaticClass(), "GetNetcodeVersion",(Native)&ATeamArenaCharacter::execGetNetcodeVersion);
 	}
-	IMPLEMENT_CLASS(ATeamArenaCharacter, 2687719762);
+	IMPLEMENT_CLASS(ATeamArenaCharacter, 1203116225);
 	void UTeamArenaCharacterMovement::StaticRegisterNativesUTeamArenaCharacterMovement()
 	{
 	}
@@ -335,7 +339,7 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFNetcodeDelayedProj
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "ClientNotifyImpressive",(Native)&AUTPlusShockRifle::execClientNotifyImpressive);
 		FNativeFunctionRegistrar::RegisterFunction(AUTPlusShockRifle::StaticClass(), "UpdateScreenTexture",(Native)&AUTPlusShockRifle::execUpdateScreenTexture);
 	}
-	IMPLEMENT_CLASS(AUTPlusShockRifle, 2116626224);
+	IMPLEMENT_CLASS(AUTPlusShockRifle, 4045597718);
 	void AUTPlusSniper::ClientNotifyImpressive()
 	{
 		ProcessEvent(FindFunctionChecked(NETCODEPLUS_ClientNotifyImpressive),NULL);
@@ -458,7 +462,9 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTMutator();
 	ENGINE_API class UScriptStruct* Z_Construct_UScriptStruct_FTimerHandle();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTLocalMessage_NoRegister();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTCTFBaseGame();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTCharacter();
+	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_AUTWeapon_NoRegister();
 	COREUOBJECT_API class UScriptStruct* Z_Construct_UScriptStruct_FLinearColor();
 	ENGINE_API class UClass* Z_Construct_UClass_UMaterialInterface_NoRegister();
 	UNREALTOURNAMENT_API class UClass* Z_Construct_UClass_UUTCharacterMovement();
@@ -513,6 +519,8 @@ static struct FScriptStruct_NetcodePlus_StaticRegisterNativesFPlusRocketFireMode
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_AMutHitsounds_WriteConfigSection();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_AMutHitsounds();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_ANCPlusCTFGameMode_NoRegister();
+	NETCODEPLUS_API class UClass* Z_Construct_UClass_ANCPlusCTFGameMode();
 	NETCODEPLUS_API class UFunction* Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter_NoRegister();
 	NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter();
@@ -1302,6 +1310,75 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 	static FCompiledInDefer Z_CompiledInDefer_UClass_AMutHitsounds(Z_Construct_UClass_AMutHitsounds, &AMutHitsounds::StaticClass, TEXT("AMutHitsounds"), false, nullptr, nullptr, nullptr);
 	DEFINE_VTABLE_PTR_HELPER_CTOR(AMutHitsounds);
+	UClass* Z_Construct_UClass_ANCPlusCTFGameMode_NoRegister()
+	{
+		return ANCPlusCTFGameMode::StaticClass();
+	}
+	UClass* Z_Construct_UClass_ANCPlusCTFGameMode()
+	{
+		static UClass* OuterClass = NULL;
+		if (!OuterClass)
+		{
+			Z_Construct_UClass_AUTCTFBaseGame();
+			Z_Construct_UPackage__Script_NetcodePlus();
+			OuterClass = ANCPlusCTFGameMode::StaticClass();
+			if (!(OuterClass->ClassFlags & CLASS_Constructed))
+			{
+				UObjectForceRegistration(OuterClass);
+				OuterClass->ClassFlags |= 0x2090028D;
+
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				UProperty* NewProp_FlagCarrierLOSPenalty = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FlagCarrierLOSPenalty"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(FlagCarrierLOSPenalty, ANCPlusCTFGameMode), 0x0010000000010005);
+				UProperty* NewProp_DroppedFlagSpawnPenalty = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("DroppedFlagSpawnPenalty"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(DroppedFlagSpawnPenalty, ANCPlusCTFGameMode), 0x0010000000010005);
+				UProperty* NewProp_FlagCarrierSpawnPenalty = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FlagCarrierSpawnPenalty"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(FlagCarrierSpawnPenalty, ANCPlusCTFGameMode), 0x0010000000010005);
+				UProperty* NewProp_FlagSpawnPenaltyRadius = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FlagSpawnPenaltyRadius"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(FlagSpawnPenaltyRadius, ANCPlusCTFGameMode), 0x0010000000010005);
+				UProperty* NewProp_FlagBaseProximityRadius = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("FlagBaseProximityRadius"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(FlagBaseProximityRadius, ANCPlusCTFGameMode), 0x0010000000010005);
+				CPP_BOOL_PROPERTY_BITMASK_STRUCT(bEndGameAdvantageOnlyWithinOneCap, ANCPlusCTFGameMode, bool);
+				UProperty* NewProp_bEndGameAdvantageOnlyWithinOneCap = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("bEndGameAdvantageOnlyWithinOneCap"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(bEndGameAdvantageOnlyWithinOneCap, ANCPlusCTFGameMode), 0x0010000000010005, CPP_BOOL_PROPERTY_BITMASK(bEndGameAdvantageOnlyWithinOneCap, ANCPlusCTFGameMode), sizeof(bool), true);
+				UProperty* NewProp_GracePeriodDuration = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("GracePeriodDuration"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(GracePeriodDuration, ANCPlusCTFGameMode), 0x0010000000010005);
+				UProperty* NewProp_AdvantageMaxDuration = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("AdvantageMaxDuration"), RF_Public|RF_Transient|RF_MarkAsNative) UIntProperty(CPP_PROPERTY_BASE(AdvantageMaxDuration, ANCPlusCTFGameMode), 0x0010000000010005);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				OuterClass->ClassConfigName = FName(TEXT("Game"));
+				OuterClass->StaticLink();
+#if WITH_METADATA
+				UMetaData* MetaData = OuterClass->GetOutermost()->GetMetaData();
+				MetaData->SetValue(OuterClass, TEXT("HideCategories"), TEXT("Info Rendering MovementReplication Replication Actor Input Movement Collision Rendering Utilities|Transformation"));
+				MetaData->SetValue(OuterClass, TEXT("IncludePath"), TEXT("NCPlusCTFGameMode.h"));
+				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(OuterClass, TEXT("ShowCategories"), TEXT("Input|MouseInput Input|TouchInput"));
+				MetaData->SetValue(NewProp_FlagCarrierLOSPenalty, TEXT("Category"), TEXT("CTF|Spawning"));
+				MetaData->SetValue(NewProp_FlagCarrierLOSPenalty, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_FlagCarrierLOSPenalty, TEXT("ToolTip"), TEXT("Score penalty for spawns with direct LOS to an enemy flag carrier."));
+				MetaData->SetValue(NewProp_DroppedFlagSpawnPenalty, TEXT("Category"), TEXT("CTF|Spawning"));
+				MetaData->SetValue(NewProp_DroppedFlagSpawnPenalty, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_DroppedFlagSpawnPenalty, TEXT("ToolTip"), TEXT("Score penalty applied when a spawn is near a dropped flag in its own base."));
+				MetaData->SetValue(NewProp_FlagCarrierSpawnPenalty, TEXT("Category"), TEXT("CTF|Spawning"));
+				MetaData->SetValue(NewProp_FlagCarrierSpawnPenalty, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_FlagCarrierSpawnPenalty, TEXT("ToolTip"), TEXT("Score penalty applied when a spawn is near a flag carrier in the base area."));
+				MetaData->SetValue(NewProp_FlagSpawnPenaltyRadius, TEXT("Category"), TEXT("CTF|Spawning"));
+				MetaData->SetValue(NewProp_FlagSpawnPenaltyRadius, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_FlagSpawnPenaltyRadius, TEXT("ToolTip"), TEXT("Distance from a flag carrier or dropped flag within which spawns are penalized."));
+				MetaData->SetValue(NewProp_FlagBaseProximityRadius, TEXT("Category"), TEXT("CTF|Spawning"));
+				MetaData->SetValue(NewProp_FlagBaseProximityRadius, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_FlagBaseProximityRadius, TEXT("ToolTip"), TEXT("Distance from a flag base within which an actor is considered \"in the base area.\""));
+				MetaData->SetValue(NewProp_bEndGameAdvantageOnlyWithinOneCap, TEXT("Category"), TEXT("CTF|Advantage"));
+				MetaData->SetValue(NewProp_bEndGameAdvantageOnlyWithinOneCap, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_bEndGameAdvantageOnlyWithinOneCap, TEXT("ToolTip"), TEXT("If true, end-of-game advantage only triggers if score difference is <= 1 cap. Halftime always allows advantage."));
+				MetaData->SetValue(NewProp_GracePeriodDuration, TEXT("Category"), TEXT("CTF|Advantage"));
+				MetaData->SetValue(NewProp_GracePeriodDuration, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_GracePeriodDuration, TEXT("ToolTip"), TEXT("Seconds after all flags return home before ending the half/game. Picking up a flag cancels it."));
+				MetaData->SetValue(NewProp_AdvantageMaxDuration, TEXT("Category"), TEXT("CTF|Advantage"));
+				MetaData->SetValue(NewProp_AdvantageMaxDuration, TEXT("ModuleRelativePath"), TEXT("Public/NCPlusCTFGameMode.h"));
+				MetaData->SetValue(NewProp_AdvantageMaxDuration, TEXT("ToolTip"), TEXT("Max seconds advantage lasts while a flag is held before forcing grace period."));
+#endif
+			}
+		}
+		check(OuterClass->GetClass());
+		return OuterClass;
+	}
+	static FCompiledInDefer Z_CompiledInDefer_UClass_ANCPlusCTFGameMode(Z_Construct_UClass_ANCPlusCTFGameMode, &ANCPlusCTFGameMode::StaticClass, TEXT("ANCPlusCTFGameMode"), false, nullptr, nullptr, nullptr);
+	DEFINE_VTABLE_PTR_HELPER_CTOR(ANCPlusCTFGameMode);
 	UFunction* Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion()
 	{
 		struct TeamArenaCharacter_eventGetNetcodeVersion_Parms
@@ -1345,6 +1422,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				OuterClass->LinkChild(Z_Construct_UFunction_ATeamArenaCharacter_GetNetcodeVersion());
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				UProperty* NewProp_LastEquippedWeapon = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("LastEquippedWeapon"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(LastEquippedWeapon, ATeamArenaCharacter), 0x0020080000000000, Z_Construct_UClass_AUTWeapon_NoRegister());
 				UProperty* NewProp_CachedPredictionPC = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("CachedPredictionPC"), RF_Public|RF_Transient|RF_MarkAsNative) UObjectProperty(CPP_PROPERTY_BASE(CachedPredictionPC, ATeamArenaCharacter), 0x0020080000000000, Z_Construct_UClass_ATeamArenaPredictionPC_NoRegister());
 				UProperty* NewProp_SmoothedStabilityFactor = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SmoothedStabilityFactor"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(SmoothedStabilityFactor, ATeamArenaCharacter), 0x0010000000000000);
 				UProperty* NewProp_SpawnProtectionOpacity = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("SpawnProtectionOpacity"), RF_Public|RF_Transient|RF_MarkAsNative) UFloatProperty(CPP_PROPERTY_BASE(SpawnProtectionOpacity, ATeamArenaCharacter), 0x0010000000010015);
@@ -1360,6 +1438,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				MetaData->SetValue(OuterClass, TEXT("ModuleRelativePath"), TEXT("Public/TeamArenaCharacter.h"));
 				MetaData->SetValue(OuterClass, TEXT("ObjectInitializerConstructorDeclared"), TEXT(""));
 				MetaData->SetValue(OuterClass, TEXT("ToolTip"), TEXT("Enhanced character that uses split prediction for movement.\n\nKey change: OnRep_ReplicatedMovement() uses GetVisualPredictionTime()\ninstead of GetPredictionTime() for client-side extrapolation.\n\nThis eliminates the \"dual hitbox\" bug where enemies appear to have\ndifferent positions visually vs where the server validates hits.\n\nVisual position (predict 0) \x2248 Server position (now)\nHit validation (predict 120) \x2248 What shooter saw when they fired"));
+				MetaData->SetValue(NewProp_LastEquippedWeapon, TEXT("ModuleRelativePath"), TEXT("Public/TeamArenaCharacter.h"));
+				MetaData->SetValue(NewProp_LastEquippedWeapon, TEXT("ToolTip"), TEXT("--- Per-weapon hide tracking ---\nTracks last equipped weapon to detect weapon switches and apply hide state"));
 				MetaData->SetValue(NewProp_CachedPredictionPC, TEXT("ModuleRelativePath"), TEXT("Public/TeamArenaCharacter.h"));
 				MetaData->SetValue(NewProp_CachedPredictionPC, TEXT("ToolTip"), TEXT("Cached reference to viewing controller (for performance).\nUpdated when controller changes."));
 				MetaData->SetValue(NewProp_SmoothedStabilityFactor, TEXT("ModuleRelativePath"), TEXT("Public/TeamArenaCharacter.h"));
@@ -2136,7 +2216,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			UMetaData* MetaData = ReturnFunction->GetOutermost()->GetMetaData();
 			MetaData->SetValue(ReturnFunction, TEXT("Category"), TEXT("Impressive"));
 			MetaData->SetValue(ReturnFunction, TEXT("ModuleRelativePath"), TEXT("Public/UTPlusShockRifle.h"));
-			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("BP event you?ll use to play the sound / widget"));
+			MetaData->SetValue(ReturnFunction, TEXT("ToolTip"), TEXT("BP event you\xfffdll use to play the sound / widget"));
 #endif
 		}
 		return ReturnFunction;
@@ -2226,7 +2306,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				UProperty* NewProp_bTrackImpressive = new(EC_InternalUseOnlyConstructor, OuterClass, TEXT("bTrackImpressive"), RF_Public|RF_Transient|RF_MarkAsNative) UBoolProperty(FObjectInitializer(), EC_CppProperty, CPP_BOOL_PROPERTY_OFFSET(bTrackImpressive, AUTPlusShockRifle), 0x0010000000010005, CPP_BOOL_PROPERTY_BITMASK(bTrackImpressive, AUTPlusShockRifle), sizeof(bool), true);
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTPlusShockRifle_ClientNotifyImpressive(), "ClientNotifyImpressive"); // 1533969078
-				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTPlusShockRifle_OnImpressive(), "OnImpressive"); // 1724617142
+				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTPlusShockRifle_OnImpressive(), "OnImpressive"); // 338287143
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTPlusShockRifle_Play1PComboEffects(), "Play1PComboEffects"); // 1621028241
 				OuterClass->AddFunctionToFunctionMapWithOverriddenName(Z_Construct_UFunction_AUTPlusShockRifle_UpdateScreenTexture(), "UpdateScreenTexture"); // 2043393905
 				OuterClass->ClassConfigName = FName(TEXT("Game"));
@@ -3295,8 +3375,8 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 			ReturnPackage = CastChecked<UPackage>(StaticFindObjectFast(UPackage::StaticClass(), NULL, FName(TEXT("/Script/NetcodePlus")), false, false));
 			ReturnPackage->SetPackageFlags(PKG_CompiledIn | 0x00000000);
 			FGuid Guid;
-			Guid.A = 0x3976CA40;
-			Guid.B = 0xBC29A921;
+			Guid.A = 0x8ACB1C79;
+			Guid.B = 0x04694EBB;
 			Guid.C = 0x00000000;
 			Guid.D = 0x00000000;
 			ReturnPackage->SetGuid(Guid);

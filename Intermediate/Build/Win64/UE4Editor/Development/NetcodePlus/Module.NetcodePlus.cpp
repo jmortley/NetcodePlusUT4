@@ -2,6 +2,7 @@
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\MutHitsounds.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\NCPlusCTFGameMode.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\NetcodePlus.cpp"
+#include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\SUTWeaponSkinSelector.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\TeamArenaCharacter.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\TeamArenaCharacterMovement.cpp"
 #include "C:\UnrealTournament\UnrealTournament\Plugins\NetcodePlus\Source\Private\TeamArenaPredictionPC.cpp"

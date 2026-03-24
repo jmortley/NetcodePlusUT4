@@ -561,13 +561,74 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 	}
 
+	// --- FIX: Kill ambient sounds from inactive weapons (stock link gun overheat bug) ---
+	// Stock UTWeap_LinkGun::Tick() sets overheat ambient sound on the owner even when
+	// the link gun is inactive in inventory. This causes spectators to hear a looping
+	// overheat sound on players who aren't even holding the link gun.
+	if (GetNetMode() != NM_DedicatedServer && AmbientSound)
+	{
+		AUTWeapon* ActiveWeapon = GetWeapon();
+		if (ActiveWeapon)
+		{
+			// If active weapon is a link gun, the sound is legitimate
+			AUTWeap_LinkGun* ActiveLinkGun = Cast<AUTWeap_LinkGun>(ActiveWeapon);
+			if (!ActiveLinkGun || ActiveLinkGun->OverheatSound != AmbientSound)
+			{
+				// Active weapon is NOT a link gun, or its overheat sound doesn't match.
+				// Check if an inactive link gun in inventory is the culprit.
+				for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
+				{
+					if (*It != ActiveWeapon)
+					{
+						AUTWeap_LinkGun* InactiveLinkGun = Cast<AUTWeap_LinkGun>(*It);
+						if (InactiveLinkGun && InactiveLinkGun->OverheatSound == AmbientSound)
+						{
+							SetAmbientSound(nullptr, true);
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Kill ambient sounds on dead characters
+	if (IsDead() && AmbientSoundComp && AmbientSoundComp->IsPlaying())
+	{
+		AmbientSoundComp->Stop();
+	}
+
 	// --- PERF: Skip base class spawn protection material loop ---
 	// Base AUTCharacter::Tick (line 4698-4734) loops BodyMIs setting SpawnProtectionPct
 	// every frame. We handle spawn protection ourselves, so skip the base class work
 	// by temporarily clearing the flag. Saves ~27K material calls/sec.
+	//
+	// IMPORTANT: We still need the base class expiry logic to run, so we handle it
+	// ourselves here before skipping. The base class checks elapsed time against
+	// GS->SpawnProtectionTime and clears bSpawnProtectionEligible when time is up.
 	bool bSavedSpawnProtectionEligible = bSpawnProtectionEligible;
 	if (bSpawnProtectionEligible && GetNetMode() != NM_DedicatedServer)
 	{
+		// Run the expiry check that base class would have done
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+		if (GS != nullptr && GS->SpawnProtectionTime > 0.0f)
+		{
+			float Pct = 1.0f - (GetWorld()->TimeSeconds - SpawnProtectionStartTime) / GS->SpawnProtectionTime;
+			if (Pct <= 0.0f)
+			{
+				// Time's up — actually expire spawn protection
+				bSpawnProtectionEligible = false;
+				bSavedSpawnProtectionEligible = false;
+			}
+		}
+		else
+		{
+			// No spawn protection time configured — disable immediately
+			bSpawnProtectionEligible = false;
+			bSavedSpawnProtectionEligible = false;
+		}
+
+		// Hide from base class material loop (we do our own visuals below)
 		bSpawnProtectionEligible = false;
 	}
 
@@ -599,7 +660,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		OverlayMesh = SavedOverlayMesh;
 	}
 
-	// Restore spawn protection flag
+	// Restore spawn protection flag (respects expiry — bSavedSpawnProtectionEligible
+	// is set to false above if protection time elapsed)
 	bSpawnProtectionEligible = bSavedSpawnProtectionEligible;
 
 	// Visuals are for clients only
@@ -707,4 +769,50 @@ void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
 
 	// Clear any stuck audio on the pawn
 	SetAmbientSound(nullptr);
+}
+
+
+FRotator ATeamArenaCharacter::GetViewRotation() const
+{
+	FRotator BaseRotation = Super::GetViewRotation();
+
+	// Only smooth for remote characters (not locally controlled, not on dedicated server)
+	if (IsLocallyControlled() || GetNetMode() == NM_DedicatedServer)
+	{
+		return BaseRotation;
+	}
+
+	// Initialize on first call to prevent interpolating from (0,0,0)
+	if (!bSmoothedViewRotationInitialized)
+	{
+		SmoothedViewRotation = BaseRotation;
+		bSmoothedViewRotationInitialized = true;
+		return BaseRotation;
+	}
+
+	// Smooth the rotation for spectators viewing this character.
+	// Engine default SmoothTargetViewRotationSpeed is 20.0 which at 480fps
+	// catches up in ~2 frames, making 100Hz network rotation updates look jerky.
+	// 10.0 spreads each step over ~5 frames, eliminating visible stepping.
+	float DeltaTime = GetWorld()->GetDeltaSeconds();
+	SmoothedViewRotation = FMath::RInterpTo(SmoothedViewRotation, BaseRotation, DeltaTime, 10.0f);
+
+	return SmoothedViewRotation;
+}
+
+
+bool ATeamArenaCharacter::Died(AController* EventInstigator, const FDamageEvent& DamageEvent, AActor* DamageCauser)
+{
+	// Force-clear ALL ambient sounds on death to prevent looping
+	// (e.g. link gun overheat sound continuing after death)
+	SetAmbientSound(nullptr, true);
+	SetStatusAmbientSound(nullptr, true);
+	SetLocalAmbientSound(nullptr, true);
+
+	if (AmbientSoundComp && AmbientSoundComp->IsPlaying())
+	{
+		AmbientSoundComp->Stop();
+	}
+
+	return Super::Died(EventInstigator, DamageEvent, DamageCauser);
 }

@@ -9,6 +9,9 @@
 #ifndef NETCODEPLUS_MutHitsounds_generated_h
 	#include "Public/MutHitsounds.h"
 #endif
+#ifndef NETCODEPLUS_NCPlusCTFGameMode_generated_h
+	#include "Public/NCPlusCTFGameMode.h"
+#endif
 #ifndef NETCODEPLUS_TeamArenaCharacter_generated_h
 	#include "Public/TeamArenaCharacter.h"
 #endif
@@ -20,6 +23,12 @@
 #endif
 #ifndef NETCODEPLUS_UTHitsoundMessage_generated_h
 	#include "Public/UTHitsoundMessage.h"
+#endif
+#ifndef NETCODEPLUS_UTPlusProj_FlakShell_generated_h
+	#include "Public/UTPlusProj_FlakShell.h"
+#endif
+#ifndef NETCODEPLUS_UTPlusProj_Rocket_generated_h
+	#include "Public/UTPlusProj_Rocket.h"
 #endif
 #ifndef NETCODEPLUS_UTPlusProj_ShockBall_generated_h
 	#include "Public/UTPlusProj_ShockBall.h"
