@@ -660,9 +660,15 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		OverlayMesh = SavedOverlayMesh;
 	}
 
-	// Restore spawn protection flag (respects expiry — bSavedSpawnProtectionEligible
-	// is set to false above if protection time elapsed)
-	bSpawnProtectionEligible = bSavedSpawnProtectionEligible;
+	// Restore spawn protection flag ONLY on clients (where we cleared it for the
+	// material loop optimization). On the dedicated server we never touched it,
+	// so the base class expiry in Super::Tick() must be allowed to persist —
+	// otherwise the unconditional restore overwrites the server's "time's up"
+	// clear back to true, making spawn protection permanent.
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		bSpawnProtectionEligible = bSavedSpawnProtectionEligible;
+	}
 
 	// Visuals are for clients only
 	if (GetNetMode() == NM_DedicatedServer)
