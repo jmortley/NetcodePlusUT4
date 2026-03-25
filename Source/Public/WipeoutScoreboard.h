@@ -1,6 +1,7 @@
 // WipeoutScoreboard — Portrait-row scoreboard for Wipeout game mode
 #pragma once
-
+#include "NetcodePlus.h"
+#include "UnrealTournament.h"
 #include "UTTeamScoreboard.h"
 #include "WipeoutScoreboard.generated.h"
 
@@ -27,10 +28,16 @@ public:
 	FText CH_Damage;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	FText CH_Efficiency;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	float ColumnHeaderKillsX;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	float ColumnHeaderDamageX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	float ColumnHeaderEfficiencyX;
 
 protected:
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;

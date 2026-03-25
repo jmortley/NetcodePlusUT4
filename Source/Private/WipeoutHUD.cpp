@@ -1,7 +1,8 @@
 // WipeoutHUD — FlagRun-style portrait strip for Wipeout game mode
-#include "NetcodePlus.h"
-#include "UnrealTournament.h"
 #include "WipeoutHUD.h"
+#include "NCPlusCTFGameMode.h"
+#include "UnrealTournament.h"
+#include "UTTeamGameMode.h"
 #include "WipeoutScoreboard.h"
 #include "UTGameState.h"
 #include "UTPlayerState.h"
@@ -106,13 +107,18 @@ void AWipeoutHUD::DrawHUD()
 			float OwnerPipScaling = (UTPS == GetScorerPlayerState()) ? 1.25f : 1.f;
 			float PipSize = BasePipSize * OwnerPipScaling;
 
+			// Determine if player is dead — GetUTCharacter() can still return
+			// a valid (ragdolling) character after death, so check IsDead() too
+			AUTCharacter* UTC = UTPS->GetUTCharacter();
+			bool bPlayerDead = (UTC == nullptr) || UTC->IsDead();
+
 			// Respawn progress: 0 = fully dead/waiting, 1 = alive
 			float LiveScaling = 1.f;
-			if (UTPS->RespawnTime > 0.f && UTPS->RespawnWaitTime > 0.f && !UTPS->GetUTCharacter())
+			if (bPlayerDead && UTPS->RespawnTime > 0.f && UTPS->RespawnWaitTime > 0.f)
 			{
 				LiveScaling = FMath::Clamp(1.f - UTPS->RespawnTime / UTPS->RespawnWaitTime, 0.f, 1.f);
 			}
-			else if (!UTPS->GetUTCharacter() && !UTPS->bOutOfLives)
+			else if (bPlayerDead && !UTPS->bOutOfLives)
 			{
 				// Dead but no respawn time info yet — show as dead
 				LiveScaling = 0.f;

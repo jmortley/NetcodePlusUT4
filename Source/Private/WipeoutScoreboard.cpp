@@ -1,31 +1,36 @@
 // WipeoutScoreboard — Portrait-row scoreboard for Wipeout game mode
-#include "NetcodePlus.h"
-#include "UnrealTournament.h"
 #include "WipeoutScoreboard.h"
+#include "NCPlusCTFGameMode.h"
+#include "UnrealTournament.h"
+#include "UTTeamGameMode.h"
 #include "UTGameState.h"
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
 #include "UTBot.h"
+#include "Engine/NetDriver.h"
+#include "Engine/NetConnection.h"
 
 UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	// Taller cells to accommodate portrait pip + HP/armor bars
 	CellHeight = 80.f;
-	CellWidth = 550.f;
+	CellWidth = 775.f;
 
 	// Column positions (fraction of CellWidth)
-	ColumnHeaderPlayerX = 0.16f;    // Name starts after portrait
-	ColumnHeaderScoreX = 0.60f;     // Score/round wins
-	ColumnHeaderKillsX = 0.68f;
-	ColumnHeaderDeathsX = 0.76f;
-	ColumnHeaderDamageX = 0.86f;
-	ColumnHeaderPingX = 0.95f;
+	ColumnHeaderPlayerX = 0.10f;    // Name starts after portrait
+	ColumnHeaderScoreX = 0.40f;     // Score/round wins (unused in Wipeout but keep for base class)
+	ColumnHeaderKillsX = 0.42f;
+	ColumnHeaderDeathsX = 0.54f;
+	ColumnHeaderDamageX = 0.65f;
+	ColumnHeaderEfficiencyX = 0.77f;
+	ColumnHeaderPingX = 0.90f;
 
 	CH_Kills = NSLOCTEXT("UTScoreboard", "ColumnHeader_Kills", "Kills");
 	CH_Deaths = NSLOCTEXT("UTScoreboard", "ColumnHeader_Deaths", "Deaths");
 	CH_Damage = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Damage", "DMG");
+	CH_Efficiency = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Efficiency", "Eff%");
 
 	bUseRoundKills = true;
 
@@ -74,6 +79,8 @@ void UWipeoutScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_Damage, XOffset + (ScaledCellWidth * ColumnHeaderDamageX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(CH_Efficiency, XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX), YOffset + ColumnHeaderY,
+				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 		}
 		DrawText((GetWorld()->GetNetMode() == NM_Standalone) ? CH_Skill : CH_Ping,
 			XOffset + (ScaledCellWidth * ColumnHeaderPingX), YOffset + ColumnHeaderY,
@@ -99,7 +106,8 @@ void UWipeoutScoreboard::DrawPortraitPip(AUTPlayerState* PlayerState, float XOff
 		BlueTeamOverlay.Texture = Atlas;
 	}
 
-	bool bIsDead = !PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives;
+	AUTCharacter* UTC_Pip = PlayerState->GetUTCharacter();
+	bool bIsDead = (UTC_Pip == nullptr || UTC_Pip->IsDead()) && !PlayerState->bOutOfLives;
 	uint8 TeamNum = PlayerState->GetTeamNum();
 
 	// Layer 1: Team background
@@ -224,7 +232,8 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 
 	// ---- Player name ----
 	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);
-	bool bIsDead = !PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives;
+	AUTCharacter* UTC_Name = PlayerState->GetUTCharacter();
+	bool bIsDead = (UTC_Name == nullptr || UTC_Name->IsDead()) && !PlayerState->bOutOfLives;
 	if (bIsDead) DrawColor *= 0.6f;
 
 	FString DisplayName = PlayerState->PlayerName;
@@ -323,15 +332,47 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 		static const FNumberFormattingOptions SkillFmt = FNumberFormattingOptions()
 			.SetMinimumFractionalDigits(1).SetMaximumFractionalDigits(1);
 		DrawText(FText::AsNumber(Bot->Skill, &SkillFmt), XOffset + ScaledCellWidth * ColumnHeaderPingX, YOffset + ColumnY,
-			UTHUDOwner->TinyFont, 0.75f * RenderScale, 1.f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
+			UTHUDOwner->SmallFont, RenderScale, 1.f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 	else if (GetWorld()->GetNetMode() != NM_Standalone)
 	{
 		FLinearColor PingColor = (Ping < 60) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
 			: (Ping < 120) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
 			: FLinearColor(1.f, 0.25f, 0.25f, 1.f);
-		DrawText(FText::AsNumber(Ping), XOffset + ScaledCellWidth * ColumnHeaderPingX, YOffset + ColumnY,
-			UTHUDOwner->TinyFont, 0.75f * RenderScale, 1.f, PingColor, ETextHorzPos::Center, ETextVertPos::Center);
+
+		// For the local player, also show packet loss from the net connection
+		FString PingStr;
+		if (bIsOwner)
+		{
+			float PacketLossPct = 0.f;
+			UNetDriver* NetDriver = GetWorld()->GetNetDriver();
+			if (NetDriver && NetDriver->ServerConnection)
+			{
+				int32 InLost = NetDriver->ServerConnection->InPacketsLost;
+				int32 InTotal = NetDriver->ServerConnection->InTotalPackets;
+				if (InTotal > 0)
+				{
+					PacketLossPct = (float(InLost) / float(InTotal)) * 100.f;
+				}
+			}
+			if (PacketLossPct > 0.1f)
+			{
+				PingStr = FString::Printf(TEXT("%d (%.1f%%)"), Ping, PacketLossPct);
+				// Tint towards red if significant packet loss
+				if (PacketLossPct > 1.f) PingColor = FLinearColor(1.f, 0.25f, 0.25f, 1.f);
+			}
+			else
+			{
+				PingStr = FString::Printf(TEXT("%dms"), Ping);
+			}
+		}
+		else
+		{
+			PingStr = FString::Printf(TEXT("%dms"), Ping);
+		}
+
+		DrawText(FText::FromString(PingStr), XOffset + ScaledCellWidth * ColumnHeaderPingX, YOffset + ColumnY,
+			UTHUDOwner->SmallFont, RenderScale, 1.f, PingColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 
 	// ---- Mute indicator (from base) ----
@@ -369,4 +410,17 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) DmgColor *= 0.6f;
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DmgColor, ETextHorzPos::Center, ETextVertPos::Center);
+
+	// Efficiency — kills / (kills + deaths), shown as percentage
+	int32 EffKills = bUseRoundKills ? PlayerState->RoundKills : PlayerState->Kills;
+	int32 EffDeaths = PlayerState->Deaths;
+	float EffPct = (EffKills + EffDeaths > 0) ? (float(EffKills) / float(EffKills + EffDeaths)) * 100.f : 0.f;
+	FLinearColor EffColor = (EffPct >= 60.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
+		: (EffPct >= 40.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
+		: FLinearColor(1.f, 0.4f, 0.4f, 1.f);
+	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) EffColor *= 0.6f;
+	// Show as "75%" format
+	FString EffStr = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(EffPct));
+	DrawText(FText::FromString(EffStr), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
+		UTHUDOwner->TinyFont, 1.0f, 1.0f, EffColor, ETextHorzPos::Center, ETextVertPos::Center);
 }

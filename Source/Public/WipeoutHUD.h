@@ -1,6 +1,7 @@
 // WipeoutHUD — FlagRun-style portrait strip for Wipeout game mode
 #pragma once
-
+#include "NetcodePlus.h"
+#include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "WipeoutHUD.generated.h"
 
