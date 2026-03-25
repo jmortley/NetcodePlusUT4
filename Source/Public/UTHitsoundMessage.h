@@ -24,7 +24,7 @@ enum class EHitsoundMessageType : uint8
  * Server calls ClientReceiveLocalizedMessage, client receives and plays sound.
  * 
  * Switch: 0 = Enemy hit, 1 = Friendly hit
- * OptionalObject: The MutHitsounds actor (to access config)
+ * OptionalObject: The ClientHitsounds actor (to access config)
  * RelatedPlayerState_1: Attacker (for spectator routing)
  * Value: Damage amount (packed into MessageIndex or use OptionalValue if available)
  */

@@ -1,5 +1,5 @@
-// MutHitsounds.h
-// C++ Implementation of MutHitsounds Blueprint Mutator
+// ClientHitsounds.h
+// C++ Implementation of ClientHitsounds Mutator
 // Compatible with TeamArenaCharacter and NetcodePlus
 
 #pragma once
@@ -7,7 +7,7 @@
 #include "CoreMinimal.h"
 #include "UTMutator.h"
 #include "Sound/SoundBase.h"
-#include "MutHitsounds.generated.h"
+#include "ClientHitsounds.generated.h"
 
 // Forward declarations
 class AUTPlayerController;
@@ -128,7 +128,7 @@ struct FFlakHitEvent
 };
 
 /**
- * MutHitsounds - Hitsound Mutator
+ * ClientHitsounds - Hitsound Mutator
  *
  * Provides configurable hitsound feedback for damage dealt.
  * Features:
@@ -137,14 +137,15 @@ struct FFlakHitEvent
  * - Flak shard batching to prevent sound spam
  * - Replay spectator support
  * - Menu system for configuration
+ * - Client-side hitsound prediction with server deduplication
  */
 UCLASS(Blueprintable, Meta = (ChildCanTick))
-class NETCODEPLUS_API AMutHitsounds : public AUTMutator
+class NETCODEPLUS_API AClientHitsounds : public AUTMutator
 {
 	GENERATED_BODY()
 
 public:
-	AMutHitsounds(const FObjectInitializer& ObjectInitializer);
+	AClientHitsounds(const FObjectInitializer& ObjectInitializer);
 
 	//~ Begin AActor Interface
 	virtual void BeginPlay() override;
@@ -268,6 +269,18 @@ public:
 	const FHitsoundsConfig& GetConfig() const { return Config; }
 
 	// ============================================================
+	// Client-Side Hitsound Prediction
+	// ============================================================
+
+	/** Play a client-predicted hitsound based on estimated damage */
+	UFUNCTION(BlueprintCallable, Category = "Hitsounds|Prediction")
+	void PlayClientPredictedHitsound(int32 EstimatedDamage);
+
+	/** Returns true if a server hitsound should be suppressed (within dedup window) */
+	UFUNCTION(BlueprintPure, Category = "Hitsounds|Prediction")
+	bool ShouldSuppressServerHitsound() const;
+
+	// ============================================================
 	// Client RPCs
 	// ============================================================
 
@@ -324,6 +337,25 @@ protected:
 	/** Minimum age (seconds) before flak hits are processed */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flak")
 	float FlakHitMinAge;
+
+	// ============================================================
+	// Client-Side Prediction Properties
+	// ============================================================
+
+	/** Timestamp of last client-predicted hitsound */
+	float LastClientHitsoundTime;
+
+	/** Whether client-side hitsound prediction is enabled */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Prediction")
+	bool bClientSideHitsoundsEnabled;
+
+	/** Time window (seconds) to suppress duplicate server hitsound after client prediction */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Prediction")
+	float ClientHitsoundDedupWindow;
+
+	/** Minimum interval (seconds) between client-predicted hitsounds (for flak shard batching) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Prediction")
+	float ClientHitsoundMinInterval;
 
 	// ============================================================
 	// Damage Type Identification

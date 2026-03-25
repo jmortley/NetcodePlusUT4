@@ -1,5 +1,6 @@
-// MutHitsounds.cpp
-#include "MutHitsounds.h"
+// ClientHitsounds.cpp
+#include "ClientHitsounds.h"
+#include "HitsoundPack.h"
 #include "UTHitsoundMessage.h"
 #include "UnrealTournament.h"
 #include "UTGameMode.h"
@@ -12,12 +13,14 @@
 #include "TimerManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
+#include "AssetRegistryModule.h"
+#include "IAssetRegistry.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogMutHitsounds, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogClientHitsounds, Log, All);
 
-const FString AMutHitsounds::ConfigSection = TEXT("MutHitsounds");
+const FString AClientHitsounds::ConfigSection = TEXT("ClientHitsounds");
 
-AMutHitsounds::AMutHitsounds(const FObjectInitializer& ObjectInitializer)
+AClientHitsounds::AClientHitsounds(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	FlakHitMinAge = 0.035f;
@@ -27,6 +30,12 @@ AMutHitsounds::AMutHitsounds(const FObjectInitializer& ObjectInitializer)
 	HitsoundsDefaults.UserMultiplier = 1.0f;
 	Config = HitsoundsDefaults;
 
+	// Client-side prediction defaults
+	LastClientHitsoundTime = 0.0f;
+	bClientSideHitsoundsEnabled = true;
+	ClientHitsoundDedupWindow = 0.25f;
+	ClientHitsoundMinInterval = 0.05f;
+
 	// Critical for networking
 	bReplicates = true;
 	bAlwaysRelevant = true;
@@ -35,7 +44,7 @@ AMutHitsounds::AMutHitsounds(const FObjectInitializer& ObjectInitializer)
 	HitsoundMessageClass = UUTHitsoundMessage::StaticClass();
 }
 
-void AMutHitsounds::BeginPlay()
+void AClientHitsounds::BeginPlay()
 {
 	Super::BeginPlay();
 	if (GetNetMode() != NM_DedicatedServer)
@@ -43,10 +52,10 @@ void AMutHitsounds::BeginPlay()
 		ReadConfig();
 	}
 	BuildHitsounds();
-	UE_LOG(LogMutHitsounds, Log, TEXT("MutHitsounds initialized"));
+	UE_LOG(LogClientHitsounds, Log, TEXT("ClientHitsounds initialized"));
 }
 
-void AMutHitsounds::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void AClientHitsounds::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (FlakTimer.IsValid())
 	{
@@ -55,13 +64,13 @@ void AMutHitsounds::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void AMutHitsounds::Init_Implementation(const FString& Options)
+void AClientHitsounds::Init_Implementation(const FString& Options)
 {
 	Super::Init_Implementation(Options);
-	UE_LOG(LogMutHitsounds, Log, TEXT("MutHitsounds::Init with options: %s"), *Options);
+	UE_LOG(LogClientHitsounds, Log, TEXT("ClientHitsounds::Init with options: %s"), *Options);
 }
 
-void AMutHitsounds::Mutate_Implementation(const FString& MutateString, APlayerController* Sender)
+void AClientHitsounds::Mutate_Implementation(const FString& MutateString, APlayerController* Sender)
 {
 	Super::Mutate_Implementation(MutateString, Sender);
 	if (HasAuthority())
@@ -70,7 +79,7 @@ void AMutHitsounds::Mutate_Implementation(const FString& MutateString, APlayerCo
 	}
 }
 
-void AMutHitsounds::EventMutateClientSide_Implementation(const FString& MutateString, APlayerController* Sender)
+void AClientHitsounds::EventMutateClientSide_Implementation(const FString& MutateString, APlayerController* Sender)
 {
 	APlayerController* LocalPC = UGameplayStatics::GetPlayerController(this, 0);
 	if (LocalPC && LocalPC == Sender)
@@ -79,7 +88,7 @@ void AMutHitsounds::EventMutateClientSide_Implementation(const FString& MutateSt
 	}
 }
 
-bool AMutHitsounds::ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured,
+bool AClientHitsounds::ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured,
 	AController* InstigatedBy, const FHitResult& HitInfo, AActor* DamageCauser,
 	TSubclassOf<UDamageType> DamageType)
 {
@@ -91,12 +100,12 @@ bool AMutHitsounds::ModifyDamage_Implementation(int32& Damage, FVector& Momentum
 	return bResult;
 }
 
-int32 AMutHitsounds::GetScaledDamage(AController* InstigatorController, int32 BaseDamage)
+int32 AClientHitsounds::GetScaledDamage(AController* InstigatorController, int32 BaseDamage)
 {
 	return BaseDamage;
 }
 
-void AMutHitsounds::HandleDamage(AController* CausedBy, APawn* Victim, int32 Damage, TSubclassOf<UDamageType> Type)
+void AClientHitsounds::HandleDamage(AController* CausedBy, APawn* Victim, int32 Damage, TSubclassOf<UDamageType> Type)
 {
 	if (!CausedBy || !Victim) return;
 
@@ -108,7 +117,7 @@ void AMutHitsounds::HandleDamage(AController* CausedBy, APawn* Victim, int32 Dam
 	NotifyDamage(Damage, CausedBy, Victim);
 }
 
-void AMutHitsounds::NotifyDamage(int32 Damage, AController* CausedBy, APawn* Victim)
+void AClientHitsounds::NotifyDamage(int32 Damage, AController* CausedBy, APawn* Victim)
 {
 	if (!CausedBy || !HasAuthority()) return;
 
@@ -129,7 +138,7 @@ void AMutHitsounds::NotifyDamage(int32 Damage, AController* CausedBy, APawn* Vic
 	);
 }
 
-void AMutHitsounds::AppendFlakQueue(int32 Damage, AController* CausedBy, APawn* Victim)
+void AClientHitsounds::AppendFlakQueue(int32 Damage, AController* CausedBy, APawn* Victim)
 {
 	float CurrentTime = GetWorld()->GetTimeSeconds();
 	FlakHitQueue.Add(FFlakHitEvent(Damage, CurrentTime, CausedBy, Victim));
@@ -139,14 +148,14 @@ void AMutHitsounds::AppendFlakQueue(int32 Damage, AController* CausedBy, APawn* 
 		GetWorld()->GetTimerManager().SetTimer(
 			FlakTimer,
 			this,
-			&AMutHitsounds::ProcessFlakQueue,
+			&AClientHitsounds::ProcessFlakQueue,
 			0.01f,
 			true
 		);
 	}
 }
 
-void AMutHitsounds::ProcessFlakQueue()
+void AClientHitsounds::ProcessFlakQueue()
 {
 	if (FlakHitQueue.Num() == 0)
 	{
@@ -166,7 +175,7 @@ void AMutHitsounds::ProcessFlakQueue()
 	}
 }
 
-void AMutHitsounds::PlayHitsound(int32 Damage, bool bIsFriendly, TSubclassOf<UDamageType> Type, AActor* HitsoundPlayer)
+void AClientHitsounds::PlayHitsound(int32 Damage, bool bIsFriendly, TSubclassOf<UDamageType> Type, AActor* HitsoundPlayer)
 {
 	// Removed Interface Logic - Direct Playback Only
 	const FHitsound& HitsoundPreset = bIsFriendly ? Config.Friendly : Config.Enemy;
@@ -184,7 +193,7 @@ void AMutHitsounds::PlayHitsound(int32 Damage, bool bIsFriendly, TSubclassOf<UDa
 	}
 }
 
-USoundBase* AMutHitsounds::SelectSoundForDamage(const FHitsound& Hitsound, int32 Damage) const
+USoundBase* AClientHitsounds::SelectSoundForDamage(const FHitsound& Hitsound, int32 Damage) const
 {
 	if (Damage >= HighDamageThreshold && Hitsound.High) return Hitsound.High;
 	else if (Damage >= MedDamageThreshold && Hitsound.Med) return Hitsound.Med;
@@ -192,7 +201,7 @@ USoundBase* AMutHitsounds::SelectSoundForDamage(const FHitsound& Hitsound, int32
 	return Hitsound.Med;
 }
 
-void AMutHitsounds::PlaySampleHitsound()
+void AClientHitsounds::PlaySampleHitsound()
 {
 	USoundBase* SoundToPlay = SelectSoundForDamage(Config.Enemy, MedDamageThreshold);
 	if (SoundToPlay)
@@ -202,7 +211,64 @@ void AMutHitsounds::PlaySampleHitsound()
 	}
 }
 
-void AMutHitsounds::ReadConfig()
+// ============================================================
+// Client-Side Hitsound Prediction (Task 4)
+// ============================================================
+
+void AClientHitsounds::PlayClientPredictedHitsound(int32 EstimatedDamage)
+{
+	if (!bClientSideHitsoundsEnabled)
+	{
+		return;
+	}
+
+	// Only on clients, not dedicated server
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	float CurrentTime = World->GetTimeSeconds();
+
+	// Check minimum interval (flak shard batching)
+	if ((CurrentTime - LastClientHitsoundTime) < ClientHitsoundMinInterval)
+	{
+		return;
+	}
+
+	// Use Enemy preset for client-predicted hitsounds
+	USoundBase* SoundToPlay = SelectSoundForDamage(Config.Enemy, EstimatedDamage);
+	if (SoundToPlay)
+	{
+		float FinalVolume = Config.Enemy.Volume * Config.UserMultiplier;
+		UGameplayStatics::PlaySound2D(this, SoundToPlay, FinalVolume, Config.Enemy.Pitch);
+		LastClientHitsoundTime = CurrentTime;
+	}
+}
+
+bool AClientHitsounds::ShouldSuppressServerHitsound() const
+{
+	UWorld* World = GetWorld();
+	if (!World || !bClientSideHitsoundsEnabled)
+	{
+		return false;
+	}
+
+	float CurrentTime = World->GetTimeSeconds();
+	return (CurrentTime - LastClientHitsoundTime) < ClientHitsoundDedupWindow;
+}
+
+// ============================================================
+// Configuration
+// ============================================================
+
+void AClientHitsounds::ReadConfig()
 {
 	BuildHitsounds();
 	Config.Enemy = ReadConfigSection(TEXT("Hitsounds.Enemy"), HitsoundsDefaults.Enemy);
@@ -215,9 +281,14 @@ void AMutHitsounds::ReadConfig()
 	int32 PlayZeroFriendlyInt = 0;
 	UUTGameplayStatics::GetModConfigInt(ConfigSection, TEXT("PlayZeroFriendly"), PlayZeroFriendlyInt);
 	Config.bPlayZeroFriendly = (PlayZeroFriendlyInt != 0);
+
+	// Read client-side hitsound prediction setting
+	int32 ClientSideHitsoundsInt = 1;
+	UUTGameplayStatics::GetModConfigInt(ConfigSection, TEXT("ClientSideHitsounds"), ClientSideHitsoundsInt);
+	bClientSideHitsoundsEnabled = (ClientSideHitsoundsInt != 0);
 }
 
-FHitsound AMutHitsounds::ReadConfigSection(const FString& Section, const FHitsound& Default)
+FHitsound AClientHitsounds::ReadConfigSection(const FString& Section, const FHitsound& Default)
 {
 	FHitsound Result = Default;
 	FString SoundID;
@@ -234,25 +305,58 @@ FHitsound AMutHitsounds::ReadConfigSection(const FString& Section, const FHitsou
 	return Result;
 }
 
-void AMutHitsounds::WriteConfig()
+void AClientHitsounds::WriteConfig()
 {
 	WriteConfigSection(TEXT("Hitsounds.Enemy"), Config.Enemy);
 	WriteConfigSection(TEXT("Hitsounds.Friendly"), Config.Friendly);
 	UUTGameplayStatics::SetModConfigFloat(ConfigSection, TEXT("UserMultiplier"), Config.UserMultiplier);
 	UUTGameplayStatics::SetModConfigInt(ConfigSection, TEXT("PlayZeroFriendly"), Config.bPlayZeroFriendly ? 1 : 0);
+
+	// Write client-side hitsound prediction setting
+	UUTGameplayStatics::SetModConfigInt(ConfigSection, TEXT("ClientSideHitsounds"), bClientSideHitsoundsEnabled ? 1 : 0);
+
 	UUTGameplayStatics::SaveModConfig();
 }
 
-void AMutHitsounds::WriteConfigSection(const FString& Section, const FHitsound& Hitsound)
+void AClientHitsounds::WriteConfigSection(const FString& Section, const FHitsound& Hitsound)
 {
 	UUTGameplayStatics::SetModConfigString(Section, TEXT("SoundID"), Hitsound.DisplayName);
 	UUTGameplayStatics::SetModConfigFloat(Section, TEXT("Pitch"), Hitsound.Pitch);
 	UUTGameplayStatics::SetModConfigFloat(Section, TEXT("Volume"), Hitsound.Volume);
 }
 
-void AMutHitsounds::BuildHitsounds_Implementation()
+void AClientHitsounds::BuildHitsounds_Implementation()
 {
 	AllHitsounds.Empty();
+
+	// Discover all UHitsoundPack data assets via the Asset Registry
+	FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AR = ARM.Get();
+	TArray<FAssetData> AssetList;
+	AR.GetAssetsByClass(UHitsoundPack::StaticClass()->GetFName(), AssetList, true);
+
+	for (const FAssetData& Asset : AssetList)
+	{
+		UHitsoundPack* Pack = Cast<UHitsoundPack>(Asset.GetAsset());
+		if (!Pack) continue;
+
+		FHitsound HS;
+		HS.DisplayName = Pack->DisplayName;
+		HS.Low = Pack->Low;
+		HS.Med = Pack->Med;
+		HS.High = Pack->High;
+		HS.Volume = Pack->DefaultVolume;
+		HS.Pitch = Pack->DefaultPitch;
+		AllHitsounds.Add(HS);
+	}
+
+	// Sort alphabetically by display name
+	AllHitsounds.Sort([](const FHitsound& A, const FHitsound& B)
+	{
+		return A.DisplayName < B.DisplayName;
+	});
+
+	// Set defaults from first entries
 	if (AllHitsounds.Num() > 0)
 	{
 		HitsoundsDefaults.Enemy = AllHitsounds[0];
@@ -260,7 +364,7 @@ void AMutHitsounds::BuildHitsounds_Implementation()
 	}
 }
 
-FHitsound AMutHitsounds::GetHitsoundByName(const FString& Name)
+FHitsound AClientHitsounds::GetHitsoundByName(const FString& Name)
 {
 	for (const FHitsound& Preset : AllHitsounds)
 	{
@@ -273,7 +377,7 @@ FHitsound AMutHitsounds::GetHitsoundByName(const FString& Name)
 	return FHitsound();
 }
 
-FHitsound AMutHitsounds::MakeHitsound(float Volume, float Pitch, USoundBase* Low, USoundBase* Med, USoundBase* High, const FString& InDisplayName)
+FHitsound AClientHitsounds::MakeHitsound(float Volume, float Pitch, USoundBase* Low, USoundBase* Med, USoundBase* High, const FString& InDisplayName)
 {
 	FHitsound Result;
 	Result.Volume = Volume;
@@ -285,7 +389,7 @@ FHitsound AMutHitsounds::MakeHitsound(float Volume, float Pitch, USoundBase* Low
 	return Result;
 }
 
-void AMutHitsounds::ShowMenu(const FString& Command, APlayerController* InPlayerOwner)
+void AClientHitsounds::ShowMenu(const FString& Command, APlayerController* InPlayerOwner)
 {
 	// Stub implementation for now to satisfy linker
 	if (Command.Contains(TEXT("test")))
@@ -294,19 +398,19 @@ void AMutHitsounds::ShowMenu(const FString& Command, APlayerController* InPlayer
 	}
 }
 
-bool AMutHitsounds::IsFlakDamage(TSubclassOf<UDamageType> DamageType) const
+bool AClientHitsounds::IsFlakDamage(TSubclassOf<UDamageType> DamageType) const
 {
 	if (!DamageType) return false;
 	FString DamageTypeName = DamageType->GetName();
 	return DamageTypeName.Contains(TEXT("Flak")) || DamageTypeName.Contains(TEXT("Shard"));
 }
 
-bool AMutHitsounds::ShouldPlayHitsound(TSubclassOf<UDamageType> DamageType) const
+bool AClientHitsounds::ShouldPlayHitsound(TSubclassOf<UDamageType> DamageType) const
 {
 	return true;
 }
 
-bool AMutHitsounds::IsFriendlyFire(AController* Attacker, APawn* Victim) const
+bool AClientHitsounds::IsFriendlyFire(AController* Attacker, APawn* Victim) const
 {
 	if (!Attacker || !Victim) return false;
 	AUTPlayerState* AttackerPS = Cast<AUTPlayerState>(Attacker->PlayerState);

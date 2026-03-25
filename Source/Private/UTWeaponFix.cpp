@@ -13,6 +13,8 @@
 #include "UTPlusProj_Rocket.h"
 #include "UTWeaponSkin.h"
 #include "UObject/UObjectIterator.h"
+#include "ClientHitsounds.h"
+#include "EngineUtils.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
@@ -633,6 +635,18 @@ void AUTWeaponFix::FireShot()
 			HitScanTrace(SpawnLocation, EndTrace, InstantHitInfo[CurrentFireMode].TraceHalfSize, PreHit, 0.0f);
 			ClientHitChar = Cast<AUTCharacter>(PreHit.Actor.Get());
 		}
+
+		// Client-side hitsound prediction for hitscan weapons
+		if (ClientHitChar != nullptr && Role != ROLE_Authority)
+		{
+			AClientHitsounds* HitsoundsMut = FindClientHitsoundsMutator();
+			if (HitsoundsMut)
+			{
+				int32 EstDamage = InstantHitInfo.IsValidIndex(CurrentFireMode) ? InstantHitInfo[CurrentFireMode].Damage : 0;
+				HitsoundsMut->PlayClientPredictedHitsound(EstDamage);
+			}
+		}
+
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset);
         QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
 
@@ -3246,6 +3260,22 @@ bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum, int32 I
 
 void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum)
 {
+	// Client-side hitsound prediction for projectile weapons
+	if (HitTarget != nullptr && Role != ROLE_Authority)
+	{
+		AClientHitsounds* HitsoundsMut = FindClientHitsoundsMutator();
+		if (HitsoundsMut)
+		{
+			int32 EstDamage = 0;
+			if (ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum])
+			{
+				AUTProjectile* DefProj = ProjClass[FireModeNum]->GetDefaultObject<AUTProjectile>();
+				if (DefProj) EstDamage = DefProj->DamageParams.BaseDamage;
+			}
+			HitsoundsMut->PlayClientPredictedHitsound(EstDamage);
+		}
+	}
+
 	if (!bEnableProjectileRewind || !HitTarget)
 	{
 		return;
@@ -3426,4 +3456,32 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	{
 		ActiveServerProjectiles.RemoveAt(FoundIndex);
 	}
+}
+
+// =========================================================================
+// CLIENT-SIDE HITSOUND PREDICTION HELPER
+// =========================================================================
+
+AClientHitsounds* AUTWeaponFix::FindClientHitsoundsMutator()
+{
+	// Return cached pointer if still valid
+	if (CachedClientHitsounds.IsValid())
+	{
+		return CachedClientHitsounds.Get();
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	// Search via TActorIterator (works on both client and server)
+	for (TActorIterator<AClientHitsounds> It(World); It; ++It)
+	{
+		CachedClientHitsounds = *It;
+		return *It;
+	}
+
+	return nullptr;
 }

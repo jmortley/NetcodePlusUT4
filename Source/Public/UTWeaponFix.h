@@ -24,8 +24,9 @@
  * Works with TeamArenaPredictionPC and TeamArenaCharacter for complete hybrid system.
  */
 
- // --- Forward Declaration ---
+ // --- Forward Declarations ---
 class AUTProjectile;
+class AClientHitsounds;
 
 // --- Struct Definition (MUST BE BEFORE THE CLASS) ---
 USTRUCT(BlueprintType)
@@ -433,4 +434,15 @@ protected:
     /** Server-side tracking of authoritative projectiles by EventIndex */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
+
+    // =========================================================================
+    // CLIENT-SIDE HITSOUND PREDICTION HELPER
+    // =========================================================================
+
+    /** Find and cache the ClientHitsounds mutator from the game state mutator chain */
+    AClientHitsounds* FindClientHitsoundsMutator();
+
+    /** Cached pointer to the ClientHitsounds mutator */
+    UPROPERTY()
+    TWeakObjectPtr<AClientHitsounds> CachedClientHitsounds;
 };

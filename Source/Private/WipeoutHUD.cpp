@@ -107,18 +107,33 @@ void AWipeoutHUD::DrawHUD()
 			float OwnerPipScaling = (UTPS == GetScorerPlayerState()) ? 1.25f : 1.f;
 			float PipSize = BasePipSize * OwnerPipScaling;
 
-			// Determine if player is dead — GetUTCharacter() can still return
-			// a valid (ragdolling) character after death, so check IsDead() too
-			AUTCharacter* UTC = UTPS->GetUTCharacter();
-			bool bPlayerDead = (UTC == nullptr) || UTC->IsDead();
+			// Determine if player is alive.
+			// On the server, check the controller's current pawn directly
+			// (GetUTCharacter() intentionally caches dead characters).
+			// On clients, the controller (GetOwner) is null for remote players,
+			// so fall back to GetUTCharacter() + IsDead().
+			bool bPlayerAlive = false;
+			AController* C = Cast<AController>(UTPS->GetOwner());
+			if (C != nullptr)
+			{
+				// Server or local player — check controller's actual pawn
+				AUTCharacter* UTC = Cast<AUTCharacter>(C->GetPawn());
+				bPlayerAlive = (UTC != nullptr && !UTC->IsDead());
+			}
+			else
+			{
+				// Remote player on client — use GetUTCharacter + IsDead
+				AUTCharacter* UTC = UTPS->GetUTCharacter();
+				bPlayerAlive = (UTC != nullptr && !UTC->IsDead());
+			}
 
 			// Respawn progress: 0 = fully dead/waiting, 1 = alive
 			float LiveScaling = 1.f;
-			if (bPlayerDead && UTPS->RespawnTime > 0.f && UTPS->RespawnWaitTime > 0.f)
+			if (!bPlayerAlive && UTPS->RespawnTime > 0.f && UTPS->RespawnWaitTime > 0.f)
 			{
 				LiveScaling = FMath::Clamp(1.f - UTPS->RespawnTime / UTPS->RespawnWaitTime, 0.f, 1.f);
 			}
-			else if (bPlayerDead && !UTPS->bOutOfLives)
+			else if (!bPlayerAlive && !UTPS->bOutOfLives)
 			{
 				// Dead but no respawn time info yet — show as dead
 				LiveScaling = 0.f;
@@ -162,10 +177,21 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		YOffset += FMath::InterpEaseIn(PipHeight, 0.0f, TimeSinceJoin, 3.0f);
 	}
 
-	// Layer 1: Team-colored background
-	const FCanvasIcon* BGIcon = PlayerState->GetTeamNum() == 1 ? &BlueTeamIcon : &RedTeamIcon;
-	Canvas->DrawTile(BGIcon->Texture, XOffset, YOffset, PipSize, PipHeight,
-		BGIcon->U, BGIcon->V, BGIcon->UL, BGIcon->VL);
+	// Layer 1: Team-colored background — use dynamic team color instead of
+	// hardcoded red/blue atlas tiles so TeamSkins custom colors work
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	FLinearColor TeamBGColor = (PlayerState->GetTeamNum() == 1)
+		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)    // fallback blue
+		: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);     // fallback red
+	if (GS && GS->Teams.IsValidIndex(PlayerState->GetTeamNum()) && GS->Teams[PlayerState->GetTeamNum()])
+	{
+		TeamBGColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
+	}
+	// Draw solid colored rectangle as background
+	Canvas->SetLinearDrawColor(TeamBGColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight,
+		0, 0, 1, 1);
+	Canvas->SetLinearDrawColor(FLinearColor::White);
 
 	// Layer 2: Character portrait (dimmed if dead)
 	if (LiveScaling < 1.f)
@@ -173,17 +199,16 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		Canvas->SetLinearDrawColor(FLinearColor(0.2f, 0.2f, 0.2f, 1.f));
 	}
 
-	BGIcon = &CharIcon;
 	if (PlayerState->GetTeamNum() == 1)
 	{
 		// Blue team: flip horizontally (same as FlagRun)
-		Canvas->DrawTile(BGIcon->Texture, XOffset, YOffset, PipSize, PipHeight,
-			BGIcon->U + BGIcon->UL, BGIcon->V, BGIcon->UL * -1.0f, BGIcon->VL);
+		Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
+			CharIcon.U + CharIcon.UL, CharIcon.V, CharIcon.UL * -1.0f, CharIcon.VL);
 	}
 	else
 	{
-		Canvas->DrawTile(BGIcon->Texture, XOffset, YOffset, PipSize, PipHeight,
-			BGIcon->U, BGIcon->V, BGIcon->UL, BGIcon->VL);
+		Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
+			CharIcon.U, CharIcon.V, CharIcon.UL, CharIcon.VL);
 	}
 
 	// Layer 3: Respawn dark overlay sweeping from right to left
@@ -198,9 +223,9 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 
 	// Layer 4: Team-colored frame overlay
 	Canvas->SetLinearDrawColor(FLinearColor::White);
-	BGIcon = PlayerState->GetTeamNum() == 1 ? &BlueTeamOverlay : &RedTeamOverlay;
-	Canvas->DrawTile(BGIcon->Texture, XOffset, YOffset, PipSize, PipHeight,
-		BGIcon->U, BGIcon->V, BGIcon->UL, BGIcon->VL);
+	const FCanvasIcon& OverlayIcon = PlayerState->GetTeamNum() == 1 ? BlueTeamOverlay : RedTeamOverlay;
+	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
+		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
 
 	// Layer 5 (Wipeout-specific): Respawn countdown text on dead portraits
 	if (LiveScaling < 1.f && PlayerState->RespawnTime > 0.f)

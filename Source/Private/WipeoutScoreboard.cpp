@@ -32,7 +32,7 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	CH_Damage = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Damage", "DMG");
 	CH_Efficiency = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Efficiency", "Eff%");
 
-	bUseRoundKills = true;
+	bUseRoundKills = false;  // Show overall match stats, not per-round
 
 	// Portrait atlas UVs — same as WipeoutHUD / FlagRun
 	// Note: CharacterPortraitAtlas is on AUTHUD, so we grab it at draw time from UTHUDOwner
@@ -110,11 +110,18 @@ void UWipeoutScoreboard::DrawPortraitPip(AUTPlayerState* PlayerState, float XOff
 	bool bIsDead = (UTC_Pip == nullptr || UTC_Pip->IsDead()) && !PlayerState->bOutOfLives;
 	uint8 TeamNum = PlayerState->GetTeamNum();
 
-	// Layer 1: Team background
+	// Layer 1: Team background — use dynamic team color (respects TeamSkins)
+	FLinearColor TeamBGColor = (TeamNum == 1)
+		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
+		: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);
+	if (UTGameState && UTGameState->Teams.IsValidIndex(TeamNum) && UTGameState->Teams[TeamNum])
+	{
+		TeamBGColor = UTGameState->Teams[TeamNum]->TeamColor;
+	}
+	Canvas->SetLinearDrawColor(TeamBGColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipWidth, PipHeight,
+		0, 0, 1, 1);
 	Canvas->SetLinearDrawColor(FLinearColor::White);
-	const FCanvasIcon* BGIcon = (TeamNum == 1) ? &BlueTeamIcon : &RedTeamIcon;
-	Canvas->DrawTile(BGIcon->Texture, XOffset, YOffset, PipWidth, PipHeight,
-		BGIcon->U, BGIcon->V, BGIcon->UL, BGIcon->VL);
 
 	// Layer 2: Character portrait
 	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
@@ -157,9 +164,9 @@ void UWipeoutScoreboard::DrawPortraitPip(AUTPlayerState* PlayerState, float XOff
 
 	// Layer 3: Team frame overlay
 	Canvas->SetLinearDrawColor(FLinearColor::White);
-	BGIcon = (TeamNum == 1) ? &BlueTeamOverlay : &RedTeamOverlay;
-	Canvas->DrawTile(BGIcon->Texture, XOffset, YOffset, PipWidth, PipHeight,
-		BGIcon->U, BGIcon->V, BGIcon->UL, BGIcon->VL);
+	const FCanvasIcon& OverlayIcon = (TeamNum == 1) ? BlueTeamOverlay : RedTeamOverlay;
+	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipWidth, PipHeight,
+		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
 
 	// Respawn countdown on dead portraits
 	if (bIsDead && PlayerState->RespawnTime > 0.f)
@@ -349,7 +356,7 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 			if (NetDriver && NetDriver->ServerConnection)
 			{
 				int32 InLost = NetDriver->ServerConnection->InPacketsLost;
-				int32 InTotal = NetDriver->ServerConnection->InTotalPackets;
+				int32 InTotal = NetDriver->ServerConnection->InPackets;
 				if (InTotal > 0)
 				{
 					PacketLossPct = (float(InLost) / float(InTotal)) * 100.f;

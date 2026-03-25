@@ -302,6 +302,24 @@ public:
 	UPROPERTY(Transient) float Team1RoundDamage;
 	UPROPERTY(Transient) TMap<TWeakObjectPtr<AUTPlayerState>, float> PlayerRoundDamage;
 
+	/**
+	 * Per-life mutual damage tracking: key = (Attacker, Victim) pair encoded as uint64,
+	 * value = damage dealt. Cleared on respawn. Used for death recap messages.
+	 */
+	TMap<uint64, int32> LifeDamageMap;
+
+	/** Encode two PlayerState pointers into a single uint64 key for LifeDamageMap */
+	static uint64 MakeDamagePairKey(const AUTPlayerState* From, const AUTPlayerState* To);
+
+	/** Get damage dealt from one player to another this life */
+	int32 GetLifeDamage(const AUTPlayerState* From, const AUTPlayerState* To) const;
+
+	/** Clear all life-damage entries involving a player (called on respawn) */
+	void ClearLifeDamageFor(AUTPlayerState* PS);
+
+	/** Send private death recap to victim showing mutual damage with killer */
+	void SendDeathRecap(AUTPlayerState* Victim, AUTPlayerState* Killer);
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Achievements", meta = (ClampMin = "0.0", ClampMax = "100.0"))
 	float HighDamageCarryThreshold = 60.0f;
 

@@ -486,6 +486,11 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 	TimerDelegate.BindUFunction(this, FName("OnRespawnTimerFired"), DeadPS);
 	GetWorldTimerManager().SetTimer(Pending.RespawnTimerHandle, TimerDelegate, RespawnDelay, false);
 
+	// Update replicated PlayerState fields so HUD/Scoreboard can display
+	DeadPS->RespawnWaitTime = RespawnDelay;
+	DeadPS->RespawnTime = RespawnDelay;
+	DeadPS->ForceNetUpdate();
+
 	// Notify Blueprint
 	BP_OnPlayerWaitingRespawn(DeadPS, RespawnDelay,
 		(TeamIndex == 0) ? Team0DeathCount : Team1DeathCount);
@@ -521,8 +526,10 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 	// Remove from pending list
 	PendingRespawns.Remove(PS);
 
-	// Clear OutOfLives so RestartPlayer allows spawning
+	// Clear respawn state so HUD shows alive
 	PS->bOutOfLives = false;
+	PS->RespawnTime = 0.f;
+	PS->RespawnWaitTime = 0.f;
 	PS->ForceNetUpdate();
 
 	// Get the controller
@@ -611,6 +618,9 @@ void AUWipeoutGame::TickRespawnCountdowns()
 		float Remaining = GetPlayerRespawnTimeRemaining(PS);
 		int32 SecondsRemaining = FMath::CeilToInt(Remaining);
 
+		// Update replicated PlayerState so HUD shows countdown
+		PS->RespawnTime = Remaining;
+
 		if (SecondsRemaining > 0)
 		{
 			BP_OnPlayerRespawnCountdown(PS, SecondsRemaining);
@@ -646,6 +656,10 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		}
 	}
 
+	// Send death recap to victim (private message showing mutual damage)
+	AUTPlayerState* KillerPS = Killer ? Cast<AUTPlayerState>(Killer->PlayerState) : nullptr;
+	SendDeathRecap(OtherPS, KillerPS);
+
 	// In Wipeout, death doesn't mean permanently out.
 	// Mark as bOutOfLives temporarily (so GetAliveCounts returns correctly)
 	// but start a respawn timer to bring them back.
@@ -654,6 +668,9 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		OtherPS->bOutOfLives = true;
 		OtherPS->ForceNetUpdate();
 	}
+
+	// Clear life-damage tracking for the dead player
+	ClearLifeDamageFor(OtherPS);
 
 	// Start the escalating respawn timer
 	StartRespawnTimer(OtherPS);
@@ -1334,6 +1351,68 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 
 	if (Attacker->Team->TeamIndex == 0)      Team0RoundDamage += ActualDamage;
 	else if (Attacker->Team->TeamIndex == 1)  Team1RoundDamage += ActualDamage;
+
+	// Track per-life mutual damage for death recap
+	uint64 Key = MakeDamagePairKey(Attacker, Victim);
+	int32& PairDmg = LifeDamageMap.FindOrAdd(Key);
+	PairDmg += ActualDamage;
+}
+
+
+// ============================================================================
+// LIFE DAMAGE TRACKING (for death recap messages)
+// ============================================================================
+
+uint64 AUWipeoutGame::MakeDamagePairKey(const AUTPlayerState* From, const AUTPlayerState* To)
+{
+	// Pack two 32-bit IDs into one 64-bit key
+	uint32 FromID = From ? From->GetUniqueID() : 0;
+	uint32 ToID = To ? To->GetUniqueID() : 0;
+	return (uint64(FromID) << 32) | uint64(ToID);
+}
+
+int32 AUWipeoutGame::GetLifeDamage(const AUTPlayerState* From, const AUTPlayerState* To) const
+{
+	uint64 Key = MakeDamagePairKey(From, To);
+	const int32* Val = LifeDamageMap.Find(Key);
+	return Val ? *Val : 0;
+}
+
+void AUWipeoutGame::ClearLifeDamageFor(AUTPlayerState* PS)
+{
+	if (!PS) return;
+	uint32 PSID = PS->GetUniqueID();
+
+	TArray<uint64> KeysToRemove;
+	for (auto& Pair : LifeDamageMap)
+	{
+		uint32 FromID = uint32(Pair.Key >> 32);
+		uint32 ToID = uint32(Pair.Key & 0xFFFFFFFF);
+		if (FromID == PSID || ToID == PSID)
+		{
+			KeysToRemove.Add(Pair.Key);
+		}
+	}
+	for (uint64 Key : KeysToRemove)
+	{
+		LifeDamageMap.Remove(Key);
+	}
+}
+
+void AUWipeoutGame::SendDeathRecap(AUTPlayerState* Victim, AUTPlayerState* Killer)
+{
+	if (!Victim || !Killer || Victim == Killer) return;
+
+	AUTPlayerController* VictimPC = Cast<AUTPlayerController>(Cast<AController>(Victim->GetOwner()));
+	if (!VictimPC) return;
+
+	int32 DmgToKiller = GetLifeDamage(Victim, Killer);
+	int32 DmgFromKiller = GetLifeDamage(Killer, Victim);
+
+	FString Msg = FString::Printf(TEXT("You dealt %d to %s | They dealt %d to you"),
+		DmgToKiller, *Killer->PlayerName, DmgFromKiller);
+
+	VictimPC->ClientSay(nullptr, Msg, ChatDestinations::System);
 }
 
 
@@ -1346,6 +1425,7 @@ void AUWipeoutGame::ResetPlayersForNewRound()
 	Team0RoundDamage = 0.0f;
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
+	LifeDamageMap.Empty();
 
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 	{
