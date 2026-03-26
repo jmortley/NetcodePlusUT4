@@ -83,5 +83,10 @@ private:
 	FReply OnCloseClicked();
 	void OnHideCheckChanged(ECheckBoxState NewState, FName Tag);
 
+	/** Hitscan choice (Sniper / LG) */
+	FString CurrentHitscanChoice;
+	TSharedPtr<STextBlock> HitscanValueText;
+	FReply OnHitscanToggleClicked();
+
 	FSlateBrush BackgroundBrush;
 };

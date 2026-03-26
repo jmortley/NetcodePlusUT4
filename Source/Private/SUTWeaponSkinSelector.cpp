@@ -63,6 +63,36 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 							.ColorAndOpacity(FLinearColor::White)
 						]
 
+						// Hitscan choice toggle
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0, 0, 0, 8)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.VAlign(VAlign_Center)
+							.Padding(0, 0, 8, 0)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("HitscanLabel", "Hitscan Weapon:"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
+								.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							[
+								SNew(SButton)
+								.OnClicked(this, &SUTWeaponSkinSelector::OnHitscanToggleClicked)
+								[
+									SAssignNew(HitscanValueText, STextBlock)
+									.Text(LOCTEXT("HitscanDefault", "Sniper Rifle"))
+									.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 13))
+									.ColorAndOpacity(FLinearColor(0.3f, 0.9f, 0.3f, 1.0f))
+								]
+							]
+						]
+
 						// Content: Weapon list | Skin list
 						+ SVerticalBox::Slot()
 						.FillHeight(1.0f)
@@ -391,8 +421,17 @@ void SUTWeaponSkinSelector::LoadSettings()
 	// Copy hide state from the static map (keyed by class name)
 	HideState = AUTWeaponFix::HiddenWeaponsByTag;
 
-	// Load skin selections from Mod.ini
+	// Load hitscan choice from Mod.ini
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString HitscanStr;
+	GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), HitscanStr, ModIniPath);
+	CurrentHitscanChoice = HitscanStr.Equals(TEXT("LG"), ESearchCase::IgnoreCase) ? TEXT("LG") : TEXT("Sniper");
+	if (HitscanValueText.IsValid())
+	{
+		HitscanValueText->SetText(FText::FromString(CurrentHitscanChoice == TEXT("LG") ? TEXT("Lightning Gun") : TEXT("Sniper Rifle")));
+	}
+
+	// Load skin selections from Mod.ini
 	for (const auto& W : Weapons)
 	{
 		FString Key = FString::Printf(TEXT("Skin.%s"), *W.Tag.ToString());
@@ -461,7 +500,16 @@ void SUTWeaponSkinSelector::SaveAndApply()
 		}
 	}
 
+	// Save hitscan choice
+	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), *CurrentHitscanChoice, ModIniPath);
+
 	GConfig->Flush(false, ModIniPath);
+
+	// Send hitscan choice to server
+	if (PC)
+	{
+		PC->ServerMutate(FString::Printf(TEXT("sethitscan %s"), *CurrentHitscanChoice));
+	}
 
 	// Apply hide to current weapon immediately
 	AUTCharacter* UTChar = PC ? Cast<AUTCharacter>(PC->GetPawn()) : nullptr;
@@ -713,6 +761,32 @@ void SUTWeaponSkinSelector::ClosePanel()
 			ViewportClient->RemoveViewportWidgetContent(AsShared());
 		}
 	}
+}
+
+FReply SUTWeaponSkinSelector::OnHitscanToggleClicked()
+{
+	// Toggle between Sniper and LG
+	if (CurrentHitscanChoice == TEXT("LG"))
+	{
+		CurrentHitscanChoice = TEXT("Sniper");
+	}
+	else
+	{
+		CurrentHitscanChoice = TEXT("LG");
+	}
+
+	if (HitscanValueText.IsValid())
+	{
+		HitscanValueText->SetText(FText::FromString(CurrentHitscanChoice == TEXT("LG") ? TEXT("Lightning Gun") : TEXT("Sniper Rifle")));
+	}
+
+	if (StatusText.IsValid())
+	{
+		StatusText->SetText(FText::FromString(FString::Printf(TEXT("Hitscan set to %s — click Apply to save."),
+			CurrentHitscanChoice == TEXT("LG") ? TEXT("Lightning Gun") : TEXT("Sniper Rifle"))));
+	}
+
+	return FReply::Handled();
 }
 
 #undef LOCTEXT_NAMESPACE
