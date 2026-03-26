@@ -382,19 +382,7 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 			UTHUDOwner->SmallFont, RenderScale, 1.f, PingColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 
-	// ---- Mute indicator (from base) ----
-	if (UTHUDOwner->UTPlayerOwner->IsPlayerGameMuted(PlayerState))
-	{
-		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
-		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f * RenderScale) : (-36.0f * RenderScale);
-		FTextureUVs ChatIconUVs = bLeft ? FTextureUVs(497.0f, 965.0f, 35.0f, 31.0f) : FTextureUVs(532.0f, 965.0f, -35.0f, 31.0f);
-		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset, YOffset + ((CellHeight * 0.5f - 24.0f) * RenderScale),
-			(26 * RenderScale), (23 * RenderScale), ChatIconUVs.U, ChatIconUVs.V, ChatIconUVs.UL, ChatIconUVs.VL, 1.0f);
-
-		FTextureUVs MuteIconUVs = FTextureUVs(410.0f, 942.0f, 64.0f, 64.0f);
-		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset - 3.f, YOffset + ((CellHeight * 0.5f - 30.0f) * RenderScale),
-			(32 * RenderScale), (32 * RenderScale), MuteIconUVs.U, MuteIconUVs.V, MuteIconUVs.UL, MuteIconUVs.VL, 1.0f, FLinearColor::Red);
-	}
+	// Mute indicator removed — too cluttered for compact portrait layout
 }
 
 void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor)

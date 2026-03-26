@@ -88,8 +88,24 @@ TSubclassOf<AUTWeapon> ANCUTPlus::GetReplacementFor(UClass* StockWeaponClass) co
 		return nullptr;
 	}
 
+	// Exact match first (fastest path)
 	const TSubclassOf<AUTWeapon>* Found = FullReplacementMap.Find(StockWeaponClass);
-	return Found ? *Found : nullptr;
+	if (Found)
+	{
+		return *Found;
+	}
+
+	// Blueprint subclass match — map weapons are BP children of the C++ classes
+	// e.g., BP_Sniper_C is a child of AUTWeap_Sniper
+	for (const auto& Pair : FullReplacementMap)
+	{
+		if (StockWeaponClass->IsChildOf(Pair.Key))
+		{
+			return Pair.Value;
+		}
+	}
+
+	return nullptr;
 }
 
 bool ANCUTPlus::IsHitscanWeapon(UClass* WeaponClass) const
@@ -168,10 +184,10 @@ void ANCUTPlus::BeginPlay()
 
 		if (HitscanStr.Equals(TEXT("LG"), ESearchCase::IgnoreCase))
 		{
-			APlayerController* PC = GetWorld()->GetFirstPlayerController();
-			if (PC)
+			AUTPlayerController* UTPC = Cast<AUTPlayerController>(GetWorld()->GetFirstPlayerController());
+			if (UTPC)
 			{
-				PC->ServerMutate(TEXT("sethitscan LG"));
+				UTPC->ServerMutate(TEXT("sethitscan LG"));
 			}
 		}
 	}
@@ -196,7 +212,7 @@ bool ANCUTPlus::CheckRelevance_Implementation(AActor* Other)
 		TSubclassOf<AUTWeapon> Replacement = GetReplacementFor(WeaponPickup->WeaponType);
 		if (Replacement)
 		{
-			UE_LOG(LogUTGame, Verbose, TEXT("NCUTPlus: Replacing weapon pickup %s → %s"),
+			UE_LOG(LogUTGame, Log, TEXT("NCUTPlus: Replacing weapon pickup %s → %s"),
 				WeaponPickup->WeaponType ? *WeaponPickup->WeaponType->GetName() : TEXT("null"),
 				*Replacement->GetName());
 			WeaponPickup->WeaponType = Replacement;
@@ -211,7 +227,7 @@ bool ANCUTPlus::CheckRelevance_Implementation(AActor* Other)
 			TSubclassOf<AUTWeapon> Replacement = GetReplacementFor(AmmoPickup->Ammo.Type);
 			if (Replacement)
 			{
-				UE_LOG(LogUTGame, Verbose, TEXT("NCUTPlus: Rewriting ammo type %s → %s"),
+				UE_LOG(LogUTGame, Log, TEXT("NCUTPlus: Rewriting ammo type %s → %s"),
 					*AmmoPickup->Ammo.Type->GetName(), *Replacement->GetName());
 				AmmoPickup->Ammo.Type = Replacement;
 			}
@@ -328,10 +344,9 @@ void ANCUTPlus::Mutate_Implementation(const FString& MutateString, APlayerContro
 	}
 
 	// Parse: "sethitscan sniper" or "sethitscan lg"
-	FString Command = MutateString.TrimStartAndEnd();
-	if (Command.StartsWith(TEXT("sethitscan "), ESearchCase::IgnoreCase))
+	if (MutateString.StartsWith(TEXT("sethitscan "), ESearchCase::IgnoreCase))
 	{
-		FString Choice = Command.Mid(11).TrimStartAndEnd();
+		FString Choice = MutateString.Mid(11);
 
 		AUTPlayerState* PS = Cast<AUTPlayerState>(Sender->PlayerState);
 		if (!PS || !PS->UniqueId.IsValid())

@@ -31,4 +31,7 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 
 	virtual void DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float IconSize);
 	virtual void GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers);
+
+	/** Force game-only input when dead but match in progress — prevents mouse escaping viewport */
+	virtual EInputMode::Type GetInputMode_Implementation() const override;
 };

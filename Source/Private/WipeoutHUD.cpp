@@ -60,6 +60,37 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 }
 
+EInputMode::Type AWipeoutHUD::GetInputMode_Implementation() const
+{
+	// FIX: Mouse focus loss on death.
+	//
+	// When a player dies, the base UTHUD::GetInputMode_Implementation() checks
+	// bOutOfLives and bOnlySpectator — if either is true (and scoreboard isn't
+	// shown), it returns EIM_UIOnly, which releases mouse capture from the
+	// viewport. This lets the cursor escape to other monitors/windows.
+	//
+	// In elimination/wipeout modes, dead players should spectate teammates with
+	// full mouse capture until the round ends or they respawn. We force
+	// EIM_GameOnly for the entire duration of an in-progress match, regardless
+	// of life state. The base class handles all other match states normally
+	// (intermission, end of match, warmup, etc.).
+	//
+	// This same pattern is used in the ElimPlus Blueprint HUD (BaseElm) and
+	// in the engine's UTHUD_InstantReplay (which always returns EIM_GameOnly).
+	// See also: UTHUD_Showdown::GetInputMode_Implementation() for a GameAndUI
+	// variant used during spawn selection.
+	if (UTPlayerOwner != nullptr)
+	{
+		AUTPlayerState* PS = UTPlayerOwner->UTPlayerState;
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+		if (PS && !PS->bOnlySpectator && GS && GS->GetMatchState() == MatchState::InProgress)
+		{
+			return EInputMode::EIM_GameOnly;
+		}
+	}
+	return Super::GetInputMode_Implementation();
+}
+
 void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 {
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
@@ -151,6 +182,34 @@ void AWipeoutHUD::DrawHUD()
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffset, PipSize);
 				XOffsetBlue += 1.1f * PipSize;
 			}
+		}
+		// ─── Score / KDA mini widget (top right) ───
+		AUTPlayerState* MyPS = GetScorerPlayerState();
+		if (MyPS)
+		{
+			int32 Score = FMath::TruncToInt(MyPS->Score);
+			int32 Kills = MyPS->Kills;
+			int32 Deaths = MyPS->Deaths;
+			int32 Assists = MyPS->KillAssists;
+
+			FString ScoreStr = FString::Printf(TEXT("Score: %d"), Score);
+			FString KDAStr = FString::Printf(TEXT("KDA: %d / %d / %d"), Kills, Deaths, Assists);
+
+			float KDAXPos = Canvas->ClipX * 0.98f;
+			float KDAYPos = Canvas->ClipY * 0.015f;
+			float FontScale = RenderScale * 0.9f;
+
+			// Score line
+			float XL, YL;
+			Canvas->TextSize(SmallFont, ScoreStr, XL, YL, FontScale, FontScale);
+			Canvas->DrawColor = FColor(255, 255, 255, 220);
+			Canvas->DrawText(SmallFont, ScoreStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
+			KDAYPos += YL * 1.1f;
+
+			// KDA line
+			Canvas->TextSize(SmallFont, KDAStr, XL, YL, FontScale, FontScale);
+			Canvas->DrawColor = FColor(200, 200, 200, 200);
+			Canvas->DrawText(SmallFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
 		}
 	}
 }
