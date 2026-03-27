@@ -56,23 +56,8 @@ public:
 	/** True if DisableFloorSlide() was called — enforced in Tick */
 	bool bFloorSlideDisabled = false;
 
-	// ── NCP Menu settings (cached from Mod.ini on BeginPlay) ──
-	/** If false, gibs are suppressed — death goes straight to ragdoll */
-	bool bNCPAllowGib = false;
-	/** If false, ragdoll mesh is hidden immediately on death */
-	bool bNCPShowRagdoll = true;
-	/** How long the ragdoll body stays visible (seconds) */
-	float NCPRagdollTime = 3.0f;
-	/** Volume multiplier for own footstep sounds (0 = silent, 1 = full) */
-	float NCPOwnFootstepVolume = 0.0f;
-
-	/** Load NCP client settings from Mod.ini [NetcodePlus] */
-	void LoadNCPClientSettings();
-
-	// ── Overrides for NCP settings ──
-	virtual void GibExplosion_Implementation() override;
-	virtual void PlayDying() override;
-	virtual void PlayFootstep(uint8 FootNum, bool bFirstPerson = false) override;
+	// ── NCP Menu settings — temporarily disabled, investigating spawn freeze ──
+	// TODO: Re-add PlayDying/GibExplosion/PlayFootstep overrides once spawn issue is resolved
 
 	virtual bool IsHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling,
 		AUTCharacter* ShotInstigator, float PredictionTime) override;
