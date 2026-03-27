@@ -175,22 +175,8 @@ void ANCUTPlus::BeginPlay()
 		}
 	}
 
-	// Client: auto-send hitscan preference from Mod.ini
-	if (GetNetMode() != NM_DedicatedServer)
-	{
-		FString HitscanStr;
-		FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
-		GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), HitscanStr, ModIniPath);
-
-		if (HitscanStr.Equals(TEXT("LG"), ESearchCase::IgnoreCase))
-		{
-			AUTPlayerController* UTPC = Cast<AUTPlayerController>(GetWorld()->GetFirstPlayerController());
-			if (UTPC)
-			{
-				UTPC->ServerMutate(TEXT("sethitscan LG"));
-			}
-		}
-	}
+	// Hitscan choice is now sent from TeamArenaCharacter::BeginPlay,
+	// which fires for every player regardless of whether this mutator is loaded.
 }
 
 // ─── CheckRelevance ────────────────────────────────────────────────────

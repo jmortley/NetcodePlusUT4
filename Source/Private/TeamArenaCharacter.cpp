@@ -610,10 +610,27 @@ void ATeamArenaCharacter::BeginPlay()
 		}
 	}
 
-	// CLIENT ONLY: Load NCP menu settings from Mod.ini
+	// CLIENT ONLY: Load NCP menu settings and send hitscan choice to server
 	if (IsLocallyControlled())
 	{
 		LoadNCPClientSettings();
+
+		// Send hitscan preference (Sniper vs LG) to server so the mutator
+		// knows what to give on next spawn. Done here instead of in NCUTPlus
+		// because the mutator may not be loaded, but the character always is.
+		FString HitscanChoice;
+		FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		if (GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), HitscanChoice, ModIniPath))
+		{
+			if (!HitscanChoice.IsEmpty())
+			{
+				AUTPlayerController* UTPC = Cast<AUTPlayerController>(GetController());
+				if (UTPC)
+				{
+					UTPC->ServerMutate(FString::Printf(TEXT("sethitscan %s"), *HitscanChoice));
+				}
+			}
+		}
 	}
 }
 
