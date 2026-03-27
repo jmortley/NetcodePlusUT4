@@ -505,9 +505,16 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	GConfig->Flush(false, ModIniPath);
 
-	// Settings are saved to Mod.ini — they take effect on next spawn.
-	// No mid-life weapon swap needed, which avoids Slate/inventory crashes.
+	// Close panel first — all Slate references must be dead before any
+	// ServerMutate that might trigger inventory changes on the same frame.
 	ClosePanel();
+
+	// Notify server of hitscan choice change (safe — no weapon swap, just updates
+	// the server's HitscanChoiceMap so the next spawn gives the right weapon).
+	if (PC)
+	{
+		PC->ServerMutate(FString::Printf(TEXT("sethitscan %s"), *CurrentHitscanChoice));
+	}
 }
 
 void SUTWeaponSkinSelector::RebuildWeaponList()
