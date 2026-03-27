@@ -30,7 +30,7 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	CH_Kills = NSLOCTEXT("UTScoreboard", "ColumnHeader_Kills", "Kills");
 	CH_Deaths = NSLOCTEXT("UTScoreboard", "ColumnHeader_Deaths", "Deaths");
 	CH_Damage = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Damage", "DMG");
-	CH_Efficiency = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Efficiency", "Eff%");
+	CH_Efficiency = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_DmgPerLife", "DMG/Life");
 
 	bUseRoundKills = false;  // Show overall match stats, not per-round
 
@@ -406,16 +406,14 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DmgColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Efficiency — kills / (kills + deaths), shown as percentage
-	int32 EffKills = bUseRoundKills ? PlayerState->RoundKills : PlayerState->Kills;
-	int32 EffDeaths = PlayerState->Deaths;
-	float EffPct = (EffKills + EffDeaths > 0) ? (float(EffKills) / float(EffKills + EffDeaths)) * 100.f : 0.f;
-	FLinearColor EffColor = (EffPct >= 60.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
-		: (EffPct >= 40.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
+	// DMG/Life — average damage dealt per life (total damage / (deaths + 1))
+	int32 Lives = PlayerState->Deaths + 1;
+	float DmgPerLife = float(Damage) / float(Lives);
+	FLinearColor DplColor = (DmgPerLife >= 300.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
+		: (DmgPerLife >= 150.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
 		: FLinearColor(1.f, 0.4f, 0.4f, 1.f);
-	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) EffColor *= 0.6f;
-	// Show as "75%" format
-	FString EffStr = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(EffPct));
-	DrawText(FText::FromString(EffStr), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, 1.0f, 1.0f, EffColor, ETextHorzPos::Center, ETextVertPos::Center);
+	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) DplColor *= 0.6f;
+	FString DplStr = FString::Printf(TEXT("%d"), FMath::RoundToInt(DmgPerLife));
+	DrawText(FText::FromString(DplStr), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
+		UTHUDOwner->TinyFont, 1.0f, 1.0f, DplColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
