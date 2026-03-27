@@ -12,6 +12,7 @@
 #include "UTDroppedPickup.h"
 #include "UTPickupWeapon.h"
 #include "UTPickupHealth.h"
+#include "UTPickupAmmo.h"
 #include "UTPickupInventory.h"
 #include "Engine/DemoNetDriver.h"
 #include "Kismet/GameplayStatics.h"
@@ -1336,6 +1337,12 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 
 	// --- Health pickups: remove all (health vials, health packs, etc.) ---
 	if (Other->IsA(AUTPickupHealth::StaticClass()))
+	{
+		return false;
+	}
+
+	// --- Standalone ammo pickups: remove (weapon bases handle ammo refill) ---
+	if (Other->IsA(AUTPickupAmmo::StaticClass()))
 	{
 		return false;
 	}
