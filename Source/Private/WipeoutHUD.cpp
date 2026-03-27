@@ -306,7 +306,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const float BarWidth = 220.f * RenderScale;
 	const float BarHeight = 36.f * RenderScale;
 	const float ScoreBoxWidth = 50.f * RenderScale;
-	const float GapWidth = 4.f * RenderScale;
+	const float GapWidth = 8.f * RenderScale;
 
 	// ── Team 0 (left side) ──
 	float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
@@ -388,38 +388,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		ClockY += YL + 1.f * RenderScale;
 	}
 
-	// ── Match elapsed time (small, below round timer) ──
-	int32 MatchTime = GS->ElapsedTime;
-	int32 MMins = MatchTime / 60;
-	int32 MSecs = MatchTime % 60;
-	FString MatchClockStr = FString::Printf(TEXT("Match: %02d:%02d"), MMins, MSecs);
-	float MatchClockScale = RenderScale * 0.6f;
-	Canvas->TextSize(SmallFont, MatchClockStr, XL, YL, MatchClockScale, MatchClockScale);
-	Canvas->DrawColor = FColor(180, 180, 180, 180);
-	Canvas->DrawText(SmallFont, MatchClockStr, CenterX - XL * 0.5f, ClockY, MatchClockScale, MatchClockScale);
-	ClockY += YL + 1.f * RenderScale;
-
-	// ── "You are on X" text ──
-	AUTPlayerState* MyPS = GetScorerPlayerState();
-	if (MyPS && MyPS->Team)
-	{
-		FString TeamLabel = (MyPS->Team->TeamIndex == 0) ? Team0Name : Team1Name;
-		FString YouAreOn = FString::Printf(TEXT("You are on "));
-		float SmallScale = RenderScale * 0.65f;
-		float LabelY = ClockY + YL + 1.f * RenderScale;
-
-		float YouXL, YouYL, LabelXL, LabelYL;
-		Canvas->TextSize(SmallFont, YouAreOn, YouXL, YouYL, SmallScale, SmallScale);
-		Canvas->TextSize(SmallFont, TeamLabel, LabelXL, LabelYL, SmallScale, SmallScale);
-		float TotalW = YouXL + LabelXL;
-
-		Canvas->DrawColor = FColor(200, 200, 200, 200);
-		Canvas->DrawText(SmallFont, YouAreOn, CenterX - TotalW * 0.5f, LabelY, SmallScale, SmallScale);
-
-		FLinearColor MyTeamColor = (MyPS->Team->TeamIndex == 0) ? Team0Color : Team1Color;
-		Canvas->SetLinearDrawColor(MyTeamColor);
-		Canvas->DrawText(SmallFont, TeamLabel, CenterX - TotalW * 0.5f + YouXL, LabelY, SmallScale, SmallScale);
-	}
+	// Removed: match elapsed timer and "You are on X" text — too cluttered
 }
 
 void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float PipSize)
