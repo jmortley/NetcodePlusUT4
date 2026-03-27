@@ -10,6 +10,7 @@
 #include "UTTeamInfo.h"
 #include "UTTeamPlayerStart.h"
 #include "UTDroppedPickup.h"
+#include "UTPickup.h"
 #include "UTPickupWeapon.h"
 #include "UTPickupHealth.h"
 #include "UTPickupAmmo.h"
@@ -907,6 +908,10 @@ void AUWipeoutGame::StartNextRound()
 		BP_OnSetIntermission(false, 0);
 		GS->ForceNetUpdate();
 	}
+
+	// Reset pickup timers at round start so Shield Belt and UDamage
+	// respawn on a clean schedule each round
+	ResetPickupTimers();
 
 	BroadcastLocalized(this, UUTGameMessage::StaticClass(), 0, NULL, NULL, NULL);
 
@@ -2513,4 +2518,22 @@ void AUWipeoutGame::BP_SetTeamScores(int32 RedScore, int32 BlueScore)
 	PreviousRedScore = Teams[0]->Score;
 	PreviousBlueScore = Teams[1]->Score;
 	bHasBroadcastTeamDominating = false;
+}
+
+// ─── ResetPickupTimers ────────────────────────────────────────────────
+// At round start, force all remaining pickups (Shield Belt, UDamage, weapon bases)
+// to respawn immediately so every round has a clean item cycle.
+void AUWipeoutGame::ResetPickupTimers()
+{
+	for (TActorIterator<AUTPickup> It(GetWorld()); It; ++It)
+	{
+		AUTPickup* Pickup = *It;
+		if (Pickup && !Pickup->IsPendingKillPending())
+		{
+			// If the pickup is currently waiting to respawn, force it to respawn now
+			Pickup->SetInventoryType(Pickup->GetInventoryType());
+
+			UE_LOG(LogGameMode, Verbose, TEXT("WipeoutGame: Reset pickup timer for %s"), *Pickup->GetName());
+		}
+	}
 }

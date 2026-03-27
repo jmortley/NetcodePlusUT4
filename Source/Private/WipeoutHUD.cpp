@@ -362,15 +362,42 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->DrawText(SmallFont, Team1Name, RightBarX + 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
-	// ── Clock (centered below bars) ──
+	// ── Round Clock (big, centered below bars) ──
+	// Read RoundSecondsRemaining from the BP GameState via reflection
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
-	int32 RemainingTime = GS->GetRemainingTime();
-	int32 Mins = RemainingTime / 60;
-	int32 Secs = RemainingTime % 60;
-	FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-	Canvas->TextSize(MediumFont, ClockStr, XL, YL, FontScale, FontScale);
-	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, FontScale, FontScale);
+	int32 RoundTime = -1;
+	UIntProperty* RoundTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RoundSecondsRemaining"));
+	if (RoundTimeProp)
+	{
+		RoundTime = RoundTimeProp->GetPropertyValue_InContainer(GS);
+	}
+
+	float RoundClockScale = RenderScale * 1.1f;
+	if (RoundTime >= 0)
+	{
+		int32 RMins = RoundTime / 60;
+		int32 RSecs = RoundTime % 60;
+		FString RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
+		Canvas->TextSize(MediumFont, RoundClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		// Flash red when under 30 seconds
+		if (RoundTime <= 30)
+			Canvas->DrawColor = FColor(255, 60, 60, 255);
+		else
+			Canvas->DrawColor = FColor::White;
+		Canvas->DrawText(MediumFont, RoundClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		ClockY += YL + 1.f * RenderScale;
+	}
+
+	// ── Match elapsed time (small, below round timer) ──
+	int32 MatchTime = GS->ElapsedTime;
+	int32 MMins = MatchTime / 60;
+	int32 MSecs = MatchTime % 60;
+	FString MatchClockStr = FString::Printf(TEXT("Match: %02d:%02d"), MMins, MSecs);
+	float MatchClockScale = RenderScale * 0.6f;
+	Canvas->TextSize(SmallFont, MatchClockStr, XL, YL, MatchClockScale, MatchClockScale);
+	Canvas->DrawColor = FColor(180, 180, 180, 180);
+	Canvas->DrawText(SmallFont, MatchClockStr, CenterX - XL * 0.5f, ClockY, MatchClockScale, MatchClockScale);
+	ClockY += YL + 1.f * RenderScale;
 
 	// ── "You are on X" text ──
 	AUTPlayerState* MyPS = GetScorerPlayerState();

@@ -489,6 +489,8 @@ protected:
 	void StartIntermission(int32 Seconds);
 	virtual void HandleMatchIntermission();
 	void StartNextRound();
+	/** Reset all pickup respawn timers at round start (Belt/Amp get fresh cycle) */
+	void ResetPickupTimers();
 	void CheckWipeoutCondition();
 	void EndRoundForTeam(int32 WinnerTeamIndex, FName Reason);
 	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const;
