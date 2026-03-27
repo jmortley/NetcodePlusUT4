@@ -2521,19 +2521,46 @@ void AUWipeoutGame::BP_SetTeamScores(int32 RedScore, int32 BlueScore)
 }
 
 // ─── ResetPickupTimers ────────────────────────────────────────────────
-// At round start, force all remaining pickups (Shield Belt, UDamage, weapon bases)
-// to respawn immediately so every round has a clean item cycle.
+// At round start, hide Shield Belt and UDamage pickups and set them to
+// appear at specific times into the round (Belt=60s, Amp=90s).
+// Weapon bases are left alone so players can pick up ammo immediately.
 void AUWipeoutGame::ResetPickupTimers()
 {
-	for (TActorIterator<AUTPickup> It(GetWorld()); It; ++It)
+	for (TActorIterator<AUTPickupInventory> It(GetWorld()); It; ++It)
 	{
-		AUTPickup* Pickup = *It;
-		if (Pickup && !Pickup->IsPendingKillPending())
-		{
-			// If the pickup is currently waiting to respawn, force it to respawn now
-			Pickup->SetInventoryType(Pickup->GetInventoryType());
+		AUTPickupInventory* Pickup = *It;
+		if (!Pickup || Pickup->IsPendingKillPending()) continue;
 
-			UE_LOG(LogGameMode, Verbose, TEXT("WipeoutGame: Reset pickup timer for %s"), *Pickup->GetName());
+		UClass* InvType = Pickup->GetInventoryType();
+		if (!InvType) continue;
+
+		FString ClassName = InvType->GetName();
+
+		float DelaySeconds = 0.f;
+
+		// Shield Belt — spawn 60s into the round
+		if (ClassName.Contains(TEXT("ShieldBelt")))
+		{
+			DelaySeconds = 60.f;
 		}
+		// UDamage/Amp — spawn 90s into the round
+		else if (ClassName.Contains(TEXT("UDamage")) || ClassName.Contains(TEXT("Amp")))
+		{
+			DelaySeconds = 90.f;
+		}
+		else
+		{
+			continue; // Don't touch other pickups
+		}
+
+		// Hide the pickup and set it to respawn after the delay
+		Pickup->StartSleeping();
+		Pickup->RespawnTime = DelaySeconds;
+		// Force the respawn timer — WakeUp will be called when timer expires
+		GetWorldTimerManager().SetTimer(
+			Pickup->WakeUpTimerHandle, Pickup,
+			&AUTPickup::WakeUp, DelaySeconds, false);
+
+		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: %s will spawn in %.0fs"), *ClassName, DelaySeconds);
 	}
 }
