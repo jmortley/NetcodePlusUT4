@@ -210,13 +210,9 @@ void AUWipeoutGame::BeginPlay()
 void AUWipeoutGame::InitGameState()
 {
 	Super::InitGameState();
-
-	// Set GameModeClass so clients can look up the correct DisplayName.
-	// Clients need the NetcodePlus plugin installed, so they can load our class.
-	if (AUTGameState* GS = GetGameState<AUTGameState>())
-	{
-		GS->GameModeClass = GetClass(); // Use actual class (or BP subclass) for correct DisplayName
-	}
+	// GameModeClass is left as-is — clients have NetcodePlus installed,
+	// so the base class sets it correctly and the scoreboard reads
+	// DisplayName from the actual game mode class (or BP subclass).
 }
 
 void AUWipeoutGame::HandleMatchHasStarted()
