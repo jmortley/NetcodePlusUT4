@@ -46,9 +46,13 @@ public:
 	float ColumnHeaderDmgPerLifeX;
 
 protected:
+	virtual void DrawTeamPanel(float RenderDelta, float& YOffset) override;
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayer(int32 Index, AUTPlayerState* PlayerState, float RenderDelta, float XOffset, float YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor) override;
+
+	/** Check if teams have non-standard colors (TeamSkins) */
+	bool HasCustomTeamColors() const;
 
 	/** Draw a small portrait pip at the given position. */
 	void DrawPortraitPip(AUTPlayerState* PlayerState, float XOffset, float YOffset, float PipWidth, float PipHeight);

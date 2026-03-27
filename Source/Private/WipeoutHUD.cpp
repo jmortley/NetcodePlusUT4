@@ -48,7 +48,8 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"));
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_TeamGameClock.bpHW_TeamGameClock_C"));
+	// Removed bpHW_TeamGameClock — we draw our own team score bar in DrawHUD
+	// that respects dynamic team colors from TeamSkins.
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_QuickStats.bpHW_QuickStats_C"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"));
@@ -155,6 +156,13 @@ void AWipeoutHUD::DrawHUD()
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	bool bScoreboardIsUp = ScoreboardIsUp();
 
+	// ─── Custom team score bar (replaces bpHW_TeamGameClock) ───
+	// Respects dynamic team colors from TeamSkins mutator.
+	if (GS && !bScoreboardIsUp)
+	{
+		DrawTeamScoreBar(GS);
+	}
+
 	if (!bScoreboardIsUp && GS && GS->GetMatchState() == MatchState::InProgress)
 	{
 		RedPlayerCount = 0;
@@ -250,6 +258,140 @@ void AWipeoutHUD::DrawHUD()
 			Canvas->DrawColor = FColor(200, 200, 200, 200);
 			Canvas->DrawText(SmallFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
 		}
+	}
+}
+
+// ─── Custom team score bar ─────────────────────────────────────────────
+// Draws team scores, clock, and "You are on X" text at the top center.
+// Uses dynamic team colors from AUTTeamInfo::TeamColor instead of hardcoded red/blue.
+// When non-standard team colors are detected, shows "Liandri" vs "Phayder" instead.
+void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
+{
+	if (!Canvas || !SmallFont || !MediumFont || !LargeFont) return;
+
+	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float TopY = 2.f * RenderScale;
+
+	// Get team colors (respect TeamSkins custom colors)
+	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f); // default red
+	FLinearColor Team1Color = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);  // default blue
+	bool bCustomColors = false;
+
+	if (GS->Teams.IsValidIndex(0) && GS->Teams[0])
+	{
+		FLinearColor TC = GS->Teams[0]->TeamColor;
+		// Check if non-standard (not close to pure red)
+		if (FMath::Abs(TC.R - 1.f) > 0.2f || TC.G > 0.3f || TC.B > 0.3f)
+			bCustomColors = true;
+		Team0Color = TC;
+	}
+	if (GS->Teams.IsValidIndex(1) && GS->Teams[1])
+	{
+		FLinearColor TC = GS->Teams[1]->TeamColor;
+		if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f)
+			bCustomColors = true;
+		Team1Color = TC;
+	}
+
+	// Team names
+	FString Team0Name = bCustomColors ? TEXT("Liandri") : TEXT("RED");
+	FString Team1Name = bCustomColors ? TEXT("Phayder") : TEXT("BLUE");
+
+	// Scores
+	int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
+	int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
+
+	// Bar dimensions
+	const float BarWidth = 220.f * RenderScale;
+	const float BarHeight = 36.f * RenderScale;
+	const float ScoreBoxWidth = 50.f * RenderScale;
+	const float GapWidth = 4.f * RenderScale;
+
+	// ── Team 0 (left side) ──
+	float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
+	Canvas->SetLinearDrawColor(Team0Color);
+	Canvas->DrawTile(Canvas->DefaultTexture, LeftBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
+
+	// Team 0 score box
+	float ScoreBoxX0 = CenterX - GapWidth - ScoreBoxWidth;
+	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
+
+	// ── Team 1 (right side) ──
+	float ScoreBoxX1 = CenterX + GapWidth;
+	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
+
+	float RightBarX = CenterX + GapWidth + ScoreBoxWidth;
+	Canvas->SetLinearDrawColor(Team1Color);
+	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
+
+	// ── Center divider (white thin line) ──
+	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight, 0, 0, 1, 1);
+
+	// ── Text ──
+	float FontScale = RenderScale * 0.85f;
+	float LargeFontScale = RenderScale * 1.2f;
+	float XL, YL;
+
+	// Team 0 name (right-aligned inside left bar)
+	Canvas->TextSize(SmallFont, Team0Name, XL, YL, FontScale, FontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(SmallFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+
+	// Team 0 score (centered in score box)
+	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
+	Canvas->TextSize(LargeFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(LargeFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+
+	// Team 1 score (centered in score box)
+	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
+	Canvas->TextSize(LargeFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(LargeFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+
+	// Team 1 name (left-aligned inside right bar)
+	Canvas->TextSize(SmallFont, Team1Name, XL, YL, FontScale, FontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(SmallFont, Team1Name, RightBarX + 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+
+	// ── Clock (centered below bars) ──
+	float ClockY = TopY + BarHeight + 2.f * RenderScale;
+	int32 RemainingTime = GS->GetRemainingTime();
+	int32 Mins = RemainingTime / 60;
+	int32 Secs = RemainingTime % 60;
+	FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
+	Canvas->TextSize(MediumFont, ClockStr, XL, YL, FontScale, FontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, FontScale, FontScale);
+
+	// ── "You are on X" text ──
+	AUTPlayerState* MyPS = GetScorerPlayerState();
+	if (MyPS && MyPS->Team)
+	{
+		FString TeamLabel = (MyPS->Team->TeamIndex == 0) ? Team0Name : Team1Name;
+		FString YouAreOn = FString::Printf(TEXT("You are on "));
+		float SmallScale = RenderScale * 0.65f;
+		float LabelY = ClockY + YL + 1.f * RenderScale;
+
+		float YouXL, YouYL, LabelXL, LabelYL;
+		Canvas->TextSize(SmallFont, YouAreOn, YouXL, YouYL, SmallScale, SmallScale);
+		Canvas->TextSize(SmallFont, TeamLabel, LabelXL, LabelYL, SmallScale, SmallScale);
+		float TotalW = YouXL + LabelXL;
+
+		Canvas->DrawColor = FColor(200, 200, 200, 200);
+		Canvas->DrawText(SmallFont, YouAreOn, CenterX - TotalW * 0.5f, LabelY, SmallScale, SmallScale);
+
+		FLinearColor MyTeamColor = (MyPS->Team->TeamIndex == 0) ? Team0Color : Team1Color;
+		Canvas->SetLinearDrawColor(MyTeamColor);
+		Canvas->DrawText(SmallFont, TeamLabel, CenterX - TotalW * 0.5f + YouXL, LabelY, SmallScale, SmallScale);
 	}
 }
 

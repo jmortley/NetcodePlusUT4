@@ -32,6 +32,10 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float IconSize);
 	virtual void GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers);
 
+	/** Custom team score bar — replaces bpHW_TeamGameClock to respect TeamSkins colors.
+	 *  Shows "Liandri" vs "Phayder" when custom team colors are detected. */
+	virtual void DrawTeamScoreBar(AUTGameState* GS);
+
 	/** Force game-only input when dead but match in progress — prevents mouse escaping viewport */
 	virtual EInputMode::Type GetInputMode_Implementation() const override;
 

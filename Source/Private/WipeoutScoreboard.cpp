@@ -59,6 +59,81 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	RedTeamOverlay.VL = 310.0f;
 }
 
+// ─── Custom team colors check ──────────────────────────────────────────
+bool UWipeoutScoreboard::HasCustomTeamColors() const
+{
+	if (!UTGameState) return false;
+
+	for (int32 i = 0; i < 2; i++)
+	{
+		if (!UTGameState->Teams.IsValidIndex(i) || !UTGameState->Teams[i]) continue;
+		FLinearColor TC = UTGameState->Teams[i]->TeamColor;
+		if (i == 0)
+		{
+			// Check if team 0 is non-standard red
+			if (FMath::Abs(TC.R - 1.f) > 0.2f || TC.G > 0.3f || TC.B > 0.3f)
+				return true;
+		}
+		else
+		{
+			// Check if team 1 is non-standard blue
+			if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f)
+				return true;
+		}
+	}
+	return false;
+}
+
+// ─── DrawTeamPanel override — use dynamic team colors and custom names ─
+void UWipeoutScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
+{
+	if (!UTGameState || UTGameState->Teams.Num() < 2 || !UTGameState->Teams[0] || !UTGameState->Teams[1]) return;
+
+	bool bCustom = HasCustomTeamColors();
+
+	// Set team names based on whether custom colors are active
+	RedTeamText = bCustom ? FText::FromString(TEXT("LIANDRI")) : FText::FromString(TEXT("RED"));
+	BlueTeamText = bCustom ? FText::FromString(TEXT("PHAYDER")) : FText::FromString(TEXT("BLUE"));
+
+	// Call base — it uses RedTeamText/BlueTeamText and draws with FLinearColor::Red/Blue
+	// We override the draw colors by using the team colors directly
+	float Width = 0.5f * (Size.X - 400.f) * RenderScale;
+	float FrontSize = 35.f * RenderScale;
+	float EndSize = 16.f * RenderScale;
+	float MiddleSize = Width - FrontSize - EndSize;
+	float BackgroundY = YOffset + 22.f * RenderScale;
+	float TeamTextY = YOffset + 40.f * RenderScale;
+	float TeamScoreY = YOffset + 36.f * RenderScale;
+	float BackgroundHeight = 65.f * RenderScale;
+	float TeamEdgeSize = 40.f * RenderScale;
+	float NamePosition = TeamEdgeSize + FrontSize + 0.25f * MiddleSize;
+
+	FLinearColor Team0Color = UTGameState->Teams[0]->TeamColor;
+	FLinearColor Team1Color = UTGameState->Teams[1]->TeamColor;
+
+	// Team 0 (left)
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, TeamEdgeSize, BackgroundY, FrontSize, BackgroundHeight, 0, 188, 36, 65, 1.0f, Team0Color);
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, TeamEdgeSize + FrontSize, BackgroundY, MiddleSize, BackgroundHeight, 39, 188, 64, 65, 1.0f, Team0Color);
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, TeamEdgeSize + FrontSize + MiddleSize, BackgroundY, EndSize, BackgroundHeight, 39, 188, 64, 65, 1.0f, Team0Color);
+
+	DrawText(RedTeamText, NamePosition, TeamTextY, UTHUDOwner->HugeFont, RenderScale, 1.f, FLinearColor::White, ETextHorzPos::Left, ETextVertPos::Center);
+	DrawText(FText::AsNumber(UTGameState->Teams[0]->Score), TeamEdgeSize + FrontSize + MiddleSize - EndSize, TeamScoreY, UTHUDOwner->HugeFont, false, FVector2D(0, 0), FLinearColor::Black, true, FLinearColor::Black, 1.5f * RenderScale * RedScoreScaling, 1.f, FLinearColor::White, FLinearColor(0.f, 0.f, 0.f, 0.f), ETextHorzPos::Right, ETextVertPos::Center);
+
+	// Team 1 (right)
+	float LeftEdge = Canvas->ClipX - TeamEdgeSize - FrontSize - MiddleSize - EndSize;
+
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, LeftEdge + EndSize + MiddleSize, BackgroundY, FrontSize, BackgroundHeight, 196, 188, 36, 65, 1.f, Team1Color);
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, LeftEdge + EndSize, BackgroundY, MiddleSize, BackgroundHeight, 130, 188, 64, 65, 1.f, Team1Color);
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, LeftEdge, BackgroundY, EndSize, BackgroundHeight, 117, 188, 16, 65, 1.f, Team1Color);
+
+	DrawText(BlueTeamText, Canvas->ClipX - NamePosition, TeamTextY, UTHUDOwner->HugeFont, RenderScale, 1.f, FLinearColor::White, ETextHorzPos::Right, ETextVertPos::Center);
+	DrawText(FText::AsNumber(UTGameState->Teams[1]->Score), LeftEdge + 2.f * EndSize, TeamScoreY, UTHUDOwner->HugeFont, false, FVector2D(0.f, 0.f), FLinearColor::Black, true, FLinearColor::Black, 1.5f * RenderScale * BlueScoreScaling, 1.f, FLinearColor::White, FLinearColor(0.f, 0.f, 0.f, 0.f), ETextHorzPos::Left, ETextVertPos::Center);
+
+	YOffset += 119.f * RenderScale;
+	BlueScoreScaling = FMath::Max(BlueScoreScaling - RenderDelta, 1.f);
+	RedScoreScaling = FMath::Max(RedScoreScaling - RenderDelta, 1.f);
+}
+
 void UWipeoutScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 {
 	float XOffset = ScaledEdgeSize;
