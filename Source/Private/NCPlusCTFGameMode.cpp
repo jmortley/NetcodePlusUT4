@@ -122,21 +122,11 @@ bool ANCPlusCTFGameMode::SupportsInstantReplay() const
 }
 
 // ── Floor Slide ─────────────────────────────────────────────────────
-// AUTCharacter::CanSlide() is non-virtual (const), so we can't override it.
-// Instead, after spawning the character, zero out the movement component's
-// slide properties so the base CanSlide() check fails naturally.
+// Floor slide disable temporarily removed — needs reimplementation
+// without changing TeamArenaCharacter class layout
 void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
 	Super::RestartPlayer(NewPlayer);
-
-	if (!bAllowFloorSlide && NewPlayer)
-	{
-		ATeamArenaCharacter* UTC = Cast<ATeamArenaCharacter>(NewPlayer->GetPawn());
-		if (UTC)
-		{
-			UTC->DisableFloorSlide();
-		}
-	}
 }
 
 // ── Spawn Rating ────────────────────────────────────────────────────
