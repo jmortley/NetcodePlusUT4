@@ -9,7 +9,6 @@
 #include "UTPlusShockRifle.h"
 #include "UTGameState.h"
 #include "UTWeap_LinkGun.h"
-#include "NCPlusCTFGameMode.h"
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
