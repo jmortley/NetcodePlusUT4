@@ -211,11 +211,11 @@ void AUWipeoutGame::InitGameState()
 {
 	Super::InitGameState();
 
-	// Compatibility fix: clients without the plugin need a class they can load
+	// Set GameModeClass so clients can look up the correct DisplayName.
+	// Clients need the NetcodePlus plugin installed, so they can load our class.
 	if (AUTGameState* GS = GetGameState<AUTGameState>())
 	{
-		GS->GameModeClass = AUTTeamGameMode::StaticClass();
-		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame::InitGameState - Set GameModeClass to UTTeamGameMode for compatibility"));
+		GS->GameModeClass = GetClass(); // Use actual class (or BP subclass) for correct DisplayName
 	}
 }
 
