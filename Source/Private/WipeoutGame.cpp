@@ -1096,7 +1096,16 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		return;
 	}
 
-	const bool bShouldAllowSpawn = (bAllowPlayerRespawns || bWarmupMode || GetMatchState() == MatchState::WaitingToStart);
+	// Check if this player has ever spawned. If not, this is a late joiner
+	// who needs to be let into the game (or forced to spectate until next round).
+	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+	const bool bIsLateJoiner = (PS && PS->Deaths == 0 && PS->Kills == 0 && !PS->bOutOfLives);
+
+	// Allow spawn during: warmup, waiting to start, explicit respawn window
+	// (wave respawn), or for late joiners who have never spawned.
+	const bool bShouldAllowSpawn = (bAllowPlayerRespawns || bWarmupMode
+		|| GetMatchState() == MatchState::WaitingToStart
+		|| bIsLateJoiner);
 
 	if (bShouldAllowSpawn)
 	{
