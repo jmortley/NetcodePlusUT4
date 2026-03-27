@@ -505,45 +505,9 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	GConfig->Flush(false, ModIniPath);
 
-	// Apply hide to current weapon immediately (before closing panel)
-	AUTCharacter* UTChar = PC ? Cast<AUTCharacter>(PC->GetPawn()) : nullptr;
-	if (UTChar && UTChar->GetWeapon())
-	{
-		AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
-		if (FixWeapon)
-		{
-			FName Tag = FixWeapon->WeaponSkinCustomizationTag;
-			bool bHide = AUTWeaponFix::HiddenWeaponsByTag.Contains(Tag) && AUTWeaponFix::HiddenWeaponsByTag[Tag];
-			if (FixWeapon->GetMesh())
-			{
-				FixWeapon->GetMesh()->SetVisibility(!bHide, true);
-			}
-			if (UTChar->FirstPersonMesh)
-			{
-				UTChar->FirstPersonMesh->SetVisibility(!bHide, true);
-			}
-		}
-	}
-
-	// Close the panel BEFORE sending ServerMutate — the mutate triggers
-	// weapon swap which destroys/recreates inventory. If the Slate widget
-	// is still alive during that cascade, Slate crashes in ICU text layout
-	// trying to render a widget whose backing data was destroyed mid-frame.
+	// Settings are saved to Mod.ini — they take effect on next spawn.
+	// No mid-life weapon swap needed, which avoids Slate/inventory crashes.
 	ClosePanel();
-
-	// Defer the ServerMutate to next tick so Slate finishes its cleanup first
-	FString HitscanCmd = FString::Printf(TEXT("sethitscan %s"), *CurrentHitscanChoice);
-	TWeakObjectPtr<AUTPlayerController> WeakPC = PC;
-	FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
-		[WeakPC, HitscanCmd](float) -> bool
-		{
-			if (WeakPC.IsValid())
-			{
-				WeakPC->ServerMutate(HitscanCmd);
-			}
-			return false; // One-shot
-		}
-	), 0.f);
 }
 
 void SUTWeaponSkinSelector::RebuildWeaponList()
