@@ -10,6 +10,9 @@
 #include "UTTeamInfo.h"
 #include "UTTeamPlayerStart.h"
 #include "UTDroppedPickup.h"
+#include "UTPickupWeapon.h"
+#include "UTPickupHealth.h"
+#include "UTPickupInventory.h"
 #include "Engine/DemoNetDriver.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
@@ -1302,19 +1305,63 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-// CheckRelevance — Remove unwanted pickups from the map (e.g. Redeemer)
+// CheckRelevance — Strip pickups not appropriate for Wipeout:
+//   - Remove Redeemer weapon base (and its weapon)
+//   - Remove ALL health pickups and vials
+//   - Remove armor EXCEPT ShieldBelt
+//   - Remove powerups EXCEPT UDamage/Amp
+//   - Keep all other weapon bases (ammo refill encourages movement)
 // ---------------------------------------------------------------------------
 bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 {
-	if (Other)
+	if (!Other)
 	{
-		FString ClassName = Other->GetClass()->GetName();
-		// Remove Redeemer pickups (both C++ and Blueprint variants)
-		if (ClassName.Contains(TEXT("Redeemer")))
-		{
-			return false; // Destroy the actor
-		}
+		return Super::CheckRelevance_Implementation(Other);
 	}
+
+	// --- Weapon bases: only remove Redeemer ---
+	AUTPickupWeapon* WeaponPickup = Cast<AUTPickupWeapon>(Other);
+	if (WeaponPickup)
+	{
+		if (WeaponPickup->WeaponType)
+		{
+			FString WeaponName = WeaponPickup->WeaponType->GetName();
+			if (WeaponName.Contains(TEXT("Redeemer")))
+			{
+				return false;
+			}
+		}
+		return Super::CheckRelevance_Implementation(Other);
+	}
+
+	// --- Health pickups: remove all (health vials, health packs, etc.) ---
+	if (Other->IsA(AUTPickupHealth::StaticClass()))
+	{
+		return false;
+	}
+
+	// --- Inventory pickups (armor + powerups): selective removal ---
+	AUTPickupInventory* InvPickup = Cast<AUTPickupInventory>(Other);
+	if (InvPickup && InvPickup->GetInventoryType())
+	{
+		FString InvName = InvPickup->GetInventoryType()->GetName();
+
+		// Keep: ShieldBelt
+		if (InvName.Contains(TEXT("ShieldBelt")))
+		{
+			return Super::CheckRelevance_Implementation(Other);
+		}
+
+		// Keep: UDamage / Amp
+		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")) || InvName.Contains(TEXT("Berserk")))
+		{
+			return Super::CheckRelevance_Implementation(Other);
+		}
+
+		// Remove everything else (Thighpads, Chest, Helmet, Jumpboots, Invisibility, etc.)
+		return false;
+	}
+
 	return Super::CheckRelevance_Implementation(Other);
 }
 
