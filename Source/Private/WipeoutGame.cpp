@@ -2072,7 +2072,11 @@ void AUWipeoutGame::ExecuteOvertimeWave()
 			OvertimeDamageType ? *OvertimeDamageType : UUTDamageType::StaticClass(),
 			FVector::ZeroVector);
 
-		C->TakeDamage(DamageToApply, DamageEvent, nullptr, this);
+		// Pass the victim's own controller as instigator for overtime environment damage.
+		// Passing nullptr crashes Epic's damage pipeline which dereferences InstigatedBy
+		// without null checks in kill credit / death message code paths.
+		AController* VictimController = C->GetController();
+		C->TakeDamage(DamageToApply, DamageEvent, VictimController, this);
 	}
 
 	CheckWipeoutCondition();
