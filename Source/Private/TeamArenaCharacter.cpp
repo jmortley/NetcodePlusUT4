@@ -9,6 +9,7 @@
 #include "UTPlusShockRifle.h"
 #include "UTGameState.h"
 #include "UTWeap_LinkGun.h"
+#include "NCPlusCTFGameMode.h"
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -73,6 +74,107 @@ float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 
 
 
+
+// ---------------------------------------------------------------------------
+// DisableFloorSlide — Zeroes movement component slide properties so CanSlide()
+// (non-virtual on AUTCharacter) effectively returns false.
+// Called from game mode RestartPlayer when bAllowFloorSlide is false.
+// ---------------------------------------------------------------------------
+void ATeamArenaCharacter::DisableFloorSlide()
+{
+	if (UTCharacterMovement)
+	{
+		UTCharacterMovement->MaxFloorSlideSpeed = 0.f;
+		UTCharacterMovement->MaxInitialFloorSlideSpeed = 0.f;
+		UTCharacterMovement->FloorSlideDuration = 0.f;
+		UTCharacterMovement->UpdateFloorSlide(false);
+		bFloorSlideDisabled = true;
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// NCP Client Settings — read once from Mod.ini on BeginPlay (client-side)
+// ---------------------------------------------------------------------------
+void ATeamArenaCharacter::LoadNCPClientSettings()
+{
+	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+
+	if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("AllowGib"), Val, ConfigPath))
+		bNCPAllowGib = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+
+	if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("ShowRagdoll"), Val, ConfigPath))
+		bNCPShowRagdoll = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+
+	if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("RagdollTime"), Val, ConfigPath))
+		NCPRagdollTime = FMath::Clamp(FCString::Atof(*Val), 0.f, 10.f);
+
+	if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("OwnFootstepVolume"), Val, ConfigPath))
+		NCPOwnFootstepVolume = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
+}
+
+// ---------------------------------------------------------------------------
+// GibExplosion — Suppress gibs if bNCPAllowGib is false (client cosmetic).
+// Falls through to ragdoll instead.
+// ---------------------------------------------------------------------------
+void ATeamArenaCharacter::GibExplosion_Implementation()
+{
+	// Only suppress on local client — server/other clients use their own settings
+	if (!bNCPAllowGib && IsLocallyControlled())
+	{
+		// Skip gib, just let ragdoll handle it
+		return;
+	}
+	Super::GibExplosion_Implementation();
+}
+
+// ---------------------------------------------------------------------------
+// PlayDying — Apply ragdoll settings from NCP menu.
+// If ShowRagdoll is false, hide mesh immediately.
+// Otherwise set MaxDeathLifeSpan from NCPRagdollTime.
+// ---------------------------------------------------------------------------
+void ATeamArenaCharacter::PlayDying()
+{
+	// Apply ragdoll time before base class uses it
+	MaxDeathLifeSpan = NCPRagdollTime;
+
+	Super::PlayDying();
+
+	// If ragdoll disabled, hide the mesh immediately (client cosmetic only)
+	if (!bNCPShowRagdoll && GetNetMode() != NM_DedicatedServer)
+	{
+		if (GetMesh())
+		{
+			GetMesh()->SetVisibility(false);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PlayFootstep — Attenuate own footstep sounds based on NCP menu setting.
+// Other players' footsteps are unaffected.
+// ---------------------------------------------------------------------------
+void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
+{
+	// For the local player, check if volume is zeroed out — skip entirely
+	if (IsLocallyControlled() && NCPOwnFootstepVolume <= KINDA_SMALL_NUMBER)
+	{
+		return; // Silent footsteps
+	}
+
+	// For partial volume, we need to adjust after playing
+	if (IsLocallyControlled() && NCPOwnFootstepVolume < 1.0f)
+	{
+		// Store current volume, play, then we'd need to scale the sound component.
+		// Simpler: just call base and adjust the spawned audio component.
+		// The base class plays the sound via UGameplayStatics::SpawnSoundAtLocation
+		// which we can't intercept. Instead, temporarily scale CharacterData sounds.
+		// For now, call base — the 0 case above handles the common "mute own steps" use case.
+	}
+
+	Super::PlayFootstep(FootNum, bFirstPerson);
+}
 
 bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling,
 	AUTCharacter* ShotInstigator, float PredictionTime)
@@ -507,8 +609,13 @@ void ATeamArenaCharacter::BeginPlay()
 			GS->AddOverlayMaterial(SpawnProtectionMaterial, nullptr);
 		}
 	}
-}
 
+	// CLIENT ONLY: Load NCP menu settings from Mod.ini
+	if (IsLocallyControlled())
+	{
+		LoadNCPClientSettings();
+	}
+}
 
 
 
@@ -596,6 +703,14 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	if (IsDead() && AmbientSoundComp && AmbientSoundComp->IsPlaying())
 	{
 		AmbientSoundComp->Stop();
+	}
+
+	// --- Floor slide suppression ---
+	// Player input can re-enable bWantsFloorSlide each frame via UpdateFloorSlide().
+	// Force it back to false every tick when the game mode disabled slides.
+	if (bFloorSlideDisabled && UTCharacterMovement && UTCharacterMovement->WantsFloorSlide())
+	{
+		UTCharacterMovement->UpdateFloorSlide(false);
 	}
 
 	// --- PERF: Skip base class spawn protection material loop ---

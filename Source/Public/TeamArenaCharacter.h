@@ -46,6 +46,34 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawn Protection", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float SpawnProtectionOpacity = 0.7f;
 
+	/** Disable floor sliding by zeroing movement component slide properties.
+	 *  Called from game mode RestartPlayer when bAllowFloorSlide is false.
+	 *  CanSlide() on AUTCharacter is non-virtual (const), so we disable at
+	 *  the movement component level instead. bWantsFloorSlide is forced
+	 *  false every tick to prevent re-enable from input. */
+	void DisableFloorSlide();
+
+	/** True if DisableFloorSlide() was called — enforced in Tick */
+	bool bFloorSlideDisabled = false;
+
+	// ── NCP Menu settings (cached from Mod.ini on BeginPlay) ──
+	/** If false, gibs are suppressed — death goes straight to ragdoll */
+	bool bNCPAllowGib = false;
+	/** If false, ragdoll mesh is hidden immediately on death */
+	bool bNCPShowRagdoll = true;
+	/** How long the ragdoll body stays visible (seconds) */
+	float NCPRagdollTime = 3.0f;
+	/** Volume multiplier for own footstep sounds (0 = silent, 1 = full) */
+	float NCPOwnFootstepVolume = 0.0f;
+
+	/** Load NCP client settings from Mod.ini [NetcodePlus] */
+	void LoadNCPClientSettings();
+
+	// ── Overrides for NCP settings ──
+	virtual void GibExplosion_Implementation() override;
+	virtual void PlayDying() override;
+	virtual void PlayFootstep(uint8 FootNum, bool bFirstPerson = false) override;
+
 	virtual bool IsHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling,
 		AUTCharacter* ShotInstigator, float PredictionTime) override;
 

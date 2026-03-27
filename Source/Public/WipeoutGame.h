@@ -191,6 +191,25 @@ public:
 
 
 	// =======================================================================
+	// LINK GUN TEAM HEALING
+	// When stock Link Gun beam (UTDMG_Link_Alt) hits a teammate, heal them
+	// instead of dealing damage. Set LinkHealPerSecond = 0 to disable.
+	// =======================================================================
+
+	/** HP healed per second by Link beam on teammates. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|LinkHeal")
+	float LinkHealPerSecond;
+
+	/** Max HP a player can be healed to (capped here, not at full stack). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|LinkHeal")
+	int32 LinkHealMaxHP;
+
+	/** Fractional heal accumulator per player (beam ticks faster than 1HP). */
+	UPROPERTY(Transient)
+	TMap<TWeakObjectPtr<AUTPlayerState>, float> LinkHealAccumulator;
+
+
+	// =======================================================================
 	// SPAWN SYSTEM (reused from TeamArena for round-start)
 	// =======================================================================
 
@@ -482,6 +501,10 @@ protected:
 
 	UFUNCTION()
 	void DelayedEndGame(int32 WinnerTeamIndex, FName Reason);
+
+	/** Override EndGame to guard against replay crashes in PIE/standalone.
+	 *  Only calls PickMostCoolMoments if DemoNetDriver is running. */
+	virtual void EndGame(AUTPlayerState* Winner, FName Reason) override;
 
 	UFUNCTION()
 	void DeferredHandleMatchStart();

@@ -91,6 +91,42 @@ EInputMode::Type AWipeoutHUD::GetInputMode_Implementation() const
 	return Super::GetInputMode_Implementation();
 }
 
+void AWipeoutHUD::NotifyMatchStateChange()
+{
+	Super::NotifyMatchStateChange();
+
+	// Take a high-res screenshot once when match ends (if enabled in NCP settings)
+	if (!bPostMatchScreenshotTaken)
+	{
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+		if (GS && GS->HasMatchEnded())
+		{
+			// Check Mod.ini setting
+			FString Val;
+			FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+			if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
+			{
+				bNCPScreenshotEnabled = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+			}
+
+			if (bNCPScreenshotEnabled)
+			{
+				// Delay slightly so the final scoreboard has a chance to render
+				FTimerHandle ScreenshotTimer;
+				GetWorldTimerManager().SetTimer(ScreenshotTimer, [this]()
+				{
+					if (GetWorld() && GetWorld()->GetFirstPlayerController())
+					{
+						GetWorld()->GetFirstPlayerController()->ConsoleCommand(TEXT("HighResShot 2"));
+					}
+				}, 1.5f, false);
+			}
+
+			bPostMatchScreenshotTaken = true;
+		}
+	}
+}
+
 void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 {
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
@@ -112,6 +148,9 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 void AWipeoutHUD::DrawHUD()
 {
 	Super::DrawHUD();
+
+	// Guard: Canvas or fonts may be null during Slate UI overlays (e.g. weapon skins menu)
+	if (!Canvas || !SmallFont) return;
 
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	bool bScoreboardIsUp = ScoreboardIsUp();
@@ -185,7 +224,7 @@ void AWipeoutHUD::DrawHUD()
 		}
 		// ─── Score / KDA mini widget (top right) ───
 		AUTPlayerState* MyPS = GetScorerPlayerState();
-		if (MyPS)
+		if (MyPS && Canvas && SmallFont)
 		{
 			int32 Score = FMath::TruncToInt(MyPS->Score);
 			int32 Kills = MyPS->Kills;

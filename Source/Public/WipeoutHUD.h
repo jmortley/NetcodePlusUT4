@@ -34,4 +34,11 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 
 	/** Force game-only input when dead but match in progress — prevents mouse escaping viewport */
 	virtual EInputMode::Type GetInputMode_Implementation() const override;
+
+	/** Take high-res screenshot when match ends (if enabled in NCP settings) */
+	virtual void NotifyMatchStateChange() override;
+
+private:
+	bool bPostMatchScreenshotTaken = false;
+	bool bNCPScreenshotEnabled = true;
 };

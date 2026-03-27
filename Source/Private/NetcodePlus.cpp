@@ -11,9 +11,13 @@
 #include "UTWeaponFix.h"
 #include "UTATypes.h"
 #include "SUTWeaponSkinSelector.h"
+#include "SUTNCPlusMenu.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
+
+/** Weak reference to active NCP menu — only one can be open at a time */
+static TWeakPtr<SUTNCPlusMenu> ActiveNCPMenu;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -183,6 +187,49 @@ static void HandleWeaponSkins(const TArray<FString>& Args)
 	ActiveSkinSelector = SkinSelector;
 }
 
+static void HandleNCPMenu(const TArray<FString>& Args)
+{
+	// Toggle: if already open, close it
+	if (ActiveNCPMenu.IsValid())
+	{
+		ActiveNCPMenu.Pin()->ClosePanel();
+		ActiveNCPMenu.Reset();
+		return;
+	}
+
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+	if (!World) return;
+
+	APlayerController* RawPC = World->GetFirstPlayerController();
+	if (!RawPC) return;
+
+	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(RawPC->GetLocalPlayer());
+	if (!LP) return;
+
+	UGameViewportClient* ViewportClient = World->GetGameViewport();
+	if (!ViewportClient) return;
+
+	TSharedRef<SUTNCPlusMenu> Menu =
+		SNew(SUTNCPlusMenu)
+		.PlayerOwner(LP);
+
+	ViewportClient->AddViewportWidgetContent(Menu, 100);
+	FSlateApplication::Get().SetKeyboardFocus(Menu, EFocusCause::SetDirectly);
+
+	ActiveNCPMenu = Menu;
+}
+
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
 void FNetcodePlus::StartupModule()
@@ -200,6 +247,26 @@ void FNetcodePlus::StartupModule()
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleWeaponSkins),
 		ECVF_Default
 	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("ncpmenu"),
+		TEXT("Open NetcodePlus settings menu (gore, footsteps, screenshots)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleNCPMenu),
+		ECVF_Default
+	);
+
+	// Bind F5 to ncpmenu by default
+	if (GEngine)
+	{
+		UPlayerInput* DefInput = GetMutableDefault<UPlayerInput>();
+		if (DefInput)
+		{
+			FKeyBind Bind;
+			Bind.Key = EKeys::F5;
+			Bind.Command = TEXT("ncpmenu");
+			DefInput->DebugExecBindings.Add(Bind);
+		}
+	}
 
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
@@ -219,6 +286,16 @@ void FNetcodePlus::ShutdownModule()
 
 	IConsoleObject* Cmd2 = IConsoleManager::Get().FindConsoleObject(TEXT("weaponskins"));
 	if (Cmd2) { IConsoleManager::Get().UnregisterConsoleObject(Cmd2, false); }
+
+	// Close NCP menu if open
+	if (ActiveNCPMenu.IsValid())
+	{
+		ActiveNCPMenu.Pin()->ClosePanel();
+		ActiveNCPMenu.Reset();
+	}
+
+	IConsoleObject* Cmd3 = IConsoleManager::Get().FindConsoleObject(TEXT("ncpmenu"));
+	if (Cmd3) { IConsoleManager::Get().UnregisterConsoleObject(Cmd3, false); }
 
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus unloaded"));
 }

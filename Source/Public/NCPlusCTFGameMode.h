@@ -47,9 +47,46 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float FlagCarrierLOSPenalty;
 
+	/** Distance within which ANY living enemy penalizes a spawn point.
+	 *  Prevents spawning directly on top of enemies regardless of flag state.
+	 *  BP equivalent: EnemyBlockRange. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float EnemyBlockRange;
+
+	/** Score penalty applied per nearby enemy within EnemyBlockRange. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float EnemyBlockPenalty;
+
+	/** Distance within which an enemy with LOS to spawn point adds penalty.
+	 *  BP equivalent: EnemyLOSBlockRange. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float EnemyLOSBlockRange;
+
+	/** Score penalty for spawns with clear LOS to a nearby enemy. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float EnemyLOSPenalty;
+
+	// ── Movement Configuration ───────────────────────────────────────
+
+	/** If false, floor sliding is disabled for all players.
+	 *  Useful for modes like Sniper CTF where slide animations
+	 *  desync from the hitbox, making players hard to hit unfairly. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	bool bAllowFloorSlide;
+
+	// ── Overtime Configuration ────────────────────────────────────────
+
+	/** Respawn wait time during overtime (seconds). Replaces Epic's extended
+	 *  overtime that escalated to 10s. Set to 0 to use normal respawn time. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
+	float OvertimeRespawnTime;
+
 	// ── Game Flow Overrides ──────────────────────────────────────────
+	// NOTE: Floor slide disable is enforced via ATeamArenaCharacter::CanSlide_Implementation()
+	// which reads bAllowFloorSlide from this game mode. No RestartPlayer override needed.
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
+	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn, AUTPlayerState* Holder, FName Reason) override;
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer);

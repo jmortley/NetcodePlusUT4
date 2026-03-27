@@ -11,6 +11,9 @@
 #include "UTPickup.h"
 #include "UTGameMessage.h"
 #include "UTMutator.h"
+#include "UTCharacterMovement.h"
+#include "UTTeamPlayerStart.h"
+#include "TeamArenaCharacter.h"
 #include "UTCTFSquadAI.h"
 #include "UTWorldSettings.h"
 #include "StatNames.h"
@@ -36,12 +39,18 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	GracePeriodDuration = 10;
 	bEndGameAdvantageOnlyWithinOneCap = true;
 
-	// Spawn configuration
-	FlagBaseProximityRadius = 4000.f;
-	FlagSpawnPenaltyRadius = 3500.f;
+	// Spawn configuration — defaults match BP values
+	FlagBaseProximityRadius = 3000.f;   // BP: FlagBlockRange
+	FlagSpawnPenaltyRadius = 3000.f;    // Radius for distance-scaled penalties near flag
 	FlagCarrierSpawnPenalty = 15.f;
 	DroppedFlagSpawnPenalty = 10.f;
 	FlagCarrierLOSPenalty = 5.f;
+	EnemyBlockRange = 2500.f;           // BP: EnemyBlockRange — penalize spawns near ANY enemy
+	EnemyBlockPenalty = 10.f;
+	EnemyLOSBlockRange = 3000.f;        // BP: EnemyLOSBlockRange — LOS check to nearby enemies
+	EnemyLOSPenalty = 8.f;
+	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
+	OvertimeRespawnTime = 6.f;          // Fixed 6s respawn in overtime (replaces Epic's 10s escalation)
 
 	// Internal state
 	AdvantageTimeRemaining = 0;
@@ -69,6 +78,42 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	{
 		TimeLimit = uint32(float(TimeLimit) * 0.5f);
 	}
+
+	// Safety: if the map has UTTeamPlayerStarts but no plain PlayerStarts,
+	// the engine asserts fatally in FindPlayerStart. Spawn fallback PlayerStarts
+	// at UTTeamPlayerStart locations so the engine can find them.
+	bool bHasPlayerStart = false;
+	bool bHasTeamStart = false;
+	for (TActorIterator<APlayerStart> It(GetWorld()); It; ++It)
+	{
+		if (Cast<AUTTeamPlayerStart>(*It))
+		{
+			bHasTeamStart = true;
+		}
+		else
+		{
+			bHasPlayerStart = true;
+		}
+	}
+
+	if (!bHasPlayerStart && bHasTeamStart)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF: Map has UTTeamPlayerStarts but no plain PlayerStarts — spawning fallbacks"));
+		for (TActorIterator<AUTTeamPlayerStart> It(GetWorld()); It; ++It)
+		{
+			FActorSpawnParameters SpawnParams;
+			SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			APlayerStart* Fallback = GetWorld()->SpawnActor<APlayerStart>(
+				APlayerStart::StaticClass(),
+				It->GetActorLocation(),
+				It->GetActorRotation(),
+				SpawnParams);
+			if (Fallback)
+			{
+				Fallback->PlayerStartTag = FName(*FString::Printf(TEXT("Team%d"), It->TeamNum));
+			}
+		}
+	}
 }
 
 bool ANCPlusCTFGameMode::SupportsInstantReplay() const
@@ -76,7 +121,25 @@ bool ANCPlusCTFGameMode::SupportsInstantReplay() const
 	return true;
 }
 
-// ── Spawn System ────────────────────────────────────────────────────
+// ── Floor Slide ─────────────────────────────────────────────────────
+// AUTCharacter::CanSlide() is non-virtual (const), so we can't override it.
+// Instead, after spawning the character, zero out the movement component's
+// slide properties so the base CanSlide() check fails naturally.
+void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
+{
+	Super::RestartPlayer(NewPlayer);
+
+	if (!bAllowFloorSlide && NewPlayer)
+	{
+		ATeamArenaCharacter* UTC = Cast<ATeamArenaCharacter>(NewPlayer->GetPawn());
+		if (UTC)
+		{
+			UTC->DisableFloorSlide();
+		}
+	}
+}
+
+// ── Spawn Rating ────────────────────────────────────────────────────
 
 float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 {
@@ -160,6 +223,51 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 				{
 					float DistanceFactor = 1.f - (SpawnToFlagDist / FlagSpawnPenaltyRadius);
 					Result -= DroppedFlagSpawnPenalty * DistanceFactor;
+				}
+			}
+		}
+	}
+
+	// ── Enemy proximity & LOS penalties (independent of flag state) ──
+	// Penalize spawns near ANY living enemy, not just the flag carrier.
+	// Matches the BP EnemyBlockRange / EnemyLOSBlockRange behavior.
+	if (EnemyBlockRange > 0.f || EnemyLOSBlockRange > 0.f)
+	{
+		for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+		{
+			AController* C = It->Get();
+			if (!C || !C->GetPawn()) continue;
+
+			AUTPlayerState* EnemyPS = Cast<AUTPlayerState>(C->PlayerState);
+			if (!EnemyPS || !EnemyPS->Team || EnemyPS->Team->TeamIndex == PlayerTeamNum)
+				continue; // Skip teammates and non-team players
+
+			AUTCharacter* EnemyChar = Cast<AUTCharacter>(C->GetPawn());
+			if (!EnemyChar || EnemyChar->IsDead()) continue;
+
+			const FVector EnemyLoc = EnemyChar->GetActorLocation();
+			const float DistToEnemy = (StartLoc - EnemyLoc).Size();
+
+			// Distance-based penalty: closer enemy = bigger penalty
+			if (EnemyBlockRange > 0.f && DistToEnemy < EnemyBlockRange)
+			{
+				float DistFactor = 1.f - (DistToEnemy / EnemyBlockRange);
+				Result -= EnemyBlockPenalty * DistFactor;
+			}
+
+			// LOS penalty: can the enemy see this spawn point?
+			if (EnemyLOSBlockRange > 0.f && DistToEnemy < EnemyLOSBlockRange)
+			{
+				FVector SpawnEye = StartLoc + FVector(0.f, 0.f, 64.f);
+				FVector EnemyEye = EnemyLoc + FVector(0.f, 0.f, EnemyChar->BaseEyeHeight);
+
+				if (!GetWorld()->LineTraceTestByChannel(
+					SpawnEye, EnemyEye,
+					COLLISION_TRACE_WEAPONNOCHARACTER,
+					FCollisionQueryParams(NAME_CTFSpawnCheck, false)))
+				{
+					// Clear LOS from spawn to enemy — penalize
+					Result -= EnemyLOSPenalty;
 				}
 			}
 		}
@@ -414,15 +522,13 @@ void ANCPlusCTFGameMode::DefaultTimer()
 		}
 	}
 
-	// Port from AUTCTFGameMode: increase respawn delay in extended overtime
-	if (CTFGameState && CTFGameState->IsMatchInOvertime())
+	// Overtime respawn: use fixed OvertimeRespawnTime (default 6s) instead of
+	// Epic's extended overtime escalation that forced 10s respawns.
+	// Keeps overtime fast-paced and decisive.
+	if (CTFGameState && CTFGameState->IsMatchInOvertime() && OvertimeRespawnTime > 0.f)
 	{
-		float OvertimeElapsed = CTFGameState->ElapsedTime - CTFGameState->OvertimeStartTime;
-		if (OvertimeElapsed > TimeLimit)
-		{
-			RespawnWaitTime = 10.f;
-			CTFGameState->SetRespawnWaitTime(RespawnWaitTime);
-		}
+		RespawnWaitTime = OvertimeRespawnTime;
+		CTFGameState->SetRespawnWaitTime(RespawnWaitTime);
 	}
 }
 
@@ -524,15 +630,14 @@ bool ANCPlusCTFGameMode::CheckScore_Implementation(AUTPlayerState* Scorer)
 
 void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 {
-	if (GetWorld()->WorldType == EWorldType::PIE)
+	// Select the end-of-game replay before calling Super (which sets MatchEnded).
+	// Only call PickMostCoolMoments if instant replay is actually supported —
+	// standalone PIE and dedicated servers without demo recording will crash
+	// if we try to access replay data that was never initialized.
+	if (SupportsInstantReplay() && GetWorld()->DemoNetDriver != nullptr)
 	{
-		return;
+		PickMostCoolMoments();
 	}
-
-	// Select the end-of-game replay before calling Super (which sets MatchEnded)
-	// Call PickMostCoolMoments - advantage caps have 600.0 CoolFactor so they'll be selected.
-	// For blowouts, the regular "coolest" capture wins via its 200.0 + surrounding kills.
-	PickMostCoolMoments();
 
 	Super::EndGame(Winner, Reason);
 }

@@ -81,6 +81,10 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	WipeoutGracePeriod = 0.15f;
 	bTeamSharedDeathCounter = true;
 
+	// Link Gun beam teammate healing (5 HP/sec, capped at 100)
+	LinkHealPerSecond = 5.0f;
+	LinkHealMaxHP = 100;
+
 	// Wipeout runtime
 	Team0DeathCount = 0;
 	Team1DeathCount = 0;
@@ -93,8 +97,8 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	WinningKillerPawn = nullptr;
 	RoundWinningKillTime = 0.0f;
 
-	// Scoring
-	GoalScore = ScoreLimit;
+	// Scoring — default GoalScore, can be overridden via URL (?GoalScore=X) or BP subclass
+	GoalScore = 5;
 
 	// Overtime
 	bOvertimeEnabled = true;
@@ -175,7 +179,14 @@ void AUWipeoutGame::BP_SetMatchState_InProgress()
 void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
-	GoalScore = ScoreLimit;
+	// Super::InitGame already parses ?GoalScore=X from the URL.
+	// Only override if the URL explicitly provided a GoalScore option;
+	// otherwise keep the BP default (GoalScore set in constructor).
+	int32 URLGoalScore = UGameplayStatics::GetIntOption(Options, TEXT("GoalScore"), -1);
+	if (URLGoalScore >= 0)
+	{
+		GoalScore = URLGoalScore;
+	}
 	TimeLimit = 0; // We manage time per-round
 }
 
@@ -820,6 +831,7 @@ void AUWipeoutGame::StartNextRound()
 	PlayerDeathCounts.Empty();
 	CancelAllPendingRespawns();
 	SpawnProtectedUntil.Empty();
+	LinkHealAccumulator.Empty();
 	Team0RoundDamage = 0.0f;
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
@@ -998,6 +1010,20 @@ void AUWipeoutGame::DelayedEndGame(int32 WinnerTeamIndex, FName Reason)
 {
 	AUTPlayerState* BestPlayer = FindBestPlayerOnTeam(WinnerTeamIndex);
 	EndGame(BestPlayer, Reason);
+}
+
+
+void AUWipeoutGame::EndGame(AUTPlayerState* Winner, FName Reason)
+{
+	// Safety: only access replay data if demo recording is actually running.
+	// Standalone PIE and servers without demo recording will crash in
+	// PickMostCoolMoments if DemoNetDriver is null.
+	if (GetWorld()->DemoNetDriver != nullptr)
+	{
+		PickMostCoolMoments();
+	}
+
+	Super::EndGame(Winner, Reason);
 }
 
 
@@ -1314,6 +1340,54 @@ bool AUWipeoutGame::ModifyDamage_Implementation(int32& Damage, FVector& Momentum
 			{
 				// Protection expired, clean up
 				SpawnProtectedUntil.Remove(InjuredPS);
+			}
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Link Gun beam teammate healing
+	// When the beam (UTDMG_Link_Alt) hits a same-team player, heal them
+	// instead of dealing damage. Rate: ~5 HP/sec (beam ticks ~8x/sec at
+	// 0.12s interval, so we accumulate fractional healing per tick).
+	// Capped at 100 HP (normal max). Works with stock Link Gun.
+	// -----------------------------------------------------------------------
+	if (LinkHealPerSecond > 0.f && DamageType && Injured && InstigatedBy)
+	{
+		FString DTName = DamageType->GetName();
+		if (DTName.Contains(TEXT("Link_Alt")) || DTName.Contains(TEXT("LinkBeam")))
+		{
+			AUTCharacter* InjuredChar = Cast<AUTCharacter>(Injured);
+			AUTPlayerState* InjuredPS = InjuredChar ? Cast<AUTPlayerState>(InjuredChar->PlayerState) : nullptr;
+			AUTPlayerState* InstigatorPS = InstigatedBy ? Cast<AUTPlayerState>(InstigatedBy->PlayerState) : nullptr;
+
+			if (InjuredPS && InstigatorPS && InjuredPS != InstigatorPS
+				&& InjuredPS->Team && InstigatorPS->Team
+				&& InjuredPS->Team->TeamIndex == InstigatorPS->Team->TeamIndex)
+			{
+				// Same team — heal instead of damage
+				if (InjuredChar->Health < LinkHealMaxHP)
+				{
+					// Accumulate fractional healing per beam tick
+					// Beam fires every ~0.12s, so per-tick heal = HealPerSecond * 0.12
+					float HealPerTick = LinkHealPerSecond * 0.12f;
+					float& Accumulator = LinkHealAccumulator.FindOrAdd(InjuredPS);
+					Accumulator += HealPerTick;
+
+					int32 WholeHeal = FMath::FloorToInt(Accumulator);
+					if (WholeHeal > 0)
+					{
+						Accumulator -= (float)WholeHeal;
+						int32 ActualHeal = FMath::Min(WholeHeal, LinkHealMaxHP - InjuredChar->Health);
+						if (ActualHeal > 0)
+						{
+							InjuredChar->Health += ActualHeal;
+						}
+					}
+				}
+
+				// Block damage to teammate
+				Damage = 0;
+				return true;
 			}
 		}
 	}
