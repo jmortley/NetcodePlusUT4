@@ -74,27 +74,6 @@ float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 
 
 
-// ---------------------------------------------------------------------------
-// DisableFloorSlide — Zeroes movement component slide properties so CanSlide()
-// (non-virtual on AUTCharacter) effectively returns false.
-// Called from game mode RestartPlayer when bAllowFloorSlide is false.
-// ---------------------------------------------------------------------------
-void ATeamArenaCharacter::DisableFloorSlide()
-{
-	if (UTCharacterMovement)
-	{
-		UTCharacterMovement->MaxFloorSlideSpeed = 0.f;
-		UTCharacterMovement->MaxInitialFloorSlideSpeed = 0.f;
-		UTCharacterMovement->FloorSlideDuration = 0.f;
-		UTCharacterMovement->UpdateFloorSlide(false);
-		bFloorSlideDisabled = true;
-	}
-}
-
-
-// NCP Client Settings — temporarily disabled, investigating spawn freeze
-// TODO: Re-add LoadNCPClientSettings, GibExplosion, PlayDying, PlayFootstep
-//       once spawn issue is resolved
 
 bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling,
 	AUTCharacter* ShotInstigator, float PredictionTime)
@@ -615,14 +594,6 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	if (IsDead() && AmbientSoundComp && AmbientSoundComp->IsPlaying())
 	{
 		AmbientSoundComp->Stop();
-	}
-
-	// --- Floor slide suppression ---
-	// Player input can re-enable bWantsFloorSlide each frame via UpdateFloorSlide().
-	// Force it back to false every tick when the game mode disabled slides.
-	if (bFloorSlideDisabled && UTCharacterMovement && UTCharacterMovement->WantsFloorSlide())
-	{
-		UTCharacterMovement->UpdateFloorSlide(false);
 	}
 
 	// --- PERF: Skip base class spawn protection material loop ---
