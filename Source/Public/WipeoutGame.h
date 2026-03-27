@@ -468,6 +468,7 @@ public:
 	void Logout(AController* Exiting) override;
 
 	virtual void CallMatchStateChangeNotify() override;
+	virtual bool CheckRelevance_Implementation(AActor* Other) override;
 	virtual bool ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured, AController* InstigatedBy, const FHitResult& HitInfo, AActor* DamageCauser, TSubclassOf<UDamageType> DamageType) override;
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer) override;
 

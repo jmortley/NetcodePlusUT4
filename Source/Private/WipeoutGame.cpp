@@ -1301,6 +1301,23 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 // MODIFY DAMAGE — Spawn protection for mid-round respawns + intermission invuln
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// CheckRelevance — Remove unwanted pickups from the map (e.g. Redeemer)
+// ---------------------------------------------------------------------------
+bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
+{
+	if (Other)
+	{
+		FString ClassName = Other->GetClass()->GetName();
+		// Remove Redeemer pickups (both C++ and Blueprint variants)
+		if (ClassName.Contains(TEXT("Redeemer")))
+		{
+			return false; // Destroy the actor
+		}
+	}
+	return Super::CheckRelevance_Implementation(Other);
+}
+
 bool AUWipeoutGame::ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured,
 	AController* InstigatedBy, const FHitResult& HitInfo, AActor* DamageCauser, TSubclassOf<UDamageType> DamageType)
 {
