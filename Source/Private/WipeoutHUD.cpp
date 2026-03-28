@@ -137,7 +137,12 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 	for (APlayerState* PS : GS->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-		if (UTPS != nullptr && UTPS->Team != nullptr && !UTPS->bOnlySpectator && !UTPS->bIsInactive)
+		// Include players even if Team pointer is temporarily null (late replication).
+		// GetTeamNum() returns a valid index from the replicated byte even before
+		// the Team UObject pointer itself replicates. This prevents the "missing 8th
+		// player" bug where the last joiner's Team arrives a few frames late.
+		if (UTPS != nullptr && !UTPS->bOnlySpectator && !UTPS->bIsInactive
+			&& (UTPS->Team != nullptr || UTPS->GetTeamNum() != 255))
 		{
 			UTPS->SelectionOrder = (UTPS == HUDPS) ? -1 : UTPS->SpectatingIDTeam;
 			SortedPlayers.Add(UTPS);
@@ -217,13 +222,15 @@ void AWipeoutHUD::DrawHUD()
 				LiveScaling = 0.f;
 			}
 
-			if (UTPS->Team->TeamIndex == 0)
+			// Use GetTeamNum() which works even if Team pointer is null
+			uint8 TeamIdx = UTPS->GetTeamNum();
+			if (TeamIdx == 0)
 			{
 				RedPlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffset, PipSize);
 				XOffsetRed -= 1.1f * PipSize;
 			}
-			else
+			else if (TeamIdx == 1)
 			{
 				BluePlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffset, PipSize);
