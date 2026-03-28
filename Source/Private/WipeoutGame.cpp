@@ -1345,10 +1345,15 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 		return Super::CheckRelevance_Implementation(Other);
 	}
 
-	// --- Health pickups: remove all (health vials, health packs, etc.) ---
+	// --- Health pickups: remove all EXCEPT CandyPlaceholder (custom pickup) ---
 	if (Other->IsA(AUTPickupHealth::StaticClass()))
 	{
-		return false;
+		// Whitelist CandyPlaceholder — BP subclass of UTPickupHealth used for custom mechanics
+		FString ClassName = Other->GetClass()->GetName();
+		if (!ClassName.Contains(TEXT("Candy")))
+		{
+			return false;
+		}
 	}
 
 	// --- Standalone ammo pickups: remove (weapon bases handle ammo refill) ---
