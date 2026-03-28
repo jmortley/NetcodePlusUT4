@@ -505,16 +505,24 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	GConfig->Flush(false, ModIniPath);
 
-	// Close panel first — all Slate references must be dead before any
-	// ServerMutate that might trigger inventory changes on the same frame.
-	ClosePanel();
-
-	// Notify server of hitscan choice change (safe — no weapon swap, just updates
-	// the server's HitscanChoiceMap so the next spawn gives the right weapon).
-	if (PC)
+	// Defer the ServerMutate to next tick — calling it while Slate is still
+	// on the callstack causes a MallocBinned2 crash (use-after-free when the
+	// RPC processing triggers GC while the widget is mid-teardown).
+	FString HitscanCmd = FString::Printf(TEXT("sethitscan %s"), *CurrentHitscanChoice);
+	TWeakObjectPtr<AUTPlayerController> WeakPC = PC;
+	if (PC->GetWorld())
 	{
-		PC->ServerMutate(FString::Printf(TEXT("sethitscan %s"), *CurrentHitscanChoice));
+		PC->GetWorld()->GetTimerManager().SetTimerForNextTick([WeakPC, HitscanCmd]()
+		{
+			if (WeakPC.IsValid())
+			{
+				WeakPC->ServerMutate(HitscanCmd);
+			}
+		});
 	}
+
+	// Close panel after deferring — safe now since ServerMutate won't fire this frame
+	ClosePanel();
 }
 
 void SUTWeaponSkinSelector::RebuildWeaponList()

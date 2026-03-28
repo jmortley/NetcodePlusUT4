@@ -10,6 +10,8 @@
 #include "UTBot.h"
 #include "Engine/NetDriver.h"
 #include "Engine/NetConnection.h"
+#include "WipeoutDamageReplicator.h"
+#include "EngineUtils.h"
 
 UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -445,8 +447,30 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 	DrawText(FText::AsNumber(PlayerState->Deaths), XOffset + (Width * ColumnHeaderDeathsX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Damage
-	int32 Damage = int32(PlayerState->DamageDone);
+	// Damage — read from the replicated damage replicator if available,
+	// otherwise fall back to PlayerState (works on listen server / standalone)
+	int32 Damage = 0;
+	{
+		AWipeoutDamageReplicator* DmgRep = nullptr;
+		UWorld* World = GetWorld();
+		if (World)
+		{
+			for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
+			{
+				DmgRep = *It;
+				break;
+			}
+		}
+		if (DmgRep && PlayerState->UniqueId.IsValid())
+		{
+			Damage = DmgRep->GetDamageForPlayer(PlayerState->UniqueId.ToString());
+		}
+		else
+		{
+			// Fallback: direct read (works on server/listen server)
+			Damage = int32(PlayerState->DamageDone);
+		}
+	}
 	FLinearColor DmgColor = FLinearColor(1.f, 0.8f, 0.25f, 1.f);
 	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) DmgColor *= 0.6f;
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,

@@ -462,6 +462,10 @@ public:
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void BeginPlay() override;
+
+	/** Replicated damage broadcaster — spawned in BeginPlay, replicates DamageDone to clients */
+	UPROPERTY(Transient)
+	class AWipeoutDamageReplicator* DamageReplicator;
 	virtual void InitGameState() override;
 	virtual void HandleMatchHasStarted() override;
 	virtual void DefaultTimer() override;

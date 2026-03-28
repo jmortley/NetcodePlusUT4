@@ -16,6 +16,7 @@
 #include "UTPickupAmmo.h"
 #include "UTPickupInventory.h"
 #include "Engine/DemoNetDriver.h"
+#include "WipeoutDamageReplicator.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "GameFramework/HUD.h"
@@ -206,6 +207,14 @@ void AUWipeoutGame::BeginPlay()
 	}
 
 	PrecomputeSpawnLayouts();
+
+	// Spawn the damage replicator so clients can see DamageDone on the scoreboard
+	if (HasAuthority() && !DamageReplicator)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		DamageReplicator = GetWorld()->SpawnActor<AWipeoutDamageReplicator>(SpawnParams);
+	}
 }
 
 void AUWipeoutGame::InitGameState()
