@@ -95,6 +95,7 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	Team1DeathCount = 0;
 	Team0RoundDamage = 0.f;
 	Team1RoundDamage = 0.f;
+	bInSuddenDeath = false;
 	HighDamageCarryThreshold = 60.0f;
 
 	// Replay
@@ -327,7 +328,7 @@ void AUWipeoutGame::DefaultTimer()
 				// Disable all respawns. Dead players stay dead.
 				// Alive players fight it out until one team is fully eliminated.
 				// No auto-win, no tiebreaker — pure last-team-standing.
-				bAllowPlayerRespawns = false;
+				bInSuddenDeath = true;
 				PendingRespawns.Empty();
 
 				// If one team is already wiped, end the round
@@ -351,9 +352,8 @@ void AUWipeoutGame::DefaultTimer()
 			if (LastPS)
 			{
 				bTeam0LastAliveAnnounced = true;
-				int32 PendingT0 = CountPendingRespawnsOnTeam(0);
-				// Only announce if no one is about to respawn imminently
-				if (PendingT0 == 0)
+				// Only suppress LMS sound if a teammate respawns within 1 second
+				if (!HasImminentRespawnOnTeam(0, 1.0f))
 				{
 					BP_OnLastPlayerAlive(0, LastPS, Alive1);
 					OnClutchSituationStarted.Broadcast(LastPS, Alive1);
@@ -366,8 +366,7 @@ void AUWipeoutGame::DefaultTimer()
 			if (LastPS)
 			{
 				bTeam1LastAliveAnnounced = true;
-				int32 PendingT1 = CountPendingRespawnsOnTeam(1);
-				if (PendingT1 == 0)
+				if (!HasImminentRespawnOnTeam(1, 1.0f))
 				{
 					BP_OnLastPlayerAlive(1, LastPS, Alive0);
 					OnClutchSituationStarted.Broadcast(LastPS, Alive0);
@@ -457,6 +456,24 @@ int32 AUWipeoutGame::CountPendingRespawnsOnTeam(int32 TeamIndex) const
 	return Count;
 }
 
+bool AUWipeoutGame::HasImminentRespawnOnTeam(int32 TeamIndex, float WithinSeconds) const
+{
+	float Now = GetWorld()->GetTimeSeconds();
+	for (auto& Pair : PendingRespawns)
+	{
+		AUTPlayerState* PS = Pair.Key.Get();
+		if (PS && PS->Team && PS->Team->TeamIndex == TeamIndex)
+		{
+			float TimeRemaining = (Pair.Value.RespawnStartTime + Pair.Value.TotalRespawnTime) - Now;
+			if (TimeRemaining <= WithinSeconds)
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 
 void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 {
@@ -533,10 +550,10 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 		return;
 	}
 
-	// Time expired — no more respawns allowed (dead players stay dead in OT)
-	if (!bAllowPlayerRespawns)
+	// Sudden death — round timer expired, no more respawns allowed
+	if (bInSuddenDeath)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn blocked for %s — time expired, no respawns in OT"), *PS->PlayerName);
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn blocked for %s — sudden death active"), *PS->PlayerName);
 		PendingRespawns.Remove(PS);
 		return;
 	}
@@ -841,6 +858,7 @@ void AUWipeoutGame::StartNextRound()
 	CancelAllPendingRespawns();
 	SpawnProtectedUntil.Empty();
 	LinkHealAccumulator.Empty();
+	bInSuddenDeath = false;
 	Team0RoundDamage = 0.0f;
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();

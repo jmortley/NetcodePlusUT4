@@ -156,6 +156,10 @@ public:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	bool bRoundInProgress;
 
+	/** True when round timer expired — no more respawns, fight to the last */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
+	bool bInSuddenDeath;
+
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	int32 LastRoundWinningTeamIndex;
 
@@ -439,6 +443,9 @@ public:
 	/** Returns number of players currently waiting to respawn on a team */
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Wipeout|Respawn")
 	int32 CountPendingRespawnsOnTeam(int32 TeamIndex) const;
+
+	/** Returns true if any teammate will respawn within the given number of seconds */
+	bool HasImminentRespawnOnTeam(int32 TeamIndex, float WithinSeconds) const;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spectating")
 	bool useBPSpecFunction;
