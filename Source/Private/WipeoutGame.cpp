@@ -74,14 +74,13 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	useBPSpecFunction = false;
 
 	// Wipeout-specific defaults: escalating respawn delays
-	// Indexed by team death count. Diabotical-inspired curve.
-	// Death 0 = 2s, Death 1 = 4s, Death 2 = 8s, etc.
-	RespawnDelays.Add(2.0f);   // 1st team death
-	RespawnDelays.Add(4.0f);   // 2nd team death
-	RespawnDelays.Add(8.0f);   // 3rd team death
-	RespawnDelays.Add(14.0f);  // 4th team death
-	RespawnDelays.Add(22.0f);  // 5th team death
-	RespawnDelays.Add(30.0f);  // 6th+ team deaths (cap)
+	// Indexed by team death count. Configurable via BP subclass defaults.
+	RespawnDelays.Add(4.0f);   // 1st team death
+	RespawnDelays.Add(7.0f);   // 2nd team death
+	RespawnDelays.Add(11.0f);  // 3rd team death
+	RespawnDelays.Add(16.0f);  // 4th team death
+	RespawnDelays.Add(25.0f);  // 5th team death
+	RespawnDelays.Add(35.0f);  // 6th+ team deaths (cap)
 
 	RespawnProtectionTime = 1.5f;
 	WipeoutGracePeriod = 0.15f;
