@@ -323,7 +323,12 @@ void AUWipeoutGame::DefaultTimer()
 
 			if (RoundRemain == 0)
 			{
-				// Time is up. Check state.
+				// Time is up — disable all respawns immediately.
+				// Dead players stay dead, no overtime wave spawns.
+				bAllowPlayerRespawns = false;
+				PendingRespawns.Empty();
+
+				// Check state.
 				if (Alive0 > 0 && Alive1 > 0)
 				{
 					if (bOvertimeEnabled)
@@ -537,6 +542,14 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 	// Safety: round might have ended during our wait
 	if (!bRoundInProgress)
 	{
+		PendingRespawns.Remove(PS);
+		return;
+	}
+
+	// Time expired — no more respawns allowed (dead players stay dead in OT)
+	if (!bAllowPlayerRespawns)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn blocked for %s — time expired, no respawns in OT"), *PS->PlayerName);
 		PendingRespawns.Remove(PS);
 		return;
 	}
