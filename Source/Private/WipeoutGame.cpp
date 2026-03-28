@@ -2520,12 +2520,14 @@ void AUWipeoutGame::BP_RestartCurrentRound()
 	GetWorldTimerManager().ClearTimer(InitialWinCheckHandle);
 
 	bRoundInProgress = false;
+	bInSuddenDeath = false;
 	RoundEndTimeSeconds = 0.f;
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	Team0DeathCount = 0;
 	Team1DeathCount = 0;
 	PlayerDeathCounts.Empty();
 	SpawnProtectedUntil.Empty();
+	LinkHealAccumulator.Empty();
 
 	ResetPlayersForNewRound();
 	CleanupWorldForNewRound();
