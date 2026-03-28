@@ -323,33 +323,20 @@ void AUWipeoutGame::DefaultTimer()
 
 			if (RoundRemain == 0)
 			{
-				// Time is up — disable all respawns immediately.
-				// Dead players stay dead, no overtime wave spawns.
+				// Time is up — SUDDEN DEATH.
+				// Disable all respawns. Dead players stay dead.
+				// Alive players fight it out until one team is fully eliminated.
+				// No auto-win, no tiebreaker — pure last-team-standing.
 				bAllowPlayerRespawns = false;
 				PendingRespawns.Empty();
 
-				// Check state.
-				if (Alive0 > 0 && Alive1 > 0)
-				{
-					if (bOvertimeEnabled)
-					{
-						if (!OvertimeWaveTimerHandle.IsValid())
-						{
-							StartOvertime();
-						}
-					}
-					else
-					{
-						const int32 Winner = GetTiebreakWinnerByTeamHealth();
-						FTimerDelegate TimerDelegate;
-						TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), Winner, FName(TEXT("TimeTiebreak")));
-						GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.1f, false);
-					}
-				}
-				else
+				// If one team is already wiped, end the round
+				if (Alive0 == 0 || Alive1 == 0)
 				{
 					CheckWipeoutCondition();
 				}
+				// Otherwise: sudden death continues — CheckWipeoutCondition
+				// will be called on the next kill via ScoreKill
 				return;
 			}
 		}
