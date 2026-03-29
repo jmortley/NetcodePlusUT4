@@ -1123,6 +1123,17 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		if (MustSpectate(PC)) return;
 	}
 
+	// Guard: don't spawn until team is assigned. Without a team, the spawn
+	// falls through to the engine's default FindPlayerStart which can trigger
+	// "InWorld == NULL || InWorld == World" assertion when the client's world
+	// context isn't fully set up. The engine retries RestartPlayer on
+	// subsequent frames once team assignment completes.
+	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+	if (!PS || !PS->Team)
+	{
+		return;
+	}
+
 	if (GetMatchState() == MatchState::WaitingToStart)
 	{
 		Super::RestartPlayer(NewPlayer);
