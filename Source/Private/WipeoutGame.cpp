@@ -215,13 +215,15 @@ void AUWipeoutGame::BeginPlay()
 
 	PrecomputeSpawnLayouts();
 
-	// Spawn the damage replicator so clients can see DamageDone on the scoreboard
-	if (HasAuthority() && !DamageReplicator)
-	{
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.Owner = this;
-		DamageReplicator = GetWorld()->SpawnActor<AWipeoutDamageReplicator>(SpawnParams);
-	}
+	// TODO: Damage replicator temporarily disabled — suspected cause of
+	// "InWorld == NULL || InWorld == World" crash on client connect.
+	// The replicated actor may trigger package loading during EndLevelLoading.
+	// if (HasAuthority() && !DamageReplicator)
+	// {
+	// 	FActorSpawnParameters SpawnParams;
+	// 	SpawnParams.Owner = this;
+	// 	DamageReplicator = GetWorld()->SpawnActor<AWipeoutDamageReplicator>(SpawnParams);
+	// }
 }
 
 void AUWipeoutGame::InitGameState()
