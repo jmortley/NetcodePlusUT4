@@ -1148,7 +1148,7 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 
 	// Check if this player has ever spawned. If not, this is a late joiner
 	// who needs to be let into the game (or forced to spectate until next round).
-	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+	// (PS already obtained above for the team guard)
 	const bool bIsLateJoiner = (PS && PS->Deaths == 0 && PS->Kills == 0 && !PS->bOutOfLives);
 
 	// Allow spawn during: warmup, waiting to start, explicit respawn window
