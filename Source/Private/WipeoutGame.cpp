@@ -43,7 +43,7 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	bBalanceTeams = true;
 	bUseTeamStarts = false;
 	bAnnounceTeam = true;
-	bRecordReplays = true;
+	bRecordReplays = false; // Disabled — causes client crash on map load (see SupportsInstantReplay)
 
 	// Sound defaults
 	RedTeamVictorySound = nullptr;
@@ -142,7 +142,14 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 
 bool AUWipeoutGame::SupportsInstantReplay() const
 {
-	return true;
+	// Disabled: Epic's killcam system in UTGameState::ReceivedGameModeClass()
+	// starts a _DeathCam replay recording on map load when this is true.
+	// In Wipeout (respawn mode), this conflicts with the level loading and
+	// causes "InWorld == NULL || InWorld == World" assertion crash in Player.cpp.
+	// TeamArena (elimination) doesn't hit this because players stay dead.
+	// TODO: Re-enable once we can selectively disable death cam but keep
+	// end-of-round instant replay.
+	return false;
 }
 
 

@@ -62,13 +62,13 @@ void AUTPlusProj_ShockBall::PerformCombo(class AController* InstigatedBy, class 
 
 bool AUTPlusProj_ShockBall::ShouldIgnoreHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp)
 {
-	// If we're a fake projectile hitting another shock ball, ignore it locally.
-	// Let the server be authoritative on core-vs-core collisions.
-	//if (bFakeClientProjectile && Cast<AUTProj_ShockBall>(OtherActor))
-	//{
-	//	return true;
-	//}
-	if (bFakeClientProjectile && Cast<AUTProjectile>(OtherActor))
+	// Fake projectiles should NEVER process hits locally — the server handles
+	// all collision. Without this, the fake shock core hits a wall on the client,
+	// stops/embeds without exploding (fakes don't have authority to explode),
+	// and remains alive + combo-able. The combo RPC reaches the server where
+	// the real projectile may still be in flight (due to latency), giving a
+	// free wall-combo that shouldn't exist.
+	if (bFakeClientProjectile)
 	{
 		return true;
 	}
