@@ -576,6 +576,18 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
 void AUTWeaponFix::FireShot()
 {
+	// --- REPLAY PLAYBACK: skip all NC prediction/rewind, use stock behavior ---
+	// During instant replay, there's no server to do the rewind dance with.
+	// Fake projectile handoff, ServerStartFireFixed RPCs, and ClientHitChar
+	// prediction all break in replay context. Stock FireShot just spawns the
+	// visual projectile directly which is all replay needs.
+	UWorld* ReplayWorld = GetWorld();
+	if (ReplayWorld && ReplayWorld->DemoNetDriver && ReplayWorld->DemoNetDriver->IsPlaying())
+	{
+		Super::FireShot();
+		return;
+	}
+
 	// --- CLIENT SIDE ---
 	if (Role < ROLE_Authority)
 	{
@@ -3260,6 +3272,13 @@ bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum, int32 I
 
 void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum)
 {
+	// During replay playback, skip all rewind/prediction logic
+	UWorld* W = GetWorld();
+	if (W && W->DemoNetDriver && W->DemoNetDriver->IsPlaying())
+	{
+		return;
+	}
+
 	// Client-side hitsound prediction for projectile weapons
 	if (HitTarget != nullptr && Role != ROLE_Authority)
 	{
@@ -3456,6 +3475,23 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	{
 		ActiveServerProjectiles.RemoveAt(FoundIndex);
 	}
+}
+
+// =========================================================================
+// FIRING STATE GUARD — prevent crash when fire RPC arrives after owner death
+// =========================================================================
+
+void AUTWeaponFix::ServerUpdateFiringStates_Implementation(uint8 FireSettings)
+{
+	// Guard: if owner is dead/destroyed, discard the RPC.
+	// Race condition: player dies, weapon is being torn down, but a replicated
+	// ServerUpdateFiringStates was already in flight and arrives this frame.
+	// Base class dereferences UTOwner without null check → access violation.
+	if (!GetUTOwner() || GetUTOwner()->IsDead() || IsPendingKillPending())
+	{
+		return;
+	}
+	Super::ServerUpdateFiringStates_Implementation(FireSettings);
 }
 
 // =========================================================================

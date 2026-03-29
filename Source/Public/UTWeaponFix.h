@@ -157,6 +157,10 @@ public:
     void PutDownDelayed();
     virtual void FireInstantHit(bool bDealDamage, FHitResult* OutHit) override;
     virtual void FireShot() override;
+
+    // Guard against race condition: replicated fire RPC arrives after owner dies
+    // and weapon is being destroyed. The base class dereferences owner without null check.
+    virtual void ServerUpdateFiringStates_Implementation(uint8 FireSettings) override;
     virtual FRotator GetAdjustedAim_Implementation(FVector StartFireLoc) override;
     virtual void HitScanTrace(const FVector& StartLocation, const FVector& EndTrace,
         float TraceRadius, FHitResult& Hit, float PredictionTime) override;

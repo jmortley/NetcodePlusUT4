@@ -505,14 +505,20 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	GConfig->Flush(false, ModIniPath);
 
-	// Defer the ServerMutate to next tick — calling it while Slate is still
-	// on the callstack causes a MallocBinned2 crash (use-after-free when the
-	// RPC processing triggers GC while the widget is mid-teardown).
+	// Capture everything we need BEFORE closing the panel.
+	// ClosePanel() destroys this widget — no member access after it.
 	FString HitscanCmd = FString::Printf(TEXT("sethitscan %s"), *CurrentHitscanChoice);
 	TWeakObjectPtr<AUTPlayerController> WeakPC = PC;
-	if (PC->GetWorld())
+	UWorld* World = PC ? PC->GetWorld() : nullptr;
+
+	// Close panel FIRST — all Slate teardown completes synchronously here.
+	ClosePanel();
+
+	// AFTER panel is fully dead, defer the ServerMutate to next tick.
+	// No Slate widgets on the callstack, no risk of use-after-free.
+	if (World)
 	{
-		PC->GetWorld()->GetTimerManager().SetTimerForNextTick([WeakPC, HitscanCmd]()
+		World->GetTimerManager().SetTimerForNextTick([WeakPC, HitscanCmd]()
 		{
 			if (WeakPC.IsValid())
 			{
@@ -520,9 +526,6 @@ void SUTWeaponSkinSelector::SaveAndApply()
 			}
 		});
 	}
-
-	// Close panel after deferring — safe now since ServerMutate won't fire this frame
-	ClosePanel();
 }
 
 void SUTWeaponSkinSelector::RebuildWeaponList()
