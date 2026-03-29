@@ -215,15 +215,9 @@ void AUWipeoutGame::BeginPlay()
 
 	PrecomputeSpawnLayouts();
 
-	// TODO: Damage replicator temporarily disabled — suspected cause of
-	// "InWorld == NULL || InWorld == World" crash on client connect.
-	// The replicated actor may trigger package loading during EndLevelLoading.
-	// if (HasAuthority() && !DamageReplicator)
-	// {
-	// 	FActorSpawnParameters SpawnParams;
-	// 	SpawnParams.Owner = this;
-	// 	DamageReplicator = GetWorld()->SpawnActor<AWipeoutDamageReplicator>(SpawnParams);
-	// }
+	// Damage replicator is spawned in HandleMatchHasStarted instead of here —
+	// spawning bAlwaysRelevant actors during BeginPlay can trigger package
+	// loading on connecting clients before their world is fully set up.
 }
 
 void AUWipeoutGame::InitGameState()
@@ -239,6 +233,15 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	UE_LOG(LogGameMode, Warning, TEXT("=== Wipeout::HandleMatchHasStarted ==="));
 	Super::HandleMatchHasStarted();
 	bWarmupMode = false;
+
+	// Spawn the damage replicator now — all clients are fully loaded at this point.
+	// Spawning in BeginPlay was too early and could cause client crashes.
+	if (HasAuthority() && !DamageReplicator)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		DamageReplicator = GetWorld()->SpawnActor<AWipeoutDamageReplicator>(SpawnParams);
+	}
 }
 
 
