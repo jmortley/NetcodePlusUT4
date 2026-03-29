@@ -2967,7 +2967,7 @@ void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& Spa
 		FVector Forward = SpawnRotation.Vector();
 		FVector Down = FVector(0.0f, 0.0f, -1.0f);
 		SpawnLocation = UTOwner->CharacterCameraComponent->GetComponentLocation()
-			+ Forward * 25.0f   // Forward from camera
+			+ Forward * -10.0f   // Behind camera — pulls particles into body
 			+ Down * 35.0f;     // Stomach height — roughly halfway between eye and feet
 		return;
 	}

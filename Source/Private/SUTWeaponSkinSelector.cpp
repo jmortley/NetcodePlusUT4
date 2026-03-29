@@ -86,7 +86,7 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 								.OnClicked(this, &SUTWeaponSkinSelector::OnHitscanToggleClicked)
 								[
 									SAssignNew(HitscanValueText, STextBlock)
-									.Text(LOCTEXT("HitscanDefault", "Sniper Rifle"))
+									.Text(FText::FromString(CurrentHitscanChoice == TEXT("LG") ? TEXT("Lightning Gun") : TEXT("Sniper Rifle")))
 									.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 13))
 									.ColorAndOpacity(FLinearColor(0.3f, 0.9f, 0.3f, 1.0f))
 								]
@@ -462,20 +462,18 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	AUTPlayerController* PC = Cast<AUTPlayerController>(PlayerOwner->PlayerController);
 	if (!PC) return;
 
-	AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
-
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
+	// Save hide states and skin selections to config only — no server RPCs.
+	// Skins apply on next spawn; hide states are client-local (checked in BringUp).
 	for (const auto& W : Weapons)
 	{
-		// Save hide state — keyed by HideKey (class name) for per-weapon granularity
 		bool bHidden = HideState.Contains(W.HideKey) ? HideState[W.HideKey] : false;
 		AUTWeaponFix::HiddenWeaponsByTag.Add(W.HideKey, bHidden);
 
 		FString HideKeyStr = FString::Printf(TEXT("Hide.%s"), *W.HideKey.ToString());
 		GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *HideKeyStr, bHidden ? TEXT("1") : TEXT("0"), ModIniPath);
 
-		// Save and apply skin
 		if (W.bHasSkins)
 		{
 			int32 SkinIdx = SelectedSkinIndex.Contains(W.Tag) ? SelectedSkinIndex[W.Tag] : 0;
@@ -483,9 +481,7 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 			if (SkinIdx == 0)
 			{
-				// Default — clear skin
 				GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *SkinKey, TEXT(""), ModIniPath);
-				if (PS) PS->ServerReceiveWeaponSkin(TEXT(""));
 			}
 			else
 			{
@@ -494,7 +490,6 @@ void SUTWeaponSkinSelector::SaveAndApply()
 				{
 					FString SkinPath = (*Skins)[SkinIdx - 1]->GetPathName();
 					GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *SkinKey, *SkinPath, ModIniPath);
-					if (PS) PS->ServerReceiveWeaponSkin(SkinPath);
 				}
 			}
 		}
@@ -505,27 +500,10 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	GConfig->Flush(false, ModIniPath);
 
-	// Capture everything we need BEFORE closing the panel.
-	// ClosePanel() destroys this widget — no member access after it.
-	FString HitscanCmd = FString::Printf(TEXT("sethitscan %s"), *CurrentHitscanChoice);
-	TWeakObjectPtr<AUTPlayerController> WeakPC = PC;
-	UWorld* World = PC ? PC->GetWorld() : nullptr;
-
-	// Close panel FIRST — all Slate teardown completes synchronously here.
-	ClosePanel();
-
-	// AFTER panel is fully dead, defer the ServerMutate to next tick.
-	// No Slate widgets on the callstack, no risk of use-after-free.
-	if (World)
-	{
-		World->GetTimerManager().SetTimerForNextTick([WeakPC, HitscanCmd]()
-		{
-			if (WeakPC.IsValid())
-			{
-				WeakPC->ServerMutate(HitscanCmd);
-			}
-		});
-	}
+	// Send hitscan choice to server via console command — defers through the command pipeline
+	// instead of calling ServerMutate directly (which executes inline on listen servers).
+	FString MutateCmd = CurrentHitscanChoice == TEXT("LG") ? TEXT("mutate hsc_LG") : TEXT("mutate hsc_SR");
+	PC->ConsoleCommand(MutateCmd);
 }
 
 void SUTWeaponSkinSelector::RebuildWeaponList()
@@ -695,6 +673,12 @@ FReply SUTWeaponSkinSelector::OnApplyClicked()
 {
 	SaveAndApply();
 	RebuildWeaponList(); // Refresh checkbox visuals
+
+	if (StatusText.IsValid())
+	{
+		StatusText->SetText(FText::FromString(TEXT("Settings saved and applied.")));
+	}
+
 	return FReply::Handled();
 }
 

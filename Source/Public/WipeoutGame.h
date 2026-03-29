@@ -135,6 +135,16 @@ public:
 
 
 	// =======================================================================
+	// ABILITY (e.g. healing bubble — piggybacks on Epic's boost system)
+	// =======================================================================
+
+	/** Ability class given to players on every spawn (e.g. healing bubble).
+	 *  Leave None to disable abilities entirely. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Ability")
+	TSubclassOf<AUTInventory> SpawnAbilityClass;
+
+
+	// =======================================================================
 	// TIMING & ROUND RULES
 	// =======================================================================
 
@@ -502,6 +512,17 @@ protected:
 	void StartNextRound();
 	/** Reset all pickup respawn timers at round start (Belt/Amp get fresh cycle) */
 	void ResetPickupTimers();
+
+	// --- Shield Belt substitution ---
+	// If a map has no ShieldBelt pickup, the first Chest/Vest pickup is
+	// converted into a ShieldBelt so every map has belt control.
+	/** True once we've confirmed the map has a native ShieldBelt pickup */
+	bool bMapHasShieldBelt = false;
+	/** First Chest/Vest pickup found — kept alive until BeginPlay resolves it */
+	UPROPERTY(Transient)
+	AUTPickupInventory* PendingVestPickup = nullptr;
+	/** Resolve the vest→belt swap after all actors have been CheckRelevance'd */
+	void ResolveShieldBeltSubstitution();
 	void CheckWipeoutCondition();
 	void EndRoundForTeam(int32 WinnerTeamIndex, FName Reason);
 	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const;

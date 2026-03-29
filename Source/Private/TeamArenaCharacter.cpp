@@ -23,7 +23,7 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 {
     CachedPredictionPC = nullptr;
     bHasCachedPC = false;
-    NetUpdateFrequency = 100.0f;
+    NetUpdateFrequency = 200.0f;
     MinNetUpdateFrequency = 100.0f;
 	NetPriority = 10.0f;
     //MaxSavedPositionAge = 0.35f;

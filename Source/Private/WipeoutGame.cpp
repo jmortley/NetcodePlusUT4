@@ -7,6 +7,7 @@
 #include "UTPlayerState.h"
 #include "Sound/SoundBase.h"
 #include "UTPlayerController.h"
+#include "NPPlayerController.h"
 #include "UTTeamInfo.h"
 #include "UTTeamPlayerStart.h"
 #include "UTDroppedPickup.h"
@@ -37,6 +38,7 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	DisplayName = NSLOCTEXT("UTGameMode", "Wipeout", "Wipeout");
 	bTeamGame = true;
 	HUDClass = AWipeoutHUD::StaticClass();
+	PlayerControllerClass = ANPPlayerController::StaticClass();
 
 	// Team defaults
 	NumTeams = 2;
@@ -211,6 +213,10 @@ void AUWipeoutGame::BeginPlay()
 
 	PrecomputeSpawnLayouts();
 
+	// All actors have passed through CheckRelevance by now — resolve
+	// whether the stashed vest pickup should become a ShieldBelt.
+	ResolveShieldBeltSubstitution();
+
 	// Damage replicator is spawned in HandleMatchHasStarted instead of here —
 	// spawning bAlwaysRelevant actors during BeginPlay can trigger package
 	// loading on connecting clients before their world is fully set up.
@@ -222,6 +228,14 @@ void AUWipeoutGame::InitGameState()
 	// GameModeClass is left as-is — clients have NetcodePlus installed,
 	// so the base class sets it correctly and the scoreboard reads
 	// DisplayName from the actual game mode class (or BP subclass).
+
+	// Disable automatic boost recharge — charges come from spawning only
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	if (GS)
+	{
+		GS->BoostRechargeTime = 0.0f;
+		GS->BoostRechargeMaxCharges = 0;
+	}
 }
 
 void AUWipeoutGame::HandleMatchHasStarted()
@@ -717,8 +731,25 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 	// Clear life-damage tracking for the dead player
 	ClearLifeDamageFor(OtherPS);
 
-	// Start the escalating respawn timer
-	StartRespawnTimer(OtherPS);
+	if (bInSuddenDeath)
+	{
+		// Sudden death / overtime: no respawn. Force spectate after death cam.
+		FTimerHandle SuddenDeathSpecHandle;
+		FTimerDelegate SpecDelegate;
+		SpecDelegate.BindLambda([this, OtherPS]()
+		{
+			if (OtherPS && !OtherPS->IsPendingKill() && bRoundInProgress)
+			{
+				ForceTeamSpectate(OtherPS);
+			}
+		});
+		GetWorldTimerManager().SetTimer(SuddenDeathSpecHandle, SpecDelegate, SpectateDelay, false);
+	}
+	else
+	{
+		// Normal: start the escalating respawn timer
+		StartRespawnTimer(OtherPS);
+	}
 
 	// Check for wipeout with a brief grace period
 	// (prevents false triggers from simultaneous kills)
@@ -1178,6 +1209,17 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
 
+		// Grant ability charge on spawn (piggybacks on Epic's boost system)
+		if (SpawnAbilityClass && NewPlayer->GetPawn())
+		{
+			AUTPlayerState* SpawnPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+			if (SpawnPS)
+			{
+				SpawnPS->BoostClass = SpawnAbilityClass;
+				SpawnPS->SetRemainingBoosts(1);
+			}
+		}
+
 		if (!NewPlayer->GetPawn())
 		{
 			UE_LOG(LogGameMode, Warning, TEXT("Wipeout::RestartPlayer: FAILED to spawn pawn for %s"),
@@ -1416,6 +1458,7 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 		// Keep: ShieldBelt
 		if (InvName.Contains(TEXT("ShieldBelt")))
 		{
+			bMapHasShieldBelt = true;
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
@@ -1425,7 +1468,14 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
-		// Remove everything else (Thighpads, Chest, Helmet, Jumpboots, Invisibility, etc.)
+		// Stash the first Chest/Vest pickup — might become a ShieldBelt later
+		if (!PendingVestPickup && InvName.Contains(TEXT("Armor_Chest")))
+		{
+			PendingVestPickup = InvPickup;
+			return Super::CheckRelevance_Implementation(Other); // keep alive for now
+		}
+
+		// Remove everything else (Thighpads, extra Chests, Helmet, Jumpboots, Invisibility, etc.)
 		return false;
 	}
 
@@ -2615,4 +2665,65 @@ void AUWipeoutGame::ResetPickupTimers()
 
 		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: %s will spawn in %.0fs"), *ClassName, DelaySeconds);
 	}
+}
+
+
+// ─── ResolveShieldBeltSubstitution ──────────────────────────────────────
+// Called from BeginPlay after all actors have been CheckRelevance'd.
+// If the map had no ShieldBelt pickup, spawn a fresh ArmorBase pickup at the
+// vest's location with ShieldBelt as its inventory type (Showdown pattern).
+void AUWipeoutGame::ResolveShieldBeltSubstitution()
+{
+	if (bMapHasShieldBelt)
+	{
+		// Map already has a belt — destroy the stashed vest
+		if (PendingVestPickup && !PendingVestPickup->IsPendingKillPending())
+		{
+			UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has ShieldBelt — removing stashed vest pickup"));
+			PendingVestPickup->Destroy();
+		}
+		PendingVestPickup = nullptr;
+		return;
+	}
+
+	if (!PendingVestPickup)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has no ShieldBelt and no vest — nothing to substitute"));
+		return;
+	}
+
+	// No ShieldBelt on this map — spawn a fresh pickup at the vest's location
+	// (follows the same pattern as UTShowdownGame::CheckRelevance)
+	TSubclassOf<AUTPickupInventory> ArmorBaseClass = LoadClass<AUTPickupInventory>(
+		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/ArmorBase.ArmorBase_C"));
+	TSubclassOf<AUTInventory> ShieldBeltClass = LoadClass<AUTInventory>(
+		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_ShieldBelt.Armor_ShieldBelt_C"));
+
+	if (ArmorBaseClass && ShieldBeltClass)
+	{
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AUTPickupInventory* NewBelt = GetWorld()->SpawnActor<AUTPickupInventory>(
+			ArmorBaseClass,
+			PendingVestPickup->GetActorLocation(),
+			PendingVestPickup->GetActorRotation(),
+			Params);
+		if (NewBelt)
+		{
+			NewBelt->SetInventoryType(ShieldBeltClass);
+			bMapHasShieldBelt = true;
+			UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has no ShieldBelt — spawned belt at vest location %s"),
+				*PendingVestPickup->GetActorLocation().ToString());
+		}
+	}
+	else
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: Failed to load ArmorBase (%s) or ShieldBelt (%s) class"),
+			ArmorBaseClass ? TEXT("OK") : TEXT("FAIL"),
+			ShieldBeltClass ? TEXT("OK") : TEXT("FAIL"));
+	}
+
+	// Always destroy the old vest pickup
+	PendingVestPickup->Destroy();
+	PendingVestPickup = nullptr;
 }

@@ -318,7 +318,7 @@ bool ANCUTPlus::OverridePickupQuery_Implementation(APawn* Other, TSubclassOf<AUT
 	return Super::OverridePickupQuery_Implementation(Other, ItemClass, Pickup, bAllowPickup);
 }
 
-// ─── Mutate (sethitscan command) ───────────────────────────────────────
+// ─── Mutate (hitscan choice command) ──────────────────────────────────
 
 void ANCUTPlus::Mutate_Implementation(const FString& MutateString, APlayerController* Sender)
 {
@@ -329,11 +329,10 @@ void ANCUTPlus::Mutate_Implementation(const FString& MutateString, APlayerContro
 		return;
 	}
 
-	// Parse: "sethitscan sniper" or "sethitscan lg"
-	if (MutateString.StartsWith(TEXT("sethitscan "), ESearchCase::IgnoreCase))
+	// hsc_SR = Sniper Rifle, hsc_LG = Lightning Gun
+	if (MutateString.Equals(TEXT("hsc_SR"), ESearchCase::IgnoreCase) ||
+		MutateString.Equals(TEXT("hsc_LG"), ESearchCase::IgnoreCase))
 	{
-		FString Choice = MutateString.Mid(11);
-
 		AUTPlayerState* PS = Cast<AUTPlayerState>(Sender->PlayerState);
 		if (!PS || !PS->UniqueId.IsValid())
 		{
@@ -341,12 +340,9 @@ void ANCUTPlus::Mutate_Implementation(const FString& MutateString, APlayerContro
 		}
 
 		FString UniqueIdStr = PS->UniqueId.ToString();
-		EHitscanChoice NewChoice = EHitscanChoice::Sniper;
-
-		if (Choice.Equals(TEXT("LG"), ESearchCase::IgnoreCase))
-		{
-			NewChoice = EHitscanChoice::LG;
-		}
+		EHitscanChoice NewChoice = MutateString.Equals(TEXT("hsc_LG"), ESearchCase::IgnoreCase)
+			? EHitscanChoice::LG
+			: EHitscanChoice::Sniper;
 
 		PlayerHitscanChoices.Add(UniqueIdStr, NewChoice);
 

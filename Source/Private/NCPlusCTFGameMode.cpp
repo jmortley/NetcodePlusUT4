@@ -22,10 +22,12 @@
 #include "UTCharacterVoice.h"
 #include "UTCTFScoring.h"
 #include "UTFlag.h"
+#include "NPPlayerController.h"
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	PlayerControllerClass = ANPPlayerController::StaticClass();
 	IntermissionDuration = 30.f;
 	bAllowOvertime = true;
 	MercyScore = 5;
