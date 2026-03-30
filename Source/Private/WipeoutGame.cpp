@@ -38,7 +38,7 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	DisplayName = NSLOCTEXT("UTGameMode", "Wipeout", "Wipeout");
 	bTeamGame = true;
 	HUDClass = AWipeoutHUD::StaticClass();
-	PlayerControllerClass = ANPPlayerController::StaticClass();
+	//PlayerControllerClass = ANPPlayerController::StaticClass(); // Enable when ready to test debounce fix
 
 	// Team defaults
 	NumTeams = 2;
@@ -1182,11 +1182,16 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 	// (PS already obtained above for the team guard)
 	const bool bIsLateJoiner = (PS && PS->Deaths == 0 && PS->Kills == 0 && !PS->bOutOfLives);
 
+	// Detect reconnecting players: they have stats (played before) but no pawn
+	// (crashed/disconnected). Allow them to respawn mid-round unless sudden death.
+	const bool bIsReconnect = (PS && !NewPlayer->GetPawn() && bRoundInProgress
+		&& !bInSuddenDeath && (PS->Deaths > 0 || PS->Kills > 0));
+
 	// Allow spawn during: warmup, waiting to start, explicit respawn window
-	// (wave respawn), or for late joiners who have never spawned.
+	// (wave respawn), late joiners, or reconnecting players.
 	const bool bShouldAllowSpawn = (bAllowPlayerRespawns || bWarmupMode
 		|| GetMatchState() == MatchState::WaitingToStart
-		|| bIsLateJoiner);
+		|| bIsLateJoiner || bIsReconnect);
 
 	if (bShouldAllowSpawn)
 	{
@@ -1325,39 +1330,39 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 		return Super::ChoosePlayerStart_Implementation(Player);
 	}
 
-	APlayerStart* ChosenSpawn = nullptr;
+	// Pick the spawn with the fewest teammates nearby (distributes 1 player per spawn)
+	APlayerStart* BestSpawn = nullptr;
+	int32 BestCount = INT_MAX;
+	float CheckRadiusSq = 300.f * 300.f;
 
-	if (SelectedSpawns.Num() >= 2)
+	for (APlayerStart* Spawn : SelectedSpawns)
 	{
-		APlayerStart* SpawnA = SelectedSpawns[0];
-		APlayerStart* SpawnB = SelectedSpawns[1];
+		if (!Spawn) continue;
 
-		int32 CountAtA = 0, CountAtB = 0;
-		float CheckRadiusSq = 150.f * 150.f;
-
+		int32 NearbyCount = 0;
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
-			if (Pawn && Pawn->PlayerState)
+			if (!Pawn || !Pawn->PlayerState) continue;
+			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
+			if (OtherPS && OtherPS != PS && OtherPS->Team && OtherPS->Team->TeamIndex == TeamIndex)
 			{
-				AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
-				if (OtherPS && OtherPS != PS && OtherPS->Team && OtherPS->Team->TeamIndex == TeamIndex)
+				if (FVector::DistSquared(Pawn->GetActorLocation(), Spawn->GetActorLocation()) < CheckRadiusSq)
 				{
-					FVector PawnLoc = Pawn->GetActorLocation();
-					if (SpawnA && FVector::DistSquared(PawnLoc, SpawnA->GetActorLocation()) < CheckRadiusSq) CountAtA++;
-					else if (SpawnB && FVector::DistSquared(PawnLoc, SpawnB->GetActorLocation()) < CheckRadiusSq) CountAtB++;
+					NearbyCount++;
 				}
 			}
 		}
 
-		ChosenSpawn = (CountAtA <= CountAtB) ? SpawnA : SpawnB;
-	}
-	else
-	{
-		ChosenSpawn = SelectedSpawns[0];
+		if (NearbyCount < BestCount)
+		{
+			BestCount = NearbyCount;
+			BestSpawn = Spawn;
+			if (BestCount == 0) break; // Empty spawn found, use it immediately
+		}
 	}
 
-	return ChosenSpawn ? ChosenSpawn : Super::ChoosePlayerStart_Implementation(Player);
+	return BestSpawn ? BestSpawn : Super::ChoosePlayerStart_Implementation(Player);
 }
 
 
@@ -2033,72 +2038,131 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 		return;
 	}
 
-	const float SafetyThreshold = FMath::Min(MinimumEnemyHorizontalDistance, 2900.0f);
-
-	// 2v2 layouts
-	for (int32 a = 0; a < N; ++a)
+	// ── Cluster spawns into two geographic sides ──
+	// Find the two spawns that are furthest apart — these anchor each side.
+	int32 AnchorA = 0, AnchorB = 1;
+	float MaxDist = 0.f;
+	for (int32 i = 0; i < N; ++i)
 	{
-		for (int32 b = a + 1; b < N; ++b)
+		for (int32 j = i + 1; j < N; ++j)
 		{
-			float T0Sep = (AllSpawnPointsList[a]->GetActorLocation() - AllSpawnPointsList[b]->GetActorLocation()).Size2D();
-			if (T0Sep < MinTeammateSeparation2D || T0Sep > MaxTeammateSeparation2D) continue;
-
-			for (int32 c = 0; c < N; ++c)
+			float D = (AllSpawnPointsList[i]->GetActorLocation() - AllSpawnPointsList[j]->GetActorLocation()).Size2D();
+			if (D > MaxDist)
 			{
-				if (c == a || c == b) continue;
-				for (int32 d = c + 1; d < N; ++d)
-				{
-					if (d == a || d == b) continue;
-
-					float T1Sep = (AllSpawnPointsList[c]->GetActorLocation() - AllSpawnPointsList[d]->GetActorLocation()).Size2D();
-					if (T1Sep < MinTeammateSeparation2D || T1Sep > MaxTeammateSeparation2D) continue;
-
-					float MinCross = FLT_MAX;
-					MinCross = FMath::Min(MinCross, (AllSpawnPointsList[a]->GetActorLocation() - AllSpawnPointsList[c]->GetActorLocation()).Size2D());
-					MinCross = FMath::Min(MinCross, (AllSpawnPointsList[a]->GetActorLocation() - AllSpawnPointsList[d]->GetActorLocation()).Size2D());
-					MinCross = FMath::Min(MinCross, (AllSpawnPointsList[b]->GetActorLocation() - AllSpawnPointsList[c]->GetActorLocation()).Size2D());
-					MinCross = FMath::Min(MinCross, (AllSpawnPointsList[b]->GetActorLocation() - AllSpawnPointsList[d]->GetActorLocation()).Size2D());
-
-					if (MinCross < SafetyThreshold) continue;
-
-					FWipeoutSpawnLayout Layout;
-					Layout.T0_Primary = AllSpawnPointsList[a];
-					Layout.T0_Secondary = AllSpawnPointsList[b];
-					Layout.T1_Primary = AllSpawnPointsList[c];
-					Layout.T1_Secondary = AllSpawnPointsList[d];
-					Layout.MinCrossDistance2D = MinCross;
-					Layout.T0Separation = T0Sep;
-					Layout.T1Separation = T1Sep;
-					Layout.UsageCount = 0;
-					Layout.QualityScore = MinCross + FMath::Min(T0Sep, 1500.0f) * 0.3f + FMath::Min(T1Sep, 1500.0f) * 0.3f;
-
-					ValidLayouts_2v2.Add(Layout);
-				}
+				MaxDist = D;
+				AnchorA = i;
+				AnchorB = j;
 			}
 		}
 	}
 
-	// 1v1 (stack) layouts
-	const float StackSafetyThreshold = FMath::Max(SafetyThreshold, MinimumStackSpawnDistance2D);
-	for (int32 a = 0; a < N; ++a)
+	// Assign every spawn to the closer anchor (two clusters = two sides)
+	TArray<APlayerStart*> SideA, SideB;
+	FVector LocA = AllSpawnPointsList[AnchorA]->GetActorLocation();
+	FVector LocB = AllSpawnPointsList[AnchorB]->GetActorLocation();
+
+	for (int32 i = 0; i < N; ++i)
 	{
-		for (int32 b = 0; b < N; ++b)
+		FVector Loc = AllSpawnPointsList[i]->GetActorLocation();
+		float DistToA = (Loc - LocA).Size2D();
+		float DistToB = (Loc - LocB).Size2D();
+		if (DistToA <= DistToB)
+			SideA.Add(AllSpawnPointsList[i]);
+		else
+			SideB.Add(AllSpawnPointsList[i]);
+	}
+
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout spawn clustering: %d on side A, %d on side B (anchor dist %.0f)"),
+		SideA.Num(), SideB.Num(), MaxDist);
+
+	// ── Generate layouts: pick SpawnsPerTeam from each side ──
+	// SpawnsPerTeam = 4 to give each player a unique spawn (4v4 max)
+	const int32 SpawnsPerTeam = 4;
+	const int32 SpawnsA = FMath::Min(SideA.Num(), SpawnsPerTeam);
+	const int32 SpawnsB = FMath::Min(SideB.Num(), SpawnsPerTeam);
+
+	if (SpawnsA == 0 || SpawnsB == 0)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: One side has no spawns (A=%d, B=%d) — falling back to 1v1 only"), SpawnsA, SpawnsB);
+	}
+
+	// Sort each side by distance from the other side's centroid (prefer "deeper" spawns)
+	auto SortByDistFromCentroid = [](TArray<APlayerStart*>& Side, const FVector& OtherCentroid)
+	{
+		Side.Sort([&OtherCentroid](const APlayerStart& A, const APlayerStart& B)
 		{
-			if (b == a) continue;
-			float Dist = (AllSpawnPointsList[a]->GetActorLocation() - AllSpawnPointsList[b]->GetActorLocation()).Size2D();
-			if (Dist < StackSafetyThreshold) continue;
+			return (A.GetActorLocation() - OtherCentroid).Size2D() > (B.GetActorLocation() - OtherCentroid).Size2D();
+		});
+	};
+
+	// Compute centroids
+	FVector CentroidA = FVector::ZeroVector, CentroidB = FVector::ZeroVector;
+	for (APlayerStart* S : SideA) CentroidA += S->GetActorLocation();
+	for (APlayerStart* S : SideB) CentroidB += S->GetActorLocation();
+	if (SideA.Num() > 0) CentroidA /= SideA.Num();
+	if (SideB.Num() > 0) CentroidB /= SideB.Num();
+
+	SortByDistFromCentroid(SideA, CentroidB);
+	SortByDistFromCentroid(SideB, CentroidA);
+
+	// Build the main layout (takes top N spawns from each sorted side)
+	if (SpawnsA >= 1 && SpawnsB >= 1)
+	{
+		FWipeoutSpawnLayout Layout;
+		for (int32 i = 0; i < SpawnsA; ++i) Layout.T0_Spawns.Add(SideA[i]);
+		for (int32 i = 0; i < SpawnsB; ++i) Layout.T1_Spawns.Add(SideB[i]);
+
+		// MinCross = minimum distance between any T0 spawn and any T1 spawn
+		float MinCross = FLT_MAX;
+		for (APlayerStart* S0 : Layout.T0_Spawns)
+		{
+			for (APlayerStart* S1 : Layout.T1_Spawns)
+			{
+				MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
+			}
+		}
+		Layout.MinCrossDistance2D = MinCross;
+		Layout.QualityScore = MinCross;
+		Layout.UsageCount = 0;
+		ValidLayouts_2v2.Add(Layout);
+
+		// Generate a few more layouts by shuffling which spawns from each side are picked
+		// (if sides have more spawns than SpawnsPerTeam, try alternate selections)
+		for (int32 Variant = 1; Variant < FMath::Min(SideA.Num(), 6); ++Variant)
+		{
+			FWipeoutSpawnLayout VLayout;
+			// Rotate: shift the starting index for side A
+			for (int32 i = 0; i < SpawnsA; ++i) VLayout.T0_Spawns.Add(SideA[(i + Variant) % SideA.Num()]);
+			for (int32 i = 0; i < SpawnsB; ++i) VLayout.T1_Spawns.Add(SideB[i]);
+
+			MinCross = FLT_MAX;
+			for (APlayerStart* S0 : VLayout.T0_Spawns)
+			{
+				for (APlayerStart* S1 : VLayout.T1_Spawns)
+				{
+					MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
+				}
+			}
+			VLayout.MinCrossDistance2D = MinCross;
+			VLayout.QualityScore = MinCross;
+			VLayout.UsageCount = 0;
+			ValidLayouts_2v2.Add(VLayout);
+		}
+	}
+
+	// 1v1 layouts (single spawn per team, maximum cross distance)
+	for (int32 a = 0; a < SideA.Num(); ++a)
+	{
+		for (int32 b = 0; b < SideB.Num(); ++b)
+		{
+			float Dist = (SideA[a]->GetActorLocation() - SideB[b]->GetActorLocation()).Size2D();
 
 			FWipeoutSpawnLayout Layout;
-			Layout.T0_Primary = AllSpawnPointsList[a];
-			Layout.T0_Secondary = nullptr;
-			Layout.T1_Primary = AllSpawnPointsList[b];
-			Layout.T1_Secondary = nullptr;
+			Layout.T0_Spawns.Add(SideA[a]);
+			Layout.T1_Spawns.Add(SideB[b]);
 			Layout.MinCrossDistance2D = Dist;
-			Layout.T0Separation = 0.f;
-			Layout.T1Separation = 0.f;
-			Layout.UsageCount = 0;
 			Layout.QualityScore = Dist;
-
+			Layout.UsageCount = 0;
 			ValidLayouts_1v1.Add(Layout);
 		}
 	}
@@ -2106,7 +2170,7 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 	ValidLayouts_2v2.Sort([](const FWipeoutSpawnLayout& A, const FWipeoutSpawnLayout& B) { return A.QualityScore > B.QualityScore; });
 	ValidLayouts_1v1.Sort([](const FWipeoutSpawnLayout& A, const FWipeoutSpawnLayout& B) { return A.QualityScore > B.QualityScore; });
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout spawn precompute: %d 2v2, %d 1v1 layouts"), ValidLayouts_2v2.Num(), ValidLayouts_1v1.Num());
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout spawn precompute: %d team, %d 1v1 layouts"), ValidLayouts_2v2.Num(), ValidLayouts_1v1.Num());
 }
 
 
@@ -2143,21 +2207,17 @@ void AUWipeoutGame::SelectSpawnLayoutForRound()
 	FWipeoutSpawnLayout& Chosen = Pool[BestIndex];
 	Chosen.UsageCount++;
 
+	// Swap team sides on odd rounds for fairness
 	bool bSwapTeams = (TotalRoundsPlayed % 2 == 1);
+	const TArray<APlayerStart*>& T0Source = bSwapTeams ? Chosen.T1_Spawns : Chosen.T0_Spawns;
+	const TArray<APlayerStart*>& T1Source = bSwapTeams ? Chosen.T0_Spawns : Chosen.T1_Spawns;
 
-	APlayerStart* FinalT0_P = bSwapTeams ? Chosen.T1_Primary   : Chosen.T0_Primary;
-	APlayerStart* FinalT0_S = bSwapTeams ? Chosen.T1_Secondary : Chosen.T0_Secondary;
-	APlayerStart* FinalT1_P = bSwapTeams ? Chosen.T0_Primary   : Chosen.T1_Primary;
-	APlayerStart* FinalT1_S = bSwapTeams ? Chosen.T0_Secondary : Chosen.T1_Secondary;
+	Team0SelectedSpawns = T0Source;
+	Team1SelectedSpawns = T1Source;
 
-	Team0SelectedSpawns.Add(FinalT0_P);
-	if (FinalT0_S) Team0SelectedSpawns.Add(FinalT0_S);
-
-	Team1SelectedSpawns.Add(FinalT1_P);
-	if (FinalT1_S) Team1SelectedSpawns.Add(FinalT1_S);
-
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout round %d: Layout idx %d, CrossDist %.0f"),
-		TotalRoundsPlayed, BestIndex, Chosen.MinCrossDistance2D);
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout round %d: Layout idx %d, CrossDist %.0f, T0 spawns=%d, T1 spawns=%d"),
+		TotalRoundsPlayed, BestIndex, Chosen.MinCrossDistance2D,
+		Team0SelectedSpawns.Num(), Team1SelectedSpawns.Num());
 }
 
 

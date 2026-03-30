@@ -25,29 +25,20 @@ struct FWipeoutSpawnLayout
 {
 	GENERATED_BODY()
 
+	/** Spawn points for Team 0 (up to 4, one per player) */
 	UPROPERTY()
-	APlayerStart* T0_Primary;
+	TArray<APlayerStart*> T0_Spawns;
 
+	/** Spawn points for Team 1 (up to 4, one per player) */
 	UPROPERTY()
-	APlayerStart* T0_Secondary;
-
-	UPROPERTY()
-	APlayerStart* T1_Primary;
-
-	UPROPERTY()
-	APlayerStart* T1_Secondary;
+	TArray<APlayerStart*> T1_Spawns;
 
 	float MinCrossDistance2D;
 	float QualityScore;
-	float T0Separation;
-	float T1Separation;
 	int32 UsageCount;
 
 	FWipeoutSpawnLayout()
-		: T0_Primary(nullptr), T0_Secondary(nullptr)
-		, T1_Primary(nullptr), T1_Secondary(nullptr)
-		, MinCrossDistance2D(0.f), QualityScore(0.f)
-		, T0Separation(0.f), T1Separation(0.f)
+		: MinCrossDistance2D(0.f), QualityScore(0.f)
 		, UsageCount(0)
 	{
 	}

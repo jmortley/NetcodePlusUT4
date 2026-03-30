@@ -27,7 +27,7 @@
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	PlayerControllerClass = ANPPlayerController::StaticClass();
+	//PlayerControllerClass = ANPPlayerController::StaticClass(); // Enable when ready to test debounce fix
 	IntermissionDuration = 30.f;
 	bAllowOvertime = true;
 	MercyScore = 5;
