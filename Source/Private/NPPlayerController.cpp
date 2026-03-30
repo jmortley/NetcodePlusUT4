@@ -1,10 +1,14 @@
 // NPPlayerController.cpp
 #include "NPPlayerController.h"
 #include "UnrealTournament.h"
+#include "UTPlayerCameraManager.h"
 
 ANPPlayerController::ANPPlayerController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	// Explicitly set the CameraManager to prevent "SpawnActor failed" crashes
+	// when the editor creates the CDO and the parent's reference doesn't resolve.
+	PlayerCameraManagerClass = AUTPlayerCameraManager::StaticClass();
 }
 
 void ANPPlayerController::PlayerTick(float DeltaTime)
