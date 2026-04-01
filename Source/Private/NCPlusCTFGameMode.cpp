@@ -135,6 +135,16 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 
 float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 {
+	// Small games (1v1, 2v2): use Epic's default spawn system only.
+	// Custom flag + enemy penalties make all spawns equally bad when there
+	// aren't enough spawn points to avoid both flags and enemies.
+	// Epic's base system handles small games well (last-killer avoidance,
+	// 0.2f score floor, ChoosePlayerStart fallback).
+	if (GameSession && GameSession->MaxPlayers <= 4)
+	{
+		return Super::RatePlayerStart(P, Player);
+	}
+
 	float Result = Super::RatePlayerStart(P, Player);
 
 	// Use engine accessor GetFlagBase() instead of directly reading FlagBases.
@@ -279,7 +289,8 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 
 float ANCPlusCTFGameMode::GetTravelDelay()
 {
-	return Super::GetTravelDelay() + (CTFGameState ? FMath::Max(6.f, 1.f + CTFGameState->GetScoringPlays().Num()) : 6.f);
+	// GetScoringPlays() is inline and unsafe across the DLL boundary — use a safe fallback
+	return Super::GetTravelDelay() + 6.f;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -309,7 +320,7 @@ bool ANCPlusCTFGameMode::ShouldEnterAdvantage() const
 	}
 
 	// Halftime advantage: always allowed regardless of score
-	if (!CTFGameState->bSecondHalf)
+	if (!NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		return true;
 	}
@@ -328,10 +339,10 @@ bool ANCPlusCTFGameMode::ShouldEnterAdvantage() const
 
 void ANCPlusCTFGameMode::EnterAdvantage()
 {
-	CTFGameState->bPlayingAdvantage = true;
+	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), true);
 	// 255 = both teams have advantage (not just one specific team)
-	CTFGameState->AdvantageTeamIndex = 255;
-	CTFGameState->bStopGameClock = true;
+	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
+	NCPlusReflection::SetBool(CTFGameState, TEXT("bStopGameClock"), true);
 
 	AdvantageTimeRemaining = AdvantageMaxDuration;
 	bGracePeriodActive = false;
@@ -386,12 +397,12 @@ bool ANCPlusCTFGameMode::CheckAdvantage()
 void ANCPlusCTFGameMode::EndOfHalf()
 {
 	// Clear advantage state
-	CTFGameState->bPlayingAdvantage = false;
-	CTFGameState->AdvantageTeamIndex = 255;
+	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);
+	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
 
-	if (CTFGameState->bSecondHalf)
+	if (NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		AUTTeamInfo* WinningTeam = CTFGameState->FindLeadingTeam();
 		if (WinningTeam != nullptr)
@@ -427,7 +438,7 @@ void ANCPlusCTFGameMode::CheckGameTime()
 		return;
 	}
 
-	if (CTFGameState->GetRemainingTime() <= 0)
+	if (NCPlusReflection::GetInt(CTFGameState, TEXT("RemainingTime")) <= 0)
 	{
 		// ── Overtime: golden cap, first score wins ──
 		if (CTFGameState->IsMatchInOvertime())
@@ -442,14 +453,14 @@ void ANCPlusCTFGameMode::CheckGameTime()
 		}
 
 		// ── Already playing advantage ──
-		if (CTFGameState->bPlayingAdvantage)
+		if (NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")))
 		{
 			// Advantage timer ran out and grace period also expired (or flags still held)
 			// This is handled by DefaultTimer ticking down and calling EndOfHalf
 			// But also stop the game clock if it isn't already
-			if (!CTFGameState->bStopGameClock)
+			if (!NCPlusReflection::GetBool(CTFGameState, TEXT("bStopGameClock")))
 			{
-				CTFGameState->bStopGameClock = true;
+				NCPlusReflection::SetBool(CTFGameState, TEXT("bStopGameClock"), true);
 			}
 			return;
 		}
@@ -457,7 +468,7 @@ void ANCPlusCTFGameMode::CheckGameTime()
 		// ── Time just expired, not yet in advantage ──
 		if (bAllowOvertime && !UTGameState->IsMatchInOvertime())
 		{
-			UTGameState->bStopGameClock = true;
+			NCPlusReflection::SetBool(UTGameState, TEXT("bStopGameClock"), true);
 		}
 
 		if (ShouldEnterAdvantage())
@@ -469,7 +480,7 @@ void ANCPlusCTFGameMode::CheckGameTime()
 			EndOfHalf();
 		}
 	}
-	else if (CTFGameState->bPlayingAdvantage)
+	else if (NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")))
 	{
 		// Clock is still running but advantage is active - check if it should end
 		// This handles the case where advantage was entered and something changed
@@ -485,7 +496,7 @@ void ANCPlusCTFGameMode::DefaultTimer()
 	Super::DefaultTimer();
 
 	// Tick advantage and grace period timers (DefaultTimer fires every second)
-	if (CTFGameState && CTFGameState->bPlayingAdvantage && CTFGameState->IsMatchInProgress())
+	if (CTFGameState && NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")) && CTFGameState->IsMatchInProgress())
 	{
 		if (bGracePeriodActive)
 		{
@@ -558,7 +569,7 @@ void ANCPlusCTFGameMode::ScoreObject_Implementation(AUTCarriedObject* GameObject
 		if (Reason == FName("SentHome"))
 		{
 			// Flag was returned during advantage
-			if (CTFGameState->bPlayingAdvantage)
+			if (NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")))
 			{
 				if (!IsAnyFlagHeld() && !bGracePeriodActive)
 				{
@@ -585,7 +596,7 @@ void ANCPlusCTFGameMode::HandleFlagCapture(AUTCharacter* HolderPawn, AUTPlayerSt
 		CheckScore(Holder);
 
 		// Cap during advantage ends the half immediately
-		if (CTFGameState->bPlayingAdvantage && !CTFGameState->HasMatchEnded())
+		if (NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")) && !CTFGameState->HasMatchEnded())
 		{
 			// Track for replay: advantage cap is the "coolest" moment
 			LastAdvantageCapPlayer = Holder;
@@ -649,7 +660,7 @@ void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 void ANCPlusCTFGameMode::HandleMatchHasStarted()
 {
 	// Only call super (which starts replay recording, announces match, etc.) on first half
-	if (!CTFGameState->bSecondHalf)
+	if (!NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
 	}
@@ -660,8 +671,8 @@ void ANCPlusCTFGameMode::HandleMatchIntermission()
 	Super::HandleMatchIntermission();
 
 	// Clear advantage state for halftime
-	CTFGameState->bPlayingAdvantage = false;
-	CTFGameState->AdvantageTeamIndex = 255;
+	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);
+	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
 	bGracePeriodActive = false;
 	bAdvantageCapEndedPeriod = false;
 
@@ -670,10 +681,10 @@ void ANCPlusCTFGameMode::HandleMatchIntermission()
 
 void ANCPlusCTFGameMode::HandleExitingIntermission()
 {
-	const bool bWasSecondHalf = CTFGameState->bSecondHalf;
+	const bool bWasSecondHalf = NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf"));
 
 	// Set before calling super so HandleMatchHasStarted can read it
-	CTFGameState->bSecondHalf = true;
+	NCPlusReflection::SetBool(CTFGameState, TEXT("bSecondHalf"), true);
 
 	Super::HandleExitingIntermission();
 
@@ -689,14 +700,14 @@ void ANCPlusCTFGameMode::HandleEnteringOvertime()
 {
 	CTFGameState->SetTimeLimit(6000);
 	SetMatchState(MatchState::MatchIsInOvertime);
-	CTFGameState->bPlayingAdvantage = false;
+	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);
 	bGracePeriodActive = false;
 }
 
 void ANCPlusCTFGameMode::HandleMatchInOvertime()
 {
 	BroadcastLocalized(this, UUTCTFMajorMessage::StaticClass(), 12, nullptr, nullptr, nullptr);
-	CTFGameState->bPlayingAdvantage = false;
+	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);
 	bGracePeriodActive = false;
 }
 

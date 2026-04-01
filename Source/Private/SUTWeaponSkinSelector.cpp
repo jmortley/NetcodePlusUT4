@@ -9,6 +9,8 @@
 #include "UTWeaponSkin.h"
 #include "UTProfileSettings.h"
 #include "UTGameplayStatics.h"
+#include "UTGameMode.h"
+#include "UTGameState.h"
 #include "AssetRegistryModule.h"
 
 #define LOCTEXT_NAMESPACE "WeaponSkins"
@@ -229,6 +231,36 @@ void SUTWeaponSkinSelector::GatherWeapons()
 
 				Weapons.Add(Info);
 				bHasInventory = true;
+			}
+		}
+	}
+
+	// In instagib, filter to only show weapons from the game mode's DefaultInventory.
+	// Prevents showing NC+ weapons that the mutator chain added but aren't part of the loadout.
+	if (bHasInventory && PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		AUTGameState* GS = PlayerOwner->PlayerController->GetWorld()->GetGameState<AUTGameState>();
+		if (GS)
+		{
+			TSubclassOf<AGameMode> GMClass = GS->GetGameModeClass();
+			if (GMClass)
+			{
+				AUTGameMode* GMCDO = GMClass->GetDefaultObject<AUTGameMode>();
+				if (GMCDO && GMCDO->bIsInstagib && GMCDO->DefaultInventory.Num() > 0)
+				{
+					Weapons = Weapons.FilterByPredicate([&](const FNetcodePlusWeaponInfo& W)
+					{
+						if (!W.WeaponClass) return false;
+						for (const TSubclassOf<AUTInventory>& InvClass : GMCDO->DefaultInventory)
+						{
+							if (InvClass && W.WeaponClass->IsChildOf(InvClass))
+							{
+								return true;
+							}
+						}
+						return false;
+					});
+				}
 			}
 		}
 	}

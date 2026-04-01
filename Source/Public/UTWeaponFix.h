@@ -133,10 +133,14 @@ public:
     virtual void BeginPlay() override;
     static int32 GetTargetProjectileTickRate();
 
-    /** Per-weapon hide state — keyed by WeaponSkinCustomizationTag.
+    /** Per-weapon hide state — keyed by class name.
      *  Set via "weaponskins" menu or "weaponhand hidden/show" console command.
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
     static TMap<FName, bool> HiddenWeaponsByTag;
+
+    /** Saved skin asset paths — keyed by WeaponSkinCustomizationTag.
+     *  Loaded from Mod.ini, applied in BringUp(). */
+    static TMap<FName, FString> SavedSkinPaths;
 
     /** Load weapon settings (skins + hide state) from Mod.ini. Called once on first BringUp. */
     static void LoadWeaponSettings();

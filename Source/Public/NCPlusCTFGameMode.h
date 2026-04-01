@@ -6,6 +6,40 @@
 #include "UTCTFBaseGame.h"
 #include "NCPlusCTFGameMode.generated.h"
 
+// Safe property access across DLL boundary — uses runtime UProperty reflection
+// instead of direct member access which has wrong offsets due to layout mismatch.
+// The plugin DLL's compiled class layout differs from the engine DLL's, so
+// CTFGameState->bPlayingAdvantage reads garbage. These helpers do runtime name
+// lookup via FindField which always returns the correct offset.
+namespace NCPlusReflection
+{
+	inline bool GetBool(UObject* Obj, const TCHAR* PropName)
+	{
+		UBoolProperty* Prop = FindField<UBoolProperty>(Obj->GetClass(), PropName);
+		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : false;
+	}
+	inline void SetBool(UObject* Obj, const TCHAR* PropName, bool Value)
+	{
+		UBoolProperty* Prop = FindField<UBoolProperty>(Obj->GetClass(), PropName);
+		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
+	}
+	inline uint8 GetByte(UObject* Obj, const TCHAR* PropName)
+	{
+		UByteProperty* Prop = FindField<UByteProperty>(Obj->GetClass(), PropName);
+		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
+	}
+	inline void SetByte(UObject* Obj, const TCHAR* PropName, uint8 Value)
+	{
+		UByteProperty* Prop = FindField<UByteProperty>(Obj->GetClass(), PropName);
+		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
+	}
+	inline int32 GetInt(UObject* Obj, const TCHAR* PropName)
+	{
+		UIntProperty* Prop = FindField<UIntProperty>(Obj->GetClass(), PropName);
+		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
+	}
+}
+
 UCLASS(Abstract)
 class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 {

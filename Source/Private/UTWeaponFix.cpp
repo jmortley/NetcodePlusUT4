@@ -25,7 +25,7 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
     TEXT("ut.ProjectileTickRate"),
     240,
     TEXT("Client-side projectile simulation rate in Hz.\n")
-    TEXT("Snapped to nearest multiple of 60. Range: 60-720.\n")
+    TEXT("Snapped to nearest multiple of 60. Range: 60-660.\n")
     TEXT("Server always uses native 120Hz tick."),
     ECVF_Scalability
 );
@@ -33,7 +33,7 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
 int32 AUTWeaponFix::GetTargetProjectileTickRate()
 {
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
-    TargetHz = FMath::Clamp(TargetHz, 60, 720);
+    TargetHz = FMath::Clamp(TargetHz, 60, 660);
     return FMath::RoundToInt(TargetHz / 60.f) * 60;
 }
 
@@ -58,6 +58,7 @@ static int32 GetSnappedProjectileHz()
 //extern FCollisionResponseParams WorldResponseParams;
 
 TMap<FName, bool> AUTWeaponFix::HiddenWeaponsByTag;
+TMap<FName, FString> AUTWeaponFix::SavedSkinPaths;
 bool AUTWeaponFix::bWeaponSettingsLoaded = false;
 
 static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings");
@@ -71,18 +72,37 @@ void AUTWeaponFix::LoadWeaponSettings()
 
 	// Load hide settings — read keys by class name
 	// We iterate weapon classes to get all possible class names, then check Mod.ini for each
+	TSet<FName> SeenSkinTags;
 	for (TObjectIterator<UClass> It; It; ++It)
 	{
 		if (It->IsChildOf(AUTWeapon::StaticClass()) && !It->HasAnyClassFlags(CLASS_Abstract))
 		{
 			FName HideKey = FName(*It->GetName());
-			if (HiddenWeaponsByTag.Contains(HideKey)) continue;
-
-			FString Key = FString::Printf(TEXT("Hide.%s"), *HideKey.ToString());
-			FString Value;
-			if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *Key, Value, ModIniPath))
+			if (!HiddenWeaponsByTag.Contains(HideKey))
 			{
-				HiddenWeaponsByTag.Add(HideKey, Value == TEXT("1"));
+				FString Key = FString::Printf(TEXT("Hide.%s"), *HideKey.ToString());
+				FString Value;
+				if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *Key, Value, ModIniPath))
+				{
+					HiddenWeaponsByTag.Add(HideKey, Value == TEXT("1"));
+				}
+			}
+
+			// Load saved skin paths — keyed by WeaponSkinCustomizationTag
+			AUTWeapon* WeaponCDO = Cast<AUTWeapon>(It->GetDefaultObject());
+			if (WeaponCDO && WeaponCDO->WeaponSkinCustomizationTag != NAME_None)
+			{
+				FName Tag = WeaponCDO->WeaponSkinCustomizationTag;
+				if (!SeenSkinTags.Contains(Tag))
+				{
+					SeenSkinTags.Add(Tag);
+					FString SkinKey = FString::Printf(TEXT("Skin.%s"), *Tag.ToString());
+					FString SkinPath;
+					if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *SkinKey, SkinPath, ModIniPath) && !SkinPath.IsEmpty())
+					{
+						SavedSkinPaths.Add(Tag, SkinPath);
+					}
+				}
 			}
 		}
 	}
@@ -2979,6 +2999,16 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 					);
 				}
 			}
+		}
+	}
+
+	// Load saved skin from Mod.ini if we don't already have one set
+	if (!WeaponSkin && WeaponSkinCustomizationTag != NAME_None)
+	{
+		FString* SkinPath = SavedSkinPaths.Find(WeaponSkinCustomizationTag);
+		if (SkinPath && !SkinPath->IsEmpty())
+		{
+			WeaponSkin = LoadObject<UUTWeaponSkin>(nullptr, **SkinPath);
 		}
 	}
 
