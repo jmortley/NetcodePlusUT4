@@ -11,6 +11,7 @@
 #include "UTWeaponStateZooming.h"
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
+#include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponSkin.h"
 #include "UObject/UObjectIterator.h"
 #include "ClientHitsounds.h"
@@ -24,7 +25,7 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
     TEXT("ut.ProjectileTickRate"),
     240,
     TEXT("Client-side projectile simulation rate in Hz.\n")
-    TEXT("Snapped to nearest multiple of 60. Range: 60-600.\n")
+    TEXT("Snapped to nearest multiple of 60. Range: 60-720.\n")
     TEXT("Server always uses native 120Hz tick."),
     ECVF_Scalability
 );
@@ -32,7 +33,7 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
 int32 AUTWeaponFix::GetTargetProjectileTickRate()
 {
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
-    TargetHz = FMath::Clamp(TargetHz, 60, 600);
+    TargetHz = FMath::Clamp(TargetHz, 60, 720);
     return FMath::RoundToInt(TargetHz / 60.f) * 60;
 }
 
@@ -1103,6 +1104,34 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     UWorld* World = GetWorld();
     if (!World) return;
 
+    // --- TRADE-KILL GRACE PERIOD (projectiles only) ---
+    // If UTOwner is null (weapon removed on death) but within the grace window,
+    // spawn the projectile directly using the cached position from Removed().
+    // Only applies to projectile weapons (rockets, shock balls, etc.) — not hitscan.
+    // Specifically important for loaded rockets that were released just before death.
+    if (!UTOwner && OwnerLostTime > 0.f)
+    {
+        float TimeSinceDeath = World->GetTimeSeconds() - OwnerLostTime;
+        if (TimeSinceDeath <= TradeKillGracePeriod && ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum])
+        {
+            FVector SpawnLoc = CachedFireStartLoc;
+            FRotator SpawnRot = ClientViewRot.IsZero() ? CachedFireRotation : ClientViewRot;
+            FActorSpawnParameters Params;
+            Params.Instigator = Instigator;
+            Params.Owner = this;
+            Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+            AUTProjectile* Proj = World->SpawnActor<AUTProjectile>(ProjClass[FireModeNum], SpawnLoc, SpawnRot, Params);
+            if (Proj)
+            {
+                UE_LOG(LogUTWeaponFix, Log, TEXT("[TradeKill] Spawned projectile %.0fms after death (Mode %d)"),
+                    TimeSinceDeath * 1000.f, FireModeNum);
+            }
+            OwnerLostTime = 0.f; // only one grace shot
+            return;
+        }
+        return; // outside grace period or hitscan — drop silently
+    }
+
     if (!ValidateFireRequest(FireModeNum, InFireEventIndex, ClientTimestamp))
     {
         ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : 0);
@@ -1206,6 +1235,31 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     {
         ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
     }
+}
+
+void AUTWeaponFix::Removed()
+{
+	// Cache the owner's last known fire position before Super::Removed() nulls UTOwner.
+	// This enables the trade-kill grace period — if a fire RPC arrives within
+	// TradeKillGracePeriod after death, we can still spawn the projectile.
+	if (UTOwner && Role == ROLE_Authority)
+	{
+		CachedFireStartLoc = GetFireStartLoc();
+		CachedFireRotation = GetBaseFireRotation();
+		OwnerLostTime = GetWorld()->GetTimeSeconds();
+
+		// Force-fire loaded rockets on death. If the player was holding alt-fire
+		// to load rockets and died before releasing, fire them now.
+		AUTPlusWeap_RocketLauncher* RL = Cast<AUTPlusWeap_RocketLauncher>(this);
+		if (RL && RL->NumLoadedBarrels > 0)
+		{
+			UE_LOG(LogUTWeaponFix, Log, TEXT("[DeathRelease] Firing %d loaded rockets on death"), RL->NumLoadedBarrels);
+			// FireShot on the charged state will spawn all loaded rockets
+			CurrentFireMode = 1; // alt-fire mode for loaded rockets
+			Super::FireShot();
+		}
+	}
+	Super::Removed();
 }
 
 void AUTWeaponFix::Tick(float DeltaTime)

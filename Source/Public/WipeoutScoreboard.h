@@ -25,13 +25,25 @@ public:
 	FCanvasIcon BlueTeamOverlay;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	FText CH_KD;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	FText CH_BeltAmp;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	FText CH_Damage;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	FText CH_Efficiency;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
-	float ColumnHeaderKillsX;
+	FText CH_DmgPerLife;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	float ColumnHeaderKDX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	float ColumnHeaderBeltAmpX;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	float ColumnHeaderDamageX;
@@ -40,14 +52,12 @@ public:
 	float ColumnHeaderEfficiencyX;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
-	FText CH_DmgPerLife;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	float ColumnHeaderDmgPerLifeX;
 
 protected:
 	virtual void DrawTeamPanel(float RenderDelta, float& YOffset) override;
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
+	virtual void DrawPlayerScores(float RenderDelta, float& DrawY) override;
 	virtual void DrawPlayer(int32 Index, AUTPlayerState* PlayerState, float RenderDelta, float XOffset, float YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor) override;
 

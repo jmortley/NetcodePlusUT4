@@ -172,6 +172,7 @@ public:
     virtual void SetSkin(UMaterialInterface* NewSkin) override;
     void ClearPendingFakeProjectiles();
     void DeferredGotoActiveState(uint8 FireModeNum);
+    virtual void Removed() override;
     //~ End AUTWeapon Interface
 
     // =========================================================================
@@ -219,6 +220,16 @@ protected:
     FTimerHandle RetryFireHandle[2];
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
+
+    // --- Trade-kill grace period: cache owner state before Removed() nulls UTOwner ---
+    /** World time when UTOwner was lost (weapon removed from dying player) */
+    float OwnerLostTime = 0.f;
+    /** Last known fire start location when owner was alive */
+    FVector CachedFireStartLoc = FVector::ZeroVector;
+    /** Last known fire rotation when owner was alive */
+    FRotator CachedFireRotation = FRotator::ZeroRotator;
+    /** Max time after death to still allow pending fire RPCs (seconds) */
+    static constexpr float TradeKillGracePeriod = 0.08f;
     FTimerHandle DeferredActiveStateHandle;
     /**
  * Server-side authoritative fire event index for each fire mode.

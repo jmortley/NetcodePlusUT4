@@ -184,6 +184,27 @@ void AWipeoutHUD::DrawHUD()
 
 		TArray<AUTPlayerState*> LivePlayers;
 		GetPlayerListForIcons(LivePlayers);
+
+		// Pre-pass: find the next-to-spawn teammate (lowest RespawnTime > 0)
+		AUTPlayerState* MyPS_ForSpawn = Cast<AUTPlayerState>(UTPlayerOwner ? UTPlayerOwner->PlayerState : nullptr);
+		uint8 MyTeam = MyPS_ForSpawn ? MyPS_ForSpawn->GetTeamNum() : 255;
+		AUTPlayerState* NextToSpawn = nullptr;
+		float LowestRespawnTime = BIG_NUMBER;
+		for (AUTPlayerState* UTPS : LivePlayers)
+		{
+			if (UTPS && UTPS != MyPS_ForSpawn && UTPS->GetTeamNum() == MyTeam
+				&& UTPS->RespawnTime > 0.f && UTPS->RespawnTime < LowestRespawnTime)
+			{
+				AUTCharacter* UTC = UTPS->GetUTCharacter();
+				bool bDead = !UTC || UTC->IsDead();
+				if (bDead)
+				{
+					LowestRespawnTime = UTPS->RespawnTime;
+					NextToSpawn = UTPS;
+				}
+			}
+		}
+
 		for (AUTPlayerState* UTPS : LivePlayers)
 		{
 			// In Wipeout everyone respawns, so show all non-spectator players
@@ -228,12 +249,35 @@ void AWipeoutHUD::DrawHUD()
 			{
 				RedPlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffset, PipSize);
+				if (UTPS == NextToSpawn)
+				{
+					// Gold border highlight for next teammate to spawn
+					float PipHeight = PipSize * (320.0f / 224.0f);
+					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
+					float BorderW = 2.f;
+					Canvas->SetLinearDrawColor(Gold);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffset, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffset + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed + PipSize - BorderW, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
+				}
 				XOffsetRed -= 1.1f * PipSize;
 			}
 			else if (TeamIdx == 1)
 			{
 				BluePlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffset, PipSize);
+				if (UTPS == NextToSpawn)
+				{
+					float PipHeight = PipSize * (320.0f / 224.0f);
+					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
+					float BorderW = 2.f;
+					Canvas->SetLinearDrawColor(Gold);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffset, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffset + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue + PipSize - BorderW, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
+				}
 				XOffsetBlue += 1.1f * PipSize;
 			}
 		}
@@ -492,6 +536,45 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f),
 			YOffset + (PipHeight * 0.5f) - (YL * FontRenderScale * 0.5f),
 			FontRenderScale, FontRenderScale, TextRenderInfo);
+	}
+
+	// Layer 6: Teammate HP/Armor numbers (alive teammates only, not self)
+	if (LiveScaling >= 1.f && UTPlayerOwner)
+	{
+		AUTPlayerState* MyPS = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
+		if (MyPS && MyPS != PlayerState && MyPS->GetTeamNum() == PlayerState->GetTeamNum())
+		{
+			AUTCharacter* UTC = PlayerState->GetUTCharacter();
+			if (UTC && !UTC->IsDead())
+			{
+				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f;
+				FFontRenderInfo TextRenderInfo;
+				TextRenderInfo.bEnableShadow = true;
+
+				int32 HP = UTC->Health;
+				int32 Armor = UTC->GetArmorAmount();
+				FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
+
+				float XL, YL;
+				Canvas->StrLen(SmallFont, HPStr, XL, YL);
+
+				float TextX = XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f);
+				float TextY = YOffset + PipHeight - (YL * FontRenderScale) - 2.f;
+
+				// Black outline: draw text offset in 4 directions
+				FLinearColor GoldOutline(0.f, 0.f, 0.f, 1.f);
+				float OutlineOffset = 1.f;
+				Canvas->SetLinearDrawColor(GoldOutline);
+				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX - OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX + OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY - OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY + OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
+
+				// White fill on top
+				Canvas->SetLinearDrawColor(FLinearColor::White);
+				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+			}
+		}
 	}
 }
 

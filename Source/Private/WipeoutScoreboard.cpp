@@ -10,7 +10,9 @@
 #include "UTBot.h"
 #include "Engine/NetDriver.h"
 #include "Engine/NetConnection.h"
+#include "UTDemoRecSpectator.h"
 #include "WipeoutDamageReplicator.h"
+#include "StatNames.h"
 #include "EngineUtils.h"
 
 UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializer)
@@ -23,15 +25,15 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	// Column positions (fraction of CellWidth) — 6 data columns after player name
 	ColumnHeaderPlayerX = 0.10f;    // Name starts after portrait
 	ColumnHeaderScoreX = 0.38f;     // Score/round wins (unused in Wipeout but keep for base class)
-	ColumnHeaderKillsX = 0.40f;
-	ColumnHeaderDeathsX = 0.50f;
+	ColumnHeaderKDX = 0.40f;
+	ColumnHeaderBeltAmpX = 0.50f;
 	ColumnHeaderDamageX = 0.59f;
 	ColumnHeaderEfficiencyX = 0.68f;
 	ColumnHeaderDmgPerLifeX = 0.79f;
 	ColumnHeaderPingX = 0.92f;
 
-	CH_Kills = NSLOCTEXT("UTScoreboard", "ColumnHeader_Kills", "Kills");
-	CH_Deaths = NSLOCTEXT("UTScoreboard", "ColumnHeader_Deaths", "Deaths");
+	CH_KD = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_KD", "K/D");
+	CH_BeltAmp = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_BeltAmp", "B/A");
 	CH_Damage = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Damage", "DMG");
 	CH_Efficiency = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Efficiency", "Eff%");
 	CH_DmgPerLife = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_DmgPerLife", "DMG/Life");
@@ -152,9 +154,9 @@ void UWipeoutScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 
 		if (UTGameState && UTGameState->HasMatchStarted())
 		{
-			DrawText(CH_Kills, XOffset + (ScaledCellWidth * ColumnHeaderKillsX), YOffset + ColumnHeaderY,
+			DrawText(CH_KD, XOffset + (ScaledCellWidth * ColumnHeaderKDX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Deaths, XOffset + (ScaledCellWidth * ColumnHeaderDeathsX), YOffset + ColumnHeaderY,
+			DrawText(CH_BeltAmp, XOffset + (ScaledCellWidth * ColumnHeaderBeltAmpX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_Damage, XOffset + (ScaledCellWidth * ColumnHeaderDamageX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
@@ -428,24 +430,51 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 		DrawText(FText::FromString(FString::Printf(TEXT("%dms"), Ping)),
 			XOffset + ScaledCellWidth * ColumnHeaderPingX, YOffset + ColumnY,
 			UTHUDOwner->SmallFont, RenderScale, 1.f, PingColor, ETextHorzPos::Center, ETextVertPos::Center);
-	}
 
-	// Mute indicator removed — too cluttered for compact portrait layout
+		// Packet loss — local player only
+		if (bIsOwner && UTPlayerOwner && UTPlayerOwner->Player)
+		{
+			UNetConnection* Conn = Cast<UNetDriver>(GetWorld()->GetNetDriver()) ? Cast<UNetConnection>(UTPlayerOwner->Player) : nullptr;
+			if (!Conn)
+			{
+				// Try via NetDriver
+				UNetDriver* Driver = GetWorld()->GetNetDriver();
+				if (Driver && Driver->ServerConnection)
+				{
+					Conn = Driver->ServerConnection;
+				}
+			}
+			if (Conn && Conn->InPackets > 0)
+			{
+				float LossPct = (float(Conn->InPacketsLost) / float(Conn->InPackets + Conn->InPacketsLost)) * 100.f;
+				if (LossPct > 0.f)
+				{
+					FLinearColor PLColor = (LossPct < 2.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f) : FLinearColor(1.f, 0.25f, 0.25f, 1.f);
+					DrawText(FText::FromString(FString::Printf(TEXT("PL:%.1f%%"), LossPct)),
+						XOffset + ScaledCellWidth * ColumnHeaderPingX, YOffset + ColumnY + 14.f * RenderScale,
+						UTHUDOwner->TinyFont, 0.75f * RenderScale, 1.f, PLColor, ETextHorzPos::Center, ETextVertPos::Center);
+				}
+			}
+		}
+	}
 }
 
 void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor)
 {
-	// Kills
+	// K/D — merged kills and deaths
 	int32 DisplayKills = bUseRoundKills ? (PlayerState->RoundKills + PlayerState->RoundKillAssists) : (PlayerState->Kills + PlayerState->KillAssists);
-	int32 FinalBlows = bUseRoundKills ? PlayerState->RoundKills : PlayerState->Kills;
-	DrawText(FText::Format(NSLOCTEXT("Wipeout", "KillsFmt", "{0} ({1})"),
-		FText::AsNumber(DisplayKills), FText::AsNumber(FinalBlows)),
-		XOffset + (Width * ColumnHeaderKillsX), YOffset + ColumnY,
+	FString KDStr = FString::Printf(TEXT("%d/%d"), DisplayKills, PlayerState->Deaths);
+	DrawText(FText::FromString(KDStr), XOffset + (Width * ColumnHeaderKDX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Deaths
-	DrawText(FText::AsNumber(PlayerState->Deaths), XOffset + (Width * ColumnHeaderDeathsX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
+	// B/A — belt and amp pickup counts
+	int32 Belts = PlayerState->GetStatsValue(NAME_ShieldBeltCount);
+	int32 Amps = PlayerState->GetStatsValue(NAME_UDamageCount);
+	FString BAStr = FString::Printf(TEXT("%d/%d"), Belts, Amps);
+	FLinearColor BAColor = FLinearColor(0.9f, 0.8f, 0.2f, 1.f); // gold
+	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) BAColor *= 0.6f;
+	DrawText(FText::FromString(BAStr), XOffset + (Width * ColumnHeaderBeltAmpX), YOffset + ColumnY,
+		UTHUDOwner->TinyFont, 1.0f, 1.0f, BAColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// Damage — read from the replicated damage replicator if available,
 	// otherwise fall back to PlayerState (works on listen server / standalone)
@@ -498,4 +527,62 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 	FString DplStr = FString::Printf(TEXT("%d"), FMath::RoundToInt(DmgPerLife));
 	DrawText(FText::FromString(DplStr), XOffset + (Width * ColumnHeaderDmgPerLifeX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DplColor, ETextHorzPos::Center, ETextVertPos::Center);
+}
+
+void UWipeoutScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
+{
+	if (!UTGameState) return;
+
+	int32 XOffset = ScaledEdgeSize;
+	float MaxYOffset = 0.f;
+	TArray<FString> SpectatorNames;
+
+	for (int8 Team = 0; Team < 2; Team++)
+	{
+		int32 Place = 1;
+		float DrawOffset = YOffset;
+		int32 NumPlayersToShow = ShouldDrawScoringStats() ? 5 : UTGameState->PlayerArray.Num();
+		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
+		{
+			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(UTGameState->PlayerArray[i]);
+			if (PlayerState)
+			{
+				if (!PlayerState->bOnlySpectator)
+				{
+					if (PlayerState->GetTeamNum() == Team)
+					{
+						DrawPlayer(Place, PlayerState, RenderDelta, XOffset, DrawOffset);
+						Place++;
+						DrawOffset += CellHeight * RenderScale;
+						if (Place > NumPlayersToShow) break;
+					}
+				}
+				else if (Team == 0 && !PlayerState->bIsDemoRecording)
+				{
+					SpectatorNames.Add(PlayerState->PlayerName);
+				}
+			}
+		}
+		MaxYOffset = FMath::Max(DrawOffset, MaxYOffset);
+		XOffset = Canvas->ClipX - ScaledCellWidth - ScaledEdgeSize;
+	}
+	YOffset = MaxYOffset;
+
+	// GoalScore centered below player rows
+	if (UTGameState->GoalScore > 0 && !ShouldDrawScoringStats())
+	{
+		FString GoalStr = FString::Printf(TEXT("First to %d"), UTGameState->GoalScore);
+		DrawText(FText::FromString(GoalStr), Canvas->ClipX * 0.5f, YOffset + 4.f * RenderScale,
+			UTHUDOwner->SmallFont, 1.0f, 1.0f, FLinearColor(0.75f, 0.75f, 0.75f, 1.f),
+			ETextHorzPos::Center, ETextVertPos::Top);
+	}
+
+	// Named spectator list instead of generic count
+	if (SpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
+	{
+		FString SpecStr = TEXT("Spectators: ") + FString::Join(SpectatorNames, TEXT(", "));
+		DrawText(FText::FromString(SpecStr), Size.X * 0.5f, 765.f * RenderScale,
+			UTHUDOwner->SmallFont, 1.0f, 1.0f, FLinearColor(0.75f, 0.75f, 0.75f, 1.f),
+			ETextHorzPos::Center, ETextVertPos::Bottom);
+	}
 }

@@ -137,7 +137,12 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 {
 	float Result = Super::RatePlayerStart(P, Player);
 
-	if (Result <= 0.f || !CTFGameState || !Player)
+	// Use engine accessor GetFlagBase() instead of directly reading FlagBases.
+	// The plugin DLL has a different memory layout offset for FlagBases than the
+	// engine DLL (class layout mismatch), so direct member access reads garbage.
+	// GetFlagBase() is compiled in the engine DLL with the correct offsets.
+	AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
+	if (Result <= 0.f || !GS || !Player)
 	{
 		return Result;
 	}
@@ -152,16 +157,18 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 	const FVector StartLoc = P->GetActorLocation();
 	static FName NAME_CTFSpawnCheck = FName(TEXT("CTFSpawnCheck"));
 
-	for (AUTCTFFlagBase* FlagBase : CTFGameState->FlagBases)
+	// Iterate team indices and use engine accessor — CTF is always 2 teams
+	for (uint8 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
 	{
-		if (!FlagBase || !FlagBase->MyFlag)
+		AUTCTFFlagBase* FlagBase = GS->GetFlagBase(TeamIdx);
+		if (!IsValid(FlagBase) || !IsValid(FlagBase->MyFlag))
 		{
 			continue;
 		}
 
 		AUTFlag* Flag = FlagBase->MyFlag;
 		const uint8 FlagTeamNum = FlagBase->GetTeamNum();
-		const FName FlagState = FlagBase->GetCarriedObjectState();
+		const FName FlagState = GS->GetFlagState(TeamIdx);
 		const FVector FlagBaseLoc = FlagBase->GetActorLocation();
 
 		// Only process OUR flag — "what is the enemy doing with our flag?"
@@ -170,7 +177,7 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 			continue;
 		}
 
-		if (FlagState == CarriedObjectState::Held && Flag->HoldingPawn)
+		if (FlagState == CarriedObjectState::Held && IsValid(Flag->HoldingPawn))
 		{
 			// Enemy is carrying our flag
 			const FVector CarrierLoc = Flag->HoldingPawn->GetActorLocation();
@@ -189,7 +196,9 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 
 			// LOS check: penalize spawns with direct sightline to enemy flag carrier (anywhere on map)
 			FVector EyeLoc = StartLoc + FVector(0.f, 0.f, 64.f); // approximate eye height
-			FVector CarrierEyeLoc = CarrierLoc + FVector(0.f, 0.f, Flag->HoldingPawn->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+			UCapsuleComponent* CarrierCapsule = Flag->HoldingPawn->GetCapsuleComponent();
+			float CarrierHalfHeight = CarrierCapsule ? CarrierCapsule->GetScaledCapsuleHalfHeight() : 64.f;
+			FVector CarrierEyeLoc = CarrierLoc + FVector(0.f, 0.f, CarrierHalfHeight);
 
 			if (!GetWorld()->LineTraceTestByChannel(
 				EyeLoc,
@@ -277,13 +286,14 @@ float ANCPlusCTFGameMode::GetTravelDelay()
 
 bool ANCPlusCTFGameMode::IsAnyFlagHeld() const
 {
-	if (!CTFGameState)
+	if (!IsValid(CTFGameState))
 	{
 		return false;
 	}
-	for (AUTCTFFlagBase* Base : CTFGameState->FlagBases)
+	// Use engine accessor — plugin cannot directly access FlagBases (layout mismatch)
+	for (uint8 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
 	{
-		if (Base != nullptr && Base->GetCarriedObjectState() == CarriedObjectState::Held)
+		if (CTFGameState->GetFlagState(TeamIdx) == CarriedObjectState::Held)
 		{
 			return true;
 		}
@@ -346,7 +356,7 @@ void ANCPlusCTFGameMode::CancelGracePeriod()
 
 bool ANCPlusCTFGameMode::CheckAdvantage()
 {
-	if (!CTFGameState || CTFGameState->FlagBases.Num() < 2)
+	if (!CTFGameState || !CTFGameState->GetFlagBase(0) || !CTFGameState->GetFlagBase(1))
 	{
 		return false;
 	}

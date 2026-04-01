@@ -353,6 +353,18 @@ void AUWipeoutGame::DefaultTimer()
 				bInSuddenDeath = true;
 				PendingRespawns.Empty();
 
+				// Force all dead players to spectate — they can't respawn in sudden death
+				for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+				{
+					AUTPlayerState* DeadPS = It->Get() ? Cast<AUTPlayerState>(It->Get()->PlayerState) : nullptr;
+					if (DeadPS && DeadPS->bOutOfLives && !DeadPS->bOnlySpectator)
+					{
+						DeadPS->RespawnTime = 0.f;
+						DeadPS->ForceNetUpdate();
+						ForceTeamSpectate(DeadPS);
+					}
+				}
+
 				// If one team is already wiped, end the round
 				if (Alive0 == 0 || Alive1 == 0)
 				{
@@ -577,6 +589,9 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 	{
 		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn blocked for %s — sudden death active"), *PS->PlayerName);
 		PendingRespawns.Remove(PS);
+		PS->RespawnTime = 0.f;
+		PS->ForceNetUpdate();
+		ForceTeamSpectate(PS);
 		return;
 	}
 
@@ -1333,7 +1348,7 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 	// Pick the spawn with the fewest teammates nearby (distributes 1 player per spawn)
 	APlayerStart* BestSpawn = nullptr;
 	int32 BestCount = INT_MAX;
-	float CheckRadiusSq = 300.f * 300.f;
+	float CheckRadiusSq = 600.f * 600.f;
 
 	for (APlayerStart* Spawn : SelectedSpawns)
 	{
@@ -1360,6 +1375,12 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 			BestSpawn = Spawn;
 			if (BestCount == 0) break; // Empty spawn found, use it immediately
 		}
+	}
+
+	if (BestSpawn)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s assigned spawn at %s (NearbyCount=%d, TotalSpawns=%d)"),
+			*PS->PlayerName, *BestSpawn->GetActorLocation().ToString(), BestCount, SelectedSpawns.Num());
 	}
 
 	return BestSpawn ? BestSpawn : Super::ChoosePlayerStart_Implementation(Player);
