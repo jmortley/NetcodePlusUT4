@@ -249,6 +249,32 @@ void AWipeoutHUD::DrawHUD()
 			{
 				RedPlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffset, PipSize);
+				// Player name above icon
+				{
+					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
+					FFontRenderInfo NameRI;
+					NameRI.bEnableShadow = true;
+					FString Name = UTPS->PlayerName;
+					float NXL, NYL;
+					Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					// Truncate if wider than pip
+					while (NXL * NameScale > PipSize && Name.Len() > 3)
+					{
+						Name = Name.Left(Name.Len() - 1);
+						Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					}
+					// Black outline + white fill (matches HP/Armor style)
+					float NameX = XOffsetRed + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
+					float NameY = YOffset + 2.f;
+					float OL = 1.f;
+					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
+					Canvas->SetLinearDrawColor(FLinearColor::White);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+				}
 				if (UTPS == NextToSpawn)
 				{
 					// Gold border highlight for next teammate to spawn
@@ -267,6 +293,31 @@ void AWipeoutHUD::DrawHUD()
 			{
 				BluePlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffset, PipSize);
+				// Player name above icon
+				{
+					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
+					FFontRenderInfo NameRI;
+					NameRI.bEnableShadow = true;
+					FString Name = UTPS->PlayerName;
+					float NXL, NYL;
+					Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					while (NXL * NameScale > PipSize && Name.Len() > 3)
+					{
+						Name = Name.Left(Name.Len() - 1);
+						Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					}
+					// Black outline + white fill (matches HP/Armor style)
+					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
+					float NameY = YOffset + 2.f;
+					float OL = 1.f;
+					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
+					Canvas->SetLinearDrawColor(FLinearColor::White);
+					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+				}
 				if (UTPS == NextToSpawn)
 				{
 					float PipHeight = PipSize * (320.0f / 224.0f);
@@ -378,9 +429,21 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->SetLinearDrawColor(Team1Color);
 	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
+	// ── Score color tails (extend below score box, width of the number) ──
+	float TailHeight = 14.f * RenderScale;
+	float TailAlpha = 1.f;
+
+	// Team 0 tail
+	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, TailAlpha));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
+
+	// Team 1 tail
+	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, TailAlpha));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
+
 	// ── Center divider (white thin line) ──
 	Canvas->SetLinearDrawColor(FLinearColor::White);
-	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight, 0, 0, 1, 1);
+	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
 	// ── Text ──
 	float FontScale = RenderScale * 0.85f;
