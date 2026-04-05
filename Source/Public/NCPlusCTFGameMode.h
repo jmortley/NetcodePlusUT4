@@ -102,6 +102,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	// ── Movement Configuration ───────────────────────────────────────
 
+	/** If true, the match has two halves with intermission (side switch).
+	 *  Auto-set to true for small games (MaxPlayers <= 4), false for larger games.
+	 *  Can be overridden in Blueprint. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Halftime")
+	bool bHasHalftime;
+
 	/** If false, floor sliding is disabled for all players.
 	 *  Useful for modes like Sniper CTF where slide animations
 	 *  desync from the hitbox, making players hard to hit unfairly. */

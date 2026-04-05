@@ -51,6 +51,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	EnemyBlockPenalty = 10.f;
 	EnemyLOSBlockRange = 3000.f;        // BP: EnemyLOSBlockRange — LOS check to nearby enemies
 	EnemyLOSPenalty = 8.f;
+	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
 	OvertimeRespawnTime = 6.f;          // Fixed 6s respawn in overtime (replaces Epic's 10s escalation)
 
@@ -76,8 +77,16 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	{
 		TimeLimit = 600;
 	}
-	// Halve time limit for two halves
-	if (TimeLimit > 0)
+
+	// Auto-disable halftime for 3v3+ games — single period, full time limit.
+	// 1v1/2v2 keep two halves with intermission and side switch.
+	if (GameSession && GameSession->MaxPlayers > 4)
+	{
+		bHasHalftime = false;
+	}
+
+	// Halve time limit only for two-half games
+	if (bHasHalftime && TimeLimit > 0)
 	{
 		TimeLimit = uint32(float(TimeLimit) * 0.5f);
 	}
@@ -320,8 +329,8 @@ bool ANCPlusCTFGameMode::ShouldEnterAdvantage() const
 		return false;
 	}
 
-	// Halftime advantage: always allowed regardless of score
-	if (!NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
+	// Halftime advantage (two-half games only): always allowed regardless of score
+	if (bHasHalftime && !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		return true;
 	}
@@ -403,8 +412,9 @@ void ANCPlusCTFGameMode::EndOfHalf()
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
 
-	if (NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
+	if (!bHasHalftime || NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
+		// End of game (or single-period game with no halftime)
 		AUTTeamInfo* WinningTeam = CTFGameState->FindLeadingTeam();
 		if (WinningTeam != nullptr)
 		{
@@ -687,8 +697,9 @@ void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 
 void ANCPlusCTFGameMode::HandleMatchHasStarted()
 {
-	// Only call super (which starts replay recording, announces match, etc.) on first half
-	if (!NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
+	// Only call super (which starts replay recording, announces match, etc.) on first half.
+	// Non-halftime games always call super (there's no second half).
+	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
 	}
