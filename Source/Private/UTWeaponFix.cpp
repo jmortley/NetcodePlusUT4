@@ -3438,10 +3438,10 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	float HalfRTT = FMath::Max(0.0f, (PingMs - FudgeFactorMs) * 0.0005f);
 	float ScaledRewindTime = HalfRTT * RewindScale;
 
-	if (ScaledRewindTime <= 0.0f)
-	{
-		return;
-	}
+	// Floor at 5ms so low-ping players (<20ms) still get proximity validation.
+	// Without this, the fudge factor zeroes out the rewind and the entire claim
+	// is silently discarded — causing no-regs at LAN ping.
+	ScaledRewindTime = FMath::Max(ScaledRewindTime, 0.005f);
 
 	// 3. Find the real (authoritative) projectile
 	// Match by FireMode, oldest first (FIFO). EventIndex match preferred if provided.
@@ -3453,6 +3453,16 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		FActiveServerProjectile& Entry = ActiveServerProjectiles[i];
 		if (!Entry.Projectile.IsValid())
 		{
+			ActiveServerProjectiles.RemoveAt(i);
+			i--;
+			continue;
+		}
+		AUTProjectile* Candidate = Entry.Projectile.Get();
+		// Clean up exploded/destroyed entries — they already applied damage naturally
+		if (!Candidate || Candidate->bExploded || Candidate->IsPendingKillPending())
+		{
+			ActiveServerProjectiles.RemoveAt(i);
+			i--;
 			continue;
 		}
 		if (Entry.FireMode != ClaimedFireMode)
@@ -3464,17 +3474,16 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		{
 			continue;
 		}
-		AUTProjectile* Candidate = Entry.Projectile.Get();
-		if (Candidate && !Candidate->bExploded && !Candidate->IsPendingKillPending())
-		{
-			RealProjectile = Candidate;
-			FoundIndex = i;
-			break; // Oldest first (array is insertion-ordered)
-		}
+		RealProjectile = Candidate;
+		FoundIndex = i;
+		break; // Oldest first (array is insertion-ordered)
 	}
 
 	if (!RealProjectile)
 	{
+		// No unexploded projectile found. The server rocket already hit something
+		// (target or geometry) and applied damage via its natural collision. Don't
+		// re-apply damage — that causes double damage at 90+ ping.
 		return;
 	}
 
@@ -3543,16 +3552,25 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		return;
 	}
 
-	// 9. HIT! Process the real projectile's hit
-	FVector HitNormal = (ProjLoc - PointOnCapsule).GetSafeNormal();
-	FVector HitLocation = PointOnCapsule + (HitNormal * CapRadius);
+	// 9. HIT! Process the real projectile's hit — but only if it hasn't already
+	// exploded naturally between the lookup and now (tight race at high ping).
+	if (RealProjectile->bExploded)
+	{
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("ProjectileRewind SKIPPED: Projectile already exploded naturally (race condition)"));
+	}
+	else
+	{
+		FVector HitNormal = (ProjLoc - PointOnCapsule).GetSafeNormal();
+		FVector HitLocation = PointOnCapsule + (HitNormal * CapRadius);
 
-	UE_LOG(LogUTWeaponFix, Log,
-		TEXT("ProjectileRewind HIT: Target=%s Ping=%.0f Scale=%.2f Rewind=%.1fms Dist=%.1f"),
-		*ClaimedTarget->GetName(), PingMs, RewindScale, ScaledRewindTime * 1000.f, FMath::Sqrt(DistSqr));
+		UE_LOG(LogUTWeaponFix, Log,
+			TEXT("ProjectileRewind HIT: Target=%s Ping=%.0f Scale=%.2f Rewind=%.1fms Dist=%.1f"),
+			*ClaimedTarget->GetName(), PingMs, RewindScale, ScaledRewindTime * 1000.f, FMath::Sqrt(DistSqr));
 
-	RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(),
-		HitLocation, -RealProjectile->GetVelocity().GetSafeNormal());
+		RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(),
+			HitLocation, -RealProjectile->GetVelocity().GetSafeNormal());
+	}
 
 	// 10. Clean up tracking entry
 	if (FoundIndex >= 0 && FoundIndex < ActiveServerProjectiles.Num())

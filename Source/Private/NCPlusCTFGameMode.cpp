@@ -58,6 +58,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	AdvantageTimeRemaining = 0;
 	GracePeriodTimeRemaining = 0;
 	bGracePeriodActive = false;
+	OvertimeStartWorldTime = 0.f;
 	LastAdvantageCapTime = 0.f;
 	bAdvantageCapEndedPeriod = false;
 	LastScoreObjectTime = 0.f;
@@ -524,6 +525,14 @@ void ANCPlusCTFGameMode::DefaultTimer()
 		}
 		else
 		{
+			// If all flags returned (manual OR auto-return), start grace period.
+			// Auto-return doesn't fire a ScoreObject("SentHome") event, so we
+			// poll the actual flag state here instead of relying on events.
+			if (!IsAnyFlagHeld())
+			{
+				StartGracePeriod();
+			}
+
 			// Advantage main timer ticking
 			AdvantageTimeRemaining--;
 
@@ -535,13 +544,32 @@ void ANCPlusCTFGameMode::DefaultTimer()
 		}
 	}
 
-	// Overtime respawn: use fixed OvertimeRespawnTime (default 6s) instead of
-	// Epic's extended overtime escalation that forced 10s respawns.
-	// Keeps overtime fast-paced and decisive.
-	if (CTFGameState && CTFGameState->IsMatchInOvertime() && OvertimeRespawnTime > 0.f)
+	// Overtime respawn escalation: every 2 minutes of OT, add 1s to base respawn
+	// time (2s default), capping at OvertimeRespawnTime (6s). Only for 3v3+.
+	// Ramp: 0-2min=2s, 2-4min=3s, 4-6min=4s, 6-8min=5s, 8min+=6s
+	if (CTFGameState && CTFGameState->IsMatchInOvertime() && OvertimeRespawnTime > 0.f
+		&& GameSession && GameSession->MaxPlayers > 4)
 	{
-		RespawnWaitTime = OvertimeRespawnTime;
-		CTFGameState->SetRespawnWaitTime(RespawnWaitTime);
+		float OTElapsed = GetWorld()->GetTimeSeconds() - OvertimeStartWorldTime;
+		int32 ExtraSeconds = FMath::FloorToInt(OTElapsed / 120.f);
+		float BaseRespawn = 2.f;
+		float NewRespawn = FMath::Min(BaseRespawn + (float)ExtraSeconds, OvertimeRespawnTime);
+		if (NewRespawn > RespawnWaitTime)
+		{
+			RespawnWaitTime = NewRespawn;
+			CTFGameState->SetRespawnWaitTime(RespawnWaitTime);
+
+			// Notify all players of the respawn increase
+			FString Msg = FString::Printf(TEXT("Overtime: respawn time increased to %ds"), FMath::RoundToInt(NewRespawn));
+			for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+			{
+				APlayerController* PC = Cast<APlayerController>(It->Get());
+				if (PC)
+				{
+					PC->ClientMessage(Msg);
+				}
+			}
+		}
 	}
 }
 
@@ -698,6 +726,7 @@ void ANCPlusCTFGameMode::HandleExitingIntermission()
 
 void ANCPlusCTFGameMode::HandleEnteringOvertime()
 {
+	OvertimeStartWorldTime = GetWorld()->GetTimeSeconds();
 	CTFGameState->SetTimeLimit(6000);
 	SetMatchState(MatchState::MatchIsInOvertime);
 	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);

@@ -161,6 +161,9 @@ public:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	bool bInSuddenDeath;
 
+	/** True during the 3-second grace period before sudden death activates */
+	bool bSuddenDeathPending = false;
+
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	int32 LastRoundWinningTeamIndex;
 

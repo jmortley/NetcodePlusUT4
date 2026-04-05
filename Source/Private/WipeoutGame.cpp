@@ -98,6 +98,7 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	Team0RoundDamage = 0.f;
 	Team1RoundDamage = 0.f;
 	bInSuddenDeath = false;
+	bSuddenDeathPending = false;
 	HighDamageCarryThreshold = 60.0f;
 
 	// Replay
@@ -344,34 +345,45 @@ void AUWipeoutGame::DefaultTimer()
 			BP_OnSetRound(true, RoundRemain, LastRoundWinningTeamIndex,
 				Alive0, Alive1, Team0DeathCount, Team1DeathCount);
 
-			if (RoundRemain == 0)
+			if (RoundRemain == 0 && !bInSuddenDeath && !bSuddenDeathPending)
 			{
-				// Time is up — SUDDEN DEATH.
-				// Disable all respawns. Dead players stay dead.
-				// Alive players fight it out until one team is fully eliminated.
-				// No auto-win, no tiebreaker — pure last-team-standing.
-				bInSuddenDeath = true;
-				PendingRespawns.Empty();
+				// Time is up — start 3-second grace period before sudden death.
+				// Players with pending respawns within the grace window can still spawn.
+				bSuddenDeathPending = true;
 
-				// Force all dead players to spectate — they can't respawn in sudden death
-				for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+				FTimerDelegate SuddenDeathDelegate;
+				SuddenDeathDelegate.BindLambda([this]()
 				{
-					AUTPlayerState* DeadPS = It->Get() ? Cast<AUTPlayerState>(It->Get()->PlayerState) : nullptr;
-					if (DeadPS && DeadPS->bOutOfLives && !DeadPS->bOnlySpectator)
+					if (!bRoundInProgress || bInSuddenDeath) return;
+
+					bInSuddenDeath = true;
+					PendingRespawns.Empty();
+
+					// Restart the round clock so players can time items during OT.
+					RoundEndTimeSeconds = GetWorld()->GetTimeSeconds() + 300.f;
+
+					// Force all dead players to spectate
+					for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 					{
-						DeadPS->RespawnTime = 0.f;
-						DeadPS->ForceNetUpdate();
-						ForceTeamSpectate(DeadPS);
+						AUTPlayerState* DeadPS = It->Get() ? Cast<AUTPlayerState>(It->Get()->PlayerState) : nullptr;
+						if (DeadPS && DeadPS->bOutOfLives && !DeadPS->bOnlySpectator)
+						{
+							DeadPS->RespawnTime = 0.f;
+							DeadPS->ForceNetUpdate();
+							ForceTeamSpectate(DeadPS);
+						}
 					}
-				}
 
-				// If one team is already wiped, end the round
-				if (Alive0 == 0 || Alive1 == 0)
-				{
-					CheckWipeoutCondition();
-				}
-				// Otherwise: sudden death continues — CheckWipeoutCondition
-				// will be called on the next kill via ScoreKill
+					int32 A0, A1;
+					GetAliveCounts(A0, A1);
+					if (A0 == 0 || A1 == 0)
+					{
+						CheckWipeoutCondition();
+					}
+				});
+
+				FTimerHandle SuddenDeathGraceHandle;
+				GetWorldTimerManager().SetTimer(SuddenDeathGraceHandle, SuddenDeathDelegate, 3.0f, false);
 				return;
 			}
 		}
@@ -913,6 +925,7 @@ void AUWipeoutGame::StartNextRound()
 	SpawnProtectedUntil.Empty();
 	LinkHealAccumulator.Empty();
 	bInSuddenDeath = false;
+	bSuddenDeathPending = false;
 	Team0RoundDamage = 0.0f;
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
@@ -1228,6 +1241,24 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		OverriddenPlayerStart = ChosenStart;
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
+
+		// Force switch to best weapon on spawn — bypasses the player's
+		// bAutoWeaponSwitch preference so they don't spawn with Enforcer/Hammer.
+		// Super::RestartPlayer already calls ClientSwitchToBestWeapon for remote
+		// players, but it can fire before all weapons have replicated. Defer to
+		// next tick to ensure full inventory is available.
+		AUTPlayerController* SpawnPC = Cast<AUTPlayerController>(NewPlayer);
+		if (SpawnPC && NewPlayer->GetPawn())
+		{
+			TWeakObjectPtr<AUTPlayerController> WeakPC = SpawnPC;
+			GetWorldTimerManager().SetTimerForNextTick([WeakPC]()
+			{
+				if (WeakPC.IsValid())
+				{
+					WeakPC->ClientSwitchToBestWeapon();
+				}
+			});
+		}
 
 		// Grant ability charge on spawn (piggybacks on Epic's boost system)
 		if (SpawnAbilityClass && NewPlayer->GetPawn())
@@ -2671,6 +2702,7 @@ void AUWipeoutGame::BP_RestartCurrentRound()
 
 	bRoundInProgress = false;
 	bInSuddenDeath = false;
+	bSuddenDeathPending = false;
 	RoundEndTimeSeconds = 0.f;
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	Team0DeathCount = 0;

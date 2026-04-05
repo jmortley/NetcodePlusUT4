@@ -28,7 +28,10 @@ namespace UnrealBuildTool.Rules
 			});
 
 			PrivateDependencyModuleNames.AddRange(new string[] {
-				"AssetRegistry"
+				"AssetRegistry",
+				"Http",
+				"Json",
+				"JsonUtilities"
             });
 		}
 	}

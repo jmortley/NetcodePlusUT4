@@ -454,6 +454,7 @@ protected:
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
 
+
     // =========================================================================
     // CLIENT-SIDE HITSOUND PREDICTION HELPER
     // =========================================================================

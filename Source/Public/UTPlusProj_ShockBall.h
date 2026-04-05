@@ -49,4 +49,11 @@ protected:
 	FVector OriginalFireDirection;
 	bool bHasCachedFireDirection;
 
+	/** Time the projectile has been near-zero velocity on the server.
+	 *  If it exceeds StuckExplodeDelay, force-explode to prevent stuck balls. */
+	float StuckTime;
+	static constexpr float StuckExplodeDelay = 0.05f;
+
+public:
+	virtual bool CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const override;
 };

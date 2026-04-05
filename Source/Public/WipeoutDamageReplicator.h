@@ -20,6 +20,12 @@ struct FReplicatedDamageEntry
 
 	UPROPERTY()
 	int32 DamageDone = 0;
+
+	UPROPERTY()
+	int32 BeltPickups = 0;
+
+	UPROPERTY()
+	int32 AmpPickups = 0;
 };
 
 UCLASS(NotPlaceable)
@@ -38,6 +44,8 @@ public:
 	/** Look up a player's replicated damage by their UniqueNetId string.
 	 *  Returns 0 if not found. Safe to call on clients. */
 	int32 GetDamageForPlayer(const FString& UniqueIdStr) const;
+	int32 GetBeltsForPlayer(const FString& UniqueIdStr) const;
+	int32 GetAmpsForPlayer(const FString& UniqueIdStr) const;
 
 	/** Server-only: refresh DamageEntries from all PlayerStates */
 	void UpdateFromPlayerStates();

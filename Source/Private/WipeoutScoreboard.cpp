@@ -18,6 +18,7 @@
 UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	bDrawMinimapInScoreboard = false;
 	// Taller cells to accommodate portrait pip + HP/armor bars
 	CellHeight = 80.f;
 	CellWidth = 850.f;
@@ -467,9 +468,27 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 	DrawText(FText::FromString(KDStr), XOffset + (Width * ColumnHeaderKDX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// B/A — belt and amp pickup counts
-	int32 Belts = PlayerState->GetStatsValue(NAME_ShieldBeltCount);
-	int32 Amps = PlayerState->GetStatsValue(NAME_UDamageCount);
+	// B/A — belt and amp pickup counts (from replicated damage replicator)
+	int32 Belts = 0;
+	int32 Amps = 0;
+	{
+		AWipeoutDamageReplicator* DmgRep = nullptr;
+		UWorld* BAWorld = GetWorld();
+		if (BAWorld)
+		{
+			for (TActorIterator<AWipeoutDamageReplicator> It(BAWorld); It; ++It)
+			{
+				DmgRep = *It;
+				break;
+			}
+		}
+		if (DmgRep && PlayerState->UniqueId.IsValid())
+		{
+			FString PId = PlayerState->UniqueId.ToString();
+			Belts = DmgRep->GetBeltsForPlayer(PId);
+			Amps = DmgRep->GetAmpsForPlayer(PId);
+		}
+	}
 	FString BAStr = FString::Printf(TEXT("%d/%d"), Belts, Amps);
 	FLinearColor BAColor = FLinearColor(0.9f, 0.8f, 0.2f, 1.f); // gold
 	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) BAColor *= 0.6f;

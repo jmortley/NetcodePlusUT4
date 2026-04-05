@@ -3,6 +3,7 @@
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
+#include "StatNames.h"
 #include "Net/UnrealNetwork.h"
 
 AWipeoutDamageReplicator::AWipeoutDamageReplicator(const FObjectInitializer& ObjectInitializer)
@@ -67,13 +68,15 @@ void AWipeoutDamageReplicator::UpdateFromPlayerStates()
 		Entry.PlayerId = UTPS->UniqueId.ToString();
 
 		// DamageDone is tracked server-side on AUTPlayerState but not replicated
-		// Access it via reflection since it may be a BP variable or use the
-		// engine's built-in tracking
 		UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
 		if (DmgProp)
 		{
 			Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
 		}
+
+		// Belt and Amp pickup counts — server-side stats
+		Entry.BeltPickups = UTPS->GetStatsValue(NAME_ShieldBeltCount);
+		Entry.AmpPickups = UTPS->GetStatsValue(NAME_UDamageCount);
 
 		DamageEntries.Add(Entry);
 	}
@@ -86,6 +89,30 @@ int32 AWipeoutDamageReplicator::GetDamageForPlayer(const FString& UniqueIdStr) c
 		if (Entry.PlayerId == UniqueIdStr)
 		{
 			return Entry.DamageDone;
+		}
+	}
+	return 0;
+}
+
+int32 AWipeoutDamageReplicator::GetBeltsForPlayer(const FString& UniqueIdStr) const
+{
+	for (const FReplicatedDamageEntry& Entry : DamageEntries)
+	{
+		if (Entry.PlayerId == UniqueIdStr)
+		{
+			return Entry.BeltPickups;
+		}
+	}
+	return 0;
+}
+
+int32 AWipeoutDamageReplicator::GetAmpsForPlayer(const FString& UniqueIdStr) const
+{
+	for (const FReplicatedDamageEntry& Entry : DamageEntries)
+	{
+		if (Entry.PlayerId == UniqueIdStr)
+		{
+			return Entry.AmpPickups;
 		}
 	}
 	return 0;

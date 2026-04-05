@@ -181,6 +181,11 @@ protected:
 	/** True when all flags are home and we're counting down before ending. */
 	bool bGracePeriodActive;
 
+	// ── Overtime Tracking ────────────────────────────────────────────
+
+	/** World time when overtime started — used to delay respawn escalation. */
+	float OvertimeStartWorldTime;
+
 	// ── Replay Tracking ──────────────────────────────────────────────
 
 	/** Time of the last cap during advantage (for replay selection). */

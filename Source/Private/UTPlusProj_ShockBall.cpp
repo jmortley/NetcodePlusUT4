@@ -82,6 +82,7 @@ void AUTPlusProj_ShockBall::BeginPlay()
 
 	// Cache the original fire direction for drift correction at high fps
 	bHasCachedFireDirection = false;
+	StuckTime = 0.f;
 	if (ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero())
 	{
 		OriginalFireDirection = ProjectileMovement->Velocity.GetSafeNormal();
@@ -133,6 +134,36 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 		{
 			ProjectileMovement->Velocity = OriginalFireDirection * Speed;
 		}
+	}
+
+	// Stuck-ball detection: if the server-side projectile has near-zero velocity
+	// and is embedded in world geometry, force-explode. This catches edge cases
+	// where the movement component bleeds velocity at a shallow angle without
+	// triggering a clean OnStop → ProcessHit → Explode chain.
+	// Bio globs are safe: they're actors, so EncroachingBlockingGeometry returns false.
+	if (Role == ROLE_Authority && ProjectileMovement
+		&& ProjectileMovement->Velocity.IsNearlyZero(5.0f))
+	{
+		StuckTime += DeltaTime;
+		if (StuckTime >= StuckExplodeDelay && CollisionComp)
+		{
+			// Zero-length sweep at current location — returns true only if inside
+			// static world geometry (BSP, static meshes), not actors like bio globs.
+			FHitResult Hit;
+			bool bBlocked = GetWorld()->SweepSingleByChannel(Hit, GetActorLocation(), GetActorLocation(),
+				FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(1.f),
+				FCollisionQueryParams(TEXT("StuckCheck"), false, this));
+
+			if (bBlocked)
+			{
+				Explode(GetActorLocation(), Hit.ImpactNormal.IsNearlyZero() ? FVector(0.f, 0.f, 1.f) : Hit.ImpactNormal);
+				return;
+			}
+		}
+	}
+	else
+	{
+		StuckTime = 0.f;
 	}
 
 	// Stuck-ball handoff: when the real stops (bio goo, wall) but the fake is
@@ -230,4 +261,14 @@ void AUTPlusProj_ShockBall::Explode_Implementation(const FVector& HitLocation, c
 	}
 
 	Super::Explode_Implementation(HitLocation, HitNormal, HitComp);
+}
+
+bool AUTPlusProj_ShockBall::CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const
+{
+	// Relaxed direction check for shock balls. The stock 0.95 dot product threshold
+	// is too strict when the cached transactional rotation differs slightly from the
+	// server's (sub-frame mouse jitter, network quantization). At 2415 u/s with
+	// typically one core in flight, 0.5 (~60 degrees) prevents double-core visuals
+	// while still rejecting obviously wrong matches.
+	return (InFakeProjectile->GetVelocity().GetSafeNormal() | VelDir) > 0.5f;
 }

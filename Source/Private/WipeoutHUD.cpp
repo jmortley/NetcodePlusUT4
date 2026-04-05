@@ -538,6 +538,24 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			FontRenderScale, FontRenderScale, TextRenderInfo);
 	}
 
+	// Layer 5b: "X" on dead portraits with no respawn (OT / sudden death)
+	if (LiveScaling < 1.f && PlayerState->RespawnTime <= 0.f && PlayerState->bOutOfLives)
+	{
+		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f;
+		FFontRenderInfo TextRenderInfo;
+		TextRenderInfo.bEnableShadow = true;
+
+		FString XStr = TEXT("X");
+		float XL, YL;
+		Canvas->StrLen(SmallFont, XStr, XL, YL);
+
+		Canvas->SetLinearDrawColor(FLinearColor(1.f, 0.2f, 0.2f, 0.9f));
+		Canvas->DrawText(SmallFont, FText::FromString(XStr),
+			XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f),
+			YOffset + (PipHeight * 0.5f) - (YL * FontRenderScale * 0.5f),
+			FontRenderScale, FontRenderScale, TextRenderInfo);
+	}
+
 	// Layer 6: Teammate HP/Armor numbers (alive teammates only, not self)
 	if (LiveScaling >= 1.f && UTPlayerOwner)
 	{

@@ -9,6 +9,8 @@
 #include "UTPlusShockRifle.h"
 #include "UTGameState.h"
 #include "UTWeap_LinkGun.h"
+#include "UTArmor.h"
+#include "UTDamageType.h"
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -819,4 +821,78 @@ bool ATeamArenaCharacter::Died(AController* EventInstigator, const FDamageEvent&
 	}
 
 	return Super::Died(EventInstigator, DamageEvent, DamageCauser);
+}
+
+bool ATeamArenaCharacter::ModifyDamageTaken_Implementation(
+	int32& AppliedDamage, int32& Damage, FVector& Momentum,
+	AUTInventory*& HitArmor, const FHitResult& HitInfo,
+	AController* EventInstigator, AActor* DamageCauser,
+	TSubclassOf<UDamageType> DamageType)
+{
+	// Inventory damage events (same as stock UTCharacter)
+	for (TInventoryIterator<> It(this); It; ++It)
+	{
+		if (It->bCallDamageEvents)
+		{
+			It->ModifyDamageTaken(Damage, Momentum, HitArmor,
+				EventInstigator, HitInfo, DamageCauser, DamageType);
+		}
+	}
+
+	// ArmorPlus absorption
+	int32 CurrentArmor = GetArmorAmount();
+	if (Damage > 0 && CurrentArmor > 0)
+	{
+		const UDamageType* const DamageTypeCDO = DamageType
+			? DamageType->GetDefaultObject<UDamageType>()
+			: GetDefault<UDamageType>();
+		const UUTDamageType* const UTDamageTypeCDO = Cast<UUTDamageType>(DamageTypeCDO);
+
+		if (UTDamageTypeCDO == nullptr || UTDamageTypeCDO->bBlockedByArmor)
+		{
+			HitArmor = ArmorType;
+			int32 AbsorbedDamage = 0;
+			int32 InitialDamage = Damage;
+
+			// Sync BeltArmorRemaining when current armor type is belt (CDO ArmorAmount > 100)
+			if (ArmorType != nullptr)
+			{
+				const AUTArmor* ArmorCDO = ArmorType->GetClass()->GetDefaultObject<AUTArmor>();
+				if (ArmorCDO != nullptr && ArmorCDO->ArmorAmount > 100)
+				{
+					BeltArmorRemaining = FMath::Max(BeltArmorRemaining, CurrentArmor);
+				}
+			}
+
+			// Clamp belt remaining to actual armor pool
+			int32 BeltPortion = FMath::Min(BeltArmorRemaining, CurrentArmor);
+			int32 RegularPortion = CurrentArmor - BeltPortion;
+
+			// Phase 1: Belt armor absorbs at 100%
+			if (BeltPortion > 0 && Damage > 0)
+			{
+				int32 BeltAbsorbed = FMath::Min(Damage, BeltPortion);
+				Damage -= BeltAbsorbed;
+				AbsorbedDamage += BeltAbsorbed;
+				BeltArmorRemaining -= BeltAbsorbed;
+			}
+
+			// Phase 2: Regular armor absorbs at 66.67%
+			if (RegularPortion > 0 && Damage > 0)
+			{
+				int32 RegularAbsorbed = FMath::Min(RegularPortion,
+					FMath::Max<int32>(1, Damage * 0.6667f));
+				Damage -= RegularAbsorbed;
+				AbsorbedDamage += RegularAbsorbed;
+			}
+
+			// Momentum absorption (same as stock)
+			if (ArmorType != nullptr && ArmorType->bAbsorbMomentum)
+			{
+				Momentum *= 1.0f - float(AbsorbedDamage) / float(InitialDamage);
+			}
+			RemoveArmor(AbsorbedDamage);
+		}
+	}
+	return false;
 }

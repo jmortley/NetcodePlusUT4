@@ -142,4 +142,17 @@ public:
 
 	// Override to clear all ambient sounds on death (prevents link gun overheat loop)
 	virtual bool Died(AController* EventInstigator, const FDamageEvent& DamageEvent, AActor* DamageCauser = nullptr) override;
+
+	// ArmorPlus: override damage absorption
+	// Belt armor always absorbs at 100%, non-belt absorbs at 66.67%
+	virtual bool ModifyDamageTaken_Implementation(
+		int32& AppliedDamage, int32& Damage, FVector& Momentum,
+		AUTInventory*& HitArmor, const FHitResult& HitInfo,
+		AController* EventInstigator, AActor* DamageCauser,
+		TSubclassOf<UDamageType> DamageType) override;
+
+protected:
+	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
+	// Server-only; synced when ArmorType is belt, decremented on damage.
+	int32 BeltArmorRemaining = 0;
 };
