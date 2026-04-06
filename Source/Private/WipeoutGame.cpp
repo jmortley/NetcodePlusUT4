@@ -1366,26 +1366,90 @@ AActor* AUWipeoutGame::ChooseMidRoundSpawn(AController* Player)
 AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 {
 	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
-	if (!PS || !PS->Team) return nullptr;
+	if (!PS || !PS->Team) return Super::ChoosePlayerStart_Implementation(Player);
 
 	const int32 TeamIndex = PS->Team->TeamIndex;
-	TArray<APlayerStart*>& SelectedSpawns = (TeamIndex == 0) ? Team0SelectedSpawns : Team1SelectedSpawns;
 
-	if (SelectedSpawns.Num() == 0)
+	// Split all spawns into two sides. Try N/S (Y axis) and E/W (X axis),
+	// pick whichever split gives the most balanced result (min side >= 4 for 4v4).
+	if (AllSpawnPointsList.Num() < 2) return Super::ChoosePlayerStart_Implementation(Player);
+
+	// Compute centroid
+	FVector Centroid = FVector::ZeroVector;
+	for (APlayerStart* S : AllSpawnPointsList) Centroid += S->GetActorLocation();
+	Centroid /= AllSpawnPointsList.Num();
+
+	// Try both axes and pick the most balanced split
+	TArray<APlayerStart*> SideA, SideB;
+	int32 BestMinSide = 0;
+
+	for (int32 Axis = 0; Axis < 2; Axis++)
 	{
-		return Super::ChoosePlayerStart_Implementation(Player);
+		TArray<APlayerStart*> TempA, TempB;
+		for (APlayerStart* S : AllSpawnPointsList)
+		{
+			float Val = (Axis == 0) ? S->GetActorLocation().X : S->GetActorLocation().Y;
+			float Mid = (Axis == 0) ? Centroid.X : Centroid.Y;
+			if (Val <= Mid)
+				TempA.Add(S);
+			else
+				TempB.Add(S);
+		}
+
+		int32 MinSide = FMath::Min(TempA.Num(), TempB.Num());
+		if (MinSide > BestMinSide)
+		{
+			BestMinSide = MinSide;
+			SideA = TempA;
+			SideB = TempB;
+		}
 	}
 
-	// Pick the spawn with the fewest teammates nearby (distributes 1 player per spawn)
-	APlayerStart* BestSpawn = nullptr;
-	int32 BestCount = INT_MAX;
-	float CheckRadiusSq = 600.f * 600.f;
+	// If neither axis gives a good split, fall back to furthest-anchor clustering
+	if (BestMinSide < 2)
+	{
+		SideA.Empty();
+		SideB.Empty();
+		int32 AnchorA = 0, AnchorB = 1;
+		float MaxDist = 0.f;
+		for (int32 i = 0; i < AllSpawnPointsList.Num(); ++i)
+		{
+			for (int32 j = i + 1; j < AllSpawnPointsList.Num(); ++j)
+			{
+				float D = (AllSpawnPointsList[i]->GetActorLocation() - AllSpawnPointsList[j]->GetActorLocation()).Size2D();
+				if (D > MaxDist) { MaxDist = D; AnchorA = i; AnchorB = j; }
+			}
+		}
+		FVector LocA = AllSpawnPointsList[AnchorA]->GetActorLocation();
+		FVector LocB = AllSpawnPointsList[AnchorB]->GetActorLocation();
+		for (APlayerStart* S : AllSpawnPointsList)
+		{
+			if ((S->GetActorLocation() - LocA).Size2D() <= (S->GetActorLocation() - LocB).Size2D())
+				SideA.Add(S);
+			else
+				SideB.Add(S);
+		}
+	}
 
-	for (APlayerStart* Spawn : SelectedSpawns)
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout spawn split: SideA=%d, SideB=%d (total %d)"),
+		SideA.Num(), SideB.Num(), AllSpawnPointsList.Num());
+
+	// Alternate sides each round + offset by round number parity for variety
+	bool bSwap = (TotalRoundsPlayed % 2 == 1);
+	TArray<APlayerStart*>& MySpawns = (TeamIndex == 0) ? (bSwap ? SideB : SideA) : (bSwap ? SideA : SideB);
+
+	if (MySpawns.Num() == 0) return Super::ChoosePlayerStart_Implementation(Player);
+
+	// Pick the spawn with fewest nearby teammates + randomness
+	APlayerStart* BestSpawn = nullptr;
+	float BestScore = -FLT_MAX;
+
+	for (APlayerStart* Spawn : MySpawns)
 	{
 		if (!Spawn) continue;
 
 		int32 NearbyCount = 0;
+		float MinTeammateDist = FLT_MAX;
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
@@ -1393,26 +1457,23 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
 			if (OtherPS && OtherPS != PS && OtherPS->Team && OtherPS->Team->TeamIndex == TeamIndex)
 			{
-				if (FVector::DistSquared(Pawn->GetActorLocation(), Spawn->GetActorLocation()) < CheckRadiusSq)
-				{
-					NearbyCount++;
-				}
+				float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
+				MinTeammateDist = FMath::Min(MinTeammateDist, Dist);
+				if (Dist < 600.f) NearbyCount++;
 			}
 		}
 
-		if (NearbyCount < BestCount)
+		// Score: prefer no nearby teammates, then maximize distance from closest teammate
+		float Score = -NearbyCount * 10000.f + MinTeammateDist + FMath::FRandRange(0.f, 200.f);
+		if (Score > BestScore)
 		{
-			BestCount = NearbyCount;
+			BestScore = Score;
 			BestSpawn = Spawn;
-			if (BestCount == 0) break; // Empty spawn found, use it immediately
 		}
 	}
 
-	if (BestSpawn)
-	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s assigned spawn at %s (NearbyCount=%d, TotalSpawns=%d)"),
-			*PS->PlayerName, *BestSpawn->GetActorLocation().ToString(), BestCount, SelectedSpawns.Num());
-	}
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s (team %d) assigned spawn at %s (side has %d spawns)"),
+		*PS->PlayerName, TeamIndex, BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"), MySpawns.Num());
 
 	return BestSpawn ? BestSpawn : Super::ChoosePlayerStart_Implementation(Player);
 }
@@ -2270,6 +2331,16 @@ void AUWipeoutGame::SelectSpawnLayoutForRound()
 	UE_LOG(LogGameMode, Log, TEXT("Wipeout round %d: Layout idx %d, CrossDist %.0f, T0 spawns=%d, T1 spawns=%d"),
 		TotalRoundsPlayed, BestIndex, Chosen.MinCrossDistance2D,
 		Team0SelectedSpawns.Num(), Team1SelectedSpawns.Num());
+	for (int32 i = 0; i < Team0SelectedSpawns.Num(); i++)
+	{
+		if (Team0SelectedSpawns[i])
+			UE_LOG(LogGameMode, Log, TEXT("  T0[%d] = %s"), i, *Team0SelectedSpawns[i]->GetActorLocation().ToString());
+	}
+	for (int32 i = 0; i < Team1SelectedSpawns.Num(); i++)
+	{
+		if (Team1SelectedSpawns[i])
+			UE_LOG(LogGameMode, Log, TEXT("  T1[%d] = %s"), i, *Team1SelectedSpawns[i]->GetActorLocation().ToString());
+	}
 }
 
 

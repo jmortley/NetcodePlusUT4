@@ -233,7 +233,12 @@ protected:
     /** Last known fire rotation when owner was alive */
     FRotator CachedFireRotation = FRotator::ZeroRotator;
     /** Max time after death to still allow pending fire RPCs (seconds) */
-    static constexpr float TradeKillGracePeriod = 0.08f;
+    static constexpr float TradeKillGracePeriod = 0.10f;
+
+    /** Cached weapon skin MIDs — created once in BringUp, reused in SetSkin to avoid per-call GPU allocations */
+    UPROPERTY(Transient)
+    TArray<UMaterialInstanceDynamic*> CachedSkinMIDs;
+
     FTimerHandle DeferredActiveStateHandle;
     /**
  * Server-side authoritative fire event index for each fire mode.

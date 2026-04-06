@@ -1149,7 +1149,10 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
             OwnerLostTime = 0.f; // only one grace shot
             return;
         }
-        return; // outside grace period or hitscan — drop silently
+        UE_LOG(LogUTWeaponFix, Log, TEXT("[TradeKill] REJECTED: %.0fms after death exceeds %.0fms grace (Mode %d, HasProj=%d)"),
+            TimeSinceDeath * 1000.f, TradeKillGracePeriod * 1000.f, FireModeNum,
+            (ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum]) ? 1 : 0);
+        return;
     }
 
     if (!ValidateFireRequest(FireModeNum, InFireEventIndex, ClientTimestamp))
@@ -1713,7 +1716,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 				}
 
 				// Generous padding for fallback search
-				float SearchPadding = 50.0f;
+				float SearchPadding = 45.0f;
 				float CombinedRadius = CapRadius + TraceRadius + SearchPadding;
 
 				if ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CombinedRadius))
@@ -3013,22 +3016,20 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 	}
 
 	// FIX: Weapon skin 1st person material gets clobbered by SetSkin() inside
-	// AttachToOwner_Implementation (UTWeapon.cpp:956). SetSkin saves the default
-	// mesh materials to SavedMeshMaterials BEFORE weapon skins are applied.
-	// Later SetSkin(null) calls restore from SavedMeshMaterials, overwriting
-	// the weapon skin. Fix: re-apply weapon skin after BringUp and patch
-	// SavedMeshMaterials so future restores preserve the skin.
-	// Apply to ALL material slots — some weapons (Flak Cannon) have multiple
-	// slots that all need the skin material. Epic's UpdateWeaponSkin only does slot 0.
+	// AttachToOwner_Implementation (UTWeapon.cpp:956). Create MIDs once here
+	// and cache them — SetSkin reuses the cached MIDs via SetMaterial instead
+	// of creating expensive new GPU resources every call.
 	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
 	{
+		CachedSkinMIDs.Empty();
 		int32 NumSlots = Mesh->GetNumMaterials();
 		for (int32 i = 0; i < NumSlots; i++)
 		{
-			Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
+			UMaterialInstanceDynamic* MID = Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
+			CachedSkinMIDs.Add(MID);
 			if (SavedMeshMaterials.IsValidIndex(i))
 			{
-				SavedMeshMaterials[i] = Mesh->GetMaterial(i);
+				SavedMeshMaterials[i] = MID;
 			}
 		}
 	}
@@ -3063,19 +3064,21 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
 	Super::SetSkin(NewSkin);
 
-	// FIX: Super::SetSkin restores from SavedMeshMaterials when NewSkin is null,
-	// which overwrites the weapon skin. Re-apply weapon skin after every SetSkin
-	// call to persist through body color flashes, team overlays, etc.
-	// Apply to ALL slots — Flak Cannon and others have multiple material slots.
-	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
+	// Re-apply cached weapon skin MIDs. Super::SetSkin restores from
+	// SavedMeshMaterials when NewSkin is null, which overwrites the skin.
+	// SetMaterial just swaps the pointer — no GPU allocation.
+	if (WeaponSkin && Mesh && CachedSkinMIDs.Num() > 0)
 	{
-		int32 NumSlots = Mesh->GetNumMaterials();
+		int32 NumSlots = FMath::Min(Mesh->GetNumMaterials(), CachedSkinMIDs.Num());
 		for (int32 i = 0; i < NumSlots; i++)
 		{
-			Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
-			if (SavedMeshMaterials.IsValidIndex(i))
+			if (CachedSkinMIDs[i])
 			{
-				SavedMeshMaterials[i] = Mesh->GetMaterial(i);
+				Mesh->SetMaterial(i, CachedSkinMIDs[i]);
+				if (SavedMeshMaterials.IsValidIndex(i))
+				{
+					SavedMeshMaterials[i] = CachedSkinMIDs[i];
+				}
 			}
 		}
 	}
