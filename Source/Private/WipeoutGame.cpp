@@ -2943,7 +2943,7 @@ void AUWipeoutGame::SpawnSiphonPickup()
 	FVector BestLoc = FVector::ZeroVector;
 	FRotator BestRot = FRotator::ZeroRotator;
 	float HighestZ = -FLT_MAX;
-	bool bFoundSniper = false;
+	AUTPickupWeapon* BestSniperPickup = nullptr;
 
 	for (TActorIterator<AUTPickupWeapon> It(GetWorld()); It; ++It)
 	{
@@ -2959,16 +2959,19 @@ void AUWipeoutGame::SpawnSiphonPickup()
 				HighestZ = Z;
 				BestLoc = WP->GetActorLocation();
 				BestRot = WP->GetActorRotation();
-				bFoundSniper = true;
+				BestSniperPickup = WP;
 			}
 		}
 	}
 
-	if (!bFoundSniper)
+	if (!BestSniperPickup)
 	{
 		UE_LOG(LogGameMode, Log, TEXT("Wipeout: No sniper weapon base found — skipping Siphon pickup"));
 		return;
 	}
+
+	// Remove the sniper weapon pickup we're replacing
+	BestSniperPickup->Destroy();
 
 	// Spawn a PowerupBase pickup at the sniper's location
 	TSubclassOf<AUTPickupInventory> PowerupBaseClass = LoadClass<AUTPickupInventory>(
