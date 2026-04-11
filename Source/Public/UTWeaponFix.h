@@ -166,6 +166,10 @@ public:
     virtual bool PutDown() override;
     void PutDownDelayed();
     virtual void FireInstantHit(bool bDealDamage, FHitResult* OutHit) override;
+
+    /** Get the hit validation prediction time (ping-based rewind amount).
+     *  Public so ServerShield can use the same rewind for radial offset analysis. */
+    virtual float GetHitValidationPredictionTime() const;
     virtual void FireShot() override;
 
     // Guard against race condition: replicated fire RPC arrives after owner dies
@@ -383,15 +387,6 @@ protected:
      */
     UFUNCTION()
     void OnRep_FireModeState();
-
-    /**
-     * Get the hit validation time from the player controller.
-     * Uses split prediction's hit validation time if available (120ms default).
-     * Falls back to standard GetPredictionTime() if not using split prediction.
-     *
-     * @return Time in seconds to rewind pawns for hit validation
-     */
-    virtual float GetHitValidationPredictionTime() const;
 
     /** Setup replication */
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
