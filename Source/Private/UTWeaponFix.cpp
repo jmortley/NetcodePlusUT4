@@ -33,22 +33,13 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
 int32 AUTWeaponFix::GetTargetProjectileTickRate()
 {
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
-    TargetHz = FMath::Clamp(TargetHz, 60, 660);
-    return FMath::RoundToInt(TargetHz / 60.f) * 60;
+    return FMath::Clamp(TargetHz, 120, 720);
 }
 
-// Helper function (can be static or inline)
-static int32 GetSnappedProjectileHz()
+static int32 GetClampedProjectileHz()
 {
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
-
-    // Clamp range
-    TargetHz = FMath::Clamp(TargetHz, 60, 600);
-
-    // Snap to nearest multiple of 60
-    TargetHz = FMath::RoundToInt(TargetHz / 60.f) * 60;
-
-    return TargetHz;
+    return FMath::Clamp(TargetHz, 120, 720);
 }
 
 
@@ -59,6 +50,7 @@ static int32 GetSnappedProjectileHz()
 
 TMap<FName, bool> AUTWeaponFix::HiddenWeaponsByTag;
 TMap<FName, FString> AUTWeaponFix::SavedSkinPaths;
+TMap<FName, UUTWeaponSkin*> AUTWeaponFix::CachedSkinAssets;
 bool AUTWeaponFix::bWeaponSettingsLoaded = false;
 
 static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings");
@@ -101,6 +93,14 @@ void AUTWeaponFix::LoadWeaponSettings()
 					if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *SkinKey, SkinPath, ModIniPath) && !SkinPath.IsEmpty())
 					{
 						SavedSkinPaths.Add(Tag, SkinPath);
+						// Eagerly load the skin asset now (during startup) so BringUp()
+						// can do a cheap pointer lookup instead of a blocking LoadObject.
+						UUTWeaponSkin* Skin = LoadObject<UUTWeaponSkin>(nullptr, *SkinPath);
+						if (Skin)
+						{
+							Skin->AddToRoot();
+							CachedSkinAssets.Add(Tag, Skin);
+						}
 					}
 				}
 			}
@@ -2044,7 +2044,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
         }
         else if (GetNetMode() != NM_DedicatedServer)
         {
-            const int32 ClientHz = GetSnappedProjectileHz();
+            const int32 ClientHz = GetClampedProjectileHz();
             const float ClientInterval = 1.f / static_cast<float>(ClientHz);
             NewProjectile->PrimaryActorTick.TickInterval = ClientInterval;
             NewProjectile->ProjectileMovement->PrimaryComponentTick.TickInterval = ClientInterval;
@@ -2061,6 +2061,16 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
         CorrectVelocity.Z += NewProjectile->TossZ;
         NewProjectile->ProjectileMovement->Velocity = CorrectVelocity;
         NewProjectile->ProjectileMovement->UpdateComponentVelocity();
+
+        // Re-cache drift correction direction so it matches enforced velocity.
+        // BeginPlay cached OriginalFireDirection before this enforcement ran;
+        // if they differ (rotation quantization), the drift correction in Tick()
+        // would snap the ball back to the stale direction, causing a check-mark.
+        AUTPlusProj_ShockBall* ShockBall = Cast<AUTPlusProj_ShockBall>(NewProjectile);
+        if (ShockBall)
+        {
+            ShockBall->SetOriginalFireDirection(NewProjectile->ProjectileMovement->Velocity.GetSafeNormal());
+        }
     }
 
 	// ----------------------------------------
@@ -3005,13 +3015,13 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 		}
 	}
 
-	// Load saved skin from Mod.ini if we don't already have one set
+	// Apply saved skin from pre-loaded cache (loaded eagerly in LoadWeaponSettings)
 	if (!WeaponSkin && WeaponSkinCustomizationTag != NAME_None)
 	{
-		FString* SkinPath = SavedSkinPaths.Find(WeaponSkinCustomizationTag);
-		if (SkinPath && !SkinPath->IsEmpty())
+		UUTWeaponSkin** Cached = CachedSkinAssets.Find(WeaponSkinCustomizationTag);
+		if (Cached && *Cached)
 		{
-			WeaponSkin = LoadObject<UUTWeaponSkin>(nullptr, **SkinPath);
+			WeaponSkin = *Cached;
 		}
 	}
 
@@ -3021,15 +3031,35 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 	// of creating expensive new GPU resources every call.
 	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
 	{
-		CachedSkinMIDs.Empty();
+		// Reuse cached MIDs if they already exist (quick weapon swap back).
+		// Only recreate if cache is empty (first equip) or slot count changed.
 		int32 NumSlots = Mesh->GetNumMaterials();
-		for (int32 i = 0; i < NumSlots; i++)
+		if (CachedSkinMIDs.Num() != NumSlots)
 		{
-			UMaterialInstanceDynamic* MID = Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
-			CachedSkinMIDs.Add(MID);
-			if (SavedMeshMaterials.IsValidIndex(i))
+			CachedSkinMIDs.Empty();
+			for (int32 i = 0; i < NumSlots; i++)
 			{
-				SavedMeshMaterials[i] = MID;
+				UMaterialInstanceDynamic* MID = Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
+				CachedSkinMIDs.Add(MID);
+			}
+		}
+		else
+		{
+			// Cache valid — just re-set the existing MIDs on the mesh
+			for (int32 i = 0; i < NumSlots; i++)
+			{
+				if (CachedSkinMIDs[i])
+				{
+					Mesh->SetMaterial(i, CachedSkinMIDs[i]);
+				}
+			}
+		}
+		// Patch SavedMeshMaterials so SetSkin(nullptr) restores to our skin
+		for (int32 i = 0; i < CachedSkinMIDs.Num(); i++)
+		{
+			if (CachedSkinMIDs[i] && SavedMeshMaterials.IsValidIndex(i))
+			{
+				SavedMeshMaterials[i] = CachedSkinMIDs[i];
 			}
 		}
 	}
@@ -3064,10 +3094,11 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
 	Super::SetSkin(NewSkin);
 
-	// Re-apply cached weapon skin MIDs. Super::SetSkin restores from
-	// SavedMeshMaterials when NewSkin is null, which overwrites the skin.
-	// SetMaterial just swaps the pointer — no GPU allocation.
-	if (WeaponSkin && Mesh && CachedSkinMIDs.Num() > 0)
+	// Only re-apply cached weapon skin when the overlay is being REMOVED (null).
+	// When NewSkin is non-null, it's a powerup overlay (amp/berserk/etc.) — let it
+	// take effect. When it's null, Super restores from SavedMeshMaterials which
+	// already contains our cached skin MIDs (patched in BringUp).
+	if (!NewSkin && WeaponSkin && Mesh && CachedSkinMIDs.Num() > 0)
 	{
 		int32 NumSlots = FMath::Min(Mesh->GetNumMaterials(), CachedSkinMIDs.Num());
 		for (int32 i = 0; i < NumSlots; i++)
@@ -3075,10 +3106,6 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 			if (CachedSkinMIDs[i])
 			{
 				Mesh->SetMaterial(i, CachedSkinMIDs[i]);
-				if (SavedMeshMaterials.IsValidIndex(i))
-				{
-					SavedMeshMaterials[i] = CachedSkinMIDs[i];
-				}
 			}
 		}
 	}

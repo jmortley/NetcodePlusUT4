@@ -6,6 +6,8 @@
 #include "UTWeapon.h"
 #include "UTWeaponFix.generated.h"
 
+class UUTWeaponSkin;
+
 /**
  * Enhanced weapon base class combining three critical fixes:
  * 
@@ -141,6 +143,10 @@ public:
     /** Saved skin asset paths — keyed by WeaponSkinCustomizationTag.
      *  Loaded from Mod.ini, applied in BringUp(). */
     static TMap<FName, FString> SavedSkinPaths;
+
+    /** Pre-loaded skin assets — keyed by WeaponSkinCustomizationTag.
+     *  Loaded eagerly in LoadWeaponSettings() so BringUp() avoids a blocking LoadObject. */
+    static TMap<FName, UUTWeaponSkin*> CachedSkinAssets;
 
     /** Load weapon settings (skins + hide state) from Mod.ini. Called once on first BringUp. */
     static void LoadWeaponSettings();
