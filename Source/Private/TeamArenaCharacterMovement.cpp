@@ -271,18 +271,7 @@ bool UTeamArenaCharacterMovement::CanDodge()
 
 void UTeamArenaCharacterMovement::SmoothClientPosition(float DeltaSeconds)
 {
+    // TODO: Hard clamp for extreme corrections (IG+ style) — disabled for now,
+    // needs more testing with water volumes and movement mode transitions.
     Super::SmoothClientPosition(DeltaSeconds);
-
-    // Hard clamp — extreme corrections (teleport, packet loss, jump pad edge case)
-    // should snap instead of smoothing over multiple frames. IG+ does this at 100u;
-    // we use 250u since UE4 corrections accumulate differently.
-    // Skip in water — movement mode transitions cause large corrections that are normal.
-    if (MovementMode != MOVE_Swimming)
-    {
-        FNetworkPredictionData_Client_Character* ClientData = GetPredictionData_Client_Character();
-        if (ClientData && ClientData->MeshTranslationOffset.SizeSquared() > 250.f * 250.f)
-        {
-            ClientData->MeshTranslationOffset = FVector::ZeroVector;
-        }
-    }
 }
