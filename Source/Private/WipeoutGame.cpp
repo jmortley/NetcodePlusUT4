@@ -2975,26 +2975,36 @@ void AUWipeoutGame::SpawnSiphonPickup()
 		return;
 	}
 
-	if (!SiphonPickupClass)
-	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: SiphonPickupClass not set — skipping Siphon spawn"));
-		return;
-	}
-
 	// Remove the sniper weapon pickup we're replacing
 	BestSniperPickup->Destroy();
+
+	// Try BP class first, fall back to hardcoded PowerupBase_C
+	TSubclassOf<AUTPickupInventory> SpawnClass = SiphonPickupClass;
+	if (!SpawnClass)
+	{
+		SpawnClass = LoadClass<AUTPickupInventory>(
+			nullptr, TEXT("/Game/RestrictedAssets/Pickups/Powerups/PowerupBase.PowerupBase_C"));
+	}
+	if (!SpawnClass)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: No pickup class available for Siphon"));
+		return;
+	}
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Attempting Siphon spawn — class=%s at %s"),
-		*SiphonPickupClass->GetName(), *BestLoc.ToString());
-
-	AActor* SpawnedActor = GetWorld()->SpawnActor<AActor>(SiphonPickupClass, &BestLoc, &BestRot, Params);
-	SiphonPickup = Cast<AUTPickupInventory>(SpawnedActor);
+	UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Spawning Siphon class=%s at %s"), *SpawnClass->GetPathName(), *BestLoc.ToString());
+	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(SpawnClass, &BestLoc, &BestRot, Params);
 
 	if (SiphonPickup)
 	{
+		// If using fallback PowerupBase (not custom BP), set inventory type
+		if (!SiphonPickupClass)
+		{
+			SiphonPickup->SetInventoryType(AUTSiphonPowerup::StaticClass());
+		}
+
 		// Register the Siphon's overlay effect with the GameState
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS)
