@@ -12,7 +12,7 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	: Super(ObjectInitializer)
 {
 	bDrawMinimapInScoreboard = false;
-	CellWidth = 625.f; // Stock is 480 — need room for 8 columns
+	CellWidth = 850.f; // Match Wipeout — plenty of room for 8 columns
 
 	// Column positions (fraction of CellWidth)
 	ColumnHeaderPlayerX  = 0.02f;
