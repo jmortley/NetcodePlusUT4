@@ -71,7 +71,8 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 	const float CenterX = Canvas->ClipX * 0.5f;
-	const float TopY = 2.f * RenderScale;
+	// Push score bar below flag status icons (they occupy ~40px at top)
+	const float TopY = 36.f * RenderScale;
 
 	// Team colors (respect TeamSkins)
 	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
@@ -167,6 +168,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 
 	// Match clock (CTF uses match time, not round time)
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
+	float ClockBottomY = ClockY;
 	float RoundClockScale = RenderScale * 1.1f;
 
 	int32 RemainingTime = GS->GetRemainingTime();
@@ -181,6 +183,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		else
 			Canvas->DrawColor = FColor::White;
 		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		ClockBottomY = ClockY + YL;
 	}
 	else
 	{
@@ -192,5 +195,19 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
 		Canvas->DrawColor = FColor::White;
 		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		ClockBottomY = ClockY + YL;
+	}
+
+	// Half indicator (only when halftime is enabled)
+	// bSecondHalf is on UTCTFGameState — use reflection to avoid ABI mismatch
+	UBoolProperty* HalfProp = FindField<UBoolProperty>(GS->GetClass(), TEXT("bSecondHalf"));
+	if (HalfProp)
+	{
+		bool bSecondHalf = HalfProp->GetPropertyValue_InContainer(GS);
+		FString HalfStr = bSecondHalf ? TEXT("2nd Half") : TEXT("1st Half");
+		float HalfScale = RenderScale * 0.7f;
+		Canvas->TextSize(SmallFont, HalfStr, XL, YL, HalfScale, HalfScale);
+		Canvas->DrawColor = FColor(200, 200, 200, 255);
+		Canvas->DrawText(SmallFont, HalfStr, CenterX - XL * 0.5f, ClockBottomY + 1.f * RenderScale, HalfScale, HalfScale);
 	}
 }
