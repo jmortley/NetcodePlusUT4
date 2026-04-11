@@ -32,6 +32,14 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	// CH_Caps and CH_Returns inherited from parent UUTCTFScoreboard
 }
 
+void UNCPlusCTFScoreboard::PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanvas* InCanvas, FVector2D InCanvasCenter)
+{
+	Super::PreDraw(DeltaTime, InUTHUDOwner, InCanvas, InCanvasCenter);
+	// Parent CTFScoreboard::PreDraw sets bDrawMinimapInScoreboard = true every frame.
+	// Force it off — we don't want the minimap on the scoreboard.
+	bDrawMinimapInScoreboard = false;
+}
+
 ACTFStatsReplicator* UNCPlusCTFScoreboard::FindStatsReplicator()
 {
 	if (CachedStatsRep) return CachedStatsRep;

@@ -32,6 +32,7 @@ protected:
 	FText CH_Acc;
 	FText CH_Grabs;
 
+	virtual void PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanvas* InCanvas, FVector2D InCanvasCenter) override;
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor) override;
 	virtual void DrawPlayerScores(float RenderDelta, float& YOffset) override;
