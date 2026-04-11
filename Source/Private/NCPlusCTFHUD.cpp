@@ -20,6 +20,20 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusCTFScoreboard"));
 }
 
+void ANCPlusCTFHUD::BeginPlay()
+{
+	// Remove stock widgets we're replacing BEFORE Super::BeginPlay instantiates them.
+	// RequiredHudWidgetClasses is loaded from DefaultGame.ini config.
+	RequiredHudWidgetClasses.RemoveAll([](const FString& Entry)
+	{
+		return Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
+			|| Entry.Contains(TEXT("CTFScoreboard"))     // stock CTF scoreboard
+			|| Entry.Contains(TEXT("TeamScoreboard"));   // stock team scoreboard (fallback)
+	});
+
+	Super::BeginPlay();
+}
+
 EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
 {
 	// Same pattern as WipeoutHUD: keep mouse captured during match.

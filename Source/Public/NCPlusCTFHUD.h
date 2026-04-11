@@ -16,6 +16,7 @@ class NETCODEPLUS_API ANCPlusCTFHUD : public AUTHUD_CTF
 public:
 	ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer);
 
+	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
 
 protected:
