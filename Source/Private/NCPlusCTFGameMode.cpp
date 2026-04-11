@@ -149,7 +149,7 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 		APlayerStart* UsedStart = Cast<APlayerStart>(NewPlayer->StartSpot.Get());
 		if (UsedStart)
 		{
-			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(NewPlayer);
+			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(TWeakObjectPtr<AController>(NewPlayer));
 			Recent.SecondLast = Recent.Last;
 			Recent.Last = UsedStart;
 		}
@@ -324,7 +324,7 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 	// Discourage reusing the same spawn points to prevent predictable spawns.
 	if (Player)
 	{
-		FRecentSpawns* Recent = PlayerRecentSpawns.Find(Player);
+		FRecentSpawns* Recent = PlayerRecentSpawns.Find(TWeakObjectPtr<AController>(Player));
 		if (Recent)
 		{
 			// Can't use the exact same spawn as last time

@@ -196,7 +196,7 @@ protected:
 		TWeakObjectPtr<APlayerStart> SecondLast;
 	};
 
-	TMap<AController*, FRecentSpawns> PlayerRecentSpawns;
+	TMap<TWeakObjectPtr<AController>, FRecentSpawns> PlayerRecentSpawns;
 
 	/** Penalty multiplier for using the same spawn as 2 spawns ago (0.5 = half score). IG+ default. */
 	float SpawnRecentPenaltyMultiplier = 0.5f;
