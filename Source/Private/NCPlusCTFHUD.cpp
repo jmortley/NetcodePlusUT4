@@ -1,0 +1,182 @@
+// NCPlusCTFHUD.cpp — Custom CTF HUD with team score bar and mouse focus fix.
+#include "NCPlusCTFHUD.h"
+#include "UnrealTournament.h"
+#include "UTGameState.h"
+#include "UTPlayerState.h"
+#include "UTTeamInfo.h"
+
+ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+{
+	// AUTHUD_CTF constructor sets up RequiredHudWidgetClasses with all stock
+	// CTF widgets (flag status, minimap, etc). We add our scoreboard and remove
+	// the stock team clock since we draw our own.
+	//
+	// The stock clock is bpHW_TeamGameClock — loaded via RequiredHudWidgetClasses
+	// in the parent. We can't easily remove it from there, so we'll just draw our
+	// bar on top. The stock clock's small footprint is acceptable as fallback.
+
+	// Our custom scoreboard widget
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusCTFScoreboard"));
+}
+
+EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
+{
+	// Same pattern as WipeoutHUD: keep mouse captured during match.
+	// CTF doesn't have elimination, but this prevents click-off during
+	// death spectating and halftime transitions.
+	if (UTPlayerOwner != nullptr)
+	{
+		AUTPlayerState* PS = UTPlayerOwner->UTPlayerState;
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+		if (PS && !PS->bOnlySpectator && GS && GS->GetMatchState() == MatchState::InProgress)
+		{
+			return EInputMode::EIM_GameOnly;
+		}
+	}
+	return Super::GetInputMode_Implementation();
+}
+
+void ANCPlusCTFHUD::DrawHUD()
+{
+	Super::DrawHUD();
+
+	if (!Canvas || !SmallFont) return;
+
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	if (GS && !ScoreboardIsUp())
+	{
+		DrawTeamScoreBar();
+	}
+}
+
+void ANCPlusCTFHUD::DrawTeamScoreBar()
+{
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	if (!GS || !Canvas || !SmallFont || !MediumFont || !LargeFont) return;
+
+	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float TopY = 2.f * RenderScale;
+
+	// Team colors (respect TeamSkins)
+	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
+	FLinearColor Team1Color = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
+	bool bCustomColors = false;
+
+	if (GS->Teams.IsValidIndex(0) && GS->Teams[0])
+	{
+		FLinearColor TC = GS->Teams[0]->TeamColor;
+		if (FMath::Abs(TC.R - 1.f) > 0.2f || TC.G > 0.3f || TC.B > 0.3f)
+			bCustomColors = true;
+		Team0Color = TC;
+	}
+	if (GS->Teams.IsValidIndex(1) && GS->Teams[1])
+	{
+		FLinearColor TC = GS->Teams[1]->TeamColor;
+		if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f)
+			bCustomColors = true;
+		Team1Color = TC;
+	}
+
+	FString Team0Name = bCustomColors ? TEXT("Liandri") : TEXT("RED");
+	FString Team1Name = bCustomColors ? TEXT("Phayder") : TEXT("BLUE");
+
+	int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
+	int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
+
+	// Dimensions
+	const float BarWidth = 220.f * RenderScale;
+	const float BarHeight = 36.f * RenderScale;
+	const float ScoreBoxWidth = 50.f * RenderScale;
+	const float GapWidth = 8.f * RenderScale;
+
+	// Team 0 (left)
+	float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
+	Canvas->SetLinearDrawColor(Team0Color);
+	Canvas->DrawTile(Canvas->DefaultTexture, LeftBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
+
+	float ScoreBoxX0 = CenterX - GapWidth - ScoreBoxWidth;
+	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
+
+	// Team 1 (right)
+	float ScoreBoxX1 = CenterX + GapWidth;
+	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
+
+	float RightBarX = CenterX + GapWidth + ScoreBoxWidth;
+	Canvas->SetLinearDrawColor(Team1Color);
+	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
+
+	// Score tails
+	float TailHeight = 14.f * RenderScale;
+	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
+	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
+
+	// Center divider
+	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
+
+	// Text
+	float FontScale = RenderScale * 0.85f;
+	float LargeFontScale = RenderScale * 1.2f;
+	float XL, YL;
+
+	// Team 0 name
+	Canvas->TextSize(SmallFont, Team0Name, XL, YL, FontScale, FontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(SmallFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+
+	// Team 0 score
+	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
+	Canvas->TextSize(LargeFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(LargeFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+
+	// Team 1 score
+	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
+	Canvas->TextSize(LargeFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(LargeFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+
+	// Team 1 name
+	Canvas->TextSize(SmallFont, Team1Name, XL, YL, FontScale, FontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(SmallFont, Team1Name, RightBarX + 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+
+	// Match clock (CTF uses match time, not round time)
+	float ClockY = TopY + BarHeight + 2.f * RenderScale;
+	float RoundClockScale = RenderScale * 1.1f;
+
+	int32 RemainingTime = GS->GetRemainingTime();
+	if (RemainingTime >= 0 && GS->TimeLimit > 0)
+	{
+		int32 Mins = RemainingTime / 60;
+		int32 Secs = RemainingTime % 60;
+		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
+		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		if (RemainingTime <= 30)
+			Canvas->DrawColor = FColor(255, 60, 60, 255);
+		else
+			Canvas->DrawColor = FColor::White;
+		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+	}
+	else
+	{
+		// No time limit — show elapsed time
+		int32 Elapsed = GS->ElapsedTime;
+		int32 Mins = Elapsed / 60;
+		int32 Secs = Elapsed % 60;
+		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
+		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		Canvas->DrawColor = FColor::White;
+		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+	}
+}

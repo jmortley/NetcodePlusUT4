@@ -23,6 +23,8 @@
 #include "UTCTFScoring.h"
 #include "UTFlag.h"
 #include "NPPlayerController.h"
+#include "NCPlusCTFHUD.h"
+#include "CTFStatsReplicator.h"
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -35,9 +37,10 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	TimeLimit = 14;
 	CTFScoringClass = AUTCTFScoring::StaticClass();
 	DisplayName = NSLOCTEXT("UTGameMode", "NCPlusCTF", "NetcodePlus CTF");
+	HUDClass = ANCPlusCTFHUD::StaticClass();
 
 	// Advantage configuration
-	AdvantageMaxDuration = 60;
+	AdvantageMaxDuration = 300;
 	GracePeriodDuration = 10;
 	bEndGameAdvantageOnlyWithinOneCap = true;
 
@@ -70,7 +73,7 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	Super::InitGame(MapName, Options, ErrorMessage);
 
 	IntermissionDuration = FMath::Max(1, UGameplayStatics::GetIntOption(Options, TEXT("HalftimeDuration"), IntermissionDuration));
-	AdvantageMaxDuration = FMath::Max(10, UGameplayStatics::GetIntOption(Options, TEXT("AdvantageMaxDuration"), AdvantageMaxDuration));
+	AdvantageMaxDuration = FMath::Max(60, UGameplayStatics::GetIntOption(Options, TEXT("AdvantageMaxDuration"), AdvantageMaxDuration));
 	GracePeriodDuration = FMath::Max(3, UGameplayStatics::GetIntOption(Options, TEXT("GracePeriod"), GracePeriodDuration));
 
 	if (bOfflineChallenge)
@@ -139,6 +142,17 @@ bool ANCPlusCTFGameMode::SupportsInstantReplay() const
 void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
 	Super::RestartPlayer(NewPlayer);
+
+	// Ping-compensated spawn: hide pawn until client confirms control.
+	// Skip bots (no remote client to confirm).
+	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
+	if (SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
+	{
+		SpawnedChar->bPingCompensatedSpawnPending = true;
+		SpawnedChar->SetActorHiddenInGame(true);
+		SpawnedChar->SetActorEnableCollision(false);
+		SpawnedChar->SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+	}
 }
 
 // ── Spawn Rating ────────────────────────────────────────────────────
@@ -506,51 +520,47 @@ void ANCPlusCTFGameMode::DefaultTimer()
 {
 	Super::DefaultTimer();
 
-	// Tick advantage and grace period timers (DefaultTimer fires every second)
+	// Tick advantage and no-possession timers (DefaultTimer fires every second)
+	// Advantage lasts up to AdvantageMaxDuration (5 min default).
+	// If no flag is held for GracePeriodDuration (10s) continuously, game ends.
+	// Every flag pickup resets the no-possession timer.
 	if (CTFGameState && NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")) && CTFGameState->IsMatchInProgress())
 	{
-		if (bGracePeriodActive)
+		if (IsAnyFlagHeld())
 		{
-			// Check if a flag was picked up since last tick (polling approach)
-			if (IsAnyFlagHeld())
-			{
-				CancelGracePeriod();
-			}
-			else
-			{
-				GracePeriodTimeRemaining--;
-
-				// Broadcast countdown
-				if (GracePeriodTimeRemaining >= 0 && GracePeriodTimeRemaining < 10)
-				{
-					BroadcastLocalized(this, UUTCountDownMessage::StaticClass(), GracePeriodTimeRemaining + 1);
-				}
-
-				if (GracePeriodTimeRemaining <= 0)
-				{
-					EndOfHalf();
-					return;
-				}
-			}
+			// Flag is held — reset no-possession timer
+			bGracePeriodActive = false;
+			GracePeriodTimeRemaining = GracePeriodDuration;
 		}
 		else
 		{
-			// If all flags returned (manual OR auto-return), start grace period.
-			// Auto-return doesn't fire a ScoreObject("SentHome") event, so we
-			// poll the actual flag state here instead of relying on events.
-			if (!IsAnyFlagHeld())
+			// No flag held — tick (or start) no-possession timer
+			if (!bGracePeriodActive)
 			{
-				StartGracePeriod();
+				bGracePeriodActive = true;
+				GracePeriodTimeRemaining = GracePeriodDuration;
 			}
 
-			// Advantage main timer ticking
-			AdvantageTimeRemaining--;
+			GracePeriodTimeRemaining--;
 
-			if (AdvantageTimeRemaining <= 0)
+			if (GracePeriodTimeRemaining >= 0 && GracePeriodTimeRemaining < 10)
 			{
-				// Advantage time exhausted - start grace period regardless
-				StartGracePeriod();
+				BroadcastLocalized(this, UUTCountDownMessage::StaticClass(), GracePeriodTimeRemaining + 1);
 			}
+
+			if (GracePeriodTimeRemaining <= 0)
+			{
+				EndOfHalf();
+				return;
+			}
+		}
+
+		// Overall advantage time limit (5 min default)
+		AdvantageTimeRemaining--;
+		if (AdvantageTimeRemaining <= 0)
+		{
+			EndOfHalf();
+			return;
 		}
 	}
 
@@ -604,18 +614,7 @@ void ANCPlusCTFGameMode::ScoreObject_Implementation(AUTCarriedObject* GameObject
 
 	if (Holder != nullptr && Holder->Team != nullptr && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())
 	{
-		if (Reason == FName("SentHome"))
-		{
-			// Flag was returned during advantage
-			if (NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")))
-			{
-				if (!IsAnyFlagHeld() && !bGracePeriodActive)
-				{
-					StartGracePeriod();
-				}
-			}
-		}
-		else if (Reason == FName("FlagCapture"))
+		if (Reason == FName("FlagCapture"))
 		{
 			// Boost CoolFactor for all captures (for replay selection)
 			Holder->AddCoolFactorEvent(200.0f);
@@ -702,6 +701,14 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
+	}
+
+	// Spawn CTF stats replicator for scoreboard (grabs, accuracy)
+	if (HasAuthority() && !CTFStatsRep)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		CTFStatsRep = GetWorld()->SpawnActor<ACTFStatsReplicator>(SpawnParams);
 	}
 }
 

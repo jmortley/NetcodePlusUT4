@@ -11,6 +11,7 @@
 #include "UTWeap_LinkGun.h"
 #include "UTArmor.h"
 #include "UTDamageType.h"
+#include "Net/UnrealNetwork.h"
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -508,6 +509,10 @@ void ATeamArenaCharacter::BeginPlay()
 			GS->AddOverlayMaterial(SpawnProtectionMaterial, nullptr);
 		}
 	}
+
+	// Note: Ping-compensated spawn hiding is done in the game mode's
+	// RestartPlayer() AFTER Super::RestartPlayer() returns (which calls BeginPlay).
+	// The game mode sets bPingCompensatedSpawnPending, hides, and disables collision.
 }
 
 
@@ -515,6 +520,27 @@ void ATeamArenaCharacter::BeginPlay()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
+	// ── Ping-compensated spawn: client confirms control ──
+	if (bPingCompensatedSpawnPending)
+	{
+		if (IsLocallyControlled() && Controller != nullptr)
+		{
+			// Client has possession — tell server to reveal us
+			bPingCompensatedSpawnPending = false;
+			ServerConfirmSpawnReady();
+		}
+		else if (Role == ROLE_Authority)
+		{
+			// Server timeout: force-reveal after 500ms to prevent permanently hidden pawns
+			if (GetWorld()->GetTimeSeconds() - SpawnHiddenTimestamp > 0.5f)
+			{
+				bPingCompensatedSpawnPending = false;
+				SetActorHiddenInGame(false);
+				SetActorEnableCollision(true);
+			}
+		}
+	}
+
 	// --- Per-weapon hide: detect weapon switch and apply hide state ---
 	// Works for ALL weapons (stock and NetcodePlus) since TeamArenaCharacter
 	// is the character class for all players.
@@ -895,4 +921,29 @@ bool ATeamArenaCharacter::ModifyDamageTaken_Implementation(
 		}
 	}
 	return false;
+}
+
+// ── Ping-Compensated Spawn ──────────────────────────────────────────
+
+void ATeamArenaCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(ATeamArenaCharacter, bPingCompensatedSpawnPending);
+}
+
+bool ATeamArenaCharacter::ServerConfirmSpawnReady_Validate()
+{
+	return true;
+}
+
+void ATeamArenaCharacter::ServerConfirmSpawnReady_Implementation()
+{
+	if (!bPingCompensatedSpawnPending)
+	{
+		return;
+	}
+
+	bPingCompensatedSpawnPending = false;
+	SetActorHiddenInGame(false);
+	SetActorEnableCollision(true);
 }

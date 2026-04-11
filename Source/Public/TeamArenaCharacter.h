@@ -151,6 +151,23 @@ public:
 		AController* EventInstigator, AActor* DamageCauser,
 		TSubclassOf<UDamageType> DamageType) override;
 
+	// ── Ping-Compensated Spawn ──────────────────────────────────────
+	// Adapted from UT99 InstaGibPlus: spawn pawn hidden + no collision,
+	// reveal only after the client confirms it has control. Prevents the
+	// "frozen at spawn" window where enemies can see/shoot the player
+	// before the player can move, and the camera crash-zoom on respawn.
+
+	/** Server sets true on spawn; client clears + calls ServerConfirmSpawnReady on first controlled tick */
+	UPROPERTY(Replicated)
+	bool bPingCompensatedSpawnPending = false;
+
+	/** Server timestamp when bPingCompensatedSpawnPending was set (for timeout) */
+	float SpawnHiddenTimestamp = 0.f;
+
+	/** Client has confirmed possession — reveal the pawn */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerConfirmSpawnReady();
+
 protected:
 	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
 	// Server-only; synced when ArmorType is belt, decremented on damage.

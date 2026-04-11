@@ -33,6 +33,7 @@ public:
 	virtual void NotifyMatchStateChange_Implementation(FName NewState) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn,
 		AUTPlayerState* Holder, FName Reason) override;
+	virtual void Mutate_Implementation(const FString& MutateString, APlayerController* Sender) override;
 
 private:
 	// ── Config ────────────────────────────────────────────────────────

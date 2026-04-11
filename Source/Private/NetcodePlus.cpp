@@ -12,12 +12,16 @@
 #include "UTATypes.h"
 #include "SUTWeaponSkinSelector.h"
 #include "SUTNCPlusMenu.h"
+#include "SUTCosmeticSelector.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
 
 /** Weak reference to active NCP menu — only one can be open at a time */
 static TWeakPtr<SUTNCPlusMenu> ActiveNCPMenu;
+
+/** Weak reference to active cosmetic selector */
+static TWeakPtr<SUTCosmeticSelector> ActiveCosmeticSelector;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -230,6 +234,48 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 	ActiveNCPMenu = Menu;
 }
 
+static void HandleCosmetics(const TArray<FString>& Args)
+{
+	if (ActiveCosmeticSelector.IsValid())
+	{
+		ActiveCosmeticSelector.Pin()->ClosePanel();
+		ActiveCosmeticSelector.Reset();
+		return;
+	}
+
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+	if (!World) return;
+
+	APlayerController* RawPC = World->GetFirstPlayerController();
+	if (!RawPC) return;
+
+	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(RawPC->GetLocalPlayer());
+	if (!LP) return;
+
+	UGameViewportClient* ViewportClient = World->GetGameViewport();
+	if (!ViewportClient) return;
+
+	TSharedRef<SUTCosmeticSelector> Selector =
+		SNew(SUTCosmeticSelector)
+		.PlayerOwner(LP);
+
+	ViewportClient->AddViewportWidgetContent(Selector, 100);
+	FSlateApplication::Get().SetKeyboardFocus(Selector, EFocusCause::SetDirectly);
+
+	ActiveCosmeticSelector = Selector;
+}
+
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
 void FNetcodePlus::StartupModule()
@@ -252,6 +298,13 @@ void FNetcodePlus::StartupModule()
 		TEXT("ncpmenu"),
 		TEXT("Open NetcodePlus settings menu (gore, footsteps, screenshots)"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleNCPMenu),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("cosmetics"),
+		TEXT("Open cosmetic selector (hats, eyewear, characters, taunts)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleCosmetics),
 		ECVF_Default
 	);
 
@@ -296,6 +349,16 @@ void FNetcodePlus::ShutdownModule()
 
 	IConsoleObject* Cmd3 = IConsoleManager::Get().FindConsoleObject(TEXT("ncpmenu"));
 	if (Cmd3) { IConsoleManager::Get().UnregisterConsoleObject(Cmd3, false); }
+
+	// Close cosmetic selector if open
+	if (ActiveCosmeticSelector.IsValid())
+	{
+		ActiveCosmeticSelector.Pin()->ClosePanel();
+		ActiveCosmeticSelector.Reset();
+	}
+
+	IConsoleObject* Cmd4 = IConsoleManager::Get().FindConsoleObject(TEXT("cosmetics"));
+	if (Cmd4) { IConsoleManager::Get().UnregisterConsoleObject(Cmd4, false); }
 
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus unloaded"));
 }

@@ -257,6 +257,18 @@ public:
 
 
 	// =======================================================================
+	// SIPHON POWERUP (spawned at highest sniper location)
+	// =======================================================================
+
+	/** The siphon pickup spawned at the highest sniper weapon base location */
+	UPROPERTY(Transient)
+	class AUTPickupInventory* SiphonPickup;
+
+	/** Finds the highest sniper weapon base and spawns a Siphon powerup pickup there */
+	void SpawnSiphonPickup();
+
+
+	// =======================================================================
 	// VICTORY / AUDIO
 	// =======================================================================
 
@@ -603,6 +615,12 @@ protected:
 
 	UPROPERTY(Transient)
 	TArray<APlayerStart*> AllSpawnPointsList;
+
+	/** Full geographic side arrays from anchor-based clustering.
+	 *  Persisted at map load so ChoosePlayerStart can use them without re-clustering.
+	 *  Contains ALL spawns on each side (no top-N filtering). */
+	TArray<APlayerStart*> PrecomputedSideA;
+	TArray<APlayerStart*> PrecomputedSideB;
 
 	UPROPERTY(Transient)
 	bool bSpawnPointsInitialized = false;

@@ -514,14 +514,23 @@ void SUTWeaponSkinSelector::SaveAndApply()
 			if (SkinIdx == 0)
 			{
 				GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *SkinKey, TEXT(""), ModIniPath);
+				AUTWeaponFix::SavedSkinPaths.Remove(W.Tag);
+				AUTWeaponFix::CachedSkinAssets.Remove(W.Tag);
 			}
 			else
 			{
 				TArray<UUTWeaponSkin*>* Skins = SkinsByTag.Find(W.Tag);
 				if (Skins && Skins->IsValidIndex(SkinIdx - 1))
 				{
-					FString SkinPath = (*Skins)[SkinIdx - 1]->GetPathName();
+					UUTWeaponSkin* SelectedSkin = (*Skins)[SkinIdx - 1];
+					FString SkinPath = SelectedSkin->GetPathName();
 					GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), *SkinKey, *SkinPath, ModIniPath);
+					AUTWeaponFix::SavedSkinPaths.Add(W.Tag, SkinPath);
+					if (SelectedSkin)
+					{
+						SelectedSkin->AddToRoot();
+						AUTWeaponFix::CachedSkinAssets.Add(W.Tag, SelectedSkin);
+					}
 				}
 			}
 		}

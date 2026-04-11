@@ -18,6 +18,7 @@
 #include "UTPickupInventory.h"
 #include "Engine/DemoNetDriver.h"
 #include "WipeoutDamageReplicator.h"
+#include "TeamArenaCharacter.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "GameFramework/HUD.h"
@@ -26,6 +27,7 @@
 #include "UTCountDownMessage.h"
 #include "UTGameMessage.h"
 #include "WipeoutHUD.h"
+#include "SiphonPowerup.h"
 
 
 // ============================================================================
@@ -217,6 +219,11 @@ void AUWipeoutGame::BeginPlay()
 	// All actors have passed through CheckRelevance by now — resolve
 	// whether the stashed vest pickup should become a ShieldBelt.
 	ResolveShieldBeltSubstitution();
+
+	// Spawn the Siphon powerup at the highest sniper weapon base location.
+	// Same pattern as Blueprint SpawnActor: iterate all weapon pickups,
+	// find the highest sniper, spawn a PowerupBase with Siphon inventory.
+	SpawnSiphonPickup();
 
 	// Damage replicator is spawned in HandleMatchHasStarted instead of here —
 	// spawning bAlwaysRelevant actors during BeginPlay can trigger package
@@ -527,17 +534,17 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 
 	const int32 TeamIndex = DeadPS->Team->TeamIndex;
 
-	// Increment death counter BEFORE computing delay
-	// (so death 0 uses index 0, death 1 uses index 1, etc.)
+	// Compute delay BEFORE incrementing so first death uses index 0 (4s),
+	// second death uses index 1 (7s), etc.
+	float RespawnDelay = ComputeRespawnDelay(TeamIndex, DeadPS);
+
+	// Now increment counters
 	if (TeamIndex == 0) { Team0DeathCount++; }
 	else                { Team1DeathCount++; }
 
 	// Track per-player deaths too
 	int32& PlayerDeaths = PlayerDeathCounts.FindOrAdd(DeadPS);
 	PlayerDeaths++;
-
-	// Compute delay based on whichever mode we're in
-	float RespawnDelay = ComputeRespawnDelay(TeamIndex, DeadPS);
 
 	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s died (Team %d, death #%d). Respawn in %.1fs"),
 		*DeadPS->PlayerName, TeamIndex,
@@ -1242,6 +1249,17 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
 
+		// Ping-compensated spawn: hide pawn until client confirms control.
+		// Skip bots (no remote client to confirm) — they'd timeout after 500ms.
+		ATeamArenaCharacter* SpawnedChar = NewPlayer->GetPawn() ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
+		if (SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
+		{
+			SpawnedChar->bPingCompensatedSpawnPending = true;
+			SpawnedChar->SetActorHiddenInGame(true);
+			SpawnedChar->SetActorEnableCollision(false);
+			SpawnedChar->SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+		}
+
 		// Force switch to best weapon on spawn — bypasses the player's
 		// bAutoWeaponSwitch preference so they don't spawn with Enforcer/Hammer.
 		// Super::RestartPlayer already calls ClientSwitchToBestWeapon for remote
@@ -1370,77 +1388,31 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 
 	const int32 TeamIndex = PS->Team->TeamIndex;
 
-	// Split all spawns into two sides. Try N/S (Y axis) and E/W (X axis),
-	// pick whichever split gives the most balanced result (min side >= 4 for 4v4).
-	if (AllSpawnPointsList.Num() < 2) return Super::ChoosePlayerStart_Implementation(Player);
+	// Use precomputed anchor-based sides (all spawns on each geographic side,
+	// including elevated ones — no top-N filtering).
+	TArray<APlayerStart*> MySpawns;
 
-	// Compute centroid
-	FVector Centroid = FVector::ZeroVector;
-	for (APlayerStart* S : AllSpawnPointsList) Centroid += S->GetActorLocation();
-	Centroid /= AllSpawnPointsList.Num();
-
-	// Try both axes and pick the most balanced split
-	TArray<APlayerStart*> SideA, SideB;
-	int32 BestMinSide = 0;
-
-	for (int32 Axis = 0; Axis < 2; Axis++)
+	if (PrecomputedSideA.Num() > 0 && PrecomputedSideB.Num() > 0)
 	{
-		TArray<APlayerStart*> TempA, TempB;
-		for (APlayerStart* S : AllSpawnPointsList)
-		{
-			float Val = (Axis == 0) ? S->GetActorLocation().X : S->GetActorLocation().Y;
-			float Mid = (Axis == 0) ? Centroid.X : Centroid.Y;
-			if (Val <= Mid)
-				TempA.Add(S);
-			else
-				TempB.Add(S);
-		}
-
-		int32 MinSide = FMath::Min(TempA.Num(), TempB.Num());
-		if (MinSide > BestMinSide)
-		{
-			BestMinSide = MinSide;
-			SideA = TempA;
-			SideB = TempB;
-		}
+		// Swap sides on odd rounds for fairness (matches SelectSpawnLayoutForRound parity)
+		bool bSwap = (TotalRoundsPlayed % 2 == 1);
+		if (TeamIndex == 0)
+			MySpawns = bSwap ? PrecomputedSideB : PrecomputedSideA;
+		else
+			MySpawns = bSwap ? PrecomputedSideA : PrecomputedSideB;
 	}
-
-	// If neither axis gives a good split, fall back to furthest-anchor clustering
-	if (BestMinSide < 2)
+	else
 	{
-		SideA.Empty();
-		SideB.Empty();
-		int32 AnchorA = 0, AnchorB = 1;
-		float MaxDist = 0.f;
-		for (int32 i = 0; i < AllSpawnPointsList.Num(); ++i)
-		{
-			for (int32 j = i + 1; j < AllSpawnPointsList.Num(); ++j)
-			{
-				float D = (AllSpawnPointsList[i]->GetActorLocation() - AllSpawnPointsList[j]->GetActorLocation()).Size2D();
-				if (D > MaxDist) { MaxDist = D; AnchorA = i; AnchorB = j; }
-			}
-		}
-		FVector LocA = AllSpawnPointsList[AnchorA]->GetActorLocation();
-		FVector LocB = AllSpawnPointsList[AnchorB]->GetActorLocation();
-		for (APlayerStart* S : AllSpawnPointsList)
-		{
-			if ((S->GetActorLocation() - LocA).Size2D() <= (S->GetActorLocation() - LocB).Size2D())
-				SideA.Add(S);
-			else
-				SideB.Add(S);
-		}
+		// Fallback: precompute failed or map has < 2 spawns
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: No precomputed sides — falling back to Super"));
+		return Super::ChoosePlayerStart_Implementation(Player);
 	}
-
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout spawn split: SideA=%d, SideB=%d (total %d)"),
-		SideA.Num(), SideB.Num(), AllSpawnPointsList.Num());
-
-	// Alternate sides each round + offset by round number parity for variety
-	bool bSwap = (TotalRoundsPlayed % 2 == 1);
-	TArray<APlayerStart*>& MySpawns = (TeamIndex == 0) ? (bSwap ? SideB : SideA) : (bSwap ? SideA : SideB);
 
 	if (MySpawns.Num() == 0) return Super::ChoosePlayerStart_Implementation(Player);
 
-	// Pick the spawn with fewest nearby teammates + randomness
+	// Score spawns to cluster teammates together.
+	// First player spawned has no teammates yet — picks randomly.
+	// Subsequent players are pulled toward already-spawned teammates.
 	APlayerStart* BestSpawn = nullptr;
 	float BestScore = -FLT_MAX;
 
@@ -1450,6 +1422,7 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 
 		int32 NearbyCount = 0;
 		float MinTeammateDist = FLT_MAX;
+		bool bOccupied = false;
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
@@ -1458,13 +1431,21 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 			if (OtherPS && OtherPS != PS && OtherPS->Team && OtherPS->Team->TeamIndex == TeamIndex)
 			{
 				float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
+				if (Dist < 100.f)
+				{
+					bOccupied = true;
+					break;
+				}
 				MinTeammateDist = FMath::Min(MinTeammateDist, Dist);
-				if (Dist < 600.f) NearbyCount++;
+				if (Dist < 800.f) NearbyCount++;
 			}
 		}
 
-		// Score: prefer no nearby teammates, then maximize distance from closest teammate
-		float Score = -NearbyCount * 10000.f + MinTeammateDist + FMath::FRandRange(0.f, 200.f);
+		// Skip spawns that already have a teammate on them — each player gets a unique start
+		if (bOccupied) continue;
+
+		// Reward nearby teammates, reward closeness — team spawns as a tight group
+		float Score = NearbyCount * 5000.f - MinTeammateDist + FMath::FRandRange(0.f, 300.f);
 		if (Score > BestScore)
 		{
 			BestScore = Score;
@@ -1729,6 +1710,24 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 	uint64 Key = MakeDamagePairKey(Attacker, Victim);
 	int32& PairDmg = LifeDamageMap.FindOrAdd(Key);
 	PairDmg += ActualDamage;
+
+	// Siphon: heal attacker for a percentage of raw damage dealt
+	AUTCharacter* AttackerChar = Attacker->GetUTCharacter();
+	if (AttackerChar && !AttackerChar->IsDead() && !AttackerChar->IsPendingKillPending())
+	{
+		AUTSiphonPowerup* Siphon = AttackerChar->FindInventoryType<AUTSiphonPowerup>(
+			AUTSiphonPowerup::StaticClass(), false);
+		if (Siphon)
+		{
+			int32 HealAmount = FMath::CeilToInt(DamageAmount * Siphon->SiphonPercent);
+			int32 NewHealth = FMath::Min<int32>(AttackerChar->Health + HealAmount, Siphon->HealCap);
+			if (NewHealth > AttackerChar->Health)
+			{
+				AttackerChar->Health = NewHealth;
+				AttackerChar->OnHealthUpdated();
+			}
+		}
+	}
 }
 
 
@@ -2187,6 +2186,11 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 
 	UE_LOG(LogGameMode, Log, TEXT("Wipeout spawn clustering: %d on side A, %d on side B (anchor dist %.0f)"),
 		SideA.Num(), SideB.Num(), MaxDist);
+
+	// Persist full side arrays for ChoosePlayerStart (no top-N filtering —
+	// all spawns on each side remain candidates, including elevated ones).
+	PrecomputedSideA = SideA;
+	PrecomputedSideB = SideB;
 
 	// ── Generate layouts: pick SpawnsPerTeam from each side ──
 	// SpawnsPerTeam = 4 to give each player a unique spawn (4v4 max)
@@ -2849,6 +2853,17 @@ void AUWipeoutGame::ResetPickupTimers()
 
 		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: %s will spawn in %.0fs"), *ClassName, DelaySeconds);
 	}
+
+	// Siphon pickup — same 90s timer as Amp
+	if (SiphonPickup && !SiphonPickup->IsPendingKillPending())
+	{
+		SiphonPickup->StartSleeping();
+		SiphonPickup->RespawnTime = 90.f;
+		GetWorldTimerManager().SetTimer(
+			SiphonPickup->WakeUpTimerHandle, SiphonPickup,
+			&AUTPickup::WakeUp, 90.f, false);
+		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Siphon will spawn in 90s"));
+	}
 }
 
 
@@ -2910,4 +2925,69 @@ void AUWipeoutGame::ResolveShieldBeltSubstitution()
 	// Always destroy the old vest pickup
 	PendingVestPickup->Destroy();
 	PendingVestPickup = nullptr;
+}
+
+
+// ─── SpawnSiphonPickup ─────────────────────────────────────────────────
+// Finds the highest-Z sniper weapon base on the map and spawns a
+// PowerupBase pickup there with Siphon as the inventory type.
+void AUWipeoutGame::SpawnSiphonPickup()
+{
+	SiphonPickup = nullptr;
+
+	// Find the highest sniper weapon base
+	FVector BestLoc = FVector::ZeroVector;
+	FRotator BestRot = FRotator::ZeroRotator;
+	float HighestZ = -FLT_MAX;
+	bool bFoundSniper = false;
+
+	for (TActorIterator<AUTPickupWeapon> It(GetWorld()); It; ++It)
+	{
+		AUTPickupWeapon* WP = *It;
+		if (!WP || !WP->WeaponType) continue;
+
+		FString WeaponName = WP->WeaponType->GetName();
+		if (WeaponName.Contains(TEXT("Sniper")))
+		{
+			float Z = WP->GetActorLocation().Z;
+			if (Z > HighestZ)
+			{
+				HighestZ = Z;
+				BestLoc = WP->GetActorLocation();
+				BestRot = WP->GetActorRotation();
+				bFoundSniper = true;
+			}
+		}
+	}
+
+	if (!bFoundSniper)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: No sniper weapon base found — skipping Siphon pickup"));
+		return;
+	}
+
+	// Spawn a PowerupBase pickup at the sniper's location
+	TSubclassOf<AUTPickupInventory> PowerupBaseClass = LoadClass<AUTPickupInventory>(
+		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Powerups/PowerupBase.PowerupBase_C"));
+	if (!PowerupBaseClass)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Failed to load PowerupBase class — cannot spawn Siphon pickup"));
+		return;
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(
+		PowerupBaseClass, BestLoc, BestRot, Params);
+
+	if (SiphonPickup)
+	{
+		SiphonPickup->SetInventoryType(AUTSiphonPowerup::StaticClass());
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Spawned Siphon pickup at sniper location %s (Z=%.0f)"),
+			*BestLoc.ToString(), HighestZ);
+	}
+	else
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: SpawnActor failed for Siphon pickup at %s"), *BestLoc.ToString());
+	}
 }

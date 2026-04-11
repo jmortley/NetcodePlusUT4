@@ -113,6 +113,78 @@ void AMutBotEvents::NotifyMatchStateChange_Implementation(FName NewState)
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Mutate Commands (in-game console: mutate joinpug ictf)
+// ────────────────────────────────────────────────────────────────────
+
+void AMutBotEvents::Mutate_Implementation(const FString& MutateString, APlayerController* Sender)
+{
+	if (BotApiUrl.IsEmpty() || !Sender) return;
+
+	AUTPlayerState* UTPS = Cast<AUTPlayerState>(Sender->PlayerState);
+	if (!UTPS) return;
+
+	TArray<FString> Parts;
+	MutateString.ParseIntoArray(Parts, TEXT(" "), true);
+
+	if (Parts.Num() < 1) return;
+
+	FString Command = Parts[0].ToLower();
+
+	if (Command == TEXT("joinpug") || Command == TEXT("leavepug") || Command == TEXT("listpug"))
+	{
+		// Only allow joinpug after the match is over (WaitingPostMatch or MapVoteHappening)
+		if (Command == TEXT("joinpug"))
+		{
+			AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+			if (GS)
+			{
+				FName CurrentState = GS->GetMatchState();
+				bool bMatchOver = (CurrentState == MatchState::WaitingPostMatch ||
+				                   CurrentState == MatchState::MapVoteHappening);
+				if (!bMatchOver)
+				{
+					// Tell the player they need to wait
+					AUTPlayerController* PC = Cast<AUTPlayerController>(Sender);
+					if (PC)
+					{
+						PC->ClientSay(UTPS, TEXT("Cannot join PUG queue while match is in progress. Wait until the match ends."), ChatDestinations::System);
+					}
+					UE_LOG(LogBotEvents, Log, TEXT("joinpug blocked for %s — match still in progress (state: %s)"),
+						*UTPS->PlayerName, *CurrentState.ToString());
+					return;
+				}
+			}
+		}
+
+		FString Mode = Parts.Num() > 1 ? Parts[1] : TEXT("ictf");
+		FString PlayerName = UTPS->PlayerName;
+
+		// Get UT4 player ID from UniqueId
+		FString Ut4Id;
+		if (UTPS->UniqueId.IsValid())
+		{
+			Ut4Id = UTPS->UniqueId.GetUniqueNetId()->ToString();
+		}
+
+		// Build JSON
+		TSharedRef<FJsonObject> Json = MakeShareable(new FJsonObject());
+		Json->SetStringField(TEXT("action"), Command);
+		Json->SetStringField(TEXT("mode"), Mode);
+		Json->SetStringField(TEXT("ut4_id"), Ut4Id);
+		Json->SetStringField(TEXT("player_name"), PlayerName);
+
+		FString Output;
+		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Output);
+		FJsonSerializer::Serialize(Json, Writer);
+
+		SendPost(TEXT("/pug_action"), Output);
+
+		UE_LOG(LogBotEvents, Log, TEXT("PUG action: %s mode=%s player=%s ut4_id=%s"),
+			*Command, *Mode, *PlayerName, *Ut4Id);
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Flag Captures
 // ────────────────────────────────────────────────────────────────────
 

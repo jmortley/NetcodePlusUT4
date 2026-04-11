@@ -13,6 +13,7 @@
 #include "UTPickupAmmo.h"
 #include "UTPickupInventory.h"
 #include "UTGenericObjectivePoint.h"
+#include "TeamArenaCharacter.h"
 #include "UTDamageType.h"
 #include "ShockDomControlPoint.h"
 #include "ShockDomReplicator.h"
@@ -405,6 +406,26 @@ float AShockDomGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 	}
 
 	return FMath::Max(Result, 0.2f);
+}
+
+
+// ============================================================================
+// PING-COMPENSATED SPAWN
+// ============================================================================
+
+void AShockDomGameMode::RestartPlayer(AController* NewPlayer)
+{
+	Super::RestartPlayer(NewPlayer);
+
+	// Hide pawn until client confirms control. Skip bots.
+	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
+	if (SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
+	{
+		SpawnedChar->bPingCompensatedSpawnPending = true;
+		SpawnedChar->SetActorHiddenInGame(true);
+		SpawnedChar->SetActorEnableCollision(false);
+		SpawnedChar->SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+	}
 }
 
 

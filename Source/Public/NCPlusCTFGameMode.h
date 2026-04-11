@@ -187,6 +187,12 @@ protected:
 	/** True when all flags are home and we're counting down before ending. */
 	bool bGracePeriodActive;
 
+	// ── Stats Replicator ────────────────────────────────────────────
+
+	/** Replicated stats for scoreboard (grabs, accuracy) */
+	UPROPERTY(Transient)
+	class ACTFStatsReplicator* CTFStatsRep = nullptr;
+
 	// ── Overtime Tracking ────────────────────────────────────────────
 
 	/** World time when overtime started — used to delay respawn escalation. */

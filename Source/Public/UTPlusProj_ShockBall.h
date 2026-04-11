@@ -56,4 +56,7 @@ protected:
 
 public:
 	virtual bool CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const override;
+
+	/** Re-cache the fire direction after external velocity enforcement */
+	void SetOriginalFireDirection(const FVector& Dir);
 };

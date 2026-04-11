@@ -99,6 +99,7 @@ public:
 	virtual void HandleMatchHasStarted() override;
 	virtual void DefaultTimer() override;
 
+	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
 	virtual void GiveDefaultInventory(APawn* PlayerPawn) override;
 	virtual bool CheckRelevance_Implementation(AActor* Other) override;

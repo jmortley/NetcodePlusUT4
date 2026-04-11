@@ -22,6 +22,7 @@ public:
     //~ Begin UUTCharacterMovement Interface
     virtual bool CanDodge() override;
     virtual void UTCallServerMove() override;
+    virtual void SmoothClientPosition(float DeltaTime) override;
     //~ End UUTCharacterMovement Interface
 
     /** How often to update team collision ignores (seconds). Default 0.25s */

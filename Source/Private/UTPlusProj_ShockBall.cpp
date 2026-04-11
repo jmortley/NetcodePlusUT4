@@ -75,6 +75,11 @@ bool AUTPlusProj_ShockBall::ShouldIgnoreHit_Implementation(AActor* OtherActor, U
 	return Super::ShouldIgnoreHit_Implementation(OtherActor, OtherComp);
 }
 
+void AUTPlusProj_ShockBall::SetOriginalFireDirection(const FVector& Dir)
+{
+	OriginalFireDirection = Dir;
+	bHasCachedFireDirection = true;
+}
 
 void AUTPlusProj_ShockBall::BeginPlay()
 {
@@ -140,7 +145,6 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	// and is embedded in world geometry, force-explode. This catches edge cases
 	// where the movement component bleeds velocity at a shallow angle without
 	// triggering a clean OnStop → ProcessHit → Explode chain.
-	// Bio globs are safe: they're actors, so EncroachingBlockingGeometry returns false.
 	if (Role == ROLE_Authority && ProjectileMovement
 		&& ProjectileMovement->Velocity.IsNearlyZero(5.0f))
 	{
