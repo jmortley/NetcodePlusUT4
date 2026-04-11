@@ -220,10 +220,8 @@ void AUWipeoutGame::BeginPlay()
 	// whether the stashed vest pickup should become a ShieldBelt.
 	ResolveShieldBeltSubstitution();
 
-	// Spawn the Siphon powerup at the highest sniper weapon base location.
-	// Same pattern as Blueprint SpawnActor: iterate all weapon pickups,
-	// find the highest sniper, spawn a PowerupBase with Siphon inventory.
-	SpawnSiphonPickup();
+	// Siphon powerup spawned in HandleMatchHasStarted — BP actors may not
+	// be fully loaded during BeginPlay (same issue as DamageReplicator).
 
 	// Damage replicator is spawned in HandleMatchHasStarted instead of here —
 	// spawning bAlwaysRelevant actors during BeginPlay can trigger package
@@ -259,6 +257,13 @@ void AUWipeoutGame::HandleMatchHasStarted()
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.Owner = this;
 		DamageReplicator = GetWorld()->SpawnActor<AWipeoutDamageReplicator>(SpawnParams);
+	}
+
+	// Spawn Siphon pickup here — BP actors fail to spawn during BeginPlay
+	// because their packages aren't fully loaded yet.
+	if (HasAuthority() && !SiphonPickup)
+	{
+		SpawnSiphonPickup();
 	}
 }
 
