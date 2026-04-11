@@ -82,14 +82,27 @@ void AUTSiphonPowerup::GivenTo(AUTCharacter* NewOwner, bool bAutoActivate)
 	{
 		NewOwner->SetAmbientSound(SiphonAmbientSound);
 	}
+
+	// Body overlay (UTTimedPowerup only does weapon overlay via SetWeaponOverlayEffect)
+	if (NewOwner && OverlayEffect.IsValid())
+	{
+		NewOwner->SetCharacterOverlayEffect(OverlayEffect, true);
+	}
 }
 
 void AUTSiphonPowerup::Removed()
 {
-	// Clear ambient sound before Super nulls UTOwner
-	if (UTOwner && SiphonAmbientSound)
+	// Clear ambient sound and body overlay before Super nulls UTOwner
+	if (UTOwner)
 	{
-		UTOwner->SetAmbientSound(SiphonAmbientSound, true);
+		if (SiphonAmbientSound)
+		{
+			UTOwner->SetAmbientSound(SiphonAmbientSound, true);
+		}
+		if (OverlayEffect.IsValid())
+		{
+			UTOwner->SetCharacterOverlayEffect(OverlayEffect, false);
+		}
 	}
 	Super::Removed();
 }
