@@ -2989,7 +2989,15 @@ void AUWipeoutGame::SpawnSiphonPickup()
 
 	if (SiphonPickup)
 	{
-		SiphonPickup->SetInventoryType(AUTSiphonPowerup::StaticClass());
+		// Set inventory type WITHOUT calling SetInventoryType() — that triggers
+		// InventoryTypeUpdated() which calls CreatePickupMesh() using the Siphon
+		// CDO's null mesh template, destroying the PowerupBase's Berserk mesh and
+		// ghost outline. Instead, write InventoryType directly and keep the BP visuals.
+		UClassProperty* InvTypeProp = FindField<UClassProperty>(SiphonPickup->GetClass(), TEXT("InventoryType"));
+		if (InvTypeProp)
+		{
+			InvTypeProp->SetPropertyValue_InContainer(SiphonPickup, AUTSiphonPowerup::StaticClass());
+		}
 
 		// Register the Siphon's overlay effect with the GameState so it can
 		// be applied to characters. Must happen during startup (BeginPlay).
