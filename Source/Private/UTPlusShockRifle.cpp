@@ -404,7 +404,12 @@ bool AUTPlusShockRifle::CanAttack_Implementation(AActor* Target, const FVector& 
 
 AUTProjectile* AUTPlusShockRifle::FireProjectile()
 {
+	// Suppress ShotsStatsName during projectile fire so alt-fire (shock balls)
+	// don't inflate ShockRifleShots — that stat should only count primary beam shots
+	FName SavedShots = ShotsStatsName;
+	ShotsStatsName = NAME_None;
 	AUTProjectile* Result = Super::FireProjectile();
+	ShotsStatsName = SavedShots;
 	if (bPlanningCombo && UTOwner != NULL)
 	{
 		AUTProj_ShockBall* ShockBall = Cast<AUTProj_ShockBall>(Result);
