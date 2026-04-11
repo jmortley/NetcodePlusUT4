@@ -37,6 +37,18 @@ AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 		OverlayEffect1P.Material = OverlayMat1P.Object;
 	}
 
+	// Load the ambient loop sound (audible to nearby players)
+	static ConstructorHelpers::FObjectFinder<USoundBase> AmbientLoopObj(
+		TEXT("/Game/RestrictedAssets/Audio/Gameplay/A_Powerup_Invulnerability_PowerLoop"));
+	if (AmbientLoopObj.Succeeded())
+	{
+		SiphonAmbientSound = AmbientLoopObj.Object;
+	}
+	else
+	{
+		SiphonAmbientSound = nullptr;
+	}
+
 	// Load the "Siphon!" announcer sound
 	static ConstructorHelpers::FObjectFinder<USoundBase> SiphonAnnouncerObj(
 		TEXT("/Game/RestrictedAssets/Audio/AnnouncerReward/A_Announcer_Siphon"));
@@ -64,4 +76,20 @@ void AUTSiphonPowerup::GivenTo(AUTCharacter* NewOwner, bool bAutoActivate)
 			PC->UTClientPlaySound(PickupAnnouncerSound);
 		}
 	}
+
+	// Ambient loop so nearby players can hear someone has Siphon
+	if (NewOwner && SiphonAmbientSound)
+	{
+		NewOwner->SetAmbientSound(SiphonAmbientSound);
+	}
+}
+
+void AUTSiphonPowerup::Removed()
+{
+	// Clear ambient sound before Super nulls UTOwner
+	if (UTOwner && SiphonAmbientSound)
+	{
+		UTOwner->SetAmbientSound(SiphonAmbientSound, true);
+	}
+	Super::Removed();
 }

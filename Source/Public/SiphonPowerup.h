@@ -27,5 +27,10 @@ class NETCODEPLUS_API AUTSiphonPowerup : public AUTTimedPowerup
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Siphon|Audio")
 	USoundBase* PickupAnnouncerSound;
 
+	/** Ambient loop played on the character while Siphon is active */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Siphon|Audio")
+	USoundBase* SiphonAmbientSound;
+
 	virtual void GivenTo(AUTCharacter* NewOwner, bool bAutoActivate) override;
+	virtual void Removed() override;
 };
