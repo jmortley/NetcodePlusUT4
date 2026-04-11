@@ -12,16 +12,18 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	: Super(ObjectInitializer)
 {
 	bDrawMinimapInScoreboard = false;
+	CellWidth = 625.f; // Stock is 480 — need room for 8 columns
 
 	// Column positions (fraction of CellWidth)
-	ColumnHeaderKillsX   = 0.35f;
-	ColumnHeaderDeathsX  = 0.42f;
-	ColumnHeaderEffX     = 0.50f;
-	ColumnHeaderAccX     = 0.58f;
-	ColumnHeaderCapsX2   = 0.66f;
-	ColumnHeaderGrabsX   = 0.73f;
-	ColumnHeaderReturnsX2 = 0.80f;
-	ColumnHeaderPingX    = 0.91f;
+	ColumnHeaderPlayerX  = 0.02f;
+	ColumnHeaderKillsX   = 0.30f;
+	ColumnHeaderDeathsX  = 0.37f;
+	ColumnHeaderEffX     = 0.45f;
+	ColumnHeaderAccX     = 0.54f;
+	ColumnHeaderCapsX2   = 0.63f;
+	ColumnHeaderGrabsX   = 0.72f;
+	ColumnHeaderReturnsX2 = 0.81f;
+	ColumnHeaderPingX    = 0.92f;
 
 	// Column header texts
 	CH_Kills  = NSLOCTEXT("CTFScoreboard", "KillsHeader", "K");
