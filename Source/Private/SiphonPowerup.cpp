@@ -20,6 +20,22 @@ AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 
 	bAlwaysRelevant = true;
 
+	// Berserk overlay — reuse the same material so player glows while Siphon is active
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> OverlayMat3P(
+		TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/M_Berserk_Overlay"));
+	if (OverlayMat3P.Succeeded())
+	{
+		OverlayEffect.Material = OverlayMat3P.Object;
+		OverlayEffect.bIsSkin = false;
+	}
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> OverlayMat1P(
+		TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/M_Berserk_Overlay_1P"));
+	if (OverlayMat1P.Succeeded())
+	{
+		OverlayEffect1P.Material = OverlayMat1P.Object;
+		OverlayEffect1P.bIsSkin = false;
+	}
+
 	// Load the "Siphon!" announcer sound
 	static ConstructorHelpers::FObjectFinder<USoundBase> SiphonAnnouncerObj(
 		TEXT("/Game/RestrictedAssets/Audio/AnnouncerReward/A_Announcer_Siphon"));
