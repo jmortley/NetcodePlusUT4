@@ -405,12 +405,8 @@ void AUWipeoutGame::DefaultTimer()
 			if (LastPS)
 			{
 				bTeam0LastAliveAnnounced = true;
-				// Only suppress LMS sound if a teammate respawns within 1 second
-				if (!HasImminentRespawnOnTeam(0, 1.0f))
-				{
-					BP_OnLastPlayerAlive(0, LastPS, Alive1);
-					OnClutchSituationStarted.Broadcast(LastPS, Alive1);
-				}
+				BP_OnLastPlayerAlive(0, LastPS, Alive1);
+				OnClutchSituationStarted.Broadcast(LastPS, Alive1);
 			}
 		}
 		if (Alive1 == 1 && Team1StartingSize > 1 && !bTeam1LastAliveAnnounced)
@@ -419,11 +415,8 @@ void AUWipeoutGame::DefaultTimer()
 			if (LastPS)
 			{
 				bTeam1LastAliveAnnounced = true;
-				if (!HasImminentRespawnOnTeam(1, 1.0f))
-				{
-					BP_OnLastPlayerAlive(1, LastPS, Alive0);
-					OnClutchSituationStarted.Broadcast(LastPS, Alive0);
-				}
+				BP_OnLastPlayerAlive(1, LastPS, Alive0);
+				OnClutchSituationStarted.Broadcast(LastPS, Alive0);
 			}
 		}
 
