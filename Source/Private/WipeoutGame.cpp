@@ -2990,6 +2990,19 @@ void AUWipeoutGame::SpawnSiphonPickup()
 	if (SiphonPickup)
 	{
 		SiphonPickup->SetInventoryType(AUTSiphonPowerup::StaticClass());
+
+		// Register the Siphon's overlay effect with the GameState so it can
+		// be applied to characters. Must happen during startup (BeginPlay).
+		AUTGameState* GS = GetGameState<AUTGameState>();
+		if (GS)
+		{
+			const AUTSiphonPowerup* SiphonCDO = AUTSiphonPowerup::StaticClass()->GetDefaultObject<AUTSiphonPowerup>();
+			if (SiphonCDO)
+			{
+				SiphonCDO->AddOverlayMaterials(GS);
+			}
+		}
+
 		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Spawned Siphon pickup at sniper location %s (Z=%.0f)"),
 			*BestLoc.ToString(), HighestZ);
 	}
