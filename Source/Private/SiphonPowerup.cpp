@@ -7,6 +7,9 @@
 AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	// Display name for pickup message
+	DisplayName = NSLOCTEXT("Powerup", "SiphonName", "Siphon");
+
 	// Siphon lasts 30 seconds
 	TimeRemaining = 30.f;
 	TriggeredTime = 15.f;
