@@ -187,6 +187,26 @@ protected:
 	/** True when all flags are home and we're counting down before ending. */
 	bool bGracePeriodActive;
 
+	// ── Recent Spawn Tracking (IG+ style) ───────────────────────────
+	// Penalize reusing the same spawn point. Tracks last 2 spawns per player.
+
+	struct FRecentSpawns
+	{
+		TWeakObjectPtr<APlayerStart> Last;
+		TWeakObjectPtr<APlayerStart> SecondLast;
+	};
+
+	TMap<AController*, FRecentSpawns> PlayerRecentSpawns;
+
+	/** Penalty multiplier for using the same spawn as 2 spawns ago (0.5 = half score). IG+ default. */
+	float SpawnRecentPenaltyMultiplier = 0.5f;
+
+	/** Penalty for spawning within this radius of your last spawn point */
+	float SpawnNearLastRadius = 4000.f;
+
+	/** Penalty scale for near-last-spawn distance */
+	float SpawnNearLastPenalty = 6.f;
+
 	// ── Stats Replicator ────────────────────────────────────────────
 
 	/** Replicated stats for scoreboard (grabs, accuracy) */

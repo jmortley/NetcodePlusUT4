@@ -143,6 +143,18 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
 	Super::RestartPlayer(NewPlayer);
 
+	// Track recent spawns for anti-repeat penalties (IG+ style)
+	if (NewPlayer && NewPlayer->StartSpot.IsValid())
+	{
+		APlayerStart* UsedStart = Cast<APlayerStart>(NewPlayer->StartSpot.Get());
+		if (UsedStart)
+		{
+			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(NewPlayer);
+			Recent.SecondLast = Recent.Last;
+			Recent.Last = UsedStart;
+		}
+	}
+
 	// Ping-compensated spawn: hide pawn until client confirms control.
 	// Skip bots (no remote client to confirm).
 	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
@@ -303,6 +315,37 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 				{
 					// Clear LOS from spawn to enemy — penalize
 					Result -= EnemyLOSPenalty;
+				}
+			}
+		}
+	}
+
+	// ── Recent spawn penalties (IG+ style) ──
+	// Discourage reusing the same spawn points to prevent predictable spawns.
+	if (Player)
+	{
+		FRecentSpawns* Recent = PlayerRecentSpawns.Find(Player);
+		if (Recent)
+		{
+			// Can't use the exact same spawn as last time
+			if (Recent->Last.IsValid() && Recent->Last.Get() == P)
+			{
+				Result *= 0.1f; // Nearly eliminate — don't hard-block in case all others are worse
+			}
+			// Penalize using the spawn from 2 lives ago
+			else if (Recent->SecondLast.IsValid() && Recent->SecondLast.Get() == P)
+			{
+				Result *= SpawnRecentPenaltyMultiplier; // 0.5x
+			}
+
+			// Penalize spawning near your last spawn point
+			if (Recent->Last.IsValid())
+			{
+				float DistToLastSpawn = (StartLoc - Recent->Last->GetActorLocation()).Size();
+				if (DistToLastSpawn < SpawnNearLastRadius)
+				{
+					float DistFactor = 1.f - (DistToLastSpawn / SpawnNearLastRadius);
+					Result -= SpawnNearLastPenalty * DistFactor;
 				}
 			}
 		}
