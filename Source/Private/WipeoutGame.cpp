@@ -2986,8 +2986,12 @@ void AUWipeoutGame::SpawnSiphonPickup()
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(
-		SiphonPickupClass, BestLoc, BestRot, Params);
+
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Attempting Siphon spawn — class=%s at %s"),
+		*SiphonPickupClass->GetName(), *BestLoc.ToString());
+
+	AActor* SpawnedActor = GetWorld()->SpawnActor<AActor>(SiphonPickupClass, &BestLoc, &BestRot, Params);
+	SiphonPickup = Cast<AUTPickupInventory>(SpawnedActor);
 
 	if (SiphonPickup)
 	{
@@ -3007,6 +3011,8 @@ void AUWipeoutGame::SpawnSiphonPickup()
 	}
 	else
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: SpawnActor failed for Siphon pickup at %s"), *BestLoc.ToString());
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: SpawnActor failed for Siphon pickup at %s (class=%s, SpawnedActor=%s)"),
+			*BestLoc.ToString(), *SiphonPickupClass->GetName(),
+			SpawnedActor ? *SpawnedActor->GetClass()->GetName() : TEXT("null"));
 	}
 }
