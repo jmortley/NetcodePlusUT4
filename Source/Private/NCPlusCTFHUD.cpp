@@ -53,15 +53,16 @@ EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
 
 void ANCPlusCTFHUD::DrawHUD()
 {
-	Super::DrawHUD();
-
 	if (!Canvas || !SmallFont) return;
 
+	// Draw score bar BEFORE Super so flag icons (drawn by Super) render on top
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	if (GS && !ScoreboardIsUp())
 	{
 		DrawTeamScoreBar();
 	}
+
+	Super::DrawHUD();
 }
 
 void ANCPlusCTFHUD::DrawTeamScoreBar()
@@ -71,8 +72,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 	const float CenterX = Canvas->ClipX * 0.5f;
-	// Push score bar below flag status icons (they occupy ~40px at top)
-	const float TopY = 36.f * RenderScale;
+	const float TopY = 2.f * RenderScale;
 
 	// Team colors (respect TeamSkins)
 	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
