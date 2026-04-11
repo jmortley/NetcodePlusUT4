@@ -14,14 +14,14 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	bDrawMinimapInScoreboard = false;
 
 	// Column positions (fraction of CellWidth)
-	ColumnHeaderKillsX   = 0.38f;
-	ColumnHeaderDeathsX  = 0.44f;
-	ColumnHeaderEffX     = 0.51f;
-	ColumnHeaderAccX     = 0.59f;
-	ColumnHeaderCapsX2   = 0.68f;
-	ColumnHeaderGrabsX   = 0.75f;
-	ColumnHeaderReturnsX2 = 0.82f;
-	ColumnHeaderPingX    = 0.92f;
+	ColumnHeaderKillsX   = 0.35f;
+	ColumnHeaderDeathsX  = 0.42f;
+	ColumnHeaderEffX     = 0.50f;
+	ColumnHeaderAccX     = 0.58f;
+	ColumnHeaderCapsX2   = 0.66f;
+	ColumnHeaderGrabsX   = 0.73f;
+	ColumnHeaderReturnsX2 = 0.80f;
+	ColumnHeaderPingX    = 0.91f;
 
 	// Column header texts
 	CH_Kills  = NSLOCTEXT("CTFScoreboard", "KillsHeader", "K");
