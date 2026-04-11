@@ -398,6 +398,10 @@ void AUWipeoutGame::DefaultTimer()
 		// Normal tick: check for wipeout
 		CheckWipeoutCondition();
 
+		// Reset LMS announce flag when team goes back above 1 alive (teammate respawned)
+		if (Alive0 > 1) bTeam0LastAliveAnnounced = false;
+		if (Alive1 > 1) bTeam1LastAliveAnnounced = false;
+
 		// Check for "last player alive" situations (clutch)
 		if (Alive0 == 1 && Team0StartingSize > 1 && !bTeam0LastAliveAnnounced)
 		{
