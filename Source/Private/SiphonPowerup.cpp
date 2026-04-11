@@ -29,14 +29,12 @@ AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 	if (OverlayMat3P.Succeeded())
 	{
 		OverlayEffect.Material = OverlayMat3P.Object;
-		OverlayEffect.bIsSkin = false;
 	}
 	static ConstructorHelpers::FObjectFinder<UMaterialInterface> OverlayMat1P(
 		TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/M_Berserk_Overlay_1P"));
 	if (OverlayMat1P.Succeeded())
 	{
 		OverlayEffect1P.Material = OverlayMat1P.Object;
-		OverlayEffect1P.bIsSkin = false;
 	}
 
 	// Load the "Siphon!" announcer sound
