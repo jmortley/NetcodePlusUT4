@@ -2970,37 +2970,23 @@ void AUWipeoutGame::SpawnSiphonPickup()
 		return;
 	}
 
-	// Remove the sniper weapon pickup we're replacing
-	BestSniperPickup->Destroy();
-
-	// Spawn a PowerupBase pickup at the sniper's location
-	TSubclassOf<AUTPickupInventory> PowerupBaseClass = LoadClass<AUTPickupInventory>(
-		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Powerups/PowerupBase.PowerupBase_C"));
-	if (!PowerupBaseClass)
+	if (!SiphonPickupClass)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Failed to load PowerupBase class — cannot spawn Siphon pickup"));
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: SiphonPickupClass not set — skipping Siphon spawn"));
 		return;
 	}
+
+	// Remove the sniper weapon pickup we're replacing
+	BestSniperPickup->Destroy();
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(
-		PowerupBaseClass, BestLoc, BestRot, Params);
+		SiphonPickupClass, BestLoc, BestRot, Params);
 
 	if (SiphonPickup)
 	{
-		// Set inventory type WITHOUT calling SetInventoryType() — that triggers
-		// InventoryTypeUpdated() which calls CreatePickupMesh() using the Siphon
-		// CDO's null mesh template, destroying the PowerupBase's Berserk mesh and
-		// ghost outline. Instead, write InventoryType directly and keep the BP visuals.
-		UClassProperty* InvTypeProp = FindField<UClassProperty>(SiphonPickup->GetClass(), TEXT("InventoryType"));
-		if (InvTypeProp)
-		{
-			InvTypeProp->SetPropertyValue_InContainer(SiphonPickup, AUTSiphonPowerup::StaticClass());
-		}
-
-		// Register the Siphon's overlay effect with the GameState so it can
-		// be applied to characters. Must happen during startup (BeginPlay).
+		// Register the Siphon's overlay effect with the GameState
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS)
 		{

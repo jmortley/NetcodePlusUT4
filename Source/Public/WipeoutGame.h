@@ -260,6 +260,12 @@ public:
 	// SIPHON POWERUP (spawned at highest sniper location)
 	// =======================================================================
 
+	/** Blueprint pickup class to spawn at highest sniper location.
+	 *  Set in the BP subclass to a child of PowerupBase with custom mesh/ghost.
+	 *  If None, no siphon pickup is spawned. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Siphon")
+	TSubclassOf<class AUTPickupInventory> SiphonPickupClass;
+
 	/** The siphon pickup spawned at the highest sniper weapon base location */
 	UPROPERTY(Transient)
 	class AUTPickupInventory* SiphonPickup;
