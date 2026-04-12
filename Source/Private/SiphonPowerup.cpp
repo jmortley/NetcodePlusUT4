@@ -10,6 +10,15 @@ AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 	// Display name for pickup message
 	DisplayName = NSLOCTEXT("Powerup", "SiphonName", "Siphon");
 
+	// HUD icon — reuse UDamage icon from HUDAtlas01 with green tint for Siphon
+	static ConstructorHelpers::FObjectFinder<UTexture2D> HUDAtlasObj(
+		TEXT("/Game/RestrictedAssets/UI/HUDAtlas01"));
+	if (HUDAtlasObj.Succeeded())
+	{
+		HUDIcon = MakeCanvasIcon(HUDAtlasObj.Object, 589.f, 0.f, 45.f, 39.f);
+		IconColor = FLinearColor(0.2f, 1.0f, 0.2f, 1.0f); // Green to distinguish from UDamage's magenta
+	}
+
 	// Siphon lasts 30 seconds
 	TimeRemaining = 30.f;
 	TriggeredTime = 15.f;
