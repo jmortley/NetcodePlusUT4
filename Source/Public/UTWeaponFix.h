@@ -441,11 +441,11 @@ protected:
 
     /** Ping (ms) below which max scale is applied */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
-    float ProjectileRewindFullPingMs = 80.0f;
+    float ProjectileRewindFullPingMs = 90.0f;
 
     /** Ping (ms) above which NO rewind is applied. Linear falloff between Full and Max. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
-    float ProjectileRewindMaxPingMs = 120.0f;
+    float ProjectileRewindMaxPingMs = 130.0f;
 
     /** Minimum rewind scale at the falloff boundary */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
