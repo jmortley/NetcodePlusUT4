@@ -1570,8 +1570,8 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
-		// Keep: UDamage / Amp
-		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")) || InvName.Contains(TEXT("Berserk")))
+		// Keep: UDamage / Amp / Siphon
+		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")) || InvName.Contains(TEXT("Berserk")) || InvName.Contains(TEXT("Siphon")))
 		{
 			return Super::CheckRelevance_Implementation(Other);
 		}
