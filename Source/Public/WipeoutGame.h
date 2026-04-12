@@ -257,6 +257,10 @@ public:
 
 
 	// =======================================================================
+	/** If true, spawned players are hidden until their client confirms control (reduces high-ping spawn disorientation) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning")
+	bool bEnablePingCompensatedSpawn = true;
+
 	// SIPHON POWERUP (spawned at highest sniper location)
 	// =======================================================================
 

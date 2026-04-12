@@ -158,7 +158,7 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 	// Ping-compensated spawn: hide pawn until client confirms control.
 	// Skip bots (no remote client to confirm).
 	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
-	if (SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
+	if (bEnablePingCompensatedSpawn && SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
 	{
 		SpawnedChar->bPingCompensatedSpawnPending = true;
 		SpawnedChar->SetActorHiddenInGame(true);

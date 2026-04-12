@@ -419,7 +419,7 @@ void AShockDomGameMode::RestartPlayer(AController* NewPlayer)
 
 	// Hide pawn until client confirms control. Skip bots.
 	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
-	if (SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
+	if (bEnablePingCompensatedSpawn && SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
 	{
 		SpawnedChar->bPingCompensatedSpawnPending = true;
 		SpawnedChar->SetActorHiddenInGame(true);

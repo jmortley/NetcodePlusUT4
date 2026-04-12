@@ -99,6 +99,10 @@ public:
 	virtual void HandleMatchHasStarted() override;
 	virtual void DefaultTimer() override;
 
+	/** If true, spawned players are hidden until their client confirms control */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "DOM|Spawning")
+	bool bEnablePingCompensatedSpawn = true;
+
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
 	virtual void GiveDefaultInventory(APawn* PlayerPawn) override;

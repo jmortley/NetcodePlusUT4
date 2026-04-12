@@ -1261,7 +1261,7 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		// Ping-compensated spawn: hide pawn until client confirms control.
 		// Skip bots (no remote client to confirm) — they'd timeout after 500ms.
 		ATeamArenaCharacter* SpawnedChar = NewPlayer->GetPawn() ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
-		if (SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
+		if (bEnablePingCompensatedSpawn && SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
 		{
 			SpawnedChar->bPingCompensatedSpawnPending = true;
 			SpawnedChar->SetActorHiddenInGame(true);

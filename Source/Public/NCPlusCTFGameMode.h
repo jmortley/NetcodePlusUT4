@@ -114,6 +114,10 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	bool bAllowFloorSlide;
 
+	/** If true, spawned players are hidden until their client confirms control */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	bool bEnablePingCompensatedSpawn = true;
+
 	// ── Overtime Configuration ────────────────────────────────────────
 
 	/** Respawn wait time during overtime (seconds). Replaces Epic's extended
