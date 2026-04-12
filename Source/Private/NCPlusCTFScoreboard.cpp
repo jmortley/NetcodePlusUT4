@@ -32,7 +32,7 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	CH_Acc    = NSLOCTEXT("CTFScoreboard", "AccHeader", "ACC");
 	CH_Caps   = NSLOCTEXT("CTFScoreboard", "CapsHeader", "Caps");
 	CH_Grabs  = NSLOCTEXT("CTFScoreboard", "GrabsHeader", "Grabs");
-	CH_Returns = NSLOCTEXT("CTFScoreboard", "ReturnsHeader", "Rets");
+	CH_Returns = NSLOCTEXT("CTFScoreboard", "ReturnsHeader", "Returns");
 }
 
 void UNCPlusCTFScoreboard::PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanvas* InCanvas, FVector2D InCanvasCenter)
