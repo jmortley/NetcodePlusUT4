@@ -156,6 +156,7 @@ protected:
 
 	/** Returns true if any flag in the game is currently held by a player. */
 	bool IsAnyFlagHeld() const;
+	bool AreAllFlagsHome() const;
 
 	/** Determines whether advantage should start when time expires.
 	 *  Halftime: always if a flag is held. End of game: only within 1 cap diff (configurable). */

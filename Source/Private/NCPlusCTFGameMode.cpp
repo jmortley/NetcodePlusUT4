@@ -368,7 +368,6 @@ bool ANCPlusCTFGameMode::IsAnyFlagHeld() const
 	{
 		return false;
 	}
-	// Use engine accessor — plugin cannot directly access FlagBases (layout mismatch)
 	for (uint8 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
 	{
 		if (CTFGameState->GetFlagState(TeamIdx) == CarriedObjectState::Held)
@@ -379,9 +378,27 @@ bool ANCPlusCTFGameMode::IsAnyFlagHeld() const
 	return false;
 }
 
+bool ANCPlusCTFGameMode::AreAllFlagsHome() const
+{
+	if (!IsValid(CTFGameState))
+	{
+		return true;
+	}
+	for (uint8 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
+	{
+		if (CTFGameState->GetFlagState(TeamIdx) != CarriedObjectState::Home)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ANCPlusCTFGameMode::ShouldEnterAdvantage() const
 {
-	if (!IsAnyFlagHeld())
+	// Advantage triggers if ANY flag is not home (held or dropped).
+	// NewCTF (UT99) uses this — a dropped flag still means the play is live.
+	if (AreAllFlagsHome())
 	{
 		return false;
 	}
@@ -563,39 +580,16 @@ void ANCPlusCTFGameMode::DefaultTimer()
 {
 	Super::DefaultTimer();
 
-	// Tick advantage and no-possession timers (DefaultTimer fires every second)
+	// Tick advantage timer (DefaultTimer fires every second).
 	// Advantage lasts up to AdvantageMaxDuration (5 min default).
-	// If no flag is held for GracePeriodDuration (10s) continuously, game ends.
-	// Every flag pickup resets the no-possession timer.
+	// All flags home → instant end (NewCTF style, no grace period).
 	if (CTFGameState && NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")) && CTFGameState->IsMatchInProgress())
 	{
-		if (IsAnyFlagHeld())
+		// All flags home → end immediately (NewCTF: IsEveryFlagHome check in Timer)
+		if (AreAllFlagsHome())
 		{
-			// Flag is held — reset no-possession timer
-			bGracePeriodActive = false;
-			GracePeriodTimeRemaining = GracePeriodDuration;
-		}
-		else
-		{
-			// No flag held — tick (or start) no-possession timer
-			if (!bGracePeriodActive)
-			{
-				bGracePeriodActive = true;
-				GracePeriodTimeRemaining = GracePeriodDuration;
-			}
-
-			GracePeriodTimeRemaining--;
-
-			if (GracePeriodTimeRemaining >= 0 && GracePeriodTimeRemaining < 10)
-			{
-				BroadcastLocalized(this, UUTCountDownMessage::StaticClass(), GracePeriodTimeRemaining + 1);
-			}
-
-			if (GracePeriodTimeRemaining <= 0)
-			{
-				EndOfHalf();
-				return;
-			}
+			EndOfHalf();
+			return;
 		}
 
 		// Overall advantage time limit (5 min default)
@@ -607,15 +601,18 @@ void ANCPlusCTFGameMode::DefaultTimer()
 		}
 	}
 
-	// Overtime respawn escalation: every 2 minutes of OT, add 1s to base respawn
-	// time (2s default), capping at OvertimeRespawnTime (6s). Only for 3v3+.
-	// Ramp: 0-2min=2s, 2-4min=3s, 4-6min=4s, 6-8min=5s, 8min+=6s
+	// Overtime respawn escalation (NewCTF style): base respawn for first 5 minutes,
+	// then escalate +1s per 2 minutes, capping at OvertimeRespawnTime (6s). Only for 3v3+.
+	// Ramp: 0-5min=2s, 5-7min=3s, 7-9min=4s, 9-11min=5s, 11min+=6s
 	if (CTFGameState && CTFGameState->IsMatchInOvertime() && OvertimeRespawnTime > 0.f
 		&& GameSession && GameSession->MaxPlayers > 4)
 	{
 		float OTElapsed = GetWorld()->GetTimeSeconds() - OvertimeStartWorldTime;
-		int32 ExtraSeconds = FMath::FloorToInt(OTElapsed / 120.f);
 		float BaseRespawn = 2.f;
+		float OTEscalationStartTime = 300.f; // 5 minutes before escalation begins
+		int32 ExtraSeconds = (OTElapsed > OTEscalationStartTime)
+			? FMath::FloorToInt((OTElapsed - OTEscalationStartTime) / 120.f)
+			: 0;
 		float NewRespawn = FMath::Min(BaseRespawn + (float)ExtraSeconds, OvertimeRespawnTime);
 		if (NewRespawn > RespawnWaitTime)
 		{
