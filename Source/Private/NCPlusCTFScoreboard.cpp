@@ -30,8 +30,9 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	CH_Deaths = NSLOCTEXT("CTFScoreboard", "DeathsHeader", "D");
 	CH_Eff    = NSLOCTEXT("CTFScoreboard", "EffHeader", "EFF");
 	CH_Acc    = NSLOCTEXT("CTFScoreboard", "AccHeader", "ACC");
-	CH_Grabs  = NSLOCTEXT("CTFScoreboard", "GrabsHeader", "G");
-	// CH_Caps and CH_Returns inherited from parent UUTCTFScoreboard
+	CH_Caps   = NSLOCTEXT("CTFScoreboard", "CapsHeader", "Caps");
+	CH_Grabs  = NSLOCTEXT("CTFScoreboard", "GrabsHeader", "Grabs");
+	CH_Returns = NSLOCTEXT("CTFScoreboard", "ReturnsHeader", "Rets");
 }
 
 void UNCPlusCTFScoreboard::PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanvas* InCanvas, FVector2D InCanvasCenter)
