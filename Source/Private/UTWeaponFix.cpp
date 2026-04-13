@@ -2571,6 +2571,8 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
         {
             PS->ModifyStatsValue(HitsStatsName, 1);
         }
+        // Cache impact point for ServerShield hitbox analysis (server only, read in ModifyDamage)
+        LastHitscanImpactPoint = Hit.ImpactPoint;
         OnHitScanDamage(Hit, FireDir);
         Hit.Actor->TakeDamage(InstantHitInfo[CurrentFireMode].Damage,
             FUTPointDamageEvent(InstantHitInfo[CurrentFireMode].Damage, Hit, FireDir,
