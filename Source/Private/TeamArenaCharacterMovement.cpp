@@ -150,15 +150,15 @@ void UTeamArenaCharacterMovement::UTCallServerMove()
         // Stock UT4: 60Hz important, 30Hz normal. At 400+ FPS the 30Hz floor
         // leaves 66u gaps at sprint speed — too much room for float drift.
         //
-        // New rates:
-        //   60Hz (17ms) — airborne, high-speed (>1500 u/s), or important moves
+        // New rates (matches UT2004 UTComp's 0.011 NetMoveDelta):
+        //   90Hz (11ms) — airborne, high-speed (>1500 u/s), or important moves
         //   40Hz (25ms) — normal ground movement
         //
         // Dodges and shots still bypass this entirely via CanDelaySendingMove.
         bool bNeedsHighRate = NewMove->IsImportantMove(ClientData->LastAckedMove)
                            || IsFalling()
                            || Velocity.SizeSquared() > 1500.f * 1500.f;
-        float NetMoveDelta = bNeedsHighRate ? 0.017f : 0.025f;
+        float NetMoveDelta = bNeedsHighRate ? 0.011f : 0.025f;
 
         if (((NewMove->TimeStamp - ClientData->ClientUpdateTime) * CharacterOwner->GetWorldSettings()->GetEffectiveTimeDilation() < NetMoveDelta))
         {
