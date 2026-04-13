@@ -6,13 +6,9 @@
 ANPPlayerController::ANPPlayerController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	// Don't touch anything during CDO construction in the editor — the parent
-	// class references may not be resolved yet, causing "SpawnActor failed
-	// because no class was specified" and editor hangs on BP reparent.
-	if (!HasAnyFlags(RF_ClassDefaultObject))
-	{
-		PlayerCameraManagerClass = AUTPlayerCameraManager::StaticClass();
-	}
+	// Don't set PlayerCameraManagerClass here — inherit from AUTPlayerController.
+	// Any assignment during construction triggers camera manager spawning during
+	// BP reparent/compile, which hangs the editor when the class isn't fully loaded.
 }
 
 void ANPPlayerController::PlayerTick(float DeltaTime)
