@@ -46,29 +46,12 @@ AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 		OverlayEffect1P.Material = OverlayMat1P.Object;
 	}
 
-	// Load the ambient loop sound (audible to nearby players)
-	static ConstructorHelpers::FObjectFinder<USoundBase> AmbientLoopObj(
-		TEXT("/Game/RestrictedAssets/Audio/Gameplay/A_Powerup_Invulnerability_PowerLoop"));
-	if (AmbientLoopObj.Succeeded())
-	{
-		SiphonAmbientSound = AmbientLoopObj.Object;
-	}
-	else
-	{
-		SiphonAmbientSound = nullptr;
-	}
-
-	// Load the "Siphon!" announcer sound
-	static ConstructorHelpers::FObjectFinder<USoundBase> SiphonAnnouncerObj(
-		TEXT("/Game/RestrictedAssets/Audio/AnnouncerReward/A_Announcer_Siphon"));
-	if (SiphonAnnouncerObj.Succeeded())
-	{
-		PickupAnnouncerSound = SiphonAnnouncerObj.Object;
-	}
-	else
-	{
-		PickupAnnouncerSound = nullptr;
-	}
+	// Load sounds at CDO time using LoadObject — fails silently (returns nullptr)
+	// instead of popping an error dialog when the pak isn't downloaded yet.
+	SiphonAmbientSound = LoadObject<USoundBase>(nullptr,
+		TEXT("/Game/RestrictedAssets/Audio/Gameplay/A_Powerup_Invulnerability_PowerLoop.A_Powerup_Invulnerability_PowerLoop"));
+	PickupAnnouncerSound = LoadObject<USoundBase>(nullptr,
+		TEXT("/Game/RestrictedAssets/Audio/AnnouncerReward/A_Announcer_Siphon.A_Announcer_Siphon"));
 }
 
 

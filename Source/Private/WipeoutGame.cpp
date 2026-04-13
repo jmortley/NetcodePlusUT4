@@ -2900,39 +2900,23 @@ void AUWipeoutGame::ResolveShieldBeltSubstitution()
 		return;
 	}
 
-	// No ShieldBelt on this map — spawn a fresh pickup at the vest's location
-	// (follows the same pattern as UTShowdownGame::CheckRelevance)
-	TSubclassOf<AUTPickupInventory> ArmorBaseClass = LoadClass<AUTPickupInventory>(
-		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/ArmorBase.ArmorBase_C"));
+	// No ShieldBelt on this map — swap the vest's inventory type to ShieldBelt.
+	// The vest is already a valid AUTPickupInventory in the world; SetInventoryType
+	// updates the replicated InventoryType, rebuilds the mesh, and handles respawn.
 	TSubclassOf<AUTInventory> ShieldBeltClass = LoadClass<AUTInventory>(
 		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_ShieldBelt.Armor_ShieldBelt_C"));
-
-	if (ArmorBaseClass && ShieldBeltClass)
+	if (ShieldBeltClass)
 	{
-		FActorSpawnParameters Params;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		AUTPickupInventory* NewBelt = GetWorld()->SpawnActor<AUTPickupInventory>(
-			ArmorBaseClass,
-			PendingVestPickup->GetActorLocation(),
-			PendingVestPickup->GetActorRotation(),
-			Params);
-		if (NewBelt)
-		{
-			NewBelt->SetInventoryType(ShieldBeltClass);
-			bMapHasShieldBelt = true;
-			UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has no ShieldBelt — spawned belt at vest location %s"),
-				*PendingVestPickup->GetActorLocation().ToString());
-		}
+		PendingVestPickup->SetInventoryType(ShieldBeltClass);
+		bMapHasShieldBelt = true;
+		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Converted vest to ShieldBelt at %s"),
+			*PendingVestPickup->GetActorLocation().ToString());
 	}
 	else
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: Failed to load ArmorBase (%s) or ShieldBelt (%s) class"),
-			ArmorBaseClass ? TEXT("OK") : TEXT("FAIL"),
-			ShieldBeltClass ? TEXT("OK") : TEXT("FAIL"));
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: Failed to load Armor_ShieldBelt class"));
 	}
 
-	// Always destroy the old vest pickup
-	PendingVestPickup->Destroy();
 	PendingVestPickup = nullptr;
 }
 

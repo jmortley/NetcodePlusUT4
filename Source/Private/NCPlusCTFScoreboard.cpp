@@ -16,7 +16,7 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 
 	// Column positions (fraction of CellWidth)
 	ColumnHeaderPlayerX  = 0.02f;
-	ColumnHeaderKillsX   = 0.30f;
+	ColumnHeaderKillsX   = 0.32f;
 	ColumnHeaderDeathsX  = 0.37f;
 	ColumnHeaderEffX     = 0.45f;
 	ColumnHeaderAccX     = 0.54f;
@@ -66,7 +66,7 @@ void UNCPlusCTFScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 		DrawTexture(UTHUDOwner->ScoreboardAtlas, XOffset, YOffset, ScaledCellWidth, Height, 149, 138, 32, 32, 1.0, FLinearColor(0.72f, 0.72f, 0.72f, 0.85f));
 		DrawText(CH_PlayerName, XOffset + (ScaledCellWidth * ColumnHeaderPlayerX), YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Left, ETextVertPos::Center);
 
-		if (UTGameState && UTGameState->HasMatchStarted())
+		if (UTGameState)
 		{
 			DrawText(CH_Kills,  XOffset + (ScaledCellWidth * ColumnHeaderKillsX),   YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_Deaths, XOffset + (ScaledCellWidth * ColumnHeaderDeathsX),  YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
