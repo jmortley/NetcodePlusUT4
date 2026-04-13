@@ -1658,6 +1658,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                     BestPoint = ClosestPoint;
                     BestCapsulePoint = ClosestCapsulePoint;
                     BestCollisionRadius = CollisionRadius;
+                    // Cache the total padded radius for ServerShield hitplot normalization
+                    LastHitscanPaddedRadius = CollisionRadius + TraceRadius + ExtraHitPadding;
                 }
             }
         }

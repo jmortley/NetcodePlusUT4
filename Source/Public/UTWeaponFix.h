@@ -249,10 +249,16 @@ protected:
     UPROPERTY(Transient)
     TArray<UMaterialInstanceDynamic*> CachedSkinMIDs;
 
+public:
     /** Server-side only: impact point from the last FireInstantHit trace.
      *  Written just before TakeDamage so ServerShield can read it in ModifyDamage
      *  for accurate hitbox radial offset computation. Not replicated. */
     FVector LastHitscanImpactPoint = FVector::ZeroVector;
+
+    /** Server-side only: total padded radius used for the hitscan validation
+     *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
+    float LastHitscanPaddedRadius = 0.0f;
+protected:
 
     FTimerHandle DeferredActiveStateHandle;
     /**
