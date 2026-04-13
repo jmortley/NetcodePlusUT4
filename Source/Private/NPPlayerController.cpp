@@ -6,9 +6,11 @@
 ANPPlayerController::ANPPlayerController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	// Don't set PlayerCameraManagerClass here — inherit from AUTPlayerController.
-	// Any assignment during construction triggers camera manager spawning during
-	// BP reparent/compile, which hangs the editor when the class isn't fully loaded.
+	// Explicitly set camera manager class. Required for PIE — without this,
+	// SpawnPlayerCameraManager fails with "no class was specified".
+	// NOTE: Do NOT create a BP child of this class — it hangs the editor
+	// during reparent CDO reconstruction. Use directly via C++ game mode constructor.
+	PlayerCameraManagerClass = AUTPlayerCameraManager::StaticClass();
 }
 
 void ANPPlayerController::PlayerTick(float DeltaTime)
