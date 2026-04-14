@@ -1397,23 +1397,22 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 
 	const int32 TeamIndex = PS->Team->TeamIndex;
 
-	// Use precomputed anchor-based sides (all spawns on each geographic side,
-	// including elevated ones — no top-N filtering).
+	// Use the layout-selected spawns for this round (top-4 per team,
+	// chosen by SelectSpawnLayoutForRound with side alternation).
 	TArray<APlayerStart*> MySpawns;
 
-	if (PrecomputedSideA.Num() > 0 && PrecomputedSideB.Num() > 0)
+	if (TeamIndex == 0 && Team0SelectedSpawns.Num() > 0)
 	{
-		// Swap sides on odd rounds for fairness (matches SelectSpawnLayoutForRound parity)
-		bool bSwap = (TotalRoundsPlayed % 2 == 1);
-		if (TeamIndex == 0)
-			MySpawns = bSwap ? PrecomputedSideB : PrecomputedSideA;
-		else
-			MySpawns = bSwap ? PrecomputedSideA : PrecomputedSideB;
+		MySpawns = Team0SelectedSpawns;
+	}
+	else if (TeamIndex == 1 && Team1SelectedSpawns.Num() > 0)
+	{
+		MySpawns = Team1SelectedSpawns;
 	}
 	else
 	{
-		// Fallback: precompute failed or map has < 2 spawns
-		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: No precomputed sides — falling back to Super"));
+		// Fallback: layout selection failed or spawns not yet chosen
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: No selected spawns for team %d — falling back to Super"), TeamIndex);
 		return Super::ChoosePlayerStart_Implementation(Player);
 	}
 
