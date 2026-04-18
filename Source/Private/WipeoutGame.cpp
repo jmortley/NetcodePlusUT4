@@ -2158,51 +2158,111 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 		return;
 	}
 
-	// ── Cluster spawns into two geographic sides ──
-	// Find the two spawns that are furthest apart — these anchor each side.
-	int32 AnchorA = 0, AnchorB = 1;
-	float MaxDist = 0.f;
-	for (int32 i = 0; i < N; ++i)
+	// ── Multi-axis clustering ──
+	// Try several axis candidates (E-W, N-S, diagonals, principal axis).
+	// For each, project all spawns onto the axis, split at median, take 4 deepest
+	// per side. Pick whichever axis produces the biggest MinCrossDistance.
+
+	const int32 SpawnsPerTeam = 4;
+
+	// Compute overall centroid (for axis projection origin)
+	FVector Centroid = FVector::ZeroVector;
+	for (APlayerStart* S : AllSpawnPointsList) Centroid += S->GetActorLocation();
+	Centroid /= N;
+
+	// Principal axis via covariance (2D): find the direction of max spread
+	float Sxx = 0.f, Sxy = 0.f, Syy = 0.f;
+	for (APlayerStart* S : AllSpawnPointsList)
 	{
-		for (int32 j = i + 1; j < N; ++j)
+		FVector D = S->GetActorLocation() - Centroid;
+		Sxx += D.X * D.X;
+		Sxy += D.X * D.Y;
+		Syy += D.Y * D.Y;
+	}
+	// Largest eigenvector of [[Sxx Sxy][Sxy Syy]] — angle = 0.5 * atan2(2*Sxy, Sxx - Syy)
+	float PrincipalAngle = 0.5f * FMath::Atan2(2.f * Sxy, Sxx - Syy);
+	FVector2D PrincipalAxis(FMath::Cos(PrincipalAngle), FMath::Sin(PrincipalAngle));
+
+	struct FAxisCandidate
+	{
+		FString Name;
+		FVector2D Dir;
+	};
+
+	TArray<FAxisCandidate> Candidates = {
+		{ TEXT("East-West"),  FVector2D(1.f, 0.f) },
+		{ TEXT("North-South"), FVector2D(0.f, 1.f) },
+		{ TEXT("NE-SW"),      FVector2D(0.707f, 0.707f) },
+		{ TEXT("NW-SE"),      FVector2D(0.707f, -0.707f) },
+		{ TEXT("Principal"),  PrincipalAxis }
+	};
+
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Evaluating %d axis candidates for %d spawns (centroid %.0f,%.0f, principal angle %.1f deg)"),
+		Candidates.Num(), N, Centroid.X, Centroid.Y, FMath::RadiansToDegrees(PrincipalAngle));
+
+	TArray<APlayerStart*> SideA, SideB;
+	FString BestAxisName;
+	float BestMinCross = -1.f;
+
+	for (const FAxisCandidate& Axis : Candidates)
+	{
+		// Project each spawn onto this axis (scalar = dot product with axis direction)
+		TArray<TPair<float, APlayerStart*>> Projections;
+		for (APlayerStart* S : AllSpawnPointsList)
 		{
-			float D = (AllSpawnPointsList[i]->GetActorLocation() - AllSpawnPointsList[j]->GetActorLocation()).Size2D();
-			if (D > MaxDist)
-			{
-				MaxDist = D;
-				AnchorA = i;
-				AnchorB = j;
-			}
+			FVector D = S->GetActorLocation() - Centroid;
+			float Proj = D.X * Axis.Dir.X + D.Y * Axis.Dir.Y;
+			Projections.Add(TPair<float, APlayerStart*>(Proj, S));
+		}
+
+		// Sort by projection, split at median
+		Projections.Sort([](const TPair<float, APlayerStart*>& A, const TPair<float, APlayerStart*>& B)
+		{
+			return A.Key < B.Key;
+		});
+
+		int32 SplitIdx = N / 2;
+		TArray<APlayerStart*> CandidateA, CandidateB;
+		for (int32 i = 0; i < SplitIdx; ++i) CandidateA.Add(Projections[i].Value);
+		for (int32 i = SplitIdx; i < N; ++i) CandidateB.Add(Projections[i].Value);
+
+		// Pick the 4 "deepest" from each side — those with extreme projections
+		// (SideA deepest = most negative projection, SideB deepest = most positive)
+		// Projections are already sorted ascending, so:
+		// - CandidateA is [most-negative...median], deepest = index 0
+		// - CandidateB is [median...most-positive], deepest = last index
+		TArray<APlayerStart*> PickA, PickB;
+		for (int32 i = 0; i < FMath::Min(SpawnsPerTeam, CandidateA.Num()); ++i)
+			PickA.Add(CandidateA[i]);
+		for (int32 i = 0; i < FMath::Min(SpawnsPerTeam, CandidateB.Num()); ++i)
+			PickB.Add(CandidateB[CandidateB.Num() - 1 - i]);
+
+		// Compute MinCrossDistance for this axis' pick
+		float MinCross = FLT_MAX;
+		for (APlayerStart* S0 : PickA)
+			for (APlayerStart* S1 : PickB)
+				MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
+
+		UE_LOG(LogGameMode, Log, TEXT("  Axis %-12s: split %d/%d, picked %d/%d, MinCross %.0f"),
+			*Axis.Name, CandidateA.Num(), CandidateB.Num(), PickA.Num(), PickB.Num(), MinCross);
+
+		if (MinCross > BestMinCross)
+		{
+			BestMinCross = MinCross;
+			BestAxisName = Axis.Name;
+			SideA = CandidateA;
+			SideB = CandidateB;
 		}
 	}
 
-	// Assign every spawn to the closer anchor (two clusters = two sides)
-	TArray<APlayerStart*> SideA, SideB;
-	FVector LocA = AllSpawnPointsList[AnchorA]->GetActorLocation();
-	FVector LocB = AllSpawnPointsList[AnchorB]->GetActorLocation();
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Selected axis '%s' with MinCross %.0f (%d on side A, %d on side B)"),
+		*BestAxisName, BestMinCross, SideA.Num(), SideB.Num());
 
-	for (int32 i = 0; i < N; ++i)
-	{
-		FVector Loc = AllSpawnPointsList[i]->GetActorLocation();
-		float DistToA = (Loc - LocA).Size2D();
-		float DistToB = (Loc - LocB).Size2D();
-		if (DistToA <= DistToB)
-			SideA.Add(AllSpawnPointsList[i]);
-		else
-			SideB.Add(AllSpawnPointsList[i]);
-	}
-
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout spawn clustering: %d on side A, %d on side B (anchor dist %.0f)"),
-		SideA.Num(), SideB.Num(), MaxDist);
-
-	// Persist full side arrays for ChoosePlayerStart (no top-N filtering —
-	// all spawns on each side remain candidates, including elevated ones).
+	// Persist full side arrays for fallback (should not be used anymore but keep for safety)
 	PrecomputedSideA = SideA;
 	PrecomputedSideB = SideB;
 
 	// ── Generate layouts: pick SpawnsPerTeam from each side ──
-	// SpawnsPerTeam = 4 to give each player a unique spawn (4v4 max)
-	const int32 SpawnsPerTeam = 4;
 	const int32 SpawnsA = FMath::Min(SideA.Num(), SpawnsPerTeam);
 	const int32 SpawnsB = FMath::Min(SideB.Num(), SpawnsPerTeam);
 
