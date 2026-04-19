@@ -135,6 +135,13 @@ public:
     virtual void BeginPlay() override;
     static int32 GetTargetProjectileTickRate();
 
+    /** Master gate for weapon skin support. Disabled for now: stock skin allocation
+     *  (LoadObject + per-instance MID creation) causes a ~1-3ms hitch every life in
+     *  duel when you pick up a fresh weapon. Hide/show is independent of this and
+     *  stays enabled. Flip to true to re-enable skins once the per-life MID cost
+     *  is addressed (e.g., static shared MID pool keyed by WeaponClass+SkinPath). */
+    static constexpr bool bSkinsEnabled = false;
+
     /** Per-weapon hide state — keyed by class name.
      *  Set via "weaponskins" menu or "weaponhand hidden/show" console command.
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
@@ -447,9 +454,9 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
     bool bEnableProjectileRewind = false;
 
-    /** Max rewind scale at low ping (0.85 = 85% of half-RTT). Never full rewind. */
+    /** Max rewind scale at low ping (1.0 = full half-RTT compensation). */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
-    float ProjectileRewindMaxScale = 0.85f;
+    float ProjectileRewindMaxScale = 1.0f;
 
     /** Ping (ms) below which max scale is applied */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
@@ -457,7 +464,7 @@ protected:
 
     /** Ping (ms) above which NO rewind is applied. Linear falloff between Full and Max. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
-    float ProjectileRewindMaxPingMs = 130.0f;
+    float ProjectileRewindMaxPingMs = 160.0f;
 
     /** Minimum rewind scale at the falloff boundary */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")

@@ -80,26 +80,29 @@ void AUTWeaponFix::LoadWeaponSettings()
 				}
 			}
 
-			// Load saved skin paths — keyed by WeaponSkinCustomizationTag
-			AUTWeapon* WeaponCDO = Cast<AUTWeapon>(It->GetDefaultObject());
-			if (WeaponCDO && WeaponCDO->WeaponSkinCustomizationTag != NAME_None)
+			// Load saved skin paths — keyed by WeaponSkinCustomizationTag.
+			// Disabled via bSkinsEnabled gate (see UTWeaponFix.h): LoadObject sync
+			// load hitches the main thread, and MIDs aren't being applied anyway.
+			if (bSkinsEnabled)
 			{
-				FName Tag = WeaponCDO->WeaponSkinCustomizationTag;
-				if (!SeenSkinTags.Contains(Tag))
+				AUTWeapon* WeaponCDO = Cast<AUTWeapon>(It->GetDefaultObject());
+				if (WeaponCDO && WeaponCDO->WeaponSkinCustomizationTag != NAME_None)
 				{
-					SeenSkinTags.Add(Tag);
-					FString SkinKey = FString::Printf(TEXT("Skin.%s"), *Tag.ToString());
-					FString SkinPath;
-					if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *SkinKey, SkinPath, ModIniPath) && !SkinPath.IsEmpty())
+					FName Tag = WeaponCDO->WeaponSkinCustomizationTag;
+					if (!SeenSkinTags.Contains(Tag))
 					{
-						SavedSkinPaths.Add(Tag, SkinPath);
-						// Eagerly load the skin asset now (during startup) so BringUp()
-						// can do a cheap pointer lookup instead of a blocking LoadObject.
-						UUTWeaponSkin* Skin = LoadObject<UUTWeaponSkin>(nullptr, *SkinPath);
-						if (Skin)
+						SeenSkinTags.Add(Tag);
+						FString SkinKey = FString::Printf(TEXT("Skin.%s"), *Tag.ToString());
+						FString SkinPath;
+						if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *SkinKey, SkinPath, ModIniPath) && !SkinPath.IsEmpty())
 						{
-							Skin->AddToRoot();
-							CachedSkinAssets.Add(Tag, Skin);
+							SavedSkinPaths.Add(Tag, SkinPath);
+							UUTWeaponSkin* Skin = LoadObject<UUTWeaponSkin>(nullptr, *SkinPath);
+							if (Skin)
+							{
+								Skin->AddToRoot();
+								CachedSkinAssets.Add(Tag, Skin);
+							}
 						}
 					}
 				}
@@ -2979,6 +2982,15 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 		}
 	}
 
+	// Skin support is gated via bSkinsEnabled — see UTWeaponFix.h. When disabled
+	// we null WeaponSkin before Super::BringUp so Epic's AttachToOwner->SetSkin
+	// path can't kick off a per-equip CreateAndSetMaterialInstanceDynamic chain.
+	// The per-life MID allocation was a visible ~1-3ms hitch in duel on respawn.
+	if (!bSkinsEnabled)
+	{
+		WeaponSkin = nullptr;
+	}
+
 	Super::BringUp(OverflowTime);
 
 	// Load settings from Mod.ini on first weapon equip
@@ -3019,51 +3031,49 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 		}
 	}
 
-	// Apply saved skin from pre-loaded cache (loaded eagerly in LoadWeaponSettings)
-	if (!WeaponSkin && WeaponSkinCustomizationTag != NAME_None)
+	// Skin cache lookup + MID creation + SavedMeshMaterials patching.
+	// Gated off via bSkinsEnabled — see UTWeaponFix.h. The MID creation path
+	// (CreateAndSetMaterialInstanceDynamicFromMaterial) is the per-life duel
+	// hitch: every fresh weapon instance post-respawn allocates 1-N new MIDs.
+	if (bSkinsEnabled)
 	{
-		UUTWeaponSkin** Cached = CachedSkinAssets.Find(WeaponSkinCustomizationTag);
-		if (Cached && *Cached)
+		if (!WeaponSkin && WeaponSkinCustomizationTag != NAME_None)
 		{
-			WeaponSkin = *Cached;
-		}
-	}
-
-	// FIX: Weapon skin 1st person material gets clobbered by SetSkin() inside
-	// AttachToOwner_Implementation (UTWeapon.cpp:956). Create MIDs once here
-	// and cache them — SetSkin reuses the cached MIDs via SetMaterial instead
-	// of creating expensive new GPU resources every call.
-	if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
-	{
-		// Reuse cached MIDs if they already exist (quick weapon swap back).
-		// Only recreate if cache is empty (first equip) or slot count changed.
-		int32 NumSlots = Mesh->GetNumMaterials();
-		if (CachedSkinMIDs.Num() != NumSlots)
-		{
-			CachedSkinMIDs.Empty();
-			for (int32 i = 0; i < NumSlots; i++)
+			UUTWeaponSkin** Cached = CachedSkinAssets.Find(WeaponSkinCustomizationTag);
+			if (Cached && *Cached)
 			{
-				UMaterialInstanceDynamic* MID = Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
-				CachedSkinMIDs.Add(MID);
+				WeaponSkin = *Cached;
 			}
 		}
-		else
+
+		if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
 		{
-			// Cache valid — just re-set the existing MIDs on the mesh
-			for (int32 i = 0; i < NumSlots; i++)
+			int32 NumSlots = Mesh->GetNumMaterials();
+			if (CachedSkinMIDs.Num() != NumSlots)
 			{
-				if (CachedSkinMIDs[i])
+				CachedSkinMIDs.Empty();
+				for (int32 i = 0; i < NumSlots; i++)
 				{
-					Mesh->SetMaterial(i, CachedSkinMIDs[i]);
+					UMaterialInstanceDynamic* MID = Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
+					CachedSkinMIDs.Add(MID);
 				}
 			}
-		}
-		// Patch SavedMeshMaterials so SetSkin(nullptr) restores to our skin
-		for (int32 i = 0; i < CachedSkinMIDs.Num(); i++)
-		{
-			if (CachedSkinMIDs[i] && SavedMeshMaterials.IsValidIndex(i))
+			else
 			{
-				SavedMeshMaterials[i] = CachedSkinMIDs[i];
+				for (int32 i = 0; i < NumSlots; i++)
+				{
+					if (CachedSkinMIDs[i])
+					{
+						Mesh->SetMaterial(i, CachedSkinMIDs[i]);
+					}
+				}
+			}
+			for (int32 i = 0; i < CachedSkinMIDs.Num(); i++)
+			{
+				if (CachedSkinMIDs[i] && SavedMeshMaterials.IsValidIndex(i))
+				{
+					SavedMeshMaterials[i] = CachedSkinMIDs[i];
+				}
 			}
 		}
 	}
@@ -3128,11 +3138,11 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
 	Super::SetSkin(NewSkin);
 
-	// Only re-apply cached weapon skin when the overlay is being REMOVED (null).
-	// When NewSkin is non-null, it's a powerup overlay (amp/berserk/etc.) — let it
-	// take effect. When it's null, Super restores from SavedMeshMaterials which
-	// already contains our cached skin MIDs (patched in BringUp).
-	if (!NewSkin && WeaponSkin && Mesh && CachedSkinMIDs.Num() > 0)
+	// Cached-MID re-apply path. Gated off via bSkinsEnabled (see UTWeaponFix.h).
+	// With skins disabled, WeaponSkin is nulled in BringUp and CachedSkinMIDs is
+	// never populated — this block is already inert, but the explicit gate
+	// documents intent and short-circuits the branch chain.
+	if (bSkinsEnabled && !NewSkin && WeaponSkin && Mesh && CachedSkinMIDs.Num() > 0)
 	{
 		int32 NumSlots = FMath::Min(Mesh->GetNumMaterials(), CachedSkinMIDs.Num());
 		for (int32 i = 0; i < NumSlots; i++)
