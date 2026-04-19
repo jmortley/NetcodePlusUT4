@@ -117,8 +117,9 @@ protected:
 	uint8 bLastShowGlowState = 0xFF;
 
 	// --- Performance: OverlayMesh throttle ---
-	// Counter for throttling OverlayMesh->MarkRenderStateDirty() to every 8th frame
-	uint8 OverlayDirtyFrameCounter = 0;
+	// Timestamp of last OverlayMesh->MarkRenderStateDirty() allowed through Super::Tick.
+	// Time-based throttle at 60Hz — independent of render frame rate (480/720/etc).
+	float LastOverlayDirtyTime = 0.f;
 
 	// --- Per-weapon hide tracking ---
 	// Tracks last equipped weapon to detect weapon switches and apply hide state

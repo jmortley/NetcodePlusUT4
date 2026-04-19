@@ -15,7 +15,7 @@
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
-	0, // Default: 1 (Enabled by default)
+	1, // Default: 1 (Enabled by default)
 	TEXT("If 1, enables one-way latency visual prediction for non hitscan weapons.\n")
 	TEXT("Players can set to 0 to opt-out (force server positions)."),
 	ECVF_Default); // Saves to user config
@@ -659,22 +659,21 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	}
 
 	// --- PERF: Throttle OverlayMesh->MarkRenderStateDirty() ---
-	// Base AUTCharacter::Tick (line 4743) calls this EVERY FRAME as a workaround for
-	// an engine bug. We throttle to every 8th frame (60Hz at 480fps).
+	// Base AUTCharacter::Tick calls this EVERY FRAME as a workaround for an engine bug.
+	// We throttle to 60Hz regardless of render frame rate (works at 480fps and 720fps).
 	USkeletalMeshComponent* SavedOverlayMesh = nullptr;
 	if (OverlayMesh && OverlayMesh->IsRegistered() && GetNetMode() != NM_DedicatedServer)
 	{
-		OverlayDirtyFrameCounter++;
-		if (OverlayDirtyFrameCounter < 8)
+		constexpr float OverlayDirtyInterval = 1.f / 60.f;
+		const float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+		if (CurrentTime - LastOverlayDirtyTime < OverlayDirtyInterval)
 		{
-			// Hide OverlayMesh from Super::Tick so it won't MarkRenderStateDirty
 			SavedOverlayMesh = OverlayMesh;
 			OverlayMesh = nullptr;
 		}
 		else
 		{
-			OverlayDirtyFrameCounter = 0;
-			// Let Super::Tick handle it this frame (every 8th)
+			LastOverlayDirtyTime = CurrentTime;
 		}
 	}
 
@@ -700,6 +699,46 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	if (GetNetMode() == NM_DedicatedServer)
 	{
 		return;
+	}
+
+	// --- PERF: Overlay visibility cull ---
+	// OverlayMesh has BoundsScale=15000 set by Epic in UTCharacter::UpdateCharOverlays,
+	// which disables engine frustum/HZB culling on it. We piggy-back on the main mesh
+	// (normal bounds) to cull overlays for characters that are off-screen, occluded,
+	// or far from the local viewer. SetVisibility only fires when state changes to
+	// avoid redundant MarkRenderStateDirty.
+	if (OverlayMesh && OverlayMesh->IsRegistered())
+	{
+		bool bShouldShow = true;
+
+		if (USkeletalMeshComponent* MainMesh = GetMesh())
+		{
+			const float SinceRendered = GetWorld()->GetTimeSeconds() - MainMesh->LastRenderTime;
+			if (SinceRendered > 0.1f)
+			{
+				bShouldShow = false;
+			}
+		}
+
+		if (bShouldShow)
+		{
+			if (APlayerController* LocalPC = GetWorld()->GetFirstPlayerController())
+			{
+				FVector ViewLoc;
+				FRotator ViewRot;
+				LocalPC->GetPlayerViewPoint(ViewLoc, ViewRot);
+				constexpr float OverlayCullDistSq = 5500.f * 5500.f;
+				if (FVector::DistSquared(GetActorLocation(), ViewLoc) > OverlayCullDistSq)
+				{
+					bShouldShow = false;
+				}
+			}
+		}
+
+		if (OverlayMesh->IsVisible() != bShouldShow)
+		{
+			OverlayMesh->SetVisibility(bShouldShow, true);
+		}
 	}
 
 	// --- CASE 1: Active Spawn Protection ---

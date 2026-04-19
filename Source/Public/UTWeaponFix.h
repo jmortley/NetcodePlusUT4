@@ -158,6 +158,7 @@ public:
     static bool bWeaponSettingsLoaded;
     //~ Begin AUTWeapon Interface
     virtual void GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation) override;
+    virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
     virtual void PostInitProperties() override;
@@ -243,7 +244,7 @@ protected:
     /** Last known fire rotation when owner was alive */
     FRotator CachedFireRotation = FRotator::ZeroRotator;
     /** Max time after death to still allow pending fire RPCs (seconds) */
-    static constexpr float TradeKillGracePeriod = 0.10f;
+    static constexpr float TradeKillGracePeriod = 0.20f;
 
     /** Cached weapon skin MIDs — created once in BringUp, reused in SetSkin to avoid per-call GPU allocations */
     UPROPERTY(Transient)

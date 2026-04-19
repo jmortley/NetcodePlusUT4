@@ -3094,6 +3094,36 @@ void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& Spa
 	Super::GetImpactSpawnPosition(TargetLoc, SpawnLocation, SpawnRotation);
 }
 
+void AUTWeaponFix::PlayFiringEffects()
+{
+	// When the weapon is locally hidden, the muzzle flash PSC is still attached to
+	// the (hidden) muzzle socket while the beam/impact spawns from the camera-adjusted
+	// origin (see GetImpactSpawnPosition). That mismatch produces a visible puff at
+	// the hand while the beam comes from chest height. Suppress only the muzzle flash
+	// for the current fire mode — sound, anim, kickback, and beam all still fire.
+	UParticleSystemComponent* SavedPSC = nullptr;
+	int32 SavedIndex = INDEX_NONE;
+	const FName HideKey = FName(*GetClass()->GetName());
+	const bool* bHidden = HiddenWeaponsByTag.Find(HideKey);
+	if (bHidden && *bHidden && UTOwner)
+	{
+		const uint8 EffectFiringMode = (Role == ROLE_Authority || UTOwner->Controller != nullptr) ? CurrentFireMode : UTOwner->FireMode;
+		if (MuzzleFlash.IsValidIndex(EffectFiringMode))
+		{
+			SavedPSC = MuzzleFlash[EffectFiringMode];
+			SavedIndex = EffectFiringMode;
+			MuzzleFlash[EffectFiringMode] = nullptr;
+		}
+	}
+
+	Super::PlayFiringEffects();
+
+	if (SavedIndex != INDEX_NONE && MuzzleFlash.IsValidIndex(SavedIndex))
+	{
+		MuzzleFlash[SavedIndex] = SavedPSC;
+	}
+}
+
 void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
 	Super::SetSkin(NewSkin);
