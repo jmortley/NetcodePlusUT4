@@ -2207,24 +2207,31 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 	for (const FAxisCandidate& Axis : Candidates)
 	{
 		// Project each spawn onto this axis (scalar = dot product with axis direction)
-		TArray<TPair<float, APlayerStart*>> Projections;
+		struct FSpawnProj
+		{
+			float Proj;
+			APlayerStart* Spawn;
+		};
+		TArray<FSpawnProj> Projections;
 		for (APlayerStart* S : AllSpawnPointsList)
 		{
 			FVector D = S->GetActorLocation() - Centroid;
-			float Proj = D.X * Axis.Dir.X + D.Y * Axis.Dir.Y;
-			Projections.Add(TPair<float, APlayerStart*>(Proj, S));
+			FSpawnProj Item;
+			Item.Proj = D.X * Axis.Dir.X + D.Y * Axis.Dir.Y;
+			Item.Spawn = S;
+			Projections.Add(Item);
 		}
 
 		// Sort by projection, split at median
-		Projections.Sort([](const TPair<float, APlayerStart*>& A, const TPair<float, APlayerStart*>& B)
+		Projections.Sort([](const FSpawnProj& A, const FSpawnProj& B)
 		{
-			return A.Key < B.Key;
+			return A.Proj < B.Proj;
 		});
 
 		int32 SplitIdx = N / 2;
 		TArray<APlayerStart*> CandidateA, CandidateB;
-		for (int32 i = 0; i < SplitIdx; ++i) CandidateA.Add(Projections[i].Value);
-		for (int32 i = SplitIdx; i < N; ++i) CandidateB.Add(Projections[i].Value);
+		for (int32 i = 0; i < SplitIdx; ++i) CandidateA.Add(Projections[i].Spawn);
+		for (int32 i = SplitIdx; i < N; ++i) CandidateB.Add(Projections[i].Spawn);
 
 		// Pick the 4 "deepest" from each side — those with extreme projections
 		// (SideA deepest = most negative projection, SideB deepest = most positive)
