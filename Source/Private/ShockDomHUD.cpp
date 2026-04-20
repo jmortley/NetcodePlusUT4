@@ -55,7 +55,41 @@ void AShockDomHUD::DrawHUD()
 
 
 // ============================================================================
-// CONTROL POINT STATUS INDICATORS (below team score bar)
+// MATCH CLOCK (centered below team score bar — Wipeout/Blitz style)
+// ============================================================================
+
+void AShockDomHUD::DrawTeamScoreBar(AUTGameState* GS)
+{
+	// Draw parent's score bar (red/blue bars, scores, team names)
+	Super::DrawTeamScoreBar(GS);
+
+	if (!Canvas || !MediumFont || !GS) return;
+
+	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float TopY = 2.f * RenderScale;
+	const float BarHeight = 36.f * RenderScale;
+	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
+
+	int32 RemainingTime = GS->GetRemainingTime();
+	if (RemainingTime < 0) return;
+
+	int32 Mins = RemainingTime / 60;
+	int32 Secs = RemainingTime % 60;
+	FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
+
+	float ClockScale = RenderScale * 1.1f;
+	float XL, YL;
+	Canvas->TextSize(MediumFont, ClockStr, XL, YL, ClockScale, ClockScale);
+
+	// Flash red under 30s
+	Canvas->DrawColor = (RemainingTime <= 30) ? FColor(255, 60, 60, 255) : FColor::White;
+	Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, ClockScale, ClockScale);
+}
+
+
+// ============================================================================
+// CONTROL POINT STATUS INDICATORS (below match clock)
 // ============================================================================
 
 void AShockDomHUD::DrawControlPointIndicators(const TArray<AShockDomControlPoint*>& Points)
@@ -69,7 +103,7 @@ void AShockDomHUD::DrawControlPointIndicators(const TArray<AShockDomControlPoint
 
 	// Position: centered horizontally, below the team score bar
 	const float StartX = (Canvas->ClipX - TotalWidth) * 0.5f;
-	const float YPos = 52.f * RenderScale;
+	const float YPos = 78.f * RenderScale;  // Below score bar + match clock
 
 	for (int32 i = 0; i < Points.Num(); i++)
 	{

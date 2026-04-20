@@ -12,6 +12,7 @@ class NETCODEPLUS_API AShockDomHUD : public AWipeoutHUD
 	GENERATED_UCLASS_BODY()
 
 	virtual void DrawHUD() override;
+	virtual void DrawTeamScoreBar(AUTGameState* GS) override;
 
 protected:
 	void DrawControlPointIndicators(const TArray<AShockDomControlPoint*>& Points);
