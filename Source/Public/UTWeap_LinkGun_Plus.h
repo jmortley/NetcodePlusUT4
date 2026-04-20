@@ -77,6 +77,20 @@ public:
     /** Tracks if we're currently in high ping validation mode */
     bool bHighPingMode;
 
+    /** Damage cap per ServerProcessBeamHit RPC batch (was 40). Lowered to reduce
+     *  low-ping CSHD overpower — even if the client sends a big accumulator,
+     *  the server clamps to this. Scaled by FireRateMultiplier at apply time. */
+    UPROPERTY(EditDefaultsOnly, Category = "NetcodePlus")
+    int32 BeamDamagePerBatchCap;
+
+    /** At low ping, if the server's sanity trace can't confirm the hit on the
+     *  claimed target, apply this fraction of the client's claimed damage
+     *  instead of rejecting entirely. 0 = hard reject, 1 = full trust, 0.5 =
+     *  half damage fallback. Lets the weapon stay responsive under minor
+     *  client/server sync gaps without giving the client total authority. */
+    UPROPERTY(EditDefaultsOnly, Category = "NetcodePlus")
+    float BeamServerFailDamageScale;
+
     // ===========================================
     // Link Gun Beam State
     // ===========================================
@@ -100,6 +114,15 @@ public:
     /** True if held on target long enough to pull */
     UPROPERTY(BlueprintReadOnly, Category = "LinkGun")
     bool bReadyToPull;
+
+    /** Short grace cache for the last valid linked target. Used to absorb
+     *  single-frame trace misses (common at 480fps) so the warmup timer
+     *  doesn't reset and the pull still fires on fire-release. */
+    TWeakObjectPtr<AActor> LastValidLinkedTarget;
+    float LastValidLinkedTargetTime = 0.f;
+
+    /** How long (seconds) LastValidLinkedTarget remains usable as a fallback. */
+    static constexpr float LinkedTargetGraceWindow = 0.1f;
 
     // ===========================================
     // Link Pull / Pulse System

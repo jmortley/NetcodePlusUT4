@@ -89,6 +89,8 @@ void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
     if (LinkGun)
     {
         LinkGun->CurrentLinkedTarget = nullptr;
+        LinkGun->LastValidLinkedTarget.Reset();
+        LinkGun->LastValidLinkedTargetTime = 0.f;
         LinkGun->LinkStartTime = -100.f;
         LinkGun->LastBeamActivityTime = GetWorld()->GetTimeSeconds();
     }
@@ -283,7 +285,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
     // --------------------------------------------------------
     if (LinkGun->Role == ROLE_Authority && !LinkGun->GetUTOwner()->IsLocallyControlled())
     {
-        // We DO NOT consume ammo here – the owning server context
+        // We DO NOT consume ammo here ï¿½ the owning server context
         // already handled ammo and damage. This branch is purely
         // to drive replicated beam state for other clients.
 
@@ -313,7 +315,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
             LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
         }
 
-        // For other clients’ audio/HUD we still want to know if beam is hitting something
+        // For other clientsï¿½ audio/HUD we still want to know if beam is hitting something
         LinkGun->bLinkCausingDamage = Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged;
 
         // OPTIONAL: you can mirror the warmup timer here if you ever
@@ -378,21 +380,42 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
         }
         else
         {
-            // Miss: clear accumulator so we don’t store damage off-target
+            // Miss: clear accumulator so we don't store damage off-target
             ClientDamageAccumulator = 0.f;
         }
 
-        // 2d) Pull warmup logic (same semantics as stock Link)
+        // 2d) Grace-window restore for single-frame trace misses.
+        // At high fps, a single missed trace would null CurrentLinkedTarget,
+        // which then resets the warmup timer (OldLinkedTarget != Current).
+        // The pull would silently never latch. Restore the last valid target
+        // if we just missed for one frame and it's still a valid link target.
+        const float Now = GetWorld()->GetTimeSeconds();
+        if (!LinkGun->CurrentLinkedTarget
+            && LinkGun->LastValidLinkedTarget.IsValid()
+            && (Now - LinkGun->LastValidLinkedTargetTime) < AUTWeap_LinkGun_Plus::LinkedTargetGraceWindow
+            && LinkGun->IsValidLinkTarget(LinkGun->LastValidLinkedTarget.Get()))
+        {
+            LinkGun->CurrentLinkedTarget = LinkGun->LastValidLinkedTarget.Get();
+        }
+
+        // 2e) Cache current target for next tick's grace window
+        if (LinkGun->CurrentLinkedTarget)
+        {
+            LinkGun->LastValidLinkedTarget = LinkGun->CurrentLinkedTarget;
+            LinkGun->LastValidLinkedTargetTime = Now;
+        }
+
+        // 2f) Pull warmup logic (same semantics as stock Link)
         if (OldLinkedTarget != LinkGun->CurrentLinkedTarget)
         {
-            // Target changed – reset timer
-            LinkGun->LinkStartTime = GetWorld()->GetTimeSeconds();
+            // Target changed - reset timer
+            LinkGun->LinkStartTime = Now;
             LinkGun->bReadyToPull = false;
         }
         else if (LinkGun->CurrentLinkedTarget && !LinkGun->IsLinkPulsing())
         {
             LinkGun->bReadyToPull =
-                (GetWorld()->GetTimeSeconds() - LinkGun->LinkStartTime > LinkGun->PullWarmupTime);
+                (Now - LinkGun->LinkStartTime > LinkGun->PullWarmupTime);
         }
     }
 }
@@ -466,6 +489,8 @@ void UUTWeaponStateFiringLinkBeamPlus::EndState()
 
         LinkGun->bReadyToPull = false;
         LinkGun->CurrentLinkedTarget = nullptr;
+        LinkGun->LastValidLinkedTarget.Reset();
+        LinkGun->LastValidLinkedTargetTime = 0.f;
         LinkGun->bLinkBeamImpacting = false;
         LinkGun->bLinkCausingDamage = false;
         // --- FIX: Force kill effects immediately ---

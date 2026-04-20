@@ -29,6 +29,8 @@ AUTWeap_LinkGun_Plus::AUTWeap_LinkGun_Plus(const FObjectInitializer& ObjectIniti
 	LastBeamActivityTime = 0.f;
 	//MaxHitDistanceTolerance = 300.0f; // Allow 3 meters of lag discrepancy
 	ClientDamageBatchSize = 15;
+	BeamDamagePerBatchCap = 28;        // Was hardcoded 40, lowered to reduce low-ping overpower
+	BeamServerFailDamageScale = 0.5f;  // Half damage if low-ping server sanity trace misses
 	CurrentLinkedTarget = nullptr;
 	LinkStartTime = -100.f;
 	if (FiringState.Num() > 0)
@@ -190,17 +192,17 @@ bool AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Validate(
 		return true; // allow, but do nothing in _Implementation when HitActor is null
 	}
 
-	int32 DamageCap = 40;
+	int32 DamageCap = BeamDamagePerBatchCap;
 	if (UTOwner)
 	{
 		float FireRateMult = UTOwner->GetFireRateMultiplier();
-		DamageCap = FMath::CeilToInt(40 * FireRateMult);
+		DamageCap = FMath::CeilToInt(BeamDamagePerBatchCap * FireRateMult);
 	}
 
 	if (DamageAmount > DamageCap)
 	{
 
-		// don’t kick – just clamp in _Implementation
+		// donï¿½t kick ï¿½ just clamp in _Implementation
 		return true;
 	}
 
@@ -220,11 +222,11 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 		return;
 	}
 
-	int32 DamageCap = 40;
+	int32 DamageCap = BeamDamagePerBatchCap;
 	if (UTOwner)
 	{
 		float FireRateMult = UTOwner->GetFireRateMultiplier();
-		DamageCap = FMath::CeilToInt(40 * FireRateMult);
+		DamageCap = FMath::CeilToInt(BeamDamagePerBatchCap * FireRateMult);
 	}
 
 	DamageAmount = FMath::Min(DamageAmount, DamageCap);
@@ -274,8 +276,30 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 	// LOGIC SELECTION
 	if (!bHighPingMode)
 	{
-		// PATH A: LOW PING (Trust Client / CSHD)
-		bHitValidated = true;
+		// PATH A: LOW PING â€” quick server sanity trace (no extra padding).
+		// Previously trusted the client blindly, which made the beam feel OP:
+		// the server applied damage for hits it couldn't itself confirm under
+		// any trace. Now we do one strict rewind trace with base beam width;
+		// if server confirms, damage is applied as-is. If server disagrees,
+		// we apply BeamServerFailDamageScale of the claimed damage instead
+		// of a hard reject â€” enough to stay responsive under minor sync gaps
+		// but not enough to reward full desync exploitation.
+		float PredictionTime = Super::GetHitValidationPredictionTime();
+		float BaseWidth = InstantHitInfo[1].TraceHalfSize;
+
+		FHitResult SanityHit;
+		FVector TraceEnd = FireStart + (HitLocation - FireStart).GetSafeNormal() * InstantHitInfo[1].TraceRange;
+		HitScanTrace(FireStart, TraceEnd, BaseWidth, SanityHit, PredictionTime);
+
+		if (SanityHit.Actor.Get() == HitActor)
+		{
+			bHitValidated = true;
+		}
+		else
+		{
+			DamageAmount = FMath::Max(0, FMath::FloorToInt(DamageAmount * BeamServerFailDamageScale));
+			bHitValidated = (DamageAmount > 0);
+		}
 	}
 	else
 	{

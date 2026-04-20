@@ -1029,8 +1029,15 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     {
         float TimeSinceLastFire = ServerTime - LastFireTime[FireModeNum];
 
-        // 150ms tolerance: network jitter (~50ms) + rhythm compensation drift (~100ms).
-        float MinInterval = GetRefireTime(FireModeNum) - 0.15f;
+        // Scaled jitter tolerance (15% of refire, floored 15ms, capped 40ms).
+        // The old fixed 0.15s allowed fast-fire weapons (minigun 0.10s, link
+        // beam 0.12s, shock 0.15s) to be fired well above ROF — the tolerance
+        // was often larger than the refire window itself, disabling validation.
+        // Matches the authority branch of IsFireModeOnCooldown so client and
+        // server agree on what counts as rapid fire.
+        const float RefireTime = GetRefireTime(FireModeNum);
+        const float JitterTolerance = FMath::Clamp(RefireTime * 0.15f, 0.015f, 0.04f);
+        float MinInterval = RefireTime - JitterTolerance;
 
         // Use < with SMALL_NUMBER epsilon to avoid floating-point edge case where
         // rhythm compensation snaps Delta to exactly MinInterval (e.g., 0.550 < 0.550).
@@ -1068,9 +1075,18 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
         return true;
     }
 
-    // Authority needs looser tolerance to match ValidateFireRequest (0.15)
-    // Client can be strict since it knows its own timing precisely
-    const float Tolerance = (Role == ROLE_Authority) ? 0.15f : 0.05f;
+    // Client: essentially strict — prevents tap-fire from beating hold-fire.
+    //   The OnRetryTimer in StartFire queues an early click to the next valid
+    //   fire window instead of rejecting it outright, so responsiveness is
+    //   preserved — the click just fires exactly at ROF, not before.
+    // Server: scaled tolerance for network jitter absorption, floored so fast
+    //   weapons still have some slack and capped so slow weapons don't get
+    //   disproportionate leniency. Replaces the old fixed 0.15s that made
+    //   minigun/link-beam server-side validation effectively unreachable.
+    const float RequiredInterval = GetRefireTime(FireModeNum);
+    const float Tolerance = (Role == ROLE_Authority)
+        ? FMath::Clamp(RequiredInterval * 0.15f, 0.015f, 0.04f)
+        : SMALL_NUMBER;
 
     // SAME-MODE COOLDOWN CHECK ONLY.
     // Stock UT4 has independent per-mode cooldowns — the state machine prevents
@@ -1081,7 +1097,6 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
     if (LastFireTime.IsValidIndex(FireModeNum) && LastFireTime[FireModeNum] > 0.0f)
     {
         float TimeSinceLastFire = CurrentTime - LastFireTime[FireModeNum];
-        float RequiredInterval = GetRefireTime(FireModeNum);
 
         if (TimeSinceLastFire < (RequiredInterval - Tolerance))
         {
