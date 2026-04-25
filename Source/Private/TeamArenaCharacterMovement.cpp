@@ -36,10 +36,10 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    // 8 units (was 3.16, then 6). At 400+ FPS with moderate ping, float drift
-    // across many predicted frames can exceed 6u during fast movement/knockback.
-    // 8u still well below cheat/packet-loss thresholds.
-    MaxPositionErrorSquared = 64.f;
+    // 12 units. At 720fps with moderate ping, knockback replay divergence
+    // from rockets/combos can exceed 8u. 12u covers light-to-medium impulses
+    // without giving up too much cheat detection (~1728u/s undetected drift).
+    MaxPositionErrorSquared = 144.f;
 
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.01111f;  // instead of fps dependent
