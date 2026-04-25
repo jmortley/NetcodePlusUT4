@@ -2328,11 +2328,18 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 					return nullptr;
 				}
 
+				// Subtract the fast-forward time from the projectile's remaining
+				// lifespan so its total flight matches what it would have been
+				// without the catchup. Clamped to a 0.1s floor so a heavily
+				// fast-forwarded projectile (e.g., spawned during a server stall
+				// where CatchupTickDelta > original lifespan) doesn't expire on
+				// the same frame it spawned, and never goes negative — engine
+				// behavior on negative LifeSpan is treated as "never expire" in
+				// some paths, which would leak immortal projectiles.
 				if (NewProjectile->GetLifeSpan() > 0.f)
 				{
-					NewProjectile->SetLifeSpan(
-						0.1f + FMath::Max(0.01f, NewProjectile->GetLifeSpan() - CatchupTickDelta)
-					);
+					const float Remaining = NewProjectile->GetLifeSpan() - CatchupTickDelta;
+					NewProjectile->SetLifeSpan(FMath::Max(0.1f, Remaining));
 				}
 			}
 			else

@@ -170,6 +170,45 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 		StuckTime = 0.f;
 	}
 
+	// Smooth-converge the fake to the real's position over ~700ms while both
+	// are in flight. Without this, small position errors at fake/real pairing
+	// time (shooter movement parallax, server fast-forward imperfection, sub-
+	// frame spawn timing) leave the two visibly offset for the entire flight,
+	// producing a "venn diagram" look from oblique viewing angles. Even though
+	// the engine hides the real on pairing, residual visual cues from the real
+	// (or just the offset itself in cases where pairing partially fails) make
+	// the desync noticeable on shock balls because they're spheres — no shape
+	// ambiguity to hide behind.
+	//
+	// Position-based correction so it doesn't conflict with the velocity-based
+	// drift correction above (which keeps Velocity locked to OriginalFireDirection
+	// on the fake). The fake's velocity vector is untouched; only its actor
+	// location shifts gradually toward the real. Time constant 0.7s matches
+	// UTComp's NewNet shock projectile INTERP_TIME.
+	//
+	// Skipped when the real has stopped — the handoff path below handles that
+	// by snapping the fake to the real's location and destroying it.
+	if (GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
+		&& !MyFakeProjectile->IsPendingKillPending()
+		&& ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero(2.0f))
+	{
+		const FVector RealLoc = GetActorLocation();
+		const FVector FakeLoc = MyFakeProjectile->GetActorLocation();
+		const FVector Delta = RealLoc - FakeLoc;
+		const float DeltaSize = Delta.Size();
+
+		// Apply only in the small-drift range. The 120u snap path in
+		// PostNetReceiveVelocity catches anything larger (combo, server
+		// teleport, replication hiccup) — let it handle those.
+		if (DeltaSize > 1.f && DeltaSize < 60.f)
+		{
+			constexpr float ConvergeTime = 0.7f;
+			const float Alpha = FMath::Clamp(DeltaTime / ConvergeTime, 0.f, 1.f);
+			const FVector Correction = Delta * Alpha;
+			MyFakeProjectile->AddActorWorldOffset(Correction, false, nullptr, ETeleportType::TeleportPhysics);
+		}
+	}
+
 	// Stuck-ball handoff: when the real stops (bio goo, wall) but the fake is
 	// still the rendering authority (bMoveFakeToReplicatedPos = false), the
 	// fake's flight particle stops emitting → invisible to the shooter.
