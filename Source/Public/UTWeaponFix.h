@@ -458,17 +458,18 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
     float ProjectileRewindMaxScale = 1.0f;
 
-    /** Ping (ms) below which max scale is applied */
+    /** Ping (ms) below which max scale is applied. <=100ms = full half-RTT rewind. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
-    float ProjectileRewindFullPingMs = 90.0f;
+    float ProjectileRewindFullPingMs = 100.0f;
 
-    /** Ping (ms) above which NO rewind is applied. Linear falloff between Full and Max. */
+    /** Ping (ms) above which NO rewind is applied (hard cliff to zero).
+     *  Linear falloff between FullPingMs and this value, from MaxScale → MinScale. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
-    float ProjectileRewindMaxPingMs = 160.0f;
+    float ProjectileRewindMaxPingMs = 150.0f;
 
-    /** Minimum rewind scale at the falloff boundary */
+    /** Minimum rewind scale at the falloff boundary. 0.5 = half rewind at 150ms ping. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
-    float ProjectileRewindMinScale = 0.15f;
+    float ProjectileRewindMinScale = 0.5f;
 
     /** Server RPC: Client's fake projectile hit a target, validate with rewind */
     UFUNCTION(Server, Reliable, WithValidation)
