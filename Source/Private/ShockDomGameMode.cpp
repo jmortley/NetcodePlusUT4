@@ -128,6 +128,9 @@ void AShockDomGameMode::HandleMatchHasStarted()
 		}
 	}
 
+	// Pre-compute team spawn clusters for first-spawn restriction
+	ComputeInitialSpawnClusters();
+
 	// Start scoring timer
 	if (HasAuthority())
 	{
@@ -264,6 +267,78 @@ void AShockDomGameMode::SpawnControlPointsFromPlayerStarts()
 
 
 // ============================================================================
+// INITIAL SPAWN CLUSTERS (teams spawn on opposing sides for first spawn)
+// ============================================================================
+
+void AShockDomGameMode::ComputeInitialSpawnClusters()
+{
+	Team0InitialStarts.Empty();
+	Team1InitialStarts.Empty();
+
+	// Collect all player starts (skip team starts marked for a specific team — those are pre-assigned)
+	TArray<APlayerStart*> AllStarts;
+	for (TActorIterator<APlayerStart> It(GetWorld()); It; ++It)
+	{
+		AllStarts.Add(*It);
+	}
+	if (AllStarts.Num() < 2) return;
+
+	// Find two anchor starts that are maximally distant from each other
+	int32 Anchor0 = 0, Anchor1 = 1;
+	float MaxDistSq = 0.f;
+	for (int32 i = 0; i < AllStarts.Num(); i++)
+	{
+		for (int32 j = i + 1; j < AllStarts.Num(); j++)
+		{
+			float DistSq = (AllStarts[i]->GetActorLocation() - AllStarts[j]->GetActorLocation()).SizeSquared();
+			if (DistSq > MaxDistSq)
+			{
+				MaxDistSq = DistSq;
+				Anchor0 = i;
+				Anchor1 = j;
+			}
+		}
+	}
+
+	// Partition all starts: assign each to the closer anchor
+	const FVector A0Loc = AllStarts[Anchor0]->GetActorLocation();
+	const FVector A1Loc = AllStarts[Anchor1]->GetActorLocation();
+	for (APlayerStart* Start : AllStarts)
+	{
+		float Dist0Sq = (Start->GetActorLocation() - A0Loc).SizeSquared();
+		float Dist1Sq = (Start->GetActorLocation() - A1Loc).SizeSquared();
+		if (Dist0Sq < Dist1Sq)
+		{
+			Team0InitialStarts.Add(Start);
+		}
+		else
+		{
+			Team1InitialStarts.Add(Start);
+		}
+	}
+
+	UE_LOG(LogGameMode, Log, TEXT("ShockDOM: Initial spawn clusters — Team 0: %d starts, Team 1: %d starts."),
+		Team0InitialStarts.Num(), Team1InitialStarts.Num());
+}
+
+
+void AShockDomGameMode::RestartPlayer(AController* NewPlayer)
+{
+	Super::RestartPlayer(NewPlayer);
+
+	// Track first spawn so we know to skip the cluster restriction next time
+	if (NewPlayer)
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+		if (PS)
+		{
+			SpawnedPlayers.Add(PS);
+		}
+	}
+}
+
+
+// ============================================================================
 // SCORING
 // ============================================================================
 
@@ -345,6 +420,22 @@ float AShockDomGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 	const uint8 PlayerTeamNum = PS->Team->TeamIndex;
 	const FVector StartLoc = P->GetActorLocation();
 	static FName NAME_DOMSpawnCheck = FName(TEXT("DOMSpawnCheck"));
+
+	// ── First-spawn cluster restriction ──
+	// On a player's first spawn this match, force them to spawn in their team's
+	// pre-computed cluster (opposite side of the map from the enemy team).
+	const bool bFirstSpawn = !SpawnedPlayers.Contains(PS);
+	if (bFirstSpawn && (Team0InitialStarts.Num() > 0 || Team1InitialStarts.Num() > 0))
+	{
+		const TArray<APlayerStart*>& OwnCluster =
+			(PlayerTeamNum == 0) ? Team0InitialStarts : Team1InitialStarts;
+		const TArray<APlayerStart*>& EnemyCluster =
+			(PlayerTeamNum == 0) ? Team1InitialStarts : Team0InitialStarts;
+
+		if (EnemyCluster.Contains(P)) return 0.f;        // hard reject enemy cluster
+		if (!OwnCluster.Contains(P))  return 0.1f;       // unfamiliar — strongly avoid
+		// Falls through to normal rating for own cluster (still gets penalties)
+	}
 
 	// ── Control point penalties ──
 	// Don't spawn near enemy-controlled points
