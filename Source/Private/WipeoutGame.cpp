@@ -960,18 +960,25 @@ void AUWipeoutGame::StartNextRound()
 		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Layout selection failed — insufficient spawn layouts on this map"));
 	}
 
-	// Spawn all players
+	// Spawn all players in two passes — alternate which team spawns first
+	// each round so neither side gets a permanent "spawns second sees enemies" advantage.
 	bAllowPlayerRespawns = true;
 	int32 PlayersSpawned = 0;
 
-	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
-	{
-		AController* C = It->Get();
-		if (!C) continue;
+	const int32 FirstTeam  = (TotalRoundsPlayed % 2 == 0) ? 0 : 1;
+	const int32 SecondTeam = 1 - FirstTeam;
 
-		AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState);
-		if (PS && !PS->bOnlySpectator)
+	auto SpawnPassForTeam = [&](int32 TargetTeam)
+	{
+		for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 		{
+			AController* C = It->Get();
+			if (!C) continue;
+
+			AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState);
+			if (!PS || PS->bOnlySpectator || !PS->Team) continue;
+			if (PS->Team->TeamIndex != TargetTeam) continue;
+
 			PS->bOutOfLives = false;
 			PS->ForceNetUpdate();
 
@@ -984,13 +991,16 @@ void AUWipeoutGame::StartNextRound()
 			RestartPlayer(C);
 			PlayersSpawned++;
 
-			if (PS->Team)
-			{
-				if (PS->Team->TeamIndex == 0) { Team0StartingSize++; }
-				else if (PS->Team->TeamIndex == 1) { Team1StartingSize++; }
-			}
+			if (PS->Team->TeamIndex == 0) { Team0StartingSize++; }
+			else if (PS->Team->TeamIndex == 1) { Team1StartingSize++; }
 		}
-	}
+	};
+
+	SpawnPassForTeam(FirstTeam);
+	SpawnPassForTeam(SecondTeam);
+
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Spawn order this round — team %d first, team %d second"),
+		FirstTeam, SecondTeam);
 
 	bAllowPlayerRespawns = false;
 
@@ -1418,11 +1428,16 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 
 	if (MySpawns.Num() == 0) return Super::ChoosePlayerStart_Implementation(Player);
 
-	// Score spawns to cluster teammates together.
-	// First player spawned has no teammates yet — picks randomly.
-	// Subsequent players are pulled toward already-spawned teammates.
+	// Score spawns to cluster teammates together AND keep teams separated.
+	// First player spawned has no teammates/enemies yet — picks randomly.
+	// Later players pull toward teammates and away from enemies.
 	APlayerStart* BestSpawn = nullptr;
 	float BestScore = -FLT_MAX;
+
+	// Fallback: best candidate even if it fails the enemy-distance threshold,
+	// chosen by maximum distance from nearest enemy (least-bad option).
+	APlayerStart* FallbackSpawn = nullptr;
+	float FallbackEnemyDist = -FLT_MAX;
 
 	for (APlayerStart* Spawn : MySpawns)
 	{
@@ -1430,34 +1445,111 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 
 		int32 NearbyCount = 0;
 		float MinTeammateDist = FLT_MAX;
+		float MinEnemyDist = FLT_MAX;
 		bool bOccupied = false;
+
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
 			if (!Pawn || !Pawn->PlayerState) continue;
 			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
-			if (OtherPS && OtherPS != PS && OtherPS->Team && OtherPS->Team->TeamIndex == TeamIndex)
+			if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
+
+			float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
+
+			if (OtherPS->Team->TeamIndex == TeamIndex)
 			{
-				float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
-				if (Dist < 100.f)
-				{
-					bOccupied = true;
-					break;
-				}
+				// Teammate
+				if (Dist < 100.f) { bOccupied = true; break; }
 				MinTeammateDist = FMath::Min(MinTeammateDist, Dist);
 				if (Dist < 800.f) NearbyCount++;
 			}
+			else
+			{
+				// Enemy
+				MinEnemyDist = FMath::Min(MinEnemyDist, Dist);
+			}
 		}
 
-		// Skip spawns that already have a teammate on them — each player gets a unique start
+		// Skip spawns that already have a teammate on them
 		if (bOccupied) continue;
 
-		// Reward nearby teammates, reward closeness — team spawns as a tight group
-		float Score = NearbyCount * 5000.f - MinTeammateDist + FMath::FRandRange(0.f, 300.f);
+		// Track the least-bad candidate even if it fails the enemy threshold —
+		// guarantees we never return nullptr on cramped maps
+		if (MinEnemyDist > FallbackEnemyDist)
+		{
+			FallbackEnemyDist = MinEnemyDist;
+			FallbackSpawn = Spawn;
+		}
+
+		// Hard reject if any enemy is too close
+		if (MinEnemyDist < MinimumEnemySpawnDistance) continue;
+
+		// Score: cluster teammates, reward distance from enemies
+		float Score = NearbyCount * 5000.f
+			- MinTeammateDist
+			+ (MinEnemyDist * 0.5f)              // bonus for distance from enemies
+			+ FMath::FRandRange(0.f, 300.f);
 		if (Score > BestScore)
 		{
 			BestScore = Score;
 			BestSpawn = Spawn;
+		}
+	}
+
+	// Tier 2 fallback: every curated candidate failed the enemy threshold —
+	// use the least-bad option from the curated set
+	if (!BestSpawn && FallbackSpawn)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("Wipeout: All curated spawns for %s within enemy threshold (%.0f) — using fallback at enemy dist %.0f"),
+			*PS->PlayerName, MinimumEnemySpawnDistance, FallbackEnemyDist);
+		BestSpawn = FallbackSpawn;
+	}
+
+	// Tier 3 fallback: curated spawns are entirely teammate-occupied (lopsided
+	// map split or fewer curated spawns than players). Pick the best-of-the-worst
+	// from the full PlayerStart list — non-occupied spawn with max enemy distance.
+	if (!BestSpawn && AllSpawnPointsList.Num() > 0)
+	{
+		float BestMapEnemyDist = -FLT_MAX;
+		for (APlayerStart* Spawn : AllSpawnPointsList)
+		{
+			if (!Spawn) continue;
+
+			float MinEnemyDist = FLT_MAX;
+			bool bOccupied = false;
+			for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+			{
+				APawn* Pawn = It->Get();
+				if (!Pawn || !Pawn->PlayerState) continue;
+				AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
+				if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
+
+				float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
+				if (OtherPS->Team->TeamIndex == TeamIndex)
+				{
+					if (Dist < 100.f) { bOccupied = true; break; }
+				}
+				else
+				{
+					MinEnemyDist = FMath::Min(MinEnemyDist, Dist);
+				}
+			}
+			if (bOccupied) continue;
+
+			if (MinEnemyDist > BestMapEnemyDist)
+			{
+				BestMapEnemyDist = MinEnemyDist;
+				BestSpawn = Spawn;
+			}
+		}
+
+		if (BestSpawn)
+		{
+			UE_LOG(LogGameMode, Warning,
+				TEXT("Wipeout: Curated spawns exhausted for %s — picked best of full map at enemy dist %.0f"),
+				*PS->PlayerName, BestMapEnemyDist);
 		}
 	}
 
