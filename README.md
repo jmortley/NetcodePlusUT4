@@ -1,0 +1,143 @@
+# NetcodePlus
+
+A UT4 plugin focused on improving netcode feel and adding new game modes for competitive Unreal Tournament 4.
+
+Built on UE4 4.15 (UT4 fork, CL-3525360). Targets up to 720Hz on modern hardware.
+
+## What it does
+
+NetcodePlus replaces stock UT4's hit registration and projectile prediction with a hybrid lag-compensation system inspired by UTComp's NewNet, with added performance optimizations for high-refresh-rate displays. It also ships several new game modes and quality-of-life improvements built on top of that netcode layer.
+
+## Features
+
+### Netcode
+
+- **Server-side capsule rewind for hit validation** — every shot is validated against rewound target capsules at the time of fire, scaled by ping. Players at 100ms ping get the same shot effectiveness as players at 20ms.
+- **Tiered projectile rewind compensation** — full half-RTT rewind below 100ms ping, linear scale-down to 50% by 150ms, hard cliff above. Prevents extreme-ping shooters from getting unfair compensation while keeping mid-ping play fair.
+- **Split prediction system** — visual prediction (0ms) is decoupled from hit validation (~120ms ping-based), so players see enemies in real-time while shots are validated against rewound positions.
+- **Bidirectional time-search** — when primary rewind misses on a client-claimed target, server searches ±30ms in 15ms steps to catch hits within the network jitter window.
+- **HitScan padding for moving targets** — claimed targets get +40 units of capsule padding at fire time (10 units stationary), compensating for tight UT4 hitboxes vs. visible mesh silhouette.
+- **Transactional fire events** — every shot has a unique event index for client/server agreement; resend queue protects against unreliable RPC loss.
+- **Strict tap-fire enforcement** — tap-mashing the fire button can no longer fire faster than holding it. Click queueing via retry timer means responsiveness is preserved.
+- **Trade-kill grace period** (200ms) — fire RPCs in flight when the shooter dies still register, so reciprocal kills count.
+- **Client-side hit detection (CSHD) for link gun beam** — predictive damage with server sanity-trace validation. Less laggy at high ping without giving the client total authority.
+
+### Performance / High-FPS Support
+
+- **Frame-rate-independent overlay throttle** — 60Hz time-based dirty-marking on character overlay meshes regardless of render rate (works at 480, 720, uncapped).
+- **Overlay visibility cull** — armor / UDamage / spawn-protection overlays skip rendering when target is off-screen, occluded, or beyond ~55m. Significant FPS gain in scrum-heavy modes (Wipeout).
+- **Per-team collision throttle** — 32/sec instead of every-tick for team collision iteration.
+- **Spawn-protection material loop bypass** — cleared per-tick state-transition flag instead of every-frame BodyMI loop (~27K calls/sec saved at 480fps).
+- **Shock ball drift correction** — high-FPS floating-point velocity drift snapped back to original fire direction per-tick on zero-gravity projectiles.
+- **Spectator rotation smoothing** — separate interp speed for remote pawns to prevent jitter at high refresh rates.
+- **Configurable projectile tick rate** — `ut.ProjectileTickRate` console var, 120-720 Hz range.
+- **Adjusted character movement smoothing values** — tuned for 480-720fps display rates.
+
+### NetcodePlus Weapons
+
+All weapons inherit lag-compensated hit detection by default. Subclasses provide weapon-specific behavior on top:
+
+| Class | Purpose |
+|-------|---------|
+| `AUTPlusShockRifle` | Shock primary/alt with combo support, screen-texture ammo display |
+| `AUTPlusSniper` | Sniper with rewound headshot detection + Impressive streak tracking |
+| `AUTPlusFlakCannon` | Flak primary (shards) and alt (shell) with rewind validation |
+| `AUTPlusWeap_RocketLauncher` | RL with charged-state transactional fire + force-fire-on-death |
+| `AUTWeap_LinkGun_Plus` | Link gun with CSHD beam damage + reliable yoink |
+| `AUTWeap_Minigun_Plus` | Minigun with rewind via virtual dispatch |
+| `AUTWeap_Enforcer_Plus` | Enforcer with body-shot rewind, preserves dual-wield |
+| `AUTPlusProj_Rocket` | Rocket projectile with rewind hit validation |
+| `AUTPlusProj_FlakShell` | Flak shell projectile |
+| `AUTPlusProj_ShockBall` | Shock ball with stuck-detection, drift correction, fake/real convergence |
+
+### Game Modes
+
+- **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning.
+- **TeamArena (ElimPlus)** — Round-based team elimination with BP GameState bridge and hidden-while-respawning visuals.
+- **Wipeout** — Team elimination with respawn waves, portrait-strip HUD, side-by-side scoreboard with player portraits, K/D + B/A tracking, sudden death OT, alternating-team-first round spawning.
+- **ShockDom** — 4v4 Shock-Domination (3 control points). Includes match clock HUD, opposing-side cluster spawning at match start, configurable scoring tick.
+
+### Mutators
+
+- **NCUTPlus** — primary mutator that replaces stock weapons with their NetcodePlus variants. Configurable per-weapon hide/show via `weaponskins` console command.
+- **ClientHitsounds** — client-side hit prediction with batched server confirmation. Configurable hitsound packs.
+
+### Utilities
+
+- **`weaponskins` console command** — opens Slate UI for per-weapon hide/show and skin selection.
+- **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
+- **Custom siphon powerup** — life-steal pickup spawning at sniper location with 90s timer.
+- **Hit-plot replicator** — server analyzes hit positions for ServerShield-style debug visualization.
+- **Stats integration** — replicates kill / hit / shot counters for StatSQL backend.
+
+## Installation
+
+1. Place the `NetcodePlus/` folder in `<UT4Install>/UnrealTournament/Plugins/NetcodePlus/`
+2. Verify the directory contains `NetcodePlus.uplugin`, `Source/`, and `Binaries/`
+3. Launch UT4 — the plugin loads automatically
+
+For server admins: ensure `Binaries/Linux/` and `Binaries/Win64/` are committed if running dedicated servers across platforms.
+
+## Configuration
+
+### Console Variables
+
+| CVar | Default | Description |
+|------|---------|-------------|
+| `ut.ProjectileTickRate` | 240 | Client-side projectile sim rate (Hz). Range 120-720. |
+| `ut.EnableProjectilePrediction` | 1 | Visual prediction for non-hitscan weapons. Set 0 for raw server positions. |
+
+### Mod.ini
+
+Per-player settings persist in `Mod.ini` under `[NetcodePlus.WeaponSettings]`:
+
+- `Hide.<WeaponClassName>=1/0` — hide/show first-person mesh per weapon
+- `Skin.<WeaponSkinTag>=<AssetPath>` — applied skin per weapon family (currently disabled in code; see `bSkinsEnabled` gate)
+
+### Lag Compensation Tunables (BP-editable on weapon classes)
+
+| Property | Default | Purpose |
+|----------|---------|---------|
+| `MaxRewindMs` | 250 | Max one-way rewind cap |
+| `FudgeFactorMs` | 20 | Ping jitter buffer |
+| `ProjectilePredictionCapMs` | 120 | Max projectile fast-forward |
+| `HitScanPadding` | 40-45 | Capsule padding for claimed moving targets |
+| `HitScanPaddingStationary` | 10 | Capsule padding for claimed stationary targets |
+| `bEnableProjectileRewind` | (BP per-weapon) | Master toggle for projectile hit-claim validation |
+| `ProjectileRewindMaxScale` | 1.0 | Full half-RTT rewind at low ping |
+| `ProjectileRewindFullPingMs` | 100 | Below this ping, full rewind applied |
+| `ProjectileRewindMaxPingMs` | 150 | Above this ping, no rewind (cliff) |
+| `ProjectileRewindMinScale` | 0.5 | Rewind scale at the upper boundary |
+
+## Building from source
+
+NetcodePlus is a C++ plugin. To rebuild:
+
+1. Have UT4's editor build set up (Visual Studio 2017 / Linux toolchain)
+2. Right-click `UnrealTournament.uproject` → Generate Visual Studio project files
+3. Build `UnrealTournamentEditor` from VS for development, `UnrealTournament` for shipping
+4. For dedicated server: build `UnrealTournamentServer-Linux-Shipping` or `-Win64-Shipping`
+
+Plugin code is under `Source/Public/` (headers) and `Source/Private/` (impl). Module name is `NetcodePlus`.
+
+## Development notes
+
+- **UE4 4.15 quirks**: no `FString::TrimStartAndEnd()` (use `.Trim()`), `ServerMutate()` is on `AUTPlayerController` not `APlayerController`, PCH mode is `UseExplicitOrSharedPCHs` so `.cpp` files must include `UnrealTournament.h` before UT headers.
+- **Class layout / ABI**: never subclass `AUTGameState` in plugin C++ (engine class layout mismatch crashes on level load). Use a separate replicated `AInfo` actor for game-mode state.
+- **FlagBases access**: never directly access `CTFGameState->FlagBases` — use `GetFlagBase(idx)` accessor (vtable-dispatched, ABI-safe).
+
+## Related projects
+
+- **ClientDemos** — Client-side demo recording (UT99/UTComp-style) — separate plugin repo at github.com/jmortley/ClientDemos
+- **StatSQL** — Database integration for match stats — separate plugin
+
+## License / Credits
+
+- Maintained by [phantaci](https://github.com/jmortley)
+- Built on top of Epic Games' UT4 codebase
+- Design influenced by UTComp's NewNet projectile sync and lag-comp patterns
+
+## Branch policy
+
+- `main` — stable releases
+- `dev` — active work; merged to `main` at release boundaries
