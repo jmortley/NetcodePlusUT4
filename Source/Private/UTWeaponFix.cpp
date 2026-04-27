@@ -1795,19 +1795,22 @@ void AUTWeaponFix::OnServerHitScanResult(const FHitResult& Hit, float Prediction
 
 FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 {
-    // 1. Get the Raw Aim (Standard View Rotation)
-    // This relies on the controller's view rotation, not a cached target.
+    // 1. Get the Raw Aim
+    // Use the cached client rotation whenever it's non-zero, regardless of
+    // bIsTransactionalFire. The flag is cleared after BeginFiringSequence/
+    // TransactionalFire returns, but the gatekeeper has bypass paths
+    // (bIsStateFiring, bInChargedState, bNetDelayedShot) that can let a shot
+    // fire while the flag is false. Without this, server falls through to
+    // GetBaseFireRotation -> owner pawn rotation which lags the client view
+    // by NetUpdateFrequency (~10ms at 100Hz) — at 537fps with rapid mouse
+    // movement this manifests as ~1/40 shock cores diverging slightly from
+    // where the client aimed. Cache being non-zero already implies
+    // "currently in a fire session" because StopFire clears it.
     FRotator BaseAim;
 
-    if (Role == ROLE_Authority && bIsTransactionalFire)
+    if (Role == ROLE_Authority && !CachedTransactionalRotation.IsZero())
     {
         BaseAim = CachedTransactionalRotation;
-
-        // Sanity Check: If zero (e.g. from old packet), fall back to standard
-        if (BaseAim.IsZero())
-        {
-            BaseAim = GetBaseFireRotation();
-        }
     }
     else
     {
@@ -1845,24 +1848,21 @@ FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 
 FRotator AUTWeaponFix::GetBaseFireRotation()
 {
-    // Use cached rotation for both server (transactional) and client (fake projectile).
-    // This ensures the fake projectile fires in the exact direction the client was aiming
-    // when they pressed fire, not where they're aiming a few frames later when
-    // FireProjectile() actually runs. At 540fps the rotation can shift between frames,
-    // causing a visible curve on the fake projectile.
+    // Use cached rotation for both server (any role) and client (fake projectile).
+    // Same reasoning as GetAdjustedAim_Implementation: the bIsTransactionalFire
+    // flag was previously gating server use of the cache, but state-machine
+    // bypass paths can fire shots while the flag is false, falling through to
+    // owner pawn rotation (stale by ~10ms at 100Hz NetUpdateFrequency). At
+    // 537fps with rapid mouse movement this caused ~1/40 shock cores to
+    // diverge slightly. Cache is cleared on StopFire so non-zero already
+    // implies "fire session active."
+    //
+    // Client side: prevents fake projectile curving if mouse moves between
+    // fire input and SpawnNetPredictedProjectile (the original reason this
+    // override exists).
     if (!CachedTransactionalRotation.IsZero())
     {
-        // Server: use the rotation sent by the client's fire RPC
-        if (Role == ROLE_Authority && bIsTransactionalFire)
-        {
-            return CachedTransactionalRotation;
-        }
-        // Client: use the rotation we cached at fire-press time
-        // Prevents fake projectile curving if mouse moves between fire input and SpawnNetPredictedProjectile
-        if (Role < ROLE_Authority)
-        {
-            return CachedTransactionalRotation;
-        }
+        return CachedTransactionalRotation;
     }
 
     return Super::GetBaseFireRotation();
@@ -1880,7 +1880,12 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
         // If ProjClass is NULL, it's likely a Hitscan mode (Sniper, Shock Beam), so we skip.
     bool bIsProjectile = (ProjClass.IsValidIndex(FireMode) && ProjClass[FireMode] != nullptr);
 
-    if (bIsProjectile && Role == ROLE_Authority && bIsTransactionalFire && UTOwner)
+    // Same lenient pattern as GetAdjustedAim — apply parallax whenever the cache
+    // is non-zero, not gated on bIsTransactionalFire. Otherwise a state-machine
+    // bypass-fired shot uses the current muzzle location instead of the rewound
+    // one, contributing to the same client/server divergence the rotation gate
+    // produces.
+    if (bIsProjectile && Role == ROLE_Authority && !CachedTransactionalRotation.IsZero() && UTOwner)
     {
         float PredictionTime = GetHitValidationPredictionTime();
 
