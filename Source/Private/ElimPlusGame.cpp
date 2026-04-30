@@ -947,11 +947,17 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				for (APlayerState* PS : GS->PlayerArray)
 				{
 					AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-					if (!UTPS || UTPS->bOnlySpectator || !UTPS->UniqueId.IsValid()) continue;
+					if (!UTPS || UTPS->bOnlySpectator) continue;
 					if (UTPS->GetTeamNum() != TeamIdx) continue;
 
 					FElimPlusPlayerRoundPerf P;
-					P.UniqueId = UTPS->UniqueId.ToString();
+					// Bots have invalid UniqueIds. We still include them so the rating
+					// system sees correct team sizes (e.g. 4v4 not 1v1 in a solo-vs-bots
+					// match). Synthetic BOT:<name> key prevents collisions with humans
+					// and is filtered out at write-back time so bot ratings never persist.
+					P.UniqueId = UTPS->UniqueId.IsValid()
+						? UTPS->UniqueId.ToString()
+						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
 					P.Kills    = UTPS->RoundKills;
 					P.Deaths   = UTPS->bOutOfLives ? 1 : 0; // exactly one death per round in elim
 					P.Damage   = PlayerRoundDamage.Contains(UTPS) ? PlayerRoundDamage[UTPS] : 0.f;

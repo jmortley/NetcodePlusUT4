@@ -122,30 +122,45 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 {
 	using namespace TeamGlicko2;
 
-	// Skip degenerate rounds (e.g. 0v0, 1v0).
+	// Skip degenerate rounds (truly empty teams — caller should already have
+	// filtered, but be defensive).
 	if (Result.WinnerTeam.Num() == 0 || Result.LoserTeam.Num() == 0)
 	{
 		return;
 	}
 
-	// Build MatchResult from cached ratings + per-round perf scores.
-	// Note: Tron's MatchResult uses std::vector (not UE TArray) — STL methods.
-	MatchResult Match;
-	Match.teamA.reserve(Result.WinnerTeam.Num());
-	Match.teamB.reserve(Result.LoserTeam.Num());
+	// Snapshot which UniqueIds had a real cached rating BEFORE this round.
+	// Used after ProcessMatch to gate write-back: only humans (whose ratings
+	// were loaded by PostLogin) get their cache entry updated. Bots and any
+	// "BOT:<name>" synthetic IDs are absent from this set, so their post-match
+	// ratings — present only as transient placeholders below — are discarded.
+	TSet<FString> CachedIdsBefore;
+	CachedIdsBefore.Reserve(RatingCache.Num());
+	for (const TPair<FString, PlayerRating>& Pair : RatingCache)
+	{
+		CachedIdsBefore.Add(Pair.Key);
+	}
 
-	for (const FElimPlusPlayerRoundPerf& Perf : Result.WinnerTeam)
+	// Build MatchResult. For UniqueIds NOT in cache (bots, late joiners), use a
+	// transient default PlayerRating(1400, 350, 0.06). This makes the team-size
+	// math correct (e.g. 1 human + 3 bots vs 4 bots is processed as 4v4 with
+	// the human's real rating contributing alongside three 1400 placeholders).
+	auto BuildTeam = [this](const TArray<FElimPlusPlayerRoundPerf>& Perfs, std::vector<MatchPlayer>& Out)
 	{
-		PlayerRating* Cached = RatingCache.Find(Perf.UniqueId);
-		if (!Cached) continue;
-		Match.teamA.push_back(MatchPlayer(*Cached, Perf.ToPerfScore()));
-	}
-	for (const FElimPlusPlayerRoundPerf& Perf : Result.LoserTeam)
-	{
-		PlayerRating* Cached = RatingCache.Find(Perf.UniqueId);
-		if (!Cached) continue;
-		Match.teamB.push_back(MatchPlayer(*Cached, Perf.ToPerfScore()));
-	}
+		Out.reserve(Perfs.Num());
+		for (const FElimPlusPlayerRoundPerf& Perf : Perfs)
+		{
+			const PlayerRating* Cached = RatingCache.Find(Perf.UniqueId);
+			const PlayerRating PR = Cached
+				? *Cached
+				: PlayerRating(kDefaultRating, kDefaultRD, kDefaultVolatility);
+			Out.push_back(MatchPlayer(PR, Perf.ToPerfScore()));
+		}
+	};
+
+	MatchResult Match;
+	BuildTeam(Result.WinnerTeam, Match.teamA);
+	BuildTeam(Result.LoserTeam,  Match.teamB);
 
 	if (Match.teamA.empty() || Match.teamB.empty())
 	{
@@ -166,14 +181,18 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 	// Tron's library mutates Match.teamA[i].rating + Match.teamB[i].rating in place.
 	TeamGlicko2System::ProcessMatch(Match);
 
-	// Copy mutated ratings back to our cache by UniqueId.
-	// std::vector on the Tron side, TArray on our side.
-	auto WriteBack = [this](const std::vector<MatchPlayer>& Team, const TArray<FElimPlusPlayerRoundPerf>& Perfs)
+	// Write-back: only update cache for IDs that were already in it (= humans).
+	// Bot entries' new ratings are dropped on the floor — they were placeholders
+	// for team-size accuracy only.
+	auto WriteBack = [this, &CachedIdsBefore](const std::vector<MatchPlayer>& Team, const TArray<FElimPlusPlayerRoundPerf>& Perfs)
 	{
 		const int32 N = FMath::Min(static_cast<int32>(Team.size()), Perfs.Num());
 		for (int32 i = 0; i < N; ++i)
 		{
-			RatingCache.FindOrAdd(Perfs[i].UniqueId) = Team[i].rating;
+			if (CachedIdsBefore.Contains(Perfs[i].UniqueId))
+			{
+				RatingCache[Perfs[i].UniqueId] = Team[i].rating;
+			}
 		}
 	};
 	WriteBack(Match.teamA, Result.WinnerTeam);
@@ -189,12 +208,35 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 
 	const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
 
-	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : RatingCache)
+	// Anti-farm cap for solo-vs-bots matches: if only one human was present at
+	// match start, clamp their rating delta to ±SoloVsBotsDeltaCap. Lets the
+	// solo tester verify the math runs end-to-end while preventing meaningful
+	// rating drift from beating the AI. RD/sigma/perf-EMA still update fully
+	// so the player's uncertainty bookkeeping stays honest.
+	const bool bSoloVsBots = (RatingAtMatchStart.Num() == 1);
+	const int32 SoloVsBotsDeltaCap = 5; // tunable
+
+	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : RatingCache)
 	{
 		const FString& UniqueId = Pair.Key;
-		const TeamGlicko2::PlayerRating& PR = Pair.Value;
-		const FString Esc = SqlEscape(UniqueId);
+		TeamGlicko2::PlayerRating& PR = Pair.Value;  // mutable: may rewrite Rating below
 
+		const int32 NewEloRaw = FMath::RoundToInt(PR.GetRating());
+		const int32 StartElo  = RatingAtMatchStart.FindRef(UniqueId); // 0 if absent (late joiner)
+		int32 Delta = (StartElo != 0) ? (NewEloRaw - StartElo) : 0;
+		int32 FinalElo = NewEloRaw;
+
+		if (bSoloVsBots && StartElo != 0 && (Delta > SoloVsBotsDeltaCap || Delta < -SoloVsBotsDeltaCap))
+		{
+			const int32 Clamped = FMath::Clamp(Delta, -SoloVsBotsDeltaCap, SoloVsBotsDeltaCap);
+			FinalElo = StartElo + Clamped;
+			PR.SetRating(static_cast<double>(FinalElo));  // also rewrite cache so next-match start is consistent with DB
+			UE_LOG(LogElimPlusRating, Log, TEXT("Solo-vs-bots clamp: %s delta %d -> %d (Elo %d -> %d)"),
+				*UniqueId, Delta, Clamped, NewEloRaw, FinalElo);
+			Delta = Clamped;
+		}
+
+		const FString Esc = SqlEscape(UniqueId);
 		const FString Sql = FString::Printf(
 			TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")
 			TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, SchemaVersion) ")
@@ -205,18 +247,16 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			static_cast<long long>(NowUtc));
 		ExecSqlNoRows(World, Sql);
 
-		// Replicator update — only NOW does the HUD ELO change, with a delta vs
-		// match-start. Clients see "1402 +2" or "1395 -5" etc. once at match end.
+		// Replicator update — only NOW does the HUD ELO change, with the (possibly
+		// clamped) match delta. Clients see "1402 +2" or "1395 -5" once at match end.
 		if (Replicator)
 		{
-			const int32 NewElo  = FMath::RoundToInt(PR.GetRating());
-			const int32 StartElo = RatingAtMatchStart.FindRef(UniqueId); // 0 if absent => delta = NewElo
-			const int32 Delta = (StartElo != 0) ? (NewElo - StartElo) : 0;
-			Replicator->SetPlayerEloAndDelta(UniqueId, NewElo, Delta);
+			Replicator->SetPlayerEloAndDelta(UniqueId, FinalElo, Delta);
 		}
 	}
 
-	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d ratings"), RatingCache.Num());
+	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d ratings (solo-vs-bots=%s)"),
+		RatingCache.Num(), bSoloVsBots ? TEXT("YES") : TEXT("no"));
 }
 
 int32 FElimPlusRatingSystem::GetCachedElo(const FString& UniqueId) const
