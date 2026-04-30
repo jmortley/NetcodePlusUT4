@@ -1,15 +1,16 @@
 // ============================================================================
 // Vendored from https://github.com/tronunator/Glicko2 @ a2db253b
 // © Tron (tronunator). No upstream LICENSE file at vendor time; included here
-// with author authorization (relayed via NetcodePlus author). Local
-// modifications: NONE — vendored verbatim. Cross-file includes resolved via
-// Plugins/NetcodePlus/Source/Public/Glicko2 added to NetcodePlus.Build.cs
-// PublicIncludePaths. Update: re-pull from upstream and re-vendor.
+// with author authorization (relayed via NetcodePlus author).
+// LOCAL MOD: removed `#include <iostream>` and the `friend operator<<` decl
+// at the bottom of PlayerRating. <iostream> transitively pulls Windows.h on
+// MSVC which corrupts the UE4 4.15 unity-build PCH chain (Engine UT headers
+// like UTWeaponSkin.h/UTLocalMessage.h fail downstream). The operator<< was
+// only diagnostic; UE_LOG covers the same need on the UE4 side.
 // ============================================================================
 #ifndef GLICKO2_INCLUDE_TEAMGLICKORATING_H_
 #define GLICKO2_INCLUDE_TEAMGLICKORATING_H_
 
-#include <iostream>
 #include <cmath>
 #include "TeamGlicko2Config.h"
 
@@ -124,8 +125,7 @@ namespace TeamGlicko2 {
                                int minRoundsForActivity = TeamGlicko2::kMinRoundsForActivity,
                                double daysPerPeriod = TeamGlicko2::kDaysPerRatingPeriod);
 
-        /// Print rating information
-        friend std::ostream& operator<<(std::ostream& os, const PlayerRating& rating);
+        // LOCAL MOD: friend std::ostream& operator<< removed (see header banner).
 
     private:
         /// Internal rating (Glicko-2 scale)

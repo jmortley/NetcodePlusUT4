@@ -2,18 +2,24 @@
 // library. Handles Mods.db persistence and bridges between AUTPlayerState +
 // our own AElimPlusStatsReplicator and Tron's PlayerRating / TeamGlicko2System.
 //
+// Pimpl is intentional: the vendored TeamGlicko2 headers transitively include
+// <iostream> / <iosfwd> / <vector> / <cmath> which under UE4 4.15's unity build
+// pollute the PCH chain and break engine UT headers (UDataAsset, ULocalMessage,
+// etc.) when this header lands at a unity-bundle head. Hiding TeamGlicko2 types
+// behind FElimPlusRatingSystemImpl keeps the .h dependency surface to UE4 core
+// only — every consumer (ElimPlusGame.h, ElimPlusGame.cpp) can include us without
+// dragging Tron's headers into their compilation unit.
+//
 // Design notes:
 //   - ELO is computed per round (ProcessRound) for accuracy, but the values
 //     replicated to clients are FROZEN at match-start. Only at HandleMatchHasEnded
 //     does the new rating + total match delta get pushed to the replicator and
 //     persisted to Mods.db. Avoids HUD ELO ping-ponging round to round.
 //   - Lives outside any UObject hierarchy — gamemode owns a TUniquePtr<>.
-//   - Server-only. No replication of this class itself; client display is via
-//     AElimPlusStatsReplicator's Elo + EloDeltaThisMatch fields.
+//   - Server-only.
 #pragma once
 
 #include "CoreMinimal.h"
-#include "TeamGlickoRating.h"  // Vendored: namespace TeamGlicko2
 
 class UWorld;
 class AElimPlusStatsReplicator;
@@ -36,16 +42,20 @@ struct FElimPlusPlayerRoundPerf
 /** Round-level outcome bundled for ProcessRound. */
 struct FElimPlusRoundResult
 {
-	/** UniqueIds of the players on the winning team this round. Empty if draw. */
 	TArray<FElimPlusPlayerRoundPerf> WinnerTeam;
 	TArray<FElimPlusPlayerRoundPerf> LoserTeam;
 	bool bIsDraw = false;
 };
 
+/** Pimpl: opaque forward decl of the implementation struct. The real definition
+ *  lives in ElimPlusRatingSystem.cpp where it can freely use TeamGlicko2 types. */
+struct FElimPlusRatingSystemImpl;
+
 class NETCODEPLUS_API FElimPlusRatingSystem
 {
 public:
 	FElimPlusRatingSystem();
+	~FElimPlusRatingSystem();   // Out-of-line: TUniquePtr<Impl> dtor needs the complete type.
 
 	/** Run the CREATE TABLE IF NOT EXISTS on Mods.db. Call once from gamemode
 	 *  BeginPlay (server only). Idempotent. */
@@ -77,18 +87,6 @@ public:
 	/** Drop a player from the cache (e.g. on Logout, well after the match). */
 	void Forget(const FString& UniqueId);
 
-	/** Read-only access to cached PlayerRating for balancer / diagnostics. */
-	const TeamGlicko2::PlayerRating* FindRating(const FString& UniqueId) const;
-
 private:
-	/** UniqueId -> mutable PlayerRating. Updated each ProcessRound. */
-	TMap<FString, TeamGlicko2::PlayerRating> RatingCache;
-
-	/** UniqueId -> rating-rounded-int captured by SnapshotMatchStart.
-	 *  Used at FlushAtMatchEnd to compute (NewElo - StartElo) delta. */
-	TMap<FString, int32> RatingAtMatchStart;
-
-	/** Returns true if the player was loaded in this match (used to skip
-	 *  late-joiners for ELO updates per spec — bSkipELO equivalent). */
-	bool IsPlayerActive(const FString& UniqueId) const;
+	TUniquePtr<FElimPlusRatingSystemImpl> Impl;
 };

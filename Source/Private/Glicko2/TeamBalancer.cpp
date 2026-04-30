@@ -1,14 +1,14 @@
 // ============================================================================
 // Vendored from https://github.com/tronunator/Glicko2 @ a2db253b
 // © Tron (tronunator). No upstream LICENSE file at vendor time; included here
-// with author authorization (relayed via NetcodePlus author). Local
-// modifications: NONE — vendored verbatim. Cross-file includes resolved via
-// Plugins/NetcodePlus/Source/Public/Glicko2 added to NetcodePlus.Build.cs
-// PublicIncludePaths. Update: re-pull from upstream and re-vendor.
+// with author authorization (relayed via NetcodePlus author).
+// LOCAL MOD: removed `#include <iostream>` + the std::cout diagnostic in
+// BalanceTeams. <iostream> pulls Windows.h on MSVC and breaks UE4 4.15
+// unity-build PCH for surrounding files in the same bundle. UE_LOG covers
+// the diagnostic at the UE4 wrapper level.
 // ============================================================================
 #include "TeamBalancer.h"
 #include <set>
-#include <iostream>
 
 namespace TeamGlicko2 {
     TeamAssignment TeamBalancer::BalanceTeams(
@@ -66,11 +66,8 @@ namespace TeamGlicko2 {
             bestAssignment,
             combinationsTried);
 
-        std::cout << "Team balancing complete. Tried " << combinationsTried
-                  << " combinations. Best objective value: "
-                  << bestAssignment.objectiveValue
-                  << " (strength diff: " << bestAssignment.strengthDifference
-                  << ", uncertainty diff: " << bestAssignment.uncertaintyDifference << ")" << std::endl;
+        // LOCAL MOD: std::cout diagnostic removed (see header banner). Caller
+        // can read combinationsTried + objective values from bestAssignment fields.
 
         return bestAssignment;
     }

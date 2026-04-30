@@ -1,14 +1,32 @@
 // ElimPlusRatingSystem.cpp — Mods.db persistence + ProcessMatch glue.
+// Tron's TeamGlicko2 headers (and their <iostream>/<vector>/<cmath> bagage)
+// stay confined to this translation unit thanks to the Pimpl in the header.
 
 #include "ElimPlusRatingSystem.h"
 #include "UnrealTournament.h"
 #include "UTGameInstance.h"            // FDatabaseRow + ExecDatabaseCommand
 #include "ElimPlusStatsReplicator.h"
-#include "TeamGlicko2System.h"         // Vendored: ProcessMatch
-#include "TeamGlicko2Config.h"         // Vendored: kDefault* constants
 #include "Engine/World.h"
 
+// Vendored TeamGlicko2 — included only here, never via the .h.
+#include "TeamGlickoRating.h"
+#include "TeamGlicko2System.h"
+#include "TeamGlicko2Config.h"
+
 DEFINE_LOG_CATEGORY_STATIC(LogElimPlusRating, Log, All);
+
+// =============================================================================
+// Pimpl: the actual cache. Defined here where TeamGlicko2 types are visible.
+// =============================================================================
+struct FElimPlusRatingSystemImpl
+{
+	/** UniqueId -> mutable PlayerRating. Updated each ProcessRound. */
+	TMap<FString, TeamGlicko2::PlayerRating> RatingCache;
+
+	/** UniqueId -> rating-rounded-int captured by SnapshotMatchStart.
+	 *  Used at FlushAtMatchEnd to compute (NewElo - StartElo) delta. */
+	TMap<FString, int32> RatingAtMatchStart;
+};
 
 namespace
 {
@@ -37,11 +55,18 @@ namespace
 	}
 }
 
-FElimPlusRatingSystem::FElimPlusRatingSystem() {}
+// =============================================================================
+// FElimPlusRatingSystem
+// =============================================================================
+
+FElimPlusRatingSystem::FElimPlusRatingSystem()
+	: Impl(MakeUnique<FElimPlusRatingSystemImpl>())
+{}
+
+FElimPlusRatingSystem::~FElimPlusRatingSystem() = default;
 
 bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 {
-	// One CREATE per call. Use IF NOT EXISTS so it's safe to call every BeginPlay.
 	const FString Sql =
 		TEXT("CREATE TABLE IF NOT EXISTS NCRatingElimPlus (")
 		TEXT("  UniqueId       TEXT PRIMARY KEY NOT NULL,")
@@ -63,7 +88,7 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& UniqueId)
 {
 	if (UniqueId.IsEmpty()) return;
-	if (RatingCache.Contains(UniqueId)) return; // already loaded this match
+	if (Impl->RatingCache.Contains(UniqueId)) return;
 
 	const FString Esc = SqlEscape(UniqueId);
 	const FString Sql = FString::Printf(
@@ -84,16 +109,15 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 		TeamGlicko2::PlayerRating PR(Rating, RD, Sigma);
 		PR.SetPerfIndexEMA(PerfIndexEMA);
 		PR.SetPerfGames(PerfGames);
-		RatingCache.Add(UniqueId, PR);
-		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f RD=%.1f σ=%.4f"),
+		Impl->RatingCache.Add(UniqueId, PR);
+		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f RD=%.1f sigma=%.4f"),
 			*UniqueId, Rating, RD, Sigma);
 	}
 	else
 	{
-		// New player — insert default and cache.
 		TeamGlicko2::PlayerRating PR(
 			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility);
-		RatingCache.Add(UniqueId, PR);
+		Impl->RatingCache.Add(UniqueId, PR);
 
 		const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
 		const FString InsertSql = FString::Printf(
@@ -109,48 +133,44 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 
 void FElimPlusRatingSystem::SnapshotMatchStart()
 {
-	RatingAtMatchStart.Empty();
-	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : RatingCache)
+	Impl->RatingAtMatchStart.Empty();
+	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
 		const int32 RoundedElo = FMath::RoundToInt(Pair.Value.GetRating());
-		RatingAtMatchStart.Add(Pair.Key, RoundedElo);
+		Impl->RatingAtMatchStart.Add(Pair.Key, RoundedElo);
 	}
-	UE_LOG(LogElimPlusRating, Log, TEXT("Snapshot %d ratings at match start"), RatingAtMatchStart.Num());
+	UE_LOG(LogElimPlusRating, Log, TEXT("Snapshot %d ratings at match start"), Impl->RatingAtMatchStart.Num());
 }
 
 void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 {
 	using namespace TeamGlicko2;
 
-	// Skip degenerate rounds (truly empty teams — caller should already have
-	// filtered, but be defensive).
 	if (Result.WinnerTeam.Num() == 0 || Result.LoserTeam.Num() == 0)
 	{
 		return;
 	}
 
 	// Snapshot which UniqueIds had a real cached rating BEFORE this round.
-	// Used after ProcessMatch to gate write-back: only humans (whose ratings
-	// were loaded by PostLogin) get their cache entry updated. Bots and any
-	// "BOT:<name>" synthetic IDs are absent from this set, so their post-match
-	// ratings — present only as transient placeholders below — are discarded.
+	// Used post-ProcessMatch to gate write-back: only humans (loaded by PostLogin)
+	// get cache updates. Bots / "BOT:<name>" synthetic IDs are absent from this
+	// set, so their post-match ratings — present only as transient placeholders
+	// below — are discarded.
 	TSet<FString> CachedIdsBefore;
-	CachedIdsBefore.Reserve(RatingCache.Num());
-	for (const TPair<FString, PlayerRating>& Pair : RatingCache)
+	CachedIdsBefore.Reserve(Impl->RatingCache.Num());
+	for (const TPair<FString, PlayerRating>& Pair : Impl->RatingCache)
 	{
 		CachedIdsBefore.Add(Pair.Key);
 	}
 
 	// Build MatchResult. For UniqueIds NOT in cache (bots, late joiners), use a
-	// transient default PlayerRating(1400, 350, 0.06). This makes the team-size
-	// math correct (e.g. 1 human + 3 bots vs 4 bots is processed as 4v4 with
-	// the human's real rating contributing alongside three 1400 placeholders).
+	// transient default PlayerRating(1400, 350, 0.06) so team-size math is honest.
 	auto BuildTeam = [this](const TArray<FElimPlusPlayerRoundPerf>& Perfs, std::vector<MatchPlayer>& Out)
 	{
 		Out.reserve(Perfs.Num());
 		for (const FElimPlusPlayerRoundPerf& Perf : Perfs)
 		{
-			const PlayerRating* Cached = RatingCache.Find(Perf.UniqueId);
+			const PlayerRating* Cached = Impl->RatingCache.Find(Perf.UniqueId);
 			const PlayerRating PR = Cached
 				? *Cached
 				: PlayerRating(kDefaultRating, kDefaultRD, kDefaultVolatility);
@@ -178,12 +198,9 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 		Match.scoreB = 0.0;
 	}
 
-	// Tron's library mutates Match.teamA[i].rating + Match.teamB[i].rating in place.
 	TeamGlicko2System::ProcessMatch(Match);
 
 	// Write-back: only update cache for IDs that were already in it (= humans).
-	// Bot entries' new ratings are dropped on the floor — they were placeholders
-	// for team-size accuracy only.
 	auto WriteBack = [this, &CachedIdsBefore](const std::vector<MatchPlayer>& Team, const TArray<FElimPlusPlayerRoundPerf>& Perfs)
 	{
 		const int32 N = FMath::Min(static_cast<int32>(Team.size()), Perfs.Num());
@@ -191,7 +208,7 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 		{
 			if (CachedIdsBefore.Contains(Perfs[i].UniqueId))
 			{
-				RatingCache[Perfs[i].UniqueId] = Team[i].rating;
+				Impl->RatingCache[Perfs[i].UniqueId] = Team[i].rating;
 			}
 		}
 	};
@@ -208,21 +225,19 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 
 	const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
 
-	// Anti-farm cap for solo-vs-bots matches: if only one human was present at
-	// match start, clamp their rating delta to ±SoloVsBotsDeltaCap. Lets the
-	// solo tester verify the math runs end-to-end while preventing meaningful
-	// rating drift from beating the AI. RD/sigma/perf-EMA still update fully
-	// so the player's uncertainty bookkeeping stays honest.
-	const bool bSoloVsBots = (RatingAtMatchStart.Num() == 1);
+	// Anti-farm cap for solo-vs-bots matches: only one human at match start →
+	// clamp their rating delta to ±SoloVsBotsDeltaCap. RD/sigma/perf-EMA still
+	// update fully so uncertainty bookkeeping stays honest.
+	const bool bSoloVsBots = (Impl->RatingAtMatchStart.Num() == 1);
 	const int32 SoloVsBotsDeltaCap = 5; // tunable
 
-	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : RatingCache)
+	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
 		const FString& UniqueId = Pair.Key;
-		TeamGlicko2::PlayerRating& PR = Pair.Value;  // mutable: may rewrite Rating below
+		TeamGlicko2::PlayerRating& PR = Pair.Value;
 
 		const int32 NewEloRaw = FMath::RoundToInt(PR.GetRating());
-		const int32 StartElo  = RatingAtMatchStart.FindRef(UniqueId); // 0 if absent (late joiner)
+		const int32 StartElo  = Impl->RatingAtMatchStart.FindRef(UniqueId);
 		int32 Delta = (StartElo != 0) ? (NewEloRaw - StartElo) : 0;
 		int32 FinalElo = NewEloRaw;
 
@@ -230,7 +245,7 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 		{
 			const int32 Clamped = FMath::Clamp(Delta, -SoloVsBotsDeltaCap, SoloVsBotsDeltaCap);
 			FinalElo = StartElo + Clamped;
-			PR.SetRating(static_cast<double>(FinalElo));  // also rewrite cache so next-match start is consistent with DB
+			PR.SetRating(static_cast<double>(FinalElo));
 			UE_LOG(LogElimPlusRating, Log, TEXT("Solo-vs-bots clamp: %s delta %d -> %d (Elo %d -> %d)"),
 				*UniqueId, Delta, Clamped, NewEloRaw, FinalElo);
 			Delta = Clamped;
@@ -247,8 +262,6 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			static_cast<long long>(NowUtc));
 		ExecSqlNoRows(World, Sql);
 
-		// Replicator update — only NOW does the HUD ELO change, with the (possibly
-		// clamped) match delta. Clients see "1402 +2" or "1395 -5" once at match end.
 		if (Replicator)
 		{
 			Replicator->SetPlayerEloAndDelta(UniqueId, FinalElo, Delta);
@@ -256,12 +269,12 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 	}
 
 	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d ratings (solo-vs-bots=%s)"),
-		RatingCache.Num(), bSoloVsBots ? TEXT("YES") : TEXT("no"));
+		Impl->RatingCache.Num(), bSoloVsBots ? TEXT("YES") : TEXT("no"));
 }
 
 int32 FElimPlusRatingSystem::GetCachedElo(const FString& UniqueId) const
 {
-	if (const TeamGlicko2::PlayerRating* PR = RatingCache.Find(UniqueId))
+	if (const TeamGlicko2::PlayerRating* PR = Impl->RatingCache.Find(UniqueId))
 	{
 		return FMath::RoundToInt(PR->GetRating());
 	}
@@ -270,16 +283,6 @@ int32 FElimPlusRatingSystem::GetCachedElo(const FString& UniqueId) const
 
 void FElimPlusRatingSystem::Forget(const FString& UniqueId)
 {
-	RatingCache.Remove(UniqueId);
-	RatingAtMatchStart.Remove(UniqueId);
-}
-
-const TeamGlicko2::PlayerRating* FElimPlusRatingSystem::FindRating(const FString& UniqueId) const
-{
-	return RatingCache.Find(UniqueId);
-}
-
-bool FElimPlusRatingSystem::IsPlayerActive(const FString& UniqueId) const
-{
-	return RatingAtMatchStart.Contains(UniqueId);
+	Impl->RatingCache.Remove(UniqueId);
+	Impl->RatingAtMatchStart.Remove(UniqueId);
 }

@@ -1,6 +1,7 @@
 // SUTWeaponSkinSelector.h — NetcodePlus weapon settings panel (skins + hide)
 #pragma once
 
+#include "NetcodePlus.h"     // PCH preamble — pulls UnrealTournament.h → Engine.h → UDataAsset.
 #include "SlateBasics.h"
 #include "UTWeaponSkin.h"
 

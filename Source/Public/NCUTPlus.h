@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "NetcodePlus.h"   // PCH preamble — required for unity-build PCH bootstrap.
 #include "CoreMinimal.h"
 #include "UTMutator.h"
 #include "NCUTPlus.generated.h"

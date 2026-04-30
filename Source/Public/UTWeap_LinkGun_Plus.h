@@ -1,5 +1,6 @@
 // UTWeap_LinkGun_Plus.h
 #pragma once
+#include "NetcodePlus.h"   // PCH preamble — required for unity-build PCH bootstrap.
 #include "CoreMinimal.h"
 #include "UTWeaponFix.h"
 #include "Engine/Canvas.h"

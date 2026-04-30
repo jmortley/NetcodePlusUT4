@@ -154,11 +154,6 @@ namespace TeamGlicko2 {
         return r_true;
     }
 
-    std::ostream& operator<<(std::ostream& os, const PlayerRating& rating) {
-        os << "Rating: " << rating.GetRating()
-           << ", RD: " << rating.GetRD()
-           << ", Volatility: " << rating.GetVolatility();
-        return os;
-    }
+    // LOCAL MOD: operator<< definition removed (matches header). See header banner.
 
 }  // namespace TeamGlicko2
