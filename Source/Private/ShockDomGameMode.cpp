@@ -322,22 +322,6 @@ void AShockDomGameMode::ComputeInitialSpawnClusters()
 }
 
 
-void AShockDomGameMode::RestartPlayer(AController* NewPlayer)
-{
-	Super::RestartPlayer(NewPlayer);
-
-	// Track first spawn so we know to skip the cluster restriction next time
-	if (NewPlayer)
-	{
-		AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
-		if (PS)
-		{
-			SpawnedPlayers.Add(PS);
-		}
-	}
-}
-
-
 // ============================================================================
 // SCORING
 // ============================================================================
@@ -507,6 +491,16 @@ float AShockDomGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 void AShockDomGameMode::RestartPlayer(AController* NewPlayer)
 {
 	Super::RestartPlayer(NewPlayer);
+
+	// Track first spawn so cluster restriction in RatePlayerStart only applies once per player
+	if (NewPlayer)
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+		if (PS)
+		{
+			SpawnedPlayers.Add(PS);
+		}
+	}
 
 	// Hide pawn until client confirms control. Skip bots.
 	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;

@@ -51,5 +51,9 @@ public:
 
 	//~ Begin AUTWeapon Interface
 	virtual void HitScanTrace(const FVector& StartLocation, const FVector& EndTrace, float TraceRadius, FHitResult& Hit, float PredictionTime) override;
+	/** Guard against null UTOwner crash when a fire RPC arrives after the owner died.
+	 *  Mirrors AUTWeaponFix's guard — needed here because Enforcer_Plus inherits from
+	 *  stock AUTWeap_Enforcer (for AUTDualWeapon support), not AUTWeaponFix. */
+	virtual void ServerUpdateFiringStates_Implementation(uint8 FireSettings) override;
 	//~ End AUTWeapon Interface
 };

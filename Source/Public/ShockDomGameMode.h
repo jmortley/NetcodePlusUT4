@@ -117,7 +117,6 @@ public:
 
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
-	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual void GiveDefaultInventory(APawn* PlayerPawn) override;
 	virtual bool CheckRelevance_Implementation(AActor* Other) override;
 	virtual bool ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured,

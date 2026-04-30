@@ -36,6 +36,28 @@ float AUTWeap_Enforcer_Plus::GetRewindSeconds() const
 	return OneWayMs * 0.001f;
 }
 
+// =========================================================================
+// FIRING STATE GUARD — prevent crash when fire RPC arrives after owner death
+// =========================================================================
+// Race: player dies, weapon teardown clears UTOwner via Removed()/DetachFromOwner(),
+// but a replicated ServerUpdateFiringStates from the client was already in flight
+// and arrives this frame. Stock AUTWeapon::ServerUpdateFiringStates_Implementation
+// dereferences UTOwner without a null check (UTWeapon.cpp line ~576):
+//     if ( FiringState[i] && (UTOwner->IsPendingFire(i) != bWantsFire) )
+// → SIGSEGV.
+//
+// AUTWeaponFix has this same guard for the LinkGun_Plus / Minigun_Plus path.
+// Enforcer_Plus inherits from stock AUTWeap_Enforcer (to keep AUTDualWeapon
+// dual-wield infrastructure), so we reproduce the guard here.
+void AUTWeap_Enforcer_Plus::ServerUpdateFiringStates_Implementation(uint8 FireSettings)
+{
+	if (!GetUTOwner() || GetUTOwner()->IsDead() || IsPendingKillPending())
+	{
+		return;
+	}
+	Super::ServerUpdateFiringStates_Implementation(FireSettings);
+}
+
 void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVector& EndTrace, float TraceRadius, FHitResult& Hit, float PredictionTime)
 {
 	// Override caller's PredictionTime with our ping-based one. Mirrors
