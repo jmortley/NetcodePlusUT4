@@ -26,6 +26,26 @@ struct FElimPlusRatingSystemImpl
 	/** UniqueId -> rating-rounded-int captured by SnapshotMatchStart.
 	 *  Used at FlushAtMatchEnd to compute (NewElo - StartElo) delta. */
 	TMap<FString, int32> RatingAtMatchStart;
+
+	/** Lifetime PPR accumulator: sum of every round's PPR across all matches the
+	 *  player has played. Lifetime mean = TotalPoints / max(1, RoundsPlayed). */
+	TMap<FString, double> TotalPointsCache;
+
+	/** Lifetime round count: incremented once per round completed by this player. */
+	TMap<FString, int32> RoundsPlayedCache;
+
+	/** UniqueIds of cached humans who appeared in at least one round's
+	 *  MatchResult during this match. Disconnected-before-spawn / kicked-at-login
+	 *  players (e.g. plugin-mismatch) get cached by PostLogin but never end up
+	 *  here, so FlushAtMatchEnd can skip them entirely. Cleared each
+	 *  SnapshotMatchStart. */
+	TSet<FString> ActiveHumansThisMatch;
+
+	/** Subset of ActiveHumansThisMatch — humans who faced at least one human
+	 *  opponent (= round had cached players on BOTH teams). Used at flush to
+	 *  decide whether the rating change is "real" or should be clamped to the
+	 *  bot-match cap. Cleared each SnapshotMatchStart. */
+	TSet<FString> HumansWithHumanOpposition;
 };
 
 namespace
@@ -76,12 +96,21 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 		TEXT("  PerfIndexEMA   REAL NOT NULL DEFAULT 0.0,")
 		TEXT("  PerfGames      INTEGER NOT NULL DEFAULT 0,")
 		TEXT("  LastSeenUtc    INTEGER NOT NULL DEFAULT 0,")
-		TEXT("  SchemaVersion  INTEGER NOT NULL DEFAULT 1")
+		TEXT("  TotalPoints    REAL NOT NULL DEFAULT 0.0,")
+		TEXT("  RoundsPlayed   INTEGER NOT NULL DEFAULT 0,")
+		TEXT("  SchemaVersion  INTEGER NOT NULL DEFAULT 2")
 		TEXT(");");
 
 	const bool bOk = ExecSqlNoRows(World, Sql);
 	UE_LOG(LogElimPlusRating, Log, TEXT("InitDatabase: NCRatingElimPlus %s"),
 		bOk ? TEXT("ready") : TEXT("FAILED (USE_SQLITE off?)"));
+
+	// Schema migration v1 -> v2: add TotalPoints + RoundsPlayed columns to existing
+	// tables. ALTER errors if the column already exists; we ignore the bool return
+	// since the steady-state outcome is the same either way (column present).
+	ExecSqlNoRows(World, TEXT("ALTER TABLE NCRatingElimPlus ADD COLUMN TotalPoints REAL NOT NULL DEFAULT 0.0;"));
+	ExecSqlNoRows(World, TEXT("ALTER TABLE NCRatingElimPlus ADD COLUMN RoundsPlayed INTEGER NOT NULL DEFAULT 0;"));
+
 	return bOk;
 }
 
@@ -92,37 +121,44 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 
 	const FString Esc = SqlEscape(UniqueId);
 	const FString Sql = FString::Printf(
-		TEXT("SELECT Rating, RD, Sigma, PerfIndexEMA, PerfGames FROM NCRatingElimPlus WHERE UniqueId='%s';"),
+		TEXT("SELECT Rating, RD, Sigma, PerfIndexEMA, PerfGames, TotalPoints, RoundsPlayed FROM NCRatingElimPlus WHERE UniqueId='%s';"),
 		*Esc);
 
 	TArray<FDatabaseRow> Rows;
 	const bool bOk = ExecSql(World, Sql, Rows);
 
-	if (bOk && Rows.Num() > 0 && Rows[0].Text.Num() >= 5)
+	if (bOk && Rows.Num() > 0 && Rows[0].Text.Num() >= 7)
 	{
 		const double Rating       = FCString::Atod(*Rows[0].Text[0]);
 		const double RD           = FCString::Atod(*Rows[0].Text[1]);
 		const double Sigma        = FCString::Atod(*Rows[0].Text[2]);
 		const double PerfIndexEMA = FCString::Atod(*Rows[0].Text[3]);
 		const int32  PerfGames    = FCString::Atoi(*Rows[0].Text[4]);
+		const double TotalPoints  = FCString::Atod(*Rows[0].Text[5]);
+		const int32  RoundsPlayed = FCString::Atoi(*Rows[0].Text[6]);
 
 		TeamGlicko2::PlayerRating PR(Rating, RD, Sigma);
 		PR.SetPerfIndexEMA(PerfIndexEMA);
 		PR.SetPerfGames(PerfGames);
 		Impl->RatingCache.Add(UniqueId, PR);
-		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f RD=%.1f sigma=%.4f"),
-			*UniqueId, Rating, RD, Sigma);
+		Impl->TotalPointsCache.Add(UniqueId, TotalPoints);
+		Impl->RoundsPlayedCache.Add(UniqueId, RoundsPlayed);
+		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f RD=%.1f sigma=%.4f LifetimePPR=%.2f (%d rounds)"),
+			*UniqueId, Rating, RD, Sigma,
+			(RoundsPlayed > 0) ? float(TotalPoints / RoundsPlayed) : 0.f, RoundsPlayed);
 	}
 	else
 	{
 		TeamGlicko2::PlayerRating PR(
 			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility);
 		Impl->RatingCache.Add(UniqueId, PR);
+		Impl->TotalPointsCache.Add(UniqueId, 0.0);
+		Impl->RoundsPlayedCache.Add(UniqueId, 0);
 
 		const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
 		const FString InsertSql = FString::Printf(
-			TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc) ")
-			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld);"),
+			TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed) ")
+			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0);"),
 			*Esc,
 			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility,
 			static_cast<long long>(NowUtc));
@@ -134,6 +170,9 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 void FElimPlusRatingSystem::SnapshotMatchStart()
 {
 	Impl->RatingAtMatchStart.Empty();
+	Impl->ActiveHumansThisMatch.Empty();
+	Impl->HumansWithHumanOpposition.Empty();
+
 	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
 		const int32 RoundedElo = FMath::RoundToInt(Pair.Value.GetRating());
@@ -198,6 +237,48 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 		Match.scoreB = 0.0;
 	}
 
+	// Activity tracking — count cached humans on each side BEFORE we mutate the
+	// cache via ProcessMatch. Two purposes:
+	//  1. ActiveHumansThisMatch: who actually played a round (vs PostLogin-cached
+	//     ghosts like plugin-mismatch kicks who never spawned).
+	//  2. HumansWithHumanOpposition: who faced at least one human in any round.
+	//     Anyone NOT in this set at match-end gets the bot-match delta cap.
+	int32 HumansOnWinner = 0;
+	int32 HumansOnLoser  = 0;
+	for (const FElimPlusPlayerRoundPerf& Perf : Result.WinnerTeam)
+	{
+		if (CachedIdsBefore.Contains(Perf.UniqueId))
+		{
+			Impl->ActiveHumansThisMatch.Add(Perf.UniqueId);
+			++HumansOnWinner;
+		}
+	}
+	for (const FElimPlusPlayerRoundPerf& Perf : Result.LoserTeam)
+	{
+		if (CachedIdsBefore.Contains(Perf.UniqueId))
+		{
+			Impl->ActiveHumansThisMatch.Add(Perf.UniqueId);
+			++HumansOnLoser;
+		}
+	}
+	if (HumansOnWinner > 0 && HumansOnLoser > 0)
+	{
+		for (const FElimPlusPlayerRoundPerf& Perf : Result.WinnerTeam)
+		{
+			if (CachedIdsBefore.Contains(Perf.UniqueId))
+			{
+				Impl->HumansWithHumanOpposition.Add(Perf.UniqueId);
+			}
+		}
+		for (const FElimPlusPlayerRoundPerf& Perf : Result.LoserTeam)
+		{
+			if (CachedIdsBefore.Contains(Perf.UniqueId))
+			{
+				Impl->HumansWithHumanOpposition.Add(Perf.UniqueId);
+			}
+		}
+	}
+
 	TeamGlicko2System::ProcessMatch(Match);
 
 	// Write-back: only update cache for IDs that were already in it (= humans).
@@ -225,51 +306,73 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 
 	const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
 
-	// Anti-farm cap for solo-vs-bots matches: only one human at match start →
-	// clamp their rating delta to ±SoloVsBotsDeltaCap. RD/sigma/perf-EMA still
-	// update fully so uncertainty bookkeeping stays honest.
-	const bool bSoloVsBots = (Impl->RatingAtMatchStart.Num() == 1);
-	const int32 SoloVsBotsDeltaCap = 5; // tunable
+	// Bot-match cap: any cached human who never faced human opposition during
+	// the match (= every round was vs all-bots) gets their rating delta clamped
+	// to ±BotMatchDeltaCap. Replaces the old "RatingAtMatchStart.Num() == 1"
+	// solo check, which mis-counted ghosts (PostLogin-cached players who got
+	// kicked for plugin mismatch and never spawned).
+	const int32 BotMatchDeltaCap = 5; // tunable
+
+	int32 PersistedCount = 0;
+	int32 SkippedCount   = 0;
+	int32 CappedCount    = 0;
 
 	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
 		const FString& UniqueId = Pair.Key;
 		TeamGlicko2::PlayerRating& PR = Pair.Value;
 
+		// Skip cached humans who never appeared in any round's MatchResult
+		// (kicked at login, AFK spectators, joined-then-left before round 1).
+		// They have no real activity to persist; their PostLogin INSERT OR
+		// IGNORE row in the DB already represents them at default 1400.
+		if (!Impl->ActiveHumansThisMatch.Contains(UniqueId))
+		{
+			++SkippedCount;
+			continue;
+		}
+
 		const int32 NewEloRaw = FMath::RoundToInt(PR.GetRating());
 		const int32 StartElo  = Impl->RatingAtMatchStart.FindRef(UniqueId);
 		int32 Delta = (StartElo != 0) ? (NewEloRaw - StartElo) : 0;
 		int32 FinalElo = NewEloRaw;
 
-		if (bSoloVsBots && StartElo != 0 && (Delta > SoloVsBotsDeltaCap || Delta < -SoloVsBotsDeltaCap))
+		const bool bFacedHumans = Impl->HumansWithHumanOpposition.Contains(UniqueId);
+		if (!bFacedHumans && StartElo != 0 && (Delta > BotMatchDeltaCap || Delta < -BotMatchDeltaCap))
 		{
-			const int32 Clamped = FMath::Clamp(Delta, -SoloVsBotsDeltaCap, SoloVsBotsDeltaCap);
+			const int32 Clamped = FMath::Clamp(Delta, -BotMatchDeltaCap, BotMatchDeltaCap);
 			FinalElo = StartElo + Clamped;
 			PR.SetRating(static_cast<double>(FinalElo));
-			UE_LOG(LogElimPlusRating, Log, TEXT("Solo-vs-bots clamp: %s delta %d -> %d (Elo %d -> %d)"),
+			UE_LOG(LogElimPlusRating, Log, TEXT("Bot-match clamp: %s delta %d -> %d (Elo %d -> %d, no human opposition)"),
 				*UniqueId, Delta, Clamped, NewEloRaw, FinalElo);
 			Delta = Clamped;
+			++CappedCount;
 		}
+
+		const double TotalPoints  = Impl->TotalPointsCache.FindRef(UniqueId);
+		const int32  RoundsPlayed = Impl->RoundsPlayedCache.FindRef(UniqueId);
 
 		const FString Esc = SqlEscape(UniqueId);
 		const FString Sql = FString::Printf(
 			TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")
-			TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, SchemaVersion) ")
-			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, 1);"),
+			TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, SchemaVersion) ")
+			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, %.6f, %d, 2);"),
 			*Esc,
 			PR.GetRating(), PR.GetRD(), PR.GetSigma(),
 			PR.GetPerfIndexEMA(), PR.GetPerfGames(),
-			static_cast<long long>(NowUtc));
+			static_cast<long long>(NowUtc),
+			TotalPoints, RoundsPlayed);
 		ExecSqlNoRows(World, Sql);
 
 		if (Replicator)
 		{
 			Replicator->SetPlayerEloAndDelta(UniqueId, FinalElo, Delta);
 		}
+		++PersistedCount;
 	}
 
-	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d ratings (solo-vs-bots=%s)"),
-		Impl->RatingCache.Num(), bSoloVsBots ? TEXT("YES") : TEXT("no"));
+	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, skipped %d (didn't play), capped %d (no human opposition)"),
+		PersistedCount, SkippedCount, CappedCount);
 }
 
 int32 FElimPlusRatingSystem::GetCachedElo(const FString& UniqueId) const
@@ -281,8 +384,30 @@ int32 FElimPlusRatingSystem::GetCachedElo(const FString& UniqueId) const
 	return FMath::RoundToInt(TeamGlicko2::kDefaultRating);
 }
 
+void FElimPlusRatingSystem::RecordRoundPPR(const FString& UniqueId, float RoundPPR)
+{
+	if (UniqueId.IsEmpty()) return;
+	// Bots/unrated synthetic IDs (e.g. "BOT:Foo") aren't loaded by LoadPlayerFromDB
+	// and never enter the rating cache. Gate on RatingCache membership so we don't
+	// accidentally accumulate lifetime stats for transient placeholders.
+	if (!Impl->RatingCache.Contains(UniqueId)) return;
+
+	Impl->TotalPointsCache.FindOrAdd(UniqueId) += static_cast<double>(RoundPPR);
+	Impl->RoundsPlayedCache.FindOrAdd(UniqueId) += 1;
+}
+
+float FElimPlusRatingSystem::GetCachedLifetimePPR(const FString& UniqueId) const
+{
+	const int32 Rounds = Impl->RoundsPlayedCache.FindRef(UniqueId);
+	if (Rounds <= 0) return 0.f;
+	const double Total = Impl->TotalPointsCache.FindRef(UniqueId);
+	return static_cast<float>(Total / double(Rounds));
+}
+
 void FElimPlusRatingSystem::Forget(const FString& UniqueId)
 {
 	Impl->RatingCache.Remove(UniqueId);
 	Impl->RatingAtMatchStart.Remove(UniqueId);
+	Impl->TotalPointsCache.Remove(UniqueId);
+	Impl->RoundsPlayedCache.Remove(UniqueId);
 }

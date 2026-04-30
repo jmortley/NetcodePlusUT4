@@ -173,6 +173,7 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 	// Match-scoped stats reset on every map load (each map = a fresh match).
 	PerPlayerMatchPPRSum.Empty();
 	PerPlayerMatchPPRRoundCount.Empty();
+	bRatingFlushedThisMatch = false;
 }
 
 void AElimPlusGame::BeginPlay()
@@ -216,6 +217,11 @@ void AElimPlusGame::HandleMatchHasStarted()
 	Super::HandleMatchHasStarted();
 
 	bWarmupMode = false;
+
+	// Defense-in-depth reset of the flush guard: InitGame already resets it on
+	// map load, but a single PIE/server session can host multiple matches in a
+	// row. Reset here so a subsequent match can flush its own ratings.
+	bRatingFlushedThisMatch = false;
 
 	// Spawn stats replicator now — all clients are fully loaded at this point.
 	// Spawning in BeginPlay was too early and could cause client crashes.
@@ -284,12 +290,13 @@ void AElimPlusGame::HandleMatchHasEnded()
 	Super::HandleMatchHasEnded();
 
 	// Persist updated ratings to Mods.db and emit the final ELO + match delta
-	// to the replicator. The HUD chip + scoreboard ELO column update once here.
-	// (HUD-side polish todo: animate from start ELO to final tick-by-tick with
-	// green/red coloring — server-side data is already in place for it.)
-	if (HasAuthority() && RatingSystem.IsValid())
+	// to the replicator. Engine routes HandleMatchHasEnded twice in some paths
+	// (state-machine + derived); guard with bRatingFlushedThisMatch so we only
+	// log + write once. INSERT OR REPLACE was already idempotent at the SQL level.
+	if (HasAuthority() && RatingSystem.IsValid() && !bRatingFlushedThisMatch)
 	{
 		RatingSystem->FlushAtMatchEnd(GetWorld(), StatsReplicator);
+		bRatingFlushedThisMatch = true;
 	}
 }
 
@@ -926,7 +933,18 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				const int32 RoundCount = PerPlayerMatchPPRRoundCount[UTPS];
 				const float MatchMean = (RoundCount > 0) ? (PerPlayerMatchPPRSum[UTPS] / RoundCount) : 0.f;
 
-				StatsReplicator->SetPlayerPPRCurrent(UTPS->UniqueId.ToString(), MatchMean);
+				const FString UidStr = UTPS->UniqueId.ToString();
+				StatsReplicator->SetPlayerPPRCurrent(UidStr, MatchMean);
+
+				// Lifetime PPR — fold this round's contribution into the rating system's
+				// persistent TotalPoints/RoundsPlayed accumulators. Server-only / not
+				// replicated; queryable via Mods.db (NCRatingElimPlus.TotalPoints +
+				// RoundsPlayed). Gated to humans loaded by PostLogin (bots have no
+				// cache entry, so RecordRoundPPR is a no-op for them).
+				if (RatingSystem.IsValid())
+				{
+					RatingSystem->RecordRoundPPR(UidStr, RoundPPR);
+				}
 			}
 		}
 	}
@@ -1053,25 +1071,28 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 
 		if (bCanEndMatch)
 		{
-			// Game Over
-			bool bReplayTriggered = false;
-			BroadcastKillReplay();
-			bReplayTriggered = true;
-
-			UE_LOG(LogGameMode, Warning, TEXT("Team %d has won the match. Ending game."), WinnerTeamIndex);
-			if (bReplayTriggered)
+			// Game Over. Replay only fires on listen-server / dedicated; standalone
+			// PIE skips it entirely (mirrors AUTFlagRunGame::GetLineUpTime pattern).
+			const bool bIsReplayGoingToPlay = (GetNetMode() != NM_Standalone);
+			if (bIsReplayGoingToPlay)
 			{
-				// DELAY EndGame so the replay can actually play.
-				// 7.0 seconds gives time for the 0.5s delay + ~6s of replay footage
-				FTimerHandle UnusedHandle;
-				FTimerDelegate TimerDel;
-				TimerDel.BindUFunction(this, FName("DelayedEndGame"), WinnerTeamIndex, FName(TEXT("ScoreLimit")));
-				GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, 1.0f, false);
-
-				return; // EXIT NOW, do not call EndGame immediately
+				BroadcastKillReplay();
 			}
 
-			return; // Do not proceed to intermission
+			UE_LOG(LogGameMode, Warning, TEXT("Team %d has won the match. Ending game."), WinnerTeamIndex);
+
+			// 7s when a replay is playing (0.5s start delay + ~6s replay + 0.5s tail);
+			// short delay otherwise. Firing EndGame mid-replay destroys
+			// WinningKillerPawn while the replay thread is still resolving its
+			// NetworkGUID, causing EXCEPTION_ACCESS_VIOLATION in TaskGraphThreadNP /
+			// CoreUObject.dll. Was unconditional 1.0f (mismatched the 7s comment).
+			const float EndGameDelay = bIsReplayGoingToPlay ? 7.0f : 0.5f;
+			FTimerHandle UnusedHandle;
+			FTimerDelegate TimerDel;
+			TimerDel.BindUFunction(this, FName("DelayedEndGame"), WinnerTeamIndex, FName(TEXT("ScoreLimit")));
+			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, EndGameDelay, false);
+
+			return; // EXIT NOW, do not call EndGame immediately
 		}
 		// else: Win-by-two not satisfied, fall through to intermission
 	}
@@ -3811,3 +3832,53 @@ void AElimPlusGame::CheckForCampers()
 
 
 #pragma endregion
+
+
+uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
+{
+	// Mid-round paranoia + safe-fallback gate. The base impl picks smallest team
+	// (or honors RequestedTeam) and is correct in all non-tie cases.
+	if (bRoundInProgress || !RatingSystem.IsValid() || !PS || Teams.Num() < 2)
+	{
+		return Super::PickBalancedTeam(PS, RequestedTeam);
+	}
+
+	int32 MinSize = INT_MAX;
+	for (AUTTeamInfo* T : Teams)
+	{
+		if (T) MinSize = FMath::Min(MinSize, int32(T->GetSize()));
+	}
+
+	int32 BestTeamIdx = INDEX_NONE;
+	int64 BestStrength = MAX_int64;
+	for (int32 i = 0; i < Teams.Num(); ++i)
+	{
+		if (!Teams[i] || int32(Teams[i]->GetSize()) != MinSize) continue;
+
+		int64 TeamStrength = 0;
+		TArray<AController*> Members = Teams[i]->GetTeamMembers();
+		for (AController* C : Members)
+		{
+			AUTPlayerState* MemberPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+			if (MemberPS && MemberPS->UniqueId.IsValid())
+			{
+				TeamStrength += RatingSystem->GetCachedElo(MemberPS->UniqueId.ToString());
+			}
+			else
+			{
+				TeamStrength += 1400;  // bot or unrated, matches kDefaultRating
+			}
+		}
+		if (TeamStrength < BestStrength)
+		{
+			BestStrength = TeamStrength;
+			BestTeamIdx = i;
+		}
+	}
+
+	if (BestTeamIdx == INDEX_NONE) return Super::PickBalancedTeam(PS, RequestedTeam);
+
+	UE_LOG(LogGameMode, Verbose, TEXT("ElimPlus PickBalancedTeam: %s -> team %d (lowest cached-Elo sum %lld)"),
+		*PS->PlayerName, BestTeamIdx, BestStrength);
+	return static_cast<uint8>(BestTeamIdx);
+}

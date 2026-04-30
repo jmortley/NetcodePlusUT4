@@ -49,4 +49,17 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 private:
 	bool bPostMatchScreenshotTaken = false;
 	bool bNCPScreenshotEnabled = true;
+
+	/** Per-player ELO chip animation state. Triggered the first frame the
+	 *  replicator's EloDeltaThisMatch transitions from 0 to non-zero (= match end);
+	 *  cleared automatically when Delta returns to 0 (next match's frame-1 push). */
+	struct FElimPlusEloAnim
+	{
+		float StartTime  = 0.f;
+		int32 FromElo    = 0;
+		int32 ToElo      = 0;
+		int32 FinalDelta = 0;
+	};
+	TMap<FString, FElimPlusEloAnim> EloAnimByPlayerId;
+	static constexpr float EloAnimDurationSec = 4.0f;
 };

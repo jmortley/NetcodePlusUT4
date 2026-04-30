@@ -84,6 +84,14 @@ public:
 	 *  1400 if not loaded. */
 	int32 GetCachedElo(const FString& UniqueId) const;
 
+	/** Add this round's PPR (Kills + Damage*0.01) to the player's lifetime totals.
+	 *  Pure cache update; persistence happens in FlushAtMatchEnd. Server-only. */
+	void RecordRoundPPR(const FString& UniqueId, float RoundPPR);
+
+	/** Server-side accessor for lifetime PPR (TotalPoints / max(1, RoundsPlayed)).
+	 *  Returns 0 for players with no completed rounds. */
+	float GetCachedLifetimePPR(const FString& UniqueId) const;
+
 	/** Drop a player from the cache (e.g. on Logout, well after the match). */
 	void Forget(const FString& UniqueId);
 

@@ -383,6 +383,11 @@ public:
 	virtual void	ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerState* Victim, AUTPlayerState* Attacker) override;
 	virtual APawn* SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot) override;
 
+	/** Glicko-aware team picker. Refines tie-breaks among smallest-size teams using
+	 *  cached effective Elo (lower-strength team wins) — but only outside live rounds.
+	 *  Mid-round (bRoundInProgress) it defers entirely to the size-based parent impl. */
+	virtual uint8 PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam) override;
+
 	// -------- Victory Audio (Blueprint Editable) --------
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Victory Audio")
 	USoundBase* RedTeamVictorySound;
@@ -486,6 +491,12 @@ protected:
 	 *  Owns per-player PlayerRating cache. Updated per-round in EndRoundForTeam,
 	 *  flushed to DB + replicator at HandleMatchHasEnded. Non-UObject, server-only. */
 	TUniquePtr<FElimPlusRatingSystem> RatingSystem;
+
+	/** Idempotency guard for FlushAtMatchEnd. The engine may invoke
+	 *  HandleMatchHasEnded twice (Super dispatches it via state machine, plus our
+	 *  derived branches). Reset in InitGame; set true after the first flush. */
+	UPROPERTY(Transient)
+	bool bRatingFlushedThisMatch = false;
 
 	// -------- Round flow --------
 	UPROPERTY()

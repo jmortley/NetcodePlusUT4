@@ -280,34 +280,68 @@ void AElimPlusHUD::DrawHUD()
 				Canvas->DrawTile(Canvas->DefaultTexture, XOffset + PipSize - BorderW, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
 			}
 
-			// ELO chip below the portrait (small, dim, replicated)
+			// ELO chip below the portrait. At match end, count up over EloAnimDurationSec
+			// from (Elo - Delta) to Elo with green/red color fade. Trigger is the first
+			// frame the replicator returns Delta != 0; self-clears when Delta returns to 0.
 			if (Stats && UTPS->UniqueId.IsValid())
 			{
-				const int32 Elo = Stats->GetEloForPlayer(UTPS->UniqueId.ToString());
-				const int32 Delta = Stats->GetEloDeltaForPlayer(UTPS->UniqueId.ToString());
+				const FString UidStr = UTPS->UniqueId.ToString();
+				const int32 ServerElo = Stats->GetEloForPlayer(UidStr);
+				const int32 ServerDelta = Stats->GetEloDeltaForPlayer(UidStr);
+
+				int32 DisplayElo = ServerElo;
+				int32 DisplayDelta = ServerDelta;
+				float ColorBlend = 1.f;  // 1 = full final color, 0 = white
+
+				if (ServerDelta == 0)
+				{
+					// Mid-match (or pre-match). Drop any stale anim entry.
+					EloAnimByPlayerId.Remove(UidStr);
+				}
+				else
+				{
+					FElimPlusEloAnim& Anim = EloAnimByPlayerId.FindOrAdd(UidStr);
+					if (Anim.FinalDelta == 0)  // freshly created this frame
+					{
+						Anim.StartTime  = GetWorld()->TimeSeconds;
+						Anim.FromElo    = ServerElo - ServerDelta;
+						Anim.ToElo      = ServerElo;
+						Anim.FinalDelta = ServerDelta;
+					}
+					const float t = FMath::Clamp(
+						(GetWorld()->TimeSeconds - Anim.StartTime) / EloAnimDurationSec, 0.f, 1.f);
+					DisplayElo   = FMath::RoundToInt(FMath::Lerp(float(Anim.FromElo), float(Anim.ToElo), t));
+					DisplayDelta = DisplayElo - Anim.FromElo;
+					ColorBlend   = t;
+				}
+
 				const float ChipScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
 				FFontRenderInfo ChipRI;
 				ChipRI.bEnableShadow = true;
-				FString EloStr = FString::Printf(TEXT("%d"), Elo);
-				if (Delta != 0)
+
+				FString EloStr = FString::Printf(TEXT("%d"), DisplayElo);
+				if (DisplayDelta != 0)
 				{
-					EloStr += (Delta > 0)
-						? FString::Printf(TEXT(" +%d"), Delta)
-						: FString::Printf(TEXT(" %d"), Delta);
+					EloStr += (DisplayDelta > 0)
+						? FString::Printf(TEXT(" +%d"), DisplayDelta)
+						: FString::Printf(TEXT(" %d"), DisplayDelta);
 				}
 				float CXL, CYL;
 				Canvas->StrLen(TinyFont, EloStr, CXL, CYL);
 				const float ChipX = XOffset + (PipSize * 0.5f) - (CXL * ChipScale * 0.5f);
 				const float ChipY = YOffset + PipHeight + 2.f;
 				const float OL = 1.f;
+
 				Canvas->SetLinearDrawColor(FLinearColor::Black);
 				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX - OL, ChipY, ChipScale, ChipScale, ChipRI);
 				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX + OL, ChipY, ChipScale, ChipScale, ChipRI);
 				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX, ChipY - OL, ChipScale, ChipScale, ChipRI);
 				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX, ChipY + OL, ChipScale, ChipScale, ChipRI);
-				FLinearColor EloColor = FLinearColor::White;
-				if (Delta > 0)      EloColor = FLinearColor(0.4f, 1.f, 0.4f, 1.f);
-				else if (Delta < 0) EloColor = FLinearColor(1.f, 0.4f, 0.4f, 1.f);
+
+				FLinearColor TargetColor = FLinearColor::White;
+				if (DisplayDelta > 0)      TargetColor = FLinearColor(0.4f, 1.f, 0.4f, 1.f);
+				else if (DisplayDelta < 0) TargetColor = FLinearColor(1.f, 0.4f, 0.4f, 1.f);
+				const FLinearColor EloColor = FMath::Lerp(FLinearColor::White, TargetColor, ColorBlend);
 				Canvas->SetLinearDrawColor(EloColor);
 				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX, ChipY, ChipScale, ChipScale, ChipRI);
 			}
