@@ -1,6 +1,7 @@
 // TeamArenaCharacter.cpp
 #include "TeamArenaCharacter.h"
 #include "UTCharacterMovement.h"
+#include "TeamArenaCharacterMovement.h"
 #include "UTWeaponAttachment.h"
 #include "UTWeaponFix.h"
 #include "GameFramework/PlayerController.h"

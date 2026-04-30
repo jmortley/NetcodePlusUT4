@@ -9,7 +9,11 @@ namespace UnrealBuildTool.Rules
 			PrivateIncludePaths.Add("NetcodePlus/Private");
 			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 			PublicIncludePaths.AddRange(new string[] {
-				"NetcodePlus/Public"
+				"NetcodePlus/Public",
+				// Vendored Glicko2 (github.com/tronunator/Glicko2). Cross-includes
+				// like #include "TeamGlickoRating.h" resolve here without editing
+				// the vendored files. Used by ElimPlus rating system.
+				"NetcodePlus/Public/Glicko2"
             });
 			PrivateIncludePaths.AddRange(new string[] {
 				"UnrealTournament/Private",

@@ -4,6 +4,7 @@
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "Engine/World.h"
+#include "Engine/DemoNetDriver.h"
 #include "TimerManager.h"
 #include "Net/UnrealNetwork.h"
 #include "UTWeaponStateFiring_Transactional.h"
