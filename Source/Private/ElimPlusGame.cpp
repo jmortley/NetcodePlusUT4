@@ -718,6 +718,7 @@ void AElimPlusGame::StartNextRound()
 	StartCampCheckTimer();
 	RoundWinningKiller = nullptr;
 	RoundWinningKillTime = 0.0f;
+	WinningKillerPawn = nullptr;
 	bPendingDarkHorseReplay = false;
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	bTeam0LastManAnnounced = false;
@@ -1135,22 +1136,32 @@ bool AElimPlusGame::CheckScore_Implementation(AUTPlayerState* Scorer)
 
 void AElimPlusGame::BroadcastKillReplay()
 {
-	if (RoundWinningKiller && RoundWinningKillTime > 0.f)
+	// Match-winning kill replay using the FlagRun-style instant replay path
+	// (ClientPlayInstantReplay), NOT ClientQueueCoolMoment. CoolMoment routes
+	// through UUTKillcamPlayback::CoolMomentCamStart which has been crashing
+	// after MatchEnded — TaskGraphThreadNP access-violation in CoreUObject —
+	// because new round actors spawn before the playback finishes cleanup.
+	// ClientPlayInstantReplay uses OnKillcamStart with a NetworkGUID-resolved
+	// pawn focus and a hard stop timer, which is what Wipeout/Showdown rely on.
+	//
+	// Only invoked from the match-end branch of EndRoundForTeam (line ~1051),
+	// so this fires on the round that wins the match — never per regular round.
+	if (!RoundWinningKiller || RoundWinningKillTime <= 0.f || !WinningKillerPawn)
 	{
-		// Calculate offset (Current Time - Kill Time). 
-		// We add +2.0f to start the replay 2 seconds before the kill happens.
-		float ReplayOffset = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+		UE_LOG(LogGameMode, Warning, TEXT("BroadcastKillReplay: skip (no winning kill captured)"));
+		return;
+	}
 
-		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	// Rewind enough to start ~5s before the kill so the build-up plays.
+	const float TimeToRewind = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+	const float StartDelay   = 0.5f; // brief pause for the kill cam to settle
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
+		if (PC)
 		{
-			AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
-			if (PC)
-			{
-				// Use ClientPlayInstantReplay instead of ClientQueueCoolMoment.
-				// This uses the Actor's NetworkGUID which works in PIE/Standalone.
-				// Param 3 (StartDelay) is 0.0f because we want it now.
-				PC->ClientQueueCoolMoment(RoundWinningKiller->UniqueId, ReplayOffset);
-			}
+			PC->ClientPlayInstantReplay(WinningKillerPawn, TimeToRewind, StartDelay);
 		}
 	}
 }
@@ -1460,16 +1471,17 @@ void AElimPlusGame::ScoreKill_Implementation(AController* Killer, AController* O
 		UE_LOG(LogGameMode, Warning, TEXT("ScoreKill: This kill ends the round (Team0=%d, Team1=%d). Deferring spectate to EndRoundForTeam."), Alive0, Alive1);
 		if (Killer && Killer->PlayerState)
 		{
-			//RoundWinningKiller = Cast<AUTPlayerState>(Killer->PlayerState);
 			RoundWinningKillTime = GetWorld()->GetTimeSeconds();
-			if (Killer && Killer->GetPawn())
+			if (Killer->GetPawn())
 			{
 				RoundWinningKiller = Cast<AUTPlayerState>(Killer->PlayerState);
+				WinningKillerPawn  = Killer->GetPawn();   // captured for ClientPlayInstantReplay focus
 			}
 			// Fallback to victim if killer is gone/invalid
 			if (!RoundWinningKiller && OtherPS)
 			{
 				RoundWinningKiller = OtherPS;
+				WinningKillerPawn  = OtherPS->GetUTCharacter();
 				UE_LOG(LogGameMode, Warning, TEXT("ScoreKill: Killer invalid, focusing replay on Victim: %s"), *OtherPS->PlayerName);
 			}
 			// CHECK FOR DARK HORSE REPLAY CONDITION
@@ -1683,47 +1695,121 @@ void AElimPlusGame::PrecomputeSpawnLayouts()
 	const float SafetyThreshold = FMath::Min(MinimumEnemyHorizontalDistance, 2900.0f);
 
 	// -------------------------------------------------------
-	// PHASE 1: Build all valid 2v2 layouts
+	// MULTI-AXIS CLUSTERING (ported from AUWipeoutGame::PrecomputeSpawnLayouts).
+	// Old code brute-forced O(N^4) enumeration over ALL (a,b,c,d) with no
+	// requirement that teammates come from the same spatial side. That meant
+	// "Team 0 pair" could span the entire map as long as their pairwise
+	// separation was within MinTeammateSeparation/MaxTeammateSeparation.
+	//
+	// New approach: project spawns onto 5 candidate axes (E-W, N-S, NE-SW,
+	// NW-SE, principal/PCA), median-split each, pick the axis with the largest
+	// MinCrossDistance between sides. Then enumerate 2v2 pairs only WITHIN
+	// each side, guaranteeing teammates spawn near each other and far from the
+	// enemy. Same goal as Wipeout: maximise enemy distance.
 	// -------------------------------------------------------
-	for (int32 a = 0; a < N; ++a)
+
+	// Centroid for axis projection origin
+	FVector Centroid = FVector::ZeroVector;
+	for (APlayerStart* S : AllSpawns) Centroid += S->GetActorLocation();
+	Centroid /= N;
+
+	// Principal axis via 2D covariance (largest eigenvector of 2x2 cov matrix)
+	float Sxx = 0.f, Sxy = 0.f, Syy = 0.f;
+	for (APlayerStart* S : AllSpawns)
 	{
-		for (int32 b = a + 1; b < N; ++b)
+		FVector D = S->GetActorLocation() - Centroid;
+		Sxx += D.X * D.X;
+		Sxy += D.X * D.Y;
+		Syy += D.Y * D.Y;
+	}
+	const float PrincipalAngle = 0.5f * FMath::Atan2(2.f * Sxy, Sxx - Syy);
+	const FVector2D PrincipalAxis(FMath::Cos(PrincipalAngle), FMath::Sin(PrincipalAngle));
+
+	struct FAxisCandidate { FString Name; FVector2D Dir; };
+	TArray<FAxisCandidate> Candidates = {
+		{ TEXT("E-W"),       FVector2D(1.f, 0.f) },
+		{ TEXT("N-S"),       FVector2D(0.f, 1.f) },
+		{ TEXT("NE-SW"),     FVector2D(0.707f,  0.707f) },
+		{ TEXT("NW-SE"),     FVector2D(0.707f, -0.707f) },
+		{ TEXT("Principal"), PrincipalAxis }
+	};
+
+	TArray<APlayerStart*> SideA, SideB;
+	float BestMinCross = -1.f;
+	FString BestAxisName;
+
+	for (const FAxisCandidate& Axis : Candidates)
+	{
+		struct FSpawnProj { float Proj; APlayerStart* Spawn; };
+		TArray<FSpawnProj> Projections;
+		Projections.Reserve(N);
+		for (APlayerStart* S : AllSpawns)
 		{
-			float T0Sep = (AllSpawns[a]->GetActorLocation() - AllSpawns[b]->GetActorLocation()).Size2D();
+			FVector D = S->GetActorLocation() - Centroid;
+			FSpawnProj Item;
+			Item.Proj = D.X * Axis.Dir.X + D.Y * Axis.Dir.Y;
+			Item.Spawn = S;
+			Projections.Add(Item);
+		}
+		Projections.Sort([](const FSpawnProj& A, const FSpawnProj& B) { return A.Proj < B.Proj; });
+
+		const int32 SplitIdx = N / 2;
+		TArray<APlayerStart*> CandA, CandB;
+		for (int32 i = 0; i < SplitIdx; ++i) CandA.Add(Projections[i].Spawn);
+		for (int32 i = SplitIdx; i < N; ++i) CandB.Add(Projections[i].Spawn);
+
+		float MinCross = FLT_MAX;
+		for (APlayerStart* SA : CandA)
+			for (APlayerStart* SB : CandB)
+				MinCross = FMath::Min(MinCross, (SA->GetActorLocation() - SB->GetActorLocation()).Size2D());
+
+		UE_LOG(LogGameMode, Log, TEXT("  ElimPlus axis %-10s: A=%d B=%d MinCross=%.0f"),
+			*Axis.Name, CandA.Num(), CandB.Num(), MinCross);
+
+		if (MinCross > BestMinCross)
+		{
+			BestMinCross = MinCross;
+			BestAxisName = Axis.Name;
+			SideA = CandA;
+			SideB = CandB;
+		}
+	}
+
+	UE_LOG(LogGameMode, Log, TEXT("ElimPlus selected axis '%s' (MinCross=%.0f, A=%d, B=%d)"),
+		*BestAxisName, BestMinCross, SideA.Num(), SideB.Num());
+
+	// -------------------------------------------------------
+	// PHASE 1: 2v2 layouts — pairs come from a single side.
+	// -------------------------------------------------------
+	for (int32 a = 0; a < SideA.Num(); ++a)
+	{
+		for (int32 b = a + 1; b < SideA.Num(); ++b)
+		{
+			const float T0Sep = (SideA[a]->GetActorLocation() - SideA[b]->GetActorLocation()).Size2D();
 			if (T0Sep < MinTeammateSeparation2D || T0Sep > MaxTeammateSeparation2D)
 				continue;
 
-			for (int32 c = 0; c < N; ++c)
+			for (int32 c = 0; c < SideB.Num(); ++c)
 			{
-				if (c == a || c == b) continue;
-
-				for (int32 d = c + 1; d < N; ++d)
+				for (int32 d = c + 1; d < SideB.Num(); ++d)
 				{
-					if (d == a || d == b) continue;
-
-					float T1Sep = (AllSpawns[c]->GetActorLocation() - AllSpawns[d]->GetActorLocation()).Size2D();
+					const float T1Sep = (SideB[c]->GetActorLocation() - SideB[d]->GetActorLocation()).Size2D();
 					if (T1Sep < MinTeammateSeparation2D || T1Sep > MaxTeammateSeparation2D)
 						continue;
 
-					float MinCross = FLT_MAX;
-					float D_ac = (AllSpawns[a]->GetActorLocation() - AllSpawns[c]->GetActorLocation()).Size2D();
-					float D_ad = (AllSpawns[a]->GetActorLocation() - AllSpawns[d]->GetActorLocation()).Size2D();
-					float D_bc = (AllSpawns[b]->GetActorLocation() - AllSpawns[c]->GetActorLocation()).Size2D();
-					float D_bd = (AllSpawns[b]->GetActorLocation() - AllSpawns[d]->GetActorLocation()).Size2D();
-
-					MinCross = FMath::Min(MinCross, D_ac);
-					MinCross = FMath::Min(MinCross, D_ad);
-					MinCross = FMath::Min(MinCross, D_bc);
-					MinCross = FMath::Min(MinCross, D_bd);
-
+					const float D_ac = (SideA[a]->GetActorLocation() - SideB[c]->GetActorLocation()).Size2D();
+					const float D_ad = (SideA[a]->GetActorLocation() - SideB[d]->GetActorLocation()).Size2D();
+					const float D_bc = (SideA[b]->GetActorLocation() - SideB[c]->GetActorLocation()).Size2D();
+					const float D_bd = (SideA[b]->GetActorLocation() - SideB[d]->GetActorLocation()).Size2D();
+					const float MinCross = FMath::Min(FMath::Min(D_ac, D_ad), FMath::Min(D_bc, D_bd));
 					if (MinCross < SafetyThreshold)
 						continue;
 
 					FSpawnLayoutElimPlus Layout;
-					Layout.T0_Primary = AllSpawns[a];
-					Layout.T0_Secondary = AllSpawns[b];
-					Layout.T1_Primary = AllSpawns[c];
-					Layout.T1_Secondary = AllSpawns[d];
+					Layout.T0_Primary   = SideA[a];
+					Layout.T0_Secondary = SideA[b];
+					Layout.T1_Primary   = SideB[c];
+					Layout.T1_Secondary = SideB[d];
 					Layout.MinCrossDistance2D = MinCross;
 					Layout.T0Separation = T0Sep;
 					Layout.T1Separation = T1Sep;
@@ -1739,31 +1825,19 @@ void AElimPlusGame::PrecomputeSpawnLayouts()
 	}
 
 	// -------------------------------------------------------
-	// PHASE 2: Build all valid 1v1 (stack) layouts
+	// PHASE 2: 1v1 (stack) layouts — one anchor per side, max distance.
 	// -------------------------------------------------------
-	// Use a lower threshold for stacks � the original 5000 is too aggressive
-	// for small/medium maps and results in zero valid 1v1 layouts.
-	// 2900 (the same as 2v2 cross-distance) is safe because stack spawns
-	// don't have the teammate-collision-teleport problem anymore
-	// (SpawnDefaultPawnFor now uses AlwaysSpawn).
 	const float StackSafetyThreshold = FMath::Max(SafetyThreshold, MinimumStackSpawnDistance2D);
-
-	for (int32 a = 0; a < N; ++a)
+	for (int32 a = 0; a < SideA.Num(); ++a)
 	{
-		for (int32 b = 0; b < N; ++b)
+		for (int32 b = 0; b < SideB.Num(); ++b)
 		{
-			if (b == a) continue;
-
-			float Dist2D = (AllSpawns[a]->GetActorLocation() - AllSpawns[b]->GetActorLocation()).Size2D();
-
-			if (Dist2D < StackSafetyThreshold)
-				continue;
+			const float Dist2D = (SideA[a]->GetActorLocation() - SideB[b]->GetActorLocation()).Size2D();
+			if (Dist2D < StackSafetyThreshold) continue;
 
 			FSpawnLayoutElimPlus Layout;
-			Layout.T0_Primary = AllSpawns[a];
-			Layout.T0_Secondary = nullptr;
-			Layout.T1_Primary = AllSpawns[b];
-			Layout.T1_Secondary = nullptr;
+			Layout.T0_Primary = SideA[a];  Layout.T0_Secondary = nullptr;
+			Layout.T1_Primary = SideB[b];  Layout.T1_Secondary = nullptr;
 			Layout.MinCrossDistance2D = Dist2D;
 			Layout.T0Separation = 0.f;
 			Layout.T1Separation = 0.f;
