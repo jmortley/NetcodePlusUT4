@@ -2,6 +2,7 @@
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusShockRifle.h"
 #include "Particles/ParticleSystemComponent.h"
+#include "Engine/DemoNetDriver.h"
 
 
 
@@ -89,7 +90,9 @@ void AUTPlusProj_ShockBall::BeginPlay()
 	// BeginFakeProjectileSynch in the original game (fake was rendering authority).
 	// No fake exists in demo playback, so the real must become the visual — undo
 	// the hidden state that was recorded into the demo stream.
-	if (GetWorld() && GetWorld()->IsPlayingReplay())
+	UWorld* W = GetWorld();
+	const bool bInReplay = (W && W->DemoNetDriver && W->DemoNetDriver->IsPlaying());
+	if (bInReplay)
 	{
 		SetActorHiddenInGame(false);
 		TArray<USceneComponent*> Components;
