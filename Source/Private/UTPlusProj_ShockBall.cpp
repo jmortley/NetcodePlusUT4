@@ -85,6 +85,24 @@ void AUTPlusProj_ShockBall::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// During instant replay / demo playback, the real projectile was hidden by
+	// BeginFakeProjectileSynch in the original game (fake was rendering authority).
+	// No fake exists in demo playback, so the real must become the visual — undo
+	// the hidden state that was recorded into the demo stream.
+	if (GetWorld() && GetWorld()->IsPlayingReplay())
+	{
+		SetActorHiddenInGame(false);
+		TArray<USceneComponent*> Components;
+		GetComponents<USceneComponent>(Components);
+		for (USceneComponent* Comp : Components)
+		{
+			if (Comp)
+			{
+				Comp->SetVisibility(true);
+			}
+		}
+	}
+
 	// Cache the original fire direction for drift correction at high fps
 	bHasCachedFireDirection = false;
 	StuckTime = 0.f;
