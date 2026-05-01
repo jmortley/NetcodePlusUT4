@@ -976,10 +976,18 @@ void AUTPlusWeap_RocketLauncher::FiringExtraUpdated_Implementation(uint8 NewFlas
 void AUTPlusWeap_RocketLauncher::FiringInfoUpdated_Implementation(uint8 InFireMode, uint8 FlashCount, FVector InFlashLocation)
 {
     Super::FiringInfoUpdated_Implementation(InFireMode, FlashCount, InFlashLocation);
-    CurrentRocketFireMode = 0;
-    bDrawRocketModeString = false;
-    NumLoadedRockets = 0;
-    NumLoadedBarrels = 0;
+    
+    // Shield the client's local burst from Server replication race conditions.
+    // If we are still firing our burst (like grenades or spiral), do not reset the fire mode yet.
+    // This prevents the server's FlashCount replication from interrupting a timed burst
+    // and spawning "ghost" standard rockets on 0-ping environments (like PIE).
+    if (NumLoadedRockets <= 0)
+    {
+        CurrentRocketFireMode = 0;
+        bDrawRocketModeString = false;
+        NumLoadedRockets = 0;
+        NumLoadedBarrels = 0;
+    }
 }
 
 // =============================================================================
