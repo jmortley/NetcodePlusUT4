@@ -465,10 +465,17 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
             }
         }
 
-        // Stats and flash
+        // Stats and flash. IncrementFlashCount packs its arg into the top 4
+        // bits of FlashCount as the replicated FireMode (UTCharacter.cpp:2722).
+        // Passing NumLoadedRockets (1/2/3) packed bogus FireMode values 1/2/3
+        // each shot — the client unpacks those into CurrentFireMode and runs
+        // FiringInfoUpdated for an invalid mode, surfacing as a stray
+        // primary-class fake rocket on the client. Pass CurrentFireMode (1
+        // for alt) so the encoding is correct, matching the primary path
+        // below.
         if (Role == ROLE_Authority)
         {
-            UTOwner->IncrementFlashCount(NumLoadedRockets);
+            UTOwner->IncrementFlashCount(CurrentFireMode);
             if (PS && (ShotsStatsName != NAME_None))
             {
                 PS->ModifyStatsValue(ShotsStatsName, NumLoadedRockets);

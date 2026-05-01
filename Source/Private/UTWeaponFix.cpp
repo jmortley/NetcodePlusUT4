@@ -1267,6 +1267,10 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     }
 
     bIsTransactionalFire = false;
+    // Mirror the client-side clean-up at FireShot (line 696). Without this,
+    // CachedTransactionalRotation stays alive between shots and any future
+    // read with a stale gate would pick up the wrong rotation.
+    CachedTransactionalRotation = FRotator::ZeroRotator;
 	ReceivedHitScanHitChar = nullptr;
 
     // 4. CONFIRM — always sent, including shock balls. Keeps event indices synced
@@ -1383,15 +1387,10 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
         CurrentlyFiringMode = 255;
     }
 
-    // --- FIX START: Inject Rotation ---
-    if (!ClientViewRot.IsZero())
-    {
-        CachedTransactionalRotation = ClientViewRot;
-        bIsTransactionalFire = true; // Gatekeeper: Allow GetAdjustedAim to use the cached value
-    }
-    // --- FIX END ---
-
-    // 2. Clear transactional rotation state
+    // Stop fire is the end of the transactional session — clear the cache so
+    // no future read sees stale data. (The previous "inject then clear" block
+    // here was dead: it set the cache, then unconditionally cleared it on the
+    // very next lines.)
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
 
@@ -1796,26 +1795,19 @@ void AUTWeaponFix::OnServerHitScanResult(const FHitResult& Hit, float Prediction
 
 FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 {
-    // 1. Get the Raw Aim
-    // Use the cached client rotation whenever it's non-zero, regardless of
-    // bIsTransactionalFire. The flag is cleared after BeginFiringSequence/
-    // TransactionalFire returns, but the gatekeeper has bypass paths
-    // (bIsStateFiring, bInChargedState, bNetDelayedShot) that can let a shot
-    // fire while the flag is false. Without this, server falls through to
-    // GetBaseFireRotation -> owner pawn rotation which lags the client view
-    // by NetUpdateFrequency (~10ms at 100Hz) — at 537fps with rapid mouse
-    // movement this manifests as ~1/40 shock cores diverging slightly from
-    // where the client aimed. Cache being non-zero already implies
-    // "currently in a fire session" because StopFire clears it.
+    // Server: only honor cache during the actual transactional fire RPC. The
+    // cache is set in ServerStartFireFixed_Implementation and lives only for
+    // that call. Outside that scope the cache holds stale values from prior
+    // shots (server has no per-shot clear), so reading it without the flag
+    // gate causes hits to land at where the player aimed many shots ago.
     FRotator BaseAim;
 
-    if (Role == ROLE_Authority && !CachedTransactionalRotation.IsZero())
+    if (Role == ROLE_Authority && bIsTransactionalFire && !CachedTransactionalRotation.IsZero())
     {
         BaseAim = CachedTransactionalRotation;
     }
     else
     {
-        // Standard path for Client prediction or non-transactional fire
         BaseAim = GetBaseFireRotation();
     }
 
@@ -1849,19 +1841,16 @@ FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 
 FRotator AUTWeaponFix::GetBaseFireRotation()
 {
-    // Use cached rotation for both server (any role) and client (fake projectile).
-    // Same reasoning as GetAdjustedAim_Implementation: the bIsTransactionalFire
-    // flag was previously gating server use of the cache, but state-machine
-    // bypass paths can fire shots while the flag is false, falling through to
-    // owner pawn rotation (stale by ~10ms at 100Hz NetUpdateFrequency). At
-    // 537fps with rapid mouse movement this caused ~1/40 shock cores to
-    // diverge slightly. Cache is cleared on StopFire so non-zero already
-    // implies "fire session active."
+    // Server: only honor cache during the actual transactional fire RPC.
+    // The cache lives between ServerStartFireFixed calls and isn't cleared
+    // per-shot, so an ungated read returns stale rotation from prior shots
+    // (visible as damage landing at old aim points after weapon swap or
+    // RefireCheckTimer-driven held fire).
     //
-    // Client side: prevents fake projectile curving if mouse moves between
-    // fire input and SpawnNetPredictedProjectile (the original reason this
-    // override exists).
-    if (!CachedTransactionalRotation.IsZero())
+    // Client: cache is set right before Super::FireShot and cleared right
+    // after, so non-zero already means "this one fake spawn we're in."
+    if ((Role == ROLE_Authority && bIsTransactionalFire && !CachedTransactionalRotation.IsZero()) ||
+        (Role < ROLE_Authority && !CachedTransactionalRotation.IsZero()))
     {
         return CachedTransactionalRotation;
     }
@@ -1881,12 +1870,11 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
         // If ProjClass is NULL, it's likely a Hitscan mode (Sniper, Shock Beam), so we skip.
     bool bIsProjectile = (ProjClass.IsValidIndex(FireMode) && ProjClass[FireMode] != nullptr);
 
-    // Same lenient pattern as GetAdjustedAim — apply parallax whenever the cache
-    // is non-zero, not gated on bIsTransactionalFire. Otherwise a state-machine
-    // bypass-fired shot uses the current muzzle location instead of the rewound
-    // one, contributing to the same client/server divergence the rotation gate
-    // produces.
-    if (bIsProjectile && Role == ROLE_Authority && !CachedTransactionalRotation.IsZero() && UTOwner)
+    // Gated on bIsTransactionalFire — same reason as GetAdjustedAim: the cache
+    // isn't cleared per-shot on the server, so an ungated read applies
+    // parallax shift using stale data from the wrong shot.
+    if (bIsProjectile && Role == ROLE_Authority && bIsTransactionalFire &&
+        !CachedTransactionalRotation.IsZero() && UTOwner)
     {
         float PredictionTime = GetHitValidationPredictionTime();
 
