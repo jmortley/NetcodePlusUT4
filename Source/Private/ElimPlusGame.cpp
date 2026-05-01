@@ -217,6 +217,10 @@ void AElimPlusGame::DelayedEndGame(int32 WinnerTeamIndex, FName Reason)
 void AElimPlusGame::HandleMatchHasStarted()
 {
 	UE_LOG(LogGameMode, Warning, TEXT("=== TeamArena::HandleMatchHasStarted ENTER ==="));
+	// Build marker — change the tag string below whenever you want to verify
+	// the deployed binary contains a specific commit's changes. Lives next to
+	// the proven-reliable HandleMatchHasStarted ENTER line.
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus build marker: rebalance+warnings+broadcast (post-ca60db0)"));
 	UE_LOG(LogGameMode, Warning, TEXT("  UTIsHandlingReplays: %s"), UTIsHandlingReplays() ? TEXT("TRUE") : TEXT("FALSE"));
 	UE_LOG(LogGameMode, Warning, TEXT("  GetGameInstance: %s"), GetGameInstance() ? TEXT("VALID") : TEXT("NULL"));
 	UE_LOG(LogGameMode, Warning, TEXT("  GetNetMode: %d"), (int32)GetNetMode());
