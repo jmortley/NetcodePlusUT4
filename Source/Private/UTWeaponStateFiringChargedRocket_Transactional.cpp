@@ -275,18 +275,24 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
         }
         else
         {
-            // Legit early release (or latency too high) - RESET STATE
-            GetOuterAUTWeapon()->GotoActiveState();
-            AttemptBufferedFire(); // <--- Check input
+            // Legit early release. 
+            // DO NOT abort the state here! Let the LoadTimer finish naturally
+            // so the single rocket fires and triggers the global refire cooldown.
             return;
         }
     }
     // --- FIX END ---
 
-    if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
+    if (!RocketLauncher)
     {
         GetOuterAUTWeapon()->GotoActiveState();
         AttemptBufferedFire(); // <--- Check input
+        return;
+    }
+
+    if (RocketLauncher->NumLoadedRockets <= 0)
+    {
+        // Player released before first rocket loaded. Let LoadTimer finish.
         return;
     }
 
@@ -342,13 +348,28 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
     // Fire one rocket using stock UT logic (bypasses UTWeaponFix transactional)
     RocketLauncher->FireShotDirect();
-   
-    // Handle burst
+
+    // Decide if we need to wait before firing the next one.
+    // Per-mode interval check — restoring previously-removed logic. Without this,
+    // grenades fall through to the instant-dump while-loop because BurstInterval
+    // is 0 (rockets dump instantly). Grenades need GrenadeBurstInterval (0.1s)
+    // timed bursts; firing all 3 in one frame causes ghost rocket fakes on the
+    // client due to prediction/replication race on CurrentRocketFireMode.
     if (RocketLauncher->NumLoadedRockets > 0)
     {
-        if (RocketLauncher->BurstInterval <= 0.f || RocketLauncher->ShouldFireLoad())
+        float IntervalToCheck = RocketLauncher->BurstInterval;
+        if (RocketLauncher->CurrentRocketFireMode == 1)
         {
-            // --- FIX START: SAFETY COUNTER ---
+            IntervalToCheck = RocketLauncher->GrenadeBurstInterval;
+        }
+        else if (RocketLauncher->CurrentRocketFireMode == 2)
+        {
+            IntervalToCheck = RocketLauncher->SpiralBurstInterval;
+        }
+
+        if (IntervalToCheck <= 0.f || RocketLauncher->ShouldFireLoad())
+        {
+            // INSTANT DUMP — only for modes with 0 interval (Spread, by default)
             int32 SafetyCounter = 0;
             while (RocketLauncher->NumLoadedRockets > 0)
             {
@@ -371,19 +392,17 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
                     break;
                 }
             }
-            // --- FIX END ---
         }
         else
         {
-            float BurstTime = (RocketLauncher->CurrentRocketFireMode == 0)
-                ? RocketLauncher->BurstInterval
-                : RocketLauncher->GrenadeBurstInterval;
-
+            // TIMED BURST — Grenades (and any mode with non-zero interval).
+            // The timer schedules the next FireLoadedRocket call; one projectile
+            // per call lets CurrentRocketFireMode replicate cleanly between shots.
             GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
                 FireLoadedRocketHandle,
                 this,
                 &UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket,
-                BurstTime,
+                IntervalToCheck,
                 false
             );
             return;
