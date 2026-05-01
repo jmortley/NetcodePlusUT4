@@ -12,6 +12,7 @@
 #include "TeamGlickoRating.h"
 #include "TeamGlicko2System.h"
 #include "TeamGlicko2Config.h"
+#include "TeamBalancer.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogElimPlusRating, Log, All);
 
@@ -457,4 +458,52 @@ int32 FElimPlusRatingSystem::GetOrAssignBotElo(const FString& UniqueId)
 	Impl->BotEloCache.Add(UniqueId, NewElo);
 	UE_LOG(LogElimPlusRating, Verbose, TEXT("Assigned bot ELO %d to %s"), NewElo, *UniqueId);
 	return NewElo;
+}
+
+FElimPlusBalanceResult FElimPlusRatingSystem::ComputeBalancedTeams(const TArray<FElimPlusBalanceInput>& Players)
+{
+	using namespace TeamGlicko2;
+
+	FElimPlusBalanceResult Result;
+	if (Players.Num() < 2)
+	{
+		return Result;  // bValid=false
+	}
+
+	// Build PlayerInfo list. playerId is the input index — caller uses it to map
+	// back to their parallel controller array.
+	std::vector<PlayerInfo> PInfos;
+	PInfos.reserve(Players.Num());
+	for (int32 i = 0; i < Players.Num(); ++i)
+	{
+		const FString& Uid = Players[i].UniqueId;
+		PlayerRating PR;
+		if (PlayerRating* Cached = Impl->RatingCache.Find(Uid))
+		{
+			PR = *Cached;
+		}
+		else
+		{
+			// Bot or unrated. GetOrAssignBotElo returns the cached random value
+			// when randomization is on, else 1400. Either way we use default
+			// RD/sigma since these are transient placeholders.
+			const int32 BotElo = GetOrAssignBotElo(Uid);
+			PR = PlayerRating(static_cast<double>(BotElo), kDefaultRD, kDefaultVolatility);
+		}
+		PInfos.push_back(PlayerInfo(i, PR));
+	}
+
+	BalancerConfig Config;  // defaults: lambda=kLambda, separateTopPlayers=true,
+	                        // putTopPlayerInSmallerTeam=true, maxCombinations=10000
+	TeamAssignment TA = TeamBalancer::BalanceTeams(PInfos, Config);
+
+	Result.Team0Indices.Reserve(TA.team0PlayerIds.size());
+	for (int Id : TA.team0PlayerIds) Result.Team0Indices.Add(Id);
+	Result.Team1Indices.Reserve(TA.team1PlayerIds.size());
+	for (int Id : TA.team1PlayerIds) Result.Team1Indices.Add(Id);
+	Result.Team0Strength = static_cast<float>(TA.team0Strength);
+	Result.Team1Strength = static_cast<float>(TA.team1Strength);
+	Result.StrengthDifference = static_cast<float>(TA.strengthDifference);
+	Result.bValid = (Result.Team0Indices.Num() + Result.Team1Indices.Num()) == Players.Num();
+	return Result;
 }

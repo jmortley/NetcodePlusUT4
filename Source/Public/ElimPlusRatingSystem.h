@@ -47,6 +47,26 @@ struct FElimPlusRoundResult
 	bool bIsDraw = false;
 };
 
+/** Input slot for ComputeBalancedTeams. UniqueId is either the real Epic ID
+ *  (humans) or the synthetic "BOT:<PlayerName>" key (bots). */
+struct FElimPlusBalanceInput
+{
+	FString UniqueId;
+};
+
+/** TeamBalancer output, UE4-friendly (no STL types). The Team0/Team1Indices
+ *  reference back into the input TArray<FElimPlusBalanceInput> the caller
+ *  passed in, so the caller can map indices back to AControllers. */
+struct FElimPlusBalanceResult
+{
+	TArray<int32> Team0Indices;
+	TArray<int32> Team1Indices;
+	float Team0Strength = 0.f;
+	float Team1Strength = 0.f;
+	float StrengthDifference = 0.f;
+	bool bValid = false;
+};
+
 /** Pimpl: opaque forward decl of the implementation struct. The real definition
  *  lives in ElimPlusRatingSystem.cpp where it can freely use TeamGlicko2 types. */
 struct FElimPlusRatingSystemImpl;
@@ -104,6 +124,13 @@ public:
 	/** Returns the bot's assigned ELO if randomization is on, else 1400. Stable
 	 *  per UniqueId across calls within the session. */
 	int32 GetOrAssignBotElo(const FString& UniqueId);
+
+	/** Compute balanced team assignments via Tron's TeamGlicko2::TeamBalancer
+	 *  using cached human ratings + bot random ELOs. Caller iterates the result
+	 *  Team0/Team1Indices to look up the controller for each slot in their own
+	 *  parallel array and call MovePlayerToTeam. Server-only; no DB or
+	 *  replicator side-effects. */
+	FElimPlusBalanceResult ComputeBalancedTeams(const TArray<FElimPlusBalanceInput>& Players);
 
 	/** Drop a player from the cache (e.g. on Logout, well after the match). */
 	void Forget(const FString& UniqueId);

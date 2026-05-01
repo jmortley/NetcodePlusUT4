@@ -404,6 +404,13 @@ public:
 	 *  Mid-round (bRoundInProgress) it defers entirely to the size-based parent impl. */
 	virtual uint8 PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam) override;
 
+	/** Full pre-match team rebalance via Tron's TeamGlicko2::TeamBalancer. Walks
+	 *  PlayerArray, asks the rating system for the optimal 2-team split, then
+	 *  calls MovePlayerToTeam for any player whose team changed. Called once per
+	 *  match at the WaitingToStart -> PlayerIntro transition so players can
+	 *  watch the shuffle on the auto-shown scoreboard during the countdown. */
+	void RebalanceTeamsForMatchStart();
+
 	// -------- Victory Audio (Blueprint Editable) --------
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Victory Audio")
 	USoundBase* RedTeamVictorySound;

@@ -336,6 +336,10 @@ void AElimPlusGame::CallMatchStateChangeNotify()
 		// Ensure warmup mode is disabled once match is starting
 		bWarmupMode = false;
 		ResetSpawnSelectionForNewRound();
+		// Full ELO-based shuffle during the visible countdown. Scoreboard is
+		// force-shown by AElimPlusHUD::NotifyMatchStateChange so players can
+		// watch the team assignments resolve.
+		RebalanceTeamsForMatchStart();
 	}
 	if (GetMatchState() == MatchState::MatchIntermission || GetMatchState() == FName(TEXT("RoundCooldown")))
 	{
@@ -3910,4 +3914,78 @@ uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 	UE_LOG(LogGameMode, Verbose, TEXT("ElimPlus PickBalancedTeam: %s -> team %d (lowest cached-Elo sum %lld)"),
 		*PS->PlayerName, BestTeamIdx, BestStrength);
 	return static_cast<uint8>(BestTeamIdx);
+}
+
+
+void AElimPlusGame::RebalanceTeamsForMatchStart()
+{
+	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2) return;
+
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	if (!GS) return;
+
+	// Walk PlayerArray and build parallel arrays:
+	//   Inputs: FString UniqueId per slot (real Epic ID for humans, "BOT:<name>" for bots)
+	//   ControllersByIndex: AController* per slot
+	// Index alignment is critical — TeamBalancer returns int slot indices that
+	// reference back into both arrays.
+	TArray<FElimPlusBalanceInput> Inputs;
+	TArray<AController*> ControllersByIndex;
+	Inputs.Reserve(GS->PlayerArray.Num());
+	ControllersByIndex.Reserve(GS->PlayerArray.Num());
+
+	for (APlayerState* PS : GS->PlayerArray)
+	{
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+		if (!UTPS || UTPS->bOnlySpectator) continue;
+
+		AController* C = Cast<AController>(UTPS->GetOwner());
+		if (!C) continue;
+
+		FElimPlusBalanceInput In;
+		In.UniqueId = UTPS->UniqueId.IsValid()
+			? UTPS->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+		Inputs.Add(In);
+		ControllersByIndex.Add(C);
+	}
+
+	if (Inputs.Num() < 2)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("ElimPlus rebalance: skipped (only %d active players)"), Inputs.Num());
+		return;
+	}
+
+	const FElimPlusBalanceResult Result = RatingSystem->ComputeBalancedTeams(Inputs);
+	if (!Result.bValid)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: TeamBalancer returned invalid assignment, skipping"));
+		return;
+	}
+
+	// Apply: any player whose new team differs from their current team gets
+	// MovePlayerToTeam'd. Skip moves for already-correct assignments to avoid
+	// the suicide+message cascade that ChangeTeam triggers.
+	int32 MovesMade = 0;
+	auto AssignToTeam = [this, &ControllersByIndex, &MovesMade](const TArray<int32>& Indices, uint8 TargetTeam)
+	{
+		for (int32 SlotIdx : Indices)
+		{
+			if (!ControllersByIndex.IsValidIndex(SlotIdx)) continue;
+			AController* C = ControllersByIndex[SlotIdx];
+			AUTPlayerState* UTPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+			if (!UTPS) continue;
+			if (UTPS->Team && UTPS->Team->TeamIndex == TargetTeam) continue;  // already there
+			MovePlayerToTeam(C, UTPS, TargetTeam);
+			++MovesMade;
+		}
+	};
+	AssignToTeam(Result.Team0Indices, 0);
+	AssignToTeam(Result.Team1Indices, 1);
+
+	UE_LOG(LogGameMode, Log, TEXT("ElimPlus rebalance: %d players, Team0=%d str=%.1f, Team1=%d str=%.1f, diff=%.1f, moves=%d"),
+		Inputs.Num(),
+		Result.Team0Indices.Num(), Result.Team0Strength,
+		Result.Team1Indices.Num(), Result.Team1Strength,
+		Result.StrengthDifference, MovesMade);
 }
