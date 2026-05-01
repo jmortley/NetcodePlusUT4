@@ -245,17 +245,32 @@ void AElimPlusGame::HandleMatchHasStarted()
 		RatingSystem->SnapshotMatchStart();
 
 		// Push the start-of-match Elo to replicator with delta=0 so the HUD
-		// shows the player's current rating from the very first frame.
+		// shows the player's current rating from the very first frame. Bots
+		// also get pushed when bRandomizeBotElo is on, so the scoreboard can
+		// display their assigned random ELO (otherwise GetOrAssignBotElo
+		// returns 1400 and the row reads as default anyway — same as before).
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS && StatsReplicator)
 		{
 			for (APlayerState* PS : GS->PlayerArray)
 			{
 				AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-				if (!UTPS || !UTPS->UniqueId.IsValid()) continue;
-				const FString UidStr = UTPS->UniqueId.ToString();
-				const int32 Elo = RatingSystem->GetCachedElo(UidStr);
-				StatsReplicator->SetPlayerEloAndDelta(UidStr, Elo, 0);
+				if (!UTPS || UTPS->bOnlySpectator) continue;
+
+				if (UTPS->UniqueId.IsValid())
+				{
+					const FString UidStr = UTPS->UniqueId.ToString();
+					const int32 Elo = RatingSystem->GetCachedElo(UidStr);
+					StatsReplicator->SetPlayerEloAndDelta(UidStr, Elo, 0);
+				}
+				else
+				{
+					// Bot — synthetic key. GetOrAssignBotElo is sticky-random
+					// when randomization is on, else returns 1400.
+					const FString BotKey = FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					const int32 BotElo = RatingSystem->GetOrAssignBotElo(BotKey);
+					StatsReplicator->SetPlayerEloAndDelta(BotKey, BotElo, 0);
+				}
 			}
 		}
 	}

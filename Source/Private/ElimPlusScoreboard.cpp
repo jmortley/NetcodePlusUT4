@@ -400,9 +400,18 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 
 void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor)
 {
-	// Resolve replicator + player id once
+	// Resolve replicator + player id once. Bots have invalid UniqueIds, so use
+	// the same synthetic "BOT:<name>" key the rating/replicator pair publishes
+	// — so when bRandomizeBotElo is on, bots show their assigned ELO instead
+	// of the default 1400 fallback.
 	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-	const FString PId = (PlayerState && PlayerState->UniqueId.IsValid()) ? PlayerState->UniqueId.ToString() : FString();
+	FString PId;
+	if (PlayerState)
+	{
+		PId = PlayerState->UniqueId.IsValid()
+			? PlayerState->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
+	}
 	const FElimPlusStatsEntry* Entry = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
 
 	const FLinearColor DimColor = (PlayerState->GetUTCharacter() == nullptr) ? FLinearColor(0.6f, 0.6f, 0.6f, 1.f) * DrawColor : DrawColor;

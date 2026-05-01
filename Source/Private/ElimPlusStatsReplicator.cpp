@@ -57,13 +57,18 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 	for (APlayerState* PS : GS->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-		if (!UTPS || !UTPS->UniqueId.IsValid())
+		if (!UTPS || UTPS->bOnlySpectator)
 		{
 			continue;
 		}
 
+		// Bots have invalid UniqueIds — key them with the synthetic "BOT:<name>"
+		// shape used everywhere else (rating system, balancer). Lets bot ELOs
+		// flow through the same replicator path when bRandomizeBotElo is on.
 		FElimPlusStatsEntry Entry;
-		Entry.PlayerId = UTPS->UniqueId.ToString();
+		Entry.PlayerId = UTPS->UniqueId.IsValid()
+			? UTPS->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
 
 		// PPR(Current) — pulled from server-only side cache populated by gamemode
 		// at end-of-round via SetPlayerPPRCurrent.

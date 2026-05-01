@@ -283,9 +283,12 @@ void AElimPlusHUD::DrawHUD()
 			// ELO chip below the portrait. At match end, count up over EloAnimDurationSec
 			// from (Elo - Delta) to Elo with green/red color fade. Trigger is the first
 			// frame the replicator returns Delta != 0; self-clears when Delta returns to 0.
-			if (Stats && UTPS->UniqueId.IsValid())
+			// Bots use the synthetic "BOT:<name>" key so randomized bot ELOs render too.
+			if (Stats && UTPS)
 			{
-				const FString UidStr = UTPS->UniqueId.ToString();
+				const FString UidStr = UTPS->UniqueId.IsValid()
+					? UTPS->UniqueId.ToString()
+					: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
 				const int32 ServerElo = Stats->GetEloForPlayer(UidStr);
 				const int32 ServerDelta = Stats->GetEloDeltaForPlayer(UidStr);
 

@@ -204,13 +204,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WinBy2")
 	bool bWinByTwo = false;
 
-	// -------- Testing: random bot ELO (for balancer testing) --------
+	// -------- Random bot ELO (for balancer + visible variety) --------
 	/** When true, each bot gets a stable random ELO in [BotEloMin, BotEloMax]
-	 *  used by both PickBalancedTeam and the Glicko match math. Off by default —
-	 *  production servers should leave this off so bots count as 1400 (their
-	 *  ELO swings are clamped by the bot-match cap anyway). */
+	 *  used by PickBalancedTeam, the Glicko match math, AND the replicator (so
+	 *  the scoreboard shows the assigned ELO instead of a flat 1400). Default
+	 *  ON — bots having varied ELO is the more useful baseline for a server
+	 *  that mixes bots and humans, and bot-only matches are still clamped to
+	 *  ±5 by HumansWithHumanOpposition gating in FlushAtMatchEnd. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "ElimPlus|Testing")
-	bool bRandomizeBotElo = false;
+	bool bRandomizeBotElo = true;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "ElimPlus|Testing", meta = (ClampMin = "0", ClampMax = "5000"))
 	int32 BotEloMin = 1400;
