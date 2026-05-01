@@ -242,6 +242,17 @@ void AElimPlusGame::HandleMatchHasStarted()
 		StatsReplicator = GetWorld()->SpawnActor<AElimPlusStatsReplicator>(SpawnParams);
 	}
 
+	// Full ELO-based team rebalance now that all bots have joined (Super has
+	// completed any AddBots fills). Runs BEFORE StartNextRound spawns the
+	// player pawns, so the round begins with already-balanced teams. Players
+	// never see a mid-match suicide-respawn — the move is silent because
+	// pawns haven't been created yet for this round.
+	if (HasAuthority() && !bDidPreMatchRebalance)
+	{
+		RebalanceTeamsForMatchStart();
+		bDidPreMatchRebalance = true;
+	}
+
 	// Snapshot every loaded player's current rating as their "match-start" value.
 	// Replicator's Elo + EloDeltaThisMatch stay frozen at these values until
 	// HandleMatchHasEnded — players don't see ELO change round-to-round.
@@ -342,18 +353,11 @@ void AElimPlusGame::CallMatchStateChangeNotify()
 		// Ensure warmup mode is disabled once match is starting
 		bWarmupMode = false;
 		ResetSpawnSelectionForNewRound();
-		// Full ELO-based shuffle during the visible countdown. Scoreboard is
-		// force-shown by AElimPlusHUD::NotifyMatchStateChange so players can
-		// watch the team assignments resolve. UT4's standard pre-match flow is
-		// WaitingToStart -> CountdownToBegin -> InProgress; some modes also
-		// stop in PlayerIntro for cinematics. Hook both, gated by
-		// bDidPreMatchRebalance so a state bouncing back-and-forth (lobby loses
-		// the start condition, regains it) doesn't re-shuffle teams.
-		if (!bDidPreMatchRebalance)
-		{
-			RebalanceTeamsForMatchStart();
-			bDidPreMatchRebalance = true;
-		}
+		// Note: rebalance moved to HandleMatchHasStarted — at PlayerIntro and
+		// CountdownToBegin the bot roster is still filling (Super::AddBots
+		// happens inside the InProgress transition), so a rebalance here would
+		// only see partial players and miss late bots. Scoreboard is still
+		// auto-shown for these states by AElimPlusHUD::NotifyMatchStateChange.
 	}
 	if (GetMatchState() == MatchState::MatchIntermission || GetMatchState() == FName(TEXT("RoundCooldown")))
 	{

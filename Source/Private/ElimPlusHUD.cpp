@@ -84,10 +84,11 @@ void AElimPlusHUD::NotifyMatchStateChange()
 {
 	Super::NotifyMatchStateChange();
 
-	// Auto-force the scoreboard up during the pre-match countdown so players
-	// can watch the ELO-based team shuffle resolve. Drop it when the match
-	// actually starts. UT4 hits CountdownToBegin first; some modes also pass
-	// through PlayerIntro for cinematics — handle both.
+	// Auto-show the scoreboard during the pre-match phases so players can see
+	// the team rosters (and the ELO-based rebalance result that lands at
+	// HandleMatchHasStarted). ToggleScoreboard is the same path player input
+	// uses, so it actually drives the widget to render — bForceScores alone
+	// only flips the ScoreboardIsUp() flag without binding a visible widget.
 	{
 		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 		if (GS)
@@ -95,11 +96,24 @@ void AElimPlusHUD::NotifyMatchStateChange()
 			const FName State = GS->GetMatchState();
 			if (State == MatchState::PlayerIntro || State == MatchState::CountdownToBegin)
 			{
-				bForceScores = true;
+				ToggleScoreboard(true);
 			}
 			else if (State == MatchState::InProgress)
 			{
-				bForceScores = false;
+				// Keep scoreboard visible briefly into InProgress so players see
+				// the rebalanced teams after HandleMatchHasStarted has shuffled.
+				// ScoreboardHideHandle hides it after a short delay.
+				ToggleScoreboard(true);
+				FTimerHandle TmpHandle;
+				GetWorldTimerManager().SetTimer(TmpHandle,
+					FTimerDelegate::CreateLambda([this]()
+					{
+						if (this && IsValidLowLevel())
+						{
+							ToggleScoreboard(false);
+						}
+					}),
+					4.0f, false);
 			}
 		}
 	}
