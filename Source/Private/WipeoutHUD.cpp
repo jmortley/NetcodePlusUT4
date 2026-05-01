@@ -237,9 +237,10 @@ void AWipeoutHUD::DrawHUD()
 			{
 				LiveScaling = FMath::Clamp(1.f - UTPS->RespawnTime / UTPS->RespawnWaitTime, 0.f, 1.f);
 			}
-			else if (!bPlayerAlive && !UTPS->bOutOfLives)
+			else if (!bPlayerAlive)
 			{
-				// Dead but no respawn time info yet — show as dead
+				// Any other dead state: pre-timer (no RespawnWaitTime yet) or
+				// sudden-death/OT (bOutOfLives + RespawnTime = 0). Always dim.
 				LiveScaling = 0.f;
 			}
 

@@ -234,7 +234,7 @@ public:
 	float MinimumEnemyHorizontalDistance = 3000.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning", meta = (ClampMin = "500.0"))
-	float MinimumEnemySpawnDistance = 2800.0f;
+	float MinimumEnemySpawnDistance = 3600.0f;
 
 	/** Minimum distance from living enemies for mid-round respawns */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning", meta = (ClampMin = "500.0"))

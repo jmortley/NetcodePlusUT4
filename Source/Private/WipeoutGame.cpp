@@ -124,7 +124,7 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	CurrentWaveDamage = 0.0f;
 
 	// Spawn defaults
-	MinimumEnemySpawnDistance = 2800.0f;
+	MinimumEnemySpawnDistance = 3600.0f;
 	MinimumEnemyHorizontalDistance = 3000.0f;
 	MidRoundMinEnemyDistance = 2000.0f;
 
@@ -1482,13 +1482,21 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 			FallbackSpawn = Spawn;
 		}
 
-		// Hard reject if any enemy is too close
+		// Hard reject if any enemy is too close (FLT_MAX < threshold is false, so
+		// this naturally skips when no enemies exist yet — first team spawning)
 		if (MinEnemyDist < MinimumEnemySpawnDistance) continue;
 
-		// Score: cluster teammates, reward distance from enemies
+		// Score: cluster teammates, reward distance from enemies.
+		// Cap the enemy-distance bonus so it doesn't drown out teammate clustering
+		// when no enemies have spawned yet (MinEnemyDist would be FLT_MAX).
+		const float EnemyBonusCap = 5000.f;
+		const bool bAnyEnemy = (MinEnemyDist < FLT_MAX);
+		const float EnemyBonus = bAnyEnemy
+			? FMath::Min(MinEnemyDist, EnemyBonusCap) * 0.5f
+			: 0.f;
 		float Score = NearbyCount * 5000.f
 			- MinTeammateDist
-			+ (MinEnemyDist * 0.5f)              // bonus for distance from enemies
+			+ EnemyBonus
 			+ FMath::FRandRange(0.f, 300.f);
 		if (Score > BestScore)
 		{
