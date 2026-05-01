@@ -92,6 +92,19 @@ public:
 	 *  Returns 0 for players with no completed rounds. */
 	float GetCachedLifetimePPR(const FString& UniqueId) const;
 
+	/** TESTING: enable per-bot random ELO assignment so PickBalancedTeam has
+	 *  varied team strengths to balance against. When enabled, each unique bot
+	 *  key (e.g. "BOT:KiloBot") gets a stable random rating in [Min, Max] on
+	 *  first lookup; subsequent lookups return the cached value. Disabled by
+	 *  default — production servers should leave this off so bots count as 1400.
+	 *  Used by both PickBalancedTeam (team-strength sum) and ProcessRound (bot
+	 *  placeholder PlayerRating) for consistency. */
+	void SetBotRandomEloRange(bool bEnabled, int32 Min, int32 Max);
+
+	/** Returns the bot's assigned ELO if randomization is on, else 1400. Stable
+	 *  per UniqueId across calls within the session. */
+	int32 GetOrAssignBotElo(const FString& UniqueId);
+
 	/** Drop a player from the cache (e.g. on Logout, well after the match). */
 	void Forget(const FString& UniqueId);
 

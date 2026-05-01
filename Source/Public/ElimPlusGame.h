@@ -204,6 +204,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WinBy2")
 	bool bWinByTwo = false;
 
+	// -------- Testing: random bot ELO (for balancer testing) --------
+	/** When true, each bot gets a stable random ELO in [BotEloMin, BotEloMax]
+	 *  used by both PickBalancedTeam and the Glicko match math. Off by default —
+	 *  production servers should leave this off so bots count as 1400 (their
+	 *  ELO swings are clamped by the bot-match cap anyway). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "ElimPlus|Testing")
+	bool bRandomizeBotElo = false;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "ElimPlus|Testing", meta = (ClampMin = "0", ClampMax = "5000"))
+	int32 BotEloMin = 1400;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "ElimPlus|Testing", meta = (ClampMin = "0", ClampMax = "5000"))
+	int32 BotEloMax = 1600;
+
 	/** Restart the current round - useful for handling disconnections or other issues during official matches */
 	UFUNCTION(BlueprintCallable, Category = "TeamArena|Round Control")
 	void BP_RestartCurrentRound();

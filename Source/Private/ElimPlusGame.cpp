@@ -197,6 +197,11 @@ void AElimPlusGame::BeginPlay()
 	{
 		RatingSystem = MakeUnique<FElimPlusRatingSystem>();
 		FElimPlusRatingSystem::InitDatabase(GetWorld());
+
+		// Push the testing-config bot ELO range into the rating system so both
+		// PickBalancedTeam and the per-round Glicko placeholder use the same
+		// numbers. No-op when bRandomizeBotElo is false (production default).
+		RatingSystem->SetBotRandomEloRange(bRandomizeBotElo, BotEloMin, BotEloMax);
 	}
 }
 
@@ -3860,13 +3865,22 @@ uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 		for (AController* C : Members)
 		{
 			AUTPlayerState* MemberPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
-			if (MemberPS && MemberPS->UniqueId.IsValid())
+			if (!MemberPS)
+			{
+				TeamStrength += 1400;
+				continue;
+			}
+			if (MemberPS->UniqueId.IsValid())
 			{
 				TeamStrength += RatingSystem->GetCachedElo(MemberPS->UniqueId.ToString());
 			}
 			else
 			{
-				TeamStrength += 1400;  // bot or unrated, matches kDefaultRating
+				// Bot or unrated. Same synthetic key shape as EndRoundForTeam's
+				// BuildPerf path so the random-bot-ELO testing path is consistent
+				// across balancer and Glicko math.
+				const FString BotKey = FString::Printf(TEXT("BOT:%s"), *MemberPS->PlayerName);
+				TeamStrength += RatingSystem->GetOrAssignBotElo(BotKey);
 			}
 		}
 		if (TeamStrength < BestStrength)

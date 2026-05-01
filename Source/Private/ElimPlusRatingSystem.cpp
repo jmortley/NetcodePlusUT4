@@ -46,6 +46,18 @@ struct FElimPlusRatingSystemImpl
 	 *  decide whether the rating change is "real" or should be clamped to the
 	 *  bot-match cap. Cleared each SnapshotMatchStart. */
 	TSet<FString> HumansWithHumanOpposition;
+
+	// ---- Testing: random bot ELO assignment ----
+	/** When true, GetOrAssignBotElo returns a random rating in [BotEloMin, BotEloMax]
+	 *  on first lookup of a synthetic bot key, cached for the session. */
+	bool bRandomBotElo = false;
+	int32 BotEloMin = 1400;
+	int32 BotEloMax = 1600;
+
+	/** UniqueId (synthetic bot key like "BOT:Foo") -> assigned random ELO. Persists
+	 *  across rounds within a session so the same bot keeps the same ELO. Never
+	 *  written to Mods.db — bots are transient. */
+	TMap<FString, int32> BotEloCache;
 };
 
 namespace
@@ -203,16 +215,25 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 	}
 
 	// Build MatchResult. For UniqueIds NOT in cache (bots, late joiners), use a
-	// transient default PlayerRating(1400, 350, 0.06) so team-size math is honest.
+	// transient placeholder PlayerRating so team-size math is honest. If bot ELO
+	// randomization is on, use the per-bot assigned ELO (so balancer + Glicko
+	// math agree on team strengths); else default 1400.
 	auto BuildTeam = [this](const TArray<FElimPlusPlayerRoundPerf>& Perfs, std::vector<MatchPlayer>& Out)
 	{
 		Out.reserve(Perfs.Num());
 		for (const FElimPlusPlayerRoundPerf& Perf : Perfs)
 		{
 			const PlayerRating* Cached = Impl->RatingCache.Find(Perf.UniqueId);
-			const PlayerRating PR = Cached
-				? *Cached
-				: PlayerRating(kDefaultRating, kDefaultRD, kDefaultVolatility);
+			PlayerRating PR;
+			if (Cached)
+			{
+				PR = *Cached;
+			}
+			else
+			{
+				const int32 BotElo = GetOrAssignBotElo(Perf.UniqueId);
+				PR = PlayerRating(static_cast<double>(BotElo), kDefaultRD, kDefaultVolatility);
+			}
 			Out.push_back(MatchPlayer(PR, Perf.ToPerfScore()));
 		}
 	};
@@ -410,4 +431,30 @@ void FElimPlusRatingSystem::Forget(const FString& UniqueId)
 	Impl->RatingAtMatchStart.Remove(UniqueId);
 	Impl->TotalPointsCache.Remove(UniqueId);
 	Impl->RoundsPlayedCache.Remove(UniqueId);
+}
+
+void FElimPlusRatingSystem::SetBotRandomEloRange(bool bEnabled, int32 Min, int32 Max)
+{
+	Impl->bRandomBotElo = bEnabled;
+	Impl->BotEloMin = FMath::Min(Min, Max);
+	Impl->BotEloMax = FMath::Max(Min, Max);
+	UE_LOG(LogElimPlusRating, Log, TEXT("Bot random ELO: %s [%d, %d]"),
+		bEnabled ? TEXT("enabled") : TEXT("disabled"),
+		Impl->BotEloMin, Impl->BotEloMax);
+}
+
+int32 FElimPlusRatingSystem::GetOrAssignBotElo(const FString& UniqueId)
+{
+	if (!Impl->bRandomBotElo)
+	{
+		return FMath::RoundToInt(TeamGlicko2::kDefaultRating);
+	}
+	if (const int32* Existing = Impl->BotEloCache.Find(UniqueId))
+	{
+		return *Existing;
+	}
+	const int32 NewElo = FMath::RandRange(Impl->BotEloMin, Impl->BotEloMax);
+	Impl->BotEloCache.Add(UniqueId, NewElo);
+	UE_LOG(LogElimPlusRating, Verbose, TEXT("Assigned bot ELO %d to %s"), NewElo, *UniqueId);
+	return NewElo;
 }
