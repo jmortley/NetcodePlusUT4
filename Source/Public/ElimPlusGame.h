@@ -521,6 +521,13 @@ protected:
 	UPROPERTY(Transient)
 	bool bRatingFlushedThisMatch = false;
 
+	/** Idempotency guard for RebalanceTeamsForMatchStart. CountdownToBegin can
+	 *  fire multiple times if the lobby loses then re-gains the start condition.
+	 *  Reset in InitGame and HandleMatchHasEnded so the next match can rebalance.
+	 *  Set true the first time the rebalance runs. */
+	UPROPERTY(Transient)
+	bool bDidPreMatchRebalance = false;
+
 	// -------- Round flow --------
 	UPROPERTY()
 	AUTPlayerState* RoundWinningKiller;

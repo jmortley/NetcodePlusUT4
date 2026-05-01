@@ -84,15 +84,16 @@ void AElimPlusHUD::NotifyMatchStateChange()
 {
 	Super::NotifyMatchStateChange();
 
-	// Auto-force the scoreboard up during PlayerIntro so players can watch
-	// the ELO-based team shuffle resolve during the countdown. Drop it when
-	// the match actually starts. Mirrors what an old BP gamemode used to do.
+	// Auto-force the scoreboard up during the pre-match countdown so players
+	// can watch the ELO-based team shuffle resolve. Drop it when the match
+	// actually starts. UT4 hits CountdownToBegin first; some modes also pass
+	// through PlayerIntro for cinematics — handle both.
 	{
 		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 		if (GS)
 		{
 			const FName State = GS->GetMatchState();
-			if (State == MatchState::PlayerIntro)
+			if (State == MatchState::PlayerIntro || State == MatchState::CountdownToBegin)
 			{
 				bForceScores = true;
 			}

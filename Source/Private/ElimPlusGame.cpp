@@ -174,6 +174,7 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 	PerPlayerMatchPPRSum.Empty();
 	PerPlayerMatchPPRRoundCount.Empty();
 	bRatingFlushedThisMatch = false;
+	bDidPreMatchRebalance = false;
 }
 
 void AElimPlusGame::BeginPlay()
@@ -323,7 +324,7 @@ void AElimPlusGame::HandleMatchHasEnded()
 
 void AElimPlusGame::CallMatchStateChangeNotify()
 {
-	UE_LOG(LogGameMode, Log, TEXT("Current matchstate: %s"), *GetMatchState().ToString());
+	UE_LOG(LogGameMode, Warning, TEXT("Current matchstate: %s"), *GetMatchState().ToString());
 	// This function intercepts all SetMatchState calls
 	// and routes them to our custom handlers.
 	if (GetMatchState() == MatchState::WaitingToStart)
@@ -331,15 +332,24 @@ void AElimPlusGame::CallMatchStateChangeNotify()
 		bWarmupMode = true;
 
 	}
-	else if (GetMatchState() == MatchState::PlayerIntro)
+	else if (GetMatchState() == MatchState::PlayerIntro
+	      || GetMatchState() == MatchState::CountdownToBegin)
 	{
 		// Ensure warmup mode is disabled once match is starting
 		bWarmupMode = false;
 		ResetSpawnSelectionForNewRound();
 		// Full ELO-based shuffle during the visible countdown. Scoreboard is
 		// force-shown by AElimPlusHUD::NotifyMatchStateChange so players can
-		// watch the team assignments resolve.
-		RebalanceTeamsForMatchStart();
+		// watch the team assignments resolve. UT4's standard pre-match flow is
+		// WaitingToStart -> CountdownToBegin -> InProgress; some modes also
+		// stop in PlayerIntro for cinematics. Hook both, gated by
+		// bDidPreMatchRebalance so a state bouncing back-and-forth (lobby loses
+		// the start condition, regains it) doesn't re-shuffle teams.
+		if (!bDidPreMatchRebalance)
+		{
+			RebalanceTeamsForMatchStart();
+			bDidPreMatchRebalance = true;
+		}
 	}
 	if (GetMatchState() == MatchState::MatchIntermission || GetMatchState() == FName(TEXT("RoundCooldown")))
 	{
@@ -3919,7 +3929,14 @@ uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 
 void AElimPlusGame::RebalanceTeamsForMatchStart()
 {
-	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2) return;
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: ENTER (state=%s)"), *GetMatchState().ToString());
+
+	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: bailed (auth=%d, rating=%d, teams=%d)"),
+			HasAuthority() ? 1 : 0, RatingSystem.IsValid() ? 1 : 0, Teams.Num());
+		return;
+	}
 
 	AUTGameState* GS = GetGameState<AUTGameState>();
 	if (!GS) return;
@@ -3952,7 +3969,7 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 
 	if (Inputs.Num() < 2)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("ElimPlus rebalance: skipped (only %d active players)"), Inputs.Num());
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: skipped (only %d active players)"), Inputs.Num());
 		return;
 	}
 
@@ -3983,7 +4000,7 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 	AssignToTeam(Result.Team0Indices, 0);
 	AssignToTeam(Result.Team1Indices, 1);
 
-	UE_LOG(LogGameMode, Log, TEXT("ElimPlus rebalance: %d players, Team0=%d str=%.1f, Team1=%d str=%.1f, diff=%.1f, moves=%d"),
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: %d players, Team0=%d str=%.1f, Team1=%d str=%.1f, diff=%.1f, moves=%d"),
 		Inputs.Num(),
 		Result.Team0Indices.Num(), Result.Team0Strength,
 		Result.Team1Indices.Num(), Result.Team1Strength,
