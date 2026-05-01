@@ -4005,4 +4005,51 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 		Result.Team0Indices.Num(), Result.Team0Strength,
 		Result.Team1Indices.Num(), Result.Team1Strength,
 		Result.StrengthDifference, MovesMade);
+
+	// Build human-readable per-team rosters and broadcast to every connected
+	// player as a chat message. Mirrors what the old BP gamemode used to do —
+	// the scoreboard's already up during countdown but having the result also
+	// in chat gives players a stationary reference they can scroll back to.
+	auto BuildTeamLine = [this, &ControllersByIndex](const TArray<int32>& Indices, const TCHAR* Prefix, float Strength) -> FString
+	{
+		FString Names;
+		for (int32 SlotIdx : Indices)
+		{
+			if (!ControllersByIndex.IsValidIndex(SlotIdx)) continue;
+			AController* C = ControllersByIndex[SlotIdx];
+			AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+			if (!PS) continue;
+
+			int32 Elo = 1400;
+			if (PS->UniqueId.IsValid())
+			{
+				Elo = RatingSystem->GetCachedElo(PS->UniqueId.ToString());
+			}
+			else
+			{
+				Elo = RatingSystem->GetOrAssignBotElo(FString::Printf(TEXT("BOT:%s"), *PS->PlayerName));
+			}
+			if (!Names.IsEmpty()) Names += TEXT(", ");
+			Names += FString::Printf(TEXT("%s(%d)"), *PS->PlayerName, Elo);
+		}
+		return FString::Printf(TEXT("%s (str=%.0f): %s"), Prefix, Strength, *Names);
+	};
+
+	const FString Header  = FString::Printf(TEXT("=== ElimPlus Auto-Balance: diff=%.0f, moves=%d ==="),
+	                                        Result.StrengthDifference, MovesMade);
+	const FString RedLine  = BuildTeamLine(Result.Team0Indices, TEXT("RED  "), Result.Team0Strength);
+	const FString BlueLine = BuildTeamLine(Result.Team1Indices, TEXT("BLUE "), Result.Team1Strength);
+
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *Header);
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *RedLine);
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *BlueLine);
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (!PC) continue;
+		PC->ClientMessage(Header);
+		PC->ClientMessage(RedLine);
+		PC->ClientMessage(BlueLine);
+	}
 }
