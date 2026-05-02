@@ -23,104 +23,28 @@ class APlayerStart;
 class AElimPlusStatsReplicator;
 
 
+// Per-team spawn pool layout. Mirrors AUWipeoutGame's FWipeoutSpawnLayout —
+// see WipeoutGame.h for the design rationale. Each layout holds up to N
+// candidate spawns per team (N = team size, currently 4); the runtime spawn
+// picker (ChoosePlayerStart_Implementation) does dynamic per-player scoring
+// within these pools.
 USTRUCT()
-struct FSpawnPointDataElimPlus
+struct FElimPlusSpawnLayout
 {
 	GENERATED_BODY()
 
 	UPROPERTY()
-	APlayerStart* PlayerStart;
+	TArray<APlayerStart*> T0_Spawns;
 
 	UPROPERTY()
-	float HeightScore;
+	TArray<APlayerStart*> T1_Spawns;
 
-	UPROPERTY()
-	float TeamSideScore;
+	float MinCrossDistance2D;
+	float QualityScore;
+	int32 UsageCount;
 
-	UPROPERTY()
-	int32 Team0UsageCount;
-
-	UPROPERTY()
-	int32 Team1UsageCount;
-
-	UPROPERTY()
-	int32 LastUsedRound;
-
-	FSpawnPointDataElimPlus()
-		: PlayerStart(nullptr)
-		, HeightScore(0.0f)
-		, TeamSideScore(0.0f)
-		, Team0UsageCount(0)
-		, Team1UsageCount(0)
-		, LastUsedRound(-1)
-	{
-	}
-
-	FSpawnPointDataElimPlus(APlayerStart* InPlayerStart)
-		: PlayerStart(InPlayerStart)
-		, HeightScore(0.0f)
-		, TeamSideScore(0.0f)
-		, Team0UsageCount(0)
-		, Team1UsageCount(0)
-		, LastUsedRound(-1)
-	{
-	}
-
-	int32 GetUsageCountForTeam(int32 TeamIndex) const
-	{
-		return (TeamIndex == 0) ? Team0UsageCount : Team1UsageCount;
-	}
-
-	void IncrementUsageForTeam(int32 TeamIndex, int32 CurrentRound)
-	{
-		if (TeamIndex == 0)
-		{
-			Team0UsageCount++;
-		}
-		else
-		{
-			Team1UsageCount++;
-		}
-		LastUsedRound = CurrentRound;
-	}
-};
-
-
-
-// A complete spawn layout for both teams in one struct.
-// Every entry in the precomputed list is GUARANTEED safe by construction.
-USTRUCT()
-struct FSpawnLayoutElimPlus
-{
-	GENERATED_BODY()
-
-	// Team 0 spawns (Secondary is nullptr for stack spawns)
-	UPROPERTY()
-	APlayerStart* T0_Primary;
-
-	UPROPERTY()
-	APlayerStart* T0_Secondary;
-
-	// Team 1 spawns (Secondary is nullptr for stack spawns)
-	UPROPERTY()
-	APlayerStart* T1_Primary;
-
-	UPROPERTY()
-	APlayerStart* T1_Secondary;
-
-	// Pre-graded quality metrics
-	float MinCrossDistance2D;   // Worst-case horizontal distance between any T0 and T1 spawn
-	float QualityScore;        // Overall quality of this layout
-	float T0Separation;        // Teammate spread for Team 0 (0 if stacked)
-	float T1Separation;        // Teammate spread for Team 1 (0 if stacked)
-	int32 UsageCount;          // How many times this layout has been picked this match
-
-	FSpawnLayoutElimPlus()
-		: T0_Primary(nullptr), T0_Secondary(nullptr)
-		, T1_Primary(nullptr), T1_Secondary(nullptr)
-		, MinCrossDistance2D(0.f), QualityScore(0.f)
-		, T0Separation(0.f), T1Separation(0.f)
-		, UsageCount(0)
+	FElimPlusSpawnLayout()
+		: MinCrossDistance2D(0.f), QualityScore(0.f), UsageCount(0)
 	{
 	}
 };
@@ -192,11 +116,6 @@ public:
 
 	bool ValidateSpawnLocation(const FVector& TestLocation);
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawning")
-	float MinimumStackSpawnDistance2D = 4000.0f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawning")
-	int32 ForceStackEveryNRounds = 3;
 	/** Total number of rounds played (including draws) - accessible from Blueprint */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Arena|State")
 	int32 TotalRoundsPlayed;
@@ -696,86 +615,54 @@ protected:
 	//FTimerHandle TH_NextRound;
 	//float OvertimeStartTimeSeconds = 0.f;
 
-	// -------- Enhanced Spawn Selection System --------
+	// -------- Spawn Selection (Wipeout-style: per-team pool + dynamic per-player scoring) --------
+	/** Flat list of every APlayerStart found at map-load time. Source data for
+	 *  PrecomputeSpawnLayouts. */
 	UPROPERTY(Transient)
-	TArray<FSpawnPointDataElimPlus> AllSpawnPoints;
+	TArray<APlayerStart*> AllSpawnPointsList;
 
+	/** Per-team pools selected by SelectSpawnLayoutForRound — N spawns per team
+	 *  (N = team size, currently 4). ChoosePlayerStart_Implementation does
+	 *  dynamic per-player scoring within these pools. */
 	UPROPERTY(Transient)
 	TArray<APlayerStart*> Team0SelectedSpawns;
 
 	UPROPERTY(Transient)
 	TArray<APlayerStart*> Team1SelectedSpawns;
 
+	/** Cached side splits from PrecomputeSpawnLayouts (winning multi-axis side
+	 *  partition). Used as fallback if all curated layouts get exhausted. */
+	UPROPERTY(Transient)
+	TArray<APlayerStart*> PrecomputedSideA;
+
+	UPROPERTY(Transient)
+	TArray<APlayerStart*> PrecomputedSideB;
+
 	UPROPERTY(Transient)
 	int32 CurrentRoundNumber = 0;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning")
-	float SpawnOffsetDistance = 90.0f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning")
-	int32 MaxSpawnOffsetAttempts = 4;
 
 	UPROPERTY(Transient)
 	bool bSpawnPointsInitialized = false;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Weight for distance from enemy spawns when selecting spawn points"))
-	float SpawnDistanceWeight = 0.30f;
+	/** Precomputed layouts ranked by MinCrossDistance2D. _4v4 covers the standard
+	 *  team-spawn case; _1v1 are single-spawn-per-team layouts used periodically
+	 *  (every 3rd round) for tighter close-quarters rounds. */
+	TArray<FElimPlusSpawnLayout> ValidLayouts_4v4;
+	TArray<FElimPlusSpawnLayout> ValidLayouts_1v1;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Weight for spawn point height when selecting spawn points"))
-	float SpawnHeightWeight = 0.10f;
+	/** Hard floor on enemy distance during ChoosePlayerStart_Implementation —
+	 *  any candidate spawn closer than this to a living enemy is rejected
+	 *  (with 3-tier fallback if all candidates fail). Mirrors WipeoutGame's
+	 *  default; raised from the original 2800 once 4v4 made tighter spawns
+	 *  problematic. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning",
+		meta = (ClampMin = "500.0", ClampMax = "15000.0"))
+	float MinimumEnemySpawnDistance = 3600.0f;
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Weight for spawn usage frequency (promotes variety) when selecting spawn points"))
-	float SpawnUsageWeight = 0.45f;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning", meta = (ClampMin = "0.0", ClampMax = "1.0", ToolTip = "Weight for separation between team spawn points when selecting spawn points"))
-	float SpawnSeparationWeight = 0.15f;
-
-	// -------- Enhanced Spawn Selection Functions --------
 	void InitializeSpawnPointSystem();
-	void ScoreAllSpawnPoints();
-	void SelectOptimalSpawnPairForTeam(int32 TeamIndex);
-	void FindMaxDistanceSpawnPair(const TArray<FSpawnPointDataElimPlus*>& CandidateSpawns, const TArray<APlayerStart*>& EnemySpawns, int32 TeamIndex, APlayerStart*& OutPrimary, APlayerStart*& OutSecondary);
-	bool IsSpawnOnHomeSide(const FSpawnPointDataElimPlus& SpawnData, int32 TeamIndex) const;
-	//void FindMaxDistanceSpawnPair(const TArray<FSpawnPointDataElimPlus*>& CandidateSpawns, const TArray<APlayerStart*>& EnemySpawns, APlayerStart*& OutPrimary, APlayerStart*& OutSecondary);
-	float CalculateMinDistanceToEnemySpawns(APlayerStart* SpawnPoint, const TArray<APlayerStart*>& EnemySpawns);
-	TArray<FSpawnPointDataElimPlus*> GetSpawnCandidatesForTeam(int32 TeamIndex);
-	FVector FindSafeSpawnOffset(APlayerStart* BaseSpawn, int32 AttemptIndex);
-	bool IsLocationClearOfPlayers(const FVector& Location, float CheckRadius = 85.0f);
-	void ResetSpawnSelectionForNewRound();
-	/** Minimum distance required between team spawns and enemy spawns */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning", meta = (ClampMin = "500.0", ClampMax = "15000.0"))
-	float MinimumEnemySpawnDistance;
-	// Precomputed layout arrays (filled once at map load, never modified during gameplay)
-	TArray<FSpawnLayoutElimPlus> ValidLayouts_2v2;   // Both teams get split spawns
-	TArray<FSpawnLayoutElimPlus> ValidLayouts_1v1;   // Both teams stack on single spawn
-
-	// Tuning: maximum teammate separation to still count as a "pair"
-	// Beyond this, teammates are too far to help each other
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawning")
-	float MaxTeammateSeparation2D = 2500.0f;
-
-	// Tuning: minimum teammate separation for split spawns
-	// Below this, they're basically stacked anyway - not worth splitting
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawning")
-	float MinTeammateSeparation2D = 600.0f;
-
-	// Precomputation
 	void PrecomputeSpawnLayouts();
-
-	// Runtime selection (called at round start)
 	void SelectSpawnLayoutForRound();
-
-	// Helper
-	float GetMinCrossTeamDistance2D(const TArray<APlayerStart*>& TeamA, const TArray<APlayerStart*>& TeamB);
-
-    // Minimum horizontal distance required from enemy. 
-    // Defaults to something high like 3000.0f to force cross-map spawns.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawning")
-	float MinimumEnemyHorizontalDistance = 3000.0f;
-
-	/** Preferred distance between team spawns and enemy spawns (used for scoring) */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning", meta = (ClampMin = "1000.0", ClampMax = "15000.0"))
-	float PreferredEnemySpawnDistance;
+	void ResetSpawnSelectionForNewRound();
 	
 	UPROPERTY(Transient)
 	AActor* OverriddenPlayerStart;
@@ -826,7 +713,4 @@ protected:
 	void CheckForDarkHorse(int32 WinnerTeamIndex);
 	void CheckForHighDamageCarry(int32 WinnerTeamIndex);
 	TMap<TWeakObjectPtr<AUTPlayerState>, int32> DarkHorseCandidates;
-	// New spawn selection methods
-	void FindLeastUsedSpawnPair(const TArray<FSpawnPointDataElimPlus*>& CandidateSpawns, int32 TeamIndex, APlayerStart*& OutPrimary, APlayerStart*& OutSecondary);
-	void FindBalancedRandomSpawnPair(const TArray<FSpawnPointDataElimPlus*>& CandidateSpawns, const TArray<APlayerStart*>& EnemySpawns, int32 TeamIndex, APlayerStart*& OutPrimary, APlayerStart*& OutSecondary);
 };
