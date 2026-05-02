@@ -84,16 +84,8 @@ void AElimPlusHUD::NotifyMatchStateChange()
 {
 	Super::NotifyMatchStateChange();
 
-	// Track InProgress entry time for the custom pre-match team preview overlay.
-	// (Standard ToggleScoreboard fights with engine paths during pre-match; we
-	// render our own panel via DrawPreMatchTeamPreview.)
-	{
-		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-		if (GS && GS->GetMatchState() == MatchState::InProgress && MatchStartTimeSeconds < 0.f)
-		{
-			MatchStartTimeSeconds = GetWorld()->GetTimeSeconds();
-		}
-	}
+	// (Pre-match team preview is rendered by DrawPreMatchTeamPreview() each
+	// frame from DrawHUD; no per-state-change setup needed here.)
 
 	if (!bPostMatchScreenshotTaken)
 	{
@@ -655,11 +647,7 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 
 	const FName State = GS->GetMatchState();
 	const bool bPreMatch = (State == MatchState::PlayerIntro || State == MatchState::CountdownToBegin);
-	const bool bEarlyInProgress = (State == MatchState::InProgress
-		&& MatchStartTimeSeconds > 0.f
-		&& (GetWorld()->GetTimeSeconds() - MatchStartTimeSeconds) < PreviewHoldAfterMatchStart);
-
-	if (!bPreMatch && !bEarlyInProgress) return;
+	if (!bPreMatch) return;
 
 	AElimPlusStatsReplicator* Stats = FindElimPlusStatsReplicator(GetWorld());
 

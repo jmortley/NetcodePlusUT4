@@ -304,6 +304,20 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 	if (!HasAuthority() || !RatingSystem.IsValid()) return;
 	if (!NewPlayer) return;
 
+	// Eagerly spawn the stats replicator on first PostLogin if it doesn't exist
+	// yet. Originally we spawned it in HandleMatchHasStarted, but that's too
+	// late — the pre-match team preview overlay (PlayerIntro/CountdownToBegin)
+	// queries it for ELOs, so the replicator + EloCache need to be populated
+	// before then. PostLogin is the earliest point where we have an actual
+	// player to push, and clients are connected enough to receive replicated
+	// data without crashing (the BeginPlay-spawn issue from earlier sessions).
+	if (!StatsReplicator)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		StatsReplicator = GetWorld()->SpawnActor<AElimPlusStatsReplicator>(SpawnParams);
+	}
+
 	AUTPlayerState* UTPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (UTPS && UTPS->UniqueId.IsValid())
 	{
@@ -316,6 +330,27 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 		{
 			const int32 Elo = RatingSystem->GetCachedElo(UidStr);
 			StatsReplicator->SetPlayerEloAndDelta(UidStr, Elo, 0);
+		}
+	}
+
+	// Also push any bots already in PlayerArray. Bots don't trigger PostLogin
+	// themselves but they may have been added before the human connected (lobby
+	// fill). Without this they show 1400 in the pre-match preview until
+	// HandleMatchHasStarted runs the full push.
+	if (StatsReplicator)
+	{
+		AUTGameState* GS = GetGameState<AUTGameState>();
+		if (GS)
+		{
+			for (APlayerState* PS : GS->PlayerArray)
+			{
+				AUTPlayerState* OtherPS = Cast<AUTPlayerState>(PS);
+				if (!OtherPS || OtherPS->bOnlySpectator) continue;
+				if (OtherPS->UniqueId.IsValid()) continue;  // human, handled by their own PostLogin
+				const FString BotKey = FString::Printf(TEXT("BOT:%s"), *OtherPS->PlayerName);
+				const int32 BotElo = RatingSystem->GetOrAssignBotElo(BotKey);
+				StatsReplicator->SetPlayerEloAndDelta(BotKey, BotElo, 0);
+			}
 		}
 	}
 }
