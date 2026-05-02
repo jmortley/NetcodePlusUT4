@@ -53,14 +53,31 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
 ### Game Modes
 
 - **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning.
-- **TeamArena (ElimPlus)** — Round-based team elimination with BP GameState bridge and hidden-while-respawning visuals.
+- **ElimPlus** — Round-based 4v4 team elimination, formerly TeamArena. Full competitive scoring stack:
+  - Vendored TeamGlicko-2 ratings (per-player Rating / RD / Sigma persisted in `Saved/Mods.db`), per-round in-memory updates, frozen display ELO during a match → animated count-up at match end on the portrait HUD chip (green/red color tween).
+  - `PickBalancedTeam` override + full pre-match `TeamBalancer` rebalance at `HandleMatchHasStarted` (fires after engine bot-fill so the pool is complete). Respects `?BalanceTeams=true/false` URL flag.
+  - Custom Canvas-drawn pre-match team-preview overlay with team rosters + ELOs + team-strength totals (replaces unreliable scoreboard auto-show).
+  - Bot-match cap (±5 ELO) for matches where the human never faced human opposition. Skips never-played connections (e.g. plugin-mismatch kicks) at flush.
+  - Lifetime PPR persistence (`TotalPoints` + `RoundsPlayed` columns in `NCRatingElimPlus`, queryable via sqlite).
+  - Match-winning-kill instant replay via `ClientPlayInstantReplay` with conditional 7s EndGame delay (skipped in standalone PIE).
+  - Hidden-while-respawning portrait visuals + last-man-standing pulse.
 - **Wipeout** — Team elimination with respawn waves, portrait-strip HUD, side-by-side scoreboard with player portraits, K/D + B/A tracking, sudden death OT, alternating-team-first round spawning.
 - **ShockDom** — 4v4 Shock-Domination (3 control points). Includes match clock HUD, opposing-side cluster spawning at match start, configurable scoring tick.
+
+### Spawn System (Wipeout + ElimPlus)
+
+Both team-elimination modes share the same spawn picker:
+- Multi-axis side detection at map load — five candidate splits (E-W, N-S, two diagonals, principal eigenvector of the spawn covariance), pick whichever maximizes the minimum cross-team distance.
+- Per-team curated pool of N spawns (N = team size, currently 4) sorted by distance from the other side's centroid.
+- Dynamic per-player scoring at spawn time within the pool: cluster teammates, separate from enemies, hard floor at `MinimumEnemySpawnDistance` (3600u default), occupancy check.
+- 3-tier fallback: curated pool → curated best-of-bad (relax enemy threshold) → entire-map best-of-bad. Never returns null.
+- Capped enemy-distance bonus (5000u) so the score doesn't explode when no enemies have spawned yet (first team in a round).
 
 ### Mutators
 
 - **NCUTPlus** — primary mutator that replaces stock weapons with their NetcodePlus variants. Configurable per-weapon hide/show via `weaponskins` console command.
 - **ClientHitsounds** — client-side hit prediction with batched server confirmation. Configurable hitsound packs.
+- **ElimPlusMutator** — adds the ElimPlus-specific behaviors (rating/replicator hookup, BP CheckRelevance for placed-pickup filtering). Required when running `ElimPlus` game mode.
 
 ### Utilities
 
@@ -94,6 +111,30 @@ Per-player settings persist in `Mod.ini` under `[NetcodePlus.WeaponSettings]`:
 - `Hide.<WeaponClassName>=1/0` — hide/show first-person mesh per weapon
 - `Skin.<WeaponSkinTag>=<AssetPath>` — applied skin per weapon family (currently disabled in code; see `bSkinsEnabled` gate)
 
+### URL Flags (server command line)
+
+Standard UT4 URL flags that NetcodePlus modes honor:
+
+- `?BalanceTeams=true|false` — enables / disables the auto-balancer in ElimPlus (gates both `PickBalancedTeam` override and the pre-match `RebalanceTeamsForMatchStart`). Default true.
+
+### ElimPlus testing knobs (`Game.ini` or BP defaults)
+
+```ini
+[/Script/NetcodePlus.AElimPlusGame]
+bRandomizeBotElo=true     ; default true — give each bot a random ELO in [BotEloMin, BotEloMax]
+BotEloMin=1400
+BotEloMax=1600
+MinimumEnemySpawnDistance=3600.0
+```
+
+Mods.db schema for ELO data (server-only, gated by `USE_SQLITE = UE_SERVER`):
+
+```sql
+SELECT UniqueId, Rating, RD, Sigma, TotalPoints, RoundsPlayed,
+       (TotalPoints / NULLIF(RoundsPlayed, 0)) AS LifetimePPR
+FROM NCRatingElimPlus;
+```
+
 ### Lag Compensation Tunables (BP-editable on weapon classes)
 
 | Property | Default | Purpose |
@@ -122,9 +163,10 @@ Plugin code is under `Source/Public/` (headers) and `Source/Private/` (impl). Mo
 
 ## Development notes
 
-- **UE4 4.15 quirks**: no `FString::TrimStartAndEnd()` (use `.Trim()`), `ServerMutate()` is on `AUTPlayerController` not `APlayerController`, PCH mode is `UseExplicitOrSharedPCHs` so `.cpp` files must include `UnrealTournament.h` before UT headers.
+- **UE4 4.15 quirks**: no `FString::TrimStartAndEnd()` (use `.Trim()`), `ServerMutate()` is on `AUTPlayerController` not `APlayerController`, PCH mode is `UseExplicitOrSharedPCHs` so `.cpp` files must include `UnrealTournament.h` (or `NetcodePlus.h`) before UT headers. Same rule applies to plugin **headers** that include UT engine types — `#include "NetcodePlus.h"` must be the first include or unity-bundle reshuffles trigger UDataAsset / ULocalMessage cascade errors.
 - **Class layout / ABI**: never subclass `AUTGameState` in plugin C++ (engine class layout mismatch crashes on level load). Use a separate replicated `AInfo` actor for game-mode state.
 - **FlagBases access**: never directly access `CTFGameState->FlagBases` — use `GetFlagBase(idx)` accessor (vtable-dispatched, ABI-safe).
+- **Vendored libraries**: hide non-UE4 C++ libs (e.g. Tron's TeamGlicko-2) behind a Pimpl in your wrapper header. Strip any `<iostream>` / `<fstream>` / stdio includes from vendored sources — they pull `<Windows.h>` on MSVC and poison the unity-build PCH chain. `FElimPlusRatingSystem` is the canonical example.
 
 ## Related projects
 
