@@ -577,22 +577,23 @@ void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
 {
 	// Owner-gone guard. PutDown can be deferred via PutDownHandle (see the
 	// SetTimer below); if the player dies between defer and fire, the weapon's
-	// UTOwner is null by the time we get back here. The only legal transition
-	// for an owner-less weapon is to InactiveState — anything else trips the
-	// "Attempt to send X to state Y while not owned" ensure in
-	// AUTWeapon::GotoState. Was reproducible on death with loaded rockets:
+	// UTOwner is null by the time we get back here. Any state transition would
+	// trip "Attempt to send X to state Y while not owned" in AUTWeapon::GotoState
+	// (only InactiveState is allowed without an owner, and it's protected with
+	// no public accessor). Just bail — the weapon is about to be destroyed by
+	// AUTCharacter::DiscardAllInventory anyway. Repro:
 	//   [DeathRelease] Firing N loaded rockets on death
 	//   Ensure failed: UTOwner != NULL || NewState == InactiveState
+	if (AUTWeapon* Wpn = GetOuterAUTWeapon())
 	{
-		AUTWeapon* Wpn = GetOuterAUTWeapon();
-		if (!Wpn || Wpn->GetUTOwner() == nullptr)
+		if (Wpn->GetUTOwner() == nullptr)
 		{
-			if (Wpn && Wpn->InactiveState)
-			{
-				Wpn->GotoState(Wpn->InactiveState);
-			}
 			return;
 		}
+	}
+	else
+	{
+		return;
 	}
 
 	// Mid-burst: wait for it to complete
