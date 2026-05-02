@@ -224,6 +224,34 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 {
     if (FireModeNum != GetFireMode()) return;
 
+    // Re-entry guard: if a burst is already in progress (FireLoadedRocketHandle
+    // timer scheduled by a prior EndFiringSequence call this frame), drop this
+    // call. This closes the LoadTimer + ServerStopFire RPC race where two
+    // callers reach EndFiringSequence in the same server tick: each invocation
+    // would fire one rocket via FireLoadedRocket and schedule an overlapping
+    // timer, producing a same-frame double-spawn. The asymmetric timing
+    // (server: 2 instant + remainder timed; client: all timed at 150ms)
+    // caused server's end-of-burst CRFM=0 reset to replicate to the client
+    // mid-burst and corrupt the next client fake to spawn as a rocket
+    // (orphan). The OnRep_CurrentRocketFireMode guard on the client catches
+    // this defensively, but blocking the race here removes the source.
+    //
+    // The guard is correct because:
+    //  - First EndFiringSequence call passes (timer not yet active), starts
+    //    the burst, FireLoadedRocket schedules timer for the next shot.
+    //  - Same-frame re-entry sees active timer, returns; the just-loaded
+    //    extra rocket (if LoadTimer fired this same tick) is still picked
+    //    up because NumLoadedRockets is checked at each timer tick.
+    //  - Legitimate "load completes after release" path (LoadTimer fires
+    //    on a tick where no burst is in progress) is unaffected because
+    //    that scenario has the timer cleared between calls.
+    if (GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(FireLoadedRocketHandle))
+    {
+        UE_LOG(LogTemp, Verbose, TEXT("[NCFire] EndFiringSequence re-entry blocked (LoadTimer + StopFire race) Loaded=%d"),
+            RocketLauncher ? RocketLauncher->NumLoadedRockets : -1);
+        return;
+    }
+
     bCharging = false;
 
 

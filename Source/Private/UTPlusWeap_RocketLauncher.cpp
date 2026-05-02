@@ -983,11 +983,12 @@ void AUTPlusWeap_RocketLauncher::FiringExtraUpdated_Implementation(uint8 NewFlas
 void AUTPlusWeap_RocketLauncher::FiringInfoUpdated_Implementation(uint8 InFireMode, uint8 FlashCount, FVector InFlashLocation)
 {
     Super::FiringInfoUpdated_Implementation(InFireMode, FlashCount, InFlashLocation);
-    
-    // Shield the client's local burst from Server replication race conditions.
-    // If we are still firing our burst (like grenades or spiral), do not reset the fire mode yet.
-    // This prevents the server's FlashCount replication from interrupting a timed burst
-    // and spawning "ghost" standard rockets on 0-ping environments (like PIE).
+
+    // Shield the client's local burst from server replication race conditions.
+    // If we are still firing our burst (grenades or spiral), do not reset the
+    // fire mode yet. Without this, the server's FlashCount replication can
+    // interrupt a timed burst and spawn ghost standard rockets in 0-ping
+    // environments (PIE).
     if (NumLoadedRockets <= 0)
     {
         CurrentRocketFireMode = 0;
@@ -1290,6 +1291,29 @@ void AUTPlusWeap_RocketLauncher::OnRep_PendingLockedTarget()
     if (PendingLockedTarget != nullptr)
     {
         PendingLockedTargetTime = GetWorld()->GetTimeSeconds();
+    }
+}
+
+// Guards against the server's end-of-burst CRFM=0 reset arriving on the firing
+// client mid-burst and corrupting the class chosen for the next timed-burst
+// shot. The race occurs when server instant-dumps grenades (resets CRFM to 0
+// in the same frame as the spawns) while the client is still timed-bursting
+// at GrenadeBurstInterval; the rep arrives between client shots and the next
+// FireRocketProjectile reads CRFM=0, spawning a Spread (rocket) instead of a
+// grenade — visible to the player as an orphan rocket fake with no server
+// counterpart.
+//
+// With the EndFiringSequence re-entry guard in place server timed-bursts
+// correctly and this should not normally trigger. Kept as defense-in-depth;
+// the warning fires loudly so any regression that re-opens the race is
+// immediately visible in logs.
+void AUTPlusWeap_RocketLauncher::OnRep_CurrentRocketFireMode(int32 OldValue)
+{
+    if (NumLoadedRockets > 0 && CurrentRocketFireMode == 0 && OldValue != 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[NCFire] OnRep_CurrentRocketFireMode rejected mid-burst CRFM stomp from server (OldValue=%d Loaded=%d)"),
+            OldValue, NumLoadedRockets);
+        CurrentRocketFireMode = OldValue;
     }
 }
 

@@ -114,7 +114,7 @@ public:
     // === FIRE MODES ===
 
     /** Current rocket fire mode: 0=Spread, 1=Grenades, 2=Spiral */
-    UPROPERTY(BlueprintReadOnly, Replicated, Category = "Rocket Launcher")
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CurrentRocketFireMode, Category = "Rocket Launcher")
     int32 CurrentRocketFireMode;
 
     /** Whether to show the mode string on HUD */
@@ -316,6 +316,11 @@ public:
 
     UFUNCTION()
     void OnRep_PendingLockedTarget();
+
+    /** Defends against silent server CRFM replication overwrites mid-burst.
+     *  See implementation comment for race details. */
+    UFUNCTION()
+    void OnRep_CurrentRocketFireMode(int32 OldValue);
 
     // AI
     virtual float GetAISelectRating_Implementation() override;
