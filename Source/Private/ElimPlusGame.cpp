@@ -3878,6 +3878,13 @@ void AElimPlusGame::CheckForCampers()
 
 uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 {
+	// Respect the bBalanceTeams URL/admin toggle. If the admin disabled
+	// balancing, defer entirely to Super (which may also be a no-op).
+	if (!bBalanceTeams)
+	{
+		return Super::PickBalancedTeam(PS, RequestedTeam);
+	}
+
 	// Mid-round paranoia + safe-fallback gate. The base impl picks smallest team
 	// (or honors RequestedTeam) and is correct in all non-tie cases.
 	if (bRoundInProgress || !RatingSystem.IsValid() || !PS || Teams.Num() < 2)
@@ -3937,7 +3944,18 @@ uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 
 void AElimPlusGame::RebalanceTeamsForMatchStart()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: ENTER (state=%s)"), *GetMatchState().ToString());
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: ENTER (state=%s, bBalanceTeams=%s)"),
+		*GetMatchState().ToString(), bBalanceTeams ? TEXT("true") : TEXT("false"));
+
+	// Respect the URL flag / admin toggle. ?BalanceTeams=false on the server
+	// command line parses into bBalanceTeams=false via AUTGameMode::InitGame.
+	// Skip the Glicko shuffle entirely in that case so admins can run
+	// stack-as-you-wish matches.
+	if (!bBalanceTeams)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus rebalance: skipped (bBalanceTeams=false)"));
+		return;
+	}
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2)
 	{

@@ -46,6 +46,19 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	/** Take high-res screenshot when match ends (if enabled in NCP settings) */
 	virtual void NotifyMatchStateChange() override;
 
+	/** Custom Canvas overlay shown during PlayerIntro/CountdownToBegin (and the
+	 *  first few seconds of InProgress) listing both team rosters with names +
+	 *  ELOs and team-strength totals. Bypasses the standard scoreboard widget
+	 *  because UT4's auto-show paths fight ToggleScoreboard during the
+	 *  countdown. Drawn from DrawHUD after Super. */
+	void DrawPreMatchTeamPreview();
+
+	/** Tracked client-side: when the match transitions to InProgress, hold the
+	 *  preview visible for this many seconds so players see the rebalanced
+	 *  rosters before it auto-hides. */
+	float MatchStartTimeSeconds = -1.f;
+	static constexpr float PreviewHoldAfterMatchStart = 4.0f;
+
 private:
 	bool bPostMatchScreenshotTaken = false;
 	bool bNCPScreenshotEnabled = true;

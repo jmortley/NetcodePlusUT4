@@ -84,37 +84,14 @@ void AElimPlusHUD::NotifyMatchStateChange()
 {
 	Super::NotifyMatchStateChange();
 
-	// Auto-show the scoreboard during the pre-match phases so players can see
-	// the team rosters (and the ELO-based rebalance result that lands at
-	// HandleMatchHasStarted). ToggleScoreboard is the same path player input
-	// uses, so it actually drives the widget to render — bForceScores alone
-	// only flips the ScoreboardIsUp() flag without binding a visible widget.
+	// Track InProgress entry time for the custom pre-match team preview overlay.
+	// (Standard ToggleScoreboard fights with engine paths during pre-match; we
+	// render our own panel via DrawPreMatchTeamPreview.)
 	{
 		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-		if (GS)
+		if (GS && GS->GetMatchState() == MatchState::InProgress && MatchStartTimeSeconds < 0.f)
 		{
-			const FName State = GS->GetMatchState();
-			if (State == MatchState::PlayerIntro || State == MatchState::CountdownToBegin)
-			{
-				ToggleScoreboard(true);
-			}
-			else if (State == MatchState::InProgress)
-			{
-				// Keep scoreboard visible briefly into InProgress so players see
-				// the rebalanced teams after HandleMatchHasStarted has shuffled.
-				// ScoreboardHideHandle hides it after a short delay.
-				ToggleScoreboard(true);
-				FTimerHandle TmpHandle;
-				GetWorldTimerManager().SetTimer(TmpHandle,
-					FTimerDelegate::CreateLambda([this]()
-					{
-						if (this && IsValidLowLevel())
-						{
-							ToggleScoreboard(false);
-						}
-					}),
-					4.0f, false);
-			}
+			MatchStartTimeSeconds = GetWorld()->GetTimeSeconds();
 		}
 	}
 
@@ -186,6 +163,12 @@ void AElimPlusHUD::DrawHUD()
 
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	const bool bScoreboardIsUp = ScoreboardIsUp();
+
+	// Pre-match team preview overlay — replaces the unreliable scoreboard
+	// auto-show. Drawn during PlayerIntro, CountdownToBegin, and the first
+	// PreviewHoldAfterMatchStart seconds of InProgress so players see the
+	// rebalance result before the match starts moving.
+	DrawPreMatchTeamPreview();
 
 	// Custom team score bar (replaces bpHW_TeamGameClock — respects TeamSkins).
 	if (GS && !bScoreboardIsUp)
@@ -660,4 +643,117 @@ FLinearColor AElimPlusHUD::GetBaseHUDColor()
 		}
 	}
 	return TeamColor;
+}
+
+
+void AElimPlusHUD::DrawPreMatchTeamPreview()
+{
+	if (!Canvas || !SmallFont || !MediumFont) return;
+
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	if (!GS) return;
+
+	const FName State = GS->GetMatchState();
+	const bool bPreMatch = (State == MatchState::PlayerIntro || State == MatchState::CountdownToBegin);
+	const bool bEarlyInProgress = (State == MatchState::InProgress
+		&& MatchStartTimeSeconds > 0.f
+		&& (GetWorld()->GetTimeSeconds() - MatchStartTimeSeconds) < PreviewHoldAfterMatchStart);
+
+	if (!bPreMatch && !bEarlyInProgress) return;
+
+	AElimPlusStatsReplicator* Stats = FindElimPlusStatsReplicator(GetWorld());
+
+	// Layout: centered panel, 60% width × 50% height.
+	const float W  = float(Canvas->SizeX);
+	const float H  = float(Canvas->SizeY);
+	const float PW = W * 0.55f;
+	const float PH = H * 0.45f;
+	const float PX = (W - PW) * 0.5f;
+	const float PY = H * 0.18f;
+	const float TextScale = H / 1080.0f;
+
+	// Background tile (dim black with alpha).
+	Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.75f));
+	Canvas->DrawTile(Canvas->DefaultTexture, PX, PY, PW, PH, 0, 0, 1, 1);
+
+	// Top border accent.
+	Canvas->SetLinearDrawColor(FLinearColor(1.f, 0.85f, 0.2f, 1.f));
+	Canvas->DrawTile(Canvas->DefaultTexture, PX, PY, PW, 3.f, 0, 0, 1, 1);
+	Canvas->DrawTile(Canvas->DefaultTexture, PX, PY + PH - 3.f, PW, 3.f, 0, 0, 1, 1);
+
+	FFontRenderInfo RI;
+	RI.bEnableShadow = true;
+
+	// Title centered at top.
+	{
+		const FString Title = TEXT("MATCH BALANCE");
+		float TXL, TYL;
+		Canvas->StrLen(MediumFont, Title, TXL, TYL);
+		const float TitleScale = TextScale * 1.1f;
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+		Canvas->DrawText(MediumFont, FText::FromString(Title),
+			PX + (PW - TXL * TitleScale) * 0.5f, PY + 14.f,
+			TitleScale, TitleScale, RI);
+	}
+
+	// Two columns: RED / BLUE.
+	const float ColW = PW * 0.5f;
+	const float HeaderY = PY + 60.f * TextScale;
+	const float RowY0   = PY + 110.f * TextScale;
+	const float RowH    = 32.f * TextScale;
+
+	auto DrawTeamColumn = [&](int32 TeamIdx, float ColX, const TCHAR* Label, FLinearColor Accent)
+	{
+		// Header
+		Canvas->SetLinearDrawColor(Accent);
+		Canvas->DrawText(MediumFont, FText::FromString(Label),
+			ColX + 24.f * TextScale, HeaderY, TextScale, TextScale, RI);
+
+		// Player rows
+		float Y = RowY0;
+		int64 TeamStrength = 0;
+		int32 RowCount = 0;
+		for (APlayerState* PS : GS->PlayerArray)
+		{
+			AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+			if (!UTPS || UTPS->bOnlySpectator) continue;
+			if (UTPS->GetTeamNum() != TeamIdx) continue;
+
+			const FString Key = UTPS->UniqueId.IsValid()
+				? UTPS->UniqueId.ToString()
+				: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+			const int32 Elo = Stats ? Stats->GetEloForPlayer(Key) : 1400;
+			TeamStrength += Elo;
+
+			// Player name (left) + ELO (right of column)
+			Canvas->SetLinearDrawColor(FLinearColor::White);
+			Canvas->DrawText(SmallFont, FText::FromString(UTPS->PlayerName),
+				ColX + 24.f * TextScale, Y, TextScale, TextScale, RI);
+
+			const FString EloStr = FString::Printf(TEXT("%d"), Elo);
+			float EXL, EYL;
+			Canvas->StrLen(SmallFont, EloStr, EXL, EYL);
+			Canvas->SetLinearDrawColor(Accent);
+			Canvas->DrawText(SmallFont, FText::FromString(EloStr),
+				ColX + ColW - 24.f * TextScale - EXL * TextScale, Y, TextScale, TextScale, RI);
+
+			Y += RowH;
+			++RowCount;
+		}
+
+		// Total strength at bottom of column
+		const float TotalY = PY + PH - 50.f * TextScale;
+		const FString TotalStr = FString::Printf(TEXT("Team Strength: %lld"), TeamStrength);
+		Canvas->SetLinearDrawColor(Accent);
+		Canvas->DrawText(MediumFont, FText::FromString(TotalStr),
+			ColX + 24.f * TextScale, TotalY, TextScale, TextScale, RI);
+	};
+
+	DrawTeamColumn(0, PX,         TEXT("RED  (LIANDRI)"), FLinearColor(1.f,  0.35f, 0.35f, 1.f));
+	DrawTeamColumn(1, PX + ColW,  TEXT("BLUE (PHAYDER)"), FLinearColor(0.4f, 1.f,   0.4f,  1.f));
+
+	// Subtle divider between columns
+	Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, 0.25f));
+	Canvas->DrawTile(Canvas->DefaultTexture, PX + ColW - 1.f, PY + 50.f * TextScale,
+		2.f, PH - 90.f * TextScale, 0, 0, 1, 1);
 }
