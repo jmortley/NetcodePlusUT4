@@ -44,7 +44,21 @@ struct FNCPlusHUDElement
 		const FString* V = Extras.Find(Key);
 		return V ? *V : FString();
 	}
+
+	/** Read an extras key as a color (parses #RRGGBB or #RRGGBBAA).
+	 *  Returns Fallback if the key is missing or the string is malformed. */
+	FLinearColor GetExtraColor(FName Key, const FLinearColor& Fallback) const;
 };
+
+/** Hex ↔ FLinearColor utilities for the HUD layout's per-element color overrides. */
+namespace NCPlusHUDColor
+{
+	/** Parse "#RRGGBB", "#RRGGBBAA", or with no leading hash. Returns true on success. */
+	NETCODEPLUS_API bool TryParse(const FString& Hex, FLinearColor& Out);
+
+	/** Convert a color to "#RRGGBBAA" (or "#RRGGBB" if bIncludeAlpha=false). */
+	NETCODEPLUS_API FString ToHexString(const FLinearColor& Color, bool bIncludeAlpha = true);
+}
 
 /** Visual variants for the HP/Armor widget (mirrors Docs/HudMockups SVGs). */
 enum class ENCPlusHPArmorStyle : uint8
@@ -92,8 +106,13 @@ struct FNCPlusHUDLayout
 	/** Write layout to JSON file. Returns true on success. */
 	bool SaveToFile(const FString& Path) const;
 
-	/** Default location: <ProjectSaved>/NetcodePlus/ElimPlusHUDLayout.json */
-	static FString GetDefaultElimPlusPath();
+	/** Default location: <ProjectSaved>/NetcodePlus/HUDLayout.json
+	 *  (Single shared file across all NetcodePlus modes — ElimPlus, Wipeout,
+	 *  NCPlusCTF, ShockDom — so users configure once and it applies everywhere.) */
+	static FString GetDefaultLayoutPath();
+
+	/** Deprecated alias for GetDefaultLayoutPath; kept temporarily for compat. */
+	static FString GetDefaultElimPlusPath() { return GetDefaultLayoutPath(); }
 
 	/** Convert anchor enum to normalized screen coords (0..1, 0..1). */
 	static FVector2D AnchorToScreenCoords(ENCPlusHUDAnchor Anchor);

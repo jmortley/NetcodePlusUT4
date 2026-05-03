@@ -13,6 +13,15 @@ class UUTLocalPlayer;
  * Per-row controls for one HUD element. The panel stores a parallel array of
  * these so we can update individual rows without rebuilding the whole VBox.
  */
+/** A single editable color slot on a row (e.g. hp_armor's "color_health"). */
+struct FNCHUDEditorColor
+{
+	FName  Key;            // extras key, e.g. "color_health"
+	FText  Label;          // user-facing label, e.g. "Health"
+	FLinearColor Default;  // default if no override present
+	TSharedPtr<class SEditableTextBox> Input;
+};
+
 struct FNCHUDEditorRow
 {
 	FName Alias;
@@ -24,6 +33,9 @@ struct FNCHUDEditorRow
 	TSharedPtr<class STextComboBox> StyleCombo;
 	TArray<TSharedPtr<FString>> StyleChoices;
 	bool bHasStylePicker = false;
+
+	// Optional per-row color overrides (hp_armor + weapon_bar_*).
+	TArray<FNCHUDEditorColor> Colors;
 };
 
 class SNCPlusHUDEditor : public SCompoundWidget
@@ -82,6 +94,10 @@ private:
 
 	// Style combo (hp_armor only)
 	void OnStyleSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias);
+
+	// Color overrides
+	TSharedRef<class SWidget> BuildColorRow(FNCHUDEditorRow& Row);
+	void OnColorTextCommitted(const FText& NewText, ETextCommit::Type, FName Alias, FName ColorKey);
 
 	// Per-row reset
 	FReply OnResetRowClicked(FName Alias);

@@ -4,6 +4,7 @@
 #include "UTGameState.h"
 #include "UTPlayerState.h"
 #include "UTTeamInfo.h"
+#include "NCPlusHUDLayout.h"
 
 ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -18,6 +19,10 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 
 	// Our custom scoreboard widget
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusCTFScoreboard"));
+	// Custom split WeaponBar + modernized HP/Armor (replace stock variants).
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
 }
 
 void ANCPlusCTFHUD::BeginPlay()
@@ -28,10 +33,18 @@ void ANCPlusCTFHUD::BeginPlay()
 	{
 		return Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
 			|| Entry.Contains(TEXT("CTFScoreboard"))     // stock CTF scoreboard
-			|| Entry.Contains(TEXT("TeamScoreboard"));   // stock team scoreboard (fallback)
+			|| Entry.Contains(TEXT("TeamScoreboard"))    // stock team scoreboard (fallback)
+			|| Entry.Contains(TEXT("bpHW_WeaponBar"))    // replaced by our split bar
+			|| Entry.Contains(TEXT("bpHW_QuickStats"))   // replaced by our HP/Armor widget
+			|| Entry.Contains(TEXT("bpHW_Paperdoll"));   // fallback +HP/Armor mode would conflict
 	});
 
 	Super::BeginPlay();
+
+	// HUD layout system — capture stock defaults, load + apply live layout.
+	CaptureWidgetDefaults(this);
+	FNCPlusHUDLayout::ReloadLive();
+	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 }
 
 EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
@@ -53,6 +66,9 @@ EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
 
 void ANCPlusCTFHUD::DrawHUD()
 {
+	// Re-apply live layout each frame for live preview (cheap when clean).
+	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+
 	if (!Canvas || !SmallFont) return;
 
 	// Draw score bar BEFORE Super so flag icons (drawn by Super) render on top

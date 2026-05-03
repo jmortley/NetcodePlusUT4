@@ -5,6 +5,7 @@
 #include "UTTeamInfo.h"
 #include "ShockDomControlPoint.h"
 #include "ShockDomScoreboard.h"
+#include "NCPlusHUDLayout.h"
 #include "EngineUtils.h"
 
 
@@ -19,6 +20,10 @@ AShockDomHUD::AShockDomHUD(const FObjectInitializer& ObjectInitializer)
 
 void AShockDomHUD::DrawHUD()
 {
+	// Re-apply live layout each frame for live preview (cheap when clean).
+	// We bypass AWipeoutHUD::DrawHUD below, so the apply call has to live here.
+	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+
 	// Skip AWipeoutHUD::DrawHUD (portrait strip) — go straight to AUTHUD base
 	AUTHUD::DrawHUD();
 

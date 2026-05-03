@@ -21,9 +21,10 @@ namespace NCPlusWB
 	static const float AmmoBarH    = 4.f;
 	static const float GroupNumPad = 3.f;
 
-	// Colors
-	static const FLinearColor SlotBgInactive(0.07f, 0.07f, 0.07f, 0.55f);
-	static const FLinearColor SlotBgActive  (0.18f, 0.18f, 0.18f, 0.85f);
+	// Default colors (overridable per-element via Extras keys in Phase 3.3).
+	// Lower alphas + lighter inactive bg to match stock UT4 weapon bar's translucent feel.
+	static const FLinearColor SlotBgInactive(0.04f, 0.04f, 0.04f, 0.30f);
+	static const FLinearColor SlotBgActive  (0.10f, 0.10f, 0.10f, 0.55f);
 	static const FLinearColor ActiveOutline (0.95f, 0.83f, 0.34f, 1.f); // amber accent
 	static const FLinearColor AmmoFillFull  (0.4f,  0.95f, 0.48f, 1.f);
 	static const FLinearColor AmmoFillWarn  (1.0f,  0.85f, 0.30f, 1.f);
@@ -144,6 +145,18 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		else if (OrientStr.Equals(TEXT("Vertical"), ESearchCase::IgnoreCase)) bVertical = true;
 	}
 
+	// Color overrides (Extras keys). Defaults match the constants in NCPlusWB.
+	auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
+	{
+		return Elem ? Elem->GetExtraColor(Key, Default) : Default;
+	};
+	const FLinearColor SlotBgInactiveCol = Col(TEXT("color_slot_bg_inactive"), SlotBgInactive);
+	const FLinearColor SlotBgActiveCol   = Col(TEXT("color_slot_bg_active"),   SlotBgActive);
+	const FLinearColor ActiveOutlineCol  = Col(TEXT("color_outline"),          ActiveOutline);
+	const FLinearColor AmmoFillFullCol   = Col(TEXT("color_ammo_full"),        AmmoFillFull);
+	const FLinearColor AmmoFillWarnCol   = Col(TEXT("color_ammo_warn"),        AmmoFillWarn);
+	const FLinearColor AmmoFillDangerCol = Col(TEXT("color_ammo_danger"),      AmmoFillDanger);
+
 	// Active weapon — pending swap takes priority over current.
 	AUTWeapon* CurrentWeapon = Char->GetPendingWeapon();
 	if (!CurrentWeapon) CurrentWeapon = Char->GetWeapon();
@@ -182,17 +195,17 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		const bool  bActive = (W == CurrentWeapon);
 
 		// Background cell
-		const FLinearColor Bg = bActive ? SlotBgActive : SlotBgInactive;
+		const FLinearColor Bg = bActive ? SlotBgActiveCol : SlotBgInactiveCol;
 		DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, SlotH,
 			0.f, 0.f, 1.f, 1.f, 1.0f, Bg);
 
 		// Active outline (1px frame)
 		if (bActive)
 		{
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, 1.5f,            0,0,1,1, 1.0f, ActiveOutline);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY + SlotH - 1.5f, SlotW, 1.5f, 0,0,1,1, 1.0f, ActiveOutline);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, 1.5f, SlotH,            0,0,1,1, 1.0f, ActiveOutline);
-			DrawTexture(Canvas->DefaultTexture, SlotX + SlotW - 1.5f, SlotY, 1.5f, SlotH, 0,0,1,1, 1.0f, ActiveOutline);
+			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, 1.5f,            0,0,1,1, 1.0f, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY + SlotH - 1.5f, SlotW, 1.5f, 0,0,1,1, 1.0f, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, 1.5f, SlotH,            0,0,1,1, 1.0f, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, SlotX + SlotW - 1.5f, SlotY, 1.5f, SlotH, 0,0,1,1, 1.0f, ActiveOutlineCol);
 		}
 
 		// Weapon icon — UVs from WeaponBarSelectedUVs are pixel coords against
@@ -263,9 +276,9 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 
 			// Fill
 			const float AmmoFrac = FMath::Clamp(float(W->Ammo) / float(W->MaxAmmo), 0.f, 1.f);
-			FLinearColor FillCol = AmmoFillFull;
-			if (W->Ammo <= W->AmmoDangerAmount)       FillCol = AmmoFillDanger;
-			else if (W->Ammo <= W->AmmoWarningAmount) FillCol = AmmoFillWarn;
+			FLinearColor FillCol = AmmoFillFullCol;
+			if (W->Ammo <= W->AmmoDangerAmount)       FillCol = AmmoFillDangerCol;
+			else if (W->Ammo <= W->AmmoWarningAmount) FillCol = AmmoFillWarnCol;
 			DrawTexture(Canvas->DefaultTexture, AmmoBarX, AmmoBarY, AmmoBarW * AmmoFrac, AmmoBarH,
 				0,0,1,1, 1.0f, FillCol);
 

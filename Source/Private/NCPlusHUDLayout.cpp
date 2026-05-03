@@ -107,6 +107,67 @@ FString FNCPlusHUDLayout::AnchorToString(ENCPlusHUDAnchor Anchor)
 }
 
 // =============================================================================
+// Color hex parser
+// =============================================================================
+
+namespace NCPlusHUDColor
+{
+	static int32 HexCharVal(TCHAR C)
+	{
+		if (C >= TEXT('0') && C <= TEXT('9')) return C - TEXT('0');
+		if (C >= TEXT('a') && C <= TEXT('f')) return 10 + (C - TEXT('a'));
+		if (C >= TEXT('A') && C <= TEXT('F')) return 10 + (C - TEXT('A'));
+		return -1;
+	}
+
+	bool TryParse(const FString& Hex, FLinearColor& Out)
+	{
+		FString S = Hex;
+		S.Trim();
+		if (S.StartsWith(TEXT("#"))) S = S.RightChop(1);
+		if (S.Len() != 6 && S.Len() != 8) return false;
+
+		int32 V[8];
+		for (int32 i = 0; i < S.Len(); i++)
+		{
+			V[i] = HexCharVal(S[i]);
+			if (V[i] < 0) return false;
+		}
+
+		const float R = (V[0] * 16 + V[1]) / 255.f;
+		const float G = (V[2] * 16 + V[3]) / 255.f;
+		const float B = (V[4] * 16 + V[5]) / 255.f;
+		const float A = (S.Len() == 8) ? (V[6] * 16 + V[7]) / 255.f : 1.f;
+
+		// Treat hex as sRGB-encoded (matches what users expect from web color pickers).
+		Out = FLinearColor(FColor(
+			FMath::RoundToInt(R * 255.f),
+			FMath::RoundToInt(G * 255.f),
+			FMath::RoundToInt(B * 255.f),
+			FMath::RoundToInt(A * 255.f)));
+		return true;
+	}
+
+	FString ToHexString(const FLinearColor& Color, bool bIncludeAlpha)
+	{
+		const FColor C = Color.ToFColor(true);
+		if (bIncludeAlpha)
+		{
+			return FString::Printf(TEXT("#%02X%02X%02X%02X"), C.R, C.G, C.B, C.A);
+		}
+		return FString::Printf(TEXT("#%02X%02X%02X"), C.R, C.G, C.B);
+	}
+}
+
+FLinearColor FNCPlusHUDElement::GetExtraColor(FName Key, const FLinearColor& Fallback) const
+{
+	const FString* V = Extras.Find(Key);
+	if (!V) return Fallback;
+	FLinearColor Out;
+	return NCPlusHUDColor::TryParse(*V, Out) ? Out : Fallback;
+}
+
+// =============================================================================
 // Find + WeaponBar side resolution
 // =============================================================================
 
@@ -147,9 +208,9 @@ FName FNCPlusHUDLayout::GetWeaponSide(UClass* WeaponClass) const
 // JSON I/O
 // =============================================================================
 
-FString FNCPlusHUDLayout::GetDefaultElimPlusPath()
+FString FNCPlusHUDLayout::GetDefaultLayoutPath()
 {
-	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
+	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
 }
 
 FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
@@ -394,7 +455,18 @@ FNCPlusHUDLayout& FNCPlusHUDLayout::GetLive()
 
 void FNCPlusHUDLayout::ReloadLive()
 {
-	GetLive() = LoadFromFile(GetDefaultElimPlusPath());
+	const FString NewPath = GetDefaultLayoutPath();
+	if (FPaths::FileExists(NewPath))
+	{
+		GetLive() = LoadFromFile(NewPath);
+	}
+	else
+	{
+		// Legacy fallback: use the pre-3.4 per-mode file if the unified one is absent.
+		// On next Save, we'll write to NewPath, effectively migrating.
+		const FString LegacyPath = FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
+		GetLive() = LoadFromFile(LegacyPath);
+	}
 	GLiveLayoutDirty = true;
 }
 

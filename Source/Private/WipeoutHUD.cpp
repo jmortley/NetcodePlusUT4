@@ -8,6 +8,7 @@
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
+#include "NCPlusHUDLayout.h"
 
 AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -44,14 +45,17 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	// RequiredHudWidgetClasses would be empty. Load all standard team-game
 	// widgets via HudWidgetClasses (built after RequiredHudWidgetClasses in BeginPlay).
 	// Widget list mirrors UTHUD_Showdown / UTFlagRunHUD but with our scoreboard.
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"));
+	// Custom split WeaponBar replaces stock bpHW_WeaponBar (see ElimPlusHUD.cpp).
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"));
+	// Removed bpHW_Paperdoll — fallback +HP/Armor mode would render on top of our widget.
 	// Removed bpHW_TeamGameClock — we draw our own team score bar in DrawHUD
 	// that respects dynamic team colors from TeamSkins.
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"));
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_QuickStats.bpHW_QuickStats_C"));
+	// Modernized HP/Armor display — replaces stock bpHW_QuickStats (5 styles).
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"));
@@ -59,6 +63,17 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"));
 	// Our custom portrait-row scoreboard
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
+}
+
+void AWipeoutHUD::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// HUD layout system — capture stock defaults before any override pass,
+	// then load + apply the live layout. See ElimPlusHUD.cpp for full notes.
+	CaptureWidgetDefaults(this);
+	FNCPlusHUDLayout::ReloadLive();
+	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 }
 
 EInputMode::Type AWipeoutHUD::GetInputMode_Implementation() const
@@ -153,6 +168,10 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 
 void AWipeoutHUD::DrawHUD()
 {
+	// Re-apply the live layout each frame so Slate editor edits show up immediately.
+	// Cheap when clean (dirty-flag gated).
+	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+
 	Super::DrawHUD();
 
 	// Guard: Canvas or fonts may be null during Slate UI overlays (e.g. weapon skins menu)

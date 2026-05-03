@@ -91,14 +91,21 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 	LastHealth = Health;
 	LastArmor  = Armor;
 
-	// --- Color palette (shared across styles) ---
-	const FLinearColor White       = FLinearColor::White;
-	const FLinearColor LowHpRed    (1.f, 0.32f, 0.28f, 1.f);
-	const FLinearColor DamageFlash (1.f, 0.45f, 0.30f, 1.f);
+	// --- Color palette (shared across styles).
+	// Per-element overrides via Extras keys: color_health, color_armor,
+	// color_low_hp, color_damage_flash. Defaults match the original look.
+	const FLinearColor White = FLinearColor::White;
+	const FNCPlusHUDElement* ColorElem = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
+	auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
+	{
+		return ColorElem ? ColorElem->GetExtraColor(Key, Default) : Default;
+	};
+	const FLinearColor LowHpRed    = Col(TEXT("color_low_hp"),       FLinearColor(1.f, 0.32f, 0.28f, 1.f));
+	const FLinearColor DamageFlash = Col(TEXT("color_damage_flash"), FLinearColor(1.f, 0.45f, 0.30f, 1.f));
 
 	FStatColors C;
-	C.HealthAccent = FLinearColor(0.37f, 0.96f, 0.48f, 1.f); // bright green
-	C.ArmorAccent  = FLinearColor(0.95f, 0.83f, 0.34f, 1.f); // amber
+	C.HealthAccent = Col(TEXT("color_health"), FLinearColor(0.37f, 0.96f, 0.48f, 1.f));
+	C.ArmorAccent  = Col(TEXT("color_armor"),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f));
 
 	C.HealthNumColor = White;
 	if (Health <= LowHealthCutoff)

@@ -53,13 +53,26 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Row.Alias         = Alias;
 		Row.DisplayName   = NCPlusHUDAliases::GetDisplayName(Alias);
 		Row.AnchorChoices = NCHUDEdit::BuildAnchorChoices();
-		// hp_armor is the only element with a visual-style picker right now.
-		// Others can opt in by adding their own choice list when we add more
-		// styled widgets (e.g. custom WeaponBar).
+
+		// hp_armor: style picker + 4 color overrides.
 		if (Alias == TEXT("hp_armor"))
 		{
 			Row.bHasStylePicker = true;
 			Row.StyleChoices    = NCPlusHPArmorStyle::GetChoices();
+			Row.Colors.Add({ TEXT("color_health"),       FText::FromString(TEXT("Health")),     FLinearColor(0.37f, 0.96f, 0.48f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_armor"),        FText::FromString(TEXT("Armor")),      FLinearColor(0.95f, 0.83f, 0.34f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_low_hp"),       FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_damage_flash"), FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f), nullptr });
+		}
+		// WeaponBar (both sides): bg/outline/ammo color overrides.
+		else if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
+		{
+			Row.Colors.Add({ TEXT("color_slot_bg_inactive"), FText::FromString(TEXT("Slot BG")),     FLinearColor(0.04f, 0.04f, 0.04f, 0.30f), nullptr });
+			Row.Colors.Add({ TEXT("color_slot_bg_active"),   FText::FromString(TEXT("Slot Active")), FLinearColor(0.10f, 0.10f, 0.10f, 0.55f), nullptr });
+			Row.Colors.Add({ TEXT("color_outline"),          FText::FromString(TEXT("Outline")),     FLinearColor(0.95f, 0.83f, 0.34f, 1.f),   nullptr });
+			Row.Colors.Add({ TEXT("color_ammo_full"),        FText::FromString(TEXT("Ammo Full")),   FLinearColor(0.4f,  0.95f, 0.48f, 1.f),   nullptr });
+			Row.Colors.Add({ TEXT("color_ammo_warn"),        FText::FromString(TEXT("Ammo Warn")),   FLinearColor(1.0f,  0.85f, 0.30f, 1.f),   nullptr });
+			Row.Colors.Add({ TEXT("color_ammo_danger"),      FText::FromString(TEXT("Ammo Low")),    FLinearColor(1.0f,  0.32f, 0.28f, 1.f),   nullptr });
 		}
 		Rows.Add(Row);
 	}
@@ -69,10 +82,18 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 
 	for (FNCHUDEditorRow& Row : Rows)
 	{
+		TSharedPtr<SVerticalBox> RowBox;
+		SAssignNew(RowBox, SVerticalBox)
+		+ SVerticalBox::Slot().AutoHeight() [ BuildRow(Row) ];
+		if (Row.Colors.Num() > 0)
+		{
+			RowBox->AddSlot().AutoHeight().Padding(8.f, 1.f, 0.f, 0.f) [ BuildColorRow(Row) ];
+		}
+
 		RowList->AddSlot()
 			.AutoHeight()
 			.Padding(2.f)
-			[ BuildRow(Row) ];
+			[ RowBox.ToSharedRef() ];
 	}
 
 	GatherWeaponsForPicker();
@@ -429,6 +450,79 @@ FReply SNCPlusHUDEditor::OnCloseClicked()
 {
 	ClosePanel();
 	return FReply::Handled();
+}
+
+// =============================================================================
+// Color overrides sub-row
+// =============================================================================
+
+TSharedRef<SWidget> SNCPlusHUDEditor::BuildColorRow(FNCHUDEditorRow& Row)
+{
+	const FName Alias = Row.Alias;
+	TSharedPtr<SHorizontalBox> Box;
+	SAssignNew(Box, SHorizontalBox)
+	+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+	[
+		SNew(SBox).WidthOverride(60.f)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Colors:")))
+			.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f, 1.f))
+		]
+	];
+
+	for (FNCHUDEditorColor& Color : Row.Colors)
+	{
+		const FName Key = Color.Key;
+		// Initial display: existing override if present, otherwise the default.
+		FString InitialHex;
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		if (E)
+		{
+			const FString Existing = E->GetExtra(Key);
+			if (!Existing.IsEmpty()) InitialHex = Existing;
+		}
+		if (InitialHex.IsEmpty())
+		{
+			InitialHex = NCPlusHUDColor::ToHexString(Color.Default, true);
+		}
+
+		Box->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,4,0)
+		[
+			SNew(STextBlock)
+			.Text(Color.Label)
+			.ColorAndOpacity(FLinearColor(0.75f, 0.75f, 0.75f, 1.f))
+		];
+
+		Box->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[
+			SNew(SBox).WidthOverride(80.f)
+			[
+				SAssignNew(Color.Input, SEditableTextBox)
+				.Text(FText::FromString(InitialHex))
+				.OnTextCommitted(this, &SNCPlusHUDEditor::OnColorTextCommitted, Alias, Key)
+			]
+		];
+	}
+
+	return Box.ToSharedRef();
+}
+
+void SNCPlusHUDEditor::OnColorTextCommitted(const FText& NewText, ETextCommit::Type, FName Alias, FName ColorKey)
+{
+	const FString Hex = NewText.ToString();
+
+	// Validate before storing — if it doesn't parse, don't write a bogus value.
+	FLinearColor Parsed;
+	if (!NCPlusHUDColor::TryParse(Hex, Parsed))
+	{
+		SetStatus(FString::Printf(TEXT("Invalid color '%s' (use #RRGGBB or #RRGGBBAA)."), *Hex));
+		return;
+	}
+
+	MutateElement(Alias, [&](FNCPlusHUDElement& E) {
+		E.Extras.Add(ColorKey, Hex);
+	});
 }
 
 // =============================================================================
