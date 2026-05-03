@@ -167,6 +167,13 @@ FLinearColor FNCPlusHUDElement::GetExtraColor(FName Key, const FLinearColor& Fal
 	return NCPlusHUDColor::TryParse(*V, Out) ? Out : Fallback;
 }
 
+float FNCPlusHUDElement::GetExtraFloat(FName Key, float Fallback) const
+{
+	const FString* V = Extras.Find(Key);
+	if (!V || V->IsEmpty()) return Fallback;
+	return FCString::Atof(**V);
+}
+
 // =============================================================================
 // Find + WeaponBar side resolution
 // =============================================================================

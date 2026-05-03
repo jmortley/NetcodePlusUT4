@@ -93,7 +93,10 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 
 	// --- Color palette (shared across styles).
 	// Per-element overrides via Extras keys: color_health, color_armor,
-	// color_low_hp, color_damage_flash. Defaults match the original look.
+	// color_low_hp, color_damage_flash, plus opacity multiplier.
+	// NOTE: Colors carry their natural alpha — we DON'T pre-multiply Opacity in
+	// because UUTHUDWidget::DrawTexture overwrites color.A. Each draw site must
+	// pass `color.A * C.Opacity` through the explicit DrawOpacity argument.
 	const FLinearColor White = FLinearColor::White;
 	const FNCPlusHUDElement* ColorElem = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
 	auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
@@ -104,14 +107,20 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 	const FLinearColor DamageFlash = Col(TEXT("color_damage_flash"), FLinearColor(1.f, 0.45f, 0.30f, 1.f));
 
 	FStatColors C;
+	C.Opacity      = ColorElem ? FMath::Clamp(ColorElem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
 	C.HealthAccent = Col(TEXT("color_health"), FLinearColor(0.37f, 0.96f, 0.48f, 1.f));
 	C.ArmorAccent  = Col(TEXT("color_armor"),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f));
 
-	C.HealthNumColor = White;
+	// Base number colors are user-overridable; low-HP red + damage flash still
+	// lerp over the top so behavior remains intact when colors are customized.
+	const FLinearColor HealthNumBase = Col(TEXT("color_health_number"), White);
+	const FLinearColor ArmorNumBase  = Col(TEXT("color_armor_number"),  White);
+
+	C.HealthNumColor = HealthNumBase;
 	if (Health <= LowHealthCutoff)
 	{
 		const float t = FMath::Clamp(float(Health) / float(LowHealthCutoff), 0.f, 1.f);
-		C.HealthNumColor = FMath::Lerp(LowHpRed, White, t);
+		C.HealthNumColor = FMath::Lerp(LowHpRed, HealthNumBase, t);
 	}
 	if (Now < HealthDamageFlashEnd)
 	{
@@ -119,7 +128,7 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 		C.HealthNumColor = FMath::Lerp(C.HealthNumColor, DamageFlash, t);
 	}
 
-	C.ArmorNumColor = White;
+	C.ArmorNumColor = ArmorNumBase;
 	if (Now < ArmorDamageFlashEnd)
 	{
 		const float t = (ArmorDamageFlashEnd - Now) / FlashDuration;
@@ -169,7 +178,7 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 		const FVector2D NumSize = DrawText(FText::AsNumber(Health),
 			TextX, TextY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumberScale, 1.0f, C.HealthNumColor,
+			NumberScale, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
 			ETextHorzPos::Right, ETextVertPos::Top);
 
 		const float NumberW       = NumSize.X * NumberScale;
@@ -182,16 +191,16 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 		if (Canvas && Canvas->DefaultTexture)
 		{
 			FLinearColor LineColor = C.HealthAccent;
-			LineColor.A = 0.85f + C.HealthPulse * 0.15f;
+			const float LineAlpha = (0.85f + C.HealthPulse * 0.15f) * C.Opacity;
 			const float LineH = 1.5f + C.HealthPulse * 1.5f;
 			DrawTexture(Canvas->DefaultTexture, TextX - LineW, AccentLineY, LineW, LineH,
-				0.f, 0.f, 1.f, 1.f, 1.0f, LineColor);
+				0.f, 0.f, 1.f, 1.f, LineAlpha, LineColor);
 		}
 
 		DrawText(FText::FromString(TEXT("HEALTH")),
 			LabelCenterX, LabelY, LabelFont,
 			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			LabelScale, 1.0f, C.HealthAccent,
+			LabelScale, C.HealthAccent.A * C.Opacity, C.HealthAccent,
 			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 
@@ -203,7 +212,7 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 		const FVector2D NumSize = DrawText(FText::AsNumber(Armor),
 			TextX, TextY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumberScale, 1.0f, C.ArmorNumColor,
+			NumberScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
 			ETextHorzPos::Left, ETextVertPos::Top);
 
 		const float NumberW       = NumSize.X * NumberScale;
@@ -216,16 +225,16 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 		if (Canvas && Canvas->DefaultTexture)
 		{
 			FLinearColor LineColor = C.ArmorAccent;
-			LineColor.A = 0.85f + C.ArmorPulse * 0.15f;
+			const float LineAlpha = (0.85f + C.ArmorPulse * 0.15f) * C.Opacity;
 			const float LineH = 1.5f + C.ArmorPulse * 1.5f;
 			DrawTexture(Canvas->DefaultTexture, TextX, AccentLineY, LineW, LineH,
-				0.f, 0.f, 1.f, 1.f, 1.0f, LineColor);
+				0.f, 0.f, 1.f, 1.f, LineAlpha, LineColor);
 		}
 
 		DrawText(FText::FromString(TEXT("ARMOR")),
 			LabelCenterX, LabelY, LabelFont,
 			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			LabelScale, 1.0f, C.ArmorAccent,
+			LabelScale, C.ArmorAccent.A * C.Opacity, C.ArmorAccent,
 			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 
@@ -234,7 +243,7 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 	{
 		const FLinearColor DividerColor(0.7f, 0.55f, 0.30f, 0.45f);
 		DrawTexture(Canvas->DefaultTexture, CenterX - 0.5f, DividerY0,
-			1.f, DividerY1 - DividerY0, 0.f, 0.f, 1.f, 1.f, 1.0f, DividerColor);
+			1.f, DividerY1 - DividerY0, 0.f, 0.f, 1.f, 1.f, DividerColor.A * C.Opacity, DividerColor);
 	}
 }
 
@@ -268,12 +277,12 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 		// Number on the left, visually centered on the segment row's midpoint.
 		DrawText(FText::AsNumber(Value), NumWidth, Y + SegH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumScale, 1.0f, FillColor,
+			NumScale, FillColor.A * C.Opacity, FillColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
 
-		FLinearColor PulsedFill = FillColor;
-		PulsedFill.A = 0.85f + Pulse * 0.15f;
-		const FLinearColor EmptyOutline(0.18f, 0.20f, 0.18f, 0.7f);
+		const float FillAlpha   = (0.85f + Pulse * 0.15f) * C.Opacity;
+		const FLinearColor EmptyOutline(0.18f, 0.20f, 0.18f, 1.f);
+		const float EmptyAlpha  = 0.7f * C.Opacity;
 
 		const int32 FullCount   = FMath::Clamp(Value / SegmentSize, 0, SegCount);
 		const float ActiveFrac  = FMath::Clamp(float(Value % SegmentSize) / float(SegmentSize), 0.f, 1.f);
@@ -281,14 +290,14 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 		for (int32 i = 0; i < SegCount; i++)
 		{
 			const float X = StripStartX + i * (SegW + SegGap);
-			DrawTexture(Canvas->DefaultTexture, X, Y, SegW, SegH, 0, 0, 1, 1, 1.0f, EmptyOutline);
+			DrawTexture(Canvas->DefaultTexture, X, Y, SegW, SegH, 0, 0, 1, 1, EmptyAlpha, EmptyOutline);
 			if (i < FullCount)
 			{
-				DrawTexture(Canvas->DefaultTexture, X, Y, SegW, SegH, 0, 0, 1, 1, 1.0f, PulsedFill);
+				DrawTexture(Canvas->DefaultTexture, X, Y, SegW, SegH, 0, 0, 1, 1, FillAlpha, FillColor);
 			}
 			else if (i == FullCount && ActiveFrac > 0.f)
 			{
-				DrawTexture(Canvas->DefaultTexture, X, Y, SegW * ActiveFrac, SegH, 0, 0, 1, 1, 1.0f, PulsedFill);
+				DrawTexture(Canvas->DefaultTexture, X, Y, SegW * ActiveFrac, SegH, 0, 0, 1, 1, FillAlpha, FillColor);
 			}
 		}
 	};
@@ -372,9 +381,11 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 	const float OuterR_HP = 46.f, OuterR_AR = 32.f;
 	const float Thick = 6.f;
 
-	// Track ring (dim background — full circle)
-	const FLinearColor TrackHP(0.10f, 0.16f, 0.12f, 0.85f);
-	const FLinearColor TrackAR(0.16f, 0.14f, 0.10f, 0.85f);
+	// Track ring (dim background — full circle). DrawArc uses K2_DrawTriangle
+	// which writes per-vertex color directly (no DrawOpacity override), so we
+	// can pre-multiply Opacity into the color.A and it WILL render.
+	FLinearColor TrackHP(0.10f, 0.16f, 0.12f, 0.85f * C.Opacity);
+	FLinearColor TrackAR(0.16f, 0.14f, 0.10f, 0.85f * C.Opacity);
 	DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP, 0.f, 2.f * PI, 48, TrackHP);
 	if (bDrawArmor)
 	{
@@ -384,7 +395,7 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 	// HP arc — full sweep maps to MaxHealth (200).
 	const float HPFrac = FMath::Clamp(float(Health) / float(MaxHealth), 0.f, 1.f);
 	FLinearColor HPColor = C.HealthAccent;
-	HPColor.A = 0.9f + C.HealthPulse * 0.1f;
+	HPColor.A = (0.9f + C.HealthPulse * 0.1f) * C.Opacity;
 	DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP,
 	        0.f, HPFrac * 2.f * PI, FMath::Max(8, FMath::FloorToInt(HPFrac * 48.f)), HPColor);
 
@@ -393,21 +404,21 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 	{
 		const float ARFrac = FMath::Clamp(float(Armor) / float(MaxArmor), 0.f, 1.f);
 		FLinearColor ARColor = C.ArmorAccent;
-		ARColor.A = 0.9f + C.ArmorPulse * 0.1f;
+		ARColor.A = (0.9f + C.ArmorPulse * 0.1f) * C.Opacity;
 		DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR,
 		        0.f, ARFrac * 2.f * PI, FMath::Max(6, FMath::FloorToInt(ARFrac * 40.f)), ARColor);
 	}
 
-	// Numbers stacked in the center of the rings.
+	// Numbers stacked in the center of the rings — DrawText needs DrawOpacity arg.
 	DrawText(FText::AsNumber(Health), CX, CY - 14.f, NumberFont,
 		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-		0.95f, 1.0f, C.HealthNumColor,
+		0.95f, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
 		ETextHorzPos::Center, ETextVertPos::Center);
 	if (bDrawArmor)
 	{
 		DrawText(FText::AsNumber(Armor), CX, CY + 14.f, NumberFont,
 			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			0.6f, 1.0f, C.ArmorNumColor,
+			0.6f, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
 			ETextHorzPos::Center, ETextVertPos::Center);
 	}
 }
@@ -479,12 +490,13 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 		// Number on the left, visually centered on the chevron row.
 		DrawText(FText::AsNumber(Value), NumWidth, Y + ChevH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumScale, 1.0f, FillColor,
+			NumScale, FillColor.A * C.Opacity, FillColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
 
-		const FLinearColor EmptyOutline(0.18f, 0.20f, 0.18f, 0.55f);
+		// DrawChevron uses K2_DrawTriangle which preserves color.A → bake Opacity in.
+		FLinearColor EmptyOutline(0.18f, 0.20f, 0.18f, 0.55f * C.Opacity);
 		FLinearColor PulsedFill = FillColor;
-		PulsedFill.A = 0.85f + Pulse * 0.15f;
+		PulsedFill.A = (0.85f + Pulse * 0.15f) * C.Opacity;
 
 		const int32 FullCount   = FMath::Clamp(Value / SegmentSize, 0, SegCount);
 		const float ActiveFrac  = FMath::Clamp(float(Value % SegmentSize) / float(SegmentSize), 0.f, 1.f);
@@ -538,24 +550,24 @@ void UNCPlusHUDWidget_QuickStats::DrawVerticalPills(int32 Health, int32 Armor, b
 	auto DrawPill = [&](float X, float Y, int32 Value, int32 MaxValue,
 	                    const FLinearColor& FillColor, const FLinearColor& NumColor, float Pulse, const FText& Label)
 	{
-		// Track
-		const FLinearColor Track(0.10f, 0.12f, 0.10f, 0.92f);
-		DrawTexture(Canvas->DefaultTexture, X, Y, PillW, PillH, 0, 0, 1, 1, 1.0f, Track);
+		// Track — DrawTexture overrides color.A → pass alpha through DrawOpacity.
+		const FLinearColor Track(0.10f, 0.12f, 0.10f, 1.f);
+		const float TrackAlpha = 0.92f * C.Opacity;
+		DrawTexture(Canvas->DefaultTexture, X, Y, PillW, PillH, 0, 0, 1, 1, TrackAlpha, Track);
 
 		// Fill scaled to MaxValue (200 for HP, 150 for armor).
 		const float FillFrac = FMath::Clamp(float(Value) / float(MaxValue), 0.f, 1.f);
 		const float FillH    = PillH * FillFrac;
-		FLinearColor PulsedFill = FillColor;
-		PulsedFill.A = 0.9f + Pulse * 0.1f;
+		const float FillAlpha = (0.9f + Pulse * 0.1f) * C.Opacity;
 		DrawTexture(Canvas->DefaultTexture,
 			X + 2.f, Y + (PillH - FillH) + 2.f,
 			PillW - 4.f, FMath::Max(0.f, FillH - 4.f),
-			0, 0, 1, 1, 1.0f, PulsedFill);
+			0, 0, 1, 1, FillAlpha, FillColor);
 
 		// Number BELOW the pill so it doesn't compete with the team-name strip above.
 		DrawText(FText::AsNumber(Value), X + PillW * 0.5f, Y + PillH + 4.f, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			0.85f, 1.0f, NumColor,
+			0.85f, NumColor.A * C.Opacity, NumColor,
 			ETextHorzPos::Center, ETextVertPos::Top);
 	};
 

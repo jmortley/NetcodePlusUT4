@@ -48,6 +48,10 @@ struct FNCPlusHUDElement
 	/** Read an extras key as a color (parses #RRGGBB or #RRGGBBAA).
 	 *  Returns Fallback if the key is missing or the string is malformed. */
 	FLinearColor GetExtraColor(FName Key, const FLinearColor& Fallback) const;
+
+	/** Read an extras key as a float (e.g. opacity multiplier).
+	 *  Returns Fallback if the key is missing or unparsable. */
+	float GetExtraFloat(FName Key, float Fallback) const;
 };
 
 /** Hex ↔ FLinearColor utilities for the HUD layout's per-element color overrides. */

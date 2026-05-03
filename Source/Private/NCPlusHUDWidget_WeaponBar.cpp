@@ -146,9 +146,21 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 	}
 
 	// Color overrides (Extras keys). Defaults match the constants in NCPlusWB.
+	// Per-element opacity multiplier scales every color's alpha — easier than
+	// editing alpha on each color individually.
+	const float Opacity = Elem ? FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
+
+	// IMPORTANT: UUTHUDWidget::DrawTexture overwrites the passed DrawColor.A
+	// with (Widget.Opacity * arg.DrawOpacity * HUDOpacity). Baking alpha into
+	// a color and passing it to DrawTexture does NOT fade — we have to pass
+	// the alpha through the explicit DrawOpacity argument at every draw site.
+	// We keep .A populated (Opacity * color_alpha) and read it back as the
+	// DrawOpacity argument when drawing each rect.
 	auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
 	{
-		return Elem ? Elem->GetExtraColor(Key, Default) : Default;
+		FLinearColor Out = Elem ? Elem->GetExtraColor(Key, Default) : Default;
+		Out.A *= Opacity;
+		return Out;
 	};
 	const FLinearColor SlotBgInactiveCol = Col(TEXT("color_slot_bg_inactive"), SlotBgInactive);
 	const FLinearColor SlotBgActiveCol   = Col(TEXT("color_slot_bg_active"),   SlotBgActive);
@@ -194,18 +206,19 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		const float SlotY = bVertical ? i * (SlotH + SlotGap) : 0.f;
 		const bool  bActive = (W == CurrentWeapon);
 
-		// Background cell
+		// Background cell — alpha goes through DrawOpacity (10th arg).
 		const FLinearColor Bg = bActive ? SlotBgActiveCol : SlotBgInactiveCol;
 		DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, SlotH,
-			0.f, 0.f, 1.f, 1.f, 1.0f, Bg);
+			0.f, 0.f, 1.f, 1.f, Bg.A, Bg);
 
 		// Active outline (1px frame)
 		if (bActive)
 		{
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, 1.5f,            0,0,1,1, 1.0f, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY + SlotH - 1.5f, SlotW, 1.5f, 0,0,1,1, 1.0f, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, 1.5f, SlotH,            0,0,1,1, 1.0f, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX + SlotW - 1.5f, SlotY, 1.5f, SlotH, 0,0,1,1, 1.0f, ActiveOutlineCol);
+			const float OL = ActiveOutlineCol.A;
+			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, 1.5f,            0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY + SlotH - 1.5f, SlotW, 1.5f, 0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, 1.5f, SlotH,            0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, SlotX + SlotW - 1.5f, SlotY, 1.5f, SlotH, 0,0,1,1, OL, ActiveOutlineCol);
 		}
 
 		// Weapon icon — UVs from WeaponBarSelectedUVs are pixel coords against
@@ -226,7 +239,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 			{
 				Alpha *= 0.45f;
 			}
-			IconCol.A = Alpha;
+			IconCol.A = Alpha * Opacity;
 
 			// Fit icon into slot (preserve aspect ratio, leave room for ammo bar).
 			const float MaxIconW = SlotW - SlotPad * 2.f;
@@ -251,7 +264,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 			const float IconY = SlotY + SlotPad;
 			DrawTexture(WeaponIconAtlas, IconX, IconY, IconW, IconH,
 				UV.U, UV.V, UV.UL, UV.VL,   // raw pixel coords
-				1.0f, IconCol);
+				IconCol.A, IconCol);
 		}
 
 		// Group number top-left
@@ -259,7 +272,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		{
 			DrawText(FText::AsNumber(W->Group), SlotX + GroupNumPad, SlotY + GroupNumPad,
 				GroupFont, FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.6f),
-				1.0f, bActive ? 1.0f : 0.7f, FLinearColor::White,
+				1.0f, (bActive ? 1.0f : 0.7f) * Opacity, FLinearColor::White,
 				ETextHorzPos::Left, ETextVertPos::Top);
 		}
 
@@ -272,7 +285,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 
 			// Track
 			DrawTexture(Canvas->DefaultTexture, AmmoBarX, AmmoBarY, AmmoBarW, AmmoBarH,
-				0,0,1,1, 1.0f, FLinearColor(0.05f, 0.05f, 0.05f, 0.8f));
+				0,0,1,1, 0.8f * Opacity, FLinearColor(0.05f, 0.05f, 0.05f, 1.f));
 
 			// Fill
 			const float AmmoFrac = FMath::Clamp(float(W->Ammo) / float(W->MaxAmmo), 0.f, 1.f);
@@ -280,14 +293,14 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 			if (W->Ammo <= W->AmmoDangerAmount)       FillCol = AmmoFillDangerCol;
 			else if (W->Ammo <= W->AmmoWarningAmount) FillCol = AmmoFillWarnCol;
 			DrawTexture(Canvas->DefaultTexture, AmmoBarX, AmmoBarY, AmmoBarW * AmmoFrac, AmmoBarH,
-				0,0,1,1, 1.0f, FillCol);
+				0,0,1,1, FillCol.A, FillCol);
 
 			// Ammo count text top-right
 			if (AmmoFont)
 			{
 				DrawText(FText::AsNumber(W->Ammo), SlotX + SlotW - GroupNumPad, SlotY + GroupNumPad,
 					AmmoFont, FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.6f),
-					0.85f, bActive ? 1.0f : 0.75f, FillCol,
+					0.85f, (bActive ? 1.0f : 0.75f) * Opacity, FillCol,
 					ETextHorzPos::Right, ETextVertPos::Top);
 			}
 		}

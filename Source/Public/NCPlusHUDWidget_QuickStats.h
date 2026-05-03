@@ -45,6 +45,10 @@ private:
 		FLinearColor ArmorAccent;
 		float HealthPulse;
 		float ArmorPulse;
+		// Per-element opacity multiplier (0..1). Each draw call must multiply its
+		// own alpha by this value and pass the result as DrawOpacity, because
+		// UUTHUDWidget::DrawTexture overwrites the color's .A with its own calc.
+		float Opacity;
 	};
 
 	void DrawMinimalTypography(int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C);

@@ -95,6 +95,11 @@ private:
 	// Style combo (hp_armor only)
 	void OnStyleSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias);
 
+	// Opacity (per-element multiplier 0..1)
+	TOptional<float> GetOpacity(FName Alias) const;
+	void OnOpacityChanged(float NewVal, FName Alias);
+	void OnOpacityCommitted(float NewVal, ETextCommit::Type, FName Alias);
+
 	// Color overrides
 	TSharedRef<class SWidget> BuildColorRow(FNCHUDEditorRow& Row);
 	void OnColorTextCommitted(const FText& NewText, ETextCommit::Type, FName Alias, FName ColorKey);

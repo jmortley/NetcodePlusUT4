@@ -54,15 +54,17 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Row.DisplayName   = NCPlusHUDAliases::GetDisplayName(Alias);
 		Row.AnchorChoices = NCHUDEdit::BuildAnchorChoices();
 
-		// hp_armor: style picker + 4 color overrides.
+		// hp_armor: style picker + color overrides.
 		if (Alias == TEXT("hp_armor"))
 		{
 			Row.bHasStylePicker = true;
 			Row.StyleChoices    = NCPlusHPArmorStyle::GetChoices();
-			Row.Colors.Add({ TEXT("color_health"),       FText::FromString(TEXT("Health")),     FLinearColor(0.37f, 0.96f, 0.48f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_armor"),        FText::FromString(TEXT("Armor")),      FLinearColor(0.95f, 0.83f, 0.34f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_low_hp"),       FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_damage_flash"), FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_health_number"), FText::FromString(TEXT("HP #")),       FLinearColor::White,                    nullptr });
+			Row.Colors.Add({ TEXT("color_armor_number"),  FText::FromString(TEXT("AR #")),       FLinearColor::White,                    nullptr });
+			Row.Colors.Add({ TEXT("color_health"),        FText::FromString(TEXT("HP Accent")),  FLinearColor(0.37f, 0.96f, 0.48f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_armor"),         FText::FromString(TEXT("AR Accent")),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_low_hp"),        FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_damage_flash"),  FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f), nullptr });
 		}
 		// WeaponBar (both sides): bg/outline/ammo color overrides.
 		else if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
@@ -106,7 +108,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		.VAlign(VAlign_Center)
 		[
 			SNew(SBox)
-			.WidthOverride(740.f)
+			.WidthOverride(940.f)
 			[
 				SNew(SBorder)
 				.BorderImage(&BackgroundBrush)
@@ -240,17 +242,39 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Y "))) ]
 			]
 		]
-		// Hidden checkbox
+		// Opacity (per-element multiplier 0..1)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[
-			SNew(SCheckBox)
-			.IsChecked(this, &SNCPlusHUDEditor::GetHiddenState, Alias)
-			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnHiddenChanged, Alias)
-			.Content()
+			SNew(SBox).WidthOverride(NumericInputWidth)
 			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Hide")))
-				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				SNew(SNumericEntryBox<float>)
+				.Value(this, &SNCPlusHUDEditor::GetOpacity, Alias)
+				.OnValueChanged(this, &SNCPlusHUDEditor::OnOpacityChanged, Alias)
+				.OnValueCommitted(this, &SNCPlusHUDEditor::OnOpacityCommitted, Alias)
+				.AllowSpin(true)
+				.MinSliderValue(0.f)
+				.MaxSliderValue(1.f)
+				.MinValue(0.f)
+				.MaxValue(1.f)
+				.Delta(0.05f)
+				.LabelPadding(FMargin(0))
+				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Op "))) ]
+			]
+		]
+		// Hidden checkbox — explicit width so the label never truncates to "Hid".
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[
+			SNew(SBox).WidthOverride(60.f)
+			[
+				SNew(SCheckBox)
+				.IsChecked(this, &SNCPlusHUDEditor::GetHiddenState, Alias)
+				.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnHiddenChanged, Alias)
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Hide")))
+					.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				]
 			]
 		]
 		// Per-row reset
@@ -353,6 +377,23 @@ void SNCPlusHUDEditor::OnHiddenChanged(ECheckBoxState NewState, FName Alias)
 {
 	const bool bHide = (NewState == ECheckBoxState::Checked);
 	MutateElement(Alias, [bHide](FNCPlusHUDElement& E){ E.bHidden = bHide; });
+}
+
+TOptional<float> SNCPlusHUDEditor::GetOpacity(FName Alias) const
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	return E ? E->GetExtraFloat(TEXT("opacity"), 1.f) : 1.f;
+}
+
+void SNCPlusHUDEditor::OnOpacityChanged(float NewVal, FName Alias)
+{
+	const FString S = FString::Printf(TEXT("%.3f"), NewVal);
+	MutateElement(Alias, [&S](FNCPlusHUDElement& E){ E.Extras.Add(TEXT("opacity"), S); });
+}
+
+void SNCPlusHUDEditor::OnOpacityCommitted(float NewVal, ETextCommit::Type, FName Alias)
+{
+	OnOpacityChanged(NewVal, Alias);
 }
 
 void SNCPlusHUDEditor::OnAnchorSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias)
@@ -459,53 +500,68 @@ FReply SNCPlusHUDEditor::OnCloseClicked()
 TSharedRef<SWidget> SNCPlusHUDEditor::BuildColorRow(FNCHUDEditorRow& Row)
 {
 	const FName Alias = Row.Alias;
-	TSharedPtr<SHorizontalBox> Box;
-	SAssignNew(Box, SHorizontalBox)
-	+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
-	[
-		SNew(SBox).WidthOverride(60.f)
-		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Colors:")))
-			.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f, 1.f))
-		]
-	];
 
-	for (FNCHUDEditorColor& Color : Row.Colors)
+	// Wrap colors into chunks of 4 per line so the panel doesn't overflow at 720p.
+	const int32 ColorsPerLine = 4;
+	TSharedPtr<SVerticalBox> VBox;
+	SAssignNew(VBox, SVerticalBox);
+
+	for (int32 LineStart = 0; LineStart < Row.Colors.Num(); LineStart += ColorsPerLine)
 	{
-		const FName Key = Color.Key;
-		// Initial display: existing override if present, otherwise the default.
-		FString InitialHex;
-		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		if (E)
-		{
-			const FString Existing = E->GetExtra(Key);
-			if (!Existing.IsEmpty()) InitialHex = Existing;
-		}
-		if (InitialHex.IsEmpty())
-		{
-			InitialHex = NCPlusHUDColor::ToHexString(Color.Default, true);
-		}
+		TSharedPtr<SHorizontalBox> LineBox;
+		SAssignNew(LineBox, SHorizontalBox);
 
-		Box->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,4,0)
+		// Label only on the first line; spacer on subsequent lines for alignment.
+		LineBox->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[
-			SNew(STextBlock)
-			.Text(Color.Label)
-			.ColorAndOpacity(FLinearColor(0.75f, 0.75f, 0.75f, 1.f))
-		];
-
-		Box->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
-		[
-			SNew(SBox).WidthOverride(80.f)
+			SNew(SBox).WidthOverride(60.f)
 			[
-				SAssignNew(Color.Input, SEditableTextBox)
-				.Text(FText::FromString(InitialHex))
-				.OnTextCommitted(this, &SNCPlusHUDEditor::OnColorTextCommitted, Alias, Key)
+				SNew(STextBlock)
+				.Text(FText::FromString(LineStart == 0 ? TEXT("Colors:") : TEXT("")))
+				.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f, 1.f))
 			]
 		];
+
+		const int32 LineEnd = FMath::Min(LineStart + ColorsPerLine, Row.Colors.Num());
+		for (int32 i = LineStart; i < LineEnd; i++)
+		{
+			FNCHUDEditorColor& Color = Row.Colors[i];
+			const FName Key = Color.Key;
+
+			FString InitialHex;
+			const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+			if (E)
+			{
+				const FString Existing = E->GetExtra(Key);
+				if (!Existing.IsEmpty()) InitialHex = Existing;
+			}
+			if (InitialHex.IsEmpty())
+			{
+				InitialHex = NCPlusHUDColor::ToHexString(Color.Default, true);
+			}
+
+			LineBox->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,4,0)
+			[
+				SNew(STextBlock)
+				.Text(Color.Label)
+				.ColorAndOpacity(FLinearColor(0.75f, 0.75f, 0.75f, 1.f))
+			];
+
+			LineBox->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+			[
+				SNew(SBox).WidthOverride(80.f)
+				[
+					SAssignNew(Color.Input, SEditableTextBox)
+					.Text(FText::FromString(InitialHex))
+					.OnTextCommitted(this, &SNCPlusHUDEditor::OnColorTextCommitted, Alias, Key)
+				]
+			];
+		}
+
+		VBox->AddSlot().AutoHeight().Padding(0, 2, 0, 0) [ LineBox.ToSharedRef() ];
 	}
 
-	return Box.ToSharedRef();
+	return VBox.ToSharedRef();
 }
 
 void SNCPlusHUDEditor::OnColorTextCommitted(const FText& NewText, ETextCommit::Type, FName Alias, FName ColorKey)
