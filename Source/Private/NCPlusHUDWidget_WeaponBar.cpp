@@ -49,8 +49,10 @@ UNCPlusHUDWidget_WeaponBar::UNCPlusHUDWidget_WeaponBar(const FObjectInitializer&
 	DesignedResolution = 1080.f;
 
 	// Stock weapon-icon atlas — WeaponBarSelectedUVs are pixel coords into THIS,
-	// not HUDAtlas. Loaded once at CDO construction.
-	static ConstructorHelpers::FObjectFinder<UTexture2D> WeaponAtlasFinder(TEXT("/Game/RestrictedAssets/UI/WeaponAtlas01.WeaponAtlas01"));
+	// not HUDAtlas. Match stock UTHUDWidget_WeaponBar's exact path format
+	// (Texture2D'...' wrapper). Falls back to a lazy LoadObject in Draw if this
+	// CDO-time load returns null (FObjectFinder can be flaky in some load paths).
+	static ConstructorHelpers::FObjectFinder<UTexture2D> WeaponAtlasFinder(TEXT("Texture2D'/Game/RestrictedAssets/UI/WeaponAtlas01.WeaponAtlas01'"));
 	WeaponIconAtlas = WeaponAtlasFinder.Object;
 }
 
@@ -104,6 +106,29 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 	if (!ViewTarget || ViewTarget->IsPendingKill()) return;
 	AUTCharacter* Char = Cast<AUTCharacter>(ViewTarget);
 	if (!Char || Char->IsDead()) return;
+
+	// Lazy-load the weapon atlas if the CDO-time FObjectFinder failed
+	// (happens occasionally — see feedback_editorplus_crash memory note).
+	if (!WeaponIconAtlas)
+	{
+		WeaponIconAtlas = LoadObject<UTexture2D>(nullptr, TEXT("/Game/RestrictedAssets/UI/WeaponAtlas01.WeaponAtlas01"));
+	}
+
+	// One-shot diagnostic so we can see what state the atlas is in.
+	static bool bLoggedAtlas = false;
+	if (!bLoggedAtlas)
+	{
+		bLoggedAtlas = true;
+		if (!WeaponIconAtlas)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NCPlusWB] WeaponIconAtlas LOAD FAILED — both FObjectFinder and LoadObject returned null."));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[NCPlusWB] WeaponIconAtlas loaded OK (%dx%d). Side=%d"),
+				int32(WeaponIconAtlas->GetSurfaceWidth()), int32(WeaponIconAtlas->GetSurfaceHeight()), SideIndex);
+		}
+	}
 
 	const FNCPlusHUDLayout& Layout = FNCPlusHUDLayout::GetLive();
 	const FName MyAlias = (SideIndex == 0) ? FName(TEXT("weapon_bar_left")) : FName(TEXT("weapon_bar_right"));
@@ -171,52 +196,49 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		}
 
 		// Weapon icon — UVs from WeaponBarSelectedUVs are pixel coords against
-		// WeaponIconAtlas (NOT HUDAtlas; that's a different texture). Guard the
-		// texture and its surface dimensions to avoid div-by-zero NaN UVs.
+		// WeaponIconAtlas. Note: UUTHUDWidget::DrawTexture normalizes the U/V/UL/VL
+		// arguments INTERNALLY by texture size, so we pass the raw pixel values
+		// (NOT pre-normalized) — pre-dividing here would double-divide and shrink
+		// the sample region to a single texel (= invisible).
 		if (WeaponIconAtlas && !WeaponIconAtlas->IsPendingKill())
 		{
-			const float TexW = WeaponIconAtlas->GetSurfaceWidth();
-			const float TexH = WeaponIconAtlas->GetSurfaceHeight();
-			if (TexW > 0.f && TexH > 0.f)
+			const FTextureUVs& UV = W->WeaponBarSelectedUVs;
+			FLinearColor IconCol = (UTHUDOwner->GetUseWeaponColors())
+				? W->IconColor
+				: FLinearColor::White;
+
+			// Dim if not active and dim further if no ammo.
+			float Alpha = bActive ? 1.0f : 0.55f;
+			if (W->NeedsAmmoDisplay() && W->Ammo <= 0)
 			{
-				const FTextureUVs& UV = W->WeaponBarSelectedUVs;
-				FLinearColor IconCol = (UTHUDOwner->GetUseWeaponColors())
-					? W->IconColor
-					: FLinearColor::White;
-
-				// Dim if not active and dim further if no ammo.
-				float Alpha = bActive ? 1.0f : 0.55f;
-				if (W->NeedsAmmoDisplay() && W->Ammo <= 0)
-				{
-					Alpha *= 0.45f;
-				}
-				IconCol.A = Alpha;
-
-				// Fit icon into slot (preserve aspect ratio, leave room for ammo bar).
-				const float MaxIconW = SlotW - SlotPad * 2.f;
-				const float MaxIconH = SlotH - SlotPad * 2.f - AmmoBarH - 2.f;
-				float IconW = UV.UL;
-				float IconH = UV.VL;
-				if (IconW > 0.f && IconH > 0.f)
-				{
-					const float ScaleW = MaxIconW / IconW;
-					const float ScaleH = MaxIconH / IconH;
-					const float Scale  = FMath::Min(ScaleW, ScaleH);
-					IconW *= Scale;
-					IconH *= Scale;
-				}
-				else
-				{
-					IconW = MaxIconW;
-					IconH = MaxIconH;
-				}
-
-				const float IconX = SlotX + (SlotW - IconW) * 0.5f;
-				const float IconY = SlotY + SlotPad;
-				DrawTexture(WeaponIconAtlas, IconX, IconY, IconW, IconH,
-					UV.U / TexW, UV.V / TexH, UV.UL / TexW, UV.VL / TexH,
-					1.0f, IconCol);
+				Alpha *= 0.45f;
 			}
+			IconCol.A = Alpha;
+
+			// Fit icon into slot (preserve aspect ratio, leave room for ammo bar).
+			const float MaxIconW = SlotW - SlotPad * 2.f;
+			const float MaxIconH = SlotH - SlotPad * 2.f - AmmoBarH - 2.f;
+			float IconW = UV.UL;
+			float IconH = UV.VL;
+			if (IconW > 0.f && IconH > 0.f)
+			{
+				const float ScaleW = MaxIconW / IconW;
+				const float ScaleH = MaxIconH / IconH;
+				const float Scale  = FMath::Min(ScaleW, ScaleH);
+				IconW *= Scale;
+				IconH *= Scale;
+			}
+			else
+			{
+				IconW = MaxIconW;
+				IconH = MaxIconH;
+			}
+
+			const float IconX = SlotX + (SlotW - IconW) * 0.5f;
+			const float IconY = SlotY + SlotPad;
+			DrawTexture(WeaponIconAtlas, IconX, IconY, IconW, IconH,
+				UV.U, UV.V, UV.UL, UV.VL,   // raw pixel coords
+				1.0f, IconCol);
 		}
 
 		// Group number top-left
