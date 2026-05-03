@@ -1,0 +1,40 @@
+{
+	"version": 1,
+	"elements": {
+		"hp_armor": {
+			"anchor": "BottomCenter",
+			"offset_x": 0,
+			"offset_y": -180,
+			"scale": 1.0,
+			"hidden": false
+		},
+		"weapon_bar": {
+			"anchor": "BottomCenter",
+			"offset_x": 0,
+			"offset_y": -10,
+			"scale": 1.0,
+			"hidden": false
+		},
+		"weapon_info": {
+			"anchor": "BottomRight",
+			"offset_x": -40,
+			"offset_y": -60,
+			"scale": 1.0,
+			"hidden": false
+		},
+		"powerups": {
+			"anchor": "BottomLeft",
+			"offset_x": 40,
+			"offset_y": -60,
+			"scale": 1.0,
+			"hidden": false
+		},
+		"killfeed": {
+			"anchor": "TopRight",
+			"offset_x": -20,
+			"offset_y": 80,
+			"scale": 1.0,
+			"hidden": false
+		}
+	}
+}

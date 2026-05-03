@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 140" width="480" height="140">
+  <defs>
+    <linearGradient id="bg5" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a2e22"/>
+      <stop offset="1" stop-color="#1a140e"/>
+    </linearGradient>
+    <linearGradient id="hpFill" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#4ac365"/>
+      <stop offset="1" stop-color="#9bff9b"/>
+    </linearGradient>
+    <linearGradient id="armFill" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#c4a634"/>
+      <stop offset="1" stop-color="#ffe78a"/>
+    </linearGradient>
+    <filter id="glow5" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="1.6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="480" height="140" fill="url(#bg5)"/>
+
+  <!-- HEALTH pill -->
+  <g transform="translate(195,22)">
+    <!-- Track -->
+    <rect x="0" y="0" width="28" height="96" rx="14" fill="#1a2419" stroke="#2c3a2c" stroke-width="1"/>
+    <!-- Fill at 100% (max) — full height -->
+    <rect x="3" y="3" width="22" height="90" rx="11" fill="url(#hpFill)" filter="url(#glow5)"/>
+    <!-- Overflow indicator: a brighter ring at the top showing >100 -->
+    <rect x="0" y="0" width="28" height="14" rx="14" fill="none" stroke="#b9ffc6" stroke-width="2" opacity="0.95"/>
+    <!-- Number above -->
+    <text x="14" y="-6" text-anchor="middle" font-family="Verdana,sans-serif" font-size="16" font-weight="700" fill="#7df58f" filter="url(#glow5)">125</text>
+    <!-- Tick marks -->
+    <line x1="28" y1="20" x2="34" y2="20" stroke="#7df58f" stroke-width="1" opacity="0.6"/>
+    <line x1="28" y1="48" x2="32" y2="48" stroke="#7df58f" stroke-width="1" opacity="0.4"/>
+    <line x1="28" y1="76" x2="32" y2="76" stroke="#7df58f" stroke-width="1" opacity="0.4"/>
+  </g>
+
+  <!-- ARMOR pill -->
+  <g transform="translate(257,22)">
+    <rect x="0" y="0" width="28" height="96" rx="14" fill="#241f16" stroke="#3a3422" stroke-width="1"/>
+    <rect x="3" y="3" width="22" height="90" rx="11" fill="url(#armFill)" filter="url(#glow5)"/>
+    <text x="14" y="-6" text-anchor="middle" font-family="Verdana,sans-serif" font-size="16" font-weight="700" fill="#f5e07a" filter="url(#glow5)">100</text>
+    <line x1="-6" y1="20" x2="0" y2="20" stroke="#f5e07a" stroke-width="1" opacity="0.6"/>
+    <line x1="-4" y1="48" x2="0" y2="48" stroke="#f5e07a" stroke-width="1" opacity="0.4"/>
+    <line x1="-4" y1="76" x2="0" y2="76" stroke="#f5e07a" stroke-width="1" opacity="0.4"/>
+  </g>
+
+  <text x="240" y="132" text-anchor="middle" font-family="Verdana,sans-serif" font-size="9" fill="#888">05 — Vertical Pills (compact paired meters, overflow ring on top)</text>
+</svg>

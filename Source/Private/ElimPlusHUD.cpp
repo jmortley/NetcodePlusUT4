@@ -10,6 +10,7 @@
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
 #include "ElimPlusStatsReplicator.h"
+#include "NCPlusHUDLayout.h"
 #include "EngineUtils.h"
 
 AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
@@ -49,17 +50,33 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"));
+	// Removed bpHW_Paperdoll — when the user hides stock QuickStats (which we want,
+	// since our NCPlusHUDWidget_QuickStats replaces it), Paperdoll switches into a
+	// fallback "+ HP / Armor" mode (UTHUDWidget_Paperdoll.cpp:47) which would draw
+	// on top of our modern widget. Our widget handles HP/Armor cleanly on its own.
 	// Removed bpHW_TeamGameClock — we draw our own team score bar in DrawHUD
 	// that respects dynamic team colors from TeamSkins.
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"));
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_QuickStats.bpHW_QuickStats_C"));
+	// Modernized minimal-typography health/armor display — replaces stock bpHW_QuickStats.
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ElimPlusScoreboard"));
+}
+
+void AElimPlusHUD::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Load JSON overrides from disk into the live singleton.
+	// The Slate editor (Phase 2) mutates the singleton in place; DrawHUD re-applies
+	// it every frame, so any edit is visible next render tick = live preview.
+	// Missing file = empty layout = no overrides = unchanged behavior.
+	FNCPlusHUDLayout::ReloadLive();
+	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 }
 
 EInputMode::Type AElimPlusHUD::GetInputMode_Implementation() const
@@ -148,6 +165,11 @@ static AElimPlusStatsReplicator* FindElimPlusStatsReplicator(UWorld* World)
 
 void AElimPlusHUD::DrawHUD()
 {
+	// Re-apply the live layout every frame so Slate editor edits show up
+	// immediately (Phase 2 live preview). Cheap — just a few field assignments
+	// per registered widget, gated by a class-name lookup.
+	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+
 	Super::DrawHUD();
 
 	// Guard: Canvas or fonts may be null during Slate UI overlays

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>NetcodePlus HUD Health/Armor Mockups</title>
+<style>
+  body { background:#111; color:#ddd; font-family:'Segoe UI', Verdana, sans-serif; margin:0; padding:24px; }
+  h1 { font-weight:300; letter-spacing:2px; margin:0 0 4px; }
+  p.lead { color:#888; margin:0 0 28px; font-size:13px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(500px, 1fr)); gap:18px; }
+  .card { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:6px; padding:14px; }
+  .card h2 { font-size:14px; font-weight:600; margin:0 0 10px; color:#7df58f; letter-spacing:1px; }
+  .card p { font-size:12px; color:#999; margin:8px 0 0; line-height:1.5; }
+  img { display:block; width:100%; height:auto; border-radius:3px; }
+  .pros { color:#9bc; }
+  .cons { color:#c98; }
+  .meta { font-size:11px; color:#666; margin-top:6px; }
+</style>
+</head>
+<body>
+  <h1>HEALTH / ARMOR — VISUAL DIRECTIONS</h1>
+  <p class="lead">Five mockups at the same scale as the existing widget (~480×140 px crop). Health=125 (overflow), Armor=100. Backgrounds are dim placeholders — in-game these float over the world.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>01 — Segmented Bars</h2>
+      <img src="01_segmented_bars.svg" alt="Segmented bars">
+      <p><span class="pros">Pros:</span> Reads instantly at a glance. Discrete 25-unit segments give clear "low HP" cues. Overflow slot makes 100→125 visually distinct.</p>
+      <p><span class="cons">Cons:</span> Wider footprint than current widget. Needs careful tuning for ultra-low HP (1 segment ≈ tiny).</p>
+    </div>
+
+    <div class="card">
+      <h2>02 — Radial Arcs</h2>
+      <img src="02_radial_arcs.svg" alt="Radial arcs">
+      <p><span class="pros">Pros:</span> Compact circular footprint matches the crosshair-centered placement. Numbers stay in eye-line. Two arcs encode HP+armor without extra real estate.</p>
+      <p><span class="cons">Cons:</span> Arc fill changes are subtle in peripheral vision. Could conflict with the existing pip ring.</p>
+    </div>
+
+    <div class="card">
+      <h2>03 — Minimal Typography</h2>
+      <img src="03_minimal_typography.svg" alt="Minimal typography">
+      <p><span class="pros">Pros:</span> Very modern (CS2/Valorant feel). Numbers are huge and unambiguous. No icon clutter.</p>
+      <p><span class="cons">Cons:</span> Loses the "fill level" intuition — you only know exact numbers. Damage flashes have to do all the perceptual work.</p>
+    </div>
+
+    <div class="card">
+      <h2>04 — Hex Chevrons</h2>
+      <img src="04_hex_chevrons.svg" alt="Hex chevrons">
+      <p><span class="pros">Pros:</span> Sci-fi aesthetic that suits UT's tone. Discrete segments like option 01 but more "personality". Overflow segment is visually distinct.</p>
+      <p><span class="cons">Cons:</span> Wider footprint. Slanted edges are harder to draw correctly with UE4 Canvas (need quads, not the simple DrawTexture path).</p>
+    </div>
+
+    <div class="card">
+      <h2>05 — Vertical Pills</h2>
+      <img src="05_vertical_pills.svg" alt="Vertical pills">
+      <p><span class="pros">Pros:</span> Smallest footprint. Two-color paired meters read fast. Overflow ring on top of HP pill is a nice cue without taking extra space.</p>
+      <p><span class="cons">Cons:</span> Vertical fill is less common in FPS HUDs — slight learning curve. Numbers are small.</p>
+    </div>
+  </div>
+
+  <p class="meta">Files in this folder: 01_segmented_bars.svg · 02_radial_arcs.svg · 03_minimal_typography.svg · 04_hex_chevrons.svg · 05_vertical_pills.svg</p>
+</body>
+</html>

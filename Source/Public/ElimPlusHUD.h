@@ -15,6 +15,7 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 {
 	GENERATED_UCLASS_BODY()
 
+	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
 	virtual FLinearColor GetBaseHUDColor() override;
 

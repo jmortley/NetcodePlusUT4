@@ -13,6 +13,7 @@
 #include "SUTWeaponSkinSelector.h"
 #include "SUTNCPlusMenu.h"
 #include "SUTCosmeticSelector.h"
+#include "SNCPlusHUDEditor.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
@@ -22,6 +23,9 @@ static TWeakPtr<SUTNCPlusMenu> ActiveNCPMenu;
 
 /** Weak reference to active cosmetic selector */
 static TWeakPtr<SUTCosmeticSelector> ActiveCosmeticSelector;
+
+/** Weak reference to active HUD layout editor */
+static TWeakPtr<SNCPlusHUDEditor> ActiveHUDEditor;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -276,6 +280,49 @@ static void HandleCosmetics(const TArray<FString>& Args)
 	ActiveCosmeticSelector = Selector;
 }
 
+static void HandleHUDEditor(const TArray<FString>& Args)
+{
+	// Toggle: close if open.
+	if (ActiveHUDEditor.IsValid())
+	{
+		ActiveHUDEditor.Pin()->ClosePanel();
+		ActiveHUDEditor.Reset();
+		return;
+	}
+
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+	if (!World) return;
+
+	APlayerController* RawPC = World->GetFirstPlayerController();
+	if (!RawPC) return;
+
+	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(RawPC->GetLocalPlayer());
+	if (!LP) return;
+
+	UGameViewportClient* ViewportClient = World->GetGameViewport();
+	if (!ViewportClient) return;
+
+	TSharedRef<SNCPlusHUDEditor> Editor =
+		SNew(SNCPlusHUDEditor)
+		.PlayerOwner(LP);
+
+	ViewportClient->AddViewportWidgetContent(Editor, 100);
+	FSlateApplication::Get().SetKeyboardFocus(Editor, EFocusCause::SetDirectly);
+
+	ActiveHUDEditor = Editor;
+}
+
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
 void FNetcodePlus::StartupModule()
@@ -305,6 +352,13 @@ void FNetcodePlus::StartupModule()
 		TEXT("cosmetics"),
 		TEXT("Open cosmetic selector (hats, eyewear, characters, taunts)"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleCosmetics),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("nchud"),
+		TEXT("Open the NetcodePlus HUD layout editor (live preview, save to disk)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleHUDEditor),
 		ECVF_Default
 	);
 
@@ -359,6 +413,16 @@ void FNetcodePlus::ShutdownModule()
 
 	IConsoleObject* Cmd4 = IConsoleManager::Get().FindConsoleObject(TEXT("cosmetics"));
 	if (Cmd4) { IConsoleManager::Get().UnregisterConsoleObject(Cmd4, false); }
+
+	// Close HUD layout editor if open
+	if (ActiveHUDEditor.IsValid())
+	{
+		ActiveHUDEditor.Pin()->ClosePanel();
+		ActiveHUDEditor.Reset();
+	}
+
+	IConsoleObject* Cmd5 = IConsoleManager::Get().FindConsoleObject(TEXT("nchud"));
+	if (Cmd5) { IConsoleManager::Get().UnregisterConsoleObject(Cmd5, false); }
 
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus unloaded"));
 }

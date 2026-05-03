@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 140" width="480" height="140">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a2e22"/>
+      <stop offset="1" stop-color="#1a140e"/>
+    </linearGradient>
+    <filter id="glow2" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="480" height="140" fill="url(#bg2)"/>
+
+  <!-- Two concentric arcs around screen-center area -->
+  <g transform="translate(240,70)">
+    <!-- Outer ring track (health) -->
+    <circle r="46" fill="none" stroke="#1f2a22" stroke-width="6"/>
+    <!-- Health arc: 125% — full sweep + a brighter overflow tip -->
+    <path d="M 0,-46 A 46,46 0 1 1 -0.1,-46" fill="none" stroke="#5fdc7a" stroke-width="6" stroke-linecap="round" filter="url(#glow2)"/>
+    <!-- Overflow tip (extra 25% drawn as a brighter offset arc) -->
+    <path d="M 0,-46 A 46,46 0 0 1 32.5,-32.5" fill="none" stroke="#b9ffc6" stroke-width="6" stroke-linecap="round" opacity="0.9"/>
+
+    <!-- Inner ring track (armor) -->
+    <circle r="32" fill="none" stroke="#2a2418" stroke-width="5"/>
+    <!-- Armor arc: 100% full sweep -->
+    <path d="M 0,-32 A 32,32 0 1 1 -0.1,-32" fill="none" stroke="#e3c542" stroke-width="5" stroke-linecap="round" filter="url(#glow2)"/>
+
+    <!-- Center stack: HP large, ARM smaller -->
+    <text x="0" y="-2" text-anchor="middle" font-family="Verdana,sans-serif" font-size="22" font-weight="700" fill="#7df58f" filter="url(#glow2)">125</text>
+    <text x="0" y="18" text-anchor="middle" font-family="Verdana,sans-serif" font-size="14" font-weight="600" fill="#f5e07a">100</text>
+  </g>
+
+  <text x="240" y="132" text-anchor="middle" font-family="Verdana,sans-serif" font-size="9" fill="#888">02 — Radial Arcs (concentric rings, numbers stacked in center)</text>
+</svg>

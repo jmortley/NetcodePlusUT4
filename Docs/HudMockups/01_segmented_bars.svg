@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 140" width="480" height="140">
+  <defs>
+    <linearGradient id="bg1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a2e22"/>
+      <stop offset="1" stop-color="#1a140e"/>
+    </linearGradient>
+    <linearGradient id="hpGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5fdc7a"/>
+      <stop offset="1" stop-color="#7df58f"/>
+    </linearGradient>
+    <linearGradient id="armGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e3c542"/>
+      <stop offset="1" stop-color="#f5e07a"/>
+    </linearGradient>
+    <filter id="glow1" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="1.4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="480" height="140" fill="url(#bg1)"/>
+
+  <!-- HEALTH ROW -->
+  <g transform="translate(60,38)">
+    <text x="0" y="14" font-family="Verdana, sans-serif" font-size="22" font-weight="700" fill="#7df58f" filter="url(#glow1)">125</text>
+    <!-- 5 segments, 6th overflow segment for >100 -->
+    <g transform="translate(64,0)">
+      <rect x="0"  y="0" width="38" height="14" rx="2" fill="url(#hpGrad)"/>
+      <rect x="42" y="0" width="38" height="14" rx="2" fill="url(#hpGrad)"/>
+      <rect x="84" y="0" width="38" height="14" rx="2" fill="url(#hpGrad)"/>
+      <rect x="126" y="0" width="38" height="14" rx="2" fill="url(#hpGrad)"/>
+      <rect x="168" y="0" width="38" height="14" rx="2" fill="url(#hpGrad)"/>
+      <rect x="210" y="0" width="38" height="14" rx="2" fill="#a8ffb6" stroke="#7df58f" stroke-width="1" opacity="0.85"/>
+      <rect x="252" y="0" width="38" height="14" rx="2" fill="none" stroke="#3a4a3c" stroke-width="1"/>
+    </g>
+  </g>
+
+  <!-- ARMOR ROW -->
+  <g transform="translate(60,82)">
+    <text x="0" y="14" font-family="Verdana, sans-serif" font-size="22" font-weight="700" fill="#f5e07a" filter="url(#glow1)">100</text>
+    <g transform="translate(64,0)">
+      <rect x="0"  y="0" width="38" height="14" rx="2" fill="url(#armGrad)"/>
+      <rect x="42" y="0" width="38" height="14" rx="2" fill="url(#armGrad)"/>
+      <rect x="84" y="0" width="38" height="14" rx="2" fill="url(#armGrad)"/>
+      <rect x="126" y="0" width="38" height="14" rx="2" fill="url(#armGrad)"/>
+      <rect x="168" y="0" width="38" height="14" rx="2" fill="url(#armGrad)"/>
+      <rect x="210" y="0" width="38" height="14" rx="2" fill="none" stroke="#4a4332" stroke-width="1"/>
+      <rect x="252" y="0" width="38" height="14" rx="2" fill="none" stroke="#4a4332" stroke-width="1"/>
+    </g>
+  </g>
+
+  <text x="240" y="132" text-anchor="middle" font-family="Verdana,sans-serif" font-size="9" fill="#888">01 — Segmented Bars (5 base + 2 overflow slots)</text>
+</svg>
