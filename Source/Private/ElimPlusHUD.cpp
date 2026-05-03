@@ -208,9 +208,23 @@ void AElimPlusHUD::DrawHUD()
 
 		const float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
 		const float XAdjust = BasePipSize * 1.1f;
-		float XOffsetRed  = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
-		float XOffsetBlue = 0.6f * Canvas->ClipX + XAdjust;
-		const float YOffset = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+
+		// Stock fallback positions.
+		const float StockXRed  = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
+		const float StockXBlue = 0.6f * Canvas->ClipX + XAdjust;
+		const float StockY     = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+
+		// Phase 3.5 layout consult.
+		const FVector2D RedStart  = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_red"),  Canvas, FVector2D(StockXRed,  StockY));
+		const FVector2D BlueStart = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_blue"), Canvas, FVector2D(StockXBlue, StockY));
+		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
+		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
+
+		float XOffsetRed  = RedStart.X;
+		float XOffsetBlue = BlueStart.X;
+		const float YOffsetRed  = RedStart.Y;
+		const float YOffsetBlue = BlueStart.Y;
+		const float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split
 
 		TArray<AUTPlayerState*> LivePlayers;
 		GetPlayerListForIcons(LivePlayers);
@@ -271,13 +285,17 @@ void AElimPlusHUD::DrawHUD()
 			}
 
 			const uint8 TeamIdx = UTPS->GetTeamNum();
+			// Phase 3.5 hide gates.
+			if (TeamIdx == 0 && bHideRed)  continue;
+			if (TeamIdx == 1 && bHideBlue) continue;
 			float* XOffsetForTeam = nullptr;
-			if (TeamIdx == 0)      { RedPlayerCount++;  XOffsetForTeam = &XOffsetRed; }
-			else if (TeamIdx == 1) { BluePlayerCount++; XOffsetForTeam = &XOffsetBlue; }
+			float  YForTeam = YOffset;
+			if (TeamIdx == 0)      { RedPlayerCount++;  XOffsetForTeam = &XOffsetRed;  YForTeam = YOffsetRed;  }
+			else if (TeamIdx == 1) { BluePlayerCount++; XOffsetForTeam = &XOffsetBlue; YForTeam = YOffsetBlue; }
 			else                   { continue; }
 
 			const float XOffset = *XOffsetForTeam;
-			DrawPlayerIcon(UTPS, bPlayerAlive, XOffset, YOffset, PipSize);
+			DrawPlayerIcon(UTPS, bPlayerAlive, XOffset, YForTeam, PipSize);
 
 			// Player name above icon
 			{
@@ -293,7 +311,7 @@ void AElimPlusHUD::DrawHUD()
 					Canvas->StrLen(TinyFont, Name, NXL, NYL);
 				}
 				const float NameX = XOffset + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
-				const float NameY = YOffset + 2.f;
+				const float NameY = YForTeam + 2.f;
 				const float OL = 1.f;
 				Canvas->SetLinearDrawColor(FLinearColor::Black);
 				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
@@ -313,10 +331,10 @@ void AElimPlusHUD::DrawHUD()
 				PulseColor.A = 0.9f;
 				const float BorderW = 2.f;
 				Canvas->SetLinearDrawColor(PulseColor);
-				Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, BorderW, 0, 0, 1, 1);
-				Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
-				Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
-				Canvas->DrawTile(Canvas->DefaultTexture, XOffset + PipSize - BorderW, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
+				Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YForTeam, PipSize, BorderW, 0, 0, 1, 1);
+				Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YForTeam + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
+				Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YForTeam, BorderW, PipHeight, 0, 0, 1, 1);
+				Canvas->DrawTile(Canvas->DefaultTexture, XOffset + PipSize - BorderW, YForTeam, BorderW, PipHeight, 0, 0, 1, 1);
 			}
 
 			// ELO chip below the portrait. At match end, count up over EloAnimDurationSec
@@ -371,7 +389,7 @@ void AElimPlusHUD::DrawHUD()
 				float CXL, CYL;
 				Canvas->StrLen(TinyFont, EloStr, CXL, CYL);
 				const float ChipX = XOffset + (PipSize * 0.5f) - (CXL * ChipScale * 0.5f);
-				const float ChipY = YOffset + PipHeight + 2.f;
+				const float ChipY = YForTeam + PipHeight + 2.f;
 				const float OL = 1.f;
 
 				Canvas->SetLinearDrawColor(FLinearColor::Black);
@@ -426,23 +444,29 @@ void AElimPlusHUD::DrawHUD()
 void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
 	if (!Canvas || !SmallFont || !MediumFont || !LargeFont) return;
+	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
-	const float CenterX = Canvas->ClipX * 0.5f;
-	const float TopY = 2.f * RenderScale;
+
+	// Phase 3.5 layout consult.
+	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * RenderScale);
+	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("scorebar"), Canvas, StockPos);
+	const float CenterX = ScoreBarPos.X;
+	const float TopY    = ScoreBarPos.Y;
 
 	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
 	FLinearColor Team1Color = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
 	bool bCustomColors = false;
+	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
 
-	if (GS->Teams.IsValidIndex(0) && GS->Teams[0])
+	if (bUseTeamColor && GS->Teams.IsValidIndex(0) && GS->Teams[0])
 	{
 		FLinearColor TC = GS->Teams[0]->TeamColor;
 		if (FMath::Abs(TC.R - 1.f) > 0.2f || TC.G > 0.3f || TC.B > 0.3f)
 			bCustomColors = true;
 		Team0Color = TC;
 	}
-	if (GS->Teams.IsValidIndex(1) && GS->Teams[1])
+	if (bUseTeamColor && GS->Teams.IsValidIndex(1) && GS->Teams[1])
 	{
 		FLinearColor TC = GS->Teams[1]->TeamColor;
 		if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f)
@@ -554,12 +578,15 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 		YOffset += FMath::InterpEaseIn(PipHeight, 0.0f, TimeSinceJoin, 3.0f);
 	}
 
-	// Layer 1: Team-colored background (TeamSkins-aware)
+	// Layer 1: Team-colored background (TeamSkins-aware).
+	// Honors per-portrait `use_team_color` extra: when false, locks to stock red/blue.
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	const FName PortraitAlias = (PlayerState->GetTeamNum() == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
+	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(PortraitAlias);
 	FLinearColor TeamBGColor = (PlayerState->GetTeamNum() == 1)
 		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
 		: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);
-	if (GS && GS->Teams.IsValidIndex(PlayerState->GetTeamNum()) && GS->Teams[PlayerState->GetTeamNum()])
+	if (bUseTeamColor && GS && GS->Teams.IsValidIndex(PlayerState->GetTeamNum()) && GS->Teams[PlayerState->GetTeamNum()])
 	{
 		TeamBGColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
 	}

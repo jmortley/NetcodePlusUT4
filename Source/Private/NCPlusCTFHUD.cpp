@@ -85,24 +85,30 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 {
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	if (!GS || !Canvas || !SmallFont || !MediumFont || !LargeFont) return;
+	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
-	const float CenterX = Canvas->ClipX * 0.5f;
-	const float TopY = 2.f * RenderScale;
 
-	// Team colors (respect TeamSkins)
+	// Phase 3.5 layout consult.
+	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * RenderScale);
+	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("scorebar"), Canvas, StockPos);
+	const float CenterX = ScoreBarPos.X;
+	const float TopY    = ScoreBarPos.Y;
+
+	// Team colors (respect TeamSkins). Honors `use_team_color` extra.
 	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
 	FLinearColor Team1Color = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
 	bool bCustomColors = false;
+	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
 
-	if (GS->Teams.IsValidIndex(0) && GS->Teams[0])
+	if (bUseTeamColor && GS->Teams.IsValidIndex(0) && GS->Teams[0])
 	{
 		FLinearColor TC = GS->Teams[0]->TeamColor;
 		if (FMath::Abs(TC.R - 1.f) > 0.2f || TC.G > 0.3f || TC.B > 0.3f)
 			bCustomColors = true;
 		Team0Color = TC;
 	}
-	if (GS->Teams.IsValidIndex(1) && GS->Teams[1])
+	if (bUseTeamColor && GS->Teams.IsValidIndex(1) && GS->Teams[1])
 	{
 		FLinearColor TC = GS->Teams[1]->TeamColor;
 		if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f)

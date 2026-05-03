@@ -69,10 +69,15 @@ void AShockDomHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Super::DrawTeamScoreBar(GS);
 
 	if (!Canvas || !MediumFont || !GS) return;
+	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
-	const float CenterX = Canvas->ClipX * 0.5f;
-	const float TopY = 2.f * RenderScale;
+
+	// Phase 3.5 layout consult — same anchor as Super so the clock stays put.
+	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * RenderScale);
+	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("scorebar"), Canvas, StockPos);
+	const float CenterX = ScoreBarPos.X;
+	const float TopY    = ScoreBarPos.Y;
 	const float BarHeight = 36.f * RenderScale;
 	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
 

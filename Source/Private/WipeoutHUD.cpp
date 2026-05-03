@@ -197,9 +197,23 @@ void AWipeoutHUD::DrawHUD()
 
 		float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
 		float XAdjust = BasePipSize * 1.1f;
-		float XOffsetRed = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
-		float XOffsetBlue = 0.6f * Canvas->ClipX + XAdjust;
-		float YOffset = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+
+		// Stock positions used as fallbacks if the layout has no override.
+		const float StockXRed  = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
+		const float StockXBlue = 0.6f * Canvas->ClipX + XAdjust;
+		const float StockY     = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+
+		// Layout consult (Phase 3.5) — user can move each strip independently.
+		const FVector2D RedStart  = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_red"),  Canvas, FVector2D(StockXRed,  StockY));
+		const FVector2D BlueStart = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_blue"), Canvas, FVector2D(StockXBlue, StockY));
+		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
+		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
+
+		float XOffsetRed  = RedStart.X;
+		float XOffsetBlue = BlueStart.X;
+		float YOffsetRed  = RedStart.Y;
+		float YOffsetBlue = BlueStart.Y;
+		float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split (kept for safety)
 
 		TArray<AUTPlayerState*> LivePlayers;
 		GetPlayerListForIcons(LivePlayers);
@@ -265,10 +279,13 @@ void AWipeoutHUD::DrawHUD()
 
 			// Use GetTeamNum() which works even if Team pointer is null
 			uint8 TeamIdx = UTPS->GetTeamNum();
+			// Phase 3.5 hide gates — skip drawing the strip the user disabled.
+			if (TeamIdx == 0 && bHideRed)  continue;
+			if (TeamIdx == 1 && bHideBlue) continue;
 			if (TeamIdx == 0)
 			{
 				RedPlayerCount++;
-				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffset, PipSize);
+				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffsetRed, PipSize);
 				// Player name above icon
 				{
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
@@ -285,7 +302,7 @@ void AWipeoutHUD::DrawHUD()
 					}
 					// Black outline + white fill (matches HP/Armor style)
 					float NameX = XOffsetRed + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
-					float NameY = YOffset + 2.f;
+					float NameY = YOffsetRed + 2.f;
 					float OL = 1.f;
 					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
 					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
@@ -302,17 +319,17 @@ void AWipeoutHUD::DrawHUD()
 					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
 					float BorderW = 2.f;
 					Canvas->SetLinearDrawColor(Gold);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffset, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffset + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed + PipSize - BorderW, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffsetRed, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffsetRed + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffsetRed, BorderW, PipHeight, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed + PipSize - BorderW, YOffsetRed, BorderW, PipHeight, 0, 0, 1, 1);
 				}
 				XOffsetRed -= 1.1f * PipSize;
 			}
 			else if (TeamIdx == 1)
 			{
 				BluePlayerCount++;
-				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffset, PipSize);
+				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffsetBlue, PipSize);
 				// Player name above icon
 				{
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
@@ -328,7 +345,7 @@ void AWipeoutHUD::DrawHUD()
 					}
 					// Black outline + white fill (matches HP/Armor style)
 					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
-					float NameY = YOffset + 2.f;
+					float NameY = YOffsetBlue + 2.f;
 					float OL = 1.f;
 					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
 					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
@@ -344,10 +361,10 @@ void AWipeoutHUD::DrawHUD()
 					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
 					float BorderW = 2.f;
 					Canvas->SetLinearDrawColor(Gold);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffset, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffset + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue + PipSize - BorderW, YOffset, BorderW, PipHeight, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffsetBlue, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffsetBlue + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffsetBlue, BorderW, PipHeight, 0, 0, 1, 1);
+					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue + PipSize - BorderW, YOffsetBlue, BorderW, PipHeight, 0, 0, 1, 1);
 				}
 				XOffsetBlue += 1.1f * PipSize;
 			}
@@ -390,17 +407,25 @@ void AWipeoutHUD::DrawHUD()
 void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
 	if (!Canvas || !SmallFont || !MediumFont || !LargeFont) return;
+	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
-	const float CenterX = Canvas->ClipX * 0.5f;
-	const float TopY = 2.f * RenderScale;
 
-	// Get team colors (respect TeamSkins custom colors)
+	// Phase 3.5 layout consult — anchor + offset for the whole scorebar.
+	// Stock placement: top-center, 2px from top edge.
+	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * RenderScale);
+	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("scorebar"), Canvas, StockPos);
+	const float CenterX = ScoreBarPos.X;
+	const float TopY    = ScoreBarPos.Y;
+
+	// Get team colors (respect TeamSkins custom colors).
+	// Honors scorebar's `use_team_color` extra: when false, locks to stock red/blue.
 	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f); // default red
 	FLinearColor Team1Color = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);  // default blue
 	bool bCustomColors = false;
+	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
 
-	if (GS->Teams.IsValidIndex(0) && GS->Teams[0])
+	if (bUseTeamColor && GS->Teams.IsValidIndex(0) && GS->Teams[0])
 	{
 		FLinearColor TC = GS->Teams[0]->TeamColor;
 		// Check if non-standard (not close to pure red)
@@ -408,7 +433,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 			bCustomColors = true;
 		Team0Color = TC;
 	}
-	if (GS->Teams.IsValidIndex(1) && GS->Teams[1])
+	if (bUseTeamColor && GS->Teams.IsValidIndex(1) && GS->Teams[1])
 	{
 		FLinearColor TC = GS->Teams[1]->TeamColor;
 		if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f)
@@ -547,13 +572,15 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		YOffset += FMath::InterpEaseIn(PipHeight, 0.0f, TimeSinceJoin, 3.0f);
 	}
 
-	// Layer 1: Team-colored background — use dynamic team color instead of
-	// hardcoded red/blue atlas tiles so TeamSkins custom colors work
+	// Layer 1: Team-colored background. Honors per-portrait use_team_color
+	// extra: false → lock to stock red/blue.
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	const FName PortraitAlias = (PlayerState->GetTeamNum() == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
+	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(PortraitAlias);
 	FLinearColor TeamBGColor = (PlayerState->GetTeamNum() == 1)
 		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)    // fallback blue
 		: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);     // fallback red
-	if (GS && GS->Teams.IsValidIndex(PlayerState->GetTeamNum()) && GS->Teams[PlayerState->GetTeamNum()])
+	if (bUseTeamColor && GS && GS->Teams.IsValidIndex(PlayerState->GetTeamNum()) && GS->Teams[PlayerState->GetTeamNum()])
 	{
 		TeamBGColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
 	}

@@ -52,6 +52,9 @@ struct FNCPlusHUDElement
 	/** Read an extras key as a float (e.g. opacity multiplier).
 	 *  Returns Fallback if the key is missing or unparsable. */
 	float GetExtraFloat(FName Key, float Fallback) const;
+
+	/** Read an extras key as a bool. Accepts "true"/"false"/"1"/"0" (case-insensitive). */
+	bool GetExtraBool(FName Key, bool Fallback) const;
 };
 
 /** Hex ↔ FLinearColor utilities for the HUD layout's per-element color overrides. */
@@ -177,6 +180,33 @@ namespace NCPlusHUDAliases
 
 	/** Pretty display name for an alias (e.g. "hp_armor" → "Health & Armor"). */
 	NETCODEPLUS_API FText GetDisplayName(FName Alias);
+}
+
+/**
+ * Helpers for C++-drawn HUD pieces (portrait strips, scorebar) that aren't
+ * UUTHUDWidget instances. The HUD's DrawHUD calls into these to get the user's
+ * configured screen position and visibility.
+ *
+ * Phase 3.5: these aliases live alongside the widget aliases in the editor list,
+ * but `ApplyLayoutToWidgets` ignores them (no widget to mutate).
+ */
+namespace NCPlusHUDDrawCall
+{
+	/** Resolve "what screen pixel should this draw-call element start at?"
+	 *  Returns Fallback if the layout has no entry for Alias (preserves stock behavior).
+	 *  Anchor coords are 0..1 of canvas; Offset is design-pixel; RenderScale = ClipY/1080. */
+	NETCODEPLUS_API FVector2D ResolveScreenPos(FName Alias, class UCanvas* Canvas, const FVector2D& Fallback);
+
+	/** True if the layout marks this alias hidden — caller skips its draw. */
+	NETCODEPLUS_API bool IsHidden(FName Alias);
+
+	/** Per-element scale (design-px multiplier). 1.0 if no override. */
+	NETCODEPLUS_API float GetScale(FName Alias);
+
+	/** Should this element use the dynamic AUTTeamInfo::TeamColor (true, default)
+	 *  or the stock red/blue palette (false)? Honored by portrait_red,
+	 *  portrait_blue, and scorebar. */
+	NETCODEPLUS_API bool GetUseTeamColor(FName Alias);
 }
 
 /**

@@ -36,6 +36,9 @@ struct FNCHUDEditorRow
 
 	// Optional per-row color overrides (hp_armor + weapon_bar_*).
 	TArray<FNCHUDEditorColor> Colors;
+
+	// Optional "Use Team Color" checkbox (portraits + scorebar).
+	bool bHasTeamColorToggle = false;
 };
 
 class SNCPlusHUDEditor : public SCompoundWidget
@@ -103,6 +106,10 @@ private:
 	// Color overrides
 	TSharedRef<class SWidget> BuildColorRow(FNCHUDEditorRow& Row);
 	void OnColorTextCommitted(const FText& NewText, ETextCommit::Type, FName Alias, FName ColorKey);
+
+	// Team-color toggle (portraits + scorebar)
+	ECheckBoxState GetTeamColorState(FName Alias) const;
+	void OnTeamColorChanged(ECheckBoxState NewState, FName Alias);
 
 	// Per-row reset
 	FReply OnResetRowClicked(FName Alias);

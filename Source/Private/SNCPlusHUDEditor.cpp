@@ -66,8 +66,13 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_low_hp"),        FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f), nullptr });
 			Row.Colors.Add({ TEXT("color_damage_flash"),  FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f), nullptr });
 		}
+		// Portraits + scorebar opt-in to the use_team_color checkbox.
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar"))
+		{
+			Row.bHasTeamColorToggle = true;
+		}
 		// WeaponBar (both sides): bg/outline/ammo color overrides.
-		else if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
+		if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
 		{
 			Row.Colors.Add({ TEXT("color_slot_bg_inactive"), FText::FromString(TEXT("Slot BG")),     FLinearColor(0.04f, 0.04f, 0.04f, 0.30f), nullptr });
 			Row.Colors.Add({ TEXT("color_slot_bg_active"),   FText::FromString(TEXT("Slot Active")), FLinearColor(0.10f, 0.10f, 0.10f, 0.55f), nullptr });
@@ -162,6 +167,21 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 {
 	const FName Alias = Row.Alias;
 	using namespace NCHUDEdit;
+
+	// Helper for the optional team-color checkbox.
+	TSharedRef<SWidget> TeamColorSlot = SNullWidget::NullWidget;
+	if (Row.bHasTeamColorToggle)
+	{
+		TeamColorSlot = SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetTeamColorState, Alias)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnTeamColorChanged, Alias)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Team Color")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			];
+	}
 
 	// Helper for the optional style picker — only shown if Row.bHasStylePicker.
 	TSharedRef<SWidget> StyleSlot = SNullWidget::NullWidget;
@@ -277,6 +297,9 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				]
 			]
 		]
+		// "Use Team Color" checkbox — only populated for portrait/scorebar rows.
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[ TeamColorSlot ]
 		// Per-row reset
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
@@ -377,6 +400,19 @@ void SNCPlusHUDEditor::OnHiddenChanged(ECheckBoxState NewState, FName Alias)
 {
 	const bool bHide = (NewState == ECheckBoxState::Checked);
 	MutateElement(Alias, [bHide](FNCPlusHUDElement& E){ E.bHidden = bHide; });
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetTeamColorState(FName Alias) const
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	const bool bUse = E ? E->GetExtraBool(TEXT("use_team_color"), true) : true;
+	return bUse ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnTeamColorChanged(ECheckBoxState NewState, FName Alias)
+{
+	const FString S = (NewState == ECheckBoxState::Checked) ? TEXT("true") : TEXT("false");
+	MutateElement(Alias, [&S](FNCPlusHUDElement& E){ E.Extras.Add(TEXT("use_team_color"), S); });
 }
 
 TOptional<float> SNCPlusHUDEditor::GetOpacity(FName Alias) const

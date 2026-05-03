@@ -174,6 +174,18 @@ float FNCPlusHUDElement::GetExtraFloat(FName Key, float Fallback) const
 	return FCString::Atof(**V);
 }
 
+bool FNCPlusHUDElement::GetExtraBool(FName Key, bool Fallback) const
+{
+	const FString* V = Extras.Find(Key);
+	if (!V || V->IsEmpty()) return Fallback;
+	FString S = *V;
+	S.Trim();
+	S = S.ToLower();
+	if (S == TEXT("true")  || S == TEXT("1")) return true;
+	if (S == TEXT("false") || S == TEXT("0")) return false;
+	return Fallback;
+}
+
 // =============================================================================
 // Find + WeaponBar side resolution
 // =============================================================================
@@ -381,8 +393,9 @@ namespace NCPlusHUDAliases
 	struct FAliasEntry
 	{
 		FName    Alias;
-		FString  ClassPath;
+		FString  ClassPath;     // empty for draw-call elements
 		FText    DisplayName;
+		bool     bIsDrawCall = false;  // true → no widget; HUD's DrawHUD consults layout directly
 	};
 
 	static const TArray<FAliasEntry>& GetAliasTable()
@@ -403,6 +416,11 @@ namespace NCPlusHUDAliases
 			T.Add({ TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")) });
 			T.Add({ TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")) });
 			T.Add({ TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")) });
+			// C++-drawn pieces (Phase 3.5). No UClass — HUD's DrawHUD consults the layout
+			// for these via NCPlusHUDDrawCall::ResolveScreenPos.
+			T.Add({ TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),     true });
+			T.Add({ TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),    true });
+			T.Add({ TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),   true });
 			return T;
 		}();
 		return Table;
@@ -443,6 +461,45 @@ namespace NCPlusHUDAliases
 			if (E.Alias == Alias) return E.DisplayName;
 		}
 		return FText::FromName(Alias);
+	}
+}
+
+// =============================================================================
+// C++-drawn piece helpers (Phase 3.5)
+// =============================================================================
+
+namespace NCPlusHUDDrawCall
+{
+	FVector2D ResolveScreenPos(FName Alias, UCanvas* Canvas, const FVector2D& Fallback)
+	{
+		if (!Canvas) return Fallback;
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		if (!E) return Fallback;
+
+		const FVector2D Anchor = FNCPlusHUDLayout::AnchorToScreenCoords(E->Anchor);
+		const float RenderScale = Canvas->ClipY / 1080.f;
+		return FVector2D(
+			Anchor.X * Canvas->ClipX + E->Offset.X * RenderScale,
+			Anchor.Y * Canvas->ClipY + E->Offset.Y * RenderScale
+		);
+	}
+
+	bool IsHidden(FName Alias)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		return E && E->bHidden;
+	}
+
+	float GetScale(FName Alias)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		return E ? FMath::Max(E->Scale, 0.01f) : 1.f;
+	}
+
+	bool GetUseTeamColor(FName Alias)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		return E ? E->GetExtraBool(TEXT("use_team_color"), true) : true;
 	}
 }
 
