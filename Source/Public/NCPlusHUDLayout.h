@@ -32,8 +32,36 @@ struct FNCPlusHUDElement
 	FVector2D Offset = FVector2D::ZeroVector;  // 1080p design pixels
 	float Scale = 1.0f;
 	bool bHidden = false;
-	// Style block intentionally omitted in v1 — see header comment.
+
+	/** Per-element free-form settings (style, color, etc.). Only certain
+	 *  widgets honor specific keys — e.g. hp_armor reads "style" for its
+	 *  visual variant. Unknown keys are silently preserved by the loader. */
+	TMap<FName, FString> Extras;
+
+	/** Read an extras key as string (returns empty if missing). */
+	FString GetExtra(FName Key) const
+	{
+		const FString* V = Extras.Find(Key);
+		return V ? *V : FString();
+	}
 };
+
+/** Visual variants for the HP/Armor widget (mirrors Docs/HudMockups SVGs). */
+enum class ENCPlusHPArmorStyle : uint8
+{
+	MinimalTypography = 0,  // Mockup 03 — current default
+	SegmentedBars,          // Mockup 01 — 5 segments + overflow
+	RadialArcs,             // Mockup 02 — concentric arcs around crosshair
+	HexChevrons,            // Mockup 04 — sci-fi angled segments
+	VerticalPills,          // Mockup 05 — paired tall meters
+};
+
+namespace NCPlusHPArmorStyle
+{
+	NETCODEPLUS_API ENCPlusHPArmorStyle Parse(const FString& Name);
+	NETCODEPLUS_API FString ToString(ENCPlusHPArmorStyle Style);
+	NETCODEPLUS_API TArray<TSharedPtr<FString>> GetChoices();
+}
 
 /** Whole-HUD layout config. Keyed by alias (e.g. "hp_armor", "weapon_bar"). */
 struct FNCPlusHUDLayout
@@ -116,13 +144,41 @@ namespace NCPlusHUDAliases
 }
 
 /**
+ * Snapshot of a widget's stock layout fields, captured once at BeginPlay so that
+ * Reset / Reset All can restore the original look (not whatever the user last
+ * dragged it to).
+ */
+struct FNCPlusWidgetDefaults
+{
+	FVector2D ScreenPosition = FVector2D::ZeroVector;
+	FVector2D Position       = FVector2D::ZeroVector;
+	FVector2D Origin         = FVector2D::ZeroVector;
+	bool      bHidden        = false;
+
+	// WeaponBar quirk: it self-positions in PreDraw from its own internal
+	// Horizontal/Vertical*Position fields, stomping anything we set on the
+	// generic ScreenPosition/Position. We snapshot those too so reset works.
+	FVector2D WB_HorizScreenPos = FVector2D::ZeroVector;
+	FVector2D WB_HorizPos       = FVector2D::ZeroVector;
+	FVector2D WB_VertScreenPos  = FVector2D::ZeroVector;
+	FVector2D WB_VertPos        = FVector2D::ZeroVector;
+	bool      bIsWeaponBar      = false;
+};
+
+/**
+ * Capture stock defaults for every widget the alias map knows about. Call once
+ * after Super::BeginPlay() — before the first ApplyLayoutToWidgets() — so the
+ * "no override" path can restore an identity-preserving baseline.
+ */
+NETCODEPLUS_API void CaptureWidgetDefaults(class AUTHUD* HUD);
+
+/**
  * Apply a layout to every widget in HUD->HudWidgets[].
  *
- * For each widget, looks up its class in the alias table; if a matching entry
- * exists in `Layout.Elements`, mutates the widget's ScreenPosition / Position /
- * bHidden accordingly. Widgets without a layout entry are left untouched.
- *
- * Origin is intentionally NOT touched — each widget knows its preferred pivot.
- * Users adjust offset to compensate.
+ * For each registered widget:
+ *   - Override present → set ScreenPosition + Origin (both match the anchor so
+ *     the widget sticks to its anchor corner and content extends inward) +
+ *     Position (offset in design pixels) + hidden state.
+ *   - No override     → restore from CaptureWidgetDefaults() snapshot.
  */
 NETCODEPLUS_API void ApplyLayoutToWidgets(class AUTHUD* HUD, const FNCPlusHUDLayout& Layout);

@@ -48,6 +48,14 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Row.Alias         = Alias;
 		Row.DisplayName   = NCPlusHUDAliases::GetDisplayName(Alias);
 		Row.AnchorChoices = NCHUDEdit::BuildAnchorChoices();
+		// hp_armor is the only element with a visual-style picker right now.
+		// Others can opt in by adding their own choice list when we add more
+		// styled widgets (e.g. custom WeaponBar).
+		if (Alias == TEXT("hp_armor"))
+		{
+			Row.bHasStylePicker = true;
+			Row.StyleChoices    = NCPlusHPArmorStyle::GetChoices();
+		}
 		Rows.Add(Row);
 	}
 
@@ -118,6 +126,25 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 	const FName Alias = Row.Alias;
 	using namespace NCHUDEdit;
 
+	// Helper for the optional style picker — only shown if Row.bHasStylePicker.
+	TSharedRef<SWidget> StyleSlot = SNullWidget::NullWidget;
+	if (Row.bHasStylePicker && Row.StyleChoices.Num() > 0)
+	{
+		// Resolve currently-selected style from live layout's extras.
+		const FNCPlusHUDElement* Cur = FNCPlusHUDLayout::GetLive().Find(Alias);
+		const FString CurStr = Cur ? Cur->GetExtra(TEXT("style")) : FString();
+		const ENCPlusHPArmorStyle CurStyle = NCPlusHPArmorStyle::Parse(CurStr);
+		const int32 InitialIdx = FMath::Clamp((int32)CurStyle, 0, Row.StyleChoices.Num() - 1);
+
+		StyleSlot = SNew(SBox).WidthOverride(150.f)
+		[
+			SAssignNew(Row.StyleCombo, STextComboBox)
+			.OptionsSource(&Row.StyleChoices)
+			.InitiallySelectedItem(Row.StyleChoices[InitialIdx])
+			.OnSelectionChanged(this, &SNCPlusHUDEditor::OnStyleSelected, Alias)
+		];
+	}
+
 	return SNew(SHorizontalBox)
 		// Display name
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
@@ -141,6 +168,9 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.OnSelectionChanged(this, &SNCPlusHUDEditor::OnAnchorSelected, Alias)
 			]
 		]
+		// Optional style picker (hp_armor only)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[ StyleSlot ]
 		// Offset X
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[
@@ -297,6 +327,15 @@ void SNCPlusHUDEditor::OnAnchorSelected(TSharedPtr<FString> NewSel, ESelectInfo:
 	MutateElement(Alias, [NewAnchor](FNCPlusHUDElement& E){ E.Anchor = NewAnchor; });
 }
 
+void SNCPlusHUDEditor::OnStyleSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias)
+{
+	if (!NewSel.IsValid()) return;
+	const FString NewStyle = *NewSel;
+	MutateElement(Alias, [&NewStyle](FNCPlusHUDElement& E){
+		E.Extras.Add(TEXT("style"), NewStyle);
+	});
+}
+
 FReply SNCPlusHUDEditor::OnResetRowClicked(FName Alias)
 {
 	FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
@@ -305,14 +344,19 @@ FReply SNCPlusHUDEditor::OnResetRowClicked(FName Alias)
 		FNCPlusHUDLayout::MarkLiveDirty();
 		SetStatus(FString::Printf(TEXT("Reset '%s'."), *Alias.ToString()));
 
-		// Re-sync the anchor combo to "Center" since element no longer exists.
+		// Re-sync the anchor + style combos to defaults.
 		for (FNCHUDEditorRow& Row : Rows)
 		{
-			if (Row.Alias == Alias && Row.AnchorCombo.IsValid())
+			if (Row.Alias != Alias) continue;
+			if (Row.AnchorCombo.IsValid())
 			{
 				Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[(int32)ENCPlusHUDAnchor::Center]);
-				break;
 			}
+			if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
+			{
+				Row.StyleCombo->SetSelectedItem(Row.StyleChoices[(int32)ENCPlusHPArmorStyle::MinimalTypography]);
+			}
+			break;
 		}
 	}
 	return FReply::Handled();
@@ -330,13 +374,21 @@ FReply SNCPlusHUDEditor::OnReloadClicked()
 	FNCPlusHUDLayout::ReloadLive();
 	SetStatus(TEXT("Reloaded from disk."));
 
-	// Sync anchor combos to reloaded values.
+	// Sync anchor + style combos to reloaded values.
 	for (FNCHUDEditorRow& Row : Rows)
 	{
-		if (!Row.AnchorCombo.IsValid()) continue;
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Row.Alias);
-		const int32 Idx = E ? (int32)E->Anchor : (int32)ENCPlusHUDAnchor::Center;
-		Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[Idx]);
+		if (Row.AnchorCombo.IsValid())
+		{
+			const int32 Idx = E ? (int32)E->Anchor : (int32)ENCPlusHUDAnchor::Center;
+			Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[Idx]);
+		}
+		if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
+		{
+			const FString CurStr = E ? E->GetExtra(TEXT("style")) : FString();
+			const int32 Idx = FMath::Clamp((int32)NCPlusHPArmorStyle::Parse(CurStr), 0, Row.StyleChoices.Num() - 1);
+			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[Idx]);
+		}
 	}
 	return FReply::Handled();
 }
@@ -350,6 +402,10 @@ FReply SNCPlusHUDEditor::OnResetAllClicked()
 		if (Row.AnchorCombo.IsValid())
 		{
 			Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[(int32)ENCPlusHUDAnchor::Center]);
+		}
+		if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
+		{
+			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[(int32)ENCPlusHPArmorStyle::MinimalTypography]);
 		}
 	}
 	return FReply::Handled();

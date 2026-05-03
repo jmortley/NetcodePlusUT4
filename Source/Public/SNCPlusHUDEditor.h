@@ -19,6 +19,11 @@ struct FNCHUDEditorRow
 	FText DisplayName;
 	TSharedPtr<class STextComboBox> AnchorCombo;
 	TArray<TSharedPtr<FString>> AnchorChoices;   // same indices as ENCPlusHUDAnchor
+
+	// Optional per-row style picker (currently only hp_armor uses one).
+	TSharedPtr<class STextComboBox> StyleCombo;
+	TArray<TSharedPtr<FString>> StyleChoices;
+	bool bHasStylePicker = false;
 };
 
 class SNCPlusHUDEditor : public SCompoundWidget
@@ -60,6 +65,9 @@ private:
 
 	// Anchor combo
 	void OnAnchorSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias);
+
+	// Style combo (hp_armor only)
+	void OnStyleSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias);
 
 	// Per-row reset
 	FReply OnResetRowClicked(FName Alias);

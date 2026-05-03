@@ -71,10 +71,14 @@ void AElimPlusHUD::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Snapshot the engine-spawned widget positions/origins BEFORE we override
+	// anything. ApplyLayoutToWidgets uses these as the "no override" fallback
+	// so Reset / Reset All restore the stock look exactly.
+	CaptureWidgetDefaults(this);
+
 	// Load JSON overrides from disk into the live singleton.
-	// The Slate editor (Phase 2) mutates the singleton in place; DrawHUD re-applies
-	// it every frame, so any edit is visible next render tick = live preview.
-	// Missing file = empty layout = no overrides = unchanged behavior.
+	// Slate editor mutates the singleton; DrawHUD re-applies each frame
+	// (gated by a dirty flag) → any edit is visible next render tick.
 	FNCPlusHUDLayout::ReloadLive();
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 }

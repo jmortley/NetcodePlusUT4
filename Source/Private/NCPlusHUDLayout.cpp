@@ -47,6 +47,48 @@ ENCPlusHUDAnchor FNCPlusHUDLayout::ParseAnchor(const FString& Name)
 	return ENCPlusHUDAnchor::Center;
 }
 
+// =============================================================================
+// HP/Armor style enum
+// =============================================================================
+
+namespace NCPlusHPArmorStyle
+{
+	ENCPlusHPArmorStyle Parse(const FString& Name)
+	{
+		FString N = Name;
+		N.Trim();
+		N = N.ToLower();
+		if (N == TEXT("segmentedbars"))     return ENCPlusHPArmorStyle::SegmentedBars;
+		if (N == TEXT("radialarcs"))        return ENCPlusHPArmorStyle::RadialArcs;
+		if (N == TEXT("hexchevrons"))       return ENCPlusHPArmorStyle::HexChevrons;
+		if (N == TEXT("verticalpills"))     return ENCPlusHPArmorStyle::VerticalPills;
+		return ENCPlusHPArmorStyle::MinimalTypography;
+	}
+
+	FString ToString(ENCPlusHPArmorStyle Style)
+	{
+		switch (Style)
+		{
+			case ENCPlusHPArmorStyle::SegmentedBars:    return TEXT("SegmentedBars");
+			case ENCPlusHPArmorStyle::RadialArcs:       return TEXT("RadialArcs");
+			case ENCPlusHPArmorStyle::HexChevrons:      return TEXT("HexChevrons");
+			case ENCPlusHPArmorStyle::VerticalPills:    return TEXT("VerticalPills");
+			default:                                    return TEXT("MinimalTypography");
+		}
+	}
+
+	TArray<TSharedPtr<FString>> GetChoices()
+	{
+		TArray<TSharedPtr<FString>> Out;
+		Out.Add(MakeShareable(new FString(TEXT("MinimalTypography"))));
+		Out.Add(MakeShareable(new FString(TEXT("SegmentedBars"))));
+		Out.Add(MakeShareable(new FString(TEXT("RadialArcs"))));
+		Out.Add(MakeShareable(new FString(TEXT("HexChevrons"))));
+		Out.Add(MakeShareable(new FString(TEXT("VerticalPills"))));
+		return Out;
+	}
+}
+
 FString FNCPlusHUDLayout::AnchorToString(ENCPlusHUDAnchor Anchor)
 {
 	switch (Anchor)
@@ -144,6 +186,19 @@ FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
 			Elem.bHidden = bHidden;
 		}
 
+		// Free-form extras (per-element settings like "style", colors, etc.).
+		// We accept any string-valued top-level keys we don't already recognize.
+		static const TSet<FString> KnownKeys = { TEXT("anchor"), TEXT("offset_x"), TEXT("offset_y"), TEXT("scale"), TEXT("hidden") };
+		for (const auto& Field : E->Values)
+		{
+			if (KnownKeys.Contains(Field.Key)) continue;
+			FString StrVal;
+			if (Field.Value.IsValid() && Field.Value->TryGetString(StrVal))
+			{
+				Elem.Extras.Add(FName(*Field.Key), StrVal);
+			}
+		}
+
 		Layout.Elements.Add(Key, Elem);
 	}
 
@@ -166,6 +221,11 @@ bool FNCPlusHUDLayout::SaveToFile(const FString& Path) const
 		EObj->SetNumberField(TEXT("offset_y"),  E.Offset.Y);
 		EObj->SetNumberField(TEXT("scale"),     E.Scale);
 		EObj->SetBoolField  (TEXT("hidden"),    E.bHidden);
+		// Round-trip extras as string fields next to the known keys.
+		for (const auto& X : E.Extras)
+		{
+			EObj->SetStringField(X.Key.ToString(), X.Value);
+		}
 		ElementsObj->SetObjectField(Pair.Key.ToString(), EObj);
 	}
 	Root->SetObjectField(TEXT("elements"), ElementsObj);
@@ -297,17 +357,84 @@ void FNCPlusHUDLayout::ClearLiveDirty(){ GLiveLayoutDirty = false; }
 // Apply pass
 // =============================================================================
 
+// Defaults snapshot — captured once per HUD lifetime in CaptureWidgetDefaults,
+// consulted by ApplyLayoutToWidgets when an element has no override.
+static TMap<FName, FNCPlusWidgetDefaults> GWidgetDefaults;
+
+// =============================================================================
+// Reflection helpers — UUTHUDWidget_WeaponBar's positioning fields are declared
+// `protected` in C++ even though they're UPROPERTYs. We can't access them via
+// the typed pointer; reflection bypasses the access check.
+// =============================================================================
+
+static FVector2D GetVec2Prop(UObject* Obj, FName PropName, const FVector2D& Fallback)
+{
+	if (!Obj) return Fallback;
+	UStructProperty* SP = FindField<UStructProperty>(Obj->GetClass(), PropName);
+	if (SP && SP->Struct == TBaseStructure<FVector2D>::Get())
+	{
+		if (FVector2D* Ptr = SP->ContainerPtrToValuePtr<FVector2D>(Obj))
+		{
+			return *Ptr;
+		}
+	}
+	return Fallback;
+}
+
+static void SetVec2Prop(UObject* Obj, FName PropName, const FVector2D& Val)
+{
+	if (!Obj) return;
+	UStructProperty* SP = FindField<UStructProperty>(Obj->GetClass(), PropName);
+	if (SP && SP->Struct == TBaseStructure<FVector2D>::Get())
+	{
+		if (FVector2D* Ptr = SP->ContainerPtrToValuePtr<FVector2D>(Obj))
+		{
+			*Ptr = Val;
+		}
+	}
+}
+
+void CaptureWidgetDefaults(AUTHUD* HUD)
+{
+	if (!HUD) return;
+	GWidgetDefaults.Empty();
+	for (UUTHUDWidget* W : HUD->HudWidgets)
+	{
+		if (!W) continue;
+		const FName Alias = NCPlusHUDAliases::GetAliasForClass(W->GetClass());
+		if (Alias == NAME_None) continue;
+
+		FNCPlusWidgetDefaults D;
+		D.ScreenPosition = W->ScreenPosition;
+		D.Position       = W->Position;
+		D.Origin         = W->Origin;
+		D.bHidden        = W->IsHidden();
+
+		// WeaponBar special-case: it self-positions in PreDraw from these
+		// internal fields (declared protected in C++; we use reflection).
+		// Detect by alias rather than UClass to avoid pulling in the header.
+		if (Alias == TEXT("weapon_bar"))
+		{
+			D.bIsWeaponBar      = true;
+			D.WB_HorizScreenPos = GetVec2Prop(W, TEXT("HorizontalScreenPosition"), FVector2D::ZeroVector);
+			D.WB_HorizPos       = GetVec2Prop(W, TEXT("HorizontalPosition"),       FVector2D::ZeroVector);
+			D.WB_VertScreenPos  = GetVec2Prop(W, TEXT("VerticalScreenPosition"),   FVector2D::ZeroVector);
+			D.WB_VertPos        = GetVec2Prop(W, TEXT("VerticalPosition"),         FVector2D::ZeroVector);
+		}
+
+		GWidgetDefaults.Add(Alias, D);
+	}
+	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Captured stock defaults for %d widget(s)."), GWidgetDefaults.Num());
+}
+
 void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 {
 	if (!HUD) return;
 
-	// Fast path: when the layout hasn't changed since last apply AND has no
-	// entries, do nothing. This is the common case during normal gameplay.
+	// Fast path: layout unchanged since last apply → nothing to do.
+	// Defaults restore is handled the same frame the user removed an entry
+	// (which marks dirty), so a "clean" empty layout means nothing changed.
 	if (!FNCPlusHUDLayout::IsLiveDirty() && Layout.Elements.Num() == 0) return;
-
-	// Even when "dirty but empty" (e.g. user just hit Reset), we still walk
-	// HudWidgets[] once to clear hidden state on widgets that may have been
-	// hidden by an earlier layout. Otherwise a Reset wouldn't un-hide anything.
 
 	int32 NumApplied = 0;
 	for (UUTHUDWidget* W : HUD->HudWidgets)
@@ -319,24 +446,61 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 		const FNCPlusHUDElement* Elem = Layout.Find(Alias);
 		if (!Elem)
 		{
-			// No override → make sure we're not still applying a stale hidden flag.
-			if (W->IsHidden()) W->SetHidden(false);
+			// No override → restore stock snapshot so Reset / removed-entry
+			// returns the widget to exactly where the engine put it on spawn.
+			if (FNCPlusWidgetDefaults* D = GWidgetDefaults.Find(Alias))
+			{
+				W->ScreenPosition = D->ScreenPosition;
+				W->Position       = D->Position;
+				W->Origin         = D->Origin;
+				W->SetHidden(D->bHidden);
+
+				if (D->bIsWeaponBar)
+				{
+					SetVec2Prop(W, TEXT("HorizontalScreenPosition"), D->WB_HorizScreenPos);
+					SetVec2Prop(W, TEXT("HorizontalPosition"),       D->WB_HorizPos);
+					SetVec2Prop(W, TEXT("VerticalScreenPosition"),   D->WB_VertScreenPos);
+					SetVec2Prop(W, TEXT("VerticalPosition"),         D->WB_VertPos);
+				}
+			}
+			else if (W->IsHidden())
+			{
+				// No snapshot for some reason — at least un-hide.
+				W->SetHidden(false);
+			}
 			continue;
 		}
 
-		// Apply: ScreenPosition (anchor 0..1), Position (offset in design px), hidden.
-		// Origin intentionally untouched — each widget carries its preferred pivot.
-		W->ScreenPosition = FNCPlusHUDLayout::AnchorToScreenCoords(Elem->Anchor);
+		// Override present.
+		// Set Origin = anchor coords too: the widget's pivot lands AT the anchor
+		// corner, and its bounding box (Size.X × Size.Y) extends inward from
+		// that corner. This is what users intuitively expect for "anchor X" —
+		// e.g. BottomLeft means content sits in the bottom-left, not centered
+		// horizontally over screen X=0.
+		const FVector2D AnchorCoords = FNCPlusHUDLayout::AnchorToScreenCoords(Elem->Anchor);
+		W->ScreenPosition = AnchorCoords;
+		W->Origin         = AnchorCoords;
 		W->Position       = Elem->Offset;
 		W->SetHidden(Elem->bHidden);
-		// Per-widget scale is reserved for Phase 3 (most UUTHUDWidget classes
-		// have non-trivial scale plumbing; one field doesn't propagate cleanly).
+
+		// WeaponBar special-case: it self-positions in PreDraw from its own
+		// Horizontal/Vertical*Position fields, ignoring the generic
+		// ScreenPosition/Position above. Push the override down to BOTH the
+		// horizontal AND vertical sets so it sticks regardless of layout mode.
+		// (Fields are protected in C++ → reflection access.)
+		if (Alias == TEXT("weapon_bar"))
+		{
+			SetVec2Prop(W, TEXT("HorizontalScreenPosition"), AnchorCoords);
+			SetVec2Prop(W, TEXT("HorizontalPosition"),       Elem->Offset);
+			SetVec2Prop(W, TEXT("VerticalScreenPosition"),   AnchorCoords);
+			SetVec2Prop(W, TEXT("VerticalPosition"),         Elem->Offset);
+		}
+		// Scale reserved for Phase 3.
 
 		NumApplied++;
 	}
 
 	FNCPlusHUDLayout::ClearLiveDirty();
-
-	// Verbose log left at Log level so it appears once after a change but not every frame.
-	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Applied layout to %d widget(s)."), NumApplied);
+	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Applied layout: %d override(s), %d default(s) restored."),
+		NumApplied, GWidgetDefaults.Num() - NumApplied);
 }
