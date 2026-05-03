@@ -47,7 +47,11 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 	// AElimPlusHUD is a new class with no DefaultGame.ini section, so
 	// RequiredHudWidgetClasses would be empty. Load standard team-game widgets
 	// via HudWidgetClasses (built after RequiredHudWidgetClasses in BeginPlay).
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"));
+	// Custom split WeaponBar — two independent strips. Replaces stock bpHW_WeaponBar.
+	// Per-side anchor + offset come from the layout; per-weapon side assignment
+	// from the layout's weapon_groups block.
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
 	// Removed bpHW_Paperdoll — when the user hides stock QuickStats (which we want,

@@ -63,7 +63,7 @@ namespace NCPlusHPArmorStyle
 	NETCODEPLUS_API TArray<TSharedPtr<FString>> GetChoices();
 }
 
-/** Whole-HUD layout config. Keyed by alias (e.g. "hp_armor", "weapon_bar"). */
+/** Whole-HUD layout config. Keyed by alias (e.g. "hp_armor", "weapon_bar_left"). */
 struct FNCPlusHUDLayout
 {
 	static const int32 SchemaVersion = 1;
@@ -71,7 +71,20 @@ struct FNCPlusHUDLayout
 	int32 Version = SchemaVersion;
 	TMap<FName, FNCPlusHUDElement> Elements;
 
+	/** Weapon class short name (e.g. "UTWeap_Sniper") → "left" or "right".
+	 *  Drives the custom split WeaponBar (see NCPlusHUDWidget_WeaponBar).
+	 *  Unassigned weapons fall back to GetDefaultWeaponSide(). */
+	TMap<FName, FName> WeaponGroupAssignments;
+
 	const FNCPlusHUDElement* Find(FName ElementId) const;
+
+	/** Return "left" or "right" for a weapon class.
+	 *  Honors WeaponGroupAssignments first; falls back to a built-in heuristic
+	 *  (hitscan-ish names → left; everything else → right). */
+	FName GetWeaponSide(UClass* WeaponClass) const;
+
+	/** Built-in default for unassigned weapons. */
+	static FName GetDefaultWeaponSide(UClass* WeaponClass);
 
 	/** Load from a JSON file. Returns empty layout if file missing or parse fails. */
 	static FNCPlusHUDLayout LoadFromFile(const FString& Path);

@@ -2,6 +2,10 @@
 #include "SNCPlusHUDEditor.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
+#include "UTPlayerController.h"
+#include "UTCharacter.h"
+#include "UTWeapon.h"
+#include "UTInventory.h"
 #include "Widgets/Input/SNumericEntryBox.h"
 #include "Widgets/Input/STextComboBox.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -9,6 +13,7 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SSeparator.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -70,6 +75,8 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			[ BuildRow(Row) ];
 	}
 
+	GatherWeaponsForPicker();
+
 	ChildSlot
 	[
 		SNew(SOverlay)
@@ -78,7 +85,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		.VAlign(VAlign_Center)
 		[
 			SNew(SBox)
-			.WidthOverride(720.f)
+			.WidthOverride(740.f)
 			[
 				SNew(SBorder)
 				.BorderImage(&BackgroundBrush)
@@ -90,6 +97,13 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 					[
 						SNew(SScrollBox)
 						+ SScrollBox::Slot() [ RowList.ToSharedRef() ]
+						+ SScrollBox::Slot()
+						[
+							SNew(SVerticalBox)
+							+ SVerticalBox::Slot().AutoHeight().Padding(0,12,0,4)
+							[ SNew(SSeparator) ]
+							+ SVerticalBox::Slot().AutoHeight() [ BuildWeaponPicker() ]
+						]
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0) [ BuildFooter() ]
 				]
@@ -415,6 +429,137 @@ FReply SNCPlusHUDEditor::OnCloseClicked()
 {
 	ClosePanel();
 	return FReply::Handled();
+}
+
+// =============================================================================
+// Weapon group picker
+// =============================================================================
+
+void SNCPlusHUDEditor::GatherWeaponsForPicker()
+{
+	WeaponPicker.Empty();
+	if (!PlayerOwner.IsValid() || !PlayerOwner->PlayerController) return;
+	AUTCharacter* UTChar = Cast<AUTCharacter>(PlayerOwner->PlayerController->GetPawn());
+	if (!UTChar) return;
+
+	TSet<FName> Seen;
+	for (TInventoryIterator<AUTWeapon> It(UTChar); It; ++It)
+	{
+		AUTWeapon* W = *It;
+		if (!W || !W->GetClass()) continue;
+		const FName Key(*W->GetClass()->GetName());
+		if (Seen.Contains(Key)) continue;
+		Seen.Add(Key);
+
+		FNCHUDWeaponPickerEntry E;
+		E.ClassKey = Key;
+		// Pretty display name: strip common prefixes / suffixes.
+		FString Name = W->GetClass()->GetName();
+		Name.ReplaceInline(TEXT("BP_"), TEXT(""));
+		Name.ReplaceInline(TEXT("_C"), TEXT(""));
+		Name.ReplaceInline(TEXT("UTWeap_"), TEXT(""));
+		Name.ReplaceInline(TEXT("UTPlus"), TEXT(""));
+		Name.ReplaceInline(TEXT("_Plus"), TEXT(""));
+		Name.ReplaceInline(TEXT("_"), TEXT(" "));
+		E.DisplayName = Name;
+		WeaponPicker.Add(E);
+	}
+
+	// Sort alphabetically for predictable order.
+	WeaponPicker.Sort([](const FNCHUDWeaponPickerEntry& A, const FNCHUDWeaponPickerEntry& B) {
+		return A.DisplayName < B.DisplayName;
+	});
+}
+
+TSharedRef<SWidget> SNCPlusHUDEditor::BuildWeaponPicker()
+{
+	TSharedPtr<SVerticalBox> Box;
+	SAssignNew(Box, SVerticalBox)
+	+ SVerticalBox::Slot().AutoHeight().Padding(0,0,0,4)
+	[
+		SNew(STextBlock)
+		.Text(FText::FromString(TEXT("Weapon Group Assignments")))
+		.ColorAndOpacity(FLinearColor(0.95f, 0.95f, 0.95f, 1.f))
+	]
+	+ SVerticalBox::Slot().AutoHeight().Padding(0,0,0,6)
+	[
+		SNew(STextBlock)
+		.Text(FText::FromString(TEXT("Pick which side of the WeaponBar each weapon shows on. Unassigned = default (hitscan → Left, others → Right).")))
+		.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+		.AutoWrapText(true)
+	];
+
+	if (WeaponPicker.Num() == 0)
+	{
+		Box->AddSlot().AutoHeight().Padding(0,4,0,0)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("(Open this panel during a match to discover your inventory's weapons.)")))
+			.ColorAndOpacity(FLinearColor(0.5f, 0.5f, 0.5f, 1.f))
+		];
+	}
+	else
+	{
+		for (const FNCHUDWeaponPickerEntry& W : WeaponPicker)
+		{
+			Box->AddSlot().AutoHeight().Padding(0,2,0,0) [ BuildWeaponPickerRow(W) ];
+		}
+	}
+
+	return Box.ToSharedRef();
+}
+
+TSharedRef<SWidget> SNCPlusHUDEditor::BuildWeaponPickerRow(const FNCHUDWeaponPickerEntry& W)
+{
+	const FName Key = W.ClassKey;
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[
+			SNew(SBox).WidthOverride(220.f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(W.DisplayName))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[
+			SNew(SCheckBox)
+			.Style(FCoreStyle::Get(), "RadioButton")
+			.IsChecked(this, &SNCPlusHUDEditor::GetWeaponSideState, Key, FName(TEXT("left")))
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnWeaponSideCheckChanged, Key, FName(TEXT("left")))
+			.Content() [ SNew(STextBlock).Text(FText::FromString(TEXT("Left"))) ]
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[
+			SNew(SCheckBox)
+			.Style(FCoreStyle::Get(), "RadioButton")
+			.IsChecked(this, &SNCPlusHUDEditor::GetWeaponSideState, Key, FName(TEXT("right")))
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnWeaponSideCheckChanged, Key, FName(TEXT("right")))
+			.Content() [ SNew(STextBlock).Text(FText::FromString(TEXT("Right"))) ]
+		];
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetWeaponSideState(FName ClassKey, FName Side) const
+{
+	const FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
+	const FName* Assigned = L.WeaponGroupAssignments.Find(ClassKey);
+	const FName Effective = Assigned ? *Assigned :
+		FNCPlusHUDLayout::GetDefaultWeaponSide(FindObject<UClass>(ANY_PACKAGE, *ClassKey.ToString()));
+	return (Effective == Side) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnWeaponSideCheckChanged(ECheckBoxState State, FName ClassKey, FName Side)
+{
+	if (State != ECheckBoxState::Checked) return;  // radio behavior — only react to "checked"
+	OnWeaponSideChanged(ClassKey, Side);
+}
+
+void SNCPlusHUDEditor::OnWeaponSideChanged(FName ClassKey, FName NewSide)
+{
+	FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
+	L.WeaponGroupAssignments.Add(ClassKey, NewSide);
+	FNCPlusHUDLayout::MarkLiveDirty();
 }
 
 void SNCPlusHUDEditor::SetStatus(const FString& Msg)

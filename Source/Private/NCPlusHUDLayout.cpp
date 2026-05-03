@@ -107,12 +107,40 @@ FString FNCPlusHUDLayout::AnchorToString(ENCPlusHUDAnchor Anchor)
 }
 
 // =============================================================================
-// Find
+// Find + WeaponBar side resolution
 // =============================================================================
 
 const FNCPlusHUDElement* FNCPlusHUDLayout::Find(FName ElementId) const
 {
 	return Elements.Find(ElementId);
+}
+
+FName FNCPlusHUDLayout::GetDefaultWeaponSide(UClass* WeaponClass)
+{
+	if (!WeaponClass) return TEXT("right");
+	const FString N = WeaponClass->GetName().ToLower();
+	// Hitscan-ish weapons go on the left. Catches both stock (UTWeap_Sniper,
+	// LightningGun, ShockRifle, Enforcer) and our NetcodePlus subclasses
+	// (UTPlusSniper, UTPlusShockRifle, etc.) by substring match.
+	if (N.Contains(TEXT("sniper"))    ||
+	    N.Contains(TEXT("lightning")) ||
+	    N.Contains(TEXT("shock"))     ||
+	    N.Contains(TEXT("enforcer")))
+	{
+		return TEXT("left");
+	}
+	return TEXT("right");
+}
+
+FName FNCPlusHUDLayout::GetWeaponSide(UClass* WeaponClass) const
+{
+	if (!WeaponClass) return TEXT("right");
+	const FName ClassKey(*WeaponClass->GetName());
+	if (const FName* Assigned = WeaponGroupAssignments.Find(ClassKey))
+	{
+		return *Assigned;
+	}
+	return GetDefaultWeaponSide(WeaponClass);
 }
 
 // =============================================================================
@@ -202,7 +230,27 @@ FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
 		Layout.Elements.Add(Key, Elem);
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Loaded %d element(s) from %s"), Layout.Elements.Num(), *Path);
+	// weapon_groups: top-level object mapping class short-name → "left"/"right".
+	const TSharedPtr<FJsonObject>* WGObjPtr = nullptr;
+	if (Root->TryGetObjectField(TEXT("weapon_groups"), WGObjPtr) && WGObjPtr && (*WGObjPtr).IsValid())
+	{
+		for (const auto& Pair : (*WGObjPtr)->Values)
+		{
+			FString Side;
+			if (Pair.Value.IsValid() && Pair.Value->TryGetString(Side))
+			{
+				FString SideLow = Side;
+				SideLow = SideLow.ToLower();
+				if (SideLow == TEXT("left") || SideLow == TEXT("right"))
+				{
+					Layout.WeaponGroupAssignments.Add(FName(*Pair.Key), FName(*SideLow));
+				}
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Loaded %d element(s), %d weapon group(s) from %s"),
+		Layout.Elements.Num(), Layout.WeaponGroupAssignments.Num(), *Path);
 	return Layout;
 }
 
@@ -229,6 +277,17 @@ bool FNCPlusHUDLayout::SaveToFile(const FString& Path) const
 		ElementsObj->SetObjectField(Pair.Key.ToString(), EObj);
 	}
 	Root->SetObjectField(TEXT("elements"), ElementsObj);
+
+	// weapon_groups
+	if (WeaponGroupAssignments.Num() > 0)
+	{
+		TSharedRef<FJsonObject> WGObj = MakeShareable(new FJsonObject);
+		for (const auto& Pair : WeaponGroupAssignments)
+		{
+			WGObj->SetStringField(Pair.Key.ToString(), Pair.Value.ToString());
+		}
+		Root->SetObjectField(TEXT("weapon_groups"), WGObj);
+	}
 
 	FString Out;
 	TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer
@@ -266,7 +325,9 @@ namespace NCPlusHUDAliases
 			// Display order = list-view order in the editor. Group by region.
 			T.Add({ TEXT("hp_armor"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),                          FText::FromString(TEXT("Health & Armor")) });
 			T.Add({ TEXT("weapon_info"),      TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"),  FText::FromString(TEXT("Weapon Info / Ammo")) });
-			T.Add({ TEXT("weapon_bar"),       TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"),    FText::FromString(TEXT("Weapon Bar")) });
+			// Custom split WeaponBar — two independent positionable strips.
+			T.Add({ TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                    FText::FromString(TEXT("Weapon Bar (Left)")) });
+			T.Add({ TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                   FText::FromString(TEXT("Weapon Bar (Right)")) });
 			T.Add({ TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")) });
 			T.Add({ TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")) });
 			T.Add({ TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")) });
@@ -439,8 +500,10 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 	int32 NumApplied = 0;
 	for (UUTHUDWidget* W : HUD->HudWidgets)
 	{
-		if (!W) continue;
-		const FName Alias = NCPlusHUDAliases::GetAliasForClass(W->GetClass());
+		if (!W || W->IsPendingKill()) continue;
+		UClass* WClass = W->GetClass();
+		if (!WClass) continue;
+		const FName Alias = NCPlusHUDAliases::GetAliasForClass(WClass);
 		if (Alias == NAME_None) continue;
 
 		const FNCPlusHUDElement* Elem = Layout.Find(Alias);

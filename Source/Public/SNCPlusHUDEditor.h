@@ -42,6 +42,20 @@ private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
 	TArray<FNCHUDEditorRow> Rows;
 
+	// Weapon-group picker state — discovered at panel open.
+	struct FNCHUDWeaponPickerEntry
+	{
+		FName    ClassKey;       // short class name, used for layout assignments
+		FString  DisplayName;    // pretty-cleaned name shown in the editor
+	};
+	TArray<FNCHUDWeaponPickerEntry> WeaponPicker;
+	void GatherWeaponsForPicker();
+	TSharedRef<class SWidget> BuildWeaponPicker();
+	TSharedRef<class SWidget> BuildWeaponPickerRow(const FNCHUDWeaponPickerEntry& W);
+	void OnWeaponSideChanged(FName ClassKey, FName NewSide);
+	ECheckBoxState GetWeaponSideState(FName ClassKey, FName Side) const;
+	void OnWeaponSideCheckChanged(ECheckBoxState State, FName ClassKey, FName Side);
+
 	// Build / rebuild handlers
 	TSharedRef<class SWidget> BuildHeader();
 	TSharedRef<class SWidget> BuildRow(FNCHUDEditorRow& Row);

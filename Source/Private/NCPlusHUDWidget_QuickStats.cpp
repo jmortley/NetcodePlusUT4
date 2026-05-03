@@ -252,14 +252,16 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 	const float RowY[2]    = { 14.f, 14.f + SegH + RowGap };
 	const float StripStartX = NumWidth + 10.f;
 
+	const float NumScale = 0.70f;   // small enough to vertically fit inside SegH
+	const float NumNudgeY = -4.f;   // visual centering compensates for font asymmetry
+
 	auto DrawRow = [&](int32 Value, int32 SegCount, float Y,
 	                   const FLinearColor& FillColor, float Pulse)
 	{
-		// Number on the left, vertically CENTERED on the segment row's midpoint
-		// so the digit baseline aligns with the segments visually.
-		DrawText(FText::AsNumber(Value), NumWidth, Y + SegH * 0.5f, NumberFont,
+		// Number on the left, visually centered on the segment row's midpoint.
+		DrawText(FText::AsNumber(Value), NumWidth, Y + SegH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			0.95f, 1.0f, FillColor,
+			NumScale, 1.0f, FillColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
 
 		FLinearColor PulsedFill = FillColor;
@@ -272,7 +274,6 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 		for (int32 i = 0; i < SegCount; i++)
 		{
 			const float X = StripStartX + i * (SegW + SegGap);
-			// Empty background cell first
 			DrawTexture(Canvas->DefaultTexture, X, Y, SegW, SegH, 0, 0, 1, 1, 1.0f, EmptyOutline);
 			if (i < FullCount)
 			{
@@ -462,13 +463,16 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 	const float StripX   = NumWidth + 10.f;
 	const float RowY[2]  = { 14.f, 14.f + ChevH + 18.f };
 
+	const float NumScale = 0.75f;   // small enough to fit inside ChevH visually
+	const float NumNudgeY = -4.f;   // compensate for font glyph-box asymmetry
+
 	auto DrawRow = [&](int32 Value, int32 SegCount, float Y,
 	                   const FLinearColor& FillColor, float Pulse)
 	{
-		// Number on the left, vertically centered on the chevron row.
-		DrawText(FText::AsNumber(Value), NumWidth, Y + ChevH * 0.5f, NumberFont,
+		// Number on the left, visually centered on the chevron row.
+		DrawText(FText::AsNumber(Value), NumWidth, Y + ChevH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			0.95f, 1.0f, FillColor,
+			NumScale, 1.0f, FillColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
 
 		const FLinearColor EmptyOutline(0.18f, 0.20f, 0.18f, 0.55f);
