@@ -57,6 +57,12 @@ private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
 	TArray<FNCHUDEditorRow> Rows;
 
+	// True while we're programmatically updating combo selections (Reset / Reload /
+	// Reset All). Anchor and Style change callbacks honor it and skip MutateElement,
+	// otherwise the SetSelectedItem call would fire OnAnchorSelected → re-create the
+	// layout entry we just deleted in Reset.
+	bool bSuppressComboCallbacks = false;
+
 	// Weapon-group picker state — discovered at panel open.
 	struct FNCHUDWeaponPickerEntry
 	{

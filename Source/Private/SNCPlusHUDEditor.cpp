@@ -14,6 +14,7 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSeparator.h"
+#include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -23,6 +24,35 @@ namespace NCHUDEdit
 	static const float NumericInputWidth  = 80.f;
 	static const float ComboWidth         = 130.f;
 	static const float DisplayNameWidth   = 180.f;
+
+	// Section grouping for the editor's collapsible UI (Phase 3.6).
+	static FString GetSectionForAlias(FName Alias)
+	{
+		if (Alias == TEXT("hp_armor"))
+		{
+			return TEXT("HP / Armor");
+		}
+		if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
+		{
+			return TEXT("Weapon Bars");
+		}
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar"))
+		{
+			return TEXT("Top Bar (Portraits + Scorebar)");
+		}
+		return TEXT("Stock Widgets");
+	}
+
+	static const TArray<FString>& GetSectionOrder()
+	{
+		static const TArray<FString> Order = {
+			TEXT("HP / Armor"),
+			TEXT("Weapon Bars"),
+			TEXT("Top Bar (Portraits + Scorebar)"),
+			TEXT("Stock Widgets"),
+		};
+		return Order;
+	}
 
 	static TArray<TSharedPtr<FString>> BuildAnchorChoices()
 	{
@@ -84,23 +114,50 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Rows.Add(Row);
 	}
 
+	// Group rows by section (Phase 3.6 — SExpandableArea-based UI).
+	TMap<FString, TArray<int32>> SectionRows;
+	for (int32 i = 0; i < Rows.Num(); i++)
+	{
+		const FString Section = NCHUDEdit::GetSectionForAlias(Rows[i].Alias);
+		SectionRows.FindOrAdd(Section).Add(i);
+	}
+
 	TSharedPtr<SVerticalBox> RowList;
 	SAssignNew(RowList, SVerticalBox);
 
-	for (FNCHUDEditorRow& Row : Rows)
+	for (const FString& Section : NCHUDEdit::GetSectionOrder())
 	{
-		TSharedPtr<SVerticalBox> RowBox;
-		SAssignNew(RowBox, SVerticalBox)
-		+ SVerticalBox::Slot().AutoHeight() [ BuildRow(Row) ];
-		if (Row.Colors.Num() > 0)
+		const TArray<int32>* Indices = SectionRows.Find(Section);
+		if (!Indices || Indices->Num() == 0) continue;
+
+		TSharedPtr<SVerticalBox> SectionBody;
+		SAssignNew(SectionBody, SVerticalBox);
+		for (int32 Idx : *Indices)
 		{
-			RowBox->AddSlot().AutoHeight().Padding(8.f, 1.f, 0.f, 0.f) [ BuildColorRow(Row) ];
+			FNCHUDEditorRow& Row = Rows[Idx];
+			TSharedPtr<SVerticalBox> RowBox;
+			SAssignNew(RowBox, SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight() [ BuildRow(Row) ];
+			if (Row.Colors.Num() > 0)
+			{
+				RowBox->AddSlot().AutoHeight().Padding(8.f, 1.f, 0.f, 0.f) [ BuildColorRow(Row) ];
+			}
+			SectionBody->AddSlot().AutoHeight().Padding(2.f) [ RowBox.ToSharedRef() ];
 		}
 
-		RowList->AddSlot()
-			.AutoHeight()
-			.Padding(2.f)
-			[ RowBox.ToSharedRef() ];
+		// Default-open: HP/Armor (the headline element). Others collapsed
+		// so the panel stays compact at lower resolutions.
+		const bool bCollapsed = (Section != TEXT("HP / Armor"));
+		RowList->AddSlot().AutoHeight().Padding(0, 4)
+		[
+			SNew(SExpandableArea)
+			.InitiallyCollapsed(bCollapsed)
+			.AreaTitle(FText::FromString(Section))
+			.BodyContent()
+			[
+				SectionBody.ToSharedRef()
+			]
+		];
 	}
 
 	GatherWeaponsForPicker();
@@ -128,9 +185,14 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 						+ SScrollBox::Slot()
 						[
 							SNew(SVerticalBox)
-							+ SVerticalBox::Slot().AutoHeight().Padding(0,12,0,4)
-							[ SNew(SSeparator) ]
-							+ SVerticalBox::Slot().AutoHeight() [ BuildWeaponPicker() ]
+							+ SVerticalBox::Slot().AutoHeight().Padding(0, 4)
+							[
+								SNew(SExpandableArea)
+								.InitiallyCollapsed(true)
+								.AreaTitle(FText::FromString(TEXT("Weapon Group Assignments")))
+								.BodyContent()
+								[ BuildWeaponPicker() ]
+							]
 						]
 					]
 					+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0) [ BuildFooter() ]
@@ -434,6 +496,7 @@ void SNCPlusHUDEditor::OnOpacityCommitted(float NewVal, ETextCommit::Type, FName
 
 void SNCPlusHUDEditor::OnAnchorSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias)
 {
+	if (bSuppressComboCallbacks) return;  // skip during programmatic resync (Reset / Reload)
 	if (!NewSel.IsValid()) return;
 	const ENCPlusHUDAnchor NewAnchor = FNCPlusHUDLayout::ParseAnchor(*NewSel);
 	MutateElement(Alias, [NewAnchor](FNCPlusHUDElement& E){ E.Anchor = NewAnchor; });
@@ -441,6 +504,7 @@ void SNCPlusHUDEditor::OnAnchorSelected(TSharedPtr<FString> NewSel, ESelectInfo:
 
 void SNCPlusHUDEditor::OnStyleSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias)
 {
+	if (bSuppressComboCallbacks) return;
 	if (!NewSel.IsValid()) return;
 	const FString NewStyle = *NewSel;
 	MutateElement(Alias, [&NewStyle](FNCPlusHUDElement& E){
@@ -456,7 +520,10 @@ FReply SNCPlusHUDEditor::OnResetRowClicked(FName Alias)
 		FNCPlusHUDLayout::MarkLiveDirty();
 		SetStatus(FString::Printf(TEXT("Reset '%s'."), *Alias.ToString()));
 
-		// Re-sync the anchor + style combos to defaults.
+		// Suppress callbacks while we resync combos — otherwise SetSelectedItem
+		// fires OnAnchorSelected/OnStyleSelected → MutateElement → re-creates the
+		// entry we just deleted.
+		TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
 		for (FNCHUDEditorRow& Row : Rows)
 		{
 			if (Row.Alias != Alias) continue;
@@ -486,7 +553,8 @@ FReply SNCPlusHUDEditor::OnReloadClicked()
 	FNCPlusHUDLayout::ReloadLive();
 	SetStatus(TEXT("Reloaded from disk."));
 
-	// Sync anchor + style combos to reloaded values.
+	// Sync anchor + style combos to reloaded values (suppress callbacks).
+	TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
 	for (FNCHUDEditorRow& Row : Rows)
 	{
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Row.Alias);
@@ -509,6 +577,7 @@ FReply SNCPlusHUDEditor::OnResetAllClicked()
 {
 	FNCPlusHUDLayout::ResetLive();
 	SetStatus(TEXT("All overrides cleared."));
+	TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
 	for (FNCHUDEditorRow& Row : Rows)
 	{
 		if (Row.AnchorCombo.IsValid())
@@ -659,14 +728,10 @@ void SNCPlusHUDEditor::GatherWeaponsForPicker()
 
 TSharedRef<SWidget> SNCPlusHUDEditor::BuildWeaponPicker()
 {
+	// Header text now lives in the SExpandableArea title; just include the
+	// hint blurb here for context.
 	TSharedPtr<SVerticalBox> Box;
 	SAssignNew(Box, SVerticalBox)
-	+ SVerticalBox::Slot().AutoHeight().Padding(0,0,0,4)
-	[
-		SNew(STextBlock)
-		.Text(FText::FromString(TEXT("Weapon Group Assignments")))
-		.ColorAndOpacity(FLinearColor(0.95f, 0.95f, 0.95f, 1.f))
-	]
 	+ SVerticalBox::Slot().AutoHeight().Padding(0,0,0,6)
 	[
 		SNew(STextBlock)

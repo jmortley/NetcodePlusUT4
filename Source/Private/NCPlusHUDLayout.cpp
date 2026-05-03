@@ -395,7 +395,13 @@ namespace NCPlusHUDAliases
 		FName    Alias;
 		FString  ClassPath;     // empty for draw-call elements
 		FText    DisplayName;
-		bool     bIsDrawCall = false;  // true → no widget; HUD's DrawHUD consults layout directly
+		bool     bIsDrawCall;   // true → no widget; HUD's DrawHUD consults layout directly
+
+		// Explicit constructors so brace-init still works in UE4 4.15 (which
+		// can't deduce aggregate-init when a member has a default initializer).
+		FAliasEntry(FName InAlias, FString InPath, FText InName, bool bInDrawCall = false)
+			: Alias(InAlias), ClassPath(MoveTemp(InPath)), DisplayName(MoveTemp(InName)), bIsDrawCall(bInDrawCall)
+		{}
 	};
 
 	static const TArray<FAliasEntry>& GetAliasTable()
@@ -404,23 +410,23 @@ namespace NCPlusHUDAliases
 		{
 			TArray<FAliasEntry> T;
 			// Display order = list-view order in the editor. Group by region.
-			T.Add({ TEXT("hp_armor"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),                          FText::FromString(TEXT("Health & Armor")) });
-			T.Add({ TEXT("weapon_info"),      TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"),  FText::FromString(TEXT("Weapon Info / Ammo")) });
-			// Custom split WeaponBar — two independent positionable strips.
-			T.Add({ TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                    FText::FromString(TEXT("Weapon Bar (Left)")) });
-			T.Add({ TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                   FText::FromString(TEXT("Weapon Bar (Right)")) });
-			T.Add({ TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")) });
-			T.Add({ TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")) });
-			T.Add({ TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")) });
-			T.Add({ TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")) });
-			T.Add({ TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")) });
-			T.Add({ TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")) });
-			T.Add({ TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")) });
-			// C++-drawn pieces (Phase 3.5). No UClass — HUD's DrawHUD consults the layout
-			// for these via NCPlusHUDDrawCall::ResolveScreenPos.
-			T.Add({ TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),     true });
-			T.Add({ TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),    true });
-			T.Add({ TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),   true });
+			// Use Emplace (positional ctor args) instead of Add({...}) to avoid
+			// C4868 (left-to-right eval order in braced-init-list) on /W4.
+			T.Emplace(TEXT("hp_armor"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),                          FText::FromString(TEXT("Health & Armor")));
+			T.Emplace(TEXT("weapon_info"),      TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"),  FText::FromString(TEXT("Weapon Info / Ammo")));
+			T.Emplace(TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                      FText::FromString(TEXT("Weapon Bar (Left)")));
+			T.Emplace(TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                     FText::FromString(TEXT("Weapon Bar (Right)")));
+			T.Emplace(TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")));
+			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")));
+			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")));
+			T.Emplace(TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")));
+			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")));
+			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")));
+			T.Emplace(TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")));
+			// C++-drawn pieces (Phase 3.5).
+			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),     true);
+			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),    true);
+			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),   true);
 			return T;
 		}();
 		return Table;
