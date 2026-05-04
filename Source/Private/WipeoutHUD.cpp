@@ -227,9 +227,13 @@ void AWipeoutHUD::DrawHUD()
 		// the anchor coordinate. Lets dragging the strip across screen-center
 		// (via nchud_drag) auto-flip growth so the visible strip stays on
 		// screen instead of extending off the now-far edge.
-		const float ScreenHalfX  = Canvas->ClipX * 0.5f;
-		const float RedGrowSign  = (RedStart.X  < ScreenHalfX) ? +1.f : -1.f;
-		const float BlueGrowSign = (BlueStart.X < ScreenHalfX) ? +1.f : -1.f;
+		// Team-defaulted grow direction; flip only if default would clip
+		// off-screen. See ElimPlusHUD for full rationale.
+		const float EstStripWidth = 5.f * XAdjust;
+		float RedGrowSign  = -1.f;
+		float BlueGrowSign = +1.f;
+		if (RedStart.X  - EstStripWidth < 0.f)             RedGrowSign  = +1.f;
+		if (BlueStart.X + EstStripWidth > Canvas->ClipX)   BlueGrowSign = -1.f;
 
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;

@@ -234,13 +234,15 @@ void AElimPlusHUD::DrawHUD()
 		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
 		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
 
-		// Per-strip grow direction — derived from RESOLVED screen position, not
-		// the anchor coordinate. Lets dragging the strip across screen-center
-		// (via nchud_drag) auto-flip growth so the visible strip stays on
-		// screen instead of extending off the now-far edge.
-		const float ScreenHalfX  = Canvas->ClipX * 0.5f;
-		const float RedGrowSign  = (RedStart.X  < ScreenHalfX) ? +1.f : -1.f;
-		const float BlueGrowSign = (BlueStart.X < ScreenHalfX) ? +1.f : -1.f;
+		// Per-strip grow direction — team-defaulted (red grows leftward, blue
+		// grows rightward, matching conventional CTF/elim layouts). Only flip
+		// when the default direction would push the strip off-screen — handles
+		// edge-anchored placements (TopLeft / TopRight) and aggressive drags.
+		const float EstStripWidth = 5.f * XAdjust;  // 5 pips × spacing — worst-case team size
+		float RedGrowSign  = -1.f;  // red default: extend leftward from anchor
+		float BlueGrowSign = +1.f;  // blue default: extend rightward from anchor
+		if (RedStart.X  - EstStripWidth < 0.f)               RedGrowSign  = +1.f;
+		if (BlueStart.X + EstStripWidth > Canvas->ClipX)     BlueGrowSign = -1.f;
 
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
