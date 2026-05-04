@@ -108,8 +108,11 @@ void AShockDomHUD::DrawControlPointIndicators(const TArray<AShockDomControlPoint
 	if (NCPlusHUDDrawCall::IsHidden(TEXT("shockdom_controls"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
-	const float IndicatorSize = 30.f * RenderScale;
-	const float Spacing = 10.f * RenderScale;
+	// Phase 3.11: shockdom_controls Scale override sizes the whole indicator
+	// strip (and its label font below) uniformly.
+	const float CtrlScale = NCPlusHUDDrawCall::GetScale(TEXT("shockdom_controls"));
+	const float IndicatorSize = 30.f * RenderScale * CtrlScale;
+	const float Spacing = 10.f * RenderScale * CtrlScale;
 	const float TotalWidth = Points.Num() * IndicatorSize + (Points.Num() - 1) * Spacing;
 
 	// Phase 3.5+ layout consult — anchor + offset for the whole strip.
@@ -151,7 +154,7 @@ void AShockDomHUD::DrawControlPointIndicators(const TArray<AShockDomControlPoint
 		// Point label centered
 		FString Label = CP->PointLabel;
 		float TextW, TextH;
-		float FontScale = RenderScale * 0.7f;
+		float FontScale = RenderScale * 0.7f * CtrlScale;
 		Canvas->TextSize(SmallFont, Label, TextW, TextH, FontScale, FontScale);
 
 		float TextX = XPos + (IndicatorSize - TextW) * 0.5f;

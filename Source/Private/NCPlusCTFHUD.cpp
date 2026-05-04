@@ -133,9 +133,11 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
 
 	// Dimensions
-	const float BarWidth = 220.f * RenderScale;
-	const float BarHeight = 36.f * RenderScale;
-	const float ScoreBoxWidth = 50.f * RenderScale;
+	// Phase 3.11: scorebar Scale override scales bar + clock font uniformly.
+	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
+	const float BarWidth = 220.f * RenderScale * ScoreScale;
+	const float BarHeight = 36.f * RenderScale * ScoreScale;
+	const float ScoreBoxWidth = 50.f * RenderScale * ScoreScale;
 	const float GapWidth = 8.f * RenderScale;
 
 	// Team 0 (left)
@@ -157,7 +159,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
 	// Score tails
-	float TailHeight = 14.f * RenderScale;
+	float TailHeight = 14.f * RenderScale * ScoreScale;
 	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
 	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
@@ -168,8 +170,8 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
 	// Text
-	float FontScale = RenderScale * 0.85f;
-	float LargeFontScale = RenderScale * 1.2f;
+	float FontScale = RenderScale * 0.85f * ScoreScale;
+	float LargeFontScale = RenderScale * 1.2f * ScoreScale;
 	float XL, YL;
 
 	// Team 0 name

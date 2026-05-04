@@ -74,4 +74,7 @@ private:
 	void      OnContextReset(FName Alias);
 	void      OnContextToggleOrientation(FName Alias);
 	void      OnContextProperties(FName Alias);
+	// Scale presets submenu (Phase 3.11c).
+	void      BuildScaleSubMenu(class FMenuBuilder& MenuBuilder, FName Alias);
+	void      OnContextSetScale(FName Alias, float Scale);
 };

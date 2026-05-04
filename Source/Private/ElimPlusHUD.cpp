@@ -215,6 +215,12 @@ void AElimPlusHUD::DrawHUD()
 		const float TeammateScale = 0.4f;
 
 		const float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
+		// Phase 3.11: per-strip Scale override. Layout entries can independently
+		// resize red vs blue (e.g. user wants their team larger).
+		const float RedScale  = NCPlusHUDDrawCall::GetScale(TEXT("portrait_red"));
+		const float BlueScale = NCPlusHUDDrawCall::GetScale(TEXT("portrait_blue"));
+		const float RedPipSize  = BasePipSize * RedScale;
+		const float BluePipSize = BasePipSize * BlueScale;
 		const float XAdjust = BasePipSize * 1.1f;
 
 		// Stock fallback positions.
@@ -240,9 +246,10 @@ void AElimPlusHUD::DrawHUD()
 		float XOffsetBlue = BlueStart.X;
 		// When growing leftward, the resolved point is the strip's RIGHT edge —
 		// shift the first pip left by its width so its right edge sits at the
-		// anchor instead of extending off-screen.
-		if (RedGrowSign  < 0.f) XOffsetRed  -= BasePipSize;
-		if (BlueGrowSign < 0.f) XOffsetBlue -= BasePipSize;
+		// anchor instead of extending off-screen. Use the per-side scaled pip
+		// size so the right-edge alignment stays correct under custom Scale.
+		if (RedGrowSign  < 0.f) XOffsetRed  -= RedPipSize;
+		if (BlueGrowSign < 0.f) XOffsetBlue -= BluePipSize;
 		const float YOffsetRed  = RedStart.Y;
 		const float YOffsetBlue = BlueStart.Y;
 		const float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split
@@ -280,7 +287,11 @@ void AElimPlusHUD::DrawHUD()
 		for (AUTPlayerState* UTPS : LivePlayers)
 		{
 			const float OwnerPipScaling = (UTPS == GetScorerPlayerState()) ? 1.25f : 1.f;
-			const float PipSize = BasePipSize * OwnerPipScaling;
+			// Per-team pip size: red strip honors portrait_red.Scale, blue honors
+			// portrait_blue.Scale. Scoring-player gets a 1.25x bump on top.
+			const uint8 PreTeamIdx = UTPS ? UTPS->GetTeamNum() : 255;
+			const float TeamPipBase = (PreTeamIdx == 1) ? BluePipSize : RedPipSize;
+			const float PipSize = TeamPipBase * OwnerPipScaling;
 			const float PipHeight = PipSize * (320.0f / 224.0f);
 
 			// Alive check — server uses controller's pawn directly; clients fall
@@ -501,9 +512,12 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
 	const int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
 
-	const float BarWidth = 220.f * RenderScale;
-	const float BarHeight = 36.f * RenderScale;
-	const float ScoreBoxWidth = 50.f * RenderScale;
+	// Phase 3.11: scorebar Scale override scales the whole bar (and clock font
+	// scales below) uniformly. RenderScale stays for resolution-independence.
+	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
+	const float BarWidth = 220.f * RenderScale * ScoreScale;
+	const float BarHeight = 36.f * RenderScale * ScoreScale;
+	const float ScoreBoxWidth = 50.f * RenderScale * ScoreScale;
 	const float GapWidth = 8.f * RenderScale;
 
 	const float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
@@ -522,7 +536,7 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->SetLinearDrawColor(Team1Color);
 	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
-	const float TailHeight = 14.f * RenderScale;
+	const float TailHeight = 14.f * RenderScale * ScoreScale;
 	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
 	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
@@ -531,8 +545,8 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->SetLinearDrawColor(FLinearColor::White);
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
-	const float FontScale = RenderScale * 0.85f;
-	const float LargeFontScale = RenderScale * 1.2f;
+	const float FontScale = RenderScale * 0.85f * ScoreScale;
+	const float LargeFontScale = RenderScale * 1.2f * ScoreScale;
 	float XL, YL;
 
 	Canvas->TextSize(SmallFont, Team0Name, XL, YL, FontScale, FontScale);

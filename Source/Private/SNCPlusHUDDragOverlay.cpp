@@ -493,6 +493,15 @@ void SNCPlusHUDDragOverlay::OpenContextMenu(FName Alias, const FVector2D& Screen
 		);
 	}
 
+	// Scale presets submenu (Phase 3.11c). Quick-pick common multipliers without
+	// having to open the panel editor's Sc spinbox.
+	MenuBuilder.AddMenuSeparator();
+	MenuBuilder.AddSubMenu(
+		FText::FromString(TEXT("Scale")),
+		FText::FromString(TEXT("Resize this element by a preset factor.")),
+		FNewMenuDelegate::CreateSP(this, &SNCPlusHUDDragOverlay::BuildScaleSubMenu, Alias)
+	);
+
 	MenuBuilder.AddMenuSeparator();
 	MenuBuilder.AddMenuEntry(
 		FText::FromString(TEXT("Properties (open editor)...")),
@@ -553,6 +562,55 @@ void SNCPlusHUDDragOverlay::OnContextToggleOrientation(FName Alias)
 	}
 	const bool bIsHorizontal = Elem->GetExtra(TEXT("orientation")).Equals(TEXT("Horizontal"), ESearchCase::IgnoreCase);
 	Elem->Extras.Add(TEXT("orientation"), bIsHorizontal ? TEXT("Vertical") : TEXT("Horizontal"));
+	FNCPlusHUDLayout::MarkLiveDirty();
+}
+
+void SNCPlusHUDDragOverlay::BuildScaleSubMenu(FMenuBuilder& MenuBuilder, FName Alias)
+{
+	// Common preset factors. The current scale gets a checkmark-style indicator
+	// via the entry label so users see what's active without re-opening.
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	const float CurrentScale = E ? E->Scale : 1.f;
+
+	struct FPreset { float Value; const TCHAR* Label; };
+	static const FPreset Presets[] = {
+		{ 0.50f, TEXT("0.5x  (half)")    },
+		{ 0.75f, TEXT("0.75x")           },
+		{ 1.00f, TEXT("1.0x  (default)") },
+		{ 1.25f, TEXT("1.25x")           },
+		{ 1.50f, TEXT("1.5x")            },
+		{ 2.00f, TEXT("2.0x  (double)")  },
+	};
+
+	for (const FPreset& P : Presets)
+	{
+		// Mark the active preset with a leading bullet so the menu reflects state.
+		const bool bActive = FMath::IsNearlyEqual(CurrentScale, P.Value, 0.01f);
+		const FString DisplayLabel = bActive
+			? FString::Printf(TEXT("•  %s"), P.Label)
+			: FString::Printf(TEXT("    %s"),    P.Label);
+
+		MenuBuilder.AddMenuEntry(
+			FText::FromString(DisplayLabel),
+			FText::GetEmpty(),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SNCPlusHUDDragOverlay::OnContextSetScale, Alias, P.Value))
+		);
+	}
+}
+
+void SNCPlusHUDDragOverlay::OnContextSetScale(FName Alias, float Scale)
+{
+	FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
+	FNCPlusHUDElement* Elem = L.Elements.Find(Alias);
+	if (!Elem)
+	{
+		FNCPlusHUDElement Seed;
+		Seed.Anchor = NCPlusHUDAliases::GetStockAnchor(Alias);
+		Seed.Offset = NCPlusHUDAliases::GetStockOffset(Alias);
+		Elem = &L.Elements.Add(Alias, Seed);
+	}
+	Elem->Scale = FMath::Clamp(Scale, 0.25f, 4.f);
 	FNCPlusHUDLayout::MarkLiveDirty();
 }
 

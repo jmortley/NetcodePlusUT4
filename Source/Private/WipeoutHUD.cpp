@@ -205,6 +205,11 @@ void AWipeoutHUD::DrawHUD()
 		float TeammateScale = 0.4f;
 
 		float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
+		// Phase 3.11: per-strip Scale override (independent red/blue resize).
+		const float WO_RedScale  = NCPlusHUDDrawCall::GetScale(TEXT("portrait_red"));
+		const float WO_BlueScale = NCPlusHUDDrawCall::GetScale(TEXT("portrait_blue"));
+		const float WO_RedPipSize  = BasePipSize * WO_RedScale;
+		const float WO_BluePipSize = BasePipSize * WO_BlueScale;
 		float XAdjust = BasePipSize * 1.1f;
 
 		// Stock positions used as fallbacks if the layout has no override.
@@ -231,8 +236,8 @@ void AWipeoutHUD::DrawHUD()
 		// When growing leftward, the resolved point is the strip's RIGHT edge —
 		// shift the first pip left by its width so its right edge sits at the
 		// anchor instead of extending off-screen.
-		if (RedGrowSign  < 0.f) XOffsetRed  -= BasePipSize;
-		if (BlueGrowSign < 0.f) XOffsetBlue -= BasePipSize;
+		if (RedGrowSign  < 0.f) XOffsetRed  -= WO_RedPipSize;
+		if (BlueGrowSign < 0.f) XOffsetBlue -= WO_BluePipSize;
 		float YOffsetRed  = RedStart.Y;
 		float YOffsetBlue = BlueStart.Y;
 		float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split (kept for safety)
@@ -264,7 +269,10 @@ void AWipeoutHUD::DrawHUD()
 		{
 			// In Wipeout everyone respawns, so show all non-spectator players
 			float OwnerPipScaling = (UTPS == GetScorerPlayerState()) ? 1.25f : 1.f;
-			float PipSize = BasePipSize * OwnerPipScaling;
+			// Per-team Scale: red strip honors portrait_red.Scale, blue honors blue.
+			const uint8 PreTeamIdx = UTPS ? UTPS->GetTeamNum() : 255;
+			const float TeamPipBase = (PreTeamIdx == 1) ? WO_BluePipSize : WO_RedPipSize;
+			float PipSize = TeamPipBase * OwnerPipScaling;
 
 			// Determine if player is alive.
 			// On the server, check the controller's current pawn directly
@@ -472,9 +480,11 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
 
 	// Bar dimensions
-	const float BarWidth = 220.f * RenderScale;
-	const float BarHeight = 36.f * RenderScale;
-	const float ScoreBoxWidth = 50.f * RenderScale;
+	// Phase 3.11: scorebar Scale override scales the bar + clock font uniformly.
+	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
+	const float BarWidth = 220.f * RenderScale * ScoreScale;
+	const float BarHeight = 36.f * RenderScale * ScoreScale;
+	const float ScoreBoxWidth = 50.f * RenderScale * ScoreScale;
 	const float GapWidth = 8.f * RenderScale;
 
 	// ── Team 0 (left side) ──
@@ -497,7 +507,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
 	// ── Score color tails (extend below score box, width of the number) ──
-	float TailHeight = 14.f * RenderScale;
+	float TailHeight = 14.f * RenderScale * ScoreScale;
 	float TailAlpha = 1.f;
 
 	// Team 0 tail
@@ -513,8 +523,8 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
 	// ── Text ──
-	float FontScale = RenderScale * 0.85f;
-	float LargeFontScale = RenderScale * 1.2f;
+	float FontScale = RenderScale * 0.85f * ScoreScale;
+	float LargeFontScale = RenderScale * 1.2f * ScoreScale;
 	float XL, YL;
 
 	// Team 0 name (right-aligned inside left bar)
