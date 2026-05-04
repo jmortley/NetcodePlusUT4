@@ -368,6 +368,27 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Y "))) ]
 			]
 		]
+		// Scale (per-element size multiplier — 1.0 = stock, 0.5 = half, 2.0 = double).
+		// For widget-backed elements, drives UUTHUDWidget::GetDrawScaleOverride()
+		// which the engine reads in PreDraw to scale RenderSize uniformly.
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[
+			SNew(SBox).WidthOverride(NumericInputWidth)
+			[
+				SNew(SNumericEntryBox<float>)
+				.Value(this, &SNCPlusHUDEditor::GetScale, Alias)
+				.OnValueChanged(this, &SNCPlusHUDEditor::OnScaleChanged, Alias)
+				.OnValueCommitted(this, &SNCPlusHUDEditor::OnScaleCommitted, Alias)
+				.AllowSpin(true)
+				.MinSliderValue(0.5f)
+				.MaxSliderValue(2.0f)
+				.MinValue(0.25f)
+				.MaxValue(4.0f)
+				.Delta(0.05f)
+				.LabelPadding(FMargin(0))
+				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Sc "))) ]
+			]
+		]
 		// Opacity (per-element multiplier 0..1)
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[
@@ -543,6 +564,23 @@ void SNCPlusHUDEditor::OnOpacityChanged(float NewVal, FName Alias)
 void SNCPlusHUDEditor::OnOpacityCommitted(float NewVal, ETextCommit::Type, FName Alias)
 {
 	OnOpacityChanged(NewVal, Alias);
+}
+
+TOptional<float> SNCPlusHUDEditor::GetScale(FName Alias) const
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	return E ? E->Scale : 1.f;
+}
+
+void SNCPlusHUDEditor::OnScaleChanged(float NewVal, FName Alias)
+{
+	const float Clamped = FMath::Clamp(NewVal, 0.25f, 4.f);
+	MutateElement(Alias, [Clamped](FNCPlusHUDElement& E){ E.Scale = Clamped; });
+}
+
+void SNCPlusHUDEditor::OnScaleCommitted(float NewVal, ETextCommit::Type, FName Alias)
+{
+	OnScaleChanged(NewVal, Alias);
 }
 
 void SNCPlusHUDEditor::OnAnchorSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias)

@@ -119,6 +119,11 @@ private:
 	void OnOpacityChanged(float NewVal, FName Alias);
 	void OnOpacityCommitted(float NewVal, ETextCommit::Type, FName Alias);
 
+	// Scale (per-element size multiplier — 1.0 = stock, 0.5 = half, 2.0 = double)
+	TOptional<float> GetScale(FName Alias) const;
+	void OnScaleChanged(float NewVal, FName Alias);
+	void OnScaleCommitted(float NewVal, ETextCommit::Type, FName Alias);
+
 	// Font sub-row (hp_armor + ammo).
 	TSharedRef<class SWidget> BuildFontRow(FNCHUDEditorRow& Row);
 

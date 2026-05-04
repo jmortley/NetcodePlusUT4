@@ -17,8 +17,11 @@ class NETCODEPLUS_API UNCPlusHUDWidget_AmmoCounter : public UUTHUDWidget
 {
 	GENERATED_UCLASS_BODY()
 
-	virtual void Draw_Implementation(float DeltaTime) override;
-	virtual bool ShouldDraw_Implementation(bool bShowScores) override;
+	virtual void  Draw_Implementation(float DeltaTime) override;
+	virtual bool  ShouldDraw_Implementation(bool bShowScores) override;
+	// Scale override (Phase 3.11): multiply base by FNCPlusHUDElement::Scale
+	// for the "ammo" alias so layout scale tweaks resize the whole widget.
+	virtual float GetDrawScaleOverride() override;
 
 	/** Same atlas WeaponBar uses — WeaponBarSelectedUVs are pixel coords into this. */
 	UPROPERTY()

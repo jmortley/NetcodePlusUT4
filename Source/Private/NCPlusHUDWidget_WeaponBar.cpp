@@ -88,6 +88,15 @@ UNCPlusHUDWidget_WeaponBar_Right::UNCPlusHUDWidget_WeaponBar_Right(const FObject
 // ShouldDraw / Draw
 // =============================================================================
 
+float UNCPlusHUDWidget_WeaponBar::GetDrawScaleOverride()
+{
+	// Per-side alias: weapon_bar_left for SideIndex 0, weapon_bar_right for 1.
+	const FName Alias = (SideIndex == 0) ? FName(TEXT("weapon_bar_left")) : FName(TEXT("weapon_bar_right"));
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	const float UserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+	return Super::GetDrawScaleOverride() * UserScale;
+}
+
 bool UNCPlusHUDWidget_WeaponBar::ShouldDraw_Implementation(bool bShowScores)
 {
 	if (!Super::ShouldDraw_Implementation(bShowScores)) return false;

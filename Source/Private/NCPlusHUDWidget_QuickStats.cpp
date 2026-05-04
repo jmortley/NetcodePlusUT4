@@ -54,6 +54,13 @@ UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitialize
 	ArmorPickupPulseEnd    = 0.f;
 }
 
+float UNCPlusHUDWidget_QuickStats::GetDrawScaleOverride()
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
+	const float UserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+	return Super::GetDrawScaleOverride() * UserScale;
+}
+
 bool UNCPlusHUDWidget_QuickStats::ShouldDraw_Implementation(bool bShowScores)
 {
 	return Super::ShouldDraw_Implementation(bShowScores)

@@ -46,6 +46,13 @@ UNCPlusHUDWidget_AmmoCounter::UNCPlusHUDWidget_AmmoCounter(const FObjectInitiali
 	WeaponIconAtlas = WeaponAtlasFinder.Object;
 }
 
+float UNCPlusHUDWidget_AmmoCounter::GetDrawScaleOverride()
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("ammo"));
+	const float UserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+	return Super::GetDrawScaleOverride() * UserScale;
+}
+
 bool UNCPlusHUDWidget_AmmoCounter::ShouldDraw_Implementation(bool bShowScores)
 {
 	if (!Super::ShouldDraw_Implementation(bShowScores)) return false;
