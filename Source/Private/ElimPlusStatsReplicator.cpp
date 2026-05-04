@@ -21,6 +21,13 @@ void AElimPlusStatsReplicator::GetLifetimeReplicatedProps(TArray<FLifetimeProper
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AElimPlusStatsReplicator, StatsEntries);
+	DOREPLIFETIME(AElimPlusStatsReplicator, bBalanceTeamsActive);
+}
+
+void AElimPlusStatsReplicator::SetBalanceTeamsActive(bool bActive)
+{
+	if (Role != ROLE_Authority) return;
+	bBalanceTeamsActive = bActive;
 }
 
 void AElimPlusStatsReplicator::BeginPlay()

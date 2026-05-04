@@ -52,6 +52,15 @@ public:
 	UPROPERTY(Replicated, Transient)
 	TArray<FElimPlusStatsEntry> StatsEntries;
 
+	/** Mirror of AUTTeamGameMode::bBalanceTeams (parsed from the
+	 *  ?BalanceTeams=true|false URL flag in InitGame). Replicated so the
+	 *  client-side HUD can hide the pre-match team-balance preview overlay
+	 *  when the admin disabled balancing — there's no point telegraphing an
+	 *  ELO-balanced split that isn't going to happen. Server pushes this once
+	 *  in HandleMatchHasStarted via SetBalanceTeamsActive. */
+	UPROPERTY(Replicated, Transient)
+	bool bBalanceTeamsActive = true;
+
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	virtual void BeginPlay() override;
@@ -76,6 +85,13 @@ public:
 	/** Server-only: rating system pushes a player's ELO + match-delta here at
 	 *  HandleMatchHasEnded (NOT per round — display stays frozen until then). */
 	void SetPlayerEloAndDelta(const FString& UniqueIdStr, int32 NewElo, int32 DeltaThisMatch);
+
+	/** Server-only: gamemode pushes its bBalanceTeams flag here so it can
+	 *  replicate to client HUDs. */
+	void SetBalanceTeamsActive(bool bActive);
+
+	/** Client-safe accessor for the replicated bBalanceTeamsActive flag. */
+	bool IsBalanceTeamsActive() const { return bBalanceTeamsActive; }
 
 private:
 	/** Server-only side caches populated by setters. Not replicated; values

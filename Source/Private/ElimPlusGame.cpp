@@ -240,6 +240,13 @@ void AElimPlusGame::HandleMatchHasStarted()
 		StatsReplicator = GetWorld()->SpawnActor<AElimPlusStatsReplicator>(SpawnParams);
 	}
 
+	// Replicate the bBalanceTeams URL flag to clients so the HUD's pre-match
+	// team-balance preview overlay can hide when the admin disabled balancing.
+	if (HasAuthority() && StatsReplicator)
+	{
+		StatsReplicator->SetBalanceTeamsActive(bBalanceTeams);
+	}
+
 	// Full ELO-based team rebalance now that all bots have joined (Super has
 	// completed any AddBots fills). Runs BEFORE StartNextRound spawns the
 	// player pawns, so the round begins with already-balanced teams. Players

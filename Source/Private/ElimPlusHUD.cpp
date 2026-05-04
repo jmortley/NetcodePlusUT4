@@ -778,6 +778,16 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 
 	AElimPlusStatsReplicator* Stats = FindElimPlusStatsReplicator(GetWorld());
 
+	// Hide the preview overlay entirely when the admin disabled balancing
+	// (?BalanceTeams=false on the server URL). No point telegraphing an
+	// ELO-balanced split that isn't going to happen. We still let the fade
+	// alpha be computed above so CountdownStartTimeSeconds gets reset
+	// consistently; we just don't draw anything.
+	if (!Stats || !Stats->IsBalanceTeamsActive())
+	{
+		return;
+	}
+
 	// Layout: centered panel, 60% width × 50% height.
 	const float W  = float(Canvas->SizeX);
 	const float H  = float(Canvas->SizeY);
