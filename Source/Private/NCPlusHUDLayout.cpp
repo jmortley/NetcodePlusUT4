@@ -596,6 +596,9 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),  true,  ENCPlusHUDAnchor::TopCenter);
 			// Game-mode-specific draw calls.
 			T.Emplace(TEXT("shockdom_controls"),FString(),                                                                       FText::FromString(TEXT("ShockDom A/B/C Indicators")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 78.f));
+			// Live-accuracy widget for NCShaftArena (and any other mode that opts
+			// in by listing the class in its HudWidgetClasses).
+			T.Emplace(TEXT("accuracy"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"),                            FText::FromString(TEXT("Shaft Accuracy")),     false, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 110.f));
 			return T;
 		}();
 		return Table;

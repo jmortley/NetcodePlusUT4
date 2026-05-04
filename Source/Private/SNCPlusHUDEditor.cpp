@@ -46,7 +46,7 @@ namespace NCHUDEdit
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
-		if (Alias == TEXT("shockdom_controls"))
+		if (Alias == TEXT("shockdom_controls") || Alias == TEXT("accuracy"))
 		{
 			return TEXT("Game Mode");
 		}
