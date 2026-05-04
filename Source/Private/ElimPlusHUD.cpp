@@ -228,19 +228,21 @@ void AElimPlusHUD::DrawHUD()
 		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
 		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
 
-		// Per-strip grow direction — flips so portraits grow INWARD when anchored
-		// to a screen edge. Default preserves stock (red grows left, blue right).
-		const FVector2D RedAnchor  = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_red")));
-		const FVector2D BlueAnchor = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_blue")));
-		const float RedGrowSign  = (RedAnchor.X  < 0.25f) ? +1.f : -1.f;
-		const float BlueGrowSign = (BlueAnchor.X > 0.75f) ? -1.f : +1.f;
+		// Per-strip grow direction — derived from RESOLVED screen position, not
+		// the anchor coordinate. Lets dragging the strip across screen-center
+		// (via nchud_drag) auto-flip growth so the visible strip stays on
+		// screen instead of extending off the now-far edge.
+		const float ScreenHalfX  = Canvas->ClipX * 0.5f;
+		const float RedGrowSign  = (RedStart.X  < ScreenHalfX) ? +1.f : -1.f;
+		const float BlueGrowSign = (BlueStart.X < ScreenHalfX) ? +1.f : -1.f;
 
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
-		// Right-anchored strips: shift first portrait left by its width so its
-		// right edge sits at the anchor instead of going off-screen.
-		if (RedAnchor.X  > 0.75f) XOffsetRed  -= BasePipSize;
-		if (BlueAnchor.X > 0.75f) XOffsetBlue -= BasePipSize;
+		// When growing leftward, the resolved point is the strip's RIGHT edge —
+		// shift the first pip left by its width so its right edge sits at the
+		// anchor instead of extending off-screen.
+		if (RedGrowSign  < 0.f) XOffsetRed  -= BasePipSize;
+		if (BlueGrowSign < 0.f) XOffsetBlue -= BasePipSize;
 		const float YOffsetRed  = RedStart.Y;
 		const float YOffsetBlue = BlueStart.Y;
 		const float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split
@@ -726,9 +728,39 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	if (!GS) return;
 
+	// Compute fade alpha based on match state.
+	//   PlayerIntro      → full opacity (Alpha = 1.0)
+	//   CountdownToBegin → fade 1.0 → 0.0 over PreviewFadeDurationSec, lined up
+	//                      with the "3" countdown announcement (CountdownToBegin
+	//                      starts ~3s before InProgress on standard configs).
+	//   anything else    → don't draw.
 	const FName State = GS->GetMatchState();
-	const bool bPreMatch = (State == MatchState::PlayerIntro || State == MatchState::CountdownToBegin);
-	if (!bPreMatch) return;
+	float Alpha = 1.f;
+	if (State == MatchState::PlayerIntro)
+	{
+		// Reset so the NEXT CountdownToBegin entry re-arms the fade timer.
+		CountdownStartTimeSeconds = -1.f;
+	}
+	else if (State == MatchState::CountdownToBegin)
+	{
+		if (CountdownStartTimeSeconds < 0.f)
+		{
+			CountdownStartTimeSeconds = GetWorld()->GetTimeSeconds();
+		}
+		const float Elapsed = GetWorld()->GetTimeSeconds() - CountdownStartTimeSeconds;
+		Alpha = FMath::Clamp(1.f - (Elapsed / PreviewFadeDurationSec), 0.f, 1.f);
+	}
+	else
+	{
+		return;
+	}
+
+	if (Alpha <= 0.f) return;
+
+	// Helper: scale a color's alpha component by the fade alpha so all draws
+	// fade uniformly. Multiplies in linear-alpha space — fine for our tile +
+	// text mix since SetLinearDrawColor is the source of truth for both.
+	auto Faded = [Alpha](FLinearColor C) { C.A *= Alpha; return C; };
 
 	AElimPlusStatsReplicator* Stats = FindElimPlusStatsReplicator(GetWorld());
 
@@ -742,11 +774,11 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 	const float TextScale = H / 1080.0f;
 
 	// Background tile (dim black with alpha).
-	Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.75f));
+	Canvas->SetLinearDrawColor(Faded(FLinearColor(0.f, 0.f, 0.f, 0.75f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, PX, PY, PW, PH, 0, 0, 1, 1);
 
 	// Top border accent.
-	Canvas->SetLinearDrawColor(FLinearColor(1.f, 0.85f, 0.2f, 1.f));
+	Canvas->SetLinearDrawColor(Faded(FLinearColor(1.f, 0.85f, 0.2f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, PX, PY, PW, 3.f, 0, 0, 1, 1);
 	Canvas->DrawTile(Canvas->DefaultTexture, PX, PY + PH - 3.f, PW, 3.f, 0, 0, 1, 1);
 
@@ -759,7 +791,7 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 		float TXL, TYL;
 		Canvas->StrLen(MediumFont, Title, TXL, TYL);
 		const float TitleScale = TextScale * 1.1f;
-		Canvas->SetLinearDrawColor(FLinearColor::White);
+		Canvas->SetLinearDrawColor(Faded(FLinearColor::White));
 		Canvas->DrawText(MediumFont, FText::FromString(Title),
 			PX + (PW - TXL * TitleScale) * 0.5f, PY + 14.f,
 			TitleScale, TitleScale, RI);
@@ -774,7 +806,7 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 	auto DrawTeamColumn = [&](int32 TeamIdx, float ColX, const TCHAR* Label, FLinearColor Accent)
 	{
 		// Header
-		Canvas->SetLinearDrawColor(Accent);
+		Canvas->SetLinearDrawColor(Faded(Accent));
 		Canvas->DrawText(MediumFont, FText::FromString(Label),
 			ColX + 24.f * TextScale, HeaderY, TextScale, TextScale, RI);
 
@@ -795,14 +827,14 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 			TeamStrength += Elo;
 
 			// Player name (left) + ELO (right of column)
-			Canvas->SetLinearDrawColor(FLinearColor::White);
+			Canvas->SetLinearDrawColor(Faded(FLinearColor::White));
 			Canvas->DrawText(SmallFont, FText::FromString(UTPS->PlayerName),
 				ColX + 24.f * TextScale, Y, TextScale, TextScale, RI);
 
 			const FString EloStr = FString::Printf(TEXT("%d"), Elo);
 			float EXL, EYL;
 			Canvas->StrLen(SmallFont, EloStr, EXL, EYL);
-			Canvas->SetLinearDrawColor(Accent);
+			Canvas->SetLinearDrawColor(Faded(Accent));
 			Canvas->DrawText(SmallFont, FText::FromString(EloStr),
 				ColX + ColW - 24.f * TextScale - EXL * TextScale, Y, TextScale, TextScale, RI);
 
@@ -813,7 +845,7 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 		// Total strength at bottom of column
 		const float TotalY = PY + PH - 50.f * TextScale;
 		const FString TotalStr = FString::Printf(TEXT("Team Strength: %lld"), TeamStrength);
-		Canvas->SetLinearDrawColor(Accent);
+		Canvas->SetLinearDrawColor(Faded(Accent));
 		Canvas->DrawText(MediumFont, FText::FromString(TotalStr),
 			ColX + 24.f * TextScale, TotalY, TextScale, TextScale, RI);
 	};
@@ -822,7 +854,7 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 	DrawTeamColumn(1, PX + ColW,  TEXT("BLUE (PHAYDER)"), FLinearColor(0.4f, 1.f,   0.4f,  1.f));
 
 	// Subtle divider between columns
-	Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, 0.25f));
+	Canvas->SetLinearDrawColor(Faded(FLinearColor(1.f, 1.f, 1.f, 0.25f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, PX + ColW - 1.f, PY + 50.f * TextScale,
 		2.f, PH - 90.f * TextScale, 0, 0, 1, 1);
 }

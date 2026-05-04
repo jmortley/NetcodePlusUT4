@@ -47,11 +47,10 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	/** Take high-res screenshot when match ends (if enabled in NCP settings) */
 	virtual void NotifyMatchStateChange() override;
 
-	/** Custom Canvas overlay shown during PlayerIntro and CountdownToBegin
-	 *  listing both team rosters with names + ELOs and team-strength totals.
-	 *  Bypasses the standard scoreboard widget because UT4's auto-show paths
-	 *  fight ToggleScoreboard during the countdown. Drawn from DrawHUD after
-	 *  Super; auto-hides as soon as state transitions to InProgress. */
+	/** Custom Canvas overlay shown during PlayerIntro listing both team rosters
+	 *  with names + ELOs and team-strength totals. Fades out when state
+	 *  transitions to CountdownToBegin (lines up with the "3" countdown
+	 *  announcement), then disappears entirely. Drawn from DrawHUD after Super. */
 	void DrawPreMatchTeamPreview();
 
 private:
@@ -70,4 +69,11 @@ private:
 	};
 	TMap<FString, FElimPlusEloAnim> EloAnimByPlayerId;
 	static constexpr float EloAnimDurationSec = 4.0f;
+
+	/** Client-side timestamp captured the first frame the gamestate reports
+	 *  CountdownToBegin. DrawPreMatchTeamPreview fades the overlay alpha from
+	 *  1 → 0 over PreviewFadeDurationSec starting at this time. Reset to -1
+	 *  while in PlayerIntro so the next match's countdown re-arms the fade. */
+	float CountdownStartTimeSeconds = -1.f;
+	static constexpr float PreviewFadeDurationSec = 0.8f;
 };
