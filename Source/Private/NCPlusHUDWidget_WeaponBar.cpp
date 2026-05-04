@@ -49,6 +49,14 @@ UNCPlusHUDWidget_WeaponBar::UNCPlusHUDWidget_WeaponBar(const FObjectInitializer&
 	Origin             = FVector2D(0.5f, 1.0f);
 	DesignedResolution = 1080.f;
 
+	// Don't apply HUDImpulse to the weapon bar. Stock UUTHUDWidget::PreDraw shifts
+	// Origin by AUTHUD::CurrentHUDImpulse whenever bShouldKickBack is true (default),
+	// causing the bar to jolt sideways on every fire. The impulse magnitude is
+	// per-weapon: sniper uses base UTWeapon's default (0.03, 0.1); flak overrides
+	// to (0, 0.2) — both noticeable on a tall side-anchored strip. Crosshair,
+	// scoreboard, and radial menu all opt out for the same reason.
+	bShouldKickBack = false;
+
 	// Stock weapon-icon atlas — WeaponBarSelectedUVs are pixel coords into THIS,
 	// not HUDAtlas. Match stock UTHUDWidget_WeaponBar's exact path format
 	// (Texture2D'...' wrapper). Falls back to a lazy LoadObject in Draw if this

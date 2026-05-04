@@ -53,7 +53,8 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"));
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
+	// Modernized ammo counter — replaces stock bpHW_WeaponInfo (3 styles, fully editable).
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
 	// Removed bpHW_Paperdoll — when the user hides stock QuickStats (which we want,
 	// since our NCPlusHUDWidget_QuickStats replaces it), Paperdoll switches into a
 	// fallback "+ HP / Armor" mode (UTHUDWidget_Paperdoll.cpp:47) which would draw
@@ -220,8 +221,19 @@ void AElimPlusHUD::DrawHUD()
 		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
 		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
 
+		// Per-strip grow direction — flips so portraits grow INWARD when anchored
+		// to a screen edge. Default preserves stock (red grows left, blue right).
+		const FVector2D RedAnchor  = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_red")));
+		const FVector2D BlueAnchor = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_blue")));
+		const float RedGrowSign  = (RedAnchor.X  < 0.25f) ? +1.f : -1.f;
+		const float BlueGrowSign = (BlueAnchor.X > 0.75f) ? -1.f : +1.f;
+
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
+		// Right-anchored strips: shift first portrait left by its width so its
+		// right edge sits at the anchor instead of going off-screen.
+		if (RedAnchor.X  > 0.75f) XOffsetRed  -= BasePipSize;
+		if (BlueAnchor.X > 0.75f) XOffsetBlue -= BasePipSize;
 		const float YOffsetRed  = RedStart.Y;
 		const float YOffsetBlue = BlueStart.Y;
 		const float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split
@@ -407,8 +419,8 @@ void AElimPlusHUD::DrawHUD()
 			}
 
 			// Advance the column offset for the next portrait
-			if (TeamIdx == 0) XOffsetRed  -= 1.1f * PipSize;
-			else              XOffsetBlue += 1.1f * PipSize;
+			if (TeamIdx == 0) XOffsetRed  += RedGrowSign  * 1.1f * PipSize;
+			else              XOffsetBlue += BlueGrowSign * 1.1f * PipSize;
 		}
 
 		// Score / KDA mini widget (top right) — same as Wipeout

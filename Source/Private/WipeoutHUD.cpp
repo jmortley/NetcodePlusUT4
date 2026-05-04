@@ -49,7 +49,8 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"));
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
+	// Modernized ammo counter — replaces stock bpHW_WeaponInfo (3 styles, fully editable).
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
 	// Removed bpHW_Paperdoll — fallback +HP/Armor mode would render on top of our widget.
 	// Removed bpHW_TeamGameClock — we draw our own team score bar in DrawHUD
 	// that respects dynamic team colors from TeamSkins.
@@ -209,8 +210,20 @@ void AWipeoutHUD::DrawHUD()
 		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
 		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
 
+		// Per-strip grow direction — flips so portraits grow INWARD when anchored
+		// to a screen edge (otherwise the strip extends off-screen). Default
+		// preserves stock behavior: red grows left, blue grows right.
+		const FVector2D RedAnchor  = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_red")));
+		const FVector2D BlueAnchor = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_blue")));
+		const float RedGrowSign   = (RedAnchor.X  < 0.25f) ? +1.f : -1.f;  // anchored left → grow right
+		const float BlueGrowSign  = (BlueAnchor.X > 0.75f) ? -1.f : +1.f;  // anchored right → grow left
+
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
+		// Right-anchored strips: shift first portrait left by its width so its
+		// right edge sits on the anchor instead of extending off-screen.
+		if (RedAnchor.X  > 0.75f) XOffsetRed  -= BasePipSize;
+		if (BlueAnchor.X > 0.75f) XOffsetBlue -= BasePipSize;
 		float YOffsetRed  = RedStart.Y;
 		float YOffsetBlue = BlueStart.Y;
 		float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split (kept for safety)
@@ -324,7 +337,7 @@ void AWipeoutHUD::DrawHUD()
 					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffsetRed, BorderW, PipHeight, 0, 0, 1, 1);
 					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed + PipSize - BorderW, YOffsetRed, BorderW, PipHeight, 0, 0, 1, 1);
 				}
-				XOffsetRed -= 1.1f * PipSize;
+				XOffsetRed += RedGrowSign * 1.1f * PipSize;
 			}
 			else if (TeamIdx == 1)
 			{
@@ -366,7 +379,7 @@ void AWipeoutHUD::DrawHUD()
 					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffsetBlue, BorderW, PipHeight, 0, 0, 1, 1);
 					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue + PipSize - BorderW, YOffsetBlue, BorderW, PipHeight, 0, 0, 1, 1);
 				}
-				XOffsetBlue += 1.1f * PipSize;
+				XOffsetBlue += BlueGrowSign * 1.1f * PipSize;
 			}
 		}
 		// ─── Score / KDA mini widget (top right) ───

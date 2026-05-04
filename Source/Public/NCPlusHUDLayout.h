@@ -84,6 +84,21 @@ namespace NCPlusHPArmorStyle
 	NETCODEPLUS_API TArray<TSharedPtr<FString>> GetChoices();
 }
 
+/** Visual variants for the ammo counter widget (Phase 3.7). */
+enum class ENCPlusAmmoStyle : uint8
+{
+	BigNumber = 0,    // Large number with thin accent underline + "/Max" subtext.
+	IconAndCount,     // Weapon icon left, count right, ammo bar underline.
+	VerticalGauge,    // Stacked: icon top, vertical fill gauge, number below.
+};
+
+namespace NCPlusAmmoStyle
+{
+	NETCODEPLUS_API ENCPlusAmmoStyle Parse(const FString& Name);
+	NETCODEPLUS_API FString ToString(ENCPlusAmmoStyle Style);
+	NETCODEPLUS_API TArray<TSharedPtr<FString>> GetChoices();
+}
+
 /** Whole-HUD layout config. Keyed by alias (e.g. "hp_armor", "weapon_bar_left"). */
 struct FNCPlusHUDLayout
 {
@@ -180,6 +195,18 @@ namespace NCPlusHUDAliases
 
 	/** Pretty display name for an alias (e.g. "hp_armor" → "Health & Armor"). */
 	NETCODEPLUS_API FText GetDisplayName(FName Alias);
+
+	/** Anchor that visually matches where this element renders by default
+	 *  (i.e. with no layout override). Used by the editor to display a
+	 *  meaningful anchor in the dropdown when no entry exists, instead of
+	 *  the generic "Center". Returns Center for unrecognized aliases. */
+	NETCODEPLUS_API ENCPlusHUDAnchor GetStockAnchor(FName Alias);
+
+	/** Default offset (1080p design pixels) paired with GetStockAnchor.
+	 *  Used by the editor's X/Y boxes when no override exists, and also
+	 *  seeded into newly-created layout entries so the first edit doesn't
+	 *  visibly jump the widget. Returns (0, 0) for unrecognized aliases. */
+	NETCODEPLUS_API FVector2D GetStockOffset(FName Alias);
 }
 
 /**
@@ -207,6 +234,10 @@ namespace NCPlusHUDDrawCall
 	 *  or the stock red/blue palette (false)? Honored by portrait_red,
 	 *  portrait_blue, and scorebar. */
 	NETCODEPLUS_API bool GetUseTeamColor(FName Alias);
+
+	/** Effective anchor for an alias: layout override if present, otherwise
+	 *  the alias's stock anchor (NCPlusHUDAliases::GetStockAnchor). */
+	NETCODEPLUS_API ENCPlusHUDAnchor GetEffectiveAnchor(FName Alias);
 }
 
 /**

@@ -23,6 +23,8 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
+	// Modernized ammo counter — replaces stock bpHW_WeaponInfo (3 styles, fully editable).
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
 }
 
 void ANCPlusCTFHUD::BeginPlay()
@@ -36,7 +38,8 @@ void ANCPlusCTFHUD::BeginPlay()
 			|| Entry.Contains(TEXT("TeamScoreboard"))    // stock team scoreboard (fallback)
 			|| Entry.Contains(TEXT("bpHW_WeaponBar"))    // replaced by our split bar
 			|| Entry.Contains(TEXT("bpHW_QuickStats"))   // replaced by our HP/Armor widget
-			|| Entry.Contains(TEXT("bpHW_Paperdoll"));   // fallback +HP/Armor mode would conflict
+			|| Entry.Contains(TEXT("bpHW_Paperdoll"))    // fallback +HP/Armor mode would conflict
+			|| Entry.Contains(TEXT("bpHW_WeaponInfo")); // replaced by our ammo counter
 	});
 
 	Super::BeginPlay();

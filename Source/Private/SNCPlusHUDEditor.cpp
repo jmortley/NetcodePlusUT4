@@ -32,6 +32,10 @@ namespace NCHUDEdit
 		{
 			return TEXT("HP / Armor");
 		}
+		if (Alias == TEXT("ammo"))
+		{
+			return TEXT("Ammo");
+		}
 		if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
 		{
 			return TEXT("Weapon Bars");
@@ -47,11 +51,22 @@ namespace NCHUDEdit
 	{
 		static const TArray<FString> Order = {
 			TEXT("HP / Armor"),
+			TEXT("Ammo"),
 			TEXT("Weapon Bars"),
 			TEXT("Top Bar (Portraits + Scorebar)"),
 			TEXT("Stock Widgets"),
 		};
 		return Order;
+	}
+
+	// Per-alias style enum dispatch — keeps the row code generic so multiple
+	// widgets can have their own style picker without if-laddering everywhere.
+	// Returns the integer index into Row.StyleChoices that matches StyleStr.
+	static int32 ParseStyleIndex(FName Alias, const FString& StyleStr)
+	{
+		if (Alias == TEXT("hp_armor")) return (int32)NCPlusHPArmorStyle::Parse(StyleStr);
+		if (Alias == TEXT("ammo"))     return (int32)NCPlusAmmoStyle::Parse(StyleStr);
+		return 0;
 	}
 
 	static TArray<TSharedPtr<FString>> BuildAnchorChoices()
@@ -95,6 +110,18 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_armor"),         FText::FromString(TEXT("AR Accent")),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f), nullptr });
 			Row.Colors.Add({ TEXT("color_low_hp"),        FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f), nullptr });
 			Row.Colors.Add({ TEXT("color_damage_flash"),  FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f), nullptr });
+		}
+		// ammo: style picker + color overrides (3 styles — see NCPlusHUDWidget_AmmoCounter).
+		if (Alias == TEXT("ammo"))
+		{
+			Row.bHasStylePicker = true;
+			Row.StyleChoices    = NCPlusAmmoStyle::GetChoices();
+			Row.Colors.Add({ TEXT("color_number"), FText::FromString(TEXT("Number")),  FLinearColor::White,                    nullptr });
+			Row.Colors.Add({ TEXT("color_max"),    FText::FromString(TEXT("/Max")),    FLinearColor(0.65f, 0.65f, 0.65f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_full"),   FText::FromString(TEXT("Full")),    FLinearColor(0.40f, 0.95f, 0.48f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_warn"),   FText::FromString(TEXT("Warn")),    FLinearColor(1.0f,  0.85f, 0.30f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_danger"), FText::FromString(TEXT("Low")),     FLinearColor(1.0f,  0.32f, 0.28f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_bg"),     FText::FromString(TEXT("Plate BG")), FLinearColor(0.04f, 0.04f, 0.04f, 0.45f), nullptr });
 		}
 		// Portraits + scorebar opt-in to the use_team_color checkbox.
 		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar"))
@@ -252,8 +279,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 		// Resolve currently-selected style from live layout's extras.
 		const FNCPlusHUDElement* Cur = FNCPlusHUDLayout::GetLive().Find(Alias);
 		const FString CurStr = Cur ? Cur->GetExtra(TEXT("style")) : FString();
-		const ENCPlusHPArmorStyle CurStyle = NCPlusHPArmorStyle::Parse(CurStr);
-		const int32 InitialIdx = FMath::Clamp((int32)CurStyle, 0, Row.StyleChoices.Num() - 1);
+		const int32 InitialIdx = FMath::Clamp(NCHUDEdit::ParseStyleIndex(Alias, CurStr), 0, Row.StyleChoices.Num() - 1);
 
 		StyleSlot = SNew(SBox).WidthOverride(150.f)
 		[
@@ -275,15 +301,18 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.ColorAndOpacity(FLinearColor::White)
 			]
 		]
-		// Anchor combo
+		// Anchor combo — show the layout entry's anchor if one exists, otherwise
+		// the alias's stock anchor (so the dropdown reflects what's actually on screen).
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[
 			SNew(SBox).WidthOverride(ComboWidth)
 			[
 				SAssignNew(Row.AnchorCombo, STextComboBox)
 				.OptionsSource(&Row.AnchorChoices)
-				.InitiallySelectedItem(Row.AnchorChoices[(int32)
-					(GetOrCreateElement(Alias).Anchor)])
+				.InitiallySelectedItem(Row.AnchorChoices[(int32)(
+					FNCPlusHUDLayout::GetLive().Find(Alias)
+						? FNCPlusHUDLayout::GetLive().Find(Alias)->Anchor
+						: NCPlusHUDAliases::GetStockAnchor(Alias))])
 				.OnSelectionChanged(this, &SNCPlusHUDEditor::OnAnchorSelected, Alias)
 			]
 		]
@@ -410,7 +439,14 @@ FNCPlusHUDElement& SNCPlusHUDEditor::GetOrCreateElement(FName Alias)
 	FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
 	FNCPlusHUDElement* Existing = L.Elements.Find(Alias);
 	if (Existing) return *Existing;
-	return L.Elements.Add(Alias, FNCPlusHUDElement());
+
+	// Seed new entries with the alias's stock anchor + offset so the first edit
+	// (e.g. nudging X by 1 px) doesn't jump the widget from its constructor
+	// position to the default-constructed Center+(0,0).
+	FNCPlusHUDElement Seed;
+	Seed.Anchor = NCPlusHUDAliases::GetStockAnchor(Alias);
+	Seed.Offset = NCPlusHUDAliases::GetStockOffset(Alias);
+	return L.Elements.Add(Alias, Seed);
 }
 
 void SNCPlusHUDEditor::MutateElement(FName Alias, TFunctionRef<void(FNCPlusHUDElement&)> Mutator)
@@ -426,13 +462,13 @@ void SNCPlusHUDEditor::MutateElement(FName Alias, TFunctionRef<void(FNCPlusHUDEl
 TOptional<float> SNCPlusHUDEditor::GetOffsetX(FName Alias) const
 {
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-	return E ? E->Offset.X : 0.f;
+	return E ? E->Offset.X : NCPlusHUDAliases::GetStockOffset(Alias).X;
 }
 
 TOptional<float> SNCPlusHUDEditor::GetOffsetY(FName Alias) const
 {
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-	return E ? E->Offset.Y : 0.f;
+	return E ? E->Offset.Y : NCPlusHUDAliases::GetStockOffset(Alias).Y;
 }
 
 void SNCPlusHUDEditor::OnOffsetXChanged(float NewVal, FName Alias)
@@ -529,11 +565,13 @@ FReply SNCPlusHUDEditor::OnResetRowClicked(FName Alias)
 			if (Row.Alias != Alias) continue;
 			if (Row.AnchorCombo.IsValid())
 			{
-				Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[(int32)ENCPlusHUDAnchor::Center]);
+				const int32 StockIdx = (int32)NCPlusHUDAliases::GetStockAnchor(Alias);
+				Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[StockIdx]);
 			}
 			if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
 			{
-				Row.StyleCombo->SetSelectedItem(Row.StyleChoices[(int32)ENCPlusHPArmorStyle::MinimalTypography]);
+				// Index 0 in each enum's GetChoices() is the default style.
+				Row.StyleCombo->SetSelectedItem(Row.StyleChoices[0]);
 			}
 			break;
 		}
@@ -560,13 +598,13 @@ FReply SNCPlusHUDEditor::OnReloadClicked()
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Row.Alias);
 		if (Row.AnchorCombo.IsValid())
 		{
-			const int32 Idx = E ? (int32)E->Anchor : (int32)ENCPlusHUDAnchor::Center;
+			const int32 Idx = E ? (int32)E->Anchor : (int32)NCPlusHUDAliases::GetStockAnchor(Row.Alias);
 			Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[Idx]);
 		}
 		if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
 		{
 			const FString CurStr = E ? E->GetExtra(TEXT("style")) : FString();
-			const int32 Idx = FMath::Clamp((int32)NCPlusHPArmorStyle::Parse(CurStr), 0, Row.StyleChoices.Num() - 1);
+			const int32 Idx = FMath::Clamp(NCHUDEdit::ParseStyleIndex(Row.Alias, CurStr), 0, Row.StyleChoices.Num() - 1);
 			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[Idx]);
 		}
 	}
@@ -582,11 +620,13 @@ FReply SNCPlusHUDEditor::OnResetAllClicked()
 	{
 		if (Row.AnchorCombo.IsValid())
 		{
-			Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[(int32)ENCPlusHUDAnchor::Center]);
+			const int32 StockIdx = (int32)NCPlusHUDAliases::GetStockAnchor(Row.Alias);
+			Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[StockIdx]);
 		}
 		if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
 		{
-			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[(int32)ENCPlusHPArmorStyle::MinimalTypography]);
+			// Index 0 is the default style for any registered enum.
+			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[0]);
 		}
 	}
 	return FReply::Handled();

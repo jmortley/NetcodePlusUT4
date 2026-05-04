@@ -89,6 +89,38 @@ namespace NCPlusHPArmorStyle
 	}
 }
 
+namespace NCPlusAmmoStyle
+{
+	ENCPlusAmmoStyle Parse(const FString& Name)
+	{
+		FString N = Name;
+		N.Trim();
+		N = N.ToLower();
+		if (N == TEXT("iconandcount"))  return ENCPlusAmmoStyle::IconAndCount;
+		if (N == TEXT("verticalgauge")) return ENCPlusAmmoStyle::VerticalGauge;
+		return ENCPlusAmmoStyle::BigNumber;
+	}
+
+	FString ToString(ENCPlusAmmoStyle Style)
+	{
+		switch (Style)
+		{
+			case ENCPlusAmmoStyle::IconAndCount:  return TEXT("IconAndCount");
+			case ENCPlusAmmoStyle::VerticalGauge: return TEXT("VerticalGauge");
+			default:                              return TEXT("BigNumber");
+		}
+	}
+
+	TArray<TSharedPtr<FString>> GetChoices()
+	{
+		TArray<TSharedPtr<FString>> Out;
+		Out.Add(MakeShareable(new FString(TEXT("BigNumber"))));
+		Out.Add(MakeShareable(new FString(TEXT("IconAndCount"))));
+		Out.Add(MakeShareable(new FString(TEXT("VerticalGauge"))));
+		return Out;
+	}
+}
+
 FString FNCPlusHUDLayout::AnchorToString(ENCPlusHUDAnchor Anchor)
 {
 	switch (Anchor)
@@ -396,11 +428,16 @@ namespace NCPlusHUDAliases
 		FString  ClassPath;     // empty for draw-call elements
 		FText    DisplayName;
 		bool     bIsDrawCall;   // true → no widget; HUD's DrawHUD consults layout directly
+		ENCPlusHUDAnchor StockAnchor;  // visual default — what to show in editor when no override exists
+		FVector2D StockOffset;         // default offset paired with StockAnchor (design pixels)
 
 		// Explicit constructors so brace-init still works in UE4 4.15 (which
 		// can't deduce aggregate-init when a member has a default initializer).
-		FAliasEntry(FName InAlias, FString InPath, FText InName, bool bInDrawCall = false)
-			: Alias(InAlias), ClassPath(MoveTemp(InPath)), DisplayName(MoveTemp(InName)), bIsDrawCall(bInDrawCall)
+		FAliasEntry(FName InAlias, FString InPath, FText InName, bool bInDrawCall = false,
+		            ENCPlusHUDAnchor InStockAnchor = ENCPlusHUDAnchor::Center,
+		            FVector2D InStockOffset = FVector2D::ZeroVector)
+			: Alias(InAlias), ClassPath(MoveTemp(InPath)), DisplayName(MoveTemp(InName))
+			, bIsDrawCall(bInDrawCall), StockAnchor(InStockAnchor), StockOffset(InStockOffset)
 		{}
 	};
 
@@ -410,23 +447,28 @@ namespace NCPlusHUDAliases
 		{
 			TArray<FAliasEntry> T;
 			// Display order = list-view order in the editor. Group by region.
-			// Use Emplace (positional ctor args) instead of Add({...}) to avoid
-			// C4868 (left-to-right eval order in braced-init-list) on /W4.
-			T.Emplace(TEXT("hp_armor"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),                          FText::FromString(TEXT("Health & Armor")));
-			T.Emplace(TEXT("weapon_info"),      TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"),  FText::FromString(TEXT("Weapon Info / Ammo")));
-			T.Emplace(TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                      FText::FromString(TEXT("Weapon Bar (Left)")));
-			T.Emplace(TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                     FText::FromString(TEXT("Weapon Bar (Right)")));
-			T.Emplace(TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")));
-			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")));
-			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")));
-			T.Emplace(TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")));
-			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")));
-			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")));
-			T.Emplace(TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")));
+			// 5th arg = stock anchor — the anchor that visually matches where the
+			// element renders out-of-the-box. Used by editor for combo display when
+			// no layout override exists, so users see truthful state.
+			// 6th arg = StockOffset (design pixels), paired with StockAnchor.
+			// These mirror the constructor-set Position so that the editor's X/Y
+			// boxes show the actual visual default (not 0/0) and so that creating
+			// a fresh entry by tweaking one field doesn't visually jump the widget.
+			T.Emplace(TEXT("hp_armor"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),                          FText::FromString(TEXT("Health & Armor")),     false, ENCPlusHUDAnchor::BottomCenter);
+			T.Emplace(TEXT("ammo"),             TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"),                         FText::FromString(TEXT("Ammo Counter")),       false, ENCPlusHUDAnchor::BottomRight, FVector2D(-20.f, -20.f));
+			T.Emplace(TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                      FText::FromString(TEXT("Weapon Bar (Left)")), false, ENCPlusHUDAnchor::CenterLeft,  FVector2D( 20.f, -20.f));
+			T.Emplace(TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                     FText::FromString(TEXT("Weapon Bar (Right)")), false, ENCPlusHUDAnchor::CenterRight, FVector2D(-20.f, -20.f));
+			T.Emplace(TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")),          false, ENCPlusHUDAnchor::Center);
+			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")),           false, ENCPlusHUDAnchor::BottomLeft);
+			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")), false, ENCPlusHUDAnchor::TopRight);
+			T.Emplace(TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")), false, ENCPlusHUDAnchor::TopRight);
+			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")),      false, ENCPlusHUDAnchor::TopCenter);
+			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")),   false, ENCPlusHUDAnchor::BottomLeft);
+			T.Emplace(TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")),  false, ENCPlusHUDAnchor::TopCenter);
 			// C++-drawn pieces (Phase 3.5).
-			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),     true);
-			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),    true);
-			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),   true);
+			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter);
+			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter);
+			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),  true,  ENCPlusHUDAnchor::TopCenter);
 			return T;
 		}();
 		return Table;
@@ -468,6 +510,24 @@ namespace NCPlusHUDAliases
 		}
 		return FText::FromName(Alias);
 	}
+
+	ENCPlusHUDAnchor GetStockAnchor(FName Alias)
+	{
+		for (const FAliasEntry& E : GetAliasTable())
+		{
+			if (E.Alias == Alias) return E.StockAnchor;
+		}
+		return ENCPlusHUDAnchor::Center;
+	}
+
+	FVector2D GetStockOffset(FName Alias)
+	{
+		for (const FAliasEntry& E : GetAliasTable())
+		{
+			if (E.Alias == Alias) return E.StockOffset;
+		}
+		return FVector2D::ZeroVector;
+	}
 }
 
 // =============================================================================
@@ -506,6 +566,12 @@ namespace NCPlusHUDDrawCall
 	{
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
 		return E ? E->GetExtraBool(TEXT("use_team_color"), true) : true;
+	}
+
+	ENCPlusHUDAnchor GetEffectiveAnchor(FName Alias)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		return E ? E->Anchor : NCPlusHUDAliases::GetStockAnchor(Alias);
 	}
 }
 

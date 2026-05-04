@@ -43,6 +43,9 @@ UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitialize
 	Origin             = FVector2D(0.5f, 0.f);
 	DesignedResolution = 1080.f;
 
+	// Opt out of HUDImpulse — see NCPlusHUDWidget_WeaponBar for the full rationale.
+	bShouldKickBack = false;
+
 	LastHealth             = -1;
 	LastArmor              = -1;
 	HealthDamageFlashEnd   = 0.f;
