@@ -320,9 +320,9 @@ void AWipeoutHUD::DrawHUD()
 			{
 				RedPlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffsetRed, PipSize);
-				// Player name above icon
+				// Player name above icon — multiply by team scale so text shrinks with the pip.
 				{
-					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
+					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_RedScale;
 					FFontRenderInfo NameRI;
 					NameRI.bEnableShadow = true;
 					FString Name = UTPS->PlayerName;
@@ -364,9 +364,9 @@ void AWipeoutHUD::DrawHUD()
 			{
 				BluePlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffsetBlue, PipSize);
-				// Player name above icon
+				// Player name above icon — multiply by team scale so text shrinks with the pip.
 				{
-					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
+					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_BlueScale;
 					FFontRenderInfo NameRI;
 					NameRI.bEnableShadow = true;
 					FString Name = UTPS->PlayerName;
@@ -567,7 +567,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		RoundTime = RoundTimeProp->GetPropertyValue_InContainer(GS);
 	}
 
-	float RoundClockScale = RenderScale * 1.1f;
+	float RoundClockScale = RenderScale * 1.1f * ScoreScale;
 	if (RoundTime >= 0)
 	{
 		int32 RMins = RoundTime / 60;
@@ -665,10 +665,14 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
 		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
 
+	// Per-team scale for text inside the pip — keeps countdown / X / HP/Armor
+	// glyphs proportional when the strip is shrunk via the layout's Sc spinner.
+	const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
+
 	// Layer 5 (Wipeout-specific): Respawn countdown text on dead portraits
 	if (LiveScaling < 1.f && PlayerState->RespawnTime > 0.f)
 	{
-		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f;
+		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale;
 		FFontRenderInfo TextRenderInfo;
 		TextRenderInfo.bEnableShadow = true;
 
@@ -692,7 +696,7 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	// Layer 5b: "X" on dead portraits with no respawn (OT / sudden death)
 	if (LiveScaling < 1.f && PlayerState->RespawnTime <= 0.f && PlayerState->bOutOfLives)
 	{
-		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f;
+		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale;
 		FFontRenderInfo TextRenderInfo;
 		TextRenderInfo.bEnableShadow = true;
 
@@ -716,7 +720,7 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			AUTCharacter* UTC = PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())
 			{
-				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f;
+				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale;
 				FFontRenderInfo TextRenderInfo;
 				TextRenderInfo.bEnableShadow = true;
 

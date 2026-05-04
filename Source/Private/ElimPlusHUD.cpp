@@ -331,9 +331,11 @@ void AElimPlusHUD::DrawHUD()
 			const float XOffset = *XOffsetForTeam;
 			DrawPlayerIcon(UTPS, bPlayerAlive, XOffset, YForTeam, PipSize);
 
-			// Player name above icon
+			// Player name above icon — multiply by team scale so text stays
+			// proportional when the strip is shrunk via the layout's Sc spinner.
 			{
-				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
+				const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
+				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale;
 				FFontRenderInfo NameRI;
 				NameRI.bEnableShadow = true;
 				FString Name = UTPS->PlayerName;
@@ -582,7 +584,7 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		RoundTime = RoundTimeProp->GetPropertyValue_InContainer(GS);
 	}
 
-	const float RoundClockScale = RenderScale * 1.1f;
+	const float RoundClockScale = RenderScale * 1.1f * ScoreScale;
 	if (RoundTime >= 0)
 	{
 		const int32 RMins = RoundTime / 60;
@@ -670,7 +672,9 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 	// Layer 5: Red "X" on dead portraits — always (no respawn this round)
 	if (!bPlayerAlive)
 	{
-		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f;
+		// Scale font by team's portrait scale so the X shrinks with the pip.
+		const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
+		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale;
 		FFontRenderInfo TextRenderInfo;
 		TextRenderInfo.bEnableShadow = true;
 
@@ -694,7 +698,9 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 			AUTCharacter* UTC = PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())
 			{
-				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f;
+				// Scale font by team's portrait scale so HP/Armor numbers shrink with the pip.
+				const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
+				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale;
 				FFontRenderInfo TextRenderInfo;
 				TextRenderInfo.bEnableShadow = true;
 

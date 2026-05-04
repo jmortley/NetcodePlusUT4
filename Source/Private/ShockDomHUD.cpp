@@ -72,13 +72,15 @@ void AShockDomHUD::DrawTeamScoreBar(AUTGameState* GS)
 	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+	// Phase 3.11: scorebar Scale override sizes clock + bar offset uniformly.
+	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
 
 	// Phase 3.5 layout consult — same anchor as Super so the clock stays put.
 	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * RenderScale);
 	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("scorebar"), Canvas, StockPos);
 	const float CenterX = ScoreBarPos.X;
 	const float TopY    = ScoreBarPos.Y;
-	const float BarHeight = 36.f * RenderScale;
+	const float BarHeight = 36.f * RenderScale * ScoreScale;
 	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
 
 	int32 RemainingTime = GS->GetRemainingTime();
@@ -88,7 +90,7 @@ void AShockDomHUD::DrawTeamScoreBar(AUTGameState* GS)
 	int32 Secs = RemainingTime % 60;
 	FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 
-	float ClockScale = RenderScale * 1.1f;
+	float ClockScale = RenderScale * 1.1f * ScoreScale;
 	float XL, YL;
 	Canvas->TextSize(MediumFont, ClockStr, XL, YL, ClockScale, ClockScale);
 

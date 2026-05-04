@@ -203,7 +203,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	// Match clock (CTF uses match time, not round time)
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	float ClockBottomY = ClockY;
-	float RoundClockScale = RenderScale * 1.1f;
+	float RoundClockScale = RenderScale * 1.1f * ScoreScale;
 
 	int32 RemainingTime = GS->GetRemainingTime();
 	if (RemainingTime >= 0 && GS->TimeLimit > 0)
