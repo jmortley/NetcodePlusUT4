@@ -96,6 +96,14 @@ EInputMode::Type AWipeoutHUD::GetInputMode_Implementation() const
 	// in the engine's UTHUD_InstantReplay (which always returns EIM_GameOnly).
 	// See also: UTHUD_Showdown::GetInputMode_Implementation() for a GameAndUI
 	// variant used during spawn selection.
+	//
+	// Phase 4.0: drag overlay (nchud_drag) needs cursor freed for Slate input.
+	// Checked first so it can override the in-match GameOnly forcing below.
+	if (NCPlusHUDDragMode::IsActive())
+	{
+		return EInputMode::EIM_GameAndUI;
+	}
+
 	if (UTPlayerOwner != nullptr)
 	{
 		AUTPlayerState* PS = UTPlayerOwner->UTPlayerState;

@@ -90,6 +90,13 @@ void AElimPlusHUD::BeginPlay()
 
 EInputMode::Type AElimPlusHUD::GetInputMode_Implementation() const
 {
+	// Drag overlay (nchud_drag) needs cursor freed so Slate gets mouse events.
+	// Checked first because it overrides the in-match GameOnly forcing below.
+	if (NCPlusHUDDragMode::IsActive())
+	{
+		return EInputMode::EIM_GameAndUI;
+	}
+
 	// FIX: Mouse focus loss on death. Same pattern as AWipeoutHUD — base class
 	// returns EIM_UIOnly when dead/out-of-lives, releasing mouse capture from
 	// the viewport. In elim, dead players spectate teammates with full mouse

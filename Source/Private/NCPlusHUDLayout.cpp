@@ -91,6 +91,18 @@ namespace NCPlusHPArmorStyle
 }
 
 // =============================================================================
+// Drag overlay activation flag (Phase 4.0a/b)
+// =============================================================================
+
+namespace NCPlusHUDDragMode
+{
+	static bool GIsActive = false;
+
+	bool IsActive()              { return GIsActive; }
+	void SetActive(bool bActive) { GIsActive = bActive; }
+}
+
+// =============================================================================
 // Font resolver (Phase 3.8)
 // =============================================================================
 

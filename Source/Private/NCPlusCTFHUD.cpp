@@ -52,6 +52,13 @@ void ANCPlusCTFHUD::BeginPlay()
 
 EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
 {
+	// Phase 4.0: drag overlay (nchud_drag) needs cursor freed for Slate input.
+	// Checked first so it can override the in-match GameOnly forcing below.
+	if (NCPlusHUDDragMode::IsActive())
+	{
+		return EInputMode::EIM_GameAndUI;
+	}
+
 	// Same pattern as WipeoutHUD: keep mouse captured during match.
 	// CTF doesn't have elimination, but this prevents click-off during
 	// death spectating and halftime transitions.

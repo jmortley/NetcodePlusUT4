@@ -100,6 +100,19 @@ namespace NCPlusAmmoStyle
 }
 
 /**
+ * Drag overlay activation flag (Phase 4.0a/b). The overlay flips this on
+ * Construct and clears on ClosePanel; each NetcodePlus HUD's
+ * GetInputMode_Implementation reads it and returns EIM_GameAndUI early when
+ * set, so Slate mouse events route to the overlay instead of being eaten by
+ * the in-match camera-capture / pre-match scoreboard.
+ */
+namespace NCPlusHUDDragMode
+{
+	NETCODEPLUS_API bool IsActive();
+	NETCODEPLUS_API void SetActive(bool bActive);
+}
+
+/**
  * Per-element font override (Phase 3.8). Layout JSON stores a display-name
  * string in Extras["font"]; widgets call Resolve() at draw time to convert
  * that to a real UFont*. Tier A fonts (Tiny/Small/Medium/Large/Huge/Number/

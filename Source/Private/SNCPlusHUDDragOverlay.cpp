@@ -11,6 +11,8 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SBorder.h"
+#include "Blueprint/WidgetBlueprintLibrary.h"
+#include "Framework/Application/SlateApplication.h"
 
 namespace NCDragOverlay
 {
@@ -50,6 +52,24 @@ void SNCPlusHUDDragOverlay::Construct(const FArguments& InArgs)
 		.BorderImage(FCoreStyle::Get().GetBrush(TEXT("NoBorder")))
 		.Visibility(EVisibility::Visible)
 	];
+
+	// Switch input mode to GameAndUI so Slate can receive mouse events. The
+	// HUD's GetInputMode_Implementation forces GameOnly during InProgress
+	// (camera-look capture); flipping NCPlusHUDDragMode flag makes it return
+	// GameAndUI on next poll. Forcing it on the PC here too snaps the cursor
+	// loose immediately instead of waiting for the next HUD tick.
+	NCPlusHUDDragMode::SetActive(true);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* PC = PlayerOwner->PlayerController;
+		PC->bShowMouseCursor = true;
+
+		FInputModeGameAndUI InputMode;
+		InputMode.SetWidgetToFocus(SharedThis(this));
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		PC->SetInputMode(InputMode);
+	}
 }
 
 AUTHUD* SNCPlusHUDDragOverlay::GetHUD() const
@@ -294,6 +314,21 @@ FReply SNCPlusHUDDragOverlay::OnKeyDown(const FGeometry& MyGeometry, const FKeyE
 
 void SNCPlusHUDDragOverlay::ClosePanel()
 {
+	// Restore input mode FIRST, before tearing down the widget — once the
+	// widget is removed, SharedThis would be stale.
+	NCPlusHUDDragMode::SetActive(false);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* PC = PlayerOwner->PlayerController;
+		PC->bShowMouseCursor = false;
+
+		// FInputModeGameOnly snaps the cursor back to camera-look capture.
+		// The HUD's GetInputMode poll will reaffirm this next tick (with the
+		// drag-mode flag now cleared, it returns to its normal GameOnly path).
+		FInputModeGameOnly InputMode;
+		PC->SetInputMode(InputMode);
+	}
+
 	if (UGameViewportClient* VC = (PlayerOwner.IsValid() && PlayerOwner->GetWorld())
 		? PlayerOwner->GetWorld()->GetGameViewport() : nullptr)
 	{
