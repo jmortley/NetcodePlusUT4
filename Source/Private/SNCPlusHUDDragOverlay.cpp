@@ -11,6 +11,9 @@
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SBorder.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Text/STextBlock.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Framework/Application/SlateApplication.h"
 
@@ -38,19 +41,42 @@ void SNCPlusHUDDragOverlay::Construct(const FArguments& InArgs)
 	// containers (AddViewportWidgetContent) tweaking child visibility.
 	SetVisibility(EVisibility::Visible);
 
-	// SBorder with NoBorder brush + HAlign/VAlign Fill makes the ChildSlot
-	// expand to the full viewport, so AllottedGeometry in OnPaint covers the
-	// entire screen — required for hit-testing arbitrary screen positions.
-	// An empty SBox would collapse to zero size and make mouse events miss us.
+	// Layered ChildSlot:
+	//   - SBorder fills the viewport but is HitTestInvisible so mouse events
+	//     fall through to this SCompoundWidget's OnMouseButton* overrides
+	//     (which run the per-frame hit-test for drag).
+	//   - SButton "Close (ESC)" sits on top, top-right, hit-testable.
+	// SOverlay layers them: SButton wins the click on its own rect, SBorder
+	// passes everything else through.
 	ChildSlot
 	.HAlign(HAlign_Fill)
 	.VAlign(VAlign_Fill)
 	[
-		SNew(SBorder)
+		SNew(SOverlay)
+		+ SOverlay::Slot()
 		.HAlign(HAlign_Fill)
 		.VAlign(VAlign_Fill)
-		.BorderImage(FCoreStyle::Get().GetBrush(TEXT("NoBorder")))
-		.Visibility(EVisibility::Visible)
+		[
+			SNew(SBorder)
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
+			.BorderImage(FCoreStyle::Get().GetBrush(TEXT("NoBorder")))
+			.Visibility(EVisibility::HitTestInvisible)
+		]
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Right)
+		.VAlign(VAlign_Top)
+		.Padding(FMargin(0.f, 12.f, 16.f, 0.f))
+		[
+			SNew(SButton)
+			.OnClicked(this, &SNCPlusHUDDragOverlay::OnCloseButtonClicked)
+			.ContentPadding(FMargin(14.f, 6.f))
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Close (ESC)")))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
 	];
 
 	// Switch input mode to GameAndUI so Slate can receive mouse events. The
@@ -101,12 +127,52 @@ float SNCPlusHUDDragOverlay::GetRenderScale() const
 	return 1.f;
 }
 
+// Hit-rect approximation for C++-drawn HUD pieces (portraits, scorebar, etc.).
+// In design pixels; the rect's TOP-LEFT lives at (ResolvedPos.X + AnchorOffset.X,
+// ResolvedPos.Y + AnchorOffset.Y). Hardcoded because each draw-call element has
+// its own convention for "where the resolved point lives relative to the visible
+// content" — the renderers in ElimPlusHUD / WipeoutHUD / NCPlusCTFHUD / ShockDomHUD
+// each compute layout differently.
+namespace NCDragRects
+{
+	struct FInfo
+	{
+		FVector2D SizeDesignPx;
+		FVector2D AnchorOffsetDesignPx;  // top-left of rect relative to ResolvedPos
+	};
+
+	static FInfo Get(FName Alias)
+	{
+		// Portrait strips: each portrait pip is ~96 design px wide × ~134 tall;
+		// 5 pips per team. ResolvedPos is the strip's start anchor.
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue"))
+		{
+			return { FVector2D(450.f, 130.f), FVector2D(0.f, 0.f) };
+		}
+		// Scorebar: BarWidth*2 + ScoreBoxWidth*2 + GapWidth*2 ≈ 600 design px wide,
+		// ~60 tall (bar + tail + clock). ResolvedPos.X is the bar's center.
+		if (Alias == TEXT("scorebar"))
+		{
+			return { FVector2D(600.f, 80.f), FVector2D(-300.f, 0.f) };
+		}
+		// ShockDom A/B/C indicators: 3 squares × ~40 design px + spacing ≈ 200 wide.
+		// ResolvedPos.X is the strip's center.
+		if (Alias == TEXT("shockdom_controls"))
+		{
+			return { FVector2D(200.f, 45.f), FVector2D(-100.f, 0.f) };
+		}
+		// Unknown draw-call — small default rect centered on the resolved point.
+		return { FVector2D(120.f, 40.f), FVector2D(-60.f, -20.f) };
+	}
+}
+
 void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 {
 	CachedElements.Empty();
 	AUTHUD* HUD = GetHUD();
 	if (!HUD) return;
 
+	// --- Widget-backed aliases (render rects come from UUTHUDWidget itself) ---
 	for (UUTHUDWidget* W : HUD->HudWidgets)
 	{
 		if (!W || W->IsPendingKill()) continue;
@@ -124,6 +190,51 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 		// Skip degenerate rects (some widgets have ShouldDraw==false → never sized).
 		if (E.ScreenSize.X < 4.f || E.ScreenSize.Y < 4.f) continue;
 		CachedElements.Add(E);
+	}
+
+	// --- C++-drawn aliases (portraits, scorebar, shockdom_controls) ---
+	// These don't live in HudWidgets[] so we synthesize rects using the same
+	// ResolveScreenPos the renderers consult, plus per-alias size hints.
+	if (PlayerOwner.IsValid() && PlayerOwner->GetWorld())
+	{
+		if (UGameViewportClient* VC = PlayerOwner->GetWorld()->GetGameViewport())
+		{
+			if (VC->Viewport)
+			{
+				const FIntPoint VS = VC->Viewport->GetSizeXY();
+				if (VS.X > 0 && VS.Y > 0)
+				{
+					const float RenderScale = float(VS.Y) / 1080.f;
+
+					for (FName Alias : NCPlusHUDAliases::GetAllAliases())
+					{
+						// Draw-call aliases have empty ClassPath in the alias table.
+						if (!NCPlusHUDAliases::GetClassPath(Alias).IsEmpty()) continue;
+						if (NCPlusHUDDrawCall::IsHidden(Alias)) continue;
+
+						// Resolve the anchor's screen position. We can't reuse
+						// NCPlusHUDDrawCall::ResolveScreenPos because it takes a
+						// UCanvas (which is protected on AHUD); inline the math.
+						const ENCPlusHUDAnchor Anchor = NCPlusHUDDrawCall::GetEffectiveAnchor(Alias);
+						const FVector2D AnchorCoords = FNCPlusHUDLayout::AnchorToScreenCoords(Anchor);
+						const FNCPlusHUDElement* LayoutElem = FNCPlusHUDLayout::GetLive().Find(Alias);
+						const FVector2D Offset = LayoutElem ? LayoutElem->Offset : NCPlusHUDAliases::GetStockOffset(Alias);
+						const FVector2D ResolvedPos(
+							AnchorCoords.X * float(VS.X) + Offset.X * RenderScale,
+							AnchorCoords.Y * float(VS.Y) + Offset.Y * RenderScale);
+
+						const NCDragRects::FInfo Info = NCDragRects::Get(Alias);
+
+						FOverlayElement E;
+						E.Alias      = Alias;
+						E.Label      = NCPlusHUDAliases::GetDisplayName(Alias).ToString();
+						E.ScreenPos  = ResolvedPos + (Info.AnchorOffsetDesignPx * RenderScale);
+						E.ScreenSize = Info.SizeDesignPx * RenderScale;
+						CachedElements.Add(E);
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -310,6 +421,15 @@ FReply SNCPlusHUDDragOverlay::OnKeyDown(const FGeometry& MyGeometry, const FKeyE
 		return FReply::Handled().ReleaseMouseCapture();
 	}
 	return FReply::Unhandled();
+}
+
+FReply SNCPlusHUDDragOverlay::OnCloseButtonClicked()
+{
+	// Backup path for the (occasional) case where ESC keyboard focus is lost
+	// after a drag — mouse-focused button click is more reliable.
+	DragIdx = INDEX_NONE;
+	ClosePanel();
+	return FReply::Handled().ReleaseMouseCapture();
 }
 
 void SNCPlusHUDDragOverlay::ClosePanel()

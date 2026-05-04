@@ -60,4 +60,8 @@ private:
 	float     GetRenderScale() const;
 	void      RefreshCachedElements() const;
 	int32     HitTest(const FVector2D& AbsoluteMousePos) const;
+
+	// Close button click handler (alternative to ESC — esc focus is flaky if a
+	// drag was just released).
+	FReply    OnCloseButtonClicked();
 };
