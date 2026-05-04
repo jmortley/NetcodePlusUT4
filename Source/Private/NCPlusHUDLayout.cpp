@@ -576,6 +576,8 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter);
 			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter);
 			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),  true,  ENCPlusHUDAnchor::TopCenter);
+			// Game-mode-specific draw calls.
+			T.Emplace(TEXT("shockdom_controls"),FString(),                                                                       FText::FromString(TEXT("ShockDom A/B/C Indicators")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 78.f));
 			return T;
 		}();
 		return Table;
@@ -667,6 +669,12 @@ namespace NCPlusHUDDrawCall
 	{
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
 		return E ? FMath::Max(E->Scale, 0.01f) : 1.f;
+	}
+
+	float GetOpacity(FName Alias)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		return E ? FMath::Clamp(E->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
 	}
 
 	bool GetUseTeamColor(FName Alias)

@@ -46,6 +46,10 @@ namespace NCHUDEdit
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
+		if (Alias == TEXT("shockdom_controls"))
+		{
+			return TEXT("Game Mode");
+		}
 		return TEXT("Stock Widgets");
 	}
 
@@ -56,6 +60,7 @@ namespace NCHUDEdit
 			TEXT("Ammo"),
 			TEXT("Weapon Bars"),
 			TEXT("Top Bar (Portraits + Scorebar)"),
+			TEXT("Game Mode"),
 			TEXT("Stock Widgets"),
 		};
 		return Order;

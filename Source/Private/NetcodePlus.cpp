@@ -14,6 +14,7 @@
 #include "SUTNCPlusMenu.h"
 #include "SUTCosmeticSelector.h"
 #include "SNCPlusHUDEditor.h"
+#include "SNCPlusHUDDragOverlay.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
@@ -25,7 +26,8 @@ static TWeakPtr<SUTNCPlusMenu> ActiveNCPMenu;
 static TWeakPtr<SUTCosmeticSelector> ActiveCosmeticSelector;
 
 /** Weak reference to active HUD layout editor */
-static TWeakPtr<SNCPlusHUDEditor> ActiveHUDEditor;
+static TWeakPtr<SNCPlusHUDEditor>      ActiveHUDEditor;
+static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -323,6 +325,51 @@ static void HandleHUDEditor(const TArray<FString>& Args)
 	ActiveHUDEditor = Editor;
 }
 
+static void HandleHUDDragOverlay(const TArray<FString>& Args)
+{
+	// Toggle: close if open.
+	if (ActiveDragOverlay.IsValid())
+	{
+		ActiveDragOverlay.Pin()->ClosePanel();
+		ActiveDragOverlay.Reset();
+		return;
+	}
+
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+	if (!World) return;
+
+	APlayerController* RawPC = World->GetFirstPlayerController();
+	if (!RawPC) return;
+
+	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(RawPC->GetLocalPlayer());
+	if (!LP) return;
+
+	UGameViewportClient* ViewportClient = World->GetGameViewport();
+	if (!ViewportClient) return;
+
+	TSharedRef<SNCPlusHUDDragOverlay> Overlay =
+		SNew(SNCPlusHUDDragOverlay)
+		.PlayerOwner(LP);
+
+	// ZOrder 95 — below the editor panel (100) so if both are up the editor sits
+	// on top; above all in-game HUD widgets so frames + labels are visible.
+	ViewportClient->AddViewportWidgetContent(Overlay, 95);
+	FSlateApplication::Get().SetKeyboardFocus(Overlay, EFocusCause::SetDirectly);
+
+	ActiveDragOverlay = Overlay;
+}
+
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
 void FNetcodePlus::StartupModule()
@@ -359,6 +406,13 @@ void FNetcodePlus::StartupModule()
 		TEXT("nchud"),
 		TEXT("Open the NetcodePlus HUD layout editor (live preview, save to disk)"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleHUDEditor),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("nchud_drag"),
+		TEXT("Toggle the visual drag-drop overlay — click and drag any HUD element frame"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleHUDDragOverlay),
 		ECVF_Default
 	);
 
@@ -423,6 +477,16 @@ void FNetcodePlus::ShutdownModule()
 
 	IConsoleObject* Cmd5 = IConsoleManager::Get().FindConsoleObject(TEXT("nchud"));
 	if (Cmd5) { IConsoleManager::Get().UnregisterConsoleObject(Cmd5, false); }
+
+	// Close drag overlay if open
+	if (ActiveDragOverlay.IsValid())
+	{
+		ActiveDragOverlay.Pin()->ClosePanel();
+		ActiveDragOverlay.Reset();
+	}
+
+	IConsoleObject* Cmd6 = IConsoleManager::Get().FindConsoleObject(TEXT("nchud_drag"));
+	if (Cmd6) { IConsoleManager::Get().UnregisterConsoleObject(Cmd6, false); }
 
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus unloaded"));
 }

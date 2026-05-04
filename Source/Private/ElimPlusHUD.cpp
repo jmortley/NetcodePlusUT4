@@ -577,7 +577,13 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 		return;
 	}
 
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	// Per-portrait opacity (Phase 3.5+): scale every SetLinearDrawColor alpha by
+	// this so the editor's Op slider fades the entire portrait stack consistently.
+	const FName PortraitAlias = (PlayerState->GetTeamNum() == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
+	const float Op = NCPlusHUDDrawCall::GetOpacity(PortraitAlias);
+	auto Tinted = [Op](FLinearColor C) -> FLinearColor { C.A *= Op; return C; };
+
+	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 	float PipHeight = PipSize * (320.0f / 224.0f);
 
 	// Join animation — pop-in over 1 second (same as FlagRun)
@@ -593,7 +599,6 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 	// Layer 1: Team-colored background (TeamSkins-aware).
 	// Honors per-portrait `use_team_color` extra: when false, locks to stock red/blue.
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-	const FName PortraitAlias = (PlayerState->GetTeamNum() == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
 	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(PortraitAlias);
 	FLinearColor TeamBGColor = (PlayerState->GetTeamNum() == 1)
 		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
@@ -602,14 +607,14 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 	{
 		TeamBGColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
 	}
-	Canvas->SetLinearDrawColor(TeamBGColor);
+	Canvas->SetLinearDrawColor(Tinted(TeamBGColor));
 	Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight, 0, 0, 1, 1);
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 
 	// Layer 2: Character portrait (dimmed if dead)
 	if (!bPlayerAlive)
 	{
-		Canvas->SetLinearDrawColor(FLinearColor(0.2f, 0.2f, 0.2f, 1.f));
+		Canvas->SetLinearDrawColor(Tinted(FLinearColor(0.2f, 0.2f, 0.2f, 1.f)));
 	}
 	if (PlayerState->GetTeamNum() == 1)
 	{
@@ -626,13 +631,13 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 	// stay dead until the round ends).
 	if (!bPlayerAlive)
 	{
-		Canvas->SetLinearDrawColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.6f));
+		Canvas->SetLinearDrawColor(Tinted(FLinearColor(0.0f, 0.0f, 0.0f, 0.6f)));
 		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight,
 			0, 0, 1, 1, BLEND_Translucent);
 	}
 
 	// Layer 4: Team-colored frame overlay
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 	const FCanvasIcon& OverlayIcon = PlayerState->GetTeamNum() == 1 ? BlueTeamOverlay : RedTeamOverlay;
 	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
 		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
@@ -648,7 +653,7 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 		float XL, YL;
 		Canvas->StrLen(SmallFont, XStr, XL, YL);
 
-		Canvas->SetLinearDrawColor(FLinearColor(1.f, 0.2f, 0.2f, 0.9f));
+		Canvas->SetLinearDrawColor(Tinted(FLinearColor(1.f, 0.2f, 0.2f, 0.9f)));
 		Canvas->DrawText(SmallFont, FText::FromString(XStr),
 			XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f),
 			YOffset + (PipHeight * 0.5f) - (YL * FontRenderScale * 0.5f),
@@ -678,13 +683,13 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 				const float TextX = XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f);
 				const float TextY = YOffset + PipHeight - (YL * FontRenderScale) - 2.f;
 				const float OutlineOffset = 1.f;
-				Canvas->SetLinearDrawColor(FLinearColor::Black);
+				Canvas->SetLinearDrawColor(Tinted(FLinearColor::Black));
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX - OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX + OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY - OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY + OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
 
-				Canvas->SetLinearDrawColor(FLinearColor::White);
+				Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
 			}
 		}

@@ -257,6 +257,11 @@ namespace NCPlusHUDDrawCall
 	/** Per-element scale (design-px multiplier). 1.0 if no override. */
 	NETCODEPLUS_API float GetScale(FName Alias);
 
+	/** Per-element opacity (0..1). 1.0 if no override. C++-drawn pieces should
+	 *  multiply this into every SetLinearDrawColor alpha they emit so the
+	 *  layout editor's Op slider behaves consistently with widget elements. */
+	NETCODEPLUS_API float GetOpacity(FName Alias);
+
 	/** Should this element use the dynamic AUTTeamInfo::TeamColor (true, default)
 	 *  or the stock red/blue palette (false)? Honored by portrait_red,
 	 *  portrait_blue, and scorebar. */

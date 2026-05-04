@@ -105,15 +105,26 @@ void AShockDomHUD::DrawTeamScoreBar(AUTGameState* GS)
 void AShockDomHUD::DrawControlPointIndicators(const TArray<AShockDomControlPoint*>& Points)
 {
 	if (Points.Num() == 0) return;
+	if (NCPlusHUDDrawCall::IsHidden(TEXT("shockdom_controls"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 	const float IndicatorSize = 30.f * RenderScale;
 	const float Spacing = 10.f * RenderScale;
 	const float TotalWidth = Points.Num() * IndicatorSize + (Points.Num() - 1) * Spacing;
 
-	// Position: centered horizontally, below the team score bar
-	const float StartX = (Canvas->ClipX - TotalWidth) * 0.5f;
-	const float YPos = 78.f * RenderScale;  // Below score bar + match clock
+	// Phase 3.5+ layout consult — anchor + offset for the whole strip.
+	// Stock placement: centered horizontally, 78 design-px below screen top.
+	const FVector2D StockTopLeft((Canvas->ClipX - TotalWidth) * 0.5f, 78.f * RenderScale);
+	const FVector2D ResolvedAnchor = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("shockdom_controls"), Canvas, FVector2D(Canvas->ClipX * 0.5f, 78.f * RenderScale));
+
+	// The layout anchor refers to the strip's logical center-top. To keep the
+	// strip centered on that point, subtract half its width to land top-left.
+	const float StartX = ResolvedAnchor.X - TotalWidth * 0.5f;
+	const float YPos   = ResolvedAnchor.Y;
+
+	// Per-element opacity — fades the whole indicator strip uniformly.
+	const float Op = NCPlusHUDDrawCall::GetOpacity(TEXT("shockdom_controls"));
+	auto Tinted = [Op](FLinearColor C) -> FLinearColor { C.A *= Op; return C; };
 
 	for (int32 i = 0; i < Points.Num(); i++)
 	{
@@ -131,8 +142,8 @@ void AShockDomHUD::DrawControlPointIndicators(const TArray<AShockDomControlPoint
 			Color = FMath::Lerp(Color, FLinearColor::White, Pulse * 0.4f);
 		}
 
-		// Filled square indicator
-		Canvas->SetDrawColor(FColor(Color.ToFColor(true)));
+		// Filled square indicator (color carries the per-element opacity).
+		Canvas->SetLinearDrawColor(Tinted(Color));
 		Canvas->DrawTile(Canvas->DefaultTexture,
 			XPos, YPos, IndicatorSize, IndicatorSize,
 			0.f, 0.f, 1.f, 1.f);
@@ -147,10 +158,10 @@ void AShockDomHUD::DrawControlPointIndicators(const TArray<AShockDomControlPoint
 		float TextY = YPos + (IndicatorSize - TextH) * 0.5f;
 
 		FCanvasTextItem TextItem(FVector2D(TextX, TextY), FText::FromString(Label),
-			SmallFont, FLinearColor::White);
+			SmallFont, Tinted(FLinearColor::White));
 		TextItem.Scale = FVector2D(FontScale, FontScale);
 		TextItem.bOutlined = true;
-		TextItem.OutlineColor = FLinearColor::Black;
+		TextItem.OutlineColor = Tinted(FLinearColor::Black);
 		Canvas->DrawItem(TextItem);
 	}
 }

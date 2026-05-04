@@ -571,7 +571,13 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		return;
 	}
 
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	// Per-portrait opacity (Phase 3.5+): scale every SetLinearDrawColor alpha
+	// by this so the editor's Op slider fades the entire portrait stack.
+	const FName PortraitAlias = (PlayerState->GetTeamNum() == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
+	const float Op = NCPlusHUDDrawCall::GetOpacity(PortraitAlias);
+	auto Tinted = [Op](FLinearColor C) -> FLinearColor { C.A *= Op; return C; };
+
+	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 
 	float PipHeight = PipSize * (320.0f / 224.0f);
 
@@ -588,7 +594,6 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	// Layer 1: Team-colored background. Honors per-portrait use_team_color
 	// extra: false → lock to stock red/blue.
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-	const FName PortraitAlias = (PlayerState->GetTeamNum() == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
 	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(PortraitAlias);
 	FLinearColor TeamBGColor = (PlayerState->GetTeamNum() == 1)
 		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)    // fallback blue
@@ -598,15 +603,15 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		TeamBGColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
 	}
 	// Draw solid colored rectangle as background
-	Canvas->SetLinearDrawColor(TeamBGColor);
+	Canvas->SetLinearDrawColor(Tinted(TeamBGColor));
 	Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight,
 		0, 0, 1, 1);
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 
 	// Layer 2: Character portrait (dimmed if dead)
 	if (LiveScaling < 1.f)
 	{
-		Canvas->SetLinearDrawColor(FLinearColor(0.2f, 0.2f, 0.2f, 1.f));
+		Canvas->SetLinearDrawColor(Tinted(FLinearColor(0.2f, 0.2f, 0.2f, 1.f)));
 	}
 
 	if (PlayerState->GetTeamNum() == 1)
@@ -624,7 +629,7 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	// Layer 3: Respawn dark overlay sweeping from right to left
 	if (LiveScaling < 1.f)
 	{
-		Canvas->SetLinearDrawColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.6f));
+		Canvas->SetLinearDrawColor(Tinted(FLinearColor(0.0f, 0.0f, 0.0f, 0.6f)));
 		Canvas->DrawTile(Canvas->DefaultTexture,
 			XOffset + LiveScaling * PipSize, YOffset,
 			PipSize - LiveScaling * PipSize, PipHeight,
@@ -632,7 +637,7 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	}
 
 	// Layer 4: Team-colored frame overlay
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 	const FCanvasIcon& OverlayIcon = PlayerState->GetTeamNum() == 1 ? BlueTeamOverlay : RedTeamOverlay;
 	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
 		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
@@ -654,7 +659,7 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			? FLinearColor(1.f, 0.4f, 0.4f, 1.f)    // Red team
 			: FLinearColor(0.4f, 0.6f, 1.f, 1.f);     // Blue team
 
-		Canvas->SetLinearDrawColor(CountdownColor);
+		Canvas->SetLinearDrawColor(Tinted(CountdownColor));
 		Canvas->DrawText(SmallFont, FText::FromString(CountdownStr),
 			XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f),
 			YOffset + (PipHeight * 0.5f) - (YL * FontRenderScale * 0.5f),
@@ -672,7 +677,7 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		float XL, YL;
 		Canvas->StrLen(SmallFont, XStr, XL, YL);
 
-		Canvas->SetLinearDrawColor(FLinearColor(1.f, 0.2f, 0.2f, 0.9f));
+		Canvas->SetLinearDrawColor(Tinted(FLinearColor(1.f, 0.2f, 0.2f, 0.9f)));
 		Canvas->DrawText(SmallFont, FText::FromString(XStr),
 			XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f),
 			YOffset + (PipHeight * 0.5f) - (YL * FontRenderScale * 0.5f),
@@ -705,14 +710,14 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 				// Black outline: draw text offset in 4 directions
 				FLinearColor GoldOutline(0.f, 0.f, 0.f, 1.f);
 				float OutlineOffset = 1.f;
-				Canvas->SetLinearDrawColor(GoldOutline);
+				Canvas->SetLinearDrawColor(Tinted(GoldOutline));
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX - OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX + OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY - OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY + OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
 
 				// White fill on top
-				Canvas->SetLinearDrawColor(FLinearColor::White);
+				Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
 			}
 		}
