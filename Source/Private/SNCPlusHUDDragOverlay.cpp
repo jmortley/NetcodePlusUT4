@@ -16,6 +16,8 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/Commands/UIAction.h"
 
 namespace NCDragOverlay
 {
@@ -343,7 +345,8 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 
 FReply SNCPlusHUDDragOverlay::OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
-	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton)
+	const FKey Button = MouseEvent.GetEffectingButton();
+	if (Button != EKeys::LeftMouseButton && Button != EKeys::RightMouseButton)
 	{
 		return FReply::Unhandled();
 	}
@@ -357,14 +360,24 @@ FReply SNCPlusHUDDragOverlay::OnMouseButtonDown(const FGeometry& MyGeometry, con
 	const int32 Hit = HitTest(MouseAbs);
 	if (Hit == INDEX_NONE)
 	{
-		// Click on empty area — release focus so the game doesn't get stuck.
+		// Click on empty area — pass through.
 		return FReply::Unhandled();
 	}
 
+	const FName Alias = CachedElements[Hit].Alias;
+
+	if (Button == EKeys::RightMouseButton)
+	{
+		// Cancel any in-progress drag (defensive — shouldn't normally happen).
+		DragIdx = INDEX_NONE;
+		OpenContextMenu(Alias, MouseAbs);
+		return FReply::Handled();
+	}
+
+	// Left button → start drag.
 	DragIdx           = Hit;
 	DragStartMouseAbs = MouseAbs;
 
-	const FName Alias = CachedElements[Hit].Alias;
 	const FNCPlusHUDElement* Existing = FNCPlusHUDLayout::GetLive().Find(Alias);
 	DragStartOffset = Existing ? Existing->Offset : NCPlusHUDAliases::GetStockOffset(Alias);
 
@@ -430,6 +443,127 @@ FReply SNCPlusHUDDragOverlay::OnCloseButtonClicked()
 	DragIdx = INDEX_NONE;
 	ClosePanel();
 	return FReply::Handled().ReleaseMouseCapture();
+}
+
+// =============================================================================
+// Right-click context menu (Phase 4.0c)
+// =============================================================================
+
+void SNCPlusHUDDragOverlay::OpenContextMenu(FName Alias, const FVector2D& ScreenPos)
+{
+	const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(Alias);
+	const bool bHidden        = Elem && Elem->bHidden;
+	const bool bIsWeaponBar   = (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"));
+	const bool bIsHorizontal  = bIsWeaponBar && Elem &&
+		Elem->GetExtra(TEXT("orientation")).Equals(TEXT("Horizontal"), ESearchCase::IgnoreCase);
+
+	// FMenuBuilder with bShouldCloseWindowAfterMenuSelection=true so the menu
+	// auto-dismisses when the user picks an entry. nullptr command list is fine
+	// since we use FUIAction lambdas instead of registered commands.
+	FMenuBuilder MenuBuilder(/*bShouldCloseWindowAfterMenuSelection=*/true, nullptr);
+
+	// Section header — shows which element this menu controls.
+	MenuBuilder.BeginSection(NAME_None, NCPlusHUDAliases::GetDisplayName(Alias));
+
+	MenuBuilder.AddMenuEntry(
+		FText::FromString(bHidden ? TEXT("Show") : TEXT("Hide")),
+		FText::FromString(TEXT("Toggle whether this element renders.")),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SNCPlusHUDDragOverlay::OnContextHideToggle, Alias))
+	);
+
+	MenuBuilder.AddMenuEntry(
+		FText::FromString(TEXT("Reset to Default")),
+		FText::FromString(TEXT("Clear all overrides for this element.")),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SNCPlusHUDDragOverlay::OnContextReset, Alias))
+	);
+
+	if (bIsWeaponBar)
+	{
+		MenuBuilder.AddMenuSeparator();
+		MenuBuilder.AddMenuEntry(
+			FText::FromString(bIsHorizontal ? TEXT("Switch to Vertical") : TEXT("Switch to Horizontal")),
+			FText::FromString(TEXT("Flip the slot stack direction.")),
+			FSlateIcon(),
+			FUIAction(FExecuteAction::CreateSP(this, &SNCPlusHUDDragOverlay::OnContextToggleOrientation, Alias))
+		);
+	}
+
+	MenuBuilder.AddMenuSeparator();
+	MenuBuilder.AddMenuEntry(
+		FText::FromString(TEXT("Properties (open editor)...")),
+		FText::FromString(TEXT("Close this overlay and open the full HUD editor panel.")),
+		FSlateIcon(),
+		FUIAction(FExecuteAction::CreateSP(this, &SNCPlusHUDDragOverlay::OnContextProperties, Alias))
+	);
+
+	MenuBuilder.EndSection();
+
+	// Push the menu as a context-style popup at the click position. PushMenu
+	// returns a SharedRef to the menu's window; we don't need to retain it,
+	// the menu manages its own lifetime (auto-closes on selection / outside-click).
+	FSlateApplication::Get().PushMenu(
+		SharedThis(this),
+		FWidgetPath(),
+		MenuBuilder.MakeWidget(),
+		ScreenPos,
+		FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu)
+	);
+}
+
+void SNCPlusHUDDragOverlay::OnContextHideToggle(FName Alias)
+{
+	FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
+	FNCPlusHUDElement* Elem = L.Elements.Find(Alias);
+	if (!Elem)
+	{
+		// Same seeding idiom as OnMouseMove — start from stock anchor + offset
+		// so toggling Hide on a never-edited element doesn't jump it visually.
+		FNCPlusHUDElement Seed;
+		Seed.Anchor = NCPlusHUDAliases::GetStockAnchor(Alias);
+		Seed.Offset = NCPlusHUDAliases::GetStockOffset(Alias);
+		Elem = &L.Elements.Add(Alias, Seed);
+	}
+	Elem->bHidden = !Elem->bHidden;
+	FNCPlusHUDLayout::MarkLiveDirty();
+}
+
+void SNCPlusHUDDragOverlay::OnContextReset(FName Alias)
+{
+	// Removing the entry restores the captured constructor defaults via the
+	// apply pass's no-override branch.
+	FNCPlusHUDLayout::GetLive().Elements.Remove(Alias);
+	FNCPlusHUDLayout::MarkLiveDirty();
+}
+
+void SNCPlusHUDDragOverlay::OnContextToggleOrientation(FName Alias)
+{
+	FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
+	FNCPlusHUDElement* Elem = L.Elements.Find(Alias);
+	if (!Elem)
+	{
+		FNCPlusHUDElement Seed;
+		Seed.Anchor = NCPlusHUDAliases::GetStockAnchor(Alias);
+		Seed.Offset = NCPlusHUDAliases::GetStockOffset(Alias);
+		Elem = &L.Elements.Add(Alias, Seed);
+	}
+	const bool bIsHorizontal = Elem->GetExtra(TEXT("orientation")).Equals(TEXT("Horizontal"), ESearchCase::IgnoreCase);
+	Elem->Extras.Add(TEXT("orientation"), bIsHorizontal ? TEXT("Vertical") : TEXT("Horizontal"));
+	FNCPlusHUDLayout::MarkLiveDirty();
+}
+
+void SNCPlusHUDDragOverlay::OnContextProperties(FName Alias)
+{
+	// Close the drag overlay and trigger the main editor panel via the existing
+	// console command. nchud is a toggle: it'll open since nothing's open after
+	// our ClosePanel. Using GEngine->Exec keeps this loosely coupled to the
+	// command's actual implementation in NetcodePlus.cpp.
+	ClosePanel();
+	if (PlayerOwner.IsValid() && PlayerOwner->GetWorld() && GEngine)
+	{
+		GEngine->Exec(PlayerOwner->GetWorld(), TEXT("nchud"));
+	}
 }
 
 void SNCPlusHUDDragOverlay::ClosePanel()

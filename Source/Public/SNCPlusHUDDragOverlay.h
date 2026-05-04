@@ -64,4 +64,14 @@ private:
 	// Close button click handler (alternative to ESC — esc focus is flaky if a
 	// drag was just released).
 	FReply    OnCloseButtonClicked();
+
+	// Right-click context menu (Phase 4.0c). Per-element actions: hide/show,
+	// reset to default, toggle orientation (WeaponBars only), open properties
+	// in the main editor panel. Built lazily each invocation so menu entries
+	// reflect current state (hide vs show, current orientation, etc.).
+	void      OpenContextMenu(FName Alias, const FVector2D& ScreenPos);
+	void      OnContextHideToggle(FName Alias);
+	void      OnContextReset(FName Alias);
+	void      OnContextToggleOrientation(FName Alias);
+	void      OnContextProperties(FName Alias);
 };
