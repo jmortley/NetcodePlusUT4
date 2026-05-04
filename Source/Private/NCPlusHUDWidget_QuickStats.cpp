@@ -168,7 +168,8 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 {
 	using namespace NCPlusQS;
 
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
 	UFont* LabelFont  = UTHUDOwner->TinyFont;
 	if (!NumberFont || !LabelFont) return;
 
@@ -258,7 +259,8 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C)
 {
 	using namespace NCPlusQS;
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
 	if (!NumberFont || !Canvas || !Canvas->DefaultTexture) return;
 
 	// Segment math: each segment is SegmentSize (50) units. Full segments are
@@ -376,7 +378,8 @@ namespace
 void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C)
 {
 	using namespace NCPlusQS;
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
 	if (!NumberFont || !Canvas) return;
 
 	const float CX = Size.X * 0.5f;
@@ -474,7 +477,8 @@ namespace
 void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C)
 {
 	using namespace NCPlusQS;
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
 	if (!NumberFont || !Canvas) return;
 
 	const float ChevW   = 44.f, ChevH = 22.f, ChevSlant = 10.f, ChevGap = 8.f;
@@ -539,7 +543,8 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 void UNCPlusHUDWidget_QuickStats::DrawVerticalPills(int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C)
 {
 	using namespace NCPlusQS;
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
 	if (!NumberFont || !Canvas || !Canvas->DefaultTexture) return;
 
 	const float PillW       = 22.f;

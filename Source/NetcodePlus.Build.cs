@@ -33,6 +33,7 @@ namespace UnrealBuildTool.Rules
 
 			PrivateDependencyModuleNames.AddRange(new string[] {
 				"AssetRegistry",
+				"AppFramework",   // SColorPicker (used by SNCPlusHUDEditor color swatches)
 				"Http",
 				"Json",
 				"JsonUtilities"

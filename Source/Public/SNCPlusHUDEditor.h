@@ -19,7 +19,9 @@ struct FNCHUDEditorColor
 	FName  Key;            // extras key, e.g. "color_health"
 	FText  Label;          // user-facing label, e.g. "Health"
 	FLinearColor Default;  // default if no override present
-	TSharedPtr<class SEditableTextBox> Input;
+	// No stored widget pointer — the swatch's color is attribute-bound to
+	// GetCurrentColor() and re-read each paint, so it stays live without a
+	// reference to update.
 };
 
 struct FNCHUDEditorRow
@@ -33,6 +35,11 @@ struct FNCHUDEditorRow
 	TSharedPtr<class STextComboBox> StyleCombo;
 	TArray<TSharedPtr<FString>> StyleChoices;
 	bool bHasStylePicker = false;
+
+	// Optional per-row font picker (hp_armor + ammo).
+	TSharedPtr<class STextComboBox> FontCombo;
+	TArray<TSharedPtr<FString>> FontChoices;
+	bool bHasFontPicker = false;
 
 	// Optional per-row color overrides (hp_armor + weapon_bar_*).
 	TArray<FNCHUDEditorColor> Colors;
@@ -104,14 +111,22 @@ private:
 	// Style combo (hp_armor only)
 	void OnStyleSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias);
 
+	// Font combo (hp_armor + ammo)
+	void OnFontSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias);
+
 	// Opacity (per-element multiplier 0..1)
 	TOptional<float> GetOpacity(FName Alias) const;
 	void OnOpacityChanged(float NewVal, FName Alias);
 	void OnOpacityCommitted(float NewVal, ETextCommit::Type, FName Alias);
 
-	// Color overrides
+	// Font sub-row (hp_armor + ammo).
+	TSharedRef<class SWidget> BuildFontRow(FNCHUDEditorRow& Row);
+
+	// Color overrides — swatch button per slot, opens SColorPicker on click.
 	TSharedRef<class SWidget> BuildColorRow(FNCHUDEditorRow& Row);
-	void OnColorTextCommitted(const FText& NewText, ETextCommit::Type, FName Alias, FName ColorKey);
+	FReply OnSwatchClicked(FName Alias, FName ColorKey, FLinearColor DefaultColor);
+	void OnColorPickerCommitted(FLinearColor NewColor, FName Alias, FName ColorKey);
+	FLinearColor GetCurrentColor(FName Alias, FName ColorKey, FLinearColor DefaultColor) const;
 
 	// Team-color toggle (portraits + scorebar)
 	ECheckBoxState GetTeamColorState(FName Alias) const;

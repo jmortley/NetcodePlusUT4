@@ -169,7 +169,8 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 void UNCPlusHUDWidget_AmmoCounter::DrawBigNumber(AUTWeapon* W, const FAmmoColors& C)
 {
 	using namespace NCPlusAC;
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("ammo"), UTHUDOwner, UTHUDOwner->LargeFont);
 	UFont* MaxFont    = UTHUDOwner->TinyFont;
 	if (!NumberFont || !MaxFont) return;
 
@@ -221,7 +222,8 @@ void UNCPlusHUDWidget_AmmoCounter::DrawBigNumber(AUTWeapon* W, const FAmmoColors
 void UNCPlusHUDWidget_AmmoCounter::DrawIconAndCount(AUTWeapon* W, const FAmmoColors& C)
 {
 	using namespace NCPlusAC;
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("ammo"), UTHUDOwner, UTHUDOwner->LargeFont);
 	UFont* MaxFont    = UTHUDOwner->SmallFont;
 	if (!NumberFont || !MaxFont || !Canvas || !Canvas->DefaultTexture) return;
 
@@ -315,7 +317,8 @@ void UNCPlusHUDWidget_AmmoCounter::DrawIconAndCount(AUTWeapon* W, const FAmmoCol
 void UNCPlusHUDWidget_AmmoCounter::DrawVerticalGauge(AUTWeapon* W, const FAmmoColors& C)
 {
 	using namespace NCPlusAC;
-	UFont* NumberFont = UTHUDOwner->LargeFont;
+	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
+	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("ammo"), UTHUDOwner, UTHUDOwner->LargeFont);
 	if (!NumberFont || !Canvas || !Canvas->DefaultTexture) return;
 
 	// Centered column.

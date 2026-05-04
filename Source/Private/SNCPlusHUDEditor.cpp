@@ -17,6 +17,8 @@
 #include "Widgets/Layout/SExpandableArea.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Widgets/Colors/SColorBlock.h"
+#include "Widgets/Colors/SColorPicker.h"
 
 namespace NCHUDEdit
 {
@@ -99,29 +101,33 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Row.DisplayName   = NCPlusHUDAliases::GetDisplayName(Alias);
 		Row.AnchorChoices = NCHUDEdit::BuildAnchorChoices();
 
-		// hp_armor: style picker + color overrides.
+		// hp_armor: style picker + font picker + color overrides.
 		if (Alias == TEXT("hp_armor"))
 		{
 			Row.bHasStylePicker = true;
+			Row.bHasFontPicker  = true;
+			Row.FontChoices     = NCPlusHUDFonts::GetChoices();
 			Row.StyleChoices    = NCPlusHPArmorStyle::GetChoices();
-			Row.Colors.Add({ TEXT("color_health_number"), FText::FromString(TEXT("HP #")),       FLinearColor::White,                    nullptr });
-			Row.Colors.Add({ TEXT("color_armor_number"),  FText::FromString(TEXT("AR #")),       FLinearColor::White,                    nullptr });
-			Row.Colors.Add({ TEXT("color_health"),        FText::FromString(TEXT("HP Accent")),  FLinearColor(0.37f, 0.96f, 0.48f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_armor"),         FText::FromString(TEXT("AR Accent")),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_low_hp"),        FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_damage_flash"),  FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f), nullptr });
+			Row.Colors.Add({ TEXT("color_health_number"), FText::FromString(TEXT("HP #")),       FLinearColor::White                    });
+			Row.Colors.Add({ TEXT("color_armor_number"),  FText::FromString(TEXT("AR #")),       FLinearColor::White                    });
+			Row.Colors.Add({ TEXT("color_health"),        FText::FromString(TEXT("HP Accent")),  FLinearColor(0.37f, 0.96f, 0.48f, 1.f) });
+			Row.Colors.Add({ TEXT("color_armor"),         FText::FromString(TEXT("AR Accent")),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f) });
+			Row.Colors.Add({ TEXT("color_low_hp"),        FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f) });
+			Row.Colors.Add({ TEXT("color_damage_flash"),  FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f) });
 		}
-		// ammo: style picker + color overrides (3 styles — see NCPlusHUDWidget_AmmoCounter).
+		// ammo: style picker + font picker + color overrides (3 styles — see NCPlusHUDWidget_AmmoCounter).
 		if (Alias == TEXT("ammo"))
 		{
 			Row.bHasStylePicker = true;
+			Row.bHasFontPicker  = true;
+			Row.FontChoices     = NCPlusHUDFonts::GetChoices();
 			Row.StyleChoices    = NCPlusAmmoStyle::GetChoices();
-			Row.Colors.Add({ TEXT("color_number"), FText::FromString(TEXT("Number")),  FLinearColor::White,                    nullptr });
-			Row.Colors.Add({ TEXT("color_max"),    FText::FromString(TEXT("/Max")),    FLinearColor(0.65f, 0.65f, 0.65f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_full"),   FText::FromString(TEXT("Full")),    FLinearColor(0.40f, 0.95f, 0.48f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_warn"),   FText::FromString(TEXT("Warn")),    FLinearColor(1.0f,  0.85f, 0.30f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_danger"), FText::FromString(TEXT("Low")),     FLinearColor(1.0f,  0.32f, 0.28f, 1.f), nullptr });
-			Row.Colors.Add({ TEXT("color_bg"),     FText::FromString(TEXT("Plate BG")), FLinearColor(0.04f, 0.04f, 0.04f, 0.45f), nullptr });
+			Row.Colors.Add({ TEXT("color_number"), FText::FromString(TEXT("Number")),  FLinearColor::White                    });
+			Row.Colors.Add({ TEXT("color_max"),    FText::FromString(TEXT("/Max")),    FLinearColor(0.65f, 0.65f, 0.65f, 1.f) });
+			Row.Colors.Add({ TEXT("color_full"),   FText::FromString(TEXT("Full")),    FLinearColor(0.40f, 0.95f, 0.48f, 1.f) });
+			Row.Colors.Add({ TEXT("color_warn"),   FText::FromString(TEXT("Warn")),    FLinearColor(1.0f,  0.85f, 0.30f, 1.f) });
+			Row.Colors.Add({ TEXT("color_danger"), FText::FromString(TEXT("Low")),     FLinearColor(1.0f,  0.32f, 0.28f, 1.f) });
+			Row.Colors.Add({ TEXT("color_bg"),     FText::FromString(TEXT("Plate BG")), FLinearColor(0.04f, 0.04f, 0.04f, 0.45f) });
 		}
 		// Portraits + scorebar opt-in to the use_team_color checkbox.
 		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar"))
@@ -131,12 +137,12 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		// WeaponBar (both sides): bg/outline/ammo color overrides.
 		if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
 		{
-			Row.Colors.Add({ TEXT("color_slot_bg_inactive"), FText::FromString(TEXT("Slot BG")),     FLinearColor(0.04f, 0.04f, 0.04f, 0.30f), nullptr });
-			Row.Colors.Add({ TEXT("color_slot_bg_active"),   FText::FromString(TEXT("Slot Active")), FLinearColor(0.10f, 0.10f, 0.10f, 0.55f), nullptr });
-			Row.Colors.Add({ TEXT("color_outline"),          FText::FromString(TEXT("Outline")),     FLinearColor(0.95f, 0.83f, 0.34f, 1.f),   nullptr });
-			Row.Colors.Add({ TEXT("color_ammo_full"),        FText::FromString(TEXT("Ammo Full")),   FLinearColor(0.4f,  0.95f, 0.48f, 1.f),   nullptr });
-			Row.Colors.Add({ TEXT("color_ammo_warn"),        FText::FromString(TEXT("Ammo Warn")),   FLinearColor(1.0f,  0.85f, 0.30f, 1.f),   nullptr });
-			Row.Colors.Add({ TEXT("color_ammo_danger"),      FText::FromString(TEXT("Ammo Low")),    FLinearColor(1.0f,  0.32f, 0.28f, 1.f),   nullptr });
+			Row.Colors.Add({ TEXT("color_slot_bg_inactive"), FText::FromString(TEXT("Slot BG")),     FLinearColor(0.04f, 0.04f, 0.04f, 0.30f) });
+			Row.Colors.Add({ TEXT("color_slot_bg_active"),   FText::FromString(TEXT("Slot Active")), FLinearColor(0.10f, 0.10f, 0.10f, 0.55f) });
+			Row.Colors.Add({ TEXT("color_outline"),          FText::FromString(TEXT("Outline")),     FLinearColor(0.95f, 0.83f, 0.34f, 1.f)   });
+			Row.Colors.Add({ TEXT("color_ammo_full"),        FText::FromString(TEXT("Ammo Full")),   FLinearColor(0.4f,  0.95f, 0.48f, 1.f)   });
+			Row.Colors.Add({ TEXT("color_ammo_warn"),        FText::FromString(TEXT("Ammo Warn")),   FLinearColor(1.0f,  0.85f, 0.30f, 1.f)   });
+			Row.Colors.Add({ TEXT("color_ammo_danger"),      FText::FromString(TEXT("Ammo Low")),    FLinearColor(1.0f,  0.32f, 0.28f, 1.f)   });
 		}
 		Rows.Add(Row);
 	}
@@ -165,6 +171,10 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			TSharedPtr<SVerticalBox> RowBox;
 			SAssignNew(RowBox, SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight() [ BuildRow(Row) ];
+			if (Row.bHasFontPicker)
+			{
+				RowBox->AddSlot().AutoHeight().Padding(8.f, 1.f, 0.f, 0.f) [ BuildFontRow(Row) ];
+			}
 			if (Row.Colors.Num() > 0)
 			{
 				RowBox->AddSlot().AutoHeight().Padding(8.f, 1.f, 0.f, 0.f) [ BuildColorRow(Row) ];
@@ -573,6 +583,11 @@ FReply SNCPlusHUDEditor::OnResetRowClicked(FName Alias)
 				// Index 0 in each enum's GetChoices() is the default style.
 				Row.StyleCombo->SetSelectedItem(Row.StyleChoices[0]);
 			}
+			if (Row.bHasFontPicker && Row.FontCombo.IsValid() && Row.FontChoices.Num() > 0)
+			{
+				// Index 0 of FontChoices is "Default" (no override).
+				Row.FontCombo->SetSelectedItem(Row.FontChoices[0]);
+			}
 			break;
 		}
 	}
@@ -607,6 +622,20 @@ FReply SNCPlusHUDEditor::OnReloadClicked()
 			const int32 Idx = FMath::Clamp(NCHUDEdit::ParseStyleIndex(Row.Alias, CurStr), 0, Row.StyleChoices.Num() - 1);
 			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[Idx]);
 		}
+		if (Row.bHasFontPicker && Row.FontCombo.IsValid() && Row.FontChoices.Num() > 0)
+		{
+			const FString CurStr = E ? E->GetExtra(TEXT("font")) : FString();
+			int32 Idx = 0;  // Default
+			for (int32 i = 0; i < Row.FontChoices.Num(); i++)
+			{
+				if (Row.FontChoices[i].IsValid() && (*Row.FontChoices[i]).Equals(CurStr, ESearchCase::IgnoreCase))
+				{
+					Idx = i;
+					break;
+				}
+			}
+			Row.FontCombo->SetSelectedItem(Row.FontChoices[Idx]);
+		}
 	}
 	return FReply::Handled();
 }
@@ -627,6 +656,10 @@ FReply SNCPlusHUDEditor::OnResetAllClicked()
 		{
 			// Index 0 is the default style for any registered enum.
 			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[0]);
+		}
+		if (Row.bHasFontPicker && Row.FontCombo.IsValid() && Row.FontChoices.Num() > 0)
+		{
+			Row.FontCombo->SetSelectedItem(Row.FontChoices[0]);  // "Default"
 		}
 	}
 	return FReply::Handled();
@@ -671,19 +704,8 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildColorRow(FNCHUDEditorRow& Row)
 		for (int32 i = LineStart; i < LineEnd; i++)
 		{
 			FNCHUDEditorColor& Color = Row.Colors[i];
-			const FName Key = Color.Key;
-
-			FString InitialHex;
-			const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-			if (E)
-			{
-				const FString Existing = E->GetExtra(Key);
-				if (!Existing.IsEmpty()) InitialHex = Existing;
-			}
-			if (InitialHex.IsEmpty())
-			{
-				InitialHex = NCPlusHUDColor::ToHexString(Color.Default, true);
-			}
+			const FName Key      = Color.Key;
+			const FLinearColor Default = Color.Default;
 
 			LineBox->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,4,0)
 			[
@@ -692,13 +714,29 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildColorRow(FNCHUDEditorRow& Row)
 				.ColorAndOpacity(FLinearColor(0.75f, 0.75f, 0.75f, 1.f))
 			];
 
+			// Swatch button — clicking opens SColorPicker. The color block's
+			// .Color attribute is bound to GetCurrentColor() so it updates live
+			// (both as the picker drags and when other code paths mutate the layout).
 			LineBox->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 			[
-				SNew(SBox).WidthOverride(80.f)
+				SNew(SBox).WidthOverride(54.f).HeightOverride(20.f)
 				[
-					SAssignNew(Color.Input, SEditableTextBox)
-					.Text(FText::FromString(InitialHex))
-					.OnTextCommitted(this, &SNCPlusHUDEditor::OnColorTextCommitted, Alias, Key)
+					SNew(SButton)
+					.ContentPadding(FMargin(2.f))
+					.OnClicked(this, &SNCPlusHUDEditor::OnSwatchClicked, Alias, Key, Default)
+					.ToolTipText(TAttribute<FText>::Create(TAttribute<FText>::FGetter::CreateLambda(
+						[this, Alias, Key, Default]() -> FText
+						{
+							const FLinearColor C = GetCurrentColor(Alias, Key, Default);
+							return FText::FromString(NCPlusHUDColor::ToHexString(C, true));
+						})))
+					[
+						SNew(SColorBlock)
+						.Color(this, &SNCPlusHUDEditor::GetCurrentColor, Alias, Key, Default)
+						.ShowBackgroundForAlpha(true)
+						.IgnoreAlpha(false)
+						.Size(FVector2D(46.f, 14.f))
+					]
 				]
 			];
 		}
@@ -709,18 +747,97 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildColorRow(FNCHUDEditorRow& Row)
 	return VBox.ToSharedRef();
 }
 
-void SNCPlusHUDEditor::OnColorTextCommitted(const FText& NewText, ETextCommit::Type, FName Alias, FName ColorKey)
+TSharedRef<SWidget> SNCPlusHUDEditor::BuildFontRow(FNCHUDEditorRow& Row)
 {
-	const FString Hex = NewText.ToString();
+	const FName Alias = Row.Alias;
 
-	// Validate before storing — if it doesn't parse, don't write a bogus value.
-	FLinearColor Parsed;
-	if (!NCPlusHUDColor::TryParse(Hex, Parsed))
+	// Resolve current selection from layout extras → index in FontChoices.
+	const FNCPlusHUDElement* Cur = FNCPlusHUDLayout::GetLive().Find(Alias);
+	const FString CurStr = Cur ? Cur->GetExtra(TEXT("font")) : FString();
+	int32 InitialIdx = 0;  // "Default"
+	if (!CurStr.IsEmpty())
 	{
-		SetStatus(FString::Printf(TEXT("Invalid color '%s' (use #RRGGBB or #RRGGBBAA)."), *Hex));
-		return;
+		for (int32 i = 0; i < Row.FontChoices.Num(); i++)
+		{
+			if (Row.FontChoices[i].IsValid() && (*Row.FontChoices[i]).Equals(CurStr, ESearchCase::IgnoreCase))
+			{
+				InitialIdx = i;
+				break;
+			}
+		}
 	}
 
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[
+			SNew(SBox).WidthOverride(60.f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Font:")))
+				.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f, 1.f))
+			]
+		]
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+		[
+			SNew(SBox).WidthOverride(180.f)
+			[
+				SAssignNew(Row.FontCombo, STextComboBox)
+				.OptionsSource(&Row.FontChoices)
+				.InitiallySelectedItem(Row.FontChoices.IsValidIndex(InitialIdx) ? Row.FontChoices[InitialIdx] : nullptr)
+				.OnSelectionChanged(this, &SNCPlusHUDEditor::OnFontSelected, Alias)
+			]
+		];
+}
+
+void SNCPlusHUDEditor::OnFontSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias)
+{
+	if (bSuppressComboCallbacks) return;
+	if (!NewSel.IsValid()) return;
+	const FString Choice = *NewSel;
+
+	// "Default" → remove the override so Resolve() returns the widget's fallback.
+	// Anything else → store the display name; Resolve() looks it up in the table.
+	if (Choice.Equals(TEXT("Default"), ESearchCase::IgnoreCase))
+	{
+		MutateElement(Alias, [](FNCPlusHUDElement& E) {
+			E.Extras.Remove(TEXT("font"));
+		});
+	}
+	else
+	{
+		MutateElement(Alias, [&Choice](FNCPlusHUDElement& E) {
+			E.Extras.Add(TEXT("font"), Choice);
+		});
+	}
+}
+
+FLinearColor SNCPlusHUDEditor::GetCurrentColor(FName Alias, FName ColorKey, FLinearColor DefaultColor) const
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	return E ? E->GetExtraColor(ColorKey, DefaultColor) : DefaultColor;
+}
+
+FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearColor DefaultColor)
+{
+	const FLinearColor Initial = GetCurrentColor(Alias, ColorKey, DefaultColor);
+
+	FColorPickerArgs PickerArgs;
+	PickerArgs.bUseAlpha = true;
+	PickerArgs.bIsModal = false;
+	PickerArgs.bOnlyRefreshOnOk = false;          // live update — value commits as picker drags
+	PickerArgs.bExpandAdvancedSection = false;
+	PickerArgs.InitialColorOverride = Initial;
+	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateSP(
+		this, &SNCPlusHUDEditor::OnColorPickerCommitted, Alias, ColorKey);
+	PickerArgs.ParentWidget = SharedThis(this);
+
+	OpenColorPicker(PickerArgs);
+	return FReply::Handled();
+}
+
+void SNCPlusHUDEditor::OnColorPickerCommitted(FLinearColor NewColor, FName Alias, FName ColorKey)
+{
+	const FString Hex = NCPlusHUDColor::ToHexString(NewColor, true);
 	MutateElement(Alias, [&](FNCPlusHUDElement& E) {
 		E.Extras.Add(ColorKey, Hex);
 	});

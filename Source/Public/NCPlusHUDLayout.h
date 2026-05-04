@@ -99,6 +99,33 @@ namespace NCPlusAmmoStyle
 	NETCODEPLUS_API TArray<TSharedPtr<FString>> GetChoices();
 }
 
+/**
+ * Per-element font override (Phase 3.8). Layout JSON stores a display-name
+ * string in Extras["font"]; widgets call Resolve() at draw time to convert
+ * that to a real UFont*. Tier A fonts (Tiny/Small/Medium/Large/Huge/Number/
+ * Chat) come from AUTHUD which already loads them on construction — zero
+ * extra cost. Tier B fonts (Exo2 Bold, Rajdhani, Ambex, Positec, Extreme)
+ * are lazy-loaded on first use and cached for the rest of the session.
+ *
+ * "Default" / empty string in Extras means "no override" — Resolve returns
+ * the Fallback parameter (whatever the widget's call-site already uses).
+ */
+namespace NCPlusHUDFonts
+{
+	/** Resolve a font override for an alias. Returns Fallback if no override
+	 *  (or if the override fails to load). HUD must be non-null for Tier A
+	 *  fonts to resolve; pass it through from your widget's UTHUDOwner. */
+	NETCODEPLUS_API class UFont* Resolve(FName Alias, class AUTHUD* HUD, class UFont* Fallback);
+
+	/** Resolve a font scale multiplier. Default 1.0 — applied on top of the
+	 *  widget's existing per-call scale so users can compensate for the
+	 *  glyph-height difference between font families. */
+	NETCODEPLUS_API float ResolveScale(FName Alias, float Default = 1.f);
+
+	/** Display-name dropdown choices ("Default", "Tiny", ..., "Rajdhani Bold"). */
+	NETCODEPLUS_API TArray<TSharedPtr<FString>> GetChoices();
+}
+
 /** Whole-HUD layout config. Keyed by alias (e.g. "hp_armor", "weapon_bar_left"). */
 struct FNCPlusHUDLayout
 {

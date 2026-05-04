@@ -3,6 +3,7 @@
 #include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
+#include "Engine/Font.h"
 #include "Json.h"
 #include "JsonUtilities.h"
 #include "Misc/Paths.h"
@@ -85,6 +86,112 @@ namespace NCPlusHPArmorStyle
 		Out.Add(MakeShareable(new FString(TEXT("RadialArcs"))));
 		Out.Add(MakeShareable(new FString(TEXT("HexChevrons"))));
 		Out.Add(MakeShareable(new FString(TEXT("VerticalPills"))));
+		return Out;
+	}
+}
+
+// =============================================================================
+// Font resolver (Phase 3.8)
+// =============================================================================
+
+namespace NCPlusHUDFonts
+{
+	// Tier A getters — pull from AUTHUD's already-loaded font set.
+	static UFont* GetTiny  (AUTHUD* H) { return H ? H->TinyFont   : nullptr; }
+	static UFont* GetSmall (AUTHUD* H) { return H ? H->SmallFont  : nullptr; }
+	static UFont* GetMedium(AUTHUD* H) { return H ? H->MediumFont : nullptr; }
+	static UFont* GetLarge (AUTHUD* H) { return H ? H->LargeFont  : nullptr; }
+	static UFont* GetHuge  (AUTHUD* H) { return H ? H->HugeFont   : nullptr; }
+	static UFont* GetNumber(AUTHUD* H) { return H ? H->NumberFont : nullptr; }
+	static UFont* GetChat  (AUTHUD* H) { return H ? H->ChatFont   : nullptr; }
+
+	struct FFontEntry
+	{
+		FString  Display;                  // user-facing name (also stored in JSON)
+		FString  AssetPath;                // empty for Tier A; full path for Tier B
+		UFont* (*HUDFunc)(AUTHUD* H);      // non-null for Tier A; null for Tier B
+	};
+
+	static const TArray<FFontEntry>& GetTable()
+	{
+		static const TArray<FFontEntry> Table = {
+			// Tier A — already loaded by AUTHUD ctor, zero cost.
+			{ TEXT("Tiny"),         FString(),                                                                              &GetTiny   },
+			{ TEXT("Small"),        FString(),                                                                              &GetSmall  },
+			{ TEXT("Medium"),       FString(),                                                                              &GetMedium },
+			{ TEXT("Large"),        FString(),                                                                              &GetLarge  },
+			{ TEXT("Huge"),         FString(),                                                                              &GetHuge   },
+			{ TEXT("Number"),       FString(),                                                                              &GetNumber },
+			{ TEXT("Chat"),         FString(),                                                                              &GetChat   },
+			// Tier B — lazy-loaded on first use, cached for rest of session.
+			{ TEXT("Exo2 Bold"),    TEXT("/Game/RestrictedAssets/UI/Fonts/Exo2-Bold.Exo2-Bold"),                            nullptr    },
+			{ TEXT("Rajdhani Bold"),TEXT("/Game/RestrictedAssets/UI/Fonts/Rajdhani-Bold.Rajdhani-Bold"),                    nullptr    },
+			{ TEXT("Ambex"),        TEXT("/Game/RestrictedAssets/Fonts/fntAmbex36.fntAmbex36"),                             nullptr    },
+			{ TEXT("Positec"),      TEXT("/Game/RestrictedAssets/Fonts/fntPositec36.fntPositec36"),                         nullptr    },
+			{ TEXT("Extreme"),      TEXT("/Game/RestrictedAssets/Fonts/fntExtreme.fntExtreme"),                             nullptr    },
+		};
+		return Table;
+	}
+
+	UFont* Resolve(FName Alias, AUTHUD* HUD, UFont* Fallback)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		if (!E) return Fallback;
+
+		const FString FontKey = E->GetExtra(TEXT("font"));
+		if (FontKey.IsEmpty() || FontKey.Equals(TEXT("Default"), ESearchCase::IgnoreCase))
+		{
+			return Fallback;
+		}
+
+		// Lazy-load cache for Tier B fonts. Map by asset path so different
+		// display aliases pointing at the same asset only load once.
+		static TMap<FString, UFont*> Cache;
+
+		for (const FFontEntry& F : GetTable())
+		{
+			if (!F.Display.Equals(FontKey, ESearchCase::IgnoreCase)) continue;
+
+			if (F.HUDFunc)
+			{
+				UFont* HF = F.HUDFunc(HUD);
+				return HF ? HF : Fallback;
+			}
+
+			if (UFont** Cached = Cache.Find(F.AssetPath))
+			{
+				if (*Cached) return *Cached;
+			}
+			UFont* Loaded = LoadObject<UFont>(nullptr, *F.AssetPath);
+			if (Loaded)
+			{
+				Cache.Add(F.AssetPath, Loaded);
+				return Loaded;
+			}
+			UE_LOG(LogTemp, Warning, TEXT("[NCPlusHUDFonts] Failed to load '%s' (%s) — falling back."),
+				*F.Display, *F.AssetPath);
+			return Fallback;
+		}
+
+		// Unknown name → fall back silently. Likely an old JSON entry from a
+		// future build; leaving it as-is on disk so it survives a re-save.
+		return Fallback;
+	}
+
+	float ResolveScale(FName Alias, float Default)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		return E ? E->GetExtraFloat(TEXT("font_scale"), Default) : Default;
+	}
+
+	TArray<TSharedPtr<FString>> GetChoices()
+	{
+		TArray<TSharedPtr<FString>> Out;
+		Out.Add(MakeShareable(new FString(TEXT("Default"))));
+		for (const FFontEntry& F : GetTable())
+		{
+			Out.Add(MakeShareable(new FString(F.Display)));
+		}
 		return Out;
 	}
 }
