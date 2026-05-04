@@ -10,6 +10,7 @@
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SBorder.h"
 
 namespace NCDragOverlay
 {
@@ -30,12 +31,24 @@ void SNCPlusHUDDragOverlay::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
 
-	// Empty container — actual rendering happens in OnPaint, mouse events come
-	// from the SCompoundWidget base. Visibility::Visible is critical so we
-	// catch mouse events instead of letting them fall through to the game.
+	// Explicit Visible so the overlay's bounding box catches mouse events.
+	// Default would technically be Visible too, but defensive against parent
+	// containers (AddViewportWidgetContent) tweaking child visibility.
+	SetVisibility(EVisibility::Visible);
+
+	// SBorder with NoBorder brush + HAlign/VAlign Fill makes the ChildSlot
+	// expand to the full viewport, so AllottedGeometry in OnPaint covers the
+	// entire screen — required for hit-testing arbitrary screen positions.
+	// An empty SBox would collapse to zero size and make mouse events miss us.
 	ChildSlot
+	.HAlign(HAlign_Fill)
+	.VAlign(VAlign_Fill)
 	[
-		SNew(SBox)
+		SNew(SBorder)
+		.HAlign(HAlign_Fill)
+		.VAlign(VAlign_Fill)
+		.BorderImage(FCoreStyle::Get().GetBrush(TEXT("NoBorder")))
+		.Visibility(EVisibility::Visible)
 	];
 }
 
@@ -125,6 +138,14 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 	// Use the body font for labels — small but readable.
 	const FSlateFontInfo Font = FCoreStyle::Get().GetFontStyle(TEXT("NormalText"));
 
+	// AbsToLocal: GetRenderPosition returns absolute screen pixels (set by
+	// AUTHUD::DrawHUD). ToPaintGeometry expects LOCAL (DPI-scaled) coords. On
+	// a high-DPI display the two diverge by AllottedGeometry.Scale, so naive
+	// passthrough drops the frame in the wrong place. Convert once via this
+	// helper at every paint site.
+	const float DPIScale = (AllottedGeometry.Scale > 0.f) ? AllottedGeometry.Scale : 1.f;
+	auto AbsToLocal = [DPIScale](const FVector2D& Abs) -> FVector2D { return Abs / DPIScale; };
+
 	for (int32 i = 0; i < CachedElements.Num(); i++)
 	{
 		const FOverlayElement& E = CachedElements[i];
@@ -133,33 +154,36 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 		const FLinearColor Fill    = bIsDragging ? DragFill    : IdleFill;
 		const FLinearColor Outline = bIsDragging ? DragOutline : IdleOutline;
 
+		const FVector2D LocalPos  = AbsToLocal(E.ScreenPos);
+		const FVector2D LocalSize = AbsToLocal(E.ScreenSize);
+
 		// Fill rect (translucent so user can still see what's underneath).
-		// NOTE: UE 4.15's MakeBox/MakeText REQUIRE an FSlateRect ClippingRect arg
-		// before the draw-effect bitmask. The 4.17+ overload that omits it doesn't
-		// exist here. Pass MyClippingRect (the OnPaint arg) at every call site.
+		// NOTE: UE 4.15's MakeBox/MakeText require an FSlateRect ClippingRect
+		// arg before the draw-effect bitmask (the 4.17+ overload that omits it
+		// doesn't exist here). Pass MyClippingRect at every call site.
 		FSlateDrawElement::MakeBox(
 			OutDrawElements, LayerId,
-			AllottedGeometry.ToPaintGeometry(E.ScreenPos, E.ScreenSize),
+			AllottedGeometry.ToPaintGeometry(LocalPos, LocalSize),
 			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Fill);
 
-		// Outline — 4 thin rects (top, bottom, left, right). MakeBox doesn't have
-		// a stroke-only mode in 4.15, so we composite manually.
-		const float T = OutlineThickness;
+		// Outline — 4 thin rects (top, bottom, left, right). MakeBox doesn't
+		// have a stroke-only mode in 4.15, so we composite manually.
+		const float T = OutlineThickness / DPIScale;  // keep visual thickness uniform across DPI
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
-			AllottedGeometry.ToPaintGeometry(E.ScreenPos, FVector2D(E.ScreenSize.X, T)),
+			AllottedGeometry.ToPaintGeometry(LocalPos, FVector2D(LocalSize.X, T)),
 			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
-			AllottedGeometry.ToPaintGeometry(E.ScreenPos + FVector2D(0.f, E.ScreenSize.Y - T), FVector2D(E.ScreenSize.X, T)),
+			AllottedGeometry.ToPaintGeometry(LocalPos + FVector2D(0.f, LocalSize.Y - T), FVector2D(LocalSize.X, T)),
 			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
-			AllottedGeometry.ToPaintGeometry(E.ScreenPos, FVector2D(T, E.ScreenSize.Y)),
+			AllottedGeometry.ToPaintGeometry(LocalPos, FVector2D(T, LocalSize.Y)),
 			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
-			AllottedGeometry.ToPaintGeometry(E.ScreenPos + FVector2D(E.ScreenSize.X - T, 0.f), FVector2D(T, E.ScreenSize.Y)),
+			AllottedGeometry.ToPaintGeometry(LocalPos + FVector2D(LocalSize.X - T, 0.f), FVector2D(T, LocalSize.Y)),
 			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 
 		// Label with shadow — anchored top-left of the frame.
-		const FVector2D LabelPos = E.ScreenPos + FVector2D(6.f, 4.f);
+		const FVector2D LabelPos = LocalPos + FVector2D(6.f, 4.f);
 		FSlateDrawElement::MakeText(
 			OutDrawElements, LayerId + 2,
 			AllottedGeometry.ToPaintGeometry(LabelPos + FVector2D(1.f, 1.f), FVector2D(400.f, 24.f)),
@@ -170,7 +194,8 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 			E.Label, Font, MyClippingRect, ESlateDrawEffect::None, LabelColor);
 	}
 
-	// Footer hint — tells the user what to do.
+	// Footer hint — tells the user what to do. AllottedGeometry.GetLocalSize()
+	// is already in local (DPI-adjusted) coords, so no conversion needed here.
 	const FString Hint = FString(TEXT("Drag any frame to move that element. ESC to close."));
 	const FVector2D HintPos(20.f, AllottedGeometry.GetLocalSize().Y - 32.f);
 	FSlateDrawElement::MakeText(
