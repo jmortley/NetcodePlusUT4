@@ -383,9 +383,13 @@ static void HandleHUDDragOverlay(const TArray<FString>& Args)
 		SNew(SNCPlusHUDDragOverlay)
 		.PlayerOwner(LP);
 
-	// ZOrder 95 — below the editor panel (100) so if both are up the editor sits
-	// on top; above all in-game HUD widgets so frames + labels are visible.
-	ViewportClient->AddViewportWidgetContent(Overlay, 95);
+	// ZOrder 1000 — above stock UT slate UI like the pre-match team-preview
+	// scoreboard (~100-200) and any in-match overlays. Tested at 95 first; the
+	// pre-match scoreboard's slate widget intercepted clicks before reaching us
+	// (visible-but-unclickable). 1000 is high enough to cover stock UI without
+	// fighting Slate modal dialogs (which mount as windows, not viewport widgets,
+	// so ZOrder doesn't affect them anyway).
+	ViewportClient->AddViewportWidgetContent(Overlay, 1000);
 	FSlateApplication::Get().SetKeyboardFocus(Overlay, EFocusCause::SetDirectly);
 
 	ActiveDragOverlay = Overlay;
