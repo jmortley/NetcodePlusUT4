@@ -218,20 +218,21 @@ void AWipeoutHUD::DrawHUD()
 		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
 		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
 
-		// Per-strip grow direction — flips so portraits grow INWARD when anchored
-		// to a screen edge (otherwise the strip extends off-screen). Default
-		// preserves stock behavior: red grows left, blue grows right.
-		const FVector2D RedAnchor  = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_red")));
-		const FVector2D BlueAnchor = FNCPlusHUDLayout::AnchorToScreenCoords(NCPlusHUDDrawCall::GetEffectiveAnchor(TEXT("portrait_blue")));
-		const float RedGrowSign   = (RedAnchor.X  < 0.25f) ? +1.f : -1.f;  // anchored left → grow right
-		const float BlueGrowSign  = (BlueAnchor.X > 0.75f) ? -1.f : +1.f;  // anchored right → grow left
+		// Per-strip grow direction — derived from RESOLVED screen position, not
+		// the anchor coordinate. Lets dragging the strip across screen-center
+		// (via nchud_drag) auto-flip growth so the visible strip stays on
+		// screen instead of extending off the now-far edge.
+		const float ScreenHalfX  = Canvas->ClipX * 0.5f;
+		const float RedGrowSign  = (RedStart.X  < ScreenHalfX) ? +1.f : -1.f;
+		const float BlueGrowSign = (BlueStart.X < ScreenHalfX) ? +1.f : -1.f;
 
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
-		// Right-anchored strips: shift first portrait left by its width so its
-		// right edge sits on the anchor instead of extending off-screen.
-		if (RedAnchor.X  > 0.75f) XOffsetRed  -= BasePipSize;
-		if (BlueAnchor.X > 0.75f) XOffsetBlue -= BasePipSize;
+		// When growing leftward, the resolved point is the strip's RIGHT edge —
+		// shift the first pip left by its width so its right edge sits at the
+		// anchor instead of extending off-screen.
+		if (RedGrowSign  < 0.f) XOffsetRed  -= BasePipSize;
+		if (BlueGrowSign < 0.f) XOffsetBlue -= BasePipSize;
 		float YOffsetRed  = RedStart.Y;
 		float YOffsetBlue = BlueStart.Y;
 		float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split (kept for safety)

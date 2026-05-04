@@ -329,7 +329,7 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 
 	// Footer hint — tells the user what to do. AllottedGeometry.GetLocalSize()
 	// is already in local (DPI-adjusted) coords, so no conversion needed here.
-	const FString Hint = FString(TEXT("Drag any frame to move that element. ESC to close."));
+	const FString Hint = FString(TEXT("Left-click + drag to move. Right-click for options (Hide / Reset / flip orientation on weapon bars). ESC or Close (top-right) to exit."));
 	const FVector2D HintPos(20.f, AllottedGeometry.GetLocalSize().Y - 32.f);
 	FSlateDrawElement::MakeText(
 		OutDrawElements, LayerId + 4,
@@ -451,6 +451,9 @@ FReply SNCPlusHUDDragOverlay::OnCloseButtonClicked()
 
 void SNCPlusHUDDragOverlay::OpenContextMenu(FName Alias, const FVector2D& ScreenPos)
 {
+	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDDragOverlay] Right-click on '%s' at (%.0f, %.0f) — opening context menu."),
+		*Alias.ToString(), ScreenPos.X, ScreenPos.Y);
+
 	const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(Alias);
 	const bool bHidden        = Elem && Elem->bHidden;
 	const bool bIsWeaponBar   = (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"));
