@@ -15,6 +15,10 @@
 #include "SUTCosmeticSelector.h"
 #include "SNCPlusHUDEditor.h"
 #include "SNCPlusHUDDragOverlay.h"
+#include "ElimPlusHUD.h"
+#include "WipeoutHUD.h"
+#include "NCPlusCTFHUD.h"
+#include "ShockDomHUD.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
@@ -357,6 +361,23 @@ static void HandleHUDDragOverlay(const TArray<FString>& Args)
 
 	UGameViewportClient* ViewportClient = World->GetGameViewport();
 	if (!ViewportClient) return;
+
+	// Harden: skip if the active HUD isn't one of ours. Catches main-menu
+	// invocations and stock-mode lobbies — without this guard the overlay
+	// would mount as an empty translucent layer that catches mouse input
+	// (no crash, just bad UX). The cast chain checks each NetcodePlus mode HUD.
+	AHUD* RawHUD = RawPC->MyHUD;
+	const bool bIsNCPHUD =
+		Cast<AElimPlusHUD>(RawHUD) != nullptr ||
+		Cast<AWipeoutHUD>(RawHUD)  != nullptr ||
+		Cast<ANCPlusCTFHUD>(RawHUD)!= nullptr ||
+		Cast<AShockDomHUD>(RawHUD) != nullptr;
+	if (!bIsNCPHUD)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("nchud_drag: not in a NetcodePlus match (active HUD is %s) — ignoring."),
+			RawHUD ? *RawHUD->GetClass()->GetName() : TEXT("<none>"));
+		return;
+	}
 
 	TSharedRef<SNCPlusHUDDragOverlay> Overlay =
 		SNew(SNCPlusHUDDragOverlay)

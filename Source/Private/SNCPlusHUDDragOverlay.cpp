@@ -48,10 +48,22 @@ AUTHUD* SNCPlusHUDDragOverlay::GetHUD() const
 
 float SNCPlusHUDDragOverlay::GetRenderScale() const
 {
-	AUTHUD* HUD = GetHUD();
-	if (HUD && HUD->Canvas && HUD->Canvas->ClipY > 0.f)
+	// AHUD::Canvas is protected — can't read it directly from outside the class.
+	// Pull viewport pixel height from the GameViewport instead; matches what
+	// AUTHUD::DrawHUD uses when computing Canvas->ClipY.
+	if (PlayerOwner.IsValid() && PlayerOwner->GetWorld())
 	{
-		return HUD->Canvas->ClipY / 1080.f;
+		if (UGameViewportClient* VC = PlayerOwner->GetWorld()->GetGameViewport())
+		{
+			if (VC->Viewport)
+			{
+				const FIntPoint Size = VC->Viewport->GetSizeXY();
+				if (Size.Y > 0)
+				{
+					return float(Size.Y) / 1080.f;
+				}
+			}
+		}
 	}
 	return 1.f;
 }
@@ -121,38 +133,41 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 		const FLinearColor Fill    = bIsDragging ? DragFill    : IdleFill;
 		const FLinearColor Outline = bIsDragging ? DragOutline : IdleOutline;
 
-		// Fill rect (translucent so user can still see what's underneath)
+		// Fill rect (translucent so user can still see what's underneath).
+		// NOTE: UE 4.15's MakeBox/MakeText REQUIRE an FSlateRect ClippingRect arg
+		// before the draw-effect bitmask. The 4.17+ overload that omits it doesn't
+		// exist here. Pass MyClippingRect (the OnPaint arg) at every call site.
 		FSlateDrawElement::MakeBox(
 			OutDrawElements, LayerId,
 			AllottedGeometry.ToPaintGeometry(E.ScreenPos, E.ScreenSize),
-			WhiteBrush, ESlateDrawEffect::None, Fill);
+			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Fill);
 
 		// Outline — 4 thin rects (top, bottom, left, right). MakeBox doesn't have
 		// a stroke-only mode in 4.15, so we composite manually.
 		const float T = OutlineThickness;
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(E.ScreenPos, FVector2D(E.ScreenSize.X, T)),
-			WhiteBrush, ESlateDrawEffect::None, Outline);
+			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(E.ScreenPos + FVector2D(0.f, E.ScreenSize.Y - T), FVector2D(E.ScreenSize.X, T)),
-			WhiteBrush, ESlateDrawEffect::None, Outline);
+			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(E.ScreenPos, FVector2D(T, E.ScreenSize.Y)),
-			WhiteBrush, ESlateDrawEffect::None, Outline);
+			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(E.ScreenPos + FVector2D(E.ScreenSize.X - T, 0.f), FVector2D(T, E.ScreenSize.Y)),
-			WhiteBrush, ESlateDrawEffect::None, Outline);
+			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
 
 		// Label with shadow — anchored top-left of the frame.
 		const FVector2D LabelPos = E.ScreenPos + FVector2D(6.f, 4.f);
 		FSlateDrawElement::MakeText(
 			OutDrawElements, LayerId + 2,
 			AllottedGeometry.ToPaintGeometry(LabelPos + FVector2D(1.f, 1.f), FVector2D(400.f, 24.f)),
-			E.Label, Font, ESlateDrawEffect::None, LabelShadowColor);
+			E.Label, Font, MyClippingRect, ESlateDrawEffect::None, LabelShadowColor);
 		FSlateDrawElement::MakeText(
 			OutDrawElements, LayerId + 3,
 			AllottedGeometry.ToPaintGeometry(LabelPos, FVector2D(400.f, 24.f)),
-			E.Label, Font, ESlateDrawEffect::None, LabelColor);
+			E.Label, Font, MyClippingRect, ESlateDrawEffect::None, LabelColor);
 	}
 
 	// Footer hint — tells the user what to do.
@@ -161,11 +176,11 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 	FSlateDrawElement::MakeText(
 		OutDrawElements, LayerId + 4,
 		AllottedGeometry.ToPaintGeometry(HintPos + FVector2D(1.f, 1.f), FVector2D(900.f, 24.f)),
-		Hint, Font, ESlateDrawEffect::None, LabelShadowColor);
+		Hint, Font, MyClippingRect, ESlateDrawEffect::None, LabelShadowColor);
 	FSlateDrawElement::MakeText(
 		OutDrawElements, LayerId + 5,
 		AllottedGeometry.ToPaintGeometry(HintPos, FVector2D(900.f, 24.f)),
-		Hint, Font, ESlateDrawEffect::None, LabelColor);
+		Hint, Font, MyClippingRect, ESlateDrawEffect::None, LabelColor);
 
 	return LayerId + 6;
 }
