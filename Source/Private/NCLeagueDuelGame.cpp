@@ -103,15 +103,55 @@ void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
 
-	// Per feedback_postlogin_before_plugin_check.md: PostLogin fires before the
-	// plugin-compat kick, so a player who later gets kicked still appears here.
-	// LoadPlayerFromDB just preloads career ELO into the cache — harmless if the
-	// player ends up being rejected.
-	if (Role != ROLE_Authority || !RatingSystem || !NewPlayer) return;
+	if (Role != ROLE_Authority || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (!PS) return;
-	const FString UniqueId = PS->StatsID.IsEmpty() ? PS->PlayerName : PS->StatsID;
-	RatingSystem->LoadPlayerFromDB(GetWorld(), UniqueId);
+
+	// Per feedback_postlogin_before_plugin_check.md: PostLogin fires before
+	// the plugin-compat kick, so a player who later gets kicked still appears
+	// here. LoadPlayerFromDB just preloads career ELO; harmless if rejected.
+	if (RatingSystem)
+	{
+		const FString UniqueId = PS->StatsID.IsEmpty() ? PS->PlayerName : PS->StatsID;
+		RatingSystem->LoadPlayerFromDB(GetWorld(), UniqueId);
+	}
+
+	// Force-populate RespawnChoiceA/B if the engine's InitNewPlayer flow
+	// (UTGameMode.cpp:3051-3059) didn't run them. In this UT4 fork's PIE
+	// flow, the human player's InitNewPlayer fires while bIsSpectator is
+	// still true (or InitNewPlayer is bypassed entirely on the join path),
+	// so the populate block is skipped and A/B stay null. Without this, the
+	// player only sees one spawn (whatever FindPlayerStart -> ChoosePlayerStart
+	// returned for the actual respawn) and the spawn-choice UI never gets
+	// the second pick to show.
+	//
+	// Mirrors the engine's populate block exactly: null out, populate via
+	// two ChoosePlayerStart calls, set bChosePrimary. We add a guard so we
+	// don't double-populate when the engine's flow DID work (bot path).
+	if (bHasRespawnChoices && !PS->bOnlySpectator)
+	{
+		const bool bAlreadyPopulated = (PS->RespawnChoiceA != nullptr && PS->RespawnChoiceB != nullptr);
+		if (!bAlreadyPopulated)
+		{
+			UE_LOG(LogNCLeagueDuel, Log,
+				TEXT("PostLogin force-populate for %s: A/B were (A=%s, B=%s) — running ChoosePlayerStart twice"),
+				*PS->PlayerName,
+				PS->RespawnChoiceA ? TEXT("set") : TEXT("null"),
+				PS->RespawnChoiceB ? TEXT("set") : TEXT("null"));
+
+			PS->RespawnChoiceA = nullptr;
+			PS->RespawnChoiceB = nullptr;
+			PS->RespawnChoiceA = Cast<APlayerStart>(ChoosePlayerStart(NewPlayer));
+			PS->RespawnChoiceB = Cast<APlayerStart>(ChoosePlayerStart(NewPlayer));
+			PS->bChosePrimaryRespawnChoice = true;
+
+			UE_LOG(LogNCLeagueDuel, Log,
+				TEXT("PostLogin force-populate complete for %s: A=%s B=%s"),
+				*PS->PlayerName,
+				PS->RespawnChoiceA ? *PS->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
+				PS->RespawnChoiceB ? *PS->RespawnChoiceB->GetActorLocation().ToString() : TEXT("(null)"));
+		}
+	}
 }
 
 void ANCLeagueDuelGame::HandleMatchHasStarted()
