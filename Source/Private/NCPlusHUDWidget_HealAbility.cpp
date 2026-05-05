@@ -217,7 +217,11 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
 		: FLinearColor(0.6f, 0.6f, 0.6f, 0.85f);
 
-	DrawText(FText::FromString(KeyLabel), Size.X * 0.5f, IconY + IconSize + 2.f,
+	// Prefix the keybind with "Heal:" so the label is self-explanatory at a
+	// glance instead of reading as a stray letter under the icon. Even with
+	// "?" as the keybind, the "Heal: ?" form makes it obvious what's missing.
+	const FString DisplayLabel = FString::Printf(TEXT("Heal: %s"), *KeyLabel);
+	DrawText(FText::FromString(DisplayLabel), Size.X * 0.5f, IconY + IconSize + 2.f,
 		LabelFont, RenderScale, 1.0f, LabelColor,
 		ETextHorzPos::Center, ETextVertPos::Top);
 }
