@@ -80,6 +80,11 @@ public:
 protected:
 	UPROPERTY() TArray<FNCLeagueWeaponPair> WeaponPairs;
 	UPROPERTY() TArray<class APlayerStart*> AllPlayerStarts;
+	/** Every PlayerStart whose AssociatedPickup is a weapon (any weapon, not
+	 *  just the canonical pair list). First-spawn picker falls back to this
+	 *  pool when canonical pairs run out so the player still lands at a gun
+	 *  rather than a generic spot near a bio bottle or health vial. */
+	UPROPERTY() TArray<class APlayerStart*> WeaponAnchoredStarts;
 	UPROPERTY() AUTPickupInventory*         ShieldBeltPickup;
 	UPROPERTY() TArray<class APlayerStart*> ShieldBeltExclusions;
 

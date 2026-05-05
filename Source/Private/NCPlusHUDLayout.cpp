@@ -601,7 +601,7 @@ namespace NCPlusHUDAliases
 			// bottom-right above the ammo counter (which lives at BottomRight
 			// (-107, -46) in stock layout) so the eye doesn't have to leave the
 			// HP/Armor/Ammo cluster to see live aim feedback.
-			T.Emplace(TEXT("accuracy"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"),                            FText::FromString(TEXT("Accuracy Widget")),    false, ENCPlusHUDAnchor::BottomRight, FVector2D(-20.f, -180.f));
+			T.Emplace(TEXT("accuracy"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"),                            FText::FromString(TEXT("Accuracy Widget")),    false, ENCPlusHUDAnchor::BottomRight, FVector2D(-20.f, 0.f));
 			return T;
 		}();
 		return Table;

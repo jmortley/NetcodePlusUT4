@@ -156,9 +156,15 @@ void ANCLeagueDuelGame::ComputeSpawnPairings()
 {
 	WeaponPairs.Reset();
 	AllPlayerStarts.Reset();
+	WeaponAnchoredStarts.Reset();
 	ConsumedPairIndices.Reset();
 
-	// Group PlayerStarts by AssociatedPickup's WeaponType group.
+	// Group PlayerStarts by AssociatedPickup's WeaponType group, AND track
+	// every weapon-anchored start (regardless of whether its weapon is in the
+	// canonical pair list) so the first-spawn fallback can land on a gun
+	// even when canonical pairs are exhausted (e.g. a map with only Rocket+Bio
+	// has no canonical pair, but spawning at the Bio is still better than a
+	// random vial).
 	TMap<FName, TArray<APlayerStart*>> GroupToStarts;
 	int32 StartsWithoutAssoc = 0;
 	for (TActorIterator<APlayerStart> It(GetWorld()); It; ++It)
@@ -172,6 +178,9 @@ void ANCLeagueDuelGame::ComputeSpawnPairings()
 
 		AUTPickupWeapon* WPickup = Cast<AUTPickupWeapon>(UTPS->AssociatedPickup);
 		if (!WPickup || !WPickup->WeaponType) continue;
+
+		// Any weapon at all → eligible for the fallback pool.
+		WeaponAnchoredStarts.Add(PS);
 
 		const FName Group = GroupForWeaponClass(WPickup->WeaponType);
 		if (Group == NAME_None) continue;
@@ -289,16 +298,16 @@ bool ANCLeagueDuelGame::IsExcludedByActiveShieldBelt(APlayerStart* PS) const
 APlayerStart* ANCLeagueDuelGame::SelectPairedSpawnForFirstSpawn(AUTPlayerState* PS,
 	APlayerStart* ExcludeStart)
 {
-	if (!PS || WeaponPairs.Num() == 0) return nullptr;
+	if (!PS) return nullptr;
 
 	const int32 TeamIdx = (PS->Team) ? PS->Team->TeamIndex : 0;
 
-	// Walk every pair, return the team-anchored side as a candidate. Skip pairs
-	// already-consumed (by the OTHER player on their first spawn) and skip any
-	// pair whose team-side equals ExcludeStart (so the second populate call
-	// for THIS player gets a different pair than the first call).
-	TArray<int32> Available;
-	Available.Reserve(WeaponPairs.Num());
+	// Tier A — canonical pair (Sniper<->Shock, Rocket<->Flak, Mini<->Link).
+	// Walk every pair, return the team-anchored side as a candidate. Skip
+	// pairs already-consumed and skip any pair whose team-side equals
+	// ExcludeStart so A != B.
+	TArray<int32> AvailablePairs;
+	AvailablePairs.Reserve(WeaponPairs.Num());
 	for (int32 i = 0; i < WeaponPairs.Num(); ++i)
 	{
 		if (ConsumedPairIndices.Contains(i)) continue;
@@ -306,25 +315,44 @@ APlayerStart* ANCLeagueDuelGame::SelectPairedSpawnForFirstSpawn(AUTPlayerState* 
 		APlayerStart* Side = (TeamIdx == 0) ? Pair.StartA : Pair.StartB;
 		if (!Side) continue;
 		if (ExcludeStart && Side == ExcludeStart) continue;
-		Available.Add(i);
+		AvailablePairs.Add(i);
 	}
-	if (Available.Num() == 0) return nullptr;
+	if (AvailablePairs.Num() > 0)
+	{
+		const int32 PickedIdx = AvailablePairs[FMath::RandRange(0, AvailablePairs.Num() - 1)];
+		const FNCLeagueWeaponPair& Pair = WeaponPairs[PickedIdx];
+		APlayerStart* Chosen = (TeamIdx == 0) ? Pair.StartA : Pair.StartB;
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("First-spawn pick for %s (team %d): canonical pair %d -> %s%s"),
+			*PS->PlayerName, TeamIdx, PickedIdx,
+			Chosen ? *Chosen->GetActorLocation().ToString() : TEXT("nullptr"),
+			ExcludeStart ? TEXT(" [excluded prior pick]") : TEXT(""));
+		return Chosen;
+	}
 
-	const int32 PickedIdx = Available[FMath::RandRange(0, Available.Num() - 1)];
-	const FNCLeagueWeaponPair& Pair = WeaponPairs[PickedIdx];
-	APlayerStart* Chosen = (TeamIdx == 0) ? Pair.StartA : Pair.StartB;
+	// Tier B — any weapon-anchored start (no distance filter; first-spawn
+	// fairness is purely pair/weapon-based, not positional). Used when
+	// canonical pairs are exhausted (e.g. map has Rocket+Flak as the only
+	// canonical pair; the second populate call lands here so it gets a
+	// weapon-anchored start instead of falling through to the generic Tier-1
+	// picker which would pick by enemy-distance score and might land on a
+	// non-weapon spot like a bio bottle).
+	TArray<APlayerStart*> Eligible;
+	Eligible.Reserve(WeaponAnchoredStarts.Num());
+	for (APlayerStart* Cand : WeaponAnchoredStarts)
+	{
+		if (!Cand || Cand == ExcludeStart) continue;
+		Eligible.Add(Cand);
+	}
+	if (Eligible.Num() == 0) return nullptr;
 
-	// Pair-consumption is only marked when the OTHER player takes their first
-	// spawn from this pair (so player 1 picking ChoiceA doesn't cut player 2's
-	// options). The simplest signal: ConsumedPairIndices grows when a different
-	// AUTPlayerState first-spawns from this pair. We don't track that here;
-	// it's left for ChoosePlayerStart to mark via PlayersWhoSpawnedOnce flow.
+	APlayerStart* Picked = Eligible[FMath::RandRange(0, Eligible.Num() - 1)];
 	UE_LOG(LogNCLeagueDuel, Log,
-		TEXT("First-spawn pick for %s (team %d): pair %d -> %s%s"),
-		*PS->PlayerName, TeamIdx, PickedIdx,
-		Chosen ? *Chosen->GetActorLocation().ToString() : TEXT("nullptr"),
+		TEXT("First-spawn pick for %s (team %d): weapon-anchored fallback -> %s%s"),
+		*PS->PlayerName, TeamIdx,
+		Picked ? *Picked->GetActorLocation().ToString() : TEXT("nullptr"),
 		ExcludeStart ? TEXT(" [excluded prior pick]") : TEXT(""));
-	return Chosen;
+	return Picked;
 }
 
 // =============================================================================
@@ -443,17 +471,25 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	APlayerStart* FallbackSpawn = nullptr;
 	float FallbackEnemyDist = -FLT_MAX;
 
+	// Distance filters (inter-A/B + killer-distance + min-enemy-distance) only
+	// apply once the player has been killed at least once. The very first
+	// spawn of the game is pure pair/weapon-anchored selection — fairness is
+	// positional equivalence to the opponent, not "far from a killer that
+	// doesn't exist yet."
+	const bool bIsFirstSpawn = !LastKillerLocation.Contains(Player);
+
 	for (APlayerStart* Start : AllPlayerStarts)
 	{
 		if (!Start) continue;
 		if (Start == ExcludeStart) continue;
 		if (IsExcludedByActiveShieldBelt(Start)) continue;
 
-		// Inter-A/B distance: when filling B, reject candidates within
-		// MinKillerSpawnDistance of the already-picked A so the player can't
-		// be cornered with two close-together choices. Same threshold as the
-		// killer-distance rule (2500uu by default).
-		if (ExcludeStart)
+		// Inter-A/B distance: when filling B post-death, reject candidates
+		// within MinKillerSpawnDistance of the already-picked A so the player
+		// can't be cornered with two close-together choices. Skip on first
+		// spawn — both choices being near each other isn't a tactical issue
+		// when nobody's hunting the player yet.
+		if (ExcludeStart && !bIsFirstSpawn)
 		{
 			const float DistFromA = (Start->GetActorLocation() - ExcludeStart->GetActorLocation()).Size2D();
 			if (DistFromA < MinKillerSpawnDistance) continue;
@@ -468,13 +504,20 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 			FallbackEnemyDist = MinEnemyDist;
 			FallbackSpawn = Start;
 		}
-		if (MinEnemyDist < MinimumEnemySpawnDistance) continue;
+		// Min-enemy-distance hard reject — also skipped on first spawn so a
+		// tiny map with weapons close to spawn points doesn't wedge the picker.
+		if (!bIsFirstSpawn && MinEnemyDist < MinimumEnemySpawnDistance) continue;
 
-		// Killer-distance reject.
-		if (const FVector* KillerLoc = LastKillerLocation.Find(Player))
+		// Killer-distance reject (no-op if bIsFirstSpawn since the Find above
+		// is what defines bIsFirstSpawn — but we keep the lookup explicit so
+		// the intent is obvious to readers).
+		if (!bIsFirstSpawn)
 		{
-			const float KillerDist = (Start->GetActorLocation() - *KillerLoc).Size2D();
-			if (KillerDist < MinKillerSpawnDistance) continue;
+			if (const FVector* KillerLoc = LastKillerLocation.Find(Player))
+			{
+				const float KillerDist = (Start->GetActorLocation() - *KillerLoc).Size2D();
+				if (KillerDist < MinKillerSpawnDistance) continue;
+			}
 		}
 
 		float Score = (MinEnemyDist < FLT_MAX ? FMath::Min(MinEnemyDist, 5000.f) * 0.5f : 0.f)
