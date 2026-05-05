@@ -565,25 +565,37 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->DrawText(SmallFont, Team1Name, RightBarX + 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
-	// ── Round Clock (big, centered below bars) ──
-	// Read RoundSecondsRemaining from the BP GameState via reflection
+	// ── Clock (big, centered below bars) ──
+	// Round-based modes (Wipeout, ElimPlus) replicate RoundSecondsRemaining
+	// on a BP GameState — read it via reflection. Time-based modes (Duel,
+	// CTF, etc.) use stock AUTGameState::RemainingTime instead. Try the BP
+	// field first; fall back to the stock match clock so non-round modes
+	// (NCLeagueDuel especially) still get a visible timer.
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
-	int32 RoundTime = -1;
-	UIntProperty* RoundTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RoundSecondsRemaining"));
-	if (RoundTimeProp)
+	int32 ClockSeconds = -1;
+	if (UIntProperty* RoundTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RoundSecondsRemaining")))
 	{
-		RoundTime = RoundTimeProp->GetPropertyValue_InContainer(GS);
+		ClockSeconds = RoundTimeProp->GetPropertyValue_InContainer(GS);
+	}
+	if (ClockSeconds < 0)
+	{
+		// Stock match clock. RemainingTime counts down to 0 when a TimeLimit
+		// is set, or stays at TimeLimit (default 0 → no clock) for untimed
+		// modes. Skip drawing in the latter case so we don't show "00:00"
+		// glued to the score bar for the whole match.
+		ClockSeconds = GS->RemainingTime;
+		if (ClockSeconds <= 0) ClockSeconds = -1;
 	}
 
 	float RoundClockScale = RenderScale * 1.1f * ScoreScale;
-	if (RoundTime >= 0)
+	if (ClockSeconds >= 0)
 	{
-		int32 RMins = RoundTime / 60;
-		int32 RSecs = RoundTime % 60;
+		int32 RMins = ClockSeconds / 60;
+		int32 RSecs = ClockSeconds % 60;
 		FString RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
 		Canvas->TextSize(MediumFont, RoundClockStr, XL, YL, RoundClockScale, RoundClockScale);
 		// Flash red when under 30 seconds
-		if (RoundTime <= 30)
+		if (ClockSeconds <= 30)
 			Canvas->DrawColor = FColor(255, 60, 60, 255);
 		else
 			Canvas->DrawColor = FColor::White;
