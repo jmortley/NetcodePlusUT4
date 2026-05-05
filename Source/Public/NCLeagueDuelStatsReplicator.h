@@ -14,7 +14,9 @@
 #include "GameFramework/Info.h"
 #include "NCLeagueDuelStatsReplicator.generated.h"
 
-/** Per-player accuracy snapshot. Combined hitscan: LG + Shock + Sniper. */
+/** Per-player snapshot — accuracy + armor pickup counts. The underlying
+ *  AUTPlayerState::StatsData TMap is not replicated, so we mirror the
+ *  values we want client-side here. */
 USTRUCT()
 struct FNCLeagueDuelStatsEntry
 {
@@ -27,6 +29,16 @@ struct FNCLeagueDuelStatsEntry
 	 *  Display: divide by 100 to get percentage with 2 decimals. */
 	UPROPERTY()
 	int32 HitscanAccuracyTimes100 = 0;
+
+	/** Per-armor-type pickup counts. Stock UT4 increments these via
+	 *  AUTPickupInventory::GiveTo -> ModifyStatsValue(StatsNameCount, 1)
+	 *  using NAME_ShieldBeltCount / NAME_ArmorVestCount / NAME_ArmorPadsCount
+	 *  / NAME_HelmetCount. uint8 is enough — duel matches don't exceed 255
+	 *  pickups of any single armor type. */
+	UPROPERTY() uint8 BeltCount   = 0;
+	UPROPERTY() uint8 VestCount   = 0;
+	UPROPERTY() uint8 PadsCount   = 0;
+	UPROPERTY() uint8 HelmetCount = 0;
 };
 
 UCLASS(NotPlaceable)
@@ -48,6 +60,12 @@ public:
 	/** Client-safe: returns 0..100 accuracy percent for a player by UniqueId
 	 *  string. 0 if no entry (e.g. before first replication). */
 	float GetAccuracyForPlayer(const FString& UniqueIdStr) const;
+
+	/** Client-safe: armor pickup counts. 0 if no entry yet. */
+	uint8 GetBeltCountForPlayer  (const FString& UniqueIdStr) const;
+	uint8 GetVestCountForPlayer  (const FString& UniqueIdStr) const;
+	uint8 GetPadsCountForPlayer  (const FString& UniqueIdStr) const;
+	uint8 GetHelmetCountForPlayer(const FString& UniqueIdStr) const;
 
 private:
 	float UpdateInterval = 1.0f;

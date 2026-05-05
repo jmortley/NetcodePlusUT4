@@ -19,6 +19,8 @@
 #include "NCDuelRatingSystem.h"
 #include "NCStatsUploader.h"
 #include "NCLeagueDuelStatsReplicator.h"
+#include "UTPickup.h"
+#include "Particles/ParticleSystemComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCLeagueDuel, Log, All);
 
@@ -143,6 +145,30 @@ void ANCLeagueDuelGame::HandleMatchHasStarted()
 	{
 		RatingSystem->SnapshotMatchStart();
 	}
+
+	// Strip every pickup's respawn-timer particle effect so the map doesn't
+	// flash a giant world-space "X seconds until respawn" ring at every
+	// taken item. AUTPickup::TimerEffect is a UParticleSystemComponent the
+	// engine unhides when the pickup enters respawn-pending; destroying it
+	// once at match start kills the visual permanently for the match. Per
+	// the user-decision in feedback_no_pickup_timers - pickup timers are
+	// considered cheating, only audio cues + take-callouts are acceptable.
+	// NCLeagueDuel doesn't spawn dynamic pickups mid-match (no death-drops
+	// like ElimPlus has), so a single pass at match start covers everything.
+	int32 StrippedCount = 0;
+	for (TActorIterator<AUTPickup> It(GetWorld()); It; ++It)
+	{
+		AUTPickup* Pickup = *It;
+		if (Pickup && Pickup->TimerEffect)
+		{
+			Pickup->TimerEffect->DestroyComponent();
+			Pickup->TimerEffect = nullptr;
+			++StrippedCount;
+		}
+	}
+	UE_LOG(LogNCLeagueDuel, Log,
+		TEXT("HandleMatchHasStarted: stripped TimerEffect from %d pickup(s)."),
+		StrippedCount);
 }
 
 void ANCLeagueDuelGame::EndPlayerIntro()

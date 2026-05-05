@@ -79,6 +79,19 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 			Entry.HitscanAccuracyTimes100 = FMath::RoundToInt(FMath::Clamp(Acc, 0.f, 100.f) * 100.f);
 		}
 
+		// Armor pickup counts (server-only StatsData -> replicate per-frame).
+		// Stock UT4 increments these on every armor pickup via
+		// AUTPickupInventory::GiveTo. uint8 clamp matches the wire format -
+		// duel matches won't see more than 255 of any single armor type.
+		const auto Clamp255 = [](float V) -> uint8 {
+			const int32 R = FMath::RoundToInt(V);
+			return uint8(FMath::Clamp(R, 0, 255));
+		};
+		Entry.BeltCount   = Clamp255(UTPS->GetStatsValue(NAME_ShieldBeltCount));
+		Entry.VestCount   = Clamp255(UTPS->GetStatsValue(NAME_ArmorVestCount));
+		Entry.PadsCount   = Clamp255(UTPS->GetStatsValue(NAME_ArmorPadsCount));
+		Entry.HelmetCount = Clamp255(UTPS->GetStatsValue(NAME_HelmetCount));
+
 		StatsEntries.Add(Entry);
 	}
 }
@@ -93,4 +106,37 @@ float ANCLeagueDuelStatsReplicator::GetAccuracyForPlayer(const FString& UniqueId
 		}
 	}
 	return 0.f;
+}
+
+namespace
+{
+	const FNCLeagueDuelStatsEntry* FindEntry(const TArray<FNCLeagueDuelStatsEntry>& Entries, const FString& UniqueIdStr)
+	{
+		for (const FNCLeagueDuelStatsEntry& E : Entries)
+		{
+			if (E.PlayerId == UniqueIdStr) return &E;
+		}
+		return nullptr;
+	}
+}
+
+uint8 ANCLeagueDuelStatsReplicator::GetBeltCountForPlayer(const FString& Id) const
+{
+	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
+	return E ? E->BeltCount : 0;
+}
+uint8 ANCLeagueDuelStatsReplicator::GetVestCountForPlayer(const FString& Id) const
+{
+	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
+	return E ? E->VestCount : 0;
+}
+uint8 ANCLeagueDuelStatsReplicator::GetPadsCountForPlayer(const FString& Id) const
+{
+	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
+	return E ? E->PadsCount : 0;
+}
+uint8 ANCLeagueDuelStatsReplicator::GetHelmetCountForPlayer(const FString& Id) const
+{
+	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
+	return E ? E->HelmetCount : 0;
 }
