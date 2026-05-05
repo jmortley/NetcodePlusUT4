@@ -118,42 +118,10 @@ void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 		RatingSystem->LoadPlayerFromDB(GetWorld(), UniqueId);
 	}
 
-	// Assign RespawnChoiceA/B straight from the pre-built shuffle table.
-	// The full spawn-pair state was finalized in InitGame, so this is just
-	// two map lookups — no ChoosePlayerStart calls, no shuffle decisions.
-	// Zero per-join computation, identical for every player.
-	//
-	// Why bypass the engine's InitNewPlayer populate flow entirely: that
-	// flow's `!bIsSpectator` guard fires inconsistently in this fork's PIE
-	// path — bots got two ChoosePlayerStart calls (populate worked), the
-	// human player got zero (populate skipped, A/B stayed null, picker UI
-	// fell back to whatever spawn FindPlayerStart picked). Doing the
-	// assignment ourselves at PostLogin guarantees both choices are set
-	// regardless of which engine code path the player took to get here.
-	if (bHasRespawnChoices && !PS->bOnlySpectator && WeaponPairs.Num() > 0
-		&& FirstSpawnShuffleOrder.Num() >= 2)
-	{
-		const int32 TeamIdx = PS->Team ? PS->Team->TeamIndex : 0;
-
-		auto GetSide = [&](int32 ChoiceIdx) -> APlayerStart*
-		{
-			const int32 PairIdx = FirstSpawnShuffleOrder[ChoiceIdx];
-			const FNCLeagueWeaponPair& P = WeaponPairs[PairIdx];
-			const bool bUseStartA = (TeamIdx == 0) ? bRedGetsPrimarySide : !bRedGetsPrimarySide;
-			return bUseStartA ? P.StartA : P.StartB;
-		};
-
-		PS->RespawnChoiceA = GetSide(0);
-		PS->RespawnChoiceB = GetSide(1);
-		PS->bChosePrimaryRespawnChoice = true;
-
-		UE_LOG(LogNCLeagueDuel, Log,
-			TEXT("PostLogin assigned spawn choices for %s (team %d): A=%s B=%s (red side=%s)"),
-			*PS->PlayerName, TeamIdx,
-			PS->RespawnChoiceA ? *PS->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
-			PS->RespawnChoiceB ? *PS->RespawnChoiceB->GetActorLocation().ToString() : TEXT("(null)"),
-			bRedGetsPrimarySide ? TEXT("StartA") : TEXT("StartB"));
-	}
+	// Spawn-choice assignment lives in EndPlayerIntro (single owner per match).
+	// PostLogin only handles the rating-DB preload above; the engine will
+	// transition to PlayerIntro once both players are present, then
+	// EndPlayerIntro runs and does the paired-shuffle A/B assignment.
 }
 
 void ANCLeagueDuelGame::HandleMatchHasStarted()
@@ -163,6 +131,83 @@ void ANCLeagueDuelGame::HandleMatchHasStarted()
 	{
 		RatingSystem->SnapshotMatchStart();
 	}
+}
+
+void ANCLeagueDuelGame::EndPlayerIntro()
+{
+	// The engine's HandlePlayerIntro nulled every PlayerState's A/B. The
+	// stock EndPlayerIntro then runs two ChoosePlayerStart calls per player
+	// to refill them. We override that whole pass: assign A and B directly
+	// from the per-match pre-built shuffle (FirstSpawnShuffleOrder +
+	// bRedGetsPrimarySide). This is THE definitive first-spawn assignment —
+	// fires at the end of MatchState::PlayerIntro, right before the match
+	// transitions to CountdownToBegin/InProgress, exactly when the spawn-
+	// choice picker UI is about to read RespawnChoiceA/B.
+	//
+	// Bypassing ChoosePlayerStart here means the engine's race-prone populate
+	// flow can't poison the result — no PlayersWhoSpawnedOnce / Tier-1
+	// fallthrough / "cluster of high-scoring spawns" failure modes. Both
+	// duelists see paired anchors from distinct weapon groups.
+
+	bCheckAgainstPotentialStarts = true;
+	int32 AssignedCount = 0;
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
+		if (!PC || !PC->UTPlayerState) continue;
+
+		PC->UTPlayerState->bIsWarmingUp = false;
+		PC->UTPlayerState->RespawnChoiceA = nullptr;
+		PC->UTPlayerState->RespawnChoiceB = nullptr;
+
+		if (PC->UTPlayerState->bIsSpectator) continue;
+		if (WeaponPairs.Num() == 0 || FirstSpawnShuffleOrder.Num() < 2) continue;
+
+		const int32 TeamIdx = PC->UTPlayerState->Team ? PC->UTPlayerState->Team->TeamIndex : 0;
+		auto GetSide = [&](int32 ChoiceIdx) -> APlayerStart*
+		{
+			const int32 PairIdx = FirstSpawnShuffleOrder[ChoiceIdx];
+			const FNCLeagueWeaponPair& P = WeaponPairs[PairIdx];
+			const bool bUseStartA = (TeamIdx == 0) ? bRedGetsPrimarySide : !bRedGetsPrimarySide;
+			return bUseStartA ? P.StartA : P.StartB;
+		};
+
+		PC->UTPlayerState->RespawnChoiceA = GetSide(0);
+		PC->UTPlayerState->RespawnChoiceB = GetSide(1);
+		PC->UTPlayerState->bChosePrimaryRespawnChoice = true;
+
+		// Mirror the engine's spectator-pawn warp so the post-intro camera
+		// fly-in lands on the chosen spawn (engine version does this at
+		// UTGameMode.cpp:3631-3635).
+		if (PC->GetSpectatorPawn() && PC->UTPlayerState->RespawnChoiceA)
+		{
+			PC->GetSpectatorPawn()->SetActorLocationAndRotation(
+				PC->UTPlayerState->RespawnChoiceA->GetActorLocation(),
+				PC->UTPlayerState->RespawnChoiceA->GetActorRotation());
+			PC->SetControlRotation(PC->UTPlayerState->RespawnChoiceA->GetActorRotation());
+		}
+
+		++AssignedCount;
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("EndPlayerIntro assigned for %s (team %d): A=%s B=%s (red side=%s)"),
+			*PC->UTPlayerState->PlayerName, TeamIdx,
+			PC->UTPlayerState->RespawnChoiceA ? *PC->UTPlayerState->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
+			PC->UTPlayerState->RespawnChoiceB ? *PC->UTPlayerState->RespawnChoiceB->GetActorLocation().ToString() : TEXT("(null)"),
+			bRedGetsPrimarySide ? TEXT("StartA") : TEXT("StartB"));
+	}
+
+	// Final clear of any line-up before the match starts (mirrors engine).
+	if (UTGameState)
+	{
+		UTGameState->ClearLineUp();
+	}
+	bCheckAgainstPotentialStarts = false;
+
+	// Transition state — same as Super (UTGameMode.cpp:3644).
+	SetMatchState(MatchState::CountdownToBegin);
+
+	UE_LOG(LogNCLeagueDuel, Log, TEXT("EndPlayerIntro: assigned spawn choices for %d player(s); transitioning to CountdownToBegin"), AssignedCount);
 }
 
 void ANCLeagueDuelGame::HandleMatchHasEnded()
@@ -623,36 +668,36 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	// choice comes from a distinct pre-shuffled pair — A from shuffle[0],
 	// B from shuffle[1]. The shuffle is per-match, so red and blue see the
 	// same two pairs; the bRedGetsPrimarySide flag swaps which side each
-	// team gets (mutual fairness). PlayersWhoSpawnedOnce is marked when
-	// filling B so the eventual third "actual spawn" call falls through
-	// to Super (which returns A or B per bChosePrimaryRespawnChoice).
-	if (!PlayersWhoSpawnedOnce.Contains(PS) && WeaponPairs.Num() > 0)
+	// team gets (mutual fairness).
+	//
+	// Gate: "haven't died yet" — LastKillerLocation gets populated in our
+	// ScoreKill override BEFORE Super (so the engine's death-respawn populate
+	// inside Super sees the entry and routes through Tier 1 with distance
+	// filters). Before any death, the map is empty for this Player, and we
+	// stay on the paired path. PlayersWhoSpawnedOnce is intentionally NOT used
+	// here — it persists across match-state transitions (e.g. Waiting →
+	// InProgress when the second duelist joins, which nulls A/B and re-runs
+	// the populate flow), and gating on it caused the re-populate to fall
+	// through to Tier 1 and produce two clustered same-weapon picks.
+	const bool bIsFirstSpawn = !LastKillerLocation.Contains(Player);
+	if (bIsFirstSpawn && WeaponPairs.Num() > 0)
 	{
 		const int32 ChoiceIdx = (ExcludeStart == nullptr) ? 0 : 1;
 		if (APlayerStart* Anchor = SelectPairedSpawnForFirstSpawn(PS, ChoiceIdx, ExcludeStart))
 		{
-			if (ExcludeStart != nullptr)
-			{
-				PlayersWhoSpawnedOnce.Add(PS);
-			}
 			return Anchor;
 		}
 	}
-	PlayersWhoSpawnedOnce.Add(PS);
 
 	// Tier 1: dynamic scoring within all PlayerStarts (minus belt exclusions
-	// and the already-picked choice when filling B).
+	// and the already-picked choice when filling B). Distance filters
+	// (inter-A/B + killer-distance + min-enemy-distance) only apply once the
+	// player has been killed at least once — bIsFirstSpawn was computed above
+	// from LastKillerLocation membership.
 	APlayerStart* BestSpawn = nullptr;
 	float BestScore = -FLT_MAX;
 	APlayerStart* FallbackSpawn = nullptr;
 	float FallbackEnemyDist = -FLT_MAX;
-
-	// Distance filters (inter-A/B + killer-distance + min-enemy-distance) only
-	// apply once the player has been killed at least once. The very first
-	// spawn of the game is pure pair/weapon-anchored selection — fairness is
-	// positional equivalence to the opponent, not "far from a killer that
-	// doesn't exist yet."
-	const bool bIsFirstSpawn = !LastKillerLocation.Contains(Player);
 
 	for (APlayerStart* Start : AllPlayerStarts)
 	{

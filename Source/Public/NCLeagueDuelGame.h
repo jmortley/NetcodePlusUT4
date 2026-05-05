@@ -62,6 +62,7 @@ class NETCODEPLUS_API ANCLeagueDuelGame : public AUTDuelGame
 public:
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual void EndPlayerIntro() override;
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleMatchHasEnded() override;
 
@@ -100,9 +101,6 @@ protected:
 
 	/** Killer location captured in ScoreKill — drives the 2500uu respawn rule. */
 	TMap<TWeakObjectPtr<AController>, FVector> LastKillerLocation;
-
-	/** Players who've already taken their first spawn this match. */
-	TSet<TWeakObjectPtr<AUTPlayerState>> PlayersWhoSpawnedOnce;
 
 	/** Pairs that have already been assigned this match (skip on next first-spawn). */
 	TSet<int32> ConsumedPairIndices;
