@@ -583,7 +583,7 @@ namespace NCPlusHUDAliases
 			// These mirror the constructor-set Position so that the editor's X/Y
 			// boxes show the actual visual default (not 0/0) and so that creating
 			// a fresh entry by tweaking one field doesn't visually jump the widget.
-			T.Emplace(TEXT("hp_armor"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),                          FText::FromString(TEXT("Health & Armor")),     false, ENCPlusHUDAnchor::BottomCenter);
+			T.Emplace(TEXT("hp_armor"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),                          FText::FromString(TEXT("Health & Armor")),     false, ENCPlusHUDAnchor::BottomCenter, FVector2D(0.f, -180.f));
 			T.Emplace(TEXT("ammo"),             TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"),                         FText::FromString(TEXT("Ammo Counter")),       false, ENCPlusHUDAnchor::BottomRight, FVector2D(-20.f, -20.f));
 			T.Emplace(TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                      FText::FromString(TEXT("Weapon Bar (Left)")), false, ENCPlusHUDAnchor::CenterLeft,  FVector2D( 20.f, -20.f));
 			T.Emplace(TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                     FText::FromString(TEXT("Weapon Bar (Right)")), false, ENCPlusHUDAnchor::CenterRight, FVector2D(-20.f, -20.f));

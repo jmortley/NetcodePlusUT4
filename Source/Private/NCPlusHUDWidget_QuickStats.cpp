@@ -37,10 +37,16 @@ namespace NCPlusQS
 UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitializer& OI)
 	: Super(OI)
 {
-	Position           = FVector2D(0.f, 0.f);
+	// Default: BottomCenter anchor, lifted 180px so HP/Armor sits clear of
+	// the bottom edge without overlapping the ammo cluster on default layouts.
+	// Origin matches the anchor so adjusting the layout offset shifts the
+	// widget intuitively (negative Y = up). Mirrors the alias-table StockOffset
+	// in NCPlusHUDLayout.cpp — keep them in sync so "no layout entry" renders
+	// identically to a freshly-created entry.
+	Position           = FVector2D(0.f, -180.f);
 	Size               = FVector2D(480.f, 100.f);
-	ScreenPosition     = FVector2D(0.5f, 0.78f);
-	Origin             = FVector2D(0.5f, 0.f);
+	ScreenPosition     = FVector2D(0.5f, 1.0f);
+	Origin             = FVector2D(0.5f, 1.0f);
 	DesignedResolution = 1080.f;
 
 	// Opt out of HUDImpulse — see NCPlusHUDWidget_WeaponBar for the full rationale.

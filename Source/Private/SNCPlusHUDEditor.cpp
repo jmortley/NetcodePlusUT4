@@ -19,6 +19,8 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Widgets/Colors/SColorPicker.h"
+#include "Engine/Engine.h"
+#include "GameFramework/GameUserSettings.h"
 
 namespace NCHUDEdit
 {
@@ -871,6 +873,32 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 {
 	const FLinearColor Initial = GetCurrentColor(Alias, ColorKey, DefaultColor);
 
+	// Fullscreen-Exclusive workaround.
+	//
+	// SColorPicker opens as a new top-level Slate window. Under FSE, Windows
+	// owns the swap chain exclusively — the moment the new window steals
+	// focus, the OS minimizes the FSE window to release the GPU. The picker
+	// then can't render (it expects to share the device), Slate retries,
+	// focus bounces back, and the user gets an infinite minimize/restore
+	// cycle. Borderless (WindowedFullscreen) is visually identical to FSE
+	// on a single monitor, has no exclusive-mode coupling, and Slate
+	// dialogs interleave correctly.
+	//
+	// Strategy: snapshot the current mode, swap to borderless if FSE was
+	// active, and restore on picker close. ResolutionSettings apply with
+	// bCheckForCommandLineOverrides=false so we don't trigger a respawn /
+	// resolution change beyond the window-mode flip.
+	EWindowMode::Type SavedMode = EWindowMode::Windowed;
+	if (UGameUserSettings* Settings = GEngine ? GEngine->GetGameUserSettings() : nullptr)
+	{
+		SavedMode = Settings->GetFullscreenMode();
+		if (SavedMode == EWindowMode::Fullscreen)
+		{
+			Settings->SetFullscreenMode(EWindowMode::WindowedFullscreen);
+			Settings->ApplyResolutionSettings(false);
+		}
+	}
+
 	FColorPickerArgs PickerArgs;
 	PickerArgs.bUseAlpha = true;
 	PickerArgs.bIsModal = false;
@@ -880,6 +908,23 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateSP(
 		this, &SNCPlusHUDEditor::OnColorPickerCommitted, Alias, ColorKey);
 	PickerArgs.ParentWidget = SharedThis(this);
+
+	// Restore FSE on picker close. SavedMode captured by value so the
+	// lambda is independent of `this` lifetime — the editor panel could
+	// outlive the picker, but mode-restore is a pure GEngine operation
+	// that doesn't need editor state. Fires for both commit and cancel.
+	PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateLambda(
+		[SavedMode](const TSharedRef<SWindow>& /*ClosedWindow*/)
+		{
+			if (SavedMode == EWindowMode::Fullscreen)
+			{
+				if (UGameUserSettings* S = GEngine ? GEngine->GetGameUserSettings() : nullptr)
+				{
+					S->SetFullscreenMode(EWindowMode::Fullscreen);
+					S->ApplyResolutionSettings(false);
+				}
+			}
+		});
 
 	OpenColorPicker(PickerArgs);
 	return FReply::Handled();
