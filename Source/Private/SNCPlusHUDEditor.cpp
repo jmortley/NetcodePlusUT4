@@ -48,7 +48,7 @@ namespace NCHUDEdit
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
-		if (Alias == TEXT("shockdom_controls") || Alias == TEXT("accuracy") || Alias == TEXT("heal_ability"))
+		if (Alias == TEXT("shockdom_controls") || Alias == TEXT("accuracy") || Alias == TEXT("heal_ability") || Alias == TEXT("candy_marker"))
 		{
 			return TEXT("Game Mode");
 		}

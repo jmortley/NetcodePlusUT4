@@ -75,6 +75,11 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 	// Optional default-hidden overlays — see WipeoutHUD for full notes.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
+	// ElimPlus-only: through-wall world-space markers for the candy orbs
+	// dropped on player death (1 jump-boot + ammo restore on pickup). BP
+	// widget that already does the world-to-screen projection + on-/off-
+	// screen edge clamping. Hidden until user enables via nchud.
+	HudWidgetClasses.Add(TEXT("/Game/Blueprints/ElimPlusStuff/CandyPickupMarker.CandyPickupMarker_C"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ElimPlusScoreboard"));
 }
 
