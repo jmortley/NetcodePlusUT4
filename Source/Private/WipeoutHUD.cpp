@@ -70,6 +70,16 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	// for that mode. Set the "weapon" extras key (current/linkgun/sniper/etc.)
 	// to pin a specific weapon, otherwise it tracks the held weapon.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
+	// Optional default-hidden overlays (speedometer, minimap, heal-bind icon).
+	// All three gate visibility on the presence of a layout entry — instances
+	// stay registered but ShouldDraw returns false until the user adds them
+	// via nchud. heal_ability additionally short-circuits when the player has
+	// no BoostClass (i.e. on modes that don't grant a heal/boost), so it's
+	// safe to inherit into NCLeagueDuel/ShockDom via subclass without any
+	// per-mode gating here.
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_HealAbility"));
 	// Our custom portrait-row scoreboard
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 }
@@ -571,11 +581,26 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	// CTF, etc.) use stock AUTGameState::RemainingTime instead. Try the BP
 	// field first; fall back to the stock match clock so non-round modes
 	// (NCLeagueDuel especially) still get a visible timer.
+	//
+	// Static caches: UClass field tables don't change at runtime, so a single
+	// FindField per (GameState class, property name) is enough. Stock
+	// FindField walks the class hierarchy on every call; this is the cheap
+	// trick for hot HUD paths that read replicated ints by name.
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	int32 ClockSeconds = -1;
-	if (UIntProperty* RoundTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RoundSecondsRemaining")))
 	{
-		ClockSeconds = RoundTimeProp->GetPropertyValue_InContainer(GS);
+		static UClass* CachedRoundCls = nullptr;
+		static UIntProperty* CachedRoundProp = nullptr;
+		UClass* GSCls = GS->GetClass();
+		if (CachedRoundCls != GSCls)
+		{
+			CachedRoundCls  = GSCls;
+			CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+		}
+		if (CachedRoundProp)
+		{
+			ClockSeconds = CachedRoundProp->GetPropertyValue_InContainer(GS);
+		}
 	}
 	if (ClockSeconds < 0)
 	{
@@ -586,9 +611,17 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		// TimeLimit (default 0 → no clock) for untimed modes. Skip drawing
 		// when 0/negative so untimed modes don't show "00:00" glued to the
 		// score bar.
-		if (UIntProperty* RemTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RemainingTime")))
+		static UClass* CachedRemCls = nullptr;
+		static UIntProperty* CachedRemProp = nullptr;
+		UClass* GSCls = GS->GetClass();
+		if (CachedRemCls != GSCls)
 		{
-			const int32 RT = RemTimeProp->GetPropertyValue_InContainer(GS);
+			CachedRemCls  = GSCls;
+			CachedRemProp = FindField<UIntProperty>(GSCls, TEXT("RemainingTime"));
+		}
+		if (CachedRemProp)
+		{
+			const int32 RT = CachedRemProp->GetPropertyValue_InContainer(GS);
 			if (RT > 0) ClockSeconds = RT;
 		}
 	}

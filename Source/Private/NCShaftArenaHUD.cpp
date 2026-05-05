@@ -146,10 +146,22 @@ void ANCShaftArenaHUD::DrawTeamScoreBar(AUTGameState* GS)
 	// non-round modes.
 	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	int32 ClockSeconds = -1;
-	if (UIntProperty* RemTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RemainingTime")))
 	{
-		const int32 RT = RemTimeProp->GetPropertyValue_InContainer(GS);
-		if (RT > 0) ClockSeconds = RT;
+		// Static cache: see WipeoutHUD/ElimPlusHUD for rationale (FindField was
+		// hitting the class-hierarchy walk every frame).
+		static UClass* CachedCls = nullptr;
+		static UIntProperty* CachedProp = nullptr;
+		UClass* GSCls = GS->GetClass();
+		if (CachedCls != GSCls)
+		{
+			CachedCls  = GSCls;
+			CachedProp = FindField<UIntProperty>(GSCls, TEXT("RemainingTime"));
+		}
+		if (CachedProp)
+		{
+			const int32 RT = CachedProp->GetPropertyValue_InContainer(GS);
+			if (RT > 0) ClockSeconds = RT;
+		}
 	}
 
 	const float RoundClockScale = RenderScale * 1.1f * ScoreScale;

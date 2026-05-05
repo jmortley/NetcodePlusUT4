@@ -612,6 +612,12 @@ namespace NCPlusHUDAliases
 			// (-107, -46) in stock layout) so the eye doesn't have to leave the
 			// HP/Armor/Ammo cluster to see live aim feedback.
 			T.Emplace(TEXT("accuracy"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"),                            FText::FromString(TEXT("Accuracy Widget")),    false, ENCPlusHUDAnchor::BottomRight, FVector2D(-20.f, 0.f));
+			// Default-hidden opt-in widgets. Stock anchor + offset mirror each
+			// widget's constructor defaults so the editor's first edit doesn't
+			// visibly jump the element when seeded.
+			T.Emplace(TEXT("speedometer"),      TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"),                         FText::FromString(TEXT("Speedometer")),        false, ENCPlusHUDAnchor::Center,      FVector2D(0.f, 80.f));
+			T.Emplace(TEXT("minimap"),          TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"),                             FText::FromString(TEXT("Minimap")),            false, ENCPlusHUDAnchor::TopLeft,     FVector2D(20.f, 20.f));
+			T.Emplace(TEXT("heal_ability"),     TEXT("/Script/NetcodePlus.NCPlusHUDWidget_HealAbility"),                         FText::FromString(TEXT("Heal Ability Bind")),  false, ENCPlusHUDAnchor::BottomCenter, FVector2D(0.f, -180.f));
 			return T;
 		}();
 		return Table;
@@ -850,9 +856,15 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 	if (!HUD) return;
 
 	// Fast path: layout unchanged since last apply → nothing to do.
-	// Defaults restore is handled the same frame the user removed an entry
-	// (which marks dirty), so a "clean" empty layout means nothing changed.
-	if (!FNCPlusHUDLayout::IsLiveDirty() && Layout.Elements.Num() == 0) return;
+	// Old condition gated the fast path on `Layout.Elements.Num() == 0`,
+	// which meant the moment a user added ANY layout entry, the apply
+	// loop ran every frame at 144Hz+ — full HudWidgets iteration plus a
+	// reflection lookup per widget plus a UE_LOG. Now we trust the dirty
+	// flag exclusively: ReloadLive / ResetLive / MarkLiveDirty all set it
+	// true, so the first frame after a mutation re-applies. After that,
+	// widget state already reflects the layout — re-asserting the same
+	// values is wasted work.
+	if (!FNCPlusHUDLayout::IsLiveDirty()) return;
 
 	int32 NumApplied = 0;
 	for (UUTHUDWidget* W : HUD->HudWidgets)
@@ -921,6 +933,8 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 	}
 
 	FNCPlusHUDLayout::ClearLiveDirty();
+	// Only fires on a real mutation now (ReloadLive, ResetLive, editor edit).
+	// Was previously per-frame for any non-empty layout — log spam.
 	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Applied layout: %d override(s), %d default(s) restored."),
 		NumApplied, GWidgetDefaults.Num() - NumApplied);
 }

@@ -28,6 +28,9 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	// Optional opt-in accuracy widget — hidden by default (ShouldDraw requires
 	// a layout entry); user enables via nchud and picks current/specific weapon.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
+	// Optional default-hidden overlays — see WipeoutHUD for full notes.
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
 }
 
 void ANCPlusCTFHUD::BeginPlay()

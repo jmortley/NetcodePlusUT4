@@ -72,6 +72,9 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 	// Optional opt-in accuracy widget — hidden by default (ShouldDraw requires
 	// a layout entry); user enables via nchud and picks current/specific weapon.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
+	// Optional default-hidden overlays — see WipeoutHUD for full notes.
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ElimPlusScoreboard"));
 }
 
@@ -172,11 +175,24 @@ void AElimPlusHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 }
 
 // Helper: locate the stats replicator on this client (works on server too).
+// Cached on a weak pointer — once we've found it we can just deref next
+// frame. The replicator is bAlwaysRelevant and spawned once per match, so
+// the cache only invalidates on world tear-down (PIE stop / map travel).
+// TActorIterator walks the entire actor list — for a HUD called every
+// frame at 144Hz+ that's a measurable cost on dense maps.
 static AElimPlusStatsReplicator* FindElimPlusStatsReplicator(UWorld* World)
 {
 	if (!World) return nullptr;
+	static TWeakObjectPtr<UWorld> CachedWorld;
+	static TWeakObjectPtr<AElimPlusStatsReplicator> CachedRep;
+	if (CachedWorld.Get() == World && CachedRep.IsValid())
+	{
+		return CachedRep.Get();
+	}
 	for (TActorIterator<AElimPlusStatsReplicator> It(World); It; ++It)
 	{
+		CachedWorld = World;
+		CachedRep   = *It;
 		return *It;
 	}
 	return nullptr;
@@ -578,13 +594,23 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->DrawText(SmallFont, Team1Name, RightBarX + 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
-	// Round Clock — read RoundSecondsRemaining from BP GameState via reflection
+	// Round Clock — read RoundSecondsRemaining from BP GameState via reflection.
+	// Static cache: FindField walks the class hierarchy and was running every
+	// frame; (GameState class, property name) is immutable so a one-shot
+	// resolution is enough.
 	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	int32 RoundTime = -1;
-	UIntProperty* RoundTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RoundSecondsRemaining"));
-	if (RoundTimeProp)
+	static UClass* CachedRoundCls = nullptr;
+	static UIntProperty* CachedRoundProp = nullptr;
+	UClass* GSCls = GS->GetClass();
+	if (CachedRoundCls != GSCls)
 	{
-		RoundTime = RoundTimeProp->GetPropertyValue_InContainer(GS);
+		CachedRoundCls  = GSCls;
+		CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+	}
+	if (CachedRoundProp)
+	{
+		RoundTime = CachedRoundProp->GetPropertyValue_InContainer(GS);
 	}
 
 	const float RoundClockScale = RenderScale * 1.1f * ScoreScale;

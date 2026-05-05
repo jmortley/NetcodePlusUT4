@@ -46,9 +46,13 @@ namespace NCHUDEdit
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
-		if (Alias == TEXT("shockdom_controls") || Alias == TEXT("accuracy"))
+		if (Alias == TEXT("shockdom_controls") || Alias == TEXT("accuracy") || Alias == TEXT("heal_ability"))
 		{
 			return TEXT("Game Mode");
+		}
+		if (Alias == TEXT("speedometer") || Alias == TEXT("minimap"))
+		{
+			return TEXT("Optional Overlays");
 		}
 		return TEXT("Stock Widgets");
 	}
@@ -61,6 +65,7 @@ namespace NCHUDEdit
 			TEXT("Weapon Bars"),
 			TEXT("Top Bar (Portraits + Scorebar)"),
 			TEXT("Game Mode"),
+			TEXT("Optional Overlays"),
 			TEXT("Stock Widgets"),
 		};
 		return Order;

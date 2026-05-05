@@ -42,16 +42,44 @@ void AShockDomHUD::DrawHUD()
 		(GS->GetMatchState() == MatchState::InProgress ||
 		 GS->GetMatchState() == MatchState::WaitingPostMatch))
 	{
-		// Collect control points via TActorIterator (they're bAlwaysRelevant)
-		TArray<AShockDomControlPoint*> Points;
-		for (TActorIterator<AShockDomControlPoint> It(GetWorld()); It; ++It)
+		// Cache the control-point list across frames. They're spawned at map
+		// load, never destroyed mid-match (bAlwaysRelevant), and never change
+		// PointIndex — so iterating + sorting every frame at 144Hz+ is wasted
+		// work. Cache invalidates on world swap (PIE stop / map travel).
+		static TWeakObjectPtr<UWorld> CachedWorld;
+		static TArray<TWeakObjectPtr<AShockDomControlPoint>> CachedPointsWeak;
+		UWorld* World = GetWorld();
+
+		bool bRebuild = (CachedWorld.Get() != World);
+		if (!bRebuild)
 		{
-			Points.Add(*It);
+			for (const TWeakObjectPtr<AShockDomControlPoint>& WP : CachedPointsWeak)
+			{
+				if (!WP.IsValid()) { bRebuild = true; break; }
+			}
 		}
-		Points.Sort([](const AShockDomControlPoint& A, const AShockDomControlPoint& B)
+		if (bRebuild)
 		{
-			return A.PointIndex < B.PointIndex;
-		});
+			CachedPointsWeak.Reset();
+			TArray<AShockDomControlPoint*> Tmp;
+			for (TActorIterator<AShockDomControlPoint> It(World); It; ++It)
+			{
+				Tmp.Add(*It);
+			}
+			Tmp.Sort([](const AShockDomControlPoint& A, const AShockDomControlPoint& B)
+			{
+				return A.PointIndex < B.PointIndex;
+			});
+			CachedWorld = World;
+			for (AShockDomControlPoint* P : Tmp) CachedPointsWeak.Add(P);
+		}
+
+		TArray<AShockDomControlPoint*> Points;
+		Points.Reserve(CachedPointsWeak.Num());
+		for (const TWeakObjectPtr<AShockDomControlPoint>& WP : CachedPointsWeak)
+		{
+			if (AShockDomControlPoint* P = WP.Get()) Points.Add(P);
+		}
 
 		DrawControlPointIndicators(Points);
 		DrawControlPointWorldMarkers(Points);
