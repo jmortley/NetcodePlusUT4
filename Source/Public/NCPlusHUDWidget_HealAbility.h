@@ -19,4 +19,5 @@ class NETCODEPLUS_API UNCPlusHUDWidget_HealAbility : public UUTHUDWidget
 
 	virtual void Draw_Implementation(float DeltaTime) override;
 	virtual bool ShouldDraw_Implementation(bool bShowScores) override;
+	virtual float GetDrawScaleOverride() override;
 };

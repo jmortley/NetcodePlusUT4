@@ -6,6 +6,33 @@
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "StatNames.h"
+#include "EngineUtils.h"
+#include "NCLeagueDuelStatsReplicator.h"
+
+namespace
+{
+	/** Locate the duel stats replicator on this client. Cached on a weak ptr —
+	 *  the replicator is bAlwaysRelevant and spawned once per match (same
+	 *  pattern as ElimPlus), so re-iterating actors every scoreboard frame is
+	 *  wasted work. Cache invalidates on world swap (PIE stop / map travel). */
+	ANCLeagueDuelStatsReplicator* FindNCLeagueDuelStatsReplicator(UWorld* World)
+	{
+		if (!World) return nullptr;
+		static TWeakObjectPtr<UWorld> CachedWorld;
+		static TWeakObjectPtr<ANCLeagueDuelStatsReplicator> CachedRep;
+		if (CachedWorld.Get() == World && CachedRep.IsValid())
+		{
+			return CachedRep.Get();
+		}
+		for (TActorIterator<ANCLeagueDuelStatsReplicator> It(World); It; ++It)
+		{
+			CachedWorld = World;
+			CachedRep   = *It;
+			return *It;
+		}
+		return nullptr;
+	}
+}
 
 UNCLeagueDuelScoreboard::UNCLeagueDuelScoreboard(const FObjectInitializer& OI)
 	: Super(OI)
@@ -60,14 +87,32 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	DrawText(FText::FromString(KDStr), XOffset + (Width * ColumnHeaderKDX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Combined hitscan accuracy: (LG + Shock + Sniper) hits / shots.
-	const int32 Hits  = PS->GetStatsValue(NAME_LinkHits)
-	                  + PS->GetStatsValue(NAME_ShockRifleHits)
-	                  + PS->GetStatsValue(NAME_SniperHits);
-	const int32 Shots = PS->GetStatsValue(NAME_LinkShots)
-	                  + PS->GetStatsValue(NAME_ShockRifleShots)
-	                  + PS->GetStatsValue(NAME_SniperShots);
-	const float Pct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
+	// Combined hitscan accuracy via the replicator. Reading PS->GetStatsValue
+	// directly only works on the authority — AUTPlayerState::StatsData is
+	// UPROPERTY() with no Replicated specifier, so on remote clients every
+	// per-weapon hit/shot stat reads 0. ANCLeagueDuelStatsReplicator snapshots
+	// the values server-side at 1Hz and replicates the percentage.
+	const FString PlayerId = PS->UniqueId.IsValid()
+		? PS->UniqueId.ToString()
+		: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+	float Pct = 0.f;
+	if (ANCLeagueDuelStatsReplicator* Rep = FindNCLeagueDuelStatsReplicator(GetWorld()))
+	{
+		Pct = Rep->GetAccuracyForPlayer(PlayerId);
+	}
+	// Authority fallback — listen-server / standalone where no replication
+	// has happened yet. Keeps the local player's row populated from frame 1
+	// instead of waiting on the 1Hz tick.
+	if (Pct == 0.f && GetWorld() && GetWorld()->GetNetMode() != NM_Client)
+	{
+		const int32 Hits  = PS->GetStatsValue(NAME_LinkHits)
+		                  + PS->GetStatsValue(NAME_ShockRifleHits)
+		                  + PS->GetStatsValue(NAME_SniperHits);
+		const int32 Shots = PS->GetStatsValue(NAME_LinkShots)
+		                  + PS->GetStatsValue(NAME_ShockRifleShots)
+		                  + PS->GetStatsValue(NAME_SniperShots);
+		Pct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
+	}
 	const FLinearColor AccColor = (Pct >= 35.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
 	                            : (Pct >= 20.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
 	                            : FLinearColor(1.f, 0.4f, 0.4f, 1.f);

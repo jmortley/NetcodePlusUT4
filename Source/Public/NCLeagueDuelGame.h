@@ -123,6 +123,14 @@ protected:
 	 *  in HandleMatchHasEnded. */
 	TUniquePtr<FNCDuelRatingSystem> RatingSystem;
 
+	/** Replicates per-player hitscan accuracy to clients. AUTPlayerState's
+	 *  StatsData TMap (which holds NAME_LinkHits / NAME_ShockRifleHits etc.)
+	 *  is server-only — without this replicator the duel scoreboard's Acc
+	 *  column always reads 0 on remote clients. Spawned in InitGame, ticked
+	 *  on the authority. */
+	UPROPERTY()
+	class ANCLeagueDuelStatsReplicator* StatsReplicator = nullptr;
+
 	void  ComputeSpawnPairings();
 	void  ComputeShieldBeltExclusions();
 	bool  IsExcludedByActiveShieldBelt(class APlayerStart* PS) const;

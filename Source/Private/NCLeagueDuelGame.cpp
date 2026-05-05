@@ -18,6 +18,7 @@
 #include "NCLeagueDuelHUD.h"
 #include "NCDuelRatingSystem.h"
 #include "NCStatsUploader.h"
+#include "NCLeagueDuelStatsReplicator.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCLeagueDuel, Log, All);
 
@@ -99,6 +100,17 @@ void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options,
 	// Rating system DB init too — lives on the gamemode, no PlayerState yet.
 	RatingSystem = MakeUnique<FNCDuelRatingSystem>();
 	FNCDuelRatingSystem::InitDatabase(GetWorld());
+
+	// Stats replicator — bridges StatsData (server-only TMap on AUTPlayerState)
+	// to clients so the duel scoreboard's Acc column actually has data to
+	// render. Without this every remote player's accuracy reads 0 (StatsData
+	// is UPROPERTY() with no Replicated specifier in the engine).
+	if (Role == ROLE_Authority && !StatsReplicator)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		StatsReplicator = GetWorld()->SpawnActor<ANCLeagueDuelStatsReplicator>(SpawnParams);
+	}
 }
 
 void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)

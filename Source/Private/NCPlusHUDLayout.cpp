@@ -621,7 +621,7 @@ namespace NCPlusHUDAliases
 			// visibly jump the element when seeded.
 			T.Emplace(TEXT("speedometer"),      TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"),                         FText::FromString(TEXT("Speedometer")),        false, ENCPlusHUDAnchor::Center,      FVector2D(0.f, 80.f));
 			T.Emplace(TEXT("minimap"),          TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"),                             FText::FromString(TEXT("Minimap")),            false, ENCPlusHUDAnchor::TopLeft,     FVector2D(20.f, 20.f));
-			T.Emplace(TEXT("heal_ability"),     TEXT("/Script/NetcodePlus.NCPlusHUDWidget_HealAbility"),                         FText::FromString(TEXT("Heal Ability Bind")),  false, ENCPlusHUDAnchor::BottomCenter, FVector2D(0.f, -180.f));
+			T.Emplace(TEXT("heal_ability"),     TEXT("/Script/NetcodePlus.NCPlusHUDWidget_HealAbility"),                         FText::FromString(TEXT("Heal Ability Bind")),  false, ENCPlusHUDAnchor::BottomCenter, FVector2D(635.f, -52.f));
 			return T;
 		}();
 		return Table;

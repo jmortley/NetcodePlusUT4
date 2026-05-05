@@ -96,16 +96,26 @@ namespace
 UNCPlusHUDWidget_HealAbility::UNCPlusHUDWidget_HealAbility(const FObjectInitializer& OI)
 	: Super(OI)
 {
-	// Stock position: bottom-center, lifted a bit so it doesn't overlap the
-	// HP/Armor cluster. Diabotical places it to the right of the player
-	// model — but for arbitrary HUDs the safe default is dead-center bottom
-	// where it's easy to spot during combat. User can drag elsewhere via nchud.
-	Position           = FVector2D(0.f, -180.f);
+	// Stock position: bottom-center, offset right of crosshair so it sits next
+	// to the HP/Armor cluster without overlapping (matches the user's preferred
+	// Diabotical-ish layout — heal indicator near the player, not above it).
+	// Mirrored in NCPlusHUDLayout.cpp's alias StockOffset; keep them in sync
+	// so "no layout entry" renders identically to a freshly-created entry.
+	Position           = FVector2D(635.f, -52.f);
 	Size               = FVector2D(96.f, 96.f);
 	ScreenPosition     = FVector2D(0.5f, 1.0f);   // BottomCenter anchor
 	Origin             = FVector2D(0.5f, 1.0f);   // pivot bottom-center
 	DesignedResolution = 1080.f;
 	bShouldKickBack    = false;
+}
+
+float UNCPlusHUDWidget_HealAbility::GetDrawScaleOverride()
+{
+	// Honor per-element Scale override (same pattern as QuickStats / AmmoCounter).
+	// Without this the editor's Sc field has no effect on this widget.
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("heal_ability"));
+	const float UserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+	return Super::GetDrawScaleOverride() * UserScale;
 }
 
 bool UNCPlusHUDWidget_HealAbility::ShouldDraw_Implementation(bool bShowScores)
@@ -159,6 +169,12 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("heal_ability"));
 	const float IconSize = (E ? E->GetExtraFloat(TEXT("icon_size"), 64.f) : 64.f);
 
+	// Honor per-element opacity (0..1) — applied to icon tint AND label color.
+	// UUTHUDWidget::DrawTexture's color.A path is the right one to feed into:
+	// passing alpha pre-multiplied via the FLinearColor's .A is the canonical
+	// way to dim a draw call. Same approach AmmoCounter / QuickStats use.
+	const float Opacity = E ? FMath::Clamp(E->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
+
 	// Resolve the keybind. If the user pinned a specific command via the
 	// layout's "bind_command" extra, look up only that. Otherwise walk the
 	// canonical candidates: ActivateSpecial (stock UT4 default — see
@@ -190,10 +206,13 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	const bool bAvailable = Charges > 0;
 
 	// Greyed when consumed: keep at full opacity so the icon shape stays
-	// recognizable, but desaturate and dim. Bright tint when ready.
-	const FLinearColor IconTint = bAvailable
+	// recognizable, but desaturate and dim. Bright tint when ready. The
+	// user-configured Opacity is multiplied into the alpha so the editor's
+	// Op slider behaves consistently with other widgets.
+	FLinearColor IconTint = bAvailable
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
 		: FLinearColor(0.35f, 0.35f, 0.35f, 0.85f);
+	IconTint.A *= Opacity;
 
 	// Centered icon in widget-relative space — DrawTexture transforms by
 	// the widget's origin/screen position automatically (unlike raw
@@ -213,9 +232,10 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	if (!LabelFont) return;
 
 	// KeyLabel was resolved above (candidate-list fallback or extras override).
-	const FLinearColor LabelColor = bAvailable
+	FLinearColor LabelColor = bAvailable
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
 		: FLinearColor(0.6f, 0.6f, 0.6f, 0.85f);
+	LabelColor.A *= Opacity;
 
 	// Prefix the keybind with "Heal:" so the label is self-explanatory at a
 	// glance instead of reading as a stray letter under the icon. Even with
