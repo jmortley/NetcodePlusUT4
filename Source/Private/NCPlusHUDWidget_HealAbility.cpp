@@ -30,13 +30,39 @@
 
 namespace
 {
-	/** Scan CustomBinds + LocalBinds for the first key bound to Command.
-	 *  Returns "?" if the action isn't bound — better visual than empty so
-	 *  the user immediately sees they need to bind a key.  */
+	/** Scan all known input-binding tables for the first key bound to Command.
+	 *  UE4 has THREE places a keybind can live, and "Q -> Activate Powerup" is
+	 *  in the one we weren't checking:
+	 *    1. UPlayerInput::ActionMappings    — engine-standard actions loaded
+	 *       from DefaultInput.ini (StartActivatePowerup lives here)
+	 *    2. UUTPlayerInput::CustomBinds     — UT4 plugin-defined commands
+	 *       (ToggleTranslocator etc.)
+	 *    3. UUTPlayerInput::LocalBinds      — per-machine override layer
+	 *  Earlier code only checked #2 and #3, so action-mapped binds always
+	 *  came back as "?". Action-mapped is the more common path for
+	 *  combat/ability binds — checked first now. Returns "?" if none found,
+	 *  which is still a better visual than empty (user sees they need to
+	 *  bind a key OR set bind_command extras to a different action name).  */
 	FString FindKeyForCommand(AUTPlayerController* PC, const FString& Command)
 	{
 		if (!PC || !PC->PlayerInput) return TEXT("?");
-		UUTPlayerInput* Input = Cast<UUTPlayerInput>(PC->PlayerInput);
+		UPlayerInput* BaseInput = PC->PlayerInput;
+
+		// 1. ActionMappings — engine-canonical actions. ActionName must
+		//    match exactly (no fuzzy StartsWith — these are clean FNames).
+		const FName ActionName(*Command);
+		for (const FInputActionKeyMapping& M : BaseInput->ActionMappings)
+		{
+			if (M.ActionName == ActionName)
+			{
+				FString Out = M.Key.GetFName().ToString();
+				if (Out.StartsWith(TEXT("Gamepad_"))) Out = Out.RightChop(8);
+				return Out;
+			}
+		}
+
+		// 2 + 3. UT4 CustomBinds / LocalBinds.
+		UUTPlayerInput* Input = Cast<UUTPlayerInput>(BaseInput);
 		if (!Input) return TEXT("?");
 
 		auto Search = [&Command](const TArray<FCustomKeyBinding>& Binds) -> FName
@@ -58,8 +84,6 @@ namespace
 		if (Key == NAME_None) Key = Search(Input->LocalBinds);
 		if (Key == NAME_None) return TEXT("?");
 
-		// FName already comes through as a clean key name (e.g. "Q", "MouseX").
-		// Strip the verbose engine prefixes the player would never want to see.
 		FString Out = Key.ToString();
 		if (Out.StartsWith(TEXT("Gamepad_"))) Out = Out.RightChop(8);
 		return Out;

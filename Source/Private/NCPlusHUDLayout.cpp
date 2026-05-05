@@ -136,11 +136,15 @@ namespace NCPlusHUDFonts
 			{ TEXT("Number"),       FString(),                                                                              &GetNumber },
 			{ TEXT("Chat"),         FString(),                                                                              &GetChat   },
 			// Tier B — lazy-loaded on first use, cached for rest of session.
-			{ TEXT("Exo2 Bold"),    TEXT("/Game/RestrictedAssets/UI/Fonts/Exo2-Bold.Exo2-Bold"),                            nullptr    },
-			{ TEXT("Rajdhani Bold"),TEXT("/Game/RestrictedAssets/UI/Fonts/Rajdhani-Bold.Rajdhani-Bold"),                    nullptr    },
-			{ TEXT("Ambex"),        TEXT("/Game/RestrictedAssets/Fonts/fntAmbex36.fntAmbex36"),                             nullptr    },
-			{ TEXT("Positec"),      TEXT("/Game/RestrictedAssets/Fonts/fntPositec36.fntPositec36"),                         nullptr    },
-			{ TEXT("Extreme"),      TEXT("/Game/RestrictedAssets/Fonts/fntExtreme.fntExtreme"),                             nullptr    },
+			{ TEXT("Exo2 Bold"),       TEXT("/Game/RestrictedAssets/UI/Fonts/Exo2-Bold.Exo2-Bold"),                         nullptr },
+			{ TEXT("Rajdhani Bold"),   TEXT("/Game/RestrictedAssets/UI/Fonts/Rajdhani-Bold.Rajdhani-Bold"),                 nullptr },
+			{ TEXT("Rajdhani SemiBold"),TEXT("/Game/RestrictedAssets/UI/Fonts/Rajdhani-SemiBold.Rajdhani-SemiBold"),        nullptr },
+			{ TEXT("Lato"),            TEXT("/Game/RestrictedAssets/Fonts/Lato.Lato"),                                      nullptr },
+			{ TEXT("Ambex"),           TEXT("/Game/RestrictedAssets/Fonts/fntAmbex36.fntAmbex36"),                          nullptr },
+			{ TEXT("Ambex Large"),     TEXT("/Game/RestrictedAssets/Fonts/fntAmbex72.fntAmbex72"),                          nullptr },
+			{ TEXT("Positec"),         TEXT("/Game/RestrictedAssets/Fonts/fntPositec36.fntPositec36"),                      nullptr },
+			{ TEXT("Positec Small"),   TEXT("/Game/RestrictedAssets/Fonts/fntPositec14.fntPositec14"),                      nullptr },
+			{ TEXT("Extreme"),         TEXT("/Game/RestrictedAssets/Fonts/fntExtreme.fntExtreme"),                          nullptr },
 		};
 		return Table;
 	}
