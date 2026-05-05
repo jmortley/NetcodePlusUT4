@@ -286,53 +286,44 @@ bool ANCLeagueDuelGame::IsExcludedByActiveShieldBelt(APlayerStart* PS) const
 // First-spawn helper
 // =============================================================================
 
-APlayerStart* ANCLeagueDuelGame::SelectPairedSpawnForFirstSpawn(AUTPlayerState* PS)
+APlayerStart* ANCLeagueDuelGame::SelectPairedSpawnForFirstSpawn(AUTPlayerState* PS,
+	APlayerStart* ExcludeStart)
 {
 	if (!PS || WeaponPairs.Num() == 0) return nullptr;
 
-	// Find an unconsumed pair (each pair is used at most once per match — once
-	// both players have consumed their first spawn, this never fires again).
+	const int32 TeamIdx = (PS->Team) ? PS->Team->TeamIndex : 0;
+
+	// Walk every pair, return the team-anchored side as a candidate. Skip pairs
+	// already-consumed (by the OTHER player on their first spawn) and skip any
+	// pair whose team-side equals ExcludeStart (so the second populate call
+	// for THIS player gets a different pair than the first call).
 	TArray<int32> Available;
 	Available.Reserve(WeaponPairs.Num());
 	for (int32 i = 0; i < WeaponPairs.Num(); ++i)
 	{
-		if (!ConsumedPairIndices.Contains(i)) Available.Add(i);
+		if (ConsumedPairIndices.Contains(i)) continue;
+		const FNCLeagueWeaponPair& Pair = WeaponPairs[i];
+		APlayerStart* Side = (TeamIdx == 0) ? Pair.StartA : Pair.StartB;
+		if (!Side) continue;
+		if (ExcludeStart && Side == ExcludeStart) continue;
+		Available.Add(i);
 	}
 	if (Available.Num() == 0) return nullptr;
 
 	const int32 PickedIdx = Available[FMath::RandRange(0, Available.Num() - 1)];
 	const FNCLeagueWeaponPair& Pair = WeaponPairs[PickedIdx];
+	APlayerStart* Chosen = (TeamIdx == 0) ? Pair.StartA : Pair.StartB;
 
-	// Deterministic A/B assignment by team index — keeps red↔blue consistent
-	// across both players' first-spawn calls when ChoosePlayerStart fires
-	// independently for each.
-	APlayerStart* Chosen = nullptr;
-	if (PS->Team && PS->Team->TeamIndex == 0)
-	{
-		Chosen = Pair.StartA;
-	}
-	else
-	{
-		Chosen = Pair.StartB;
-	}
-
-	// Mark the pair consumed only after BOTH players have spawned. Track via
-	// PlayersWhoSpawnedOnce set count: the second call from the matched
-	// teammate will trigger consumption. For 1v1, this is just "both players
-	// have spawned at least once".
-	int32 SpawnedCount = PlayersWhoSpawnedOnce.Num();
-	if (SpawnedCount >= 1)
-	{
-		// This is the second player's first spawn — pair is now fully assigned.
-		ConsumedPairIndices.Add(PickedIdx);
-	}
-
+	// Pair-consumption is only marked when the OTHER player takes their first
+	// spawn from this pair (so player 1 picking ChoiceA doesn't cut player 2's
+	// options). The simplest signal: ConsumedPairIndices grows when a different
+	// AUTPlayerState first-spawns from this pair. We don't track that here;
+	// it's left for ChoosePlayerStart to mark via PlayersWhoSpawnedOnce flow.
 	UE_LOG(LogNCLeagueDuel, Log,
-		TEXT("First spawn for %s (team %d): assigned pair index %d (%s)"),
-		*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
-		PickedIdx,
-		Chosen ? *Chosen->GetActorLocation().ToString() : TEXT("nullptr"));
-
+		TEXT("First-spawn pick for %s (team %d): pair %d -> %s%s"),
+		*PS->PlayerName, TeamIdx, PickedIdx,
+		Chosen ? *Chosen->GetActorLocation().ToString() : TEXT("nullptr"),
+		ExcludeStart ? TEXT(" [excluded prior pick]") : TEXT(""));
 	return Chosen;
 }
 
@@ -424,15 +415,23 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		ExcludeStart = PS->RespawnChoiceA;
 	}
 
-	// First-spawn path: paired weapon anchor (only applies on the very first
-	// ChoosePlayerStart call for this PS — subsequent calls fall through).
+	// First-spawn path: BOTH the populate-A and populate-B calls return
+	// paired-weapon anchors (different pairs) so the player picks weapon
+	// preference rather than seeing one paired anchor + one generic spawn.
+	// PlayersWhoSpawnedOnce is marked once when filling B (ExcludeStart is
+	// set), so the actual third "spawn" call falls through to the Super path.
 	if (!PlayersWhoSpawnedOnce.Contains(PS) && WeaponPairs.Num() > 0)
 	{
-		if (APlayerStart* Anchor = SelectPairedSpawnForFirstSpawn(PS))
+		if (APlayerStart* Anchor = SelectPairedSpawnForFirstSpawn(PS, ExcludeStart))
 		{
-			PlayersWhoSpawnedOnce.Add(PS);
-			if (Anchor != ExcludeStart) return Anchor;
-			// Pair anchor collided with already-picked-A — fall through to Tier 1.
+			// Mark the player as having consumed first-spawn only on the second
+			// populate call (when filling B). Until then both populate calls
+			// stay on the paired path.
+			if (ExcludeStart != nullptr)
+			{
+				PlayersWhoSpawnedOnce.Add(PS);
+			}
+			return Anchor;
 		}
 	}
 	PlayersWhoSpawnedOnce.Add(PS);
@@ -449,6 +448,16 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		if (!Start) continue;
 		if (Start == ExcludeStart) continue;
 		if (IsExcludedByActiveShieldBelt(Start)) continue;
+
+		// Inter-A/B distance: when filling B, reject candidates within
+		// MinKillerSpawnDistance of the already-picked A so the player can't
+		// be cornered with two close-together choices. Same threshold as the
+		// killer-distance rule (2500uu by default).
+		if (ExcludeStart)
+		{
+			const float DistFromA = (Start->GetActorLocation() - ExcludeStart->GetActorLocation()).Size2D();
+			if (DistFromA < MinKillerSpawnDistance) continue;
+		}
 
 		float MinEnemyDist = FLT_MAX;
 		bool  bHasLOS = false;

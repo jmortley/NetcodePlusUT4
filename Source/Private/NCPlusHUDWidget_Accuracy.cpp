@@ -74,10 +74,14 @@ namespace
 UNCPlusHUDWidget_Accuracy::UNCPlusHUDWidget_Accuracy(const FObjectInitializer& OI)
 	: Super(OI)
 {
-	Position           = FVector2D(0.f, 0.f);
+	// Stock position: bottom-right corner, above the ammo counter, so live
+	// aim feedback sits in the same eye-region as HP/Armor/Ammo. Layout
+	// override (Extras + nchud) takes precedence; this is what
+	// CaptureWidgetDefaults snapshots for "No override → restore stock".
+	Position           = FVector2D(-20.f, -180.f);
 	Size               = FVector2D(220.f, 80.f);
-	ScreenPosition     = FVector2D(0.5f, 0.10f);   // top-center default
-	Origin             = FVector2D(0.5f, 0.f);
+	ScreenPosition     = FVector2D(1.0f, 1.0f);    // BottomRight anchor
+	Origin             = FVector2D(1.0f, 1.0f);    // pivot at widget's bottom-right
 	DesignedResolution = 1080.f;
 	bShouldKickBack    = false;
 }

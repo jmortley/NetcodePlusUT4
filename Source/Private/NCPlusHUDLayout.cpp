@@ -597,8 +597,11 @@ namespace NCPlusHUDAliases
 			// Game-mode-specific draw calls.
 			T.Emplace(TEXT("shockdom_controls"),FString(),                                                                       FText::FromString(TEXT("ShockDom A/B/C Indicators")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 78.f));
 			// Live-accuracy widget for NCShaftArena (and any other mode that opts
-			// in by listing the class in its HudWidgetClasses).
-			T.Emplace(TEXT("accuracy"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"),                            FText::FromString(TEXT("Shaft Accuracy")),     false, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 110.f));
+			// in by listing the class in its HudWidgetClasses). Default sits at
+			// bottom-right above the ammo counter (which lives at BottomRight
+			// (-107, -46) in stock layout) so the eye doesn't have to leave the
+			// HP/Armor/Ammo cluster to see live aim feedback.
+			T.Emplace(TEXT("accuracy"),         TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"),                            FText::FromString(TEXT("Accuracy Widget")),    false, ENCPlusHUDAnchor::BottomRight, FVector2D(-20.f, -180.f));
 			return T;
 		}();
 		return Table;

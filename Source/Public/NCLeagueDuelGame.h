@@ -99,7 +99,10 @@ protected:
 	void  ComputeSpawnPairings();
 	void  ComputeShieldBeltExclusions();
 	bool  IsExcludedByActiveShieldBelt(class APlayerStart* PS) const;
-	class APlayerStart* SelectPairedSpawnForFirstSpawn(class AUTPlayerState* PS);
+	/** Pick a paired-weapon anchor for the player's team, optionally avoiding a
+	 *  start that's already been picked (for the second populate call so A != B). */
+	class APlayerStart* SelectPairedSpawnForFirstSpawn(class AUTPlayerState* PS,
+	                                                    class APlayerStart* ExcludeStart);
 	float ComputeEnemyProximityScore(class APlayerStart* P, AController* Player,
 	                                 float& OutMinEnemyDist, bool& bOutHasLOS) const;
 	void  BuildMatchSummary(struct FNCMatchSummary& OutSummary) const;
