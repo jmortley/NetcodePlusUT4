@@ -137,8 +137,12 @@ namespace NCPlusHUDFonts
 			{ TEXT("Chat"),         FString(),                                                                              &GetChat   },
 			// Tier B — lazy-loaded on first use, cached for rest of session.
 			{ TEXT("Exo2 Bold"),       TEXT("/Game/RestrictedAssets/UI/Fonts/Exo2-Bold.Exo2-Bold"),                         nullptr },
-			{ TEXT("Rajdhani Bold"),   TEXT("/Game/RestrictedAssets/UI/Fonts/Rajdhani-Bold.Rajdhani-Bold"),                 nullptr },
-			{ TEXT("Rajdhani SemiBold"),TEXT("/Game/RestrictedAssets/UI/Fonts/Rajdhani-SemiBold.Rajdhani-SemiBold"),        nullptr },
+			// Rajdhani Bold + SemiBold removed - the .uasset files exist on
+			// disk under /Game/RestrictedAssets/UI/Fonts/ but neither loads as
+			// UFont (likely UCompositeFont or unbaked TTF wrapper, or a
+			// cooking issue specific to this build). The cache-failure fix
+			// suppressed the spam but the fonts never resolved, so they were
+			// just dead entries cluttering the picker.
 			{ TEXT("Lato"),            TEXT("/Game/RestrictedAssets/Fonts/Lato.Lato"),                                      nullptr },
 			{ TEXT("Ambex"),           TEXT("/Game/RestrictedAssets/Fonts/fntAmbex36.fntAmbex36"),                          nullptr },
 			{ TEXT("Ambex Large"),     TEXT("/Game/RestrictedAssets/Fonts/fntAmbex72.fntAmbex72"),                          nullptr },

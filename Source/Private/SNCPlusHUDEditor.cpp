@@ -1,4 +1,4 @@
-// SNCPlusHUDEditor.cpp — implementation of the live HUD layout editor.
+// SNCPlusHUDEditor.cpp - implementation of the live HUD layout editor.
 #include "SNCPlusHUDEditor.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
@@ -73,7 +73,7 @@ namespace NCHUDEdit
 		return Order;
 	}
 
-	// Per-alias style enum dispatch — keeps the row code generic so multiple
+	// Per-alias style enum dispatch - keeps the row code generic so multiple
 	// widgets can have their own style picker without if-laddering everywhere.
 	// Returns the integer index into Row.StyleChoices that matches StyleStr.
 	static int32 ParseStyleIndex(FName Alias, const FString& StyleStr)
@@ -127,7 +127,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_low_hp"),        FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f) });
 			Row.Colors.Add({ TEXT("color_damage_flash"),  FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f) });
 		}
-		// ammo: style picker + font picker + color overrides (3 styles — see NCPlusHUDWidget_AmmoCounter).
+		// ammo: style picker + font picker + color overrides (3 styles - see NCPlusHUDWidget_AmmoCounter).
 		if (Alias == TEXT("ammo"))
 		{
 			Row.bHasStylePicker = true;
@@ -146,7 +146,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		{
 			Row.bHasTeamColorToggle = true;
 		}
-		// Scorebar font picker — drives both team-name and score-number text
+		// Scorebar font picker - drives both team-name and score-number text
 		// in WipeoutHUD/ElimPlusHUD/NCPlusCTFHUD/NCShaftArenaHUD scorebars
 		// (single alias, single font for typographic coherence).
 		if (Alias == TEXT("scorebar"))
@@ -173,7 +173,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Rows.Add(Row);
 	}
 
-	// Group rows by section (Phase 3.6 — SExpandableArea-based UI).
+	// Group rows by section (Phase 3.6 - SExpandableArea-based UI).
 	TMap<FString, TArray<int32>> SectionRows;
 	for (int32 i = 0; i < Rows.Num(); i++)
 	{
@@ -273,7 +273,12 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 		+ SVerticalBox::Slot().AutoHeight()
 		[
 			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("NetcodePlus HUD Editor — ElimPlus")))
+			// ASCII hyphen instead of em-dash. This file has no UTF-8 BOM
+			// and MSVC defaults to Windows-1252 here, so a raw em-dash in
+			// the source gets read as three garbled bytes and shows up as
+			// mojibake in Slate. Hyphen sidesteps the encoding question
+			// entirely.
+			.Text(FText::FromString(TEXT("NetcodePlus HUD Editor - ElimPlus")))
 			.ColorAndOpacity(FLinearColor(0.95f, 0.95f, 0.95f, 1.f))
 		]
 		+ SVerticalBox::Slot().AutoHeight().Padding(0,4,0,0)
@@ -310,7 +315,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 			];
 	}
 
-	// Helper for the optional style picker — only shown if Row.bHasStylePicker.
+	// Helper for the optional style picker - only shown if Row.bHasStylePicker.
 	TSharedRef<SWidget> StyleSlot = SNullWidget::NullWidget;
 	if (Row.bHasStylePicker && Row.StyleChoices.Num() > 0)
 	{
@@ -339,7 +344,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.ColorAndOpacity(FLinearColor::White)
 			]
 		]
-		// Anchor combo — show the layout entry's anchor if one exists, otherwise
+		// Anchor combo - show the layout entry's anchor if one exists, otherwise
 		// the alias's stock anchor (so the dropdown reflects what's actually on screen).
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[
@@ -391,7 +396,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Y "))) ]
 			]
 		]
-		// Scale (per-element size multiplier — 1.0 = stock, 0.5 = half, 2.0 = double).
+		// Scale (per-element size multiplier - 1.0 = stock, 0.5 = half, 2.0 = double).
 		// For widget-backed elements, drives UUTHUDWidget::GetDrawScaleOverride()
 		// which the engine reads in PreDraw to scale RenderSize uniformly.
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
@@ -431,7 +436,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Op "))) ]
 			]
 		]
-		// Hidden checkbox — explicit width so the label never truncates to "Hid".
+		// Hidden checkbox - explicit width so the label never truncates to "Hid".
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[
 			SNew(SBox).WidthOverride(60.f)
@@ -447,7 +452,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				]
 			]
 		]
-		// "Use Team Color" checkbox — only populated for portrait/scorebar rows.
+		// "Use Team Color" checkbox - only populated for portrait/scorebar rows.
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[ TeamColorSlot ]
 		// Per-row reset
@@ -490,7 +495,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildFooter()
 }
 
 // =============================================================================
-// Element accessors — Find() returns const pointer; we need a mutable handle.
+// Element accessors - Find() returns const pointer; we need a mutable handle.
 // =============================================================================
 
 FNCPlusHUDElement& SNCPlusHUDEditor::GetOrCreateElement(FName Alias)
@@ -632,7 +637,7 @@ FReply SNCPlusHUDEditor::OnResetRowClicked(FName Alias)
 		FNCPlusHUDLayout::MarkLiveDirty();
 		SetStatus(FString::Printf(TEXT("Reset '%s'."), *Alias.ToString()));
 
-		// Suppress callbacks while we resync combos — otherwise SetSelectedItem
+		// Suppress callbacks while we resync combos - otherwise SetSelectedItem
 		// fires OnAnchorSelected/OnStyleSelected → MutateElement → re-creates the
 		// entry we just deleted.
 		TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
@@ -663,7 +668,7 @@ FReply SNCPlusHUDEditor::OnResetRowClicked(FName Alias)
 FReply SNCPlusHUDEditor::OnSaveClicked()
 {
 	const bool bOk = FNCPlusHUDLayout::SaveLive();
-	SetStatus(bOk ? TEXT("Saved.") : TEXT("Save failed — check log."));
+	SetStatus(bOk ? TEXT("Saved.") : TEXT("Save failed - check log."));
 	return FReply::Handled();
 }
 
@@ -780,7 +785,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildColorRow(FNCHUDEditorRow& Row)
 				.ColorAndOpacity(FLinearColor(0.75f, 0.75f, 0.75f, 1.f))
 			];
 
-			// Swatch button — clicking opens SColorPicker. The color block's
+			// Swatch button - clicking opens SColorPicker. The color block's
 			// .Color attribute is bound to GetCurrentColor() so it updates live
 			// (both as the picker drags and when other code paths mutate the layout).
 			LineBox->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
@@ -890,7 +895,7 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	// Fullscreen-Exclusive workaround.
 	//
 	// SColorPicker opens as a new top-level Slate window. Under FSE, Windows
-	// owns the swap chain exclusively — the moment the new window steals
+	// owns the swap chain exclusively - the moment the new window steals
 	// focus, the OS minimizes the FSE window to release the GPU. The picker
 	// then can't render (it expects to share the device), Slate retries,
 	// focus bounces back, and the user gets an infinite minimize/restore
@@ -916,7 +921,7 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	FColorPickerArgs PickerArgs;
 	PickerArgs.bUseAlpha = true;
 	PickerArgs.bIsModal = false;
-	PickerArgs.bOnlyRefreshOnOk = false;          // live update — value commits as picker drags
+	PickerArgs.bOnlyRefreshOnOk = false;          // live update - value commits as picker drags
 	PickerArgs.bExpandAdvancedSection = false;
 	PickerArgs.InitialColorOverride = Initial;
 	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateSP(
@@ -924,7 +929,7 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	PickerArgs.ParentWidget = SharedThis(this);
 
 	// Restore FSE on picker close. SavedMode captured by value so the
-	// lambda is independent of `this` lifetime — the editor panel could
+	// lambda is independent of `this` lifetime - the editor panel could
 	// outlive the picker, but mode-restore is a pure GEngine operation
 	// that doesn't need editor state. Fires for both commit and cancel.
 	PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateLambda(
@@ -1068,7 +1073,7 @@ ECheckBoxState SNCPlusHUDEditor::GetWeaponSideState(FName ClassKey, FName Side) 
 
 void SNCPlusHUDEditor::OnWeaponSideCheckChanged(ECheckBoxState State, FName ClassKey, FName Side)
 {
-	if (State != ECheckBoxState::Checked) return;  // radio behavior — only react to "checked"
+	if (State != ECheckBoxState::Checked) return;  // radio behavior - only react to "checked"
 	OnWeaponSideChanged(ClassKey, Side);
 }
 
