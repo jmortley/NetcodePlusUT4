@@ -166,38 +166,69 @@ void ANCLeagueDuelGame::ComputeSpawnPairings()
 	WeaponAnchoredStarts.Reset();
 	ConsumedPairIndices.Reset();
 
-	// Group PlayerStarts by AssociatedPickup's WeaponType group, AND track
-	// every weapon-anchored start (regardless of whether its weapon is in the
-	// canonical pair list) so the first-spawn fallback can land on a gun
-	// even when canonical pairs are exhausted (e.g. a map with only Rocket+Bio
-	// has no canonical pair, but spawning at the Bio is still better than a
-	// random vial).
-	TMap<FName, TArray<APlayerStart*>> GroupToStarts;
-	int32 StartsWithoutAssoc = 0;
+	// Cache every PlayerStart up front.
 	for (TActorIterator<APlayerStart> It(GetWorld()); It; ++It)
 	{
-		APlayerStart* PS = *It;
-		if (!PS) continue;
-		AllPlayerStarts.Add(PS);
+		if (APlayerStart* PS = *It) AllPlayerStarts.Add(PS);
+	}
 
-		AUTPlayerStart* UTPS = Cast<AUTPlayerStart>(PS);
-		if (!UTPS || !UTPS->AssociatedPickup) { ++StartsWithoutAssoc; continue; }
+	// Build group→starts map by WALKING THE WEAPON PICKUPS, not the PlayerStarts.
+	// Many UT4 maps don't fill AUTPlayerStart::AssociatedPickup (it's optional
+	// metadata the mapper has to set manually). Going pickup-first means we
+	// don't depend on that field — every spawned AUTPickupWeapon contributes
+	// regardless of how the map was authored. For each weapon, claim the
+	// closest unclaimed PlayerStart within MaxAssocDist; that becomes the
+	// "anchor" for that weapon group.
+	TMap<FName, TArray<APlayerStart*>> GroupToStarts;
+	TSet<APlayerStart*> ClaimedStarts;
+	const float MaxAssocDist = 2500.f;  // reasonable "near" radius; weapons
+	                                    // beyond this are not credibly an anchor.
 
-		AUTPickupWeapon* WPickup = Cast<AUTPickupWeapon>(UTPS->AssociatedPickup);
-		if (!WPickup || !WPickup->WeaponType) continue;
+	int32 PickupsScanned = 0;
+	int32 PickupsClaimed = 0;
+	for (TActorIterator<AUTPickupWeapon> It(GetWorld()); It; ++It)
+	{
+		AUTPickupWeapon* Pickup = *It;
+		if (!Pickup || !Pickup->WeaponType) continue;
+		++PickupsScanned;
 
-		// Any weapon at all → eligible for the fallback pool.
-		WeaponAnchoredStarts.Add(PS);
+		const FName Group = GroupForWeaponClass(Pickup->WeaponType);
+		const FVector PickupLoc = Pickup->GetActorLocation();
 
-		const FName Group = GroupForWeaponClass(WPickup->WeaponType);
-		if (Group == NAME_None) continue;
+		// Find nearest unclaimed PlayerStart.
+		APlayerStart* NearestStart = nullptr;
+		float NearestDistSq = MaxAssocDist * MaxAssocDist;
+		for (APlayerStart* Cand : AllPlayerStarts)
+		{
+			if (!Cand || ClaimedStarts.Contains(Cand)) continue;
+			const float DSq = FVector::DistSquared(Cand->GetActorLocation(), PickupLoc);
+			if (DSq < NearestDistSq)
+			{
+				NearestDistSq = DSq;
+				NearestStart = Cand;
+			}
+		}
+		if (!NearestStart) continue;
 
-		GroupToStarts.FindOrAdd(Group).Add(PS);
+		ClaimedStarts.Add(NearestStart);
+		WeaponAnchoredStarts.Add(NearestStart);
+		++PickupsClaimed;
+
+		if (Group != NAME_None)
+		{
+			GroupToStarts.FindOrAdd(Group).Add(NearestStart);
+		}
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("Anchored weapon %s -> PlayerStart at %s (%.0fuu, group %s)"),
+			*Pickup->WeaponType->GetName(),
+			*NearestStart->GetActorLocation().ToString(),
+			FMath::Sqrt(NearestDistSq),
+			*Group.ToString());
 	}
 
 	UE_LOG(LogNCLeagueDuel, Log,
-		TEXT("ComputeSpawnPairings: %d total starts, %d without AssociatedPickup, %d weapon groups identified"),
-		AllPlayerStarts.Num(), StartsWithoutAssoc, GroupToStarts.Num());
+		TEXT("ComputeSpawnPairings: %d total starts, %d weapon pickups (%d anchored), %d weapon groups identified"),
+		AllPlayerStarts.Num(), PickupsScanned, PickupsClaimed, GroupToStarts.Num());
 
 	// For each canonical pair group (handle each pair once via a "consumed" set
 	// so we don't emit Sniper↔Shock and Shock↔Sniper as separate pairs).
