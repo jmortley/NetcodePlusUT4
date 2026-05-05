@@ -28,8 +28,14 @@ AUTWeap_LinkGun_Plus::AUTWeap_LinkGun_Plus(const FObjectInitializer& ObjectIniti
 	BeamTimeoutDuration = 0.5f;
 	LastBeamActivityTime = 0.f;
 	//MaxHitDistanceTolerance = 300.0f; // Allow 3 meters of lag discrepancy
-	ClientDamageBatchSize = 15;
-	BeamDamagePerBatchCap = 28;        // Was hardcoded 40, lowered to reduce low-ping overpower
+	// Stock UT4 link beam uses MinDamage=5 in UUTWeaponStateFiringBeam
+	// (UTWeaponStateFiringBeam.cpp:12) as the accumulator flush threshold.
+	// Match it so damage popups match stock cadence: ~48 popups/sec at ~5 each
+	// instead of ~16 popups/sec at 15-28 each. Same total DPS, but small
+	// bleeding chunks instead of fat one-shot batches that can finish a kill
+	// before the target reacts.
+	ClientDamageBatchSize = 5;
+	BeamDamagePerBatchCap = 28;        // Hitch ceiling — kicks in only when a frame spike accumulates >5×stock per-tick.
 	BeamServerFailDamageScale = 0.5f;  // Half damage if low-ping server sanity trace misses
 	CurrentLinkedTarget = nullptr;
 	LinkStartTime = -100.f;

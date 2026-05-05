@@ -204,7 +204,7 @@ void AWipeoutHUD::DrawHUD()
 		DrawTeamScoreBar(GS);
 	}
 
-	if (!bScoreboardIsUp && GS && GS->GetMatchState() == MatchState::InProgress)
+	if (bShouldDrawPortraits && !bScoreboardIsUp && GS && GS->GetMatchState() == MatchState::InProgress)
 	{
 		RedPlayerCount = 0;
 		BluePlayerCount = 0;

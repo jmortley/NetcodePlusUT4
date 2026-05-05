@@ -19,6 +19,7 @@ DEFINE_LOG_CATEGORY_STATIC(LogNCShaftArena, Log, All);
 ANCShaftArenaGame::ANCShaftArenaGame(const FObjectInitializer& OI)
 	: Super(OI)
 {
+	DisplayName     = NSLOCTEXT("UTGameMode", "NCShaftArena", "NetcodePlus Shaft Arena");
 	HUDClass        = ANCShaftArenaHUD::StaticClass();
 	GoalScore       = 10;
 	TimeLimit       = 0;

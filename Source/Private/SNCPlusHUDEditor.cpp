@@ -187,9 +187,11 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			SectionBody->AddSlot().AutoHeight().Padding(2.f) [ RowBox.ToSharedRef() ];
 		}
 
-		// Default-open: HP/Armor (the headline element). Others collapsed
-		// so the panel stays compact at lower resolutions.
-		const bool bCollapsed = (Section != TEXT("HP / Armor"));
+		// Default-open: HP/Armor (the headline element) + Game Mode (so the
+		// optional accuracy widget and any mode-specific draw calls are
+		// discoverable without hunting through collapsed areas). Other
+		// sections collapsed for a compact panel at lower resolutions.
+		const bool bCollapsed = (Section != TEXT("HP / Armor")) && (Section != TEXT("Game Mode"));
 		RowList->AddSlot().AutoHeight().Padding(0, 4)
 		[
 			SNew(SExpandableArea)

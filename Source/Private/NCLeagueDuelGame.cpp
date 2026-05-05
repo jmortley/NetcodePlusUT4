@@ -56,6 +56,7 @@ namespace
 ANCLeagueDuelGame::ANCLeagueDuelGame(const FObjectInitializer& OI)
 	: Super(OI)
 {
+	DisplayName = NSLOCTEXT("UTGameMode", "NCLeagueDuel", "NetcodePlus League Duel");
 	HUDClass = ANCLeagueDuelHUD::StaticClass();
 	MinKillerSpawnDistance     = 2500.f;
 	MinimumEnemySpawnDistance  = 2400.f;
@@ -402,18 +403,42 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
 	if (!PS) return Super::ChoosePlayerStart_Implementation(Player);
 
-	// First-spawn path: paired weapon anchor.
+	// AUTGameMode populates RespawnChoiceA, then RespawnChoiceB by calling
+	// ChoosePlayerStart twice in a row, then later calls it AGAIN to actually
+	// spawn the player at whichever they picked (bChosePrimaryRespawnChoice).
+	// On that third call, both A and B are already non-null — defer to Super
+	// so it returns A or B per the player's pick rather than running our
+	// picker fresh and ignoring their choice. (See UTGameMode.cpp:3068.)
+	if (bHasRespawnChoices && PS->RespawnChoiceA != nullptr && PS->RespawnChoiceB != nullptr)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
+	// We're being asked to populate either A or B with a fresh pick. If A is
+	// already set we're filling B — exclude A from candidates so the two
+	// choices are guaranteed distinct (the random tiebreak otherwise often
+	// returns the same top-scoring start twice).
+	APlayerStart* ExcludeStart = nullptr;
+	if (bHasRespawnChoices && PS->RespawnChoiceA != nullptr && PS->RespawnChoiceB == nullptr)
+	{
+		ExcludeStart = PS->RespawnChoiceA;
+	}
+
+	// First-spawn path: paired weapon anchor (only applies on the very first
+	// ChoosePlayerStart call for this PS — subsequent calls fall through).
 	if (!PlayersWhoSpawnedOnce.Contains(PS) && WeaponPairs.Num() > 0)
 	{
 		if (APlayerStart* Anchor = SelectPairedSpawnForFirstSpawn(PS))
 		{
 			PlayersWhoSpawnedOnce.Add(PS);
-			return Anchor;
+			if (Anchor != ExcludeStart) return Anchor;
+			// Pair anchor collided with already-picked-A — fall through to Tier 1.
 		}
 	}
 	PlayersWhoSpawnedOnce.Add(PS);
 
-	// Tier 1: dynamic scoring within all PlayerStarts (minus belt exclusions).
+	// Tier 1: dynamic scoring within all PlayerStarts (minus belt exclusions
+	// and the already-picked choice when filling B).
 	APlayerStart* BestSpawn = nullptr;
 	float BestScore = -FLT_MAX;
 	APlayerStart* FallbackSpawn = nullptr;
@@ -422,6 +447,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	for (APlayerStart* Start : AllPlayerStarts)
 	{
 		if (!Start) continue;
+		if (Start == ExcludeStart) continue;
 		if (IsExcludedByActiveShieldBelt(Start)) continue;
 
 		float MinEnemyDist = FLT_MAX;
@@ -450,9 +476,9 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 
 	if (BestSpawn) return BestSpawn;
 
-	// Tier 2: best-of-bad from full set (still respects belt exclusions, drops
-	// enemy-distance hard reject — keep killer-distance reject).
-	if (FallbackSpawn) return FallbackSpawn;
+	// Tier 2: best-of-bad from full set (still respects belt + exclusion,
+	// drops enemy-distance hard reject — keep killer-distance reject).
+	if (FallbackSpawn && FallbackSpawn != ExcludeStart) return FallbackSpawn;
 
 	// Tier 3: full fallback to engine picker.
 	return Super::ChoosePlayerStart_Implementation(Player);

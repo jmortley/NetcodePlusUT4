@@ -30,6 +30,13 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	int32 RedPlayerCount;
 	int32 BluePlayerCount;
 
+	/** Subclass override: set false in your HUD ctor to skip the portrait
+	 *  strips entirely (NCLeagueDuel sets this false — 1v1 doesn't benefit
+	 *  from a team-portrait row). Layout entries for portrait_red /
+	 *  portrait_blue are still respected when this is true. */
+	UPROPERTY(EditDefaultsOnly, Category = "WipeoutHUD")
+	bool bShouldDrawPortraits = true;
+
 	virtual void DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float IconSize);
 	virtual void GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers);
 
