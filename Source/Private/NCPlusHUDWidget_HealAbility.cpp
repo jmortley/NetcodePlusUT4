@@ -6,9 +6,12 @@
 //   UUTPlayerInput::CustomBinds[]     -> match Command              (key label)
 //
 // Layout extras honoured:
-//   "bind_command" (string) — the input Command to look up. Default
-//      "StartActivatePowerup" (engine standard for boost). Override to
-//      "ToggleTranslocator" for the user's custom heal binding.
+//   "bind_command" (string) — the input Command to look up. Default tries
+//      a small candidate list ("ActivateSpecial" -> "StartActivatePowerup"
+//      -> "ToggleTranslocator") because UT4's stock keybind is registered
+//      as "ActivateSpecial" (UTProfileSettings.cpp:256), but custom server
+//      configs sometimes use the older boost or translocator names.
+//      Set this extra to skip the fallback chain and look up exactly one.
 //   "icon_size"    (float)  — design-pixel edge length, default 64.
 //
 // Hidden by default. Strictly Wipeout-only: hides whenever PS->BoostClass
@@ -155,8 +158,33 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("heal_ability"));
 	const float IconSize = (E ? E->GetExtraFloat(TEXT("icon_size"), 64.f) : 64.f);
-	const FString BindCmd = (E ? E->GetExtra(TEXT("bind_command")) : FString());
-	const FString EffectiveCmd = BindCmd.IsEmpty() ? FString(TEXT("StartActivatePowerup")) : BindCmd;
+
+	// Resolve the keybind. If the user pinned a specific command via the
+	// layout's "bind_command" extra, look up only that. Otherwise walk the
+	// canonical candidates: ActivateSpecial (stock UT4 default — see
+	// UTProfileSettings.cpp:256), StartActivatePowerup (older boost name),
+	// ToggleTranslocator (translocator-style heal binding). First non-"?"
+	// hit wins.
+	const FString BindOverride = (E ? E->GetExtra(TEXT("bind_command")) : FString());
+	FString KeyLabel;
+	if (!BindOverride.IsEmpty())
+	{
+		KeyLabel = FindKeyForCommand(PC, BindOverride);
+	}
+	else
+	{
+		static const TCHAR* Candidates[] = {
+			TEXT("ActivateSpecial"),
+			TEXT("StartActivatePowerup"),
+			TEXT("ToggleTranslocator"),
+		};
+		KeyLabel = TEXT("?");
+		for (const TCHAR* Cand : Candidates)
+		{
+			FString Found = FindKeyForCommand(PC, Cand);
+			if (Found != TEXT("?")) { KeyLabel = Found; break; }
+		}
+	}
 
 	const uint8 Charges = PS->GetRemainingBoosts();
 	const bool bAvailable = Charges > 0;
@@ -184,7 +212,7 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	LabelFont = NCPlusHUDFonts::Resolve(TEXT("heal_ability"), UTHUDOwner, LabelFont);
 	if (!LabelFont) return;
 
-	const FString KeyLabel = FindKeyForCommand(PC, EffectiveCmd);
+	// KeyLabel was resolved above (candidate-list fallback or extras override).
 	const FLinearColor LabelColor = bAvailable
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
 		: FLinearColor(0.6f, 0.6f, 0.6f, 0.85f);
