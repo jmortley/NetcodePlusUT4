@@ -1,23 +1,28 @@
 // NCLeagueDuelGame — AUTDuelGame with a fairness-first spawn picker.
 //
 // Behavior summary:
-//   - At BeginPlay (server only), iterate all AUTPlayerStarts and pair them up
-//     by AssociatedPickup weapon class: Sniper↔Shock, Rocket↔Flak, Mini↔Link.
-//     For maps with multiple pickups of one weapon (e.g. DM-Deck has 2 of
-//     each), pick the start-pair with maximum 2D distance — gives players
-//     the most geographic separation.
-//   - First spawn for each player is anchored to one side of a randomly chosen
-//     pair, so a Sniper-anchored player always faces a Shock-anchored opponent.
-//   - On respawn, RatePlayerStart enforces ≥MinKillerSpawnDistance (2500uu
-//     default) from the killer's last known location.
+//   - At InitGame (server only, before any player joins), walk every
+//     AUTPickupWeapon actor in the world and claim its closest PlayerStart
+//     within 2500uu as that weapon's anchor. Independent of the map's
+//     AssociatedPickup field (which most maps don't bother to set).
+//     Build 3 weapon pairs: Sniper↔Shock, Rocket↔Flak, Mini↔Link, each with
+//     the maximum-distance start-pair on multi-pickup maps. Then shuffle the
+//     pair index list and roll a 50/50 bRedGetsPrimarySide flag — the
+//     entire "preset spawn choices" table is FROZEN at this point.
+//   - PostLogin: each joining player gets RespawnChoiceA = first pair's
+//     team-side, RespawnChoiceB = second pair's team-side (read straight
+//     from the pre-built shuffle order). Zero per-join computation.
+//   - On respawn after death, RatePlayerStart enforces ≥MinKillerSpawnDistance
+//     (2500uu default) from the killer's last known location, and the
+//     inter-A/B 2500uu rule prevents the player from being cornered.
 //   - While the Shield Belt pickup is active, the closest 2 PlayerStarts to
 //     the belt are excluded from spawn selection (don't let a player snowball
 //     belt control).
 //
-// Server-only state: WeaponPairs / AllPlayerStarts / ShieldBeltPickup live on
-// the GameMode (we don't subclass AUTGameState — ABI mismatch).
-// 1v1 ELO via FNCDuelRatingSystem (Glicko2). Stats upload stubs hit
-// FNCStatsUploader.
+// Server-only state: WeaponPairs / WeaponAnchoredStarts / FirstSpawnShuffleOrder
+// / bRedGetsPrimarySide / ShieldBeltPickup all live on the GameMode (we don't
+// subclass AUTGameState — ABI mismatch). 1v1 ELO via FNCDuelRatingSystem
+// (Glicko2). Stats upload stubs hit FNCStatsUploader.
 #pragma once
 
 #include "NetcodePlus.h"
@@ -56,7 +61,6 @@ class NETCODEPLUS_API ANCLeagueDuelGame : public AUTDuelGame
 
 public:
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
-	virtual void BeginPlay() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleMatchHasEnded() override;

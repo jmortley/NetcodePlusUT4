@@ -77,24 +77,26 @@ void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options,
 	UE_LOG(LogNCLeagueDuel, Log,
 		TEXT("InitGame: MinKillerDist=%.0f MinEnemyDist=%.0f BeltExclusions=%d"),
 		MinKillerSpawnDistance, MinimumEnemySpawnDistance, ShieldBeltExclusionCount);
-}
 
-void ANCLeagueDuelGame::BeginPlay()
-{
-	Super::BeginPlay();
-
-	if (Role != ROLE_Authority) return;
-
+	// Match the BP's "Event Post Init Game" pattern: do EVERY piece of
+	// spawn-pair setup right here, at map load, before any player can possibly
+	// join. By the time the first PostLogin fires, WeaponPairs +
+	// FirstSpawnShuffleOrder + bRedGetsPrimarySide + ShieldBeltExclusions are
+	// all final and read-only. PostLogin just assigns A and B from the
+	// pre-built table — zero per-join computation.
+	//
+	// (Was previously split: ComputeSpawnPairings in BeginPlay, shuffle lazy
+	// on first ChoosePlayerStart. That race was the root cause of bots
+	// populating pre-BeginPlay falling through to Tier 1 and the human
+	// player seeing "rocket + rocket" / weapon-less spawns.)
 	ComputeSpawnPairings();
 	ComputeShieldBeltExclusions();
+	EnsureFirstSpawnShuffle();          // shuffle order + bRedGetsPrimarySide
+	UE_LOG(LogNCLeagueDuel, Log,
+		TEXT("PresetSpawnChoices configured at InitGame: %d pairs, shuffle ready, belt exclusions=%d"),
+		WeaponPairs.Num(), ShieldBeltExclusions.Num());
 
-	// Reset per-match first-spawn shuffle state. The actual shuffle happens
-	// lazily on the first ChoosePlayerStart call once we know WeaponPairs is
-	// finalized (deferred so test maps without weapon-anchored starts don't
-	// crash with an empty shuffle).
-	FirstSpawnShuffleOrder.Reset();
-	bFirstSpawnShuffleReady = false;
-
+	// Rating system DB init too — lives on the gamemode, no PlayerState yet.
 	RatingSystem = MakeUnique<FNCDuelRatingSystem>();
 	FNCDuelRatingSystem::InitDatabase(GetWorld());
 }
@@ -116,41 +118,41 @@ void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 		RatingSystem->LoadPlayerFromDB(GetWorld(), UniqueId);
 	}
 
-	// Force-populate RespawnChoiceA/B if the engine's InitNewPlayer flow
-	// (UTGameMode.cpp:3051-3059) didn't run them. In this UT4 fork's PIE
-	// flow, the human player's InitNewPlayer fires while bIsSpectator is
-	// still true (or InitNewPlayer is bypassed entirely on the join path),
-	// so the populate block is skipped and A/B stay null. Without this, the
-	// player only sees one spawn (whatever FindPlayerStart -> ChoosePlayerStart
-	// returned for the actual respawn) and the spawn-choice UI never gets
-	// the second pick to show.
+	// Assign RespawnChoiceA/B straight from the pre-built shuffle table.
+	// The full spawn-pair state was finalized in InitGame, so this is just
+	// two map lookups — no ChoosePlayerStart calls, no shuffle decisions.
+	// Zero per-join computation, identical for every player.
 	//
-	// Mirrors the engine's populate block exactly: null out, populate via
-	// two ChoosePlayerStart calls, set bChosePrimary. We add a guard so we
-	// don't double-populate when the engine's flow DID work (bot path).
-	if (bHasRespawnChoices && !PS->bOnlySpectator)
+	// Why bypass the engine's InitNewPlayer populate flow entirely: that
+	// flow's `!bIsSpectator` guard fires inconsistently in this fork's PIE
+	// path — bots got two ChoosePlayerStart calls (populate worked), the
+	// human player got zero (populate skipped, A/B stayed null, picker UI
+	// fell back to whatever spawn FindPlayerStart picked). Doing the
+	// assignment ourselves at PostLogin guarantees both choices are set
+	// regardless of which engine code path the player took to get here.
+	if (bHasRespawnChoices && !PS->bOnlySpectator && WeaponPairs.Num() > 0
+		&& FirstSpawnShuffleOrder.Num() >= 2)
 	{
-		const bool bAlreadyPopulated = (PS->RespawnChoiceA != nullptr && PS->RespawnChoiceB != nullptr);
-		if (!bAlreadyPopulated)
+		const int32 TeamIdx = PS->Team ? PS->Team->TeamIndex : 0;
+
+		auto GetSide = [&](int32 ChoiceIdx) -> APlayerStart*
 		{
-			UE_LOG(LogNCLeagueDuel, Log,
-				TEXT("PostLogin force-populate for %s: A/B were (A=%s, B=%s) — running ChoosePlayerStart twice"),
-				*PS->PlayerName,
-				PS->RespawnChoiceA ? TEXT("set") : TEXT("null"),
-				PS->RespawnChoiceB ? TEXT("set") : TEXT("null"));
+			const int32 PairIdx = FirstSpawnShuffleOrder[ChoiceIdx];
+			const FNCLeagueWeaponPair& P = WeaponPairs[PairIdx];
+			const bool bUseStartA = (TeamIdx == 0) ? bRedGetsPrimarySide : !bRedGetsPrimarySide;
+			return bUseStartA ? P.StartA : P.StartB;
+		};
 
-			PS->RespawnChoiceA = nullptr;
-			PS->RespawnChoiceB = nullptr;
-			PS->RespawnChoiceA = Cast<APlayerStart>(ChoosePlayerStart(NewPlayer));
-			PS->RespawnChoiceB = Cast<APlayerStart>(ChoosePlayerStart(NewPlayer));
-			PS->bChosePrimaryRespawnChoice = true;
+		PS->RespawnChoiceA = GetSide(0);
+		PS->RespawnChoiceB = GetSide(1);
+		PS->bChosePrimaryRespawnChoice = true;
 
-			UE_LOG(LogNCLeagueDuel, Log,
-				TEXT("PostLogin force-populate complete for %s: A=%s B=%s"),
-				*PS->PlayerName,
-				PS->RespawnChoiceA ? *PS->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
-				PS->RespawnChoiceB ? *PS->RespawnChoiceB->GetActorLocation().ToString() : TEXT("(null)"));
-		}
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("PostLogin assigned spawn choices for %s (team %d): A=%s B=%s (red side=%s)"),
+			*PS->PlayerName, TeamIdx,
+			PS->RespawnChoiceA ? *PS->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
+			PS->RespawnChoiceB ? *PS->RespawnChoiceB->GetActorLocation().ToString() : TEXT("(null)"),
+			bRedGetsPrimarySide ? TEXT("StartA") : TEXT("StartB"));
 	}
 }
 
