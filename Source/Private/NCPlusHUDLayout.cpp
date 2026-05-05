@@ -189,11 +189,26 @@ namespace NCPlusHUDFonts
 
 			// First attempt for this asset path. Try as UObject first so we can
 			// log the actual class on cast failure (asset may exist but not be
-			// a UFont — e.g. UCompositeFont). Cache success or failure.
+			// a UFont, e.g. UCompositeFont). Cache success or failure.
 			UObject* Asset = LoadObject<UObject>(nullptr, *F.AssetPath);
 			UFont* Loaded = Cast<UFont>(Asset);
 			Cache.Add(F.AssetPath, Loaded);
-			if (Loaded) return Loaded;
+			if (Loaded)
+			{
+				// CRITICAL: pin to root so GC doesn't reap the font out from
+				// under our cached raw pointer. The cache is a static
+				// TMap<FString, UFont*> with no UPROPERTY holding the UFont
+				// alive; without AddToRoot, UE4's GC walks the property graph
+				// at spawn-time, finds the font unreferenced, and reaps it.
+				// The cache then holds a stale pointer that the next DrawText
+				// queues into a Slate render command, and the render thread
+				// dereferences it the next frame as an EXCEPTION_ACCESS_VIOLATION
+				// reading 0x18 inside SlateRHIRenderer. This was the root cause
+				// of the "crashes when match countdown ends" bug across all
+				// three NetcodePlus team modes.
+				Loaded->AddToRoot();
+				return Loaded;
+			}
 
 			UE_LOG(LogTemp, Warning,
 				TEXT("[NCPlusHUDFonts] Failed to load '%s' (%s): asset=%s class=%s — falling back (cached, no retry)."),
