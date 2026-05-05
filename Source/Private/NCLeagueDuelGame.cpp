@@ -672,19 +672,47 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 
 AActor* ANCLeagueDuelGame::FindPlayerStart_Implementation(AController* Player, const FString& IncomingName)
 {
-	// FindPlayerStart is the engine's "give me where to actually spawn this
-	// player" entry point — internally it calls ChoosePlayerStart. We don't
-	// need to do anything special here; just defer to Super and log the final
-	// committed pick alongside the PlayerState's RespawnChoiceA/B state. This
-	// log line is the authoritative "what actually happened" — if the picks
-	// shown in nchud's spawn-choice UI ever look different from what's logged
-	// here, something between us and the engine is rewriting state.
-	AActor* Result = Super::FindPlayerStart_Implementation(Player, IncomingName);
+	// Mirror the original BP's FindPlayerStart override: when both
+	// RespawnChoiceA and RespawnChoiceB are populated and the player has
+	// committed to one (bChosePrimaryRespawnChoice), short-circuit and return
+	// that PlayerStart directly. Bypasses any engine path that would otherwise
+	// re-route through ChoosePlayerStart (or skip it entirely on
+	// IncomingName-matched lookups), guaranteeing the player spawns at the
+	// pick they selected in the spawn-choice UI.
+	//
+	// Why both ChoosePlayerStart AND FindPlayerStart need overriding (the BP
+	// did this for a reason): ChoosePlayerStart populates the choices,
+	// FindPlayerStart is the engine's actual "give me where to spawn" hook
+	// and can be called via paths that don't reach ChoosePlayerStart (named-
+	// PlayerStart matches, alternate spawn flows from mutators/replays, etc.).
+	if (AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr)
+	{
+		if (bHasRespawnChoices && PS->RespawnChoiceA && PS->RespawnChoiceB)
+		{
+			APlayerStart* Picked = PS->bChosePrimaryRespawnChoice
+				? PS->RespawnChoiceA
+				: PS->RespawnChoiceB;
+			if (Picked)
+			{
+				UE_LOG(LogNCLeagueDuel, Log,
+					TEXT("FindPlayerStart short-circuit for %s (team %d): chose %s -> %s | A=%s B=%s"),
+					*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
+					PS->bChosePrimaryRespawnChoice ? TEXT("A") : TEXT("B"),
+					*Picked->GetActorLocation().ToString(),
+					*PS->RespawnChoiceA->GetActorLocation().ToString(),
+					*PS->RespawnChoiceB->GetActorLocation().ToString());
+				return Picked;
+			}
+		}
+	}
 
+	// No committed pick yet — fall back to Super, which will route through
+	// ChoosePlayerStart (and our override) for the populate calls.
+	AActor* Result = Super::FindPlayerStart_Implementation(Player, IncomingName);
 	if (AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr)
 	{
 		UE_LOG(LogNCLeagueDuel, Log,
-			TEXT("FindPlayerStart for %s (team %d): returned %s | RespawnChoiceA=%s RespawnChoiceB=%s bChosePrimary=%d"),
+			TEXT("FindPlayerStart fallthrough for %s (team %d): Super returned %s | A=%s B=%s bChosePrimary=%d"),
 			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 			Result ? *Result->GetActorLocation().ToString() : TEXT("(null)"),
 			PS->RespawnChoiceA ? *PS->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
