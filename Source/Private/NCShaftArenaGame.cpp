@@ -12,7 +12,7 @@
 #include "NCShaftArenaHUD.h"
 #include "NCShaftArenaRatingSystem.h"
 #include "NCStatsUploader.h"
-#include "UTWeap_ShaftLink.h"
+#include "UTWeap_LinkGun_Plus.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCShaftArena, Log, All);
 
@@ -25,12 +25,11 @@ ANCShaftArenaGame::ANCShaftArenaGame(const FObjectInitializer& OI)
 	MinWinMargin    = 2;
 	SiphonPercent   = 0.5f;
 	HealCap         = 199;
-	ShaftLinkClass  = AUTWeap_ShaftLink::StaticClass();
-
-	// Loadout: ONLY the shaft link. Base AUTGameMode::GiveDefaultInventory
-	// iterates DefaultInventory at SetPlayerDefaults time.
-	DefaultInventory.Empty();
-	DefaultInventory.Add(ShaftLinkClass);
+	// ShaftLinkClass: nullptr by default — user supplies it via a BP subclass
+	// of NCShaftArenaGame, or via Mod.ini [NCShaftArena] WeaponClass=...
+	// DefaultInventory is left untouched here; InitGame configures it after
+	// resolving the class so a Mod.ini override can replace the BP value.
+	ShaftLinkClass = nullptr;
 }
 
 void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -45,9 +44,44 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("HealCap"),       HealCap,        ConfigPath);
 	GoalScore = IniGoal;
 
+	// Mod.ini WeaponClass overrides the BP-set ShaftLinkClass when present.
+	// Path format mirrors blueprint asset references:
+	//   /Game/Mods/NetcodePlus/Weapons/BP_ShaftLink.BP_ShaftLink_C
+	FString WeaponPath;
+	if (GConfig->GetString(TEXT("NCShaftArena"), TEXT("WeaponClass"), WeaponPath, ConfigPath)
+		&& !WeaponPath.IsEmpty())
+	{
+		if (UClass* Loaded = LoadClass<AUTWeap_LinkGun_Plus>(nullptr, *WeaponPath))
+		{
+			ShaftLinkClass = Loaded;
+			UE_LOG(LogNCShaftArena, Log, TEXT("InitGame: loaded ShaftLinkClass from Mod.ini: %s"), *WeaponPath);
+		}
+		else
+		{
+			UE_LOG(LogNCShaftArena, Warning,
+				TEXT("InitGame: Mod.ini WeaponClass='%s' did not resolve to an AUTWeap_LinkGun_Plus subclass"),
+				*WeaponPath);
+		}
+	}
+
+	if (ShaftLinkClass)
+	{
+		// Loadout: ONLY the configured shaft link. Base AUTGameMode::GiveDefaultInventory
+		// iterates DefaultInventory at SetPlayerDefaults time.
+		DefaultInventory.Empty();
+		DefaultInventory.Add(ShaftLinkClass);
+	}
+	else
+	{
+		UE_LOG(LogNCShaftArena, Warning,
+			TEXT("InitGame: ShaftLinkClass not set — players will spawn with stock inventory. ")
+			TEXT("Configure via BP subclass or Mod.ini [NCShaftArena] WeaponClass=..."));
+	}
+
 	UE_LOG(LogNCShaftArena, Log,
-		TEXT("InitGame: GoalScore=%d MinWinMargin=%d Siphon=%.2f HealCap=%d"),
-		GoalScore, MinWinMargin, SiphonPercent, HealCap);
+		TEXT("InitGame: GoalScore=%d MinWinMargin=%d Siphon=%.2f HealCap=%d ShaftLinkClass=%s"),
+		GoalScore, MinWinMargin, SiphonPercent, HealCap,
+		ShaftLinkClass ? *ShaftLinkClass->GetPathName() : TEXT("(none)"));
 }
 
 void ANCShaftArenaGame::BeginPlay()

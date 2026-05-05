@@ -2,7 +2,16 @@
 // vampirism, first-to-N kills win-by-2, persistent ELO + accuracy awards
 // in Mods.db (NCRatingShaftArena table).
 //
-// Both fire modes of the loadout weapon (AUTWeap_ShaftLink) act as the beam.
+// The loadout weapon is configurable: any AUTWeap_LinkGun_Plus subclass
+// (typically a Blueprint) where both fire modes act as the beam. The BP
+// owns all the visuals (tracers, beam mesh, sounds) and fire-mode wiring;
+// this gamemode just hands it to players via DefaultInventory.
+//
+// Set the class via:
+//   - BP subclass of NCShaftArenaGame (DefaultProperties → ShaftLinkClass), or
+//   - Mod.ini  [NCShaftArena]  WeaponClass=/Game/Path/To/BP_ShaftLink.BP_ShaftLink_C
+// Mod.ini overrides the BP value when both are set.
+//
 // The vampirism math is a copy of WipeoutGame's Siphon flow but without the
 // powerup-presence check: the gamemode is the powerup, effectively.
 #pragma once
@@ -16,7 +25,7 @@
 
 #include "NCShaftArenaGame.generated.h"
 
-class AUTWeap_ShaftLink;
+class AUTWeap_LinkGun_Plus;
 
 UCLASS()
 class NETCODEPLUS_API ANCShaftArenaGame : public AUTDMGameMode
@@ -50,9 +59,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "NCShaftArena")
 	int32 HealCap;
 
-	/** Loadout weapon — defaults to AUTWeap_ShaftLink in the constructor. */
+	/** Loadout weapon. Set via BP subclass DefaultProperties or Mod.ini
+	 *  [NCShaftArena] WeaponClass=/Game/Path/To/BP_ShaftLink.BP_ShaftLink_C.
+	 *  Players spawn with this in their inventory and nothing else. */
 	UPROPERTY(EditDefaultsOnly, Category = "NCShaftArena")
-	TSubclassOf<AUTWeap_ShaftLink> ShaftLinkClass;
+	TSubclassOf<AUTWeap_LinkGun_Plus> ShaftLinkClass;
 
 protected:
 	TUniquePtr<FNCShaftArenaRatingSystem> RatingSystem;

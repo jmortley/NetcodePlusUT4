@@ -85,9 +85,9 @@ UNCPlusHUDWidget_Accuracy::UNCPlusHUDWidget_Accuracy(const FObjectInitializer& O
 bool UNCPlusHUDWidget_Accuracy::ShouldDraw_Implementation(bool bShowScores)
 {
 	if (bShowScores) return false;
-	if (!UTHUDOwner || !UTHUDOwner->UTPlayerOwner) return false;
+	if (!IsValid(UTHUDOwner) || !IsValid(UTHUDOwner->UTPlayerOwner)) return false;
 	AUTPlayerState* PS = UTHUDOwner->UTPlayerOwner->UTPlayerState;
-	if (!PS || PS->bOnlySpectator) return false;
+	if (!IsValid(PS) || PS->bOnlySpectator) return false;
 
 	// Opt-in: the widget renders only when the user has placed it via nchud
 	// (or a mode that wants it on by default has seeded a layout entry — see
@@ -101,14 +101,30 @@ bool UNCPlusHUDWidget_Accuracy::ShouldDraw_Implementation(bool bShowScores)
 
 void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 {
-	if (!UTHUDOwner || !UTHUDOwner->UTPlayerOwner || !Canvas) return;
-	AUTPlayerState* PS = UTHUDOwner->UTPlayerOwner->UTPlayerState;
-	if (!PS) return;
+	// Defensive: every dereference along the chain can be invalidated between
+	// ShouldDraw and Draw (controller swap on map travel, character respawn
+	// mid-tick, pawn destroyed by gamemode hook). IsValid catches both null
+	// and pending-kill objects. Crash 0x298 access-violation observed in the
+	// wild was a stale pointer dereference here — keep these guards.
+	if (!Canvas) return;
+	if (!IsValid(UTHUDOwner) || !IsValid(UTHUDOwner->UTPlayerOwner)) return;
+	AUTPlayerController* PC = UTHUDOwner->UTPlayerOwner;
+	AUTPlayerState* PS = PC->UTPlayerState;
+	if (!IsValid(PS)) return;
 
-	// Weapon source: explicit key from layout extras, or held weapon's stat names.
+	// Resolve stat source. Two modes:
+	//   Pinned weapon (layout Extras["weapon"] = "linkgun" / "shockrifle" /
+	//     etc.): stat NAMEs come from the resolver table; always render so
+	//     career-style "show me my LG accuracy" works during weapon switches
+	//     and even while spectating death.
+	//   Current weapon (default / "current"): pull stat NAMEs off the held
+	//     AUTWeapon. If there's no live character or weapon yet (just spawned,
+	//     mid-respawn, holding a weapon that doesn't track shots like the
+	//     translocator and we're being strict), bail — nothing useful to show.
 	FName HitsStat = NAME_None;
 	FName ShotsStat = NAME_None;
 	FString SmallLabel;
+	bool bPinnedMode = false;
 	if (const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("accuracy")))
 	{
 		const FString WeaponKey = E->GetExtra(TEXT("weapon"));
@@ -117,29 +133,29 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 			HitsStat   = Info->HitsStat;
 			ShotsStat  = Info->ShotsStat;
 			SmallLabel = Info->DisplayLabel;
-		}
-	}
-	if (HitsStat == NAME_None)
-	{
-		// Current held weapon — read its registered stat names.
-		AUTCharacter* Char = UTHUDOwner->UTPlayerOwner->GetUTCharacter();
-		AUTWeapon* Weapon = Char ? Char->GetWeapon() : nullptr;
-		if (Weapon)
-		{
-			HitsStat  = Weapon->HitsStatsName;
-			ShotsStat = Weapon->ShotsStatsName;
+			bPinnedMode = true;
 		}
 	}
 
-	// Nothing to read (no held weapon, no override) — show a neutral dash so the
-	// widget's space stays predictable while the user scrolls between weapons
-	// that don't track accuracy (e.g. translocator).
-	int32 Hits = 0, Shots = 0;
-	if (HitsStat != NAME_None && ShotsStat != NAME_None)
+	if (!bPinnedMode)
 	{
-		Hits  = PS->GetStatsValue(HitsStat);
-		Shots = PS->GetStatsValue(ShotsStat);
+		// Use GetPawn() (UPROPERTY, GC-nulled on destroy) rather than
+		// GetUTCharacter() — the latter goes through a Cast that can chase a
+		// stale ptr through engine code (root cause of the 0x298 crash before
+		// these guards landed).
+		APawn* Pawn = PC->GetPawn();
+		if (!IsValid(Pawn)) return;
+		AUTCharacter* Char = Cast<AUTCharacter>(Pawn);
+		if (!IsValid(Char)) return;
+		AUTWeapon* Weapon = Char->GetWeapon();
+		if (!IsValid(Weapon)) return;
+		HitsStat  = Weapon->HitsStatsName;
+		ShotsStat = Weapon->ShotsStatsName;
+		if (HitsStat == NAME_None || ShotsStat == NAME_None) return;
 	}
+
+	const int32 Hits  = PS->GetStatsValue(HitsStat);
+	const int32 Shots = PS->GetStatsValue(ShotsStat);
 	const float Pct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
 
 	// Color tier: green ≥ 50, yellow ≥ 30, red below.
