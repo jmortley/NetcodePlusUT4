@@ -55,8 +55,17 @@ void UNCPlusHUDWidget_Minimap::Draw_Implementation(float DeltaTime)
 	const float SizePx = E->GetExtraFloat(TEXT("size"), 220.f) * RenderScale;
 	const int32 Alpha  = FMath::Clamp(FMath::RoundToInt(E->GetExtraFloat(TEXT("alpha"), 192.f)), 0, 255);
 
+	// Defer to the HUD's own minimap-availability check. Modes / maps without
+	// minimap world data (DM testbeds, levels with no level-bounds set up)
+	// will return false here. Calling DrawMinimap anyway in that case races
+	// the spawn-choice picker's scene-capture components on the render
+	// thread and can produce a 0x18 access-violation in SlateRHIRenderer
+	// (capture render-target resource bound to a null handle while Slate
+	// composites). Cheaper to bail than to chase the engine race.
+	if (!UTHUDOwner->ShouldDrawMinimap()) return;
+
 	// The widget framework already transformed Position from design pixels to
-	// real screen coords by the time Draw runs — but DrawMinimap is on the
+	// real screen coords by the time Draw runs - but DrawMinimap is on the
 	// HUD, not the widget, so it expects absolute canvas coords. Compute the
 	// top-left corner from our anchor + position the same way the framework
 	// does for our own Canvas calls.
