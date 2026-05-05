@@ -257,12 +257,16 @@ void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 
 	// Cover the right ~5% of the cell where the parent drew skill/ping.
 	// Use the same row background color so the cover blends seamlessly.
+	// BarOpacity in the parent's DrawPlayer is a local (not a class member)
+	// so we can't read it; hardcode 0.7 which matches the engine's default
+	// row opacity. If it ever doesn't match exactly the seam will only be
+	// visible at the very right edge where there's nothing else to compare.
 	const FLinearColor BarColor = GetPlayerBackgroundColorFor(PlayerState);
 	const float CoverW = 0.06f * ScaledCellWidth;
 	const float CoverX = XOffset + ScaledCellWidth - CoverW;
 	const float CoverH = 0.9f * CellHeight * RenderScale;
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, CoverX, YOffset, CoverW, CoverH,
-		149, 138, 32, 32, BarOpacity, BarColor);
+		149, 138, 32, 32, 0.7f, BarColor);
 }
 
 void UNCLeagueDuelScoreboard::DrawArmorIconRow(float CenterX, float CenterY,
