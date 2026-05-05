@@ -103,6 +103,18 @@ UNCLeagueDuelScoreboard::UNCLeagueDuelScoreboard(const FObjectInitializer& OI)
 	: Super(OI)
 {
 	CH_Accuracy = NSLOCTEXT("NCLeagueDuelScoreboard", "ColumnHeader_Accuracy", "Acc");
+
+	// Redistribute column X positions for the 5-column duel layout:
+	// Player(left-aligned) | K/D | Acc | DMG | Armors(4 icons)
+	// - DmgPerLife and Skill/Ping columns are removed (DrawPlayer override
+	//   skips the inherited skill/ping draw)
+	// - Armors column gets more space than the others because it's a 4-cell
+	//   icon strip ~150px wide at typical resolutions
+	ColumnHeaderKDX         = 0.42f;
+	ColumnHeaderBeltAmpX    = 0.54f;   // Acc
+	ColumnHeaderDamageX     = 0.66f;
+	ColumnHeaderEfficiencyX = 0.84f;   // Armor row (icon strip)
+	// DmgPerLife / Ping positions left at parent defaults; nothing draws them now.
 }
 
 void UNCLeagueDuelScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
@@ -127,19 +139,16 @@ void UNCLeagueDuelScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_Damage, XOffset + (ScaledCellWidth * ColumnHeaderDamageX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			// Eff% replaced with 4 armor-pickup icons (Belt / Vest / Pads / Helmet)
-			// rendered in a tight row centered on the old Eff column position.
-			// Per-player counts come from the stats replicator. The header
-			// shows just the icons (no "Armors" label) - icons + scoreboard
-			// width constraint already make it self-explanatory.
-			DrawArmorIconRow(XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX),
-				YOffset + ColumnHeaderY, /*Counts*/ nullptr, FLinearColor::Black);
-			DrawText(CH_DmgPerLife, XOffset + (ScaledCellWidth * ColumnHeaderDmgPerLifeX), YOffset + ColumnHeaderY,
+			// Armors column header: simple text label. Tried 4 icons here but
+			// at header-row scale they read as illegible dots, and the icons
+			// are tinted black for header parity which makes them invisible
+			// against the light header bar. Text is the right call.
+			static const FText CH_Armors = NSLOCTEXT("NCLeagueDuelScoreboard", "ColumnHeader_Armors", "Armors");
+			DrawText(CH_Armors, XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			// CH_DmgPerLife and CH_Skill/CH_Ping headers intentionally removed
+			// per user request - duel scoreboard ends with the armor column.
 		}
-		DrawText((GetWorld()->GetNetMode() == NM_Standalone) ? CH_Skill : CH_Ping,
-			XOffset + (ScaledCellWidth * ColumnHeaderPingX), YOffset + ColumnHeaderY,
-			UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 
 		XOffset = Canvas->ClipX - ScaledCellWidth - ScaledEdgeSize;
 	}
@@ -219,18 +228,41 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 		Counts[2] = Clamp255(PS->GetStatsValue(NAME_ArmorPadsCount));
 		Counts[3] = Clamp255(PS->GetStatsValue(NAME_HelmetCount));
 	}
+	// Per-player armor icons: tint WHITE so the artwork's natural colors come
+	// through. The previous code passed DrawColor (the row's team color) which
+	// multiplied against the icon RGB and turned the icons into dim blobs.
 	DrawArmorIconRow(XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
-		Counts, DrawColor);
+		Counts, FLinearColor::White);
+	// DmgPerLife column intentionally removed per user request.
+}
 
-	// Damage / life
-	const int32 Lives = PS->Deaths + 1;
-	const float DmgPerLife = float(Damage) / float(Lives);
-	const FLinearColor DplColor = (DmgPerLife >= 300.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
-		: (DmgPerLife >= 150.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
-		: FLinearColor(1.f, 0.4f, 0.4f, 1.f);
-	const FString DplStr = FString::Printf(TEXT("%d"), FMath::RoundToInt(DmgPerLife));
-	DrawText(FText::FromString(DplStr), XOffset + (Width * ColumnHeaderDmgPerLifeX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, 1.0f, 1.0f, DplColor, ETextHorzPos::Center, ETextVertPos::Center);
+void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState,
+	float RenderDelta, float XOffset, float YOffset)
+{
+	// Slim version of UUTScoreboard::DrawPlayer that omits the right-edge
+	// Skill/Ping draw. Everything else (background, name, friend icon,
+	// kick %, DrawPlayerScore call, strike-out, mute/talk indicators) is
+	// inherited from Super by calling it. Then we paint over the right-
+	// edge ping/skill text with the same row background color so it
+	// disappears from view.
+	//
+	// Why not just override DrawPlayer wholesale: the parent body is ~120
+	// lines that touch private state (SelectedPlayer, BarOpacity, FlagX,
+	// etc.) and gets engine updates (mute UI, kick voting) we want to
+	// inherit for free. Cover-rect over the unwanted last column is the
+	// minimum-disruption hook.
+	Super::DrawPlayer(Index, PlayerState, RenderDelta, XOffset, YOffset);
+
+	if (!PlayerState || !UTHUDOwner) return;
+
+	// Cover the right ~5% of the cell where the parent drew skill/ping.
+	// Use the same row background color so the cover blends seamlessly.
+	const FLinearColor BarColor = GetPlayerBackgroundColorFor(PlayerState);
+	const float CoverW = 0.06f * ScaledCellWidth;
+	const float CoverX = XOffset + ScaledCellWidth - CoverW;
+	const float CoverH = 0.9f * CellHeight * RenderScale;
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, CoverX, YOffset, CoverW, CoverH,
+		149, 138, 32, 32, BarOpacity, BarColor);
 }
 
 void UNCLeagueDuelScoreboard::DrawArmorIconRow(float CenterX, float CenterY,
@@ -238,13 +270,15 @@ void UNCLeagueDuelScoreboard::DrawArmorIconRow(float CenterX, float CenterY,
 {
 	if (!Canvas) return;
 
-	// Each armor cell: small icon + (optional) count beneath. Arrange 4 cells
-	// in a tight row centered on CenterX. Cell width sized so 4 fit within
-	// the column space the old "%XX%" text used.
-	const float IconSize = 18.f * RenderScale;
-	const float CellW    = 26.f * RenderScale;     // icon + small gap
+	// Each armor cell: icon + (optional) count to the right. Arrange 4 cells
+	// in a tight row centered on CenterX. Bumped to 26px icons + 18px count
+	// width so the artwork is recognizable at typical scoreboard scale; was
+	// 18px before (read as black dots).
+	const float IconSize = 26.f * RenderScale;
+	const float CountW   = 18.f * RenderScale;
+	const float CellW    = IconSize + CountW + 4.f * RenderScale;
 	const float TotalW   = CellW * 4.f;
-	const float StartX   = CenterX - TotalW * 0.5f + (CellW - IconSize) * 0.5f;
+	const float StartX   = CenterX - TotalW * 0.5f;
 	const float IconY    = CenterY - IconSize * 0.5f;
 
 	FArmorIconSlot* Slots[4] = {
