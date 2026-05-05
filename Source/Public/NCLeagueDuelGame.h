@@ -62,6 +62,7 @@ public:
 	virtual void HandleMatchHasEnded() override;
 
 	virtual AActor* ChoosePlayerStart_Implementation(AController* Player) override;
+	virtual AActor* FindPlayerStart_Implementation(AController* Player, const FString& IncomingName = TEXT("")) override;
 	virtual float   RatePlayerStart(class APlayerStart* P, AController* Player) override;
 
 	virtual void ScoreKill_Implementation(AController* Killer, AController* Other,

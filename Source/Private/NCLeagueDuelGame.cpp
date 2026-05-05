@@ -526,7 +526,29 @@ float ANCLeagueDuelGame::RatePlayerStart(APlayerStart* P, AController* Player)
 AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 {
 	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
-	if (!PS) return Super::ChoosePlayerStart_Implementation(Player);
+	if (!PS)
+	{
+		UE_LOG(LogNCLeagueDuel, Warning,
+			TEXT("ChoosePlayerStart: no AUTPlayerState on controller %s — deferring to Super"),
+			Player ? *Player->GetName() : TEXT("(null)"));
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
+	// Diagnostic: log every entry with the PlayerState's current spawn-choice
+	// state. The expected sequence per InitNewPlayer (UTGameMode.cpp:3056-3057)
+	// is ChoosePlayerStart called twice — first populates RespawnChoiceA (we
+	// see A=null on entry), second populates RespawnChoiceB (we see A=set,
+	// B=null). A third call from RestartPlayer→FindPlayerStart sees both set
+	// and is deferred to Super. If you see fewer than 3 lines with this prefix
+	// per match, something is intercepting calls before they reach us (BP
+	// override, mutator, etc.).
+	UE_LOG(LogNCLeagueDuel, Log,
+		TEXT("ChoosePlayerStart entry: PS=%s team=%d bHasRespawnChoices=%d RespawnChoiceA=%s RespawnChoiceB=%s bChosePrimary=%d"),
+		*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
+		bHasRespawnChoices ? 1 : 0,
+		PS->RespawnChoiceA ? *PS->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
+		PS->RespawnChoiceB ? *PS->RespawnChoiceB->GetActorLocation().ToString() : TEXT("(null)"),
+		PS->bChosePrimaryRespawnChoice ? 1 : 0);
 
 	// AUTGameMode populates RespawnChoiceA, then RespawnChoiceB by calling
 	// ChoosePlayerStart twice in a row, then later calls it AGAIN to actually
@@ -536,7 +558,12 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	// picker fresh and ignoring their choice. (See UTGameMode.cpp:3068.)
 	if (bHasRespawnChoices && PS->RespawnChoiceA != nullptr && PS->RespawnChoiceB != nullptr)
 	{
-		return Super::ChoosePlayerStart_Implementation(Player);
+		AActor* SuperPick = Super::ChoosePlayerStart_Implementation(Player);
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("ChoosePlayerStart spawn-actual: deferring to Super — returned %s (chose %s)"),
+			SuperPick ? *SuperPick->GetActorLocation().ToString() : TEXT("(null)"),
+			PS->bChosePrimaryRespawnChoice ? TEXT("A") : TEXT("B"));
+		return SuperPick;
 	}
 
 	// We're being asked to populate either A or B with a fresh pick. If A is
@@ -641,6 +668,30 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 
 	// Tier 3: full fallback to engine picker.
 	return Super::ChoosePlayerStart_Implementation(Player);
+}
+
+AActor* ANCLeagueDuelGame::FindPlayerStart_Implementation(AController* Player, const FString& IncomingName)
+{
+	// FindPlayerStart is the engine's "give me where to actually spawn this
+	// player" entry point — internally it calls ChoosePlayerStart. We don't
+	// need to do anything special here; just defer to Super and log the final
+	// committed pick alongside the PlayerState's RespawnChoiceA/B state. This
+	// log line is the authoritative "what actually happened" — if the picks
+	// shown in nchud's spawn-choice UI ever look different from what's logged
+	// here, something between us and the engine is rewriting state.
+	AActor* Result = Super::FindPlayerStart_Implementation(Player, IncomingName);
+
+	if (AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr)
+	{
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("FindPlayerStart for %s (team %d): returned %s | RespawnChoiceA=%s RespawnChoiceB=%s bChosePrimary=%d"),
+			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
+			Result ? *Result->GetActorLocation().ToString() : TEXT("(null)"),
+			PS->RespawnChoiceA ? *PS->RespawnChoiceA->GetActorLocation().ToString() : TEXT("(null)"),
+			PS->RespawnChoiceB ? *PS->RespawnChoiceB->GetActorLocation().ToString() : TEXT("(null)"),
+			PS->bChosePrimaryRespawnChoice ? 1 : 0);
+	}
+	return Result;
 }
 
 void ANCLeagueDuelGame::ScoreKill_Implementation(AController* Killer, AController* Other,
