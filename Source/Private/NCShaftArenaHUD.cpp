@@ -48,12 +48,16 @@ void ANCShaftArenaHUD::BeginPlay()
 	}
 }
 
+// Mirrors AWipeoutHUD::DrawTeamScoreBar's boxed-bars + score boxes + center
+// divider + clock layout, but FFA-flavoured: two grey bars (no team colors,
+// no Liandri/Phayder), populated with the top two players' names where the
+// team variant prints faction names. Same `scorebar` layout extras (anchor,
+// offset, scale, hidden) so drag-drop works identically across modes.
 void ANCShaftArenaHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
-	if (!Canvas || !GS || !MediumFont) return;
+	if (!Canvas || !GS || !SmallFont || !MediumFont || !LargeFont) return;
+	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
-	// Find the two FFA players (top by score). AUTDMGameMode is teamless, so
-	// AWipeoutHUD::DrawTeamScoreBar's team-based logic doesn't apply.
 	AUTPlayerState* P1 = nullptr;
 	AUTPlayerState* P2 = nullptr;
 	for (APlayerState* APS : GS->PlayerArray)
@@ -66,16 +70,96 @@ void ANCShaftArenaHUD::DrawTeamScoreBar(AUTGameState* GS)
 	if (!P1 || !P2) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
-	const float CenterX = Canvas->ClipX * 0.5f;
-	const float TopY    = 16.f * RenderScale;
 
-	const FString Line = FString::Printf(TEXT("%s   %d  -  %d   %s"),
-		*P1->PlayerName, int32(P1->Score), int32(P2->Score), *P2->PlayerName);
+	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * RenderScale);
+	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("scorebar"), Canvas, StockPos);
+	const float CenterX = ScoreBarPos.X;
+	const float TopY    = ScoreBarPos.Y;
 
-	FCanvasTextItem TextItem(FVector2D(CenterX, TopY), FText::FromString(Line),
-		MediumFont, FLinearColor::White);
-	TextItem.bCentreX = true;
-	TextItem.EnableShadow(FLinearColor::Black);
-	TextItem.Scale = FVector2D(RenderScale, RenderScale);
-	Canvas->DrawItem(TextItem);
+	// FFA has no team colors — neutral mid-grey both sides. Same * 0.7f
+	// darkening for the score box that the team variant uses.
+	const FLinearColor BarColor(0.35f, 0.35f, 0.35f, 1.f);
+	const FLinearColor BoxColor(BarColor.R * 0.7f, BarColor.G * 0.7f, BarColor.B * 0.7f, 1.f);
+
+	const FString P1Name = P1->PlayerName;
+	const FString P2Name = P2->PlayerName;
+	const int32 Score1 = int32(P1->Score);
+	const int32 Score2 = int32(P2->Score);
+
+	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
+	const float BarWidth = 220.f * RenderScale * ScoreScale;
+	const float BarHeight = 36.f * RenderScale * ScoreScale;
+	const float ScoreBoxWidth = 50.f * RenderScale * ScoreScale;
+	const float GapWidth = 8.f * RenderScale;
+
+	const float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
+	Canvas->SetLinearDrawColor(BarColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, LeftBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
+
+	const float ScoreBoxX0 = CenterX - GapWidth - ScoreBoxWidth;
+	Canvas->SetLinearDrawColor(BoxColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
+
+	const float ScoreBoxX1 = CenterX + GapWidth;
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
+
+	const float RightBarX = CenterX + GapWidth + ScoreBoxWidth;
+	Canvas->SetLinearDrawColor(BarColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
+
+	const float TailHeight = 14.f * RenderScale * ScoreScale;
+	Canvas->SetLinearDrawColor(BoxColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
+
+	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
+
+	const float FontScale = RenderScale * 0.85f * ScoreScale;
+	const float LargeFontScale = RenderScale * 1.2f * ScoreScale;
+	float XL, YL;
+
+	Canvas->TextSize(SmallFont, P1Name, XL, YL, FontScale, FontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(SmallFont, P1Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+
+	const FString Score1Str = FString::Printf(TEXT("%d"), Score1);
+	Canvas->TextSize(LargeFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(LargeFont, Score1Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+
+	const FString Score2Str = FString::Printf(TEXT("%d"), Score2);
+	Canvas->TextSize(LargeFont, Score2Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(LargeFont, Score2Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+
+	Canvas->TextSize(SmallFont, P2Name, XL, YL, FontScale, FontScale);
+	Canvas->DrawColor = FColor::White;
+	Canvas->DrawText(SmallFont, P2Name, RightBarX + 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+
+	// NCShaftArena is time-limited (DM with TimeLimit). Stock RemainingTime is
+	// protected, so reach via reflection — same pattern Wipeout uses for
+	// non-round modes.
+	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
+	int32 ClockSeconds = -1;
+	if (UIntProperty* RemTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RemainingTime")))
+	{
+		const int32 RT = RemTimeProp->GetPropertyValue_InContainer(GS);
+		if (RT > 0) ClockSeconds = RT;
+	}
+
+	const float RoundClockScale = RenderScale * 1.1f * ScoreScale;
+	if (ClockSeconds >= 0)
+	{
+		const int32 RMins = ClockSeconds / 60;
+		const int32 RSecs = ClockSeconds % 60;
+		FString RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
+		Canvas->TextSize(MediumFont, RoundClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		Canvas->DrawColor = (ClockSeconds <= 30) ? FColor(255, 60, 60, 255) : FColor::White;
+		Canvas->DrawText(MediumFont, RoundClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+	}
 }

@@ -689,6 +689,22 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		}
 	}
 
+	// Diagnostic: positive confirmation that we're in the post-death dynamic-
+	// scoring path (vs the first-spawn paired anchor at line ~683). Greppable
+	// as "Tier 1 entry". On a respawn this should fire twice per death (once
+	// per A/B populate call); on first spawn it should NOT fire (the gate
+	// above returns first).
+	{
+		const FVector* TKL = LastKillerLocation.Find(Player);
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("Tier 1 entry for %s (team %d): bIsFirstSpawn=%d killerLoc=%s exclude=%s minKillerDist=%.0f minEnemyDist=%.0f"),
+			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
+			bIsFirstSpawn ? 1 : 0,
+			TKL ? *TKL->ToString() : TEXT("(none)"),
+			ExcludeStart ? *ExcludeStart->GetActorLocation().ToString() : TEXT("(none)"),
+			MinKillerSpawnDistance, MinimumEnemySpawnDistance);
+	}
+
 	// Tier 1: dynamic scoring within all PlayerStarts (minus belt exclusions
 	// and the already-picked choice when filling B). Distance filters
 	// (inter-A/B + killer-distance + min-enemy-distance) only apply once the
@@ -747,7 +763,18 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		if (Score > BestScore) { BestScore = Score; BestSpawn = Start; }
 	}
 
-	if (BestSpawn) return BestSpawn;
+	if (BestSpawn)
+	{
+		// Diagnostic: Tier 1 picked. Compare to "Tier 1 entry" log for that
+		// player to confirm distance filters honoured (chose location should
+		// be > MinKillerSpawnDistance from killerLoc, and > 2500uu from
+		// exclude when ExcludeStart is set).
+		UE_LOG(LogNCLeagueDuel, Log,
+			TEXT("Tier 1 result for %s (team %d): chose %s score=%.1f"),
+			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
+			*BestSpawn->GetActorLocation().ToString(), BestScore);
+		return BestSpawn;
+	}
 
 	// Tier 2: best-of-bad from full set (still respects belt + exclusion,
 	// drops enemy-distance hard reject — keep killer-distance reject).

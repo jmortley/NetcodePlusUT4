@@ -95,8 +95,8 @@ void UElimPlusScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 	if (!UTGameState || UTGameState->Teams.Num() < 2 || !UTGameState->Teams[0] || !UTGameState->Teams[1]) return;
 
 	const bool bCustom = HasCustomTeamColors();
-	RedTeamText  = bCustom ? FText::FromString(TEXT("LIANDRI")) : FText::FromString(TEXT("RED"));
-	BlueTeamText = bCustom ? FText::FromString(TEXT("PHAYDER")) : FText::FromString(TEXT("BLUE"));
+	RedTeamText  = bCustom ? FText::FromString(TEXT("LIANDRI (R)")) : FText::FromString(TEXT("RED"));
+	BlueTeamText = bCustom ? FText::FromString(TEXT("PHAYDER (B)")) : FText::FromString(TEXT("BLUE"));
 
 	const float Width = 0.5f * (Size.X - 400.f) * RenderScale;
 	const float FrontSize = 35.f * RenderScale;

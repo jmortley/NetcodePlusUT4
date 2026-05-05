@@ -484,8 +484,8 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	}
 
 	// Team names
-	FString Team0Name = bCustomColors ? TEXT("Liandri") : TEXT("RED");
-	FString Team1Name = bCustomColors ? TEXT("Phayder") : TEXT("BLUE");
+	FString Team0Name = bCustomColors ? TEXT("Liandri (R)") : TEXT("RED");
+	FString Team1Name = bCustomColors ? TEXT("Phayder (B)") : TEXT("BLUE");
 
 	// Scores
 	int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;

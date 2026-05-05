@@ -129,8 +129,8 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		Team1Color = TC;
 	}
 
-	FString Team0Name = bCustomColors ? TEXT("Liandri") : TEXT("RED");
-	FString Team1Name = bCustomColors ? TEXT("Phayder") : TEXT("BLUE");
+	FString Team0Name = bCustomColors ? TEXT("Liandri (R)") : TEXT("RED");
+	FString Team1Name = bCustomColors ? TEXT("Phayder (B)") : TEXT("BLUE");
 
 	int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
 	int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
