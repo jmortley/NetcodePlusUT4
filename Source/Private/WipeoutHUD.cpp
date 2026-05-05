@@ -579,12 +579,18 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	}
 	if (ClockSeconds < 0)
 	{
-		// Stock match clock. RemainingTime counts down to 0 when a TimeLimit
-		// is set, or stays at TimeLimit (default 0 → no clock) for untimed
-		// modes. Skip drawing in the latter case so we don't show "00:00"
-		// glued to the score bar for the whole match.
-		ClockSeconds = GS->RemainingTime;
-		if (ClockSeconds <= 0) ClockSeconds = -1;
+		// Stock match clock. AUTGameState::RemainingTime is protected, so we
+		// can't access it directly from a plugin TU — UHT-generated reflection
+		// doesn't honor C++ access modifiers, which is what makes this work.
+		// RemainingTime counts down to 0 when a TimeLimit is set, or stays at
+		// TimeLimit (default 0 → no clock) for untimed modes. Skip drawing
+		// when 0/negative so untimed modes don't show "00:00" glued to the
+		// score bar.
+		if (UIntProperty* RemTimeProp = FindField<UIntProperty>(GS->GetClass(), TEXT("RemainingTime")))
+		{
+			const int32 RT = RemTimeProp->GetPropertyValue_InContainer(GS);
+			if (RT > 0) ClockSeconds = RT;
+		}
 	}
 
 	float RoundClockScale = RenderScale * 1.1f * ScoreScale;
