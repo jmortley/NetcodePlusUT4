@@ -47,9 +47,17 @@ namespace
 	struct FArmorIconSlot
 	{
 		const TCHAR* ClassPath;
-		UClass*       CachedClass = nullptr;
+		UClass*       CachedClass;
 		FCanvasIcon   CachedIcon;
-		bool          bResolved   = false;
+		bool          bResolved;
+
+		// Explicit constructor: UE4 4.15 / MSVC C++14-mode doesn't treat
+		// structs with default member initializers as aggregates, so brace-
+		// init `FArmorIconSlot{ TEXT("...") }` fails. Same gotcha noted on
+		// FAliasEntry in NCPlusHUDLayout.cpp.
+		explicit FArmorIconSlot(const TCHAR* InPath)
+			: ClassPath(InPath), CachedClass(nullptr), bResolved(false)
+		{}
 	};
 
 	static FArmorIconSlot& GetBeltSlot()
