@@ -767,14 +767,23 @@ AActor* ANCLeagueDuelGame::FindPlayerStart_Implementation(AController* Player, c
 void ANCLeagueDuelGame::ScoreKill_Implementation(AController* Killer, AController* Other,
 	APawn* KilledPawn, TSubclassOf<UDamageType> DamageType)
 {
-	Super::ScoreKill_Implementation(Killer, Other, KilledPawn, DamageType);
-
-	// Capture the killer's pawn location so the victim's next spawn picker can
-	// enforce MinKillerSpawnDistance.
-	if (Killer && Killer->GetPawn())
+	// CRITICAL ORDERING: capture LastKillerLocation BEFORE calling Super.
+	// Super::ScoreKill_Implementation runs the engine's death-respawn populate
+	// block (UTGameMode.cpp:1518) which calls ChoosePlayerStart twice to fill
+	// the victim's RespawnChoiceA/B. Our ChoosePlayerStart distance-filter
+	// branch reads `bIsFirstSpawn = !LastKillerLocation.Contains(Player)`. If
+	// we add to the map AFTER Super, the populate calls see an empty map,
+	// bIsFirstSpawn comes out true, and the inter-A/B 2500uu rule + the
+	// killer-distance reject all SKIP. Result: A and B can both land within
+	// 730uu of each other in the same weapon area (e.g. both near Rocket).
+	// Adding before Super means the populate calls see the killer's location
+	// and the distance filters do their job.
+	if (Killer && Killer->GetPawn() && Other)
 	{
 		LastKillerLocation.FindOrAdd(Other) = Killer->GetPawn()->GetActorLocation();
 	}
+
+	Super::ScoreKill_Implementation(Killer, Other, KilledPawn, DamageType);
 }
 
 // =============================================================================
