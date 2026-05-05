@@ -170,18 +170,28 @@ namespace NCPlusHUDFonts
 				return HF ? HF : Fallback;
 			}
 
+			// Cache hit. nullptr is a valid cached value meaning "tried, failed,
+			// don't retry" — without this short-circuit a missing asset retries
+			// LoadObject every frame for every widget that names it, hammering
+			// disk and spamming the log. Treat cached-null as known failure.
 			if (UFont** Cached = Cache.Find(F.AssetPath))
 			{
-				if (*Cached) return *Cached;
+				return *Cached ? *Cached : Fallback;
 			}
-			UFont* Loaded = LoadObject<UFont>(nullptr, *F.AssetPath);
-			if (Loaded)
-			{
-				Cache.Add(F.AssetPath, Loaded);
-				return Loaded;
-			}
-			UE_LOG(LogTemp, Warning, TEXT("[NCPlusHUDFonts] Failed to load '%s' (%s) — falling back."),
-				*F.Display, *F.AssetPath);
+
+			// First attempt for this asset path. Try as UObject first so we can
+			// log the actual class on cast failure (asset may exist but not be
+			// a UFont — e.g. UCompositeFont). Cache success or failure.
+			UObject* Asset = LoadObject<UObject>(nullptr, *F.AssetPath);
+			UFont* Loaded = Cast<UFont>(Asset);
+			Cache.Add(F.AssetPath, Loaded);
+			if (Loaded) return Loaded;
+
+			UE_LOG(LogTemp, Warning,
+				TEXT("[NCPlusHUDFonts] Failed to load '%s' (%s): asset=%s class=%s — falling back (cached, no retry)."),
+				*F.Display, *F.AssetPath,
+				Asset ? TEXT("loaded") : TEXT("null"),
+				Asset ? *Asset->GetClass()->GetName() : TEXT("(none)"));
 			return Fallback;
 		}
 
