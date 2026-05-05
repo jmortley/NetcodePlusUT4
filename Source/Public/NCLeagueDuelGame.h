@@ -42,6 +42,11 @@ struct FNCLeagueWeaponPair
 	UPROPERTY() class APlayerStart* StartA = nullptr;
 	UPROPERTY() class APlayerStart* StartB = nullptr;
 	UPROPERTY() TSubclassOf<class AUTWeapon> CounterClass;     // the class StartB anchors
+	/** Group keys matching GroupForWeaponClass output (Sniper/Shock/Rocket/...).
+	 *  Used to prevent weapon-class collisions between Choice A and B when one
+	 *  pair is consumed and the fallback has to scan WeaponAnchoredStarts. */
+	FName GroupA = NAME_None;
+	FName GroupB = NAME_None;
 };
 
 UCLASS()
@@ -97,6 +102,20 @@ protected:
 	/** Pairs that have already been assigned this match (skip on next first-spawn). */
 	TSet<int32> ConsumedPairIndices;
 
+	/** Per-match shuffle of WeaponPairs indices. Choice A = WeaponPairs[FirstSpawnShuffleOrder[0]],
+	 *  Choice B = WeaponPairs[FirstSpawnShuffleOrder[1]]. Mirrors the BP "shuffle pairs, take 2"
+	 *  flow so both players see the SAME two pairs as their A/B options (mutual fairness). */
+	TArray<int32> FirstSpawnShuffleOrder;
+
+	/** 50/50 random per match — when true, team 0 (red) gets the StartA side of each pair
+	 *  and team 1 (blue) gets StartB; when false, sides are swapped. Adds weapon-meta
+	 *  fairness (e.g. if Sniper is OP, red has 50% chance to start at it instead of always). */
+	bool bRedGetsPrimarySide = true;
+
+	/** True once FirstSpawnShuffleOrder + bRedGetsPrimarySide have been initialized for this
+	 *  match. Reset in BeginPlay. */
+	bool bFirstSpawnShuffleReady = false;
+
 	/** Server-only Glicko2 ELO. Loaded from Mods.db on PostLogin, persisted
 	 *  in HandleMatchHasEnded. */
 	TUniquePtr<FNCDuelRatingSystem> RatingSystem;
@@ -104,9 +123,18 @@ protected:
 	void  ComputeSpawnPairings();
 	void  ComputeShieldBeltExclusions();
 	bool  IsExcludedByActiveShieldBelt(class APlayerStart* PS) const;
-	/** Pick a paired-weapon anchor for the player's team, optionally avoiding a
-	 *  start that's already been picked (for the second populate call so A != B). */
+	/** Lazily build FirstSpawnShuffleOrder + bRedGetsPrimarySide. No-op once ready. */
+	void  EnsureFirstSpawnShuffle();
+	/** Get the canonical weapon group key (Sniper/Shock/Rocket/Flak/Mini/Link/None)
+	 *  for whatever weapon a PlayerStart's AssociatedPickup carries. Used by the
+	 *  Tier-B fallback so Choice B can avoid the same weapon FAMILY as A. */
+	FName GetWeaponGroupForStart(class APlayerStart* Start) const;
+	/** Pick a paired-weapon anchor for the player's team. ChoiceIdx 0 -> Choice A,
+	 *  1 -> Choice B; reads from the per-match shuffle order so both players' A's
+	 *  come from the SAME pair (mutual fairness). ExcludeStart triggers the Tier-B
+	 *  fallback path when WeaponPairs is too sparse. */
 	class APlayerStart* SelectPairedSpawnForFirstSpawn(class AUTPlayerState* PS,
+	                                                    int32 ChoiceIdx,
 	                                                    class APlayerStart* ExcludeStart);
 	float ComputeEnemyProximityScore(class APlayerStart* P, AController* Player,
 	                                 float& OutMinEnemyDist, bool& bOutHasLOS) const;

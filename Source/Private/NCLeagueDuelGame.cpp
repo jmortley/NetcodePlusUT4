@@ -88,6 +88,13 @@ void ANCLeagueDuelGame::BeginPlay()
 	ComputeSpawnPairings();
 	ComputeShieldBeltExclusions();
 
+	// Reset per-match first-spawn shuffle state. The actual shuffle happens
+	// lazily on the first ChoosePlayerStart call once we know WeaponPairs is
+	// finalized (deferred so test maps without weapon-anchored starts don't
+	// crash with an empty shuffle).
+	FirstSpawnShuffleOrder.Reset();
+	bFirstSpawnShuffleReady = false;
+
 	RatingSystem = MakeUnique<FNCDuelRatingSystem>();
 	FNCDuelRatingSystem::InitDatabase(GetWorld());
 }
@@ -226,6 +233,8 @@ void ANCLeagueDuelGame::ComputeSpawnPairings()
 		FNCLeagueWeaponPair Pair;
 		Pair.StartA = BestA;
 		Pair.StartB = BestB;
+		Pair.GroupA = GroupA;
+		Pair.GroupB = GroupB;
 		WeaponPairs.Add(Pair);
 		ConsumedGroups.Add(GroupA);
 		ConsumedGroups.Add(GroupB);
@@ -292,66 +301,132 @@ bool ANCLeagueDuelGame::IsExcludedByActiveShieldBelt(APlayerStart* PS) const
 }
 
 // =============================================================================
-// First-spawn helper
+// First-spawn helpers (BP port: shuffle pairs once per match, take 2 as A/B)
 // =============================================================================
 
-APlayerStart* ANCLeagueDuelGame::SelectPairedSpawnForFirstSpawn(AUTPlayerState* PS,
-	APlayerStart* ExcludeStart)
+void ANCLeagueDuelGame::EnsureFirstSpawnShuffle()
 {
-	if (!PS) return nullptr;
+	if (bFirstSpawnShuffleReady) return;
 
-	const int32 TeamIdx = (PS->Team) ? PS->Team->TeamIndex : 0;
-
-	// Tier A — canonical pair (Sniper<->Shock, Rocket<->Flak, Mini<->Link).
-	// Walk every pair, return the team-anchored side as a candidate. Skip
-	// pairs already-consumed and skip any pair whose team-side equals
-	// ExcludeStart so A != B.
-	TArray<int32> AvailablePairs;
-	AvailablePairs.Reserve(WeaponPairs.Num());
+	FirstSpawnShuffleOrder.Reset();
+	FirstSpawnShuffleOrder.Reserve(WeaponPairs.Num());
 	for (int32 i = 0; i < WeaponPairs.Num(); ++i)
 	{
-		if (ConsumedPairIndices.Contains(i)) continue;
-		const FNCLeagueWeaponPair& Pair = WeaponPairs[i];
-		APlayerStart* Side = (TeamIdx == 0) ? Pair.StartA : Pair.StartB;
-		if (!Side) continue;
-		if (ExcludeStart && Side == ExcludeStart) continue;
-		AvailablePairs.Add(i);
-	}
-	if (AvailablePairs.Num() > 0)
-	{
-		const int32 PickedIdx = AvailablePairs[FMath::RandRange(0, AvailablePairs.Num() - 1)];
-		const FNCLeagueWeaponPair& Pair = WeaponPairs[PickedIdx];
-		APlayerStart* Chosen = (TeamIdx == 0) ? Pair.StartA : Pair.StartB;
-		UE_LOG(LogNCLeagueDuel, Log,
-			TEXT("First-spawn pick for %s (team %d): canonical pair %d -> %s%s"),
-			*PS->PlayerName, TeamIdx, PickedIdx,
-			Chosen ? *Chosen->GetActorLocation().ToString() : TEXT("nullptr"),
-			ExcludeStart ? TEXT(" [excluded prior pick]") : TEXT(""));
-		return Chosen;
+		FirstSpawnShuffleOrder.Add(i);
 	}
 
-	// Tier B — any weapon-anchored start (no distance filter; first-spawn
-	// fairness is purely pair/weapon-based, not positional). Used when
-	// canonical pairs are exhausted (e.g. map has Rocket+Flak as the only
-	// canonical pair; the second populate call lands here so it gets a
-	// weapon-anchored start instead of falling through to the generic Tier-1
-	// picker which would pick by enemy-distance score and might land on a
-	// non-weapon spot like a bio bottle).
+	// Fisher-Yates shuffle. Mirrors the BP "Shuffle" node on the spawn-pairs array.
+	for (int32 i = FirstSpawnShuffleOrder.Num() - 1; i > 0; --i)
+	{
+		const int32 j = FMath::RandRange(0, i);
+		FirstSpawnShuffleOrder.Swap(i, j);
+	}
+
+	// 50/50: which team gets StartA side? Mirrors the BP "Red Is Player 1" branch
+	// that flipped which side of each pair red got. Without this, a meta-dominant
+	// weapon (e.g. Sniper) would always go to red — bRedGetsPrimarySide swaps
+	// half the time so weapon-meta fairness holds across matches.
+	bRedGetsPrimarySide = (FMath::RandRange(0, 1) == 0);
+	bFirstSpawnShuffleReady = true;
+
+	FString OrderStr;
+	for (int32 i = 0; i < FirstSpawnShuffleOrder.Num(); ++i)
+	{
+		const FNCLeagueWeaponPair& P = WeaponPairs[FirstSpawnShuffleOrder[i]];
+		OrderStr += FString::Printf(TEXT("[%d:%s<->%s] "),
+			FirstSpawnShuffleOrder[i], *P.GroupA.ToString(), *P.GroupB.ToString());
+	}
+	UE_LOG(LogNCLeagueDuel, Log,
+		TEXT("First-spawn shuffle: order=%s | red gets %s side"),
+		*OrderStr, bRedGetsPrimarySide ? TEXT("StartA") : TEXT("StartB"));
+}
+
+FName ANCLeagueDuelGame::GetWeaponGroupForStart(APlayerStart* Start) const
+{
+	if (!Start) return NAME_None;
+	for (const FNCLeagueWeaponPair& P : WeaponPairs)
+	{
+		if (P.StartA == Start) return P.GroupA;
+		if (P.StartB == Start) return P.GroupB;
+	}
+	// Fall back: read it directly off the AssociatedPickup. Same group keys as
+	// ComputeSpawnPairings produces (so canonical-pair checks stay consistent).
+	if (AUTPlayerStart* UTPS = Cast<AUTPlayerStart>(Start))
+	{
+		if (AUTPickupWeapon* WPickup = Cast<AUTPickupWeapon>(UTPS->AssociatedPickup))
+		{
+			if (WPickup->WeaponType)
+			{
+				return GroupForWeaponClass(WPickup->WeaponType);
+			}
+		}
+	}
+	return NAME_None;
+}
+
+APlayerStart* ANCLeagueDuelGame::SelectPairedSpawnForFirstSpawn(AUTPlayerState* PS,
+	int32 ChoiceIdx, APlayerStart* ExcludeStart)
+{
+	if (!PS) return nullptr;
+	const int32 TeamIdx = (PS->Team) ? PS->Team->TeamIndex : 0;
+
+	EnsureFirstSpawnShuffle();
+
+	// Tier A — direct read from the per-match shuffle order. Choice A and B
+	// always come from DIFFERENT pairs, and both players hit the same pair
+	// for each ChoiceIdx (red gets one side, blue gets the other → mutual
+	// fairness). Mirrors the BP shuffle+GET 0/1 flow.
+	if (FirstSpawnShuffleOrder.IsValidIndex(ChoiceIdx))
+	{
+		const int32 PairIdx = FirstSpawnShuffleOrder[ChoiceIdx];
+		const FNCLeagueWeaponPair& Pair = WeaponPairs[PairIdx];
+
+		// Side selection: bRedGetsPrimarySide flips which TeamIndex maps to StartA.
+		const bool bUseStartA = (TeamIdx == 0) ? bRedGetsPrimarySide : !bRedGetsPrimarySide;
+		APlayerStart* Chosen = bUseStartA ? Pair.StartA : Pair.StartB;
+		if (Chosen)
+		{
+			UE_LOG(LogNCLeagueDuel, Log,
+				TEXT("First-spawn pick for %s (team %d, choice %c): pair %d (%s<->%s) -> %s side at %s"),
+				*PS->PlayerName, TeamIdx, ChoiceIdx == 0 ? TCHAR('A') : TCHAR('B'),
+				PairIdx, *Pair.GroupA.ToString(), *Pair.GroupB.ToString(),
+				bUseStartA ? TEXT("StartA") : TEXT("StartB"),
+				*Chosen->GetActorLocation().ToString());
+			return Chosen;
+		}
+	}
+
+	// Tier B — fallback for sparse maps (fewer than 2 canonical pairs available).
+	// Pick any weapon-anchored start, but exclude anything whose weapon GROUP
+	// matches ExcludeStart (so we don't get "Rocket + Rocket" when the map has
+	// duplicate Rocket pickups but no Sniper/Mini pairs).
+	const FName ExcludeGroup = GetWeaponGroupForStart(ExcludeStart);
+
 	TArray<APlayerStart*> Eligible;
 	Eligible.Reserve(WeaponAnchoredStarts.Num());
 	for (APlayerStart* Cand : WeaponAnchoredStarts)
 	{
 		if (!Cand || Cand == ExcludeStart) continue;
+		if (ExcludeGroup != NAME_None && GetWeaponGroupForStart(Cand) == ExcludeGroup) continue;
 		Eligible.Add(Cand);
 	}
-	if (Eligible.Num() == 0) return nullptr;
+	if (Eligible.Num() == 0)
+	{
+		// Last-resort: drop the group filter so we still hand back a weapon spot.
+		for (APlayerStart* Cand : WeaponAnchoredStarts)
+		{
+			if (!Cand || Cand == ExcludeStart) continue;
+			Eligible.Add(Cand);
+		}
+		if (Eligible.Num() == 0) return nullptr;
+	}
 
 	APlayerStart* Picked = Eligible[FMath::RandRange(0, Eligible.Num() - 1)];
 	UE_LOG(LogNCLeagueDuel, Log,
-		TEXT("First-spawn pick for %s (team %d): weapon-anchored fallback -> %s%s"),
-		*PS->PlayerName, TeamIdx,
+		TEXT("First-spawn pick for %s (team %d, choice %c): weapon-anchored fallback -> %s [excluded group %s]"),
+		*PS->PlayerName, TeamIdx, ChoiceIdx == 0 ? TCHAR('A') : TCHAR('B'),
 		Picked ? *Picked->GetActorLocation().ToString() : TEXT("nullptr"),
-		ExcludeStart ? TEXT(" [excluded prior pick]") : TEXT(""));
+		*ExcludeGroup.ToString());
 	return Picked;
 }
 
@@ -443,18 +518,19 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		ExcludeStart = PS->RespawnChoiceA;
 	}
 
-	// First-spawn path: BOTH the populate-A and populate-B calls return
-	// paired-weapon anchors (different pairs) so the player picks weapon
-	// preference rather than seeing one paired anchor + one generic spawn.
-	// PlayersWhoSpawnedOnce is marked once when filling B (ExcludeStart is
-	// set), so the actual third "spawn" call falls through to the Super path.
+	// First-spawn path. Both populate-A (ExcludeStart=null) and populate-B
+	// (ExcludeStart=A's pick) hit SelectPairedSpawnForFirstSpawn so each
+	// choice comes from a distinct pre-shuffled pair — A from shuffle[0],
+	// B from shuffle[1]. The shuffle is per-match, so red and blue see the
+	// same two pairs; the bRedGetsPrimarySide flag swaps which side each
+	// team gets (mutual fairness). PlayersWhoSpawnedOnce is marked when
+	// filling B so the eventual third "actual spawn" call falls through
+	// to Super (which returns A or B per bChosePrimaryRespawnChoice).
 	if (!PlayersWhoSpawnedOnce.Contains(PS) && WeaponPairs.Num() > 0)
 	{
-		if (APlayerStart* Anchor = SelectPairedSpawnForFirstSpawn(PS, ExcludeStart))
+		const int32 ChoiceIdx = (ExcludeStart == nullptr) ? 0 : 1;
+		if (APlayerStart* Anchor = SelectPairedSpawnForFirstSpawn(PS, ChoiceIdx, ExcludeStart))
 		{
-			// Mark the player as having consumed first-spawn only on the second
-			// populate call (when filling B). Until then both populate calls
-			// stay on the paired path.
 			if (ExcludeStart != nullptr)
 			{
 				PlayersWhoSpawnedOnce.Add(PS);
