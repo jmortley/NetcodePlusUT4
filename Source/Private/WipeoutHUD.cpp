@@ -545,34 +545,42 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
 	// ── Text ──
+	// Honor per-element font override (Phase 3.8). One alias controls both
+	// team-name and score-number fonts on the scorebar — they read as a
+	// unit, so a single setting keeps the typography coherent.
+	UFont* TeamNameFont  = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, SmallFont);
+	UFont* TeamScoreFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, LargeFont);
+	if (!TeamNameFont)  TeamNameFont  = SmallFont;
+	if (!TeamScoreFont) TeamScoreFont = LargeFont;
+
 	float FontScale = RenderScale * 0.85f * ScoreScale;
 	float LargeFontScale = RenderScale * 1.2f * ScoreScale;
 	float XL, YL;
 
 	// Team 0 name (right-aligned inside left bar)
-	Canvas->TextSize(SmallFont, Team0Name, XL, YL, FontScale, FontScale);
+	Canvas->TextSize(TeamNameFont, Team0Name, XL, YL, FontScale, FontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(SmallFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+	Canvas->DrawText(TeamNameFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
 	// Team 0 score (centered in score box)
 	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
-	Canvas->TextSize(LargeFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->TextSize(TeamScoreFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(LargeFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+	Canvas->DrawText(TeamScoreFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
 	// Team 1 score (centered in score box)
 	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
-	Canvas->TextSize(LargeFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->TextSize(TeamScoreFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(LargeFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+	Canvas->DrawText(TeamScoreFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
 	// Team 1 name (left-aligned inside right bar)
-	Canvas->TextSize(SmallFont, Team1Name, XL, YL, FontScale, FontScale);
+	Canvas->TextSize(TeamNameFont, Team1Name, XL, YL, FontScale, FontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(SmallFont, Team1Name, RightBarX + 8.f * RenderScale,
+	Canvas->DrawText(TeamNameFont, Team1Name, RightBarX + 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
 	// ── Clock (big, centered below bars) ──

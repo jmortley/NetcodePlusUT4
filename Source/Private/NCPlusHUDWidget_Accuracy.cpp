@@ -170,6 +170,10 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 
 	UFont* BigFont  = UTHUDOwner->LargeFont ? UTHUDOwner->LargeFont : UTHUDOwner->MediumFont;
 	UFont* SmallFnt = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
+	// Per-element font override (Phase 3.8) — applied to both percentage
+	// number and the small label/sub-text.
+	BigFont  = NCPlusHUDFonts::Resolve(TEXT("accuracy"), UTHUDOwner, BigFont);
+	SmallFnt = NCPlusHUDFonts::Resolve(TEXT("accuracy"), UTHUDOwner, SmallFnt);
 	if (!BigFont || !SmallFnt) return;
 
 	// Optional small label above the number — only when a specific weapon is

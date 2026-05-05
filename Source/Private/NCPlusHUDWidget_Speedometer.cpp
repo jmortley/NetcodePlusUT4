@@ -64,6 +64,10 @@ void UNCPlusHUDWidget_Speedometer::Draw_Implementation(float DeltaTime)
 
 	UFont* BigFont  = UTHUDOwner->LargeFont  ? UTHUDOwner->LargeFont  : UTHUDOwner->MediumFont;
 	UFont* SmallFnt = UTHUDOwner->SmallFont  ? UTHUDOwner->SmallFont  : UTHUDOwner->TinyFont;
+	// Honor per-element font override (Phase 3.8). Both number and unit-label
+	// route through the same alias so they stay typographically consistent.
+	BigFont  = NCPlusHUDFonts::Resolve(TEXT("speedometer"), UTHUDOwner, BigFont);
+	SmallFnt = NCPlusHUDFonts::Resolve(TEXT("speedometer"), UTHUDOwner, SmallFnt);
 	if (!BigFont) return;
 
 	const FString SpeedStr = FString::Printf(TEXT("%d"), FMath::RoundToInt(Speed));

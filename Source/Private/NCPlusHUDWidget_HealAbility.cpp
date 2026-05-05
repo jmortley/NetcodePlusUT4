@@ -1,9 +1,9 @@
 // NCPlusHUDWidget_HealAbility.cpp — heal/boost ability indicator.
 //
 // Reads:
-//   AUTPlayerState::BoostClass        -> inventory CDO -> HUDIcon  (what to draw)
-//   AUTPlayerState::GetRemainingBoosts() -> grey out gate           (when used up)
-//   UUTPlayerInput::CustomBinds[]     -> match Command              (key label)
+//   AUTPlayerState::BoostClass        -> inventory CDO -> HUDIcon  (preferred icon source)
+//   AUTPlayerState::GetRemainingBoosts() -> grey out gate          (when used up)
+//   UUTPlayerInput::CustomBinds[]     -> match Command             (key label)
 //
 // Layout extras honoured:
 //   "bind_command" (string) — the input Command to look up. Default
@@ -12,6 +12,14 @@
 //   "icon_size"    (float)  — design-pixel edge length, default 64.
 //
 // Hidden by default. Enable + reposition via the nchud editor.
+//
+// Warmup behavior: WipeoutGame::RestartPlayer early-returns on
+// MatchState::WaitingToStart (WipeoutGame.cpp:1218-1222), so the boost
+// grant block at line 1300+ never runs and PS->BoostClass stays null. The
+// widget keeps rendering anyway with a placeholder green-cross icon so
+// the user can still see the bound key during warm-up. Once the match
+// starts and the spawn block runs, the icon swaps to the real heal
+// inventory's HUDIcon.
 
 #include "NCPlusHUDWidget_HealAbility.h"
 #include "UnrealTournament.h"
@@ -59,6 +67,28 @@ namespace
 		if (Out.StartsWith(TEXT("Gamepad_"))) Out = Out.RightChop(8);
 		return Out;
 	}
+
+	/** Draw a green plus-sign placeholder when no inventory icon is available
+	 *  (warm-up before BoostClass is granted, or BoostClass with empty
+	 *  HUDIcon.Texture). Universally readable as "heal", visually distinct
+	 *  from the real inventory icon so the user knows it's a placeholder. */
+	void DrawPlaceholderHealIcon(UCanvas* Canvas, float X, float Y, float Sz, const FLinearColor& Tint)
+	{
+		if (!Canvas || !Canvas->DefaultTexture) return;
+		const float Cx = X + Sz * 0.5f;
+		const float Cy = Y + Sz * 0.5f;
+		const float Thick = Sz * 0.22f;
+		const float Len   = Sz * 0.78f;
+		const FLinearColor Green(0.35f, 0.95f, 0.45f, 1.f);
+		const FLinearColor Final = Green * Tint;
+		// Vertical bar
+		Canvas->SetLinearDrawColor(Final);
+		Canvas->DrawTile(Canvas->DefaultTexture, Cx - Thick * 0.5f, Cy - Len * 0.5f,
+			Thick, Len, 0, 0, 1, 1);
+		// Horizontal bar
+		Canvas->DrawTile(Canvas->DefaultTexture, Cx - Len * 0.5f, Cy - Thick * 0.5f,
+			Len, Thick, 0, 0, 1, 1);
+	}
 }
 
 UNCPlusHUDWidget_HealAbility::UNCPlusHUDWidget_HealAbility(const FObjectInitializer& OI)
@@ -83,11 +113,8 @@ bool UNCPlusHUDWidget_HealAbility::ShouldDraw_Implementation(bool bShowScores)
 	AUTPlayerState* PS = UTHUDOwner->UTPlayerOwner->UTPlayerState;
 	if (!IsValid(PS) || PS->bOnlySpectator) return false;
 
-	// No-op for modes that don't grant a boost (gracefully hides outside
-	// Wipeout). Checked AFTER layout entry so the editor's eye-toggle still
-	// works the user expects.
-	if (!PS->BoostClass) return false;
-
+	// Render whenever the user has placed the widget via the nchud editor
+	// (no implicit gating on BoostClass — see warmup note in file header).
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("heal_ability"));
 	if (!E) return false;
 	if (E->bHidden) return false;
@@ -100,44 +127,72 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	if (!IsValid(UTHUDOwner) || !IsValid(UTHUDOwner->UTPlayerOwner)) return;
 	AUTPlayerController* PC = UTHUDOwner->UTPlayerOwner;
 	AUTPlayerState* PS = PC->UTPlayerState;
-	if (!IsValid(PS) || !PS->BoostClass) return;
-
-	AUTInventory* InvCDO = PS->BoostClass->GetDefaultObject<AUTInventory>();
-	if (!InvCDO) return;
-	const FCanvasIcon& Icon = InvCDO->HUDIcon;
-	if (Icon.Texture == nullptr) return;
+	if (!IsValid(PS)) return;
 
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("heal_ability"));
 	const float IconSize = (E ? E->GetExtraFloat(TEXT("icon_size"), 64.f) : 64.f);
 	const FString BindCmd = (E ? E->GetExtra(TEXT("bind_command")) : FString());
 	const FString EffectiveCmd = BindCmd.IsEmpty() ? FString(TEXT("StartActivatePowerup")) : BindCmd;
 
-	const uint8 Charges = PS->GetRemainingBoosts();
-	const bool bAvailable = Charges > 0;
+	// Charge state. Three cases:
+	//   1. BoostClass null (warmup, pre-spawn)                   → show placeholder, treat as "available" (no charge known yet)
+	//   2. BoostClass set + RemainingBoosts > 0 (active, ready)  → show real icon, bright
+	//   3. BoostClass set + RemainingBoosts == 0 (just used)     → show real icon, greyed
+	const bool bHasBoostInfo = (PS->BoostClass != nullptr);
+	const bool bUsed         = bHasBoostInfo && PS->GetRemainingBoosts() == 0;
 
-	// Greyed when consumed: keep at full opacity so the icon shape stays
-	// recognizable, but desaturate and dim. Bright tint when ready.
-	const FLinearColor IconTint = bAvailable
-		? FLinearColor(1.f, 1.f, 1.f, 1.f)
-		: FLinearColor(0.35f, 0.35f, 0.35f, 0.85f);
+	const FLinearColor IconTint = bUsed
+		? FLinearColor(0.35f, 0.35f, 0.35f, 0.85f)
+		: FLinearColor(1.f, 1.f, 1.f, 1.f);
 
 	// Centered icon. Size.X * 0.5f puts the X anchor at our box midpoint;
 	// Origin already places the box bottom-center at the screen anchor.
 	const float IconX = (Size.X - IconSize) * 0.5f;
 	const float IconY = (Size.Y - IconSize) * 0.5f - 8.f;   // lift to leave room for keybind text
 
-	DrawTexture(Icon.Texture, IconX, IconY, IconSize, IconSize,
-		Icon.U, Icon.V, Icon.UL, Icon.VL, 1.f, IconTint);
+	bool bDrewRealIcon = false;
+	if (bHasBoostInfo)
+	{
+		AUTInventory* InvCDO = PS->BoostClass->GetDefaultObject<AUTInventory>();
+		if (InvCDO && InvCDO->HUDIcon.Texture)
+		{
+			const FCanvasIcon& Icon = InvCDO->HUDIcon;
+			DrawTexture(Icon.Texture, IconX, IconY, IconSize, IconSize,
+				Icon.U, Icon.V, Icon.UL, Icon.VL, 1.f, IconTint);
+			bDrewRealIcon = true;
+		}
+	}
+	if (!bDrewRealIcon)
+	{
+		// Warmup pre-grant OR the configured ability inventory has no
+		// HUDIcon set. Drop in a placeholder so the user still sees a
+		// recognizable heal indicator + their bind. One-shot diagnostic
+		// log helps debug "why is this a placeholder" without spamming.
+		static bool bLoggedPlaceholder = false;
+		if (!bLoggedPlaceholder)
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("[NCPlusHUDWidget_HealAbility] Drawing placeholder icon: BoostClass=%s, HUDIcon.Texture=%s. ")
+				TEXT("Expected during warmup (WipeoutGame::RestartPlayer skips boost grant in WaitingToStart). ")
+				TEXT("If still placeholder mid-match, the ability inventory class needs HUDIcon set."),
+				bHasBoostInfo ? *PS->BoostClass->GetName() : TEXT("(null)"),
+				(bHasBoostInfo && PS->BoostClass->GetDefaultObject<AUTInventory>() && PS->BoostClass->GetDefaultObject<AUTInventory>()->HUDIcon.Texture)
+					? TEXT("set") : TEXT("null"));
+			bLoggedPlaceholder = true;
+		}
+		DrawPlaceholderHealIcon(Canvas, IconX, IconY, IconSize, IconTint);
+	}
 
-	// Keybind label below the icon. Larger font when available, dimmer
-	// when the icon is greyed (mirrors the icon's state visually).
+	// Keybind label below the icon.
 	UFont* LabelFont = UTHUDOwner->MediumFont ? UTHUDOwner->MediumFont : UTHUDOwner->SmallFont;
+	// Honor per-element font override (Phase 3.8).
+	LabelFont = NCPlusHUDFonts::Resolve(TEXT("heal_ability"), UTHUDOwner, LabelFont);
 	if (!LabelFont) return;
 
 	const FString KeyLabel = FindKeyForCommand(PC, EffectiveCmd);
-	const FLinearColor LabelColor = bAvailable
-		? FLinearColor(1.f, 1.f, 1.f, 1.f)
-		: FLinearColor(0.6f, 0.6f, 0.6f, 0.85f);
+	const FLinearColor LabelColor = bUsed
+		? FLinearColor(0.6f, 0.6f, 0.6f, 0.85f)
+		: FLinearColor(1.f, 1.f, 1.f, 1.f);
 
 	DrawText(FText::FromString(KeyLabel), Size.X * 0.5f, IconY + IconSize + 2.f,
 		LabelFont, RenderScale, 1.0f, LabelColor,

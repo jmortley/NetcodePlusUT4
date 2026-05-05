@@ -146,6 +146,20 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		{
 			Row.bHasTeamColorToggle = true;
 		}
+		// Scorebar font picker — drives both team-name and score-number text
+		// in WipeoutHUD/ElimPlusHUD/NCPlusCTFHUD/NCShaftArenaHUD scorebars
+		// (single alias, single font for typographic coherence).
+		if (Alias == TEXT("scorebar"))
+		{
+			Row.bHasFontPicker = true;
+			Row.FontChoices    = NCPlusHUDFonts::GetChoices();
+		}
+		// Other text-rendering opt-in widgets get font selection too.
+		if (Alias == TEXT("accuracy") || Alias == TEXT("heal_ability") || Alias == TEXT("speedometer"))
+		{
+			Row.bHasFontPicker = true;
+			Row.FontChoices    = NCPlusHUDFonts::GetChoices();
+		}
 		// WeaponBar (both sides): bg/outline/ammo color overrides.
 		if (Alias == TEXT("weapon_bar_left") || Alias == TEXT("weapon_bar_right"))
 		{

@@ -119,26 +119,33 @@ void ANCShaftArenaHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const float LargeFontScale = RenderScale * 1.2f * ScoreScale;
 	float XL, YL;
 
-	Canvas->TextSize(SmallFont, P1Name, XL, YL, FontScale, FontScale);
+	// Per-element font override (Phase 3.8). FFA uses player names instead
+	// of team names but the same scorebar alias drives the typography.
+	UFont* PlayerNameFont  = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, SmallFont);
+	UFont* PlayerScoreFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, LargeFont);
+	if (!PlayerNameFont)  PlayerNameFont  = SmallFont;
+	if (!PlayerScoreFont) PlayerScoreFont = LargeFont;
+
+	Canvas->TextSize(PlayerNameFont, P1Name, XL, YL, FontScale, FontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(SmallFont, P1Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+	Canvas->DrawText(PlayerNameFont, P1Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
 	const FString Score1Str = FString::Printf(TEXT("%d"), Score1);
-	Canvas->TextSize(LargeFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->TextSize(PlayerScoreFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(LargeFont, Score1Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+	Canvas->DrawText(PlayerScoreFont, Score1Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
 	const FString Score2Str = FString::Printf(TEXT("%d"), Score2);
-	Canvas->TextSize(LargeFont, Score2Str, XL, YL, LargeFontScale, LargeFontScale);
+	Canvas->TextSize(PlayerScoreFont, Score2Str, XL, YL, LargeFontScale, LargeFontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(LargeFont, Score2Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+	Canvas->DrawText(PlayerScoreFont, Score2Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
-	Canvas->TextSize(SmallFont, P2Name, XL, YL, FontScale, FontScale);
+	Canvas->TextSize(PlayerNameFont, P2Name, XL, YL, FontScale, FontScale);
 	Canvas->DrawColor = FColor::White;
-	Canvas->DrawText(SmallFont, P2Name, RightBarX + 8.f * RenderScale,
+	Canvas->DrawText(PlayerNameFont, P2Name, RightBarX + 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
 	// NCShaftArena is time-limited (DM with TimeLimit). Stock RemainingTime is
