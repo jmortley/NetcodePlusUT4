@@ -62,6 +62,14 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"));
+	// Optional opt-in accuracy widget — registered on every NetcodePlus HUD
+	// (NCLeagueDuel, ShockDom, NCShaftArena, Wipeout itself) but defaults to
+	// hidden because UNCPlusHUDWidget_Accuracy::ShouldDraw requires a layout
+	// entry. User enables per-mode by dragging it onto the canvas in `nchud`.
+	// NCShaftArenaHUD seeds the layout entry in BeginPlay so it's on by default
+	// for that mode. Set the "weapon" extras key (current/linkgun/sniper/etc.)
+	// to pin a specific weapon, otherwise it tracks the held weapon.
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
 	// Our custom portrait-row scoreboard
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 }

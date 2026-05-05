@@ -13,5 +13,6 @@ class NETCODEPLUS_API ANCShaftArenaHUD : public AWipeoutHUD
 {
 	GENERATED_UCLASS_BODY()
 
+	virtual void BeginPlay() override;
 	virtual void DrawTeamScoreBar(AUTGameState* GS) override;
 };

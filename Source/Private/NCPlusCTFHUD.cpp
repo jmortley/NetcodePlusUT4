@@ -25,6 +25,9 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
 	// Modernized ammo counter — replaces stock bpHW_WeaponInfo (3 styles, fully editable).
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
+	// Optional opt-in accuracy widget — hidden by default (ShouldDraw requires
+	// a layout entry); user enables via nchud and picks current/specific weapon.
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
 }
 
 void ANCPlusCTFHUD::BeginPlay()

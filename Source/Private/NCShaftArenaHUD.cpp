@@ -6,12 +6,15 @@
 #include "UTPlayerState.h"
 #include "Engine/Canvas.h"
 #include "NCShaftArenaScoreboard.h"
+#include "NCPlusHUDLayout.h"
 
 ANCShaftArenaHUD::ANCShaftArenaHUD(const FObjectInitializer& OI)
 	: Super(OI)
 {
-	// Drop AWipeoutHUD's scoreboard reference and add our FFA scoreboard +
-	// accuracy widget.
+	// Swap out AWipeoutHUD's scoreboard for our FFA variant. The accuracy
+	// widget is already registered by the parent; visibility is layout-gated
+	// (see ShouldDraw_Implementation) and BeginPlay below seeds the default
+	// entry so it shows on this mode out of the box.
 	for (int32 i = HudWidgetClasses.Num() - 1; i >= 0; --i)
 	{
 		if (HudWidgetClasses[i].Contains(TEXT("WipeoutScoreboard")))
@@ -19,8 +22,30 @@ ANCShaftArenaHUD::ANCShaftArenaHUD(const FObjectInitializer& OI)
 			HudWidgetClasses.RemoveAt(i);
 		}
 	}
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCShaftArenaScoreboard"));
+}
+
+void ANCShaftArenaHUD::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Seed a default accuracy entry so the widget is visible by default in
+	// shaft arena. Other HUDs leave the entry empty (widget hidden) so users
+	// must opt in via the nchud editor. The seed only writes if no entry
+	// exists yet — explicit user customization (drag, hide, weapon override)
+	// is preserved across launches.
+	FNCPlusHUDLayout& Live = FNCPlusHUDLayout::GetLive();
+	if (!Live.Elements.Contains(TEXT("accuracy")))
+	{
+		FNCPlusHUDElement Entry;
+		Entry.Anchor = NCPlusHUDAliases::GetStockAnchor(TEXT("accuracy"));
+		Entry.Offset = NCPlusHUDAliases::GetStockOffset(TEXT("accuracy"));
+		// "current" is the default behavior (held weapon) — record it
+		// explicitly so the editor's weapon dropdown shows the right choice.
+		Entry.Extras.Add(TEXT("weapon"), TEXT("current"));
+		Live.Elements.Add(TEXT("accuracy"), Entry);
+		FNCPlusHUDLayout::MarkLiveDirty();
+	}
 }
 
 void ANCShaftArenaHUD::DrawTeamScoreBar(AUTGameState* GS)
