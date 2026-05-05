@@ -11,6 +11,9 @@
 #include "UTCharacter.h"
 #include "UTArmor.h"
 #include "UTInventory.h"
+#include "UTBot.h"
+#include "UTHUD.h"
+#include "Engine/Canvas.h"
 #include "StatNames.h"
 #include "EngineUtils.h"
 #include "NCLeagueDuelStatsReplicator.h"
@@ -239,34 +242,205 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState,
 	float RenderDelta, float XOffset, float YOffset)
 {
-	// Slim version of UUTScoreboard::DrawPlayer that omits the right-edge
-	// Skill/Ping draw. Everything else (background, name, friend icon,
-	// kick %, DrawPlayerScore call, strike-out, mute/talk indicators) is
-	// inherited from Super by calling it. Then we paint over the right-
-	// edge ping/skill text with the same row background color so it
-	// disappears from view.
+	// Direct copy of UUTScoreboard::DrawPlayer, with the bot-skill / ping
+	// right-edge draw block (parent's UTScoreboard.cpp:785-798) OMITTED.
+	// Duel scoreboard ends with the Armors column - no skill/ping at the
+	// far right. Earlier attempt was a cover-rect over the parent's draw
+	// but that double-blended opacities and showed up as a black smear on
+	// non-local players' rows; the only clean solution is to skip the
+	// inherited draws outright.
 	//
-	// Why not just override DrawPlayer wholesale: the parent body is ~120
-	// lines that touch private state (SelectedPlayer, BarOpacity, FlagX,
-	// etc.) and gets engine updates (mute UI, kick voting) we want to
-	// inherit for free. Cover-rect over the unwanted last column is the
-	// minimum-disruption hook.
-	Super::DrawPlayer(Index, PlayerState, RenderDelta, XOffset, YOffset);
+	// Everything else is preserved: background tile, kick %, flag, name,
+	// friend icon, DrawPlayerScore, ready-text, strike-out, mute/talk
+	// indicators. Engine fixes to those land for free via parent edits.
+	if (PlayerState == NULL) return;
 
-	if (!PlayerState || !UTHUDOwner) return;
+	float BarOpacity = 0.3f;
+	bool bIsUnderCursor = false;
 
-	// Cover the right ~5% of the cell where the parent drew skill/ping.
-	// Use the same row background color so the cover blends seamlessly.
-	// BarOpacity in the parent's DrawPlayer is a local (not a class member)
-	// so we can't read it; hardcode 0.7 which matches the engine's default
-	// row opacity. If it ever doesn't match exactly the seam will only be
-	// visible at the very right edge where there's nothing else to compare.
-	const FLinearColor BarColor = GetPlayerBackgroundColorFor(PlayerState);
-	const float CoverW = 0.06f * ScaledCellWidth;
-	const float CoverX = XOffset + ScaledCellWidth - CoverW;
-	const float CoverH = 0.9f * CellHeight * RenderScale;
-	DrawTexture(UTHUDOwner->ScoreboardAtlas, CoverX, YOffset, CoverW, CoverH,
-		149, 138, 32, 32, 0.7f, BarColor);
+	if (bIsInteractive)
+	{
+		FVector4 Bounds = FVector4(RenderPosition.X + XOffset, RenderPosition.Y + YOffset,
+			RenderPosition.X + XOffset + ScaledCellWidth, RenderPosition.Y + YOffset + CellHeight*RenderScale);
+		SelectionStack.Add(FSelectionObject(PlayerState, Bounds));
+		bIsUnderCursor = (CursorPosition.X >= Bounds.X && CursorPosition.X <= Bounds.Z
+			&& CursorPosition.Y >= Bounds.Y && CursorPosition.Y <= Bounds.W);
+	}
+	PlayerState->ScoreCorner = FVector(RenderPosition.X + XOffset, RenderPosition.Y + YOffset + 0.25f*CellHeight*RenderScale, 0.f);
+	if (!PlayerState->Team || (PlayerState->Team->TeamIndex != 1))
+	{
+		PlayerState->ScoreCorner.X += ScaledCellWidth;
+	}
+
+	float NameXL, NameYL;
+	float ClanXL = 0.f;
+	FString DisplayName = PlayerState->PlayerName;
+	FString ClanName = PlayerState->ClanName;
+	if (!PlayerState->ClanName.IsEmpty())
+	{
+		ClanName = "[" + ClanName + "]";
+		Canvas->TextSize(UTHUDOwner->SmallFont, ClanName, ClanXL, NameYL, 1.f, 1.f);
+		ClanXL += 4.f;
+	}
+	float MaxNameWidth = 0.42f*ScaledCellWidth - (PlayerState->bIsFriend ? 30.f*RenderScale : 0.f);
+	Canvas->TextSize(UTHUDOwner->SmallFont, DisplayName, NameXL, NameYL, 1.f, 1.f);
+	UFont* NameFont = UTHUDOwner->SmallFont;
+	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);
+
+	if (UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState)
+	{
+		BarOpacity = 0.5f;
+	}
+
+	// Background border.
+	FLinearColor BarColor = GetPlayerBackgroundColorFor(PlayerState);
+	float FinalBarOpacity = BarOpacity;
+	if (bIsUnderCursor)
+	{
+		BarColor = FLinearColor(0.0, 0.3, 0.0, 1.0);
+		FinalBarOpacity = 0.75f;
+	}
+	if (PlayerState == SelectedPlayer)
+	{
+		BarColor = FLinearColor(0.0, 0.3, 0.3, 1.0);
+		FinalBarOpacity = 0.75f;
+	}
+
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, XOffset, YOffset, ScaledCellWidth,
+		0.9f*CellHeight*RenderScale, 149, 138, 32, 32, FinalBarOpacity, BarColor);
+
+	if (PlayerState->KickCount > 0)
+	{
+		float NumPlayers = 0.0f;
+		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
+		{
+			if (!UTGameState->PlayerArray[i]->bIsSpectator
+				&& !UTGameState->PlayerArray[i]->bOnlySpectator
+				&& !UTGameState->PlayerArray[i]->bIsABot)
+			{
+				if (!UTGameState->bOnlyTeamCanVoteKick
+					|| UTGameState->OnSameTeam(PlayerState, UTGameState->PlayerArray[i]))
+				{
+					NumPlayers += 1.0f;
+				}
+			}
+		}
+		if (NumPlayers > 0.0f)
+		{
+			float KickPercent = float(PlayerState->KickCount) / NumPlayers;
+			float XL, SmallYL;
+			Canvas->TextSize(UTHUDOwner->SmallFont, "Kick", XL, SmallYL, RenderScale, RenderScale);
+			DrawText(NSLOCTEXT("UTScoreboard", "Kick", "Kick"), XOffset + (ScaledCellWidth * FlagX),
+				YOffset + ColumnY - 0.27f*SmallYL, UTHUDOwner->TinyFont, RenderScale, 1.0f,
+				DrawColor, ETextHorzPos::Left, ETextVertPos::Center);
+			FText Kick = FText::Format(NSLOCTEXT("Common", "PercFormat", "{0}%"),
+				FText::AsNumber(int32(KickPercent * 100.0)));
+			DrawText(Kick, XOffset + (ScaledCellWidth * FlagX), YOffset + ColumnY + 0.33f*SmallYL,
+				UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
+				ETextHorzPos::Left, ETextVertPos::Center);
+		}
+	}
+	else
+	{
+		FTextureUVs FlagUV;
+		UTexture2D* NewFlagAtlas = UTHUDOwner->ResolveFlag(PlayerState, FlagUV);
+		DrawTexture(NewFlagAtlas, XOffset + (ScaledCellWidth * FlagX), YOffset + 14.f*RenderScale,
+			FlagUV.UL*RenderScale, FlagUV.VL*RenderScale, FlagUV.U, FlagUV.V, 36, 26, 1.0,
+			FLinearColor::White, FVector2D(0.0f, 0.5f));
+	}
+
+	FVector2D NameSize;
+	float NameScaling = FMath::Min(RenderScale, MaxNameWidth / FMath::Max(NameXL + ClanXL, 1.f));
+	if (!PlayerState->EpicAccountName.IsEmpty())
+	{
+		NameSize = DrawText(FText::FromString(ClanName),
+			XOffset + (ScaledCellWidth * ColumnHeaderPlayerX), YOffset + ColumnY,
+			NameFont, NameScaling, 1.0f, DrawColor, ETextHorzPos::Left, ETextVertPos::Center);
+		NameSize += DrawText(FText::FromString(DisplayName),
+			XOffset + NameScaling*ClanXL + (ScaledCellWidth * ColumnHeaderPlayerX), YOffset + ColumnY,
+			NameFont, false, FVector2D(0.f, 0.f), FLinearColor::Black, true,
+			GetPlayerHighlightColorFor(PlayerState), NameScaling, 1.0f, DrawColor,
+			FLinearColor(0.0f, 0.0f, 0.0f, 0.0f), ETextHorzPos::Left, ETextVertPos::Center);
+	}
+	else
+	{
+		NameSize = DrawText(FText::FromString(DisplayName),
+			XOffset + (ScaledCellWidth * ColumnHeaderPlayerX), YOffset + ColumnY,
+			NameFont, NameScaling, 1.0f, DrawColor, ETextHorzPos::Left, ETextVertPos::Center);
+	}
+
+	if (PlayerState->bIsFriend)
+	{
+		DrawTexture(UTHUDOwner->ScoreboardAtlas,
+			XOffset + (ScaledCellWidth * ColumnHeaderPlayerX) + NameSize.X*NameScaling + 5.f*RenderScale,
+			YOffset + 18.f*RenderScale, 30.f*RenderScale, 24.f*RenderScale,
+			236, 136, 30, 24, 1.0, FLinearColor::White, FVector2D(0.0f, 0.5f));
+	}
+	if (UTGameState && UTGameState->HasMatchStarted())
+	{
+		if (PlayerState->bPendingTeamSwitch && !PlayerState->bIsABot)
+		{
+			DrawText(TeamSwapText, XOffset + (ScaledCellWidth * ColumnHeaderScoreX),
+				YOffset + ColumnY, UTHUDOwner->SmallFont, RenderScale, 1.0f,
+				FLinearColor::White, ETextHorzPos::Center, ETextVertPos::Center);
+		}
+		else
+		{
+			DrawPlayerScore(PlayerState, XOffset, YOffset, ScaledCellWidth, DrawColor);
+		}
+	}
+	else
+	{
+		DrawReadyText(PlayerState, XOffset, YOffset, ScaledCellWidth);
+	}
+
+	// >>> Skill / Ping right-edge draw OMITTED on purpose. <<<
+
+	// Strike out players that are out of lives.
+	if (PlayerState->bOutOfLives)
+	{
+		float Height = 8.0f;
+		float XL, YL;
+		Canvas->TextSize(UTHUDOwner->SmallFont,
+			(PlayerState->PlayerName + PlayerState->ClanName), XL, YL, RenderScale, RenderScale);
+		float StrikeWidth = FMath::Min(0.475f*ScaledCellWidth, XL);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + (ScaledCellWidth * ColumnHeaderPlayerX),
+			YOffset + ColumnY, StrikeWidth, Height, 185.f, 400.f, 4.f, 4.f, 1.0f, FLinearColor::Red);
+	}
+
+	// Muted indicator.
+	if (UTHUDOwner->UTPlayerOwner->IsPlayerGameMuted(PlayerState))
+	{
+		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
+		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);
+		FTextureUVs ChatIconUVs = bLeft
+			? FTextureUVs(497.0f, 965.0f, 35.0f, 31.0f)
+			: FTextureUVs(532.0f, 965.0f, -35.0f, 31.0f);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset,
+			YOffset + ((CellHeight * 0.5f - 24.0f) * RenderScale),
+			(26 * RenderScale), (23 * RenderScale),
+			ChatIconUVs.U, ChatIconUVs.V, ChatIconUVs.UL, ChatIconUVs.VL, 1.0f);
+
+		FTextureUVs MuteIconUVs = FTextureUVs(410.0f, 942.0f, 64.0f, 64.0f);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset - 3.f,
+			YOffset + ((CellHeight * 0.5f - 30.0f) * RenderScale),
+			(32 * RenderScale), (32 * RenderScale),
+			MuteIconUVs.U, MuteIconUVs.V, MuteIconUVs.UL, MuteIconUVs.VL,
+			1.0f, FLinearColor::Red);
+	}
+	// Talking indicator.
+	else if (PlayerState->bIsTalking)
+	{
+		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
+		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);
+		FTextureUVs ChatIconUVs = bLeft
+			? FTextureUVs(497.0f, 965.0f, 35.0f, 31.0f)
+			: FTextureUVs(532.0f, 965.0f, -35.0f, 31.0f);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset,
+			YOffset + ((CellHeight * 0.5f - 24.0f) * RenderScale),
+			(26 * RenderScale), (23 * RenderScale),
+			ChatIconUVs.U, ChatIconUVs.V, ChatIconUVs.UL, ChatIconUVs.VL, 1.0f);
+	}
 }
 
 void UNCLeagueDuelScoreboard::DrawArmorIconRow(float CenterX, float CenterY,
