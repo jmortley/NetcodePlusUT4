@@ -673,6 +673,26 @@ void AUTWeap_LinkGun_Plus::StartLinkPull()
 {
 	bReadyToPull = false;
 	PulseTarget = nullptr;
+
+	// NCShaftArena gates: pull is the "GET OVER HERE" yoink and feels wrong
+	// in a 1v1 shaft duel where movement positioning is the entire game.
+	// String-compare the gamemode class name so we don't have to include
+	// NCShaftArenaGame.h here (avoids a circular dependency between the
+	// LG_Plus weapon module and the gamemode header). Walks once per pull
+	// attempt - cheap and pull is a discrete event, not a per-tick.
+	if (UTOwner)
+	{
+		if (AGameModeBase* GM = UTOwner->GetWorld() ? UTOwner->GetWorld()->GetAuthGameMode<AGameModeBase>() : nullptr)
+		{
+			if (GM->GetClass()->GetName().Contains(TEXT("NCShaftArena")))
+			{
+				CurrentLinkedTarget = nullptr;
+				LinkStartTime = -100.f;
+				return;
+			}
+		}
+	}
+
 	if (UTOwner && CurrentLinkedTarget && UTOwner->IsLocallyControlled())
 	{
 		LastBeamPulseTime = GetWorld()->TimeSeconds;

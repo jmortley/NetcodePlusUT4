@@ -24,4 +24,12 @@ protected:
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset,
 		float YOffset, float Width, FLinearColor DrawColor) override;
+
+	/** Override DrawPlayer to skip the parent's Skill/Ping draw at the right
+	 *  edge. Shaft arena scoreboard ends with the Damage column. Same
+	 *  rationale and approach as NCLeagueDuelScoreboard - cover-rect
+	 *  approach left a black smear on non-local rows so we copy the parent's
+	 *  body and omit the skill/ping block. */
+	virtual void DrawPlayer(int32 Index, AUTPlayerState* PlayerState,
+		float RenderDelta, float XOffset, float YOffset) override;
 };

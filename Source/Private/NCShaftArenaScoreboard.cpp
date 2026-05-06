@@ -1,10 +1,16 @@
-// NCShaftArenaScoreboard.cpp — Kills / Accuracy / Streak / Damage columns.
+// NCShaftArenaScoreboard.cpp - 5-column layout: Player | K/D | Acc | Streak | DMG.
+// Drops Eff%, DMG/Life, and Skill/Ping vs the inherited parent layout - shaft
+// arena cares about kills, accuracy, current spree, and damage; everything else
+// is noise in a 1v1 beam duel.
 
 #include "NCShaftArenaScoreboard.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
+#include "UTBot.h"
+#include "UTHUD.h"
+#include "Engine/Canvas.h"
 #include "StatNames.h"
 
 UNCShaftArenaScoreboard::UNCShaftArenaScoreboard(const FObjectInitializer& OI)
@@ -12,6 +18,14 @@ UNCShaftArenaScoreboard::UNCShaftArenaScoreboard(const FObjectInitializer& OI)
 {
 	CH_Accuracy = NSLOCTEXT("NCShaftArenaScoreboard", "ColumnHeader_Accuracy", "Acc");
 	CH_Streak   = NSLOCTEXT("NCShaftArenaScoreboard", "ColumnHeader_Streak",   "Streak");
+
+	// 5-column layout: Player(left) | K/D | Acc | Streak | DMG
+	// Spread across the row leaving the right ~6% empty (which the
+	// DrawPlayer override scrubs of inherited skill/ping).
+	ColumnHeaderKDX         = 0.42f;
+	ColumnHeaderBeltAmpX    = 0.54f;   // Acc
+	ColumnHeaderDamageX     = 0.66f;   // Streak (re-purposed: name kept for parent compat)
+	ColumnHeaderEfficiencyX = 0.84f;   // DMG total (re-purposed)
 }
 
 void UNCShaftArenaScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
@@ -35,14 +49,10 @@ void UNCShaftArenaScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_Streak, XOffset + (ScaledCellWidth * ColumnHeaderDamageX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Efficiency, XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX), YOffset + ColumnHeaderY,
+			DrawText(CH_Damage, XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_DmgPerLife, XOffset + (ScaledCellWidth * ColumnHeaderDmgPerLifeX), YOffset + ColumnHeaderY,
-				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			// Eff%, DMG/Life, Skill/Ping intentionally removed.
 		}
-		DrawText((GetWorld()->GetNetMode() == NM_Standalone) ? CH_Skill : CH_Ping,
-			XOffset + (ScaledCellWidth * ColumnHeaderPingX), YOffset + ColumnHeaderY,
-			UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 
 		XOffset = Canvas->ClipX - ScaledCellWidth - ScaledEdgeSize;
 	}
@@ -59,10 +69,13 @@ void UNCShaftArenaScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	DrawText(FText::FromString(KDStr), XOffset + (Width * ColumnHeaderKDX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Link gun accuracy (the only weapon in this mode)
+	// Link gun accuracy. Clamped at 100% as defensive backstop - the underlying
+	// LG_Plus increment-by-DamageAmount bug is fixed but the clamp catches
+	// any future weapon bookkeeping mistake of the same shape.
 	const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
 	const int32 Shots = PS->GetStatsValue(NAME_LinkShots);
-	const float Pct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
+	const float RawPct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
+	const float Pct    = FMath::Min(RawPct, 100.f);
 	const FLinearColor AccColor = (Pct >= 50.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
 	                            : (Pct >= 30.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
 	                            : FLinearColor(1.f, 0.4f, 0.4f, 1.f);
@@ -70,32 +83,209 @@ void UNCShaftArenaScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	DrawText(FText::FromString(AccStr), XOffset + (Width * ColumnHeaderBeltAmpX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, AccColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Live "current spree" — engine PS->Spree is the rolling kill streak. The
-	// persistent best-of-match BestStreak that feeds awards lives on the
-	// gamemode and isn't replicated; a future replicator can surface it here.
+	// Current spree (engine PS->Spree, rolling)
 	const FString StreakStr = FString::Printf(TEXT("%d"), PS->Spree);
 	DrawText(FText::FromString(StreakStr), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor(1.f, 0.85f, 0.4f, 1.f),
 		ETextHorzPos::Center, ETextVertPos::Center);
 
-	// K/(K+D) efficiency
-	const int32 EffKills  = PS->Kills;
-	const int32 EffDeaths = PS->Deaths;
-	const float EffPct = (EffKills + EffDeaths > 0)
-		? (float(EffKills) / float(EffKills + EffDeaths)) * 100.f : 0.f;
-	const FLinearColor EffColor = (EffPct >= 60.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
-		: (EffPct >= 40.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
-		: FLinearColor(1.f, 0.4f, 0.4f, 1.f);
-	const FString EffStr = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(EffPct));
-	DrawText(FText::FromString(EffStr), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, 1.0f, 1.0f, EffColor, ETextHorzPos::Center, ETextVertPos::Center);
-
-	// Damage / life
+	// Damage total (replicated on AUTPlayerState as DamageDone)
 	const int32 Damage = int32(PS->DamageDone);
-	const int32 Lives = PS->Deaths + 1;
-	const float DmgPerLife = float(Damage) / float(Lives);
-	const FString DplStr = FString::Printf(TEXT("%d"), FMath::RoundToInt(DmgPerLife));
-	DrawText(FText::FromString(DplStr), XOffset + (Width * ColumnHeaderDmgPerLifeX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor(1.f, 0.8f, 0.25f, 1.f),
-		ETextHorzPos::Center, ETextVertPos::Center);
+	FLinearColor DmgColor = FLinearColor(1.f, 0.8f, 0.25f, 1.f);
+	if (!PS->GetUTCharacter()) DmgColor *= 0.6f;
+	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
+		UTHUDOwner->TinyFont, 1.0f, 1.0f, DmgColor, ETextHorzPos::Center, ETextVertPos::Center);
+
+	// Eff%, DMG/Life intentionally removed.
+}
+
+void UNCShaftArenaScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState,
+	float RenderDelta, float XOffset, float YOffset)
+{
+	// Direct copy of UUTScoreboard::DrawPlayer with the bot-skill / ping
+	// right-edge draw block omitted. Same approach as NCLeagueDuelScoreboard.
+	if (PlayerState == NULL) return;
+
+	float BarOpacity = 0.3f;
+	bool bIsUnderCursor = false;
+
+	if (bIsInteractive)
+	{
+		FVector4 Bounds = FVector4(RenderPosition.X + XOffset, RenderPosition.Y + YOffset,
+			RenderPosition.X + XOffset + ScaledCellWidth, RenderPosition.Y + YOffset + CellHeight*RenderScale);
+		SelectionStack.Add(FSelectionObject(PlayerState, Bounds));
+		bIsUnderCursor = (CursorPosition.X >= Bounds.X && CursorPosition.X <= Bounds.Z
+			&& CursorPosition.Y >= Bounds.Y && CursorPosition.Y <= Bounds.W);
+	}
+	PlayerState->ScoreCorner = FVector(RenderPosition.X + XOffset, RenderPosition.Y + YOffset + 0.25f*CellHeight*RenderScale, 0.f);
+	if (!PlayerState->Team || (PlayerState->Team->TeamIndex != 1))
+	{
+		PlayerState->ScoreCorner.X += ScaledCellWidth;
+	}
+
+	float NameXL, NameYL;
+	float ClanXL = 0.f;
+	FString DisplayName = PlayerState->PlayerName;
+	FString ClanName = PlayerState->ClanName;
+	if (!PlayerState->ClanName.IsEmpty())
+	{
+		ClanName = "[" + ClanName + "]";
+		Canvas->TextSize(UTHUDOwner->SmallFont, ClanName, ClanXL, NameYL, 1.f, 1.f);
+		ClanXL += 4.f;
+	}
+	float MaxNameWidth = 0.42f*ScaledCellWidth - (PlayerState->bIsFriend ? 30.f*RenderScale : 0.f);
+	Canvas->TextSize(UTHUDOwner->SmallFont, DisplayName, NameXL, NameYL, 1.f, 1.f);
+	UFont* NameFont = UTHUDOwner->SmallFont;
+	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);
+
+	if (UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState)
+	{
+		BarOpacity = 0.5f;
+	}
+
+	FLinearColor BarColor = GetPlayerBackgroundColorFor(PlayerState);
+	float FinalBarOpacity = BarOpacity;
+	if (bIsUnderCursor)
+	{
+		BarColor = FLinearColor(0.0, 0.3, 0.0, 1.0);
+		FinalBarOpacity = 0.75f;
+	}
+	if (PlayerState == SelectedPlayer)
+	{
+		BarColor = FLinearColor(0.0, 0.3, 0.3, 1.0);
+		FinalBarOpacity = 0.75f;
+	}
+
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, XOffset, YOffset, ScaledCellWidth,
+		0.9f*CellHeight*RenderScale, 149, 138, 32, 32, FinalBarOpacity, BarColor);
+
+	if (PlayerState->KickCount > 0)
+	{
+		float NumPlayers = 0.0f;
+		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
+		{
+			if (!UTGameState->PlayerArray[i]->bIsSpectator
+				&& !UTGameState->PlayerArray[i]->bOnlySpectator
+				&& !UTGameState->PlayerArray[i]->bIsABot)
+			{
+				if (!UTGameState->bOnlyTeamCanVoteKick
+					|| UTGameState->OnSameTeam(PlayerState, UTGameState->PlayerArray[i]))
+				{
+					NumPlayers += 1.0f;
+				}
+			}
+		}
+		if (NumPlayers > 0.0f)
+		{
+			float KickPercent = float(PlayerState->KickCount) / NumPlayers;
+			float XL, SmallYL;
+			Canvas->TextSize(UTHUDOwner->SmallFont, "Kick", XL, SmallYL, RenderScale, RenderScale);
+			DrawText(NSLOCTEXT("UTScoreboard", "Kick", "Kick"), XOffset + (ScaledCellWidth * FlagX),
+				YOffset + ColumnY - 0.27f*SmallYL, UTHUDOwner->TinyFont, RenderScale, 1.0f,
+				DrawColor, ETextHorzPos::Left, ETextVertPos::Center);
+			FText Kick = FText::Format(NSLOCTEXT("Common", "PercFormat", "{0}%"),
+				FText::AsNumber(int32(KickPercent * 100.0)));
+			DrawText(Kick, XOffset + (ScaledCellWidth * FlagX), YOffset + ColumnY + 0.33f*SmallYL,
+				UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
+				ETextHorzPos::Left, ETextVertPos::Center);
+		}
+	}
+	else
+	{
+		FTextureUVs FlagUV;
+		UTexture2D* NewFlagAtlas = UTHUDOwner->ResolveFlag(PlayerState, FlagUV);
+		DrawTexture(NewFlagAtlas, XOffset + (ScaledCellWidth * FlagX), YOffset + 14.f*RenderScale,
+			FlagUV.UL*RenderScale, FlagUV.VL*RenderScale, FlagUV.U, FlagUV.V, 36, 26, 1.0,
+			FLinearColor::White, FVector2D(0.0f, 0.5f));
+	}
+
+	FVector2D NameSize;
+	float NameScaling = FMath::Min(RenderScale, MaxNameWidth / FMath::Max(NameXL + ClanXL, 1.f));
+	if (!PlayerState->EpicAccountName.IsEmpty())
+	{
+		NameSize = DrawText(FText::FromString(ClanName),
+			XOffset + (ScaledCellWidth * ColumnHeaderPlayerX), YOffset + ColumnY,
+			NameFont, NameScaling, 1.0f, DrawColor, ETextHorzPos::Left, ETextVertPos::Center);
+		NameSize += DrawText(FText::FromString(DisplayName),
+			XOffset + NameScaling*ClanXL + (ScaledCellWidth * ColumnHeaderPlayerX), YOffset + ColumnY,
+			NameFont, false, FVector2D(0.f, 0.f), FLinearColor::Black, true,
+			GetPlayerHighlightColorFor(PlayerState), NameScaling, 1.0f, DrawColor,
+			FLinearColor(0.0f, 0.0f, 0.0f, 0.0f), ETextHorzPos::Left, ETextVertPos::Center);
+	}
+	else
+	{
+		NameSize = DrawText(FText::FromString(DisplayName),
+			XOffset + (ScaledCellWidth * ColumnHeaderPlayerX), YOffset + ColumnY,
+			NameFont, NameScaling, 1.0f, DrawColor, ETextHorzPos::Left, ETextVertPos::Center);
+	}
+
+	if (PlayerState->bIsFriend)
+	{
+		DrawTexture(UTHUDOwner->ScoreboardAtlas,
+			XOffset + (ScaledCellWidth * ColumnHeaderPlayerX) + NameSize.X*NameScaling + 5.f*RenderScale,
+			YOffset + 18.f*RenderScale, 30.f*RenderScale, 24.f*RenderScale,
+			236, 136, 30, 24, 1.0, FLinearColor::White, FVector2D(0.0f, 0.5f));
+	}
+	if (UTGameState && UTGameState->HasMatchStarted())
+	{
+		if (PlayerState->bPendingTeamSwitch && !PlayerState->bIsABot)
+		{
+			DrawText(TeamSwapText, XOffset + (ScaledCellWidth * ColumnHeaderScoreX),
+				YOffset + ColumnY, UTHUDOwner->SmallFont, RenderScale, 1.0f,
+				FLinearColor::White, ETextHorzPos::Center, ETextVertPos::Center);
+		}
+		else
+		{
+			DrawPlayerScore(PlayerState, XOffset, YOffset, ScaledCellWidth, DrawColor);
+		}
+	}
+	else
+	{
+		DrawReadyText(PlayerState, XOffset, YOffset, ScaledCellWidth);
+	}
+
+	// >>> Skill / Ping right-edge draw OMITTED on purpose. <<<
+
+	if (PlayerState->bOutOfLives)
+	{
+		float Height = 8.0f;
+		float XL, YL;
+		Canvas->TextSize(UTHUDOwner->SmallFont,
+			(PlayerState->PlayerName + PlayerState->ClanName), XL, YL, RenderScale, RenderScale);
+		float StrikeWidth = FMath::Min(0.475f*ScaledCellWidth, XL);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + (ScaledCellWidth * ColumnHeaderPlayerX),
+			YOffset + ColumnY, StrikeWidth, Height, 185.f, 400.f, 4.f, 4.f, 1.0f, FLinearColor::Red);
+	}
+
+	if (UTHUDOwner->UTPlayerOwner->IsPlayerGameMuted(PlayerState))
+	{
+		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
+		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);
+		FTextureUVs ChatIconUVs = bLeft
+			? FTextureUVs(497.0f, 965.0f, 35.0f, 31.0f)
+			: FTextureUVs(532.0f, 965.0f, -35.0f, 31.0f);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset,
+			YOffset + ((CellHeight * 0.5f - 24.0f) * RenderScale),
+			(26 * RenderScale), (23 * RenderScale),
+			ChatIconUVs.U, ChatIconUVs.V, ChatIconUVs.UL, ChatIconUVs.VL, 1.0f);
+
+		FTextureUVs MuteIconUVs = FTextureUVs(410.0f, 942.0f, 64.0f, 64.0f);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset - 3.f,
+			YOffset + ((CellHeight * 0.5f - 30.0f) * RenderScale),
+			(32 * RenderScale), (32 * RenderScale),
+			MuteIconUVs.U, MuteIconUVs.V, MuteIconUVs.UL, MuteIconUVs.VL,
+			1.0f, FLinearColor::Red);
+	}
+	else if (PlayerState->bIsTalking)
+	{
+		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
+		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);
+		FTextureUVs ChatIconUVs = bLeft
+			? FTextureUVs(497.0f, 965.0f, 35.0f, 31.0f)
+			: FTextureUVs(532.0f, 965.0f, -35.0f, 31.0f);
+		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset,
+			YOffset + ((CellHeight * 0.5f - 24.0f) * RenderScale),
+			(26 * RenderScale), (23 * RenderScale),
+			ChatIconUVs.U, ChatIconUVs.V, ChatIconUVs.UL, ChatIconUVs.VL, 1.0f);
+	}
 }
