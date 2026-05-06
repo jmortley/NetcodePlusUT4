@@ -367,7 +367,13 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 
 	if (PS && HitsStatsName != NAME_None)
 	{
-		PS->ModifyStatsValue(HitsStatsName, DamageAmount);
+		// Increment by 1 per hit-event to match stock UT4 convention
+		// (UTWeapon.cpp:1983). Was incrementing by DamageAmount which inflated
+		// NAME_LinkHits by 5-100+ per beam tick, blowing accuracy past
+		// 1000% in NCShaftArena where the link beam is the only weapon.
+		// Damage totals are tracked separately via PS->DamageDone, so
+		// nothing else cares about hits-as-damage here.
+		PS->ModifyStatsValue(HitsStatsName, 1);
 	}
 }
 
