@@ -5,6 +5,8 @@
 #include "UTPlayerState.h"
 #include "UTTeamInfo.h"
 #include "NCPlusHUDLayout.h"
+#include "NCPlusCTFOTInfo.h"
+#include "EngineUtils.h"
 
 ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -217,43 +219,96 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	float ClockBottomY = ClockY;
 	float RoundClockScale = RenderScale * 1.1f * ScoreScale;
 
-	int32 RemainingTime = GS->GetRemainingTime();
-	if (RemainingTime >= 0 && GS->TimeLimit > 0)
+	// OT detection: GetMatchState() == MatchState::MatchIsInOvertime.
+	// IsMatchInOvertime() is virtual on UTGameState so it reads the same on
+	// clients (MatchState is replicated).
+	const bool bInOvertime = GS->IsMatchInOvertime();
+
+	if (bInOvertime)
 	{
-		int32 Mins = RemainingTime / 60;
-		int32 Secs = RemainingTime % 60;
+		// Read OT start elapsed from the gamemode-spawned replicator.
+		// Engine's AUTCTFGameState::OvertimeStartTime isn't Replicated;
+		// ANCPlusCTFOTInfo carries the value. Lazy-find on first OT frame
+		// and cache the weak ptr (re-iterates only if the world swapped).
+		static TWeakObjectPtr<UWorld> CachedWorld;
+		static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
+		ANCPlusCTFOTInfo* Info = nullptr;
+		if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
+		{
+			Info = CachedInfo.Get();
+		}
+		else
+		{
+			for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
+			{
+				CachedWorld = GetWorld();
+				CachedInfo = *It;
+				Info = *It;
+				break;
+			}
+		}
+		const int32 StartElapsed = (Info && Info->OvertimeStartElapsed >= 0)
+			? Info->OvertimeStartElapsed : GS->ElapsedTime;
+		const int32 OTSeconds = FMath::Max(0, GS->ElapsedTime - StartElapsed);
+		const int32 Mins = OTSeconds / 60;
+		const int32 Secs = OTSeconds % 60;
 		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
-		if (RemainingTime <= 30)
-			Canvas->DrawColor = FColor(255, 60, 60, 255);
-		else
-			Canvas->DrawColor = FColor::White;
+		Canvas->DrawColor = FColor(255, 200, 60, 255);    // amber for OT
 		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 		ClockBottomY = ClockY + YL;
 	}
 	else
 	{
-		// No time limit — show elapsed time
-		int32 Elapsed = GS->ElapsedTime;
-		int32 Mins = Elapsed / 60;
-		int32 Secs = Elapsed % 60;
-		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
-		Canvas->DrawColor = FColor::White;
-		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
-		ClockBottomY = ClockY + YL;
+		int32 RemainingTime = GS->GetRemainingTime();
+		if (RemainingTime >= 0 && GS->TimeLimit > 0)
+		{
+			int32 Mins = RemainingTime / 60;
+			int32 Secs = RemainingTime % 60;
+			FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
+			Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+			if (RemainingTime <= 30)
+				Canvas->DrawColor = FColor(255, 60, 60, 255);
+			else
+				Canvas->DrawColor = FColor::White;
+			Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+			ClockBottomY = ClockY + YL;
+		}
+		else
+		{
+			// No time limit — show elapsed time
+			int32 Elapsed = GS->ElapsedTime;
+			int32 Mins = Elapsed / 60;
+			int32 Secs = Elapsed % 60;
+			FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
+			Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+			Canvas->DrawColor = FColor::White;
+			Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+			ClockBottomY = ClockY + YL;
+		}
 	}
 
-	// Half indicator (only when halftime is enabled)
-	// bSecondHalf is on UTCTFGameState — use reflection to avoid ABI mismatch
-	UBoolProperty* HalfProp = FindField<UBoolProperty>(GS->GetClass(), TEXT("bSecondHalf"));
-	if (HalfProp)
+	// Status label below the clock: "Overtime" during OT, "1st/2nd Half"
+	// otherwise (only when halftime is enabled). bSecondHalf is on
+	// UTCTFGameState — use reflection to avoid ABI mismatch.
+	FString StatusStr;
+	FColor StatusColor(200, 200, 200, 255);
+	if (bInOvertime)
 	{
-		bool bSecondHalf = HalfProp->GetPropertyValue_InContainer(GS);
-		FString HalfStr = bSecondHalf ? TEXT("2nd Half") : TEXT("1st Half");
-		float HalfScale = RenderScale * 0.7f;
-		Canvas->TextSize(SmallFont, HalfStr, XL, YL, HalfScale, HalfScale);
-		Canvas->DrawColor = FColor(200, 200, 200, 255);
-		Canvas->DrawText(SmallFont, HalfStr, CenterX - XL * 0.5f, ClockBottomY + 1.f * RenderScale, HalfScale, HalfScale);
+		StatusStr = TEXT("Overtime");
+		StatusColor = FColor(255, 200, 60, 255);    // amber to match clock
+	}
+	else if (UBoolProperty* HalfProp = FindField<UBoolProperty>(GS->GetClass(), TEXT("bSecondHalf")))
+	{
+		const bool bSecondHalf = HalfProp->GetPropertyValue_InContainer(GS);
+		StatusStr = bSecondHalf ? TEXT("2nd Half") : TEXT("1st Half");
+	}
+
+	if (!StatusStr.IsEmpty())
+	{
+		const float StatusScale = RenderScale * 0.7f;
+		Canvas->TextSize(SmallFont, StatusStr, XL, YL, StatusScale, StatusScale);
+		Canvas->DrawColor = StatusColor;
+		Canvas->DrawText(SmallFont, StatusStr, CenterX - XL * 0.5f, ClockBottomY + 1.f * RenderScale, StatusScale, StatusScale);
 	}
 }

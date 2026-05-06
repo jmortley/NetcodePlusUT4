@@ -25,6 +25,7 @@
 #include "NPPlayerController.h"
 #include "NCPlusCTFHUD.h"
 #include "CTFStatsReplicator.h"
+#include "NCPlusCTFOTInfo.h"
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -497,6 +498,10 @@ void ANCPlusCTFGameMode::EndOfHalf()
 		}
 		else if (bAllowOvertime)
 		{
+			if (OTInfo && CTFGameState)
+			{
+				OTInfo->OvertimeStartElapsed = CTFGameState->ElapsedTime;
+			}
 			SetMatchState(MatchState::MatchIsInOvertime);
 		}
 		else
@@ -750,6 +755,16 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		SpawnParams.Owner = this;
 		CTFStatsRep = GetWorld()->SpawnActor<ACTFStatsReplicator>(SpawnParams);
 	}
+
+	// Spawn OT info replicator so the HUD can render an OT count-up clock.
+	// OvertimeStartElapsed gets stamped in HandleEnteringOvertime / the
+	// SetMatchState(MatchIsInOvertime) sites.
+	if (HasAuthority() && !OTInfo)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		OTInfo = GetWorld()->SpawnActor<ANCPlusCTFOTInfo>(SpawnParams);
+	}
 }
 
 void ANCPlusCTFGameMode::HandleMatchIntermission()
@@ -785,6 +800,10 @@ void ANCPlusCTFGameMode::HandleExitingIntermission()
 void ANCPlusCTFGameMode::HandleEnteringOvertime()
 {
 	OvertimeStartWorldTime = GetWorld()->GetTimeSeconds();
+	if (OTInfo && CTFGameState)
+	{
+		OTInfo->OvertimeStartElapsed = CTFGameState->ElapsedTime;
+	}
 	CTFGameState->SetTimeLimit(6000);
 	SetMatchState(MatchState::MatchIsInOvertime);
 	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);

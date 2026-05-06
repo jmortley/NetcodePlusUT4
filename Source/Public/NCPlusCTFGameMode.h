@@ -218,6 +218,12 @@ protected:
 	UPROPERTY(Transient)
 	class ACTFStatsReplicator* CTFStatsRep = nullptr;
 
+	/** Replicates GS->ElapsedTime snapshot at the moment OT begins so the
+	 *  HUD can render an OT count-up timer. Engine's
+	 *  AUTCTFGameState::OvertimeStartTime isn't replicated. */
+	UPROPERTY(Transient)
+	class ANCPlusCTFOTInfo* OTInfo = nullptr;
+
 	// ── Overtime Tracking ────────────────────────────────────────────
 
 	/** World time when overtime started — used to delay respawn escalation. */

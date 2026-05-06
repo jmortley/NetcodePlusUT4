@@ -174,21 +174,48 @@ void UNCPlusCTFScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XO
 
 void UNCPlusCTFScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 {
-	// Let the parent team scoreboard draw all player rows
-	Super::DrawPlayerScores(RenderDelta, YOffset);
+	// Copy of UUTTeamScoreboard::DrawPlayerScores with the engine's
+	// "X Spectators Watching" count text replaced by a comma-separated
+	// names list. Calling Super and then drawing our text is what we used
+	// to do, but the engine paints its count at Y=765 — same Y as our
+	// names list — and the two overlap into the "garbled" look.
+	// Same pattern Elim/Wipeout scoreboards use.
+	if (UTGameState == nullptr) return;
 
-	// Spectator list at bottom
-	if (!UTGameState) return;
-
+	int32 XOffset = ScaledEdgeSize;
+	float MaxYOffset = 0.f;
 	TArray<FString> SpectatorNames;
-	for (APlayerState* PS : UTGameState->PlayerArray)
+
+	for (int8 Team = 0; Team < 2; Team++)
 	{
-		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-		if (UTPS && UTPS->bOnlySpectator && !UTPS->PlayerName.IsEmpty())
+		int32 Place = 1;
+		float DrawOffset = YOffset;
+		const int32 NumPlayersToShow = ShouldDrawScoringStats() ? 5 : UTGameState->PlayerArray.Num();
+		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
 		{
-			SpectatorNames.Add(UTPS->PlayerName);
+			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(UTGameState->PlayerArray[i]);
+			if (PlayerState)
+			{
+				if (!PlayerState->bOnlySpectator)
+				{
+					if (PlayerState->GetTeamNum() == Team)
+					{
+						DrawPlayer(Place, PlayerState, RenderDelta, XOffset, DrawOffset);
+						Place++;
+						DrawOffset += CellHeight * RenderScale;
+						if (Place > NumPlayersToShow) break;
+					}
+				}
+				else if (Team == 0 && !PlayerState->bIsDemoRecording && !PlayerState->PlayerName.IsEmpty())
+				{
+					SpectatorNames.Add(PlayerState->PlayerName);
+				}
+			}
 		}
+		MaxYOffset = FMath::Max(DrawOffset, MaxYOffset);
+		XOffset = Canvas->ClipX - ScaledCellWidth - ScaledEdgeSize;
 	}
+	YOffset = MaxYOffset;
 
 	if (SpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
 	{
