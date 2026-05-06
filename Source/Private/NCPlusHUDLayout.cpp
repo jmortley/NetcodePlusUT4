@@ -617,6 +617,12 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")),      false, ENCPlusHUDAnchor::TopCenter);
 			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")),   false, ENCPlusHUDAnchor::BottomLeft);
 			T.Emplace(TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")),  false, ENCPlusHUDAnchor::TopCenter);
+			// CTF flag status (the team flag silhouettes either side of the
+			// scorebar). Engine widget UUTHUDWidget_CTFFlagStatus, default
+			// ScreenPosition = (0.5, 0.0), Origin = (0.5, 0.5) → top-center.
+			// Only meaningful in CTF; safe to leave in the table for other
+			// modes since the widget simply isn't instantiated.
+			T.Emplace(TEXT("ctf_flag_status"),  TEXT("/Script/UnrealTournament.UTHUDWidget_CTFFlagStatus"),                      FText::FromString(TEXT("CTF Flag Status")),    false, ENCPlusHUDAnchor::TopCenter);
 			// C++-drawn pieces (Phase 3.5).
 			// Portrait strips: TopCenter anchor with offsets that approximately
 			// match where the renderers' StockXRed / StockXBlue fallback puts them
