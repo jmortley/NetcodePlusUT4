@@ -149,8 +149,15 @@ void UNCLeagueDuelScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset
 			static const FText CH_Armors = NSLOCTEXT("NCLeagueDuelScoreboard", "ColumnHeader_Armors", "Armors");
 			DrawText(CH_Armors, XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			// CH_DmgPerLife and CH_Skill/CH_Ping headers intentionally removed
-			// per user request - duel scoreboard ends with the armor column.
+			// Ping column at the right edge - only outside standalone (no
+			// network = no meaningful ping). Skill column for bots stays
+			// disabled per user request; only ping renders here.
+			if (GetWorld()->GetNetMode() != NM_Standalone)
+			{
+				DrawText(CH_Ping, XOffset + (ScaledCellWidth * ColumnHeaderPingX), YOffset + ColumnHeaderY,
+					UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			}
+			// CH_DmgPerLife header intentionally removed.
 		}
 
 		XOffset = Canvas->ClipX - ScaledCellWidth - ScaledEdgeSize;
@@ -410,7 +417,25 @@ void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 		DrawReadyText(PlayerState, XOffset, YOffset, ScaledCellWidth);
 	}
 
-	// >>> Skill / Ping right-edge draw OMITTED on purpose. <<<
+	// Skill (bot) draw still OMITTED. Ping restored per user request - duel
+	// players want to see their connection quality; bot skill numbers in
+	// the rightmost column were never useful. Mirrors stock UTScoreboard's
+	// non-Skill branch (UTScoreboard.cpp:794-798).
+	{
+		AUTBot* Bot = Cast<AUTBot>(PlayerState->GetOwner());
+		if (!Bot && GetWorld()->GetNetMode() != NM_Standalone)
+		{
+			int32 Ping = PlayerState->Ping * 4;
+			if (UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState)
+			{
+				Ping = PlayerState->ExactPing;
+			}
+			FText PingText = FText::Format(PingFormatText, FText::AsNumber(Ping));
+			DrawText(PingText, XOffset + 0.995f*ScaledCellWidth, YOffset + ColumnY,
+				UTHUDOwner->TinyFont, 0.75f*RenderScale, 1.f, DrawColor,
+				ETextHorzPos::Right, ETextVertPos::Center);
+		}
+	}
 
 	// Strike out players that are out of lives.
 	if (PlayerState->bOutOfLives)
