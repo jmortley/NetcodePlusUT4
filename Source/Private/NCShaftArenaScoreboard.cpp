@@ -103,13 +103,15 @@ void UNCShaftArenaScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 
 	// Link gun accuracy. Replicator on dedicated clients; PS->GetStatsValue
 	// authority fallback for listen-server / standalone where the replicator
-	// might not have ticked yet. Clamp at 100% as defensive backstop on top
-	// of the LG_Plus increment-by-1 fix.
+	// might not have ticked yet. NAME_LinkBeamShots is the per-refire-tick
+	// counter UTWeap_LinkGun_Plus increments on every beam-mode ConsumeAmmo
+	// call — Quake-style accuracy. NAME_LinkHits ticks per damage chunk.
 	float Pct = Rep ? Rep->GetAccuracyForPlayer(PlayerId) : 0.f;
 	if (Pct == 0.f && bIsAuthority)
 	{
+		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 		const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
-		const int32 Shots = PS->GetStatsValue(NAME_LinkShots);
+		const int32 Shots = PS->GetStatsValue(NAME_LinkBeamShots);
 		Pct = (Shots > 0) ? FMath::Min(float(Hits) / float(Shots) * 100.f, 100.f) : 0.f;
 	}
 	const FLinearColor AccColor = (Pct >= 50.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
@@ -179,7 +181,12 @@ void UNCShaftArenaScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 	UFont* NameFont = UTHUDOwner->SmallFont;
 	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);
 
-	if (UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState)
+	// Null-guard owner check. Match elim/wipeout's defensive pattern — duel's
+	// matching deref crashes pre-match scoreboard render in standalone PIE
+	// before UTPlayerOwner is fully wired up. Same hazard here.
+	const bool bIsOwner = (UTHUDOwner && UTHUDOwner->UTPlayerOwner
+		&& UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState);
+	if (bIsOwner)
 	{
 		BarOpacity = 0.5f;
 	}
@@ -298,26 +305,10 @@ void UNCShaftArenaScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 			YOffset + ColumnY, StrikeWidth, Height, 185.f, 400.f, 4.f, 4.f, 1.0f, FLinearColor::Red);
 	}
 
-	if (UTHUDOwner->UTPlayerOwner->IsPlayerGameMuted(PlayerState))
-	{
-		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
-		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);
-		FTextureUVs ChatIconUVs = bLeft
-			? FTextureUVs(497.0f, 965.0f, 35.0f, 31.0f)
-			: FTextureUVs(532.0f, 965.0f, -35.0f, 31.0f);
-		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset,
-			YOffset + ((CellHeight * 0.5f - 24.0f) * RenderScale),
-			(26 * RenderScale), (23 * RenderScale),
-			ChatIconUVs.U, ChatIconUVs.V, ChatIconUVs.UL, ChatIconUVs.VL, 1.0f);
-
-		FTextureUVs MuteIconUVs = FTextureUVs(410.0f, 942.0f, 64.0f, 64.0f);
-		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset - 3.f,
-			YOffset + ((CellHeight * 0.5f - 30.0f) * RenderScale),
-			(32 * RenderScale), (32 * RenderScale),
-			MuteIconUVs.U, MuteIconUVs.V, MuteIconUVs.UL, MuteIconUVs.VL,
-			1.0f, FLinearColor::Red);
-	}
-	else if (PlayerState->bIsTalking)
+	// Mute indicator removed — elim/wipeout don't have it either, and the
+	// IsPlayerGameMuted call required an unguarded UTHUDOwner->UTPlayerOwner
+	// deref that risked a crash during pre-match scoreboard render.
+	if (PlayerState->bIsTalking)
 	{
 		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
 		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);

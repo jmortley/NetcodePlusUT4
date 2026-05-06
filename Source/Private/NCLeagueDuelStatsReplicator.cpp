@@ -92,8 +92,15 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 		Entry.PadsCount   = Clamp255(UTPS->GetStatsValue(NAME_ArmorPadsCount));
 		Entry.HelmetCount = Clamp255(UTPS->GetStatsValue(NAME_HelmetCount));
 
-		// Damage total - AUTPlayerState::DamageDone is server-only.
-		Entry.DamageDone = int32(UTPS->DamageDone);
+		// Damage total — AUTPlayerState::DamageDone is server-only.
+		// Read via reflection to match Wipeout/ElimPlus replicators
+		// (WipeoutDamageReplicator.cpp:71, ElimPlusStatsReplicator.cpp:88).
+		// Direct member access also works in this codebase (ShockDom does it),
+		// but reflection is the established pattern for stats replicators here.
+		if (UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone")))
+		{
+			Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
+		}
 
 		StatsEntries.Add(Entry);
 	}

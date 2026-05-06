@@ -59,6 +59,21 @@ public:
 
     virtual void StopFire(uint8 FireModeNum) override;
 
+    /** Override ConsumeAmmo to drive Quake-style beam accuracy:
+     *  - LinkBeamShots += 1 every refire interval (one "shot" per beam tick)
+     *  - LinkHits      += 1 if bHitDuringCurrentRefireInterval was set since
+     *    the last ConsumeAmmo (the beam connected at least once during this
+     *    interval)
+     *  Then the flag is reset for the next interval. ServerProcessBeamHit
+     *  sets the flag instead of incrementing LinkHits directly — that's what
+     *  rate-matches the two counters. */
+    virtual void ConsumeAmmo(uint8 FireModeNum) override;
+
+    /** Set true by ServerProcessBeamHit when the beam connects during the
+     *  current refire interval. Read & reset by ConsumeAmmo. */
+    UPROPERTY(Transient)
+    bool bHitDuringCurrentRefireInterval = false;
+
     /** Buffer zone for ping mode switching to prevent oscillation */
     UPROPERTY(EditDefaultsOnly, Category = "NetcodePlus")
     float HysteresisBuffer;

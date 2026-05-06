@@ -365,16 +365,15 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 		UTOwner->Controller,
 		this);
 
-	if (PS && HitsStatsName != NAME_None)
-	{
-		// Increment by 1 per hit-event to match stock UT4 convention
-		// (UTWeapon.cpp:1983). Was incrementing by DamageAmount which inflated
-		// NAME_LinkHits by 5-100+ per beam tick, blowing accuracy past
-		// 1000% in NCShaftArena where the link beam is the only weapon.
-		// Damage totals are tracked separately via PS->DamageDone, so
-		// nothing else cares about hits-as-damage here.
-		PS->ModifyStatsValue(HitsStatsName, 1);
-	}
+	// Mark "the beam connected at least once during this refire interval".
+	// ConsumeAmmo (beam mode) reads + resets this flag and increments
+	// HitsStatsName by 1 if set. This rate-matches HitsStatsName to
+	// LinkBeamShots (both 1-per-refire-interval), giving Quake-style
+	// accuracy: each refire tick is independently a hit-or-miss.
+	// Was previously +=1 per ServerProcessBeamHit batch (~10Hz), but
+	// LinkBeamShots ticks per ConsumeAmmo (~8.3Hz at FireInterval[1]=0.12s),
+	// so the rates didn't match and Hits/Shots clamped to 100% on any hold.
+	bHitDuringCurrentRefireInterval = true;
 }
 
 
@@ -666,6 +665,33 @@ void AUTWeap_LinkGun_Plus::StopFire(uint8 FireModeNum)
 		// Plasma - use Fix logic
 		AUTWeapon::StopFire(FireModeNum);
 	}
+}
+
+void AUTWeap_LinkGun_Plus::ConsumeAmmo(uint8 FireModeNum)
+{
+	Super::ConsumeAmmo(FireModeNum);
+
+	// Quake-style beam accuracy: each refire tick is one "shot", and counts
+	// as a "hit" iff the beam connected at least once since the last tick.
+	// Server-only — clients see the values via the existing stats replicator.
+	if (FireModeNum == 1 && Role == ROLE_Authority && UTOwner)
+	{
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(UTOwner->PlayerState))
+		{
+			static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+			PS->ModifyStatsValue(NAME_LinkBeamShots, 1);
+
+			if (bHitDuringCurrentRefireInterval && HitsStatsName != NAME_None)
+			{
+				PS->ModifyStatsValue(HitsStatsName, 1);
+			}
+		}
+	}
+
+	// Reset for the next interval — even if we didn't increment (e.g. mode 0
+	// plasma shot, or non-authority); the flag is conceptually "did the beam
+	// land in the current refire window".
+	bHitDuringCurrentRefireInterval = false;
 }
 
 

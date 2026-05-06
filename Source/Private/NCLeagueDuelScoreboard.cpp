@@ -310,7 +310,14 @@ void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 	UFont* NameFont = UTHUDOwner->SmallFont;
 	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);
 
-	if (UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState)
+	// Null-guard the local-owner check. ElimPlus/Wipeout scoreboards null-check
+	// UTHUDOwner + UTPlayerOwner here; duel was missing the guards which crashes
+	// during pre-match scoreboard render in standalone PIE before UTPlayerOwner
+	// is fully wired up. Crash → standalone process exits → editor bounces to
+	// UT-Entry. Match wipeout/elim's pattern.
+	const bool bIsOwner = (UTHUDOwner && UTHUDOwner->UTPlayerOwner
+		&& UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState);
+	if (bIsOwner)
 	{
 		BarOpacity = 0.5f;
 	}
@@ -426,7 +433,8 @@ void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 		if (!Bot && GetWorld()->GetNetMode() != NM_Standalone)
 		{
 			int32 Ping = PlayerState->Ping * 4;
-			if (UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState)
+			if (UTHUDOwner && UTHUDOwner->UTPlayerOwner
+				&& UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState)
 			{
 				Ping = PlayerState->ExactPing;
 			}
@@ -449,28 +457,11 @@ void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 			YOffset + ColumnY, StrikeWidth, Height, 185.f, 400.f, 4.f, 4.f, 1.0f, FLinearColor::Red);
 	}
 
-	// Muted indicator.
-	if (UTHUDOwner->UTPlayerOwner->IsPlayerGameMuted(PlayerState))
-	{
-		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
-		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);
-		FTextureUVs ChatIconUVs = bLeft
-			? FTextureUVs(497.0f, 965.0f, 35.0f, 31.0f)
-			: FTextureUVs(532.0f, 965.0f, -35.0f, 31.0f);
-		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset,
-			YOffset + ((CellHeight * 0.5f - 24.0f) * RenderScale),
-			(26 * RenderScale), (23 * RenderScale),
-			ChatIconUVs.U, ChatIconUVs.V, ChatIconUVs.UL, ChatIconUVs.VL, 1.0f);
-
-		FTextureUVs MuteIconUVs = FTextureUVs(410.0f, 942.0f, 64.0f, 64.0f);
-		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + TalkingXOffset - 3.f,
-			YOffset + ((CellHeight * 0.5f - 30.0f) * RenderScale),
-			(32 * RenderScale), (32 * RenderScale),
-			MuteIconUVs.U, MuteIconUVs.V, MuteIconUVs.UL, MuteIconUVs.VL,
-			1.0f, FLinearColor::Red);
-	}
+	// Mute indicator removed — elim/wipeout don't have it either, and the
+	// IsPlayerGameMuted call required an unguarded UTHUDOwner->UTPlayerOwner
+	// deref that risked a crash during pre-match scoreboard render.
 	// Talking indicator.
-	else if (PlayerState->bIsTalking)
+	if (PlayerState->bIsTalking)
 	{
 		bool bLeft = (XOffset < Canvas->ClipX * 0.5f);
 		float TalkingXOffset = bLeft ? ScaledCellWidth + (10.0f *RenderScale) : (-36.0f * RenderScale);

@@ -158,14 +158,21 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 		if (HitsStat == NAME_None || ShotsStat == NAME_None) return;
 	}
 
+	// Link-beam accuracy fix: NAME_LinkHits ticks per damage chunk landed,
+	// but stock NAME_LinkShots only ticks on trigger pull (sustained beam =
+	// 1 shot, many hits → ratio explodes). UTWeap_LinkGun_Plus increments
+	// NAME_LinkBeamShots per beam-mode ConsumeAmmo (= 1 per refire tick),
+	// giving Quake-style per-tick accuracy when paired with NAME_LinkHits.
+	// Swap whenever we're displaying link accuracy.
+	if (HitsStat == NAME_LinkHits)
+	{
+		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+		ShotsStat = NAME_LinkBeamShots;
+	}
+
 	const int32 Hits  = PS->GetStatsValue(HitsStat);
 	const int32 Shots = PS->GetStatsValue(ShotsStat);
-	// Clamp at 100%. The link-gun BEAM increments NAME_LinkHits per damage
-	// chunk applied (every time the FiringBeam state's Accumulator crosses
-	// MinDamage) but increments NAME_LinkShots only on the initial trigger
-	// pull. Sustained beam = 1 shot, many hits = ratio inflates wildly
-	// (1000%+ in NCShaftArena). Other weapons are 1 shot = 1 hit max so
-	// the clamp is a no-op for them. Cleaner UX than showing 1978%.
+	// Clamp at 100% as a defensive backstop.
 	const float RawPct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
 	const float Pct    = FMath::Min(RawPct, 100.f);
 

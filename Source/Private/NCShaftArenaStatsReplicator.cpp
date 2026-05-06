@@ -58,17 +58,32 @@ void ANCShaftArenaStatsReplicator::UpdateFromPlayerStates()
 			? UTPS->UniqueId.ToString()
 			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
 
-		// Link accuracy (only weapon in shaft arena). Clamp at 100% defensively
-		// in case any future weapon-bookkeeping bug inflates Hits.
+		// Link accuracy (Quake-style): per-beam-tick hit ratio.
+		// NAME_LinkHits ticks per damage chunk landed (engine-side, in the
+		// FiringBeam state when on target). NAME_LinkBeamShots ticks per
+		// ConsumeAmmo call in beam mode (UTWeap_LinkGun_Plus override) — one
+		// per refire interval regardless of target. Hits/BeamShots gives the
+		// fraction of beam ticks that connected. Stock NAME_LinkShots only
+		// ticks on trigger pull, which made sustained beams report ratios
+		// >> 100%. Defensive clamp kept as a safety net.
+		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 		const float Hits  = UTPS->GetStatsValue(NAME_LinkHits);
-		const float Shots = UTPS->GetStatsValue(NAME_LinkShots);
+		const float Shots = UTPS->GetStatsValue(NAME_LinkBeamShots);
 		if (Shots > 0.f)
 		{
 			const float Acc = (Hits / Shots) * 100.f;
 			Entry.LinkAccuracyTimes100 = FMath::RoundToInt(FMath::Clamp(Acc, 0.f, 100.f) * 100.f);
 		}
 
-		Entry.DamageDone = int32(UTPS->DamageDone);
+		// AUTPlayerState::DamageDone is server-only. Read via reflection to
+		// match Wipeout/ElimPlus replicators (WipeoutDamageReplicator.cpp:71,
+		// ElimPlusStatsReplicator.cpp:88). Direct member access also works
+		// (ShockDomReplicator does it), but reflection is the established
+		// pattern for stats replicators here.
+		if (UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone")))
+		{
+			Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
+		}
 
 		StatsEntries.Add(Entry);
 	}
