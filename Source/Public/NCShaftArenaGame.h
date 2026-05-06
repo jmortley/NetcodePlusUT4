@@ -17,7 +17,7 @@
 #pragma once
 
 #include "NetcodePlus.h"
-#include "UTDMGameMode.h"
+#include "UTTeamDMGameMode.h"
 
 // Full include needed (not forward-decl) so TUniquePtr<FNCShaftArenaRatingSystem>
 // can instantiate its destructor at this header. Must precede .generated.h.
@@ -26,9 +26,10 @@
 #include "NCShaftArenaGame.generated.h"
 
 class AUTWeap_LinkGun_Plus;
+class ANCShaftArenaStatsReplicator;
 
 UCLASS()
-class NETCODEPLUS_API ANCShaftArenaGame : public AUTDMGameMode
+class NETCODEPLUS_API ANCShaftArenaGame : public AUTTeamDMGameMode
 {
 	GENERATED_UCLASS_BODY()
 
@@ -64,6 +65,13 @@ public:
 	 *  Players spawn with this in their inventory and nothing else. */
 	UPROPERTY(EditDefaultsOnly, Category = "NCShaftArena")
 	TSubclassOf<AUTWeap_LinkGun_Plus> ShaftLinkClass;
+
+	/** Bridges StatsData (server-only) and DamageDone (also server-only) to
+	 *  clients for the scoreboard. Without this, dedicated-server play shows
+	 *  0% accuracy + 0 damage on every row. Same pattern as the duel
+	 *  replicator. */
+	UPROPERTY()
+	ANCShaftArenaStatsReplicator* StatsReplicator = nullptr;
 
 protected:
 	TUniquePtr<FNCShaftArenaRatingSystem> RatingSystem;

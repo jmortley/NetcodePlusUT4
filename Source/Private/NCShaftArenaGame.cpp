@@ -1,4 +1,7 @@
 // NCShaftArenaGame.cpp — 1v1 shaft-only with vampirism, win-by-2, ELO + awards.
+// Team-DM based (red vs blue) with the player count capped at 2 - one player
+// per team, gets the team-color treatment from the inherited AUTTeamDMGameMode
+// auto-balance / TeamInfo plumbing for free.
 
 #include "NCShaftArenaGame.h"
 #include "UnrealTournament.h"
@@ -11,6 +14,7 @@
 #include "StatNames.h"
 #include "NCShaftArenaHUD.h"
 #include "NCShaftArenaRatingSystem.h"
+#include "NCShaftArenaStatsReplicator.h"
 #include "NCStatsUploader.h"
 #include "UTWeap_LinkGun_Plus.h"
 
@@ -98,6 +102,16 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 		TEXT("InitGame: GoalScore=%d MinWinMargin=%d Siphon=%.2f HealCap=%d ShaftLinkClass=%s"),
 		GoalScore, MinWinMargin, SiphonPercent, HealCap,
 		ShaftLinkClass ? *ShaftLinkClass->GetPathName() : TEXT("(none)"));
+
+	// Stats replicator - server-only StatsData (LinkHits/LinkShots) + DamageDone
+	// don't reach clients without this. Spawn here so clients see it before
+	// the first scoreboard render.
+	if (Role == ROLE_Authority && !StatsReplicator)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		StatsReplicator = GetWorld()->SpawnActor<ANCShaftArenaStatsReplicator>(SpawnParams);
+	}
 }
 
 void ANCShaftArenaGame::BeginPlay()

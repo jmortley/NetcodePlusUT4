@@ -11,7 +11,32 @@
 #include "UTBot.h"
 #include "UTHUD.h"
 #include "Engine/Canvas.h"
+#include "EngineUtils.h"
 #include "StatNames.h"
+#include "NCShaftArenaStatsReplicator.h"
+
+namespace
+{
+	/** Cached weak-ptr lookup for the replicator. Same pattern the duel
+	 *  scoreboard uses - re-iterating actors every frame is wasted work. */
+	ANCShaftArenaStatsReplicator* FindNCShaftArenaStatsReplicator(UWorld* World)
+	{
+		if (!World) return nullptr;
+		static TWeakObjectPtr<UWorld> CachedWorld;
+		static TWeakObjectPtr<ANCShaftArenaStatsReplicator> CachedRep;
+		if (CachedWorld.Get() == World && CachedRep.IsValid())
+		{
+			return CachedRep.Get();
+		}
+		for (TActorIterator<ANCShaftArenaStatsReplicator> It(World); It; ++It)
+		{
+			CachedWorld = World;
+			CachedRep   = *It;
+			return *It;
+		}
+		return nullptr;
+	}
+}
 
 UNCShaftArenaScoreboard::UNCShaftArenaScoreboard(const FObjectInitializer& OI)
 	: Super(OI)
@@ -69,13 +94,24 @@ void UNCShaftArenaScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	DrawText(FText::FromString(KDStr), XOffset + (Width * ColumnHeaderKDX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Link gun accuracy. Clamped at 100% as defensive backstop - the underlying
-	// LG_Plus increment-by-DamageAmount bug is fixed but the clamp catches
-	// any future weapon bookkeeping mistake of the same shape.
-	const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
-	const int32 Shots = PS->GetStatsValue(NAME_LinkShots);
-	const float RawPct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
-	const float Pct    = FMath::Min(RawPct, 100.f);
+	// Build replicator key once - both accuracy and damage come from it.
+	const FString PlayerId = PS->UniqueId.IsValid()
+		? PS->UniqueId.ToString()
+		: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+	ANCShaftArenaStatsReplicator* Rep = FindNCShaftArenaStatsReplicator(GetWorld());
+	const bool bIsAuthority = GetWorld() && GetWorld()->GetNetMode() != NM_Client;
+
+	// Link gun accuracy. Replicator on dedicated clients; PS->GetStatsValue
+	// authority fallback for listen-server / standalone where the replicator
+	// might not have ticked yet. Clamp at 100% as defensive backstop on top
+	// of the LG_Plus increment-by-1 fix.
+	float Pct = Rep ? Rep->GetAccuracyForPlayer(PlayerId) : 0.f;
+	if (Pct == 0.f && bIsAuthority)
+	{
+		const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
+		const int32 Shots = PS->GetStatsValue(NAME_LinkShots);
+		Pct = (Shots > 0) ? FMath::Min(float(Hits) / float(Shots) * 100.f, 100.f) : 0.f;
+	}
 	const FLinearColor AccColor = (Pct >= 50.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
 	                            : (Pct >= 30.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
 	                            : FLinearColor(1.f, 0.4f, 0.4f, 1.f);
@@ -83,14 +119,19 @@ void UNCShaftArenaScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	DrawText(FText::FromString(AccStr), XOffset + (Width * ColumnHeaderBeltAmpX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, AccColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Current spree (engine PS->Spree, rolling)
+	// Current spree (engine PS->Spree IS replicated - direct read is fine).
 	const FString StreakStr = FString::Printf(TEXT("%d"), PS->Spree);
 	DrawText(FText::FromString(StreakStr), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor(1.f, 0.85f, 0.4f, 1.f),
 		ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Damage total (replicated on AUTPlayerState as DamageDone)
-	const int32 Damage = int32(PS->DamageDone);
+	// Damage total. AUTPlayerState::DamageDone is server-only, so replicator
+	// path on dedicated clients; authority fallback for standalone.
+	int32 Damage = Rep ? Rep->GetDamageForPlayer(PlayerId) : 0;
+	if (Damage == 0 && bIsAuthority)
+	{
+		Damage = int32(PS->DamageDone);
+	}
 	FLinearColor DmgColor = FLinearColor(1.f, 0.8f, 0.25f, 1.f);
 	if (!PS->GetUTCharacter()) DmgColor *= 0.6f;
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
