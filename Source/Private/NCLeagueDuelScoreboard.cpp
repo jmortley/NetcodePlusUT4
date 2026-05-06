@@ -206,8 +206,20 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	DrawText(FText::FromString(AccStr), XOffset + (Width * ColumnHeaderBeltAmpX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, AccColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Damage
-	const int32 Damage = int32(PS->DamageDone);
+	// Damage. AUTPlayerState::DamageDone is UPROPERTY(BlueprintReadWrite) with
+	// no Replicated specifier - reads as 0 on dedicated-server clients. Same
+	// fix pattern as accuracy: replicator path on the wire, authority
+	// fallback for listen-server / standalone so the local row populates
+	// before the 1Hz tick catches up.
+	int32 Damage = 0;
+	if (ANCLeagueDuelStatsReplicator* Rep = FindNCLeagueDuelStatsReplicator(GetWorld()))
+	{
+		Damage = Rep->GetDamageForPlayer(PlayerId);
+	}
+	if (Damage == 0 && GetWorld() && GetWorld()->GetNetMode() != NM_Client)
+	{
+		Damage = int32(PS->DamageDone);
+	}
 	FLinearColor DmgColor = FLinearColor(1.f, 0.8f, 0.25f, 1.f);
 	if (!PS->GetUTCharacter()) DmgColor *= 0.6f;
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,

@@ -39,6 +39,12 @@ struct FNCLeagueDuelStatsEntry
 	UPROPERTY() uint8 VestCount   = 0;
 	UPROPERTY() uint8 PadsCount   = 0;
 	UPROPERTY() uint8 HelmetCount = 0;
+
+	/** Total damage dealt this match. AUTPlayerState::DamageDone is
+	 *  UPROPERTY(BlueprintReadWrite) without Replicated, so on dedicated-
+	 *  server clients it reads as 0 - this is the wire copy. */
+	UPROPERTY()
+	int32 DamageDone = 0;
 };
 
 UCLASS(NotPlaceable)
@@ -66,6 +72,9 @@ public:
 	uint8 GetVestCountForPlayer  (const FString& UniqueIdStr) const;
 	uint8 GetPadsCountForPlayer  (const FString& UniqueIdStr) const;
 	uint8 GetHelmetCountForPlayer(const FString& UniqueIdStr) const;
+
+	/** Client-safe: total damage dealt this match. 0 if no entry yet. */
+	int32 GetDamageForPlayer(const FString& UniqueIdStr) const;
 
 private:
 	float UpdateInterval = 1.0f;

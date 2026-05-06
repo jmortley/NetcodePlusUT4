@@ -92,6 +92,9 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 		Entry.PadsCount   = Clamp255(UTPS->GetStatsValue(NAME_ArmorPadsCount));
 		Entry.HelmetCount = Clamp255(UTPS->GetStatsValue(NAME_HelmetCount));
 
+		// Damage total - AUTPlayerState::DamageDone is server-only.
+		Entry.DamageDone = int32(UTPS->DamageDone);
+
 		StatsEntries.Add(Entry);
 	}
 }
@@ -139,4 +142,9 @@ uint8 ANCLeagueDuelStatsReplicator::GetHelmetCountForPlayer(const FString& Id) c
 {
 	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
 	return E ? E->HelmetCount : 0;
+}
+int32 ANCLeagueDuelStatsReplicator::GetDamageForPlayer(const FString& Id) const
+{
+	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
+	return E ? E->DamageDone : 0;
 }
