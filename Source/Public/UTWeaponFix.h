@@ -205,6 +205,25 @@ public:
     void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum);
     UPROPERTY()
     TArray<float> LastFireTime;
+
+    /** Per-fire-mode timestamp of the most recent StopFire call. Used by the
+     *  mouse-bounce debounce in StartFire to coalesce rapid release+press
+     *  pairs (low-debounce mice, scroll-wheel binds) into a single fire
+     *  intent rather than treating them as separate clicks. */
+    UPROPERTY()
+    TArray<float> LastReleaseTime;
+
+    /** Mouse-bounce debounce window in seconds. A press event arriving
+     *  within this many seconds of the prior release is treated as a bounce
+     *  (or scroll-wheel rapid-fire) — PendingFire is kept true so any held
+     *  intent is preserved, but no new fire event is triggered. Default
+     *  30ms sits comfortably between hardware bounce ceiling (~20ms) and
+     *  human double-click physiological floor (~40-80ms), so it cannot eat
+     *  intentional rapid clicks. Tune higher per-weapon if low-debounce
+     *  mice still produce rejected shots; set to 0 to disable entirely. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Weapon")
+    float MouseDebounceWindow;
+
      /**
      * Checks if a fire mode is currently on cooldown.
      *

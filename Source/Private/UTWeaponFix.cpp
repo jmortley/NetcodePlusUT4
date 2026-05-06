@@ -133,6 +133,7 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     AuthoritativeFireEventIndex.SetNum(2);
     ClientFireEventIndex.SetNum(2);
     LastFireTime.SetNum(2);
+    LastReleaseTime.SetNum(2);
     FireModeActiveState.SetNum(2);
     bIsTransactionalFire = false;
     bHandlingRetry = false;
@@ -143,12 +144,14 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     LastMultiPressTime = 0.f;
     LastShockCoreSpawnTime = 0.0f;
     LastFlakShellSpawnTime = 0.0f;
+    MouseDebounceWindow = 0.030f;  // 30ms — mouse-bounce / scroll-wheel coalesce
 
     for (int32 i = 0; i < 2; i++)
     {
         AuthoritativeFireEventIndex[i] = 0;
         ClientFireEventIndex[i] = 0;
         LastFireTime[i] = -1.0f;
+        LastReleaseTime[i] = -1.0f;
         FireModeActiveState[i] = 0;
     }
 
@@ -229,7 +232,38 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             return;
         }
     }
- 
+
+    // ---------------------------------------------------------
+    // MOUSE-BOUNCE / SCROLL-WHEEL DEBOUNCE
+    // ---------------------------------------------------------
+    // Low-debounce mice and scroll-wheel-bound fire actions generate rapid
+    // release+press event pairs that the engine surfaces as separate clicks.
+    // Without this guard, every spurious bounce reaches the cooldown gate and
+    // either gets absorbed into the retry queue (fine) or — under specific
+    // race conditions — eats the user's held intent (broken). The 25ms default
+    // floor is well below human physiological double-click cadence (~50-80ms
+    // minimum), so this can only catch bounces, not intentional rapid fire.
+    //
+    // Coalesce, do not block: keep PendingFire=true so any held intent is
+    // preserved and refire continues normally. The bounce simply doesn't
+    // generate a new fire event.
+    if (UTOwner && UTOwner->IsLocallyControlled() &&
+        MouseDebounceWindow > 0.f &&
+        LastReleaseTime.IsValidIndex(FireModeNum) &&
+        LastReleaseTime[FireModeNum] > 0.0f)
+    {
+        const float SinceRelease = GetWorld()->GetTimeSeconds() - LastReleaseTime[FireModeNum];
+        if (SinceRelease >= 0.f && SinceRelease < MouseDebounceWindow)
+        {
+            // Verbose log so testers can confirm the debounce is engaging
+            // when investigating low-debounce-mouse complaints. Off by default.
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[NCFire.Debounce] mode=%d sinceRelease=%.4f window=%.4f"),
+                FireModeNum, SinceRelease, MouseDebounceWindow);
+            UTOwner->SetPendingFire(FireModeNum, true);
+            return;
+        }
+    }
+
 	if (GetCurrentState() &&
 		(GetCurrentState()->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass())))
 	{
@@ -379,8 +413,13 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             return;
         }
 
-        // RETRY LOGIC (Smart Wait for Local Client)
-        if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
+        // RETRY LOGIC (Smart Wait for Locally Controlled Player)
+        // Previously gated on Role < ROLE_Authority. That broke held-fire after a
+        // rapid-reclick in standalone PIE / listen server: DeferredGotoActiveState
+        // clears PendingFire on cooldown end, and without a retry queued the held
+        // shot was lost. Locally controlled is the right gate — dedicated server
+        // pawns aren't locally controlled so this still skips correctly there.
+        if (UTOwner && UTOwner->IsLocallyControlled())
         {
             // Find when the cooldown actually ends
             float MaxReadyTime = 0.f;
@@ -768,7 +807,13 @@ void AUTWeaponFix::FireShot()
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
-    
+    // Mouse-bounce debounce: stamp the release time so the next StartFire
+    // within MouseDebounceWindow is recognised as a bounce, not a new click.
+    if (LastReleaseTime.IsValidIndex(FireModeNum))
+    {
+        LastReleaseTime[FireModeNum] = GetWorld()->GetTimeSeconds();
+    }
+
     if (UTOwner)
     {
         // Only clear pending fire if user actually released the button, not if switching weapons
