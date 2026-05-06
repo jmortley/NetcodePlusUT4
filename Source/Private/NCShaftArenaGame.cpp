@@ -31,11 +31,26 @@ ANCShaftArenaGame::ANCShaftArenaGame(const FObjectInitializer& OI)
 	// DefaultInventory is left untouched here; InitGame configures it after
 	// resolving the class so a Mod.ini override can replace the BP value.
 	ShaftLinkClass = nullptr;
+
+	// Strict 1v1: same enforcement pattern AUTDuelGame uses. InitGame copies
+	// this into GameSession->MaxPlayers so the matchmaking / server-browser
+	// rejects 3rd+ joiners. Standalone PIE was previously unbounded because
+	// AUTDMGameMode default is 32.
+	DefaultMaxPlayers = 2;
+	BotFillCount      = FMath::Min(BotFillCount, 2);
 }
 
 void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+
+	// Lock MaxPlayers to 2 - AUTGameSession reads this on PreLogin and rejects
+	// connections beyond the cap. Mirrors AUTDuelGame::InitGame line 92.
+	if (GameSession)
+	{
+		GameSession->MaxPlayers = DefaultMaxPlayers;
+	}
+	BotFillCount = FMath::Min(BotFillCount, DefaultMaxPlayers);
 
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	int32 IniGoal = GoalScore;

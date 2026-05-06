@@ -193,7 +193,11 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 		const int32 Shots = PS->GetStatsValue(NAME_LinkShots)
 		                  + PS->GetStatsValue(NAME_ShockRifleShots)
 		                  + PS->GetStatsValue(NAME_SniperShots);
-		Pct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
+		// Clamp at 100% - link-beam can inflate NAME_LinkHits past Shots
+		// because beam state increments hits per damage chunk while shots
+		// only increment on trigger-pull. Replicator path already clamps;
+		// authority fallback gets it here too for consistency.
+		Pct = (Shots > 0) ? FMath::Min(float(Hits) / float(Shots) * 100.f, 100.f) : 0.f;
 	}
 	const FLinearColor AccColor = (Pct >= 35.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
 	                            : (Pct >= 20.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)

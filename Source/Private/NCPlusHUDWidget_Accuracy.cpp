@@ -160,7 +160,14 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 
 	const int32 Hits  = PS->GetStatsValue(HitsStat);
 	const int32 Shots = PS->GetStatsValue(ShotsStat);
-	const float Pct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
+	// Clamp at 100%. The link-gun BEAM increments NAME_LinkHits per damage
+	// chunk applied (every time the FiringBeam state's Accumulator crosses
+	// MinDamage) but increments NAME_LinkShots only on the initial trigger
+	// pull. Sustained beam = 1 shot, many hits = ratio inflates wildly
+	// (1000%+ in NCShaftArena). Other weapons are 1 shot = 1 hit max so
+	// the clamp is a no-op for them. Cleaner UX than showing 1978%.
+	const float RawPct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
+	const float Pct    = FMath::Min(RawPct, 100.f);
 
 	// Color tier: green ≥ 50, yellow ≥ 30, red below.
 	const FLinearColor PctColor = (Shots == 0)   ? FLinearColor(1.f, 1.f, 1.f, 0.6f)
