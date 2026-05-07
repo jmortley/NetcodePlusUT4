@@ -654,6 +654,10 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
 			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
 			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),  true,  ENCPlusHUDAnchor::TopCenter);
+			// Top-right "Score: N" + "KDA: K/D/A" mini panel. Drawn inline by
+			// ElimPlusHUD::DrawHUD and WipeoutHUD::DrawHUD. Default offset
+			// approximates the original hard-coded (ClipX*0.98, ClipY*0.015).
+			T.Emplace(TEXT("score_kda"),        FString(),                                                                       FText::FromString(TEXT("Score / KDA Mini")),   true,  ENCPlusHUDAnchor::TopRight,    FVector2D(-40.f, 16.f));
 			// Game-mode-specific draw calls.
 			T.Emplace(TEXT("shockdom_controls"),FString(),                                                                       FText::FromString(TEXT("ShockDom A/B/C Indicators")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 78.f));
 			// Live-accuracy widget for NCShaftArena (and any other mode that opts

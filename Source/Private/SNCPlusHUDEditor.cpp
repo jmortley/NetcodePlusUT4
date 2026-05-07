@@ -47,7 +47,7 @@ namespace NCHUDEdit
 		{
 			return TEXT("Weapon Bars");
 		}
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("score_kda"))
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
@@ -1059,14 +1059,17 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 				}
 			}
 
-			if (UGameUserSettings* S = GEngine ? GEngine->GetGameUserSettings() : nullptr)
+			// Use the engine's setres console command instead of
+			// SetScreenResolution + SetFullscreenMode + ApplyResolutionSettings.
+			// The settings path silently no-ops when LastConfirmed matches the
+			// current values (which they do here - GameUserSettings still
+			// thinks we're at the original resolution). setres routes through
+			// FSystemResolution::RequestResolutionChange directly and actually
+			// applies the change. "f" = exclusive fullscreen.
+			if (GEngine && GEngine->GameViewport)
 			{
-				// Explicit resolution restore - ApplyResolutionSettings reads
-				// ResolutionSizeX/Y, which the WindowedFullscreen flip may have
-				// mutated to monitor-native size.
-				S->SetScreenResolution(SavedRes);
-				S->SetFullscreenMode(EWindowMode::Fullscreen);
-				S->ApplyResolutionSettings(false);
+				const FString Cmd = FString::Printf(TEXT("setres %dx%df"), SavedRes.X, SavedRes.Y);
+				GEngine->GameViewport->ConsoleCommand(Cmd);
 			}
 		});
 

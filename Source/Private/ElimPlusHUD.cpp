@@ -471,9 +471,13 @@ void AElimPlusHUD::DrawHUD()
 			else              XOffsetBlue += BlueGrowSign * 1.1f * PipSize;
 		}
 
-		// Score / KDA mini widget (top right) — same as Wipeout
+		// Score / KDA mini widget (top right) — layout-aware via "score_kda"
+		// alias. Position, scale, and font are nchud-overridable; layout
+		// scale multiplies into FontScale so resizing in the editor actually
+		// shrinks/grows the rendered text (the unconditional 0.9f stays as
+		// the design-default scale relative to SmallFont).
 		AUTPlayerState* MyPS = GetScorerPlayerState();
-		if (MyPS && Canvas && SmallFont)
+		if (MyPS && Canvas && SmallFont && !NCPlusHUDDrawCall::IsHidden(TEXT("score_kda")))
 		{
 			const int32 Score = FMath::TruncToInt(MyPS->Score);
 			const int32 Kills = MyPS->Kills;
@@ -483,19 +487,26 @@ void AElimPlusHUD::DrawHUD()
 			FString ScoreStr = FString::Printf(TEXT("Score: %d"), Score);
 			FString KDAStr = FString::Printf(TEXT("KDA: %d / %d / %d"), Kills, Deaths, Assists);
 
-			float KDAXPos = Canvas->ClipX * 0.98f;
-			float KDAYPos = Canvas->ClipY * 0.015f;
-			const float FontScale = RenderScale * 0.9f;
+			const FVector2D StockPos(Canvas->ClipX * 0.98f, Canvas->ClipY * 0.015f);
+			const FVector2D ResolvedPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("score_kda"), Canvas, StockPos);
+			const float ElemScale = NCPlusHUDDrawCall::GetScale(TEXT("score_kda"));
+			const float FontScale = RenderScale * 0.9f * ElemScale;
+
+			UFont* KDAFont = NCPlusHUDFonts::Resolve(TEXT("score_kda"), this, SmallFont);
+			if (!KDAFont) KDAFont = SmallFont;
+
+			float KDAXPos = ResolvedPos.X;
+			float KDAYPos = ResolvedPos.Y;
 
 			float XL, YL;
-			Canvas->TextSize(SmallFont, ScoreStr, XL, YL, FontScale, FontScale);
+			Canvas->TextSize(KDAFont, ScoreStr, XL, YL, FontScale, FontScale);
 			Canvas->DrawColor = FColor(255, 255, 255, 220);
-			Canvas->DrawText(SmallFont, ScoreStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
+			Canvas->DrawText(KDAFont, ScoreStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
 			KDAYPos += YL * 1.1f;
 
-			Canvas->TextSize(SmallFont, KDAStr, XL, YL, FontScale, FontScale);
+			Canvas->TextSize(KDAFont, KDAStr, XL, YL, FontScale, FontScale);
 			Canvas->DrawColor = FColor(200, 200, 200, 200);
-			Canvas->DrawText(SmallFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
+			Canvas->DrawText(KDAFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
 		}
 	}
 }
