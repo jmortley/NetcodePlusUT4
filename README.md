@@ -21,6 +21,7 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 - **Strict tap-fire enforcement** — tap-mashing the fire button can no longer fire faster than holding it. Click queueing via retry timer means responsiveness is preserved.
 - **Trade-kill grace period** (200ms) — fire RPCs in flight when the shooter dies still register, so reciprocal kills count.
 - **Client-side hit detection (CSHD) for link gun beam** — predictive damage with server sanity-trace validation. Less laggy at high ping without giving the client total authority.
+- **Quake-style LG accuracy** — stock UT4 ticks `NAME_LinkShots` once per trigger pull, so sustained-beam Hits/Shots ratios explode past 1000%. NetcodePlus adds `NAME_LinkBeamShots` (one per refire interval, server-only) and rate-matches the hit increment via a per-interval flag (`bHitDuringCurrentRefireInterval`). Result: Hits ≤ Shots is mathematically guaranteed, scoreboards / HUD widgets show meaningful 30-70% accuracy in normal play instead of always 100%.
 
 ### Performance / High-FPS Support
 
@@ -52,7 +53,17 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
 
 ### Game Modes
 
-- **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning.
+- **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning. HUD scorebar shows count-up overtime clock with "Overtime" label (replicated via `ANCPlusCTFOTInfo`); spectator list deduplicates the engine's stock count text.
+- **NCLeagueDuel** — Strict 1v1 with paired-weapon first-spawn fairness:
+  - Map's weapon pickups grouped into pairs (Sniper↔Shock, Rocket↔Flak, Mini↔Link); first-spawn picker assigns A and B from the same pair so neither player gets a weapon-class advantage out of the gate.
+  - Shield-belt-adjacent PlayerStarts excluded from first-spawn while the belt is active.
+  - 1v1 Glicko-2 ratings persisted in `NCRatingDuel` (Mods.db). Match-end pushes per-player pre/post ELO + delta.
+  - Scoreboard: K/D, Quake-style LG accuracy column, total damage, and a 4-icon armor-pickup row (Belt/Vest/Pads/Helm) with anti-timing reveal delay (4s hold per armor type, instant on damage / match reset).
+- **NCShaftArena** — 1v1 link-gun-only beam fight, win-by-2:
+  - Shaft-only loadout (BP weapon class, configurable via Mod.ini `[NCShaftArena] WeaponClass=...`).
+  - Always-on vampirism (`SiphonPercent=0.5`, `HealCap=199`) — shaft hits heal the attacker.
+  - Glicko-2 1v1 ratings in `NCRatingShaftArena`.
+  - Link-pull yoink disabled (no "GET OVER HERE"), pickup timers stripped (no respawn-ring world spam).
 - **ElimPlus** — Round-based 4v4 team elimination, formerly TeamArena. Full competitive scoring stack:
   - Vendored TeamGlicko-2 ratings (per-player Rating / RD / Sigma persisted in `Saved/Mods.db`), per-round in-memory updates, frozen display ELO during a match → animated count-up at match end on the portrait HUD chip (green/red color tween).
   - `PickBalancedTeam` override + full pre-match `TeamBalancer` rebalance at `HandleMatchHasStarted` (fires after engine bot-fill so the pool is complete). Respects `?BalanceTeams=true/false` URL flag.
@@ -73,6 +84,21 @@ Both team-elimination modes share the same spawn picker:
 - 3-tier fallback: curated pool → curated best-of-bad (relax enemy threshold) → entire-map best-of-bad. Never returns null.
 - Capped enemy-distance bonus (5000u) so the score doesn't explode when no enemies have spawned yet (first team in a round).
 
+### HUD Editor
+
+NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-preview JSON layout system that's not present in any official UT release.
+
+- **9-anchor grid** (TopLeft / TopCenter / TopRight / CenterLeft / Center / CenterRight / BottomLeft / BottomCenter / BottomRight) plus per-element offset, scale, opacity, color overrides, font selector.
+- **Drag-drop visual editor** — repositioning happens in viewport, not text fields.
+- **Five HP/Armor visual styles** (MinimalTypography / SegmentedBars / RadialArcs / HexChevrons / VerticalPills), per-element via the `style` extra.
+- **Custom split WeaponBar** — left/right columns with per-weapon picker (decide which weapons live in which column; remaining weapons hide entirely).
+- **Live preview** — every edit applies to the active HUD without a restart. Reset-per-row and Reset-All snap back to engine defaults snapshotted at startup.
+- **JSON share via clipboard** — Copy / Paste buttons in the editor footer serialize the layout to/from the system clipboard. Validation + confirm dialog on paste. Same payload as `Saved/NetcodePlus/HUDLayout.json`.
+- **Multi-mode** — single layout file applies across all NetcodePlus modes (ElimPlus / Wipeout / NCPlusCTF / ShockDom / NCLeagueDuel / NCShaftArena).
+- **Movable engine widgets** too — the alias table covers stock CTF flag-status, crosshair, killfeed, spectator score, announcements, voice-chat status, etc. Position overrides write straight to the widget's `ScreenPosition` / `Position` / `Origin` fields.
+
+Open the editor in-game with the registered console command (see `NetcodePlus.cpp` for the bind name). Layout persists to `Saved/NetcodePlus/HUDLayout.json`.
+
 ### Mutators
 
 - **NCUTPlus** — primary mutator that replaces stock weapons with their NetcodePlus variants. Configurable per-weapon hide/show via `weaponskins` console command.
@@ -85,7 +111,9 @@ Both team-elimination modes share the same spawn picker:
 - **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
 - **Custom siphon powerup** — life-steal pickup spawning at sniper location with 90s timer.
 - **Hit-plot replicator** — server analyzes hit positions for ServerShield-style debug visualization.
-- **Stats integration** — replicates kill / hit / shot counters for StatSQL backend.
+- **Stats integration** — replicates per-player accuracy + damage + armor counts via mode-specific `AInfo` replicators (`ANCLeagueDuelStatsReplicator`, `ANCShaftArenaStatsReplicator`, `AElimPlusStatsReplicator`, `ACTFStatsReplicator`, `AWipeoutDamageReplicator`, `AShockDomReplicator`) so dedicated-server clients can read stats that are server-only on `AUTPlayerState`.
+- **Local + global ELO** — every rated mode (Duel, Shaft, ElimPlus) writes per-player Glicko-2 ratings to the hub's local `Saved/Mods.db` SQLite. On match end, hubs also push results to ut4stats.com (via StatSQL's HTTP layer) for a cross-hub global ELO leaderboard.
+- **Anti-timing armor delay** (duel scoreboard) — armor pickup counts on the scoreboard hold for 4 seconds before incrementing, so opponents / spectators / streamers can't time pickups by watching the column. Per-armor-type timer; decreases (match reset) update instantly.
 
 ## Installation
 
@@ -127,13 +155,24 @@ BotEloMax=1600
 MinimumEnemySpawnDistance=3600.0
 ```
 
-Mods.db schema for ELO data (server-only, gated by `USE_SQLITE = UE_SERVER`):
+Mods.db schema for ELO data (server-only, gated by `USE_SQLITE = UE_SERVER`). One table per rated mode; all live in `Saved/Mods.db`:
 
 ```sql
+-- ElimPlus (team-based Glicko-2 + per-round PPR)
 SELECT UniqueId, Rating, RD, Sigma, TotalPoints, RoundsPlayed,
        (TotalPoints / NULLIF(RoundsPlayed, 0)) AS LifetimePPR
 FROM NCRatingElimPlus;
+
+-- NCLeagueDuel (1v1 Glicko-2)
+SELECT UniqueId, Rating, RD, Sigma, GamesPlayed, Wins, Losses, Draws
+FROM NCRatingDuel;
+
+-- NCShaftArena (1v1 Glicko-2, beam-only)
+SELECT UniqueId, Rating, RD, Sigma, GamesPlayed, Wins, Losses, Draws
+FROM NCRatingShaftArena;
 ```
+
+Hubs use these tables as the local source of truth. A parallel push to ut4stats.com (via StatSQL) feeds a cross-hub global ELO leaderboard so a player's rating accumulates across all participating hubs.
 
 ### Lag Compensation Tunables (BP-editable on weapon classes)
 
