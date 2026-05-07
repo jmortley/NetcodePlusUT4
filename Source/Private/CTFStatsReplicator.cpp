@@ -67,19 +67,22 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 		Entry.PlayerId = UTPS->UniqueId.ToString();
 		Entry.FlagGrabs = UTPS->GetStatsValue(NAME_FlagGrabs);
 
-		// Auto-detect instagib vs normal hitscan
+		// Auto-detect instagib vs normal hitscan. Instagib mode shows
+		// instagib accuracy; everything else shows LG-only (per-tick beam
+		// Hits/Shots), matching duel/shaft. Shock-rifle and rifles are
+		// excluded because their accuracy isn't representative of the LG
+		// fights that actually decide CTF picks.
 		int32 InstagibShots = UTPS->GetStatsValue(NAME_InstagibShots);
 		if (InstagibShots > 0)
 		{
-			Entry.HitscanHits = UTPS->GetStatsValue(NAME_InstagibHits);
+			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_InstagibHits);
 			Entry.HitscanShots = InstagibShots;
 		}
 		else
 		{
-			Entry.HitscanHits = UTPS->GetStatsValue(NAME_LightningRifleHits)
-				+ UTPS->GetStatsValue(NAME_SniperHits);
-			Entry.HitscanShots = UTPS->GetStatsValue(NAME_LightningRifleShots)
-				+ UTPS->GetStatsValue(NAME_SniperShots);
+			static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_LinkHits);
+			Entry.HitscanShots = UTPS->GetStatsValue(NAME_LinkBeamShots);
 		}
 
 		StatsEntries.Add(Entry);

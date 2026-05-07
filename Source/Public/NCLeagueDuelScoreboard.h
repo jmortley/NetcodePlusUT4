@@ -31,4 +31,19 @@ protected:
 	 *  icon (per-player row). If null, only the icons render (column header).
 	 *  Counts ordering: [Belt, Vest, Pads, Helmet]. */
 	void DrawArmorIconRow(float CenterX, float CenterY, const uint8* Counts, FLinearColor IconTint);
+
+private:
+	/** Anti-timing armor count delay. When a player picks up armor, the
+	 *  scoreboard column doesn't increment for ScoreboardArmorRevealDelay
+	 *  seconds — viewers (other players, spectators, streamers) can't time
+	 *  pickups by watching count increments. Decreases (match reset) update
+	 *  instantly. Per-armor-type timer so independent pickups don't extend
+	 *  each other's hold. Set to 0 to disable. */
+	static constexpr float ScoreboardArmorRevealDelay = 4.0f;
+	struct FArmorDelayState
+	{
+		uint8 DisplayedCounts[4]   = { 0, 0, 0, 0 };
+		float PendingRevealAt[4]   = { 0.f, 0.f, 0.f, 0.f };
+	};
+	TMap<FString, FArmorDelayState> ArmorDelayCache;
 };

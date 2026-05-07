@@ -63,15 +63,16 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 			? UTPS->UniqueId.ToString()
 			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
 
-		// Same combined-hitscan formula the scoreboard was already using locally —
-		// LG + Shock + Sniper. NCLeagueDuel doesn't really care about flak/rocket
-		// accuracy for "skill" display; this matches duel convention.
-		const float Hits  = UTPS->GetStatsValue(NAME_LinkHits)
-		                  + UTPS->GetStatsValue(NAME_ShockRifleHits)
-		                  + UTPS->GetStatsValue(NAME_SniperHits);
-		const float Shots = UTPS->GetStatsValue(NAME_LinkShots)
-		                  + UTPS->GetStatsValue(NAME_ShockRifleShots)
-		                  + UTPS->GetStatsValue(NAME_SniperShots);
+		// LG-only accuracy: per-tick beam Hits/Shots (Quake-style). Stock
+		// shock + sniper used to be summed in here, but the duel scoreboard
+		// is meant to highlight precision LG play. Shock-dom and instagib
+		// modes have their own scoreboards with mode-appropriate stats.
+		// NAME_LinkBeamShots is the per-refire-tick counter from
+		// UTWeap_LinkGun_Plus::ConsumeAmmo (NOT NAME_LinkShots which only
+		// ticks per trigger pull and inflates the ratio).
+		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+		const float Hits  = UTPS->GetStatsValue(NAME_LinkHits);
+		const float Shots = UTPS->GetStatsValue(NAME_LinkBeamShots);
 
 		if (Shots > 0.f)
 		{

@@ -194,16 +194,13 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	// instead of waiting on the 1Hz tick.
 	if (Pct == 0.f && GetWorld() && GetWorld()->GetNetMode() != NM_Client)
 	{
-		const int32 Hits  = PS->GetStatsValue(NAME_LinkHits)
-		                  + PS->GetStatsValue(NAME_ShockRifleHits)
-		                  + PS->GetStatsValue(NAME_SniperHits);
-		const int32 Shots = PS->GetStatsValue(NAME_LinkShots)
-		                  + PS->GetStatsValue(NAME_ShockRifleShots)
-		                  + PS->GetStatsValue(NAME_SniperShots);
-		// Clamp at 100% - link-beam can inflate NAME_LinkHits past Shots
-		// because beam state increments hits per damage chunk while shots
-		// only increment on trigger-pull. Replicator path already clamps;
-		// authority fallback gets it here too for consistency.
+		// LG-only accuracy: per-tick Hits/Shots ratio. NAME_LinkBeamShots is
+		// the per-refire-tick counter from UTWeap_LinkGun_Plus::ConsumeAmmo
+		// — NOT NAME_LinkShots which only ticks per trigger pull. Replicator
+		// path uses the same pair; this fallback aligns with it.
+		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+		const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
+		const int32 Shots = PS->GetStatsValue(NAME_LinkBeamShots);
 		Pct = (Shots > 0) ? FMath::Min(float(Hits) / float(Shots) * 100.f, 100.f) : 0.f;
 	}
 	const FLinearColor AccColor = (Pct >= 35.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
@@ -235,25 +232,59 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	// Armor pickup row (replaces the Eff% column). Reads counts from the
 	// stats replicator with the same authority-fallback the accuracy column
 	// uses so listen-server / standalone don't wait on the 1Hz tick.
-	uint8 Counts[4] = { 0, 0, 0, 0 };
+	uint8 RealCounts[4] = { 0, 0, 0, 0 };
 	if (ANCLeagueDuelStatsReplicator* Rep = FindNCLeagueDuelStatsReplicator(GetWorld()))
 	{
-		Counts[0] = Rep->GetBeltCountForPlayer(PlayerId);
-		Counts[1] = Rep->GetVestCountForPlayer(PlayerId);
-		Counts[2] = Rep->GetPadsCountForPlayer(PlayerId);
-		Counts[3] = Rep->GetHelmetCountForPlayer(PlayerId);
+		RealCounts[0] = Rep->GetBeltCountForPlayer(PlayerId);
+		RealCounts[1] = Rep->GetVestCountForPlayer(PlayerId);
+		RealCounts[2] = Rep->GetPadsCountForPlayer(PlayerId);
+		RealCounts[3] = Rep->GetHelmetCountForPlayer(PlayerId);
 	}
-	if (Counts[0] == 0 && Counts[1] == 0 && Counts[2] == 0 && Counts[3] == 0
+	if (RealCounts[0] == 0 && RealCounts[1] == 0 && RealCounts[2] == 0 && RealCounts[3] == 0
 		&& GetWorld() && GetWorld()->GetNetMode() != NM_Client)
 	{
 		const auto Clamp255 = [](float V) -> uint8 {
 			return uint8(FMath::Clamp(FMath::RoundToInt(V), 0, 255));
 		};
-		Counts[0] = Clamp255(PS->GetStatsValue(NAME_ShieldBeltCount));
-		Counts[1] = Clamp255(PS->GetStatsValue(NAME_ArmorVestCount));
-		Counts[2] = Clamp255(PS->GetStatsValue(NAME_ArmorPadsCount));
-		Counts[3] = Clamp255(PS->GetStatsValue(NAME_HelmetCount));
+		RealCounts[0] = Clamp255(PS->GetStatsValue(NAME_ShieldBeltCount));
+		RealCounts[1] = Clamp255(PS->GetStatsValue(NAME_ArmorVestCount));
+		RealCounts[2] = Clamp255(PS->GetStatsValue(NAME_ArmorPadsCount));
+		RealCounts[3] = Clamp255(PS->GetStatsValue(NAME_HelmetCount));
 	}
+
+	// Anti-timing reveal delay. Pickups (RealCount > Displayed) hold for
+	// ScoreboardArmorRevealDelay seconds before the count increments on the
+	// scoreboard, so viewers (other players, spectators, streamers) can't
+	// time armor pickups by watching the column. Decreases (match reset)
+	// update instantly. Per-armor-type timer so a belt pickup doesn't
+	// extend a vest hold. Cache is keyed on PlayerId — ResetLive isn't
+	// called on map load, so stale entries from prior matches just decay
+	// when their counts are seen lower than the displayed value.
+	const float Now = GetWorld()->GetTimeSeconds();
+	FArmorDelayState& State = ArmorDelayCache.FindOrAdd(PlayerId);
+	uint8 Counts[4] = { 0, 0, 0, 0 };
+	for (int32 i = 0; i < 4; ++i)
+	{
+		if (RealCounts[i] < State.DisplayedCounts[i])
+		{
+			State.DisplayedCounts[i] = RealCounts[i];
+			State.PendingRevealAt[i] = 0.f;
+		}
+		else if (RealCounts[i] > State.DisplayedCounts[i])
+		{
+			if (State.PendingRevealAt[i] <= 0.f)
+			{
+				State.PendingRevealAt[i] = Now + ScoreboardArmorRevealDelay;
+			}
+			if (Now >= State.PendingRevealAt[i])
+			{
+				State.DisplayedCounts[i] = RealCounts[i];
+				State.PendingRevealAt[i] = 0.f;
+			}
+		}
+		Counts[i] = State.DisplayedCounts[i];
+	}
+
 	// Per-player armor icons: tint WHITE so the artwork's natural colors come
 	// through. The previous code passed DrawColor (the row's team color) which
 	// multiplied against the icon RGB and turned the icons into dim blobs.

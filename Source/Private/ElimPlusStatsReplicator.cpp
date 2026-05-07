@@ -123,10 +123,12 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		}
 		else
 		{
-			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots)
-			             + UTPS->GetStatsValue(NAME_LightningRifleShots);
-			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)
-			             + UTPS->GetStatsValue(NAME_LightningRifleHits);
+			// LG-only (per-tick beam Hits/Shots) for non-instagib play —
+			// matches duel/shaft. NAME_LinkBeamShots is the per-refire-tick
+			// counter from UTWeap_LinkGun_Plus::ConsumeAmmo.
+			static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+			HitscanHits  = UTPS->GetStatsValue(NAME_LinkHits);
+			HitscanShots = UTPS->GetStatsValue(NAME_LinkBeamShots);
 		}
 		if (HitscanShots > 0.f)
 		{
