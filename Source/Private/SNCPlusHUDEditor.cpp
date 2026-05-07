@@ -1067,19 +1067,25 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 				}
 			}
 
-			// Route setres through the local PlayerController's console exec.
-			// The settings-path (SetScreenResolution + ApplyResolutionSettings)
-			// silently no-ops because GameUserSettings believes nothing changed
-			// (LastConfirmed still matches). setres bypasses that gate and
-			// drives FSystemResolution::RequestResolutionChange directly.
-			// "f" = exclusive fullscreen.
-			const FString Cmd = FString::Printf(TEXT("setres %dx%df"), SavedRes.X, SavedRes.Y);
-			if (UUTLocalPlayer* LP = WeakLP.Get())
+			// Route setres through the local PlayerController's console exec
+			// (same path as typing in the in-game console). No "f" suffix —
+			// that forces exclusive fullscreen and the FSE re-attach was
+			// failing; without the suffix setres preserves the current mode
+			// (WindowedFullscreen, after the swap). On a single monitor
+			// WindowedFullscreen is visually identical to FSE; FSE's only
+			// real win is exclusive swap-chain ownership which doesn't
+			// matter for typical play.
+			const FString Cmd = FString::Printf(TEXT("setres %dx%d"), SavedRes.X, SavedRes.Y);
+			UUTLocalPlayer* LP = WeakLP.Get();
+			APlayerController* PC = LP ? LP->PlayerController : nullptr;
+			UE_LOG(LogTemp, Log,
+				TEXT("[NCPlusHUDEditor] FSE picker close: cmd='%s' LP=%s PC=%s"),
+				*Cmd,
+				LP ? TEXT("ok") : TEXT("null"),
+				PC ? TEXT("ok") : TEXT("null"));
+			if (PC)
 			{
-				if (APlayerController* PC = LP->PlayerController)
-				{
-					PC->ConsoleCommand(Cmd);
-				}
+				PC->ConsoleCommand(Cmd);
 			}
 		});
 
