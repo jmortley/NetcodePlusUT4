@@ -1014,7 +1014,8 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 		// the wrong display.
 		if (GEngine && GEngine->GameViewport)
 		{
-			if (TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow())
+			TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow();
+			if (GameWindow.IsValid())
 			{
 				SavedWindowPos = GameWindow->GetPositionInScreen();
 				bHaveWindowPos = true;
@@ -1051,12 +1052,10 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 			// the engine picks the correct monitor when it re-establishes FSE.
 			if (bHaveWindowPos && GEngine && GEngine->GameViewport)
 			{
-				if (TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow())
+				TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow();
+				if (GameWindow.IsValid() && GameWindow->GetPositionInScreen() != SavedWindowPos)
 				{
-					if (GameWindow->GetPositionInScreen() != SavedWindowPos)
-					{
-						GameWindow->MoveWindowTo(SavedWindowPos);
-					}
+					GameWindow->MoveWindowTo(SavedWindowPos);
 				}
 			}
 
