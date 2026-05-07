@@ -427,12 +427,30 @@ FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
 		return Layout;
 	}
 
+	bool bOk = false;
+	Layout = FromJsonString(Raw, bOk);
+	if (!bOk)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[NCPlusHUDLayout] Failed to parse JSON at %s — falling back to defaults."), *Path);
+		return FNCPlusHUDLayout();
+	}
+	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Loaded %d element(s), %d weapon group(s) from %s"),
+		Layout.Elements.Num(), Layout.WeaponGroupAssignments.Num(), *Path);
+	return Layout;
+}
+
+FNCPlusHUDLayout FNCPlusHUDLayout::FromJsonString(const FString& Raw, bool& bOutOk)
+{
+	bOutOk = false;
+	FNCPlusHUDLayout Layout;
+
+	if (Raw.IsEmpty()) return Layout;
+
 	TSharedPtr<FJsonObject> Root;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Raw);
 	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[NCPlusHUDLayout] Failed to parse JSON at %s — falling back to defaults."), *Path);
-		return Layout;
+		return Layout;   // bOutOk stays false
 	}
 
 	// Version (forward-compat: future loaders can branch on this)
@@ -513,12 +531,11 @@ FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] Loaded %d element(s), %d weapon group(s) from %s"),
-		Layout.Elements.Num(), Layout.WeaponGroupAssignments.Num(), *Path);
+	bOutOk = true;
 	return Layout;
 }
 
-bool FNCPlusHUDLayout::SaveToFile(const FString& Path) const
+FString FNCPlusHUDLayout::ToJsonString() const
 {
 	TSharedRef<FJsonObject> Root = MakeShareable(new FJsonObject);
 	Root->SetNumberField(TEXT("version"), Version);
@@ -556,10 +573,14 @@ bool FNCPlusHUDLayout::SaveToFile(const FString& Path) const
 	FString Out;
 	TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer
 		= TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&Out);
-	if (!FJsonSerializer::Serialize(Root, Writer))
-	{
-		return false;
-	}
+	FJsonSerializer::Serialize(Root, Writer);
+	return Out;
+}
+
+bool FNCPlusHUDLayout::SaveToFile(const FString& Path) const
+{
+	const FString Out = ToJsonString();
+	if (Out.IsEmpty()) return false;
 
 	// Ensure target directory exists.
 	const FString Dir = FPaths::GetPath(Path);

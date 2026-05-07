@@ -21,6 +21,8 @@
 #include "Widgets/Colors/SColorPicker.h"
 #include "Engine/Engine.h"
 #include "GameFramework/GameUserSettings.h"
+#include "HAL/PlatformMisc.h"     // FPlatformMisc::ClipboardCopy/Paste (UE 4.15)
+#include "Misc/MessageDialog.h"
 
 namespace NCHUDEdit
 {
@@ -485,6 +487,20 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildFooter()
 			.Text(FText::FromString(TEXT("Reset All")))
 			.OnClicked(this, &SNCPlusHUDEditor::OnResetAllClicked)
 		]
+		+ SHorizontalBox::Slot().AutoWidth().Padding(0,0,8,0)
+		[
+			SNew(SButton)
+			.Text(FText::FromString(TEXT("Copy to Clipboard")))
+			.ToolTipText(FText::FromString(TEXT("Copy this layout to the system clipboard as JSON. Share it with anyone — they can paste it into their HUD editor.")))
+			.OnClicked(this, &SNCPlusHUDEditor::OnCopyToClipboardClicked)
+		]
+		+ SHorizontalBox::Slot().AutoWidth().Padding(0,0,8,0)
+		[
+			SNew(SButton)
+			.Text(FText::FromString(TEXT("Paste from Clipboard")))
+			.ToolTipText(FText::FromString(TEXT("Replace the current layout with JSON from the clipboard. Confirms before overwriting.")))
+			.OnClicked(this, &SNCPlusHUDEditor::OnPasteFromClipboardClicked)
+		]
 		+ SHorizontalBox::Slot().FillWidth(1.f)  // spacer
 		+ SHorizontalBox::Slot().AutoWidth()
 		[
@@ -739,6 +755,79 @@ FReply SNCPlusHUDEditor::OnResetAllClicked()
 FReply SNCPlusHUDEditor::OnCloseClicked()
 {
 	ClosePanel();
+	return FReply::Handled();
+}
+
+FReply SNCPlusHUDEditor::OnCopyToClipboardClicked()
+{
+	const FString Json = FNCPlusHUDLayout::GetLive().ToJsonString();
+	FPlatformMisc::ClipboardCopy(*Json);
+	const int32 NumElems = FNCPlusHUDLayout::GetLive().Elements.Num();
+	SetStatus(FString::Printf(TEXT("Copied %d element(s) to clipboard."), NumElems));
+	return FReply::Handled();
+}
+
+FReply SNCPlusHUDEditor::OnPasteFromClipboardClicked()
+{
+	FString Pasted;
+	FPlatformMisc::ClipboardPaste(Pasted);
+	if (Pasted.IsEmpty())
+	{
+		SetStatus(TEXT("Clipboard is empty."));
+		return FReply::Handled();
+	}
+
+	bool bOk = false;
+	FNCPlusHUDLayout Parsed = FNCPlusHUDLayout::FromJsonString(Pasted, bOk);
+	if (!bOk)
+	{
+		FMessageDialog::Open(EAppMsgType::Ok,
+			FText::FromString(TEXT("Clipboard does not contain valid HUD layout JSON.")));
+		SetStatus(TEXT("Paste failed: invalid JSON."));
+		return FReply::Handled();
+	}
+
+	const int32 NumIncoming = Parsed.Elements.Num();
+	const int32 NumCurrent  = FNCPlusHUDLayout::GetLive().Elements.Num();
+	const FString Prompt = FString::Printf(
+		TEXT("Replace your current layout (%d element override(s)) with the clipboard layout (%d element(s))?\n\n")
+		TEXT("This won't write to disk until you click 'Save to Disk'."),
+		NumCurrent, NumIncoming);
+
+	if (FMessageDialog::Open(EAppMsgType::YesNo, FText::FromString(Prompt)) != EAppReturnType::Yes)
+	{
+		SetStatus(TEXT("Paste cancelled."));
+		return FReply::Handled();
+	}
+
+	FNCPlusHUDLayout::GetLive() = MoveTemp(Parsed);
+	FNCPlusHUDLayout::MarkLiveDirty();
+	// Refresh combo selections so the editor rows reflect the new state.
+	// Anchor + style + font combos all need to match the pasted layout —
+	// otherwise the next interaction would write the stale combo value back
+	// and silently revert the paste for that property.
+	{
+		TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
+		for (FNCHUDEditorRow& Row : Rows)
+		{
+			const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(Row.Alias);
+			const ENCPlusHUDAnchor Anchor = Elem ? Elem->Anchor
+				: NCPlusHUDAliases::GetStockAnchor(Row.Alias);
+			if (Row.AnchorCombo.IsValid())
+			{
+				Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[(int32)Anchor]);
+			}
+			if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
+			{
+				Row.StyleCombo->SetSelectedItem(Row.StyleChoices[0]);
+			}
+			if (Row.bHasFontPicker && Row.FontCombo.IsValid() && Row.FontChoices.Num() > 0)
+			{
+				Row.FontCombo->SetSelectedItem(Row.FontChoices[0]);
+			}
+		}
+	}
+	SetStatus(FString::Printf(TEXT("Pasted %d element(s) from clipboard."), NumIncoming));
 	return FReply::Handled();
 }
 

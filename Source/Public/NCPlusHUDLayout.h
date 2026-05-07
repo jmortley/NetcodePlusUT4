@@ -168,6 +168,15 @@ struct FNCPlusHUDLayout
 	/** Write layout to JSON file. Returns true on success. */
 	bool SaveToFile(const FString& Path) const;
 
+	/** Serialize to a pretty-printed JSON string. Same payload SaveToFile
+	 *  writes — share-to-clipboard uses this. */
+	FString ToJsonString() const;
+
+	/** Parse a JSON string. Sets bOutOk=true on success, false (and returns
+	 *  empty layout) on parse failure or schema mismatch. Used by paste-from-
+	 *  clipboard import and unit-test seams. */
+	static FNCPlusHUDLayout FromJsonString(const FString& Json, bool& bOutOk);
+
 	/** Default location: <ProjectSaved>/NetcodePlus/HUDLayout.json
 	 *  (Single shared file across all NetcodePlus modes — ElimPlus, Wipeout,
 	 *  NCPlusCTF, ShockDom — so users configure once and it applies everywhere.) */

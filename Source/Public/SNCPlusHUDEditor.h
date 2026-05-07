@@ -145,6 +145,8 @@ private:
 	FReply OnReloadClicked();
 	FReply OnResetAllClicked();
 	FReply OnCloseClicked();
+	FReply OnCopyToClipboardClicked();
+	FReply OnPasteFromClipboardClicked();
 
 	// Status banner ("Saved.", "Reloaded.", etc.)
 	TSharedPtr<class STextBlock> StatusText;
