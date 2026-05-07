@@ -118,7 +118,8 @@ void AShockDomHUD::DrawTeamScoreBar(AUTGameState* GS)
 	int32 Secs = RemainingTime % 60;
 	FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 
-	float ClockScale = RenderScale * 1.1f * ScoreScale;
+	const float FontExtraScale = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
+	float ClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
 	float XL, YL;
 	Canvas->TextSize(MediumFont, ClockStr, XL, YL, ClockScale, ClockScale);
 

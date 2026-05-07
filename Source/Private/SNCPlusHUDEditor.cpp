@@ -1043,8 +1043,16 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	// lambda is independent of `this` lifetime - the editor panel could
 	// outlive the picker, but mode-restore is a pure GEngine operation
 	// that doesn't need editor state. Fires for both commit and cancel.
+	// Capture PlayerOwner weakly so the lambda can route the setres exec
+	// through APlayerController::ConsoleCommand — that path goes through
+	// UPlayer::Exec → FSystemResolution::RequestResolutionChange, which is
+	// what actually applies the resolution change (same path the user types
+	// `setres` from in the in-game console). UGameViewportClient::ConsoleCommand
+	// goes through a different exec stack and was silently dropping the call.
+	TWeakObjectPtr<UUTLocalPlayer> WeakLP = PlayerOwner;
+
 	PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateLambda(
-		[SavedMode, SavedRes, SavedWindowPos, bHaveWindowPos](const TSharedRef<SWindow>& /*ClosedWindow*/)
+		[SavedMode, SavedRes, SavedWindowPos, bHaveWindowPos, WeakLP](const TSharedRef<SWindow>& /*ClosedWindow*/)
 		{
 			if (SavedMode != EWindowMode::Fullscreen) return;
 
@@ -1059,17 +1067,19 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 				}
 			}
 
-			// Use the engine's setres console command instead of
-			// SetScreenResolution + SetFullscreenMode + ApplyResolutionSettings.
-			// The settings path silently no-ops when LastConfirmed matches the
-			// current values (which they do here - GameUserSettings still
-			// thinks we're at the original resolution). setres routes through
-			// FSystemResolution::RequestResolutionChange directly and actually
-			// applies the change. "f" = exclusive fullscreen.
-			if (GEngine && GEngine->GameViewport)
+			// Route setres through the local PlayerController's console exec.
+			// The settings-path (SetScreenResolution + ApplyResolutionSettings)
+			// silently no-ops because GameUserSettings believes nothing changed
+			// (LastConfirmed still matches). setres bypasses that gate and
+			// drives FSystemResolution::RequestResolutionChange directly.
+			// "f" = exclusive fullscreen.
+			const FString Cmd = FString::Printf(TEXT("setres %dx%df"), SavedRes.X, SavedRes.Y);
+			if (UUTLocalPlayer* LP = WeakLP.Get())
 			{
-				const FString Cmd = FString::Printf(TEXT("setres %dx%df"), SavedRes.X, SavedRes.Y);
-				GEngine->GameViewport->ConsoleCommand(Cmd);
+				if (APlayerController* PC = LP->PlayerController)
+				{
+					PC->ConsoleCommand(Cmd);
+				}
 			}
 		});
 

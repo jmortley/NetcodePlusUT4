@@ -439,7 +439,8 @@ void AWipeoutHUD::DrawHUD()
 			const FVector2D StockPos(Canvas->ClipX * 0.98f, Canvas->ClipY * 0.015f);
 			const FVector2D ResolvedPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("score_kda"), Canvas, StockPos);
 			const float ElemScale = NCPlusHUDDrawCall::GetScale(TEXT("score_kda"));
-			float FontScale = RenderScale * 0.9f * ElemScale;
+			const float FontExtra = NCPlusHUDFonts::ResolveScale(TEXT("score_kda"), 1.f);
+			float FontScale = RenderScale * 0.9f * ElemScale * FontExtra;
 
 			UFont* KDAFont = NCPlusHUDFonts::Resolve(TEXT("score_kda"), this, SmallFont);
 			if (!KDAFont) KDAFont = SmallFont;
@@ -563,8 +564,12 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	if (!TeamNameFont)  TeamNameFont  = SmallFont;
 	if (!TeamScoreFont) TeamScoreFont = LargeFont;
 
-	float FontScale = RenderScale * 0.85f * ScoreScale;
-	float LargeFontScale = RenderScale * 1.2f * ScoreScale;
+	// font_scale Extras lets the user shrink/grow text independently of
+	// bar dimensions. Useful for tall fonts (Extreme) where ScoreScale alone
+	// doesn't shrink LargeFont enough (1.2 * 0.85 ≈ 1.02 = barely changed).
+	const float FontExtraScale = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
+	float FontScale = RenderScale * 0.85f * ScoreScale * FontExtraScale;
+	float LargeFontScale = RenderScale * 1.2f * ScoreScale * FontExtraScale;
 	float XL, YL;
 
 	// Team 0 name (right-aligned inside left bar)
@@ -644,7 +649,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		}
 	}
 
-	float RoundClockScale = RenderScale * 1.1f * ScoreScale;
+	float RoundClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
 	if (ClockSeconds >= 0)
 	{
 		int32 RMins = ClockSeconds / 60;

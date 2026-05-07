@@ -490,7 +490,8 @@ void AElimPlusHUD::DrawHUD()
 			const FVector2D StockPos(Canvas->ClipX * 0.98f, Canvas->ClipY * 0.015f);
 			const FVector2D ResolvedPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("score_kda"), Canvas, StockPos);
 			const float ElemScale = NCPlusHUDDrawCall::GetScale(TEXT("score_kda"));
-			const float FontScale = RenderScale * 0.9f * ElemScale;
+			const float FontExtra = NCPlusHUDFonts::ResolveScale(TEXT("score_kda"), 1.f);
+			const float FontScale = RenderScale * 0.9f * ElemScale * FontExtra;
 
 			UFont* KDAFont = NCPlusHUDFonts::Resolve(TEXT("score_kda"), this, SmallFont);
 			if (!KDAFont) KDAFont = SmallFont;
@@ -584,8 +585,13 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->SetLinearDrawColor(FLinearColor::White);
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
-	const float FontScale = RenderScale * 0.85f * ScoreScale;
-	const float LargeFontScale = RenderScale * 1.2f * ScoreScale;
+	// font_scale Extras lets the user shrink/grow text independently of bar
+	// dimensions. Useful for tall fonts (Extreme) where ScoreScale alone
+	// undershoots because the LargeFont 1.2x multiplier offsets the bar
+	// shrink (1.2 * 0.85 ≈ 1.02 = barely changed).
+	const float FontExtraScale = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
+	const float FontScale = RenderScale * 0.85f * ScoreScale * FontExtraScale;
+	const float LargeFontScale = RenderScale * 1.2f * ScoreScale * FontExtraScale;
 	float XL, YL;
 
 	// Per-element font override (Phase 3.8). Single "scorebar" alias drives
@@ -636,7 +642,7 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		RoundTime = CachedRoundProp->GetPropertyValue_InContainer(GS);
 	}
 
-	const float RoundClockScale = RenderScale * 1.1f * ScoreScale;
+	const float RoundClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
 	if (RoundTime >= 0)
 	{
 		const int32 RMins = RoundTime / 60;

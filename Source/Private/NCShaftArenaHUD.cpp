@@ -115,8 +115,11 @@ void ANCShaftArenaHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->SetLinearDrawColor(FLinearColor::White);
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
-	const float FontScale = RenderScale * 0.85f * ScoreScale;
-	const float LargeFontScale = RenderScale * 1.2f * ScoreScale;
+	// font_scale Extras lets the user shrink/grow text independently of bar
+	// dimensions (useful for tall fonts like Extreme).
+	const float FontExtraScale = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
+	const float FontScale = RenderScale * 0.85f * ScoreScale * FontExtraScale;
+	const float LargeFontScale = RenderScale * 1.2f * ScoreScale * FontExtraScale;
 	float XL, YL;
 
 	// Per-element font override (Phase 3.8). FFA uses player names instead
@@ -171,7 +174,7 @@ void ANCShaftArenaHUD::DrawTeamScoreBar(AUTGameState* GS)
 		}
 	}
 
-	const float RoundClockScale = RenderScale * 1.1f * ScoreScale;
+	const float RoundClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
 	if (ClockSeconds >= 0)
 	{
 		const int32 RMins = ClockSeconds / 60;

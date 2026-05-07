@@ -179,8 +179,11 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 
 	// Text — single "scorebar" font override drives both team-name and
 	// score-number fonts (Phase 3.8).
-	float FontScale = RenderScale * 0.85f * ScoreScale;
-	float LargeFontScale = RenderScale * 1.2f * ScoreScale;
+	// font_scale Extras lets the user shrink/grow text independently of bar
+	// dimensions (useful for tall fonts like Extreme).
+	const float FontExtraScale = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
+	float FontScale = RenderScale * 0.85f * ScoreScale * FontExtraScale;
+	float LargeFontScale = RenderScale * 1.2f * ScoreScale * FontExtraScale;
 	float XL, YL;
 
 	UFont* TeamNameFont  = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, SmallFont);
@@ -217,7 +220,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	// Match clock (CTF uses match time, not round time)
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	float ClockBottomY = ClockY;
-	float RoundClockScale = RenderScale * 1.1f * ScoreScale;
+	float RoundClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
 
 	// OT detection: GetMatchState() == MatchState::MatchIsInOvertime.
 	// IsMatchInOvertime() is virtual on UTGameState so it reads the same on
