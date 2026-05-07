@@ -67,6 +67,29 @@ struct FElimPlusBalanceResult
 	bool bValid = false;
 };
 
+/** Per-player audit info supplied by the gamemode at match end. UniqueId must
+ *  match the rating system's cache key (FString from AUTPlayerState::StatsID
+ *  or PlayerName, NOT the synthetic "BOT:..." prefix — bots are filtered out
+ *  before the payload is built). */
+struct FNCElimPlusPlayerInput
+{
+	FString UniqueId;
+	FString PlayerName;
+	int32   TeamIndex = 0;        // 0 = red, 1 = blue
+	int32   Kills     = 0;        // match-aggregate
+	int32   Deaths    = 0;
+	int32   Damage    = 0;
+};
+
+/** Match-end payload input. WinnerTeamIndex is 0/1; -1 means draw. */
+struct FNCElimPlusMatchInput
+{
+	int32 WinnerTeamIndex = 0;
+	int32 RedScore        = 0;
+	int32 BlueScore       = 0;
+	TArray<FNCElimPlusPlayerInput> Players;
+};
+
 /** Pimpl: opaque forward decl of the implementation struct. The real definition
  *  lives in ElimPlusRatingSystem.cpp where it can freely use TeamGlicko2 types. */
 struct FElimPlusRatingSystemImpl;
@@ -134,6 +157,12 @@ public:
 
 	/** Drop a player from the cache (e.g. on Logout, well after the match). */
 	void Forget(const FString& UniqueId);
+
+	/** Build the JSON payload pushed to ut4stats.com for global-ELO updates.
+	 *  Call AFTER FlushAtMatchEnd so RatingCache holds final values (including
+	 *  any bot-match clamp). Bots (UIds not in RatingCache) are filtered out.
+	 *  Returns an empty string if no human players have cache entries. */
+	FString BuildResultPayload(UWorld* World, const FNCElimPlusMatchInput& In) const;
 
 private:
 	TUniquePtr<FElimPlusRatingSystemImpl> Impl;

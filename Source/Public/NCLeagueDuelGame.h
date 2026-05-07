@@ -123,6 +123,12 @@ protected:
 	 *  in HandleMatchHasEnded. */
 	TUniquePtr<FNCDuelRatingSystem> RatingSystem;
 
+	/** Idempotency guard: HandleMatchHasEnded is sometimes routed twice by the
+	 *  engine state machine. Mirrors AElimPlusGame::bRatingFlushedThisMatch.
+	 *  Reset in InitGame; set true after the first ProcessMatchResult+Flush+upload. */
+	UPROPERTY(Transient)
+	bool bRatingFlushedThisMatch = false;
+
 	/** Replicates per-player hitscan accuracy to clients. AUTPlayerState's
 	 *  StatsData TMap (which holds NAME_LinkHits / NAME_ShockRifleHits etc.)
 	 *  is server-only — without this replicator the duel scoreboard's Acc

@@ -76,6 +76,12 @@ public:
 protected:
 	TUniquePtr<FNCShaftArenaRatingSystem> RatingSystem;
 
+	/** Idempotency guard: HandleMatchHasEnded is sometimes routed twice by the
+	 *  engine state machine. Mirrors AElimPlusGame::bRatingFlushedThisMatch.
+	 *  Reset in InitGame; set true after the first RecordMatchResult+Flush+upload. */
+	UPROPERTY(Transient)
+	bool bRatingFlushedThisMatch = false;
+
 	/** Tracks longest unbroken kill streak this match per PS — fed into the
 	 *  awards system at match end. */
 	TMap<TWeakObjectPtr<AUTPlayerState>, int32> CurrentStreak;

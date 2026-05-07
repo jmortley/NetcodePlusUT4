@@ -15,6 +15,7 @@
 #include "NCShaftArenaHUD.h"
 #include "NCShaftArenaRatingSystem.h"
 #include "NCShaftArenaStatsReplicator.h"
+#include "NCEloUploader.h"
 #include "NCStatsUploader.h"
 #include "UTWeap_LinkGun_Plus.h"
 
@@ -47,6 +48,9 @@ ANCShaftArenaGame::ANCShaftArenaGame(const FObjectInitializer& OI)
 void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+
+	// Reset per-match state so a re-init (map travel) starts clean.
+	bRatingFlushedThisMatch = false;
 
 	// Lock MaxPlayers to 2 - AUTGameSession reads this on PreLogin and rejects
 	// connections beyond the cap. Mirrors AUTDuelGame::InitGame line 92.
@@ -148,6 +152,11 @@ void ANCShaftArenaGame::HandleMatchHasEnded()
 	Super::HandleMatchHasEnded();
 	if (Role != ROLE_Authority || !RatingSystem || !UTGameState) return;
 
+	// Engine routes HandleMatchHasEnded twice in some paths. Without this guard
+	// rating math, DB write, AND upload would fire twice — corrupting counters
+	// and double-pushing the global ELO.
+	if (bRatingFlushedThisMatch) return;
+
 	// Resolve top two scorers (FFA, but should be 1v1 in practice).
 	AUTPlayerState* Winner = nullptr;
 	AUTPlayerState* Loser  = nullptr;
@@ -174,7 +183,27 @@ void ANCShaftArenaGame::HandleMatchHasEnded()
 			WinnerAcc, LoserAcc,
 			WinnerStreak, LoserStreak);
 		RatingSystem->Flush(GetWorld());
+
+		// Push the global-ELO update to ut4stats.com.
+		FNCShaftArenaMatchInput UploadIn;
+		UploadIn.WinnerId       = WinnerId;
+		UploadIn.WinnerName     = Winner->PlayerName;
+		UploadIn.WinnerScore    = Winner->Score;
+		UploadIn.WinnerStreak   = WinnerStreak;
+		UploadIn.WinnerAccuracy = WinnerAcc;
+		UploadIn.LoserId        = LoserId;
+		UploadIn.LoserName      = Loser->PlayerName;
+		UploadIn.LoserScore     = Loser->Score;
+		UploadIn.LoserStreak    = LoserStreak;
+		UploadIn.LoserAccuracy  = LoserAcc;
+		const FString Json = RatingSystem->BuildResultPayload(GetWorld(), UploadIn);
+		if (!Json.IsEmpty())
+		{
+			FNCEloUploader::PostMatchResult(GetWorld(), Json);
+		}
 	}
+
+	bRatingFlushedThisMatch = true;
 
 	FNCMatchSummary Summary;
 	BuildMatchSummary(Summary);

@@ -31,6 +31,19 @@ struct FNCDuelPlayerEntry
 	int32   SchemaVersion = 1;
 };
 
+/** Per-match payload input — gamemode supplies winner/loser identity + scores;
+ *  rating system fills in pre/post/RD/sigma from its caches. */
+struct FNCDuelMatchInput
+{
+	FString WinnerId;
+	FString WinnerName;
+	int32   WinnerScore = 0;
+	FString LoserId;
+	FString LoserName;
+	int32   LoserScore  = 0;
+	bool    bDraw       = false;
+};
+
 struct FNCDuelRatingSystemImpl;
 
 class NETCODEPLUS_API FNCDuelRatingSystem
@@ -67,6 +80,11 @@ public:
 	/** Capture each loaded player's rating as the "match start" reference for
 	 *  PreMatchElo lookups. Call from HandleMatchHasStarted. */
 	void SnapshotMatchStart();
+
+	/** Build the JSON payload pushed to ut4stats.com for global-ELO updates.
+	 *  Call AFTER ProcessMatchResult+Flush so RatingCache holds post-match values.
+	 *  Returns an empty string if the cache lookup fails (logs a warning). */
+	FString BuildResultPayload(UWorld* World, const FNCDuelMatchInput& In) const;
 
 private:
 	TUniquePtr<FNCDuelRatingSystemImpl> Impl;

@@ -3,7 +3,12 @@
 #include "NCShaftArenaRatingSystem.h"
 #include "UnrealTournament.h"
 #include "UTGameInstance.h"
+#include "UTGameState.h"               // ServerName for BuildResultPayload
 #include "Engine/World.h"
+#include "Misc/DateTime.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 #include "TeamGlickoRating.h"
 #include "TeamGlicko2System.h"
@@ -248,6 +253,81 @@ void FNCShaftArenaRatingSystem::Forget(const FString& UniqueId)
 	Impl->RatingCache.Remove(UniqueId);
 	Impl->EntryCache.Remove(UniqueId);
 	Impl->RatingAtMatchStart.Remove(UniqueId);
+}
+
+FString FNCShaftArenaRatingSystem::BuildResultPayload(UWorld* World, const FNCShaftArenaMatchInput& In) const
+{
+	using namespace TeamGlicko2;
+
+	const PlayerRating* WinnerPR = Impl->RatingCache.Find(In.WinnerId);
+	const PlayerRating* LoserPR  = Impl->RatingCache.Find(In.LoserId);
+	if (!WinnerPR || !LoserPR)
+	{
+		UE_LOG(LogNCShaftArenaRating, Warning,
+			TEXT("BuildResultPayload: cache miss for W=%s L=%s — skipping upload"),
+			*In.WinnerId, *In.LoserId);
+		return FString();
+	}
+
+	const int32 WinnerPre = Impl->RatingAtMatchStart.FindRef(In.WinnerId);
+	const int32 LoserPre  = Impl->RatingAtMatchStart.FindRef(In.LoserId);
+
+	FString ServerName;
+	if (World)
+	{
+		if (AUTGameState* GS = World->GetGameState<AUTGameState>())
+		{
+			ServerName = GS->ServerName;
+		}
+	}
+	FString MapName;
+	if (World)
+	{
+		MapName = World->GetMapName();
+		MapName.RemoveFromStart(World->StreamingLevelsPrefix);
+	}
+	const FString PlayedAtUtc = FDateTime::UtcNow().ToIso8601();
+
+	FString Out;
+	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+
+	Writer->WriteObjectStart();
+	Writer->WriteValue(TEXT("request"),       FString(TEXT("elo_match_result")));
+	Writer->WriteValue(TEXT("mode"),          FString(TEXT("ShaftArena")));
+	Writer->WriteValue(TEXT("server"),        ServerName);
+	Writer->WriteValue(TEXT("map"),           MapName);
+	Writer->WriteValue(TEXT("played_at_utc"), PlayedAtUtc);
+	Writer->WriteArrayStart(TEXT("players"));
+
+	auto WritePlayer = [&Writer](const FString& Id, const FString& Name, const TCHAR* Result,
+	                              int32 Score, int32 Streak, float AccuracyPct,
+	                              int32 PreElo, const PlayerRating& PR)
+	{
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("id"),           Id);
+		Writer->WriteValue(TEXT("name"),         Name);
+		Writer->WriteValue(TEXT("result"),       FString(Result));
+		Writer->WriteValue(TEXT("score"),        Score);
+		Writer->WriteValue(TEXT("best_streak"),  Streak);
+		Writer->WriteValue(TEXT("accuracy_pct"), static_cast<double>(AccuracyPct));
+		Writer->WriteValue(TEXT("pre"),          static_cast<double>(PreElo));
+		Writer->WriteValue(TEXT("post"),         PR.GetRating());
+		Writer->WriteValue(TEXT("rd"),           PR.GetRD());
+		Writer->WriteValue(TEXT("sigma"),        PR.GetSigma());
+		Writer->WriteObjectEnd();
+	};
+
+	WritePlayer(In.WinnerId, In.WinnerName, TEXT("win"),
+	            In.WinnerScore, In.WinnerStreak, In.WinnerAccuracy, WinnerPre, *WinnerPR);
+	WritePlayer(In.LoserId, In.LoserName, TEXT("loss"),
+	            In.LoserScore, In.LoserStreak, In.LoserAccuracy, LoserPre, *LoserPR);
+
+	Writer->WriteArrayEnd();
+	Writer->WriteObjectEnd();
+	Writer->Close();
+
+	return Out;
 }
 
 TArray<FNCShaftArenaPlayerEntry> FNCShaftArenaRatingSystem::GetTopPlayers(UWorld* World, int32 N)

@@ -5,8 +5,13 @@
 #include "ElimPlusRatingSystem.h"
 #include "UnrealTournament.h"
 #include "UTGameInstance.h"            // FDatabaseRow + ExecDatabaseCommand
+#include "UTGameState.h"               // ServerName for BuildResultPayload
 #include "ElimPlusStatsReplicator.h"
 #include "Engine/World.h"
+#include "Misc/DateTime.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 
 // Vendored TeamGlicko2 — included only here, never via the .h.
 #include "TeamGlickoRating.h"
@@ -458,6 +463,113 @@ int32 FElimPlusRatingSystem::GetOrAssignBotElo(const FString& UniqueId)
 	Impl->BotEloCache.Add(UniqueId, NewElo);
 	UE_LOG(LogElimPlusRating, Verbose, TEXT("Assigned bot ELO %d to %s"), NewElo, *UniqueId);
 	return NewElo;
+}
+
+FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPlusMatchInput& In) const
+{
+	using namespace TeamGlicko2;
+
+	// Filter to humans (= cache entries that exist). Bots have either no cache
+	// entry (their MatchResult contributions used transient placeholder ratings)
+	// or a synthetic "BOT:..." key that LoadPlayerFromDB never seeds. Either way
+	// they're absent from RatingCache and don't appear in RatingAtMatchStart.
+	TArray<int32> HumanIndices;
+	HumanIndices.Reserve(In.Players.Num());
+	for (int32 i = 0; i < In.Players.Num(); ++i)
+	{
+		const FNCElimPlusPlayerInput& P = In.Players[i];
+		if (P.UniqueId.IsEmpty()) continue;
+		if (Impl->RatingCache.Contains(P.UniqueId))
+		{
+			HumanIndices.Add(i);
+		}
+	}
+	if (HumanIndices.Num() == 0)
+	{
+		UE_LOG(LogElimPlusRating, Warning,
+			TEXT("BuildResultPayload: no human players in cache — skipping upload"));
+		return FString();
+	}
+
+	FString ServerName;
+	if (World)
+	{
+		if (AUTGameState* GS = World->GetGameState<AUTGameState>())
+		{
+			ServerName = GS->ServerName;
+		}
+	}
+	FString MapName;
+	if (World)
+	{
+		MapName = World->GetMapName();
+		MapName.RemoveFromStart(World->StreamingLevelsPrefix);
+	}
+	const FString PlayedAtUtc = FDateTime::UtcNow().ToIso8601();
+
+	FString Out;
+	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+
+	Writer->WriteObjectStart();
+	Writer->WriteValue(TEXT("request"),       FString(TEXT("elo_match_result")));
+	Writer->WriteValue(TEXT("mode"),          FString(TEXT("ElimPlus")));
+	Writer->WriteValue(TEXT("server"),        ServerName);
+	Writer->WriteValue(TEXT("map"),           MapName);
+	Writer->WriteValue(TEXT("played_at_utc"), PlayedAtUtc);
+	Writer->WriteValue(TEXT("winner_team"),   In.WinnerTeamIndex);
+	Writer->WriteValue(TEXT("red_score"),     In.RedScore);
+	Writer->WriteValue(TEXT("blue_score"),    In.BlueScore);
+	Writer->WriteArrayStart(TEXT("players"));
+
+	for (int32 Idx : HumanIndices)
+	{
+		const FNCElimPlusPlayerInput& P = In.Players[Idx];
+		const PlayerRating* PR = Impl->RatingCache.Find(P.UniqueId);
+		if (!PR) continue; // shouldn't happen — we filtered above
+
+		const int32 PreElo = Impl->RatingAtMatchStart.FindRef(P.UniqueId);
+		const int32 PostElo = FMath::RoundToInt(PR->GetRating());
+		const int32 Delta = (PreElo != 0) ? (PostElo - PreElo) : 0;
+
+		const TCHAR* Result;
+		if (In.WinnerTeamIndex < 0)
+		{
+			Result = TEXT("draw");
+		}
+		else
+		{
+			Result = (P.TeamIndex == In.WinnerTeamIndex) ? TEXT("win") : TEXT("loss");
+		}
+
+		const double TotalPoints  = Impl->TotalPointsCache.FindRef(P.UniqueId);
+		const int32  RoundsPlayed = Impl->RoundsPlayedCache.FindRef(P.UniqueId);
+		const bool   bFacedHumans = Impl->HumansWithHumanOpposition.Contains(P.UniqueId);
+
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("id"),             P.UniqueId);
+		Writer->WriteValue(TEXT("name"),           P.PlayerName);
+		Writer->WriteValue(TEXT("team"),           P.TeamIndex);
+		Writer->WriteValue(TEXT("result"),         FString(Result));
+		Writer->WriteValue(TEXT("kills"),          P.Kills);
+		Writer->WriteValue(TEXT("deaths"),         P.Deaths);
+		Writer->WriteValue(TEXT("damage"),         P.Damage);
+		Writer->WriteValue(TEXT("pre"),            static_cast<double>(PreElo));
+		Writer->WriteValue(TEXT("post"),           PR->GetRating());
+		Writer->WriteValue(TEXT("delta"),          Delta);
+		Writer->WriteValue(TEXT("rd"),             PR->GetRD());
+		Writer->WriteValue(TEXT("sigma"),          PR->GetSigma());
+		Writer->WriteValue(TEXT("total_points"),   TotalPoints);
+		Writer->WriteValue(TEXT("rounds_played"),  RoundsPlayed);
+		Writer->WriteValue(TEXT("faced_humans"),   bFacedHumans);
+		Writer->WriteObjectEnd();
+	}
+
+	Writer->WriteArrayEnd();
+	Writer->WriteObjectEnd();
+	Writer->Close();
+
+	return Out;
 }
 
 FElimPlusBalanceResult FElimPlusRatingSystem::ComputeBalancedTeams(const TArray<FElimPlusBalanceInput>& Players)

@@ -3,6 +3,7 @@
 #include "ElimPlusStatsReplicator.h"
 #include "ElimPlusHUD.h"
 #include "ElimPlusRatingSystem.h"
+#include "NCEloUploader.h"
 //#include "GSInterface.h"
 //#include "ArenaPlayerCameraManager.h"
 #include "UTTeamGameMode.h"
@@ -373,6 +374,56 @@ void AElimPlusGame::HandleMatchHasEnded()
 	{
 		RatingSystem->FlushAtMatchEnd(GetWorld(), StatsReplicator);
 		bRatingFlushedThisMatch = true;
+
+		// Build + push the global-ELO payload to ut4stats.com. Walk the player
+		// array once, gather per-player audit data, hand off to the rating
+		// system to fill in pre/post/RD/sigma from its caches.
+		AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+		if (GS)
+		{
+			FNCElimPlusMatchInput UploadIn;
+
+			// Winner team from Teams[].Score; -1 on draw.
+			int32 RedScore  = 0;
+			int32 BlueScore = 0;
+			if (GS->Teams.Num() >= 2 && GS->Teams[0] && GS->Teams[1])
+			{
+				RedScore  = static_cast<int32>(GS->Teams[0]->Score);
+				BlueScore = static_cast<int32>(GS->Teams[1]->Score);
+			}
+			UploadIn.RedScore  = RedScore;
+			UploadIn.BlueScore = BlueScore;
+			if (RedScore > BlueScore)      UploadIn.WinnerTeamIndex = 0;
+			else if (BlueScore > RedScore) UploadIn.WinnerTeamIndex = 1;
+			else                            UploadIn.WinnerTeamIndex = -1;
+
+			for (APlayerState* APS : GS->PlayerArray)
+			{
+				AUTPlayerState* UTPS = Cast<AUTPlayerState>(APS);
+				if (!UTPS || UTPS->bOnlySpectator) continue;
+				// Bots have invalid UniqueId — rating system filter drops them, but
+				// we can short-circuit here to avoid bloating the payload.
+				if (!UTPS->UniqueId.IsValid()) continue;
+
+				FNCElimPlusPlayerInput P;
+				// ElimPlus rating system keys on UniqueId.ToString() (see PostLogin
+				// at LoadPlayerFromDB call). Must match exactly or the cache lookup
+				// in BuildResultPayload misses.
+				P.UniqueId   = UTPS->UniqueId.ToString();
+				P.PlayerName = UTPS->PlayerName;
+				P.TeamIndex  = UTPS->GetTeamNum();
+				P.Kills      = UTPS->Kills;
+				P.Deaths     = UTPS->Deaths;
+				P.Damage     = static_cast<int32>(UTPS->DamageDone);
+				UploadIn.Players.Add(MoveTemp(P));
+			}
+
+			const FString Json = RatingSystem->BuildResultPayload(GetWorld(), UploadIn);
+			if (!Json.IsEmpty())
+			{
+				FNCEloUploader::PostMatchResult(GetWorld(), Json);
+			}
+		}
 	}
 }
 

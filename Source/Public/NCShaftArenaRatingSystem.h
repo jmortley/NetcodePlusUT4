@@ -29,6 +29,23 @@ struct FNCShaftArenaPlayerEntry
 	int32   SchemaVersion       = 1;
 };
 
+/** Payload input for the global-ELO push. Includes the same fields as
+ *  RecordMatchResult plus the player display names (which the rating system
+ *  doesn't otherwise need). */
+struct FNCShaftArenaMatchInput
+{
+	FString WinnerId;
+	FString WinnerName;
+	int32   WinnerScore     = 0;
+	int32   WinnerStreak    = 0;
+	float   WinnerAccuracy  = 0.f;
+	FString LoserId;
+	FString LoserName;
+	int32   LoserScore      = 0;
+	int32   LoserStreak     = 0;
+	float   LoserAccuracy   = 0.f;
+};
+
 struct FNCShaftArenaRatingSystemImpl;
 
 class NETCODEPLUS_API FNCShaftArenaRatingSystem
@@ -73,6 +90,11 @@ public:
 
 	/** Return top-N entries by Rating descending (live query — not cached). */
 	TArray<FNCShaftArenaPlayerEntry> GetTopPlayers(UWorld* World, int32 N);
+
+	/** Build the JSON payload pushed to ut4stats.com for global-ELO updates.
+	 *  Call AFTER RecordMatchResult+Flush so RatingCache holds post-match values.
+	 *  Returns an empty string if the cache lookup fails (logs a warning). */
+	FString BuildResultPayload(UWorld* World, const FNCShaftArenaMatchInput& In) const;
 
 private:
 	TUniquePtr<FNCShaftArenaRatingSystemImpl> Impl;

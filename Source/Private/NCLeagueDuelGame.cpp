@@ -17,6 +17,7 @@
 #include "StatNames.h"
 #include "NCLeagueDuelHUD.h"
 #include "NCDuelRatingSystem.h"
+#include "NCEloUploader.h"
 #include "NCStatsUploader.h"
 #include "NCLeagueDuelStatsReplicator.h"
 #include "UTPickup.h"
@@ -70,6 +71,9 @@ ANCLeagueDuelGame::ANCLeagueDuelGame(const FObjectInitializer& OI)
 void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+
+	// Reset per-match state so a re-init (map travel) starts clean.
+	bRatingFlushedThisMatch = false;
 
 	// Mod.ini overrides — same pattern as ElimPlusGame.
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
@@ -253,6 +257,12 @@ void ANCLeagueDuelGame::HandleMatchHasEnded()
 	Super::HandleMatchHasEnded();
 	if (Role != ROLE_Authority || !RatingSystem || !UTGameState) return;
 
+	// Engine routes HandleMatchHasEnded twice in some paths (state machine +
+	// derived). Without a guard the rating math, DB write, AND upload would
+	// fire twice — corrupting GamesPlayed counters and creating a duplicate
+	// global-ELO row on the Django side.
+	if (bRatingFlushedThisMatch) return;
+
 	// Identify the two duelists. With more than 2 players (server testing /
 	// spectators), use the top-2 scorers — duel intends 1v1.
 	AUTPlayerState* P1 = nullptr;
@@ -272,7 +282,25 @@ void ANCLeagueDuelGame::HandleMatchHasEnded()
 		const FString LoserId  = P2->StatsID.IsEmpty() ? P2->PlayerName : P2->StatsID;
 		RatingSystem->ProcessMatchResult(WinnerId, LoserId, bDraw);
 		RatingSystem->Flush(GetWorld());
+
+		// Push the global-ELO update to ut4stats.com. Builds JSON from cached
+		// rating state (which is now post-Flush) + caller-supplied identity.
+		FNCDuelMatchInput UploadIn;
+		UploadIn.WinnerId    = WinnerId;
+		UploadIn.WinnerName  = P1->PlayerName;
+		UploadIn.WinnerScore = P1->Score;
+		UploadIn.LoserId     = LoserId;
+		UploadIn.LoserName   = P2->PlayerName;
+		UploadIn.LoserScore  = P2->Score;
+		UploadIn.bDraw       = bDraw;
+		const FString Json = RatingSystem->BuildResultPayload(GetWorld(), UploadIn);
+		if (!Json.IsEmpty())
+		{
+			FNCEloUploader::PostMatchResult(GetWorld(), Json);
+		}
 	}
+
+	bRatingFlushedThisMatch = true;
 
 	FNCMatchSummary Summary;
 	BuildMatchSummary(Summary);
