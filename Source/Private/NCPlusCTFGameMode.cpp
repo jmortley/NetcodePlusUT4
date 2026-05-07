@@ -131,19 +131,6 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 			}
 		}
 	}
-
-	// Spawn the CTF stats replicator HERE (was in HandleMatchHasStarted).
-	// During warmup the scoreboard renders too — without an existing
-	// replicator, FindStatsReplicator() returns null, the layout selection
-	// defaults to NormalLayout (Armors/Amp columns), and instagib matches
-	// show the wrong scoreboard until the match formally starts. Spawning
-	// in InitGame guarantees the replicator exists from frame one.
-	if (HasAuthority() && !CTFStatsRep)
-	{
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.Owner = this;
-		CTFStatsRep = GetWorld()->SpawnActor<ACTFStatsReplicator>(SpawnParams);
-	}
 }
 
 bool ANCPlusCTFGameMode::SupportsInstantReplay() const
@@ -762,11 +749,18 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		Super::HandleMatchHasStarted();
 	}
 
-	// CTFStatsRep is spawned in InitGame now so it exists during warmup —
-	// the scoreboard's instagib-vs-normal layout selection reads bIsInstagibMatch
-	// off the replicator, and without an existing replicator during warmup the
-	// client falls back to the non-instagib layout (showing Armors/Amp columns
-	// that don't apply to instagib). See ANCPlusCTFGameMode::InitGame.
+	// Spawn CTF stats replicator for scoreboard (grabs, accuracy).
+	// MUST stay in HandleMatchHasStarted — spawning in BeginPlay or earlier
+	// is documented to cause client crashes (see ElimPlusGame.cpp:236-237 +
+	// WipeoutGame.cpp:254-255). Side effect: scoreboard's instagib-vs-normal
+	// layout falls back to NormalLayout during warmup because the replicator
+	// doesn't exist yet. Accepted trade-off vs the crash risk.
+	if (HasAuthority() && !CTFStatsRep)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		CTFStatsRep = GetWorld()->SpawnActor<ACTFStatsReplicator>(SpawnParams);
+	}
 
 	// Per-weapon hits/shots replicator for the accuracy HUD widget.
 	ANCAccuracyStatsReplicator::EnsureSpawned(this);
