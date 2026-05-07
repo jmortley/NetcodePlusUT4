@@ -20,6 +20,7 @@
 #include "NCEloUploader.h"
 #include "NCStatsUploader.h"
 #include "NCLeagueDuelStatsReplicator.h"
+#include "NCAccuracyStatsReplicator.h"
 #include "UTPickup.h"
 #include "Particles/ParticleSystemComponent.h"
 
@@ -117,6 +118,9 @@ void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options,
 		SpawnParams.Owner = this;
 		StatsReplicator = GetWorld()->SpawnActor<ANCLeagueDuelStatsReplicator>(SpawnParams);
 	}
+
+	// Per-weapon hits/shots replicator for the accuracy HUD widget.
+	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 }
 
 void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)

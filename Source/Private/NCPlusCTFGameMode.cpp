@@ -25,6 +25,7 @@
 #include "NPPlayerController.h"
 #include "NCPlusCTFHUD.h"
 #include "CTFStatsReplicator.h"
+#include "NCAccuracyStatsReplicator.h"
 #include "NCPlusCTFOTInfo.h"
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
@@ -755,6 +756,9 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		SpawnParams.Owner = this;
 		CTFStatsRep = GetWorld()->SpawnActor<ACTFStatsReplicator>(SpawnParams);
 	}
+
+	// Per-weapon hits/shots replicator for the accuracy HUD widget.
+	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 
 	// Spawn OT info replicator so the HUD can render an OT count-up clock.
 	// OvertimeStartElapsed gets stamped in HandleEnteringOvertime / the

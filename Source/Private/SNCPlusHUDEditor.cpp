@@ -19,6 +19,7 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Widgets/Colors/SColorPicker.h"
+#include "Widgets/SWindow.h"
 #include "Engine/Engine.h"
 #include "GameFramework/GameUserSettings.h"
 #include "HAL/PlatformMisc.h"     // FPlatformMisc::ClipboardCopy/Paste (UE 4.15)
@@ -997,9 +998,29 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	// bCheckForCommandLineOverrides=false so we don't trigger a respawn /
 	// resolution change beyond the window-mode flip.
 	EWindowMode::Type SavedMode = EWindowMode::Windowed;
+	FIntPoint         SavedRes  = FIntPoint::ZeroValue;
+	FVector2D         SavedWindowPos = FVector2D::ZeroVector;
+	bool              bHaveWindowPos = false;
+
 	if (UGameUserSettings* Settings = GEngine ? GEngine->GetGameUserSettings() : nullptr)
 	{
 		SavedMode = Settings->GetFullscreenMode();
+		SavedRes  = Settings->GetScreenResolution();
+
+		// Capture main game window position BEFORE the borderless flip so we can
+		// restore FSE on the same monitor. UE 4.15 has no PreferredMonitorIndex -
+		// the engine binds FSE to whichever monitor the main window is currently
+		// on. If the window drifts during the picker session, FSE re-attaches to
+		// the wrong display.
+		if (GEngine && GEngine->GameViewport)
+		{
+			if (TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow())
+			{
+				SavedWindowPos = GameWindow->GetPositionInScreen();
+				bHaveWindowPos = true;
+			}
+		}
+
 		if (SavedMode == EWindowMode::Fullscreen)
 		{
 			Settings->SetFullscreenMode(EWindowMode::WindowedFullscreen);
@@ -1022,15 +1043,31 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	// outlive the picker, but mode-restore is a pure GEngine operation
 	// that doesn't need editor state. Fires for both commit and cancel.
 	PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateLambda(
-		[SavedMode](const TSharedRef<SWindow>& /*ClosedWindow*/)
+		[SavedMode, SavedRes, SavedWindowPos, bHaveWindowPos](const TSharedRef<SWindow>& /*ClosedWindow*/)
 		{
-			if (SavedMode == EWindowMode::Fullscreen)
+			if (SavedMode != EWindowMode::Fullscreen) return;
+
+			// Move the main window back to its original screen position FIRST so
+			// the engine picks the correct monitor when it re-establishes FSE.
+			if (bHaveWindowPos && GEngine && GEngine->GameViewport)
 			{
-				if (UGameUserSettings* S = GEngine ? GEngine->GetGameUserSettings() : nullptr)
+				if (TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow())
 				{
-					S->SetFullscreenMode(EWindowMode::Fullscreen);
-					S->ApplyResolutionSettings(false);
+					if (GameWindow->GetPositionInScreen() != SavedWindowPos)
+					{
+						GameWindow->MoveWindowTo(SavedWindowPos);
+					}
 				}
+			}
+
+			if (UGameUserSettings* S = GEngine ? GEngine->GetGameUserSettings() : nullptr)
+			{
+				// Explicit resolution restore - ApplyResolutionSettings reads
+				// ResolutionSizeX/Y, which the WindowedFullscreen flip may have
+				// mutated to monitor-native size.
+				S->SetScreenResolution(SavedRes);
+				S->SetFullscreenMode(EWindowMode::Fullscreen);
+				S->ApplyResolutionSettings(false);
 			}
 		});
 

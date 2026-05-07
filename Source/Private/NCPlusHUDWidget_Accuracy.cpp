@@ -23,8 +23,10 @@
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "Engine/Canvas.h"
+#include "EngineUtils.h"
 #include "StatNames.h"
 #include "NCPlusHUDLayout.h"
+#include "NCAccuracyStatsReplicator.h"
 
 namespace
 {
@@ -170,8 +172,23 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 		ShotsStat = NAME_LinkBeamShots;
 	}
 
-	const int32 Hits  = PS->GetStatsValue(HitsStat);
-	const int32 Shots = PS->GetStatsValue(ShotsStat);
+	// AUTPlayerState::StatsData is server-only (UPROPERTY with no Replicated
+	// specifier). On dedicated-server clients PS->GetStatsValue returns 0 for
+	// every stat. Fall back to the per-weapon replicator (spawned by every
+	// NCPlus gamemode) which broadcasts the standard weapon hits/shots at 2Hz.
+	int32 Hits  = PS->GetStatsValue(HitsStat);
+	int32 Shots = PS->GetStatsValue(ShotsStat);
+	if (Hits == 0 && Shots == 0)
+	{
+		if (ANCAccuracyStatsReplicator* Rep = GetAccuracyReplicator())
+		{
+			const FString PlayerId = PS->UniqueId.IsValid()
+				? PS->UniqueId.ToString()
+				: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+			Hits  = Rep->GetHitsForPlayer (PlayerId, HitsStat);
+			Shots = Rep->GetShotsForPlayer(PlayerId, ShotsStat);
+		}
+	}
 	// Clamp at 100% as a defensive backstop.
 	const float RawPct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
 	const float Pct    = FMath::Min(RawPct, 100.f);
@@ -214,4 +231,21 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 	DrawText(FText::FromString(SubStr), Size.X * 0.5f, NumberY + 48.f,
 		SmallFnt, RenderScale, 1.0f, FLinearColor(1.f, 1.f, 1.f, 0.85f),
 		ETextHorzPos::Center, ETextVertPos::Top);
+}
+
+ANCAccuracyStatsReplicator* UNCPlusHUDWidget_Accuracy::GetAccuracyReplicator() const
+{
+	if (CachedAccuracyReplicator.IsValid())
+	{
+		return CachedAccuracyReplicator.Get();
+	}
+	if (!IsValid(UTHUDOwner)) return nullptr;
+	UWorld* World = UTHUDOwner->GetWorld();
+	if (!World) return nullptr;
+	for (TActorIterator<ANCAccuracyStatsReplicator> It(World); It; ++It)
+	{
+		CachedAccuracyReplicator = *It;
+		return *It;
+	}
+	return nullptr;
 }

@@ -15,9 +15,13 @@
 #include "NCShaftArenaHUD.h"
 #include "NCShaftArenaRatingSystem.h"
 #include "NCShaftArenaStatsReplicator.h"
+#include "NCAccuracyStatsReplicator.h"
 #include "NCEloUploader.h"
 #include "NCStatsUploader.h"
 #include "UTWeap_LinkGun_Plus.h"
+#include "UTPickup.h"
+#include "UTDroppedPickup.h"
+#include "EngineUtils.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCShaftArena, Log, All);
 
@@ -116,6 +120,9 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 		SpawnParams.Owner = this;
 		StatsReplicator = GetWorld()->SpawnActor<ANCShaftArenaStatsReplicator>(SpawnParams);
 	}
+
+	// Per-weapon hits/shots replicator for the accuracy HUD widget.
+	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 }
 
 void ANCShaftArenaGame::BeginPlay()
@@ -126,6 +133,36 @@ void ANCShaftArenaGame::BeginPlay()
 
 	RatingSystem = MakeUnique<FNCShaftArenaRatingSystem>();
 	FNCShaftArenaRatingSystem::InitDatabase(GetWorld());
+
+	// 1v1 shaft is link-only by design — strip every map pickup (weapons,
+	// armor, ammo, powerups, health) so the map is bare arena. Players spawn
+	// with the configured ShaftLinkClass and that's it; no item routes, no
+	// armor advantage, no flak/rocket pickups to fall back on.
+	//
+	// AUTPickup is the base for armor / ammo / health / weapon / powerup
+	// spawners. AUTDroppedPickup covers death-drops (link guns from kills);
+	// destroying those too keeps the floor clean.
+	int32 RemovedPickups = 0;
+	for (TActorIterator<AUTPickup> It(GetWorld()); It; ++It)
+	{
+		if (AUTPickup* P = *It)
+		{
+			P->Destroy();
+			++RemovedPickups;
+		}
+	}
+	int32 RemovedDropped = 0;
+	for (TActorIterator<AUTDroppedPickup> It(GetWorld()); It; ++It)
+	{
+		if (AUTDroppedPickup* DP = *It)
+		{
+			DP->Destroy();
+			++RemovedDropped;
+		}
+	}
+	UE_LOG(LogNCShaftArena, Log,
+		TEXT("BeginPlay: stripped %d pickup(s) + %d dropped pickup(s) — 1v1 shaft = bare map"),
+		RemovedPickups, RemovedDropped);
 }
 
 void ANCShaftArenaGame::PostLogin(APlayerController* NewPlayer)
@@ -209,6 +246,18 @@ void ANCShaftArenaGame::HandleMatchHasEnded()
 	BuildMatchSummary(Summary);
 	FNCStatsUploader::PostToUT4Stats(GetWorld(), Summary);
 	FNCStatsUploader::PostToStatSQL(GetWorld(), Summary);
+}
+
+void ANCShaftArenaGame::DiscardInventory(APawn* Other, AController* Killer)
+{
+	// Intentional no-op: 1v1 shaft is link-only and players always respawn
+	// with the configured ShaftLinkClass, so dropping the dead pawn's weapon
+	// adds nothing but visual clutter. The held weapon is destroyed with the
+	// pawn (engine handles cleanup); no AUTDroppedPickup spawns.
+	//
+	// Stock AUTGameMode::DiscardInventory tosses weapon + flag handling. Flag
+	// handling is N/A here (no CTF objects in shaft), so the empty override
+	// is safe.
 }
 
 // =============================================================================

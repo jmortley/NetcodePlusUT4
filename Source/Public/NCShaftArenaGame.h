@@ -46,6 +46,13 @@ public:
 		APawn* KilledPawn, TSubclassOf<UDamageType> DamageType) override;
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer) override;
 
+	/** Suppress death-drops. 1v1 shaft is link-only by design — every player
+	 *  spawns with the configured ShaftLinkClass, no reason to litter the
+	 *  floor with dropped link guns when someone dies. Empty override means
+	 *  the held weapon goes with the pawn at destruction; no AUTDroppedPickup
+	 *  spawns. */
+	virtual void DiscardInventory(APawn* Other, AController* Killer = nullptr) override;
+
 	/** Win condition: first to GoalScore kills (default 10), but only if their
 	 *  margin over the next-best player is at least MinWinMargin (default 2).
 	 *  Both configurable via Mod.ini [NCShaftArena]. */

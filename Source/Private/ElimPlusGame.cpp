@@ -1,6 +1,7 @@
 #include "ElimPlusGame.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
+#include "NCAccuracyStatsReplicator.h"
 #include "ElimPlusHUD.h"
 #include "ElimPlusRatingSystem.h"
 #include "NCEloUploader.h"
@@ -240,6 +241,9 @@ void AElimPlusGame::HandleMatchHasStarted()
 		SpawnParams.Owner = this;
 		StatsReplicator = GetWorld()->SpawnActor<AElimPlusStatsReplicator>(SpawnParams);
 	}
+
+	// Per-weapon hits/shots replicator for the accuracy HUD widget.
+	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 
 	// Replicate the bBalanceTeams URL flag to clients so the HUD's pre-match
 	// team-balance preview overlay can hide when the admin disabled balancing.

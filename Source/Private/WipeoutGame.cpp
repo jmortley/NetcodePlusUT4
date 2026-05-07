@@ -18,6 +18,7 @@
 #include "UTPickupInventory.h"
 #include "Engine/DemoNetDriver.h"
 #include "WipeoutDamageReplicator.h"
+#include "NCAccuracyStatsReplicator.h"
 #include "TeamArenaCharacter.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
@@ -258,6 +259,10 @@ void AUWipeoutGame::HandleMatchHasStarted()
 		SpawnParams.Owner = this;
 		DamageReplicator = GetWorld()->SpawnActor<AWipeoutDamageReplicator>(SpawnParams);
 	}
+
+	// Per-weapon hits/shots replicator — Wipeout doesn't show accuracy by
+	// default but the widget is opt-in via nchud, so spawn defensively.
+	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 
 	// Spawn Siphon pickup here — BP actors fail to spawn during BeginPlay
 	// because their packages aren't fully loaded yet.

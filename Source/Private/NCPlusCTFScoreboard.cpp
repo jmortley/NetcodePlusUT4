@@ -9,6 +9,7 @@
 #include "Engine/World.h"
 #include "UTBot.h"
 #include "UTHUD.h"
+#include "UTArmor.h"
 #include "Engine/Canvas.h"
 
 UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectInitializer)
@@ -17,32 +18,50 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	bDrawMinimapInScoreboard = false;
 	CellWidth = 850.f; // Match Wipeout — plenty of room for 8 columns
 
-	// Column positions (fraction of CellWidth).
-	// PlayerX 0.09: engine draws the country flag at FlagX=0.01 with a ~36px
-	// texture (~6-7% of CellWidth). The previous 0.02 put the clan-tag-
-	// prefixed name on top of the flag, so [SV] / [U★P] / etc. crowded the
-	// flag glyph. 0.09 sits one cell to the right of the flag; engine default
-	// for the same situation is 0.10. Stat-column positions kept at their
-	// original spots — name area is now 0.09 → 0.32 (~23% of CellWidth, plenty
-	// for typical names + clan tags).
-	ColumnHeaderPlayerX  = 0.09f;
-	ColumnHeaderKillsX   = 0.32f;
-	ColumnHeaderDeathsX  = 0.37f;
-	ColumnHeaderEffX     = 0.45f;
-	ColumnHeaderAccX     = 0.54f;
-	ColumnHeaderCapsX2   = 0.63f;
-	ColumnHeaderGrabsX   = 0.72f;
-	ColumnHeaderReturnsX2 = 0.81f;
-	ColumnHeaderPingX    = 0.92f;
+	// Parent's PlayerX member is what our DrawPlayer override reads when
+	// laying out the country flag, clan tag, and name. Both layouts use
+	// 0.09 (past the flag), so set it once here.
+	ColumnHeaderPlayerX = 0.09f;
+
+	// Two layouts. Both push PlayerX past the country-flag glyph (FlagX=0.01,
+	// ~6-7% of CellWidth) and use a tight name region so long auto-generated
+	// names don't crash into the K/D column. Engine MaxNameWidth is hardcoded
+	// at 0.42 — our DrawPlayer override re-computes it from PlayerX/KDX so
+	// names get scaled into the actual available room.
+	NormalLayout.PlayerX  = 0.09f;
+	NormalLayout.KDX      = 0.30f;
+	NormalLayout.AccX     = 0.37f;
+	NormalLayout.CapsX    = 0.45f;
+	NormalLayout.GrabsX   = 0.52f;
+	NormalLayout.ReturnsX = 0.60f;
+	NormalLayout.ArmorsX  = 0.72f;   // wide — 4 icons + counts
+	NormalLayout.AmpX     = 0.85f;   // wide — count + MM:SS held
+	NormalLayout.PingX    = 0.95f;
+
+	InstagibLayout.PlayerX  = 0.09f;
+	InstagibLayout.KDX      = 0.36f;   // pushed right — instagib has no Armors/Amp so the room shifts
+	InstagibLayout.EffX     = 0.45f;
+	InstagibLayout.AccX     = 0.55f;
+	InstagibLayout.CapsX    = 0.65f;
+	InstagibLayout.GrabsX   = 0.74f;
+	InstagibLayout.ReturnsX = 0.83f;
+	InstagibLayout.PingX    = 0.93f;
 
 	// Column header texts
-	CH_Kills  = NSLOCTEXT("CTFScoreboard", "KillsHeader", "K");
-	CH_Deaths = NSLOCTEXT("CTFScoreboard", "DeathsHeader", "D");
-	CH_Eff    = NSLOCTEXT("CTFScoreboard", "EffHeader", "EFF");
-	CH_Acc    = NSLOCTEXT("CTFScoreboard", "AccHeader", "ACC");
-	CH_Caps   = NSLOCTEXT("CTFScoreboard", "CapsHeader", "Caps");
-	CH_Grabs  = NSLOCTEXT("CTFScoreboard", "GrabsHeader", "Grabs");
+	CH_KD      = NSLOCTEXT("CTFScoreboard", "KDHeader",      "K/D");
+	CH_Eff     = NSLOCTEXT("CTFScoreboard", "EffHeader",     "EFF");
+	CH_Acc     = NSLOCTEXT("CTFScoreboard", "AccHeader",     "ACC");
+	CH_Caps    = NSLOCTEXT("CTFScoreboard", "CapsHeader",    "Caps");
+	CH_Grabs   = NSLOCTEXT("CTFScoreboard", "GrabsHeader",   "Grabs");
 	CH_Returns = NSLOCTEXT("CTFScoreboard", "ReturnsHeader", "Returns");
+	CH_Armors  = NSLOCTEXT("CTFScoreboard", "ArmorsHeader",  "Armors");
+	CH_Amp     = NSLOCTEXT("CTFScoreboard", "AmpHeader",     "Amp");
+}
+
+const UNCPlusCTFScoreboard::FCtfColumnLayout& UNCPlusCTFScoreboard::GetActiveLayout()
+{
+	ACTFStatsReplicator* Rep = FindStatsReplicator();
+	return (Rep && Rep->bIsInstagibMatch) ? InstagibLayout : NormalLayout;
 }
 
 void UNCPlusCTFScoreboard::PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanvas* InCanvas, FVector2D InCanvasCenter)
@@ -78,13 +97,29 @@ void UNCPlusCTFScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 
 		if (UTGameState)
 		{
-			DrawText(CH_Kills,  XOffset + (ScaledCellWidth * ColumnHeaderKillsX),   YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Deaths, XOffset + (ScaledCellWidth * ColumnHeaderDeathsX),  YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Eff,    XOffset + (ScaledCellWidth * ColumnHeaderEffX),     YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Acc,    XOffset + (ScaledCellWidth * ColumnHeaderAccX),     YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Caps,   XOffset + (ScaledCellWidth * ColumnHeaderCapsX2),   YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Grabs,  XOffset + (ScaledCellWidth * ColumnHeaderGrabsX),   YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Returns,XOffset + (ScaledCellWidth * ColumnHeaderReturnsX2),YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			ACTFStatsReplicator* Rep = FindStatsReplicator();
+			const bool bInstagib = Rep && Rep->bIsInstagibMatch;
+			const FCtfColumnLayout& L = bInstagib ? InstagibLayout : NormalLayout;
+
+			DrawText(CH_KD,     XOffset + (ScaledCellWidth * L.KDX),      YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			if (bInstagib)
+			{
+				DrawText(CH_Eff, XOffset + (ScaledCellWidth * L.EffX),    YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			}
+			DrawText(CH_Acc,    XOffset + (ScaledCellWidth * L.AccX),     YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(CH_Caps,   XOffset + (ScaledCellWidth * L.CapsX),    YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(CH_Grabs,  XOffset + (ScaledCellWidth * L.GrabsX),   YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(CH_Returns,XOffset + (ScaledCellWidth * L.ReturnsX), YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			if (!bInstagib)
+			{
+				DrawText(CH_Armors, XOffset + (ScaledCellWidth * L.ArmorsX), YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+				DrawText(CH_Amp,    XOffset + (ScaledCellWidth * L.AmpX),    YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			}
+
+			// Keep parent's ColumnHeaderPingX in sync with our active layout
+			// so the DrawPlayer override (which uses that member for the ping
+			// value position) lines up with the header.
+			ColumnHeaderPingX = L.PingX;
 		}
 		DrawText((GetWorld()->GetNetMode() == NM_Standalone) ? CH_Skill : CH_Ping,
 			XOffset + (ScaledCellWidth * ColumnHeaderPingX), YOffset + ColumnHeaderY,
@@ -99,87 +134,90 @@ void UNCPlusCTFScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XO
 {
 	if (!PlayerState) return;
 
-	// Kills
-	DrawText(FText::AsNumber(PlayerState->Kills),
-		XOffset + (Width * ColumnHeaderKillsX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
-		ETextHorzPos::Center, ETextVertPos::Center);
+	ACTFStatsReplicator* Rep = FindStatsReplicator();
+	const FString PlayerId = PlayerState->UniqueId.IsValid()
+		? PlayerState->UniqueId.ToString()
+		: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
+	const bool bInstagib = Rep && Rep->bIsInstagibMatch;
+	const FCtfColumnLayout& L = bInstagib ? InstagibLayout : NormalLayout;
 
-	// Deaths
-	DrawText(FText::AsNumber(PlayerState->Deaths),
-		XOffset + (Width * ColumnHeaderDeathsX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
-		ETextHorzPos::Center, ETextVertPos::Center);
-
-	// Efficiency
+	// K/D (combined column — matches duel/elim/wipeout)
 	{
-		float EffKills = (float)PlayerState->Kills;
-		float EffDeaths = (float)PlayerState->Deaths;
-		float EffPct = (EffKills + EffDeaths > 0.f) ? (EffKills / (EffKills + EffDeaths) * 100.f) : 0.f;
-		FLinearColor EffColor;
-		if (EffPct >= 60.f)
-			EffColor = FLinearColor(0.25f, 0.8f, 0.25f, 1.f); // green
-		else if (EffPct >= 40.f)
-			EffColor = FLinearColor(0.8f, 0.8f, 0.25f, 1.f);  // yellow
-		else
-			EffColor = FLinearColor(0.8f, 0.25f, 0.25f, 1.f);  // red
-
-		FString EffStr = FString::Printf(TEXT("%.0f%%"), EffPct);
-		DrawText(FText::FromString(EffStr),
-			XOffset + (Width * ColumnHeaderEffX), YOffset + ColumnY,
-			UTHUDOwner->TinyFont, RenderScale, 1.0f, EffColor,
-			ETextHorzPos::Center, ETextVertPos::Center);
-	}
-
-	// Accuracy (from replicator)
-	{
-		int32 Hits = 0, Shots = 0;
-		ACTFStatsReplicator* Rep = FindStatsReplicator();
-		if (Rep && PlayerState->UniqueId.IsValid())
-		{
-			Rep->GetAccuracyForPlayer(PlayerState->UniqueId.ToString(), Hits, Shots);
-		}
-		float AccPct = (Shots > 0) ? (float(Hits) / float(Shots) * 100.f) : 0.f;
-		FLinearColor AccColor;
-		if (AccPct >= 40.f)
-			AccColor = FLinearColor(0.25f, 0.8f, 0.25f, 1.f);
-		else if (AccPct >= 25.f)
-			AccColor = FLinearColor(0.8f, 0.8f, 0.25f, 1.f);
-		else
-			AccColor = FLinearColor(0.8f, 0.25f, 0.25f, 1.f);
-
-		FString AccStr = (Shots > 0) ? FString::Printf(TEXT("%.0f%%"), AccPct) : TEXT("-");
-		DrawText(FText::FromString(AccStr),
-			XOffset + (Width * ColumnHeaderAccX), YOffset + ColumnY,
-			UTHUDOwner->TinyFont, RenderScale, 1.0f, AccColor,
-			ETextHorzPos::Center, ETextVertPos::Center);
-	}
-
-	// Caps (replicated on PlayerState)
-	DrawText(FText::AsNumber(PlayerState->FlagCaptures),
-		XOffset + (Width * ColumnHeaderCapsX2), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
-		ETextHorzPos::Center, ETextVertPos::Center);
-
-	// Grabs (from replicator)
-	{
-		int32 Grabs = 0;
-		ACTFStatsReplicator* Rep = FindStatsReplicator();
-		if (Rep && PlayerState->UniqueId.IsValid())
-		{
-			Grabs = Rep->GetGrabsForPlayer(PlayerState->UniqueId.ToString());
-		}
-		DrawText(FText::AsNumber(Grabs),
-			XOffset + (Width * ColumnHeaderGrabsX), YOffset + ColumnY,
+		const int32 DisplayKills = PlayerState->Kills + PlayerState->KillAssists;
+		const FString KDStr = FString::Printf(TEXT("%d/%d"), DisplayKills, PlayerState->Deaths);
+		DrawText(FText::FromString(KDStr),
+			XOffset + (Width * L.KDX), YOffset + ColumnY,
 			UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
 			ETextHorzPos::Center, ETextVertPos::Center);
 	}
 
-	// Returns (replicated on PlayerState)
-	DrawText(FText::AsNumber(PlayerState->FlagReturns),
-		XOffset + (Width * ColumnHeaderReturnsX2), YOffset + ColumnY,
+	// EFF — instagib only. Kills / (Kills + Deaths) * 100.
+	if (bInstagib)
+	{
+		const float EffKills = float(PlayerState->Kills);
+		const float EffDeaths = float(PlayerState->Deaths);
+		const float EffPct = (EffKills + EffDeaths > 0.f)
+			? (EffKills / (EffKills + EffDeaths) * 100.f) : 0.f;
+		const FLinearColor EffColor = (EffPct >= 60.f) ? FLinearColor(0.25f, 0.8f, 0.25f, 1.f)
+		                            : (EffPct >= 40.f) ? FLinearColor(0.8f,  0.8f, 0.25f, 1.f)
+		                            : FLinearColor(0.8f, 0.25f, 0.25f, 1.f);
+		DrawText(FText::FromString(FString::Printf(TEXT("%.0f%%"), EffPct)),
+			XOffset + (Width * L.EffX), YOffset + ColumnY,
+			UTHUDOwner->TinyFont, RenderScale, 1.0f, EffColor,
+			ETextHorzPos::Center, ETextVertPos::Center);
+	}
+
+	// Accuracy (from replicator — LG-only or Instagib depending on match mode)
+	{
+		int32 Hits = 0, Shots = 0;
+		if (Rep) Rep->GetAccuracyForPlayer(PlayerId, Hits, Shots);
+		const float AccPct = (Shots > 0) ? (float(Hits) / float(Shots) * 100.f) : 0.f;
+		const FLinearColor AccColor = (AccPct >= 40.f) ? FLinearColor(0.25f, 0.8f, 0.25f, 1.f)
+		                            : (AccPct >= 25.f) ? FLinearColor(0.8f,  0.8f, 0.25f, 1.f)
+		                            : FLinearColor(0.8f, 0.25f, 0.25f, 1.f);
+		const FString AccStr = (Shots > 0) ? FString::Printf(TEXT("%.0f%%"), AccPct) : TEXT("-");
+		DrawText(FText::FromString(AccStr),
+			XOffset + (Width * L.AccX), YOffset + ColumnY,
+			UTHUDOwner->TinyFont, RenderScale, 1.0f, AccColor,
+			ETextHorzPos::Center, ETextVertPos::Center);
+	}
+
+	// Caps
+	DrawText(FText::AsNumber(PlayerState->FlagCaptures),
+		XOffset + (Width * L.CapsX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
 		ETextHorzPos::Center, ETextVertPos::Center);
+
+	// Grabs
+	{
+		int32 Grabs = (Rep) ? Rep->GetGrabsForPlayer(PlayerId) : 0;
+		DrawText(FText::AsNumber(Grabs),
+			XOffset + (Width * L.GrabsX), YOffset + ColumnY,
+			UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
+			ETextHorzPos::Center, ETextVertPos::Center);
+	}
+
+	// Returns
+	DrawText(FText::AsNumber(PlayerState->FlagReturns),
+		XOffset + (Width * L.ReturnsX), YOffset + ColumnY,
+		UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
+		ETextHorzPos::Center, ETextVertPos::Center);
+
+	// Armors + Amp only in non-instagib play. In instagib these stats are
+	// always 0 and the columns are header-suppressed.
+	if (!bInstagib && Rep)
+	{
+		uint8 ArmorCounts[4] = { 0, 0, 0, 0 };
+		Rep->GetArmorCountsForPlayer(PlayerId, ArmorCounts);
+		DrawArmorIconRow(XOffset + (Width * L.ArmorsX), YOffset + ColumnY,
+			ArmorCounts, FLinearColor::White);
+
+		uint8 AmpCount = 0;
+		int32 AmpTimeS = 0;
+		Rep->GetAmpForPlayer(PlayerId, AmpCount, AmpTimeS);
+		DrawAmpCell(XOffset + (Width * L.AmpX), YOffset + ColumnY,
+			AmpCount, AmpTimeS, DrawColor);
+	}
 }
 
 void UNCPlusCTFScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
@@ -237,6 +275,119 @@ void UNCPlusCTFScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 }
 
 // =============================================================================
+// Armor icon row + Amp cell helpers (non-instagib)
+// =============================================================================
+// Stock armor BP class paths. Each BP sets HUDIcon on its CDO with the
+// proper UV slice. Loaded once + AddToRoot so GC doesn't reap the cached
+// UClass underneath us. Mirrors the duel scoreboard's pattern.
+namespace
+{
+	struct FCtfArmorSlot
+	{
+		const TCHAR* ClassPath;
+		UClass*      CachedClass;
+		FCanvasIcon  CachedIcon;
+		bool         bResolved;
+
+		// Explicit ctor for UE 4.15 brace-init compatibility — see the
+		// FArmorIconSlot note in NCLeagueDuelScoreboard.cpp.
+		explicit FCtfArmorSlot(const TCHAR* InPath)
+			: ClassPath(InPath), CachedClass(nullptr), bResolved(false) {}
+	};
+
+	static FCtfArmorSlot& GetCtfBeltSlot()
+	{
+		static FCtfArmorSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_ShieldBelt.Armor_ShieldBelt_C") };
+		return S;
+	}
+	static FCtfArmorSlot& GetCtfVestSlot()
+	{
+		static FCtfArmorSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Chest.Armor_Chest_C") };
+		return S;
+	}
+	static FCtfArmorSlot& GetCtfPadsSlot()
+	{
+		static FCtfArmorSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_ThighPads.Armor_ThighPads_C") };
+		return S;
+	}
+	static FCtfArmorSlot& GetCtfHelmetSlot()
+	{
+		static FCtfArmorSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Helmet.Armor_Helmet_C") };
+		return S;
+	}
+
+	bool ResolveCtfArmorIcon(FCtfArmorSlot& Slot)
+	{
+		if (Slot.bResolved) return Slot.CachedIcon.Texture != nullptr;
+		Slot.bResolved = true;
+		Slot.CachedClass = LoadClass<AUTArmor>(nullptr, Slot.ClassPath);
+		if (!Slot.CachedClass) return false;
+		Slot.CachedClass->AddToRoot();
+		if (AUTArmor* CDO = Slot.CachedClass->GetDefaultObject<AUTArmor>())
+		{
+			Slot.CachedIcon = CDO->HUDIcon;
+		}
+		return Slot.CachedIcon.Texture != nullptr;
+	}
+}
+
+void UNCPlusCTFScoreboard::DrawArmorIconRow(float CenterX, float CenterY,
+	const uint8* Counts, FLinearColor IconTint)
+{
+	FCtfArmorSlot* Slots[4] = { &GetCtfBeltSlot(), &GetCtfVestSlot(),
+		&GetCtfPadsSlot(), &GetCtfHelmetSlot() };
+
+	const float CellSize = 18.f * RenderScale;   // tighter than duel's row — CTF has more columns
+	const float Gap      = 4.f  * RenderScale;
+	const float TotalW   = 4.f * CellSize + 3.f * Gap;
+	float X = CenterX - TotalW * 0.5f;
+	const float IconY = CenterY - CellSize * 0.5f;
+
+	for (int32 i = 0; i < 4; ++i)
+	{
+		if (ResolveCtfArmorIcon(*Slots[i]))
+		{
+			const FCanvasIcon& Icon = Slots[i]->CachedIcon;
+			DrawTexture(Icon.Texture, X, IconY, CellSize, CellSize,
+				Icon.U, Icon.V, Icon.UL, Icon.VL, 1.0f, IconTint);
+		}
+		// Count below the icon (or "—" when zero, dimmer)
+		const uint8 C = Counts[i];
+		const FLinearColor NumColor = (C > 0)
+			? FLinearColor(1.f, 1.f, 1.f, 1.f)
+			: FLinearColor(1.f, 1.f, 1.f, 0.35f);
+		DrawText(FText::AsNumber(C),
+			X + CellSize * 0.5f, CenterY + CellSize * 0.6f,
+			UTHUDOwner->TinyFont, 0.85f * RenderScale, 1.0f, NumColor,
+			ETextHorzPos::Center, ETextVertPos::Center);
+		X += CellSize + Gap;
+	}
+}
+
+void UNCPlusCTFScoreboard::DrawAmpCell(float CenterX, float CenterY,
+	uint8 AmpCount, int32 AmpTimeS, FLinearColor DrawColor)
+{
+	// Format: "<count>×  <mm:ss>" — count and held-time on one line.
+	// Dimmed when AmpCount is 0.
+	const FLinearColor Color = (AmpCount > 0)
+		? FLinearColor(1.f, 0.85f, 0.4f, 1.f)   // amp gold
+		: FLinearColor(1.f, 1.f, 1.f, 0.35f);
+
+	const int32 Mins = AmpTimeS / 60;
+	const int32 Secs = AmpTimeS % 60;
+	// ASCII hyphen, not em-dash — this .cpp lacks a UTF-8 BOM so MSVC reads
+	// non-ASCII chars as Win-1252 and a "—" renders as "â€"" mojibake in
+	// Slate. Same gotcha hit on SNCPlusHUDEditor.cpp / NCDuelRatingSystem.cpp.
+	const FString Text = (AmpCount > 0)
+		? FString::Printf(TEXT("%u  %02d:%02d"), AmpCount, Mins, Secs)
+		: TEXT("-");
+
+	DrawText(FText::FromString(Text),
+		CenterX, CenterY, UTHUDOwner->TinyFont, RenderScale, 1.0f, Color,
+		ETextHorzPos::Center, ETextVertPos::Center);
+}
+
+// =============================================================================
 // DrawPlayer override
 // =============================================================================
 // Same shape as the duel / shaft DrawPlayer overrides:
@@ -279,7 +430,13 @@ void UNCPlusCTFScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState,
 		Canvas->TextSize(UTHUDOwner->SmallFont, ClanName, ClanXL, NameYL, 1.f, 1.f);
 		ClanXL += 4.f;
 	}
-	float MaxNameWidth = 0.42f*ScaledCellWidth - (PlayerState->bIsFriend ? 30.f*RenderScale : 0.f);
+	// Tight name cap based on the active layout's K/D column — engine's
+	// hardcoded 0.42 is too generous for our column-dense scoreboard and
+	// long auto-generated names ("WIN11X3DPRO-3313") crashed into K/D.
+	// Reserve a small padding before the K/D center.
+	const FCtfColumnLayout& ActiveL = GetActiveLayout();
+	const float NameWidthFraction = FMath::Max(0.18f, (ActiveL.KDX - ColumnHeaderPlayerX) - 0.03f);
+	float MaxNameWidth = NameWidthFraction*ScaledCellWidth - (PlayerState->bIsFriend ? 30.f*RenderScale : 0.f);
 	Canvas->TextSize(UTHUDOwner->SmallFont, DisplayName, NameXL, NameYL, 1.f, 1.f);
 	UFont* NameFont = UTHUDOwner->SmallFont;
 	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);

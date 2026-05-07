@@ -3,6 +3,7 @@
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
+#include "UTGameMode.h"
 #include "StatNames.h"
 #include "Net/UnrealNetwork.h"
 
@@ -20,6 +21,7 @@ void ACTFStatsReplicator::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(ACTFStatsReplicator, StatsEntries);
+	DOREPLIFETIME(ACTFStatsReplicator, bIsInstagibMatch);
 }
 
 void ACTFStatsReplicator::BeginPlay()
@@ -53,6 +55,14 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 		return;
 	}
 
+	// Read instagib state directly from the gamemode (server-only). Authoritative
+	// from match start — no waiting for the first instagib shot before the
+	// scoreboard layout settles.
+	if (AUTGameMode* GM = GetWorld()->GetAuthGameMode<AUTGameMode>())
+	{
+		bIsInstagibMatch = GM->bIsInstagib;
+	}
+
 	StatsEntries.Reset();
 
 	for (APlayerState* PS : GS->PlayerArray)
@@ -72,11 +82,10 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 		// Hits/Shots), matching duel/shaft. Shock-rifle and rifles are
 		// excluded because their accuracy isn't representative of the LG
 		// fights that actually decide CTF picks.
-		int32 InstagibShots = UTPS->GetStatsValue(NAME_InstagibShots);
-		if (InstagibShots > 0)
+		if (bIsInstagibMatch)
 		{
 			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_InstagibHits);
-			Entry.HitscanShots = InstagibShots;
+			Entry.HitscanShots = UTPS->GetStatsValue(NAME_InstagibShots);
 		}
 		else
 		{
@@ -84,6 +93,22 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_LinkHits);
 			Entry.HitscanShots = UTPS->GetStatsValue(NAME_LinkBeamShots);
 		}
+
+		// Armor pickup counts — clamp to uint8 (255 max). CTF matches don't
+		// realistically exceed that for any single armor type.
+		const auto Clamp255 = [](float V) -> uint8 {
+			return uint8(FMath::Clamp(FMath::RoundToInt(V), 0, 255));
+		};
+		Entry.BeltCount   = Clamp255(UTPS->GetStatsValue(NAME_ShieldBeltCount));
+		Entry.VestCount   = Clamp255(UTPS->GetStatsValue(NAME_ArmorVestCount));
+		Entry.PadsCount   = Clamp255(UTPS->GetStatsValue(NAME_ArmorPadsCount));
+		Entry.HelmetCount = Clamp255(UTPS->GetStatsValue(NAME_HelmetCount));
+
+		// UDamage / Amp pickup count + total seconds held. NAME_UDamageTime is
+		// incremented per-tick by AUTTimedPowerup while held (StatsNameTime
+		// path; UDamage CDO sets this to NAME_UDamageTime).
+		Entry.AmpCount = Clamp255(UTPS->GetStatsValue(NAME_UDamageCount));
+		Entry.AmpTimeS = FMath::RoundToInt(UTPS->GetStatsValue(NAME_UDamageTime));
 
 		StatsEntries.Add(Entry);
 	}
@@ -114,4 +139,35 @@ void ACTFStatsReplicator::GetAccuracyForPlayer(const FString& UniqueIdStr, int32
 	}
 	OutHits = 0;
 	OutShots = 0;
+}
+
+void ACTFStatsReplicator::GetArmorCountsForPlayer(const FString& UniqueIdStr, uint8 OutCounts[4]) const
+{
+	OutCounts[0] = OutCounts[1] = OutCounts[2] = OutCounts[3] = 0;
+	for (const FCTFReplicatedStatsEntry& Entry : StatsEntries)
+	{
+		if (Entry.PlayerId == UniqueIdStr)
+		{
+			OutCounts[0] = Entry.BeltCount;
+			OutCounts[1] = Entry.VestCount;
+			OutCounts[2] = Entry.PadsCount;
+			OutCounts[3] = Entry.HelmetCount;
+			return;
+		}
+	}
+}
+
+void ACTFStatsReplicator::GetAmpForPlayer(const FString& UniqueIdStr, uint8& OutCount, int32& OutTimeSeconds) const
+{
+	OutCount = 0;
+	OutTimeSeconds = 0;
+	for (const FCTFReplicatedStatsEntry& Entry : StatsEntries)
+	{
+		if (Entry.PlayerId == UniqueIdStr)
+		{
+			OutCount = Entry.AmpCount;
+			OutTimeSeconds = Entry.AmpTimeS;
+			return;
+		}
+	}
 }

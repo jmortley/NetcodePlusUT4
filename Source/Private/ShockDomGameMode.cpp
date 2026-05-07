@@ -17,6 +17,7 @@
 #include "UTDamageType.h"
 #include "ShockDomControlPoint.h"
 #include "ShockDomReplicator.h"
+#include "NCAccuracyStatsReplicator.h"
 #include "ShockDomHUD.h"
 #include "ShockDomMessage.h"
 #include "UTPlusShockRifle.h"
@@ -127,6 +128,9 @@ void AShockDomGameMode::HandleMatchHasStarted()
 			DomReplicator->DomScoreGoal = GoalScore;
 		}
 	}
+
+	// Per-weapon hits/shots replicator for the accuracy HUD widget.
+	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 
 	// Pre-compute team spawn clusters for first-spawn restriction
 	ComputeInitialSpawnClusters();

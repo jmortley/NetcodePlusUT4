@@ -205,14 +205,17 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	const uint8 Charges = PS->GetRemainingBoosts();
 	const bool bAvailable = Charges > 0;
 
-	// Greyed when consumed: keep at full opacity so the icon shape stays
-	// recognizable, but desaturate and dim. Bright tint when ready. The
-	// user-configured Opacity is multiplied into the alpha so the editor's
-	// Op slider behaves consistently with other widgets.
+	// Greyed when consumed: desaturate via tint RGB. Bright tint when ready.
+	// IMPORTANT: UUTHUDWidget::DrawTexture overwrites color.A with the
+	// explicit DrawOpacity argument — multiplying IconTint.A here would be
+	// silently dropped. Combine the consumed-state dim factor with the
+	// layout's opacity extra into a single DrawOpacity scalar.
+	// (Same gotcha noted in hud_editor_session_may3_2026.md.)
 	FLinearColor IconTint = bAvailable
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
-		: FLinearColor(0.35f, 0.35f, 0.35f, 0.85f);
-	IconTint.A *= Opacity;
+		: FLinearColor(0.35f, 0.35f, 0.35f, 1.f);
+	const float ConsumedDim = bAvailable ? 1.f : 0.85f;
+	const float DrawOpacity = Opacity * ConsumedDim;
 
 	// Centered icon in widget-relative space — DrawTexture transforms by
 	// the widget's origin/screen position automatically (unlike raw
@@ -222,7 +225,7 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	const float IconY = (Size.Y - IconSize) * 0.5f - 8.f;   // lift to leave room for keybind text
 
 	DrawTexture(Icon.Texture, IconX, IconY, IconSize, IconSize,
-		Icon.U, Icon.V, Icon.UL, Icon.VL, 1.f, IconTint);
+		Icon.U, Icon.V, Icon.UL, Icon.VL, DrawOpacity, IconTint);
 
 	// Keybind label below the icon. Larger font when available, dimmer
 	// when the icon is greyed (mirrors the icon's state visually).
