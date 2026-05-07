@@ -1043,16 +1043,29 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 	// lambda is independent of `this` lifetime - the editor panel could
 	// outlive the picker, but mode-restore is a pure GEngine operation
 	// that doesn't need editor state. Fires for both commit and cancel.
-	// Capture PlayerOwner weakly so the lambda can route the setres exec
-	// through APlayerController::ConsoleCommand — that path goes through
-	// UPlayer::Exec → FSystemResolution::RequestResolutionChange, which is
-	// what actually applies the resolution change (same path the user types
-	// `setres` from in the in-game console). UGameViewportClient::ConsoleCommand
-	// goes through a different exec stack and was silently dropping the call.
-	TWeakObjectPtr<UUTLocalPlayer> WeakLP = PlayerOwner;
-
+	// Restore lambda mirrors UT4's GUI Settings → Display → Fullscreen
+	// dropdown path (SUTSystemSettingsDialog.cpp:1415-1425) — that's the
+	// known-working sequence the user confirmed by manually clicking through
+	// the GUI to fix the stuck-in-windowed-fullscreen state.
+	//
+	// Order matters:
+	//   1. SetFullscreenMode FIRST — UT4's UUTGameUserSettings override calls
+	//      LockSetForegroundWindow(LSFW_LOCK) on FSE, which is what tells
+	//      Windows to honor the exclusive swap chain on the next apply.
+	//   2. SetScreenResolution second — pure value set, no side effects.
+	//   3. SaveConfig — writes the chosen mode + res to the ini AND
+	//      flushes LastConfirmed* fields. Without this ApplyResolutionSettings
+	//      sees no diff vs the in-memory state and silently no-ops (which is
+	//      exactly what was happening before — the silent no-op was the bug).
+	//   4. ApplyResolutionSettings(false) — final apply.
+	//
+	// Earlier attempts: SetScreenResolution + SetFullscreenMode + Apply
+	// (wrong order, no SaveConfig) silently no-op'd. setres console exec
+	// (with or without 'f') silently no-op'd too — different exec stack.
+	// The GUI dropdown is the path that works on the user's machine, so we
+	// mirror it exactly.
 	PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateLambda(
-		[SavedMode, SavedRes, SavedWindowPos, bHaveWindowPos, WeakLP](const TSharedRef<SWindow>& /*ClosedWindow*/)
+		[SavedMode, SavedRes, SavedWindowPos, bHaveWindowPos](const TSharedRef<SWindow>& /*ClosedWindow*/)
 		{
 			if (SavedMode != EWindowMode::Fullscreen) return;
 
@@ -1067,26 +1080,19 @@ FReply SNCPlusHUDEditor::OnSwatchClicked(FName Alias, FName ColorKey, FLinearCol
 				}
 			}
 
-			// Route setres through the local PlayerController's console exec
-			// (same path as typing in the in-game console). No "f" suffix —
-			// that forces exclusive fullscreen and the FSE re-attach was
-			// failing; without the suffix setres preserves the current mode
-			// (WindowedFullscreen, after the swap). On a single monitor
-			// WindowedFullscreen is visually identical to FSE; FSE's only
-			// real win is exclusive swap-chain ownership which doesn't
-			// matter for typical play.
-			const FString Cmd = FString::Printf(TEXT("setres %dx%d"), SavedRes.X, SavedRes.Y);
-			UUTLocalPlayer* LP = WeakLP.Get();
-			APlayerController* PC = LP ? LP->PlayerController : nullptr;
+			UGameUserSettings* S = GEngine ? GEngine->GetGameUserSettings() : nullptr;
 			UE_LOG(LogTemp, Log,
-				TEXT("[NCPlusHUDEditor] FSE picker close: cmd='%s' LP=%s PC=%s"),
-				*Cmd,
-				LP ? TEXT("ok") : TEXT("null"),
-				PC ? TEXT("ok") : TEXT("null"));
-			if (PC)
-			{
-				PC->ConsoleCommand(Cmd);
-			}
+				TEXT("[NCPlusHUDEditor] FSE picker close: restoring mode=Fullscreen res=%dx%d settings=%s"),
+				SavedRes.X, SavedRes.Y, S ? *S->GetClass()->GetName() : TEXT("null"));
+			if (!S) return;
+
+			// SetFullscreenMode is virtual; the actual instance is
+			// UUTGameUserSettings, so the UT4 override (LockSetForegroundWindow)
+			// runs via virtual dispatch even though we hold the base pointer.
+			S->SetFullscreenMode(EWindowMode::Fullscreen);
+			S->SetScreenResolution(SavedRes);
+			S->SaveConfig();
+			S->ApplyResolutionSettings(false);
 		});
 
 	OpenColorPicker(PickerArgs);
