@@ -106,6 +106,16 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
 
+	// Always reload layout from disk on panel open so the editor reflects
+	// the on-disk state, not whatever's been left in memory. Critical for
+	// main-menu invocations: no in-game HUD has run BeginPlay yet, so
+	// GetLive() is whatever stale state was left over (often empty).
+	// Without this, users had to manually click Reload before they saw
+	// their saved settings — easy to mistake for "settings didn't save."
+	// Cheap (single FFileHelper read of HUDLayout.json), and matches the
+	// behavior of the in-game HUDs which reload in BeginPlay.
+	FNCPlusHUDLayout::ReloadLive();
+
 	BackgroundBrush.TintColor = FLinearColor(0.05f, 0.05f, 0.05f, 0.92f);
 
 	// Build per-row state
