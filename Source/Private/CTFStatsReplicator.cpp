@@ -28,6 +28,21 @@ void ACTFStatsReplicator::BeginPlay()
 {
 	Super::BeginPlay();
 	TimeSinceLastUpdate = 0.0f;
+
+	// Seed bIsInstagibMatch immediately so the scoreboard layout selection is
+	// correct from the first frame the replicator exists. Without this, clients
+	// see the non-instagib layout (Armors/Amp columns) for up to 0.5s after
+	// joining an instagib match, and during warmup the layout was wrong for
+	// the entire warmup period because Tick / UpdateFromPlayerStates didn't
+	// fire on dedicated servers until the match transitioned to InProgress
+	// in the old spawn-at-HandleMatchHasStarted code path.
+	if (Role == ROLE_Authority)
+	{
+		if (AUTGameMode* GM = GetWorld()->GetAuthGameMode<AUTGameMode>())
+		{
+			bIsInstagibMatch = GM->bIsInstagib;
+		}
+	}
 }
 
 void ACTFStatsReplicator::Tick(float DeltaTime)
