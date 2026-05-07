@@ -66,12 +66,19 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 // "Instagib"? In instagib mode every player spawns with a weapon class named
 // like UTWeap_InstagibRifle (stock) or UTPlusInstagibRifle (plugin variant) -
 // the substring is reliable across both. Walks at most ~5-10 inventory items.
+//
+// Defensive: IsValid catches both null and pending-kill on the character (can
+// happen mid-respawn or just after Destroy()) and on each inventory item
+// (TInventoryIterator can yield a stale ptr if the inventory chain is mid-mutation).
 static bool NCCharHasInstagibWeapon(AUTCharacter* Char)
 {
-	if (!Char) return false;
+	if (!IsValid(Char)) return false;
 	for (TInventoryIterator<AUTWeapon> It(Char); It; ++It)
 	{
-		if (It->GetClass()->GetName().Contains(TEXT("Instagib")))
+		AUTWeapon* W = *It;
+		if (!IsValid(W)) continue;
+		UClass* WClass = W->GetClass();
+		if (WClass && WClass->GetName().Contains(TEXT("Instagib")))
 		{
 			return true;
 		}
@@ -91,23 +98,36 @@ const UNCPlusCTFScoreboard::FCtfColumnLayout& UNCPlusCTFScoreboard::GetActiveLay
 
 	// Warmup fallback. Replicator MUST defer to HandleMatchHasStarted to avoid
 	// client crashes (see feedback_replicator_spawn_timing.md), so during
-	// warmup it doesn't exist yet. Sniff the local pawn's inventory instead -
-	// players have weapons in warmup, instagib weapon classes contain the
-	// substring "Instagib", and this is purely client-side (no replication
-	// timing to worry about).
-	if (UTHUDOwner && UTHUDOwner->UTPlayerOwner)
+	// warmup it doesn't exist yet. Sniff inventory instead - purely client-side,
+	// no replication timing to worry about.
+	//
+	// Three layers of fallback for "no local pawn yet" cases:
+	//   1. Local player has a pawn → check that pawn's inventory.
+	//   2. No local pawn (joined as spectator, hasn't picked a team, or is
+	//      dead mid-warmup) → walk world AUTCharacters for any with an
+	//      instagib weapon.
+	//   3. No characters in world yet (very first second of warmup, no one
+	//      has spawned) → fall through to NormalLayout. The replicator will
+	//      take over once HandleMatchHasStarted fires; this brief window is
+	//      harmless.
+	//
+	// Each access is null-/IsValid-guarded; the helper handles pending-kill
+	// pawns and stale inventory pointers.
+	if (IsValid(UTHUDOwner) && IsValid(UTHUDOwner->UTPlayerOwner))
 	{
-		if (NCCharHasInstagibWeapon(Cast<AUTCharacter>(UTHUDOwner->UTPlayerOwner->GetPawn())))
+		APawn* LocalPawn = UTHUDOwner->UTPlayerOwner->GetPawn();
+		if (NCCharHasInstagibWeapon(Cast<AUTCharacter>(LocalPawn)))
 		{
 			return InstagibLayout;
 		}
 	}
 
-	// Spectator fallback: no local pawn. Walk world AUTCharacters until we
-	// find one with an instagib weapon. ~6-8 chars in CTF, cheap enough to
-	// run unconditionally during warmup; never reached once the replicator
-	// exists.
-	if (UWorld* World = UTHUDOwner ? UTHUDOwner->GetWorld() : nullptr)
+	// Spectator / not-yet-joined fallback: walk world AUTCharacters. Cheap
+	// (~6-8 chars max in CTF) and only reached during warmup before the
+	// replicator exists. TActorIterator skips destroyed actors automatically;
+	// the helper guards pending-kill ones.
+	UWorld* World = IsValid(UTHUDOwner) ? UTHUDOwner->GetWorld() : nullptr;
+	if (World)
 	{
 		for (TActorIterator<AUTCharacter> CharIt(World); CharIt; ++CharIt)
 		{
