@@ -2,11 +2,15 @@
 #include "NCPlusCTFScoreboard.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
+#include "UTPlayerController.h"
 #include "UTGameState.h"
 #include "UTTeamInfo.h"
+#include "UTCharacter.h"
+#include "UTWeapon.h"
 #include "CTFStatsReplicator.h"
 #include "StatNames.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "UTBot.h"
 #include "UTHUD.h"
 #include "UTArmor.h"
@@ -58,10 +62,63 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	CH_Amp     = NSLOCTEXT("CTFScoreboard", "AmpHeader",     "Amp");
 }
 
+// Local helper: does the character have any weapon whose class name contains
+// "Instagib"? In instagib mode every player spawns with a weapon class named
+// like UTWeap_InstagibRifle (stock) or UTPlusInstagibRifle (plugin variant) -
+// the substring is reliable across both. Walks at most ~5-10 inventory items.
+static bool NCCharHasInstagibWeapon(AUTCharacter* Char)
+{
+	if (!Char) return false;
+	for (TInventoryIterator<AUTWeapon> It(Char); It; ++It)
+	{
+		if (It->GetClass()->GetName().Contains(TEXT("Instagib")))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 const UNCPlusCTFScoreboard::FCtfColumnLayout& UNCPlusCTFScoreboard::GetActiveLayout()
 {
-	ACTFStatsReplicator* Rep = FindStatsReplicator();
-	return (Rep && Rep->bIsInstagibMatch) ? InstagibLayout : NormalLayout;
+	// Replicator-driven path - works once HandleMatchHasStarted has fired.
+	// Trusted authoritative source: ACTFStatsReplicator::bIsInstagibMatch is
+	// seeded from GM->bIsInstagib in BeginPlay.
+	if (ACTFStatsReplicator* Rep = FindStatsReplicator())
+	{
+		return Rep->bIsInstagibMatch ? InstagibLayout : NormalLayout;
+	}
+
+	// Warmup fallback. Replicator MUST defer to HandleMatchHasStarted to avoid
+	// client crashes (see feedback_replicator_spawn_timing.md), so during
+	// warmup it doesn't exist yet. Sniff the local pawn's inventory instead -
+	// players have weapons in warmup, instagib weapon classes contain the
+	// substring "Instagib", and this is purely client-side (no replication
+	// timing to worry about).
+	if (UTHUDOwner && UTHUDOwner->UTPlayerOwner)
+	{
+		if (NCCharHasInstagibWeapon(Cast<AUTCharacter>(UTHUDOwner->UTPlayerOwner->GetPawn())))
+		{
+			return InstagibLayout;
+		}
+	}
+
+	// Spectator fallback: no local pawn. Walk world AUTCharacters until we
+	// find one with an instagib weapon. ~6-8 chars in CTF, cheap enough to
+	// run unconditionally during warmup; never reached once the replicator
+	// exists.
+	if (UWorld* World = UTHUDOwner ? UTHUDOwner->GetWorld() : nullptr)
+	{
+		for (TActorIterator<AUTCharacter> CharIt(World); CharIt; ++CharIt)
+		{
+			if (NCCharHasInstagibWeapon(*CharIt))
+			{
+				return InstagibLayout;
+			}
+		}
+	}
+
+	return NormalLayout;
 }
 
 void UNCPlusCTFScoreboard::PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanvas* InCanvas, FVector2D InCanvasCenter)
@@ -97,9 +154,11 @@ void UNCPlusCTFScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 
 		if (UTGameState)
 		{
-			ACTFStatsReplicator* Rep = FindStatsReplicator();
-			const bool bInstagib = Rep && Rep->bIsInstagibMatch;
-			const FCtfColumnLayout& L = bInstagib ? InstagibLayout : NormalLayout;
+			// GetActiveLayout handles replicator-vs-warmup fallback in one place.
+			// Identity-compare the returned reference to detect instagib without
+			// re-querying the replicator (and without re-walking inventory).
+			const FCtfColumnLayout& L = GetActiveLayout();
+			const bool bInstagib = (&L == &InstagibLayout);
 
 			DrawText(CH_KD,     XOffset + (ScaledCellWidth * L.KDX),      YOffset + ColumnHeaderY, UTHUDOwner->TinyFont, RenderScale, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			if (bInstagib)
@@ -138,8 +197,8 @@ void UNCPlusCTFScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XO
 	const FString PlayerId = PlayerState->UniqueId.IsValid()
 		? PlayerState->UniqueId.ToString()
 		: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
-	const bool bInstagib = Rep && Rep->bIsInstagibMatch;
-	const FCtfColumnLayout& L = bInstagib ? InstagibLayout : NormalLayout;
+	const FCtfColumnLayout& L = GetActiveLayout();
+	const bool bInstagib = (&L == &InstagibLayout);
 
 	// K/D (combined column — matches duel/elim/wipeout)
 	{
