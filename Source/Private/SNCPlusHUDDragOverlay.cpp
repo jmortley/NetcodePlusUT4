@@ -369,12 +369,17 @@ FReply SNCPlusHUDDragOverlay::OnMouseButtonDown(const FGeometry& MyGeometry, con
 	if (Button == EKeys::RightMouseButton)
 	{
 		// Cancel any in-progress drag (defensive — shouldn't normally happen).
-		DragIdx = INDEX_NONE;
+		DragAlias = NAME_None;
+		DragIdx   = INDEX_NONE;
 		OpenContextMenu(Alias, MouseAbs);
 		return FReply::Handled();
 	}
 
-	// Left button → start drag.
+	// Left button → start drag. Cache the alias (durable identity) AND the
+	// index (visual hint for OnPaint). The index can go stale if the cached
+	// elements list rebuilds between events; the alias is the authoritative
+	// source for which element to mutate.
+	DragAlias         = Alias;
 	DragIdx           = Hit;
 	DragStartMouseAbs = MouseAbs;
 
@@ -386,7 +391,7 @@ FReply SNCPlusHUDDragOverlay::OnMouseButtonDown(const FGeometry& MyGeometry, con
 
 FReply SNCPlusHUDDragOverlay::OnMouseMove(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
-	if (DragIdx == INDEX_NONE) return FReply::Unhandled();
+	if (DragAlias.IsNone()) return FReply::Unhandled();
 
 	// Mouse delta in screen pixels → divide by RenderScale to get design-pixel
 	// delta (matches how the layout's Offset is interpreted by the apply pass).
@@ -396,7 +401,11 @@ FReply SNCPlusHUDDragOverlay::OnMouseMove(const FGeometry& MyGeometry, const FPo
 	if (RenderScale <= 0.f) return FReply::Handled();
 	const FVector2D DesignDelta = DeltaPx / RenderScale;
 
-	const FName Alias = CachedElements[DragIdx].Alias;
+	// Use the cached alias rather than CachedElements[DragIdx].Alias — the
+	// CachedElements array can rebuild between events (a widget hides, the
+	// viewport resizes, etc.) and DragIdx would go stale, indexing the wrong
+	// element or out-of-bounds. DragAlias is durable for the drag's lifetime.
+	const FName Alias = DragAlias;
 	FNCPlusHUDLayout& L = FNCPlusHUDLayout::GetLive();
 	FNCPlusHUDElement* Elem = L.Elements.Find(Alias);
 	if (!Elem)
@@ -411,15 +420,26 @@ FReply SNCPlusHUDDragOverlay::OnMouseMove(const FGeometry& MyGeometry, const FPo
 	Elem->Offset = DragStartOffset + DesignDelta;
 	FNCPlusHUDLayout::MarkLiveDirty();
 
+	// Refresh the visual-hint index to keep the drag-color frame on the right
+	// element if the cache rebuilt under us. Best-effort — if the alias isn't
+	// present anymore (widget went hidden), DragIdx becomes INDEX_NONE and the
+	// frame just renders in idle color until the widget reappears.
+	DragIdx = INDEX_NONE;
+	for (int32 i = 0; i < CachedElements.Num(); i++)
+	{
+		if (CachedElements[i].Alias == DragAlias) { DragIdx = i; break; }
+	}
+
 	return FReply::Handled();
 }
 
 FReply SNCPlusHUDDragOverlay::OnMouseButtonUp(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
 	if (MouseEvent.GetEffectingButton() != EKeys::LeftMouseButton) return FReply::Unhandled();
-	if (DragIdx == INDEX_NONE) return FReply::Unhandled();
+	if (DragAlias.IsNone()) return FReply::Unhandled();
 
-	DragIdx = INDEX_NONE;
+	DragAlias = NAME_None;
+	DragIdx   = INDEX_NONE;
 	return FReply::Handled().ReleaseMouseCapture();
 }
 
@@ -429,7 +449,8 @@ FReply SNCPlusHUDDragOverlay::OnKeyDown(const FGeometry& MyGeometry, const FKeyE
 	{
 		// Release any in-progress drag before tearing down so we don't leave the
 		// mouse captured.
-		DragIdx = INDEX_NONE;
+		DragAlias = NAME_None;
+		DragIdx   = INDEX_NONE;
 		ClosePanel();
 		return FReply::Handled().ReleaseMouseCapture();
 	}
@@ -440,7 +461,8 @@ FReply SNCPlusHUDDragOverlay::OnCloseButtonClicked()
 {
 	// Backup path for the (occasional) case where ESC keyboard focus is lost
 	// after a drag — mouse-focused button click is more reliable.
-	DragIdx = INDEX_NONE;
+	DragAlias = NAME_None;
+	DragIdx   = INDEX_NONE;
 	ClosePanel();
 	return FReply::Handled().ReleaseMouseCapture();
 }
@@ -513,11 +535,18 @@ void SNCPlusHUDDragOverlay::OpenContextMenu(FName Alias, const FVector2D& Screen
 	MenuBuilder.EndSection();
 
 	// Push the menu as a context-style popup at the click position. PushMenu
-	// returns a SharedRef to the menu's window; we don't need to retain it,
-	// the menu manages its own lifetime (auto-closes on selection / outside-click).
+	// requires a real FWidgetPath so Slate can resolve the menu's owning
+	// window — passing FWidgetPath() (empty) here triggered an assertion in
+	// SMenuAnchor.cpp:400 (`NewMenu->GetOwnedWindow().IsValid()` failed) and
+	// crashed the client during menu paint. FindPathToWidget walks the live
+	// Slate tree from this widget back to the root SWindow.
+	TSharedRef<SWidget> Self = SharedThis(this);
+	FWidgetPath WidgetPath;
+	FSlateApplication::Get().FindPathToWidget(Self, WidgetPath);
+
 	FSlateApplication::Get().PushMenu(
-		SharedThis(this),
-		FWidgetPath(),
+		Self,
+		WidgetPath,
 		MenuBuilder.MakeWidget(),
 		ScreenPos,
 		FPopupTransitionEffect(FPopupTransitionEffect::ContextMenu)

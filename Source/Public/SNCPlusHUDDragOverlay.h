@@ -51,10 +51,18 @@ private:
 	// resize, so we don't bother caching across frames.
 	mutable TArray<FOverlayElement> CachedElements;
 
-	// Drag state
-	int32     DragIdx = INDEX_NONE;
+	// Drag state.
+	// DragAlias: which element is being dragged. Cached at MouseDown so it
+	// survives RefreshCachedElements rebuilds between events (the array index
+	// would go stale if a widget hides/respawns/resizes mid-drag).
+	FName     DragAlias = NAME_None;
 	FVector2D DragStartMouseAbs;
 	FVector2D DragStartOffset;        // element's design-pixel offset when drag began
+	// Visual highlight only — used by OnPaint to show the dragged frame in
+	// "drag" colors. Recomputed in OnMouseButtonDown / OnMouseMove from the
+	// alias, so a stale value here just means a frame of wrong color, not a
+	// crash.
+	int32     DragIdx = INDEX_NONE;
 
 	AUTHUD*   GetHUD() const;
 	float     GetRenderScale() const;
