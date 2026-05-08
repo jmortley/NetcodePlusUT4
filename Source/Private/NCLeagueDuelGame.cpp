@@ -691,6 +691,19 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		return Super::ChoosePlayerStart_Implementation(Player);
 	}
 
+	// Warmup gate: in warmup the engine still calls ChoosePlayerStart on every
+	// auto-respawn, but there's no choice UI and the engine nulls
+	// RespawnChoiceA/B between spawns anyway — running our paired-weapon picker
+	// here is wasted work that also clutters the log with bogus first-spawn
+	// pair assignments before they matter. Defer to Super (stock auto-spawn).
+	// At the WaitingToStart → CountdownToBegin / PlayerIntro / InProgress
+	// transition the engine re-runs ChoosePlayerStart with cleared choices,
+	// and our picker fires correctly at that point.
+	if (GetMatchState() == MatchState::WaitingToStart)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
 	// Diagnostic: log every entry with the PlayerState's current spawn-choice
 	// state. The expected sequence per InitNewPlayer (UTGameMode.cpp:3056-3057)
 	// is ChoosePlayerStart called twice — first populates RespawnChoiceA (we
@@ -920,7 +933,14 @@ void ANCLeagueDuelGame::ScoreKill_Implementation(AController* Killer, AControlle
 	// 730uu of each other in the same weapon area (e.g. both near Rocket).
 	// Adding before Super means the populate calls see the killer's location
 	// and the distance filters do their job.
-	if (Killer && Killer->GetPawn() && Other)
+	//
+	// Warmup gate: only populate during InProgress. Warmup deaths shouldn't
+	// poison LastKillerLocation — if they did, the first real-match spawn
+	// would see a non-empty map, flip bIsFirstSpawn to false, and skip the
+	// paired-weapon picker entirely (falling through to killer-distance logic
+	// before the player has even had their TRUE first spawn).
+	if (GetMatchState() == MatchState::InProgress &&
+	    Killer && Killer->GetPawn() && Other)
 	{
 		LastKillerLocation.FindOrAdd(Other) = Killer->GetPawn()->GetActorLocation();
 	}
