@@ -82,7 +82,8 @@ private:
 	void      OnContextReset(FName Alias);
 	void      OnContextToggleOrientation(FName Alias);
 	void      OnContextProperties(FName Alias);
-	// Scale presets submenu (Phase 3.11c).
-	void      BuildScaleSubMenu(class FMenuBuilder& MenuBuilder, FName Alias);
+	// Scale preset action (Phase 3.11c). Used by inline scale entries in the
+	// parent context menu — no submenu (UE 4.15's MenuBuilder.AddSubMenu
+	// crashes when called from a viewport-pushed context menu).
 	void      OnContextSetScale(FName Alias, float Scale);
 };
