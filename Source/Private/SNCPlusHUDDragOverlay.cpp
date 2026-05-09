@@ -66,17 +66,33 @@ void SNCPlusHUDDragOverlay::Construct(const FArguments& InArgs)
 			.Visibility(EVisibility::HitTestInvisible)
 		]
 		+ SOverlay::Slot()
-		.HAlign(HAlign_Right)
+		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Top)
-		.Padding(FMargin(0.f, 12.f, 16.f, 0.f))
+		.Padding(FMargin(0.f, 60.f, 0.f, 0.f))
 		[
-			SNew(SButton)
-			.OnClicked(this, &SNCPlusHUDDragOverlay::OnCloseButtonClicked)
-			.ContentPadding(FMargin(14.f, 6.f))
+			// Top-center anchor avoids viewport-edge clipping that hid the
+			// button on some users' displays (overscan / unusual aspect
+			// ratios / DPI scaling pushed the right-edge anchor past the
+			// visible render area). 60px top inset clears any stock-HUD
+			// banner widgets and the user's score_kda mini panel.
+			//
+			// Fixed 200x44 size + explicit content padding so the button
+			// has a guaranteed-visible footprint regardless of the
+			// surrounding overlay's bounds.
+			SNew(SBox)
+			.WidthOverride(200.f)
+			.HeightOverride(44.f)
 			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Close (ESC)")))
-				.ColorAndOpacity(FLinearColor::White)
+				SNew(SButton)
+				.OnClicked(this, &SNCPlusHUDDragOverlay::OnCloseButtonClicked)
+				.HAlign(HAlign_Center)
+				.VAlign(VAlign_Center)
+				.ContentPadding(FMargin(14.f, 6.f))
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Close (ESC)")))
+					.ColorAndOpacity(FLinearColor::White)
+				]
 			]
 		]
 	];
