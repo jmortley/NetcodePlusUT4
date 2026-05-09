@@ -662,6 +662,13 @@ void SNCPlusHUDDragOverlay::OnContextProperties(FName Alias)
 
 void SNCPlusHUDDragOverlay::ClosePanel()
 {
+	// Auto-save layout to disk on close. The drag overlay has no explicit
+	// Save button — ESC / Close is the commit gesture, and users expect
+	// their flips / drags / scale picks to persist after they exit. Without
+	// this, opening nchud (or restarting the game) loses the work because
+	// disk still holds the pre-edit state.
+	FNCPlusHUDLayout::SaveLive();
+
 	// Restore input mode FIRST, before tearing down the widget — once the
 	// widget is removed, SharedThis would be stale.
 	NCPlusHUDDragMode::SetActive(false);
