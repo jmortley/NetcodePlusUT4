@@ -144,6 +144,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_armor_number"),  FText::FromString(TEXT("AR #")),       FLinearColor::White                    });
 			Row.Colors.Add({ TEXT("color_health"),        FText::FromString(TEXT("HP Accent")),  FLinearColor(0.37f, 0.96f, 0.48f, 1.f) });
 			Row.Colors.Add({ TEXT("color_armor"),         FText::FromString(TEXT("AR Accent")),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f) });
+			Row.Colors.Add({ TEXT("color_warning_hp"),    FText::FromString(TEXT("Warn HP")),    FLinearColor(1.f,   0.78f, 0.20f, 1.f) });
 			Row.Colors.Add({ TEXT("color_low_hp"),        FText::FromString(TEXT("Low HP")),     FLinearColor(1.f,   0.32f, 0.28f, 1.f) });
 			Row.Colors.Add({ TEXT("color_damage_flash"),  FText::FromString(TEXT("Damage")),     FLinearColor(1.f,   0.45f, 0.30f, 1.f) });
 		}

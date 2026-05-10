@@ -12,7 +12,14 @@ namespace NCPlusQS
 {
 	static const float FlashDuration   = 0.30f;
 	static const float PulseDuration   = 0.45f;
-	static const int32 LowHealthCutoff = 30;
+	// Two-tier low-health thresholds keyed to UT4 weapon damage values:
+	//   - WarningHealthCutoff (70): a sniper (45) or shock-combo (~100) shot
+	//     can finish you. One clean LG shot puts you in the danger zone.
+	//   - CriticalHealthCutoff (45): a single hitscan shot kills outright.
+	//     Sniper does 45 damage, so anything <=45 = next-shot-dead.
+	// Color tiers: HP > 70 base, 45-70 warning yellow, <= 45 critical red.
+	static const int32 WarningHealthCutoff  = 70;
+	static const int32 CriticalHealthCutoff = 45;
 
 	// Visual caps for segmented/filled styles. UT4 stock max HP is 199 (rounded
 	// to 200 = 4 segments of 50); max armor is 150 = 3 segments of 50.
@@ -119,8 +126,13 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 	{
 		return ColorElem ? ColorElem->GetExtraColor(Key, Default) : Default;
 	};
-	const FLinearColor LowHpRed    = Col(TEXT("color_low_hp"),       FLinearColor(1.f, 0.32f, 0.28f, 1.f));
-	const FLinearColor DamageFlash = Col(TEXT("color_damage_flash"), FLinearColor(1.f, 0.45f, 0.30f, 1.f));
+	// Two-tier low-HP coloring: warning (45-70) and critical (<=45). The
+	// "color_low_hp" extras key keeps its historical meaning (critical red)
+	// for backwards-compat with users who've customized it. New
+	// "color_warning_hp" key tunes the 45-70 warning tone independently.
+	const FLinearColor LowHpRed     = Col(TEXT("color_low_hp"),      FLinearColor(1.f,  0.32f, 0.28f, 1.f));
+	const FLinearColor WarningHp    = Col(TEXT("color_warning_hp"),  FLinearColor(1.f,  0.78f, 0.20f, 1.f));
+	const FLinearColor DamageFlash  = Col(TEXT("color_damage_flash"), FLinearColor(1.f, 0.45f, 0.30f, 1.f));
 
 	FStatColors C;
 	C.Opacity      = ColorElem ? FMath::Clamp(ColorElem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
@@ -133,10 +145,21 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 	const FLinearColor ArmorNumBase  = Col(TEXT("color_armor_number"),  White);
 
 	C.HealthNumColor = HealthNumBase;
-	if (Health <= LowHealthCutoff)
+	if (Health <= CriticalHealthCutoff)
 	{
-		const float t = FMath::Clamp(float(Health) / float(LowHealthCutoff), 0.f, 1.f);
-		C.HealthNumColor = FMath::Lerp(LowHpRed, HealthNumBase, t);
+		// <=45 HP: any single hitscan (sniper, shock combo) is a one-shot
+		// kill. Solid critical red — no lerp to base, the danger is binary.
+		C.HealthNumColor = LowHpRed;
+	}
+	else if (Health <= WarningHealthCutoff)
+	{
+		// 45 < HP <= 70: warning zone. Lerp from full warning yellow at the
+		// critical boundary up to base color as HP approaches the safe edge.
+		// (Health - Critical) / (Warning - Critical) goes 0→1 across the band.
+		const float t = FMath::Clamp(
+			float(Health - CriticalHealthCutoff) /
+			float(WarningHealthCutoff - CriticalHealthCutoff), 0.f, 1.f);
+		C.HealthNumColor = FMath::Lerp(WarningHp, HealthNumBase, t);
 	}
 	if (Now < HealthDamageFlashEnd)
 	{
