@@ -1,5 +1,6 @@
 // SNCPlusHUDEditor.cpp - implementation of the live HUD layout editor.
 #include "SNCPlusHUDEditor.h"
+#include "SNCPlusHUDPresetGallery.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
 #include "UTPlayerController.h"
@@ -21,6 +22,7 @@
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/SWindow.h"
 #include "Engine/Engine.h"
+#include "Framework/Application/SlateApplication.h"
 #include "GameFramework/GameUserSettings.h"
 #include "HAL/PlatformMisc.h"     // FPlatformMisc::ClipboardCopy/Paste (UE 4.15)
 #include "Misc/MessageDialog.h"
@@ -285,6 +287,21 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 				]
 			]
 		]
+		// Preset gallery overlay - covers the entire editor when shown.
+		// Toggled via OnPresetsClicked / ShowPresetGallery. Lives in the same
+		// viewport widget tree (no new top-level Slate window), per
+		// feedback_fse_picker_restore.md and feedback_no_addsubmenu_in_viewport_menus.md.
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Fill).VAlign(VAlign_Fill)
+		[
+			SAssignNew(PresetGalleryWrapper, SBox)
+			.Visibility(EVisibility::Collapsed)
+			[
+				SAssignNew(PresetGallery, SNCPlusHUDPresetGallery)
+				.OnCloseRequested(FSimpleDelegate::CreateSP(this, &SNCPlusHUDEditor::ShowPresetGallery, false))
+				.OnApplyPreset(FNCApplyPresetDelegate::CreateSP(this, &SNCPlusHUDEditor::ApplyJsonReplacingLive))
+			]
+		]
 	];
 }
 
@@ -509,6 +526,13 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildFooter()
 		+ SHorizontalBox::Slot().AutoWidth().Padding(0,0,8,0)
 		[
 			SNew(SButton)
+			.Text(FText::FromString(TEXT("Presets...")))
+			.ToolTipText(FText::FromString(TEXT("Browse curated layouts and save your own as custom presets. Apply replaces your current layout (with confirmation).")))
+			.OnClicked(this, &SNCPlusHUDEditor::OnPresetsClicked)
+		]
+		+ SHorizontalBox::Slot().AutoWidth().Padding(0,0,8,0)
+		[
+			SNew(SButton)
 			.Text(FText::FromString(TEXT("Copy to Clipboard")))
 			.ToolTipText(FText::FromString(TEXT("Copy this layout to the system clipboard as JSON. Share it with anyone — they can paste it into their HUD editor.")))
 			.OnClicked(this, &SNCPlusHUDEditor::OnCopyToClipboardClicked)
@@ -711,38 +735,7 @@ FReply SNCPlusHUDEditor::OnReloadClicked()
 {
 	FNCPlusHUDLayout::ReloadLive();
 	SetStatus(TEXT("Reloaded from disk."));
-
-	// Sync anchor + style combos to reloaded values (suppress callbacks).
-	TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
-	for (FNCHUDEditorRow& Row : Rows)
-	{
-		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Row.Alias);
-		if (Row.AnchorCombo.IsValid())
-		{
-			const int32 Idx = E ? (int32)E->Anchor : (int32)NCPlusHUDAliases::GetStockAnchor(Row.Alias);
-			Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[Idx]);
-		}
-		if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
-		{
-			const FString CurStr = E ? E->GetExtra(TEXT("style")) : FString();
-			const int32 Idx = FMath::Clamp(NCHUDEdit::ParseStyleIndex(Row.Alias, CurStr), 0, Row.StyleChoices.Num() - 1);
-			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[Idx]);
-		}
-		if (Row.bHasFontPicker && Row.FontCombo.IsValid() && Row.FontChoices.Num() > 0)
-		{
-			const FString CurStr = E ? E->GetExtra(TEXT("font")) : FString();
-			int32 Idx = 0;  // Default
-			for (int32 i = 0; i < Row.FontChoices.Num(); i++)
-			{
-				if (Row.FontChoices[i].IsValid() && (*Row.FontChoices[i]).Equals(CurStr, ESearchCase::IgnoreCase))
-				{
-					Idx = i;
-					break;
-				}
-			}
-			Row.FontCombo->SetSelectedItem(Row.FontChoices[Idx]);
-		}
-	}
+	ResyncCombosToLive();
 	return FReply::Handled();
 }
 
@@ -795,59 +788,106 @@ FReply SNCPlusHUDEditor::OnPasteFromClipboardClicked()
 		SetStatus(TEXT("Clipboard is empty."));
 		return FReply::Handled();
 	}
+	ApplyJsonReplacingLive(Pasted, TEXT("the clipboard layout"));
+	return FReply::Handled();
+}
 
+bool SNCPlusHUDEditor::ApplyJsonReplacingLive(const FString& Json, const FString& Source)
+{
 	bool bOk = false;
-	FNCPlusHUDLayout Parsed = FNCPlusHUDLayout::FromJsonString(Pasted, bOk);
+	FNCPlusHUDLayout Parsed = FNCPlusHUDLayout::FromJsonString(Json, bOk);
 	if (!bOk)
 	{
 		FMessageDialog::Open(EAppMsgType::Ok,
-			FText::FromString(TEXT("Clipboard does not contain valid HUD layout JSON.")));
-		SetStatus(TEXT("Paste failed: invalid JSON."));
-		return FReply::Handled();
+			FText::FromString(FString::Printf(TEXT("%s does not contain valid HUD layout JSON."), *Source)));
+		SetStatus(FString::Printf(TEXT("Apply failed: invalid JSON in %s."), *Source));
+		return false;
 	}
 
 	const int32 NumIncoming = Parsed.Elements.Num();
 	const int32 NumCurrent  = FNCPlusHUDLayout::GetLive().Elements.Num();
 	const FString Prompt = FString::Printf(
-		TEXT("Replace your current layout (%d element override(s)) with the clipboard layout (%d element(s))?\n\n")
+		TEXT("Replace your current layout (%d element override(s)) with %s (%d element(s))?\n\n")
 		TEXT("This won't write to disk until you click 'Save to Disk'."),
-		NumCurrent, NumIncoming);
+		NumCurrent, *Source, NumIncoming);
 
 	if (FMessageDialog::Open(EAppMsgType::YesNo, FText::FromString(Prompt)) != EAppReturnType::Yes)
 	{
-		SetStatus(TEXT("Paste cancelled."));
-		return FReply::Handled();
+		SetStatus(FString::Printf(TEXT("Apply cancelled (%s)."), *Source));
+		return false;
 	}
 
 	FNCPlusHUDLayout::GetLive() = MoveTemp(Parsed);
 	FNCPlusHUDLayout::MarkLiveDirty();
-	// Refresh combo selections so the editor rows reflect the new state.
-	// Anchor + style + font combos all need to match the pasted layout —
-	// otherwise the next interaction would write the stale combo value back
-	// and silently revert the paste for that property.
+	ResyncCombosToLive();
+	SetStatus(FString::Printf(TEXT("Applied %d element(s) from %s."), NumIncoming, *Source));
+	return true;
+}
+
+void SNCPlusHUDEditor::ResyncCombosToLive()
+{
+	TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
+	for (FNCHUDEditorRow& Row : Rows)
 	{
-		TGuardValue<bool> Guard(bSuppressComboCallbacks, true);
-		for (FNCHUDEditorRow& Row : Rows)
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Row.Alias);
+		if (Row.AnchorCombo.IsValid())
 		{
-			const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(Row.Alias);
-			const ENCPlusHUDAnchor Anchor = Elem ? Elem->Anchor
-				: NCPlusHUDAliases::GetStockAnchor(Row.Alias);
-			if (Row.AnchorCombo.IsValid())
+			const int32 Idx = E ? (int32)E->Anchor : (int32)NCPlusHUDAliases::GetStockAnchor(Row.Alias);
+			Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[Idx]);
+		}
+		if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
+		{
+			const FString CurStr = E ? E->GetExtra(TEXT("style")) : FString();
+			const int32 Idx = FMath::Clamp(
+				NCHUDEdit::ParseStyleIndex(Row.Alias, CurStr), 0, Row.StyleChoices.Num() - 1);
+			Row.StyleCombo->SetSelectedItem(Row.StyleChoices[Idx]);
+		}
+		if (Row.bHasFontPicker && Row.FontCombo.IsValid() && Row.FontChoices.Num() > 0)
+		{
+			const FString CurStr = E ? E->GetExtra(TEXT("font")) : FString();
+			int32 Idx = 0;  // Default
+			for (int32 i = 0; i < Row.FontChoices.Num(); i++)
 			{
-				Row.AnchorCombo->SetSelectedItem(Row.AnchorChoices[(int32)Anchor]);
+				if (Row.FontChoices[i].IsValid()
+					&& (*Row.FontChoices[i]).Equals(CurStr, ESearchCase::IgnoreCase))
+				{
+					Idx = i;
+					break;
+				}
 			}
-			if (Row.bHasStylePicker && Row.StyleCombo.IsValid() && Row.StyleChoices.Num() > 0)
-			{
-				Row.StyleCombo->SetSelectedItem(Row.StyleChoices[0]);
-			}
-			if (Row.bHasFontPicker && Row.FontCombo.IsValid() && Row.FontChoices.Num() > 0)
-			{
-				Row.FontCombo->SetSelectedItem(Row.FontChoices[0]);
-			}
+			Row.FontCombo->SetSelectedItem(Row.FontChoices[Idx]);
 		}
 	}
-	SetStatus(FString::Printf(TEXT("Pasted %d element(s) from clipboard."), NumIncoming));
+}
+
+FReply SNCPlusHUDEditor::OnPresetsClicked()
+{
+	if (PresetGallery.IsValid())
+	{
+		PresetGallery->RefreshList();
+	}
+	ShowPresetGallery(true);
 	return FReply::Handled();
+}
+
+void SNCPlusHUDEditor::ShowPresetGallery(bool bShow)
+{
+	if (PresetGalleryWrapper.IsValid())
+	{
+		PresetGalleryWrapper->SetVisibility(bShow ? EVisibility::Visible : EVisibility::Collapsed);
+	}
+	if (bShow && PresetGallery.IsValid())
+	{
+		// Hand keyboard focus to the gallery so its OnKeyDown sees ESC first.
+		FSlateApplication::Get().SetKeyboardFocus(PresetGallery, EFocusCause::SetDirectly);
+	}
+	else if (!bShow)
+	{
+		// Restore focus to the editor so subsequent ESC closes the editor
+		// (otherwise the now-collapsed gallery would still hold focus and
+		// re-handle ESC into a no-op).
+		FSlateApplication::Get().SetKeyboardFocus(SharedThis(this), EFocusCause::SetDirectly);
+	}
 }
 
 // =============================================================================

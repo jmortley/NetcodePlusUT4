@@ -1,5 +1,6 @@
 // NCPlusHUDLayout — implementation. JSON I/O + alias map + apply-to-widgets pass.
 #include "NCPlusHUDLayout.h"
+#include "NCPlusHUDPresets.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
@@ -808,14 +809,43 @@ void FNCPlusHUDLayout::ReloadLive()
 	const FString NewPath = GetDefaultLayoutPath();
 	if (FPaths::FileExists(NewPath))
 	{
+		// Existing player: honor their saved layout exactly. This branch is
+		// the backward-compat guarantee — anyone updating from a prior plugin
+		// version with a saved HUDLayout.json gets their exact prior state,
+		// including custom colors, weapon group assignments, and the
+		// "empty overrides after Reset All + Save" state.
 		GetLive() = LoadFromFile(NewPath);
+		GLiveLayoutDirty = true;
+		return;
+	}
+
+	// Legacy fallback: use the pre-3.4 per-mode file if the unified one is absent.
+	// On next Save, we'll write to NewPath, effectively migrating.
+	const FString LegacyPath = FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
+	if (FPaths::FileExists(LegacyPath))
+	{
+		GetLive() = LoadFromFile(LegacyPath);
+		GLiveLayoutDirty = true;
+		return;
+	}
+
+	// First-run seed. No layout file at either path - this is a fresh install
+	// (or a player who deleted their layout). Seed with the curated default
+	// (NCPlusHUDPresets::GetCurated()[0] = "Streamer Friendly") so new players
+	// get a polished baseline instead of stock UT defaults. On first Save,
+	// the seeded layout is written to NewPath.
+	const TArray<FNCPlusHUDPreset>& Curated = NCPlusHUDPresets::GetCurated();
+	if (Curated.Num() > 0)
+	{
+		bool bOk = false;
+		FNCPlusHUDLayout Seed = FromJsonString(Curated[0].JsonString, bOk);
+		GetLive() = bOk ? MoveTemp(Seed) : FNCPlusHUDLayout();
+		UE_LOG(LogTemp, Log, TEXT("[NCPlusHUDLayout] First-run seed: applied '%s' preset (%d elements)."),
+			*Curated[0].DisplayName, GetLive().Elements.Num());
 	}
 	else
 	{
-		// Legacy fallback: use the pre-3.4 per-mode file if the unified one is absent.
-		// On next Save, we'll write to NewPath, effectively migrating.
-		const FString LegacyPath = FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
-		GetLive() = LoadFromFile(LegacyPath);
+		GetLive() = FNCPlusHUDLayout();
 	}
 	GLiveLayoutDirty = true;
 }

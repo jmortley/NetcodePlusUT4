@@ -8,6 +8,8 @@
 #include "NCPlusHUDLayout.h"
 
 class UUTLocalPlayer;
+class SNCPlusHUDPresetGallery;
+class SBox;
 
 /**
  * Per-row controls for one HUD element. The panel stores a parallel array of
@@ -147,6 +149,23 @@ private:
 	FReply OnCloseClicked();
 	FReply OnCopyToClipboardClicked();
 	FReply OnPasteFromClipboardClicked();
+	FReply OnPresetsClicked();
+
+	// Preset gallery wiring (overlay on the editor body, toggled visible).
+	TSharedPtr<SNCPlusHUDPresetGallery> PresetGallery;
+	TSharedPtr<SBox>                    PresetGalleryWrapper;
+	void ShowPresetGallery(bool bShow);
+
+	// Replace GetLive() with the parsed contents of Json. Called by
+	// OnPasteFromClipboardClicked and the preset gallery's Apply path.
+	// Source is the user-facing description ("the clipboard layout",
+	// "the 'Streamer Friendly' preset") interpolated into the confirm
+	// dialog. Returns true on success (after user confirmation).
+	bool ApplyJsonReplacingLive(const FString& Json, const FString& Source);
+
+	// Refresh anchor/style/font combo selections to match GetLive().
+	// Shared by Reload, Paste, and Apply Preset paths.
+	void ResyncCombosToLive();
 
 	// Status banner ("Saved.", "Reloaded.", etc.)
 	TSharedPtr<class STextBlock> StatusText;
