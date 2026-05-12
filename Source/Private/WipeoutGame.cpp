@@ -2305,9 +2305,33 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Evaluating %d axis candidates for %d spawns (centroid %.0f,%.0f, principal angle %.1f deg)"),
 		Candidates.Num(), N, Centroid.X, Centroid.Y, FMath::RadiansToDegrees(PrincipalAngle));
 
+	// Helper: max pairwise 2D distance ("diameter") of a spawn set.
+	// Used as an intra-team cohesion metric — smaller = tighter cluster.
+	auto IntraDiameter2D = [](const TArray<APlayerStart*>& Side) -> float
+	{
+		float D = 0.f;
+		for (int32 i = 0; i < Side.Num(); ++i)
+		{
+			for (int32 j = i + 1; j < Side.Num(); ++j)
+			{
+				if (Side[i] && Side[j])
+				{
+					D = FMath::Max(D, (Side[i]->GetActorLocation() - Side[j]->GetActorLocation()).Size2D());
+				}
+			}
+		}
+		return D;
+	};
+
+	// Penalty weight for intra-team spread in layout scoring.
+	// QualityScore = MinCrossDistance2D - IntraSpreadPenalty * MaxIntraDiameter.
+	// 0.5 means a 2000u spread reduction is worth the same as a 1000u cross gain.
+	const float IntraSpreadPenalty = 0.5f;
+
 	TArray<APlayerStart*> SideA, SideB;
 	FString BestAxisName;
 	float BestMinCross = -1.f;
+	float BestAxisScore = -FLT_MAX;
 
 	for (const FAxisCandidate& Axis : Candidates)
 	{
@@ -2355,11 +2379,18 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 			for (APlayerStart* S1 : PickB)
 				MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
 
-		UE_LOG(LogGameMode, Log, TEXT("  Axis %-12s: split %d/%d, picked %d/%d, MinCross %.0f"),
-			*Axis.Name, CandidateA.Num(), CandidateB.Num(), PickA.Num(), PickB.Num(), MinCross);
+		// Intra-team cohesion: max diameter among the picked 4 per side.
+		// We want this LOW so teammates spawn close together (no outliers).
+		const float IntraSpread = FMath::Max(IntraDiameter2D(PickA), IntraDiameter2D(PickB));
+		const float AxisScore = MinCross - IntraSpreadPenalty * IntraSpread;
 
-		if (MinCross > BestMinCross)
+		UE_LOG(LogGameMode, Log, TEXT("  Axis %-12s: split %d/%d, picked %d/%d, MinCross %.0f, IntraSpread %.0f, Score %.0f"),
+			*Axis.Name, CandidateA.Num(), CandidateB.Num(), PickA.Num(), PickB.Num(),
+			MinCross, IntraSpread, AxisScore);
+
+		if (AxisScore > BestAxisScore)
 		{
+			BestAxisScore = AxisScore;
 			BestMinCross = MinCross;
 			BestAxisName = Axis.Name;
 			SideA = CandidateA;
@@ -2367,8 +2398,8 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Selected axis '%s' with MinCross %.0f (%d on side A, %d on side B)"),
-		*BestAxisName, BestMinCross, SideA.Num(), SideB.Num());
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Selected axis '%s' with Score %.0f, MinCross %.0f (%d on side A, %d on side B)"),
+		*BestAxisName, BestAxisScore, BestMinCross, SideA.Num(), SideB.Num());
 
 	// Persist full side arrays for fallback (should not be used anymore but keep for safety)
 	PrecomputedSideA = SideA;
@@ -2418,8 +2449,12 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 				MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
 			}
 		}
+		// Intra-team cohesion penalty: ensure the curated 4 cluster together.
+		// Without this, a "deep" but isolated spawn (e.g. top link on DM-Rankin)
+		// can end up in the curated set and isolate one player with the enemy.
+		float IntraSpread = FMath::Max(IntraDiameter2D(Layout.T0_Spawns), IntraDiameter2D(Layout.T1_Spawns));
 		Layout.MinCrossDistance2D = MinCross;
-		Layout.QualityScore = MinCross;
+		Layout.QualityScore = MinCross - IntraSpreadPenalty * IntraSpread;
 		Layout.UsageCount = 0;
 		ValidLayouts_2v2.Add(Layout);
 
@@ -2440,8 +2475,9 @@ void AUWipeoutGame::PrecomputeSpawnLayouts()
 					MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
 				}
 			}
+			float VIntraSpread = FMath::Max(IntraDiameter2D(VLayout.T0_Spawns), IntraDiameter2D(VLayout.T1_Spawns));
 			VLayout.MinCrossDistance2D = MinCross;
-			VLayout.QualityScore = MinCross;
+			VLayout.QualityScore = MinCross - IntraSpreadPenalty * VIntraSpread;
 			VLayout.UsageCount = 0;
 			ValidLayouts_2v2.Add(VLayout);
 		}

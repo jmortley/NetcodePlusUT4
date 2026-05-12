@@ -1922,9 +1922,32 @@ void AElimPlusGame::PrecomputeSpawnLayouts()
 	UE_LOG(LogGameMode, Log, TEXT("ElimPlus: Evaluating %d axis candidates for %d spawns (centroid %.0f,%.0f, principal %.1f deg)"),
 		Candidates.Num(), N, Centroid.X, Centroid.Y, FMath::RadiansToDegrees(PrincipalAngle));
 
+	// Helper: max pairwise 2D distance ("diameter") of a spawn set.
+	// Intra-team cohesion metric — smaller = teammates spawn tighter together.
+	auto IntraDiameter2D = [](const TArray<APlayerStart*>& Side) -> float
+	{
+		float D = 0.f;
+		for (int32 i = 0; i < Side.Num(); ++i)
+		{
+			for (int32 j = i + 1; j < Side.Num(); ++j)
+			{
+				if (Side[i] && Side[j])
+				{
+					D = FMath::Max(D, (Side[i]->GetActorLocation() - Side[j]->GetActorLocation()).Size2D());
+				}
+			}
+		}
+		return D;
+	};
+
+	// QualityScore = MinCrossDistance2D - IntraSpreadPenalty * MaxIntraDiameter.
+	// 0.5 means a 2000u intra reduction is worth the same as a 1000u cross gain.
+	const float IntraSpreadPenalty = 0.5f;
+
 	TArray<APlayerStart*> SideA, SideB;
 	FString BestAxisName;
 	float BestMinCross = -1.f;
+	float BestAxisScore = -FLT_MAX;
 
 	for (const FAxisCandidate& Axis : Candidates)
 	{
@@ -1955,11 +1978,17 @@ void AElimPlusGame::PrecomputeSpawnLayouts()
 			for (APlayerStart* S1 : PickB)
 				MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
 
-		UE_LOG(LogGameMode, Log, TEXT("  Axis %-12s: split %d/%d, picked %d/%d, MinCross %.0f"),
-			*Axis.Name, CandidateA.Num(), CandidateB.Num(), PickA.Num(), PickB.Num(), MinCross);
+		// Intra-team cohesion: max diameter of the picked 4 per side.
+		const float IntraSpread = FMath::Max(IntraDiameter2D(PickA), IntraDiameter2D(PickB));
+		const float AxisScore = MinCross - IntraSpreadPenalty * IntraSpread;
 
-		if (MinCross > BestMinCross)
+		UE_LOG(LogGameMode, Log, TEXT("  Axis %-12s: split %d/%d, picked %d/%d, MinCross %.0f, IntraSpread %.0f, Score %.0f"),
+			*Axis.Name, CandidateA.Num(), CandidateB.Num(), PickA.Num(), PickB.Num(),
+			MinCross, IntraSpread, AxisScore);
+
+		if (AxisScore > BestAxisScore)
 		{
+			BestAxisScore = AxisScore;
 			BestMinCross = MinCross;
 			BestAxisName = Axis.Name;
 			SideA = CandidateA;
@@ -1967,8 +1996,8 @@ void AElimPlusGame::PrecomputeSpawnLayouts()
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("ElimPlus: Selected axis '%s' MinCross %.0f (sideA=%d, sideB=%d)"),
-		*BestAxisName, BestMinCross, SideA.Num(), SideB.Num());
+	UE_LOG(LogGameMode, Log, TEXT("ElimPlus: Selected axis '%s' Score %.0f, MinCross %.0f (sideA=%d, sideB=%d)"),
+		*BestAxisName, BestAxisScore, BestMinCross, SideA.Num(), SideB.Num());
 
 	PrecomputedSideA = SideA;
 	PrecomputedSideB = SideB;
@@ -2004,8 +2033,13 @@ void AElimPlusGame::PrecomputeSpawnLayouts()
 		for (APlayerStart* S0 : Layout.T0_Spawns)
 			for (APlayerStart* S1 : Layout.T1_Spawns)
 				MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
+
+		// Intra-team cohesion penalty so the curated 4 actually cluster.
+		// Prevents isolated "deep" spawns (e.g. central choke points) from being
+		// included in the team's pool and stranding a player with the enemy.
+		float IntraSpread = FMath::Max(IntraDiameter2D(Layout.T0_Spawns), IntraDiameter2D(Layout.T1_Spawns));
 		Layout.MinCrossDistance2D = MinCross;
-		Layout.QualityScore = MinCross;
+		Layout.QualityScore = MinCross - IntraSpreadPenalty * IntraSpread;
 		ValidLayouts_4v4.Add(Layout);
 
 		// Variants: rotate which spawns from side A are picked, keep side B fixed
@@ -2019,8 +2053,9 @@ void AElimPlusGame::PrecomputeSpawnLayouts()
 			for (APlayerStart* S0 : VLayout.T0_Spawns)
 				for (APlayerStart* S1 : VLayout.T1_Spawns)
 					MinCross = FMath::Min(MinCross, (S0->GetActorLocation() - S1->GetActorLocation()).Size2D());
+			float VIntraSpread = FMath::Max(IntraDiameter2D(VLayout.T0_Spawns), IntraDiameter2D(VLayout.T1_Spawns));
 			VLayout.MinCrossDistance2D = MinCross;
-			VLayout.QualityScore = MinCross;
+			VLayout.QualityScore = MinCross - IntraSpreadPenalty * VIntraSpread;
 			ValidLayouts_4v4.Add(VLayout);
 		}
 	}
