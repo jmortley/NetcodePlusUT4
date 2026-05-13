@@ -657,7 +657,7 @@ protected:
 	 *  problematic. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Spawning",
 		meta = (ClampMin = "500.0", ClampMax = "15000.0"))
-	float MinimumEnemySpawnDistance = 3600.0f;
+	float MinimumEnemySpawnDistance = 4000.0f;
 
 	void InitializeSpawnPointSystem();
 	void PrecomputeSpawnLayouts();

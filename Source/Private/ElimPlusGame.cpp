@@ -1706,42 +1706,36 @@ void AElimPlusGame::DelayedForceSpectate(AUTPlayerState* DeadPS)
 
 AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 {
-	// Wipeout-style spawn picker: per-team curated pool from
-	// SelectSpawnLayoutForRound, dynamic per-player scoring, 3-tier fallback.
-	// Replaces the old 1-2-spawn pair picker that didn't scale to 4v4.
 	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
 	if (!PS || !PS->Team) return Super::ChoosePlayerStart_Implementation(Player);
 
 	const int32 TeamIndex = PS->Team->TeamIndex;
-	TArray<APlayerStart*> MySpawns;
-	if (TeamIndex == 0 && Team0SelectedSpawns.Num() > 0) MySpawns = Team0SelectedSpawns;
-	else if (TeamIndex == 1 && Team1SelectedSpawns.Num() > 0) MySpawns = Team1SelectedSpawns;
-	else
+
+	// Three-tier algorithm with HARD enemy-distance floor:
+	//   Tier 1a: curated 4 spawns, must be >= MinimumEnemySpawnDistance from enemies
+	//   Tier 1b: any spawn on the map, same hard floor (if 1a fails)
+	//   Tier 2:  teammate-stack — pick the spawn closest to a teammate (last resort,
+	//            ignores enemy distance; safety over solitude)
+
+	const float EnemyBonusCap = 5000.f;
+	auto ScoreCandidate = [&](float MinTeammateDist, int32 NearbyCount, float MinEnemyDist) -> float
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus ChoosePlayerStart: no curated spawns for team %d, falling back to Super"), TeamIndex);
-		return Super::ChoosePlayerStart_Implementation(Player);
-	}
+		const bool bAnyTeammate = (MinTeammateDist < FLT_MAX);
+		const bool bAnyEnemy    = (MinEnemyDist    < FLT_MAX);
+		const float TeammateTerm = bAnyTeammate ? -MinTeammateDist : 0.f;
+		const float EnemyBonus   = bAnyEnemy ? FMath::Min(MinEnemyDist, EnemyBonusCap) * 0.5f : 0.f;
+		return NearbyCount * 5000.f + TeammateTerm + EnemyBonus + FMath::FRandRange(0.f, 300.f);
+	};
 
-	if (MySpawns.Num() == 0) return Super::ChoosePlayerStart_Implementation(Player);
-
-	// Tier 1: dynamic scoring within the curated pool. Cluster teammates,
-	// reward distance from enemies. Hard-reject spawns within
-	// MinimumEnemySpawnDistance of any living enemy. Track a "least bad"
-	// fallback in case every curated candidate fails the threshold.
-	APlayerStart* BestSpawn = nullptr;
-	float BestScore = -FLT_MAX;
-	APlayerStart* FallbackSpawn = nullptr;
-	float FallbackEnemyDist = -FLT_MAX;
-
-	for (APlayerStart* Spawn : MySpawns)
+	auto ScanCandidate = [&](APlayerStart* Spawn, float& OutMinEnemy, float& OutMinTeammate, int32& OutNearby, bool& OutOccupied)
 	{
-		if (!Spawn) continue;
+		OutMinEnemy = FLT_MAX;
+		OutMinTeammate = FLT_MAX;
+		OutNearby = 0;
+		OutOccupied = false;
+		if (!Spawn) return;
 
-		int32 NearbyCount = 0;
-		float MinTeammateDist = FLT_MAX;
-		float MinEnemyDist = FLT_MAX;
-		bool bOccupied = false;
-
+		const FVector SpawnLoc = Spawn->GetActorLocation();
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
@@ -1749,91 +1743,106 @@ AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
 			if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
 
-			float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
+			const float Dist = (Pawn->GetActorLocation() - SpawnLoc).Size2D();
 			if (OtherPS->Team->TeamIndex == TeamIndex)
 			{
-				if (Dist < 100.f) { bOccupied = true; break; }
-				MinTeammateDist = FMath::Min(MinTeammateDist, Dist);
-				if (Dist < 800.f) NearbyCount++;
+				if (Dist < 100.f) { OutOccupied = true; return; }
+				OutMinTeammate = FMath::Min(OutMinTeammate, Dist);
+				if (Dist < 800.f) OutNearby++;
 			}
 			else
 			{
-				MinEnemyDist = FMath::Min(MinEnemyDist, Dist);
+				OutMinEnemy = FMath::Min(OutMinEnemy, Dist);
 			}
 		}
+	};
 
+	APlayerStart* BestSpawn = nullptr;
+	float BestScore = -FLT_MAX;
+
+	// Tier 1a: curated spawns for this team, with hard enemy floor.
+	TArray<APlayerStart*> MySpawns;
+	if (TeamIndex == 0 && Team0SelectedSpawns.Num() > 0)      MySpawns = Team0SelectedSpawns;
+	else if (TeamIndex == 1 && Team1SelectedSpawns.Num() > 0) MySpawns = Team1SelectedSpawns;
+
+	for (APlayerStart* Spawn : MySpawns)
+	{
+		float MinEnemy, MinTeammate; int32 Nearby; bool bOccupied;
+		ScanCandidate(Spawn, MinEnemy, MinTeammate, Nearby, bOccupied);
 		if (bOccupied) continue;
+		if (MinEnemy < MinimumEnemySpawnDistance) continue;   // hard floor
 
-		if (MinEnemyDist > FallbackEnemyDist)
-		{
-			FallbackEnemyDist = MinEnemyDist;
-			FallbackSpawn = Spawn;
-		}
-
-		// Hard reject if any enemy too close. (FLT_MAX < threshold is false, so
-		// the first team spawning naturally passes when no enemies exist yet.)
-		if (MinEnemyDist < MinimumEnemySpawnDistance) continue;
-
-		// Cap the enemy bonus so it doesn't drown out teammate clustering when
-		// MinEnemyDist is FLT_MAX (no enemies). Same guard as Wipeout.
-		const float EnemyBonusCap = 5000.f;
-		const bool bAnyEnemy = (MinEnemyDist < FLT_MAX);
-		const float EnemyBonus = bAnyEnemy ? FMath::Min(MinEnemyDist, EnemyBonusCap) * 0.5f : 0.f;
-		float Score = NearbyCount * 5000.f
-			- MinTeammateDist
-			+ EnemyBonus
-			+ FMath::FRandRange(0.f, 300.f);
+		const float Score = ScoreCandidate(MinTeammate, Nearby, MinEnemy);
 		if (Score > BestScore) { BestScore = Score; BestSpawn = Spawn; }
 	}
 
-	// Tier 2 fallback: every curated candidate failed the enemy threshold —
-	// take the best-of-bad from the curated set.
-	if (!BestSpawn && FallbackSpawn)
-	{
-		UE_LOG(LogGameMode, Warning,
-			TEXT("ElimPlus: All curated spawns for %s within enemy threshold (%.0f) — using fallback at enemy dist %.0f"),
-			*PS->PlayerName, MinimumEnemySpawnDistance, FallbackEnemyDist);
-		BestSpawn = FallbackSpawn;
-	}
-
-	// Tier 3 fallback: curated pool entirely teammate-occupied. Search the
-	// full PlayerStart list for a non-occupied spawn with max enemy distance.
+	// Tier 1b: full map with hard enemy floor (curated couldn't satisfy threshold).
 	if (!BestSpawn && AllSpawnPointsList.Num() > 0)
 	{
-		float BestMapEnemyDist = -FLT_MAX;
 		for (APlayerStart* Spawn : AllSpawnPointsList)
 		{
-			if (!Spawn) continue;
-			float MinEnemyDist = FLT_MAX;
-			bool bOccupied = false;
-			for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
-			{
-				APawn* Pawn = It->Get();
-				if (!Pawn || !Pawn->PlayerState) continue;
-				AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
-				if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
-				float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
-				if (OtherPS->Team->TeamIndex == TeamIndex)
-				{
-					if (Dist < 100.f) { bOccupied = true; break; }
-				}
-				else
-				{
-					MinEnemyDist = FMath::Min(MinEnemyDist, Dist);
-				}
-			}
+			float MinEnemy, MinTeammate; int32 Nearby; bool bOccupied;
+			ScanCandidate(Spawn, MinEnemy, MinTeammate, Nearby, bOccupied);
 			if (bOccupied) continue;
-			if (MinEnemyDist > BestMapEnemyDist) { BestMapEnemyDist = MinEnemyDist; BestSpawn = Spawn; }
+			if (MinEnemy < MinimumEnemySpawnDistance) continue;
+
+			const float Score = ScoreCandidate(MinTeammate, Nearby, MinEnemy);
+			if (Score > BestScore) { BestScore = Score; BestSpawn = Spawn; }
 		}
 		if (BestSpawn)
 		{
 			UE_LOG(LogGameMode, Warning,
-				TEXT("ElimPlus: Curated spawns exhausted for %s — picked best of full map at enemy dist %.0f"),
-				*PS->PlayerName, BestMapEnemyDist);
+				TEXT("ElimPlus: %s curated spawns failed %.0fu floor — using full-map spawn (passed floor)"),
+				*PS->PlayerName, MinimumEnemySpawnDistance);
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("ElimPlus: %s (team %d) assigned spawn at %s (curated pool size %d)"),
+	// Tier 2: TEAMMATE-STACK fallback. No spawn on the entire map passed the
+	// hard enemy floor. Spawn ON a teammate (closest spawn to any living
+	// teammate). Better to die alongside a friend than alone in enemy territory.
+	if (!BestSpawn && AllSpawnPointsList.Num() > 0)
+	{
+		TArray<FVector> TeammateLocs;
+		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+		{
+			APawn* Pawn = It->Get();
+			if (!Pawn || !Pawn->PlayerState) continue;
+			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
+			if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
+			if (OtherPS->Team->TeamIndex == TeamIndex)
+			{
+				TeammateLocs.Add(Pawn->GetActorLocation());
+			}
+		}
+
+		if (TeammateLocs.Num() > 0)
+		{
+			float BestTeammateDist = FLT_MAX;
+			for (APlayerStart* Spawn : AllSpawnPointsList)
+			{
+				if (!Spawn) continue;
+				const FVector SpawnLoc = Spawn->GetActorLocation();
+				float MinDist = FLT_MAX;
+				for (const FVector& Loc : TeammateLocs)
+				{
+					MinDist = FMath::Min(MinDist, (Loc - SpawnLoc).Size2D());
+				}
+				if (MinDist < BestTeammateDist)
+				{
+					BestTeammateDist = MinDist;
+					BestSpawn = Spawn;
+				}
+			}
+			if (BestSpawn)
+			{
+				UE_LOG(LogGameMode, Warning,
+					TEXT("ElimPlus: %s — no spawn passes %.0fu floor; teammate-stacking at %.0fu from teammate"),
+					*PS->PlayerName, MinimumEnemySpawnDistance, BestTeammateDist);
+			}
+		}
+	}
+
+	UE_LOG(LogGameMode, Log, TEXT("ElimPlus: %s (team %d) assigned spawn at %s (curated pool %d)"),
 		*PS->PlayerName, TeamIndex,
 		BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"),
 		MySpawns.Num());
@@ -2090,8 +2099,10 @@ void AElimPlusGame::SelectSpawnLayoutForRound()
 
 	// Every 3rd round, force a tight 1v1 layout for variety. Otherwise pick
 	// from the 4v4 pool with usage-penalty + jitter scoring.
-	const bool bForce1v1 = (TotalRoundsPlayed % 3 == 0) && (ValidLayouts_1v1.Num() > 0);
-	TArray<FElimPlusSpawnLayout>& Pool = (!bForce1v1 && ValidLayouts_4v4.Num() > 0) ? ValidLayouts_4v4 : ValidLayouts_1v1;
+	// Always prefer the team-size (4v4) layouts. 1v1 layouts are only a
+	// fallback when no 4v4 layouts exist (degenerate maps). The previous
+	// "force 1v1 every 3rd round" path broke 4v4 spawning catastrophically.
+	TArray<FElimPlusSpawnLayout>& Pool = (ValidLayouts_4v4.Num() > 0) ? ValidLayouts_4v4 : ValidLayouts_1v1;
 
 	if (Pool.Num() == 0)
 	{
