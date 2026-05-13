@@ -170,6 +170,22 @@ namespace NCPlusHUDPresetsImpl
 		TEXT("}")
 	);
 
+	// Helper: build an entry via explicit field assignment. UE 4.15 + the
+	// default member initializer on FNCPlusHUDPreset::bIsCustom disqualifies
+	// the struct from aggregate brace-init, so T.Add({...}) fails to compile.
+	// Field-assignment is the portable alternative.
+	static FNCPlusHUDPreset MakePreset(const TCHAR* Id, const TCHAR* Display,
+	                                   const TCHAR* Description, const FString& Json)
+	{
+		FNCPlusHUDPreset P;
+		P.Id          = Id;
+		P.DisplayName = Display;
+		P.Description = Description;
+		P.JsonString  = Json;
+		P.bIsCustom   = false;
+		return P;
+	}
+
 	static const TArray<FNCPlusHUDPreset>& BuildCuratedTable()
 	{
 		static const TArray<FNCPlusHUDPreset> Table = []()
@@ -177,27 +193,21 @@ namespace NCPlusHUDPresetsImpl
 			TArray<FNCPlusHUDPreset> T;
 			// Index 0 is the first-run default seed (referenced by
 			// FNCPlusHUDLayout::ReloadLive when no on-disk layout exists).
-			T.Add({
+			T.Add(MakePreset(
 				TEXT("streamer_friendly"),
 				TEXT("Streamer Friendly"),
 				TEXT("Big legible HP/Armor, prominent portraits + scorebar, killfeed visible. Tuned for chat readers to follow the action."),
-				StreamerFriendlyJson,
-				false
-			});
-			T.Add({
+				StreamerFriendlyJson));
+			T.Add(MakePreset(
 				TEXT("comp_minimal"),
 				TEXT("Comp Minimal"),
 				TEXT("Slim HP/Armor, accuracy widget visible, portraits and killfeed hidden. Maximum screen for competitive play."),
-				CompMinimalJson,
-				false
-			});
-			T.Add({
+				CompMinimalJson));
+			T.Add(MakePreset(
 				TEXT("ql_throwback"),
 				TEXT("Quake Live Throwback"),
 				TEXT("HP/Armor top-left in classic Q3 green/yellow, big yellow ammo bottom-right. Old-school left-stack feel."),
-				QLThrowbackJson,
-				false
-			});
+				QLThrowbackJson));
 			return T;
 		}();
 		return Table;
@@ -290,7 +300,8 @@ namespace NCPlusHUDPresets
 
 	FString GetCustomPresetsDir()
 	{
-		const FString Dir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("NetcodePlus"), TEXT("Presets"));
+		// UE 4.15 uses GameSavedDir(); ProjectSavedDir was renamed later (UE 4.18+).
+		const FString Dir = FPaths::Combine(FPaths::GameSavedDir(), TEXT("NetcodePlus"), TEXT("Presets"));
 		IFileManager::Get().MakeDirectory(*Dir, /*Tree=*/true);
 		return Dir;
 	}

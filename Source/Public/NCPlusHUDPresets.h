@@ -33,8 +33,8 @@ namespace NCPlusHUDPresets
 	 *  FNCPlusHUDLayout::ReloadLive when no on-disk layout exists. */
 	NETCODEPLUS_API const TArray<FNCPlusHUDPreset>& GetCurated();
 
-	/** Scan Saved/NetcodePlus/Presets/*.preset.json. Sorted alphabetically
-	 *  by display name. */
+	/** Scan Saved/NetcodePlus/Presets for <name>.preset.json files. Sorted
+	 *  alphabetically by display name. */
 	NETCODEPLUS_API TArray<FNCPlusHUDPreset> ScanCustoms();
 
 	/** Curated + customs in display order (curated first). */

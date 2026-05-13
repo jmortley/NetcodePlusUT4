@@ -514,7 +514,13 @@ FReply SNCPlusHUDPresetGallery::OnSaveDialogConfirmClicked()
 		? SaveDialogNameBox->GetText().ToString() : FString();
 	const FString Desc = SaveDialogDescBox.IsValid()
 		? SaveDialogDescBox->GetText().ToString() : FString();
-	if (Name.TrimStartAndEnd().IsEmpty())
+
+	// UE 4.15 has no FString::TrimStartAndEnd. Copy + use the in-place
+	// Trim() / TrimTrailing() pair instead. Both mutate the string in place.
+	FString TrimmedName = Name;
+	TrimmedName.Trim();
+	TrimmedName.TrimTrailing();
+	if (TrimmedName.IsEmpty())
 	{
 		FMessageDialog::Open(EAppMsgType::Ok,
 			FText::FromString(TEXT("Preset name can't be empty.")));
@@ -522,9 +528,9 @@ FReply SNCPlusHUDPresetGallery::OnSaveDialogConfirmClicked()
 	}
 
 	FString OutId;
-	if (NCPlusHUDPresets::SaveCustom(Name, Desc, OutId))
+	if (NCPlusHUDPresets::SaveCustom(TrimmedName, Desc, OutId))
 	{
-		SetStatus(FString::Printf(TEXT("Saved '%s' as custom preset."), *Name));
+		SetStatus(FString::Printf(TEXT("Saved '%s' as custom preset."), *TrimmedName));
 		ShowSaveDialog(false);
 		RefreshList();
 	}
