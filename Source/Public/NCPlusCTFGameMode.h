@@ -4,6 +4,12 @@
 #include "UTCTFGameState.h"
 #include "UTCTFScoring.h"
 #include "UTCTFBaseGame.h"
+
+// Full include needed (not forward decl) because TUniquePtr<FNCPlusCTFRatingSystem>
+// instantiates its destructor at this header — `delete` requires the complete type.
+// Must come BEFORE the .generated.h (UHT requires .generated.h to be the last include).
+#include "NCPlusCTFRatingSystem.h"
+
 #include "NCPlusCTFGameMode.generated.h"
 
 // Safe property access across DLL boundary — uses runtime UProperty reflection
@@ -130,6 +136,9 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	// which reads bAllowFloorSlide from this game mode. No RestartPlayer override needed.
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
+	virtual void BeginPlay() override;
+	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn, AUTPlayerState* Holder, FName Reason) override;
@@ -143,6 +152,16 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void HandleExitingIntermission() override;
 	virtual void HandleMatchInOvertime() override;
 	virtual void EndGame(AUTPlayerState* Winner, FName Reason) override;
+
+	/** Server-side rating system for CTF or iCTF (separate ladders, single
+	 *  instance per match — bIsInstagib locked at construction). Flushed at
+	 *  HandleMatchHasEnded. Non-UObject, server-only. */
+	TUniquePtr<FNCPlusCTFRatingSystem> RatingSystem;
+
+	/** Guard against the engine routing HandleMatchHasEnded twice. Reset in
+	 *  InitGame; set true after the first successful flush. */
+	UPROPERTY(Transient)
+	bool bRatingFlushedThisMatch = false;
 
 	virtual bool PlayerCanRestart_Implementation(APlayerController* Player);
 	virtual bool SupportsInstantReplay() const override;

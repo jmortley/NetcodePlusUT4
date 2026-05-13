@@ -27,6 +27,9 @@
 #include "CTFStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "NCPlusCTFOTInfo.h"
+#include "NCPlusCTFRatingSystem.h"
+#include "NCEloUploader.h"
+#include "UTGameMode.h"     // AUTGameMode::bIsInstagib
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -130,6 +133,105 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 				Fallback->PlayerStartTag = FName(*FString::Printf(TEXT("Team%d"), It->TeamNum));
 			}
 		}
+	}
+
+	// Match-scoped: reset the rating flush guard on each map load. The rating
+	// system itself is constructed in BeginPlay where bIsInstagib has been
+	// finalized by the mutator chain.
+	bRatingFlushedThisMatch = false;
+}
+
+void ANCPlusCTFGameMode::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Server-only rating system. Construct ONCE per map load, locking in the
+	// detected instagib state. AUTGameMode::bIsInstagib is set by the Instagib
+	// mutator during the mutator chain — fully resolved by BeginPlay. Each
+	// instance reads/writes only its variant's Mods.db table.
+	if (HasAuthority() && !RatingSystem.IsValid())
+	{
+		const bool bInstagib = bIsInstagib;
+		FNCPlusCTFRatingSystem::InitDatabase(GetWorld());
+		RatingSystem = MakeUnique<FNCPlusCTFRatingSystem>(bInstagib);
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: rating system constructed for %s ladder"),
+			bInstagib ? TEXT("iCTF") : TEXT("CTF"));
+	}
+}
+
+void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
+{
+	Super::PostLogin(NewPlayer);
+
+	if (!HasAuthority() || !RatingSystem.IsValid()) return;
+	if (!NewPlayer) return;
+
+	AUTPlayerState* UTPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+	if (UTPS && UTPS->UniqueId.IsValid())
+	{
+		RatingSystem->LoadPlayerFromDB(GetWorld(), UTPS->UniqueId.ToString());
+	}
+}
+
+void ANCPlusCTFGameMode::HandleMatchHasEnded()
+{
+	Super::HandleMatchHasEnded();
+
+	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
+	{
+		return;
+	}
+
+	AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+	if (!GS) return;
+
+	// Build the single-match input from final K/D/damage on the player array.
+	FNCPlusCTFMatchInput In;
+	In.bIsInstagib = RatingSystem->IsInstagibMode();
+
+	int32 RedScore  = 0;
+	int32 BlueScore = 0;
+	if (GS->Teams.Num() >= 2 && GS->Teams[0] && GS->Teams[1])
+	{
+		RedScore  = static_cast<int32>(GS->Teams[0]->Score);
+		BlueScore = static_cast<int32>(GS->Teams[1]->Score);
+	}
+	In.RedScore  = RedScore;
+	In.BlueScore = BlueScore;
+	if (RedScore > BlueScore)      In.WinnerTeamIndex = 0;
+	else if (BlueScore > RedScore) In.WinnerTeamIndex = 1;
+	else                            In.WinnerTeamIndex = -1;
+
+	for (APlayerState* APS : GS->PlayerArray)
+	{
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(APS);
+		if (!UTPS || UTPS->bOnlySpectator) continue;
+		if (!UTPS->UniqueId.IsValid()) continue;  // bot
+
+		FNCPlusCTFPlayerInput P;
+		P.UniqueId   = UTPS->UniqueId.ToString();
+		P.PlayerName = UTPS->PlayerName;
+		P.TeamIndex  = UTPS->GetTeamNum();
+		P.Kills      = UTPS->Kills;
+		P.Deaths     = UTPS->Deaths;
+		P.Damage     = static_cast<int32>(UTPS->DamageDone);
+		In.Players.Add(MoveTemp(P));
+	}
+
+	// Snapshot BEFORE the ProcessMatch in-memory update so the delta is correct.
+	// (HandleMatchHasStarted is the canonical snapshot point for ElimPlus, but
+	// CTF can lose players between match-start and match-end via mid-match join,
+	// and SnapshotMatchStart is idempotent — calling here captures the actual
+	// pre-update state for whoever ended up playing.)
+	RatingSystem->SnapshotMatchStart();
+	RatingSystem->ProcessMatch(In);
+	RatingSystem->Flush(GetWorld());
+	bRatingFlushedThisMatch = true;
+
+	const FString Json = RatingSystem->BuildResultPayload(GetWorld(), In);
+	if (!Json.IsEmpty())
+	{
+		FNCEloUploader::PostMatchResult(GetWorld(), Json);
 	}
 }
 

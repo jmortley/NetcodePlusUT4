@@ -29,6 +29,8 @@
 #include "UTGameMessage.h"
 #include "WipeoutHUD.h"
 #include "SiphonPowerup.h"
+#include "WipeoutRatingSystem.h"
+#include "NCEloUploader.h"
 
 
 // ============================================================================
@@ -125,7 +127,7 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	CurrentWaveDamage = 0.0f;
 
 	// Spawn defaults
-	MinimumEnemySpawnDistance = 3600.0f;
+	MinimumEnemySpawnDistance = 4000.0f;
 	MinimumEnemyHorizontalDistance = 3000.0f;
 	MidRoundMinEnemyDistance = 2000.0f;
 
@@ -203,6 +205,9 @@ void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FSt
 		GoalScore = URLGoalScore;
 	}
 	TimeLimit = 0; // We manage time per-round
+
+	// Match-scoped: reset the rating flush guard on each map load.
+	bRatingFlushedThisMatch = false;
 }
 
 void AUWipeoutGame::BeginPlay()
@@ -227,6 +232,13 @@ void AUWipeoutGame::BeginPlay()
 	// Damage replicator is spawned in HandleMatchHasStarted instead of here —
 	// spawning bAlwaysRelevant actors during BeginPlay can trigger package
 	// loading on connecting clients before their world is fully set up.
+
+	// Server-only rating system. Initialize Mods.db schema once per map load.
+	if (HasAuthority() && !RatingSystem.IsValid())
+	{
+		RatingSystem = MakeUnique<FWipeoutRatingSystem>();
+		FWipeoutRatingSystem::InitDatabase(GetWorld());
+	}
 }
 
 void AUWipeoutGame::InitGameState()
@@ -251,6 +263,11 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	Super::HandleMatchHasStarted();
 	bWarmupMode = false;
 
+	// Defense-in-depth reset: InitGame already clears this on map load, but a
+	// single server session can host multiple matches. Reset here so a subsequent
+	// match can flush its own ratings.
+	bRatingFlushedThisMatch = false;
+
 	// Spawn the damage replicator now — all clients are fully loaded at this point.
 	// Spawning in BeginPlay was too early and could cause client crashes.
 	if (HasAuthority() && !DamageReplicator)
@@ -269,6 +286,87 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	if (HasAuthority() && !SiphonPickup)
 	{
 		SpawnSiphonPickup();
+	}
+
+	// Snapshot every loaded player's current rating as their "match-start" value
+	// for the per-match delta reported in BuildResultPayload.
+	if (HasAuthority() && RatingSystem.IsValid())
+	{
+		RatingSystem->SnapshotMatchStart();
+	}
+}
+
+
+void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
+{
+	Super::PostLogin(NewPlayer);
+
+	// Server-only: pull this player's rating from Mods.db into the cache so it's
+	// ready before the first round ends. Late joiners arriving mid-match also
+	// get their rating loaded; SnapshotMatchStart for them is best-effort.
+	if (!HasAuthority() || !RatingSystem.IsValid()) return;
+	if (!NewPlayer) return;
+
+	AUTPlayerState* UTPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+	if (UTPS && UTPS->UniqueId.IsValid())
+	{
+		RatingSystem->LoadPlayerFromDB(GetWorld(), UTPS->UniqueId.ToString());
+	}
+}
+
+
+void AUWipeoutGame::HandleMatchHasEnded()
+{
+	Super::HandleMatchHasEnded();
+
+	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
+	{
+		return;
+	}
+
+	// Persist updated ratings to Mods.db.
+	RatingSystem->FlushAtMatchEnd(GetWorld());
+	bRatingFlushedThisMatch = true;
+
+	// Build + push the global-ELO payload to ut4stats.com.
+	AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+	if (!GS) return;
+
+	FNCWipeoutMatchInput UploadIn;
+
+	int32 RedScore  = 0;
+	int32 BlueScore = 0;
+	if (GS->Teams.Num() >= 2 && GS->Teams[0] && GS->Teams[1])
+	{
+		RedScore  = static_cast<int32>(GS->Teams[0]->Score);
+		BlueScore = static_cast<int32>(GS->Teams[1]->Score);
+	}
+	UploadIn.RedScore  = RedScore;
+	UploadIn.BlueScore = BlueScore;
+	if (RedScore > BlueScore)      UploadIn.WinnerTeamIndex = 0;
+	else if (BlueScore > RedScore) UploadIn.WinnerTeamIndex = 1;
+	else                            UploadIn.WinnerTeamIndex = -1;
+
+	for (APlayerState* APS : GS->PlayerArray)
+	{
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(APS);
+		if (!UTPS || UTPS->bOnlySpectator) continue;
+		if (!UTPS->UniqueId.IsValid()) continue;  // bot
+
+		FNCWipeoutPlayerInput P;
+		P.UniqueId   = UTPS->UniqueId.ToString();
+		P.PlayerName = UTPS->PlayerName;
+		P.TeamIndex  = UTPS->GetTeamNum();
+		P.Kills      = UTPS->Kills;
+		P.Deaths     = UTPS->Deaths;
+		P.Damage     = static_cast<int32>(UTPS->DamageDone);
+		UploadIn.Players.Add(MoveTemp(P));
+	}
+
+	const FString Json = RatingSystem->BuildResultPayload(GetWorld(), UploadIn);
+	if (!Json.IsEmpty())
+	{
+		FNCEloUploader::PostMatchResult(GetWorld(), Json);
 	}
 }
 
@@ -1070,6 +1168,59 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 	StopOvertime();
 	CancelAllPendingRespawns();
 
+	// Rating system: per-round ProcessMatch (in-memory only — flushed at match end).
+	if (RatingSystem.IsValid())
+	{
+		AUTGameState* RGS = GetGameState<AUTGameState>();
+		if (RGS)
+		{
+			FWipeoutRoundResult RoundResult;
+			RoundResult.bIsDraw = (WinnerTeamIndex == INDEX_NONE);
+
+			auto BuildPerf = [this, RGS](int32 TeamIdx) -> TArray<FWipeoutPlayerRoundPerf>
+			{
+				TArray<FWipeoutPlayerRoundPerf> Out;
+				for (APlayerState* PS : RGS->PlayerArray)
+				{
+					AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+					if (!UTPS || UTPS->bOnlySpectator) continue;
+					if (UTPS->GetTeamNum() != TeamIdx) continue;
+
+					FWipeoutPlayerRoundPerf P;
+					// Bots get synthetic key; filtered at write-back time so their
+					// transient PlayerRating placeholders never persist.
+					P.UniqueId = UTPS->UniqueId.IsValid()
+						? UTPS->UniqueId.ToString()
+						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					P.Kills    = UTPS->RoundKills;
+					// Wipeout has mid-round respawns, so a single bOutOfLives flag
+					// at round-end can under-count actual deaths. PlayerDeathCounts
+					// tracks per-individual death counts when the team-shared
+					// counter is off; fall back to bOutOfLives otherwise.
+					const int32* DeathPtr = PlayerDeathCounts.Find(UTPS);
+					P.Deaths   = DeathPtr ? *DeathPtr : (UTPS->bOutOfLives ? 1 : 0);
+					P.Damage   = PlayerRoundDamage.Contains(UTPS) ? PlayerRoundDamage[UTPS] : 0.f;
+					Out.Add(MoveTemp(P));
+				}
+				return Out;
+			};
+
+			if (RoundResult.bIsDraw)
+			{
+				RoundResult.WinnerTeam = BuildPerf(0);
+				RoundResult.LoserTeam  = BuildPerf(1);
+			}
+			else
+			{
+				const int32 LoserIdx = (WinnerTeamIndex == 0) ? 1 : 0;
+				RoundResult.WinnerTeam = BuildPerf(WinnerTeamIndex);
+				RoundResult.LoserTeam  = BuildPerf(LoserIdx);
+			}
+
+			RatingSystem->ProcessRound(RoundResult);
+		}
+	}
+
 	// Score the round
 	bool bIsDraw = (WinnerTeamIndex == INDEX_NONE);
 	if (!bIsDraw)
@@ -1412,47 +1563,35 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 
 	const int32 TeamIndex = PS->Team->TeamIndex;
 
-	// Use the layout-selected spawns for this round (top-4 per team,
-	// chosen by SelectSpawnLayoutForRound with side alternation).
-	TArray<APlayerStart*> MySpawns;
+	// Three-tier algorithm with HARD enemy-distance floor:
+	//   Tier 1a: curated 4 spawns, must be >= MinimumEnemySpawnDistance from enemies
+	//   Tier 1b: any spawn on the map, same hard floor (if 1a fails)
+	//   Tier 2:  teammate-stack — pick the spawn closest to a teammate (last resort,
+	//            ignores enemy distance; safety over solitude)
+	//
+	// Per-candidate scoring (Tier 1a/1b): cluster teammates, reward enemy distance.
+	// Bonus terms guard against FLT_MAX dominance when no teammates/enemies exist.
 
-	if (TeamIndex == 0 && Team0SelectedSpawns.Num() > 0)
+	const float EnemyBonusCap = 5000.f;
+	auto ScoreCandidate = [&](float MinTeammateDist, int32 NearbyCount, float MinEnemyDist) -> float
 	{
-		MySpawns = Team0SelectedSpawns;
-	}
-	else if (TeamIndex == 1 && Team1SelectedSpawns.Num() > 0)
+		const bool bAnyTeammate = (MinTeammateDist < FLT_MAX);
+		const bool bAnyEnemy    = (MinEnemyDist    < FLT_MAX);
+		const float TeammateTerm = bAnyTeammate ? -MinTeammateDist : 0.f;
+		const float EnemyBonus   = bAnyEnemy ? FMath::Min(MinEnemyDist, EnemyBonusCap) * 0.5f : 0.f;
+		return NearbyCount * 5000.f + TeammateTerm + EnemyBonus + FMath::FRandRange(0.f, 300.f);
+	};
+
+	// Helper: scan all pawns relative to a candidate spawn.
+	auto ScanCandidate = [&](APlayerStart* Spawn, float& OutMinEnemy, float& OutMinTeammate, int32& OutNearby, bool& OutOccupied)
 	{
-		MySpawns = Team1SelectedSpawns;
-	}
-	else
-	{
-		// Fallback: layout selection failed or spawns not yet chosen
-		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: No selected spawns for team %d — falling back to Super"), TeamIndex);
-		return Super::ChoosePlayerStart_Implementation(Player);
-	}
+		OutMinEnemy = FLT_MAX;
+		OutMinTeammate = FLT_MAX;
+		OutNearby = 0;
+		OutOccupied = false;
+		if (!Spawn) return;
 
-	if (MySpawns.Num() == 0) return Super::ChoosePlayerStart_Implementation(Player);
-
-	// Score spawns to cluster teammates together AND keep teams separated.
-	// First player spawned has no teammates/enemies yet — picks randomly.
-	// Later players pull toward teammates and away from enemies.
-	APlayerStart* BestSpawn = nullptr;
-	float BestScore = -FLT_MAX;
-
-	// Fallback: best candidate even if it fails the enemy-distance threshold,
-	// chosen by maximum distance from nearest enemy (least-bad option).
-	APlayerStart* FallbackSpawn = nullptr;
-	float FallbackEnemyDist = -FLT_MAX;
-
-	for (APlayerStart* Spawn : MySpawns)
-	{
-		if (!Spawn) continue;
-
-		int32 NearbyCount = 0;
-		float MinTeammateDist = FLT_MAX;
-		float MinEnemyDist = FLT_MAX;
-		bool bOccupied = false;
-
+		const FVector SpawnLoc = Spawn->GetActorLocation();
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
@@ -1460,114 +1599,111 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
 			if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
 
-			float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
-
+			const float Dist = (Pawn->GetActorLocation() - SpawnLoc).Size2D();
 			if (OtherPS->Team->TeamIndex == TeamIndex)
 			{
-				// Teammate
-				if (Dist < 100.f) { bOccupied = true; break; }
-				MinTeammateDist = FMath::Min(MinTeammateDist, Dist);
-				if (Dist < 800.f) NearbyCount++;
+				if (Dist < 100.f) { OutOccupied = true; return; }
+				OutMinTeammate = FMath::Min(OutMinTeammate, Dist);
+				if (Dist < 800.f) OutNearby++;
 			}
 			else
 			{
-				// Enemy
-				MinEnemyDist = FMath::Min(MinEnemyDist, Dist);
+				OutMinEnemy = FMath::Min(OutMinEnemy, Dist);
 			}
 		}
+	};
 
-		// Skip spawns that already have a teammate on them
-		if (bOccupied) continue;
+	APlayerStart* BestSpawn = nullptr;
+	float BestScore = -FLT_MAX;
 
-		// Track the least-bad candidate even if it fails the enemy threshold —
-		// guarantees we never return nullptr on cramped maps
-		if (MinEnemyDist > FallbackEnemyDist)
-		{
-			FallbackEnemyDist = MinEnemyDist;
-			FallbackSpawn = Spawn;
-		}
+	// Tier 1a: curated spawns for this team, with hard enemy floor.
+	TArray<APlayerStart*> MySpawns;
+	if (TeamIndex == 0 && Team0SelectedSpawns.Num() > 0)      MySpawns = Team0SelectedSpawns;
+	else if (TeamIndex == 1 && Team1SelectedSpawns.Num() > 0) MySpawns = Team1SelectedSpawns;
 
-		// Hard reject if any enemy is too close (FLT_MAX < threshold is false, so
-		// this naturally skips when no enemies exist yet — first team spawning)
-		if (MinEnemyDist < MinimumEnemySpawnDistance) continue;
-
-		// Score: cluster teammates, reward distance from enemies.
-		// Cap the enemy-distance bonus so it doesn't drown out teammate clustering
-		// when no enemies have spawned yet (MinEnemyDist would be FLT_MAX).
-		const float EnemyBonusCap = 5000.f;
-		const bool bAnyEnemy = (MinEnemyDist < FLT_MAX);
-		const float EnemyBonus = bAnyEnemy
-			? FMath::Min(MinEnemyDist, EnemyBonusCap) * 0.5f
-			: 0.f;
-		float Score = NearbyCount * 5000.f
-			- MinTeammateDist
-			+ EnemyBonus
-			+ FMath::FRandRange(0.f, 300.f);
-		if (Score > BestScore)
-		{
-			BestScore = Score;
-			BestSpawn = Spawn;
-		}
-	}
-
-	// Tier 2 fallback: every curated candidate failed the enemy threshold —
-	// use the least-bad option from the curated set
-	if (!BestSpawn && FallbackSpawn)
+	for (APlayerStart* Spawn : MySpawns)
 	{
-		UE_LOG(LogGameMode, Warning,
-			TEXT("Wipeout: All curated spawns for %s within enemy threshold (%.0f) — using fallback at enemy dist %.0f"),
-			*PS->PlayerName, MinimumEnemySpawnDistance, FallbackEnemyDist);
-		BestSpawn = FallbackSpawn;
+		float MinEnemy, MinTeammate; int32 Nearby; bool bOccupied;
+		ScanCandidate(Spawn, MinEnemy, MinTeammate, Nearby, bOccupied);
+		if (bOccupied) continue;
+		if (MinEnemy < MinimumEnemySpawnDistance) continue;   // hard floor
+
+		const float Score = ScoreCandidate(MinTeammate, Nearby, MinEnemy);
+		if (Score > BestScore) { BestScore = Score; BestSpawn = Spawn; }
 	}
 
-	// Tier 3 fallback: curated spawns are entirely teammate-occupied (lopsided
-	// map split or fewer curated spawns than players). Pick the best-of-the-worst
-	// from the full PlayerStart list — non-occupied spawn with max enemy distance.
+	// Tier 1b: full map with hard enemy floor (curated couldn't satisfy 4500u).
 	if (!BestSpawn && AllSpawnPointsList.Num() > 0)
 	{
-		float BestMapEnemyDist = -FLT_MAX;
 		for (APlayerStart* Spawn : AllSpawnPointsList)
 		{
-			if (!Spawn) continue;
-
-			float MinEnemyDist = FLT_MAX;
-			bool bOccupied = false;
-			for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
-			{
-				APawn* Pawn = It->Get();
-				if (!Pawn || !Pawn->PlayerState) continue;
-				AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
-				if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
-
-				float Dist = (Pawn->GetActorLocation() - Spawn->GetActorLocation()).Size2D();
-				if (OtherPS->Team->TeamIndex == TeamIndex)
-				{
-					if (Dist < 100.f) { bOccupied = true; break; }
-				}
-				else
-				{
-					MinEnemyDist = FMath::Min(MinEnemyDist, Dist);
-				}
-			}
+			float MinEnemy, MinTeammate; int32 Nearby; bool bOccupied;
+			ScanCandidate(Spawn, MinEnemy, MinTeammate, Nearby, bOccupied);
 			if (bOccupied) continue;
+			if (MinEnemy < MinimumEnemySpawnDistance) continue;
 
-			if (MinEnemyDist > BestMapEnemyDist)
-			{
-				BestMapEnemyDist = MinEnemyDist;
-				BestSpawn = Spawn;
-			}
+			const float Score = ScoreCandidate(MinTeammate, Nearby, MinEnemy);
+			if (Score > BestScore) { BestScore = Score; BestSpawn = Spawn; }
 		}
-
 		if (BestSpawn)
 		{
 			UE_LOG(LogGameMode, Warning,
-				TEXT("Wipeout: Curated spawns exhausted for %s — picked best of full map at enemy dist %.0f"),
-				*PS->PlayerName, BestMapEnemyDist);
+				TEXT("Wipeout: %s curated spawns failed %.0fu floor — using full-map spawn (passed floor)"),
+				*PS->PlayerName, MinimumEnemySpawnDistance);
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s (team %d) assigned spawn at %s (side has %d spawns)"),
-		*PS->PlayerName, TeamIndex, BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"), MySpawns.Num());
+	// Tier 2: TEAMMATE-STACK fallback. No spawn on the entire map passed the
+	// hard enemy floor. Spawn ON a teammate (closest spawn to any living
+	// teammate). Better to die alongside a friend than alone in enemy territory.
+	// This intentionally bypasses the 100u "occupied" check.
+	if (!BestSpawn && AllSpawnPointsList.Num() > 0)
+	{
+		// Gather living teammates
+		TArray<FVector> TeammateLocs;
+		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+		{
+			APawn* Pawn = It->Get();
+			if (!Pawn || !Pawn->PlayerState) continue;
+			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
+			if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
+			if (OtherPS->Team->TeamIndex == TeamIndex)
+			{
+				TeammateLocs.Add(Pawn->GetActorLocation());
+			}
+		}
+
+		if (TeammateLocs.Num() > 0)
+		{
+			float BestTeammateDist = FLT_MAX;
+			for (APlayerStart* Spawn : AllSpawnPointsList)
+			{
+				if (!Spawn) continue;
+				const FVector SpawnLoc = Spawn->GetActorLocation();
+				float MinDist = FLT_MAX;
+				for (const FVector& Loc : TeammateLocs)
+				{
+					MinDist = FMath::Min(MinDist, (Loc - SpawnLoc).Size2D());
+				}
+				if (MinDist < BestTeammateDist)
+				{
+					BestTeammateDist = MinDist;
+					BestSpawn = Spawn;
+				}
+			}
+			if (BestSpawn)
+			{
+				UE_LOG(LogGameMode, Warning,
+					TEXT("Wipeout: %s — no spawn passes %.0fu floor; teammate-stacking at %.0fu from teammate"),
+					*PS->PlayerName, MinimumEnemySpawnDistance, BestTeammateDist);
+			}
+		}
+	}
+
+	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s (team %d) assigned spawn at %s (curated pool %d)"),
+		*PS->PlayerName, TeamIndex,
+		BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"),
+		MySpawns.Num());
 
 	return BestSpawn ? BestSpawn : Super::ChoosePlayerStart_Implementation(Player);
 }
@@ -2512,8 +2648,12 @@ void AUWipeoutGame::SelectSpawnLayoutForRound()
 	Team0SelectedSpawns.Empty();
 	Team1SelectedSpawns.Empty();
 
-	bool bForce1v1 = (TotalRoundsPlayed % 3 == 0) && (ValidLayouts_1v1.Num() > 0);
-	TArray<FWipeoutSpawnLayout>& Pool = (!bForce1v1 && ValidLayouts_2v2.Num() > 0) ? ValidLayouts_2v2 : ValidLayouts_1v1;
+	// Always prefer the team-size (4v4) layouts. 1v1 layouts are only a
+	// fallback when no 4v4 layouts exist (degenerate maps). The previous
+	// "force 1v1 every 3rd round" path broke 4v4 spawning catastrophically
+	// — a 1v1 layout has 1 spawn per team, so 3 of 4 teammates ended up in
+	// Tier 3 fallback (full map, no threshold) and spawned in enemy territory.
+	TArray<FWipeoutSpawnLayout>& Pool = (ValidLayouts_2v2.Num() > 0) ? ValidLayouts_2v2 : ValidLayouts_1v1;
 
 	if (Pool.Num() == 0)
 	{

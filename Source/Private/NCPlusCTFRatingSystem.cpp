@@ -1,0 +1,402 @@
+// NCPlusCTFRatingSystem.cpp — Mods.db persistence + match-end ProcessMatch glue
+// for CTF/iCTF. Tron's TeamGlicko2 headers stay confined to this TU.
+
+#include "NCPlusCTFRatingSystem.h"
+#include "UnrealTournament.h"
+#include "UTGameInstance.h"            // FDatabaseRow + ExecDatabaseCommand
+#include "UTGameState.h"               // ServerName for BuildResultPayload
+#include "Engine/World.h"
+#include "Misc/DateTime.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
+
+// Vendored TeamGlicko2 — included only here, never via the .h.
+#include "TeamGlickoRating.h"
+#include "TeamGlicko2System.h"
+#include "TeamGlicko2Config.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogNCPlusCTFRating, Log, All);
+
+// =============================================================================
+// Pimpl: cache + per-instance flag. TeamGlicko2 types only visible here.
+// =============================================================================
+struct FNCPlusCTFRatingSystemImpl
+{
+	bool bIsInstagib = false;
+
+	/** UniqueId -> mutable PlayerRating. Updated by ProcessMatch. */
+	TMap<FString, TeamGlicko2::PlayerRating> RatingCache;
+
+	/** UniqueId -> rating-rounded-int captured by SnapshotMatchStart. */
+	TMap<FString, int32> RatingAtMatchStart;
+};
+
+// Unity-build aware: file-scoped prefixed names to avoid collisions with
+// other rating systems bundled into the same TU.
+namespace
+{
+	FString CTFR_SqlEscape(const FString& In)
+	{
+		return In.Replace(TEXT("'"), TEXT("''"));
+	}
+
+	bool CTFR_ExecSql(UWorld* World, const FString& Sql, TArray<FDatabaseRow>& OutRows)
+	{
+		if (!World) return false;
+		UUTGameInstance* GI = Cast<UUTGameInstance>(World->GetGameInstance());
+		if (!GI) return false;
+		return GI->ExecDatabaseCommand(Sql, OutRows);
+	}
+
+	bool CTFR_ExecSqlNoRows(UWorld* World, const FString& Sql)
+	{
+		TArray<FDatabaseRow> Discard;
+		return CTFR_ExecSql(World, Sql, Discard);
+	}
+
+	const TCHAR* TableForMode(bool bInstagib)
+	{
+		return bInstagib ? TEXT("NCRatingICTF") : TEXT("NCRatingCTF");
+	}
+
+	const TCHAR* JsonModeKey(bool bInstagib)
+	{
+		return bInstagib ? TEXT("iCTF") : TEXT("CTF");
+	}
+}
+
+// =============================================================================
+// FNCPlusCTFRatingSystem
+// =============================================================================
+
+FNCPlusCTFRatingSystem::FNCPlusCTFRatingSystem(bool bInIsInstagib)
+	: Impl(MakeUnique<FNCPlusCTFRatingSystemImpl>())
+{
+	Impl->bIsInstagib = bInIsInstagib;
+}
+
+FNCPlusCTFRatingSystem::~FNCPlusCTFRatingSystem() = default;
+
+bool FNCPlusCTFRatingSystem::IsInstagibMode() const
+{
+	return Impl->bIsInstagib;
+}
+
+bool FNCPlusCTFRatingSystem::InitDatabase(UWorld* World)
+{
+	// Create BOTH tables so the static InitDatabase call from BeginPlay covers
+	// either path (regular CTF or instagib CTF) regardless of when bIsInstagib
+	// is determined. The unused table will sit empty — that's fine, schema
+	// creation is idempotent and cheap.
+	bool bAllOk = true;
+
+	for (int32 Variant = 0; Variant < 2; ++Variant)
+	{
+		const bool bInstagib = (Variant == 1);
+		const FString Sql = FString::Printf(
+			TEXT("CREATE TABLE IF NOT EXISTS %s (")
+			TEXT("  UniqueId       TEXT PRIMARY KEY NOT NULL,")
+			TEXT("  Rating         REAL NOT NULL DEFAULT 1400.0,")
+			TEXT("  RD             REAL NOT NULL DEFAULT 350.0,")
+			TEXT("  Sigma          REAL NOT NULL DEFAULT 0.06,")
+			TEXT("  PerfIndexEMA   REAL NOT NULL DEFAULT 0.0,")
+			TEXT("  PerfGames      INTEGER NOT NULL DEFAULT 0,")
+			TEXT("  LastSeenUtc    INTEGER NOT NULL DEFAULT 0,")
+			TEXT("  SchemaVersion  INTEGER NOT NULL DEFAULT 1")
+			TEXT(");"), TableForMode(bInstagib));
+		const bool bOk = CTFR_ExecSqlNoRows(World, Sql);
+		if (!bOk) bAllOk = false;
+	}
+
+	UE_LOG(LogNCPlusCTFRating, Log, TEXT("InitDatabase: NCRatingCTF + NCRatingICTF %s"),
+		bAllOk ? TEXT("ready") : TEXT("FAILED (USE_SQLITE off?)"));
+	return bAllOk;
+}
+
+void FNCPlusCTFRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& UniqueId)
+{
+	if (UniqueId.IsEmpty()) return;
+	if (Impl->RatingCache.Contains(UniqueId)) return;
+
+	const FString Esc = CTFR_SqlEscape(UniqueId);
+	const TCHAR* Table = TableForMode(Impl->bIsInstagib);
+	const FString Sql = FString::Printf(
+		TEXT("SELECT Rating, RD, Sigma, PerfIndexEMA, PerfGames FROM %s WHERE UniqueId='%s';"),
+		Table, *Esc);
+
+	TArray<FDatabaseRow> Rows;
+	const bool bOk = CTFR_ExecSql(World, Sql, Rows);
+
+	if (bOk && Rows.Num() > 0 && Rows[0].Text.Num() >= 5)
+	{
+		const double Rating       = FCString::Atod(*Rows[0].Text[0]);
+		const double RD           = FCString::Atod(*Rows[0].Text[1]);
+		const double Sigma        = FCString::Atod(*Rows[0].Text[2]);
+		const double PerfIndexEMA = FCString::Atod(*Rows[0].Text[3]);
+		const int32  PerfGames    = FCString::Atoi(*Rows[0].Text[4]);
+
+		TeamGlicko2::PlayerRating PR(Rating, RD, Sigma);
+		PR.SetPerfIndexEMA(PerfIndexEMA);
+		PR.SetPerfGames(PerfGames);
+		Impl->RatingCache.Add(UniqueId, PR);
+		UE_LOG(LogNCPlusCTFRating, Log, TEXT("[%s] Loaded %s: Rating=%.1f RD=%.1f"),
+			Table, *UniqueId, Rating, RD);
+	}
+	else
+	{
+		TeamGlicko2::PlayerRating PR(
+			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility);
+		Impl->RatingCache.Add(UniqueId, PR);
+
+		const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
+		const FString InsertSql = FString::Printf(
+			TEXT("INSERT OR IGNORE INTO %s (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc) ")
+			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld);"),
+			Table,
+			*Esc,
+			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility,
+			static_cast<long long>(NowUtc));
+		CTFR_ExecSqlNoRows(World, InsertSql);
+		UE_LOG(LogNCPlusCTFRating, Log, TEXT("[%s] New player %s — defaults + INSERT OR IGNORE"), Table, *UniqueId);
+	}
+}
+
+void FNCPlusCTFRatingSystem::SnapshotMatchStart()
+{
+	Impl->RatingAtMatchStart.Empty();
+	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
+	{
+		Impl->RatingAtMatchStart.Add(Pair.Key, FMath::RoundToInt(Pair.Value.GetRating()));
+	}
+	UE_LOG(LogNCPlusCTFRating, Log, TEXT("[%s] Snapshot %d ratings at match start"),
+		TableForMode(Impl->bIsInstagib), Impl->RatingAtMatchStart.Num());
+}
+
+void FNCPlusCTFRatingSystem::ProcessMatch(const FNCPlusCTFMatchInput& In)
+{
+	using namespace TeamGlicko2;
+
+	// Partition players by team. Cumulative K/D/damage drives the performance
+	// score. Bots (no cache entry) get a transient default placeholder so
+	// team size math reflects reality, but their post-match ratings get
+	// discarded at write-back.
+	TSet<FString> CachedIdsBefore;
+	CachedIdsBefore.Reserve(Impl->RatingCache.Num());
+	for (const TPair<FString, PlayerRating>& Pair : Impl->RatingCache)
+	{
+		CachedIdsBefore.Add(Pair.Key);
+	}
+
+	auto BuildTeam = [this](const TArray<FNCPlusCTFPlayerInput>& Inputs, std::vector<MatchPlayer>& Out)
+	{
+		Out.reserve(Inputs.Num());
+		for (const FNCPlusCTFPlayerInput& P : Inputs)
+		{
+			const PlayerRating* Cached = Impl->RatingCache.Find(P.UniqueId);
+			PlayerRating PR;
+			if (Cached)
+			{
+				PR = *Cached;
+			}
+			else
+			{
+				PR = PlayerRating(kDefaultRating, kDefaultRD, kDefaultVolatility);
+			}
+			const double Perf = double(P.Kills) - double(P.Deaths) + double(P.Damage) / 220.0;
+			Out.push_back(MatchPlayer(PR, Perf));
+		}
+	};
+
+	TArray<FNCPlusCTFPlayerInput> RedTeam, BlueTeam;
+	for (const FNCPlusCTFPlayerInput& P : In.Players)
+	{
+		if (P.TeamIndex == 0)      RedTeam.Add(P);
+		else if (P.TeamIndex == 1) BlueTeam.Add(P);
+	}
+
+	if (RedTeam.Num() == 0 || BlueTeam.Num() == 0)
+	{
+		UE_LOG(LogNCPlusCTFRating, Warning,
+			TEXT("ProcessMatch: empty team (Red=%d Blue=%d) — skipping rating update"),
+			RedTeam.Num(), BlueTeam.Num());
+		return;
+	}
+
+	MatchResult Match;
+	BuildTeam(RedTeam,  Match.teamA);
+	BuildTeam(BlueTeam, Match.teamB);
+
+	if (In.WinnerTeamIndex < 0)
+	{
+		Match.scoreA = 0.5;
+		Match.scoreB = 0.5;
+	}
+	else if (In.WinnerTeamIndex == 0)
+	{
+		Match.scoreA = 1.0;
+		Match.scoreB = 0.0;
+	}
+	else
+	{
+		Match.scoreA = 0.0;
+		Match.scoreB = 1.0;
+	}
+
+	TeamGlicko2System::ProcessMatch(Match);
+
+	// Write back: only humans (cache entries that existed pre-call).
+	auto WriteBack = [this, &CachedIdsBefore](const std::vector<MatchPlayer>& Team, const TArray<FNCPlusCTFPlayerInput>& Players)
+	{
+		const int32 N = FMath::Min(static_cast<int32>(Team.size()), Players.Num());
+		for (int32 i = 0; i < N; ++i)
+		{
+			if (CachedIdsBefore.Contains(Players[i].UniqueId))
+			{
+				Impl->RatingCache[Players[i].UniqueId] = Team[i].rating;
+			}
+		}
+	};
+	WriteBack(Match.teamA, RedTeam);
+	WriteBack(Match.teamB, BlueTeam);
+}
+
+void FNCPlusCTFRatingSystem::Flush(UWorld* World)
+{
+	if (!World) return;
+
+	const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
+	const TCHAR* Table = TableForMode(Impl->bIsInstagib);
+
+	int32 PersistedCount = 0;
+	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
+	{
+		const FString& UniqueId = Pair.Key;
+		const TeamGlicko2::PlayerRating& PR = Pair.Value;
+
+		const FString Esc = CTFR_SqlEscape(UniqueId);
+		const FString Sql = FString::Printf(
+			TEXT("INSERT OR REPLACE INTO %s ")
+			TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, SchemaVersion) ")
+			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, 1);"),
+			Table,
+			*Esc,
+			PR.GetRating(), PR.GetRD(), PR.GetSigma(),
+			PR.GetPerfIndexEMA(), PR.GetPerfGames(),
+			static_cast<long long>(NowUtc));
+		CTFR_ExecSqlNoRows(World, Sql);
+		++PersistedCount;
+	}
+	UE_LOG(LogNCPlusCTFRating, Log, TEXT("[%s] Flush: persisted %d ratings"), Table, PersistedCount);
+}
+
+int32 FNCPlusCTFRatingSystem::GetCachedElo(const FString& UniqueId) const
+{
+	if (const TeamGlicko2::PlayerRating* PR = Impl->RatingCache.Find(UniqueId))
+	{
+		return FMath::RoundToInt(PR->GetRating());
+	}
+	return FMath::RoundToInt(TeamGlicko2::kDefaultRating);
+}
+
+void FNCPlusCTFRatingSystem::Forget(const FString& UniqueId)
+{
+	Impl->RatingCache.Remove(UniqueId);
+	Impl->RatingAtMatchStart.Remove(UniqueId);
+}
+
+FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusCTFMatchInput& In) const
+{
+	using namespace TeamGlicko2;
+
+	TArray<int32> HumanIndices;
+	HumanIndices.Reserve(In.Players.Num());
+	for (int32 i = 0; i < In.Players.Num(); ++i)
+	{
+		const FNCPlusCTFPlayerInput& P = In.Players[i];
+		if (P.UniqueId.IsEmpty()) continue;
+		if (Impl->RatingCache.Contains(P.UniqueId))
+		{
+			HumanIndices.Add(i);
+		}
+	}
+	if (HumanIndices.Num() == 0)
+	{
+		UE_LOG(LogNCPlusCTFRating, Warning,
+			TEXT("BuildResultPayload: no human players in cache — skipping upload"));
+		return FString();
+	}
+
+	FString ServerName;
+	if (World)
+	{
+		if (AUTGameState* GS = World->GetGameState<AUTGameState>())
+		{
+			ServerName = GS->ServerName;
+		}
+	}
+	FString MapName;
+	if (World)
+	{
+		MapName = World->GetMapName();
+		MapName.RemoveFromStart(World->StreamingLevelsPrefix);
+	}
+	const FString PlayedAtUtc = FDateTime::UtcNow().ToIso8601();
+
+	FString Out;
+	TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+		TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
+
+	Writer->WriteObjectStart();
+	Writer->WriteValue(TEXT("request"),       FString(TEXT("elo_match_result")));
+	Writer->WriteValue(TEXT("mode"),          FString(JsonModeKey(Impl->bIsInstagib)));
+	Writer->WriteValue(TEXT("server"),        ServerName);
+	Writer->WriteValue(TEXT("map"),           MapName);
+	Writer->WriteValue(TEXT("played_at_utc"), PlayedAtUtc);
+	Writer->WriteValue(TEXT("winner_team"),   In.WinnerTeamIndex);
+	Writer->WriteValue(TEXT("red_score"),     In.RedScore);
+	Writer->WriteValue(TEXT("blue_score"),    In.BlueScore);
+	Writer->WriteArrayStart(TEXT("players"));
+
+	for (int32 Idx : HumanIndices)
+	{
+		const FNCPlusCTFPlayerInput& P = In.Players[Idx];
+		const PlayerRating* PR = Impl->RatingCache.Find(P.UniqueId);
+		if (!PR) continue;
+
+		const int32 PreElo  = Impl->RatingAtMatchStart.FindRef(P.UniqueId);
+		const int32 PostElo = FMath::RoundToInt(PR->GetRating());
+		const int32 Delta   = (PreElo != 0) ? (PostElo - PreElo) : 0;
+
+		const TCHAR* Result;
+		if (In.WinnerTeamIndex < 0)
+		{
+			Result = TEXT("draw");
+		}
+		else
+		{
+			Result = (P.TeamIndex == In.WinnerTeamIndex) ? TEXT("win") : TEXT("loss");
+		}
+
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("id"),     P.UniqueId);
+		Writer->WriteValue(TEXT("name"),   P.PlayerName);
+		Writer->WriteValue(TEXT("team"),   P.TeamIndex);
+		Writer->WriteValue(TEXT("result"), FString(Result));
+		Writer->WriteValue(TEXT("kills"),  P.Kills);
+		Writer->WriteValue(TEXT("deaths"), P.Deaths);
+		Writer->WriteValue(TEXT("damage"), P.Damage);
+		Writer->WriteValue(TEXT("pre"),    static_cast<double>(PreElo));
+		Writer->WriteValue(TEXT("post"),   PR->GetRating());
+		Writer->WriteValue(TEXT("delta"),  Delta);
+		Writer->WriteValue(TEXT("rd"),     PR->GetRD());
+		Writer->WriteValue(TEXT("sigma"),  PR->GetSigma());
+		Writer->WriteObjectEnd();
+	}
+
+	Writer->WriteArrayEnd();
+	Writer->WriteObjectEnd();
+	Writer->Close();
+
+	return Out;
+}

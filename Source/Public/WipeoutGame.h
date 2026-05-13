@@ -8,6 +8,13 @@
 #include "Templates/SubclassOf.h"
 #include "TimerManager.h"
 #include "UTLineUpHelper.h"
+
+// Full include needed (not forward decl) because TUniquePtr<FWipeoutRatingSystem>
+// instantiates its destructor at this header — `delete` requires the complete
+// type. Must come BEFORE the .generated.h (UHT requires .generated.h to be the
+// last include).
+#include "WipeoutRatingSystem.h"
+
 #include "WipeoutGame.generated.h"
 
 // Forward declarations
@@ -234,7 +241,7 @@ public:
 	float MinimumEnemyHorizontalDistance = 3000.0f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning", meta = (ClampMin = "500.0"))
-	float MinimumEnemySpawnDistance = 3600.0f;
+	float MinimumEnemySpawnDistance = 4000.0f;
 
 	/** Minimum distance from living enemies for mid-round respawns */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning", meta = (ClampMin = "500.0"))
@@ -501,8 +508,20 @@ public:
 	class AWipeoutDamageReplicator* DamageReplicator;
 	virtual void InitGameState() override;
 	virtual void HandleMatchHasStarted() override;
+	virtual void HandleMatchHasEnded() override;
+	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void DefaultTimer() override;
 	void Logout(AController* Exiting) override;
+
+	/** Server-side rating system for Wipeout (separate ladder from ElimPlus).
+	 *  Updated each EndRoundForTeam; flushed to Mods.db + pushed to ut4stats at
+	 *  HandleMatchHasEnded. Non-UObject, server-only. */
+	TUniquePtr<FWipeoutRatingSystem> RatingSystem;
+
+	/** Guard against the engine routing HandleMatchHasEnded twice. Reset in
+	 *  InitGame; set true after the first successful flush. */
+	UPROPERTY(Transient)
+	bool bRatingFlushedThisMatch = false;
 
 	virtual void CallMatchStateChangeNotify() override;
 	virtual bool CheckRelevance_Implementation(AActor* Other) override;
