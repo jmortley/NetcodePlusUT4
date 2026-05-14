@@ -135,9 +135,12 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 		}
 	}
 
-	// Match-scoped: reset the rating flush guard on each map load. The rating
-	// system itself is constructed in BeginPlay where bIsInstagib has been
-	// finalized by the mutator chain.
+	// Match-scoped: reset the rating flush guard on each map load. Rating system
+	// instance itself is constructed lazily in HandleMatchHasStarted — that's
+	// when AUTGameMode::bIsInstagib is reliably settled (same timing
+	// CTFStatsReplicator and MutServerShield use). Reading earlier risks the
+	// Instagib BP mutator not yet having set the flag, which would route an iCTF
+	// match into the regular CTF Mods.db table.
 	bRatingFlushedThisMatch = false;
 }
 
@@ -145,17 +148,13 @@ void ANCPlusCTFGameMode::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Server-only rating system. Construct ONCE per map load, locking in the
-	// detected instagib state. AUTGameMode::bIsInstagib is set by the Instagib
-	// mutator during the mutator chain — fully resolved by BeginPlay. Each
-	// instance reads/writes only its variant's Mods.db table.
-	if (HasAuthority() && !RatingSystem.IsValid())
+	// Create both NCRatingCTF + NCRatingICTF tables now (static, idempotent).
+	// The rating-system instance — which picks ONE of the two tables based on
+	// bIsInstagib — is deferred to HandleMatchHasStarted (see comment in
+	// InitGame above).
+	if (HasAuthority())
 	{
-		const bool bInstagib = bIsInstagib;
 		FNCPlusCTFRatingSystem::InitDatabase(GetWorld());
-		RatingSystem = MakeUnique<FNCPlusCTFRatingSystem>(bInstagib);
-		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: rating system constructed for %s ladder"),
-			bInstagib ? TEXT("iCTF") : TEXT("CTF"));
 	}
 }
 
@@ -163,8 +162,12 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
 
-	if (!HasAuthority() || !RatingSystem.IsValid()) return;
-	if (!NewPlayer) return;
+	if (!HasAuthority() || !NewPlayer) return;
+
+	// Warmup joiner: rating system isn't constructed yet. They'll be picked up
+	// en-masse by the GS->PlayerArray walk in HandleMatchHasStarted.
+	// Late joiner (mid-match): rating system already exists, load immediately.
+	if (!RatingSystem.IsValid()) return;
 
 	AUTPlayerState* UTPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (UTPS && UTPS->UniqueId.IsValid())
@@ -875,6 +878,34 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.Owner = this;
 		OTInfo = GetWorld()->SpawnActor<ANCPlusCTFOTInfo>(SpawnParams);
+	}
+
+	// Rating system: construct ONCE per map load, locking in bIsInstagib now
+	// that the mutator chain is reliably settled. The `!IsValid()` guard makes
+	// the halftime second call a no-op so we don't reconstruct mid-match.
+	// Bulk-load every already-connected human from PlayerArray — warmup
+	// PostLogins were skipped because the rating system didn't exist yet.
+	if (HasAuthority() && !RatingSystem.IsValid())
+	{
+		const bool bInstagib = bIsInstagib;
+		RatingSystem = MakeUnique<FNCPlusCTFRatingSystem>(bInstagib);
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: rating system constructed for %s ladder"),
+			bInstagib ? TEXT("iCTF") : TEXT("CTF"));
+
+		AUTGameState* GS = GetGameState<AUTGameState>();
+		if (GS)
+		{
+			int32 LoadedCount = 0;
+			for (APlayerState* PS : GS->PlayerArray)
+			{
+				AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+				if (!UTPS || UTPS->bOnlySpectator) continue;
+				if (!UTPS->UniqueId.IsValid()) continue;   // bot
+				RatingSystem->LoadPlayerFromDB(GetWorld(), UTPS->UniqueId.ToString());
+				++LoadedCount;
+			}
+			UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: bulk-loaded %d human ratings from PlayerArray"), LoadedCount);
+		}
 	}
 }
 

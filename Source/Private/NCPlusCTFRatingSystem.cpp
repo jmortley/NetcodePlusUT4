@@ -30,6 +30,12 @@ struct FNCPlusCTFRatingSystemImpl
 
 	/** UniqueId -> rating-rounded-int captured by SnapshotMatchStart. */
 	TMap<FString, int32> RatingAtMatchStart;
+
+	/** Humans who faced at least one human opponent (= both teams had >=1
+	 *  cached human in ProcessMatch). Anyone NOT in this set at flush time
+	 *  gets their delta clamped to ±BotMatchDeltaCap. Single-shot for CTF
+	 *  since there's no per-round loop — populated by ProcessMatch. */
+	TSet<FString> HumansWithHumanOpposition;
 };
 
 // Unity-build aware: file-scoped prefixed names to avoid collisions with
@@ -165,6 +171,7 @@ void FNCPlusCTFRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniq
 void FNCPlusCTFRatingSystem::SnapshotMatchStart()
 {
 	Impl->RatingAtMatchStart.Empty();
+	Impl->HumansWithHumanOpposition.Empty();
 	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
 		Impl->RatingAtMatchStart.Add(Pair.Key, FMath::RoundToInt(Pair.Value.GetRating()));
@@ -209,10 +216,20 @@ void FNCPlusCTFRatingSystem::ProcessMatch(const FNCPlusCTFMatchInput& In)
 	};
 
 	TArray<FNCPlusCTFPlayerInput> RedTeam, BlueTeam;
+	int32 HumansRed = 0, HumansBlue = 0;
 	for (const FNCPlusCTFPlayerInput& P : In.Players)
 	{
-		if (P.TeamIndex == 0)      RedTeam.Add(P);
-		else if (P.TeamIndex == 1) BlueTeam.Add(P);
+		const bool bIsCachedHuman = CachedIdsBefore.Contains(P.UniqueId);
+		if (P.TeamIndex == 0)
+		{
+			RedTeam.Add(P);
+			if (bIsCachedHuman) ++HumansRed;
+		}
+		else if (P.TeamIndex == 1)
+		{
+			BlueTeam.Add(P);
+			if (bIsCachedHuman) ++HumansBlue;
+		}
 	}
 
 	if (RedTeam.Num() == 0 || BlueTeam.Num() == 0)
@@ -221,6 +238,21 @@ void FNCPlusCTFRatingSystem::ProcessMatch(const FNCPlusCTFMatchInput& In)
 			TEXT("ProcessMatch: empty team (Red=%d Blue=%d) — skipping rating update"),
 			RedTeam.Num(), BlueTeam.Num());
 		return;
+	}
+
+	// Bot-match clamp setup: only humans on BOTH teams qualify as "had human
+	// opposition". Anyone outside this set at flush time gets a delta clamp
+	// to prevent solo-vs-bots farming. Single-shot — CTF has no rounds, so
+	// ProcessMatch fires exactly once per match.
+	if (HumansRed > 0 && HumansBlue > 0)
+	{
+		for (const FNCPlusCTFPlayerInput& P : In.Players)
+		{
+			if (CachedIdsBefore.Contains(P.UniqueId))
+			{
+				Impl->HumansWithHumanOpposition.Add(P.UniqueId);
+			}
+		}
 	}
 
 	MatchResult Match;
@@ -268,11 +300,34 @@ void FNCPlusCTFRatingSystem::Flush(UWorld* World)
 	const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
 	const TCHAR* Table = TableForMode(Impl->bIsInstagib);
 
+	// Bot-match cap: anyone whose match didn't include a human opponent gets
+	// their delta clamped (prevents farming inflated ratings vs all-bot
+	// scrimmages). Mirrors the ElimPlus pattern.
+	const int32 BotMatchDeltaCap = 5;
+
 	int32 PersistedCount = 0;
-	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
+	int32 CappedCount    = 0;
+
+	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
 		const FString& UniqueId = Pair.Key;
-		const TeamGlicko2::PlayerRating& PR = Pair.Value;
+		TeamGlicko2::PlayerRating& PR = Pair.Value;
+
+		const int32 NewEloRaw = FMath::RoundToInt(PR.GetRating());
+		const int32 StartElo  = Impl->RatingAtMatchStart.FindRef(UniqueId);
+		const int32 Delta     = (StartElo != 0) ? (NewEloRaw - StartElo) : 0;
+
+		const bool bFacedHumans = Impl->HumansWithHumanOpposition.Contains(UniqueId);
+		if (!bFacedHumans && StartElo != 0 && (Delta > BotMatchDeltaCap || Delta < -BotMatchDeltaCap))
+		{
+			const int32 Clamped  = FMath::Clamp(Delta, -BotMatchDeltaCap, BotMatchDeltaCap);
+			const int32 FinalElo = StartElo + Clamped;
+			PR.SetRating(static_cast<double>(FinalElo));
+			UE_LOG(LogNCPlusCTFRating, Log,
+				TEXT("[%s] Bot-match clamp: %s delta %d -> %d (Elo %d -> %d, no human opposition)"),
+				Table, *UniqueId, Delta, Clamped, NewEloRaw, FinalElo);
+			++CappedCount;
+		}
 
 		const FString Esc = CTFR_SqlEscape(UniqueId);
 		const FString Sql = FString::Printf(
@@ -287,7 +342,8 @@ void FNCPlusCTFRatingSystem::Flush(UWorld* World)
 		CTFR_ExecSqlNoRows(World, Sql);
 		++PersistedCount;
 	}
-	UE_LOG(LogNCPlusCTFRating, Log, TEXT("[%s] Flush: persisted %d ratings"), Table, PersistedCount);
+	UE_LOG(LogNCPlusCTFRating, Log, TEXT("[%s] Flush: persisted %d ratings, capped %d (no human opposition)"),
+		Table, PersistedCount, CappedCount);
 }
 
 int32 FNCPlusCTFRatingSystem::GetCachedElo(const FString& UniqueId) const
@@ -378,19 +434,22 @@ FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusC
 			Result = (P.TeamIndex == In.WinnerTeamIndex) ? TEXT("win") : TEXT("loss");
 		}
 
+		const bool bFacedHumans = Impl->HumansWithHumanOpposition.Contains(P.UniqueId);
+
 		Writer->WriteObjectStart();
-		Writer->WriteValue(TEXT("id"),     P.UniqueId);
-		Writer->WriteValue(TEXT("name"),   P.PlayerName);
-		Writer->WriteValue(TEXT("team"),   P.TeamIndex);
-		Writer->WriteValue(TEXT("result"), FString(Result));
-		Writer->WriteValue(TEXT("kills"),  P.Kills);
-		Writer->WriteValue(TEXT("deaths"), P.Deaths);
-		Writer->WriteValue(TEXT("damage"), P.Damage);
-		Writer->WriteValue(TEXT("pre"),    static_cast<double>(PreElo));
-		Writer->WriteValue(TEXT("post"),   PR->GetRating());
-		Writer->WriteValue(TEXT("delta"),  Delta);
-		Writer->WriteValue(TEXT("rd"),     PR->GetRD());
-		Writer->WriteValue(TEXT("sigma"),  PR->GetSigma());
+		Writer->WriteValue(TEXT("id"),           P.UniqueId);
+		Writer->WriteValue(TEXT("name"),         P.PlayerName);
+		Writer->WriteValue(TEXT("team"),         P.TeamIndex);
+		Writer->WriteValue(TEXT("result"),       FString(Result));
+		Writer->WriteValue(TEXT("kills"),        P.Kills);
+		Writer->WriteValue(TEXT("deaths"),       P.Deaths);
+		Writer->WriteValue(TEXT("damage"),       P.Damage);
+		Writer->WriteValue(TEXT("pre"),          static_cast<double>(PreElo));
+		Writer->WriteValue(TEXT("post"),         PR->GetRating());
+		Writer->WriteValue(TEXT("delta"),        Delta);
+		Writer->WriteValue(TEXT("rd"),           PR->GetRD());
+		Writer->WriteValue(TEXT("sigma"),        PR->GetSigma());
+		Writer->WriteValue(TEXT("faced_humans"), bFacedHumans);
 		Writer->WriteObjectEnd();
 	}
 

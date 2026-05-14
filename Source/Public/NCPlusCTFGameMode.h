@@ -154,8 +154,11 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void EndGame(AUTPlayerState* Winner, FName Reason) override;
 
 	/** Server-side rating system for CTF or iCTF (separate ladders, single
-	 *  instance per match — bIsInstagib locked at construction). Flushed at
-	 *  HandleMatchHasEnded. Non-UObject, server-only. */
+	 *  instance per match — bIsInstagib locked at construction).
+	 *  Constructed lazily in HandleMatchHasStarted, not BeginPlay: that's the
+	 *  earliest point AUTGameMode::bIsInstagib is reliably set by the Instagib
+	 *  BP mutator chain (same timing CTFStatsReplicator + MutServerShield use).
+	 *  Flushed at HandleMatchHasEnded. Non-UObject, server-only. */
 	TUniquePtr<FNCPlusCTFRatingSystem> RatingSystem;
 
 	/** Guard against the engine routing HandleMatchHasEnded twice. Reset in
