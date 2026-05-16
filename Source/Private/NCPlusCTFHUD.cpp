@@ -6,6 +6,7 @@
 #include "UTTeamInfo.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusCTFOTInfo.h"
+#include "NCPlusCTFGameMode.h"   // NCPlusReflection helpers (bPlayingAdvantage / bSecondHalf)
 #include "EngineUtils.h"
 
 ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
@@ -97,6 +98,81 @@ void ANCPlusCTFHUD::DrawHUD()
 	}
 
 	Super::DrawHUD();
+
+	// Spectator banner — drawn after Super so it sits on top of any stock UI
+	// in the same screen region. Suppressed while the scoreboard is open.
+	if (GS && !ScoreboardIsUp())
+	{
+		DrawSpectatorTarget();
+	}
+}
+
+void ANCPlusCTFHUD::DrawSpectatorTarget()
+{
+	if (!Canvas || !MediumFont || !SmallFont) return;
+	if (!UTPlayerOwner) return;
+
+	AActor* ViewTarget = UTPlayerOwner->GetViewTarget();
+	if (!ViewTarget || ViewTarget == UTPlayerOwner) return;
+
+	APawn* ViewPawn = Cast<APawn>(ViewTarget);
+	if (!ViewPawn) return;
+
+	// Viewing our own pawn = playing, not spectating.
+	if (ViewPawn == UTPlayerOwner->GetPawn()) return;
+
+	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->PlayerState);
+	if (!PS || PS->PlayerName.IsEmpty()) return;
+
+	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+	const float HeaderScale = RenderScale * 0.75f;
+	const float NameScale   = RenderScale * 1.30f;
+
+	const FString HeaderText = TEXT("NOW WATCHING");
+	const FString NameText   = PS->PlayerName;
+
+	float HeaderW, HeaderH, NameW, NameH;
+	Canvas->TextSize(SmallFont,  HeaderText, HeaderW, HeaderH, HeaderScale, HeaderScale);
+	Canvas->TextSize(MediumFont, NameText,   NameW,   NameH,   NameScale,   NameScale);
+
+	const float PadX = 16.f * RenderScale;
+	const float PadY = 8.f  * RenderScale;
+	const float Gap  = 4.f  * RenderScale;
+	const float PanelW = FMath::Max(HeaderW, NameW) + PadX * 2.f;
+	const float PanelH = HeaderH + NameH + PadY * 2.f + Gap;
+	// Bottom-right with margins. ~140px above bottom keeps clear of the
+	// stock ammo counter (BottomRight -20/-20) and the OnScreenChat box.
+	const float PanelX = Canvas->ClipX - PanelW - 24.f * RenderScale;
+	const float PanelY = Canvas->ClipY - PanelH - 140.f * RenderScale;
+
+	// Background panel
+	Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.7f));
+	Canvas->DrawTile(Canvas->DefaultTexture, PanelX, PanelY, PanelW, PanelH, 0, 0, 1, 1);
+
+	// Team-color accent stripe on the left edge
+	FLinearColor AccentColor(0.9f, 0.9f, 0.9f, 1.f);
+	if (PS->Team)
+	{
+		AccentColor = (PS->Team->TeamIndex == 0)
+			? FLinearColor(0.9f, 0.15f, 0.15f, 1.f)
+			: FLinearColor(0.15f, 0.4f, 0.95f, 1.f);
+	}
+	Canvas->SetLinearDrawColor(AccentColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, PanelX, PanelY, 3.f * RenderScale, PanelH, 0, 0, 1, 1);
+
+	// "NOW WATCHING" header — small muted text
+	Canvas->DrawColor = FColor(180, 180, 180, 255);
+	Canvas->DrawText(SmallFont, HeaderText,
+		PanelX + (PanelW - HeaderW) * 0.5f,
+		PanelY + PadY,
+		HeaderScale, HeaderScale);
+
+	// PlayerName — larger, team-colored
+	Canvas->DrawColor = AccentColor.ToFColor(true);
+	Canvas->DrawText(MediumFont, NameText,
+		PanelX + (PanelW - NameW) * 0.5f,
+		PanelY + PadY + HeaderH + Gap,
+		NameScale, NameScale);
 }
 
 void ANCPlusCTFHUD::DrawTeamScoreBar()
@@ -222,34 +298,39 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	float ClockBottomY = ClockY;
 	float RoundClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
 
+	// Resolve the OT replicator once — OT clock, Advantage clock, and the
+	// status-label branch all read off it. ANCPlusCTFOTInfo is spawned
+	// authority-only and replicates to every client; lazy-find + cache.
+	static TWeakObjectPtr<UWorld> CachedWorld;
+	static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
+	ANCPlusCTFOTInfo* Info = nullptr;
+	if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
+	{
+		Info = CachedInfo.Get();
+	}
+	else
+	{
+		for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
+		{
+			CachedWorld = GetWorld();
+			CachedInfo = *It;
+			Info = *It;
+			break;
+		}
+	}
+
 	// OT detection: GetMatchState() == MatchState::MatchIsInOvertime.
 	// IsMatchInOvertime() is virtual on UTGameState so it reads the same on
 	// clients (MatchState is replicated).
 	const bool bInOvertime = GS->IsMatchInOvertime();
+	// Advantage runs in MatchState::InProgress with bPlayingAdvantage set —
+	// regulation clock is frozen at 00:00 server-side (bStopGameClock). The
+	// HUD draws a count-up timer instead so spectators can read it.
+	const bool bPlayingAdvantage = !bInOvertime &&
+		NCPlusReflection::GetBool(GS, TEXT("bPlayingAdvantage"));
 
 	if (bInOvertime)
 	{
-		// Read OT start elapsed from the gamemode-spawned replicator.
-		// Engine's AUTCTFGameState::OvertimeStartTime isn't Replicated;
-		// ANCPlusCTFOTInfo carries the value. Lazy-find on first OT frame
-		// and cache the weak ptr (re-iterates only if the world swapped).
-		static TWeakObjectPtr<UWorld> CachedWorld;
-		static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
-		ANCPlusCTFOTInfo* Info = nullptr;
-		if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
-		{
-			Info = CachedInfo.Get();
-		}
-		else
-		{
-			for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
-			{
-				CachedWorld = GetWorld();
-				CachedInfo = *It;
-				Info = *It;
-				break;
-			}
-		}
 		const int32 StartElapsed = (Info && Info->OvertimeStartElapsed >= 0)
 			? Info->OvertimeStartElapsed : GS->ElapsedTime;
 		const int32 OTSeconds = FMath::Max(0, GS->ElapsedTime - StartElapsed);
@@ -258,6 +339,19 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
 		Canvas->DrawColor = FColor(255, 200, 60, 255);    // amber for OT
+		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		ClockBottomY = ClockY + YL;
+	}
+	else if (bPlayingAdvantage)
+	{
+		const int32 StartElapsed = (Info && Info->AdvantageStartElapsed >= 0)
+			? Info->AdvantageStartElapsed : GS->ElapsedTime;
+		const int32 AdvSeconds = FMath::Max(0, GS->ElapsedTime - StartElapsed);
+		const int32 Mins = AdvSeconds / 60;
+		const int32 Secs = AdvSeconds % 60;
+		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
+		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		Canvas->DrawColor = FColor(255, 200, 60, 255);    // amber matches OT
 		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 		ClockBottomY = ClockY + YL;
 	}
@@ -291,9 +385,10 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		}
 	}
 
-	// Status label below the clock: "Overtime" during OT, "1st/2nd Half"
-	// otherwise (only when halftime is enabled). bSecondHalf is on
-	// UTCTFGameState — use reflection to avoid ABI mismatch.
+	// Status label below the clock. Priority: Overtime > Advantage > Halves.
+	// Halves only show when the gamemode actually has halftime enabled —
+	// OTInfo->bHasHalftime mirrors the server-side decision (false for 3v3+),
+	// so single-period games no longer show a misleading "1st Half" all match.
 	FString StatusStr;
 	FColor StatusColor(200, 200, 200, 255);
 	if (bInOvertime)
@@ -301,9 +396,14 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		StatusStr = TEXT("Overtime");
 		StatusColor = FColor(255, 200, 60, 255);    // amber to match clock
 	}
-	else if (UBoolProperty* HalfProp = FindField<UBoolProperty>(GS->GetClass(), TEXT("bSecondHalf")))
+	else if (bPlayingAdvantage)
 	{
-		const bool bSecondHalf = HalfProp->GetPropertyValue_InContainer(GS);
+		StatusStr = TEXT("Advantage");
+		StatusColor = FColor(255, 200, 60, 255);    // amber to match clock
+	}
+	else if (Info && Info->bHasHalftime)
+	{
+		const bool bSecondHalf = NCPlusReflection::GetBool(GS, TEXT("bSecondHalf"));
 		StatusStr = bSecondHalf ? TEXT("2nd Half") : TEXT("1st Half");
 	}
 

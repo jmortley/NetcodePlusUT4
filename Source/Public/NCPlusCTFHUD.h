@@ -25,4 +25,7 @@ protected:
 private:
 	/** Draw the Wipeout-style team score bar at top center */
 	void DrawTeamScoreBar();
+
+	/** Draw "NOW WATCHING / PlayerName" bottom-right when viewing another player */
+	void DrawSpectatorTarget();
 };

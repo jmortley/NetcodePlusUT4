@@ -250,13 +250,43 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
 	Super::RestartPlayer(NewPlayer);
 
-	// Track recent spawns for anti-repeat penalties (IG+ style)
+	// Track recent spawns for anti-repeat penalties (IG+ style).
+	// Snapshot prior Recent BEFORE updating so the log can classify the
+	// chosen spawn as fresh / same-as-last / two-back.
 	if (NewPlayer && NewPlayer->StartSpot.IsValid())
 	{
 		APlayerStart* UsedStart = Cast<APlayerStart>(NewPlayer->StartSpot.Get());
 		if (UsedStart)
 		{
 			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(TWeakObjectPtr<AController>(NewPlayer));
+
+			// Classify against the prior (pre-update) state.
+			const TCHAR* RecentTag = TEXT("fresh");
+			int32 DistFromLast = -1;
+			if (Recent.Last.IsValid())
+			{
+				DistFromLast = FMath::RoundToInt(
+					(UsedStart->GetActorLocation() - Recent.Last->GetActorLocation()).Size());
+				if (Recent.Last.Get() == UsedStart) RecentTag = TEXT("same");
+				else if (Recent.SecondLast.IsValid() && Recent.SecondLast.Get() == UsedStart) RecentTag = TEXT("2back");
+			}
+
+			// Final-pick log. Grep "NCPlusCTF spawn:" after a match to see
+			// every chosen spawn with enough context to spot anti-repeat
+			// misfires or flag-state-correlated spawnkill complaints.
+			AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+			AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
+			const int32 TeamIdx = (PS && PS->Team) ? int32(PS->Team->TeamIndex) : -1;
+			const FString OwnFlag   = (GS && TeamIdx >= 0) ? GS->GetFlagState(TeamIdx).ToString()     : TEXT("?");
+			const FString EnemyFlag = (GS && TeamIdx >= 0) ? GS->GetFlagState(1 - TeamIdx).ToString() : TEXT("?");
+			const FVector SL = UsedStart->GetActorLocation();
+			UE_LOG(LogGameMode, Log,
+				TEXT("NCPlusCTF spawn: %s(T%d) -> %s (%.0f,%.0f) | recent=%s dist_from_last=%d | own_flag=%s enemy_flag=%s"),
+				PS ? *PS->PlayerName : TEXT("?"), TeamIdx,
+				*UsedStart->GetName(), SL.X, SL.Y,
+				RecentTag, DistFromLast,
+				*OwnFlag, *EnemyFlag);
+
 			Recent.SecondLast = Recent.Last;
 			Recent.Last = UsedStart;
 		}
@@ -434,13 +464,18 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 		FRecentSpawns* Recent = PlayerRecentSpawns.Find(TWeakObjectPtr<AController>(Player));
 		if (Recent)
 		{
-			// Can't use the exact same spawn as last time
+			// Hard-block back-to-back identical spawns. Bypassing the 0.2
+			// floor below is the whole point — a 0.1x multiplier still
+			// floored to 0.2, which could beat a heavily-penalized clean
+			// alternative on small maps. Any spawn that survives the floor
+			// (>= 0.2) outranks this 0.001, so the only way to land back on
+			// the same start is a map with literally one usable spawn.
 			if (Recent->Last.IsValid() && Recent->Last.Get() == P)
 			{
-				Result *= 0.1f; // Nearly eliminate — don't hard-block in case all others are worse
+				return 0.001f;
 			}
 			// Penalize using the spawn from 2 lives ago
-			else if (Recent->SecondLast.IsValid() && Recent->SecondLast.Get() == P)
+			if (Recent->SecondLast.IsValid() && Recent->SecondLast.Get() == P)
 			{
 				Result *= SpawnRecentPenaltyMultiplier; // 0.5x
 			}
@@ -539,6 +574,12 @@ void ANCPlusCTFGameMode::EnterAdvantage()
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
 
+	// Stamp advantage start for the HUD's elapsed-time counter.
+	if (OTInfo && CTFGameState)
+	{
+		OTInfo->AdvantageStartElapsed = CTFGameState->ElapsedTime;
+	}
+
 	// Broadcast advantage message (message index 6 = "Advantage" in UTCTFGameMessage)
 	// Pass NULL for team since both teams get advantage
 	BroadcastLocalized(this, UUTCTFGameMessage::StaticClass(), 6, nullptr, nullptr, nullptr);
@@ -592,6 +633,10 @@ void ANCPlusCTFGameMode::EndOfHalf()
 	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
+	if (OTInfo)
+	{
+		OTInfo->AdvantageStartElapsed = -1;
+	}
 
 	if (!bHasHalftime || NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
@@ -879,6 +924,11 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		SpawnParams.Owner = this;
 		OTInfo = GetWorld()->SpawnActor<ANCPlusCTFOTInfo>(SpawnParams);
 	}
+	if (OTInfo)
+	{
+		// Mirror gamemode halftime decision so HUD can suppress "1st Half" label.
+		OTInfo->bHasHalftime = bHasHalftime;
+	}
 
 	// Rating system: construct ONCE per map load, locking in bIsInstagib now
 	// that the mutator chain is reliably settled. The `!IsValid()` guard makes
@@ -918,6 +968,10 @@ void ANCPlusCTFGameMode::HandleMatchIntermission()
 	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
 	bGracePeriodActive = false;
 	bAdvantageCapEndedPeriod = false;
+	if (OTInfo)
+	{
+		OTInfo->AdvantageStartElapsed = -1;
+	}
 
 	BroadcastLocalized(this, UUTCTFMajorMessage::StaticClass(), 11, nullptr, nullptr, nullptr);
 }
@@ -945,6 +999,7 @@ void ANCPlusCTFGameMode::HandleEnteringOvertime()
 	if (OTInfo && CTFGameState)
 	{
 		OTInfo->OvertimeStartElapsed = CTFGameState->ElapsedTime;
+		OTInfo->AdvantageStartElapsed = -1;        // OT replaces advantage on the HUD
 	}
 	CTFGameState->SetTimeLimit(6000);
 	SetMatchState(MatchState::MatchIsInOvertime);
