@@ -6,7 +6,6 @@
 #include "UTTeamInfo.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusCTFOTInfo.h"
-#include "NCPlusCTFGameMode.h"   // NCPlusReflection helpers (bPlayingAdvantage / bSecondHalf)
 #include "EngineUtils.h"
 
 ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
@@ -298,39 +297,34 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	float ClockBottomY = ClockY;
 	float RoundClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
 
-	// Resolve the OT replicator once — OT clock, Advantage clock, and the
-	// status-label branch all read off it. ANCPlusCTFOTInfo is spawned
-	// authority-only and replicates to every client; lazy-find + cache.
-	static TWeakObjectPtr<UWorld> CachedWorld;
-	static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
-	ANCPlusCTFOTInfo* Info = nullptr;
-	if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
-	{
-		Info = CachedInfo.Get();
-	}
-	else
-	{
-		for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
-		{
-			CachedWorld = GetWorld();
-			CachedInfo = *It;
-			Info = *It;
-			break;
-		}
-	}
-
 	// OT detection: GetMatchState() == MatchState::MatchIsInOvertime.
 	// IsMatchInOvertime() is virtual on UTGameState so it reads the same on
 	// clients (MatchState is replicated).
 	const bool bInOvertime = GS->IsMatchInOvertime();
-	// Advantage runs in MatchState::InProgress with bPlayingAdvantage set —
-	// regulation clock is frozen at 00:00 server-side (bStopGameClock). The
-	// HUD draws a count-up timer instead so spectators can read it.
-	const bool bPlayingAdvantage = !bInOvertime &&
-		NCPlusReflection::GetBool(GS, TEXT("bPlayingAdvantage"));
 
 	if (bInOvertime)
 	{
+		// Read OT start elapsed from the gamemode-spawned replicator.
+		// Engine's AUTCTFGameState::OvertimeStartTime isn't Replicated;
+		// ANCPlusCTFOTInfo carries the value. Lazy-find on first OT frame
+		// and cache the weak ptr (re-iterates only if the world swapped).
+		static TWeakObjectPtr<UWorld> CachedWorld;
+		static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
+		ANCPlusCTFOTInfo* Info = nullptr;
+		if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
+		{
+			Info = CachedInfo.Get();
+		}
+		else
+		{
+			for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
+			{
+				CachedWorld = GetWorld();
+				CachedInfo = *It;
+				Info = *It;
+				break;
+			}
+		}
 		const int32 StartElapsed = (Info && Info->OvertimeStartElapsed >= 0)
 			? Info->OvertimeStartElapsed : GS->ElapsedTime;
 		const int32 OTSeconds = FMath::Max(0, GS->ElapsedTime - StartElapsed);
@@ -339,19 +333,6 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
 		Canvas->DrawColor = FColor(255, 200, 60, 255);    // amber for OT
-		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
-		ClockBottomY = ClockY + YL;
-	}
-	else if (bPlayingAdvantage)
-	{
-		const int32 StartElapsed = (Info && Info->AdvantageStartElapsed >= 0)
-			? Info->AdvantageStartElapsed : GS->ElapsedTime;
-		const int32 AdvSeconds = FMath::Max(0, GS->ElapsedTime - StartElapsed);
-		const int32 Mins = AdvSeconds / 60;
-		const int32 Secs = AdvSeconds % 60;
-		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
-		Canvas->DrawColor = FColor(255, 200, 60, 255);    // amber matches OT
 		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 		ClockBottomY = ClockY + YL;
 	}
@@ -385,10 +366,9 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		}
 	}
 
-	// Status label below the clock. Priority: Overtime > Advantage > Halves.
-	// Halves only show when the gamemode actually has halftime enabled —
-	// OTInfo->bHasHalftime mirrors the server-side decision (false for 3v3+),
-	// so single-period games no longer show a misleading "1st Half" all match.
+	// Status label below the clock: "Overtime" during OT, "1st/2nd Half"
+	// otherwise (only when halftime is enabled). bSecondHalf is on
+	// UTCTFGameState — use reflection to avoid ABI mismatch.
 	FString StatusStr;
 	FColor StatusColor(200, 200, 200, 255);
 	if (bInOvertime)
@@ -396,14 +376,9 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		StatusStr = TEXT("Overtime");
 		StatusColor = FColor(255, 200, 60, 255);    // amber to match clock
 	}
-	else if (bPlayingAdvantage)
+	else if (UBoolProperty* HalfProp = FindField<UBoolProperty>(GS->GetClass(), TEXT("bSecondHalf")))
 	{
-		StatusStr = TEXT("Advantage");
-		StatusColor = FColor(255, 200, 60, 255);    // amber to match clock
-	}
-	else if (Info && Info->bHasHalftime)
-	{
-		const bool bSecondHalf = NCPlusReflection::GetBool(GS, TEXT("bSecondHalf"));
+		const bool bSecondHalf = HalfProp->GetPropertyValue_InContainer(GS);
 		StatusStr = bSecondHalf ? TEXT("2nd Half") : TEXT("1st Half");
 	}
 

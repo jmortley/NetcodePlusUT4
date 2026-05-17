@@ -574,12 +574,6 @@ void ANCPlusCTFGameMode::EnterAdvantage()
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
 
-	// Stamp advantage start for the HUD's elapsed-time counter.
-	if (OTInfo && CTFGameState)
-	{
-		OTInfo->AdvantageStartElapsed = CTFGameState->ElapsedTime;
-	}
-
 	// Broadcast advantage message (message index 6 = "Advantage" in UTCTFGameMessage)
 	// Pass NULL for team since both teams get advantage
 	BroadcastLocalized(this, UUTCTFGameMessage::StaticClass(), 6, nullptr, nullptr, nullptr);
@@ -633,10 +627,6 @@ void ANCPlusCTFGameMode::EndOfHalf()
 	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
-	if (OTInfo)
-	{
-		OTInfo->AdvantageStartElapsed = -1;
-	}
 
 	if (!bHasHalftime || NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
@@ -924,11 +914,6 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		SpawnParams.Owner = this;
 		OTInfo = GetWorld()->SpawnActor<ANCPlusCTFOTInfo>(SpawnParams);
 	}
-	if (OTInfo)
-	{
-		// Mirror gamemode halftime decision so HUD can suppress "1st Half" label.
-		OTInfo->bHasHalftime = bHasHalftime;
-	}
 
 	// Rating system: construct ONCE per map load, locking in bIsInstagib now
 	// that the mutator chain is reliably settled. The `!IsValid()` guard makes
@@ -968,10 +953,6 @@ void ANCPlusCTFGameMode::HandleMatchIntermission()
 	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
 	bGracePeriodActive = false;
 	bAdvantageCapEndedPeriod = false;
-	if (OTInfo)
-	{
-		OTInfo->AdvantageStartElapsed = -1;
-	}
 
 	BroadcastLocalized(this, UUTCTFMajorMessage::StaticClass(), 11, nullptr, nullptr, nullptr);
 }
@@ -999,7 +980,6 @@ void ANCPlusCTFGameMode::HandleEnteringOvertime()
 	if (OTInfo && CTFGameState)
 	{
 		OTInfo->OvertimeStartElapsed = CTFGameState->ElapsedTime;
-		OTInfo->AdvantageStartElapsed = -1;        // OT replaces advantage on the HUD
 	}
 	CTFGameState->SetTimeLimit(6000);
 	SetMatchState(MatchState::MatchIsInOvertime);
