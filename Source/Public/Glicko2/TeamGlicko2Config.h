@@ -34,7 +34,11 @@ namespace TeamGlicko2 {
     static const double kDefaultRD = 200.0;
 
     /// Default initial volatility (sigma_0)
-    static const double kDefaultVolatility = 0.06;
+    /// Tron-suggested tuning (2026-05-17): halved 0.06 -> 0.03 to slow
+    /// per-game RD convergence — CTF/iCTF leaderboard was clustering RD
+    /// around 60-65 across all 3+ game players. Existing Mods.db rows
+    /// keep their stored sigma; only new INSERTs get the new default.
+    static const double kDefaultVolatility = 0.03;
 
     /// Lambda: Team uncertainty balance weight
     /// Objective = |avg(S_A) - avg(S_B)| + lambda * |avg(U_A) - avg(U_B)|
