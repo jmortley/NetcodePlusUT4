@@ -14,6 +14,7 @@
 #include "UTPlayerState.h"
 #include "UTCarriedObject.h"
 #include "UTCTFFlag.h"
+#include "UTCTFFlagBase.h"
 #include "UTCTFGameState.h"
 #include "Json.h"
 
@@ -25,6 +26,7 @@ AMutBotEvents::AMutBotEvents(const FObjectInitializer& ObjectInitializer)
 	bReplicates = true;
 	bAlwaysRelevant = true;
 	PugId = -1;
+	bFlagEventsBound = false;
 }
 
 void AMutBotEvents::BeginPlay()
@@ -79,6 +81,10 @@ void AMutBotEvents::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AMutBotEvents::NotifyMatchStateChange_Implementation(FName NewState)
 {
+	// MutBotEvents is the chain head in bot-hosted games — forward before any
+	// early return, or every downstream mutator (StatSQL submission, etc.) is starved.
+	Super::NotifyMatchStateChange_Implementation(NewState);
+
 	if (GetNetMode() == NM_Client || BotApiUrl.IsEmpty()) return;
 
 	FString StateStr = NewState.ToString();
@@ -99,6 +105,7 @@ void AMutBotEvents::NotifyMatchStateChange_Implementation(FName NewState)
 	else if (NewState == MatchState::InProgress)
 	{
 		StopReadyPolling();
+		TryBindFlagEvents();
 		PostStateChangeWithPlayers(TEXT("InProgress"));
 	}
 	else if (NewState == MatchState::WaitingPostMatch)
@@ -118,6 +125,10 @@ void AMutBotEvents::NotifyMatchStateChange_Implementation(FName NewState)
 
 void AMutBotEvents::Mutate_Implementation(const FString& MutateString, APlayerController* Sender)
 {
+	// Forward first (chain head) — without this, mutate commands handled by
+	// downstream mutators never fire in bot-hosted games.
+	Super::Mutate_Implementation(MutateString, Sender);
+
 	if (BotApiUrl.IsEmpty() || !Sender) return;
 
 	AUTPlayerState* UTPS = Cast<AUTPlayerState>(Sender->PlayerState);
@@ -192,11 +203,108 @@ void AMutBotEvents::ScoreObject_Implementation(
 	AUTCarriedObject* GameObject, AUTCharacter* HolderPawn,
 	AUTPlayerState* Holder, FName Reason)
 {
+	// Forward first (chain head) — StatSQL's flag/carry tracking lives downstream.
+	Super::ScoreObject_Implementation(GameObject, HolderPawn, Holder, Reason);
+
 	if (GetNetMode() == NM_Client || BotApiUrl.IsEmpty()) return;
 
 	if (Reason == FName(TEXT("FlagCapture")) && Holder)
 	{
 		PostFlagCapture(Holder);
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Cover Kills
+// ────────────────────────────────────────────────────────────────────
+
+void AMutBotEvents::ScoreKill_Implementation(AController* Killer, AController* Other,
+	TSubclassOf<UDamageType> DamageType)
+{
+	// Forward down the mutator chain first — MutBotEvents runs ahead of
+	// MutStatSQL/MutServerShield, which both rely on ScoreKill.
+	Super::ScoreKill_Implementation(Killer, Other, DamageType);
+
+	if (GetNetMode() == NM_Client || BotApiUrl.IsEmpty()) return;
+	if (!Killer || !Other || Killer == Other) return; // ignore suicides/environment
+
+	AUTPlayerState* KillerPS = Cast<AUTPlayerState>(Killer->PlayerState);
+	AUTPlayerState* VictimPS = Cast<AUTPlayerState>(Other->PlayerState);
+	if (!KillerPS || !VictimPS || KillerPS == VictimPS) return;
+
+	const int32 KillerTeam = KillerPS->GetTeamNum();
+	const int32 VictimTeam = VictimPS->GetTeamNum();
+
+	// A cover kill is a frag of an enemy by a teammate of the flag carrier while
+	// that team is carrying. Both must be on valid, opposing teams (no team kills).
+	if (KillerTeam > 1 || VictimTeam > 1 || KillerTeam == VictimTeam) return;
+
+	FCoverCarryWindow& Window = CarryWindows[KillerTeam];
+	if (!Window.bOpen) return;
+
+	// The carrier isn't their own cover.
+	const FString KillerName = KillerPS->PlayerName;
+	if (KillerName == Window.CarrierName) return;
+
+	Window.CoverKills.AddUnique(KillerName);
+}
+
+void AMutBotEvents::TryBindFlagEvents()
+{
+	if (bFlagEventsBound) return;
+
+	AUTCTFGameState* CTFGS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
+	if (!CTFGS) return; // not a CTF mode — no flags to track
+
+	// Use GetFlagBase() accessor — never access FlagBases directly (ABI mismatch).
+	bool bBoundAny = false;
+	for (int32 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
+	{
+		AUTCTFFlagBase* Base = CTFGS->GetFlagBase(TeamIdx);
+		if (Base && Base->GetCarriedObject())
+		{
+			Base->GetCarriedObject()->OnCarriedObjectHolderChangedDelegate.AddDynamic(
+				this, &AMutBotEvents::OnFlagHolderChanged);
+			bBoundAny = true;
+			UE_LOG(LogBotEvents, Log, TEXT("Bound cover-kill tracker to flag holder-changed delegate for team %d"), TeamIdx);
+		}
+	}
+
+	if (bBoundAny)
+	{
+		bFlagEventsBound = true;
+		CarryWindows[0] = FCoverCarryWindow();
+		CarryWindows[1] = FCoverCarryWindow();
+	}
+}
+
+void AMutBotEvents::OnFlagHolderChanged(AUTCarriedObject* Flag)
+{
+	if (!Flag) return;
+
+	AUTPlayerState* Holder = Flag->Holder;
+	if (Holder)
+	{
+		// Flag grabbed — open a fresh carry window for the carrier's team.
+		const int32 CarrierTeam = Holder->GetTeamNum();
+		if (CarrierTeam == 0 || CarrierTeam == 1)
+		{
+			FCoverCarryWindow& Window = CarryWindows[CarrierTeam];
+			Window.bOpen = true;
+			Window.CarrierName = Holder->PlayerName;
+			Window.CoverKills.Empty();
+		}
+	}
+	else
+	{
+		// Flag dropped or returned — stop counting covers for the carrying team.
+		// A flag's carrier is always on the team opposite its home team. Leave the
+		// list intact so a capture firing in the same frame can still read it.
+		const int32 FlagTeam = Flag->GetTeamNum();
+		if (FlagTeam == 0 || FlagTeam == 1)
+		{
+			CarryWindows[1 - FlagTeam].bOpen = false;
+		}
 	}
 }
 
@@ -264,6 +372,22 @@ void AMutBotEvents::PostFlagCapture(AUTPlayerState* Scorer)
 	Json->SetStringField(TEXT("match_id"), GetMatchId());
 	Json->SetNumberField(TEXT("match_remaining_time"), RemainingTime);
 
+	// Cover kills: teammates who fragged enemies while this team carried the flag.
+	// Snapshot the open carry window for the capper's team, then reset it.
+	TArray<TSharedPtr<FJsonValue>> CoverKillsArray;
+	int32 NumCovers = 0;
+	if (TeamIndex == 0 || TeamIndex == 1)
+	{
+		FCoverCarryWindow& Window = CarryWindows[TeamIndex];
+		for (const FString& Name : Window.CoverKills)
+		{
+			CoverKillsArray.Add(MakeShareable(new FJsonValueString(Name)));
+		}
+		NumCovers = Window.CoverKills.Num();
+		Window = FCoverCarryWindow();
+	}
+	Json->SetArrayField(TEXT("cover_kills"), CoverKillsArray);
+
 	// Team scores array
 	TArray<TSharedPtr<FJsonValue>> TeamsArray;
 
@@ -285,8 +409,8 @@ void AMutBotEvents::PostFlagCapture(AUTPlayerState* Scorer)
 
 	SendPost(TEXT("/score"), Output);
 
-	UE_LOG(LogBotEvents, Log, TEXT("Flag capture: %s (team %d) | Score: %d-%d"),
-		*PlayerName, TeamIndex, ScoreRed, ScoreBlue);
+	UE_LOG(LogBotEvents, Log, TEXT("Flag capture: %s (team %d) | Score: %d-%d | Covers: %d"),
+		*PlayerName, TeamIndex, ScoreRed, ScoreBlue, NumCovers);
 }
 
 void AMutBotEvents::PostMatchEnded()

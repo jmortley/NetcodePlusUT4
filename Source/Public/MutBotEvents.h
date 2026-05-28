@@ -18,6 +18,17 @@
 
 DECLARE_LOG_CATEGORY_EXTERN(LogBotEvents, Log, All);
 
+/** Cover kills accrued by a team while it carries the enemy flag. Indexed per
+ *  carrier team; snapshotted into the FlagCapture POST when that team scores. */
+struct FCoverCarryWindow
+{
+	bool bOpen;
+	FString CarrierName;
+	TArray<FString> CoverKills;
+
+	FCoverCarryWindow() : bOpen(false) {}
+};
+
 UCLASS()
 class NETCODEPLUS_API AMutBotEvents : public AUTMutator
 {
@@ -33,6 +44,8 @@ public:
 	virtual void NotifyMatchStateChange_Implementation(FName NewState) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn,
 		AUTPlayerState* Holder, FName Reason) override;
+	virtual void ScoreKill_Implementation(AController* Killer, AController* Other,
+		TSubclassOf<UDamageType> DamageType) override;
 	virtual void Mutate_Implementation(const FString& MutateString, APlayerController* Sender) override;
 
 private:
@@ -56,6 +69,17 @@ private:
 	FTimerHandle ReadyCheckTimer;
 	void PollPlayerReadiness();
 	void StopReadyPolling();
+
+	// ── Cover-Kill Tracking ───────────────────────────────────────────
+	FCoverCarryWindow CarryWindows[2]; // indexed by carrier team (0=Red, 1=Blue)
+	bool bFlagEventsBound;
+
+	/** Bind the flag holder-changed delegates (once, when flags exist). */
+	void TryBindFlagEvents();
+
+	/** Open/close a carry window as a flag is grabbed or dropped/returned. */
+	UFUNCTION()
+	void OnFlagHolderChanged(AUTCarriedObject* Flag);
 
 	// ── Helpers ────────────────────────────────────────────────────────
 	FString BuildPlayerListJson() const;
