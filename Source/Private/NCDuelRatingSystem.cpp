@@ -3,6 +3,7 @@
 // to this translation unit thanks to the Pimpl in the header.
 
 #include "NCDuelRatingSystem.h"
+#include "NCEloUploader.h"             // FNCEloUploader::ResolveServerName
 #include "UnrealTournament.h"
 #include "UTGameInstance.h"            // FDatabaseRow + ExecDatabaseCommand
 #include "UTGameState.h"               // ServerName for BuildResultPayload
@@ -279,14 +280,9 @@ FString FNCDuelRatingSystem::BuildResultPayload(UWorld* World, const FNCDuelMatc
 	const int32 WinnerPre = Impl->RatingAtMatchStart.FindRef(In.WinnerId);
 	const int32 LoserPre  = Impl->RatingAtMatchStart.FindRef(In.LoserId);
 
-	FString ServerName;
-	if (World)
-	{
-		if (AUTGameState* GS = World->GetGameState<AUTGameState>())
-		{
-			ServerName = GS->ServerName;
-		}
-	}
+	// Server name via NCEloUploader helper — matches StatSQL's Mod.ini value
+	// plus the per-instance suffix; correlation substring-matches it.
+	const FString ServerName = FNCEloUploader::ResolveServerName(World);
 	FString MapName;
 	if (World)
 	{

@@ -3,6 +3,7 @@
 // to this translation unit thanks to the Pimpl in the header.
 
 #include "WipeoutRatingSystem.h"
+#include "NCEloUploader.h"             // FNCEloUploader::ResolveServerName
 #include "UnrealTournament.h"
 #include "UTGameInstance.h"            // FDatabaseRow + ExecDatabaseCommand
 #include "UTGameState.h"               // ServerName for BuildResultPayload
@@ -361,14 +362,9 @@ FString FWipeoutRatingSystem::BuildResultPayload(UWorld* World, const FNCWipeout
 		return FString();
 	}
 
-	FString ServerName;
-	if (World)
-	{
-		if (AUTGameState* GS = World->GetGameState<AUTGameState>())
-		{
-			ServerName = GS->ServerName;
-		}
-	}
+	// Server name via NCEloUploader helper — matches StatSQL's Mod.ini value
+	// plus the per-instance suffix; correlation substring-matches it.
+	const FString ServerName = FNCEloUploader::ResolveServerName(World);
 	FString MapName;
 	if (World)
 	{

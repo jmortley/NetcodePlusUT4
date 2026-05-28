@@ -2,6 +2,7 @@
 // for CTF/iCTF. Tron's TeamGlicko2 headers stay confined to this TU.
 
 #include "NCPlusCTFRatingSystem.h"
+#include "NCEloUploader.h"             // FNCEloUploader::ResolveServerName
 #include "UnrealTournament.h"
 #include "UTGameInstance.h"            // FDatabaseRow + ExecDatabaseCommand
 #include "UTGameState.h"               // ServerName for BuildResultPayload
@@ -383,14 +384,10 @@ FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusC
 		return FString();
 	}
 
-	FString ServerName;
-	if (World)
-	{
-		if (AUTGameState* GS = World->GetGameState<AUTGameState>())
-		{
-			ServerName = GS->ServerName;
-		}
-	}
+	// Resolve server name via NCEloUploader so it matches StatSQL's recorded
+	// value (Mod.ini [UTPUGS_STATS] ServerName) + the per-instance suffix —
+	// lets Django correlation substring-match without losing PUG identity.
+	const FString ServerName = FNCEloUploader::ResolveServerName(World);
 	FString MapName;
 	if (World)
 	{

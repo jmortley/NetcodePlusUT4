@@ -31,4 +31,16 @@ public:
 	/** POST a pre-built JSON envelope to /elo_entry/. Builds an HTTP request,
 	 *  attaches auth, retries on transient failure, logs the final outcome. */
 	static void PostMatchResult(UWorld* World, const FString& JsonBody);
+
+	/** Resolve the server-name string to put in the elo_entry payload.
+	 *  Returns "<ModIni.ServerName> <GS->ServerName>" when Mod.ini's
+	 *  [UTPUGS_STATS] ServerName is set — the Mod.ini value matches what
+	 *  StatSQL records for the same match, so Django correlation gets a
+	 *  reliable substring-match bonus; the trailing GS->ServerName preserves
+	 *  the per-PUG instance identifier for display.
+	 *  Falls back to plain GS->ServerName when Mod.ini ServerName is empty
+	 *  (back-compat: servers that haven't configured it keep current behavior).
+	 *  Truncates to 64 chars (Django CharField(max_length=64)) preserving the
+	 *  Mod.ini prefix verbatim (the part that matters for correlation). */
+	static FString ResolveServerName(UWorld* World);
 };

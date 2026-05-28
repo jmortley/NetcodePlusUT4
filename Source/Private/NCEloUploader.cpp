@@ -5,6 +5,7 @@
 
 #include "NCEloUploader.h"
 #include "UnrealTournament.h"
+#include "UTGameState.h"               // GS->ServerName for ResolveServerName
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "Misc/ConfigCacheIni.h"
@@ -22,11 +23,16 @@ namespace
 	constexpr int32 NCElo_MaxRetries = 3;
 	const TCHAR* NCElo_Endpoint = TEXT("/elo_entry/");
 
+	// Django NCRatingMatch.server is CharField(max_length=64). Match payload
+	// width to that so server-side validators don't trim what we send.
+	constexpr int32 NCElo_ServerFieldMax = 64;
+
 	// Process-static config. Loaded lazily on first PostMatchResult call.
 	struct FNCEloConfig
 	{
 		FString ApiBaseUrl = TEXT("https://ut4stats.com");
 		FString ApiAuthKey;
+		FString ServerName;   // [UTPUGS_STATS] ServerName= from Mod.ini (shared with StatSQL)
 		bool bEnabled = true;
 		bool bLoaded = false;
 	};
@@ -63,6 +69,12 @@ namespace
 				if (const FConfigValue* SendVal = Section->Find(FName(TEXT("SendStats"))))
 				{
 					Config.bEnabled = SendVal->GetValue().ToBool();
+				}
+				if (const FConfigValue* SrvVal = Section->Find(FName(TEXT("ServerName"))))
+				{
+					// Shared with StatSQL's MutStatSQL Init — same string both
+					// sides POST, gives Django correlation a deterministic bonus.
+					Config.ServerName = SrvVal->GetValue();
 				}
 			}
 			else
@@ -197,4 +209,41 @@ void FNCEloUploader::PostMatchResult(UWorld* World, const FString& JsonBody)
 
 	EnsureConfigLoaded(World);
 	DoSend(TWeakObjectPtr<UWorld>(World), NCElo_Endpoint, JsonBody, 0);
+}
+
+FString FNCEloUploader::ResolveServerName(UWorld* World)
+{
+	EnsureConfigLoaded(World);
+	const FNCEloConfig& Config = GetConfig();
+
+	FString InstanceName;
+	if (AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr)
+	{
+		InstanceName = GS->ServerName;
+	}
+
+	// Back-compat: no Mod.ini ServerName → plain instance name. Servers that
+	// haven't been reconfigured behave exactly as before.
+	if (Config.ServerName.IsEmpty())
+	{
+		return InstanceName;
+	}
+
+	// Concat Mod.ini name first (must survive truncation — it's the
+	// correlation-matching prefix StatSQL records identically) + space +
+	// instance name.
+	FString Combined = Config.ServerName + TEXT(" ") + InstanceName;
+	if (Combined.Len() <= NCElo_ServerFieldMax)
+	{
+		return Combined;
+	}
+
+	const int32 RoomForInstance = NCElo_ServerFieldMax - Config.ServerName.Len() - 1;
+	if (RoomForInstance <= 0)
+	{
+		// Mod.ini name alone is already at-or-over field max — ship the
+		// truncated prefix; correlation still works on substring match.
+		return Config.ServerName.Left(NCElo_ServerFieldMax);
+	}
+	return Config.ServerName + TEXT(" ") + InstanceName.Left(RoomForInstance);
 }
