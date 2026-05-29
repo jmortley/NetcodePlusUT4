@@ -138,6 +138,7 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void BeginPlay() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual void Logout(AController* Exiting) override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
@@ -165,6 +166,38 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  InitGame; set true after the first successful flush. */
 	UPROPERTY(Transient)
 	bool bRatingFlushedThisMatch = false;
+
+	// ── CTF rating: leaver capture + per-match perf config ───────────────
+
+	/** Per-match snapshot of rating-relevant stats, keyed by UniqueId.
+	 *  Populated on Logout (while the PlayerState is still intact) and at match
+	 *  end from PlayerArray, so rage-quitters/leavers are still rated and the
+	 *  team z-scores aren't distorted by a missing roster slot. Cleared in
+	 *  InitGame. Non-replicated, server-only. */
+	TMap<FString, FNCPlusCTFPlayerInput> MatchStatCache;
+
+	/** UniqueId -> world seconds first seen this match. Drives the leaver
+	 *  presence threshold: rate rage-quitters who left late, drop genuine
+	 *  early leavers. Populated in PostLogin / HandleMatchHasStarted. */
+	TMap<FString, float> PlayerJoinWorldTime;
+
+	/** World seconds at match start, and the intended full match length, used
+	 *  for the leaver presence fraction. Stamped in HandleMatchHasStarted. */
+	float MatchStartWorldTime = 0.f;
+	float MatchFullDurationSeconds = 0.f;
+
+	/** CTF perf knobs, loaded from Mod.ini [UTPUGS_STATS] in HandleMatchHasStarted. */
+	FNCPlusCTFPerfConfig CTFPerfConfig;
+
+	/** Fraction of MatchFullDurationSeconds a leaver must have been present for
+	 *  to be rated (rage-quit dodge guard). Mod.ini override; default 0.5. */
+	float CTFRatingMinPresenceFrac = 0.5f;
+
+	/** Read the rating-relevant stats off a live AUTPlayerState into Out. */
+	void CapturePlayerStats(class AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const;
+
+	/** Load CTFPerfConfig + CTFRatingMinPresenceFrac from Mod.ini [UTPUGS_STATS]. */
+	void LoadCTFPerfConfig();
 
 	virtual bool PlayerCanRestart_Implementation(APlayerController* Player);
 	virtual bool SupportsInstantReplay() const override;

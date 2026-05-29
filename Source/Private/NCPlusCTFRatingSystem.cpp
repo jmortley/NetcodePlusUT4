@@ -71,6 +71,66 @@ namespace
 	{
 		return bInstagib ? TEXT("iCTF") : TEXT("CTF");
 	}
+
+	// Legacy performance score: cumulative K/D/damage. Used for the live delta
+	// while bShadow is set, and as the fallback when bEnabled is false.
+	double CTFR_LegacyPerf(const FNCPlusCTFPlayerInput& P)
+	{
+		return double(P.Kills) - double(P.Deaths) + double(P.Damage) / 220.0;
+	}
+
+	// CTF-aware performance score. Only the WITHIN-TEAM relative spread of this
+	// value matters (TeamGlicko2 turns it into a teammate-relative z-score), so
+	// the weights are chosen as ratios anchored to UT4's own per-event scoring
+	// (UTCTFScoring.cpp: FlagCapPoints=12, FlagSupportAssist=5, FC-kill~4,
+	// FlagReturnPoints~3, support-kill~2, BaseKillScore=1). Each signal is
+	// capped per game so a blowout can't explode one player's z and crush the
+	// rest of the team. iCTF drops damage (degenerate — every hit is a kill)
+	// and halves combat so objective play, not fragging, drives the ranking.
+	double CTFR_CTFPerf(const FNCPlusCTFPlayerInput& P, const FNCPlusCTFPerfConfig& Cfg, bool bInstagib)
+	{
+		auto Cap = [](int32 V, int32 Hi) -> double { return double(FMath::Clamp(V, 0, Hi)); };
+
+		const int32  KillCap = bInstagib ? 40 : 30;
+		const double Kills   = Cap(P.Kills,  KillCap);
+		const double Deaths  = Cap(P.Deaths, KillCap);
+
+		double Combat;
+		if (bInstagib)
+		{
+			Combat = 0.5 * Kills - 0.5 * Deaths;            // damage ≡ kills in IG — omit
+		}
+		else
+		{
+			const double Damage = FMath::Min(double(P.Damage), double(KillCap) * 220.0);
+			Combat = Kills - Deaths + Damage / 220.0;
+		}
+
+		// FCKills / SupportKills are bonuses layered on the base kill already
+		// counted above — matching UT4, where an FC kill = base kill + bonus.
+		const double Objective =
+			  12.0 * Cap(P.Caps,         5)
+			+  5.0 * Cap(P.Assists,      8)
+			+  4.0 * Cap(P.FCKills,      6)
+			+  3.0 * Cap(P.Returns,      8)
+			+  2.0 * Cap(P.SupportKills, 8);
+
+		// Anti-pad: grabs that advanced nothing (not a cap, not a carry assist).
+		const double Feeder = Cap(FMath::Max(0, P.Grabs - P.Caps - P.CarryAssists), 6);
+
+		return Combat
+			 + Cfg.ObjectiveWeight * Objective
+			 - Cfg.FeederPenalty   * Feeder;
+	}
+
+	// The score fed to the LIVE Glicko update: new CTF perf only once enabled
+	// AND out of shadow; legacy K/D otherwise.
+	double CTFR_LivePerf(const FNCPlusCTFPlayerInput& P, const FNCPlusCTFPerfConfig& Cfg, bool bInstagib)
+	{
+		return (Cfg.bEnabled && !Cfg.bShadow)
+			? CTFR_CTFPerf(P, Cfg, bInstagib)
+			: CTFR_LegacyPerf(P);
+	}
 }
 
 // =============================================================================
@@ -196,7 +256,7 @@ void FNCPlusCTFRatingSystem::ProcessMatch(const FNCPlusCTFMatchInput& In)
 		CachedIdsBefore.Add(Pair.Key);
 	}
 
-	auto BuildTeam = [this](const TArray<FNCPlusCTFPlayerInput>& Inputs, std::vector<MatchPlayer>& Out)
+	auto BuildTeam = [this, &In](const TArray<FNCPlusCTFPlayerInput>& Inputs, std::vector<MatchPlayer>& Out)
 	{
 		Out.reserve(Inputs.Num());
 		for (const FNCPlusCTFPlayerInput& P : Inputs)
@@ -211,7 +271,7 @@ void FNCPlusCTFRatingSystem::ProcessMatch(const FNCPlusCTFMatchInput& In)
 			{
 				PR = PlayerRating(kDefaultRating, kDefaultRD, kDefaultVolatility);
 			}
-			const double Perf = double(P.Kills) - double(P.Deaths) + double(P.Damage) / 220.0;
+			const double Perf = CTFR_LivePerf(P, In.Perf, Impl->bIsInstagib);
 			Out.push_back(MatchPlayer(PR, Perf));
 		}
 	};
@@ -409,6 +469,12 @@ FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusC
 	Writer->WriteValue(TEXT("winner_team"),   In.WinnerTeamIndex);
 	Writer->WriteValue(TEXT("red_score"),     In.RedScore);
 	Writer->WriteValue(TEXT("blue_score"),    In.BlueScore);
+	// perf_enabled: the CTF-aware perf machinery is on (raw flag stats + per-player
+	// `perf` are present below). perf_shadow: the live `delta` was computed from
+	// LEGACY K/D perf for observation only — the new `perf` did NOT move it. Django
+	// uses these to decide whether to trust `delta` or just store the new perf.
+	Writer->WriteValue(TEXT("perf_enabled"),  In.Perf.bEnabled);
+	Writer->WriteValue(TEXT("perf_shadow"),   In.Perf.bShadow);
 	Writer->WriteArrayStart(TEXT("players"));
 
 	for (int32 Idx : HumanIndices)
@@ -447,6 +513,22 @@ FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusC
 		Writer->WriteValue(TEXT("rd"),           PR->GetRD());
 		Writer->WriteValue(TEXT("sigma"),        PR->GetSigma());
 		Writer->WriteValue(TEXT("faced_humans"), bFacedHumans);
+
+		// CTF-aware perf scalar + the raw flag signals it derives from. Sent
+		// whenever the machinery is enabled (even in shadow) so Django can store
+		// them and reconstruct/observe the ordering without re-running matches.
+		if (In.Perf.bEnabled)
+		{
+			Writer->WriteValue(TEXT("perf"),           CTFR_CTFPerf(P, In.Perf, Impl->bIsInstagib));
+			Writer->WriteValue(TEXT("caps"),           P.Caps);
+			Writer->WriteValue(TEXT("returns"),        P.Returns);
+			Writer->WriteValue(TEXT("assists"),        P.Assists);
+			Writer->WriteValue(TEXT("fc_kills"),       P.FCKills);
+			Writer->WriteValue(TEXT("support_kills"),  P.SupportKills);
+			Writer->WriteValue(TEXT("grabs"),          P.Grabs);
+			Writer->WriteValue(TEXT("carry_assists"),  P.CarryAssists);
+			Writer->WriteValue(TEXT("enemy_fc_damage"),P.EnemyFCDamage);
+		}
 		Writer->WriteObjectEnd();
 	}
 

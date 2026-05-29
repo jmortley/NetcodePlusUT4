@@ -30,6 +30,9 @@
 #include "NCPlusCTFRatingSystem.h"
 #include "NCEloUploader.h"
 #include "UTGameMode.h"     // AUTGameMode::bIsInstagib
+#include "UTATypes.h"                  // NAME_FCKills / NAME_FlagSupportKills / NAME_FlagGrabs / ...
+#include "Misc/ConfigCacheIni.h"       // FConfigFile — Mod.ini perf knobs
+#include "Misc/Paths.h"                // FPaths::GameSavedDir
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -142,6 +145,12 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	// Instagib BP mutator not yet having set the flag, which would route an iCTF
 	// match into the regular CTF Mods.db table.
 	bRatingFlushedThisMatch = false;
+
+	// Per-match leaver/stat caches reset on each map load.
+	MatchStatCache.Empty();
+	PlayerJoinWorldTime.Empty();
+	MatchStartWorldTime = 0.f;
+	MatchFullDurationSeconds = 0.f;
 }
 
 void ANCPlusCTFGameMode::BeginPlay()
@@ -172,7 +181,15 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 	AUTPlayerState* UTPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (UTPS && UTPS->UniqueId.IsValid())
 	{
-		RatingSystem->LoadPlayerFromDB(GetWorld(), UTPS->UniqueId.ToString());
+		const FString Uid = UTPS->UniqueId.ToString();
+		RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
+		// Mid-match joiner: stamp first-seen time for the leaver presence calc.
+		// (Warmup joiners are stamped en-masse in HandleMatchHasStarted.) Keep
+		// the earliest sighting on a rejoin.
+		if (!PlayerJoinWorldTime.Contains(Uid))
+		{
+			PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+		}
 	}
 }
 
@@ -188,9 +205,11 @@ void ANCPlusCTFGameMode::HandleMatchHasEnded()
 	AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
 	if (!GS) return;
 
-	// Build the single-match input from final K/D/damage on the player array.
+	// Build the single-match input. Perf config + leaver snapshots were captured
+	// at match start / Logout; here we fold in everyone still present.
 	FNCPlusCTFMatchInput In;
 	In.bIsInstagib = RatingSystem->IsInstagibMode();
+	In.Perf        = CTFPerfConfig;
 
 	int32 RedScore  = 0;
 	int32 BlueScore = 0;
@@ -205,20 +224,28 @@ void ANCPlusCTFGameMode::HandleMatchHasEnded()
 	else if (BlueScore > RedScore) In.WinnerTeamIndex = 1;
 	else                            In.WinnerTeamIndex = -1;
 
+	// Players still present overwrite any earlier Logout snapshot with their
+	// complete final line — present == most complete, and always rated.
 	for (APlayerState* APS : GS->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(APS);
 		if (!UTPS || UTPS->bOnlySpectator) continue;
 		if (!UTPS->UniqueId.IsValid()) continue;  // bot
+		if (UTPS->GetTeamNum() > 1) continue;      // no valid CTF team slot
 
 		FNCPlusCTFPlayerInput P;
-		P.UniqueId   = UTPS->UniqueId.ToString();
-		P.PlayerName = UTPS->PlayerName;
-		P.TeamIndex  = UTPS->GetTeamNum();
-		P.Kills      = UTPS->Kills;
-		P.Deaths     = UTPS->Deaths;
-		P.Damage     = static_cast<int32>(UTPS->DamageDone);
-		In.Players.Add(MoveTemp(P));
+		CapturePlayerStats(UTPS, P);
+		const FString Key = P.UniqueId;   // copy key first — Add arg eval order is unspecified
+		MatchStatCache.Add(Key, MoveTemp(P));
+	}
+
+	// Feed the union of present players + leavers who cleared the presence
+	// threshold at Logout, so team sizes / z-scores reflect the real roster
+	// and a rage-quitter can't dodge the result by disconnecting.
+	In.Players.Reserve(MatchStatCache.Num());
+	for (const TPair<FString, FNCPlusCTFPlayerInput>& Pair : MatchStatCache)
+	{
+		In.Players.Add(Pair.Value);
 	}
 
 	// Snapshot BEFORE the ProcessMatch in-memory update so the delta is correct.
@@ -236,6 +263,120 @@ void ANCPlusCTFGameMode::HandleMatchHasEnded()
 	{
 		FNCEloUploader::PostMatchResult(GetWorld(), Json);
 	}
+}
+
+void ANCPlusCTFGameMode::Logout(AController* Exiting)
+{
+	// Snapshot a leaver's stats while their PlayerState is still intact (the
+	// engine duplicates+destroys it just after this). Rate them on the final
+	// result if they were present long enough — a rage-quitter near the end
+	// must not dodge the loss by disconnecting; a genuine early leaver is
+	// dropped (and excluded from the team z-score, since the match was
+	// effectively short-handed). RatingSystem.IsValid() => match has started;
+	// !bRatingFlushedThisMatch => not yet processed. Deliberately does NOT call
+	// Forget — the rating must stay cached for the match-end ProcessMatch/Flush.
+	if (HasAuthority() && Exiting && RatingSystem.IsValid() && !bRatingFlushedThisMatch)
+	{
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(Exiting->PlayerState);
+		if (UTPS && !UTPS->bIsABot && !UTPS->bOnlySpectator
+			&& UTPS->UniqueId.IsValid() && UTPS->GetTeamNum() <= 1)
+		{
+			const FString Uid = UTPS->UniqueId.ToString();
+
+			const float Now      = GetWorld()->GetTimeSeconds();
+			const float JoinTime = PlayerJoinWorldTime.FindRef(Uid);   // 0.f if unknown
+			const bool  bCanThreshold = (MatchFullDurationSeconds > 1.f);
+			const float Frac     = bCanThreshold ? ((Now - JoinTime) / MatchFullDurationSeconds) : 1.f;
+
+			if (!bCanThreshold || Frac >= CTFRatingMinPresenceFrac)
+			{
+				FNCPlusCTFPlayerInput P;
+				CapturePlayerStats(UTPS, P);
+				MatchStatCache.Add(Uid, MoveTemp(P));
+				UE_LOG(LogGameMode, Log,
+					TEXT("NCPlusCTF: rated leaver %s (presence %.0f%%, takes match result)"),
+					*UTPS->PlayerName, Frac * 100.f);
+			}
+			else
+			{
+				// Below threshold — drop any prior snapshot so they're neither
+				// rated nor counted in the roster.
+				MatchStatCache.Remove(Uid);
+				UE_LOG(LogGameMode, Log,
+					TEXT("NCPlusCTF: dropped early leaver %s (presence %.0f%% < %.0f%%)"),
+					*UTPS->PlayerName, Frac * 100.f, CTFRatingMinPresenceFrac * 100.f);
+			}
+		}
+	}
+
+	Super::Logout(Exiting);
+}
+
+void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const
+{
+	Out.UniqueId   = UTPS->UniqueId.ToString();
+	Out.PlayerName = UTPS->PlayerName;
+	Out.TeamIndex  = UTPS->GetTeamNum();
+	Out.Kills      = UTPS->Kills;
+	Out.Deaths     = UTPS->Deaths;
+	Out.Damage     = static_cast<int32>(UTPS->DamageDone);
+
+	// CTF objective signals. Caps/Returns/Assists are direct replicated fields;
+	// the rest live in the server-side StatsData TMap — same GetStatsValue path
+	// CTFStatsReplicator already uses for FlagGrabs.
+	Out.Caps          = UTPS->FlagCaptures;
+	Out.Returns       = UTPS->FlagReturns;
+	Out.Assists       = UTPS->Assists;
+	Out.FCKills       = static_cast<int32>(UTPS->GetStatsValue(NAME_FCKills));
+	Out.SupportKills  = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagSupportKills));
+	Out.Grabs         = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagGrabs));
+	Out.CarryAssists  = static_cast<int32>(UTPS->GetStatsValue(NAME_CarryAssist));
+	Out.EnemyFCDamage = static_cast<int32>(UTPS->GetStatsValue(NAME_EnemyFCDamage));
+}
+
+void ANCPlusCTFGameMode::LoadCTFPerfConfig()
+{
+	// Members already hold defaults; only override what Mod.ini [UTPUGS_STATS]
+	// specifies (same section + load pattern as NCEloUploader).
+	const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+	if (!FPaths::FileExists(ModIniPath))
+	{
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF perf: Mod.ini not found, using defaults"));
+		return;
+	}
+
+	FConfigFile ModIni;
+	ModIni.Read(ModIniPath);
+	const FConfigSection* Section = ModIni.Find(TEXT("UTPUGS_STATS"));
+	if (!Section)
+	{
+		return;
+	}
+
+	auto ReadBool = [Section](const TCHAR* Key, bool& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = V->GetValue().ToBool(); }
+	};
+	auto ReadDouble = [Section](const TCHAR* Key, double& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atod(*V->GetValue()); }
+	};
+	auto ReadFloat = [Section](const TCHAR* Key, float& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atof(*V->GetValue()); }
+	};
+
+	ReadBool(TEXT("CTFPerfEnabled"),           CTFPerfConfig.bEnabled);
+	ReadBool(TEXT("CTFRatingShadow"),          CTFPerfConfig.bShadow);
+	ReadDouble(TEXT("CTFPerfObjectiveWeight"), CTFPerfConfig.ObjectiveWeight);
+	ReadDouble(TEXT("CTFFlagFeederPenalty"),   CTFPerfConfig.FeederPenalty);
+	ReadFloat(TEXT("CTFRatingMinPresenceFrac"),CTFRatingMinPresenceFrac);
+
+	UE_LOG(LogGameMode, Log,
+		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f"),
+		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
+		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
+		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac);
 }
 
 bool ANCPlusCTFGameMode::SupportsInstantReplay() const
@@ -931,6 +1072,12 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: rating system constructed for %s ladder"),
 			bInstagib ? TEXT("iCTF") : TEXT("CTF"));
 
+		// Stamp the match-start clock + intended full length for the leaver
+		// presence threshold, and load the runtime perf knobs (once per map).
+		MatchStartWorldTime = GetWorld()->GetTimeSeconds();
+		MatchFullDurationSeconds = (bHasHalftime ? float(TimeLimit) * 2.f : float(TimeLimit)) * 60.f;
+		LoadCTFPerfConfig();
+
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS)
 		{
@@ -940,7 +1087,13 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 				AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 				if (!UTPS || UTPS->bOnlySpectator) continue;
 				if (!UTPS->UniqueId.IsValid()) continue;   // bot
-				RatingSystem->LoadPlayerFromDB(GetWorld(), UTPS->UniqueId.ToString());
+				const FString Uid = UTPS->UniqueId.ToString();
+				RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
+				// Present at match start => full presence credit.
+				if (!PlayerJoinWorldTime.Contains(Uid))
+				{
+					PlayerJoinWorldTime.Add(Uid, MatchStartWorldTime);
+				}
 				++LoadedCount;
 			}
 			UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: bulk-loaded %d human ratings from PlayerArray"), LoadedCount);

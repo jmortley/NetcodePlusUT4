@@ -18,7 +18,10 @@
 
 class UWorld;
 
-/** Per-player input for the single match-end ProcessMatch call. */
+/** Per-player input for the single match-end ProcessMatch call.
+ *  The CTF-specific signals below are all read server-side from AUTPlayerState
+ *  at match end (direct fields + GetStatsValue). They default to 0 so any
+ *  caller that only fills K/D/damage reproduces the legacy behaviour. */
 struct FNCPlusCTFPlayerInput
 {
 	FString UniqueId;
@@ -27,6 +30,29 @@ struct FNCPlusCTFPlayerInput
 	int32   Kills     = 0;
 	int32   Deaths    = 0;
 	int32   Damage    = 0;
+
+	// ── CTF objective signals ────────────────────────────────────────────
+	int32   Caps          = 0;   // AUTPlayerState::FlagCaptures
+	int32   Returns       = 0;   // AUTPlayerState::FlagReturns
+	int32   Assists       = 0;   // AUTPlayerState::Assists (flag-cap assists)
+	int32   FCKills       = 0;   // NAME_FCKills — killed the enemy flag carrier
+	int32   SupportKills  = 0;   // NAME_FlagSupportKills — protected own carrier
+	int32   Grabs         = 0;   // NAME_FlagGrabs
+	int32   CarryAssists  = 0;   // NAME_CarryAssist — advanced flag, teammate capped
+	int32   EnemyFCDamage = 0;   // NAME_EnemyFCDamage — damage-points dealt to enemy FC
+};
+
+/** Runtime-tunable CTF perf knobs, read from Mod.ini [UTPUGS_STATS] by the
+ *  gamemode each match and passed into ProcessMatch / BuildResultPayload.
+ *  Defaults reproduce the shipped Phase-1 state: the new perf score is computed
+ *  and uploaded for observation, but the LIVE Glicko delta still uses the
+ *  legacy K/D perf until bShadow is cleared at cutover. */
+struct FNCPlusCTFPerfConfig
+{
+	bool   bEnabled        = true;   // false => pure legacy K/D perf, no new payload fields
+	bool   bShadow         = true;   // true => live delta uses legacy perf; new perf observed only
+	double ObjectiveWeight = 1.0;    // master multiplier on the objective half of the score
+	double FeederPenalty   = 1.0;    // multiplier on the grabs-without-cap penalty
 };
 
 /** Match-end payload input. WinnerTeamIndex is 0/1; -1 means draw.
@@ -38,6 +64,7 @@ struct FNCPlusCTFMatchInput
 	int32 RedScore        = 0;
 	int32 BlueScore       = 0;
 	bool  bIsInstagib     = false;
+	FNCPlusCTFPerfConfig Perf;
 	TArray<FNCPlusCTFPlayerInput> Players;
 };
 
