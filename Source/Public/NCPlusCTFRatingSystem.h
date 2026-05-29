@@ -40,6 +40,17 @@ struct FNCPlusCTFPlayerInput
 	int32   Grabs         = 0;   // NAME_FlagGrabs
 	int32   CarryAssists  = 0;   // NAME_CarryAssist — advanced flag, teammate capped
 	int32   EnemyFCDamage = 0;   // NAME_EnemyFCDamage — damage-points dealt to enemy FC
+
+	// ── Role (positional, sampled over the match) ────────────────────────
+	// OffLean drives the role-aware perf weighting; -1 = pure defense (always
+	// own half), +1 = pure offense (always enemy half), 0 = mid. The fractions
+	// + label are carried for the payload / observability only. 0 / "" when no
+	// position samples (role-aware perf then falls back to neutral weights).
+	float   OffLean   = 0.f;
+	float   OwnFrac   = 0.f;
+	float   MidFrac   = 0.f;
+	float   EnemyFrac = 0.f;
+	FString Role;                // offense / mid / mid-cover / mid-fallback / defense
 };
 
 /** Runtime-tunable CTF perf knobs, read from Mod.ini [UTPUGS_STATS] by the
@@ -53,6 +64,8 @@ struct FNCPlusCTFPerfConfig
 	bool   bShadow         = true;   // true => live delta uses legacy perf; new perf observed only
 	double ObjectiveWeight = 1.0;    // master multiplier on the objective half of the score
 	double FeederPenalty   = 1.0;    // multiplier on the grabs-without-cap penalty
+	bool   bRoleAware      = true;   // false => flat off/def weights (ignore OffLean)
+	double RoleWeightStrength = 0.25;// spread of the role multipliers: Aoff=1+s*OffLean, Adef=1-s*OffLean
 };
 
 /** Match-end payload input. WinnerTeamIndex is 0/1; -1 means draw.

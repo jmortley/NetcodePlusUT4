@@ -46,6 +46,20 @@ namespace NCPlusReflection
 	}
 }
 
+/** Per-player positional dwell accumulator for role inference. Seconds spent in
+ *  each zone (own/mid/enemy half, by flag-base-axis projection t=d0/(d0+d1))
+ *  plus flag-state-conditioned excursions that distinguish a mid's cover (push
+ *  to escort the runner) from fallback (drop back to defend). Server-only,
+ *  reset per match. */
+struct FNCPlusCTFRoleDwell
+{
+	float OwnSec      = 0.f;
+	float MidSec      = 0.f;
+	float EnemySec    = 0.f;
+	float FallbackSec = 0.f;   // own half while own flag is out (Held/Dropped)
+	float CoverSec    = 0.f;   // enemy half while our team holds the enemy flag
+};
+
 UCLASS(Abstract)
 class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 {
@@ -142,6 +156,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
+
+	/** Own spawn selection (ElimPlus/Wipeout pattern) so the engine pipeline
+	 *  can't bypass RatePlayerStart. Curates an own-team pool from the map's
+	 *  AUTTeamPlayerStart TeamNum tags (trusted, not mutated) and scores it with
+	 *  RatePlayerStart. See NCPlusCTFGameMode.cpp. */
+	virtual AActor* ChoosePlayerStart_Implementation(AController* Player) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn, AUTPlayerState* Holder, FName Reason) override;
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer);
 	virtual void CheckGameTime() override;
@@ -181,6 +201,11 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  early leavers. Populated in PostLogin / HandleMatchHasStarted. */
 	TMap<FString, float> PlayerJoinWorldTime;
 
+	/** UniqueId -> positional dwell, accumulated each second by SampleRoleDwell
+	 *  while the match is in progress. Resolved into role + OffLean at capture
+	 *  time. Cleared in InitGame. */
+	TMap<FString, FNCPlusCTFRoleDwell> RoleDwell;
+
 	/** World seconds at match start, and the intended full match length, used
 	 *  for the leaver presence fraction. Stamped in HandleMatchHasStarted. */
 	float MatchStartWorldTime = 0.f;
@@ -193,8 +218,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  to be rated (rage-quit dodge guard). Mod.ini override; default 0.5. */
 	float CTFRatingMinPresenceFrac = 0.5f;
 
-	/** Read the rating-relevant stats off a live AUTPlayerState into Out. */
+	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
+	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
 	void CapturePlayerStats(class AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const;
+
+	/** Sample every living player's zone (own/mid/enemy) + flag-state-conditioned
+	 *  cover/fallback into RoleDwell. Called once per second from DefaultTimer
+	 *  while the match is in progress. */
+	void SampleRoleDwell();
 
 	/** Load CTFPerfConfig + CTFRatingMinPresenceFrac from Mod.ini [UTPUGS_STATS]. */
 	void LoadCTFPerfConfig();
@@ -266,6 +297,20 @@ protected:
 
 	/** Penalty scale for near-last-spawn distance */
 	float SpawnNearLastPenalty = 6.f;
+
+	// ── Team-aware spawn pools (curated from author TeamNum tags) ─────
+	// Built lazily on the first ChoosePlayerStart. Server-only; never replicated.
+
+	/** Own-team candidate starts, partitioned by authored TeamNum. */
+	TArray<TWeakObjectPtr<APlayerStart>> Team0Spawns;
+	TArray<TWeakObjectPtr<APlayerStart>> Team1Spawns;
+
+	/** False until BuildTeamSpawnPools has populated the pools this match. */
+	bool bSpawnPoolsBuilt = false;
+
+	/** Bucket each AUTTeamPlayerStart into Team0Spawns / Team1Spawns by its
+	 *  authored TeamNum (trusted, not mutated). Plain APlayerStarts are excluded. */
+	void BuildTeamSpawnPools();
 
 	// ── Stats Replicator ────────────────────────────────────────────
 

@@ -146,6 +146,11 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	// match into the regular CTF Mods.db table.
 	bRatingFlushedThisMatch = false;
 
+	// Team spawn pools rebuild per match, lazily on the first ChoosePlayerStart.
+	bSpawnPoolsBuilt = false;
+	Team0Spawns.Reset();
+	Team1Spawns.Reset();
+
 	// Per-match leaver/stat caches reset on each map load.
 	MatchStatCache.Empty();
 	PlayerJoinWorldTime.Empty();
@@ -639,6 +644,109 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 	}
 
 	return FMath::Max(Result, 0.2f);
+}
+
+// ── Team-aware spawn ownership ───────────────────────────────────────
+// We own ChoosePlayerStart (mirroring ElimPlus/Wipeout) so the engine spawn
+// pipeline can't bypass RatePlayerStart. On maps whose UTTeamPlayerStart tags
+// are unreliable, the stock pipeline was starving the rating loop (-20 on every
+// candidate) and falling through to a deterministic engine pick — pinning every
+// player to one spawn for the whole match. Here the candidate pool is curated
+// per-team by nearest flag base (ground truth via GetFlagBase), each team start
+// is retagged so the bUseTeamStarts=true -20 guard trusts geometry, and the pool
+// is scored with the existing RatePlayerStart (flag-state, enemy/LOS, anti-repeat).
+
+void ANCPlusCTFGameMode::BuildTeamSpawnPools()
+{
+	Team0Spawns.Reset();
+	Team1Spawns.Reset();
+
+	// Trust the map authors' TeamNum (these maps are tagged correctly). Bucket
+	// each AUTTeamPlayerStart into its own team's pool — no mutation. Geometry
+	// retagging is intentionally NOT done: it would mis-flip starts the mapper
+	// deliberately placed on asymmetric maps. Plain APlayerStarts (incl. the
+	// InitGame engine-assert fallbacks) carry no TeamNum and would hit the -20
+	// wrong-team guard, so they are excluded; they exist only to satisfy the
+	// engine's FindPlayerStart.
+	int32 Skipped = 0;
+	for (TActorIterator<AUTTeamPlayerStart> It(GetWorld()); It; ++It)
+	{
+		AUTTeamPlayerStart* TPS = *It;
+		if (!IsValid(TPS)) continue;
+
+		if (TPS->TeamNum == 0)      { Team0Spawns.Add(TPS); }
+		else if (TPS->TeamNum == 1) { Team1Spawns.Add(TPS); }
+		else                        { Skipped++; }
+	}
+
+	bSpawnPoolsBuilt = true;
+
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF spawn-pools built: T0=%d T1=%d team starts (by author TeamNum; %d skipped non-0/1)"),
+		Team0Spawns.Num(), Team1Spawns.Num(), Skipped);
+}
+
+AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player)
+{
+	// Small games (1v1/2v2): keep Epic's default selection — same carve-out as
+	// RatePlayerStart; too few starts for team pools to help.
+	if (GameSession && GameSession->MaxPlayers <= 4)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
+	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
+	if (!PS || !PS->Team)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
+	if (!bSpawnPoolsBuilt)
+	{
+		BuildTeamSpawnPools();
+	}
+
+	const int32 TeamIndex = PS->Team->TeamIndex;
+	TArray<TWeakObjectPtr<APlayerStart>>& Pool = (TeamIndex == 0) ? Team0Spawns : Team1Spawns;
+
+	// No team starts tagged for this team — never fail to spawn; defer to engine.
+	if (Pool.Num() == 0)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
+	// Score the curated own-team pool with the existing RatePlayerStart. The pool
+	// is the player's own team (by author TeamNum), so the -20 wrong-team guard
+	// never trips here — it stays a safety net. RatePlayerStart's jitter and its
+	// -8 last-spot penalty keep picks rotating instead of pinning.
+	APlayerStart* Best = nullptr;
+	float BestScore = -FLT_MAX;
+	for (const TWeakObjectPtr<APlayerStart>& WP : Pool)
+	{
+		APlayerStart* Candidate = WP.Get();
+		if (!Candidate) continue;
+
+		const float Score = RatePlayerStart(Candidate, Player);
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = Candidate;
+		}
+	}
+
+	if (!Best)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+
+	// Confirmation log (Warning to survive the Shipping UE_LOG strip). Pairs with
+	// the "NCPlusCTF spawn:" line in RestartPlayer — together they prove this
+	// override drives selection and that picks rotate per life.
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF pick: %s(T%d) -> %s score=%.1f (pool=%d)"),
+		*PS->PlayerName, TeamIndex, *Best->GetName(), BestScore, Pool.Num());
+
+	return Best;
 }
 
 float ANCPlusCTFGameMode::GetTravelDelay()

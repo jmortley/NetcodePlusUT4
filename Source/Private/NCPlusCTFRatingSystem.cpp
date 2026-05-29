@@ -83,10 +83,21 @@ namespace
 	// value matters (TeamGlicko2 turns it into a teammate-relative z-score), so
 	// the weights are chosen as ratios anchored to UT4's own per-event scoring
 	// (UTCTFScoring.cpp: FlagCapPoints=12, FlagSupportAssist=5, FC-kill~4,
-	// FlagReturnPoints~3, support-kill~2, BaseKillScore=1). Each signal is
+	// returns scale to ~12 with hold bonus, BaseKillScore=1). Each signal is
 	// capped per game so a blowout can't explode one player's z and crush the
 	// rest of the team. iCTF drops damage (degenerate — every hit is a kill)
 	// and halves combat so objective play, not fragging, drives the ranking.
+	//
+	// Role fairness: the objective is split into offensive (scoring/escort) and
+	// defensive (denial/carrier-kills) halves, each scaled by a role multiplier
+	// derived from the player's positional OffLean (sampled over the match).
+	// A defender (OffLean<0) gets their defensive half boosted and offensive
+	// half discounted, so a shutdown defender with zero caps isn't dragged to
+	// the bottom of the team z purely for playing defense. Defensive per-event
+	// weights are set comparable to offensive ones (returns 6, fc_kills 5) so a
+	// strong defensive game is magnitude-comparable to a strong offensive one
+	// BEFORE the role multiplier — the multiplier fine-tunes, it doesn't carry
+	// the whole correction. Strength + on/off are runtime knobs.
 	double CTFR_CTFPerf(const FNCPlusCTFPlayerInput& P, const FNCPlusCTFPerfConfig& Cfg, bool bInstagib)
 	{
 		auto Cap = [](int32 V, int32 Hi) -> double { return double(FMath::Clamp(V, 0, Hi)); };
@@ -106,20 +117,30 @@ namespace
 			Combat = Kills - Deaths + Damage / 220.0;
 		}
 
-		// FCKills / SupportKills are bonuses layered on the base kill already
-		// counted above — matching UT4, where an FC kill = base kill + bonus.
-		const double Objective =
+		// Offensive objective: scoring + escort. SupportKills is a bonus layered
+		// on the base kill already in Combat (UT4: FC/support kill = kill + bonus).
+		const double ObjOff =
 			  12.0 * Cap(P.Caps,         5)
 			+  5.0 * Cap(P.Assists,      8)
-			+  4.0 * Cap(P.FCKills,      6)
-			+  3.0 * Cap(P.Returns,      8)
 			+  2.0 * Cap(P.SupportKills, 8);
+
+		// Defensive objective: denial + enemy-carrier kills. Weights raised vs
+		// the offensive caps so a defensive game stands on its own magnitude.
+		const double ObjDef =
+			  6.0 * Cap(P.Returns, 8)
+			+ 5.0 * Cap(P.FCKills, 6);
+
+		// Role multipliers around 1.0. OffLean is 0 (neutral) when role-aware is
+		// off or no position samples exist, collapsing to flat off/def weights.
+		const double s    = Cfg.bRoleAware ? Cfg.RoleWeightStrength : 0.0;
+		const double Aoff = 1.0 + s * double(P.OffLean);
+		const double Adef = 1.0 - s * double(P.OffLean);
 
 		// Anti-pad: grabs that advanced nothing (not a cap, not a carry assist).
 		const double Feeder = Cap(FMath::Max(0, P.Grabs - P.Caps - P.CarryAssists), 6);
 
 		return Combat
-			 + Cfg.ObjectiveWeight * Objective
+			 + Cfg.ObjectiveWeight * (Aoff * ObjOff + Adef * ObjDef)
 			 - Cfg.FeederPenalty   * Feeder;
 	}
 
@@ -528,6 +549,11 @@ FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusC
 			Writer->WriteValue(TEXT("grabs"),          P.Grabs);
 			Writer->WriteValue(TEXT("carry_assists"),  P.CarryAssists);
 			Writer->WriteValue(TEXT("enemy_fc_damage"),P.EnemyFCDamage);
+			Writer->WriteValue(TEXT("role"),           P.Role);
+			Writer->WriteValue(TEXT("off_lean"),       P.OffLean);
+			Writer->WriteValue(TEXT("own_frac"),       P.OwnFrac);
+			Writer->WriteValue(TEXT("mid_frac"),       P.MidFrac);
+			Writer->WriteValue(TEXT("enemy_frac"),     P.EnemyFrac);
 		}
 		Writer->WriteObjectEnd();
 	}
