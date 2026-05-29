@@ -396,50 +396,46 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
 	Super::RestartPlayer(NewPlayer);
 
-	// Track recent spawns for anti-repeat penalties (IG+ style).
-	// Snapshot prior Recent BEFORE updating so the log can classify the
-	// chosen spawn as fresh / same-as-last / two-back.
+	// Anti-repeat tracking (IG+ style): keep PlayerRecentSpawns updated from the
+	// chosen StartSpot so RatePlayerStart's anti-repeat has data. Runs every spawn
+	// (incl. warmup) — harmless.
 	if (NewPlayer && NewPlayer->StartSpot.IsValid())
 	{
 		APlayerStart* UsedStart = Cast<APlayerStart>(NewPlayer->StartSpot.Get());
 		if (UsedStart)
 		{
 			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(TWeakObjectPtr<AController>(NewPlayer));
-
-			// Classify against the prior (pre-update) state.
-			const TCHAR* RecentTag = TEXT("fresh");
-			int32 DistFromLast = -1;
-			if (Recent.Last.IsValid())
-			{
-				DistFromLast = FMath::RoundToInt(
-					(UsedStart->GetActorLocation() - Recent.Last->GetActorLocation()).Size());
-				if (Recent.Last.Get() == UsedStart) RecentTag = TEXT("same");
-				else if (Recent.SecondLast.IsValid() && Recent.SecondLast.Get() == UsedStart) RecentTag = TEXT("2back");
-			}
-
-			// Final-pick log. Grep "NCPlusCTF spawn:" after a match to see
-			// every chosen spawn with enough context to spot anti-repeat
-			// misfires or flag-state-correlated spawnkill complaints.
-			// Warning verbosity (not Log) so the line survives the Shipping
-			// build's static UE_LOG strip — Log is below COMPILED_IN_MINIMUM_
-			// VERBOSITY (=Display) in Shipping w/o USE_LOGGING_IN_SHIPPING,
-			// which silently elided the entire format string out of the .so.
-			AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
-			AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
-			const int32 TeamIdx = (PS && PS->Team) ? int32(PS->Team->TeamIndex) : -1;
-			const FString OwnFlag   = (GS && TeamIdx >= 0) ? GS->GetFlagState(TeamIdx).ToString()     : TEXT("?");
-			const FString EnemyFlag = (GS && TeamIdx >= 0) ? GS->GetFlagState(1 - TeamIdx).ToString() : TEXT("?");
-			const FVector SL = UsedStart->GetActorLocation();
-			UE_LOG(LogGameMode, Warning,
-				TEXT("NCPlusCTF spawn: %s(T%d) -> %s (%.0f,%.0f) | recent=%s dist_from_last=%d | own_flag=%s enemy_flag=%s"),
-				PS ? *PS->PlayerName : TEXT("?"), TeamIdx,
-				*UsedStart->GetName(), SL.X, SL.Y,
-				RecentTag, DistFromLast,
-				*OwnFlag, *EnemyFlag);
-
 			Recent.SecondLast = Recent.Last;
 			Recent.Last = UsedStart;
 		}
+	}
+
+	// Spawn log — gated to LIVE match (warmup respawns were inflating the count so it
+	// never matched real deaths) and reporting the PAWN's ACTUAL world location. The
+	// previous version logged NewPlayer->StartSpot, which can lag the real per-life
+	// spawn and falsely read "same"; StartSpot is printed alongside so any divergence
+	// from the pawn is visible. Warning verbosity to survive the Shipping UE_LOG strip.
+	APawn* SpawnedPawnForLog = NewPlayer ? NewPlayer->GetPawn() : nullptr;
+	if (SpawnedPawnForLog && CTFGameState && CTFGameState->IsMatchInProgress())
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+		const int32 TeamIdx = (PS && PS->Team) ? int32(PS->Team->TeamIndex) : -1;
+		const FString OwnFlag   = (TeamIdx >= 0) ? CTFGameState->GetFlagState(TeamIdx).ToString()     : TEXT("?");
+		const FString EnemyFlag = (TeamIdx >= 0) ? CTFGameState->GetFlagState(1 - TeamIdx).ToString() : TEXT("?");
+
+		const FVector SpawnLoc = SpawnedPawnForLog->GetActorLocation();
+		FVector& LastLoc = PlayerLastSpawnLoc.FindOrAdd(TWeakObjectPtr<AController>(NewPlayer));
+		const int32 DistFromLast = LastLoc.IsZero() ? -1 : FMath::RoundToInt((SpawnLoc - LastLoc).Size());
+		const TCHAR* RecentTag = (DistFromLast < 0) ? TEXT("fresh") : (DistFromLast < 250 ? TEXT("same") : TEXT("moved"));
+		LastLoc = SpawnLoc;
+
+		APlayerStart* SS = Cast<APlayerStart>(NewPlayer->StartSpot.Get());
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF spawn: %s(T%d) pawn=(%.0f,%.0f) recent=%s dist_from_last=%d | StartSpot=%s | own_flag=%s enemy_flag=%s"),
+			PS ? *PS->PlayerName : TEXT("?"), TeamIdx,
+			SpawnLoc.X, SpawnLoc.Y, RecentTag, DistFromLast,
+			SS ? *SS->GetName() : TEXT("(none)"),
+			*OwnFlag, *EnemyFlag);
 	}
 
 	// Ping-compensated spawn: hide pawn until client confirms control.

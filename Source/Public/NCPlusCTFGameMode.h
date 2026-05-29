@@ -289,6 +289,10 @@ protected:
 
 	TMap<TWeakObjectPtr<AController>, FRecentSpawns> PlayerRecentSpawns;
 
+	/** Per-player last ACTUAL spawn (pawn) world location, for a truthful in-match
+	 *  rotation/dist log that doesn't depend on the (sometimes stale) StartSpot. */
+	TMap<TWeakObjectPtr<AController>, FVector> PlayerLastSpawnLoc;
+
 	/** Penalty multiplier for using the same spawn as 2 spawns ago (0.5 = half score). IG+ default. */
 	float SpawnRecentPenaltyMultiplier = 0.5f;
 
