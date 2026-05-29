@@ -274,13 +274,17 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 			// Final-pick log. Grep "NCPlusCTF spawn:" after a match to see
 			// every chosen spawn with enough context to spot anti-repeat
 			// misfires or flag-state-correlated spawnkill complaints.
+			// Warning verbosity (not Log) so the line survives the Shipping
+			// build's static UE_LOG strip — Log is below COMPILED_IN_MINIMUM_
+			// VERBOSITY (=Display) in Shipping w/o USE_LOGGING_IN_SHIPPING,
+			// which silently elided the entire format string out of the .so.
 			AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 			AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
 			const int32 TeamIdx = (PS && PS->Team) ? int32(PS->Team->TeamIndex) : -1;
 			const FString OwnFlag   = (GS && TeamIdx >= 0) ? GS->GetFlagState(TeamIdx).ToString()     : TEXT("?");
 			const FString EnemyFlag = (GS && TeamIdx >= 0) ? GS->GetFlagState(1 - TeamIdx).ToString() : TEXT("?");
 			const FVector SL = UsedStart->GetActorLocation();
-			UE_LOG(LogGameMode, Log,
+			UE_LOG(LogGameMode, Warning,
 				TEXT("NCPlusCTF spawn: %s(T%d) -> %s (%.0f,%.0f) | recent=%s dist_from_last=%d | own_flag=%s enemy_flag=%s"),
 				PS ? *PS->PlayerName : TEXT("?"), TeamIdx,
 				*UsedStart->GetName(), SL.X, SL.Y,
