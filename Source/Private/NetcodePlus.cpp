@@ -20,6 +20,13 @@
 #include "NCPlusCTFHUD.h"
 #include "ShockDomHUD.h"
 
+// -ncpconnect launcher direct-connect support
+#include "Containers/Ticker.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "Misc/CoreMisc.h"
+#include "Engine/GameInstance.h"
+
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
 
@@ -395,6 +402,92 @@ static void HandleHUDDragOverlay(const TArray<FString>& Args)
 	ActiveDragOverlay = Overlay;
 }
 
+// ---------------------------------------------------------------------------
+// -ncpconnect: UT4 Community Launcher direct-connect to a PUG server.
+//
+// The retail SHIPPING client compiles out every stock command-line connect path
+// (GameInstance.cpp blanks the first-arg map/URL; -EXEC=/-ExecCmds= are stripped),
+// so the launcher cannot ask the game to join a server through any normal cmdline
+// argument. This plugin-side hook re-enables exactly one narrow case: when the
+// launcher passes -ncpconnect=IP:port?Password=pw, we wait until the front-end
+// menu world exists and the player is signed in to MCP, then issue a single
+// engine-level ClientTravel to that server. Plugin C++ is NOT shipping-gated.
+//
+// Deliberately PlayerController-free: routing this through a PlayerController
+// (even our own ANPPlayerController) crashes the editor, so the travel is driven
+// from a core ticker via GEngine->SetClientTravel — the same call that
+// APlayerController::ClientTravel makes internally, minus the controller.
+// ---------------------------------------------------------------------------
+
+static FDelegateHandle GNcpConnectTickerHandle;
+static FString         GNcpConnectURL;
+static float           GNcpConnectElapsed = 0.0f;
+
+/** Connect anyway after this long if MCP sign-in never completes (offline/slow login). */
+static const float GNcpConnectLoginTimeout = 45.0f;
+
+/** Drop the password option so it never reaches the log. */
+static FString RedactConnectURL(const FString& URL)
+{
+	int32 QueryIdx = INDEX_NONE;
+	if (URL.FindChar(TEXT('?'), QueryIdx))
+	{
+		return URL.Left(QueryIdx) + TEXT("?<options hidden>");
+	}
+	return URL;
+}
+
+/** Core-ticker callback: wait for the menu + sign-in, then ClientTravel once. */
+static bool TickNcpConnect(float DeltaTime)
+{
+	GNcpConnectElapsed += DeltaTime;
+
+	if (!GEngine)
+	{
+		return true; // keep waiting for the engine
+	}
+
+	// Find the live game-client world. PIE/editor worlds are EWorldType::PIE/Editor
+	// and never carry -ncpconnect, so this also keeps the hook inert in the editor.
+	UWorld* GameWorld = nullptr;
+	for (const FWorldContext& Context : GEngine->GetWorldContexts())
+	{
+		if (Context.WorldType == EWorldType::Game && Context.World())
+		{
+			GameWorld = Context.World();
+			break;
+		}
+	}
+	if (!GameWorld)
+	{
+		return true; // front-end map not up yet
+	}
+
+	// Wait for MCP sign-in so trusted PUG servers accept us; fall back on timeout.
+	UUTLocalPlayer* UTLP = nullptr;
+	if (UGameInstance* GI = GameWorld->GetGameInstance())
+	{
+		UTLP = Cast<UUTLocalPlayer>(GI->GetFirstGamePlayer());
+	}
+
+	const bool bLoggedIn = (UTLP && UTLP->IsLoggedIn());
+	const bool bTimedOut = (GNcpConnectElapsed >= GNcpConnectLoginTimeout);
+	if (!bLoggedIn && !bTimedOut)
+	{
+		return true; // keep waiting for sign-in
+	}
+
+	// Warning verbosity survives Shipping (Log/Verbose are stripped there).
+	UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpconnect -> ClientTravel to %s%s"),
+		*RedactConnectURL(GNcpConnectURL),
+		bLoggedIn ? TEXT("") : TEXT(" (not signed in; connecting anyway after timeout)"));
+
+	GEngine->SetClientTravel(GameWorld, *GNcpConnectURL, TRAVEL_Absolute);
+
+	GNcpConnectTickerHandle.Reset();
+	return false; // single shot — unregister
+}
+
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
 void FNetcodePlus::StartupModule()
@@ -454,11 +547,34 @@ void FNetcodePlus::StartupModule()
 		}
 	}
 
+	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
+	// Register the ticker ONLY when the arg is present, so there is zero overhead
+	// on normal launches. bShouldStopOnComma=false keeps a comma in the password.
+	if (!IsRunningDedicatedServer() && !GIsEditor)
+	{
+		FString ConnectURL;
+		if (FParse::Value(FCommandLine::Get(), TEXT("ncpconnect="), ConnectURL, /*bShouldStopOnComma=*/ false)
+			&& !ConnectURL.IsEmpty())
+		{
+			GNcpConnectURL = ConnectURL;
+			GNcpConnectElapsed = 0.0f;
+			GNcpConnectTickerHandle = FTicker::GetCoreTicker().AddTicker(
+				FTickerDelegate::CreateStatic(&TickNcpConnect), 0.0f);
+		}
+	}
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
 void FNetcodePlus::ShutdownModule()
 {
+	// Stop the -ncpconnect ticker if it never fired.
+	if (GNcpConnectTickerHandle.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(GNcpConnectTickerHandle);
+		GNcpConnectTickerHandle.Reset();
+	}
+
 	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())
 	{
