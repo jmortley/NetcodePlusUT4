@@ -2524,6 +2524,17 @@ bool AUWipeoutGame::CanSpectate_Implementation(APlayerController* Viewer, APlaye
 
 	if (!bRoundInProgress)
 	{
+		// Round over (custom 'RoundCooldown' state): losers are forced to spectate
+		// the winners and Mouse1 (ServerViewNextPlayer) should cycle through them.
+		// Deferring to Super rejected the cycle because RoundCooldown isn't "match
+		// in progress" — so explicitly allow spectating any alive non-spectator.
+		if (!TargetPS->bOnlySpectator)
+		{
+			const AController* TPC = Cast<AController>(TargetPS->GetOwner());
+			const APawn* TP = TPC ? TPC->GetPawn() : nullptr;
+			const AUTCharacter* TC = Cast<AUTCharacter>(TP);
+			if (TP && (!TC || !TC->IsDead())) return true;
+		}
 		return Super::CanSpectate_Implementation(Viewer, ViewTarget);
 	}
 
