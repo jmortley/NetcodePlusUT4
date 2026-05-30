@@ -31,6 +31,9 @@
 #include "SiphonPowerup.h"
 #include "WipeoutRatingSystem.h"
 #include "NCEloUploader.h"
+#include "GameFramework/WorldSettings.h"            // KillZ for bad-spawn detection
+#include "Components/CapsuleComponent.h"            // capsule half-height for snap-back
+#include "GameFramework/CharacterMovementComponent.h" // IsFalling / StopMovementImmediately
 
 
 // ============================================================================
@@ -792,6 +795,9 @@ void AUWipeoutGame::CancelAllPendingRespawns()
 	{
 		GetWorldTimerManager().ClearTimer(RespawnCountdownTickHandle);
 	}
+
+	// Clear any in-flight bad-spawn watchdogs too (round end / cleanup).
+	CancelAllSpawnRemediations();
 }
 
 
@@ -890,6 +896,15 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 			}
 		});
 		GetWorldTimerManager().SetTimer(SuddenDeathSpecHandle, SpecDelegate, SpectateDelay, false);
+	}
+	else if (WasBadSpawnDeath(OtherPS, Killer, Other))
+	{
+		// Bad-spawn artifact (engine ejected them off/under the map shortly after
+		// spawning): refund it — undo the death, free instant respawn, and do NOT
+		// escalate the team wave timer.
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: refunding bad-spawn death for %s (no wave penalty)"),
+			*OtherPS->PlayerName);
+		RefundBadSpawnDeath(OtherPS);
 	}
 	else
 	{
@@ -1424,6 +1439,14 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
 
+		// Bad-spawn remediation: the start is fine, but engine collision handling
+		// can eject the fresh pawn off/under the map. Watch it briefly and snap
+		// it back to the intended start if that happens.
+		if (NewPlayer->GetPawn() && ChosenStart)
+		{
+			ArmSpawnRemediation(NewPlayer->GetPawn(), ChosenStart->GetActorLocation());
+		}
+
 		// Ping-compensated spawn: hide pawn until client confirms control.
 		// Skip bots (no remote client to confirm) — they'd timeout after 500ms.
 		ATeamArenaCharacter* SpawnedChar = NewPlayer->GetPawn() ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
@@ -1470,6 +1493,160 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 				NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
 		}
 	}
+}
+
+
+// ============================================================================
+// BAD-SPAWN REMEDIATION
+// Spawn points are fine; the engine's collision handling (AlwaysSpawn + the
+// ping-comp collision toggle) occasionally depenetrates a fresh pawn off the
+// map or under it. Watch each spawn briefly and snap it back to its intended
+// start; if it still dies to the world/fall within a short grace, refund the
+// death (no wave escalation). Server-only.
+// ============================================================================
+
+void AUWipeoutGame::ArmSpawnRemediation(APawn* Pawn, const FVector& IntendedLoc)
+{
+	if (!Pawn || !HasAuthority()) return;
+
+	const float Now = GetWorld()->GetTimeSeconds();
+
+	if (AUTPlayerState* PS = Cast<AUTPlayerState>(Pawn->PlayerState))
+	{
+		LastSpawnWorldTime.Add(PS, Now);   // for the death-refund window
+	}
+
+	FSpawnRemediation& R = SpawnRemediations.FindOrAdd(Pawn);
+	R.Anchor     = IntendedLoc;
+	R.SpawnTime  = Now;
+	R.ChecksLeft = FMath::Max(1, FMath::CeilToInt(BadSpawnWatchWindow / FMath::Max(0.03f, BadSpawnCheckInterval)));
+
+	if (R.CheckHandle.IsValid())
+	{
+		GetWorldTimerManager().ClearTimer(R.CheckHandle);
+	}
+	const TWeakObjectPtr<APawn> WeakPawn(Pawn);
+	GetWorldTimerManager().SetTimer(R.CheckHandle,
+		FTimerDelegate::CreateLambda([this, WeakPawn]() { CheckSpawnRemediation(WeakPawn); }),
+		FMath::Max(0.03f, BadSpawnCheckInterval), true);
+}
+
+void AUWipeoutGame::CheckSpawnRemediation(TWeakObjectPtr<APawn> WeakPawn)
+{
+	FSpawnRemediation* R = SpawnRemediations.Find(WeakPawn);
+	if (!R) return;
+
+	APawn* Pawn = WeakPawn.Get();   // null if the pawn was destroyed mid-watch
+	AUTCharacter* Char = Pawn ? Cast<AUTCharacter>(Pawn) : nullptr;
+	bool bStop = (Pawn == nullptr) || Pawn->IsPendingKill() || (Char && Char->IsDead());
+
+	if (!bStop && IsSpawnEjected(Pawn, R->Anchor))
+	{
+		float HalfHeight = 0.f;
+		if (Char && Char->GetCapsuleComponent())
+		{
+			HalfHeight = Char->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+		}
+		const FVector Target = R->Anchor + FVector(0.f, 0.f, HalfHeight + 12.f);
+		Pawn->SetActorLocation(Target, false, nullptr, ETeleportType::ResetPhysics);
+		if (Char && Char->GetCharacterMovement())
+		{
+			Char->GetCharacterMovement()->StopMovementImmediately();
+			Char->GetCharacterMovement()->Velocity = FVector::ZeroVector;
+		}
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: bad spawn remediated — snapped %s back to %s"),
+			Pawn->PlayerState ? *Pawn->PlayerState->PlayerName : TEXT("?"), *R->Anchor.ToString());
+		bStop = true;   // one snap-back is enough
+	}
+
+	if (bStop || --R->ChecksLeft <= 0)
+	{
+		GetWorldTimerManager().ClearTimer(R->CheckHandle);
+		SpawnRemediations.Remove(WeakPawn);
+	}
+}
+
+bool AUWipeoutGame::IsSpawnEjected(APawn* Pawn, const FVector& Anchor) const
+{
+	if (!Pawn) return false;
+	const FVector Loc = Pawn->GetActorLocation();
+
+	// Under the world.
+	if (AWorldSettings* WS = GetWorld()->GetWorldSettings())
+	{
+		if (Loc.Z < WS->KillZ + BadSpawnKillZMargin)
+		{
+			return true;
+		}
+	}
+
+	// Dropped well below the intended start — went through the floor.
+	if (Loc.Z < Anchor.Z - BadSpawnMaxDropBelowStart)
+	{
+		return true;
+	}
+
+	// Falling with no walkable ground within reach — ejected over the void.
+	const AUTCharacter* Char = Cast<AUTCharacter>(Pawn);
+	if (Char && Char->GetCharacterMovement() && Char->GetCharacterMovement()->IsFalling())
+	{
+		FHitResult Hit;
+		const FVector End = Loc - FVector(0.f, 0.f, BadSpawnGroundTrace);
+		FCollisionQueryParams Q(FName("WipeoutBadSpawnGround"), false, Pawn);
+		if (!GetWorld()->LineTraceSingleByChannel(Hit, Loc, End, ECC_Visibility, Q))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool AUWipeoutGame::WasBadSpawnDeath(AUTPlayerState* PS, AController* Killer, AController* Other) const
+{
+	if (!PS) return false;
+	const float* SpawnT = LastSpawnWorldTime.Find(PS);
+	if (!SpawnT) return false;
+	if (GetWorld()->GetTimeSeconds() - *SpawnT > BadSpawnRefundGrace) return false;
+	// Only self / world deaths — never refund a real enemy kill that happened to
+	// land within the grace window.
+	return (Killer == nullptr || Killer == Other);
+}
+
+void AUWipeoutGame::RefundBadSpawnDeath(AUTPlayerState* PS)
+{
+	if (!PS) return;
+
+	// Undo the death Super::ScoreKill just counted; clear respawn state. No
+	// StartRespawnTimer -> no team death-count increment, no wave escalation.
+	PS->Deaths = FMath::Max(0, PS->Deaths - 1);
+	PS->bOutOfLives = false;
+	PS->RespawnTime = 0.f;
+	PS->RespawnWaitTime = 0.f;
+	PS->ForceNetUpdate();
+
+	// Deferred instant respawn — don't restart mid-death-processing.
+	TWeakObjectPtr<AUTPlayerState> WeakPS = PS;
+	GetWorldTimerManager().SetTimerForNextTick([this, WeakPS]()
+	{
+		if (!WeakPS.IsValid() || !bRoundInProgress || bInSuddenDeath) return;
+		AController* C = Cast<AController>(WeakPS->GetOwner());
+		if (C && !C->GetPawn())
+		{
+			RestartPlayer(C);
+		}
+	});
+}
+
+void AUWipeoutGame::CancelAllSpawnRemediations()
+{
+	for (TPair<TWeakObjectPtr<APawn>, FSpawnRemediation>& Pair : SpawnRemediations)
+	{
+		if (Pair.Value.CheckHandle.IsValid())
+		{
+			GetWorldTimerManager().ClearTimer(Pair.Value.CheckHandle);
+		}
+	}
+	SpawnRemediations.Empty();
 }
 
 

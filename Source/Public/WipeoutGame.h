@@ -86,6 +86,26 @@ struct FPendingRespawn
 
 
 // ============================================================================
+// Bad-spawn remediation tracking
+// The spawn POINTS are fine — but the engine's collision handling (AlwaysSpawn
+// + ping-comp collision toggle) can depenetrate a freshly-spawned pawn off the
+// map or under it. We watch each fresh spawn briefly and snap it back to its
+// intended (good) start if that happens. Plain struct (server-only, not
+// replicated, not UPROPERTY).
+// ============================================================================
+
+struct FSpawnRemediation
+{
+	FVector      Anchor;       // intended (good) start location to snap back to
+	float        SpawnTime;    // world seconds the pawn spawned
+	int32        ChecksLeft;   // remaining watchdog ticks
+	FTimerHandle CheckHandle;
+
+	FSpawnRemediation() : Anchor(FVector::ZeroVector), SpawnTime(0.f), ChecksLeft(0) {}
+};
+
+
+// ============================================================================
 // Delegates
 // ============================================================================
 
@@ -246,6 +266,31 @@ public:
 	/** Minimum distance from living enemies for mid-round respawns */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning", meta = (ClampMin = "500.0"))
 	float MidRoundMinEnemyDistance = 2000.0f;
+
+	// --- Bad-spawn remediation knobs (engine ejected the pawn off/under map) ---
+	/** Seconds after a spawn to watch the pawn for an off-map/under-map ejection. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning|BadSpawn", meta = (ClampMin = "0.2"))
+	float BadSpawnWatchWindow = 1.5f;
+	/** Watchdog tick interval while watching a fresh spawn. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning|BadSpawn", meta = (ClampMin = "0.03"))
+	float BadSpawnCheckInterval = 0.12f;
+	/** Treat as ejected if the pawn drops more than this far below its intended start. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning|BadSpawn", meta = (ClampMin = "200.0"))
+	float BadSpawnMaxDropBelowStart = 1500.f;
+	/** Treat as under-map if within this many units above the world KillZ. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning|BadSpawn", meta = (ClampMin = "0.0"))
+	float BadSpawnKillZMargin = 1000.f;
+	/** Falling with no ground within this downward trace = over the void. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning|BadSpawn", meta = (ClampMin = "500.0"))
+	float BadSpawnGroundTrace = 2500.f;
+	/** A self/world death within this many seconds of spawning is refunded (free respawn, no wave escalation). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning|BadSpawn", meta = (ClampMin = "0.0"))
+	float BadSpawnRefundGrace = 2.5f;
+
+	/** Pawns currently being watched for a bad-spawn ejection. Keyed by pawn. */
+	TMap<TWeakObjectPtr<APawn>, FSpawnRemediation> SpawnRemediations;
+	/** UniqueId-free: world time each player last spawned, for the death refund. */
+	TMap<TWeakObjectPtr<AUTPlayerState>, float> LastSpawnWorldTime;
 
 	UPROPERTY(Transient)
 	TArray<APlayerStart*> Team0SelectedSpawns;
@@ -616,6 +661,22 @@ protected:
 
 	/** Choose a spawn point for a mid-round respawn (far from enemies) */
 	AActor* ChooseMidRoundSpawn(AController* Player);
+
+	// --- Bad-spawn remediation (server-only; spawn points are fine, engine
+	//     collision sometimes ejects the pawn off/under the map after spawn) ---
+	/** Begin watching a freshly-spawned pawn for an off-map/under-map ejection. */
+	void ArmSpawnRemediation(APawn* Pawn, const FVector& IntendedLoc);
+	/** Watchdog tick: snap the pawn back to its anchor if it's been ejected.
+	 *  Weak ptr so a pawn destroyed mid-watch is handled without a dangling pointer. */
+	void CheckSpawnRemediation(TWeakObjectPtr<APawn> WeakPawn);
+	/** True if the pawn has been moved somewhere bad (under map / over void / dropped through floor). */
+	bool IsSpawnEjected(APawn* Pawn, const FVector& Anchor) const;
+	/** True if this death is a bad-spawn artifact (self/world death within the refund grace of spawning). */
+	bool WasBadSpawnDeath(AUTPlayerState* PS, AController* Killer, AController* Other) const;
+	/** Undo a refunded death and instant-respawn without escalating the wave. */
+	void RefundBadSpawnDeath(AUTPlayerState* PS);
+	/** Clear all bad-spawn watchdog timers (round reset / cleanup). */
+	void CancelAllSpawnRemediations();
 
 
 	// =======================================================================
