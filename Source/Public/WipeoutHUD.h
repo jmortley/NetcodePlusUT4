@@ -44,6 +44,10 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	 *  Shows "Liandri" vs "Phayder" when custom team colors are detected. */
 	virtual void DrawTeamScoreBar(AUTGameState* GS);
 
+	/** "NOW WATCHING <player>" spectator banner, ported from iCTF (ANCPlusCTFHUD).
+	 *  Self-guards: draws nothing unless we're viewing another player's pawn. */
+	void DrawSpectatorTarget();
+
 	/** Force game-only input when dead but match in progress — prevents mouse escaping viewport */
 	virtual EInputMode::Type GetInputMode_Implementation() const override;
 

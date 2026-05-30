@@ -193,6 +193,65 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 	SortedPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B) { return A.SelectionOrder > B.SelectionOrder; });
 }
 
+// "NOW WATCHING <player>" spectator banner (verbatim port of ANCPlusCTFHUD::
+// DrawSpectatorTarget). Bottom-right, suppressed by the caller when the
+// scoreboard is up. Self-guards to nothing when we're playing our own pawn.
+void AWipeoutHUD::DrawSpectatorTarget()
+{
+	if (!Canvas || !MediumFont || !SmallFont) return;
+	if (!UTPlayerOwner) return;
+
+	AActor* ViewTarget = UTPlayerOwner->GetViewTarget();
+	if (!ViewTarget || ViewTarget == UTPlayerOwner) return;
+
+	APawn* ViewPawn = Cast<APawn>(ViewTarget);
+	if (!ViewPawn) return;
+	if (ViewPawn == UTPlayerOwner->GetPawn()) return;   // own pawn = playing
+
+	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->PlayerState);
+	if (!PS || PS->PlayerName.IsEmpty()) return;
+
+	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+	const float HeaderScale = RenderScale * 0.75f;
+	const float NameScale   = RenderScale * 1.30f;
+
+	const FString HeaderText = TEXT("NOW WATCHING");
+	const FString NameText   = PS->PlayerName;
+
+	float HeaderW, HeaderH, NameW, NameH;
+	Canvas->TextSize(SmallFont,  HeaderText, HeaderW, HeaderH, HeaderScale, HeaderScale);
+	Canvas->TextSize(MediumFont, NameText,   NameW,   NameH,   NameScale,   NameScale);
+
+	const float PadX = 16.f * RenderScale;
+	const float PadY = 8.f  * RenderScale;
+	const float Gap  = 4.f  * RenderScale;
+	const float PanelW = FMath::Max(HeaderW, NameW) + PadX * 2.f;
+	const float PanelH = HeaderH + NameH + PadY * 2.f + Gap;
+	const float PanelX = Canvas->ClipX - PanelW - 24.f * RenderScale;
+	const float PanelY = Canvas->ClipY - PanelH - 140.f * RenderScale;
+
+	Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.7f));
+	Canvas->DrawTile(Canvas->DefaultTexture, PanelX, PanelY, PanelW, PanelH, 0, 0, 1, 1);
+
+	FLinearColor AccentColor(0.9f, 0.9f, 0.9f, 1.f);
+	if (PS->Team)
+	{
+		AccentColor = (PS->Team->TeamIndex == 0)
+			? FLinearColor(0.9f, 0.15f, 0.15f, 1.f)
+			: FLinearColor(0.15f, 0.4f, 0.95f, 1.f);
+	}
+	Canvas->SetLinearDrawColor(AccentColor);
+	Canvas->DrawTile(Canvas->DefaultTexture, PanelX, PanelY, 3.f * RenderScale, PanelH, 0, 0, 1, 1);
+
+	Canvas->DrawColor = FColor(180, 180, 180, 255);
+	Canvas->DrawText(SmallFont, HeaderText,
+		PanelX + (PanelW - HeaderW) * 0.5f, PanelY + PadY, HeaderScale, HeaderScale);
+
+	Canvas->DrawColor = AccentColor.ToFColor(true);
+	Canvas->DrawText(MediumFont, NameText,
+		PanelX + (PanelW - NameW) * 0.5f, PanelY + PadY + HeaderH + Gap, NameScale, NameScale);
+}
+
 void AWipeoutHUD::DrawHUD()
 {
 	// Re-apply the live layout each frame so Slate editor edits show up immediately.
@@ -212,6 +271,8 @@ void AWipeoutHUD::DrawHUD()
 	if (GS && !bScoreboardIsUp)
 	{
 		DrawTeamScoreBar(GS);
+		// NOW WATCHING banner — self-guards when not spectating another pawn.
+		DrawSpectatorTarget();
 	}
 
 	if (bShouldDrawPortraits && !bScoreboardIsUp && GS && GS->GetMatchState() == MatchState::InProgress)

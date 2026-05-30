@@ -41,6 +41,10 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	/** Custom team score bar — dynamic team colors via TeamSkins, plus round clock. */
 	virtual void DrawTeamScoreBar(AUTGameState* GS);
 
+	/** "NOW WATCHING <player>" spectator banner, ported from iCTF (ANCPlusCTFHUD).
+	 *  Self-guards: draws nothing unless we're viewing another player's pawn. */
+	void DrawSpectatorTarget();
+
 	/** Force game-only input when dead but match in progress — prevents mouse escaping viewport */
 	virtual EInputMode::Type GetInputMode_Implementation() const override;
 
