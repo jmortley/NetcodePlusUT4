@@ -1548,7 +1548,9 @@ void AUWipeoutGame::CheckSpawnRemediation(TWeakObjectPtr<APawn> WeakPawn)
 			HalfHeight = Char->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 		}
 		const FVector Target = R->Anchor + FVector(0.f, 0.f, HalfHeight + 12.f);
-		Pawn->SetActorLocation(Target, false, nullptr, ETeleportType::ResetPhysics);
+		// 4.15: ETeleportType has only None / TeleportPhysics (no ResetPhysics).
+		// TeleportPhysics hard-moves the body without sweeping; velocity is zeroed below.
+		Pawn->SetActorLocation(Target, false, nullptr, ETeleportType::TeleportPhysics);
 		if (Char && Char->GetCharacterMovement())
 		{
 			Char->GetCharacterMovement()->StopMovementImmediately();
