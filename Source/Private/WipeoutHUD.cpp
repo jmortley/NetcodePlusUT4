@@ -275,7 +275,11 @@ void AWipeoutHUD::DrawHUD()
 		DrawSpectatorTarget();
 	}
 
-	if (bShouldDrawPortraits && !bScoreboardIsUp && GS && GS->GetMatchState() == MatchState::InProgress)
+	// Keep portraits up through the round-win window ("RoundCooldown") so the
+	// enemy team's final health stays visible after they win — not just InProgress.
+	if (bShouldDrawPortraits && !bScoreboardIsUp && GS
+		&& (GS->GetMatchState() == MatchState::InProgress
+			|| GS->GetMatchState() == FName(TEXT("RoundCooldown"))))
 	{
 		RedPlayerCount = 0;
 		BluePlayerCount = 0;
