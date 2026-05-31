@@ -120,6 +120,30 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float EnemyLOSPenalty;
 
+	// ── Spawn Selection (tie-band + freshness; all overridable via Mod.ini [UTPUGS_SPAWN]) ──
+
+	/** Candidates scoring within this margin of the best are treated as equally
+	 *  good and one is picked at RANDOM — breaks the deterministic "always one
+	 *  side" players reported. Wider = more variety. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnTieBandWidth;
+
+	/** When no flag is active near our base, add up to this bonus to a candidate
+	 *  scaled by how long since the team last used it — forces spread across
+	 *  unused starts and makes a fresh respawn meaningful again. 0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnFreshnessBonus;
+
+	/** Seconds since last use at which a start counts as fully fresh (staleness = 1). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnFreshnessWindow;
+
+	/** A flag (enemy carrier or a dropped flag) within this distance of our flag
+	 *  base counts as "in the vicinity" → suppress the freshness spread and keep
+	 *  safe, scored spawns. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnFlagVicinityRadius;
+
 	// ── Movement Configuration ───────────────────────────────────────
 
 	/** If true, the match has two halves with intermission (side switch).
@@ -230,6 +254,13 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	/** Load CTFPerfConfig + CTFRatingMinPresenceFrac from Mod.ini [UTPUGS_STATS]. */
 	void LoadCTFPerfConfig();
 
+	/** Override spawn penalty weights + selection knobs from Mod.ini [UTPUGS_SPAWN]. */
+	void LoadSpawnConfig();
+
+	/** True if a non-home flag (enemy carrier or a dropped flag) is within
+	 *  SpawnFlagVicinityRadius of the given team's flag base. */
+	bool IsFlagNearOwnBase(uint8 TeamIndex) const;
+
 	virtual bool PlayerCanRestart_Implementation(APlayerController* Player);
 	virtual bool SupportsInstantReplay() const override;
 
@@ -308,6 +339,10 @@ protected:
 	/** Own-team candidate starts, partitioned by authored TeamNum. */
 	TArray<TWeakObjectPtr<APlayerStart>> Team0Spawns;
 	TArray<TWeakObjectPtr<APlayerStart>> Team1Spawns;
+
+	/** Server time each start was last chosen (team-wide), for the freshness
+	 *  spread. Reset per match. Server-only. */
+	TMap<TWeakObjectPtr<APlayerStart>, float> SpawnLastUsedTime;
 
 	/** False until BuildTeamSpawnPools has populated the pools this match. */
 	bool bSpawnPoolsBuilt = false;

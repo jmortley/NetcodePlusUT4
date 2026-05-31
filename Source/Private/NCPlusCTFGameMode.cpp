@@ -62,6 +62,13 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	EnemyBlockPenalty = 10.f;
 	EnemyLOSBlockRange = 3000.f;        // BP: EnemyLOSBlockRange — LOS check to nearby enemies
 	EnemyLOSPenalty = 8.f;
+
+	// Spawn selection (tie-band + freshness; tunable via Mod.ini [UTPUGS_SPAWN])
+	SpawnTieBandWidth = 2.0f;           // starts within ~2 score pts of best = a coin-flip
+	SpawnFreshnessBonus = 10.0f;        // when calm, lift unused starts to spread spawns
+	SpawnFreshnessWindow = 30.0f;       // 30s since last use = fully fresh
+	SpawnFlagVicinityRadius = 4000.f;   // flag within this of our base = "in the vicinity"
+
 	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
 	OvertimeRespawnTime = 6.f;          // Fixed 6s respawn in overtime (replaces Epic's 10s escalation)
@@ -150,6 +157,7 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	bSpawnPoolsBuilt = false;
 	Team0Spawns.Reset();
 	Team1Spawns.Reset();
+	SpawnLastUsedTime.Reset();
 
 	// Per-match leaver/stat caches reset on each map load.
 	MatchStatCache.Empty();
@@ -382,6 +390,93 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac);
+}
+
+void ANCPlusCTFGameMode::LoadSpawnConfig()
+{
+	// Same Mod.ini load pattern as LoadCTFPerfConfig, section [UTPUGS_SPAWN].
+	// Members already hold ctor defaults; only override what the ini specifies.
+	const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+	if (!FPaths::FileExists(ModIniPath))
+	{
+		return;
+	}
+
+	FConfigFile ModIni;
+	ModIni.Read(ModIniPath);
+	const FConfigSection* Section = ModIni.Find(TEXT("UTPUGS_SPAWN"));
+	if (!Section)
+	{
+		return;
+	}
+
+	auto ReadFloat = [Section](const TCHAR* Key, float& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atof(*V->GetValue()); }
+	};
+
+	// Penalty weights (the side-clustering knobs — soften these to let mid back in).
+	ReadFloat(TEXT("FlagCarrierSpawnPenalty"), FlagCarrierSpawnPenalty);
+	ReadFloat(TEXT("DroppedFlagSpawnPenalty"), DroppedFlagSpawnPenalty);
+	ReadFloat(TEXT("FlagCarrierLOSPenalty"),   FlagCarrierLOSPenalty);
+	ReadFloat(TEXT("EnemyBlockRange"),         EnemyBlockRange);
+	ReadFloat(TEXT("EnemyBlockPenalty"),       EnemyBlockPenalty);
+	ReadFloat(TEXT("EnemyLOSBlockRange"),      EnemyLOSBlockRange);
+	ReadFloat(TEXT("EnemyLOSPenalty"),         EnemyLOSPenalty);
+	ReadFloat(TEXT("FlagBaseProximityRadius"), FlagBaseProximityRadius);
+	ReadFloat(TEXT("FlagSpawnPenaltyRadius"),  FlagSpawnPenaltyRadius);
+	ReadFloat(TEXT("SpawnRecentPenaltyMultiplier"), SpawnRecentPenaltyMultiplier);
+	ReadFloat(TEXT("SpawnNearLastRadius"),     SpawnNearLastRadius);
+	ReadFloat(TEXT("SpawnNearLastPenalty"),    SpawnNearLastPenalty);
+
+	// Selection knobs (tie-band + freshness).
+	ReadFloat(TEXT("SpawnTieBandWidth"),       SpawnTieBandWidth);
+	ReadFloat(TEXT("SpawnFreshnessBonus"),     SpawnFreshnessBonus);
+	ReadFloat(TEXT("SpawnFreshnessWindow"),    SpawnFreshnessWindow);
+	ReadFloat(TEXT("SpawnFlagVicinityRadius"), SpawnFlagVicinityRadius);
+
+	UE_LOG(LogGameMode, Log,
+		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius,
+		FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange);
+}
+
+bool ANCPlusCTFGameMode::IsFlagNearOwnBase(uint8 TeamIndex) const
+{
+	AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
+	if (!GS)
+	{
+		return false;
+	}
+	AUTCTFFlagBase* OwnBase = GS->GetFlagBase(TeamIndex);
+	if (!IsValid(OwnBase))
+	{
+		return false;
+	}
+	const FVector OwnBaseLoc = OwnBase->GetActorLocation();
+
+	// Any non-home flag (enemy carrier or a dropped flag) close to our base = pressure.
+	for (uint8 t = 0; t < 2; ++t)
+	{
+		AUTCTFFlagBase* FB = GS->GetFlagBase(t);
+		if (!IsValid(FB) || !IsValid(FB->MyFlag))
+		{
+			continue;
+		}
+		const FName State = GS->GetFlagState(t);
+		if (State == CarriedObjectState::Home)
+		{
+			continue;
+		}
+		const FVector FlagLoc = (State == CarriedObjectState::Held && IsValid(FB->MyFlag->HoldingPawn))
+			? FB->MyFlag->HoldingPawn->GetActorLocation()
+			: FB->MyFlag->GetActorLocation();
+		if ((FlagLoc - OwnBaseLoc).Size() < SpawnFlagVicinityRadius)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 bool ANCPlusCTFGameMode::SupportsInstantReplay() const
@@ -711,36 +806,66 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		return Super::ChoosePlayerStart_Implementation(Player);
 	}
 
-	// Score the curated own-team pool with the existing RatePlayerStart. The pool
-	// is the player's own team (by author TeamNum), so the -20 wrong-team guard
-	// never trips here — it stays a safety net. RatePlayerStart's jitter and its
-	// -8 last-spot penalty keep picks rotating instead of pinning.
-	APlayerStart* Best = nullptr;
+	// Score the curated own-team pool with the existing RatePlayerStart (the -20
+	// wrong-team guard never trips here — own-team pool — so it stays a safety net).
+	// Two shaping passes on top of the raw score:
+	//   * Freshness: when no flag is active near our base, reward starts the team
+	//     hasn't used recently (scaled by staleness) — forces spread across unused
+	//     starts and makes a fresh respawn meaningful again (was: same safe spot).
+	//   * Tie-band: pick at RANDOM among everything within SpawnTieBandWidth of the
+	//     best — kills the deterministic "always one side" players reported.
+	const bool bForceFresh = (SpawnFreshnessBonus > 0.f) && !IsFlagNearOwnBase((uint8)TeamIndex);
+	const float Now = GetWorld()->GetTimeSeconds();
+
+	TArray<APlayerStart*> Cands;
+	TArray<float> Scores;
+	Cands.Reserve(Pool.Num());
+	Scores.Reserve(Pool.Num());
 	float BestScore = -FLT_MAX;
 	for (const TWeakObjectPtr<APlayerStart>& WP : Pool)
 	{
 		APlayerStart* Candidate = WP.Get();
 		if (!Candidate) continue;
 
-		const float Score = RatePlayerStart(Candidate, Player);
-		if (Score > BestScore)
+		float Score = RatePlayerStart(Candidate, Player);
+		if (bForceFresh)
 		{
-			BestScore = Score;
-			Best = Candidate;
+			const float* LastUsed = SpawnLastUsedTime.Find(Candidate);
+			const float Staleness = LastUsed
+				? FMath::Clamp((Now - *LastUsed) / FMath::Max(1.f, SpawnFreshnessWindow), 0.f, 1.f)
+				: 1.f; // never used this match = maximally fresh
+			Score += SpawnFreshnessBonus * Staleness;
 		}
+		Cands.Add(Candidate);
+		Scores.Add(Score);
+		BestScore = FMath::Max(BestScore, Score);
 	}
 
+	// Collect the tie-band (all within SpawnTieBandWidth of the best) and pick one at random.
+	TArray<APlayerStart*> TopBand;
+	for (int32 i = 0; i < Cands.Num(); ++i)
+	{
+		if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
+	}
+
+	APlayerStart* Best = (TopBand.Num() > 0) ? TopBand[FMath::RandRange(0, TopBand.Num() - 1)] : nullptr;
 	if (!Best)
 	{
 		return Super::ChoosePlayerStart_Implementation(Player);
 	}
 
-	// Confirmation log (Warning to survive the Shipping UE_LOG strip). Pairs with
-	// the "NCPlusCTF spawn:" line in RestartPlayer — together they prove this
-	// override drives selection and that picks rotate per life.
+	// Record team-wide use for the freshness spread — only count real in-match spawns
+	// so warmup / pre-match prepopulation picks don't pollute staleness.
+	if (CTFGameState && CTFGameState->IsMatchInProgress())
+	{
+		SpawnLastUsedTime.Add(Best, Now);
+	}
+
+	// Confirmation log (Warning survives the Shipping UE_LOG strip). Pairs with the
+	// "NCPlusCTF spawn:" line in RestartPlayer to show selection is ours + rotating.
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF pick: %s(T%d) -> %s score=%.1f (pool=%d)"),
-		*PS->PlayerName, TeamIndex, *Best->GetName(), BestScore, Pool.Num());
+		TEXT("NCPlusCTF pick: %s(T%d) -> %s | band=%d fresh=%d (pool=%d)"),
+		*PS->PlayerName, TeamIndex, *Best->GetName(), TopBand.Num(), bForceFresh ? 1 : 0, Pool.Num());
 
 	return Best;
 }
@@ -1181,6 +1306,7 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		MatchStartWorldTime = GetWorld()->GetTimeSeconds();
 		MatchFullDurationSeconds = (bHasHalftime ? float(TimeLimit) * 2.f : float(TimeLimit)) * 60.f;
 		LoadCTFPerfConfig();
+		LoadSpawnConfig();
 
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS)
