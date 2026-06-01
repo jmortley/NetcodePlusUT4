@@ -150,6 +150,13 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnKillerAvoidRadius;
 
+	/** When your OWN flag isn't home (stolen or dropped), drop this many of your
+	 *  team's starts nearest your flag base — so you respawn forward toward the
+	 *  carrier's escape instead of behind it at the just-robbed base. Always keeps
+	 *  at least one start. 0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnRobbedBaseAvoidCount;
+
 	// ── Movement Configuration ───────────────────────────────────────
 
 	/** If true, the match has two halves with intermission (side switch).

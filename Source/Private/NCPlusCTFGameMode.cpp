@@ -69,6 +69,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	SpawnFreshnessWindow = 30.0f;       // 30s since last use = fully fresh
 	SpawnFlagVicinityRadius = 4000.f;   // flag within this of our base = "in the vicinity"
 	SpawnKillerAvoidRadius = 2500.f;    // never respawn within this of your last killer (anti-camp)
+	SpawnRobbedBaseAvoidCount = 2.f;    // when our flag's out, skip the 2 deepest base spawns
 
 	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
@@ -436,10 +437,11 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadFloat(TEXT("SpawnFreshnessWindow"),    SpawnFreshnessWindow);
 	ReadFloat(TEXT("SpawnFlagVicinityRadius"), SpawnFlagVicinityRadius);
 	ReadFloat(TEXT("SpawnKillerAvoidRadius"),  SpawnKillerAvoidRadius);
+	ReadFloat(TEXT("SpawnRobbedBaseAvoidCount"), SpawnRobbedBaseAvoidCount);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
-		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius,
+		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f robbedAvoid=%.0f | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius, SpawnRobbedBaseAvoidCount,
 		FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange);
 }
 
@@ -842,13 +844,30 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		}
 	}
 
+	// When our OWN flag isn't home, drop the deepest starts at our (just-robbed) base
+	// so we respawn forward toward the carrier's escape rather than behind it — a
+	// lightweight slice of UT99's "hard to leave".
+	FVector OwnBaseLoc = FVector::ZeroVector;
+	const int32 RobbedAvoid = FMath::TruncToInt(SpawnRobbedBaseAvoidCount);
+	bool bOwnFlagOut = false;
+	if (RobbedAvoid > 0 && CTFGameState)
+	{
+		AUTCTFFlagBase* OwnBase = CTFGameState->GetFlagBase((uint8)TeamIndex);
+		if (IsValid(OwnBase) && CTFGameState->GetFlagState((uint8)TeamIndex) != CarriedObjectState::Home)
+		{
+			OwnBaseLoc = OwnBase->GetActorLocation();
+			bOwnFlagOut = true;
+		}
+	}
+
 	TArray<APlayerStart*> Cands;
 	TArray<float> Scores;
 	TArray<bool> KillerAdj;
+	TArray<float> DistOwnBase;
 	Cands.Reserve(Pool.Num());
 	Scores.Reserve(Pool.Num());
 	KillerAdj.Reserve(Pool.Num());
-	int32 SafeCount = 0;
+	DistOwnBase.Reserve(Pool.Num());
 	for (const TWeakObjectPtr<APlayerStart>& WP : Pool)
 	{
 		APlayerStart* Candidate = WP.Get();
@@ -863,22 +882,52 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 				: 1.f; // never used this match = maximally fresh
 			Score += SpawnFreshnessBonus * Staleness;
 		}
-		const bool bAdj = bHaveKiller && ((Candidate->GetActorLocation() - KillerLoc).Size() < SpawnKillerAvoidRadius);
-		if (!bAdj) { SafeCount++; }
 		Cands.Add(Candidate);
 		Scores.Add(Score);
-		KillerAdj.Add(bAdj);
+		KillerAdj.Add(bHaveKiller && ((Candidate->GetActorLocation() - KillerLoc).Size() < SpawnKillerAvoidRadius));
+		DistOwnBase.Add(bOwnFlagOut ? (Candidate->GetActorLocation() - OwnBaseLoc).Size() : FLT_MAX);
 	}
 
-	// If at least one start is clear of the last killer, restrict to those; otherwise
-	// fall back to the full set (never fail to spawn). This also acts as the freshness
-	// safety-floor — the freshness bonus can't pull us onto a killer-adjacent start.
-	const bool bExcludeKiller = (SafeCount > 0);
+	// Mark the RobbedAvoid starts nearest our robbed base (keep at least one start).
+	TArray<bool> RobbedAdj;
+	RobbedAdj.Init(false, Cands.Num());
+	if (bOwnFlagOut)
+	{
+		const int32 ToDrop = FMath::Min(RobbedAvoid, FMath::Max(0, Cands.Num() - 1));
+		for (int32 k = 0; k < ToDrop; ++k)
+		{
+			int32 MinIdx = -1; float MinD = FLT_MAX;
+			for (int32 i = 0; i < Cands.Num(); ++i)
+			{
+				if (!RobbedAdj[i] && DistOwnBase[i] < MinD) { MinD = DistOwnBase[i]; MinIdx = i; }
+			}
+			if (MinIdx < 0) break;
+			RobbedAdj[MinIdx] = true;
+		}
+	}
+
+	// Tiered eligibility so we never fail to spawn and killer-avoidance (the safety
+	// filter) is the last thing dropped: prefer clear-of-killer AND off-robbed-base,
+	// else clear-of-killer, else anything.
+	int32 nBoth = 0, nKiller = 0;
+	for (int32 i = 0; i < Cands.Num(); ++i)
+	{
+		const bool kOk = !(bHaveKiller && KillerAdj[i]);
+		if (kOk) { nKiller++; if (!RobbedAdj[i]) { nBoth++; } }
+	}
+	const int32 Tier = (nBoth > 0) ? 2 : (nKiller > 0 ? 1 : 0);
+	auto Eligible = [&](int32 i) -> bool
+	{
+		const bool kOk = !(bHaveKiller && KillerAdj[i]);
+		if (Tier == 2) { return kOk && !RobbedAdj[i]; }
+		if (Tier == 1) { return kOk; }
+		return true;
+	};
 
 	float BestScore = -FLT_MAX;
 	for (int32 i = 0; i < Cands.Num(); ++i)
 	{
-		if (bExcludeKiller && KillerAdj[i]) { continue; }
+		if (!Eligible(i)) { continue; }
 		BestScore = FMath::Max(BestScore, Scores[i]);
 	}
 
@@ -886,7 +935,7 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	TArray<APlayerStart*> TopBand;
 	for (int32 i = 0; i < Cands.Num(); ++i)
 	{
-		if (bExcludeKiller && KillerAdj[i]) { continue; }
+		if (!Eligible(i)) { continue; }
 		if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
 	}
 
@@ -905,10 +954,16 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 
 	// Confirmation log (Warning survives the Shipping UE_LOG strip). Pairs with the
 	// "NCPlusCTF spawn:" line in RestartPlayer to show selection is ours + rotating.
+	int32 KillerBlocked = 0, RobbedBlocked = 0;
+	for (int32 i = 0; i < Cands.Num(); ++i)
+	{
+		if (Eligible(i)) { continue; }
+		if (bHaveKiller && KillerAdj[i]) { KillerBlocked++; } else { RobbedBlocked++; }
+	}
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF pick: %s(T%d) -> %s | band=%d fresh=%d kblk=%d (pool=%d)"),
+		TEXT("NCPlusCTF pick: %s(T%d) -> %s | band=%d fresh=%d kblk=%d rbblk=%d (pool=%d)"),
 		*PS->PlayerName, TeamIndex, *Best->GetName(), TopBand.Num(), bForceFresh ? 1 : 0,
-		bExcludeKiller ? (Cands.Num() - SafeCount) : 0, Pool.Num());
+		KillerBlocked, RobbedBlocked, Pool.Num());
 
 	return Best;
 }
