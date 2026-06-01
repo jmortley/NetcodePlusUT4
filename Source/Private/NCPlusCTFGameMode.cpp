@@ -68,6 +68,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	SpawnFreshnessBonus = 10.0f;        // when calm, lift unused starts to spread spawns
 	SpawnFreshnessWindow = 30.0f;       // 30s since last use = fully fresh
 	SpawnFlagVicinityRadius = 4000.f;   // flag within this of our base = "in the vicinity"
+	SpawnKillerAvoidRadius = 2500.f;    // never respawn within this of your last killer (anti-camp)
 
 	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
@@ -429,15 +430,16 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadFloat(TEXT("SpawnNearLastRadius"),     SpawnNearLastRadius);
 	ReadFloat(TEXT("SpawnNearLastPenalty"),    SpawnNearLastPenalty);
 
-	// Selection knobs (tie-band + freshness).
+	// Selection knobs (tie-band + freshness + killer-avoid).
 	ReadFloat(TEXT("SpawnTieBandWidth"),       SpawnTieBandWidth);
 	ReadFloat(TEXT("SpawnFreshnessBonus"),     SpawnFreshnessBonus);
 	ReadFloat(TEXT("SpawnFreshnessWindow"),    SpawnFreshnessWindow);
 	ReadFloat(TEXT("SpawnFlagVicinityRadius"), SpawnFlagVicinityRadius);
+	ReadFloat(TEXT("SpawnKillerAvoidRadius"),  SpawnKillerAvoidRadius);
 
-	UE_LOG(LogGameMode, Log,
-		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
-		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius,
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius,
 		FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange);
 }
 
@@ -817,11 +819,36 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	const bool bForceFresh = (SpawnFreshnessBonus > 0.f) && !IsFlagNearOwnBase((uint8)TeamIndex);
 	const float Now = GetWorld()->GetTimeSeconds();
 
+	// Anti-camp: find the player's LAST KILLER's current location (if alive on the
+	// map) so we can hard-exclude spawns next to whoever just fragged us — the
+	// "spawned in front of the killer" case when they're sitting in our base.
+	FVector KillerLoc = FVector::ZeroVector;
+	bool bHaveKiller = false;
+	if (SpawnKillerAvoidRadius > 0.f && PS->LastKillerPlayerState)
+	{
+		for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+		{
+			AController* C = It->Get();
+			if (C && C->PlayerState == PS->LastKillerPlayerState && C->GetPawn())
+			{
+				AUTCharacter* KillerChar = Cast<AUTCharacter>(C->GetPawn());
+				if (KillerChar && !KillerChar->IsDead())
+				{
+					KillerLoc = KillerChar->GetActorLocation();
+					bHaveKiller = true;
+				}
+				break;
+			}
+		}
+	}
+
 	TArray<APlayerStart*> Cands;
 	TArray<float> Scores;
+	TArray<bool> KillerAdj;
 	Cands.Reserve(Pool.Num());
 	Scores.Reserve(Pool.Num());
-	float BestScore = -FLT_MAX;
+	KillerAdj.Reserve(Pool.Num());
+	int32 SafeCount = 0;
 	for (const TWeakObjectPtr<APlayerStart>& WP : Pool)
 	{
 		APlayerStart* Candidate = WP.Get();
@@ -836,15 +863,30 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 				: 1.f; // never used this match = maximally fresh
 			Score += SpawnFreshnessBonus * Staleness;
 		}
+		const bool bAdj = bHaveKiller && ((Candidate->GetActorLocation() - KillerLoc).Size() < SpawnKillerAvoidRadius);
+		if (!bAdj) { SafeCount++; }
 		Cands.Add(Candidate);
 		Scores.Add(Score);
-		BestScore = FMath::Max(BestScore, Score);
+		KillerAdj.Add(bAdj);
+	}
+
+	// If at least one start is clear of the last killer, restrict to those; otherwise
+	// fall back to the full set (never fail to spawn). This also acts as the freshness
+	// safety-floor — the freshness bonus can't pull us onto a killer-adjacent start.
+	const bool bExcludeKiller = (SafeCount > 0);
+
+	float BestScore = -FLT_MAX;
+	for (int32 i = 0; i < Cands.Num(); ++i)
+	{
+		if (bExcludeKiller && KillerAdj[i]) { continue; }
+		BestScore = FMath::Max(BestScore, Scores[i]);
 	}
 
 	// Collect the tie-band (all within SpawnTieBandWidth of the best) and pick one at random.
 	TArray<APlayerStart*> TopBand;
 	for (int32 i = 0; i < Cands.Num(); ++i)
 	{
+		if (bExcludeKiller && KillerAdj[i]) { continue; }
 		if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
 	}
 
@@ -864,8 +906,9 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	// Confirmation log (Warning survives the Shipping UE_LOG strip). Pairs with the
 	// "NCPlusCTF spawn:" line in RestartPlayer to show selection is ours + rotating.
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF pick: %s(T%d) -> %s | band=%d fresh=%d (pool=%d)"),
-		*PS->PlayerName, TeamIndex, *Best->GetName(), TopBand.Num(), bForceFresh ? 1 : 0, Pool.Num());
+		TEXT("NCPlusCTF pick: %s(T%d) -> %s | band=%d fresh=%d kblk=%d (pool=%d)"),
+		*PS->PlayerName, TeamIndex, *Best->GetName(), TopBand.Num(), bForceFresh ? 1 : 0,
+		bExcludeKiller ? (Cands.Num() - SafeCount) : 0, Pool.Num());
 
 	return Best;
 }

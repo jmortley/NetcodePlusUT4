@@ -144,6 +144,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnFlagVicinityRadius;
 
+	/** Hard-exclude spawn starts within this distance of the player's LAST KILLER
+	 *  (when that killer is alive and near our spawns — i.e. camping our base) so you
+	 *  don't respawn into whoever just fragged you. Never empties the pool. 0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnKillerAvoidRadius;
+
 	// ── Movement Configuration ───────────────────────────────────────
 
 	/** If true, the match has two halves with intermission (side switch).
