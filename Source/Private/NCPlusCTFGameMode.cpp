@@ -373,72 +373,114 @@ void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlay
 
 void ANCPlusCTFGameMode::SampleRoleDwell()
 {
-	// 1Hz positional sampler that feeds role-aware perf. Per living player,
-	// project the pawn onto the flag-base axis t = dOwn/(dOwn+dEnemy) and add a
-	// second to the own(<0.4) / mid / enemy(>=0.6) bucket. Cover/fallback refine
-	// the mid label only (not OffLean): enemy-half-while-we-hold-their-flag vs
-	// own-half-while-our-flag-is-out. Cheap — 2 distance calcs/player, no traces.
+	// 1Hz presence sampler for role-aware perf: one second per living player,
+	// bucketed by map zone (CreditRoleDwell). Combat locations are credited
+	// separately, at higher weight, from ScoreKill.
 	AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
 	if (!GS || !(GS->IsMatchInProgress() || GS->IsMatchInOvertime()))
 	{
 		return;
 	}
-	AUTCTFFlagBase* Base0 = GS->GetFlagBase(0);
-	AUTCTFFlagBase* Base1 = GS->GetFlagBase(1);
-	if (!IsValid(Base0) || !IsValid(Base1))
-	{
-		return;
-	}
-	const FVector BaseLoc[2] = { Base0->GetActorLocation(), Base1->GetActorLocation() };
-	const float OwnMax   = 0.40f;   // t below this = own half
-	const float EnemyMin = 0.60f;   // t at/above this = enemy half
-
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 	{
 		AController* C = It->Get();
 		APawn* Pawn = C ? C->GetPawn() : nullptr;
 		AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
-		if (!Pawn || !PS || PS->bOnlySpectator || !PS->UniqueId.IsValid())
+		if (Pawn && PS && !PS->bOnlySpectator)
 		{
-			continue;   // dead (no pawn), spectator, or bot (no UniqueId) -> not sampled
-		}
-		const int32 Team = PS->GetTeamNum();
-		if (Team != 0 && Team != 1)
-		{
-			continue;
-		}
-		const FVector Loc = Pawn->GetActorLocation();
-		const float dOwn   = (Loc - BaseLoc[Team]).Size();
-		const float dEnemy = (Loc - BaseLoc[1 - Team]).Size();
-		const float Denom  = dOwn + dEnemy;
-		if (Denom <= KINDA_SMALL_NUMBER)
-		{
-			continue;
-		}
-		const float t = dOwn / Denom;   // 0 = at own base, 1 = at enemy base
-
-		FNCPlusCTFRoleDwell& D = RoleDwell.FindOrAdd(PS->UniqueId.ToString());
-		if (t < OwnMax)
-		{
-			D.OwnSec += 1.f;
-			if (GS->GetFlagState((uint8)Team) != CarriedObjectState::Home)
-			{
-				D.FallbackSec += 1.f;   // holding own half while our flag is out
-			}
-		}
-		else if (t >= EnemyMin)
-		{
-			D.EnemySec += 1.f;
-			if (GS->GetFlagState((uint8)(1 - Team)) == CarriedObjectState::Held)
-			{
-				D.CoverSec += 1.f;      // pushing enemy half while we carry their flag
-			}
-		}
-		else
-		{
-			D.MidSec += 1.f;
+			CreditRoleDwell(PS, Pawn->GetActorLocation(), 1.f);   // one second of presence
 		}
 	}
+}
+
+void ANCPlusCTFGameMode::CreditRoleDwell(AUTPlayerState* PS, const FVector& Loc, float Weight)
+{
+	// Project Loc onto the flag-base axis t = dOwn/(dOwn+dEnemy) and add Weight to
+	// the own(<0.4) / mid / enemy(>=0.6) bucket. Cover/fallback refine the mid
+	// LABEL only (not OffLean): enemy-half while we hold their flag vs own-half
+	// while our flag is out. Keyed by UniqueId to match CapturePlayerStats.
+	if (!PS || !PS->UniqueId.IsValid() || Weight <= 0.f)
+	{
+		return;
+	}
+	const int32 Team = PS->GetTeamNum();
+	if (Team != 0 && Team != 1)
+	{
+		return;
+	}
+	AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
+	if (!GS)
+	{
+		return;
+	}
+	AUTCTFFlagBase* OwnBase   = GS->GetFlagBase((uint8)Team);
+	AUTCTFFlagBase* EnemyBase = GS->GetFlagBase((uint8)(1 - Team));
+	if (!IsValid(OwnBase) || !IsValid(EnemyBase))
+	{
+		return;
+	}
+	const float dOwn   = (Loc - OwnBase->GetActorLocation()).Size();
+	const float dEnemy = (Loc - EnemyBase->GetActorLocation()).Size();
+	const float Denom  = dOwn + dEnemy;
+	if (Denom <= KINDA_SMALL_NUMBER)
+	{
+		return;
+	}
+	const float t = dOwn / Denom;   // 0 = at own base, 1 = at enemy base
+
+	FNCPlusCTFRoleDwell& D = RoleDwell.FindOrAdd(PS->UniqueId.ToString());
+	if (t < 0.40f)
+	{
+		D.OwnSec += Weight;
+		if (GS->GetFlagState((uint8)Team) != CarriedObjectState::Home)
+		{
+			D.FallbackSec += Weight;
+		}
+	}
+	else if (t >= 0.60f)
+	{
+		D.EnemySec += Weight;
+		if (GS->GetFlagState((uint8)(1 - Team)) == CarriedObjectState::Held)
+		{
+			D.CoverSec += Weight;
+		}
+	}
+	else
+	{
+		D.MidSec += Weight;
+	}
+}
+
+void ANCPlusCTFGameMode::ScoreKill_Implementation(AController* Killer, AController* Other, APawn* KilledPawn, TSubclassOf<UDamageType> DamageType)
+{
+	// Role-aware ratings: a fight is a far stronger role signal than idle presence,
+	// so credit combat locations into role dwell at CTFRoleCombatWeight (vs 1.0 per
+	// presence-second) — the victim where they died, the killer where they fought.
+	// Captures aggressive offense even when idle enemy-half time is tiny (a runner
+	// who grabs, caps, dies fast). Read locations BEFORE Super (it runs the engine
+	// death/respawn path). Super does ALL scoring; this only touches rating dwell.
+	if (CTFPerfConfig.bRoleAware && CTFRoleCombatWeight > 0.f && CTFGameState
+		&& (CTFGameState->IsMatchInProgress() || CTFGameState->IsMatchInOvertime()))
+	{
+		if (AUTPlayerState* VictimPS = Other ? Cast<AUTPlayerState>(Other->PlayerState) : nullptr)
+		{
+			if (KilledPawn)
+			{
+				CreditRoleDwell(VictimPS, KilledPawn->GetActorLocation(), CTFRoleCombatWeight);
+			}
+		}
+		if (Killer && Killer != Other)
+		{
+			AUTPlayerState* KillerPS = Cast<AUTPlayerState>(Killer->PlayerState);
+			APawn* KillerPawn = Killer->GetPawn();
+			if (KillerPS && KillerPawn)
+			{
+				CreditRoleDwell(KillerPS, KillerPawn->GetActorLocation(), CTFRoleCombatWeight);
+			}
+		}
+	}
+
+	Super::ScoreKill_Implementation(Killer, Other, KilledPawn, DamageType);
 }
 
 void ANCPlusCTFGameMode::LoadCTFPerfConfig()
@@ -480,13 +522,14 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	ReadFloat(TEXT("CTFRatingMinPresenceFrac"),CTFRatingMinPresenceFrac);
 	ReadBool(TEXT("CTFRoleAware"),             CTFPerfConfig.bRoleAware);
 	ReadDouble(TEXT("CTFRoleWeightStrength"),  CTFPerfConfig.RoleWeightStrength);
+	ReadFloat(TEXT("CTFRoleCombatWeight"),     CTFRoleCombatWeight);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f"),
+		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f"),
 		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac,
-		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength);
+		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength, CTFRoleCombatWeight);
 }
 
 void ANCPlusCTFGameMode::LoadSpawnConfig()

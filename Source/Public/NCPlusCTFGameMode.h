@@ -255,6 +255,11 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  to be rated (rage-quit dodge guard). Mod.ini override; default 0.5. */
 	float CTFRatingMinPresenceFrac = 0.5f;
 
+	/** Weight a kill/death location adds to a fighter's role dwell vs the 1.0 a
+	 *  one-second presence sample adds — a fight is a stronger role signal than
+	 *  idle standing. Mod.ini [UTPUGS_STATS]; default 4. 0 = positional only. */
+	float CTFRoleCombatWeight = 4.f;
+
 	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
 	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
 	void CapturePlayerStats(class AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const;
@@ -263,6 +268,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  cover/fallback into RoleDwell. Called once per second from DefaultTimer
 	 *  while the match is in progress. */
 	void SampleRoleDwell();
+
+	/** Add Weight to a player's RoleDwell bucket for a world location (projected
+	 *  onto the flag-base axis). Shared by SampleRoleDwell (presence, Weight=1)
+	 *  and ScoreKill (combat, Weight=CTFRoleCombatWeight). */
+	void CreditRoleDwell(class AUTPlayerState* PS, const FVector& Loc, float Weight);
+
+	/** Credits kill+death locations into role dwell, then Super does all scoring. */
+	virtual void ScoreKill_Implementation(AController* Killer, AController* Other, APawn* KilledPawn, TSubclassOf<UDamageType> DamageType) override;
 
 	/** Load CTFPerfConfig + CTFRatingMinPresenceFrac from Mod.ini [UTPUGS_STATS]. */
 	void LoadCTFPerfConfig();
