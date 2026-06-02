@@ -139,6 +139,12 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 			const float Acc = (HitscanHits / HitscanShots) * 100.f;
 			Entry.LinkGunAccuracyTimes100 = FMath::RoundToInt(FMath::Clamp(Acc, 0.f, 100.f) * 100.f);
 		}
+		else
+		{
+			// No shots with the tracked weapon -> sentinel so the scoreboard
+			// prints "-" instead of a misleading 0% (matches NCPlusCTFScoreboard).
+			Entry.LinkGunAccuracyTimes100 = -1;
+		}
 
 		StatsEntries.Add(Entry);
 	}
@@ -183,7 +189,7 @@ int32 AElimPlusStatsReplicator::GetEloDeltaForPlayer(const FString& UniqueIdStr)
 float AElimPlusStatsReplicator::GetLinkGunAccuracyForPlayer(const FString& UniqueIdStr) const
 {
 	const FElimPlusStatsEntry* E = FindEntry(UniqueIdStr);
-	return E ? (static_cast<float>(E->LinkGunAccuracyTimes100) / 100.f) : 0.f;
+	return (E && E->LinkGunAccuracyTimes100 >= 0) ? (static_cast<float>(E->LinkGunAccuracyTimes100) / 100.f) : -1.f;
 }
 
 void AElimPlusStatsReplicator::SetPlayerPPRCurrent(const FString& UniqueIdStr, float Value)

@@ -36,10 +36,11 @@ struct FElimPlusStatsEntry
 	UPROPERTY()
 	int32 EloDeltaThisMatch = 0;
 
-	/** Link Gun primary hits / shots * 10000, packed as integer for replication compactness.
-	 *  Display: divide by 100 to get percentage with 2 decimals. */
+	/** Sniper / Lightning Gun accuracy: (hits/shots) as percentage * 100, packed
+	 *  as an integer (0-10000). Display: divide by 100. -1 = no sniper shots
+	 *  fired -> scoreboard prints "-" instead of a misleading 0%. */
 	UPROPERTY()
-	int32 LinkGunAccuracyTimes100 = 0;
+	int32 LinkGunAccuracyTimes100 = -1;
 };
 
 UCLASS(NotPlaceable)

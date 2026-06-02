@@ -467,13 +467,18 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 		XOffset + (Width * ColumnHeaderEloX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, EloColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// LG_Acc — populated by replicator from NAME_LinkHits / NAME_LinkShots
-	const float LGAcc = Entry ? (static_cast<float>(Entry->LinkGunAccuracyTimes100) / 100.f) : 0.f;
-	const FLinearColor LGColor = (LGAcc >= 35.f) ? FLinearColor(0.4f, 1.f, 0.4f, 1.f)
+	// LG_Acc — Sniper / Lightning Gun hitscan accuracy, computed + replicated
+	// server-side (NAME_SniperHits/Shots). -1 = no sniper shots fired -> show "-"
+	// (matches NCPlusCTFScoreboard) instead of a misleading 0%.
+	const int32 LGAccPacked = Entry ? Entry->LinkGunAccuracyTimes100 : -1;
+	const bool bHasLGAcc = (LGAccPacked >= 0);
+	const float LGAcc = bHasLGAcc ? (static_cast<float>(LGAccPacked) / 100.f) : 0.f;
+	const FLinearColor LGColor = !bHasLGAcc       ? FLinearColor(0.5f, 0.5f, 0.5f, 1.f)
+		: (LGAcc >= 35.f) ? FLinearColor(0.4f, 1.f, 0.4f, 1.f)
 		: (LGAcc >= 20.f) ? FLinearColor(1.f, 1.f, 0.4f, 1.f)
 		: (LGAcc > 0.f)   ? FLinearColor(1.f, 0.5f, 0.4f, 1.f)
 		: FLinearColor(0.5f, 0.5f, 0.5f, 1.f);
-	DrawText(FText::FromString(FString::Printf(TEXT("%.0f%%"), LGAcc)),
+	DrawText(FText::FromString(bHasLGAcc ? FString::Printf(TEXT("%.0f%%"), LGAcc) : TEXT("-")),
 		XOffset + (Width * ColumnHeaderLGAccX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, LGColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
