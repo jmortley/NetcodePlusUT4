@@ -347,6 +347,98 @@ void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlay
 	Out.Grabs         = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagGrabs));
 	Out.CarryAssists  = static_cast<int32>(UTPS->GetStatsValue(NAME_CarryAssist));
 	Out.EnemyFCDamage = static_cast<int32>(UTPS->GetStatsValue(NAME_EnemyFCDamage));
+
+	// Resolve positional role from the dwell accumulated by SampleRoleDwell (1Hz).
+	// OffLean = EnemyFrac - OwnFrac (-1 pure defense .. +1 pure offense); the mid
+	// bucket doesn't shift it. Fractions + label are observability-only (payload).
+	// No samples (e.g. never spawned) -> all 0 -> neutral role weights in perf.
+	if (const FNCPlusCTFRoleDwell* D = RoleDwell.Find(Out.UniqueId))
+	{
+		const float Total = D->OwnSec + D->MidSec + D->EnemySec;
+		if (Total > 0.f)
+		{
+			Out.OwnFrac   = D->OwnSec   / Total;
+			Out.MidFrac   = D->MidSec   / Total;
+			Out.EnemyFrac = D->EnemySec / Total;
+			Out.OffLean   = Out.EnemyFrac - Out.OwnFrac;
+
+			if      (Out.OffLean >=  0.34f)        { Out.Role = TEXT("offense"); }
+			else if (Out.OffLean <= -0.34f)        { Out.Role = TEXT("defense"); }
+			else if (D->CoverSec > D->FallbackSec) { Out.Role = TEXT("mid-cover"); }
+			else if (D->FallbackSec > D->CoverSec) { Out.Role = TEXT("mid-fallback"); }
+			else                                   { Out.Role = TEXT("mid"); }
+		}
+	}
+}
+
+void ANCPlusCTFGameMode::SampleRoleDwell()
+{
+	// 1Hz positional sampler that feeds role-aware perf. Per living player,
+	// project the pawn onto the flag-base axis t = dOwn/(dOwn+dEnemy) and add a
+	// second to the own(<0.4) / mid / enemy(>=0.6) bucket. Cover/fallback refine
+	// the mid label only (not OffLean): enemy-half-while-we-hold-their-flag vs
+	// own-half-while-our-flag-is-out. Cheap — 2 distance calcs/player, no traces.
+	AUTCTFGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTCTFGameState>() : nullptr;
+	if (!GS || !(GS->IsMatchInProgress() || GS->IsMatchInOvertime()))
+	{
+		return;
+	}
+	AUTCTFFlagBase* Base0 = GS->GetFlagBase(0);
+	AUTCTFFlagBase* Base1 = GS->GetFlagBase(1);
+	if (!IsValid(Base0) || !IsValid(Base1))
+	{
+		return;
+	}
+	const FVector BaseLoc[2] = { Base0->GetActorLocation(), Base1->GetActorLocation() };
+	const float OwnMax   = 0.40f;   // t below this = own half
+	const float EnemyMin = 0.60f;   // t at/above this = enemy half
+
+	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+	{
+		AController* C = It->Get();
+		APawn* Pawn = C ? C->GetPawn() : nullptr;
+		AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+		if (!Pawn || !PS || PS->bOnlySpectator || !PS->UniqueId.IsValid())
+		{
+			continue;   // dead (no pawn), spectator, or bot (no UniqueId) -> not sampled
+		}
+		const int32 Team = PS->GetTeamNum();
+		if (Team != 0 && Team != 1)
+		{
+			continue;
+		}
+		const FVector Loc = Pawn->GetActorLocation();
+		const float dOwn   = (Loc - BaseLoc[Team]).Size();
+		const float dEnemy = (Loc - BaseLoc[1 - Team]).Size();
+		const float Denom  = dOwn + dEnemy;
+		if (Denom <= KINDA_SMALL_NUMBER)
+		{
+			continue;
+		}
+		const float t = dOwn / Denom;   // 0 = at own base, 1 = at enemy base
+
+		FNCPlusCTFRoleDwell& D = RoleDwell.FindOrAdd(PS->UniqueId.ToString());
+		if (t < OwnMax)
+		{
+			D.OwnSec += 1.f;
+			if (GS->GetFlagState((uint8)Team) != CarriedObjectState::Home)
+			{
+				D.FallbackSec += 1.f;   // holding own half while our flag is out
+			}
+		}
+		else if (t >= EnemyMin)
+		{
+			D.EnemySec += 1.f;
+			if (GS->GetFlagState((uint8)(1 - Team)) == CarriedObjectState::Held)
+			{
+				D.CoverSec += 1.f;      // pushing enemy half while we carry their flag
+			}
+		}
+		else
+		{
+			D.MidSec += 1.f;
+		}
+	}
 }
 
 void ANCPlusCTFGameMode::LoadCTFPerfConfig()
@@ -386,12 +478,15 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	ReadDouble(TEXT("CTFPerfObjectiveWeight"), CTFPerfConfig.ObjectiveWeight);
 	ReadDouble(TEXT("CTFFlagFeederPenalty"),   CTFPerfConfig.FeederPenalty);
 	ReadFloat(TEXT("CTFRatingMinPresenceFrac"),CTFRatingMinPresenceFrac);
+	ReadBool(TEXT("CTFRoleAware"),             CTFPerfConfig.bRoleAware);
+	ReadDouble(TEXT("CTFRoleWeightStrength"),  CTFPerfConfig.RoleWeightStrength);
 
-	UE_LOG(LogGameMode, Log,
-		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f"),
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f"),
 		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
-		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac);
+		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac,
+		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength);
 }
 
 void ANCPlusCTFGameMode::LoadSpawnConfig()
@@ -1207,6 +1302,10 @@ void ANCPlusCTFGameMode::CheckGameTime()
 void ANCPlusCTFGameMode::DefaultTimer()
 {
 	Super::DefaultTimer();
+
+	// Role-aware ratings: sample every living player's map zone once per second
+	// (DefaultTimer is 1Hz) while the match is live. Self-guards on match state.
+	SampleRoleDwell();
 
 	// Tick advantage timer (DefaultTimer fires every second).
 	// Advantage lasts up to AdvantageMaxDuration (5 min default).
