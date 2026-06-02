@@ -109,10 +109,11 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		// PPR + EloDeltaThisMatch are populated by the gamemode (next phase).
 		// For now they stay at defaults — the LG accuracy is computed below.
 
-		// "LG_Acc" is hitscan accuracy. NetcodePlus lets clients pick Sniper or
-		// LightningRifle (UT2k4-style "LG") via a preference, so sum both — only
-		// the chosen weapon accumulates. Auto-detect instagib mutator too.
-		// Same pattern as ACTFStatsReplicator::UpdateFromPlayerStates.
+		// "LG_Acc" is hitscan accuracy. In instagib it's the instagib rifle;
+		// otherwise it's the Sniper / Lightning Gun — the LG is a Blueprint
+		// reskin of AUTPlusSniper, so both skins record to the SAME
+		// NAME_SniperHits/NAME_SniperShots stats and one read covers either.
+		// Auto-detect instagib via NAME_InstagibShots.
 		float HitscanShots = 0.f;
 		float HitscanHits  = 0.f;
 		const float InstagibShots = UTPS->GetStatsValue(NAME_InstagibShots);
@@ -123,12 +124,15 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		}
 		else
 		{
-			// LG-only (per-tick beam Hits/Shots) for non-instagib play —
-			// matches duel/shaft. NAME_LinkBeamShots is the per-refire-tick
-			// counter from UTWeap_LinkGun_Plus::ConsumeAmmo.
-			static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
-			HitscanHits  = UTPS->GetStatsValue(NAME_LinkHits);
-			HitscanShots = UTPS->GetStatsValue(NAME_LinkBeamShots);
+			// Non-instagib "LG" = the Lightning Gun, a Blueprint reskin of our
+			// AUTPlusSniper (players run the Sniper OR the LG skin — both are
+			// AUTPlusSniper). It records single-shot hitscan accuracy to
+			// NAME_SniperHits / NAME_SniperShots via ModifyStatsValue
+			// (UTPlusSniper.cpp), so this is a clean per-shot hit ratio.
+			// BUG FIX: was reading the Link Gun beam (NAME_LinkHits/LinkBeamShots),
+			// which stays ~0 in ElimPlus — that's why the column was stuck at 0%.
+			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits);
+			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots);
 		}
 		if (HitscanShots > 0.f)
 		{
