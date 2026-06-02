@@ -20,5 +20,17 @@ public:
 	UPROPERTY(Replicated, Transient)
 	int32 OvertimeStartElapsed;
 
+	/** GS->ElapsedTime captured the moment EnterAdvantage() fired.
+	 *  -1 = not currently in advantage. Cleared on EndOfHalf / intermission /
+	 *  OT transition so the HUD doesn't show a stale timer. */
+	UPROPERTY(Replicated, Transient)
+	int32 AdvantageStartElapsed;
+
+	/** Mirror of the gamemode's bHasHalftime decision (false for 3v3+ etc.).
+	 *  Lets the HUD suppress the "1st/2nd Half" label entirely for single-
+	 *  period games — without this, clients can't tell halftime is disabled. */
+	UPROPERTY(Replicated, Transient)
+	bool bHasHalftime;
+
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 };
