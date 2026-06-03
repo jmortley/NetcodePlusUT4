@@ -89,6 +89,9 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
 
+	// A bot-hosted PUG passes ?PugId=N — gate auto-pause-on-drop to real PUGs.
+	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
+
 	IntermissionDuration = FMath::Max(1, UGameplayStatics::GetIntOption(Options, TEXT("HalftimeDuration"), IntermissionDuration));
 	AdvantageMaxDuration = FMath::Max(60, UGameplayStatics::GetIntOption(Options, TEXT("AdvantageMaxDuration"), AdvantageMaxDuration));
 	GracePeriodDuration = FMath::Max(3, UGameplayStatics::GetIntOption(Options, TEXT("GracePeriod"), GracePeriodDuration));
@@ -204,6 +207,19 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 		if (!PlayerJoinWorldTime.Contains(Uid))
 		{
 			PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+		}
+
+		// Auto-pause: an awaited drop just rejoined — resume once everyone we're
+		// waiting on is back.
+		if (bAutoPaused && AutoPauseAwaitIds.Contains(Uid))
+		{
+			AutoPauseAwaitIds.Remove(Uid);
+			UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF auto-pause: %s rejoined (%d still out)"),
+				*UTPS->PlayerName, AutoPauseAwaitIds.Num());
+			if (AutoPauseAwaitIds.Num() == 0)
+			{
+				EndAutoPause(TEXT("all dropped players rejoined"));
+			}
 		}
 	}
 }
@@ -324,7 +340,83 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 		}
 	}
 
+	// Auto-pause: a participant dropping mid-PUG freezes the match until they
+	// rejoin (or an admin unpauses). Server-only; uses the engine world-pause
+	// (WorldSettings->Pauser) — the same primitive as the `pause` command.
+	// Runs BEFORE Super (the leaver's PlayerState is still intact here).
+	if (HasAuthority() && bAutoPauseOnDrop && bIsPugMatch && Exiting && CTFGameState
+		&& (CTFGameState->IsMatchInProgress() || CTFGameState->IsMatchInOvertime()))
+	{
+		AUTPlayerState* LeavePS = Cast<AUTPlayerState>(Exiting->PlayerState);
+		if (LeavePS && !LeavePS->bIsABot && !LeavePS->bOnlySpectator
+			&& LeavePS->UniqueId.IsValid() && LeavePS->GetTeamNum() <= 1)
+		{
+			BeginOrHoldAutoPause(LeavePS->UniqueId.ToString(), LeavePS->PlayerName);
+		}
+	}
+
 	Super::Logout(Exiting);
+}
+
+APlayerState* ANCPlusCTFGameMode::FindAutoPauseMarker() const
+{
+	// A present, non-spectator player who hasn't dropped — used as the engine
+	// pause marker (WorldSettings->Pauser must be non-null to hold the pause).
+	if (!CTFGameState) return nullptr;
+	for (APlayerState* PS : CTFGameState->PlayerArray)
+	{
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+		if (UTPS && !UTPS->bOnlySpectator && UTPS->UniqueId.IsValid()
+			&& !AutoPauseAwaitIds.Contains(UTPS->UniqueId.ToString()))
+		{
+			return UTPS;
+		}
+	}
+	return nullptr;
+}
+
+void ANCPlusCTFGameMode::BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName)
+{
+	AWorldSettings* WS = GetWorldSettings();
+	if (!WS) return;
+
+	AutoPauseAwaitIds.Add(LeaverId);
+
+	// (Re)point the pause marker at a still-present player — never a leaver (their
+	// PlayerState is torn down in Super::Logout). If nobody's left, nothing to do.
+	APlayerState* Marker = FindAutoPauseMarker();
+	if (!Marker)
+	{
+		if (bAutoPaused) { EndAutoPause(TEXT("no players remain")); }
+		else { AutoPauseAwaitIds.Reset(); }
+		return;
+	}
+
+	WS->Pauser = Marker;   // engine world-pause; replicated, clients show paused
+	if (!bAutoPaused)
+	{
+		bAutoPaused = true;
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF auto-pause: %s dropped — match PAUSED until rejoin (or admin unpause). awaiting=%d"),
+			*LeaverName, AutoPauseAwaitIds.Num());
+	}
+	else
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF auto-pause: %s also dropped while paused — awaiting=%d"),
+			*LeaverName, AutoPauseAwaitIds.Num());
+	}
+}
+
+void ANCPlusCTFGameMode::EndAutoPause(const TCHAR* Reason)
+{
+	if (AWorldSettings* WS = GetWorldSettings())
+	{
+		WS->Pauser = nullptr;
+	}
+	bAutoPaused = false;
+	AutoPauseAwaitIds.Reset();
+	UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF auto-pause: resuming (%s)"), Reason);
 }
 
 void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const
@@ -524,13 +616,15 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	ReadDouble(TEXT("CTFRoleWeightStrength"),  CTFPerfConfig.RoleWeightStrength);
 	ReadFloat(TEXT("CTFRoleCombatWeight"),     CTFRoleCombatWeight);
 	ReadFloat(TEXT("CTFRespawnWait"),          CTFRespawnWait);
+	ReadBool(TEXT("AutoPauseOnDrop"),          bAutoPauseOnDrop);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f respawn=%.2f"),
+		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f respawn=%.2f autoPause=%s"),
 		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac,
-		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength, CTFRoleCombatWeight, CTFRespawnWait);
+		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength, CTFRoleCombatWeight, CTFRespawnWait,
+		bAutoPauseOnDrop ? TEXT("true") : TEXT("false"));
 }
 
 void ANCPlusCTFGameMode::LoadSpawnConfig()

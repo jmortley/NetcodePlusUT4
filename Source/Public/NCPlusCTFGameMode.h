@@ -266,6 +266,21 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  Overtime escalation still ramps respawn up from here. */
 	float CTFRespawnWait = 1.5f;
 
+	/** Auto-pause the match when a participant drops out of a bot PUG (?PugId),
+	 *  until they (and any others who dropped) rejoin, or an admin unpauses via
+	 *  the `pause` command. Uses the engine world-pause (WorldSettings->Pauser).
+	 *  No auto-resume timeout yet. Mod.ini [UTPUGS_STATS] AutoPauseOnDrop. */
+	bool bAutoPauseOnDrop = true;
+
+	/** True when this match was launched as a bot PUG (?PugId present). */
+	bool bIsPugMatch = false;
+
+	/** True while an auto-pause is currently active. */
+	bool bAutoPaused = false;
+
+	/** UniqueIds of dropped participants we're waiting on before resuming. */
+	TSet<FString> AutoPauseAwaitIds;
+
 	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
 	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
 	void CapturePlayerStats(class AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const;
@@ -285,6 +300,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	/** Load CTFPerfConfig + CTFRatingMinPresenceFrac from Mod.ini [UTPUGS_STATS]. */
 	void LoadCTFPerfConfig();
+
+	/** Auto-pause helpers (server-only). BeginOrHoldAutoPause records a dropped
+	 *  participant and (re)points the engine pause marker at a still-present
+	 *  player; EndAutoPause clears it; FindAutoPauseMarker returns a present,
+	 *  non-dropped PlayerState to hold the pause on (or null if none remain). */
+	void BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName);
+	void EndAutoPause(const TCHAR* Reason);
+	class APlayerState* FindAutoPauseMarker() const;
 
 	/** Override spawn penalty weights + selection knobs from Mod.ini [UTPUGS_SPAWN]. */
 	void LoadSpawnConfig();
