@@ -523,13 +523,14 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	ReadBool(TEXT("CTFRoleAware"),             CTFPerfConfig.bRoleAware);
 	ReadDouble(TEXT("CTFRoleWeightStrength"),  CTFPerfConfig.RoleWeightStrength);
 	ReadFloat(TEXT("CTFRoleCombatWeight"),     CTFRoleCombatWeight);
+	ReadFloat(TEXT("CTFRespawnWait"),          CTFRespawnWait);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f"),
+		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f respawn=%.2f"),
 		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac,
-		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength, CTFRoleCombatWeight);
+		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength, CTFRoleCombatWeight, CTFRespawnWait);
 }
 
 void ANCPlusCTFGameMode::LoadSpawnConfig()
@@ -1562,6 +1563,18 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		MatchFullDurationSeconds = (bHasHalftime ? float(TimeLimit) * 2.f : float(TimeLimit)) * 60.f;
 		LoadCTFPerfConfig();
 		LoadSpawnConfig();
+
+		// Apply the configured regulation respawn wait. Runs after Super +
+		// InitGame's integer ?RespawnWait parse and any BP default, so it's
+		// authoritative and supports fractional values (e.g. 1.5s) — the
+		// ?RespawnWait launch option is integer-only (GetIntOption). RespawnTime
+		// is decremented per-frame (UTPlayerState.cpp), so sub-second is honored.
+		// Overtime escalation (DefaultTimer) still ramps respawn up from here.
+		RespawnWaitTime = CTFRespawnWait;
+		if (CTFGameState)
+		{
+			CTFGameState->SetRespawnWaitTime(CTFRespawnWait);
+		}
 
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS)

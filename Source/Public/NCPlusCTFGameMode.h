@@ -260,6 +260,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  idle standing. Mod.ini [UTPUGS_STATS]; default 4. 0 = positional only. */
 	float CTFRoleCombatWeight = 4.f;
 
+	/** Regulation respawn delay (seconds). Applied in HandleMatchHasStarted AFTER
+	 *  InitGame's integer ?RespawnWait parse and any BP default, so it wins and
+	 *  supports fractional values (e.g. 1.5). Mod.ini [UTPUGS_STATS] CTFRespawnWait.
+	 *  Overtime escalation still ramps respawn up from here. */
+	float CTFRespawnWait = 1.5f;
+
 	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
 	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
 	void CapturePlayerStats(class AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const;
