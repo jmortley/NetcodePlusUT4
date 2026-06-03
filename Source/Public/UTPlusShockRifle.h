@@ -141,6 +141,10 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	 * Beam mode uses standard validation for forgiving hitscan.
 	 */
 	virtual float GetHitValidationPredictionTime() const override;
+
+	/** Widen the server-side hitscan time-search fallback to 45ms (half-window) for the
+	 *  shock family (incl. the BP instagib child); other weapons keep the base 30ms. */
+	virtual float GetHitscanTimeSearchWindow() const override;
 };
 
 #ifdef _MSC_VER

@@ -1743,7 +1743,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 		float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
 		const float SearchStep = 0.015f;      // 15ms steps
-		const float MaxSearchOffset = 0.030f; // ±30ms max search (tries ±15, ±30 — tighter than the prior ±45 to reduce "shot through my dodge" defender complaints; primary rewind still does the heavy lifting)
+		const float MaxSearchOffset = GetHitscanTimeSearchWindow(); // ±30ms max search (tries ±15, ±30 — tighter than the prior ±45 to reduce "shot through my dodge" defender complaints; primary rewind still does the heavy lifting)
 		float SearchOffset = SearchStep;
 
 		while (FMath::Abs(SearchOffset) <= MaxSearchOffset)

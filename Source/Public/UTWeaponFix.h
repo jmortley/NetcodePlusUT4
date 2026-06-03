@@ -178,6 +178,11 @@ public:
     /** Get the hit validation prediction time (ping-based rewind amount).
      *  Public so ServerShield can use the same rewind for radial offset analysis. */
     virtual float GetHitValidationPredictionTime() const;
+
+    /** Half-width (seconds) of the server-side bidirectional time-search fallback in
+     *  HitScanTrace, used when the client claimed a hit the primary rewind missed.
+     *  Per-weapon overridable. Base 30ms; shock/instagib widen to 45ms. */
+    virtual float GetHitscanTimeSearchWindow() const { return 0.030f; }
     virtual void FireShot() override;
 
     // Guard against race condition: replicated fire RPC arrives after owner dies
