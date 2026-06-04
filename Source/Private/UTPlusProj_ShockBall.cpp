@@ -144,22 +144,28 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// High-FPS drift correction: at 480+ fps, floating point accumulation in
-	// ProjectileMovementComponent causes the velocity direction to drift slightly
-	// per tick. Over 1000+ ticks the shock ball visibly curves upward/sideways.
-	// Fix: snap velocity back to original fire direction, preserving speed.
-	// Only applies to zero-gravity projectiles (shock balls have no arc).
+	// Drift correction: floating-point accumulation in ProjectileMovementComponent
+	// rotates the velocity direction slightly per tick; over a slow shock ball's long
+	// flight (1000+ ticks) it visibly curves. Re-assert the heading along the original
+	// fire line every tick, preserving current speed. Only zero-gravity projectiles need
+	// this (shock balls have no arc). Rockets/flak have NO Tick override — they set
+	// heading once at spawn (SpawnNetPredictedProjectile enforces Velocity = SpawnRotation
+	// * InitialSpeed) and coast ballistically, because they're too short-lived to drift.
+	//
+	// UNCONDITIONAL on purpose. The previous `dot > 0.9998` (~1.1 deg) gate was a one-way
+	// latch: it only re-aimed while ALREADY within ~1.1 deg of aim, so a single oversized
+	// integration step from an FPS hitch could kick the heading past the threshold, after
+	// which the gate never re-engaged (systematic drift only grows) and the core flew
+	// permanently off-aim — the rare, FPS-fluctuation-correlated off-aim shots. A straight
+	// shock core never legitimately changes heading in flight (combo destroys it; slomo
+	// changes only speed, preserved here via live Speed; a wall stops it, caught by the
+	// IsNearlyZero guard), so there is nothing to protect by gating — gating WAS the bug.
 	if (bHasCachedFireDirection && ProjectileMovement
 		&& !ProjectileMovement->Velocity.IsNearlyZero()
 		&& FMath::IsNearlyZero(ProjectileMovement->ProjectileGravityScale))
 	{
-		float Speed = ProjectileMovement->Velocity.Size();
-		FVector CurrentDir = ProjectileMovement->Velocity / Speed;
-		// Only correct if drift is small (< 1 degree) — larger changes are intentional (bounces, etc.)
-		if ((CurrentDir | OriginalFireDirection) > 0.9998f) // ~1 degree
-		{
-			ProjectileMovement->Velocity = OriginalFireDirection * Speed;
-		}
+		const float Speed = ProjectileMovement->Velocity.Size();
+		ProjectileMovement->Velocity = OriginalFireDirection * Speed;
 	}
 
 	// Stuck-ball detection: if the server-side projectile has near-zero velocity
