@@ -867,9 +867,10 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		}
 	}
 
-	// Send death recap to victim (private message showing mutual damage)
-	AUTPlayerState* KillerPS = Killer ? Cast<AUTPlayerState>(Killer->PlayerState) : nullptr;
-	SendDeathRecap(OtherPS, KillerPS);
+	// Death recap (the per-life "You dealt N to X | They dealt M to you" system-chat
+	// line) intentionally DISABLED — it spammed chat in respawn-wave play. The
+	// SendDeathRecap() function + LifeDamageMap tracking are left in place (dormant)
+	// so it can be re-enabled later if wanted.
 
 	// In Wipeout, death doesn't mean permanently out.
 	// Mark as bOutOfLives temporarily (so GetAliveCounts returns correctly)
