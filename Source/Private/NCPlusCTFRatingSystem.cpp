@@ -119,10 +119,13 @@ namespace
 
 		// Offensive objective: scoring + escort. SupportKills is a bonus layered
 		// on the base kill already in Combat (UT4: FC/support kill = kill + bonus).
+		// SupportKills weight raised 2.0 -> 8.0 (2026-06-03): escort/support play
+		// (kills near your carrier without grabbing) was under-valued, sinking
+		// support/mid players; 8.0 puts a maxed escort game ~on par with a capture.
 		const double ObjOff =
 			  12.0 * Cap(P.Caps,         5)
 			+  5.0 * Cap(P.Assists,      8)
-			+  2.0 * Cap(P.SupportKills, 8);
+			+  8.0 * Cap(P.SupportKills, 8);
 
 		// Defensive objective: denial + enemy-carrier kills. Weights raised vs
 		// the offensive caps so a defensive game stands on its own magnitude.
@@ -139,8 +142,18 @@ namespace
 		// Anti-pad: grabs that advanced nothing (not a cap, not a carry assist).
 		const double Feeder = Cap(FMath::Max(0, P.Grabs - P.Caps - P.CarryAssists), 6);
 
+		// Efficiency factor (2026-06-03): K/(K+D) centred at 0.5. Discounts the
+		// objective half for players who die far more than they kill (pad returns/
+		// caps while being a fragging liability) and boosts efficient play. Clamped
+		// 0.4..1.4 so it tunes rather than dominates. Uses RAW K/D (not the capped
+		// values) to reflect true trade efficiency. Mirrors the Django ctf_perf so
+		// the live/pushed perf matches the authoritative rebuild ladder.
+		const int32  KD      = P.Kills + P.Deaths;
+		const double Eff     = (KD > 0) ? (double(P.Kills) / double(KD)) : 0.5;
+		const double EffMult = FMath::Clamp(Eff / 0.5, 0.4, 1.4);
+
 		return Combat
-			 + Cfg.ObjectiveWeight * (Aoff * ObjOff + Adef * ObjDef)
+			 + EffMult * Cfg.ObjectiveWeight * (Aoff * ObjOff + Adef * ObjDef)
 			 - Cfg.FeederPenalty   * Feeder;
 	}
 
