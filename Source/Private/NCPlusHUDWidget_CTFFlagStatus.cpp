@@ -297,6 +297,20 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawStatusMessage(float DeltaTime)
 
 	const uint8 MyTeam = OwnerPS->GetTeamNum();
 
+	// Diagnostic: one-shot, unconditional proof that DrawStatusMessage is reached
+	// (i.e. our widget's Draw_Implementation IS running). If this never appears in
+	// the log, the widget isn't drawing at all — which would also explain the dead
+	// carrier indicator. If it appears but "enemy-has-flag fired" doesn't, the
+	// banner code is fine and the enemy-carries-your-flag case simply wasn't hit.
+	static bool bLoggedDrawStatusReached = false;
+	if (!bLoggedDrawStatusReached)
+	{
+		bLoggedDrawStatusReached = true;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[NCPlusHUDWidget_CTFFlagStatus] DrawStatusMessage reached (widget IS drawing). MyTeam=%d"),
+			MyTeam);
+	}
+
 	// --- Two animation alphas (yellow uses parent's AnimationAlpha; red uses our own). ---
 	AnimationAlpha       += DeltaTime * 3.f;
 	EnemyAnimationAlpha  += DeltaTime * 3.f;
