@@ -46,6 +46,7 @@ void ANCPlusCTFHUD::BeginPlay()
 {
 	// Remove stock widgets we're replacing BEFORE Super::BeginPlay instantiates them.
 	// RequiredHudWidgetClasses is loaded from DefaultGame.ini config.
+	const int32 PreStripCount = RequiredHudWidgetClasses.Num();
 	RequiredHudWidgetClasses.RemoveAll([](const FString& Entry)
 	{
 		return Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
@@ -63,7 +64,30 @@ void ANCPlusCTFHUD::BeginPlay()
 			|| Entry.Contains(TEXT("CTFFlagStatus"));
 	});
 
+	// Diagnostic: verify the strip caught CTFFlagStatus.
+	int32 RemainingCTFFS = 0;
+	for (const FString& E : RequiredHudWidgetClasses)
+	{
+		if (E.Contains(TEXT("CTFFlagStatus"))) ++RemainingCTFFS;
+	}
+	UE_LOG(LogTemp, Warning,
+		TEXT("[NCPlusCTFHUD] Post-strip: removed %d entries, %d CTFFlagStatus matches remain (expect 0)"),
+		PreStripCount - RequiredHudWidgetClasses.Num(), RemainingCTFFS);
+
 	Super::BeginPlay();
+
+	// Diagnostic: did our subclass make it into HudWidgets?
+	int32 OurInstanceCount = 0;
+	int32 AnyCTFFSCount = 0;
+	for (UUTHUDWidget* W : HudWidgets)
+	{
+		if (!W) continue;
+		if (Cast<UNCPlusHUDWidget_CTFFlagStatus>(W)) ++OurInstanceCount;
+		if (W->IsA(UUTHUDWidget_CTFFlagStatus::StaticClass())) ++AnyCTFFSCount;
+	}
+	UE_LOG(LogTemp, Warning,
+		TEXT("[NCPlusCTFHUD] Post-Super: HudWidgets has %d total; %d CTFFlagStatus-family; %d are our subclass (expect 1/1)"),
+		HudWidgets.Num(), AnyCTFFSCount, OurInstanceCount);
 
 	// HUD layout system — capture stock defaults, load + apply live layout.
 	CaptureWidgetDefaults(this);
@@ -83,6 +107,14 @@ void ANCPlusCTFHUD::BeginPlay()
 	UUTHUDWidget_CTFFlagStatus* StockCDO = StockBPClass
 		? Cast<UUTHUDWidget_CTFFlagStatus>(StockBPClass->GetDefaultObject())
 		: nullptr;
+	UE_LOG(LogTemp, Warning,
+		TEXT("[NCPlusCTFHUD] BP CDO: LoadObject=%s, Cast=%s, FlagIconTemplate.Atlas=%s, FlagStatusText.Font=%s"),
+		StockBPClass ? TEXT("OK") : TEXT("NULL"),
+		StockCDO     ? TEXT("OK") : TEXT("NULL"),
+		(StockCDO && StockCDO->FlagIconTemplate.Atlas) ? *StockCDO->FlagIconTemplate.Atlas->GetName() : TEXT("NULL"),
+		(StockCDO && StockCDO->FlagStatusText.Font)    ? *StockCDO->FlagStatusText.Font->GetName()    : TEXT("NULL"));
+
+	int32 CopiesApplied = 0;
 	if (StockCDO)
 	{
 		for (UUTHUDWidget* W : HudWidgets)
@@ -110,9 +142,12 @@ void ANCPlusCTFHUD::BeginPlay()
 			Ours->LeftEdgePadding        = StockCDO->LeftEdgePadding;
 			Ours->RightEdgePadding       = StockCDO->RightEdgePadding;
 			Ours->TeamPositions          = StockCDO->TeamPositions;
+			++CopiesApplied;
 			break;
 		}
 	}
+	UE_LOG(LogTemp, Warning,
+		TEXT("[NCPlusCTFHUD] CDO copy applied to %d instance(s) (expect 1)"), CopiesApplied);
 }
 
 EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const

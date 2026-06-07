@@ -63,6 +63,17 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagWorld(AUTCTFGameState* GameState,
 	FVector PlayerViewPoint, FRotator PlayerViewRotation, uint8 TeamNum,
 	AUTCTFFlagBase* FlagBase, AUTFlag* Flag, AUTPlayerState* FlagHolder)
 {
+	// Diagnostic: confirm our override is reached (one-shot per process).
+	static bool bLoggedDrawFlagWorld = false;
+	if (!bLoggedDrawFlagWorld)
+	{
+		bLoggedDrawFlagWorld = true;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[NCPlusHUDWidget_CTFFlagStatus] DrawFlagWorld override IS being called (FlagIconTemplate.Atlas=%s, FlagStatusText.Font=%s)"),
+			FlagIconTemplate.Atlas ? *FlagIconTemplate.Atlas->GetName() : TEXT("NULL"),
+			FlagStatusText.Font    ? *FlagStatusText.Font->GetName()    : TEXT("NULL"));
+	}
+
 	if (!Flag) return;
 
 	static const FName CarrierAlias(TEXT("ctf_carrier_indicator"));
@@ -313,6 +324,19 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawStatusMessage(float DeltaTime)
 	const bool bEnemyHasFlag = (OurFlagHolder != nullptr
 		&& OurFlagHolder->Team != nullptr
 		&& OurFlagHolder->Team->TeamIndex != MyTeam);
+
+	// Diagnostic: confirm enemy-has-flag detection fires (one-shot per process).
+	static bool bLoggedEnemyHasFlag = false;
+	if (bEnemyHasFlag && !bLoggedEnemyHasFlag)
+	{
+		bLoggedEnemyHasFlag = true;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[NCPlusHUDWidget_CTFFlagStatus] DrawStatusMessage: enemy-has-flag fired. MyTeam=%d, Holder=%s, Holder.Team.Index=%d"),
+			MyTeam,
+			OurFlagHolder ? *OurFlagHolder->PlayerName : TEXT("NULL"),
+			OurFlagHolder && OurFlagHolder->Team ? OurFlagHolder->Team->TeamIndex : -1);
+	}
+
 	if (bEnemyHasFlag)
 	{
 		if (EnemyHasFlagAppearedAt < 0.f) EnemyHasFlagAppearedAt = CurrentTime;
