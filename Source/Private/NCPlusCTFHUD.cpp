@@ -4,6 +4,8 @@
 #include "UTGameState.h"
 #include "UTPlayerState.h"
 #include "UTTeamInfo.h"
+#include "UTHUDWidget_CTFFlagStatus.h"
+#include "NCPlusHUDWidget_CTFFlagStatus.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusCTFOTInfo.h"
 #include "NCPlusCTFGameMode.h"   // NCPlusReflection helpers (bPlayingAdvantage / bSecondHalf)
@@ -53,7 +55,12 @@ void ANCPlusCTFHUD::BeginPlay()
 			|| Entry.Contains(TEXT("bpHW_QuickStats"))   // replaced by our HP/Armor widget
 			|| Entry.Contains(TEXT("bpHW_Paperdoll"))    // fallback +HP/Armor mode would conflict
 			|| Entry.Contains(TEXT("bpHW_WeaponInfo"))   // replaced by our ammo counter
-			|| Entry.Contains(TEXT("UTHUDWidget_CTFFlagStatus")); // replaced by NCPlus subclass
+			// The stock CTF flag status widget is registered in DefaultGame.ini as
+			// /Game/RestrictedAssets/UI/HUDWidgets/bpHW_CTFFlagStatus.bpHW_CTFFlagStatus_C
+			// (a BP wrapper around UTHUDWidget_CTFFlagStatus). Matching "CTFFlagStatus"
+			// catches both the BP path and any future C++ entry. Our subclass is added
+			// via HudWidgetClasses below so this strip removes only the stock one.
+			|| Entry.Contains(TEXT("CTFFlagStatus"));
 	});
 
 	Super::BeginPlay();
@@ -62,6 +69,50 @@ void ANCPlusCTFHUD::BeginPlay()
 	CaptureWidgetDefaults(this);
 	FNCPlusHUDLayout::ReloadLive();
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+
+	// CDO-copy fallback: our C++ subclass inherits behavior from
+	// UUTHUDWidget_CTFFlagStatus but the engine widget leaves the render-template
+	// UPROPERTYs (FlagIconTemplate.Atlas, CircleTemplate.Atlas, FlagStatusText.Font,
+	// etc.) unset in C++; they are configured in bpHW_CTFFlagStatus's BP defaults.
+	// Without those assets our DrawFlagWorld and DrawStatusMessage overrides have
+	// nothing to render with. Pull the BP CDO at runtime and copy its template
+	// values onto our live instance so we render with the same assets the stock BP
+	// would have provided.
+	UClass* StockBPClass = LoadObject<UClass>(nullptr,
+		TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_CTFFlagStatus.bpHW_CTFFlagStatus_C"));
+	UUTHUDWidget_CTFFlagStatus* StockCDO = StockBPClass
+		? Cast<UUTHUDWidget_CTFFlagStatus>(StockBPClass->GetDefaultObject())
+		: nullptr;
+	if (StockCDO)
+	{
+		for (UUTHUDWidget* W : HudWidgets)
+		{
+			UNCPlusHUDWidget_CTFFlagStatus* Ours = Cast<UNCPlusHUDWidget_CTFFlagStatus>(W);
+			if (!Ours) continue;
+			// Render templates (textures + UV).
+			Ours->FlagIconTemplate       = StockCDO->FlagIconTemplate;
+			Ours->CircleTemplate         = StockCDO->CircleTemplate;
+			Ours->CircleBorderTemplate   = StockCDO->CircleBorderTemplate;
+			Ours->TakenIconTemplate      = StockCDO->TakenIconTemplate;
+			Ours->DroppedIconTemplate    = StockCDO->DroppedIconTemplate;
+			Ours->FlagGoneIconTemplate   = StockCDO->FlagGoneIconTemplate;
+			Ours->ArrowTemplate          = StockCDO->ArrowTemplate;
+			Ours->CameraIconTemplate     = StockCDO->CameraIconTemplate;
+			// Text render objects (font + scale + position).
+			Ours->FlagHolderNameTemplate = StockCDO->FlagHolderNameTemplate;
+			Ours->FlagStatusText         = StockCDO->FlagStatusText;
+			Ours->RallyText              = StockCDO->RallyText;
+			// Behavior knobs that the BP commonly overrides — keep them aligned.
+			Ours->MaxIconScale           = StockCDO->MaxIconScale;
+			Ours->InWorldAlpha           = StockCDO->InWorldAlpha;
+			Ours->TopEdgePadding         = StockCDO->TopEdgePadding;
+			Ours->BottomEdgePadding      = StockCDO->BottomEdgePadding;
+			Ours->LeftEdgePadding        = StockCDO->LeftEdgePadding;
+			Ours->RightEdgePadding       = StockCDO->RightEdgePadding;
+			Ours->TeamPositions          = StockCDO->TeamPositions;
+			break;
+		}
+	}
 }
 
 EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
