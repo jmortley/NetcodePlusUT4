@@ -150,17 +150,23 @@ namespace NCPlusHUDFonts
 			{ TEXT("Positec"),         TEXT("/Game/RestrictedAssets/Fonts/fntPositec36.fntPositec36"),                      nullptr },
 			{ TEXT("Positec Small"),   TEXT("/Game/RestrictedAssets/Fonts/fntPositec14.fntPositec14"),                      nullptr },
 			{ TEXT("Extreme"),         TEXT("/Game/RestrictedAssets/Fonts/fntExtreme.fntExtreme"),                          nullptr },
-			// External Google Fonts (OFL). Import each .ttf in the editor the same
-			// way Lato was (Runtime UFont — NOT an Offline/Composite/FontFace, which
-			// is what made Rajdhani fail to load), name the asset to match the path
-			// below, and drop it in /Game/RestrictedAssets/Fonts/. Until the asset
-			// exists Resolve() falls back (one "[NCPlusHUDFonts] Failed to load" log
-			// line); import before shipping a build so the picker has no dead entries.
-			{ TEXT("Inter"),           TEXT("/Game/RestrictedAssets/Fonts/Inter.Inter"),                                    nullptr },
-			{ TEXT("JetBrains Mono"),  TEXT("/Game/RestrictedAssets/Fonts/JetBrainsMono.JetBrainsMono"),                    nullptr },
-			{ TEXT("Bebas Neue"),      TEXT("/Game/RestrictedAssets/Fonts/BebasNeue.BebasNeue"),                            nullptr },
-			{ TEXT("Oswald"),          TEXT("/Game/RestrictedAssets/Fonts/Oswald.Oswald"),                                  nullptr },
-			{ TEXT("Russo One"),       TEXT("/Game/RestrictedAssets/Fonts/RussoOne.RussoOne"),                              nullptr },
+			// External Google Fonts (OFL) - TEST SET, pointing at the exact UFont
+			// asset names currently in /Game/Blueprints/Netcode/ (incl. italic +
+			// variable-font variants) for a quick render test.
+			// COOK NOTE: these are string-path refs the cooker won't auto-pull from
+			// Blueprints/Netcode - either add that folder to "Additional Asset
+			// Directories to Cook" or keep a holder asset (the FontTest BP) that
+			// hard-references them so the cook drags them in.
+			// UE4.15 may not render the *VariableFont* ones (Inter/JetBrains/Oswald);
+			// Bebas/Russo are static and should be safe. Once a final set is chosen,
+			// trim to one weight each + rename to clean names.
+			{ TEXT("Inter"),                 TEXT("/Game/Blueprints/Netcode/Inter-VariableFont_opsz_wght_Font.Inter-VariableFont_opsz_wght_Font"),                     nullptr },
+			{ TEXT("Inter Italic"),          TEXT("/Game/Blueprints/Netcode/Inter-Italic-VariableFont_opsz_wght_Font.Inter-Italic-VariableFont_opsz_wght_Font"),       nullptr },
+			{ TEXT("JetBrains Mono"),        TEXT("/Game/Blueprints/Netcode/JetBrainsMono-VariableFont_wght_Font.JetBrainsMono-VariableFont_wght_Font"),               nullptr },
+			{ TEXT("JetBrains Mono Italic"), TEXT("/Game/Blueprints/Netcode/JetBrainsMono-Italic-VariableFont_wght_Font.JetBrainsMono-Italic-VariableFont_wght_Font"), nullptr },
+			{ TEXT("Bebas Neue"),            TEXT("/Game/Blueprints/Netcode/BebasNeue-Regular_Font.BebasNeue-Regular_Font"),                                            nullptr },
+			{ TEXT("Oswald"),                TEXT("/Game/Blueprints/Netcode/Oswald-VariableFont_wght_Font.Oswald-VariableFont_wght_Font"),                              nullptr },
+			{ TEXT("Russo One"),             TEXT("/Game/Blueprints/Netcode/RussoOne-Regular_Font.RussoOne-Regular_Font"),                                              nullptr },
 		};
 		return Table;
 	}
