@@ -57,6 +57,11 @@ namespace NCHUDEdit
 		{
 			return TEXT("Game Mode");
 		}
+		if (Alias == TEXT("ctf_flag_status") || Alias == TEXT("ctf_carrier_indicator")
+			|| Alias == TEXT("ctf_you_have_flag") || Alias == TEXT("ctf_enemy_has_flag"))
+		{
+			return TEXT("CTF");
+		}
 		if (Alias == TEXT("speedometer") || Alias == TEXT("minimap"))
 		{
 			return TEXT("Optional Overlays");
@@ -72,6 +77,7 @@ namespace NCHUDEdit
 			TEXT("Weapon Bars"),
 			TEXT("Top Bar (Portraits + Scorebar)"),
 			TEXT("Game Mode"),
+			TEXT("CTF"),
 			TEXT("Optional Overlays"),
 			TEXT("Stock Widgets"),
 		};
@@ -192,6 +198,15 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_ammo_full"),        FText::FromString(TEXT("Ammo Full")),   FLinearColor(0.4f,  0.95f, 0.48f, 1.f)   });
 			Row.Colors.Add({ TEXT("color_ammo_warn"),        FText::FromString(TEXT("Ammo Warn")),   FLinearColor(1.0f,  0.85f, 0.30f, 1.f)   });
 			Row.Colors.Add({ TEXT("color_ammo_danger"),      FText::FromString(TEXT("Ammo Low")),    FLinearColor(1.0f,  0.32f, 0.28f, 1.f)   });
+		}
+		// CTF banner aliases: single color_text override (default yellow / red).
+		if (Alias == TEXT("ctf_you_have_flag"))
+		{
+			Row.Colors.Add({ TEXT("color_text"), FText::FromString(TEXT("Text")), FLinearColor::Yellow });
+		}
+		if (Alias == TEXT("ctf_enemy_has_flag"))
+		{
+			Row.Colors.Add({ TEXT("color_text"), FText::FromString(TEXT("Text")), FLinearColor(1.f, 0.18f, 0.18f, 1.f) });
 		}
 		Rows.Add(Row);
 	}

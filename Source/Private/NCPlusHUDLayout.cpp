@@ -640,11 +640,31 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")),   false, ENCPlusHUDAnchor::BottomLeft);
 			T.Emplace(TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")),  false, ENCPlusHUDAnchor::TopCenter);
 			// CTF flag status (the team flag silhouettes either side of the
-			// scorebar). Engine widget UUTHUDWidget_CTFFlagStatus, default
-			// ScreenPosition = (0.5, 0.0), Origin = (0.5, 0.5) → top-center.
-			// Only meaningful in CTF; safe to leave in the table for other
-			// modes since the widget simply isn't instantiated.
-			T.Emplace(TEXT("ctf_flag_status"),  TEXT("/Script/UnrealTournament.UTHUDWidget_CTFFlagStatus"),                      FText::FromString(TEXT("CTF Flag Status")),    false, ENCPlusHUDAnchor::TopCenter);
+			// scorebar). NCPlus subclass UNCPlusHUDWidget_CTFFlagStatus replaces
+			// the engine widget so DrawFlagWorld + DrawStatusMessage can route
+			// through nchud (carrier indicator + banners). Widget-root position
+			// here controls the top-center silhouettes via ApplyLayoutToWidgets;
+			// the carrier indicator and banners have their own aliases (below).
+			T.Emplace(TEXT("ctf_flag_status"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_CTFFlagStatus"),                       FText::FromString(TEXT("CTF Flag Silhouettes")), false, ENCPlusHUDAnchor::TopCenter);
+			// Three CTF sub-element aliases routed through the NCPlus subclass's
+			// Draw* overrides (NOT through ApplyLayoutToWidgets). Empty ClassPath
+			// keeps GetAliasForClass from colliding with ctf_flag_status above;
+			// the subclass reads each entry directly from FNCPlusHUDLayout::GetLive().
+			//
+			// World-projected flag icon over the enemy carrier's head. Anchor
+			// nominal (world projection, not screen-anchored). Offset shifts the
+			// icon in screen pixels AFTER world projection.
+			T.Emplace(TEXT("ctf_carrier_indicator"), FString(),                                                                  FText::FromString(TEXT("CTF Carrier Indicator")), true, ENCPlusHUDAnchor::Center);
+			// "You have the flag!" banner (yellow, pulsing). Engine already drew
+			// this; we expose position + scale + color via nchud. BottomCenter
+			// matches the stock engine placement.
+			T.Emplace(TEXT("ctf_you_have_flag"),     FString(),                                                                  FText::FromString(TEXT("CTF \"You Have the Flag\"")), true, ENCPlusHUDAnchor::BottomCenter, FVector2D(0.f, -120.f));
+			// "The enemy has your flag, recover it!" banner (red, pulsing). NEW
+			// in NCPlus - the engine had the FText defined but never rendered it.
+			// UT99-style persistent alarm for audio-announcement-off players.
+			// TopCenter with a pixel offset below the scorebar so the score and
+			// alarm read as a single top cluster.
+			T.Emplace(TEXT("ctf_enemy_has_flag"),    FString(),                                                                  FText::FromString(TEXT("CTF \"Enemy Has Your Flag\"")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 110.f));
 			// C++-drawn pieces (Phase 3.5).
 			// Portrait strips: TopCenter anchor with offsets that approximately
 			// match where the renderers' StockXRed / StockXBlue fallback puts them

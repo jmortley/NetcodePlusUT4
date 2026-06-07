@@ -34,6 +34,10 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	// Optional default-hidden overlays — see WipeoutHUD for full notes.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
+	// NCPlus CTF flag-status subclass — drops in for the stock engine widget.
+	// Adds nchud control over carrier indicator + you-have-flag banner + the
+	// NEW enemy-has-flag banner (engine had the FText defined but never rendered).
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_CTFFlagStatus"));
 }
 
 void ANCPlusCTFHUD::BeginPlay()
@@ -48,7 +52,8 @@ void ANCPlusCTFHUD::BeginPlay()
 			|| Entry.Contains(TEXT("bpHW_WeaponBar"))    // replaced by our split bar
 			|| Entry.Contains(TEXT("bpHW_QuickStats"))   // replaced by our HP/Armor widget
 			|| Entry.Contains(TEXT("bpHW_Paperdoll"))    // fallback +HP/Armor mode would conflict
-			|| Entry.Contains(TEXT("bpHW_WeaponInfo")); // replaced by our ammo counter
+			|| Entry.Contains(TEXT("bpHW_WeaponInfo"))   // replaced by our ammo counter
+			|| Entry.Contains(TEXT("UTHUDWidget_CTFFlagStatus")); // replaced by NCPlus subclass
 	});
 
 	Super::BeginPlay();
