@@ -63,17 +63,6 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagWorld(AUTCTFGameState* GameState,
 	FVector PlayerViewPoint, FRotator PlayerViewRotation, uint8 TeamNum,
 	AUTCTFFlagBase* FlagBase, AUTFlag* Flag, AUTPlayerState* FlagHolder)
 {
-	// Diagnostic: confirm our override is reached (one-shot per process).
-	static bool bLoggedDrawFlagWorld = false;
-	if (!bLoggedDrawFlagWorld)
-	{
-		bLoggedDrawFlagWorld = true;
-		UE_LOG(LogTemp, Warning,
-			TEXT("[NCPlusHUDWidget_CTFFlagStatus] DrawFlagWorld override IS being called (FlagIconTemplate.Atlas=%s, FlagStatusText.Font=%s)"),
-			FlagIconTemplate.Atlas ? *FlagIconTemplate.Atlas->GetName() : TEXT("NULL"),
-			FlagStatusText.Font    ? *FlagStatusText.Font->GetName()    : TEXT("NULL"));
-	}
-
 	if (!Flag) return;
 
 	static const FName CarrierAlias(TEXT("ctf_carrier_indicator"));
@@ -319,20 +308,6 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawStatusMessage(float DeltaTime)
 
 	const uint8 MyTeam = OwnerPS->GetTeamNum();
 
-	// Diagnostic: one-shot, unconditional proof that DrawStatusMessage is reached
-	// (i.e. our widget's Draw_Implementation IS running). If this never appears in
-	// the log, the widget isn't drawing at all — which would also explain the dead
-	// carrier indicator. If it appears but "enemy-has-flag fired" doesn't, the
-	// banner code is fine and the enemy-carries-your-flag case simply wasn't hit.
-	static bool bLoggedDrawStatusReached = false;
-	if (!bLoggedDrawStatusReached)
-	{
-		bLoggedDrawStatusReached = true;
-		UE_LOG(LogTemp, Warning,
-			TEXT("[NCPlusHUDWidget_CTFFlagStatus] DrawStatusMessage reached (widget IS drawing). MyTeam=%d"),
-			MyTeam);
-	}
-
 	// --- Two animation alphas (yellow uses parent's AnimationAlpha; red uses our own). ---
 	AnimationAlpha       += DeltaTime * 3.f;
 	EnemyAnimationAlpha  += DeltaTime * 3.f;
@@ -360,18 +335,6 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawStatusMessage(float DeltaTime)
 	const bool bEnemyHasFlag = (OurFlagHolder != nullptr
 		&& OurFlagHolder->Team != nullptr
 		&& OurFlagHolder->Team->TeamIndex != MyTeam);
-
-	// Diagnostic: confirm enemy-has-flag detection fires (one-shot per process).
-	static bool bLoggedEnemyHasFlag = false;
-	if (bEnemyHasFlag && !bLoggedEnemyHasFlag)
-	{
-		bLoggedEnemyHasFlag = true;
-		UE_LOG(LogTemp, Warning,
-			TEXT("[NCPlusHUDWidget_CTFFlagStatus] DrawStatusMessage: enemy-has-flag fired. MyTeam=%d, Holder=%s, Holder.Team.Index=%d"),
-			MyTeam,
-			OurFlagHolder ? *OurFlagHolder->PlayerName : TEXT("NULL"),
-			OurFlagHolder && OurFlagHolder->Team ? OurFlagHolder->Team->TeamIndex : -1);
-	}
 
 	if (bEnemyHasFlag)
 	{
