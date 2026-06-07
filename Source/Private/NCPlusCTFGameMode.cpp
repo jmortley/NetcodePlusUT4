@@ -24,6 +24,7 @@
 #include "UTFlag.h"
 #include "NPPlayerController.h"
 #include "NCPlusCTFHUD.h"
+#include "WarmupRoamMutator.h"
 #include "CTFStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "NCPlusCTFOTInfo.h"
@@ -88,6 +89,12 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+
+	// Auto-add the warmup-roam mutator (all NCPlusCTF, incl. iCTF). `mutate warmup`
+	// lets players roam the map invulnerable + fire-disabled during warmup; it strips
+	// itself the instant the match leaves WaitingToStart (see the mutator's
+	// NotifyMatchStateChange), so it can never carry into live play.
+	AddMutatorClass(AWarmupRoamMutator::StaticClass());
 
 	// A bot-hosted PUG passes ?PugId=N — gate auto-pause-on-drop to real PUGs.
 	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
