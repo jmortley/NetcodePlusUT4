@@ -43,8 +43,13 @@ namespace TeamGlicko2 {
     public:
         /// Process a match and update all player ratings
         /// @param match Match result with player ratings and performance scores
+        /// @param bLobbyImpactBlend When true (ElimPlus/Wipeout), z-score perf
+        ///        across BOTH teams and blend it into the Glicko score
+        ///        (eff = kCarryWeight*logistic(kPerfSlope*z) + (1-kCarryWeight)*W/L).
+        ///        When false (default; 1v1 Duel/ShaftArena + CTF), use the
+        ///        original within-team multiplicative performance scaler.
         /// This function modifies the rating member of each MatchPlayer in place
-        static void ProcessMatch(MatchResult& match);
+        static void ProcessMatch(MatchResult& match, bool bLobbyImpactBlend = false);
 
         /// Update a single player's rating based on team outcome
         /// This implements the single-opponent Glicko-2 update with sign-aware performance scaling

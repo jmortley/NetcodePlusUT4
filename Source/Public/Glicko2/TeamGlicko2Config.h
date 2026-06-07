@@ -83,6 +83,20 @@ namespace TeamGlicko2 {
     /// Small constant to avoid division by zero in standard deviation
     static const double kEpsilon = 1e-6;
 
+    // LOCAL MOD (ElimPlus/Wipeout carry-rework 2026-06): lobby-impact blend.
+    // Used by ProcessMatch ONLY when called with bLobbyImpactBlend=true (the
+    // team-ELIMINATION modes: ElimPlus + Wipeout). 1v1 modes (Duel, ShaftArena)
+    // and CTF/iCTF call ProcessMatch without it and keep the original within-team
+    // path -- a lobby blend is meaningless for 1v1 and unvalidated for CTF. The
+    // per-player Glicko score becomes
+    //   eff = kCarryWeight*logistic(kPerfSlope*z_lobby) + (1-kCarryWeight)*W/L
+    // (with ToPerfScore on the PPR basis Kills+Damage/100), replacing the
+    // within-team multiplicative scaler (f = 1 + kBeta*sign*z) that left good
+    // players stuck near the seed. Validated on 90k Abs-Elim + UTPugs ElimPlus
+    // matches (Spearman 0.937 vs the PPR board; DayX #1, tron top-10, DELUX last).
+    static const double kCarryWeight = 0.9;   // share of score from cross-lobby impact vs team W/L
+    static const double kPerfSlope = 2.5;     // logistic steepness of the lobby-impact map
+
 
     // ========== Optional Rating Change Clamping ==========
 

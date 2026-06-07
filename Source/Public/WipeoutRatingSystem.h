@@ -24,8 +24,10 @@
 
 class UWorld;
 
-/** Per-player perf score input to a round update. Tron's library expects
- *  `Kills*1 + Deaths*(-1) + Damage*(1/220)`. */
+/** Per-player perf score input to a round update. PPR basis: Kills + Damage/100
+ *  (no deaths term), shared with the ElimPlus carry-rating recipe; z-scored
+ *  across the lobby in TeamGlicko2System when ProcessMatch is called with
+ *  bLobbyImpactBlend. */
 struct FWipeoutPlayerRoundPerf
 {
 	FString UniqueId;
@@ -35,7 +37,9 @@ struct FWipeoutPlayerRoundPerf
 
 	double ToPerfScore() const
 	{
-		return double(Kills) - double(Deaths) + double(Damage) / 220.0;
+		// PPR basis: kills + damage/100 (shared carry recipe; deaths excluded).
+		// See the ElimPlus validation + the lobby-impact blend in ProcessMatch.
+		return double(Kills) + double(Damage) / 100.0;
 	}
 };
 

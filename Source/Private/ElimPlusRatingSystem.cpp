@@ -307,7 +307,7 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 		}
 	}
 
-	TeamGlicko2System::ProcessMatch(Match);
+	TeamGlicko2System::ProcessMatch(Match, /*bLobbyImpactBlend=*/true);
 
 	// Write-back: only update cache for IDs that were already in it (= humans).
 	auto WriteBack = [this, &CachedIdsBefore](const std::vector<MatchPlayer>& Team, const TArray<FElimPlusPlayerRoundPerf>& Perfs)

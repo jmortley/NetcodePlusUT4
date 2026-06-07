@@ -15,7 +15,17 @@
 #endif
 
 namespace TeamGlicko2 {
-    void TeamGlicko2System::ProcessMatch(MatchResult& match) {
+
+    // LOCAL MOD (carry-rework): map a lobby-wide perf z-score to a (0,1) impact
+    // via a logistic, clamped so a large kPerfSlope can't overflow exp().
+    static double LobbyImpact(double zScore) {
+        double x = kPerfSlope * zScore;
+        if (x > 60.0) x = 60.0;
+        else if (x < -60.0) x = -60.0;
+        return 1.0 / (1.0 + std::exp(-x));
+    }
+
+    void TeamGlicko2System::ProcessMatch(MatchResult& match, bool bLobbyImpactBlend) {
         // Step 1: Extract player ratings for each team
         std::vector<PlayerRating> teamARatings;
         std::vector<PlayerRating> teamBRatings;
@@ -32,10 +42,41 @@ namespace TeamGlicko2 {
             teamBPerformance.push_back(player.performanceScore);
         }
 
-        // Step 2: Compute team aggregated ratings
+        // Step 2: Compute team aggregated ratings (each team = one opponent)
         TeamRatingStats statsA = TeamRatingAggregator::ComputeTeamStats(teamARatings);
         TeamRatingStats statsB = TeamRatingAggregator::ComputeTeamStats(teamBRatings);
 
+        // LOCAL MOD (ElimPlus/Wipeout carry-rework): carry-aware lobby-impact
+        // blend (see TeamGlicko2Config.h). z-score perf across the WHOLE LOBBY so
+        // a stud who tops the lobby scores high regardless of teammates, then
+        // blend that impact into the Glicko SCORE:
+        //   eff = kCarryWeight*impact + (1-kCarryWeight)*outcome
+        // Passing zScore=0 to UpdatePlayerRating makes its within-team scaler a
+        // no-op (factor 1.0), so the rating moves purely on the blended score.
+        if (bLobbyImpactBlend) {
+            std::vector<double> lobbyPerf;
+            lobbyPerf.reserve(teamAPerformance.size() + teamBPerformance.size());
+            for (double p : teamAPerformance) lobbyPerf.push_back(p);
+            for (double p : teamBPerformance) lobbyPerf.push_back(p);
+            std::vector<PlayerWeight> lobbyW = PerformanceWeighting::ComputeZScores(lobbyPerf);
+
+            const size_t nA = match.teamA.size();
+            for (size_t i = 0; i < match.teamA.size(); ++i) {
+                double eff = kCarryWeight * LobbyImpact(lobbyW[i].zScore)
+                           + (1.0 - kCarryWeight) * match.scoreA;
+                match.teamA[i].rating = UpdatePlayerRating(
+                    match.teamA[i].rating, statsB.mu, statsB.phi, eff, 0.0);
+            }
+            for (size_t i = 0; i < match.teamB.size(); ++i) {
+                double eff = kCarryWeight * LobbyImpact(lobbyW[nA + i].zScore)
+                           + (1.0 - kCarryWeight) * match.scoreB;
+                match.teamB[i].rating = UpdatePlayerRating(
+                    match.teamB[i].rating, statsA.mu, statsA.phi, eff, 0.0);
+            }
+            return;
+        }
+
+        // ---- Original within-team multiplicative path (1v1 Duel/ShaftArena, CTF) ----
         // Step 3: Compute performance z-scores for each team
         std::vector<PlayerWeight> weightsA = PerformanceWeighting::ComputeZScores(teamAPerformance);
         std::vector<PlayerWeight> weightsB = PerformanceWeighting::ComputeZScores(teamBPerformance);

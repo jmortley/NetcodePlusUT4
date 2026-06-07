@@ -24,8 +24,10 @@
 class UWorld;
 class AElimPlusStatsReplicator;
 
-/** Per-player perf score input to a round update. Tron's library expects
- *  `Kills*1 + Deaths*(-1) + Damage*(1/220)`. */
+/** Per-player perf score input to a round update. PPR basis: Kills + Damage/100
+ *  (matches the lifetime-PPR formula + the validated carry-rating recipe; no
+ *  deaths term). Fed as the per-player performanceScore that TeamGlicko2System
+ *  z-scores across the lobby when ProcessMatch is called with bLobbyImpactBlend. */
 struct FElimPlusPlayerRoundPerf
 {
 	FString UniqueId;
@@ -35,7 +37,10 @@ struct FElimPlusPlayerRoundPerf
 
 	double ToPerfScore() const
 	{
-		return double(Kills) - double(Deaths) + double(Damage) / 220.0;
+		// PPR basis: kills + damage/100. Validated on 90k Abs-Elim + UTPugs
+		// ElimPlus matches (Spearman 0.937 vs the community PPR board). Deaths
+		// excluded on purpose; a deaths penalty mis-ranked known studs (tron->#27).
+		return double(Kills) + double(Damage) / 100.0;
 	}
 };
 

@@ -252,7 +252,7 @@ void FWipeoutRatingSystem::ProcessRound(const FWipeoutRoundResult& Result)
 		}
 	}
 
-	TeamGlicko2System::ProcessMatch(Match);
+	TeamGlicko2System::ProcessMatch(Match, /*bLobbyImpactBlend=*/true);
 
 	auto WriteBack = [this, &CachedIdsBefore](const std::vector<MatchPlayer>& Team, const TArray<FWipeoutPlayerRoundPerf>& Perfs)
 	{
