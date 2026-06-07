@@ -150,6 +150,17 @@ namespace NCPlusHUDFonts
 			{ TEXT("Positec"),         TEXT("/Game/RestrictedAssets/Fonts/fntPositec36.fntPositec36"),                      nullptr },
 			{ TEXT("Positec Small"),   TEXT("/Game/RestrictedAssets/Fonts/fntPositec14.fntPositec14"),                      nullptr },
 			{ TEXT("Extreme"),         TEXT("/Game/RestrictedAssets/Fonts/fntExtreme.fntExtreme"),                          nullptr },
+			// External Google Fonts (OFL). Import each .ttf in the editor the same
+			// way Lato was (Runtime UFont — NOT an Offline/Composite/FontFace, which
+			// is what made Rajdhani fail to load), name the asset to match the path
+			// below, and drop it in /Game/RestrictedAssets/Fonts/. Until the asset
+			// exists Resolve() falls back (one "[NCPlusHUDFonts] Failed to load" log
+			// line); import before shipping a build so the picker has no dead entries.
+			{ TEXT("Inter"),           TEXT("/Game/RestrictedAssets/Fonts/Inter.Inter"),                                    nullptr },
+			{ TEXT("JetBrains Mono"),  TEXT("/Game/RestrictedAssets/Fonts/JetBrainsMono.JetBrainsMono"),                    nullptr },
+			{ TEXT("Bebas Neue"),      TEXT("/Game/RestrictedAssets/Fonts/BebasNeue.BebasNeue"),                            nullptr },
+			{ TEXT("Oswald"),          TEXT("/Game/RestrictedAssets/Fonts/Oswald.Oswald"),                                  nullptr },
+			{ TEXT("Russo One"),       TEXT("/Game/RestrictedAssets/Fonts/RussoOne.RussoOne"),                              nullptr },
 		};
 		return Table;
 	}
