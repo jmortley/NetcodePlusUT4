@@ -142,6 +142,19 @@ void ANCPlusCTFHUD::BeginPlay()
 			Ours->LeftEdgePadding        = StockCDO->LeftEdgePadding;
 			Ours->RightEdgePadding       = StockCDO->RightEdgePadding;
 			Ours->TeamPositions          = StockCDO->TeamPositions;
+			// TeamPositions is a BP-only UPROPERTY (never set in C++). The engine's
+			// DrawIndicators gates its WHOLE loop — silhouettes AND the carrier
+			// indicator — on TeamPositions.IsValidIndex(Team), so if the BP CDO
+			// didn't carry two entries the carrier indicator can never draw. Seed
+			// defaults when absent. The values only position the silhouettes (which
+			// the ctf_flag_status alias can hide); the carrier indicator computes its
+			// own world-projected position and ignores them.
+			if (Ours->TeamPositions.Num() < 2)
+			{
+				Ours->TeamPositions.Empty();
+				Ours->TeamPositions.Add(FVector2D(-150.f, 30.f));
+				Ours->TeamPositions.Add(FVector2D( 150.f, 30.f));
+			}
 			++CopiesApplied;
 			break;
 		}

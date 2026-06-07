@@ -42,6 +42,13 @@ class NETCODEPLUS_API UNCPlusHUDWidget_CTFFlagStatus : public UUTHUDWidget_CTFFl
 	 *  own nchud alias. */
 	virtual void DrawStatusMessage(float DeltaTime) override;
 
+	/** Top-of-screen flag silhouettes. Overridden so the `ctf_flag_status` alias
+	 *  hides ONLY the silhouettes — the carrier indicator and banners live on the
+	 *  same widget and must keep drawing when the silhouettes are hidden. */
+	virtual void DrawFlagStatus(class AUTCTFGameState* GameState, FVector PlayerViewPoint,
+		FRotator PlayerViewRotation, uint8 TeamNum, FVector2D IndicatorPosition,
+		class AUTCTFFlagBase* FlagBase, class AUTFlag* Flag, class AUTPlayerState* FlagHolder) override;
+
 protected:
 	/** Pulse alpha for the red enemy-has-flag banner. Tracked separately from
 	 *  the parent's AnimationAlpha (which drives the yellow banner) so the

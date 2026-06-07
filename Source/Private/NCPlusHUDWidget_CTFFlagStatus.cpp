@@ -272,6 +272,28 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagWorld(AUTCTFGameState* GameState,
 }
 
 // =============================================================================
+// DrawFlagStatus - top-of-screen team flag silhouettes.
+//
+// The engine draws these for both teams from DrawIndicators. We override only to
+// gate them on the `ctf_flag_status` alias, so a user who hides the silhouettes
+// (e.g. because they run a custom scorebar) does NOT also lose the carrier
+// indicator or the status banners — all three share this single widget, and the
+// old widget-level hide killed everything at once.
+// =============================================================================
+void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagStatus(AUTCTFGameState* GameState,
+	FVector PlayerViewPoint, FRotator PlayerViewRotation, uint8 TeamNum,
+	FVector2D IndicatorPosition, AUTCTFFlagBase* FlagBase, AUTFlag* Flag,
+	AUTPlayerState* FlagHolder)
+{
+	static const FName SilhouetteAlias(TEXT("ctf_flag_status"));
+	const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(SilhouetteAlias);
+	if (Elem && Elem->bHidden) return;
+
+	Super::DrawFlagStatus(GameState, PlayerViewPoint, PlayerViewRotation, TeamNum,
+		IndicatorPosition, FlagBase, Flag, FlagHolder);
+}
+
+// =============================================================================
 // DrawStatusMessage - both banners.
 //
 // Engine version only ever rendered YouHaveFlagText. We also render

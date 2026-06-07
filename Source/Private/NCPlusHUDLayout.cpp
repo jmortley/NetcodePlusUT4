@@ -639,13 +639,18 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")),      false, ENCPlusHUDAnchor::TopCenter);
 			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")),   false, ENCPlusHUDAnchor::BottomLeft);
 			T.Emplace(TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")),  false, ENCPlusHUDAnchor::TopCenter);
-			// CTF flag status (the team flag silhouettes either side of the
-			// scorebar). NCPlus subclass UNCPlusHUDWidget_CTFFlagStatus replaces
-			// the engine widget so DrawFlagWorld + DrawStatusMessage can route
-			// through nchud (carrier indicator + banners). Widget-root position
-			// here controls the top-center silhouettes via ApplyLayoutToWidgets;
-			// the carrier indicator and banners have their own aliases (below).
-			T.Emplace(TEXT("ctf_flag_status"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_CTFFlagStatus"),                       FText::FromString(TEXT("CTF Flag Silhouettes")), false, ENCPlusHUDAnchor::TopCenter);
+			// CTF flag status — the top-of-screen team flag silhouettes (DrawFlagStatus).
+			// IMPORTANT: this is a DRAW-CALL alias (empty ClassPath), NOT a widget alias.
+			// The NCPlus subclass UNCPlusHUDWidget_CTFFlagStatus hosts THREE independent
+			// pieces on one widget — silhouettes (this alias), the carrier indicator
+			// (ctf_carrier_indicator), and the banners (ctf_you_have_flag /
+			// ctf_enemy_has_flag). When this mapped to the widget CLASS, hiding the
+			// silhouettes made ApplyLayoutToWidgets SetHidden the entire widget, which
+			// silently killed the carrier indicator AND both banners too (the render
+			// loop skips hidden widgets before any Draw runs). As a draw-call alias the
+			// widget is never hidden by layout; the subclass's DrawFlagStatus override
+			// honors this alias's hidden flag to drop ONLY the silhouettes.
+			T.Emplace(TEXT("ctf_flag_status"),  FString(),                                                                  FText::FromString(TEXT("CTF Flag Silhouettes")), true, ENCPlusHUDAnchor::TopCenter);
 			// Three CTF sub-element aliases routed through the NCPlus subclass's
 			// Draw* overrides (NOT through ApplyLayoutToWidgets). Empty ClassPath
 			// keeps GetAliasForClass from colliding with ctf_flag_status above;
