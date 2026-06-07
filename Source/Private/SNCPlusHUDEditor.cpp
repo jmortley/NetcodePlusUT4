@@ -184,8 +184,11 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.bHasFontPicker = true;
 			Row.FontChoices    = NCPlusHUDFonts::GetChoices();
 		}
-		// Other text-rendering opt-in widgets get font selection too.
-		if (Alias == TEXT("accuracy") || Alias == TEXT("heal_ability") || Alias == TEXT("speedometer"))
+		// Other text-rendering opt-in widgets get font selection too. The CTF
+		// banners (you-have-flag / enemy-has-flag) are text, so they opt in here;
+		// DrawOneBanner honors the choice via NCPlusHUDFonts::Resolve.
+		if (Alias == TEXT("accuracy") || Alias == TEXT("heal_ability") || Alias == TEXT("speedometer")
+			|| Alias == TEXT("ctf_you_have_flag") || Alias == TEXT("ctf_enemy_has_flag"))
 		{
 			Row.bHasFontPicker = true;
 			Row.FontChoices    = NCPlusHUDFonts::GetChoices();

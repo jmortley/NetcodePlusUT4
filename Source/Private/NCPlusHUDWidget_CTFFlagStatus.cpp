@@ -395,6 +395,7 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawOneBanner(FName Alias, const FText& Tex
 	const bool SavedShadow         = FlagStatusText.bDrawShadow;
 	const FVector2D SavedShadowDir = FlagStatusText.ShadowDirection;
 	const FLinearColor SavedShadow_C = FlagStatusText.ShadowColor;
+	UFont* const SavedFont           = FlagStatusText.Font;
 
 	// Position relative to widget root (RenderObj_Text re-adds RenderPosition).
 	FlagStatusText.Position = FVector2D(ScreenX - RenderPosition.X, ScreenY - RenderPosition.Y);
@@ -402,6 +403,9 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawOneBanner(FName Alias, const FText& Tex
 	FlagStatusText.RenderScale    = SavedScale * LayoutScale * PopInScale;
 	FlagStatusText.RenderOpacity  = PulseAlpha * LayoutOpacity;
 	FlagStatusText.Text           = Text;
+	// Per-banner font override (editor "Font" dropdown -> Extras["font"]). Falls
+	// back to the BP-provided FlagStatusText.Font when left on "Default".
+	FlagStatusText.Font           = NCPlusHUDFonts::Resolve(Alias, UTHUDOwner, FlagStatusText.Font);
 	FlagStatusText.bDrawShadow    = true;
 	FlagStatusText.ShadowDirection = FVector2D(1.f, 2.f);
 	FlagStatusText.ShadowColor    = FLinearColor::Black;
@@ -413,6 +417,7 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawOneBanner(FName Alias, const FText& Tex
 	FlagStatusText.RenderScale    = SavedScale;
 	FlagStatusText.RenderOpacity  = SavedOpacity;
 	FlagStatusText.Text           = SavedText;
+	FlagStatusText.Font           = SavedFont;
 	FlagStatusText.bDrawShadow    = SavedShadow;
 	FlagStatusText.ShadowDirection = SavedShadowDir;
 	FlagStatusText.ShadowColor    = SavedShadow_C;
