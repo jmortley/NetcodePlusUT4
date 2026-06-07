@@ -58,7 +58,8 @@ namespace NCHUDEdit
 			return TEXT("Game Mode");
 		}
 		if (Alias == TEXT("ctf_flag_status") || Alias == TEXT("ctf_carrier_indicator")
-			|| Alias == TEXT("ctf_you_have_flag") || Alias == TEXT("ctf_enemy_has_flag"))
+			|| Alias == TEXT("ctf_you_have_flag") || Alias == TEXT("ctf_enemy_has_flag")
+			|| Alias == TEXT("crosshair_flag_grab"))
 		{
 			return TEXT("CTF");
 		}
@@ -629,6 +630,14 @@ void SNCPlusHUDEditor::OnOffsetYCommitted(float NewVal, ETextCommit::Type, FName
 ECheckBoxState SNCPlusHUDEditor::GetHiddenState(FName Alias) const
 {
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	// crosshair_flag_grab is a default-OFF feature: with no layout entry the flash
+	// is suppressed by NCPlusCTFHUD, so the Hide box must read CHECKED until the
+	// user opts in. Unchecking Hide then writes a visible entry, which the HUD
+	// honors (the only state where the flash draws is entry-present + not-hidden).
+	if (Alias == TEXT("crosshair_flag_grab"))
+	{
+		return (!E || E->bHidden) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+	}
 	return (E && E->bHidden) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
 }
 

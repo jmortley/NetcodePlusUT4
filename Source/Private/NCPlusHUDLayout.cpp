@@ -665,6 +665,14 @@ namespace NCPlusHUDAliases
 			// TopCenter with a pixel offset below the scorebar so the score and
 			// alarm read as a single top cluster.
 			T.Emplace(TEXT("ctf_enemy_has_flag"),    FString(),                                                                  FText::FromString(TEXT("CTF \"Enemy Has Your Flag\"")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 110.f));
+			// Engine crosshair flag-grab flash: the team-colored flag that balloons
+			// over the crosshair for 3s after YOU grab a flag. It's drawn by the
+			// stock UTHUDWidget_WeaponCrosshair (which NCPlusCTFHUD does NOT subclass)
+			// off AUTHUD::LastFlagGrabTime — entirely separate from the flag-status
+			// widget above. Default OFF: NCPlusCTFHUD::DrawHUD suppresses it unless
+			// this entry exists and is visible. On/off only — the flash is engine-
+			// drawn at a fixed crosshair offset, so offset/scale/color aren't honored.
+			T.Emplace(TEXT("crosshair_flag_grab"),   FString(),                                                                  FText::FromString(TEXT("CTF Grab Flash (crosshair)")), true, ENCPlusHUDAnchor::Center);
 			// C++-drawn pieces (Phase 3.5).
 			// Portrait strips: TopCenter anchor with offsets that approximately
 			// match where the renderers' StockXRed / StockXBlue fallback puts them

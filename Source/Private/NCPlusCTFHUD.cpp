@@ -188,7 +188,25 @@ void ANCPlusCTFHUD::DrawHUD()
 		DrawTeamScoreBar();
 	}
 
+	// Suppress the engine's crosshair flag-grab flash unless the user opted in via
+	// nchud. The stock UTHUDWidget_WeaponCrosshair (which we don't strip/subclass)
+	// draws a team-colored flag ballooning over the crosshair for 3s after a grab,
+	// keyed off AUTHUD::LastFlagGrabTime (UTHUDWidget_WeaponCrosshair.cpp). That
+	// field is read in exactly one place engine-wide (the flash), so stashing it to
+	// a far-past value across the widget pass disables only the flash, with no other
+	// side effects; restored immediately after Super. Default OFF — opt in by adding
+	// a visible `crosshair_flag_grab` layout entry (CTF section in nchud).
+	const FNCPlusHUDElement* GrabFlashElem = FNCPlusHUDLayout::GetLive().Find(TEXT("crosshair_flag_grab"));
+	const bool bShowGrabFlash = (GrabFlashElem != nullptr && !GrabFlashElem->bHidden);
+	const float SavedFlagGrabTime = LastFlagGrabTime;
+	if (!bShowGrabFlash)
+	{
+		LastFlagGrabTime = -1000.f;
+	}
+
 	Super::DrawHUD();
+
+	LastFlagGrabTime = SavedFlagGrabTime;
 
 	// Spectator banner — drawn after Super so it sits on top of any stock UI
 	// in the same screen region. Suppressed while the scoreboard is open.
