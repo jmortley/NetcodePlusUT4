@@ -4,6 +4,7 @@
 // (listen-server / standalone). 7 columns: Name | K | D | DMG | PPR | ELO | LG_Acc | Ping.
 
 #include "ElimPlusScoreboard.h"
+#include "NCPlusScoreboardHost.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -333,6 +334,10 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 		DrawText(FText::FromString(FString::Chr(0x25B6)), NameX - 14.f * RenderScale, NameY, UTHUDOwner->TinyFont, RenderScale, 1.0f,
 			FLinearColor(0.3f, 1.f, 0.3f, 1.f), ETextHorzPos::Left, ETextVertPos::Center);
 	}
+
+	// Match-host badge — tags the player who pressed Enter to start the match.
+	NCPlusScoreboardHost::DrawHostMarker(this, UTHUDOwner, PlayerState, UTGameState,
+		NameX + NameXL * NameScaling + 8.f * RenderScale, NameY, RenderScale);
 
 	// HP/Armor bars for alive teammates (same pattern as Wipeout)
 	AUTCharacter* UTC = PlayerState->GetUTCharacter();

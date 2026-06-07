@@ -1,5 +1,6 @@
 // WipeoutScoreboard — Portrait-row scoreboard for Wipeout game mode
 #include "WipeoutScoreboard.h"
+#include "NCPlusScoreboardHost.h"
 #include "NCPlusCTFGameMode.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
@@ -353,6 +354,11 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 		DrawText(FText::FromString(TEXT("\u25B6")), NameX - 14.f * RenderScale, NameY, UTHUDOwner->TinyFont, RenderScale, 1.0f,
 			FLinearColor(0.3f, 1.f, 0.3f, 1.f), ETextHorzPos::Left, ETextVertPos::Center);
 	}
+
+	// Match-host badge \u2014 tags the player who pressed Enter to start the match,
+	// just right of their name. Shared across every NetcodePlus scoreboard.
+	NCPlusScoreboardHost::DrawHostMarker(this, UTHUDOwner, PlayerState, UTGameState,
+		NameX + NameXL * NameScaling + 8.f * RenderScale, NameY, RenderScale);
 
 	// ---- HP / Armor bars (for alive teammates, like Showdown) ----
 	AUTCharacter* UTC = PlayerState->GetUTCharacter();

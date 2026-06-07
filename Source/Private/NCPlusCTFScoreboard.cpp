@@ -1,5 +1,6 @@
 // NCPlusCTFScoreboard.cpp — K/D/Eff/Acc/C/G/R/Ping columns for CTF.
 #include "NCPlusCTFScoreboard.h"
+#include "NCPlusScoreboardHost.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTPlayerController.h"
@@ -606,6 +607,13 @@ void UNCPlusCTFScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState,
 			YOffset + 18.f*RenderScale, 30.f*RenderScale, 24.f*RenderScale,
 			236, 136, 30, 24, 1.0, FLinearColor::White, FVector2D(0.0f, 0.5f));
 	}
+
+	// Match-host badge — tags the player who pressed Enter to start the match,
+	// past the name (and the friend icon when present). Shared helper.
+	NCPlusScoreboardHost::DrawHostMarker(this, UTHUDOwner, PlayerState, UTGameState,
+		XOffset + (ScaledCellWidth * ColumnHeaderPlayerX) + NameSize.X * NameScaling
+			+ (PlayerState->bIsFriend ? 40.f : 8.f) * RenderScale,
+		YOffset + ColumnY, RenderScale);
 	if (UTGameState && UTGameState->HasMatchStarted())
 	{
 		if (PlayerState->bPendingTeamSwitch && !PlayerState->bIsABot)

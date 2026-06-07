@@ -4,6 +4,7 @@
 // is noise in a 1v1 beam duel.
 
 #include "NCShaftArenaScoreboard.h"
+#include "NCPlusScoreboardHost.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
 #include "UTPlayerState.h"
@@ -274,6 +275,13 @@ void UNCShaftArenaScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 			YOffset + 18.f*RenderScale, 30.f*RenderScale, 24.f*RenderScale,
 			236, 136, 30, 24, 1.0, FLinearColor::White, FVector2D(0.0f, 0.5f));
 	}
+
+	// Match-host badge — tags the player who pressed Enter to start the match,
+	// past the name (and the friend icon when present). Shared helper.
+	NCPlusScoreboardHost::DrawHostMarker(this, UTHUDOwner, PlayerState, UTGameState,
+		XOffset + (ScaledCellWidth * ColumnHeaderPlayerX) + NameSize.X * NameScaling
+			+ (PlayerState->bIsFriend ? 40.f : 8.f) * RenderScale,
+		YOffset + ColumnY, RenderScale);
 	if (UTGameState && UTGameState->HasMatchStarted())
 	{
 		if (PlayerState->bPendingTeamSwitch && !PlayerState->bIsABot)
