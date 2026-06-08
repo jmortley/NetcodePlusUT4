@@ -1,4 +1,5 @@
 #include "ShockDomGameMode.h"
+#include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -110,6 +111,14 @@ void AShockDomGameMode::BeginPlay()
 	{
 		SpawnControlPoints();
 	}
+}
+
+void AShockDomGameMode::PostLogin(APlayerController* NewPlayer)
+{
+	Super::PostLogin(NewPlayer);
+
+	// Early plugin-version check — kicks mismatched clients within 10s of join.
+	NCPlusVersionGate::SpawnFor(NewPlayer);
 }
 
 

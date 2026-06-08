@@ -25,6 +25,7 @@
 #include "NPPlayerController.h"
 #include "NCPlusCTFHUD.h"
 #include "WarmupRoamMutator.h"
+#include "NCPlusVersionGate.h"
 #include "CTFStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "NCPlusCTFOTInfo.h"
@@ -195,6 +196,12 @@ void ANCPlusCTFGameMode::BeginPlay()
 void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+
+	// Early version check — kicks outdated/missing-plugin clients within 10s of
+	// PostLogin, BEFORE they can play meaningful warmup. Replaces the BP check
+	// that fires at match start (which let them roam the map during warmup,
+	// breaking PUGs when they got kicked at go-time). Skips bots + listen host.
+	NCPlusVersionGate::SpawnFor(NewPlayer);
 
 	if (!HasAuthority() || !NewPlayer) return;
 

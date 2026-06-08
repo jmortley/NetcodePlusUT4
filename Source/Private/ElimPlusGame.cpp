@@ -1,4 +1,5 @@
 #include "ElimPlusGame.h"
+#include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
@@ -306,6 +307,9 @@ void AElimPlusGame::HandleMatchHasStarted()
 void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+
+	// Early plugin-version check — kicks mismatched clients within 10s of join.
+	NCPlusVersionGate::SpawnFor(NewPlayer);
 
 	// Server-only: pull this player's rating from Mods.db into the cache so it's
 	// ready before the first round ends. Late joiners who arrive mid-match also

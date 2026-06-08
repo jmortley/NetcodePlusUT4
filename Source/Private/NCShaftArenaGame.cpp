@@ -4,6 +4,7 @@
 // auto-balance / TeamInfo plumbing for free.
 
 #include "NCShaftArenaGame.h"
+#include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
@@ -168,6 +169,9 @@ void ANCShaftArenaGame::BeginPlay()
 void ANCShaftArenaGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+
+	// Early plugin-version check — kicks mismatched clients within 10s of join.
+	NCPlusVersionGate::SpawnFor(NewPlayer);
 	if (Role != ROLE_Authority || !RatingSystem || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (!PS) return;

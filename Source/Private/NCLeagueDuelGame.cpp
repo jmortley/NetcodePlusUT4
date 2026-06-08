@@ -1,6 +1,7 @@
 // NCLeagueDuelGame.cpp — fairness-first 1v1 spawn picker + Glicko2 ELO + stats hooks.
 
 #include "NCLeagueDuelGame.h"
+#include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "UTPlayerStart.h"
 #include "UTPickupInventory.h"
@@ -126,6 +127,9 @@ void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options,
 void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+
+	// Early plugin-version check — kicks mismatched clients within 10s of join.
+	NCPlusVersionGate::SpawnFor(NewPlayer);
 
 	if (Role != ROLE_Authority || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
