@@ -4,6 +4,10 @@
 #include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
+#include "UTPlayerController.h"
+#include "UTCharacter.h"
+#include "UTGameState.h"
+#include "Engine/Canvas.h"
 #include "Engine/Font.h"
 #include "Json.h"
 #include "JsonUtilities.h"
@@ -704,6 +708,18 @@ namespace NCPlusHUDAliases
 			// them apart in the visual editor.
 			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
 			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
+			// Full-screen tint when the local pawn takes damage. Polls Health+Armor
+			// each frame; on a decrease, stamps the time and tints the screen for
+			// `flash_duration` seconds. Extras: color_text (tint color, default red),
+			// flash_duration (seconds, default 0.30), opacity (multiplier, default 1.0),
+			// hidden. Anchor/offset/scale ignored — the draw covers the entire viewport.
+			T.Emplace(TEXT("damage_flash"),     FString(),                                                                       FText::FromString(TEXT("Damage Flash (screen tint)")), true, ENCPlusHUDAnchor::Center);
+			// Small server identification line (server name from GameState->ServerName).
+			// Default OFF: no layout entry = no draw, so it stays invisible until the
+			// user opts in by adding the entry + unchecking Hide. Useful for streamers
+			// who want server attribution baked into clips. Honors font / font_scale /
+			// color_text / opacity.
+			T.Emplace(TEXT("server_info"),      FString(),                                                                       FText::FromString(TEXT("Server Name Plate")),  true,  ENCPlusHUDAnchor::TopLeft,     FVector2D(20.f, 14.f));
 			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),  true,  ENCPlusHUDAnchor::TopCenter);
 			// Top-right "Score: N" + "KDA: K/D/A" mini panel. Drawn inline by
 			// ElimPlusHUD::DrawHUD and WipeoutHUD::DrawHUD. Default offset
@@ -837,6 +853,117 @@ namespace NCPlusHUDDrawCall
 	{
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
 		return E ? E->Anchor : NCPlusHUDAliases::GetStockAnchor(Alias);
+	}
+
+	// =============================================================================
+	// Damage flash
+	// =============================================================================
+	//
+	// Polls the local pawn's (Health + Armor) sum each frame and stamps a flash
+	// time on a decrease. Static state is single-client safe — UT4 has no
+	// split-screen and the HUD only ever runs for the local client. Resets the
+	// cached HP when the world changes (map travel / PIE re-load) so the first
+	// frame of a new match doesn't false-trigger.
+	void DrawDamageFlash(AUTHUD* HUD)
+	{
+		if (HUD == nullptr || HUD->Canvas == nullptr || HUD->UTPlayerOwner == nullptr)
+		{
+			return;
+		}
+
+		static TWeakObjectPtr<UWorld> SCachedWorld;
+		static int32 SLastHPSum = -1;
+		static float SLastFlashTime = -1.f;
+
+		UWorld* World = HUD->GetWorld();
+		if (SCachedWorld.Get() != World)
+		{
+			SCachedWorld = World;
+			SLastHPSum = -1;
+			SLastFlashTime = -1.f;
+		}
+
+		// Read pawn HP+Armor. Spectators / dead = no pawn = reset cache and bail.
+		AUTCharacter* MyChar = Cast<AUTCharacter>(HUD->UTPlayerOwner->GetViewTarget());
+		if (MyChar == nullptr || MyChar->IsDead())
+		{
+			SLastHPSum = -1;
+			return;
+		}
+		const int32 NowHPSum = MyChar->Health + MyChar->GetArmorAmount();
+		if (SLastHPSum >= 0 && NowHPSum < SLastHPSum && World != nullptr)
+		{
+			SLastFlashTime = World->GetTimeSeconds();
+		}
+		SLastHPSum = NowHPSum;
+
+		// Layout consult. No entry / hidden = feature off; cache continues to
+		// track HP so toggling on mid-match doesn't false-flash from a stale baseline.
+		const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(TEXT("damage_flash"));
+		if (Elem == nullptr || Elem->bHidden || SLastFlashTime < 0.f || World == nullptr)
+		{
+			return;
+		}
+
+		const float Duration = FMath::Max(0.05f, Elem->GetExtraFloat(TEXT("flash_duration"), 0.30f));
+		const float Elapsed  = World->GetTimeSeconds() - SLastFlashTime;
+		if (Elapsed >= Duration)
+		{
+			return;
+		}
+
+		const FLinearColor TintColor = Elem->GetExtraColor(TEXT("color_text"), FLinearColor(1.f, 0.f, 0.f, 1.f));
+		const float OpacityMul       = FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f);
+		// Linear fade from full alpha at t=0 down to 0 at t=Duration. Cap the peak
+		// at the tint color's own alpha so an "almost transparent red" stays subtle.
+		const float Alpha = FMath::Clamp(TintColor.A, 0.f, 1.f) * OpacityMul * (1.f - Elapsed / Duration);
+		if (Alpha <= 0.001f)
+		{
+			return;
+		}
+
+		UCanvas* C = HUD->Canvas;
+		C->SetLinearDrawColor(FLinearColor(TintColor.R, TintColor.G, TintColor.B, Alpha));
+		C->DrawTile(C->DefaultTexture, 0.f, 0.f, C->ClipX, C->ClipY, 0.f, 0.f, 1.f, 1.f, BLEND_Translucent);
+	}
+
+	// =============================================================================
+	// Server info name plate
+	// =============================================================================
+	void DrawServerInfo(AUTHUD* HUD)
+	{
+		if (HUD == nullptr || HUD->Canvas == nullptr)
+		{
+			return;
+		}
+		const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(TEXT("server_info"));
+		if (Elem == nullptr || Elem->bHidden)
+		{
+			return;     // default OFF — no entry = no draw
+		}
+		AUTGameState* GS = HUD->GetWorld() ? HUD->GetWorld()->GetGameState<AUTGameState>() : nullptr;
+		if (GS == nullptr)
+		{
+			return;
+		}
+		const FString Label = GS->ServerName.IsEmpty() ? FString(TEXT("(server)")) : GS->ServerName;
+
+		const FVector2D Pos = ResolveScreenPos(TEXT("server_info"), HUD->Canvas,
+			FVector2D(20.f * (HUD->Canvas->ClipY / 1080.f), 14.f * (HUD->Canvas->ClipY / 1080.f)));
+
+		UFont* Font = NCPlusHUDFonts::Resolve(TEXT("server_info"), HUD, HUD->SmallFont);
+		if (Font == nullptr) Font = HUD->SmallFont;
+		if (Font == nullptr) return;
+
+		const float RenderScale = HUD->Canvas->ClipY / 1080.f;
+		const float FontExtra   = NCPlusHUDFonts::ResolveScale(TEXT("server_info"), 1.f);
+		const float Scale       = RenderScale * FontExtra;
+
+		const FLinearColor Tint = Elem->GetExtraColor(TEXT("color_text"), FLinearColor(0.85f, 0.85f, 0.85f, 1.f));
+		const float OpacityMul  = FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f);
+
+		HUD->Canvas->DrawColor = FLinearColor(Tint.R, Tint.G, Tint.B, Tint.A * OpacityMul).ToFColor(true);
+		HUD->Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
 	}
 }
 

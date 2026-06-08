@@ -292,6 +292,17 @@ namespace NCPlusHUDDrawCall
 	/** Effective anchor for an alias: layout override if present, otherwise
 	 *  the alias's stock anchor (NCPlusHUDAliases::GetStockAnchor). */
 	NETCODEPLUS_API ENCPlusHUDAnchor GetEffectiveAnchor(FName Alias);
+
+	/** Full-screen damage tint. Call at the end of each NCPlus HUD's DrawHUD.
+	 *  Tracks the local pawn's Health+Armor across frames; on a decrease, stamps
+	 *  the time and tints the screen for `flash_duration` seconds. No-op when the
+	 *  `damage_flash` alias has no layout entry or is hidden (default OFF). */
+	NETCODEPLUS_API void DrawDamageFlash(class AUTHUD* HUD);
+
+	/** Optional server-name plate. Reads GameState->ServerName, draws at the
+	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).
+	 *  Honors font / font_scale / color_text / opacity. */
+	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD);
 }
 
 /**

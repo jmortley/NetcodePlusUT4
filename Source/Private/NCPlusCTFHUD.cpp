@@ -193,6 +193,11 @@ void ANCPlusCTFHUD::DrawHUD()
 	{
 		DrawSpectatorTarget();
 	}
+
+	// Optional opt-in overlays (default OFF). DrawDamageFlash must be last so it
+	// tints over every other HUD draw.
+	NCPlusHUDDrawCall::DrawServerInfo(this);
+	NCPlusHUDDrawCall::DrawDamageFlash(this);
 }
 
 void ANCPlusCTFHUD::DrawSpectatorTarget()

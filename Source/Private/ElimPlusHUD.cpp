@@ -575,6 +575,11 @@ void AElimPlusHUD::DrawHUD()
 			Canvas->DrawText(KDAFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
 		}
 	}
+
+	// Optional opt-in overlays (default OFF). DrawDamageFlash must be last so it
+	// tints over every other HUD draw.
+	NCPlusHUDDrawCall::DrawServerInfo(this);
+	NCPlusHUDDrawCall::DrawDamageFlash(this);
 }
 
 // Custom team score bar — dynamic team colors, round clock. Same pattern as Wipeout.
@@ -792,21 +797,27 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
 		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
 
+	// Per-team scale + font override for text inside the pip. PipFont defaults
+	// to SmallFont; PipFontExtra is the nchud FontSz multiplier (headline 4K
+	// legibility knob). Both are no-ops until the user touches the picker.
+	const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
+	UFont* PipFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, SmallFont);
+	if (!PipFont) PipFont = SmallFont;
+	const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
+
 	// Layer 5: Red "X" on dead portraits — always (no respawn this round)
 	if (!bPlayerAlive)
 	{
-		// Scale font by team's portrait scale so the X shrinks with the pip.
-		const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
-		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale;
+		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
 		FFontRenderInfo TextRenderInfo;
 		TextRenderInfo.bEnableShadow = true;
 
 		FString XStr = TEXT("X");
 		float XL, YL;
-		Canvas->StrLen(SmallFont, XStr, XL, YL);
+		Canvas->StrLen(PipFont, XStr, XL, YL);
 
 		Canvas->SetLinearDrawColor(Tinted(FLinearColor(1.f, 0.2f, 0.2f, 0.9f)));
-		Canvas->DrawText(SmallFont, FText::FromString(XStr),
+		Canvas->DrawText(PipFont, FText::FromString(XStr),
 			XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f),
 			YOffset + (PipHeight * 0.5f) - (YL * FontRenderScale * 0.5f),
 			FontRenderScale, FontRenderScale, TextRenderInfo);
@@ -821,9 +832,7 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 			AUTCharacter* UTC = PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())
 			{
-				// Scale font by team's portrait scale so HP/Armor numbers shrink with the pip.
-				const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
-				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale;
+				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale * PipFontExtra;
 				FFontRenderInfo TextRenderInfo;
 				TextRenderInfo.bEnableShadow = true;
 
@@ -832,19 +841,19 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 				FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
 
 				float XL, YL;
-				Canvas->StrLen(SmallFont, HPStr, XL, YL);
+				Canvas->StrLen(PipFont, HPStr, XL, YL);
 
 				const float TextX = XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f);
 				const float TextY = YOffset + PipHeight - (YL * FontRenderScale) - 2.f;
 				const float OutlineOffset = 1.f;
 				Canvas->SetLinearDrawColor(Tinted(FLinearColor::Black));
-				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX - OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX + OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY - OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY + OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX - OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX + OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY - OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY + OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
 
 				Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
-				Canvas->DrawText(SmallFont, FText::FromString(HPStr), TextX, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
 			}
 		}
 	}

@@ -63,7 +63,8 @@ namespace NCHUDEdit
 		{
 			return TEXT("CTF");
 		}
-		if (Alias == TEXT("speedometer") || Alias == TEXT("minimap"))
+		if (Alias == TEXT("speedometer") || Alias == TEXT("minimap")
+			|| Alias == TEXT("damage_flash") || Alias == TEXT("server_info"))
 		{
 			return TEXT("Optional Overlays");
 		}
@@ -176,6 +177,33 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		{
 			Row.bHasTeamColorToggle = true;
 		}
+		// Portrait pip text knobs: a Font dropdown (HP/Armor + respawn timer text)
+		// and a FontSz slider so 4K users can right-size the numbers without
+		// touching pip dimensions. DrawPlayerIcon (Wipeout + Elim) reads both
+		// from the same alias so each team's strip is independent.
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue"))
+		{
+			Row.bHasFontPicker = true;
+			Row.bHasFontScale  = true;
+			Row.FontChoices    = NCPlusHUDFonts::GetChoices();
+		}
+		// Damage flash: opt-in opacity multiplier on the existing Op slider PLUS a
+		// flash_duration float + a color_text picker. Default OFF (no layout entry
+		// => no draw); enable by adding the entry and unchecking Hide.
+		if (Alias == TEXT("damage_flash"))
+		{
+			Row.Colors.Add({ TEXT("color_text"), FText::FromString(TEXT("Tint")), FLinearColor(1.f, 0.f, 0.f, 1.f) });
+		}
+		// Server name plate: text element, so a font dropdown + size slider + color.
+		// Default OFF; same convention as the CTF Grab Flash row (Hide reads
+		// CHECKED when no entry exists).
+		if (Alias == TEXT("server_info"))
+		{
+			Row.bHasFontPicker = true;
+			Row.bHasFontScale  = true;
+			Row.FontChoices    = NCPlusHUDFonts::GetChoices();
+			Row.Colors.Add({ TEXT("color_text"), FText::FromString(TEXT("Text")), FLinearColor(0.85f, 0.85f, 0.85f, 1.f) });
+		}
 		// Scorebar font picker - drives both team-name and score-number text
 		// in WipeoutHUD/ElimPlusHUD/NCPlusCTFHUD/NCShaftArenaHUD scorebars
 		// (single alias, single font for typographic coherence). Also exposes a
@@ -251,7 +279,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			TSharedPtr<SVerticalBox> RowBox;
 			SAssignNew(RowBox, SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight() [ BuildRow(Row) ];
-			if (Row.bHasFontPicker)
+			if (Row.bHasFontPicker || Row.bHasFontScale)
 			{
 				RowBox->AddSlot().AutoHeight().Padding(8.f, 1.f, 0.f, 0.f) [ BuildFontRow(Row) ];
 			}
@@ -645,11 +673,14 @@ void SNCPlusHUDEditor::OnOffsetYCommitted(float NewVal, ETextCommit::Type, FName
 ECheckBoxState SNCPlusHUDEditor::GetHiddenState(FName Alias) const
 {
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-	// crosshair_flag_grab is a default-OFF feature: with no layout entry the flash
-	// is suppressed by NCPlusCTFHUD, so the Hide box must read CHECKED until the
-	// user opts in. Unchecking Hide then writes a visible entry, which the HUD
-	// honors (the only state where the flash draws is entry-present + not-hidden).
-	if (Alias == TEXT("crosshair_flag_grab"))
+	// crosshair_flag_grab, damage_flash, server_info are default-OFF features:
+	// with no layout entry the draw is suppressed, so the Hide box must read
+	// CHECKED until the user opts in. Unchecking Hide writes a visible entry, at
+	// which point the draw fires (the only state where it shows is entry-present
+	// + not-hidden).
+	if (Alias == TEXT("crosshair_flag_grab")
+		|| Alias == TEXT("damage_flash")
+		|| Alias == TEXT("server_info"))
 	{
 		return (!E || E->bHidden) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
 	}
@@ -1057,7 +1088,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildFontRow(FNCHUDEditorRow& Row)
 		]
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
-			SNew(SBox).WidthOverride(180.f)
+			SNew(SBox).WidthOverride(180.f).Visibility(Row.bHasFontPicker ? EVisibility::Visible : EVisibility::Collapsed)
 			[
 				SAssignNew(Row.FontCombo, STextComboBox)
 				.OptionsSource(&Row.FontChoices)

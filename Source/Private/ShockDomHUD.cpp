@@ -84,6 +84,11 @@ void AShockDomHUD::DrawHUD()
 		DrawControlPointIndicators(Points);
 		DrawControlPointWorldMarkers(Points);
 	}
+
+	// Optional opt-in overlays (default OFF). DrawDamageFlash must be last so it
+	// tints over every other HUD draw.
+	NCPlusHUDDrawCall::DrawServerInfo(this);
+	NCPlusHUDDrawCall::DrawDamageFlash(this);
 }
 
 
