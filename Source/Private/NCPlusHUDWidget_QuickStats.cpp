@@ -206,7 +206,11 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
 	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
-	UFont* LabelFont  = UTHUDOwner->TinyFont;
+	// Also resolve the label font ("HEALTH" / "ARMOR" text) from the same alias
+	// so the picker affects the whole hp_armor typography, not just the numbers.
+	// LabelScale (0.80f) still keeps the label visually smaller than the number;
+	// only the typeface changes. Falls back to TinyFont when the picker is on Default.
+	UFont* LabelFont  = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->TinyFont);
 	if (!NumberFont || !LabelFont) return;
 
 	const float CenterX = Size.X * 0.5f;
