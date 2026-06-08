@@ -193,8 +193,10 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 									SNew(SButton)
 									.OnClicked(this, &SUTWeaponSkinSelector::OnHitscanColorClicked)
 									[
-										SAssignNew(HitscanBeamSwatch, SColorBlock)
-										.Color(HitscanBeamColor)
+										SNew(SColorBlock)
+										.Color(TAttribute<FLinearColor>::Create(
+											TAttribute<FLinearColor>::FGetter::CreateSP(
+												this, &SUTWeaponSkinSelector::GetHitscanBeamColor)))
 									]
 								]
 							]
@@ -211,8 +213,10 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 									SNew(SButton)
 									.OnClicked(this, &SUTWeaponSkinSelector::OnShockColorClicked)
 									[
-										SAssignNew(ShockBeamSwatch, SColorBlock)
-										.Color(ShockBeamColor)
+										SNew(SColorBlock)
+										.Color(TAttribute<FLinearColor>::Create(
+											TAttribute<FLinearColor>::FGetter::CreateSP(
+												this, &SUTWeaponSkinSelector::GetShockBeamColor)))
 									]
 								]
 							]
@@ -603,8 +607,7 @@ void SUTWeaponSkinSelector::LoadSettings()
 				ShockBeamColor = Parsed;
 			}
 		}
-		if (HitscanBeamSwatch.IsValid()) HitscanBeamSwatch->SetColor(HitscanBeamColor);
-		if (ShockBeamSwatch.IsValid())   ShockBeamSwatch->SetColor(ShockBeamColor);
+		// Swatches re-poll via TAttribute on next paint — nothing to push.
 	}
 
 	// Load hitscan choice from Mod.ini
@@ -915,14 +918,13 @@ FReply SUTWeaponSkinSelector::OnShockColorClicked()
 
 void SUTWeaponSkinSelector::OnHitscanColorCommitted(FLinearColor NewColor)
 {
+	// TAttribute binding re-polls the getter on next paint — no swatch push needed.
 	HitscanBeamColor = NewColor;
-	if (HitscanBeamSwatch.IsValid()) HitscanBeamSwatch->SetColor(NewColor);
 }
 
 void SUTWeaponSkinSelector::OnShockColorCommitted(FLinearColor NewColor)
 {
 	ShockBeamColor = NewColor;
-	if (ShockBeamSwatch.IsValid()) ShockBeamSwatch->SetColor(NewColor);
 }
 
 void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<void(FLinearColor)> OnCommit)

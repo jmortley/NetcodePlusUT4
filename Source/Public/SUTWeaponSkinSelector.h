@@ -107,8 +107,10 @@ private:
 	 *  B=...,A=...)" so BP "Convert String to LinearColor" reads it directly. */
 	FLinearColor HitscanBeamColor;
 	FLinearColor ShockBeamColor;
-	TSharedPtr<SColorBlock> HitscanBeamSwatch;
-	TSharedPtr<SColorBlock> ShockBeamSwatch;
+	// SColorBlock has no SetColor in UE4.15 — bind via TAttribute getters so the
+	// swatch re-polls each paint and reflects edits automatically.
+	FLinearColor GetHitscanBeamColor() const { return HitscanBeamColor; }
+	FLinearColor GetShockBeamColor()   const { return ShockBeamColor;   }
 	FReply OnHitscanColorClicked();
 	FReply OnShockColorClicked();
 	/** Shared FSE-safe color picker. Mirrors the nchud OnSwatchClicked pattern
