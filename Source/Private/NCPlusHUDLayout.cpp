@@ -940,12 +940,29 @@ namespace NCPlusHUDDrawCall
 		{
 			return;     // default OFF — no entry = no draw
 		}
-		AUTGameState* GS = HUD->GetWorld() ? HUD->GetWorld()->GetGameState<AUTGameState>() : nullptr;
-		if (GS == nullptr)
+		// Source priority: user override (Extras["name_override"]) wins so a hub
+		// instance can show "phantaci's UT4 Hub" even when GS->ServerName has been
+		// overwritten by the hub with the ruleset/match label. Then ServerName,
+		// then ServerDescription, then "(server)". The override is a free-text
+		// Extras key — set it in the editor's clipboard JSON paste or by hand
+		// editing the layout (no dedicated UI; first-class enough to keep simple).
+		const FString Override = Elem->GetExtra(TEXT("name_override"));
+		FString Label;
+		if (!Override.IsEmpty())
 		{
-			return;
+			Label = Override;
 		}
-		const FString Label = GS->ServerName.IsEmpty() ? FString(TEXT("(server)")) : GS->ServerName;
+		else
+		{
+			AUTGameState* GS = HUD->GetWorld() ? HUD->GetWorld()->GetGameState<AUTGameState>() : nullptr;
+			if (GS == nullptr)
+			{
+				return;
+			}
+			if (!GS->ServerName.IsEmpty())          Label = GS->ServerName;
+			else if (!GS->ServerDescription.IsEmpty()) Label = GS->ServerDescription;
+			else                                    Label = TEXT("(server)");
+		}
 
 		const FVector2D Pos = ResolveScreenPos(TEXT("server_info"), Canvas,
 			FVector2D(20.f * (Canvas->ClipY / 1080.f), 14.f * (Canvas->ClipY / 1080.f)));

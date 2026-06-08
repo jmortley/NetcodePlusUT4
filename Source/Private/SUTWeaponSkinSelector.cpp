@@ -12,6 +12,11 @@
 #include "UTGameMode.h"
 #include "UTGameState.h"
 #include "AssetRegistryModule.h"
+#include "Widgets/Colors/SColorPicker.h"
+#include "Widgets/Colors/SColorBlock.h"
+#include "GameFramework/GameUserSettings.h"
+#include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 
 #define LOCTEXT_NAMESPACE "WeaponSkins"
 
@@ -31,6 +36,10 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 	// Mod.ini already populated into the statics.
 	HiddenBeamBack = AUTWeaponFix::HiddenBeamBackOffset;
 	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
+	// Sensible defaults — LoadSettings overwrites from Mod.ini if present.
+	// Hitscan: warm orange (matches stock sniper feel). Shock: cyan.
+	HitscanBeamColor = FLinearColor(1.f, 0.55f, 0.f, 1.f);
+	ShockBeamColor   = FLinearColor(0.2f, 0.85f, 1.f, 1.f);
 
 	BackgroundBrush.TintColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.85f);
 
@@ -152,6 +161,59 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 									.MinSliderValue(0.f).MaxSliderValue(80.f)
 									.MinValue(0.f).MaxValue(100.f)
 									.Delta(1.f)
+								]
+							]
+						]
+
+						// Beam (tracer) colors — drive the UTNPLightningGun /
+						// UTNPSniper (shared LGColor) and UTNPShockRifle (ShockBeam)
+						// BP defaults which read [WeaponSkinsPlus] in Mod.ini at spawn.
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0, 0, 0, 8)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("BeamColorsLabel", "Beam color:"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
+								.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+							[
+								SNew(STextBlock).Text(LOCTEXT("HitscanColorLbl", "Hitscan (LG/Sniper)"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
+								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 16, 0)
+							[
+								SNew(SBox).WidthOverride(56.f).HeightOverride(18.f)
+								[
+									SNew(SButton)
+									.OnClicked(this, &SUTWeaponSkinSelector::OnHitscanColorClicked)
+									[
+										SAssignNew(HitscanBeamSwatch, SColorBlock)
+										.Color(HitscanBeamColor)
+									]
+								]
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+							[
+								SNew(STextBlock).Text(LOCTEXT("ShockColorLbl", "Shock beam"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
+								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(SBox).WidthOverride(56.f).HeightOverride(18.f)
+								[
+									SNew(SButton)
+									.OnClicked(this, &SUTWeaponSkinSelector::OnShockColorClicked)
+									[
+										SAssignNew(ShockBeamSwatch, SColorBlock)
+										.Color(ShockBeamColor)
+									]
 								]
 							]
 						]
@@ -519,6 +581,32 @@ void SUTWeaponSkinSelector::LoadSettings()
 	HiddenBeamBack = AUTWeaponFix::HiddenBeamBackOffset;
 	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
 
+	// Beam colors from Mod.ini [WeaponSkinsPlus]. Format = FLinearColor::ToString
+	// output "(R=...,G=...,B=...,A=...)" so the BP parser (Convert String to
+	// LinearColor) reads it directly. Bad / empty value = keep ctor defaults.
+	{
+		FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		FString S;
+		if (GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("LGColor"), S, ModIniPath) && !S.IsEmpty())
+		{
+			FLinearColor Parsed;
+			if (Parsed.InitFromString(S))
+			{
+				HitscanBeamColor = Parsed;
+			}
+		}
+		if (GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("ShockBeam"), S, ModIniPath) && !S.IsEmpty())
+		{
+			FLinearColor Parsed;
+			if (Parsed.InitFromString(S))
+			{
+				ShockBeamColor = Parsed;
+			}
+		}
+		if (HitscanBeamSwatch.IsValid()) HitscanBeamSwatch->SetColor(HitscanBeamColor);
+		if (ShockBeamSwatch.IsValid())   ShockBeamSwatch->SetColor(ShockBeamColor);
+	}
+
 	// Load hitscan choice from Mod.ini
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	FString HitscanStr;
@@ -573,6 +661,12 @@ void SUTWeaponSkinSelector::SaveAndApply()
 		*FString::Printf(TEXT("%.3f"), AUTWeaponFix::HiddenBeamBackOffset), ModIniPath);
 	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamDown"),
 		*FString::Printf(TEXT("%.3f"), AUTWeaponFix::HiddenBeamDownOffset), ModIniPath);
+
+	// Beam colors → [WeaponSkinsPlus] LGColor / ShockBeam. FLinearColor::ToString
+	// writes "(R=...,G=...,B=...,A=...)" which BP's "Convert String to LinearColor"
+	// reads back unchanged. Applies on next weapon spawn (BPs read at BeginPlay).
+	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("LGColor"),  *HitscanBeamColor.ToString(), ModIniPath);
+	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("ShockBeam"), *ShockBeamColor.ToString(),  ModIniPath);
 
 	// Save hide states and skin selections to config only — no server RPCs.
 	// Skins apply on next spawn; hide states are client-local (checked in BringUp).
@@ -805,6 +899,99 @@ FReply SUTWeaponSkinSelector::OnCloseClicked()
 {
 	ClosePanel();
 	return FReply::Handled();
+}
+
+FReply SUTWeaponSkinSelector::OnHitscanColorClicked()
+{
+	OpenBeamColorPicker(HitscanBeamColor, [this](FLinearColor NewC) { OnHitscanColorCommitted(NewC); });
+	return FReply::Handled();
+}
+
+FReply SUTWeaponSkinSelector::OnShockColorClicked()
+{
+	OpenBeamColorPicker(ShockBeamColor, [this](FLinearColor NewC) { OnShockColorCommitted(NewC); });
+	return FReply::Handled();
+}
+
+void SUTWeaponSkinSelector::OnHitscanColorCommitted(FLinearColor NewColor)
+{
+	HitscanBeamColor = NewColor;
+	if (HitscanBeamSwatch.IsValid()) HitscanBeamSwatch->SetColor(NewColor);
+}
+
+void SUTWeaponSkinSelector::OnShockColorCommitted(FLinearColor NewColor)
+{
+	ShockBeamColor = NewColor;
+	if (ShockBeamSwatch.IsValid()) ShockBeamSwatch->SetColor(NewColor);
+}
+
+void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<void(FLinearColor)> OnCommit)
+{
+	// Fullscreen-Exclusive workaround. SColorPicker opens as a new top-level
+	// Slate window; under FSE the OS minimizes the game to release the swap
+	// chain, the picker can't render, focus bounces, and the user gets an
+	// infinite minimize/restore cycle. Snapshot the current mode, swap to
+	// borderless (WindowedFullscreen) if FSE was active, restore on close.
+	// Direct port of the nchud OnSwatchClicked pattern - keep them in sync.
+	EWindowMode::Type SavedMode = EWindowMode::Windowed;
+	FIntPoint         SavedRes  = FIntPoint::ZeroValue;
+	FVector2D         SavedWindowPos = FVector2D::ZeroVector;
+	bool              bHaveWindowPos = false;
+
+	if (UGameUserSettings* Settings = GEngine ? GEngine->GetGameUserSettings() : nullptr)
+	{
+		SavedMode = Settings->GetFullscreenMode();
+		SavedRes  = Settings->GetScreenResolution();
+		if (GEngine && GEngine->GameViewport)
+		{
+			TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow();
+			if (GameWindow.IsValid())
+			{
+				SavedWindowPos = GameWindow->GetPositionInScreen();
+				bHaveWindowPos = true;
+			}
+		}
+		if (SavedMode == EWindowMode::Fullscreen)
+		{
+			Settings->SetFullscreenMode(EWindowMode::WindowedFullscreen);
+			Settings->ApplyResolutionSettings(false);
+		}
+	}
+
+	FColorPickerArgs PickerArgs;
+	PickerArgs.bUseAlpha = true;
+	PickerArgs.bIsModal = false;
+	PickerArgs.bOnlyRefreshOnOk = false;
+	PickerArgs.bExpandAdvancedSection = false;
+	PickerArgs.InitialColorOverride = Initial;
+	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateLambda(
+		[OnCommit](FLinearColor C) { if (OnCommit) OnCommit(C); });
+	PickerArgs.ParentWidget = SharedThis(this);
+
+	// Restore on close - same order as nchud (SetFullscreenMode → SetScreenResolution
+	// → SaveConfig → ApplyResolutionSettings) which mirrors UT4's GUI Settings
+	// Display dropdown. See SNCPlusHUDEditor::OnSwatchClicked for full rationale.
+	PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateLambda(
+		[SavedMode, SavedRes, SavedWindowPos, bHaveWindowPos](const TSharedRef<SWindow>& /*W*/)
+		{
+			if (SavedMode != EWindowMode::Fullscreen) return;
+			if (bHaveWindowPos && GEngine && GEngine->GameViewport)
+			{
+				TSharedPtr<SWindow> GameWindow = GEngine->GameViewport->GetWindow();
+				if (GameWindow.IsValid() && GameWindow->GetPositionInScreen() != SavedWindowPos)
+				{
+					GameWindow->MoveWindowTo(SavedWindowPos);
+				}
+			}
+			UGameUserSettings* S = GEngine ? GEngine->GetGameUserSettings() : nullptr;
+			if (!S) return;
+			S->SetFullscreenMode(EWindowMode::Fullscreen);
+			S->SetScreenResolution(SavedRes);
+			S->SaveConfig();
+			S->ApplyResolutionSettings(false);
+		});
+
+	OpenColorPicker(PickerArgs);
 }
 
 FReply SUTWeaponSkinSelector::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)

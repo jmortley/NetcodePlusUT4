@@ -6,6 +6,7 @@
 #include "UTWeaponSkin.h"
 
 class UUTLocalPlayer;
+class SColorBlock;
 
 /** Free all cached skin assets (call on module shutdown or map change) */
 void SUTWeaponSkinSelector_CleanupCache();
@@ -98,6 +99,23 @@ private:
 	TOptional<float> GetHiddenBeamDown() const { return HiddenBeamDown; }
 	void OnHiddenBeamBackChanged(float NewVal) { HiddenBeamBack = NewVal; }
 	void OnHiddenBeamDownChanged(float NewVal) { HiddenBeamDown = NewVal; }
+
+	/** Beam (tracer) colors stored in Mod.ini [WeaponSkinsPlus] keys LGColor +
+	 *  ShockBeam. Read by the UTNPLightningGun / UTNPSniper / UTNPShockRifle
+	 *  blueprint defaults at spawn. LGColor is shared by Sniper + LG (unified
+	 *  hitscan). String format = FLinearColor::ToString output "(R=...,G=...,
+	 *  B=...,A=...)" so BP "Convert String to LinearColor" reads it directly. */
+	FLinearColor HitscanBeamColor;
+	FLinearColor ShockBeamColor;
+	TSharedPtr<SColorBlock> HitscanBeamSwatch;
+	TSharedPtr<SColorBlock> ShockBeamSwatch;
+	FReply OnHitscanColorClicked();
+	FReply OnShockColorClicked();
+	/** Shared FSE-safe color picker. Mirrors the nchud OnSwatchClicked pattern
+	 *  (snapshot mode, swap to borderless, restore on close). */
+	void OpenBeamColorPicker(FLinearColor Initial, TFunction<void(FLinearColor)> OnCommit);
+	void OnHitscanColorCommitted(FLinearColor NewColor);
+	void OnShockColorCommitted(FLinearColor NewColor);
 
 	FSlateBrush BackgroundBrush;
 };
