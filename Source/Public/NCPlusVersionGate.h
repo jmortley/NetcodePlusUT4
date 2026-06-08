@@ -38,6 +38,11 @@ protected:
 	UPROPERTY(Transient)
 	bool bConfirmed;
 
+	/** Resolved timeout for THIS spawn (from Mod.ini [NetcodePlus]
+	 *  VersionReportTimeoutSec, default 10s, clamped 1-60s). Captured in
+	 *  BeginPlay so the timeout-log line can report the actual value used. */
+	float TimeoutSec;
+
 	FTimerHandle TimeoutHandle;
 };
 

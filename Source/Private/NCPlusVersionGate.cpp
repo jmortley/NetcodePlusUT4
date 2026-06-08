@@ -7,15 +7,51 @@
 #include "GameFramework/GameMode.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 
-// Server kick deadline. User asked for 10s so a hitchy client has time to fully
-// initialize replication before we judge them. Long enough to never false-kick;
-// short enough that warmup play time for an outdated client is bounded.
-static const float kVersionReportTimeoutSec = 10.f;
+// Default kick deadline (seconds). 10s gives a hitchy client time to fully
+// initialize replication before we judge them. Overridable per-server via
+// Mod.ini [NetcodePlus] VersionReportTimeoutSec, clamped 1.0-60.0.
+static const float kVersionReportTimeoutDefault = 10.f;
+static const float kVersionReportTimeoutMin     =  1.f;
+static const float kVersionReportTimeoutMax     = 60.f;
+
+// Resolve the timeout from Mod.ini [NetcodePlus] VersionReportTimeoutSec, falling
+// back to the default if the file/section/key is missing or out of range. Cheap
+// enough to call per spawn — gives admins same-process live-ish control (each new
+// joiner reads fresh; no actor change needed mid-match) and survives restarts.
+static float ResolveVersionReportTimeoutSec()
+{
+	const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+	if (!FPaths::FileExists(ModIniPath))
+	{
+		return kVersionReportTimeoutDefault;
+	}
+	FConfigFile ModIni;
+	ModIni.Read(ModIniPath);
+	const FConfigSection* Section = ModIni.Find(TEXT("NetcodePlus"));
+	if (!Section)
+	{
+		return kVersionReportTimeoutDefault;
+	}
+	const FConfigValue* V = Section->Find(FName(TEXT("VersionReportTimeoutSec")));
+	if (!V)
+	{
+		return kVersionReportTimeoutDefault;
+	}
+	const float Parsed = FCString::Atof(*V->GetValue());
+	if (Parsed <= 0.f)
+	{
+		return kVersionReportTimeoutDefault;     // Atof returns 0 on garbage input
+	}
+	return FMath::Clamp(Parsed, kVersionReportTimeoutMin, kVersionReportTimeoutMax);
+}
 
 ANCVersionGate::ANCVersionGate(const FObjectInitializer& OI)
 	: Super(OI)
 	, bConfirmed(false)
+	, TimeoutSec(kVersionReportTimeoutDefault)
 {
 	bReplicates = true;
 	bOnlyRelevantToOwner = true;
@@ -35,9 +71,10 @@ void ANCVersionGate::BeginPlay()
 	{
 		if (UWorld* W = GetWorld())
 		{
+			TimeoutSec = ResolveVersionReportTimeoutSec();
 			W->GetTimerManager().SetTimer(
 				TimeoutHandle, this, &ANCVersionGate::OnTimeout,
-				kVersionReportTimeoutSec, /*bLoop*/ false);
+				TimeoutSec, /*bLoop*/ false);
 		}
 	}
 }
@@ -98,7 +135,7 @@ void ANCVersionGate::OnTimeout()
 	UE_LOG(LogGameMode, Warning,
 		TEXT("[NCPlusVersionGate] kicking owner: no version report within %.0fs (server v%d). ")
 		TEXT("Likely missing/outdated NetcodePlus plugin."),
-		kVersionReportTimeoutSec, NETCODE_PLUGIN_VERSION);
+		TimeoutSec, NETCODE_PLUGIN_VERSION);
 	KickOwner(FString::Printf(
 		TEXT("NetcodePlus plugin missing or outdated (server is v%d). Update via launcher."),
 		NETCODE_PLUGIN_VERSION));
