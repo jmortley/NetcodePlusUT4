@@ -43,6 +43,11 @@ struct FNCHUDEditorRow
 	TArray<TSharedPtr<FString>> FontChoices;
 	bool bHasFontPicker = false;
 
+	// Optional per-row font display-size slider (Extras["font_scale"]). Only enable
+	// for widgets whose draw site actually calls NCPlusHUDFonts::ResolveScale -
+	// otherwise the slider would appear to do nothing. Today: scorebar, score_kda.
+	bool bHasFontScale = false;
+
 	// Optional per-row color overrides (hp_armor + weapon_bar_*).
 	TArray<FNCHUDEditorColor> Colors;
 
@@ -115,6 +120,14 @@ private:
 
 	// Font combo (hp_armor + ammo)
 	void OnFontSelected(TSharedPtr<FString> NewSel, ESelectInfo::Type, FName Alias);
+
+	// Font display-size multiplier (Extras["font_scale"], default 1.0). Lets the
+	// user dial in apparent text size without bumping LegacyFontSize on the asset.
+	// Consumed by widgets that call NCPlusHUDFonts::ResolveScale (scorebar / score_kda
+	// today; other widgets need an explicit ResolveScale wire-up to honor it).
+	TOptional<float> GetFontScale(FName Alias) const;
+	void OnFontScaleChanged(float NewVal, FName Alias);
+	void OnFontScaleCommitted(float NewVal, ETextCommit::Type, FName Alias);
 
 	// Opacity (per-element multiplier 0..1)
 	TOptional<float> GetOpacity(FName Alias) const;

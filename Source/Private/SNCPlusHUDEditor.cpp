@@ -178,10 +178,22 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		}
 		// Scorebar font picker - drives both team-name and score-number text
 		// in WipeoutHUD/ElimPlusHUD/NCPlusCTFHUD/NCShaftArenaHUD scorebars
-		// (single alias, single font for typographic coherence).
+		// (single alias, single font for typographic coherence). Also exposes a
+		// FontSz slider (font_scale extras) so the user can dial in apparent text
+		// size at 4K without re-importing the UFont at a different LegacyFontSize.
 		if (Alias == TEXT("scorebar"))
 		{
 			Row.bHasFontPicker = true;
+			Row.bHasFontScale  = true;
+			Row.FontChoices    = NCPlusHUDFonts::GetChoices();
+		}
+		// score_kda mini panel (top-right) — its draw site (ElimPlusHUD::DrawHUD)
+		// already calls NCPlusHUDFonts::Resolve + ResolveScale; the editor was
+		// just missing the UI surface. Add the picker + size slider here.
+		if (Alias == TEXT("score_kda"))
+		{
+			Row.bHasFontPicker = true;
+			Row.bHasFontScale  = true;
 			Row.FontChoices    = NCPlusHUDFonts::GetChoices();
 		}
 		// Other text-rendering opt-in widgets get font selection too. The CTF
@@ -680,6 +692,26 @@ void SNCPlusHUDEditor::OnOpacityCommitted(float NewVal, ETextCommit::Type, FName
 	OnOpacityChanged(NewVal, Alias);
 }
 
+TOptional<float> SNCPlusHUDEditor::GetFontScale(FName Alias) const
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	return E ? E->GetExtraFloat(TEXT("font_scale"), 1.f) : 1.f;
+}
+
+void SNCPlusHUDEditor::OnFontScaleChanged(float NewVal, FName Alias)
+{
+	// Mirror Opacity's storage: write the float to Extras as a printed string so
+	// the unified Extras<string,string> map stays homogeneous (read back via
+	// FNCPlusHUDElement::GetExtraFloat). NCPlusHUDFonts::ResolveScale picks it up.
+	const FString S = FString::Printf(TEXT("%.3f"), NewVal);
+	MutateElement(Alias, [&S](FNCPlusHUDElement& E){ E.Extras.Add(TEXT("font_scale"), S); });
+}
+
+void SNCPlusHUDEditor::OnFontScaleCommitted(float NewVal, ETextCommit::Type, FName Alias)
+{
+	OnFontScaleChanged(NewVal, Alias);
+}
+
 TOptional<float> SNCPlusHUDEditor::GetScale(FName Alias) const
 {
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
@@ -1031,6 +1063,30 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildFontRow(FNCHUDEditorRow& Row)
 				.OptionsSource(&Row.FontChoices)
 				.InitiallySelectedItem(Row.FontChoices.IsValidIndex(InitialIdx) ? Row.FontChoices[InitialIdx] : nullptr)
 				.OnSelectionChanged(this, &SNCPlusHUDEditor::OnFontSelected, Alias)
+			]
+		]
+		// Font display-size multiplier on top of the widget's own Scale (Extras
+		// key "font_scale"). 1.0 = whatever the draw-site picks naturally; bigger
+		// makes the text bigger without resizing the rest of the widget. Gated on
+		// bHasFontScale so it only renders for widgets whose draw site actually
+		// calls NCPlusHUDFonts::ResolveScale (otherwise the slider would do
+		// nothing and the row would look broken).
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8,0,0,0)
+		[
+			SNew(SBox).WidthOverride(110.f).Visibility(Row.bHasFontScale ? EVisibility::Visible : EVisibility::Collapsed)
+			[
+				SNew(SNumericEntryBox<float>)
+				.Value(this, &SNCPlusHUDEditor::GetFontScale, Alias)
+				.OnValueChanged(this, &SNCPlusHUDEditor::OnFontScaleChanged, Alias)
+				.OnValueCommitted(this, &SNCPlusHUDEditor::OnFontScaleCommitted, Alias)
+				.AllowSpin(true)
+				.MinSliderValue(0.5f)
+				.MaxSliderValue(2.0f)
+				.MinValue(0.25f)
+				.MaxValue(4.0f)
+				.Delta(0.05f)
+				.LabelPadding(FMargin(0))
+				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("FontSz "))) ]
 			]
 		];
 }
