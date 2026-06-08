@@ -89,5 +89,15 @@ private:
 	TSharedPtr<STextBlock> HitscanValueText;
 	FReply OnHitscanToggleClicked();
 
+	/** Hidden-weapon beam origin offsets (read into AUTWeaponFix statics).
+	 *  Live values shown in the spinner; LoadSettings seeds them from the
+	 *  static (which was filled from Mod.ini); SaveAndApply pushes them back. */
+	float HiddenBeamBack;
+	float HiddenBeamDown;
+	TOptional<float> GetHiddenBeamBack() const { return HiddenBeamBack; }
+	TOptional<float> GetHiddenBeamDown() const { return HiddenBeamDown; }
+	void OnHiddenBeamBackChanged(float NewVal) { HiddenBeamBack = NewVal; }
+	void OnHiddenBeamDownChanged(float NewVal) { HiddenBeamDown = NewVal; }
+
 	FSlateBrush BackgroundBrush;
 };

@@ -147,6 +147,15 @@ public:
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
     static TMap<FName, bool> HiddenWeaponsByTag;
 
+    /** Tracer/beam origin offsets used when the firing weapon is hidden.
+     *  Plumbed into GetImpactSpawnPosition (camera-relative). Set via the
+     *  weaponskins menu; persisted in Mod.ini [NetcodePlus.WeaponSettings]
+     *  HiddenBeamBack + HiddenBeamDown. Defaults match the original hardcoded
+     *  values (10 back, 35 down = "stomach"). 0 back + 0 down = camera-origin
+     *  (beam can render edge-on / invisible when stationary). */
+    static float HiddenBeamBackOffset;
+    static float HiddenBeamDownOffset;
+
     /** Saved skin asset paths — keyed by WeaponSkinCustomizationTag.
      *  Loaded from Mod.ini, applied in BringUp(). */
     static TMap<FName, FString> SavedSkinPaths;

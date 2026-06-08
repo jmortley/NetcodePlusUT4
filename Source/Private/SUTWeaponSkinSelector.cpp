@@ -26,6 +26,11 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
 	CurrentWeaponIndex = 0;
+	// Defaults match AUTWeaponFix statics so the spinner shows real values even
+	// before LoadSettings runs. LoadSettings overwrites with the values that
+	// Mod.ini already populated into the statics.
+	HiddenBeamBack = AUTWeaponFix::HiddenBeamBackOffset;
+	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
 
 	BackgroundBrush.TintColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.85f);
 
@@ -91,6 +96,62 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 									.Text(FText::FromString(CurrentHitscanChoice == TEXT("LG") ? TEXT("Lightning Gun") : TEXT("Sniper Rifle")))
 									.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 13))
 									.ColorAndOpacity(FLinearColor(0.3f, 0.9f, 0.3f, 1.0f))
+								]
+							]
+						]
+
+						// Hidden-weapon beam origin — two numeric spinners that drive
+						// AUTWeaponFix::HiddenBeamBackOffset / HiddenBeamDownOffset.
+						// Only matters when a weapon is set Hidden; controls where
+						// the tracer/beam spawns relative to the camera.
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0, 0, 0, 8)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("HiddenBeamLabel", "Hidden-weapon beam:"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
+								.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+							[
+								SNew(STextBlock).Text(LOCTEXT("HiddenBeamBackLbl", "Back"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
+								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 12, 0)
+							[
+								SNew(SBox).WidthOverride(80.f)
+								[
+									SNew(SNumericEntryBox<float>)
+									.Value(this, &SUTWeaponSkinSelector::GetHiddenBeamBack)
+									.OnValueChanged(this, &SUTWeaponSkinSelector::OnHiddenBeamBackChanged)
+									.AllowSpin(true)
+									.MinSliderValue(0.f).MaxSliderValue(60.f)
+									.MinValue(0.f).MaxValue(100.f)
+									.Delta(1.f)
+								]
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+							[
+								SNew(STextBlock).Text(LOCTEXT("HiddenBeamDownLbl", "Down"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
+								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(SBox).WidthOverride(80.f)
+								[
+									SNew(SNumericEntryBox<float>)
+									.Value(this, &SUTWeaponSkinSelector::GetHiddenBeamDown)
+									.OnValueChanged(this, &SUTWeaponSkinSelector::OnHiddenBeamDownChanged)
+									.AllowSpin(true)
+									.MinSliderValue(0.f).MaxSliderValue(80.f)
+									.MinValue(0.f).MaxValue(100.f)
+									.Delta(1.f)
 								]
 							]
 						]
@@ -453,6 +514,11 @@ void SUTWeaponSkinSelector::LoadSettings()
 	// Copy hide state from the static map (keyed by class name)
 	HideState = AUTWeaponFix::HiddenWeaponsByTag;
 
+	// Pick up hidden-weapon beam offsets from the now-populated statics so the
+	// spinners reflect whatever Mod.ini already had on disk.
+	HiddenBeamBack = AUTWeaponFix::HiddenBeamBackOffset;
+	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
+
 	// Load hitscan choice from Mod.ini
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	FString HitscanStr;
@@ -495,6 +561,18 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	if (!PC) return;
 
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// Hidden-weapon beam offsets — push to AUTWeaponFix statics so the next
+	// fire reads the new values (GetImpactSpawnPosition reads the statics
+	// directly), and persist to Mod.ini so they survive a restart. Clamp here
+	// too — the spinner Min/Max already enforces, but a manual edit could
+	// poke in something weird.
+	AUTWeaponFix::HiddenBeamBackOffset = FMath::Clamp(HiddenBeamBack, 0.f, 100.f);
+	AUTWeaponFix::HiddenBeamDownOffset = FMath::Clamp(HiddenBeamDown, 0.f, 100.f);
+	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamBack"),
+		*FString::Printf(TEXT("%.3f"), AUTWeaponFix::HiddenBeamBackOffset), ModIniPath);
+	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamDown"),
+		*FString::Printf(TEXT("%.3f"), AUTWeaponFix::HiddenBeamDownOffset), ModIniPath);
 
 	// Save hide states and skin selections to config only — no server RPCs.
 	// Skins apply on next spawn; hide states are client-local (checked in BringUp).

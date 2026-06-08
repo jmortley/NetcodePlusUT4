@@ -53,6 +53,9 @@ TMap<FName, bool> AUTWeaponFix::HiddenWeaponsByTag;
 TMap<FName, FString> AUTWeaponFix::SavedSkinPaths;
 TMap<FName, UUTWeaponSkin*> AUTWeaponFix::CachedSkinAssets;
 bool AUTWeaponFix::bWeaponSettingsLoaded = false;
+// Stomach-height defaults; LoadWeaponSettings overrides from Mod.ini.
+float AUTWeaponFix::HiddenBeamBackOffset = 10.f;
+float AUTWeaponFix::HiddenBeamDownOffset = 35.f;
 
 static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings");
 
@@ -62,6 +65,21 @@ void AUTWeaponFix::LoadWeaponSettings()
 	bWeaponSettingsLoaded = true;
 
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// Hidden-weapon beam-origin offsets. Clamped 0-100 so a corrupted value
+	// can't spawn beams behind the player or through the floor. Sliders in
+	// SUTWeaponSkinSelector write back to these same keys.
+	{
+		FString OffsetStr;
+		if (GConfig->GetString(WEAPON_SETTINGS_SECTION, TEXT("HiddenBeamBack"), OffsetStr, ModIniPath) && !OffsetStr.IsEmpty())
+		{
+			HiddenBeamBackOffset = FMath::Clamp(FCString::Atof(*OffsetStr), 0.f, 100.f);
+		}
+		if (GConfig->GetString(WEAPON_SETTINGS_SECTION, TEXT("HiddenBeamDown"), OffsetStr, ModIniPath) && !OffsetStr.IsEmpty())
+		{
+			HiddenBeamDownOffset = FMath::Clamp(FCString::Atof(*OffsetStr), 0.f, 100.f);
+		}
+	}
 
 	// Load hide settings — read keys by class name
 	// We iterate weapon classes to get all possible class names, then check Mod.ini for each
@@ -3152,13 +3170,16 @@ void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& Spa
 	if (bHidden && *bHidden && UTOwner && UTOwner->CharacterCameraComponent)
 	{
 		SpawnRotation = UTOwner->CharacterCameraComponent->GetComponentRotation();
-		// Offset forward and slightly down from camera so the beam is visible
-		// (spawning at exact camera position makes the beam edge-on/invisible when stationary)
-		FVector Forward = SpawnRotation.Vector();
-		FVector Down = FVector(0.0f, 0.0f, -1.0f);
+		// Offset back+down from camera so the beam is visible (spawning at exact
+		// camera position makes the beam edge-on/invisible when stationary).
+		// Magnitudes come from Mod.ini [NetcodePlus.WeaponSettings] HiddenBeamBack
+		// + HiddenBeamDown via LoadWeaponSettings; the weaponskins menu has
+		// sliders. Defaults (10 / 35) reproduce the original hardcoded behavior.
+		const FVector Forward = SpawnRotation.Vector();
+		const FVector Down(0.f, 0.f, -1.f);
 		SpawnLocation = UTOwner->CharacterCameraComponent->GetComponentLocation()
-			+ Forward * -10.0f   // Behind camera — pulls particles into body
-			+ Down * 35.0f;     // Stomach height — roughly halfway between eye and feet
+			+ Forward * -HiddenBeamBackOffset   // pulls particles back into body
+			+ Down    *  HiddenBeamDownOffset;   // drop below eye line
 		return;
 	}
 
