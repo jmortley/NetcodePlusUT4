@@ -266,6 +266,18 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  Overtime escalation still ramps respawn up from here. */
 	float CTFRespawnWait = 1.5f;
 
+	/** Respawn delay for small games (1v1). Used instead of CTFRespawnWait when
+	 *  GameSession->MaxPlayers <= CTFSmallGameMaxPlayers. Keyed on player count in
+	 *  HandleMatchHasStarted so bot- AND hub-hosted (ruleset) matches both get the
+	 *  right value automatically with no ?RespawnWait. Mod.ini [UTPUGS_STATS]
+	 *  CTFRespawnWaitSmall; default 1.0. */
+	float CTFRespawnWaitSmall = 1.0f;
+
+	/** MaxPlayers at/below which a match is "small" and uses CTFRespawnWaitSmall.
+	 *  Mod.ini [UTPUGS_STATS] CTFSmallGameMaxPlayers; default 2 (1v1). Raise to 4
+	 *  to also give 2v2 the fast respawn. */
+	int32 CTFSmallGameMaxPlayers = 2;
+
 	/** Auto-pause the match when a participant drops out of a bot PUG (?PugId),
 	 *  until they (and any others who dropped) rejoin, or an admin unpauses via
 	 *  the `pause` command. Uses the engine world-pause (WorldSettings->Pauser).

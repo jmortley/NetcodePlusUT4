@@ -613,6 +613,10 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	{
 		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atof(*V->GetValue()); }
 	};
+	auto ReadInt = [Section](const TCHAR* Key, int32& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atoi(*V->GetValue()); }
+	};
 
 	ReadBool(TEXT("CTFPerfEnabled"),           CTFPerfConfig.bEnabled);
 	ReadBool(TEXT("CTFRatingShadow"),          CTFPerfConfig.bShadow);
@@ -623,6 +627,8 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	ReadDouble(TEXT("CTFRoleWeightStrength"),  CTFPerfConfig.RoleWeightStrength);
 	ReadFloat(TEXT("CTFRoleCombatWeight"),     CTFRoleCombatWeight);
 	ReadFloat(TEXT("CTFRespawnWait"),          CTFRespawnWait);
+	ReadFloat(TEXT("CTFRespawnWaitSmall"),     CTFRespawnWaitSmall);
+	ReadInt(TEXT("CTFSmallGameMaxPlayers"),    CTFSmallGameMaxPlayers);
 	ReadBool(TEXT("AutoPauseOnDrop"),          bAutoPauseOnDrop);
 
 	UE_LOG(LogGameMode, Warning,
@@ -1665,17 +1671,24 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		LoadCTFPerfConfig();
 		LoadSpawnConfig();
 
-		// Apply the configured regulation respawn wait. Runs after Super +
-		// InitGame's integer ?RespawnWait parse and any BP default, so it's
-		// authoritative and supports fractional values (e.g. 1.5s) — the
-		// ?RespawnWait launch option is integer-only (GetIntOption). RespawnTime
-		// is decremented per-frame (UTPlayerState.cpp), so sub-second is honored.
-		// Overtime escalation (DefaultTimer) still ramps respawn up from here.
-		RespawnWaitTime = CTFRespawnWait;
+		// Apply the regulation respawn wait, keyed on match size so bot-hosted AND
+		// hub-hosted (ruleset) games both get it automatically from MaxPlayers - no
+		// ?RespawnWait option required. Small games (1v1: MaxPlayers <=
+		// CTFSmallGameMaxPlayers) use CTFRespawnWaitSmall (1.0s); larger use
+		// CTFRespawnWait (1.5s). This is the authoritative value: the respawn
+		// countdown reads GameState->RespawnWaitTime (MAX'd with the per-player
+		// field, which CTF never raises in-match), and this runs after InitGame's
+		// ?RespawnWait parse so it wins. Supports fractional values; overtime
+		// escalation (DefaultTimer) still ramps respawn up from here.
+		const int32 MaxP = GameSession ? GameSession->MaxPlayers : 10;
+		const float WantRespawn = (MaxP <= CTFSmallGameMaxPlayers) ? CTFRespawnWaitSmall : CTFRespawnWait;
+		RespawnWaitTime = WantRespawn;
 		if (CTFGameState)
 		{
-			CTFGameState->SetRespawnWaitTime(CTFRespawnWait);
+			CTFGameState->SetRespawnWaitTime(WantRespawn);
 		}
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF respawn: MaxPlayers=%d -> %.2fs (<=%d uses %.2f, else %.2f)"),
+			MaxP, WantRespawn, CTFSmallGameMaxPlayers, CTFRespawnWaitSmall, CTFRespawnWait);
 
 		AUTGameState* GS = GetGameState<AUTGameState>();
 		if (GS)
