@@ -145,7 +145,11 @@ void ANCVersionGate::KickOwner(const FString& Reason)
 {
 	APlayerController* PC = Cast<APlayerController>(GetOwner());
 	UWorld* W = GetWorld();
-	AGameMode* GM = W ? W->GetAuthGameMode() : nullptr;
+	// UE4.15: UWorld::GetAuthGameMode() returns AGameModeBase*, not AGameMode*.
+	// Cast to AGameMode so we can reach ->GameSession (lives on the AGameMode
+	// subclass in this engine). Both UT4 modes derive from AGameMode, so the
+	// cast always succeeds for our PostLogin spawn path.
+	AGameMode* GM = W ? Cast<AGameMode>(W->GetAuthGameMode()) : nullptr;
 	if (PC && GM && GM->GameSession)
 	{
 		GM->GameSession->KickPlayer(PC, FText::FromString(Reason));

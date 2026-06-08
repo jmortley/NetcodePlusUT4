@@ -530,8 +530,8 @@ void AWipeoutHUD::DrawHUD()
 	// Optional opt-in overlays. Both default OFF (no layout entry = no draw).
 	// server_info first so the damage flash tints over it; flash must be LAST so
 	// it covers every HUD pixel.
-	NCPlusHUDDrawCall::DrawServerInfo(this);
-	NCPlusHUDDrawCall::DrawDamageFlash(this);
+	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
+	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
 }
 
 // ─── Custom team score bar ─────────────────────────────────────────────

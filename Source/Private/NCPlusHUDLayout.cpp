@@ -864,9 +864,9 @@ namespace NCPlusHUDDrawCall
 	// split-screen and the HUD only ever runs for the local client. Resets the
 	// cached HP when the world changes (map travel / PIE re-load) so the first
 	// frame of a new match doesn't false-trigger.
-	void DrawDamageFlash(AUTHUD* HUD)
+	void DrawDamageFlash(AUTHUD* HUD, UCanvas* Canvas)
 	{
-		if (HUD == nullptr || HUD->Canvas == nullptr || HUD->UTPlayerOwner == nullptr)
+		if (HUD == nullptr || Canvas == nullptr || HUD->UTPlayerOwner == nullptr)
 		{
 			return;
 		}
@@ -922,17 +922,16 @@ namespace NCPlusHUDDrawCall
 			return;
 		}
 
-		UCanvas* C = HUD->Canvas;
-		C->SetLinearDrawColor(FLinearColor(TintColor.R, TintColor.G, TintColor.B, Alpha));
-		C->DrawTile(C->DefaultTexture, 0.f, 0.f, C->ClipX, C->ClipY, 0.f, 0.f, 1.f, 1.f, BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor(TintColor.R, TintColor.G, TintColor.B, Alpha));
+		Canvas->DrawTile(Canvas->DefaultTexture, 0.f, 0.f, Canvas->ClipX, Canvas->ClipY, 0.f, 0.f, 1.f, 1.f, BLEND_Translucent);
 	}
 
 	// =============================================================================
 	// Server info name plate
 	// =============================================================================
-	void DrawServerInfo(AUTHUD* HUD)
+	void DrawServerInfo(AUTHUD* HUD, UCanvas* Canvas)
 	{
-		if (HUD == nullptr || HUD->Canvas == nullptr)
+		if (HUD == nullptr || Canvas == nullptr)
 		{
 			return;
 		}
@@ -948,22 +947,22 @@ namespace NCPlusHUDDrawCall
 		}
 		const FString Label = GS->ServerName.IsEmpty() ? FString(TEXT("(server)")) : GS->ServerName;
 
-		const FVector2D Pos = ResolveScreenPos(TEXT("server_info"), HUD->Canvas,
-			FVector2D(20.f * (HUD->Canvas->ClipY / 1080.f), 14.f * (HUD->Canvas->ClipY / 1080.f)));
+		const FVector2D Pos = ResolveScreenPos(TEXT("server_info"), Canvas,
+			FVector2D(20.f * (Canvas->ClipY / 1080.f), 14.f * (Canvas->ClipY / 1080.f)));
 
 		UFont* Font = NCPlusHUDFonts::Resolve(TEXT("server_info"), HUD, HUD->SmallFont);
 		if (Font == nullptr) Font = HUD->SmallFont;
 		if (Font == nullptr) return;
 
-		const float RenderScale = HUD->Canvas->ClipY / 1080.f;
+		const float RenderScale = Canvas->ClipY / 1080.f;
 		const float FontExtra   = NCPlusHUDFonts::ResolveScale(TEXT("server_info"), 1.f);
 		const float Scale       = RenderScale * FontExtra;
 
 		const FLinearColor Tint = Elem->GetExtraColor(TEXT("color_text"), FLinearColor(0.85f, 0.85f, 0.85f, 1.f));
 		const float OpacityMul  = FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f);
 
-		HUD->Canvas->DrawColor = FLinearColor(Tint.R, Tint.G, Tint.B, Tint.A * OpacityMul).ToFColor(true);
-		HUD->Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
+		Canvas->DrawColor = FLinearColor(Tint.R, Tint.G, Tint.B, Tint.A * OpacityMul).ToFColor(true);
+		Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
 	}
 }
 

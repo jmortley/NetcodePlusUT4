@@ -296,13 +296,16 @@ namespace NCPlusHUDDrawCall
 	/** Full-screen damage tint. Call at the end of each NCPlus HUD's DrawHUD.
 	 *  Tracks the local pawn's Health+Armor across frames; on a decrease, stamps
 	 *  the time and tints the screen for `flash_duration` seconds. No-op when the
-	 *  `damage_flash` alias has no layout entry or is hidden (default OFF). */
-	NETCODEPLUS_API void DrawDamageFlash(class AUTHUD* HUD);
+	 *  `damage_flash` alias has no layout entry or is hidden (default OFF).
+	 *  Canvas is passed by the caller (AHUD::Canvas is protected, can't be
+	 *  reached from a free function — the HUD subclass has it in scope already). */
+	NETCODEPLUS_API void DrawDamageFlash(class AUTHUD* HUD, class UCanvas* Canvas);
 
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).
-	 *  Honors font / font_scale / color_text / opacity. */
-	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD);
+	 *  Honors font / font_scale / color_text / opacity. Canvas passed by caller
+	 *  (see DrawDamageFlash note). */
+	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD, class UCanvas* Canvas);
 }
 
 /**
