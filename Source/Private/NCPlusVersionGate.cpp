@@ -1,5 +1,6 @@
 // NCPlusVersionGate.cpp — see header.
 #include "NCPlusVersionGate.h"
+#include "NCPlusHostInfo.h"
 #include "UnrealTournament.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
@@ -173,6 +174,11 @@ namespace NCPlusVersionGate
 		{
 			return;
 		}
+		// Per-match host-identity replicator rides this same PostLogin hook (it's
+		// the one entry point every NCPlus mode already calls). Goes before the
+		// exemption early-outs below — it must spawn even when this particular
+		// joiner is a bot or the listen host.
+		NCPlusHostInfo::EnsureSpawned(PC->GetWorld());
 		// Bots have no client — nothing to handshake with. The listen-host's
 		// local PC also has no remote: replicating an owner-only actor to a
 		// local PC works, but it's churn for no win since the host obviously
