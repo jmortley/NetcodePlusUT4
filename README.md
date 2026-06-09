@@ -53,7 +53,12 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
 
 ### Game Modes
 
-- **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning. HUD scorebar shows count-up overtime clock with "Overtime" label (replicated via `ANCPlusCTFOTInfo`); spectator list deduplicates the engine's stock count text.
+- **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning. Used for both regular CTF and iCTF (instagib).
+  - HUD scorebar shows count-up overtime clock with "Overtime" label (replicated via `ANCPlusCTFOTInfo`); spectator list deduplicates the engine's stock count text.
+  - **Size-keyed respawn** — `MaxPlayers <= CTFSmallGameMaxPlayers` (default 2 = 1v1 / w00t) uses `CTFRespawnWaitSmall` (1.0s); larger uses `CTFRespawnWait` (1.5s). Works for bot-hosted PUGs and hub rulesets without anyone needing `?RespawnWait`.
+  - **`mutate warmup`** — warmup-only roam mode (`AWarmupRoamMutator`, auto-added). Toggles invulnerability + disables firing on the calling player so they can learn the map without dying or fragging others. Re-asserted on respawn; stripped from everyone the instant the match leaves `WaitingToStart`, so it can never carry into live play.
+  - **Flag-status banners** (`UNCPlusHUDWidget_CTFFlagStatus`) — full nchud control of the world-projected carrier indicator (orange flag over enemy carrier's head), the yellow "You have the flag!" banner, and a new red "Enemy has your flag, recover it!" banner (engine had the text but never drew it; restored as a UT99-style alarm for audio-off players). Each piece independently positionable/hideable/colorable/styleable.
+  - **Crosshair flag-grab flash suppressed** by default (the engine's team-colored flag that pops over the crosshair for 3s after a grab). Opt back in via nchud → CTF section. Implemented as a `LastFlagGrabTime` save/restore around `Super::DrawHUD()` — touches only the one flash path, no other side effects.
 - **NCLeagueDuel** — Strict 1v1 with paired-weapon first-spawn fairness:
   - Map's weapon pickups grouped into pairs (Sniper↔Shock, Rocket↔Flak, Mini↔Link); first-spawn picker assigns A and B from the same pair so neither player gets a weapon-class advantage out of the gate.
   - Shield-belt-adjacent PlayerStarts excluded from first-spawn while the belt is active.
@@ -66,13 +71,14 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
   - Link-pull yoink disabled (no "GET OVER HERE"), pickup timers stripped (no respawn-ring world spam).
 - **ElimPlus** — Round-based 4v4 team elimination, formerly TeamArena. Full competitive scoring stack:
   - Vendored TeamGlicko-2 ratings (per-player Rating / RD / Sigma persisted in `Saved/Mods.db`), per-round in-memory updates, frozen display ELO during a match → animated count-up at match end on the portrait HUD chip (green/red color tween).
+  - **Carry-aware lobby-impact blend** — per-round PPR (Kills + Damage/100, no deaths — matches the community PPR board) z-scored across BOTH teams, blended into the Glicko update via `eff = 0.9·logistic(2.5·z) + 0.1·W/L`. Within-team performance scaling alone could only ever dampen the W/L delta (never flip its sign), so good players plateaued near the seed (~1600). The blend rescues a hard carry from a losing team and discounts a passenger on a winning team. Validated offline on 90k PHX Abs-Elim + UTPugs ElimPlus matches: Spearman 0.937 vs the community PPR board. Wipeout uses the same blend.
   - `PickBalancedTeam` override + full pre-match `TeamBalancer` rebalance at `HandleMatchHasStarted` (fires after engine bot-fill so the pool is complete). Respects `?BalanceTeams=true/false` URL flag.
   - Custom Canvas-drawn pre-match team-preview overlay with team rosters + ELOs + team-strength totals (replaces unreliable scoreboard auto-show).
   - Bot-match cap (±5 ELO) for matches where the human never faced human opposition. Skips never-played connections (e.g. plugin-mismatch kicks) at flush.
   - Lifetime PPR persistence (`TotalPoints` + `RoundsPlayed` columns in `NCRatingElimPlus`, queryable via sqlite).
   - Match-winning-kill instant replay via `ClientPlayInstantReplay` with conditional 7s EndGame delay (skipped in standalone PIE).
   - Hidden-while-respawning portrait visuals + last-man-standing pulse.
-- **Wipeout** — Team elimination with respawn waves, portrait-strip HUD, side-by-side scoreboard with player portraits, K/D + B/A tracking, sudden death OT, alternating-team-first round spawning.
+- **Wipeout** — Team elimination with respawn waves, portrait-strip HUD, side-by-side scoreboard with player portraits, K/D + B/A tracking, sudden death OT, alternating-team-first round spawning. Same carry-aware Glicko blend as ElimPlus.
 - **ShockDom** — 4v4 Shock-Domination (3 control points). Includes match clock HUD, opposing-side cluster spawning at match start, configurable scoring tick.
 
 ### Spawn System (Wipeout + ElimPlus)
@@ -88,27 +94,39 @@ Both team-elimination modes share the same spawn picker:
 
 NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-preview JSON layout system that's not present in any official UT release.
 
-- **9-anchor grid** (TopLeft / TopCenter / TopRight / CenterLeft / Center / CenterRight / BottomLeft / BottomCenter / BottomRight) plus per-element offset, scale, opacity, color overrides, font selector.
-- **Drag-drop visual editor** — repositioning happens in viewport, not text fields.
-- **Five HP/Armor visual styles** (MinimalTypography / SegmentedBars / RadialArcs / HexChevrons / VerticalPills), per-element via the `style` extra.
+- **9-anchor grid** (TopLeft / TopCenter / TopRight / CenterLeft / Center / CenterRight / BottomLeft / BottomCenter / BottomRight) plus per-element offset, scale, opacity, color overrides.
+- **In-viewport repositioning** — `nchud_drag` preview overlay lets you see element bounds in-place rather than picking through text fields blind.
+- **Per-element font picker + FontSz slider** — Tier A (engine built-ins: Tiny / Small / Medium / Large / Huge / Number / Chat) and Tier B (lazy-loaded UT4 fonts: Exo2 Bold, Lato, Ambex, Positec, Extreme) on every text-rendering alias. `FontSz` is a separate multiplier (0.5–2.0 slider, 0.25–4.0 hard cap) so you can dial in apparent text size at 4K without re-importing the UFont at a different `LegacyFontSize`. Lives on scorebar / score_kda today; portraits get it for HP/Armor numbers + respawn timers; the CTF banners get it too.
+- **Five HP/Armor visual styles** (MinimalTypography / SegmentedBars / RadialArcs / HexChevrons / VerticalPills), per-element via the `style` extra. The font picker on `hp_armor` covers both the numbers and the HEALTH / ARMOR labels.
 - **Custom split WeaponBar** — left/right columns with per-weapon picker (decide which weapons live in which column; remaining weapons hide entirely).
+- **CTF flag-status banners** — `ctf_carrier_indicator` (orange flag over enemy carrier), `ctf_you_have_flag` (yellow), `ctf_enemy_has_flag` (red, new in v326), and `ctf_flag_status` (top silhouettes) are four independent draw-call aliases — each independently hideable/positionable, banners with their own color + font.
+- **Optional opt-in overlays** (default OFF; appear in the editor with the Hide box pre-checked):
+  - `damage_flash` — full-screen tint when you take damage. Tunable color, intensity (via opacity), and `flash_duration` (default 0.30s, linear fade).
+  - `server_info` — small server-name plate (font/size/color/opacity). Reads `GameState->ServerName`, falls through to `ServerDescription`, then a string literal. Supports an explicit `name_override` Extras key for hub setups where `ServerName` is overwritten with the ruleset/match label.
+  - `crosshair_flag_grab` — bring back the engine's grab flash if you want it.
+  - `speedometer`, `minimap`, `accuracy`, `heal_ability` — pre-existing opt-ins.
+- **HOST badge on scoreboards** — gold "HOST" tag next to the player who'll press Enter to start the match, on every NCPlus scoreboard. Warmup-only — disappears the instant the match starts. Identifies the host via `AUTPlayerState::bIsMatchHost` with replicated `AUTGameState::HostIdString` as a fallback.
 - **Live preview** — every edit applies to the active HUD without a restart. Reset-per-row and Reset-All snap back to engine defaults snapshotted at startup.
 - **JSON share via clipboard** — Copy / Paste buttons in the editor footer serialize the layout to/from the system clipboard. Validation + confirm dialog on paste. Same payload as `Saved/NetcodePlus/HUDLayout.json`.
+- **Preset gallery** — 3 curated presets (Streamer Friendly / Comp Minimal / Quake Live Throwback) plus user save/delete, with procedural Slate thumbnails. First-run seeds Streamer Friendly so new installs get a polished baseline instead of stock UT defaults.
 - **Multi-mode** — single layout file applies across all NetcodePlus modes (ElimPlus / Wipeout / NCPlusCTF / ShockDom / NCLeagueDuel / NCShaftArena).
-- **Movable engine widgets** too — the alias table covers stock CTF flag-status, crosshair, killfeed, spectator score, announcements, voice-chat status, etc. Position overrides write straight to the widget's `ScreenPosition` / `Position` / `Origin` fields.
+- **Movable engine widgets** too — the alias table covers stock crosshair, killfeed, spectator score, announcements, voice-chat status, etc. Position overrides write straight to the widget's `ScreenPosition` / `Position` / `Origin` fields.
+- **FSE-safe color picker** — opens via a snapshot-and-restore window-mode swap (Fullscreen → WindowedFullscreen → restore on close) so the OS doesn't minimize the game and trap the picker in a bounce loop.
 
-Open the editor in-game with the registered console command (see `NetcodePlus.cpp` for the bind name). Layout persists to `Saved/NetcodePlus/HUDLayout.json`.
+Open the editor in-game with the `nchud` console command. Layout persists to `Saved/NetcodePlus/HUDLayout.json`.
 
 ### Mutators
 
 - **NCUTPlus** — primary mutator that replaces stock weapons with their NetcodePlus variants. Configurable per-weapon hide/show via `weaponskins` console command.
 - **ClientHitsounds** — client-side hit prediction with batched server confirmation. Configurable hitsound packs.
 - **ElimPlusMutator** — adds the ElimPlus-specific behaviors (rating/replicator hookup, BP CheckRelevance for placed-pickup filtering). Required when running `ElimPlus` game mode.
+- **AWarmupRoamMutator** — auto-added by NCPlusCTF (incl. iCTF). Powers the `mutate warmup` console command: warmup-only invuln + firing-disable so players can learn the map. Stripped from everyone at match start via `NotifyMatchStateChange`; can never carry into live play.
 
 ### Utilities
 
-- **`weaponskins` console command** — opens Slate UI for per-weapon hide/show and skin selection.
+- **`weaponskins` console command** — opens Slate UI for per-weapon hide/show, skin selection, hitscan choice (Sniper / LG), **beam colors** (Sniper/LG via `LGColor`, Shock via `ShockBeam` — FSE-safe color picker, format matches the BP defaults' `Convert String to Linear Color` parser so the weapon BPs read the new color at spawn without parser changes), and **hidden-weapon beam origin** (`Back` / `Down` spinners — the tracer/beam spawn point relative to the camera when the weapon is hidden; defaults 10 / 35 reproduce stomach-height; try 10 / 20 for chest or 10 / 60 for hip-fire feel).
 - **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
+- **Plugin-version gate (`ANCVersionGate`)** — server-spawned per-player `AInfo` in `PostLogin`, owner-only replication. Client's `PostNetInit` reports `NETCODE_PLUGIN_VERSION` immediately; server `KickPlayer`s mismatches with a clear "server v325, you are vN — update via launcher" message. Server-side timeout (default 10s, `[NetcodePlus] VersionReportTimeoutSec`, clamp 1–60) catches clients that don't have the gate class at all and never respond. Wired into every NCPlus mode's `PostLogin`. Bots + listen-host local PC exempt.
 - **Custom siphon powerup** — life-steal pickup spawning at sniper location with 90s timer.
 - **Hit-plot replicator** — server analyzes hit positions for ServerShield-style debug visualization.
 - **Stats integration** — replicates per-player accuracy + damage + armor counts via mode-specific `AInfo` replicators (`ANCLeagueDuelStatsReplicator`, `ANCShaftArenaStatsReplicator`, `AElimPlusStatsReplicator`, `ACTFStatsReplicator`, `AWipeoutDamageReplicator`, `AShockDomReplicator`) so dedicated-server clients can read stats that are server-only on `AUTPlayerState`.
@@ -134,10 +152,29 @@ For server admins: ensure `Binaries/Linux/` and `Binaries/Win64/` are committed 
 
 ### Mod.ini
 
-Per-player settings persist in `Mod.ini` under `[NetcodePlus.WeaponSettings]`:
+Lives at `<Saved>/Config/Mod.ini`. Most plugin-side knobs go here; some are per-player (client `Saved/`), some are per-server (server `Saved/`), some apply to both — noted per section.
 
-- `Hide.<WeaponClassName>=1/0` — hide/show first-person mesh per weapon
-- `Skin.<WeaponSkinTag>=<AssetPath>` — applied skin per weapon family (currently disabled in code; see `bSkinsEnabled` gate)
+**`[NetcodePlus]`** (server-side):
+- `VersionReportTimeoutSec=10.0` — how long the version gate waits for a client to report its NETCODE_PLUGIN_VERSION before kicking. Default 10s; clamped 1–60s. Garbage / missing value falls back to default.
+
+**`[NetcodePlus.WeaponSettings]`** (per-player):
+- `Hide.<WeaponClassName>=1|0` — hide/show first-person mesh per weapon.
+- `HiddenBeamBack=10.0` — when a weapon is hidden, how far behind the camera the tracer/beam spawns (units). Clamped 0–100.
+- `HiddenBeamDown=35.0` — how far below the camera. Defaults 10 / 35 = stomach height; 10 / 20 = chest; 10 / 60 = hip-fire.
+- `Skin.<WeaponSkinTag>=<AssetPath>` — applied skin per weapon family (currently disabled in code; see `bSkinsEnabled` gate).
+
+**`[WeaponSkinsPlus]`** (per-player):
+- `HitscanChoice=Sniper|LG` — hitscan weapon preference (Sniper Rifle vs Lightning Gun). Set via the `weaponskins` menu toggle.
+- `LGColor=(R=...,G=...,B=...,A=...)` — beam color for both Sniper and LG. Format is `FLinearColor::ToString` output; read by the BP `Convert String to Linear Color` node in `UTNPLightningGun` / `UTNPSniper` defaults.
+- `ShockBeam=(R=...,G=...,B=...,A=...)` — beam color for the Shock primary. Same format; read by `UTNPShockRifle`.
+
+**`[UTPUGS_STATS]`** (server-side — CTF perf + respawn tuning):
+- `CTFRespawnWait=1.5` — regulation CTF respawn for normal-sized matches (`MaxPlayers > CTFSmallGameMaxPlayers`). Fractional values honored.
+- `CTFRespawnWaitSmall=1.0` — respawn for small games (1v1 / w00t).
+- `CTFSmallGameMaxPlayers=2` — `MaxPlayers <= this` uses `CTFRespawnWaitSmall`. Raise to 4 if you want 2v2 to also get the fast respawn.
+- Other knobs in this section tune the live CTF perf scoring used for ELO + the live Glicko system; see `LoadCTFPerfConfig` in `NCPlusCTFGameMode.cpp` for the full list.
+
+**`[UTPUGS_SPAWN]`** (server-side — CTF spawn picker tuning): per-knob list in `LoadSpawnConfig` (penalties for flag-carrier proximity, enemy LOS, freshness window, etc.).
 
 ### URL Flags (server command line)
 
