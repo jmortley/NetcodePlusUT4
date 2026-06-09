@@ -278,21 +278,25 @@ void AMutBotEvents::ScoreKill_PostHighlights(AUTPlayerState* KillerPS)
 	if (KillerPS == nullptr || BotApiUrl.IsEmpty()) return;
 	if (KillerPS->bIsABot) return;       // don't flood chat in bot-heavy matches
 
-	// MONSTER KILL only — fire on exact threshold, not on 5+ kills (those just
-	// keep saying MONSTER from the engine's POV).
-	if (KillerPS->MultiKillLevel == 4)
+	// MONSTER KILL — fire for level 4 AND every subsequent kill in the same
+	// engine multikill window (5, 6, ...). Multiplier turns those continuations
+	// into "MONSTER KILL x2 / x3 / ..." on the bot side via Discord message edit
+	// instead of fresh embeds. Level 4 -> Multiplier 1 -> new embed; >4 -> edit.
+	if (KillerPS->MultiKillLevel >= 4)
 	{
-		PostReward(KillerPS, TEXT("monster"), 4);
+		const int32 Multiplier = KillerPS->MultiKillLevel - 3;     // 4->1, 5->2, 6->3, ...
+		PostReward(KillerPS, TEXT("monster"), KillerPS->MultiKillLevel, Multiplier);
 	}
 
 	// DOMINATING and above (level 3..5). The %5==0 gate is the engine's own
 	// milestone check; matches AUTGameMode::ScoreKill at UTGameMode.cpp:2846.
+	// Each spree milestone is its own event — multiplier always 1.
 	if (KillerPS->Spree > 0 && (KillerPS->Spree % 5) == 0)
 	{
 		const int32 SpreeLevel = KillerPS->Spree / 5;
 		if (SpreeLevel >= 3 && SpreeLevel <= 5)
 		{
-			PostReward(KillerPS, TEXT("spree"), SpreeLevel);
+			PostReward(KillerPS, TEXT("spree"), SpreeLevel, 1);
 		}
 	}
 }
@@ -461,13 +465,14 @@ void AMutBotEvents::PostFlagCapture(AUTPlayerState* Scorer)
 		*PlayerName, TeamIndex, ScoreRed, ScoreBlue, NumCovers);
 }
 
-void AMutBotEvents::PostReward(AUTPlayerState* Scorer, const FString& Type, int32 Level)
+void AMutBotEvents::PostReward(AUTPlayerState* Scorer, const FString& Type, int32 Level, int32 Multiplier)
 {
 	if (Scorer == nullptr || BotApiUrl.IsEmpty()) return;
 
 	TSharedRef<FJsonObject> Json = MakeShareable(new FJsonObject());
-	Json->SetStringField(TEXT("type"),         Type);       // "monster" | "spree"
-	Json->SetNumberField(TEXT("level"),        Level);      // monster=4; spree=3..5
+	Json->SetStringField(TEXT("type"),         Type);          // "monster" | "spree"
+	Json->SetNumberField(TEXT("level"),        Level);         // raw engine value
+	Json->SetNumberField(TEXT("multiplier"),   Multiplier);    // 1 = new embed; >1 = edit existing
 	Json->SetStringField(TEXT("player_name"),  Scorer->PlayerName);
 	Json->SetNumberField(TEXT("player_team"),  Scorer->GetTeamNum());
 	Json->SetNumberField(TEXT("pug_id"),       PugId);
@@ -480,8 +485,8 @@ void AMutBotEvents::PostReward(AUTPlayerState* Scorer, const FString& Type, int3
 
 	SendPost(TEXT("/reward"), Output);
 
-	UE_LOG(LogBotEvents, Log, TEXT("Reward: %s lvl=%d by %s (team %d)"),
-		*Type, Level, *Scorer->PlayerName, Scorer->GetTeamNum());
+	UE_LOG(LogBotEvents, Log, TEXT("Reward: %s lvl=%d x%d by %s (team %d)"),
+		*Type, Level, Multiplier, *Scorer->PlayerName, Scorer->GetTeamNum());
 }
 
 void AMutBotEvents::PostMatchEnded()
