@@ -41,7 +41,7 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers);
 
 	/** Custom team score bar — replaces bpHW_TeamGameClock to respect TeamSkins colors.
-	 *  Shows "Liandri" vs "Phayder" when custom team colors are detected. */
+	 *  Shows "Phayder" (red) vs "Liandri" (blue) when custom team colors are detected. */
 	virtual void DrawTeamScoreBar(AUTGameState* GS);
 
 	/** "NOW WATCHING <player>" spectator banner, ported from iCTF (ANCPlusCTFHUD).

@@ -537,7 +537,7 @@ void AWipeoutHUD::DrawHUD()
 // ─── Custom team score bar ─────────────────────────────────────────────
 // Draws team scores, clock, and "You are on X" text at the top center.
 // Uses dynamic team colors from AUTTeamInfo::TeamColor instead of hardcoded red/blue.
-// When non-standard team colors are detected, shows "Liandri" vs "Phayder" instead.
+// When non-standard team colors are detected, shows "Phayder" (red) vs "Liandri" (blue).
 void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
 	if (!Canvas || !SmallFont || !MediumFont || !LargeFont) return;
@@ -576,8 +576,8 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	}
 
 	// Team names
-	FString Team0Name = bCustomColors ? TEXT("Liandri (R)") : TEXT("RED");
-	FString Team1Name = bCustomColors ? TEXT("Phayder (B)") : TEXT("BLUE");
+	FString Team0Name = bCustomColors ? TEXT("Phayder (R)") : TEXT("RED");
+	FString Team1Name = bCustomColors ? TEXT("Liandri (B)") : TEXT("BLUE");
 
 	// Scores
 	int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
