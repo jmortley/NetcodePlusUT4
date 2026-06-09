@@ -64,6 +64,10 @@ private:
 	void PostStateChangeWithPlayers(const FString& State);
 	void PostFlagCapture(AUTPlayerState* Scorer);
 	void PostMatchEnded();
+	/** /reward POST — unified endpoint for kill-streak highlights (multikill
+	 *  rungs above Monster, sprees Dominating+). Type = "monster"|"spree";
+	 *  Level = the engine's MultiKillLevel (1..4) or Spree/5 (1..5). */
+	void PostReward(AUTPlayerState* Scorer, const FString& Type, int32 Level);
 
 	// ── Player Readiness Polling ──────────────────────────────────────
 	FTimerHandle ReadyCheckTimer;
@@ -80,6 +84,12 @@ private:
 	/** Open/close a carry window as a flag is grabbed or dropped/returned. */
 	UFUNCTION()
 	void OnFlagHolderChanged(AUTCarriedObject* Flag);
+
+	// ── Kill-streak highlights ───────────────────────────────────────
+	/** Called from ScoreKill_Implementation after Super:: has updated the
+	 *  killer's MultiKillLevel / Spree. Posts /reward for Monster Kill (exact
+	 *  threshold) and for Spree levels 3..5 (Dominating, Unstoppable, Godlike). */
+	void ScoreKill_PostHighlights(AUTPlayerState* KillerPS);
 
 	// ── Helpers ────────────────────────────────────────────────────────
 	FString BuildPlayerListJson() const;
