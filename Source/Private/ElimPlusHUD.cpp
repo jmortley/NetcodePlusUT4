@@ -1014,8 +1014,8 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 			ColX + 24.f * TextScale, TotalY, TextScale, TextScale, RI);
 	};
 
-	DrawTeamColumn(0, PX,         TEXT("RED  (LIANDRI)"), FLinearColor(1.f,  0.35f, 0.35f, 1.f));
-	DrawTeamColumn(1, PX + ColW,  TEXT("BLUE (PHAYDER)"), FLinearColor(0.4f, 1.f,   0.4f,  1.f));
+	DrawTeamColumn(0, PX,         TEXT("RED  (PHAYDER)"), FLinearColor(1.f,  0.35f, 0.35f, 1.f));
+	DrawTeamColumn(1, PX + ColW,  TEXT("BLUE (LIANDRI)"), FLinearColor(0.4f, 1.f,   0.4f,  1.f));
 
 	// Subtle divider between columns
 	Canvas->SetLinearDrawColor(Faded(FLinearColor(1.f, 1.f, 1.f, 0.25f)));

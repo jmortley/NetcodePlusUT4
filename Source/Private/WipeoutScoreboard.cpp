@@ -98,8 +98,8 @@ void UWipeoutScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 	bool bCustom = HasCustomTeamColors();
 
 	// Set team names based on whether custom colors are active
-	RedTeamText = bCustom ? FText::FromString(TEXT("LIANDRI (R)")) : FText::FromString(TEXT("RED"));
-	BlueTeamText = bCustom ? FText::FromString(TEXT("PHAYDER (B)")) : FText::FromString(TEXT("BLUE"));
+	RedTeamText = bCustom ? FText::FromString(TEXT("PHAYDER (R)")) : FText::FromString(TEXT("RED"));
+	BlueTeamText = bCustom ? FText::FromString(TEXT("LIANDRI (B)")) : FText::FromString(TEXT("BLUE"));
 
 	// Call base — it uses RedTeamText/BlueTeamText and draws with FLinearColor::Red/Blue
 	// We override the draw colors by using the team colors directly
