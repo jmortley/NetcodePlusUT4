@@ -145,6 +145,17 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	/** Widen the server-side hitscan time-search fallback to 45ms (half-window) for the
 	 *  shock family (incl. the BP instagib child); other weapons keep the base 30ms. */
 	virtual float GetHitscanTimeSearchWindow() const override;
+
+	/** UT99-style TARGET knockback for the primary beam in CTF/iCTF (covers the BP
+	 *  instagib child). When Mod.ini [NetcodePlus] bShockTargetBoost=true (default
+	 *  OFF), a live pawn hit by the beam gets UT99-feel momentum — boosting the
+	 *  TARGET (incl. a teammate, with bTeammatesBlockHitscan), never the shooter.
+	 *  Server-only effect: momentum is consumed inside the server's TakeDamage
+	 *  (firing client runs FireInstantHit with bDealDamage=false), so this needs
+	 *  no client roll and no version bump. UT99 used 60000 into a 400-speed world;
+	 *  UT4's world is ~2.35x faster, so the feel-matched default is 140000
+	 *  (rocket-class) — above ~170k the AddDampedImpulse caps eat the excess. */
+	virtual float GetImpartedMomentumMag(AActor* HitActor) override;
 };
 
 #ifdef _MSC_VER

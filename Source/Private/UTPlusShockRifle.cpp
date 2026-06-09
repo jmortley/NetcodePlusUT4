@@ -7,6 +7,7 @@
 #include "Engine.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTCTFGameState.h"
 #include "Net/UnrealNetwork.h"
 
 const FName NAME_ShockPrimaryShots(TEXT("ShockPrimaryShots"));
@@ -188,6 +189,61 @@ float AUTPlusShockRifle::GetHitscanTimeSearchWindow() const
 	// the shock family (this class + the BP instagib rifle child). Recovers high-ping
 	// claimed hits on the ~5% smaller iCTF hitbox; other weapons keep the base 30ms.
 	return 0.045f;
+}
+
+// --- UT99-style shock target-boost (Mod.ini; OFF by default; read once per process,
+//     server restart applies changes — same convention as the other [NetcodePlus] keys) ---
+static bool  GShockBoostLoaded   = false;
+static bool  GShockBoostEnabled  = false;     // [NetcodePlus] bShockTargetBoost
+static float GShockBoostMomentum = 140000.f;  // [NetcodePlus] ShockTargetBoostMomentum
+
+static void LoadShockBoostConfig()
+{
+	if (GShockBoostLoaded)
+	{
+		return;
+	}
+	GShockBoostLoaded = true;
+
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	GConfig->GetBool (TEXT("NetcodePlus"), TEXT("bShockTargetBoost"),        GShockBoostEnabled,  ModIni);
+	GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ShockTargetBoostMomentum"), GShockBoostMomentum, ModIni);
+	GShockBoostMomentum = FMath::Clamp(GShockBoostMomentum, 0.f, 1000000.f);
+}
+
+float AUTPlusShockRifle::GetImpartedMomentumMag(AActor* HitActor)
+{
+	// Base keeps Epic's behavior: 20000 for dead bodies, Momentum * FriendlyMomentumScaling
+	// for teammates, else InstantHitInfo[CurrentFireMode].Momentum.
+	const float Base = Super::GetImpartedMomentumMag(HitActor);
+
+	LoadShockBoostConfig();
+	if (!GShockBoostEnabled)
+	{
+		return Base;   // off by design — admin opt-in only
+	}
+
+	// Scope = primary beam (mode 0) in a CTF-family match (AUTCTFBaseGame sets
+	// AUTCTFGameState, so this covers NCPlusCTF regular AND instagib).
+	if (CurrentFireMode != 0 || GetWorld()->GetGameState<AUTCTFGameState>() == nullptr)
+	{
+		return Base;
+	}
+
+	// Boost the TARGET we hit — a live character (an enemy, or a teammate when the BP
+	// runs bTeammatesBlockHitscan). The shooter is never HitActor for a hitscan beam,
+	// so this can never self-boost (UT99 never had a primary self-boost either —
+	// ShockRifle.uc deals 60000*aimDir to `Other` with `Other != Owner`).
+	// Max() lifts every live target to the UT99-equivalent floor and never reduces a
+	// larger base; note it also restores teammate launch if the BP zeroed
+	// FriendlyMomentumScaling — that's the flag-carrier-boost use case.
+	AUTCharacter* HitChar = Cast<AUTCharacter>(HitActor);
+	if (HitChar != nullptr && !HitChar->IsDead())
+	{
+		return FMath::Max(Base, GShockBoostMomentum);
+	}
+
+	return Base;   // world geometry / dead bodies → unchanged
 }
 
 bool AUTPlusShockRifle::WaitingForCombo()
