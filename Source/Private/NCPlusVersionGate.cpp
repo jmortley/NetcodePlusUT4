@@ -48,6 +48,14 @@ static float ResolveVersionReportTimeoutSec()
 	return FMath::Clamp(Parsed, kVersionReportTimeoutMin, kVersionReportTimeoutMax);
 }
 
+// Best-effort owning player's name for audit logs. Owner / PlayerState can race
+// to null on disconnect, so guard every hop and fall back to "<unknown>".
+static FString ResolveOwnerName(AActor* Gate)
+{
+	APlayerController* PC = Gate ? Cast<APlayerController>(Gate->GetOwner()) : nullptr;
+	return (PC && PC->PlayerState) ? PC->PlayerState->PlayerName : FString(TEXT("<unknown>"));
+}
+
 ANCVersionGate::ANCVersionGate(const FObjectInitializer& OI)
 	: Super(OI)
 	, bConfirmed(false)
@@ -119,8 +127,8 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 
 	// Mismatch — immediate kick.
 	UE_LOG(LogGameMode, Warning,
-		TEXT("[NCPlusVersionGate] kicking owner: client v%d != server v%d"),
-		ClientVersion, ServerVersion);
+		TEXT("[NCPlusVersionGate] kicking owner: client v%d != server v%d (player: %s)"),
+		ClientVersion, ServerVersion, *ResolveOwnerName(this));
 	KickOwner(FString::Printf(
 		TEXT("NetcodePlus version mismatch: server is v%d, you are v%d. Update via launcher."),
 		ServerVersion, ClientVersion));
@@ -134,8 +142,8 @@ void ANCVersionGate::OnTimeout()
 	}
 	UE_LOG(LogGameMode, Warning,
 		TEXT("[NCPlusVersionGate] kicking owner: no version report within %.0fs (server v%d). ")
-		TEXT("Likely missing/outdated NetcodePlus plugin."),
-		TimeoutSec, NETCODE_PLUGIN_VERSION);
+		TEXT("Likely missing/outdated NetcodePlus plugin. (player: %s)"),
+		TimeoutSec, NETCODE_PLUGIN_VERSION, *ResolveOwnerName(this));
 	KickOwner(FString::Printf(
 		TEXT("NetcodePlus plugin missing or outdated (server is v%d). Update via launcher."),
 		NETCODE_PLUGIN_VERSION));
