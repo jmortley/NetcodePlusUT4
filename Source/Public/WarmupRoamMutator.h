@@ -23,7 +23,9 @@ class NETCODEPLUS_API AWarmupRoamMutator : public AUTMutator
 	GENERATED_UCLASS_BODY()
 
 public:
-	/** `mutate warmup` toggles roam for the sender. Warmup-only; rejected otherwise. */
+	/** `mutate warmup` toggles roam for the sender (warmup-only; rejected otherwise).
+	 *  `mutate host` replies with the match host's name over ClientMessage — server-side
+	 *  stopgap for the unreliable HOST badge until the ANCHostInfo client roll lands. */
 	virtual void Mutate_Implementation(const FString& MutateString, APlayerController* Sender) override;
 
 	/** Re-assert roam on a respawned pawn (firing/invuln reset to defaults each spawn). */

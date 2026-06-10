@@ -4,6 +4,8 @@
 #include "UTCharacter.h"
 #include "UTPlayerController.h"
 #include "UTGameState.h"
+#include "UTBaseGameMode.h"
+#include "UTPlayerState.h"
 
 AWarmupRoamMutator::AWarmupRoamMutator(const FObjectInitializer& OI)
 	: Super(OI)
@@ -84,6 +86,47 @@ void AWarmupRoamMutator::Mutate_Implementation(const FString& MutateString, APla
 				: TEXT("Warmup roam OFF."));
 		}
 		// fall through to Super so the rest of the mutator chain still sees the command.
+	}
+	else if (Sender != nullptr && MutateString.Equals(TEXT("host"), ESearchCase::IgnoreCase))
+	{
+		// Stopgap host visibility: the scoreboard HOST badge is unreliable on some
+		// servers until the ANCHostInfo client roll (feature/host-badge-info-actor),
+		// so let anyone ask the server directly. The answer travels over the stock
+		// ClientMessage RPC, so this works for current clients with no recook.
+		AUTBaseGameMode* GM = GetWorld() ? Cast<AUTBaseGameMode>(GetWorld()->GetAuthGameMode()) : nullptr;
+		const FString HostId = GM ? GM->GetHostId() : FString();
+		if (HostId.IsEmpty())
+		{
+			Sender->ClientMessage(TEXT("No match host is configured on this server."));
+		}
+		else
+		{
+			AUTPlayerState* HostPS = nullptr;
+			AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+			if (GS != nullptr)
+			{
+				for (int32 i = 0; i < GS->PlayerArray.Num(); i++)
+				{
+					AUTPlayerState* PS = Cast<AUTPlayerState>(GS->PlayerArray[i]);
+					// Mirror the engine host loop's match (UTGameMode::ReadyToStartMatch):
+					// id equality, case-insensitive, skip inactive.
+					if (PS != nullptr && !PS->bIsInactive && PS->UniqueId.IsValid()
+						&& HostId.Equals(PS->UniqueId.ToString(), ESearchCase::IgnoreCase))
+					{
+						HostPS = PS;
+						break;
+					}
+				}
+			}
+			Sender->ClientMessage(HostPS != nullptr
+				? FString::Printf(TEXT("Match host: %s"), *HostPS->PlayerName)
+				: TEXT("Match host is not connected yet."));
+			// Server-log echo so admins can grep who the host resolved to per match.
+			UE_LOG(LogGameMode, Log, TEXT("[WarmupRoam] mutate host: %s (asked by %s)"),
+				HostPS ? *HostPS->PlayerName : TEXT("<not connected>"),
+				(Sender->PlayerState != nullptr) ? *Sender->PlayerState->PlayerName : TEXT("<unknown>"));
+		}
+		// fall through to Super, same as `warmup`.
 	}
 
 	Super::Mutate_Implementation(MutateString, Sender);
