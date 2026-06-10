@@ -71,7 +71,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	SpawnFreshnessWindow = 30.0f;       // 30s since last use = fully fresh
 	SpawnFlagVicinityRadius = 4000.f;   // flag within this of our base = "in the vicinity"
 	SpawnKillerAvoidRadius = 2500.f;    // never respawn within this of your last killer (anti-camp)
-	SpawnRobbedBaseAvoidCount = 2.f;    // when our flag's out, skip the 2 deepest base spawns
+	SpawnRobbedBaseAvoidCount = 2.f;    // when our flag's out, the 2 deepest base spawns form the avoid set — ONE blocked per respawn, alternating
 
 	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
@@ -1097,9 +1097,10 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		}
 	}
 
-	// When our OWN flag isn't home, drop the deepest starts at our (just-robbed) base
-	// so we respawn forward toward the carrier's escape rather than behind it — a
-	// lightweight slice of UT99's "hard to leave".
+	// When our OWN flag isn't home, drop ONE of the deepest starts at our
+	// (just-robbed) base — alternating which — so we respawn biased forward toward
+	// the carrier's escape rather than behind it: a lightweight slice of UT99's
+	// "hard to leave" that no longer locks defenders out of the whole base area.
 	FVector OwnBaseLoc = FVector::ZeroVector;
 	const int32 RobbedAvoid = FMath::TruncToInt(SpawnRobbedBaseAvoidCount);
 	bool bOwnFlagOut = false;
@@ -1141,21 +1142,31 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		DistOwnBase.Add(bOwnFlagOut ? (Candidate->GetActorLocation() - OwnBaseLoc).Size() : FLT_MAX);
 	}
 
-	// Mark the RobbedAvoid starts nearest our robbed base (keep at least one start).
+	// Rank the RobbedAvoid starts nearest our robbed base, then mark exactly ONE
+	// of them — rotating through the set per respawn (nearest, 2nd-nearest, ...)
+	// so defenders always keep a base spawn available but can't rely on one fixed
+	// spot while the flag is out. (Was: drop ALL RobbedAvoid nearest at once.)
 	TArray<bool> RobbedAdj;
 	RobbedAdj.Init(false, Cands.Num());
 	if (bOwnFlagOut)
 	{
-		const int32 ToDrop = FMath::Min(RobbedAvoid, FMath::Max(0, Cands.Num() - 1));
-		for (int32 k = 0; k < ToDrop; ++k)
+		TArray<int32> NearestRanked;   // candidate indices, ascending distance to base
+		const int32 SetSize = FMath::Min(RobbedAvoid, FMath::Max(0, Cands.Num() - 1));
+		for (int32 k = 0; k < SetSize; ++k)
 		{
 			int32 MinIdx = -1; float MinD = FLT_MAX;
 			for (int32 i = 0; i < Cands.Num(); ++i)
 			{
-				if (!RobbedAdj[i] && DistOwnBase[i] < MinD) { MinD = DistOwnBase[i]; MinIdx = i; }
+				if (!NearestRanked.Contains(i) && DistOwnBase[i] < MinD) { MinD = DistOwnBase[i]; MinIdx = i; }
 			}
 			if (MinIdx < 0) break;
-			RobbedAdj[MinIdx] = true;
+			NearestRanked.Add(MinIdx);
+		}
+		if (NearestRanked.Num() > 0)
+		{
+			int32& Rotation = RobbedSpawnRotation[FMath::Clamp(TeamIndex, 0, 1)];
+			RobbedAdj[NearestRanked[Rotation % NearestRanked.Num()]] = true;
+			++Rotation;
 		}
 	}
 

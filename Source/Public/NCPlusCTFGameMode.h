@@ -155,11 +155,17 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	float SpawnKillerAvoidRadius;
 
 	/** When your OWN flag isn't home (stolen or dropped), drop this many of your
-	 *  team's starts nearest your flag base — so you respawn forward toward the
-	 *  carrier's escape instead of behind it at the just-robbed base. Always keeps
-	 *  at least one start. 0 disables. */
+	 *  team's starts nearest your flag base form the avoid SET — exactly ONE of
+	 *  them is excluded per respawn, rotating through the set (nearest, then
+	 *  2nd-nearest, ...) so defenders always keep a base spawn available but
+	 *  can't rely on one fixed spot while the flag is out. You still respawn
+	 *  biased forward toward the carrier's escape. 0 disables. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnRobbedBaseAvoidCount;
+
+	/** Per-team rotation cursor for the robbed-base exclusion above (which of the
+	 *  N nearest starts is blocked this respawn). Runtime only; resets per map. */
+	int32 RobbedSpawnRotation[2] = { 0, 0 };
 
 	// ── Movement Configuration ───────────────────────────────────────
 
