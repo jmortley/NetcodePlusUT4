@@ -721,3 +721,14 @@ AUTPlayerState* AShockDomGameMode::FindBestPlayerOnTeam(int32 TeamIndex)
 
 	return Best;
 }
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool AShockDomGameMode::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved;
+	// this only ADDS the ?HostId= match host when the server's Mod.ini sets
+	// [NetcodePlus] bAllowHostPause=true.
+	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
+}

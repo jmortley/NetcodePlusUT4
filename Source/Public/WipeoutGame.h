@@ -804,4 +804,9 @@ protected:
 	 *  GetAliveCounts minus the living-pawn requirement. Used to detect someone
 	 *  joining the empty team during a solo/practice round. */
 	bool GetTeamMemberCounts(int32& OutTeam0, int32& OutTeam1) const;
+
+public:
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
 };

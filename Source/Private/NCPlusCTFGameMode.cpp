@@ -1857,3 +1857,14 @@ void ANCPlusCTFGameMode::CreateGameURLOptions(TArray<TSharedPtr<TAttributeProper
 // AUTCTFGameMode::CreateConfigWidgets provides the standard CTF UI. Our custom
 // settings (AdvantageMaxDuration, GracePeriod, MercyScore) are exposed via
 // CreateGameURLOptions and can be set via URL params or config.
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool ANCPlusCTFGameMode::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved;
+	// this only ADDS the ?HostId= match host when the server's Mod.ini sets
+	// [NetcodePlus] bAllowHostPause=true.
+	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
+}

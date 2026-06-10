@@ -60,6 +60,10 @@ class NETCODEPLUS_API ANCLeagueDuelGame : public AUTDuelGame
 	GENERATED_UCLASS_BODY()
 
 public:
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void EndPlayerIntro() override;

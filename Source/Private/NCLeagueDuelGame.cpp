@@ -1000,3 +1000,14 @@ void ANCLeagueDuelGame::BuildMatchSummary(FNCMatchSummary& Out) const
 		Out.Players.Add(P);
 	}
 }
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool ANCLeagueDuelGame::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved;
+	// this only ADDS the ?HostId= match host when the server's Mod.ini sets
+	// [NetcodePlus] bAllowHostPause=true.
+	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
+}

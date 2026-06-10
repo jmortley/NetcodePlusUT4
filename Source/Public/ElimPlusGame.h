@@ -306,6 +306,10 @@ public:
 	virtual void CallMatchStateChangeNotify() override;
 	virtual bool ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured, AController* InstigatedBy, const FHitResult& HitInfo, AActor* DamageCauser, TSubclassOf<UDamageType> DamageType) override;
 
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
 	/** Override core UT score check to allow win by 2 */
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer) override;
 

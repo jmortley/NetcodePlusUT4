@@ -65,6 +65,10 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 {
 	GENERATED_UCLASS_BODY()
 
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
 	// ── Advantage Configuration ──────────────────────────────────────
 
 	/** Max seconds advantage lasts while a flag is held before forcing grace period. */

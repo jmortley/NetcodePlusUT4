@@ -18,6 +18,10 @@ class NETCODEPLUS_API AShockDomGameMode : public AUTTeamGameMode
 public:
 	AShockDomGameMode(const FObjectInitializer& ObjectInitializer);
 
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
 
 	// =======================================================================
 	// DOMINATION CONFIGURATION
