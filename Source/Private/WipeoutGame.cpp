@@ -459,6 +459,26 @@ void AUWipeoutGame::DefaultTimer()
 		int32 Alive0, Alive1;
 		GetAliveCounts(Alive0, Alive1);
 
+		// Solo/practice round bookkeeping (round started with one team empty).
+		const bool bSoloRound = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+		if (bSoloRound && !GetWorldTimerManager().IsTimerActive(TH_RoundEndDelay))
+		{
+			// Someone joined the previously-empty team mid-practice-round: end it
+			// now with no score so intermission starts a REAL round, both sides
+			// fresh — wipeout rules should never judge a player who hasn't had a
+			// spawn wave yet.
+			int32 Members0, Members1;
+			GetTeamMemberCounts(Members0, Members1);
+			if (Members0 > 0 && Members1 > 0)
+			{
+				UE_LOG(LogGameMode, Warning, TEXT("Wipeout: practice round reset — %dv%d players now present, restarting as a real round."), Members0, Members1);
+				FTimerDelegate TimerDelegate;
+				TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), (int32)INDEX_NONE, FName(TEXT("PracticeReset")));
+				GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
+				return;
+			}
+		}
+
 		int32 RoundRemain = 0;
 		if (RoundEndTimeSeconds > 0.f)
 		{
@@ -469,6 +489,24 @@ void AUWipeoutGame::DefaultTimer()
 
 			if (RoundRemain == 0 && !bInSuddenDeath && !bSuddenDeathPending)
 			{
+				// Solo/practice: time's up vs an empty team — no sudden death against
+				// nobody. Alive → the populated side takes the round ("TimeExpired");
+				// dead between respawn waves at this exact second → draw. Real games
+				// are unaffected (bSoloRound needs an empty team at round start).
+				if (bSoloRound)
+				{
+					if (!GetWorldTimerManager().IsTimerActive(TH_RoundEndDelay))
+					{
+						const int32 Winner = (Team0StartingSize == 0)
+							? ((Alive1 > 0) ? 1 : INDEX_NONE)
+							: ((Alive0 > 0) ? 0 : INDEX_NONE);
+						FTimerDelegate TimerDelegate;
+						TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), Winner, FName(TEXT("TimeExpired")));
+						GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
+					}
+					return;
+				}
+
 				// Time is up — start 3-second grace period before sudden death.
 				// Players with pending respawns within the grace window can still spawn.
 				bSuddenDeathPending = true;
@@ -941,6 +979,17 @@ void AUWipeoutGame::CheckWipeoutCondition()
 
 	int32 Alive0, Alive1;
 	GetAliveCounts(Alive0, Alive1);
+
+	// Solo/practice rounds (one team empty at round start): nobody to wipe or
+	// be wiped by — respawn waves keep the solo player going and the round
+	// clock decides (DefaultTimer awards "TimeExpired" at expiry, or resets to
+	// a real round if someone joins). Real games never have a 0 starting size.
+	const bool bSoloRound = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+	if (bSoloRound && RoundEndTimeSeconds > 0.f
+		&& GetWorld()->GetTimeSeconds() < RoundEndTimeSeconds)
+	{
+		return;
+	}
 
 	const bool Team0Wiped = (Alive0 == 0);
 	const bool Team1Wiped = (Alive1 == 0);
@@ -2306,6 +2355,28 @@ bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 
 		if (PS->Team->TeamIndex == 0) OutAliveTeam0++;
 		else if (PS->Team->TeamIndex == 1) OutAliveTeam1++;
+	}
+
+	return true;
+}
+
+bool AUWipeoutGame::GetTeamMemberCounts(int32& OutTeam0, int32& OutTeam1) const
+{
+	OutTeam0 = 0;
+	OutTeam1 = 0;
+
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	if (!GS || GS->IsPendingKill()) return false;
+
+	// Same filters as GetAliveCounts, minus the living-pawn requirement: counts
+	// everyone ON a team — alive, dead, or waiting on a respawn wave.
+	for (APlayerState* PSBase : GS->PlayerArray)
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+		if (!PS || PS->bOnlySpectator || PS->bIsInactive || !PS->Team) continue;
+
+		if (PS->Team->TeamIndex == 0) OutTeam0++;
+		else if (PS->Team->TeamIndex == 1) OutTeam1++;
 	}
 
 	return true;

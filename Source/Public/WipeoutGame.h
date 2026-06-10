@@ -799,4 +799,9 @@ protected:
 	/** Track team sizes at round start */
 	int32 Team0StartingSize;
 	int32 Team1StartingSize;
+
+	/** Counts everyone ON each team (alive, dead, or awaiting a respawn wave) —
+	 *  GetAliveCounts minus the living-pawn requirement. Used to detect someone
+	 *  joining the empty team during a solo/practice round. */
+	bool GetTeamMemberCounts(int32& OutTeam0, int32& OutTeam1) const;
 };

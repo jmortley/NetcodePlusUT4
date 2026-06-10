@@ -2578,23 +2578,38 @@ void AElimPlusGame::CheckRoundWinConditions()
 	}
 	int32 Alive0, Alive1;
 	GetAliveCounts(Alive0, Alive1);
-	/*if (Team0StartingSize == 0 || Team1StartingSize == 0)
+	// Solo/practice rounds (one team empty at round start): an empty team can't
+	// be "eliminated", so don't insta-award every round — let the round clock
+	// run. At expiry DefaultTimer re-enters this function with the clock dead,
+	// the guard goes inert, and the normal branches below award the round
+	// (reason "TimeExpired" — real games are untouched since their starting
+	// sizes are never 0). If the populated side wipes ITSELF (solo player dies:
+	// no respawns in elimination), fall through for the instant Draw + next round.
+	const bool bSoloRound    = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+	const bool bClockRunning = (RoundEndTimeSeconds > 0.f)
+	                        && (GetWorld()->GetTimeSeconds() < RoundEndTimeSeconds);
+	if (bSoloRound && bClockRunning)
 	{
-		// One team is empty - let the timer run out naturally
-		return;
-	}*/
+		const int32 PopulatedAlive = (Team0StartingSize == 0) ? Alive1 : Alive0;
+		if (PopulatedAlive > 0)
+		{
+			return;   // alive vs nobody — wait for the round timer
+		}
+	}
 	const bool Team0Eliminated = (Alive0 == 0);
 	const bool Team1Eliminated = (Alive1 == 0);
 	if (Team0Eliminated && !Team1Eliminated)
 	{
 		FTimerDelegate TimerDelegate;
-		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 1, FName(TEXT("Elimination")));
+		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 1,
+			FName((Team0StartingSize == 0) ? TEXT("TimeExpired") : TEXT("Elimination")));
 		GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
 	}
 	else if (Team1Eliminated && !Team0Eliminated)
 	{
 		FTimerDelegate TimerDelegate;
-		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 0, FName(TEXT("Elimination")));
+		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 0,
+			FName((Team1StartingSize == 0) ? TEXT("TimeExpired") : TEXT("Elimination")));
 		GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
 	}
 	else if (Team0Eliminated && Team1Eliminated)
