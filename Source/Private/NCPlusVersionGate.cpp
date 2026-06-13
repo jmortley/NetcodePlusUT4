@@ -125,13 +125,23 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 		return;
 	}
 
-	// Mismatch — immediate kick.
+	// Mismatch — KICK DISABLED FOR NOW. The version-mismatch path is logged but
+	// no longer kicks the player; mismatched clients are allowed in. The 10s
+	// no-reply timeout (OnTimeout) is still active and will kick clients that
+	// never report at all (no-plugin / wrong-path installs). To restore the
+	// mismatch kick: replace this block with the KickOwner call (see git history
+	// — commit before this disable).
 	UE_LOG(LogGameMode, Warning,
-		TEXT("[NCPlusVersionGate] kicking owner: client v%d != server v%d (player: %s)"),
+		TEXT("[NCPlusVersionGate] version mismatch ALLOWED IN (kick disabled): client v%d != server v%d (player: %s)"),
 		ClientVersion, ServerVersion, *ResolveOwnerName(this));
-	KickOwner(FString::Printf(
-		TEXT("NetcodePlus version mismatch: server is v%d, you are v%d. Update via launcher."),
-		ServerVersion, ClientVersion));
+	// Mark confirmed + clear timer + destroy actor so the 10s timeout doesn't
+	// fire and kick a player who DID reply (just with a different version).
+	bConfirmed = true;
+	if (UWorld* W = GetWorld())
+	{
+		W->GetTimerManager().ClearTimer(TimeoutHandle);
+	}
+	Destroy();
 }
 
 void ANCVersionGate::OnTimeout()
