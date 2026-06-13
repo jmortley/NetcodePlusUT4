@@ -150,13 +150,19 @@ void ANCVersionGate::OnTimeout()
 	{
 		return;
 	}
+	// KICK DISABLED FOR NOW. The no-reply timeout path is logged but no longer
+	// kicks the player; clients that never report (no plugin / pre-326 / lossy
+	// owner-only replication) are allowed in. Mismatch path is also disabled —
+	// see ServerReportVersion_Implementation. To restore: replace this block
+	// with the KickOwner call (see git history — commit 9acacd2 or earlier).
 	UE_LOG(LogGameMode, Warning,
-		TEXT("[NCPlusVersionGate] kicking owner: no version report within %.0fs (server v%d). ")
-		TEXT("Likely missing/outdated NetcodePlus plugin. (player: %s)"),
+		TEXT("[NCPlusVersionGate] no version report within %.0fs (kick disabled): server v%d, player: %s. ")
+		TEXT("Likely missing/outdated NetcodePlus plugin."),
 		TimeoutSec, NETCODE_PLUGIN_VERSION, *ResolveOwnerName(this));
-	KickOwner(FString::Printf(
-		TEXT("NetcodePlus plugin missing or outdated (server is v%d). Update via launcher."),
-		NETCODE_PLUGIN_VERSION));
+	// Mark confirmed + drop the actor so it doesn't linger in the per-player
+	// relevancy set (same cleanup the match path does).
+	bConfirmed = true;
+	Destroy();
 }
 
 void ANCVersionGate::KickOwner(const FString& Reason)
