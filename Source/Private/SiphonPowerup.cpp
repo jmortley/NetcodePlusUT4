@@ -27,8 +27,13 @@ AUTSiphonPowerup::AUTSiphonPowerup(const FObjectInitializer& ObjectInitializer)
 	SiphonPercent = 0.5f;
 	HealCap = 199;
 
-	// Reuse Berserk stat tracking (same conceptual slot)
-	StatsNameTime = NAME_BerserkTime;
+	// Reuse Berserk stat tracking (same conceptual slot — Berserk never spawns in
+	// Wipeout so the slots are free). Time = seconds Siphon was held; Count = number
+	// of Siphons picked up (auto-incremented by AUTPickupInventory on pickup when
+	// StatsNameCount != NAME_None — see UTPickupInventory.cpp:586). No engine edit /
+	// new FName needed; both names are already registered in StatManager.
+	StatsNameTime  = NAME_BerserkTime;
+	StatsNameCount = NAME_BerserkCount;
 
 	bAlwaysRelevant = true;
 
