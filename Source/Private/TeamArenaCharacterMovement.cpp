@@ -26,6 +26,21 @@ public:
         // smoothing. At 600fps on a jumppad with higher ping, errors can reach 200u+.
         // Set high enough that only cheats/teleports trigger hard snap.
         NoSmoothNetUpdateDist = 400.f;
+
+        // Saved-move buffer. Engine default is 96 each. This replaces the per-client
+        // UE4-Engine-Win64-Shipping.dll binary patch (UT4-Danger update-saved-moves.py)
+        // so the fix ships with the plugin instead of depending on every user patching
+        // their DLL (and surviving reinstalls).
+        //
+        // Sizing is fps x worst stall, NOT fps x RTT. The client appends ~1 saved move
+        // per frame and only frees them on server ack, so any hitch (GC, shader comp,
+        // frame spike, send stall) backlogs at the full frame rate. At 480+ fps, below
+        // ~700 the engine's CreateSavedMove() hits MaxSavedMoves, spams "hit limit of N
+        // saved moves", and DROPS moves -> movement desync. 900 ~= 1.9s of stall headroom
+        // at 480fps. Note: a large value is also the per-correction replay ceiling, but
+        // corrections are rare and the array only fills near a stall.
+        MaxSavedMoves = 900;
+        MaxFreeMoves  = 900;
     }
 
     typedef FNetworkPredictionData_Client_UTChar Super;
