@@ -170,6 +170,51 @@ namespace NCPlusHUDPresetsImpl
 		TEXT("}")
 	);
 
+	// "Stock" - classic UT-style layout in the default engine font (NO Extreme).
+	// Bottom-center MinimalTypography HP/Armor with the HEALTH/ARMOR labels, modest
+	// 1.0 scales, team portraits + scorebar up top. The familiar default look for
+	// players who just want stock. Deliberately omits every "font" field so each
+	// widget falls back to its stock font instead of the Extreme override.
+	static const FString StockJson(
+		TEXT("{")
+		TEXT("\"version\":1,")
+		TEXT("\"elements\":{")
+			TEXT("\"hp_armor\":{")
+				TEXT("\"anchor\":\"BottomCenter\",\"offset_x\":0,\"offset_y\":-120,\"scale\":1.0,\"hidden\":false,")
+				TEXT("\"style\":\"MinimalTypography\"")
+			TEXT("},")
+			TEXT("\"ammo\":{")
+				TEXT("\"anchor\":\"BottomRight\",\"offset_x\":-30,\"offset_y\":-30,\"scale\":1.0,\"hidden\":false,")
+				TEXT("\"style\":\"BigNumber\"")
+			TEXT("},")
+			TEXT("\"weapon_bar_left\":{")
+				TEXT("\"anchor\":\"CenterLeft\",\"offset_x\":20,\"offset_y\":-20,\"scale\":1.0,\"hidden\":false")
+			TEXT("},")
+			TEXT("\"weapon_bar_right\":{")
+				TEXT("\"anchor\":\"CenterRight\",\"offset_x\":-20,\"offset_y\":-20,\"scale\":1.0,\"hidden\":false")
+			TEXT("},")
+			TEXT("\"portrait_red\":{")
+				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":-200,\"offset_y\":30,\"scale\":1.0,\"hidden\":false,")
+				TEXT("\"use_team_color\":\"true\"")
+			TEXT("},")
+			TEXT("\"portrait_blue\":{")
+				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":200,\"offset_y\":30,\"scale\":1.0,\"hidden\":false,")
+				TEXT("\"use_team_color\":\"true\"")
+			TEXT("},")
+			TEXT("\"scorebar\":{")
+				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":0,\"offset_y\":4,\"scale\":1.0,\"hidden\":false,")
+				TEXT("\"use_team_color\":\"true\"")
+			TEXT("},")
+			TEXT("\"score_kda\":{")
+				TEXT("\"anchor\":\"TopRight\",\"offset_x\":-40,\"offset_y\":16,\"scale\":1.0,\"hidden\":false")
+			TEXT("},")
+			TEXT("\"announcements\":{")
+				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":0,\"offset_y\":0,\"scale\":1.0,\"hidden\":false")
+			TEXT("}")
+		TEXT("}")
+		TEXT("}")
+	);
+
 	// Helper: build an entry via explicit field assignment. UE 4.15 + the
 	// default member initializer on FNCPlusHUDPreset::bIsCustom disqualifies
 	// the struct from aggregate brace-init, so T.Add({...}) fails to compile.
@@ -193,6 +238,11 @@ namespace NCPlusHUDPresetsImpl
 			TArray<FNCPlusHUDPreset> T;
 			// Index 0 is the first-run default seed (referenced by
 			// FNCPlusHUDLayout::ReloadLive when no on-disk layout exists).
+			T.Add(MakePreset(
+				TEXT("stock"),
+				TEXT("Stock"),
+				TEXT("Classic UT-style layout in the default font (no Extreme). Bottom-center HP/Armor, team portraits and scorebar up top — the familiar default look."),
+				StockJson));
 			T.Add(MakePreset(
 				TEXT("streamer_friendly"),
 				TEXT("Streamer Friendly"),

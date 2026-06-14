@@ -1,5 +1,6 @@
 // SUTWeaponSkinSelector.cpp — NetcodePlus weapon settings implementation
 #include "SUTWeaponSkinSelector.h"
+#include "NCPlusHUDLayout.h"
 #include "UTLocalPlayer.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
@@ -30,6 +31,23 @@ static TArray<UUTWeaponSkin*> CachedSkinGCRefs; // Prevents GC of cached skin as
 void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
+
+	// Take mouse input: show the cursor and switch to GameAndUI so Slate gets
+	// mouse events. NCPlusHUDDragMode holds the HUD's per-tick GetInputMode poll
+	// open (it returns GameOnly during a match and would otherwise re-capture the
+	// cursor). Released in ClosePanel. Mirrors SNCPlusHUDDragOverlay.
+	NCPlusHUDDragMode::SetActive(true);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = true;
+
+		FInputModeGameAndUI InputMode;
+		InputMode.SetWidgetToFocus(SharedThis(this));
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		MenuPC->SetInputMode(InputMode);
+	}
 	CurrentWeaponIndex = 0;
 	// Defaults match AUTWeaponFix statics so the spinner shows real values even
 	// before LoadSettings runs. LoadSettings overwrites with the values that
@@ -1024,6 +1042,16 @@ void SUTWeaponSkinSelector_CleanupCache()
 
 void SUTWeaponSkinSelector::ClosePanel()
 {
+	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
+	NCPlusHUDDragMode::SetActive(false);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = false;
+		FInputModeGameOnly InputMode;
+		MenuPC->SetInputMode(InputMode);
+	}
+
 	UWorld* World = nullptr;
 	if (GEngine)
 	{

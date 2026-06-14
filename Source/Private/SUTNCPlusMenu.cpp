@@ -1,5 +1,6 @@
 // SUTNCPlusMenu.cpp — NetcodePlus client settings implementation
 #include "SUTNCPlusMenu.h"
+#include "NCPlusHUDLayout.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
 
@@ -9,6 +10,23 @@ static const TCHAR* NCPSection = TEXT("NetcodePlus");
 void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
+
+	// Take mouse input: show the cursor and switch to GameAndUI so Slate gets
+	// mouse events. NCPlusHUDDragMode holds the HUD's per-tick GetInputMode poll
+	// open (it returns GameOnly during a match and would otherwise re-capture the
+	// cursor). Released in ClosePanel. Mirrors SNCPlusHUDDragOverlay.
+	NCPlusHUDDragMode::SetActive(true);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = true;
+
+		FInputModeGameAndUI InputMode;
+		InputMode.SetWidgetToFocus(SharedThis(this));
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		MenuPC->SetInputMode(InputMode);
+	}
 
 	// Semi-transparent dark background
 	BackgroundBrush.TintColor = FSlateColor(FLinearColor(0.f, 0.f, 0.f, 0.7f));
@@ -282,6 +300,16 @@ void SUTNCPlusMenu::SaveSettings()
 
 void SUTNCPlusMenu::ClosePanel()
 {
+	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
+	NCPlusHUDDragMode::SetActive(false);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = false;
+		FInputModeGameOnly InputMode;
+		MenuPC->SetInputMode(InputMode);
+	}
+
 	if (PlayerOwner.IsValid())
 	{
 		UGameViewportClient* ViewportClient = PlayerOwner->ViewportClient;

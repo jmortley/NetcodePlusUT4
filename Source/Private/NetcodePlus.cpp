@@ -27,6 +27,10 @@
 #include "Misc/CoreMisc.h"
 #include "Engine/GameInstance.h"
 
+// F5 hotkey support
+#include "Framework/Application/IInputProcessor.h"
+#include "Framework/Application/SlateApplication.h"
+
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
 
@@ -490,6 +494,32 @@ static bool TickNcpConnect(float DeltaTime)
 
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
+// =============================================================================
+// F5 -> ncpmenu, via a Slate input pre-processor.
+//
+// The old DebugExecBindings approach only fires in non-shipping builds, so it
+// never worked for shipped players. A pre-processor sees the key globally in
+// every build, independent of the user's Input.ini and UT's CustomBinds. F5 is
+// consumed and routed straight to HandleNCPMenu (a toggle: opens/closes).
+// =============================================================================
+class FNCPlusHotkeyInput : public IInputProcessor
+{
+public:
+	virtual void Tick(const float /*DeltaTime*/, FSlateApplication& /*SlateApp*/, TSharedRef<ICursor> /*Cursor*/) override {}
+
+	virtual bool HandleKeyDownEvent(FSlateApplication& /*SlateApp*/, const FKeyEvent& InKeyEvent) override
+	{
+		if (InKeyEvent.GetKey() == EKeys::F5 && !InKeyEvent.IsRepeat())
+		{
+			HandleNCPMenu(TArray<FString>());
+			return true; // consume F5 so it doesn't fall through to game input
+		}
+		return false;
+	}
+};
+
+static TSharedPtr<FNCPlusHotkeyInput> GNCPlusHotkeyInput;
+
 void FNetcodePlus::StartupModule()
 {
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -534,17 +564,13 @@ void FNetcodePlus::StartupModule()
 		ECVF_Default
 	);
 
-	// Bind F5 to ncpmenu by default
-	if (GEngine)
+	// F5 -> ncpmenu (client only), via a Slate input pre-processor. Works in all
+	// builds, unlike the old DebugExecBindings approach which only fired in
+	// non-shipping. See FNCPlusHotkeyInput above.
+	if (!IsRunningDedicatedServer() && FSlateApplication::IsInitialized())
 	{
-		UPlayerInput* DefInput = GetMutableDefault<UPlayerInput>();
-		if (DefInput)
-		{
-			FKeyBind Bind;
-			Bind.Key = EKeys::F5;
-			Bind.Command = TEXT("ncpmenu");
-			DefInput->DebugExecBindings.Add(Bind);
-		}
+		GNCPlusHotkeyInput = MakeShareable(new FNCPlusHotkeyInput());
+		FSlateApplication::Get().RegisterInputPreProcessor(GNCPlusHotkeyInput);
 	}
 
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
@@ -568,6 +594,13 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
+	// Unregister the F5 hotkey pre-processor.
+	if (GNCPlusHotkeyInput.IsValid() && FSlateApplication::IsInitialized())
+	{
+		FSlateApplication::Get().UnregisterInputPreProcessor(GNCPlusHotkeyInput);
+		GNCPlusHotkeyInput.Reset();
+	}
+
 	// Stop the -ncpconnect ticker if it never fired.
 	if (GNcpConnectTickerHandle.IsValid())
 	{

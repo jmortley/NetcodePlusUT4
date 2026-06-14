@@ -1,5 +1,6 @@
 // SNCPlusHUDEditor.cpp - implementation of the live HUD layout editor.
 #include "SNCPlusHUDEditor.h"
+#include "NCPlusHUDLayout.h"
 #include "SNCPlusHUDPresetGallery.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
@@ -115,6 +116,23 @@ namespace NCHUDEdit
 void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
+
+	// Take mouse input: show the cursor and switch to GameAndUI so Slate gets
+	// mouse events. NCPlusHUDDragMode holds the HUD's per-tick GetInputMode poll
+	// open (it returns GameOnly during a match and would otherwise re-capture the
+	// cursor). Released in ClosePanel. Mirrors SNCPlusHUDDragOverlay.
+	NCPlusHUDDragMode::SetActive(true);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = true;
+
+		FInputModeGameAndUI InputMode;
+		InputMode.SetWidgetToFocus(SharedThis(this));
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		MenuPC->SetInputMode(InputMode);
+	}
 
 	// Conditionally reload layout from disk so the editor reflects current
 	// state without clobbering unsaved in-memory work.
@@ -1416,6 +1434,16 @@ void SNCPlusHUDEditor::SetStatus(const FString& Msg)
 
 void SNCPlusHUDEditor::ClosePanel()
 {
+	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
+	NCPlusHUDDragMode::SetActive(false);
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = false;
+		FInputModeGameOnly InputMode;
+		MenuPC->SetInputMode(InputMode);
+	}
+
 	if (UGameViewportClient* VC = (PlayerOwner.IsValid() && PlayerOwner->GetWorld())
 		? PlayerOwner->GetWorld()->GetGameViewport() : nullptr)
 	{

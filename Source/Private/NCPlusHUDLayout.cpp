@@ -101,10 +101,14 @@ namespace NCPlusHPArmorStyle
 
 namespace NCPlusHUDDragMode
 {
-	static bool GIsActive = false;
+	// Refcounted: the drag overlay AND the nchud/weaponskins/ncpmenu/cosmetics
+	// menus each request the cursor-free input mode on open. Active while ANY are
+	// open; only the last close lets the HUD's GetInputMode poll re-capture the
+	// cursor. (Was a plain bool — one menu closing cleared another's request.)
+	static int32 GActiveCount = 0;
 
-	bool IsActive()              { return GIsActive; }
-	void SetActive(bool bActive) { GIsActive = bActive; }
+	bool IsActive()              { return GActiveCount > 0; }
+	void SetActive(bool bActive) { if (bActive) { ++GActiveCount; } else if (GActiveCount > 0) { --GActiveCount; } }
 }
 
 // =============================================================================
@@ -1024,8 +1028,8 @@ void FNCPlusHUDLayout::ReloadLive()
 
 	// First-run seed. No layout file at either path - this is a fresh install
 	// (or a player who deleted their layout). Seed with the curated default
-	// (NCPlusHUDPresets::GetCurated()[0] = "Streamer Friendly") so new players
-	// get a polished baseline instead of stock UT defaults. On first Save,
+	// (NCPlusHUDPresets::GetCurated()[0] = "Stock") so new players get the
+	// familiar stock-style layout (default UT font). On first Save,
 	// the seeded layout is written to NewPath.
 	const TArray<FNCPlusHUDPreset>& Curated = NCPlusHUDPresets::GetCurated();
 	if (Curated.Num() > 0)
