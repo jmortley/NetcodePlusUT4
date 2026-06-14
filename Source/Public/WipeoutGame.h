@@ -243,6 +243,19 @@ public:
 	UPROPERTY(Transient)
 	TMap<TWeakObjectPtr<AUTPlayerState>, float> LinkHealAccumulator;
 
+	/** Match-cumulative HP each player has restored to teammates this match
+	 *  (link beam + any BP heal ability that calls CreditHealing). Source of
+	 *  truth for the "healing done" stat; cleared in HandleMatchHasStarted. */
+	UPROPERTY(Transient)
+	TMap<TWeakObjectPtr<AUTPlayerState>, int32> HealingDoneThisMatch;
+
+	/** Credit a healer with HP actually restored to a teammate. Called from the
+	 *  C++ link-beam heal path; BlueprintCallable so the spawn heal ability (a BP
+	 *  boost) can report its heals through the same accumulator. Server-authority
+	 *  only; no-op on null healer / Amount <= 0. */
+	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
+	void CreditHealing(AUTPlayerState* HealerPS, int32 Amount);
+
 
 	// =======================================================================
 	// SPAWN SYSTEM (reused from TeamArena for round-start)

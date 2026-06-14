@@ -84,14 +84,17 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	bCompetitiveAutoPause = false;
 	useBPSpecFunction = false;
 
-	// Wipeout-specific defaults: escalating respawn delays
-	// Indexed by team death count. Configurable via BP subclass defaults.
-	RespawnDelays.Add(4.0f);   // 1st team death
-	RespawnDelays.Add(7.0f);   // 2nd team death
-	RespawnDelays.Add(11.0f);  // 3rd team death
-	RespawnDelays.Add(16.0f);  // 4th team death
-	RespawnDelays.Add(25.0f);  // 5th team death
-	RespawnDelays.Add(35.0f);  // 6th+ team deaths (cap)
+	// Wipeout-specific defaults: escalating respawn delays.
+	// Indexed by death count — PER-PLAYER in the live WipeoutPlus_C BP, which sets
+	// bTeamSharedDeathCounter=false (the C++ default below is team-shared=true).
+	// NOTE: if the BP CDO ALSO overrides RespawnDelays, this array is shadowed —
+	// change it in the BP (or clear that override) for these values to take effect.
+	RespawnDelays.Add(5.0f);   // 1st death
+	RespawnDelays.Add(9.0f);   // 2nd death
+	RespawnDelays.Add(13.0f);  // 3rd death
+	RespawnDelays.Add(20.0f);  // 4th death
+	RespawnDelays.Add(30.0f);  // 5th death
+	RespawnDelays.Add(40.0f);  // 6th+ deaths (cap)
 
 	RespawnProtectionTime = 1.5f;
 	WipeoutGracePeriod = 0.15f;
@@ -271,6 +274,7 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	// single server session can host multiple matches. Reset here so a subsequent
 	// match can flush its own ratings.
 	bRatingFlushedThisMatch = false;
+	HealingDoneThisMatch.Empty();   // match-cumulative healing stat resets per match
 
 	// Spawn the damage replicator now — all clients are fully loaded at this point.
 	// Spawning in BeginPlay was too early and could cause client crashes.
@@ -2143,6 +2147,8 @@ bool AUWipeoutGame::ModifyDamage_Implementation(int32& Damage, FVector& Momentum
 						if (ActualHeal > 0)
 						{
 							InjuredChar->Health += ActualHeal;
+							// Credit the beam owner with the HP actually restored.
+							CreditHealing(InstigatorPS, ActualHeal);
 						}
 					}
 				}
@@ -2157,6 +2163,20 @@ bool AUWipeoutGame::ModifyDamage_Implementation(int32& Damage, FVector& Momentum
 	return Super::ModifyDamage_Implementation(Damage, Momentum, Injured, InstigatedBy, HitInfo, DamageCauser, DamageType);
 }
 
+
+// ============================================================================
+// HEALING CREDIT (link beam + BP heal ability) — match-cumulative per healer
+// ============================================================================
+
+void AUWipeoutGame::CreditHealing(AUTPlayerState* HealerPS, int32 Amount)
+{
+	if (!HasAuthority() || HealerPS == nullptr || Amount <= 0)
+	{
+		return;
+	}
+	int32& Total = HealingDoneThisMatch.FindOrAdd(HealerPS);
+	Total += Amount;
+}
 
 // ============================================================================
 // SCORE DAMAGE (damage tracking for achievements)
