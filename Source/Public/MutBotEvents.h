@@ -96,6 +96,36 @@ private:
 	 *  threshold) and for Spree levels 3..5 (Dominating, Unstoppable, Godlike). */
 	void ScoreKill_PostHighlights(AUTPlayerState* KillerPS);
 
+	// ── Trigger-bot review: time-on-target at fire (ToT) ──────────────
+	/** Per-player accumulation of client-reported time-on-target samples, keyed
+	 *  by AUTPlayerState::PlayerId (stable within a match, survives respawns). Fed
+	 *  by AUTWeaponFix::ServerReportFireToT on each claimed hitscan hit in Elim /
+	 *  iCTF. REVIEW-ONLY — surfaced at match end, never auto-acts. */
+	struct FToTStat
+	{
+		FString PlayerName;
+		int32   Shots;         // claimed hitscan hits sampled
+		int32   LowDwellShots; // samples with dwell <= ToTLowDwellMs
+		int64   SumMs;         // for the mean
+		FToTStat() : Shots(0), LowDwellShots(0), SumMs(0) {}
+	};
+	TMap<int32, FToTStat> ToTStats;
+
+	/** Dwell at or below this many milliseconds counts as "near-zero" (trigger-bot-
+	 *  like). A human FLICK also lands here — the signal is the per-match FRACTION
+	 *  of low-dwell shots, never any single shot. fps-independent (dwell is timed). */
+	static const int32 ToTLowDwellMs = 16;
+
+	/** Build + emit the per-player ToT review summary (server log + bot POST). */
+	void PostToTReport();
+
+public:
+	/** Server-side sink for AUTWeaponFix's ToT telemetry (one sample per claimed
+	 *  hitscan hit). DwellMs = ms the crosshair rested on the visible target before
+	 *  fire. Public so the weapon RPC handler can route into it. */
+	void RecordFireToT(class AUTPlayerState* Shooter, uint8 DwellMs);
+
+private:
 	// ── Helpers ────────────────────────────────────────────────────────
 	FString BuildPlayerListJson() const;
 	FString BuildTeamScoresJson() const;

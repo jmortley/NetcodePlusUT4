@@ -112,6 +112,7 @@ void AMutBotEvents::NotifyMatchStateChange_Implementation(FName NewState)
 	{
 		StopReadyPolling();
 		PostMatchEnded();
+		PostToTReport();
 	}
 	else if (NewState == MatchState::MapVoteHappening)
 	{
@@ -487,6 +488,62 @@ void AMutBotEvents::PostReward(AUTPlayerState* Scorer, const FString& Type, int3
 
 	UE_LOG(LogBotEvents, Log, TEXT("Reward: %s lvl=%d x%d by %s (team %d)"),
 		*Type, Level, Multiplier, *Scorer->PlayerName, Scorer->GetTeamNum());
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Trigger-bot review — time-on-target at fire (ToT)
+// ────────────────────────────────────────────────────────────────────
+
+void AMutBotEvents::RecordFireToT(AUTPlayerState* Shooter, uint8 DwellMs)
+{
+	if (Shooter == nullptr) return;
+
+	FToTStat& S = ToTStats.FindOrAdd(Shooter->PlayerId);
+	S.PlayerName = Shooter->PlayerName;
+	S.Shots++;
+	S.SumMs += (int64)DwellMs;
+	if ((int32)DwellMs <= ToTLowDwellMs)
+	{
+		S.LowDwellShots++;
+	}
+}
+
+void AMutBotEvents::PostToTReport()
+{
+	if (ToTStats.Num() == 0) return;
+
+	const int32 LowDwellMs = ToTLowDwellMs; // local copy (avoid static-const ODR-use in varargs)
+
+	FString PlayersJson;
+	for (const TPair<int32, FToTStat>& Pair : ToTStats)
+	{
+		const FToTStat& S = Pair.Value;
+		if (S.Shots <= 0) continue;
+
+		const float LowPct = 100.0f * (float)S.LowDwellShots / (float)S.Shots;
+		const float MeanMs = (float)S.SumMs / (float)S.Shots;
+
+		// Server log — Warning so it survives Shipping builds (>= verbosity threshold),
+		// giving a review trail even on servers with no bot URL configured.
+		UE_LOG(LogBotEvents, Warning,
+			TEXT("[ToT] %s: shots=%d lowDwell(<=%dms)=%d (%.1f%%) meanMs=%.1f"),
+			*S.PlayerName, S.Shots, LowDwellMs, S.LowDwellShots, LowPct, MeanMs);
+
+		// Minimal JSON-safety on the name (names can contain quotes/backslashes).
+		const FString SafeName = S.PlayerName.Replace(TEXT("\\"), TEXT("")).Replace(TEXT("\""), TEXT("'"));
+
+		if (!PlayersJson.IsEmpty()) PlayersJson += TEXT(",");
+		PlayersJson += FString::Printf(
+			TEXT("{\"name\":\"%s\",\"shots\":%d,\"low_dwell\":%d,\"low_dwell_pct\":%.1f,\"mean_ms\":%.1f}"),
+			*SafeName, S.Shots, S.LowDwellShots, LowPct, MeanMs);
+	}
+
+	if (BotApiUrl.IsEmpty()) return; // already logged; nothing to POST
+
+	const FString Body = FString::Printf(
+		TEXT("{\"pug_id\":%d,\"match_id\":\"%s\",\"low_dwell_ms\":%d,\"players\":[%s]}"),
+		PugId, *GetMatchId(), LowDwellMs, *PlayersJson);
+	SendPost(TEXT("/triggerbot_report"), Body);
 }
 
 void AMutBotEvents::PostMatchEnded()

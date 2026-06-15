@@ -299,6 +299,36 @@ public:
     /** Server-side only: total padded radius used for the hitscan validation
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
+
+    // ============================================================
+    // Fire-validation telemetry: time-on-target at fire (ToT).
+    // Cheap client-only per-frame tracker + an owner-only gate. The actual
+    // per-player accumulation + reporting is server-authoritative and lives in
+    // AMutBotEvents. Active ONLY in Elim / instagib-CTF; dormant (zero cost)
+    // everywhere else. Pure telemetry — never affects gameplay/hit-reg/scoring.
+    // ============================================================
+
+    /** Owner-only gate, set server-side in BeginPlay and replicated to the owning
+     *  client. True only when (Elim or instagib-CTF) AND this weapon is a
+     *  UTPlusSniper or UTPlusShockRifle (or child) — i.e. instagib / shock /
+     *  sniper / LG. When false the client tracker and the report RPC are skipped
+     *  entirely. */
+    UPROPERTY(Replicated)
+    bool bToTDetectActive = false;
+
+    /** Client-side: continuous wall-clock seconds the crosshair has rested on a
+     *  visible (occlusion-checked) enemy. Reset to 0 on any frame the line of
+     *  sight is blocked or no enemy is under the crosshair. Sampled at fire time,
+     *  quantized to milliseconds (0-255), and shipped to the server. Time, not
+     *  frames, so the signal is identical at 60 or 540 fps. */
+    float ToTDwellSeconds = 0.0f;
+
+    /** Per-frame client tracker: one occlusion-aware crosshair line trace. */
+    void UpdateToTTracker(float DeltaTime);
+
+    /** Finds the bot-events mutator (the telemetry sink). Null on non-bot servers. */
+    class AMutBotEvents* FindBotEventsMutator() const;
+
 protected:
 
     FTimerHandle DeferredActiveStateHandle;
@@ -357,6 +387,16 @@ protected:
      */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
+
+    /** Telemetry sidecar — reports client time-on-target at the moment of a
+     *  hitscan fire the client believes connected. UNRELIABLE on purpose: a
+     *  dropped sample only thins the distribution, and this must never compete
+     *  with the reliable fire RPCs for bandwidth. Server-side it is clamped and
+     *  routed to AMutBotEvents; it has ZERO effect on gameplay, hit validation,
+     *  or scoring. Separate from ServerStartFireFixed by design — the hit-reg
+     *  path is never touched. */
+    UFUNCTION(Server, Unreliable, WithValidation)
+    void ServerReportFireToT(uint8 DwellMs);
 
     /**
      * Client RPC to confirm a fire event or correct client's event index.
