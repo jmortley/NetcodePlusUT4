@@ -19,6 +19,7 @@
 #include "WipeoutHUD.h"
 #include "NCPlusCTFHUD.h"
 #include "ShockDomHUD.h"
+#include "NCPlusForceModels.h"
 
 // -ncpconnect launcher direct-connect support
 #include "Containers/Ticker.h"
@@ -26,10 +27,6 @@
 #include "Misc/Parse.h"
 #include "Misc/CoreMisc.h"
 #include "Engine/GameInstance.h"
-
-// F5 hotkey support
-#include "Framework/Application/IInputProcessor.h"
-#include "Framework/Application/SlateApplication.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
@@ -494,31 +491,24 @@ static bool TickNcpConnect(float DeltaTime)
 
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
-// =============================================================================
-// F5 -> ncpmenu, via a Slate input pre-processor.
-//
-// The old DebugExecBindings approach only fires in non-shipping builds, so it
-// never worked for shipped players. A pre-processor sees the key globally in
-// every build, independent of the user's Input.ini and UT's CustomBinds. F5 is
-// consumed and routed straight to HandleNCPMenu (a toggle: opens/closes).
-// =============================================================================
-class FNCPlusHotkeyInput : public IInputProcessor
+// Debug: dump the current ForceModels config + every installed AUTCharacterContent path,
+// so you can copy a valid path into [ForceModels.Model.<side>] Class= before the picker UI exists.
+static void HandleForceModelsList(const TArray<FString>& Args)
 {
-public:
-	virtual void Tick(const float /*DeltaTime*/, FSlateApplication& /*SlateApp*/, TSharedRef<ICursor> /*Cursor*/) override {}
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] Enabled=%d Models=%d Style=%d"),
+		C.bEnabled ? 1 : 0, C.bModels ? 1 : 0, (int32)C.Style);
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels]   Enemy='%s' Team='%s' Red='%s' Blue='%s'"),
+		*C.Enemy.ContentPath, *C.Team.ContentPath, *C.Red.ContentPath, *C.Blue.ContentPath);
 
-	virtual bool HandleKeyDownEvent(FSlateApplication& /*SlateApp*/, const FKeyEvent& InKeyEvent) override
+	TArray<NCPlusForceModels::FContentEntry> Entries;
+	NCPlusForceModels::EnumerateContent(Entries);
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] %d installed character(s) (DisplayName -> Class path):"), Entries.Num());
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
 	{
-		if (InKeyEvent.GetKey() == EKeys::F5 && !InKeyEvent.IsRepeat())
-		{
-			HandleNCPMenu(TArray<FString>());
-			return true; // consume F5 so it doesn't fall through to game input
-		}
-		return false;
+		UE_LOG(LogTemp, Warning, TEXT("  %s  ->  %s"), *E.DisplayName, *E.ClassPath);
 	}
-};
-
-static TSharedPtr<FNCPlusHotkeyInput> GNCPlusHotkeyInput;
+}
 
 void FNetcodePlus::StartupModule()
 {
@@ -564,13 +554,24 @@ void FNetcodePlus::StartupModule()
 		ECVF_Default
 	);
 
-	// F5 -> ncpmenu (client only), via a Slate input pre-processor. Works in all
-	// builds, unlike the old DebugExecBindings approach which only fired in
-	// non-shipping. See FNCPlusHotkeyInput above.
-	if (!IsRunningDedicatedServer() && FSlateApplication::IsInitialized())
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("forcemodels_list"),
+		TEXT("Log the current ForceModels config + every installed AUTCharacterContent class path"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleForceModelsList),
+		ECVF_Default
+	);
+
+	// Bind F5 to ncpmenu by default (non-shipping builds only — DebugExecBindings).
+	if (GEngine)
 	{
-		GNCPlusHotkeyInput = MakeShareable(new FNCPlusHotkeyInput());
-		FSlateApplication::Get().RegisterInputPreProcessor(GNCPlusHotkeyInput);
+		UPlayerInput* DefInput = GetMutableDefault<UPlayerInput>();
+		if (DefInput)
+		{
+			FKeyBind Bind;
+			Bind.Key = EKeys::F5;
+			Bind.Command = TEXT("ncpmenu");
+			DefInput->DebugExecBindings.Add(Bind);
+		}
 	}
 
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
@@ -594,13 +595,6 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
-	// Unregister the F5 hotkey pre-processor.
-	if (GNCPlusHotkeyInput.IsValid() && FSlateApplication::IsInitialized())
-	{
-		FSlateApplication::Get().UnregisterInputPreProcessor(GNCPlusHotkeyInput);
-		GNCPlusHotkeyInput.Reset();
-	}
-
 	// Stop the -ncpconnect ticker if it never fired.
 	if (GNcpConnectTickerHandle.IsValid())
 	{

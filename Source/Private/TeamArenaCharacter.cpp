@@ -13,6 +13,11 @@
 #include "UTArmor.h"
 #include "UTDamageType.h"
 #include "Net/UnrealNetwork.h"
+#include "UTPlayerController.h"
+#include "UTCharacterContent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "NCPlusForceModels.h"
+#include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -34,6 +39,146 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
     //PositionSaveRate = 120.0f;
     //PositionSaveInterval = 1.0f / PositionSaveRate;
     //LastPositionSaveTime = 0.0f;
+}
+
+// ── Force Models (MutForceModels port, phase 1) ─────────────────────────────
+// One override covers every apply trigger — spawn (PossessedBy) and team-change
+// (OnRep_PlayerState / Team / SelectedCharacter OnRep) all route through the base
+// NotifyTeamChanged. The base reverts the pawn to its REAL model each time it runs,
+// so we re-assert the forced model AFTER it (bForceReapply=true).
+void ATeamArenaCharacter::NotifyTeamChanged()
+{
+	Super::NotifyTeamChanged();
+	ApplyForcedModel(/*bForceReapply=*/true);
+
+	// Friend/enemy is relative to the local player. If this is MY pawn and my team just changed,
+	// every OTHER pawn's bucket can flip — but their NotifyTeamChanged won't fire. Refresh them.
+	// (Matters for Enemy-Only / Team-Enemy styles; a cheap no-op for absolute Red/Blue.)
+	if (IsLocallyControlled())
+	{
+		RefreshOtherForcedModels();
+	}
+}
+
+void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
+{
+	// Client-side render preference only — never on a dedicated server, never replicated.
+	if (GetNetMode() == NM_DedicatedServer) { return; }
+	if (bApplyingForcedModel) { return; }                 // re-entrancy guard (ApplyCharacterData / base NotifyTeamChanged)
+	if (IsLocallyControlled()) { return; }                // never reskin your own pawn
+
+	UWorld* const World = GetWorld();
+
+	// ── Resolve desired state: the model class + colour to force, or "none" = leave natural. ──
+	TSubclassOf<AUTCharacterContent> Content = nullptr;
+	FLinearColor Colour = FLinearColor::White;
+	bool bWantForce = false;
+
+	if (NCPlusForceModels::IsEnabled())
+	{
+		const int32 MyTeam = (int32)GetTeamNum();
+		if (MyTeam != 255)                                // FFA / no team: deferred (see ForceModels plan)
+		{
+			// Resolve friend/enemy against THE LOCAL PLAYER. Do NOT use this->GetLocalViewer():
+			// it only returns non-null for your own / spectated pawn, so on any other pawn it is
+			// null and every player reads as an enemy. GetFirstPlayerController() is the local PC
+			// on a client (one PC) — same call the view-distance cull above in this file uses.
+			AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+			AUTPlayerController* LocalPC = World ? Cast<AUTPlayerController>(World->GetFirstPlayerController()) : nullptr;
+			const bool bIsFriendly = (GS && LocalPC && GS->OnSameTeam(this, LocalPC));
+
+			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+			Content = NCPlusForceModels::GetModelClass(Side);
+			if (Content && NCPlusForceModels::IsModelAllowed(Content))
+			{
+				Colour     = NCPlusForceModels::GetSkinColour(Side);
+				bWantForce = true;
+			}
+		}
+	}
+
+	// ── Natural: feature off, FFA, or friendly under Enemy-Only → this pawn keeps its real model. ──
+	if (!bWantForce)
+	{
+		if (bForcedModelApplied)
+		{
+			// NotifyTeamChanged path: the base already restored the real model this call.
+			// Refresh path: it did not — restore by re-running the base team-change logic.
+			if (!bForceReapply)
+			{
+				bApplyingForcedModel = true;
+				bAllowCharacterDataOverride = true;
+				AUTCharacter::NotifyTeamChanged();        // ApplyCharacterData(real) + TeamSelect + weapon/hat
+				bApplyingForcedModel = false;
+			}
+			bForcedModelApplied = false;
+			LastForcedContent   = nullptr;
+		}
+		return;
+	}
+
+	// ── Force. Skip only in the refresh path when nothing changed (the base didn't revert us there). ──
+	if (!bForceReapply && bForcedModelApplied && LastForcedContent == Content.Get() && LastForcedColour == Colour)
+	{
+		return;
+	}
+
+	bApplyingForcedModel = true;
+
+	// Force the mesh via UT's own swap (rebuilds BodyMIs). Flag must be set BEFORE the call —
+	// stock ApplyCharacterData early-returns unless bAllowCharacterDataOverride is true.
+	bAllowCharacterDataOverride = true;
+	ApplyCharacterData(Content);
+
+	// Shotgun-recolour: set every known team-colour vector param to the chosen colour on each
+	// BodyMI. SetVectorParameterValue no-ops params a material doesn't declare, so this colours
+	// any UT-material-framework model and harmlessly skips the rest (the forced mesh stands either way).
+	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames();
+	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	{
+		if (!MID) { continue; }
+		// Leave face/eyes/hair materials natural (e.g. M_Skaarj_Head_Inst / _Eyes_ / _Hair_):
+		// recolour only the body/armour materials. Skip list is in NCPlusForceModels.
+		const UMaterialInterface* Src = MID->Parent;
+		const FString MatName = Src ? Src->GetName() : MID->GetName();
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName)) { continue; }
+		for (const FName& P : Params)
+		{
+			MID->SetVectorParameterValue(P, Colour);
+		}
+	}
+
+	LastForcedContent   = Content.Get();
+	LastForcedColour    = Colour;
+	bForcedModelApplied = true;
+	bApplyingForcedModel = false;
+}
+
+// When the local player's team changes, every other pawn's friend/enemy bucket can flip without
+// their own NotifyTeamChanged firing. Collect first, then apply — re-running a pawn's base
+// NotifyTeamChanged (the un-force restore) can spawn/destroy its LeaderHat, which is unsafe to
+// do while a TActorIterator is live.
+void ATeamArenaCharacter::RefreshOtherForcedModels()
+{
+	if (GetNetMode() == NM_DedicatedServer) { return; }
+	UWorld* const World = GetWorld();
+	if (!World) { return; }
+
+	TArray<ATeamArenaCharacter*> Others;
+	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
+	{
+		ATeamArenaCharacter* Other = *It;
+		if (Other && Other != this && !Other->IsLocallyControlled())
+		{
+			Others.Add(Other);
+		}
+	}
+
+	// The dirty-latch inside ApplyForcedModel(false) makes this cheap when a bucket didn't change.
+	for (ATeamArenaCharacter* Other : Others)
+	{
+		Other->ApplyForcedModel(/*bForceReapply=*/false);
+	}
 }
 
 int32 ATeamArenaCharacter::GetNetcodeVersion()

@@ -169,8 +169,31 @@ public:
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerConfirmSpawnReady();
 
+	// ── Force Models (MutForceModels port, phase 1) ─────────────────
+	// Client-side render override: force every OTHER player to a chosen AUTCharacterContent
+	// + team-recolour, driven by the local NCPlusForceModels config. Fires on spawn /
+	// team-change (both route through NotifyTeamChanged) and is a no-op on a dedicated server.
+	virtual void NotifyTeamChanged() override;
+
 protected:
 	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
 	// Server-only; synced when ArmorType is belt, decremented on damage.
 	int32 BeltArmorRemaining = 0;
+
+	// ── Force Models state ──
+	/** Re-evaluate this pawn and apply (or clear) the forced model + team-recolour. Client-only.
+	 *  bForceReapply=true (the NotifyTeamChanged path) always re-asserts, because the base
+	 *  NotifyTeamChanged just reverted us to the real model; false (the cross-pawn refresh path)
+	 *  skips a no-op when the desired model+colour is unchanged. */
+	void ApplyForcedModel(bool bForceReapply = true);
+	/** When THIS is the local player's pawn and its team changed, every OTHER pawn's friend/enemy
+	 *  bucket can flip without their own NotifyTeamChanged firing — re-evaluate them. */
+	void RefreshOtherForcedModels();
+	/** Re-entrancy guard — ApplyCharacterData / base NotifyTeamChanged can re-enter. */
+	bool bApplyingForcedModel = false;
+	/** Last applied forced state, so the refresh path can skip no-op re-applies. */
+	UPROPERTY()
+	UClass* LastForcedContent = nullptr;
+	FLinearColor LastForcedColour = FLinearColor::Transparent;
+	bool bForcedModelApplied = false;
 };
