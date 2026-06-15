@@ -12,6 +12,7 @@
 #include "UTWeaponStateZooming.h"
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
+#include "UTPlusProj_FlakShell.h"
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponSkin.h"
 #include "UObject/UObjectIterator.h"
@@ -29,6 +30,36 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
     TEXT("Snapped to nearest multiple of 60. Range: 60-660.\n")
     TEXT("Server always uses native 120Hz tick."),
     ECVF_Scalability
+);
+
+// =========================================================================
+// PROJECTILE DIRECT-HIT LAG COMPENSATION (rocket + flak shell) — server-only.
+// Validates a client's direct-hit claim by finding, in the target's rewound
+// history, the instant its capsule sat at the client-reported ClaimedHitLocation,
+// then confirming the REAL projectile actually passed through that point
+// (server owns the hit decision). See ServerProjectileHitClaim_Implementation.
+// =========================================================================
+static TAutoConsoleVariable<int32> CVarRocketLagComp(
+    TEXT("ut.RocketLagComp"),
+    1,
+    TEXT("Server switch for projectile direct-hit lag compensation (rocket/flak shell).\n")
+    TEXT("1 = on (default), 0 = present-time only. Requires bEnableProjectileRewind on the\n")
+    TEXT("weapon so clients are actually sending claims."),
+    ECVF_Default
+);
+static TAutoConsoleVariable<float> CVarRocketLagCompMaxWindowMs(
+    TEXT("ut.RocketLagCompMaxWindowMs"),
+    120.0f,
+    TEXT("Max rewind/lookback window in ms, applied at any ping. Bounds 'shot behind cover'\n")
+    TEXT("(keep <= the hitscan rewind envelope) and naturally degrades compensation once a\n")
+    TEXT("shooter's RTT exceeds it. Full coverage holds for RTT up to ~window/1.1."),
+    ECVF_Default
+);
+static TAutoConsoleVariable<float> CVarRocketLagCompMaxPingMs(
+    TEXT("ut.RocketLagCompMaxPingMs"),
+    140.0f,
+    TEXT("Reject direct-hit claims from shooters whose RTT (ms) exceeds this. Anti-abuse cutoff."),
+    ECVF_Default
 );
 
 int32 AUTWeaponFix::GetTargetProjectileTickRate()
@@ -2184,8 +2215,13 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	{
 		NewProjectile->HitsStatsName = HitsStatsName;
 
-		// Track server projectile for rewind validation (if enabled)
-		if (bEnableProjectileRewind)
+		// Track server projectile for rewind validation (if enabled).
+		// Only claim-capable projectiles (rocket + flak shell) are tracked; tracking e.g.
+		// flak shards (9/shot) would FIFO-evict the shell/rocket from the 10-entry list
+		// before its claim RPC arrives.
+		const bool bTrackForRewind = bEnableProjectileRewind && NewProjectile &&
+			(NewProjectile->IsA(AUTPlusProj_Rocket::StaticClass()) || NewProjectile->IsA(AUTPlusProj_FlakShell::StaticClass()));
+		if (bTrackForRewind)
 		{
 			int32 ServerEventIdx = AuthoritativeFireEventIndex.IsValidIndex(CurrentFireMode)
 				? AuthoritativeFireEventIndex[CurrentFireMode] : -1;
@@ -3555,7 +3591,8 @@ bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget
 void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
 	int32 ClaimedEventIndex, uint8 ClaimedFireMode)
 {
-	if (!bEnableProjectileRewind)
+	// Master gates: per-weapon feature flag (also gates the client send) AND server kill-switch.
+	if (!bEnableProjectileRewind || CVarRocketLagComp.GetValueOnGameThread() == 0)
 	{
 		return;
 	}
@@ -3572,32 +3609,24 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		return;
 	}
 
-	// 2. Check ping and calculate rewind scale
-	float PingMs = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->ExactPing : 0.0f;
-
-	if (PingMs > ProjectileRewindMaxPingMs || PingMs < 1.0f)
+	// 2. Validate shooter, anti-abuse ping cutoff, and the rewind WINDOW (seconds).
+	// The window is the lookback into the target's history needed to reach the silhouette
+	// the shooter shot at. ClaimedHitLocation IS that silhouette, so the lookback is the
+	// shooter's FULL round-trip (snapshot age) - NOT half-RTT, and NOT the target's ping
+	// (the target's own lag is already baked into its recorded positions). The window cap
+	// bounds 'shot behind cover' and naturally degrades comp once RTT exceeds it.
+	if (!UTOwner || !UTOwner->PlayerState)
 	{
 		return;
 	}
-
-	float RewindScale;
-	if (PingMs <= ProjectileRewindFullPingMs)
+	const float PingMs = UTOwner->PlayerState->ExactPing;
+	if (PingMs > CVarRocketLagCompMaxPingMs.GetValueOnGameThread())
 	{
-		RewindScale = ProjectileRewindMaxScale;
+		return; // shooter too laggy for projectile lag comp
 	}
-	else
-	{
-		RewindScale = FMath::Lerp(ProjectileRewindMaxScale, ProjectileRewindMinScale,
-			(PingMs - ProjectileRewindFullPingMs) / (ProjectileRewindMaxPingMs - ProjectileRewindFullPingMs));
-	}
-
-	float HalfRTT = FMath::Max(0.0f, (PingMs - FudgeFactorMs) * 0.0005f);
-	float ScaledRewindTime = HalfRTT * RewindScale;
-
-	// Floor at 5ms so low-ping players (<20ms) still get proximity validation.
-	// Without this, the fudge factor zeroes out the rewind and the entire claim
-	// is silently discarded — causing no-regs at LAN ping.
-	ScaledRewindTime = FMath::Max(ScaledRewindTime, 0.005f);
+	const float MaxWindowMs = CVarRocketLagCompMaxWindowMs.GetValueOnGameThread();
+	float WindowSec = (PingMs * 0.001f) * 1.1f; // ~full RTT + slack
+	WindowSec = FMath::Clamp(WindowSec, 0.016f, MaxWindowMs * 0.001f);
 
 	// 3. Find the real (authoritative) projectile
 	// Match by FireMode, oldest first (FIFO). EventIndex match preferred if provided.
@@ -3643,16 +3672,52 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		return;
 	}
 
-	// 4. Rewind target to where they were when the client saw them
-	FVector RewoundLoc = ClaimedTarget->GetRewindLocation(ScaledRewindTime);
+	// 4. Capsule dims for the rewound target.
+	const float CapRadius = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
+	const float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const float SegHalf = FMath::Max(0.f, CapHeight - CapRadius);
 
-	// 5. Build rewound capsule geometry
-	float CapRadius = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
-	float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-	FVector CapsuleTop = RewoundLoc + FVector(0.f, 0.f, CapHeight - CapRadius);
-	FVector CapsuleBot = RewoundLoc - FVector(0.f, 0.f, CapHeight - CapRadius);
+	// 5. ClaimedHitLocation is a SEARCH ANCHOR only, never the damage origin (using it as the
+	// origin would let a modified client convert a near-miss into a center-mass direct hit).
+	// Walk the target's history across the window; find the instant its capsule passed
+	// closest to the claimed point.
+	float BestDelta = 0.f;
+	float BestDistSq = BIG_NUMBER;
+	FVector BestCenter = ClaimedTarget->GetActorLocation();
+	const float StepSec = 1.f / 240.f;
+	for (float Delta = 0.f; Delta <= WindowSec + KINDA_SMALL_NUMBER; Delta += StepSec)
+	{
+		const FVector Center = ClaimedTarget->GetRewindLocation(Delta);
+		const FVector OnSeg = FMath::ClosestPointOnSegment(ClaimedHitLocation,
+			Center - FVector(0.f, 0.f, SegHalf), Center + FVector(0.f, 0.f, SegHalf));
+		const float DistSq = FVector::DistSquared(ClaimedHitLocation, OnSeg);
+		if (DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			BestDelta = Delta;
+			BestCenter = Center;
+		}
+	}
 
-	// 6. Get real projectile's collision radius
+	// Anti-fabrication #1: the target must actually have occupied the claimed point.
+	const float ClaimMatchTol = CapRadius + 25.f;
+	if (BestDistSq > ClaimMatchTol * ClaimMatchTol)
+	{
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("ProjRewind REJECTED: target not at claim (dist=%.1f ping=%.0f win=%.0fms)"),
+			FMath::Sqrt(BestDistSq), PingMs, WindowSec * 1000.f);
+		return;
+	}
+
+	// 6. Reconstruct where the REAL projectile was at that instant, analytically from current
+	// state under constant gravity (rocket g=0, flak shell g<0); no history buffer needed:
+	//   pos(t-d) = pos - vel*d + 0.5*g*d^2
+	const FVector ProjLoc = RealProjectile->GetActorLocation();
+	const FVector ProjVel = RealProjectile->GetVelocity();
+	const float GravZ = RealProjectile->ProjectileMovement ? RealProjectile->ProjectileMovement->GetGravityZ() : 0.f;
+	const FVector ProjPast = ProjLoc - (ProjVel * BestDelta) + FVector(0.f, 0.f, 0.5f * GravZ * BestDelta * BestDelta);
+
+	// 7. Server-authoritative contact test. THIS owns the hit decision, not the client.
 	float ProjHitRadius = 0.f;
 	if (RealProjectile->CollisionComp)
 	{
@@ -3667,68 +3732,53 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		ProjHitRadius = 10.f;
 	}
 
-	// 7. Check proximity: real projectile position vs rewound capsule
-	FVector ProjLoc = RealProjectile->GetActorLocation();
-	FVector PointOnCapsule = FMath::ClosestPointOnSegment(ProjLoc, CapsuleBot, CapsuleTop);
-	float DistSqr = FVector::DistSquared(ProjLoc, PointOnCapsule);
-	float CombinedRadius = CapRadius + ProjHitRadius; // Exact radii, no padding
+	const FVector SegTop = BestCenter + FVector(0.f, 0.f, SegHalf);
+	const FVector SegBot = BestCenter - FVector(0.f, 0.f, SegHalf);
+	const FVector OnCap = FMath::ClosestPointOnSegment(ProjPast, SegBot, SegTop);
+	const float ContactDistSq = FVector::DistSquared(ProjPast, OnCap);
+	const float ContactRadius = CapRadius + ProjHitRadius;
 
-	if (DistSqr >= CombinedRadius * CombinedRadius)
+	if (ContactDistSq > ContactRadius * ContactRadius)
 	{
-		// Point check failed — try segment check using projectile velocity
-		// (projectile may be heading toward the rewound capsule)
-		FVector ProjVel = RealProjectile->GetVelocity();
-		if (!ProjVel.IsNearlyZero())
-		{
-			// Check a short path segment ahead (one tick at 240Hz)
-			float LookAhead = 1.f / 240.f;
-			FVector ProjEnd = ProjLoc + ProjVel * LookAhead;
-			FVector PointOnPath, PointOnCap;
-			FMath::SegmentDistToSegmentSafe(ProjLoc, ProjEnd, CapsuleBot, CapsuleTop, PointOnPath, PointOnCap);
-			DistSqr = FVector::DistSquared(PointOnPath, PointOnCap);
-		}
-	}
-
-	if (DistSqr >= CombinedRadius * CombinedRadius)
-	{
+		// Real projectile did NOT pass within the capsule at that instant: not a confirmable
+		// direct hit. v1 declines (present-time already handled any true contact).
 		UE_LOG(LogUTWeaponFix, Verbose,
-			TEXT("ProjectileRewind REJECTED: Dist=%.1f Combined=%.1f Ping=%.0f Scale=%.2f Rewind=%.1fms"),
-			FMath::Sqrt(DistSqr), CombinedRadius, PingMs, RewindScale, ScaledRewindTime * 1000.f);
+			TEXT("ProjRewind REJECTED: no server contact (dist=%.1f need=%.1f ping=%.0f win=%.0fms delta=%.0fms)"),
+			FMath::Sqrt(ContactDistSq), ContactRadius, PingMs, WindowSec * 1000.f, BestDelta * 1000.f);
 		return;
 	}
 
-	// 8. Wall check: make sure we're not hitting through geometry
-	FCollisionQueryParams WallParams(TEXT("ProjectileRewindWallCheck"), true, RealProjectile);
+	// Anti-fabrication #2: the claimed point must also lie on the real projectile path.
+	if (FVector::DistSquared(ProjPast, ClaimedHitLocation) > FMath::Square(ContactRadius + ClaimMatchTol))
+	{
+		UE_LOG(LogUTWeaponFix, Verbose, TEXT("ProjRewind REJECTED: claim off projectile path"));
+		return;
+	}
+
+	// 8. LOS: never award a hit through geometry.
+	FCollisionQueryParams WallParams(TEXT("ProjRewindWallCheck"), true, RealProjectile);
 	WallParams.AddIgnoredActor(ClaimedTarget);
 	WallParams.AddIgnoredActor(UTOwner);
-
-	if (GetWorld()->LineTraceTestByChannel(ProjLoc, RewoundLoc, COLLISION_TRACE_WEAPON, WallParams))
+	if (GetWorld()->LineTraceTestByChannel(ProjPast, BestCenter, COLLISION_TRACE_WEAPON, WallParams))
 	{
-		UE_LOG(LogUTWeaponFix, Verbose, TEXT("ProjectileRewind REJECTED: Wall between projectile and target"));
+		UE_LOG(LogUTWeaponFix, Verbose, TEXT("ProjRewind REJECTED: wall between projectile and target"));
 		return;
 	}
 
-	// 9. HIT! Process the real projectile's hit — but only if it hasn't already
-	// exploded naturally between the lookup and now (tight race at high ping).
-	if (RealProjectile->bExploded)
+	// 9. Confirmed. Resolve the projectile's hit on the claimed target at the rewound contact
+	// point. ProcessHit -> DamageImpactedActor + Explode reuses stock damage semantics (incl.
+	// stock direct/splash dedup) and consumes the projectile (bExploded), so the present-time
+	// collision cannot also fire.
+	if (!RealProjectile->bExploded)
 	{
-		UE_LOG(LogUTWeaponFix, Verbose,
-			TEXT("ProjectileRewind SKIPPED: Projectile already exploded naturally (race condition)"));
-	}
-	else
-	{
-		FVector HitNormal = (ProjLoc - PointOnCapsule).GetSafeNormal();
-		FVector HitLocation = PointOnCapsule + (HitNormal * CapRadius);
-
+		const FVector HitNormal = (ProjPast - OnCap).GetSafeNormal();
 		UE_LOG(LogUTWeaponFix, Log,
-			TEXT("ProjectileRewind HIT: Target=%s Ping=%.0f Scale=%.2f Rewind=%.1fms Dist=%.1f"),
-			*ClaimedTarget->GetName(), PingMs, RewindScale, ScaledRewindTime * 1000.f, FMath::Sqrt(DistSqr));
-
-		RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(),
-			HitLocation, -RealProjectile->GetVelocity().GetSafeNormal());
+			TEXT("ProjRewind HIT: %s ping=%.0f win=%.0fms delta=%.0fms dist=%.1f"),
+			*ClaimedTarget->GetName(), PingMs, WindowSec * 1000.f, BestDelta * 1000.f, FMath::Sqrt(ContactDistSq));
+		RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(), OnCap, HitNormal);
 	}
 
-	// 10. Clean up tracking entry
+	// 10. Consume the tracking entry.
 	if (FoundIndex >= 0 && FoundIndex < ActiveServerProjectiles.Num())
 	{
 		ActiveServerProjectiles.RemoveAt(FoundIndex);
