@@ -3772,9 +3772,19 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	if (!RealProjectile->bExploded)
 	{
 		const FVector HitNormal = (ProjPast - OnCap).GetSafeNormal();
+
+		// "It worked" telemetry. This damage is being applied by lag comp, not by present-time
+		// collision (the real projectile is still in flight). targetMoved = how far the target's
+		// authoritative capsule has advanced past where the shooter hit it == roughly how badly
+		// the un-compensated server test would have missed. targetMoved > capsule radius (~46u)
+		// means this hit ONLY landed because of this code.
+		const float TargetPingMs = ClaimedTarget->PlayerState ? ClaimedTarget->PlayerState->ExactPing : -1.f;
+		const float TargetMoved = (ClaimedTarget->GetActorLocation() - BestCenter).Size();
 		UE_LOG(LogUTWeaponFix, Log,
-			TEXT("ProjRewind HIT: %s ping=%.0f win=%.0fms delta=%.0fms dist=%.1f"),
-			*ClaimedTarget->GetName(), PingMs, WindowSec * 1000.f, BestDelta * 1000.f, FMath::Sqrt(ContactDistSq));
+			TEXT("ProjRewind SAVE: tgt=%s fm=%d shooterPing=%.0f targetPing=%.0f win=%.0fms rewind=%.0fms contact=%.1f targetMoved=%.1f"),
+			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TargetPingMs,
+			WindowSec * 1000.f, BestDelta * 1000.f, FMath::Sqrt(ContactDistSq), TargetMoved);
+
 		RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(), OnCap, HitNormal);
 	}
 
