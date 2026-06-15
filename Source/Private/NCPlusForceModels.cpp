@@ -6,6 +6,10 @@
 #include "Misc/ConfigCacheIni.h"      // GConfig
 #include "AssetRegistryModule.h"      // FAssetData
 #include "UTCharacter.h"              // AUTCharacter::GetBodyMIs (dumpmats)
+#include "TeamArenaCharacter.h"       // ReapplyAll iterates these pawns
+#include "UTGameState.h"              // SyncHudTeamColours: GS->Teams
+#include "UTTeamInfo.h"               // AUTTeamInfo::TeamColor
+#include "UTPlayerController.h"       // local viewer for friend/enemy
 #include "Materials/Material.h"       // GetAll{Vector,Scalar}ParameterNames
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/PlayerState.h" // GetPlayerName
@@ -17,11 +21,9 @@ namespace
 	bool                     GFMLoaded = false;
 	TMap<FString, UClass*>   GFMClassCache;
 
-	// Hard ceiling on the highlight-glow brightness — the REAL cap. A client-side Mod.ini "cap"
-	// would be meaningless (the client owns its own config), so the only enforceable limits are
-	// this compiled-in ceiling (shipped in the signed plugin) and a future server-replicated cap
-	// owned by AMutForceModels (consulted like IsModelAllowed). Tune here during dev.
-	constexpr float kMaxSkinBrightness = 1.75f;
+	// Saved real TeamColor per team, captured before the first HUD-recolour overwrite so it can be
+	// restored when HUD recolour is turned off. Weak keys so teams from a previous map drop out.
+	TMap<TWeakObjectPtr<AUTTeamInfo>, FLinearColor> GHudOrigColours;
 
 	FString ModIniPath()
 	{
@@ -112,6 +114,25 @@ void NCPlusForceModels::Reload()
 		}
 	}
 
+	// Optional baked-material denylist (comma-separated substrings) — models whose colour params are
+	// inert; matched models fall back to their baked red/blue skin. See BakedMaterialSubstrings (header).
+	C.BakedMaterialSubstrings.Reset();
+	FString BakedStr;
+	GConfig->GetString(TEXT("ForceModels"), TEXT("BakedMaterials"), BakedStr, Path);
+	if (!BakedStr.IsEmpty())
+	{
+		TArray<FString> Parts;
+		BakedStr.ParseIntoArray(Parts, TEXT(","), true);
+		for (const FString& Raw : Parts)
+		{
+			int32 S = 0, E = Raw.Len();
+			while (S < E && FChar::IsWhitespace(Raw[S]))     { ++S; }
+			while (E > S && FChar::IsWhitespace(Raw[E - 1])) { --E; }
+			const FString T = Raw.Mid(S, E - S);
+			if (!T.IsEmpty()) { C.BakedMaterialSubstrings.Add(T); }
+		}
+	}
+
 	GFMLoaded = true;
 }
 
@@ -152,6 +173,58 @@ bool NCPlusForceModels::IsEnabled()
 	return C.bEnabled && C.bModels;
 }
 
+void NCPlusForceModels::ReapplyAll(UWorld* World)
+{
+	if (!World) { return; }
+	// Collect first: NotifyTeamChanged re-runs the base team-change, which can spawn/destroy a pawn's
+	// LeaderHat — unsafe while a TActorIterator is live (same reason RefreshOtherForcedModels collects
+	// before applying). Route through NotifyTeamChanged (not ApplyForcedModel directly) so the base
+	// restores the real model first; a side the user just disabled then correctly un-forces.
+	TArray<ATeamArenaCharacter*> Chars;
+	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
+	{
+		if (ATeamArenaCharacter* C = *It) { Chars.Add(C); }
+	}
+	for (ATeamArenaCharacter* C : Chars)
+	{
+		C->NotifyTeamChanged();
+	}
+}
+
+void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
+{
+	// Client-side HUD/weapon/chat recolour (mirrors the BP's 0.25s "Update team colour" timer):
+	// overwrite each team's replicated TeamColor with the configured skin colour for that team
+	// relative to the local viewer, re-asserted each call so server replication can't revert it.
+	// Originals are captured before the first overwrite and restored when HUD recolour is off.
+	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
+	AUTGameState* GS = World->GetGameState<AUTGameState>();
+	if (!GS) { return; }
+
+	const FNCPlusForceModelsConfig& C = Get();
+	const bool bWant = C.bEnabled && C.bHUD;
+	AUTPlayerController* LocalPC = Cast<AUTPlayerController>(World->GetFirstPlayerController());
+
+	for (AUTTeamInfo* Team : GS->Teams)
+	{
+		if (!Team) { continue; }
+		const bool bFriendly = (LocalPC && GS->OnSameTeam(Team, LocalPC));
+		// Enemy-Only leaves teammates untouched; every other style recolours both teams.
+		const bool bApply = bWant && !(C.Style == ENCPlusSkinStyle::EnemyOnly && bFriendly);
+
+		if (bApply)
+		{
+			if (!GHudOrigColours.Contains(Team)) { GHudOrigColours.Add(Team, Team->TeamColor); }
+			Team->TeamColor = GetSkinColour(GetModelSettings(Team->GetTeamNum(), bFriendly));
+		}
+		else if (FLinearColor* Orig = GHudOrigColours.Find(Team))
+		{
+			Team->TeamColor = *Orig;          // restore when HUD recolour turns off / style excludes this team
+			GHudOrigColours.Remove(Team);
+		}
+	}
+}
+
 const FNCPlusModelSettings& NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly)
 {
 	static const FNCPlusModelSettings EmptySide;   // empty ContentPath -> applier skips this pawn
@@ -169,26 +242,6 @@ FLinearColor NCPlusForceModels::GetSkinColour(const FNCPlusModelSettings& Side)
 {
 	// Base albedo tint. Matches the BP's "HSV to RGB" node (Kismet): H in degrees, S/V 0-1.
 	return FLinearColor(Side.H, Side.S, Side.V, 1.f).HSVToLinearRGB();
-}
-
-FLinearColor NCPlusForceModels::GetEmissiveColour(const FNCPlusModelSettings& Side)
-{
-	// Highlight glow = base colour scaled by Brightness, fed to emissive/overlay params only.
-	// Clamped to the compiled-in kMaxSkinBrightness ceiling (see note there) so it stays well
-	// short of UTComp fullbright skins, regardless of what a client puts in Mod.ini.
-	const float B  = FMath::Clamp(Side.Brightness, 0.f, kMaxSkinBrightness);
-	FLinearColor C = GetSkinColour(Side);
-	C.R *= B; C.G *= B; C.B *= B; C.A = 1.f;
-	return C;
-}
-
-bool NCPlusForceModels::IsEmissiveParam(FName Param)
-{
-	// Glow channels: only these get the (possibly >1) emissive boost; albedo params stay at the
-	// base colour so a boost never blows out or hue-shifts the skin.
-	const FString S = Param.ToString();
-	return S.Contains(TEXT("Emissive"), ESearchCase::IgnoreCase)
-		|| S.Contains(TEXT("Overlay"),  ESearchCase::IgnoreCase);
 }
 
 TSubclassOf<AUTCharacterContent> NCPlusForceModels::GetModelClass(const FNCPlusModelSettings& Side)
@@ -234,6 +287,18 @@ bool NCPlusForceModels::IsRecolorSkippedMaterial(const FString& MaterialName)
 	const FNCPlusForceModelsConfig& C = Get();
 	const TArray<FString>& Skip = (C.SkipMaterialSubstrings.Num() > 0) ? C.SkipMaterialSubstrings : DefaultSkip;
 	for (const FString& Sub : Skip)
+	{
+		if (MaterialName.Contains(Sub, ESearchCase::IgnoreCase)) { return true; }
+	}
+	return false;
+}
+
+bool NCPlusForceModels::IsBakedMaterial(const FString& MaterialName)
+{
+	// No built-in default — param-LESS models are auto-detected at apply time; this denylist only
+	// catches models whose params exist but are inert (can't be told apart from the material API).
+	const FNCPlusForceModelsConfig& C = Get();
+	for (const FString& Sub : C.BakedMaterialSubstrings)
 	{
 		if (MaterialName.Contains(Sub, ESearchCase::IgnoreCase)) { return true; }
 	}
@@ -297,6 +362,7 @@ void NCPlusForceModels::DumpAllCharacterMaterials(UWorld* World)
 		static const FName NAME_TeamSelect(TEXT("TeamSelect"));
 		static const FName NAME_BlendMax(TEXT("Team Color Blend Max"));
 		static const FName NAME_EmisMax(TEXT("Emissive Max"));
+		static const FName NAME_EmisPower(TEXT("Emission Power"));
 		static const FName NAME_NoTeam(TEXT("NoTeamColor"));
 		static const FName NAME_Red(TEXT("Red Team Color"));
 		static const FName NAME_Blue(TEXT("Blue Team Color"));
@@ -304,17 +370,18 @@ void NCPlusForceModels::DumpAllCharacterMaterials(UWorld* World)
 		{
 			if (!MID) { continue; }
 			const UMaterialInterface* Src = MID->Parent;
-			float TeamSel = -1.f, BlendMax = -1.f, EmisMax = -1.f;
+			float TeamSel = -1.f, BlendMax = -1.f, EmisMax = -1.f, EmisPower = -1.f;
 			MID->GetScalarParameterValue(NAME_TeamSelect, TeamSel);
 			const bool bBlend = MID->GetScalarParameterValue(NAME_BlendMax, BlendMax);
 			const bool bEmis  = MID->GetScalarParameterValue(NAME_EmisMax,  EmisMax);
+			const bool bPow   = MID->GetScalarParameterValue(NAME_EmisPower, EmisPower);
 			FLinearColor NoTeam(ForceInit), RedC(ForceInit), BlueC(ForceInit);
 			const bool bNo  = MID->GetVectorParameterValue(NAME_NoTeam, NoTeam);
 			const bool bRed = MID->GetVectorParameterValue(NAME_Red,    RedC);
 			const bool bBlu = MID->GetVectorParameterValue(NAME_Blue,   BlueC);
-			UE_LOG(LogTemp, Warning, TEXT("   mat='%s'  TeamSelect=%.0f  BlendMax=%.2f[%d]  EmisMax=%.2f[%d]  NoTeam=%s[%d]  Red=%s[%d]  Blue=%s[%d]"),
+			UE_LOG(LogTemp, Warning, TEXT("   mat='%s'  TeamSelect=%.0f  BlendMax=%.2f[%d]  EmisMax=%.2f[%d]  EmisPow=%.2f[%d]  NoTeam=%s[%d]  Red=%s[%d]  Blue=%s[%d]"),
 				Src ? *Src->GetName() : *MID->GetName(), TeamSel,
-				BlendMax, bBlend ? 1 : 0, EmisMax, bEmis ? 1 : 0,
+				BlendMax, bBlend ? 1 : 0, EmisMax, bEmis ? 1 : 0, EmisPower, bPow ? 1 : 0,
 				*NoTeam.ToString(), bNo ? 1 : 0,
 				*RedC.ToString(),   bRed ? 1 : 0,
 				*BlueC.ToString(),  bBlu ? 1 : 0);

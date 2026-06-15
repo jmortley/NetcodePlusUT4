@@ -93,8 +93,11 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			if (Content && NCPlusForceModels::IsModelAllowed(Content))
 			{
 				Colour        = NCPlusForceModels::GetSkinColour(Side);
-				// Subtle highlight: Brightness 1.0 = off; >1 = a small emissive glow, capped subtle.
-				GlowIntensity = FMath::Clamp(Side.Brightness - 1.f, 0.f, 0.75f);
+				// Highlight: Brightness 1.0 = off; >1 drives an emissive glow. Slope x5, cap 5.0 to match
+				// the models' own native emissive (dumpmats showed up to ~5.0) and bring the lit in-world
+				// model up to the flat, unlit HUD swatch's brightness. Albedo is already maxed at V=1, so
+				// "brighter than normal" can only come from emissive. UI "Glow" 1.0-2.0 spans 0-5.0 (full at 2.0).
+				GlowIntensity = FMath::Clamp((Side.Brightness - 1.f) * 5.f, 0.f, 5.f);
 				bWantForce    = true;
 			}
 		}
@@ -133,18 +136,44 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	bAllowCharacterDataOverride = true;
 	ApplyCharacterData(Content);
 
-	// Recolour: force every body material onto its NoTeam (neutral) path, then tint that path. UT
-	// character materials are three-way (TeamSelect 0=Red, 1=Blue, 255=NoTeam). The Red/Blue paths
-	// are the model's baked team skins — a colour param only accents them (forcing a team value just
-	// turned robots red). The NoTeam path is the neutral canvas, tintable via NoTeamColor (the
-	// convention requires a neutral base mesh). So set TeamSelect=255 on every body MID, then set the
-	// NoTeam* colour params (Red/Blue set too, harmless). Base models (e.g. Lauren) are already on
-	// 255; non-Base models (robot) get routed there. SetVectorParameterValue no-ops params a material
-	// lacks, so this colours any UT-framework model and skips the rest (param-less ones need overlay).
 	static const FName NAME_TeamSelect(TEXT("TeamSelect"));
 	static const FName NAME_TeamBlendMax(TEXT("Team Color Blend Max"));
 	static const FName NAME_EmissiveMax(TEXT("Emissive Max"));
+	static const FName NAME_EmissionPower(TEXT("Emission Power"));
 	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames();
+
+	// Decide ONCE whether this model can be recoloured. It can't if either (a) no non-skipped body
+	// material exposes any of our team-colour params (param-less models, e.g. Garog — auto-detected),
+	// or (b) a material is on the [ForceModels] BakedMaterials denylist (params exist but are inert and
+	// indistinguishable at runtime, e.g. the community Robot). Non-recolourable models fall back to
+	// their baked red/blue team skin below, so they stay team-readable instead of a flat default colour.
+	bool bHasParam = false, bDenylisted = false;
+	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	{
+		if (!MID) { continue; }
+		const UMaterialInterface* Src = MID->Parent;
+		const FString MatName = Src ? Src->GetName() : MID->GetName();
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName)) { continue; }
+		if (NCPlusForceModels::IsBakedMaterial(MatName)) { bDenylisted = true; }
+		if (!bHasParam)
+		{
+			FLinearColor Tmp;
+			for (const FName& P : Params)
+			{
+				if (MID->GetVectorParameterValue(P, Tmp)) { bHasParam = true; break; }
+			}
+		}
+	}
+	const bool bRecolour = bHasParam && !bDenylisted;
+
+	// Baked fallback: pick the model's baked red (0) or blue (1) skin from the chosen colour — more red
+	// than blue -> red skin, else blue. In Enemy-Only this makes every (non-recolourable) enemy one
+	// uniform baked skin; the user's H choice still steers which one.
+	const float BakedTeamSelect = (Colour.R >= Colour.B) ? 0.f : 1.f;
+
+	// UT character materials are three-way (TeamSelect 0=Red, 1=Blue, 255=NoTeam). Recolour forces the
+	// neutral NoTeam path then tints it (the Red/Blue paths are the model's baked team skins, which a
+	// colour param only accents); the fallback instead selects a baked team skin directly.
 	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
 	{
 		if (!MID) { continue; }
@@ -155,15 +184,24 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			// Face/eyes/hair: leave UNTOUCHED so they keep the model's own team tint.
 			continue;
 		}
+
+		if (!bRecolour)
+		{
+			// Non-recolourable model: route to its baked red/blue skin rather than the futile NoTeam
+			// recolour (which would leave it a flat default). The baked textures carry the team look.
+			MID->SetScalarParameterValue(NAME_TeamSelect, BakedTeamSelect);
+			continue;
+		}
+
 		MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
-		// Some custom masters (e.g. MAT_MAS_Robot) bake the team skin into TEXTURES and only blend the
-		// colour params over them at a strength gated by this scalar. If it's low, the baked texture
-		// wins and our colour is ignored (green set, blue rendered). Crank it so the colour actually
-		// paints. No-op on materials that lack the param (e.g. Lauren, which already tints fully).
+		// Some masters bake the team skin into TEXTURES and only blend the colour params over them at a
+		// strength gated by this scalar; crank it so the colour actually paints. No-op where absent.
 		MID->SetScalarParameterValue(NAME_TeamBlendMax, 1.f);
-		// Subtle highlight: drive the emissive intensity from Brightness (0 = off). Only shows where
-		// the material has a live emissive channel — baked models won't glow (same wall as recolour).
+		// Highlight: drive the emissive intensity from Brightness (0 = off). Only shows where the
+		// material has a live emissive channel.
 		MID->SetScalarParameterValue(NAME_EmissiveMax, GlowIntensity);
+		// Some masters gate the emissive via an "Emission Power" scalar too — drive it (no-op where absent).
+		MID->SetScalarParameterValue(NAME_EmissionPower, GlowIntensity);
 		for (const FName& P : Params)
 		{
 			MID->SetVectorParameterValue(P, Colour);

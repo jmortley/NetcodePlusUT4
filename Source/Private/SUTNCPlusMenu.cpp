@@ -4,6 +4,8 @@
 #include "NCPlusForceModels.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
+#include "Widgets/Input/STextComboBox.h"
+#include "Widgets/Layout/SScrollBox.h"
 
 // Mod.ini section (General tab)
 static const TCHAR* NCPSection = TEXT("NetcodePlus");
@@ -75,6 +77,12 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
 				[
+					MakeTabButton(TEXT("About"), ENCPMenuTab::About)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(0, 0, 8, 0)
+				[
 					MakeTabButton(TEXT("General"), ENCPMenuTab::General)
 				]
 				+ SHorizontalBox::Slot()
@@ -91,7 +99,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			[
 				SAssignNew(ContentArea, SBox)
 				[
-					BuildGeneralTab()
+					BuildTabContent(ActiveTab)
 				]
 			]
 
@@ -139,9 +147,104 @@ FReply SUTNCPlusMenu::OnTabClicked(ENCPMenuTab Tab)
 	ActiveTab = Tab;
 	if (ContentArea.IsValid())
 	{
-		ContentArea->SetContent(Tab == ENCPMenuTab::ForceModels ? BuildForceModelsTab() : BuildGeneralTab());
+		ContentArea->SetContent(BuildTabContent(Tab));
 	}
 	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
+{
+	switch (Tab)
+	{
+		case ENCPMenuTab::ForceModels: return BuildForceModelsTab();
+		case ENCPMenuTab::General:     return BuildGeneralTab();
+		case ENCPMenuTab::About:
+		default:                       return BuildAboutTab();
+	}
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
+{
+	const FString VersionLine = FString::Printf(TEXT("Version %d"), NETCODE_PLUGIN_VERSION);
+
+	return SNew(SBox)
+		.WidthOverride(560.f)
+		[
+			SNew(SVerticalBox)
+
+			// Heading
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 12, 0, 2)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("About NetcodePlus")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			// Version
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 0, 0, 12)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(VersionLine))
+				.Font(RegularFont(12))
+				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
+			]
+
+			// Blurb
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 0, 24, 12)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("A community client and server enhancement plugin for UT4: improved netcode and hit registration, extra game modes (Elimination+, Wipeout, Duel, Shaft Arena, Shock Domination), a configurable HUD, weapon skins, and team-model overrides. Unofficial and community-maintained.")))
+				.Font(RegularFont(12))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				.AutoWrapText(true)
+			]
+
+			// Console commands heading
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 6, 0, 4)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Console Commands")))
+				.Font(BoldFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			// Console commands list
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 0, 24, 4)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("F5  or  ncpmenu  -  open this menu\nweaponskins  -  weapon skin selector\ncosmetics  -  hats, eyewear, characters, taunts\nnchud  -  HUD layout editor\nnchud_drag  -  drag HUD elements\nweaponhand [right|left|center|hidden]  -  weapon position\nforcemodels_list / forcemodels_dumpmats  -  team-model diagnostics")))
+				.Font(RegularFont(12))
+				.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.f))
+				.AutoWrapText(true)
+			]
+
+			// Footer hint
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 12, 24, 6)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Use the tabs above for General and Force Models settings.")))
+				.Font(RegularFont(11))
+				.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+				.AutoWrapText(true)
+			]
+		];
 }
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
@@ -315,59 +418,293 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 		];
 }
 
-TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
+TSharedRef<SWidget> SUTNCPlusMenu::MakeFlagCheck(const FString& Label, bool* Flag)
 {
-	return SNew(SVerticalBox)
-
-		// Header
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(0, 10, 0, 5)
-		.HAlign(HAlign_Center)
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		.VAlign(VAlign_Center)
+		[
+			SNew(SCheckBox)
+			.IsChecked_Lambda([Flag] { return (*Flag) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+			.OnCheckStateChanged_Lambda([Flag](ECheckBoxState S) { *Flag = (S == ECheckBoxState::Checked); })
+		]
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		.VAlign(VAlign_Center)
+		.Padding(6, 0, 0, 0)
 		[
 			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Force Team Models")))
-			.Font(BoldFont(18))
+			.Text(FText::FromString(Label))
+			.Font(RegularFont(12))
 			.ColorAndOpacity(FLinearColor::White)
-		]
+		];
+}
 
-		// Master enable
+TSharedRef<SWidget> SUTNCPlusMenu::MakeLabeledSpin(const FString& Label, float* Value, float Min, float Max, float Delta)
+{
+	return SNew(SHorizontalBox)
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		.VAlign(VAlign_Center)
+		.Padding(0, 0, 4, 0)
+		[
+			SNew(SBox)
+			.MinDesiredWidth(34.f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(Label))
+				.Font(RegularFont(12))
+				.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.f))
+			]
+		]
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		.VAlign(VAlign_Center)
+		[
+			SNew(SSpinBox<float>)
+			.MinValue(Min)
+			.MaxValue(Max)
+			.Delta(Delta)
+			.MinDesiredWidth(64.f)
+			.Value_Lambda([Value] { return *Value; })
+			.OnValueChanged_Lambda([Value](float V) { *Value = V; })
+		];
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusModelSettings* Side)
+{
+	// Resolve the model combo's initial selection from the stored class path ("(none)" if empty).
+	TSharedPtr<FString> InitialModel = (FMModelOptions.Num() > 0) ? FMModelOptions[0] : nullptr;
+	if (!Side->ContentPath.IsEmpty())
+	{
+		for (int32 i = 0; i < FMContentEntries.Num(); ++i)
+		{
+			if (FMContentEntries[i].ClassPath == Side->ContentPath && FMModelOptions.IsValidIndex(i + 1))
+			{
+				InitialModel = FMModelOptions[i + 1];
+				break;
+			}
+		}
+	}
+
+	return SNew(SVerticalBox)
+
+		// Side label
 		+ SVerticalBox::Slot()
 		.AutoHeight()
-		.Padding(40, 6, 40, 4)
-		.HAlign(HAlign_Center)
+		.Padding(0, 6, 0, 2)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(Label))
+			.Font(BoldFont(13))
+			.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
+		]
+
+		// Model picker
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 2, 0, 4)
 		[
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
+			.Padding(0, 0, 8, 0)
 			[
-				SNew(SCheckBox)
-				.IsChecked(bForceModelsEnabled ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
-				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnForceModelsEnabledChanged)
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Model")))
+				.Font(RegularFont(12))
+				// Live colour preview: tint the "Model" label with this side's current skin colour
+				// (from its H/S/V), re-evaluated each paint so it tracks the sliders as you drag them.
+				.ColorAndOpacity_Lambda([Side] { return FSlateColor(NCPlusForceModels::GetSkinColour(*Side)); })
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.f)
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextComboBox)
+				.OptionsSource(&FMModelOptions)
+				.InitiallySelectedItem(InitialModel)
+				.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+				{
+					if (!NewSel.IsValid()) { return; }
+					const FString Sel = *NewSel;
+					if (Sel == TEXT("(none)")) { Side->ContentPath.Empty(); return; }
+					for (const NCPlusForceModels::FContentEntry& E : FMContentEntries)
+					{
+						if (E.DisplayName == Sel) { Side->ContentPath = E.ClassPath; return; }
+					}
+				})
+			]
+		]
+
+		// Hue / Saturation / Value
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 2, 0, 2)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0) [ MakeLabeledSpin(TEXT("H"), &Side->H, 0.f, 360.f, 1.f) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0) [ MakeLabeledSpin(TEXT("S"), &Side->S, 0.f, 1.f, 0.02f) ]
+			+ SHorizontalBox::Slot().AutoWidth()                      [ MakeLabeledSpin(TEXT("V"), &Side->V, 0.f, 1.f, 0.02f) ]
+		]
+
+		// Glow + Armour mode
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 2, 0, 2)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 2.f, 0.05f) ]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 6, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Armour")))
+				.Font(RegularFont(12))
+				.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.f))
 			]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
-			.Padding(8, 0, 0, 0)
+			[
+				SNew(SBox)
+				.WidthOverride(150.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&FMArmourOptions)
+					.InitiallySelectedItem(FMArmourOptions.IsValidIndex((int32)Side->ArmourMode) ? FMArmourOptions[(int32)Side->ArmourMode] : nullptr)
+					.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+					{
+						if (!NewSel.IsValid()) { return; }
+						const int32 Idx = FMArmourOptions.IndexOfByPredicate([&](const TSharedPtr<FString>& P) { return P.IsValid() && *P == *NewSel; });
+						if (Idx != INDEX_NONE) { Side->ArmourMode = (ENCPlusArmourMode)Idx; }
+					})
+				]
+			]
+		];
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
+{
+	return SNew(SBox)
+		.WidthOverride(620.f)
+		[
+			SNew(SVerticalBox)
+
+			// Header
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 10, 0, 4)
+			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Enable Force Models")))
-				.Font(RegularFont(14))
+				.Text(FText::FromString(TEXT("Force Team Models")))
+				.Font(BoldFont(18))
 				.ColorAndOpacity(FLinearColor::White)
 			]
-		]
 
-		// Stage-2 placeholder
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(40, 10, 40, 4)
-		.HAlign(HAlign_Center)
-		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Style + per-side model/colour/brightness pickers — next build.")))
-			.Font(RegularFont(11))
-			.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.f))
+			// Master enable
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(20, 4, 20, 8)
+			.HAlign(HAlign_Center)
+			[
+				MakeFlagCheck(TEXT("Enable Force Models"), &FMConfig.bEnabled)
+			]
+
+			// Feature flags (two rows of three)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(20, 2, 20, 2)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Models"), &FMConfig.bModels) ]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("HUD"),    &FMConfig.bHUD) ]
+				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Armour"), &FMConfig.bArmour) ]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(20, 2, 20, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Flags"),     &FMConfig.bFlags) ]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Darken"),    &FMConfig.bDarkenBodies) ]
+				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Cosmetics"), &FMConfig.bCosmetics) ]
+			]
+
+			// Style selector
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(20, 4, 20, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0, 0, 8, 0)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Style")))
+					.Font(RegularFont(13))
+					.ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.WidthOverride(160.f)
+					[
+						SNew(STextComboBox)
+						.OptionsSource(&FMStyleOptions)
+						.InitiallySelectedItem(FMStyleOptions.IsValidIndex((int32)FMConfig.Style) ? FMStyleOptions[(int32)FMConfig.Style] : nullptr)
+						.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+						{
+							if (!NewSel.IsValid()) { return; }
+							const int32 Idx = FMStyleOptions.IndexOfByPredicate([&](const TSharedPtr<FString>& P) { return P.IsValid() && *P == *NewSel; });
+							if (Idx != INDEX_NONE) { FMConfig.Style = (ENCPlusSkinStyle)Idx; }
+						})
+					]
+				]
+			]
+
+			// Per-side rows (scrollable: all four sides always shown; Style decides which apply)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(10, 0, 10, 4)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SBox)
+				.HeightOverride(300.f)
+				.WidthOverride(600.f)
+				[
+					SNew(SScrollBox)
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Enemy"),           &FMConfig.Enemy) ]
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Team (friendly)"), &FMConfig.Team) ]
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Red team"),        &FMConfig.Red) ]
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Blue team"),       &FMConfig.Blue) ]
+				]
+			]
+
+			// Footnote
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(20, 2, 20, 4)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Which sides apply depends on Style. Recolour works on UT-material models; baked-texture models keep their own skin. Save applies live.")))
+				.Font(RegularFont(10))
+				.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+				.AutoWrapText(true)
+			]
 		];
 }
 
@@ -401,8 +738,26 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		bHighResScreenshotPostMatch = true;
 
-	// Force Models — read from the live config (loads Mod.ini [ForceModels] on first access).
-	bForceModelsEnabled = NCPlusForceModels::Get().bEnabled;
+	// Force Models — take a working copy of the live config (loads Mod.ini [ForceModels] on first access).
+	FMConfig = NCPlusForceModels::Get();
+
+	// Build the combo option lists once. Installed characters first ("(none)" lets a side be cleared),
+	// then the fixed Style / Armour lists (index order matches the ENCPlusSkinStyle / ENCPlusArmourMode ints).
+	FMContentEntries.Reset();
+	NCPlusForceModels::EnumerateContent(FMContentEntries);
+	FMModelOptions.Reset();
+	FMModelOptions.Add(MakeShareable(new FString(TEXT("(none)"))));
+	for (const NCPlusForceModels::FContentEntry& E : FMContentEntries)
+	{
+		FMModelOptions.Add(MakeShareable(new FString(E.DisplayName)));
+	}
+	FMStyleOptions.Reset();
+	FMStyleOptions.Add(MakeShareable(new FString(TEXT("Team / Enemy"))));
+	FMStyleOptions.Add(MakeShareable(new FString(TEXT("Red / Blue"))));
+	FMStyleOptions.Add(MakeShareable(new FString(TEXT("Enemy Only"))));
+	FMArmourOptions.Reset();
+	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Match Skin"))));
+	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Complimentary"))));
 }
 
 void SUTNCPlusMenu::SaveSettings()
@@ -417,9 +772,15 @@ void SUTNCPlusMenu::SaveSettings()
 
 	GConfig->Flush(false, ConfigPath);
 
-	// Force Models — write through the live config so it persists to Mod.ini [ForceModels].
-	NCPlusForceModels::Mutable().bEnabled = bForceModelsEnabled;
+	// Force Models — write the working copy through to the live config + Mod.ini [ForceModels].
+	NCPlusForceModels::Mutable() = FMConfig;
 	NCPlusForceModels::Save();
+
+	// Live re-apply so changes show immediately without a respawn / rejoin.
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		NCPlusForceModels::ReapplyAll(PlayerOwner->PlayerController->GetWorld());
+	}
 
 	UE_LOG(LogTemp, Log, TEXT("NCPlus settings saved to Mod.ini"));
 }
@@ -485,11 +846,6 @@ void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type Co
 void SUTNCPlusMenu::OnScreenshotChanged(ECheckBoxState NewState)
 {
 	bHighResScreenshotPostMatch = (NewState == ECheckBoxState::Checked);
-}
-
-void SUTNCPlusMenu::OnForceModelsEnabledChanged(ECheckBoxState NewState)
-{
-	bForceModelsEnabled = (NewState == ECheckBoxState::Checked);
 }
 
 FReply SUTNCPlusMenu::OnSaveClicked()

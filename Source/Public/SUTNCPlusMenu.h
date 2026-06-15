@@ -3,13 +3,16 @@
 // Tabs: General (gore/footsteps/screenshot) + Force Models
 #pragma once
 
+#include "NetcodePlus.h"     // PCH preamble (UT/core types first)
 #include "SlateBasics.h"
+#include "NCPlusForceModels.h"
 
 class UUTLocalPlayer;
 
 /** Which settings tab is showing. */
 enum class ENCPMenuTab : uint8
 {
+	About,
 	General,
 	ForceModels,
 };
@@ -41,14 +44,22 @@ private:
 	float OwnFootstepVolume;
 	bool bHighResScreenshotPostMatch;
 
-	// ── Force Models settings (mirror of NCPlusForceModels config; Stage 1 = master toggle) ──
-	bool bForceModelsEnabled;
+	// ── Force Models settings ── working copy of the live config, edited in-place by the tab's
+	// widgets via bool*/float* lambdas and written back on Save. The combo option lists are members
+	// so each STextComboBox::OptionsSource can point at them for the panel's lifetime.
+	FNCPlusForceModelsConfig FMConfig;
+	TArray<NCPlusForceModels::FContentEntry> FMContentEntries; // installed characters (display -> path)
+	TArray<TSharedPtr<FString>> FMModelOptions;                // "(none)" + each FMContentEntries display name
+	TArray<TSharedPtr<FString>> FMStyleOptions;                // Team/Enemy, Red/Blue, Enemy Only
+	TArray<TSharedPtr<FString>> FMArmourOptions;               // Match Skin, Complimentary
 
 	// ── Tabs ──
-	ENCPMenuTab ActiveTab = ENCPMenuTab::General;
+	ENCPMenuTab ActiveTab = ENCPMenuTab::About;
 	TSharedPtr<class SBox> ContentArea;
+	TSharedRef<SWidget> BuildAboutTab();
 	TSharedRef<SWidget> BuildGeneralTab();
 	TSharedRef<SWidget> BuildForceModelsTab();
+	TSharedRef<SWidget> BuildTabContent(ENCPMenuTab Tab);
 	TSharedRef<SWidget> MakeTabButton(const FString& Label, ENCPMenuTab Tab);
 	FReply OnTabClicked(ENCPMenuTab Tab);
 
@@ -62,8 +73,10 @@ private:
 	void OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnScreenshotChanged(ECheckBoxState NewState);
 
-	// Force Models handlers
-	void OnForceModelsEnabledChanged(ECheckBoxState NewState);
+	// Force Models tab builders/helpers
+	TSharedRef<SWidget> BuildSideRow(const FString& Label, FNCPlusModelSettings* Side);
+	TSharedRef<SWidget> MakeFlagCheck(const FString& Label, bool* Flag);
+	TSharedRef<SWidget> MakeLabeledSpin(const FString& Label, float* Value, float Min, float Max, float Delta);
 
 	FReply OnSaveClicked();
 	FReply OnCloseClicked();

@@ -31,7 +31,7 @@ struct FNCPlusModelSettings
 	float             H = 0.f;                      // hue in degrees (0-360)
 	float             S = 1.f;
 	float             V = 1.f;                       // HSV value = base brightness within the normal 0-1 range
-	float             Brightness = 1.f;             // overbright multiplier (1 = off) for a capped highlight glow; see GetEmissiveColour
+	float             Brightness = 1.f;             // overbright multiplier (1 = off); drives a capped emissive glow (see ApplyForcedModel)
 	bool              bComplimentary = false;
 	ENCPlusArmourMode ArmourMode = ENCPlusArmourMode::MatchSkin;
 };
@@ -60,6 +60,13 @@ struct FNCPlusForceModelsConfig
 	 *  (head/face/eye/hair/teeth/...). Matched case-insensitively against each material name
 	 *  (e.g. "M_Skaarj_Head_Inst" matches "head"). */
 	TArray<FString>  SkipMaterialSubstrings;
+
+	/** Material-name substrings that mark a model NON-recolourable ("baked-texture" models whose colour
+	 *  params are inert — e.g. the community Robot). From [ForceModels] BakedMaterials=Robot,... Empty by
+	 *  default; param-LESS models are auto-detected at apply time, so this is only for the inert case
+	 *  (params exist but don't drive albedo — indistinguishable via the material API). Matched models
+	 *  fall back to their baked red/blue team skin instead of the futile recolour. */
+	TArray<FString>  BakedMaterialSubstrings;
 };
 
 namespace NCPlusForceModels
@@ -76,19 +83,23 @@ namespace NCPlusForceModels
 	/** Master gate: feature on AND model-forcing enabled. */
 	NETCODEPLUS_API bool IsEnabled();
 
+	/** Re-apply forced models to every ATeamArenaCharacter in World (e.g. after the menu saves a
+	 *  config change). Iterator-safe (collect-then-apply) and routes through each pawn's
+	 *  NotifyTeamChanged, so a now-disabled side correctly un-forces. No-op on a dedicated server. */
+	NETCODEPLUS_API void ReapplyAll(class UWorld* World);
+
+	/** HUD recolour (the "HUD" flag): overwrite each team's TeamColor with the configured skin colour
+	 *  (relative to the local viewer) so the beacon / HUD / weapons / chat match the forced models.
+	 *  Client-side, re-asserted to survive replication; restores the real colours when HUD is off.
+	 *  Mirrors the BP's "Update team colour" timer — call ~4x/sec from a client ticker. No-op on a
+	 *  dedicated server. */
+	NETCODEPLUS_API void SyncHudTeamColours(class UWorld* World);
+
 	/** Resolve which side's settings apply to a pawn under the active Style. */
 	NETCODEPLUS_API const FNCPlusModelSettings& GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly);
 
 	/** HSV(degrees) -> FLinearColor for a side (base albedo tint; V is the normal 0-1 brightness). */
 	NETCODEPLUS_API FLinearColor GetSkinColour(const FNCPlusModelSettings& Side);
-
-	/** The side's colour scaled by its Brightness (clamped to MaxBrightness / a hard ceiling).
-	 *  Fed to the emissive/overlay params only, so a >1 boost reads as a capped highlight glow
-	 *  rather than blown-out / hue-shifted albedo. */
-	NETCODEPLUS_API FLinearColor GetEmissiveColour(const FNCPlusModelSettings& Side);
-
-	/** True if a team-colour param is an emissive/overlay (glow) channel — gets GetEmissiveColour. */
-	NETCODEPLUS_API bool IsEmissiveParam(FName Param);
 
 	/** Resolve + GC-pin + cache a side's AUTCharacterContent class (nullptr if none/unloadable). */
 	NETCODEPLUS_API TSubclassOf<AUTCharacterContent> GetModelClass(const FNCPlusModelSettings& Side);
@@ -109,6 +120,10 @@ namespace NCPlusForceModels
 
 	/** True if a material's name matches the skip list (face/eyes/hair) — don't recolour it. */
 	NETCODEPLUS_API bool IsRecolorSkippedMaterial(const FString& MaterialName);
+
+	/** True if a material's name matches the [ForceModels] BakedMaterials denylist — its model can't be
+	 *  recoloured (inert params) and should fall back to its baked red/blue skin. Empty list -> false. */
+	NETCODEPLUS_API bool IsBakedMaterial(const FString& MaterialName);
 
 	/** Diagnostic (backs the `forcemodels_dumpmats` console command): log every AUTCharacter's body
 	 *  materials + their vector/scalar parameter names, so we can see what a custom model actually

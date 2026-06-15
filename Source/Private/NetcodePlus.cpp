@@ -26,6 +26,7 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Misc/CoreMisc.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Engine/GameInstance.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
@@ -489,6 +490,39 @@ static bool TickNcpConnect(float DeltaTime)
 	return false; // single shot — unregister
 }
 
+// ---------------------------------------------------------------------------
+// HUD team-colour recolour (Force Models "HUD" flag). Persistent client core ticker,
+// self-throttled to ~4 Hz (matching the BP's "Update team colour" 0.25s timer), that
+// re-asserts each team's TeamColor to the configured skin colour. Re-assertion is needed
+// because TeamColor is replicated and the server periodically reverts it. No-op unless a
+// game world exists and the feature + HUD flag are on (see NCPlusForceModels::SyncHudTeamColours).
+// ---------------------------------------------------------------------------
+static FDelegateHandle GHudColourTickerHandle;
+static float           GHudColourAccum = 0.0f;
+
+static bool TickHudTeamColours(float DeltaTime)
+{
+	GHudColourAccum += DeltaTime;
+	if (GHudColourAccum < 0.25f)
+	{
+		return true; // throttle: the ticker fires every frame, act ~4x/sec
+	}
+	GHudColourAccum = 0.0f;
+
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game && Context.World())
+			{
+				NCPlusForceModels::SyncHudTeamColours(Context.World());
+				break;
+			}
+		}
+	}
+	return true; // persistent
+}
+
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
 
 // Debug: dump the current ForceModels config + every installed AUTCharacterContent path,
@@ -575,16 +609,48 @@ void FNetcodePlus::StartupModule()
 		ECVF_Default
 	);
 
-	// Bind F5 to ncpmenu by default (non-shipping builds only — DebugExecBindings).
-	if (GEngine)
+	// Bind F5 -> ncpmenu by writing a CustomBinds entry to Input.ini (add-if-missing).
+	//
+	// A config CustomBinds entry for a command the cloud profile doesn't manage ("ncpmenu") survives
+	// the profile's keymap rebuild (UTProfileSettings.cpp:785-906 only strips command-MATCHING binds)
+	// and IS processed by UUTPlayerInput::ExecuteCustomBind in ALL builds (UTPlayerInput.cpp:41) — the
+	// same channel utuu and the in-game keybind menu write to. (LocalBinds were tried first but don't
+	// actually fire for this key in the retail client — user-verified — so we use CustomBinds.)
+	// We also strip any stale ncpmenu LocalBind a previous build wrote. Skip the add if the user has
+	// already bound ncpmenu to some key, so a rebind wins. This replaces the old non-shipping
+	// DebugExecBindings F5; loaded per UUTPlayerInput construction so it survives map travel / joins.
 	{
-		UPlayerInput* DefInput = GetMutableDefault<UPlayerInput>();
-		if (DefInput)
+		static const TCHAR* InputSection = TEXT("/Script/UnrealTournament.UTPlayerInput");
+		bool bDirty = false;
+
+		// Migrate away the earlier (non-working) LocalBinds=ncpmenu entry, if present.
+		TArray<FString> LocalBinds;
+		GConfig->GetArray(InputSection, TEXT("LocalBinds"), LocalBinds, GInputIni);
+		if (LocalBinds.RemoveAll([](const FString& B) { return B.Contains(TEXT("ncpmenu")); }) > 0)
 		{
-			FKeyBind Bind;
-			Bind.Key = EKeys::F5;
-			Bind.Command = TEXT("ncpmenu");
-			DefInput->DebugExecBindings.Add(Bind);
+			GConfig->SetArray(InputSection, TEXT("LocalBinds"), LocalBinds, GInputIni);
+			bDirty = true;
+		}
+
+		// Add F5 -> ncpmenu to CustomBinds unless an ncpmenu bind already exists (preserve other binds).
+		TArray<FString> CustomBinds;
+		GConfig->GetArray(InputSection, TEXT("CustomBinds"), CustomBinds, GInputIni);
+		bool bHasNcpMenuBind = false;
+		for (const FString& Bind : CustomBinds)
+		{
+			if (Bind.Contains(TEXT("ncpmenu"))) { bHasNcpMenuBind = true; break; }
+		}
+		if (!bHasNcpMenuBind)
+		{
+			CustomBinds.Add(TEXT("(KeyName=\"F5\",EventType=IE_Pressed,Command=\"ncpmenu\",FriendlyName=\"ncpmenu\")"));
+			GConfig->SetArray(InputSection, TEXT("CustomBinds"), CustomBinds, GInputIni);
+			bDirty = true;
+		}
+
+		if (bDirty)
+		{
+			GConfig->Flush(false, GInputIni);
+			UE_LOG(LogLoad, Log, TEXT("netcodeplus: F5 -> ncpmenu CustomBind ensured in Input.ini"));
 		}
 	}
 
@@ -604,6 +670,15 @@ void FNetcodePlus::StartupModule()
 		}
 	}
 
+	// HUD team-colour recolour ticker (Force Models "HUD" flag). Client-only; cheap no-op until a
+	// game world exists and the feature + HUD flag are enabled. Self-throttled to ~4 Hz.
+	if (!IsRunningDedicatedServer())
+	{
+		GHudColourAccum = 0.0f;
+		GHudColourTickerHandle = FTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateStatic(&TickHudTeamColours), 0.0f);
+	}
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
@@ -614,6 +689,13 @@ void FNetcodePlus::ShutdownModule()
 	{
 		FTicker::GetCoreTicker().RemoveTicker(GNcpConnectTickerHandle);
 		GNcpConnectTickerHandle.Reset();
+	}
+
+	// Stop the HUD team-colour ticker.
+	if (GHudColourTickerHandle.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(GHudColourTickerHandle);
+		GHudColourTickerHandle.Reset();
 	}
 
 	// Close skin selector if open and free cached assets
