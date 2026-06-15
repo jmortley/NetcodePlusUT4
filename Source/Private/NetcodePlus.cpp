@@ -516,6 +516,7 @@ static bool TickHudTeamColours(float DeltaTime)
 			if (Context.WorldType == EWorldType::Game && Context.World())
 			{
 				NCPlusForceModels::SyncHudTeamColours(Context.World());
+				NCPlusForceModels::SyncFlagColours(Context.World());
 				break;
 			}
 		}

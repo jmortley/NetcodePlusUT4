@@ -62,6 +62,9 @@ private:
 	TSharedRef<SWidget> BuildTabContent(ENCPMenuTab Tab);
 	TSharedRef<SWidget> MakeTabButton(const FString& Label, ENCPMenuTab Tab);
 	FReply OnTabClicked(ENCPMenuTab Tab);
+	// "Launch" tabs: look like tabs but close this menu and run a tool's console command (weaponskins / nchud).
+	TSharedRef<SWidget> MakeLaunchButton(const FString& Label, const FString& Command);
+	FReply OnLaunchClicked(FString Command);
 
 	void LoadSettings();
 	void SaveSettings();

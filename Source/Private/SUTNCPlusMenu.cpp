@@ -87,8 +87,20 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(0, 0, 8, 0)
 				[
 					MakeTabButton(TEXT("Force Models"), ENCPMenuTab::ForceModels)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(0, 0, 8, 0)
+				[
+					MakeLaunchButton(TEXT("Weapon Skins"), TEXT("weaponskins"))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					MakeLaunchButton(TEXT("HUD Editor"), TEXT("nchud"))
 				]
 			]
 
@@ -140,6 +152,32 @@ TSharedRef<SWidget> SUTNCPlusMenu::MakeTabButton(const FString& Label, ENCPMenuT
 			.Text(FText::FromString(Label))
 			.Font(BoldFont(14))
 		];
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::MakeLaunchButton(const FString& Label, const FString& Command)
+{
+	// Looks like a tab, but instead of swapping content it closes this menu and runs the tool's
+	// console command (weaponskins / nchud), which open their own full-screen Slate panels.
+	return SNew(SButton)
+		.OnClicked(this, &SUTNCPlusMenu::OnLaunchClicked, Command)
+		.ContentPadding(FMargin(18, 6))
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(Label))
+			.Font(BoldFont(14))
+		];
+}
+
+FReply SUTNCPlusMenu::OnLaunchClicked(FString Command)
+{
+	// Capture the PC before ClosePanel (which removes this widget), then run the command.
+	APlayerController* PC = PlayerOwner.IsValid() ? PlayerOwner->PlayerController : nullptr;
+	ClosePanel();
+	if (PC)
+	{
+		PC->ConsoleCommand(Command, false);
+	}
+	return FReply::Handled();
 }
 
 FReply SUTNCPlusMenu::OnTabClicked(ENCPMenuTab Tab)
@@ -556,7 +594,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 		.Padding(0, 2, 0, 2)
 		[
 			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 2.f, 0.05f) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 5.f, 0.25f) ]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)

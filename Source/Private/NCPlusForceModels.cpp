@@ -10,6 +10,9 @@
 #include "UTGameState.h"              // SyncHudTeamColours: GS->Teams
 #include "UTTeamInfo.h"               // AUTTeamInfo::TeamColor
 #include "UTPlayerController.h"       // local viewer for friend/enemy
+#include "UTCTFGameState.h"           // SyncFlagColours: GetFlagBase
+#include "UTCTFFlagBase.h"            // AUTCTFFlagBase::MyFlag
+#include "UTFlag.h"                   // AUTFlag::GetMesh (cloth)
 #include "Materials/Material.h"       // GetAll{Vector,Scalar}ParameterNames
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/PlayerState.h" // GetPlayerName
@@ -221,6 +224,58 @@ void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
 		{
 			Team->TeamColor = *Orig;          // restore when HUD recolour turns off / style excludes this team
 			GHudOrigColours.Remove(Team);
+		}
+	}
+}
+
+void NCPlusForceModels::SyncFlagColours(UWorld* World)
+{
+	// Recolour the CTF flag cloth to each team's configured skin colour (relative to the local viewer).
+	// Same shotgun param set as the character recolour; flag mesh MIDs are created on demand and reused
+	// (re-created automatically when a flag respawns on capture). ClearParameterValues() restores the
+	// flag's real colour when the feature/flag is off. No-op outside CTF.
+	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
+	AUTCTFGameState* GS = World->GetGameState<AUTCTFGameState>();
+	if (!GS) { return; }   // not a CTF mode -> no flags
+
+	const FNCPlusForceModelsConfig& C = Get();
+	const bool bWant = C.bEnabled && C.bFlags;
+	AUTPlayerController* LocalPC = Cast<AUTPlayerController>(World->GetFirstPlayerController());
+	const TArray<FName>& Params = TeamColourParamNames();
+
+	static const FName NAME_FlagTeamSelect(TEXT("TeamSelect"));
+	static const FName NAME_FlagBlendMax(TEXT("Team Color Blend Max"));
+
+	for (uint8 Team = 0; Team < 2; ++Team)
+	{
+		AUTCTFFlagBase* Base = GS->GetFlagBase(Team);
+		if (!Base || !Base->MyFlag) { continue; }
+		USkeletalMeshComponent* Mesh = Base->MyFlag->GetMesh();
+		if (!Mesh) { continue; }
+
+		const bool bFriendly = (LocalPC && GS->OnSameTeam(Base->MyFlag, LocalPC));
+		const FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
+
+		for (int32 i = 0; i < Mesh->GetNumMaterials(); ++i)
+		{
+			UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(i));
+			if (!MID)
+			{
+				if (!bWant) { continue; }                                  // nothing to restore if we never made a MID
+				MID = Mesh->CreateAndSetMaterialInstanceDynamic(i);
+				if (!MID) { continue; }
+			}
+
+			if (bWant)
+			{
+				MID->SetScalarParameterValue(NAME_FlagTeamSelect, 255.f);  // NoTeam path, like the body recolour
+				MID->SetScalarParameterValue(NAME_FlagBlendMax, 1.f);
+				for (const FName& P : Params) { MID->SetVectorParameterValue(P, Colour); }
+			}
+			else
+			{
+				MID->ClearParameterValues();                               // restore the flag's real colour
+			}
 		}
 	}
 }

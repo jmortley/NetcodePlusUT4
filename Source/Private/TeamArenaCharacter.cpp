@@ -92,12 +92,16 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			Content = NCPlusForceModels::GetModelClass(Side);
 			if (Content && NCPlusForceModels::IsModelAllowed(Content))
 			{
-				Colour        = NCPlusForceModels::GetSkinColour(Side);
-				// Highlight: Brightness 1.0 = off; >1 drives an emissive glow. Slope x5, cap 5.0 to match
-				// the models' own native emissive (dumpmats showed up to ~5.0) and bring the lit in-world
-				// model up to the flat, unlit HUD swatch's brightness. Albedo is already maxed at V=1, so
-				// "brighter than normal" can only come from emissive. UI "Glow" 1.0-2.0 spans 0-5.0 (full at 2.0).
-				GlowIntensity = FMath::Clamp((Side.Brightness - 1.f) * 5.f, 0.f, 5.f);
+				// "Glow" (1 = normal .. 5 = 5x) brightens the model toward the flat, unlit HUD swatch.
+				// The lever that actually brightens the BODY is the ALBEDO (the team-colour params below —
+				// proven by the recolour working); driving Emissive Max did NOTHING because these body
+				// materials have no emissive source (only the eyes do, which is why only they glowed). So
+				// Glow OVERBRIGHTS the recolour colour. The emissive scalars are still fed (harmless; helps
+				// any model that does have a body emissive channel).
+				const float Glow = FMath::Clamp(Side.Brightness, 1.f, 5.f);
+				Colour        = NCPlusForceModels::GetSkinColour(Side) * Glow;
+				Colour.A      = 1.f;                       // operator* scales alpha too; keep it opaque
+				GlowIntensity = (Glow - 1.f) * 1.25f;      // 1 -> 0, 5 -> 5 emissive (only shows where supported)
 				bWantForce    = true;
 			}
 		}

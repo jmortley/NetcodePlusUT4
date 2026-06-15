@@ -31,7 +31,7 @@ struct FNCPlusModelSettings
 	float             H = 0.f;                      // hue in degrees (0-360)
 	float             S = 1.f;
 	float             V = 1.f;                       // HSV value = base brightness within the normal 0-1 range
-	float             Brightness = 1.f;             // overbright multiplier (1 = off); drives a capped emissive glow (see ApplyForcedModel)
+	float             Brightness = 1.f;             // "Glow": brightness multiplier 1-5 (1 = normal); overbrights the recolour albedo (+ emissive) in ApplyForcedModel
 	bool              bComplimentary = false;
 	ENCPlusArmourMode ArmourMode = ENCPlusArmourMode::MatchSkin;
 };
@@ -94,6 +94,11 @@ namespace NCPlusForceModels
 	 *  Mirrors the BP's "Update team colour" timer — call ~4x/sec from a client ticker. No-op on a
 	 *  dedicated server. */
 	NETCODEPLUS_API void SyncHudTeamColours(class UWorld* World);
+
+	/** Recolour the CTF flag cloth to each team's configured skin colour (relative to the local viewer),
+	 *  gated by the "Flags" flag. Client-side, re-asserted from the same ticker (survives flag respawns);
+	 *  restores the flag's real colour when off. No-op outside CTF / on a dedicated server. */
+	NETCODEPLUS_API void SyncFlagColours(class UWorld* World);
 
 	/** Resolve which side's settings apply to a pawn under the active Style. */
 	NETCODEPLUS_API const FNCPlusModelSettings& GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly);
