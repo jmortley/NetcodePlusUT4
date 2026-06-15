@@ -299,6 +299,18 @@ FLinearColor NCPlusForceModels::GetSkinColour(const FNCPlusModelSettings& Side)
 	return FLinearColor(Side.H, Side.S, Side.V, 1.f).HSVToLinearRGB();
 }
 
+FLinearColor NCPlusForceModels::GetArmourColour(const FNCPlusModelSettings& Side)
+{
+	if (Side.ArmourMode == ENCPlusArmourMode::Complimentary)
+	{
+		// Complement = hue rotated 180 degrees, keep S/V. Matches the BP's GetComplimentaryColour.
+		float H = Side.H + 180.f;
+		while (H >= 360.f) { H -= 360.f; }
+		return FLinearColor(H, Side.S, Side.V, 1.f).HSVToLinearRGB();
+	}
+	return GetSkinColour(Side);   // MatchSkin
+}
+
 TSubclassOf<AUTCharacterContent> NCPlusForceModels::GetModelClass(const FNCPlusModelSettings& Side)
 {
 	if (Side.ContentPath.IsEmpty()) { return nullptr; }

@@ -175,6 +175,9 @@ public:
 	// team-change (both route through NotifyTeamChanged) and is a no-op on a dedicated server.
 	virtual void NotifyTeamChanged() override;
 
+	// Force Models: redirect the stock yellow armour overlay to our match/complimentary armour colour.
+	virtual void UpdateArmorOverlay() override;
+
 protected:
 	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
 	// Server-only; synced when ArmorType is belt, decremented on damage.

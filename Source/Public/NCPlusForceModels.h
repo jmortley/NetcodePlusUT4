@@ -106,6 +106,10 @@ namespace NCPlusForceModels
 	/** HSV(degrees) -> FLinearColor for a side (base albedo tint; V is the normal 0-1 brightness). */
 	NETCODEPLUS_API FLinearColor GetSkinColour(const FNCPlusModelSettings& Side);
 
+	/** Armour-overlay colour for a side: the skin colour (ArmourMode=MatchSkin) or its complement
+	 *  (hue + 180, ArmourMode=Complimentary). Used to override the stock yellow armour overlay. */
+	NETCODEPLUS_API FLinearColor GetArmourColour(const FNCPlusModelSettings& Side);
+
 	/** Resolve + GC-pin + cache a side's AUTCharacterContent class (nullptr if none/unloadable). */
 	NETCODEPLUS_API TSubclassOf<AUTCharacterContent> GetModelClass(const FNCPlusModelSettings& Side);
 

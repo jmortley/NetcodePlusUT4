@@ -245,6 +245,37 @@ void ATeamArenaCharacter::RefreshOtherForcedModels()
 	}
 }
 
+void ATeamArenaCharacter::UpdateArmorOverlay()
+{
+	Super::UpdateArmorOverlay();   // sets up the armour overlay (+ the stock hardcoded yellow "Color")
+
+	// Redirect that yellow to our match/complimentary armour colour, for pawns we reskin. Client-only
+	// (OverlayMesh's MID only exists off the dedicated server). This is the ArmorType OnRep, so it
+	// re-fires on every armour change and always runs AFTER the stock colour, winning cleanly.
+	if (GetNetMode() == NM_DedicatedServer || IsLocallyControlled() || !OverlayMesh) { return; }
+
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	if (!C.bEnabled || !C.bArmour) { return; }
+
+	const int32 MyTeam = (int32)GetTeamNum();
+	if (MyTeam == 255) { return; }                                  // FFA: deferred
+
+	UWorld* const World = GetWorld();
+	AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+	AUTPlayerController* LocalPC = World ? Cast<AUTPlayerController>(World->GetFirstPlayerController()) : nullptr;
+	const bool bIsFriendly = (GS && LocalPC && GS->OnSameTeam(this, LocalPC));
+	if (C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }   // Enemy-Only leaves teammates stock
+
+	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
+	if (!MID) { return; }
+
+	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly));
+	static const FName NAME_ArmorColor(TEXT("Color"));
+	static const FName NAME_ArmorTeamColor(TEXT("TeamColor"));
+	MID->SetVectorParameterValue(NAME_ArmorColor, ArmourColour);
+	MID->SetVectorParameterValue(NAME_ArmorTeamColor, ArmourColour);
+}
+
 int32 ATeamArenaCharacter::GetNetcodeVersion()
 {
 	// Reads the #define NETCODE_PLUGIN_VERSION from NetcodePlus.h
