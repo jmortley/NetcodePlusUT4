@@ -1,11 +1,16 @@
 // SUTNCPlusMenu.cpp — NetcodePlus client settings implementation
 #include "SUTNCPlusMenu.h"
 #include "NCPlusHUDLayout.h"
+#include "NCPlusForceModels.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
 
-// Mod.ini section
+// Mod.ini section (General tab)
 static const TCHAR* NCPSection = TEXT("NetcodePlus");
+
+// Shared fonts
+static FSlateFontInfo BoldFont(int32 Size)   { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), Size); }
+static FSlateFontInfo RegularFont(int32 Size) { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), Size); }
 
 void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 {
@@ -50,182 +55,47 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			// Title
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(0, 20, 0, 20)
+			.Padding(0, 20, 0, 10)
 			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("NETCODEPLUS SETTINGS")))
-				.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 28))
+				.Font(BoldFont(28))
 				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 			]
 
-			// ── Gore Settings ──
+			// Tab strip
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(0, 10, 0, 5)
-			.HAlign(HAlign_Center)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Gore Settings")))
-				.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 18))
-				.ColorAndOpacity(FLinearColor::White)
-			]
-
-			// Allow Gib
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(40, 4, 40, 4)
+			.Padding(0, 0, 0, 12)
 			.HAlign(HAlign_Center)
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
-				.VAlign(VAlign_Center)
+				.Padding(0, 0, 8, 0)
 				[
-					SNew(SCheckBox)
-					.IsChecked(bAllowGib ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
-					.OnCheckStateChanged(this, &SUTNCPlusMenu::OnAllowGibChanged)
+					MakeTabButton(TEXT("General"), ENCPMenuTab::General)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(8, 0, 0, 0)
 				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("Allow Gib")))
-					.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 14))
-					.ColorAndOpacity(FLinearColor::White)
+					MakeTabButton(TEXT("Force Models"), ENCPMenuTab::ForceModels)
 				]
 			]
 
-			// Show Ragdoll
+			// Active tab content
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(40, 4, 40, 4)
 			.HAlign(HAlign_Center)
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
+				SAssignNew(ContentArea, SBox)
 				[
-					SNew(SCheckBox)
-					.IsChecked(bShowRagdoll ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
-					.OnCheckStateChanged(this, &SUTNCPlusMenu::OnShowRagdollChanged)
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(8, 0, 0, 0)
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("Show Ragdoll")))
-					.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 14))
-					.ColorAndOpacity(FLinearColor::White)
+					BuildGeneralTab()
 				]
 			]
 
-			// Ragdoll Time
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(40, 4, 40, 4)
-			.HAlign(HAlign_Center)
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("Ragdoll Time")))
-					.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 14))
-					.ColorAndOpacity(FLinearColor::White)
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(12, 0, 0, 0)
-				[
-					SNew(SSpinBox<float>)
-					.MinValue(0.f)
-					.MaxValue(10.f)
-					.Value(RagdollTime)
-					.OnValueCommitted(this, &SUTNCPlusMenu::OnRagdollTimeChanged)
-					.MinDesiredWidth(80.f)
-				]
-			]
-
-			// ── Footstep Settings ──
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0, 15, 0, 5)
-			.HAlign(HAlign_Center)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Footstep Settings")))
-				.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 18))
-				.ColorAndOpacity(FLinearColor::White)
-			]
-
-			// Own Footstep Volume
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(40, 4, 40, 4)
-			.HAlign(HAlign_Center)
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("Own Footstep Volume")))
-					.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 14))
-					.ColorAndOpacity(FLinearColor::White)
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(12, 0, 0, 0)
-				[
-					SNew(SSpinBox<float>)
-					.MinValue(0.f)
-					.MaxValue(1.f)
-					.Delta(0.1f)
-					.Value(OwnFootstepVolume)
-					.OnValueCommitted(this, &SUTNCPlusMenu::OnFootstepVolumeChanged)
-					.MinDesiredWidth(80.f)
-				]
-			]
-
-			// ── Screenshot ──
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(40, 15, 40, 4)
-			.HAlign(HAlign_Center)
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				[
-					SNew(SCheckBox)
-					.IsChecked(bHighResScreenshotPostMatch ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
-					.OnCheckStateChanged(this, &SUTNCPlusMenu::OnScreenshotChanged)
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(8, 0, 0, 0)
-				[
-					SNew(STextBlock)
-					.Text(FText::FromString(TEXT("High Res Screenshot PostMatch")))
-					.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 14))
-					.ColorAndOpacity(FLinearColor::White)
-				]
-			]
-
-			// ── Buttons ──
+			// Buttons (always visible)
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.Padding(0, 25, 0, 20)
@@ -250,6 +120,255 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			]
 		]
 	];
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::MakeTabButton(const FString& Label, ENCPMenuTab Tab)
+{
+	return SNew(SButton)
+		.OnClicked(this, &SUTNCPlusMenu::OnTabClicked, Tab)
+		.ContentPadding(FMargin(18, 6))
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(Label))
+			.Font(BoldFont(14))
+		];
+}
+
+FReply SUTNCPlusMenu::OnTabClicked(ENCPMenuTab Tab)
+{
+	ActiveTab = Tab;
+	if (ContentArea.IsValid())
+	{
+		ContentArea->SetContent(Tab == ENCPMenuTab::ForceModels ? BuildForceModelsTab() : BuildGeneralTab());
+	}
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
+{
+	return SNew(SVerticalBox)
+
+		// ── Gore Settings ──
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 10, 0, 5)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Gore Settings")))
+			.Font(BoldFont(18))
+			.ColorAndOpacity(FLinearColor::White)
+		]
+
+		// Allow Gib
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bAllowGib ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnAllowGibChanged)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Allow Gib")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
+
+		// Show Ragdoll
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bShowRagdoll ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnShowRagdollChanged)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show Ragdoll")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
+
+		// Ragdoll Time
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Ragdoll Time")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(12, 0, 0, 0)
+			[
+				SNew(SSpinBox<float>)
+				.MinValue(0.f)
+				.MaxValue(10.f)
+				.Value(RagdollTime)
+				.OnValueCommitted(this, &SUTNCPlusMenu::OnRagdollTimeChanged)
+				.MinDesiredWidth(80.f)
+			]
+		]
+
+		// ── Footstep Settings ──
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 15, 0, 5)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Footstep Settings")))
+			.Font(BoldFont(18))
+			.ColorAndOpacity(FLinearColor::White)
+		]
+
+		// Own Footstep Volume
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Own Footstep Volume")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(12, 0, 0, 0)
+			[
+				SNew(SSpinBox<float>)
+				.MinValue(0.f)
+				.MaxValue(1.f)
+				.Delta(0.1f)
+				.Value(OwnFootstepVolume)
+				.OnValueCommitted(this, &SUTNCPlusMenu::OnFootstepVolumeChanged)
+				.MinDesiredWidth(80.f)
+			]
+		]
+
+		// ── Screenshot ──
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 15, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bHighResScreenshotPostMatch ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnScreenshotChanged)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("High Res Screenshot PostMatch")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+		];
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
+{
+	return SNew(SVerticalBox)
+
+		// Header
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 10, 0, 5)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Force Team Models")))
+			.Font(BoldFont(18))
+			.ColorAndOpacity(FLinearColor::White)
+		]
+
+		// Master enable
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 6, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bForceModelsEnabled ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnForceModelsEnabledChanged)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Enable Force Models")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
+
+		// Stage-2 placeholder
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 10, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Style + per-side model/colour/brightness pickers — next build.")))
+			.Font(RegularFont(11))
+			.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.f))
+		];
 }
 
 void SUTNCPlusMenu::LoadSettings()
@@ -281,6 +400,9 @@ void SUTNCPlusMenu::LoadSettings()
 		bHighResScreenshotPostMatch = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 	else
 		bHighResScreenshotPostMatch = true;
+
+	// Force Models — read from the live config (loads Mod.ini [ForceModels] on first access).
+	bForceModelsEnabled = NCPlusForceModels::Get().bEnabled;
 }
 
 void SUTNCPlusMenu::SaveSettings()
@@ -294,6 +416,10 @@ void SUTNCPlusMenu::SaveSettings()
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
 	GConfig->Flush(false, ConfigPath);
+
+	// Force Models — write through the live config so it persists to Mod.ini [ForceModels].
+	NCPlusForceModels::Mutable().bEnabled = bForceModelsEnabled;
+	NCPlusForceModels::Save();
 
 	UE_LOG(LogTemp, Log, TEXT("NCPlus settings saved to Mod.ini"));
 }
@@ -359,6 +485,11 @@ void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type Co
 void SUTNCPlusMenu::OnScreenshotChanged(ECheckBoxState NewState)
 {
 	bHighResScreenshotPostMatch = (NewState == ECheckBoxState::Checked);
+}
+
+void SUTNCPlusMenu::OnForceModelsEnabledChanged(ECheckBoxState NewState)
+{
+	bForceModelsEnabled = (NewState == ECheckBoxState::Checked);
 }
 
 FReply SUTNCPlusMenu::OnSaveClicked()
