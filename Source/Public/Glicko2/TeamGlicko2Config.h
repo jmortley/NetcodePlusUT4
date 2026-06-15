@@ -94,7 +94,11 @@ namespace TeamGlicko2 {
     // within-team multiplicative scaler (f = 1 + kBeta*sign*z) that left good
     // players stuck near the seed. Validated on 90k Abs-Elim + UTPugs ElimPlus
     // matches (Spearman 0.937 vs the PPR board; DayX #1, tron top-10, DELUX last).
-    static const double kCarryWeight = 0.9;   // share of score from cross-lobby impact vs team W/L
+    // 2026-06-15: 0.9 -> 0.85 (W/L 10% -> 15%): an underdog win pays a bit more and
+    // a thrown win (good player, big-negative lobby impact) still nets a LOSS. A flat
+    // win-floor was tried + rejected (it rescued throwers too). Keep the Django rebuild
+    // ELIM_CARRY_WEIGHT in sync. Compile-time — retune = server rebuild, no Mod.ini knob.
+    static const double kCarryWeight = 0.85;  // share of score from cross-lobby impact vs team W/L
     static const double kPerfSlope = 2.5;     // logistic steepness of the lobby-impact map
 
 
