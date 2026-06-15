@@ -30,7 +30,8 @@ struct FNCPlusModelSettings
 	FString           ContentPath;                 // AUTCharacterContent class path; empty = don't force this side
 	float             H = 0.f;                      // hue in degrees (0-360)
 	float             S = 1.f;
-	float             V = 1.f;
+	float             V = 1.f;                       // HSV value = base brightness within the normal 0-1 range
+	float             Brightness = 1.f;             // overbright multiplier (1 = off) for a capped highlight glow; see GetEmissiveColour
 	bool              bComplimentary = false;
 	ENCPlusArmourMode ArmourMode = ENCPlusArmourMode::MatchSkin;
 };
@@ -78,8 +79,16 @@ namespace NCPlusForceModels
 	/** Resolve which side's settings apply to a pawn under the active Style. */
 	NETCODEPLUS_API const FNCPlusModelSettings& GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly);
 
-	/** HSV(degrees) -> FLinearColor for a side. */
+	/** HSV(degrees) -> FLinearColor for a side (base albedo tint; V is the normal 0-1 brightness). */
 	NETCODEPLUS_API FLinearColor GetSkinColour(const FNCPlusModelSettings& Side);
+
+	/** The side's colour scaled by its Brightness (clamped to MaxBrightness / a hard ceiling).
+	 *  Fed to the emissive/overlay params only, so a >1 boost reads as a capped highlight glow
+	 *  rather than blown-out / hue-shifted albedo. */
+	NETCODEPLUS_API FLinearColor GetEmissiveColour(const FNCPlusModelSettings& Side);
+
+	/** True if a team-colour param is an emissive/overlay (glow) channel — gets GetEmissiveColour. */
+	NETCODEPLUS_API bool IsEmissiveParam(FName Param);
 
 	/** Resolve + GC-pin + cache a side's AUTCharacterContent class (nullptr if none/unloadable). */
 	NETCODEPLUS_API TSubclassOf<AUTCharacterContent> GetModelClass(const FNCPlusModelSettings& Side);
@@ -100,4 +109,9 @@ namespace NCPlusForceModels
 
 	/** True if a material's name matches the skip list (face/eyes/hair) — don't recolour it. */
 	NETCODEPLUS_API bool IsRecolorSkippedMaterial(const FString& MaterialName);
+
+	/** Diagnostic (backs the `forcemodels_dumpmats` console command): log every AUTCharacter's body
+	 *  materials + their vector/scalar parameter names, so we can see what a custom model actually
+	 *  exposes. Client-side, on-demand, Shipping-safe (Warning verbosity). */
+	NETCODEPLUS_API void DumpAllCharacterMaterials(class UWorld* World);
 }

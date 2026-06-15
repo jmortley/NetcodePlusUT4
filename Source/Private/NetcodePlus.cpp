@@ -510,6 +510,13 @@ static void HandleForceModelsList(const TArray<FString>& Args)
 	}
 }
 
+// On-demand: dump every visible character's body materials + parameter names. No respawn needed,
+// works in online/Shipping clients (Warning verbosity survives Shipping; not #if'd out).
+static void HandleForceModelsDumpMats(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	NCPlusForceModels::DumpAllCharacterMaterials(World);
+}
+
 void FNetcodePlus::StartupModule()
 {
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -558,6 +565,13 @@ void FNetcodePlus::StartupModule()
 		TEXT("forcemodels_list"),
 		TEXT("Log the current ForceModels config + every installed AUTCharacterContent class path"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleForceModelsList),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("forcemodels_dumpmats"),
+		TEXT("Dump every visible character's body materials + parameter names (recolour diagnostics; on-demand, Shipping-safe)"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleForceModelsDumpMats),
 		ECVF_Default
 	);
 

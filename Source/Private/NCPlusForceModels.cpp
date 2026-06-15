@@ -5,12 +5,23 @@
 #include "Misc/Paths.h"
 #include "Misc/ConfigCacheIni.h"      // GConfig
 #include "AssetRegistryModule.h"      // FAssetData
+#include "UTCharacter.h"              // AUTCharacter::GetBodyMIs (dumpmats)
+#include "Materials/Material.h"       // GetAll{Vector,Scalar}ParameterNames
+#include "Materials/MaterialInstanceDynamic.h"
+#include "GameFramework/PlayerState.h" // GetPlayerName
+#include "EngineUtils.h"              // TActorIterator
 
 namespace
 {
 	FNCPlusForceModelsConfig GFMConfig;          // not GConfig — that is the engine global
 	bool                     GFMLoaded = false;
 	TMap<FString, UClass*>   GFMClassCache;
+
+	// Hard ceiling on the highlight-glow brightness — the REAL cap. A client-side Mod.ini "cap"
+	// would be meaningless (the client owns its own config), so the only enforceable limits are
+	// this compiled-in ceiling (shipped in the signed plugin) and a future server-replicated cap
+	// owned by AMutForceModels (consulted like IsModelAllowed). Tune here during dev.
+	constexpr float kMaxSkinBrightness = 1.75f;
 
 	FString ModIniPath()
 	{
@@ -26,6 +37,7 @@ namespace
 		GConfig->GetFloat (*Sec, TEXT("H"),     Out.H,           Path);
 		GConfig->GetFloat (*Sec, TEXT("S"),     Out.S,           Path);
 		GConfig->GetFloat (*Sec, TEXT("V"),     Out.V,           Path);
+		GConfig->GetFloat (*Sec, TEXT("Brightness"), Out.Brightness, Path);
 		int32 Comp = 0; GConfig->GetInt(*Sec, TEXT("Complimentary"), Comp, Path); Out.bComplimentary = (Comp != 0);
 		int32 AM   = 0; GConfig->GetInt(*Sec, TEXT("ArmourMode"),    AM,   Path); Out.ArmourMode = (ENCPlusArmourMode)AM;
 	}
@@ -38,6 +50,7 @@ namespace
 		GConfig->SetFloat (*Sec, TEXT("H"),             S.H,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("S"),             S.S,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("V"),             S.V,                       Path);
+		GConfig->SetFloat (*Sec, TEXT("Brightness"),    S.Brightness,              Path);
 		GConfig->SetInt   (*Sec, TEXT("Complimentary"), S.bComplimentary ? 1 : 0,  Path);
 		GConfig->SetInt   (*Sec, TEXT("ArmourMode"),    (int32)S.ArmourMode,       Path);
 	}
@@ -154,8 +167,28 @@ const FNCPlusModelSettings& NCPlusForceModels::GetModelSettings(int32 TheirTeamI
 
 FLinearColor NCPlusForceModels::GetSkinColour(const FNCPlusModelSettings& Side)
 {
-	// Matches the BP's "HSV to RGB" node (Kismet): H in degrees, S/V 0-1.
+	// Base albedo tint. Matches the BP's "HSV to RGB" node (Kismet): H in degrees, S/V 0-1.
 	return FLinearColor(Side.H, Side.S, Side.V, 1.f).HSVToLinearRGB();
+}
+
+FLinearColor NCPlusForceModels::GetEmissiveColour(const FNCPlusModelSettings& Side)
+{
+	// Highlight glow = base colour scaled by Brightness, fed to emissive/overlay params only.
+	// Clamped to the compiled-in kMaxSkinBrightness ceiling (see note there) so it stays well
+	// short of UTComp fullbright skins, regardless of what a client puts in Mod.ini.
+	const float B  = FMath::Clamp(Side.Brightness, 0.f, kMaxSkinBrightness);
+	FLinearColor C = GetSkinColour(Side);
+	C.R *= B; C.G *= B; C.B *= B; C.A = 1.f;
+	return C;
+}
+
+bool NCPlusForceModels::IsEmissiveParam(FName Param)
+{
+	// Glow channels: only these get the (possibly >1) emissive boost; albedo params stay at the
+	// base colour so a boost never blows out or hue-shifts the skin.
+	const FString S = Param.ToString();
+	return S.Contains(TEXT("Emissive"), ESearchCase::IgnoreCase)
+		|| S.Contains(TEXT("Overlay"),  ESearchCase::IgnoreCase);
 }
 
 TSubclassOf<AUTCharacterContent> NCPlusForceModels::GetModelClass(const FNCPlusModelSettings& Side)
@@ -234,6 +267,59 @@ const TArray<FName>& NCPlusForceModels::TeamColourParamNames()
 		FName(TEXT("Blue tint on alpha")),     FName(TEXT("Red tint on alpha")),
 		FName(TEXT("Solo Overlay")),           FName(TEXT("Solo Distance Color")),
 		FName(TEXT("TeamColor")),              // stock UT base team vector param
+
+		// No-Team / neutral-path colour params. REQUIRED for EDMSkin_Base community models: they
+		// render on the NoTeam path (TeamSelect=255) even while on a team, so the Red/Blue params
+		// above are never read and the model would stay its default neutral. Observed: Robot
+		// 'NoTeamColor', Necris 'No Team Latex/Dark Plastic/Cloth/PseudoMetal'. Mirror the full zone
+		// set; names a material lacks just no-op.
+		FName(TEXT("NoTeamColor")),            FName(TEXT("No Team Color")),
+		FName(TEXT("No Team Camo")),           FName(TEXT("No Team Nylon")),
+		FName(TEXT("No Team Plastic")),        FName(TEXT("No Team SubPlastic")),
+		FName(TEXT("No Team Cloth")),          FName(TEXT("No Team Dark Plastic")),
+		FName(TEXT("No Team Latex")),          FName(TEXT("No Team PseudoMetal")),
+		FName(TEXT("No Team Armor")),
 	};
 	return Names;
+}
+
+void NCPlusForceModels::DumpAllCharacterMaterials(UWorld* World)
+{
+	if (!World) { UE_LOG(LogTemp, Warning, TEXT("[ForceModels] dumpmats: no world")); return; }
+	int32 Count = 0;
+	for (TActorIterator<AUTCharacter> It(World); It; ++It)
+	{
+		AUTCharacter* Char = *It;
+		if (!Char) { continue; }
+		const FString PawnName = Char->PlayerState ? Char->PlayerState->PlayerName : Char->GetName();
+		const TArray<UMaterialInstanceDynamic*>& MIDs = Char->GetBodyMIs();
+		UE_LOG(LogTemp, Warning, TEXT("[ForceModels] '%s' — %d body material(s), LIVE values:"), *PawnName, MIDs.Num());
+		static const FName NAME_TeamSelect(TEXT("TeamSelect"));
+		static const FName NAME_BlendMax(TEXT("Team Color Blend Max"));
+		static const FName NAME_EmisMax(TEXT("Emissive Max"));
+		static const FName NAME_NoTeam(TEXT("NoTeamColor"));
+		static const FName NAME_Red(TEXT("Red Team Color"));
+		static const FName NAME_Blue(TEXT("Blue Team Color"));
+		for (UMaterialInstanceDynamic* MID : MIDs)
+		{
+			if (!MID) { continue; }
+			const UMaterialInterface* Src = MID->Parent;
+			float TeamSel = -1.f, BlendMax = -1.f, EmisMax = -1.f;
+			MID->GetScalarParameterValue(NAME_TeamSelect, TeamSel);
+			const bool bBlend = MID->GetScalarParameterValue(NAME_BlendMax, BlendMax);
+			const bool bEmis  = MID->GetScalarParameterValue(NAME_EmisMax,  EmisMax);
+			FLinearColor NoTeam(ForceInit), RedC(ForceInit), BlueC(ForceInit);
+			const bool bNo  = MID->GetVectorParameterValue(NAME_NoTeam, NoTeam);
+			const bool bRed = MID->GetVectorParameterValue(NAME_Red,    RedC);
+			const bool bBlu = MID->GetVectorParameterValue(NAME_Blue,   BlueC);
+			UE_LOG(LogTemp, Warning, TEXT("   mat='%s'  TeamSelect=%.0f  BlendMax=%.2f[%d]  EmisMax=%.2f[%d]  NoTeam=%s[%d]  Red=%s[%d]  Blue=%s[%d]"),
+				Src ? *Src->GetName() : *MID->GetName(), TeamSel,
+				BlendMax, bBlend ? 1 : 0, EmisMax, bEmis ? 1 : 0,
+				*NoTeam.ToString(), bNo ? 1 : 0,
+				*RedC.ToString(),   bRed ? 1 : 0,
+				*BlueC.ToString(),  bBlu ? 1 : 0);
+		}
+		++Count;
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] dumpmats: %d character(s) total"), Count);
 }
