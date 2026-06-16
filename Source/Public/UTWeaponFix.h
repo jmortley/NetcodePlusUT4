@@ -299,6 +299,13 @@ public:
     /** Server-side only: total padded radius used for the hitscan validation
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
+
+    /** Server-side only (327 client-informed headshot): the client's OWN headshot determination for the
+     *  claimed target, computed from its trace against its rendered mesh — something the server can't
+     *  reconstruct from the capsule alone. Set in ServerStartFireFixed alongside the stock
+     *  ReceivedHitScanHitChar; consumed by the headshot gate, which still bounds it geometrically against
+     *  the rewound head (so a torso claim is rejected). Not replicated. */
+    bool ReceivedHeadClaim = false;
 protected:
 
     FTimerHandle DeferredActiveStateHandle;
@@ -346,7 +353,7 @@ protected:
      * @param bClientPredicted - Whether client has already predicted this shot
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset);
+    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, bool bClientHeadShot);
 
     /**
      * Server RPC to stop firing.

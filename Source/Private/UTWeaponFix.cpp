@@ -747,6 +747,7 @@ void AUTWeaponFix::FireShot()
 		}
 
 		AUTCharacter* ClientHitChar = nullptr;
+		bool bClientHeadShot = false;
 		if (bTrackHitScanReplication && InstantHitInfo.IsValidIndex(CurrentFireMode) &&
 			InstantHitInfo[CurrentFireMode].DamageType != NULL &&
 			InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.0f)
@@ -759,6 +760,14 @@ void AUTWeaponFix::FireShot()
 			FHitResult PreHit;
 			HitScanTrace(SpawnLocation, EndTrace, InstantHitInfo[CurrentFireMode].TraceHalfSize, PreHit, 0.0f);
 			ClientHitChar = Cast<AUTCharacter>(PreHit.Actor.Get());
+
+			// 327 client-informed headshot: the client traces its OWN rendered mesh here, so it can tell
+			// whether the shot hit the head — which the server can't reconstruct from the capsule + a ping
+			// rewind. Report it; the server still bounds it geometrically against the rewound head (anti-cheat).
+			if (ClientHitChar != nullptr)
+			{
+				bClientHeadShot = ClientHitChar->IsHeadShot(PreHit.Location, FireDir, 1.0f, UTOwner, 0.0f);
+			}
 		}
 
 		// Client-side hitsound prediction for hitscan weapons
@@ -772,7 +781,7 @@ void AUTWeaponFix::FireShot()
 			}
 		}
 
-		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset);
+		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset, bClientHeadShot);
         QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
 
 		// Cache the client's exact aim direction at fire-press time.
@@ -1231,7 +1240,7 @@ bool AUTWeaponFix::IsFireEventSequenceValid(uint8 FireModeNum, int32 InEventInde
 
 
 
-void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset)
+void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, bool bClientHeadShot)
 {
     // 1. VALIDATION (Your existing transactional checks)
     UWorld* World = GetWorld();
@@ -1291,11 +1300,13 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         ReceivedHitScanHitChar = ClientHitChar;
         // InFireEventIndex matches FireEventIndex, so (ReceivedHitScanIndex == FireEventIndex) check passes
         ReceivedHitScanIndex = (uint8)InFireEventIndex;
+        ReceivedHeadClaim = bClientHeadShot;   // 327: client's own head determination; bounded by the headshot gate
     }
     else
     {
         ReceivedHitScanHitChar = nullptr;
         ReceivedHitScanIndex = 0;
+        ReceivedHeadClaim = false;
     }
 
     // 2. UPDATE STATE
@@ -1449,7 +1460,7 @@ void AUTWeaponFix::Tick(float DeltaTime)
 }
 
 
-bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset)
+bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, bool bClientHeadShot)
 {
     return FireModeNum < GetNumFireModes() &&
         InFireEventIndex > 0 &&
@@ -3506,7 +3517,9 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum, 
 
     // Execute the actual fire logic
     // This calculates the delay and fast-forwards the projectile to catch up
-    ServerStartFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, true, ClientViewRot, ClientHitChar, ZOffset);
+    // Resent (dropped-packet) shots don't carry the client head claim (it isn't threaded through the
+    // unreliable resend path) — pass false; these fall back to the server-side head check. Rare + graceful.
+    ServerStartFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, true, ClientViewRot, ClientHitChar, ZOffset, false);
 
     bNetDelayedShot = false;
 }

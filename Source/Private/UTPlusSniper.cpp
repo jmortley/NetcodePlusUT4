@@ -296,6 +296,17 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 				}
 			}
 
+			// 327 client-informed headshot: if the client (which traced its OWN rendered mesh) reported a
+			// head hit on THIS exact target, widen the head sphere to a bounded tolerance covering the
+			// client-render-vs-server-capsule gap. Strict: the multiplier is capped, so the aim ray must
+			// still pass within ~kClientHeadClaimScale*HeadRadius of the rewound head — a torso claim is
+			// rejected, only an honest "I hit the head I saw" is honored. (Resent shots report false.)
+			if (C == ReceivedHitScanHitChar && ReceivedHeadClaim)
+			{
+				const float kClientHeadClaimScale = 2.5f;  // ~45u tolerance at HeadRadius 18; tune via ncp.DebugHeads
+				EffectiveHeadScale = FMath::Max(EffectiveHeadScale, kClientHeadClaimScale);
+			}
+
 			if (C->IsHeadShot(Hit.Location, FireDir, EffectiveHeadScale, UTOwner, PredictionTime))
 			{
 				bIsHeadShot = true;
