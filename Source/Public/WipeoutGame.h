@@ -576,6 +576,13 @@ public:
 	virtual void DefaultTimer() override;
 	void Logout(AController* Exiting) override;
 
+	/** Pin bot-PUG players to their bot-assigned team (?PugTeams). Login picks,
+	 *  manual switches, and the engine's warmup auto-balance all route through
+	 *  ChangeTeam, so this is the one choke point that pins them. Non-roster joiners
+	 *  (subs/late fills/unlinked) defer to Super's stock balancing. PUG-only
+	 *  (bIsPugMatch). Mirrors ANCPlusCTFGameMode::ChangeTeam. */
+	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
+
 	/** Server-side rating system for Wipeout (separate ladder from ElimPlus).
 	 *  Updated each EndRoundForTeam; flushed to Mods.db + pushed to ut4stats at
 	 *  HandleMatchHasEnded. Non-UObject, server-only. */
@@ -585,6 +592,16 @@ public:
 	 *  InitGame; set true after the first successful flush. */
 	UPROPERTY(Transient)
 	bool bRatingFlushedThisMatch = false;
+
+	/** True when launched as a bot PUG (?PugId present) — gates ?PugTeams pinning. */
+	bool bIsPugMatch = false;
+
+	/** Bot-assigned teams: lowercased EOS id (== bot players.ut4_id / MutBotEvents
+	 *  Ut4Id) -> team (0 red, 1 blue). Parsed from ?PugTeams in InitGame; consulted
+	 *  in ChangeTeam to pin each rostered player to the side the bot balanced so the
+	 *  warmup auto-balance can't reshuffle the match. Empty for non-PUG games and
+	 *  unlinked players (they fall through to stock balancing). Server-only. */
+	TMap<FString, uint8> PugRosterTeam;
 
 	virtual void CallMatchStateChangeNotify() override;
 	virtual bool CheckRelevance_Implementation(AActor* Other) override;

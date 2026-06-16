@@ -215,6 +215,68 @@ void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FSt
 
 	// Match-scoped: reset the rating flush guard on each map load.
 	bRatingFlushedThisMatch = false;
+
+	// A bot-hosted PUG passes ?PugId=N — gate team pinning to real PUGs.
+	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
+
+	// Bot-assigned teams: ?PugTeams=<ut4id>:0,<ut4id>:1,...  The bot balanced the
+	// teams off the ut4stats ladder; pin each listed player to their side in
+	// ChangeTeam so the engine's warmup auto-balance can't reshuffle them. Keys are
+	// lowercased EOS ids (== MutBotEvents' Ut4Id == bot players.ut4_id). Players not
+	// listed (unlinked, subs) aren't pinned and use the stock balancer. PUG-only.
+	// Mirrors ANCPlusCTFGameMode.
+	PugRosterTeam.Reset();
+	const FString PugTeamsOpt = UGameplayStatics::ParseOption(Options, TEXT("PugTeams"));
+	if (bIsPugMatch && !PugTeamsOpt.IsEmpty())
+	{
+		TArray<FString> Entries;
+		PugTeamsOpt.ParseIntoArray(Entries, TEXT(","), true);
+		for (const FString& Entry : Entries)
+		{
+			FString IdPart, TeamPart;
+			if (Entry.Split(TEXT(":"), &IdPart, &TeamPart))
+			{
+				const FString Key = IdPart.ToLower();
+				const uint8 TeamNum = (uint8)FMath::Clamp(FCString::Atoi(*TeamPart), 0, 1);
+				if (!Key.IsEmpty())
+				{
+					PugRosterTeam.Add(Key, TeamNum);
+				}
+			}
+		}
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: PUG roster parsed — %d players pinned to teams"), PugRosterTeam.Num());
+	}
+}
+
+bool AUWipeoutGame::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)
+{
+	// Bot PUG: keep each rostered player on the side the bot balanced. Login picks,
+	// player-initiated switches, and the engine's warmup auto-balance all funnel
+	// through ChangeTeam, so this is the one place that pins them. Non-roster joiners
+	// (subs, late fills, unlinked) get the stock balancer via Super. Mirrors
+	// ANCPlusCTFGameMode::ChangeTeam.
+	if (bIsPugMatch && PugRosterTeam.Num() > 0 && Player && HasAuthority())
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+		if (PS && !PS->bOnlySpectator && PS->UniqueId.IsValid())
+		{
+			// Match on UniqueId.ToString() — the same id MutBotEvents posts as Ut4Id
+			// and the bot stores in players.ut4_id.
+			if (const uint8* Assigned = PugRosterTeam.Find(PS->UniqueId.ToString().ToLower()))
+			{
+				const uint8 Want = *Assigned;
+				// Already on the right side — accept without re-suiciding them
+				// (MovePlayerToTeam kills the pawn on an actual move).
+				if (PS->Team && PS->Team->TeamIndex == Want)
+				{
+					return true;
+				}
+				return MovePlayerToTeam(Player, PS, Want);
+			}
+		}
+	}
+
+	return Super::ChangeTeam(Player, NewTeam, bBroadcast);
 }
 
 void AUWipeoutGame::BeginPlay()
