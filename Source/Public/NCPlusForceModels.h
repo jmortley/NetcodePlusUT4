@@ -100,6 +100,26 @@ namespace NCPlusForceModels
 	 *  restores the flag's real colour when off. No-op outside CTF / on a dedicated server. */
 	NETCODEPLUS_API void SyncFlagColours(class UWorld* World);
 
+	/** Drive a single client-local AWindDirectionalSource so dc's FlagMesh cloth waves — a C++ port of
+	 *  dc's FlagWind BP (random-walk speed within [Min,Max], random-walk angular velocity capped at
+	 *  MaxAngularSpeed, integrate the actor's rotation). Spawns the wind when the cloth recolour is
+	 *  active (CTF + Flags), destroys it when off. Call EVERY frame (real DeltaTime) from the client
+	 *  ticker. Tuning via [ForceModels.FlagWind] Min/MaxSpeed, MaxAcceleration, Max{Angular}Speed,
+	 *  MaxAngularAcceleration. No-op on a dedicated server / outside CTF. */
+	NETCODEPLUS_API void TickFlagWind(class UWorld* World, float DeltaTime);
+
+	/** Suppress the stock through-walls flag-carrier outline (CTF only — matches dc's flag BP). Forces
+	 *  bForceNoOutline on each carrier and refreshes, dropping the body/weapon/flag CustomDepth stencil;
+	 *  restores former carriers. Always on (it's a fix, not a setting). Client-side, re-asserted from the
+	 *  same ticker as SyncFlagColours. No-op on a dedicated server or outside CTF (incl. Blitz). */
+	NETCODEPLUS_API void SuppressFlagCarrierOutlines(class UWorld* World);
+
+	/** The local viewer's effective team (0/1) for friend/enemy bucketing under the Team-vs-Enemy and
+	 *  Enemy-Only styles. Returns the local PC's real team when playing; for a teamless spectator it
+	 *  defaults to red (team 0) so Team = red and Enemy = blue. Use TheirTeam == GetViewerTeam(World)
+	 *  as the "friendly" test instead of OnSameTeam(), which returns false for a spectator. */
+	NETCODEPLUS_API int32 GetViewerTeam(class UWorld* World);
+
 	/** Resolve which side's settings apply to a pawn under the active Style. */
 	NETCODEPLUS_API const FNCPlusModelSettings& GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly);
 
@@ -117,10 +137,13 @@ namespace NCPlusForceModels
 	 *  AMutForceModels will own a replicated allow/deny policy this consults. */
 	NETCODEPLUS_API bool IsModelAllowed(TSubclassOf<AUTCharacterContent> Content);
 
-	/** A selectable installed character (for the picker). */
-	struct FContentEntry { FString DisplayName; FString ClassPath; };
-	/** Enumerate every installed AUTCharacterContent (on-disk only -> self-limiting to renderable). */
-	NETCODEPLUS_API void EnumerateContent(TArray<FContentEntry>& Out);
+	/** A selectable installed character (for the picker). bHidden = matches the [ForceModels]
+	 *  HiddenModels curation denylist (kept out of the picker; surfaced by forcemodels_list). */
+	struct FContentEntry { FString DisplayName; FString ClassPath; bool bHidden = false; };
+	/** Enumerate every installed AUTCharacterContent (on-disk only -> self-limiting to renderable).
+	 *  Curated by [ForceModels] HiddenModels= (comma-separated name substrings) — those are excluded
+	 *  unless bIncludeHidden (the audit path) is true, where they're returned with bHidden=true. */
+	NETCODEPLUS_API void EnumerateContent(TArray<FContentEntry>& Out, bool bIncludeHidden = false);
 
 	/** Union of known UT team-colour vector param names — shotgunned onto every model's MIDs.
 	 *  SetVectorParameterValue no-ops names a material lacks, so this colours any UT-framework

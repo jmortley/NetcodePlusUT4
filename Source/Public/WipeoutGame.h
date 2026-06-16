@@ -125,6 +125,11 @@ class NETCODEPLUS_API AUWipeoutGame : public AUTTeamGameMode
 public:
 	AUWipeoutGame(const FObjectInitializer& ObjectInitializer);
 
+	// Unlock entitlement-gated cosmetics: force the player's chosen hat as an OverrideHatClass (not
+	// entitlement-checked) so the community master's missing cosmetic entitlements can't strip it.
+	// Server-side, never kicks. See impl.
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
+
 	// =======================================================================
 	// WIPEOUT-SPECIFIC CONFIGURATION
 	// =======================================================================

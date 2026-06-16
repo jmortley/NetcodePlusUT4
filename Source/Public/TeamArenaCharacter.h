@@ -178,6 +178,19 @@ public:
 	// Force Models: redirect the stock yellow armour overlay to our match/complimentary armour colour.
 	virtual void UpdateArmorOverlay() override;
 
+	// Force Models cosmetic strip (the "Cosmetics" flag): when a reskinned pawn should have its hat/
+	// eyewear/leader-hat removed, suppress their (re)creation via these stock setter overrides — needed
+	// because OnRep_PlayerState calls SetCosmeticsFromPlayerState AFTER NotifyTeamChanged, so destroying
+	// in NotifyTeamChanged alone would be undone. StripCosmetics() clears any already-spawned.
+	virtual void SetHatClass(TSubclassOf<AUTHat> HatClass) override;
+	virtual void SetEyewearClass(TSubclassOf<AUTEyewear> EyewearClass) override;
+	virtual void LeaderHatStatusChanged_Implementation() override;
+
+	// Force Models "DarkenBodies": on a non-gib death, dissolve the corpse into its skeleton mesh.
+	// Client-side (PlayDying runs per-client), gated by bEnabled + bDarkenBodies. Spawns dc's cooked
+	// ModelDissolveEffect with the forced (or real) character's SkeletonMesh.
+	virtual void PlayDying() override;
+
 protected:
 	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
 	// Server-only; synced when ArmorType is belt, decremented on damage.
@@ -199,4 +212,16 @@ protected:
 	UClass* LastForcedContent = nullptr;
 	FLinearColor LastForcedColour = FLinearColor::Transparent;
 	bool bForcedModelApplied = false;
+
+	/** True while this reskinned pawn should have its cosmetics stripped — gates the setter overrides. */
+	bool bForceModelStripCosmetics = false;
+	/** Destroy any spawned Hat/Eyewear/LeaderHat on this pawn (Force Models cosmetic strip). */
+	void StripCosmetics();
+	/** Apply the desired strip state: strip + suppress when true, or restore (SetCosmeticsFromPlayerState)
+	 *  when transitioning back to false. Called from ApplyForcedModel. */
+	void UpdateCosmeticStrip(bool bShouldStrip);
+
+	/** DarkenBodies: spawn dc's ModelDissolveEffect with this pawn's (forced or real) skeleton mesh, if
+	 *  enabled and the death isn't a gib. Called from PlayDying (client-side). */
+	void SpawnSkeletonDissolve();
 };

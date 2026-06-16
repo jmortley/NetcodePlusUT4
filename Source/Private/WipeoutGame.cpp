@@ -264,6 +264,27 @@ void AUWipeoutGame::InitGameState()
 	}
 }
 
+bool AUWipeoutGame::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Same as NCPlusCTF: force the chosen hat via OverrideHatClass (not entitlement-checked) next tick so
+	// the community master's missing cosmetic entitlements can't strip it. Server-side; never kicks.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
+}
+
 void AUWipeoutGame::HandleMatchHasStarted()
 {
 	UE_LOG(LogGameMode, Warning, TEXT("=== Wipeout::HandleMatchHasStarted ==="));

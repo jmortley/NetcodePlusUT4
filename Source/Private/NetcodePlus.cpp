@@ -502,12 +502,11 @@ static float           GHudColourAccum = 0.0f;
 
 static bool TickHudTeamColours(float DeltaTime)
 {
+	// Flag-cloth wind needs a per-frame update (smooth gusting/direction); the colour/outline work is
+	// throttled to ~4 Hz (matching the BP's 0.25s "Update team colour" timer).
 	GHudColourAccum += DeltaTime;
-	if (GHudColourAccum < 0.25f)
-	{
-		return true; // throttle: the ticker fires every frame, act ~4x/sec
-	}
-	GHudColourAccum = 0.0f;
+	const bool bSlowTick = (GHudColourAccum >= 0.25f);
+	if (bSlowTick) { GHudColourAccum = 0.0f; }
 
 	if (GEngine)
 	{
@@ -515,8 +514,14 @@ static bool TickHudTeamColours(float DeltaTime)
 		{
 			if (Context.WorldType == EWorldType::Game && Context.World())
 			{
-				NCPlusForceModels::SyncHudTeamColours(Context.World());
-				NCPlusForceModels::SyncFlagColours(Context.World());
+				UWorld* const W = Context.World();
+				NCPlusForceModels::TickFlagWind(W, DeltaTime);   // every frame
+				if (bSlowTick)
+				{
+					NCPlusForceModels::SyncHudTeamColours(W);
+					NCPlusForceModels::SyncFlagColours(W);
+					NCPlusForceModels::SuppressFlagCarrierOutlines(W);
+				}
 				break;
 			}
 		}
@@ -536,12 +541,16 @@ static void HandleForceModelsList(const TArray<FString>& Args)
 	UE_LOG(LogTemp, Warning, TEXT("[ForceModels]   Enemy='%s' Team='%s' Red='%s' Blue='%s'"),
 		*C.Enemy.ContentPath, *C.Team.ContentPath, *C.Red.ContentPath, *C.Blue.ContentPath);
 
+	// Audit path: include the curated-out (HiddenModels) entries too, marked [HIDDEN], so you can see the
+	// full set and decide what to add to [ForceModels] HiddenModels=.
 	TArray<NCPlusForceModels::FContentEntry> Entries;
-	NCPlusForceModels::EnumerateContent(Entries);
-	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] %d installed character(s) (DisplayName -> Class path):"), Entries.Num());
+	NCPlusForceModels::EnumerateContent(Entries, /*bIncludeHidden=*/true);
+	int32 NumHidden = 0;
+	for (const NCPlusForceModels::FContentEntry& E : Entries) { if (E.bHidden) { ++NumHidden; } }
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] %d installed character(s) (%d hidden via HiddenModels / bHideInUI). Name -> Class path:"), Entries.Num(), NumHidden);
 	for (const NCPlusForceModels::FContentEntry& E : Entries)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("  %s  ->  %s"), *E.DisplayName, *E.ClassPath);
+		UE_LOG(LogTemp, Warning, TEXT("  %s%s  ->  %s"), E.bHidden ? TEXT("[HIDDEN] ") : TEXT(""), *E.DisplayName, *E.ClassPath);
 	}
 }
 

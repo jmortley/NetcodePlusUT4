@@ -92,13 +92,13 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 		Entry.PlayerId = UTPS->UniqueId.ToString();
 		Entry.FlagGrabs = UTPS->GetStatsValue(NAME_FlagGrabs);
 
-		// Auto-detect instagib vs normal hitscan. Instagib mode shows the
-		// instagib rifle's accuracy; normal CTF shows the Sniper / Lightning
-		// Gun (NAME_SniperHits/Shots — the LG is a Blueprint reskin of
-		// AUTPlusSniper, so both skins land here). Shock/rifles are excluded —
-		// their accuracy isn't representative of the fights that decide picks.
-		// (Was reading the Link Gun beam, whose NAME_LinkBeamShots denominator
-		// is only fed by the custom UTWeap_LinkGun_Plus; matches ElimPlus fix.)
+		// Auto-detect instagib vs normal hitscan. Instagib mode shows the instagib rifle's accuracy;
+		// normal CTF shows the Sniper OR the Lightning Gun. The LG is a Blueprint reskin of
+		// AUTPlusSniper but OVERRIDES its stat names to LightningRifleHits/Shots (NOT SniperHits/Shots),
+		// so read BOTH and sum (a player runs one or the other; the unused weapon's stats are 0).
+		// Shock/rifles are excluded — their accuracy isn't representative of the fights that decide picks.
+		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
+		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
 		if (bIsInstagibMatch)
 		{
 			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_InstagibHits);
@@ -106,8 +106,8 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 		}
 		else
 		{
-			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits);
-			Entry.HitscanShots = UTPS->GetStatsValue(NAME_SniperShots);
+			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NAME_LightningRifleHits);
+			Entry.HitscanShots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NAME_LightningRifleShots);
 		}
 
 		// Armor pickup counts — clamp to uint8 (255 max). CTF matches don't

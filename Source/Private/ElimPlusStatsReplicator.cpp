@@ -110,10 +110,13 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		// For now they stay at defaults — the LG accuracy is computed below.
 
 		// "LG_Acc" is hitscan accuracy. In instagib it's the instagib rifle;
-		// otherwise it's the Sniper / Lightning Gun — the LG is a Blueprint
-		// reskin of AUTPlusSniper, so both skins record to the SAME
-		// NAME_SniperHits/NAME_SniperShots stats and one read covers either.
-		// Auto-detect instagib via NAME_InstagibShots.
+		// otherwise it's the Sniper OR the Lightning Gun. The LG is a Blueprint reskin of
+		// AUTPlusSniper but OVERRIDES the stat names in its Class Defaults to
+		// LightningRifleHits/LightningRifleShots (NOT SniperHits/Shots) — so we must read BOTH
+		// weapons and sum them. A player runs one or the other, so the unused weapon's stats are
+		// 0 and the sum is the right per-shot ratio. Auto-detect instagib via NAME_InstagibShots.
+		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
+		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
 		float HitscanShots = 0.f;
 		float HitscanHits  = 0.f;
 		const float InstagibShots = UTPS->GetStatsValue(NAME_InstagibShots);
@@ -124,15 +127,9 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		}
 		else
 		{
-			// Non-instagib "LG" = the Lightning Gun, a Blueprint reskin of our
-			// AUTPlusSniper (players run the Sniper OR the LG skin — both are
-			// AUTPlusSniper). It records single-shot hitscan accuracy to
-			// NAME_SniperHits / NAME_SniperShots via ModifyStatsValue
-			// (UTPlusSniper.cpp), so this is a clean per-shot hit ratio.
-			// BUG FIX: was reading the Link Gun beam (NAME_LinkHits/LinkBeamShots),
-			// which stays ~0 in ElimPlus — that's why the column was stuck at 0%.
-			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits);
-			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots);
+			// Sniper + Lightning Gun (the LG writes LightningRifle* stats, the Sniper writes Sniper*).
+			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NAME_LightningRifleHits);
+			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NAME_LightningRifleShots);
 		}
 		if (HitscanShots > 0.f)
 		{

@@ -200,9 +200,20 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void BeginPlay() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void Logout(AController* Exiting) override;
+
+	/** Pin bot-PUG players to their bot-assigned team (see PugRosterTeam). The
+	 *  single choke point for login picks, manual switches, and the engine's
+	 *  CountdownToBegin auto-balance — all route through ChangeTeam. Non-roster
+	 *  joiners (subs/late fills) defer to Super's stock balancing. */
+	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
+
+	// Unlock entitlement-gated cosmetics: force the player's chosen hat as an OverrideHatClass (which the
+	// engine does NOT entitlement-check) so the community master's missing cosmetic entitlements can't
+	// strip it. Server-side, never kicks. See impl.
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
 
 	/** Own spawn selection (ElimPlus/Wipeout pattern) so the engine pipeline
 	 *  can't bypass RatePlayerStart. Curates an own-team pool from the map's
@@ -297,6 +308,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	/** True when this match was launched as a bot PUG (?PugId present). */
 	bool bIsPugMatch = false;
 
+	/** Bot-assigned teams: lowercased EOS id (== the bot's players.ut4_id, ==
+	 *  MutBotEvents' Ut4Id) -> team (0 red, 1 blue). Parsed from ?PugTeams in
+	 *  InitGame; consulted in ChangeTeam to pin each rostered player to the side
+	 *  the bot balanced, so the engine's warmup auto-balance can't reshuffle the
+	 *  match. Empty for non-PUG games and for players who haven't /linked (those
+	 *  fall through to the stock balancer). Server-only. */
+	TMap<FString, uint8> PugRosterTeam;
+
 	/** True while an auto-pause is currently active. */
 	bool bAutoPaused = false;
 
@@ -340,6 +359,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	virtual bool PlayerCanRestart_Implementation(APlayerController* Player);
 	virtual bool SupportsInstantReplay() const override;
+
+	/** CTF-aware end-game replay selection: feature the decisive flag capture
+	 *  (the cap that ended the match) as the first clip, then fill any remaining
+	 *  slots from the stock cool-factor ranking. Server-side; queues via the same
+	 *  ClientQueueCoolMoment RPC the engine already uses. */
+	virtual void PickMostCoolMoments(bool bClearCoolMoments = false, int32 CoolMomentsToShow = 1) override;
 
 	void BuildServerResponseRules(FString& OutRules);
 
@@ -455,6 +480,20 @@ protected:
 
 	/** True if an advantage cap ended the game or half. */
 	bool bAdvantageCapEndedPeriod;
+
+	/** World time of the most recent flag capture (any cap), for end-game replay
+	 *  selection. The cap that ends the match (scorelimit / golden / mercy) is the
+	 *  decisive moment and should be featured over a generic frag. */
+	float LastCapTime;
+
+	/** Player who scored the most recent flag capture. */
+	TWeakObjectPtr<AUTPlayerState> LastCapPlayer;
+
+	/** Max age (s) for the last cap to still count as "the decider" when EndGame
+	 *  runs. A scorelimit/golden/mercy end credits the cap microseconds before
+	 *  EndGame, so it is always within this window; a timelimit end (last cap long
+	 *  ago) falls through to the stock cool-factor picker. */
+	float FeatureCapMaxAgeSeconds = 15.f;
 
 	/** World time before which a FlagCapture ScoreObject is rejected. Prevents double caps on maps with no geometry between bases. */
 	float LastScoreObjectTime;

@@ -15,11 +15,17 @@
 #include "UTFlag.h"                   // AUTFlag::GetMesh (cloth)
 #include "Materials/Material.h"       // GetAll{Vector,Scalar}ParameterNames
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/SkeletalMesh.h"      // SyncFlagColours: swap to dc's FlagMesh
+#include "Engine/WindDirectionalSource.h"            // TickFlagWind: cloth wind (ports dc's FlagWind)
+#include "Components/WindDirectionalSourceComponent.h"
+#include "UnrealEngine.h"                             // GetCachedScalabilityCVars().DetailMode (flag cloth)
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
 
 namespace
 {
+	FString ModIniPath();   // defined below; forward-declared for the flag-mesh/wind helpers above it
+
 	FNCPlusForceModelsConfig GFMConfig;          // not GConfig — that is the engine global
 	bool                     GFMLoaded = false;
 	TMap<FString, UClass*>   GFMClassCache;
@@ -27,6 +33,83 @@ namespace
 	// Saved real TeamColor per team, captured before the first HUD-recolour overwrite so it can be
 	// restored when HUD recolour is turned off. Weak keys so teams from a previous map drop out.
 	TMap<TWeakObjectPtr<AUTTeamInfo>, FLinearColor> GHudOrigColours;
+
+	// Flag carriers we've forced bForceNoOutline on, so we can restore them when they drop the flag
+	// (or the suppression is turned off). Weak keys so GC'd pawns drop out.
+	TSet<TWeakObjectPtr<AUTCharacter>> GOutlineSuppressed;
+
+	// dc's tintable flag skeletal mesh (cooked on the client). Loaded once, GC-pinned. Path overridable
+	// via [ForceModels] FlagMeshPath in case dc re-homes the asset.
+	TWeakObjectPtr<USkeletalMesh> GDCFlagMesh;
+	bool                          GDCFlagMeshLogged = false;
+
+	// Stock skeletal mesh each flag had before we swapped in dc's FlagMesh, so we can restore on disable
+	// or flag respawn. Weak keys so destroyed (captured/respawned) flags drop out.
+	TMap<TWeakObjectPtr<AUTFlag>, TWeakObjectPtr<USkeletalMesh>> GFlagOrigMesh;
+
+	USkeletalMesh* LoadDCFlagMesh()
+	{
+		if (GDCFlagMesh.IsValid()) { return GDCFlagMesh.Get(); }
+		// dc's MutTeamSkins pak mounts Content/ -> /Game/, so the cooked path is /Game/TeamSkins/...
+		// (no "dc/" folder — the editor Copy-Reference path included one, but the pak drops it).
+		FString Path = TEXT("/Game/TeamSkins/Flags/FlagMesh.FlagMesh");
+		GConfig->GetString(TEXT("ForceModels"), TEXT("FlagMeshPath"), Path, ModIniPath());
+		USkeletalMesh* M = Path.IsEmpty() ? nullptr : LoadObject<USkeletalMesh>(nullptr, *Path);
+		if (M) { M->AddToRoot(); GDCFlagMesh = M; }
+		else if (!GDCFlagMeshLogged)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ForceModels] flag cloth: couldn't load FlagMesh '%s' — cloth recolour disabled"), *Path);
+			GDCFlagMeshLogged = true;
+		}
+		return M;
+	}
+
+	// dc's tintable cloth material. dc assigns FlagBase_M as a COMPONENT override on his TeamFlag actor —
+	// NOT on the FlagMesh asset's slot — so after the runtime swap the cloth slot is bare (renders the
+	// engine default grey checker). Load it explicitly and apply it to the bare slot ourselves.
+	TWeakObjectPtr<UMaterialInterface> GDCFlagClothMat;
+	bool                               GDCFlagClothMatLogged = false;
+
+	UMaterialInterface* LoadDCFlagClothMaterial()
+	{
+		if (GDCFlagClothMat.IsValid()) { return GDCFlagClothMat.Get(); }
+		FString Path = TEXT("/Game/TeamSkins/Flags/FlagBase_M.FlagBase_M");
+		GConfig->GetString(TEXT("ForceModels"), TEXT("FlagClothMaterialPath"), Path, ModIniPath());
+		UMaterialInterface* Mat = Path.IsEmpty() ? nullptr : LoadObject<UMaterialInterface>(nullptr, *Path);
+		if (Mat) { Mat->AddToRoot(); GDCFlagClothMat = Mat; }
+		else if (!GDCFlagClothMatLogged)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ForceModels] flag cloth: couldn't load FlagBase_M '%s'"), *Path);
+			GDCFlagClothMatLogged = true;
+		}
+		return Mat;
+	}
+
+	// ── Flag wind (ports dc's FlagWind BP) ──────────────────────────────────────────────────────────
+	// One client-local WindDirectionalSource whose speed + direction wander each frame so the cloth waves.
+	TWeakObjectPtr<AWindDirectionalSource> GFlagWind;
+	float   GWindSpeed   = 0.f;
+	FVector GWindAngVel  = FVector::ZeroVector;   // deg/s, euler; BP only randomises the X component
+	FVector GWindRot     = FVector::ZeroVector;   // accumulated euler (X=roll, Y=pitch, Z=yaw)
+	// Tuning (defaults are GUESSES — dc's BP variable defaults not on the screenshot; overridable below).
+	bool    GWindKnobsLoaded   = false;
+	float   GWindMinSpeed      = 0.3f;
+	float   GWindMaxSpeed      = 2.0f;
+	float   GWindMaxAccel      = 1.5f;            // units/s^2
+	float   GWindMaxAngSpeed   = 25.f;           // deg/s
+	float   GWindMaxAngAccel   = 50.f;           // deg/s^2
+
+	void LoadWindKnobs()
+	{
+		if (GWindKnobsLoaded) { return; }
+		GWindKnobsLoaded = true;
+		const FString P = ModIniPath();
+		GConfig->GetFloat(TEXT("ForceModels.FlagWind"), TEXT("MinSpeed"),              GWindMinSpeed,    P);
+		GConfig->GetFloat(TEXT("ForceModels.FlagWind"), TEXT("MaxSpeed"),              GWindMaxSpeed,    P);
+		GConfig->GetFloat(TEXT("ForceModels.FlagWind"), TEXT("MaxAcceleration"),       GWindMaxAccel,    P);
+		GConfig->GetFloat(TEXT("ForceModels.FlagWind"), TEXT("MaxAngularSpeed"),       GWindMaxAngSpeed, P);
+		GConfig->GetFloat(TEXT("ForceModels.FlagWind"), TEXT("MaxAngularAcceleration"), GWindMaxAngAccel, P);
+	}
 
 	FString ModIniPath()
 	{
@@ -206,12 +289,12 @@ void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
 
 	const FNCPlusForceModelsConfig& C = Get();
 	const bool bWant = C.bEnabled && C.bHUD;
-	AUTPlayerController* LocalPC = Cast<AUTPlayerController>(World->GetFirstPlayerController());
+	const int32 ViewerTeam = GetViewerTeam(World);   // spectator -> red is "ours"
 
 	for (AUTTeamInfo* Team : GS->Teams)
 	{
 		if (!Team) { continue; }
-		const bool bFriendly = (LocalPC && GS->OnSameTeam(Team, LocalPC));
+		const bool bFriendly = ((int32)Team->GetTeamNum() == ViewerTeam);
 		// Enemy-Only leaves teammates untouched; every other style recolours both teams.
 		const bool bApply = bWant && !(C.Style == ENCPlusSkinStyle::EnemyOnly && bFriendly);
 
@@ -230,54 +313,229 @@ void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
 
 void NCPlusForceModels::SyncFlagColours(UWorld* World)
 {
-	// Recolour the CTF flag cloth to each team's configured skin colour (relative to the local viewer).
-	// Same shotgun param set as the character recolour; flag mesh MIDs are created on demand and reused
-	// (re-created automatically when a flag respawns on capture). ClearParameterValues() restores the
-	// flag's real colour when the feature/flag is off. No-op outside CTF.
+	// Recolour the CTF flag CLOTH to each team's skin colour (relative to the local viewer). The stock
+	// flag cloth is a BAKED material (untintable), so reproduce dc's TeamFlag "Update Materials": swap the
+	// flag's skeletal mesh to dc's tintable FlagMesh (its asset carries FlagPole_M on elem 0, FlagBase_M
+	// on elem 1, plus the cloth sim) and set the "FlagColour" vector param on the cloth MID. Client-side,
+	// re-asserted from the ticker (so it survives flag respawns on capture); restores the stock mesh +
+	// materials when the feature/flag is off. No-op outside CTF / on a dedicated server.
+	// NOTE: the cloth WAVING is driven by dc's FlagWind actor, NOT yet ported (stock UTFlag has no wind
+	// code) — the cloth may hang limp until that lands.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
 	AUTCTFGameState* GS = World->GetGameState<AUTCTFGameState>();
 	if (!GS) { return; }   // not a CTF mode -> no flags
 
 	const FNCPlusForceModelsConfig& C = Get();
 	const bool bWant = C.bEnabled && C.bFlags;
-	AUTPlayerController* LocalPC = Cast<AUTPlayerController>(World->GetFirstPlayerController());
-	const TArray<FName>& Params = TeamColourParamNames();
-
-	static const FName NAME_FlagTeamSelect(TEXT("TeamSelect"));
-	static const FName NAME_FlagBlendMax(TEXT("Team Color Blend Max"));
+	const int32 ViewerTeam = GetViewerTeam(World);   // spectator -> red is "ours"
+	USkeletalMesh* DCMesh = bWant ? LoadDCFlagMesh() : nullptr;
+	static const FName NAME_FlagColour(TEXT("FlagColour"));
 
 	for (uint8 Team = 0; Team < 2; ++Team)
 	{
 		AUTCTFFlagBase* Base = GS->GetFlagBase(Team);
 		if (!Base || !Base->MyFlag) { continue; }
-		USkeletalMeshComponent* Mesh = Base->MyFlag->GetMesh();
+		AUTFlag* Flag = Base->MyFlag;
+		USkeletalMeshComponent* Mesh = Flag->GetMesh();
 		if (!Mesh) { continue; }
 
-		const bool bFriendly = (LocalPC && GS->OnSameTeam(Base->MyFlag, LocalPC));
-		const FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
-
-		for (int32 i = 0; i < Mesh->GetNumMaterials(); ++i)
+		if (bWant && DCMesh)
 		{
-			UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(i));
-			if (!MID)
+			// One-time swap to dc's FlagMesh; cache the stock mesh so we can restore it later.
+			if (Mesh->SkeletalMesh != DCMesh)
 			{
-				if (!bWant) { continue; }                                  // nothing to restore if we never made a MID
-				MID = Mesh->CreateAndSetMaterialInstanceDynamic(i);
-				if (!MID) { continue; }
+				if (!GFlagOrigMesh.Contains(Flag)) { GFlagOrigMesh.Add(Flag, Mesh->SkeletalMesh); }
+				// Decide cloth state BEFORE the swap. Mirror stock AUTFlag::PostInitializeComponents
+				// (UTFlag.cpp:52): cloth sim ON above low detail (so the wind waves it), OFF at
+				// DetailMode==0 (respect the low-detail perf opt-out — stiff flag, same as stock).
+				// Order matters: SetSkeletalMesh binds the new mesh's clothing in whatever state this flag
+				// is in, so it must be set first or the cloth never binds and collapses to a sliver.
+				Mesh->bDisableClothSimulation = (GetCachedScalabilityCVars().DetailMode == 0);
+				Mesh->SetSkeletalMesh(DCMesh, /*bReinitPose=*/true);
+				Mesh->OverrideMaterials.Empty();  // drop the stock element-0 MeshMID override so dc's mats show
+				Mesh->MarkRenderStateDirty();     // (EmptyOverrideMaterials() is editor-only)
+				// A runtime SetSkeletalMesh leaves the cloth actors bound to the OLD mesh — re-bind to dc's
+				// mesh or the enabled sim runs on invalid cloth and the flag collapses to a thin line.
+				if (!Mesh->bDisableClothSimulation) { Mesh->RecreateClothingActors(); }
+
+				// dc's FlagMesh has its own pivot + native scale (its TeamFlag used Z=-120, scale 1.0),
+				// while the stock flag home-positions at MeshOffset -48 and scales by FlagWorldScale 1.75 —
+				// so dc's mesh both floats AND looks oversized, and the held attachment (FlagHeldScale/
+				// HeldOffset) is off too. Set the stock flag's transform fields to dc's values so stock keeps
+				// the mesh seated + sized in BOTH home and held states. All tunable to dial without a rebuild.
+				const FString CfgP = ModIniPath();
+				float HomeZ = -120.f, HeldZ = -72.f, HomeScale = 1.f, HeldScale = 1.f;
+				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagMeshZOffset"), HomeZ,     CfgP);
+				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagHeldZOffset"), HeldZ,     CfgP);
+				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagWorldScale"),  HomeScale, CfgP);
+				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagHeldScale"),   HeldScale, CfgP);
+				Flag->MeshOffset     = FVector(0.f, 0.f, HomeZ);
+				Flag->HeldOffset     = FVector(0.f, 0.f, HeldZ);
+				Flag->FlagWorldScale = HomeScale;
+				Flag->FlagHeldScale  = HeldScale;
+				// Apply the current (home) state now; stock's ClientUpdateAttachment uses these fields on grab/drop.
+				Mesh->SetWorldScale3D(FVector(HomeScale));
+				Mesh->SetRelativeLocation(Flag->MeshOffset);
 			}
 
-			if (bWant)
+			// Tint the cloth: set "FlagColour" on each element's MID (no-op on the FlagPole_M element).
+			// The cloth slot is BARE on the swapped mesh (dc puts FlagBase_M on the component, not the
+			// asset) -> it renders the grey default. Fall back to the explicitly-loaded FlagBase_M for any
+			// slot with no material, so the cloth actually gets a tintable material instead of grey.
+			const bool bFriendly = ((int32)Team == ViewerTeam);
+			const FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
+			for (int32 i = 0; i < Mesh->GetNumMaterials(); ++i)
 			{
-				MID->SetScalarParameterValue(NAME_FlagTeamSelect, 255.f);  // NoTeam path, like the body recolour
-				MID->SetScalarParameterValue(NAME_FlagBlendMax, 1.f);
-				for (const FName& P : Params) { MID->SetVectorParameterValue(P, Colour); }
+				UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(i));
+				if (!MID)
+				{
+					UMaterialInterface* Base = Mesh->GetMaterial(i);     // asset material, or null on the bare cloth slot
+					if (!Base) { Base = LoadDCFlagClothMaterial(); }     // dc's FlagBase_M (component override, not on the asset)
+					MID = Base ? Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, Base) : nullptr;
+				}
+				if (MID)  { MID->SetVectorParameterValue(NAME_FlagColour, Colour); }
 			}
-			else
+		}
+		else
+		{
+			// Feature/flag off -> restore the stock flag mesh + materials (once).
+			if (TWeakObjectPtr<USkeletalMesh>* OrigPtr = GFlagOrigMesh.Find(Flag))
 			{
-				MID->ClearParameterValues();                               // restore the flag's real colour
+				USkeletalMesh* OrigMesh = OrigPtr->Get();
+				if (OrigMesh && Mesh->SkeletalMesh != OrigMesh)
+				{
+					Mesh->SetSkeletalMesh(OrigMesh, /*bReinitPose=*/true);
+					Mesh->OverrideMaterials.Empty();
+					Mesh->MarkRenderStateDirty();
+					// Restore the stock transform fields (pivot offsets + scale) from the flag class CDO.
+					const AUTFlag* CDO = Flag->GetClass()->GetDefaultObject<AUTFlag>();
+					Flag->MeshOffset     = CDO->MeshOffset;
+					Flag->HeldOffset     = CDO->HeldOffset;
+					Flag->FlagWorldScale = CDO->FlagWorldScale;
+					Flag->FlagHeldScale  = CDO->FlagHeldScale;
+					Mesh->SetWorldScale3D(FVector(CDO->FlagWorldScale));
+					Mesh->SetRelativeLocation(Flag->MeshOffset);
+					Flag->MeshMID = Mesh->CreateAndSetMaterialInstanceDynamic(0);  // restore stock element-0 MID
+				}
+				GFlagOrigMesh.Remove(Flag);
 			}
 		}
 	}
+
+	// Prune entries for flags that respawned / were destroyed (weak keys gone invalid).
+	for (auto It = GFlagOrigMesh.CreateIterator(); It; ++It)
+	{
+		if (!It->Key.IsValid()) { It.RemoveCurrent(); }
+	}
+}
+
+void NCPlusForceModels::TickFlagWind(UWorld* World, float DeltaTime)
+{
+	// Port of dc's FlagWind BP: spawn one WindDirectionalSource and wander its speed + direction so the
+	// swapped-in cloth waves (stock UTFlag has no wind; UE4 APEX cloth reads scene wind). Client-local,
+	// non-replicated. Spawned while the cloth recolour is active (CTF + Flags), destroyed otherwise.
+	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
+	const FNCPlusForceModelsConfig& C = Get();
+	const bool bWant = C.bEnabled && C.bFlags && (World->GetGameState<AUTCTFGameState>() != nullptr);
+
+	AWindDirectionalSource* Wind = GFlagWind.Get();
+	if (!bWant)
+	{
+		if (Wind) { Wind->Destroy(); GFlagWind = nullptr; }
+		return;
+	}
+
+	if (!Wind)
+	{
+		LoadWindKnobs();
+		FActorSpawnParameters SP;
+		SP.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		Wind = World->SpawnActor<AWindDirectionalSource>(AWindDirectionalSource::StaticClass(), FTransform::Identity, SP);
+		if (!Wind) { return; }
+		GFlagWind   = Wind;
+		GWindSpeed  = GWindMinSpeed;
+		GWindAngVel = FVector::ZeroVector;
+		GWindRot    = FVector::ZeroVector;
+	}
+
+	const float Dt = FMath::Max(DeltaTime, 0.f);
+
+	// Speed: bounded random walk in [MinSpeed, MaxSpeed].
+	GWindSpeed = FMath::Clamp(GWindSpeed + FMath::FRandRange(-GWindMaxAccel, GWindMaxAccel) * Dt,
+	                          GWindMinSpeed, GWindMaxSpeed);
+
+	// Angular velocity: random walk (BP randomises the X/roll axis only), magnitude capped.
+	GWindAngVel += FVector(FMath::FRandRange(-GWindMaxAngAccel, GWindMaxAngAccel), 0.f, 0.f) * Dt;
+	if (GWindAngVel.Size() > GWindMaxAngSpeed) { GWindAngVel = GWindAngVel.GetSafeNormal() * GWindMaxAngSpeed; }
+
+	// Integrate the wind direction (euler degrees) and push speed + rotation onto the source.
+	GWindRot += GWindAngVel * Dt;
+	if (UWindDirectionalSourceComponent* Comp = Wind->GetComponent())
+	{
+		// UWindDirectionalSourceComponent::SetSpeed isn't ENGINE_API-exported, so inline what it does
+		// (set the property + queue the render-thread update). MarkRenderDynamicDataDirty IS exported.
+		Comp->Speed = GWindSpeed;
+		Comp->MarkRenderDynamicDataDirty();
+	}
+	Wind->SetActorRotation(FRotator(GWindRot.Y, GWindRot.Z, GWindRot.X));   // Pitch=Y, Yaw=Z, Roll=X
+}
+
+void NCPlusForceModels::SuppressFlagCarrierOutlines(UWorld* World)
+{
+	// Base UT outlines the flag carrier through walls — to teammates (AUTCarriedObject::SetHolder sets
+	// HoldingPawn->bSpecialTeamPlayer) and to everyone while pinged (AUTFlag::Tick sets bSpecialPlayer).
+	// dc's TeamFlag BP hid this by forcing bForceNoOutline on the holder each tick; our C++ flags don't,
+	// so the stock outline reappeared. Reproduce dc's suppression client-side: bForceNoOutline short-
+	// circuits AUTCharacter::IsOutlined(), and SetOutlineLocal(false) refreshes UpdateOutline(), which
+	// unregisters the CustomDepth stencil on the body, weapon, attachment AND the carried flag. Purely
+	// local — bForceNoOutline is not replicated, so the server never reverts it.
+	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
+	// Always on (it's a fix, not a setting). CTF only — NOT Blitz: Blitz (Flag Run) uses AUTFlagRunGameState
+	// (derives from AUTGameState, not AUTCTFGameState), so GetGameState<AUTCTFGameState>() is null there;
+	// real CTF / iCTF / NCPlusCTF all use an AUTCTFGameState. When false, Current stays empty and any prior
+	// suppression is restored below, so a CTF->Blitz map change cleanly hands the stock outline back.
+	const bool bWant = World->GetGameState<AUTCTFGameState>() != nullptr;
+
+	TSet<TWeakObjectPtr<AUTCharacter>> Current;
+	if (bWant)
+	{
+		for (TActorIterator<AUTCharacter> It(World); It; ++It)
+		{
+			AUTCharacter* C = *It;
+			if (!C || C->IsPendingKill() || !Cast<AUTFlag>(C->GetCarriedObject())) { continue; }
+			Current.Add(C);
+			if (!C->bForceNoOutline)
+			{
+				C->bForceNoOutline = true;
+				C->SetOutlineLocal(false);   // refresh -> drops the stencil mesh
+			}
+		}
+	}
+
+	// Restore anyone we previously suppressed who is no longer a carrier (or once suppression is off).
+	for (const TWeakObjectPtr<AUTCharacter>& Prev : GOutlineSuppressed)
+	{
+		if (Current.Contains(Prev)) { continue; }
+		if (AUTCharacter* C = Prev.Get())
+		{
+			C->bForceNoOutline = false;
+			C->SetOutlineLocal(false);       // refresh -> stock outline state re-applies as needed
+		}
+	}
+	GOutlineSuppressed = MoveTemp(Current);
+}
+
+int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
+{
+	if (World)
+	{
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(World->GetFirstPlayerController()))
+		{
+			const uint8 T = PC->GetTeamNum();
+			if (T == 0 || T == 1) { return (int32)T; }
+		}
+	}
+	return 0;   // spectator / no team -> red is "our" team, blue is enemy
 }
 
 const FNCPlusModelSettings& NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly)
@@ -331,16 +589,71 @@ bool NCPlusForceModels::IsModelAllowed(TSubclassOf<AUTCharacterContent> Content)
 	return Content != nullptr;
 }
 
-void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out)
+// Per-class bHideInUI cache (the property isn't AssetRegistrySearchable, so we must load the CDO once).
+// Loading a char class pulls its mesh — heavy — so cache the bool and only ever load each once.
+static bool IsCharHiddenInUI(const FString& ClassPath)
 {
+	static TMap<FString, bool> Cache;
+	if (const bool* Found = Cache.Find(ClassPath)) { return *Found; }
+	bool bHide = false;
+	if (UClass* Cls = LoadObject<UClass>(nullptr, *ClassPath))
+	{
+		if (const AUTCharacterContent* CDO = Cls->GetDefaultObject<AUTCharacterContent>())
+		{
+			bHide = CDO->bHideInUI;   // Epic's "hide from menus — testing / mod-internal" flag
+		}
+	}
+	Cache.Add(ClassPath, bHide);
+	return bHide;
+}
+
+void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bIncludeHidden)
+{
+	// Auto-hide Epic's bHideInUI test/mod-internal chars ([ForceModels] HideTestModels, default on).
+	// Costs a one-time load of every char class on the first call (cached after) — disable if too slow.
+	bool bHideTest = true;
+	GConfig->GetBool(TEXT("ForceModels"), TEXT("HideTestModels"), bHideTest, ModIniPath());
+
+	// Curation denylist: [ForceModels] HiddenModels = comma-separated name substrings (case-insensitive).
+	// Lets you cull near-duplicate variants (e.g. NecrisDamian02,NecrisDamian03) from the picker. Hidden
+	// entries are dropped here but still returned (with bHidden=true) on the audit path (forcemodels_list).
+	TArray<FString> Hidden;
+	FString HiddenStr;
+	GConfig->GetString(TEXT("ForceModels"), TEXT("HiddenModels"), HiddenStr, ModIniPath());
+	if (!HiddenStr.IsEmpty())
+	{
+		TArray<FString> Parts;
+		HiddenStr.ParseIntoArray(Parts, TEXT(","), true);
+		for (const FString& Raw : Parts)
+		{
+			int32 S = 0, E = Raw.Len();
+			while (S < E && FChar::IsWhitespace(Raw[S]))     { ++S; }
+			while (E > S && FChar::IsWhitespace(Raw[E - 1])) { --E; }
+			const FString T = Raw.Mid(S, E - S);
+			if (!T.IsEmpty()) { Hidden.Add(T); }
+		}
+	}
+
 	TArray<FAssetData> Assets;
 	GetAllBlueprintAssetData(AUTCharacterContent::StaticClass(), Assets, /*bRequireEntitlements=*/false);
 	Out.Reserve(Assets.Num());
 	for (const FAssetData& A : Assets)
 	{
+		const FString Name      = A.AssetName.ToString();
+		const FString ClassPath = A.ObjectPath.ToString() + TEXT("_C");
+		bool bHidden = false;
+		for (const FString& Sub : Hidden)
+		{
+			if (Name.Contains(Sub, ESearchCase::IgnoreCase)) { bHidden = true; break; }
+		}
+		// Epic's bHideInUI test/mod-internal chars (loads the CDO; cached).
+		if (!bHidden && bHideTest && IsCharHiddenInUI(ClassPath)) { bHidden = true; }
+		if (bHidden && !bIncludeHidden) { continue; }
+
 		FContentEntry E;
-		E.ClassPath   = A.ObjectPath.ToString() + TEXT("_C");
-		E.DisplayName = A.AssetName.ToString();
+		E.ClassPath   = ClassPath;
+		E.DisplayName = Name;
+		E.bHidden     = bHidden;
 		Out.Add(E);
 	}
 }

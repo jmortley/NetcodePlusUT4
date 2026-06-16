@@ -9,6 +9,9 @@
 
 // Mod.ini section (General tab)
 static const TCHAR* NCPSection = TEXT("NetcodePlus");
+// Gib/ragdoll death settings live under [InstagibCTF] — that's the section the iCTF damage type
+// (NCPlusUTDmg_Instagib: ShouldGib reads bAllowGib, PlayDeathEffects reads RagdollTime) actually reads.
+static const TCHAR* IGCTFSection = TEXT("InstagibCTF");
 
 // Shared fonts
 static FSlateFontInfo BoldFont(int32 Size)   { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), Size); }
@@ -99,8 +102,14 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(0, 0, 8, 0)
 				[
 					MakeLaunchButton(TEXT("HUD Editor"), TEXT("nchud"))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					MakeLaunchButton(TEXT("Cosmetics"), TEXT("cosmetics"))
 				]
 			]
 
@@ -264,7 +273,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 			.Padding(24, 0, 24, 4)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("F5  or  ncpmenu  -  open this menu\nweaponskins  -  weapon skin selector\ncosmetics  -  hats, eyewear, characters, taunts\nnchud  -  HUD layout editor\nnchud_drag  -  drag HUD elements\nweaponhand [right|left|center|hidden]  -  weapon position\nforcemodels_list / forcemodels_dumpmats  -  team-model diagnostics")))
+				.Text(FText::FromString(TEXT("F5  or  ncpmenu  -  open this menu\nweaponskins  -  weapon skin selector\ncosmetics  -  hats, eyewear, characters, taunts\nnchud  -  HUD layout editor\nnchud_drag  -  drag HUD elements\nforcemodels_list / forcemodels_dumpmats  -  team-model diagnostics")))
 				.Font(RegularFont(12))
 				.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.f))
 				.AutoWrapText(true)
@@ -751,17 +760,19 @@ void SUTNCPlusMenu::LoadSettings()
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
 	FString Val;
-	if (GConfig->GetString(NCPSection, TEXT("AllowGib"), Val, ConfigPath))
+	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
+	// RagdollTime). ShowRagdoll kept here too for now — see note in Save (consumer unconfirmed).
+	if (GConfig->GetString(IGCTFSection, TEXT("bAllowGib"), Val, ConfigPath))
 		bAllowGib = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 	else
 		bAllowGib = false;
 
-	if (GConfig->GetString(NCPSection, TEXT("ShowRagdoll"), Val, ConfigPath))
+	if (GConfig->GetString(IGCTFSection, TEXT("bShowRagdoll"), Val, ConfigPath))
 		bShowRagdoll = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 	else
 		bShowRagdoll = true;
 
-	if (GConfig->GetString(NCPSection, TEXT("RagdollTime"), Val, ConfigPath))
+	if (GConfig->GetString(IGCTFSection, TEXT("RagdollTime"), Val, ConfigPath))
 		RagdollTime = FCString::Atof(*Val);
 	else
 		RagdollTime = 3.0f;
@@ -802,9 +813,11 @@ void SUTNCPlusMenu::SaveSettings()
 {
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	GConfig->SetString(NCPSection, TEXT("AllowGib"), bAllowGib ? TEXT("True") : TEXT("False"), ConfigPath);
-	GConfig->SetString(NCPSection, TEXT("ShowRagdoll"), bShowRagdoll ? TEXT("True") : TEXT("False"), ConfigPath);
-	GConfig->SetString(NCPSection, TEXT("RagdollTime"), *FString::SanitizeFloat(RagdollTime), ConfigPath);
+	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
+	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.
+	GConfig->SetString(IGCTFSection, TEXT("bAllowGib"), bAllowGib ? TEXT("True") : TEXT("False"), ConfigPath);
+	GConfig->SetString(IGCTFSection, TEXT("bShowRagdoll"), bShowRagdoll ? TEXT("True") : TEXT("False"), ConfigPath);
+	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"), *FString::SanitizeFloat(RagdollTime), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 

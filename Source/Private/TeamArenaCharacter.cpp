@@ -14,6 +14,7 @@
 #include "UTDamageType.h"
 #include "Net/UnrealNetwork.h"
 #include "UTPlayerController.h"
+#include "UTPlayerState.h"            // GetSelectedCharacter (DarkenBodies skeleton fallback)
 #include "UTCharacterContent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "NCPlusForceModels.h"
@@ -80,13 +81,11 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		const int32 MyTeam = (int32)GetTeamNum();
 		if (MyTeam != 255)                                // FFA / no team: deferred (see ForceModels plan)
 		{
-			// Resolve friend/enemy against THE LOCAL PLAYER. Do NOT use this->GetLocalViewer():
-			// it only returns non-null for your own / spectated pawn, so on any other pawn it is
-			// null and every player reads as an enemy. GetFirstPlayerController() is the local PC
-			// on a client (one PC) — same call the view-distance cull above in this file uses.
-			AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
-			AUTPlayerController* LocalPC = World ? Cast<AUTPlayerController>(World->GetFirstPlayerController()) : nullptr;
-			const bool bIsFriendly = (GS && LocalPC && GS->OnSameTeam(this, LocalPC));
+			// Resolve friend/enemy against THE LOCAL VIEWER's team. NCPlusForceModels::GetViewerTeam
+			// uses GetFirstPlayerController() (the one local PC on a client) and, for a teamless
+			// spectator, defaults to red = "ours" so Team/Enemy still buckets (OnSameTeam returns
+			// false for a spectator, which made everyone read as an enemy).
+			const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));
 
 			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
 			Content = NCPlusForceModels::GetModelClass(Side);
@@ -123,6 +122,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			}
 			bForcedModelApplied = false;
 			LastForcedContent   = nullptr;
+			UpdateCosmeticStrip(false);   // pawn no longer reskinned -> restore any stripped cosmetics
 		}
 		return;
 	}
@@ -215,7 +215,164 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	LastForcedContent   = Content.Get();
 	LastForcedColour    = Colour;
 	bForcedModelApplied = true;
+
+	// Cosmetic strip (the "Cosmetics" flag, on = remove): drop + suppress hats/eyewear on this reskinned
+	// pawn. Set BEFORE OnRep_PlayerState's later SetCosmeticsFromPlayerState so the setter overrides catch
+	// the re-add. (NotifyTeamChanged runs first at OnRep, this gate second.)
+	UpdateCosmeticStrip(NCPlusForceModels::Get().bCosmetics);
+
 	bApplyingForcedModel = false;
+}
+
+// dc's "Remove Cosmetic": IsValid -> DetachFromActor (Keep Relative) -> DestroyActor. The explicit
+// detach matches the BP (bare Destroy() would also detach, but we mirror dc's proven recipe).
+static void RemoveCosmetic(AActor* Cosmetic)
+{
+	if (Cosmetic)
+	{
+		Cosmetic->DetachFromActor(FDetachmentTransformRules::KeepRelativeTransform);
+		Cosmetic->Destroy();
+	}
+}
+
+void ATeamArenaCharacter::StripCosmetics()
+{
+	RemoveCosmetic(Hat);       Hat       = nullptr;
+	RemoveCosmetic(Eyewear);   Eyewear   = nullptr;
+	RemoveCosmetic(LeaderHat); LeaderHat = nullptr;
+}
+
+void ATeamArenaCharacter::UpdateCosmeticStrip(bool bShouldStrip)
+{
+	const bool bWasStripping = bForceModelStripCosmetics;
+	bForceModelStripCosmetics = bShouldStrip;
+	if (bShouldStrip)        { StripCosmetics(); }            // clear any already-spawned (overrides stop re-adds)
+	else if (bWasStripping)  { SetCosmeticsFromPlayerState(); } // restore what we suppressed
+}
+
+void ATeamArenaCharacter::SetHatClass(TSubclassOf<AUTHat> HatClass)
+{
+	if (bForceModelStripCosmetics)
+	{
+		RemoveCosmetic(Hat); Hat = nullptr;       // don't spawn the hat on a stripped pawn
+		return;
+	}
+	Super::SetHatClass(HatClass);
+}
+
+void ATeamArenaCharacter::SetEyewearClass(TSubclassOf<AUTEyewear> EyewearClass)
+{
+	if (bForceModelStripCosmetics)
+	{
+		RemoveCosmetic(Eyewear); Eyewear = nullptr;
+		return;
+	}
+	Super::SetEyewearClass(EyewearClass);
+}
+
+void ATeamArenaCharacter::LeaderHatStatusChanged_Implementation()
+{
+	if (bForceModelStripCosmetics)
+	{
+		RemoveCosmetic(LeaderHat); LeaderHat = nullptr;
+		return;
+	}
+	Super::LeaderHatStatusChanged_Implementation();
+}
+
+// dc's ModelDissolveEffect BP (cooked in the MutTeamSkins pak). Loaded once, GC-pinned.
+static UClass* LoadDissolveEffectClass()
+{
+	static TWeakObjectPtr<UClass> Cached;
+	static bool bLogged = false;
+	if (Cached.IsValid()) { return Cached.Get(); }
+	UClass* C = StaticLoadClass(AActor::StaticClass(), nullptr,
+		TEXT("/Game/TeamSkins/Dissolve/ModelDissolveEffect.ModelDissolveEffect_C"));
+	if (C) { C->AddToRoot(); Cached = C; }
+	else if (!bLogged)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ForceModels] DarkenBodies: couldn't load ModelDissolveEffect — skeleton dissolve disabled"));
+		bLogged = true;
+	}
+	return C;
+}
+
+void ATeamArenaCharacter::PlayDying()
+{
+	Super::PlayDying();
+	SpawnSkeletonDissolve();
+}
+
+void ATeamArenaCharacter::SpawnSkeletonDissolve()
+{
+	// DarkenBodies: dissolve the corpse into its skeleton. Client-side, per-pawn (PlayDying runs on every
+	// client for every dying pawn). Mirrors dc's ForceSkeleton/ReplicatedMakeSkeleton, minus the server
+	// multicast (each client decides locally from its own config).
+	if (GetNetMode() == NM_DedicatedServer) { return; }
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	if (!C.bEnabled || !C.bDarkenBodies) { return; }
+
+	// Skip gibs (dc: "try not to spawn the dissolve if the char is going to be gibbed").
+	if (LastTakeHitInfo.DamageType)
+	{
+		UUTDamageType* Dmg = Cast<UUTDamageType>(LastTakeHitInfo.DamageType.GetDefaultObject());
+		if (Dmg && Dmg->ShouldGib(this)) { return; }
+	}
+
+	// Skeleton mesh: the forced model's if we reskinned this pawn, else its real character's.
+	USkeletalMesh* SkelMesh = nullptr;
+	if (bForcedModelApplied && LastForcedContent)
+	{
+		if (const AUTCharacterContent* CC = Cast<AUTCharacterContent>(LastForcedContent->GetDefaultObject()))
+		{
+			SkelMesh = CC->SkeletonMesh;
+		}
+	}
+	if (!SkelMesh)
+	{
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState))
+		{
+			if (TSubclassOf<AUTCharacterContent> CCClass = PS->GetSelectedCharacter())
+			{
+				SkelMesh = CCClass.GetDefaultObject()->SkeletonMesh;
+			}
+		}
+	}
+	if (!SkelMesh) { return; }
+
+	UClass* FXClass = LoadDissolveEffectClass();
+	UWorld* const World = GetWorld();
+	if (!FXClass || !World) { return; }
+
+	FActorSpawnParameters SP;
+	SP.Owner = this;
+	SP.Instigator = this;
+	SP.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AActor* FX = World->SpawnActor<AActor>(FXClass, GetActorTransform(), SP);
+	if (!FX) { return; }
+
+	// Skeleton REPLACES the ragdoll (dc's mutator behaviour): hide the pawn's corpse mesh so only the
+	// dissolving skeleton shows. The ragdoll physics still runs invisibly; the dissolve actor is separate
+	// (not a child of this pawn) so it's unaffected. Runs after Super::PlayDying scheduled StartRagdoll —
+	// StartRagdoll only changes physics, not visibility, so this hide holds.
+	if (USkeletalMeshComponent* BodyMesh = GetMesh())
+	{
+		BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
+	}
+
+	// Hand the skeleton mesh to dc's "Dissolve(Skel Mesh)" BP function via reflection. Guard the signature
+	// (exactly one object-pointer param) so a mismatch can't corrupt ProcessEvent memory — if it differs,
+	// the effect still spawns but won't dissolve, and we correct the call from the real signature.
+	static const FName NAME_Dissolve(TEXT("Dissolve"));
+	if (UFunction* Fn = FX->FindFunction(NAME_Dissolve))
+	{
+		if (Fn->NumParms == 1 && Fn->ParmsSize == sizeof(USkeletalMesh*))
+		{
+			struct { USkeletalMesh* SkelMesh; } Params;
+			Params.SkelMesh = SkelMesh;
+			FX->ProcessEvent(Fn, &Params);
+		}
+	}
 }
 
 // When the local player's team changes, every other pawn's friend/enemy bucket can flip without
@@ -261,18 +418,24 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	if (MyTeam == 255) { return; }                                  // FFA: deferred
 
 	UWorld* const World = GetWorld();
-	AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
-	AUTPlayerController* LocalPC = World ? Cast<AUTPlayerController>(World->GetFirstPlayerController()) : nullptr;
-	const bool bIsFriendly = (GS && LocalPC && GS->OnSameTeam(this, LocalPC));
+	const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));   // spectator -> red is "ours"
 	if (C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }   // Enemy-Only leaves teammates stock
 
 	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
 	if (!MID) { return; }
 
 	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly));
+
+	// Stock "Color" is a BRIGHT ~(1,1,0) yellow that drives the armour's emissive glow; our configured
+	// colour is usually dimmer (V<1), so reusing it flat washed the glow out. Push our hue to full
+	// brightness (normalise so the brightest channel = 1, like the stock yellow) for the emissive "Color",
+	// and keep the real tint in "TeamColor". Preserves the armour's emissive intensity in our hue.
+	FLinearColor Glow = ArmourColour;
+	const float MaxCh = FMath::Max3(Glow.R, Glow.G, Glow.B);
+	if (MaxCh > KINDA_SMALL_NUMBER) { Glow /= MaxCh; }
 	static const FName NAME_ArmorColor(TEXT("Color"));
 	static const FName NAME_ArmorTeamColor(TEXT("TeamColor"));
-	MID->SetVectorParameterValue(NAME_ArmorColor, ArmourColour);
+	MID->SetVectorParameterValue(NAME_ArmorColor, Glow);
 	MID->SetVectorParameterValue(NAME_ArmorTeamColor, ArmourColour);
 }
 

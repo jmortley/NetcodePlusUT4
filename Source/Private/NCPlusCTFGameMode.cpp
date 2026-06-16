@@ -1,6 +1,7 @@
 // NCPlusCTFGameMode.cpp - NetcodePlus CTF with improved advantage time and instant replay
 #include "NCPlusCTFGameMode.h"
 #include "UnrealTournament.h"
+#include "UTPlayerState.h"            // ValidateHat: SetOverrideHatClass / OverrideHatClass
 #include "UTTeamGameMode.h"
 #include "UTHUD_CTF.h"
 #include "UTCTFGameMessage.h"
@@ -85,6 +86,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	LastAdvantageCapTime = 0.f;
 	bAdvantageCapEndedPeriod = false;
 	LastScoreObjectTime = 0.f;
+	LastCapTime = 0.f;
 }
 
 void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -99,6 +101,34 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 
 	// A bot-hosted PUG passes ?PugId=N — gate auto-pause-on-drop to real PUGs.
 	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
+
+	// Bot-assigned teams: ?PugTeams=<ut4id>:0,<ut4id>:1,...  The bot already
+	// balanced the teams; pin each listed player to their side in ChangeTeam so
+	// the engine's warmup auto-balance can't reshuffle them (and nobody has to
+	// hand-swap). Keys are lowercased EOS ids — same string MutBotEvents posts as
+	// Ut4Id and the bot stores in players.ut4_id. Players not listed (unlinked, or
+	// subs) aren't pinned and use the stock balancer.
+	PugRosterTeam.Reset();
+	const FString TeamsOpt = UGameplayStatics::ParseOption(Options, TEXT("PugTeams"));
+	if (!TeamsOpt.IsEmpty())
+	{
+		TArray<FString> Entries;
+		TeamsOpt.ParseIntoArray(Entries, TEXT(","), true);
+		for (const FString& Entry : Entries)
+		{
+			FString IdPart, TeamPart;
+			if (Entry.Split(TEXT(":"), &IdPart, &TeamPart))
+			{
+				const FString Key = IdPart.ToLower();
+				const uint8 TeamNum = (uint8)FMath::Clamp(FCString::Atoi(*TeamPart), 0, 1);
+				if (!Key.IsEmpty())
+				{
+					PugRosterTeam.Add(Key, TeamNum);
+				}
+			}
+		}
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: PUG roster parsed — %d players pinned to teams"), PugRosterTeam.Num());
+	}
 
 	IntermissionDuration = FMath::Max(1, UGameplayStatics::GetIntOption(Options, TEXT("HalftimeDuration"), IntermissionDuration));
 	AdvantageMaxDuration = FMath::Max(60, UGameplayStatics::GetIntOption(Options, TEXT("AdvantageMaxDuration"), AdvantageMaxDuration));
@@ -236,6 +266,39 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 			}
 		}
 	}
+}
+
+bool ANCPlusCTFGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)
+{
+	// Bot PUG: keep each rostered player on the side the bot balanced. login picks,
+	// player-initiated switches, and the engine's CountdownToBegin auto-balance
+	// (AUTTeamGameMode::ShouldBalanceTeams) all funnel through ChangeTeam, so this
+	// is the one place that pins them — the auto-balance is exactly what was
+	// swapping people onto the wrong team. Non-roster joiners (subs, late fills,
+	// or anyone who hasn't /linked) get the stock balancer via Super.
+	if (bIsPugMatch && PugRosterTeam.Num() > 0 && Player && HasAuthority())
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+		if (PS && !PS->bOnlySpectator && PS->UniqueId.IsValid())
+		{
+			// Match on UniqueId.ToString() — the same id this gamemode keys the
+			// rating DB on in PostLogin, which equals MutBotEvents' Ut4Id and the
+			// bot's players.ut4_id.
+			if (const uint8* Assigned = PugRosterTeam.Find(PS->UniqueId.ToString().ToLower()))
+			{
+				const uint8 Want = *Assigned;
+				// Already on the right side — accept without re-suiciding them
+				// (MovePlayerToTeam kills the pawn on an actual move).
+				if (PS->Team && PS->Team->TeamIndex == Want)
+				{
+					return true;
+				}
+				return MovePlayerToTeam(Player, PS, Want);
+			}
+		}
+	}
+
+	return Super::ChangeTeam(Player, NewTeam, bBroadcast);
 }
 
 void ANCPlusCTFGameMode::HandleMatchHasEnded()
@@ -739,6 +802,31 @@ bool ANCPlusCTFGameMode::IsFlagNearOwnBase(uint8 TeamIndex) const
 bool ANCPlusCTFGameMode::SupportsInstantReplay() const
 {
 	return true;
+}
+
+bool ANCPlusCTFGameMode::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Force the player's chosen hat as an OverrideHatClass (NOT entitlement-checked) on the NEXT tick —
+	// after ServerReceiveHatClass runs ValidateEntitlements + strips the un-entitled cosmetic — so the
+	// override is the final word. The community master grants base + map entitlements but withholds
+	// cosmetic ones, which is what trips the strip; OverrideHatClass sidesteps it. Server-side; never kicks.
+	// The log reveals whether the class actually LOADED: NULL there = content/pak problem (not the strip),
+	// and no override can conjure a class that won't load.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
 }
 
 // ── Floor Slide ─────────────────────────────────────────────────────
@@ -1554,6 +1642,19 @@ void ANCPlusCTFGameMode::ScoreObject_Implementation(AUTCarriedObject* GameObject
 		{
 			// Boost CoolFactor for all captures (for replay selection)
 			Holder->AddCoolFactorEvent(200.0f);
+
+			// Track the most recent cap so EndGame can feature the decisive one
+			// (the cap that hits scorelimit / golden / mercy) over a generic frag.
+			LastCapPlayer = Holder;
+			LastCapTime = GetWorld()->GetTimeSeconds();
+		}
+		else if (Reason == FName("SentHome"))
+		{
+			// Credit a flag return so a clutch defensive save is replay-eligible
+			// (and can fill a secondary clip, or be featured if no cap ends the
+			// match). Engine credits near-base denials in UTCTFFlag::Drop but
+			// never plain returns. Below the 200 cap weight so a cap still wins.
+			Holder->AddCoolFactorEvent(120.0f);
 		}
 	}
 }
@@ -1626,6 +1727,113 @@ void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 	}
 
 	Super::EndGame(Winner, Reason);
+}
+
+void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolMomentsToShow)
+{
+	const float Now = GetWorld()->TimeSeconds;
+
+	// Is the most recent cap recent enough to be "the decider"? A cap-driven end
+	// (scorelimit / golden / mercy) credits the cap microseconds before EndGame;
+	// a timelimit end leaves the last cap stale.
+	AUTPlayerState* FeaturePS = LastCapPlayer.Get();
+	const bool bFeatureCap = FeaturePS != nullptr
+		&& FeaturePS->UniqueId.IsValid()
+		&& LastCapTime > 0.f
+		&& (Now - LastCapTime) <= FeatureCapMaxAgeSeconds;
+
+	if (!bFeatureCap)
+	{
+		// No decisive cap — defer to the stock cool-factor ranking.
+		Super::PickMostCoolMoments(bClearCoolMoments, CoolMomentsToShow);
+		return;
+	}
+
+	// Slot 0: the decisive cap, queued to every client (same RPC the engine uses).
+	TArray<float> UsedTimes;
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
+		{
+			PC->ClientQueueCoolMoment(FeaturePS->UniqueId, Now - LastCapTime);
+		}
+	}
+	UsedTimes.Add(LastCapTime);
+	UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF replay: featured decisive cap by %s at %f"),
+		*FeaturePS->PlayerName, LastCapTime);
+
+	// Remaining slots: mirror the stock top-by-CoolFactor picker — one moment per
+	// player, spaced >=5s from already-used times. Featured player excluded so the
+	// reel stays varied. With the default CoolMomentsToShow==1 this loop is a no-op.
+	TArray<AUTPlayerState*> Pool;
+	for (int32 i = 0; i < GameState->PlayerArray.Num(); i++)
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(GameState->PlayerArray[i]);
+		if (PS && PS != FeaturePS && PS->CoolFactorHistory.Num() > 0 && PS->UniqueId.IsValid())
+		{
+			Pool.Add(PS);
+		}
+	}
+
+	while (UsedTimes.Num() < CoolMomentsToShow && Pool.Num() > 0)
+	{
+		AUTPlayerState* BestPS = nullptr;
+		float BestAmount = 0.f;
+		float BestTime = 0.f;
+
+		for (int32 p = 0; p < Pool.Num(); p++)
+		{
+			for (int32 c = 0; c < Pool[p]->CoolFactorHistory.Num(); c++)
+			{
+				const FCoolFactorHistoricalEvent& Ev = Pool[p]->CoolFactorHistory[c];
+				if (Ev.CoolFactorAmount <= BestAmount)
+				{
+					continue;
+				}
+				bool bSpaced = true;
+				for (int32 u = 0; u < UsedTimes.Num(); u++)
+				{
+					if (FMath::Abs(UsedTimes[u] - Ev.TimeOccurred) < 5.f)
+					{
+						bSpaced = false;
+						break;
+					}
+				}
+				if (bSpaced)
+				{
+					BestAmount = Ev.CoolFactorAmount;
+					BestTime = Ev.TimeOccurred;
+					BestPS = Pool[p];
+				}
+			}
+		}
+
+		if (BestPS == nullptr)
+		{
+			break;
+		}
+
+		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+		{
+			if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
+			{
+				PC->ClientQueueCoolMoment(BestPS->UniqueId, Now - BestTime);
+			}
+		}
+		UsedTimes.Add(BestTime);
+		Pool.Remove(BestPS);
+	}
+
+	if (bClearCoolMoments)
+	{
+		for (int32 i = 0; i < GameState->PlayerArray.Num(); i++)
+		{
+			if (AUTPlayerState* PS = Cast<AUTPlayerState>(GameState->PlayerArray[i]))
+			{
+				PS->CoolFactorHistory.Empty();
+			}
+		}
+	}
 }
 
 // ── Match State Handlers ─────────────────────────────────────────────
