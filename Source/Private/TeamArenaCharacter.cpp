@@ -499,26 +499,6 @@ bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection,
 	bool bHeadShot = FMath::PointDistToLine(HeadLocation, ShotDirection, HitLocation)
 		< HeadRadius * HeadScale * WeaponHeadScaling;
 
-#if ENABLE_DRAW_DEBUG
-	static IConsoleVariable* CVarDebugHeadshots = IConsoleManager::Get().FindConsoleVariable(TEXT("ut.DebugHeadshots"));
-	if (CVarDebugHeadshots && CVarDebugHeadshots->GetInt() != 0)
-	{
-		DrawDebugLine(GetWorld(), HitLocation + (ShotDirection * 1000.f),
-			HitLocation - (ShotDirection * 1000.f), FColor::White, true);
-
-		if (bHeadShot)
-		{
-			DrawDebugSphere(GetWorld(), HeadLocation, HeadRadius * HeadScale * WeaponHeadScaling,
-				10, FColor::Green, true);
-		}
-		else
-		{
-			DrawDebugSphere(GetWorld(), HeadLocation, HeadRadius * HeadScale * WeaponHeadScaling,
-				10, FColor::Red, true);
-		}
-	}
-#endif
-
 	return bHeadShot;
 }
 
@@ -831,73 +811,27 @@ FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerCo
     return TargetLocation;
 }
 
-/*
 FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 {
-	if (PredictionTime <= 0.f)
-	{
-		if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
-		{
-			return GetMesh()->GetSocketLocation(FName("head"));
-		}
-		return GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
-	}
+	// Model-INDEPENDENT head, derived from the CAPSULE instead of the skeletal mesh's "head" bone.
+	//
+	// SERVER-SIDE INTERIM for the Force-Models headshot bug (the full client-informed fix is on the
+	// 327-experimental branch). With Force Models the client renders a different model than the server
+	// validates against, so a bone-derived head desyncs and headshots aimed at the visible head miss. The
+	// capsule is identical client+server, so anchoring the head to the capsule top makes the server's
+	// sphere model-independent — a forced model's visible head (UT scales every model to fill the standard
+	// capsule, UTCharacter.cpp:5351) lines up with it. Also makes the rewind exact (fixed capsule geometry,
+	// no animated-bone pose to approximate) and drops the per-check RefreshBoneTransforms.
+	//
+	// kHeadCapsuleDrop = sphere CENTRE below the capsule top (standing half-height 108, stock head ~Z+82 ->
+	// ~26). Compile-time constant so client and server agree. Calibrate visually on the 327-experimental
+	// branch (ncp.DebugHeads marker), then mirror the value here. GetScaledCapsuleHalfHeight() is crouch-aware.
+	static const float kHeadCapsuleDrop = 26.0f;
 
-	// --- REWOUND HEAD ---
-	// no longer need const_cast<ATeamArenaCharacter*>(this) because the function is not const!
-	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
-
-	// Get current head offset from body center (captures lean, crouch, animation)
-	FVector CurrentHeadWorld = GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
-	if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
-	{
-		CurrentHeadWorld = GetMesh()->GetSocketLocation(FName("head"));
-	}
-
-	// Calculate head offset relative to current body
-	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
-
-	// Apply that offset to rewound position
-	return RewoundBodyLoc + HeadOffset;
-}
-*/
-
-FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
-{
-	// Force mesh update if necessary (from Epic's implementation)
-	if (GetMesh()->IsRegistered() && GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones && !GetMesh()->bRecentlyRendered)
-	{
-		if (GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPose)
-		{
-			const float Step = 0.1f;
-			for (float TickTime = FMath::Min<float>(GetWorld()->TimeSeconds - GetMesh()->LastRenderTime, 1.0f); TickTime > 0.0f; TickTime -= Step)
-			{
-				GetMesh()->TickAnimation(FMath::Min<float>(TickTime, Step), false);
-			}
-		}
-		GetMesh()->AnimUpdateRateParams->bSkipEvaluation = false;
-		GetMesh()->AnimUpdateRateParams->bInterpolateSkippedFrames = false;
-		GetMesh()->RefreshBoneTransforms();
-		GetMesh()->UpdateComponentToWorld();
-	}
-
-	if (PredictionTime <= 0.f)
-	{
-		// Current head position: socket + HeadHeight offset
-		return GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
-	}
-
-	// --- REWOUND HEAD ---
-	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
-
-	// Get current head world position (with HeadHeight!)
-	FVector CurrentHeadWorld = GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
-
-	// Calculate head offset relative to current body
-	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
-
-	// Apply that offset to rewound position
-	return RewoundBodyLoc + HeadOffset;
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	// GetRewindLocation rewinds the actor (capsule) position on the server and returns the current position
+	// on clients / for PredictionTime <= 0, so this one call covers both the rewound and live cases.
+	return GetRewindLocation(PredictionTime) + FVector(0.f, 0.f, HalfHeight - kHeadCapsuleDrop);
 }
 
 void ATeamArenaCharacter::BeginPlay()
