@@ -44,6 +44,11 @@ public:
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleMatchHasEnded() override;
 
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat via OverrideHatClass so the
+	// community master's withheld cosmetic entitlements can't strip it. Server-side, never kicks. See impl
+	// (mirrors ANCPlusCTFGameMode / AUWipeoutGame).
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
+
 	virtual void ScoreDamage_Implementation(int32 DamageAmount,
 		AUTPlayerState* Victim, AUTPlayerState* Attacker) override;
 	virtual void ScoreKill_Implementation(AController* Killer, AController* Other,

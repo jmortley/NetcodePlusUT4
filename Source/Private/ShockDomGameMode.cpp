@@ -28,6 +28,29 @@
 #include "GameFramework/PlayerStart.h"
 
 
+bool AShockDomGameMode::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat as an OverrideHatClass (which
+	// the engine does NOT entitlement-check) on the next tick — after ServerReceiveHatClass's
+	// ValidateEntitlements strip — so the community master's withheld cosmetic entitlements can't remove it.
+	// Server-side; never kicks. Mirrors ANCPlusCTFGameMode::ValidateHat. NULL in the log = class didn't load.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
+}
+
 // ============================================================================
 // CONSTRUCTOR
 // ============================================================================

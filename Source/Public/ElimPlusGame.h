@@ -83,6 +83,11 @@ class NETCODEPLUS_API AElimPlusGame : public AUTTeamGameMode {
 public:
 	AElimPlusGame(const FObjectInitializer& ObjectInitializer);
 
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat via OverrideHatClass so the
+	// community master's withheld cosmetic entitlements can't strip it. Server-side, never kicks. See impl
+	// (mirrors ANCPlusCTFGameMode / AUWipeoutGame).
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
+
 	// === Configurable Timings ===
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Timing")
 	float AwardDisplayTime;
