@@ -21,6 +21,7 @@
 #include "UnrealEngine.h"                             // GetCachedScalabilityCVars().DetailMode (flag cloth)
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
+#include "Engine/Canvas.h"            // DrawHeadDebug: Canvas->Project / K2_DrawLine
 
 namespace
 {
@@ -257,6 +258,70 @@ bool NCPlusForceModels::IsEnabled()
 {
 	const FNCPlusForceModelsConfig& C = Get();
 	return C.bEnabled && C.bModels;
+}
+
+// TEMP head-hitbox calibration aid. ECVF_Default (NOT cheat) so it can be toggled on a live server —
+// strip / cheat-gate before final ship (it visualises enemy head positions).
+static TAutoConsoleVariable<int32> CVarNCPDebugHeads(
+	TEXT("ncp.DebugHeads"), 0,
+	TEXT("NetcodePlus: draw the capsule-relative headshot sphere (GREEN = what the server validates) and the ")
+	TEXT("mesh head bone (RED cross = the visible head) for every other pawn, client-side. 1=on."),
+	ECVF_Default);
+
+void NCPlusForceModels::DrawHeadDebug(UCanvas* Canvas, APlayerController* PC)
+{
+	// Why this exists: ut.DebugHeadshots is wrapped in #if ENABLE_DRAW_DEBUG (compiled out of Shipping) and
+	// draws server-side anyway, so it's useless online. This reproduces the head sphere client-side via the
+	// HUD canvas (Shipping-safe). It's faithful because the head is now capsule-derived — the client can
+	// compute the exact same sphere the server validates from the replicated capsule. GREEN ring = that
+	// sphere; RED cross = the mesh "head" bone (~the visible head). Calibrate kHeadCapsuleDrop so they overlap.
+	if (!Canvas || !PC || CVarNCPDebugHeads.GetValueOnGameThread() == 0) { return; }
+	UWorld* const World = PC->GetWorld();
+	if (!World) { return; }
+
+	FVector CamLoc; FRotator CamRot;
+	PC->GetPlayerViewPoint(CamLoc, CamRot);
+	const FVector CamRight = FRotationMatrix(CamRot).GetScaledAxis(EAxis::Y);
+
+	static const FName NAME_Head(TEXT("head"));
+	const float HeadHeight = 8.f;     // AUTCharacter engine defaults (debug-only references)
+	const float HeadRadius = 18.f;
+
+	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
+	{
+		ATeamArenaCharacter* C = *It;
+		if (!C || C->IsLocallyControlled()) { continue; }      // skip your own pawn
+
+		// GREEN ring: the capsule-relative head sphere the server actually validates.
+		const FVector HeadWorld = C->GetHeadLocation(0.f);
+		const FVector S = Canvas->Project(HeadWorld);
+		if (S.Z <= 0.f) { continue; }                          // behind camera
+
+		const FVector SEdge = Canvas->Project(HeadWorld + CamRight * HeadRadius);
+		const float ScreenR = FMath::Max(3.f, FMath::Abs(SEdge.X - S.X));
+
+		const int32 Segs = 24;
+		FVector2D Prev(S.X + ScreenR, S.Y);
+		for (int32 i = 1; i <= Segs; ++i)
+		{
+			const float Ang = (2.f * PI * i) / Segs;
+			const FVector2D Cur(S.X + ScreenR * FMath::Cos(Ang), S.Y + ScreenR * FMath::Sin(Ang));
+			Canvas->K2_DrawLine(Prev, Cur, 1.5f, FLinearColor::Green);
+			Prev = Cur;
+		}
+
+		// RED cross: the mesh "head" bone (~where the visible head is) for comparison.
+		if (C->GetMesh() && C->GetMesh()->DoesSocketExist(NAME_Head))
+		{
+			const FVector BoneWorld = C->GetMesh()->GetSocketLocation(NAME_Head) + FVector(0.f, 0.f, HeadHeight);
+			const FVector B = Canvas->Project(BoneWorld);
+			if (B.Z > 0.f)
+			{
+				Canvas->K2_DrawLine(FVector2D(B.X - 7.f, B.Y), FVector2D(B.X + 7.f, B.Y), 1.5f, FLinearColor::Red);
+				Canvas->K2_DrawLine(FVector2D(B.X, B.Y - 7.f), FVector2D(B.X, B.Y + 7.f), 1.5f, FLinearColor::Red);
+			}
+		}
+	}
 }
 
 void NCPlusForceModels::ReapplyAll(UWorld* World)

@@ -351,6 +351,12 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	AActor* FX = World->SpawnActor<AActor>(FXClass, GetActorTransform(), SP);
 	if (!FX) { return; }
 
+	// The skeleton must dissolve and disappear quickly — that's the whole point. Hard-cap the effect
+	// actor's lifetime so it can NEVER linger: dc's BP doesn't reliably self-destruct, and if its
+	// Dissolve() signature differs from the call below the dissolve animation never starts, so without
+	// this the skeleton would hang on screen forever.
+	FX->SetLifeSpan(1.0f);
+
 	// Skeleton REPLACES the ragdoll (dc's mutator behaviour): hide the pawn's corpse mesh so only the
 	// dissolving skeleton shows. The ragdoll physics still runs invisibly; the dissolve actor is separate
 	// (not a child of this pawn) so it's unaffected. Runs after Super::PlayDying scheduled StartRagdoll —
@@ -831,73 +837,33 @@ FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerCo
     return TargetLocation;
 }
 
-/*
 FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 {
-	if (PredictionTime <= 0.f)
-	{
-		if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
-		{
-			return GetMesh()->GetSocketLocation(FName("head"));
-		}
-		return GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
-	}
+	// Model-INDEPENDENT head, derived from the CAPSULE instead of the skeletal mesh's "head" bone.
+	//
+	// Why: with Force Models the client may be rendering a completely different model (forced/community)
+	// than the one the server validates against (the player's real model). The mesh — and thus its "head"
+	// bone — differs between the two, so a bone-derived head sphere desyncs and headshots aimed at the
+	// visible head miss the server's sphere (body still regs because the capsule is shared). The capsule IS
+	// identical on client and server, so anchoring the head to the capsule top makes both compute the same
+	// sphere. UT scales every model to fill the standard capsule (ApplyCharacterData, UTCharacter.cpp:5351),
+	// so a properly-built model's visible head sits at the capsule top — exactly where this sphere is.
+	//
+	// Bonus: this also makes the rewind EXACT. The head offset is now fixed capsule geometry, so rewinding
+	// the actor position (which SavedPositions tracks precisely) is sufficient — no animated-bone pose to
+	// approximate, and no per-check RefreshBoneTransforms cost (which only existed to pose the bone server-side).
+	//
+	// kHeadCapsuleDrop = the sphere CENTRE's distance below the capsule top. Calibrated to the stock head:
+	// standing half-height 108, stock head ~Z+82 -> drop ~26. MUST be a compile-time constant (NOT Mod.ini)
+	// so client and server always agree; a per-side config value could drift and desync the head. Verify /
+	// fine-tune with `ut.DebugHeadshots 1` on a listen server (force a model, confirm the sphere is on the
+	// head you're shooting). GetScaledCapsuleHalfHeight() is crouch-aware, so the head lowers when crouched.
+	static const float kHeadCapsuleDrop = 26.0f;
 
-	// --- REWOUND HEAD ---
-	// no longer need const_cast<ATeamArenaCharacter*>(this) because the function is not const!
-	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
-
-	// Get current head offset from body center (captures lean, crouch, animation)
-	FVector CurrentHeadWorld = GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
-	if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
-	{
-		CurrentHeadWorld = GetMesh()->GetSocketLocation(FName("head"));
-	}
-
-	// Calculate head offset relative to current body
-	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
-
-	// Apply that offset to rewound position
-	return RewoundBodyLoc + HeadOffset;
-}
-*/
-
-FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
-{
-	// Force mesh update if necessary (from Epic's implementation)
-	if (GetMesh()->IsRegistered() && GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones && !GetMesh()->bRecentlyRendered)
-	{
-		if (GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPose)
-		{
-			const float Step = 0.1f;
-			for (float TickTime = FMath::Min<float>(GetWorld()->TimeSeconds - GetMesh()->LastRenderTime, 1.0f); TickTime > 0.0f; TickTime -= Step)
-			{
-				GetMesh()->TickAnimation(FMath::Min<float>(TickTime, Step), false);
-			}
-		}
-		GetMesh()->AnimUpdateRateParams->bSkipEvaluation = false;
-		GetMesh()->AnimUpdateRateParams->bInterpolateSkippedFrames = false;
-		GetMesh()->RefreshBoneTransforms();
-		GetMesh()->UpdateComponentToWorld();
-	}
-
-	if (PredictionTime <= 0.f)
-	{
-		// Current head position: socket + HeadHeight offset
-		return GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
-	}
-
-	// --- REWOUND HEAD ---
-	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
-
-	// Get current head world position (with HeadHeight!)
-	FVector CurrentHeadWorld = GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
-
-	// Calculate head offset relative to current body
-	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
-
-	// Apply that offset to rewound position
-	return RewoundBodyLoc + HeadOffset;
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	// GetRewindLocation rewinds the actor (capsule) position on the server and returns the current position
+	// on clients / for PredictionTime <= 0, so this one call covers both the rewound and live cases.
+	return GetRewindLocation(PredictionTime) + FVector(0.f, 0.f, HalfHeight - kHeadCapsuleDrop);
 }
 
 void ATeamArenaCharacter::BeginPlay()

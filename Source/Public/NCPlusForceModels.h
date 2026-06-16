@@ -161,4 +161,11 @@ namespace NCPlusForceModels
 	 *  materials + their vector/scalar parameter names, so we can see what a custom model actually
 	 *  exposes. Client-side, on-demand, Shipping-safe (Warning verbosity). */
 	NETCODEPLUS_API void DumpAllCharacterMaterials(class UWorld* World);
+
+	/** Debug (cvar `ncp.DebugHeads`): draw the capsule-relative headshot sphere (GREEN = what the server
+	 *  validates) and the mesh head bone (RED cross = the visible head) for every other pawn, client-side,
+	 *  so the head hitbox can be eyeballed ONLINE — ut.DebugHeadshots is compiled out of Shipping and draws
+	 *  server-side. Call from a HUD's DrawHUD with its Canvas + PlayerOwner. TEMP calibration aid; strip /
+	 *  cheat-gate before final ship. */
+	NETCODEPLUS_API void DrawHeadDebug(class UCanvas* Canvas, class APlayerController* PC);
 }
