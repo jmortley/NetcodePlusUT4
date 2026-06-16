@@ -108,8 +108,16 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
+				.Padding(0, 0, 8, 0)
 				[
 					MakeLaunchButton(TEXT("Cosmetics"), TEXT("cosmetics"))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				[
+					// Opens the BP hitsounds menu (the C++ hitsounds port isn't ready yet):
+					// close this menu + run "mutate hitsounds" (routes to the BP mutator's Mutate handler).
+					MakeLaunchButton(TEXT("Hitsounds"), TEXT("mutate hitsounds"))
 				]
 			]
 
