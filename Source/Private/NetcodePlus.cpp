@@ -4,6 +4,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
 #include "UTPlayerController.h"
+#include "UTPlayerInput.h"
 #include "UTProfileSettings.h"
 #include "UTLocalPlayer.h"
 #include "UTCharacter.h"
@@ -619,48 +620,25 @@ void FNetcodePlus::StartupModule()
 		ECVF_Default
 	);
 
-	// Bind F5 -> ncpmenu by writing a CustomBinds entry to Input.ini (add-if-missing).
-	//
-	// A config CustomBinds entry for a command the cloud profile doesn't manage ("ncpmenu") survives
-	// the profile's keymap rebuild (UTProfileSettings.cpp:785-906 only strips command-MATCHING binds)
-	// and IS processed by UUTPlayerInput::ExecuteCustomBind in ALL builds (UTPlayerInput.cpp:41) — the
-	// same channel utuu and the in-game keybind menu write to. (LocalBinds were tried first but don't
-	// actually fire for this key in the retail client — user-verified — so we use CustomBinds.)
-	// We also strip any stale ncpmenu LocalBind a previous build wrote. Skip the add if the user has
-	// already bound ncpmenu to some key, so a rebind wins. This replaces the old non-shipping
-	// DebugExecBindings F5; loaded per UUTPlayerInput construction so it survives map travel / joins.
+	// Bind F5 -> ncpmenu by SEEDING the UUTPlayerInput CDO's CustomBinds at startup (pure run-once).
+	// The CDO exists by now (GetMutableDefault constructs + config-loads it if needed), so this adds on top
+	// of whatever Input.ini had; new UUTPlayerInput instances inherit the CDO's CustomBinds, and
+	// UTForceRebuildingKeyMaps(true) (the settings "restore defaults" path) copies the CDO too. add-if-missing.
+	// Client-only. F5 is otherwise free (old CTFPlus-UI BP retired). NB if F5 still doesn't bind, instances
+	// are re-LoadConfig'ing CustomBinds from the file over the CDO inheritance — fall back to binding the
+	// live UUTPlayerInput via a per-map ticker.
+	if (!IsRunningDedicatedServer())
 	{
-		static const TCHAR* InputSection = TEXT("/Script/UnrealTournament.UTPlayerInput");
-		bool bDirty = false;
-
-		// Migrate away the earlier (non-working) LocalBinds=ncpmenu entry, if present.
-		TArray<FString> LocalBinds;
-		GConfig->GetArray(InputSection, TEXT("LocalBinds"), LocalBinds, GInputIni);
-		if (LocalBinds.RemoveAll([](const FString& B) { return B.Contains(TEXT("ncpmenu")); }) > 0)
-		{
-			GConfig->SetArray(InputSection, TEXT("LocalBinds"), LocalBinds, GInputIni);
-			bDirty = true;
-		}
-
-		// Add F5 -> ncpmenu to CustomBinds unless an ncpmenu bind already exists (preserve other binds).
-		TArray<FString> CustomBinds;
-		GConfig->GetArray(InputSection, TEXT("CustomBinds"), CustomBinds, GInputIni);
+		UUTPlayerInput* InputCDO = GetMutableDefault<UUTPlayerInput>();
 		bool bHasNcpMenuBind = false;
-		for (const FString& Bind : CustomBinds)
+		for (const FCustomKeyBinding& B : InputCDO->CustomBinds)
 		{
-			if (Bind.Contains(TEXT("ncpmenu"))) { bHasNcpMenuBind = true; break; }
+			if (B.Command.Contains(TEXT("ncpmenu"))) { bHasNcpMenuBind = true; break; }
 		}
 		if (!bHasNcpMenuBind)
 		{
-			CustomBinds.Add(TEXT("(KeyName=\"F5\",EventType=IE_Pressed,Command=\"ncpmenu\",FriendlyName=\"ncpmenu\")"));
-			GConfig->SetArray(InputSection, TEXT("CustomBinds"), CustomBinds, GInputIni);
-			bDirty = true;
-		}
-
-		if (bDirty)
-		{
-			GConfig->Flush(false, GInputIni);
-			UE_LOG(LogLoad, Log, TEXT("netcodeplus: F5 -> ncpmenu CustomBind ensured in Input.ini"));
+			InputCDO->CustomBinds.Add(FCustomKeyBinding(FName(TEXT("F5")), IE_Pressed, TEXT("ncpmenu")));
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: F5 -> ncpmenu seeded on UUTPlayerInput CDO"));
 		}
 	}
 
