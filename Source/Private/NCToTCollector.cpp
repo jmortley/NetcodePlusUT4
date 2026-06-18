@@ -6,8 +6,36 @@
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/ConfigCacheIni.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCToT, Log, All);
+
+bool FNCToTCollector::IsEnabled()
+{
+	// Cached for the process — Mod.ini is a server config, not a live-tunable knob.
+	// Same FConfigFile read pattern the CTF perf knobs / NCEloUploader use.
+	static int8 Cached = -1;
+	if (Cached < 0)
+	{
+		bool b = false;
+		const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+		if (FPaths::FileExists(ModIniPath))
+		{
+			FConfigFile ModIni;
+			ModIni.Read(ModIniPath);
+			if (const FConfigSection* Section = ModIni.Find(TEXT("NetcodePlus")))
+			{
+				if (const FConfigValue* V = Section->Find(FName(TEXT("EnableToT"))))
+				{
+					b = V->GetValue().ToBool();
+				}
+			}
+		}
+		Cached = b ? 1 : 0;
+		UE_LOG(LogNCToT, Warning, TEXT("[ToT] EnableToT (Mod.ini [NetcodePlus]) = %d"), (int32)Cached);
+	}
+	return Cached != 0;
+}
 
 // Tunables (compile-time; mirror the originals from MutBotEvents).
 static const int32 kLowDwellMs        = 16;

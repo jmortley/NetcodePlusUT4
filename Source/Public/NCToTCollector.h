@@ -16,6 +16,12 @@ class NETCODEPLUS_API FNCToTCollector
 public:
 	static FNCToTCollector& Get();
 
+	/** Server master switch from Mod.ini [NetcodePlus] EnableToT (default FALSE). Read
+	 *  once + cached for the process. When false the weapon gate never arms, so the
+	 *  owner-only replicated flag never tells any client to start tracking. Restart the
+	 *  server to change it. */
+	static bool IsEnabled();
+
 	/** One client-reported sample (already server-clamped). World supplies the match clock. */
 	void Record(class UWorld* World, class AUTPlayerState* Shooter, int32 DwellMs, uint8 FrameMs, bool bClaimedHit);
 

@@ -15,7 +15,7 @@ struct FVector_NetQuantize;
 #endif
 #define NETCODEPLUS_UTWeap_LinkGun_Plus_generated_h
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_RPC_WRAPPERS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_RPC_WRAPPERS \
 	virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta); \
 	virtual void FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode); \
 	virtual bool ServerStopBeamFiring_Validate(); \
@@ -108,7 +108,7 @@ struct FVector_NetQuantize;
 	}
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_RPC_WRAPPERS_NO_PURE_DECLS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_RPC_WRAPPERS_NO_PURE_DECLS \
 	virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta); \
 	virtual void FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode); \
 	virtual bool ServerStopBeamFiring_Validate(); \
@@ -201,7 +201,7 @@ struct FVector_NetQuantize;
 	}
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_EVENT_PARMS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_EVENT_PARMS \
 	struct UTWeap_LinkGun_Plus_eventDrawWeaponCrosshair_Parms \
 	{ \
 		UUTHUDWidget* WeaponHudWidget; \
@@ -229,8 +229,8 @@ extern NETCODEPLUS_API  FName NETCODEPLUS_FiringExtraUpdated;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ServerProcessBeamHit;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ServerSetPulseTarget;
 extern NETCODEPLUS_API  FName NETCODEPLUS_ServerStopBeamFiring;
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_CALLBACK_WRAPPERS
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_INCLASS_NO_PURE_DECLS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_CALLBACK_WRAPPERS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_INCLASS_NO_PURE_DECLS \
 	private: \
 	static void StaticRegisterNativesAUTWeap_LinkGun_Plus(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTWeap_LinkGun_Plus(); \
@@ -241,7 +241,7 @@ extern NETCODEPLUS_API  FName NETCODEPLUS_ServerStopBeamFiring;
 	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_INCLASS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_INCLASS \
 	private: \
 	static void StaticRegisterNativesAUTWeap_LinkGun_Plus(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_AUTWeap_LinkGun_Plus(); \
@@ -252,7 +252,7 @@ extern NETCODEPLUS_API  FName NETCODEPLUS_ServerStopBeamFiring;
 	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_STANDARD_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_STANDARD_CONSTRUCTORS \
 	/** Standard constructor, called after all reflected properties have been initialized */ \
 	NO_API AUTWeap_LinkGun_Plus(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get()); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(AUTWeap_LinkGun_Plus) \
@@ -265,7 +265,7 @@ private: \
 public:
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_ENHANCED_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_ENHANCED_CONSTRUCTORS \
 	/** Standard constructor, called after all reflected properties have been initialized */ \
 	NO_API AUTWeap_LinkGun_Plus(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get()) : Super(ObjectInitializer) { }; \
 private: \
@@ -278,31 +278,31 @@ DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(AUTWeap_LinkGun_Plus); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(AUTWeap_LinkGun_Plus)
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_PRIVATE_PROPERTY_OFFSET
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_16_PROLOG \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_EVENT_PARMS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_PRIVATE_PROPERTY_OFFSET
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_17_PROLOG \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_EVENT_PARMS
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_GENERATED_BODY_LEGACY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_GENERATED_BODY_LEGACY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_RPC_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_CALLBACK_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_INCLASS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_STANDARD_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_RPC_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_CALLBACK_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_INCLASS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_STANDARD_CONSTRUCTORS \
 public: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_GENERATED_BODY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_GENERATED_BODY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_RPC_WRAPPERS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_CALLBACK_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_INCLASS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_19_ENHANCED_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_RPC_WRAPPERS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_CALLBACK_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_INCLASS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_UTWeap_LinkGun_Plus_h_20_ENHANCED_CONSTRUCTORS \
 static_assert(false, "Unknown access specifier for GENERATED_BODY() macro in class UTWeap_LinkGun_Plus."); \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 

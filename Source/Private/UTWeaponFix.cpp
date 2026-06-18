@@ -265,7 +265,20 @@ void AUTWeaponFix::BeginPlay()
         const bool bElim = GM && GM->IsA(AElimPlusGame::StaticClass());
         const bool bICTF = GM && GM->bIsInstagib && GM->IsA(AUTCTFBaseGame::StaticClass());
         const bool bToTWeapon = IsA(AUTPlusSniper::StaticClass()) || IsA(AUTPlusShockRifle::StaticClass());
-        bToTDetectActive = (bElim || bICTF) && bToTWeapon;
+        // 3. Server master switch: Mod.ini [NetcodePlus] EnableToT (default OFF). Gated
+        //    here server-side, so when it's off bToTDetectActive stays false and the
+        //    owner-only replicated flag never tells any client to start the tracker.
+        const bool bEnabled = FNCToTCollector::IsEnabled();
+        bToTDetectActive = bEnabled && (bElim || bICTF) && bToTWeapon;
+
+        // One-time diagnostic for the relevant weapons, so a "no samples" result is never
+        // a mystery again: it shows whether the gate armed and which condition failed.
+        // (No line at all while holding a sniper/shock => that weapon isn't a UTPlus class.)
+        if (bToTWeapon)
+        {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[ToT] gate: weapon=%s enabled=%d elim=%d ictf=%d -> active=%d"),
+                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bToTDetectActive ? 1 : 0);
+        }
     }
 }
 
