@@ -800,13 +800,35 @@ void AUTWeaponFix::FireShot()
         QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
 
         // Telemetry sidecar — separate UNRELIABLE RPC, never folded into the fire
-        // path above. Report time-on-target only for a hitscan shot the client
-        // believes connected (ClientHitChar set above only for in-cone hitscan),
-        // in an active mode. ToTDwellSeconds is maintained per-frame in Tick.
-        if (bToTDetectActive && ClientHitChar != nullptr)
+        // path above. Sample every shot taken WHILE THE CROSSHAIR IS ON A VISIBLE
+        // ENEMY — hits AND on-target misses (a capsule-edge whiff is real signal) —
+        // but NOT off-target spam, which would flood the data with meaningless
+        // dwell=0 and inflate everyone's low-dwell share. ToTAcquireTime>=0 means
+        // the per-frame tracker had an enemy as of last tick; the ClientHitChar
+        // fallback catches a fresh flick whose hit lands the same frame the tick
+        // hasn't run yet (dwell ~0). bClaimedHit lets the server split hit vs miss.
+        if (bToTDetectActive)
         {
-            const uint8 DwellMs = (uint8)FMath::Clamp(FMath::RoundToInt(ToTDwellSeconds * 1000.0f), 0, 255);
-            ServerReportFireToT(DwellMs);
+            bool bHitEnemy = false;
+            if (ClientHitChar != nullptr && UTOwner && !ClientHitChar->IsDead())
+            {
+                const uint8 MyTeam = UTOwner->GetTeamNum();
+                const uint8 ThTeam = ClientHitChar->GetTeamNum();
+                bHitEnemy = (MyTeam == 255 || ThTeam == 255 || MyTeam != ThTeam);
+            }
+            if (ToTAcquireTime >= 0.0f || bHitEnemy)
+            {
+                // Fresh-flick fallback (acquire<0 but the muzzle trace hit an enemy:
+                // Tick hadn't registered the target yet this frame): floor dwell to
+                // ONE frame, not 0 — a literal 0 ms implies impossible negative
+                // reaction and would inflate the zero bucket for fast legit flickers.
+                const float DwellSec = (ToTAcquireTime >= 0.0f && GetWorld())
+                    ? FMath::Max(0.0f, GetWorld()->GetTimeSeconds() - ToTAcquireTime)
+                    : ToTFrameTimeEMA;
+                const int32 DwellMs = FMath::Clamp(FMath::RoundToInt(DwellSec * 1000.0f), 0, 60000);
+                const uint8 FrameMs = (uint8)FMath::Clamp(FMath::RoundToInt(ToTFrameTimeEMA * 1000.0f), 0, 255);
+                ServerReportFireToT(DwellMs, FrameMs, bHitEnemy);
+            }
         }
 
 		// Cache the client's exact aim direction at fire-press time.
@@ -1492,15 +1514,20 @@ void AUTWeaponFix::Tick(float DeltaTime)
 
 void AUTWeaponFix::UpdateToTTracker(float DeltaTime)
 {
+    // Smooth the client frame time regardless of on-target state, so the fps
+    // context we ship is the player's actual cadence (EMA, ~last 20 frames).
+    ToTFrameTimeEMA = (ToTFrameTimeEMA <= 0.0f) ? DeltaTime
+                    : FMath::Lerp(ToTFrameTimeEMA, DeltaTime, 0.05f);
+
     // Only meaningful for the equipped weapon on a living owner.
     if (!UTOwner || UTOwner->IsDead() || UTOwner->GetWeapon() != this)
     {
-        ToTDwellSeconds = 0.0f;
+        ToTAcquireTime = -1.0f;
         return;
     }
 
     UWorld* World = GetWorld();
-    if (!World) { ToTDwellSeconds = 0.0f; return; }
+    if (!World) { ToTAcquireTime = -1.0f; return; }
 
     const FVector Start = UTOwner->GetPawnViewLocation();
     const FVector Dir   = UTOwner->GetViewRotation().Vector();
@@ -1515,7 +1542,7 @@ void AUTWeaponFix::UpdateToTTracker(float DeltaTime)
     FHitResult Hit;
     const bool bBlocked = World->LineTraceSingleByChannel(Hit, Start, End, COLLISION_TRACE_WEAPON, Params);
 
-    bool bOnVisibleEnemy = false;
+    AUTCharacter* OnEnemy = nullptr;
     if (bBlocked)
     {
         AUTCharacter* HitChar = Cast<AUTCharacter>(Hit.GetActor());
@@ -1524,17 +1551,31 @@ void AUTWeaponFix::UpdateToTTracker(float DeltaTime)
             const uint8 MyTeam = UTOwner->GetTeamNum();
             const uint8 ThTeam = HitChar->GetTeamNum();
             // 255 = no team (FFA): everyone is an enemy. Otherwise differing teams.
-            bOnVisibleEnemy = (MyTeam == 255 || ThTeam == 255 || MyTeam != ThTeam);
+            if (MyTeam == 255 || ThTeam == 255 || MyTeam != ThTeam)
+            {
+                OnEnemy = HitChar;
+            }
         }
     }
 
-    if (bOnVisibleEnemy)
+    if (OnEnemy)
     {
-        ToTDwellSeconds += DeltaTime;
+        // Re-acquire (reset dwell) when the crosshair is on a DIFFERENT enemy than
+        // last frame. Without this, a snap from a long-tracked target onto a freshly
+        // revealed one would inherit the old dwell and hide a trigger-bot's
+        // target-to-target snap as a "patient" shot. Weak ptr so a destroyed-then-
+        // reused address can't be mistaken for the same target.
+        if (ToTAcquireTime < 0.0f || ToTLastTarget.Get() != OnEnemy)
+        {
+            ToTAcquireTime = World->GetTimeSeconds();
+        }
+        ToTLastTarget = OnEnemy;
     }
     else
     {
-        ToTDwellSeconds = 0.0f;
+        // LOS broken or no enemy under the crosshair -> end the run.
+        ToTAcquireTime = -1.0f;
+        ToTLastTarget = nullptr;
     }
 }
 
@@ -1549,19 +1590,21 @@ AMutBotEvents* AUTWeaponFix::FindBotEventsMutator() const
     return nullptr;
 }
 
-void AUTWeaponFix::ServerReportFireToT_Implementation(uint8 DwellMs)
+void AUTWeaponFix::ServerReportFireToT_Implementation(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
 {
     AUTPlayerState* PS = UTOwner ? Cast<AUTPlayerState>(UTOwner->PlayerState) : nullptr;
     if (!PS) return;
     if (AMutBotEvents* Bot = FindBotEventsMutator())
     {
-        Bot->RecordFireToT(PS, DwellMs);
+        // Clamp into a sane telemetry range server-side (a tampering client could
+        // send anything — this is review-only data, never gameplay-affecting).
+        Bot->RecordFireToT(PS, FMath::Clamp(DwellMs, 0, 60000), FrameMs, bClaimedHit);
     }
 }
 
-bool AUTWeaponFix::ServerReportFireToT_Validate(uint8 DwellMs)
+bool AUTWeaponFix::ServerReportFireToT_Validate(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
 {
-    // uint8 is inherently bounded 0-255; pure telemetry, nothing to clamp into gameplay.
+    // Pure telemetry — bounds are enforced in the impl; nothing to reject here.
     return true;
 }
 

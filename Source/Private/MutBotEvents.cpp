@@ -17,6 +17,10 @@
 #include "UTCTFFlagBase.h"
 #include "UTCTFGameState.h"
 #include "Json.h"
+#include "GameFramework/GameStateBase.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 
 DEFINE_LOG_CATEGORY(LogBotEvents);
 
@@ -494,18 +498,101 @@ void AMutBotEvents::PostReward(AUTPlayerState* Scorer, const FString& Type, int3
 // Trigger-bot review — time-on-target at fire (ToT)
 // ────────────────────────────────────────────────────────────────────
 
-void AMutBotEvents::RecordFireToT(AUTPlayerState* Shooter, uint8 DwellMs)
+// Dwell histogram buckets (ms): [0,8) [8,16) [16,32) [32,64) [64,128) [128,256)
+// [256,512) [512,inf). Log-ish spacing so the low end (flick / trigger-bot band)
+// has fine resolution and the long tracking tail collapses into a few buckets.
+static int32 ToTHistBucket(int32 Ms)
+{
+	if (Ms < 8)   return 0;
+	if (Ms < 16)  return 1;
+	if (Ms < 32)  return 2;
+	if (Ms < 64)  return 3;
+	if (Ms < 128) return 4;
+	if (Ms < 256) return 5;
+	if (Ms < 512) return 6;
+	return 7;
+}
+
+void AMutBotEvents::RecordFireToT(AUTPlayerState* Shooter, int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
 {
 	if (Shooter == nullptr) return;
 
-	FToTStat& S = ToTStats.FindOrAdd(Shooter->PlayerId);
-	S.PlayerName = Shooter->PlayerName;
-	S.Shots++;
-	S.SumMs += (int64)DwellMs;
-	if ((int32)DwellMs <= ToTLowDwellMs)
+	// Stable identity, most-stable first: StatsID (logged-in account, survives a
+	// reconnect) -> session UniqueId (stable for the connection even for a guest,
+	// and immune to a mid-match `setname`) -> name (last resort). A drop+rejoin
+	// (what the auto-pause feature exists to handle) keeps the same StatsID; a guest
+	// renaming mid-match keeps the same UniqueId. Name alone is the least stable key.
+	FString Key;
+	if (!Shooter->StatsID.IsEmpty())      Key = TEXT("id:")   + Shooter->StatsID;
+	else if (Shooter->UniqueId.IsValid()) Key = TEXT("net:")  + Shooter->UniqueId.ToString();
+	else                                  Key = TEXT("name:") + Shooter->PlayerName;
+
+	UWorld* World = GetWorld();
+	AGameStateBase* GS = World ? World->GetGameState() : nullptr;
+	const float Now = GS ? GS->GetServerWorldTimeSeconds()
+	                     : (World ? World->GetTimeSeconds() : 0.0f);
+
+	FToTStat& S = ToTStats.FindOrAdd(Key);
+	S.PlayerName = Shooter->PlayerName; // keep the latest display name for this identity
+	S.Samples.Emplace(FMath::Clamp(DwellMs, 0, 60000), Now, FrameMs, bClaimedHit);
+}
+
+AMutBotEvents::FToTSummary AMutBotEvents::ComputeToTSummary(const FToTStat& S) const
+{
+	FToTSummary R;
+	FMemory::Memzero(&R, sizeof(R)); // POD-only struct (no FString) — safe to zero
+	const int32 N = S.Samples.Num();
+	R.N = N;
+	if (N == 0) return R;
+
+	TArray<int32> D; D.Reserve(N);
+	double Sum = 0.0, FrameSum = 0.0; int32 FrameCnt = 0, LowCnt = 0, FirstFrameCnt = 0;
+	for (const FToTSample& Smp : S.Samples)
 	{
-		S.LowDwellShots++;
+		D.Add(Smp.DwellMs);
+		Sum += Smp.DwellMs;
+		R.Hist[ToTHistBucket(Smp.DwellMs)]++;
+		if (Smp.DwellMs <= ToTLowDwellMs) LowCnt++;
+		if (Smp.bClaimedHit) R.HitN++;
+		if (Smp.FrameMs > 0) { FrameSum += Smp.FrameMs; FrameCnt++; }
+		// "First-frame fire": dwell within ~1 of the PLAYER'S OWN frame time. Unlike
+		// the fixed-ms low-dwell band this is fps-FAIR by construction — "did you
+		// fire within a frame of acquiring", the same question at 60 or 480 fps.
+		// Falls back to the fixed band when the client didn't report a frame time.
+		const int32 FrameRef = (Smp.FrameMs > 0) ? (int32)Smp.FrameMs : ToTLowDwellMs;
+		if (Smp.DwellMs <= FrameRef) FirstFrameCnt++;
 	}
+	const double PreciseMean = Sum / N;   // keep full precision for the variance pass
+	R.MeanMs        = (float)PreciseMean;
+	R.LowDwellPct   = 100.0f * (float)LowCnt / (float)N;
+	R.FirstFramePct = 100.0f * (float)FirstFrameCnt / (float)N;
+	R.MeanFrameMs   = FrameCnt ? (float)(FrameSum / FrameCnt) : 0.0f;
+
+	double Var = 0.0;
+	for (int32 X : D) { const double d = (double)X - PreciseMean; Var += d * d; }
+	R.StdDevMs = (N > 1) ? (float)FMath::Sqrt(Var / (N - 1)) : 0.0f;
+	R.CV       = (R.MeanMs > KINDA_SMALL_NUMBER) ? (R.StdDevMs / R.MeanMs) : 0.0f;
+
+	if (R.StdDevMs > 0.0f)
+	{
+		for (int32 X : D)
+			if (FMath::Abs((float)X - R.MeanMs) > 3.0f * R.StdDevMs) R.OutlierCount++;
+	}
+
+	D.Sort();
+	R.MinMs = D[0];
+	R.MaxMs = D[N - 1];
+	R.P10 = D[FMath::Clamp(FMath::RoundToInt(0.10f * (N - 1)), 0, N - 1)];
+	R.P50 = D[FMath::Clamp(FMath::RoundToInt(0.50f * (N - 1)), 0, N - 1)];
+	R.P90 = D[FMath::Clamp(FMath::RoundToInt(0.90f * (N - 1)), 0, N - 1)];
+
+	// The "suspect" hint is RELATIVE to the lobby and is set in PostToTReport once
+	// every player's summary is known. Ground truth (UT99 'meep'): a real cheat sits
+	// at an ELEVATED fast-hit fraction vs peers WITH low variance — NOT at some fixed
+	// absolute %. A lone absolute threshold either misses the cheat or floods on fast
+	// instagib flickers; peer-relative self-calibrates per lobby and per fps.
+	R.bSuspectConsistent = false;
+	return R;
 }
 
 void AMutBotEvents::PostToTReport()
@@ -514,36 +601,131 @@ void AMutBotEvents::PostToTReport()
 
 	const int32 LowDwellMs = ToTLowDwellMs; // local copy (avoid static-const ODR-use in varargs)
 
-	FString PlayersJson;
-	for (const TPair<int32, FToTStat>& Pair : ToTStats)
+	// Pass 1 — summarize every player.
+	struct FRow { FString Name; FToTSummary R; };
+	TArray<FRow> Rows;
+	for (const TPair<FString, FToTStat>& Pair : ToTStats)
 	{
-		const FToTStat& S = Pair.Value;
-		if (S.Shots <= 0) continue;
+		if (Pair.Value.Samples.Num() == 0) continue;
+		FRow Row; Row.Name = Pair.Value.PlayerName; Row.R = ComputeToTSummary(Pair.Value);
+		Rows.Add(Row);
+	}
+	if (Rows.Num() == 0) return;
 
-		const float LowPct = 100.0f * (float)S.LowDwellShots / (float)S.Shots;
-		const float MeanMs = (float)S.SumMs / (float)S.Shots;
+	// Lobby baseline: median first-frame fraction over players with enough samples.
+	// The "suspect" hint is a RELATIVE outlier test against this — a real cheat is the
+	// clear high outlier of its OWN lobby, which self-calibrates across fps and across
+	// modes (instagib lobbies run fast across the board, so an absolute cut is wrong).
+	TArray<float> FF, CVs;
+	for (const FRow& Row : Rows)
+		if (Row.R.N >= ToTMinSamplesForFlag) { FF.Add(Row.R.FirstFramePct); CVs.Add(Row.R.CV); }
+	float LobbyMedianFF = 0.0f, LobbyMedianCV = 0.0f;
+	if (FF.Num()  > 0) { FF.Sort();  LobbyMedianFF = FF[FF.Num() / 2]; }
+	if (CVs.Num() > 0) { CVs.Sort(); LobbyMedianCV = CVs[CVs.Num() / 2]; }
+
+	// Pass 2 — relative flag + emit. Thresholds are PROVISIONAL; tune from gathered
+	// data (the operator's UT99 'meep' set shows a cheat ~2-4x peers AND consistent
+	// across matches). A single-match flag is a soft hint; the strong signal is the
+	// SAME player flagging across many matches — persist these rows to get that.
+	FString PlayersJson;
+	for (FRow& Row : Rows)
+	{
+		FToTSummary& R = Row.R;
+		const bool bEnough = (R.N >= ToTMinSamplesForFlag) && (FF.Num() >= 3);
+
+		// Signature A — "fast": elevated fast-hit fraction vs peers (instant/naive
+		// trigger that fires the moment the crosshair is on target).
+		const bool bFastOutlier = bEnough && (R.CV < 0.5f) && (R.FirstFramePct >= 12.0f)
+			&& (R.FirstFramePct >= 2.0f * FMath::Max(LobbyMedianFF, 1.0f));
+
+		// Signature B — "regular": tight spread AND no human tracking tail (compressed
+		// p90/p50), clearly below the lobby's variance. Catches a DELAY-RANDOMISED
+		// trigger bot whose dwell sits mid-range (e.g. 90-200ms): a fixed delay band is
+		// itself unnaturally consistent (CV ~0.2) and, crucially, never produces the
+		// long tracking/holding dwells a real player accrues — the one shape a trigger
+		// bot can't fake without throwing away its advantage (not shooting open targets).
+		const float TailRatio = (float)R.P90 / (float)FMath::Max(R.P50, 1);
+		const bool bTooRegular = bEnough && (R.CV < 0.45f) && (TailRatio < 2.5f)
+			&& (R.CV <= 0.6f * FMath::Max(LobbyMedianCV, KINDA_SMALL_NUMBER));
+
+		R.bSuspectConsistent = bFastOutlier || bTooRegular;
+		const TCHAR* Reason = bFastOutlier ? TEXT("fast") : (bTooRegular ? TEXT("regular") : TEXT(""));
+		const FString Flag = R.bSuspectConsistent
+			? FString::Printf(TEXT("  [REVIEW: %s]"), Reason) : FString();
+
+		const float Fps = (R.MeanFrameMs > 0.0f) ? (1000.0f / R.MeanFrameMs) : 0.0f;
 
 		// Server log — Warning so it survives Shipping builds (>= verbosity threshold),
 		// giving a review trail even on servers with no bot URL configured.
 		UE_LOG(LogBotEvents, Warning,
-			TEXT("[ToT] %s: shots=%d lowDwell(<=%dms)=%d (%.1f%%) meanMs=%.1f"),
-			*S.PlayerName, S.Shots, LowDwellMs, S.LowDwellShots, LowPct, MeanMs);
+			TEXT("[ToT] %s: n=%d hits=%d mean=%.0f sd=%.0f cv=%.2f p10=%d p50=%d p90=%d min=%d max=%d low<=%dms=%.0f%% firstframe=%.0f%%(lobby~%.0f%%) fps~%.0f outliers=%d%s"),
+			*Row.Name, R.N, R.HitN, R.MeanMs, R.StdDevMs, R.CV, R.P10, R.P50, R.P90, R.MinMs, R.MaxMs,
+			LowDwellMs, R.LowDwellPct, R.FirstFramePct, LobbyMedianFF, Fps, R.OutlierCount, *Flag);
 
 		// Minimal JSON-safety on the name (names can contain quotes/backslashes).
-		const FString SafeName = S.PlayerName.Replace(TEXT("\\"), TEXT("")).Replace(TEXT("\""), TEXT("'"));
+		const FString SafeName = Row.Name.Replace(TEXT("\\"), TEXT("")).Replace(TEXT("\""), TEXT("'"));
+		FString HistJson;
+		for (int32 i = 0; i < 8; ++i) { if (i) HistJson += TEXT(","); HistJson += FString::FromInt(R.Hist[i]); }
 
 		if (!PlayersJson.IsEmpty()) PlayersJson += TEXT(",");
 		PlayersJson += FString::Printf(
-			TEXT("{\"name\":\"%s\",\"shots\":%d,\"low_dwell\":%d,\"low_dwell_pct\":%.1f,\"mean_ms\":%.1f}"),
-			*SafeName, S.Shots, S.LowDwellShots, LowPct, MeanMs);
+			TEXT("{\"name\":\"%s\",\"n\":%d,\"claimed_hits\":%d,\"mean_ms\":%.1f,\"sd_ms\":%.1f,\"cv\":%.3f,")
+			TEXT("\"p10\":%d,\"p50\":%d,\"p90\":%d,\"min\":%d,\"max\":%d,\"low_dwell_pct\":%.1f,\"first_frame_pct\":%.1f,")
+			TEXT("\"mean_frame_ms\":%.1f,\"outliers\":%d,\"suspect_outlier\":%s,\"suspect_reason\":\"%s\",\"hist\":[%s]}"),
+			*SafeName, R.N, R.HitN, R.MeanMs, R.StdDevMs, R.CV,
+			R.P10, R.P50, R.P90, R.MinMs, R.MaxMs, R.LowDwellPct, R.FirstFramePct,
+			R.MeanFrameMs, R.OutlierCount, R.bSuspectConsistent ? TEXT("true") : TEXT("false"), Reason, *HistJson);
 	}
 
-	if (BotApiUrl.IsEmpty()) return; // already logged; nothing to POST
+	// Always write the per-sample timeline (independent of bot connectivity) — it
+	// is the review trail an admin scrubs against a server demo.
+	WriteToTTimelineCsv();
+
+	if (BotApiUrl.IsEmpty()) return; // already logged + CSV written; nothing to POST
 
 	const FString Body = FString::Printf(
-		TEXT("{\"pug_id\":%d,\"match_id\":\"%s\",\"low_dwell_ms\":%d,\"players\":[%s]}"),
-		PugId, *GetMatchId(), LowDwellMs, *PlayersJson);
+		TEXT("{\"pug_id\":%d,\"match_id\":\"%s\",\"low_dwell_ms\":%d,\"lobby_first_frame_pct\":%.1f,\"players\":[%s]}"),
+		PugId, *GetMatchId(), LowDwellMs, LobbyMedianFF, *PlayersJson);
 	SendPost(TEXT("/triggerbot_report"), Body);
+}
+
+void AMutBotEvents::WriteToTTimelineCsv() const
+{
+	// Flatten every player's samples into one match-clock-sorted timeline. An admin
+	// reviewing a SERVER demo scrubs to server_time and sees who fired with what
+	// dwell. (Client->server telemetry RPCs are not carried in a demo stream, so a
+	// side-file keyed on the match clock is the realistic "diagnosis in replay" —
+	// true in-demo overlay would need the per-shot data replicated to clients.)
+	struct FRow { float T; FString Name; int32 Dwell; uint8 Frame; bool bHit; };
+	TArray<FRow> Rows;
+	for (const TPair<FString, FToTStat>& Pair : ToTStats)
+		for (const FToTSample& Smp : Pair.Value.Samples)
+		{
+			FRow Rw; Rw.T = Smp.ServerTime; Rw.Name = Pair.Value.PlayerName;
+			Rw.Dwell = Smp.DwellMs; Rw.Frame = Smp.FrameMs; Rw.bHit = Smp.bClaimedHit;
+			Rows.Add(Rw);
+		}
+	if (Rows.Num() == 0) return;
+	Rows.Sort([](const FRow& A, const FRow& B) { return A.T < B.T; });
+
+	FString Csv = TEXT("server_time,player,dwell_ms,frame_ms,hit\n");
+	for (const FRow& Rw : Rows)
+	{
+		// CSV-safety: strip the separators/quotes a UT name can contain.
+		const FString Name = Rw.Name.Replace(TEXT("\""), TEXT("'")).Replace(TEXT(","), TEXT(" ")).Replace(TEXT("\n"), TEXT(" "));
+		Csv += FString::Printf(TEXT("%.3f,%s,%d,%d,%d\n"), Rw.T, *Name, Rw.Dwell, (int32)Rw.Frame, Rw.bHit ? 1 : 0);
+	}
+
+	FString SafeMatch = GetMatchId();
+	SafeMatch = SafeMatch.Replace(TEXT("/"), TEXT("_")).Replace(TEXT("\\"), TEXT("_")).Replace(TEXT(":"), TEXT("_"));
+	const FString Path = FPaths::GameSavedDir() / TEXT("Logs") / (TEXT("ToT_") + SafeMatch + TEXT(".csv"));
+	// SaveStringToFile does NOT create the directory tree — ensure Logs/ exists first
+	// (normally yes, the engine log lives there, but be defensive on a fresh box).
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), /*Tree=*/true);
+	if (FFileHelper::SaveStringToFile(Csv, *Path))
+		UE_LOG(LogBotEvents, Warning, TEXT("[ToT] timeline written: %s (%d samples)"), *Path, Rows.Num());
+	else
+		UE_LOG(LogBotEvents, Warning, TEXT("[ToT] FAILED to write timeline: %s"), *Path);
 }
 
 void AMutBotEvents::PostMatchEnded()

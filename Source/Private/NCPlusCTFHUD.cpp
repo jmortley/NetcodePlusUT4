@@ -198,6 +198,9 @@ void ANCPlusCTFHUD::DrawHUD()
 	// tints over every other HUD draw.
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
 	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
+
+	// Replay-only: time-on-target corner feed (self-guards to demo playback).
+	NCPlusHUDDrawCall::DrawToTReplayFeed(this, Canvas);
 }
 
 void ANCPlusCTFHUD::DrawSpectatorTarget()

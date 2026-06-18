@@ -316,12 +316,26 @@ public:
     UPROPERTY(Replicated)
     bool bToTDetectActive = false;
 
-    /** Client-side: continuous wall-clock seconds the crosshair has rested on a
-     *  visible (occlusion-checked) enemy. Reset to 0 on any frame the line of
-     *  sight is blocked or no enemy is under the crosshair. Sampled at fire time,
-     *  quantized to milliseconds (0-255), and shipped to the server. Time, not
-     *  frames, so the signal is identical at 60 or 540 fps. */
-    float ToTDwellSeconds = 0.0f;
+    /** Client-side: local-clock time (World->GetTimeSeconds()) at which the
+     *  crosshair FIRST landed on a visible (occlusion-checked) enemy in the current
+     *  continuous on-target run; -1 = not currently on a visible enemy. Dwell is
+     *  read at fire as (now - ToTAcquireTime), which avoids the per-frame DeltaTime
+     *  accumulation and the tick/fire ordering jitter the old counter had. Shipped
+     *  full-range in milliseconds (int32, no 255 ms cap), so heavy trackers no
+     *  longer saturate the server-side mean. */
+    float ToTAcquireTime = -1.0f;
+
+    /** Client-side: the enemy the crosshair is currently dwelling on. When the
+     *  traced enemy changes (target-to-target snap), the acquire instant resets so
+     *  the new target starts from zero dwell. Weak so a destroyed/reused actor
+     *  address can't masquerade as the same target. */
+    TWeakObjectPtr<class AUTCharacter> ToTLastTarget;
+
+    /** Client-side: smoothed (EMA) frame time in seconds, sent alongside each
+     *  sample as fps context. The low-dwell band is still frame-quantized near
+     *  zero (a 60 fps client cannot produce a sub-16 ms dwell), so review must be
+     *  able to see each player's frame rate to discount that bias. */
+    float ToTFrameTimeEMA = 0.0f;
 
     /** Per-frame client tracker: one occlusion-aware crosshair line trace. */
     void UpdateToTTracker(float DeltaTime);
@@ -396,7 +410,7 @@ protected:
      *  or scoring. Separate from ServerStartFireFixed by design — the hit-reg
      *  path is never touched. */
     UFUNCTION(Server, Unreliable, WithValidation)
-    void ServerReportFireToT(uint8 DwellMs);
+    void ServerReportFireToT(int32 DwellMs, uint8 FrameMs, bool bClaimedHit);
 
     /**
      * Client RPC to confirm a fire event or correct client's event index.

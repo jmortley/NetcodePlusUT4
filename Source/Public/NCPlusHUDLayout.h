@@ -306,6 +306,13 @@ namespace NCPlusHUDDrawCall
 	 *  Honors font / font_scale / color_text / opacity. Canvas passed by caller
 	 *  (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD, class UCanvas* Canvas);
+
+	/** Replay-only corner feed of time-on-target samples. No-op unless a demo is
+	 *  playing back. Reads the server-written ToT_*.csv (newest in Saved/Logs, or
+	 *  the path in the `ncp.ToTReplayCsv` cvar) and draws each shot synced to the
+	 *  replayed server clock (GameState->GetServerWorldTimeSeconds). Pure client
+	 *  display — no replication, never runs in live play. */
+	NETCODEPLUS_API void DrawToTReplayFeed(class AUTHUD* HUD, class UCanvas* Canvas);
 }
 
 /**

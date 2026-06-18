@@ -13,6 +13,11 @@
 #include "JsonUtilities.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
+#include "Engine/World.h"
+#include "Engine/DemoNetDriver.h"
+#include "GameFramework/GameStateBase.h"
+#include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 
 // =============================================================================
 // Anchor conversions
@@ -984,6 +989,132 @@ namespace NCPlusHUDDrawCall
 
 		Canvas->DrawColor = FLinearColor(Tint.R, Tint.G, Tint.B, Tint.A * OpacityMul).ToFColor(true);
 		Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
+	}
+
+	// ── Replay-only time-on-target corner feed ────────────────────────
+	// Reads the server-written ToT_*.csv and overlays each sampled shot during
+	// demo playback, synced to the replayed server clock. Pure client display.
+
+	struct FNCToTReplayEvent { float Time; FString Name; int32 Dwell; int32 Frame; bool bHit; };
+
+	static TArray<FNCToTReplayEvent> GToTEvents;        // sorted ascending by Time
+	static FString                   GToTLoadedPath;    // CSV currently cached ("" = none)
+	static TWeakObjectPtr<UWorld>    GToTLoadedWorld;   // reload when the replay world changes
+
+	static TAutoConsoleVariable<FString> CVarToTReplayCsv(
+		TEXT("ncp.ToTReplayCsv"), TEXT(""),
+		TEXT("Path to a ToT_*.csv for the replay overlay. Empty = newest in Saved/Logs."));
+
+	static FString FindNewestToTCsv()
+	{
+		const FString Dir = FPaths::GameSavedDir() / TEXT("Logs");
+		TArray<FString> Names;
+		IFileManager::Get().FindFiles(Names, *(Dir / TEXT("ToT_*.csv")), true, false);
+		FString Best;
+		FDateTime BestTime = FDateTime::MinValue();
+		for (const FString& N : Names)
+		{
+			const FString Full = Dir / N;
+			const FDateTime T = IFileManager::Get().GetTimeStamp(*Full);
+			if (T >= BestTime) { BestTime = T; Best = Full; }
+		}
+		return Best;
+	}
+
+	static void LoadToTCsv(const FString& Path)
+	{
+		GToTEvents.Reset();
+		GToTLoadedPath = Path;
+		if (Path.IsEmpty()) return;
+
+		TArray<FString> Lines;
+		if (!FFileHelper::LoadFileToStringArray(Lines, *Path)) return;
+
+		for (int32 i = 0; i < Lines.Num(); ++i)
+		{
+			if (i == 0 && Lines[i].StartsWith(TEXT("server_time"))) continue; // header
+			TArray<FString> F;
+			Lines[i].ParseIntoArray(F, TEXT(","), false);
+			if (F.Num() < 5) continue;
+			FNCToTReplayEvent E;
+			E.Time  = FCString::Atof(*F[0]);
+			E.Name  = F[1];
+			E.Dwell = FCString::Atoi(*F[2]);
+			E.Frame = FCString::Atoi(*F[3]);
+			E.bHit  = (FCString::Atoi(*F[4]) != 0);
+			GToTEvents.Add(E);
+		}
+		GToTEvents.Sort([](const FNCToTReplayEvent& A, const FNCToTReplayEvent& B) { return A.Time < B.Time; });
+	}
+
+	void DrawToTReplayFeed(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (HUD == nullptr || Canvas == nullptr) return;
+
+		UWorld* World = HUD->GetWorld();
+		// Replay-only: identical guard the plugin uses elsewhere (UTPlusProj_ShockBall).
+		if (World == nullptr || World->DemoNetDriver == nullptr || !World->DemoNetDriver->IsPlaying()) return;
+
+		AGameStateBase* GS = World->GetGameState();
+		UFont* Font = HUD->SmallFont;
+		if (GS == nullptr || Font == nullptr) return;
+
+		const float NowServer = GS->GetServerWorldTimeSeconds();
+
+		// (Re)load once per replay, or when the cvar points somewhere new. Once
+		// we've attempted a load for this world we don't re-scan disk per frame —
+		// even if no CSV was found (drop one in + restart the replay, or set the
+		// cvar, to pick it up).
+		const FString CVarPath = CVarToTReplayCsv.GetValueOnGameThread();
+		const bool bSameWorld  = (GToTLoadedWorld.Get() == World);
+		FString Desired;
+		if (!CVarPath.IsEmpty())  Desired = CVarPath;
+		else                      Desired = bSameWorld ? GToTLoadedPath : FindNewestToTCsv();
+		if (!bSameWorld || Desired != GToTLoadedPath)
+		{
+			LoadToTCsv(Desired);
+			GToTLoadedWorld = World;
+		}
+
+		const float RenderScale = Canvas->ClipY / 1080.f;
+		const float Scale = RenderScale * 0.9f;
+		const float X     = 24.f  * RenderScale;
+		float       Y     = 220.f * RenderScale;   // below the top-left clock region
+		const float LineH = 22.f  * RenderScale;
+		const float Window = 6.0f;                 // seconds of history shown
+		const int32 MaxLines = 8;
+
+		Canvas->DrawColor = FColor(170, 170, 170, 200);
+		Canvas->DrawText(Font, GToTEvents.Num() > 0
+			? FString(TEXT("ToT (replay)"))
+			: FString(TEXT("ToT (replay): no ToT_*.csv in Saved/Logs")),
+			X, Y, Scale, Scale);
+		Y += LineH * 1.2f;
+		if (GToTEvents.Num() == 0) return;
+
+		int32 Drawn = 0;
+		for (int32 i = GToTEvents.Num() - 1; i >= 0 && Drawn < MaxLines; --i)
+		{
+			const FNCToTReplayEvent& E = GToTEvents[i];
+			const float Age = NowServer - E.Time;
+			if (Age < -0.25f) continue;  // shot is ahead of the playback head — skip
+			if (Age > Window) break;     // sorted: everything earlier is older still
+
+			const float Alpha = FMath::Clamp(1.f - Age / Window, 0.15f, 1.f);
+			const bool bFirstFrame = (E.Frame > 0) ? (E.Dwell <= E.Frame) : (E.Dwell <= 16);
+			FLinearColor C = bFirstFrame ? FLinearColor(1.f, 0.25f, 0.2f, 1.f)
+				: (E.Dwell <= 50 ? FLinearColor(1.f, 0.7f, 0.15f, 1.f)
+				                 : FLinearColor(0.9f, 0.9f, 0.9f, 1.f));
+			C.A = Alpha;
+			Canvas->DrawColor = C.ToFColor(true);
+
+			const FString Line = FString::Printf(TEXT("%s  %dms  %s%s"),
+				*E.Name, E.Dwell, E.bHit ? TEXT("hit") : TEXT("miss"),
+				bFirstFrame ? TEXT("  <<first-frame") : TEXT(""));
+			Canvas->DrawText(Font, Line, X, Y, Scale, Scale);
+			Y += LineH;
+			++Drawn;
+		}
 	}
 }
 
