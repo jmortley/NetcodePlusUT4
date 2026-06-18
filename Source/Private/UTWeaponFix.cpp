@@ -274,8 +274,11 @@ void AUTWeaponFix::BeginPlay()
         // One-time diagnostic for the relevant weapons, so a "no samples" result is never
         // a mystery again: it shows whether the gate armed and which condition failed.
         // (No line at all while holding a sniper/shock => that weapon isn't a UTPlus class.)
-        if (bToTWeapon)
+        // Log once per process (not per weapon spawn) to confirm the gate without spam.
+        static bool bLoggedToTGate = false;
+        if (bToTWeapon && !bLoggedToTGate)
         {
+            bLoggedToTGate = true;
             UE_LOG(LogUTWeaponFix, Warning, TEXT("[ToT] gate: weapon=%s enabled=%d elim=%d ictf=%d -> active=%d"),
                 *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bToTDetectActive ? 1 : 0);
         }
