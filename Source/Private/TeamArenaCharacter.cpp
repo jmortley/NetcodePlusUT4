@@ -19,6 +19,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "NCPlusForceModels.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
+#include "TimerManager.h"           // DarkenBodies delayed corpse hide
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -280,98 +281,34 @@ void ATeamArenaCharacter::LeaderHatStatusChanged_Implementation()
 	Super::LeaderHatStatusChanged_Implementation();
 }
 
-// dc's ModelDissolveEffect BP (cooked in the MutTeamSkins pak). Loaded once, GC-pinned.
-static UClass* LoadDissolveEffectClass()
-{
-	static TWeakObjectPtr<UClass> Cached;
-	static bool bLogged = false;
-	if (Cached.IsValid()) { return Cached.Get(); }
-	UClass* C = StaticLoadClass(AActor::StaticClass(), nullptr,
-		TEXT("/Game/TeamSkins/Dissolve/ModelDissolveEffect.ModelDissolveEffect_C"));
-	if (C) { C->AddToRoot(); Cached = C; }
-	else if (!bLogged)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ForceModels] DarkenBodies: couldn't load ModelDissolveEffect — skeleton dissolve disabled"));
-		bLogged = true;
-	}
-	return C;
-}
-
 void ATeamArenaCharacter::PlayDying()
 {
 	Super::PlayDying();
 	SpawnSkeletonDissolve();
 }
 
+// "Darken Bodies" toggle: on death, hide the corpse after a short delay so the death/ragdoll effects are
+// visible first (instant hide looked abrupt). (Replaces dc's ModelDissolveEffect, which drove its dissolve
+// through a SkinUpdater-owner exec chain and wouldn't run reliably across models — this clean hide works on
+// any model with zero asset dependency.) The ragdoll keeps simulating invisibly after and cleans up on its
+// normal lifespan; we just stop rendering it. Client-side, per pawn; no-op on a dedicated server.
 void ATeamArenaCharacter::SpawnSkeletonDissolve()
 {
-	// DarkenBodies: dissolve the corpse into its skeleton. Client-side, per-pawn (PlayDying runs on every
-	// client for every dying pawn). Mirrors dc's ForceSkeleton/ReplicatedMakeSkeleton, minus the server
-	// multicast (each client decides locally from its own config).
 	if (GetNetMode() == NM_DedicatedServer) { return; }
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	if (!C.bEnabled || !C.bDarkenBodies) { return; }
+	// Delay the hide so the death effects play first. Timer is bound to this actor, so it's auto-cleared if
+	// the corpse is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
+	const float kHideDelay = 1.0f;
+	FTimerHandle TempHandle;
+	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, kHideDelay, false);
+}
 
-	// Skip gibs (dc: "try not to spawn the dissolve if the char is going to be gibbed").
-	if (LastTakeHitInfo.DamageType)
-	{
-		UUTDamageType* Dmg = Cast<UUTDamageType>(LastTakeHitInfo.DamageType.GetDefaultObject());
-		if (Dmg && Dmg->ShouldGib(this)) { return; }
-	}
-
-	// Skeleton mesh: the forced model's if we reskinned this pawn, else its real character's.
-	USkeletalMesh* SkelMesh = nullptr;
-	if (bForcedModelApplied && LastForcedContent)
-	{
-		if (const AUTCharacterContent* CC = Cast<AUTCharacterContent>(LastForcedContent->GetDefaultObject()))
-		{
-			SkelMesh = CC->SkeletonMesh;
-		}
-	}
-	if (!SkelMesh)
-	{
-		if (AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState))
-		{
-			if (TSubclassOf<AUTCharacterContent> CCClass = PS->GetSelectedCharacter())
-			{
-				SkelMesh = CCClass.GetDefaultObject()->SkeletonMesh;
-			}
-		}
-	}
-	if (!SkelMesh) { return; }
-
-	UClass* FXClass = LoadDissolveEffectClass();
-	UWorld* const World = GetWorld();
-	if (!FXClass || !World) { return; }
-
-	FActorSpawnParameters SP;
-	SP.Owner = this;
-	SP.Instigator = this;
-	SP.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	AActor* FX = World->SpawnActor<AActor>(FXClass, GetActorTransform(), SP);
-	if (!FX) { return; }
-
-	// Skeleton REPLACES the ragdoll (dc's mutator behaviour): hide the pawn's corpse mesh so only the
-	// dissolving skeleton shows. The ragdoll physics still runs invisibly; the dissolve actor is separate
-	// (not a child of this pawn) so it's unaffected. Runs after Super::PlayDying scheduled StartRagdoll —
-	// StartRagdoll only changes physics, not visibility, so this hide holds.
+void ATeamArenaCharacter::HideDeadBody()
+{
 	if (USkeletalMeshComponent* BodyMesh = GetMesh())
 	{
 		BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
-	}
-
-	// Hand the skeleton mesh to dc's "Dissolve(Skel Mesh)" BP function via reflection. Guard the signature
-	// (exactly one object-pointer param) so a mismatch can't corrupt ProcessEvent memory — if it differs,
-	// the effect still spawns but won't dissolve, and we correct the call from the real signature.
-	static const FName NAME_Dissolve(TEXT("Dissolve"));
-	if (UFunction* Fn = FX->FindFunction(NAME_Dissolve))
-	{
-		if (Fn->NumParms == 1 && Fn->ParmsSize == sizeof(USkeletalMesh*))
-		{
-			struct { USkeletalMesh* SkelMesh; } Params;
-			Params.SkelMesh = SkelMesh;
-			FX->ProcessEvent(Fn, &Params);
-		}
 	}
 }
 

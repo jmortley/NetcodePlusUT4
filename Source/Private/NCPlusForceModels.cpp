@@ -607,53 +607,176 @@ static bool IsCharHiddenInUI(const FString& ClassPath)
 	return bHide;
 }
 
+// Asset name minus a trailing run of digits — the "stem" we group variant families by
+// ("NecrisMale05" -> "NecrisMale", "NecrisMale_Necroth03" -> "NecrisMale_Necroth"). A name with no
+// trailing digits is its own stem; an all-digit name is left whole (never collapse to an empty stem).
+static FString StemOf(const FString& Name)
+{
+	int32 End = Name.Len();
+	while (End > 0 && FChar::IsDigit(Name[End - 1])) { --End; }
+	return (End > 0) ? Name.Left(End) : Name;
+}
+
+// Representative rank within a coalesced family: lower wins. The trailing number, or MAX_int32 for a
+// non-numbered member, so the lowest-numbered variant (e.g. SkaarjMale01) is preferred over both higher
+// numbers and the un-numbered base (e.g. plain "NecrisMale") — per the picker design.
+static int32 VariantRank(const FString& Name)
+{
+	int32 S = Name.Len();
+	while (S > 0 && FChar::IsDigit(Name[S - 1])) { --S; }
+	if (S == Name.Len()) { return MAX_int32; }   // no trailing digits
+	return FCString::Atoi(*Name.Mid(S));
+}
+
 void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bIncludeHidden)
 {
-	// Auto-hide Epic's bHideInUI test/mod-internal chars ([ForceModels] HideTestModels, default on).
-	// Costs a one-time load of every char class on the first call (cached after) — disable if too slow.
-	bool bHideTest = true;
-	GConfig->GetBool(TEXT("ForceModels"), TEXT("HideTestModels"), bHideTest, ModIniPath());
+	TArray<FAssetData> Assets;
+	GetAllBlueprintAssetData(AUTCharacterContent::StaticClass(), Assets, /*bRequireEntitlements=*/false);
 
-	// Curation denylist: [ForceModels] HiddenModels = comma-separated name substrings (case-insensitive).
-	// Lets you cull near-duplicate variants (e.g. NecrisDamian02,NecrisDamian03) from the picker. Hidden
-	// entries are dropped here but still returned (with bHidden=true) on the audit path (forcemodels_list).
-	TArray<FString> Hidden;
-	FString HiddenStr;
-	GConfig->GetString(TEXT("ForceModels"), TEXT("HiddenModels"), HiddenStr, ModIniPath());
-	if (!HiddenStr.IsEmpty())
+	if (bIncludeHidden)
+	{
+		// ── AUDIT PATH (forcemodels_list): every installed character, uncoalesced, curated ones flagged.
+		// Denylist (name substrings): baked stock/unusable set + [ForceModels] HiddenModels= overrides; plus
+		// Epic's bHideInUI test chars ([ForceModels] HideTestModels, default on — loads each char CDO once,
+		// cached). This whole cost is paid ONLY here, never on the menu/picker path below.
+		bool bHideTest = true;
+		GConfig->GetBool(TEXT("ForceModels"), TEXT("HideTestModels"), bHideTest, ModIniPath());
+
+		static const TCHAR* const DefaultHidden[] = {
+			TEXT("HumanMaleBase"), TEXT("NecrisFemaleBase"), TEXT("NecrisMaleBase"), TEXT("SkaarjMaleBase"),
+			TEXT("LTC_Bot_CharacterData"), TEXT("BP_Char_Oct2015"),
+			TEXT("TC_GodKing"), TEXT("TC_Siris"),
+			TEXT("UNUSED_"), TEXT("TC_ArmorNewV"),
+		};
+		TArray<FString> Hidden;
+		for (const TCHAR* D : DefaultHidden) { Hidden.Add(D); }
+		FString HiddenStr;
+		GConfig->GetString(TEXT("ForceModels"), TEXT("HiddenModels"), HiddenStr, ModIniPath());
+		if (!HiddenStr.IsEmpty())
+		{
+			TArray<FString> Parts;
+			HiddenStr.ParseIntoArray(Parts, TEXT(","), true);
+			for (const FString& Raw : Parts)
+			{
+				int32 S = 0, E = Raw.Len();
+				while (S < E && FChar::IsWhitespace(Raw[S]))     { ++S; }
+				while (E > S && FChar::IsWhitespace(Raw[E - 1])) { --E; }
+				const FString T = Raw.Mid(S, E - S);
+				if (!T.IsEmpty()) { Hidden.Add(T); }
+			}
+		}
+
+		Out.Reserve(Assets.Num());
+		for (const FAssetData& A : Assets)
+		{
+			const FString Name      = A.AssetName.ToString();
+			const FString ClassPath = A.ObjectPath.ToString() + TEXT("_C");
+			bool bHidden = false;
+			for (const FString& Sub : Hidden)
+			{
+				if (Name.Contains(Sub, ESearchCase::IgnoreCase)) { bHidden = true; break; }
+			}
+			if (!bHidden && bHideTest && IsCharHiddenInUI(ClassPath)) { bHidden = true; }
+			FContentEntry E;
+			E.DisplayName = Name;
+			E.ClassPath   = ClassPath;
+			E.VariantPaths.Add(ClassPath);
+			E.bHidden     = bHidden;
+			Out.Add(E);
+		}
+		return;
+	}
+
+	// ── PICKER PATH: locked to an explicit ALLOWLIST of stems, then coalesce numbered families.
+	// Only these stems ever reach the menu — new/unknown installed content can't auto-appear (327 lock).
+	// The audit path above still lists everything. [ForceModels] AllowModels= (comma-separated stems)
+	// appends more without a rebuild (e.g. a newly-cooked custom char). No bHideInUI CDO loads here.
+	static const TCHAR* const DefaultAllowed[] = {
+		TEXT("NecrisFemaleCoat"), TEXT("Genghis"), TEXT("LiandriRobot"),       // custom content
+		TEXT("NecrisFemale"), TEXT("NecrisMale"), TEXT("NecrisMale_Damian"),   // stock families (coalesced)
+		TEXT("NecrisMale_Necroth"), TEXT("SkaarjMale"), TEXT("TC_Male"),
+	};
+	TArray<FString> Allowed;
+	for (const TCHAR* D : DefaultAllowed) { Allowed.Add(D); }
+	FString AllowStr;
+	GConfig->GetString(TEXT("ForceModels"), TEXT("AllowModels"), AllowStr, ModIniPath());
+	if (!AllowStr.IsEmpty())
 	{
 		TArray<FString> Parts;
-		HiddenStr.ParseIntoArray(Parts, TEXT(","), true);
+		AllowStr.ParseIntoArray(Parts, TEXT(","), true);
 		for (const FString& Raw : Parts)
 		{
 			int32 S = 0, E = Raw.Len();
 			while (S < E && FChar::IsWhitespace(Raw[S]))     { ++S; }
 			while (E > S && FChar::IsWhitespace(Raw[E - 1])) { --E; }
 			const FString T = Raw.Mid(S, E - S);
-			if (!T.IsEmpty()) { Hidden.Add(T); }
+			if (!T.IsEmpty()) { Allowed.Add(T); }
 		}
 	}
 
-	TArray<FAssetData> Assets;
-	GetAllBlueprintAssetData(AUTCharacterContent::StaticClass(), Assets, /*bRequireEntitlements=*/false);
-	Out.Reserve(Assets.Num());
+	// 1) Collect only allowed stems (exact stem match, case-insensitive), in registry order.
+	struct FRaw { FString Name; FString ClassPath; };
+	TArray<FRaw> Visible;
+	Visible.Reserve(Assets.Num());
 	for (const FAssetData& A : Assets)
 	{
 		const FString Name      = A.AssetName.ToString();
 		const FString ClassPath = A.ObjectPath.ToString() + TEXT("_C");
-		bool bHidden = false;
-		for (const FString& Sub : Hidden)
+		const FString Stem      = StemOf(Name);
+		bool bAllowed = false;
+		for (const FString& Al : Allowed)
 		{
-			if (Name.Contains(Sub, ESearchCase::IgnoreCase)) { bHidden = true; break; }
+			if (Stem.Equals(Al, ESearchCase::IgnoreCase)) { bAllowed = true; break; }
 		}
-		// Epic's bHideInUI test/mod-internal chars (loads the CDO; cached).
-		if (!bHidden && bHideTest && IsCharHiddenInUI(ClassPath)) { bHidden = true; }
-		if (bHidden && !bIncludeHidden) { continue; }
+		if (!bAllowed) { continue; }
+		Visible.Add({ Name, ClassPath });
+	}
 
+	// 2) Group by stem (name minus a trailing digit run), preserving first-seen order.
+	TArray<FString>       GroupStem;   // stem per group (parallel to Groups)
+	TArray<TArray<int32>> Groups;      // member indices into Visible
+	TMap<FString, int32>  StemToGroup;
+	for (int32 i = 0; i < Visible.Num(); ++i)
+	{
+		const FString Stem = StemOf(Visible[i].Name);
+		int32* GI = StemToGroup.Find(Stem);
+		if (!GI)
+		{
+			const int32 NewIdx = Groups.AddDefaulted();
+			GroupStem.Add(Stem);
+			GI = &StemToGroup.Add(Stem, NewIdx);
+		}
+		Groups[*GI].Add(i);
+	}
+
+	// 3) One entry per group. Families (>=2 members) collapse to the stem label applying the lowest-
+	//    numbered member; singles (lone or non-numbered) keep their real asset name.
+	Out.Reserve(Groups.Num());
+	for (int32 g = 0; g < Groups.Num(); ++g)
+	{
+		const TArray<int32>& Members = Groups[g];
 		FContentEntry E;
-		E.ClassPath   = ClassPath;
-		E.DisplayName = Name;
-		E.bHidden     = bHidden;
+		E.bHidden = false;
+		if (Members.Num() == 1)
+		{
+			const FRaw& R = Visible[Members[0]];
+			E.DisplayName = R.Name;
+			E.ClassPath   = R.ClassPath;
+			E.VariantPaths.Add(R.ClassPath);
+		}
+		else
+		{
+			int32 BestMember = Members[0];
+			int32 BestRank   = VariantRank(Visible[Members[0]].Name);
+			for (int32 k = 1; k < Members.Num(); ++k)
+			{
+				const int32 Rank = VariantRank(Visible[Members[k]].Name);
+				if (Rank < BestRank) { BestRank = Rank; BestMember = Members[k]; }
+			}
+			E.DisplayName = GroupStem[g];                  // e.g. "SkaarjMale"
+			E.ClassPath   = Visible[BestMember].ClassPath; // e.g. SkaarjMale01 (lowest-numbered)
+			for (int32 m : Members) { E.VariantPaths.Add(Visible[m].ClassPath); }
+		}
 		Out.Add(E);
 	}
 }

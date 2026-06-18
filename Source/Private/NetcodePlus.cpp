@@ -548,7 +548,7 @@ static void HandleForceModelsList(const TArray<FString>& Args)
 	NCPlusForceModels::EnumerateContent(Entries, /*bIncludeHidden=*/true);
 	int32 NumHidden = 0;
 	for (const NCPlusForceModels::FContentEntry& E : Entries) { if (E.bHidden) { ++NumHidden; } }
-	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] %d installed character(s) (%d hidden via HiddenModels / bHideInUI). Name -> Class path:"), Entries.Num(), NumHidden);
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] %d installed character(s) (%d hidden via drop-list / HiddenModels / bHideInUI). Name -> Class path:"), Entries.Num(), NumHidden);
 	for (const NCPlusForceModels::FContentEntry& E : Entries)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("  %s%s  ->  %s"), E.bHidden ? TEXT("[HIDDEN] ") : TEXT(""), *E.DisplayName, *E.ClassPath);

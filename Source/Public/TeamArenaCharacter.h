@@ -186,9 +186,9 @@ public:
 	virtual void SetEyewearClass(TSubclassOf<AUTEyewear> EyewearClass) override;
 	virtual void LeaderHatStatusChanged_Implementation() override;
 
-	// Force Models "DarkenBodies": on a non-gib death, dissolve the corpse into its skeleton mesh.
-	// Client-side (PlayDying runs per-client), gated by bEnabled + bDarkenBodies. Spawns dc's cooked
-	// ModelDissolveEffect with the forced (or real) character's SkeletonMesh.
+	// Force Models "DarkenBodies": on death, hide the corpse after a short delay (so the death/ragdoll
+	// effects are still visible briefly). Client-side (PlayDying runs per-client), gated by bEnabled +
+	// bDarkenBodies.
 	virtual void PlayDying() override;
 
 protected:
@@ -221,7 +221,9 @@ protected:
 	 *  when transitioning back to false. Called from ApplyForcedModel. */
 	void UpdateCosmeticStrip(bool bShouldStrip);
 
-	/** DarkenBodies: spawn dc's ModelDissolveEffect with this pawn's (forced or real) skeleton mesh, if
-	 *  enabled and the death isn't a gib. Called from PlayDying (client-side). */
+	/** DarkenBodies: on death, schedule the corpse to hide after a short delay (lets death/ragdoll effects
+	 *  play first). Gated by bEnabled + bDarkenBodies. Called from PlayDying (client-side). */
 	void SpawnSkeletonDissolve();
+	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
+	void HideDeadBody();
 };

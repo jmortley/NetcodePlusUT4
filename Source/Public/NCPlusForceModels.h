@@ -137,12 +137,31 @@ namespace NCPlusForceModels
 	 *  AMutForceModels will own a replicated allow/deny policy this consults. */
 	NETCODEPLUS_API bool IsModelAllowed(TSubclassOf<AUTCharacterContent> Content);
 
-	/** A selectable installed character (for the picker). bHidden = matches the [ForceModels]
-	 *  HiddenModels curation denylist (kept out of the picker; surfaced by forcemodels_list). */
-	struct FContentEntry { FString DisplayName; FString ClassPath; bool bHidden = false; };
-	/** Enumerate every installed AUTCharacterContent (on-disk only -> self-limiting to renderable).
-	 *  Curated by [ForceModels] HiddenModels= (comma-separated name substrings) — those are excluded
-	 *  unless bIncludeHidden (the audit path) is true, where they're returned with bHidden=true. */
+	/** A selectable installed character (for the picker).
+	 *  bHidden      = curated out of the picker (baked drop-list / [ForceModels] HiddenModels / bHideInUI);
+	 *                 surfaced only on the audit path (forcemodels_list).
+	 *  ClassPath    = the AUTCharacterContent class actually applied when this entry is chosen.
+	 *  VariantPaths = every class path this entry stands for (always >=1). For a coalesced numbered family
+	 *                 (the single "SkaarjMale" entry covering SkaarjMale01..03) it lists all members and
+	 *                 ClassPath is the representative; for a normal entry it is just { ClassPath }. Lets the
+	 *                 menu show a saved variant path (e.g. SkaarjMale03) as this entry's current selection. */
+	struct FContentEntry
+	{
+		FString         DisplayName;
+		FString         ClassPath;
+		TArray<FString> VariantPaths;
+		bool            bHidden = false;
+	};
+	/** Enumerate installed AUTCharacterContent for the model picker (on-disk only -> self-limiting to
+	 *  renderable). Picker path (bIncludeHidden=false):
+	 *   - LOCKED to a baked allowlist of stems (custom: NecrisFemaleCoat/Genghis/LiandriRobot; stock
+	 *     families: NecrisFemale/NecrisMale/NecrisMale_Damian/NecrisMale_Necroth/SkaarjMale/TC_Male) — only
+	 *     these reach the menu, so new/unknown installed content can't auto-appear. [ForceModels] AllowModels=
+	 *     (comma-separated stems) appends more without a rebuild; and
+	 *   - COALESCES numbered variant families — NecrisMale01..05 collapse to one "NecrisMale" entry applying
+	 *     the lowest-numbered member.
+	 *  Audit path (bIncludeHidden=true, used by forcemodels_list): EVERY installed character, uncoalesced,
+	 *  with the denylist / bHideInUI-curated ones marked bHidden=true. */
 	NETCODEPLUS_API void EnumerateContent(TArray<FContentEntry>& Out, bool bIncludeHidden = false);
 
 	/** Union of known UT team-colour vector param names — shotgunned onto every model's MIDs.

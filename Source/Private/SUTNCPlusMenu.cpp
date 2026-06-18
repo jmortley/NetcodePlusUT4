@@ -530,12 +530,18 @@ TSharedRef<SWidget> SUTNCPlusMenu::MakeLabeledSpin(const FString& Label, float* 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusModelSettings* Side)
 {
 	// Resolve the model combo's initial selection from the stored class path ("(none)" if empty).
+	// Match against VariantPaths too, so a saved variant that got coalesced (e.g. SkaarjMale03 -> the
+	// "SkaarjMale" entry, which applies SkaarjMale01) still shows its family as the current selection
+	// even though the stored path isn't the representative. (The model itself still applies regardless,
+	// since the applier loads by path; this only fixes what the dropdown displays.)
 	TSharedPtr<FString> InitialModel = (FMModelOptions.Num() > 0) ? FMModelOptions[0] : nullptr;
 	if (!Side->ContentPath.IsEmpty())
 	{
 		for (int32 i = 0; i < FMContentEntries.Num(); ++i)
 		{
-			if (FMContentEntries[i].ClassPath == Side->ContentPath && FMModelOptions.IsValidIndex(i + 1))
+			const NCPlusForceModels::FContentEntry& E = FMContentEntries[i];
+			const bool bMatch = (E.ClassPath == Side->ContentPath) || E.VariantPaths.Contains(Side->ContentPath);
+			if (bMatch && FMModelOptions.IsValidIndex(i + 1))
 			{
 				InitialModel = FMModelOptions[i + 1];
 				break;
