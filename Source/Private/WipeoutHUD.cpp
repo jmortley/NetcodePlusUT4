@@ -9,6 +9,7 @@
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
 #include "NCPlusHUDLayout.h"
+#include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 
 AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -262,6 +263,10 @@ void AWipeoutHUD::DrawHUD()
 
 	// Guard: Canvas or fonts may be null during Slate UI overlays (e.g. weapon skins menu)
 	if (!Canvas || !SmallFont) return;
+
+	// TEMP head-hitbox debug (cvar `ncp.DebugHeads 1`): GREEN ring = the capsule headshot sphere the server
+	// validates, RED cross = the mesh head bone (the visible head). Lets us calibrate kHeadCapsuleDrop online.
+	NCPlusForceModels::DrawHeadDebug(Canvas, PlayerOwner);
 
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	bool bScoreboardIsUp = ScoreboardIsUp();
