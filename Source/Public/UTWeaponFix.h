@@ -300,12 +300,14 @@ public:
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
 
-    /** Server-side only (327 client-informed headshot): the client's OWN headshot determination for the
-     *  claimed target, computed from its trace against its rendered mesh — something the server can't
-     *  reconstruct from the capsule alone. Set in ServerStartFireFixed alongside the stock
-     *  ReceivedHitScanHitChar; consumed by the headshot gate, which still bounds it geometrically against
-     *  the rewound head (so a torso claim is rejected). Not replicated. */
-    bool ReceivedHeadClaim = false;
+    /** Server-side only (327 client-informed headshot): WHERE the client rendered the claimed target's
+     *  head — the offset of its rendered mesh head bone from the target's body. Lets the server place a
+     *  NORMAL-size head sphere at the head the player actually saw (forced models render their own head
+     *  here), instead of a fixed capsule point. Set in ServerStartFireFixed alongside the stock
+     *  ReceivedHitScanHitChar; the headshot gate CLAMPS it into the plausible head band of the rewound
+     *  capsule (so a chest/feet claim is impossible) and uses a normal radius (no inflation -> a torso hit
+     *  can't be upgraded). Zero = no claim. Not replicated. */
+    FVector ReceivedHeadOffset = FVector::ZeroVector;
 protected:
 
     FTimerHandle DeferredActiveStateHandle;
@@ -353,7 +355,7 @@ protected:
      * @param bClientPredicted - Whether client has already predicted this shot
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, bool bClientHeadShot);
+    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
 
     /**
      * Server RPC to stop firing.

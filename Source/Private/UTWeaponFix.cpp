@@ -747,7 +747,7 @@ void AUTWeaponFix::FireShot()
 		}
 
 		AUTCharacter* ClientHitChar = nullptr;
-		bool bClientHeadShot = false;
+		FVector ClientHeadOffset = FVector::ZeroVector;
 		if (bTrackHitScanReplication && InstantHitInfo.IsValidIndex(CurrentFireMode) &&
 			InstantHitInfo[CurrentFireMode].DamageType != NULL &&
 			InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.0f)
@@ -761,12 +761,22 @@ void AUTWeaponFix::FireShot()
 			HitScanTrace(SpawnLocation, EndTrace, InstantHitInfo[CurrentFireMode].TraceHalfSize, PreHit, 0.0f);
 			ClientHitChar = Cast<AUTCharacter>(PreHit.Actor.Get());
 
-			// 327 client-informed headshot: the client traces its OWN rendered mesh here, so it can tell
-			// whether the shot hit the head — which the server can't reconstruct from the capsule + a ping
-			// rewind. Report it; the server still bounds it geometrically against the rewound head (anti-cheat).
-			if (ClientHitChar != nullptr)
+			// 327 client-informed headshot (SECURE): report WHERE the client rendered the target's head —
+			// the offset of its rendered mesh head bone from the target's body — but only when the shot
+			// actually passed through that rendered head (normal radius). Under Force Models the client
+			// renders the forced model's own head mesh here, so this IS "the head I saw". The server clamps
+			// it into the head band and uses a normal sphere (see UTPlusSniper), so it can't be abused.
+			// Zero = no claim (an honest head offset is never zero — the head is always above body centre).
+			if (ClientHitChar != nullptr && ClientHitChar->GetMesh())
 			{
-				bClientHeadShot = ClientHitChar->IsHeadShot(PreHit.Location, FireDir, 1.0f, UTOwner, 0.0f);
+				const FVector RenderedHead = ClientHitChar->GetMesh()->GetSocketLocation(ClientHitChar->HeadBone)
+					+ FVector(0.f, 0.f, ClientHitChar->HeadHeight);
+				const bool bThroughHead = FMath::PointDistToLine(RenderedHead, FireDir, PreHit.Location)
+					< ClientHitChar->HeadRadius * ClientHitChar->HeadScale;
+				if (bThroughHead)
+				{
+					ClientHeadOffset = RenderedHead - ClientHitChar->GetActorLocation();
+				}
 			}
 		}
 
@@ -781,7 +791,7 @@ void AUTWeaponFix::FireShot()
 			}
 		}
 
-		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset, bClientHeadShot);
+		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
         QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
 
 		// Cache the client's exact aim direction at fire-press time.
@@ -1240,7 +1250,7 @@ bool AUTWeaponFix::IsFireEventSequenceValid(uint8 FireModeNum, int32 InEventInde
 
 
 
-void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, bool bClientHeadShot)
+void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
     // 1. VALIDATION (Your existing transactional checks)
     UWorld* World = GetWorld();
@@ -1300,13 +1310,13 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         ReceivedHitScanHitChar = ClientHitChar;
         // InFireEventIndex matches FireEventIndex, so (ReceivedHitScanIndex == FireEventIndex) check passes
         ReceivedHitScanIndex = (uint8)InFireEventIndex;
-        ReceivedHeadClaim = bClientHeadShot;   // 327: client's own head determination; bounded by the headshot gate
+        ReceivedHeadOffset = ClientHeadOffset;   // 327: client's rendered head position; clamped + bounded by the headshot gate
     }
     else
     {
         ReceivedHitScanHitChar = nullptr;
         ReceivedHitScanIndex = 0;
-        ReceivedHeadClaim = false;
+        ReceivedHeadOffset = FVector::ZeroVector;
     }
 
     // 2. UPDATE STATE
@@ -1460,7 +1470,7 @@ void AUTWeaponFix::Tick(float DeltaTime)
 }
 
 
-bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, bool bClientHeadShot)
+bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
     return FireModeNum < GetNumFireModes() &&
         InFireEventIndex > 0 &&
@@ -3517,9 +3527,9 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum, 
 
     // Execute the actual fire logic
     // This calculates the delay and fast-forwards the projectile to catch up
-    // Resent (dropped-packet) shots don't carry the client head claim (it isn't threaded through the
-    // unreliable resend path) — pass false; these fall back to the server-side head check. Rare + graceful.
-    ServerStartFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, true, ClientViewRot, ClientHitChar, ZOffset, false);
+    // Resent (dropped-packet) shots don't carry the client head offset (it isn't threaded through the
+    // resend path) — pass zero; these fall back to the stock capsule-relative head check. Rare + graceful.
+    ServerStartFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, true, ClientViewRot, ClientHitChar, ZOffset, FVector::ZeroVector);
 
     bNetDelayedShot = false;
 }

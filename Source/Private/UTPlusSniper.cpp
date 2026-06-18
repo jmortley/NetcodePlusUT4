@@ -296,18 +296,37 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 				}
 			}
 
-			// 327 client-informed headshot: if the client (which traced its OWN rendered mesh) reported a
-			// head hit on THIS exact target, widen the head sphere to a bounded tolerance covering the
-			// client-render-vs-server-capsule gap. Strict: the multiplier is capped, so the aim ray must
-			// still pass within ~kClientHeadClaimScale*HeadRadius of the rewound head — a torso claim is
-			// rejected, only an honest "I hit the head I saw" is honored. (Resent shots report false.)
-			if (C == ReceivedHitScanHitChar && ReceivedHeadClaim)
+			// 327 client-informed headshot (SECURE): when the client reported WHERE it rendered the head
+			// (an offset from the target body, from its rendered mesh head bone), validate a NORMAL-size
+			// head sphere placed at that client-informed centre — but CLAMP the centre into the plausible
+			// head band of the REWOUND capsule first. Precise (the sphere sits at the forced model's actual
+			// rendered head, not a fixed capsule point) AND safe (normal radius + clamped centre => a torso
+			// hit can't be upgraded; a chest/feet claim is clamped back to the real head region). NO 2.5x
+			// inflation. Unclaimed / resent shots fall back to the stock capsule-relative head check.
+			// Calibrate the band with ncp.DebugHeads.
+			bool bHead = false;
+			if (C == ReceivedHitScanHitChar && !ReceivedHeadOffset.IsZero())
 			{
-				const float kClientHeadClaimScale = 2.5f;  // ~45u tolerance at HeadRadius 18; tune via ncp.DebugHeads
-				EffectiveHeadScale = FMath::Max(EffectiveHeadScale, kClientHeadClaimScale);
+				static const float kHeadBandLow  = 45.f;  // head centre sits within the top ~[5..45]u of the capsule
+				static const float kHeadBandHigh = 5.f;
+				static const float kHeadBandXY   = 22.f;   // ~head radius off the capsule axis
+				const float HH = C->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+				FVector Off = ReceivedHeadOffset;
+				Off.Z = FMath::Clamp(Off.Z, HH - kHeadBandLow, HH - kHeadBandHigh);
+				Off.X = FMath::Clamp(Off.X, -kHeadBandXY, kHeadBandXY);
+				Off.Y = FMath::Clamp(Off.Y, -kHeadBandXY, kHeadBandXY);
+				const FVector HeadCentre = C->GetRewindLocation(PredictionTime) + Off;
+				// Same sphere SIZE as the stock check (EffectiveHeadScale already carries the moving-target
+				// padding) — only the CENTRE moves to where the client rendered the head. NO inflation.
+				bHead = FMath::PointDistToLine(HeadCentre, FireDir, Hit.Location)
+					< C->HeadRadius * C->HeadScale * EffectiveHeadScale;
+			}
+			else
+			{
+				bHead = C->IsHeadShot(Hit.Location, FireDir, EffectiveHeadScale, UTOwner, PredictionTime);
 			}
 
-			if (C->IsHeadShot(Hit.Location, FireDir, EffectiveHeadScale, UTOwner, PredictionTime))
+			if (bHead)
 			{
 				bIsHeadShot = true;
 				if (C->BlockedHeadShot(Hit.Location, FireDir, EffectiveHeadScale, true, UTOwner))
