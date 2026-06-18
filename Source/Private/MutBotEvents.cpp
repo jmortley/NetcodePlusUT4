@@ -723,9 +723,13 @@ void AMutBotEvents::WriteToTTimelineCsv() const
 	// (normally yes, the engine log lives there, but be defensive on a fresh box).
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), /*Tree=*/true);
 	if (FFileHelper::SaveStringToFile(Csv, *Path))
+	{
 		UE_LOG(LogBotEvents, Warning, TEXT("[ToT] timeline written: %s (%d samples)"), *Path, Rows.Num());
+	}
 	else
+	{
 		UE_LOG(LogBotEvents, Warning, TEXT("[ToT] FAILED to write timeline: %s"), *Path);
+	}
 }
 
 void AMutBotEvents::PostMatchEnded()

@@ -1028,7 +1028,9 @@ namespace NCPlusHUDDrawCall
 		if (Path.IsEmpty()) return;
 
 		TArray<FString> Lines;
-		if (!FFileHelper::LoadFileToStringArray(Lines, *Path)) return;
+		FString Whole;
+		if (!FFileHelper::LoadFileToString(Whole, *Path)) return;  // 4.15 has LoadFileToString, not ...Array
+		Whole.ParseIntoArray(Lines, TEXT("\n"), /*CullEmpty=*/true);
 
 		for (int32 i = 0; i < Lines.Num(); ++i)
 		{
