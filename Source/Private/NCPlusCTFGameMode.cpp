@@ -1,5 +1,6 @@
 // NCPlusCTFGameMode.cpp - NetcodePlus CTF with improved advantage time and instant replay
 #include "NCPlusCTFGameMode.h"
+#include "NCToTCollector.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"            // ValidateHat: SetOverrideHatClass / OverrideHatClass
 #include "UTTeamGameMode.h"
@@ -304,6 +305,8 @@ bool ANCPlusCTFGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBr
 void ANCPlusCTFGameMode::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+
+	FNCToTCollector::Get().ReportOnce(GetWorld());   // emit [ToT] + CSV (guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -1845,6 +1848,7 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
+		FNCToTCollector::Get().Reset();   // first half only — accumulate ToT across both halves
 	}
 
 	// Spawn CTF stats replicator for scoreboard (grabs, accuracy).

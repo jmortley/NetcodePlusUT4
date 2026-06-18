@@ -23,6 +23,7 @@
 #include "UTPlayerState.h"
 #include "ElimPlusGame.h"
 #include "MutBotEvents.h"
+#include "NCToTCollector.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
 
@@ -1615,12 +1616,10 @@ void AUTWeaponFix::ServerReportFireToT_Implementation(int32 DwellMs, uint8 Frame
 {
     AUTPlayerState* PS = UTOwner ? Cast<AUTPlayerState>(UTOwner->PlayerState) : nullptr;
     if (!PS) return;
-    if (AMutBotEvents* Bot = FindBotEventsMutator())
-    {
-        // Clamp into a sane telemetry range server-side (a tampering client could
-        // send anything — this is review-only data, never gameplay-affecting).
-        Bot->RecordFireToT(PS, FMath::Clamp(DwellMs, 0, 60000), FrameMs, bClaimedHit);
-    }
+    // Record into the standalone collector — mutator-INDEPENDENT, so ToT works on any
+    // NetcodePlus server (NA autopug doesn't load MutBotEvents). Clamp server-side; this
+    // is review-only data, never gameplay-affecting.
+    FNCToTCollector::Get().Record(GetWorld(), PS, FMath::Clamp(DwellMs, 0, 60000), FrameMs, bClaimedHit);
 }
 
 bool AUTWeaponFix::ServerReportFireToT_Validate(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)

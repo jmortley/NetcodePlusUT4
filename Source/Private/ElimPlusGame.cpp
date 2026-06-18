@@ -1,4 +1,5 @@
 #include "ElimPlusGame.h"
+#include "NCToTCollector.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
@@ -250,6 +251,8 @@ void AElimPlusGame::HandleMatchHasStarted()
 	UE_LOG(LogGameMode, Warning, TEXT("  GetNetMode: %d"), (int32)GetNetMode());
 	Super::HandleMatchHasStarted();
 
+	FNCToTCollector::Get().Reset();   // fresh ToT table + CSV id for this match
+
 	bWarmupMode = false;
 
 	// Defense-in-depth reset of the flush guard: InitGame already resets it on
@@ -396,6 +399,8 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 void AElimPlusGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+
+	FNCToTCollector::Get().ReportOnce(GetWorld());   // emit [ToT] + CSV (guards double-route)
 
 	// Persist updated ratings to Mods.db and emit the final ELO + match delta
 	// to the replicator. Engine routes HandleMatchHasEnded twice in some paths
