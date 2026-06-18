@@ -308,6 +308,50 @@ public:
      *  capsule (so a chest/feet claim is impossible) and uses a normal radius (no inflation -> a torso hit
      *  can't be upgraded). Zero = no claim. Not replicated. */
     FVector ReceivedHeadOffset = FVector::ZeroVector;
+
+    // ============================================================
+    // Fire-validation telemetry: time-on-target at fire (ToT).
+    // Cheap client-only per-frame tracker + an owner-only gate. The actual
+    // per-player accumulation + reporting is server-authoritative and lives in
+    // AMutBotEvents. Active ONLY in Elim / instagib-CTF; dormant (zero cost)
+    // everywhere else. Pure telemetry — never affects gameplay/hit-reg/scoring.
+    // ============================================================
+
+    /** Owner-only gate, set server-side in BeginPlay and replicated to the owning
+     *  client. True only when (Elim or instagib-CTF) AND this weapon is a
+     *  UTPlusSniper or UTPlusShockRifle (or child) — i.e. instagib / shock /
+     *  sniper / LG. When false the client tracker and the report RPC are skipped
+     *  entirely. */
+    UPROPERTY(Replicated)
+    bool bToTDetectActive = false;
+
+    /** Client-side: local-clock time (World->GetTimeSeconds()) at which the
+     *  crosshair FIRST landed on a visible (occlusion-checked) enemy in the current
+     *  continuous on-target run; -1 = not currently on a visible enemy. Dwell is
+     *  read at fire as (now - ToTAcquireTime), which avoids the per-frame DeltaTime
+     *  accumulation and the tick/fire ordering jitter the old counter had. Shipped
+     *  full-range in milliseconds (int32, no 255 ms cap), so heavy trackers no
+     *  longer saturate the server-side mean. */
+    float ToTAcquireTime = -1.0f;
+
+    /** Client-side: the enemy the crosshair is currently dwelling on. When the
+     *  traced enemy changes (target-to-target snap), the acquire instant resets so
+     *  the new target starts from zero dwell. Weak so a destroyed/reused actor
+     *  address can't masquerade as the same target. */
+    TWeakObjectPtr<class AUTCharacter> ToTLastTarget;
+
+    /** Client-side: smoothed (EMA) frame time in seconds, sent alongside each
+     *  sample as fps context. The low-dwell band is still frame-quantized near
+     *  zero (a 60 fps client cannot produce a sub-16 ms dwell), so review must be
+     *  able to see each player's frame rate to discount that bias. */
+    float ToTFrameTimeEMA = 0.0f;
+
+    /** Per-frame client tracker: one occlusion-aware crosshair line trace. */
+    void UpdateToTTracker(float DeltaTime);
+
+    /** Finds the bot-events mutator (the telemetry sink). Null on non-bot servers. */
+    class AMutBotEvents* FindBotEventsMutator() const;
+
 protected:
 
     FTimerHandle DeferredActiveStateHandle;
@@ -366,6 +410,16 @@ protected:
      */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
+
+    /** Telemetry sidecar — reports client time-on-target at the moment of a
+     *  hitscan fire the client believes connected. UNRELIABLE on purpose: a
+     *  dropped sample only thins the distribution, and this must never compete
+     *  with the reliable fire RPCs for bandwidth. Server-side it is clamped and
+     *  routed to AMutBotEvents; it has ZERO effect on gameplay, hit validation,
+     *  or scoring. Separate from ServerStartFireFixed by design — the hit-reg
+     *  path is never touched. */
+    UFUNCTION(Server, Unreliable, WithValidation)
+    void ServerReportFireToT(int32 DwellMs, uint8 FrameMs, bool bClaimedHit);
 
     /**
      * Client RPC to confirm a fire event or correct client's event index.
