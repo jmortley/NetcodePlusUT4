@@ -1166,7 +1166,7 @@ namespace NCPlusHUDDrawCall
 
 // Dirty flag — gates per-frame apply so DrawHUD does ~zero work when nothing changed.
 // Starts true so the first frame applies whatever was loaded on PIE start.
-static bool GLiveLayoutDirty = true; ++GLayoutRevision;
+static bool GLiveLayoutDirty = true;
 
 FNCPlusHUDLayout& FNCPlusHUDLayout::GetLive()
 {

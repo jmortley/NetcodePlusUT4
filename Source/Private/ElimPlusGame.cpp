@@ -206,7 +206,6 @@ void AElimPlusGame::BeginPlay()
 
 	if (!bSpawnPointsInitialized)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("Force initializing spawn system in BeginPlay"));
 		InitializeSpawnPointSystem();
 		bSpawnPointsInitialized = true;
 	}
@@ -241,14 +240,9 @@ void AElimPlusGame::DelayedEndGame(int32 WinnerTeamIndex, FName Reason)
 
 void AElimPlusGame::HandleMatchHasStarted()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("=== TeamArena::HandleMatchHasStarted ENTER ==="));
 	// Build marker — change the tag string below whenever you want to verify
-	// the deployed binary contains a specific commit's changes. Lives next to
-	// the proven-reliable HandleMatchHasStarted ENTER line.
+	// the deployed binary contains a specific commit's changes.
 	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus build marker: rebalance+warnings+broadcast (post-ca60db0)"));
-	UE_LOG(LogGameMode, Warning, TEXT("  UTIsHandlingReplays: %s"), UTIsHandlingReplays() ? TEXT("TRUE") : TEXT("FALSE"));
-	UE_LOG(LogGameMode, Warning, TEXT("  GetGameInstance: %s"), GetGameInstance() ? TEXT("VALID") : TEXT("NULL"));
-	UE_LOG(LogGameMode, Warning, TEXT("  GetNetMode: %d"), (int32)GetNetMode());
 	Super::HandleMatchHasStarted();
 
 	FNCToTCollector::Get().Reset();   // fresh ToT table + CSV id for this match
@@ -469,7 +463,6 @@ void AElimPlusGame::HandleMatchHasEnded()
 
 void AElimPlusGame::CallMatchStateChangeNotify()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("Current matchstate: %s"), *GetMatchState().ToString());
 	// This function intercepts all SetMatchState calls
 	// and routes them to our custom handlers.
 	if (GetMatchState() == MatchState::WaitingToStart)
@@ -826,7 +819,7 @@ void AElimPlusGame::HandleInstanceCleanup()
  */
 void AElimPlusGame::HandleMatchIntermission()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("HandleMatchIntermission: Preparing for next round."));
+	UE_LOG(LogGameMode, Verbose, TEXT("HandleMatchIntermission: Preparing for next round."));
 
 
 	// Reset spawn points for the new round
@@ -846,7 +839,7 @@ void AElimPlusGame::HandleMatchIntermission()
  */
 void AElimPlusGame::StartIntermission(int32 Seconds)
 {
-	UE_LOG(LogGameMode, Warning, TEXT("StartIntermission: Entering intermission for %d seconds."), Seconds);
+	UE_LOG(LogGameMode, Verbose, TEXT("StartIntermission: Entering intermission for %d seconds."), Seconds);
 
 	bRoundInProgress = false;
 	IntermissionSecondsRemaining = FMath::Max(1, Seconds); // Ensure at least 1 second
@@ -878,7 +871,7 @@ void AElimPlusGame::StartIntermission(int32 Seconds)
 
 void AElimPlusGame::StartNextRound()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("StartNextRound: Spawning players and starting round."));
+	UE_LOG(LogGameMode, Verbose, TEXT("StartNextRound: Spawning players and starting round."));
 
 	if (bWarmupMode)
 	{
@@ -1015,7 +1008,7 @@ void AElimPlusGame::OnAllPlayersSpawned()
 {
 	bAllowPlayerRespawns = false;
 
-	UE_LOG(LogGameMode, Warning, TEXT("Round starting sizes - Team0: %d, Team1: %d"), Team0StartingSize, Team1StartingSize);
+	UE_LOG(LogGameMode, Verbose, TEXT("Round starting sizes - Team0: %d, Team1: %d"), Team0StartingSize, Team1StartingSize);
 
 	// Set round timer
 	if (RoundTimeSeconds > 0)
@@ -1877,11 +1870,6 @@ AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("ElimPlus: %s (team %d) assigned spawn at %s (curated pool %d)"),
-		*PS->PlayerName, TeamIndex,
-		BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"),
-		MySpawns.Num());
-
 	return BestSpawn ? BestSpawn : Super::ChoosePlayerStart_Implementation(Player);
 }
 
@@ -1895,7 +1883,6 @@ AActor* AElimPlusGame::FindPlayerStart_Implementation(AController* Player, const
 		return OverriddenPlayerStart;
 	}
 
-	UE_LOG(LogGameMode, Warning, TEXT("Calling parent findplayerstart"));
 	return Super::FindPlayerStart_Implementation(Player, IncomingName);
 }
 
@@ -2371,24 +2358,9 @@ void AElimPlusGame::ForceLosersToViewWinners(int32 WinnerTeamIndex)
 
 void AElimPlusGame::DebugPlayerStates()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("=== DEBUG PLAYER STATES ==="));
-	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-	{
-		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
-		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
-		if (!PC || !PS) continue;
-		FName StateName = PC->GetStateName();
-		AActor* ViewTarget = PC->GetViewTarget();
-		FString ViewTargetName = ViewTarget ? ViewTarget->GetName() : TEXT("None");
-		/*UE_LOG(LogGameMode, Warning, TEXT("Player: %s, Team: %d, State: %s, ViewTarget: %s, OutOfLives: %s, HasPawn: %s"),
-			*PS->PlayerName,
-			PS->Team ? PS->Team->TeamIndex : -1,
-			StateName.IsValid() ? *StateName.ToString() : TEXT("Unknown"),
-			*ViewTargetName,
-			PS->bOutOfLives ? TEXT("Yes") : TEXT("No"),
-			PC->GetPawn() ? TEXT("Yes") : TEXT("No")); */
-	}
-	//UE_LOG(LogGameMode, Warning, TEXT("=== END DEBUG ==="));
+	// (no-op) The per-player debug dump was disabled; the body + "=== DEBUG
+	// PLAYER STATES ===" header log were removed to cut the spam. Re-add a
+	// Verbose loop here if you need it.
 }
 
 bool AElimPlusGame::CanSpectate_Implementation(APlayerController* Viewer, APlayerState* ViewTarget)
@@ -2966,7 +2938,7 @@ void AElimPlusGame::StartOvertime()
 		false
 	);
 	BP_OnOvertimeStarted();
-	UE_LOG(LogGameMode, Warning, TEXT("Overtime has started! First wave in %.1f seconds with %.1f damage"),
+	UE_LOG(LogGameMode, Verbose, TEXT("Overtime has started! First wave in %.1f seconds with %.1f damage"),
 		OvertimeStartDelay, OvertimeBaseDamage);
 }
 
@@ -3030,7 +3002,7 @@ void AElimPlusGame::ExecuteOvertimeWave()
 	{
 		CurrentWaveDamage = FMath::Min(CurrentWaveDamage, OvertimeMaxDamage);
 	}
-	UE_LOG(LogGameMode, Warning, TEXT("Overtime Wave %d: %.1f damage to %d players"),
+	UE_LOG(LogGameMode, Verbose, TEXT("Overtime Wave %d: %.1f damage to %d players"),
 		CurrentOvertimeWave, CurrentWaveDamage, GetWorld()->GetNumPawns());
 	BP_OnOvertimeWave(CurrentWaveDamage, CurrentOvertimeWave);
 	int32 DamageCount = 0;
@@ -3082,7 +3054,7 @@ void AElimPlusGame::ExecuteOvertimeWave()
 
 		}
 	}
-	UE_LOG(LogGameMode, Warning, TEXT("Applied damage to %d players"), DamageCount);
+	UE_LOG(LogGameMode, Verbose, TEXT("Applied damage to %d players"), DamageCount);
 	CheckRoundWinConditions();
 	if (bRoundInProgress)
 	{
