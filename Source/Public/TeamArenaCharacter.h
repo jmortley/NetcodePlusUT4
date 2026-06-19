@@ -191,6 +191,13 @@ public:
 	// bDarkenBodies.
 	virtual void PlayDying() override;
 
+	/** True iff this pawn is controlled by a LOCAL HUMAN player — i.e. it's "my own" pawn (incl. split-screen).
+	 *  PUBLIC so DrawHeadDebug can use it too. Use this, NOT IsLocallyControlled(), to skip the local player's
+	 *  pawn: in NM_Standalone (offline) IsLocallyControlled() is true for EVERY controller (bots' AIControllers
+	 *  included), which made Force Models + the DebugHeads ring skip ALL pawns offline. Bots use AIController, so
+	 *  the Cast excludes them; IsLocalController() keeps remote players (listen server) from matching. */
+	bool IsLocalPlayerPawn() const;
+
 protected:
 	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
 	// Server-only; synced when ArmorType is belt, decremented on damage.

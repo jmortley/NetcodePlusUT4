@@ -305,9 +305,9 @@ void AElimPlusHUD::DrawHUD()
 	const bool bScoreboardIsUp = ScoreboardIsUp();
 
 	// Head-hitbox calibration (cvar `ncp.DebugHeads 1`): GREEN ring = the capsule headshot sphere the server
-	// validates, RED cross = the mesh head bone (the visible head). WARMUP-ONLY (WaitingToStart) so it can't
-	// clutter live play; calibrate kHeadCapsuleDrop/bands against forced models during warmup before the match.
-	if (GS && GS->GetMatchState() == MatchState::WaitingToStart)
+	// validates, RED cross = the mesh head bone (the visible head). Warmup-only in NETWORKED play (anti head-ESP)
+	// but ALWAYS in standalone/offline so you can calibrate in a live single-player match (host -> cvar drives both).
+	if (GS && (GS->GetMatchState() == MatchState::WaitingToStart || GetWorld()->GetNetMode() == NM_Standalone))
 	{
 		NCPlusForceModels::DrawHeadDebug(Canvas, PlayerOwner);
 	}

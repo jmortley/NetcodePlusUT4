@@ -28,6 +28,19 @@ static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("Players can set to 0 to opt-out (force server positions)."),
 	ECVF_Default); // Saves to user config
 
+// Headshot sphere CENTRE distance below the capsule top, in units. LOWER = the sphere moves UP toward the head
+// (it does NOT change the sphere SIZE — that's HeadRadius). Live-tunable so it can be calibrated in warmup against
+// ncp.DebugHeads instead of a rebuild per tweak. ⚠️ MUST match client + server: the SERVER's value is authoritative
+// for the fallback head validation (GetHeadLocation -> IsHeadShot); the client's value only moves the debug ring.
+// Set it on your dogfood server (or a listen server, where client == server) so the green ring AND the real hitbox
+// move together. NB the PRIMARY sniper client-informed path uses the HeadBand* clamp, not this — see UTPlusSniper.
+static TAutoConsoleVariable<float> CVarHeadCapsuleDrop(
+	TEXT("ncp.HeadCapsuleDrop"),
+	20.0f,   // calibrated 2026-06-19 (was 26; robot/genghis heads sit higher than the stock ~Z+82)
+	TEXT("Headshot sphere centre distance below the capsule top (units). Lower = sphere moves UP toward the head; ")
+	TEXT("size is unchanged (HeadRadius). Calibrate live in warmup vs ncp.DebugHeads. Server value is authoritative."),
+	ECVF_Default);
+
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer.SetDefaultSubobjectClass<UTeamArenaCharacterMovement>(ACharacter::CharacterMovementComponentName))
@@ -70,7 +83,7 @@ void ATeamArenaCharacter::NotifyTeamChanged()
 		// every OTHER pawn's bucket can flip — but their NotifyTeamChanged won't fire. Refresh them
 		// (also coalesced to the next-tick flush). Matters for Enemy-Only / Team-Enemy styles; a cheap
 		// no-op for absolute Red/Blue.
-		if (IsLocallyControlled())
+		if (IsLocalPlayerPawn())
 		{
 			bRefreshOthersDirty = true;
 		}
@@ -96,12 +109,24 @@ void ATeamArenaCharacter::FlushForcedModelUpdate()
 	}
 }
 
+// "Is this MY OWN pawn?" — controlled by a LOCAL human player. Deliberately NOT IsLocallyControlled(): in
+// NM_Standalone (offline) every controller (incl. bots' AIControllers) reports IsLocalController()==true, so
+// IsLocallyControlled() was true for every pawn and Force Models skipped them all offline. Bots use AIController,
+// not a PlayerController, so the Cast cleanly excludes them; IsLocalController() keeps remote players (on a listen
+// server) from matching. Correct in standalone, client, and listen-server.
+bool ATeamArenaCharacter::IsLocalPlayerPawn() const
+{
+	const APlayerController* const PC = Cast<APlayerController>(Controller);
+	return PC && PC->IsLocalController();
+}
+
 void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 {
 	// Client-side render preference only — never on a dedicated server, never replicated.
 	if (GetNetMode() == NM_DedicatedServer) { return; }
 	if (bApplyingForcedModel) { return; }                 // re-entrancy guard (ApplyCharacterData / base NotifyTeamChanged)
-	if (IsLocallyControlled()) { return; }                // never reskin your own pawn
+	if (IsLocalPlayerPawn()) { return; }                  // never reskin MY OWN pawn (NOT IsLocallyControlled —
+	                                                      // that's true for ALL pawns offline; see IsLocalPlayerPawn)
 
 	UWorld* const World = GetWorld();
 
@@ -360,7 +385,7 @@ void ATeamArenaCharacter::RefreshOtherForcedModels()
 	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
 	{
 		ATeamArenaCharacter* Other = *It;
-		if (Other && Other != this && !Other->IsLocallyControlled())
+		if (Other && Other != this && !Other->IsLocalPlayerPawn())
 		{
 			Others.Add(Other);
 		}
@@ -380,7 +405,7 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	// Redirect that yellow to our match/complimentary armour colour, for pawns we reskin. Client-only
 	// (OverlayMesh's MID only exists off the dedicated server). This is the ArmorType OnRep, so it
 	// re-fires on every armour change and always runs AFTER the stock colour, winning cleanly.
-	if (GetNetMode() == NM_DedicatedServer || IsLocallyControlled() || !OverlayMesh) { return; }
+	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn() || !OverlayMesh) { return; }  // skip MY pawn (offline-safe)
 
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	if (!C.bEnabled || !C.bArmour) { return; }
@@ -794,10 +819,13 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 	// capsule, UTCharacter.cpp:5351) lines up with it. Also makes the rewind exact (fixed capsule geometry,
 	// no animated-bone pose to approximate) and drops the per-check RefreshBoneTransforms.
 	//
-	// kHeadCapsuleDrop = sphere CENTRE below the capsule top (standing half-height 108, stock head ~Z+82 ->
-	// ~26). Compile-time constant so client and server agree. Calibrate visually on the 327-experimental
-	// branch (ncp.DebugHeads marker), then mirror the value here. GetScaledCapsuleHalfHeight() is crouch-aware.
-	static const float kHeadCapsuleDrop = 26.0f;
+	// kHeadCapsuleDrop = sphere CENTRE below the capsule top (standing half-height 108, stock head ~Z+82 -> ~26).
+	// Now a live cvar (ncp.HeadCapsuleDrop) so it can be calibrated in warmup vs ncp.DebugHeads without a rebuild —
+	// LOWER it to raise the sphere onto the head. Read on any thread (validation is game-thread; harmless elsewhere).
+	// Client + server must use the same value (server authoritative for validation). GetScaledCapsuleHalfHeight() is
+	// crouch-aware. NB a forced model whose head sits higher than stock (e.g. a tall robot) needs a SMALLER drop than
+	// 26 — that's why the default lands at the chest on some models; pick a value that fits the models you run.
+	const float kHeadCapsuleDrop = CVarHeadCapsuleDrop.GetValueOnAnyThread();
 
 	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 	// GetRewindLocation rewinds the actor (capsule) position on the server and returns the current position

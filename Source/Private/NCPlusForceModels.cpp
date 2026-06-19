@@ -301,7 +301,8 @@ void NCPlusForceModels::DrawHeadDebug(UCanvas* Canvas, APlayerController* PC)
 	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
 	{
 		ATeamArenaCharacter* C = *It;
-		if (!C || C->IsLocallyControlled()) { continue; }      // skip your own pawn
+		if (!C || C->IsLocalPlayerPawn()) { continue; }        // skip MY own pawn (offline-safe; NOT IsLocallyControlled,
+		                                                       // which is true for ALL pawns in standalone)
 
 		// GREEN ring: the capsule-relative head sphere the server actually validates.
 		const FVector HeadWorld = C->GetHeadLocation(0.f);
@@ -846,6 +847,15 @@ static void MaybeMigrateFromTeamSkins(const FString& Path)
 	UE_LOG(LogTemp, Log, TEXT("[ForceModels] Seeded config from dc MutTeamSkins (one-time onboarding)."));
 }
 
+// Name-substring denylist of engine base / test / unusable character stems — kept out of BOTH the
+// forcemodels_list audit listing AND the AllowAnyModel picker. [ForceModels] HiddenModels= appends.
+static const TCHAR* const GFMDefaultHiddenStems[] = {
+	TEXT("HumanMaleBase"), TEXT("NecrisFemaleBase"), TEXT("NecrisMaleBase"), TEXT("SkaarjMaleBase"),
+	TEXT("LTC_Bot_CharacterData"), TEXT("BP_Char_Oct2015"),
+	TEXT("TC_GodKing"), TEXT("TC_Siris"),
+	TEXT("UNUSED_"), TEXT("TC_ArmorNewV"),
+};
+
 void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bIncludeHidden)
 {
 	TArray<FAssetData> Assets;
@@ -860,14 +870,8 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 		bool bHideTest = true;
 		GConfig->GetBool(TEXT("ForceModels"), TEXT("HideTestModels"), bHideTest, ModIniPath());
 
-		static const TCHAR* const DefaultHidden[] = {
-			TEXT("HumanMaleBase"), TEXT("NecrisFemaleBase"), TEXT("NecrisMaleBase"), TEXT("SkaarjMaleBase"),
-			TEXT("LTC_Bot_CharacterData"), TEXT("BP_Char_Oct2015"),
-			TEXT("TC_GodKing"), TEXT("TC_Siris"),
-			TEXT("UNUSED_"), TEXT("TC_ArmorNewV"),
-		};
 		TArray<FString> Hidden;
-		for (const TCHAR* D : DefaultHidden) { Hidden.Add(D); }
+		for (const TCHAR* D : GFMDefaultHiddenStems) { Hidden.Add(D); }
 		FString HiddenStr;
 		GConfig->GetString(TEXT("ForceModels"), TEXT("HiddenModels"), HiddenStr, ModIniPath());
 		if (!HiddenStr.IsEmpty())
@@ -932,7 +936,34 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 		}
 	}
 
-	// 1) Collect only allowed stems (exact stem match, case-insensitive), in registry order.
+	// [ForceModels] AllowAnyModel=true (server-owner opt-in; read from THIS install's Mod.ini) drops
+	// the curated allowlist so every installed character is selectable — still minus the cheap
+	// name-substring denylist (engine base/test/unusable + HiddenModels=). Default false keeps the
+	// shipped allowlist. (The bHideInUI CDO-load curation stays off the picker path for cost.)
+	bool bAllowAny = false;
+	GConfig->GetBool(TEXT("ForceModels"), TEXT("AllowAnyModel"), bAllowAny, ModIniPath());
+	TArray<FString> Hidden;
+	if (bAllowAny)
+	{
+		for (const TCHAR* D : GFMDefaultHiddenStems) { Hidden.Add(D); }
+		FString HiddenStr;
+		GConfig->GetString(TEXT("ForceModels"), TEXT("HiddenModels"), HiddenStr, ModIniPath());
+		if (!HiddenStr.IsEmpty())
+		{
+			TArray<FString> Parts;
+			HiddenStr.ParseIntoArray(Parts, TEXT(","), true);
+			for (const FString& Raw : Parts)
+			{
+				int32 S = 0, E = Raw.Len();
+				while (S < E && FChar::IsWhitespace(Raw[S]))     { ++S; }
+				while (E > S && FChar::IsWhitespace(Raw[E - 1])) { --E; }
+				const FString T = Raw.Mid(S, E - S);
+				if (!T.IsEmpty()) { Hidden.Add(T); }
+			}
+		}
+	}
+
+	// 1) Collect stems: default = the curated allowlist; AllowAnyModel = all installed minus denylist.
 	struct FRaw { FString Name; FString ClassPath; };
 	TArray<FRaw> Visible;
 	Visible.Reserve(Assets.Num());
@@ -941,12 +972,24 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 		const FString Name      = A.AssetName.ToString();
 		const FString ClassPath = A.ObjectPath.ToString() + TEXT("_C");
 		const FString Stem      = StemOf(Name);
-		bool bAllowed = false;
-		for (const FString& Al : Allowed)
+		if (bAllowAny)
 		{
-			if (Stem.Equals(Al, ESearchCase::IgnoreCase)) { bAllowed = true; break; }
+			bool bDenied = false;
+			for (const FString& Sub : Hidden)
+			{
+				if (Name.Contains(Sub, ESearchCase::IgnoreCase)) { bDenied = true; break; }
+			}
+			if (bDenied) { continue; }
 		}
-		if (!bAllowed) { continue; }
+		else
+		{
+			bool bAllowed = false;
+			for (const FString& Al : Allowed)
+			{
+				if (Stem.Equals(Al, ESearchCase::IgnoreCase)) { bAllowed = true; break; }
+			}
+			if (!bAllowed) { continue; }
+		}
 		Visible.Add({ Name, ClassPath });
 	}
 
