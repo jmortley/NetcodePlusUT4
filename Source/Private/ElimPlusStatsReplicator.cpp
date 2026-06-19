@@ -105,6 +105,12 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		{
 			Entry.EloDeltaThisMatch = *DeltaPtr;
 		}
+		// Global leaderboard rank — pushed by the gamemode/rating system at match
+		// start + end (frozen like ELO). 0 stays for bots / unranked players.
+		if (const int32* RankPtr = GlobalRankCache.Find(Entry.PlayerId))
+		{
+			Entry.GlobalRank = *RankPtr;
+		}
 
 		// PPR + EloDeltaThisMatch are populated by the gamemode (next phase).
 		// For now they stay at defaults — the LG accuracy is computed below.
@@ -200,4 +206,10 @@ void AElimPlusStatsReplicator::SetPlayerEloAndDelta(const FString& UniqueIdStr, 
 	if (Role != ROLE_Authority) return;
 	EloCache.FindOrAdd(UniqueIdStr) = NewElo;
 	EloDeltaCache.FindOrAdd(UniqueIdStr) = DeltaThisMatch;
+}
+
+void AElimPlusStatsReplicator::SetPlayerGlobalRank(const FString& UniqueIdStr, int32 Rank)
+{
+	if (Role != ROLE_Authority) return;
+	GlobalRankCache.FindOrAdd(UniqueIdStr) = Rank;
 }

@@ -213,6 +213,16 @@ protected:
 	FLinearColor LastForcedColour = FLinearColor::Transparent;
 	bool bForcedModelApplied = false;
 
+	/** Coalesce the forced-model apply: a single replication burst fires NotifyTeamChanged 2-4x
+	 *  (PossessedBy / OnRep_PlayerState / the PlayerState's NotifyTeamChanged / UTTeamInfo). Rather than
+	 *  rebuild the forced mesh per OnRep, NotifyTeamChanged marks this dirty and Tick re-asserts the model
+	 *  exactly once. Set only off the dedicated server. */
+	bool bForcedModelDirty = false;
+	/** Local pawn only: its team change flips every OTHER pawn's friend/enemy bucket; coalesced refresh. */
+	bool bRefreshOthersDirty = false;
+	/** Flush the coalesced forced-model work (the dirty flags) — called from the top of Tick on clients. */
+	void FlushForcedModelUpdate();
+
 	/** True while this reskinned pawn should have its cosmetics stripped — gates the setter overrides. */
 	bool bForceModelStripCosmetics = false;
 	/** Destroy any spawned Hat/Eyewear/LeaderHat on this pawn (Force Models cosmetic strip). */

@@ -46,18 +46,52 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 // ── Force Models (MutForceModels port, phase 1) ─────────────────────────────
 // One override covers every apply trigger — spawn (PossessedBy) and team-change
 // (OnRep_PlayerState / Team / SelectedCharacter OnRep) all route through the base
-// NotifyTeamChanged. The base reverts the pawn to its REAL model each time it runs,
-// so we re-assert the forced model AFTER it (bForceReapply=true).
+// NotifyTeamChanged. The base reverts the pawn to its REAL model each time it runs.
+// Because a single replication burst fires this 2-4x, we don't re-force inline; we mark
+// the pawn dirty and re-assert the forced model once on the next Tick (FlushForcedModelUpdate).
 void ATeamArenaCharacter::NotifyTeamChanged()
 {
 	Super::NotifyTeamChanged();
-	ApplyForcedModel(/*bForceReapply=*/true);
 
-	// Friend/enemy is relative to the local player. If this is MY pawn and my team just changed,
-	// every OTHER pawn's bucket can flip — but their NotifyTeamChanged won't fire. Refresh them.
-	// (Matters for Enemy-Only / Team-Enemy styles; a cheap no-op for absolute Red/Blue.)
-	if (IsLocallyControlled())
+	// Coalesce the forced-model apply. PossessedBy / OnRep_PlayerState / the PlayerState's own
+	// NotifyTeamChanged / UTTeamInfo each drive this 2-4x in ONE replication burst (spawn, join, team
+	// assignment) — so the heavy ApplyCharacterData mesh rebuild + double GetBodyMIs() recolour loop ran
+	// 2-4x per remote pawn per spawn (a hitch). Super above has ALREADY reverted the mesh to the real
+	// model on THIS call, so instead of re-forcing per OnRep we just mark dirty here and re-assert the
+	// forced model EXACTLY ONCE on the next Tick. Tick runs after this frame's replication dispatch, so
+	// the reskin still lands before render (no real-model flash). The flush re-forces with
+	// bForceReapply=true and must NOT latch-skip — each Super::NotifyTeamChanged unconditionally reverted
+	// the mesh, so a skip would silently drop the reskin.
+	if (GetNetMode() != NM_DedicatedServer)
 	{
+		bForcedModelDirty = true;
+
+		// Friend/enemy is relative to the local player. If this is MY pawn and my team just changed,
+		// every OTHER pawn's bucket can flip — but their NotifyTeamChanged won't fire. Refresh them
+		// (also coalesced to the next-tick flush). Matters for Enemy-Only / Team-Enemy styles; a cheap
+		// no-op for absolute Red/Blue.
+		if (IsLocallyControlled())
+		{
+			bRefreshOthersDirty = true;
+		}
+	}
+}
+
+// Apply the coalesced forced-model work, at most once per frame. Called from the top of Tick on clients,
+// which runs AFTER this frame's network replication dispatch — so the N NotifyTeamChanged calls from a
+// single replication burst collapse into ONE ApplyCharacterData rebuild here. bForceReapply MUST be true:
+// every Super::NotifyTeamChanged during the burst reverted the mesh to the real model, so the flush has to
+// re-force unconditionally (a latch-skip would silently drop the reskin).
+void ATeamArenaCharacter::FlushForcedModelUpdate()
+{
+	if (bForcedModelDirty)
+	{
+		bForcedModelDirty = false;
+		ApplyForcedModel(/*bForceReapply=*/true);
+	}
+	if (bRefreshOthersDirty)
+	{
+		bRefreshOthersDirty = false;
 		RefreshOtherForcedModels();
 	}
 }
@@ -795,6 +829,14 @@ void ATeamArenaCharacter::BeginPlay()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
+	// Flush any forced-model apply coalesced from this frame's replication burst (see NotifyTeamChanged).
+	// Runs here — after net dispatch, before Super::Tick/render — so N team OnReps collapse to one mesh
+	// rebuild and the reskin is in place for this frame. No-op on a dedicated server (flags never set).
+	if (bForcedModelDirty || bRefreshOthersDirty)
+	{
+		FlushForcedModelUpdate();
+	}
+
 	// ── Ping-compensated spawn: client confirms control ──
 	if (bPingCompensatedSpawnPending)
 	{

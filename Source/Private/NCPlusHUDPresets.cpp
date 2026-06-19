@@ -171,49 +171,171 @@ namespace NCPlusHUDPresetsImpl
 	);
 
 	// "Stock" - classic UT-style layout in the default engine font (NO Extreme).
-	// Bottom-center MinimalTypography HP/Armor with the HEALTH/ARMOR labels, modest
-	// 1.0 scales, team portraits + scorebar up top. The familiar default look for
-	// players who just want stock. Deliberately omits every "font" field so each
-	// widget falls back to its stock font instead of the Extreme override.
-	static const FString StockJson(
-		TEXT("{")
-		TEXT("\"version\":1,")
-		TEXT("\"elements\":{")
-			TEXT("\"hp_armor\":{")
-				TEXT("\"anchor\":\"BottomCenter\",\"offset_x\":0,\"offset_y\":-120,\"scale\":1.0,\"hidden\":false,")
-				TEXT("\"style\":\"MinimalTypography\"")
-			TEXT("},")
-			TEXT("\"ammo\":{")
-				TEXT("\"anchor\":\"BottomRight\",\"offset_x\":-30,\"offset_y\":-30,\"scale\":1.0,\"hidden\":false,")
-				TEXT("\"style\":\"BigNumber\"")
-			TEXT("},")
-			TEXT("\"weapon_bar_left\":{")
-				TEXT("\"anchor\":\"CenterLeft\",\"offset_x\":20,\"offset_y\":-20,\"scale\":1.0,\"hidden\":false")
-			TEXT("},")
-			TEXT("\"weapon_bar_right\":{")
-				TEXT("\"anchor\":\"CenterRight\",\"offset_x\":-20,\"offset_y\":-20,\"scale\":1.0,\"hidden\":false")
-			TEXT("},")
-			TEXT("\"portrait_red\":{")
-				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":-200,\"offset_y\":30,\"scale\":1.0,\"hidden\":false,")
-				TEXT("\"use_team_color\":\"true\"")
-			TEXT("},")
-			TEXT("\"portrait_blue\":{")
-				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":200,\"offset_y\":30,\"scale\":1.0,\"hidden\":false,")
-				TEXT("\"use_team_color\":\"true\"")
-			TEXT("},")
-			TEXT("\"scorebar\":{")
-				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":0,\"offset_y\":4,\"scale\":1.0,\"hidden\":false,")
-				TEXT("\"use_team_color\":\"true\"")
-			TEXT("},")
-			TEXT("\"score_kda\":{")
-				TEXT("\"anchor\":\"TopRight\",\"offset_x\":-40,\"offset_y\":16,\"scale\":1.0,\"hidden\":false")
-			TEXT("},")
-			TEXT("\"announcements\":{")
-				TEXT("\"anchor\":\"TopCenter\",\"offset_x\":0,\"offset_y\":0,\"scale\":1.0,\"hidden\":false")
-			TEXT("}")
-		TEXT("}")
-		TEXT("}")
-	);
+	// NCPlus default HUD layout — the user's hand-tuned near-stock layout (2026-06-18).
+	// Used as BOTH the first-run seed (GetCurated()[0], applied in FNCPlusHUDLayout::ReloadLive
+	// when a fresh player has no Saved/NetcodePlus/HUDLayout.json) and the "Stock" entry in the
+	// preset gallery. Embedded as a raw string so it's a verbatim editor export — no escaping;
+	// UTF8_TO_TCHAR converts the ASCII literal to TCHAR at static init. Extras keys are
+	// case-insensitive (FName), so the editor's "Font"/"Opacity"/"Style" capitalisation is fine.
+	// To re-tune the default, paste a fresh editor export between the R"NCHUD( ... )NCHUD" guards.
+	static const FString StockJson(UTF8_TO_TCHAR(R"NCHUD(
+{
+	"version": 1,
+	"elements":
+	{
+		"weapon_bar_left":
+		{
+			"anchor": "CenterLeft",
+			"offset_x": -2.5000019073486328,
+			"offset_y": 982.75006103515625,
+			"scale": 1,
+			"hidden": false,
+			"Orientation": "Horizontal"
+		},
+		"hp_armor":
+		{
+			"anchor": "BottomCenter",
+			"offset_x": -3.0000002384185791,
+			"offset_y": -160.49995422363281,
+			"scale": 0.75,
+			"hidden": false,
+			"Font": "Large"
+		},
+		"Accuracy":
+		{
+			"anchor": "BottomRight",
+			"offset_x": 5.64971923828125,
+			"offset_y": -45,
+			"scale": 0.25,
+			"hidden": false,
+			"Font": "Tiny"
+		},
+		"heal_ability":
+		{
+			"anchor": "BottomCenter",
+			"offset_x": 635,
+			"offset_y": -52,
+			"scale": 1,
+			"hidden": true,
+			"Font": "Extreme"
+		},
+		"speedometer":
+		{
+			"anchor": "Center",
+			"offset_x": 0,
+			"offset_y": 80,
+			"scale": 1,
+			"hidden": true
+		},
+		"minimap":
+		{
+			"anchor": "TopLeft",
+			"offset_x": 1480.2501220703125,
+			"offset_y": 352.25003051757813,
+			"scale": 1,
+			"hidden": true
+		},
+		"Ammo":
+		{
+			"anchor": "BottomRight",
+			"offset_x": 35.199737548828125,
+			"offset_y": -158.00001525878906,
+			"scale": 0.75,
+			"hidden": false,
+			"Font": "Medium",
+			"Style": "VerticalGauge"
+		},
+		"Spectator":
+		{
+			"anchor": "TopRight",
+			"offset_x": -1851.7501220703125,
+			"offset_y": 390.00003051757813,
+			"scale": 1,
+			"hidden": true
+		},
+		"score_kda":
+		{
+			"anchor": "TopRight",
+			"offset_x": -765.25006103515625,
+			"offset_y": 415.00003051757813,
+			"scale": 1,
+			"hidden": true,
+			"font_scale": "1.000"
+		},
+		"ctf_flag_status":
+		{
+			"anchor": "TopCenter",
+			"offset_x": 0,
+			"offset_y": 0,
+			"scale": 1,
+			"hidden": true
+		},
+		"weapon_bar_right":
+		{
+			"anchor": "CenterRight",
+			"offset_x": -20,
+			"offset_y": -19.25,
+			"scale": 1,
+			"hidden": false
+		},
+		"server_info":
+		{
+			"anchor": "TopLeft",
+			"offset_x": 1680.2000732421875,
+			"offset_y": 1,
+			"scale": 1,
+			"hidden": true,
+			"font_scale": "0.515",
+			"Font": "Tiny"
+		},
+		"portrait_red":
+		{
+			"anchor": "TopCenter",
+			"offset_x": -253.25,
+			"offset_y": 2.9999980926513672,
+			"scale": 0.94999998807907104,
+			"hidden": false,
+			"Opacity": "0.530"
+		},
+		"portrait_blue":
+		{
+			"anchor": "TopCenter",
+			"offset_x": 240.5,
+			"offset_y": -1.5000019073486328,
+			"scale": 0.94999998807907104,
+			"hidden": false,
+			"Opacity": "0.600"
+		},
+		"ctf_you_have_flag":
+		{
+			"anchor": "BottomCenter",
+			"offset_x": 0.75000005960464478,
+			"offset_y": -81.75,
+			"scale": 1,
+			"hidden": false
+		},
+		"scorebar":
+		{
+			"anchor": "TopCenter",
+			"offset_x": 0,
+			"offset_y": 0,
+			"scale": 1,
+			"hidden": false,
+			"Font": "Large",
+			"font_scale": "0.620"
+		}
+	},
+	"weapon_groups":
+	{
+		"NPFlakCannon_C": "Left",
+		"UT+BioRifleElim_C": "Left",
+		"UT+ImpactHammerElim_C": "Left",
+		"UT+LinkGunElim_C": "Left",
+		"UT+MinigunElim_C": "Left",
+		"UTNPRocketLauncher_C": "Left"
+	}
+}
+)NCHUD"));
 
 	// Helper: build an entry via explicit field assignment. UE 4.15 + the
 	// default member initializer on FNCPlusHUDPreset::bIsCustom disqualifies

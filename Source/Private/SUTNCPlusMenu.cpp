@@ -20,6 +20,7 @@ static FSlateFontInfo RegularFont(int32 Size) { return FSlateFontInfo(FPaths::En
 void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
+	ActiveTab = InArgs._InitialTab;   // ContentArea below builds BuildTabContent(ActiveTab)
 
 	// Take mouse input: show the cursor and switch to GameAndUI so Slate gets
 	// mouse events. NCPlusHUDDragMode holds the HUD's per-tick GetInputMode poll

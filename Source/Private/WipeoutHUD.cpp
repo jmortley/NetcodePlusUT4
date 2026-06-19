@@ -264,12 +264,16 @@ void AWipeoutHUD::DrawHUD()
 	// Guard: Canvas or fonts may be null during Slate UI overlays (e.g. weapon skins menu)
 	if (!Canvas || !SmallFont) return;
 
-	// TEMP head-hitbox debug (cvar `ncp.DebugHeads 1`): GREEN ring = the capsule headshot sphere the server
-	// validates, RED cross = the mesh head bone (the visible head). Lets us calibrate kHeadCapsuleDrop online.
-	NCPlusForceModels::DrawHeadDebug(Canvas, PlayerOwner);
-
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	bool bScoreboardIsUp = ScoreboardIsUp();
+
+	// Head-hitbox calibration (cvar `ncp.DebugHeads 1`): GREEN ring = the capsule headshot sphere the server
+	// validates, RED cross = the mesh head bone. WARMUP-ONLY (WaitingToStart) so it can't clutter live play;
+	// calibrate kHeadCapsuleDrop/bands against forced models during warmup before the match.
+	if (GS && GS->GetMatchState() == MatchState::WaitingToStart)
+	{
+		NCPlusForceModels::DrawHeadDebug(Canvas, PlayerOwner);
+	}
 
 	// ─── Custom team score bar (replaces bpHW_TeamGameClock) ───
 	// Respects dynamic team colors from TeamSkins mutator.
@@ -410,29 +414,30 @@ void AWipeoutHUD::DrawHUD()
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffsetRed, PipSize);
 				// Player name above icon — multiply by team scale so text shrinks with the pip.
 				{
-					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_RedScale;
+					/* Portraits (Red) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(FName(TEXT("portrait_red")), this, TinyFont); if (!NameFont) { NameFont = TinyFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(FName(TEXT("portrait_red")), 1.f);
+					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_RedScale * NameFontExtra;
 					FFontRenderInfo NameRI;
 					NameRI.bEnableShadow = true;
 					FString Name = UTPS->PlayerName;
 					float NXL, NYL;
-					Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					Canvas->StrLen(NameFont, Name, NXL, NYL);
 					// Truncate if wider than pip
 					while (NXL * NameScale > PipSize && Name.Len() > 3)
 					{
 						Name = Name.Left(Name.Len() - 1);
-						Canvas->StrLen(TinyFont, Name, NXL, NYL);
+						Canvas->StrLen(NameFont, Name, NXL, NYL);
 					}
 					// Black outline + white fill (matches HP/Armor style)
 					float NameX = XOffsetRed + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
 					float NameY = YOffsetRed + 2.f;
 					float OL = 1.f;
 					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
 					Canvas->SetLinearDrawColor(FLinearColor::White);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
 				}
 				if (UTPS == NextToSpawn)
 				{
@@ -454,28 +459,29 @@ void AWipeoutHUD::DrawHUD()
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffsetBlue, PipSize);
 				// Player name above icon — multiply by team scale so text shrinks with the pip.
 				{
-					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_BlueScale;
+					/* Portraits (Blue) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(FName(TEXT("portrait_blue")), this, TinyFont); if (!NameFont) { NameFont = TinyFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(FName(TEXT("portrait_blue")), 1.f);
+					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_BlueScale * NameFontExtra;
 					FFontRenderInfo NameRI;
 					NameRI.bEnableShadow = true;
 					FString Name = UTPS->PlayerName;
 					float NXL, NYL;
-					Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					Canvas->StrLen(NameFont, Name, NXL, NYL);
 					while (NXL * NameScale > PipSize && Name.Len() > 3)
 					{
 						Name = Name.Left(Name.Len() - 1);
-						Canvas->StrLen(TinyFont, Name, NXL, NYL);
+						Canvas->StrLen(NameFont, Name, NXL, NYL);
 					}
 					// Black outline + white fill (matches HP/Armor style)
 					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
 					float NameY = YOffsetBlue + 2.f;
 					float OL = 1.f;
 					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
 					Canvas->SetLinearDrawColor(FLinearColor::White);
-					Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
 				}
 				if (UTPS == NextToSpawn)
 				{

@@ -120,6 +120,11 @@ namespace NCPlusHUDDragMode
 // Font resolver (Phase 3.8)
 // =============================================================================
 
+// Monotonic layout revision — bumped wherever the live layout changes (load / reset /
+// edit). The font + scale resolve caches below key off it, so on an unchanged layout
+// (the per-frame norm) a resolve is one FName Find instead of GetExtra + a scan.
+static uint32 GLayoutRevision = 1;
+
 namespace NCPlusHUDFonts
 {
 	// Tier A getters — pull from AUTHUD's already-loaded font set.
@@ -186,27 +191,49 @@ namespace NCPlusHUDFonts
 
 	UFont* Resolve(FName Alias, AUTHUD* HUD, UFont* Fallback)
 	{
-		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		if (!E) return Fallback;
+		// Per-alias override cache: Alias is already an FName, so a hit is one hashed
+		// Find with zero string/FName work. Invalidated when the layout changes
+		// (GLayoutRevision). Value = resolved OVERRIDE font, or null meaning no
+		// override (use the caller's Fallback), so the same alias works from sites
+		// passing different fallbacks (e.g. pip SmallFont vs name TinyFont).
+		static TMap<FName, UFont*> OverrideCache;
+		static uint32 CacheRev = 0;
+		if (CacheRev != GLayoutRevision) { OverrideCache.Reset(); CacheRev = GLayoutRevision; }
+		if (UFont** Hit = OverrideCache.Find(Alias)) { return *Hit ? *Hit : Fallback; }
 
-		const FString FontKey = E->GetExtra(TEXT("font"));
+		UFont* const Resolved = [&]() -> UFont*
+		{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		if (!E) return nullptr;
+
+		static const FName NAME_Font(TEXT("font"));   // build the key once, not per call
+		const FString FontKey = E->GetExtra(NAME_Font);
 		if (FontKey.IsEmpty() || FontKey.Equals(TEXT("Default"), ESearchCase::IgnoreCase))
 		{
-			return Fallback;
+			return nullptr;
 		}
 
 		// Lazy-load cache for Tier B fonts. Map by asset path so different
 		// display aliases pointing at the same asset only load once.
 		static TMap<FString, UFont*> Cache;
 
-		for (const FFontEntry& F : GetTable())
+		// One-time name -> entry index (display names are unique). Turns an
+		// overridden font into a single FName-keyed Find instead of a ~20-entry
+		// case-insensitive FString scan every frame — matters at 500+ fps. FName
+		// keys make the match case-insensitive for free.
+		static const TMap<FName, const FFontEntry*> NameMap = []{
+			TMap<FName, const FFontEntry*> M;
+			for (const FFontEntry& Ent : GetTable()) { M.Add(FName(*Ent.Display), &Ent); }
+			return M;
+		}();
+		if (const FFontEntry* const* Found = NameMap.Find(FName(*FontKey)))
 		{
-			if (!F.Display.Equals(FontKey, ESearchCase::IgnoreCase)) continue;
+			const FFontEntry& F = **Found;
 
 			if (F.HUDFunc)
 			{
 				UFont* HF = F.HUDFunc(HUD);
-				return HF ? HF : Fallback;
+				return HF;
 			}
 
 			// Cache hit. nullptr is a valid cached value meaning "tried, failed,
@@ -215,7 +242,7 @@ namespace NCPlusHUDFonts
 			// disk and spamming the log. Treat cached-null as known failure.
 			if (UFont** Cached = Cache.Find(F.AssetPath))
 			{
-				return *Cached ? *Cached : Fallback;
+				return *Cached;
 			}
 
 			// First attempt for this asset path. Try as UObject first so we can
@@ -246,18 +273,31 @@ namespace NCPlusHUDFonts
 				*F.Display, *F.AssetPath,
 				Asset ? TEXT("loaded") : TEXT("null"),
 				Asset ? *Asset->GetClass()->GetName() : TEXT("(none)"));
-			return Fallback;
+			return nullptr;
 		}
 
-		// Unknown name → fall back silently. Likely an old JSON entry from a
-		// future build; leaving it as-is on disk so it survives a re-save.
-		return Fallback;
+		// Unknown name -> no override; the wrapper below applies the caller's Fallback.
+		return nullptr;
+		}();
+
+		OverrideCache.Add(Alias, Resolved);
+		return Resolved ? Resolved : Fallback;
 	}
 
 	float ResolveScale(FName Alias, float Default)
 	{
+		// Per-alias cache (see Resolve). Assumes a stable Default per alias; all
+		// current callers pass 1.f.
+		static TMap<FName, float> ScaleCache;
+		static uint32 ScaleCacheRev = 0;
+		if (ScaleCacheRev != GLayoutRevision) { ScaleCache.Reset(); ScaleCacheRev = GLayoutRevision; }
+		if (float* Hit = ScaleCache.Find(Alias)) { return *Hit; }
+
+		static const FName NAME_FontScale(TEXT("font_scale"));
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		return E ? E->GetExtraFloat(TEXT("font_scale"), Default) : Default;
+		const float V = E ? E->GetExtraFloat(NAME_FontScale, Default) : Default;
+		ScaleCache.Add(Alias, V);
+		return V;
 	}
 
 	TArray<TSharedPtr<FString>> GetChoices()
@@ -1126,7 +1166,7 @@ namespace NCPlusHUDDrawCall
 
 // Dirty flag — gates per-frame apply so DrawHUD does ~zero work when nothing changed.
 // Starts true so the first frame applies whatever was loaded on PIE start.
-static bool GLiveLayoutDirty = true;
+static bool GLiveLayoutDirty = true; ++GLayoutRevision;
 
 FNCPlusHUDLayout& FNCPlusHUDLayout::GetLive()
 {
@@ -1145,7 +1185,7 @@ void FNCPlusHUDLayout::ReloadLive()
 		// including custom colors, weapon group assignments, and the
 		// "empty overrides after Reset All + Save" state.
 		GetLive() = LoadFromFile(NewPath);
-		GLiveLayoutDirty = true;
+		GLiveLayoutDirty = true; ++GLayoutRevision;
 		return;
 	}
 
@@ -1155,7 +1195,7 @@ void FNCPlusHUDLayout::ReloadLive()
 	if (FPaths::FileExists(LegacyPath))
 	{
 		GetLive() = LoadFromFile(LegacyPath);
-		GLiveLayoutDirty = true;
+		GLiveLayoutDirty = true; ++GLayoutRevision;
 		return;
 	}
 
@@ -1177,7 +1217,7 @@ void FNCPlusHUDLayout::ReloadLive()
 	{
 		GetLive() = FNCPlusHUDLayout();
 	}
-	GLiveLayoutDirty = true;
+	GLiveLayoutDirty = true; ++GLayoutRevision;
 }
 
 bool FNCPlusHUDLayout::SaveLive()
@@ -1189,10 +1229,10 @@ bool FNCPlusHUDLayout::SaveLive()
 void FNCPlusHUDLayout::ResetLive()
 {
 	GetLive() = FNCPlusHUDLayout();
-	GLiveLayoutDirty = true;
+	GLiveLayoutDirty = true; ++GLayoutRevision;
 }
 
-void FNCPlusHUDLayout::MarkLiveDirty() { GLiveLayoutDirty = true; }
+void FNCPlusHUDLayout::MarkLiveDirty() { GLiveLayoutDirty = true; ++GLayoutRevision; }
 bool FNCPlusHUDLayout::IsLiveDirty()   { return GLiveLayoutDirty; }
 void FNCPlusHUDLayout::ClearLiveDirty(){ GLiveLayoutDirty = false; }
 

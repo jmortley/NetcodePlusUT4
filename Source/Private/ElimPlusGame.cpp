@@ -315,6 +315,8 @@ void AElimPlusGame::HandleMatchHasStarted()
 					const FString UidStr = UTPS->UniqueId.ToString();
 					const int32 Elo = RatingSystem->GetCachedElo(UidStr);
 					StatsReplicator->SetPlayerEloAndDelta(UidStr, Elo, 0);
+					// Global leaderboard rank (1-based, frozen for the match like ELO).
+					StatsReplicator->SetPlayerGlobalRank(UidStr, RatingSystem->GetPlayerGlobalRank(GetWorld(), UidStr));
 				}
 				else
 				{
@@ -370,6 +372,7 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 		{
 			const int32 Elo = RatingSystem->GetCachedElo(UidStr);
 			StatsReplicator->SetPlayerEloAndDelta(UidStr, Elo, 0);
+			StatsReplicator->SetPlayerGlobalRank(UidStr, RatingSystem->GetPlayerGlobalRank(GetWorld(), UidStr));
 		}
 	}
 

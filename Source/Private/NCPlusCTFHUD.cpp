@@ -9,6 +9,8 @@
 #include "NCPlusHUDLayout.h"
 #include "NCPlusCTFOTInfo.h"
 #include "NCPlusCTFGameMode.h"   // NCPlusReflection helpers (bPlayingAdvantage / bSecondHalf)
+#include "NCPlusSpectatorSlideOut.h"
+#include "UTHUDWidget_SpectatorSlideOut.h"
 #include "EngineUtils.h"
 
 ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
@@ -40,6 +42,31 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	// Adds nchud control over carrier indicator + you-have-flag banner + the
 	// NEW enemy-has-flag banner (engine had the FText defined but never rendered).
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_CTFFlagStatus"));
+}
+
+void ANCPlusCTFHUD::AddSpectatorWidgets()
+{
+	Super::AddSpectatorWidgets();
+
+	// Replace the stock spectator slide-out with our subclass. In instagib (iCTF)
+	// the weapon-stats panel then shows only the instagib rifle with accuracy from
+	// the replicated NCAccuracyStatsReplicator (stock reads server-only StatsData,
+	// which is 0 on dedicated-server spectators, and enumerated the empty map
+	// pickup list). Non-instagib CTF defers to stock behaviour inside the widget.
+	// SpectatorHudWidgetClasses (base UTHUD ini section) holds exactly the stock
+	// slide-out — remove that one instance (exact-class so we never drop our own).
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() == UUTHUDWidget_SpectatorSlideOut::StaticClass())
+	{
+		HudWidgets.Remove(SpectatorSlideOutWidget);
+		SpectatorSlideOutWidget = nullptr;
+	}
+	if (UUTHUDWidget* W = AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()))
+	{
+		if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(W))
+		{
+			SlideOut->WeaponListMode = ENCSlideOutWeaponMode::CTFAuto;
+		}
+	}
 }
 
 void ANCPlusCTFHUD::BeginPlay()

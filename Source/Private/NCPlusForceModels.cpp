@@ -145,9 +145,20 @@ namespace
 	}
 }
 
+// One-time dc MutTeamSkins -> ForceModels onboarding seed (defined below, after StemOf so its
+// file-scope definition is in scope there). file-internal linkage matches the definition.
+static void MaybeMigrateFromTeamSkins(const FString& Path);
+
 void NCPlusForceModels::Reload()
 {
 	const FString Path = ModIniPath();
+
+	// First-init only: if this player has NO [ForceModels] config yet AND dc's older [TeamSkins]
+	// config is present in the same Mod.ini, seed [ForceModels.*] from it (run-once flag in
+	// [ForceModels.Versioning]). Writes + Flush happen BEFORE the reads below, so the seeded values
+	// land in GFMConfig in this same call. Cheap no-op on the common already-configured path.
+	MaybeMigrateFromTeamSkins(Path);
+
 	FNCPlusForceModelsConfig& C = GFMConfig;
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Enabled"),      C.bEnabled,      Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Models"),       C.bModels,       Path);
@@ -691,6 +702,148 @@ static int32 VariantRank(const FString& Name)
 	while (S > 0 && FChar::IsDigit(Name[S - 1])) { --S; }
 	if (S == Name.Len()) { return MAX_int32; }   // no trailing digits
 	return FCString::Atoi(*Name.Mid(S));
+}
+
+// ── One-time client onboarding: dc's [TeamSkins.*] (MutTeamSkins) -> our [ForceModels.*] ─────────
+// File-scope statics, placed AFTER StemOf/VariantRank so StemOf (file static, above) and the
+// anonymous-namespace WriteSide are both visible with their real definitions. Forward-declared
+// above Reload() (which calls this at its top). Client-local; no-op on a dedicated server.
+
+// dc Model.<Side>.ID -> our picker stem (index table read off dc's SkinUpdater model array).
+static FString DCModelIdToStem(int32 ID)
+{
+	switch (ID)
+	{
+		case 0:  return TEXT("TC_Male");        // Malcolm
+		case 1:  return TEXT("NecrisFemale");
+		case 2:  return TEXT("SkaarjMale");     // Skaarj
+		case 3:  return TEXT("NecrisMale");
+		default: return FString();              // unknown -> leave Class empty (side un-forced)
+	}
+}
+
+// Resolve a stem to the picker's own ClassPath (so the seeded path is exactly what the applier
+// expects). Empty if the stem isn't an installed picker entry -> caller leaves Class empty.
+static FString ResolveStemToClassPath(const TArray<NCPlusForceModels::FContentEntry>& Entries, const FString& Stem)
+{
+	if (Stem.IsEmpty()) { return FString(); }
+	// 1) Exact picker label (a coalesced stock family's DisplayName IS the bare stem).
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
+	{
+		if (E.DisplayName.Equals(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+	}
+	// 2) Stem of the DisplayName (a non-coalesced single keeps its asset name); the exact match
+	//    above already resolved bare "NecrisMale", so this can't mis-hit NecrisMale_Damian/_Necroth.
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
+	{
+		if (StemOf(E.DisplayName).Equals(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+	}
+	// 3) Last-ditch: the ClassPath (or a variant) embeds the stem.
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
+	{
+		if (E.ClassPath.Contains(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+		for (const FString& VP : E.VariantPaths)
+		{
+			if (VP.Contains(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+		}
+	}
+	return FString();
+}
+
+// Map one dc side's [TeamSkins.SkinColour.<Side>] + [TeamSkins.Model.<Side>] into Out.
+static void MigrateOneSide(const TArray<NCPlusForceModels::FContentEntry>& Entries,
+                           const TCHAR* DcSide, const FString& Path, FNCPlusModelSettings& Out)
+{
+	// Model.<Side>.ID -> stem -> ClassPath (absent ID / unknown -> empty path -> side un-forced).
+	int32 ModelId = -1;
+	const FString ModelSec = FString::Printf(TEXT("TeamSkins.Model.%s"), DcSide);
+	GConfig->GetInt(*ModelSec, TEXT("ID"), ModelId, Path);
+	Out.ContentPath = ResolveStemToClassPath(Entries, DCModelIdToStem(ModelId));
+
+	// Colour: SkinColour.<Side>.{H,S,V} — dc stores H in degrees / S,V 0-1, same as FNCPlusModelSettings
+	// (verified: dc H values >1), so copy straight. IsComplimentary -> bComplimentary.
+	const FString ColSec = FString::Printf(TEXT("TeamSkins.SkinColour.%s"), DcSide);
+	GConfig->GetFloat(*ColSec, TEXT("H"), Out.H, Path);   // absent -> struct default kept
+	GConfig->GetFloat(*ColSec, TEXT("S"), Out.S, Path);
+	GConfig->GetFloat(*ColSec, TEXT("V"), Out.V, Path);
+	int32 Comp = 0;
+	GConfig->GetInt(*ColSec, TEXT("IsComplimentary"), Comp, Path);
+	Out.bComplimentary = (Comp != 0);
+
+	// User's explicit choices: dc had no emissive -> Brightness 3; armour matches skin.
+	Out.Brightness = 3.0f;
+	Out.ArmourMode = ENCPlusArmourMode::MatchSkin;
+}
+
+static void MaybeMigrateFromTeamSkins(const FString& Path)
+{
+	// 1) Run-once. GetInt's return value is "did the key exist?"; absent -> Migrated stays 0.
+	int32 Migrated = 0;
+	GConfig->GetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), Migrated, Path);
+	if (Migrated != 0) { return; }
+
+	// 2) NEVER clobber an existing [ForceModels] config (the common case). Section probe + a key
+	//    belt-and-suspenders against a degenerate empty header. DoesSectionExist is read-only.
+	bool bHasEnabledKey = false;
+	const bool bForceModelsPresent =
+		GConfig->GetBool(TEXT("ForceModels"), TEXT("Enabled"), bHasEnabledKey, Path);
+	if (GConfig->DoesSectionExist(TEXT("ForceModels"), Path) || bForceModelsPresent)
+	{
+		GConfig->SetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), 1, Path);
+		GConfig->Flush(false, Path);
+		return;
+	}
+
+	// 3) Only migrate if dc's config is actually present. [TeamSkins.Enable] is dc's anchor section.
+	if (!GConfig->DoesSectionExist(TEXT("TeamSkins.Enable"), Path))
+	{
+		GConfig->SetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), 1, Path);
+		GConfig->Flush(false, Path);
+		return;
+	}
+
+	// 4) Need the asset registry to resolve model class paths. If it isn't populated yet, bail WITHOUT
+	//    writing or stamping so the migration retries on a later launch (don't permanently seed empty
+	//    model paths). Enumerate ONCE and reuse for all four sides.
+	TArray<NCPlusForceModels::FContentEntry> Entries;
+	NCPlusForceModels::EnumerateContent(Entries, /*bIncludeHidden=*/false);
+	if (Entries.Num() == 0) { return; }
+
+	// ── Seed [ForceModels.*] from dc's [TeamSkins.*]. ───────────────────────────────────────────
+	// Top-level [TeamSkins.Enable] flags (absent -> 0 = off, dc's default semantics).
+	int32 EnStyle = 0, EnHUD = 0, EnFlags = 0, EnDarken = 0, EnCosmetics = 0, EnArmour = 0;
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Style"),        EnStyle,     Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("HUD"),          EnHUD,       Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Flags"),        EnFlags,     Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("DarkenBodies"), EnDarken,    Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Cosmetics"),    EnCosmetics, Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Armour"),       EnArmour,    Path);
+
+	// Migrating => force models ON. ENCPlusSkinStyle int matches dc's (TeamEnemy=0/RedBlue=1/EnemyOnly=2).
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Enabled"),      true,               Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Models"),       true,               Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("HUD"),          (EnHUD != 0),       Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Armour"),       (EnArmour != 0),    Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Flags"),        (EnFlags != 0),     Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), (EnDarken != 0),    Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    (EnCosmetics != 0), Path);
+	GConfig->SetInt (TEXT("ForceModels"), TEXT("Style"),        EnStyle,            Path);
+
+	// Per-side: map colour + model, then write all 7 keys via the existing WriteSide.
+	FNCPlusModelSettings Enemy, Team, Red, Blue;
+	MigrateOneSide(Entries, TEXT("Enemy"), Path, Enemy);
+	MigrateOneSide(Entries, TEXT("Team"),  Path, Team);
+	MigrateOneSide(Entries, TEXT("Red"),   Path, Red);
+	MigrateOneSide(Entries, TEXT("Blue"),  Path, Blue);
+	WriteSide(TEXT("Enemy"), Enemy);
+	WriteSide(TEXT("Team"),  Team);
+	WriteSide(TEXT("Red"),   Red);
+	WriteSide(TEXT("Blue"),  Blue);
+
+	// 5) Stamp run-once + persist everything in one flush.
+	GConfig->SetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), 1, Path);
+	GConfig->Flush(false, Path);
+	UE_LOG(LogTemp, Log, TEXT("[ForceModels] Seeded config from dc MutTeamSkins (one-time onboarding)."));
 }
 
 void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bIncludeHidden)

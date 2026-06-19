@@ -994,6 +994,7 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		{
 			RoundWinningKiller = OtherPS;
 		}
+		WinningKillerPawn = Killer->GetPawn();   // focus actor for the instant replay (BroadcastKillReplay)
 	}
 
 	// Death recap (the per-life "You dealt N to X | They dealt M to you" system-chat
@@ -1191,6 +1192,7 @@ void AUWipeoutGame::StartNextRound()
 
 	// Reset all Wipeout state for the new round
 	RoundWinningKiller = nullptr;
+	WinningKillerPawn = nullptr;
 	RoundWinningKillTime = 0.0f;
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	Team0DeathCount = 0;
@@ -3236,14 +3238,20 @@ void AUWipeoutGame::BroadcastRoundResults(int32 WinnerTeamIndex, bool bIsDraw)
 
 void AUWipeoutGame::BroadcastKillReplay()
 {
-	if (RoundWinningKiller && RoundWinningKillTime > 0.f)
+	// Instant replay path (ClientPlayInstantReplay), NOT ClientQueueCoolMoment.
+	// CoolMoment routes through UUTKillcamPlayback::CoolMomentCamStart, which crashes
+	// after MatchEnded (TaskGraphThreadNP access-violation in CoreUObject) because new
+	// actors spawn before the playback finishes cleanup. Mirrors
+	// AElimPlusGame::BroadcastKillReplay — focus the killer pawn, hard stop timer.
+	if (RoundWinningKiller && RoundWinningKillTime > 0.f && WinningKillerPawn)
 	{
-		float ReplayOffset = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+		const float TimeToRewind = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+		const float StartDelay   = 0.5f;
 		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 		{
 			if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
 			{
-				PC->ClientQueueCoolMoment(RoundWinningKiller->UniqueId, ReplayOffset);
+				PC->ClientPlayInstantReplay(WinningKillerPawn, TimeToRewind, StartDelay);
 			}
 		}
 	}

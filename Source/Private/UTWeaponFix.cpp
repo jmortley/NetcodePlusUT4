@@ -1646,6 +1646,14 @@ bool AUTWeaponFix::ServerReportFireToT_Validate(int32 DwellMs, uint8 FrameMs, bo
 
 bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
+    // Sanity-bound the client head offset at the RPC edge. The headshot gate clamps it downstream, but a NaN
+    // defeats FMath::Clamp (NaN fails every comparison) and that clamp is currently the sole defense, so reject
+    // NaN/Inf or an absurd magnitude here. A legit offset is the rendered head relative to the body (~110u up),
+    // so the 1000u bound is hugely generous — no honest client is ever caught; only a tampered one is dropped.
+    if (ClientHeadOffset.ContainsNaN() || ClientHeadOffset.SizeSquared() > FMath::Square(1000.0f))
+    {
+        return false;
+    }
     return FireModeNum < GetNumFireModes() &&
         InFireEventIndex > 0 &&
         ClientTimestamp > 0.0f;
@@ -1978,9 +1986,13 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 	// NEWNET-STYLE BIDIRECTIONAL TIME SEARCH
 	// If client claimed a hit but we didn't find it, search through time
 	// ============================================================
+	// Mirror the main-loop team guard (~line 1896): never run the time-search for a CLIENT-NAMED teammate when
+	// teammates don't block hitscan. ReceivedHitScanHitChar is fully client-controlled, so without this a client
+	// could name a teammate to force a near-graze body hit (FF-gated at damage, but it shouldn't be considered).
 	if (Role == ROLE_Authority &&
 		ReceivedHitScanHitChar != nullptr &&
-		BestTarget != ReceivedHitScanHitChar)
+		BestTarget != ReceivedHitScanHitChar &&
+		(bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, ReceivedHitScanHitChar)))
 	{
 		AUTCharacter* ClaimedTarget = ReceivedHitScanHitChar;
 

@@ -11,6 +11,9 @@
 #include "UTTeamInfo.h"
 #include "ElimPlusStatsReplicator.h"
 #include "NCPlusHUDLayout.h"
+#include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads) — warmup-only head-hitbox calibration
+#include "NCPlusSpectatorSlideOut.h"
+#include "UTHUDWidget_SpectatorSlideOut.h"
 #include "EngineUtils.h"
 
 AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
@@ -97,6 +100,30 @@ void AElimPlusHUD::BeginPlay()
 	// (gated by a dirty flag) → any edit is visible next render tick.
 	FNCPlusHUDLayout::ReloadLive();
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+}
+
+void AElimPlusHUD::AddSpectatorWidgets()
+{
+	Super::AddSpectatorWidgets();
+
+	// Replace the stock spectator slide-out with our subclass so the per-player
+	// weapon-stats panel lists the Elim loadout and reads accuracy from the
+	// replicated NCAccuracyStatsReplicator (stock reads server-only StatsData,
+	// which is 0 on dedicated-server spectators). SpectatorHudWidgetClasses (the
+	// base UTHUD ini section) contains exactly the stock slide-out — remove that
+	// one instance (exact-class match so a re-entrant call can't drop our own).
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() == UUTHUDWidget_SpectatorSlideOut::StaticClass())
+	{
+		HudWidgets.Remove(SpectatorSlideOutWidget);
+		SpectatorSlideOutWidget = nullptr;
+	}
+	if (UUTHUDWidget* W = AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()))
+	{
+		if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(W))
+		{
+			SlideOut->WeaponListMode = ENCSlideOutWeaponMode::ElimLoadout;
+		}
+	}
 }
 
 EInputMode::Type AElimPlusHUD::GetInputMode_Implementation() const
@@ -277,6 +304,14 @@ void AElimPlusHUD::DrawHUD()
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	const bool bScoreboardIsUp = ScoreboardIsUp();
 
+	// Head-hitbox calibration (cvar `ncp.DebugHeads 1`): GREEN ring = the capsule headshot sphere the server
+	// validates, RED cross = the mesh head bone (the visible head). WARMUP-ONLY (WaitingToStart) so it can't
+	// clutter live play; calibrate kHeadCapsuleDrop/bands against forced models during warmup before the match.
+	if (GS && GS->GetMatchState() == MatchState::WaitingToStart)
+	{
+		NCPlusForceModels::DrawHeadDebug(Canvas, PlayerOwner);
+	}
+
 	// Pre-match team preview overlay — replaces the unreliable scoreboard
 	// auto-show. Drawn during PlayerIntro, CountdownToBegin, and the first
 	// PreviewHoldAfterMatchStart seconds of InProgress so players see the
@@ -423,28 +458,29 @@ void AElimPlusHUD::DrawHUD()
 			// Player name above icon — multiply by team scale so text stays
 			// proportional when the strip is shrunk via the layout's Sc spinner.
 			{
-				const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
-				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale;
+				/* Portraits (Red)/(Blue) Font + FontSz now restyle the player name. */ const FName PortraitAlias = (TeamIdx == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red")); UFont* NameFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, TinyFont); if (!NameFont) { NameFont = TinyFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
+					const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
+				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
 				FFontRenderInfo NameRI;
 				NameRI.bEnableShadow = true;
 				FString Name = UTPS->PlayerName;
 				float NXL, NYL;
-				Canvas->StrLen(TinyFont, Name, NXL, NYL);
+				Canvas->StrLen(NameFont, Name, NXL, NYL);
 				while (NXL * NameScale > PipSize && Name.Len() > 3)
 				{
 					Name = Name.Left(Name.Len() - 1);
-					Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					Canvas->StrLen(NameFont, Name, NXL, NYL);
 				}
 				const float NameX = XOffset + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
 				const float NameY = YForTeam + 2.f;
 				const float OL = 1.f;
 				Canvas->SetLinearDrawColor(FLinearColor::Black);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
 				Canvas->SetLinearDrawColor(FLinearColor::White);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
 			}
 
 			// Last-man-standing pulse: white-flashing border at 1Hz when this

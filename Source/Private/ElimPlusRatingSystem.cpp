@@ -395,12 +395,40 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 		if (Replicator)
 		{
 			Replicator->SetPlayerEloAndDelta(UniqueId, FinalElo, Delta);
+			// Refresh the leaderboard rank now that the row above holds the new
+			// rating, so the end-of-match scoreboard reflects updated standings.
+			Replicator->SetPlayerGlobalRank(UniqueId, GetPlayerGlobalRank(World, UniqueId));
 		}
 		++PersistedCount;
 	}
 
 	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, skipped %d (didn't play), capped %d (no human opposition)"),
 		PersistedCount, SkippedCount, CappedCount);
+}
+
+int32 FElimPlusRatingSystem::GetPlayerGlobalRank(UWorld* World, const FString& UniqueId) const
+{
+	if (!World || UniqueId.IsEmpty())
+	{
+		return 0;
+	}
+
+	// 1-based rank = 1 + count of rated players with a strictly higher Rating.
+	// Returns exactly one row when this player has a rating row; zero rows -> 0
+	// (unranked, e.g. a bot or a brand-new id). Ties share a rank. Live query —
+	// call only at match start/end, never per-tick.
+	const FString Esc = SqlEscape(UniqueId);
+	const FString Sql = FString::Printf(
+		TEXT("SELECT (SELECT COUNT(*) FROM NCRatingElimPlus WHERE Rating > me.Rating) + 1 ")
+		TEXT("FROM NCRatingElimPlus me WHERE me.UniqueId='%s';"),
+		*Esc);
+
+	TArray<FDatabaseRow> Rows;
+	if (!ExecSql(World, Sql, Rows) || Rows.Num() == 0 || Rows[0].Text.Num() < 1)
+	{
+		return 0;
+	}
+	return FCString::Atoi(*Rows[0].Text[0]);
 }
 
 int32 FElimPlusRatingSystem::GetCachedElo(const FString& UniqueId) const

@@ -19,6 +19,10 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	virtual void DrawHUD() override;
 	virtual FLinearColor GetBaseHUDColor() override;
 
+	/** Swap the stock spectator slide-out for UNCPlusSpectatorSlideOut so the
+	 *  weapon-stats panel lists the Elim loadout with replicated accuracy. */
+	virtual void AddSpectatorWidgets() override;
+
 	// Portrait atlas icons — same UV coords as AUTFlagRunHUD / AWipeoutHUD
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, NoClear)
 	FCanvasIcon RedTeamIcon;
