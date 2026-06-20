@@ -2,6 +2,8 @@
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "UTPlayerController.h"
+#include "UTBasePlayerController.h"   // ClientSay
+#include "UTATypes.h"                 // ChatDestinations
 #include "UTPlayerState.h"
 #include "GameFramework/GameSession.h"
 #include "GameFramework/GameMode.h"
@@ -10,12 +12,20 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Paths.h"
 
-// Default kick deadline (seconds). 10s gives a hitchy client time to fully
-// initialize replication before we judge them. Overridable per-server via
-// Mod.ini [NetcodePlus] VersionReportTimeoutSec, clamped 1.0-60.0.
-static const float kVersionReportTimeoutDefault = 10.f;
-static const float kVersionReportTimeoutMin     =  1.f;
-static const float kVersionReportTimeoutMax     = 60.f;
+// Default kick deadline (seconds). 100s is a generous grace so only genuinely
+// plugin-less clients are still unreported by the deadline — a legit client with
+// lossy owner-only replication has ample time to receive the gate actor + run the
+// handshake before we judge it (this lossiness is why the timeout kick was
+// disabled in 9159128; the long grace is the mitigation). Overridable per-server
+// via Mod.ini [NetcodePlus] VersionReportTimeoutSec, clamped 1.0-120.0.
+static const float kVersionReportTimeoutDefault = 100.f;
+static const float kVersionReportTimeoutMin     =   1.f;
+static const float kVersionReportTimeoutMax     = 120.f;
+
+// After the no-report deadline we announce to the whole server, then kick this
+// many seconds later — context for everyone + a final beat for a very-late
+// handshake to land and cancel the kick.
+static const float kKickGraceSec = 5.f;
 
 // Resolve the timeout from Mod.ini [NetcodePlus] VersionReportTimeoutSec, falling
 // back to the default if the file/section/key is missing or out of range. Cheap
@@ -54,6 +64,24 @@ static FString ResolveOwnerName(AActor* Gate)
 {
 	APlayerController* PC = Gate ? Cast<APlayerController>(Gate->GetOwner()) : nullptr;
 	return (PC && PC->PlayerState) ? PC->PlayerState->PlayerName : FString(TEXT("<unknown>"));
+}
+
+// Push a system chat line to every player on the server. ClientSay is base-UT
+// (AUTBasePlayerController), not plugin-gated, so plugin-less clients see it too.
+static void BroadcastSystemMessage(UWorld* W, const FString& Msg)
+{
+	if (!W)
+	{
+		return;
+	}
+	for (FConstPlayerControllerIterator It = W->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
+		if (PC && PC->UTPlayerState)
+		{
+			PC->ClientSay(PC->UTPlayerState, Msg, ChatDestinations::System);
+		}
+	}
 }
 
 ANCVersionGate::ANCVersionGate(const FObjectInitializer& OI)
@@ -118,6 +146,7 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 		if (UWorld* W = GetWorld())
 		{
 			W->GetTimerManager().ClearTimer(TimeoutHandle);
+			W->GetTimerManager().ClearTimer(KickHandle);   // cancel a pending grace-kick if they reported late
 		}
 		// Job done — drop the actor so it doesn't linger in the per-player
 		// relevancy set for the rest of the match.
@@ -125,9 +154,8 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 		return;
 	}
 
-	// Mismatch — immediate kick. (The no-reply timeout path in OnTimeout is
-	// disabled as of commit 9159128, but a CLIENT REPLY with a different version
-	// is a clear signal — that one still kicks.)
+	// Mismatch — immediate kick. (The no-reply timeout path in OnTimeout also
+	// kicks now — re-enabled 2026-06-19 at a 100s grace.)
 	UE_LOG(LogGameMode, Warning,
 		TEXT("[NCPlusVersionGate] kicking owner: client v%d != server v%d (player: %s)"),
 		ClientVersion, ServerVersion, *ResolveOwnerName(this));
@@ -142,19 +170,41 @@ void ANCVersionGate::OnTimeout()
 	{
 		return;
 	}
-	// KICK DISABLED FOR NOW. The no-reply timeout path is logged but no longer
-	// kicks the player; clients that never report (no plugin / pre-326 / lossy
-	// owner-only replication) are allowed in. Mismatch path is also disabled —
-	// see ServerReportVersion_Implementation. To restore: replace this block
-	// with the KickOwner call (see git history — commit 9acacd2 or earlier).
+	// No version report within the deadline → the client never handshook, i.e. no
+	// NetcodePlus plugin (or a pre-gate build). Rather than an abrupt kick, announce
+	// it to the whole server for context, then kick kKickGraceSec later. The delay
+	// is also a final beat for a very-late handshake to land — a matching report in
+	// the window clears KickHandle (see ServerReportVersion_Implementation).
+	const FString PlayerName = ResolveOwnerName(this);
 	UE_LOG(LogGameMode, Warning,
-		TEXT("[NCPlusVersionGate] no version report within %.0fs (kick disabled): server v%d, player: %s. ")
-		TEXT("Likely missing/outdated NetcodePlus plugin."),
-		TimeoutSec, NETCODE_PLUGIN_VERSION, *ResolveOwnerName(this));
-	// Mark confirmed + drop the actor so it doesn't linger in the per-player
-	// relevancy set (same cleanup the match path does).
+		TEXT("[NCPlusVersionGate] no version report within %.0fs: %s missing plugin (server v%d) — announcing + kicking in %.0fs."),
+		TimeoutSec, *PlayerName, NETCODE_PLUGIN_VERSION, kKickGraceSec);
+
+	BroadcastSystemMessage(GetWorld(), FString::Printf(
+		TEXT("%s does not have the NetcodePlus plugin (server is v%d) — removing in %.0fs. Get it from the launcher."),
+		*PlayerName, NETCODE_PLUGIN_VERSION, kKickGraceSec));
+
+	if (UWorld* W = GetWorld())
+	{
+		W->GetTimerManager().SetTimer(
+			KickHandle, this, &ANCVersionGate::OnKickDeadline,
+			kKickGraceSec, /*bLoop*/ false);
+	}
+}
+
+void ANCVersionGate::OnKickDeadline()
+{
+	if (Role != ROLE_Authority || bConfirmed)
+	{
+		return;
+	}
 	bConfirmed = true;
-	Destroy();
+	UE_LOG(LogGameMode, Warning,
+		TEXT("[NCPlusVersionGate] kicking %s — no NetcodePlus plugin (server v%d)."),
+		*ResolveOwnerName(this), NETCODE_PLUGIN_VERSION);
+	KickOwner(FString::Printf(
+		TEXT("NetcodePlus plugin required (server v%d) — not detected. Install/update via the launcher."),
+		NETCODE_PLUGIN_VERSION));
 }
 
 void ANCVersionGate::KickOwner(const FString& Reason)

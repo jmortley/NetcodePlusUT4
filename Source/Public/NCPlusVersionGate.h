@@ -5,8 +5,9 @@
 // match begins — wrecking the PUG. This C++ gate spawns a per-player owner-only
 // AInfo right at PostLogin; the client's PostNetInit calls ServerReportVersion
 // with NETCODE_PLUGIN_VERSION. Server compares: mismatch → kick immediately.
-// 10-second timeout → kick if no reply (covers old clients that don't have this
-// class at all and never replicate the actor cleanly).
+// 100-second timeout with no reply → broadcast a "missing plugin" notice to the
+// whole server, then kick 5s later (covers old clients that don't have this class
+// at all / never replicate the actor cleanly; the long grace + announce soften it).
 //
 // Bots + the listen-host local PC are exempt (no remote client to handshake with).
 #pragma once
@@ -29,8 +30,13 @@ public:
 	void ServerReportVersion(int32 ClientVersion);
 
 protected:
-	/** Server-side: fired 10s after spawn. Kick if we never got a matching report. */
+	/** Server-side: fired after the report deadline (default 100s). No matching
+	 *  report → broadcast a "missing plugin" notice, then schedule OnKickDeadline. */
 	void OnTimeout();
+
+	/** Server-side: fired kKickGraceSec after OnTimeout's broadcast — kicks the
+	 *  owner unless a matching late report cancelled it in the meantime. */
+	void OnKickDeadline();
 
 	/** Server-side: kick the owning PC with a clear message. Safe if already gone. */
 	void KickOwner(const FString& Reason);
@@ -39,11 +45,12 @@ protected:
 	bool bConfirmed;
 
 	/** Resolved timeout for THIS spawn (from Mod.ini [NetcodePlus]
-	 *  VersionReportTimeoutSec, default 10s, clamped 1-60s). Captured in
+	 *  VersionReportTimeoutSec, default 100s, clamped 1-120s). Captured in
 	 *  BeginPlay so the timeout-log line can report the actual value used. */
 	float TimeoutSec;
 
 	FTimerHandle TimeoutHandle;
+	FTimerHandle KickHandle;
 };
 
 namespace NCPlusVersionGate
