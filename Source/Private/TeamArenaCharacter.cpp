@@ -41,6 +41,21 @@ static TAutoConsoleVariable<float> CVarHeadCapsuleDrop(
 	TEXT("size is unchanged (HeadRadius). Calibrate live in warmup vs ncp.DebugHeads. Server value is authoritative."),
 	ECVF_Default);
 
+// Projectile visual-prediction stability smoothing (UTUpdateSimulatedPosition). ASYMMETRIC: when a high-ping enemy
+// jukes, the prediction lead must drop FAST so they stop warping; re-arming the lead is SLOW so we don't over-predict
+// straight into their next juke. FastDrop = FInterpTo rate when the stability factor is falling (target reversing/
+// perpendicular); SlowRise = rate when it climbs back (target straightened). Live-tunable for dogfood feel.
+static TAutoConsoleVariable<float> CVarPredStabFastDrop(
+	TEXT("ncp.PredStabFastDrop"),
+	30.0f,
+	TEXT("Projectile-prediction stability: FInterpTo rate when the lead must drop (target juking). High = snap off fast (~1 frame)."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarPredStabSlowRise(
+	TEXT("ncp.PredStabSlowRise"),
+	4.0f,
+	TEXT("Projectile-prediction stability: FInterpTo rate when re-arming the lead (target straightened). Low = ease up slowly (~250ms)."),
+	ECVF_Default);
+
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer.SetDefaultSubobjectClass<UTeamArenaCharacterMovement>(ACharacter::CharacterMovementComponentName))
@@ -555,11 +570,24 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 								// +1 (same dir)      = 100% prediction
 								float StabilityFactor = FMath::Clamp((VelocityDot + 1.0f) * 0.5f, 0.0f, 1.0f);
 
-								// Smooth the factor itself to prevent frame-to-frame flickering
-								// Rate 6.0 = converges in roughly 150-200ms
-								SmoothedStabilityFactor = FMath::FInterpTo(
-									SmoothedStabilityFactor, StabilityFactor,
-									GetWorld()->GetDeltaSeconds(), 6.0f);
+								// ASYMMETRIC smoothing (replaces the symmetric rate-6 FInterpTo). A high-ping enemy's
+								// juke must STOP warping immediately, but re-arming the lead should be gradual so we
+								// don't over-predict into their NEXT juke. So drop the factor FAST when it's falling
+								// (target reversing) and rise SLOWLY when it climbs (target straightened). Plus a hard-
+								// zero on a genuine horizontal reversal (VelocityDot<0 = >90 deg flip), gated on
+								// horizontal speed so a jump arc's vertical Z-velocity flip at apex doesn't trip it.
+								const float dt = GetWorld()->GetDeltaSeconds();
+								if (OldVelocity.Size2D() > 200.0f && VelocityDot < 0.0f)
+								{
+									SmoothedStabilityFactor = 0.0f;   // dodge/strafe-flip: kill the lead NOW (no warp)
+								}
+								else
+								{
+									const float InterpRate = (StabilityFactor < SmoothedStabilityFactor)
+										? CVarPredStabFastDrop.GetValueOnGameThread()    // falling  -> snap the lead down
+										: CVarPredStabSlowRise.GetValueOnGameThread();   // rising   -> ease it back up
+									SmoothedStabilityFactor = FMath::FInterpTo(SmoothedStabilityFactor, StabilityFactor, dt, InterpRate);
+								}
 
 								PredictionTime = BasePrediction * SmoothedStabilityFactor;
 							}
