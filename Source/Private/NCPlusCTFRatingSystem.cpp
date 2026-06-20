@@ -98,7 +98,7 @@ namespace
 	// strong defensive game is magnitude-comparable to a strong offensive one
 	// BEFORE the role multiplier — the multiplier fine-tunes, it doesn't carry
 	// the whole correction. Strength + on/off are runtime knobs.
-	double CTFR_CTFPerf(const FNCPlusCTFPlayerInput& P, const FNCPlusCTFPerfConfig& Cfg, bool bInstagib)
+	double CTFR_CTFPerf(const FNCPlusCTFPlayerInput& P, const FNCPlusCTFPerfConfig& Cfg, bool bInstagib, int32 CapsAllowed = -1)
 	{
 		auto Cap = [](int32 V, int32 Hi) -> double { return double(FMath::Clamp(V, 0, Hi)); };
 
@@ -106,63 +106,87 @@ namespace
 		const double Kills   = Cap(P.Kills,  KillCap);
 		const double Deaths  = Cap(P.Deaths, KillCap);
 
+		// iCTF perf REBALANCE (2026-06-19): caps up, defensive volume (returns/fc/
+		// support) down toward UT4's own values, the K/(K+D) efficiency multiplier
+		// moved OFF the objective half (it was discounting cappers who die pushing
+		// in and boosting campers), death penalty 0.5->0.4, role tilt softened, plus
+		// carry-time / clutch-denial / map-robust caps-allowed (defence-by-OUTCOME)
+		// terms. Regular CTF (!bInstagib) keeps the prior weighting BYTE-IDENTICAL:
+		// the iCTF-only weights below are gated, and CarryW/DenialW/CapsAllowedW are
+		// 0 for CTF so those terms vanish.  *** KEEP IN SYNC with
+		// browse/elo_helpers.ctf_perf + the replay_ctf_elo flags that rebuild the
+		// iCTF ladder: cap26/ret2/fck2.5/support2/role0.15/death0.4/
+		// eff-scope=combat/caps-allowed4. ***
+		const double CapW     = bInstagib ? 26.0 : 12.0;
+		const double SupW     = bInstagib ?  2.0 :  8.0;
+		const double RetW     = bInstagib ?  2.0 :  6.0;
+		const double FckW     = bInstagib ?  2.5 :  5.0;
+		const double DeathC   = bInstagib ?  0.4 :  1.0;   // combat death coefficient
+		const double CarryW   = bInstagib ? 0.10 :  0.0;   // CTF: no carry term (matches FlagStats rebuild)
+		const double DenialW  = bInstagib ?  5.0 :  0.0;
+		const double CapsAllowedW = bInstagib ? 4.0 : 0.0;
+		const double RoleStr  = bInstagib ? 0.15 : Cfg.RoleWeightStrength;
+		const bool   bEffOnCombat = bInstagib;             // iCTF: eff_mult scales combat, not objectives
+
 		double Combat;
 		if (bInstagib)
 		{
-			Combat = 0.5 * Kills - 0.5 * Deaths;            // damage ≡ kills in IG — omit
+			Combat = 0.5 * Kills - DeathC * Deaths;         // damage ≡ kills in IG — omit
 		}
 		else
 		{
 			const double Damage = FMath::Min(double(P.Damage), double(KillCap) * 220.0);
-			Combat = Kills - Deaths + Damage / 220.0;
+			Combat = Kills - DeathC * Deaths + Damage / 220.0;
 		}
 
-		// Offensive objective: scoring + escort. SupportKills is a bonus layered
-		// on the base kill already in Combat (UT4: FC/support kill = kill + bonus).
-		// SupportKills weight raised 2.0 -> 8.0 (2026-06-03): escort/support play
-		// (kills near your carrier without grabbing) was under-valued, sinking
-		// support/mid players; 8.0 puts a maxed escort game ~on par with a capture.
+		// Offensive objective: caps + assists + escort + (iCTF) carry workload.
 		const double ObjOff =
-			  12.0 * Cap(P.Caps,         5)
+			  CapW * Cap(P.Caps,         5)
 			+  5.0 * Cap(P.Assists,      8)
-			+  8.0 * Cap(P.SupportKills, 8);
+			+ SupW * Cap(P.SupportKills, 8)
+			+ CarryW * FMath::Clamp(double(P.CarryTime), 0.0, 60.0);
 
-		// Defensive objective: denial + enemy-carrier kills. Weights raised vs
-		// the offensive caps so a defensive game stands on its own magnitude.
-		const double ObjDef =
-			  6.0 * Cap(P.Returns, 8)
-			+ 5.0 * Cap(P.FCKills, 6);
+		// Defensive objective: returns + FC-kills + (iCTF) clutch denials + (iCTF)
+		// defence-by-OUTCOME: fewer enemy caps conceded scores better. Per-match
+		// z-scoring downstream makes caps-allowed map-relative (Tayla cancels), and
+		// it's gated through Adef so defenders are weighted more.
+		double ObjDef =
+			  RetW * Cap(P.Returns, 8)
+			+ FckW * Cap(P.FCKills, 6)
+			+ DenialW * Cap(P.Denials, 5);
+		if (CapsAllowedW != 0.0 && CapsAllowed >= 0)
+		{
+			ObjDef += CapsAllowedW * (0.0 - double(CapsAllowed));
+		}
 
 		// Role multipliers around 1.0. OffLean is 0 (neutral) when role-aware is
 		// off or no position samples exist, collapsing to flat off/def weights.
-		const double s    = Cfg.bRoleAware ? Cfg.RoleWeightStrength : 0.0;
+		const double s    = Cfg.bRoleAware ? RoleStr : 0.0;
 		const double Aoff = 1.0 + s * double(P.OffLean);
 		const double Adef = 1.0 - s * double(P.OffLean);
 
 		// Anti-pad: grabs that advanced nothing (not a cap, not a carry assist).
 		const double Feeder = Cap(FMath::Max(0, P.Grabs - P.Caps - P.CarryAssists), 6);
 
-		// Efficiency factor (2026-06-03): K/(K+D) centred at 0.5. Discounts the
-		// objective half for players who die far more than they kill (pad returns/
-		// caps while being a fragging liability) and boosts efficient play. Clamped
-		// 0.4..1.4 so it tunes rather than dominates. Uses RAW K/D (not the capped
-		// values) to reflect true trade efficiency. Mirrors the Django ctf_perf so
-		// the live/pushed perf matches the authoritative rebuild ladder.
+		// Efficiency K/(K+D) centred at 0.5, clamped 0.4..1.4, on RAW K/D. iCTF
+		// applies it to combat (bEffOnCombat); CTF keeps it on the objective half.
 		const int32  KD      = P.Kills + P.Deaths;
 		const double Eff     = (KD > 0) ? (double(P.Kills) / double(KD)) : 0.5;
 		const double EffMult = FMath::Clamp(Eff / 0.5, 0.4, 1.4);
+		const double EffC    = bEffOnCombat ? EffMult : 1.0;
+		const double EffO    = bEffOnCombat ? 1.0     : EffMult;
 
-		return Combat
-			 + EffMult * Cfg.ObjectiveWeight * (Aoff * ObjOff + Adef * ObjDef)
+		return EffC * Combat
+			 + EffO * Cfg.ObjectiveWeight * (Aoff * ObjOff + Adef * ObjDef)
 			 - Cfg.FeederPenalty   * Feeder;
 	}
 
 	// The score fed to the LIVE Glicko update: new CTF perf only once enabled
 	// AND out of shadow; legacy K/D otherwise.
-	double CTFR_LivePerf(const FNCPlusCTFPlayerInput& P, const FNCPlusCTFPerfConfig& Cfg, bool bInstagib)
+	double CTFR_LivePerf(const FNCPlusCTFPlayerInput& P, const FNCPlusCTFPerfConfig& Cfg, bool bInstagib, int32 CapsAllowed = -1)
 	{
 		return (Cfg.bEnabled && !Cfg.bShadow)
-			? CTFR_CTFPerf(P, Cfg, bInstagib)
+			? CTFR_CTFPerf(P, Cfg, bInstagib, CapsAllowed)
 			: CTFR_LegacyPerf(P);
 	}
 }
@@ -305,7 +329,8 @@ void FNCPlusCTFRatingSystem::ProcessMatch(const FNCPlusCTFMatchInput& In)
 			{
 				PR = PlayerRating(kDefaultRating, kDefaultRD, kDefaultVolatility);
 			}
-			const double Perf = CTFR_LivePerf(P, In.Perf, Impl->bIsInstagib);
+			const int32 CapsAllowed = (P.TeamIndex == 0) ? In.BlueScore : In.RedScore;   // opponent's score = caps conceded
+			const double Perf = CTFR_LivePerf(P, In.Perf, Impl->bIsInstagib, CapsAllowed);
 			Out.push_back(MatchPlayer(PR, Perf));
 		}
 	};
@@ -553,7 +578,8 @@ FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusC
 		// them and reconstruct/observe the ordering without re-running matches.
 		if (In.Perf.bEnabled)
 		{
-			Writer->WriteValue(TEXT("perf"),           CTFR_CTFPerf(P, In.Perf, Impl->bIsInstagib));
+			const int32 CapsAllowed = (P.TeamIndex == 0) ? In.BlueScore : In.RedScore;   // opponent's score = caps conceded
+			Writer->WriteValue(TEXT("perf"),           CTFR_CTFPerf(P, In.Perf, Impl->bIsInstagib, CapsAllowed));
 			Writer->WriteValue(TEXT("caps"),           P.Caps);
 			Writer->WriteValue(TEXT("returns"),        P.Returns);
 			Writer->WriteValue(TEXT("assists"),        P.Assists);
@@ -562,6 +588,10 @@ FString FNCPlusCTFRatingSystem::BuildResultPayload(UWorld* World, const FNCPlusC
 			Writer->WriteValue(TEXT("grabs"),          P.Grabs);
 			Writer->WriteValue(TEXT("carry_assists"),  P.CarryAssists);
 			Writer->WriteValue(TEXT("enemy_fc_damage"),P.EnemyFCDamage);
+			Writer->WriteValue(TEXT("carry_time"),     P.CarryTime);
+			Writer->WriteValue(TEXT("denials"),        P.Denials);
+			Writer->WriteValue(TEXT("held_deny"),      P.HeldDeny);
+			Writer->WriteValue(TEXT("held_deny_time"), P.HeldDenyTime);
 			Writer->WriteValue(TEXT("role"),           P.Role);
 			Writer->WriteValue(TEXT("off_lean"),       P.OffLean);
 			Writer->WriteValue(TEXT("own_frac"),       P.OwnFrac);

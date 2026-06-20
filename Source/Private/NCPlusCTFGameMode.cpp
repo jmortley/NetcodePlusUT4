@@ -523,6 +523,15 @@ void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlay
 	Out.CarryAssists  = static_cast<int32>(UTPS->GetStatsValue(NAME_CarryAssist));
 	Out.EnemyFCDamage = static_cast<int32>(UTPS->GetStatsValue(NAME_EnemyFCDamage));
 
+	// Possession + denial signals (previously captured by the engine but never fed
+	// to ranking). FlagHeldTime = offensive carry/possession seconds; FlagDenials =
+	// clutch save (enemy carrier killed near the would-be-cap base); FlagHeldDeny
+	// [Time] = the both-flags-out hold. Same StatsData path as the objectives above.
+	Out.CarryTime    = UTPS->GetStatsValue(NAME_FlagHeldTime);
+	Out.Denials      = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagDenials));
+	Out.HeldDeny     = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagHeldDeny));
+	Out.HeldDenyTime = UTPS->GetStatsValue(NAME_FlagHeldDenyTime);
+
 	// Resolve positional role from the dwell accumulated by SampleRoleDwell (1Hz).
 	// OffLean = EnemyFrac - OwnFrac (-1 pure defense .. +1 pure offense); the mid
 	// bucket doesn't shift it. Fractions + label are observability-only (payload).
