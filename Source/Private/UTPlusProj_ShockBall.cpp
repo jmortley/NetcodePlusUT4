@@ -3,6 +3,7 @@
 #include "UTPlusShockRifle.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Engine/DemoNetDriver.h"
+#include "GameFramework/Pawn.h"
 
 
 
@@ -74,6 +75,21 @@ bool AUTPlusProj_ShockBall::ShouldIgnoreHit_Implementation(AActor* OtherActor, U
 		return true;
 	}
 	return Super::ShouldIgnoreHit_Implementation(OtherActor, OtherComp);
+}
+
+void AUTPlusProj_ShockBall::DamageImpactedActor_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal)
+{
+	// ACCURACY FIX (server-authoritative): the shock core has no ProcessHit override, so hook the
+	// direct-impact credit here. AUTProjectile::DamageImpactedActor credits a full accuracy hit
+	// (StatsHitCredit defaults to 1.0, no pawn check) for any non-null OtherActor — a core that hits
+	// or embeds in a static-mesh wall inflates ShockRifleHits. Zero the credit for non-pawn impacts
+	// so only player hits count. Pawn hits keep the default credit; the combo/radial path in Explode
+	// resets StatsHitCredit itself, so this affects only the buggy direct-impact line.
+	if (Role == ROLE_Authority && Cast<APawn>(OtherActor) == nullptr)
+	{
+		StatsHitCredit = 0.f;
+	}
+	Super::DamageImpactedActor_Implementation(OtherActor, OtherComp, HitLocation, HitNormal);
 }
 
 void AUTPlusProj_ShockBall::SetOriginalFireDirection(const FVector& Dir)
