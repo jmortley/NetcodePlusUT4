@@ -187,6 +187,9 @@ void ANCPlusCTFHUD::DrawHUD()
 
 	if (!Canvas || !SmallFont) return;
 
+	// Auto post-match high-res screenshot — fires once when the replay is over and the scoreboard is up.
+	MaybeTakePostMatchScreenshot();
+
 	// Draw score bar BEFORE Super so flag icons (drawn by Super) render on top
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	if (GS && !ScoreboardIsUp())
@@ -228,6 +231,47 @@ void ANCPlusCTFHUD::DrawHUD()
 
 	// Replay-only: time-on-target corner feed (self-guards to demo playback).
 	NCPlusHUDDrawCall::DrawToTReplayFeed(this, Canvas);
+}
+
+void ANCPlusCTFHUD::MaybeTakePostMatchScreenshot()
+{
+	if (bPostMatchScreenshotTaken)
+	{
+		return;
+	}
+
+	// Wait until the decisive-cap REPLAY is over (the match has actually ended — iCTF holds the match
+	// open ncp.CTFReplayHoldSec for the replay, so HasMatchEnded() is false during it) AND the scoreboard
+	// is showing, so the capture is the final scoreboard rather than the replay view.
+	AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+	if (!GS || !GS->HasMatchEnded() || !ScoreboardIsUp())
+	{
+		return;
+	}
+
+	// Client opt-in (F5 "High Res Screenshot PostMatch" -> Mod.ini [NetcodePlus] HighResScreenshotPostMatch).
+	bool bEnabled = true;
+	FString Val;
+	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
+	{
+		bEnabled = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+	}
+
+	if (bEnabled)
+	{
+		// Small settle delay so the scoreboard is fully rendered before the (slow) high-res capture.
+		FTimerHandle ScreenshotTimer;
+		GetWorldTimerManager().SetTimer(ScreenshotTimer, [this]()
+		{
+			if (GetWorld() && GetWorld()->GetFirstPlayerController())
+			{
+				GetWorld()->GetFirstPlayerController()->ConsoleCommand(TEXT("HighResShot 2"));
+			}
+		}, 1.0f, false);
+	}
+
+	bPostMatchScreenshotTaken = true;   // one-shot regardless of enabled, so we stop polling
 }
 
 void ANCPlusCTFHUD::DrawSpectatorTarget()
