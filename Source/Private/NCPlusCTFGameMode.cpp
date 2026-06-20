@@ -1727,23 +1727,20 @@ bool ANCPlusCTFGameMode::CheckScore_Implementation(AUTPlayerState* Scorer)
 
 void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 {
-	// Select the end-of-game replay before calling Super (which sets MatchEnded).
-	// Only call PickMostCoolMoments if instant replay is actually supported —
-	// standalone PIE and dedicated servers without demo recording will crash
-	// if we try to access replay data that was never initialized.
-	//
-	// This is the STOCK inherited cool-moment path (AUTGameMode::PickMostCoolMoments) —
-	// the same one the live UK server (v326) and every stock mode run without crashing,
-	// and the same CoolMomentCamStart killcam seen surviving in Wipeout logs. The custom
-	// override that force-focused the flag-carrying capper via ClientPlayInstantReplay
-	// crashed the client killcam seek (Map.h:527); only CTF hit it (Wipeout's killer-focus
-	// replay is fine). Reverted to UK-build behaviour 2026-06-20. The deciding cap is still
-	// featured — it carries the highest cool factor (AddCoolFactorEvent +200 in ScoreObject).
-	if (SupportsInstantReplay() && GetWorld()->DemoNetDriver != nullptr)
-	{
-		PickMostCoolMoments();
-	}
-
+	// NO end-of-match cool-moment killcam for CTF/iCTF — deliberately. Both the stock
+	// AUTGameMode::PickMostCoolMoments (-> ClientQueueCoolMoment -> CoolMomentCamStart) and the
+	// former custom ClientPlayInstantReplay override funnel through the SAME killcam demo SEEK
+	// (UUTKillcamPlayback::KillcamGoToTime -> GotoTimeInSeconds, UTKillcamPlayback.cpp:236-249).
+	// In CTF that seek rebuilds the killcam-world GuidCache at the cap frame, where the flag is
+	// in its mid-cap attached state, and asserts Map.h:527 (FindChecked on an unresolved NetGUID)
+	// on EVERY decisive cap, any map, bot or human (crashes 80DA1F6B / DE4CC973 / 4196BF23).
+	// Wipeout/ElimPlus only survive by ORDERING: they fire ClientPlayInstantReplay first and
+	// delay EndGame ~7s, so their later cool-moment hits the "killcam already active" early-return
+	// (UTPlayerController.cpp:4938) and never seeks. CTF has no such order, so a synchronous
+	// PickMostCoolMoments here seeks alone at MatchEnded and crashes. There is no safe end-of-match
+	// killcam in this gamemode. Saved-demo playback, the ToT replay overlay, and the post-match
+	// HighRes screenshot are SEPARATE paths and unaffected. Verified by workflow wf_572f489d +
+	// direct code adjudication (UTKillcamPlayback / UTCarriedObject / UTPlayerController) 2026-06-20.
 	Super::EndGame(Winner, Reason);
 }
 
