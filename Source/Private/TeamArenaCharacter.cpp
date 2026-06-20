@@ -20,6 +20,8 @@
 #include "NCPlusForceModels.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
+#include "Kismet/GameplayStatics.h" // SpawnSound2D (own-footstep volume)
+#include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -1358,4 +1360,89 @@ void ATeamArenaCharacter::ServerConfirmSpawnReady_Implementation()
 	bPingCompensatedSpawnPending = false;
 	SetActorHiddenInGame(false);
 	SetActorEnableCollision(true);
+}
+
+// ── Own footstep volume (iCTF) ─────────────────────────────────────────────
+// Scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting. Only the local
+// human's own pawn, only in iCTF, only when the setting is below stock (1.0); everything else falls through
+// to the stock AUTCharacter::PlayFootstep. UTPlaySound has no volume argument, so the non-stock case is
+// played via SpawnSoundAttached with a VolumeMultiplier.
+void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
+{
+	if (GetNetMode() != NM_DedicatedServer && IsLocalPlayerPawn())
+	{
+		// Read the 0..1 setting once (mid-match F5 changes apply next life). Default 1.0 = stock.
+		if (!bOwnFootstepVolumeRead)
+		{
+			bOwnFootstepVolumeRead = true;
+			FString Val;
+			const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+			if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("OwnFootstepVolume"), Val, ConfigPath))
+			{
+				OwnFootstepVolumeScale = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
+			}
+		}
+
+		// Only do the iCTF lookup / custom play when the feature is actually active (vol < stock), so
+		// default users pay nothing. ACTFStatsReplicator exists only in NCPlusCTF (instagib); searched
+		// lazily while null so it still binds if the first footstep precedes its replication.
+		if (OwnFootstepVolumeScale < 1.f)
+		{
+			// Resolve the iCTF gate once: search until the replicator is found, or give up ~8s after spawn
+			// so non-iCTF modes (ElimPlus etc., which have no ACTFStatsReplicator) don't iterate every
+			// footstep forever. The window also covers a first footstep that precedes the replicator's arrival.
+			if (!bIctfFootstepResolved)
+			{
+				for (TActorIterator<ACTFStatsReplicator> It(GetWorld()); It; ++It)
+				{
+					CachedCTFRep = *It;
+					break;
+				}
+				if (CachedCTFRep.IsValid() || (GetWorld()->GetTimeSeconds() - CreationTime) > 8.f)
+				{
+					bIctfFootstepResolved = true;
+				}
+			}
+			if (CachedCTFRep.IsValid() && CachedCTFRep->bIsInstagibMatch)
+			{
+				// Mirror stock's double-footstep filter: drop the 3rd-person step while in first-person view
+				// (otherwise both the 1P and 3P notifies would play the own footstep twice).
+				AUTPlayerController* UTPC = Cast<AUTPlayerController>(Controller);
+				if (UTPC && !bFirstPerson && !UTPC->IsBehindView())
+				{
+					return;
+				}
+				PlayOwnFootstepScaled(FootNum);
+				return;
+			}
+		}
+	}
+
+	Super::PlayFootstep(FootNum, bFirstPerson);
+}
+
+void ATeamArenaCharacter::PlayOwnFootstepScaled(uint8 FootNum)
+{
+	// Mirror AUTCharacter::PlayFootstep's gating, but play the local player's own footstep at
+	// OwnFootstepVolumeScale via SpawnSound2D — non-spatialized, matching the character of the stock own
+	// footstep (UTPlaySound has no volume arg). The fork stubs GetFootstepSoundForSurfaceType to always
+	// return null, so footsteps always use FootstepSound (or WaterFootstepSound) — there's no per-surface
+	// own variant to reproduce. SAT_Footstep amplification is bypassed, so the volume is a direct multiplier
+	// of the asset (a deliberate reduction; there's a small loudness step vs the stock 1.0 path). Cadence
+	// (LastFoot/LastFootstepTime) is preserved so anim-timed steps stay correct.
+	if ((GetWorld()->TimeSeconds - LastFootstepTime < 0.1f) || bFeigningDeath || IsDead() || bIsCrouched)
+	{
+		return;
+	}
+
+	USoundBase* FootstepSoundToPlay = FeetAreInWater() ? WaterFootstepSound : FootstepSound;
+
+	// Volume 0 -> play nothing (silent own footsteps), which is the whole point at 0.
+	if (FootstepSoundToPlay && OwnFootstepVolumeScale > 0.f)
+	{
+		UGameplayStatics::SpawnSound2D(this, FootstepSoundToPlay, OwnFootstepVolumeScale);
+	}
+
+	LastFoot = FootNum;
+	LastFootstepTime = GetWorld()->TimeSeconds;
 }
