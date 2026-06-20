@@ -1647,6 +1647,18 @@ void ANCPlusCTFGameMode::ScoreObject_Implementation(AUTCarriedObject* GameObject
 		LastScoreObjectTime = CurrentTime + 0.5f;
 	}
 
+	// Record the decisive cap BEFORE Super: a scorelimit/golden/mercy cap ends the match
+	// INSIDE Super::ScoreObject_Implementation (-> EndGame -> end-match replay) before the
+	// post-Super !HasMatchEnded() bookkeeping runs, so the deciding cap would otherwise never
+	// be recorded (at cap limit 1 the featured moment is always blank). UniqueId is the replay
+	// focus (ClientQueueCoolMoment), so no pawn capture is needed.
+	if (Reason == FName("FlagCapture") && Holder != nullptr && Holder->Team != nullptr
+		&& CTFGameState && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())
+	{
+		LastCapPlayer = Holder;
+		LastCapTime   = GetWorld()->GetTimeSeconds();
+	}
+
 	Super::ScoreObject_Implementation(GameObject, HolderPawn, Holder, Reason);
 
 	if (Holder != nullptr && Holder->Team != nullptr && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())
@@ -1725,23 +1737,122 @@ bool ANCPlusCTFGameMode::CheckScore_Implementation(AUTPlayerState* Scorer)
 
 // ── End Game & Replay ────────────────────────────────────────────────
 
+// ============================================================================
+// DESIGN NOTE — iCTF/CTF end-of-match cap replay vs. the Map.h:527 client crash
+//
+// SYMPTOM (Shipping CLIENT, at match end):
+//   Assertion failed: Pair != nullptr [Containers/Map.h Line:527]
+//   last log lines ALWAYS: LogUTKillcam CoolMomentCamStart -> KillcamGoToTime -> crash.
+//   = the stock end-of-match cool-moment KILLCAM DEMO SEEK
+//   (UUTKillcamPlayback::KillcamGoToTime -> UDemoNetDriver::GotoTimeInSeconds) doing a
+//   FindChecked() on a NetGUID it cannot resolve while reconstructing the rewound frame.
+//
+// THEORIES DISPROVEN BY MATCH LOGS — do NOT re-litigate these:
+//   - NOT rewind distance      : a 13.97s rewind crashed, an 18.01s rewind survived.
+//   - NOT seek depth / the map : CTF-Duku-v03 both crashed AND survived in one session/build.
+//   - NOT cap-vs-frag frame, and NOT the +200/+400 cap CoolFactor boosts (live v326 ships
+//     those and is crash-free).
+//   evidence (seek-abs / match-len / result):
+//       36.6 /  72.7  CRASH        66.9 /  80.9  CRASH
+//      109.0 / 153.9  CRASH       187.0 / 205.0  OK   <- only the long match survived
+//
+// ROOT CAUSE = demo MATURITY. The seek reconstructs a past frame; in a young, still-settling
+//   early-match world some actor's NetGUID isn't resolved yet -> FindChecked. A SHORT match
+//   (e.g. 1 cap to win) can only ever seek early, so it ALWAYS crashes; a long match seeks
+//   into a settled world and survives. Compounded because the DECIDING cap was never recorded
+//   for the replay (the LastCap bookkeeping ran AFTER Super::ScoreObject, which had already
+//   ended the match) -> the picker fell back to a stale frag -> an even earlier seek. The live
+//   build "works for users" only because real matches run long enough; nobody plays 1-cap.
+//
+// WHY THE FIX IS SERVER-SIDE ONLY: the failing seek is stock Epic CLIENT code
+//   (UTKillcamPlayback / UDemoNetDriver). We do NOT fork base UT — everything stays in the
+//   plugin. So our only levers are WHEN the replay fires and WHICH frame it targets, both
+//   decided here on the server. The client side is untouched (no client roll).
+//
+// THE FIX (all in this file):
+//   1. ScoreObject records the decisive cap BEFORE Super (keeps a match-ending cap).
+//   2. EndGame gates on server demo age (ncp.CTFReplayMinDemoSeconds): short match -> skip
+//      entirely (no crash, no replay).
+//   3. PickMostCoolMoments features ONLY that cap via stock ClientQueueCoolMoment, so the
+//      seek lands at the newest / most-resolved end-of-match frame (NOT ClientPlayInstantReplay
+//      — its real-pawn-GUID focus is a separate crash vector a prior session hit).
+//   Tune ncp.CTFReplayMinDemoSeconds down to the real match-length floor. Residual edge: a
+//   late-joining client has a shorter local killcam demo than the server, so the server-measured
+//   maturity gate can't fully protect that client — not fixable without editing stock code.
+// ============================================================================
+
+// Minimum demo length (seconds) before the iCTF/CTF end-of-match replay will fire. The crash
+// (stock client UUTKillcamPlayback::KillcamGoToTime -> GotoTimeInSeconds, Map.h:527 FindChecked
+// on an unresolved NetGUID) happens when the rewound frame lands in a still-settling early-match
+// world. Match logs proved it's demo AGE, not rewind distance or the map: short matches crash at
+// any rewind (13.97s and 44.96s both crashed), while a 205s match survived a deep seek. We cannot
+// harden the seek (it's stock Epic CLIENT code), so we gate on maturity: below this, skip the
+// replay (no crash, no replay). Tune to your typical match length; 0 = always fire (not advised).
+static TAutoConsoleVariable<float> CVarCTFReplayMinDemoSeconds(
+	TEXT("ncp.CTFReplayMinDemoSeconds"), 200.f,
+	TEXT("Min server demo seconds before the CTF/iCTF end-of-match cap replay fires (short matches crash the client killcam seek). 0 = always."));
+
+// Seconds of build-up shown before the featured cap, so the run-up plays (not just the score frame).
+static TAutoConsoleVariable<float> CVarCTFReplayBuildupSeconds(
+	TEXT("ncp.CTFReplayBuildupSeconds"), 8.f,
+	TEXT("Seconds of build-up before the featured decisive cap in the CTF/iCTF end-of-match replay."));
+
 void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 {
-	// NO end-of-match cool-moment killcam for CTF/iCTF — deliberately. Both the stock
-	// AUTGameMode::PickMostCoolMoments (-> ClientQueueCoolMoment -> CoolMomentCamStart) and the
-	// former custom ClientPlayInstantReplay override funnel through the SAME killcam demo SEEK
-	// (UUTKillcamPlayback::KillcamGoToTime -> GotoTimeInSeconds, UTKillcamPlayback.cpp:236-249).
-	// In CTF that seek rebuilds the killcam-world GuidCache at the cap frame, where the flag is
-	// in its mid-cap attached state, and asserts Map.h:527 (FindChecked on an unresolved NetGUID)
-	// on EVERY decisive cap, any map, bot or human (crashes 80DA1F6B / DE4CC973 / 4196BF23).
-	// Wipeout/ElimPlus only survive by ORDERING: they fire ClientPlayInstantReplay first and
-	// delay EndGame ~7s, so their later cool-moment hits the "killcam already active" early-return
-	// (UTPlayerController.cpp:4938) and never seeks. CTF has no such order, so a synchronous
-	// PickMostCoolMoments here seeks alone at MatchEnded and crashes. There is no safe end-of-match
-	// killcam in this gamemode. Saved-demo playback, the ToT replay overlay, and the post-match
-	// HighRes screenshot are SEPARATE paths and unaffected. Verified by workflow wf_572f489d +
-	// direct code adjudication (UTKillcamPlayback / UTCarriedObject / UTPlayerController) 2026-06-20.
+	// End-of-match cap replay, GATED ON DEMO MATURITY. The client killcam demo seek crashes
+	// (Map.h:527) when the rewound frame lands in a still-settling early-match world; this is
+	// per-match demo age, not rewind distance / cap-vs-frag / map (proven by logs — see the
+	// CVarCTFReplayMinDemoSeconds note). The seek lives in stock Epic CLIENT code we don't edit,
+	// so we only fire once the demo is old enough for the seek to resolve, and PickMostCoolMoments
+	// features the just-scored decisive cap (newest, most-resolved frame). Short matches (1-cap
+	// tests) fall below the gate and skip the replay entirely — no crash, no replay.
+	const float DemoAge = (GetWorld()->DemoNetDriver != nullptr) ? GetWorld()->DemoNetDriver->DemoCurrentTime : 0.f;
+	const float MinAge  = CVarCTFReplayMinDemoSeconds.GetValueOnGameThread();
+	if (SupportsInstantReplay() && GetWorld()->DemoNetDriver != nullptr && DemoAge >= MinAge)
+	{
+		PickMostCoolMoments();
+	}
+	else if (GetWorld()->DemoNetDriver != nullptr)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: end-match replay skipped — demo %.1fs < min %.1fs (short-match killcam-seek crash guard)"), DemoAge, MinAge);
+	}
+
 	Super::EndGame(Winner, Reason);
+}
+
+void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolMomentsToShow)
+{
+	const float Now = GetWorld()->TimeSeconds;
+
+	// Feature ONLY the decisive cap (captured before Super in ScoreObject), via the stock
+	// ClientQueueCoolMoment RPC — the same empty-focus seek the engine uses for cool moments,
+	// NOT ClientPlayInstantReplay (its real-pawn-GUID focus is a separate crash vector that the
+	// last session hit). A deciding cap was credited microseconds ago, so the rewind is tiny and
+	// the seek lands at the newest, fully-resolved end-of-match frame. No recent cap (timelimit
+	// end / stale cap) => skip rather than let stock PMCM seek to a possibly-early frag frame.
+	AUTPlayerState* FeaturePS = LastCapPlayer.Get();
+	const bool bRecentCap = FeaturePS != nullptr
+		&& FeaturePS->UniqueId.IsValid()
+		&& LastCapTime > 0.f
+		&& (Now - LastCapTime) <= FeatureCapMaxAgeSeconds;
+
+	if (!bRecentCap)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: end-match replay skipped — no recent decisive cap to feature"));
+		return;
+	}
+
+	const float Rewind = (Now - LastCapTime) + CVarCTFReplayBuildupSeconds.GetValueOnGameThread();
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
+		{
+			PC->ClientQueueCoolMoment(FeaturePS->UniqueId, Rewind);
+		}
+	}
+	UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF replay: featured decisive cap by %s (rewind %.1fs, demo %.1fs)"),
+		*FeaturePS->PlayerName, Rewind,
+		(GetWorld()->DemoNetDriver != nullptr) ? GetWorld()->DemoNetDriver->DemoCurrentTime : 0.f);
 }
 
 // ── Match State Handlers ─────────────────────────────────────────────

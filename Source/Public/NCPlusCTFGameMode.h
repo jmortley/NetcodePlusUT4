@@ -232,6 +232,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void HandleMatchInOvertime() override;
 	virtual void EndGame(AUTPlayerState* Winner, FName Reason) override;
 
+	/** CTF-aware end-game replay: feature the DECISIVE flag cap (the cap that ended the
+	 *  match) via the stock ClientQueueCoolMoment path, gated on demo maturity. Skips on
+	 *  short matches / no recent cap to avoid the stock client killcam seek crash (Map.h:527).
+	 *  Server-side; see the .cpp for the full rationale. */
+	virtual void PickMostCoolMoments(bool bClearCoolMoments = false, int32 CoolMomentsToShow = 1) override;
+
 	/** Server-side rating system for CTF or iCTF (separate ladders, single
 	 *  instance per match — bIsInstagib locked at construction).
 	 *  Constructed lazily in HandleMatchHasStarted, not BeginPlay: that's the
@@ -477,6 +483,19 @@ protected:
 
 	/** World time before which a FlagCapture ScoreObject is rejected. Prevents double caps on maps with no geometry between bases. */
 	float LastScoreObjectTime;
+
+	/** Player who scored the most recent flag capture (end-of-match replay focus). Captured
+	 *  BEFORE Super::ScoreObject so a scorelimit/golden/mercy cap that ends the match inside
+	 *  Super is still recorded as the decisive moment. UniqueId is the ClientQueueCoolMoment focus. */
+	TWeakObjectPtr<AUTPlayerState> LastCapPlayer;
+
+	/** World time of the most recent flag capture. */
+	float LastCapTime = 0.f;
+
+	/** Max age (s) for the last cap to still count as "the decider" when EndGame runs. A
+	 *  cap-driven end credits the cap microseconds before EndGame, so it's always inside this
+	 *  window; a timelimit end (stale cap) falls through to no replay. */
+	float FeatureCapMaxAgeSeconds = 15.f;
 
 public:
 	virtual void CreateGameURLOptions(TArray<TSharedPtr<TAttributePropertyBase>>& MenuProps);
