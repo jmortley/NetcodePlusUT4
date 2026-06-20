@@ -34,12 +34,8 @@ private:
 	/** Draw "NOW WATCHING / PlayerName" bottom-right when viewing another player */
 	void DrawSpectatorTarget();
 
-	/** Auto post-match high-res screenshot (client opt-in via F5 "High Res Screenshot PostMatch").
-	 *  Fires once, after the decisive-cap replay is over AND the scoreboard is up, so it captures the
-	 *  final scoreboard rather than the replay. Mirrors AElimPlusHUD/AWipeoutHUD but gated on the
-	 *  replay finishing (iCTF holds the match open ncp.CTFReplayHoldSec before MatchEnded). */
-	void MaybeTakePostMatchScreenshot();
-
-	/** One-shot guard so the screenshot fires a single time. */
+	/** Post-match high-res screenshot state — serviced each frame by
+	 *  NCPlusHUDDrawCall::ServicePostMatchScreenshot (fires after the replay ends + scoreboard settles). */
 	bool bPostMatchScreenshotTaken = false;
+	float PostMatchScreenshotStable = -1.f;
 };

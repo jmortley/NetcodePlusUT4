@@ -313,6 +313,14 @@ namespace NCPlusHUDDrawCall
 	 *  replayed server clock (GameState->GetServerWorldTimeSeconds). Pure client
 	 *  display — no replication, never runs in live play. */
 	NETCODEPLUS_API void DrawToTReplayFeed(class AUTHUD* HUD, class UCanvas* Canvas);
+
+	/** Auto post-match high-res screenshot, shared by ElimPlus/Wipeout/iCTF (and Duel/Shaft via AWipeoutHUD).
+	 *  Fires ONCE, on the final scoreboard rather than the instant replay: it counts consecutive qualifying
+	 *  DrawHUD frames (match ended, not in a replay), which naturally pauses while the HUD is suspended during
+	 *  the replay's separate killcam world and resumes fresh afterward. Client opt-in via [NetcodePlus]
+	 *  HighResScreenshotPostMatch. The caller stores StableFrames + bTaken (init false) as HUD members and
+	 *  calls this every frame from DrawHUD. */
+	NETCODEPLUS_API void ServicePostMatchScreenshot(class AUTHUD* HUD, float& StableFrames, bool& bTaken);
 }
 
 /**

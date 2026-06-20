@@ -139,36 +139,9 @@ void AWipeoutHUD::NotifyMatchStateChange()
 {
 	Super::NotifyMatchStateChange();
 
-	// Take a high-res screenshot once when match ends (if enabled in NCP settings)
-	if (!bPostMatchScreenshotTaken)
-	{
-		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-		if (GS && GS->HasMatchEnded())
-		{
-			// Check Mod.ini setting
-			FString Val;
-			FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
-			if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
-			{
-				bNCPScreenshotEnabled = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
-			}
-
-			if (bNCPScreenshotEnabled)
-			{
-				// Delay slightly so the final scoreboard has a chance to render
-				FTimerHandle ScreenshotTimer;
-				GetWorldTimerManager().SetTimer(ScreenshotTimer, [this]()
-				{
-					if (GetWorld() && GetWorld()->GetFirstPlayerController())
-					{
-						GetWorld()->GetFirstPlayerController()->ConsoleCommand(TEXT("HighResShot 2"));
-					}
-				}, 1.5f, false);
-			}
-
-			bPostMatchScreenshotTaken = true;
-		}
-	}
+	// Post-match screenshot moved to DrawHUD (NCPlusHUDDrawCall::ServicePostMatchScreenshot) — the old
+	// "match-ended + 1.5s" timer fired DURING the instant replay (captured the replay, not the scoreboard).
+	// The shared helper waits for the replay demo to finish.
 }
 
 void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
@@ -260,6 +233,9 @@ void AWipeoutHUD::DrawHUD()
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 
 	Super::DrawHUD();
+
+	// Auto post-match screenshot (shared; waits for the instant replay to end + the scoreboard to settle).
+	NCPlusHUDDrawCall::ServicePostMatchScreenshot(this, PostMatchScreenshotStable, bPostMatchScreenshotTaken);
 
 	// Guard: Canvas or fonts may be null during Slate UI overlays (e.g. weapon skins menu)
 	if (!Canvas || !SmallFont) return;

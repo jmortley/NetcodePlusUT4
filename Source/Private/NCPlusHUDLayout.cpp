@@ -976,6 +976,64 @@ namespace NCPlusHUDDrawCall
 	}
 
 	// =============================================================================
+	// Post-match screenshot (shared by ElimPlus / Wipeout / iCTF + Duel/Shaft via AWipeoutHUD)
+	// =============================================================================
+	void ServicePostMatchScreenshot(AUTHUD* HUD, float& StableFrames, bool& bTaken)
+	{
+		if (bTaken || HUD == nullptr)
+		{
+			return;
+		}
+		UWorld* World = HUD->GetWorld();
+		if (World == nullptr)
+		{
+			return;
+		}
+
+		// Capture the FINAL scoreboard, never the instant replay. The replay renders a SEPARATE killcam
+		// world (UUTGameViewportClient world override), so this HUD's DrawHUD — and therefore this poll —
+		// is SUSPENDED for the whole replay and only resumes on the post-replay scoreboard. So we count
+		// CONSECUTIVE qualifying DrawHUD frames rather than wall-clock: the counter naturally pauses during
+		// the replay (no calls) and resumes fresh afterward, so it can't be tricked by time elapsing while
+		// suspended (matters for non-deferred replay modes like Wipeout, where HasMatchEnded() is already
+		// true during the replay). The DemoNetDriver->IsPlaying() check is defensive only — on a live client
+		// the source world's recording driver always reports IsPlaying()==false; it covers a true full
+		// demo-playback session.
+		AUTGameState* GS = World->GetGameState<AUTGameState>();
+		const bool bReplaying = (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsPlaying());
+		if (GS == nullptr || !GS->HasMatchEnded() || bReplaying)
+		{
+			StableFrames = 0.f;
+			return;
+		}
+
+		// A small buffer of scoreboard frames before the (slow) high-res capture — enough for it to be up,
+		// frame-rate-robust because suspended-replay frames don't count toward it.
+		StableFrames += 1.f;
+		if (StableFrames < 20.f)
+		{
+			return;
+		}
+
+		bTaken = true;   // one-shot regardless of the opt-in, so we stop polling
+
+		bool bEnabled = true;   // client opt-in via F5 "High Res Screenshot PostMatch"
+		FString Val;
+		const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
+		{
+			bEnabled = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+		}
+		if (bEnabled)
+		{
+			if (APlayerController* PC = World->GetFirstPlayerController())
+			{
+				PC->ConsoleCommand(TEXT("HighResShot 2"));
+			}
+		}
+	}
+
+	// =============================================================================
 	// Server info name plate
 	// =============================================================================
 	void DrawServerInfo(AUTHUD* HUD, UCanvas* Canvas)

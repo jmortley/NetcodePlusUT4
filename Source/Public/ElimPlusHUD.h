@@ -62,8 +62,9 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	void DrawPreMatchTeamPreview();
 
 private:
+	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
-	bool bNCPScreenshotEnabled = true;
+	float PostMatchScreenshotStable = -1.f;
 
 	/** Per-player ELO chip animation state. Triggered the first frame the
 	 *  replicator's EloDeltaThisMatch transitions from 0 to non-zero (= match end);
