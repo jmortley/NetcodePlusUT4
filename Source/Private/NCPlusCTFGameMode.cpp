@@ -1814,7 +1814,7 @@ void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 	}
 	else if (GetWorld()->DemoNetDriver != nullptr)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: end-match replay skipped — demo %.1fs < min %.1fs (short-match killcam-seek crash guard)"), DemoAge, MinAge);
+		UE_LOG(LogGameMode, Display, TEXT("NCPlusCTF: end-match replay skipped — demo %.1fs < min %.1fs (short-match killcam-seek crash guard)"), DemoAge, MinAge);
 	}
 
 	Super::EndGame(Winner, Reason);
@@ -1838,7 +1838,7 @@ void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolM
 
 	if (!bRecentCap)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: end-match replay skipped — no recent decisive cap to feature"));
+		UE_LOG(LogGameMode, Display, TEXT("NCPlusCTF: end-match replay skipped — no recent decisive cap to feature"));
 		return;
 	}
 
