@@ -363,30 +363,47 @@ void ATeamArenaCharacter::PlayDying()
 	SpawnSkeletonDissolve();
 }
 
-// "Darken Bodies" toggle: on death, hide the corpse after a short delay so the death/ragdoll effects are
-// visible first (instant hide looked abrupt). (Replaces dc's ModelDissolveEffect, which drove its dissolve
-// through a SkinUpdater-owner exec chain and wouldn't run reliably across models — this clean hide works on
-// any model with zero asset dependency.) The ragdoll keeps simulating invisibly after and cleans up on its
-// normal lifespan; we just stop rendering it. Client-side, per pawn; no-op on a dedicated server.
+// On death, hide the corpse mesh after a delay. Two roles:
+//  (1) "Darken Bodies" toggle (any mode): hide after the ~1s death-effects fade (instant hide looked abrupt).
+//      Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across models); this
+//      clean hide works on any model with zero asset dependency.
+//  (2) iCTF safety net (regardless of DarkenBodies): the body is supposed to be removed by the BP CleanUpRagdoll
+//      at [InstagibCTF] RagdollTime, but if that doesn't happen (e.g. DarkenBodies off and the BP cleanup never
+//      fires) the corpse would linger. So in iCTF we ALSO hide it at the ragdoll lifespan, so a low Ragdoll Time
+//      reliably makes the body vanish. Hide-only (SetVisibility) — never destroys the actor, so it can't fight
+//      the BP destroy or the engine corpse cleanup. Client-side, per pawn; no-op on a dedicated server.
 void ATeamArenaCharacter::SpawnSkeletonDissolve()
 {
 	if (GetNetMode() == NM_DedicatedServer) { return; }
-	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
-	if (!C.bEnabled || !C.bDarkenBodies) { return; }
 
-	// Delay the hide so the death effects play first, but COORDINATE with the iCTF "Ragdoll Time" (the BP
-	// CleanUpRagdoll lifespan, [InstagibCTF] RagdollTime) so the two settings don't conflict: never render the
-	// corpse LONGER than the ragdoll actually lives. A low ragdoll time now hides the body promptly (instead of
-	// always waiting the fixed 1s); the default (3s) still gets the ~1s fade. Floor 0.01s so the timer still
-	// fires (SetTimer never schedules rate<=0). Timer is bound to this actor, so it auto-clears if the corpse
-	// is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
-	float HideDelay = 1.0f;
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	const bool bDarken = (C.bEnabled && C.bDarkenBodies);
+
+	// iCTF detection: RagdollTime is an iCTF setting (the BP CleanUpRagdoll only runs for the instagib damage
+	// type). ACTFStatsReplicator is present only in NCPlusCTF instagib; absent in ElimPlus etc.
+	bool bIsInstagib = false;
+	if (UWorld* World = GetWorld())
+	{
+		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
+	}
+
+	// Nothing to do unless DarkenBodies is on (the fade, any mode) OR this is iCTF (the ragdoll-cleanup backup).
+	// Outside both, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
+	if (!bDarken && !bIsInstagib) { return; }
+
+	float RagdollTime = 3.0f;
 	FString Val;
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("RagdollTime"), Val, ConfigPath))
 	{
-		HideDelay = FMath::Clamp(FMath::Min(1.0f, FCString::Atof(*Val)), 0.01f, 1.0f);
+		RagdollTime = FCString::Atof(*Val);
 	}
+
+	// DarkenBodies hides early (~1s death-effects fade, but never longer than the ragdoll lives); otherwise
+	// (iCTF, DarkenBodies off) hide exactly at the ragdoll lifespan so the body still vanishes when the BP
+	// CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules rate<=0). Timer is bound to this actor, so
+	// it auto-clears if the corpse is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
+	const float HideDelay = FMath::Max(0.01f, bDarken ? FMath::Min(1.0f, RagdollTime) : RagdollTime);
 	FTimerHandle TempHandle;
 	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, HideDelay, false);
 }
