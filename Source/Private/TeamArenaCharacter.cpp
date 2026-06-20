@@ -373,11 +373,22 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	if (GetNetMode() == NM_DedicatedServer) { return; }
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	if (!C.bEnabled || !C.bDarkenBodies) { return; }
-	// Delay the hide so the death effects play first. Timer is bound to this actor, so it's auto-cleared if
-	// the corpse is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
-	const float kHideDelay = 1.0f;
+
+	// Delay the hide so the death effects play first, but COORDINATE with the iCTF "Ragdoll Time" (the BP
+	// CleanUpRagdoll lifespan, [InstagibCTF] RagdollTime) so the two settings don't conflict: never render the
+	// corpse LONGER than the ragdoll actually lives. A low ragdoll time now hides the body promptly (instead of
+	// always waiting the fixed 1s); the default (3s) still gets the ~1s fade. Floor 0.01s so the timer still
+	// fires (SetTimer never schedules rate<=0). Timer is bound to this actor, so it auto-clears if the corpse
+	// is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
+	float HideDelay = 1.0f;
+	FString Val;
+	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("RagdollTime"), Val, ConfigPath))
+	{
+		HideDelay = FMath::Clamp(FMath::Min(1.0f, FCString::Atof(*Val)), 0.01f, 1.0f);
+	}
 	FTimerHandle TempHandle;
-	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, kHideDelay, false);
+	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, HideDelay, false);
 }
 
 void ATeamArenaCharacter::HideDeadBody()
