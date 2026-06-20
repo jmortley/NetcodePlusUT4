@@ -89,8 +89,6 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	LastAdvantageCapTime = 0.f;
 	bAdvantageCapEndedPeriod = false;
 	LastScoreObjectTime = 0.f;
-	LastCapTime = 0.f;
-	LastCapPawn = nullptr;
 }
 
 void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -1649,19 +1647,6 @@ void ANCPlusCTFGameMode::ScoreObject_Implementation(AUTCarriedObject* GameObject
 		LastScoreObjectTime = CurrentTime + 0.5f;
 	}
 
-	// Capture the capper for the end-of-match instant replay BEFORE Super: a cap that hits
-	// the score limit ends the match INSIDE Super::ScoreObject_Implementation (which calls
-	// EndGame -> PickMostCoolMoments to pick the replay), while the tracking below runs AFTER
-	// Super and is gated behind !HasMatchEnded() — so the DECISIVE cap (e.g. a 1-0 scorelimit)
-	// would never be recorded and the replay gets skipped. Record it up front.
-	if (Reason == FName("FlagCapture") && Holder != nullptr && Holder->Team != nullptr
-		&& CTFGameState && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())
-	{
-		LastCapPlayer = Holder;
-		LastCapTime   = GetWorld()->GetTimeSeconds();
-		LastCapPawn   = HolderPawn;
-	}
-
 	Super::ScoreObject_Implementation(GameObject, HolderPawn, Holder, Reason);
 
 	if (Holder != nullptr && Holder->Team != nullptr && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())
@@ -1740,108 +1725,26 @@ bool ANCPlusCTFGameMode::CheckScore_Implementation(AUTPlayerState* Scorer)
 
 // ── End Game & Replay ────────────────────────────────────────────────
 
-// Seconds to hold the match open after the end-of-match instant replay is sent, so
-// ClientPlayInstantReplay has a window to play before MatchEnded tears the round down.
-// Live-tunable for dogfood; 0 disables the hold. Mirrors ElimPlus's 7s DelayedEndGame.
-static TAutoConsoleVariable<float> CVarCTFReplayHoldSec(
-	TEXT("ncp.CTFReplayHoldSec"), 7.f,
-	TEXT("Seconds to hold the iCTF/CTF match open for the end-of-match instant replay (0 disables)."));
-
 void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 {
-	// Re-entry guard: while the match is held open for the end-of-match replay, a second
-	// win trigger (e.g. another cap during the replay window) must not re-defer.
-	if (bEndGameReplayActive)
-	{
-		return;
-	}
-
 	// Select the end-of-game replay before calling Super (which sets MatchEnded).
 	// Only call PickMostCoolMoments if instant replay is actually supported —
 	// standalone PIE and dedicated servers without demo recording will crash
 	// if we try to access replay data that was never initialized.
+	//
+	// This is the STOCK inherited cool-moment path (AUTGameMode::PickMostCoolMoments) —
+	// the same one the live UK server (v326) and every stock mode run without crashing,
+	// and the same CoolMomentCamStart killcam seen surviving in Wipeout logs. The custom
+	// override that force-focused the flag-carrying capper via ClientPlayInstantReplay
+	// crashed the client killcam seek (Map.h:527); only CTF hit it (Wipeout's killer-focus
+	// replay is fine). Reverted to UK-build behaviour 2026-06-20. The deciding cap is still
+	// featured — it carries the highest cool factor (AddCoolFactorEvent +200 in ScoreObject).
 	if (SupportsInstantReplay() && GetWorld()->DemoNetDriver != nullptr)
 	{
-		PickMostCoolMoments();   // sets bEndGameReplayActive if it sent an instant replay
-	}
-
-	// If a replay was sent, hold the match open so ClientPlayInstantReplay has a window to
-	// play before MatchEnded tears the round down. ClientPlayInstantReplay (unlike the old
-	// ClientQueueCoolMoment) plays a LIVE replay and is aborted by an immediate MatchEnded.
-	const float HoldSec = CVarCTFReplayHoldSec.GetValueOnGameThread();
-	if (bEndGameReplayActive && HoldSec > 0.f)
-	{
-		PendingEndGameWinner = Winner;
-		PendingEndGameReason = Reason;
-		FTimerHandle Handle;
-		GetWorldTimerManager().SetTimer(Handle, this, &ANCPlusCTFGameMode::FinishDelayedEndGame, HoldSec, false);
-		return;
+		PickMostCoolMoments();
 	}
 
 	Super::EndGame(Winner, Reason);
-}
-
-void ANCPlusCTFGameMode::FinishDelayedEndGame()
-{
-	Super::EndGame(PendingEndGameWinner, PendingEndGameReason);
-}
-
-void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolMomentsToShow)
-{
-	const float Now = GetWorld()->TimeSeconds;
-	bEndGameReplayActive = false;   // set true below only if we send an instant replay
-
-	// Feature only the DECISIVE cap (the cap that ends the match: scorelimit /
-	// golden / mercy), replayed via the FlagRun-style instant replay path
-	// (ClientPlayInstantReplay) — NOT ClientQueueCoolMoment. CoolMoment routes
-	// through UUTKillcamPlayback::CoolMomentCamStart, which crashes after MatchEnded
-	// (TaskGraphThreadNP access-violation in CoreUObject) because new actors spawn
-	// before the playback finishes cleanup — confirmed in the wild on iCTF match end
-	// (CTF-Duku, 2026-06-18). ElimPlus already hit this and switched to
-	// ClientPlayInstantReplay (a NetworkGUID-resolved pawn focus + hard stop timer);
-	// this mirrors AElimPlusGame::BroadcastKillReplay. One clip → CoolMomentsToShow
-	// is unused (instant replay plays a single clip, not a queued reel).
-	//
-	// A cap-driven end credits the cap microseconds before EndGame, so its capper
-	// pawn is still alive; a timelimit end leaves the last cap stale -> no replay.
-	AUTPlayerState* FeaturePS = LastCapPlayer.Get();
-	const bool bFeatureCap = FeaturePS != nullptr
-		&& LastCapPawn != nullptr                       // GC-nulled if the capper pawn already died
-		&& LastCapTime > 0.f
-		&& (Now - LastCapTime) <= FeatureCapMaxAgeSeconds;
-
-	if (bFeatureCap)
-	{
-		// Rewind to ~5s before the cap so the build-up plays; brief settle delay.
-		const float TimeToRewind = (Now - LastCapTime) + 5.0f;
-		const float StartDelay   = 0.5f;
-		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-		{
-			if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
-			{
-				PC->ClientPlayInstantReplay(LastCapPawn, TimeToRewind, StartDelay);
-			}
-		}
-		bEndGameReplayActive = true;   // EndGame holds the match open for the replay window
-		UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF replay: featured decisive cap by %s at %f (instant replay)"),
-			*FeaturePS->PlayerName, LastCapTime);
-	}
-	else
-	{
-		// Do NOT fall back to Super::PickMostCoolMoments — it re-enters the crash.
-		UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF replay: no decisive cap — skipping end replay"));
-	}
-
-	if (bClearCoolMoments)
-	{
-		for (int32 i = 0; i < GameState->PlayerArray.Num(); i++)
-		{
-			if (AUTPlayerState* PS = Cast<AUTPlayerState>(GameState->PlayerArray[i]))
-			{
-				PS->CoolFactorHistory.Empty();
-			}
-		}
-	}
 }
 
 // ── Match State Handlers ─────────────────────────────────────────────

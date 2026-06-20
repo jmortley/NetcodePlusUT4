@@ -232,10 +232,6 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void HandleMatchInOvertime() override;
 	virtual void EndGame(AUTPlayerState* Winner, FName Reason) override;
 
-	/** Timer callback: after EndGame holds the match open ncp.CTFReplayHoldSec seconds for
-	 *  the end-of-match instant-replay window, this fires the real (deferred) Super::EndGame. */
-	void FinishDelayedEndGame();
-
 	/** Server-side rating system for CTF or iCTF (separate ladders, single
 	 *  instance per match — bIsInstagib locked at construction).
 	 *  Constructed lazily in HandleMatchHasStarted, not BeginPlay: that's the
@@ -364,12 +360,6 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual bool PlayerCanRestart_Implementation(APlayerController* Player);
 	virtual bool SupportsInstantReplay() const override;
 
-	/** CTF-aware end-game replay: replay the decisive flag capture (the cap that
-	 *  ended the match) via ClientPlayInstantReplay, NOT the crash-prone
-	 *  ClientQueueCoolMoment/CoolMomentCamStart path. Server-side; no end replay on a
-	 *  timelimit end with no recent cap. See the .cpp for the crash rationale. */
-	virtual void PickMostCoolMoments(bool bClearCoolMoments = false, int32 CoolMomentsToShow = 1) override;
-
 	void BuildServerResponseRules(FString& OutRules);
 
 	virtual void GetGood() override;
@@ -484,35 +474,6 @@ protected:
 
 	/** True if an advantage cap ended the game or half. */
 	bool bAdvantageCapEndedPeriod;
-
-	/** World time of the most recent flag capture (any cap), for end-game replay
-	 *  selection. The cap that ends the match (scorelimit / golden / mercy) is the
-	 *  decisive moment and should be featured over a generic frag. */
-	float LastCapTime;
-
-	/** Player who scored the most recent flag capture. */
-	TWeakObjectPtr<AUTPlayerState> LastCapPlayer;
-
-	/** Pawn of the player who scored the most recent flag capture, captured at cap
-	 *  time. Focus actor for the decisive-cap instant replay (mirrors ElimPlus's
-	 *  WinningKillerPawn). GC-nulled UPROPERTY -> null if the capper pawn already died. */
-	UPROPERTY()
-	APawn* LastCapPawn = nullptr;
-
-	/** Max age (s) for the last cap to still count as "the decider" when EndGame
-	 *  runs. A scorelimit/golden/mercy end credits the cap microseconds before
-	 *  EndGame, so it is always within this window; a timelimit end (last cap long
-	 *  ago) falls through to the stock cool-factor picker. */
-	float FeatureCapMaxAgeSeconds = 15.f;
-
-	/** Set by PickMostCoolMoments when it sends an end-of-match instant replay; EndGame then
-	 *  defers Super::EndGame (ncp.CTFReplayHoldSec) so the replay isn't cut off by MatchEnded. */
-	bool bEndGameReplayActive = false;
-
-	/** Winner/Reason captured when EndGame is deferred for the instant-replay window. */
-	UPROPERTY()
-	AUTPlayerState* PendingEndGameWinner = nullptr;
-	FName PendingEndGameReason;
 
 	/** World time before which a FlagCapture ScoreObject is rejected. Prevents double caps on maps with no geometry between bases. */
 	float LastScoreObjectTime;
