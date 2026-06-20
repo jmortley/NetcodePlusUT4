@@ -240,6 +240,13 @@ public:
     // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
     // =========================================================================
     void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum);
+
+    /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves (explodes) to
+     *  snapshot its final state into ActiveServerProjectiles for the lag-comp grace buffer, so a claim
+     *  arriving after the projectile is gone can still rewind-rescue. DamagedChar = the pawn it directly
+     *  hit this frame, or null (geometry/whiff) — prevents double-damaging a target that already took the
+     *  present-time hit. PUBLIC: called from the UTPlusProj_* classes, which are not AUTWeaponFix subclasses. */
+    void OnTrackedProjectileResolved(class AUTProjectile* Proj, class AUTCharacter* DamagedChar);
     UPROPERTY()
     TArray<float> LastFireTime;
 
@@ -598,13 +605,6 @@ protected:
     /** Server-side tracking of authoritative projectiles by EventIndex */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
-
-    /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves
-     *  (explodes) to snapshot its final state into ActiveServerProjectiles for the lag-comp
-     *  grace buffer, so a claim arriving after the projectile is gone can still rewind-rescue.
-     *  DamagedChar = the pawn it directly hit this frame, or null (geometry/whiff) — used to
-     *  prevent double-damaging a target that already took the present-time hit. */
-    void OnTrackedProjectileResolved(class AUTProjectile* Proj, class AUTCharacter* DamagedChar);
 
 
     // =========================================================================
