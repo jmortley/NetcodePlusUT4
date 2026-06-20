@@ -24,6 +24,10 @@ public:
 	virtual bool ShouldIgnoreHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp) override;
 	virtual void DamageImpactedActor_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal) override;
 
+	// Diagnostic hooks (ncp.ShockDebug) — Super-passthrough + event-gated logging only, no behaviour change.
+	virtual void ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal) override;
+	virtual void PostNetReceiveLocationAndRotation() override;
+
 private:
 	// Forward declaration for safety
 	class UParticleSystemComponent* FlightEffectComponent;

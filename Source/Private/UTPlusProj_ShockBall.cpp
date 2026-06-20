@@ -4,6 +4,51 @@
 #include "Particles/ParticleSystemComponent.h"
 #include "Engine/DemoNetDriver.h"
 #include "GameFramework/Pawn.h"
+#include "HAL/IConsoleManager.h"
+#include "Components/SphereComponent.h"
+
+// =========================================================================
+// SHOCK-CORE DIAGNOSTICS (ncp.ShockDebug)
+// Event-gated (NEVER per-tick — projectile tick is 120-720Hz) logging to pin down
+// the two long-standing shock-core symptoms that don't repro offline/standalone:
+//   - stuck-in-mesh: a live core embeds + "spins" in a wall, still comboable
+//   - invisible-bounce/curve: a core seems to collide with / curve off nothing
+// One cvar, registered in BOTH the client and dedicated-server process. Set it on
+// whichever process you want logs from: client-side for pairing/handoff/reveal/snap
+// events ([ShockDbg/CLI]), server-side for stuck/embed/combo/proj-vs-proj events
+// ([ShockDbg/SRV]). Default 0 = inert (a single cvar read + branch per event).
+// =========================================================================
+DEFINE_LOG_CATEGORY_STATIC(LogShockDbg, Log, All);
+
+static TAutoConsoleVariable<int32> CVarShockDebug(
+	TEXT("ncp.ShockDebug"), 0,
+	TEXT("NetcodePlus shock-core diagnostics. 0=off, 1=event logs (pairing/handoff/reveal/stuck/combo/collision)."),
+	ECVF_Default);
+
+static FORCEINLINE bool ShockDbg()
+{
+	return CVarShockDebug.GetValueOnGameThread() > 0;
+}
+
+static FORCEINLINE const TCHAR* ShockDbgSide(const AActor* A)
+{
+	return (A && A->Role == ROLE_Authority) ? TEXT("SRV") : TEXT("CLI");
+}
+
+// Zero-length WorldStatic sphere sweep at the core's location — true if embedded in
+// static geometry. Used only inside ShockDbg()-gated blocks (no cost when off).
+static bool ShockDbgGeoUnder(const AActor* Self, USphereComponent* Collision)
+{
+	if (!Self || !Collision || !Self->GetWorld())
+	{
+		return false;
+	}
+	FHitResult H;
+	const float R = FMath::Max(2.f, Collision->GetScaledSphereRadius());
+	return Self->GetWorld()->SweepSingleByChannel(H, Self->GetActorLocation(), Self->GetActorLocation(),
+		FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(R),
+		FCollisionQueryParams(TEXT("ShockDbgGeo"), false, Self));
+}
 
 
 
@@ -31,6 +76,13 @@ void AUTPlusProj_ShockBall::NotifyClientSideHit(AUTPlayerController* InstigatedB
 
 void AUTPlusProj_ShockBall::PerformCombo(class AController* InstigatedBy, class AActor* DamageCauser)
 {
+	if (ShockDbg() && Role == ROLE_Authority)
+	{
+		UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/SRV] COMBO @%s vel=%.1f geoUnder=%d age=%.3f"),
+			*GetActorLocation().ToString(), ProjectileMovement ? ProjectileMovement->Velocity.Size() : -1.f,
+			ShockDbgGeoUnder(this, CollisionComp) ? 1 : 0, GetWorld()->GetTimeSeconds() - CreationTime);
+	}
+
 	// Consume extra ammo for the combo
 	if (Role == ROLE_Authority)
 	{
@@ -221,15 +273,33 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 			< FMath::Square(StuckProgressThreshold);
 		if (bServerEmbedded && bNotTravelling)
 		{
+			if (ShockDbg() && StuckTime == 0.f)
+			{
+				UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/SRV] STUCK enter @%s vel=%.1f age=%.3f"),
+					*Loc.ToString(), ProjectileMovement ? ProjectileMovement->Velocity.Size() : -1.f,
+					GetWorld()->GetTimeSeconds() - CreationTime);
+			}
 			StuckTime += DeltaTime;
 			if (StuckTime >= StuckExplodeDelay)
 			{
+				if (ShockDbg())
+				{
+					UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/SRV] STUCK force-explode @%s heldFor=%.3f age=%.3f"),
+						*Loc.ToString(), StuckTime, GetWorld()->GetTimeSeconds() - CreationTime);
+				}
 				Explode(Loc, StuckHit.ImpactNormal.IsNearlyZero() ? FVector(0.f, 0.f, 1.f) : StuckHit.ImpactNormal);
 				return;
 			}
 		}
 		else
 		{
+			if (ShockDbg() && StuckTime > 0.f)
+			{
+				// Rapid enter/reset alternation = embed detection flickering (the old sawtooth).
+				UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/SRV] STUCK reset embedded=%d travelling=%d heldFor=%.3f vel=%.1f"),
+					bServerEmbedded ? 1 : 0, bNotTravelling ? 0 : 1, StuckTime,
+					ProjectileMovement ? ProjectileMovement->Velocity.Size() : -1.f);
+			}
 			StuckTime = 0.f;
 			LastStuckProgressLoc = Loc;
 		}
@@ -283,7 +353,18 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 		&& !MyFakeProjectile->IsPendingKillPending()
 		&& ProjectileMovement && ProjectileMovement->Velocity.IsNearlyZero(2.0f))
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("[ShockBall] HANDOFF: Real stopped, unhiding real and destroying fake"));
+		if (ShockDbg())
+		{
+			// geoUnder=0 with the core continuing to move afterward = a FALSE reveal (invisible-curve);
+			// geoUnder=1 = a legitimate wall-stop reveal.
+			UE_LOG(LogShockDbg, Warning,
+				TEXT("[ShockDbg/CLI] HANDOFF real@%s fake@%s realFakeDist=%.1f vel=%.1f geoUnder=%d tickHz=%d age=%.3f"),
+				*GetActorLocation().ToString(), *MyFakeProjectile->GetActorLocation().ToString(),
+				FVector::Dist(GetActorLocation(), MyFakeProjectile->GetActorLocation()),
+				ProjectileMovement ? ProjectileMovement->Velocity.Size() : -1.f,
+				ShockDbgGeoUnder(this, CollisionComp) ? 1 : 0, AUTWeaponFix::GetTargetProjectileTickRate(),
+				GetWorld()->GetTimeSeconds() - CreationTime);
+		}
 		SetActorHiddenInGame(false);
 		// BeginFakeProjectileSynch also set every USceneComponent visibility to false —
 		// SetActorHiddenInGame alone doesn't undo that.
@@ -328,6 +409,12 @@ void AUTPlusProj_ShockBall::PostNetReceiveVelocity(const FVector& NewVelocity)
 	// Server says "I stopped"
 	if (NewVelocity.IsNearlyZero(StopThresh))
 	{
+		if (ShockDbg())
+		{
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV stop-snap real@%s fake@%s dist=%.1f"),
+				*GetActorLocation().ToString(), *MyFakeProjectile->GetActorLocation().ToString(),
+				FVector::Dist(GetActorLocation(), MyFakeProjectile->GetActorLocation()));
+		}
 		// Snap + stop fake
 		MyFakeProjectile->SetActorLocation(GetActorLocation(), false, nullptr, ETeleportType::TeleportPhysics);
 
@@ -343,6 +430,11 @@ void AUTPlusProj_ShockBall::PostNetReceiveVelocity(const FVector& NewVelocity)
 	const float MaxDrift = 120.f;
 	if (FVector::DistSquared(MyFakeProjectile->GetActorLocation(), GetActorLocation()) > FMath::Square(MaxDrift))
 	{
+		if (ShockDbg())
+		{
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV 120u failsafe snap dist=%.1f newVel=%.1f"),
+				FVector::Dist(MyFakeProjectile->GetActorLocation(), GetActorLocation()), NewVelocity.Size());
+		}
 		MyFakeProjectile->SetActorLocation(GetActorLocation(), false, nullptr, ETeleportType::TeleportPhysics);
 		if (MyFakeProjectile->ProjectileMovement)
 		{
@@ -378,5 +470,56 @@ bool AUTPlusProj_ShockBall::CanMatchFake(AUTProjectile* InFakeProjectile, const 
 	// server's (sub-frame mouse jitter, network quantization). At 2415 u/s with
 	// typically one core in flight, 0.5 (~60 degrees) prevents double-core visuals
 	// while still rejecting obviously wrong matches.
-	return (InFakeProjectile->GetVelocity().GetSafeNormal() | VelDir) > 0.5f;
+	const float Dot = (InFakeProjectile->GetVelocity().GetSafeNormal() | VelDir);
+	const bool bMatch = (Dot > 0.5f);
+	if (ShockDbg())
+	{
+		// A match landing in 0.5-0.95 is one stock (0.95) would have REJECTED — seeds a diverged pair.
+		UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/%s] CanMatchFake %s dot=%.4f (gate 0.5) fakeRealDist=%.1f"),
+			ShockDbgSide(this), bMatch ? TEXT("ACCEPT") : TEXT("reject"), Dot,
+			InFakeProjectile ? FVector::Dist(InFakeProjectile->GetActorLocation(), GetActorLocation()) : -1.f);
+	}
+	return bMatch;
+}
+
+void AUTPlusProj_ShockBall::ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal)
+{
+	// DIAGNOSTIC ONLY (ncp.ShockDebug) — behaviour unchanged (Super does all the work). Logs when a
+	// core's collision resolves against another projectile or a HIDDEN actor: the prime candidate for
+	// "bounces off something invisible". The hidden REAL of any paired core keeps its shootable
+	// collision (pairing only hides visuals, never disables collision), so a core can collide with an
+	// invisible, position-divergent body that the shooter can't see.
+	if (ShockDbg() && OtherActor && OtherActor != this)
+	{
+		AUTProjectile* OtherProj = Cast<AUTProjectile>(OtherActor);
+		if (OtherProj != nullptr || (OtherActor->bHidden != 0))
+		{
+			UE_LOG(LogShockDbg, Warning,
+				TEXT("[ShockDbg/%s] PROC-HIT other=%s(%s) otherHidden=%d otherFake=%d hit@%s self@%s selfFake=%d"),
+				ShockDbgSide(this), *OtherActor->GetName(), *OtherActor->GetClass()->GetName(),
+				(OtherActor->bHidden != 0) ? 1 : 0, (OtherProj && OtherProj->bFakeClientProjectile) ? 1 : 0,
+				*HitLocation.ToString(), *GetActorLocation().ToString(), bFakeClientProjectile ? 1 : 0);
+		}
+	}
+	Super::ProcessHit_Implementation(OtherActor, OtherComp, HitLocation, HitNormal);
+}
+
+void AUTPlusProj_ShockBall::PostNetReceiveLocationAndRotation()
+{
+	// DIAGNOSTIC ONLY (ncp.ShockDebug) — behaviour unchanged (Super does all the work). Once the fake
+	// is gone, the stock implementation snaps the real to its true server position and forward-predicts
+	// by GetPredictionTime() (the suspected "reveal teleport"/curve). Log only a large jump on the
+	// client real so steady-state updates stay quiet.
+	const FVector PreLoc = GetActorLocation();
+	const bool bHadFake = (MyFakeProjectile != nullptr);
+	Super::PostNetReceiveLocationAndRotation();
+	if (ShockDbg() && !bHadFake && !bFakeClientProjectile && Role != ROLE_Authority)
+	{
+		const float Jump = FVector::Dist(PreLoc, GetActorLocation());
+		if (Jump > 20.f)
+		{
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] REVEAL-SNAP jump=%.1f %s -> %s age=%.3f"),
+				Jump, *PreLoc.ToString(), *GetActorLocation().ToString(), GetWorld()->GetTimeSeconds() - CreationTime);
+		}
+	}
 }
