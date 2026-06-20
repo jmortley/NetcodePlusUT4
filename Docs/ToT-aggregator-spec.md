@@ -1,105 +1,91 @@
-# ToT Aggregator Spec — peer-relative trigger detection (drop FirstFramePct)
+# ToT Aggregator Spec v2 — distribution-shape trigger detection
 
-Status: design, parked aggregator. Engine emitter (`NCToTCollector`) already ships descriptive
-output; this spec defines the pooled, peer-relative flag logic that consumes it (StatSQL/Django
-or a standalone script over pooled CSVs — home unresolved).
+Status: design, parked aggregator. v2 supersedes v1 after a Gemini adversarial review + domain
+corrections. The engine emitter (`NCToTCollector`) ships descriptive output; this spec defines the
+pooled detector that consumes it.
+
+## Changelog v1 -> v2
+- **DROP the fast/held bins + per-metric robust-z.** Gemini (verified): robust-z on a fraction
+  bounded near the human median is structurally unable to flag — a perfect 0% bot reaches only
+  z = (0-median)/(1.4826*MAD) ~= -1.6 at median 0.07 / MAD 0.03, never -3. Hard bins are also
+  trivially evaded (a [32,45]ms delay zeroes FastFrac while staying superhuman; 10% padded held
+  shots passes HeldFraction). Both removed.
+- **Replace with whole-distribution testing** (Anderson-Darling + Hartigan dip) on the dwell ECDF.
+- **Pipeline correction:** NetcodePlus POSTs ToT straight to a ut4stats Django endpoint. It already
+  has HTTP (the collector's existing report POST). StatSQL is NOT a courier here — that pattern is
+  ServerShield-only, because SS has no HTTP of its own.
+- **Instagib playstyle correction (domain):** top instagib is crosshair-placement + pre-aiming +
+  predictive fire, so legit low dwell and low held-fraction are NORMAL. Absolute thresholds on
+  "fastness" are invalid for this mode. Only distribution SHAPE (spike vs broad/multimodal)
+  discriminates, and the reference MUST be top-tier instagib players, not generic dogfood.
 
 ## What ToT measures
+Per shot, the dwell (ms) between crosshair acquiring an enemy (once-per-frame on-target trace) and
+firing. Dwell is CLIENT-measured (client stamps acquire time, computes dwell at fire, ships via RPC)
+-> immune to server-tick packing, but spoofable -> this is a SCREEN that triggers demo review, never
+an auto-ban or sole conviction.
 
-Per shot, the **dwell** between when the crosshair acquired an enemy (per-frame on-target trace)
-and when the player fired. A human reacting/tracking produces a **broad** distribution with a fat
-**upper tail** (reaction shots ~150 ms+, tracking and held shots into the hundreds of ms). A
-trigger-bot fires within its engine reaction floor of acquisition (single-digit to low-tens of ms)
-and **cannot hold** → a tight low cluster with **no upper tail**.
+## Step 0 (GATING) — is instagib even separable?
+Before building anything, pull the dwell distributions of 5-10 known-clean top-tier instagib players
+over many matches. Confirm each is BROAD / multimodal: a low-dwell predictive/pre-fire mode PLUS a
+reaction mode (~120-200ms) PLUS a tracking/held tail. If a top pre-aimer's distribution is itself a
+tight low spike (no reaction/tracking spread), a trigger-bot is indistinguishable and ToT must be
+limited to a soft review-trigger or dropped for instagib. Everything below assumes step 0 passes.
+The detector's whole job is "is this player's dwell distribution a SPIKE or a human SPREAD."
 
-The engine is an EMITTER only — per match it writes per-player descriptive stats + server-time-
-stamped raw shots, NO verdict. This aggregator pools a player's shots across matches and produces a
-peer-relative suspicion for HUMAN REVIEW (demo). No auto-ban.
+## Detector
+For each player, pool dwell over a rolling window (see Pooling) and build the ECDF. Compute three
+shape features; combine into ONE score (NOT an AND of independent thresholds):
 
-## Empirical basis (dogfood, CTF-Duku, 2026-06-20, ~500 fps)
+1. **Shape divergence** — two-sample **Anderson-Darling** of the player's dwell ECDF vs a pooled,
+   skill-matched human REFERENCE ECDF. A-D over KS: more sensitive to the tails (the reaction /
+   tracking modes a trigger lacks). Output = the A-D statistic.
+2. **Spikiness / unimodal collapse** — **Hartigan dip** + a concentration measure (mass within the
+   modal +/-1-frame bin). A trigger spikes at its reaction floor; a padded cheat (90% spike + 10%
+   fake held) goes bimodal -> the dip catches what a single divergence misses when the spike
+   dominates.
+3. **Reaction-mode deficit** — mass in the human reaction band (~100-220ms) RELATIVE to the
+   reference. Pre-aimers still have reaction shots; a trigger has ~none. Use the relative deficit,
+   not an absolute count.
 
-| metric          | clean human (phantaci) | trigger-bot (same player) |
-|-----------------|------------------------|---------------------------|
-| n               | 14                     | 19                        |
-| median dwell    | 41 ms                  | 13 ms                     |
-| max dwell       | 288 ms                 | 116 ms                    |
-| FastFrac @16ms  | 14%                    | **68%**                   |
-| HeldFrac @150ms | ~7%                    | **0%**                    |
-| FirstFrame%     | 7%                     | 0% (INVERTED)             |
-| CV              | 1.17                   | 1.26 (INVERTED)           |
+Combine via **Mahalanobis distance** of [A-D, dip, reaction-deficit] against the skill-stratum's
+feature covariance (or a logistic calibrated on labelled clean + known-cheat samples). One score ->
+no rectangular AND-region, no bounded-fraction z, correlated features handled by the covariance.
 
-ServerShield (accuracy/aim/hit-distribution) did **not** flag the trigger-bot (composite 8.5) —
-server-side behavioral AC is structurally blind to a fire-*timing* cheat; the human is doing the
-aiming, so accuracy and hit-placement look human. ToT is the only signal that separates them.
+## fps normalization
+Quantize every dwell to a common temporal grid (one 60fps frame = 16.67ms) BEFORE building the ECDF,
+so mixed-fps peer groups aren't biased by a high-fps player's finer low-end resolution. The shape
+tests live mostly in the mid/upper distribution, which quantization barely touches.
 
-## Metric changes
+## Pooling & baseline
+- **MIN_SHOTS >= 300** pooled per player (a mechanical baseline, not a hot streak). ~2-4 instagib
+  matches.
+- **Reference = global, skill-stratified, rolling 30-day** clean/general-population ECDF, bucketed by
+  ELO so a top player is compared to other top players (kills the smurf/skill confound and answers
+  "who is the peer when I pool one player across many lobbies"). NOT a single-match peer set.
+- Abstain if the player's stratum reference has too few contributors to be stable.
 
-### DROP — FirstFramePct
-`dwell <= frame_ms`. It pegs the "impossibly fast" threshold to **frame time**, but human reaction
-(~150 ms) is an absolute physiological constant independent of fps. At 500 fps the bar is 2 ms, so a
-real trigger-bot (~10 ms) reads ~0% and looks clean; at 60 fps the bar collapses onto the
-measurement floor. Empirically INVERTED here (clean 7% > bot 0%). Unsalvageable as a frame-relative
-metric — "fixing" it means pinning the threshold to absolute time, which makes it FastFrac below.
+## Data pipeline (NetcodePlus -> Django -> Postgres)
+- **Emitter:** at match end, NCToTCollector POSTs per player `{stats_id, match_id, mode, fps_median,
+  N, dwell_histogram[] (5ms bins 0-500ms + overflow), reaction_band_count, hit/miss split}`. A binned
+  HISTOGRAM, not per-shot rows -> compact, but enough to rebuild ECDFs and run A-D + dip on pooled
+  data. Neutral endpoint + field names (no "trigger"/"bot" in shipped strings).
+- **Django:** new `utstats` model `ToTProfile` (FK player, FK match, mode, fps_median, N, histogram
+  int array, reaction_band_count, created_at) + migration + an authenticated ingest view. Justified
+  WRITE endpoint (the "no new endpoints" rule was about read endpoints).
+- **Aggregator:** a management command pools each player's histograms over the rolling window, builds
+  the ECDF, computes the per-ELO-stratum reference ECDF, runs the detector, writes a ranked suspicion
+  table. Persist per-run rows: the strong signal is the SAME player surfacing across many windows.
 
-### DROP from the flag (keep descriptive) — CV
-Trigger-bot CV (1.26) was HIGHER than clean (1.17): two held-ish outliers inflate variance, so a
-"low CV = bot" rule CLEARS the bot. Too outlier-sensitive at these sample sizes. Keep CV in the
-descriptive output; do not use it as a flag input.
+## Evasion bounds
+- Catches: naive/greedy triggers (tight spike), padded triggers (bimodal via dip), delay-shifted
+  triggers (A-D still sees the missing reaction/tracking modes and the wrong shape).
+- Evades: a cheat that SAMPLES its delay from a real recorded human dwell distribution (matches the
+  shape) -> demo review. Spoofing (client-measured dwell) -> a tampered client can lie; cross-check
+  with server-coarse reaction where possible, else treat as a review trigger only.
 
-### PRIMARY — HeldFraction
-`HeldFraction = count(dwell > HELD_MS) / N`, default `HELD_MS = 150`.
-The "track-and-hold absence." Humans have a fat upper tail (reactions + tracking + holds); a
-trigger-bot cannot hold without surrendering its edge → ~0. It lives at the **top** of the
-distribution, so it is immune to the frame quantization that corrupts the low end (acquire is
-detected once per frame). 150 ms = 5–75 frames across 60–500 fps → measurable and meaningful at any
-fps. **Lower HeldFraction = more suspicious.** This is the fake-resistant discriminator: a bot can't
-reproduce the human upper tail without giving up the reason it exists.
-
-### SECONDARY — FastFrac@Nms
-`FastFrac = count(dwell <= FAST_MS) / N`, default `FAST_MS = 30` (covers a 1–2 frame bot reaction
-from 60–500 fps; well under the 150 ms human floor; 16 ms worked at 500 fps but 30 generalizes).
-Corroborates HeldFraction. **Higher = more suspicious.** High-fps humans have finer quantization →
-slightly higher FastFrac → compare peer-relative, never as an absolute cut.
-
-## Aggregation (pooled, peer-relative)
-
-1. Pool each player's qualifying on-target shots across matches (off-target spam already excluded by
-   the emitter gate).
-2. Require `MIN_SHOTS` per player (default 90, matching the instagib accuracy floor; ToT-specific
-   floor >= ~60 acceptable) — else abstain for that player.
-3. Within a peer set, compute peer **median** and **MAD** of HeldFraction and FastFrac.
-4. Robust-z per metric: `z = (x - median) / (1.4826 * max(MAD, MAD_FLOOR))`.
-   `1.4826` converts MAD->sigma. `MAD_FLOOR` stops clustered bounded fractions from inflating z into
-   a silent false positive.
-5. Flag candidate iff `HeldFraction z <= -Zcrit` AND `FastFrac z >= +Zcrit` (default `Zcrit ~3`).
-6. **Abstain if fewer than `MIN_PEERS` qualifying players (default 8)** — n=3 can't carry a MAD.
-7. The two metrics are ~ONE latent axis ("no human upper tail"). Treat the AND as corroboration, NOT
-   two independent votes — do not multiply confidences; set `Zcrit` accordingly.
-8. Output a ranked suspicion list, persisted over time. The strongest signal is the SAME player
-   surfacing across many pooled windows. Conviction is human demo review, never the score alone.
-
-## fps rationale (why absolute, and why the upper tail)
-
-- `dwell = fire_time - acquire_time`; acquire is sampled by a once-per-frame on-target trace, so the
-  LOW end of dwell is frame-quantized — a 60 fps player physically cannot produce a sub-16 ms dwell,
-  cheating or not. Any metric anchored at the low end fights the measurement resolution and drifts
-  with fps.
-- Human reaction (~150 ms) is an absolute floor, unrelated to fps. So discriminating thresholds must
-  be ABSOLUTE time, and the most robust live at the UPPER tail (HeldFraction), which frame
-  quantization cannot reach.
-- Ship `frame_ms` per shot for context; never put it inside a threshold.
-
-## Engine emitter (NCToTCollector) — descriptive only, per player per match
-
-`N, mean, sd, CV (descriptive), p10/p50/p90, min/max, HeldFraction@150, FastFrac@30,
-median frame_ms, on-target hit/miss split`, plus server-time-stamped raw shots to
-`ToT_<match>.csv`. No flag/verdict in the engine — the aggregator owns the decision.
-
-## Open questions
-
-- Aggregator home: StatSQL/Django table vs standalone script over pooled CSVs.
-- Peer set: per-lobby pooled vs per-season global baseline (or both, with different `Zcrit`).
-- Final `HELD_MS` / `FAST_MS` / `Zcrit` calibration from a clean-league corpus + known-cheat samples.
-- Evasion: a cheat that injects a randomized human-like reaction delay AND occasional fake held
-  shots would erode both metrics — bound what this catches (naive/greedy triggers) vs what still
-  needs demo review.
+## Open
+- Aggregator: Django management command vs a service.
+- Reference seeding (chicken-and-egg): bootstrap from the general population, then refine by removing
+  demo-confirmed cheats.
+- Final A-D / dip / Mahalanobis thresholds from the step-0 corpus + a few known-cheat captures.
