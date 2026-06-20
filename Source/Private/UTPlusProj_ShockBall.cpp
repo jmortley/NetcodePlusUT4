@@ -125,6 +125,7 @@ void AUTPlusProj_ShockBall::BeginPlay()
 	// Cache the original fire direction for drift correction at high fps
 	bHasCachedFireDirection = false;
 	StuckTime = 0.f;
+	LastStuckProgressLoc = GetActorLocation();
 	if (ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero())
 	{
 		OriginalFireDirection = ProjectileMovement->Velocity.GetSafeNormal();
@@ -168,49 +169,70 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	// heading once at spawn (SpawnNetPredictedProjectile enforces Velocity = SpawnRotation
 	// * InitialSpeed) and coast ballistically, because they're too short-lived to drift.
 	//
-	// UNCONDITIONAL on purpose. The previous `dot > 0.9998` (~1.1 deg) gate was a one-way
-	// latch: it only re-aimed while ALREADY within ~1.1 deg of aim, so a single oversized
-	// integration step from an FPS hitch could kick the heading past the threshold, after
-	// which the gate never re-engaged (systematic drift only grows) and the core flew
-	// permanently off-aim — the rare, FPS-fluctuation-correlated off-aim shots. A straight
-	// shock core never legitimately changes heading in flight (combo destroys it; slomo
-	// changes only speed, preserved here via live Speed; a wall stops it, caught by the
-	// IsNearlyZero guard), so there is nothing to protect by gating — gating WAS the bug.
+	// UNCONDITIONAL on heading: the old `dot > 0.9998` (~1.1 deg) latch was a one-way gate
+	// that, once an FPS hitch kicked the heading past threshold, never re-engaged → permanent
+	// off-aim cores. Re-asserting every tick fixed that.
+	//
+	// GATED on WHO runs it (and WHEN). Only the client FAKE (client-authoritative aim) and the
+	// SERVER real integrate the full flight via the movement component and accumulate float drift —
+	// AND both have their OriginalFireDirection seeded from the TRUE fire line (SetOriginalFireDirection,
+	// called only in SpawnNetPredictedProjectile). The client's REPLICATED real is a SimulatedProxy
+	// that never goes through that spawn path, so BeginPlay seeds its OriginalFireDirection from the
+	// FIRST *quantized* replicated velocity — a slightly-wrong axis. Re-asserting drift on it locks the
+	// (still-collidable, later-revealed) real onto that wrong axis = off-aim curve. So skip the client
+	// real and let it follow the authoritative replicated path. Also skip on the server when the core
+	// is embedded in static geometry, so drift stops re-injecting velocity INTO the wall — that
+	// re-inflation is exactly what kept Speed high and starved the old velocity-gated stuck check.
+	bool bServerEmbedded = false;
+	FHitResult StuckHit;
+	if (Role == ROLE_Authority && CollisionComp && !bExploded)
+	{
+		const FVector Loc = GetActorLocation();
+		const float ProbeRadius = FMath::Max(2.f, CollisionComp->GetScaledSphereRadius());
+		// Zero-length sweep — true only if overlapping static world geometry (BSP, static meshes),
+		// not actors like bio globs or movers.
+		bServerEmbedded = GetWorld()->SweepSingleByChannel(StuckHit, Loc, Loc,
+			FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(ProbeRadius),
+			FCollisionQueryParams(TEXT("ShockStuckCheck"), false, this));
+	}
+
 	if (bHasCachedFireDirection && ProjectileMovement
 		&& !ProjectileMovement->Velocity.IsNearlyZero()
-		&& FMath::IsNearlyZero(ProjectileMovement->ProjectileGravityScale))
+		&& FMath::IsNearlyZero(ProjectileMovement->ProjectileGravityScale)
+		&& (bFakeClientProjectile || Role == ROLE_Authority)
+		&& !bServerEmbedded)
 	{
 		const float Speed = ProjectileMovement->Velocity.Size();
 		ProjectileMovement->Velocity = OriginalFireDirection * Speed;
 	}
 
-	// Stuck-ball detection: if the server-side projectile has near-zero velocity
-	// and is embedded in world geometry, force-explode. This catches edge cases
-	// where the movement component bleeds velocity at a shallow angle without
-	// triggering a clean OnStop → ProcessHit → Explode chain.
-	if (Role == ROLE_Authority && ProjectileMovement
-		&& ProjectileMovement->Velocity.IsNearlyZero(5.0f))
+	// Stuck-ball detection (server). A core that reaches a wall in flight can end up with its centre
+	// PENETRATING the surface; from inside an overlap the movement component stops reporting a clean
+	// blocking hit, so it never runs OnStop -> Explode and sits embedded, visibly jittering/"spins",
+	// alive and still combo-able. Detect it directly: force-explode when the core is (a) embedded in
+	// static geometry AND (b) not making net progress. Both are required so a fast core skimming past
+	// a wall (still moving) or a slomo core hovering in open space (not touching geometry) is never
+	// wrongly detonated. Velocity-INDEPENDENT on purpose — the drift correction above keeps Speed high
+	// on an embedded core, so the previous IsNearlyZero(5.0) velocity gate never fired.
+	if (Role == ROLE_Authority && CollisionComp && !bExploded)
 	{
-		StuckTime += DeltaTime;
-		if (StuckTime >= StuckExplodeDelay && CollisionComp)
+		const FVector Loc = GetActorLocation();
+		const bool bNotTravelling = FVector::DistSquared(Loc, LastStuckProgressLoc)
+			< FMath::Square(StuckProgressThreshold);
+		if (bServerEmbedded && bNotTravelling)
 		{
-			// Zero-length sweep at current location — returns true only if inside
-			// static world geometry (BSP, static meshes), not actors like bio globs.
-			FHitResult Hit;
-			bool bBlocked = GetWorld()->SweepSingleByChannel(Hit, GetActorLocation(), GetActorLocation(),
-				FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(1.f),
-				FCollisionQueryParams(TEXT("StuckCheck"), false, this));
-
-			if (bBlocked)
+			StuckTime += DeltaTime;
+			if (StuckTime >= StuckExplodeDelay)
 			{
-				Explode(GetActorLocation(), Hit.ImpactNormal.IsNearlyZero() ? FVector(0.f, 0.f, 1.f) : Hit.ImpactNormal);
+				Explode(Loc, StuckHit.ImpactNormal.IsNearlyZero() ? FVector(0.f, 0.f, 1.f) : StuckHit.ImpactNormal);
 				return;
 			}
 		}
-	}
-	else
-	{
-		StuckTime = 0.f;
+		else
+		{
+			StuckTime = 0.f;
+			LastStuckProgressLoc = Loc;
+		}
 	}
 
 	// Smooth-converge the fake to the real's position over ~700ms while both
