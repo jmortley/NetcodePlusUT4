@@ -110,6 +110,29 @@ struct FActiveServerProjectile
     UPROPERTY()
     uint8 FireMode;
 
+    // --- Grace buffer (populated when the projectile RESOLVES / explodes) ---
+    // Retain a resolved projectile's final state briefly so a claim arriving after the server
+    // projectile is gone (close-range timing race) can still rewind-rescue. ExpireTime < 0 means
+    // the projectile is still live (not yet resolved).
+    UPROPERTY()
+    FVector FinalLoc = FVector::ZeroVector;
+    UPROPERTY()
+    FVector FinalVel = FVector::ZeroVector;
+    UPROPERTY()
+    float FinalGravityZ = 0.f;
+    UPROPERTY()
+    float HitRadius = 0.f;
+    UPROPERTY()
+    float BaseDamage = 0.f;
+    UPROPERTY()
+    float Momentum = 0.f;
+    UPROPERTY()
+    TSubclassOf<UDamageType> DamageType;
+    UPROPERTY()
+    float ExpireTime = -1.f;
+    UPROPERTY()
+    TWeakObjectPtr<class AUTCharacter> DamagedTarget;
+
     FActiveServerProjectile()
         : EventIndex(-1)
         , FireMode(0)
@@ -575,6 +598,13 @@ protected:
     /** Server-side tracking of authoritative projectiles by EventIndex */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
+
+    /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves
+     *  (explodes) to snapshot its final state into ActiveServerProjectiles for the lag-comp
+     *  grace buffer, so a claim arriving after the projectile is gone can still rewind-rescue.
+     *  DamagedChar = the pawn it directly hit this frame, or null (geometry/whiff) — used to
+     *  prevent double-damaging a target that already took the present-time hit. */
+    void OnTrackedProjectileResolved(class AUTProjectile* Proj, class AUTCharacter* DamagedChar);
 
 
     // =========================================================================

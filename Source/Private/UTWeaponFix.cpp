@@ -13,6 +13,7 @@
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
 #include "UTPlusProj_FlakShell.h"
+#include "UTDamageType.h"   // FUTRadialDamageEvent (grace-buffer direct-hit damage)
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponSkin.h"
 #include "UObject/UObjectIterator.h"
@@ -57,10 +58,22 @@ static TAutoConsoleVariable<int32> CVarRocketLagComp(
 );
 static TAutoConsoleVariable<float> CVarRocketLagCompMaxWindowMs(
     TEXT("ut.RocketLagCompMaxWindowMs"),
-    120.0f,
+    150.0f,
     TEXT("Max rewind/lookback window in ms, applied at any ping. Bounds 'shot behind cover'\n")
     TEXT("(keep <= the hitscan rewind envelope) and naturally degrades compensation once a\n")
-    TEXT("shooter's RTT exceeds it. Full coverage holds for RTT up to ~window/1.1."),
+    TEXT("shooter's RTT exceeds it. Full coverage holds for RTT up to ~window/1.1. Pairs with\n")
+    TEXT("ut.RocketLagCompGraceMs (keep them matched; both ~= the ping cutoff)."),
+    ECVF_Default
+);
+// Grace buffer: how long a RESOLVED (exploded) rocket/flak shell is retained so a claim that
+// arrives after the server projectile is already gone (the close-range timing race, where the
+// claim is ~one shooter-RTT late) can still rewind-rescue. Match to ut.RocketLagCompMaxPingMs.
+// 0 disables the grace path entirely (kill switch -> live-projectile-only, the pre-grace behavior).
+static TAutoConsoleVariable<float> CVarRocketLagCompGraceMs(
+    TEXT("ut.RocketLagCompGraceMs"),
+    150.0f,
+    TEXT("Grace buffer (ms) for retaining a resolved rocket/flak shell so a late claim can still\n")
+    TEXT("rewind-rescue (close-range timing race). Match ut.RocketLagCompMaxPingMs. 0 = disabled."),
     ECVF_Default
 );
 static TAutoConsoleVariable<float> CVarRocketLagCompMaxPingMs(
@@ -3792,6 +3805,40 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 	ServerProjectileHitClaim(HitTarget, HitLocation, -1, FireModeNum);
 }
 
+void AUTWeaponFix::OnTrackedProjectileResolved(AUTProjectile* Proj, AUTCharacter* DamagedChar)
+{
+	// Server-only. Snapshot a tracked projectile's final state at the moment it resolves
+	// (explodes), BEFORE the engine destroys it, so the grace buffer can rewind-rescue a
+	// claim that arrives after the projectile is gone. Capturing here (vs a per-tick poll)
+	// gives the exact explosion position/velocity AND what it actually hit (for the
+	// double-damage guard).
+	if (Role != ROLE_Authority || !Proj)
+	{
+		return;
+	}
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	for (FActiveServerProjectile& E : ActiveServerProjectiles)
+	{
+		if (E.Projectile.Get() != Proj)
+		{
+			continue;
+		}
+		E.FinalLoc = Proj->GetActorLocation();
+		E.FinalVel = Proj->GetVelocity();
+		E.FinalGravityZ = Proj->ProjectileMovement ? Proj->ProjectileMovement->GetGravityZ() : 0.f;
+		E.BaseDamage = Proj->DamageParams.BaseDamage;
+		E.Momentum = Proj->Momentum;
+		E.DamageType = Proj->MyDamageType;
+		float R = 0.f;
+		if (Proj->CollisionComp) { R = Proj->CollisionComp->GetScaledSphereRadius(); }
+		if (R <= 0.f && Proj->PawnOverlapSphere) { R = Proj->PawnOverlapSphere->GetScaledSphereRadius(); }
+		E.HitRadius = (R > 0.f) ? R : 10.f;
+		E.ExpireTime = Now;
+		E.DamagedTarget = DamagedChar;
+		break;
+	}
+}
+
 bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
 	int32 ClaimedEventIndex, uint8 ClaimedFireMode)
 {
@@ -3840,26 +3887,47 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 
 	// 3. Find the real (authoritative) projectile
 	// Match by FireMode, oldest first (FIFO). EventIndex match preferred if provided.
+	// Prefer a LIVE projectile; if none, fall back to the GRACE BUFFER — a matching projectile
+	// that resolved (exploded) within ut.RocketLagCompGraceMs, for the close-range timing race
+	// where the server projectile detonated before this ~RTT-late claim arrived.
+	const float NowSec = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	const float GraceSec = FMath::Max(0.f, CVarRocketLagCompGraceMs.GetValueOnGameThread() * 0.001f);
+
 	AUTProjectile* RealProjectile = nullptr;
 	int32 FoundIndex = -1;
+	int32 GraceIndex = -1;   // fallback: a matching resolved projectile still within the grace window
 
 	for (int32 i = 0; i < ActiveServerProjectiles.Num(); i++)
 	{
 		FActiveServerProjectile& Entry = ActiveServerProjectiles[i];
-		if (!Entry.Projectile.IsValid())
+		const bool bLive = Entry.Projectile.IsValid()
+			&& !Entry.Projectile.Get()->bExploded
+			&& !Entry.Projectile.Get()->IsPendingKillPending();
+
+		if (!bLive)
 		{
-			ActiveServerProjectiles.RemoveAt(i);
-			i--;
+			// Retain a RESOLVED entry only while it's inside the grace window AND grace is on;
+			// otherwise drop it. A resolved entry has ExpireTime >= 0 (set by
+			// OnTrackedProjectileResolved); a never-resolved-but-now-invalid entry (ExpireTime < 0)
+			// is dropped immediately as before.
+			const bool bWithinGrace = (GraceSec > 0.f) && (Entry.ExpireTime >= 0.f)
+				&& ((NowSec - Entry.ExpireTime) <= GraceSec);
+			if (!bWithinGrace)
+			{
+				ActiveServerProjectiles.RemoveAt(i);
+				i--;
+				continue;
+			}
+			// Eligible grace fallback if it matches; remember the first (oldest) one.
+			if (GraceIndex == -1
+				&& Entry.FireMode == ClaimedFireMode
+				&& (ClaimedEventIndex < 0 || Entry.EventIndex == ClaimedEventIndex))
+			{
+				GraceIndex = i;
+			}
 			continue;
 		}
-		AUTProjectile* Candidate = Entry.Projectile.Get();
-		// Clean up exploded/destroyed entries — they already applied damage naturally
-		if (!Candidate || Candidate->bExploded || Candidate->IsPendingKillPending())
-		{
-			ActiveServerProjectiles.RemoveAt(i);
-			i--;
-			continue;
-		}
+
 		if (Entry.FireMode != ClaimedFireMode)
 		{
 			continue;
@@ -3869,16 +3937,50 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		{
 			continue;
 		}
-		RealProjectile = Candidate;
+		RealProjectile = Entry.Projectile.Get();
 		FoundIndex = i;
 		break; // Oldest first (array is insertion-ordered)
 	}
 
-	if (!RealProjectile)
+	// Grace-buffer fallback when no LIVE projectile matched (the close-range timing race).
+	bool bFromGrace = false;
+	FVector GraceFinalLoc = FVector::ZeroVector;
+	FVector GraceFinalVel = FVector::ZeroVector;
+	float GraceFinalGravityZ = 0.f;
+	float GraceHitRadius = 10.f;
+	float GraceExpireTime = 0.f;
+	float GraceBaseDamage = 0.f;
+	float GraceMomentum = 0.f;
+	TSubclassOf<UDamageType> GraceDamageType = nullptr;
+	if (!RealProjectile && GraceIndex != -1)
 	{
-		// No unexploded projectile found. The server rocket already hit something
-		// (target or geometry) and applied damage via its natural collision. Don't
-		// re-apply damage — that causes double damage at 90+ ping.
+		FActiveServerProjectile& E = ActiveServerProjectiles[GraceIndex];
+		// Double-damage guard: if this projectile already directly hit the CLAIMED target
+		// present-time, the damage was applied by its natural collision — do NOT rescue.
+		if (E.DamagedTarget.Get() == ClaimedTarget)
+		{
+			return;
+		}
+		bFromGrace = true;
+		FoundIndex = GraceIndex;
+		GraceFinalLoc = E.FinalLoc;
+		GraceFinalVel = E.FinalVel;
+		GraceFinalGravityZ = E.FinalGravityZ;
+		GraceHitRadius = E.HitRadius;
+		GraceExpireTime = E.ExpireTime;
+		GraceBaseDamage = E.BaseDamage;
+		GraceMomentum = E.Momentum;
+		GraceDamageType = E.DamageType;
+	}
+
+	if (!RealProjectile && !bFromGrace)
+	{
+		// No live projectile AND nothing rescuable in the grace buffer. The server rocket either
+		// hit the target present-time and applied damage (normal), or detonated/whiffed and its
+		// grace window already expired (claim arrived too late, or grace disabled). Don't re-apply.
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("ProjRewind no-op: no live or in-grace projectile (fm=%d ping=%.0f) — present-time hit OR claim past grace"),
+			(int32)ClaimedFireMode, PingMs);
 		return;
 	}
 
@@ -3913,27 +4015,43 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	const float ClaimMatchTol = CapRadius + 25.f;
 	if (BestDistSq > ClaimMatchTol * ClaimMatchTol)
 	{
-		UE_LOG(LogUTWeaponFix, Verbose,
+		UE_LOG(LogUTWeaponFix, Warning,
 			TEXT("ProjRewind REJECTED: target not at claim (dist=%.1f ping=%.0f win=%.0fms)"),
 			FMath::Sqrt(BestDistSq), PingMs, WindowSec * 1000.f);
 		return;
 	}
 
-	// 6. Reconstruct where the REAL projectile was at that instant, analytically from current
-	// state under constant gravity (rocket g=0, flak shell g<0); no history buffer needed:
-	//   pos(t-d) = pos - vel*d + 0.5*g*d^2
-	const FVector ProjLoc = RealProjectile->GetActorLocation();
-	const FVector ProjVel = RealProjectile->GetVelocity();
-	const float GravZ = RealProjectile->ProjectileMovement ? RealProjectile->ProjectileMovement->GetGravityZ() : 0.f;
-	const FVector ProjPast = ProjLoc - (ProjVel * BestDelta) + FVector(0.f, 0.f, 0.5f * GravZ * BestDelta * BestDelta);
+	// 6. Reconstruct where the projectile was at the rewind instant, analytically under constant
+	// gravity (rocket g=0, flak shell g<0); no history buffer needed.
+	//   LIVE:  walk back from current state:  pos(t-d) = pos - vel*d + 0.5*g*d^2
+	//   GRACE: the projectile resolved at GraceExpireTime at GraceFinalLoc; the rewind instant
+	//          (NowSec - BestDelta) is BEFORE the explosion, so walk back from the explosion by
+	//          BackDt = ExpireTime - (Now - BestDelta).
+	FVector ProjPast;
+	if (bFromGrace)
+	{
+		const float BackDt = FMath::Max(0.f, GraceExpireTime - (NowSec - BestDelta));
+		ProjPast = GraceFinalLoc - (GraceFinalVel * BackDt) + FVector(0.f, 0.f, 0.5f * GraceFinalGravityZ * BackDt * BackDt);
+	}
+	else
+	{
+		const FVector ProjLoc = RealProjectile->GetActorLocation();
+		const FVector ProjVel = RealProjectile->GetVelocity();
+		const float GravZ = RealProjectile->ProjectileMovement ? RealProjectile->ProjectileMovement->GetGravityZ() : 0.f;
+		ProjPast = ProjLoc - (ProjVel * BestDelta) + FVector(0.f, 0.f, 0.5f * GravZ * BestDelta * BestDelta);
+	}
 
 	// 7. Server-authoritative contact test. THIS owns the hit decision, not the client.
 	float ProjHitRadius = 0.f;
-	if (RealProjectile->CollisionComp)
+	if (bFromGrace)
+	{
+		ProjHitRadius = GraceHitRadius;   // captured at resolution (real projectile is gone)
+	}
+	else if (RealProjectile->CollisionComp)
 	{
 		ProjHitRadius = RealProjectile->CollisionComp->GetScaledSphereRadius();
 	}
-	if (ProjHitRadius <= 0.f && RealProjectile->PawnOverlapSphere)
+	if (ProjHitRadius <= 0.f && !bFromGrace && RealProjectile->PawnOverlapSphere)
 	{
 		ProjHitRadius = RealProjectile->PawnOverlapSphere->GetScaledSphereRadius();
 	}
@@ -3952,7 +4070,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	{
 		// Real projectile did NOT pass within the capsule at that instant: not a confirmable
 		// direct hit. v1 declines (present-time already handled any true contact).
-		UE_LOG(LogUTWeaponFix, Verbose,
+		UE_LOG(LogUTWeaponFix, Warning,
 			TEXT("ProjRewind REJECTED: no server contact (dist=%.1f need=%.1f ping=%.0f win=%.0fms delta=%.0fms)"),
 			FMath::Sqrt(ContactDistSq), ContactRadius, PingMs, WindowSec * 1000.f, BestDelta * 1000.f);
 		return;
@@ -3961,7 +4079,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	// Anti-fabrication #2: the claimed point must also lie on the real projectile path.
 	if (FVector::DistSquared(ProjPast, ClaimedHitLocation) > FMath::Square(ContactRadius + ClaimMatchTol))
 	{
-		UE_LOG(LogUTWeaponFix, Verbose, TEXT("ProjRewind REJECTED: claim off projectile path"));
+		UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: claim off projectile path"));
 		return;
 	}
 
@@ -3971,26 +4089,50 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	WallParams.AddIgnoredActor(UTOwner);
 	if (GetWorld()->LineTraceTestByChannel(ProjPast, BestCenter, COLLISION_TRACE_WEAPON, WallParams))
 	{
-		UE_LOG(LogUTWeaponFix, Verbose, TEXT("ProjRewind REJECTED: wall between projectile and target"));
+		UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: wall between projectile and target"));
 		return;
 	}
 
-	// 9. Confirmed. Resolve the projectile's hit on the claimed target at the rewound contact
-	// point. ProcessHit -> DamageImpactedActor + Explode reuses stock damage semantics (incl.
-	// stock direct/splash dedup) and consumes the projectile (bExploded), so the present-time
-	// collision cannot also fire.
-	if (!RealProjectile->bExploded)
-	{
-		const FVector HitNormal = (ProjPast - OnCap).GetSafeNormal();
+	// 9. Confirmed direct hit at the rewound contact point.
+	const FVector HitNormal = (ProjPast - OnCap).GetSafeNormal();
+	// targetMoved = how far the target's authoritative capsule advanced past where the shooter
+	// hit it == roughly how badly the un-compensated server test would have missed (> capsule
+	// radius ~46u means this hit ONLY landed because of lag comp).
+	const float TargetPingMs = ClaimedTarget->PlayerState ? ClaimedTarget->PlayerState->ExactPing : -1.f;
+	const float TargetMoved = (ClaimedTarget->GetActorLocation() - BestCenter).Size();
 
-		// "It worked" telemetry. This damage is being applied by lag comp, not by present-time
-		// collision (the real projectile is still in flight). targetMoved = how far the target's
-		// authoritative capsule has advanced past where the shooter hit it == roughly how badly
-		// the un-compensated server test would have missed. targetMoved > capsule radius (~46u)
-		// means this hit ONLY landed because of this code.
-		const float TargetPingMs = ClaimedTarget->PlayerState ? ClaimedTarget->PlayerState->ExactPing : -1.f;
-		const float TargetMoved = (ClaimedTarget->GetActorLocation() - BestCenter).Size();
-		UE_LOG(LogUTWeaponFix, Log,
+	if (bFromGrace)
+	{
+		// Real projectile already exploded (close-range timing race). Apply its DIRECT-hit damage
+		// ourselves — mirrors AUTProjectile::DamageImpactedActor's radial branch with MinimumDamage
+		// forced to full (a direct hit deals full damage regardless of radial falloff). The
+		// double-damage guard already ensured this projectile did NOT hit ClaimedTarget present-time,
+		// and same-team was rejected earlier — so this is a clean rescue, not a re-application.
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("ProjRewind GRACE SAVE: tgt=%s fm=%d shooterPing=%.0f targetPing=%.0f win=%.0fms rewind=%.0fms graceAge=%.0fms contact=%.1f targetMoved=%.1f dmg=%.0f"),
+			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TargetPingMs,
+			WindowSec * 1000.f, BestDelta * 1000.f, (NowSec - GraceExpireTime) * 1000.f,
+			FMath::Sqrt(ContactDistSq), TargetMoved, GraceBaseDamage);
+
+		FUTRadialDamageEvent DmgEvent;
+		DmgEvent.BaseMomentumMag = GraceMomentum;
+		DmgEvent.Params = FRadialDamageParams(GraceBaseDamage, 1.0f);
+		DmgEvent.Params.MinimumDamage = GraceBaseDamage; // force full damage for a direct hit
+		DmgEvent.DamageTypeClass = GraceDamageType ? GraceDamageType : TSubclassOf<UDamageType>(UDamageType::StaticClass());
+		DmgEvent.Origin = OnCap;
+		new(DmgEvent.ComponentHits) FHitResult(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(), OnCap, HitNormal);
+		DmgEvent.ComponentHits[0].TraceStart = OnCap - GraceFinalVel;
+		DmgEvent.ComponentHits[0].TraceEnd = OnCap + GraceFinalVel;
+		DmgEvent.ShotDirection = GraceFinalVel.GetSafeNormal();
+		AController* InstC = UTOwner ? UTOwner->GetController() : nullptr;
+		ClaimedTarget->TakeDamage(GraceBaseDamage, DmgEvent, InstC, this);
+	}
+	else if (!RealProjectile->bExploded)
+	{
+		// Live projectile still in flight: reuse stock damage semantics — ProcessHit ->
+		// DamageImpactedActor + Explode (incl. direct/splash dedup), consuming the projectile
+		// (bExploded) so the present-time collision cannot also fire.
+		UE_LOG(LogUTWeaponFix, Warning,
 			TEXT("ProjRewind SAVE: tgt=%s fm=%d shooterPing=%.0f targetPing=%.0f win=%.0fms rewind=%.0fms contact=%.1f targetMoved=%.1f"),
 			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TargetPingMs,
 			WindowSec * 1000.f, BestDelta * 1000.f, FMath::Sqrt(ContactDistSq), TargetMoved);
