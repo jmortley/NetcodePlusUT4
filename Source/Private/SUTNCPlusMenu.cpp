@@ -13,6 +13,18 @@ static const TCHAR* NCPSection = TEXT("NetcodePlus");
 // (NCPlusUTDmg_Instagib: ShouldGib reads bAllowGib, PlayDeathEffects reads RagdollTime) actually reads.
 static const TCHAR* IGCTFSection = TEXT("InstagibCTF");
 
+// Ragdoll-time semantics + footgun guard. The iCTF damage-type BP (NCPlusUTDmg_Instagib::PlayDeathEffects)
+// passes RagdollTime straight into a "Set Timer by Function Name" (CleanUpRagdoll) node. Engine rule
+// (FTimerManager::SetTimer): rate <= 0 NEVER schedules the timer — so RagdollTime == 0 means "no cleanup =
+// keep the ragdoll". A tiny positive value (e.g. 0.01) DOES schedule it and fires almost instantly, so the
+// ragdoll despawns before it's visible. Snap that whole near-zero band to 0 (keep) so the slider only ever
+// yields 0 or a clearly-visible lifetime; cap at 10s.
+static constexpr float MinRagdollLifetime = 0.5f;
+static FORCEINLINE float SanitizeRagdollTime(float V)
+{
+	return (V < MinRagdollLifetime) ? 0.f : FMath::Min(V, 10.f);
+}
+
 // Shared fonts
 static FSlateFontInfo BoldFont(int32 Size)   { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), Size); }
 static FSlateFontInfo RegularFont(int32 Size) { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), Size); }
@@ -397,9 +409,11 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 				SNew(SSpinBox<float>)
 				.MinValue(0.f)
 				.MaxValue(10.f)
+				.Delta(0.5f)   // drag steps in 0.5s — can't land on a near-zero instant-despawn value
 				.Value(RagdollTime)
 				.OnValueCommitted(this, &SUTNCPlusMenu::OnRagdollTimeChanged)
 				.MinDesiredWidth(80.f)
+				.ToolTipText(FText::FromString(TEXT("Seconds before a ragdoll despawns. 0 = keep ragdolls (no auto-cleanup). Minimum lifetime 0.5s; smaller values snap to 0.")))
 			]
 		]
 
@@ -788,7 +802,7 @@ void SUTNCPlusMenu::LoadSettings()
 		bShowRagdoll = true;
 
 	if (GConfig->GetString(IGCTFSection, TEXT("RagdollTime"), Val, ConfigPath))
-		RagdollTime = FCString::Atof(*Val);
+		RagdollTime = SanitizeRagdollTime(FCString::Atof(*Val));   // sanitize stale/hand-edited configs too
 	else
 		RagdollTime = 3.0f;
 
@@ -901,7 +915,8 @@ void SUTNCPlusMenu::OnShowRagdollChanged(ECheckBoxState NewState)
 
 void SUTNCPlusMenu::OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType)
 {
-	RagdollTime = FMath::Clamp(NewValue, 0.f, 10.f);
+	// Snap the near-zero "instant despawn" band to 0 (= keep ragdolls). See SanitizeRagdollTime.
+	RagdollTime = SanitizeRagdollTime(NewValue);
 }
 
 void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType)
