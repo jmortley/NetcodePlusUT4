@@ -245,7 +245,7 @@ void FNCFireValCollector::WriteCsv(UWorld* World) const
 	const FString Path = FPaths::GameSavedDir() / TEXT("Logs")
 		/ FString::Printf(TEXT("FireVal_%s_%d.csv"), *MapTag, GFireValMatchCounter);
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), /*Tree=*/true);
-	if (FFileHelper::SaveStringToFile(Csv, *Path))
+	if (FFileHelper::SaveStringToFile(Csv, *Path, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
 	{
 		UE_LOG(LogNCFireVal, Warning, TEXT("[FireVal] timeline written: %s (%d samples)"), *Path, Rows.Num());
 	}
