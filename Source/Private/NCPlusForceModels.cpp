@@ -388,6 +388,10 @@ void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
 	}
 }
 
+static TAutoConsoleVariable<int32> CVarFlagDebug(
+	TEXT("ncp.FlagDebug"), 0,
+	TEXT("Log each CTF flag base/flag/mesh state ~every 1.5s (ForceModels flag-visibility debug). 0=off."));
+
 void NCPlusForceModels::SyncFlagColours(UWorld* World)
 {
 	// Recolour the CTF flag CLOTH to each team's skin colour (relative to the local viewer). The stock
@@ -408,13 +412,49 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 	USkeletalMesh* DCMesh = bWant ? LoadDCFlagMesh() : nullptr;
 	static const FName NAME_FlagColour(TEXT("FlagColour"));
 
+	// Flag-visibility debug (ncp.FlagDebug): dump per-base flag state ~every 1.5s. Logs even when a
+	// base/flag/mesh is missing — exactly the "map maker did something funny" case (a map with no
+	// flag base for a team, or a flag parked off-world / with collapsed render bounds).
+	const bool bFlagDbg = CVarFlagDebug.GetValueOnGameThread() != 0;
+	static float GLastFlagLog = -1000.f;
+	const float TNow = World->TimeSeconds;
+	const bool bLogNow = bFlagDbg && (TNow < GLastFlagLog || TNow - GLastFlagLog > 1.5f);
+	if (bLogNow) { GLastFlagLog = TNow; }
+
 	for (uint8 Team = 0; Team < 2; ++Team)
 	{
 		AUTCTFFlagBase* Base = GS->GetFlagBase(Team);
-		if (!Base || !Base->MyFlag) { continue; }
-		AUTFlag* Flag = Base->MyFlag;
-		USkeletalMeshComponent* Mesh = Flag->GetMesh();
-		if (!Mesh) { continue; }
+		AUTFlag* Flag = Base ? Base->MyFlag : nullptr;
+		USkeletalMeshComponent* Mesh = Flag ? Flag->GetMesh() : nullptr;
+
+		if (bLogNow)
+		{
+			if (!Base)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d: GetFlagBase=NULL (no flag base for this team on this map)"), Team);
+			}
+			else if (!Flag)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d: base=%s MyFlag=NULL baseLoc=%s"),
+					Team, *GetNameSafe(Base->GetClass()), *Base->GetActorLocation().ToCompactString());
+			}
+			else if (!Mesh)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d: flagClass=%s GetMesh=NULL"), Team, *GetNameSafe(Flag->GetClass()));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d friendly=%d held=%d | flagClass=%s baseClass=%s | mesh=%s mats=%d boundsR=%.0f hidden=%d vis=%d | worldLoc=%s relZ=%.0f scale=%.2f | baseLoc=%s"),
+					Team, ((int32)Team == ViewerTeam) ? 1 : 0, (Flag->HoldingPawn != nullptr) ? 1 : 0,
+					*GetNameSafe(Flag->GetClass()), *GetNameSafe(Base->GetClass()),
+					*GetNameSafe(Mesh->SkeletalMesh), Mesh->GetNumMaterials(), Mesh->Bounds.SphereRadius,
+					Mesh->bHiddenInGame ? 1 : 0, Mesh->IsVisible() ? 1 : 0,
+					*Mesh->GetComponentLocation().ToCompactString(), Mesh->RelativeLocation.Z, Mesh->RelativeScale3D.X,
+					*Base->GetActorLocation().ToCompactString());
+			}
+		}
+
+		if (!Base || !Flag || !Mesh) { continue; }
 
 		if (bWant && DCMesh)
 		{
