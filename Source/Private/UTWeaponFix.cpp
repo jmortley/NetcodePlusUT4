@@ -23,6 +23,7 @@
 #include "UTCTFBaseGame.h"
 #include "UTPlayerState.h"
 #include "ElimPlusGame.h"
+#include "WipeoutGame.h"
 #include "MutBotEvents.h"
 #include "NCFireValCollector.h"
 #include "UTPlusSniper.h"
@@ -267,7 +268,7 @@ void AUTWeaponFix::BeginPlay()
     // Fire-validation telemetry gate — decided server-side where the gamemode is
     // unambiguous, then replicated to the owning client. Two conditions, both
     // required:
-    //   1. Mode: Elim or instagib-CTF only (regular CTF / Duel / Wipeout / ShockDom off).
+    //   1. Mode: Elim, instagib-CTF, or Wipeout (regular CTF / Duel / ShockDom off).
     //   2. Weapon: this instance is a UTPlusSniper or UTPlusShockRifle (or child).
     //      Covers instagib rifle + shock rifle (shock children) and sniper + LG
     //      (LG is a sniper reskin). Excludes minigun/enforcer — also hitscan, but
@@ -277,12 +278,13 @@ void AUTWeaponFix::BeginPlay()
         AUTGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AUTGameMode>() : nullptr;
         const bool bElim = GM && GM->IsA(AElimPlusGame::StaticClass());
         const bool bICTF = GM && GM->bIsInstagib && GM->IsA(AUTCTFBaseGame::StaticClass());
+        const bool bWipeout = GM && GM->IsA(AUWipeoutGame::StaticClass());
         const bool bFireValWeapon = IsA(AUTPlusSniper::StaticClass()) || IsA(AUTPlusShockRifle::StaticClass());
         // 3. Server master switch: Mod.ini [NetcodePlus] EnableFireVal (default OFF). Gated
         //    here server-side, so when it's off bFireValActive stays false and the
         //    owner-only replicated flag never tells any client to start the tracker.
         const bool bEnabled = FNCFireValCollector::IsEnabled();
-        bFireValActive = bEnabled && (bElim || bICTF) && bFireValWeapon;
+        bFireValActive = bEnabled && (bElim || bICTF || bWipeout) && bFireValWeapon;
 
         // One-time diagnostic for the relevant weapons, so a "no samples" result is never
         // a mystery again: it shows whether the gate armed and which condition failed.
@@ -292,8 +294,8 @@ void AUTWeaponFix::BeginPlay()
         if (bFireValWeapon && !bLoggedFireValGate)
         {
             bLoggedFireValGate = true;
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireVal] gate: weapon=%s enabled=%d elim=%d ictf=%d -> active=%d"),
-                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bFireValActive ? 1 : 0);
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireVal] gate: weapon=%s enabled=%d elim=%d ictf=%d wipeout=%d -> active=%d"),
+                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bWipeout ? 1 : 0, bFireValActive ? 1 : 0);
         }
     }
 }

@@ -1,5 +1,6 @@
 #include "WipeoutGame.h"
 #include "NCPlusVersionGate.h"
+#include "NCFireValCollector.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -353,6 +354,8 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	Super::HandleMatchHasStarted();
 	bWarmupMode = false;
 
+	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id; accumulate across all rounds
+
 	// Defense-in-depth reset: InitGame already clears this on map load, but a
 	// single server session can host multiple matches. Reset here so a subsequent
 	// match can flush its own ratings.
@@ -412,6 +415,8 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 void AUWipeoutGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+
+	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (server-side; guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
