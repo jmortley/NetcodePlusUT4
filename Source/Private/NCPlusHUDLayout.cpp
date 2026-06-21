@@ -1089,25 +1089,25 @@ namespace NCPlusHUDDrawCall
 		Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
 	}
 
-	// ── Replay-only time-on-target corner feed ────────────────────────
-	// Reads the server-written ToT_*.csv and overlays each sampled shot during
+	// ── Replay-only fire-validation corner feed ────────────────────────
+	// Reads the server-written FireVal_*.csv and overlays each sampled shot during
 	// demo playback, synced to the replayed server clock. Pure client display.
 
-	struct FNCToTReplayEvent { float Time; FString Name; int32 Dwell; int32 Frame; bool bHit; };
+	struct FNCFireValReplayEvent { float Time; FString Name; int32 Dwell; int32 Frame; bool bHit; };
 
-	static TArray<FNCToTReplayEvent> GToTEvents;        // sorted ascending by Time
-	static FString                   GToTLoadedPath;    // CSV currently cached ("" = none)
-	static TWeakObjectPtr<UWorld>    GToTLoadedWorld;   // reload when the replay world changes
+	static TArray<FNCFireValReplayEvent> GFireValEvents;        // sorted ascending by Time
+	static FString                   GFireValLoadedPath;    // CSV currently cached ("" = none)
+	static TWeakObjectPtr<UWorld>    GFireValLoadedWorld;   // reload when the replay world changes
 
-	static TAutoConsoleVariable<FString> CVarToTReplayCsv(
-		TEXT("ncp.ToTReplayCsv"), TEXT(""),
-		TEXT("Path to a ToT_*.csv for the replay overlay. Empty = newest in Saved/Logs."));
+	static TAutoConsoleVariable<FString> CVarFireValReplayCsv(
+		TEXT("ncp.FireValReplayCsv"), TEXT(""),
+		TEXT("Path to a FireVal_*.csv for the replay overlay. Empty = newest in Saved/Logs."));
 
-	static FString FindNewestToTCsv()
+	static FString FindNewestFireValCsv()
 	{
 		const FString Dir = FPaths::GameSavedDir() / TEXT("Logs");
 		TArray<FString> Names;
-		IFileManager::Get().FindFiles(Names, *(Dir / TEXT("ToT_*.csv")), true, false);
+		IFileManager::Get().FindFiles(Names, *(Dir / TEXT("FireVal_*.csv")), true, false);
 		FString Best;
 		FDateTime BestTime = FDateTime::MinValue();
 		for (const FString& N : Names)
@@ -1119,10 +1119,10 @@ namespace NCPlusHUDDrawCall
 		return Best;
 	}
 
-	static void LoadToTCsv(const FString& Path)
+	static void LoadFireValCsv(const FString& Path)
 	{
-		GToTEvents.Reset();
-		GToTLoadedPath = Path;
+		GFireValEvents.Reset();
+		GFireValLoadedPath = Path;
 		if (Path.IsEmpty()) return;
 
 		TArray<FString> Lines;
@@ -1136,18 +1136,18 @@ namespace NCPlusHUDDrawCall
 			TArray<FString> F;
 			Lines[i].ParseIntoArray(F, TEXT(","), false);
 			if (F.Num() < 5) continue;
-			FNCToTReplayEvent E;
+			FNCFireValReplayEvent E;
 			E.Time  = FCString::Atof(*F[0]);
 			E.Name  = F[1];
 			E.Dwell = FCString::Atoi(*F[2]);
 			E.Frame = FCString::Atoi(*F[3]);
 			E.bHit  = (FCString::Atoi(*F[4]) != 0);
-			GToTEvents.Add(E);
+			GFireValEvents.Add(E);
 		}
-		GToTEvents.Sort([](const FNCToTReplayEvent& A, const FNCToTReplayEvent& B) { return A.Time < B.Time; });
+		GFireValEvents.Sort([](const FNCFireValReplayEvent& A, const FNCFireValReplayEvent& B) { return A.Time < B.Time; });
 	}
 
-	void DrawToTReplayFeed(AUTHUD* HUD, UCanvas* Canvas)
+	void DrawFireValReplayFeed(AUTHUD* HUD, UCanvas* Canvas)
 	{
 		if (HUD == nullptr || Canvas == nullptr) return;
 
@@ -1165,15 +1165,15 @@ namespace NCPlusHUDDrawCall
 		// we've attempted a load for this world we don't re-scan disk per frame —
 		// even if no CSV was found (drop one in + restart the replay, or set the
 		// cvar, to pick it up).
-		const FString CVarPath = CVarToTReplayCsv.GetValueOnGameThread();
-		const bool bSameWorld  = (GToTLoadedWorld.Get() == World);
+		const FString CVarPath = CVarFireValReplayCsv.GetValueOnGameThread();
+		const bool bSameWorld  = (GFireValLoadedWorld.Get() == World);
 		FString Desired;
 		if (!CVarPath.IsEmpty())  Desired = CVarPath;
-		else                      Desired = bSameWorld ? GToTLoadedPath : FindNewestToTCsv();
-		if (!bSameWorld || Desired != GToTLoadedPath)
+		else                      Desired = bSameWorld ? GFireValLoadedPath : FindNewestFireValCsv();
+		if (!bSameWorld || Desired != GFireValLoadedPath)
 		{
-			LoadToTCsv(Desired);
-			GToTLoadedWorld = World;
+			LoadFireValCsv(Desired);
+			GFireValLoadedWorld = World;
 		}
 
 		const float RenderScale = Canvas->ClipY / 1080.f;
@@ -1185,17 +1185,17 @@ namespace NCPlusHUDDrawCall
 		const int32 MaxLines = 8;
 
 		Canvas->DrawColor = FColor(170, 170, 170, 200);
-		Canvas->DrawText(Font, GToTEvents.Num() > 0
-			? FString(TEXT("ToT (replay)"))
-			: FString(TEXT("ToT (replay): no ToT_*.csv in Saved/Logs")),
+		Canvas->DrawText(Font, GFireValEvents.Num() > 0
+			? FString(TEXT("Fire (replay)"))
+			: FString(TEXT("Fire (replay): no FireVal_*.csv in Saved/Logs")),
 			X, Y, Scale, Scale);
 		Y += LineH * 1.2f;
-		if (GToTEvents.Num() == 0) return;
+		if (GFireValEvents.Num() == 0) return;
 
 		int32 Drawn = 0;
-		for (int32 i = GToTEvents.Num() - 1; i >= 0 && Drawn < MaxLines; --i)
+		for (int32 i = GFireValEvents.Num() - 1; i >= 0 && Drawn < MaxLines; --i)
 		{
-			const FNCToTReplayEvent& E = GToTEvents[i];
+			const FNCFireValReplayEvent& E = GFireValEvents[i];
 			const float Age = NowServer - E.Time;
 			if (Age < -0.25f) continue;  // shot is ahead of the playback head — skip
 			if (Age > Window) break;     // sorted: everything earlier is older still

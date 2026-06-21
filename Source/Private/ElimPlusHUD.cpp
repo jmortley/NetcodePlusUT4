@@ -596,8 +596,8 @@ void AElimPlusHUD::DrawHUD()
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
 	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
 
-	// Replay-only: time-on-target corner feed (self-guards to demo playback).
-	NCPlusHUDDrawCall::DrawToTReplayFeed(this, Canvas);
+	// Replay-only: fire-validation corner feed (self-guards to demo playback).
+	NCPlusHUDDrawCall::DrawFireValReplayFeed(this, Canvas);
 }
 
 // Custom team score bar — dynamic team colors, round clock. Same pattern as Wipeout.

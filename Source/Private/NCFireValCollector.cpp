@@ -1,4 +1,4 @@
-#include "NCToTCollector.h"
+#include "NCFireValCollector.h"
 #include "UTPlayerState.h"
 #include "GameFramework/GameStateBase.h"
 #include "Engine/World.h"
@@ -8,9 +8,9 @@
 #include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogNCToT, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogNCFireVal, Log, All);
 
-bool FNCToTCollector::IsEnabled()
+bool FNCFireValCollector::IsEnabled()
 {
 	// Cached for the process — Mod.ini is a server config, not a live-tunable knob.
 	// Same FConfigFile read pattern the CTF perf knobs / NCEloUploader use.
@@ -25,29 +25,29 @@ bool FNCToTCollector::IsEnabled()
 			ModIni.Read(ModIniPath);
 			if (const FConfigSection* Section = ModIni.Find(TEXT("NetcodePlus")))
 			{
-				if (const FConfigValue* V = Section->Find(FName(TEXT("EnableToT"))))
+				if (const FConfigValue* V = Section->Find(FName(TEXT("EnableFireVal"))))
 				{
 					b = V->GetValue().ToBool();
 				}
 			}
 		}
 		Cached = b ? 1 : 0;
-		UE_LOG(LogNCToT, Warning, TEXT("[ToT] EnableToT (Mod.ini [NetcodePlus]) = %d"), (int32)Cached);
+		UE_LOG(LogNCFireVal, Warning, TEXT("[FireVal] EnableFireVal (Mod.ini [NetcodePlus]) = %d"), (int32)Cached);
 	}
 	return Cached != 0;
 }
 
-// Tunables (compile-time; mirror the originals from MutBotEvents).
+// Tunables (compile-time).
 static const int32 kLowDwellMs        = 16;
 static const int32 kMinSamplesForFlag = 12;
 
 // Per-server match counter, bumped on Reset() so CSV filenames are unique across rematches.
-static int32 GToTMatchCounter = 0;
+static int32 GFireValMatchCounter = 0;
 
-// Dwell histogram buckets (ms): [0,8) [8,16) [16,32) [32,64) [64,128) [128,256)
-// [256,512) [512,inf). Log-ish spacing so the low end (flick / trigger-bot band) is
-// fine-grained and the long tracking tail collapses into a few buckets.
-static int32 ToTHistBucket(int32 Ms)
+// Sample histogram buckets (ms): [0,8) [8,16) [16,32) [32,64) [64,128) [128,256)
+// [256,512) [512,inf). Log-ish spacing so the low end is fine-grained and the long
+// tail collapses into a few buckets.
+static int32 FireValHistBucket(int32 Ms)
 {
 	if (Ms < 8)   return 0;
 	if (Ms < 16)  return 1;
@@ -59,27 +59,27 @@ static int32 ToTHistBucket(int32 Ms)
 	return 7;
 }
 
-FNCToTCollector& FNCToTCollector::Get()
+FNCFireValCollector& FNCFireValCollector::Get()
 {
-	static FNCToTCollector Instance;
+	static FNCFireValCollector Instance;
 	return Instance;
 }
 
-void FNCToTCollector::Reset()
+void FNCFireValCollector::Reset()
 {
 	Stats.Reset();
 	bReportedSinceReset = false;
-	++GToTMatchCounter;
+	++GFireValMatchCounter;
 }
 
-void FNCToTCollector::ReportOnce(UWorld* World)
+void FNCFireValCollector::ReportOnce(UWorld* World)
 {
 	if (bReportedSinceReset) return;
 	bReportedSinceReset = true;
 	Report(World);
 }
 
-void FNCToTCollector::Record(UWorld* World, AUTPlayerState* Shooter, int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
+void FNCFireValCollector::Record(UWorld* World, AUTPlayerState* Shooter, int32 SampleMs, uint8 FrameMs, bool bClaimedHit)
 {
 	if (Shooter == nullptr) return;
 
@@ -98,14 +98,14 @@ void FNCToTCollector::Record(UWorld* World, AUTPlayerState* Shooter, int32 Dwell
 	FStat& S = Stats.FindOrAdd(Key);
 	S.PlayerName = Shooter->PlayerName; // keep the latest display name for this identity
 	FSample Smp;
-	Smp.DwellMs     = FMath::Clamp(DwellMs, 0, 60000);
+	Smp.SampleMs    = FMath::Clamp(SampleMs, 0, 60000);
 	Smp.ServerTime  = Now;
 	Smp.FrameMs     = FrameMs;
 	Smp.bClaimedHit = bClaimedHit;
 	S.Samples.Add(Smp);
 }
 
-FNCToTCollector::FSummary FNCToTCollector::ComputeSummary(const FStat& S) const
+FNCFireValCollector::FSummary FNCFireValCollector::ComputeSummary(const FStat& S) const
 {
 	FSummary R;
 	FMemory::Memzero(&R, sizeof(R)); // POD-only struct (no FString) — safe to zero
@@ -117,15 +117,15 @@ FNCToTCollector::FSummary FNCToTCollector::ComputeSummary(const FStat& S) const
 	double Sum = 0.0, FrameSum = 0.0; int32 FrameCnt = 0, LowCnt = 0, FirstFrameCnt = 0;
 	for (const FSample& Smp : S.Samples)
 	{
-		D.Add(Smp.DwellMs);
-		Sum += Smp.DwellMs;
-		R.Hist[ToTHistBucket(Smp.DwellMs)]++;
-		if (Smp.DwellMs <= kLowDwellMs) LowCnt++;
+		D.Add(Smp.SampleMs);
+		Sum += Smp.SampleMs;
+		R.Hist[FireValHistBucket(Smp.SampleMs)]++;
+		if (Smp.SampleMs <= kLowDwellMs) LowCnt++;
 		if (Smp.bClaimedHit) R.HitN++;
 		if (Smp.FrameMs > 0) { FrameSum += Smp.FrameMs; FrameCnt++; }
-		// "First-frame fire": dwell within ~1 of the PLAYER'S OWN frame time — fps-FAIR.
+		// "First-frame fire": sample within ~1 of the PLAYER'S OWN frame time — fps-FAIR.
 		const int32 FrameRef = (Smp.FrameMs > 0) ? (int32)Smp.FrameMs : kLowDwellMs;
-		if (Smp.DwellMs <= FrameRef) FirstFrameCnt++;
+		if (Smp.SampleMs <= FrameRef) FirstFrameCnt++;
 	}
 	const double PreciseMean = Sum / N;   // keep full precision for the variance pass
 	R.MeanMs        = (float)PreciseMean;
@@ -155,7 +155,7 @@ FNCToTCollector::FSummary FNCToTCollector::ComputeSummary(const FStat& S) const
 	return R;
 }
 
-void FNCToTCollector::Report(UWorld* World) const
+void FNCFireValCollector::Report(UWorld* World) const
 {
 	if (Stats.Num() == 0) return;
 
@@ -172,8 +172,8 @@ void FNCToTCollector::Report(UWorld* World) const
 	}
 	if (Rows.Num() == 0) return;
 
-	// Lobby baseline: a real cheat is the clear high outlier of its OWN lobby (self-
-	// calibrates across fps and modes — instagib lobbies run fast across the board).
+	// Lobby baseline: a clear high outlier of its OWN lobby (self-calibrates across fps
+	// and modes — instagib lobbies run fast across the board).
 	TArray<float> FF, CVs;
 	for (const FRow& Row : Rows)
 		if (Row.R.N >= kMinSamplesForFlag) { FF.Add(Row.R.FirstFramePct); CVs.Add(Row.R.CV); }
@@ -181,32 +181,29 @@ void FNCToTCollector::Report(UWorld* World) const
 	if (FF.Num()  > 0) { FF.Sort();  LobbyMedianFF = FF[FF.Num() / 2]; }
 	if (CVs.Num() > 0) { CVs.Sort(); LobbyMedianCV = CVs[CVs.Num() / 2]; }
 
-	// Pass 2 — relative flag + emit. Thresholds PROVISIONAL; the strong signal is the
-	// SAME player flagging across MANY matches.
+	// Pass 2 — relative hint + emit. Thresholds PROVISIONAL; the strong signal is the
+	// SAME player recurring across MANY matches (pooled offline).
 	for (FRow& Row : Rows)
 	{
 		FSummary& R = Row.R;
 		const bool bEnough = (R.N >= kMinSamplesForFlag) && (FF.Num() >= 3);
 
-		// Signature A — "fast": elevated fast-hit fraction vs peers (instant trigger).
 		const bool bFastOutlier = bEnough && (R.CV < 0.5f) && (R.FirstFramePct >= 12.0f)
 			&& (R.FirstFramePct >= 2.0f * FMath::Max(LobbyMedianFF, 1.0f));
 
-		// Signature B — "regular": tight spread + no human tracking tail (compressed
-		// p90/p50) clearly below the lobby variance. Catches a delay-randomised bot.
 		const float TailRatio = (float)R.P90 / (float)FMath::Max(R.P50, 1);
 		const bool bTooRegular = bEnough && (R.CV < 0.45f) && (TailRatio < 2.5f)
 			&& (R.CV <= 0.6f * FMath::Max(LobbyMedianCV, KINDA_SMALL_NUMBER));
 
 		R.bSuspect = bFastOutlier || bTooRegular;
-		const TCHAR* Reason = bFastOutlier ? TEXT("fast") : (bTooRegular ? TEXT("regular") : TEXT(""));
-		const FString Flag = R.bSuspect ? FString::Printf(TEXT("  [REVIEW: %s]"), Reason) : FString();
+		const TCHAR* Reason = bFastOutlier ? TEXT("a") : (bTooRegular ? TEXT("b") : TEXT(""));
+		const FString Flag = R.bSuspect ? FString::Printf(TEXT("  [%s]"), Reason) : FString();
 
 		const float Fps = (R.MeanFrameMs > 0.0f) ? (1000.0f / R.MeanFrameMs) : 0.0f;
 
 		// Warning verbosity so it survives Shipping (it's a review trail).
-		UE_LOG(LogNCToT, Warning,
-			TEXT("[ToT] %s: n=%d hits=%d mean=%.0f sd=%.0f cv=%.2f p10=%d p50=%d p90=%d min=%d max=%d low<=%dms=%.0f%% firstframe=%.0f%%(lobby~%.0f%%) fps~%.0f outliers=%d%s"),
+		UE_LOG(LogNCFireVal, Warning,
+			TEXT("[FireVal] %s: n=%d hits=%d mean=%.0f sd=%.0f cv=%.2f p10=%d p50=%d p90=%d min=%d max=%d low<=%dms=%.0f%% firstframe=%.0f%%(lobby~%.0f%%) fps~%.0f outliers=%d%s"),
 			*Row.Name, R.N, R.HitN, R.MeanMs, R.StdDevMs, R.CV, R.P10, R.P50, R.P90, R.MinMs, R.MaxMs,
 			LowDwellMs, R.LowDwellPct, R.FirstFramePct, LobbyMedianFF, Fps, R.OutlierCount, *Flag);
 	}
@@ -214,50 +211,57 @@ void FNCToTCollector::Report(UWorld* World) const
 	WriteCsv(World);
 }
 
-void FNCToTCollector::WriteCsv(UWorld* World) const
+void FNCFireValCollector::WriteCsv(UWorld* World) const
 {
 	// Flatten every player's samples into one match-clock-sorted timeline (the review
-	// trail an admin scrubs against a server demo / the replay overlay reads).
-	struct FRow { float T; FString Name; int32 Dwell; uint8 Frame; bool bHit; };
+	// trail scrubbed against a server demo / read by the replay overlay). The trailing
+	// player_key column carries the STABLE identity (the map key) so an offline pooled
+	// pass can join the same player across matches without relying on the display name.
+	struct FRow { float T; FString Name; FString Key; int32 Sample; uint8 Frame; bool bHit; };
 	TArray<FRow> Rows;
 	for (const TPair<FString, FStat>& Pair : Stats)
 		for (const FSample& Smp : Pair.Value.Samples)
 		{
-			FRow Rw; Rw.T = Smp.ServerTime; Rw.Name = Pair.Value.PlayerName;
-			Rw.Dwell = Smp.DwellMs; Rw.Frame = Smp.FrameMs; Rw.bHit = Smp.bClaimedHit;
+			FRow Rw; Rw.T = Smp.ServerTime; Rw.Name = Pair.Value.PlayerName; Rw.Key = Pair.Key;
+			Rw.Sample = Smp.SampleMs; Rw.Frame = Smp.FrameMs; Rw.bHit = Smp.bClaimedHit;
 			Rows.Add(Rw);
 		}
 	if (Rows.Num() == 0) return;
 	Rows.Sort([](const FRow& A, const FRow& B) { return A.T < B.T; });
 
-	FString Csv = TEXT("server_time,player,dwell_ms,frame_ms,hit\n");
+	auto Clean = [](const FString& In)
+	{
+		return In.Replace(TEXT("\""), TEXT("'")).Replace(TEXT(","), TEXT(" ")).Replace(TEXT("\n"), TEXT(" "));
+	};
+
+	FString Csv = TEXT("server_time,player,dwell_ms,frame_ms,hit,player_key\n");
 	for (const FRow& Rw : Rows)
 	{
-		const FString Name = Rw.Name.Replace(TEXT("\""), TEXT("'")).Replace(TEXT(","), TEXT(" ")).Replace(TEXT("\n"), TEXT(" "));
-		Csv += FString::Printf(TEXT("%.3f,%s,%d,%d,%d\n"), Rw.T, *Name, Rw.Dwell, (int32)Rw.Frame, Rw.bHit ? 1 : 0);
+		Csv += FString::Printf(TEXT("%.3f,%s,%d,%d,%d,%s\n"), Rw.T, *Clean(Rw.Name),
+			Rw.Sample, (int32)Rw.Frame, Rw.bHit ? 1 : 0, *Clean(Rw.Key));
 	}
 
 	const FString MapTag = World ? FPaths::GetBaseFilename(World->URL.Map) : FString(TEXT("match"));
 	const FString Path = FPaths::GameSavedDir() / TEXT("Logs")
-		/ FString::Printf(TEXT("ToT_%s_%d.csv"), *MapTag, GToTMatchCounter);
+		/ FString::Printf(TEXT("FireVal_%s_%d.csv"), *MapTag, GFireValMatchCounter);
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Path), /*Tree=*/true);
 	if (FFileHelper::SaveStringToFile(Csv, *Path))
 	{
-		UE_LOG(LogNCToT, Warning, TEXT("[ToT] timeline written: %s (%d samples)"), *Path, Rows.Num());
+		UE_LOG(LogNCFireVal, Warning, TEXT("[FireVal] timeline written: %s (%d samples)"), *Path, Rows.Num());
 	}
 	else
 	{
-		UE_LOG(LogNCToT, Warning, TEXT("[ToT] FAILED to write timeline: %s"), *Path);
+		UE_LOG(LogNCFireVal, Warning, TEXT("[FireVal] FAILED to write timeline: %s"), *Path);
 	}
 }
 
-// ── On-demand dump: `ncp.ToTDump` (server console / rcon) — print + write the table
-//    mid-match without waiting for match end. Fast in-game test loop. ────────────────
-static void NCToTDumpCmd(UWorld* World)
+// ── On-demand dump: `ncp.FireValDump` (server console / rcon) — print + write the
+//    table mid-match without waiting for match end. Fast in-game test loop. ─────────
+static void NCFireValDumpCmd(UWorld* World)
 {
-	FNCToTCollector::Get().Report(World);
+	FNCFireValCollector::Get().Report(World);
 }
-static FAutoConsoleCommandWithWorld GNCToTDumpCmd(
-	TEXT("ncp.ToTDump"),
-	TEXT("Dump the current time-on-target table (server log [ToT] lines + Saved/Logs CSV) on demand."),
-	FConsoleCommandWithWorldDelegate::CreateStatic(&NCToTDumpCmd));
+static FAutoConsoleCommandWithWorld GNCFireValDumpCmd(
+	TEXT("ncp.FireValDump"),
+	TEXT("Dump the current fire-validation sample table (server log [FireVal] lines + Saved/Logs CSV) on demand."),
+	FConsoleCommandWithWorldDelegate::CreateStatic(&NCFireValDumpCmd));

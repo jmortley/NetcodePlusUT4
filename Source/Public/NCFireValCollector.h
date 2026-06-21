@@ -3,30 +3,31 @@
 #include "CoreMinimal.h"
 
 /**
- * Standalone, mutator-INDEPENDENT time-on-target collector.
+ * Standalone, mutator-INDEPENDENT fire-validation sample collector.
  *
- * The weapon's ServerReportFireToT RPC records straight into this static singleton,
- * so ToT works on ANY NetcodePlus server — including NA autopug, which does NOT load
- * MutBotEvents (the old host). The per-match report (server log "[ToT]" lines + the
- * Saved/Logs/ToT_*.csv timeline) fires from the NCPlus gamemode at match end, or on
- * demand via the `ncp.ToTDump` console command. Review-only; never affects gameplay.
+ * The weapon's ServerReportFireValidation RPC records straight into this static
+ * singleton, so it works on ANY NetcodePlus server — including NA autopug, which
+ * does NOT load MutBotEvents. The per-match summary (server log "[FireVal]" lines +
+ * the Saved/Logs/FireVal_*.csv timeline) fires from the NCPlus gamemode at match
+ * end, or on demand via the `ncp.FireValDump` console command. Review-only; never
+ * affects gameplay.
  */
-class NETCODEPLUS_API FNCToTCollector
+class NETCODEPLUS_API FNCFireValCollector
 {
 public:
-	static FNCToTCollector& Get();
+	static FNCFireValCollector& Get();
 
-	/** Server master switch from Mod.ini [NetcodePlus] EnableToT (default FALSE). Read
-	 *  once + cached for the process. When false the weapon gate never arms, so the
-	 *  owner-only replicated flag never tells any client to start tracking. Restart the
-	 *  server to change it. */
+	/** Server master switch from Mod.ini [NetcodePlus] EnableFireVal (default FALSE).
+	 *  Read once + cached for the process. When false the weapon gate never arms, so
+	 *  the owner-only replicated flag never tells any client to start sampling.
+	 *  Restart the server to change it. */
 	static bool IsEnabled();
 
 	/** One client-reported sample (already server-clamped). World supplies the match clock. */
-	void Record(class UWorld* World, class AUTPlayerState* Shooter, int32 DwellMs, uint8 FrameMs, bool bClaimedHit);
+	void Record(class UWorld* World, class AUTPlayerState* Shooter, int32 SampleMs, uint8 FrameMs, bool bClaimedHit);
 
-	/** Compute + log "[ToT]" lines + write the per-sample CSV. No-op if no samples.
-	 *  Non-destructive — safe to call repeatedly (used by the `ncp.ToTDump` command). */
+	/** Compute + log "[FireVal]" lines + write the per-sample CSV. No-op if no samples.
+	 *  Non-destructive — safe to call repeatedly (used by the `ncp.FireValDump` command). */
 	void Report(class UWorld* World) const;
 
 	/** Like Report, but fires at most once per match — call from the gamemode's match
@@ -39,7 +40,7 @@ public:
 private:
 	struct FSample
 	{
-		int32 DwellMs;
+		int32 SampleMs;
 		float ServerTime;   // GetServerWorldTimeSeconds() at receipt
 		uint8 FrameMs;      // client mean frame time, ms (0 = unknown)
 		bool  bClaimedHit;  // client believed this shot connected (vs on-target miss)

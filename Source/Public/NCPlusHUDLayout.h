@@ -307,12 +307,12 @@ namespace NCPlusHUDDrawCall
 	 *  (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD, class UCanvas* Canvas);
 
-	/** Replay-only corner feed of time-on-target samples. No-op unless a demo is
-	 *  playing back. Reads the server-written ToT_*.csv (newest in Saved/Logs, or
-	 *  the path in the `ncp.ToTReplayCsv` cvar) and draws each shot synced to the
+	/** Replay-only corner feed of fire-validation samples. No-op unless a demo is
+	 *  playing back. Reads the server-written FireVal_*.csv (newest in Saved/Logs, or
+	 *  the path in the `ncp.FireValReplayCsv` cvar) and draws each shot synced to the
 	 *  replayed server clock (GameState->GetServerWorldTimeSeconds). Pure client
 	 *  display — no replication, never runs in live play. */
-	NETCODEPLUS_API void DrawToTReplayFeed(class AUTHUD* HUD, class UCanvas* Canvas);
+	NETCODEPLUS_API void DrawFireValReplayFeed(class AUTHUD* HUD, class UCanvas* Canvas);
 
 	/** Auto post-match high-res screenshot, shared by ElimPlus/Wipeout/iCTF (and Duel/Shaft via AWipeoutHUD).
 	 *  Fires ONCE, on the final scoreboard rather than the instant replay: it counts consecutive qualifying

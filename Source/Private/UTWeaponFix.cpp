@@ -24,7 +24,7 @@
 #include "UTPlayerState.h"
 #include "ElimPlusGame.h"
 #include "MutBotEvents.h"
-#include "NCToTCollector.h"
+#include "NCFireValCollector.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
 
@@ -264,7 +264,7 @@ void AUTWeaponFix::BeginPlay()
         FireModeActiveState[i] = 0;
     }
 
-    // Time-on-target telemetry gate — decided server-side where the gamemode is
+    // Fire-validation telemetry gate — decided server-side where the gamemode is
     // unambiguous, then replicated to the owning client. Two conditions, both
     // required:
     //   1. Mode: Elim or instagib-CTF only (regular CTF / Duel / Wipeout / ShockDom off).
@@ -277,23 +277,23 @@ void AUTWeaponFix::BeginPlay()
         AUTGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AUTGameMode>() : nullptr;
         const bool bElim = GM && GM->IsA(AElimPlusGame::StaticClass());
         const bool bICTF = GM && GM->bIsInstagib && GM->IsA(AUTCTFBaseGame::StaticClass());
-        const bool bToTWeapon = IsA(AUTPlusSniper::StaticClass()) || IsA(AUTPlusShockRifle::StaticClass());
-        // 3. Server master switch: Mod.ini [NetcodePlus] EnableToT (default OFF). Gated
-        //    here server-side, so when it's off bToTDetectActive stays false and the
+        const bool bFireValWeapon = IsA(AUTPlusSniper::StaticClass()) || IsA(AUTPlusShockRifle::StaticClass());
+        // 3. Server master switch: Mod.ini [NetcodePlus] EnableFireVal (default OFF). Gated
+        //    here server-side, so when it's off bFireValActive stays false and the
         //    owner-only replicated flag never tells any client to start the tracker.
-        const bool bEnabled = FNCToTCollector::IsEnabled();
-        bToTDetectActive = bEnabled && (bElim || bICTF) && bToTWeapon;
+        const bool bEnabled = FNCFireValCollector::IsEnabled();
+        bFireValActive = bEnabled && (bElim || bICTF) && bFireValWeapon;
 
         // One-time diagnostic for the relevant weapons, so a "no samples" result is never
         // a mystery again: it shows whether the gate armed and which condition failed.
         // (No line at all while holding a sniper/shock => that weapon isn't a UTPlus class.)
         // Log once per process (not per weapon spawn) to confirm the gate without spam.
-        static bool bLoggedToTGate = false;
-        if (bToTWeapon && !bLoggedToTGate)
+        static bool bLoggedFireValGate = false;
+        if (bFireValWeapon && !bLoggedFireValGate)
         {
-            bLoggedToTGate = true;
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("[ToT] gate: weapon=%s enabled=%d elim=%d ictf=%d -> active=%d"),
-                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bToTDetectActive ? 1 : 0);
+            bLoggedFireValGate = true;
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireVal] gate: weapon=%s enabled=%d elim=%d ictf=%d -> active=%d"),
+                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bFireValActive ? 1 : 0);
         }
     }
 }
@@ -852,11 +852,11 @@ void AUTWeaponFix::FireShot()
         // path above. Sample every shot taken WHILE THE CROSSHAIR IS ON A VISIBLE
         // ENEMY — hits AND on-target misses (a capsule-edge whiff is real signal) —
         // but NOT off-target spam, which would flood the data with meaningless
-        // dwell=0 and inflate everyone's low-dwell share. ToTAcquireTime>=0 means
+        // dwell=0 and inflate everyone's low-dwell share. FireValAcquireTime>=0 means
         // the per-frame tracker had an enemy as of last tick; the ClientHitChar
         // fallback catches a fresh flick whose hit lands the same frame the tick
         // hasn't run yet (dwell ~0). bClaimedHit lets the server split hit vs miss.
-        if (bToTDetectActive)
+        if (bFireValActive)
         {
             bool bHitEnemy = false;
             if (ClientHitChar != nullptr && UTOwner && !ClientHitChar->IsDead())
@@ -865,18 +865,18 @@ void AUTWeaponFix::FireShot()
                 const uint8 ThTeam = ClientHitChar->GetTeamNum();
                 bHitEnemy = (MyTeam == 255 || ThTeam == 255 || MyTeam != ThTeam);
             }
-            if (ToTAcquireTime >= 0.0f || bHitEnemy)
+            if (FireValAcquireTime >= 0.0f || bHitEnemy)
             {
                 // Fresh-flick fallback (acquire<0 but the muzzle trace hit an enemy:
                 // Tick hadn't registered the target yet this frame): floor dwell to
                 // ONE frame, not 0 — a literal 0 ms implies impossible negative
                 // reaction and would inflate the zero bucket for fast legit flickers.
-                const float DwellSec = (ToTAcquireTime >= 0.0f && GetWorld())
-                    ? FMath::Max(0.0f, GetWorld()->GetTimeSeconds() - ToTAcquireTime)
-                    : ToTFrameTimeEMA;
+                const float DwellSec = (FireValAcquireTime >= 0.0f && GetWorld())
+                    ? FMath::Max(0.0f, GetWorld()->GetTimeSeconds() - FireValAcquireTime)
+                    : FireValFrameTimeEMA;
                 const int32 DwellMs = FMath::Clamp(FMath::RoundToInt(DwellSec * 1000.0f), 0, 60000);
-                const uint8 FrameMs = (uint8)FMath::Clamp(FMath::RoundToInt(ToTFrameTimeEMA * 1000.0f), 0, 255);
-                ServerReportFireToT(DwellMs, FrameMs, bHitEnemy);
+                const uint8 FrameMs = (uint8)FMath::Clamp(FMath::RoundToInt(FireValFrameTimeEMA * 1000.0f), 0, 255);
+                ServerReportFireValidation(DwellMs, FrameMs, bHitEnemy);
             }
         }
 
@@ -1513,11 +1513,11 @@ void AUTWeaponFix::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    // Time-on-target telemetry — local client only, gated to the equipped weapon
-    // in an active mode. One occlusion-aware crosshair trace; see UpdateToTTracker.
-    if (bToTDetectActive && Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
+    // Fire-validation telemetry — local client only, gated to the equipped weapon
+    // in an active mode. One occlusion-aware crosshair trace; see UpdateFireValTracker.
+    if (bFireValActive && Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
     {
-        UpdateToTTracker(DeltaTime);
+        UpdateFireValTracker(DeltaTime);
     }
 
     // --- WATCHDOG UNLOCK ---
@@ -1563,22 +1563,22 @@ void AUTWeaponFix::Tick(float DeltaTime)
 }
 
 
-void AUTWeaponFix::UpdateToTTracker(float DeltaTime)
+void AUTWeaponFix::UpdateFireValTracker(float DeltaTime)
 {
     // Smooth the client frame time regardless of on-target state, so the fps
     // context we ship is the player's actual cadence (EMA, ~last 20 frames).
-    ToTFrameTimeEMA = (ToTFrameTimeEMA <= 0.0f) ? DeltaTime
-                    : FMath::Lerp(ToTFrameTimeEMA, DeltaTime, 0.05f);
+    FireValFrameTimeEMA = (FireValFrameTimeEMA <= 0.0f) ? DeltaTime
+                    : FMath::Lerp(FireValFrameTimeEMA, DeltaTime, 0.05f);
 
     // Only meaningful for the equipped weapon on a living owner.
     if (!UTOwner || UTOwner->IsDead() || UTOwner->GetWeapon() != this)
     {
-        ToTAcquireTime = -1.0f;
+        FireValAcquireTime = -1.0f;
         return;
     }
 
     UWorld* World = GetWorld();
-    if (!World) { ToTAcquireTime = -1.0f; return; }
+    if (!World) { FireValAcquireTime = -1.0f; return; }
 
     const FVector Start = UTOwner->GetPawnViewLocation();
     const FVector Dir   = UTOwner->GetViewRotation().Vector();
@@ -1589,7 +1589,7 @@ void AUTWeaponFix::UpdateToTTracker(float DeltaTime)
     // blocking hit is either a wall (occluded -> reset) or the enemy under the
     // crosshair: one trace yields "crosshair on a VISIBLE enemy", occlusion free.
     // Simple collision (bTraceComplex=false) -> tests the capsule, which is what we want.
-    FCollisionQueryParams Params(FName(TEXT("ToTTrace")), false, UTOwner);
+    FCollisionQueryParams Params(FName(TEXT("FireValTrace")), false, UTOwner);
     FHitResult Hit;
     const bool bBlocked = World->LineTraceSingleByChannel(Hit, Start, End, COLLISION_TRACE_WEAPON, Params);
 
@@ -1613,20 +1613,20 @@ void AUTWeaponFix::UpdateToTTracker(float DeltaTime)
     {
         // Re-acquire (reset dwell) when the crosshair is on a DIFFERENT enemy than
         // last frame. Without this, a snap from a long-tracked target onto a freshly
-        // revealed one would inherit the old dwell and hide a trigger-bot's
+        // revealed one would inherit the old dwell and hide a fire-validation's
         // target-to-target snap as a "patient" shot. Weak ptr so a destroyed-then-
         // reused address can't be mistaken for the same target.
-        if (ToTAcquireTime < 0.0f || ToTLastTarget.Get() != OnEnemy)
+        if (FireValAcquireTime < 0.0f || FireValLastTarget.Get() != OnEnemy)
         {
-            ToTAcquireTime = World->GetTimeSeconds();
+            FireValAcquireTime = World->GetTimeSeconds();
         }
-        ToTLastTarget = OnEnemy;
+        FireValLastTarget = OnEnemy;
     }
     else
     {
         // LOS broken or no enemy under the crosshair -> end the run.
-        ToTAcquireTime = -1.0f;
-        ToTLastTarget = nullptr;
+        FireValAcquireTime = -1.0f;
+        FireValLastTarget = nullptr;
     }
 }
 
@@ -1641,17 +1641,17 @@ AMutBotEvents* AUTWeaponFix::FindBotEventsMutator() const
     return nullptr;
 }
 
-void AUTWeaponFix::ServerReportFireToT_Implementation(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
+void AUTWeaponFix::ServerReportFireValidation_Implementation(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
 {
     AUTPlayerState* PS = UTOwner ? Cast<AUTPlayerState>(UTOwner->PlayerState) : nullptr;
     if (!PS) return;
-    // Record into the standalone collector — mutator-INDEPENDENT, so ToT works on any
+    // Record into the standalone collector — mutator-INDEPENDENT, so it works on any
     // NetcodePlus server (NA autopug doesn't load MutBotEvents). Clamp server-side; this
     // is review-only data, never gameplay-affecting.
-    FNCToTCollector::Get().Record(GetWorld(), PS, FMath::Clamp(DwellMs, 0, 60000), FrameMs, bClaimedHit);
+    FNCFireValCollector::Get().Record(GetWorld(), PS, FMath::Clamp(DwellMs, 0, 60000), FrameMs, bClaimedHit);
 }
 
-bool AUTWeaponFix::ServerReportFireToT_Validate(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
+bool AUTWeaponFix::ServerReportFireValidation_Validate(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
 {
     // Pure telemetry — bounds are enforced in the impl; nothing to reject here.
     return true;
@@ -1834,7 +1834,7 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
     DOREPLIFETIME(AUTWeaponFix, AuthoritativeFireEventIndex);
     DOREPLIFETIME(AUTWeaponFix, FireModeActiveState);
-    DOREPLIFETIME_CONDITION(AUTWeaponFix, bToTDetectActive, COND_OwnerOnly);
+    DOREPLIFETIME_CONDITION(AUTWeaponFix, bFireValActive, COND_OwnerOnly);
 }
 
 
