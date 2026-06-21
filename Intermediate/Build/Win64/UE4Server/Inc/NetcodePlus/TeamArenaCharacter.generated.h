@@ -11,7 +11,22 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #endif
 #define NETCODEPLUS_TeamArenaCharacter_generated_h
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_RPC_WRAPPERS \
+	virtual bool ServerConfirmSpawnReady_Validate(); \
+	virtual void ServerConfirmSpawnReady_Implementation(); \
+ \
+	DECLARE_FUNCTION(execServerConfirmSpawnReady) \
+	{ \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		if (!this->ServerConfirmSpawnReady_Validate()) \
+		{ \
+			RPC_ValidateFailed(TEXT("ServerConfirmSpawnReady_Validate")); \
+			return; \
+		} \
+		this->ServerConfirmSpawnReady_Implementation(); \
+		P_NATIVE_END; \
+	} \
  \
 	DECLARE_FUNCTION(execGetNetcodeVersion) \
 	{ \
@@ -22,7 +37,22 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	}
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS_NO_PURE_DECLS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_RPC_WRAPPERS_NO_PURE_DECLS \
+	virtual bool ServerConfirmSpawnReady_Validate(); \
+	virtual void ServerConfirmSpawnReady_Implementation(); \
+ \
+	DECLARE_FUNCTION(execServerConfirmSpawnReady) \
+	{ \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		if (!this->ServerConfirmSpawnReady_Validate()) \
+		{ \
+			RPC_ValidateFailed(TEXT("ServerConfirmSpawnReady_Validate")); \
+			return; \
+		} \
+		this->ServerConfirmSpawnReady_Implementation(); \
+		P_NATIVE_END; \
+	} \
  \
 	DECLARE_FUNCTION(execGetNetcodeVersion) \
 	{ \
@@ -33,7 +63,10 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	}
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_INCLASS_NO_PURE_DECLS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_EVENT_PARMS
+extern NETCODEPLUS_API  FName NETCODEPLUS_ServerConfirmSpawnReady;
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_CALLBACK_WRAPPERS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_INCLASS_NO_PURE_DECLS \
 	private: \
 	static void StaticRegisterNativesATeamArenaCharacter(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter(); \
@@ -41,10 +74,11 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	DECLARE_CLASS(ATeamArenaCharacter, AUTCharacter, COMPILED_IN_FLAGS(0), 0, TEXT("/Script/NetcodePlus"), NO_API) \
 	DECLARE_SERIALIZER(ATeamArenaCharacter) \
 	/** Indicates whether the class is compiled into the engine */ \
-	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
+	enum {IsIntrinsic=COMPILED_IN_INTRINSIC}; \
+	void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_INCLASS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_INCLASS \
 	private: \
 	static void StaticRegisterNativesATeamArenaCharacter(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_ATeamArenaCharacter(); \
@@ -52,10 +86,11 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	DECLARE_CLASS(ATeamArenaCharacter, AUTCharacter, COMPILED_IN_FLAGS(0), 0, TEXT("/Script/NetcodePlus"), NO_API) \
 	DECLARE_SERIALIZER(ATeamArenaCharacter) \
 	/** Indicates whether the class is compiled into the engine */ \
-	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
+	enum {IsIntrinsic=COMPILED_IN_INTRINSIC}; \
+	void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_STANDARD_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_STANDARD_CONSTRUCTORS \
 	/** Standard constructor, called after all reflected properties have been initialized */ \
 	NO_API ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get()); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(ATeamArenaCharacter) \
@@ -68,7 +103,7 @@ private: \
 public:
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_ENHANCED_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_ENHANCED_CONSTRUCTORS \
 private: \
 	/** Private move- and copy-constructors, should never be used */ \
 	NO_API ATeamArenaCharacter(ATeamArenaCharacter&&); \
@@ -79,30 +114,36 @@ DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(ATeamArenaCharacter); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(ATeamArenaCharacter)
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_PRIVATE_PROPERTY_OFFSET \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_PRIVATE_PROPERTY_OFFSET \
 	FORCEINLINE static uint32 __PPO__CachedPredictionPC() { return STRUCT_OFFSET(ATeamArenaCharacter, CachedPredictionPC); } \
-	FORCEINLINE static uint32 __PPO__LastEquippedWeapon() { return STRUCT_OFFSET(ATeamArenaCharacter, LastEquippedWeapon); }
+	FORCEINLINE static uint32 __PPO__LastEquippedWeapon() { return STRUCT_OFFSET(ATeamArenaCharacter, LastEquippedWeapon); } \
+	FORCEINLINE static uint32 __PPO__LastForcedContent() { return STRUCT_OFFSET(ATeamArenaCharacter, LastForcedContent); }
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_28_PROLOG
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_GENERATED_BODY_LEGACY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_29_PROLOG \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_EVENT_PARMS
+
+
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_GENERATED_BODY_LEGACY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_INCLASS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_STANDARD_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_RPC_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_CALLBACK_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_INCLASS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_STANDARD_CONSTRUCTORS \
 public: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_GENERATED_BODY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_GENERATED_BODY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_RPC_WRAPPERS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_INCLASS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_31_ENHANCED_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_RPC_WRAPPERS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_CALLBACK_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_INCLASS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_32_ENHANCED_CONSTRUCTORS \
 private: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 

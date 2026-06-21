@@ -6,11 +6,110 @@
 ===========================================================================*/
 
 #include "GeneratedCppIncludes.h"
-#ifndef NETCODEPLUS_MutHitsounds_generated_h
-	#include "Public/MutHitsounds.h"
+#ifndef NETCODEPLUS_ClientHitsounds_generated_h
+	#include "Public/ClientHitsounds.h"
+#endif
+#ifndef NETCODEPLUS_CTFStatsReplicator_generated_h
+	#include "Public/CTFStatsReplicator.h"
+#endif
+#ifndef NETCODEPLUS_ElimPlusGame_generated_h
+	#include "Public/ElimPlusGame.h"
+#endif
+#ifndef NETCODEPLUS_ElimPlusHUD_generated_h
+	#include "Public/ElimPlusHUD.h"
+#endif
+#ifndef NETCODEPLUS_ElimPlusScoreboard_generated_h
+	#include "Public/ElimPlusScoreboard.h"
+#endif
+#ifndef NETCODEPLUS_ElimPlusStatsReplicator_generated_h
+	#include "Public/ElimPlusStatsReplicator.h"
+#endif
+#ifndef NETCODEPLUS_ElimPlusVictoryMessage_generated_h
+	#include "Public/ElimPlusVictoryMessage.h"
+#endif
+#ifndef NETCODEPLUS_HitsoundPack_generated_h
+	#include "Public/HitsoundPack.h"
+#endif
+#ifndef NETCODEPLUS_MutBotEvents_generated_h
+	#include "Public/MutBotEvents.h"
+#endif
+#ifndef NETCODEPLUS_NCAccuracyStatsReplicator_generated_h
+	#include "Public/NCAccuracyStatsReplicator.h"
+#endif
+#ifndef NETCODEPLUS_NCLeagueDuelGame_generated_h
+	#include "Public/NCLeagueDuelGame.h"
+#endif
+#ifndef NETCODEPLUS_NCLeagueDuelStatsReplicator_generated_h
+	#include "Public/NCLeagueDuelStatsReplicator.h"
 #endif
 #ifndef NETCODEPLUS_NCPlusCTFGameMode_generated_h
 	#include "Public/NCPlusCTFGameMode.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusCTFHUD_generated_h
+	#include "Public/NCPlusCTFHUD.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusCTFOTInfo_generated_h
+	#include "Public/NCPlusCTFOTInfo.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusCTFScoreboard_generated_h
+	#include "Public/NCPlusCTFScoreboard.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_Accuracy_generated_h
+	#include "Public/NCPlusHUDWidget_Accuracy.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_AmmoCounter_generated_h
+	#include "Public/NCPlusHUDWidget_AmmoCounter.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_CTFFlagStatus_generated_h
+	#include "Public/NCPlusHUDWidget_CTFFlagStatus.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_HealAbility_generated_h
+	#include "Public/NCPlusHUDWidget_HealAbility.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_Minimap_generated_h
+	#include "Public/NCPlusHUDWidget_Minimap.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_QuickStats_generated_h
+	#include "Public/NCPlusHUDWidget_QuickStats.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_Speedometer_generated_h
+	#include "Public/NCPlusHUDWidget_Speedometer.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusHUDWidget_WeaponBar_generated_h
+	#include "Public/NCPlusHUDWidget_WeaponBar.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusSpectatorSlideOut_generated_h
+	#include "Public/NCPlusSpectatorSlideOut.h"
+#endif
+#ifndef NETCODEPLUS_NCShaftArenaGame_generated_h
+	#include "Public/NCShaftArenaGame.h"
+#endif
+#ifndef NETCODEPLUS_NCShaftArenaStatsReplicator_generated_h
+	#include "Public/NCShaftArenaStatsReplicator.h"
+#endif
+#ifndef NETCODEPLUS_NCUTPlus_generated_h
+	#include "Public/NCUTPlus.h"
+#endif
+#ifndef NETCODEPLUS_NCPlusVersionGate_generated_h
+	#include "Public/NCPlusVersionGate.h"
+#endif
+#ifndef NETCODEPLUS_NPPlayerController_generated_h
+	#include "Public/NPPlayerController.h"
+#endif
+#ifndef NETCODEPLUS_ShockDomControlPoint_generated_h
+	#include "Public/ShockDomControlPoint.h"
+#endif
+#ifndef NETCODEPLUS_ShockDomGameMode_generated_h
+	#include "Public/ShockDomGameMode.h"
+#endif
+#ifndef NETCODEPLUS_ShockDomMessage_generated_h
+	#include "Public/ShockDomMessage.h"
+#endif
+#ifndef NETCODEPLUS_WipeoutDamageReplicator_generated_h
+	#include "Public/WipeoutDamageReplicator.h"
+#endif
+#ifndef NETCODEPLUS_ShockDomReplicator_generated_h
+	#include "Public/ShockDomReplicator.h"
 #endif
 #ifndef NETCODEPLUS_TeamArenaCharacter_generated_h
 	#include "Public/TeamArenaCharacter.h"
@@ -33,6 +132,12 @@
 #ifndef NETCODEPLUS_UTPlusProj_ShockBall_generated_h
 	#include "Public/UTPlusProj_ShockBall.h"
 #endif
+#ifndef NETCODEPLUS_SiphonPowerup_generated_h
+	#include "Public/SiphonPowerup.h"
+#endif
+#ifndef NETCODEPLUS_UTWeap_Enforcer_Plus_generated_h
+	#include "Public/UTWeap_Enforcer_Plus.h"
+#endif
 #ifndef NETCODEPLUS_UTWeaponFix_generated_h
 	#include "Public/UTWeaponFix.h"
 #endif
@@ -51,6 +156,9 @@
 #ifndef NETCODEPLUS_UTWeap_LinkGun_Plus_generated_h
 	#include "Public/UTWeap_LinkGun_Plus.h"
 #endif
+#ifndef NETCODEPLUS_UTWeap_Minigun_Plus_generated_h
+	#include "Public/UTWeap_Minigun_Plus.h"
+#endif
 #ifndef NETCODEPLUS_UTWeaponStateFiring_Transactional_generated_h
 	#include "Public/UTWeaponStateFiring_Transactional.h"
 #endif
@@ -62,4 +170,34 @@
 #endif
 #ifndef NETCODEPLUS_UTWeaponStateZoomingFix_generated_h
 	#include "Public/UTWeaponStateZoomingFix.h"
+#endif
+#ifndef NETCODEPLUS_WipeoutGame_generated_h
+	#include "Public/WipeoutGame.h"
+#endif
+#ifndef NETCODEPLUS_WarmupRoamMutator_generated_h
+	#include "Public/WarmupRoamMutator.h"
+#endif
+#ifndef NETCODEPLUS_WipeoutHUD_generated_h
+	#include "Public/WipeoutHUD.h"
+#endif
+#ifndef NETCODEPLUS_NCLeagueDuelHUD_generated_h
+	#include "Public/NCLeagueDuelHUD.h"
+#endif
+#ifndef NETCODEPLUS_NCShaftArenaHUD_generated_h
+	#include "Public/NCShaftArenaHUD.h"
+#endif
+#ifndef NETCODEPLUS_ShockDomHUD_generated_h
+	#include "Public/ShockDomHUD.h"
+#endif
+#ifndef NETCODEPLUS_WipeoutScoreboard_generated_h
+	#include "Public/WipeoutScoreboard.h"
+#endif
+#ifndef NETCODEPLUS_NCLeagueDuelScoreboard_generated_h
+	#include "Public/NCLeagueDuelScoreboard.h"
+#endif
+#ifndef NETCODEPLUS_NCShaftArenaScoreboard_generated_h
+	#include "Public/NCShaftArenaScoreboard.h"
+#endif
+#ifndef NETCODEPLUS_ShockDomScoreboard_generated_h
+	#include "Public/ShockDomScoreboard.h"
 #endif

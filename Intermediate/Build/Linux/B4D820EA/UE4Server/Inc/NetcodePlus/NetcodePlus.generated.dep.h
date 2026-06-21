@@ -78,6 +78,9 @@
 #ifndef NETCODEPLUS_NCPlusHUDWidget_WeaponBar_generated_h
 	#include "Public/NCPlusHUDWidget_WeaponBar.h"
 #endif
+#ifndef NETCODEPLUS_NCPlusSpectatorSlideOut_generated_h
+	#include "Public/NCPlusSpectatorSlideOut.h"
+#endif
 #ifndef NETCODEPLUS_NCShaftArenaGame_generated_h
 	#include "Public/NCShaftArenaGame.h"
 #endif

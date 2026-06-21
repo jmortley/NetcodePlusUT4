@@ -11,9 +11,9 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #endif
 #define NETCODEPLUS_NCPlusCTFGameMode_generated_h
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_RPC_WRAPPERS
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_RPC_WRAPPERS_NO_PURE_DECLS
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_INCLASS_NO_PURE_DECLS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_RPC_WRAPPERS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_RPC_WRAPPERS_NO_PURE_DECLS
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_INCLASS_NO_PURE_DECLS \
 	private: \
 	static void StaticRegisterNativesANCPlusCTFGameMode(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_ANCPlusCTFGameMode(); \
@@ -24,7 +24,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_INCLASS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_INCLASS \
 	private: \
 	static void StaticRegisterNativesANCPlusCTFGameMode(); \
 	friend NETCODEPLUS_API class UClass* Z_Construct_UClass_ANCPlusCTFGameMode(); \
@@ -35,7 +35,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	enum {IsIntrinsic=COMPILED_IN_INTRINSIC};
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_STANDARD_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_STANDARD_CONSTRUCTORS \
 	/** Standard constructor, called after all reflected properties have been initialized */ \
 	NO_API ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get()); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(ANCPlusCTFGameMode) \
@@ -48,7 +48,7 @@ private: \
 public:
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_ENHANCED_CONSTRUCTORS \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_ENHANCED_CONSTRUCTORS \
 	/** Standard constructor, called after all reflected properties have been initialized */ \
 	NO_API ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get()) : Super(ObjectInitializer) { }; \
 private: \
@@ -61,26 +61,30 @@ DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(ANCPlusCTFGameMode); \
 	DEFINE_DEFAULT_OBJECT_INITIALIZER_CONSTRUCTOR_CALL(ANCPlusCTFGameMode)
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_PRIVATE_PROPERTY_OFFSET
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_9_PROLOG
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_GENERATED_BODY_LEGACY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_PRIVATE_PROPERTY_OFFSET \
+	FORCEINLINE static uint32 __PPO__CTFStatsRep() { return STRUCT_OFFSET(ANCPlusCTFGameMode, CTFStatsRep); } \
+	FORCEINLINE static uint32 __PPO__OTInfo() { return STRUCT_OFFSET(ANCPlusCTFGameMode, OTInfo); }
+
+
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_63_PROLOG
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_GENERATED_BODY_LEGACY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_RPC_WRAPPERS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_INCLASS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_STANDARD_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_RPC_WRAPPERS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_INCLASS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_STANDARD_CONSTRUCTORS \
 public: \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 
-#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_GENERATED_BODY \
+#define UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_GENERATED_BODY \
 PRAGMA_DISABLE_DEPRECATION_WARNINGS \
 public: \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_PRIVATE_PROPERTY_OFFSET \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_RPC_WRAPPERS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_INCLASS_NO_PURE_DECLS \
-	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_12_ENHANCED_CONSTRUCTORS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_PRIVATE_PROPERTY_OFFSET \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_RPC_WRAPPERS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_INCLASS_NO_PURE_DECLS \
+	UnrealTournament_Plugins_NetcodePlus_Source_Public_NCPlusCTFGameMode_h_66_ENHANCED_CONSTRUCTORS \
 static_assert(false, "Unknown access specifier for GENERATED_BODY() macro in class NCPlusCTFGameMode."); \
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 

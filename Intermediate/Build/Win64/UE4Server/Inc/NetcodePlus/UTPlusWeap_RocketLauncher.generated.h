@@ -21,6 +21,15 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	virtual void ServerCycleRocketMode_Implementation(); \
 	virtual void ClientAbortLoad_Implementation(); \
  \
+	DECLARE_FUNCTION(execOnRep_CurrentRocketFireMode) \
+	{ \
+		P_GET_PROPERTY(UIntProperty,Z_Param_OldValue); \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		this->OnRep_CurrentRocketFireMode(Z_Param_OldValue); \
+		P_NATIVE_END; \
+	} \
+ \
 	DECLARE_FUNCTION(execOnRep_PendingLockedTarget) \
 	{ \
 		P_FINISH; \
@@ -63,6 +72,15 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	virtual bool ServerCycleRocketMode_Validate(); \
 	virtual void ServerCycleRocketMode_Implementation(); \
 	virtual void ClientAbortLoad_Implementation(); \
+ \
+	DECLARE_FUNCTION(execOnRep_CurrentRocketFireMode) \
+	{ \
+		P_GET_PROPERTY(UIntProperty,Z_Param_OldValue); \
+		P_FINISH; \
+		P_NATIVE_BEGIN; \
+		this->OnRep_CurrentRocketFireMode(Z_Param_OldValue); \
+		P_NATIVE_END; \
+	} \
  \
 	DECLARE_FUNCTION(execOnRep_PendingLockedTarget) \
 	{ \
