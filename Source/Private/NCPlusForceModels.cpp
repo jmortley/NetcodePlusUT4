@@ -39,52 +39,9 @@ namespace
 	// (or the suppression is turned off). Weak keys so GC'd pawns drop out.
 	TSet<TWeakObjectPtr<AUTCharacter>> GOutlineSuppressed;
 
-	// dc's tintable flag skeletal mesh (cooked on the client). Loaded once, GC-pinned. Path overridable
-	// via [ForceModels] FlagMeshPath in case dc re-homes the asset.
-	TWeakObjectPtr<USkeletalMesh> GDCFlagMesh;
-	bool                          GDCFlagMeshLogged = false;
-
-	// Stock skeletal mesh each flag had before we swapped in dc's FlagMesh, so we can restore on disable
-	// or flag respawn. Weak keys so destroyed (captured/respawned) flags drop out.
-	TMap<TWeakObjectPtr<AUTFlag>, TWeakObjectPtr<USkeletalMesh>> GFlagOrigMesh;
-
-	USkeletalMesh* LoadDCFlagMesh()
-	{
-		if (GDCFlagMesh.IsValid()) { return GDCFlagMesh.Get(); }
-		// dc's MutTeamSkins pak mounts Content/ -> /Game/, so the cooked path is /Game/TeamSkins/...
-		// (no "dc/" folder — the editor Copy-Reference path included one, but the pak drops it).
-		FString Path = TEXT("/Game/TeamSkins/Flags/FlagMesh.FlagMesh");
-		GConfig->GetString(TEXT("ForceModels"), TEXT("FlagMeshPath"), Path, ModIniPath());
-		USkeletalMesh* M = Path.IsEmpty() ? nullptr : LoadObject<USkeletalMesh>(nullptr, *Path);
-		if (M) { M->AddToRoot(); GDCFlagMesh = M; }
-		else if (!GDCFlagMeshLogged)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[ForceModels] flag cloth: couldn't load FlagMesh '%s' — cloth recolour disabled"), *Path);
-			GDCFlagMeshLogged = true;
-		}
-		return M;
-	}
-
-	// dc's tintable cloth material. dc assigns FlagBase_M as a COMPONENT override on his TeamFlag actor —
-	// NOT on the FlagMesh asset's slot — so after the runtime swap the cloth slot is bare (renders the
-	// engine default grey checker). Load it explicitly and apply it to the bare slot ourselves.
-	TWeakObjectPtr<UMaterialInterface> GDCFlagClothMat;
-	bool                               GDCFlagClothMatLogged = false;
-
-	UMaterialInterface* LoadDCFlagClothMaterial()
-	{
-		if (GDCFlagClothMat.IsValid()) { return GDCFlagClothMat.Get(); }
-		FString Path = TEXT("/Game/TeamSkins/Flags/FlagBase_M.FlagBase_M");
-		GConfig->GetString(TEXT("ForceModels"), TEXT("FlagClothMaterialPath"), Path, ModIniPath());
-		UMaterialInterface* Mat = Path.IsEmpty() ? nullptr : LoadObject<UMaterialInterface>(nullptr, *Path);
-		if (Mat) { Mat->AddToRoot(); GDCFlagClothMat = Mat; }
-		else if (!GDCFlagClothMatLogged)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[ForceModels] flag cloth: couldn't load FlagBase_M '%s'"), *Path);
-			GDCFlagClothMatLogged = true;
-		}
-		return Mat;
-	}
+	// Flag recolour is now PURE STOCK — no dc mesh, no dc material. The stock CTF flag material
+	// (MI_CTF_RedFlag / MI_CTF_BlueFlag, parent M_CTF_Flag) already exposes a "FlagColor" vector param;
+	// SyncFlagColours just MIDs the stock flag's slots and sets it. No loaders / no swap state needed.
 
 	// ── Flag wind (ports dc's FlagWind BP) ──────────────────────────────────────────────────────────
 	// One client-local WindDirectionalSource whose speed + direction wander each frame so the cloth waves.
@@ -392,28 +349,15 @@ static TAutoConsoleVariable<int32> CVarFlagDebug(
 	TEXT("ncp.FlagDebug"), 0,
 	TEXT("Log each CTF flag base/flag/mesh state ~every 1.5s (ForceModels flag-visibility debug). 0=off."));
 
-// Client-side flag-visibility watchdog (ncp.FlagVisAudit, default ON). Per team [0=red,1=blue]:
-// GFlagGoodR = high-water healthy bounds radius (learned), GFlagVisBad = last tick's verdict
-// (edge-trigger so we warn/heal once per collapse, not every slow tick), GFlagSeen = the flag
-// instance the baseline was learned on — reset GFlagGoodR/GFlagVisBad when it changes (map travel
-// / cap-respawn) so a stale high-water from another map/flag can't mask a real collapse here.
-static TAutoConsoleVariable<int32> CVarFlagVisAudit(
-	TEXT("ncp.FlagVisAudit"), 1,
-	TEXT("Client watchdog: warn + re-render a CTF flag whose mesh collapses / goes invisible. 1=on (default), 0=off."));
-static float GFlagGoodR[2] = { 0.f, 0.f };
-static bool  GFlagVisBad[2] = { false, false };
-static TWeakObjectPtr<AUTFlag> GFlagSeen[2];
-
 void NCPlusForceModels::SyncFlagColours(UWorld* World)
 {
-	// Recolour the CTF flag CLOTH to each team's skin colour (relative to the local viewer). The stock
-	// flag cloth is a BAKED material (untintable), so reproduce dc's TeamFlag "Update Materials": swap the
-	// flag's skeletal mesh to dc's tintable FlagMesh (its asset carries FlagPole_M on elem 0, FlagBase_M
-	// on elem 1, plus the cloth sim) and set the "FlagColour" vector param on the cloth MID. Client-side,
-	// re-asserted from the ticker (so it survives flag respawns on capture); restores the stock mesh +
-	// materials when the feature/flag is off. No-op outside CTF / on a dedicated server.
-	// NOTE: the cloth WAVING is driven by dc's FlagWind actor, NOT yet ported (stock UTFlag has no wind
-	// code) — the cloth may hang limp until that lands.
+	// Recolour the stock CTF flag to each team's skin colour (relative to the local viewer). The stock
+	// flag material (MI_CTF_RedFlag / MI_CTF_BlueFlag -> M_CTF_Flag) already exposes a "FlagColor" vector
+	// param (American spelling — dc's separate mesh used "FlagColour", which is why the old swap path
+	// existed and kept breaking). So we just MID the stock flag's material slots and set FlagColor: NO
+	// mesh swap, NO dc assets, cloth left ON (the stock APEX flag waves via TickFlagWind's wind source).
+	// Re-asserted from the ticker so it survives flag respawns on capture/return. No-op outside CTF / on
+	// a dedicated server.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
 	AUTCTFGameState* GS = World->GetGameState<AUTCTFGameState>();
 	if (!GS) { return; }   // not a CTF mode -> no flags
@@ -421,8 +365,7 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 	const FNCPlusForceModelsConfig& C = Get();
 	const bool bWant = C.bEnabled && C.bFlags;
 	const int32 ViewerTeam = GetViewerTeam(World);   // spectator -> red is "ours"
-	USkeletalMesh* DCMesh = bWant ? LoadDCFlagMesh() : nullptr;
-	static const FName NAME_FlagColour(TEXT("FlagColour"));
+	static const FName NAME_FlagColor(TEXT("FlagColor"));
 
 	// Flag-visibility debug (ncp.FlagDebug): dump per-base flag state ~every 1.5s. Logs even when a
 	// base/flag/mesh is missing — exactly the "map maker did something funny" case (a map with no
@@ -468,129 +411,23 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 
 		if (!Base || !Flag || !Mesh) { continue; }
 
-		if (bWant && DCMesh)
+		if (bWant)
 		{
-			// One-time swap to dc's FlagMesh; cache the stock mesh so we can restore it later.
-			if (Mesh->SkeletalMesh != DCMesh)
-			{
-				if (!GFlagOrigMesh.Contains(Flag)) { GFlagOrigMesh.Add(Flag, Mesh->SkeletalMesh); }
-				// Decide cloth state BEFORE the swap. Mirror stock AUTFlag::PostInitializeComponents
-				// (UTFlag.cpp:52): cloth sim ON above low detail (so the wind waves it), OFF at
-				// DetailMode==0 (respect the low-detail perf opt-out — stiff flag, same as stock).
-				// Order matters: SetSkeletalMesh binds the new mesh's clothing in whatever state this flag
-				// is in, so it must be set first or the cloth never binds and collapses to a sliver.
-				// Cloth sim defaults OFF (stiff but ALWAYS VISIBLE): dc's MutTeamSkins FlagMesh materials
-				// (FlagPole_M / FlagBase_M) lack bUsedWithClothing, so a cooked build can't compile that
-				// usage permutation and the cloth section collapses/vanishes on the runtime re-bind after a
-				// cap/return (enemy flag invisible the rest of the match). Opt the wave back in with
-				// [ForceModels] FlagClothSim=True once the FlagMesh materials are recooked Used-With-Clothing.
-				bool bClothSim = false;
-				GConfig->GetBool(TEXT("ForceModels"), TEXT("FlagClothSim"), bClothSim, ModIniPath());
-				Mesh->bDisableClothSimulation = !bClothSim || (GetCachedScalabilityCVars().DetailMode == 0);
-				Mesh->SetSkeletalMesh(DCMesh, /*bReinitPose=*/true);
-				Mesh->OverrideMaterials.Empty();  // drop the stock element-0 MeshMID override so dc's mats show
-				Mesh->MarkRenderStateDirty();     // (EmptyOverrideMaterials() is editor-only)
-				// A runtime SetSkeletalMesh leaves the cloth actors bound to the OLD mesh — re-bind to dc's
-				// mesh or the enabled sim runs on invalid cloth and the flag collapses to a thin line.
-				if (!Mesh->bDisableClothSimulation) { Mesh->RecreateClothingActors(); }
-
-				// dc's FlagMesh has its own pivot + native scale (its TeamFlag used Z=-120, scale 1.0),
-				// while the stock flag home-positions at MeshOffset -48 and scales by FlagWorldScale 1.75 —
-				// so dc's mesh both floats AND looks oversized, and the held attachment (FlagHeldScale/
-				// HeldOffset) is off too. Set the stock flag's transform fields to dc's values so stock keeps
-				// the mesh seated + sized in BOTH home and held states. All tunable to dial without a rebuild.
-				const FString CfgP = ModIniPath();
-				float HomeZ = -120.f, HeldZ = -72.f, HomeScale = 1.f, HeldScale = 1.f;
-				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagMeshZOffset"), HomeZ,     CfgP);
-				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagHeldZOffset"), HeldZ,     CfgP);
-				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagWorldScale"),  HomeScale, CfgP);
-				GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagHeldScale"),   HeldScale, CfgP);
-				Flag->MeshOffset     = FVector(0.f, 0.f, HomeZ);
-				Flag->HeldOffset     = FVector(0.f, 0.f, HeldZ);
-				Flag->FlagWorldScale = HomeScale;
-				Flag->FlagHeldScale  = HeldScale;
-				// Apply the current (home) state now; stock's ClientUpdateAttachment uses these fields on grab/drop.
-				Mesh->SetWorldScale3D(FVector(HomeScale));
-				Mesh->SetRelativeLocation(Flag->MeshOffset);
-			}
-
-			// Tint the cloth: set "FlagColour" on each element's MID (no-op on the FlagPole_M element).
-			// The cloth slot is BARE on the swapped mesh (dc puts FlagBase_M on the component, not the
-			// asset) -> it renders the grey default. Fall back to the explicitly-loaded FlagBase_M for any
-			// slot with no material, so the cloth actually gets a tintable material instead of grey.
+			// Tint the stock flag in place: MID each material slot and set the stock "FlagColor" param to
+			// the team skin colour. Cloth stays ON (waving). No swap / no override material = never
+			// collapses. Element 0 is already a stock MID (Flag->MeshMID) so we just retint it; any slot
+			// without a FlagColor param no-ops harmlessly. Re-asserted each slow tick (viewer-relative).
 			const bool bFriendly = ((int32)Team == ViewerTeam);
 			const FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
 			for (int32 i = 0; i < Mesh->GetNumMaterials(); ++i)
 			{
 				UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(i));
-				if (!MID)
-				{
-					UMaterialInterface* Base = Mesh->GetMaterial(i);     // asset material, or null on the bare cloth slot
-					if (!Base) { Base = LoadDCFlagClothMaterial(); }     // dc's FlagBase_M (component override, not on the asset)
-					MID = Base ? Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, Base) : nullptr;
-				}
-				if (MID)  { MID->SetVectorParameterValue(NAME_FlagColour, Colour); }
-			}
-
-			// Visibility watchdog (ncp.FlagVisAudit, default on): catch + self-heal the "invisible flag"
-			// bug — a swapped flag whose render bounds collapse to a sliver (the uncooked-cloth hazard, or
-			// anything that nukes the mesh). Learn the healthy bounds high-water mark; if the radius drops
-			// below 30% of it, warn ONCE (edge-triggered) and force a visible bind pose (cloth off +
-			// re-render). Position is left to stock so this never fights the held/home attachment. One
-			// cached-bounds read at the ~4 Hz slow-tick rate — effectively free.
-			// Fresh flag instance (map travel / cap-respawn) -> drop the stale baseline so it re-learns.
-			if (GFlagSeen[Team].Get() != Flag)
-			{
-				GFlagSeen[Team]   = Flag;
-				GFlagGoodR[Team]  = 0.f;
-				GFlagVisBad[Team] = false;
-			}
-			const bool  bAudit = (CVarFlagVisAudit.GetValueOnGameThread() != 0);
-			const float FlagR  = Mesh->Bounds.SphereRadius;
-			if (FlagR > GFlagGoodR[Team]) { GFlagGoodR[Team] = FlagR; }
-			const bool bFlagBad = (GFlagGoodR[Team] > 20.f) && (FlagR < 0.3f * GFlagGoodR[Team]);
-			if (bAudit && bFlagBad && !GFlagVisBad[Team])
-			{
-				UE_LOG(LogTemp, Warning,
-					TEXT("[NCPFlag] T%d render collapsed (boundsR=%.1f vs healthy %.1f, held=%d) -> forcing visible"),
-					Team, FlagR, GFlagGoodR[Team], (Flag->HoldingPawn != nullptr) ? 1 : 0);
-				Mesh->bDisableClothSimulation = true;   // drop the collapsing cloth sim
-				Mesh->MarkRenderStateDirty();           // re-render in bind pose
-			}
-			// Latch only while auditing, so toggling ncp.FlagVisAudit on heals a currently-bad flag.
-			if (bAudit) { GFlagVisBad[Team] = bFlagBad; }
-		}
-		else
-		{
-			// Feature/flag off -> restore the stock flag mesh + materials (once).
-			if (TWeakObjectPtr<USkeletalMesh>* OrigPtr = GFlagOrigMesh.Find(Flag))
-			{
-				USkeletalMesh* OrigMesh = OrigPtr->Get();
-				if (OrigMesh && Mesh->SkeletalMesh != OrigMesh)
-				{
-					Mesh->SetSkeletalMesh(OrigMesh, /*bReinitPose=*/true);
-					Mesh->OverrideMaterials.Empty();
-					Mesh->MarkRenderStateDirty();
-					// Restore the stock transform fields (pivot offsets + scale) from the flag class CDO.
-					const AUTFlag* CDO = Flag->GetClass()->GetDefaultObject<AUTFlag>();
-					Flag->MeshOffset     = CDO->MeshOffset;
-					Flag->HeldOffset     = CDO->HeldOffset;
-					Flag->FlagWorldScale = CDO->FlagWorldScale;
-					Flag->FlagHeldScale  = CDO->FlagHeldScale;
-					Mesh->SetWorldScale3D(FVector(CDO->FlagWorldScale));
-					Mesh->SetRelativeLocation(Flag->MeshOffset);
-					Flag->MeshMID = Mesh->CreateAndSetMaterialInstanceDynamic(0);  // restore stock element-0 MID
-				}
-				GFlagOrigMesh.Remove(Flag);
+				if (!MID) { MID = Mesh->CreateAndSetMaterialInstanceDynamic(i); }
+				if (MID) { MID->SetVectorParameterValue(NAME_FlagColor, Colour); }
 			}
 		}
 	}
 
-	// Prune entries for flags that respawned / were destroyed (weak keys gone invalid).
-	for (auto It = GFlagOrigMesh.CreateIterator(); It; ++It)
-	{
-		if (!It->Key.IsValid()) { It.RemoveCurrent(); }
-	}
 }
 
 void NCPlusForceModels::TickFlagWind(UWorld* World, float DeltaTime)
