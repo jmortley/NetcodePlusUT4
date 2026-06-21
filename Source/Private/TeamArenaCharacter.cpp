@@ -22,6 +22,7 @@
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
 #include "Kismet/GameplayStatics.h" // SpawnSound2D (own-footstep volume)
 #include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
+#include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -142,8 +143,10 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// Client-side render preference only — never on a dedicated server, never replicated.
 	if (GetNetMode() == NM_DedicatedServer) { return; }
 	if (bApplyingForcedModel) { return; }                 // re-entrancy guard (ApplyCharacterData / base NotifyTeamChanged)
-	if (IsLocalPlayerPawn()) { return; }                  // never reskin MY OWN pawn (NOT IsLocallyControlled —
-	                                                      // that's true for ALL pawns offline; see IsLocalPlayerPawn)
+	// MY OWN pawn → COLOUR-ONLY: keep your real model, run the team-colour tint only (gated below) so your
+	// own body matches the recoloured teammates and the line-up / post-game line-up. (NOT IsLocallyControlled
+	// — that's true for every pawn offline; see IsLocalPlayerPawn.)
+	const bool bColourOnly = IsLocalPlayerPawn();
 
 	UWorld* const World = GetWorld();
 
@@ -214,8 +217,12 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 
 	// Force the mesh via UT's own swap (rebuilds BodyMIs). Flag must be set BEFORE the call —
 	// stock ApplyCharacterData early-returns unless bAllowCharacterDataOverride is true.
-	bAllowCharacterDataOverride = true;
-	ApplyCharacterData(Content);
+	// Own pawn (bColourOnly): skip the mesh swap — keep the real model and its existing BodyMIs, tint only.
+	if (!bColourOnly)
+	{
+		bAllowCharacterDataOverride = true;
+		ApplyCharacterData(Content);
+	}
 
 	static const FName NAME_TeamSelect(TEXT("TeamSelect"));
 	static const FName NAME_TeamBlendMax(TEXT("Team Color Blend Max"));
@@ -296,7 +303,11 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// Cosmetic strip (the "Cosmetics" flag, on = remove): drop + suppress hats/eyewear on this reskinned
 	// pawn. Set BEFORE OnRep_PlayerState's later SetCosmeticsFromPlayerState so the setter overrides catch
 	// the re-add. (NotifyTeamChanged runs first at OnRep, this gate second.)
-	UpdateCosmeticStrip(NCPlusForceModels::Get().bCosmetics);
+	// Not for the own pawn — colour-only doesn't reskin, so keep your full character (hat/eyewear).
+	if (!bColourOnly)
+	{
+		UpdateCosmeticStrip(NCPlusForceModels::Get().bCosmetics);
+	}
 
 	bApplyingForcedModel = false;
 }
@@ -1426,12 +1437,28 @@ void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
 					CachedCTFRep = *It;
 					break;
 				}
-				if (CachedCTFRep.IsValid() || (GetWorld()->GetTimeSeconds() - CreationTime) > 8.f)
+				// WARMUP signal: ACTFStatsReplicator only spawns at match start, so during warmup the
+				// replicator gate is null and footsteps fall through to stock. The replicated MutInstagibNCP
+				// mutator is present from match init (through warmup), so finding it confirms iCTF early.
+				// Contains() handles the BP "_C" suffix; latched so we don't iterate mutators every step.
+				if (!bIctfMutatorFound)
+				{
+					for (TActorIterator<AUTMutator> It(GetWorld()); It; ++It)
+					{
+						if (It->GetClass()->GetName().Contains(TEXT("MutInstagibNCP")))
+						{
+							bIctfMutatorFound = true;
+							break;
+						}
+					}
+				}
+				if (CachedCTFRep.IsValid() || bIctfMutatorFound || (GetWorld()->GetTimeSeconds() - CreationTime) > 8.f)
 				{
 					bIctfFootstepResolved = true;
 				}
 			}
-			if (CachedCTFRep.IsValid() && CachedCTFRep->bIsInstagibMatch)
+			// iCTF if EITHER signal fires: the mutator (covers warmup) or the authoritative replicator flag.
+			if (bIctfMutatorFound || (CachedCTFRep.IsValid() && CachedCTFRep->bIsInstagibMatch))
 			{
 				// Mirror stock's double-footstep filter: drop the 3rd-person step while in first-person view
 				// (otherwise both the 1P and 3P notifies would play the own footstep twice).

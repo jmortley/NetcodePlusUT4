@@ -261,4 +261,7 @@ protected:
 	 *  latched by bIctfFootstepResolved to avoid iterating every footstep forever in non-iCTF modes. */
 	TWeakObjectPtr<ACTFStatsReplicator> CachedCTFRep;
 	bool bIctfFootstepResolved = false;
+	/** Warmup iCTF signal: the replicated MutInstagibNCP mutator is present from match init (incl. warmup),
+	 *  unlike ACTFStatsReplicator which only spawns at match start. Latched once found. */
+	bool bIctfMutatorFound = false;
 };
