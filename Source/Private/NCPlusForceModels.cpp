@@ -392,6 +392,18 @@ static TAutoConsoleVariable<int32> CVarFlagDebug(
 	TEXT("ncp.FlagDebug"), 0,
 	TEXT("Log each CTF flag base/flag/mesh state ~every 1.5s (ForceModels flag-visibility debug). 0=off."));
 
+// Client-side flag-visibility watchdog (ncp.FlagVisAudit, default ON). Per team [0=red,1=blue]:
+// GFlagGoodR = high-water healthy bounds radius (learned), GFlagVisBad = last tick's verdict
+// (edge-trigger so we warn/heal once per collapse, not every slow tick), GFlagSeen = the flag
+// instance the baseline was learned on — reset GFlagGoodR/GFlagVisBad when it changes (map travel
+// / cap-respawn) so a stale high-water from another map/flag can't mask a real collapse here.
+static TAutoConsoleVariable<int32> CVarFlagVisAudit(
+	TEXT("ncp.FlagVisAudit"), 1,
+	TEXT("Client watchdog: warn + re-render a CTF flag whose mesh collapses / goes invisible. 1=on (default), 0=off."));
+static float GFlagGoodR[2] = { 0.f, 0.f };
+static bool  GFlagVisBad[2] = { false, false };
+static TWeakObjectPtr<AUTFlag> GFlagSeen[2];
+
 void NCPlusForceModels::SyncFlagColours(UWorld* World)
 {
 	// Recolour the CTF flag CLOTH to each team's skin colour (relative to the local viewer). The stock
@@ -467,7 +479,14 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 				// DetailMode==0 (respect the low-detail perf opt-out — stiff flag, same as stock).
 				// Order matters: SetSkeletalMesh binds the new mesh's clothing in whatever state this flag
 				// is in, so it must be set first or the cloth never binds and collapses to a sliver.
-				Mesh->bDisableClothSimulation = (GetCachedScalabilityCVars().DetailMode == 0);
+				// Cloth sim defaults OFF (stiff but ALWAYS VISIBLE): dc's MutTeamSkins FlagMesh materials
+				// (FlagPole_M / FlagBase_M) lack bUsedWithClothing, so a cooked build can't compile that
+				// usage permutation and the cloth section collapses/vanishes on the runtime re-bind after a
+				// cap/return (enemy flag invisible the rest of the match). Opt the wave back in with
+				// [ForceModels] FlagClothSim=True once the FlagMesh materials are recooked Used-With-Clothing.
+				bool bClothSim = false;
+				GConfig->GetBool(TEXT("ForceModels"), TEXT("FlagClothSim"), bClothSim, ModIniPath());
+				Mesh->bDisableClothSimulation = !bClothSim || (GetCachedScalabilityCVars().DetailMode == 0);
 				Mesh->SetSkeletalMesh(DCMesh, /*bReinitPose=*/true);
 				Mesh->OverrideMaterials.Empty();  // drop the stock element-0 MeshMID override so dc's mats show
 				Mesh->MarkRenderStateDirty();     // (EmptyOverrideMaterials() is editor-only)
@@ -512,6 +531,34 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 				}
 				if (MID)  { MID->SetVectorParameterValue(NAME_FlagColour, Colour); }
 			}
+
+			// Visibility watchdog (ncp.FlagVisAudit, default on): catch + self-heal the "invisible flag"
+			// bug — a swapped flag whose render bounds collapse to a sliver (the uncooked-cloth hazard, or
+			// anything that nukes the mesh). Learn the healthy bounds high-water mark; if the radius drops
+			// below 30% of it, warn ONCE (edge-triggered) and force a visible bind pose (cloth off +
+			// re-render). Position is left to stock so this never fights the held/home attachment. One
+			// cached-bounds read at the ~4 Hz slow-tick rate — effectively free.
+			// Fresh flag instance (map travel / cap-respawn) -> drop the stale baseline so it re-learns.
+			if (GFlagSeen[Team].Get() != Flag)
+			{
+				GFlagSeen[Team]   = Flag;
+				GFlagGoodR[Team]  = 0.f;
+				GFlagVisBad[Team] = false;
+			}
+			const bool  bAudit = (CVarFlagVisAudit.GetValueOnGameThread() != 0);
+			const float FlagR  = Mesh->Bounds.SphereRadius;
+			if (FlagR > GFlagGoodR[Team]) { GFlagGoodR[Team] = FlagR; }
+			const bool bFlagBad = (GFlagGoodR[Team] > 20.f) && (FlagR < 0.3f * GFlagGoodR[Team]);
+			if (bAudit && bFlagBad && !GFlagVisBad[Team])
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[NCPFlag] T%d render collapsed (boundsR=%.1f vs healthy %.1f, held=%d) -> forcing visible"),
+					Team, FlagR, GFlagGoodR[Team], (Flag->HoldingPawn != nullptr) ? 1 : 0);
+				Mesh->bDisableClothSimulation = true;   // drop the collapsing cloth sim
+				Mesh->MarkRenderStateDirty();           // re-render in bind pose
+			}
+			// Latch only while auditing, so toggling ncp.FlagVisAudit on heals a currently-bad flag.
+			if (bAudit) { GFlagVisBad[Team] = bFlagBad; }
 		}
 		else
 		{
