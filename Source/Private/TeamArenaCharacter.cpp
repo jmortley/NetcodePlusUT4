@@ -20,6 +20,7 @@
 #include "NCPlusForceModels.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
+#include "UTCarriedObject.h"        // HideDeadBody: don't blank a carried flag still parented to the corpse
 #include "Kismet/GameplayStatics.h" // SpawnSound2D (own-footstep volume)
 #include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
 #include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
@@ -421,9 +422,27 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 
 void ATeamArenaCharacter::HideDeadBody()
 {
-	if (USkeletalMeshComponent* BodyMesh = GetMesh())
+	USkeletalMeshComponent* BodyMesh = GetMesh();
+	if (!BodyMesh) { return; }
+
+	BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
+
+	// Don't let the corpse-hide blank a carried FLAG. An instagib flag carrier who dies drops the flag,
+	// but if that detach hasn't processed yet the flag's root is still parented to this body mesh, and the
+	// propagate above traverses the ENTIRE attach tree (USceneComponent::SetVisibility, SceneComponent.cpp)
+	// — across the actor boundary into the flag — setting the flag mesh's bVisible=false. That survives the
+	// detach, so the flag is invisible when dropped and after it returns home (the "flag goes invisible
+	// after a cap/return"; near-certain with a low [InstagibCTF] RagdollTime firing this inside the still-
+	// attached window). Re-show any attached carried object so the corpse-hide can never strand a flag.
+	// Cosmetics (owned by this character) stay hidden — only foreign carried objects are re-shown.
+	TArray<USceneComponent*> Descendants;
+	BodyMesh->GetChildrenComponents(/*bIncludeAllDescendants=*/true, Descendants);
+	for (USceneComponent* Child : Descendants)
 	{
-		BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
+		if (Child && Child->GetOwner() && Child->GetOwner()->IsA(AUTCarriedObject::StaticClass()))
+		{
+			Child->SetVisibility(true, /*bPropagateToChildren=*/false);
+		}
 	}
 }
 
