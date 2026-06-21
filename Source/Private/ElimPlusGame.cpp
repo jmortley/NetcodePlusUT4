@@ -1,5 +1,5 @@
 #include "ElimPlusGame.h"
-#include "NCToTCollector.h"
+#include "NCFireValCollector.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
@@ -245,7 +245,7 @@ void AElimPlusGame::HandleMatchHasStarted()
 	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus build marker: rebalance+warnings+broadcast (post-ca60db0)"));
 	Super::HandleMatchHasStarted();
 
-	FNCToTCollector::Get().Reset();   // fresh ToT table + CSV id for this match
+	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id for this match
 
 	bWarmupMode = false;
 
@@ -397,7 +397,7 @@ void AElimPlusGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
 
-	FNCToTCollector::Get().ReportOnce(GetWorld());   // emit [ToT] + CSV (guards double-route)
+	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (guards double-route)
 
 	// Persist updated ratings to Mods.db and emit the final ELO + match delta
 	// to the replicator. Engine routes HandleMatchHasEnded twice in some paths
@@ -901,6 +901,13 @@ void AElimPlusGame::StartNextRound()
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
 	ResetPlayersForNewRound();
+	// Sweep AFTER the reset, on the canonical round-start path. CleanupWorldForNewRound
+	// also runs in DefaultTimer at intermission-end, but that fires BEFORE StartNextRound
+	// (and a BP-driven state transition can bypass it), so any pickup still on the floor
+	// at round start — e.g. a thrown weapon (throw bind -> TossInventory, which does NOT
+	// go through the now-suppressed DiscardInventory) — used to survive into the new round.
+	// Sweeping here guarantees a clean floor regardless of how the round was started.
+	CleanupWorldForNewRound();
 	DarkHorseCandidates.Empty();
 	ResetSpawnSelectionForNewRound();
 	Team0AlivePlayers.Empty();
