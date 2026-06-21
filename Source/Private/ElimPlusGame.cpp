@@ -1393,6 +1393,24 @@ void AElimPlusGame::ResetPlayersForNewRound()
 	}
 }
 
+// ElimPlus arena rule: players never drop their loadout. Stock
+// AUTGameMode::DiscardInventory tosses the current weapon (or the Enforcer fallback)
+// plus any bAlwaysDropOnDeath powerups, spawning AUTDroppedPickups — and it fired both
+// on death (AUTCharacter::Died) AND from ResetPlayersForNewRound at round reset (:1389).
+// The reset toss ran AFTER CleanupWorldForNewRound's sweep, so those drops survived into
+// the next round. Destroy the inventory in place instead: DiscardAllInventory Destroy()s
+// each item (no TossInventory), nulls the weapon + saved ammo. Nothing ever spawns, so
+// the sweep-ordering issue is moot. Deliberately does NOT call Super. Candy orbs (spawned
+// by the BP PreventDeath as separate AUTPickupHealth world actors) are not this pawn's
+// inventory and are untouched.
+void AElimPlusGame::DiscardInventory(APawn* Other, AController* Killer)
+{
+	if (AUTCharacter* UTC = Cast<AUTCharacter>(Other))
+	{
+		UTC->DiscardAllInventory();
+	}
+}
+
 // This function is unchanged
 void AElimPlusGame::CleanupWorldForNewRound()
 {
