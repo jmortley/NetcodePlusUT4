@@ -110,6 +110,29 @@ struct FActiveServerProjectile
     UPROPERTY()
     uint8 FireMode;
 
+    // --- Grace buffer (populated when the projectile RESOLVES / explodes) ---
+    // Retain a resolved projectile's final state briefly so a claim arriving after the server
+    // projectile is gone (close-range timing race) can still rewind-rescue. ExpireTime < 0 means
+    // the projectile is still live (not yet resolved).
+    UPROPERTY()
+    FVector FinalLoc = FVector::ZeroVector;
+    UPROPERTY()
+    FVector FinalVel = FVector::ZeroVector;
+    UPROPERTY()
+    float FinalGravityZ = 0.f;
+    UPROPERTY()
+    float HitRadius = 0.f;
+    UPROPERTY()
+    float BaseDamage = 0.f;
+    UPROPERTY()
+    float Momentum = 0.f;
+    UPROPERTY()
+    TSubclassOf<UDamageType> DamageType;
+    UPROPERTY()
+    float ExpireTime = -1.f;
+    UPROPERTY()
+    TWeakObjectPtr<class AUTCharacter> DamagedTarget;
+
     FActiveServerProjectile()
         : EventIndex(-1)
         , FireMode(0)
@@ -217,6 +240,13 @@ public:
     // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
     // =========================================================================
     void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum);
+
+    /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves (explodes) to
+     *  snapshot its final state into ActiveServerProjectiles for the lag-comp grace buffer, so a claim
+     *  arriving after the projectile is gone can still rewind-rescue. DamagedChar = the pawn it directly
+     *  hit this frame, or null (geometry/whiff) — prevents double-damaging a target that already took the
+     *  present-time hit. PUBLIC: called from the UTPlusProj_* classes, which are not AUTWeaponFix subclasses. */
+    void OnTrackedProjectileResolved(class AUTProjectile* Proj, class AUTCharacter* DamagedChar);
     UPROPERTY()
     TArray<float> LastFireTime;
 
@@ -299,6 +329,59 @@ public:
     /** Server-side only: total padded radius used for the hitscan validation
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
+
+    /** Server-side only (327 client-informed headshot): WHERE the client rendered the claimed target's
+     *  head — the offset of its rendered mesh head bone from the target's body. Lets the server place a
+     *  NORMAL-size head sphere at the head the player actually saw (forced models render their own head
+     *  here), instead of a fixed capsule point. Set in ServerStartFireFixed alongside the stock
+     *  ReceivedHitScanHitChar; the headshot gate CLAMPS it into the plausible head band of the rewound
+     *  capsule (so a chest/feet claim is impossible) and uses a normal radius (no inflation -> a torso hit
+     *  can't be upgraded). Zero = no claim. Not replicated. */
+    FVector ReceivedHeadOffset = FVector::ZeroVector;
+
+    // ============================================================
+    // Fire-validation sample telemetry. Cheap client-only per-frame tracker + an
+    // owner-only gate. The actual per-player accumulation + reporting is server-
+    // authoritative and lives in FNCFireValCollector. Active ONLY in Elim /
+    // instagib-CTF; dormant (zero cost) everywhere else. Pure telemetry — never
+    // affects gameplay/hit-reg/scoring.
+    // ============================================================
+
+    /** Owner-only gate, set server-side in BeginPlay and replicated to the owning
+     *  client. True only when (Elim or instagib-CTF) AND this weapon is a
+     *  UTPlusSniper or UTPlusShockRifle (or child) — i.e. instagib / shock /
+     *  sniper / LG. When false the client tracker and the report RPC are skipped
+     *  entirely. */
+    UPROPERTY(Replicated)
+    bool bFireValActive = false;
+
+    /** Client-side: local-clock time (World->GetTimeSeconds()) at which the
+     *  crosshair FIRST landed on a visible (occlusion-checked) enemy in the current
+     *  continuous run; -1 = not currently on a visible enemy. The interval is read
+     *  at fire as (now - FireValAcquireTime), which avoids the per-frame DeltaTime
+     *  accumulation and the tick/fire ordering jitter the old counter had. Shipped
+     *  full-range in milliseconds (int32, no 255 ms cap), so heavy values no
+     *  longer saturate the server-side mean. */
+    float FireValAcquireTime = -1.0f;
+
+    /** Client-side: the enemy the crosshair is currently resting on. When the
+     *  traced enemy changes (target-to-target snap), the acquire instant resets so
+     *  the new target starts from zero. Weak so a destroyed/reused actor address
+     *  can't masquerade as the same target. */
+    TWeakObjectPtr<class AUTCharacter> FireValLastTarget;
+
+    /** Client-side: smoothed (EMA) frame time in seconds, sent alongside each
+     *  sample as fps context. The low band is still frame-quantized near zero (a
+     *  60 fps client cannot produce a sub-16 ms value), so review must be able to
+     *  see each player's frame rate to discount that bias. */
+    float FireValFrameTimeEMA = 0.0f;
+
+    /** Per-frame client tracker: one occlusion-aware crosshair line trace. */
+    void UpdateFireValTracker(float DeltaTime);
+
+    /** Finds the bot-events mutator (the telemetry sink). Null on non-bot servers. */
+    class AMutBotEvents* FindBotEventsMutator() const;
+
 protected:
 
     FTimerHandle DeferredActiveStateHandle;
@@ -346,7 +429,7 @@ protected:
      * @param bClientPredicted - Whether client has already predicted this shot
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset);
+    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
 
     /**
      * Server RPC to stop firing.
@@ -357,6 +440,16 @@ protected:
      */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
+
+    /** Telemetry sidecar — reports a client-side fire-validation sample at the
+     *  moment of a hitscan fire the client believes connected. UNRELIABLE on
+     *  purpose: a dropped sample only thins the distribution, and this must never
+     *  compete with the reliable fire RPCs for bandwidth. Server-side it is clamped
+     *  and routed to FNCFireValCollector; it has ZERO effect on gameplay, hit
+     *  validation, or scoring. Separate from ServerStartFireFixed by design — the
+     *  hit-reg path is never touched. */
+    UFUNCTION(Server, Unreliable, WithValidation)
+    void ServerReportFireValidation(int32 SampleMs, uint8 FrameMs, bool bClaimedHit);
 
     /**
      * Client RPC to confirm a fire event or correct client's event index.

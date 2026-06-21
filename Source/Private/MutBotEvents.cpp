@@ -17,6 +17,10 @@
 #include "UTCTFFlagBase.h"
 #include "UTCTFGameState.h"
 #include "Json.h"
+#include "GameFramework/GameStateBase.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 
 DEFINE_LOG_CATEGORY(LogBotEvents);
 
@@ -488,6 +492,7 @@ void AMutBotEvents::PostReward(AUTPlayerState* Scorer, const FString& Type, int3
 	UE_LOG(LogBotEvents, Log, TEXT("Reward: %s lvl=%d x%d by %s (team %d)"),
 		*Type, Level, Multiplier, *Scorer->PlayerName, Scorer->GetTeamNum());
 }
+
 
 void AMutBotEvents::PostMatchEnded()
 {

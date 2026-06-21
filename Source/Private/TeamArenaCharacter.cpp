@@ -20,6 +20,9 @@
 #include "NCPlusForceModels.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
+#include "Kismet/GameplayStatics.h" // SpawnSound2D (own-footstep volume)
+#include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
+#include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -27,6 +30,34 @@ static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("If 1, enables one-way latency visual prediction for non hitscan weapons.\n")
 	TEXT("Players can set to 0 to opt-out (force server positions)."),
 	ECVF_Default); // Saves to user config
+
+// Headshot sphere CENTRE distance below the capsule top, in units. LOWER = the sphere moves UP toward the head
+// (it does NOT change the sphere SIZE — that's HeadRadius). Live-tunable so it can be calibrated in warmup against
+// ncp.DebugHeads instead of a rebuild per tweak. ⚠️ MUST match client + server: the SERVER's value is authoritative
+// for the fallback head validation (GetHeadLocation -> IsHeadShot); the client's value only moves the debug ring.
+// Set it on your dogfood server (or a listen server, where client == server) so the green ring AND the real hitbox
+// move together. NB the PRIMARY sniper client-informed path uses the HeadBand* clamp, not this — see UTPlusSniper.
+static TAutoConsoleVariable<float> CVarHeadCapsuleDrop(
+	TEXT("ncp.HeadCapsuleDrop"),
+	20.0f,   // calibrated 2026-06-19 (was 26; robot/genghis heads sit higher than the stock ~Z+82)
+	TEXT("Headshot sphere centre distance below the capsule top (units). Lower = sphere moves UP toward the head; ")
+	TEXT("size is unchanged (HeadRadius). Calibrate live in warmup vs ncp.DebugHeads. Server value is authoritative."),
+	ECVF_Default);
+
+// Projectile visual-prediction stability smoothing (UTUpdateSimulatedPosition). ASYMMETRIC: when a high-ping enemy
+// jukes, the prediction lead must drop FAST so they stop warping; re-arming the lead is SLOW so we don't over-predict
+// straight into their next juke. FastDrop = FInterpTo rate when the stability factor is falling (target reversing/
+// perpendicular); SlowRise = rate when it climbs back (target straightened). Live-tunable for dogfood feel.
+static TAutoConsoleVariable<float> CVarPredStabFastDrop(
+	TEXT("ncp.PredStabFastDrop"),
+	30.0f,
+	TEXT("Projectile-prediction stability: FInterpTo rate when the lead must drop (target juking). High = snap off fast (~1 frame)."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarPredStabSlowRise(
+	TEXT("ncp.PredStabSlowRise"),
+	4.0f,
+	TEXT("Projectile-prediction stability: FInterpTo rate when re-arming the lead (target straightened). Low = ease up slowly (~250ms)."),
+	ECVF_Default);
 
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
@@ -46,20 +77,65 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 // ── Force Models (MutForceModels port, phase 1) ─────────────────────────────
 // One override covers every apply trigger — spawn (PossessedBy) and team-change
 // (OnRep_PlayerState / Team / SelectedCharacter OnRep) all route through the base
-// NotifyTeamChanged. The base reverts the pawn to its REAL model each time it runs,
-// so we re-assert the forced model AFTER it (bForceReapply=true).
+// NotifyTeamChanged. The base reverts the pawn to its REAL model each time it runs.
+// Because a single replication burst fires this 2-4x, we don't re-force inline; we mark
+// the pawn dirty and re-assert the forced model once on the next Tick (FlushForcedModelUpdate).
 void ATeamArenaCharacter::NotifyTeamChanged()
 {
 	Super::NotifyTeamChanged();
-	ApplyForcedModel(/*bForceReapply=*/true);
 
-	// Friend/enemy is relative to the local player. If this is MY pawn and my team just changed,
-	// every OTHER pawn's bucket can flip — but their NotifyTeamChanged won't fire. Refresh them.
-	// (Matters for Enemy-Only / Team-Enemy styles; a cheap no-op for absolute Red/Blue.)
-	if (IsLocallyControlled())
+	// Coalesce the forced-model apply. PossessedBy / OnRep_PlayerState / the PlayerState's own
+	// NotifyTeamChanged / UTTeamInfo each drive this 2-4x in ONE replication burst (spawn, join, team
+	// assignment) — so the heavy ApplyCharacterData mesh rebuild + double GetBodyMIs() recolour loop ran
+	// 2-4x per remote pawn per spawn (a hitch). Super above has ALREADY reverted the mesh to the real
+	// model on THIS call, so instead of re-forcing per OnRep we just mark dirty here and re-assert the
+	// forced model EXACTLY ONCE on the next Tick. Tick runs after this frame's replication dispatch, so
+	// the reskin still lands before render (no real-model flash). The flush re-forces with
+	// bForceReapply=true and must NOT latch-skip — each Super::NotifyTeamChanged unconditionally reverted
+	// the mesh, so a skip would silently drop the reskin.
+	if (GetNetMode() != NM_DedicatedServer)
 	{
+		bForcedModelDirty = true;
+
+		// Friend/enemy is relative to the local player. If this is MY pawn and my team just changed,
+		// every OTHER pawn's bucket can flip — but their NotifyTeamChanged won't fire. Refresh them
+		// (also coalesced to the next-tick flush). Matters for Enemy-Only / Team-Enemy styles; a cheap
+		// no-op for absolute Red/Blue.
+		if (IsLocalPlayerPawn())
+		{
+			bRefreshOthersDirty = true;
+		}
+	}
+}
+
+// Apply the coalesced forced-model work, at most once per frame. Called from the top of Tick on clients,
+// which runs AFTER this frame's network replication dispatch — so the N NotifyTeamChanged calls from a
+// single replication burst collapse into ONE ApplyCharacterData rebuild here. bForceReapply MUST be true:
+// every Super::NotifyTeamChanged during the burst reverted the mesh to the real model, so the flush has to
+// re-force unconditionally (a latch-skip would silently drop the reskin).
+void ATeamArenaCharacter::FlushForcedModelUpdate()
+{
+	if (bForcedModelDirty)
+	{
+		bForcedModelDirty = false;
+		ApplyForcedModel(/*bForceReapply=*/true);
+	}
+	if (bRefreshOthersDirty)
+	{
+		bRefreshOthersDirty = false;
 		RefreshOtherForcedModels();
 	}
+}
+
+// "Is this MY OWN pawn?" — controlled by a LOCAL human player. Deliberately NOT IsLocallyControlled(): in
+// NM_Standalone (offline) every controller (incl. bots' AIControllers) reports IsLocalController()==true, so
+// IsLocallyControlled() was true for every pawn and Force Models skipped them all offline. Bots use AIController,
+// not a PlayerController, so the Cast cleanly excludes them; IsLocalController() keeps remote players (on a listen
+// server) from matching. Correct in standalone, client, and listen-server.
+bool ATeamArenaCharacter::IsLocalPlayerPawn() const
+{
+	const APlayerController* const PC = Cast<APlayerController>(Controller);
+	return PC && PC->IsLocalController();
 }
 
 void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
@@ -67,7 +143,10 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// Client-side render preference only — never on a dedicated server, never replicated.
 	if (GetNetMode() == NM_DedicatedServer) { return; }
 	if (bApplyingForcedModel) { return; }                 // re-entrancy guard (ApplyCharacterData / base NotifyTeamChanged)
-	if (IsLocallyControlled()) { return; }                // never reskin your own pawn
+	// MY OWN pawn → COLOUR-ONLY: keep your real model, run the team-colour tint only (gated below) so your
+	// own body matches the recoloured teammates and the line-up / post-game line-up. (NOT IsLocallyControlled
+	// — that's true for every pawn offline; see IsLocalPlayerPawn.)
+	const bool bColourOnly = IsLocalPlayerPawn();
 
 	UWorld* const World = GetWorld();
 
@@ -138,8 +217,12 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 
 	// Force the mesh via UT's own swap (rebuilds BodyMIs). Flag must be set BEFORE the call —
 	// stock ApplyCharacterData early-returns unless bAllowCharacterDataOverride is true.
-	bAllowCharacterDataOverride = true;
-	ApplyCharacterData(Content);
+	// Own pawn (bColourOnly): skip the mesh swap — keep the real model and its existing BodyMIs, tint only.
+	if (!bColourOnly)
+	{
+		bAllowCharacterDataOverride = true;
+		ApplyCharacterData(Content);
+	}
 
 	static const FName NAME_TeamSelect(TEXT("TeamSelect"));
 	static const FName NAME_TeamBlendMax(TEXT("Team Color Blend Max"));
@@ -220,7 +303,11 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// Cosmetic strip (the "Cosmetics" flag, on = remove): drop + suppress hats/eyewear on this reskinned
 	// pawn. Set BEFORE OnRep_PlayerState's later SetCosmeticsFromPlayerState so the setter overrides catch
 	// the re-add. (NotifyTeamChanged runs first at OnRep, this gate second.)
-	UpdateCosmeticStrip(NCPlusForceModels::Get().bCosmetics);
+	// Not for the own pawn — colour-only doesn't reskin, so keep your full character (hat/eyewear).
+	if (!bColourOnly)
+	{
+		UpdateCosmeticStrip(NCPlusForceModels::Get().bCosmetics);
+	}
 
 	bApplyingForcedModel = false;
 }
@@ -287,21 +374,49 @@ void ATeamArenaCharacter::PlayDying()
 	SpawnSkeletonDissolve();
 }
 
-// "Darken Bodies" toggle: on death, hide the corpse after a short delay so the death/ragdoll effects are
-// visible first (instant hide looked abrupt). (Replaces dc's ModelDissolveEffect, which drove its dissolve
-// through a SkinUpdater-owner exec chain and wouldn't run reliably across models — this clean hide works on
-// any model with zero asset dependency.) The ragdoll keeps simulating invisibly after and cleans up on its
-// normal lifespan; we just stop rendering it. Client-side, per pawn; no-op on a dedicated server.
+// On death, hide the corpse mesh after a delay. Two roles:
+//  (1) "Darken Bodies" toggle (any mode): hide after the ~1s death-effects fade (instant hide looked abrupt).
+//      Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across models); this
+//      clean hide works on any model with zero asset dependency.
+//  (2) iCTF safety net (regardless of DarkenBodies): the body is supposed to be removed by the BP CleanUpRagdoll
+//      at [InstagibCTF] RagdollTime, but if that doesn't happen (e.g. DarkenBodies off and the BP cleanup never
+//      fires) the corpse would linger. So in iCTF we ALSO hide it at the ragdoll lifespan, so a low Ragdoll Time
+//      reliably makes the body vanish. Hide-only (SetVisibility) — never destroys the actor, so it can't fight
+//      the BP destroy or the engine corpse cleanup. Client-side, per pawn; no-op on a dedicated server.
 void ATeamArenaCharacter::SpawnSkeletonDissolve()
 {
 	if (GetNetMode() == NM_DedicatedServer) { return; }
+
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
-	if (!C.bEnabled || !C.bDarkenBodies) { return; }
-	// Delay the hide so the death effects play first. Timer is bound to this actor, so it's auto-cleared if
-	// the corpse is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
-	const float kHideDelay = 1.0f;
+	const bool bDarken = (C.bEnabled && C.bDarkenBodies);
+
+	// iCTF detection: RagdollTime is an iCTF setting (the BP CleanUpRagdoll only runs for the instagib damage
+	// type). ACTFStatsReplicator is present only in NCPlusCTF instagib; absent in ElimPlus etc.
+	bool bIsInstagib = false;
+	if (UWorld* World = GetWorld())
+	{
+		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
+	}
+
+	// Nothing to do unless DarkenBodies is on (the fade, any mode) OR this is iCTF (the ragdoll-cleanup backup).
+	// Outside both, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
+	if (!bDarken && !bIsInstagib) { return; }
+
+	float RagdollTime = 3.0f;
+	FString Val;
+	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("RagdollTime"), Val, ConfigPath))
+	{
+		RagdollTime = FCString::Atof(*Val);
+	}
+
+	// DarkenBodies hides early (~1s death-effects fade, but never longer than the ragdoll lives); otherwise
+	// (iCTF, DarkenBodies off) hide exactly at the ragdoll lifespan so the body still vanishes when the BP
+	// CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules rate<=0). Timer is bound to this actor, so
+	// it auto-clears if the corpse is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
+	const float HideDelay = FMath::Max(0.01f, bDarken ? FMath::Min(1.0f, RagdollTime) : RagdollTime);
 	FTimerHandle TempHandle;
-	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, kHideDelay, false);
+	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, HideDelay, false);
 }
 
 void ATeamArenaCharacter::HideDeadBody()
@@ -326,7 +441,7 @@ void ATeamArenaCharacter::RefreshOtherForcedModels()
 	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
 	{
 		ATeamArenaCharacter* Other = *It;
-		if (Other && Other != this && !Other->IsLocallyControlled())
+		if (Other && Other != this && !Other->IsLocalPlayerPawn())
 		{
 			Others.Add(Other);
 		}
@@ -346,7 +461,7 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	// Redirect that yellow to our match/complimentary armour colour, for pawns we reskin. Client-only
 	// (OverlayMesh's MID only exists off the dedicated server). This is the ArmorType OnRep, so it
 	// re-fires on every armour change and always runs AFTER the stock colour, winning cleanly.
-	if (GetNetMode() == NM_DedicatedServer || IsLocallyControlled() || !OverlayMesh) { return; }
+	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn() || !OverlayMesh) { return; }  // skip MY pawn (offline-safe)
 
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	if (!C.bEnabled || !C.bArmour) { return; }
@@ -496,11 +611,24 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 								// +1 (same dir)      = 100% prediction
 								float StabilityFactor = FMath::Clamp((VelocityDot + 1.0f) * 0.5f, 0.0f, 1.0f);
 
-								// Smooth the factor itself to prevent frame-to-frame flickering
-								// Rate 6.0 = converges in roughly 150-200ms
-								SmoothedStabilityFactor = FMath::FInterpTo(
-									SmoothedStabilityFactor, StabilityFactor,
-									GetWorld()->GetDeltaSeconds(), 6.0f);
+								// ASYMMETRIC smoothing (replaces the symmetric rate-6 FInterpTo). A high-ping enemy's
+								// juke must STOP warping immediately, but re-arming the lead should be gradual so we
+								// don't over-predict into their NEXT juke. So drop the factor FAST when it's falling
+								// (target reversing) and rise SLOWLY when it climbs (target straightened). Plus a hard-
+								// zero on a genuine horizontal reversal (VelocityDot<0 = >90 deg flip), gated on
+								// horizontal speed so a jump arc's vertical Z-velocity flip at apex doesn't trip it.
+								const float dt = GetWorld()->GetDeltaSeconds();
+								if (OldVelocity.Size2D() > 200.0f && VelocityDot < 0.0f)
+								{
+									SmoothedStabilityFactor = 0.0f;   // dodge/strafe-flip: kill the lead NOW (no warp)
+								}
+								else
+								{
+									const float InterpRate = (StabilityFactor < SmoothedStabilityFactor)
+										? CVarPredStabFastDrop.GetValueOnGameThread()    // falling  -> snap the lead down
+										: CVarPredStabSlowRise.GetValueOnGameThread();   // rising   -> ease it back up
+									SmoothedStabilityFactor = FMath::FInterpTo(SmoothedStabilityFactor, StabilityFactor, dt, InterpRate);
+								}
 
 								PredictionTime = BasePrediction * SmoothedStabilityFactor;
 							}
@@ -760,10 +888,13 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 	// capsule, UTCharacter.cpp:5351) lines up with it. Also makes the rewind exact (fixed capsule geometry,
 	// no animated-bone pose to approximate) and drops the per-check RefreshBoneTransforms.
 	//
-	// kHeadCapsuleDrop = sphere CENTRE below the capsule top (standing half-height 108, stock head ~Z+82 ->
-	// ~26). Compile-time constant so client and server agree. Calibrate visually on the 327-experimental
-	// branch (ncp.DebugHeads marker), then mirror the value here. GetScaledCapsuleHalfHeight() is crouch-aware.
-	static const float kHeadCapsuleDrop = 26.0f;
+	// kHeadCapsuleDrop = sphere CENTRE below the capsule top (standing half-height 108, stock head ~Z+82 -> ~26).
+	// Now a live cvar (ncp.HeadCapsuleDrop) so it can be calibrated in warmup vs ncp.DebugHeads without a rebuild —
+	// LOWER it to raise the sphere onto the head. Read on any thread (validation is game-thread; harmless elsewhere).
+	// Client + server must use the same value (server authoritative for validation). GetScaledCapsuleHalfHeight() is
+	// crouch-aware. NB a forced model whose head sits higher than stock (e.g. a tall robot) needs a SMALLER drop than
+	// 26 — that's why the default lands at the chest on some models; pick a value that fits the models you run.
+	const float kHeadCapsuleDrop = CVarHeadCapsuleDrop.GetValueOnAnyThread();
 
 	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 	// GetRewindLocation rewinds the actor (capsule) position on the server and returns the current position
@@ -795,6 +926,14 @@ void ATeamArenaCharacter::BeginPlay()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
+	// Flush any forced-model apply coalesced from this frame's replication burst (see NotifyTeamChanged).
+	// Runs here — after net dispatch, before Super::Tick/render — so N team OnReps collapse to one mesh
+	// rebuild and the reskin is in place for this frame. No-op on a dedicated server (flags never set).
+	if (bForcedModelDirty || bRefreshOthersDirty)
+	{
+		FlushForcedModelUpdate();
+	}
+
 	// ── Ping-compensated spawn: client confirms control ──
 	if (bPingCompensatedSpawnPending)
 	{
@@ -1260,4 +1399,105 @@ void ATeamArenaCharacter::ServerConfirmSpawnReady_Implementation()
 	bPingCompensatedSpawnPending = false;
 	SetActorHiddenInGame(false);
 	SetActorEnableCollision(true);
+}
+
+// ── Own footstep volume (iCTF) ─────────────────────────────────────────────
+// Scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting. Only the local
+// human's own pawn, only in iCTF, only when the setting is below stock (1.0); everything else falls through
+// to the stock AUTCharacter::PlayFootstep. UTPlaySound has no volume argument, so the non-stock case is
+// played via SpawnSoundAttached with a VolumeMultiplier.
+void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
+{
+	if (GetNetMode() != NM_DedicatedServer && IsLocalPlayerPawn())
+	{
+		// Read the 0..1 setting once (mid-match F5 changes apply next life). Default 1.0 = stock.
+		if (!bOwnFootstepVolumeRead)
+		{
+			bOwnFootstepVolumeRead = true;
+			FString Val;
+			const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+			if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("OwnFootstepVolume"), Val, ConfigPath))
+			{
+				OwnFootstepVolumeScale = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
+			}
+		}
+
+		// Only do the iCTF lookup / custom play when the feature is actually active (vol < stock), so
+		// default users pay nothing. ACTFStatsReplicator exists only in NCPlusCTF (instagib); searched
+		// lazily while null so it still binds if the first footstep precedes its replication.
+		if (OwnFootstepVolumeScale < 1.f)
+		{
+			// Resolve the iCTF gate once: search until the replicator is found, or give up ~8s after spawn
+			// so non-iCTF modes (ElimPlus etc., which have no ACTFStatsReplicator) don't iterate every
+			// footstep forever. The window also covers a first footstep that precedes the replicator's arrival.
+			if (!bIctfFootstepResolved)
+			{
+				for (TActorIterator<ACTFStatsReplicator> It(GetWorld()); It; ++It)
+				{
+					CachedCTFRep = *It;
+					break;
+				}
+				// WARMUP signal: ACTFStatsReplicator only spawns at match start, so during warmup the
+				// replicator gate is null and footsteps fall through to stock. The replicated MutInstagibNCP
+				// mutator is present from match init (through warmup), so finding it confirms iCTF early.
+				// Contains() handles the BP "_C" suffix; latched so we don't iterate mutators every step.
+				if (!bIctfMutatorFound)
+				{
+					for (TActorIterator<AUTMutator> It(GetWorld()); It; ++It)
+					{
+						if (It->GetClass()->GetName().Contains(TEXT("MutInstagibNCP")))
+						{
+							bIctfMutatorFound = true;
+							break;
+						}
+					}
+				}
+				if (CachedCTFRep.IsValid() || bIctfMutatorFound || (GetWorld()->GetTimeSeconds() - CreationTime) > 8.f)
+				{
+					bIctfFootstepResolved = true;
+				}
+			}
+			// iCTF if EITHER signal fires: the mutator (covers warmup) or the authoritative replicator flag.
+			if (bIctfMutatorFound || (CachedCTFRep.IsValid() && CachedCTFRep->bIsInstagibMatch))
+			{
+				// Mirror stock's double-footstep filter: drop the 3rd-person step while in first-person view
+				// (otherwise both the 1P and 3P notifies would play the own footstep twice).
+				AUTPlayerController* UTPC = Cast<AUTPlayerController>(Controller);
+				if (UTPC && !bFirstPerson && !UTPC->IsBehindView())
+				{
+					return;
+				}
+				PlayOwnFootstepScaled(FootNum);
+				return;
+			}
+		}
+	}
+
+	Super::PlayFootstep(FootNum, bFirstPerson);
+}
+
+void ATeamArenaCharacter::PlayOwnFootstepScaled(uint8 FootNum)
+{
+	// Mirror AUTCharacter::PlayFootstep's gating, but play the local player's own footstep at
+	// OwnFootstepVolumeScale via SpawnSound2D — non-spatialized, matching the character of the stock own
+	// footstep (UTPlaySound has no volume arg). The fork stubs GetFootstepSoundForSurfaceType to always
+	// return null, so footsteps always use FootstepSound (or WaterFootstepSound) — there's no per-surface
+	// own variant to reproduce. SAT_Footstep amplification is bypassed, so the volume is a direct multiplier
+	// of the asset (a deliberate reduction; there's a small loudness step vs the stock 1.0 path). Cadence
+	// (LastFoot/LastFootstepTime) is preserved so anim-timed steps stay correct.
+	if ((GetWorld()->TimeSeconds - LastFootstepTime < 0.1f) || bFeigningDeath || IsDead() || bIsCrouched)
+	{
+		return;
+	}
+
+	USoundBase* FootstepSoundToPlay = FeetAreInWater() ? WaterFootstepSound : FootstepSound;
+
+	// Volume 0 -> play nothing (silent own footsteps), which is the whole point at 0.
+	if (FootstepSoundToPlay && OwnFootstepVolumeScale > 0.f)
+	{
+		UGameplayStatics::SpawnSound2D(this, FootstepSoundToPlay, OwnFootstepVolumeScale);
+	}
+
+	LastFoot = FootNum;
+	LastFootstepTime = GetWorld()->TimeSeconds;
 }

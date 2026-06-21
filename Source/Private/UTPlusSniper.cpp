@@ -5,8 +5,20 @@
 #include "UTBot.h"
 #include "StatNames.h"
 #include "Net/UnrealNetwork.h"
+#include "HAL/IConsoleManager.h"
 
-
+// ── Headshot calibration (server-side validation; live-tunable for dogfood) ──
+// The secure client-informed head check below places a NORMAL sphere at the client's
+// rendered-head offset, clamped into [HeadBandHigh..HeadBandLow] below the rewound
+// capsule top (ncp.DebugHeads visualises it). HeadSlack widens that sphere by ~(target
+// speed x rewind time) so an honest headshot still regs when the under-rewind error
+// exceeds the head radius at high ping — velocity-gated (stationary -> 0, no torso
+// upgrade) and hard-capped. Server-side only; no client sync needed.
+static TAutoConsoleVariable<float> CVarHeadBandLow(   TEXT("ncp.HeadBandLow"),   45.f, TEXT("Head-sphere centre lower bound: capsule top minus this many uu."));
+static TAutoConsoleVariable<float> CVarHeadBandHigh(  TEXT("ncp.HeadBandHigh"),   5.f, TEXT("Head-sphere centre upper bound: capsule top minus this many uu."));
+static TAutoConsoleVariable<float> CVarHeadBandXY(    TEXT("ncp.HeadBandXY"),    22.f, TEXT("Max head-sphere centre offset off the capsule axis (uu)."));
+static TAutoConsoleVariable<float> CVarHeadSlackScale(TEXT("ncp.HeadSlackScale"), 1.f, TEXT("High-ping head slack = targetSpeed * rewindTime * this (0 disables)."));
+static TAutoConsoleVariable<float> CVarHeadSlackMax(  TEXT("ncp.HeadSlackMax"),  25.f, TEXT("Hard cap (uu) on the high-ping head slack added to the sphere radius."));
 
 
 AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
@@ -296,7 +308,44 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 				}
 			}
 
-			if (C->IsHeadShot(Hit.Location, FireDir, EffectiveHeadScale, UTOwner, PredictionTime))
+			// 327 client-informed headshot (SECURE): when the client reported WHERE it rendered the head
+			// (an offset from the target body, from its rendered mesh head bone), validate a NORMAL-size
+			// head sphere placed at that client-informed centre — but CLAMP the centre into the plausible
+			// head band of the REWOUND capsule first. Precise (the sphere sits at the forced model's actual
+			// rendered head, not a fixed capsule point) AND safe (normal radius + clamped centre => a torso
+			// hit can't be upgraded; a chest/feet claim is clamped back to the real head region). NO 2.5x
+			// inflation. Unclaimed / resent shots fall back to the stock capsule-relative head check.
+			// Calibrate the band with ncp.DebugHeads.
+			bool bHead = false;
+			if (C == ReceivedHitScanHitChar && !ReceivedHeadOffset.IsZero())
+			{
+				const float kHeadBandLow  = CVarHeadBandLow.GetValueOnGameThread();   // centre within top [High..Low]u of capsule
+				const float kHeadBandHigh = CVarHeadBandHigh.GetValueOnGameThread();
+				const float kHeadBandXY   = CVarHeadBandXY.GetValueOnGameThread();    // ~head radius off the capsule axis
+				const float HH = C->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+				FVector Off = ReceivedHeadOffset;
+				Off.Z = FMath::Clamp(Off.Z, HH - kHeadBandLow, HH - kHeadBandHigh);
+				Off.X = FMath::Clamp(Off.X, -kHeadBandXY, kHeadBandXY);
+				Off.Y = FMath::Clamp(Off.Y, -kHeadBandXY, kHeadBandXY);
+				const FVector HeadCentre = C->GetRewindLocation(PredictionTime) + Off;
+				// High-ping slack: the rewound capsule can reconstruct ~(target speed x rewind time)
+				// off from where the client saw the head; widen the sphere by that much so an honest
+				// headshot regs, velocity-gated (stationary -> 0, so a still target can't upgrade a
+				// torso hit) and hard-capped. ncp.HeadSlackScale / ncp.HeadSlackMax tune it live.
+				const float HeadSlack = FMath::Clamp(
+					C->GetVelocity().Size() * PredictionTime * CVarHeadSlackScale.GetValueOnGameThread(),
+					0.f, CVarHeadSlackMax.GetValueOnGameThread());
+				// EffectiveHeadScale already carries the moving-target padding; only the CENTRE moves
+				// to the client-rendered head, plus the bounded high-ping slack on the radius. No 2.5x.
+				bHead = FMath::PointDistToLine(HeadCentre, FireDir, Hit.Location)
+					< C->HeadRadius * C->HeadScale * EffectiveHeadScale + HeadSlack;
+			}
+			else
+			{
+				bHead = C->IsHeadShot(Hit.Location, FireDir, EffectiveHeadScale, UTOwner, PredictionTime);
+			}
+
+			if (bHead)
 			{
 				bIsHeadShot = true;
 				if (C->BlockedHeadShot(Hit.Location, FireDir, EffectiveHeadScale, true, UTOwner))

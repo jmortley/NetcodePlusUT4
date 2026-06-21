@@ -75,6 +75,13 @@ public:
 
 	void Mutate_Implementation(const FString& MutateString, APlayerController* Sender) override;
 
+	/** Multicast so the SENDING client opens the NetcodePlus (F5) menu. Mirrors
+	 *  AClientHitsounds::EventMutateClientSide — fires on all clients, only
+	 *  LocalPC==Sender acts. Lets `mutate teamskins` / `mutate forcemodels` open
+	 *  the same menu as F5/ncpmenu (onboarding for dc MutTeamSkins users). */
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastOpenNCPlusMenu(APlayerController* Sender);
+
 	void NotifyLogout_Implementation(AController* C) override;
 
 	bool OverridePickupQuery_Implementation(APawn* Other, TSubclassOf<AUTInventory> ItemClass, AActor* Pickup, bool& bAllowPickup) override;

@@ -55,6 +55,7 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void NotifyMatchStateChange() override;
 
 private:
+	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
-	bool bNCPScreenshotEnabled = true;
+	float PostMatchScreenshotStable = -1.f;
 };

@@ -41,6 +41,11 @@ struct FElimPlusStatsEntry
 	 *  fired -> scoreboard prints "-" instead of a misleading 0%. */
 	UPROPERTY()
 	int32 LinkGunAccuracyTimes100 = -1;
+
+	/** Global leaderboard rank (1-based) for this player's frozen ELO. 0 = unranked
+	 *  / unknown / bot -> the scoreboard then shows no "(rank)". Set at match start + end. */
+	UPROPERTY()
+	int32 GlobalRank = 0;
 };
 
 UCLASS(NotPlaceable)
@@ -87,6 +92,10 @@ public:
 	 *  HandleMatchHasEnded (NOT per round — display stays frozen until then). */
 	void SetPlayerEloAndDelta(const FString& UniqueIdStr, int32 NewElo, int32 DeltaThisMatch);
 
+	/** Server-only: gamemode / rating system pushes a player's global leaderboard
+	 *  rank (1-based; 0 = unranked) at match start + end, alongside the ELO. */
+	void SetPlayerGlobalRank(const FString& UniqueIdStr, int32 Rank);
+
 	/** Server-only: gamemode pushes its bBalanceTeams flag here so it can
 	 *  replicate to client HUDs. */
 	void SetBalanceTeamsActive(bool bActive);
@@ -100,6 +109,7 @@ private:
 	TMap<FString, float> PPRCurrentCache;
 	TMap<FString, int32> EloCache;
 	TMap<FString, int32> EloDeltaCache;
+	TMap<FString, int32> GlobalRankCache;
 
 private:
 	float UpdateInterval = 1.0f;

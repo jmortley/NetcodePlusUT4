@@ -13,6 +13,11 @@
 #include "JsonUtilities.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
+#include "Engine/World.h"
+#include "Engine/DemoNetDriver.h"
+#include "GameFramework/GameStateBase.h"
+#include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
 
 // =============================================================================
 // Anchor conversions
@@ -115,6 +120,11 @@ namespace NCPlusHUDDragMode
 // Font resolver (Phase 3.8)
 // =============================================================================
 
+// Monotonic layout revision — bumped wherever the live layout changes (load / reset /
+// edit). The font + scale resolve caches below key off it, so on an unchanged layout
+// (the per-frame norm) a resolve is one FName Find instead of GetExtra + a scan.
+static uint32 GLayoutRevision = 1;
+
 namespace NCPlusHUDFonts
 {
 	// Tier A getters — pull from AUTHUD's already-loaded font set.
@@ -181,27 +191,49 @@ namespace NCPlusHUDFonts
 
 	UFont* Resolve(FName Alias, AUTHUD* HUD, UFont* Fallback)
 	{
-		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		if (!E) return Fallback;
+		// Per-alias override cache: Alias is already an FName, so a hit is one hashed
+		// Find with zero string/FName work. Invalidated when the layout changes
+		// (GLayoutRevision). Value = resolved OVERRIDE font, or null meaning no
+		// override (use the caller's Fallback), so the same alias works from sites
+		// passing different fallbacks (e.g. pip SmallFont vs name TinyFont).
+		static TMap<FName, UFont*> OverrideCache;
+		static uint32 CacheRev = 0;
+		if (CacheRev != GLayoutRevision) { OverrideCache.Reset(); CacheRev = GLayoutRevision; }
+		if (UFont** Hit = OverrideCache.Find(Alias)) { return *Hit ? *Hit : Fallback; }
 
-		const FString FontKey = E->GetExtra(TEXT("font"));
+		UFont* const Resolved = [&]() -> UFont*
+		{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		if (!E) return nullptr;
+
+		static const FName NAME_Font(TEXT("font"));   // build the key once, not per call
+		const FString FontKey = E->GetExtra(NAME_Font);
 		if (FontKey.IsEmpty() || FontKey.Equals(TEXT("Default"), ESearchCase::IgnoreCase))
 		{
-			return Fallback;
+			return nullptr;
 		}
 
 		// Lazy-load cache for Tier B fonts. Map by asset path so different
 		// display aliases pointing at the same asset only load once.
 		static TMap<FString, UFont*> Cache;
 
-		for (const FFontEntry& F : GetTable())
+		// One-time name -> entry index (display names are unique). Turns an
+		// overridden font into a single FName-keyed Find instead of a ~20-entry
+		// case-insensitive FString scan every frame — matters at 500+ fps. FName
+		// keys make the match case-insensitive for free.
+		static const TMap<FName, const FFontEntry*> NameMap = []{
+			TMap<FName, const FFontEntry*> M;
+			for (const FFontEntry& Ent : GetTable()) { M.Add(FName(*Ent.Display), &Ent); }
+			return M;
+		}();
+		if (const FFontEntry* const* Found = NameMap.Find(FName(*FontKey)))
 		{
-			if (!F.Display.Equals(FontKey, ESearchCase::IgnoreCase)) continue;
+			const FFontEntry& F = **Found;
 
 			if (F.HUDFunc)
 			{
 				UFont* HF = F.HUDFunc(HUD);
-				return HF ? HF : Fallback;
+				return HF;
 			}
 
 			// Cache hit. nullptr is a valid cached value meaning "tried, failed,
@@ -210,7 +242,7 @@ namespace NCPlusHUDFonts
 			// disk and spamming the log. Treat cached-null as known failure.
 			if (UFont** Cached = Cache.Find(F.AssetPath))
 			{
-				return *Cached ? *Cached : Fallback;
+				return *Cached;
 			}
 
 			// First attempt for this asset path. Try as UObject first so we can
@@ -241,18 +273,31 @@ namespace NCPlusHUDFonts
 				*F.Display, *F.AssetPath,
 				Asset ? TEXT("loaded") : TEXT("null"),
 				Asset ? *Asset->GetClass()->GetName() : TEXT("(none)"));
-			return Fallback;
+			return nullptr;
 		}
 
-		// Unknown name → fall back silently. Likely an old JSON entry from a
-		// future build; leaving it as-is on disk so it survives a re-save.
-		return Fallback;
+		// Unknown name -> no override; the wrapper below applies the caller's Fallback.
+		return nullptr;
+		}();
+
+		OverrideCache.Add(Alias, Resolved);
+		return Resolved ? Resolved : Fallback;
 	}
 
 	float ResolveScale(FName Alias, float Default)
 	{
+		// Per-alias cache (see Resolve). Assumes a stable Default per alias; all
+		// current callers pass 1.f.
+		static TMap<FName, float> ScaleCache;
+		static uint32 ScaleCacheRev = 0;
+		if (ScaleCacheRev != GLayoutRevision) { ScaleCache.Reset(); ScaleCacheRev = GLayoutRevision; }
+		if (float* Hit = ScaleCache.Find(Alias)) { return *Hit; }
+
+		static const FName NAME_FontScale(TEXT("font_scale"));
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		return E ? E->GetExtraFloat(TEXT("font_scale"), Default) : Default;
+		const float V = E ? E->GetExtraFloat(NAME_FontScale, Default) : Default;
+		ScaleCache.Add(Alias, V);
+		return V;
 	}
 
 	TArray<TSharedPtr<FString>> GetChoices()
@@ -931,6 +976,64 @@ namespace NCPlusHUDDrawCall
 	}
 
 	// =============================================================================
+	// Post-match screenshot (shared by ElimPlus / Wipeout / iCTF + Duel/Shaft via AWipeoutHUD)
+	// =============================================================================
+	void ServicePostMatchScreenshot(AUTHUD* HUD, float& StableFrames, bool& bTaken)
+	{
+		if (bTaken || HUD == nullptr)
+		{
+			return;
+		}
+		UWorld* World = HUD->GetWorld();
+		if (World == nullptr)
+		{
+			return;
+		}
+
+		// Capture the FINAL scoreboard, never the instant replay. The replay renders a SEPARATE killcam
+		// world (UUTGameViewportClient world override), so this HUD's DrawHUD — and therefore this poll —
+		// is SUSPENDED for the whole replay and only resumes on the post-replay scoreboard. So we count
+		// CONSECUTIVE qualifying DrawHUD frames rather than wall-clock: the counter naturally pauses during
+		// the replay (no calls) and resumes fresh afterward, so it can't be tricked by time elapsing while
+		// suspended (matters for non-deferred replay modes like Wipeout, where HasMatchEnded() is already
+		// true during the replay). The DemoNetDriver->IsPlaying() check is defensive only — on a live client
+		// the source world's recording driver always reports IsPlaying()==false; it covers a true full
+		// demo-playback session.
+		AUTGameState* GS = World->GetGameState<AUTGameState>();
+		const bool bReplaying = (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsPlaying());
+		if (GS == nullptr || !GS->HasMatchEnded() || bReplaying)
+		{
+			StableFrames = 0.f;
+			return;
+		}
+
+		// A small buffer of scoreboard frames before the (slow) high-res capture — enough for it to be up,
+		// frame-rate-robust because suspended-replay frames don't count toward it.
+		StableFrames += 1.f;
+		if (StableFrames < 20.f)
+		{
+			return;
+		}
+
+		bTaken = true;   // one-shot regardless of the opt-in, so we stop polling
+
+		bool bEnabled = true;   // client opt-in via F5 "High Res Screenshot PostMatch"
+		FString Val;
+		const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
+		{
+			bEnabled = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+		}
+		if (bEnabled)
+		{
+			if (APlayerController* PC = World->GetFirstPlayerController())
+			{
+				PC->ConsoleCommand(TEXT("HighResShot 2"));
+			}
+		}
+	}
+
+	// =============================================================================
 	// Server info name plate
 	// =============================================================================
 	void DrawServerInfo(AUTHUD* HUD, UCanvas* Canvas)
@@ -985,6 +1088,134 @@ namespace NCPlusHUDDrawCall
 		Canvas->DrawColor = FLinearColor(Tint.R, Tint.G, Tint.B, Tint.A * OpacityMul).ToFColor(true);
 		Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
 	}
+
+	// ── Replay-only fire-validation corner feed ────────────────────────
+	// Reads the server-written FireVal_*.csv and overlays each sampled shot during
+	// demo playback, synced to the replayed server clock. Pure client display.
+
+	struct FNCFireValReplayEvent { float Time; FString Name; int32 Dwell; int32 Frame; bool bHit; };
+
+	static TArray<FNCFireValReplayEvent> GFireValEvents;        // sorted ascending by Time
+	static FString                   GFireValLoadedPath;    // CSV currently cached ("" = none)
+	static TWeakObjectPtr<UWorld>    GFireValLoadedWorld;   // reload when the replay world changes
+
+	static TAutoConsoleVariable<FString> CVarFireValReplayCsv(
+		TEXT("ncp.FireValReplayCsv"), TEXT(""),
+		TEXT("Path to a FireVal_*.csv for the replay overlay. Empty = newest in Saved/Logs."));
+
+	static FString FindNewestFireValCsv()
+	{
+		const FString Dir = FPaths::GameSavedDir() / TEXT("Logs");
+		TArray<FString> Names;
+		IFileManager::Get().FindFiles(Names, *(Dir / TEXT("FireVal_*.csv")), true, false);
+		FString Best;
+		FDateTime BestTime = FDateTime::MinValue();
+		for (const FString& N : Names)
+		{
+			const FString Full = Dir / N;
+			const FDateTime T = IFileManager::Get().GetTimeStamp(*Full);
+			if (T >= BestTime) { BestTime = T; Best = Full; }
+		}
+		return Best;
+	}
+
+	static void LoadFireValCsv(const FString& Path)
+	{
+		GFireValEvents.Reset();
+		GFireValLoadedPath = Path;
+		if (Path.IsEmpty()) return;
+
+		TArray<FString> Lines;
+		FString Whole;
+		if (!FFileHelper::LoadFileToString(Whole, *Path)) return;  // 4.15 has LoadFileToString, not ...Array
+		Whole.ParseIntoArray(Lines, TEXT("\n"), /*CullEmpty=*/true);
+
+		for (int32 i = 0; i < Lines.Num(); ++i)
+		{
+			if (i == 0 && Lines[i].StartsWith(TEXT("server_time"))) continue; // header
+			TArray<FString> F;
+			Lines[i].ParseIntoArray(F, TEXT(","), false);
+			if (F.Num() < 5) continue;
+			FNCFireValReplayEvent E;
+			E.Time  = FCString::Atof(*F[0]);
+			E.Name  = F[1];
+			E.Dwell = FCString::Atoi(*F[2]);
+			E.Frame = FCString::Atoi(*F[3]);
+			E.bHit  = (FCString::Atoi(*F[4]) != 0);
+			GFireValEvents.Add(E);
+		}
+		GFireValEvents.Sort([](const FNCFireValReplayEvent& A, const FNCFireValReplayEvent& B) { return A.Time < B.Time; });
+	}
+
+	void DrawFireValReplayFeed(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (HUD == nullptr || Canvas == nullptr) return;
+
+		UWorld* World = HUD->GetWorld();
+		// Replay-only: identical guard the plugin uses elsewhere (UTPlusProj_ShockBall).
+		if (World == nullptr || World->DemoNetDriver == nullptr || !World->DemoNetDriver->IsPlaying()) return;
+
+		AGameStateBase* GS = World->GetGameState();
+		UFont* Font = HUD->SmallFont;
+		if (GS == nullptr || Font == nullptr) return;
+
+		const float NowServer = GS->GetServerWorldTimeSeconds();
+
+		// (Re)load once per replay, or when the cvar points somewhere new. Once
+		// we've attempted a load for this world we don't re-scan disk per frame —
+		// even if no CSV was found (drop one in + restart the replay, or set the
+		// cvar, to pick it up).
+		const FString CVarPath = CVarFireValReplayCsv.GetValueOnGameThread();
+		const bool bSameWorld  = (GFireValLoadedWorld.Get() == World);
+		FString Desired;
+		if (!CVarPath.IsEmpty())  Desired = CVarPath;
+		else                      Desired = bSameWorld ? GFireValLoadedPath : FindNewestFireValCsv();
+		if (!bSameWorld || Desired != GFireValLoadedPath)
+		{
+			LoadFireValCsv(Desired);
+			GFireValLoadedWorld = World;
+		}
+
+		const float RenderScale = Canvas->ClipY / 1080.f;
+		const float Scale = RenderScale * 0.9f;
+		const float X     = 24.f  * RenderScale;
+		float       Y     = 220.f * RenderScale;   // below the top-left clock region
+		const float LineH = 22.f  * RenderScale;
+		const float Window = 6.0f;                 // seconds of history shown
+		const int32 MaxLines = 8;
+
+		Canvas->DrawColor = FColor(170, 170, 170, 200);
+		Canvas->DrawText(Font, GFireValEvents.Num() > 0
+			? FString(TEXT("Fire (replay)"))
+			: FString(TEXT("Fire (replay): no FireVal_*.csv in Saved/Logs")),
+			X, Y, Scale, Scale);
+		Y += LineH * 1.2f;
+		if (GFireValEvents.Num() == 0) return;
+
+		int32 Drawn = 0;
+		for (int32 i = GFireValEvents.Num() - 1; i >= 0 && Drawn < MaxLines; --i)
+		{
+			const FNCFireValReplayEvent& E = GFireValEvents[i];
+			const float Age = NowServer - E.Time;
+			if (Age < -0.25f) continue;  // shot is ahead of the playback head — skip
+			if (Age > Window) break;     // sorted: everything earlier is older still
+
+			const float Alpha = FMath::Clamp(1.f - Age / Window, 0.15f, 1.f);
+			const bool bFirstFrame = (E.Frame > 0) ? (E.Dwell <= E.Frame) : (E.Dwell <= 16);
+			FLinearColor C = bFirstFrame ? FLinearColor(1.f, 0.25f, 0.2f, 1.f)
+				: (E.Dwell <= 50 ? FLinearColor(1.f, 0.7f, 0.15f, 1.f)
+				                 : FLinearColor(0.9f, 0.9f, 0.9f, 1.f));
+			C.A = Alpha;
+			Canvas->DrawColor = C.ToFColor(true);
+
+			const FString Line = FString::Printf(TEXT("%s  %dms  %s%s"),
+				*E.Name, E.Dwell, E.bHit ? TEXT("hit") : TEXT("miss"),
+				bFirstFrame ? TEXT("  <<first-frame") : TEXT(""));
+			Canvas->DrawText(Font, Line, X, Y, Scale, Scale);
+			Y += LineH;
+			++Drawn;
+		}
+	}
 }
 
 // =============================================================================
@@ -1012,7 +1243,7 @@ void FNCPlusHUDLayout::ReloadLive()
 		// including custom colors, weapon group assignments, and the
 		// "empty overrides after Reset All + Save" state.
 		GetLive() = LoadFromFile(NewPath);
-		GLiveLayoutDirty = true;
+		GLiveLayoutDirty = true; ++GLayoutRevision;
 		return;
 	}
 
@@ -1022,7 +1253,7 @@ void FNCPlusHUDLayout::ReloadLive()
 	if (FPaths::FileExists(LegacyPath))
 	{
 		GetLive() = LoadFromFile(LegacyPath);
-		GLiveLayoutDirty = true;
+		GLiveLayoutDirty = true; ++GLayoutRevision;
 		return;
 	}
 
@@ -1044,7 +1275,7 @@ void FNCPlusHUDLayout::ReloadLive()
 	{
 		GetLive() = FNCPlusHUDLayout();
 	}
-	GLiveLayoutDirty = true;
+	GLiveLayoutDirty = true; ++GLayoutRevision;
 }
 
 bool FNCPlusHUDLayout::SaveLive()
@@ -1056,10 +1287,10 @@ bool FNCPlusHUDLayout::SaveLive()
 void FNCPlusHUDLayout::ResetLive()
 {
 	GetLive() = FNCPlusHUDLayout();
-	GLiveLayoutDirty = true;
+	GLiveLayoutDirty = true; ++GLayoutRevision;
 }
 
-void FNCPlusHUDLayout::MarkLiveDirty() { GLiveLayoutDirty = true; }
+void FNCPlusHUDLayout::MarkLiveDirty() { GLiveLayoutDirty = true; ++GLayoutRevision; }
 bool FNCPlusHUDLayout::IsLiveDirty()   { return GLiveLayoutDirty; }
 void FNCPlusHUDLayout::ClearLiveDirty(){ GLiveLayoutDirty = false; }
 

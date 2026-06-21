@@ -19,6 +19,11 @@ public:
 	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
 
+	/** Swap the stock spectator slide-out for UNCPlusSpectatorSlideOut so the
+	 *  weapon-stats panel shows only the instagib rifle (iCTF) with replicated
+	 *  accuracy. Non-instagib CTF keeps the stock map-pickup behaviour. */
+	virtual void AddSpectatorWidgets() override;
+
 protected:
 	virtual EInputMode::Type GetInputMode_Implementation() const override;
 
@@ -28,4 +33,9 @@ private:
 
 	/** Draw "NOW WATCHING / PlayerName" bottom-right when viewing another player */
 	void DrawSpectatorTarget();
+
+	/** Post-match high-res screenshot state — serviced each frame by
+	 *  NCPlusHUDDrawCall::ServicePostMatchScreenshot (fires after the replay ends + scoreboard settles). */
+	bool bPostMatchScreenshotTaken = false;
+	float PostMatchScreenshotStable = -1.f;
 };

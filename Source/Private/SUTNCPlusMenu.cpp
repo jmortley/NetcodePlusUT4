@@ -13,6 +13,13 @@ static const TCHAR* NCPSection = TEXT("NetcodePlus");
 // (NCPlusUTDmg_Instagib: ShouldGib reads bAllowGib, PlayDeathEffects reads RagdollTime) actually reads.
 static const TCHAR* IGCTFSection = TEXT("InstagibCTF");
 
+// Ragdoll-time semantics (the iCTF damage-type BP NCPlusUTDmg_Instagib::PlayDeathEffects passes RagdollTime
+// straight into a "Set Timer by Function Name" / CleanUpRagdoll node). Engine rule, FTimerManager::SetTimer:
+// rate <= 0 NEVER schedules the timer, so a literal 0 would KEEP the ragdoll forever — counter-intuitive
+// (players read "0 time" as "no ragdoll"). So the slider's 0 is remapped to 0.01 on SAVE: the BP then fires
+// the cleanup almost instantly = ragdoll removed. The user sees 0..10 (0 = remove instantly, N = N-sec
+// despawn, max 10); the stored config value is never a keep-forever 0.
+
 // Shared fonts
 static FSlateFontInfo BoldFont(int32 Size)   { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), Size); }
 static FSlateFontInfo RegularFont(int32 Size) { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), Size); }
@@ -20,6 +27,7 @@ static FSlateFontInfo RegularFont(int32 Size) { return FSlateFontInfo(FPaths::En
 void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
+	ActiveTab = InArgs._InitialTab;   // ContentArea below builds BuildTabContent(ActiveTab)
 
 	// Take mouse input: show the cursor and switch to GameAndUI so Slate gets
 	// mouse events. NCPlusHUDDragMode holds the HUD's per-tick GetInputMode poll
@@ -86,7 +94,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
 				[
-					MakeTabButton(TEXT("General"), ENCPMenuTab::General)
+					MakeTabButton(TEXT("iCTF"), ENCPMenuTab::General)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
@@ -399,6 +407,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 				.Value(RagdollTime)
 				.OnValueCommitted(this, &SUTNCPlusMenu::OnRagdollTimeChanged)
 				.MinDesiredWidth(80.f)
+				.ToolTipText(FText::FromString(TEXT("Seconds a ragdoll stays before despawning. 0 = remove instantly (no ragdoll); e.g. 3 = despawn after 3s. Max 10.")))
 			]
 		]
 
@@ -787,14 +796,18 @@ void SUTNCPlusMenu::LoadSettings()
 		bShowRagdoll = true;
 
 	if (GConfig->GetString(IGCTFSection, TEXT("RagdollTime"), Val, ConfigPath))
-		RagdollTime = FCString::Atof(*Val);
+	{
+		// Stored 0.01 is our "instant removal" sentinel — show it as 0 on the slider for a clean round-trip.
+		const float Stored = FCString::Atof(*Val);
+		RagdollTime = (Stored <= 0.011f) ? 0.f : FMath::Clamp(Stored, 0.f, 10.f);
+	}
 	else
 		RagdollTime = 3.0f;
 
 	if (GConfig->GetString(NCPSection, TEXT("OwnFootstepVolume"), Val, ConfigPath))
-		OwnFootstepVolume = FCString::Atof(*Val);
+		OwnFootstepVolume = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
 	else
-		OwnFootstepVolume = 0.0f;
+		OwnFootstepVolume = 1.0f;   // default = stock (no change unless lowered); matches the consumer default
 
 	if (GConfig->GetString(NCPSection, TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
 		bHighResScreenshotPostMatch = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
@@ -831,7 +844,10 @@ void SUTNCPlusMenu::SaveSettings()
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.
 	GConfig->SetString(IGCTFSection, TEXT("bAllowGib"), bAllowGib ? TEXT("True") : TEXT("False"), ConfigPath);
 	GConfig->SetString(IGCTFSection, TEXT("bShowRagdoll"), bShowRagdoll ? TEXT("True") : TEXT("False"), ConfigPath);
-	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"), *FString::SanitizeFloat(RagdollTime), ConfigPath);
+	// Slider 0 -> store 0.01 so the BP's SetTimer fires (rate>0) and removes the ragdoll instantly, rather
+	// than a literal 0 (rate<=0) which never fires = keep forever. Non-zero values pass through unchanged.
+	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"),
+		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
@@ -900,6 +916,8 @@ void SUTNCPlusMenu::OnShowRagdollChanged(ECheckBoxState NewState)
 
 void SUTNCPlusMenu::OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType)
 {
+	// Slider value the user sees (0..10). 0 = remove instantly (remapped to 0.01 on save, since a literal 0
+	// would keep ragdolls forever); N = despawn after N seconds. See the semantics note at the top of the file.
 	RagdollTime = FMath::Clamp(NewValue, 0.f, 10.f);
 }
 

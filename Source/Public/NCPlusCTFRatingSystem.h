@@ -41,6 +41,14 @@ struct FNCPlusCTFPlayerInput
 	int32   CarryAssists  = 0;   // NAME_CarryAssist — advanced flag, teammate capped
 	int32   EnemyFCDamage = 0;   // NAME_EnemyFCDamage — damage-points dealt to enemy FC
 
+	// ── Possession + denial signals (forwarded for ranking; folded into the
+	//    Django authoritative ctf_perf — C++ CTFR_CTFPerf parity pending weight
+	//    validation). Read from the StatsData TMap like the objective signals. ──
+	float   CarryTime    = 0.f;  // NAME_FlagHeldTime      — seconds holding the enemy flag (offense workload)
+	int32   Denials      = 0;    // NAME_FlagDenials       — clutch save: killed enemy carrier near their base
+	int32   HeldDeny     = 0;    // NAME_FlagHeldDeny      — held enemy flag during a both-flags-out standoff
+	float   HeldDenyTime = 0.f;  // NAME_FlagHeldDenyTime  — seconds of the above
+
 	// ── Role (positional, sampled over the match) ────────────────────────
 	// OffLean drives the role-aware perf weighting; -1 = pure defense (always
 	// own half), +1 = pure offense (always enemy half), 0 = mid. The fractions

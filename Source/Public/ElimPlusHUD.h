@@ -19,6 +19,10 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	virtual void DrawHUD() override;
 	virtual FLinearColor GetBaseHUDColor() override;
 
+	/** Swap the stock spectator slide-out for UNCPlusSpectatorSlideOut so the
+	 *  weapon-stats panel lists the Elim loadout with replicated accuracy. */
+	virtual void AddSpectatorWidgets() override;
+
 	// Portrait atlas icons — same UV coords as AUTFlagRunHUD / AWipeoutHUD
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, NoClear)
 	FCanvasIcon RedTeamIcon;
@@ -58,8 +62,9 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	void DrawPreMatchTeamPreview();
 
 private:
+	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
-	bool bNCPScreenshotEnabled = true;
+	float PostMatchScreenshotStable = -1.f;
 
 	/** Per-player ELO chip animation state. Triggered the first frame the
 	 *  replicator's EloDeltaThisMatch transitions from 0 to non-zero (= match end);

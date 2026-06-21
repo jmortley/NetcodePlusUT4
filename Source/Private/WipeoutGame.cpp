@@ -994,6 +994,7 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		{
 			RoundWinningKiller = OtherPS;
 		}
+		WinningKillerPawn = Killer->GetPawn();   // focus actor for the instant replay (BroadcastKillReplay)
 	}
 
 	// Death recap (the per-life "You dealt N to X | They dealt M to you" system-chat
@@ -1191,6 +1192,7 @@ void AUWipeoutGame::StartNextRound()
 
 	// Reset all Wipeout state for the new round
 	RoundWinningKiller = nullptr;
+	WinningKillerPawn = nullptr;
 	RoundWinningKillTime = 0.0f;
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	Team0DeathCount = 0;
@@ -1630,8 +1632,17 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 
 		if (!NewPlayer->GetPawn())
 		{
-			UE_LOG(LogGameMode, Warning, TEXT("Wipeout::RestartPlayer: FAILED to spawn pawn for %s"),
-				NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
+			// Throttle: RestartPlayer retries every frame on a map with no valid spawn, so this can flood
+			// the log (thousands of lines). Rate-limit to once per 5s (monotonic wall-clock so it survives
+			// map changes, unlike GetWorld()->GetTimeSeconds()).
+			static double LastSpawnFailWarnTime = 0.0;
+			const double Now = FPlatformTime::Seconds();
+			if (Now - LastSpawnFailWarnTime >= 5.0)
+			{
+				LastSpawnFailWarnTime = Now;
+				UE_LOG(LogGameMode, Warning, TEXT("Wipeout::RestartPlayer: FAILED to spawn pawn for %s (throttled 5s)"),
+					NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
+			}
 		}
 	}
 }
@@ -1967,9 +1978,17 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 		}
 		if (BestSpawn)
 		{
-			UE_LOG(LogGameMode, Warning,
-				TEXT("Wipeout: %s curated spawns failed %.0fu floor — using full-map spawn (passed floor)"),
-				*PS->PlayerName, MinimumEnemySpawnDistance);
+			// Throttle: fires per spawn attempt and can flood the log on a bad map. Rate-limit to once per 5s
+			// (monotonic wall-clock so it survives map changes). The fallback spawn itself still happens.
+			static double LastSpawnFallbackWarnTime = 0.0;
+			const double Now = FPlatformTime::Seconds();
+			if (Now - LastSpawnFallbackWarnTime >= 5.0)
+			{
+				LastSpawnFallbackWarnTime = Now;
+				UE_LOG(LogGameMode, Warning,
+					TEXT("Wipeout: %s curated spawns failed %.0fu floor — using full-map spawn (passed floor) (throttled 5s)"),
+					*PS->PlayerName, MinimumEnemySpawnDistance);
+			}
 		}
 	}
 
@@ -2013,9 +2032,16 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 			}
 			if (BestSpawn)
 			{
-				UE_LOG(LogGameMode, Warning,
-					TEXT("Wipeout: %s — no spawn passes %.0fu floor; teammate-stacking at %.0fu from teammate"),
-					*PS->PlayerName, MinimumEnemySpawnDistance, BestTeammateDist);
+				// Throttle (same reason as the other spawn warnings): per-attempt, floods on a bad map.
+				static double LastTeammateStackWarnTime = 0.0;
+				const double Now = FPlatformTime::Seconds();
+				if (Now - LastTeammateStackWarnTime >= 5.0)
+				{
+					LastTeammateStackWarnTime = Now;
+					UE_LOG(LogGameMode, Warning,
+						TEXT("Wipeout: %s — no spawn passes %.0fu floor; teammate-stacking at %.0fu from teammate (throttled 5s)"),
+						*PS->PlayerName, MinimumEnemySpawnDistance, BestTeammateDist);
+				}
 			}
 		}
 	}
@@ -3236,14 +3262,20 @@ void AUWipeoutGame::BroadcastRoundResults(int32 WinnerTeamIndex, bool bIsDraw)
 
 void AUWipeoutGame::BroadcastKillReplay()
 {
-	if (RoundWinningKiller && RoundWinningKillTime > 0.f)
+	// Instant replay path (ClientPlayInstantReplay), NOT ClientQueueCoolMoment.
+	// CoolMoment routes through UUTKillcamPlayback::CoolMomentCamStart, which crashes
+	// after MatchEnded (TaskGraphThreadNP access-violation in CoreUObject) because new
+	// actors spawn before the playback finishes cleanup. Mirrors
+	// AElimPlusGame::BroadcastKillReplay — focus the killer pawn, hard stop timer.
+	if (RoundWinningKiller && RoundWinningKillTime > 0.f && WinningKillerPawn)
 	{
-		float ReplayOffset = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+		const float TimeToRewind = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+		const float StartDelay   = 0.5f;
 		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 		{
 			if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
 			{
-				PC->ClientQueueCoolMoment(RoundWinningKiller->UniqueId, ReplayOffset);
+				PC->ClientPlayInstantReplay(WinningKillerPawn, TimeToRewind, StartDelay);
 			}
 		}
 	}

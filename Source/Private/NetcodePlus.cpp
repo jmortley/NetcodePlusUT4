@@ -244,9 +244,27 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 	UGameViewportClient* ViewportClient = World->GetGameViewport();
 	if (!ViewportClient) return;
 
+	// Optional first arg picks the opening tab: `ncpmenu forcemodels` (or the
+	// teamskins/models synonyms) → Force Models, `general` → General; bare
+	// `ncpmenu` / F5 → About.
+	ENCPMenuTab InitialTab = ENCPMenuTab::About;
+	if (Args.Num() > 0)
+	{
+		const FString Tab = Args[0].ToLower();
+		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
+		{
+			InitialTab = ENCPMenuTab::ForceModels;
+		}
+		else if (Tab == TEXT("general"))
+		{
+			InitialTab = ENCPMenuTab::General;
+		}
+	}
+
 	TSharedRef<SUTNCPlusMenu> Menu =
 		SNew(SUTNCPlusMenu)
-		.PlayerOwner(LP);
+		.PlayerOwner(LP)
+		.InitialTab(InitialTab);
 
 	ViewportClient->AddViewportWidgetContent(Menu, 100);
 	FSlateApplication::Get().SetKeyboardFocus(Menu, EFocusCause::SetDirectly);

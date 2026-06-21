@@ -325,6 +325,13 @@ public:
 	virtual void    RestartPlayer(AController* NewPlayer) override;
 	virtual void    ScoreKill_Implementation(AController* Killer, AController* Other, APawn* KilledPawn, TSubclassOf<UDamageType> DamageType) override;
 	virtual void	ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerState* Victim, AUTPlayerState* Attacker) override;
+	/** ElimPlus arena rule: players NEVER drop their loadout — not on death, not at
+	 *  round reset. Override the stock weapon/Enforcer/powerup toss to destroy the
+	 *  pawn's inventory in place (AUTCharacter::DiscardAllInventory) so no
+	 *  AUTDroppedPickup ever spawns. Candy orbs (BP PreventDeath spawns them as
+	 *  separate AUTPickupHealth world actors) are NOT inventory, so unaffected. */
+	virtual void DiscardInventory(APawn* Other, AController* Killer) override;
+
 	virtual APawn* SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot) override;
 
 	/** Glicko-aware team picker. Refines tie-breaks among smallest-size teams using

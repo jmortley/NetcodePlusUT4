@@ -7,6 +7,7 @@
 #include "UTCharacter.h"
 #include "UTPlayerState.h"
 #include "UTPlayerController.h"
+#include "Kismet/GameplayStatics.h"
 
 // NC+ weapon headers (for StaticClass refs in hardcoded map)
 #include "UTPlusSniper.h"
@@ -348,6 +349,28 @@ void ANCUTPlus::Mutate_Implementation(const FString& MutateString, APlayerContro
 
 		UE_LOG(LogUTGame, Log, TEXT("NCUTPlus: %s set hitscan choice to %s"),
 			*PS->PlayerName, NewChoice == EHitscanChoice::LG ? TEXT("LG") : TEXT("Sniper"));
+	}
+
+	// `mutate teamskins` / `mutate forcemodels` → open the NetcodePlus (F5) menu
+	// on the sending client (Force Models lives there). Onboarding alias for users
+	// coming from dc's MutTeamSkins. Multicast → only LocalPC==Sender acts.
+	if (MutateString.Equals(TEXT("teamskins"), ESearchCase::IgnoreCase) ||
+		MutateString.Equals(TEXT("forcemodels"), ESearchCase::IgnoreCase))
+	{
+		MulticastOpenNCPlusMenu(Sender);
+	}
+}
+
+void ANCUTPlus::MulticastOpenNCPlusMenu_Implementation(APlayerController* Sender)
+{
+	// NetMulticast fires on every client; only the player who typed the mutate
+	// command opens the menu. `ncpmenu forcemodels` = the F5 menu's console command
+	// (SUTNCPlusMenu) with its optional tab arg → opens straight to the Force Models
+	// tab. Same PC->ConsoleCommand channel as the menu's weaponskins/nchud buttons.
+	APlayerController* LocalPC = UGameplayStatics::GetPlayerController(this, 0);
+	if (LocalPC && LocalPC == Sender)
+	{
+		LocalPC->ConsoleCommand(TEXT("ncpmenu forcemodels"));
 	}
 }
 

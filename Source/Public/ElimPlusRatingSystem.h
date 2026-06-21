@@ -132,6 +132,12 @@ public:
 	 *  1400 if not loaded. */
 	int32 GetCachedElo(const FString& UniqueId) const;
 
+	/** Global rank (1-based) on the ElimPlus leaderboard: 1 + the number of rated
+	 *  players in NCRatingElimPlus with a strictly higher Rating. Live DB query —
+	 *  call only at match start/end (alongside the ELO push), never per-tick.
+	 *  Returns 0 if the player has no rating row (unranked / bot). */
+	int32 GetPlayerGlobalRank(UWorld* World, const FString& UniqueId) const;
+
 	/** Add this round's PPR (Kills + Damage*0.01) to the player's lifetime totals.
 	 *  Pure cache update; persistence happens in FlushAtMatchEnd. Server-only. */
 	void RecordRoundPPR(const FString& UniqueId, float RoundPPR);

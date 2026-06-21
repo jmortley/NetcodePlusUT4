@@ -24,8 +24,12 @@ enum class ENCPMenuTab : uint8
  */
 class SUTNCPlusMenu : public SCompoundWidget
 {
-	SLATE_BEGIN_ARGS(SUTNCPlusMenu) {}
+	SLATE_BEGIN_ARGS(SUTNCPlusMenu)
+		: _InitialTab(ENCPMenuTab::About)
+		{}
 	SLATE_ARGUMENT(TWeakObjectPtr<UUTLocalPlayer>, PlayerOwner)
+	/** Tab to show on open — ncpmenu's optional arg (bare F5 = About default). */
+	SLATE_ARGUMENT(ENCPMenuTab, InitialTab)
 	SLATE_END_ARGS()
 
 	void Construct(const FArguments& InArgs);

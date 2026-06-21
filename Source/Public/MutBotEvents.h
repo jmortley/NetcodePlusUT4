@@ -96,6 +96,7 @@ private:
 	 *  threshold) and for Spree levels 3..5 (Dominating, Unstoppable, Godlike). */
 	void ScoreKill_PostHighlights(AUTPlayerState* KillerPS);
 
+private:
 	// ── Helpers ────────────────────────────────────────────────────────
 	FString BuildPlayerListJson() const;
 	FString BuildTeamScoresJson() const;

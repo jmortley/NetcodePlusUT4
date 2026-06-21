@@ -21,6 +21,7 @@
 #include "UnrealEngine.h"                             // GetCachedScalabilityCVars().DetailMode (flag cloth)
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
+#include "Engine/Canvas.h"            // DrawHeadDebug: Canvas->Project / K2_DrawLine
 
 namespace
 {
@@ -144,9 +145,20 @@ namespace
 	}
 }
 
+// One-time dc MutTeamSkins -> ForceModels onboarding seed (defined below, after StemOf so its
+// file-scope definition is in scope there). file-internal linkage matches the definition.
+static void MaybeMigrateFromTeamSkins(const FString& Path);
+
 void NCPlusForceModels::Reload()
 {
 	const FString Path = ModIniPath();
+
+	// First-init only: if this player has NO [ForceModels] config yet AND dc's older [TeamSkins]
+	// config is present in the same Mod.ini, seed [ForceModels.*] from it (run-once flag in
+	// [ForceModels.Versioning]). Writes + Flush happen BEFORE the reads below, so the seeded values
+	// land in GFMConfig in this same call. Cheap no-op on the common already-configured path.
+	MaybeMigrateFromTeamSkins(Path);
+
 	FNCPlusForceModelsConfig& C = GFMConfig;
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Enabled"),      C.bEnabled,      Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Models"),       C.bModels,       Path);
@@ -259,6 +271,71 @@ bool NCPlusForceModels::IsEnabled()
 	return C.bEnabled && C.bModels;
 }
 
+// TEMP head-hitbox calibration aid. ECVF_Default (NOT cheat) so it can be toggled on a live server —
+// strip / cheat-gate before final ship (it visualises enemy head positions).
+static TAutoConsoleVariable<int32> CVarNCPDebugHeads(
+	TEXT("ncp.DebugHeads"), 0,
+	TEXT("NetcodePlus: draw the capsule-relative headshot sphere (GREEN = what the server validates) and the ")
+	TEXT("mesh head bone (RED cross = the visible head) for every other pawn, client-side. 1=on."),
+	ECVF_Default);
+
+void NCPlusForceModels::DrawHeadDebug(UCanvas* Canvas, APlayerController* PC)
+{
+	// Why this exists: ut.DebugHeadshots is wrapped in #if ENABLE_DRAW_DEBUG (compiled out of Shipping) and
+	// draws server-side anyway, so it's useless online. This reproduces the head sphere client-side via the
+	// HUD canvas (Shipping-safe). It's faithful because the head is now capsule-derived — the client can
+	// compute the exact same sphere the server validates from the replicated capsule. GREEN ring = that
+	// sphere; RED cross = the mesh "head" bone (~the visible head). Calibrate kHeadCapsuleDrop so they overlap.
+	if (!Canvas || !PC || CVarNCPDebugHeads.GetValueOnGameThread() == 0) { return; }
+	UWorld* const World = PC->GetWorld();
+	if (!World) { return; }
+
+	FVector CamLoc; FRotator CamRot;
+	PC->GetPlayerViewPoint(CamLoc, CamRot);
+	const FVector CamRight = FRotationMatrix(CamRot).GetScaledAxis(EAxis::Y);
+
+	static const FName NAME_Head(TEXT("head"));
+	const float HeadHeight = 8.f;     // AUTCharacter engine defaults (debug-only references)
+	const float HeadRadius = 18.f;
+
+	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
+	{
+		ATeamArenaCharacter* C = *It;
+		if (!C || C->IsLocalPlayerPawn()) { continue; }        // skip MY own pawn (offline-safe; NOT IsLocallyControlled,
+		                                                       // which is true for ALL pawns in standalone)
+
+		// GREEN ring: the capsule-relative head sphere the server actually validates.
+		const FVector HeadWorld = C->GetHeadLocation(0.f);
+		const FVector S = Canvas->Project(HeadWorld);
+		if (S.Z <= 0.f) { continue; }                          // behind camera
+
+		const FVector SEdge = Canvas->Project(HeadWorld + CamRight * HeadRadius);
+		const float ScreenR = FMath::Max(3.f, FMath::Abs(SEdge.X - S.X));
+
+		const int32 Segs = 24;
+		FVector2D Prev(S.X + ScreenR, S.Y);
+		for (int32 i = 1; i <= Segs; ++i)
+		{
+			const float Ang = (2.f * PI * i) / Segs;
+			const FVector2D Cur(S.X + ScreenR * FMath::Cos(Ang), S.Y + ScreenR * FMath::Sin(Ang));
+			Canvas->K2_DrawLine(Prev, Cur, 1.5f, FLinearColor::Green);
+			Prev = Cur;
+		}
+
+		// RED cross: the mesh "head" bone (~where the visible head is) for comparison.
+		if (C->GetMesh() && C->GetMesh()->DoesSocketExist(NAME_Head))
+		{
+			const FVector BoneWorld = C->GetMesh()->GetSocketLocation(NAME_Head) + FVector(0.f, 0.f, HeadHeight);
+			const FVector B = Canvas->Project(BoneWorld);
+			if (B.Z > 0.f)
+			{
+				Canvas->K2_DrawLine(FVector2D(B.X - 7.f, B.Y), FVector2D(B.X + 7.f, B.Y), 1.5f, FLinearColor::Red);
+				Canvas->K2_DrawLine(FVector2D(B.X, B.Y - 7.f), FVector2D(B.X, B.Y + 7.f), 1.5f, FLinearColor::Red);
+			}
+		}
+	}
+}
+
 void NCPlusForceModels::ReapplyAll(UWorld* World)
 {
 	if (!World) { return; }
@@ -311,6 +388,22 @@ void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
 	}
 }
 
+static TAutoConsoleVariable<int32> CVarFlagDebug(
+	TEXT("ncp.FlagDebug"), 0,
+	TEXT("Log each CTF flag base/flag/mesh state ~every 1.5s (ForceModels flag-visibility debug). 0=off."));
+
+// Client-side flag-visibility watchdog (ncp.FlagVisAudit, default ON). Per team [0=red,1=blue]:
+// GFlagGoodR = high-water healthy bounds radius (learned), GFlagVisBad = last tick's verdict
+// (edge-trigger so we warn/heal once per collapse, not every slow tick), GFlagSeen = the flag
+// instance the baseline was learned on — reset GFlagGoodR/GFlagVisBad when it changes (map travel
+// / cap-respawn) so a stale high-water from another map/flag can't mask a real collapse here.
+static TAutoConsoleVariable<int32> CVarFlagVisAudit(
+	TEXT("ncp.FlagVisAudit"), 1,
+	TEXT("Client watchdog: warn + re-render a CTF flag whose mesh collapses / goes invisible. 1=on (default), 0=off."));
+static float GFlagGoodR[2] = { 0.f, 0.f };
+static bool  GFlagVisBad[2] = { false, false };
+static TWeakObjectPtr<AUTFlag> GFlagSeen[2];
+
 void NCPlusForceModels::SyncFlagColours(UWorld* World)
 {
 	// Recolour the CTF flag CLOTH to each team's skin colour (relative to the local viewer). The stock
@@ -331,13 +424,49 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 	USkeletalMesh* DCMesh = bWant ? LoadDCFlagMesh() : nullptr;
 	static const FName NAME_FlagColour(TEXT("FlagColour"));
 
+	// Flag-visibility debug (ncp.FlagDebug): dump per-base flag state ~every 1.5s. Logs even when a
+	// base/flag/mesh is missing — exactly the "map maker did something funny" case (a map with no
+	// flag base for a team, or a flag parked off-world / with collapsed render bounds).
+	const bool bFlagDbg = CVarFlagDebug.GetValueOnGameThread() != 0;
+	static float GLastFlagLog = -1000.f;
+	const float TNow = World->TimeSeconds;
+	const bool bLogNow = bFlagDbg && (TNow < GLastFlagLog || TNow - GLastFlagLog > 1.5f);
+	if (bLogNow) { GLastFlagLog = TNow; }
+
 	for (uint8 Team = 0; Team < 2; ++Team)
 	{
 		AUTCTFFlagBase* Base = GS->GetFlagBase(Team);
-		if (!Base || !Base->MyFlag) { continue; }
-		AUTFlag* Flag = Base->MyFlag;
-		USkeletalMeshComponent* Mesh = Flag->GetMesh();
-		if (!Mesh) { continue; }
+		AUTFlag* Flag = Base ? Base->MyFlag : nullptr;
+		USkeletalMeshComponent* Mesh = Flag ? Flag->GetMesh() : nullptr;
+
+		if (bLogNow)
+		{
+			if (!Base)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d: GetFlagBase=NULL (no flag base for this team on this map)"), Team);
+			}
+			else if (!Flag)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d: base=%s MyFlag=NULL baseLoc=%s"),
+					Team, *GetNameSafe(Base->GetClass()), *Base->GetActorLocation().ToCompactString());
+			}
+			else if (!Mesh)
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d: flagClass=%s GetMesh=NULL"), Team, *GetNameSafe(Flag->GetClass()));
+			}
+			else
+			{
+				UE_LOG(LogTemp, Display, TEXT("[NCPFlag] T%d friendly=%d held=%d | flagClass=%s baseClass=%s | mesh=%s mats=%d boundsR=%.0f hidden=%d vis=%d | worldLoc=%s relZ=%.0f scale=%.2f | baseLoc=%s"),
+					Team, ((int32)Team == ViewerTeam) ? 1 : 0, (Flag->HoldingPawn != nullptr) ? 1 : 0,
+					*GetNameSafe(Flag->GetClass()), *GetNameSafe(Base->GetClass()),
+					*GetNameSafe(Mesh->SkeletalMesh), Mesh->GetNumMaterials(), Mesh->Bounds.SphereRadius,
+					Mesh->bHiddenInGame ? 1 : 0, Mesh->IsVisible() ? 1 : 0,
+					*Mesh->GetComponentLocation().ToCompactString(), Mesh->RelativeLocation.Z, Mesh->RelativeScale3D.X,
+					*Base->GetActorLocation().ToCompactString());
+			}
+		}
+
+		if (!Base || !Flag || !Mesh) { continue; }
 
 		if (bWant && DCMesh)
 		{
@@ -350,7 +479,14 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 				// DetailMode==0 (respect the low-detail perf opt-out — stiff flag, same as stock).
 				// Order matters: SetSkeletalMesh binds the new mesh's clothing in whatever state this flag
 				// is in, so it must be set first or the cloth never binds and collapses to a sliver.
-				Mesh->bDisableClothSimulation = (GetCachedScalabilityCVars().DetailMode == 0);
+				// Cloth sim defaults OFF (stiff but ALWAYS VISIBLE): dc's MutTeamSkins FlagMesh materials
+				// (FlagPole_M / FlagBase_M) lack bUsedWithClothing, so a cooked build can't compile that
+				// usage permutation and the cloth section collapses/vanishes on the runtime re-bind after a
+				// cap/return (enemy flag invisible the rest of the match). Opt the wave back in with
+				// [ForceModels] FlagClothSim=True once the FlagMesh materials are recooked Used-With-Clothing.
+				bool bClothSim = false;
+				GConfig->GetBool(TEXT("ForceModels"), TEXT("FlagClothSim"), bClothSim, ModIniPath());
+				Mesh->bDisableClothSimulation = !bClothSim || (GetCachedScalabilityCVars().DetailMode == 0);
 				Mesh->SetSkeletalMesh(DCMesh, /*bReinitPose=*/true);
 				Mesh->OverrideMaterials.Empty();  // drop the stock element-0 MeshMID override so dc's mats show
 				Mesh->MarkRenderStateDirty();     // (EmptyOverrideMaterials() is editor-only)
@@ -395,6 +531,34 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 				}
 				if (MID)  { MID->SetVectorParameterValue(NAME_FlagColour, Colour); }
 			}
+
+			// Visibility watchdog (ncp.FlagVisAudit, default on): catch + self-heal the "invisible flag"
+			// bug — a swapped flag whose render bounds collapse to a sliver (the uncooked-cloth hazard, or
+			// anything that nukes the mesh). Learn the healthy bounds high-water mark; if the radius drops
+			// below 30% of it, warn ONCE (edge-triggered) and force a visible bind pose (cloth off +
+			// re-render). Position is left to stock so this never fights the held/home attachment. One
+			// cached-bounds read at the ~4 Hz slow-tick rate — effectively free.
+			// Fresh flag instance (map travel / cap-respawn) -> drop the stale baseline so it re-learns.
+			if (GFlagSeen[Team].Get() != Flag)
+			{
+				GFlagSeen[Team]   = Flag;
+				GFlagGoodR[Team]  = 0.f;
+				GFlagVisBad[Team] = false;
+			}
+			const bool  bAudit = (CVarFlagVisAudit.GetValueOnGameThread() != 0);
+			const float FlagR  = Mesh->Bounds.SphereRadius;
+			if (FlagR > GFlagGoodR[Team]) { GFlagGoodR[Team] = FlagR; }
+			const bool bFlagBad = (GFlagGoodR[Team] > 20.f) && (FlagR < 0.3f * GFlagGoodR[Team]);
+			if (bAudit && bFlagBad && !GFlagVisBad[Team])
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[NCPFlag] T%d render collapsed (boundsR=%.1f vs healthy %.1f, held=%d) -> forcing visible"),
+					Team, FlagR, GFlagGoodR[Team], (Flag->HoldingPawn != nullptr) ? 1 : 0);
+				Mesh->bDisableClothSimulation = true;   // drop the collapsing cloth sim
+				Mesh->MarkRenderStateDirty();           // re-render in bind pose
+			}
+			// Latch only while auditing, so toggling ncp.FlagVisAudit on heals a currently-bad flag.
+			if (bAudit) { GFlagVisBad[Team] = bFlagBad; }
 		}
 		else
 		{
@@ -628,6 +792,157 @@ static int32 VariantRank(const FString& Name)
 	return FCString::Atoi(*Name.Mid(S));
 }
 
+// ── One-time client onboarding: dc's [TeamSkins.*] (MutTeamSkins) -> our [ForceModels.*] ─────────
+// File-scope statics, placed AFTER StemOf/VariantRank so StemOf (file static, above) and the
+// anonymous-namespace WriteSide are both visible with their real definitions. Forward-declared
+// above Reload() (which calls this at its top). Client-local; no-op on a dedicated server.
+
+// dc Model.<Side>.ID -> our picker stem (index table read off dc's SkinUpdater model array).
+static FString DCModelIdToStem(int32 ID)
+{
+	switch (ID)
+	{
+		case 0:  return TEXT("TC_Male");        // Malcolm
+		case 1:  return TEXT("NecrisFemale");
+		case 2:  return TEXT("SkaarjMale");     // Skaarj
+		case 3:  return TEXT("NecrisMale");
+		default: return FString();              // unknown -> leave Class empty (side un-forced)
+	}
+}
+
+// Resolve a stem to the picker's own ClassPath (so the seeded path is exactly what the applier
+// expects). Empty if the stem isn't an installed picker entry -> caller leaves Class empty.
+static FString ResolveStemToClassPath(const TArray<NCPlusForceModels::FContentEntry>& Entries, const FString& Stem)
+{
+	if (Stem.IsEmpty()) { return FString(); }
+	// 1) Exact picker label (a coalesced stock family's DisplayName IS the bare stem).
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
+	{
+		if (E.DisplayName.Equals(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+	}
+	// 2) Stem of the DisplayName (a non-coalesced single keeps its asset name); the exact match
+	//    above already resolved bare "NecrisMale", so this can't mis-hit NecrisMale_Damian/_Necroth.
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
+	{
+		if (StemOf(E.DisplayName).Equals(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+	}
+	// 3) Last-ditch: the ClassPath (or a variant) embeds the stem.
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
+	{
+		if (E.ClassPath.Contains(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+		for (const FString& VP : E.VariantPaths)
+		{
+			if (VP.Contains(Stem, ESearchCase::IgnoreCase)) { return E.ClassPath; }
+		}
+	}
+	return FString();
+}
+
+// Map one dc side's [TeamSkins.SkinColour.<Side>] + [TeamSkins.Model.<Side>] into Out.
+static void MigrateOneSide(const TArray<NCPlusForceModels::FContentEntry>& Entries,
+                           const TCHAR* DcSide, const FString& Path, FNCPlusModelSettings& Out)
+{
+	// Model.<Side>.ID -> stem -> ClassPath (absent ID / unknown -> empty path -> side un-forced).
+	int32 ModelId = -1;
+	const FString ModelSec = FString::Printf(TEXT("TeamSkins.Model.%s"), DcSide);
+	GConfig->GetInt(*ModelSec, TEXT("ID"), ModelId, Path);
+	Out.ContentPath = ResolveStemToClassPath(Entries, DCModelIdToStem(ModelId));
+
+	// Colour: SkinColour.<Side>.{H,S,V} — dc stores H in degrees / S,V 0-1, same as FNCPlusModelSettings
+	// (verified: dc H values >1), so copy straight. IsComplimentary -> bComplimentary.
+	const FString ColSec = FString::Printf(TEXT("TeamSkins.SkinColour.%s"), DcSide);
+	GConfig->GetFloat(*ColSec, TEXT("H"), Out.H, Path);   // absent -> struct default kept
+	GConfig->GetFloat(*ColSec, TEXT("S"), Out.S, Path);
+	GConfig->GetFloat(*ColSec, TEXT("V"), Out.V, Path);
+	int32 Comp = 0;
+	GConfig->GetInt(*ColSec, TEXT("IsComplimentary"), Comp, Path);
+	Out.bComplimentary = (Comp != 0);
+
+	// User's explicit choices: dc had no emissive -> Brightness 3; armour matches skin.
+	Out.Brightness = 3.0f;
+	Out.ArmourMode = ENCPlusArmourMode::MatchSkin;
+}
+
+static void MaybeMigrateFromTeamSkins(const FString& Path)
+{
+	// 1) Run-once. GetInt's return value is "did the key exist?"; absent -> Migrated stays 0.
+	int32 Migrated = 0;
+	GConfig->GetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), Migrated, Path);
+	if (Migrated != 0) { return; }
+
+	// 2) NEVER clobber an existing [ForceModels] config (the common case). Section probe + a key
+	//    belt-and-suspenders against a degenerate empty header. DoesSectionExist is read-only.
+	bool bHasEnabledKey = false;
+	const bool bForceModelsPresent =
+		GConfig->GetBool(TEXT("ForceModels"), TEXT("Enabled"), bHasEnabledKey, Path);
+	if (GConfig->DoesSectionExist(TEXT("ForceModels"), Path) || bForceModelsPresent)
+	{
+		GConfig->SetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), 1, Path);
+		GConfig->Flush(false, Path);
+		return;
+	}
+
+	// 3) Only migrate if dc's config is actually present. [TeamSkins.Enable] is dc's anchor section.
+	if (!GConfig->DoesSectionExist(TEXT("TeamSkins.Enable"), Path))
+	{
+		GConfig->SetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), 1, Path);
+		GConfig->Flush(false, Path);
+		return;
+	}
+
+	// 4) Need the asset registry to resolve model class paths. If it isn't populated yet, bail WITHOUT
+	//    writing or stamping so the migration retries on a later launch (don't permanently seed empty
+	//    model paths). Enumerate ONCE and reuse for all four sides.
+	TArray<NCPlusForceModels::FContentEntry> Entries;
+	NCPlusForceModels::EnumerateContent(Entries, /*bIncludeHidden=*/false);
+	if (Entries.Num() == 0) { return; }
+
+	// ── Seed [ForceModels.*] from dc's [TeamSkins.*]. ───────────────────────────────────────────
+	// Top-level [TeamSkins.Enable] flags (absent -> 0 = off, dc's default semantics).
+	int32 EnStyle = 0, EnHUD = 0, EnFlags = 0, EnDarken = 0, EnCosmetics = 0, EnArmour = 0;
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Style"),        EnStyle,     Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("HUD"),          EnHUD,       Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Flags"),        EnFlags,     Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("DarkenBodies"), EnDarken,    Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Cosmetics"),    EnCosmetics, Path);
+	GConfig->GetInt(TEXT("TeamSkins.Enable"), TEXT("Armour"),       EnArmour,    Path);
+
+	// Migrating => force models ON. ENCPlusSkinStyle int matches dc's (TeamEnemy=0/RedBlue=1/EnemyOnly=2).
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Enabled"),      true,               Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Models"),       true,               Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("HUD"),          (EnHUD != 0),       Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Armour"),       (EnArmour != 0),    Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Flags"),        (EnFlags != 0),     Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), (EnDarken != 0),    Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    (EnCosmetics != 0), Path);
+	GConfig->SetInt (TEXT("ForceModels"), TEXT("Style"),        EnStyle,            Path);
+
+	// Per-side: map colour + model, then write all 7 keys via the existing WriteSide.
+	FNCPlusModelSettings Enemy, Team, Red, Blue;
+	MigrateOneSide(Entries, TEXT("Enemy"), Path, Enemy);
+	MigrateOneSide(Entries, TEXT("Team"),  Path, Team);
+	MigrateOneSide(Entries, TEXT("Red"),   Path, Red);
+	MigrateOneSide(Entries, TEXT("Blue"),  Path, Blue);
+	WriteSide(TEXT("Enemy"), Enemy);
+	WriteSide(TEXT("Team"),  Team);
+	WriteSide(TEXT("Red"),   Red);
+	WriteSide(TEXT("Blue"),  Blue);
+
+	// 5) Stamp run-once + persist everything in one flush.
+	GConfig->SetInt(TEXT("ForceModels.Versioning"), TEXT("MigratedFromTeamSkins"), 1, Path);
+	GConfig->Flush(false, Path);
+	UE_LOG(LogTemp, Log, TEXT("[ForceModels] Seeded config from dc MutTeamSkins (one-time onboarding)."));
+}
+
+// Name-substring denylist of engine base / test / unusable character stems — kept out of BOTH the
+// forcemodels_list audit listing AND the AllowAnyModel picker. [ForceModels] HiddenModels= appends.
+static const TCHAR* const GFMDefaultHiddenStems[] = {
+	TEXT("HumanMaleBase"), TEXT("NecrisFemaleBase"), TEXT("NecrisMaleBase"), TEXT("SkaarjMaleBase"),
+	TEXT("LTC_Bot_CharacterData"), TEXT("BP_Char_Oct2015"),
+	TEXT("TC_GodKing"), TEXT("TC_Siris"),
+	TEXT("UNUSED_"), TEXT("TC_ArmorNewV"),
+};
+
 void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bIncludeHidden)
 {
 	TArray<FAssetData> Assets;
@@ -642,14 +957,8 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 		bool bHideTest = true;
 		GConfig->GetBool(TEXT("ForceModels"), TEXT("HideTestModels"), bHideTest, ModIniPath());
 
-		static const TCHAR* const DefaultHidden[] = {
-			TEXT("HumanMaleBase"), TEXT("NecrisFemaleBase"), TEXT("NecrisMaleBase"), TEXT("SkaarjMaleBase"),
-			TEXT("LTC_Bot_CharacterData"), TEXT("BP_Char_Oct2015"),
-			TEXT("TC_GodKing"), TEXT("TC_Siris"),
-			TEXT("UNUSED_"), TEXT("TC_ArmorNewV"),
-		};
 		TArray<FString> Hidden;
-		for (const TCHAR* D : DefaultHidden) { Hidden.Add(D); }
+		for (const TCHAR* D : GFMDefaultHiddenStems) { Hidden.Add(D); }
 		FString HiddenStr;
 		GConfig->GetString(TEXT("ForceModels"), TEXT("HiddenModels"), HiddenStr, ModIniPath());
 		if (!HiddenStr.IsEmpty())
@@ -714,7 +1023,34 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 		}
 	}
 
-	// 1) Collect only allowed stems (exact stem match, case-insensitive), in registry order.
+	// [ForceModels] AllowAnyModel=true (server-owner opt-in; read from THIS install's Mod.ini) drops
+	// the curated allowlist so every installed character is selectable — still minus the cheap
+	// name-substring denylist (engine base/test/unusable + HiddenModels=). Default false keeps the
+	// shipped allowlist. (The bHideInUI CDO-load curation stays off the picker path for cost.)
+	bool bAllowAny = false;
+	GConfig->GetBool(TEXT("ForceModels"), TEXT("AllowAnyModel"), bAllowAny, ModIniPath());
+	TArray<FString> Hidden;
+	if (bAllowAny)
+	{
+		for (const TCHAR* D : GFMDefaultHiddenStems) { Hidden.Add(D); }
+		FString HiddenStr;
+		GConfig->GetString(TEXT("ForceModels"), TEXT("HiddenModels"), HiddenStr, ModIniPath());
+		if (!HiddenStr.IsEmpty())
+		{
+			TArray<FString> Parts;
+			HiddenStr.ParseIntoArray(Parts, TEXT(","), true);
+			for (const FString& Raw : Parts)
+			{
+				int32 S = 0, E = Raw.Len();
+				while (S < E && FChar::IsWhitespace(Raw[S]))     { ++S; }
+				while (E > S && FChar::IsWhitespace(Raw[E - 1])) { --E; }
+				const FString T = Raw.Mid(S, E - S);
+				if (!T.IsEmpty()) { Hidden.Add(T); }
+			}
+		}
+	}
+
+	// 1) Collect stems: default = the curated allowlist; AllowAnyModel = all installed minus denylist.
 	struct FRaw { FString Name; FString ClassPath; };
 	TArray<FRaw> Visible;
 	Visible.Reserve(Assets.Num());
@@ -723,12 +1059,24 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 		const FString Name      = A.AssetName.ToString();
 		const FString ClassPath = A.ObjectPath.ToString() + TEXT("_C");
 		const FString Stem      = StemOf(Name);
-		bool bAllowed = false;
-		for (const FString& Al : Allowed)
+		if (bAllowAny)
 		{
-			if (Stem.Equals(Al, ESearchCase::IgnoreCase)) { bAllowed = true; break; }
+			bool bDenied = false;
+			for (const FString& Sub : Hidden)
+			{
+				if (Name.Contains(Sub, ESearchCase::IgnoreCase)) { bDenied = true; break; }
+			}
+			if (bDenied) { continue; }
 		}
-		if (!bAllowed) { continue; }
+		else
+		{
+			bool bAllowed = false;
+			for (const FString& Al : Allowed)
+			{
+				if (Stem.Equals(Al, ESearchCase::IgnoreCase)) { bAllowed = true; break; }
+			}
+			if (!bAllowed) { continue; }
+		}
 		Visible.Add({ Name, ClassPath });
 	}
 

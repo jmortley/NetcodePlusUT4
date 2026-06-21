@@ -12,6 +12,7 @@
 
 
 class UTeamArenaCharacterMovement;
+class ACTFStatsReplicator;
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -191,6 +192,18 @@ public:
 	// bDarkenBodies.
 	virtual void PlayDying() override;
 
+	// iCTF-only: scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting
+	// ([NetcodePlus] OwnFootstepVolume, 0..1; 1 = stock). Remote/enemy footsteps and other modes are
+	// untouched. UTPlaySound has no volume arg, so a non-stock volume is played via PlayOwnFootstepScaled.
+	virtual void PlayFootstep(uint8 FootNum, bool bFirstPerson = false) override;
+
+	/** True iff this pawn is controlled by a LOCAL HUMAN player — i.e. it's "my own" pawn (incl. split-screen).
+	 *  PUBLIC so DrawHeadDebug can use it too. Use this, NOT IsLocallyControlled(), to skip the local player's
+	 *  pawn: in NM_Standalone (offline) IsLocallyControlled() is true for EVERY controller (bots' AIControllers
+	 *  included), which made Force Models + the DebugHeads ring skip ALL pawns offline. Bots use AIController, so
+	 *  the Cast excludes them; IsLocalController() keeps remote players (listen server) from matching. */
+	bool IsLocalPlayerPawn() const;
+
 protected:
 	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
 	// Server-only; synced when ArmorType is belt, decremented on damage.
@@ -213,6 +226,16 @@ protected:
 	FLinearColor LastForcedColour = FLinearColor::Transparent;
 	bool bForcedModelApplied = false;
 
+	/** Coalesce the forced-model apply: a single replication burst fires NotifyTeamChanged 2-4x
+	 *  (PossessedBy / OnRep_PlayerState / the PlayerState's NotifyTeamChanged / UTTeamInfo). Rather than
+	 *  rebuild the forced mesh per OnRep, NotifyTeamChanged marks this dirty and Tick re-asserts the model
+	 *  exactly once. Set only off the dedicated server. */
+	bool bForcedModelDirty = false;
+	/** Local pawn only: its team change flips every OTHER pawn's friend/enemy bucket; coalesced refresh. */
+	bool bRefreshOthersDirty = false;
+	/** Flush the coalesced forced-model work (the dirty flags) — called from the top of Tick on clients. */
+	void FlushForcedModelUpdate();
+
 	/** True while this reskinned pawn should have its cosmetics stripped — gates the setter overrides. */
 	bool bForceModelStripCosmetics = false;
 	/** Destroy any spawned Hat/Eyewear/LeaderHat on this pawn (Force Models cosmetic strip). */
@@ -226,4 +249,19 @@ protected:
 	void SpawnSkeletonDissolve();
 	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
 	void HideDeadBody();
+
+	// ── Own footstep volume (iCTF) ──
+	/** Reimplemented own-footstep play honouring OwnFootstepVolumeScale (UTPlaySound has no volume arg). */
+	void PlayOwnFootstepScaled(uint8 FootNum);
+	/** 0..1 multiplier on the local player's own footstep; 1 = stock (no override). Read once from config. */
+	float OwnFootstepVolumeScale = 1.f;
+	bool bOwnFootstepVolumeRead = false;
+	/** Cached iCTF gate (ACTFStatsReplicator::bIsInstagibMatch) — present only in NCPlusCTF instagib.
+	 *  Searched lazily while null (so it resolves even if the first footstep precedes replication), then
+	 *  latched by bIctfFootstepResolved to avoid iterating every footstep forever in non-iCTF modes. */
+	TWeakObjectPtr<ACTFStatsReplicator> CachedCTFRep;
+	bool bIctfFootstepResolved = false;
+	/** Warmup iCTF signal: the replicated MutInstagibNCP mutator is present from match init (incl. warmup),
+	 *  unlike ACTFStatsReplicator which only spawns at match start. Latched once found. */
+	bool bIctfMutatorFound = false;
 };

@@ -458,7 +458,18 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 	// defunct in this fork (see feedback_no_epic_mcp_or_tdmrank memory).
 	const int32 Elo = Entry ? Entry->Elo : 1400;
 	const int32 EloDelta = Entry ? Entry->EloDeltaThisMatch : 0;
+	const int32 Rank = Entry ? Entry->GlobalRank : 0;
 	FString EloStr = FString::Printf(TEXT("%d"), Elo);
+	if (Rank > 0)
+	{
+		// Global leaderboard rank in parens, with English ordinal suffix:
+		// 1st, 2nd, 3rd, 4th ... 11th-13th, 21st, 200th.
+		const int32 M100 = Rank % 100;
+		const int32 M10  = Rank % 10;
+		const TCHAR* Suf = (M100 >= 11 && M100 <= 13) ? TEXT("th")
+			: (M10 == 1) ? TEXT("st") : (M10 == 2) ? TEXT("nd") : (M10 == 3) ? TEXT("rd") : TEXT("th");
+		EloStr += FString::Printf(TEXT(" (%d%s)"), Rank, Suf);
+	}
 	if (EloDelta != 0)
 	{
 		EloStr += (EloDelta > 0)

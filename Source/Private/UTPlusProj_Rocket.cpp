@@ -32,6 +32,31 @@ void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiv
 		}
 	}
 
+	// SERVER-SIDE: snapshot final state into the weapon's grace buffer BEFORE Super explodes/
+	// destroys this projectile, so a claim arriving after the rocket is gone (close-range timing
+	// race) can still rewind-rescue. The pawn we directly hit (or null = geometry/whiff) is passed
+	// so the grace path won't double-damage a target that already took the present-time hit.
+	if (Role == ROLE_Authority)
+	{
+		AUTCharacter* OwnerChar = Cast<AUTCharacter>(GetInstigator());
+		AUTWeaponFix* Weapon = OwnerChar ? Cast<AUTWeaponFix>(OwnerChar->GetWeapon()) : nullptr;
+		if (Weapon)
+		{
+			Weapon->OnTrackedProjectileResolved(this, Cast<AUTCharacter>(OtherActor));
+		}
+	}
+
+	// ACCURACY FIX (server-authoritative): a direct impact on world geometry (a static-mesh actor;
+	// BSP reports a null OtherActor and is already exempt) credits a full accuracy hit in
+	// AUTProjectile::DamageImpactedActor — StatsHitCredit defaults to 1.0 with no pawn check, so a
+	// rocket detonating against a wall inflates RocketHits. Zero the credit for non-pawn impacts so
+	// only player hits count. Pawn hits keep the default credit; the radial/splash path in Explode
+	// resets StatsHitCredit itself, so this affects only the buggy direct-impact line.
+	if (Role == ROLE_Authority && Cast<APawn>(OtherActor) == nullptr)
+	{
+		StatsHitCredit = 0.f;
+	}
+
 	// Standard processing: damage (server only), explode, etc.
 	Super::ProcessHit_Implementation(OtherActor, OtherComp, HitLocation, HitNormal);
 }

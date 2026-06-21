@@ -11,6 +11,9 @@
 #include "UTTeamInfo.h"
 #include "ElimPlusStatsReplicator.h"
 #include "NCPlusHUDLayout.h"
+#include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads) — warmup-only head-hitbox calibration
+#include "NCPlusSpectatorSlideOut.h"
+#include "UTHUDWidget_SpectatorSlideOut.h"
 #include "EngineUtils.h"
 
 AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
@@ -99,6 +102,30 @@ void AElimPlusHUD::BeginPlay()
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 }
 
+void AElimPlusHUD::AddSpectatorWidgets()
+{
+	Super::AddSpectatorWidgets();
+
+	// Replace the stock spectator slide-out with our subclass so the per-player
+	// weapon-stats panel lists the Elim loadout and reads accuracy from the
+	// replicated NCAccuracyStatsReplicator (stock reads server-only StatsData,
+	// which is 0 on dedicated-server spectators). SpectatorHudWidgetClasses (the
+	// base UTHUD ini section) contains exactly the stock slide-out — remove that
+	// one instance (exact-class match so a re-entrant call can't drop our own).
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() == UUTHUDWidget_SpectatorSlideOut::StaticClass())
+	{
+		HudWidgets.Remove(SpectatorSlideOutWidget);
+		SpectatorSlideOutWidget = nullptr;
+	}
+	if (UUTHUDWidget* W = AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()))
+	{
+		if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(W))
+		{
+			SlideOut->WeaponListMode = ENCSlideOutWeaponMode::ElimLoadout;
+		}
+	}
+}
+
 EInputMode::Type AElimPlusHUD::GetInputMode_Implementation() const
 {
 	// Drag overlay (nchud_drag) needs cursor freed so Slate gets mouse events.
@@ -131,33 +158,9 @@ void AElimPlusHUD::NotifyMatchStateChange()
 	// (Pre-match team preview is rendered by DrawPreMatchTeamPreview() each
 	// frame from DrawHUD; no per-state-change setup needed here.)
 
-	if (!bPostMatchScreenshotTaken)
-	{
-		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-		if (GS && GS->HasMatchEnded())
-		{
-			FString Val;
-			FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
-			if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
-			{
-				bNCPScreenshotEnabled = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
-			}
-
-			if (bNCPScreenshotEnabled)
-			{
-				FTimerHandle ScreenshotTimer;
-				GetWorldTimerManager().SetTimer(ScreenshotTimer, [this]()
-				{
-					if (GetWorld() && GetWorld()->GetFirstPlayerController())
-					{
-						GetWorld()->GetFirstPlayerController()->ConsoleCommand(TEXT("HighResShot 2"));
-					}
-				}, 1.5f, false);
-			}
-
-			bPostMatchScreenshotTaken = true;
-		}
-	}
+	// Post-match screenshot moved to DrawHUD (NCPlusHUDDrawCall::ServicePostMatchScreenshot) — the old
+	// "match-ended + 1.5s" timer fired DURING the instant replay (captured the replay/win-banner, not the
+	// final scoreboard). The shared helper waits for the replay demo to finish.
 }
 
 void AElimPlusHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
@@ -271,11 +274,22 @@ void AElimPlusHUD::DrawHUD()
 
 	Super::DrawHUD();
 
+	// Auto post-match screenshot (shared; waits for the instant replay to end + the scoreboard to settle).
+	NCPlusHUDDrawCall::ServicePostMatchScreenshot(this, PostMatchScreenshotStable, bPostMatchScreenshotTaken);
+
 	// Guard: Canvas or fonts may be null during Slate UI overlays
 	if (!Canvas || !SmallFont) return;
 
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	const bool bScoreboardIsUp = ScoreboardIsUp();
+
+	// Head-hitbox calibration (cvar `ncp.DebugHeads 1`): GREEN ring = the capsule headshot sphere the server
+	// validates, RED cross = the mesh head bone (the visible head). Warmup-only in NETWORKED play (anti head-ESP)
+	// but ALWAYS in standalone/offline so you can calibrate in a live single-player match (host -> cvar drives both).
+	if (GS && (GS->GetMatchState() == MatchState::WaitingToStart || GetWorld()->GetNetMode() == NM_Standalone))
+	{
+		NCPlusForceModels::DrawHeadDebug(Canvas, PlayerOwner);
+	}
 
 	// Pre-match team preview overlay — replaces the unreliable scoreboard
 	// auto-show. Drawn during PlayerIntro, CountdownToBegin, and the first
@@ -423,28 +437,29 @@ void AElimPlusHUD::DrawHUD()
 			// Player name above icon — multiply by team scale so text stays
 			// proportional when the strip is shrunk via the layout's Sc spinner.
 			{
-				const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
-				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale;
+				/* Portraits (Red)/(Blue) Font + FontSz now restyle the player name. */ const FName PortraitAlias = (TeamIdx == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red")); UFont* NameFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, TinyFont); if (!NameFont) { NameFont = TinyFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
+					const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
+				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
 				FFontRenderInfo NameRI;
 				NameRI.bEnableShadow = true;
 				FString Name = UTPS->PlayerName;
 				float NXL, NYL;
-				Canvas->StrLen(TinyFont, Name, NXL, NYL);
+				Canvas->StrLen(NameFont, Name, NXL, NYL);
 				while (NXL * NameScale > PipSize && Name.Len() > 3)
 				{
 					Name = Name.Left(Name.Len() - 1);
-					Canvas->StrLen(TinyFont, Name, NXL, NYL);
+					Canvas->StrLen(NameFont, Name, NXL, NYL);
 				}
 				const float NameX = XOffset + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
 				const float NameY = YForTeam + 2.f;
 				const float OL = 1.f;
 				Canvas->SetLinearDrawColor(FLinearColor::Black);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
 				Canvas->SetLinearDrawColor(FLinearColor::White);
-				Canvas->DrawText(TinyFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
 			}
 
 			// Last-man-standing pulse: white-flashing border at 1Hz when this
@@ -580,6 +595,9 @@ void AElimPlusHUD::DrawHUD()
 	// tints over every other HUD draw.
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
 	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
+
+	// Replay-only: fire-validation corner feed (self-guards to demo playback).
+	NCPlusHUDDrawCall::DrawFireValReplayFeed(this, Canvas);
 }
 
 // Custom team score bar — dynamic team colors, round clock. Same pattern as Wipeout.
