@@ -1534,13 +1534,18 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		return;
 	}
 
+	// Idempotency guard (hoisted ABOVE the warmup branch) — same defect as ElimPlus: a
+	// second RestartPlayer on a still-living warmup pawn re-runs GiveDefaultInventory, and
+	// stock AddInventory dedupes only by instance (not class), so the whole arsenal is
+	// granted twice = the doubled weapon bar. First spawn (no pawn) is unaffected; the
+	// live/lineup paths below already relied on this guard.
+	if (NewPlayer->GetPawn()) return;
+
 	if (GetMatchState() == MatchState::WaitingToStart)
 	{
 		Super::RestartPlayer(NewPlayer);
 		return;
 	}
-
-	if (NewPlayer->GetPawn()) return;
 
 	AUTGameState* GS = GetGameState<AUTGameState>();
 	bool bLineupIsActive = (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers);

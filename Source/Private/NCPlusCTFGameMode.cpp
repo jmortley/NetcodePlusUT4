@@ -847,6 +847,17 @@ bool ANCPlusCTFGameMode::ValidateHat(AUTPlayerState* HatOwner, const FString& Ha
 // without changing TeamArenaCharacter class layout
 void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
+	// Idempotency guard: a RestartPlayer on a controller that ALREADY has a living pawn
+	// must be a no-op. The engine reuses the existing pawn but still re-runs
+	// SetPlayerDefaults -> GiveDefaultInventory, and stock AddInventory dedupes only by
+	// instance (not class), so a second warmup RestartPlayer would grant a second copy of
+	// every default weapon = the doubled weapon bar. First spawn (no pawn) is unaffected;
+	// the anti-repeat tracking below only has fresh StartSpot data when a spawn occurred.
+	if (NewPlayer && NewPlayer->GetPawn())
+	{
+		return;
+	}
+
 	Super::RestartPlayer(NewPlayer);
 
 	// Anti-repeat tracking (IG+ style): keep PlayerRecentSpawns updated from the

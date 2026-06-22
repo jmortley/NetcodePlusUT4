@@ -1461,14 +1461,23 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 		}
 	}
 
-	if (GetMatchState() == MatchState::WaitingToStart)
+	// Idempotency guard (hoisted ABOVE the warmup branch). A RestartPlayer on a
+	// controller that ALREADY has a living pawn must be a no-op: the engine reuses the
+	// existing pawn but still re-runs FinishRestartPlayer -> SetPlayerDefaults ->
+	// GiveDefaultInventory, and stock AUTCharacter::AddInventory dedupes only by INSTANCE
+	// (not by class). So a SECOND RestartPlayer during warmup (e.g. the join auto-spawn
+	// racing the client's ready-up) grants a second copy of every default weapon -> the
+	// doubled weapon bar reported on 327. First spawn (no pawn) is unaffected; the live
+	// and lineup paths below were already gated on this guard, so hoisting it only adds
+	// the missing coverage for WaitingToStart.
+	if (NewPlayer->GetPawn())
 	{
-		Super::RestartPlayer(NewPlayer);
 		return;
 	}
 
-	if (NewPlayer->GetPawn())
+	if (GetMatchState() == MatchState::WaitingToStart)
 	{
+		Super::RestartPlayer(NewPlayer);
 		return;
 	}
 
