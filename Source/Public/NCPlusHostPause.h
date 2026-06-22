@@ -26,4 +26,19 @@ namespace NCPlusHostPause
 	 *  and PC is the match host (bIsMatchHost, or direct GetHostId() vs
 	 *  UniqueId compare — the same match the engine host loop uses). */
 	NETCODEPLUS_API bool HostMayPause(APlayerController* PC, AUTBaseGameMode* GM);
+
+	/** Call at the TOP of a gamemode's ClearPause() override. Returns true if the
+	 *  unpause was DEFERRED behind a short server-only "Resuming in N..." countdown —
+	 *  the override must then return false (stay paused). Returns false if the caller
+	 *  should proceed with Super::ClearPause() immediately: feature disabled, the world
+	 *  isn't actually paused (so every non-unpause ClearPause passes straight through),
+	 *  or the countdown just completed and is firing the real clear.
+	 *
+	 *  Gated by [NetcodePlus] UnpauseCountdownSec (default 3; 0 = disabled = instant
+	 *  unpause as before). Driven by a pause-immune core FTicker (the world is frozen
+	 *  while paused) that is SELF-COMPLETING — worst case it always resumes after the
+	 *  countdown, so it can never wedge a match even if the pauser disconnects. Only
+	 *  affects the stock pause path (host via [NetcodePlus] bAllowHostPause, or rcon);
+	 *  auto-pause-on-drop clears WorldSettings->Pauser directly and is unaffected. */
+	NETCODEPLUS_API bool DeferUnpauseForCountdown(AUTBaseGameMode* GM);
 }

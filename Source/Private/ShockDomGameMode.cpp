@@ -755,3 +755,14 @@ bool AShockDomGameMode::AllowPausing(APlayerController* PC)
 	// [NetcodePlus] bAllowHostPause=true.
 	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
 }
+
+bool AShockDomGameMode::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
+}
