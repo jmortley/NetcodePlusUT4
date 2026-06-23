@@ -25,6 +25,28 @@ static TAutoConsoleVariable<int32> CVarShockDebug(
 	TEXT("NetcodePlus shock-core diagnostics. 0=off, 1=event logs (pairing/handoff/reveal/stuck/combo/collision)."),
 	ECVF_Default);
 
+// =========================================================================
+// DIAGNOSTIC ISOLATION TOGGLES (defaults = current shipped behaviour)
+// Flip these live (set on whichever process you want — server for the authoritative
+// core's stuck/slide behaviour, client for the fake/pairing visual) to isolate which
+// NetcodePlus delta drives the stuck-in-wall / curving symptoms vs stock. None of these
+// change replicated state, UPROPERTYs, or NETCODE_PLUGIN_VERSION — pure behaviour gates.
+// =========================================================================
+static TAutoConsoleVariable<int32> CVarShockDriftCorrect(
+	TEXT("ncp.ShockDriftCorrect"), 1,
+	TEXT("Per-tick heading re-assert (drift correction). 1=on (shipped), 0=off (stock-like: no re-aim, PMC owns velocity)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarShockMatchFakeDot(
+	TEXT("ncp.ShockMatchFakeDot"), 0.5f,
+	TEXT("CanMatchFake direction gate (dot). 0.5=shipped (~60deg), 0.95=stock (~18deg: rejects divergent fake/real pairs)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShockServerTickHz(
+	TEXT("ncp.ShockServerTickHz"), 0,
+	TEXT("Server shock-core tick rate. 0=240Hz (shipped); >0=that Hz (clamped 30..720); <0=unset/tick-every-frame (stock-like). Read at spawn — set BEFORE firing."),
+	ECVF_Default);
+
 static FORCEINLINE bool ShockDbg()
 {
 	return CVarShockDebug.GetValueOnGameThread() > 0;
@@ -186,9 +208,15 @@ void AUTPlusProj_ShockBall::BeginPlay()
 
 	if (Role == ROLE_Authority)
 	{
-		// Server: Fixed 240Hz
-		PrimaryActorTick.TickInterval = 1.f / 240.f;
-		if (ProjectileMovement) ProjectileMovement->PrimaryComponentTick.TickInterval = 1.f / 240.f;
+		// Server tick rate. Shipped = fixed 240Hz. Override via ncp.ShockServerTickHz:
+		//   0  = 240Hz (shipped);  >0 = that Hz (clamped 30..720);  <0 = unset (tick every frame, stock-like).
+		const int32 HzOverride = CVarShockServerTickHz.GetValueOnGameThread();
+		float ServerInterval;
+		if (HzOverride < 0)       ServerInterval = 0.f;                                                       // every frame (stock-like)
+		else if (HzOverride == 0) ServerInterval = 1.f / 240.f;                                               // shipped
+		else                      ServerInterval = 1.f / static_cast<float>(FMath::Clamp(HzOverride, 30, 720));
+		PrimaryActorTick.TickInterval = ServerInterval;
+		if (ProjectileMovement) ProjectileMovement->PrimaryComponentTick.TickInterval = ServerInterval;
 	}
 	else if (GetNetMode() != NM_DedicatedServer)
 	{
@@ -248,7 +276,8 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 			FCollisionQueryParams(TEXT("ShockStuckCheck"), false, this));
 	}
 
-	if (bHasCachedFireDirection && ProjectileMovement
+	if (CVarShockDriftCorrect.GetValueOnGameThread() > 0
+		&& bHasCachedFireDirection && ProjectileMovement
 		&& !ProjectileMovement->Velocity.IsNearlyZero()
 		&& FMath::IsNearlyZero(ProjectileMovement->ProjectileGravityScale)
 		&& (bFakeClientProjectile || Role == ROLE_Authority)
@@ -471,12 +500,13 @@ bool AUTPlusProj_ShockBall::CanMatchFake(AUTProjectile* InFakeProjectile, const 
 	// typically one core in flight, 0.5 (~60 degrees) prevents double-core visuals
 	// while still rejecting obviously wrong matches.
 	const float Dot = (InFakeProjectile->GetVelocity().GetSafeNormal() | VelDir);
-	const bool bMatch = (Dot > 0.5f);
+	const float MatchGate = FMath::Clamp(CVarShockMatchFakeDot.GetValueOnGameThread(), -1.f, 1.f);
+	const bool bMatch = (Dot > MatchGate);
 	if (ShockDbg())
 	{
 		// A match landing in 0.5-0.95 is one stock (0.95) would have REJECTED — seeds a diverged pair.
-		UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/%s] CanMatchFake %s dot=%.4f (gate 0.5) fakeRealDist=%.1f"),
-			ShockDbgSide(this), bMatch ? TEXT("ACCEPT") : TEXT("reject"), Dot,
+		UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/%s] CanMatchFake %s dot=%.4f (gate %.2f) fakeRealDist=%.1f"),
+			ShockDbgSide(this), bMatch ? TEXT("ACCEPT") : TEXT("reject"), Dot, MatchGate,
 			InFakeProjectile ? FVector::Dist(InFakeProjectile->GetActorLocation(), GetActorLocation()) : -1.f);
 	}
 	return bMatch;
