@@ -539,13 +539,27 @@ int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
 	return 0;   // spectator / no team -> red is "our" team, blue is enemy
 }
 
-const FNCPlusModelSettings& NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly)
+FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly)
 {
 	static const FNCPlusModelSettings EmptySide;   // empty ContentPath -> applier skips this pawn
 	const FNCPlusForceModelsConfig& C = Get();
 	switch (C.Style)
 	{
-	case ENCPlusSkinStyle::RedBlue:   return (TheirTeamIndex == 0) ? C.Red : C.Blue;   // red team = 0
+	case ENCPlusSkinStyle::RedBlue:
+	{
+		// Red/Blue is ABSOLUTE: team 0 = red, team 1 = blue. BP parity — the BP overrode the HUE with
+		// DefaultRed/BlueHue (keeping S/V/model/armour from config), so FORCE H to red/blue here.
+		// Without this an unconfigured Blue side keeps its default H = 0, which is RED -> "red vs red".
+		FNCPlusModelSettings Out = (TheirTeamIndex == 0) ? C.Red : C.Blue;
+		Out.H = (TheirTeamIndex == 0) ? 0.f : 240.f;   // red / blue
+		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
+		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
+		if (Out.ContentPath.IsEmpty())
+		{
+			Out.ContentPath = !C.Team.ContentPath.IsEmpty() ? C.Team.ContentPath : C.Enemy.ContentPath;
+		}
+		return Out;
+	}
 	case ENCPlusSkinStyle::EnemyOnly: return bIsFriendly ? EmptySide : C.Enemy;
 	case ENCPlusSkinStyle::TeamEnemy:
 	default:                          return bIsFriendly ? C.Team : C.Enemy;

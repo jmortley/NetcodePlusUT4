@@ -120,8 +120,10 @@ namespace NCPlusForceModels
 	 *  as the "friendly" test instead of OnSameTeam(), which returns false for a spectator. */
 	NETCODEPLUS_API int32 GetViewerTeam(class UWorld* World);
 
-	/** Resolve which side's settings apply to a pawn under the active Style. */
-	NETCODEPLUS_API const FNCPlusModelSettings& GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly);
+	/** Resolve which side's settings apply to a pawn under the active Style. Returned BY VALUE: the
+	 *  Red/Blue style forces the hue (red/blue) and may borrow the Team/Enemy model, so it can't
+	 *  always hand back a reference straight into the config. */
+	NETCODEPLUS_API FNCPlusModelSettings GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly);
 
 	/** HSV(degrees) -> FLinearColor for a side (base albedo tint; V is the normal 0-1 brightness). */
 	NETCODEPLUS_API FLinearColor GetSkinColour(const FNCPlusModelSettings& Side);
