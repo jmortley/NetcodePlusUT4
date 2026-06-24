@@ -1189,9 +1189,50 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			bShowGlowToViewer = false;
 		}
 
-		// --- PERF: Dirty flag — only update materials when state changes ---
-		// Values are constant within each state (glow on vs glow off).
-		// bLastShowGlowState initialized to 0xFF to force first-frame apply.
+		// Resolve the glow colour ONCE. Default = stock team colour (unchanged vanilla behaviour).
+		// Only when ForceModels is actually recolouring THIS enemy's body to a forced skin colour do
+		// we (a) use that colour for the body hit-flash and (b) re-tint the spawn OVERLAY below.
+		FLinearColor GlowColour = GetTeamColor();
+		bool bUseForcedGlow = false;
+		if (bShowGlowToViewer && NCPlusForceModels::IsEnabled())
+		{
+			const int32 GlowTeam = (int32)GetTeamNum();
+			if (GlowTeam != 255)
+			{
+				const bool bGlowFriendly = (GlowTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
+				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly);
+				TSubclassOf<AUTCharacterContent> GlowContent = NCPlusForceModels::GetModelClass(GlowSide);
+				if (GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent))
+				{
+					GlowColour     = NCPlusForceModels::GetSkinColour(GlowSide);
+					bUseForcedGlow = true;
+				}
+			}
+		}
+
+		// ── THE FIX: re-tint the spawn-protection OVERLAY (the actual yellow). ──
+		// The yellow is NOT the body — it's a separate OverlayMesh the BP applies via
+		// SetCharacterOverlayEffect(SpawnProtectionMaterial). Stock UTCharacter::UpdateCharOverlays
+		// HARDCODES that overlay material's TeamColor param to pure yellow (1,1,0) (UTCharacter.cpp:4307)
+		// regardless of team — that is the yellow we see. When ForceModels is recolouring this enemy,
+		// override it to the forced skin colour so the spawn-protected enemy reads in their body colour
+		// instead of yellow. Done EVERY frame (NOT behind the dirty flag below): the overlay is
+		// (re)created a frame or two after spawn / on any CharOverlayFlags change, so a one-shot wouldn't
+		// stick — which is why it previously only looked right AFTER the target took damage (that tore the
+		// overlay down). Non-ForceModels play keeps the vanilla yellow. Cheap: one param write on one MID
+		// while spawn-protected; no-op if no overlay MID is present.
+		if (bUseForcedGlow && OverlayMesh && OverlayMesh->IsRegistered())
+		{
+			if (UMaterialInstanceDynamic* OverlayMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0)))
+			{
+				static const FName NAME_OverlayTeamColor(TEXT("TeamColor"));
+				OverlayMID->SetVectorParameterValue(NAME_OverlayTeamColor, GlowColour);
+			}
+		}
+
+		// --- PERF: Dirty flag — body-material work only on state change ---
+		// Values are constant within each state (glow on vs glow off). The overlay tint above runs
+		// every frame; bLastShowGlowState initialized to 0xFF to force first-frame apply.
 		uint8 CurrentState = bShowGlowToViewer ? 1 : 0;
 		if (CurrentState == bLastShowGlowState)
 		{
@@ -1205,14 +1246,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 		if (bShowGlowToViewer)
 		{
-			FLinearColor BaseTeamColor = GetTeamColor();
-			float BrightnessMult = 20.0f;
-			FLinearColor ObviousColor = FLinearColor(
-				BaseTeamColor.R * BrightnessMult,
-				BaseTeamColor.G * BrightnessMult,
-				BaseTeamColor.B * BrightnessMult,
-				1.0f
-			);
+			// Body hit-flash (mostly hidden behind the spawn overlay, but covers the brief post-overlay
+			// window and any pawn whose overlay isn't currently active). Uses the same GlowColour resolved
+			// above, overbright 20x into the HitFlash param as before.
+			const float BrightnessMult = 20.0f;
+			const FLinearColor ObviousColor(GlowColour.R * BrightnessMult, GlowColour.G * BrightnessMult, GlowColour.B * BrightnessMult, 1.0f);
 
 			for (UMaterialInstanceDynamic* MI : BodyMIs)
 			{
