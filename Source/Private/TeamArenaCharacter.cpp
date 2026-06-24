@@ -59,6 +59,11 @@ static TAutoConsoleVariable<float> CVarPredStabSlowRise(
 	4.0f,
 	TEXT("Projectile-prediction stability: FInterpTo rate when re-arming the lead (target straightened). Low = ease up slowly (~250ms)."),
 	ECVF_Default);
+static TAutoConsoleVariable<int32> CVarHideArmorShield(
+	TEXT("ncp.HideArmorShield"),
+	0,
+	TEXT("ForceModels armour-shield fallback: 1 = HIDE the shield-belt overlay instead of recolouring it (for community models whose shield material bakes the gold and ignores the Color recolour). Default 0 = recolour to the team skin colour. Runtime-toggleable; client-side."),
+	ECVF_Default);
 
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
@@ -1168,9 +1173,67 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			}
 		}
 
+		// ── ForceModels: optional fallback — HIDE the shield-belt overlay (ncp.HideArmorShield 1) ──
+		// The continuous recolour below tints the shield to the team skin colour via the "Color" param
+		// (the working path, DEFAULT). This hide is the fallback for community models whose shield
+		// material bakes the gold and ignores that recolour. Gated on IsEnabled so it also catches
+		// transiently-unrecoloured pawns; other overlays (UDamage, etc.) are untouched, and vanilla
+		// play keeps the stock shield.
+		if (bShouldShow && NCPlusForceModels::IsEnabled() && CVarHideArmorShield.GetValueOnGameThread() != 0)
+		{
+			UMaterialInstanceDynamic* ShieldMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
+			if (ShieldMID && ShieldMID->Parent && ShieldMID->Parent->GetName().Contains(TEXT("Shield")))
+			{
+				bShouldShow = false;
+			}
+		}
+
 		if (OverlayMesh->IsVisible() != bShouldShow)
 		{
 			OverlayMesh->SetVisibility(bShouldShow, true);
+		}
+	}
+
+	// =========================================================================
+	// Character/armour OVERLAY recolour (CONTINUOUS) — armour/shield outlives spawn protection
+	// =========================================================================
+	// The OverlayMesh (shield-belt / OverlayElimCharacter / any active char overlay) is rebuilt by
+	// stock UTCharacter::UpdateCharOverlays with TeamColor=(1,1,0) yellow each time CharOverlayFlags
+	// changes (UTCharacter.cpp:4307) — that hardcoded write is the yellow. Re-tint it to the ForceModels
+	// skin colour EVERY frame, NOT gated on spawn protection: the shield-belt persists with armour, so
+	// the old spawn-protection-only tint reverted to yellow the instant protection dropped. No-op when
+	// ForceModels isn't recolouring this pawn / there's no overlay MID; vanilla play keeps stock yellow.
+	{
+		FLinearColor SkinCol = GetTeamColor();
+		bool bForcedSkin = false;
+		if (NCPlusForceModels::IsEnabled())
+		{
+			const int32 MyTeam = (int32)GetTeamNum();
+			if (MyTeam != 255)
+			{
+				const bool bFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
+				const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bFriendly);
+				TSubclassOf<AUTCharacterContent> Content = NCPlusForceModels::GetModelClass(Side);
+				if (Content && NCPlusForceModels::IsModelAllowed(Content))
+				{
+					SkinCol     = NCPlusForceModels::GetSkinColour(Side);
+					bForcedSkin = true;
+				}
+			}
+		}
+
+		static const FName NAME_OverlayTeamColor(TEXT("TeamColor"));
+		static const FName NAME_OverlayColor(TEXT("Color"));
+		if (bForcedSkin && OverlayMesh && OverlayMesh->IsRegistered())
+		{
+			if (UMaterialInstanceDynamic* OvMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0)))
+			{
+				// "Color" is the lever that recolours the shield-belt: its gold lives on the material's
+				// DEFAULT "Color" param (the stock-overridden "TeamColor" is baked/ignored on ShieldBelt_Inst).
+				// We set both so non-shield overlays (which key off TeamColor) also recolour.
+				OvMID->SetVectorParameterValue(NAME_OverlayTeamColor, SkinCol);
+				OvMID->SetVectorParameterValue(NAME_OverlayColor, SkinCol);
+			}
 		}
 	}
 
@@ -1189,11 +1252,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			bShowGlowToViewer = false;
 		}
 
-		// Resolve the glow colour ONCE. Default = stock team colour (unchanged vanilla behaviour).
-		// Only when ForceModels is actually recolouring THIS enemy's body to a forced skin colour do
-		// we (a) use that colour for the body hit-flash and (b) re-tint the spawn OVERLAY below.
+		// Resolve the glow colour ONCE for the body hit-flash. Default = stock team colour (unchanged
+		// vanilla behaviour); use the ForceModels skin colour when it's recolouring this enemy's body.
+		// (The OVERLAY recolour now lives in the CONTINUOUS block above — the armour/shield overlay
+		// outlives spawn protection, so it can't be gated on it.)
 		FLinearColor GlowColour = GetTeamColor();
-		bool bUseForcedGlow = false;
 		if (bShowGlowToViewer && NCPlusForceModels::IsEnabled())
 		{
 			const int32 GlowTeam = (int32)GetTeamNum();
@@ -1204,29 +1267,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				TSubclassOf<AUTCharacterContent> GlowContent = NCPlusForceModels::GetModelClass(GlowSide);
 				if (GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent))
 				{
-					GlowColour     = NCPlusForceModels::GetSkinColour(GlowSide);
-					bUseForcedGlow = true;
+					GlowColour = NCPlusForceModels::GetSkinColour(GlowSide);
 				}
-			}
-		}
-
-		// ── THE FIX: re-tint the spawn-protection OVERLAY (the actual yellow). ──
-		// The yellow is NOT the body — it's a separate OverlayMesh the BP applies via
-		// SetCharacterOverlayEffect(SpawnProtectionMaterial). Stock UTCharacter::UpdateCharOverlays
-		// HARDCODES that overlay material's TeamColor param to pure yellow (1,1,0) (UTCharacter.cpp:4307)
-		// regardless of team — that is the yellow we see. When ForceModels is recolouring this enemy,
-		// override it to the forced skin colour so the spawn-protected enemy reads in their body colour
-		// instead of yellow. Done EVERY frame (NOT behind the dirty flag below): the overlay is
-		// (re)created a frame or two after spawn / on any CharOverlayFlags change, so a one-shot wouldn't
-		// stick — which is why it previously only looked right AFTER the target took damage (that tore the
-		// overlay down). Non-ForceModels play keeps the vanilla yellow. Cheap: one param write on one MID
-		// while spawn-protected; no-op if no overlay MID is present.
-		if (bUseForcedGlow && OverlayMesh && OverlayMesh->IsRegistered())
-		{
-			if (UMaterialInstanceDynamic* OverlayMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0)))
-			{
-				static const FName NAME_OverlayTeamColor(TEXT("TeamColor"));
-				OverlayMID->SetVectorParameterValue(NAME_OverlayTeamColor, GlowColour);
 			}
 		}
 
