@@ -5,6 +5,7 @@
 #include "UTPlayerState.h"
 #include "UTPlayerController.h"
 #include "UTBasePlayerController.h"   // ClientSay
+#include "UTCountDownMessage.h"        // big center-screen countdown (stock localized message)
 #include "UTATypes.h"                 // ChatDestinations
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"  // AWorldSettings::Pauser
@@ -88,7 +89,15 @@ static void BroadcastResuming(AUTBaseGameMode* GM, int32 N)
 	{
 		if (AUTPlayerController* UTPC = Cast<AUTPlayerController>(It->Get()))
 		{
-			// nullptr speaker = system line (mirrors WipeoutGame's system messages).
+			// Big center-screen countdown: the stock round-start counter (UUTCountDownMessage via the
+			// stock ClientReceiveLocalizedMessage RPC — exactly like ElimPlus/Wipeout's round countdown).
+			// Both the message class AND the RPC are stock, so it draws on EVERY client (incl. un-updated /
+			// no-launcher) with no version bump — server-only. Shows N big in the Announcements area.
+			UTPC->ClientReceiveLocalizedMessage(UUTCountDownMessage::StaticClass(), N);
+
+			// Keep the system chat line as a paused-proof fallback: chat renders while paused, so if the
+			// localized message's lifetime/scale animation misbehaves on the frozen game clock, the
+			// countdown is still visible. nullptr speaker = system line (mirrors WipeoutGame's).
 			UTPC->ClientSay(nullptr, Msg, ChatDestinations::System);
 		}
 	}
