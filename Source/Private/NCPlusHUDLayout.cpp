@@ -7,6 +7,9 @@
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "UTGameState.h"
+#include "UTInventory.h"
+#include "UTTimedPowerup.h"
+#include "UTJumpBoots.h"
 #include "Engine/Canvas.h"
 #include "Engine/Font.h"
 #include "Json.h"
@@ -18,6 +21,7 @@
 #include "GameFramework/GameStateBase.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "Misc/ConfigCacheIni.h"
 
 // =============================================================================
 // Anchor conversions
@@ -168,23 +172,12 @@ namespace NCPlusHUDFonts
 			{ TEXT("Positec"),         TEXT("/Game/RestrictedAssets/Fonts/fntPositec36.fntPositec36"),                      nullptr },
 			{ TEXT("Positec Small"),   TEXT("/Game/RestrictedAssets/Fonts/fntPositec14.fntPositec14"),                      nullptr },
 			{ TEXT("Extreme"),         TEXT("/Game/RestrictedAssets/Fonts/fntExtreme.fntExtreme"),                          nullptr },
-			// External Google Fonts (OFL) - TEST SET, pointing at the exact UFont
-			// asset names currently in /Game/Blueprints/Netcode/ (incl. italic +
-			// variable-font variants) for a quick render test.
-			// COOK NOTE: these are string-path refs the cooker won't auto-pull from
-			// Blueprints/Netcode - either add that folder to "Additional Asset
-			// Directories to Cook" or keep a holder asset (the FontTest BP) that
-			// hard-references them so the cook drags them in.
-			// UE4.15 may not render the *VariableFont* ones (Inter/JetBrains/Oswald);
-			// Bebas/Russo are static and should be safe. Once a final set is chosen,
-			// trim to one weight each + rename to clean names.
-			{ TEXT("Inter"),                 TEXT("/Game/Blueprints/Netcode/Inter-VariableFont_opsz_wght_Font.Inter-VariableFont_opsz_wght_Font"),                     nullptr },
-			{ TEXT("Inter Italic"),          TEXT("/Game/Blueprints/Netcode/Inter-Italic-VariableFont_opsz_wght_Font.Inter-Italic-VariableFont_opsz_wght_Font"),       nullptr },
-			{ TEXT("JetBrains Mono"),        TEXT("/Game/Blueprints/Netcode/JetBrainsMono-VariableFont_wght_Font.JetBrainsMono-VariableFont_wght_Font"),               nullptr },
-			{ TEXT("JetBrains Mono Italic"), TEXT("/Game/Blueprints/Netcode/JetBrainsMono-Italic-VariableFont_wght_Font.JetBrainsMono-Italic-VariableFont_wght_Font"), nullptr },
-			{ TEXT("Bebas Neue"),            TEXT("/Game/Blueprints/Netcode/BebasNeue-Regular_Font.BebasNeue-Regular_Font"),                                            nullptr },
-			{ TEXT("Oswald"),                TEXT("/Game/Blueprints/Netcode/Oswald-VariableFont_wght_Font.Oswald-VariableFont_wght_Font"),                              nullptr },
-			{ TEXT("Russo One"),             TEXT("/Game/Blueprints/Netcode/RussoOne-Regular_Font.RussoOne-Regular_Font"),                                              nullptr },
+			// External Google-font TEST SET (Inter / Inter Italic / JetBrains Mono x2 /
+			// Bebas Neue / Oswald / Russo One) REMOVED 2026-06-23 — they lived in
+			// /Game/Blueprints/Netcode/ which was never added to the cook (so they never
+			// shipped) and the variable-font ones don't render in UE4.15 anyway. Picking
+			// one silently fell back to the default font ("the font bug"). Re-add ONLY a
+			// NON-variable weight, and only after confirming it's cooked + loads as UFont.
 		};
 		return Table;
 	}
@@ -487,6 +480,20 @@ FString FNCPlusHUDLayout::GetDefaultLayoutPath()
 	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
 }
 
+bool FNCPlusHUDLayout::WantsStockBottomBar()
+{
+	// Explicit choice in Mod.ini wins (written by the menu / Stock-Like preset).
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockBottomBar"), Val, ModIni) && !Val.IsEmpty())
+	{
+		return Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
+	}
+	// No explicit choice — default to the familiar stock bar for a fresh install
+	// (no saved HUD layout). Anyone who has saved a layout keeps the NCPlus widgets.
+	return !FPaths::FileExists(GetDefaultLayoutPath());
+}
+
 FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
 {
 	FNCPlusHUDLayout Layout;
@@ -703,7 +710,7 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                      FText::FromString(TEXT("Weapon Bar (Left)")), false, ENCPlusHUDAnchor::CenterLeft,  FVector2D( 20.f, -20.f));
 			T.Emplace(TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                     FText::FromString(TEXT("Weapon Bar (Right)")), false, ENCPlusHUDAnchor::CenterRight, FVector2D(-20.f, -20.f));
 			T.Emplace(TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")),          false, ENCPlusHUDAnchor::Center);
-			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")),           false, ENCPlusHUDAnchor::BottomLeft);
+			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")),           false, ENCPlusHUDAnchor::BottomLeft, FVector2D(20.f, -20.f));
 			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")), false, ENCPlusHUDAnchor::TopRight);
 			T.Emplace(TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")), false, ENCPlusHUDAnchor::TopRight);
 			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")),      false, ENCPlusHUDAnchor::TopCenter);
@@ -973,6 +980,114 @@ namespace NCPlusHUDDrawCall
 
 		Canvas->SetLinearDrawColor(FLinearColor(TintColor.R, TintColor.G, TintColor.B, Alpha));
 		Canvas->DrawTile(Canvas->DefaultTexture, 0.f, 0.f, Canvas->ClipX, Canvas->ClipY, 0.f, 0.f, 1.f, 1.f, BLEND_Translucent);
+	}
+
+	// =============================================================================
+	// Held-pickup status — amp / berserk / siphon remaining time + jump-boot charges
+	// =============================================================================
+	//
+	// Pure-C++ stand-in for the stock bpHW_Powerups widget in NCPlus modes. Stock UT4
+	// shows held-pickup status via the MiniHUD QuickStats cluster (when "Show Powerups
+	// on MiniHUD" is on) OR the standalone bpHW_Powerups widget (which suppresses
+	// itself whenever the cluster is on). NCPlus replaces QuickStats with one that
+	// draws no powerups/boots — so any player who enabled the cluster lost amp/berserk/
+	// siphon/boots entirely. We draw it ourselves here, always, in NCPlus mode.
+	//
+	// Held-pickup STATUS only (your own carried powerups/boots) — NOT map item respawn
+	// timers. In stock-bottom-bar mode the vanilla widgets still work, so we defer.
+	// Configurable via the "powerups" alias: position/anchor/offset, scale, opacity,
+	// and on/off (the nchud Hide checkbox).
+	void DrawHeldPowerups(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (HUD == nullptr || Canvas == nullptr || HUD->UTPlayerOwner == nullptr)
+		{
+			return;
+		}
+		// Stock-bottom-bar mode keeps the vanilla QuickStats/Paperdoll/bpHW_Powerups
+		// widgets, which already show held-pickup status — defer to them.
+		if (FNCPlusHUDLayout::WantsStockBottomBar())
+		{
+			return;
+		}
+		// nchud on/off for the "powerups" element.
+		if (IsHidden(TEXT("powerups")))
+		{
+			return;
+		}
+
+		// View target = self when alive, the spectated player when spectating.
+		AUTCharacter* C = Cast<AUTCharacter>(HUD->UTPlayerOwner->GetViewTarget());
+		if (C == nullptr || C->IsDead())
+		{
+			return;
+		}
+
+		// Gather held timed powerups (amp / berserk / siphon …) + jump boots. Each
+		// supplies its own HUD icon + remaining-time / charge text via GetHUDText —
+		// the same data the stock powerups widget reads.
+		TArray<AUTInventory*> Items;
+		for (TInventoryIterator<> It(C); It; ++It)
+		{
+			AUTInventory* Inv = *It;
+			if (Inv == nullptr || Inv->HUDIcon.Texture == nullptr)
+			{
+				continue;
+			}
+			if (Cast<AUTTimedPowerup>(Inv) != nullptr || Cast<AUTJumpBoots>(Inv) != nullptr)
+			{
+				Items.Add(Inv);
+			}
+		}
+		if (Items.Num() == 0)
+		{
+			return;
+		}
+
+		const float ResScale = FMath::Max(Canvas->ClipY, 1.f) / 1080.f;
+		const float Scale    = ResScale * GetScale(TEXT("powerups"));
+		const float Op       = FMath::Clamp(GetOpacity(TEXT("powerups")), 0.f, 1.f) * HUD->GetHUDWidgetOpacity();
+		if (Op <= 0.001f)
+		{
+			return;
+		}
+
+		const float IconH  = 36.f * Scale;
+		const float Pad    = 8.f  * Scale;
+		const float RowH   = IconH + Pad;
+		const float BlockH = RowH * Items.Num();
+
+		// Default lower-left; the block grows UPWARD from the anchor so the stock
+		// BottomLeft default reads naturally and never runs off the bottom edge.
+		const FVector2D Start = ResolveScreenPos(TEXT("powerups"), Canvas,
+			FVector2D(20.f * ResScale, Canvas->ClipY - 20.f * ResScale));
+		const float X = Start.X;
+		float Y = Start.Y - BlockH;
+
+		UFont* Font = HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont;
+		FFontRenderInfo RI;
+		RI.bEnableShadow = true;
+		const FColor TextColor(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(Op * 255.f), 0, 255));
+
+		for (AUTInventory* Inv : Items)
+		{
+			const FCanvasIcon& Ic = Inv->HUDIcon;
+			const float AspectW = (Ic.VL != 0.f) ? (Ic.UL / Ic.VL) : 1.f;
+			const float IconW = IconH * AspectW;
+
+			Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, Op));
+			Canvas->DrawTile(Ic.Texture, X, Y, IconW, IconH, Ic.U, Ic.V, Ic.UL, Ic.VL);
+
+			const FText HudText = Inv->GetHUDText();
+			if (Font != nullptr && !HudText.IsEmpty())
+			{
+				float XL, YL;
+				Canvas->TextSize(Font, HudText.ToString(), XL, YL, Scale, Scale);
+				Canvas->DrawColor = TextColor;
+				Canvas->DrawText(Font, HudText, X + IconW + Pad, Y + (IconH - YL) * 0.5f, Scale, Scale, RI);
+			}
+
+			Y += RowH;
+		}
 	}
 
 	// =============================================================================

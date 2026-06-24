@@ -5,6 +5,7 @@
 
 #include "ElimPlusScoreboard.h"
 #include "NCPlusScoreboardHost.h"
+#include "NCPlusHUDLayout.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -95,7 +96,10 @@ void UElimPlusScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 {
 	if (!UTGameState || UTGameState->Teams.Num() < 2 || !UTGameState->Teams[0] || !UTGameState->Teams[1]) return;
 
-	const bool bCustom = HasCustomTeamColors();
+	// Faction names only when custom team colors are in use AND the scorebar's
+	// Team-Color toggle is on — untick it and the scoreboard reads plain RED/BLUE
+	// (unifies with the top bar; kills the "am I red, blue, or phayder?" confusion).
+	const bool bCustom = HasCustomTeamColors() && NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
 	RedTeamText  = bCustom ? FText::FromString(TEXT("PHAYDER (R)")) : FText::FromString(TEXT("RED"));
 	BlueTeamText = bCustom ? FText::FromString(TEXT("LIANDRI (B)")) : FText::FromString(TEXT("BLUE"));
 
@@ -110,8 +114,11 @@ void UElimPlusScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 	const float TeamEdgeSize = 40.f * RenderScale;
 	const float NamePosition = TeamEdgeSize + FrontSize + 0.25f * MiddleSize;
 
-	const FLinearColor Team0Color = UTGameState->Teams[0]->TeamColor;
-	const FLinearColor Team1Color = UTGameState->Teams[1]->TeamColor;
+	// Background color follows the same toggle as the names: custom team colors when
+	// faction mode is on, stock red/blue when the user wants plain RED vs BLUE — so a
+	// "RED" label never sits on a magenta bar.
+	const FLinearColor Team0Color = bCustom ? UTGameState->Teams[0]->TeamColor : FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
+	const FLinearColor Team1Color = bCustom ? UTGameState->Teams[1]->TeamColor : FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
 
 	// Team 0 (left)
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, TeamEdgeSize, BackgroundY, FrontSize, BackgroundHeight, 0, 188, 36, 65, 1.0f, Team0Color);

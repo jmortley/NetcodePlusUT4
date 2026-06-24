@@ -182,6 +182,14 @@ struct FNCPlusHUDLayout
 	 *  NCPlusCTF, ShockDom — so users configure once and it applies everywhere.) */
 	static FString GetDefaultLayoutPath();
 
+	/** Which bottom-bar widget family this client loads at HUD construction:
+	 *  true = stock weapon bar / ammo / health-armor (familiar, self-reads the
+	 *  player's HUD profile); false = the NCPlus custom widgets. [NetcodePlus]
+	 *  StockBottomBar in Mod.ini overrides; default = fresh install (no saved
+	 *  HUDLayout.json) so new players get the stock-like bar and customized users
+	 *  keep NCPlus. Read once per HUD spawn — a change applies on the next map. */
+	static bool WantsStockBottomBar();
+
 	/** Deprecated alias for GetDefaultLayoutPath; kept temporarily for compat. */
 	static FString GetDefaultElimPlusPath() { return GetDefaultLayoutPath(); }
 
@@ -300,6 +308,17 @@ namespace NCPlusHUDDrawCall
 	 *  Canvas is passed by the caller (AHUD::Canvas is protected, can't be
 	 *  reached from a free function — the HUD subclass has it in scope already). */
 	NETCODEPLUS_API void DrawDamageFlash(class AUTHUD* HUD, class UCanvas* Canvas);
+
+	/** Held-pickup status — amp/berserk/siphon REMAINING TIME + jump-boot charges —
+	 *  drawn in C++ for NCPlus modes. Replaces the stock bpHW_Powerups widget, which
+	 *  only draws when the player's "Show Powerups on MiniHUD" profile option is off
+	 *  and which NCPlus's QuickStats replacement otherwise suppresses (so MiniHUD
+	 *  users lost the display). Held-pickup STATUS only — your own powerups/boots —
+	 *  NOT map item respawn timers. No-op in stock-bottom-bar mode (the vanilla
+	 *  widgets handle it) or when the `powerups` alias is hidden. Honors the
+	 *  `powerups` alias position/anchor/offset, scale, and opacity. Call from each
+	 *  NCPlus HUD's DrawHUD (Canvas passed by caller — see DrawDamageFlash note). */
+	NETCODEPLUS_API void DrawHeldPowerups(class AUTHUD* HUD, class UCanvas* Canvas);
 
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).

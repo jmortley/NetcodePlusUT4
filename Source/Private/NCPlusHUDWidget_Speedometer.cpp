@@ -48,6 +48,13 @@ void UNCPlusHUDWidget_Speedometer::Draw_Implementation(float DeltaTime)
 	APawn* Pawn = UTHUDOwner->UTPlayerOwner->GetPawn();
 	if (!IsValid(Pawn)) return;
 
+	// Honor the editor's Scale + Opacity rows. Layout Scale multiplies the text
+	// scale; opacity routes through DrawText's DrawOpacity arg (the alpha-safe
+	// channel). Both default to 1.0 (no override) so untouched layouts are identical.
+	const FNCPlusHUDElement* SpeedElem = FNCPlusHUDLayout::GetLive().Find(TEXT("speedometer"));
+	const float ElemScale = SpeedElem ? SpeedElem->Scale : 1.f;
+	const float Op = SpeedElem ? SpeedElem->GetExtraFloat(TEXT("opacity"), 1.f) : 1.f;
+
 	// Horizontal speed only — vertical drops out so falling/jumping doesn't
 	// inflate the readout. Matches what competitive players track.
 	const FVector V = Pawn->GetVelocity();
@@ -72,15 +79,15 @@ void UNCPlusHUDWidget_Speedometer::Draw_Implementation(float DeltaTime)
 
 	const FString SpeedStr = FString::Printf(TEXT("%d"), FMath::RoundToInt(Speed));
 	DrawText(FText::FromString(SpeedStr), Size.X * 0.5f, 0.f,
-		BigFont, RenderScale, 1.0f, SpeedColor,
+		BigFont, RenderScale * ElemScale, Op, SpeedColor,
 		ETextHorzPos::Center, ETextVertPos::Top);
 
 	// Optional unit label below the number — small, dim, easy to ignore once
 	// the user gets used to the value range.
 	if (SmallFnt)
 	{
-		DrawText(FText::FromString(TEXT("uu/s")), Size.X * 0.5f, 22.f,
-			SmallFnt, RenderScale, 1.0f, FLinearColor(1.f, 1.f, 1.f, 0.6f),
+		DrawText(FText::FromString(TEXT("uu/s")), Size.X * 0.5f, 22.f * ElemScale,
+			SmallFnt, RenderScale * ElemScale, Op, FLinearColor(1.f, 1.f, 1.f, 0.6f),
 			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 }

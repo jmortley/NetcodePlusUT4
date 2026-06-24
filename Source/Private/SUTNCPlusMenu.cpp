@@ -479,6 +479,33 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 				.Font(RegularFont(14))
 				.ColorAndOpacity(FLinearColor::White)
 			]
+		]
+
+		// ── Stock bottom bar ──
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bStockBottomBar ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnStockBottomBarChanged)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Stock bottom bar (weapon/ammo/health) - applies next match")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
 		];
 }
 
@@ -814,6 +841,10 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		bHighResScreenshotPostMatch = true;
 
+	// Reflect the CURRENT effective bottom-bar choice (explicit [NetcodePlus] StockBottomBar
+	// if set, otherwise the fresh-install default) so the checkbox shows reality.
+	bStockBottomBar = FNCPlusHUDLayout::WantsStockBottomBar();
+
 	// Force Models — take a working copy of the live config (loads Mod.ini [ForceModels] on first access).
 	FMConfig = NCPlusForceModels::Get();
 
@@ -850,6 +881,7 @@ void SUTNCPlusMenu::SaveSettings()
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
+	GConfig->SetString(NCPSection, TEXT("StockBottomBar"), bStockBottomBar ? TEXT("True") : TEXT("False"), ConfigPath);
 
 	GConfig->Flush(false, ConfigPath);
 
@@ -929,6 +961,11 @@ void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type Co
 void SUTNCPlusMenu::OnScreenshotChanged(ECheckBoxState NewState)
 {
 	bHighResScreenshotPostMatch = (NewState == ECheckBoxState::Checked);
+}
+
+void SUTNCPlusMenu::OnStockBottomBarChanged(ECheckBoxState NewState)
+{
+	bStockBottomBar = (NewState == ECheckBoxState::Checked);
 }
 
 FReply SUTNCPlusMenu::OnSaveClicked()

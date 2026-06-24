@@ -47,6 +47,7 @@ private:
 	float RagdollTime;
 	float OwnFootstepVolume;
 	bool bHighResScreenshotPostMatch;
+	bool bStockBottomBar;   // stock weapon/ammo/health bottom bar vs NCPlus custom (applies next match)
 
 	// ── Force Models settings ── working copy of the live config, edited in-place by the tab's
 	// widgets via bool*/float* lambdas and written back on Save. The combo option lists are members
@@ -79,6 +80,7 @@ private:
 	void OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnScreenshotChanged(ECheckBoxState NewState);
+	void OnStockBottomBarChanged(ECheckBoxState NewState);
 
 	// Force Models tab builders/helpers
 	TSharedRef<SWidget> BuildSideRow(const FString& Label, FNCPlusModelSettings* Side);

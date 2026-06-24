@@ -1,6 +1,7 @@
 // WipeoutScoreboard — Portrait-row scoreboard for Wipeout game mode
 #include "WipeoutScoreboard.h"
 #include "NCPlusScoreboardHost.h"
+#include "NCPlusHUDLayout.h"
 #include "NCPlusCTFGameMode.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
@@ -95,7 +96,9 @@ void UWipeoutScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 {
 	if (!UTGameState || UTGameState->Teams.Num() < 2 || !UTGameState->Teams[0] || !UTGameState->Teams[1]) return;
 
-	bool bCustom = HasCustomTeamColors();
+	// Faction names only when custom team colors are in use AND the scorebar's
+	// Team-Color toggle is on — untick it and the scoreboard reads plain RED/BLUE.
+	bool bCustom = HasCustomTeamColors() && NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
 
 	// Set team names based on whether custom colors are active
 	RedTeamText = bCustom ? FText::FromString(TEXT("PHAYDER (R)")) : FText::FromString(TEXT("RED"));
@@ -114,8 +117,11 @@ void UWipeoutScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 	float TeamEdgeSize = 40.f * RenderScale;
 	float NamePosition = TeamEdgeSize + FrontSize + 0.25f * MiddleSize;
 
-	FLinearColor Team0Color = UTGameState->Teams[0]->TeamColor;
-	FLinearColor Team1Color = UTGameState->Teams[1]->TeamColor;
+	// Background follows the same toggle as the names (parity with ElimPlusScoreboard):
+	// custom team colors when faction mode is on, stock red/blue when the user wants plain
+	// RED vs BLUE — so a "RED" label never sits on a magenta bar.
+	FLinearColor Team0Color = bCustom ? UTGameState->Teams[0]->TeamColor : FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
+	FLinearColor Team1Color = bCustom ? UTGameState->Teams[1]->TeamColor : FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
 
 	// Team 0 (left)
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, TeamEdgeSize, BackgroundY, FrontSize, BackgroundHeight, 0, 188, 36, 65, 1.0f, Team0Color);
