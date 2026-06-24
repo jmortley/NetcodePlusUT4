@@ -1030,8 +1030,19 @@ void ANCLeagueDuelGame::BuildMatchSummary(FNCMatchSummary& Out) const
 
 bool ANCLeagueDuelGame::AllowPausing(APlayerController* PC)
 {
-	// Stock permissions (rcon admin / listen with no remotes) are preserved;
-	// this only ADDS the ?HostId= match host when the server's Mod.ini sets
-	// [NetcodePlus] bAllowHostPause=true.
-	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool ANCLeagueDuelGame::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
 }

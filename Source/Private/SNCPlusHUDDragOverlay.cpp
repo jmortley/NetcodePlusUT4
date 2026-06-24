@@ -103,6 +103,7 @@ void SNCPlusHUDDragOverlay::Construct(const FArguments& InArgs)
 	// GameAndUI on next poll. Forcing it on the PC here too snaps the cursor
 	// loose immediately instead of waiting for the next HUD tick.
 	NCPlusHUDDragMode::SetActive(true);
+	bHeldDragMode = true;
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		APlayerController* PC = PlayerOwner->PlayerController;
@@ -114,6 +115,12 @@ void SNCPlusHUDDragOverlay::Construct(const FArguments& InArgs)
 		InputMode.SetHideCursorDuringCapture(false);
 		PC->SetInputMode(InputMode);
 	}
+}
+
+SNCPlusHUDDragOverlay::~SNCPlusHUDDragOverlay()
+{
+	// Map load drops the viewport widget without ClosePanel — release the refcount.
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
 }
 
 AUTHUD* SNCPlusHUDDragOverlay::GetHUD() const
@@ -687,7 +694,7 @@ void SNCPlusHUDDragOverlay::ClosePanel()
 
 	// Restore input mode FIRST, before tearing down the widget — once the
 	// widget is removed, SharedThis would be stale.
-	NCPlusHUDDragMode::SetActive(false);
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		APlayerController* PC = PlayerOwner->PlayerController;

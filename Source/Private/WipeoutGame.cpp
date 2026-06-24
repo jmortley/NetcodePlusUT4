@@ -1,5 +1,6 @@
 #include "WipeoutGame.h"
 #include "NCPlusVersionGate.h"
+#include "NCFireValCollector.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -353,6 +354,8 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	Super::HandleMatchHasStarted();
 	bWarmupMode = false;
 
+	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id; accumulate across all rounds
+
 	// Defense-in-depth reset: InitGame already clears this on map load, but a
 	// single server session can host multiple matches. Reset here so a subsequent
 	// match can flush its own ratings.
@@ -412,6 +415,8 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 void AUWipeoutGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+
+	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (server-side; guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -1529,13 +1534,18 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		return;
 	}
 
+	// Idempotency guard (hoisted ABOVE the warmup branch) — same defect as ElimPlus: a
+	// second RestartPlayer on a still-living warmup pawn re-runs GiveDefaultInventory, and
+	// stock AddInventory dedupes only by instance (not class), so the whole arsenal is
+	// granted twice = the doubled weapon bar. First spawn (no pawn) is unaffected; the
+	// live/lineup paths below already relied on this guard.
+	if (NewPlayer->GetPawn()) return;
+
 	if (GetMatchState() == MatchState::WaitingToStart)
 	{
 		Super::RestartPlayer(NewPlayer);
 		return;
 	}
-
-	if (NewPlayer->GetPawn()) return;
 
 	AUTGameState* GS = GetGameState<AUTGameState>();
 	bool bLineupIsActive = (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers);
@@ -3763,8 +3773,19 @@ void AUWipeoutGame::SpawnSiphonPickup()
 
 bool AUWipeoutGame::AllowPausing(APlayerController* PC)
 {
-	// Stock permissions (rcon admin / listen with no remotes) are preserved;
-	// this only ADDS the ?HostId= match host when the server's Mod.ini sets
-	// [NetcodePlus] bAllowHostPause=true.
-	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool AUWipeoutGame::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
 }

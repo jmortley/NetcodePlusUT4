@@ -53,20 +53,43 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 	// Custom split WeaponBar — two independent strips. Replaces stock bpHW_WeaponBar.
 	// Per-side anchor + offset come from the layout; per-weapon side assignment
 	// from the layout's weapon_groups block.
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
+	// Bottom bar: stock (familiar) vs NCPlus custom — chosen once at construction
+	// (see FNCPlusHUDLayout::WantsStockBottomBar). Only ONE family is ever loaded, so
+	// the two can never double-draw. Crosshair/powerups below are shared by both.
+	if (FNCPlusHUDLayout::WantsStockBottomBar())
+	{
+		// Stock weapon bar + ammo + health/armor. The stock weapon bar self-reads the
+		// player's HUD profile (orientation/scale/opacity/colors/weapon-group remap),
+		// so the player's existing preference is honored with zero extra wiring.
+		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"));
+		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
+		// Health/armor = stock Paperdoll (the classic icon display TeamDM/DM use,
+		// DefaultGame.ini:102/131). NOT bpHW_QuickStats — that self-hides behind a
+		// profile setting and isn't the main HP/Armor readout.
+		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"));
+	}
+	else
+	{
+		// NCPlus custom split WeaponBar (two strips, per-side anchor/offset + per-weapon
+		// side from the layout's weapon_groups block) — replaces stock bpHW_WeaponBar.
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
+		// Modernized ammo counter — replaces stock bpHW_WeaponInfo (3 styles, fully editable).
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
+		// Modernized minimal-typography health/armor display — replaces stock bpHW_QuickStats.
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
+	}
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"));
-	// Modernized ammo counter — replaces stock bpHW_WeaponInfo (3 styles, fully editable).
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
-	// Removed bpHW_Paperdoll — when the user hides stock QuickStats (which we want,
-	// since our NCPlusHUDWidget_QuickStats replaces it), Paperdoll switches into a
-	// fallback "+ HP / Armor" mode (UTHUDWidget_Paperdoll.cpp:47) which would draw
-	// on top of our modern widget. Our widget handles HP/Armor cleanly on its own.
 	// Removed bpHW_TeamGameClock — we draw our own team score bar in DrawHUD
 	// that respects dynamic team colors from TeamSkins.
-	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"));
-	// Modernized minimal-typography health/armor display — replaces stock bpHW_QuickStats.
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
+	// Held-pickup status (amp/berserk/siphon countdown + boot charges): keep the stock
+	// powerups widget ONLY in stock-bottom-bar mode. In NCPlus mode we draw it ourselves
+	// (NCPlusHUDDrawCall::DrawHeldPowerups) so it shows regardless of the player's MiniHUD
+	// "Show Powerups" setting, which the NCPlus QuickStats replacement doesn't honor.
+	if (FNCPlusHUDLayout::WantsStockBottomBar())
+	{
+		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"));
+	}
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"));
@@ -437,7 +460,7 @@ void AElimPlusHUD::DrawHUD()
 			// Player name above icon — multiply by team scale so text stays
 			// proportional when the strip is shrunk via the layout's Sc spinner.
 			{
-				/* Portraits (Red)/(Blue) Font + FontSz now restyle the player name. */ const FName PortraitAlias = (TeamIdx == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red")); UFont* NameFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, TinyFont); if (!NameFont) { NameFont = TinyFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
+				/* Portraits (Red)/(Blue) Font + FontSz now restyle the player name. */ const FName PortraitAlias = (TeamIdx == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red")); UFont* NameFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
 					const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
 				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
 				FFontRenderInfo NameRI;
@@ -570,6 +593,7 @@ void AElimPlusHUD::DrawHUD()
 			const FVector2D StockPos(Canvas->ClipX * 0.98f, Canvas->ClipY * 0.015f);
 			const FVector2D ResolvedPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("score_kda"), Canvas, StockPos);
 			const float ElemScale = NCPlusHUDDrawCall::GetScale(TEXT("score_kda"));
+			const float KdaOp = NCPlusHUDDrawCall::GetOpacity(TEXT("score_kda"));
 			const float FontExtra = NCPlusHUDFonts::ResolveScale(TEXT("score_kda"), 1.f);
 			const float FontScale = RenderScale * 0.9f * ElemScale * FontExtra;
 
@@ -581,15 +605,18 @@ void AElimPlusHUD::DrawHUD()
 
 			float XL, YL;
 			Canvas->TextSize(KDAFont, ScoreStr, XL, YL, FontScale, FontScale);
-			Canvas->DrawColor = FColor(255, 255, 255, 220);
+			Canvas->DrawColor = FColor(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(220.f * KdaOp), 0, 255));
 			Canvas->DrawText(KDAFont, ScoreStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
 			KDAYPos += YL * 1.1f;
 
 			Canvas->TextSize(KDAFont, KDAStr, XL, YL, FontScale, FontScale);
-			Canvas->DrawColor = FColor(200, 200, 200, 200);
+			Canvas->DrawColor = FColor(200, 200, 200, (uint8)FMath::Clamp(FMath::RoundToInt(200.f * KdaOp), 0, 255));
 			Canvas->DrawText(KDAFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
 		}
 	}
+
+	// Held-pickup status (amp/berserk/siphon countdown + boot charges) — NCPlus mode only.
+	NCPlusHUDDrawCall::DrawHeldPowerups(this, Canvas);
 
 	// Optional opt-in overlays (default OFF). DrawDamageFlash must be last so it
 	// tints over every other HUD draw.
@@ -648,29 +675,36 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const float ScoreBoxWidth = 50.f * RenderScale * ScoreScale;
 	const float GapWidth = 8.f * RenderScale;
 
+	// Per-element opacity (the editor's Op slider). Mirror the portrait Tinted-lambda:
+	// FadeL scales every tile color's alpha; WhiteOp is the faded text color. Op
+	// defaults to 1.0 (no override) so untouched layouts render pixel-identically.
+	const float ScoreOp = NCPlusHUDDrawCall::GetOpacity(TEXT("scorebar"));
+	auto FadeL = [ScoreOp](FLinearColor C) -> FLinearColor { C.A *= ScoreOp; return C; };
+	const FColor WhiteOp(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(ScoreOp * 255.f), 0, 255));
+
 	const float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
-	Canvas->SetLinearDrawColor(Team0Color);
+	Canvas->SetLinearDrawColor(FadeL(Team0Color));
 	Canvas->DrawTile(Canvas->DefaultTexture, LeftBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
 	const float ScoreBoxX0 = CenterX - GapWidth - ScoreBoxWidth;
-	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
 
 	const float ScoreBoxX1 = CenterX + GapWidth;
-	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
 
 	const float RightBarX = CenterX + GapWidth + ScoreBoxWidth;
-	Canvas->SetLinearDrawColor(Team1Color);
+	Canvas->SetLinearDrawColor(FadeL(Team1Color));
 	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
 	const float TailHeight = 14.f * RenderScale * ScoreScale;
-	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
-	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
 
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor::White));
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
 	// font_scale Extras lets the user shrink/grow text independently of bar
@@ -690,24 +724,24 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	if (!TeamScoreFont) TeamScoreFont = LargeFont;
 
 	Canvas->TextSize(TeamNameFont, Team0Name, XL, YL, FontScale, FontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamNameFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
 	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
 	Canvas->TextSize(TeamScoreFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamScoreFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
 	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
 	Canvas->TextSize(TeamScoreFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamScoreFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
 	Canvas->TextSize(TeamNameFont, Team1Name, XL, YL, FontScale, FontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamNameFont, Team1Name, RightBarX + 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
@@ -737,7 +771,7 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		const int32 RSecs = RoundTime % 60;
 		FString RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
 		Canvas->TextSize(MediumFont, RoundClockStr, XL, YL, RoundClockScale, RoundClockScale);
-		Canvas->DrawColor = (RoundTime <= 30) ? FColor(255, 60, 60, 255) : FColor::White;
+		Canvas->DrawColor = (RoundTime <= 30) ? FColor(255, 60, 60, WhiteOp.A) : WhiteOp;
 		Canvas->DrawText(MediumFont, RoundClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 	}
 }
@@ -819,8 +853,8 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 	// to SmallFont; PipFontExtra is the nchud FontSz multiplier (headline 4K
 	// legibility knob). Both are no-ops until the user touches the picker.
 	const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
-	UFont* PipFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, SmallFont);
-	if (!PipFont) PipFont = SmallFont;
+	UFont* PipFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, MediumFont);
+	if (!PipFont) PipFont = MediumFont;
 	const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
 
 	// Layer 5: Red "X" on dead portraits — always (no respawn this round)
@@ -992,6 +1026,22 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 		Canvas->DrawText(MediumFont, FText::FromString(Label),
 			ColX + 24.f * TextScale, HeaderY, TextScale, TextScale, RI);
 
+		// "ELO" column header — right-aligned to match the per-row ELO values below,
+		// and vertically centered against the larger MediumFont team-name label so
+		// both header labels sit on a shared centerline (they were top-aligned at
+		// HeaderY, which left the smaller ELO floating high next to RED/BLUE).
+		{
+			const FString EloHdr = TEXT("ELO");
+			float HXL, HYL;
+			Canvas->StrLen(SmallFont, EloHdr, HXL, HYL);
+			float LXL, LYL;
+			Canvas->StrLen(MediumFont, FString(Label), LXL, LYL);
+			const float EloHdrY = HeaderY + (LYL - HYL) * 0.5f * TextScale;
+			Canvas->SetLinearDrawColor(Faded(Accent));
+			Canvas->DrawText(SmallFont, FText::FromString(EloHdr),
+				ColX + ColW - 24.f * TextScale - HXL * TextScale, EloHdrY, TextScale, TextScale, RI);
+		}
+
 		// Player rows
 		float Y = RowY0;
 		int64 TeamStrength = 0;
@@ -1032,8 +1082,26 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 			ColX + 24.f * TextScale, TotalY, TextScale, TextScale, RI);
 	};
 
-	DrawTeamColumn(0, PX,         TEXT("RED  (PHAYDER)"), FLinearColor(1.f,  0.35f, 0.35f, 1.f));
-	DrawTeamColumn(1, PX + ColW,  TEXT("BLUE (LIANDRI)"), FLinearColor(0.4f, 1.f,   0.4f,  1.f));
+	// Faction suffix only when custom team colors are actually in use (gated on the
+	// scorebar Team-Color toggle) — otherwise plain RED/BLUE, matching the scorebar +
+	// scoreboards. Kills the "am I red, blue, or phayder?" confusion.
+	bool bCustomColors = false;
+	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
+	if (bUseTeamColor && GS->Teams.IsValidIndex(0) && GS->Teams[0])
+	{
+		const FLinearColor TC = GS->Teams[0]->TeamColor;
+		if (FMath::Abs(TC.R - 1.f) > 0.2f || TC.G > 0.3f || TC.B > 0.3f) bCustomColors = true;
+	}
+	if (bUseTeamColor && GS->Teams.IsValidIndex(1) && GS->Teams[1])
+	{
+		const FLinearColor TC = GS->Teams[1]->TeamColor;
+		if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f) bCustomColors = true;
+	}
+	const FString RedLabel  = bCustomColors ? TEXT("RED  (PHAYDER)") : TEXT("RED");
+	const FString BlueLabel = bCustomColors ? TEXT("BLUE (LIANDRI)") : TEXT("BLUE");
+
+	DrawTeamColumn(0, PX,         *RedLabel,  FLinearColor(1.f,  0.35f, 0.35f, 1.f));
+	DrawTeamColumn(1, PX + ColW,  *BlueLabel, FLinearColor(0.4f, 1.f,   0.4f,  1.f));
 
 	// Subtle divider between columns
 	Canvas->SetLinearDrawColor(Faded(FLinearColor(1.f, 1.f, 1.f, 0.25f)));

@@ -65,7 +65,8 @@ namespace NCHUDEdit
 			return TEXT("CTF");
 		}
 		if (Alias == TEXT("speedometer") || Alias == TEXT("minimap")
-			|| Alias == TEXT("damage_flash") || Alias == TEXT("server_info"))
+			|| Alias == TEXT("damage_flash") || Alias == TEXT("server_info")
+			|| Alias == TEXT("powerups"))   // held-pickup status (DrawHeldPowerups) — a repositionable C++ draw element
 		{
 			return TEXT("Optional Overlays");
 		}
@@ -122,6 +123,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 	// open (it returns GameOnly during a match and would otherwise re-capture the
 	// cursor). Released in ClosePanel. Mirrors SNCPlusHUDDragOverlay.
 	NCPlusHUDDragMode::SetActive(true);
+	bHeldDragMode = true;
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		APlayerController* MenuPC = PlayerOwner->PlayerController;
@@ -407,6 +409,21 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 			SAssignNew(StatusText, STextBlock)
 			.Text(FText::GetEmpty())
 			.ColorAndOpacity(FLinearColor(0.4f, 0.95f, 0.48f, 1.f))
+		]
+		// Stock vs NCPlus bottom bar (weapon/ammo/health). Lives in the HUD editor (moved
+		// out of the iCTF settings tab). Applies immediately: persists [NetcodePlus]
+		// StockBottomBar + live-swaps the bottom-bar widget family on the running HUD.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetStockBottomBarState)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnStockBottomBarChanged)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Stock bottom bar (weapon / ammo / health)")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
 		];
 }
 
@@ -487,8 +504,8 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.OnValueChanged(this, &SNCPlusHUDEditor::OnOffsetXChanged, Alias)
 				.OnValueCommitted(this, &SNCPlusHUDEditor::OnOffsetXCommitted, Alias)
 				.AllowSpin(true)
-				.MinSliderValue(-1920.f)
-				.MaxSliderValue( 1920.f)
+				.MinSliderValue(-4000.f)
+				.MaxSliderValue( 4000.f)
 				.Delta(1.f)
 				.LabelPadding(FMargin(0))
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("X "))) ]
@@ -504,8 +521,8 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.OnValueChanged(this, &SNCPlusHUDEditor::OnOffsetYChanged, Alias)
 				.OnValueCommitted(this, &SNCPlusHUDEditor::OnOffsetYCommitted, Alias)
 				.AllowSpin(true)
-				.MinSliderValue(-1080.f)
-				.MaxSliderValue( 1080.f)
+				.MinSliderValue(-2400.f)
+				.MaxSliderValue( 2400.f)
 				.Delta(1.f)
 				.LabelPadding(FMargin(0))
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Y "))) ]
@@ -837,6 +854,25 @@ FReply SNCPlusHUDEditor::OnSaveClicked()
 	const bool bOk = FNCPlusHUDLayout::SaveLive();
 	SetStatus(bOk ? TEXT("Saved.") : TEXT("Save failed - check log."));
 	return FReply::Handled();
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetStockBottomBarState() const
+{
+	return FNCPlusHUDLayout::WantsStockBottomBar() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnStockBottomBarChanged(ECheckBoxState NewState)
+{
+	const bool bStock = (NewState == ECheckBoxState::Checked);
+	// Persist the explicit choice ([NetcodePlus] StockBottomBar). Written only on this toggle, so a
+	// fresh install isn't silently locked to stock (see FNCPlusHUDLayout::WantsStockBottomBar).
+	FNCPlusHUDLayout::SetStockBottomBar(bStock);
+	// Live-swap the bottom-bar widget family on the running HUD so it applies this match.
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		NCPlusHUDDrawCall::RefreshBottomBarWidgets(PlayerOwner->PlayerController->MyHUD, bStock);
+	}
+	SetStatus(bStock ? TEXT("Bottom bar: Stock (applies now).") : TEXT("Bottom bar: NetcodePlus (applies now)."));
 }
 
 FReply SNCPlusHUDEditor::OnReloadClicked()
@@ -1432,10 +1468,16 @@ void SNCPlusHUDEditor::SetStatus(const FString& Msg)
 	}
 }
 
+SNCPlusHUDEditor::~SNCPlusHUDEditor()
+{
+	// Map load drops the viewport widget without ClosePanel — release the refcount.
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+}
+
 void SNCPlusHUDEditor::ClosePanel()
 {
 	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
-	NCPlusHUDDragMode::SetActive(false);
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		APlayerController* MenuPC = PlayerOwner->PlayerController;

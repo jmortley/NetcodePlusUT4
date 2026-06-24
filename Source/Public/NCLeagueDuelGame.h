@@ -64,6 +64,10 @@ public:
 	 *  bAllowHostPause — see NCPlusHostPause.h). */
 	virtual bool AllowPausing(APlayerController* PC) override;
 
+	/** Defer a host/rcon unpause behind a short server-only resume countdown
+	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	virtual bool ClearPause() override;
+
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void EndPlayerIntro() override;

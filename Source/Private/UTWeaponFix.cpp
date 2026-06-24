@@ -23,6 +23,7 @@
 #include "UTCTFBaseGame.h"
 #include "UTPlayerState.h"
 #include "ElimPlusGame.h"
+#include "WipeoutGame.h"
 #include "MutBotEvents.h"
 #include "NCFireValCollector.h"
 #include "UTPlusSniper.h"
@@ -58,7 +59,7 @@ static TAutoConsoleVariable<int32> CVarRocketLagComp(
 );
 static TAutoConsoleVariable<float> CVarRocketLagCompMaxWindowMs(
     TEXT("ut.RocketLagCompMaxWindowMs"),
-    150.0f,
+    200.0f,
     TEXT("Max rewind/lookback window in ms, applied at any ping. Bounds 'shot behind cover'\n")
     TEXT("(keep <= the hitscan rewind envelope) and naturally degrades compensation once a\n")
     TEXT("shooter's RTT exceeds it. Full coverage holds for RTT up to ~window/1.1. Pairs with\n")
@@ -71,15 +72,16 @@ static TAutoConsoleVariable<float> CVarRocketLagCompMaxWindowMs(
 // 0 disables the grace path entirely (kill switch -> live-projectile-only, the pre-grace behavior).
 static TAutoConsoleVariable<float> CVarRocketLagCompGraceMs(
     TEXT("ut.RocketLagCompGraceMs"),
-    150.0f,
+    200.0f,
     TEXT("Grace buffer (ms) for retaining a resolved rocket/flak shell so a late claim can still\n")
     TEXT("rewind-rescue (close-range timing race). Match ut.RocketLagCompMaxPingMs. 0 = disabled."),
     ECVF_Default
 );
 static TAutoConsoleVariable<float> CVarRocketLagCompMaxPingMs(
     TEXT("ut.RocketLagCompMaxPingMs"),
-    140.0f,
-    TEXT("Reject direct-hit claims from shooters whose RTT (ms) exceeds this. Anti-abuse cutoff."),
+    150.0f,
+    TEXT("Reject direct-hit claims from shooters whose RTT (ms) exceeds this. Anti-abuse cutoff.\n")
+    TEXT("150 covers Israel/EU->NYC (~143ms). Matched to MaxWindowMs/GraceMs (both 200)."),
     ECVF_Default
 );
 
@@ -267,7 +269,7 @@ void AUTWeaponFix::BeginPlay()
     // Fire-validation telemetry gate — decided server-side where the gamemode is
     // unambiguous, then replicated to the owning client. Two conditions, both
     // required:
-    //   1. Mode: Elim or instagib-CTF only (regular CTF / Duel / Wipeout / ShockDom off).
+    //   1. Mode: Elim, instagib-CTF, or Wipeout (regular CTF / Duel / ShockDom off).
     //   2. Weapon: this instance is a UTPlusSniper or UTPlusShockRifle (or child).
     //      Covers instagib rifle + shock rifle (shock children) and sniper + LG
     //      (LG is a sniper reskin). Excludes minigun/enforcer — also hitscan, but
@@ -277,12 +279,13 @@ void AUTWeaponFix::BeginPlay()
         AUTGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AUTGameMode>() : nullptr;
         const bool bElim = GM && GM->IsA(AElimPlusGame::StaticClass());
         const bool bICTF = GM && GM->bIsInstagib && GM->IsA(AUTCTFBaseGame::StaticClass());
+        const bool bWipeout = GM && GM->IsA(AUWipeoutGame::StaticClass());
         const bool bFireValWeapon = IsA(AUTPlusSniper::StaticClass()) || IsA(AUTPlusShockRifle::StaticClass());
         // 3. Server master switch: Mod.ini [NetcodePlus] EnableFireVal (default OFF). Gated
         //    here server-side, so when it's off bFireValActive stays false and the
         //    owner-only replicated flag never tells any client to start the tracker.
         const bool bEnabled = FNCFireValCollector::IsEnabled();
-        bFireValActive = bEnabled && (bElim || bICTF) && bFireValWeapon;
+        bFireValActive = bEnabled && (bElim || bICTF || bWipeout) && bFireValWeapon;
 
         // One-time diagnostic for the relevant weapons, so a "no samples" result is never
         // a mystery again: it shows whether the gate armed and which condition failed.
@@ -292,8 +295,8 @@ void AUTWeaponFix::BeginPlay()
         if (bFireValWeapon && !bLoggedFireValGate)
         {
             bLoggedFireValGate = true;
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireVal] gate: weapon=%s enabled=%d elim=%d ictf=%d -> active=%d"),
-                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bFireValActive ? 1 : 0);
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireVal] gate: weapon=%s enabled=%d elim=%d ictf=%d wipeout=%d -> active=%d"),
+                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bWipeout ? 1 : 0, bFireValActive ? 1 : 0);
         }
     }
 }
@@ -654,6 +657,15 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     // Clean up stale flags
     if (EarliestFireTime > CurrentTime)
     {
+        // DIAGNOSTIC (net-safe, survives Shipping): a normal weapon-switch / put-down penalty is
+        // sub-second. An EarliestFireTime block of >1s is the silent rocket no-reg pathology — this
+        // path returns with NO other log, so surface it server-side to name the gate + value on a repro.
+        if (Role == ROLE_Authority && (EarliestFireTime - CurrentTime) > 1.0f)
+        {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s StartFire mode %d blocked %.2fs by EarliestFireTime=%.2f (now=%.2f)"),
+                *GetName(), FireModeNum, EarliestFireTime - CurrentTime, EarliestFireTime, CurrentTime);
+        }
+
         // 1. Preserve the user's input so they don't have to click again
         if (UTOwner)
         {
@@ -1537,16 +1549,33 @@ void AUTWeaponFix::Tick(float DeltaTime)
     }
 
 
-    // WATCHDOG: Prevent "Infinite Loop" audio/anim if Client disconnects or loses Stop packet.
+    // WATCHDOG: Prevent a stuck firing state from hanging (client disconnect / lost Stop packet, OR
+    // a WEDGED charged-rocket state silently swallowing primaries — the rocket-only ~20s no-reg).
     if (Role == ROLE_Authority && IsFiring())
     {
-        
-        if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
-            CurrentState->GetName().Contains(TEXT("Charged"))))
+        bool bForceRecoverCharged = false;
+        if (UUTWeaponStateFiringChargedRocket_Transactional* Chg = Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState))
         {
-            return;
+            // A legitimately-active charged state always has one of these in flight (loading, grace,
+            // mid-burst, or the post-burst refire wait) and self-transitions — leave it alone. A charged
+            // state that is IsFiring() with NONE of them and not charging is WEDGED: it never self-
+            // transitions, and an incoming primary routes through its inherited stock
+            // UUTWeaponStateFiring::BeginFiringSequence which just sets PendingFireSequence and returns —
+            // no projectile, no reject, no log. Only the rocket has this state, which is why the no-reg
+            // is rocket-only. Let the timeout below force it back to Active so primaries fire again.
+            FTimerManager& TM = GetWorldTimerManager();
+            const bool bBusy = Chg->bCharging
+                || TM.IsTimerActive(Chg->LoadTimerHandle)
+                || TM.IsTimerActive(Chg->GraceTimerHandle)
+                || TM.IsTimerActive(Chg->FireLoadedRocketHandle)
+                || TM.IsTimerActive(Chg->RefireCheckHandle);
+            if (bBusy)
+            {
+                return;
+            }
+            bForceRecoverCharged = true;
         }
-        
+
         float RefireTime = GetRefireTime(CurrentFireMode);
 
         // If we haven't received a valid RPC in > 2.5x the refire time, assume connection loss.
@@ -1554,10 +1583,25 @@ void AUTWeaponFix::Tick(float DeltaTime)
         float TimeoutThreshold = FMath::Max(0.25f, RefireTime * 2.5f);
 
         // LastFireTime is updated in ServerStartFireFixed
-        if (GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode] > TimeoutThreshold)
+        if (LastFireTime.IsValidIndex(CurrentFireMode) &&
+            GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode] > TimeoutThreshold)
         {
-            // Force stop. This kills the looping audio and resets the state.
-            StopFire(CurrentFireMode);
+            if (bForceRecoverCharged)
+            {
+                // GotoActiveState, NOT StopFire — StopFire re-enters the charged EndFiringSequence and
+                // would re-wedge. Reset the fire-mode tracker so the next primary is accepted.
+                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s force-recovered a WEDGED ChargedRocket state (mode=%d CurFiring=%d idle=%.1fs) — was swallowing primaries"),
+                    *GetName(), CurrentFireMode, CurrentlyFiringMode,
+                    GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode]);
+                CurrentlyFiringMode = 255;
+                for (int32 i = 0; i < FireModeActiveState.Num(); i++) { FireModeActiveState[i] = 0; }
+                GotoActiveState();
+            }
+            else
+            {
+                // Force stop. This kills the looping audio and resets the state.
+                StopFire(CurrentFireMode);
+            }
         }
     }
 }
@@ -3315,6 +3359,14 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 			UE_LOG(LogUTWeaponFix, Verbose,
 				TEXT("[BringUp] %s: EarliestFireTime set to %.3f (blocks for %.3fms)"),
 				*GetName(), EarliestFireTime, (MaxBlockTime - CurrentTime) * 1000.f);
+			// DIAGNOSTIC (net-safe, survives Shipping): flag an ABNORMAL bring-up block (>1s) — the
+			// prime suspect for the silent multi-second rocket fire stall. Shows what set it + how far.
+			if (Role == ROLE_Authority && (MaxBlockTime - CurrentTime) > 1.0f)
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[FireBlock] %s BringUp set EarliestFireTime %.2fs ahead (=%.2f, now=%.2f)"),
+					*GetName(), MaxBlockTime - CurrentTime, EarliestFireTime, CurrentTime);
+			}
 		}
 	}
 
@@ -3877,8 +3929,22 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		return;
 	}
 	const float PingMs = UTOwner->PlayerState->ExactPing;
+
+	// DIAGNOSTIC: log every claim that reaches here (passed target/team validation), with the
+	// shooter ping and how many projectiles are currently tracked. Tells us whether claims are
+	// even arriving for high-ping shooters, and whether their rocket got tracked at all.
+	const int32 TrackedAtClaim = ActiveServerProjectiles.Num();
+	UE_LOG(LogUTWeaponFix, Warning,
+		TEXT("ProjRewind CLAIM: tgt=%s fm=%d ping=%.0f tracked=%d"),
+		*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TrackedAtClaim);
+
 	if (PingMs > CVarRocketLagCompMaxPingMs.GetValueOnGameThread())
 	{
+		// DIAGNOSTIC: previously a silent return — now logged so over-cutoff shooters (e.g. Kuj
+		// at ~143) show up in the log instead of vanishing.
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("ProjRewind REJECTED: shooter over ping cutoff (ping=%.0f > %.0f)"),
+			PingMs, CVarRocketLagCompMaxPingMs.GetValueOnGameThread());
 		return; // shooter too laggy for projectile lag comp
 	}
 	const float MaxWindowMs = CVarRocketLagCompMaxWindowMs.GetValueOnGameThread();
@@ -3897,6 +3963,13 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	int32 FoundIndex = -1;
 	int32 GraceIndex = -1;   // fallback: a matching resolved projectile still within the grace window
 
+	// DIAGNOSTIC counters for the no-op path — distinguish "claim too late for the grace window"
+	// (raise grace) from "no matching projectile tracked / resolve hook never fired" (fix the trigger).
+	// Filled in as the loop prunes out-of-grace entries below.
+	int32 DiagFmDroppedTooOld   = 0;    // fm-matching resolved entries past the grace window
+	int32 DiagFmInvalidNoExpire = 0;    // fm-matching entries invalidated WITHOUT a resolve snapshot
+	float DiagNewestDroppedAgeMs = -1.f;// age of the fm-match that MOST NEARLY fit (smallest age > grace)
+
 	for (int32 i = 0; i < ActiveServerProjectiles.Num(); i++)
 	{
 		FActiveServerProjectile& Entry = ActiveServerProjectiles[i];
@@ -3914,6 +3987,23 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 				&& ((NowSec - Entry.ExpireTime) <= GraceSec);
 			if (!bWithinGrace)
 			{
+				// DIAGNOSTIC: record fm-matching entries we're about to drop, to explain a later no-op.
+				if (Entry.FireMode == ClaimedFireMode)
+				{
+					if (Entry.ExpireTime >= 0.f)
+					{
+						const float AgeMs = (NowSec - Entry.ExpireTime) * 1000.f;
+						DiagFmDroppedTooOld++;
+						if (DiagNewestDroppedAgeMs < 0.f || AgeMs < DiagNewestDroppedAgeMs)
+						{
+							DiagNewestDroppedAgeMs = AgeMs; // the one that most nearly fit the grace window
+						}
+					}
+					else
+					{
+						DiagFmInvalidNoExpire++; // invalidated without OnTrackedProjectileResolved firing
+					}
+				}
 				ActiveServerProjectiles.RemoveAt(i);
 				i--;
 				continue;
@@ -3979,8 +4069,8 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		// hit the target present-time and applied damage (normal), or detonated/whiffed and its
 		// grace window already expired (claim arrived too late, or grace disabled). Don't re-apply.
 		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind no-op: no live or in-grace projectile (fm=%d ping=%.0f) — present-time hit OR claim past grace"),
-			(int32)ClaimedFireMode, PingMs);
+			TEXT("ProjRewind no-op: no live/grace proj (fm=%d ping=%.0f tracked=%d fmDroppedTooOld=%d newestAge=%.0fms fmInvalidNoResolve=%d grace=%.0fms) — present-time hit OR claim past grace"),
+			(int32)ClaimedFireMode, PingMs, TrackedAtClaim, DiagFmDroppedTooOld, DiagNewestDroppedAgeMs, DiagFmInvalidNoExpire, GraceSec * 1000.f);
 		return;
 	}
 

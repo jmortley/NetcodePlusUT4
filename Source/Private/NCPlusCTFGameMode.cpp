@@ -847,6 +847,17 @@ bool ANCPlusCTFGameMode::ValidateHat(AUTPlayerState* HatOwner, const FString& Ha
 // without changing TeamArenaCharacter class layout
 void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
+	// Idempotency guard: a RestartPlayer on a controller that ALREADY has a living pawn
+	// must be a no-op. The engine reuses the existing pawn but still re-runs
+	// SetPlayerDefaults -> GiveDefaultInventory, and stock AddInventory dedupes only by
+	// instance (not class), so a second warmup RestartPlayer would grant a second copy of
+	// every default weapon = the doubled weapon bar. First spawn (no pawn) is unaffected;
+	// the anti-repeat tracking below only has fresh StartSpot data when a spawn occurred.
+	if (NewPlayer && NewPlayer->GetPawn())
+	{
+		return;
+	}
+
 	Super::RestartPlayer(NewPlayer);
 
 	// Anti-repeat tracking (IG+ style): keep PlayerRecentSpawns updated from the
@@ -2102,8 +2113,19 @@ void ANCPlusCTFGameMode::CreateGameURLOptions(TArray<TSharedPtr<TAttributeProper
 
 bool ANCPlusCTFGameMode::AllowPausing(APlayerController* PC)
 {
-	// Stock permissions (rcon admin / listen with no remotes) are preserved;
-	// this only ADDS the ?HostId= match host when the server's Mod.ini sets
-	// [NetcodePlus] bAllowHostPause=true.
-	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool ANCPlusCTFGameMode::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
 }

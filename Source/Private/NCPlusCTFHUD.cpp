@@ -26,12 +26,16 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 
 	// Our custom scoreboard widget
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusCTFScoreboard"));
-	// Custom split WeaponBar + modernized HP/Armor (replace stock variants).
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
-	// Modernized ammo counter — replaces stock bpHW_WeaponInfo (3 styles, fully editable).
-	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
+	// Bottom bar: NCPlus custom only when NOT in stock mode. In stock mode the parent
+	// AUTHUD_CTF's RequiredHudWidgetClasses stock widgets are kept (the BeginPlay strip
+	// below is skipped for them), so we add nothing here. Only ONE family ever loads.
+	if (!FNCPlusHUDLayout::WantsStockBottomBar())
+	{
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"));
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"));
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"));
+		HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"));
+	}
 	// Optional opt-in accuracy widget — hidden by default (ShouldDraw requires
 	// a layout entry); user enables via nchud and picks current/specific weapon.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
@@ -73,21 +77,36 @@ void ANCPlusCTFHUD::BeginPlay()
 {
 	// Remove stock widgets we're replacing BEFORE Super::BeginPlay instantiates them.
 	// RequiredHudWidgetClasses is loaded from DefaultGame.ini config.
-	RequiredHudWidgetClasses.RemoveAll([](const FString& Entry)
+	// Stock bottom-bar widgets are stripped ONLY when we're drawing the NCPlus ones;
+	// in stock-bottom-bar mode we keep the parent's stock weapon/ammo/health widgets.
+	const bool bStockBottom = FNCPlusHUDLayout::WantsStockBottomBar();
+	RequiredHudWidgetClasses.RemoveAll([bStockBottom](const FString& Entry)
 	{
-		return Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
-			|| Entry.Contains(TEXT("CTFScoreboard"))     // stock CTF scoreboard
-			|| Entry.Contains(TEXT("TeamScoreboard"))    // stock team scoreboard (fallback)
-			|| Entry.Contains(TEXT("bpHW_WeaponBar"))    // replaced by our split bar
-			|| Entry.Contains(TEXT("bpHW_QuickStats"))   // replaced by our HP/Armor widget
-			|| Entry.Contains(TEXT("bpHW_Paperdoll"))    // fallback +HP/Armor mode would conflict
-			|| Entry.Contains(TEXT("bpHW_WeaponInfo"))   // replaced by our ammo counter
+		// Always replaced — our scorebar / scoreboard / flag-status supersede these
+		// regardless of which bottom bar is active.
+		if (Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
+			|| Entry.Contains(TEXT("CTFScoreboard"))  // stock CTF scoreboard
+			|| Entry.Contains(TEXT("TeamScoreboard")) // stock team scoreboard (fallback)
 			// The stock CTF flag status widget is registered in DefaultGame.ini as
 			// /Game/RestrictedAssets/UI/HUDWidgets/bpHW_CTFFlagStatus.bpHW_CTFFlagStatus_C
 			// (a BP wrapper around UTHUDWidget_CTFFlagStatus). Matching "CTFFlagStatus"
 			// catches both the BP path and any future C++ entry. Our subclass is added
-			// via HudWidgetClasses below so this strip removes only the stock one.
-			|| Entry.Contains(TEXT("CTFFlagStatus"));
+			// via HudWidgetClasses above so this strip removes only the stock one.
+			|| Entry.Contains(TEXT("CTFFlagStatus")))
+		{
+			return true;
+		}
+		// Bottom bar (weapon/ammo/health): strip the stock widgets only when we're
+		// drawing the NCPlus replacements. In stock mode, keep them so they draw.
+		if (!bStockBottom)
+		{
+			return Entry.Contains(TEXT("bpHW_WeaponBar"))    // replaced by our split bar
+				|| Entry.Contains(TEXT("bpHW_QuickStats"))   // replaced by our HP/Armor widget
+				|| Entry.Contains(TEXT("bpHW_Paperdoll"))    // fallback +HP/Armor mode would conflict
+				|| Entry.Contains(TEXT("bpHW_WeaponInfo"))   // replaced by our ammo counter
+				|| Entry.Contains(TEXT("bpHW_Powerups"));    // replaced by NCPlusHUDDrawCall::DrawHeldPowerups
+		}
+		return false;
 	});
 
 	Super::BeginPlay();
@@ -225,6 +244,9 @@ void ANCPlusCTFHUD::DrawHUD()
 		DrawSpectatorTarget();
 	}
 
+	// Held-pickup status (amp/berserk/siphon countdown + boot charges) — NCPlus mode only.
+	NCPlusHUDDrawCall::DrawHeldPowerups(this, Canvas);
+
 	// Optional opt-in overlays (default OFF). DrawDamageFlash must be last so it
 	// tints over every other HUD draw.
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
@@ -351,33 +373,40 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	const float ScoreBoxWidth = 50.f * RenderScale * ScoreScale;
 	const float GapWidth = 8.f * RenderScale;
 
+	// Per-element opacity (the editor's Op slider). FadeL scales every tile color's
+	// alpha; WhiteOp is the faded text color. Op defaults to 1.0 (no override) so
+	// untouched layouts render pixel-identically.
+	const float ScoreOp = NCPlusHUDDrawCall::GetOpacity(TEXT("scorebar"));
+	auto FadeL = [ScoreOp](FLinearColor C) -> FLinearColor { C.A *= ScoreOp; return C; };
+	const FColor WhiteOp(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(ScoreOp * 255.f), 0, 255));
+
 	// Team 0 (left)
 	float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
-	Canvas->SetLinearDrawColor(Team0Color);
+	Canvas->SetLinearDrawColor(FadeL(Team0Color));
 	Canvas->DrawTile(Canvas->DefaultTexture, LeftBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
 	float ScoreBoxX0 = CenterX - GapWidth - ScoreBoxWidth;
-	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
 
 	// Team 1 (right)
 	float ScoreBoxX1 = CenterX + GapWidth;
-	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
 
 	float RightBarX = CenterX + GapWidth + ScoreBoxWidth;
-	Canvas->SetLinearDrawColor(Team1Color);
+	Canvas->SetLinearDrawColor(FadeL(Team1Color));
 	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
 
 	// Score tails
 	float TailHeight = 14.f * RenderScale * ScoreScale;
-	Canvas->SetLinearDrawColor(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
-	Canvas->SetLinearDrawColor(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f));
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f)));
 	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
 
 	// Center divider
-	Canvas->SetLinearDrawColor(FLinearColor::White);
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor::White));
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
 	// Text — single "scorebar" font override drives both team-name and
@@ -396,27 +425,27 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 
 	// Team 0 name
 	Canvas->TextSize(TeamNameFont, Team0Name, XL, YL, FontScale, FontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamNameFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
 	// Team 0 score
 	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
 	Canvas->TextSize(TeamScoreFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamScoreFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
 	// Team 1 score
 	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
 	Canvas->TextSize(TeamScoreFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamScoreFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
 		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
 
 	// Team 1 name
 	Canvas->TextSize(TeamNameFont, Team1Name, XL, YL, FontScale, FontScale);
-	Canvas->DrawColor = FColor::White;
+	Canvas->DrawColor = WhiteOp;
 	Canvas->DrawText(TeamNameFont, Team1Name, RightBarX + 8.f * RenderScale,
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
 
@@ -465,7 +494,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		const int32 Secs = OTSeconds % 60;
 		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
-		Canvas->DrawColor = FColor(255, 200, 60, 255);    // amber for OT
+		Canvas->DrawColor = FColor(255, 200, 60, WhiteOp.A);    // amber for OT
 		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 		ClockBottomY = ClockY + YL;
 	}
@@ -478,7 +507,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		const int32 Secs = AdvSeconds % 60;
 		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
-		Canvas->DrawColor = FColor(255, 200, 60, 255);    // amber matches OT
+		Canvas->DrawColor = FColor(255, 200, 60, WhiteOp.A);    // amber matches OT
 		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 		ClockBottomY = ClockY + YL;
 	}
@@ -492,9 +521,9 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 			FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 			Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
 			if (RemainingTime <= 30)
-				Canvas->DrawColor = FColor(255, 60, 60, 255);
+				Canvas->DrawColor = FColor(255, 60, 60, WhiteOp.A);
 			else
-				Canvas->DrawColor = FColor::White;
+				Canvas->DrawColor = WhiteOp;
 			Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 			ClockBottomY = ClockY + YL;
 		}
@@ -506,7 +535,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 			int32 Secs = Elapsed % 60;
 			FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
 			Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
-			Canvas->DrawColor = FColor::White;
+			Canvas->DrawColor = WhiteOp;
 			Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
 			ClockBottomY = ClockY + YL;
 		}
@@ -538,7 +567,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	{
 		const float StatusScale = RenderScale * 0.7f;
 		Canvas->TextSize(SmallFont, StatusStr, XL, YL, StatusScale, StatusScale);
-		Canvas->DrawColor = StatusColor;
+		StatusColor.A = WhiteOp.A; Canvas->DrawColor = StatusColor;
 		Canvas->DrawText(SmallFont, StatusStr, CenterX - XL * 0.5f, ClockBottomY + 1.f * RenderScale, StatusScale, StatusScale);
 	}
 }

@@ -320,7 +320,14 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 
     if (RocketLauncher->NumLoadedRockets <= 0)
     {
-        // Player released before first rocket loaded. Let LoadTimer finish.
+        // Nothing loaded, and LoadTimer is no longer active (the still-loading case is handled
+        // above at the IsTimerActive(LoadTimerHandle) branch). "Let LoadTimer finish" was a bug:
+        // no timer is armed, so the charged state WEDGES here — still IsFiring(), not charging, no
+        // timer — and then silently swallows every following primary via the inherited stock
+        // UUTWeaponStateFiring::BeginFiringSequence (the rocket-only secondary->primary no-reg).
+        // Go idle and pick up any buffered primary, exactly like the sibling exits above.
+        GetOuterAUTWeapon()->GotoActiveState();
+        AttemptBufferedFire();
         return;
     }
 

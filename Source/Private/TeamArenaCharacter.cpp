@@ -59,6 +59,11 @@ static TAutoConsoleVariable<float> CVarPredStabSlowRise(
 	4.0f,
 	TEXT("Projectile-prediction stability: FInterpTo rate when re-arming the lead (target straightened). Low = ease up slowly (~250ms)."),
 	ECVF_Default);
+static TAutoConsoleVariable<int32> CVarHideArmorShield(
+	TEXT("ncp.HideArmorShield"),
+	0,
+	TEXT("ForceModels armour-shield fallback: 1 = HIDE the shield-belt overlay instead of recolouring it (for community models whose shield material bakes the gold and ignores the Color recolour). Default 0 = recolour to the team skin colour. Runtime-toggleable; client-side."),
+	ECVF_Default);
 
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
@@ -1168,9 +1173,68 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			}
 		}
 
+		// ── ForceModels: optional fallback — HIDE the shield-belt overlay (ncp.HideArmorShield 1) ──
+		// The continuous recolour below tints the shield to the team skin colour via the "Color" param
+		// (the working path, DEFAULT). This hide is the fallback for community models whose shield
+		// material bakes the gold and ignores that recolour. Gated on IsEnabled so it also catches
+		// transiently-unrecoloured pawns; other overlays (UDamage, etc.) are untouched, and vanilla
+		// play keeps the stock shield.
+		if (bShouldShow && NCPlusForceModels::IsEnabled() && CVarHideArmorShield.GetValueOnGameThread() != 0)
+		{
+			UMaterialInstanceDynamic* ShieldMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
+			if (ShieldMID && ShieldMID->Parent && ShieldMID->Parent->GetName().Contains(TEXT("Shield")))
+			{
+				bShouldShow = false;
+			}
+		}
+
 		if (OverlayMesh->IsVisible() != bShouldShow)
 		{
 			OverlayMesh->SetVisibility(bShouldShow, true);
+		}
+	}
+
+	// =========================================================================
+	// Character/armour OVERLAY recolour (CONTINUOUS) — armour/shield outlives spawn protection
+	// =========================================================================
+	// The OverlayMesh (shield-belt / OverlayElimCharacter / any active char overlay) carries a hardcoded
+	// gold: stock UTCharacter::UpdateArmorOverlay (UTCharacter.cpp:5544) sets the shield MID's "Color"
+	// param to (1,1,0) for blue / (0.75,0.75,0.1) for red, and "TeamColor" to the team colour — the
+	// "Color" write is the gold lever (TeamColor alone won't shift it). Re-tint it to the ForceModels
+	// skin colour EVERY frame, NOT gated on spawn protection: the shield-belt persists with armour and is
+	// re-applied on any overlay rebuild, so the old spawn-protection-only tint reverted to gold the
+	// instant protection dropped. No-op when ForceModels isn't recolouring this pawn / there's no overlay MID.
+	{
+		FLinearColor SkinCol = GetTeamColor();
+		bool bForcedSkin = false;
+		if (NCPlusForceModels::IsEnabled())
+		{
+			const int32 MyTeam = (int32)GetTeamNum();
+			if (MyTeam != 255)
+			{
+				const bool bFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
+				const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bFriendly);
+				TSubclassOf<AUTCharacterContent> Content = NCPlusForceModels::GetModelClass(Side);
+				if (Content && NCPlusForceModels::IsModelAllowed(Content))
+				{
+					SkinCol     = NCPlusForceModels::GetSkinColour(Side);
+					bForcedSkin = true;
+				}
+			}
+		}
+
+		static const FName NAME_OverlayTeamColor(TEXT("TeamColor"));
+		static const FName NAME_OverlayColor(TEXT("Color"));
+		if (bForcedSkin && OverlayMesh && OverlayMesh->IsRegistered())
+		{
+			if (UMaterialInstanceDynamic* OvMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0)))
+			{
+				// "Color" is the lever that recolours the shield-belt: stock UpdateArmorOverlay puts the
+				// gold on the "Color" param (it also sets "TeamColor" to the team colour, but that doesn't
+				// drive the gold). We set both so non-shield overlays that key off TeamColor recolour too.
+				OvMID->SetVectorParameterValue(NAME_OverlayTeamColor, SkinCol);
+				OvMID->SetVectorParameterValue(NAME_OverlayColor, SkinCol);
+			}
 		}
 	}
 
@@ -1189,9 +1253,29 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			bShowGlowToViewer = false;
 		}
 
-		// --- PERF: Dirty flag — only update materials when state changes ---
-		// Values are constant within each state (glow on vs glow off).
-		// bLastShowGlowState initialized to 0xFF to force first-frame apply.
+		// Resolve the glow colour ONCE for the body hit-flash. Default = stock team colour (unchanged
+		// vanilla behaviour); use the ForceModels skin colour when it's recolouring this enemy's body.
+		// (The OVERLAY recolour now lives in the CONTINUOUS block above — the armour/shield overlay
+		// outlives spawn protection, so it can't be gated on it.)
+		FLinearColor GlowColour = GetTeamColor();
+		if (bShowGlowToViewer && NCPlusForceModels::IsEnabled())
+		{
+			const int32 GlowTeam = (int32)GetTeamNum();
+			if (GlowTeam != 255)
+			{
+				const bool bGlowFriendly = (GlowTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
+				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly);
+				TSubclassOf<AUTCharacterContent> GlowContent = NCPlusForceModels::GetModelClass(GlowSide);
+				if (GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent))
+				{
+					GlowColour = NCPlusForceModels::GetSkinColour(GlowSide);
+				}
+			}
+		}
+
+		// --- PERF: Dirty flag — body-material work only on state change ---
+		// Values are constant within each state (glow on vs glow off). The overlay tint above runs
+		// every frame; bLastShowGlowState initialized to 0xFF to force first-frame apply.
 		uint8 CurrentState = bShowGlowToViewer ? 1 : 0;
 		if (CurrentState == bLastShowGlowState)
 		{
@@ -1205,14 +1289,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 		if (bShowGlowToViewer)
 		{
-			FLinearColor BaseTeamColor = GetTeamColor();
-			float BrightnessMult = 20.0f;
-			FLinearColor ObviousColor = FLinearColor(
-				BaseTeamColor.R * BrightnessMult,
-				BaseTeamColor.G * BrightnessMult,
-				BaseTeamColor.B * BrightnessMult,
-				1.0f
-			);
+			// Body hit-flash (mostly hidden behind the spawn overlay, but covers the brief post-overlay
+			// window and any pawn whose overlay isn't currently active). Uses the same GlowColour resolved
+			// above, overbright 20x into the HitFlash param as before.
+			const float BrightnessMult = 20.0f;
+			const FLinearColor ObviousColor(GlowColour.R * BrightnessMult, GlowColour.G * BrightnessMult, GlowColour.B * BrightnessMult, 1.0f);
 
 			for (UMaterialInstanceDynamic* MI : BodyMIs)
 			{

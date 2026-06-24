@@ -42,11 +42,16 @@ class SUTCosmeticSelector : public SCompoundWidget
 	void Construct(const FArguments& InArgs);
 	void ClosePanel();
 
+	/** RAII backstop: release a held NCPlusHUDDragMode count if torn down without
+	 *  ClosePanel (e.g. viewport widgets dropped on a map load). */
+	virtual ~SUTCosmeticSelector();
+
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 	virtual bool SupportsKeyboardFocus() const override { return true; }
 
 private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
+	bool bHeldDragMode = false;  // true while this panel holds a NCPlusHUDDragMode refcount
 
 	/** All discovered items per slot */
 	TMap<ECosmeticSlot, TArray<FCosmeticItemInfo>> ItemsBySlot;

@@ -85,6 +85,10 @@ void AShockDomHUD::DrawHUD()
 		DrawControlPointWorldMarkers(Points);
 	}
 
+	// Held-pickup status (amp/berserk/siphon countdown + boot charges) — NCPlus mode only.
+	// ShockDomHUD overrides AWipeoutHUD::DrawHUD, so it needs its own call.
+	NCPlusHUDDrawCall::DrawHeldPowerups(this, Canvas);
+
 	// Optional opt-in overlays (default OFF). DrawDamageFlash must be last so it
 	// tints over every other HUD draw.
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);

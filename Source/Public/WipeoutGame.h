@@ -844,4 +844,8 @@ public:
 	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
 	 *  bAllowHostPause — see NCPlusHostPause.h). */
 	virtual bool AllowPausing(APlayerController* PC) override;
+
+	/** Defer a host/rcon unpause behind a short server-only resume countdown
+	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	virtual bool ClearPause() override;
 };
