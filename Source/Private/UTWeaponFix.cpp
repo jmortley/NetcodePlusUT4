@@ -657,6 +657,15 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     // Clean up stale flags
     if (EarliestFireTime > CurrentTime)
     {
+        // DIAGNOSTIC (net-safe, survives Shipping): a normal weapon-switch / put-down penalty is
+        // sub-second. An EarliestFireTime block of >1s is the silent rocket no-reg pathology — this
+        // path returns with NO other log, so surface it server-side to name the gate + value on a repro.
+        if (Role == ROLE_Authority && (EarliestFireTime - CurrentTime) > 1.0f)
+        {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s StartFire mode %d blocked %.2fs by EarliestFireTime=%.2f (now=%.2f)"),
+                *GetName(), FireModeNum, EarliestFireTime - CurrentTime, EarliestFireTime, CurrentTime);
+        }
+
         // 1. Preserve the user's input so they don't have to click again
         if (UTOwner)
         {
@@ -3318,6 +3327,14 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 			UE_LOG(LogUTWeaponFix, Verbose,
 				TEXT("[BringUp] %s: EarliestFireTime set to %.3f (blocks for %.3fms)"),
 				*GetName(), EarliestFireTime, (MaxBlockTime - CurrentTime) * 1000.f);
+			// DIAGNOSTIC (net-safe, survives Shipping): flag an ABNORMAL bring-up block (>1s) — the
+			// prime suspect for the silent multi-second rocket fire stall. Shows what set it + how far.
+			if (Role == ROLE_Authority && (MaxBlockTime - CurrentTime) > 1.0f)
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[FireBlock] %s BringUp set EarliestFireTime %.2fs ahead (=%.2f, now=%.2f)"),
+					*GetName(), MaxBlockTime - CurrentTime, EarliestFireTime, CurrentTime);
+			}
 		}
 	}
 

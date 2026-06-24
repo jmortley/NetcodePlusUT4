@@ -332,11 +332,16 @@ void AUTPlusWeap_RocketLauncher::FireShot()
         // Check if we are physically allowed to fire right now
         if (FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime))
         {
-            // LOG AND ABORT
-            //UE_LOG(LogUTRocketLauncher, Warning, TEXT("[FireShot] ABORTING ILLEGAL SHOT! IsFireModeOnCooldown=TRUE. Time: %.4f"), CurrentTime);
-
-            // OPTIONAL: Force the timer to stay clean
-            // If the rhythm logic is aggressive, ensure we don't snap things here.
+            // DIAGNOSTIC (net-safe, survives Shipping): this silent abort is a rocket no-reg suspect.
+            // Surface an ABNORMAL (>1s) block server-side so a repro names the values that caused it.
+            const float Lft = LastFireTime.IsValidIndex(CurrentFireMode) ? LastFireTime[CurrentFireMode] : -1.f;
+            if (Role == ROLE_Authority &&
+                ((EarliestFireTime - CurrentTime) > 1.0f || (Lft > 0.f && (Lft - CurrentTime) > 1.0f)))
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[FireBlock] RocketLauncher FireShot mode %d abort: EarliestFireTime=%.2f LastFireTime=%.2f now=%.2f"),
+                    CurrentFireMode, EarliestFireTime, Lft, CurrentTime);
+            }
+            // ABORT to protect the rhythm logic (original behavior).
             return;
         }
     }
