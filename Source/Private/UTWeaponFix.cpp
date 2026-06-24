@@ -1549,16 +1549,33 @@ void AUTWeaponFix::Tick(float DeltaTime)
     }
 
 
-    // WATCHDOG: Prevent "Infinite Loop" audio/anim if Client disconnects or loses Stop packet.
+    // WATCHDOG: Prevent a stuck firing state from hanging (client disconnect / lost Stop packet, OR
+    // a WEDGED charged-rocket state silently swallowing primaries — the rocket-only ~20s no-reg).
     if (Role == ROLE_Authority && IsFiring())
     {
-        
-        if (CurrentState && (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()) ||
-            CurrentState->GetName().Contains(TEXT("Charged"))))
+        bool bForceRecoverCharged = false;
+        if (UUTWeaponStateFiringChargedRocket_Transactional* Chg = Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState))
         {
-            return;
+            // A legitimately-active charged state always has one of these in flight (loading, grace,
+            // mid-burst, or the post-burst refire wait) and self-transitions — leave it alone. A charged
+            // state that is IsFiring() with NONE of them and not charging is WEDGED: it never self-
+            // transitions, and an incoming primary routes through its inherited stock
+            // UUTWeaponStateFiring::BeginFiringSequence which just sets PendingFireSequence and returns —
+            // no projectile, no reject, no log. Only the rocket has this state, which is why the no-reg
+            // is rocket-only. Let the timeout below force it back to Active so primaries fire again.
+            FTimerManager& TM = GetWorldTimerManager();
+            const bool bBusy = Chg->bCharging
+                || TM.IsTimerActive(Chg->LoadTimerHandle)
+                || TM.IsTimerActive(Chg->GraceTimerHandle)
+                || TM.IsTimerActive(Chg->FireLoadedRocketHandle)
+                || TM.IsTimerActive(Chg->RefireCheckHandle);
+            if (bBusy)
+            {
+                return;
+            }
+            bForceRecoverCharged = true;
         }
-        
+
         float RefireTime = GetRefireTime(CurrentFireMode);
 
         // If we haven't received a valid RPC in > 2.5x the refire time, assume connection loss.
@@ -1566,10 +1583,25 @@ void AUTWeaponFix::Tick(float DeltaTime)
         float TimeoutThreshold = FMath::Max(0.25f, RefireTime * 2.5f);
 
         // LastFireTime is updated in ServerStartFireFixed
-        if (GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode] > TimeoutThreshold)
+        if (LastFireTime.IsValidIndex(CurrentFireMode) &&
+            GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode] > TimeoutThreshold)
         {
-            // Force stop. This kills the looping audio and resets the state.
-            StopFire(CurrentFireMode);
+            if (bForceRecoverCharged)
+            {
+                // GotoActiveState, NOT StopFire — StopFire re-enters the charged EndFiringSequence and
+                // would re-wedge. Reset the fire-mode tracker so the next primary is accepted.
+                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s force-recovered a WEDGED ChargedRocket state (mode=%d CurFiring=%d idle=%.1fs) — was swallowing primaries"),
+                    *GetName(), CurrentFireMode, CurrentlyFiringMode,
+                    GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode]);
+                CurrentlyFiringMode = 255;
+                for (int32 i = 0; i < FireModeActiveState.Num(); i++) { FireModeActiveState[i] = 0; }
+                GotoActiveState();
+            }
+            else
+            {
+                // Force stop. This kills the looping audio and resets the state.
+                StopFire(CurrentFireMode);
+            }
         }
     }
 }
