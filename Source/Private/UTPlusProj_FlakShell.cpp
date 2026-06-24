@@ -23,10 +23,16 @@ void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 		if (HitChar)
 		{
 			AUTCharacter* OwnerChar = Cast<AUTCharacter>(GetInstigator());
-			AUTWeaponFix* Weapon = OwnerChar ? Cast<AUTWeaponFix>(OwnerChar->GetWeapon()) : nullptr;
-			if (Weapon)
+			// Only the SHOOTER's own client can route the claim (the Server RPC needs the weapon's
+			// owning connection). A bot's / remote player's replicated shell also runs this here,
+			// where GetWeapon() resolves a weapon we don't own → "No owning connection" RPC drop.
+			if (OwnerChar && OwnerChar->IsLocallyControlled())
 			{
-				Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 1); // FireMode 1 = alt-fire (flak shell)
+				AUTWeaponFix* Weapon = Cast<AUTWeaponFix>(OwnerChar->GetWeapon());
+				if (Weapon)
+				{
+					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 1); // FireMode 1 = alt-fire (flak shell)
+				}
 			}
 		}
 	}

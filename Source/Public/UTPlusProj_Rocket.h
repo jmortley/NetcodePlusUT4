@@ -23,4 +23,7 @@ public:
 
 	virtual void ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp,
 		const FVector& HitLocation, const FVector& HitNormal) override;
+
+	// Diagnostic: logs each SERVER-spawned rocket (see UTPlusProj_Rocket.cpp).
+	virtual void BeginPlay() override;
 };
