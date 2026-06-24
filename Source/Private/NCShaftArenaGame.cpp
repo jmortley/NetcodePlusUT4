@@ -418,10 +418,10 @@ void ANCShaftArenaGame::BuildMatchSummary(FNCMatchSummary& Out) const
 
 bool ANCShaftArenaGame::AllowPausing(APlayerController* PC)
 {
-	// Stock permissions (rcon admin / listen with no remotes) are preserved;
-	// this only ADDS the ?HostId= match host when the server's Mod.ini sets
-	// [NetcodePlus] bAllowHostPause=true.
-	return Super::AllowPausing(PC) || NCPlusHostPause::HostMayPause(PC, this);
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
 }
 
 bool ANCShaftArenaGame::ClearPause()

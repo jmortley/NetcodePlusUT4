@@ -31,10 +31,35 @@ static void LoadHostPauseConfig()
 	GConfig->GetBool(TEXT("NetcodePlus"), TEXT("bAllowHostPause"), GHostPauseEnabled, ModIni);
 }
 
+// ── Captain pause ([NetcodePlus] bAllowCaptainPause + CaptainPauseCooldownSec) ──
+// The bot passes ?Captains=<id>,<id> (top-ELO per team) so each side has a
+// pause-capable player. Read once per process (server restart applies changes).
+static bool  GCaptainPauseLoaded      = false;
+static bool  GCaptainPauseEnabled     = false;
+static int32 GCaptainPauseCooldownSec = 8;
+static float GLastCaptainPauseTime    = -1.f;   // world seconds of the last captain pause (one match per server)
+
+static void LoadCaptainPauseConfig()
+{
+	if (GCaptainPauseLoaded)
+	{
+		return;
+	}
+	GCaptainPauseLoaded = true;
+
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	GConfig->GetBool(TEXT("NetcodePlus"), TEXT("bAllowCaptainPause"), GCaptainPauseEnabled, ModIni);
+	GConfig->GetInt(TEXT("NetcodePlus"), TEXT("CaptainPauseCooldownSec"), GCaptainPauseCooldownSec, ModIni);
+	if (GCaptainPauseCooldownSec < 0)
+	{
+		GCaptainPauseCooldownSec = 0;
+	}
+}
+
 // ── Unpause countdown ────────────────────────────────────────────────────────
-// [NetcodePlus] UnpauseCountdownSec (default 3; 0 = disabled). Cached per process.
+// [NetcodePlus] UnpauseCountdownSec (default 7; 0 = disabled). Cached per process.
 static bool  GUnpauseCfgLoaded = false;
-static int32 GUnpauseSec       = 3;
+static int32 GUnpauseSec       = 7;
 
 static void LoadUnpauseConfig()
 {
@@ -121,6 +146,84 @@ namespace NCPlusHostPause
 		const FString HostId = GM->GetHostId();
 		return !HostId.IsEmpty() && PS->UniqueId.IsValid()
 			&& HostId.Equals(PS->UniqueId.ToString(), ESearchCase::IgnoreCase);
+	}
+
+	bool CaptainMayPause(APlayerController* PC, AUTBaseGameMode* GM)
+	{
+		LoadCaptainPauseConfig();
+		if (!GCaptainPauseEnabled || PC == nullptr || GM == nullptr)
+		{
+			return false;
+		}
+		AUTPlayerState* PS = Cast<AUTPlayerState>(PC->PlayerState);
+		if (PS == nullptr || !PS->UniqueId.IsValid())
+		{
+			return false;
+		}
+		UWorld* World = GM->GetWorld();
+		if (World == nullptr)
+		{
+			return false;
+		}
+
+		// The bot passes ?Captains=<id>,<id> (top-ELO player per team) ONLY for PUGs,
+		// so its presence doubles as the PUG gate. Parsed per call — pause attempts are
+		// rare, so no cache (avoids stale-match state).
+		const FString CaptainsOpt = World->URL.GetOption(TEXT("Captains="), TEXT(""));
+		if (CaptainsOpt.IsEmpty())
+		{
+			return false;
+		}
+
+		const FString MyId = PS->UniqueId.ToString();
+		TArray<FString> Ids;
+		CaptainsOpt.ParseIntoArray(Ids, TEXT(","), /*CullEmpty=*/true);
+		bool bIsCaptain = false;
+		for (const FString& Id : Ids)
+		{
+			// UE 4.15 has no FString::TrimStartAndEnd; .Trim()/.TrimTrailing() mutate in place.
+			FString Trimmed = Id;
+			Trimmed.Trim();
+			Trimmed.TrimTrailing();
+			if (Trimmed.Equals(MyId, ESearchCase::IgnoreCase))
+			{
+				bIsCaptain = true;
+				break;
+			}
+		}
+		if (!bIsCaptain)
+		{
+			return false;
+		}
+
+		// Anti-spam: throttle a NEW captain pause (world currently unpaused) by a shared
+		// cooldown. World time is frozen while paused and resets per map, so a stored time
+		// in the future = a new match → reset (otherwise the first pause of the next match
+		// would be wrongly blocked). The cooldown is measured in UNPAUSED seconds, which is
+		// exactly "don't re-pause too soon after resuming". Unpause is never throttled.
+		AWorldSettings* WS = GM->GetWorldSettings();
+		const bool bWouldBeNewPause = (WS != nullptr && WS->Pauser == nullptr);
+		if (bWouldBeNewPause)
+		{
+			const float Now = World->GetTimeSeconds();
+			if (Now < GLastCaptainPauseTime)
+			{
+				GLastCaptainPauseTime = -1.f;   // new map / match
+			}
+			if (GCaptainPauseCooldownSec > 0 && GLastCaptainPauseTime >= 0.f
+				&& (Now - GLastCaptainPauseTime) < static_cast<float>(GCaptainPauseCooldownSec))
+			{
+				return false;   // too soon after the last captain pause
+			}
+			GLastCaptainPauseTime = Now;
+			UE_LOG(LogNCHostPause, Warning, TEXT("[CaptainPause] %s paused the match"), *PS->PlayerName);
+		}
+		return true;
+	}
+
+	bool MayPause(APlayerController* PC, AUTBaseGameMode* GM)
+	{
+		return HostMayPause(PC, GM) || CaptainMayPause(PC, GM);
 	}
 
 	bool DeferUnpauseForCountdown(AUTBaseGameMode* GM)
