@@ -658,6 +658,20 @@ void FNetcodePlus::StartupModule()
 			InputCDO->CustomBinds.Add(FCustomKeyBinding(FName(TEXT("F5")), IE_Pressed, TEXT("ncpmenu")));
 			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: F5 -> ncpmenu seeded on UUTPlayerInput CDO"));
 		}
+
+		// Spectators take a SEPARATE bind path: UUTPlayerInput::ExecuteCustomBind checks
+		// SpectatorBinds first while bOnlySpectator/bOutOfLives, so the CustomBinds seed
+		// above never fires F5 for a spectator. Seed it into SpectatorBinds too.
+		bool bHasNcpMenuSpecBind = false;
+		for (const FCustomKeyBinding& B : InputCDO->SpectatorBinds)
+		{
+			if (B.Command.Contains(TEXT("ncpmenu"))) { bHasNcpMenuSpecBind = true; break; }
+		}
+		if (!bHasNcpMenuSpecBind)
+		{
+			InputCDO->SpectatorBinds.Add(FCustomKeyBinding(FName(TEXT("F5")), IE_Pressed, TEXT("ncpmenu")));
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: F5 -> ncpmenu seeded on UUTPlayerInput CDO SpectatorBinds"));
+		}
 	}
 
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
