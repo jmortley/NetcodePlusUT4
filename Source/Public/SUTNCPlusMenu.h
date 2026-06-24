@@ -47,7 +47,8 @@ private:
 	float RagdollTime;
 	float OwnFootstepVolume;
 	bool bHighResScreenshotPostMatch;
-	bool bStockBottomBar;   // stock weapon/ammo/health bottom bar vs NCPlus custom (applies next match)
+	bool bStockBottomBar;   // stock weapon/ammo/health bottom bar vs NCPlus custom (applies on Save)
+	bool bStockBottomBarTouched;   // only persist StockBottomBar when the user toggles it (else the HUDLayout.json-exists default governs; stops a fresh-install Save locking in stock)
 
 	// ── Force Models settings ── working copy of the live config, edited in-place by the tab's
 	// widgets via bool*/float* lambdas and written back on Save. The combo option lists are members

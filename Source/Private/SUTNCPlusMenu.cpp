@@ -842,8 +842,10 @@ void SUTNCPlusMenu::LoadSettings()
 		bHighResScreenshotPostMatch = true;
 
 	// Reflect the CURRENT effective bottom-bar choice (explicit [NetcodePlus] StockBottomBar
-	// if set, otherwise the fresh-install default) so the checkbox shows reality.
+	// if set, otherwise the fresh-install default) so the checkbox shows reality. Not "touched"
+	// until the user actually clicks it — so merely opening + saving the menu never persists it.
 	bStockBottomBar = FNCPlusHUDLayout::WantsStockBottomBar();
+	bStockBottomBarTouched = false;
 
 	// Force Models — take a working copy of the live config (loads Mod.ini [ForceModels] on first access).
 	FMConfig = NCPlusForceModels::Get();
@@ -881,7 +883,14 @@ void SUTNCPlusMenu::SaveSettings()
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
-	GConfig->SetString(NCPSection, TEXT("StockBottomBar"), bStockBottomBar ? TEXT("True") : TEXT("False"), ConfigPath);
+	// Only persist when the user actually toggled the checkbox this session — writing it on every Save
+	// would lock a fresh install (no HUDLayout.json yet -> default stock) into StockBottomBar=True, then
+	// silently ignore a later custom layout (the explicit flag wins over the file-exists default in
+	// WantsStockBottomBar). Untouched -> leave the key as-is.
+	if (bStockBottomBarTouched)
+	{
+		GConfig->SetString(NCPSection, TEXT("StockBottomBar"), bStockBottomBar ? TEXT("True") : TEXT("False"), ConfigPath);
+	}
 
 	GConfig->Flush(false, ConfigPath);
 
@@ -970,6 +979,7 @@ void SUTNCPlusMenu::OnScreenshotChanged(ECheckBoxState NewState)
 void SUTNCPlusMenu::OnStockBottomBarChanged(ECheckBoxState NewState)
 {
 	bStockBottomBar = (NewState == ECheckBoxState::Checked);
+	bStockBottomBarTouched = true;   // explicit choice -> SaveSettings may now persist it
 }
 
 FReply SUTNCPlusMenu::OnSaveClicked()
