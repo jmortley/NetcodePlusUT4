@@ -26,6 +26,10 @@ class SNCPlusHUDDragOverlay : public SCompoundWidget
 	void Construct(const FArguments& InArgs);
 	void ClosePanel();
 
+	/** RAII backstop: release a held NCPlusHUDDragMode count if torn down without
+	 *  ClosePanel (e.g. viewport widgets dropped on a map load). */
+	virtual ~SNCPlusHUDDragOverlay();
+
 	// SWidget overrides — paint frames, handle drag + ESC.
 	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry,
 		const FSlateRect& MyClippingRect, FSlateWindowElementList& OutDrawElements,
@@ -38,6 +42,7 @@ class SNCPlusHUDDragOverlay : public SCompoundWidget
 
 private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
+	bool bHeldDragMode = false;  // true while this overlay holds a NCPlusHUDDragMode refcount
 
 	struct FOverlayElement
 	{

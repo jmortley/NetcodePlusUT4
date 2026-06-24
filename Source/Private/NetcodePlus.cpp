@@ -3,6 +3,7 @@
 #include "Modules/ModuleManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
+#include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
 #include "UTPlayerController.h"
 #include "UTPlayerInput.h"
 #include "UTProfileSettings.h"
@@ -42,6 +43,9 @@ static TWeakPtr<SUTCosmeticSelector> ActiveCosmeticSelector;
 /** Weak reference to active HUD layout editor */
 static TWeakPtr<SNCPlusHUDEditor>      ActiveHUDEditor;
 static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
+
+/** PreLoadMap delegate handle — self-heals the menu input state across level loads. */
+static FDelegateHandle GNCPPreLoadMapHandle;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -270,6 +274,21 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 	FSlateApplication::Get().SetKeyboardFocus(Menu, EFocusCause::SetDirectly);
 
 	ActiveNCPMenu = Menu;
+}
+
+// On a level transition the GameViewportClient drops our menu widgets WITHOUT
+// calling ClosePanel(). Each panel's destructor now releases its own
+// NCPlusHUDDragMode count (RAII), but close the F5 menu cleanly here first while
+// the outgoing PC is still valid (so its input mode is properly restored), then
+// hard-clear the refcount as a final backstop against any leaked count.
+static void OnNCPPreLoadMap(const FString& /*MapName*/)
+{
+	if (ActiveNCPMenu.IsValid())
+	{
+		ActiveNCPMenu.Pin()->ClosePanel();
+		ActiveNCPMenu.Reset();
+	}
+	NCPlusHUDDragMode::Reset();
 }
 
 static void HandleCosmetics(const TArray<FString>& Args)
@@ -674,6 +693,14 @@ void FNetcodePlus::StartupModule()
 		}
 	}
 
+	// Self-heal the menu input state across level transitions: LoadMap drops our
+	// viewport widgets without ClosePanel, which would otherwise leak a
+	// NCPlusHUDDragMode count and strand the cursor on the next map. Client only.
+	if (!IsRunningDedicatedServer())
+	{
+		GNCPPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPPreLoadMap);
+	}
+
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
 	// Register the ticker ONLY when the arg is present, so there is zero overhead
 	// on normal launches. bShouldStopOnComma=false keeps a comma in the password.
@@ -725,6 +752,12 @@ void FNetcodePlus::ShutdownModule()
 		ActiveSkinSelector.Reset();
 	}
 	SUTWeaponSkinSelector_CleanupCache();
+
+	if (GNCPPreLoadMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPPreLoadMapHandle);
+		GNCPPreLoadMapHandle.Reset();
+	}
 
 	IConsoleObject* Cmd = IConsoleManager::Get().FindConsoleObject(TEXT("weaponhand"));
 	if (Cmd) { IConsoleManager::Get().UnregisterConsoleObject(Cmd, false); }

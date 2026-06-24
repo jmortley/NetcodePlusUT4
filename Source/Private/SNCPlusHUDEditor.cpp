@@ -123,6 +123,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 	// open (it returns GameOnly during a match and would otherwise re-capture the
 	// cursor). Released in ClosePanel. Mirrors SNCPlusHUDDragOverlay.
 	NCPlusHUDDragMode::SetActive(true);
+	bHeldDragMode = true;
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		APlayerController* MenuPC = PlayerOwner->PlayerController;
@@ -1467,10 +1468,16 @@ void SNCPlusHUDEditor::SetStatus(const FString& Msg)
 	}
 }
 
+SNCPlusHUDEditor::~SNCPlusHUDEditor()
+{
+	// Map load drops the viewport widget without ClosePanel — release the refcount.
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+}
+
 void SNCPlusHUDEditor::ClosePanel()
 {
 	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
-	NCPlusHUDDragMode::SetActive(false);
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		APlayerController* MenuPC = PlayerOwner->PlayerController;

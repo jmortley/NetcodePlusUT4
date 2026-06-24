@@ -118,6 +118,7 @@ namespace NCPlusHUDDragMode
 
 	bool IsActive()              { return GActiveCount > 0; }
 	void SetActive(bool bActive) { if (bActive) { ++GActiveCount; } else if (GActiveCount > 0) { --GActiveCount; } }
+	void Reset()                 { GActiveCount = 0; }   // backstop for a leaked count (map load)
 }
 
 // =============================================================================

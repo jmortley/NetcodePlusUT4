@@ -35,11 +35,16 @@ class SUTNCPlusMenu : public SCompoundWidget
 	void Construct(const FArguments& InArgs);
 	void ClosePanel();
 
+	/** RAII backstop: release a held NCPlusHUDDragMode count if this panel is torn
+	 *  down without ClosePanel (e.g. viewport widgets dropped on a map load). */
+	virtual ~SUTNCPlusMenu();
+
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 	virtual bool SupportsKeyboardFocus() const override { return true; }
 
 private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
+	bool bHeldDragMode = false;  // true while this panel holds a NCPlusHUDDragMode refcount
 
 	// ── General settings ([NetcodePlus] in Mod.ini) ──
 	bool bAllowGib;

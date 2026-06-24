@@ -110,6 +110,7 @@ namespace NCPlusHUDDragMode
 {
 	NETCODEPLUS_API bool IsActive();
 	NETCODEPLUS_API void SetActive(bool bActive);
+	NETCODEPLUS_API void Reset();   // hard-clear the refcount (level-transition backstop)
 }
 
 /**
