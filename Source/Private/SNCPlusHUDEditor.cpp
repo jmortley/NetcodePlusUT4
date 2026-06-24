@@ -65,7 +65,8 @@ namespace NCHUDEdit
 			return TEXT("CTF");
 		}
 		if (Alias == TEXT("speedometer") || Alias == TEXT("minimap")
-			|| Alias == TEXT("damage_flash") || Alias == TEXT("server_info"))
+			|| Alias == TEXT("damage_flash") || Alias == TEXT("server_info")
+			|| Alias == TEXT("powerups"))   // held-pickup status (DrawHeldPowerups) — a repositionable C++ draw element
 		{
 			return TEXT("Optional Overlays");
 		}
