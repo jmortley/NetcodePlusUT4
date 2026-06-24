@@ -1197,12 +1197,13 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	// =========================================================================
 	// Character/armour OVERLAY recolour (CONTINUOUS) — armour/shield outlives spawn protection
 	// =========================================================================
-	// The OverlayMesh (shield-belt / OverlayElimCharacter / any active char overlay) is rebuilt by
-	// stock UTCharacter::UpdateCharOverlays with TeamColor=(1,1,0) yellow each time CharOverlayFlags
-	// changes (UTCharacter.cpp:4307) — that hardcoded write is the yellow. Re-tint it to the ForceModels
-	// skin colour EVERY frame, NOT gated on spawn protection: the shield-belt persists with armour, so
-	// the old spawn-protection-only tint reverted to yellow the instant protection dropped. No-op when
-	// ForceModels isn't recolouring this pawn / there's no overlay MID; vanilla play keeps stock yellow.
+	// The OverlayMesh (shield-belt / OverlayElimCharacter / any active char overlay) carries a hardcoded
+	// gold: stock UTCharacter::UpdateArmorOverlay (UTCharacter.cpp:5544) sets the shield MID's "Color"
+	// param to (1,1,0) for blue / (0.75,0.75,0.1) for red, and "TeamColor" to the team colour — the
+	// "Color" write is the gold lever (TeamColor alone won't shift it). Re-tint it to the ForceModels
+	// skin colour EVERY frame, NOT gated on spawn protection: the shield-belt persists with armour and is
+	// re-applied on any overlay rebuild, so the old spawn-protection-only tint reverted to gold the
+	// instant protection dropped. No-op when ForceModels isn't recolouring this pawn / there's no overlay MID.
 	{
 		FLinearColor SkinCol = GetTeamColor();
 		bool bForcedSkin = false;
@@ -1228,9 +1229,9 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		{
 			if (UMaterialInstanceDynamic* OvMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0)))
 			{
-				// "Color" is the lever that recolours the shield-belt: its gold lives on the material's
-				// DEFAULT "Color" param (the stock-overridden "TeamColor" is baked/ignored on ShieldBelt_Inst).
-				// We set both so non-shield overlays (which key off TeamColor) also recolour.
+				// "Color" is the lever that recolours the shield-belt: stock UpdateArmorOverlay puts the
+				// gold on the "Color" param (it also sets "TeamColor" to the team colour, but that doesn't
+				// drive the gold). We set both so non-shield overlays that key off TeamColor recolour too.
 				OvMID->SetVectorParameterValue(NAME_OverlayTeamColor, SkinCol);
 				OvMID->SetVectorParameterValue(NAME_OverlayColor, SkinCol);
 			}
