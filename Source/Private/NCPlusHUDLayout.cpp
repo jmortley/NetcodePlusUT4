@@ -1091,6 +1091,73 @@ namespace NCPlusHUDDrawCall
 	}
 
 	// =============================================================================
+	// Live bottom-bar swap — apply the Stock-vs-NCPlus toggle THIS match, not next level
+	// =============================================================================
+	void RefreshBottomBarWidgets(AHUD* HUDBase, bool bWantStock)
+	{
+		AUTHUD* HUD = Cast<AUTHUD>(HUDBase);
+		if (HUD == nullptr || HUD->GetNetMode() == NM_DedicatedServer)
+		{
+			return;
+		}
+
+		// The two interchangeable bottom-bar families (weapon bar + ammo + health [+ powerups]).
+		// Same sets every NCPlus mode uses, so one generic swap covers ElimPlus/Wipeout/CTF/ShockDom/etc.
+		static const TCHAR* const StockPaths[] = {
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"),
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"),
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"),
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),
+		};
+		static const TCHAR* const NCPlusPaths[] = {
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"),
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),
+		};
+
+		auto Resolve = [](const TCHAR* const* Paths) -> TArray<UClass*>
+		{
+			TArray<UClass*> Out;
+			for (int32 i = 0; i < 4; i++)
+			{
+				if (UClass* C = StaticLoadClass(UUTHUDWidget::StaticClass(), nullptr, Paths[i]))
+				{
+					Out.Add(C);
+				}
+			}
+			return Out;
+		};
+
+		const TArray<UClass*> WantClasses = Resolve(bWantStock ? StockPaths : NCPlusPaths);
+		const TArray<UClass*> DropClasses = Resolve(bWantStock ? NCPlusPaths : StockPaths);
+
+		// Drop the family we no longer want (stops it drawing; the widget GCs once unreferenced).
+		for (int32 i = HUD->HudWidgets.Num() - 1; i >= 0; i--)
+		{
+			UUTHUDWidget* W = HUD->HudWidgets[i];
+			if (W && DropClasses.Contains(W->GetClass()))
+			{
+				HUD->HudWidgets.RemoveAt(i);
+			}
+		}
+
+		// Add any wanted family member not already present (AddHudWidget instantiates + initializes).
+		for (UClass* C : WantClasses)
+		{
+			bool bPresent = false;
+			for (UUTHUDWidget* W : HUD->HudWidgets)
+			{
+				if (W && W->GetClass() == C) { bPresent = true; break; }
+			}
+			if (!bPresent)
+			{
+				HUD->AddHudWidget(C);
+			}
+		}
+	}
+
+	// =============================================================================
 	// Post-match screenshot (shared by ElimPlus / Wipeout / iCTF + Duel/Shaft via AWipeoutHUD)
 	// =============================================================================
 	void ServicePostMatchScreenshot(AUTHUD* HUD, float& StableFrames, bool& bTaken)

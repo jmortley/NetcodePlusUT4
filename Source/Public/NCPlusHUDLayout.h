@@ -320,6 +320,13 @@ namespace NCPlusHUDDrawCall
 	 *  NCPlus HUD's DrawHUD (Canvas passed by caller — see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawHeldPowerups(class AUTHUD* HUD, class UCanvas* Canvas);
 
+	/** Swap the bottom-bar widget family (stock vs NCPlus) on a LIVE HUD so the menu's
+	 *  Stock-bottom-bar toggle applies THIS match instead of next level (the family is
+	 *  otherwise fixed at HUD construction). bWantStock = the menu's current choice, passed
+	 *  in to avoid a GConfig re-read race against the just-written value. Removes the family
+	 *  no longer wanted and adds the one now wanted; no-op on a dedicated server / non-UT HUD. */
+	NETCODEPLUS_API void RefreshBottomBarWidgets(class AHUD* HUD, bool bWantStock);
+
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).
 	 *  Honors font / font_scale / color_text / opacity. Canvas passed by caller

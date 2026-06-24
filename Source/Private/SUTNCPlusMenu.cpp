@@ -502,7 +502,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 			.Padding(8, 0, 0, 0)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Stock bottom bar (weapon/ammo/health) - applies next match")))
+				.Text(FText::FromString(TEXT("Stock bottom bar (weapon/ammo/health) - applies on Save")))
 				.Font(RegularFont(14))
 				.ColorAndOpacity(FLinearColor::White)
 			]
@@ -893,6 +893,10 @@ void SUTNCPlusMenu::SaveSettings()
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		NCPlusForceModels::ReapplyAll(PlayerOwner->PlayerController->GetWorld());
+
+		// Bottom-bar (stock vs NCPlus): swap the LIVE HUD widgets so the toggle applies this
+		// match instead of next level (the widget family is otherwise fixed at HUD construction).
+		NCPlusHUDDrawCall::RefreshBottomBarWidgets(PlayerOwner->PlayerController->MyHUD, bStockBottomBar);
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("NCPlus settings saved to Mod.ini"));
