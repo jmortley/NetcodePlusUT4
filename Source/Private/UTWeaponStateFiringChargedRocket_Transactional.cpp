@@ -495,12 +495,8 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
     // LOGIC START
     // -----------------------------------------------------------
 
-    // A. PRIORITY 1: CONTINUE CHARGING — only if SECONDARY (this charged state's fire mode = 1) is
-    // still held. HandleContinuedFiring() tests GetCurrentFireMode(), which flips to 0 the instant the
-    // player starts holding PRIMARY after the burst — so on its own it would re-enter the charge and
-    // swallow the primary ("load a grenade, then hold M1 -> no primary until you release + re-tap").
-    // Gating on mode 1 lets a held primary fall through to the switch-to-primary path below.
-    if (GetUTOwner()->IsPendingFire(1) && GetOuterAUTWeapon()->HandleContinuedFiring())
+    // A. PRIORITY 1: CONTINUE CHARGING (Mode 1)
+    if (GetOuterAUTWeapon()->HandleContinuedFiring())
     {
         bCharging = true;
         BeginState(this);
