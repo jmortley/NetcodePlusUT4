@@ -152,6 +152,11 @@ private:
 	ECheckBoxState GetTeamColorState(FName Alias) const;
 	void OnTeamColorChanged(ECheckBoxState NewState, FName Alias);
 
+	// Stock-vs-NCPlus bottom-bar toggle (global; moved here from the iCTF settings tab).
+	// Applies immediately: persists [NetcodePlus] StockBottomBar + live-swaps the widget family.
+	ECheckBoxState GetStockBottomBarState() const;
+	void OnStockBottomBarChanged(ECheckBoxState NewState);
+
 	// Per-row reset
 	FReply OnResetRowClicked(FName Alias);
 

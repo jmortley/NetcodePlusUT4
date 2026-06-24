@@ -494,6 +494,18 @@ bool FNCPlusHUDLayout::WantsStockBottomBar()
 	return !FPaths::FileExists(GetDefaultLayoutPath());
 }
 
+void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
+{
+	// Mirror WantsStockBottomBar's source: [NetcodePlus] StockBottomBar in the generated Mod.ini.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("StockBottomBar"),
+			bStock ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+}
+
 FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
 {
 	FNCPlusHUDLayout Layout;

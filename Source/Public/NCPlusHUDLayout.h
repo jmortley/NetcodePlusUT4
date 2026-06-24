@@ -190,6 +190,11 @@ struct FNCPlusHUDLayout
 	 *  keep NCPlus. Read once per HUD spawn — a change applies on the next map. */
 	static bool WantsStockBottomBar();
 
+	/** Persist the bottom-bar choice ([NetcodePlus] StockBottomBar in Mod.ini). Call ONLY from an
+	 *  explicit user toggle — never unconditionally — so a fresh install (no saved HUDLayout.json)
+	 *  is not silently locked to stock (see WantsStockBottomBar). Owned by the HUD editor. */
+	static void SetStockBottomBar(bool bStock);
+
 	/** Deprecated alias for GetDefaultLayoutPath; kept temporarily for compat. */
 	static FString GetDefaultElimPlusPath() { return GetDefaultLayoutPath(); }
 
