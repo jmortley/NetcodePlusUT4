@@ -269,7 +269,7 @@ e.g. `/Game/Blueprints/ElimPlusStuff/ElimPlus.ElimPlus_C`. The native class path
 | Wipeout | `AUWipeoutGame` | "Wipeout" | `/Game/Blueprints/ElimPlusStuff/WipeoutPlus.WipeoutPlus_C` | *(pak)* |
 | League Duel | `ANCLeagueDuelGame` | "NetcodePlus League Duel" | `/Game/Blueprints/Netcode/bp_NCLeagueDuel.bp_NCLeagueDuel_C` | `[NCLeagueDuel]` |
 | Shaft Arena | `ANCShaftArenaGame` | "NetcodePlus Shaft Arena" | `NetcodePlus.NCShaftArenaGame` (or BP subclass) | `[NCShaftArena]` |
-| Shock Domination | `AShockDomGameMode` | "Shock Domination" | `NetcodePlus.ShockDomGameMode` (or BP subclass) | — |
+| Shock Domination | `AShockDomGameMode` | "Shock Domination" | `/Game/Blueprints/Netcode/ShockDomGM.ShockDomGM_C` | — |
 
 Notes:
 - `ANCPlusCTFGameMode` is **abstract** — you must reference a concrete subclass (the `NCP-IGCTF_C` BP for
@@ -693,8 +693,8 @@ Spawn distances are in Mod.ini `[NCLeagueDuel]`; net rate comes from `[ElimPlus]
 other NetcodePlus gamemodes (no `SetNetSpeed` — it's a native gamemode).
 
 > For a **non‑instagib NetcodePlus CTF**, use your CTF subclass BP (concrete subclass of
-> `ANCPlusCTFGameMode`) without `MutInstagibNCP`. ShockDom uses `SdomMutator` + your ShockDom BP and
-> honors `?MaxPoints` / `?GoalScore`.
+> `ANCPlusCTFGameMode`) without `MutInstagibNCP`. ShockDom uses `SdomMutator` + the
+> `/Game/Blueprints/Netcode/ShockDomGM.ShockDomGM_C` BP and honors `?MaxPoints` / `?GoalScore`.
 
 ---
 
