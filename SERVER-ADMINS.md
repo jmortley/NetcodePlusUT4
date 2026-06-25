@@ -267,7 +267,7 @@ e.g. `/Game/Blueprints/ElimPlusStuff/ElimPlus.ElimPlus_C`. The native class path
 | ElimPlus / Team Arena | `AElimPlusGame` | "Team Arena" | `/Game/Blueprints/ElimPlusStuff/ElimPlus.ElimPlus_C` | *(pak)* |
 | NetcodePlus CTF / iCTF | `ANCPlusCTFGameMode` *(abstract)* | "NetcodePlus CTF" | `/Game/Blueprints/Netcode/NCP-IGCTF.NCP-IGCTF_C` | `[UTPUGS_STATS]`, `[UTPUGS_SPAWN]` |
 | Wipeout | `AUWipeoutGame` | "Wipeout" | `/Game/Blueprints/ElimPlusStuff/WipeoutPlus.WipeoutPlus_C` | *(pak)* |
-| League Duel | `ANCLeagueDuelGame` | "NetcodePlus League Duel" | `NetcodePlus.NCLeagueDuelGame` (or BP subclass) | `[NCLeagueDuel]` |
+| League Duel | `ANCLeagueDuelGame` | "NetcodePlus League Duel" | `/Game/Blueprints/Netcode/bp_NCLeagueDuel.bp_NCLeagueDuel_C` | `[NCLeagueDuel]` |
 | Shaft Arena | `ANCShaftArenaGame` | "NetcodePlus Shaft Arena" | `NetcodePlus.NCShaftArenaGame` (or BP subclass) | `[NCShaftArena]` |
 | Shock Domination | `AShockDomGameMode` | "Shock Domination" | `NetcodePlus.ShockDomGameMode` (or BP subclass) | — |
 
@@ -669,25 +669,28 @@ CTF respawn + small‑game tuning is in Mod.ini `[UTPUGS_STATS]` (`CTFRespawnWai
 
 ### 11.4 Duel (League Duel) — 1v1
 
-Duel uses a stock‑lineage gamemode, so add `NCWepMut` to bring in the NetcodePlus weapons:
+Use the **NetcodePlus League Duel** gamemode (not stock Duel) — a Duel subclass with the NetcodePlus
+fair‑spawn picker + Glicko2 rating, referenced by its blueprint. The duel weapon set comes in via the
+stock `WeaponReplacement` mutator + `NCWepMut`, with the first‑spawn weapon pair set by `?WTR=<A>:<B>`:
 
 ```json
 {
   "uniqueTag": "PUG_DUEL_NCP",
   "categories": ["UT+ Pickup Games"],
-  "title": "Duel (NetcodePlus)",
+  "title": "Duel (NetcodePlus League Duel)",
   "displayTexture": "Texture2D'/Game/RestrictedAssets/UI/GameModeBadges/GB_Duel.GB_Duel'",
-  "gameMode": "NetcodePlus.NCLeagueDuelGame",
+  "gameMode": "/Game/Blueprints/Netcode/bp_NCLeagueDuel.bp_NCLeagueDuel_C",
   "bTeamGame": true,
   "maxPlayers": 2,
   "minPlayersToStart": 2,
-  "gameOptions": "?BotFill=0?RequireFull=1?TimeLimit=10?MaxSpectators=3?GoalScore=0?mutator=WeaponReplacement,NCWepMut,dcHitsounds,NoSpawnProtectionMutator?ForceNoBots=1",
+  "gameOptions": "?BotFill=0?RequireFull=1?TimeLimit=10?MaxSpectators=3?GoalScore=0?WTR=/Game/RestrictedAssets/Weapons/GrenadeLauncher/BP_GrenadeLauncher.BP_GrenadeLauncher_C:/Game/RestrictedAssets/Weapons/BioRifle/BP_BioRifle.BP_BioRifle_C?mutator=WeaponReplacement,dcHitsounds,NCWepMut,NoSpawnProtectionMutator?AnalyticsLogged=true?ForceNoBots=1",
   "optionFlags": 65535,
   "bHideFromUI": false
 }
 ```
 
-Spawn distances are in Mod.ini `[NCLeagueDuel]`.
+Spawn distances are in Mod.ini `[NCLeagueDuel]`; net rate comes from `[ElimPlus] NetSpeed` like the
+other NetcodePlus gamemodes (no `SetNetSpeed` — it's a native gamemode).
 
 > For a **non‑instagib NetcodePlus CTF**, use your CTF subclass BP (concrete subclass of
 > `ANCPlusCTFGameMode`) without `MutInstagibNCP`. ShockDom uses `SdomMutator` + your ShockDom BP and
