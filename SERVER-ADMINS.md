@@ -704,6 +704,9 @@ The plugin's signed manifest lists the current build's URL + SHA‑256. These sc
 download, back up the old plugin, and extract the new one. They only touch the **NetcodePlus plugin** —
 update StatSQL/ServerShield from their release (§10) when a matched pair is published.
 
+**Ready‑to‑run copies live in [`tools/`](tools/):** [`tools/update-hub.sh`](tools/update-hub.sh) (Linux)
+and [`tools/update-hub.ps1`](tools/update-hub.ps1) (Windows) — identical to the listings below.
+
 > The canonical trust root is the launcher's minisign‑signed manifest. These scripts verify the
 > **SHA‑256** from that manifest (fetched over HTTPS), which is enough for a server‑side convenience
 > tool; they don't check the minisig. **Stop the server before running them** (a mounted DLL can't be
