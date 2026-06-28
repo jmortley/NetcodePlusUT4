@@ -105,13 +105,21 @@ void ANCVersionGate::BeginPlay()
 	// as soon as the actor is fully replicated + owner-resolved.
 	if (Role == ROLE_Authority)
 	{
-		if (UWorld* W = GetWorld())
-		{
-			TimeoutSec = ResolveVersionReportTimeoutSec();
-			W->GetTimerManager().SetTimer(
-				TimeoutHandle, this, &ANCVersionGate::OnTimeout,
-				TimeoutSec, /*bLoop*/ false);
-		}
+		// DISABLED 2026-06-24 — the no-reply timeout kick was false-positiving on
+		// hub-instance joins: a legit, correctly-versioned client whose version
+		// report didn't land inside the window got kicked, and KickOwner's
+		// GameSession->KickPlayer adds them to the instance/hub ban list, so the
+		// client can't rejoin ("PendingNetDriver[PendingConnectionFailure]: BANNED").
+		// Mismatch reports (ServerReportVersion_Implementation) still kick genuinely
+		// outdated clients; we just stop kicking clients that never handshake.
+		// Re-arm by uncommenting the SetTimer below.
+		TimeoutSec = ResolveVersionReportTimeoutSec();   // resolved for the OnTimeout log line; the kick timer is NOT armed
+		// if (UWorld* W = GetWorld())
+		// {
+		// 	W->GetTimerManager().SetTimer(
+		// 		TimeoutHandle, this, &ANCVersionGate::OnTimeout,
+		// 		TimeoutSec, /*bLoop*/ false);
+		// }
 	}
 }
 
@@ -209,16 +217,17 @@ void ANCVersionGate::OnKickDeadline()
 
 void ANCVersionGate::KickOwner(const FString& Reason)
 {
-	APlayerController* PC = Cast<APlayerController>(GetOwner());
-	UWorld* W = GetWorld();
-	// UE4.15: UWorld::GetAuthGameMode() returns AGameModeBase*, not AGameMode*.
-	// Cast to AGameMode so we can reach ->GameSession (lives on the AGameMode
-	// subclass in this engine). Both UT4 modes derive from AGameMode, so the
-	// cast always succeeds for our PostLogin spawn path.
-	AGameMode* GM = W ? Cast<AGameMode>(W->GetAuthGameMode()) : nullptr;
-	if (PC && GM && GM->GameSession)
+	// Non-banning disconnect WITH a visible reason. GameSession->KickPlayer adds the
+	// player to UTGameEngine->InstanceBannedUsers on a hub instance
+	// (AUTGameSessionNonRanked::KickPlayer) → "PendingConnectionFailure: BANNED" on
+	// rejoin, and its bKickToHubIfPossible=true path doesn't even surface the reason.
+	// Call GuaranteedKick(reason, /*bKickToHubIfPossible*/ false) directly instead:
+	// it routes through ClientWasKicked (which shows the reason on the client) plus a
+	// 1s-delayed Destroy, and skips the instance-ban add. An outdated client sees the
+	// version message and can rejoin once they've updated via the launcher.
+	if (AUTBasePlayerController* PC = Cast<AUTBasePlayerController>(GetOwner()))
 	{
-		GM->GameSession->KickPlayer(PC, FText::FromString(Reason));
+		PC->GuaranteedKick(FText::FromString(Reason), /*bKickToHubIfPossible*/ false);
 	}
 	Destroy();
 }

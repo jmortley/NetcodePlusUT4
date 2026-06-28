@@ -1,6 +1,7 @@
 // ElimPlusStatsReplicator.cpp
 
 #include "ElimPlusStatsReplicator.h"
+#include "ElimPlusGame.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
@@ -84,11 +85,26 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 			Entry.PPRCurrent = *PPRPtr;
 		}
 
-		// DamageDone is server-side on AUTPlayerState but not replicated — pull via reflection
-		UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
-		if (DmgProp)
+		// DMG column shows OVERKILL-INCLUSIVE match damage (each hit at full value, incl.
+		// the portion beyond victim HP) so the "100 dmg = 1 pt" PPR rule stays exact and
+		// the columns line up. Source is the gamemode's per-player accumulator (server-
+		// only; this runs on Authority). Engine AUTPlayerState::DamageDone (overkill-
+		// stripped, sent to StatSQL) is the fallback for listen-server/standalone where
+		// the gamemode cast is unavailable.
+		bool bGotOverkillDamage = false;
+		if (AElimPlusGame* EG = GetWorld()->GetAuthGameMode<AElimPlusGame>())
 		{
-			Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
+			Entry.DamageDone = FMath::RoundToInt(EG->GetMatchDamageForPlayer(UTPS));
+			bGotOverkillDamage = true;
+		}
+		if (!bGotOverkillDamage)
+		{
+			// Fallback: engine DamageDone via reflection (server-side, not replicated).
+			UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
+			if (DmgProp)
+			{
+				Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
+			}
 		}
 
 		// ELO: source of truth is FElimPlusRatingSystem on the gamemode. It pushes

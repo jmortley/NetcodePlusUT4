@@ -119,6 +119,12 @@ public:
 	 *  HandleMatchHasStarted, after all players are loaded. */
 	void SnapshotMatchStart();
 
+	/** Give a mid-match joiner a match-start baseline (their rating as of now)
+	 *  so FlushAtMatchEnd can show their +/- delta. No-op outside a live match,
+	 *  for an uncached player, or if a baseline already exists. Call from
+	 *  PostLogin after LoadPlayerFromDB. */
+	void CaptureLateJoinBaseline(const FString& UniqueId);
+
 	/** Apply a single round's outcome to the cached PlayerRatings. Internal
 	 *  in-memory update only — does NOT push to the replicator (display stays
 	 *  frozen until match end). */

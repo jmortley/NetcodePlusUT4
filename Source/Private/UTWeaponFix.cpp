@@ -42,6 +42,19 @@ static TAutoConsoleVariable<int32> CVarProjectileTickRate(
     ECVF_Scalability
 );
 
+// Client fire-input diagnostics (held-M1 beam-stall hunt). 0=off; 1=Warning logs of every
+// StartFire/StopFire/retry fork so a repro names the branch that eats the held primary beam.
+// Pure logging, no behaviour change, client-side (no replication / no version bump).
+static TAutoConsoleVariable<int32> CVarFireDebug(
+    TEXT("ncp.FireDebug"), 0,
+    TEXT("Client fire-input diagnostics: 1=log every StartFire/StopFire/retry decision (traces the held-M1 beam stall). Off by default, no behaviour change."),
+    ECVF_Default);
+
+static FORCEINLINE bool FireDbg()
+{
+    return CVarFireDebug.GetValueOnGameThread() > 0;
+}
+
 // =========================================================================
 // PROJECTILE DIRECT-HIT LAG COMPENSATION (rocket + flak shell) — server-only.
 // Validates a client's direct-hit claim by finding, in the target's rewound
@@ -306,6 +319,7 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
     
     bHandlingRetry = true;
     UE_LOG(LogUTWeaponFix, Verbose, TEXT("[OnRetryTimer] Mode %d: Retry firing — calling StartFire"), FireModeNum);
+    if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] OnRetryTimer mode=%d -> StartFire"), FireModeNum);
     StartFire(FireModeNum);
     bHandlingRetry = false;
 }
@@ -320,6 +334,13 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
 
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
+    if (FireDbg())
+    {
+        UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] StartFire mode=%d curFiring=%d state=%s"),
+            FireModeNum, CurrentlyFiringMode,
+            GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
+    }
+
     // ---------------------------------------------------------
     // ZOOM BYPASS (MUST BE FIRST)
     // ---------------------------------------------------------
@@ -561,6 +582,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                 RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
                 GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, 0.01f, false);
             }
+            if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] mode=%d ON-COOLDOWN -> retry scheduled (delay=%.3f)"), FireModeNum, Delay);
         }
         return;
     }
@@ -627,6 +649,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		// B) Legacy/Fallback Logic (Standard UT behavior)
 		if (CurrentState->IsFiring())
 		{
+			if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] mode=%d CROSS-MODE IsFiring -> clear PendingFire + OnMultiPress + RETURN (no fire, NO retry queued)"), FireModeNum);
 			if (UTOwner) UTOwner->SetPendingFire(FireModeNum, false);
 			OnMultiPress(FireModeNum);
 			return;
@@ -973,6 +996,8 @@ void AUTWeaponFix::FireShot()
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
+    if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] StopFire mode=%d curFiring=%d"), FireModeNum, CurrentlyFiringMode);
+
     // Mouse-bounce debounce: stamp the release time so the next StartFire
     // within MouseDebounceWindow is recognised as a bounce, not a new click.
     if (LastReleaseTime.IsValidIndex(FireModeNum))
@@ -2281,7 +2306,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
         float TimeSinceLast = CurrentTime - LastShockCoreSpawnTime;
         if (TimeSinceLast < 0.2f)
         {
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("ShockCore anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
+            if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("ShockCore anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
             return nullptr;
         }
         LastShockCoreSpawnTime = CurrentTime;
@@ -2292,7 +2317,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
         float TimeSinceLast = CurrentTime - LastFlakShellSpawnTime;
         if (TimeSinceLast < 0.2f)
         {
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("FlakShell anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
+            if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("FlakShell anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
             return nullptr;
         }
         LastFlakShellSpawnTime = CurrentTime;

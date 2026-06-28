@@ -54,6 +54,10 @@ struct FElimPlusRatingSystemImpl
 	 *  bot-match cap. Cleared each SnapshotMatchStart. */
 	TSet<FString> HumansWithHumanOpposition;
 
+	/** True between SnapshotMatchStart and FlushAtMatchEnd. Lets a mid-match
+	 *  joiner pick up a match-start baseline at LoadPlayerFromDB time. */
+	bool bMatchActive = false;
+
 	// ---- Testing: random bot ELO assignment ----
 	/** When true, GetOrAssignBotElo returns a random rating in [BotEloMin, BotEloMax]
 	 *  on first lookup of a synthetic bot key, cached for the session. */
@@ -191,6 +195,7 @@ void FElimPlusRatingSystem::SnapshotMatchStart()
 	Impl->RatingAtMatchStart.Empty();
 	Impl->ActiveHumansThisMatch.Empty();
 	Impl->HumansWithHumanOpposition.Empty();
+	Impl->bMatchActive = true;
 
 	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
 	{
@@ -198,6 +203,19 @@ void FElimPlusRatingSystem::SnapshotMatchStart()
 		Impl->RatingAtMatchStart.Add(Pair.Key, RoundedElo);
 	}
 	UE_LOG(LogElimPlusRating, Log, TEXT("Snapshot %d ratings at match start"), Impl->RatingAtMatchStart.Num());
+}
+
+void FElimPlusRatingSystem::CaptureLateJoinBaseline(const FString& UniqueId)
+{
+	// Mid-match joiner: no SnapshotMatchStart entry exists, so the end-of-match
+	// delta would render blank even though their rating still moves for the
+	// rounds they play. Baseline them at their current (just-loaded) rating so
+	// the scoreboard shows a change-since-join delta.
+	if (!Impl->bMatchActive) return;
+	if (Impl->RatingAtMatchStart.Contains(UniqueId)) return; // present at start / reconnect
+	const TeamGlicko2::PlayerRating* PR = Impl->RatingCache.Find(UniqueId);
+	if (!PR) return;
+	Impl->RatingAtMatchStart.Add(UniqueId, FMath::RoundToInt(PR->GetRating()));
 }
 
 void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
@@ -404,6 +422,8 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 
 	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, skipped %d (didn't play), capped %d (no human opposition)"),
 		PersistedCount, SkippedCount, CappedCount);
+
+	Impl->bMatchActive = false;
 }
 
 int32 FElimPlusRatingSystem::GetPlayerGlobalRank(UWorld* World, const FString& UniqueId) const

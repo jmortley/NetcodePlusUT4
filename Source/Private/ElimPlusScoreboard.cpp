@@ -514,32 +514,70 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 	float MaxYOffset = 0.f;
 	TArray<FString> SpectatorNames;
 
+	// PPR(Current) lookup for row ordering — same replicator + uid resolution
+	// DrawPlayerScore uses (bots key on the synthetic "BOT:<name>"). 0 fallback
+	// when the replicator isn't up or no round has completed yet, in which case
+	// the kills/score tiebreaks below preserve a sensible order.
+	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
+	auto GetPPR = [Stats](AUTPlayerState* PS) -> float
+	{
+		if (!Stats || !PS) return 0.f;
+		const FString PId = PS->UniqueId.IsValid()
+			? PS->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+		const FElimPlusStatsEntry* E = PId.IsEmpty() ? nullptr : Stats->FindEntry(PId);
+		return E ? E->PPRCurrent : 0.f;
+	};
+
 	for (int8 Team = 0; Team < 2; Team++)
 	{
 		int32 Place = 1;
 		float DrawOffset = YOffset;
 		const int32 NumPlayersToShow = ShouldDrawScoringStats() ? 5 : UTGameState->PlayerArray.Num();
+
+		// Collect this team's players (harvesting spectators once, on the team-0
+		// pass), then sort by PPR(Current) desc so the board ranks by PPR. Kills
+		// then score break ties (and carry the ordering before any round ends,
+		// when every PPR is still 0).
+		TArray<AUTPlayerState*> TeamPlayers;
+		TMap<const AUTPlayerState*, float> PPRByPlayer;
 		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
 		{
 			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(UTGameState->PlayerArray[i]);
-			if (PlayerState)
+			if (!PlayerState) continue;
+			if (PlayerState->bOnlySpectator)
 			{
-				if (!PlayerState->bOnlySpectator)
-				{
-					if (PlayerState->GetTeamNum() == Team)
-					{
-						DrawPlayer(Place, PlayerState, RenderDelta, XOffset, DrawOffset);
-						Place++;
-						DrawOffset += CellHeight * RenderScale;
-						if (Place > NumPlayersToShow) break;
-					}
-				}
-				else if (Team == 0 && !PlayerState->bIsDemoRecording)
+				if (Team == 0 && !PlayerState->bIsDemoRecording)
 				{
 					SpectatorNames.Add(PlayerState->PlayerName);
 				}
+				continue;
+			}
+			if (PlayerState->GetTeamNum() == Team)
+			{
+				TeamPlayers.Add(PlayerState);
+				PPRByPlayer.Add(PlayerState, GetPPR(PlayerState));
 			}
 		}
+		TeamPlayers.Sort([&PPRByPlayer](const AUTPlayerState& A, const AUTPlayerState& B)
+		{
+			const float PA = PPRByPlayer.FindRef(&A);
+			const float PB = PPRByPlayer.FindRef(&B);
+			if (PA != PB) return PA > PB;
+			const int32 KA = A.Kills + A.KillAssists;
+			const int32 KB = B.Kills + B.KillAssists;
+			if (KA != KB) return KA > KB;
+			return A.Score > B.Score;
+		});
+
+		for (AUTPlayerState* PlayerState : TeamPlayers)
+		{
+			DrawPlayer(Place, PlayerState, RenderDelta, XOffset, DrawOffset);
+			Place++;
+			DrawOffset += CellHeight * RenderScale;
+			if (Place > NumPlayersToShow) break;
+		}
+
 		MaxYOffset = FMath::Max(DrawOffset, MaxYOffset);
 		XOffset = Canvas->ClipX - ScaledCellWidth - ScaledEdgeSize;
 	}

@@ -21,6 +21,8 @@
 #include "UTDroppedPickup.h"
 #include "Engine/DemoNetDriver.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 #include "TimerManager.h"
 #include "GameFramework/HUD.h"
 #include "GameFramework/PlayerStart.h"
@@ -196,8 +198,34 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 	// Match-scoped stats reset on every map load (each map = a fresh match).
 	PerPlayerMatchPPRSum.Empty();
 	PerPlayerMatchPPRRoundCount.Empty();
+	PerPlayerMatchDamage.Empty();
 	bRatingFlushedThisMatch = false;
 	bDidPreMatchRebalance = false;
+
+	// Bot PUGs always carry ?PugId (the bot adds it); public/hub games never do.
+	// Uneven-team health scaling is for public games only.
+	bIsPugMatch = !UGameplayStatics::ParseOption(Options, TEXT("PugId")).IsEmpty();
+
+	// Mod.ini [NetcodePlus] overrides. Each Get* leaves the value UNTOUCHED when the
+	// key is absent, so the BP/CDO defaults stand unless an admin sets the key.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		// Uneven-team health scaling (defaults: on, 5% per missing player).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthScaling"), bElimUnevenHealthScaling, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthPct"), ElimUnevenHealthPct, ModIni);
+
+		// Anti-camp (defaults: on, threshold 400u, check 1.0s, cooldown 5.0s).
+		// ElimCampCheckInterval=0 disables the camp timer (StartCampCheckTimer gate).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimEnableAntiCamp"), bEnableAntiCamp, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimCampThreshold"), CampThreshold, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimCampCheckInterval"), CampCheckInterval, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimCampWarnCooldown"), CampWarnCooldown, ModIni);
+	}
+	ElimUnevenHealthPct = FMath::Clamp(ElimUnevenHealthPct, 0.f, 50.f);
+	CampThreshold     = FMath::Max(0.f, CampThreshold);
+	CampCheckInterval = FMath::Max(0.f, CampCheckInterval);
+	CampWarnCooldown  = FMath::Max(0.f, CampWarnCooldown);
 }
 
 void AElimPlusGame::BeginPlay()
@@ -335,8 +363,8 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 
 	// Server-only: pull this player's rating from Mods.db into the cache so it's
 	// ready before the first round ends. Late joiners who arrive mid-match also
-	// get their rating loaded, but won't have a SnapshotMatchStart entry — they
-	// skip ELO for this match (no delta would be meaningful).
+	// get their rating loaded AND a match-start baseline (CaptureLateJoinBaseline
+	// below), so their end-of-match +/- reflects their rating change since joining.
 	if (!HasAuthority() || !RatingSystem.IsValid()) return;
 	if (!NewPlayer) return;
 
@@ -359,6 +387,12 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 	{
 		const FString UidStr = UTPS->UniqueId.ToString();
 		RatingSystem->LoadPlayerFromDB(GetWorld(), UidStr);
+
+		// Mid-match joiner: baseline them as of NOW so the end-of-match scoreboard
+		// shows their +/- (their rating already moves for the rounds they play;
+		// without a baseline FlushAtMatchEnd renders a blank delta). No-op if the
+		// match hasn't started yet (SnapshotMatchStart will baseline everyone).
+		RatingSystem->CaptureLateJoinBaseline(UidStr);
 
 		// Push their current ELO straight to the replicator so their HUD chip
 		// shows real value (not 1400 baseline) from the moment they connect.
@@ -1088,6 +1122,11 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 				if (!UTPS || UTPS->bOnlySpectator || !UTPS->UniqueId.IsValid()) continue;
 
+				// PPR damage = PlayerRoundDamage, which now accumulates OVERKILL-INCLUSIVE
+				// damage per round (full hit value incl. the portion beyond victim HP —
+				// see ScoreDamage_Implementation, which reconstructs the overkill the
+				// engine strips before it reaches us). 2k4 TAM rule: 100 dmg = 1 pt,
+				// 1 kill = 1 pt; PPR(Current) = sum of per-round PPR / rounds played.
 				const float* DmgPtr = PlayerRoundDamage.Find(UTPS);
 				const float RoundDamage = DmgPtr ? *DmgPtr : 0.f;
 				const int32 RoundKills = UTPS->RoundKills;
@@ -1144,6 +1183,13 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
 					P.Kills    = UTPS->RoundKills;
 					P.Deaths   = UTPS->bOutOfLives ? 1 : 0; // exactly one death per round in elim
+					// ELO uses the OVERKILL-INCLUSIVE round damage (PlayerRoundDamage),
+					// matching the PPR + DMG columns for one consistent damage definition
+					// across the whole mode (user decision). PlayerRoundDamage is per-round
+					// (reset in ResetPlayersForNewRound), so at EndRoundForTeam it holds
+					// only this round's damage. (NB: the prior validated Glicko fit used
+					// effective damage; overkill is theoretically farmable on low-HP
+					// targets — flip back to UTPS->RoundDamageDone if that ever shows up.)
 					P.Damage   = PlayerRoundDamage.Contains(UTPS) ? PlayerRoundDamage[UTPS] : 0.f;
 					Out.Add(MoveTemp(P));
 				}
@@ -1505,7 +1551,50 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 			UE_LOG(LogGameMode, Warning, TEXT("RestartPlayer: FAILED to spawn pawn for %s"),
 				NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
 		}
+		else
+		{
+			// Pawn now carries its BP defaults (HealthMax 125 + the vest's 100 armor
+			// from default inventory). Scale HP for uneven teams (non-PUG) here.
+			ApplyUnevenTeamHealthScaling(Cast<AUTCharacter>(NewPlayer->GetPawn()));
+		}
 	}
+}
+
+void AElimPlusGame::ApplyUnevenTeamHealthScaling(AUTCharacter* Char)
+{
+	// Non-PUG only, opt-out via Mod.ini, and only when the teams are actually
+	// uneven. The short-handed team spawns tougher, the larger team softer.
+	if (!bElimUnevenHealthScaling || bIsPugMatch || !Char) return;
+	if (Teams.Num() < 2 || !Teams[0] || !Teams[1]) return;
+
+	const int32 TeamNum = Char->GetTeamNum();
+	if (TeamNum != 0 && TeamNum != 1) return;
+
+	// Team sizes include bots, so a bot-filled team counts as even (the bot is the
+	// compensation) — scaling only kicks in on a genuine head-count imbalance.
+	const int32 SizeMine  = Teams[TeamNum]->GetSize();
+	const int32 SizeOther = Teams[1 - TeamNum]->GetSize();
+	if (SizeMine == SizeOther) return;
+
+	// Proportional to the head-count gap: ElimUnevenHealthPct% PER missing player
+	// (4v5 = ±5%, 4v6 = ±10%, 3v6 = ±15%, ...), capped at ±50% so a lopsided
+	// count can't drive HP to zero. Diff >= 1 here (equal sizes returned above).
+	const int32 Diff   = FMath::Abs(SizeMine - SizeOther);
+	const float Delta  = FMath::Min(ElimUnevenHealthPct / 100.f * Diff, 0.5f);
+	const float Factor = (SizeMine < SizeOther) ? (1.f + Delta)   // short team: tougher
+	                                            : (1.f - Delta);  // big team:  softer
+
+	// Read the BP-set HealthMax (TeamArenaCharacter = 125) and scale it — never
+	// hardcode. Set HealthMax alongside Health: UT4 has NO health decay (Health
+	// alone would hold the buff), but matching HealthMax keeps Health <= max so
+	// the engine doesn't tag a buffed pawn as "overhealth" (UTCharacter.cpp:1551,
+	// hit/armor-effect classification). HealthMax isn't replicated → the scale is
+	// server-authoritative only (client bar reads vs its own 125; death + damage
+	// are server-side, which is what matters). Armor (the default vest) untouched.
+	const int32 BaseMax   = Char->HealthMax;
+	const int32 ScaledMax = FMath::Max(1, FMath::RoundToInt(BaseMax * Factor));
+	Char->HealthMax = ScaledMax;
+	Char->Health    = ScaledMax;
 }
 
 
@@ -2834,6 +2923,13 @@ void AElimPlusGame::RecordHighDamageCarry(AUTPlayerState* PlayerState, float Dam
 	OnPlayerHighDamageCarry.Broadcast(PlayerState, DamagePercentage);
 }
 
+float AElimPlusGame::GetMatchDamageForPlayer(AUTPlayerState* PS) const
+{
+	if (!PS) return 0.f;
+	const float* Found = PerPlayerMatchDamage.Find(PS);
+	return Found ? *Found : 0.f;
+}
+
 void AElimPlusGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerState* Victim, AUTPlayerState* Attacker)
 {
 	Super::ScoreDamage_Implementation(DamageAmount, Victim, Attacker);
@@ -2857,32 +2953,40 @@ void AElimPlusGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 	}
 
 
-		// **NEW**: Calculate actual damage dealt (not overkill)
-		int32 ActualDamageDealt = DamageAmount;
-
-		if (Victim && Victim->GetUTCharacter())
+		// Reconstruct the OVERKILL-INCLUSIVE damage for this hit. DamageAmount we
+		// receive is the engine's AppliedDamage = effective resource consumed
+		// (armor-absorbed + HP removed, with overkill ALREADY stripped): UTCharacter::
+		// TakeDamage does Health -= ResultDamage (UTCharacter.cpp:981) then
+		// AppliedDamage += Health when Health<0 (:992), and ScoreDamage receives that
+		// stripped value (:1023). We're called before Died(), so a lethal blow leaves
+		// the victim's Health negative by exactly the overkill — add it back. Result =
+		// consumed + overkill = the FULL hit value. NOTE this INCLUDES the armor-absorbed
+		// portion (ATeamArenaCharacter::ModifyDamageTaken reduces only ResultDamage, not
+		// AppliedDamage), matching the engine's own DamageDone accounting — so the DMG
+		// column reads "normal damage (armor included) + overkill". (The old
+		// Min(dmg, currentHP) cap did the inverse: it zeroed every killing blow, which
+		// halved PPR and starved the carry achievement / ELO.)
+		float OverkillDamage = static_cast<float>(DamageAmount);
+		if (AUTCharacter* VictimChar = Victim->GetUTCharacter())
 		{
-			AUTCharacter* VictimChar = Victim->GetUTCharacter();
-			int32 VictimHealth = VictimChar->Health;
-			float VictimArmor = VictimChar->GetArmorAmount();
-			int32 TotalVictimHP = VictimHealth + FMath::FloorToInt(VictimArmor);
-
-			// Cap damage at victim's actual health + armor
-			ActualDamageDealt = FMath::Min(DamageAmount, TotalVictimHP);
+			if (VictimChar->Health < 0)
+			{
+				OverkillDamage += static_cast<float>(-VictimChar->Health);
+			}
 		}
 
-		if (!PlayerRoundDamage.Contains(Attacker))
-		{
-			PlayerRoundDamage.Add(Attacker, 0.0f);
-		}
-		PlayerRoundDamage[Attacker] += ActualDamageDealt; // Use actual damage, not overkill
+		// Per-round (drives PPR + high-damage-carry achievement) and match-cumulative
+		// (drives the scoreboard DMG column via the stats replicator). Engine DamageDone
+		// stays overkill-stripped for StatSQL — we do NOT touch it.
+		PlayerRoundDamage.FindOrAdd(Attacker) += OverkillDamage;
+		PerPlayerMatchDamage.FindOrAdd(Attacker) += OverkillDamage;
 		if (Attacker->Team->TeamIndex == 0)
 		{
-			Team0RoundDamage += ActualDamageDealt;
+			Team0RoundDamage += OverkillDamage;
 		}
 		else if (Attacker->Team->TeamIndex == 1)
 		{
-			Team1RoundDamage += ActualDamageDealt;
+			Team1RoundDamage += OverkillDamage;
 		}
 
 }
@@ -3279,6 +3383,7 @@ void AElimPlusGame::Logout(AController* Exiting)
 			DarkHorseCandidates.Remove(PS);
 			PerPlayerMatchPPRSum.Remove(PS);
 			PerPlayerMatchPPRRoundCount.Remove(PS);
+			PerPlayerMatchDamage.Remove(PS);
 
 		}
 	}
