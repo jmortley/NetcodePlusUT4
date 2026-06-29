@@ -8,6 +8,7 @@
 #include "UTPlayerInput.h"
 #include "UTProfileSettings.h"
 #include "UTLocalPlayer.h"
+#include "UTGameState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTWeaponFix.h"
@@ -537,6 +538,11 @@ static bool TickNcpConnect(float DeltaTime)
 // ---------------------------------------------------------------------------
 static FDelegateHandle GHudColourTickerHandle;
 static float           GHudColourAccum = 0.0f;
+// Post-match-join killcam crash guard (see TickHudTeamColours). GIRGuardWorld = the game world whose
+// initial match state we've already evaluated (raw ptr, compared only, never dereferenced);
+// GSavedInstantReplay = the user's UT.EnableInstantReplay value while we suppress it (-1 = not suppressing).
+static UWorld*         GIRGuardWorld = nullptr;
+static int32           GSavedInstantReplay = -1;
 
 static bool TickHudTeamColours(float DeltaTime)
 {
@@ -554,6 +560,40 @@ static bool TickHudTeamColours(float DeltaTime)
 			{
 				UWorld* const W = Context.World();
 				NCPlusForceModels::TickFlagWind(W, DeltaTime);   // every frame
+
+				// Post-match-join killcam crash guard. The stock killcam recorder
+				// (AUTGameState::StartRecordingReplay, armed on a 0.5s timer in ReceivedGameModeClass) has NO
+				// match-state gate, so a client that JOINS a server already in post-match bootstraps a _DeathCam
+				// replay with no data -> a 2nd, local LoadMap -> the UPlayer::Exec world-mismatch assert
+				// (Player.cpp:98). Its sole arming condition is the cvar UT.EnableInstantReplay==1. We force it
+				// to 0 ONLY for a client that joined STRAIGHT INTO post-match (first time we see this world it is
+				// already ended), and restore the user's value once a live match is in progress -- so a player
+				// present the whole match (recorder already running) is never touched and still gets the
+				// end-of-match replay. Client-only, no GameState subclass (replicated-class-identity crash, the
+				// CTF ABI doctrine), no stock-source edit. HasMatchEnded()/IsMatchInProgress() are call-only
+				// engine accessors; SetByConsole so it wins over however the user enabled it.
+				if (AUTGameState* const GS = W->GetGameState<AUTGameState>())
+				{
+					if (IConsoleVariable* const CVarIR = IConsoleManager::Get().FindConsoleVariable(TEXT("UT.EnableInstantReplay")))
+					{
+						const bool bNewWorld = (W != GIRGuardWorld);
+						GIRGuardWorld = W;
+						if (bNewWorld && GSavedInstantReplay < 0 && GS->HasMatchEnded())
+						{
+							GSavedInstantReplay = CVarIR->GetInt();
+							CVarIR->Set(TEXT("0"), ECVF_SetByConsole);
+						}
+						else if (GSavedInstantReplay >= 0 && !GS->HasMatchEnded())
+						{
+							// No longer post-match (same world restarted, or we travelled to the next match's
+							// world while it's still in warmup) -> restore BEFORE that world's 0.5s recorder timer
+							// fires, so the next match's killcam records normally.
+							CVarIR->Set(*FString::FromInt(GSavedInstantReplay), ECVF_SetByConsole);
+							GSavedInstantReplay = -1;
+						}
+					}
+				}
+
 				if (bSlowTick)
 				{
 					NCPlusForceModels::SyncHudTeamColours(W);
