@@ -15,6 +15,7 @@
 #include "AssetRegistryModule.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Colors/SColorBlock.h"
+#include "Widgets/Input/SNumericEntryBox.h"  // SNumericEntryBox<float> (was leaking transitively via the unity build)
 #include "GameFramework/GameUserSettings.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"

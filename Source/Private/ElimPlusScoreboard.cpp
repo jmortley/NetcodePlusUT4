@@ -125,6 +125,17 @@ void UElimPlusScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, TeamEdgeSize + FrontSize, BackgroundY, MiddleSize, BackgroundHeight, 39, 188, 64, 65, 1.0f, Team0Color);
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, TeamEdgeSize + FrontSize + MiddleSize, BackgroundY, EndSize, BackgroundHeight, 39, 188, 64, 65, 1.0f, Team0Color);
 
+	// Concept-D gloss: translucent light band over the top of the team bar + a
+	// darker band along the bottom (cheap "glossy bevel", no new texture).
+	{
+		const float bX = TeamEdgeSize, bY = BackgroundY, bW = FrontSize + MiddleSize + EndSize, bH = BackgroundHeight;
+		Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, 0.16f));
+		Canvas->DrawTile(Canvas->DefaultTexture, bX + 4.f * RenderScale, bY + 2.f * RenderScale, bW - 8.f * RenderScale, bH * 0.42f, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.22f));
+		Canvas->DrawTile(Canvas->DefaultTexture, bX + 4.f * RenderScale, bY + bH * 0.72f, bW - 8.f * RenderScale, bH * 0.28f, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
+
 	DrawText(RedTeamText, NamePosition, TeamTextY, UTHUDOwner->HugeFont, RenderScale, 1.f, FLinearColor::White, ETextHorzPos::Left, ETextVertPos::Center);
 	DrawText(FText::AsNumber(UTGameState->Teams[0]->Score), TeamEdgeSize + FrontSize + MiddleSize - EndSize, TeamScoreY, UTHUDOwner->HugeFont, false, FVector2D(0, 0), FLinearColor::Black, true, FLinearColor::Black, 1.5f * RenderScale * RedScoreScaling, 1.f, FLinearColor::White, FLinearColor(0.f, 0.f, 0.f, 0.f), ETextHorzPos::Right, ETextVertPos::Center);
 
@@ -134,6 +145,16 @@ void UElimPlusScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, LeftEdge + EndSize + MiddleSize, BackgroundY, FrontSize, BackgroundHeight, 196, 188, 36, 65, 1.f, Team1Color);
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, LeftEdge + EndSize, BackgroundY, MiddleSize, BackgroundHeight, 130, 188, 64, 65, 1.f, Team1Color);
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, LeftEdge, BackgroundY, EndSize, BackgroundHeight, 117, 188, 16, 65, 1.f, Team1Color);
+
+	// Concept-D gloss (right team bar).
+	{
+		const float bX = LeftEdge, bY = BackgroundY, bW = EndSize + MiddleSize + FrontSize, bH = BackgroundHeight;
+		Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, 0.16f));
+		Canvas->DrawTile(Canvas->DefaultTexture, bX + 4.f * RenderScale, bY + 2.f * RenderScale, bW - 8.f * RenderScale, bH * 0.42f, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.22f));
+		Canvas->DrawTile(Canvas->DefaultTexture, bX + 4.f * RenderScale, bY + bH * 0.72f, bW - 8.f * RenderScale, bH * 0.28f, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
 
 	DrawText(BlueTeamText, Canvas->ClipX - NamePosition, TeamTextY, UTHUDOwner->HugeFont, RenderScale, 1.f, FLinearColor::White, ETextHorzPos::Right, ETextVertPos::Center);
 	DrawText(FText::AsNumber(UTGameState->Teams[1]->Score), LeftEdge + 2.f * EndSize, TeamScoreY, UTHUDOwner->HugeFont, false, FVector2D(0.f, 0.f), FLinearColor::Black, true, FLinearColor::Black, 1.5f * RenderScale * BlueScoreScaling, 1.f, FLinearColor::White, FLinearColor(0.f, 0.f, 0.f, 0.f), ETextHorzPos::Left, ETextVertPos::Center);
@@ -270,7 +291,7 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 {
 	if (PlayerState == nullptr) return;
 
-	float BarOpacity = 0.3f;
+	float BarOpacity = FNCPlusHUDLayout::GetScoreboardOpacity();
 	bool bIsUnderCursor = false;
 
 	if (bIsInteractive)
@@ -289,15 +310,44 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 	}
 
 	const bool bIsOwner = (UTHUDOwner && UTHUDOwner->UTPlayerOwner && UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState);
-	if (bIsOwner) BarOpacity = 0.5f;
+	if (bIsOwner) BarOpacity = FMath::Min(1.f, FNCPlusHUDLayout::GetScoreboardOpacity() + 0.2f);
 
 	FLinearColor BarColor = GetPlayerBackgroundColorFor(PlayerState);
+	// Owner row: the stock light-Gray highlight washes out the (dead-dimmed) text on
+	// the dark Concept-D panel — impossible to read your own row when dead. Force a
+	// dark readable tint; the ">" caret + the higher owner opacity still mark it as
+	// your row (cursor/selected still override below).
+	if (bIsOwner) { BarColor = FLinearColor(0.10f, 0.13f, 0.20f, 1.f); }
 	float FinalBarOpacity = BarOpacity;
 	if (bIsUnderCursor) { BarColor = FLinearColor(0.0, 0.3, 0.0, 1.0); FinalBarOpacity = 0.75f; }
 	if (PlayerState == SelectedPlayer) { BarColor = FLinearColor(0.0, 0.3, 0.3, 1.0); FinalBarOpacity = 0.75f; }
 
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, XOffset, YOffset, ScaledCellWidth, 0.95f * CellHeight * RenderScale,
 		149, 138, 32, 32, FinalBarOpacity, BarColor);
+
+	// Concept-D MVP row: the top-PPR player (Index 1) gets a team-colored border +
+	// faint tint over the cell. Additive — over the cell bg, under the row content.
+	if (Index == 1)
+	{
+		const uint8 MvpTeam = PlayerState->GetTeamNum();
+		const bool bUseTC = HasCustomTeamColors() && NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
+		FLinearColor Accent = (MvpTeam == 1) ? FLinearColor(0.05f, 0.1f, 0.9f, 1.f) : FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
+		if (bUseTC && UTGameState && UTGameState->Teams.IsValidIndex(MvpTeam) && UTGameState->Teams[MvpTeam])
+		{
+			Accent = UTGameState->Teams[MvpTeam]->TeamColor;
+		}
+		const float CW = ScaledCellWidth, CHgt = 0.95f * CellHeight * RenderScale, BW = 2.f * RenderScale;
+		FLinearColor Tint = Accent; Tint.A = 0.12f;
+		Canvas->SetLinearDrawColor(Tint);
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, CW, CHgt, 0, 0, 1, 1, BLEND_Translucent);
+		FLinearColor Border = Accent; Border.A = 0.9f;
+		Canvas->SetLinearDrawColor(Border);
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, CW, BW, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset + CHgt - BW, CW, BW, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, BW, CHgt, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset + CW - BW, YOffset, BW, CHgt, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
 
 	// Portrait pip on the left
 	const float PipPadding = 4.f * RenderScale;
@@ -570,12 +620,98 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			return A.Score > B.Score;
 		});
 
+		// Concept-D dark panel backdrop behind this team's rows + a thin team-color
+		// top accent (no new texture — a translucent dark tile under the rows).
+		{
+			const int32 ActualRows = FMath::Min(NumPlayersToShow, TeamPlayers.Num());
+			const float RowsH = ActualRows * CellHeight * RenderScale;
+			const float PadX = 6.f * RenderScale, PadTop = 4.f * RenderScale;
+			const bool bUseTC = HasCustomTeamColors() && NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
+			FLinearColor Accent = (bUseTC && UTGameState->Teams.IsValidIndex(Team) && UTGameState->Teams[Team]) ? UTGameState->Teams[Team]->TeamColor : ((Team == 1) ? FLinearColor(0.05f, 0.1f, 0.9f, 1.f) : FLinearColor(0.8f, 0.05f, 0.05f, 1.f));
+			Canvas->SetLinearDrawColor(FLinearColor(0.03f, 0.04f, 0.06f, 0.78f));
+			Canvas->DrawTile(Canvas->DefaultTexture, XOffset - PadX, DrawOffset - PadTop, ScaledCellWidth + 2.f * PadX, RowsH + PadTop + 40.f * RenderScale, 0, 0, 1, 1, BLEND_Translucent);
+			Accent.A = 0.9f;
+			Canvas->SetLinearDrawColor(Accent);
+			Canvas->DrawTile(Canvas->DefaultTexture, XOffset - PadX, DrawOffset - PadTop, ScaledCellWidth + 2.f * PadX, 2.f * RenderScale, 0, 0, 1, 1, BLEND_Translucent);
+			Canvas->SetLinearDrawColor(FLinearColor::White);
+		}
+
 		for (AUTPlayerState* PlayerState : TeamPlayers)
 		{
 			DrawPlayer(Place, PlayerState, RenderDelta, XOffset, DrawOffset);
 			Place++;
 			DrawOffset += CellHeight * RenderScale;
 			if (Place > NumPlayersToShow) break;
+		}
+
+		// Team totals row under this team's rows — sums of the columns above, aligned
+		// under each column. K / D / DMG / PPR are additive; ELO / LG_Acc / Ping aren't,
+		// so they're left blank. (Replaced the per-team MVP banner.)
+		if (TeamPlayers.Num() > 0)
+		{
+			int32 SumK = 0, SumD = 0, SumDMG = 0;
+			float SumPPR = 0.f;
+			int64 SumElo = 0;  int32 CountElo = 0;   // ELO: team average
+			float SumAcc = 0.f; int32 CountAcc = 0;  // LG_Acc: average of players with data
+			int64 SumPing = 0; int32 CountPing = 0;  // Ping: average of HUMANs (bots show skill)
+			const bool bNetworked = (GetWorld()->GetNetMode() != NM_Standalone);
+			for (AUTPlayerState* TP : TeamPlayers)
+			{
+				if (!TP) continue;
+				SumK += TP->Kills;
+				SumD += TP->Deaths;
+				SumPPR += PPRByPlayer.FindRef(TP);
+				const FString PId = TP->UniqueId.IsValid() ? TP->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *TP->PlayerName);
+				const FElimPlusStatsEntry* E = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
+				SumDMG += E ? E->DamageDone : int32(TP->DamageDone);
+				SumElo += E ? E->Elo : 1400; ++CountElo;
+				if (E && E->LinkGunAccuracyTimes100 >= 0) { SumAcc += float(E->LinkGunAccuracyTimes100) / 100.f; ++CountAcc; }
+				if (bNetworked && !Cast<AUTBot>(TP->GetOwner()))
+				{
+					const bool bTPOwner = (UTHUDOwner && UTHUDOwner->UTPlayerOwner && UTHUDOwner->UTPlayerOwner->UTPlayerState == TP);
+					SumPing += bTPOwner ? TP->ExactPing : (TP->Ping * 4);
+					++CountPing;
+				}
+			}
+
+			const float BX = XOffset - 6.f * RenderScale, BW2 = ScaledCellWidth + 12.f * RenderScale;
+			const float BY = DrawOffset + 4.f * RenderScale, BH2 = 26.f * RenderScale;
+			const float TY = BY + BH2 * 0.5f;
+			const bool bUseTC = HasCustomTeamColors() && NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
+			FLinearColor Accent = (bUseTC && UTGameState->Teams.IsValidIndex(Team) && UTGameState->Teams[Team]) ? UTGameState->Teams[Team]->TeamColor : ((Team == 1) ? FLinearColor(0.05f, 0.1f, 0.9f, 1.f) : FLinearColor(0.8f, 0.05f, 0.05f, 1.f));
+
+			Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.5f));
+			Canvas->DrawTile(Canvas->DefaultTexture, BX, BY, BW2, BH2, 0, 0, 1, 1, BLEND_Translucent);
+			// Team-color "TOTAL" chip in the name column.
+			Canvas->SetLinearDrawColor(Accent);
+			Canvas->DrawTile(Canvas->DefaultTexture, BX + 6.f * RenderScale, BY + 5.f * RenderScale, 56.f * RenderScale, BH2 - 10.f * RenderScale, 0, 0, 1, 1, BLEND_Translucent);
+			Canvas->SetLinearDrawColor(FLinearColor::White);
+			DrawText(FText::FromString(TEXT("TOTAL")), BX + 34.f * RenderScale, TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, FLinearColor::White, ETextHorzPos::Center, ETextVertPos::Center);
+
+			// Sums centered under the same column X's the rows use.
+			const FLinearColor TotCol(0.88f, 0.90f, 0.95f, 1.f);
+			DrawText(FText::AsNumber(SumK),   XOffset + ScaledCellWidth * ColumnHeaderKillsX,  TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, TotCol, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::AsNumber(SumD),   XOffset + ScaledCellWidth * ColumnHeaderDeathsX, TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, TotCol, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::AsNumber(SumDMG), XOffset + ScaledCellWidth * ColumnHeaderDamageX, TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, FLinearColor(1.f, 0.8f, 0.25f, 1.f), ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::FromString(FString::Printf(TEXT("%.1f"), SumPPR)), XOffset + ScaledCellWidth * ColumnHeaderPPRCurX, TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, TotCol, ETextHorzPos::Center, ETextVertPos::Center);
+
+			// Averages (not additive): ELO, LG_Acc, Ping — centered under their columns.
+			if (CountElo > 0)
+			{
+				DrawText(FText::AsNumber(int32(SumElo / CountElo)), XOffset + ScaledCellWidth * ColumnHeaderEloX, TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, TotCol, ETextHorzPos::Center, ETextVertPos::Center);
+			}
+			DrawText(FText::FromString(CountAcc > 0 ? FString::Printf(TEXT("%.0f%%"), SumAcc / CountAcc) : TEXT("-")),
+				XOffset + ScaledCellWidth * ColumnHeaderLGAccX, TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, TotCol, ETextHorzPos::Center, ETextVertPos::Center);
+			if (CountPing > 0)
+			{
+				const int32 AvgPing = int32(SumPing / CountPing);
+				const FLinearColor PingCol = (AvgPing < 60) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
+					: (AvgPing < 120) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
+					: FLinearColor(1.f, 0.25f, 0.25f, 1.f);
+				DrawText(FText::FromString(FString::Printf(TEXT("%dms"), AvgPing)), XOffset + ScaledCellWidth * ColumnHeaderPingX, TY, UTHUDOwner->TinyFont, RenderScale, RenderScale, PingCol, ETextHorzPos::Center, ETextVertPos::Center);
+			}
+
+			DrawOffset += BH2 + 6.f * RenderScale;
 		}
 
 		MaxYOffset = FMath::Max(DrawOffset, MaxYOffset);

@@ -140,11 +140,16 @@ void AElimPlusHUD::AddSpectatorWidgets()
 		HudWidgets.Remove(SpectatorSlideOutWidget);
 		SpectatorSlideOutWidget = nullptr;
 	}
+	// ALWAYS register the slide-out: its ShouldDraw bootstraps the interactive spectator
+	// Slate window (cursor / ESC / camera switching). When the stock team panel is on we
+	// suppress only its ROSTER VISUAL (bSuppressRosterDraw) — removing it entirely left
+	// the cursor stuck + ESC dead (no SUTSpectatorWindow ever opened).
 	if (UUTHUDWidget* W = AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()))
 	{
 		if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(W))
 		{
 			SlideOut->WeaponListMode = ENCSlideOutWeaponMode::ElimLoadout;
+			SlideOut->bSuppressRosterDraw = FNCPlusHUDLayout::WantsStockTeamPanel();
 		}
 	}
 }
@@ -321,9 +326,17 @@ void AElimPlusHUD::DrawHUD()
 	DrawPreMatchTeamPreview();
 
 	// Custom team score bar (replaces bpHW_TeamGameClock — respects TeamSkins).
+	// Suppressed when the stock team panel is on AND visible: that panel shows team
+	// scores + the round clock itself, so the scorebar would be redundant (no more
+	// hand-hiding it in nchud). If the panel is hidden, the scorebar returns so you
+	// never lose both. Non-stock mode still honors the scorebar's own nchud hide gate.
+	const bool bStockPanelActive = FNCPlusHUDLayout::WantsStockTeamPanel() && !NCPlusHUDDrawCall::IsHidden(TEXT("team_panel"));
 	if (GS && !bScoreboardIsUp)
 	{
-		DrawTeamScoreBar(GS);
+		if (!bStockPanelActive)
+		{
+			DrawTeamScoreBar(GS);
+		}
 		// NOW WATCHING banner — self-guards when not spectating another pawn.
 		DrawSpectatorTarget();
 	}
@@ -338,6 +351,17 @@ void AElimPlusHUD::DrawHUD()
 		BluePlayerCount = 0;
 
 		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+
+		// Stock team panel (top-left roster) replaces the portrait strip when the
+		// user opts in (default for fresh installs). Same teammate HP/alive data,
+		// different presentation. Score/KDA below still draws in both modes.
+		const bool bStockTeamPanel = FNCPlusHUDLayout::WantsStockTeamPanel();
+		if (bStockTeamPanel)
+		{
+			NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
+		}
+		else
+		{
 		const float TeammateScale = 0.4f;
 
 		const float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
@@ -573,6 +597,7 @@ void AElimPlusHUD::DrawHUD()
 			if (TeamIdx == 0) XOffsetRed  += RedGrowSign  * 1.1f * PipSize;
 			else              XOffsetBlue += BlueGrowSign * 1.1f * PipSize;
 		}
+		} // end else — NCPlus portrait strip (stock panel handled above)
 
 		// Score / KDA mini widget (top right) — layout-aware via "score_kda"
 		// alias. Position, scale, and font are nchud-overridable; layout

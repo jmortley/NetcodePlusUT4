@@ -274,9 +274,15 @@ void AWipeoutHUD::DrawHUD()
 
 	// ─── Custom team score bar (replaces bpHW_TeamGameClock) ───
 	// Respects dynamic team colors from TeamSkins mutator.
+	// Suppress the redundant scorebar when the stock team panel is on AND visible; the
+	// panel draws team scores + the round clock itself. Panel hidden → scorebar returns.
+	const bool bStockPanelActive = FNCPlusHUDLayout::WantsStockTeamPanel() && !NCPlusHUDDrawCall::IsHidden(TEXT("team_panel"));
 	if (GS && !bScoreboardIsUp)
 	{
-		DrawTeamScoreBar(GS);
+		if (!bStockPanelActive)
+		{
+			DrawTeamScoreBar(GS);
+		}
 		// NOW WATCHING banner — self-guards when not spectating another pawn.
 		DrawSpectatorTarget();
 	}
@@ -291,6 +297,17 @@ void AWipeoutHUD::DrawHUD()
 		BluePlayerCount = 0;
 
 		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+
+		// Stock team panel (top-left roster) replaces the portrait strip when the
+		// user opts in (default for fresh installs). Same teammate HP/alive data,
+		// different presentation. Score/KDA below still draws in both modes.
+		const bool bStockTeamPanel = FNCPlusHUDLayout::WantsStockTeamPanel();
+		if (bStockTeamPanel)
+		{
+			NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
+		}
+		else
+		{
 		float TeammateScale = 0.4f;
 
 		float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
@@ -494,6 +511,7 @@ void AWipeoutHUD::DrawHUD()
 				XOffsetBlue += BlueGrowSign * 1.1f * PipSize;
 			}
 		}
+		} // end else — NCPlus portrait strip (stock panel handled above)
 		// ─── Score / KDA mini widget (top right) ───
 		// Layout-aware via "score_kda" alias. Position, scale, and font are
 		// nchud-overridable; layout scale multiplies into FontScale so editor
