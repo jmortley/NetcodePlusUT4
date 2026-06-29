@@ -47,6 +47,18 @@ static TAutoConsoleVariable<int32> CVarShockServerTickHz(
 	TEXT("Server shock-core tick rate. 0=240Hz (shipped); >0=that Hz (clamped 30..720); <0=unset/tick-every-frame (stock-like). Read at spawn — set BEFORE firing."),
 	ECVF_Default);
 
+// CLIENT rollback levers (default 1 = current shipped behaviour; flip to 0 live to kill the feature
+// without a rebuild). Both are client-side cosmetic fake/real reconciliation — no replication, no version bump.
+static TAutoConsoleVariable<int32> CVarShockConverge(
+	TEXT("ncp.ShockConverge"), 1,
+	TEXT("Client fake->real convergence interp (the ~700ms, 60u-capped pull of the rendered fake toward the real). 1=on (shipped), 0=off (fake renders its own predicted path, no pull)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarShockHandoff(
+	TEXT("ncp.ShockHandoff"), 1,
+	TEXT("Client stuck-ball handoff: when the real stops, destroy the fake + reveal the real so the shooter sees the stop. 1=on (shipped), 0=off (no reveal; fake persists until the explode/pairing cleanup)."),
+	ECVF_Default);
+
 static FORCEINLINE bool ShockDbg()
 {
 	return CVarShockDebug.GetValueOnGameThread() > 0;
@@ -352,7 +364,8 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	//
 	// Skipped when the real has stopped — the handoff path below handles that
 	// by snapping the fake to the real's location and destroying it.
-	if (GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
+	if (CVarShockConverge.GetValueOnGameThread() > 0
+		&& GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
 		&& !MyFakeProjectile->IsPendingKillPending()
 		&& ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero(2.0f))
 	{
@@ -378,7 +391,8 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	// fake's flight particle stops emitting → invisible to the shooter.
 	// Detect the stop and hand rendering back to the real so the shooter
 	// sees the same "stuck ball" visual as everyone else.
-	if (GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
+	if (CVarShockHandoff.GetValueOnGameThread() > 0
+		&& GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
 		&& !MyFakeProjectile->IsPendingKillPending()
 		&& ProjectileMovement && ProjectileMovement->Velocity.IsNearlyZero(2.0f))
 	{
