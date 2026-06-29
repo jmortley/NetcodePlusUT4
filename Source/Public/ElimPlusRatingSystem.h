@@ -34,6 +34,7 @@ struct FElimPlusPlayerRoundPerf
 	int32 Kills = 0;
 	int32 Deaths = 0;
 	float Damage = 0.f;
+	int32 TeamIndex = 0;   // 0 = red, 1 = blue. Used to label per-round upload records.
 
 	double ToPerfScore() const
 	{

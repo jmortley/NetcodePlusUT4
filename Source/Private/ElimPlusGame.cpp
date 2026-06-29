@@ -1181,6 +1181,7 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					P.UniqueId = UTPS->UniqueId.IsValid()
 						? UTPS->UniqueId.ToString()
 						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					P.TeamIndex = TeamIdx;   // 0/1 — labels the per-round upload record
 					P.Kills    = UTPS->RoundKills;
 					P.Deaths   = UTPS->bOutOfLives ? 1 : 0; // exactly one death per round in elim
 					// ELO uses the OVERKILL-INCLUSIVE round damage (PlayerRoundDamage),

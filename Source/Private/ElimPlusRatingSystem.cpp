@@ -23,6 +23,31 @@
 DEFINE_LOG_CATEGORY_STATIC(LogElimPlusRating, Log, All);
 
 // =============================================================================
+// Per-round capture for the upload's rounds[] array. ut4stats persists these and
+// re-runs a Python port of Tron's TeamGlicko2 over the real round history with
+// tuned params (kCarryWeight / kPerfSlope / kDefaultRD / ...) — backtesting the
+// rating without waiting to gather new data. Humans only: synthetic "BOT:" keys
+// and empty ids are skipped, matching the rest of the upload path. Internal to
+// this TU (never crosses the .h), so adding fields here is ABI-irrelevant.
+// =============================================================================
+struct FElimPlusRoundPlayerRecord
+{
+	FString UniqueId;
+	int32   TeamIndex = 0;        // 0 = red, 1 = blue
+	int32   Kills     = 0;
+	int32   Deaths    = 0;
+	double  Damage    = 0.0;
+	bool    bWinner   = false;    // bWinner=false + bIsDraw=false => loss
+};
+
+struct FElimPlusRoundRecord
+{
+	int32 WinnerTeamIndex = -1;   // 0/1; -1 == draw
+	bool  bIsDraw         = false;
+	TArray<FElimPlusRoundPlayerRecord> Players;
+};
+
+// =============================================================================
 // Pimpl: the actual cache. Defined here where TeamGlicko2 types are visible.
 // =============================================================================
 struct FElimPlusRatingSystemImpl
@@ -69,6 +94,11 @@ struct FElimPlusRatingSystemImpl
 	 *  across rounds within a session so the same bot keeps the same ELO. Never
 	 *  written to Mods.db — bots are transient. */
 	TMap<FString, int32> BotEloCache;
+
+	/** Per-round perf log captured each ProcessRound (humans only), emitted as the
+	 *  rounds[] array in BuildResultPayload. Cleared each SnapshotMatchStart so it
+	 *  holds exactly this match's rounds. */
+	TArray<FElimPlusRoundRecord> RoundLog;
 };
 
 namespace
@@ -195,6 +225,7 @@ void FElimPlusRatingSystem::SnapshotMatchStart()
 	Impl->RatingAtMatchStart.Empty();
 	Impl->ActiveHumansThisMatch.Empty();
 	Impl->HumansWithHumanOpposition.Empty();
+	Impl->RoundLog.Empty();
 	Impl->bMatchActive = true;
 
 	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
@@ -341,6 +372,45 @@ void FElimPlusRatingSystem::ProcessRound(const FElimPlusRoundResult& Result)
 	};
 	WriteBack(Match.teamA, Result.WinnerTeam);
 	WriteBack(Match.teamB, Result.LoserTeam);
+
+	// Capture this round for the upload's rounds[] (ut4stats TeamGlicko2 backtest).
+	// Humans only — skip synthetic "BOT:" keys + empty ids so the stored history
+	// matches the human ladder. WinnerTeam/LoserTeam already carry per-player team
+	// indices (set by the gamemode's BuildPerf), so the round's winner index is
+	// just the winning side's team. Recorded post-write-back; logging only, never
+	// affects the rating math above.
+	{
+		FElimPlusRoundRecord Rec;
+		Rec.bIsDraw = Result.bIsDraw;
+		auto AddSide = [&Rec](const TArray<FElimPlusPlayerRoundPerf>& Side, bool bWinnerSide)
+		{
+			for (const FElimPlusPlayerRoundPerf& Perf : Side)
+			{
+				if (Perf.UniqueId.IsEmpty() || Perf.UniqueId.StartsWith(TEXT("BOT:")))
+				{
+					continue;
+				}
+				FElimPlusRoundPlayerRecord PR;
+				PR.UniqueId  = Perf.UniqueId;
+				PR.TeamIndex = Perf.TeamIndex;
+				PR.Kills     = Perf.Kills;
+				PR.Deaths    = Perf.Deaths;
+				PR.Damage    = static_cast<double>(Perf.Damage);
+				PR.bWinner   = bWinnerSide;
+				Rec.Players.Add(MoveTemp(PR));
+			}
+		};
+		AddSide(Result.WinnerTeam, /*bWinnerSide=*/ !Result.bIsDraw);
+		AddSide(Result.LoserTeam,  /*bWinnerSide=*/ false);
+		if (!Result.bIsDraw && Result.WinnerTeam.Num() > 0)
+		{
+			Rec.WinnerTeamIndex = Result.WinnerTeam[0].TeamIndex;
+		}
+		if (Rec.Players.Num() > 0)
+		{
+			Impl->RoundLog.Add(MoveTemp(Rec));
+		}
+	}
 }
 
 void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplicator* Replicator)
@@ -610,6 +680,39 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 	}
 
 	Writer->WriteArrayEnd();
+
+	// Per-round perf log (rounds[]) for the ut4stats TeamGlicko2 backtest. Lets the
+	// site re-run the team-Glicko over real round history with tuned params
+	// (kCarryWeight / kPerfSlope / kDefaultRD / ...) without waiting to gather new
+	// data. Backward-compatible: hubs on the old build simply omit this key and
+	// Django falls back to the match-aggregate path. Humans only (BOT keys already
+	// filtered out at capture). winner_team is 0/1, or -1 when draw.
+	Writer->WriteArrayStart(TEXT("rounds"));
+	for (int32 r = 0; r < Impl->RoundLog.Num(); ++r)
+	{
+		const FElimPlusRoundRecord& Rec = Impl->RoundLog[r];
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("index"),       r);
+		Writer->WriteValue(TEXT("winner_team"), Rec.WinnerTeamIndex);
+		Writer->WriteValue(TEXT("draw"),        Rec.bIsDraw);
+		Writer->WriteArrayStart(TEXT("players"));
+		for (const FElimPlusRoundPlayerRecord& PR : Rec.Players)
+		{
+			const TCHAR* RResult = Rec.bIsDraw ? TEXT("draw") : (PR.bWinner ? TEXT("win") : TEXT("loss"));
+			Writer->WriteObjectStart();
+			Writer->WriteValue(TEXT("id"),     PR.UniqueId);
+			Writer->WriteValue(TEXT("team"),   PR.TeamIndex);
+			Writer->WriteValue(TEXT("kills"),  PR.Kills);
+			Writer->WriteValue(TEXT("deaths"), PR.Deaths);
+			Writer->WriteValue(TEXT("damage"), PR.Damage);
+			Writer->WriteValue(TEXT("result"), FString(RResult));
+			Writer->WriteObjectEnd();
+		}
+		Writer->WriteArrayEnd();
+		Writer->WriteObjectEnd();
+	}
+	Writer->WriteArrayEnd();
+
 	Writer->WriteObjectEnd();
 	Writer->Close();
 

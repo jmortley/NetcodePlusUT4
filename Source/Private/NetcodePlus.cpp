@@ -464,7 +464,8 @@ static FDelegateHandle GNcpConnectTickerHandle;
 static FString         GNcpConnectURL;
 static float           GNcpConnectElapsed = 0.0f;
 
-/** Connect anyway after this long if MCP sign-in never completes (offline/slow login). */
+/** Connect anyway after this long if the MCP profile/progression never finish
+ *  loading (offline / slow login) — the deadlock backstop for the readiness gate. */
 static const float GNcpConnectLoginTimeout = 45.0f;
 
 /** Drop the password option so it never reaches the log. */
@@ -504,24 +505,41 @@ static bool TickNcpConnect(float DeltaTime)
 		return true; // front-end map not up yet
 	}
 
-	// Wait for MCP sign-in so trusted PUG servers accept us; fall back on timeout.
+	// Wait for MCP sign-in AND the cloud profile (keybinds) + progression (XP) to
+	// finish downloading before we travel. IsLoggedIn() alone only means OSS auth is
+	// done; the profile + progression cloud reads land asynchronously AFTER that, so
+	// travelling on login alone races them — a fast client joins with DEFAULT BINDS
+	// and 0 XP (and a later profile save-back can overwrite the cloud binds with those
+	// defaults: the "binds lost" report). We mirror stock UT4's own data-ready gate,
+	// IsPlayerCardDataLoaded() == IsLoggedIn() && !IsPendingMCPLoad() (SUTMenuBase.cpp),
+	// which stock defines but never applies to its own join/travel path. Falls back on
+	// the timeout below if MCP is slow/offline (same degraded outcome as before).
 	UUTLocalPlayer* UTLP = nullptr;
 	if (UGameInstance* GI = GameWorld->GetGameInstance())
 	{
 		UTLP = Cast<UUTLocalPlayer>(GI->GetFirstGamePlayer());
 	}
 
-	const bool bLoggedIn = (UTLP && UTLP->IsLoggedIn());
+	// All four accessors are public + tick-safe; the two getters are only null-COMPARED
+	// (never dereferenced), so any not-yet-ready / early-null signal keeps bReady false
+	// and we keep waiting. IsPendingMCPLoad() is the OR of the profile + progression
+	// pending flags, so it is false only once BOTH cloud reads complete — exactly
+	// "keybinds loaded AND XP loaded" in one read (UTLocalPlayer.cpp).
+	const bool bReady = (UTLP
+		&& UTLP->IsLoggedIn()
+		&& !UTLP->IsPendingMCPLoad()
+		&& UTLP->GetProfileSettings() != nullptr
+		&& UTLP->GetProgressionStorage() != nullptr);
 	const bool bTimedOut = (GNcpConnectElapsed >= GNcpConnectLoginTimeout);
-	if (!bLoggedIn && !bTimedOut)
+	if (!bReady && !bTimedOut)
 	{
-		return true; // keep waiting for sign-in
+		return true; // keep waiting for sign-in + profile/progression download
 	}
 
 	// Warning verbosity survives Shipping (Log/Verbose are stripped there).
 	UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpconnect -> ClientTravel to %s%s"),
 		*RedactConnectURL(GNcpConnectURL),
-		bLoggedIn ? TEXT("") : TEXT(" (not signed in; connecting anyway after timeout)"));
+		bReady ? TEXT("") : TEXT(" (profile/progression not ready; connecting anyway after timeout)"));
 
 	GEngine->SetClientTravel(GameWorld, *GNcpConnectURL, TRAVEL_Absolute);
 

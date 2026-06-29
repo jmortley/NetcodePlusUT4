@@ -969,12 +969,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 		else if (Role == ROLE_Authority)
 		{
-			// Server timeout: force-reveal after 500ms to prevent permanently hidden pawns
+			// Final safety: force-reveal after 500ms if the RevealRttPct timer somehow
+			// didn't fire (belt-and-suspenders; normally the timer reveals first).
 			if (GetWorld()->GetTimeSeconds() - SpawnHiddenTimestamp > 0.5f)
 			{
-				bPingCompensatedSpawnPending = false;
-				SetActorHiddenInGame(false);
-				SetActorEnableCollision(true);
+				RevealAfterPingComp();
 			}
 		}
 	}
@@ -1491,14 +1490,72 @@ bool ATeamArenaCharacter::ServerConfirmSpawnReady_Validate()
 
 void ATeamArenaCharacter::ServerConfirmSpawnReady_Implementation()
 {
-	if (!bPingCompensatedSpawnPending)
+	// Client ACK'd possession — reveal. Early-out vs the RevealRttPct timer when
+	// ExactPing over-read (timer set too long). Guarded against double-fire.
+	RevealAfterPingComp();
+}
+
+void ATeamArenaCharacter::BeginPingCompensatedSpawnHide()
+{
+	// PING FLOOR: skip the hide for low-ping spawners. They get possession back
+	// almost immediately (no real spawn-kill risk), and their brief hidden window is
+	// exactly what makes them appear to "teleport-dodge" off the spawn point on a
+	// higher-ping opponent's screen — which is the thing high-ping players complain
+	// about. At/above the floor the hide genuinely prevents being seen/shot before
+	// you can move. Floor = Mod.ini [NetcodePlus] PingCompSpawnMinPingMs (default
+	// 60ms), read via GConfig like the own-footstep setting above. (ExactPing is live
+	// for every spawn — measured continuously server-side — so there's no unknown case.)
+	float MinPingMs = 60.f;
+	float RevealRttPct = 75.f;   // reveal at this % of RTT (server estimate) vs the full round-trip ACK
+	const FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
 	{
-		return;
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("PingCompSpawnMinPingMs"), MinPingMs, ModIniPath);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("PingCompSpawnRevealRttPct"), RevealRttPct, ModIniPath);
+	}
+	MinPingMs = FMath::Max(0.f, MinPingMs);
+	RevealRttPct = FMath::Clamp(RevealRttPct, 0.f, 100.f);
+
+	float Ping = 0.f;
+	if (AController* C = GetController())
+	{
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState))
+		{
+			Ping = PS->ExactPing;   // server-measured true ms (live every spawn, not the compressed Ping)
+		}
+	}
+	if (Ping < MinPingMs)
+	{
+		return;   // low-ping spawner -> spawn visible immediately, no hide
 	}
 
+	bPingCompensatedSpawnPending = true;
+	SetActorHiddenInGame(true);
+	SetActorEnableCollision(false);
+	SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+
+	// Reveal on a SERVER ESTIMATE at RevealRttPct% of RTT, rather than waiting for the
+	// client's ServerConfirmSpawnReady ACK. The ACK is a FULL round-trip, so it over-
+	// hides by ~one one-way trip the spawner doesn't need — and that surplus invisible
+	// window is the high-ping spawn edge. The client has control after ~one one-way
+	// trip; 75% of RTT reveals a touch after that, leaving a small buffer for client
+	// render/orient + jitter. The ACK still reveals early if ExactPing OVER-read
+	// (timer set too long), and the 0.5s Tick timeout is a final safety if the timer
+	// somehow doesn't fire. Capped at 0.5s to match that timeout.
+	const float RevealDelay = FMath::Clamp((RevealRttPct / 100.f) * (Ping / 1000.f), 0.f, 0.5f);
+	GetWorldTimerManager().SetTimer(SpawnRevealHandle, this, &ATeamArenaCharacter::RevealAfterPingComp, RevealDelay, false);
+}
+
+void ATeamArenaCharacter::RevealAfterPingComp()
+{
+	if (!bPingCompensatedSpawnPending)
+	{
+		return;   // already revealed (timer / ACK / timeout race) — no-op
+	}
 	bPingCompensatedSpawnPending = false;
 	SetActorHiddenInGame(false);
 	SetActorEnableCollision(true);
+	GetWorldTimerManager().ClearTimer(SpawnRevealHandle);
 }
 
 // ── Own footstep volume (iCTF) ─────────────────────────────────────────────

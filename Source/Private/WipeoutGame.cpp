@@ -1605,10 +1605,7 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		ATeamArenaCharacter* SpawnedChar = NewPlayer->GetPawn() ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
 		if (bEnablePingCompensatedSpawn && SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
 		{
-			SpawnedChar->bPingCompensatedSpawnPending = true;
-			SpawnedChar->SetActorHiddenInGame(true);
-			SpawnedChar->SetActorEnableCollision(false);
-			SpawnedChar->SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+			SpawnedChar->BeginPingCompensatedSpawnHide();   // ping-floored: skips low-ping spawners
 		}
 
 		// Force switch to best weapon on spawn — bypasses the player's
