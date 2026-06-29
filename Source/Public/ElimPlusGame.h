@@ -389,6 +389,11 @@ public:
 
 	// -------- Anti-Camp Configuration --------
 
+	// Anti-camp. These are the BP/CDO defaults; each is overridable per-server at
+	// runtime via Mod.ini [NetcodePlus] (read in InitGame): ElimEnableAntiCamp /
+	// ElimCampThreshold / ElimCampCheckInterval / ElimCampWarnCooldown. A key left
+	// out of Mod.ini keeps the default below. Detection is C++ (CheckForCampers);
+	// the response is Blueprint (BP_OnCamperDetected / BP_OnCamperClear).
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|AntiCamp")
 	bool bEnableAntiCamp = true;
 
@@ -466,6 +471,24 @@ protected:
 	 *  Set true the first time the rebalance runs. */
 	UPROPERTY(Transient)
 	bool bDidPreMatchRebalance = false;
+
+	/** True when this match was launched as a bot PUG (?PugId on the URL). Set in
+	 *  InitGame. Uneven-team health scaling is gated to NON-PUG games only. */
+	bool bIsPugMatch = false;
+
+	/** Uneven-team health scaling (NON-PUG only): when the teams differ in size,
+	 *  the short-handed team spawns tougher and the larger team softer, scaled
+	 *  PROPORTIONALLY to the head-count gap — ElimUnevenHealthPct% per missing
+	 *  player (4v5 = ±5%, 4v6 = ±10%, ...), capped at ±50%. Read from Mod.ini
+	 *  [NetcodePlus] in InitGame (ElimUnevenHealthScaling / ElimUnevenHealthPct).
+	 *  HP is read from the pawn's BP-set HealthMax and scaled — never hardcoded;
+	 *  armor is left untouched. */
+	bool  bElimUnevenHealthScaling = true;
+	float ElimUnevenHealthPct      = 5.f;
+
+	/** Scale a freshly-spawned pawn's HealthMax+Health for uneven teams (non-PUG).
+	 *  No-op on even teams / PUGs / when disabled. Server-only. */
+	void ApplyUnevenTeamHealthScaling(class AUTCharacter* Char);
 
 	// -------- Round flow --------
 	UPROPERTY()
@@ -727,6 +750,19 @@ protected:
 	 *  RoundKills + RoundDamage * 0.01. */
 	TMap<TWeakObjectPtr<AUTPlayerState>, float> PerPlayerMatchPPRSum;
 	TMap<TWeakObjectPtr<AUTPlayerState>, int32> PerPlayerMatchPPRRoundCount;
+
+	/** Per-player OVERKILL-INCLUSIVE match-cumulative damage (each hit counted at full
+	 *  value incl. the portion beyond victim HP). Drives the scoreboard DMG column via
+	 *  AElimPlusStatsReplicator — NOT the engine AUTPlayerState::DamageDone, which stays
+	 *  overkill-stripped for StatSQL. Accumulated in ScoreDamage; cleared on InitGame;
+	 *  entry removed on Logout. */
+	TMap<TWeakObjectPtr<AUTPlayerState>, float> PerPlayerMatchDamage;
+
+public:
+	/** Server-only: overkill-inclusive match damage for a player (0 if none).
+	 *  Read by AElimPlusStatsReplicator to populate the scoreboard DMG column. */
+	float GetMatchDamageForPlayer(AUTPlayerState* PS) const;
+protected:
 
 	void CheckRoundAchievements(int32 WinnerTeamIndex, FName Reason);
 	void CheckForACE(int32 WinnerTeamIndex);
