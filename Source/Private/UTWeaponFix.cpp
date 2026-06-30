@@ -55,6 +55,22 @@ static FORCEINLINE bool FireDbg()
     return CVarFireDebug.GetValueOnGameThread() > 0;
 }
 
+// "Ghost rocket" fix toggle (default OFF so the build is identical to today until
+// flipped). When 1: carry the REAL held-fire state across a weapon switch instead of
+// the retry-timer graduation, and clear the server's PendingFire on a genuine release.
+// 0 = legacy retry-graduation + :1779-guarded server clear (today's behaviour).
+// Runtime-toggleable (rcon) so ONE hub can A/B it live. See StartFire / StopFire /
+// PutDown / ServerStopFireFixed. No replicated/RPC change; pairs with ncp.FireDebug.
+static TAutoConsoleVariable<int32> CVarGhostFix(
+    TEXT("ncp.GhostFix"), 0,
+    TEXT("Ghost-rocket-on-weapon-switch fix: 1=carry real held-fire across a switch (no phantom rocket/shock), 0=legacy. Off by default."),
+    ECVF_Default);
+
+static FORCEINLINE bool GhostFix()
+{
+    return CVarGhostFix.GetValueOnGameThread() > 0;
+}
+
 // =========================================================================
 // PROJECTILE DIRECT-HIT LAG COMPENSATION (rocket + flak shell) — server-only.
 // Validates a client's direct-hit claim by finding, in the target's rewound
@@ -222,6 +238,8 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     FireModeActiveState.SetNum(2);
     bIsTransactionalFire = false;
     bHandlingRetry = false;
+    bFireHeldByPlayer[0] = false;
+    bFireHeldByPlayer[1] = false;
     HitScanPadding = 30.f;
     HitScanPaddingStationary = 10.0f;
 	FudgeFactorMs = 20;
@@ -458,6 +476,16 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     {
         return;
     }
+
+	// GHOST FIX (ncp.GhostFix): record a GENUINE held press. We are past the zoom,
+	// mouse-bounce, and charged-rocket-buffer early-returns, so this only sets for a
+	// real new input press — not a retry (bHandlingRetry) nor a buffered re-entry.
+	// Set even when the press is deferred by cooldown, so a held-during-cooldown switch
+	// still carries. Cleared on a genuine release in StopFire; read in PutDown.
+	if (GhostFix() && !bHandlingRetry && FireModeNum < 2 && UTOwner && UTOwner->IsLocallyControlled())
+	{
+		bFireHeldByPlayer[FireModeNum] = true;
+	}
 
 	bool bIsSwitching = (CurrentState == UnequippingState) || (UTOwner && UTOwner->GetPendingWeapon());
 
@@ -1013,6 +1041,10 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         if (!bIsSwitchingWeapons)
         {
             UTOwner->SetPendingFire(FireModeNum, false);
+            // GHOST FIX: a genuine (non-switch) release ends held intent. Mirrors the
+            // PendingFire clear so an internal stop DURING a switch (held swap) does
+            // not falsely clear it and break hold-through-switch.
+            if (GhostFix() && FireModeNum < 2) { bFireHeldByPlayer[FireModeNum] = false; }
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Clearing PendingFire %d"), FireModeNum);
         }
     }
@@ -1772,6 +1804,27 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     // very next lines.)
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
+
+    // GHOST FIX (server): the guard below skips EndFiringSequence (and its PendingFire
+    // clear) when the weapon is mid-cooldown / Unequipping — so a genuine release in
+    // that window leaves the SERVER's PendingFire stale, and the server auto-fires the
+    // next weapon on equip (the authoritative ghost rocket). Stock EndFiringSequence
+    // clears PendingFire unconditionally; mirror that on the genuine release this RPC
+    // represents. WATCH: this RPC is ALSO sent for an internal continue-fire stop
+    // (client StopFire), so a HELD switch could clear it too — verify hold-through-switch
+    // on the test hub (ncp.FireDebug logs role/state/pending below).
+    if (GhostFix() && UTOwner)
+    {
+        if (FireDbg())
+        {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] ServerStopFire clear mode=%d role=%d state=%s wasPending=%d pendingWpn=%d"),
+                FireModeNum, (int32)Role,
+                (GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null")),
+                (UTOwner->IsPendingFire(FireModeNum) ? 1 : 0),
+                (UTOwner->GetPendingWeapon() ? 1 : 0));
+        }
+        UTOwner->SetPendingFire(FireModeNum, false);
+    }
 
     // 3. Guard: only call EndFiringSequence if we're actually in the firing state
     // for this mode. Stock EndFiringSequence dispatches to CurrentState->EndFiringSequence(),
@@ -3046,9 +3099,29 @@ bool AUTWeaponFix::PutDown()
         {
             for (int32 i = 0; i < 2; i++)
             {
-                if (GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]))
+                if (GhostFix())
                 {
-                    // "Graduate" the local retry timer to a persistent Pawn flag
+                    // GHOST FIX: carry the REAL held state across the switch instead of
+                    // graduating a stale cooldown-retry. Locally-controlled (client / listen
+                    // host): held -> new weapon auto-fires (feature kept); tap/released ->
+                    // cleared, no phantom rocket. Dedicated-server remote players: PendingFire
+                    // is owned by Server{Start,Stop}FireFixed, never graduated here.
+                    if (UTOwner->IsLocallyControlled())
+                    {
+                        UTOwner->SetPendingFire(i, bFireHeldByPlayer[i]);
+                    }
+                    if (FireDbg())
+                    {
+                        UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] PutDown graduate mode=%d role=%d local=%d held=%d retryActive=%d -> pending=%d"),
+                            i, (int32)Role, (UTOwner->IsLocallyControlled() ? 1 : 0),
+                            (bFireHeldByPlayer[i] ? 1 : 0),
+                            (GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]) ? 1 : 0),
+                            (UTOwner->IsPendingFire(i) ? 1 : 0));
+                    }
+                }
+                else if (GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]))
+                {
+                    // LEGACY (ncp.GhostFix=0): graduate the local retry timer to a Pawn flag
                     UTOwner->SetPendingFire(i, true);
                     UE_LOG(LogUTWeaponFix, Verbose, TEXT("PutDown: Transferring Retry %d to Pawn PendingFire"), i);
                 }

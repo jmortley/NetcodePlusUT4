@@ -5,6 +5,8 @@
 #include "UTBasePlayerController.h"   // ClientSay
 #include "UTATypes.h"                 // ChatDestinations
 #include "UTPlayerState.h"
+#include "UTCharacterMovement.h"      // CurrentServerMoveTime — server-side "client has moved" proof
+#include "GameFramework/Pawn.h"
 #include "GameFramework/GameSession.h"
 #include "GameFramework/GameMode.h"
 #include "Engine/World.h"
@@ -66,6 +68,25 @@ static FString ResolveOwnerName(AActor* Gate)
 	return (PC && PC->PlayerState) ? PC->PlayerState->PlayerName : FString(TEXT("<unknown>"));
 }
 
+// Corroborating "this client is really here and functional" signal for the no-report
+// kick. The server sets CurrentServerMoveTime to the client's timestamp every time it
+// processes a movement update from that client's pawn (UUTCharacterMovement::
+// MoveAutonomous); it stays 0 until the first one arrives. Every NCPlus mode spawns
+// ATeamArenaCharacter (a NetcodePlus class) as the player pawn, so a plugin-LESS client
+// can't load its own pawn, never runs client movement prediction, and never sends a
+// UTServerMove → CurrentServerMoveTime is still 0 at the deadline. A client that IS
+// moving therefore loaded the NCPlus pawn class, i.e. has the plugin — its missing
+// version report is a lost/failed handshake, NOT a missing plugin. Guard the kick on
+// this so we never boot a legit player whose reliable RPC didn't land in the window.
+static bool OwnerClientHasMoved(AActor* Gate)
+{
+	APlayerController* PC = Gate ? Cast<APlayerController>(Gate->GetOwner()) : nullptr;
+	APawn* Pawn = PC ? PC->GetPawn() : nullptr;
+	UUTCharacterMovement* Move =
+		Pawn ? Cast<UUTCharacterMovement>(Pawn->GetMovementComponent()) : nullptr;
+	return Move != nullptr && Move->CurrentServerMoveTime > 0.f;
+}
+
 // Push a system chat line to every player on the server. ClientSay is base-UT
 // (AUTBasePlayerController), not plugin-gated, so plugin-less clients see it too.
 static void BroadcastSystemMessage(UWorld* W, const FString& Msg)
@@ -105,21 +126,29 @@ void ANCVersionGate::BeginPlay()
 	// as soon as the actor is fully replicated + owner-resolved.
 	if (Role == ROLE_Authority)
 	{
-		// DISABLED 2026-06-24 — the no-reply timeout kick was false-positiving on
-		// hub-instance joins: a legit, correctly-versioned client whose version
-		// report didn't land inside the window got kicked, and KickOwner's
-		// GameSession->KickPlayer adds them to the instance/hub ban list, so the
-		// client can't rejoin ("PendingNetDriver[PendingConnectionFailure]: BANNED").
-		// Mismatch reports (ServerReportVersion_Implementation) still kick genuinely
-		// outdated clients; we just stop kicking clients that never handshake.
-		// Re-arm by uncommenting the SetTimer below.
-		TimeoutSec = ResolveVersionReportTimeoutSec();   // resolved for the OnTimeout log line; the kick timer is NOT armed
-		// if (UWorld* W = GetWorld())
-		// {
-		// 	W->GetTimerManager().SetTimer(
-		// 		TimeoutHandle, this, &ANCVersionGate::OnTimeout,
-		// 		TimeoutSec, /*bLoop*/ false);
-		// }
+		// ARMED 2026-06-29 — the no-reply timeout kick is ON. It's the only channel that
+		// reaches a plugin-less client already inside an NCPlus instance: their HUD is an
+		// NCPlus class they can't load, so MyHUD is null/non-AUTHUD and ClientReceiveChat
+		// drops every chat/HUD line (the same reason they see broken player models). The
+		// kick-reason screen (GuaranteedKick → ClientWasKicked → viewport KickReason) is
+		// NOT HUD-gated, so it renders + names netcodeplus.com.
+		//
+		// Two safeties make this safe to run (the BARE timeout kick is why 9159128
+		// disabled it — a lossy legit joiner got instance-banned): (1) KickOwner routes
+		// through non-banning GuaranteedKick, never GameSession->KickPlayer, so a mistaken
+		// kick is rejoinable, not a ban; (2) the OwnerClientHasMoved guard in OnTimeout/
+		// OnKickDeadline stands down on any client whose pawn has sent moves — that client
+		// loaded the NCPlus pawn class (ATeamArenaCharacter) so it demonstrably has the
+		// plugin, i.e. its missing report is a lost handshake, not a missing plugin.
+		// Default 100s grace, Mod.ini VersionReportTimeoutSec (the movement guard also
+		// makes a shorter value safe).
+		TimeoutSec = ResolveVersionReportTimeoutSec();
+		if (UWorld* W = GetWorld())
+		{
+			W->GetTimerManager().SetTimer(
+				TimeoutHandle, this, &ANCVersionGate::OnTimeout,
+				TimeoutSec, /*bLoop*/ false);
+		}
 	}
 }
 
@@ -162,13 +191,13 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 		return;
 	}
 
-	// Mismatch — immediate kick. (The no-reply timeout path in OnTimeout also
-	// kicks now — re-enabled 2026-06-19 at a 100s grace.)
+	// Mismatch — immediate kick. (The no-reply timeout path in OnTimeout also kicks —
+	// armed + movement-guarded; see BeginPlay.)
 	UE_LOG(LogGameMode, Warning,
 		TEXT("[NCPlusVersionGate] kicking owner: client v%d != server v%d (player: %s)"),
 		ClientVersion, ServerVersion, *ResolveOwnerName(this));
 	KickOwner(FString::Printf(
-		TEXT("NetcodePlus version mismatch: server is v%d, you are v%d. Update via launcher."),
+		TEXT("NetcodePlus version mismatch: server is v%d, you are v%d. Update via the launcher at netcodeplus.com."),
 		ServerVersion, ClientVersion));
 }
 
@@ -178,6 +207,21 @@ void ANCVersionGate::OnTimeout()
 	{
 		return;
 	}
+	// Corroboration guard: if the owner is demonstrably playing (their pawn has sent
+	// moves), the missing report is a failed handshake on a functional client, not a
+	// missing plugin — a plugin-less client can't load the NCPlus pawn class so it never
+	// moves (see OwnerClientHasMoved). Stand down silently: don't broadcast a false
+	// "missing plugin" accusation or schedule the kick.
+	if (OwnerClientHasMoved(this))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[NCPlusVersionGate] no version report within %.0fs from %s, but their pawn is moving — treating as a lost handshake on a functional client, NOT kicking."),
+			TimeoutSec, *ResolveOwnerName(this));
+		bConfirmed = true;
+		Destroy();
+		return;
+	}
+
 	// No version report within the deadline → the client never handshook, i.e. no
 	// NetcodePlus plugin (or a pre-gate build). Rather than an abrupt kick, announce
 	// it to the whole server for context, then kick kKickGraceSec later. The delay
@@ -189,7 +233,7 @@ void ANCVersionGate::OnTimeout()
 		TimeoutSec, *PlayerName, NETCODE_PLUGIN_VERSION, kKickGraceSec);
 
 	BroadcastSystemMessage(GetWorld(), FString::Printf(
-		TEXT("%s does not have the NetcodePlus plugin (server is v%d) — removing in %.0fs. Get it from the launcher."),
+		TEXT("%s does not have the NetcodePlus plugin (server is v%d) — removing in %.0fs. Get the launcher at netcodeplus.com."),
 		*PlayerName, NETCODE_PLUGIN_VERSION, kKickGraceSec));
 
 	if (UWorld* W = GetWorld())
@@ -206,12 +250,24 @@ void ANCVersionGate::OnKickDeadline()
 	{
 		return;
 	}
+	// Final corroboration re-check — covers a client whose pawn only just spawned and
+	// started moving during the kKickGraceSec grace (so OnTimeout still saw 0). Moving
+	// == functional == has the plugin → stand down instead of kicking.
+	if (OwnerClientHasMoved(this))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[NCPlusVersionGate] %s started moving during the kick grace — functional client, standing down."),
+			*ResolveOwnerName(this));
+		bConfirmed = true;
+		Destroy();
+		return;
+	}
 	bConfirmed = true;
 	UE_LOG(LogGameMode, Warning,
 		TEXT("[NCPlusVersionGate] kicking %s — no NetcodePlus plugin (server v%d)."),
 		*ResolveOwnerName(this), NETCODE_PLUGIN_VERSION);
 	KickOwner(FString::Printf(
-		TEXT("NetcodePlus plugin required (server v%d) — not detected. Install/update via the launcher."),
+		TEXT("NetcodePlus plugin required (server v%d) — not detected. Get the launcher at netcodeplus.com, install/update, then rejoin."),
 		NETCODE_PLUGIN_VERSION));
 }
 

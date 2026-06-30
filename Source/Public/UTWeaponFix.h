@@ -303,6 +303,13 @@ protected:
     FTimerHandle DelayedPutDownHandle;
     bool bHandlingRetry;
     FTimerHandle RetryFireHandle[2];
+
+    // Ghost-rocket fix (ncp.GhostFix): the REAL fire-button-held state per mode,
+    // tracked from genuine input on the locally-controlled client (set in StartFire
+    // when !bHandlingRetry, cleared in StopFire on a non-switch release). Read at the
+    // PutDown switch boundary so held intent carries across a weapon switch WITHOUT
+    // graduating a stale cooldown-retry into a phantom rocket/shock fire.
+    bool bFireHeldByPlayer[2];
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
 

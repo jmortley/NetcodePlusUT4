@@ -162,6 +162,16 @@ private:
 	ECheckBoxState GetStockBottomBarState() const;
 	void OnStockBottomBarChanged(ECheckBoxState NewState);
 
+	// Stock top-left team roster (slanted name + HP plates) vs the NCPlus portrait strip.
+	// Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
+	ECheckBoxState GetStockTeamPanelState() const;
+	void OnStockTeamPanelChanged(ECheckBoxState NewState);
+
+	// Scoreboard background opacity (0.05..1.0). Global; persists [NetcodePlus] ScoreboardOpacity.
+	TOptional<float> GetScoreboardOpacityValue() const;
+	void OnScoreboardOpacityChanged(float NewValue);
+	void OnScoreboardOpacityCommitted(float NewValue, ETextCommit::Type CommitType);
+
 	// Per-row reset
 	FReply OnResetRowClicked(FName Alias);
 

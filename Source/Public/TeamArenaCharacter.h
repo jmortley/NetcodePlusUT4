@@ -8,6 +8,7 @@
 #include "UTHat.h"
 #include "UTHatLeader.h"
 #include "UTEyewear.h"
+#include "TimerManager.h"   // FTimerHandle SpawnRevealHandle (ping-comp spawn reveal timer)
 #include "TeamArenaCharacter.generated.h"
 
 
@@ -166,9 +167,28 @@ public:
 	/** Server timestamp when bPingCompensatedSpawnPending was set (for timeout) */
 	float SpawnHiddenTimestamp = 0.f;
 
+	/** Server-side reveal timer: fires at ~RevealRttPct% of the spawner's RTT (an
+	 *  estimate of when their client has control), instead of waiting for the full
+	 *  round-trip ServerConfirmSpawnReady ACK. */
+	FTimerHandle SpawnRevealHandle;
+
+	/** Server-side: reveal the pawn (unhide + re-enable collision + clear the flag &
+	 *  timer). Shared by the RevealRttPct timer, the client ACK, and the 0.5s safety
+	 *  timeout; guarded against double-fire. */
+	void RevealAfterPingComp();
+
 	/** Client has confirmed possession — reveal the pawn */
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerConfirmSpawnReady();
+
+	/** Server-side: begin the ping-compensated spawn hide (set pending + hide +
+	 *  disable collision + stamp), BUT only if the owning client's ping is at/above
+	 *  the floor (Mod.ini [NetcodePlus] PingCompSpawnMinPingMs, default 60ms).
+	 *  Low-ping spawners regain control almost instantly (no real spawn-kill risk),
+	 *  and their brief hide is exactly what makes them look like they teleport-dodge
+	 *  off the spawn on a higher-ping opponent's screen. (ExactPing is live every
+	 *  spawn, so there's no unknown case.) Call from the gamemode's RestartPlayer after Super. */
+	void BeginPingCompensatedSpawnHide();
 
 	// ── Force Models (MutForceModels port, phase 1) ─────────────────
 	// Client-side render override: force every OTHER player to a chosen AUTCharacterContent

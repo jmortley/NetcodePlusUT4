@@ -5,9 +5,9 @@
 // match begins — wrecking the PUG. This C++ gate spawns a per-player owner-only
 // AInfo right at PostLogin; the client's PostNetInit calls ServerReportVersion
 // with NETCODE_PLUGIN_VERSION. Server compares: mismatch → kick immediately.
-// 100-second timeout with no reply → broadcast a "missing plugin" notice to the
-// whole server, then kick 5s later (covers old clients that don't have this class
-// at all / never replicate the actor cleanly; the long grace + announce soften it).
+// 100-second timeout with no reply → broadcast a "missing plugin" notice, then kick 5s
+// later (non-banning, and gated by a movement-corroboration guard so a functional client
+// whose handshake was merely lost is never kicked). See BeginPlay.
 //
 // Bots + the listen-host local PC are exempt (no remote client to handshake with).
 #pragma once

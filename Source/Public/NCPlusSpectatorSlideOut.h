@@ -54,7 +54,17 @@ class NETCODEPLUS_API UNCPlusSpectatorSlideOut : public UUTHUDWidget_SpectatorSl
 	UPROPERTY(Transient)
 	ENCSlideOutWeaponMode WeaponListMode;
 
+	/** When true (stock team panel active), the roster panel is redundant: skip
+	 *  rendering it, but stay REGISTERED so ShouldDraw still bootstraps the interactive
+	 *  spectator window (cursor / ESC / camera switching). Set by the owning HUD. */
+	UPROPERTY(Transient)
+	bool bSuppressRosterDraw;
+
 protected:
+	/** Suppress only the roster VISUAL when bSuppressRosterDraw — ShouldDraw (the sole
+	 *  bootstrap for SUTSpectatorWindow's cursor/ESC/camera input) keeps running. */
+	virtual void Draw_Implementation(float DeltaTime) override;
+
 	virtual void DrawWeaponStats(AUTPlayerState* PS, float DeltaTime, float& YPos, float XOffset, float ScoreWidth, float MaxHeight, const FStatsFontInfo& StatsFontInfo) override;
 
 private:

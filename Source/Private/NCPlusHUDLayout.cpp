@@ -6,11 +6,14 @@
 #include "UTHUDWidget.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTPlayerState.h"
+#include "UTTeamInfo.h"
 #include "UTGameState.h"
 #include "UTInventory.h"
 #include "UTTimedPowerup.h"
 #include "UTJumpBoots.h"
 #include "Engine/Canvas.h"
+#include "CanvasItem.h"
 #include "Engine/Font.h"
 #include "Json.h"
 #include "JsonUtilities.h"
@@ -507,6 +510,84 @@ void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
 	}
 }
 
+// -----------------------------------------------------------------------------
+// Stock team panel toggle + scoreboard opacity (mirror the StockBottomBar plumbing)
+// -----------------------------------------------------------------------------
+
+// Cached so the per-frame DrawHUD call never hits FileExists. -1 = unresolved.
+static int8 GStockTeamPanelCache = -1;
+
+bool FNCPlusHUDLayout::WantsStockTeamPanel()
+{
+	if (GStockTeamPanelCache >= 0)
+	{
+		return GStockTeamPanelCache != 0;
+	}
+	bool bResult;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), Val, ModIni) && !Val.IsEmpty())
+	{
+		// Explicit choice in Mod.ini wins (written by the editor toggle).
+		bResult = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
+	}
+	else
+	{
+		// No explicit choice — default to the stock roster for a fresh install (no
+		// saved HUD layout). Anyone who has customized their HUD keeps the portraits.
+		bResult = !FPaths::FileExists(GetDefaultLayoutPath());
+	}
+	GStockTeamPanelCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetStockTeamPanel(bool bStock)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"),
+			bStock ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	// Refresh the cache so the change applies on the very next DrawHUD frame
+	// (the panel draws directly from this value — no widget swap needed).
+	GStockTeamPanelCache = bStock ? 1 : 0;
+}
+
+static float GScoreboardOpacityCache = -1.f;
+
+float FNCPlusHUDLayout::GetScoreboardOpacity()
+{
+	if (GScoreboardOpacityCache >= 0.f)
+	{
+		return GScoreboardOpacityCache;
+	}
+	float Result = 0.3f;  // prior hard-coded default
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("ScoreboardOpacity"), Val, ModIni) && !Val.IsEmpty())
+	{
+		Result = FCString::Atof(*Val);
+	}
+	Result = FMath::Clamp(Result, 0.05f, 1.f);
+	GScoreboardOpacityCache = Result;
+	return Result;
+}
+
+void FNCPlusHUDLayout::SetScoreboardOpacity(float Opacity)
+{
+	const float Clamped = FMath::Clamp(Opacity, 0.05f, 1.f);
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("ScoreboardOpacity"),
+			*FString::SanitizeFloat(Clamped), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GScoreboardOpacityCache = Clamped;
+}
+
 FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
 {
 	FNCPlusHUDLayout Layout;
@@ -777,6 +858,10 @@ namespace NCPlusHUDAliases
 			// them apart in the visual editor.
 			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
 			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
+			// Stock top-left team roster (alternative to the portrait strip; see
+			// NCPlusHUDDrawCall::DrawStockTeamPanel). Draw-call alias → movable, with
+			// Scale / Opacity / Hide honored. Default top-left with a small inset.
+			T.Emplace(TEXT("team_panel"),       FString(),                                                                       FText::FromString(TEXT("Team Panel (Stock Roster)")), true, ENCPlusHUDAnchor::TopLeft, FVector2D(16.f, 12.f));
 			// Full-screen tint when the local pawn takes damage. Polls Health+Armor
 			// each frame; on a decrease, stamps the time and tints the screen for
 			// `flash_duration` seconds. Extras: color_text (tint color, default red),
@@ -993,6 +1078,262 @@ namespace NCPlusHUDDrawCall
 
 		Canvas->SetLinearDrawColor(FLinearColor(TintColor.R, TintColor.G, TintColor.B, Alpha));
 		Canvas->DrawTile(Canvas->DefaultTexture, 0.f, 0.f, Canvas->ClipX, Canvas->ClipY, 0.f, 0.f, 1.f, 1.f, BLEND_Translucent);
+	}
+
+	// =============================================================================
+	// Stock team panel — top-left team roster (alternative to the portrait strip)
+	// =============================================================================
+	//
+	// Red row then blue row of slanted, team-colored plates. Teammate plates show
+	// name + "+HP  armor"; enemy plates show the name only (no live enemy HP). Dead
+	// players are skipped so the row reflows — plate count = alive count. Same data
+	// source as the portrait strip (teammate Health/GetArmorAmount); only the look
+	// differs. Honors the `team_panel` alias (position / scale / opacity / hide).
+	void DrawStockTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (HUD == nullptr || Canvas == nullptr) return;
+		if (IsHidden(TEXT("team_panel"))) return;
+
+		UWorld* World = HUD->GetWorld();
+		if (!World) return;
+		AUTGameState* GS = World->GetGameState<AUTGameState>();
+		if (!GS) return;
+
+		// Font + FontSz come from the `team_panel` nchud alias (Font dropdown + FontSz
+		// slider in the editor), falling back to the stock HUD fonts when unset.
+		UFont* NameFont  = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD, HUD->SmallFont);
+		if (!NameFont) NameFont = HUD->SmallFont;
+		UFont* StatFont  = NameFont;
+		UFont* ScoreFont = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD, HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont);
+		if (!ScoreFont) ScoreFont = HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont;
+		if (!NameFont) return;
+
+		// Local viewer's team — teammates get an HP/armor readout, enemies name-only.
+		uint8 MyTeam = 255;
+		if (HUD->UTPlayerOwner)
+		{
+			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
+			{
+				MyTeam = MyPS->GetTeamNum();
+			}
+		}
+
+		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+		const float PanelScale  = GetScale(TEXT("team_panel"));
+		const float S  = FMath::Max(0.2f, RenderScale * PanelScale);
+		const float Op = FMath::Clamp(GetOpacity(TEXT("team_panel")), 0.f, 1.f);
+
+		// Geometry (design px * S).
+		const float PlateW = 150.f * S;
+		const float PlateH = 30.f  * S;
+		const float Skew   = 10.f  * S;
+		const float Gap    = 4.f   * S;
+		const float ScoreW = 34.f  * S;
+		const float RowGap = 6.f   * S;
+		const float Pitch  = PlateW + Gap;
+
+		const FVector2D Origin = ResolveScreenPos(TEXT("team_panel"), Canvas,
+			FVector2D(16.f * RenderScale, 12.f * RenderScale));
+
+		const float FontExtra  = NCPlusHUDFonts::ResolveScale(TEXT("team_panel"), 1.f);
+		const float NameScale  = (float(Canvas->SizeY) / 1080.0f) * 0.42f * PanelScale * FontExtra;
+		const float StatScale  = (float(Canvas->SizeY) / 1080.0f) * 0.42f * PanelScale * FontExtra;
+		const float ScoreScale = (float(Canvas->SizeY) / 1080.0f) * 0.65f * PanelScale * FontExtra;
+
+		// White texture for the slanted plate fills (DrawTile is axis-aligned, so the
+		// slant needs triangle items).
+		FTexture* WhiteTex = (Canvas->DefaultTexture) ? Canvas->DefaultTexture->Resource : nullptr;
+		if (!WhiteTex) return;
+
+		FFontRenderInfo RI;
+		RI.bEnableShadow = true;
+
+		auto DrawQuad = [&](const FVector2D& A, const FVector2D& B, const FVector2D& C, const FVector2D& D, FLinearColor Col)
+		{
+			Col.A *= Op;
+			FCanvasTriangleItem T1(A, B, C, WhiteTex);
+			T1.BlendMode = ESimpleElementBlendMode::SE_BLEND_Translucent;
+			T1.SetColor(Col);
+			Canvas->DrawItem(T1);
+			FCanvasTriangleItem T2(A, C, D, WhiteTex);
+			T2.BlendMode = ESimpleElementBlendMode::SE_BLEND_Translucent;
+			T2.SetColor(Col);
+			Canvas->DrawItem(T2);
+		};
+
+		// Trim text to fit a max pixel width (mirrors the portrait-strip name clamp).
+		auto Fit = [&](UFont* Font, FString Text, float MaxW, float Scale) -> FString
+		{
+			float XL, YL;
+			Canvas->StrLen(Font, Text, XL, YL);
+			while (XL * Scale > MaxW && Text.Len() > 3)
+			{
+				Text = Text.Left(Text.Len() - 1);
+				Canvas->StrLen(Font, Text, XL, YL);
+			}
+			return Text;
+		};
+
+		// Outlined text centered on (CenterX, CenterY).
+		auto DrawCentered = [&](UFont* Font, const FString& Text, float CenterX, float CenterY, float Scale, FLinearColor Color)
+		{
+			if (!Font || Text.IsEmpty()) return;
+			float XL, YL;
+			Canvas->StrLen(Font, Text, XL, YL);
+			const float X = CenterX - (XL * Scale * 0.5f);
+			const float Y = CenterY - (YL * Scale * 0.5f);
+			const float OL = 1.f;
+			Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, Op));
+			Canvas->DrawText(Font, FText::FromString(Text), X - OL, Y, Scale, Scale, RI);
+			Canvas->DrawText(Font, FText::FromString(Text), X + OL, Y, Scale, Scale, RI);
+			Canvas->DrawText(Font, FText::FromString(Text), X, Y - OL, Scale, Scale, RI);
+			Canvas->DrawText(Font, FText::FromString(Text), X, Y + OL, Scale, Scale, RI);
+			Color.A *= Op;
+			Canvas->SetLinearDrawColor(Color);
+			Canvas->DrawText(Font, FText::FromString(Text), X, Y, Scale, Scale, RI);
+		};
+
+		for (int32 TeamIdx = 0; TeamIdx < 2; ++TeamIdx)
+		{
+			const float RowY = Origin.Y + TeamIdx * (PlateH + RowGap);
+
+			// Honor the panel's OWN Team-Color toggle (parity with the portraits, which
+			// each read their own alias): custom TeamSkins color when on, stock red/blue
+			// when off. Defaults ON (GetUseTeamColor defaults true); toggle in nchud.
+			FLinearColor TeamCol = (TeamIdx == 1)
+				? FLinearColor(0.05f, 0.10f, 0.90f, 1.f)
+				: FLinearColor(0.80f, 0.05f, 0.05f, 1.f);
+			if (GetUseTeamColor(TEXT("team_panel")) && GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx])
+			{
+				TeamCol = GS->Teams[TeamIdx]->TeamColor;
+			}
+			// Muted dark plate (was full-saturation team color — too bright/glary behind
+			// the white names). Body darkened; the team hue lives in a thin top accent.
+			const FLinearColor PlateCol(TeamCol.R * 0.5f, TeamCol.G * 0.5f, TeamCol.B * 0.5f, 0.92f);
+			const FLinearColor ScoreBoxCol(TeamCol.R * 0.33f, TeamCol.G * 0.33f, TeamCol.B * 0.33f, 0.95f);
+			const FLinearColor EdgeCol(TeamCol.R, TeamCol.G, TeamCol.B, 0.8f);
+
+			// Score box (slanted), with the team score.
+			{
+				const float x = Origin.X;
+				const FVector2D A(x + Skew, RowY), B(x + Skew + ScoreW, RowY), C(x + ScoreW, RowY + PlateH), D(x, RowY + PlateH);
+				DrawQuad(A, B, C, D, ScoreBoxCol);
+				const int32 TeamScore = (GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx]) ? GS->Teams[TeamIdx]->Score : 0;
+				DrawCentered(ScoreFont, FString::Printf(TEXT("%d"), TeamScore),
+					x + Skew * 0.5f + ScoreW * 0.5f, RowY + PlateH * 0.5f, ScoreScale, FLinearColor::White);
+			}
+
+			float PlateX = Origin.X + ScoreW + Gap;
+
+			for (APlayerState* PSBase : GS->PlayerArray)
+			{
+				AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+				if (!PS || PS->bOnlySpectator || PS->bIsInactive) continue;
+				if (PS->GetTeamNum() != TeamIdx) continue;
+
+				// Alive check — controller's pawn on the server, GetUTCharacter()
+				// fallback on clients (GetOwner() is null for remote player states).
+				// Same logic as the portrait strip; dead/unknown players are skipped
+				// so the row reflows (plate count = alive count).
+				AUTCharacter* UTC = nullptr;
+				if (AController* Ctrl = Cast<AController>(PS->GetOwner())) { UTC = Cast<AUTCharacter>(Ctrl->GetPawn()); }
+				else                                                        { UTC = PS->GetUTCharacter(); }
+				if (!UTC || UTC->IsDead()) continue;
+
+				const float x = PlateX;
+				const FVector2D A(x + Skew, RowY), B(x + Skew + PlateW, RowY), C(x + PlateW, RowY + PlateH), D(x, RowY + PlateH);
+				DrawQuad(A, B, C, D, PlateCol);
+				// Thin lighter top edge for definition.
+				DrawQuad(FVector2D(x + Skew, RowY), FVector2D(x + Skew + PlateW, RowY),
+					FVector2D(x + Skew + PlateW, RowY + 2.f * S), FVector2D(x + Skew, RowY + 2.f * S), EdgeCol);
+
+				const float CenterX  = x + Skew * 0.5f + PlateW * 0.5f;
+				const bool  bTeammate = (TeamIdx == MyTeam);
+
+				if (bTeammate)
+				{
+					// Name on top, HP/armor below.
+					const FString Name = Fit(NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale);
+					DrawCentered(NameFont, Name, CenterX, RowY + PlateH * 0.30f, NameScale, FLinearColor(0.90f, 0.90f, 0.92f, 1.f));
+
+					const int32 HP = UTC->Health;
+					const int32 AR = UTC->GetArmorAmount();
+					const FString HPStr = FString::Printf(TEXT("+%d"), HP);
+					const FString ARStr = FString::Printf(TEXT("%d"), AR);
+					FLinearColor HPCol = (HP <= 34) ? FLinearColor(1.f, 0.42f, 0.42f, 1.f)
+					                   : (HP <= 90) ? FLinearColor(0.92f, 0.82f, 0.30f, 1.f)
+					                                : FLinearColor(0.37f, 0.85f, 0.37f, 1.f);
+					FLinearColor ARCol = (AR <= 0) ? FLinearColor(0.60f, 0.60f, 0.60f, 1.f)
+					                               : FLinearColor(0.93f, 0.83f, 0.29f, 1.f);
+
+					// "+HP   armor", centered as a group (green health, yellow armor).
+					float hpXL, hpYL, arXL, arYL;
+					Canvas->StrLen(StatFont, HPStr, hpXL, hpYL);
+					Canvas->StrLen(StatFont, ARStr, arXL, arYL);
+					const float SpaceW = 10.f * S;
+					const float TotalW = (hpXL + arXL) * StatScale + SpaceW;
+					const float StatY  = RowY + PlateH - (hpYL * StatScale) - 1.f * S;
+					const float gx = CenterX - TotalW * 0.5f;
+					const float arX = gx + hpXL * StatScale + SpaceW;
+					const float OL = 1.f;
+
+					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, Op));
+					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx - OL, StatY, StatScale, StatScale, RI);
+					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx + OL, StatY, StatScale, StatScale, RI);
+					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx, StatY - OL, StatScale, StatScale, RI);
+					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx, StatY + OL, StatScale, StatScale, RI);
+					HPCol.A *= Op; Canvas->SetLinearDrawColor(HPCol);
+					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx, StatY, StatScale, StatScale, RI);
+
+					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, Op));
+					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX - OL, StatY, StatScale, StatScale, RI);
+					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX + OL, StatY, StatScale, StatScale, RI);
+					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX, StatY - OL, StatScale, StatScale, RI);
+					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX, StatY + OL, StatScale, StatScale, RI);
+					ARCol.A *= Op; Canvas->SetLinearDrawColor(ARCol);
+					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX, StatY, StatScale, StatScale, RI);
+				}
+				else
+				{
+					// Enemy: name only, vertically centered (no live enemy HP).
+					const FString Name = Fit(NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale);
+					DrawCentered(NameFont, Name, CenterX, RowY + PlateH * 0.5f, NameScale, FLinearColor(0.92f, 0.92f, 0.95f, 1.f));
+				}
+
+				PlateX += Pitch;
+			}
+		}
+
+		// Round clock — the center scorebar (which normally carries it) is suppressed
+		// while this panel is on, so draw the clock here. RoundSecondsRemaining off the
+		// BP GameState via reflection (static class+prop cache, like the scorebar).
+		{
+			int32 RoundTime = -1;
+			static UClass* CachedClockCls = nullptr;
+			static UIntProperty* CachedClockProp = nullptr;
+			UClass* GSCls = GS->GetClass();
+			if (CachedClockCls != GSCls)
+			{
+				CachedClockCls  = GSCls;
+				CachedClockProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+			}
+			if (CachedClockProp)
+			{
+				RoundTime = CachedClockProp->GetPropertyValue_InContainer(GS);
+			}
+			if (RoundTime >= 0)
+			{
+				const FString ClockStr = FString::Printf(TEXT("%02d:%02d"), RoundTime / 60, RoundTime % 60);
+				// Below both team rows, centered on the score-box column (left edge is free
+				// once the spectator slide-out is suppressed).
+				const float ClockCX = Origin.X + Skew * 0.5f + ScoreW * 0.5f;
+				const float ClockCY = Origin.Y + 2.f * PlateH + RowGap + PlateH * 0.5f;
+				const FLinearColor ClockCol = (RoundTime <= 30) ? FLinearColor(1.f, 0.24f, 0.24f, 1.f) : FLinearColor::White;
+				DrawCentered(ScoreFont, ClockStr, ClockCX, ClockCY, ScoreScale, ClockCol);
+			}
+		}
+
+		Canvas->SetLinearDrawColor(FLinearColor::White);
 	}
 
 	// =============================================================================

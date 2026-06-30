@@ -3,6 +3,7 @@
 #include "NCPlusSpectatorSlideOut.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
+#include "UTPlayerController.h"
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
@@ -15,6 +16,30 @@ UNCPlusSpectatorSlideOut::UNCPlusSpectatorSlideOut(const FObjectInitializer& Obj
 	: Super(ObjectInitializer)
 {
 	WeaponListMode = ENCSlideOutWeaponMode::Passthrough;
+	bSuppressRosterDraw = false;
+}
+
+void UNCPlusSpectatorSlideOut::Draw_Implementation(float DeltaTime)
+{
+	// A TRUE spectator (bOnlySpectator — a caster/observer, not an eliminated player)
+	// must ALWAYS get the slide-out: it's their primary tool (camera switching +
+	// per-player weapons), exactly as stock Elim shows it. Only suppress the roster
+	// VISUAL for an eliminated PLAYER, whose own team panel already shows the roster.
+	bool bTrueSpectator = false;
+	if (UTHUDOwner && UTHUDOwner->UTPlayerOwner && UTHUDOwner->UTPlayerOwner->PlayerState)
+	{
+		bTrueSpectator = UTHUDOwner->UTPlayerOwner->PlayerState->bOnlySpectator;
+	}
+
+	// Suppress only the roster VISUAL (and only for a non-true-spectator). ShouldDraw
+	// still runs — it is the SOLE bootstrap for the interactive spectator Slate window
+	// (SUTSpectatorWindow: cursor capture, ESC->menu, camera switch) — so input stays
+	// alive regardless; we just skip painting the redundant roster.
+	if (bSuppressRosterDraw && !bTrueSpectator)
+	{
+		return;
+	}
+	Super::Draw_Implementation(DeltaTime);
 }
 
 void UNCPlusSpectatorSlideOut::DrawWeaponStats(AUTPlayerState* PS, float DeltaTime, float& YPos, float XOffset, float ScoreWidth, float MaxHeight, const FStatsFontInfo& StatsFontInfo)

@@ -50,7 +50,7 @@ namespace NCHUDEdit
 		{
 			return TEXT("Weapon Bars");
 		}
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("score_kda"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("score_kda") || Alias == TEXT("team_panel"))
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
@@ -193,7 +193,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_bg"),     FText::FromString(TEXT("Plate BG")), FLinearColor(0.04f, 0.04f, 0.04f, 0.45f) });
 		}
 		// Portraits + scorebar opt-in to the use_team_color checkbox.
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("team_panel"))
 		{
 			Row.bHasTeamColorToggle = true;
 		}
@@ -201,7 +201,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		// and a FontSz slider so 4K users can right-size the numbers without
 		// touching pip dimensions. DrawPlayerIcon (Wipeout + Elim) reads both
 		// from the same alias so each team's strip is independent.
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("team_panel"))
 		{
 			Row.bHasFontPicker = true;
 			Row.bHasFontScale  = true;
@@ -423,6 +423,47 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("Stock bottom bar (weapon / ammo / health)")))
 				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+		]
+		// Stock top-left team roster (slanted name + HP/armor plates) vs the NCPlus
+		// portrait strip. Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetStockTeamPanelState)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnStockTeamPanelChanged)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Stock team panel (top-left roster) instead of portraits")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+		]
+		// Scoreboard background opacity (0.05..1.0). Global across the NCPlus scoreboards.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Scoreboard opacity")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(SBox).WidthOverride(90.f)
+				[
+					SNew(SNumericEntryBox<float>)
+					.Value(this, &SNCPlusHUDEditor::GetScoreboardOpacityValue)
+					.OnValueChanged(this, &SNCPlusHUDEditor::OnScoreboardOpacityChanged)
+					.OnValueCommitted(this, &SNCPlusHUDEditor::OnScoreboardOpacityCommitted)
+					.AllowSpin(true)
+					.MinSliderValue(0.05f)
+					.MaxSliderValue(1.0f)
+					.MinValue(0.05f)
+					.MaxValue(1.0f)
+					.Delta(0.05f)
+				]
 			]
 		];
 }
@@ -873,6 +914,36 @@ void SNCPlusHUDEditor::OnStockBottomBarChanged(ECheckBoxState NewState)
 		NCPlusHUDDrawCall::RefreshBottomBarWidgets(PlayerOwner->PlayerController->MyHUD, bStock);
 	}
 	SetStatus(bStock ? TEXT("Bottom bar: Stock (applies now).") : TEXT("Bottom bar: NetcodePlus (applies now)."));
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetStockTeamPanelState() const
+{
+	return FNCPlusHUDLayout::WantsStockTeamPanel() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnStockTeamPanelChanged(ECheckBoxState NewState)
+{
+	const bool bStock = (NewState == ECheckBoxState::Checked);
+	// Persist + refresh-cache the explicit choice. The panel is drawn directly from
+	// WantsStockTeamPanel() each DrawHUD frame, so it applies on the next frame with
+	// no widget swap needed.
+	FNCPlusHUDLayout::SetStockTeamPanel(bStock);
+	SetStatus(bStock ? TEXT("Team display: Stock roster (applies now).") : TEXT("Team display: Portraits (applies now)."));
+}
+
+TOptional<float> SNCPlusHUDEditor::GetScoreboardOpacityValue() const
+{
+	return FNCPlusHUDLayout::GetScoreboardOpacity();
+}
+
+void SNCPlusHUDEditor::OnScoreboardOpacityChanged(float NewValue)
+{
+	FNCPlusHUDLayout::SetScoreboardOpacity(NewValue);
+}
+
+void SNCPlusHUDEditor::OnScoreboardOpacityCommitted(float NewValue, ETextCommit::Type /*CommitType*/)
+{
+	FNCPlusHUDLayout::SetScoreboardOpacity(NewValue);
 }
 
 FReply SNCPlusHUDEditor::OnReloadClicked()

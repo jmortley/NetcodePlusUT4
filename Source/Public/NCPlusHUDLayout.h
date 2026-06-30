@@ -196,6 +196,25 @@ struct FNCPlusHUDLayout
 	 *  is not silently locked to stock (see WantsStockBottomBar). Owned by the HUD editor. */
 	static void SetStockBottomBar(bool bStock);
 
+	/** Stock top-left team roster (slanted name + HP/armor plates) vs the NCPlus
+	 *  portrait strip. [NetcodePlus] StockTeamPanel in Mod.ini overrides; default =
+	 *  fresh install (no saved HUDLayout.json) so new players get the stock-style
+	 *  roster and customized users keep the portraits. Cached after first resolve
+	 *  (called per-frame from DrawHUD); SetStockTeamPanel refreshes the cache. */
+	static bool WantsStockTeamPanel();
+
+	/** Persist + refresh-cache the team-panel choice ([NetcodePlus] StockTeamPanel).
+	 *  Call ONLY from an explicit user toggle (see WantsStockTeamPanel). */
+	static void SetStockTeamPanel(bool bStock);
+
+	/** Background opacity for the NCPlus scoreboards (ElimPlus/Wipeout), 0.05..1.0.
+	 *  [NetcodePlus] ScoreboardOpacity in Mod.ini; default 0.3 (the prior hard-coded
+	 *  value). Cached; SetScoreboardOpacity refreshes it. */
+	static float GetScoreboardOpacity();
+
+	/** Persist + refresh-cache the scoreboard opacity ([NetcodePlus] ScoreboardOpacity), clamped. */
+	static void SetScoreboardOpacity(float Opacity);
+
 	/** Deprecated alias for GetDefaultLayoutPath; kept temporarily for compat. */
 	static FString GetDefaultElimPlusPath() { return GetDefaultLayoutPath(); }
 
@@ -332,6 +351,14 @@ namespace NCPlusHUDDrawCall
 	 *  in to avoid a GConfig re-read race against the just-written value. Removes the family
 	 *  no longer wanted and adds the one now wanted; no-op on a dedicated server / non-UT HUD. */
 	NETCODEPLUS_API void RefreshBottomBarWidgets(class AHUD* HUD, bool bWantStock);
+
+	/** Stock-style top-left team roster: red row then blue row of slanted, team-
+	 *  colored plates (name over "+HP armor" for teammates, name only for enemies).
+	 *  Dead players are skipped so the row reflows — plate count = alive count. Drawn
+	 *  by ElimPlus/Wipeout DrawHUD when FNCPlusHUDLayout::WantsStockTeamPanel(), in
+	 *  place of the portrait strip. Honors the `team_panel` alias (pos/scale/opacity/
+	 *  hide). Canvas passed by caller (see DrawDamageFlash note). */
+	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
 
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).

@@ -286,7 +286,7 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 {
 	if (PlayerState == nullptr) return;
 
-	float BarOpacity = 0.3f;
+	float BarOpacity = FNCPlusHUDLayout::GetScoreboardOpacity();
 	bool bIsUnderCursor = false;
 
 	// Interactive scoreboard hit-test tracking
@@ -308,7 +308,7 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 
 	// Determine if this is the local player
 	bool bIsOwner = (UTHUDOwner && UTHUDOwner->UTPlayerOwner && UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState);
-	if (bIsOwner) BarOpacity = 0.5f;
+	if (bIsOwner) BarOpacity = FMath::Min(1.f, FNCPlusHUDLayout::GetScoreboardOpacity() + 0.2f);
 
 	FLinearColor BarColor = GetPlayerBackgroundColorFor(PlayerState);
 	float FinalBarOpacity = BarOpacity;
