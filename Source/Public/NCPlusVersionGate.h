@@ -6,8 +6,11 @@
 // AInfo right at PostLogin; the client's PostNetInit calls ServerReportVersion
 // with NETCODE_PLUGIN_VERSION. Server compares: mismatch → kick immediately.
 // 100-second timeout with no reply → broadcast a "missing plugin" notice, then kick 5s
-// later (non-banning, and gated by a movement-corroboration guard so a functional client
-// whose handshake was merely lost is never kicked). See BeginPlay.
+// later (non-banning). Gated by a movement-corroboration guard: a MoveWatch latch
+// confirms + destroys the gate the first time the owner ever moves (moving ⇒ loaded the
+// NCPlus pawn ⇒ has the plugin), and pawnless-by-design owners (spectators / eliminated
+// round players) are deferred rather than kicked — so a functional client whose handshake
+// was merely lost is never kicked. See BeginPlay.
 //
 // Bots + the listen-host local PC are exempt (no remote client to handshake with).
 #pragma once
@@ -38,6 +41,12 @@ protected:
 	 *  owner unless a matching late report cancelled it in the meantime. */
 	void OnKickDeadline();
 
+	/** Server-side: repeating "has the owner ever moved?" latch. The first time the
+	 *  owner's pawn has sent a move (⇒ loaded the NCPlus pawn ⇒ has the plugin) it
+	 *  confirms + destroys the gate — so a legit client that later goes pawnless
+	 *  (respawn, eliminated for a round) can't be re-exposed to the kick. */
+	void OnMoveWatch();
+
 	/** Server-side: kick the owning PC with a clear message. Safe if already gone. */
 	void KickOwner(const FString& Reason);
 
@@ -51,6 +60,7 @@ protected:
 
 	FTimerHandle TimeoutHandle;
 	FTimerHandle KickHandle;
+	FTimerHandle MoveWatchHandle;
 };
 
 namespace NCPlusVersionGate
