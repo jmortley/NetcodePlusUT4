@@ -386,7 +386,7 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 	if (UTPS && UTPS->UniqueId.IsValid())
 	{
 		const FString UidStr = UTPS->UniqueId.ToString();
-		RatingSystem->LoadPlayerFromDB(GetWorld(), UidStr);
+		RatingSystem->LoadPlayerFromDB(GetWorld(), UidStr, UTPS->PlayerName);
 
 		// Mid-match joiner: baseline them as of NOW so the end-of-match scoreboard
 		// shows their +/- (their rating already moves for the rounds they play;
@@ -1141,14 +1141,14 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				const FString UidStr = UTPS->UniqueId.ToString();
 				StatsReplicator->SetPlayerPPRCurrent(UidStr, MatchMean);
 
-				// Lifetime PPR — fold this round's contribution into the rating system's
-				// persistent TotalPoints/RoundsPlayed accumulators. Server-only / not
-				// replicated; queryable via Mods.db (NCRatingElimPlus.TotalPoints +
-				// RoundsPlayed). Gated to humans loaded by PostLogin (bots have no
-				// cache entry, so RecordRoundPPR is a no-op for them).
+				// Lifetime PPR + DPR — fold this round's contribution into the rating
+				// system's persistent accumulators (TotalPoints/RoundsPlayed/TotalDamage),
+				// and refresh the last-seen PlayerName. Server-only / not replicated;
+				// queryable via Mods.db (NCRatingElimPlus). Gated to humans loaded by
+				// PostLogin (bots have no cache entry, so RecordRoundPPR is a no-op).
 				if (RatingSystem.IsValid())
 				{
-					RatingSystem->RecordRoundPPR(UidStr, RoundPPR);
+					RatingSystem->RecordRoundPPR(UidStr, RoundPPR, RoundDamage, UTPS->PlayerName);
 				}
 			}
 		}

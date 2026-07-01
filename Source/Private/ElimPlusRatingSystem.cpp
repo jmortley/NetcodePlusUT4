@@ -66,6 +66,20 @@ struct FElimPlusRatingSystemImpl
 	/** Lifetime round count: incremented once per round completed by this player. */
 	TMap<FString, int32> RoundsPlayedCache;
 
+	/** Lifetime damage accumulator (overkill-inclusive — the same PlayerRoundDamage feed
+	 *  the PPR term uses): sum of every round's damage. DPR = TotalDamage / RoundsPlayed. */
+	TMap<FString, double> TotalDamageCache;
+
+	/** Last-seen display name per UniqueId — refreshed at PostLogin (LoadPlayerFromDB)
+	 *  and every RecordRoundPPR, persisted at flush so Mods.db rows are human-readable. */
+	TMap<FString, FString> PlayerNameCache;
+
+	/** UniqueIds whose DB load FAILED outright (locked/unavailable db — NOT "no row").
+	 *  They play the session on cached defaults, but FlushAtMatchEnd must NOT persist
+	 *  them: an INSERT OR REPLACE seeded from those defaults would overwrite the real
+	 *  stored rating. Cleared per-player on Forget. */
+	TSet<FString> LoadFailedGuard;
+
 	/** UniqueIds of cached humans who appeared in at least one round's
 	 *  MatchResult during this match. Disconnected-before-spawn / kicked-at-login
 	 *  players (e.g. plugin-mismatch) get cached by PostLogin but never end up
@@ -151,28 +165,52 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 		TEXT("  LastSeenUtc    INTEGER NOT NULL DEFAULT 0,")
 		TEXT("  TotalPoints    REAL NOT NULL DEFAULT 0.0,")
 		TEXT("  RoundsPlayed   INTEGER NOT NULL DEFAULT 0,")
-		TEXT("  SchemaVersion  INTEGER NOT NULL DEFAULT 2")
+		TEXT("  TotalDamage    REAL NOT NULL DEFAULT 0.0,")
+		TEXT("  PlayerName     TEXT NOT NULL DEFAULT '',")
+		TEXT("  SchemaVersion  INTEGER NOT NULL DEFAULT 3")
 		TEXT(");");
 
 	const bool bOk = ExecSqlNoRows(World, Sql);
 	UE_LOG(LogElimPlusRating, Log, TEXT("InitDatabase: NCRatingElimPlus %s"),
 		bOk ? TEXT("ready") : TEXT("FAILED (USE_SQLITE off?)"));
 
-	// Schema migration v1 -> v2: add TotalPoints + RoundsPlayed columns to existing
-	// tables. ALTER errors if the column already exists; we ignore the bool return
-	// since the steady-state outcome is the same either way (column present).
+	// Schema migrations: v1 -> v2 added TotalPoints + RoundsPlayed, v2 -> v3 adds
+	// TotalDamage + PlayerName. ALTER errors if the column already exists; we ignore
+	// the bool return since the steady-state outcome is the same either way (column
+	// present).
 	ExecSqlNoRows(World, TEXT("ALTER TABLE NCRatingElimPlus ADD COLUMN TotalPoints REAL NOT NULL DEFAULT 0.0;"));
 	ExecSqlNoRows(World, TEXT("ALTER TABLE NCRatingElimPlus ADD COLUMN RoundsPlayed INTEGER NOT NULL DEFAULT 0;"));
+	ExecSqlNoRows(World, TEXT("ALTER TABLE NCRatingElimPlus ADD COLUMN TotalDamage REAL NOT NULL DEFAULT 0.0;"));
+	ExecSqlNoRows(World, TEXT("ALTER TABLE NCRatingElimPlus ADD COLUMN PlayerName TEXT NOT NULL DEFAULT '';"));
+
+	// Loud breadcrumb if the v3 migration didn't land (ALTERs drop silently on e.g.
+	// SQLITE_BUSY — hub instances share one Mods.db and the engine sets no busy_timeout).
+	// LoadPlayerFromDB degrades gracefully either way; this just explains the session.
+	{
+		TArray<FDatabaseRow> ProbeRows;
+		if (!ExecSql(World, TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus LIMIT 1;"), ProbeRows))
+		{
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER (db busy?) — damage/name capture degraded this session"));
+		}
+	}
 
 	return bOk;
 }
 
-void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& UniqueId)
+void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& UniqueId, const FString& PlayerName)
 {
 	if (UniqueId.IsEmpty()) return;
+	// Refresh the last-seen name even for an already-cached player (rejoin /
+	// mid-session rename) — it's persisted at the next flush.
+	if (!PlayerName.IsEmpty()) { Impl->PlayerNameCache.Add(UniqueId, PlayerName); }
 	if (Impl->RatingCache.Contains(UniqueId)) return;
 
 	const FString Esc = SqlEscape(UniqueId);
+
+	// Core columns FIRST, v2 set only — this SELECT is valid on ANY schema version, so a
+	// failed/blocked v3 migration can never make a veteran look like a new player (whose
+	// defaults-seeded row would then INSERT OR REPLACE over the real rating at flush).
 	const FString Sql = FString::Printf(
 		TEXT("SELECT Rating, RD, Sigma, PerfIndexEMA, PerfGames, TotalPoints, RoundsPlayed FROM NCRatingElimPlus WHERE UniqueId='%s';"),
 		*Esc);
@@ -190,15 +228,49 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 		const double TotalPoints  = FCString::Atod(*Rows[0].Text[5]);
 		const int32  RoundsPlayed = FCString::Atoi(*Rows[0].Text[6]);
 
+		// v3 extras in a SEPARATE query so a missing migration degrades to defaults for
+		// damage/name instead of failing the whole load (InitDatabase warns when so).
+		double  TotalDamage = 0.0;
+		FString DbName;
+		{
+			TArray<FDatabaseRow> ExtraRows;
+			const FString ExtraSql = FString::Printf(
+				TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus WHERE UniqueId='%s';"), *Esc);
+			if (ExecSql(World, ExtraSql, ExtraRows) && ExtraRows.Num() > 0 && ExtraRows[0].Text.Num() >= 2)
+			{
+				TotalDamage = FCString::Atod(*ExtraRows[0].Text[0]);
+				DbName      = ExtraRows[0].Text[1];
+			}
+		}
+
 		TeamGlicko2::PlayerRating PR(Rating, RD, Sigma);
 		PR.SetPerfIndexEMA(PerfIndexEMA);
 		PR.SetPerfGames(PerfGames);
 		Impl->RatingCache.Add(UniqueId, PR);
 		Impl->TotalPointsCache.Add(UniqueId, TotalPoints);
 		Impl->RoundsPlayedCache.Add(UniqueId, RoundsPlayed);
+		Impl->TotalDamageCache.Add(UniqueId, TotalDamage);
+		if (PlayerName.IsEmpty() && !DbName.IsEmpty()) { Impl->PlayerNameCache.Add(UniqueId, DbName); }
 		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f RD=%.1f sigma=%.4f LifetimePPR=%.2f (%d rounds)"),
 			*UniqueId, Rating, RD, Sigma,
 			(RoundsPlayed > 0) ? float(TotalPoints / RoundsPlayed) : 0.f, RoundsPlayed);
+	}
+	else if (!bOk)
+	{
+		// Query FAILED (db locked/unavailable — not "no row"). Cache defaults so the match
+		// can proceed, but guard the flush: we cannot know whether a real row exists, and
+		// persisting a defaults-seeded row would overwrite it. (This hazard predates v3 —
+		// the old code fell through to the new-player branch here.)
+		TeamGlicko2::PlayerRating PR(
+			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility);
+		Impl->RatingCache.Add(UniqueId, PR);
+		Impl->TotalPointsCache.Add(UniqueId, 0.0);
+		Impl->RoundsPlayedCache.Add(UniqueId, 0);
+		Impl->TotalDamageCache.Add(UniqueId, 0.0);
+		Impl->LoadFailedGuard.Add(UniqueId);
+		UE_LOG(LogElimPlusRating, Warning,
+			TEXT("Load FAILED for %s (db busy/unavailable) — playing on defaults, flush persistence DISABLED for this player"),
+			*UniqueId);
 	}
 	else
 	{
@@ -207,15 +279,28 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 		Impl->RatingCache.Add(UniqueId, PR);
 		Impl->TotalPointsCache.Add(UniqueId, 0.0);
 		Impl->RoundsPlayedCache.Add(UniqueId, 0);
+		Impl->TotalDamageCache.Add(UniqueId, 0.0);
 
 		const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
 		const FString InsertSql = FString::Printf(
-			TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed) ")
-			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0);"),
+			TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, TotalDamage, PlayerName) ")
+			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0, 0.0, '%s');"),
 			*Esc,
 			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility,
-			static_cast<long long>(NowUtc));
-		ExecSqlNoRows(World, InsertSql);
+			static_cast<long long>(NowUtc),
+			*SqlEscape(PlayerName));
+		if (!ExecSqlNoRows(World, InsertSql))
+		{
+			// Unmigrated (v2) table: retry with the v2 column set so the player still
+			// gets a row (damage/name wait for the migration; InitDatabase warned).
+			const FString V2InsertSql = FString::Printf(
+				TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed) ")
+				TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0);"),
+				*Esc,
+				TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility,
+				static_cast<long long>(NowUtc));
+			ExecSqlNoRows(World, V2InsertSql);
+		}
 		UE_LOG(LogElimPlusRating, Log, TEXT("New player %s — cached defaults + INSERT OR IGNORE"), *UniqueId);
 	}
 }
@@ -448,6 +533,17 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			continue;
 		}
 
+		// Never persist a player whose DB load FAILED (locked/unavailable db at login):
+		// their cache was seeded from defaults, and an INSERT OR REPLACE from those
+		// values would overwrite whatever real row the db holds.
+		if (Impl->LoadFailedGuard.Contains(UniqueId))
+		{
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("Flush skip %s: DB load failed at login — not persisting over the stored row"), *UniqueId);
+			++SkippedCount;
+			continue;
+		}
+
 		const int32 NewEloRaw = FMath::RoundToInt(PR.GetRating());
 		const int32 StartElo  = Impl->RatingAtMatchStart.FindRef(UniqueId);
 		int32 Delta = (StartElo != 0) ? (NewEloRaw - StartElo) : 0;
@@ -467,18 +563,35 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 
 		const double TotalPoints  = Impl->TotalPointsCache.FindRef(UniqueId);
 		const int32  RoundsPlayed = Impl->RoundsPlayedCache.FindRef(UniqueId);
+		const double TotalDamage  = Impl->TotalDamageCache.FindRef(UniqueId);
+		const FString PlayerName  = Impl->PlayerNameCache.FindRef(UniqueId);
 
 		const FString Esc = SqlEscape(UniqueId);
 		const FString Sql = FString::Printf(
 			TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")
-			TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, SchemaVersion) ")
-			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, %.6f, %d, 2);"),
+			TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, TotalDamage, PlayerName, SchemaVersion) ")
+			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, %.6f, %d, %.6f, '%s', 3);"),
 			*Esc,
 			PR.GetRating(), PR.GetRD(), PR.GetSigma(),
 			PR.GetPerfIndexEMA(), PR.GetPerfGames(),
 			static_cast<long long>(NowUtc),
-			TotalPoints, RoundsPlayed);
-		ExecSqlNoRows(World, Sql);
+			TotalPoints, RoundsPlayed,
+			TotalDamage, *SqlEscape(PlayerName));
+		if (!ExecSqlNoRows(World, Sql))
+		{
+			// Unmigrated (v2) table: never lose the session's rating update — persist the
+			// core row; damage/name wait for the migration (InitDatabase warned).
+			const FString V2Sql = FString::Printf(
+				TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")
+				TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, SchemaVersion) ")
+				TEXT("VALUES ('%s', %.6f, %.6f, %.6f, %.6f, %d, %lld, %.6f, %d, 2);"),
+				*Esc,
+				PR.GetRating(), PR.GetRD(), PR.GetSigma(),
+				PR.GetPerfIndexEMA(), PR.GetPerfGames(),
+				static_cast<long long>(NowUtc),
+				TotalPoints, RoundsPlayed);
+			ExecSqlNoRows(World, V2Sql);
+		}
 
 		if (Replicator)
 		{
@@ -530,7 +643,7 @@ int32 FElimPlusRatingSystem::GetCachedElo(const FString& UniqueId) const
 	return FMath::RoundToInt(TeamGlicko2::kDefaultRating);
 }
 
-void FElimPlusRatingSystem::RecordRoundPPR(const FString& UniqueId, float RoundPPR)
+void FElimPlusRatingSystem::RecordRoundPPR(const FString& UniqueId, float RoundPPR, float RoundDamage, const FString& PlayerName)
 {
 	if (UniqueId.IsEmpty()) return;
 	// Bots/unrated synthetic IDs (e.g. "BOT:Foo") aren't loaded by LoadPlayerFromDB
@@ -540,6 +653,8 @@ void FElimPlusRatingSystem::RecordRoundPPR(const FString& UniqueId, float RoundP
 
 	Impl->TotalPointsCache.FindOrAdd(UniqueId) += static_cast<double>(RoundPPR);
 	Impl->RoundsPlayedCache.FindOrAdd(UniqueId) += 1;
+	Impl->TotalDamageCache.FindOrAdd(UniqueId) += static_cast<double>(RoundDamage);
+	if (!PlayerName.IsEmpty()) { Impl->PlayerNameCache.Add(UniqueId, PlayerName); }
 }
 
 float FElimPlusRatingSystem::GetCachedLifetimePPR(const FString& UniqueId) const
@@ -556,6 +671,9 @@ void FElimPlusRatingSystem::Forget(const FString& UniqueId)
 	Impl->RatingAtMatchStart.Remove(UniqueId);
 	Impl->TotalPointsCache.Remove(UniqueId);
 	Impl->RoundsPlayedCache.Remove(UniqueId);
+	Impl->TotalDamageCache.Remove(UniqueId);
+	Impl->PlayerNameCache.Remove(UniqueId);
+	Impl->LoadFailedGuard.Remove(UniqueId);
 }
 
 void FElimPlusRatingSystem::SetBotRandomEloRange(bool bEnabled, int32 Min, int32 Max)
