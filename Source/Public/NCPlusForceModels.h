@@ -122,8 +122,12 @@ namespace NCPlusForceModels
 	 *  viewer's camera and outlines only the visible ones (occluded -> no outline at all). Pass
 	 *  bSlowTick ~4x/sec to re-assert against replication clobbers + refresh the MPC_NCPOutline colours
 	 *  (graceful no-op until that collection/material exists — stock outline stays red/blue until then).
-	 *  Yields entirely to spectator X-Ray (bTacComView). Restores pawns that drop out (toggle off /
-	 *  left / dead). Runs AFTER SuppressFlagCarrierOutlines. Client-side; no-op on a dedicated server. */
+	 *  Because M_OutlinePP is a RestrictedAsset (not editable in place), the recolour ships as NEW pak
+	 *  assets: Mod.ini [ForceModels] OutlineMaterial/OutlineMPC point at them and the slow tick RE-POINTS
+	 *  the camera manager's OutlineMat + DefaultPPSettings blendable (replace, never add — a second
+	 *  blendable would double-draw the stock rim). Yields entirely to spectator X-Ray (bTacComView).
+	 *  Restores pawns that drop out (toggle off / left / dead). Runs AFTER SuppressFlagCarrierOutlines.
+	 *  Client-side; no-op on a dedicated server. */
 	NETCODEPLUS_API void OutlinePlayers(class UWorld* World, bool bSlowTick);
 
 	/** True when the "Outline" render-mode is in effect for this world: flag set AND client/standalone.

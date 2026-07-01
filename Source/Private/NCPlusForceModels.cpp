@@ -11,6 +11,7 @@
 #include "UTTeamInfo.h"               // AUTTeamInfo::TeamColor
 #include "UTPlayerController.h"       // local viewer for friend/enemy; bTacComView (X-Ray) guard
 #include "Camera/PlayerCameraManager.h"  // OutlinePlayers: viewer eye for the LOS traces
+#include "UTPlayerCameraManager.h"    // SwapOutlineMaterial: OutlineMat + DefaultPPSettings blendable
 #include "UTCTFGameState.h"           // SyncFlagColours: GetFlagBase
 #include "UTCTFFlagBase.h"            // AUTCTFFlagBase::MyFlag
 #include "UTFlag.h"                   // AUTFlag::GetMesh (cloth)
@@ -47,6 +48,60 @@ namespace
 	// of this state (see OutlinePlayers); ones that drop out (toggle off / left / dead / round change)
 	// are restored. Weak keys so GC'd pawns drop out.
 	TMap<TWeakObjectPtr<AUTCharacter>, bool> GOutlined;
+
+	// ── Outline content paths (Mod.ini [ForceModels], authoring-time constants — no F5 UI) ──────────
+	// OutlineMPC      = full object path of the colour MaterialParameterCollection the outline pass feeds.
+	// OutlineMaterial = full object path of the recoloured outline PP material (EMPTY = keep stock).
+	// M_OutlinePP (and MF_TeamColorOutlines) are RestrictedAssets — the UT editor refuses to SAVE edits
+	// under that path — so the recolour ships as NEW assets in an NCP content pak and the plugin
+	// re-points the renderer at them (SwapOutlineMaterial below).
+	FString GOutlineMPCPath(TEXT("/Game/RestrictedAssets/Materials/MPC_NCPOutline.MPC_NCPOutline"));
+	FString GOutlineMatPath;
+	bool    GOutlinePathsLoaded = false;
+	// LoadObject is tried at most once per WORLD per asset: GC can unload them on travel (nothing roots
+	// them between camera managers), so FindObject alone would go stale after a map change — but a
+	// missing asset must not load-attempt (and warn) every slow tick either.
+	TWeakObjectPtr<UWorld> GOutlineAssetWorld;
+	bool GOutlineTriedMPC = false;
+	bool GOutlineTriedMat = false;
+
+	template<typename T>
+	T* ResolveOutlineAsset(const FString& Path, bool& bTriedThisWorld)
+	{
+		if (Path.IsEmpty()) { return nullptr; }
+		T* Found = FindObject<T>(nullptr, *Path);
+		if (!Found && !bTriedThisWorld)
+		{
+			bTriedThisWorld = true;
+			Found = LoadObject<T>(nullptr, *Path);
+			if (!Found)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[ForceModels] outline asset '%s' not found (pak missing / path typo) — stock look stands"), *Path);
+			}
+		}
+		return Found;
+	}
+
+	// The stock outline PP material is injected in TWO places (UTPlayerCameraManager.cpp): baked into
+	// DefaultPPSettings.WeightedBlendables in the ctor (:48) and re-added per frame from the OutlineMat
+	// UPROPERTY on maps that have their own PP volumes (:569, a function-local — no hook point). So we
+	// REPLACE the pointer in both sites. Never AddBlendable a second outline material: blendables are
+	// additive full-screen passes and the stock pass would still composite its red/blue rim under ours
+	// (double draw + an extra pass). Re-asserted each slow tick — camera managers respawn per level /
+	// possession, and the idempotent pointer-compare makes the re-assert free.
+	void SwapOutlineMaterial(UWorld* World)
+	{
+		UMaterialInterface* const OurMat = ResolveOutlineAsset<UMaterialInterface>(GOutlineMatPath, GOutlineTriedMat);
+		if (!OurMat) { return; }
+		APlayerController* const PC = World->GetFirstPlayerController();
+		AUTPlayerCameraManager* const PCM = PC ? Cast<AUTPlayerCameraManager>(PC->PlayerCameraManager) : nullptr;
+		if (!PCM || PCM->OutlineMat == OurMat) { return; }
+		for (FWeightedBlendable& WB : PCM->DefaultPPSettings.WeightedBlendables.Array)
+		{
+			if (WB.Object != nullptr && WB.Object == PCM->OutlineMat) { WB.Object = OurMat; }
+		}
+		PCM->OutlineMat = OurMat;
+	}
 
 	// Flag recolour is now PURE STOCK — no dc mesh, no dc material. The stock CTF flag material
 	// (MI_CTF_RedFlag / MI_CTF_BlueFlag, parent M_CTF_Flag) already exposes a "FlagColor" vector param;
@@ -574,6 +629,26 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// OnlyTickPoseWhenRendered. Nothing replicates; no-op on a dedicated server.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
 
+	// Authoring paths (once) + per-world load-attempt re-arm, then keep the camera manager pointed at
+	// the recoloured outline material (if configured) — BEFORE the TacCom/intermission early-outs so
+	// the swap holds during X-Ray and between rounds too.
+	if (bSlowTick)
+	{
+		if (!GOutlinePathsLoaded)
+		{
+			GOutlinePathsLoaded = true;
+			GConfig->GetString(TEXT("ForceModels"), TEXT("OutlineMPC"),      GOutlineMPCPath, ModIniPath());
+			GConfig->GetString(TEXT("ForceModels"), TEXT("OutlineMaterial"), GOutlineMatPath, ModIniPath());
+		}
+		if (GOutlineAssetWorld.Get() != World)
+		{
+			GOutlineAssetWorld = World;
+			GOutlineTriedMPC = false;
+			GOutlineTriedMat = false;
+		}
+		SwapOutlineMaterial(World);
+	}
+
 	// Spectator X-Ray (TacCom) outlines everyone THROUGH WALLS by design and re-asserts it every PC tick
 	// (UTPlayerController.cpp:3344) — while it's on, leave the outlines entirely to it (no clears, no
 	// re-asserts; our state resumes via the slow-tick ON re-assert once X-Ray is toggled off).
@@ -603,17 +678,10 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	{
 		// Resolved FRESH each slow tick (FindObject = cheap hash lookup, silent): a raw static cache
 		// dangles once GC purges the collection on map travel (it's only world/material-referenced) and
-		// SetVectorParameterValue on a stale pointer crashes in Shipping. LoadObject is tried ONCE per
-		// session (a missing-asset load logs per attempt); once the content pak ships, the edited
-		// M_OutlinePP (rooted via the camera-manager CDO) hard-refs the collection so FindObject hits.
-		static const TCHAR* kMPCPath = TEXT("/Game/RestrictedAssets/Materials/MPC_NCPOutline.MPC_NCPOutline");
-		static bool bTriedMPCLoad = false;
-		UMaterialParameterCollection* MPC = FindObject<UMaterialParameterCollection>(nullptr, kMPCPath);
-		if (!MPC && !bTriedMPCLoad)
-		{
-			bTriedMPCLoad = true;
-			MPC = LoadObject<UMaterialParameterCollection>(nullptr, kMPCPath);
-		}
+		// SetVectorParameterValue on a stale pointer crashes in Shipping. ResolveOutlineAsset retries
+		// the load once per world so a travel-unload recovers.
+		UMaterialParameterCollection* const MPC =
+			ResolveOutlineAsset<UMaterialParameterCollection>(GOutlineMPCPath, GOutlineTriedMPC);
 		if (MPC)
 		{
 			auto TeamColourFor = [ViewerTeam](int32 TeamIdx) -> FLinearColor
