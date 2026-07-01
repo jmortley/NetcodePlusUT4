@@ -126,6 +126,12 @@ namespace NCPlusForceModels
 	 *  left / dead). Runs AFTER SuppressFlagCarrierOutlines. Client-side; no-op on a dedicated server. */
 	NETCODEPLUS_API void OutlinePlayers(class UWorld* World, bool bSlowTick);
 
+	/** True when the "Outline" render-mode is in effect for this world: flag set AND client/standalone.
+	 *  Listen servers are excluded — SetOutlineLocal writes the REPLICATED bOutlineWhenUnoccluded, so a
+	 *  host's LOS gating would clobber every client's outline state. Keys BOTH the outline pass and the
+	 *  TeamArenaCharacter tint-gating (so an excluded host keeps the normal super-tint). */
+	NETCODEPLUS_API bool OutlineModeActive(const class UWorld* World);
+
 	/** The local viewer's effective team (0/1) for friend/enemy bucketing under the Team-vs-Enemy and
 	 *  Enemy-Only styles. Returns the local PC's real team when playing; for a teamless spectator it
 	 *  defaults to red (team 0) so Team = red and Enemy = blue. Use TheirTeam == GetViewerTeam(World)

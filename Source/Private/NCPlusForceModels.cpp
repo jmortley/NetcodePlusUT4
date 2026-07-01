@@ -537,6 +537,20 @@ void NCPlusForceModels::SuppressFlagCarrierOutlines(UWorld* World)
 	GOutlineSuppressed = MoveTemp(Current);
 }
 
+bool NCPlusForceModels::OutlineModeActive(const UWorld* World)
+{
+	// Outline mode is CLIENT/STANDALONE-only: SetOutlineLocal writes bOutlineWhenUnoccluded, which is
+	// REPLICATED (ReplicatedUsing=UpdateOutline) — on a listen server our per-frame LOS gating would
+	// push the host's occlusion state to every connected client and clobber their own outline flags.
+	// Also keys the TeamArenaCharacter tint-gating, so a listen host keeps the normal super-tint
+	// (neutral bodies with no outline would be strictly worse).
+	if (!World) { return false; }
+	const FNCPlusForceModelsConfig& C = Get();
+	if (!C.bEnabled || !C.bOutline) { return false; }
+	const ENetMode NM = World->GetNetMode();
+	return NM == NM_Client || NM == NM_Standalone;
+}
+
 void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 {
 	// "Outline" flag: a client-local, team-coloured, LOS-gated player outline as a cleaner alternative to
@@ -577,7 +591,7 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	}
 
 	const FNCPlusForceModelsConfig& C = Get();
-	const bool bWant = C.bEnabled && C.bOutline;
+	const bool bWant = OutlineModeActive(World);
 	const int32 ViewerTeam = GetViewerTeam(World);
 
 	// Push the per-team outline colours into MPC_NCPOutline (slow tick) so a matching M_OutlinePP renders
@@ -587,8 +601,19 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// 129 -> Team0, 130 -> Team1).
 	if (bWant && bSlowTick)
 	{
-		static UMaterialParameterCollection* MPC = LoadObject<UMaterialParameterCollection>(
-			nullptr, TEXT("/Game/RestrictedAssets/Materials/MPC_NCPOutline.MPC_NCPOutline"));
+		// Resolved FRESH each slow tick (FindObject = cheap hash lookup, silent): a raw static cache
+		// dangles once GC purges the collection on map travel (it's only world/material-referenced) and
+		// SetVectorParameterValue on a stale pointer crashes in Shipping. LoadObject is tried ONCE per
+		// session (a missing-asset load logs per attempt); once the content pak ships, the edited
+		// M_OutlinePP (rooted via the camera-manager CDO) hard-refs the collection so FindObject hits.
+		static const TCHAR* kMPCPath = TEXT("/Game/RestrictedAssets/Materials/MPC_NCPOutline.MPC_NCPOutline");
+		static bool bTriedMPCLoad = false;
+		UMaterialParameterCollection* MPC = FindObject<UMaterialParameterCollection>(nullptr, kMPCPath);
+		if (!MPC && !bTriedMPCLoad)
+		{
+			bTriedMPCLoad = true;
+			MPC = LoadObject<UMaterialParameterCollection>(nullptr, kMPCPath);
+		}
 		if (MPC)
 		{
 			auto TeamColourFor = [ViewerTeam](int32 TeamIdx) -> FLinearColor

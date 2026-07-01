@@ -262,7 +262,9 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// Outline mode ("Outline" flag): keep the forced mesh but render the body NEUTRAL (no team colour) —
 	// the team read comes from the LOS outline (NCPlusForceModels::OutlinePlayers) instead, so both teams
 	// look the same and only the outline distinguishes them (not red/blue, not "super green").
-	const bool bOutlineMode = NCPlusForceModels::Get().bOutline;
+	// OutlineModeActive (not the raw flag) so a listen host, where the outline pass is disabled, keeps
+	// the normal tint instead of neutral-bodies-with-no-outline.
+	const bool bOutlineMode = NCPlusForceModels::OutlineModeActive(GetWorld());
 
 	// Baked fallback: pick the model's baked red (0) or blue (1) skin from the chosen colour — more red
 	// than blue -> red skin, else blue. In Enemy-Only this makes every (non-recolourable) enemy one
@@ -502,7 +504,7 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn() || !OverlayMesh) { return; }  // skip MY pawn (offline-safe)
 
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
-	if (!C.bEnabled || !C.bArmour || C.bOutline) { return; }   // Outline mode: leave stock armour (no super-tint)
+	if (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(GetWorld())) { return; }   // Outline mode: leave stock armour (no super-tint)
 
 	const int32 MyTeam = (int32)GetTeamNum();
 	if (MyTeam == 255) { return; }                                  // FFA: deferred
@@ -1221,7 +1223,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		FLinearColor SkinCol = GetTeamColor();
 		bool bForcedSkin = false;
 		// Outline mode: don't re-tint the shield/armour overlay to the skin colour — leave it stock.
-		if (NCPlusForceModels::IsEnabled() && !NCPlusForceModels::Get().bOutline)
+		if (NCPlusForceModels::IsEnabled() && !NCPlusForceModels::OutlineModeActive(GetWorld()))
 		{
 			const int32 MyTeam = (int32)GetTeamNum();
 			if (MyTeam != 255)
