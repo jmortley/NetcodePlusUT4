@@ -706,8 +706,9 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Flags"),     &FMConfig.bFlags) ]
 				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Darken"),    &FMConfig.bDarkenBodies) ]
-				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Cosmetics"), &FMConfig.bCosmetics) ]
-				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Outline"),   &FMConfig.bOutline) ]
+				// "Outline" checkbox intentionally NOT exposed — the feature is parked (code stays live,
+				// dogfood via Mod.ini [ForceModels] Outline=true; colours still need the pak assets).
+				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Cosmetics"), &FMConfig.bCosmetics) ]
 			]
 
 			// Style selector
