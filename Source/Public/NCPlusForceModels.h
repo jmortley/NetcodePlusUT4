@@ -46,6 +46,7 @@ struct FNCPlusForceModelsConfig
 	bool             bFlags        = true;
 	bool             bDarkenBodies = false;
 	bool             bCosmetics    = true;
+	bool             bOutline      = false;   // team-coloured LOS outline instead of the body/armour super-tint (keeps the forced model)
 	ENCPlusSkinStyle Style         = ENCPlusSkinStyle::TeamEnemy;
 	FNCPlusModelSettings Enemy, Team, Red, Blue;
 
@@ -113,6 +114,17 @@ namespace NCPlusForceModels
 	 *  restores former carriers. Always on (it's a fix, not a setting). Client-side, re-asserted from the
 	 *  same ticker as SyncFlagColours. No-op on a dedicated server or outside CTF (incl. Blitz). */
 	NETCODEPLUS_API void SuppressFlagCarrierOutlines(class UWorld* World);
+
+	/** "Outline" flag: give players a client-local, team-coloured, LOS-GATED outline (via
+	 *  AUTCharacter::SetOutlineLocal) instead of the body/armour super-tint — a cleaner team read that
+	 *  keeps the forced model. The engine stencil has NO visible-only mode (no-128 = through-wall X-ray,
+	 *  +128 adds the visible rim), so call this EVERY FRAME: it line-traces each candidate from the
+	 *  viewer's camera and outlines only the visible ones (occluded -> no outline at all). Pass
+	 *  bSlowTick ~4x/sec to re-assert against replication clobbers + refresh the MPC_NCPOutline colours
+	 *  (graceful no-op until that collection/material exists — stock outline stays red/blue until then).
+	 *  Yields entirely to spectator X-Ray (bTacComView). Restores pawns that drop out (toggle off /
+	 *  left / dead). Runs AFTER SuppressFlagCarrierOutlines. Client-side; no-op on a dedicated server. */
+	NETCODEPLUS_API void OutlinePlayers(class UWorld* World, bool bSlowTick);
 
 	/** The local viewer's effective team (0/1) for friend/enemy bucketing under the Team-vs-Enemy and
 	 *  Enemy-Only styles. Returns the local PC's real team when playing; for a teamless spectator it

@@ -618,6 +618,10 @@ static bool TickHudTeamColours(float DeltaTime)
 					NCPlusForceModels::SyncFlagColours(W);
 					NCPlusForceModels::SuppressFlagCarrierOutlines(W);
 				}
+				// Per-frame: LOS traces gate the ForceModels outline (visible -> outlined, occluded ->
+				// none — the stock stencil has no visible-only mode, see OutlinePlayers). bSlowTick
+				// re-asserts + refreshes the MPC colours. After Suppress so carriers stay suppressed.
+				NCPlusForceModels::OutlinePlayers(W, bSlowTick);
 				break;
 			}
 		}

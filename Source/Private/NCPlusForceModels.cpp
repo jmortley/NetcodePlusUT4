@@ -9,12 +9,15 @@
 #include "TeamArenaCharacter.h"       // ReapplyAll iterates these pawns
 #include "UTGameState.h"              // SyncHudTeamColours: GS->Teams
 #include "UTTeamInfo.h"               // AUTTeamInfo::TeamColor
-#include "UTPlayerController.h"       // local viewer for friend/enemy
+#include "UTPlayerController.h"       // local viewer for friend/enemy; bTacComView (X-Ray) guard
+#include "Camera/PlayerCameraManager.h"  // OutlinePlayers: viewer eye for the LOS traces
 #include "UTCTFGameState.h"           // SyncFlagColours: GetFlagBase
 #include "UTCTFFlagBase.h"            // AUTCTFFlagBase::MyFlag
 #include "UTFlag.h"                   // AUTFlag::GetMesh (cloth)
 #include "Materials/Material.h"       // GetAll{Vector,Scalar}ParameterNames
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialParameterCollection.h"       // MPC_NCPOutline: per-team outline colours
+#include "Kismet/KismetMaterialLibrary.h"                // SetVectorParameterValue on the MPC
 #include "Engine/SkeletalMesh.h"      // SyncFlagColours: swap to dc's FlagMesh
 #include "Engine/WindDirectionalSource.h"            // TickFlagWind: cloth wind (ports dc's FlagWind)
 #include "Components/WindDirectionalSourceComponent.h"
@@ -38,6 +41,12 @@ namespace
 	// Flag carriers we've forced bForceNoOutline on, so we can restore them when they drop the flag
 	// (or the suppression is turned off). Weak keys so GC'd pawns drop out.
 	TSet<TWeakObjectPtr<AUTCharacter>> GOutlineSuppressed;
+
+	// Players the ForceModels "Outline" pass is managing -> whether their outline is currently ON
+	// (= they were visible on the last LOS check). Calls into SetOutlineLocal are gated on transitions
+	// of this state (see OutlinePlayers); ones that drop out (toggle off / left / dead / round change)
+	// are restored. Weak keys so GC'd pawns drop out.
+	TMap<TWeakObjectPtr<AUTCharacter>, bool> GOutlined;
 
 	// Flag recolour is now PURE STOCK — no dc mesh, no dc material. The stock CTF flag material
 	// (MI_CTF_RedFlag / MI_CTF_BlueFlag, parent M_CTF_Flag) already exposes a "FlagColor" vector param;
@@ -124,6 +133,7 @@ void NCPlusForceModels::Reload()
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Flags"),        C.bFlags,        Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), C.bDarkenBodies, Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    C.bCosmetics,    Path);
+	GConfig->GetBool(TEXT("ForceModels"), TEXT("Outline"),      C.bOutline,      Path);
 	int32 StyleInt = 0;
 	GConfig->GetInt(TEXT("ForceModels"), TEXT("Style"), StyleInt, Path);
 	C.Style = (ENCPlusSkinStyle)StyleInt;
@@ -214,6 +224,7 @@ void NCPlusForceModels::Save()
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Flags"),        C.bFlags,        Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), C.bDarkenBodies, Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    C.bCosmetics,    Path);
+	GConfig->SetBool(TEXT("ForceModels"), TEXT("Outline"),      C.bOutline,      Path);
 	GConfig->SetInt (TEXT("ForceModels"), TEXT("Style"),        (int32)C.Style,  Path);
 	WriteSide(TEXT("Enemy"), C.Enemy);
 	WriteSide(TEXT("Team"),  C.Team);
@@ -524,6 +535,128 @@ void NCPlusForceModels::SuppressFlagCarrierOutlines(UWorld* World)
 		}
 	}
 	GOutlineSuppressed = MoveTemp(Current);
+}
+
+void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
+{
+	// "Outline" flag: a client-local, team-coloured, LOS-gated player outline as a cleaner alternative to
+	// the body/armour super-tint (which is gated off in ATeamArenaCharacter when this is on).
+	//
+	// ⚠ Engine stencil semantics (UTCharacter.cpp:4447-4456): M_OutlinePP draws the custom-depth
+	// silhouette where it is OCCLUDED — SetOutlineLocal(true, false) is the through-wall X-ray used by
+	// spectator TacCom (UTPlayerController.cpp:2837) and Showdown, NOT a depth-masked outline. The +128
+	// stencil bit (bWhenUnoccluded=true) ADDS the visible-pixel rim; no stencil combination gives
+	// "visible only". So LOS is gated HERE: every frame each candidate is line-traced from the viewer's
+	// camera (eye/centre/feet, ECC_Visibility) — visible -> SetOutlineLocal(true, /*bWhenUnoccluded*/true),
+	// occluded -> SetOutlineLocal(false), so nothing renders through walls. Known compromise until the
+	// M_OutlinePP content edit: while a player is PARTIALLY visible, their occluded parts still X-ray
+	// through cover (the occluded-pixel path stays live whenever the outline is on).
+	//
+	// SetOutlineLocal calls are gated on TRANSITIONS of our per-pawn state (the UpdateOutline cascade's
+	// weapon-attachment OFF path unregisters unguarded -> repeated off-calls would churn/log), with an
+	// unconditional ON re-assert each slow tick to recover bLocalOutline/bOutlineWhenUnoccluded from
+	// server writes (both are ReplicatedUsing=UpdateOutline). Side perf win: an outlined mesh anim-ticks
+	// ALWAYS (AlwaysTickPoseAndRefreshBones) — LOS gating returns occluded players to
+	// OnlyTickPoseWhenRendered. Nothing replicates; no-op on a dedicated server.
+	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
+
+	// Spectator X-Ray (TacCom) outlines everyone THROUGH WALLS by design and re-asserts it every PC tick
+	// (UTPlayerController.cpp:3344) — while it's on, leave the outlines entirely to it (no clears, no
+	// re-asserts; our state resumes via the slow-tick ON re-assert once X-Ray is toggled off).
+	APlayerController* const LocalPC = World->GetFirstPlayerController();
+	{
+		const AUTPlayerController* const UTPC = Cast<AUTPlayerController>(LocalPC);
+		if (UTPC && UTPC->bTacComView) { return; }
+	}
+
+	// Intermission force-hides every outline (AUTCharacter::IsOutlined) — freeze our state instead of
+	// churning no-op calls; the slow-tick ON re-assert restores the outlines when play resumes.
+	if (AUTGameState* const GS = World->GetGameState<AUTGameState>())
+	{
+		if (GS->IsMatchIntermission()) { return; }
+	}
+
+	const FNCPlusForceModelsConfig& C = Get();
+	const bool bWant = C.bEnabled && C.bOutline;
+	const int32 ViewerTeam = GetViewerTeam(World);
+
+	// Push the per-team outline colours into MPC_NCPOutline (slow tick) so a matching M_OutlinePP renders
+	// the ForceModels skin colours (green/etc.) instead of the stock red/blue palette. Graceful no-op
+	// until that collection asset exists. Colours are by ABSOLUTE team; NB our LOS outline's stencil
+	// carries the +128 unoccluded bit, so the material's team decode must mask it (stencil & 0x7F:
+	// 129 -> Team0, 130 -> Team1).
+	if (bWant && bSlowTick)
+	{
+		static UMaterialParameterCollection* MPC = LoadObject<UMaterialParameterCollection>(
+			nullptr, TEXT("/Game/RestrictedAssets/Materials/MPC_NCPOutline.MPC_NCPOutline"));
+		if (MPC)
+		{
+			auto TeamColourFor = [ViewerTeam](int32 TeamIdx) -> FLinearColor
+			{
+				const FNCPlusModelSettings Side = GetModelSettings(TeamIdx, TeamIdx == ViewerTeam);
+				FLinearColor Col = GetSkinColour(Side);
+				Col.A = 1.f;
+				return Col;
+			};
+			static const FName NAME_Team0(TEXT("Team0"));
+			static const FName NAME_Team1(TEXT("Team1"));
+			UKismetMaterialLibrary::SetVectorParameterValue(World, MPC, NAME_Team0, TeamColourFor(0));
+			UKismetMaterialLibrary::SetVectorParameterValue(World, MPC, NAME_Team1, TeamColourFor(1));
+		}
+	}
+
+	// The LOS traces need a viewer eye; during a map transition the camera manager can briefly be
+	// missing — freeze rather than mass-clear (states recover next frame).
+	if (bWant && (!LocalPC || !LocalPC->PlayerCameraManager)) { return; }
+	const FVector ViewLoc = (LocalPC && LocalPC->PlayerCameraManager)
+		? LocalPC->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
+
+	// Never outline the local viewer's own pawn (null while spectating -> outline everyone, which is fine).
+	const APawn* const LocalPawn = LocalPC ? LocalPC->GetPawn() : nullptr;
+
+	TMap<TWeakObjectPtr<AUTCharacter>, bool> Current;
+	if (bWant)
+	{
+		FCollisionQueryParams TraceParams(FName(TEXT("NCPOutlineLOS")), /*bTraceComplex*/ true, LocalPawn);
+		for (TActorIterator<AUTCharacter> It(World); It; ++It)
+		{
+			AUTCharacter* Ch = *It;
+			if (!Ch || Ch->IsPendingKill() || Ch->IsDead() || Ch == LocalPawn) { continue; }
+			// Enemy-Only style: leave friendlies un-outlined (mirrors the reskin scoping).
+			if (C.Style == ENCPlusSkinStyle::EnemyOnly && (int32)Ch->GetTeamNum() == ViewerTeam) { continue; }
+			// Suppressed flag carriers belong to SuppressFlagCarrierOutlines — leave their state alone.
+			if (Ch->bForceNoOutline) { continue; }
+
+			// LOS: eye / centre / mirrored-feet — any unblocked sample = visible. Pawns don't block
+			// ECC_Visibility, so only world geometry occludes.
+			FCollisionQueryParams P = TraceParams;
+			P.AddIgnoredActor(Ch);
+			const FVector Head   = Ch->GetPawnViewLocation();
+			const FVector Centre = Ch->GetActorLocation();
+			const FVector Pts[3] = { Head, Centre, Centre + (Centre - Head) };
+			bool bVisible = false;
+			for (const FVector& Pt : Pts)
+			{
+				if (!World->LineTraceTestByChannel(ViewLoc, Pt, ECC_Visibility, P)) { bVisible = true; break; }
+			}
+
+			const bool* PrevOn = GOutlined.Find(Ch);
+			const bool bWasOn = (PrevOn && *PrevOn);
+			if (bVisible && (!bWasOn || bSlowTick)) { Ch->SetOutlineLocal(true, /*bWhenUnoccluded*/ true); }
+			else if (!bVisible && bWasOn)           { Ch->SetOutlineLocal(false); }
+			Current.Add(Ch, bVisible);
+		}
+	}
+
+	// Restore anyone we previously outlined who is no longer a target (toggle off / left / round change).
+	// Dead pawns skip the call — the engine already clears outlines in PlayDying/StartRagdoll.
+	for (const TPair<TWeakObjectPtr<AUTCharacter>, bool>& Prev : GOutlined)
+	{
+		if (!Prev.Value || Current.Contains(Prev.Key)) { continue; }
+		AUTCharacter* Ch = Prev.Key.Get();
+		if (Ch && !Ch->IsDead()) { Ch->SetOutlineLocal(false); }
+	}
+	GOutlined = MoveTemp(Current);
 }
 
 int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
