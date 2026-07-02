@@ -63,16 +63,20 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 			? UTPS->UniqueId.ToString()
 			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
 
-		// LG-only accuracy: per-tick beam Hits/Shots (Quake-style). Stock
-		// shock + sniper used to be summed in here, but the duel scoreboard
-		// is meant to highlight precision LG play. Shock-dom and instagib
-		// modes have their own scoreboards with mode-appropriate stats.
-		// NAME_LinkBeamShots is the per-refire-tick counter from
-		// UTWeap_LinkGun_Plus::ConsumeAmmo (NOT NAME_LinkShots which only
-		// ticks per trigger pull and inflates the ratio).
-		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
-		const float Hits  = UTPS->GetStatsValue(NAME_LinkHits);
-		const float Shots = UTPS->GetStatsValue(NAME_LinkBeamShots);
+		// Hitscan accuracy = Sniper + Lightning Gun. The duel weapon set is the Pro+
+		// hitscan pair (UTNPSniper writes Sniper*; the LG BP is an AUTPlusSniper reskin
+		// that OVERRIDES its stat names to LightningRifle* in Class Defaults) — a player
+		// runs one or the other, so the unused weapon's stats are 0 and the sum is the
+		// right per-shot ratio. This used to read NAME_LinkHits/NAME_LinkBeamShots (Link
+		// Gun BEAM — a shaft-arena weapon nothing in duel fires), so the Acc column sat
+		// at 0% in every duel: the exact defect ElimPlus fixed in e3823f5/575d579, never
+		// ported here (community report 2026-07-01). Mirrors ElimPlusStatsReplicator.
+		static const FName NAME_SniperHits(TEXT("SniperHits"));
+		static const FName NAME_SniperShots(TEXT("SniperShots"));
+		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
+		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
+		const float Hits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NAME_LightningRifleHits);
+		const float Shots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NAME_LightningRifleShots);
 
 		if (Shots > 0.f)
 		{
