@@ -415,14 +415,16 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	FString Val;
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	// F5 "Show Ragdoll" ([InstagibCTF] bShowRagdoll) is FORCE-MODELS-INDEPENDENT and AUTHORITATIVE:
-	// when the key exists (any F5 save writes it), it wins over the ForceModels Darken fade in BOTH
+	// F5 "Show Ragdoll" ([InstagibCTF] bShowRagdoll). INTENDED consumer = the BP instagib DAMAGE TYPE
+	// (it reads these keys and drives ragdoll time for instagib kills) — which by construction only
+	// ever fires in iCTF, so in every other mode the setting did nothing and the only hide path was
+	// ForceModels' DarkenBodies (community: "uncheck force models and you can see dead bodys" /
+	// "ragdoll setting overridden by force models"). This C++ read is the MODE-AGNOSTIC stand-in:
+	// when the key exists (any F5 save writes it) it is AUTHORITATIVE over the Darken fade in both
 	// directions — unticked hides corpses in every mode with FM off, ticked shows them even with
-	// Darken on. Before 2026-07-01 nothing in C++ consumed this key — the only non-iCTF hide path
-	// was ForceModels' DarkenBodies, so the setting silently did nothing unless FM was ON and Darken
-	// overrode it when it was (community: "uncheck force models and you can see dead bodys" /
-	// "ragdoll setting overridden by force models"). Key ABSENT (never saved F5 — e.g. a dc-TeamSkins
-	// migrant) -> Darken keeps its old dc-parity hide role.
+	// Darken on. Hide-only, so it composes with the BP in iCTF (ShowRagdoll-on defers to the
+	// RagdollTime safety net below = the BP's own cleanup time). Key ABSENT (never saved F5 — e.g. a
+	// dc-TeamSkins migrant) -> Darken keeps its old dc-parity hide role.
 	bool bShowRagdoll = true;
 	bool bShowRagdollExplicit = false;
 	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowRagdoll"), Val, ConfigPath))
