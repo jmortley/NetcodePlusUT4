@@ -706,9 +706,11 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Flags"),     &FMConfig.bFlags) ]
 				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Darken"),    &FMConfig.bDarkenBodies) ]
-				// "Outline" checkbox intentionally NOT exposed — the feature is parked (code stays live,
-				// dogfood via Mod.ini [ForceModels] Outline=true; colours still need the pak assets).
-				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Cosmetics"), &FMConfig.bCosmetics) ]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Cosmetics"), &FMConfig.bCosmetics) ]
+				// Outline only ENGAGES when the configured colours read as stock red-vs-blue
+				// (OutlineModeActive stock-palette gate — the rim colours are fixed in M_OutlinePP);
+				// otherwise the normal super-tint stands.
+				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Outline"),   &FMConfig.bOutline) ]
 			]
 
 			// Style selector
@@ -787,7 +789,8 @@ void SUTNCPlusMenu::LoadSettings()
 
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
-	// RagdollTime). ShowRagdoll kept here too for now — see note in Save (consumer unconfirmed).
+	// RagdollTime). bShowRagdoll is consumed by ATeamArenaCharacter::SpawnSkeletonDissolve since
+	// 2026-07-01 (unticked = corpse-hide in every mode, ForceModels-independent).
 	if (GConfig->GetString(IGCTFSection, TEXT("bAllowGib"), Val, ConfigPath))
 		bAllowGib = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 	else

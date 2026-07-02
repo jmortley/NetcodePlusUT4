@@ -65,6 +65,11 @@ namespace
 	bool GOutlineTriedMPC = false;
 	bool GOutlineTriedMat = false;
 
+	// Last OutlineModeActive verdict, refreshed once per frame by OutlinePlayers. For per-pawn
+	// per-frame call sites (TeamArenaCharacter::Tick overlay retint) — the full check copies the
+	// side settings (FStrings) + does HSV math, too heavy to run per pawn per frame.
+	bool GOutlineModeActiveCache = false;
+
 	template<typename T>
 	T* ResolveOutlineAsset(const FString& Path, bool& bTriedThisWorld)
 	{
@@ -196,6 +201,29 @@ void NCPlusForceModels::Reload()
 	ReadSide(TEXT("Team"),  C.Team);
 	ReadSide(TEXT("Red"),   C.Red);
 	ReadSide(TEXT("Blue"),  C.Blue);
+
+	// Seed usable Red/Blue side colours. The Red/Blue style takes S/V/Glow from these sides, but
+	// nothing ever seeded them — fresh configs sat at the struct defaults (H=0 S=1 V=1 Glow=1), so
+	// the style rendered flat pure-hue colours: no albedo overbright (the dc-parity norm the
+	// TeamSkins migration seeds is Glow=3) and a near-black pure blue (linear (0,0,1) ~7% luma vs
+	// red's ~21%) — community "brightness is busted on red/blue" (2026-06-30). A PRISTINE side ==
+	// exactly the untouched defaults; that also heals configs that already SAVED those defaults
+	// (indistinguishable, and nobody plausibly wants zero-overbright pure-red "Blue"). Blue seeds
+	// S=0.9 (≈ stock BLUEHUDCOLOR) to close the red-vs-blue luminance gap. A user-edited side is
+	// never touched.
+	{
+		auto SeedRedBlueSide = [](FNCPlusModelSettings& Side, float SeedH, float SeedS)
+		{
+			const bool bPristine =
+				(Side.H == 0.f && Side.S == 1.f && Side.V == 1.f && Side.Brightness == 1.f);
+			if (!bPristine) { return; }
+			Side.H = SeedH;
+			Side.S = SeedS;
+			Side.Brightness = 3.0f;   // dc-parity overbright (same constant as MigrateOneSide)
+		};
+		SeedRedBlueSide(C.Red,  0.f,   1.0f);
+		SeedRedBlueSide(C.Blue, 240.f, 0.9f);
+	}
 
 	// Optional recolour-param override (comma-separated; names may contain spaces).
 	// Lets you tune which params get team-coloured (e.g. armour-only, leave body/face).
@@ -592,18 +620,47 @@ void NCPlusForceModels::SuppressFlagCarrierOutlines(UWorld* World)
 	GOutlineSuppressed = MoveTemp(Current);
 }
 
-bool NCPlusForceModels::OutlineModeActive(const UWorld* World)
+bool NCPlusForceModels::OutlineModeActive(UWorld* World)
 {
 	// Outline mode is CLIENT/STANDALONE-only: SetOutlineLocal writes bOutlineWhenUnoccluded, which is
 	// REPLICATED (ReplicatedUsing=UpdateOutline) — on a listen server our per-frame LOS gating would
 	// push the host's occlusion state to every connected client and clobber their own outline flags.
-	// Also keys the TeamArenaCharacter tint-gating, so a listen host keeps the normal super-tint
-	// (neutral bodies with no outline would be strictly worse).
+	// Also keys the TeamArenaCharacter tint-gating, so a host with the flag on keeps the normal
+	// super-tint (neutral bodies with no outline would be strictly worse).
 	if (!World) { return false; }
 	const FNCPlusForceModelsConfig& C = Get();
 	if (!C.bEnabled || !C.bOutline) { return false; }
 	const ENetMode NM = World->GetNetMode();
-	return NM == NM_Client || NM == NM_Standalone;
+	if (NM != NM_Client && NM != NM_Standalone) { return false; }
+
+	// STOCK-PALETTE GATE (user decision 2026-07-01 — "not remaking the material for now"): the stock
+	// M_OutlinePP rim is FIXED red (team 0) / blue (team 1), so outline mode only engages when every
+	// side it would outline is configured to READ as that colour — otherwise e.g. a green-configured
+	// team gets a blue rim (community-reported mismatch) and the neutral body makes it worse. The
+	// Red/Blue style passes with its seeded/default hues (0/240; a user who repaints the Red/Blue
+	// sides elsewhere is gated like any other colour); Team/Enemy styles pass only when the user's
+	// colours line up with the absolute stencil teams. Falls back to the normal super-tint when the
+	// gate fails — the classifier below always evaluates the FINAL resolved colour.
+	const int32 ViewerTeam = GetViewerTeam(World);
+	for (int32 TeamIdx = 0; TeamIdx < 2; ++TeamIdx)
+	{
+		// EnemyOnly never outlines friendlies (OutlinePlayers skips them) — their colour is moot.
+		if (C.Style == ENCPlusSkinStyle::EnemyOnly && TeamIdx == ViewerTeam) { continue; }
+		const FLinearColor Col = GetSkinColour(GetModelSettings(TeamIdx, TeamIdx == ViewerTeam));
+		const FLinearColor HSV = Col.LinearRGBToHSV();   // R = hue 0-360, G = sat, B = value
+		if (HSV.G < 0.3f || HSV.B < 0.05f) { return false; }   // too grey/dark to read as a team colour
+		const float H = HSV.R;
+		const bool bReadsAsRim = (TeamIdx == 0)
+			? (H <= 35.f || H >= 335.f)      // red-ish
+			: (H >= 195.f && H <= 275.f);    // blue-ish
+		if (!bReadsAsRim) { return false; }
+	}
+	return true;
+}
+
+bool NCPlusForceModels::OutlineModeActiveCached()
+{
+	return GOutlineModeActiveCache;
 }
 
 void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
@@ -628,6 +685,20 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// ALWAYS (AlwaysTickPoseAndRefreshBones) — LOS gating returns occluded players to
 	// OnlyTickPoseWhenRendered. Nothing replicates; no-op on a dedicated server.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
+
+	// Refresh the per-frame gate cache BEFORE any early-out so the tint call sites always read a
+	// current verdict (TacCom/intermission freeze the outline STATE, not the mode decision).
+	// A verdict FLIP (menu save, style/colour change, viewer team switch under Team/Enemy styles)
+	// must re-tint every body — outline-mode NEUTRAL <-> normal super-tint — or pawns keep the old
+	// look until their next reapply event.
+	{
+		const bool bGate = OutlineModeActive(World);
+		if (bGate != GOutlineModeActiveCache)
+		{
+			GOutlineModeActiveCache = bGate;
+			ReapplyAll(World);
+		}
+	}
 
 	// Authoring paths (once) + per-world load-attempt re-arm, then keep the camera manager pointed at
 	// the recoloured outline material (if configured) — BEFORE the TacCom/intermission early-outs so
@@ -666,7 +737,7 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	}
 
 	const FNCPlusForceModelsConfig& C = Get();
-	const bool bWant = OutlineModeActive(World);
+	const bool bWant = GOutlineModeActiveCache;   // computed above this frame
 	const int32 ViewerTeam = GetViewerTeam(World);
 
 	// Push the per-team outline colours into MPC_NCPOutline (slow tick) so a matching M_OutlinePP renders
@@ -773,11 +844,13 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 	{
 	case ENCPlusSkinStyle::RedBlue:
 	{
-		// Red/Blue is ABSOLUTE: team 0 = red, team 1 = blue. BP parity — the BP overrode the HUE with
-		// DefaultRed/BlueHue (keeping S/V/model/armour from config), so FORCE H to red/blue here.
-		// Without this an unconfigured Blue side keeps its default H = 0, which is RED -> "red vs red".
+		// Red/Blue is ABSOLUTE: team 0 = red side, team 1 = blue side. Reload() seeds pristine sides
+		// to proper red/blue (H 0/240, Glow 3), so the old UNCONDITIONAL hue force is gone — it was
+		// stomping user-picked hues, which made the F5 Red/Blue H spinbox silently dead and the
+		// preview swatch lie (Blue row previewed RED). Kept only as a safety net: a Blue side still
+		// carrying the default RED hue (pre-seed value mid-session) must never render "red vs red".
 		FNCPlusModelSettings Out = (TheirTeamIndex == 0) ? C.Red : C.Blue;
-		Out.H = (TheirTeamIndex == 0) ? 0.f : 240.f;   // red / blue
+		if (TheirTeamIndex == 1 && Out.H == 0.f) { Out.H = 240.f; }
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
 		if (Out.ContentPath.IsEmpty())

@@ -130,11 +130,19 @@ namespace NCPlusForceModels
 	 *  Client-side; no-op on a dedicated server. */
 	NETCODEPLUS_API void OutlinePlayers(class UWorld* World, bool bSlowTick);
 
-	/** True when the "Outline" render-mode is in effect for this world: flag set AND client/standalone.
+	/** True when the "Outline" render-mode is in effect for this world: flag set AND client/standalone
+	 *  AND every side the outline would touch is configured to READ as the stock rim palette (red team 0
+	 *  / blue team 1 — the material isn't being recoloured for now, so mismatched colours fall back to
+	 *  the normal super-tint; the Red/Blue style always qualifies since its hue is forced to 0/240).
 	 *  Listen servers are excluded — SetOutlineLocal writes the REPLICATED bOutlineWhenUnoccluded, so a
 	 *  host's LOS gating would clobber every client's outline state. Keys BOTH the outline pass and the
-	 *  TeamArenaCharacter tint-gating (so an excluded host keeps the normal super-tint). */
-	NETCODEPLUS_API bool OutlineModeActive(const class UWorld* World);
+	 *  TeamArenaCharacter tint-gating (so a gated-off config keeps the normal super-tint). */
+	NETCODEPLUS_API bool OutlineModeActive(class UWorld* World);
+
+	/** Last OutlineModeActive verdict, refreshed once per frame by OutlinePlayers. Use from per-pawn
+	 *  per-frame call sites (Tick overlay retint) — the full check is too heavy for that cadence.
+	 *  At most one frame stale; false before the first OutlinePlayers tick of a world. */
+	NETCODEPLUS_API bool OutlineModeActiveCached();
 
 	/** The local viewer's effective team (0/1) for friend/enemy bucketing under the Team-vs-Enemy and
 	 *  Enemy-Only styles. Returns the local PC's real team when playing; for a teamless spectator it
