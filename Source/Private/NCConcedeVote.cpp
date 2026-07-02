@@ -52,21 +52,30 @@ namespace
 		}
 	}
 
-	// Progress prompt to every member of the losing team: center banner (packed switch)
-	// + a chat line that persists in scrollback (NCPlusHostPause dual-channel pattern).
+	// Progress prompt: the LOSING team gets the center banner (packed switch) + an
+	// actionable chat line (NCPlusHostPause dual-channel pattern); everyone ELSE gets an
+	// informational chat line — the leaders should know a concede is brewing (user call
+	// 2026-07-01), they just have no key to press.
 	void AnnounceProgress(UWorld* World, int32 TeamIdx, int32 Votes, int32 Needed)
 	{
 		const int32 Packed = ((Votes & 0xFF) << 8) | (Needed & 0xFF);
-		const FString Msg = FString::Printf(
+		const FString VoterMsg = FString::Printf(
 			TEXT("Concede vote: %d/%d — press F1 to confirm, F4 to cancel (or type gg)"), Votes, Needed);
+		const FString ObserverMsg = FString::Printf(
+			TEXT("The %s team is considering conceding (%d/%d)."),
+			(TeamIdx == 0) ? TEXT("RED") : TEXT("BLUE"), Votes, Needed);
 		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
 		{
 			AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
-			if (PC && PC->UTPlayerState && !PC->UTPlayerState->bIsABot
-				&& (int32)PC->UTPlayerState->GetTeamNum() == TeamIdx)
+			if (!PC || !PC->UTPlayerState || PC->UTPlayerState->bIsABot) { continue; }
+			if ((int32)PC->UTPlayerState->GetTeamNum() == TeamIdx)
 			{
 				PC->ClientReceiveLocalizedMessage(UNCConcedeMessage::StaticClass(), Packed);
-				SayTo(PC, Msg);
+				SayTo(PC, VoterMsg);
+			}
+			else
+			{
+				SayTo(PC, ObserverMsg);
 			}
 		}
 	}
@@ -197,16 +206,9 @@ void NCConcede::HandleVote(APlayerController* PC, uint8 Action)
 		{
 			if (V.Votes.Num() == 0)
 			{
-				// Losing team only — the leaders were never shown the vote's existence.
-				for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
-				{
-					AUTPlayerController* TeamPC = Cast<AUTPlayerController>(It->Get());
-					if (TeamPC && TeamPC->UTPlayerState
-						&& (int32)TeamPC->UTPlayerState->GetTeamNum() == V.TeamIdx)
-					{
-						SayTo(TeamPC, TEXT("Concede vote cancelled."));
-					}
-				}
+				// Everyone — the leaders were told the vote was brewing, so they also
+				// learn it's off (user call 2026-07-01: leaders should know somehow).
+				AnnounceToAll(World, TEXT("Concede vote cancelled."));
 				V = FNCConcedeState();
 			}
 			else
