@@ -537,7 +537,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::MakeLabeledSpin(const FString& Label, float* 
 		];
 }
 
-TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusModelSettings* Side)
+TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusModelSettings* Side, bool bFixedColour)
 {
 	// Resolve the model combo's initial selection from the stored class path ("(none)" if empty).
 	// Match against VariantPaths too, so a saved variant that got coalesced (e.g. SkaarjMale03 -> the
@@ -572,12 +572,13 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 		]
 
-		// Model picker
+		// Model picker (collapsed on fixed-colour rows — Red/Blue borrows the Team/Enemy model)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 4)
 		[
 			SNew(SHorizontalBox)
+			.Visibility(bFixedColour ? EVisibility::Collapsed : EVisibility::Visible)
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
@@ -610,12 +611,13 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			]
 		]
 
-		// Hue / Saturation / Value
+		// Hue / Saturation / Value (collapsed on fixed-colour rows — the style forces the colour)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 2)
 		[
 			SNew(SHorizontalBox)
+			.Visibility(bFixedColour ? EVisibility::Collapsed : EVisibility::Visible)
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0) [ MakeLabeledSpin(TEXT("H"), &Side->H, 0.f, 360.f, 1.f) ]
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0) [ MakeLabeledSpin(TEXT("S"), &Side->S, 0.f, 1.f, 0.02f) ]
 			+ SHorizontalBox::Slot().AutoWidth()                      [ MakeLabeledSpin(TEXT("V"), &Side->V, 0.f, 1.f, 0.02f) ]
@@ -763,8 +765,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 					SNew(SScrollBox)
 					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Enemy"),           &FMConfig.Enemy) ]
 					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Team (friendly)"), &FMConfig.Team) ]
-					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Red team"),        &FMConfig.Red) ]
-					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Blue team"),       &FMConfig.Blue) ]
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Red team"),        &FMConfig.Red,  /*bFixedColour*/ true) ]
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Blue team"),       &FMConfig.Blue, /*bFixedColour*/ true) ]
 				]
 			]
 

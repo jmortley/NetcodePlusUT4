@@ -202,29 +202,10 @@ void NCPlusForceModels::Reload()
 	ReadSide(TEXT("Red"),   C.Red);
 	ReadSide(TEXT("Blue"),  C.Blue);
 
-	// Seed usable Red/Blue side colours. The Red/Blue style takes S/V/Glow from these sides, but
-	// nothing ever seeded them — fresh configs sat at the struct defaults (H=0 S=1 V=1 Glow=1), so
-	// the style rendered flat pure-hue colours incl. a near-black pure blue (linear (0,0,1) ~7%
-	// luma vs red's ~21%) — community "brightness is busted on red/blue" (2026-06-30). A PRISTINE
-	// side == exactly the untouched defaults; that also heals configs that already SAVED those
-	// defaults (indistinguishable, and nobody plausibly wants zero-overbright pure-red "Blue").
-	// Blue seeds S=0.9 (≈ stock BLUEHUDCOLOR) to close the red-vs-blue luminance gap. Glow 1.5 —
-	// NOT dc's 3.0: dc ran x3 over DESATURATED colours (S/V ≈ 0.4); on near-pure hues x3 is
-	// radioactive (user-verified "way too strong" 2026-07-01). A user-edited side is never touched;
-	// the F5 Red/Blue rows are live for taste-tuning.
-	{
-		auto SeedRedBlueSide = [](FNCPlusModelSettings& Side, float SeedH, float SeedS)
-		{
-			const bool bPristine =
-				(Side.H == 0.f && Side.S == 1.f && Side.V == 1.f && Side.Brightness == 1.f);
-			if (!bPristine) { return; }
-			Side.H = SeedH;
-			Side.S = SeedS;
-			Side.Brightness = 1.5f;
-		};
-		SeedRedBlueSide(C.Red,  0.f,   1.0f);
-		SeedRedBlueSide(C.Blue, 240.f, 0.9f);
-	}
+	// NB: no Red/Blue colour seeding here — the Red/Blue style forces its colours wholesale at
+	// resolve time (GetModelSettings), so those sides' H/S/V in config are inert by design (the F5
+	// rows only expose Glow + Armour for them). This replaced a short-lived Reload() seeding pass
+	// (2026-07-01): user decision = Red/Blue is zero-config, nobody picks colours.
 
 	// Optional recolour-param override (comma-separated; names may contain spaces).
 	// Lets you tune which params get team-coloured (e.g. armour-only, leave body/face).
@@ -638,10 +619,10 @@ bool NCPlusForceModels::OutlineModeActive(UWorld* World)
 	// M_OutlinePP rim is FIXED red (team 0) / blue (team 1), so outline mode only engages when every
 	// side it would outline is configured to READ as that colour — otherwise e.g. a green-configured
 	// team gets a blue rim (community-reported mismatch) and the neutral body makes it worse. The
-	// Red/Blue style passes with its seeded/default hues (0/240; a user who repaints the Red/Blue
-	// sides elsewhere is gated like any other colour); Team/Enemy styles pass only when the user's
-	// colours line up with the absolute stencil teams. Falls back to the normal super-tint when the
-	// gate fails — the classifier below always evaluates the FINAL resolved colour.
+	// Red/Blue style ALWAYS passes (its colours are plugin-forced red/blue at resolve time);
+	// Team/Enemy styles pass only when the user's colours line up with the absolute stencil teams.
+	// Falls back to the normal super-tint when the gate fails — the classifier below always
+	// evaluates the FINAL resolved colour.
 	const int32 ViewerTeam = GetViewerTeam(World);
 	for (int32 TeamIdx = 0; TeamIdx < 2; ++TeamIdx)
 	{
@@ -845,13 +826,15 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 	{
 	case ENCPlusSkinStyle::RedBlue:
 	{
-		// Red/Blue is ABSOLUTE: team 0 = red side, team 1 = blue side. Reload() seeds pristine sides
-		// to proper red/blue (H 0/240, Glow 3), so the old UNCONDITIONAL hue force is gone — it was
-		// stomping user-picked hues, which made the F5 Red/Blue H spinbox silently dead and the
-		// preview swatch lie (Blue row previewed RED). Kept only as a safety net: a Blue side still
-		// carrying the default RED hue (pre-seed value mid-session) must never render "red vs red".
+		// Red/Blue is ABSOLUTE + ZERO-CONFIG (user decision 2026-07-01): team 0 renders red and
+		// team 1 blue whichever side the viewer is on, with the COLOUR fully plugin-fixed — no user
+		// colour input; the F5 Red/Blue rows expose only Glow + Armour mode. Blue runs S=0.9
+		// (≈ stock BLUEHUDCOLOR) so both sides read at comparable luminance. Glow/armour honour the
+		// side config; the model falls back to Team-then-Enemy so a style switch keeps a model.
 		FNCPlusModelSettings Out = (TheirTeamIndex == 0) ? C.Red : C.Blue;
-		if (TheirTeamIndex == 1 && Out.H == 0.f) { Out.H = 240.f; }
+		Out.H = (TheirTeamIndex == 0) ? 0.f : 240.f;
+		Out.S = (TheirTeamIndex == 0) ? 1.f : 0.9f;
+		Out.V = 1.f;
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
 		if (Out.ContentPath.IsEmpty())
