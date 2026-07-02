@@ -18,6 +18,7 @@
 #include "NCPlusHUDWidget_Accuracy.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
+#include "NCShaftArenaHUD.h"          // shaft-only default-on gate in ShouldDraw
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
@@ -95,12 +96,19 @@ bool UNCPlusHUDWidget_Accuracy::ShouldDraw_Implementation(bool bShowScores)
 	AUTPlayerState* PS = UTHUDOwner->UTPlayerOwner->UTPlayerState;
 	if (!IsValid(PS) || PS->bOnlySpectator) return false;
 
-	// Opt-in: the widget renders only when the user has placed it via nchud
-	// (or a mode that wants it on by default has seeded a layout entry — see
-	// NCShaftArenaHUD::BeginPlay). bHidden inside the entry honors the eye
-	// toggle in the editor.
+	// Opt-in: the widget renders only when the user has placed it via nchud —
+	// EXCEPT shaft arena, where accuracy is on by default. That default is a MODE
+	// CHECK here (2026-07-01), not a layout-entry seed: the old NCShaftArenaHUD::
+	// BeginPlay seed wrote into the shared live map, and the nchud editor/drag
+	// overlay auto-saves the whole map on close — playing shaft once + touching the
+	// editor baked a visible accuracy entry into HUDLayout.json for EVERY mode.
+	// With no entry, Draw falls back to sane defaults (scale 1, Large font, ctor
+	// bottom-right position). bHidden in an entry honors the editor's eye toggle.
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("accuracy"));
-	if (!E) return false;
+	if (!E)
+	{
+		return Cast<ANCShaftArenaHUD>(UTHUDOwner) != nullptr;
+	}
 	if (E->bHidden) return false;
 	return true;
 }

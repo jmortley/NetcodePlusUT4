@@ -201,15 +201,6 @@ namespace NCPlusHUDPresetsImpl
 			"hidden": false,
 			"Font": "Large"
 		},
-		"Accuracy":
-		{
-			"anchor": "BottomRight",
-			"offset_x": 5.64971923828125,
-			"offset_y": -45,
-			"scale": 0.25,
-			"hidden": false,
-			"Font": "Tiny"
-		},
 		"heal_ability":
 		{
 			"anchor": "BottomCenter",

@@ -4,6 +4,7 @@
 #include "NCPlusHUDLayout.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
+#include "CanvasItem.h"               // FCanvasTriangleItem: translucent arc/chevron ink
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "UTPlayerState.h"
@@ -29,13 +30,18 @@ namespace NCPlusQS
 	static const int32 HealthSegCount = MaxHealth / SegmentSize;   // 4
 	static const int32 ArmorSegCount  = MaxArmor  / SegmentSize;   // 3
 
+	// Shared local-origin convention: every style's first content row starts here, so
+	// cycling styles at a fixed X/Y keeps the ink in place (community report 2026-07-01:
+	// "minimal starts negative offset" — it began at y=8 while the others start at 14).
+	static const float ContentTopY     = 14.f;
+
 	// MinimalTypography tunables
 	static const float NumberScale     = 1.40f;
 	static const float LabelScale      = 0.80f;
 	static const float CenterGap       = 70.f;
 	static const float DividerY0       = 14.f;
 	static const float DividerY1       = 76.f;
-	static const float NumberY         = 8.f;
+	static const float NumberY         = ContentTopY;
 	static const float AccentLineGap   = 4.f;
 	static const float LabelGap        = 5.f;
 	static const float AccentLineW     = 70.f;
@@ -308,21 +314,29 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 	const float SegW       = 50.f;   // wider since we have only 4 segments now
 	const float SegH       = 18.f;
 	const float SegGap     = 5.f;
-	const float NumWidth   = 80.f;   // reserved column for the integer label on the left
 	const float RowGap     = 18.f;
-	const float RowY[2]    = { 14.f, 14.f + SegH + RowGap };
+	const float RowY[2]    = { ContentTopY, ContentTopY + SegH + RowGap };
+
+	// Center the number+strip cluster on the widget box (the shared origin convention)
+	// — it used to left-anchor at x=80, sitting ~85px left of where the centered styles
+	// put their ink at the same layout X/Y.
+	const float StripW      = HealthSegCount * (SegW + SegGap) - SegGap;
+	const float ClusterW    = 80.f + 10.f + StripW;
+	const float NumWidth    = (Size.X - ClusterW) * 0.5f + 80.f;
 	const float StripStartX = NumWidth + 10.f;
 
 	const float NumScale = 0.70f;   // small enough to vertically fit inside SegH
 	const float NumNudgeY = -4.f;   // visual centering compensates for font asymmetry
 
 	auto DrawRow = [&](int32 Value, int32 SegCount, float Y,
-	                   const FLinearColor& FillColor, float Pulse)
+	                   const FLinearColor& FillColor, const FLinearColor& NumColor, float Pulse)
 	{
-		// Number on the left, visually centered on the segment row's midpoint.
+		// Number on the left, visually centered on the segment row's midpoint. Uses the
+		// user's HP#/AR# number colors (incl. low-HP/flash tiers) — it used to draw with
+		// the row ACCENT, so the number-color settings did nothing here (2026-07-01).
 		DrawText(FText::AsNumber(Value), NumWidth, Y + SegH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumScale, FillColor.A * C.Opacity, FillColor,
+			NumScale, NumColor.A * C.Opacity, NumColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
 
 		const float FillAlpha   = (0.85f + Pulse * 0.15f) * C.Opacity;
@@ -347,10 +361,10 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 		}
 	};
 
-	DrawRow(Health, HealthSegCount, RowY[0], C.HealthAccent, C.HealthPulse);
+	DrawRow(Health, HealthSegCount, RowY[0], C.HealthAccent, C.HealthNumColor, C.HealthPulse);
 	if (bDrawArmor)
 	{
-		DrawRow(Armor, ArmorSegCount, RowY[1], C.ArmorAccent, C.ArmorPulse);
+		DrawRow(Armor, ArmorSegCount, RowY[1], C.ArmorAccent, C.ArmorNumColor, C.ArmorPulse);
 	}
 }
 
@@ -370,6 +384,21 @@ namespace
 	FORCEINLINE FVector2D LocalToScreen(const FVector2D& Local, const FVector2D& RenderPos, float Scale)
 	{
 		return FVector2D(RenderPos.X + Local.X * Scale, RenderPos.Y + Local.Y * Scale);
+	}
+
+	// Submit a triangle list with TRANSLUCENT blending. UCanvas::K2_DrawTriangle keeps
+	// FCanvasItem's default SE_BLEND_Opaque, so every vertex alpha these styles compute
+	// (the hp/armor opacity setting, pulse dims, track rings, partial-segment blends)
+	// was silently IGNORED — the arc/chevron ink always rendered solid (community
+	// "opacity doesn't change radial circles or hex chevrons", 2026-07-01).
+	void DrawTrisTranslucent(UCanvas* Canvas, TArray<FCanvasUVTri>&& Tris)
+	{
+		if (!Canvas || Tris.Num() == 0) return;
+		FCanvasTriangleItem Item(FVector2D::ZeroVector, FVector2D::ZeroVector, FVector2D::ZeroVector,
+			Canvas->DefaultTexture ? Canvas->DefaultTexture->Resource : GWhiteTexture);
+		Item.TriangleList = MoveTemp(Tris);
+		Item.BlendMode = SE_BLEND_Translucent;
+		Canvas->DrawItem(Item);
 	}
 
 	// Helper: draw a filled arc as a triangle ring around widget-local (CX, CY)
@@ -411,7 +440,7 @@ namespace
 			Tris.Add(T2);
 		}
 
-		Canvas->K2_DrawTriangle(Canvas->DefaultTexture, Tris);
+		DrawTrisTranslucent(Canvas, MoveTemp(Tris));
 	}
 }
 
@@ -423,13 +452,16 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 	if (!NumberFont || !Canvas) return;
 
 	const float CX = Size.X * 0.5f;
-	const float CY = Size.Y * 0.5f;
-	const float OuterR_HP = 46.f, OuterR_AR = 32.f;
+	const float OuterR_HP = 43.f, OuterR_AR = 32.f;
+	// Ring top aligned to the shared ContentTopY (ring spans y=[14,100]) so cycling
+	// styles at the same layout X/Y doesn't jump the ink (was vertically centered).
+	const float CY = ContentTopY + OuterR_HP;
 	const float Thick = 6.f;
 
-	// Track ring (dim background — full circle). DrawArc uses K2_DrawTriangle
-	// which writes per-vertex color directly (no DrawOpacity override), so we
-	// can pre-multiply Opacity into the color.A and it WILL render.
+	// Track ring (dim background — full circle). DrawArc submits translucent
+	// triangles (DrawTrisTranslucent), so pre-multiplying Opacity into color.A
+	// renders correctly. (It used to go through K2_DrawTriangle, whose OPAQUE
+	// default blend ignored every alpha here.)
 	FLinearColor TrackHP(0.10f, 0.16f, 0.12f, 0.85f * C.Opacity);
 	FLinearColor TrackAR(0.16f, 0.14f, 0.10f, 0.85f * C.Opacity);
 	DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP, 0.f, 2.f * PI, 48, TrackHP);
@@ -510,7 +542,7 @@ namespace
 		Tris[2].V1_Pos = P3; Tris[2].V2_Pos = P4;
 		Tris[3].V1_Pos = P4; Tris[3].V2_Pos = P5;
 
-		Canvas->K2_DrawTriangle(Canvas->DefaultTexture, Tris);
+		DrawTrisTranslucent(Canvas, MoveTemp(Tris));
 	}
 }
 
@@ -524,23 +556,29 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 	const float ChevW   = 44.f, ChevH = 22.f, ChevSlant = 10.f, ChevGap = 8.f;
 	// Number column on the left, then 4 (HP) / 3 (Armor) chevrons. Use the
 	// HP row to set the strip's start so both rows align on the same X.
-	const float NumWidth = 80.f;
+	// Cluster centered on the widget box (shared origin convention) — it used to
+	// left-anchor at x=80, off from the centered styles at the same layout X/Y.
+	const float StripW   = HealthSegCount * (ChevW + ChevGap) - ChevGap + ChevSlant;
+	const float ClusterW = 80.f + 10.f + StripW;
+	const float NumWidth = (Size.X - ClusterW) * 0.5f + 80.f;
 	const float StripX   = NumWidth + 10.f;
-	const float RowY[2]  = { 14.f, 14.f + ChevH + 18.f };
+	const float RowY[2]  = { ContentTopY, ContentTopY + ChevH + 18.f };
 
 	const float NumScale = 0.75f;   // small enough to fit inside ChevH visually
 	const float NumNudgeY = -4.f;   // compensate for font glyph-box asymmetry
 
 	auto DrawRow = [&](int32 Value, int32 SegCount, float Y,
-	                   const FLinearColor& FillColor, float Pulse)
+	                   const FLinearColor& FillColor, const FLinearColor& NumColor, float Pulse)
 	{
-		// Number on the left, visually centered on the chevron row.
+		// Number on the left, visually centered on the chevron row. Uses the user's
+		// HP#/AR# number colors (incl. low-HP/flash tiers) — it used to draw with the
+		// row ACCENT, so the number-color settings did nothing here (2026-07-01).
 		DrawText(FText::AsNumber(Value), NumWidth, Y + ChevH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumScale, FillColor.A * C.Opacity, FillColor,
+			NumScale, NumColor.A * C.Opacity, NumColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
 
-		// DrawChevron uses K2_DrawTriangle which preserves color.A → bake Opacity in.
+		// DrawChevron submits translucent triangles → bake Opacity into color.A.
 		FLinearColor EmptyOutline(0.18f, 0.20f, 0.18f, 0.55f * C.Opacity);
 		FLinearColor PulsedFill = FillColor;
 		PulsedFill.A = (0.85f + Pulse * 0.15f) * C.Opacity;
@@ -568,10 +606,10 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 		}
 	};
 
-	DrawRow(Health, HealthSegCount, RowY[0], C.HealthAccent, C.HealthPulse);
+	DrawRow(Health, HealthSegCount, RowY[0], C.HealthAccent, C.HealthNumColor, C.HealthPulse);
 	if (bDrawArmor)
 	{
-		DrawRow(Armor, ArmorSegCount, RowY[1], C.ArmorAccent, C.ArmorPulse);
+		DrawRow(Armor, ArmorSegCount, RowY[1], C.ArmorAccent, C.ArmorNumColor, C.ArmorPulse);
 	}
 }
 
