@@ -81,7 +81,14 @@ namespace
 	}
 	static FArmorIconSlot& GetHelmetSlot()
 	{
-		static FArmorIconSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Helmet.Armor_Helmet_C") };
+		// Armor_Small is the LIVE 25-armor pickup ("helmet" slot). Armor_Helmet is a
+		// deprecated thin wrapper around it with no HUDIcon override of its own, and as
+		// deprecated content it isn't reliably cooked into shipped client paks — LoadClass
+		// failed at runtime, latched the slot unresolved, and the 4th cell degraded to the
+		// dim count-only fallback ("scoreboard only draws 3 armor icons", 2026-07-01).
+		// Armor_Small also owns the HelmetCount stat the count column reads (verified in
+		// the uasset), so icon and count now come from the same class.
+		static FArmorIconSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Small.Armor_Small_C") };
 		return S;
 	}
 
