@@ -23,6 +23,8 @@
 #include "NCPlusCTFHUD.h"
 #include "ShockDomHUD.h"
 #include "NCPlusForceModels.h"
+#include "NCConcedeVote.h"            // gg concede vote: client command routing + bind seeding
+#include "EngineUtils.h"              // TActorIterator (concede vote channel lookup)
 
 // -ncpconnect launcher direct-connect support
 #include "Containers/Ticker.h"
@@ -661,6 +663,55 @@ static void HandleForceModelsDumpMats(const TArray<FString>& /*Args*/, UWorld* W
 	NCPlusForceModels::DumpAllCharacterMaterials(World);
 }
 
+// Concede vote (gg / F1 / F4): route the local player's action to the server. On a
+// listen host / standalone the local PC IS the authority, so call the vote handler
+// directly; on a net client find our per-player vote channel (owner-only-relevant,
+// so the iterator sees at most our own instance) and RPC through it. Old servers
+// without the feature simply have no channel — silent no-op.
+static void ConcedeCommand(uint8 Action)
+{
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+	if (!World) return;
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC) return;
+
+	if (PC->HasAuthority())
+	{
+		// Listen host / standalone only: the LOCAL PC is the authority. On a DEDICATED
+		// server GetFirstPlayerController() is some remote player's PC (also authoritative
+		// there) — a server-console / RCON 'gg' must never cast a vote on their behalf.
+		if (PC->IsLocalController())
+		{
+			NCConcede::HandleVote(PC, Action);
+		}
+		return;
+	}
+	for (TActorIterator<ANCConcedeVote> It(World); It; ++It)
+	{
+		if (It->GetOwner() == PC)
+		{
+			It->ServerConcede(Action);
+			return;
+		}
+	}
+}
+
+static void HandleConcedeStart(const TArray<FString>& /*Args*/)   { ConcedeCommand(NCConcede::kActionStartOrConfirm); }
+static void HandleConcedeConfirm(const TArray<FString>& /*Args*/) { ConcedeCommand(NCConcede::kActionConfirmOnly); }
+static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeCommand(NCConcede::kActionCancel); }
+
 void FNetcodePlus::StartupModule()
 {
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -719,6 +770,27 @@ void FNetcodePlus::StartupModule()
 		ECVF_Default
 	);
 
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("gg"),
+		TEXT("Concede vote: start (or confirm) a vote to forfeit the match — losing team only, >50% must agree"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleConcedeStart),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("concedeconfirm"),
+		TEXT("Concede vote: confirm the active vote (default bind F1; never starts a vote)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleConcedeConfirm),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("concedecancel"),
+		TEXT("Concede vote: withdraw your vote (default bind F4)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleConcedeCancel),
+		ECVF_Default
+	);
+
 	// Bind F5 -> ncpmenu by SEEDING the UUTPlayerInput CDO's CustomBinds at startup (pure run-once).
 	// The CDO exists by now (GetMutableDefault constructs + config-loads it if needed), so this adds on top
 	// of whatever Input.ini had; new UUTPlayerInput instances inherit the CDO's CustomBinds, and
@@ -752,6 +824,41 @@ void FNetcodePlus::StartupModule()
 		{
 			InputCDO->SpectatorBinds.Add(FCustomKeyBinding(FName(TEXT("F5")), IE_Pressed, TEXT("ncpmenu")));
 			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: F5 -> ncpmenu seeded on UUTPlayerInput CDO SpectatorBinds"));
+		}
+
+		// Concede binds — F1 confirm / F4 cancel by default, honouring whatever keys the
+		// player already configured for zo's CustomHUD BP concede (its Game.ini section
+		// persists 'Confirm Key String'/'Cancel Key String'; spaced keys + slash sections
+		// are valid GConfig lookups). add-if-missing, so a hand-rebound command wins.
+		// ALSO seeded into SpectatorBinds: dead players (bOutOfLives) route through them
+		// first, and eliminated players must be able to vote mid-round; a true spectator
+		// pressing the keys is rejected server-side (not on a team).
+		{
+			FString ConfirmKey = TEXT("F1");
+			FString CancelKey  = TEXT("F4");
+			if (GConfig)
+			{
+				static const TCHAR* kZoHUDSection =
+					TEXT("/Game/Blueprints/ElimPlusStuff/Mutator/ELIMCustomHUD/ElimZoHUD.ElimZoHUD_C");
+				GConfig->GetString(kZoHUDSection, TEXT("Confirm Key String"), ConfirmKey, GGameIni);
+				GConfig->GetString(kZoHUDSection, TEXT("Cancel Key String"),  CancelKey,  GGameIni);
+			}
+			if (ConfirmKey.IsEmpty()) { ConfirmKey = TEXT("F1"); }
+			if (CancelKey.IsEmpty())  { CancelKey  = TEXT("F4"); }
+
+			auto SeedConcedeBind = [](TArray<FCustomKeyBinding>& Binds, const FString& Key, const TCHAR* Cmd)
+			{
+				for (const FCustomKeyBinding& B : Binds)
+				{
+					if (B.Command.Contains(Cmd)) { return; }
+				}
+				Binds.Add(FCustomKeyBinding(FName(*Key), IE_Pressed, Cmd));
+				UE_LOG(LogLoad, Warning, TEXT("netcodeplus: %s -> %s seeded on UUTPlayerInput CDO"), *Key, Cmd);
+			};
+			SeedConcedeBind(InputCDO->CustomBinds,    ConfirmKey, TEXT("concedeconfirm"));
+			SeedConcedeBind(InputCDO->CustomBinds,    CancelKey,  TEXT("concedecancel"));
+			SeedConcedeBind(InputCDO->SpectatorBinds, ConfirmKey, TEXT("concedeconfirm"));
+			SeedConcedeBind(InputCDO->SpectatorBinds, CancelKey,  TEXT("concedecancel"));
 		}
 	}
 
@@ -856,6 +963,15 @@ void FNetcodePlus::ShutdownModule()
 
 	IConsoleObject* Cmd5 = IConsoleManager::Get().FindConsoleObject(TEXT("nchud"));
 	if (Cmd5) { IConsoleManager::Get().UnregisterConsoleObject(Cmd5, false); }
+
+	IConsoleObject* CmdGG = IConsoleManager::Get().FindConsoleObject(TEXT("gg"));
+	if (CmdGG) { IConsoleManager::Get().UnregisterConsoleObject(CmdGG, false); }
+
+	IConsoleObject* CmdCC = IConsoleManager::Get().FindConsoleObject(TEXT("concedeconfirm"));
+	if (CmdCC) { IConsoleManager::Get().UnregisterConsoleObject(CmdCC, false); }
+
+	IConsoleObject* CmdCX = IConsoleManager::Get().FindConsoleObject(TEXT("concedecancel"));
+	if (CmdCX) { IConsoleManager::Get().UnregisterConsoleObject(CmdCX, false); }
 
 	// Close drag overlay if open
 	if (ActiveDragOverlay.IsValid())
