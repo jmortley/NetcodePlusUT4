@@ -274,9 +274,12 @@ void AWipeoutHUD::DrawHUD()
 
 	// ─── Custom team score bar (replaces bpHW_TeamGameClock) ───
 	// Respects dynamic team colors from TeamSkins mutator.
-	// Suppress the redundant scorebar when the stock team panel is on AND visible; the
+	// Suppress the redundant scorebar when the stock team panel is on AND actually DRAWN; the
 	// panel draws team scores + the round clock itself. Panel hidden → scorebar returns.
-	const bool bStockPanelActive = FNCPlusHUDLayout::WantsStockTeamPanel() && !NCPlusHUDDrawCall::IsHidden(TEXT("team_panel"));
+	// bShouldDrawPortraits is load-bearing: NCLeagueDuel (1v1) sets it false so the panel block
+	// below never runs there — without it the toggle alone suppressed the scorebar in duel and
+	// NOTHING drew at the top (community report 2026-07-01).
+	const bool bStockPanelActive = bShouldDrawPortraits && FNCPlusHUDLayout::WantsStockTeamPanel() && !NCPlusHUDDrawCall::IsHidden(TEXT("team_panel"));
 	if (GS && !bScoreboardIsUp)
 	{
 		if (!bStockPanelActive)
