@@ -537,7 +537,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::MakeLabeledSpin(const FString& Label, float* 
 		];
 }
 
-TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusModelSettings* Side)
+TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusModelSettings* Side, bool bFixedColour)
 {
 	// Resolve the model combo's initial selection from the stored class path ("(none)" if empty).
 	// Match against VariantPaths too, so a saved variant that got coalesced (e.g. SkaarjMale03 -> the
@@ -572,12 +572,13 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 		]
 
-		// Model picker
+		// Model picker (collapsed on fixed-colour rows — Red/Blue borrows the Team/Enemy model)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 4)
 		[
 			SNew(SHorizontalBox)
+			.Visibility(bFixedColour ? EVisibility::Collapsed : EVisibility::Visible)
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
@@ -610,12 +611,13 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			]
 		]
 
-		// Hue / Saturation / Value
+		// Hue / Saturation / Value (collapsed on fixed-colour rows — the style forces the colour)
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 2)
 		[
 			SNew(SHorizontalBox)
+			.Visibility(bFixedColour ? EVisibility::Collapsed : EVisibility::Visible)
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0) [ MakeLabeledSpin(TEXT("H"), &Side->H, 0.f, 360.f, 1.f) ]
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 12, 0) [ MakeLabeledSpin(TEXT("S"), &Side->S, 0.f, 1.f, 0.02f) ]
 			+ SHorizontalBox::Slot().AutoWidth()                      [ MakeLabeledSpin(TEXT("V"), &Side->V, 0.f, 1.f, 0.02f) ]
@@ -706,6 +708,10 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Flags"),     &FMConfig.bFlags) ]
 				+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeFlagCheck(TEXT("Darken"),    &FMConfig.bDarkenBodies) ]
+				// "Outline" checkbox intentionally NOT exposed — parked again 2026-07-01 (the stock
+				// M_OutlinePP rim is fixed screen-space width and reads too big on distant players;
+				// needs the material-edit width fix). Code stays live: dogfood via Mod.ini
+				// [ForceModels] Outline=true; re-expose by restoring the MakeFlagCheck slot.
 				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Cosmetics"), &FMConfig.bCosmetics) ]
 			]
 
@@ -759,8 +765,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 					SNew(SScrollBox)
 					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Enemy"),           &FMConfig.Enemy) ]
 					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Team (friendly)"), &FMConfig.Team) ]
-					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Red team"),        &FMConfig.Red) ]
-					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Blue team"),       &FMConfig.Blue) ]
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Red team"),        &FMConfig.Red,  /*bFixedColour*/ true) ]
+					+ SScrollBox::Slot().Padding(8, 0) [ BuildSideRow(TEXT("Blue team"),       &FMConfig.Blue, /*bFixedColour*/ true) ]
 				]
 			]
 
@@ -785,7 +791,8 @@ void SUTNCPlusMenu::LoadSettings()
 
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
-	// RagdollTime). ShowRagdoll kept here too for now — see note in Save (consumer unconfirmed).
+	// RagdollTime). bShowRagdoll is consumed by ATeamArenaCharacter::SpawnSkeletonDissolve since
+	// 2026-07-01 (unticked = corpse-hide in every mode, ForceModels-independent).
 	if (GConfig->GetString(IGCTFSection, TEXT("bAllowGib"), Val, ConfigPath))
 		bAllowGib = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 	else

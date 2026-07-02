@@ -112,8 +112,10 @@ public:
 
 	/** Pull this player's rating row from Mods.db into the in-memory cache.
 	 *  If no row exists, creates an INSERT with default 1400/350/0.06 and caches
-	 *  defaults. Call from PostLogin. */
-	void LoadPlayerFromDB(UWorld* World, const FString& UniqueId);
+	 *  defaults. PlayerName (optional) refreshes the last-seen display name —
+	 *  cached even for an already-loaded player and persisted at the next flush.
+	 *  Call from PostLogin. */
+	void LoadPlayerFromDB(UWorld* World, const FString& UniqueId, const FString& PlayerName = FString());
 
 	/** Snapshot current cached ratings as the "match-start" frozen values. The
 	 *  replicator displays these throughout the match. Call from
@@ -145,9 +147,11 @@ public:
 	 *  Returns 0 if the player has no rating row (unranked / bot). */
 	int32 GetPlayerGlobalRank(UWorld* World, const FString& UniqueId) const;
 
-	/** Add this round's PPR (Kills + Damage*0.01) to the player's lifetime totals.
-	 *  Pure cache update; persistence happens in FlushAtMatchEnd. Server-only. */
-	void RecordRoundPPR(const FString& UniqueId, float RoundPPR);
+	/** Add this round's PPR (Kills + Damage*0.01) + raw round damage to the player's
+	 *  lifetime totals (TotalPoints/RoundsPlayed/TotalDamage -> lifetime PPR + DPR),
+	 *  and refresh their last-seen display name. Pure cache update; persistence
+	 *  happens in FlushAtMatchEnd. Server-only. */
+	void RecordRoundPPR(const FString& UniqueId, float RoundPPR, float RoundDamage = 0.f, const FString& PlayerName = FString());
 
 	/** Server-side accessor for lifetime PPR (TotalPoints / max(1, RoundsPlayed)).
 	 *  Returns 0 for players with no completed rounds. */

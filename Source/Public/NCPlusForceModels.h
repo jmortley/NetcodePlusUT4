@@ -46,6 +46,7 @@ struct FNCPlusForceModelsConfig
 	bool             bFlags        = true;
 	bool             bDarkenBodies = false;
 	bool             bCosmetics    = true;
+	bool             bOutline      = false;   // team-coloured LOS outline instead of the body/armour super-tint (keeps the forced model)
 	ENCPlusSkinStyle Style         = ENCPlusSkinStyle::TeamEnemy;
 	FNCPlusModelSettings Enemy, Team, Red, Blue;
 
@@ -113,6 +114,35 @@ namespace NCPlusForceModels
 	 *  restores former carriers. Always on (it's a fix, not a setting). Client-side, re-asserted from the
 	 *  same ticker as SyncFlagColours. No-op on a dedicated server or outside CTF (incl. Blitz). */
 	NETCODEPLUS_API void SuppressFlagCarrierOutlines(class UWorld* World);
+
+	/** "Outline" flag: give players a client-local, team-coloured, LOS-GATED outline (via
+	 *  AUTCharacter::SetOutlineLocal) instead of the body/armour super-tint — a cleaner team read that
+	 *  keeps the forced model. The engine stencil has NO visible-only mode (no-128 = through-wall X-ray,
+	 *  +128 adds the visible rim), so call this EVERY FRAME: it line-traces each candidate from the
+	 *  viewer's camera and outlines only the visible ones (occluded -> no outline at all). Pass
+	 *  bSlowTick ~4x/sec to re-assert against replication clobbers + refresh the MPC_NCPOutline colours
+	 *  (graceful no-op until that collection/material exists — stock outline stays red/blue until then).
+	 *  Because M_OutlinePP is a RestrictedAsset (not editable in place), the recolour ships as NEW pak
+	 *  assets: Mod.ini [ForceModels] OutlineMaterial/OutlineMPC point at them and the slow tick RE-POINTS
+	 *  the camera manager's OutlineMat + DefaultPPSettings blendable (replace, never add — a second
+	 *  blendable would double-draw the stock rim). Yields entirely to spectator X-Ray (bTacComView).
+	 *  Restores pawns that drop out (toggle off / left / dead). Runs AFTER SuppressFlagCarrierOutlines.
+	 *  Client-side; no-op on a dedicated server. */
+	NETCODEPLUS_API void OutlinePlayers(class UWorld* World, bool bSlowTick);
+
+	/** True when the "Outline" render-mode is in effect for this world: flag set AND client/standalone
+	 *  AND every side the outline would touch is configured to READ as the stock rim palette (red team 0
+	 *  / blue team 1 — the material isn't being recoloured for now, so mismatched colours fall back to
+	 *  the normal super-tint; the Red/Blue style always qualifies since its hue is forced to 0/240).
+	 *  Listen servers are excluded — SetOutlineLocal writes the REPLICATED bOutlineWhenUnoccluded, so a
+	 *  host's LOS gating would clobber every client's outline state. Keys BOTH the outline pass and the
+	 *  TeamArenaCharacter tint-gating (so a gated-off config keeps the normal super-tint). */
+	NETCODEPLUS_API bool OutlineModeActive(class UWorld* World);
+
+	/** Last OutlineModeActive verdict, refreshed once per frame by OutlinePlayers. Use from per-pawn
+	 *  per-frame call sites (Tick overlay retint) — the full check is too heavy for that cadence.
+	 *  At most one frame stale; false before the first OutlinePlayers tick of a world. */
+	NETCODEPLUS_API bool OutlineModeActiveCached();
 
 	/** The local viewer's effective team (0/1) for friend/enemy bucketing under the Team-vs-Enemy and
 	 *  Enemy-Only styles. Returns the local PC's real team when playing; for a teamless spectator it

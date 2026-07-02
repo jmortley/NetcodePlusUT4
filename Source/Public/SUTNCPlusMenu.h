@@ -86,7 +86,10 @@ private:
 	void OnScreenshotChanged(ECheckBoxState NewState);
 
 	// Force Models tab builders/helpers
-	TSharedRef<SWidget> BuildSideRow(const FString& Label, FNCPlusModelSettings* Side);
+	/** One per-side settings row. bFixedColour (the Red/Blue rows): the style forces the colours
+	 *  wholesale (zero-config red/blue), so the Model picker + H/S/V are collapsed and only Glow +
+	 *  Armour mode show. */
+	TSharedRef<SWidget> BuildSideRow(const FString& Label, FNCPlusModelSettings* Side, bool bFixedColour = false);
 	TSharedRef<SWidget> MakeFlagCheck(const FString& Label, bool* Flag);
 	TSharedRef<SWidget> MakeLabeledSpin(const FString& Label, float* Value, float Min, float Max, float Delta);
 

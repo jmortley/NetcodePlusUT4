@@ -81,7 +81,14 @@ namespace
 	}
 	static FArmorIconSlot& GetHelmetSlot()
 	{
-		static FArmorIconSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Helmet.Armor_Helmet_C") };
+		// Armor_Small is the LIVE 25-armor pickup ("helmet" slot). Armor_Helmet is a
+		// deprecated thin wrapper around it with no HUDIcon override of its own, and as
+		// deprecated content it isn't reliably cooked into shipped client paks — LoadClass
+		// failed at runtime, latched the slot unresolved, and the 4th cell degraded to the
+		// dim count-only fallback ("scoreboard only draws 3 armor icons", 2026-07-01).
+		// Armor_Small also owns the HelmetCount stat the count column reads (verified in
+		// the uasset), so icon and count now come from the same class.
+		static FArmorIconSlot S{ TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Small.Armor_Small_C") };
 		return S;
 	}
 
@@ -195,13 +202,16 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	// instead of waiting on the 1Hz tick.
 	if (Pct == 0.f && GetWorld() && GetWorld()->GetNetMode() != NM_Client)
 	{
-		// LG-only accuracy: per-tick Hits/Shots ratio. NAME_LinkBeamShots is
-		// the per-refire-tick counter from UTWeap_LinkGun_Plus::ConsumeAmmo
-		// — NOT NAME_LinkShots which only ticks per trigger pull. Replicator
-		// path uses the same pair; this fallback aligns with it.
-		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
-		const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
-		const int32 Shots = PS->GetStatsValue(NAME_LinkBeamShots);
+		// Hitscan accuracy = Sniper + Lightning Gun (the LG BP writes LightningRifle*
+		// stats, the sniper writes Sniper*; the unused one is 0 so the sum is right).
+		// Must match the replicator's read — was the Link-BEAM pair, which nothing in
+		// the duel weapon set fires (the e3823f5 ElimPlus fix, ported 2026-07-01).
+		static const FName NAME_SniperHits(TEXT("SniperHits"));
+		static const FName NAME_SniperShots(TEXT("SniperShots"));
+		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
+		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
+		const int32 Hits  = PS->GetStatsValue(NAME_SniperHits)  + PS->GetStatsValue(NAME_LightningRifleHits);
+		const int32 Shots = PS->GetStatsValue(NAME_SniperShots) + PS->GetStatsValue(NAME_LightningRifleShots);
 		Pct = (Shots > 0) ? FMath::Min(float(Hits) / float(Shots) * 100.f, 100.f) : 0.f;
 	}
 	const FLinearColor AccColor = (Pct >= 35.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)

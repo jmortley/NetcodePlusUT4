@@ -259,6 +259,12 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		}
 	}
 	const bool bRecolour = bHasParam && !bDenylisted;
+	// Outline mode ("Outline" flag): keep the forced mesh but render the body NEUTRAL (no team colour) —
+	// the team read comes from the LOS outline (NCPlusForceModels::OutlinePlayers) instead, so both teams
+	// look the same and only the outline distinguishes them (not red/blue, not "super green").
+	// OutlineModeActive (not the raw flag) so a listen host, where the outline pass is disabled, keeps
+	// the normal tint instead of neutral-bodies-with-no-outline.
+	const bool bOutlineMode = NCPlusForceModels::OutlineModeActive(GetWorld());
 
 	// Baked fallback: pick the model's baked red (0) or blue (1) skin from the chosen colour — more red
 	// than blue -> red skin, else blue. In Enemy-Only this makes every (non-recolourable) enemy one
@@ -276,6 +282,16 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName))
 		{
 			// Face/eyes/hair: leave UNTOUCHED so they keep the model's own team tint.
+			continue;
+		}
+
+		if (bOutlineMode)
+		{
+			// Outline mode: NEUTRAL body — NoTeam path (255) with NO team-colour blend, so both teams look
+			// the same and the LOS outline is the SOLE team indicator (not red/blue). TeamBlendMax 0 keeps
+			// the model's base albedo un-tinted. (Exact neutral look is model-dependent.)
+			MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
+			MID->SetScalarParameterValue(NAME_TeamBlendMax, 0.f);
 			continue;
 		}
 
@@ -396,6 +412,27 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	const bool bDarken = (C.bEnabled && C.bDarkenBodies);
 
+	FString Val;
+	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// F5 "Show Ragdoll" ([InstagibCTF] bShowRagdoll). INTENDED consumer = the BP instagib DAMAGE TYPE
+	// (it reads these keys and drives ragdoll time for instagib kills) — which by construction only
+	// ever fires in iCTF, so in every other mode the setting did nothing and the only hide path was
+	// ForceModels' DarkenBodies (community: "uncheck force models and you can see dead bodys" /
+	// "ragdoll setting overridden by force models"). This C++ read is the MODE-AGNOSTIC stand-in:
+	// when the key exists (any F5 save writes it) it is AUTHORITATIVE over the Darken fade in both
+	// directions — unticked hides corpses in every mode with FM off, ticked shows them even with
+	// Darken on. Hide-only, so it composes with the BP in iCTF (ShowRagdoll-on defers to the
+	// RagdollTime safety net below = the BP's own cleanup time). Key ABSENT (never saved F5 — e.g. a
+	// dc-TeamSkins migrant) -> Darken keeps its old dc-parity hide role.
+	bool bShowRagdoll = true;
+	bool bShowRagdollExplicit = false;
+	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowRagdoll"), Val, ConfigPath))
+	{
+		bShowRagdoll = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+		bShowRagdollExplicit = true;
+	}
+
 	// iCTF detection: RagdollTime is an iCTF setting (the BP CleanUpRagdoll only runs for the instagib damage
 	// type). ACTFStatsReplicator is present only in NCPlusCTF instagib; absent in ElimPlus etc.
 	bool bIsInstagib = false;
@@ -404,23 +441,31 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
 	}
 
-	// Nothing to do unless DarkenBodies is on (the fade, any mode) OR this is iCTF (the ragdoll-cleanup backup).
-	// Outside both, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
-	if (!bDarken && !bIsInstagib) { return; }
+	// Fade-hide when: Show Ragdoll explicitly unticked (any mode), or — with the key never written —
+	// the legacy DarkenBodies fade. iCTF keeps its ragdoll-cleanup backup regardless. Outside all of
+	// that, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
+	const bool bFadeHide = bShowRagdollExplicit ? !bShowRagdoll : bDarken;
+	if (!bFadeHide && !bIsInstagib) { return; }
 
 	float RagdollTime = 3.0f;
-	FString Val;
-	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("RagdollTime"), Val, ConfigPath))
 	{
 		RagdollTime = FCString::Atof(*Val);
 	}
+	// The menu stores iCTF "Ragdoll Time = 0" (remove instantly) as 0.01 so the BP SetTimer fires.
+	// That sentinel must not leak into the OTHER modes' fade cap — an iCTF "instant" choice would
+	// make bodies vanish frame-one in ElimPlus/Wipeout. Outside iCTF, treat it as the normal fade.
+	if (!bIsInstagib && RagdollTime <= 0.011f)
+	{
+		RagdollTime = 1.0f;
+	}
 
-	// DarkenBodies hides early (~1s death-effects fade, but never longer than the ragdoll lives); otherwise
-	// (iCTF, DarkenBodies off) hide exactly at the ragdoll lifespan so the body still vanishes when the BP
-	// CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules rate<=0). Timer is bound to this actor, so
-	// it auto-clears if the corpse is destroyed/cleaned up sooner (gib, respawn, DeathCleanupTimer).
-	const float HideDelay = FMath::Max(0.01f, bDarken ? FMath::Min(1.0f, RagdollTime) : RagdollTime);
+	// The fade paths (Show-Ragdoll-off / legacy DarkenBodies) hide early (~1s death-effects fade, but never
+	// longer than the ragdoll lives); otherwise (iCTF, no fade) hide exactly at the ragdoll lifespan so the
+	// body still vanishes when the BP CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules
+	// rate<=0). Timer is bound to this actor, so it auto-clears if the corpse is destroyed/cleaned up
+	// sooner (gib, respawn, DeathCleanupTimer).
+	const float HideDelay = FMath::Max(0.01f, bFadeHide ? FMath::Min(1.0f, RagdollTime) : RagdollTime);
 	FTimerHandle TempHandle;
 	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, HideDelay, false);
 }
@@ -488,7 +533,7 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn() || !OverlayMesh) { return; }  // skip MY pawn (offline-safe)
 
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
-	if (!C.bEnabled || !C.bArmour) { return; }
+	if (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(GetWorld())) { return; }   // Outline mode: leave stock armour (no super-tint)
 
 	const int32 MyTeam = (int32)GetTeamNum();
 	if (MyTeam == 255) { return; }                                  // FFA: deferred
@@ -1206,7 +1251,9 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	{
 		FLinearColor SkinCol = GetTeamColor();
 		bool bForcedSkin = false;
-		if (NCPlusForceModels::IsEnabled())
+		// Outline mode: don't re-tint the shield/armour overlay to the skin colour — leave it stock.
+		// Cached gate: this runs per pawn per frame; the full check is refreshed once per frame.
+		if (NCPlusForceModels::IsEnabled() && !NCPlusForceModels::OutlineModeActiveCached())
 		{
 			const int32 MyTeam = (int32)GetTeamNum();
 			if (MyTeam != 255)

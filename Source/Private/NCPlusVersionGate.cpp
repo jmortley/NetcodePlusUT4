@@ -29,6 +29,16 @@ static const float kVersionReportTimeoutMax     = 120.f;
 // handshake to land and cancel the kick.
 static const float kKickGraceSec = 5.f;
 
+// Poll cadence for the "has the owner ever moved?" latch (OnMoveWatch). Cheap (a couple
+// casts + a float read). The first time the owner's pawn has moved we confirm + destroy,
+// so a legit client is cleared within ~this long of its first move — long before any kick.
+static const float kMoveWatchIntervalSec = 2.f;
+
+// When the owner is pawnless BY DESIGN at a deadline (pure spectator, or a round-based
+// player currently eliminated), don't kick — re-check this many seconds later. The latch
+// confirms them if/when they spawn and move; a permanent spectator just keeps deferring.
+static const float kPawnlessDeferSec = 30.f;
+
 // Resolve the timeout from Mod.ini [NetcodePlus] VersionReportTimeoutSec, falling
 // back to the default if the file/section/key is missing or out of range. Cheap
 // enough to call per spawn — gives admins same-process live-ish control (each new
@@ -69,15 +79,20 @@ static FString ResolveOwnerName(AActor* Gate)
 }
 
 // Corroborating "this client is really here and functional" signal for the no-report
-// kick. The server sets CurrentServerMoveTime to the client's timestamp every time it
-// processes a movement update from that client's pawn (UUTCharacterMovement::
-// MoveAutonomous); it stays 0 until the first one arrives. Every NCPlus mode spawns
-// ATeamArenaCharacter (a NetcodePlus class) as the player pawn, so a plugin-LESS client
-// can't load its own pawn, never runs client movement prediction, and never sends a
-// UTServerMove → CurrentServerMoveTime is still 0 at the deadline. A client that IS
-// moving therefore loaded the NCPlus pawn class, i.e. has the plugin — its missing
-// version report is a lost/failed handshake, NOT a missing plugin. Guard the kick on
-// this so we never boot a legit player whose reliable RPC didn't land in the window.
+// kick. On the server, UUTCharacterMovement::CurrentServerMoveTime is set to the client's
+// timestamp when a client movement update is processed (MoveAutonomous,
+// UTCharMovementReplication.cpp) and is 0 until the first one arrives. (Two other
+// server-authored writers exist in UTCharacterMovement::TickComponent — one writes a large
+// positive value — but both are gated on IsLocallyControlled/bRunPhysicsWithNoController,
+// never true for the remote, possessed, non-local pawn this reads; bots/local PCs, which
+// CAN hit them, are gate-exempt in SpawnFor. So they can't false-positive here.) The
+// intended player pawn is a NetcodePlus class (ATeamArenaCharacter) a plugin-LESS client
+// can't load, so it never gets a controllable pawn, never sends a UTServerMove, and stays
+// at 0 — while a moving client demonstrably loaded that class, i.e. has the plugin (its
+// missing report is a lost handshake). ⚠️ the pawn type is BP-supplied (the gametype's
+// DefaultPawnClass), NOT enforced in C++ — if a deployed mode used a stock, plugin-loadable
+// pawn this inference would break. Guard the kick on this so we never boot a legit player
+// whose reliable RPC didn't land in the window.
 static bool OwnerClientHasMoved(AActor* Gate)
 {
 	APlayerController* PC = Gate ? Cast<APlayerController>(Gate->GetOwner()) : nullptr;
@@ -85,6 +100,18 @@ static bool OwnerClientHasMoved(AActor* Gate)
 	UUTCharacterMovement* Move =
 		Pawn ? Cast<UUTCharacterMovement>(Pawn->GetMovementComponent()) : nullptr;
 	return Move != nullptr && Move->CurrentServerMoveTime > 0.f;
+}
+
+// True when the owner is pawnless BY DESIGN — a pure spectator, or a round-based player
+// currently eliminated (bOutOfLives) and so pawnless for the rest of the round. The
+// movement guard can't see these clients, so we DON'T kick them: we defer + re-check (the
+// MoveWatch latch confirms them if/when they later spawn and move). A genuine version
+// MISMATCH (a real report with the wrong number) still kicks immediately regardless.
+static bool OwnerIsPawnlessByDesign(AActor* Gate)
+{
+	APlayerController* PC = Gate ? Cast<APlayerController>(Gate->GetOwner()) : nullptr;
+	AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+	return PS != nullptr && (PS->bOnlySpectator || PS->bOutOfLives);
 }
 
 // Push a system chat line to every player on the server. ClientSay is base-UT
@@ -133,21 +160,28 @@ void ANCVersionGate::BeginPlay()
 		// kick-reason screen (GuaranteedKick → ClientWasKicked → viewport KickReason) is
 		// NOT HUD-gated, so it renders + names netcodeplus.com.
 		//
-		// Two safeties make this safe to run (the BARE timeout kick is why 9159128
-		// disabled it — a lossy legit joiner got instance-banned): (1) KickOwner routes
-		// through non-banning GuaranteedKick, never GameSession->KickPlayer, so a mistaken
-		// kick is rejoinable, not a ban; (2) the OwnerClientHasMoved guard in OnTimeout/
-		// OnKickDeadline stands down on any client whose pawn has sent moves — that client
-		// loaded the NCPlus pawn class (ATeamArenaCharacter) so it demonstrably has the
-		// plugin, i.e. its missing report is a lost handshake, not a missing plugin.
-		// Default 100s grace, Mod.ini VersionReportTimeoutSec (the movement guard also
-		// makes a shorter value safe).
+		// Safe to run (the BARE timeout kick is why 9159128 disabled it — a lossy legit
+		// joiner got instance-banned): (1) KickOwner routes through non-banning
+		// GuaranteedKick, never GameSession->KickPlayer, so a mistaken kick is rejoinable,
+		// not a ban; (2) OwnerClientHasMoved stands down any client whose pawn has sent
+		// moves (loaded the NCPlus pawn ⇒ has the plugin — a lost handshake, not a missing
+		// plugin); (3) a MoveWatch latch (armed below) confirms + destroys the gate the
+		// FIRST time the owner ever moves, so a legit client that later goes pawnless
+		// (respawn, eliminated for a round) can't be re-exposed to the kick; and (4)
+		// OnTimeout/OnKickDeadline DEFER rather than kick a pawnless-by-design owner
+		// (spectator / bOutOfLives). ⚠️ (2)/(3) assume the gametype's DefaultPawnClass is
+		// the NCPlus pawn (ATeamArenaCharacter) — BP-supplied, not enforced here. Default
+		// 100s grace, Mod.ini VersionReportTimeoutSec.
 		TimeoutSec = ResolveVersionReportTimeoutSec();
 		if (UWorld* W = GetWorld())
 		{
 			W->GetTimerManager().SetTimer(
 				TimeoutHandle, this, &ANCVersionGate::OnTimeout,
 				TimeoutSec, /*bLoop*/ false);
+			// Latch: confirm + destroy the moment the owner ever moves (see class comment).
+			W->GetTimerManager().SetTimer(
+				MoveWatchHandle, this, &ANCVersionGate::OnMoveWatch,
+				kMoveWatchIntervalSec, /*bLoop*/ true);
 		}
 	}
 }
@@ -184,6 +218,7 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 		{
 			W->GetTimerManager().ClearTimer(TimeoutHandle);
 			W->GetTimerManager().ClearTimer(KickHandle);   // cancel a pending grace-kick if they reported late
+			W->GetTimerManager().ClearTimer(MoveWatchHandle);
 		}
 		// Job done — drop the actor so it doesn't linger in the per-player
 		// relevancy set for the rest of the match.
@@ -219,6 +254,23 @@ void ANCVersionGate::OnTimeout()
 			TimeoutSec, *ResolveOwnerName(this));
 		bConfirmed = true;
 		Destroy();
+		return;
+	}
+
+	// Pawnless BY DESIGN (pure spectator, or eliminated this round) → the movement guard
+	// can't see them; don't accuse/kick — defer and re-check (the MoveWatch latch confirms
+	// them if/when they spawn and move; a permanent spectator just keeps deferring).
+	if (OwnerIsPawnlessByDesign(this))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[NCPlusVersionGate] %s is pawnless by design (spectator/eliminated) — deferring the plugin check %.0fs."),
+			*ResolveOwnerName(this), kPawnlessDeferSec);
+		if (UWorld* W = GetWorld())
+		{
+			W->GetTimerManager().SetTimer(
+				TimeoutHandle, this, &ANCVersionGate::OnTimeout,
+				kPawnlessDeferSec, /*bLoop*/ false);
+		}
 		return;
 	}
 
@@ -262,6 +314,23 @@ void ANCVersionGate::OnKickDeadline()
 		Destroy();
 		return;
 	}
+
+	// Pawnless by design at the final beat (they may have died / gone to spectate during
+	// the grace) → defer, don't kick a legit spectator or eliminated round player.
+	if (OwnerIsPawnlessByDesign(this))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[NCPlusVersionGate] %s pawnless by design at the kick deadline — deferring %.0fs instead of kicking."),
+			*ResolveOwnerName(this), kPawnlessDeferSec);
+		if (UWorld* W = GetWorld())
+		{
+			W->GetTimerManager().SetTimer(
+				KickHandle, this, &ANCVersionGate::OnKickDeadline,
+				kPawnlessDeferSec, /*bLoop*/ false);
+		}
+		return;
+	}
+
 	bConfirmed = true;
 	UE_LOG(LogGameMode, Warning,
 		TEXT("[NCPlusVersionGate] kicking %s — no NetcodePlus plugin (server v%d)."),
@@ -269,6 +338,27 @@ void ANCVersionGate::OnKickDeadline()
 	KickOwner(FString::Printf(
 		TEXT("NetcodePlus plugin required (server v%d) — not detected. Get the launcher at netcodeplus.com, install/update, then rejoin."),
 		NETCODE_PLUGIN_VERSION));
+}
+
+// Latch: once the owner's pawn has ever moved, they demonstrably loaded the NCPlus pawn
+// (⇒ have the plugin), so confirm + destroy immediately. Closes the point-sampling hole
+// in OnTimeout/OnKickDeadline (which only look at the two deadline instants, and
+// CurrentServerMoveTime doesn't persist across pawns): a legit client is cleared within
+// ~kMoveWatchIntervalSec of its first move and can never be re-judged while pawnless.
+void ANCVersionGate::OnMoveWatch()
+{
+	if (Role != ROLE_Authority || bConfirmed)
+	{
+		return;
+	}
+	if (OwnerClientHasMoved(this))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[NCPlusVersionGate] %s has moved — plugin confirmed via movement, standing down (latched)."),
+			*ResolveOwnerName(this));
+		bConfirmed = true;
+		Destroy();   // Destroy() invalidates our Timeout/Kick/MoveWatch timers.
+	}
 }
 
 void ANCVersionGate::KickOwner(const FString& Reason)
