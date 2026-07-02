@@ -204,13 +204,14 @@ void NCPlusForceModels::Reload()
 
 	// Seed usable Red/Blue side colours. The Red/Blue style takes S/V/Glow from these sides, but
 	// nothing ever seeded them — fresh configs sat at the struct defaults (H=0 S=1 V=1 Glow=1), so
-	// the style rendered flat pure-hue colours: no albedo overbright (the dc-parity norm the
-	// TeamSkins migration seeds is Glow=3) and a near-black pure blue (linear (0,0,1) ~7% luma vs
-	// red's ~21%) — community "brightness is busted on red/blue" (2026-06-30). A PRISTINE side ==
-	// exactly the untouched defaults; that also heals configs that already SAVED those defaults
-	// (indistinguishable, and nobody plausibly wants zero-overbright pure-red "Blue"). Blue seeds
-	// S=0.9 (≈ stock BLUEHUDCOLOR) to close the red-vs-blue luminance gap. A user-edited side is
-	// never touched.
+	// the style rendered flat pure-hue colours incl. a near-black pure blue (linear (0,0,1) ~7%
+	// luma vs red's ~21%) — community "brightness is busted on red/blue" (2026-06-30). A PRISTINE
+	// side == exactly the untouched defaults; that also heals configs that already SAVED those
+	// defaults (indistinguishable, and nobody plausibly wants zero-overbright pure-red "Blue").
+	// Blue seeds S=0.9 (≈ stock BLUEHUDCOLOR) to close the red-vs-blue luminance gap. Glow 1.5 —
+	// NOT dc's 3.0: dc ran x3 over DESATURATED colours (S/V ≈ 0.4); on near-pure hues x3 is
+	// radioactive (user-verified "way too strong" 2026-07-01). A user-edited side is never touched;
+	// the F5 Red/Blue rows are live for taste-tuning.
 	{
 		auto SeedRedBlueSide = [](FNCPlusModelSettings& Side, float SeedH, float SeedS)
 		{
@@ -219,7 +220,7 @@ void NCPlusForceModels::Reload()
 			if (!bPristine) { return; }
 			Side.H = SeedH;
 			Side.S = SeedS;
-			Side.Brightness = 3.0f;   // dc-parity overbright (same constant as MigrateOneSide)
+			Side.Brightness = 1.5f;
 		};
 		SeedRedBlueSide(C.Red,  0.f,   1.0f);
 		SeedRedBlueSide(C.Blue, 240.f, 0.9f);
