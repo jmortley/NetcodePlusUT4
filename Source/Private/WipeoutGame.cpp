@@ -1,6 +1,7 @@
 #include "WipeoutGame.h"
 #include "NCHybridSpawnGenerator.h"
 #include "NCPlusVersionGate.h"
+#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -405,6 +406,8 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 
 	// Server-only: pull this player's rating from Mods.db into the cache so it's
 	// ready before the first round ends. Late joiners arriving mid-match also

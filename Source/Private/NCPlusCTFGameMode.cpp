@@ -29,6 +29,7 @@
 #include "NCPlusCTFHUD.h"
 #include "WarmupRoamMutator.h"
 #include "NCPlusVersionGate.h"
+#include "NCConcedeVote.h"
 #include "CTFStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "NCPlusCTFOTInfo.h"
@@ -234,6 +235,8 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 	// that fires at match start (which let them roam the map during warmup,
 	// breaking PUGs when they got kicked at go-time). Skips bots + listen host.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 
 	if (!HasAuthority() || !NewPlayer) return;
 
