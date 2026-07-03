@@ -230,7 +230,7 @@ Hubs use these tables as the local source of truth. A parallel push to ut4stats.
 
 NetcodePlus is a C++ plugin. To rebuild:
 
-1. Have UT4's editor build set up (Visual Studio 2017 / Linux toolchain)
+1. Have UT4's editor build set up (Visual Studio 2022 — VS2017 also works — plus the Linux toolchain for server builds)
 2. Right-click `UnrealTournament.uproject` → Generate Visual Studio project files
 3. Build `UnrealTournamentEditor` from VS for development, `UnrealTournament` for shipping
 4. For dedicated server: build `UnrealTournamentServer-Linux-Shipping` or `-Win64-Shipping`

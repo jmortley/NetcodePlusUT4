@@ -98,7 +98,7 @@ client, server).
   build any of the C++ — the plugin links against UT4's game modules. Getting set up isn't
   something we can document publicly yet; **ask the maintainer and they'll help you get
   access and a working tree.**
-- **Visual Studio 2017** (Windows).
+- **Visual Studio 2022** (Windows). VS2017 also builds this UE4.15 tree if that's what you have.
 - For the **Linux dedicated-server `.so`**: the UE4 Linux cross-toolchain (clang 3.9.0 /
   centos7) with the `LINUX_MULTIARCH_ROOT` environment variable pointing at it
   (e.g. `C:\UnrealToolchains\v8_clang-3.9.0-centos7\`). This cross-compiles the Linux
