@@ -23,6 +23,7 @@
 #include "NCPlusCTFHUD.h"
 #include "ShockDomHUD.h"
 #include "NCPlusForceModels.h"
+#include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
 
 // -ncpconnect launcher direct-connect support
 #include "Containers/Ticker.h"
@@ -876,6 +877,16 @@ void FNetcodePlus::StartupModule()
 			FTickerDelegate::CreateStatic(&TickMenuCloseRescue), 0.0f);
 	}
 
+	// Hub advisor: on dedicated servers, auto-spawn the version gate in ADVISOR
+	// mode (private whisper, never kick) for every lobby joiner — the hub is the
+	// one place a plugin-less client still has working chat/UI to be told
+	// anything. Instances keep the kick-mode gate spawned from each NCPlus
+	// gamemode's PostLogin; the event handler filters on IsLobbyServer().
+	if (IsRunningDedicatedServer())
+	{
+		NCPlusVersionGate::RegisterHubAdvisor();
+	}
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
@@ -901,6 +912,9 @@ void FNetcodePlus::ShutdownModule()
 		FTicker::GetCoreTicker().RemoveTicker(GMenuRescueTickerHandle);
 		GMenuRescueTickerHandle.Reset();
 	}
+
+	// Unbind the hub-advisor PostLogin hook (no-op if never registered).
+	NCPlusVersionGate::UnregisterHubAdvisor();
 
 	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())

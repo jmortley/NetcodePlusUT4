@@ -2,9 +2,11 @@
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "UTPlayerController.h"
-#include "UTBasePlayerController.h"   // ClientSay
-#include "UTATypes.h"                 // ChatDestinations
+#include "UTBasePlayerController.h"   // GuaranteedKick, ClientSay
+#include "UTATypes.h"                 // ChatDestinations (advisor whisper)
+#include "UTBaseGameMode.h"           // IsLobbyServer (hub advisor auto-spawn)
 #include "UTPlayerState.h"
+#include "GameFramework/GameModeBase.h" // FGameModeEvents::GameModePostLoginEvent
 #include "UTCharacterMovement.h"      // CurrentServerMoveTime — server-side "client has moved" proof
 #include "GameFramework/Pawn.h"
 #include "GameFramework/GameSession.h"
@@ -24,9 +26,13 @@ static const float kVersionReportTimeoutDefault = 100.f;
 static const float kVersionReportTimeoutMin     =   1.f;
 static const float kVersionReportTimeoutMax     = 120.f;
 
-// After the no-report deadline we announce to the whole server, then kick this
-// many seconds later — context for everyone + a final beat for a very-late
-// handshake to land and cancel the kick.
+// After the no-report deadline, kick this many seconds later — a final beat for
+// a very-late handshake to land and cancel the kick. (No public announcement:
+// the plugin-less owner can't see chat anyway — their HUD class doesn't load,
+// so ClientReceiveChat drops every line — and announcing to bystanders produced
+// false "missing plugin" accusations for legit players whose handshake was lost
+// and who simply hadn't moved yet, 2026-07-03 reports. The kick-reason screen
+// carries the actionable message to the one player who needs it.)
 static const float kKickGraceSec = 5.f;
 
 // Poll cadence for the "has the owner ever moved?" latch (OnMoveWatch). Cheap (a couple
@@ -38,6 +44,14 @@ static const float kMoveWatchIntervalSec = 2.f;
 // player currently eliminated), don't kick — re-check this many seconds later. The latch
 // confirms them if/when they spawn and move; a permanent spectator just keeps deferring.
 static const float kPawnlessDeferSec = 30.f;
+
+// ADVISOR MODE (hubs) cadence. First check is generous — the handshake normally
+// lands within seconds, and a whisper (unlike a kick) tolerates the rare lost
+// handshake, so no movement corroboration exists or is needed on a pawnless hub.
+// Then nag slowly while unconfirmed; each ServerReportVersion match still
+// confirms + destroys instantly, at any time.
+static const float kAdvisorFirstCheckSec = 60.f;
+static const float kAdvisorRepeatSec     = 180.f;
 
 // Resolve the timeout from Mod.ini [NetcodePlus] VersionReportTimeoutSec, falling
 // back to the default if the file/section/key is missing or out of range. Cheap
@@ -114,27 +128,11 @@ static bool OwnerIsPawnlessByDesign(AActor* Gate)
 	return PS != nullptr && (PS->bOnlySpectator || PS->bOutOfLives);
 }
 
-// Push a system chat line to every player on the server. ClientSay is base-UT
-// (AUTBasePlayerController), not plugin-gated, so plugin-less clients see it too.
-static void BroadcastSystemMessage(UWorld* W, const FString& Msg)
-{
-	if (!W)
-	{
-		return;
-	}
-	for (FConstPlayerControllerIterator It = W->GetPlayerControllerIterator(); It; ++It)
-	{
-		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
-		if (PC && PC->UTPlayerState)
-		{
-			PC->ClientSay(PC->UTPlayerState, Msg, ChatDestinations::System);
-		}
-	}
-}
-
 ANCVersionGate::ANCVersionGate(const FObjectInitializer& OI)
 	: Super(OI)
+	, bAdvisorMode(false)
 	, bConfirmed(false)
+	, AdvisorNagCount(0)
 	, TimeoutSec(kVersionReportTimeoutDefault)
 {
 	bReplicates = true;
@@ -153,6 +151,18 @@ void ANCVersionGate::BeginPlay()
 	// as soon as the actor is fully replicated + owner-resolved.
 	if (Role == ROLE_Authority)
 	{
+		// ADVISOR MODE (hubs): whisper, never kick. No MoveWatch — hub players are
+		// pawnless, and with no kick at stake the movement corroboration is moot.
+		if (bAdvisorMode)
+		{
+			if (UWorld* W = GetWorld())
+			{
+				W->GetTimerManager().SetTimer(
+					TimeoutHandle, this, &ANCVersionGate::OnAdvisorCheck,
+					kAdvisorFirstCheckSec, /*bLoop*/ false);
+			}
+			return;
+		}
 		// ARMED 2026-06-29 — the no-reply timeout kick is ON. It's the only channel that
 		// reaches a plugin-less client already inside an NCPlus instance: their HUD is an
 		// NCPlus class they can't load, so MyHUD is null/non-AUTHUD and ClientReceiveChat
@@ -226,6 +236,22 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 		return;
 	}
 
+	// Mismatch, advisor mode (hub) — they HAVE a plugin, just the wrong build.
+	// One courtesy whisper (definitive knowledge, no need to nag), then done;
+	// the instance-side gate still enforces on an actual match join.
+	if (bAdvisorMode)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[NCPlusVersionGate] hub advisor: %s reported v%d, server is v%d — whispering update pointer."),
+			*ResolveOwnerName(this), ClientVersion, ServerVersion);
+		WhisperOwner(FString::Printf(
+			TEXT("Your NetcodePlus plugin is v%d — matches on this hub run v%d. Update via the launcher at netcodeplus.com."),
+			ClientVersion, ServerVersion));
+		bConfirmed = true;
+		Destroy();
+		return;
+	}
+
 	// Mismatch — immediate kick. (The no-reply timeout path in OnTimeout also kicks —
 	// armed + movement-guarded; see BeginPlay.)
 	UE_LOG(LogGameMode, Warning,
@@ -275,18 +301,15 @@ void ANCVersionGate::OnTimeout()
 	}
 
 	// No version report within the deadline → the client never handshook, i.e. no
-	// NetcodePlus plugin (or a pre-gate build). Rather than an abrupt kick, announce
-	// it to the whole server for context, then kick kKickGraceSec later. The delay
-	// is also a final beat for a very-late handshake to land — a matching report in
-	// the window clears KickHandle (see ServerReportVersion_Implementation).
+	// NetcodePlus plugin (or a pre-gate build). Kick kKickGraceSec from now — the
+	// delay is a final beat for a very-late handshake to land (a matching report
+	// in the window clears KickHandle, see ServerReportVersion_Implementation)
+	// and OnKickDeadline re-runs the movement/pawnless guards before acting.
+	// Server log only — no in-game announcement (see kKickGraceSec comment).
 	const FString PlayerName = ResolveOwnerName(this);
 	UE_LOG(LogGameMode, Warning,
-		TEXT("[NCPlusVersionGate] no version report within %.0fs: %s missing plugin (server v%d) — announcing + kicking in %.0fs."),
+		TEXT("[NCPlusVersionGate] no version report within %.0fs: %s missing plugin (server v%d) — kicking in %.0fs."),
 		TimeoutSec, *PlayerName, NETCODE_PLUGIN_VERSION, kKickGraceSec);
-
-	BroadcastSystemMessage(GetWorld(), FString::Printf(
-		TEXT("%s does not have the NetcodePlus plugin (server is v%d) — removing in %.0fs. Get the launcher at netcodeplus.com."),
-		*PlayerName, NETCODE_PLUGIN_VERSION, kKickGraceSec));
 
 	if (UWorld* W = GetWorld())
 	{
@@ -361,6 +384,49 @@ void ANCVersionGate::OnMoveWatch()
 	}
 }
 
+// Advisor mode: the no-report check. Whisper the install pointer privately and
+// re-arm at the nag cadence — never kick, never announce to anyone else. A lost
+// handshake on a legit client costs one ignorable whisper (the wording says so);
+// a real plugin-less player gets told while their UI still works (stock lobby
+// HUD renders chat — unlike NCPlus instances, where they're deaf).
+void ANCVersionGate::OnAdvisorCheck()
+{
+	if (Role != ROLE_Authority || bConfirmed)
+	{
+		return;
+	}
+
+	if (AdvisorNagCount == 0)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[NCPlusVersionGate] hub advisor: no version report from %s within %.0fs — whispering install pointer (nagging every %.0fs while unconfirmed)."),
+			*ResolveOwnerName(this), kAdvisorFirstCheckSec, kAdvisorRepeatSec);
+	}
+	AdvisorNagCount++;
+
+	WhisperOwner(TEXT("Matches on this hub require the NetcodePlus plugin — grab the launcher at netcodeplus.com (already installed? ignore this)."));
+
+	if (UWorld* W = GetWorld())
+	{
+		W->GetTimerManager().SetTimer(
+			TimeoutHandle, this, &ANCVersionGate::OnAdvisorCheck,
+			kAdvisorRepeatSec, /*bLoop*/ false);
+	}
+}
+
+// Private system-chat line to the owning player only. ClientSay is base-UT
+// (AUTBasePlayerController) so it isn't plugin-gated, and on a hub the stock
+// lobby HUD renders it even for plugin-less clients. Speaker = the recipient's
+// own PlayerState (same pattern the rest of the codebase uses for system lines).
+void ANCVersionGate::WhisperOwner(const FString& Msg)
+{
+	AUTBasePlayerController* PC = Cast<AUTBasePlayerController>(GetOwner());
+	if (PC && PC->UTPlayerState)
+	{
+		PC->ClientSay(PC->UTPlayerState, Msg, ChatDestinations::System);
+	}
+}
+
 void ANCVersionGate::KickOwner(const FString& Reason)
 {
 	// Non-banning disconnect WITH a visible reason. GameSession->KickPlayer adds the
@@ -380,33 +446,85 @@ void ANCVersionGate::KickOwner(const FString& Reason)
 
 namespace NCPlusVersionGate
 {
-	void SpawnFor(APlayerController* PC)
+	// Shared eligibility check for both modes. Bots have no client — nothing to
+	// handshake with. The listen-host's local PC also has no remote: replicating
+	// an owner-only actor to a local PC works, but it's churn for no win since
+	// the host obviously has a matching version (same DLL load).
+	static bool ShouldGate(APlayerController* PC)
 	{
-		if (PC == nullptr || !PC->HasAuthority())
+		if (PC == nullptr || !PC->HasAuthority() || PC->IsLocalController())
 		{
-			return;
+			return false;
 		}
-		// Bots have no client — nothing to handshake with. The listen-host's
-		// local PC also has no remote: replicating an owner-only actor to a
-		// local PC works, but it's churn for no win since the host obviously
-		// has a matching version (same DLL load).
 		AUTPlayerController* UTPC = Cast<AUTPlayerController>(PC);
 		if (UTPC && UTPC->UTPlayerState && UTPC->UTPlayerState->bIsABot)
 		{
-			return;
+			return false;
 		}
-		if (PC->IsLocalController())
-		{
-			return;
-		}
-		UWorld* W = PC->GetWorld();
-		if (W == nullptr)
+		return PC->GetWorld() != nullptr;
+	}
+
+	void SpawnFor(APlayerController* PC)
+	{
+		if (!ShouldGate(PC))
 		{
 			return;
 		}
 		FActorSpawnParameters Params;
 		Params.Owner = PC;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		W->SpawnActor<ANCVersionGate>(ANCVersionGate::StaticClass(), Params);
+		PC->GetWorld()->SpawnActor<ANCVersionGate>(ANCVersionGate::StaticClass(), Params);
+	}
+
+	void SpawnAdvisorFor(APlayerController* PC)
+	{
+		if (!ShouldGate(PC))
+		{
+			return;
+		}
+		// Deferred spawn so bAdvisorMode is set BEFORE BeginPlay picks the timer set.
+		ANCVersionGate* Gate = PC->GetWorld()->SpawnActorDeferred<ANCVersionGate>(
+			ANCVersionGate::StaticClass(), FTransform::Identity,
+			/*Owner*/ PC, /*Instigator*/ nullptr,
+			ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (Gate)
+		{
+			Gate->bAdvisorMode = true;
+			Gate->FinishSpawning(FTransform::Identity);
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Hub auto-spawn: the stock lobby gamemode obviously never calls SpawnFor,
+	// so hook the engine-level PostLogin event (fires for EVERY gamemode,
+	// GameModeBase.cpp) and filter to lobby servers. This reaches hubs with
+	// zero hub-side config: loading the plugin DLL is enough.
+	// -----------------------------------------------------------------------
+	static FDelegateHandle GHubAdvisorHandle;
+
+	static void OnAnyGameModePostLogin(AGameModeBase* GameMode, APlayerController* NewPlayer)
+	{
+		AUTBaseGameMode* Base = Cast<AUTBaseGameMode>(GameMode);
+		if (Base && Base->IsLobbyServer())
+		{
+			SpawnAdvisorFor(NewPlayer);
+		}
+	}
+
+	void RegisterHubAdvisor()
+	{
+		if (!GHubAdvisorHandle.IsValid())
+		{
+			GHubAdvisorHandle = FGameModeEvents::GameModePostLoginEvent.AddStatic(&OnAnyGameModePostLogin);
+		}
+	}
+
+	void UnregisterHubAdvisor()
+	{
+		if (GHubAdvisorHandle.IsValid())
+		{
+			FGameModeEvents::GameModePostLoginEvent.Remove(GHubAdvisorHandle);
+			GHubAdvisorHandle.Reset();
+		}
 	}
 }
