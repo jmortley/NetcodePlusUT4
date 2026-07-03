@@ -918,12 +918,21 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			FontRenderScale, FontRenderScale, TextRenderInfo);
 	}
 
-	// Layer 6: Teammate HP/Armor numbers (alive teammates only, not self).
+	// Layer 6: HP/Armor numbers — alive teammates (not self). ALSO revealed on
+	// enemy pips once the round is over (the strip only draws in
+	// InProgress/RoundCooldown, so != InProgress IS the round-win window — the
+	// winners' final health should be readable), and at ALL times for TRUE
+	// spectators (bOnlySpectator; deliberately NOT bOutOfLives — a dead player
+	// must not gain live enemy info mid-round).
 	// PipFontExtra is the user's FontSz multiplier — the headline 4K legibility knob.
 	if (LiveScaling >= 1.f && UTPlayerOwner)
 	{
 		AUTPlayerState* MyPS = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
-		if (MyPS && MyPS != PlayerState && MyPS->GetTeamNum() == PlayerState->GetTeamNum())
+		AUTGameState* MatchGS = GetWorld()->GetGameState<AUTGameState>();
+		const bool bSameTeam  = MyPS && MyPS->GetTeamNum() == PlayerState->GetTeamNum();
+		const bool bRoundOver = MatchGS && MatchGS->GetMatchState() != MatchState::InProgress;
+		const bool bTrueSpec  = MyPS && MyPS->bOnlySpectator;
+		if (MyPS && MyPS != PlayerState && (bSameTeam || bRoundOver || bTrueSpec))
 		{
 			AUTCharacter* UTC = PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())

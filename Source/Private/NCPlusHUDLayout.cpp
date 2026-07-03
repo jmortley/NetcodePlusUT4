@@ -1085,10 +1085,13 @@ namespace NCPlusHUDDrawCall
 	// =============================================================================
 	//
 	// Red row then blue row of slanted, team-colored plates. Teammate plates show
-	// name + "+HP  armor"; enemy plates show the name only (no live enemy HP). Dead
-	// players are skipped so the row reflows — plate count = alive count. Same data
-	// source as the portrait strip (teammate Health/GetArmorAmount); only the look
-	// differs. Honors the `team_panel` alias (position / scale / opacity / hide).
+	// name + "+HP  armor"; enemy plates show the name only (no live enemy HP) —
+	// EXCEPT once the round is over (reveal the winners' final health) and for
+	// TRUE spectators (bOnlySpectator), who see both teams' vitals at all times.
+	// Dead players are skipped so the row reflows — plate count = alive count.
+	// Same data source as the portrait strip (teammate Health/GetArmorAmount);
+	// only the look differs. Honors the `team_panel` alias (position / scale /
+	// opacity / hide).
 	void DrawStockTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
 	{
 		if (HUD == nullptr || Canvas == nullptr) return;
@@ -1109,12 +1112,19 @@ namespace NCPlusHUDDrawCall
 		if (!NameFont) return;
 
 		// Local viewer's team — teammates get an HP/armor readout, enemies name-only.
+		// Vitals are revealed for EVERYONE when the round is over (this panel only
+		// draws in InProgress/RoundCooldown, so != InProgress IS the round-win
+		// window — show the winners' final health) and for TRUE spectators
+		// (bOnlySpectator; deliberately NOT bOutOfLives — a dead player must not
+		// gain live enemy info mid-round).
 		uint8 MyTeam = 255;
+		bool  bRevealAllVitals = (GS->GetMatchState() != MatchState::InProgress);
 		if (HUD->UTPlayerOwner)
 		{
 			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
 			{
 				MyTeam = MyPS->GetTeamNum();
+				bRevealAllVitals |= MyPS->bOnlySpectator;
 			}
 		}
 
@@ -1248,9 +1258,9 @@ namespace NCPlusHUDDrawCall
 					FVector2D(x + Skew + PlateW, RowY + 2.f * S), FVector2D(x + Skew, RowY + 2.f * S), EdgeCol);
 
 				const float CenterX  = x + Skew * 0.5f + PlateW * 0.5f;
-				const bool  bTeammate = (TeamIdx == MyTeam);
+				const bool  bShowVitals = (TeamIdx == MyTeam) || bRevealAllVitals;
 
-				if (bTeammate)
+				if (bShowVitals)
 				{
 					// Name on top, HP/armor below.
 					const FString Name = Fit(NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale);
