@@ -61,7 +61,7 @@ struct FElimPlusBalanceInput
 
 	/** When >= 0, balance on THIS value instead of the cached Glicko rating —
 	 *  the balancer only compares strength sums, so any uniform scale works.
-	 *  Used by the 5-0 mid-game shuffle (current-match PPR x100). Default -1
+	 *  Used by the 6-0 mid-game shuffle (current-match PPR x100). Default -1
 	 *  keeps the Glicko path byte-identical for all existing callers. */
 	float StrengthOverride = -1.f;
 };

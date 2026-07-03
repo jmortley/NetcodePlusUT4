@@ -351,9 +351,9 @@ public:
 	 *  watch the shuffle on the auto-shown scoreboard during the countdown. */
 	void RebalanceTeamsForMatchStart();
 
-	/** 5-0 blowout shuffle (publics): re-split BOTH teams by CURRENT-match PPR
+	/** 6-0 blowout shuffle (publics): re-split BOTH teams by CURRENT-match PPR
 	 *  — who is performing THIS match — rather than the lifetime Glicko that
-	 *  just produced the 5-0. Armed by EndRoundForTeam, consumed at the next
+	 *  just produced the 6-0. Armed by EndRoundForTeam, consumed at the next
 	 *  StartNextRound before anything spawns (silent moves, same rationale as
 	 *  the pre-match rebalance). Scores are NOT reset. */
 	void MidGameShufflePPR();
@@ -484,11 +484,11 @@ protected:
 	 *  InitGame. Uneven-team health scaling is gated to NON-PUG games only. */
 	bool bIsPugMatch = false;
 
-	/** 5-0 blowout mid-game shuffle (non-PUG, requires ?BalanceTeams): default
+	/** 6-0 blowout mid-game shuffle (non-PUG, requires ?BalanceTeams): default
 	 *  ON; Mod.ini [NetcodePlus] ElimMidGameShuffle=false disables. See
 	 *  MidGameShufflePPR. */
 	bool bElimMidGameShuffle = true;
-	/** Armed by EndRoundForTeam when the score reaches exactly 5-0; consumed at
+	/** Armed by EndRoundForTeam when the score reaches exactly 6-0; consumed at
 	 *  the next StartNextRound. Fires at most once per match (bDidMidGameShuffle). */
 	UPROPERTY(Transient)
 	bool bPendingMidGameShuffle = false;

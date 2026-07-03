@@ -217,7 +217,7 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthScaling"), bElimUnevenHealthScaling, ModIni);
 		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthPct"), ElimUnevenHealthPct, ModIni);
 
-		// 5-0 blowout mid-game PPR shuffle (default: on; non-PUG + ?BalanceTeams only).
+		// 6-0 blowout mid-game PPR shuffle (default: on; non-PUG + ?BalanceTeams only).
 		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimMidGameShuffle"), bElimMidGameShuffle, ModIni);
 
 		// Anti-camp (defaults: on, threshold 400u, check 1.0s, cooldown 5.0s).
@@ -946,7 +946,7 @@ void AElimPlusGame::StartNextRound()
 		UE_LOG(LogGameMode, Warning, TEXT("Disabled team announcements for subsequent rounds"));
 	}
 
-	// 5-0 blowout shuffle (armed by EndRoundForTeam): re-split on current-match
+	// 6-0 blowout shuffle (armed by EndRoundForTeam): re-split on current-match
 	// PPR before anything spawns for this round — the same pre-spawn silence
 	// rationale as the pre-match rebalance. Once per match.
 	if (bPendingMidGameShuffle)
@@ -1262,8 +1262,8 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 			UE_LOG(LogGameMode, Warning, TEXT("Team %d wins! New score: %d"), WinnerTeamIndex, Teams[WinnerTeamIndex]->Score);
 		}
 
-		// 5-0 blowout → arm the mid-game PPR shuffle for the next round start.
-		// Exactly 5-0 (a match passes through it at most once), publics only,
+		// 6-0 blowout → arm the mid-game PPR shuffle for the next round start.
+		// Exactly 6-0 (a match passes through it at most once), publics only,
 		// once per match, and only when balancing is on at all. The PPR maps
 		// above already include the round that just ended, so the shuffle sees
 		// current form. Applied in StartNextRound, pre-spawn.
@@ -1272,10 +1272,10 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 		{
 			const int32 S0 = static_cast<int32>(Teams[0]->Score);
 			const int32 S1 = static_cast<int32>(Teams[1]->Score);
-			if ((S0 == 5 && S1 == 0) || (S0 == 0 && S1 == 5))
+			if ((S0 == 6 && S1 == 0) || (S0 == 0 && S1 == 6))
 			{
 				bPendingMidGameShuffle = true;
-				UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 detected (%d-%d) — PPR shuffle armed for next round start."), S0, S1);
+				UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 detected (%d-%d) — PPR shuffle armed for next round start."), S0, S1);
 			}
 		}
 	}
@@ -3756,9 +3756,9 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 	}
 }
 
-// 5-0 blowout shuffle. Strength = each player's CURRENT-match mean PPR (the
+// 6-0 blowout shuffle. Strength = each player's CURRENT-match mean PPR (the
 // per-round kills + damage/100 metric the scoreboard shows), NOT lifetime
-// Glicko — the lifetime split is exactly what just produced the 5-0. The
+// Glicko — the lifetime split is exactly what just produced the 6-0. The
 // balancer only compares strength sums, so scale is free; PPR is passed x100
 // to keep the numbers in a familiar range in logs. Bots and no-history
 // joiners (no completed rounds yet) get the human mean — neutral placement
@@ -3767,7 +3767,7 @@ void AElimPlusGame::MidGameShufflePPR()
 {
 	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: bailed (auth=%d, rating=%d, teams=%d)"),
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: bailed (auth=%d, rating=%d, teams=%d)"),
 			HasAuthority() ? 1 : 0, RatingSystem.IsValid() ? 1 : 0, Teams.Num());
 		return;
 	}
@@ -3812,7 +3812,7 @@ void AElimPlusGame::MidGameShufflePPR()
 
 	if (Inputs.Num() < 2)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: skipped (only %d active players)"), Inputs.Num());
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: skipped (only %d active players)"), Inputs.Num());
 		return;
 	}
 
@@ -3830,7 +3830,7 @@ void AElimPlusGame::MidGameShufflePPR()
 	const FElimPlusBalanceResult Result = RatingSystem->ComputeBalancedTeams(Inputs);
 	if (!Result.bValid)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: TeamBalancer returned invalid assignment, skipping"));
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: TeamBalancer returned invalid assignment, skipping"));
 		return;
 	}
 
@@ -3851,7 +3851,7 @@ void AElimPlusGame::MidGameShufflePPR()
 	AssignToTeam(Result.Team0Indices, 0);
 	AssignToTeam(Result.Team1Indices, 1);
 
-	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: %d players, Team0=%d ppr=%.1f, Team1=%d ppr=%.1f, diff=%.1f, moves=%d"),
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: %d players, Team0=%d ppr=%.1f, Team1=%d ppr=%.1f, diff=%.1f, moves=%d"),
 		Inputs.Num(),
 		Result.Team0Indices.Num(), Result.Team0Strength / 100.f,
 		Result.Team1Indices.Num(), Result.Team1Strength / 100.f,
@@ -3874,7 +3874,7 @@ void AElimPlusGame::MidGameShufflePPR()
 		return FString::Printf(TEXT("%s (ppr=%.1f): %s"), Prefix, Strength / 100.f, *Names);
 	};
 
-	const FString Header   = FString::Printf(TEXT("=== 5-0: Teams shuffled by current match performance (PPR) — moves=%d ==="), MovesMade);
+	const FString Header   = FString::Printf(TEXT("=== 6-0: Teams shuffled by current match performance (PPR) — moves=%d ==="), MovesMade);
 	const FString RedLine  = BuildTeamLine(Result.Team0Indices, TEXT("RED  "), Result.Team0Strength);
 	const FString BlueLine = BuildTeamLine(Result.Team1Indices, TEXT("BLUE "), Result.Team1Strength);
 

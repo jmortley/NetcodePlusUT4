@@ -857,7 +857,7 @@ FElimPlusBalanceResult FElimPlusRatingSystem::ComputeBalancedTeams(const TArray<
 		PlayerRating PR;
 		if (Players[i].StrengthOverride >= 0.f)
 		{
-			// Caller supplied an explicit strength (5-0 shuffle: current-match
+			// Caller supplied an explicit strength (6-0 shuffle: current-match
 			// PPR x100). Uniform default RD/sigma so the balancer's top-player
 			// handling ranks purely on the supplied values.
 			PR = PlayerRating(static_cast<double>(Players[i].StrengthOverride), kDefaultRD, kDefaultVolatility);
