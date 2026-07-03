@@ -855,7 +855,14 @@ FElimPlusBalanceResult FElimPlusRatingSystem::ComputeBalancedTeams(const TArray<
 	{
 		const FString& Uid = Players[i].UniqueId;
 		PlayerRating PR;
-		if (PlayerRating* Cached = Impl->RatingCache.Find(Uid))
+		if (Players[i].StrengthOverride >= 0.f)
+		{
+			// Caller supplied an explicit strength (5-0 shuffle: current-match
+			// PPR x100). Uniform default RD/sigma so the balancer's top-player
+			// handling ranks purely on the supplied values.
+			PR = PlayerRating(static_cast<double>(Players[i].StrengthOverride), kDefaultRD, kDefaultVolatility);
+		}
+		else if (PlayerRating* Cached = Impl->RatingCache.Find(Uid))
 		{
 			PR = *Cached;
 		}

@@ -201,6 +201,8 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 	PerPlayerMatchDamage.Empty();
 	bRatingFlushedThisMatch = false;
 	bDidPreMatchRebalance = false;
+	bPendingMidGameShuffle = false;
+	bDidMidGameShuffle = false;
 
 	// Bot PUGs always carry ?PugId (the bot adds it); public/hub games never do.
 	// Uneven-team health scaling is for public games only.
@@ -214,6 +216,9 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 		// Uneven-team health scaling (defaults: on, 5% per missing player).
 		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthScaling"), bElimUnevenHealthScaling, ModIni);
 		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthPct"), ElimUnevenHealthPct, ModIni);
+
+		// 5-0 blowout mid-game PPR shuffle (default: on; non-PUG + ?BalanceTeams only).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimMidGameShuffle"), bElimMidGameShuffle, ModIni);
 
 		// Anti-camp (defaults: on, threshold 400u, check 1.0s, cooldown 5.0s).
 		// ElimCampCheckInterval=0 disables the camp timer (StartCampCheckTimer gate).
@@ -353,6 +358,28 @@ void AElimPlusGame::HandleMatchHasStarted()
 	}
 }
 
+
+void AElimPlusGame::HandlePlayerIntro()
+{
+	Super::HandlePlayerIntro();
+
+	// Rebalance HERE — BEFORE the HUD's pre-match MATCH BALANCE preview
+	// (PlayerIntro/CountdownToBegin) renders its team split — instead of only in
+	// HandleMatchHasStarted, which stock fires on InProgress entry: exactly when
+	// the preview finishes fading. On publics the preview showed the WARMUP
+	// teams, then the balancer reshuffled and the console log disagreed with
+	// what players had just read (phantaci report 2026-07-02; PUGs never showed
+	// it because pinned rosters produce zero moves). Super:: has already removed
+	// the pawns (RemoveAllPawns) and settled the bot fill (RemoveExtraBots/
+	// CheckBotCount), so the moves are exactly as silent as at match start. The
+	// HandleMatchHasStarted call remains as the guarded fallback for any flow
+	// that skips PlayerIntro.
+	if (HasAuthority() && !bDidPreMatchRebalance)
+	{
+		RebalanceTeamsForMatchStart();
+		bDidPreMatchRebalance = true;
+	}
+}
 
 void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 {
@@ -919,6 +946,16 @@ void AElimPlusGame::StartNextRound()
 		UE_LOG(LogGameMode, Warning, TEXT("Disabled team announcements for subsequent rounds"));
 	}
 
+	// 5-0 blowout shuffle (armed by EndRoundForTeam): re-split on current-match
+	// PPR before anything spawns for this round — the same pre-spawn silence
+	// rationale as the pre-match rebalance. Once per match.
+	if (bPendingMidGameShuffle)
+	{
+		bPendingMidGameShuffle = false;
+		bDidMidGameShuffle = true;
+		MidGameShufflePPR();
+	}
+
 	// Reset per-round trackers
 	CamperTracker.Empty();
 	StartCampCheckTimer();
@@ -1223,6 +1260,23 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 			Teams[WinnerTeamIndex]->Score += 1;
 			Teams[WinnerTeamIndex]->ForceNetUpdate();
 			UE_LOG(LogGameMode, Warning, TEXT("Team %d wins! New score: %d"), WinnerTeamIndex, Teams[WinnerTeamIndex]->Score);
+		}
+
+		// 5-0 blowout → arm the mid-game PPR shuffle for the next round start.
+		// Exactly 5-0 (a match passes through it at most once), publics only,
+		// once per match, and only when balancing is on at all. The PPR maps
+		// above already include the round that just ended, so the shuffle sees
+		// current form. Applied in StartNextRound, pre-spawn.
+		if (bElimMidGameShuffle && bBalanceTeams && !bIsPugMatch && !bDidMidGameShuffle
+			&& Teams.IsValidIndex(0) && Teams.IsValidIndex(1) && Teams[0] && Teams[1])
+		{
+			const int32 S0 = static_cast<int32>(Teams[0]->Score);
+			const int32 S1 = static_cast<int32>(Teams[1]->Score);
+			if ((S0 == 5 && S1 == 0) || (S0 == 0 && S1 == 5))
+			{
+				bPendingMidGameShuffle = true;
+				UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 detected (%d-%d) — PPR shuffle armed for next round start."), S0, S1);
+			}
 		}
 	}
 	else
@@ -3685,6 +3739,142 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 
 	const FString Header  = FString::Printf(TEXT("=== ElimPlus Auto-Balance: diff=%.0f, moves=%d ==="),
 	                                        Result.StrengthDifference, MovesMade);
+	const FString RedLine  = BuildTeamLine(Result.Team0Indices, TEXT("RED  "), Result.Team0Strength);
+	const FString BlueLine = BuildTeamLine(Result.Team1Indices, TEXT("BLUE "), Result.Team1Strength);
+
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *Header);
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *RedLine);
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *BlueLine);
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (!PC) continue;
+		PC->ClientMessage(Header);
+		PC->ClientMessage(RedLine);
+		PC->ClientMessage(BlueLine);
+	}
+}
+
+// 5-0 blowout shuffle. Strength = each player's CURRENT-match mean PPR (the
+// per-round kills + damage/100 metric the scoreboard shows), NOT lifetime
+// Glicko — the lifetime split is exactly what just produced the 5-0. The
+// balancer only compares strength sums, so scale is free; PPR is passed x100
+// to keep the numbers in a familiar range in logs. Bots and no-history
+// joiners (no completed rounds yet) get the human mean — neutral placement
+// rather than a scale-breaking default.
+void AElimPlusGame::MidGameShufflePPR()
+{
+	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: bailed (auth=%d, rating=%d, teams=%d)"),
+			HasAuthority() ? 1 : 0, RatingSystem.IsValid() ? 1 : 0, Teams.Num());
+		return;
+	}
+
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	if (!GS) return;
+
+	// Same parallel-array pattern as RebalanceTeamsForMatchStart: TeamBalancer
+	// returns slot indices into Inputs, which map back to ControllersByIndex.
+	TArray<FElimPlusBalanceInput> Inputs;
+	TArray<AController*> ControllersByIndex;
+	Inputs.Reserve(GS->PlayerArray.Num());
+	ControllersByIndex.Reserve(GS->PlayerArray.Num());
+
+	float HumanStrengthSum = 0.f;
+	int32 HumanStrengthCount = 0;
+	for (APlayerState* PS : GS->PlayerArray)
+	{
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+		if (!UTPS || UTPS->bOnlySpectator) continue;
+
+		AController* C = Cast<AController>(UTPS->GetOwner());
+		if (!C) continue;
+
+		FElimPlusBalanceInput In;
+		In.UniqueId = UTPS->UniqueId.IsValid()
+			? UTPS->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+
+		const int32* Rounds = PerPlayerMatchPPRRoundCount.Find(UTPS);
+		const float* Sum    = PerPlayerMatchPPRSum.Find(UTPS);
+		if (Rounds && Sum && *Rounds > 0)
+		{
+			In.StrengthOverride = (*Sum / static_cast<float>(*Rounds)) * 100.f;
+			HumanStrengthSum += In.StrengthOverride;
+			HumanStrengthCount++;
+		}
+
+		Inputs.Add(In);
+		ControllersByIndex.Add(C);
+	}
+
+	if (Inputs.Num() < 2)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: skipped (only %d active players)"), Inputs.Num());
+		return;
+	}
+
+	const float NeutralStrength = (HumanStrengthCount > 0)
+		? HumanStrengthSum / static_cast<float>(HumanStrengthCount)
+		: 100.f;
+	for (FElimPlusBalanceInput& In : Inputs)
+	{
+		if (In.StrengthOverride < 0.f)
+		{
+			In.StrengthOverride = NeutralStrength;
+		}
+	}
+
+	const FElimPlusBalanceResult Result = RatingSystem->ComputeBalancedTeams(Inputs);
+	if (!Result.bValid)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: TeamBalancer returned invalid assignment, skipping"));
+		return;
+	}
+
+	int32 MovesMade = 0;
+	auto AssignToTeam = [this, &ControllersByIndex, &MovesMade](const TArray<int32>& Indices, uint8 TargetTeam)
+	{
+		for (int32 SlotIdx : Indices)
+		{
+			if (!ControllersByIndex.IsValidIndex(SlotIdx)) continue;
+			AController* C = ControllersByIndex[SlotIdx];
+			AUTPlayerState* UTPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+			if (!UTPS) continue;
+			if (UTPS->Team && UTPS->Team->TeamIndex == TargetTeam) continue;  // already there
+			MovePlayerToTeam(C, UTPS, TargetTeam);
+			++MovesMade;
+		}
+	};
+	AssignToTeam(Result.Team0Indices, 0);
+	AssignToTeam(Result.Team1Indices, 1);
+
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 5-0 shuffle: %d players, Team0=%d ppr=%.1f, Team1=%d ppr=%.1f, diff=%.1f, moves=%d"),
+		Inputs.Num(),
+		Result.Team0Indices.Num(), Result.Team0Strength / 100.f,
+		Result.Team1Indices.Num(), Result.Team1Strength / 100.f,
+		Result.StrengthDifference / 100.f, MovesMade);
+
+	// Roster broadcast, name(ppr) per player — same stationary-chat-reference
+	// rationale as the pre-match rebalance broadcast.
+	auto BuildTeamLine = [this, &ControllersByIndex, &Inputs](const TArray<int32>& Indices, const TCHAR* Prefix, float Strength) -> FString
+	{
+		FString Names;
+		for (int32 SlotIdx : Indices)
+		{
+			if (!ControllersByIndex.IsValidIndex(SlotIdx) || !Inputs.IsValidIndex(SlotIdx)) continue;
+			AController* C = ControllersByIndex[SlotIdx];
+			AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+			if (!PS) continue;
+			if (!Names.IsEmpty()) Names += TEXT(", ");
+			Names += FString::Printf(TEXT("%s(%.1f)"), *PS->PlayerName, Inputs[SlotIdx].StrengthOverride / 100.f);
+		}
+		return FString::Printf(TEXT("%s (ppr=%.1f): %s"), Prefix, Strength / 100.f, *Names);
+	};
+
+	const FString Header   = FString::Printf(TEXT("=== 5-0: Teams shuffled by current match performance (PPR) — moves=%d ==="), MovesMade);
 	const FString RedLine  = BuildTeamLine(Result.Team0Indices, TEXT("RED  "), Result.Team0Strength);
 	const FString BlueLine = BuildTeamLine(Result.Team1Indices, TEXT("BLUE "), Result.Team1Strength);
 

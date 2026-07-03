@@ -298,6 +298,7 @@ public:
 	virtual void InitGameState() override;
 	//virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void HandleMatchHasStarted() override;
+	virtual void HandlePlayerIntro() override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void DefaultTimer() override;
@@ -349,6 +350,13 @@ public:
 	 *  match at the WaitingToStart -> PlayerIntro transition so players can
 	 *  watch the shuffle on the auto-shown scoreboard during the countdown. */
 	void RebalanceTeamsForMatchStart();
+
+	/** 5-0 blowout shuffle (publics): re-split BOTH teams by CURRENT-match PPR
+	 *  — who is performing THIS match — rather than the lifetime Glicko that
+	 *  just produced the 5-0. Armed by EndRoundForTeam, consumed at the next
+	 *  StartNextRound before anything spawns (silent moves, same rationale as
+	 *  the pre-match rebalance). Scores are NOT reset. */
+	void MidGameShufflePPR();
 
 	// -------- Victory Audio (Blueprint Editable) --------
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Victory Audio")
@@ -475,6 +483,17 @@ protected:
 	/** True when this match was launched as a bot PUG (?PugId on the URL). Set in
 	 *  InitGame. Uneven-team health scaling is gated to NON-PUG games only. */
 	bool bIsPugMatch = false;
+
+	/** 5-0 blowout mid-game shuffle (non-PUG, requires ?BalanceTeams): default
+	 *  ON; Mod.ini [NetcodePlus] ElimMidGameShuffle=false disables. See
+	 *  MidGameShufflePPR. */
+	bool bElimMidGameShuffle = true;
+	/** Armed by EndRoundForTeam when the score reaches exactly 5-0; consumed at
+	 *  the next StartNextRound. Fires at most once per match (bDidMidGameShuffle). */
+	UPROPERTY(Transient)
+	bool bPendingMidGameShuffle = false;
+	UPROPERTY(Transient)
+	bool bDidMidGameShuffle = false;
 
 	/** Uneven-team health scaling (NON-PUG only): when the teams differ in size,
 	 *  the short-handed team spawns tougher and the larger team softer, scaled
