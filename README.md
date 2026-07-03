@@ -249,10 +249,19 @@ Plugin code is under `Source/Public/` (headers) and `Source/Private/` (impl). Mo
 - **ClientDemos** — Client-side demo recording (UT99/UTComp-style) — separate plugin repo at github.com/jmortley/ClientDemos
 - **StatSQL** — Database integration for match stats — separate plugin
 
-## License / Credits
+## License
+
+NetcodePlus's original source is licensed under the [Apache License 2.0](LICENSE). It
+builds against Epic Games' UT4 / Unreal Engine 4 code, which is governed by the
+[Unreal Engine EULA](https://www.unrealengine.com/eula) and is **not** covered by this
+license. Third-party components (the vendored Glicko-2 library) retain their own
+copyright — see [NOTICE](NOTICE). See [CONTRIBUTING.md](CONTRIBUTING.md) to get involved.
+
+## Credits
 
 - Maintained by [phantaci](https://github.com/jmortley)
 - Built on top of Epic Games' UT4 codebase
+- Team Glicko-2 rating library by [Tron (tronunator)](https://github.com/tronunator/Glicko2), used with permission
 - Design influenced by UTComp's NewNet projectile sync and lag-comp patterns
 
 ## Branch policy
