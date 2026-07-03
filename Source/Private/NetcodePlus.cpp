@@ -33,6 +33,7 @@
 #include "Misc/CoreMisc.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Engine/GameInstance.h"
+#include "UTGameInstance.h"           // IsMoviePlaying (menu-close rescue ticker)
 
 /** Weak reference to active skin selector — only one can be open at a time */
 static TWeakPtr<SUTWeaponSkinSelector> ActiveSkinSelector;
@@ -543,10 +544,88 @@ static bool TickNcpConnect(float DeltaTime)
 		*RedactConnectURL(GNcpConnectURL),
 		bReady ? TEXT("") : TEXT(" (profile/progression not ready; connecting anyway after timeout)"));
 
+	// Close the front-end menu BEFORE travelling — every stock join path does this
+	// synchronously in its click handler. Travelling with the desktop menu open
+	// leaves cleanup to the arrival-side ClientCloseAllUI, which defers while the
+	// loading movie plays and can lose its movie-finished replay entirely (see
+	// TickMenuCloseRescue below); the stranded menu then hit-tests the whole
+	// viewport — cursor stuck, every key eaten, unrecoverable without killing the
+	// game. In the front-end no movie is playing, so this executes immediately.
+	if (UTLP)
+	{
+		UTLP->HideMenu();
+	}
+
 	GEngine->SetClientTravel(GameWorld, *GNcpConnectURL, TRAVEL_Absolute);
 
 	GNcpConnectTickerHandle.Reset();
 	return false; // single shot — unregister
+}
+
+// ---------------------------------------------------------------------------
+// Lost menu-close rescue. Stock defers CloseAllUI()/HideMenu() while the level-
+// loading movie plays (UTLocalPlayer bCloseUICalledDuringMoviePlayback /
+// bHideMenuCalledDuringMoviePlayback) and replays them from the game instance's
+// OnMoviePlaybackFinished — but EndLevelLoading only binds that delegate when a
+// movie is STILL playing at that instant, so the replay can be lost (movie ends
+// first, or a second travel re-binds and clears it). The stranded front-end
+// menu/dialog then hit-tests the whole viewport with no visible UI and no way
+// to close it: cursor stuck, every key eaten (Esc included), and on a
+// PlayersMustBeReady server the player can't ready up so no match-state
+// transition ever fires the HUD's HideMenu rescue — only killing the game
+// recovers. Both launcher -ncpconnect joins and hub-initiated travels with a
+// menu open hit this. This ticker replays exactly what OnMoviePlaybackFinished
+// would have done, and only when stock itself recorded that it owes a close
+// and no movie is up — the same gate the deferral used, so the replayed call
+// cannot re-defer. Both callees clear their own pending flag, so this fires at
+// most once per lost close.
+// ---------------------------------------------------------------------------
+static FDelegateHandle GMenuRescueTickerHandle;
+static float           GMenuRescueAccum = 0.0f;
+
+static bool TickMenuCloseRescue(float DeltaTime)
+{
+	// 2 Hz is plenty — the rescue only needs to win eventually, not this frame.
+	GMenuRescueAccum += DeltaTime;
+	if (GMenuRescueAccum < 0.5f)
+	{
+		return true;
+	}
+	GMenuRescueAccum = 0.0f;
+
+	if (!GEngine)
+	{
+		return true;
+	}
+
+	for (const FWorldContext& Context : GEngine->GetWorldContexts())
+	{
+		if (Context.WorldType != EWorldType::Game || !Context.World())
+		{
+			continue;
+		}
+
+		UUTGameInstance* GI = Cast<UUTGameInstance>(Context.World()->GetGameInstance());
+		if (!GI || GI->IsMoviePlaying())
+		{
+			break; // movie still up — stock's own replay path may yet fire
+		}
+
+		UUTLocalPlayer* UTLP = Cast<UUTLocalPlayer>(GI->GetFirstGamePlayer());
+		if (UTLP && UTLP->bCloseUICalledDuringMoviePlayback)
+		{
+			// Same precedence as UUTGameInstance::OnMoviePlaybackFinished.
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: replaying CloseAllUI lost to the loading-movie race"));
+			UTLP->CloseAllUI(UTLP->bDelayedCloseUIExcludesDialogs);
+		}
+		else if (UTLP && UTLP->bHideMenuCalledDuringMoviePlayback)
+		{
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: replaying HideMenu lost to the loading-movie race"));
+			UTLP->HideMenu();
+		}
+		break;
+	}
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -895,6 +974,15 @@ void FNetcodePlus::StartupModule()
 			FTickerDelegate::CreateStatic(&TickHudTeamColours), 0.0f);
 	}
 
+	// Lost menu-close rescue ticker (stuck cursor / dead input after travelling
+	// with a menu open). Client-only; self-throttled to 2 Hz.
+	if (!IsRunningDedicatedServer())
+	{
+		GMenuRescueAccum = 0.0f;
+		GMenuRescueTickerHandle = FTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateStatic(&TickMenuCloseRescue), 0.0f);
+	}
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
@@ -912,6 +1000,13 @@ void FNetcodePlus::ShutdownModule()
 	{
 		FTicker::GetCoreTicker().RemoveTicker(GHudColourTickerHandle);
 		GHudColourTickerHandle.Reset();
+	}
+
+	// Stop the menu-close rescue ticker.
+	if (GMenuRescueTickerHandle.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(GMenuRescueTickerHandle);
+		GMenuRescueTickerHandle.Reset();
 	}
 
 	// Close skin selector if open and free cached assets
