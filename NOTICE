@@ -1,0 +1,30 @@
+NetcodePlus
+Copyright 2026 phantaci (https://github.com/jmortley)
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------------
+Scope of this license
+--------------------------------------------------------------------------------
+The Apache 2.0 license in this repository applies to the original NetcodePlus
+plugin source authored for this project.
+
+NetcodePlus is a plugin for Unreal Tournament (UT4) and is built against, and
+links to, Epic Games' Unreal Tournament / Unreal Engine 4 code. That code is
+NOT covered by this license — it is governed by the Unreal Engine End User
+License Agreement (https://www.unrealengine.com/eula). Nothing in this
+repository grants any rights to Epic Games' code, assets, or trademarks. For
+convenience the repository also includes prebuilt binaries (compiled .dll / .so
+files); these contain linked Epic Games code, are NOT covered by this license,
+and remain subject to the Unreal Engine EULA.
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+Source/Public/Glicko2/ and Source/Private/Glicko2/
+    Team Glicko-2 rating library, vendored from
+    https://github.com/tronunator/Glicko2
+    Copyright (c) Tron (tronunator). Included with the author's permission.
+    This component is the copyright of its original author, retains its own
+    copyright as stated in its file headers, and is NOT licensed under this
+    repository's Apache 2.0 license.
