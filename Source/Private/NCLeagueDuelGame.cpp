@@ -2,7 +2,6 @@
 
 #include "NCLeagueDuelGame.h"
 #include "NCPlusVersionGate.h"
-#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "UTPlayerStart.h"
 #include "UTPickupInventory.h"
@@ -155,8 +154,6 @@ void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
-	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
-	NCConcede::SpawnFor(NewPlayer);
 
 	if (Role != ROLE_Authority || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);

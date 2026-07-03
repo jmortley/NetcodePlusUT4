@@ -1063,6 +1063,11 @@ void AUTPlusWeap_RocketLauncher::UpdateLock()
 		UTOwner->Controller == nullptr ||
 		UTOwner->IsFiringDisabled() ||
 		(CurrentFireMode != 1) ||    // Must be alt-fire mode
+		(CurrentRocketFireMode != 0) || // Only the standard tri-rocket spread seeks (FireRocketProjectile
+		                                // consumes LockedTarget in case 0 only) — grenades/spirals never
+		                                // did, so don't acquire or keep a lock there: it also drew a
+		                                // misleading lock reticle. Cycling modes mid-load clears/re-arms
+		                                // within LockCheckTime (0.1s).
 		!IsFiring() ||
 		(NumLoadedRockets == 0))     // Must have rockets loaded
 	{

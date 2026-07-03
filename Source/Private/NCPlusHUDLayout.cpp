@@ -1085,10 +1085,13 @@ namespace NCPlusHUDDrawCall
 	// =============================================================================
 	//
 	// Red row then blue row of slanted, team-colored plates. Teammate plates show
-	// name + "+HP  armor"; enemy plates show the name only (no live enemy HP). Dead
-	// players are skipped so the row reflows — plate count = alive count. Same data
-	// source as the portrait strip (teammate Health/GetArmorAmount); only the look
-	// differs. Honors the `team_panel` alias (position / scale / opacity / hide).
+	// name + "+HP  armor"; enemy plates show the name only (no live enemy HP) —
+	// EXCEPT once the round is over (reveal the winners' final health) and for
+	// TRUE spectators (bOnlySpectator), who see both teams' vitals at all times.
+	// Dead players are skipped so the row reflows — plate count = alive count.
+	// Same data source as the portrait strip (teammate Health/GetArmorAmount);
+	// only the look differs. Honors the `team_panel` alias (position / scale /
+	// opacity / hide).
 	void DrawStockTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
 	{
 		if (HUD == nullptr || Canvas == nullptr) return;
@@ -1109,12 +1112,19 @@ namespace NCPlusHUDDrawCall
 		if (!NameFont) return;
 
 		// Local viewer's team — teammates get an HP/armor readout, enemies name-only.
+		// Vitals are revealed for EVERYONE when the round is over (this panel only
+		// draws in InProgress/RoundCooldown, so != InProgress IS the round-win
+		// window — show the winners' final health) and for TRUE spectators
+		// (bOnlySpectator; deliberately NOT bOutOfLives — a dead player must not
+		// gain live enemy info mid-round).
 		uint8 MyTeam = 255;
+		bool  bRevealAllVitals = (GS->GetMatchState() != MatchState::InProgress);
 		if (HUD->UTPlayerOwner)
 		{
 			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
 			{
 				MyTeam = MyPS->GetTeamNum();
+				bRevealAllVitals |= MyPS->bOnlySpectator;
 			}
 		}
 
@@ -1248,9 +1258,9 @@ namespace NCPlusHUDDrawCall
 					FVector2D(x + Skew + PlateW, RowY + 2.f * S), FVector2D(x + Skew, RowY + 2.f * S), EdgeCol);
 
 				const float CenterX  = x + Skew * 0.5f + PlateW * 0.5f;
-				const bool  bTeammate = (TeamIdx == MyTeam);
+				const bool  bShowVitals = (TeamIdx == MyTeam) || bRevealAllVitals;
 
-				if (bTeammate)
+				if (bShowVitals)
 				{
 					// Name on top, HP/armor below.
 					const FString Name = Fit(NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale);
@@ -1461,6 +1471,9 @@ namespace NCPlusHUDDrawCall
 			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"),
 			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"),
 			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"),
+			// QuickStats pairs with Paperdoll/WeaponInfo (the profile flag picks ONE
+			// family at runtime) — the HUD ctor stock branches load it too (2026-07-01).
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_QuickStats.bpHW_QuickStats_C"),
 			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),
 		};
 		static const TCHAR* const NCPlusPaths[] = {
@@ -1470,10 +1483,10 @@ namespace NCPlusHUDDrawCall
 			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),
 		};
 
-		auto Resolve = [](const TCHAR* const* Paths) -> TArray<UClass*>
+		auto Resolve = [](const TCHAR* const* Paths, int32 Num) -> TArray<UClass*>
 		{
 			TArray<UClass*> Out;
-			for (int32 i = 0; i < 4; i++)
+			for (int32 i = 0; i < Num; i++)
 			{
 				if (UClass* C = StaticLoadClass(UUTHUDWidget::StaticClass(), nullptr, Paths[i]))
 				{
@@ -1483,8 +1496,10 @@ namespace NCPlusHUDDrawCall
 			return Out;
 		};
 
-		const TArray<UClass*> WantClasses = Resolve(bWantStock ? StockPaths : NCPlusPaths);
-		const TArray<UClass*> DropClasses = Resolve(bWantStock ? NCPlusPaths : StockPaths);
+		const TArray<UClass*> WantClasses = bWantStock
+			? Resolve(StockPaths, ARRAY_COUNT(StockPaths)) : Resolve(NCPlusPaths, ARRAY_COUNT(NCPlusPaths));
+		const TArray<UClass*> DropClasses = bWantStock
+			? Resolve(NCPlusPaths, ARRAY_COUNT(NCPlusPaths)) : Resolve(StockPaths, ARRAY_COUNT(StockPaths));
 
 		// Drop the family we no longer want (stops it drawing; the widget GCs once unreferenced).
 		for (int32 i = HUD->HudWidgets.Num() - 1; i >= 0; i--)
@@ -1938,6 +1953,9 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 				W->ScreenPosition = D->ScreenPosition;
 				W->Position       = D->Position;
 				W->Origin         = D->Origin;
+				// Engine PreDraw re-asserts Origin from RealOrigin every frame
+				// (UTHUDWidget.cpp:413) — writing Origin alone is a no-op.
+				W->RealOrigin     = D->Origin;
 				W->SetHidden(D->bHidden);
 
 				if (D->bIsWeaponBar)
@@ -1965,6 +1983,10 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 		const FVector2D AnchorCoords = FNCPlusHUDLayout::AnchorToScreenCoords(Elem->Anchor);
 		W->ScreenPosition = AnchorCoords;
 		W->Origin         = AnchorCoords;
+		// Engine PreDraw re-asserts Origin from RealOrigin every frame (UTHUDWidget.cpp:413)
+		// — without this the anchor pivot silently reverted to the ctor origin, which is
+		// why seeded CenterLeft/CenterRight weapon bars rendered ~270px above intent.
+		W->RealOrigin     = AnchorCoords;
 		W->Position       = Elem->Offset;
 		W->SetHidden(Elem->bHidden);
 

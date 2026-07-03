@@ -58,6 +58,12 @@ struct FElimPlusRoundResult
 struct FElimPlusBalanceInput
 {
 	FString UniqueId;
+
+	/** When >= 0, balance on THIS value instead of the cached Glicko rating —
+	 *  the balancer only compares strength sums, so any uniform scale works.
+	 *  Used by the 6-0 mid-game shuffle (current-match PPR x100). Default -1
+	 *  keeps the Glicko path byte-identical for all existing callers. */
+	float StrengthOverride = -1.f;
 };
 
 /** TeamBalancer output, UE4-friendly (no STL types). The Team0/Team1Indices

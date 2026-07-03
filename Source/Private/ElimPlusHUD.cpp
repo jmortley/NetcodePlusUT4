@@ -63,10 +63,14 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 		// so the player's existing preference is honored with zero extra wiring.
 		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"));
 		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
-		// Health/armor = stock Paperdoll (the classic icon display TeamDM/DM use,
-		// DefaultGame.ini:102/131). NOT bpHW_QuickStats — that self-hides behind a
-		// profile setting and isn't the main HP/Armor readout.
+		// Health/armor: Paperdoll AND QuickStats — BOTH, like every stock UT HUD.
+		// Mutually exclusive at runtime via the profile's QuickStats flag: Paperdoll +
+		// WeaponInfo self-HIDE when the mini-HUD is enabled (UTHUDWidget_Paperdoll.cpp:47,
+		// UTHUDWidget_WeaponInfo.cpp:30) expecting bpHW_QuickStats to carry HP/armor/ammo;
+		// omitting it (old comment had the gate INVERTED) left such profiles with NO
+		// HP/armor/ammo (community fresh-install report 2026-07-01). No double-draw.
 		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"));
+		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_QuickStats.bpHW_QuickStats_C"));
 	}
 	else
 	{
@@ -900,11 +904,20 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 			FontRenderScale, FontRenderScale, TextRenderInfo);
 	}
 
-	// Layer 6: Teammate HP/Armor numbers (alive teammates only, not self)
+	// Layer 6: HP/Armor numbers — alive teammates (not self). ALSO revealed on
+	// enemy pips once the round is over (the strip only draws in
+	// InProgress/RoundCooldown, so != InProgress IS the round-win window — the
+	// winners' final health should be readable), and at ALL times for TRUE
+	// spectators (bOnlySpectator; deliberately NOT bOutOfLives — a dead player
+	// must not gain live enemy info mid-round).
 	if (bPlayerAlive && UTPlayerOwner)
 	{
 		AUTPlayerState* MyPS = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
-		if (MyPS && MyPS != PlayerState && MyPS->GetTeamNum() == PlayerState->GetTeamNum())
+		AUTGameState* MatchGS = GetWorld()->GetGameState<AUTGameState>();
+		const bool bSameTeam  = MyPS && MyPS->GetTeamNum() == PlayerState->GetTeamNum();
+		const bool bRoundOver = MatchGS && MatchGS->GetMatchState() != MatchState::InProgress;
+		const bool bTrueSpec  = MyPS && MyPS->bOnlySpectator;
+		if (MyPS && MyPS != PlayerState && (bSameTeam || bRoundOver || bTrueSpec))
 		{
 			AUTCharacter* UTC = PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())

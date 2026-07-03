@@ -55,10 +55,17 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 		// player's HUD profile (orientation/scale/opacity/colors/group-remap).
 		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"));
 		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"));
-		// Health/armor = stock Paperdoll (the classic icon display TeamDM/DM use,
-		// DefaultGame.ini:102/131). NOT bpHW_QuickStats — that self-hides behind a
-		// profile setting and isn't the main HP/Armor readout.
+		// Health/armor: Paperdoll AND QuickStats — BOTH, like every stock UT HUD
+		// (DefaultGame.ini pairs them). They are mutually exclusive at runtime via the
+		// profile's QuickStats flag: Paperdoll + WeaponInfo self-HIDE when the player's
+		// profile has the QuickStats mini-HUD enabled (UTHUDWidget_Paperdoll.cpp:47,
+		// UTHUDWidget_WeaponInfo.cpp:30) expecting bpHW_QuickStats to carry HP/armor/ammo.
+		// Omitting QuickStats (the old comment had that gate INVERTED) meant a player
+		// whose carried-over profile enables the mini-HUD saw NO HP/armor/ammo anywhere
+		// (community fresh-install report 2026-07-01, worst in duel where portraits are
+		// off too). Exactly one of the two families draws — no double-draw.
 		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"));
+		HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_QuickStats.bpHW_QuickStats_C"));
 	}
 	else
 	{
@@ -911,12 +918,21 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			FontRenderScale, FontRenderScale, TextRenderInfo);
 	}
 
-	// Layer 6: Teammate HP/Armor numbers (alive teammates only, not self).
+	// Layer 6: HP/Armor numbers — alive teammates (not self). ALSO revealed on
+	// enemy pips once the round is over (the strip only draws in
+	// InProgress/RoundCooldown, so != InProgress IS the round-win window — the
+	// winners' final health should be readable), and at ALL times for TRUE
+	// spectators (bOnlySpectator; deliberately NOT bOutOfLives — a dead player
+	// must not gain live enemy info mid-round).
 	// PipFontExtra is the user's FontSz multiplier — the headline 4K legibility knob.
 	if (LiveScaling >= 1.f && UTPlayerOwner)
 	{
 		AUTPlayerState* MyPS = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
-		if (MyPS && MyPS != PlayerState && MyPS->GetTeamNum() == PlayerState->GetTeamNum())
+		AUTGameState* MatchGS = GetWorld()->GetGameState<AUTGameState>();
+		const bool bSameTeam  = MyPS && MyPS->GetTeamNum() == PlayerState->GetTeamNum();
+		const bool bRoundOver = MatchGS && MatchGS->GetMatchState() != MatchState::InProgress;
+		const bool bTrueSpec  = MyPS && MyPS->bOnlySpectator;
+		if (MyPS && MyPS != PlayerState && (bSameTeam || bRoundOver || bTrueSpec))
 		{
 			AUTCharacter* UTC = PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())
