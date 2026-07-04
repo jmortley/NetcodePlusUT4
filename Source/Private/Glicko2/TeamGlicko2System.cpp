@@ -66,8 +66,15 @@ namespace TeamGlicko2 {
         // round — per-round frag perf is right-skewed and the logistic
         // saturates, so a 0.5-centered impact term systematically deflated the
         // whole lobby (~-0.6 ELO/player/round in adversarial sims):
-        //   eff = clamp(E + kCarryWeight*(impact - meanImpact)
+        //   eff = clamp(E - kAnchorWeight*(E-0.5)
+        //                 + kCarryWeight*(impact - meanImpact)
         //                 + (1-kCarryWeight)*(outcome-0.5), 0, 1)
+        // The kAnchorWeight term (2026-07-04, see Config.h) is a partial
+        // opponent-strength anchor: you only get (1-lambda) of E for free —
+        // the rest must be earned by performing like your rating claims.
+        // Pulls overrated ratings down AND underrated ratings up; without it
+        // the interior is opponent-blind and league-only regulars sink to the
+        // floor while measured only against stacked rooms.
         // A lobby-average round is rating-neutral at any rating WHILE E+adj
         // stays inside [0,1]; past that the clip acts as a soft one-sided brake
         // (heavy favorites, E>~0.6, have big positive rounds clipped to 1-E —
@@ -109,7 +116,8 @@ namespace TeamGlicko2 {
                                               double impact, double outcome) {
                 const double g = 1.0 / std::sqrt(1.0 + 3.0 * oppPhi * oppPhi / (M_PI * M_PI));
                 const double E = pr.ComputeExpectedScore(oppMu, g);
-                double s = E + kCarryWeight * (impact - meanImpact)
+                double s = E - kAnchorWeight * (E - 0.5)
+                             + kCarryWeight * (impact - meanImpact)
                              + (1.0 - kCarryWeight) * (outcome - 0.5);
                 if (s < 0.0) s = 0.0; else if (s > 1.0) s = 1.0;
                 return s;

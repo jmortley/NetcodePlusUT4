@@ -114,6 +114,23 @@ namespace TeamGlicko2 {
     static const double kCarryWeight = 0.85;  // share of score from cross-lobby impact vs team W/L
     static const double kPerfSlope = 2.5;     // logistic steepness of the lobby-impact map
 
+    // 2026-07-04 PARTIAL OPPONENT-STRENGTH ANCHOR (see TeamGlicko2System.cpp).
+    // The pure centered blend is opponent-blind in the interior: impact is
+    // z-scored only vs the lobby actually played, so a strong-lobby-only
+    // regular (league player, e.g. BulkBogan) integrated to ~890 — far below
+    // any honest read — while underrated players climbed only by raw
+    // integration. eff gains a -kAnchorWeight*(E-0.5) restoring term pulling
+    // every rating toward its Glicko-consistent level FROM BOTH SIDES
+    // (overrated-average decays, underrated gets a boost). 0 = opponent-blind;
+    // 1 = the full legacy pull (the drift bug). LOCKED 0.6 from the 2026-07-04
+    // real-history sweep (0/0.25/0.4/0.6/0.8 on 2,900 matches): league
+    // regulars land ~1200, aurafarmer #18->#11, top re-compresses mildly.
+    // MUST equal ut4stats ELIM_ANCHOR_WEIGHT/WIPEOUT_ANCHOR_WEIGHT + the
+    // team_glicko2_port default. Equilibrium is granularity-independent
+    // (anchor and carry scale together), so per-round hub == per-match rebuild
+    // target; the hub just converges faster.
+    static const double kAnchorWeight = 0.6;
+
 
     // ========== Optional Rating Change Clamping ==========
 

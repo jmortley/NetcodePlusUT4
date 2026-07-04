@@ -48,8 +48,10 @@ namespace TeamGlicko2 {
         /// @param match Match result with player ratings and performance scores
         /// @param bLobbyImpactBlend When true (ElimPlus/Wipeout), z-score perf
         ///        across BOTH teams and blend it into the Glicko score,
-        ///        CENTERED on the player's expected score E (2026-07-03):
-        ///        eff = clamp(E + kCarryWeight*(logistic(kPerfSlope*z)-0.5)
+        ///        CENTERED on the player's expected score E with a partial
+        ///        opponent-strength anchor (2026-07-03/04):
+        ///        eff = clamp(E - kAnchorWeight*(E-0.5)
+        ///                      + kCarryWeight*(impact - meanLobbyImpact)
         ///                      + (1-kCarryWeight)*(W/L-0.5), 0, 1).
         ///        When false (default; 1v1 Duel/ShaftArena + CTF), use the
         ///        original within-team multiplicative performance scaler.
