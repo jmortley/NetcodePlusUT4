@@ -98,6 +98,19 @@ namespace TeamGlicko2 {
     // a thrown win (good player, big-negative lobby impact) still nets a LOSS. A flat
     // win-floor was tried + rejected (it rescued throwers too). Keep the Django rebuild
     // ELIM_CARRY_WEIGHT in sync. Compile-time — retune = server rebuild, no Mod.ini knob.
+    // 2026-07-03 EXPECTATION-CENTERED re-fix (see TeamGlicko2System.cpp blend branch):
+    // the eff formula above is now centered on the player's Glicko expected score E
+    // instead of 0.5, with the impact term recentered on the LOBBY-MEAN impact so the
+    // carry channel is zero-sum per round — eff = clamp(E + kCarryWeight*(impact-
+    // meanImpact) + (1-kCarryWeight)*(outcome-0.5), 0, 1). The 0.5-centered form made
+    // every high-rated player bleed toward the lobby mean (score rating-agnostic, E
+    // rating-dependent; a 1688 regular ground to ~1475 in a week while mostly WINNING),
+    // and the un-recentered impact deflated whole lobbies (right-skewed round perf
+    // through a saturating logistic). Rank-order validation (Spearman 0.937) couldn't
+    // see either drift — it only checks ordering, not stationarity. Residual by design:
+    // the [0,1] clip is a soft one-sided ceiling for heavy favorites (E>~0.6), NOT
+    // symmetric there. kCarryWeight/kPerfSlope keep their meaning as the ADJUSTMENT
+    // weights around E.
     static const double kCarryWeight = 0.85;  // share of score from cross-lobby impact vs team W/L
     static const double kPerfSlope = 2.5;     // logistic steepness of the lobby-impact map
 
