@@ -484,18 +484,33 @@ FString FNCPlusHUDLayout::GetDefaultLayoutPath()
 	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
 }
 
+// Cached so the per-frame DrawHeldPowerups call never hits GConfig/FileExists (mirror
+// GStockTeamPanelCache). -1 = unresolved. Invalidated by SetStockBottomBar (explicit
+// change) and SaveLive (the FileExists fallback flips the first time a layout is saved).
+static int8 GStockBottomBarCache = -1;
+
 bool FNCPlusHUDLayout::WantsStockBottomBar()
 {
+	if (GStockBottomBarCache >= 0)
+	{
+		return GStockBottomBarCache != 0;
+	}
+	bool bResult;
 	// Explicit choice in Mod.ini wins (written by the menu / Stock-Like preset).
 	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	FString Val;
 	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockBottomBar"), Val, ModIni) && !Val.IsEmpty())
 	{
-		return Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
+		bResult = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
 	}
-	// No explicit choice — default to the familiar stock bar for a fresh install
-	// (no saved HUD layout). Anyone who has saved a layout keeps the NCPlus widgets.
-	return !FPaths::FileExists(GetDefaultLayoutPath());
+	else
+	{
+		// No explicit choice — default to the familiar stock bar for a fresh install
+		// (no saved HUD layout). Anyone who has saved a layout keeps the NCPlus widgets.
+		bResult = !FPaths::FileExists(GetDefaultLayoutPath());
+	}
+	GStockBottomBarCache = bResult ? 1 : 0;
+	return bResult;
 }
 
 void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
@@ -508,6 +523,8 @@ void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
 			bStock ? TEXT("True") : TEXT("False"), ModIni);
 		GConfig->Flush(false, ModIni);
 	}
+	// Refresh the cache so the next WantsStockBottomBar() reflects the choice.
+	GStockBottomBarCache = bStock ? 1 : 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -965,6 +982,94 @@ namespace NCPlusHUDAliases
 
 namespace NCPlusHUDDrawCall
 {
+	// ---- Outlined-text + fitted-name helpers -------------------------------------
+	// Collapse the hand-rolled "4 offset DrawText + 1 fill, all shadowed" stacks (each
+	// UCanvas::DrawText paid a full ICU word-wrap + allocs, x2 for the shadow) into one
+	// batched FCanvasTextItem, and cache the per-frame name-fit StrLen loops per player.
+
+	void DrawOutlinedText(UCanvas* Canvas, const UFont* Font, const FText& Text,
+		float X, float Y, float Scale, FLinearColor Fill, FLinearColor Outline, float Opacity)
+	{
+		if (!Canvas || !Font || Text.IsEmpty()) return;
+		Fill.A    *= Opacity;
+		Outline.A *= Opacity;
+		FCanvasTextItem Item(FVector2D(X, Y), Text, Font, Fill);
+		Item.Scale        = FVector2D(Scale, Scale);
+		Item.bOutlined    = true;   // 4 diagonal ±1px passes, one batched item, no re-wrap
+		Item.OutlineColor = Outline;
+		// Deliberately NO EnableShadow(): the outline replaces the old drop shadow, and a
+		// shadow would double-raster every one of the 5 passes — the cost we're removing.
+		Canvas->DrawItem(Item);
+	}
+
+	// Per-PlayerState fitted-name cache. Each entry remembers the inputs it was built
+	// from and is recomputed only when one changes; the whole map is dropped on a world
+	// change (level transition) or a layout-revision bump so nothing goes stale.
+	namespace
+	{
+		struct FNCFittedNameEntry
+		{
+			FString      Src;
+			const UFont* Font     = nullptr;
+			int32        WidthKey = -1;
+			FText        Text;
+			float        Width  = 0.f;
+			float        Height = 0.f;
+		};
+		TMap<TWeakObjectPtr<APlayerState>, FNCFittedNameEntry> GNameFitCache;
+		uint32                 GNameFitRev   = 0;
+		TWeakObjectPtr<UWorld> GNameFitWorld;
+	}
+
+	void ResolveFittedName(UCanvas* Canvas, APlayerState* PS, UFont* Font,
+		const FString& Src, float MaxWidthPx, float Scale,
+		FText& OutText, float& OutWidth, float& OutHeight)
+	{
+		// Degenerate inputs — measure once (uncached) and bail.
+		if (!Canvas || !Font || !PS || Scale <= 0.f)
+		{
+			float XL = 0.f, YL = 0.f;
+			if (Canvas && Font) Canvas->StrLen(Font, Src, XL, YL);
+			OutText = FText::FromString(Src); OutWidth = XL; OutHeight = YL;
+			return;
+		}
+
+		// Drop the whole cache on a world change or a layout edit.
+		UWorld* World = PS->GetWorld();
+		const uint32 Rev = FNCPlusHUDLayout::GetLiveRevision();
+		if (Rev != GNameFitRev || GNameFitWorld.Get() != World)
+		{
+			GNameFitCache.Reset();
+			GNameFitRev   = Rev;
+			GNameFitWorld = World;
+		}
+
+		// The fit depends only on (Src, Font, MaxWidthPx/Scale) — bucket the ratio so
+		// tiny float jitter doesn't thrash the cache.
+		const int32 WidthKey = FMath::RoundToInt(MaxWidthPx / Scale);
+		FNCFittedNameEntry& E = GNameFitCache.FindOrAdd(PS);
+		if (E.Font != Font || E.WidthKey != WidthKey || E.Src != Src)
+		{
+			FString Text = Src;
+			float XL = 0.f, YL = 0.f;
+			Canvas->StrLen(Font, Text, XL, YL);
+			while (XL * Scale > MaxWidthPx && Text.Len() > 3)
+			{
+				Text = Text.Left(Text.Len() - 1);
+				Canvas->StrLen(Font, Text, XL, YL);
+			}
+			E.Src      = Src;
+			E.Font     = Font;
+			E.WidthKey = WidthKey;
+			E.Text     = FText::FromString(Text);
+			E.Width    = XL;
+			E.Height   = YL;
+		}
+		OutText   = E.Text;
+		OutWidth  = E.Width;
+		OutHeight = E.Height;
+	}
+
 	FVector2D ResolveScreenPos(FName Alias, UCanvas* Canvas, const FVector2D& Fallback)
 	{
 		if (!Canvas) return Fallback;
@@ -1155,52 +1260,40 @@ namespace NCPlusHUDDrawCall
 		FTexture* WhiteTex = (Canvas->DefaultTexture) ? Canvas->DefaultTexture->Resource : nullptr;
 		if (!WhiteTex) return;
 
-		FFontRenderInfo RI;
-		RI.bEnableShadow = true;
+		// Two accumulation passes → one batched draw. Collect every slanted plate quad
+		// as triangles and every label as deferred text, then flush the quads in ONE
+		// DrawItem (was 4 translucent triangle items PER plate) and draw all text on top.
+		// Batching is visually identical: plates never overlap a neighbour's text, so
+		// "all fills, then all text" preserves z-order.
+		TArray<FCanvasUVTri> PlateTris;
+		struct FPanelLabel { UFont* Font; FText Text; float X; float Y; float Scale; FLinearColor Color; };
+		TArray<FPanelLabel> Labels;
 
-		auto DrawQuad = [&](const FVector2D& A, const FVector2D& B, const FVector2D& C, const FVector2D& D, FLinearColor Col)
+		auto AddQuad = [&](const FVector2D& A, const FVector2D& B, const FVector2D& C, const FVector2D& D, FLinearColor Col)
 		{
 			Col.A *= Op;
-			FCanvasTriangleItem T1(A, B, C, WhiteTex);
-			T1.BlendMode = ESimpleElementBlendMode::SE_BLEND_Translucent;
-			T1.SetColor(Col);
-			Canvas->DrawItem(T1);
-			FCanvasTriangleItem T2(A, C, D, WhiteTex);
-			T2.BlendMode = ESimpleElementBlendMode::SE_BLEND_Translucent;
-			T2.SetColor(Col);
-			Canvas->DrawItem(T2);
+			FCanvasUVTri T1;
+			T1.V0_Pos = A; T1.V1_Pos = B; T1.V2_Pos = C;
+			T1.V0_UV = T1.V1_UV = T1.V2_UV = FVector2D::ZeroVector;   // white 1x1 tex — UV irrelevant
+			T1.V0_Color = T1.V1_Color = T1.V2_Color = Col;
+			PlateTris.Add(T1);
+			FCanvasUVTri T2;
+			T2.V0_Pos = A; T2.V1_Pos = C; T2.V2_Pos = D;
+			T2.V0_UV = T2.V1_UV = T2.V2_UV = FVector2D::ZeroVector;
+			T2.V0_Color = T2.V1_Color = T2.V2_Color = Col;
+			PlateTris.Add(T2);
 		};
 
-		// Trim text to fit a max pixel width (mirrors the portrait-strip name clamp).
-		auto Fit = [&](UFont* Font, FString Text, float MaxW, float Scale) -> FString
-		{
-			float XL, YL;
-			Canvas->StrLen(Font, Text, XL, YL);
-			while (XL * Scale > MaxW && Text.Len() > 3)
-			{
-				Text = Text.Left(Text.Len() - 1);
-				Canvas->StrLen(Font, Text, XL, YL);
-			}
-			return Text;
-		};
-
-		// Outlined text centered on (CenterX, CenterY).
-		auto DrawCentered = [&](UFont* Font, const FString& Text, float CenterX, float CenterY, float Scale, FLinearColor Color)
+		// Center a SHORT label on (CenterX, CenterY) and queue it. StrLen is fine here —
+		// these are 2-5 char score/clock/HP/armor strings, not the long player names
+		// (those go through the cached ResolveFittedName below).
+		auto PushCentered = [&](UFont* Font, const FString& Text, float CenterX, float CenterY, float Scale, const FLinearColor& Color)
 		{
 			if (!Font || Text.IsEmpty()) return;
 			float XL, YL;
 			Canvas->StrLen(Font, Text, XL, YL);
-			const float X = CenterX - (XL * Scale * 0.5f);
-			const float Y = CenterY - (YL * Scale * 0.5f);
-			const float OL = 1.f;
-			Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, Op));
-			Canvas->DrawText(Font, FText::FromString(Text), X - OL, Y, Scale, Scale, RI);
-			Canvas->DrawText(Font, FText::FromString(Text), X + OL, Y, Scale, Scale, RI);
-			Canvas->DrawText(Font, FText::FromString(Text), X, Y - OL, Scale, Scale, RI);
-			Canvas->DrawText(Font, FText::FromString(Text), X, Y + OL, Scale, Scale, RI);
-			Color.A *= Op;
-			Canvas->SetLinearDrawColor(Color);
-			Canvas->DrawText(Font, FText::FromString(Text), X, Y, Scale, Scale, RI);
+			Labels.Add(FPanelLabel{ Font, FText::FromString(Text),
+				CenterX - XL * Scale * 0.5f, CenterY - YL * Scale * 0.5f, Scale, Color });
 		};
 
 		for (int32 TeamIdx = 0; TeamIdx < 2; ++TeamIdx)
@@ -1227,9 +1320,9 @@ namespace NCPlusHUDDrawCall
 			{
 				const float x = Origin.X;
 				const FVector2D A(x + Skew, RowY), B(x + Skew + ScoreW, RowY), C(x + ScoreW, RowY + PlateH), D(x, RowY + PlateH);
-				DrawQuad(A, B, C, D, ScoreBoxCol);
+				AddQuad(A, B, C, D, ScoreBoxCol);
 				const int32 TeamScore = (GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx]) ? GS->Teams[TeamIdx]->Score : 0;
-				DrawCentered(ScoreFont, FString::Printf(TEXT("%d"), TeamScore),
+				PushCentered(ScoreFont, FString::Printf(TEXT("%d"), TeamScore),
 					x + Skew * 0.5f + ScoreW * 0.5f, RowY + PlateH * 0.5f, ScoreScale, FLinearColor::White);
 			}
 
@@ -1252,9 +1345,9 @@ namespace NCPlusHUDDrawCall
 
 				const float x = PlateX;
 				const FVector2D A(x + Skew, RowY), B(x + Skew + PlateW, RowY), C(x + PlateW, RowY + PlateH), D(x, RowY + PlateH);
-				DrawQuad(A, B, C, D, PlateCol);
+				AddQuad(A, B, C, D, PlateCol);
 				// Thin lighter top edge for definition.
-				DrawQuad(FVector2D(x + Skew, RowY), FVector2D(x + Skew + PlateW, RowY),
+				AddQuad(FVector2D(x + Skew, RowY), FVector2D(x + Skew + PlateW, RowY),
 					FVector2D(x + Skew + PlateW, RowY + 2.f * S), FVector2D(x + Skew, RowY + 2.f * S), EdgeCol);
 
 				const float CenterX  = x + Skew * 0.5f + PlateW * 0.5f;
@@ -1262,19 +1355,22 @@ namespace NCPlusHUDDrawCall
 
 				if (bShowVitals)
 				{
-					// Name on top, HP/armor below.
-					const FString Name = Fit(NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale);
-					DrawCentered(NameFont, Name, CenterX, RowY + PlateH * 0.30f, NameScale, FLinearColor(0.90f, 0.90f, 0.92f, 1.f));
+					// Name on top (cached fit), HP/armor below.
+					FText NameText; float NW, NH;
+					ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale, NameText, NW, NH);
+					Labels.Add(FPanelLabel{ NameFont, NameText,
+						CenterX - NW * NameScale * 0.5f, (RowY + PlateH * 0.30f) - NH * NameScale * 0.5f,
+						NameScale, FLinearColor(0.90f, 0.90f, 0.92f, 1.f) });
 
 					const int32 HP = UTC->Health;
 					const int32 AR = UTC->GetArmorAmount();
 					const FString HPStr = FString::Printf(TEXT("+%d"), HP);
 					const FString ARStr = FString::Printf(TEXT("%d"), AR);
-					FLinearColor HPCol = (HP <= 34) ? FLinearColor(1.f, 0.42f, 0.42f, 1.f)
-					                   : (HP <= 90) ? FLinearColor(0.92f, 0.82f, 0.30f, 1.f)
-					                                : FLinearColor(0.37f, 0.85f, 0.37f, 1.f);
-					FLinearColor ARCol = (AR <= 0) ? FLinearColor(0.60f, 0.60f, 0.60f, 1.f)
-					                               : FLinearColor(0.93f, 0.83f, 0.29f, 1.f);
+					const FLinearColor HPCol = (HP <= 34) ? FLinearColor(1.f, 0.42f, 0.42f, 1.f)
+					                         : (HP <= 90) ? FLinearColor(0.92f, 0.82f, 0.30f, 1.f)
+					                                      : FLinearColor(0.37f, 0.85f, 0.37f, 1.f);
+					const FLinearColor ARCol = (AR <= 0) ? FLinearColor(0.60f, 0.60f, 0.60f, 1.f)
+					                                     : FLinearColor(0.93f, 0.83f, 0.29f, 1.f);
 
 					// "+HP   armor", centered as a group (green health, yellow armor).
 					float hpXL, hpYL, arXL, arYL;
@@ -1285,29 +1381,17 @@ namespace NCPlusHUDDrawCall
 					const float StatY  = RowY + PlateH - (hpYL * StatScale) - 1.f * S;
 					const float gx = CenterX - TotalW * 0.5f;
 					const float arX = gx + hpXL * StatScale + SpaceW;
-					const float OL = 1.f;
-
-					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, Op));
-					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx - OL, StatY, StatScale, StatScale, RI);
-					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx + OL, StatY, StatScale, StatScale, RI);
-					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx, StatY - OL, StatScale, StatScale, RI);
-					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx, StatY + OL, StatScale, StatScale, RI);
-					HPCol.A *= Op; Canvas->SetLinearDrawColor(HPCol);
-					Canvas->DrawText(StatFont, FText::FromString(HPStr), gx, StatY, StatScale, StatScale, RI);
-
-					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, Op));
-					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX - OL, StatY, StatScale, StatScale, RI);
-					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX + OL, StatY, StatScale, StatScale, RI);
-					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX, StatY - OL, StatScale, StatScale, RI);
-					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX, StatY + OL, StatScale, StatScale, RI);
-					ARCol.A *= Op; Canvas->SetLinearDrawColor(ARCol);
-					Canvas->DrawText(StatFont, FText::FromString(ARStr), arX, StatY, StatScale, StatScale, RI);
+					Labels.Add(FPanelLabel{ StatFont, FText::FromString(HPStr), gx,  StatY, StatScale, HPCol });
+					Labels.Add(FPanelLabel{ StatFont, FText::FromString(ARStr), arX, StatY, StatScale, ARCol });
 				}
 				else
 				{
 					// Enemy: name only, vertically centered (no live enemy HP).
-					const FString Name = Fit(NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale);
-					DrawCentered(NameFont, Name, CenterX, RowY + PlateH * 0.5f, NameScale, FLinearColor(0.92f, 0.92f, 0.95f, 1.f));
+					FText NameText; float NW, NH;
+					ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale, NameText, NW, NH);
+					Labels.Add(FPanelLabel{ NameFont, NameText,
+						CenterX - NW * NameScale * 0.5f, (RowY + PlateH * 0.5f) - NH * NameScale * 0.5f,
+						NameScale, FLinearColor(0.92f, 0.92f, 0.95f, 1.f) });
 				}
 
 				PlateX += Pitch;
@@ -1339,8 +1423,21 @@ namespace NCPlusHUDDrawCall
 				const float ClockCX = Origin.X + Skew * 0.5f + ScoreW * 0.5f;
 				const float ClockCY = Origin.Y + 2.f * PlateH + RowGap + PlateH * 0.5f;
 				const FLinearColor ClockCol = (RoundTime <= 30) ? FLinearColor(1.f, 0.24f, 0.24f, 1.f) : FLinearColor::White;
-				DrawCentered(ScoreFont, ClockStr, ClockCX, ClockCY, ScoreScale, ClockCol);
+				PushCentered(ScoreFont, ClockStr, ClockCX, ClockCY, ScoreScale, ClockCol);
 			}
+		}
+
+		// Flush: every plate fill in a single triangle batch (one DrawItem), then every
+		// label as an outlined text item on top. Op is applied per-label by DrawOutlinedText.
+		if (PlateTris.Num() > 0)
+		{
+			FCanvasTriangleItem TriBatch(PlateTris, WhiteTex);
+			TriBatch.BlendMode = ESimpleElementBlendMode::SE_BLEND_Translucent;
+			Canvas->DrawItem(TriBatch);
+		}
+		for (const FPanelLabel& L : Labels)
+		{
+			DrawOutlinedText(Canvas, L.Font, L.Text, L.X, L.Y, L.Scale, L.Color, FLinearColor::Black, Op);
 		}
 
 		Canvas->SetLinearDrawColor(FLinearColor::White);
@@ -1832,7 +1929,16 @@ void FNCPlusHUDLayout::ReloadLive()
 bool FNCPlusHUDLayout::SaveLive()
 {
 	// Save doesn't change in-memory state → no need to mark dirty.
-	return GetLive().SaveToFile(GetDefaultElimPlusPath());
+	const bool bOk = GetLive().SaveToFile(GetDefaultElimPlusPath());
+	// The first successful save creates the layout file, which flips the
+	// "no saved layout → stock" fallback shared by BOTH WantsStockBottomBar and
+	// WantsStockTeamPanel ("anyone who saved a layout keeps the NCPlus widgets/
+	// portraits"). Drop both caches so they re-resolve next call — WantsStockTeamPanel
+	// is consulted live every frame, so a fresh-install user who customizes + saves
+	// flips to the portrait strip immediately instead of staying on the stock roster
+	// until restart (mirrors the SetStock* refresh).
+	if (bOk) { GStockBottomBarCache = -1; GStockTeamPanelCache = -1; }
+	return bOk;
 }
 
 void FNCPlusHUDLayout::ResetLive()
@@ -1844,6 +1950,7 @@ void FNCPlusHUDLayout::ResetLive()
 void FNCPlusHUDLayout::MarkLiveDirty() { GLiveLayoutDirty = true; ++GLayoutRevision; }
 bool FNCPlusHUDLayout::IsLiveDirty()   { return GLiveLayoutDirty; }
 void FNCPlusHUDLayout::ClearLiveDirty(){ GLiveLayoutDirty = false; }
+uint32 FNCPlusHUDLayout::GetLiveRevision() { return GLayoutRevision; }
 
 // =============================================================================
 // Apply pass

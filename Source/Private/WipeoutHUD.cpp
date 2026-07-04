@@ -440,28 +440,12 @@ void AWipeoutHUD::DrawHUD()
 				{
 					/* Portraits (Red) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(FName(TEXT("portrait_red")), this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(FName(TEXT("portrait_red")), 1.f);
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_RedScale * NameFontExtra;
-					FFontRenderInfo NameRI;
-					NameRI.bEnableShadow = true;
-					FString Name = UTPS->PlayerName;
-					float NXL, NYL;
-					Canvas->StrLen(NameFont, Name, NXL, NYL);
-					// Truncate if wider than pip
-					while (NXL * NameScale > PipSize && Name.Len() > 3)
-					{
-						Name = Name.Left(Name.Len() - 1);
-						Canvas->StrLen(NameFont, Name, NXL, NYL);
-					}
-					// Black outline + white fill (matches HP/Armor style)
-					float NameX = XOffsetRed + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
+					// Cached fit + one outlined item (was a per-frame StrLen loop + 5 DrawText).
+					FText NameText; float NW, NH;
+					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
+					float NameX = XOffsetRed + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
 					float NameY = YOffsetRed + 2.f;
-					float OL = 1.f;
-					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
-					Canvas->SetLinearDrawColor(FLinearColor::White);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
 				}
 				if (UTPS == NextToSpawn)
 				{
@@ -485,27 +469,12 @@ void AWipeoutHUD::DrawHUD()
 				{
 					/* Portraits (Blue) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(FName(TEXT("portrait_blue")), this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(FName(TEXT("portrait_blue")), 1.f);
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_BlueScale * NameFontExtra;
-					FFontRenderInfo NameRI;
-					NameRI.bEnableShadow = true;
-					FString Name = UTPS->PlayerName;
-					float NXL, NYL;
-					Canvas->StrLen(NameFont, Name, NXL, NYL);
-					while (NXL * NameScale > PipSize && Name.Len() > 3)
-					{
-						Name = Name.Left(Name.Len() - 1);
-						Canvas->StrLen(NameFont, Name, NXL, NYL);
-					}
-					// Black outline + white fill (matches HP/Armor style)
-					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
+					// Cached fit + one outlined item (was a per-frame StrLen loop + 5 DrawText).
+					FText NameText; float NW, NH;
+					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
+					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
 					float NameY = YOffsetBlue + 2.f;
-					float OL = 1.f;
-					Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 1.f));
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
-					Canvas->SetLinearDrawColor(FLinearColor::White);
-					Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
 				}
 				if (UTPS == NextToSpawn)
 				{
@@ -938,31 +907,30 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			if (UTC && !UTC->IsDead())
 			{
 				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale * PipFontExtra;
-				FFontRenderInfo TextRenderInfo;
-				TextRenderInfo.bEnableShadow = true;
 
 				int32 HP = UTC->Health;
 				int32 Armor = UTC->GetArmorAmount();
-				FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
 
-				float XL, YL;
-				Canvas->StrLen(PipFont, HPStr, XL, YL);
+				// Rebuild the HP FText + measured extents only when HP/armor (or the font)
+				// change — otherwise the string is identical frame to frame.
+				FWipeoutPipCache& PC = PipCacheByPS.FindOrAdd(PlayerState);
+				if (PC.HpKeyHP != HP || PC.HpKeyAR != Armor || PC.HpFont != PipFont)
+				{
+					const FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
+					float XL, YL;
+					Canvas->StrLen(PipFont, HPStr, XL, YL);
+					PC.HpText   = FText::FromString(HPStr);
+					PC.HpWidth  = XL;
+					PC.HpHeight = YL;
+					PC.HpKeyHP  = HP;
+					PC.HpKeyAR  = Armor;
+					PC.HpFont   = PipFont;
+				}
 
-				float TextX = XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f);
-				float TextY = YOffset + PipHeight - (YL * FontRenderScale) - 2.f;
-
-				// Black outline: draw text offset in 4 directions
-				FLinearColor GoldOutline(0.f, 0.f, 0.f, 1.f);
-				float OutlineOffset = 1.f;
-				Canvas->SetLinearDrawColor(Tinted(GoldOutline));
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX - OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX + OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY - OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY + OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
-
-				// White fill on top
-				Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+				float TextX = XOffset + (PipSize * 0.5f) - (PC.HpWidth * FontRenderScale * 0.5f);
+				float TextY = YOffset + PipHeight - (PC.HpHeight * FontRenderScale) - 2.f;
+				NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.HpText, TextX, TextY,
+					FontRenderScale, FLinearColor::White, FLinearColor::Black, Op);
 			}
 		}
 	}

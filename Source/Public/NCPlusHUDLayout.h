@@ -255,6 +255,11 @@ struct FNCPlusHUDLayout
 
 	/** Cleared automatically by ApplyLayoutToWidgets after a successful apply. */
 	static void ClearLiveDirty();
+
+	/** Monotonic revision counter, bumped on every live-layout mutation (reload,
+	 *  reset, and each editor edit via MarkLiveDirty). HUD-side per-player caches
+	 *  (e.g. fitted names) key on this so a layout edit invalidates them next frame. */
+	static uint32 GetLiveRevision();
 };
 
 /**
@@ -351,6 +356,25 @@ namespace NCPlusHUDDrawCall
 	 *  in to avoid a GConfig re-read race against the just-written value. Removes the family
 	 *  no longer wanted and adds the one now wanted; no-op on a dedicated server / non-UT HUD. */
 	NETCODEPLUS_API void RefreshBottomBarWidgets(class AHUD* HUD, bool bWantStock);
+
+	/** Draw one outlined text string as a single batched FCanvasTextItem (4 diagonal
+	 *  outline passes + 1 fill, ONE DrawItem — no per-pass ICU word-wrap / FText churn).
+	 *  Drop-in for the hand-rolled 4-offset-DrawText stacks in the HUD paths. Opacity
+	 *  scales both fill and outline alpha. Shadow is intentionally omitted — the outline
+	 *  replaces it (the old stacks paid a shadow double-raster on every one of 5 passes). */
+	NETCODEPLUS_API void DrawOutlinedText(class UCanvas* Canvas, const class UFont* Font,
+		const FText& Text, float X, float Y, float Scale,
+		FLinearColor Fill, FLinearColor Outline = FLinearColor::Black, float Opacity = 1.f);
+
+	/** Fit a player name into MaxWidthPx at draw Scale, caching the fitted result per
+	 *  PlayerState so the per-frame chop-one-char StrLen loop runs only when an input
+	 *  (name / font / width bucket / layout revision) actually changes. Fills OutText
+	 *  (ready-to-draw FText) and OutWidth/OutHeight (UNSCALED StrLen extents — multiply
+	 *  by Scale for pixels). The cache clears wholesale on world change (level
+	 *  transition) and on a layout-revision bump. */
+	NETCODEPLUS_API void ResolveFittedName(class UCanvas* Canvas, class APlayerState* PS,
+		class UFont* Font, const FString& Src, float MaxWidthPx, float Scale,
+		FText& OutText, float& OutWidth, float& OutHeight);
 
 	/** Stock-style top-left team roster: red row then blue row of slanted, team-
 	 *  colored plates (name over "+HP armor" for teammates, name only for enemies).

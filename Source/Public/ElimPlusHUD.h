@@ -76,8 +76,34 @@ private:
 		int32 ToElo      = 0;
 		int32 FinalDelta = 0;
 	};
-	TMap<FString, FElimPlusEloAnim> EloAnimByPlayerId;
+	// Keyed on the PlayerState (weak) rather than the UniqueId string — no per-pip
+	// FString hashing, and entries self-expire when the PS is destroyed.
+	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPlusEloAnim> EloAnimByPlayerId;
 	static constexpr float EloAnimDurationSec = 4.0f;
+
+	/** Per-PlayerState portrait-strip caches: the immutable UniqueId string (built once),
+	 *  and the last-rendered ELO-chip / HP FText + measured width keyed on the values they
+	 *  display, so an unchanged frame skips the Printf + StrLen + FText::FromString. Keyed
+	 *  weakly; entries self-expire with the PS. (Fitted names are cached separately by
+	 *  NCPlusHUDDrawCall::ResolveFittedName.) */
+	struct FElimPipCache
+	{
+		FString UidStr;
+		bool    bUidValid = false;
+
+		int32 EloKeyElo   = MIN_int32;
+		int32 EloKeyDelta = MIN_int32;
+		FText  EloText;
+		float  EloWidth   = 0.f;
+
+		const UFont* HpFont = nullptr;
+		int32 HpKeyHP = MIN_int32;
+		int32 HpKeyAR = MIN_int32;
+		FText  HpText;
+		float  HpWidth  = 0.f;
+		float  HpHeight = 0.f;
+	};
+	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPipCache> PipCacheByPS;
 
 	/** Client-side timestamp captured the first frame the gamestate reports
 	 *  CountdownToBegin. DrawPreMatchTeamPreview fades the overlay alpha from
