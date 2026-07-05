@@ -79,8 +79,8 @@ static FORCEINLINE bool GhostFix()
 // cooldown path uses (fires at cycle end; released tap auto-cancels via StopFire's
 // unconditional retry-clear). 0 = legacy drop. Client-side, no replication, no bump.
 static TAutoConsoleVariable<int32> CVarCrossModeRetry(
-    TEXT("ncp.CrossModeRetry"), 0,
-    TEXT("Cross-mode held-fire retry (fixes the held-M1 shock beam stall after a ball): 1=queue a retry at the current cycle's end, 0=legacy drop. Off by default. Standalone-safe with ncp.GhostFix 0: the PutDown graduation skips cross-mode-armed retries (bCrossModeRetryArmed), so no ghost shot on a fast weapon switch."),
+    TEXT("ncp.CrossModeRetry"), 1,
+    TEXT("Cross-mode held-fire retry (fixes the held-M1 shock beam stall after a ball): 1=queue a retry at the current cycle's end (default), 0=restore the legacy drop (kill-switch). Standalone-safe with ncp.GhostFix 0: the PutDown graduation skips cross-mode-armed retries (bCrossModeRetryArmed), so no ghost shot on a fast weapon switch."),
     ECVF_Default);
 
 static FORCEINLINE bool CrossModeRetry()
