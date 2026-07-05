@@ -4,6 +4,7 @@
 #include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
+#include "UTHUDWidgetMessage_KillIconMessages.h"   // killfeed special-case (KillIconWidget stomp bypass)
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "UTPlayerState.h"
@@ -822,7 +823,12 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                     FText::FromString(TEXT("Weapon Bar (Right)")), false, ENCPlusHUDAnchor::CenterRight, FVector2D(-20.f, -20.f));
 			T.Emplace(TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")),          false, ENCPlusHUDAnchor::Center);
 			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")),           false, ENCPlusHUDAnchor::BottomLeft, FVector2D(20.f, -20.f));
-			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")), false, ENCPlusHUDAnchor::TopRight);
+			// StockAnchor is TopLeft because that IS the stock base: AUTHUD::DrawHUD
+			// stomps KillIconWidget->ScreenPosition to (0,0) every frame (UTHUD.cpp:842-845)
+			// — the widget never actually sat at TopRight. The old TopRight seed made the
+			// first drag jump a full screen width once anchors take real effect (see the
+			// killfeed special-case in ApplyLayoutToWidgets).
+			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")), false, ENCPlusHUDAnchor::TopLeft);
 			T.Emplace(TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")), false, ENCPlusHUDAnchor::TopRight);
 			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")),      false, ENCPlusHUDAnchor::TopCenter);
 			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")),   false, ENCPlusHUDAnchor::BottomLeft);
@@ -2053,6 +2059,14 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 		const FNCPlusHUDElement* Elem = Layout.Find(Alias);
 		if (!Elem)
 		{
+			// Killfeed: no override → hand the widget back to the engine's stomp
+			// (re-cache the pointer we null below) so Reset / removed-entry restores
+			// the stock scoreboard-aware positioning exactly.
+			if (Alias == TEXT("killfeed") && HUD->KillIconWidget == nullptr)
+			{
+				HUD->KillIconWidget = Cast<UUTHUDWidgetMessage_KillIconMessages>(W);
+			}
+
 			// No override → restore stock snapshot so Reset / removed-entry
 			// returns the widget to exactly where the engine put it on spawn.
 			if (FNCPlusWidgetDefaults* D = GWidgetDefaults.Find(Alias))
@@ -2108,6 +2122,21 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 			SetVec2Prop(W, TEXT("HorizontalPosition"),       Elem->Offset);
 			SetVec2Prop(W, TEXT("VerticalScreenPosition"),   AnchorCoords);
 			SetVec2Prop(W, TEXT("VerticalPosition"),         Elem->Offset);
+		}
+		// Killfeed special-case: stock AUTHUD::DrawHUD re-stomps
+		// KillIconWidget->ScreenPosition EVERY frame (UTHUD.cpp:842-845, to (0,0) or
+		// the scoreboard spot) right before the widget render loop — and our apply
+		// runs BEFORE Super::DrawHUD, so the anchor write above never survived to
+		// PreDraw. That's why nchud moves "didn't take until map change" (only the
+		// pixel Offset ever applied; anchors never did). Null the HUD's cached
+		// pointer while an override exists: the stomp branch is skipped, our writes
+		// stick, and AddHudWidget only re-caches on widget creation so the null
+		// holds for the match. Restored in the no-override branch above. Trade-off
+		// (accepted): the stock "drop the feed below the scoreboard" reposition is
+		// disabled while the user has a custom placement.
+		if (Alias == TEXT("killfeed"))
+		{
+			HUD->KillIconWidget = nullptr;
 		}
 		// Scale reserved for Phase 3.
 
