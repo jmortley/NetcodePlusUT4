@@ -16,6 +16,7 @@
 #include "WarmupRoamMutator.generated.h"
 
 class AUTCharacter;
+class AUTPlayerState;
 
 UCLASS()
 class NETCODEPLUS_API AWarmupRoamMutator : public AUTMutator
@@ -23,8 +24,16 @@ class NETCODEPLUS_API AWarmupRoamMutator : public AUTMutator
 	GENERATED_UCLASS_BODY()
 
 public:
-	/** `mutate warmup` toggles roam for the sender. Warmup-only; rejected otherwise. */
+	/** `mutate warmup` toggles roam for the sender (warmup-only; rejected otherwise).
+	 *  `mutate host` replies with the match host's name over ClientMessage — server-side
+	 *  stopgap for the unreliable HOST badge until the ANCHostInfo client roll lands. */
 	virtual void Mutate_Implementation(const FString& MutateString, APlayerController* Sender) override;
+
+	/** Auto-announce the match host in the console on join (same stopgap as `mutate
+	 *  host`, but pushed instead of queried): each human joiner gets "Match host: X"
+	 *  ~10s after login (past the loading screen + version-gate window), and when the
+	 *  HOST joins, everyone already connected is told — covering both join orders. */
+	virtual void PostPlayerInit_Implementation(AController* C) override;
 
 	/** Re-assert roam on a respawned pawn (firing/invuln reset to defaults each spawn). */
 	virtual void ModifyPlayer_Implementation(APawn* Other, bool bIsNewSpawn) override;
@@ -48,4 +57,13 @@ protected:
 
 	/** Strip roam from all tracked pawns + clear the list. */
 	void ClearAll();
+
+	/** Server-side host resolve, mirroring the engine ReadyToStartMatch loop
+	 *  (GetHostId vs PlayerArray UniqueIds, IgnoreCase, skip inactive). Returns the
+	 *  host's PS when connected; bOutHostConfigured = whether ?HostId= is set at all. */
+	AUTPlayerState* ResolveHostPS(bool& bOutHostConfigured) const;
+
+	/** Delayed per-joiner console line ("Match host: X" / "hasn't joined yet").
+	 *  No-ops if the player left or the match started during the delay. */
+	void SendHostInfoTo(TWeakObjectPtr<APlayerController> WeakPC);
 };

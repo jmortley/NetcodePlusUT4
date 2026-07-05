@@ -15,6 +15,7 @@
 #include "GameFramework/PlayerStart.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "TimerManager.h"            // ValidateHat: SetTimerForNextTick / FTimerDelegate
 #include "StatNames.h"
 #include "NCLeagueDuelHUD.h"
 #include "NCDuelRatingSystem.h"
@@ -57,6 +58,29 @@ namespace
 		if (G == TEXT("Link"))   return TEXT("Mini");
 		return NAME_None;
 	}
+}
+
+bool ANCLeagueDuelGame::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat as an OverrideHatClass (which
+	// the engine does NOT entitlement-check) on the next tick — after ServerReceiveHatClass's
+	// ValidateEntitlements strip — so the community master's withheld cosmetic entitlements can't remove it.
+	// Server-side; never kicks. Mirrors ANCPlusCTFGameMode::ValidateHat. NULL in the log = class didn't load.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
 }
 
 ANCLeagueDuelGame::ANCLeagueDuelGame(const FObjectInitializer& OI)
@@ -999,4 +1023,26 @@ void ANCLeagueDuelGame::BuildMatchSummary(FNCMatchSummary& Out) const
 
 		Out.Players.Add(P);
 	}
+}
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool ANCLeagueDuelGame::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool ANCLeagueDuelGame::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
 }

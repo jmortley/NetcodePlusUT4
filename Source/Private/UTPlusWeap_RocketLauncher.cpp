@@ -332,11 +332,16 @@ void AUTPlusWeap_RocketLauncher::FireShot()
         // Check if we are physically allowed to fire right now
         if (FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime))
         {
-            // LOG AND ABORT
-            //UE_LOG(LogUTRocketLauncher, Warning, TEXT("[FireShot] ABORTING ILLEGAL SHOT! IsFireModeOnCooldown=TRUE. Time: %.4f"), CurrentTime);
-
-            // OPTIONAL: Force the timer to stay clean
-            // If the rhythm logic is aggressive, ensure we don't snap things here.
+            // DIAGNOSTIC (net-safe, survives Shipping): this silent abort is a rocket no-reg suspect.
+            // Surface an ABNORMAL (>1s) block server-side so a repro names the values that caused it.
+            const float Lft = LastFireTime.IsValidIndex(CurrentFireMode) ? LastFireTime[CurrentFireMode] : -1.f;
+            if (Role == ROLE_Authority &&
+                ((EarliestFireTime - CurrentTime) > 1.0f || (Lft > 0.f && (Lft - CurrentTime) > 1.0f)))
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[FireBlock] RocketLauncher FireShot mode %d abort: EarliestFireTime=%.2f LastFireTime=%.2f now=%.2f"),
+                    CurrentFireMode, EarliestFireTime, Lft, CurrentTime);
+            }
+            // ABORT to protect the rhythm logic (original behavior).
             return;
         }
     }
@@ -1058,6 +1063,11 @@ void AUTPlusWeap_RocketLauncher::UpdateLock()
 		UTOwner->Controller == nullptr ||
 		UTOwner->IsFiringDisabled() ||
 		(CurrentFireMode != 1) ||    // Must be alt-fire mode
+		(CurrentRocketFireMode != 0) || // Only the standard tri-rocket spread seeks (FireRocketProjectile
+		                                // consumes LockedTarget in case 0 only) — grenades/spirals never
+		                                // did, so don't acquire or keep a lock there: it also drew a
+		                                // misleading lock reticle. Cycling modes mid-load clears/re-arms
+		                                // within LockCheckTime (0.1s).
 		!IsFiring() ||
 		(NumLoadedRockets == 0))     // Must have rockets loaded
 	{

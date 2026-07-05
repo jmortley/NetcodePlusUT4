@@ -125,6 +125,11 @@ class NETCODEPLUS_API AUWipeoutGame : public AUTTeamGameMode
 public:
 	AUWipeoutGame(const FObjectInitializer& ObjectInitializer);
 
+	// Unlock entitlement-gated cosmetics: force the player's chosen hat as an OverrideHatClass (not
+	// entitlement-checked) so the community master's missing cosmetic entitlements can't strip it.
+	// Server-side, never kicks. See impl.
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
+
 	// =======================================================================
 	// WIPEOUT-SPECIFIC CONFIGURATION
 	// =======================================================================
@@ -242,6 +247,19 @@ public:
 	/** Fractional heal accumulator per player (beam ticks faster than 1HP). */
 	UPROPERTY(Transient)
 	TMap<TWeakObjectPtr<AUTPlayerState>, float> LinkHealAccumulator;
+
+	/** Match-cumulative HP each player has restored to teammates this match
+	 *  (link beam + any BP heal ability that calls CreditHealing). Source of
+	 *  truth for the "healing done" stat; cleared in HandleMatchHasStarted. */
+	UPROPERTY(Transient)
+	TMap<TWeakObjectPtr<AUTPlayerState>, int32> HealingDoneThisMatch;
+
+	/** Credit a healer with HP actually restored to a teammate. Called from the
+	 *  C++ link-beam heal path; BlueprintCallable so the spawn heal ability (a BP
+	 *  boost) can report its heals through the same accumulator. Server-authority
+	 *  only; no-op on null healer / Amount <= 0. */
+	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
+	void CreditHealing(AUTPlayerState* HealerPS, int32 Amount);
 
 
 	// =======================================================================
@@ -558,6 +576,13 @@ public:
 	virtual void DefaultTimer() override;
 	void Logout(AController* Exiting) override;
 
+	/** Pin bot-PUG players to their bot-assigned team (?PugTeams). Login picks,
+	 *  manual switches, and the engine's warmup auto-balance all route through
+	 *  ChangeTeam, so this is the one choke point that pins them. Non-roster joiners
+	 *  (subs/late fills/unlinked) defer to Super's stock balancing. PUG-only
+	 *  (bIsPugMatch). Mirrors ANCPlusCTFGameMode::ChangeTeam. */
+	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
+
 	/** Server-side rating system for Wipeout (separate ladder from ElimPlus).
 	 *  Updated each EndRoundForTeam; flushed to Mods.db + pushed to ut4stats at
 	 *  HandleMatchHasEnded. Non-UObject, server-only. */
@@ -567,6 +592,16 @@ public:
 	 *  InitGame; set true after the first successful flush. */
 	UPROPERTY(Transient)
 	bool bRatingFlushedThisMatch = false;
+
+	/** True when launched as a bot PUG (?PugId present) — gates ?PugTeams pinning. */
+	bool bIsPugMatch = false;
+
+	/** Bot-assigned teams: lowercased EOS id (== bot players.ut4_id / MutBotEvents
+	 *  Ut4Id) -> team (0 red, 1 blue). Parsed from ?PugTeams in InitGame; consulted
+	 *  in ChangeTeam to pin each rostered player to the side the bot balanced so the
+	 *  warmup auto-balance can't reshuffle the match. Empty for non-PUG games and
+	 *  unlinked players (they fall through to stock balancing). Server-only. */
+	TMap<FString, uint8> PugRosterTeam;
 
 	virtual void CallMatchStateChangeNotify() override;
 	virtual bool CheckRelevance_Implementation(AActor* Other) override;
@@ -799,4 +834,18 @@ protected:
 	/** Track team sizes at round start */
 	int32 Team0StartingSize;
 	int32 Team1StartingSize;
+
+	/** Counts everyone ON each team (alive, dead, or awaiting a respawn wave) —
+	 *  GetAliveCounts minus the living-pawn requirement. Used to detect someone
+	 *  joining the empty team during a solo/practice round. */
+	bool GetTeamMemberCounts(int32& OutTeam0, int32& OutTeam1) const;
+
+public:
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
+	/** Defer a host/rcon unpause behind a short server-only resume countdown
+	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	virtual bool ClearPause() override;
 };

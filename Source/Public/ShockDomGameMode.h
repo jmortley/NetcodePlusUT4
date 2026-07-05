@@ -18,6 +18,19 @@ class NETCODEPLUS_API AShockDomGameMode : public AUTTeamGameMode
 public:
 	AShockDomGameMode(const FObjectInitializer& ObjectInitializer);
 
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
+	/** Defer a host/rcon unpause behind a short server-only resume countdown
+	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	virtual bool ClearPause() override;
+
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat via OverrideHatClass so the
+	// community master's withheld cosmetic entitlements can't strip it. Server-side, never kicks. See impl
+	// (mirrors ANCPlusCTFGameMode / AUWipeoutGame).
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
+
 
 	// =======================================================================
 	// DOMINATION CONFIGURATION

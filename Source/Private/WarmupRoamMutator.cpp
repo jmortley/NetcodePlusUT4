@@ -4,6 +4,8 @@
 #include "UTCharacter.h"
 #include "UTPlayerController.h"
 #include "UTGameState.h"
+#include "UTBaseGameMode.h"
+#include "UTPlayerState.h"
 
 AWarmupRoamMutator::AWarmupRoamMutator(const FObjectInitializer& OI)
 	: Super(OI)
@@ -85,8 +87,125 @@ void AWarmupRoamMutator::Mutate_Implementation(const FString& MutateString, APla
 		}
 		// fall through to Super so the rest of the mutator chain still sees the command.
 	}
+	else if (Sender != nullptr && MutateString.Equals(TEXT("host"), ESearchCase::IgnoreCase))
+	{
+		// Stopgap host visibility: the scoreboard HOST badge is unreliable on some
+		// servers until the ANCHostInfo client roll (feature/host-badge-info-actor),
+		// so let anyone ask the server directly. The answer travels over the stock
+		// ClientMessage RPC, so this works for current clients with no recook.
+		bool bHostConfigured = false;
+		AUTPlayerState* HostPS = ResolveHostPS(bHostConfigured);
+		if (!bHostConfigured)
+		{
+			Sender->ClientMessage(TEXT("No match host is configured on this server."));
+		}
+		else
+		{
+			Sender->ClientMessage(HostPS != nullptr
+				? FString::Printf(TEXT("Match host: %s"), *HostPS->PlayerName)
+				: TEXT("Match host is not connected yet."));
+			// Server-log echo so admins can grep who the host resolved to per match.
+			UE_LOG(LogGameMode, Log, TEXT("[WarmupRoam] mutate host: %s (asked by %s)"),
+				HostPS ? *HostPS->PlayerName : TEXT("<not connected>"),
+				(Sender->PlayerState != nullptr) ? *Sender->PlayerState->PlayerName : TEXT("<unknown>"));
+		}
+		// fall through to Super, same as `warmup`.
+	}
 
 	Super::Mutate_Implementation(MutateString, Sender);
+}
+
+AUTPlayerState* AWarmupRoamMutator::ResolveHostPS(bool& bOutHostConfigured) const
+{
+	bOutHostConfigured = false;
+	// UE4.15: GetAuthGameMode() returns AGameModeBase* — cast to reach GetHostId().
+	AUTBaseGameMode* GM = GetWorld() ? Cast<AUTBaseGameMode>(GetWorld()->GetAuthGameMode()) : nullptr;
+	const FString HostId = GM ? GM->GetHostId() : FString();
+	if (HostId.IsEmpty())
+	{
+		return nullptr;
+	}
+	bOutHostConfigured = true;
+
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	if (GS != nullptr)
+	{
+		for (int32 i = 0; i < GS->PlayerArray.Num(); i++)
+		{
+			AUTPlayerState* PS = Cast<AUTPlayerState>(GS->PlayerArray[i]);
+			// Mirror the engine host loop's match (UTGameMode::ReadyToStartMatch):
+			// id equality, case-insensitive, skip inactive.
+			if (PS != nullptr && !PS->bIsInactive && PS->UniqueId.IsValid()
+				&& HostId.Equals(PS->UniqueId.ToString(), ESearchCase::IgnoreCase))
+			{
+				return PS;
+			}
+		}
+	}
+	return nullptr;
+}
+
+void AWarmupRoamMutator::PostPlayerInit_Implementation(AController* C)
+{
+	Super::PostPlayerInit_Implementation(C);
+
+	// Auto-announce the match host on join — pushed counterpart of `mutate host`.
+	// PostPlayerInit also fires for bots; only humans get console lines.
+	AUTPlayerState* PS = (C != nullptr) ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+	if (C == nullptr || (PS != nullptr && PS->bIsABot))
+	{
+		return;
+	}
+	bool bHostConfigured = false;
+	AUTPlayerState* HostPS = ResolveHostPS(bHostConfigured);
+	if (!bHostConfigured || !IsWarmup())
+	{
+		return;   // hostless server or mid-match join — nothing worth announcing
+	}
+
+	// The joiner IS the host: tell everyone already connected, immediately — players
+	// who joined before the host otherwise never learn the name.
+	if (HostPS != nullptr && PS == HostPS)
+	{
+		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+		{
+			APlayerController* Other = *It;
+			if (Other != nullptr && Other != C)
+			{
+				Other->ClientMessage(FString::Printf(TEXT("Match host: %s has joined."), *HostPS->PlayerName));
+			}
+		}
+		return;   // the host knows who they are
+	}
+
+	// Regular joiner: a message sent right now lands while they're still on the
+	// loading screen and scrolls away unseen, so delay it past the travel (and past
+	// the version-gate kick window — no point messaging a client about to be kicked).
+	if (APlayerController* PC = Cast<APlayerController>(C))
+	{
+		FTimerHandle Unused;
+		GetWorldTimerManager().SetTimer(Unused,
+			FTimerDelegate::CreateUObject(this, &AWarmupRoamMutator::SendHostInfoTo, TWeakObjectPtr<APlayerController>(PC)),
+			10.f, false);
+	}
+}
+
+void AWarmupRoamMutator::SendHostInfoTo(TWeakObjectPtr<APlayerController> WeakPC)
+{
+	APlayerController* PC = WeakPC.Get();
+	if (PC == nullptr || !IsWarmup())
+	{
+		return;   // left during the delay, or the match already started
+	}
+	bool bHostConfigured = false;
+	AUTPlayerState* HostPS = ResolveHostPS(bHostConfigured);
+	if (!bHostConfigured)
+	{
+		return;
+	}
+	PC->ClientMessage(HostPS != nullptr
+		? FString::Printf(TEXT("Match host: %s (starts the match when ready)"), *HostPS->PlayerName)
+		: TEXT("The match host hasn't joined yet."));
 }
 
 void AWarmupRoamMutator::ModifyPlayer_Implementation(APawn* Other, bool bIsNewSpawn)

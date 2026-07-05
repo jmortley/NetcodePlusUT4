@@ -13,6 +13,17 @@
 #include "UTArmor.h"
 #include "UTDamageType.h"
 #include "Net/UnrealNetwork.h"
+#include "UTPlayerController.h"
+#include "UTPlayerState.h"            // GetSelectedCharacter (DarkenBodies skeleton fallback)
+#include "UTCharacterContent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "NCPlusForceModels.h"
+#include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
+#include "TimerManager.h"           // DarkenBodies delayed corpse hide
+#include "UTCarriedObject.h"        // HideDeadBody: don't blank a carried flag still parented to the corpse
+#include "Kismet/GameplayStatics.h" // SpawnSound2D (own-footstep volume)
+#include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
+#include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -20,6 +31,39 @@ static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("If 1, enables one-way latency visual prediction for non hitscan weapons.\n")
 	TEXT("Players can set to 0 to opt-out (force server positions)."),
 	ECVF_Default); // Saves to user config
+
+// Headshot sphere CENTRE distance below the capsule top, in units. LOWER = the sphere moves UP toward the head
+// (it does NOT change the sphere SIZE — that's HeadRadius). Live-tunable so it can be calibrated in warmup against
+// ncp.DebugHeads instead of a rebuild per tweak. ⚠️ MUST match client + server: the SERVER's value is authoritative
+// for the fallback head validation (GetHeadLocation -> IsHeadShot); the client's value only moves the debug ring.
+// Set it on your dogfood server (or a listen server, where client == server) so the green ring AND the real hitbox
+// move together. NB the PRIMARY sniper client-informed path uses the HeadBand* clamp, not this — see UTPlusSniper.
+static TAutoConsoleVariable<float> CVarHeadCapsuleDrop(
+	TEXT("ncp.HeadCapsuleDrop"),
+	20.0f,   // calibrated 2026-06-19 (was 26; robot/genghis heads sit higher than the stock ~Z+82)
+	TEXT("Headshot sphere centre distance below the capsule top (units). Lower = sphere moves UP toward the head; ")
+	TEXT("size is unchanged (HeadRadius). Calibrate live in warmup vs ncp.DebugHeads. Server value is authoritative."),
+	ECVF_Default);
+
+// Projectile visual-prediction stability smoothing (UTUpdateSimulatedPosition). ASYMMETRIC: when a high-ping enemy
+// jukes, the prediction lead must drop FAST so they stop warping; re-arming the lead is SLOW so we don't over-predict
+// straight into their next juke. FastDrop = FInterpTo rate when the stability factor is falling (target reversing/
+// perpendicular); SlowRise = rate when it climbs back (target straightened). Live-tunable for dogfood feel.
+static TAutoConsoleVariable<float> CVarPredStabFastDrop(
+	TEXT("ncp.PredStabFastDrop"),
+	30.0f,
+	TEXT("Projectile-prediction stability: FInterpTo rate when the lead must drop (target juking). High = snap off fast (~1 frame)."),
+	ECVF_Default);
+static TAutoConsoleVariable<float> CVarPredStabSlowRise(
+	TEXT("ncp.PredStabSlowRise"),
+	4.0f,
+	TEXT("Projectile-prediction stability: FInterpTo rate when re-arming the lead (target straightened). Low = ease up slowly (~250ms)."),
+	ECVF_Default);
+static TAutoConsoleVariable<int32> CVarHideArmorShield(
+	TEXT("ncp.HideArmorShield"),
+	0,
+	TEXT("ForceModels armour-shield fallback: 1 = HIDE the shield-belt overlay instead of recolouring it (for community models whose shield material bakes the gold and ignores the Color recolour). Default 0 = recolour to the team skin colour. Runtime-toggleable; client-side."),
+	ECVF_Default);
 
 
 ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer)
@@ -34,6 +78,486 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
     //PositionSaveRate = 120.0f;
     //PositionSaveInterval = 1.0f / PositionSaveRate;
     //LastPositionSaveTime = 0.0f;
+}
+
+// ── Force Models (MutForceModels port, phase 1) ─────────────────────────────
+// One override covers every apply trigger — spawn (PossessedBy) and team-change
+// (OnRep_PlayerState / Team / SelectedCharacter OnRep) all route through the base
+// NotifyTeamChanged. The base reverts the pawn to its REAL model each time it runs.
+// Because a single replication burst fires this 2-4x, we don't re-force inline; we mark
+// the pawn dirty and re-assert the forced model once on the next Tick (FlushForcedModelUpdate).
+void ATeamArenaCharacter::NotifyTeamChanged()
+{
+	Super::NotifyTeamChanged();
+
+	// Coalesce the forced-model apply. PossessedBy / OnRep_PlayerState / the PlayerState's own
+	// NotifyTeamChanged / UTTeamInfo each drive this 2-4x in ONE replication burst (spawn, join, team
+	// assignment) — so the heavy ApplyCharacterData mesh rebuild + double GetBodyMIs() recolour loop ran
+	// 2-4x per remote pawn per spawn (a hitch). Super above has ALREADY reverted the mesh to the real
+	// model on THIS call, so instead of re-forcing per OnRep we just mark dirty here and re-assert the
+	// forced model EXACTLY ONCE on the next Tick. Tick runs after this frame's replication dispatch, so
+	// the reskin still lands before render (no real-model flash). The flush re-forces with
+	// bForceReapply=true and must NOT latch-skip — each Super::NotifyTeamChanged unconditionally reverted
+	// the mesh, so a skip would silently drop the reskin.
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		bForcedModelDirty = true;
+
+		// Friend/enemy is relative to the local player. If this is MY pawn and my team just changed,
+		// every OTHER pawn's bucket can flip — but their NotifyTeamChanged won't fire. Refresh them
+		// (also coalesced to the next-tick flush). Matters for Enemy-Only / Team-Enemy styles; a cheap
+		// no-op for absolute Red/Blue.
+		if (IsLocalPlayerPawn())
+		{
+			bRefreshOthersDirty = true;
+		}
+	}
+}
+
+// Apply the coalesced forced-model work, at most once per frame. Called from the top of Tick on clients,
+// which runs AFTER this frame's network replication dispatch — so the N NotifyTeamChanged calls from a
+// single replication burst collapse into ONE ApplyCharacterData rebuild here. bForceReapply MUST be true:
+// every Super::NotifyTeamChanged during the burst reverted the mesh to the real model, so the flush has to
+// re-force unconditionally (a latch-skip would silently drop the reskin).
+void ATeamArenaCharacter::FlushForcedModelUpdate()
+{
+	if (bForcedModelDirty)
+	{
+		bForcedModelDirty = false;
+		ApplyForcedModel(/*bForceReapply=*/true);
+	}
+	if (bRefreshOthersDirty)
+	{
+		bRefreshOthersDirty = false;
+		RefreshOtherForcedModels();
+	}
+}
+
+// "Is this MY OWN pawn?" — controlled by a LOCAL human player. Deliberately NOT IsLocallyControlled(): in
+// NM_Standalone (offline) every controller (incl. bots' AIControllers) reports IsLocalController()==true, so
+// IsLocallyControlled() was true for every pawn and Force Models skipped them all offline. Bots use AIController,
+// not a PlayerController, so the Cast cleanly excludes them; IsLocalController() keeps remote players (on a listen
+// server) from matching. Correct in standalone, client, and listen-server.
+bool ATeamArenaCharacter::IsLocalPlayerPawn() const
+{
+	const APlayerController* const PC = Cast<APlayerController>(Controller);
+	return PC && PC->IsLocalController();
+}
+
+void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
+{
+	// Client-side render preference only — never on a dedicated server, never replicated.
+	if (GetNetMode() == NM_DedicatedServer) { return; }
+	if (bApplyingForcedModel) { return; }                 // re-entrancy guard (ApplyCharacterData / base NotifyTeamChanged)
+	// MY OWN pawn → COLOUR-ONLY: keep your real model, run the team-colour tint only (gated below) so your
+	// own body matches the recoloured teammates and the line-up / post-game line-up. (NOT IsLocallyControlled
+	// — that's true for every pawn offline; see IsLocalPlayerPawn.)
+	const bool bColourOnly = IsLocalPlayerPawn();
+
+	UWorld* const World = GetWorld();
+
+	// ── Resolve desired state: the model class + colour to force, or "none" = leave natural. ──
+	TSubclassOf<AUTCharacterContent> Content = nullptr;
+	FLinearColor Colour = FLinearColor::White;
+	float        GlowIntensity = 0.f;          // subtle-highlight emissive strength, from Brightness
+	bool bWantForce = false;
+
+	if (NCPlusForceModels::IsEnabled())
+	{
+		const int32 MyTeam = (int32)GetTeamNum();
+		if (MyTeam != 255)                                // FFA / no team: deferred (see ForceModels plan)
+		{
+			// Resolve friend/enemy against THE LOCAL VIEWER's team. NCPlusForceModels::GetViewerTeam
+			// uses GetFirstPlayerController() (the one local PC on a client) and, for a teamless
+			// spectator, defaults to red = "ours" so Team/Enemy still buckets (OnSameTeam returns
+			// false for a spectator, which made everyone read as an enemy).
+			const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));
+
+			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+			Content = NCPlusForceModels::GetModelClass(Side);
+			if (Content && NCPlusForceModels::IsModelAllowed(Content))
+			{
+				// "Glow" (1 = normal .. 5 = 5x) brightens the model toward the flat, unlit HUD swatch.
+				// The lever that actually brightens the BODY is the ALBEDO (the team-colour params below —
+				// proven by the recolour working); driving Emissive Max did NOTHING because these body
+				// materials have no emissive source (only the eyes do, which is why only they glowed). So
+				// Glow OVERBRIGHTS the recolour colour. The emissive scalars are still fed (harmless; helps
+				// any model that does have a body emissive channel).
+				const float Glow = FMath::Clamp(Side.Brightness, 1.f, 5.f);
+				Colour        = NCPlusForceModels::GetSkinColour(Side) * Glow;
+				Colour.A      = 1.f;                       // operator* scales alpha too; keep it opaque
+				GlowIntensity = (Glow - 1.f) * 1.25f;      // 1 -> 0, 5 -> 5 emissive (only shows where supported)
+				bWantForce    = true;
+			}
+		}
+	}
+
+	// ── Natural: feature off, FFA, or friendly under Enemy-Only → this pawn keeps its real model. ──
+	if (!bWantForce)
+	{
+		if (bForcedModelApplied)
+		{
+			// NotifyTeamChanged path: the base already restored the real model this call.
+			// Refresh path: it did not — restore by re-running the base team-change logic.
+			if (!bForceReapply)
+			{
+				bApplyingForcedModel = true;
+				bAllowCharacterDataOverride = true;
+				AUTCharacter::NotifyTeamChanged();        // ApplyCharacterData(real) + TeamSelect + weapon/hat
+				bApplyingForcedModel = false;
+			}
+			bForcedModelApplied = false;
+			LastForcedContent   = nullptr;
+			UpdateCosmeticStrip(false);   // pawn no longer reskinned -> restore any stripped cosmetics
+		}
+		return;
+	}
+
+	// ── Force. Skip only in the refresh path when nothing changed (the base didn't revert us there). ──
+	if (!bForceReapply && bForcedModelApplied && LastForcedContent == Content.Get() && LastForcedColour == Colour)
+	{
+		return;
+	}
+
+	bApplyingForcedModel = true;
+
+	// Force the mesh via UT's own swap (rebuilds BodyMIs). Flag must be set BEFORE the call —
+	// stock ApplyCharacterData early-returns unless bAllowCharacterDataOverride is true.
+	// Own pawn (bColourOnly): skip the mesh swap — keep the real model and its existing BodyMIs, tint only.
+	if (!bColourOnly)
+	{
+		bAllowCharacterDataOverride = true;
+		ApplyCharacterData(Content);
+	}
+
+	static const FName NAME_TeamSelect(TEXT("TeamSelect"));
+	static const FName NAME_TeamBlendMax(TEXT("Team Color Blend Max"));
+	static const FName NAME_EmissiveMax(TEXT("Emissive Max"));
+	static const FName NAME_EmissionPower(TEXT("Emission Power"));
+	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames();
+
+	// Decide ONCE whether this model can be recoloured. It can't if either (a) no non-skipped body
+	// material exposes any of our team-colour params (param-less models, e.g. Garog — auto-detected),
+	// or (b) a material is on the [ForceModels] BakedMaterials denylist (params exist but are inert and
+	// indistinguishable at runtime, e.g. the community Robot). Non-recolourable models fall back to
+	// their baked red/blue team skin below, so they stay team-readable instead of a flat default colour.
+	bool bHasParam = false, bDenylisted = false;
+	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	{
+		if (!MID) { continue; }
+		const UMaterialInterface* Src = MID->Parent;
+		const FString MatName = Src ? Src->GetName() : MID->GetName();
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName)) { continue; }
+		if (NCPlusForceModels::IsBakedMaterial(MatName)) { bDenylisted = true; }
+		if (!bHasParam)
+		{
+			FLinearColor Tmp;
+			for (const FName& P : Params)
+			{
+				if (MID->GetVectorParameterValue(P, Tmp)) { bHasParam = true; break; }
+			}
+		}
+	}
+	const bool bRecolour = bHasParam && !bDenylisted;
+	// Outline mode ("Outline" flag): keep the forced mesh but render the body NEUTRAL (no team colour) —
+	// the team read comes from the LOS outline (NCPlusForceModels::OutlinePlayers) instead, so both teams
+	// look the same and only the outline distinguishes them (not red/blue, not "super green").
+	// OutlineModeActive (not the raw flag) so a listen host, where the outline pass is disabled, keeps
+	// the normal tint instead of neutral-bodies-with-no-outline.
+	const bool bOutlineMode = NCPlusForceModels::OutlineModeActive(GetWorld());
+
+	// Baked fallback: pick the model's baked red (0) or blue (1) skin from the chosen colour — more red
+	// than blue -> red skin, else blue. In Enemy-Only this makes every (non-recolourable) enemy one
+	// uniform baked skin; the user's H choice still steers which one.
+	const float BakedTeamSelect = (Colour.R >= Colour.B) ? 0.f : 1.f;
+
+	// UT character materials are three-way (TeamSelect 0=Red, 1=Blue, 255=NoTeam). Recolour forces the
+	// neutral NoTeam path then tints it (the Red/Blue paths are the model's baked team skins, which a
+	// colour param only accents); the fallback instead selects a baked team skin directly.
+	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	{
+		if (!MID) { continue; }
+		const UMaterialInterface* Src = MID->Parent;
+		const FString MatName = Src ? Src->GetName() : MID->GetName();
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName))
+		{
+			// Face/eyes/hair: leave UNTOUCHED so they keep the model's own team tint.
+			continue;
+		}
+
+		if (bOutlineMode)
+		{
+			// Outline mode: NEUTRAL body — NoTeam path (255) with NO team-colour blend, so both teams look
+			// the same and the LOS outline is the SOLE team indicator (not red/blue). TeamBlendMax 0 keeps
+			// the model's base albedo un-tinted. (Exact neutral look is model-dependent.)
+			MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
+			MID->SetScalarParameterValue(NAME_TeamBlendMax, 0.f);
+			continue;
+		}
+
+		if (!bRecolour)
+		{
+			// Non-recolourable model: route to its baked red/blue skin rather than the futile NoTeam
+			// recolour (which would leave it a flat default). The baked textures carry the team look.
+			MID->SetScalarParameterValue(NAME_TeamSelect, BakedTeamSelect);
+			continue;
+		}
+
+		MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
+		// Some masters bake the team skin into TEXTURES and only blend the colour params over them at a
+		// strength gated by this scalar; crank it so the colour actually paints. No-op where absent.
+		MID->SetScalarParameterValue(NAME_TeamBlendMax, 1.f);
+		// Highlight: drive the emissive intensity from Brightness (0 = off). Only shows where the
+		// material has a live emissive channel.
+		MID->SetScalarParameterValue(NAME_EmissiveMax, GlowIntensity);
+		// Some masters gate the emissive via an "Emission Power" scalar too — drive it (no-op where absent).
+		MID->SetScalarParameterValue(NAME_EmissionPower, GlowIntensity);
+		for (const FName& P : Params)
+		{
+			MID->SetVectorParameterValue(P, Colour);
+		}
+	}
+
+	LastForcedContent   = Content.Get();
+	LastForcedColour    = Colour;
+	bForcedModelApplied = true;
+
+	// Cosmetic strip (the "Cosmetics" flag, on = remove): drop + suppress hats/eyewear on this reskinned
+	// pawn. Set BEFORE OnRep_PlayerState's later SetCosmeticsFromPlayerState so the setter overrides catch
+	// the re-add. (NotifyTeamChanged runs first at OnRep, this gate second.)
+	// Not for the own pawn — colour-only doesn't reskin, so keep your full character (hat/eyewear).
+	if (!bColourOnly)
+	{
+		UpdateCosmeticStrip(NCPlusForceModels::Get().bCosmetics);
+	}
+
+	bApplyingForcedModel = false;
+}
+
+// dc's "Remove Cosmetic": IsValid -> DetachFromActor (Keep Relative) -> DestroyActor. The explicit
+// detach matches the BP (bare Destroy() would also detach, but we mirror dc's proven recipe).
+static void RemoveCosmetic(AActor* Cosmetic)
+{
+	if (Cosmetic)
+	{
+		Cosmetic->DetachFromActor(FDetachmentTransformRules::KeepRelativeTransform);
+		Cosmetic->Destroy();
+	}
+}
+
+void ATeamArenaCharacter::StripCosmetics()
+{
+	RemoveCosmetic(Hat);       Hat       = nullptr;
+	RemoveCosmetic(Eyewear);   Eyewear   = nullptr;
+	RemoveCosmetic(LeaderHat); LeaderHat = nullptr;
+}
+
+void ATeamArenaCharacter::UpdateCosmeticStrip(bool bShouldStrip)
+{
+	const bool bWasStripping = bForceModelStripCosmetics;
+	bForceModelStripCosmetics = bShouldStrip;
+	if (bShouldStrip)        { StripCosmetics(); }            // clear any already-spawned (overrides stop re-adds)
+	else if (bWasStripping)  { SetCosmeticsFromPlayerState(); } // restore what we suppressed
+}
+
+void ATeamArenaCharacter::SetHatClass(TSubclassOf<AUTHat> HatClass)
+{
+	if (bForceModelStripCosmetics)
+	{
+		RemoveCosmetic(Hat); Hat = nullptr;       // don't spawn the hat on a stripped pawn
+		return;
+	}
+	Super::SetHatClass(HatClass);
+}
+
+void ATeamArenaCharacter::SetEyewearClass(TSubclassOf<AUTEyewear> EyewearClass)
+{
+	if (bForceModelStripCosmetics)
+	{
+		RemoveCosmetic(Eyewear); Eyewear = nullptr;
+		return;
+	}
+	Super::SetEyewearClass(EyewearClass);
+}
+
+void ATeamArenaCharacter::LeaderHatStatusChanged_Implementation()
+{
+	if (bForceModelStripCosmetics)
+	{
+		RemoveCosmetic(LeaderHat); LeaderHat = nullptr;
+		return;
+	}
+	Super::LeaderHatStatusChanged_Implementation();
+}
+
+void ATeamArenaCharacter::PlayDying()
+{
+	Super::PlayDying();
+	SpawnSkeletonDissolve();
+}
+
+// On death, hide the corpse mesh after a delay. Two roles:
+//  (1) "Darken Bodies" toggle (any mode): hide after the ~1s death-effects fade (instant hide looked abrupt).
+//      Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across models); this
+//      clean hide works on any model with zero asset dependency.
+//  (2) iCTF safety net (regardless of DarkenBodies): the body is supposed to be removed by the BP CleanUpRagdoll
+//      at [InstagibCTF] RagdollTime, but if that doesn't happen (e.g. DarkenBodies off and the BP cleanup never
+//      fires) the corpse would linger. So in iCTF we ALSO hide it at the ragdoll lifespan, so a low Ragdoll Time
+//      reliably makes the body vanish. Hide-only (SetVisibility) — never destroys the actor, so it can't fight
+//      the BP destroy or the engine corpse cleanup. Client-side, per pawn; no-op on a dedicated server.
+void ATeamArenaCharacter::SpawnSkeletonDissolve()
+{
+	if (GetNetMode() == NM_DedicatedServer) { return; }
+
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	const bool bDarken = (C.bEnabled && C.bDarkenBodies);
+
+	FString Val;
+	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// F5 "Show Ragdoll" ([InstagibCTF] bShowRagdoll). INTENDED consumer = the BP instagib DAMAGE TYPE
+	// (it reads these keys and drives ragdoll time for instagib kills) — which by construction only
+	// ever fires in iCTF, so in every other mode the setting did nothing and the only hide path was
+	// ForceModels' DarkenBodies (community: "uncheck force models and you can see dead bodys" /
+	// "ragdoll setting overridden by force models"). This C++ read is the MODE-AGNOSTIC stand-in:
+	// when the key exists (any F5 save writes it) it is AUTHORITATIVE over the Darken fade in both
+	// directions — unticked hides corpses in every mode with FM off, ticked shows them even with
+	// Darken on. Hide-only, so it composes with the BP in iCTF (ShowRagdoll-on defers to the
+	// RagdollTime safety net below = the BP's own cleanup time). Key ABSENT (never saved F5 — e.g. a
+	// dc-TeamSkins migrant) -> Darken keeps its old dc-parity hide role.
+	bool bShowRagdoll = true;
+	bool bShowRagdollExplicit = false;
+	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowRagdoll"), Val, ConfigPath))
+	{
+		bShowRagdoll = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+		bShowRagdollExplicit = true;
+	}
+
+	// iCTF detection: RagdollTime is an iCTF setting (the BP CleanUpRagdoll only runs for the instagib damage
+	// type). ACTFStatsReplicator is present only in NCPlusCTF instagib; absent in ElimPlus etc.
+	bool bIsInstagib = false;
+	if (UWorld* World = GetWorld())
+	{
+		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
+	}
+
+	// Fade-hide when: Show Ragdoll explicitly unticked (any mode), or — with the key never written —
+	// the legacy DarkenBodies fade. iCTF keeps its ragdoll-cleanup backup regardless. Outside all of
+	// that, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
+	const bool bFadeHide = bShowRagdollExplicit ? !bShowRagdoll : bDarken;
+	if (!bFadeHide && !bIsInstagib) { return; }
+
+	float RagdollTime = 3.0f;
+	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("RagdollTime"), Val, ConfigPath))
+	{
+		RagdollTime = FCString::Atof(*Val);
+	}
+	// The menu stores iCTF "Ragdoll Time = 0" (remove instantly) as 0.01 so the BP SetTimer fires.
+	// That sentinel must not leak into the OTHER modes' fade cap — an iCTF "instant" choice would
+	// make bodies vanish frame-one in ElimPlus/Wipeout. Outside iCTF, treat it as the normal fade.
+	if (!bIsInstagib && RagdollTime <= 0.011f)
+	{
+		RagdollTime = 1.0f;
+	}
+
+	// The fade paths (Show-Ragdoll-off / legacy DarkenBodies) hide early (~1s death-effects fade, but never
+	// longer than the ragdoll lives); otherwise (iCTF, no fade) hide exactly at the ragdoll lifespan so the
+	// body still vanishes when the BP CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules
+	// rate<=0). Timer is bound to this actor, so it auto-clears if the corpse is destroyed/cleaned up
+	// sooner (gib, respawn, DeathCleanupTimer).
+	const float HideDelay = FMath::Max(0.01f, bFadeHide ? FMath::Min(1.0f, RagdollTime) : RagdollTime);
+	FTimerHandle TempHandle;
+	GetWorldTimerManager().SetTimer(TempHandle, this, &ATeamArenaCharacter::HideDeadBody, HideDelay, false);
+}
+
+void ATeamArenaCharacter::HideDeadBody()
+{
+	USkeletalMeshComponent* BodyMesh = GetMesh();
+	if (!BodyMesh) { return; }
+
+	BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
+
+	// Don't let the corpse-hide blank a carried FLAG. An instagib flag carrier who dies drops the flag,
+	// but if that detach hasn't processed yet the flag's root is still parented to this body mesh, and the
+	// propagate above traverses the ENTIRE attach tree (USceneComponent::SetVisibility, SceneComponent.cpp)
+	// — across the actor boundary into the flag — setting the flag mesh's bVisible=false. That survives the
+	// detach, so the flag is invisible when dropped and after it returns home (the "flag goes invisible
+	// after a cap/return"; near-certain with a low [InstagibCTF] RagdollTime firing this inside the still-
+	// attached window). Re-show any attached carried object so the corpse-hide can never strand a flag.
+	// Cosmetics (owned by this character) stay hidden — only foreign carried objects are re-shown.
+	TArray<USceneComponent*> Descendants;
+	BodyMesh->GetChildrenComponents(/*bIncludeAllDescendants=*/true, Descendants);
+	for (USceneComponent* Child : Descendants)
+	{
+		if (Child && Child->GetOwner() && Child->GetOwner()->IsA(AUTCarriedObject::StaticClass()))
+		{
+			Child->SetVisibility(true, /*bPropagateToChildren=*/false);
+		}
+	}
+}
+
+// When the local player's team changes, every other pawn's friend/enemy bucket can flip without
+// their own NotifyTeamChanged firing. Collect first, then apply — re-running a pawn's base
+// NotifyTeamChanged (the un-force restore) can spawn/destroy its LeaderHat, which is unsafe to
+// do while a TActorIterator is live.
+void ATeamArenaCharacter::RefreshOtherForcedModels()
+{
+	if (GetNetMode() == NM_DedicatedServer) { return; }
+	UWorld* const World = GetWorld();
+	if (!World) { return; }
+
+	TArray<ATeamArenaCharacter*> Others;
+	for (TActorIterator<ATeamArenaCharacter> It(World); It; ++It)
+	{
+		ATeamArenaCharacter* Other = *It;
+		if (Other && Other != this && !Other->IsLocalPlayerPawn())
+		{
+			Others.Add(Other);
+		}
+	}
+
+	// The dirty-latch inside ApplyForcedModel(false) makes this cheap when a bucket didn't change.
+	for (ATeamArenaCharacter* Other : Others)
+	{
+		Other->ApplyForcedModel(/*bForceReapply=*/false);
+	}
+}
+
+void ATeamArenaCharacter::UpdateArmorOverlay()
+{
+	Super::UpdateArmorOverlay();   // sets up the armour overlay (+ the stock hardcoded yellow "Color")
+
+	// Redirect that yellow to our match/complimentary armour colour, for pawns we reskin. Client-only
+	// (OverlayMesh's MID only exists off the dedicated server). This is the ArmorType OnRep, so it
+	// re-fires on every armour change and always runs AFTER the stock colour, winning cleanly.
+	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn() || !OverlayMesh) { return; }  // skip MY pawn (offline-safe)
+
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	if (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(GetWorld())) { return; }   // Outline mode: leave stock armour (no super-tint)
+
+	const int32 MyTeam = (int32)GetTeamNum();
+	if (MyTeam == 255) { return; }                                  // FFA: deferred
+
+	UWorld* const World = GetWorld();
+	const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));   // spectator -> red is "ours"
+	if (C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }   // Enemy-Only leaves teammates stock
+
+	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
+	if (!MID) { return; }
+
+	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly));
+
+	// Stock "Color" is a BRIGHT ~(1,1,0) yellow that drives the armour's emissive glow; our configured
+	// colour is usually dimmer (V<1), so reusing it flat washed the glow out. Push our hue to full
+	// brightness (normalise so the brightest channel = 1, like the stock yellow) for the emissive "Color",
+	// and keep the real tint in "TeamColor". Preserves the armour's emissive intensity in our hue.
+	FLinearColor Glow = ArmourColour;
+	const float MaxCh = FMath::Max3(Glow.R, Glow.G, Glow.B);
+	if (MaxCh > KINDA_SMALL_NUMBER) { Glow /= MaxCh; }
+	static const FName NAME_ArmorColor(TEXT("Color"));
+	static const FName NAME_ArmorTeamColor(TEXT("TeamColor"));
+	MID->SetVectorParameterValue(NAME_ArmorColor, Glow);
+	MID->SetVectorParameterValue(NAME_ArmorTeamColor, ArmourColour);
 }
 
 int32 ATeamArenaCharacter::GetNetcodeVersion()
@@ -96,26 +620,6 @@ bool ATeamArenaCharacter::IsHeadShot(FVector HitLocation, FVector ShotDirection,
 	bool bHeadShot = FMath::PointDistToLine(HeadLocation, ShotDirection, HitLocation)
 		< HeadRadius * HeadScale * WeaponHeadScaling;
 
-#if ENABLE_DRAW_DEBUG
-	static IConsoleVariable* CVarDebugHeadshots = IConsoleManager::Get().FindConsoleVariable(TEXT("ut.DebugHeadshots"));
-	if (CVarDebugHeadshots && CVarDebugHeadshots->GetInt() != 0)
-	{
-		DrawDebugLine(GetWorld(), HitLocation + (ShotDirection * 1000.f),
-			HitLocation - (ShotDirection * 1000.f), FColor::White, true);
-
-		if (bHeadShot)
-		{
-			DrawDebugSphere(GetWorld(), HeadLocation, HeadRadius * HeadScale * WeaponHeadScaling,
-				10, FColor::Green, true);
-		}
-		else
-		{
-			DrawDebugSphere(GetWorld(), HeadLocation, HeadRadius * HeadScale * WeaponHeadScaling,
-				10, FColor::Red, true);
-		}
-	}
-#endif
-
 	return bHeadShot;
 }
 
@@ -176,11 +680,24 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 								// +1 (same dir)      = 100% prediction
 								float StabilityFactor = FMath::Clamp((VelocityDot + 1.0f) * 0.5f, 0.0f, 1.0f);
 
-								// Smooth the factor itself to prevent frame-to-frame flickering
-								// Rate 6.0 = converges in roughly 150-200ms
-								SmoothedStabilityFactor = FMath::FInterpTo(
-									SmoothedStabilityFactor, StabilityFactor,
-									GetWorld()->GetDeltaSeconds(), 6.0f);
+								// ASYMMETRIC smoothing (replaces the symmetric rate-6 FInterpTo). A high-ping enemy's
+								// juke must STOP warping immediately, but re-arming the lead should be gradual so we
+								// don't over-predict into their NEXT juke. So drop the factor FAST when it's falling
+								// (target reversing) and rise SLOWLY when it climbs (target straightened). Plus a hard-
+								// zero on a genuine horizontal reversal (VelocityDot<0 = >90 deg flip), gated on
+								// horizontal speed so a jump arc's vertical Z-velocity flip at apex doesn't trip it.
+								const float dt = GetWorld()->GetDeltaSeconds();
+								if (OldVelocity.Size2D() > 200.0f && VelocityDot < 0.0f)
+								{
+									SmoothedStabilityFactor = 0.0f;   // dodge/strafe-flip: kill the lead NOW (no warp)
+								}
+								else
+								{
+									const float InterpRate = (StabilityFactor < SmoothedStabilityFactor)
+										? CVarPredStabFastDrop.GetValueOnGameThread()    // falling  -> snap the lead down
+										: CVarPredStabSlowRise.GetValueOnGameThread();   // rising   -> ease it back up
+									SmoothedStabilityFactor = FMath::FInterpTo(SmoothedStabilityFactor, StabilityFactor, dt, InterpRate);
+								}
 
 								PredictionTime = BasePrediction * SmoothedStabilityFactor;
 							}
@@ -428,73 +945,30 @@ FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerCo
     return TargetLocation;
 }
 
-/*
 FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 {
-	if (PredictionTime <= 0.f)
-	{
-		if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
-		{
-			return GetMesh()->GetSocketLocation(FName("head"));
-		}
-		return GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
-	}
+	// Model-INDEPENDENT head, derived from the CAPSULE instead of the skeletal mesh's "head" bone.
+	//
+	// SERVER-SIDE INTERIM for the Force-Models headshot bug (the full client-informed fix is on the
+	// 327-experimental branch). With Force Models the client renders a different model than the server
+	// validates against, so a bone-derived head desyncs and headshots aimed at the visible head miss. The
+	// capsule is identical client+server, so anchoring the head to the capsule top makes the server's
+	// sphere model-independent — a forced model's visible head (UT scales every model to fill the standard
+	// capsule, UTCharacter.cpp:5351) lines up with it. Also makes the rewind exact (fixed capsule geometry,
+	// no animated-bone pose to approximate) and drops the per-check RefreshBoneTransforms.
+	//
+	// kHeadCapsuleDrop = sphere CENTRE below the capsule top (standing half-height 108, stock head ~Z+82 -> ~26).
+	// Now a live cvar (ncp.HeadCapsuleDrop) so it can be calibrated in warmup vs ncp.DebugHeads without a rebuild —
+	// LOWER it to raise the sphere onto the head. Read on any thread (validation is game-thread; harmless elsewhere).
+	// Client + server must use the same value (server authoritative for validation). GetScaledCapsuleHalfHeight() is
+	// crouch-aware. NB a forced model whose head sits higher than stock (e.g. a tall robot) needs a SMALLER drop than
+	// 26 — that's why the default lands at the chest on some models; pick a value that fits the models you run.
+	const float kHeadCapsuleDrop = CVarHeadCapsuleDrop.GetValueOnAnyThread();
 
-	// --- REWOUND HEAD ---
-	// no longer need const_cast<ATeamArenaCharacter*>(this) because the function is not const!
-	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
-
-	// Get current head offset from body center (captures lean, crouch, animation)
-	FVector CurrentHeadWorld = GetActorLocation() + FVector(0.f, 0.f, BaseEyeHeight);
-	if (GetMesh() && GetMesh()->DoesSocketExist(FName("head")))
-	{
-		CurrentHeadWorld = GetMesh()->GetSocketLocation(FName("head"));
-	}
-
-	// Calculate head offset relative to current body
-	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
-
-	// Apply that offset to rewound position
-	return RewoundBodyLoc + HeadOffset;
-}
-*/
-
-FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
-{
-	// Force mesh update if necessary (from Epic's implementation)
-	if (GetMesh()->IsRegistered() && GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones && !GetMesh()->bRecentlyRendered)
-	{
-		if (GetMesh()->MeshComponentUpdateFlag > EMeshComponentUpdateFlag::AlwaysTickPose)
-		{
-			const float Step = 0.1f;
-			for (float TickTime = FMath::Min<float>(GetWorld()->TimeSeconds - GetMesh()->LastRenderTime, 1.0f); TickTime > 0.0f; TickTime -= Step)
-			{
-				GetMesh()->TickAnimation(FMath::Min<float>(TickTime, Step), false);
-			}
-		}
-		GetMesh()->AnimUpdateRateParams->bSkipEvaluation = false;
-		GetMesh()->AnimUpdateRateParams->bInterpolateSkippedFrames = false;
-		GetMesh()->RefreshBoneTransforms();
-		GetMesh()->UpdateComponentToWorld();
-	}
-
-	if (PredictionTime <= 0.f)
-	{
-		// Current head position: socket + HeadHeight offset
-		return GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
-	}
-
-	// --- REWOUND HEAD ---
-	FVector RewoundBodyLoc = GetRewindLocation(PredictionTime);
-
-	// Get current head world position (with HeadHeight!)
-	FVector CurrentHeadWorld = GetMesh()->GetSocketLocation(HeadBone) + FVector(0.f, 0.f, HeadHeight);
-
-	// Calculate head offset relative to current body
-	FVector HeadOffset = CurrentHeadWorld - GetActorLocation();
-
-	// Apply that offset to rewound position
-	return RewoundBodyLoc + HeadOffset;
+	const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	// GetRewindLocation rewinds the actor (capsule) position on the server and returns the current position
+	// on clients / for PredictionTime <= 0, so this one call covers both the rewound and live cases.
+	return GetRewindLocation(PredictionTime) + FVector(0.f, 0.f, HalfHeight - kHeadCapsuleDrop);
 }
 
 void ATeamArenaCharacter::BeginPlay()
@@ -521,6 +995,14 @@ void ATeamArenaCharacter::BeginPlay()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
+	// Flush any forced-model apply coalesced from this frame's replication burst (see NotifyTeamChanged).
+	// Runs here — after net dispatch, before Super::Tick/render — so N team OnReps collapse to one mesh
+	// rebuild and the reskin is in place for this frame. No-op on a dedicated server (flags never set).
+	if (bForcedModelDirty || bRefreshOthersDirty)
+	{
+		FlushForcedModelUpdate();
+	}
+
 	// ── Ping-compensated spawn: client confirms control ──
 	if (bPingCompensatedSpawnPending)
 	{
@@ -532,12 +1014,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 		else if (Role == ROLE_Authority)
 		{
-			// Server timeout: force-reveal after 500ms to prevent permanently hidden pawns
+			// Final safety: force-reveal after 500ms if the RevealRttPct timer somehow
+			// didn't fire (belt-and-suspenders; normally the timer reveals first).
 			if (GetWorld()->GetTimeSeconds() - SpawnHiddenTimestamp > 0.5f)
 			{
-				bPingCompensatedSpawnPending = false;
-				SetActorHiddenInGame(false);
-				SetActorEnableCollision(true);
+				RevealAfterPingComp();
 			}
 		}
 	}
@@ -736,9 +1217,70 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			}
 		}
 
+		// ── ForceModels: optional fallback — HIDE the shield-belt overlay (ncp.HideArmorShield 1) ──
+		// The continuous recolour below tints the shield to the team skin colour via the "Color" param
+		// (the working path, DEFAULT). This hide is the fallback for community models whose shield
+		// material bakes the gold and ignores that recolour. Gated on IsEnabled so it also catches
+		// transiently-unrecoloured pawns; other overlays (UDamage, etc.) are untouched, and vanilla
+		// play keeps the stock shield.
+		if (bShouldShow && NCPlusForceModels::IsEnabled() && CVarHideArmorShield.GetValueOnGameThread() != 0)
+		{
+			UMaterialInstanceDynamic* ShieldMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
+			if (ShieldMID && ShieldMID->Parent && ShieldMID->Parent->GetName().Contains(TEXT("Shield")))
+			{
+				bShouldShow = false;
+			}
+		}
+
 		if (OverlayMesh->IsVisible() != bShouldShow)
 		{
 			OverlayMesh->SetVisibility(bShouldShow, true);
+		}
+	}
+
+	// =========================================================================
+	// Character/armour OVERLAY recolour (CONTINUOUS) — armour/shield outlives spawn protection
+	// =========================================================================
+	// The OverlayMesh (shield-belt / OverlayElimCharacter / any active char overlay) carries a hardcoded
+	// gold: stock UTCharacter::UpdateArmorOverlay (UTCharacter.cpp:5544) sets the shield MID's "Color"
+	// param to (1,1,0) for blue / (0.75,0.75,0.1) for red, and "TeamColor" to the team colour — the
+	// "Color" write is the gold lever (TeamColor alone won't shift it). Re-tint it to the ForceModels
+	// skin colour EVERY frame, NOT gated on spawn protection: the shield-belt persists with armour and is
+	// re-applied on any overlay rebuild, so the old spawn-protection-only tint reverted to gold the
+	// instant protection dropped. No-op when ForceModels isn't recolouring this pawn / there's no overlay MID.
+	{
+		FLinearColor SkinCol = GetTeamColor();
+		bool bForcedSkin = false;
+		// Outline mode: don't re-tint the shield/armour overlay to the skin colour — leave it stock.
+		// Cached gate: this runs per pawn per frame; the full check is refreshed once per frame.
+		if (NCPlusForceModels::IsEnabled() && !NCPlusForceModels::OutlineModeActiveCached())
+		{
+			const int32 MyTeam = (int32)GetTeamNum();
+			if (MyTeam != 255)
+			{
+				const bool bFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
+				const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bFriendly);
+				TSubclassOf<AUTCharacterContent> Content = NCPlusForceModels::GetModelClass(Side);
+				if (Content && NCPlusForceModels::IsModelAllowed(Content))
+				{
+					SkinCol     = NCPlusForceModels::GetSkinColour(Side);
+					bForcedSkin = true;
+				}
+			}
+		}
+
+		static const FName NAME_OverlayTeamColor(TEXT("TeamColor"));
+		static const FName NAME_OverlayColor(TEXT("Color"));
+		if (bForcedSkin && OverlayMesh && OverlayMesh->IsRegistered())
+		{
+			if (UMaterialInstanceDynamic* OvMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0)))
+			{
+				// "Color" is the lever that recolours the shield-belt: stock UpdateArmorOverlay puts the
+				// gold on the "Color" param (it also sets "TeamColor" to the team colour, but that doesn't
+				// drive the gold). We set both so non-shield overlays that key off TeamColor recolour too.
+				OvMID->SetVectorParameterValue(NAME_OverlayTeamColor, SkinCol);
+				OvMID->SetVectorParameterValue(NAME_OverlayColor, SkinCol);
+			}
 		}
 	}
 
@@ -757,9 +1299,29 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			bShowGlowToViewer = false;
 		}
 
-		// --- PERF: Dirty flag — only update materials when state changes ---
-		// Values are constant within each state (glow on vs glow off).
-		// bLastShowGlowState initialized to 0xFF to force first-frame apply.
+		// Resolve the glow colour ONCE for the body hit-flash. Default = stock team colour (unchanged
+		// vanilla behaviour); use the ForceModels skin colour when it's recolouring this enemy's body.
+		// (The OVERLAY recolour now lives in the CONTINUOUS block above — the armour/shield overlay
+		// outlives spawn protection, so it can't be gated on it.)
+		FLinearColor GlowColour = GetTeamColor();
+		if (bShowGlowToViewer && NCPlusForceModels::IsEnabled())
+		{
+			const int32 GlowTeam = (int32)GetTeamNum();
+			if (GlowTeam != 255)
+			{
+				const bool bGlowFriendly = (GlowTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
+				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly);
+				TSubclassOf<AUTCharacterContent> GlowContent = NCPlusForceModels::GetModelClass(GlowSide);
+				if (GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent))
+				{
+					GlowColour = NCPlusForceModels::GetSkinColour(GlowSide);
+				}
+			}
+		}
+
+		// --- PERF: Dirty flag — body-material work only on state change ---
+		// Values are constant within each state (glow on vs glow off). The overlay tint above runs
+		// every frame; bLastShowGlowState initialized to 0xFF to force first-frame apply.
 		uint8 CurrentState = bShowGlowToViewer ? 1 : 0;
 		if (CurrentState == bLastShowGlowState)
 		{
@@ -773,14 +1335,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 		if (bShowGlowToViewer)
 		{
-			FLinearColor BaseTeamColor = GetTeamColor();
-			float BrightnessMult = 20.0f;
-			FLinearColor ObviousColor = FLinearColor(
-				BaseTeamColor.R * BrightnessMult,
-				BaseTeamColor.G * BrightnessMult,
-				BaseTeamColor.B * BrightnessMult,
-				1.0f
-			);
+			// Body hit-flash (mostly hidden behind the spawn overlay, but covers the brief post-overlay
+			// window and any pawn whose overlay isn't currently active). Uses the same GlowColour resolved
+			// above, overbright 20x into the HitFlash param as before.
+			const float BrightnessMult = 20.0f;
+			const FLinearColor ObviousColor(GlowColour.R * BrightnessMult, GlowColour.G * BrightnessMult, GlowColour.B * BrightnessMult, 1.0f);
 
 			for (UMaterialInstanceDynamic* MI : BodyMIs)
 			{
@@ -978,12 +1537,171 @@ bool ATeamArenaCharacter::ServerConfirmSpawnReady_Validate()
 
 void ATeamArenaCharacter::ServerConfirmSpawnReady_Implementation()
 {
+	// Client ACK'd possession — reveal. Early-out vs the RevealRttPct timer when
+	// ExactPing over-read (timer set too long). Guarded against double-fire.
+	RevealAfterPingComp();
+}
+
+void ATeamArenaCharacter::BeginPingCompensatedSpawnHide()
+{
+	// PING FLOOR: skip the hide for low-ping spawners. They get possession back
+	// almost immediately (no real spawn-kill risk), and their brief hidden window is
+	// exactly what makes them appear to "teleport-dodge" off the spawn point on a
+	// higher-ping opponent's screen — which is the thing high-ping players complain
+	// about. At/above the floor the hide genuinely prevents being seen/shot before
+	// you can move. Floor = Mod.ini [NetcodePlus] PingCompSpawnMinPingMs (default
+	// 60ms), read via GConfig like the own-footstep setting above. (ExactPing is live
+	// for every spawn — measured continuously server-side — so there's no unknown case.)
+	float MinPingMs = 60.f;
+	float RevealRttPct = 75.f;   // reveal at this % of RTT (server estimate) vs the full round-trip ACK
+	const FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("PingCompSpawnMinPingMs"), MinPingMs, ModIniPath);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("PingCompSpawnRevealRttPct"), RevealRttPct, ModIniPath);
+	}
+	MinPingMs = FMath::Max(0.f, MinPingMs);
+	RevealRttPct = FMath::Clamp(RevealRttPct, 0.f, 100.f);
+
+	float Ping = 0.f;
+	if (AController* C = GetController())
+	{
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState))
+		{
+			Ping = PS->ExactPing;   // server-measured true ms (live every spawn, not the compressed Ping)
+		}
+	}
+	if (Ping < MinPingMs)
+	{
+		return;   // low-ping spawner -> spawn visible immediately, no hide
+	}
+
+	bPingCompensatedSpawnPending = true;
+	SetActorHiddenInGame(true);
+	SetActorEnableCollision(false);
+	SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+
+	// Reveal on a SERVER ESTIMATE at RevealRttPct% of RTT, rather than waiting for the
+	// client's ServerConfirmSpawnReady ACK. The ACK is a FULL round-trip, so it over-
+	// hides by ~one one-way trip the spawner doesn't need — and that surplus invisible
+	// window is the high-ping spawn edge. The client has control after ~one one-way
+	// trip; 75% of RTT reveals a touch after that, leaving a small buffer for client
+	// render/orient + jitter. The ACK still reveals early if ExactPing OVER-read
+	// (timer set too long), and the 0.5s Tick timeout is a final safety if the timer
+	// somehow doesn't fire. Capped at 0.5s to match that timeout.
+	const float RevealDelay = FMath::Clamp((RevealRttPct / 100.f) * (Ping / 1000.f), 0.f, 0.5f);
+	GetWorldTimerManager().SetTimer(SpawnRevealHandle, this, &ATeamArenaCharacter::RevealAfterPingComp, RevealDelay, false);
+}
+
+void ATeamArenaCharacter::RevealAfterPingComp()
+{
 	if (!bPingCompensatedSpawnPending)
+	{
+		return;   // already revealed (timer / ACK / timeout race) — no-op
+	}
+	bPingCompensatedSpawnPending = false;
+	SetActorHiddenInGame(false);
+	SetActorEnableCollision(true);
+	GetWorldTimerManager().ClearTimer(SpawnRevealHandle);
+}
+
+// ── Own footstep volume (iCTF) ─────────────────────────────────────────────
+// Scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting. Only the local
+// human's own pawn, only in iCTF, only when the setting is below stock (1.0); everything else falls through
+// to the stock AUTCharacter::PlayFootstep. UTPlaySound has no volume argument, so the non-stock case is
+// played via SpawnSoundAttached with a VolumeMultiplier.
+void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
+{
+	if (GetNetMode() != NM_DedicatedServer && IsLocalPlayerPawn())
+	{
+		// Read the 0..1 setting once (mid-match F5 changes apply next life). Default 1.0 = stock.
+		if (!bOwnFootstepVolumeRead)
+		{
+			bOwnFootstepVolumeRead = true;
+			FString Val;
+			const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+			if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("OwnFootstepVolume"), Val, ConfigPath))
+			{
+				OwnFootstepVolumeScale = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
+			}
+		}
+
+		// Only do the iCTF lookup / custom play when the feature is actually active (vol < stock), so
+		// default users pay nothing. ACTFStatsReplicator exists only in NCPlusCTF (instagib); searched
+		// lazily while null so it still binds if the first footstep precedes its replication.
+		if (OwnFootstepVolumeScale < 1.f)
+		{
+			// Resolve the iCTF gate once: search until the replicator is found, or give up ~8s after spawn
+			// so non-iCTF modes (ElimPlus etc., which have no ACTFStatsReplicator) don't iterate every
+			// footstep forever. The window also covers a first footstep that precedes the replicator's arrival.
+			if (!bIctfFootstepResolved)
+			{
+				for (TActorIterator<ACTFStatsReplicator> It(GetWorld()); It; ++It)
+				{
+					CachedCTFRep = *It;
+					break;
+				}
+				// WARMUP signal: ACTFStatsReplicator only spawns at match start, so during warmup the
+				// replicator gate is null and footsteps fall through to stock. The replicated MutInstagibNCP
+				// mutator is present from match init (through warmup), so finding it confirms iCTF early.
+				// Contains() handles the BP "_C" suffix; latched so we don't iterate mutators every step.
+				if (!bIctfMutatorFound)
+				{
+					for (TActorIterator<AUTMutator> It(GetWorld()); It; ++It)
+					{
+						if (It->GetClass()->GetName().Contains(TEXT("MutInstagibNCP")))
+						{
+							bIctfMutatorFound = true;
+							break;
+						}
+					}
+				}
+				if (CachedCTFRep.IsValid() || bIctfMutatorFound || (GetWorld()->GetTimeSeconds() - CreationTime) > 8.f)
+				{
+					bIctfFootstepResolved = true;
+				}
+			}
+			// iCTF if EITHER signal fires: the mutator (covers warmup) or the authoritative replicator flag.
+			if (bIctfMutatorFound || (CachedCTFRep.IsValid() && CachedCTFRep->bIsInstagibMatch))
+			{
+				// Mirror stock's double-footstep filter: drop the 3rd-person step while in first-person view
+				// (otherwise both the 1P and 3P notifies would play the own footstep twice).
+				AUTPlayerController* UTPC = Cast<AUTPlayerController>(Controller);
+				if (UTPC && !bFirstPerson && !UTPC->IsBehindView())
+				{
+					return;
+				}
+				PlayOwnFootstepScaled(FootNum);
+				return;
+			}
+		}
+	}
+
+	Super::PlayFootstep(FootNum, bFirstPerson);
+}
+
+void ATeamArenaCharacter::PlayOwnFootstepScaled(uint8 FootNum)
+{
+	// Mirror AUTCharacter::PlayFootstep's gating, but play the local player's own footstep at
+	// OwnFootstepVolumeScale via SpawnSound2D — non-spatialized, matching the character of the stock own
+	// footstep (UTPlaySound has no volume arg). The fork stubs GetFootstepSoundForSurfaceType to always
+	// return null, so footsteps always use FootstepSound (or WaterFootstepSound) — there's no per-surface
+	// own variant to reproduce. SAT_Footstep amplification is bypassed, so the volume is a direct multiplier
+	// of the asset (a deliberate reduction; there's a small loudness step vs the stock 1.0 path). Cadence
+	// (LastFoot/LastFootstepTime) is preserved so anim-timed steps stay correct.
+	if ((GetWorld()->TimeSeconds - LastFootstepTime < 0.1f) || bFeigningDeath || IsDead() || bIsCrouched)
 	{
 		return;
 	}
 
-	bPingCompensatedSpawnPending = false;
-	SetActorHiddenInGame(false);
-	SetActorEnableCollision(true);
+	USoundBase* FootstepSoundToPlay = FeetAreInWater() ? WaterFootstepSound : FootstepSound;
+
+	// Volume 0 -> play nothing (silent own footsteps), which is the whole point at 0.
+	if (FootstepSoundToPlay && OwnFootstepVolumeScale > 0.f)
+	{
+		UGameplayStatics::SpawnSound2D(this, FootstepSoundToPlay, OwnFootstepVolumeScale);
+	}
+
+	LastFoot = FootNum;
+	LastFootstepTime = GetWorld()->TimeSeconds;
 }

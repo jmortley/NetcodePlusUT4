@@ -1,4 +1,5 @@
 #include "ElimPlusGame.h"
+#include "NCFireValCollector.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
@@ -20,6 +21,8 @@
 #include "UTDroppedPickup.h"
 #include "Engine/DemoNetDriver.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 #include "TimerManager.h"
 #include "GameFramework/HUD.h"
 #include "GameFramework/PlayerStart.h"
@@ -27,6 +30,29 @@
 #include "ElimPlusVictoryMessage.h"
 #include "UTCountDownMessage.h" 
 #include "UTGameMessage.h"
+
+bool AElimPlusGame::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat as an OverrideHatClass (which
+	// the engine does NOT entitlement-check) on the next tick — after ServerReceiveHatClass's
+	// ValidateEntitlements strip — so the community master's withheld cosmetic entitlements can't remove it.
+	// Server-side; never kicks. Mirrors ANCPlusCTFGameMode::ValidateHat. NULL in the log = class didn't load.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
+}
 
 AElimPlusGame::AElimPlusGame(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -172,8 +198,39 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 	// Match-scoped stats reset on every map load (each map = a fresh match).
 	PerPlayerMatchPPRSum.Empty();
 	PerPlayerMatchPPRRoundCount.Empty();
+	PerPlayerMatchDamage.Empty();
 	bRatingFlushedThisMatch = false;
 	bDidPreMatchRebalance = false;
+	bPendingMidGameShuffle = false;
+	bDidMidGameShuffle = false;
+
+	// Bot PUGs always carry ?PugId (the bot adds it); public/hub games never do.
+	// Uneven-team health scaling is for public games only.
+	bIsPugMatch = !UGameplayStatics::ParseOption(Options, TEXT("PugId")).IsEmpty();
+
+	// Mod.ini [NetcodePlus] overrides. Each Get* leaves the value UNTOUCHED when the
+	// key is absent, so the BP/CDO defaults stand unless an admin sets the key.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		// Uneven-team health scaling (defaults: on, 5% per missing player).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthScaling"), bElimUnevenHealthScaling, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimUnevenHealthPct"), ElimUnevenHealthPct, ModIni);
+
+		// 6-0 blowout mid-game PPR shuffle (default: on; non-PUG + ?BalanceTeams only).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimMidGameShuffle"), bElimMidGameShuffle, ModIni);
+
+		// Anti-camp (defaults: on, threshold 400u, check 1.0s, cooldown 5.0s).
+		// ElimCampCheckInterval=0 disables the camp timer (StartCampCheckTimer gate).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimEnableAntiCamp"), bEnableAntiCamp, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimCampThreshold"), CampThreshold, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimCampCheckInterval"), CampCheckInterval, ModIni);
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ElimCampWarnCooldown"), CampWarnCooldown, ModIni);
+	}
+	ElimUnevenHealthPct = FMath::Clamp(ElimUnevenHealthPct, 0.f, 50.f);
+	CampThreshold     = FMath::Max(0.f, CampThreshold);
+	CampCheckInterval = FMath::Max(0.f, CampCheckInterval);
+	CampWarnCooldown  = FMath::Max(0.f, CampWarnCooldown);
 }
 
 void AElimPlusGame::BeginPlay()
@@ -182,7 +239,6 @@ void AElimPlusGame::BeginPlay()
 
 	if (!bSpawnPointsInitialized)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("Force initializing spawn system in BeginPlay"));
 		InitializeSpawnPointSystem();
 		bSpawnPointsInitialized = true;
 	}
@@ -217,15 +273,12 @@ void AElimPlusGame::DelayedEndGame(int32 WinnerTeamIndex, FName Reason)
 
 void AElimPlusGame::HandleMatchHasStarted()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("=== TeamArena::HandleMatchHasStarted ENTER ==="));
 	// Build marker — change the tag string below whenever you want to verify
-	// the deployed binary contains a specific commit's changes. Lives next to
-	// the proven-reliable HandleMatchHasStarted ENTER line.
+	// the deployed binary contains a specific commit's changes.
 	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus build marker: rebalance+warnings+broadcast (post-ca60db0)"));
-	UE_LOG(LogGameMode, Warning, TEXT("  UTIsHandlingReplays: %s"), UTIsHandlingReplays() ? TEXT("TRUE") : TEXT("FALSE"));
-	UE_LOG(LogGameMode, Warning, TEXT("  GetGameInstance: %s"), GetGameInstance() ? TEXT("VALID") : TEXT("NULL"));
-	UE_LOG(LogGameMode, Warning, TEXT("  GetNetMode: %d"), (int32)GetNetMode());
 	Super::HandleMatchHasStarted();
+
+	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id for this match
 
 	bWarmupMode = false;
 
@@ -289,6 +342,8 @@ void AElimPlusGame::HandleMatchHasStarted()
 					const FString UidStr = UTPS->UniqueId.ToString();
 					const int32 Elo = RatingSystem->GetCachedElo(UidStr);
 					StatsReplicator->SetPlayerEloAndDelta(UidStr, Elo, 0);
+					// Global leaderboard rank (1-based, frozen for the match like ELO).
+					StatsReplicator->SetPlayerGlobalRank(UidStr, RatingSystem->GetPlayerGlobalRank(GetWorld(), UidStr));
 				}
 				else
 				{
@@ -304,6 +359,28 @@ void AElimPlusGame::HandleMatchHasStarted()
 }
 
 
+void AElimPlusGame::HandlePlayerIntro()
+{
+	Super::HandlePlayerIntro();
+
+	// Rebalance HERE — BEFORE the HUD's pre-match MATCH BALANCE preview
+	// (PlayerIntro/CountdownToBegin) renders its team split — instead of only in
+	// HandleMatchHasStarted, which stock fires on InProgress entry: exactly when
+	// the preview finishes fading. On publics the preview showed the WARMUP
+	// teams, then the balancer reshuffled and the console log disagreed with
+	// what players had just read (phantaci report 2026-07-02; PUGs never showed
+	// it because pinned rosters produce zero moves). Super:: has already removed
+	// the pawns (RemoveAllPawns) and settled the bot fill (RemoveExtraBots/
+	// CheckBotCount), so the moves are exactly as silent as at match start. The
+	// HandleMatchHasStarted call remains as the guarded fallback for any flow
+	// that skips PlayerIntro.
+	if (HasAuthority() && !bDidPreMatchRebalance)
+	{
+		RebalanceTeamsForMatchStart();
+		bDidPreMatchRebalance = true;
+	}
+}
+
 void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
@@ -313,8 +390,8 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 
 	// Server-only: pull this player's rating from Mods.db into the cache so it's
 	// ready before the first round ends. Late joiners who arrive mid-match also
-	// get their rating loaded, but won't have a SnapshotMatchStart entry — they
-	// skip ELO for this match (no delta would be meaningful).
+	// get their rating loaded AND a match-start baseline (CaptureLateJoinBaseline
+	// below), so their end-of-match +/- reflects their rating change since joining.
 	if (!HasAuthority() || !RatingSystem.IsValid()) return;
 	if (!NewPlayer) return;
 
@@ -336,7 +413,13 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 	if (UTPS && UTPS->UniqueId.IsValid())
 	{
 		const FString UidStr = UTPS->UniqueId.ToString();
-		RatingSystem->LoadPlayerFromDB(GetWorld(), UidStr);
+		RatingSystem->LoadPlayerFromDB(GetWorld(), UidStr, UTPS->PlayerName);
+
+		// Mid-match joiner: baseline them as of NOW so the end-of-match scoreboard
+		// shows their +/- (their rating already moves for the rounds they play;
+		// without a baseline FlushAtMatchEnd renders a blank delta). No-op if the
+		// match hasn't started yet (SnapshotMatchStart will baseline everyone).
+		RatingSystem->CaptureLateJoinBaseline(UidStr);
 
 		// Push their current ELO straight to the replicator so their HUD chip
 		// shows real value (not 1400 baseline) from the moment they connect.
@@ -344,6 +427,7 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 		{
 			const int32 Elo = RatingSystem->GetCachedElo(UidStr);
 			StatsReplicator->SetPlayerEloAndDelta(UidStr, Elo, 0);
+			StatsReplicator->SetPlayerGlobalRank(UidStr, RatingSystem->GetPlayerGlobalRank(GetWorld(), UidStr));
 		}
 	}
 
@@ -373,6 +457,8 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 void AElimPlusGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+
+	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (guards double-route)
 
 	// Persist updated ratings to Mods.db and emit the final ELO + match delta
 	// to the replicator. Engine routes HandleMatchHasEnded twice in some paths
@@ -438,7 +524,6 @@ void AElimPlusGame::HandleMatchHasEnded()
 
 void AElimPlusGame::CallMatchStateChangeNotify()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("Current matchstate: %s"), *GetMatchState().ToString());
 	// This function intercepts all SetMatchState calls
 	// and routes them to our custom handlers.
 	if (GetMatchState() == MatchState::WaitingToStart)
@@ -795,7 +880,7 @@ void AElimPlusGame::HandleInstanceCleanup()
  */
 void AElimPlusGame::HandleMatchIntermission()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("HandleMatchIntermission: Preparing for next round."));
+	UE_LOG(LogGameMode, Verbose, TEXT("HandleMatchIntermission: Preparing for next round."));
 
 
 	// Reset spawn points for the new round
@@ -815,7 +900,7 @@ void AElimPlusGame::HandleMatchIntermission()
  */
 void AElimPlusGame::StartIntermission(int32 Seconds)
 {
-	UE_LOG(LogGameMode, Warning, TEXT("StartIntermission: Entering intermission for %d seconds."), Seconds);
+	UE_LOG(LogGameMode, Verbose, TEXT("StartIntermission: Entering intermission for %d seconds."), Seconds);
 
 	bRoundInProgress = false;
 	IntermissionSecondsRemaining = FMath::Max(1, Seconds); // Ensure at least 1 second
@@ -847,7 +932,7 @@ void AElimPlusGame::StartIntermission(int32 Seconds)
 
 void AElimPlusGame::StartNextRound()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("StartNextRound: Spawning players and starting round."));
+	UE_LOG(LogGameMode, Verbose, TEXT("StartNextRound: Spawning players and starting round."));
 
 	if (bWarmupMode)
 	{
@@ -859,6 +944,16 @@ void AElimPlusGame::StartNextRound()
 	{
 		bAnnounceTeam = false;
 		UE_LOG(LogGameMode, Warning, TEXT("Disabled team announcements for subsequent rounds"));
+	}
+
+	// 6-0 blowout shuffle (armed by EndRoundForTeam): re-split on current-match
+	// PPR before anything spawns for this round — the same pre-spawn silence
+	// rationale as the pre-match rebalance. Once per match.
+	if (bPendingMidGameShuffle)
+	{
+		bPendingMidGameShuffle = false;
+		bDidMidGameShuffle = true;
+		MidGameShufflePPR();
 	}
 
 	// Reset per-round trackers
@@ -877,6 +972,13 @@ void AElimPlusGame::StartNextRound()
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
 	ResetPlayersForNewRound();
+	// Sweep AFTER the reset, on the canonical round-start path. CleanupWorldForNewRound
+	// also runs in DefaultTimer at intermission-end, but that fires BEFORE StartNextRound
+	// (and a BP-driven state transition can bypass it), so any pickup still on the floor
+	// at round start — e.g. a thrown weapon (throw bind -> TossInventory, which does NOT
+	// go through the now-suppressed DiscardInventory) — used to survive into the new round.
+	// Sweeping here guarantees a clean floor regardless of how the round was started.
+	CleanupWorldForNewRound();
 	DarkHorseCandidates.Empty();
 	ResetSpawnSelectionForNewRound();
 	Team0AlivePlayers.Empty();
@@ -984,7 +1086,7 @@ void AElimPlusGame::OnAllPlayersSpawned()
 {
 	bAllowPlayerRespawns = false;
 
-	UE_LOG(LogGameMode, Warning, TEXT("Round starting sizes - Team0: %d, Team1: %d"), Team0StartingSize, Team1StartingSize);
+	UE_LOG(LogGameMode, Verbose, TEXT("Round starting sizes - Team0: %d, Team1: %d"), Team0StartingSize, Team1StartingSize);
 
 	// Set round timer
 	if (RoundTimeSeconds > 0)
@@ -1057,6 +1159,11 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 				if (!UTPS || UTPS->bOnlySpectator || !UTPS->UniqueId.IsValid()) continue;
 
+				// PPR damage = PlayerRoundDamage, which now accumulates OVERKILL-INCLUSIVE
+				// damage per round (full hit value incl. the portion beyond victim HP —
+				// see ScoreDamage_Implementation, which reconstructs the overkill the
+				// engine strips before it reaches us). 2k4 TAM rule: 100 dmg = 1 pt,
+				// 1 kill = 1 pt; PPR(Current) = sum of per-round PPR / rounds played.
 				const float* DmgPtr = PlayerRoundDamage.Find(UTPS);
 				const float RoundDamage = DmgPtr ? *DmgPtr : 0.f;
 				const int32 RoundKills = UTPS->RoundKills;
@@ -1071,14 +1178,14 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				const FString UidStr = UTPS->UniqueId.ToString();
 				StatsReplicator->SetPlayerPPRCurrent(UidStr, MatchMean);
 
-				// Lifetime PPR — fold this round's contribution into the rating system's
-				// persistent TotalPoints/RoundsPlayed accumulators. Server-only / not
-				// replicated; queryable via Mods.db (NCRatingElimPlus.TotalPoints +
-				// RoundsPlayed). Gated to humans loaded by PostLogin (bots have no
-				// cache entry, so RecordRoundPPR is a no-op for them).
+				// Lifetime PPR + DPR — fold this round's contribution into the rating
+				// system's persistent accumulators (TotalPoints/RoundsPlayed/TotalDamage),
+				// and refresh the last-seen PlayerName. Server-only / not replicated;
+				// queryable via Mods.db (NCRatingElimPlus). Gated to humans loaded by
+				// PostLogin (bots have no cache entry, so RecordRoundPPR is a no-op).
 				if (RatingSystem.IsValid())
 				{
-					RatingSystem->RecordRoundPPR(UidStr, RoundPPR);
+					RatingSystem->RecordRoundPPR(UidStr, RoundPPR, RoundDamage, UTPS->PlayerName);
 				}
 			}
 		}
@@ -1111,8 +1218,16 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					P.UniqueId = UTPS->UniqueId.IsValid()
 						? UTPS->UniqueId.ToString()
 						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					P.TeamIndex = TeamIdx;   // 0/1 — labels the per-round upload record
 					P.Kills    = UTPS->RoundKills;
 					P.Deaths   = UTPS->bOutOfLives ? 1 : 0; // exactly one death per round in elim
+					// ELO uses the OVERKILL-INCLUSIVE round damage (PlayerRoundDamage),
+					// matching the PPR + DMG columns for one consistent damage definition
+					// across the whole mode (user decision). PlayerRoundDamage is per-round
+					// (reset in ResetPlayersForNewRound), so at EndRoundForTeam it holds
+					// only this round's damage. (NB: the prior validated Glicko fit used
+					// effective damage; overkill is theoretically farmable on low-HP
+					// targets — flip back to UTPS->RoundDamageDone if that ever shows up.)
 					P.Damage   = PlayerRoundDamage.Contains(UTPS) ? PlayerRoundDamage[UTPS] : 0.f;
 					Out.Add(MoveTemp(P));
 				}
@@ -1145,6 +1260,23 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 			Teams[WinnerTeamIndex]->Score += 1;
 			Teams[WinnerTeamIndex]->ForceNetUpdate();
 			UE_LOG(LogGameMode, Warning, TEXT("Team %d wins! New score: %d"), WinnerTeamIndex, Teams[WinnerTeamIndex]->Score);
+		}
+
+		// 6-0 blowout → arm the mid-game PPR shuffle for the next round start.
+		// Exactly 6-0 (a match passes through it at most once), publics only,
+		// once per match, and only when balancing is on at all. The PPR maps
+		// above already include the round that just ended, so the shuffle sees
+		// current form. Applied in StartNextRound, pre-spawn.
+		if (bElimMidGameShuffle && bBalanceTeams && !bIsPugMatch && !bDidMidGameShuffle
+			&& Teams.IsValidIndex(0) && Teams.IsValidIndex(1) && Teams[0] && Teams[1])
+		{
+			const int32 S0 = static_cast<int32>(Teams[0]->Score);
+			const int32 S1 = static_cast<int32>(Teams[1]->Score);
+			if ((S0 == 6 && S1 == 0) || (S0 == 0 && S1 == 6))
+			{
+				bPendingMidGameShuffle = true;
+				UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 detected (%d-%d) — PPR shuffle armed for next round start."), S0, S1);
+			}
 		}
 	}
 	else
@@ -1369,6 +1501,24 @@ void AElimPlusGame::ResetPlayersForNewRound()
 	}
 }
 
+// ElimPlus arena rule: players never drop their loadout. Stock
+// AUTGameMode::DiscardInventory tosses the current weapon (or the Enforcer fallback)
+// plus any bAlwaysDropOnDeath powerups, spawning AUTDroppedPickups — and it fired both
+// on death (AUTCharacter::Died) AND from ResetPlayersForNewRound at round reset (:1389).
+// The reset toss ran AFTER CleanupWorldForNewRound's sweep, so those drops survived into
+// the next round. Destroy the inventory in place instead: DiscardAllInventory Destroy()s
+// each item (no TossInventory), nulls the weapon + saved ammo. Nothing ever spawns, so
+// the sweep-ordering issue is moot. Deliberately does NOT call Super. Candy orbs (spawned
+// by the BP PreventDeath as separate AUTPickupHealth world actors) are not this pawn's
+// inventory and are untouched.
+void AElimPlusGame::DiscardInventory(APawn* Other, AController* Killer)
+{
+	if (AUTCharacter* UTC = Cast<AUTCharacter>(Other))
+	{
+		UTC->DiscardAllInventory();
+	}
+}
+
 // This function is unchanged
 void AElimPlusGame::CleanupWorldForNewRound()
 {
@@ -1412,14 +1562,23 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 		}
 	}
 
-	if (GetMatchState() == MatchState::WaitingToStart)
+	// Idempotency guard (hoisted ABOVE the warmup branch). A RestartPlayer on a
+	// controller that ALREADY has a living pawn must be a no-op: the engine reuses the
+	// existing pawn but still re-runs FinishRestartPlayer -> SetPlayerDefaults ->
+	// GiveDefaultInventory, and stock AUTCharacter::AddInventory dedupes only by INSTANCE
+	// (not by class). So a SECOND RestartPlayer during warmup (e.g. the join auto-spawn
+	// racing the client's ready-up) grants a second copy of every default weapon -> the
+	// doubled weapon bar reported on 327. First spawn (no pawn) is unaffected; the live
+	// and lineup paths below were already gated on this guard, so hoisting it only adds
+	// the missing coverage for WaitingToStart.
+	if (NewPlayer->GetPawn())
 	{
-		Super::RestartPlayer(NewPlayer);
 		return;
 	}
 
-	if (NewPlayer->GetPawn())
+	if (GetMatchState() == MatchState::WaitingToStart)
 	{
+		Super::RestartPlayer(NewPlayer);
 		return;
 	}
 
@@ -1447,7 +1606,50 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 			UE_LOG(LogGameMode, Warning, TEXT("RestartPlayer: FAILED to spawn pawn for %s"),
 				NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
 		}
+		else
+		{
+			// Pawn now carries its BP defaults (HealthMax 125 + the vest's 100 armor
+			// from default inventory). Scale HP for uneven teams (non-PUG) here.
+			ApplyUnevenTeamHealthScaling(Cast<AUTCharacter>(NewPlayer->GetPawn()));
+		}
 	}
+}
+
+void AElimPlusGame::ApplyUnevenTeamHealthScaling(AUTCharacter* Char)
+{
+	// Non-PUG only, opt-out via Mod.ini, and only when the teams are actually
+	// uneven. The short-handed team spawns tougher, the larger team softer.
+	if (!bElimUnevenHealthScaling || bIsPugMatch || !Char) return;
+	if (Teams.Num() < 2 || !Teams[0] || !Teams[1]) return;
+
+	const int32 TeamNum = Char->GetTeamNum();
+	if (TeamNum != 0 && TeamNum != 1) return;
+
+	// Team sizes include bots, so a bot-filled team counts as even (the bot is the
+	// compensation) — scaling only kicks in on a genuine head-count imbalance.
+	const int32 SizeMine  = Teams[TeamNum]->GetSize();
+	const int32 SizeOther = Teams[1 - TeamNum]->GetSize();
+	if (SizeMine == SizeOther) return;
+
+	// Proportional to the head-count gap: ElimUnevenHealthPct% PER missing player
+	// (4v5 = ±5%, 4v6 = ±10%, 3v6 = ±15%, ...), capped at ±50% so a lopsided
+	// count can't drive HP to zero. Diff >= 1 here (equal sizes returned above).
+	const int32 Diff   = FMath::Abs(SizeMine - SizeOther);
+	const float Delta  = FMath::Min(ElimUnevenHealthPct / 100.f * Diff, 0.5f);
+	const float Factor = (SizeMine < SizeOther) ? (1.f + Delta)   // short team: tougher
+	                                            : (1.f - Delta);  // big team:  softer
+
+	// Read the BP-set HealthMax (TeamArenaCharacter = 125) and scale it — never
+	// hardcode. Set HealthMax alongside Health: UT4 has NO health decay (Health
+	// alone would hold the buff), but matching HealthMax keeps Health <= max so
+	// the engine doesn't tag a buffed pawn as "overhealth" (UTCharacter.cpp:1551,
+	// hit/armor-effect classification). HealthMax isn't replicated → the scale is
+	// server-authoritative only (client bar reads vs its own 125; death + damage
+	// are server-side, which is what matters). Armor (the default vest) untouched.
+	const int32 BaseMax   = Char->HealthMax;
+	const int32 ScaledMax = FMath::Max(1, FMath::RoundToInt(BaseMax * Factor));
+	Char->HealthMax = ScaledMax;
+	Char->Health    = ScaledMax;
 }
 
 
@@ -1846,11 +2048,6 @@ AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("ElimPlus: %s (team %d) assigned spawn at %s (curated pool %d)"),
-		*PS->PlayerName, TeamIndex,
-		BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"),
-		MySpawns.Num());
-
 	return BestSpawn ? BestSpawn : Super::ChoosePlayerStart_Implementation(Player);
 }
 
@@ -1864,7 +2061,6 @@ AActor* AElimPlusGame::FindPlayerStart_Implementation(AController* Player, const
 		return OverriddenPlayerStart;
 	}
 
-	UE_LOG(LogGameMode, Warning, TEXT("Calling parent findplayerstart"));
 	return Super::FindPlayerStart_Implementation(Player, IncomingName);
 }
 
@@ -2340,24 +2536,9 @@ void AElimPlusGame::ForceLosersToViewWinners(int32 WinnerTeamIndex)
 
 void AElimPlusGame::DebugPlayerStates()
 {
-	UE_LOG(LogGameMode, Warning, TEXT("=== DEBUG PLAYER STATES ==="));
-	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
-	{
-		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
-		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
-		if (!PC || !PS) continue;
-		FName StateName = PC->GetStateName();
-		AActor* ViewTarget = PC->GetViewTarget();
-		FString ViewTargetName = ViewTarget ? ViewTarget->GetName() : TEXT("None");
-		/*UE_LOG(LogGameMode, Warning, TEXT("Player: %s, Team: %d, State: %s, ViewTarget: %s, OutOfLives: %s, HasPawn: %s"),
-			*PS->PlayerName,
-			PS->Team ? PS->Team->TeamIndex : -1,
-			StateName.IsValid() ? *StateName.ToString() : TEXT("Unknown"),
-			*ViewTargetName,
-			PS->bOutOfLives ? TEXT("Yes") : TEXT("No"),
-			PC->GetPawn() ? TEXT("Yes") : TEXT("No")); */
-	}
-	//UE_LOG(LogGameMode, Warning, TEXT("=== END DEBUG ==="));
+	// (no-op) The per-player debug dump was disabled; the body + "=== DEBUG
+	// PLAYER STATES ===" header log were removed to cut the spam. Re-add a
+	// Verbose loop here if you need it.
 }
 
 bool AElimPlusGame::CanSpectate_Implementation(APlayerController* Viewer, APlayerState* ViewTarget)
@@ -2578,23 +2759,38 @@ void AElimPlusGame::CheckRoundWinConditions()
 	}
 	int32 Alive0, Alive1;
 	GetAliveCounts(Alive0, Alive1);
-	/*if (Team0StartingSize == 0 || Team1StartingSize == 0)
+	// Solo/practice rounds (one team empty at round start): an empty team can't
+	// be "eliminated", so don't insta-award every round — let the round clock
+	// run. At expiry DefaultTimer re-enters this function with the clock dead,
+	// the guard goes inert, and the normal branches below award the round
+	// (reason "TimeExpired" — real games are untouched since their starting
+	// sizes are never 0). If the populated side wipes ITSELF (solo player dies:
+	// no respawns in elimination), fall through for the instant Draw + next round.
+	const bool bSoloRound    = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+	const bool bClockRunning = (RoundEndTimeSeconds > 0.f)
+	                        && (GetWorld()->GetTimeSeconds() < RoundEndTimeSeconds);
+	if (bSoloRound && bClockRunning)
 	{
-		// One team is empty - let the timer run out naturally
-		return;
-	}*/
+		const int32 PopulatedAlive = (Team0StartingSize == 0) ? Alive1 : Alive0;
+		if (PopulatedAlive > 0)
+		{
+			return;   // alive vs nobody — wait for the round timer
+		}
+	}
 	const bool Team0Eliminated = (Alive0 == 0);
 	const bool Team1Eliminated = (Alive1 == 0);
 	if (Team0Eliminated && !Team1Eliminated)
 	{
 		FTimerDelegate TimerDelegate;
-		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 1, FName(TEXT("Elimination")));
+		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 1,
+			FName((Team0StartingSize == 0) ? TEXT("TimeExpired") : TEXT("Elimination")));
 		GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
 	}
 	else if (Team1Eliminated && !Team0Eliminated)
 	{
 		FTimerDelegate TimerDelegate;
-		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 0, FName(TEXT("Elimination")));
+		TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), 0,
+			FName((Team1StartingSize == 0) ? TEXT("TimeExpired") : TEXT("Elimination")));
 		GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
 	}
 	else if (Team0Eliminated && Team1Eliminated)
@@ -2782,6 +2978,13 @@ void AElimPlusGame::RecordHighDamageCarry(AUTPlayerState* PlayerState, float Dam
 	OnPlayerHighDamageCarry.Broadcast(PlayerState, DamagePercentage);
 }
 
+float AElimPlusGame::GetMatchDamageForPlayer(AUTPlayerState* PS) const
+{
+	if (!PS) return 0.f;
+	const float* Found = PerPlayerMatchDamage.Find(PS);
+	return Found ? *Found : 0.f;
+}
+
 void AElimPlusGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerState* Victim, AUTPlayerState* Attacker)
 {
 	Super::ScoreDamage_Implementation(DamageAmount, Victim, Attacker);
@@ -2805,32 +3008,40 @@ void AElimPlusGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 	}
 
 
-		// **NEW**: Calculate actual damage dealt (not overkill)
-		int32 ActualDamageDealt = DamageAmount;
-
-		if (Victim && Victim->GetUTCharacter())
+		// Reconstruct the OVERKILL-INCLUSIVE damage for this hit. DamageAmount we
+		// receive is the engine's AppliedDamage = effective resource consumed
+		// (armor-absorbed + HP removed, with overkill ALREADY stripped): UTCharacter::
+		// TakeDamage does Health -= ResultDamage (UTCharacter.cpp:981) then
+		// AppliedDamage += Health when Health<0 (:992), and ScoreDamage receives that
+		// stripped value (:1023). We're called before Died(), so a lethal blow leaves
+		// the victim's Health negative by exactly the overkill — add it back. Result =
+		// consumed + overkill = the FULL hit value. NOTE this INCLUDES the armor-absorbed
+		// portion (ATeamArenaCharacter::ModifyDamageTaken reduces only ResultDamage, not
+		// AppliedDamage), matching the engine's own DamageDone accounting — so the DMG
+		// column reads "normal damage (armor included) + overkill". (The old
+		// Min(dmg, currentHP) cap did the inverse: it zeroed every killing blow, which
+		// halved PPR and starved the carry achievement / ELO.)
+		float OverkillDamage = static_cast<float>(DamageAmount);
+		if (AUTCharacter* VictimChar = Victim->GetUTCharacter())
 		{
-			AUTCharacter* VictimChar = Victim->GetUTCharacter();
-			int32 VictimHealth = VictimChar->Health;
-			float VictimArmor = VictimChar->GetArmorAmount();
-			int32 TotalVictimHP = VictimHealth + FMath::FloorToInt(VictimArmor);
-
-			// Cap damage at victim's actual health + armor
-			ActualDamageDealt = FMath::Min(DamageAmount, TotalVictimHP);
+			if (VictimChar->Health < 0)
+			{
+				OverkillDamage += static_cast<float>(-VictimChar->Health);
+			}
 		}
 
-		if (!PlayerRoundDamage.Contains(Attacker))
-		{
-			PlayerRoundDamage.Add(Attacker, 0.0f);
-		}
-		PlayerRoundDamage[Attacker] += ActualDamageDealt; // Use actual damage, not overkill
+		// Per-round (drives PPR + high-damage-carry achievement) and match-cumulative
+		// (drives the scoreboard DMG column via the stats replicator). Engine DamageDone
+		// stays overkill-stripped for StatSQL — we do NOT touch it.
+		PlayerRoundDamage.FindOrAdd(Attacker) += OverkillDamage;
+		PerPlayerMatchDamage.FindOrAdd(Attacker) += OverkillDamage;
 		if (Attacker->Team->TeamIndex == 0)
 		{
-			Team0RoundDamage += ActualDamageDealt;
+			Team0RoundDamage += OverkillDamage;
 		}
 		else if (Attacker->Team->TeamIndex == 1)
 		{
-			Team1RoundDamage += ActualDamageDealt;
+			Team1RoundDamage += OverkillDamage;
 		}
 
 }
@@ -2920,7 +3131,7 @@ void AElimPlusGame::StartOvertime()
 		false
 	);
 	BP_OnOvertimeStarted();
-	UE_LOG(LogGameMode, Warning, TEXT("Overtime has started! First wave in %.1f seconds with %.1f damage"),
+	UE_LOG(LogGameMode, Verbose, TEXT("Overtime has started! First wave in %.1f seconds with %.1f damage"),
 		OvertimeStartDelay, OvertimeBaseDamage);
 }
 
@@ -2984,7 +3195,7 @@ void AElimPlusGame::ExecuteOvertimeWave()
 	{
 		CurrentWaveDamage = FMath::Min(CurrentWaveDamage, OvertimeMaxDamage);
 	}
-	UE_LOG(LogGameMode, Warning, TEXT("Overtime Wave %d: %.1f damage to %d players"),
+	UE_LOG(LogGameMode, Verbose, TEXT("Overtime Wave %d: %.1f damage to %d players"),
 		CurrentOvertimeWave, CurrentWaveDamage, GetWorld()->GetNumPawns());
 	BP_OnOvertimeWave(CurrentWaveDamage, CurrentOvertimeWave);
 	int32 DamageCount = 0;
@@ -3036,7 +3247,7 @@ void AElimPlusGame::ExecuteOvertimeWave()
 
 		}
 	}
-	UE_LOG(LogGameMode, Warning, TEXT("Applied damage to %d players"), DamageCount);
+	UE_LOG(LogGameMode, Verbose, TEXT("Applied damage to %d players"), DamageCount);
 	CheckRoundWinConditions();
 	if (bRoundInProgress)
 	{
@@ -3227,6 +3438,7 @@ void AElimPlusGame::Logout(AController* Exiting)
 			DarkHorseCandidates.Remove(PS);
 			PerPlayerMatchPPRSum.Remove(PS);
 			PerPlayerMatchPPRRoundCount.Remove(PS);
+			PerPlayerMatchDamage.Remove(PS);
 
 		}
 	}
@@ -3542,4 +3754,162 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 		PC->ClientMessage(RedLine);
 		PC->ClientMessage(BlueLine);
 	}
+}
+
+// 6-0 blowout shuffle. Strength = each player's CURRENT-match mean PPR (the
+// per-round kills + damage/100 metric the scoreboard shows), NOT lifetime
+// Glicko — the lifetime split is exactly what just produced the 6-0. The
+// balancer only compares strength sums, so scale is free; PPR is passed x100
+// to keep the numbers in a familiar range in logs. Bots and no-history
+// joiners (no completed rounds yet) get the human mean — neutral placement
+// rather than a scale-breaking default.
+void AElimPlusGame::MidGameShufflePPR()
+{
+	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: bailed (auth=%d, rating=%d, teams=%d)"),
+			HasAuthority() ? 1 : 0, RatingSystem.IsValid() ? 1 : 0, Teams.Num());
+		return;
+	}
+
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	if (!GS) return;
+
+	// Same parallel-array pattern as RebalanceTeamsForMatchStart: TeamBalancer
+	// returns slot indices into Inputs, which map back to ControllersByIndex.
+	TArray<FElimPlusBalanceInput> Inputs;
+	TArray<AController*> ControllersByIndex;
+	Inputs.Reserve(GS->PlayerArray.Num());
+	ControllersByIndex.Reserve(GS->PlayerArray.Num());
+
+	float HumanStrengthSum = 0.f;
+	int32 HumanStrengthCount = 0;
+	for (APlayerState* PS : GS->PlayerArray)
+	{
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+		if (!UTPS || UTPS->bOnlySpectator) continue;
+
+		AController* C = Cast<AController>(UTPS->GetOwner());
+		if (!C) continue;
+
+		FElimPlusBalanceInput In;
+		In.UniqueId = UTPS->UniqueId.IsValid()
+			? UTPS->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+
+		const int32* Rounds = PerPlayerMatchPPRRoundCount.Find(UTPS);
+		const float* Sum    = PerPlayerMatchPPRSum.Find(UTPS);
+		if (Rounds && Sum && *Rounds > 0)
+		{
+			In.StrengthOverride = (*Sum / static_cast<float>(*Rounds)) * 100.f;
+			HumanStrengthSum += In.StrengthOverride;
+			HumanStrengthCount++;
+		}
+
+		Inputs.Add(In);
+		ControllersByIndex.Add(C);
+	}
+
+	if (Inputs.Num() < 2)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: skipped (only %d active players)"), Inputs.Num());
+		return;
+	}
+
+	const float NeutralStrength = (HumanStrengthCount > 0)
+		? HumanStrengthSum / static_cast<float>(HumanStrengthCount)
+		: 100.f;
+	for (FElimPlusBalanceInput& In : Inputs)
+	{
+		if (In.StrengthOverride < 0.f)
+		{
+			In.StrengthOverride = NeutralStrength;
+		}
+	}
+
+	const FElimPlusBalanceResult Result = RatingSystem->ComputeBalancedTeams(Inputs);
+	if (!Result.bValid)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: TeamBalancer returned invalid assignment, skipping"));
+		return;
+	}
+
+	int32 MovesMade = 0;
+	auto AssignToTeam = [this, &ControllersByIndex, &MovesMade](const TArray<int32>& Indices, uint8 TargetTeam)
+	{
+		for (int32 SlotIdx : Indices)
+		{
+			if (!ControllersByIndex.IsValidIndex(SlotIdx)) continue;
+			AController* C = ControllersByIndex[SlotIdx];
+			AUTPlayerState* UTPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+			if (!UTPS) continue;
+			if (UTPS->Team && UTPS->Team->TeamIndex == TargetTeam) continue;  // already there
+			MovePlayerToTeam(C, UTPS, TargetTeam);
+			++MovesMade;
+		}
+	};
+	AssignToTeam(Result.Team0Indices, 0);
+	AssignToTeam(Result.Team1Indices, 1);
+
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: %d players, Team0=%d ppr=%.1f, Team1=%d ppr=%.1f, diff=%.1f, moves=%d"),
+		Inputs.Num(),
+		Result.Team0Indices.Num(), Result.Team0Strength / 100.f,
+		Result.Team1Indices.Num(), Result.Team1Strength / 100.f,
+		Result.StrengthDifference / 100.f, MovesMade);
+
+	// Roster broadcast, name(ppr) per player — same stationary-chat-reference
+	// rationale as the pre-match rebalance broadcast.
+	auto BuildTeamLine = [this, &ControllersByIndex, &Inputs](const TArray<int32>& Indices, const TCHAR* Prefix, float Strength) -> FString
+	{
+		FString Names;
+		for (int32 SlotIdx : Indices)
+		{
+			if (!ControllersByIndex.IsValidIndex(SlotIdx) || !Inputs.IsValidIndex(SlotIdx)) continue;
+			AController* C = ControllersByIndex[SlotIdx];
+			AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+			if (!PS) continue;
+			if (!Names.IsEmpty()) Names += TEXT(", ");
+			Names += FString::Printf(TEXT("%s(%.1f)"), *PS->PlayerName, Inputs[SlotIdx].StrengthOverride / 100.f);
+		}
+		return FString::Printf(TEXT("%s (ppr=%.1f): %s"), Prefix, Strength / 100.f, *Names);
+	};
+
+	const FString Header   = FString::Printf(TEXT("=== 6-0: Teams shuffled by current match performance (PPR) — moves=%d ==="), MovesMade);
+	const FString RedLine  = BuildTeamLine(Result.Team0Indices, TEXT("RED  "), Result.Team0Strength);
+	const FString BlueLine = BuildTeamLine(Result.Team1Indices, TEXT("BLUE "), Result.Team1Strength);
+
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *Header);
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *RedLine);
+	UE_LOG(LogGameMode, Warning, TEXT("%s"), *BlueLine);
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (!PC) continue;
+		PC->ClientMessage(Header);
+		PC->ClientMessage(RedLine);
+		PC->ClientMessage(BlueLine);
+	}
+}
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool AElimPlusGame::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool AElimPlusGame::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
 }

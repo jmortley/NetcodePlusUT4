@@ -1,6 +1,8 @@
 // NCPlusCTFGameMode.cpp - NetcodePlus CTF with improved advantage time and instant replay
 #include "NCPlusCTFGameMode.h"
+#include "NCFireValCollector.h"
 #include "UnrealTournament.h"
+#include "UTPlayerState.h"            // ValidateHat: SetOverrideHatClass / OverrideHatClass
 #include "UTTeamGameMode.h"
 #include "UTHUD_CTF.h"
 #include "UTCTFGameMessage.h"
@@ -18,6 +20,8 @@
 #include "UTWorldSettings.h"
 #include "StatNames.h"
 #include "Engine/DemoNetDriver.h"
+#include "TimerManager.h"
+#include "HAL/IConsoleManager.h"
 #include "UTCTFScoreboard.h"
 #include "UTCharacterVoice.h"
 #include "UTCTFScoring.h"
@@ -71,7 +75,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	SpawnFreshnessWindow = 30.0f;       // 30s since last use = fully fresh
 	SpawnFlagVicinityRadius = 4000.f;   // flag within this of our base = "in the vicinity"
 	SpawnKillerAvoidRadius = 2500.f;    // never respawn within this of your last killer (anti-camp)
-	SpawnRobbedBaseAvoidCount = 2.f;    // when our flag's out, skip the 2 deepest base spawns
+	SpawnRobbedBaseAvoidCount = 2.f;    // when our flag's out, the 2 deepest base spawns form the avoid set — ONE blocked per respawn, alternating
 
 	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
@@ -99,6 +103,34 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 
 	// A bot-hosted PUG passes ?PugId=N — gate auto-pause-on-drop to real PUGs.
 	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
+
+	// Bot-assigned teams: ?PugTeams=<ut4id>:0,<ut4id>:1,...  The bot already
+	// balanced the teams; pin each listed player to their side in ChangeTeam so
+	// the engine's warmup auto-balance can't reshuffle them (and nobody has to
+	// hand-swap). Keys are lowercased EOS ids — same string MutBotEvents posts as
+	// Ut4Id and the bot stores in players.ut4_id. Players not listed (unlinked, or
+	// subs) aren't pinned and use the stock balancer.
+	PugRosterTeam.Reset();
+	const FString TeamsOpt = UGameplayStatics::ParseOption(Options, TEXT("PugTeams"));
+	if (!TeamsOpt.IsEmpty())
+	{
+		TArray<FString> Entries;
+		TeamsOpt.ParseIntoArray(Entries, TEXT(","), true);
+		for (const FString& Entry : Entries)
+		{
+			FString IdPart, TeamPart;
+			if (Entry.Split(TEXT(":"), &IdPart, &TeamPart))
+			{
+				const FString Key = IdPart.ToLower();
+				const uint8 TeamNum = (uint8)FMath::Clamp(FCString::Atoi(*TeamPart), 0, 1);
+				if (!Key.IsEmpty())
+				{
+					PugRosterTeam.Add(Key, TeamNum);
+				}
+			}
+		}
+		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: PUG roster parsed — %d players pinned to teams"), PugRosterTeam.Num());
+	}
 
 	IntermissionDuration = FMath::Max(1, UGameplayStatics::GetIntOption(Options, TEXT("HalftimeDuration"), IntermissionDuration));
 	AdvantageMaxDuration = FMath::Max(60, UGameplayStatics::GetIntOption(Options, TEXT("AdvantageMaxDuration"), AdvantageMaxDuration));
@@ -238,9 +270,44 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 	}
 }
 
+bool ANCPlusCTFGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)
+{
+	// Bot PUG: keep each rostered player on the side the bot balanced. login picks,
+	// player-initiated switches, and the engine's CountdownToBegin auto-balance
+	// (AUTTeamGameMode::ShouldBalanceTeams) all funnel through ChangeTeam, so this
+	// is the one place that pins them — the auto-balance is exactly what was
+	// swapping people onto the wrong team. Non-roster joiners (subs, late fills,
+	// or anyone who hasn't /linked) get the stock balancer via Super.
+	if (bIsPugMatch && PugRosterTeam.Num() > 0 && Player && HasAuthority())
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+		if (PS && !PS->bOnlySpectator && PS->UniqueId.IsValid())
+		{
+			// Match on UniqueId.ToString() — the same id this gamemode keys the
+			// rating DB on in PostLogin, which equals MutBotEvents' Ut4Id and the
+			// bot's players.ut4_id.
+			if (const uint8* Assigned = PugRosterTeam.Find(PS->UniqueId.ToString().ToLower()))
+			{
+				const uint8 Want = *Assigned;
+				// Already on the right side — accept without re-suiciding them
+				// (MovePlayerToTeam kills the pawn on an actual move).
+				if (PS->Team && PS->Team->TeamIndex == Want)
+				{
+					return true;
+				}
+				return MovePlayerToTeam(Player, PS, Want);
+			}
+		}
+	}
+
+	return Super::ChangeTeam(Player, NewTeam, bBroadcast);
+}
+
 void ANCPlusCTFGameMode::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+
+	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -453,6 +520,15 @@ void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlay
 	Out.Grabs         = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagGrabs));
 	Out.CarryAssists  = static_cast<int32>(UTPS->GetStatsValue(NAME_CarryAssist));
 	Out.EnemyFCDamage = static_cast<int32>(UTPS->GetStatsValue(NAME_EnemyFCDamage));
+
+	// Possession + denial signals (previously captured by the engine but never fed
+	// to ranking). FlagHeldTime = offensive carry/possession seconds; FlagDenials =
+	// clutch save (enemy carrier killed near the would-be-cap base); FlagHeldDeny
+	// [Time] = the both-flags-out hold. Same StatsData path as the objectives above.
+	Out.CarryTime    = UTPS->GetStatsValue(NAME_FlagHeldTime);
+	Out.Denials      = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagDenials));
+	Out.HeldDeny     = static_cast<int32>(UTPS->GetStatsValue(NAME_FlagHeldDeny));
+	Out.HeldDenyTime = UTPS->GetStatsValue(NAME_FlagHeldDenyTime);
 
 	// Resolve positional role from the dwell accumulated by SampleRoleDwell (1Hz).
 	// OffLean = EnemyFrac - OwnFrac (-1 pure defense .. +1 pure offense); the mid
@@ -741,11 +817,47 @@ bool ANCPlusCTFGameMode::SupportsInstantReplay() const
 	return true;
 }
 
+bool ANCPlusCTFGameMode::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Force the player's chosen hat as an OverrideHatClass (NOT entitlement-checked) on the NEXT tick —
+	// after ServerReceiveHatClass runs ValidateEntitlements + strips the un-entitled cosmetic — so the
+	// override is the final word. The community master grants base + map entitlements but withholds
+	// cosmetic ones, which is what trips the strip; OverrideHatClass sidesteps it. Server-side; never kicks.
+	// The log reveals whether the class actually LOADED: NULL there = content/pak problem (not the strip),
+	// and no override can conjure a class that won't load.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
+}
+
 // ── Floor Slide ─────────────────────────────────────────────────────
 // Floor slide disable temporarily removed — needs reimplementation
 // without changing TeamArenaCharacter class layout
 void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
+	// Idempotency guard: a RestartPlayer on a controller that ALREADY has a living pawn
+	// must be a no-op. The engine reuses the existing pawn but still re-runs
+	// SetPlayerDefaults -> GiveDefaultInventory, and stock AddInventory dedupes only by
+	// instance (not class), so a second warmup RestartPlayer would grant a second copy of
+	// every default weapon = the doubled weapon bar. First spawn (no pawn) is unaffected;
+	// the anti-repeat tracking below only has fresh StartSpot data when a spawn occurred.
+	if (NewPlayer && NewPlayer->GetPawn())
+	{
+		return;
+	}
+
 	Super::RestartPlayer(NewPlayer);
 
 	// Anti-repeat tracking (IG+ style): keep PlayerRecentSpawns updated from the
@@ -795,10 +907,7 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
 	if (bEnablePingCompensatedSpawn && SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
 	{
-		SpawnedChar->bPingCompensatedSpawnPending = true;
-		SpawnedChar->SetActorHiddenInGame(true);
-		SpawnedChar->SetActorEnableCollision(false);
-		SpawnedChar->SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+		SpawnedChar->BeginPingCompensatedSpawnHide();   // ping-floored: skips low-ping spawners
 	}
 }
 
@@ -1097,9 +1206,10 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		}
 	}
 
-	// When our OWN flag isn't home, drop the deepest starts at our (just-robbed) base
-	// so we respawn forward toward the carrier's escape rather than behind it — a
-	// lightweight slice of UT99's "hard to leave".
+	// When our OWN flag isn't home, drop ONE of the deepest starts at our
+	// (just-robbed) base — alternating which — so we respawn biased forward toward
+	// the carrier's escape rather than behind it: a lightweight slice of UT99's
+	// "hard to leave" that no longer locks defenders out of the whole base area.
 	FVector OwnBaseLoc = FVector::ZeroVector;
 	const int32 RobbedAvoid = FMath::TruncToInt(SpawnRobbedBaseAvoidCount);
 	bool bOwnFlagOut = false;
@@ -1141,21 +1251,31 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		DistOwnBase.Add(bOwnFlagOut ? (Candidate->GetActorLocation() - OwnBaseLoc).Size() : FLT_MAX);
 	}
 
-	// Mark the RobbedAvoid starts nearest our robbed base (keep at least one start).
+	// Rank the RobbedAvoid starts nearest our robbed base, then mark exactly ONE
+	// of them — rotating through the set per respawn (nearest, 2nd-nearest, ...)
+	// so defenders always keep a base spawn available but can't rely on one fixed
+	// spot while the flag is out. (Was: drop ALL RobbedAvoid nearest at once.)
 	TArray<bool> RobbedAdj;
 	RobbedAdj.Init(false, Cands.Num());
 	if (bOwnFlagOut)
 	{
-		const int32 ToDrop = FMath::Min(RobbedAvoid, FMath::Max(0, Cands.Num() - 1));
-		for (int32 k = 0; k < ToDrop; ++k)
+		TArray<int32> NearestRanked;   // candidate indices, ascending distance to base
+		const int32 SetSize = FMath::Min(RobbedAvoid, FMath::Max(0, Cands.Num() - 1));
+		for (int32 k = 0; k < SetSize; ++k)
 		{
 			int32 MinIdx = -1; float MinD = FLT_MAX;
 			for (int32 i = 0; i < Cands.Num(); ++i)
 			{
-				if (!RobbedAdj[i] && DistOwnBase[i] < MinD) { MinD = DistOwnBase[i]; MinIdx = i; }
+				if (!NearestRanked.Contains(i) && DistOwnBase[i] < MinD) { MinD = DistOwnBase[i]; MinIdx = i; }
 			}
 			if (MinIdx < 0) break;
-			RobbedAdj[MinIdx] = true;
+			NearestRanked.Add(MinIdx);
+		}
+		if (NearestRanked.Num() > 0)
+		{
+			int32& Rotation = RobbedSpawnRotation[FMath::Clamp(TeamIndex, 0, 1)];
+			RobbedAdj[NearestRanked[Rotation % NearestRanked.Num()]] = true;
+			++Rotation;
 		}
 	}
 
@@ -1535,14 +1655,36 @@ void ANCPlusCTFGameMode::ScoreObject_Implementation(AUTCarriedObject* GameObject
 		LastScoreObjectTime = CurrentTime + 0.5f;
 	}
 
+	// Record the decisive cap BEFORE Super: a scorelimit/golden/mercy cap ends the match
+	// INSIDE Super::ScoreObject_Implementation (-> EndGame -> end-match replay) before the
+	// post-Super !HasMatchEnded() bookkeeping runs, so the deciding cap would otherwise never
+	// be recorded (at cap limit 1 the featured moment is always blank). UniqueId is the replay
+	// focus (ClientQueueCoolMoment), so no pawn capture is needed.
+	if (Reason == FName("FlagCapture") && Holder != nullptr && Holder->Team != nullptr
+		&& CTFGameState && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())
+	{
+		LastCapPlayer = Holder;
+		LastCapTime   = GetWorld()->GetTimeSeconds();
+	}
+
 	Super::ScoreObject_Implementation(GameObject, HolderPawn, Holder, Reason);
 
 	if (Holder != nullptr && Holder->Team != nullptr && !CTFGameState->HasMatchEnded() && !CTFGameState->IsMatchIntermission())
 	{
 		if (Reason == FName("FlagCapture"))
 		{
-			// Boost CoolFactor for all captures (for replay selection)
+			// Boost CoolFactor for all captures (for replay selection). The LastCap*
+			// capture for the instant replay now happens BEFORE Super (above), so the
+			// scorelimit-winning cap is recorded before it ends the match.
 			Holder->AddCoolFactorEvent(200.0f);
+		}
+		else if (Reason == FName("SentHome"))
+		{
+			// Credit a flag return so a clutch defensive save is replay-eligible
+			// (and can fill a secondary clip, or be featured if no cap ends the
+			// match). Engine credits near-base denials in UTCTFFlag::Drop but
+			// never plain returns. Below the 200 cap weight so a cap still wins.
+			Holder->AddCoolFactorEvent(120.0f);
 		}
 	}
 }
@@ -1603,18 +1745,122 @@ bool ANCPlusCTFGameMode::CheckScore_Implementation(AUTPlayerState* Scorer)
 
 // ── End Game & Replay ────────────────────────────────────────────────
 
+// ============================================================================
+// DESIGN NOTE — iCTF/CTF end-of-match cap replay vs. the Map.h:527 client crash
+//
+// SYMPTOM (Shipping CLIENT, at match end):
+//   Assertion failed: Pair != nullptr [Containers/Map.h Line:527]
+//   last log lines ALWAYS: LogUTKillcam CoolMomentCamStart -> KillcamGoToTime -> crash.
+//   = the stock end-of-match cool-moment KILLCAM DEMO SEEK
+//   (UUTKillcamPlayback::KillcamGoToTime -> UDemoNetDriver::GotoTimeInSeconds) doing a
+//   FindChecked() on a NetGUID it cannot resolve while reconstructing the rewound frame.
+//
+// THEORIES DISPROVEN BY MATCH LOGS — do NOT re-litigate these:
+//   - NOT rewind distance      : a 13.97s rewind crashed, an 18.01s rewind survived.
+//   - NOT seek depth / the map : CTF-Duku-v03 both crashed AND survived in one session/build.
+//   - NOT cap-vs-frag frame, and NOT the +200/+400 cap CoolFactor boosts (live v326 ships
+//     those and is crash-free).
+//   evidence (seek-abs / match-len / result):
+//       36.6 /  72.7  CRASH        66.9 /  80.9  CRASH
+//      109.0 / 153.9  CRASH       187.0 / 205.0  OK   <- only the long match survived
+//
+// ROOT CAUSE = demo MATURITY. The seek reconstructs a past frame; in a young, still-settling
+//   early-match world some actor's NetGUID isn't resolved yet -> FindChecked. A SHORT match
+//   (e.g. 1 cap to win) can only ever seek early, so it ALWAYS crashes; a long match seeks
+//   into a settled world and survives. Compounded because the DECIDING cap was never recorded
+//   for the replay (the LastCap bookkeeping ran AFTER Super::ScoreObject, which had already
+//   ended the match) -> the picker fell back to a stale frag -> an even earlier seek. The live
+//   build "works for users" only because real matches run long enough; nobody plays 1-cap.
+//
+// WHY THE FIX IS SERVER-SIDE ONLY: the failing seek is stock Epic CLIENT code
+//   (UTKillcamPlayback / UDemoNetDriver). We do NOT fork base UT — everything stays in the
+//   plugin. So our only levers are WHEN the replay fires and WHICH frame it targets, both
+//   decided here on the server. The client side is untouched (no client roll).
+//
+// THE FIX (all in this file):
+//   1. ScoreObject records the decisive cap BEFORE Super (keeps a match-ending cap).
+//   2. EndGame gates on server demo age (ncp.CTFReplayMinDemoSeconds): short match -> skip
+//      entirely (no crash, no replay).
+//   3. PickMostCoolMoments features ONLY that cap via stock ClientQueueCoolMoment, so the
+//      seek lands at the newest / most-resolved end-of-match frame (NOT ClientPlayInstantReplay
+//      — its real-pawn-GUID focus is a separate crash vector a prior session hit).
+//   Tune ncp.CTFReplayMinDemoSeconds down to the real match-length floor. Residual edge: a
+//   late-joining client has a shorter local killcam demo than the server, so the server-measured
+//   maturity gate can't fully protect that client — not fixable without editing stock code.
+// ============================================================================
+
+// Minimum demo length (seconds) before the iCTF/CTF end-of-match replay will fire. The crash
+// (stock client UUTKillcamPlayback::KillcamGoToTime -> GotoTimeInSeconds, Map.h:527 FindChecked
+// on an unresolved NetGUID) happens when the rewound frame lands in a still-settling early-match
+// world. Match logs proved it's demo AGE, not rewind distance or the map: short matches crash at
+// any rewind (13.97s and 44.96s both crashed), while a 205s match survived a deep seek. We cannot
+// harden the seek (it's stock Epic CLIENT code), so we gate on maturity: below this, skip the
+// replay (no crash, no replay). Tune to your typical match length; 0 = always fire (not advised).
+static TAutoConsoleVariable<float> CVarCTFReplayMinDemoSeconds(
+	TEXT("ncp.CTFReplayMinDemoSeconds"), 200.f,
+	TEXT("Min server demo seconds before the CTF/iCTF end-of-match cap replay fires (short matches crash the client killcam seek). 0 = always."));
+
+// Seconds of build-up shown before the featured cap, so the run-up plays (not just the score frame).
+static TAutoConsoleVariable<float> CVarCTFReplayBuildupSeconds(
+	TEXT("ncp.CTFReplayBuildupSeconds"), 8.f,
+	TEXT("Seconds of build-up before the featured decisive cap in the CTF/iCTF end-of-match replay."));
+
 void ANCPlusCTFGameMode::EndGame(AUTPlayerState* Winner, FName Reason)
 {
-	// Select the end-of-game replay before calling Super (which sets MatchEnded).
-	// Only call PickMostCoolMoments if instant replay is actually supported —
-	// standalone PIE and dedicated servers without demo recording will crash
-	// if we try to access replay data that was never initialized.
-	if (SupportsInstantReplay() && GetWorld()->DemoNetDriver != nullptr)
+	// End-of-match cap replay, GATED ON DEMO MATURITY. The client killcam demo seek crashes
+	// (Map.h:527) when the rewound frame lands in a still-settling early-match world; this is
+	// per-match demo age, not rewind distance / cap-vs-frag / map (proven by logs — see the
+	// CVarCTFReplayMinDemoSeconds note). The seek lives in stock Epic CLIENT code we don't edit,
+	// so we only fire once the demo is old enough for the seek to resolve, and PickMostCoolMoments
+	// features the just-scored decisive cap (newest, most-resolved frame). Short matches (1-cap
+	// tests) fall below the gate and skip the replay entirely — no crash, no replay.
+	const float DemoAge = (GetWorld()->DemoNetDriver != nullptr) ? GetWorld()->DemoNetDriver->DemoCurrentTime : 0.f;
+	const float MinAge  = CVarCTFReplayMinDemoSeconds.GetValueOnGameThread();
+	if (SupportsInstantReplay() && GetWorld()->DemoNetDriver != nullptr && DemoAge >= MinAge)
 	{
 		PickMostCoolMoments();
 	}
+	else if (GetWorld()->DemoNetDriver != nullptr)
+	{
+		UE_LOG(LogGameMode, Display, TEXT("NCPlusCTF: end-match replay skipped — demo %.1fs < min %.1fs (short-match killcam-seek crash guard)"), DemoAge, MinAge);
+	}
 
 	Super::EndGame(Winner, Reason);
+}
+
+void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolMomentsToShow)
+{
+	const float Now = GetWorld()->TimeSeconds;
+
+	// Feature ONLY the decisive cap (captured before Super in ScoreObject), via the stock
+	// ClientQueueCoolMoment RPC — the same empty-focus seek the engine uses for cool moments,
+	// NOT ClientPlayInstantReplay (its real-pawn-GUID focus is a separate crash vector that the
+	// last session hit). A deciding cap was credited microseconds ago, so the rewind is tiny and
+	// the seek lands at the newest, fully-resolved end-of-match frame. No recent cap (timelimit
+	// end / stale cap) => skip rather than let stock PMCM seek to a possibly-early frag frame.
+	AUTPlayerState* FeaturePS = LastCapPlayer.Get();
+	const bool bRecentCap = FeaturePS != nullptr
+		&& FeaturePS->UniqueId.IsValid()
+		&& LastCapTime > 0.f
+		&& (Now - LastCapTime) <= FeatureCapMaxAgeSeconds;
+
+	if (!bRecentCap)
+	{
+		UE_LOG(LogGameMode, Display, TEXT("NCPlusCTF: end-match replay skipped — no recent decisive cap to feature"));
+		return;
+	}
+
+	const float Rewind = (Now - LastCapTime) + CVarCTFReplayBuildupSeconds.GetValueOnGameThread();
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
+		{
+			PC->ClientQueueCoolMoment(FeaturePS->UniqueId, Rewind);
+		}
+	}
+	UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF replay: featured decisive cap by %s (rewind %.1fs, demo %.1fs)"),
+		*FeaturePS->PlayerName, Rewind,
+		(GetWorld()->DemoNetDriver != nullptr) ? GetWorld()->DemoNetDriver->DemoCurrentTime : 0.f);
 }
 
 // ── Match State Handlers ─────────────────────────────────────────────
@@ -1626,6 +1872,7 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
+		FNCFireValCollector::Get().Reset();   // first half only — accumulate samples across both halves
 	}
 
 	// Spawn CTF stats replicator for scoreboard (grabs, accuracy).
@@ -1857,3 +2104,25 @@ void ANCPlusCTFGameMode::CreateGameURLOptions(TArray<TSharedPtr<TAttributeProper
 // AUTCTFGameMode::CreateConfigWidgets provides the standard CTF UI. Our custom
 // settings (AdvantageMaxDuration, GracePeriod, MercyScore) are exposed via
 // CreateGameURLOptions and can be set via URL params or config.
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool ANCPlusCTFGameMode::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool ANCPlusCTFGameMode::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
+}

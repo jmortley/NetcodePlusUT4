@@ -1,5 +1,6 @@
 // SNCPlusHUDEditor.cpp - implementation of the live HUD layout editor.
 #include "SNCPlusHUDEditor.h"
+#include "NCPlusHUDLayout.h"
 #include "SNCPlusHUDPresetGallery.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
@@ -49,7 +50,7 @@ namespace NCHUDEdit
 		{
 			return TEXT("Weapon Bars");
 		}
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("score_kda"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("score_kda") || Alias == TEXT("team_panel"))
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
@@ -64,7 +65,8 @@ namespace NCHUDEdit
 			return TEXT("CTF");
 		}
 		if (Alias == TEXT("speedometer") || Alias == TEXT("minimap")
-			|| Alias == TEXT("damage_flash") || Alias == TEXT("server_info"))
+			|| Alias == TEXT("damage_flash") || Alias == TEXT("server_info")
+			|| Alias == TEXT("powerups"))   // held-pickup status (DrawHeldPowerups) — a repositionable C++ draw element
 		{
 			return TEXT("Optional Overlays");
 		}
@@ -115,6 +117,24 @@ namespace NCHUDEdit
 void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
+
+	// Take mouse input: show the cursor and switch to GameAndUI so Slate gets
+	// mouse events. NCPlusHUDDragMode holds the HUD's per-tick GetInputMode poll
+	// open (it returns GameOnly during a match and would otherwise re-capture the
+	// cursor). Released in ClosePanel. Mirrors SNCPlusHUDDragOverlay.
+	NCPlusHUDDragMode::SetActive(true);
+	bHeldDragMode = true;
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = true;
+
+		FInputModeGameAndUI InputMode;
+		InputMode.SetWidgetToFocus(SharedThis(this));
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		MenuPC->SetInputMode(InputMode);
+	}
 
 	// Conditionally reload layout from disk so the editor reflects current
 	// state without clobbering unsaved in-memory work.
@@ -173,7 +193,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_bg"),     FText::FromString(TEXT("Plate BG")), FLinearColor(0.04f, 0.04f, 0.04f, 0.45f) });
 		}
 		// Portraits + scorebar opt-in to the use_team_color checkbox.
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("team_panel"))
 		{
 			Row.bHasTeamColorToggle = true;
 		}
@@ -181,7 +201,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		// and a FontSz slider so 4K users can right-size the numbers without
 		// touching pip dimensions. DrawPlayerIcon (Wipeout + Elim) reads both
 		// from the same alias so each team's strip is independent.
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("team_panel"))
 		{
 			Row.bHasFontPicker = true;
 			Row.bHasFontScale  = true;
@@ -389,6 +409,62 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 			SAssignNew(StatusText, STextBlock)
 			.Text(FText::GetEmpty())
 			.ColorAndOpacity(FLinearColor(0.4f, 0.95f, 0.48f, 1.f))
+		]
+		// Stock vs NCPlus bottom bar (weapon/ammo/health). Lives in the HUD editor (moved
+		// out of the iCTF settings tab). Applies immediately: persists [NetcodePlus]
+		// StockBottomBar + live-swaps the bottom-bar widget family on the running HUD.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetStockBottomBarState)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnStockBottomBarChanged)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Stock bottom bar (weapon / ammo / health)")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+		]
+		// Stock top-left team roster (slanted name + HP/armor plates) vs the NCPlus
+		// portrait strip. Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetStockTeamPanelState)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnStockTeamPanelChanged)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Stock team panel (top-left roster) instead of portraits")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+		]
+		// Scoreboard background opacity (0.05..1.0). Global across the NCPlus scoreboards.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Scoreboard opacity")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				SNew(SBox).WidthOverride(90.f)
+				[
+					SNew(SNumericEntryBox<float>)
+					.Value(this, &SNCPlusHUDEditor::GetScoreboardOpacityValue)
+					.OnValueChanged(this, &SNCPlusHUDEditor::OnScoreboardOpacityChanged)
+					.OnValueCommitted(this, &SNCPlusHUDEditor::OnScoreboardOpacityCommitted)
+					.AllowSpin(true)
+					.MinSliderValue(0.05f)
+					.MaxSliderValue(1.0f)
+					.MinValue(0.05f)
+					.MaxValue(1.0f)
+					.Delta(0.05f)
+				]
+			]
 		];
 }
 
@@ -469,8 +545,8 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.OnValueChanged(this, &SNCPlusHUDEditor::OnOffsetXChanged, Alias)
 				.OnValueCommitted(this, &SNCPlusHUDEditor::OnOffsetXCommitted, Alias)
 				.AllowSpin(true)
-				.MinSliderValue(-1920.f)
-				.MaxSliderValue( 1920.f)
+				.MinSliderValue(-4000.f)
+				.MaxSliderValue( 4000.f)
 				.Delta(1.f)
 				.LabelPadding(FMargin(0))
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("X "))) ]
@@ -486,8 +562,8 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 				.OnValueChanged(this, &SNCPlusHUDEditor::OnOffsetYChanged, Alias)
 				.OnValueCommitted(this, &SNCPlusHUDEditor::OnOffsetYCommitted, Alias)
 				.AllowSpin(true)
-				.MinSliderValue(-1080.f)
-				.MaxSliderValue( 1080.f)
+				.MinSliderValue(-2400.f)
+				.MaxSliderValue( 2400.f)
 				.Delta(1.f)
 				.LabelPadding(FMargin(0))
 				.Label() [ SNew(STextBlock).Text(FText::FromString(TEXT("Y "))) ]
@@ -819,6 +895,55 @@ FReply SNCPlusHUDEditor::OnSaveClicked()
 	const bool bOk = FNCPlusHUDLayout::SaveLive();
 	SetStatus(bOk ? TEXT("Saved.") : TEXT("Save failed - check log."));
 	return FReply::Handled();
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetStockBottomBarState() const
+{
+	return FNCPlusHUDLayout::WantsStockBottomBar() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnStockBottomBarChanged(ECheckBoxState NewState)
+{
+	const bool bStock = (NewState == ECheckBoxState::Checked);
+	// Persist the explicit choice ([NetcodePlus] StockBottomBar). Written only on this toggle, so a
+	// fresh install isn't silently locked to stock (see FNCPlusHUDLayout::WantsStockBottomBar).
+	FNCPlusHUDLayout::SetStockBottomBar(bStock);
+	// Live-swap the bottom-bar widget family on the running HUD so it applies this match.
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		NCPlusHUDDrawCall::RefreshBottomBarWidgets(PlayerOwner->PlayerController->MyHUD, bStock);
+	}
+	SetStatus(bStock ? TEXT("Bottom bar: Stock (applies now).") : TEXT("Bottom bar: NetcodePlus (applies now)."));
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetStockTeamPanelState() const
+{
+	return FNCPlusHUDLayout::WantsStockTeamPanel() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnStockTeamPanelChanged(ECheckBoxState NewState)
+{
+	const bool bStock = (NewState == ECheckBoxState::Checked);
+	// Persist + refresh-cache the explicit choice. The panel is drawn directly from
+	// WantsStockTeamPanel() each DrawHUD frame, so it applies on the next frame with
+	// no widget swap needed.
+	FNCPlusHUDLayout::SetStockTeamPanel(bStock);
+	SetStatus(bStock ? TEXT("Team display: Stock roster (applies now).") : TEXT("Team display: Portraits (applies now)."));
+}
+
+TOptional<float> SNCPlusHUDEditor::GetScoreboardOpacityValue() const
+{
+	return FNCPlusHUDLayout::GetScoreboardOpacity();
+}
+
+void SNCPlusHUDEditor::OnScoreboardOpacityChanged(float NewValue)
+{
+	FNCPlusHUDLayout::SetScoreboardOpacity(NewValue);
+}
+
+void SNCPlusHUDEditor::OnScoreboardOpacityCommitted(float NewValue, ETextCommit::Type /*CommitType*/)
+{
+	FNCPlusHUDLayout::SetScoreboardOpacity(NewValue);
 }
 
 FReply SNCPlusHUDEditor::OnReloadClicked()
@@ -1414,8 +1539,24 @@ void SNCPlusHUDEditor::SetStatus(const FString& Msg)
 	}
 }
 
+SNCPlusHUDEditor::~SNCPlusHUDEditor()
+{
+	// Map load drops the viewport widget without ClosePanel — release the refcount.
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+}
+
 void SNCPlusHUDEditor::ClosePanel()
 {
+	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = false;
+		FInputModeGameOnly InputMode;
+		MenuPC->SetInputMode(InputMode);
+	}
+
 	if (UGameViewportClient* VC = (PlayerOwner.IsValid() && PlayerOwner->GetWorld())
 		? PlayerOwner->GetWorld()->GetGameViewport() : nullptr)
 	{

@@ -1,5 +1,6 @@
 #include "WipeoutGame.h"
 #include "NCPlusVersionGate.h"
+#include "NCFireValCollector.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -84,14 +85,17 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	bCompetitiveAutoPause = false;
 	useBPSpecFunction = false;
 
-	// Wipeout-specific defaults: escalating respawn delays
-	// Indexed by team death count. Configurable via BP subclass defaults.
-	RespawnDelays.Add(4.0f);   // 1st team death
-	RespawnDelays.Add(7.0f);   // 2nd team death
-	RespawnDelays.Add(11.0f);  // 3rd team death
-	RespawnDelays.Add(16.0f);  // 4th team death
-	RespawnDelays.Add(25.0f);  // 5th team death
-	RespawnDelays.Add(35.0f);  // 6th+ team deaths (cap)
+	// Wipeout-specific defaults: escalating respawn delays.
+	// Indexed by death count — PER-PLAYER in the live WipeoutPlus_C BP, which sets
+	// bTeamSharedDeathCounter=false (the C++ default below is team-shared=true).
+	// NOTE: if the BP CDO ALSO overrides RespawnDelays, this array is shadowed —
+	// change it in the BP (or clear that override) for these values to take effect.
+	RespawnDelays.Add(5.0f);   // 1st death
+	RespawnDelays.Add(9.0f);   // 2nd death
+	RespawnDelays.Add(13.0f);  // 3rd death
+	RespawnDelays.Add(20.0f);  // 4th death
+	RespawnDelays.Add(30.0f);  // 5th death
+	RespawnDelays.Add(40.0f);  // 6th+ deaths (cap)
 
 	RespawnProtectionTime = 1.5f;
 	WipeoutGracePeriod = 0.15f;
@@ -212,6 +216,68 @@ void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FSt
 
 	// Match-scoped: reset the rating flush guard on each map load.
 	bRatingFlushedThisMatch = false;
+
+	// A bot-hosted PUG passes ?PugId=N — gate team pinning to real PUGs.
+	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
+
+	// Bot-assigned teams: ?PugTeams=<ut4id>:0,<ut4id>:1,...  The bot balanced the
+	// teams off the ut4stats ladder; pin each listed player to their side in
+	// ChangeTeam so the engine's warmup auto-balance can't reshuffle them. Keys are
+	// lowercased EOS ids (== MutBotEvents' Ut4Id == bot players.ut4_id). Players not
+	// listed (unlinked, subs) aren't pinned and use the stock balancer. PUG-only.
+	// Mirrors ANCPlusCTFGameMode.
+	PugRosterTeam.Reset();
+	const FString PugTeamsOpt = UGameplayStatics::ParseOption(Options, TEXT("PugTeams"));
+	if (bIsPugMatch && !PugTeamsOpt.IsEmpty())
+	{
+		TArray<FString> Entries;
+		PugTeamsOpt.ParseIntoArray(Entries, TEXT(","), true);
+		for (const FString& Entry : Entries)
+		{
+			FString IdPart, TeamPart;
+			if (Entry.Split(TEXT(":"), &IdPart, &TeamPart))
+			{
+				const FString Key = IdPart.ToLower();
+				const uint8 TeamNum = (uint8)FMath::Clamp(FCString::Atoi(*TeamPart), 0, 1);
+				if (!Key.IsEmpty())
+				{
+					PugRosterTeam.Add(Key, TeamNum);
+				}
+			}
+		}
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: PUG roster parsed — %d players pinned to teams"), PugRosterTeam.Num());
+	}
+}
+
+bool AUWipeoutGame::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)
+{
+	// Bot PUG: keep each rostered player on the side the bot balanced. Login picks,
+	// player-initiated switches, and the engine's warmup auto-balance all funnel
+	// through ChangeTeam, so this is the one place that pins them. Non-roster joiners
+	// (subs, late fills, unlinked) get the stock balancer via Super. Mirrors
+	// ANCPlusCTFGameMode::ChangeTeam.
+	if (bIsPugMatch && PugRosterTeam.Num() > 0 && Player && HasAuthority())
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+		if (PS && !PS->bOnlySpectator && PS->UniqueId.IsValid())
+		{
+			// Match on UniqueId.ToString() — the same id MutBotEvents posts as Ut4Id
+			// and the bot stores in players.ut4_id.
+			if (const uint8* Assigned = PugRosterTeam.Find(PS->UniqueId.ToString().ToLower()))
+			{
+				const uint8 Want = *Assigned;
+				// Already on the right side — accept without re-suiciding them
+				// (MovePlayerToTeam kills the pawn on an actual move).
+				if (PS->Team && PS->Team->TeamIndex == Want)
+				{
+					return true;
+				}
+				return MovePlayerToTeam(Player, PS, Want);
+			}
+		}
+	}
+
+	return Super::ChangeTeam(Player, NewTeam, bBroadcast);
 }
 
 void AUWipeoutGame::BeginPlay()
@@ -261,16 +327,40 @@ void AUWipeoutGame::InitGameState()
 	}
 }
 
+bool AUWipeoutGame::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Same as NCPlusCTF: force the chosen hat via OverrideHatClass (not entitlement-checked) next tick so
+	// the community master's missing cosmetic entitlements can't strip it. Server-side; never kicks.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
+}
+
 void AUWipeoutGame::HandleMatchHasStarted()
 {
 	UE_LOG(LogGameMode, Warning, TEXT("=== Wipeout::HandleMatchHasStarted ==="));
 	Super::HandleMatchHasStarted();
 	bWarmupMode = false;
 
+	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id; accumulate across all rounds
+
 	// Defense-in-depth reset: InitGame already clears this on map load, but a
 	// single server session can host multiple matches. Reset here so a subsequent
 	// match can flush its own ratings.
 	bRatingFlushedThisMatch = false;
+	HealingDoneThisMatch.Empty();   // match-cumulative healing stat resets per match
 
 	// Spawn the damage replicator now — all clients are fully loaded at this point.
 	// Spawning in BeginPlay was too early and could cause client crashes.
@@ -325,6 +415,8 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 void AUWipeoutGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+
+	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (server-side; guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -459,6 +551,26 @@ void AUWipeoutGame::DefaultTimer()
 		int32 Alive0, Alive1;
 		GetAliveCounts(Alive0, Alive1);
 
+		// Solo/practice round bookkeeping (round started with one team empty).
+		const bool bSoloRound = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+		if (bSoloRound && !GetWorldTimerManager().IsTimerActive(TH_RoundEndDelay))
+		{
+			// Someone joined the previously-empty team mid-practice-round: end it
+			// now with no score so intermission starts a REAL round, both sides
+			// fresh — wipeout rules should never judge a player who hasn't had a
+			// spawn wave yet.
+			int32 Members0, Members1;
+			GetTeamMemberCounts(Members0, Members1);
+			if (Members0 > 0 && Members1 > 0)
+			{
+				UE_LOG(LogGameMode, Warning, TEXT("Wipeout: practice round reset — %dv%d players now present, restarting as a real round."), Members0, Members1);
+				FTimerDelegate TimerDelegate;
+				TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), (int32)INDEX_NONE, FName(TEXT("PracticeReset")));
+				GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
+				return;
+			}
+		}
+
 		int32 RoundRemain = 0;
 		if (RoundEndTimeSeconds > 0.f)
 		{
@@ -469,6 +581,24 @@ void AUWipeoutGame::DefaultTimer()
 
 			if (RoundRemain == 0 && !bInSuddenDeath && !bSuddenDeathPending)
 			{
+				// Solo/practice: time's up vs an empty team — no sudden death against
+				// nobody. Alive → the populated side takes the round ("TimeExpired");
+				// dead between respawn waves at this exact second → draw. Real games
+				// are unaffected (bSoloRound needs an empty team at round start).
+				if (bSoloRound)
+				{
+					if (!GetWorldTimerManager().IsTimerActive(TH_RoundEndDelay))
+					{
+						const int32 Winner = (Team0StartingSize == 0)
+							? ((Alive1 > 0) ? 1 : INDEX_NONE)
+							: ((Alive0 > 0) ? 0 : INDEX_NONE);
+						FTimerDelegate TimerDelegate;
+						TimerDelegate.BindUFunction(this, FName("DelayedEndRound"), Winner, FName(TEXT("TimeExpired")));
+						GetWorldTimerManager().SetTimer(TH_RoundEndDelay, TimerDelegate, 0.2f, false);
+					}
+					return;
+				}
+
 				// Time is up — start 3-second grace period before sudden death.
 				// Players with pending respawns within the grace window can still spawn.
 				bSuddenDeathPending = true;
@@ -869,6 +999,7 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		{
 			RoundWinningKiller = OtherPS;
 		}
+		WinningKillerPawn = Killer->GetPawn();   // focus actor for the instant replay (BroadcastKillReplay)
 	}
 
 	// Death recap (the per-life "You dealt N to X | They dealt M to you" system-chat
@@ -941,6 +1072,17 @@ void AUWipeoutGame::CheckWipeoutCondition()
 
 	int32 Alive0, Alive1;
 	GetAliveCounts(Alive0, Alive1);
+
+	// Solo/practice rounds (one team empty at round start): nobody to wipe or
+	// be wiped by — respawn waves keep the solo player going and the round
+	// clock decides (DefaultTimer awards "TimeExpired" at expiry, or resets to
+	// a real round if someone joins). Real games never have a 0 starting size.
+	const bool bSoloRound = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+	if (bSoloRound && RoundEndTimeSeconds > 0.f
+		&& GetWorld()->GetTimeSeconds() < RoundEndTimeSeconds)
+	{
+		return;
+	}
 
 	const bool Team0Wiped = (Alive0 == 0);
 	const bool Team1Wiped = (Alive1 == 0);
@@ -1055,6 +1197,7 @@ void AUWipeoutGame::StartNextRound()
 
 	// Reset all Wipeout state for the new round
 	RoundWinningKiller = nullptr;
+	WinningKillerPawn = nullptr;
 	RoundWinningKillTime = 0.0f;
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	Team0DeathCount = 0;
@@ -1391,13 +1534,18 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		return;
 	}
 
+	// Idempotency guard (hoisted ABOVE the warmup branch) — same defect as ElimPlus: a
+	// second RestartPlayer on a still-living warmup pawn re-runs GiveDefaultInventory, and
+	// stock AddInventory dedupes only by instance (not class), so the whole arsenal is
+	// granted twice = the doubled weapon bar. First spawn (no pawn) is unaffected; the
+	// live/lineup paths below already relied on this guard.
+	if (NewPlayer->GetPawn()) return;
+
 	if (GetMatchState() == MatchState::WaitingToStart)
 	{
 		Super::RestartPlayer(NewPlayer);
 		return;
 	}
-
-	if (NewPlayer->GetPawn()) return;
 
 	AUTGameState* GS = GetGameState<AUTGameState>();
 	bool bLineupIsActive = (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers);
@@ -1457,10 +1605,7 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		ATeamArenaCharacter* SpawnedChar = NewPlayer->GetPawn() ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
 		if (bEnablePingCompensatedSpawn && SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
 		{
-			SpawnedChar->bPingCompensatedSpawnPending = true;
-			SpawnedChar->SetActorHiddenInGame(true);
-			SpawnedChar->SetActorEnableCollision(false);
-			SpawnedChar->SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+			SpawnedChar->BeginPingCompensatedSpawnHide();   // ping-floored: skips low-ping spawners
 		}
 
 		// Force switch to best weapon on spawn — bypasses the player's
@@ -1494,8 +1639,17 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 
 		if (!NewPlayer->GetPawn())
 		{
-			UE_LOG(LogGameMode, Warning, TEXT("Wipeout::RestartPlayer: FAILED to spawn pawn for %s"),
-				NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
+			// Throttle: RestartPlayer retries every frame on a map with no valid spawn, so this can flood
+			// the log (thousands of lines). Rate-limit to once per 5s (monotonic wall-clock so it survives
+			// map changes, unlike GetWorld()->GetTimeSeconds()).
+			static double LastSpawnFailWarnTime = 0.0;
+			const double Now = FPlatformTime::Seconds();
+			if (Now - LastSpawnFailWarnTime >= 5.0)
+			{
+				LastSpawnFailWarnTime = Now;
+				UE_LOG(LogGameMode, Warning, TEXT("Wipeout::RestartPlayer: FAILED to spawn pawn for %s (throttled 5s)"),
+					NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
+			}
 		}
 	}
 }
@@ -1831,9 +1985,17 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 		}
 		if (BestSpawn)
 		{
-			UE_LOG(LogGameMode, Warning,
-				TEXT("Wipeout: %s curated spawns failed %.0fu floor — using full-map spawn (passed floor)"),
-				*PS->PlayerName, MinimumEnemySpawnDistance);
+			// Throttle: fires per spawn attempt and can flood the log on a bad map. Rate-limit to once per 5s
+			// (monotonic wall-clock so it survives map changes). The fallback spawn itself still happens.
+			static double LastSpawnFallbackWarnTime = 0.0;
+			const double Now = FPlatformTime::Seconds();
+			if (Now - LastSpawnFallbackWarnTime >= 5.0)
+			{
+				LastSpawnFallbackWarnTime = Now;
+				UE_LOG(LogGameMode, Warning,
+					TEXT("Wipeout: %s curated spawns failed %.0fu floor — using full-map spawn (passed floor) (throttled 5s)"),
+					*PS->PlayerName, MinimumEnemySpawnDistance);
+			}
 		}
 	}
 
@@ -1877,9 +2039,16 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 			}
 			if (BestSpawn)
 			{
-				UE_LOG(LogGameMode, Warning,
-					TEXT("Wipeout: %s — no spawn passes %.0fu floor; teammate-stacking at %.0fu from teammate"),
-					*PS->PlayerName, MinimumEnemySpawnDistance, BestTeammateDist);
+				// Throttle (same reason as the other spawn warnings): per-attempt, floods on a bad map.
+				static double LastTeammateStackWarnTime = 0.0;
+				const double Now = FPlatformTime::Seconds();
+				if (Now - LastTeammateStackWarnTime >= 5.0)
+				{
+					LastTeammateStackWarnTime = Now;
+					UE_LOG(LogGameMode, Warning,
+						TEXT("Wipeout: %s — no spawn passes %.0fu floor; teammate-stacking at %.0fu from teammate (throttled 5s)"),
+						*PS->PlayerName, MinimumEnemySpawnDistance, BestTeammateDist);
+				}
 			}
 		}
 	}
@@ -2094,6 +2263,8 @@ bool AUWipeoutGame::ModifyDamage_Implementation(int32& Damage, FVector& Momentum
 						if (ActualHeal > 0)
 						{
 							InjuredChar->Health += ActualHeal;
+							// Credit the beam owner with the HP actually restored.
+							CreditHealing(InstigatorPS, ActualHeal);
 						}
 					}
 				}
@@ -2108,6 +2279,20 @@ bool AUWipeoutGame::ModifyDamage_Implementation(int32& Damage, FVector& Momentum
 	return Super::ModifyDamage_Implementation(Damage, Momentum, Injured, InstigatedBy, HitInfo, DamageCauser, DamageType);
 }
 
+
+// ============================================================================
+// HEALING CREDIT (link beam + BP heal ability) — match-cumulative per healer
+// ============================================================================
+
+void AUWipeoutGame::CreditHealing(AUTPlayerState* HealerPS, int32 Amount)
+{
+	if (!HasAuthority() || HealerPS == nullptr || Amount <= 0)
+	{
+		return;
+	}
+	int32& Total = HealingDoneThisMatch.FindOrAdd(HealerPS);
+	Total += Amount;
+}
 
 // ============================================================================
 // SCORE DAMAGE (damage tracking for achievements)
@@ -2306,6 +2491,28 @@ bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 
 		if (PS->Team->TeamIndex == 0) OutAliveTeam0++;
 		else if (PS->Team->TeamIndex == 1) OutAliveTeam1++;
+	}
+
+	return true;
+}
+
+bool AUWipeoutGame::GetTeamMemberCounts(int32& OutTeam0, int32& OutTeam1) const
+{
+	OutTeam0 = 0;
+	OutTeam1 = 0;
+
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	if (!GS || GS->IsPendingKill()) return false;
+
+	// Same filters as GetAliveCounts, minus the living-pawn requirement: counts
+	// everyone ON a team — alive, dead, or waiting on a respawn wave.
+	for (APlayerState* PSBase : GS->PlayerArray)
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+		if (!PS || PS->bOnlySpectator || PS->bIsInactive || !PS->Team) continue;
+
+		if (PS->Team->TeamIndex == 0) OutTeam0++;
+		else if (PS->Team->TeamIndex == 1) OutTeam1++;
 	}
 
 	return true;
@@ -3062,14 +3269,20 @@ void AUWipeoutGame::BroadcastRoundResults(int32 WinnerTeamIndex, bool bIsDraw)
 
 void AUWipeoutGame::BroadcastKillReplay()
 {
-	if (RoundWinningKiller && RoundWinningKillTime > 0.f)
+	// Instant replay path (ClientPlayInstantReplay), NOT ClientQueueCoolMoment.
+	// CoolMoment routes through UUTKillcamPlayback::CoolMomentCamStart, which crashes
+	// after MatchEnded (TaskGraphThreadNP access-violation in CoreUObject) because new
+	// actors spawn before the playback finishes cleanup. Mirrors
+	// AElimPlusGame::BroadcastKillReplay — focus the killer pawn, hard stop timer.
+	if (RoundWinningKiller && RoundWinningKillTime > 0.f && WinningKillerPawn)
 	{
-		float ReplayOffset = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+		const float TimeToRewind = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
+		const float StartDelay   = 0.5f;
 		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 		{
 			if (AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get()))
 			{
-				PC->ClientQueueCoolMoment(RoundWinningKiller->UniqueId, ReplayOffset);
+				PC->ClientPlayInstantReplay(WinningKillerPawn, TimeToRewind, StartDelay);
 			}
 		}
 	}
@@ -3550,4 +3763,26 @@ void AUWipeoutGame::SpawnSiphonPickup()
 		UE_LOG(LogGameMode, Warning, TEXT("Wipeout: SpawnActor failed for Siphon pickup at %s (class=%s)"),
 			*BestLoc.ToString(), *SpawnClass->GetPathName());
 	}
+}
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool AUWipeoutGame::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool AUWipeoutGame::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
 }

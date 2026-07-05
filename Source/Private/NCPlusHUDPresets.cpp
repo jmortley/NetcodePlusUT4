@@ -170,6 +170,164 @@ namespace NCPlusHUDPresetsImpl
 		TEXT("}")
 	);
 
+	// "Stock" - classic UT-style layout in the default engine font (NO Extreme).
+	// NCPlus default HUD layout — the user's hand-tuned near-stock layout (2026-06-18).
+	// Used as BOTH the first-run seed (GetCurated()[0], applied in FNCPlusHUDLayout::ReloadLive
+	// when a fresh player has no Saved/NetcodePlus/HUDLayout.json) and the "Stock" entry in the
+	// preset gallery. Embedded as a raw string so it's a verbatim editor export — no escaping;
+	// UTF8_TO_TCHAR converts the ASCII literal to TCHAR at static init. Extras keys are
+	// case-insensitive (FName), so the editor's "Font"/"Opacity"/"Style" capitalisation is fine.
+	// To re-tune the default, paste a fresh editor export between the R"NCHUD( ... )NCHUD" guards.
+	static const FString StockJson(UTF8_TO_TCHAR(R"NCHUD(
+{
+	"version": 1,
+	"elements":
+	{
+		"weapon_bar_left":
+		{
+			"anchor": "CenterLeft",
+			"offset_x": -2.5000019073486328,
+			"offset_y": 982.75006103515625,
+			"scale": 1,
+			"hidden": false,
+			"Orientation": "Horizontal"
+		},
+		"hp_armor":
+		{
+			"anchor": "BottomCenter",
+			"offset_x": -3.0000002384185791,
+			"offset_y": -160.49995422363281,
+			"scale": 0.75,
+			"hidden": false,
+			"Font": "Large"
+		},
+		"heal_ability":
+		{
+			"anchor": "BottomCenter",
+			"offset_x": 635,
+			"offset_y": -52,
+			"scale": 1,
+			"hidden": true,
+			"Font": "Extreme"
+		},
+		"speedometer":
+		{
+			"anchor": "Center",
+			"offset_x": 0,
+			"offset_y": 80,
+			"scale": 1,
+			"hidden": true
+		},
+		"minimap":
+		{
+			"anchor": "TopLeft",
+			"offset_x": 1480.2501220703125,
+			"offset_y": 352.25003051757813,
+			"scale": 1,
+			"hidden": true
+		},
+		"Ammo":
+		{
+			"anchor": "BottomRight",
+			"offset_x": 35.199737548828125,
+			"offset_y": -158.00001525878906,
+			"scale": 0.75,
+			"hidden": false,
+			"Font": "Medium",
+			"Style": "VerticalGauge"
+		},
+		"Spectator":
+		{
+			"anchor": "TopRight",
+			"offset_x": -1851.7501220703125,
+			"offset_y": 390.00003051757813,
+			"scale": 1,
+			"hidden": true
+		},
+		"score_kda":
+		{
+			"anchor": "TopRight",
+			"offset_x": -765.25006103515625,
+			"offset_y": 415.00003051757813,
+			"scale": 1,
+			"hidden": true,
+			"font_scale": "1.000"
+		},
+		"ctf_flag_status":
+		{
+			"anchor": "TopCenter",
+			"offset_x": 0,
+			"offset_y": 0,
+			"scale": 1,
+			"hidden": true
+		},
+		"weapon_bar_right":
+		{
+			"anchor": "CenterRight",
+			"offset_x": -20,
+			"offset_y": -19.25,
+			"scale": 1,
+			"hidden": false
+		},
+		"server_info":
+		{
+			"anchor": "TopLeft",
+			"offset_x": 1680.2000732421875,
+			"offset_y": 1,
+			"scale": 1,
+			"hidden": true,
+			"font_scale": "0.515",
+			"Font": "Tiny"
+		},
+		"portrait_red":
+		{
+			"anchor": "TopCenter",
+			"offset_x": -253.25,
+			"offset_y": 2.9999980926513672,
+			"scale": 0.94999998807907104,
+			"hidden": false,
+			"Opacity": "0.530"
+		},
+		"portrait_blue":
+		{
+			"anchor": "TopCenter",
+			"offset_x": 240.5,
+			"offset_y": -1.5000019073486328,
+			"scale": 0.94999998807907104,
+			"hidden": false,
+			"Opacity": "0.600"
+		},
+		"ctf_you_have_flag":
+		{
+			"anchor": "BottomCenter",
+			"offset_x": 0.75000005960464478,
+			"offset_y": -81.75,
+			"scale": 1,
+			"hidden": false
+		},
+		"scorebar":
+		{
+			"anchor": "TopCenter",
+			"offset_x": 0,
+			"offset_y": 0,
+			"scale": 1,
+			"hidden": false,
+			"Font": "Large",
+			"font_scale": "0.620"
+		}
+	},
+	"weapon_groups":
+	{
+		"NPFlakCannon_C": "Left",
+		"UT+BioRifleElim_C": "Left",
+		"UT+ImpactHammerElim_C": "Left",
+		"UT+LinkGunElim_C": "Left",
+		"UT+MinigunElim_C": "Left",
+		"UTNPRocketLauncher_C": "Left"
+	}
+}
+)NCHUD"));
+
 	// Helper: build an entry via explicit field assignment. UE 4.15 + the
 	// default member initializer on FNCPlusHUDPreset::bIsCustom disqualifies
 	// the struct from aggregate brace-init, so T.Add({...}) fails to compile.
@@ -193,6 +351,11 @@ namespace NCPlusHUDPresetsImpl
 			TArray<FNCPlusHUDPreset> T;
 			// Index 0 is the first-run default seed (referenced by
 			// FNCPlusHUDLayout::ReloadLive when no on-disk layout exists).
+			T.Add(MakePreset(
+				TEXT("stock"),
+				TEXT("Stock"),
+				TEXT("Classic UT-style layout in the default font (no Extreme). Bottom-center HP/Armor, team portraits and scorebar up top — the familiar default look."),
+				StockJson));
 			T.Add(MakePreset(
 				TEXT("streamer_friendly"),
 				TEXT("Streamer Friendly"),

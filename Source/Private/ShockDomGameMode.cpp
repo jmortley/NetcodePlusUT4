@@ -28,6 +28,29 @@
 #include "GameFramework/PlayerStart.h"
 
 
+bool AShockDomGameMode::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
+{
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat as an OverrideHatClass (which
+	// the engine does NOT entitlement-check) on the next tick — after ServerReceiveHatClass's
+	// ValidateEntitlements strip — so the community master's withheld cosmetic entitlements can't remove it.
+	// Server-side; never kicks. Mirrors ANCPlusCTFGameMode::ValidateHat. NULL in the log = class didn't load.
+	if (HatOwner && !HatClass.IsEmpty())
+	{
+		TWeakObjectPtr<AUTPlayerState> WeakPS(HatOwner);
+		const FString Path = HatClass;
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakPS, Path]()
+		{
+			if (AUTPlayerState* PS = WeakPS.Get())
+			{
+				PS->SetOverrideHatClass(Path);
+				UE_LOG(LogTemp, Warning, TEXT("[Cosmetics] ForceOverrideHat '%s' -> %s"), *Path,
+					PS->OverrideHatClass ? *PS->OverrideHatClass->GetName() : TEXT("NULL (class did not load)"));
+			}
+		}));
+	}
+	return Super::ValidateHat(HatOwner, HatClass);
+}
+
 // ============================================================================
 // CONSTRUCTOR
 // ============================================================================
@@ -519,10 +542,7 @@ void AShockDomGameMode::RestartPlayer(AController* NewPlayer)
 	ATeamArenaCharacter* SpawnedChar = (NewPlayer && NewPlayer->GetPawn()) ? Cast<ATeamArenaCharacter>(NewPlayer->GetPawn()) : nullptr;
 	if (bEnablePingCompensatedSpawn && SpawnedChar && NewPlayer->GetPawn()->GetRemoteRole() == ROLE_AutonomousProxy)
 	{
-		SpawnedChar->bPingCompensatedSpawnPending = true;
-		SpawnedChar->SetActorHiddenInGame(true);
-		SpawnedChar->SetActorEnableCollision(false);
-		SpawnedChar->SpawnHiddenTimestamp = GetWorld()->GetTimeSeconds();
+		SpawnedChar->BeginPingCompensatedSpawnHide();   // ping-floored: skips low-ping spawners
 	}
 }
 
@@ -720,4 +740,26 @@ AUTPlayerState* AShockDomGameMode::FindBestPlayerOnTeam(int32 TeamIndex)
 	}
 
 	return Best;
+}
+
+// --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
+#include "NCPlusHostPause.h"
+
+bool AShockDomGameMode::AllowPausing(APlayerController* PC)
+{
+	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
+	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
+	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.
+	return Super::AllowPausing(PC) || NCPlusHostPause::MayPause(PC, this);
+}
+
+bool AShockDomGameMode::ClearPause()
+{
+	// Host/rcon unpause: hold behind a short server-only resume countdown
+	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
+	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
+	{
+		return false;
+	}
+	return Super::ClearPause();
 }

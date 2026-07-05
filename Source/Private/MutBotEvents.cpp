@@ -17,6 +17,10 @@
 #include "UTCTFFlagBase.h"
 #include "UTCTFGameState.h"
 #include "Json.h"
+#include "GameFramework/GameStateBase.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
 
 DEFINE_LOG_CATEGORY(LogBotEvents);
 
@@ -232,6 +236,12 @@ void AMutBotEvents::ScoreKill_Implementation(AController* Killer, AController* O
 	AUTPlayerState* VictimPS = Cast<AUTPlayerState>(Other->PlayerState);
 	if (!KillerPS || !VictimPS || KillerPS == VictimPS) return;
 
+	// Kill-streak highlights (monster kills + sprees) — fire BEFORE the
+	// team-CTF gate below so FFA / Duel / ShaftArena (no valid teams) still
+	// post. The engine's IncrementKills already excluded team-kills from
+	// MultiKillLevel/Spree by the time we get here.
+	ScoreKill_PostHighlights(KillerPS);
+
 	const int32 KillerTeam = KillerPS->GetTeamNum();
 	const int32 VictimTeam = VictimPS->GetTeamNum();
 
@@ -247,6 +257,52 @@ void AMutBotEvents::ScoreKill_Implementation(AController* Killer, AController* O
 	if (KillerName == Window.CarrierName) return;
 
 	Window.CoverKills.AddUnique(KillerName);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Kill-streak highlights (multi-kills + sprees)
+// ────────────────────────────────────────────────────────────────────
+//
+// Hooked into ScoreKill_Implementation below, fires AFTER Super:: has resolved
+// (so AUTPlayerState::MultiKillLevel + Spree are already updated by the engine's
+// IncrementKills path). Sends to /reward; the bot turns it into a Discord chat
+// highlight. Skips in-game bots so a low-pop bot match doesn't flood chat.
+//
+// MultiKill rungs (UTMultiKillMessage.h):
+//   1=Double, 2=Multi, 3=ULTRA, 4=MONSTER (engine caps at 4 for the announcement).
+// We only post the Monster threshold (level 4) — exact equality so the kill
+// AFTER the monster (level=5,6,...) doesn't re-fire.
+//
+// Spree rungs (UTSpreeMessage.h, engine bumps every Spree % 5 == 0):
+//   1=Killing Spree, 2=Rampage, 3=Dominating, 4=Unstoppable, 5=Godlike (capped).
+// We only post Dominating and above (3..5). The %5==0 gate naturally fires once
+// per milestone (no spam between 15 and 20).
+void AMutBotEvents::ScoreKill_PostHighlights(AUTPlayerState* KillerPS)
+{
+	if (KillerPS == nullptr || BotApiUrl.IsEmpty()) return;
+	if (KillerPS->bIsABot) return;       // don't flood chat in bot-heavy matches
+
+	// MONSTER KILL — fire for level 4 AND every subsequent kill in the same
+	// engine multikill window (5, 6, ...). Multiplier turns those continuations
+	// into "MONSTER KILL x2 / x3 / ..." on the bot side via Discord message edit
+	// instead of fresh embeds. Level 4 -> Multiplier 1 -> new embed; >4 -> edit.
+	if (KillerPS->MultiKillLevel >= 4)
+	{
+		const int32 Multiplier = KillerPS->MultiKillLevel - 3;     // 4->1, 5->2, 6->3, ...
+		PostReward(KillerPS, TEXT("monster"), KillerPS->MultiKillLevel, Multiplier);
+	}
+
+	// DOMINATING and above (level 3..5). The %5==0 gate is the engine's own
+	// milestone check; matches AUTGameMode::ScoreKill at UTGameMode.cpp:2846.
+	// Each spree milestone is its own event — multiplier always 1.
+	if (KillerPS->Spree > 0 && (KillerPS->Spree % 5) == 0)
+	{
+		const int32 SpreeLevel = KillerPS->Spree / 5;
+		if (SpreeLevel >= 3 && SpreeLevel <= 5)
+		{
+			PostReward(KillerPS, TEXT("spree"), SpreeLevel, 1);
+		}
+	}
 }
 
 void AMutBotEvents::TryBindFlagEvents()
@@ -412,6 +468,31 @@ void AMutBotEvents::PostFlagCapture(AUTPlayerState* Scorer)
 	UE_LOG(LogBotEvents, Log, TEXT("Flag capture: %s (team %d) | Score: %d-%d | Covers: %d"),
 		*PlayerName, TeamIndex, ScoreRed, ScoreBlue, NumCovers);
 }
+
+void AMutBotEvents::PostReward(AUTPlayerState* Scorer, const FString& Type, int32 Level, int32 Multiplier)
+{
+	if (Scorer == nullptr || BotApiUrl.IsEmpty()) return;
+
+	TSharedRef<FJsonObject> Json = MakeShareable(new FJsonObject());
+	Json->SetStringField(TEXT("type"),         Type);          // "monster" | "spree"
+	Json->SetNumberField(TEXT("level"),        Level);         // raw engine value
+	Json->SetNumberField(TEXT("multiplier"),   Multiplier);    // 1 = new embed; >1 = edit existing
+	Json->SetStringField(TEXT("player_name"),  Scorer->PlayerName);
+	Json->SetNumberField(TEXT("player_team"),  Scorer->GetTeamNum());
+	Json->SetNumberField(TEXT("pug_id"),       PugId);
+	Json->SetStringField(TEXT("match_id"),     GetMatchId());
+	Json->SetNumberField(TEXT("time_seconds"), GetTimeSeconds());
+
+	FString Output;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Output);
+	FJsonSerializer::Serialize(Json, Writer);
+
+	SendPost(TEXT("/reward"), Output);
+
+	UE_LOG(LogBotEvents, Log, TEXT("Reward: %s lvl=%d x%d by %s (team %d)"),
+		*Type, Level, Multiplier, *Scorer->PlayerName, Scorer->GetTeamNum());
+}
+
 
 void AMutBotEvents::PostMatchEnded()
 {

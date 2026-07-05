@@ -1,6 +1,7 @@
 // SUTCosmeticSelector.cpp — Cosmetic selector for NetcodePlus
 // Enumerates ALL cosmetics including entitlement-gated items.
 #include "SUTCosmeticSelector.h"
+#include "NCPlusHUDLayout.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
 #include "UTPlayerController.h"
@@ -114,22 +115,22 @@ void SUTCosmeticSelector::LoadSettings()
 
 void SUTCosmeticSelector::ApplySlot(ECosmeticSlot Slot, const FString& ClassPath)
 {
-	AUTPlayerController* PC = nullptr;
-	if (PlayerOwner.IsValid())
-	{
-		PC = Cast<AUTPlayerController>(PlayerOwner->PlayerController);
-	}
-	if (!PC || !PC->UTPlayerState) return;
+	if (!PlayerOwner.IsValid()) return;
 
+	// Route through the UUTLocalPlayer setters instead of the raw ServerReceive*
+	// RPCs. Each setter writes CurrentProfileSettings (so the choice shows in the
+	// stock Player Settings menu and persists to the profile) AND sends the live
+	// ServerReceive* RPC. The old path only fired the RPC, so selections never
+	// reached the profile and never appeared in Player Settings.
 	switch (Slot)
 	{
-		case ECosmeticSlot::Hat:        PC->UTPlayerState->ServerReceiveHatClass(ClassPath); break;
-		case ECosmeticSlot::LeaderHat:  PC->UTPlayerState->ServerReceiveLeaderHatClass(ClassPath); break;
-		case ECosmeticSlot::Eyewear:    PC->UTPlayerState->ServerReceiveEyewearClass(ClassPath); break;
-		case ECosmeticSlot::Taunt1:     PC->UTPlayerState->ServerReceiveTauntClass(ClassPath); break;
-		case ECosmeticSlot::Taunt2:     PC->UTPlayerState->ServerReceiveTaunt2Class(ClassPath); break;
-		case ECosmeticSlot::GroupTaunt: PC->UTPlayerState->ServerReceiveGroupTauntClass(ClassPath); break;
-		case ECosmeticSlot::Character:  PC->UTPlayerState->ServerSetCharacter(ClassPath); break;
+		case ECosmeticSlot::Hat:        PlayerOwner->SetHatPath(ClassPath); break;
+		case ECosmeticSlot::LeaderHat:  PlayerOwner->SetLeaderHatPath(ClassPath); break;
+		case ECosmeticSlot::Eyewear:    PlayerOwner->SetEyewearPath(ClassPath); break;
+		case ECosmeticSlot::Taunt1:     PlayerOwner->SetTauntPath(ClassPath); break;
+		case ECosmeticSlot::Taunt2:     PlayerOwner->SetTaunt2Path(ClassPath); break;
+		case ECosmeticSlot::GroupTaunt: PlayerOwner->SetGroupTauntPath(ClassPath); break;
+		case ECosmeticSlot::Character:  PlayerOwner->SetCharacterPath(ClassPath); break;
 		default: break;
 	}
 }
@@ -161,11 +162,37 @@ void SUTCosmeticSelector::SaveAndApply()
 	}
 
 	GConfig->Flush(false, ModIniPath);
+
+	// Persist the cosmetic choices to the UT profile (cloud + stock Player
+	// Settings). ApplySlot wrote them into CurrentProfileSettings via the
+	// UUTLocalPlayer setters; this flushes that profile to disk.
+	if (PlayerOwner.IsValid())
+	{
+		PlayerOwner->SaveProfileSettings();
+	}
 }
 
 void SUTCosmeticSelector::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
+
+	// Take mouse input: show the cursor and switch to GameAndUI so Slate gets
+	// mouse events. NCPlusHUDDragMode holds the HUD's per-tick GetInputMode poll
+	// open (it returns GameOnly during a match and would otherwise re-capture the
+	// cursor). Released in ClosePanel. Mirrors SNCPlusHUDDragOverlay.
+	NCPlusHUDDragMode::SetActive(true);
+	bHeldDragMode = true;
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = true;
+
+		FInputModeGameAndUI InputMode;
+		InputMode.SetWidgetToFocus(SharedThis(this));
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		MenuPC->SetInputMode(InputMode);
+	}
 	CurrentSlot = ECosmeticSlot::Hat;
 
 	// Initialize selections to -1 (none)
@@ -365,8 +392,24 @@ FReply SUTCosmeticSelector::OnCloseClicked()
 	return FReply::Handled();
 }
 
+SUTCosmeticSelector::~SUTCosmeticSelector()
+{
+	// Map load drops the viewport widget without ClosePanel — release the refcount.
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+}
+
 void SUTCosmeticSelector::ClosePanel()
 {
+	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
+	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	{
+		APlayerController* MenuPC = PlayerOwner->PlayerController;
+		MenuPC->bShowMouseCursor = false;
+		FInputModeGameOnly InputMode;
+		MenuPC->SetInputMode(InputMode);
+	}
+
 	if (PlayerOwner.IsValid() && PlayerOwner->ViewportClient)
 	{
 		PlayerOwner->ViewportClient->RemoveViewportWidgetContent(AsShared());

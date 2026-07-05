@@ -26,6 +26,19 @@ public:
         // smoothing. At 600fps on a jumppad with higher ping, errors can reach 200u+.
         // Set high enough that only cheats/teleports trigger hard snap.
         NoSmoothNetUpdateDist = 400.f;
+
+        // Saved-move buffer cap. In THIS engine fork the fields are named
+        // MaxSavedMoveCount / MaxFreeMoveCount (CharacterMovementComponent.h:2449-2450) —
+        // NOT the modern UE4 names MaxSavedMoves/MaxFreeMoves (which is why an earlier
+        // attempt with those names failed to compile, C2065).
+        //
+        // Engine default ~96. At 480+ fps a hitch backlogs ~1 saved move per frame faster
+        // than the server acks, so below ~700 CreateSavedMove() hits the cap, logs "hit
+        // limit of N saved moves", and drops moves -> movement desync. 900 ~= 1.9s of stall
+        // headroom. Client-side prediction data only (no replication / no version bump) ->
+        // needs a client roll. Replaces the UE4-Engine DLL binary patch for TeamArena pawns.
+        MaxSavedMoveCount = 900;
+        MaxFreeMoveCount  = 900;
     }
 
     typedef FNetworkPredictionData_Client_UTChar Super;

@@ -34,6 +34,7 @@ struct FElimPlusPlayerRoundPerf
 	int32 Kills = 0;
 	int32 Deaths = 0;
 	float Damage = 0.f;
+	int32 TeamIndex = 0;   // 0 = red, 1 = blue. Used to label per-round upload records.
 
 	double ToPerfScore() const
 	{
@@ -57,6 +58,12 @@ struct FElimPlusRoundResult
 struct FElimPlusBalanceInput
 {
 	FString UniqueId;
+
+	/** When >= 0, balance on THIS value instead of the cached Glicko rating —
+	 *  the balancer only compares strength sums, so any uniform scale works.
+	 *  Used by the 6-0 mid-game shuffle (current-match PPR x100). Default -1
+	 *  keeps the Glicko path byte-identical for all existing callers. */
+	float StrengthOverride = -1.f;
 };
 
 /** TeamBalancer output, UE4-friendly (no STL types). The Team0/Team1Indices
@@ -111,13 +118,21 @@ public:
 
 	/** Pull this player's rating row from Mods.db into the in-memory cache.
 	 *  If no row exists, creates an INSERT with default 1400/350/0.06 and caches
-	 *  defaults. Call from PostLogin. */
-	void LoadPlayerFromDB(UWorld* World, const FString& UniqueId);
+	 *  defaults. PlayerName (optional) refreshes the last-seen display name —
+	 *  cached even for an already-loaded player and persisted at the next flush.
+	 *  Call from PostLogin. */
+	void LoadPlayerFromDB(UWorld* World, const FString& UniqueId, const FString& PlayerName = FString());
 
 	/** Snapshot current cached ratings as the "match-start" frozen values. The
 	 *  replicator displays these throughout the match. Call from
 	 *  HandleMatchHasStarted, after all players are loaded. */
 	void SnapshotMatchStart();
+
+	/** Give a mid-match joiner a match-start baseline (their rating as of now)
+	 *  so FlushAtMatchEnd can show their +/- delta. No-op outside a live match,
+	 *  for an uncached player, or if a baseline already exists. Call from
+	 *  PostLogin after LoadPlayerFromDB. */
+	void CaptureLateJoinBaseline(const FString& UniqueId);
 
 	/** Apply a single round's outcome to the cached PlayerRatings. Internal
 	 *  in-memory update only — does NOT push to the replicator (display stays
@@ -132,9 +147,17 @@ public:
 	 *  1400 if not loaded. */
 	int32 GetCachedElo(const FString& UniqueId) const;
 
-	/** Add this round's PPR (Kills + Damage*0.01) to the player's lifetime totals.
-	 *  Pure cache update; persistence happens in FlushAtMatchEnd. Server-only. */
-	void RecordRoundPPR(const FString& UniqueId, float RoundPPR);
+	/** Global rank (1-based) on the ElimPlus leaderboard: 1 + the number of rated
+	 *  players in NCRatingElimPlus with a strictly higher Rating. Live DB query —
+	 *  call only at match start/end (alongside the ELO push), never per-tick.
+	 *  Returns 0 if the player has no rating row (unranked / bot). */
+	int32 GetPlayerGlobalRank(UWorld* World, const FString& UniqueId) const;
+
+	/** Add this round's PPR (Kills + Damage*0.01) + raw round damage to the player's
+	 *  lifetime totals (TotalPoints/RoundsPlayed/TotalDamage -> lifetime PPR + DPR),
+	 *  and refresh their last-seen display name. Pure cache update; persistence
+	 *  happens in FlushAtMatchEnd. Server-only. */
+	void RecordRoundPPR(const FString& UniqueId, float RoundPPR, float RoundDamage = 0.f, const FString& PlayerName = FString());
 
 	/** Server-side accessor for lifetime PPR (TotalPoints / max(1, RoundsPlayed)).
 	 *  Returns 0 for players with no completed rounds. */

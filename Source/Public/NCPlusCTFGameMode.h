@@ -65,6 +65,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 {
 	GENERATED_UCLASS_BODY()
 
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
+	/** Defer a host/rcon unpause behind a short server-only resume countdown
+	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	virtual bool ClearPause() override;
+
 	// ── Advantage Configuration ──────────────────────────────────────
 
 	/** Max seconds advantage lasts while a flag is held before forcing grace period. */
@@ -151,11 +159,17 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	float SpawnKillerAvoidRadius;
 
 	/** When your OWN flag isn't home (stolen or dropped), drop this many of your
-	 *  team's starts nearest your flag base — so you respawn forward toward the
-	 *  carrier's escape instead of behind it at the just-robbed base. Always keeps
-	 *  at least one start. 0 disables. */
+	 *  team's starts nearest your flag base form the avoid SET — exactly ONE of
+	 *  them is excluded per respawn, rotating through the set (nearest, then
+	 *  2nd-nearest, ...) so defenders always keep a base spawn available but
+	 *  can't rely on one fixed spot while the flag is out. You still respawn
+	 *  biased forward toward the carrier's escape. 0 disables. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnRobbedBaseAvoidCount;
+
+	/** Per-team rotation cursor for the robbed-base exclusion above (which of the
+	 *  N nearest starts is blocked this respawn). Runtime only; resets per map. */
+	int32 RobbedSpawnRotation[2] = { 0, 0 };
 
 	// ── Movement Configuration ───────────────────────────────────────
 
@@ -190,9 +204,20 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void BeginPlay() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void Logout(AController* Exiting) override;
+
+	/** Pin bot-PUG players to their bot-assigned team (see PugRosterTeam). The
+	 *  single choke point for login picks, manual switches, and the engine's
+	 *  CountdownToBegin auto-balance — all route through ChangeTeam. Non-roster
+	 *  joiners (subs/late fills) defer to Super's stock balancing. */
+	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
+
+	// Unlock entitlement-gated cosmetics: force the player's chosen hat as an OverrideHatClass (which the
+	// engine does NOT entitlement-check) so the community master's missing cosmetic entitlements can't
+	// strip it. Server-side, never kicks. See impl.
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
 
 	/** Own spawn selection (ElimPlus/Wipeout pattern) so the engine pipeline
 	 *  can't bypass RatePlayerStart. Curates an own-team pool from the map's
@@ -210,6 +235,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void HandleExitingIntermission() override;
 	virtual void HandleMatchInOvertime() override;
 	virtual void EndGame(AUTPlayerState* Winner, FName Reason) override;
+
+	/** CTF-aware end-game replay: feature the DECISIVE flag cap (the cap that ended the
+	 *  match) via the stock ClientQueueCoolMoment path, gated on demo maturity. Skips on
+	 *  short matches / no recent cap to avoid the stock client killcam seek crash (Map.h:527).
+	 *  Server-side; see the .cpp for the full rationale. */
+	virtual void PickMostCoolMoments(bool bClearCoolMoments = false, int32 CoolMomentsToShow = 1) override;
 
 	/** Server-side rating system for CTF or iCTF (separate ladders, single
 	 *  instance per match — bIsInstagib locked at construction).
@@ -286,6 +317,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	/** True when this match was launched as a bot PUG (?PugId present). */
 	bool bIsPugMatch = false;
+
+	/** Bot-assigned teams: lowercased EOS id (== the bot's players.ut4_id, ==
+	 *  MutBotEvents' Ut4Id) -> team (0 red, 1 blue). Parsed from ?PugTeams in
+	 *  InitGame; consulted in ChangeTeam to pin each rostered player to the side
+	 *  the bot balanced, so the engine's warmup auto-balance can't reshuffle the
+	 *  match. Empty for non-PUG games and for players who haven't /linked (those
+	 *  fall through to the stock balancer). Server-only. */
+	TMap<FString, uint8> PugRosterTeam;
 
 	/** True while an auto-pause is currently active. */
 	bool bAutoPaused = false;
@@ -448,6 +487,19 @@ protected:
 
 	/** World time before which a FlagCapture ScoreObject is rejected. Prevents double caps on maps with no geometry between bases. */
 	float LastScoreObjectTime;
+
+	/** Player who scored the most recent flag capture (end-of-match replay focus). Captured
+	 *  BEFORE Super::ScoreObject so a scorelimit/golden/mercy cap that ends the match inside
+	 *  Super is still recorded as the decisive moment. UniqueId is the ClientQueueCoolMoment focus. */
+	TWeakObjectPtr<AUTPlayerState> LastCapPlayer;
+
+	/** World time of the most recent flag capture. */
+	float LastCapTime = 0.f;
+
+	/** Max age (s) for the last cap to still count as "the decider" when EndGame runs. A
+	 *  cap-driven end credits the cap microseconds before EndGame, so it's always inside this
+	 *  window; a timelimit end (stale cap) falls through to no replay. */
+	float FeatureCapMaxAgeSeconds = 15.f;
 
 public:
 	virtual void CreateGameURLOptions(TArray<TSharedPtr<TAttributePropertyBase>>& MenuProps);

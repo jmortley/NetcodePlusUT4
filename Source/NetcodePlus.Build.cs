@@ -36,7 +36,8 @@ namespace UnrealBuildTool.Rules
 				"AppFramework",   // SColorPicker (used by SNCPlusHUDEditor color swatches)
 				"Http",
 				"Json",
-				"JsonUtilities"
+				"JsonUtilities",
+				"RenderCore"      // GWhiteTexture (QuickStats DrawArc canvas fallback)
             });
 		}
 	}

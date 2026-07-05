@@ -36,11 +36,16 @@ class SUTWeaponSkinSelector : public SCompoundWidget
 	void Construct(const FArguments& InArgs);
 	void ClosePanel();
 
+	/** RAII backstop: release a held NCPlusHUDDragMode count if torn down without
+	 *  ClosePanel (e.g. viewport widgets dropped on a map load). */
+	virtual ~SUTWeaponSkinSelector();
+
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 	virtual bool SupportsKeyboardFocus() const override { return true; }
 
 private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
+	bool bHeldDragMode = false;  // true while this panel holds a NCPlusHUDDragMode refcount
 
 	/** Discovered NetcodePlus weapons */
 	TArray<FNetcodePlusWeaponInfo> Weapons;
@@ -107,6 +112,13 @@ private:
 	 *  B=...,A=...)" so BP "Convert String to LinearColor" reads it directly. */
 	FLinearColor HitscanBeamColor;
 	FLinearColor ShockBeamColor;
+	/** The UTNPShockRifle BP applies ShockBeam ONLY when [WeaponSkinsPlus]
+	 *  CustomShockBeam=True — a gate historically written by the retired BP tool,
+	 *  never by this selector, so fresh users picked a color that silently did
+	 *  nothing. Seeded from the ini at load, latched by a shock color commit,
+	 *  written back on save. Deliberately NOT set by merely saving other settings,
+	 *  so never-customized users keep the stock beam. */
+	bool bShockBeamCustomized = false;
 	// SColorBlock has no SetColor in UE4.15 — bind via TAttribute getters so the
 	// swatch re-polls each paint and reflects edits automatically.
 	FLinearColor GetHitscanBeamColor() const { return HitscanBeamColor; }

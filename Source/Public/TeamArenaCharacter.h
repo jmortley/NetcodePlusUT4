@@ -8,10 +8,12 @@
 #include "UTHat.h"
 #include "UTHatLeader.h"
 #include "UTEyewear.h"
+#include "TimerManager.h"   // FTimerHandle SpawnRevealHandle (ping-comp spawn reveal timer)
 #include "TeamArenaCharacter.generated.h"
 
 
 class UTeamArenaCharacterMovement;
+class ACTFStatsReplicator;
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -165,12 +167,121 @@ public:
 	/** Server timestamp when bPingCompensatedSpawnPending was set (for timeout) */
 	float SpawnHiddenTimestamp = 0.f;
 
+	/** Server-side reveal timer: fires at ~RevealRttPct% of the spawner's RTT (an
+	 *  estimate of when their client has control), instead of waiting for the full
+	 *  round-trip ServerConfirmSpawnReady ACK. */
+	FTimerHandle SpawnRevealHandle;
+
+	/** Server-side: reveal the pawn (unhide + re-enable collision + clear the flag &
+	 *  timer). Shared by the RevealRttPct timer, the client ACK, and the 0.5s safety
+	 *  timeout; guarded against double-fire. */
+	void RevealAfterPingComp();
+
 	/** Client has confirmed possession — reveal the pawn */
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerConfirmSpawnReady();
+
+	/** Server-side: begin the ping-compensated spawn hide (set pending + hide +
+	 *  disable collision + stamp), BUT only if the owning client's ping is at/above
+	 *  the floor (Mod.ini [NetcodePlus] PingCompSpawnMinPingMs, default 60ms).
+	 *  Low-ping spawners regain control almost instantly (no real spawn-kill risk),
+	 *  and their brief hide is exactly what makes them look like they teleport-dodge
+	 *  off the spawn on a higher-ping opponent's screen. (ExactPing is live every
+	 *  spawn, so there's no unknown case.) Call from the gamemode's RestartPlayer after Super. */
+	void BeginPingCompensatedSpawnHide();
+
+	// ── Force Models (MutForceModels port, phase 1) ─────────────────
+	// Client-side render override: force every OTHER player to a chosen AUTCharacterContent
+	// + team-recolour, driven by the local NCPlusForceModels config. Fires on spawn /
+	// team-change (both route through NotifyTeamChanged) and is a no-op on a dedicated server.
+	virtual void NotifyTeamChanged() override;
+
+	// Force Models: redirect the stock yellow armour overlay to our match/complimentary armour colour.
+	virtual void UpdateArmorOverlay() override;
+
+	// Force Models cosmetic strip (the "Cosmetics" flag): when a reskinned pawn should have its hat/
+	// eyewear/leader-hat removed, suppress their (re)creation via these stock setter overrides — needed
+	// because OnRep_PlayerState calls SetCosmeticsFromPlayerState AFTER NotifyTeamChanged, so destroying
+	// in NotifyTeamChanged alone would be undone. StripCosmetics() clears any already-spawned.
+	virtual void SetHatClass(TSubclassOf<AUTHat> HatClass) override;
+	virtual void SetEyewearClass(TSubclassOf<AUTEyewear> EyewearClass) override;
+	virtual void LeaderHatStatusChanged_Implementation() override;
+
+	// Force Models "DarkenBodies": on death, hide the corpse after a short delay (so the death/ragdoll
+	// effects are still visible briefly). Client-side (PlayDying runs per-client), gated by bEnabled +
+	// bDarkenBodies.
+	virtual void PlayDying() override;
+
+	// iCTF-only: scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting
+	// ([NetcodePlus] OwnFootstepVolume, 0..1; 1 = stock). Remote/enemy footsteps and other modes are
+	// untouched. UTPlaySound has no volume arg, so a non-stock volume is played via PlayOwnFootstepScaled.
+	virtual void PlayFootstep(uint8 FootNum, bool bFirstPerson = false) override;
+
+	/** True iff this pawn is controlled by a LOCAL HUMAN player — i.e. it's "my own" pawn (incl. split-screen).
+	 *  PUBLIC so DrawHeadDebug can use it too. Use this, NOT IsLocallyControlled(), to skip the local player's
+	 *  pawn: in NM_Standalone (offline) IsLocallyControlled() is true for EVERY controller (bots' AIControllers
+	 *  included), which made Force Models + the DebugHeads ring skip ALL pawns offline. Bots use AIController, so
+	 *  the Cast excludes them; IsLocalController() keeps remote players (listen server) from matching. */
+	bool IsLocalPlayerPawn() const;
 
 protected:
 	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
 	// Server-only; synced when ArmorType is belt, decremented on damage.
 	int32 BeltArmorRemaining = 0;
+
+	// ── Force Models state ──
+	/** Re-evaluate this pawn and apply (or clear) the forced model + team-recolour. Client-only.
+	 *  bForceReapply=true (the NotifyTeamChanged path) always re-asserts, because the base
+	 *  NotifyTeamChanged just reverted us to the real model; false (the cross-pawn refresh path)
+	 *  skips a no-op when the desired model+colour is unchanged. */
+	void ApplyForcedModel(bool bForceReapply = true);
+	/** When THIS is the local player's pawn and its team changed, every OTHER pawn's friend/enemy
+	 *  bucket can flip without their own NotifyTeamChanged firing — re-evaluate them. */
+	void RefreshOtherForcedModels();
+	/** Re-entrancy guard — ApplyCharacterData / base NotifyTeamChanged can re-enter. */
+	bool bApplyingForcedModel = false;
+	/** Last applied forced state, so the refresh path can skip no-op re-applies. */
+	UPROPERTY()
+	UClass* LastForcedContent = nullptr;
+	FLinearColor LastForcedColour = FLinearColor::Transparent;
+	bool bForcedModelApplied = false;
+
+	/** Coalesce the forced-model apply: a single replication burst fires NotifyTeamChanged 2-4x
+	 *  (PossessedBy / OnRep_PlayerState / the PlayerState's NotifyTeamChanged / UTTeamInfo). Rather than
+	 *  rebuild the forced mesh per OnRep, NotifyTeamChanged marks this dirty and Tick re-asserts the model
+	 *  exactly once. Set only off the dedicated server. */
+	bool bForcedModelDirty = false;
+	/** Local pawn only: its team change flips every OTHER pawn's friend/enemy bucket; coalesced refresh. */
+	bool bRefreshOthersDirty = false;
+	/** Flush the coalesced forced-model work (the dirty flags) — called from the top of Tick on clients. */
+	void FlushForcedModelUpdate();
+
+	/** True while this reskinned pawn should have its cosmetics stripped — gates the setter overrides. */
+	bool bForceModelStripCosmetics = false;
+	/** Destroy any spawned Hat/Eyewear/LeaderHat on this pawn (Force Models cosmetic strip). */
+	void StripCosmetics();
+	/** Apply the desired strip state: strip + suppress when true, or restore (SetCosmeticsFromPlayerState)
+	 *  when transitioning back to false. Called from ApplyForcedModel. */
+	void UpdateCosmeticStrip(bool bShouldStrip);
+
+	/** DarkenBodies: on death, schedule the corpse to hide after a short delay (lets death/ragdoll effects
+	 *  play first). Gated by bEnabled + bDarkenBodies. Called from PlayDying (client-side). */
+	void SpawnSkeletonDissolve();
+	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
+	void HideDeadBody();
+
+	// ── Own footstep volume (iCTF) ──
+	/** Reimplemented own-footstep play honouring OwnFootstepVolumeScale (UTPlaySound has no volume arg). */
+	void PlayOwnFootstepScaled(uint8 FootNum);
+	/** 0..1 multiplier on the local player's own footstep; 1 = stock (no override). Read once from config. */
+	float OwnFootstepVolumeScale = 1.f;
+	bool bOwnFootstepVolumeRead = false;
+	/** Cached iCTF gate (ACTFStatsReplicator::bIsInstagibMatch) — present only in NCPlusCTF instagib.
+	 *  Searched lazily while null (so it resolves even if the first footstep precedes replication), then
+	 *  latched by bIctfFootstepResolved to avoid iterating every footstep forever in non-iCTF modes. */
+	TWeakObjectPtr<ACTFStatsReplicator> CachedCTFRep;
+	bool bIctfFootstepResolved = false;
+	/** Warmup iCTF signal: the replicated MutInstagibNCP mutator is present from match init (incl. warmup),
+	 *  unlike ACTFStatsReplicator which only spawns at match start. Latched once found. */
+	bool bIctfMutatorFound = false;
 };

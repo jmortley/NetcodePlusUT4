@@ -4,15 +4,28 @@
 #include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
+#include "UTHUDWidgetMessage_KillIconMessages.h"   // killfeed special-case (KillIconWidget stomp bypass)
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTPlayerState.h"
+#include "UTTeamInfo.h"
 #include "UTGameState.h"
+#include "UTInventory.h"
+#include "UTTimedPowerup.h"
+#include "UTJumpBoots.h"
 #include "Engine/Canvas.h"
+#include "CanvasItem.h"
 #include "Engine/Font.h"
 #include "Json.h"
 #include "JsonUtilities.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
+#include "Engine/World.h"
+#include "Engine/DemoNetDriver.h"
+#include "GameFramework/GameStateBase.h"
+#include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
+#include "Misc/ConfigCacheIni.h"
 
 // =============================================================================
 // Anchor conversions
@@ -101,15 +114,25 @@ namespace NCPlusHPArmorStyle
 
 namespace NCPlusHUDDragMode
 {
-	static bool GIsActive = false;
+	// Refcounted: the drag overlay AND the nchud/weaponskins/ncpmenu/cosmetics
+	// menus each request the cursor-free input mode on open. Active while ANY are
+	// open; only the last close lets the HUD's GetInputMode poll re-capture the
+	// cursor. (Was a plain bool — one menu closing cleared another's request.)
+	static int32 GActiveCount = 0;
 
-	bool IsActive()              { return GIsActive; }
-	void SetActive(bool bActive) { GIsActive = bActive; }
+	bool IsActive()              { return GActiveCount > 0; }
+	void SetActive(bool bActive) { if (bActive) { ++GActiveCount; } else if (GActiveCount > 0) { --GActiveCount; } }
+	void Reset()                 { GActiveCount = 0; }   // backstop for a leaked count (map load)
 }
 
 // =============================================================================
 // Font resolver (Phase 3.8)
 // =============================================================================
+
+// Monotonic layout revision — bumped wherever the live layout changes (load / reset /
+// edit). The font + scale resolve caches below key off it, so on an unchanged layout
+// (the per-frame norm) a resolve is one FName Find instead of GetExtra + a scan.
+static uint32 GLayoutRevision = 1;
 
 namespace NCPlusHUDFonts
 {
@@ -154,50 +177,61 @@ namespace NCPlusHUDFonts
 			{ TEXT("Positec"),         TEXT("/Game/RestrictedAssets/Fonts/fntPositec36.fntPositec36"),                      nullptr },
 			{ TEXT("Positec Small"),   TEXT("/Game/RestrictedAssets/Fonts/fntPositec14.fntPositec14"),                      nullptr },
 			{ TEXT("Extreme"),         TEXT("/Game/RestrictedAssets/Fonts/fntExtreme.fntExtreme"),                          nullptr },
-			// External Google Fonts (OFL) - TEST SET, pointing at the exact UFont
-			// asset names currently in /Game/Blueprints/Netcode/ (incl. italic +
-			// variable-font variants) for a quick render test.
-			// COOK NOTE: these are string-path refs the cooker won't auto-pull from
-			// Blueprints/Netcode - either add that folder to "Additional Asset
-			// Directories to Cook" or keep a holder asset (the FontTest BP) that
-			// hard-references them so the cook drags them in.
-			// UE4.15 may not render the *VariableFont* ones (Inter/JetBrains/Oswald);
-			// Bebas/Russo are static and should be safe. Once a final set is chosen,
-			// trim to one weight each + rename to clean names.
-			{ TEXT("Inter"),                 TEXT("/Game/Blueprints/Netcode/Inter-VariableFont_opsz_wght_Font.Inter-VariableFont_opsz_wght_Font"),                     nullptr },
-			{ TEXT("Inter Italic"),          TEXT("/Game/Blueprints/Netcode/Inter-Italic-VariableFont_opsz_wght_Font.Inter-Italic-VariableFont_opsz_wght_Font"),       nullptr },
-			{ TEXT("JetBrains Mono"),        TEXT("/Game/Blueprints/Netcode/JetBrainsMono-VariableFont_wght_Font.JetBrainsMono-VariableFont_wght_Font"),               nullptr },
-			{ TEXT("JetBrains Mono Italic"), TEXT("/Game/Blueprints/Netcode/JetBrainsMono-Italic-VariableFont_wght_Font.JetBrainsMono-Italic-VariableFont_wght_Font"), nullptr },
-			{ TEXT("Bebas Neue"),            TEXT("/Game/Blueprints/Netcode/BebasNeue-Regular_Font.BebasNeue-Regular_Font"),                                            nullptr },
-			{ TEXT("Oswald"),                TEXT("/Game/Blueprints/Netcode/Oswald-VariableFont_wght_Font.Oswald-VariableFont_wght_Font"),                              nullptr },
-			{ TEXT("Russo One"),             TEXT("/Game/Blueprints/Netcode/RussoOne-Regular_Font.RussoOne-Regular_Font"),                                              nullptr },
+			// External Google-font TEST SET (Inter / Inter Italic / JetBrains Mono x2 /
+			// Bebas Neue / Oswald / Russo One) REMOVED 2026-06-23 — they lived in
+			// /Game/Blueprints/Netcode/ which was never added to the cook (so they never
+			// shipped) and the variable-font ones don't render in UE4.15 anyway. Picking
+			// one silently fell back to the default font ("the font bug"). Re-add ONLY a
+			// NON-variable weight, and only after confirming it's cooked + loads as UFont.
 		};
 		return Table;
 	}
 
 	UFont* Resolve(FName Alias, AUTHUD* HUD, UFont* Fallback)
 	{
-		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		if (!E) return Fallback;
+		// Per-alias override cache: Alias is already an FName, so a hit is one hashed
+		// Find with zero string/FName work. Invalidated when the layout changes
+		// (GLayoutRevision). Value = resolved OVERRIDE font, or null meaning no
+		// override (use the caller's Fallback), so the same alias works from sites
+		// passing different fallbacks (e.g. pip SmallFont vs name TinyFont).
+		static TMap<FName, UFont*> OverrideCache;
+		static uint32 CacheRev = 0;
+		if (CacheRev != GLayoutRevision) { OverrideCache.Reset(); CacheRev = GLayoutRevision; }
+		if (UFont** Hit = OverrideCache.Find(Alias)) { return *Hit ? *Hit : Fallback; }
 
-		const FString FontKey = E->GetExtra(TEXT("font"));
+		UFont* const Resolved = [&]() -> UFont*
+		{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		if (!E) return nullptr;
+
+		static const FName NAME_Font(TEXT("font"));   // build the key once, not per call
+		const FString FontKey = E->GetExtra(NAME_Font);
 		if (FontKey.IsEmpty() || FontKey.Equals(TEXT("Default"), ESearchCase::IgnoreCase))
 		{
-			return Fallback;
+			return nullptr;
 		}
 
 		// Lazy-load cache for Tier B fonts. Map by asset path so different
 		// display aliases pointing at the same asset only load once.
 		static TMap<FString, UFont*> Cache;
 
-		for (const FFontEntry& F : GetTable())
+		// One-time name -> entry index (display names are unique). Turns an
+		// overridden font into a single FName-keyed Find instead of a ~20-entry
+		// case-insensitive FString scan every frame — matters at 500+ fps. FName
+		// keys make the match case-insensitive for free.
+		static const TMap<FName, const FFontEntry*> NameMap = []{
+			TMap<FName, const FFontEntry*> M;
+			for (const FFontEntry& Ent : GetTable()) { M.Add(FName(*Ent.Display), &Ent); }
+			return M;
+		}();
+		if (const FFontEntry* const* Found = NameMap.Find(FName(*FontKey)))
 		{
-			if (!F.Display.Equals(FontKey, ESearchCase::IgnoreCase)) continue;
+			const FFontEntry& F = **Found;
 
 			if (F.HUDFunc)
 			{
 				UFont* HF = F.HUDFunc(HUD);
-				return HF ? HF : Fallback;
+				return HF;
 			}
 
 			// Cache hit. nullptr is a valid cached value meaning "tried, failed,
@@ -206,7 +240,7 @@ namespace NCPlusHUDFonts
 			// disk and spamming the log. Treat cached-null as known failure.
 			if (UFont** Cached = Cache.Find(F.AssetPath))
 			{
-				return *Cached ? *Cached : Fallback;
+				return *Cached;
 			}
 
 			// First attempt for this asset path. Try as UObject first so we can
@@ -237,18 +271,31 @@ namespace NCPlusHUDFonts
 				*F.Display, *F.AssetPath,
 				Asset ? TEXT("loaded") : TEXT("null"),
 				Asset ? *Asset->GetClass()->GetName() : TEXT("(none)"));
-			return Fallback;
+			return nullptr;
 		}
 
-		// Unknown name → fall back silently. Likely an old JSON entry from a
-		// future build; leaving it as-is on disk so it survives a re-save.
-		return Fallback;
+		// Unknown name -> no override; the wrapper below applies the caller's Fallback.
+		return nullptr;
+		}();
+
+		OverrideCache.Add(Alias, Resolved);
+		return Resolved ? Resolved : Fallback;
 	}
 
 	float ResolveScale(FName Alias, float Default)
 	{
+		// Per-alias cache (see Resolve). Assumes a stable Default per alias; all
+		// current callers pass 1.f.
+		static TMap<FName, float> ScaleCache;
+		static uint32 ScaleCacheRev = 0;
+		if (ScaleCacheRev != GLayoutRevision) { ScaleCache.Reset(); ScaleCacheRev = GLayoutRevision; }
+		if (float* Hit = ScaleCache.Find(Alias)) { return *Hit; }
+
+		static const FName NAME_FontScale(TEXT("font_scale"));
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		return E ? E->GetExtraFloat(TEXT("font_scale"), Default) : Default;
+		const float V = E ? E->GetExtraFloat(NAME_FontScale, Default) : Default;
+		ScaleCache.Add(Alias, V);
+		return V;
 	}
 
 	TArray<TSharedPtr<FString>> GetChoices()
@@ -436,6 +483,127 @@ FName FNCPlusHUDLayout::GetWeaponSide(UClass* WeaponClass) const
 FString FNCPlusHUDLayout::GetDefaultLayoutPath()
 {
 	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
+}
+
+// Cached so the per-frame DrawHeldPowerups call never hits GConfig/FileExists (mirror
+// GStockTeamPanelCache). -1 = unresolved. Invalidated by SetStockBottomBar (explicit
+// change) and SaveLive (the FileExists fallback flips the first time a layout is saved).
+static int8 GStockBottomBarCache = -1;
+
+bool FNCPlusHUDLayout::WantsStockBottomBar()
+{
+	if (GStockBottomBarCache >= 0)
+	{
+		return GStockBottomBarCache != 0;
+	}
+	bool bResult;
+	// Explicit choice in Mod.ini wins (written by the menu / Stock-Like preset).
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockBottomBar"), Val, ModIni) && !Val.IsEmpty())
+	{
+		bResult = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
+	}
+	else
+	{
+		// No explicit choice — default to the familiar stock bar for a fresh install
+		// (no saved HUD layout). Anyone who has saved a layout keeps the NCPlus widgets.
+		bResult = !FPaths::FileExists(GetDefaultLayoutPath());
+	}
+	GStockBottomBarCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
+{
+	// Mirror WantsStockBottomBar's source: [NetcodePlus] StockBottomBar in the generated Mod.ini.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("StockBottomBar"),
+			bStock ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	// Refresh the cache so the next WantsStockBottomBar() reflects the choice.
+	GStockBottomBarCache = bStock ? 1 : 0;
+}
+
+// -----------------------------------------------------------------------------
+// Stock team panel toggle + scoreboard opacity (mirror the StockBottomBar plumbing)
+// -----------------------------------------------------------------------------
+
+// Cached so the per-frame DrawHUD call never hits FileExists. -1 = unresolved.
+static int8 GStockTeamPanelCache = -1;
+
+bool FNCPlusHUDLayout::WantsStockTeamPanel()
+{
+	if (GStockTeamPanelCache >= 0)
+	{
+		return GStockTeamPanelCache != 0;
+	}
+	bool bResult;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), Val, ModIni) && !Val.IsEmpty())
+	{
+		// Explicit choice in Mod.ini wins (written by the editor toggle).
+		bResult = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
+	}
+	else
+	{
+		// No explicit choice — default to the stock roster for a fresh install (no
+		// saved HUD layout). Anyone who has customized their HUD keeps the portraits.
+		bResult = !FPaths::FileExists(GetDefaultLayoutPath());
+	}
+	GStockTeamPanelCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetStockTeamPanel(bool bStock)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"),
+			bStock ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	// Refresh the cache so the change applies on the very next DrawHUD frame
+	// (the panel draws directly from this value — no widget swap needed).
+	GStockTeamPanelCache = bStock ? 1 : 0;
+}
+
+static float GScoreboardOpacityCache = -1.f;
+
+float FNCPlusHUDLayout::GetScoreboardOpacity()
+{
+	if (GScoreboardOpacityCache >= 0.f)
+	{
+		return GScoreboardOpacityCache;
+	}
+	float Result = 0.3f;  // prior hard-coded default
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("ScoreboardOpacity"), Val, ModIni) && !Val.IsEmpty())
+	{
+		Result = FCString::Atof(*Val);
+	}
+	Result = FMath::Clamp(Result, 0.05f, 1.f);
+	GScoreboardOpacityCache = Result;
+	return Result;
+}
+
+void FNCPlusHUDLayout::SetScoreboardOpacity(float Opacity)
+{
+	const float Clamped = FMath::Clamp(Opacity, 0.05f, 1.f);
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("ScoreboardOpacity"),
+			*FString::SanitizeFloat(Clamped), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GScoreboardOpacityCache = Clamped;
 }
 
 FNCPlusHUDLayout FNCPlusHUDLayout::LoadFromFile(const FString& Path)
@@ -654,8 +822,13 @@ namespace NCPlusHUDAliases
 			T.Emplace(TEXT("weapon_bar_left"),  TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),                      FText::FromString(TEXT("Weapon Bar (Left)")), false, ENCPlusHUDAnchor::CenterLeft,  FVector2D( 20.f, -20.f));
 			T.Emplace(TEXT("weapon_bar_right"), TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),                     FText::FromString(TEXT("Weapon Bar (Right)")), false, ENCPlusHUDAnchor::CenterRight, FVector2D(-20.f, -20.f));
 			T.Emplace(TEXT("weapon_crosshair"), TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),                    FText::FromString(TEXT("Crosshair")),          false, ENCPlusHUDAnchor::Center);
-			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")),           false, ENCPlusHUDAnchor::BottomLeft);
-			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")), false, ENCPlusHUDAnchor::TopRight);
+			T.Emplace(TEXT("powerups"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),      FText::FromString(TEXT("Powerups")),           false, ENCPlusHUDAnchor::BottomLeft, FVector2D(20.f, -20.f));
+			// StockAnchor is TopLeft because that IS the stock base: AUTHUD::DrawHUD
+			// stomps KillIconWidget->ScreenPosition to (0,0) every frame (UTHUD.cpp:842-845)
+			// — the widget never actually sat at TopRight. The old TopRight seed made the
+			// first drag jump a full screen width once anchors take real effect (see the
+			// killfeed special-case in ApplyLayoutToWidgets).
+			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")), false, ENCPlusHUDAnchor::TopLeft);
 			T.Emplace(TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")), false, ENCPlusHUDAnchor::TopRight);
 			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")),      false, ENCPlusHUDAnchor::TopCenter);
 			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")),   false, ENCPlusHUDAnchor::BottomLeft);
@@ -708,6 +881,10 @@ namespace NCPlusHUDAliases
 			// them apart in the visual editor.
 			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
 			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
+			// Stock top-left team roster (alternative to the portrait strip; see
+			// NCPlusHUDDrawCall::DrawStockTeamPanel). Draw-call alias → movable, with
+			// Scale / Opacity / Hide honored. Default top-left with a small inset.
+			T.Emplace(TEXT("team_panel"),       FString(),                                                                       FText::FromString(TEXT("Team Panel (Stock Roster)")), true, ENCPlusHUDAnchor::TopLeft, FVector2D(16.f, 12.f));
 			// Full-screen tint when the local pawn takes damage. Polls Health+Armor
 			// each frame; on a decrease, stamps the time and tints the screen for
 			// `flash_duration` seconds. Extras: color_text (tint color, default red),
@@ -811,6 +988,94 @@ namespace NCPlusHUDAliases
 
 namespace NCPlusHUDDrawCall
 {
+	// ---- Outlined-text + fitted-name helpers -------------------------------------
+	// Collapse the hand-rolled "4 offset DrawText + 1 fill, all shadowed" stacks (each
+	// UCanvas::DrawText paid a full ICU word-wrap + allocs, x2 for the shadow) into one
+	// batched FCanvasTextItem, and cache the per-frame name-fit StrLen loops per player.
+
+	void DrawOutlinedText(UCanvas* Canvas, const UFont* Font, const FText& Text,
+		float X, float Y, float Scale, FLinearColor Fill, FLinearColor Outline, float Opacity)
+	{
+		if (!Canvas || !Font || Text.IsEmpty()) return;
+		Fill.A    *= Opacity;
+		Outline.A *= Opacity;
+		FCanvasTextItem Item(FVector2D(X, Y), Text, Font, Fill);
+		Item.Scale        = FVector2D(Scale, Scale);
+		Item.bOutlined    = true;   // 4 diagonal ±1px passes, one batched item, no re-wrap
+		Item.OutlineColor = Outline;
+		// Deliberately NO EnableShadow(): the outline replaces the old drop shadow, and a
+		// shadow would double-raster every one of the 5 passes — the cost we're removing.
+		Canvas->DrawItem(Item);
+	}
+
+	// Per-PlayerState fitted-name cache. Each entry remembers the inputs it was built
+	// from and is recomputed only when one changes; the whole map is dropped on a world
+	// change (level transition) or a layout-revision bump so nothing goes stale.
+	namespace
+	{
+		struct FNCFittedNameEntry
+		{
+			FString      Src;
+			const UFont* Font     = nullptr;
+			int32        WidthKey = -1;
+			FText        Text;
+			float        Width  = 0.f;
+			float        Height = 0.f;
+		};
+		TMap<TWeakObjectPtr<APlayerState>, FNCFittedNameEntry> GNameFitCache;
+		uint32                 GNameFitRev   = 0;
+		TWeakObjectPtr<UWorld> GNameFitWorld;
+	}
+
+	void ResolveFittedName(UCanvas* Canvas, APlayerState* PS, UFont* Font,
+		const FString& Src, float MaxWidthPx, float Scale,
+		FText& OutText, float& OutWidth, float& OutHeight)
+	{
+		// Degenerate inputs — measure once (uncached) and bail.
+		if (!Canvas || !Font || !PS || Scale <= 0.f)
+		{
+			float XL = 0.f, YL = 0.f;
+			if (Canvas && Font) Canvas->StrLen(Font, Src, XL, YL);
+			OutText = FText::FromString(Src); OutWidth = XL; OutHeight = YL;
+			return;
+		}
+
+		// Drop the whole cache on a world change or a layout edit.
+		UWorld* World = PS->GetWorld();
+		const uint32 Rev = FNCPlusHUDLayout::GetLiveRevision();
+		if (Rev != GNameFitRev || GNameFitWorld.Get() != World)
+		{
+			GNameFitCache.Reset();
+			GNameFitRev   = Rev;
+			GNameFitWorld = World;
+		}
+
+		// The fit depends only on (Src, Font, MaxWidthPx/Scale) — bucket the ratio so
+		// tiny float jitter doesn't thrash the cache.
+		const int32 WidthKey = FMath::RoundToInt(MaxWidthPx / Scale);
+		FNCFittedNameEntry& E = GNameFitCache.FindOrAdd(PS);
+		if (E.Font != Font || E.WidthKey != WidthKey || E.Src != Src)
+		{
+			FString Text = Src;
+			float XL = 0.f, YL = 0.f;
+			Canvas->StrLen(Font, Text, XL, YL);
+			while (XL * Scale > MaxWidthPx && Text.Len() > 3)
+			{
+				Text = Text.Left(Text.Len() - 1);
+				Canvas->StrLen(Font, Text, XL, YL);
+			}
+			E.Src      = Src;
+			E.Font     = Font;
+			E.WidthKey = WidthKey;
+			E.Text     = FText::FromString(Text);
+			E.Width    = XL;
+			E.Height   = YL;
+		}
+		OutText   = E.Text;
+		OutWidth  = E.Width;
+		OutHeight = E.Height;
+	}
+
 	FVector2D ResolveScreenPos(FName Alias, UCanvas* Canvas, const FVector2D& Fallback)
 	{
 		if (!Canvas) return Fallback;
@@ -927,6 +1192,502 @@ namespace NCPlusHUDDrawCall
 	}
 
 	// =============================================================================
+	// Stock team panel — top-left team roster (alternative to the portrait strip)
+	// =============================================================================
+	//
+	// Red row then blue row of slanted, team-colored plates. Teammate plates show
+	// name + "+HP  armor"; enemy plates show the name only (no live enemy HP) —
+	// EXCEPT once the round is over (reveal the winners' final health) and for
+	// TRUE spectators (bOnlySpectator), who see both teams' vitals at all times.
+	// Dead players are skipped so the row reflows — plate count = alive count.
+	// Same data source as the portrait strip (teammate Health/GetArmorAmount);
+	// only the look differs. Honors the `team_panel` alias (position / scale /
+	// opacity / hide).
+	void DrawStockTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (HUD == nullptr || Canvas == nullptr) return;
+		if (IsHidden(TEXT("team_panel"))) return;
+
+		UWorld* World = HUD->GetWorld();
+		if (!World) return;
+		AUTGameState* GS = World->GetGameState<AUTGameState>();
+		if (!GS) return;
+
+		// Font + FontSz come from the `team_panel` nchud alias (Font dropdown + FontSz
+		// slider in the editor), falling back to the stock HUD fonts when unset.
+		UFont* NameFont  = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD, HUD->SmallFont);
+		if (!NameFont) NameFont = HUD->SmallFont;
+		UFont* StatFont  = NameFont;
+		UFont* ScoreFont = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD, HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont);
+		if (!ScoreFont) ScoreFont = HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont;
+		if (!NameFont) return;
+
+		// Local viewer's team — teammates get an HP/armor readout, enemies name-only.
+		// Vitals are revealed for EVERYONE when the round is over (this panel only
+		// draws in InProgress/RoundCooldown, so != InProgress IS the round-win
+		// window — show the winners' final health) and for TRUE spectators
+		// (bOnlySpectator; deliberately NOT bOutOfLives — a dead player must not
+		// gain live enemy info mid-round).
+		uint8 MyTeam = 255;
+		bool  bRevealAllVitals = (GS->GetMatchState() != MatchState::InProgress);
+		if (HUD->UTPlayerOwner)
+		{
+			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
+			{
+				MyTeam = MyPS->GetTeamNum();
+				bRevealAllVitals |= MyPS->bOnlySpectator;
+			}
+		}
+
+		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+		const float PanelScale  = GetScale(TEXT("team_panel"));
+		const float S  = FMath::Max(0.2f, RenderScale * PanelScale);
+		const float Op = FMath::Clamp(GetOpacity(TEXT("team_panel")), 0.f, 1.f);
+
+		// Geometry (design px * S).
+		const float PlateW = 150.f * S;
+		const float PlateH = 30.f  * S;
+		const float Skew   = 10.f  * S;
+		const float Gap    = 4.f   * S;
+		const float ScoreW = 34.f  * S;
+		const float RowGap = 6.f   * S;
+		const float Pitch  = PlateW + Gap;
+
+		const FVector2D Origin = ResolveScreenPos(TEXT("team_panel"), Canvas,
+			FVector2D(16.f * RenderScale, 12.f * RenderScale));
+
+		const float FontExtra  = NCPlusHUDFonts::ResolveScale(TEXT("team_panel"), 1.f);
+		const float NameScale  = (float(Canvas->SizeY) / 1080.0f) * 0.42f * PanelScale * FontExtra;
+		const float StatScale  = (float(Canvas->SizeY) / 1080.0f) * 0.42f * PanelScale * FontExtra;
+		const float ScoreScale = (float(Canvas->SizeY) / 1080.0f) * 0.65f * PanelScale * FontExtra;
+
+		// White texture for the slanted plate fills (DrawTile is axis-aligned, so the
+		// slant needs triangle items).
+		FTexture* WhiteTex = (Canvas->DefaultTexture) ? Canvas->DefaultTexture->Resource : nullptr;
+		if (!WhiteTex) return;
+
+		// Two accumulation passes → one batched draw. Collect every slanted plate quad
+		// as triangles and every label as deferred text, then flush the quads in ONE
+		// DrawItem (was 4 translucent triangle items PER plate) and draw all text on top.
+		// Batching is visually identical: plates never overlap a neighbour's text, so
+		// "all fills, then all text" preserves z-order.
+		TArray<FCanvasUVTri> PlateTris;
+		struct FPanelLabel { UFont* Font; FText Text; float X; float Y; float Scale; FLinearColor Color; };
+		TArray<FPanelLabel> Labels;
+
+		auto AddQuad = [&](const FVector2D& A, const FVector2D& B, const FVector2D& C, const FVector2D& D, FLinearColor Col)
+		{
+			Col.A *= Op;
+			FCanvasUVTri T1;
+			T1.V0_Pos = A; T1.V1_Pos = B; T1.V2_Pos = C;
+			T1.V0_UV = T1.V1_UV = T1.V2_UV = FVector2D::ZeroVector;   // white 1x1 tex — UV irrelevant
+			T1.V0_Color = T1.V1_Color = T1.V2_Color = Col;
+			PlateTris.Add(T1);
+			FCanvasUVTri T2;
+			T2.V0_Pos = A; T2.V1_Pos = C; T2.V2_Pos = D;
+			T2.V0_UV = T2.V1_UV = T2.V2_UV = FVector2D::ZeroVector;
+			T2.V0_Color = T2.V1_Color = T2.V2_Color = Col;
+			PlateTris.Add(T2);
+		};
+
+		// Center a SHORT label on (CenterX, CenterY) and queue it. StrLen is fine here —
+		// these are 2-5 char score/clock/HP/armor strings, not the long player names
+		// (those go through the cached ResolveFittedName below).
+		auto PushCentered = [&](UFont* Font, const FString& Text, float CenterX, float CenterY, float Scale, const FLinearColor& Color)
+		{
+			if (!Font || Text.IsEmpty()) return;
+			float XL, YL;
+			Canvas->StrLen(Font, Text, XL, YL);
+			Labels.Add(FPanelLabel{ Font, FText::FromString(Text),
+				CenterX - XL * Scale * 0.5f, CenterY - YL * Scale * 0.5f, Scale, Color });
+		};
+
+		for (int32 TeamIdx = 0; TeamIdx < 2; ++TeamIdx)
+		{
+			const float RowY = Origin.Y + TeamIdx * (PlateH + RowGap);
+
+			// Honor the panel's OWN Team-Color toggle (parity with the portraits, which
+			// each read their own alias): custom TeamSkins color when on, stock red/blue
+			// when off. Defaults ON (GetUseTeamColor defaults true); toggle in nchud.
+			FLinearColor TeamCol = (TeamIdx == 1)
+				? FLinearColor(0.05f, 0.10f, 0.90f, 1.f)
+				: FLinearColor(0.80f, 0.05f, 0.05f, 1.f);
+			if (GetUseTeamColor(TEXT("team_panel")) && GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx])
+			{
+				TeamCol = GS->Teams[TeamIdx]->TeamColor;
+			}
+			// Muted dark plate (was full-saturation team color — too bright/glary behind
+			// the white names). Body darkened; the team hue lives in a thin top accent.
+			const FLinearColor PlateCol(TeamCol.R * 0.5f, TeamCol.G * 0.5f, TeamCol.B * 0.5f, 0.92f);
+			const FLinearColor ScoreBoxCol(TeamCol.R * 0.33f, TeamCol.G * 0.33f, TeamCol.B * 0.33f, 0.95f);
+			const FLinearColor EdgeCol(TeamCol.R, TeamCol.G, TeamCol.B, 0.8f);
+
+			// Score box (slanted), with the team score.
+			{
+				const float x = Origin.X;
+				const FVector2D A(x + Skew, RowY), B(x + Skew + ScoreW, RowY), C(x + ScoreW, RowY + PlateH), D(x, RowY + PlateH);
+				AddQuad(A, B, C, D, ScoreBoxCol);
+				const int32 TeamScore = (GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx]) ? GS->Teams[TeamIdx]->Score : 0;
+				PushCentered(ScoreFont, FString::Printf(TEXT("%d"), TeamScore),
+					x + Skew * 0.5f + ScoreW * 0.5f, RowY + PlateH * 0.5f, ScoreScale, FLinearColor::White);
+			}
+
+			float PlateX = Origin.X + ScoreW + Gap;
+
+			for (APlayerState* PSBase : GS->PlayerArray)
+			{
+				AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+				if (!PS || PS->bOnlySpectator || PS->bIsInactive) continue;
+				if (PS->GetTeamNum() != TeamIdx) continue;
+
+				// Alive check — controller's pawn on the server, GetUTCharacter()
+				// fallback on clients (GetOwner() is null for remote player states).
+				// Same logic as the portrait strip; dead/unknown players are skipped
+				// so the row reflows (plate count = alive count).
+				AUTCharacter* UTC = nullptr;
+				if (AController* Ctrl = Cast<AController>(PS->GetOwner())) { UTC = Cast<AUTCharacter>(Ctrl->GetPawn()); }
+				else                                                        { UTC = PS->GetUTCharacter(); }
+				if (!UTC || UTC->IsDead()) continue;
+
+				const float x = PlateX;
+				const FVector2D A(x + Skew, RowY), B(x + Skew + PlateW, RowY), C(x + PlateW, RowY + PlateH), D(x, RowY + PlateH);
+				AddQuad(A, B, C, D, PlateCol);
+				// Thin lighter top edge for definition.
+				AddQuad(FVector2D(x + Skew, RowY), FVector2D(x + Skew + PlateW, RowY),
+					FVector2D(x + Skew + PlateW, RowY + 2.f * S), FVector2D(x + Skew, RowY + 2.f * S), EdgeCol);
+
+				const float CenterX  = x + Skew * 0.5f + PlateW * 0.5f;
+				const bool  bShowVitals = (TeamIdx == MyTeam) || bRevealAllVitals;
+
+				if (bShowVitals)
+				{
+					// Name on top (cached fit), HP/armor below.
+					FText NameText; float NW, NH;
+					ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale, NameText, NW, NH);
+					Labels.Add(FPanelLabel{ NameFont, NameText,
+						CenterX - NW * NameScale * 0.5f, (RowY + PlateH * 0.30f) - NH * NameScale * 0.5f,
+						NameScale, FLinearColor(0.90f, 0.90f, 0.92f, 1.f) });
+
+					const int32 HP = UTC->Health;
+					const int32 AR = UTC->GetArmorAmount();
+					const FString HPStr = FString::Printf(TEXT("+%d"), HP);
+					const FString ARStr = FString::Printf(TEXT("%d"), AR);
+					const FLinearColor HPCol = (HP <= 34) ? FLinearColor(1.f, 0.42f, 0.42f, 1.f)
+					                         : (HP <= 90) ? FLinearColor(0.92f, 0.82f, 0.30f, 1.f)
+					                                      : FLinearColor(0.37f, 0.85f, 0.37f, 1.f);
+					const FLinearColor ARCol = (AR <= 0) ? FLinearColor(0.60f, 0.60f, 0.60f, 1.f)
+					                                     : FLinearColor(0.93f, 0.83f, 0.29f, 1.f);
+
+					// "+HP   armor", centered as a group (green health, yellow armor).
+					float hpXL, hpYL, arXL, arYL;
+					Canvas->StrLen(StatFont, HPStr, hpXL, hpYL);
+					Canvas->StrLen(StatFont, ARStr, arXL, arYL);
+					const float SpaceW = 10.f * S;
+					const float TotalW = (hpXL + arXL) * StatScale + SpaceW;
+					const float StatY  = RowY + PlateH - (hpYL * StatScale) - 1.f * S;
+					const float gx = CenterX - TotalW * 0.5f;
+					const float arX = gx + hpXL * StatScale + SpaceW;
+					Labels.Add(FPanelLabel{ StatFont, FText::FromString(HPStr), gx,  StatY, StatScale, HPCol });
+					Labels.Add(FPanelLabel{ StatFont, FText::FromString(ARStr), arX, StatY, StatScale, ARCol });
+				}
+				else
+				{
+					// Enemy: name only, vertically centered (no live enemy HP).
+					FText NameText; float NW, NH;
+					ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale, NameText, NW, NH);
+					Labels.Add(FPanelLabel{ NameFont, NameText,
+						CenterX - NW * NameScale * 0.5f, (RowY + PlateH * 0.5f) - NH * NameScale * 0.5f,
+						NameScale, FLinearColor(0.92f, 0.92f, 0.95f, 1.f) });
+				}
+
+				PlateX += Pitch;
+			}
+		}
+
+		// Round clock — the center scorebar (which normally carries it) is suppressed
+		// while this panel is on, so draw the clock here. RoundSecondsRemaining off the
+		// BP GameState via reflection (static class+prop cache, like the scorebar).
+		{
+			int32 RoundTime = -1;
+			static UClass* CachedClockCls = nullptr;
+			static UIntProperty* CachedClockProp = nullptr;
+			UClass* GSCls = GS->GetClass();
+			if (CachedClockCls != GSCls)
+			{
+				CachedClockCls  = GSCls;
+				CachedClockProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+			}
+			if (CachedClockProp)
+			{
+				RoundTime = CachedClockProp->GetPropertyValue_InContainer(GS);
+			}
+			if (RoundTime >= 0)
+			{
+				const FString ClockStr = FString::Printf(TEXT("%02d:%02d"), RoundTime / 60, RoundTime % 60);
+				// Below both team rows, centered on the score-box column (left edge is free
+				// once the spectator slide-out is suppressed).
+				const float ClockCX = Origin.X + Skew * 0.5f + ScoreW * 0.5f;
+				const float ClockCY = Origin.Y + 2.f * PlateH + RowGap + PlateH * 0.5f;
+				const FLinearColor ClockCol = (RoundTime <= 30) ? FLinearColor(1.f, 0.24f, 0.24f, 1.f) : FLinearColor::White;
+				PushCentered(ScoreFont, ClockStr, ClockCX, ClockCY, ScoreScale, ClockCol);
+			}
+		}
+
+		// Flush: every plate fill in a single triangle batch (one DrawItem), then every
+		// label as an outlined text item on top. Op is applied per-label by DrawOutlinedText.
+		if (PlateTris.Num() > 0)
+		{
+			FCanvasTriangleItem TriBatch(PlateTris, WhiteTex);
+			TriBatch.BlendMode = ESimpleElementBlendMode::SE_BLEND_Translucent;
+			Canvas->DrawItem(TriBatch);
+		}
+		for (const FPanelLabel& L : Labels)
+		{
+			DrawOutlinedText(Canvas, L.Font, L.Text, L.X, L.Y, L.Scale, L.Color, FLinearColor::Black, Op);
+		}
+
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
+
+	// =============================================================================
+	// Held-pickup status — amp / berserk / siphon remaining time + jump-boot charges
+	// =============================================================================
+	//
+	// Pure-C++ stand-in for the stock bpHW_Powerups widget in NCPlus modes. Stock UT4
+	// shows held-pickup status via the MiniHUD QuickStats cluster (when "Show Powerups
+	// on MiniHUD" is on) OR the standalone bpHW_Powerups widget (which suppresses
+	// itself whenever the cluster is on). NCPlus replaces QuickStats with one that
+	// draws no powerups/boots — so any player who enabled the cluster lost amp/berserk/
+	// siphon/boots entirely. We draw it ourselves here, always, in NCPlus mode.
+	//
+	// Held-pickup STATUS only (your own carried powerups/boots) — NOT map item respawn
+	// timers. In stock-bottom-bar mode the vanilla widgets still work, so we defer.
+	// Configurable via the "powerups" alias: position/anchor/offset, scale, opacity,
+	// and on/off (the nchud Hide checkbox).
+	void DrawHeldPowerups(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (HUD == nullptr || Canvas == nullptr || HUD->UTPlayerOwner == nullptr)
+		{
+			return;
+		}
+		// Stock-bottom-bar mode keeps the vanilla QuickStats/Paperdoll/bpHW_Powerups
+		// widgets, which already show held-pickup status — defer to them.
+		if (FNCPlusHUDLayout::WantsStockBottomBar())
+		{
+			return;
+		}
+		// nchud on/off for the "powerups" element.
+		if (IsHidden(TEXT("powerups")))
+		{
+			return;
+		}
+
+		// View target = self when alive, the spectated player when spectating.
+		AUTCharacter* C = Cast<AUTCharacter>(HUD->UTPlayerOwner->GetViewTarget());
+		if (C == nullptr || C->IsDead())
+		{
+			return;
+		}
+
+		// Gather held timed powerups (amp / berserk / siphon …) + jump boots. Each
+		// supplies its own HUD icon + remaining-time / charge text via GetHUDText —
+		// the same data the stock powerups widget reads.
+		TArray<AUTInventory*> Items;
+		for (TInventoryIterator<> It(C); It; ++It)
+		{
+			AUTInventory* Inv = *It;
+			if (Inv == nullptr || Inv->HUDIcon.Texture == nullptr)
+			{
+				continue;
+			}
+			if (Cast<AUTTimedPowerup>(Inv) != nullptr || Cast<AUTJumpBoots>(Inv) != nullptr)
+			{
+				Items.Add(Inv);
+			}
+		}
+		if (Items.Num() == 0)
+		{
+			return;
+		}
+
+		const float ResScale = FMath::Max(Canvas->ClipY, 1.f) / 1080.f;
+		const float Scale    = ResScale * GetScale(TEXT("powerups"));
+		const float Op       = FMath::Clamp(GetOpacity(TEXT("powerups")), 0.f, 1.f) * HUD->GetHUDWidgetOpacity();
+		if (Op <= 0.001f)
+		{
+			return;
+		}
+
+		const float IconH  = 36.f * Scale;
+		const float Pad    = 8.f  * Scale;
+		const float RowH   = IconH + Pad;
+		const float BlockH = RowH * Items.Num();
+
+		// Default lower-left; the block grows UPWARD from the anchor so the stock
+		// BottomLeft default reads naturally and never runs off the bottom edge.
+		const FVector2D Start = ResolveScreenPos(TEXT("powerups"), Canvas,
+			FVector2D(20.f * ResScale, Canvas->ClipY - 20.f * ResScale));
+		const float X = Start.X;
+		float Y = Start.Y - BlockH;
+
+		UFont* Font = HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont;
+		FFontRenderInfo RI;
+		RI.bEnableShadow = true;
+		const FColor TextColor(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(Op * 255.f), 0, 255));
+
+		for (AUTInventory* Inv : Items)
+		{
+			const FCanvasIcon& Ic = Inv->HUDIcon;
+			const float AspectW = (Ic.VL != 0.f) ? (Ic.UL / Ic.VL) : 1.f;
+			const float IconW = IconH * AspectW;
+
+			Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, Op));
+			Canvas->DrawTile(Ic.Texture, X, Y, IconW, IconH, Ic.U, Ic.V, Ic.UL, Ic.VL);
+
+			const FText HudText = Inv->GetHUDText();
+			if (Font != nullptr && !HudText.IsEmpty())
+			{
+				float XL, YL;
+				Canvas->TextSize(Font, HudText.ToString(), XL, YL, Scale, Scale);
+				Canvas->DrawColor = TextColor;
+				Canvas->DrawText(Font, HudText, X + IconW + Pad, Y + (IconH - YL) * 0.5f, Scale, Scale, RI);
+			}
+
+			Y += RowH;
+		}
+	}
+
+	// =============================================================================
+	// Live bottom-bar swap — apply the Stock-vs-NCPlus toggle THIS match, not next level
+	// =============================================================================
+	void RefreshBottomBarWidgets(AHUD* HUDBase, bool bWantStock)
+	{
+		AUTHUD* HUD = Cast<AUTHUD>(HUDBase);
+		if (HUD == nullptr || HUD->GetNetMode() == NM_DedicatedServer)
+		{
+			return;
+		}
+
+		// The two interchangeable bottom-bar families (weapon bar + ammo + health [+ powerups]).
+		// Same sets every NCPlus mode uses, so one generic swap covers ElimPlus/Wipeout/CTF/ShockDom/etc.
+		static const TCHAR* const StockPaths[] = {
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponBar.bpHW_WeaponBar_C"),
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_WeaponInfo.bpHW_WeaponInfo_C"),
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Paperdoll.bpHW_Paperdoll_C"),
+			// QuickStats pairs with Paperdoll/WeaponInfo (the profile flag picks ONE
+			// family at runtime) — the HUD ctor stock branches load it too (2026-07-01).
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_QuickStats.bpHW_QuickStats_C"),
+			TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpHW_Powerups.bpHW_Powerups_C"),
+		};
+		static const TCHAR* const NCPlusPaths[] = {
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Left"),
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_WeaponBar_Right"),
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AmmoCounter"),
+			TEXT("/Script/NetcodePlus.NCPlusHUDWidget_QuickStats"),
+		};
+
+		auto Resolve = [](const TCHAR* const* Paths, int32 Num) -> TArray<UClass*>
+		{
+			TArray<UClass*> Out;
+			for (int32 i = 0; i < Num; i++)
+			{
+				if (UClass* C = StaticLoadClass(UUTHUDWidget::StaticClass(), nullptr, Paths[i]))
+				{
+					Out.Add(C);
+				}
+			}
+			return Out;
+		};
+
+		const TArray<UClass*> WantClasses = bWantStock
+			? Resolve(StockPaths, ARRAY_COUNT(StockPaths)) : Resolve(NCPlusPaths, ARRAY_COUNT(NCPlusPaths));
+		const TArray<UClass*> DropClasses = bWantStock
+			? Resolve(NCPlusPaths, ARRAY_COUNT(NCPlusPaths)) : Resolve(StockPaths, ARRAY_COUNT(StockPaths));
+
+		// Drop the family we no longer want (stops it drawing; the widget GCs once unreferenced).
+		for (int32 i = HUD->HudWidgets.Num() - 1; i >= 0; i--)
+		{
+			UUTHUDWidget* W = HUD->HudWidgets[i];
+			if (W && DropClasses.Contains(W->GetClass()))
+			{
+				HUD->HudWidgets.RemoveAt(i);
+			}
+		}
+
+		// Add any wanted family member not already present (AddHudWidget instantiates + initializes).
+		for (UClass* C : WantClasses)
+		{
+			bool bPresent = false;
+			for (UUTHUDWidget* W : HUD->HudWidgets)
+			{
+				if (W && W->GetClass() == C) { bPresent = true; break; }
+			}
+			if (!bPresent)
+			{
+				HUD->AddHudWidget(C);
+			}
+		}
+	}
+
+	// =============================================================================
+	// Post-match screenshot (shared by ElimPlus / Wipeout / iCTF + Duel/Shaft via AWipeoutHUD)
+	// =============================================================================
+	void ServicePostMatchScreenshot(AUTHUD* HUD, float& StableFrames, bool& bTaken)
+	{
+		if (bTaken || HUD == nullptr)
+		{
+			return;
+		}
+		UWorld* World = HUD->GetWorld();
+		if (World == nullptr)
+		{
+			return;
+		}
+
+		// Capture the FINAL scoreboard, never the instant replay. The replay renders a SEPARATE killcam
+		// world (UUTGameViewportClient world override), so this HUD's DrawHUD — and therefore this poll —
+		// is SUSPENDED for the whole replay and only resumes on the post-replay scoreboard. So we count
+		// CONSECUTIVE qualifying DrawHUD frames rather than wall-clock: the counter naturally pauses during
+		// the replay (no calls) and resumes fresh afterward, so it can't be tricked by time elapsing while
+		// suspended (matters for non-deferred replay modes like Wipeout, where HasMatchEnded() is already
+		// true during the replay). The DemoNetDriver->IsPlaying() check is defensive only — on a live client
+		// the source world's recording driver always reports IsPlaying()==false; it covers a true full
+		// demo-playback session.
+		AUTGameState* GS = World->GetGameState<AUTGameState>();
+		const bool bReplaying = (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsPlaying());
+		if (GS == nullptr || !GS->HasMatchEnded() || bReplaying)
+		{
+			StableFrames = 0.f;
+			return;
+		}
+
+		// A small buffer of scoreboard frames before the (slow) high-res capture — enough for it to be up,
+		// frame-rate-robust because suspended-replay frames don't count toward it.
+		StableFrames += 1.f;
+		if (StableFrames < 20.f)
+		{
+			return;
+		}
+
+		bTaken = true;   // one-shot regardless of the opt-in, so we stop polling
+
+		bool bEnabled = true;   // client opt-in via F5 "High Res Screenshot PostMatch"
+		FString Val;
+		const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		if (GConfig->GetString(TEXT("NetcodePlus"), TEXT("HighResScreenshotPostMatch"), Val, ConfigPath))
+		{
+			bEnabled = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+		}
+		if (bEnabled)
+		{
+			if (APlayerController* PC = World->GetFirstPlayerController())
+			{
+				PC->ConsoleCommand(TEXT("HighResShot 2"));
+			}
+		}
+	}
+
+	// =============================================================================
 	// Server info name plate
 	// =============================================================================
 	void DrawServerInfo(AUTHUD* HUD, UCanvas* Canvas)
@@ -981,6 +1742,134 @@ namespace NCPlusHUDDrawCall
 		Canvas->DrawColor = FLinearColor(Tint.R, Tint.G, Tint.B, Tint.A * OpacityMul).ToFColor(true);
 		Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
 	}
+
+	// ── Replay-only fire-validation corner feed ────────────────────────
+	// Reads the server-written FireVal_*.csv and overlays each sampled shot during
+	// demo playback, synced to the replayed server clock. Pure client display.
+
+	struct FNCFireValReplayEvent { float Time; FString Name; int32 Dwell; int32 Frame; bool bHit; };
+
+	static TArray<FNCFireValReplayEvent> GFireValEvents;        // sorted ascending by Time
+	static FString                   GFireValLoadedPath;    // CSV currently cached ("" = none)
+	static TWeakObjectPtr<UWorld>    GFireValLoadedWorld;   // reload when the replay world changes
+
+	static TAutoConsoleVariable<FString> CVarFireValReplayCsv(
+		TEXT("ncp.FireValReplayCsv"), TEXT(""),
+		TEXT("Path to a FireVal_*.csv for the replay overlay. Empty = newest in Saved/Logs."));
+
+	static FString FindNewestFireValCsv()
+	{
+		const FString Dir = FPaths::GameSavedDir() / TEXT("Logs");
+		TArray<FString> Names;
+		IFileManager::Get().FindFiles(Names, *(Dir / TEXT("FireVal_*.csv")), true, false);
+		FString Best;
+		FDateTime BestTime = FDateTime::MinValue();
+		for (const FString& N : Names)
+		{
+			const FString Full = Dir / N;
+			const FDateTime T = IFileManager::Get().GetTimeStamp(*Full);
+			if (T >= BestTime) { BestTime = T; Best = Full; }
+		}
+		return Best;
+	}
+
+	static void LoadFireValCsv(const FString& Path)
+	{
+		GFireValEvents.Reset();
+		GFireValLoadedPath = Path;
+		if (Path.IsEmpty()) return;
+
+		TArray<FString> Lines;
+		FString Whole;
+		if (!FFileHelper::LoadFileToString(Whole, *Path)) return;  // 4.15 has LoadFileToString, not ...Array
+		Whole.ParseIntoArray(Lines, TEXT("\n"), /*CullEmpty=*/true);
+
+		for (int32 i = 0; i < Lines.Num(); ++i)
+		{
+			if (i == 0 && Lines[i].StartsWith(TEXT("server_time"))) continue; // header
+			TArray<FString> F;
+			Lines[i].ParseIntoArray(F, TEXT(","), false);
+			if (F.Num() < 5) continue;
+			FNCFireValReplayEvent E;
+			E.Time  = FCString::Atof(*F[0]);
+			E.Name  = F[1];
+			E.Dwell = FCString::Atoi(*F[2]);
+			E.Frame = FCString::Atoi(*F[3]);
+			E.bHit  = (FCString::Atoi(*F[4]) != 0);
+			GFireValEvents.Add(E);
+		}
+		GFireValEvents.Sort([](const FNCFireValReplayEvent& A, const FNCFireValReplayEvent& B) { return A.Time < B.Time; });
+	}
+
+	void DrawFireValReplayFeed(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (HUD == nullptr || Canvas == nullptr) return;
+
+		UWorld* World = HUD->GetWorld();
+		// Replay-only: identical guard the plugin uses elsewhere (UTPlusProj_ShockBall).
+		if (World == nullptr || World->DemoNetDriver == nullptr || !World->DemoNetDriver->IsPlaying()) return;
+
+		AGameStateBase* GS = World->GetGameState();
+		UFont* Font = HUD->SmallFont;
+		if (GS == nullptr || Font == nullptr) return;
+
+		const float NowServer = GS->GetServerWorldTimeSeconds();
+
+		// (Re)load once per replay, or when the cvar points somewhere new. Once
+		// we've attempted a load for this world we don't re-scan disk per frame —
+		// even if no CSV was found (drop one in + restart the replay, or set the
+		// cvar, to pick it up).
+		const FString CVarPath = CVarFireValReplayCsv.GetValueOnGameThread();
+		const bool bSameWorld  = (GFireValLoadedWorld.Get() == World);
+		FString Desired;
+		if (!CVarPath.IsEmpty())  Desired = CVarPath;
+		else                      Desired = bSameWorld ? GFireValLoadedPath : FindNewestFireValCsv();
+		if (!bSameWorld || Desired != GFireValLoadedPath)
+		{
+			LoadFireValCsv(Desired);
+			GFireValLoadedWorld = World;
+		}
+
+		const float RenderScale = Canvas->ClipY / 1080.f;
+		const float Scale = RenderScale * 0.9f;
+		const float X     = 24.f  * RenderScale;
+		float       Y     = 220.f * RenderScale;   // below the top-left clock region
+		const float LineH = 22.f  * RenderScale;
+		const float Window = 6.0f;                 // seconds of history shown
+		const int32 MaxLines = 8;
+
+		Canvas->DrawColor = FColor(170, 170, 170, 200);
+		Canvas->DrawText(Font, GFireValEvents.Num() > 0
+			? FString(TEXT("Fire (replay)"))
+			: FString(TEXT("Fire (replay): no FireVal_*.csv in Saved/Logs")),
+			X, Y, Scale, Scale);
+		Y += LineH * 1.2f;
+		if (GFireValEvents.Num() == 0) return;
+
+		int32 Drawn = 0;
+		for (int32 i = GFireValEvents.Num() - 1; i >= 0 && Drawn < MaxLines; --i)
+		{
+			const FNCFireValReplayEvent& E = GFireValEvents[i];
+			const float Age = NowServer - E.Time;
+			if (Age < -0.25f) continue;  // shot is ahead of the playback head — skip
+			if (Age > Window) break;     // sorted: everything earlier is older still
+
+			const float Alpha = FMath::Clamp(1.f - Age / Window, 0.15f, 1.f);
+			const bool bFirstFrame = (E.Frame > 0) ? (E.Dwell <= E.Frame) : (E.Dwell <= 16);
+			FLinearColor C = bFirstFrame ? FLinearColor(1.f, 0.25f, 0.2f, 1.f)
+				: (E.Dwell <= 50 ? FLinearColor(1.f, 0.7f, 0.15f, 1.f)
+				                 : FLinearColor(0.9f, 0.9f, 0.9f, 1.f));
+			C.A = Alpha;
+			Canvas->DrawColor = C.ToFColor(true);
+
+			const FString Line = FString::Printf(TEXT("%s  %dms  %s%s"),
+				*E.Name, E.Dwell, E.bHit ? TEXT("hit") : TEXT("miss"),
+				bFirstFrame ? TEXT("  <<first-frame") : TEXT(""));
+			Canvas->DrawText(Font, Line, X, Y, Scale, Scale);
+			Y += LineH;
+			++Drawn;
+		}
+	}
 }
 
 // =============================================================================
@@ -1008,7 +1897,7 @@ void FNCPlusHUDLayout::ReloadLive()
 		// including custom colors, weapon group assignments, and the
 		// "empty overrides after Reset All + Save" state.
 		GetLive() = LoadFromFile(NewPath);
-		GLiveLayoutDirty = true;
+		GLiveLayoutDirty = true; ++GLayoutRevision;
 		return;
 	}
 
@@ -1018,14 +1907,14 @@ void FNCPlusHUDLayout::ReloadLive()
 	if (FPaths::FileExists(LegacyPath))
 	{
 		GetLive() = LoadFromFile(LegacyPath);
-		GLiveLayoutDirty = true;
+		GLiveLayoutDirty = true; ++GLayoutRevision;
 		return;
 	}
 
 	// First-run seed. No layout file at either path - this is a fresh install
 	// (or a player who deleted their layout). Seed with the curated default
-	// (NCPlusHUDPresets::GetCurated()[0] = "Streamer Friendly") so new players
-	// get a polished baseline instead of stock UT defaults. On first Save,
+	// (NCPlusHUDPresets::GetCurated()[0] = "Stock") so new players get the
+	// familiar stock-style layout (default UT font). On first Save,
 	// the seeded layout is written to NewPath.
 	const TArray<FNCPlusHUDPreset>& Curated = NCPlusHUDPresets::GetCurated();
 	if (Curated.Num() > 0)
@@ -1040,24 +1929,34 @@ void FNCPlusHUDLayout::ReloadLive()
 	{
 		GetLive() = FNCPlusHUDLayout();
 	}
-	GLiveLayoutDirty = true;
+	GLiveLayoutDirty = true; ++GLayoutRevision;
 }
 
 bool FNCPlusHUDLayout::SaveLive()
 {
 	// Save doesn't change in-memory state → no need to mark dirty.
-	return GetLive().SaveToFile(GetDefaultElimPlusPath());
+	const bool bOk = GetLive().SaveToFile(GetDefaultElimPlusPath());
+	// The first successful save creates the layout file, which flips the
+	// "no saved layout → stock" fallback shared by BOTH WantsStockBottomBar and
+	// WantsStockTeamPanel ("anyone who saved a layout keeps the NCPlus widgets/
+	// portraits"). Drop both caches so they re-resolve next call — WantsStockTeamPanel
+	// is consulted live every frame, so a fresh-install user who customizes + saves
+	// flips to the portrait strip immediately instead of staying on the stock roster
+	// until restart (mirrors the SetStock* refresh).
+	if (bOk) { GStockBottomBarCache = -1; GStockTeamPanelCache = -1; }
+	return bOk;
 }
 
 void FNCPlusHUDLayout::ResetLive()
 {
 	GetLive() = FNCPlusHUDLayout();
-	GLiveLayoutDirty = true;
+	GLiveLayoutDirty = true; ++GLayoutRevision;
 }
 
-void FNCPlusHUDLayout::MarkLiveDirty() { GLiveLayoutDirty = true; }
+void FNCPlusHUDLayout::MarkLiveDirty() { GLiveLayoutDirty = true; ++GLayoutRevision; }
 bool FNCPlusHUDLayout::IsLiveDirty()   { return GLiveLayoutDirty; }
 void FNCPlusHUDLayout::ClearLiveDirty(){ GLiveLayoutDirty = false; }
+uint32 FNCPlusHUDLayout::GetLiveRevision() { return GLayoutRevision; }
 
 // =============================================================================
 // Apply pass
@@ -1160,6 +2059,14 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 		const FNCPlusHUDElement* Elem = Layout.Find(Alias);
 		if (!Elem)
 		{
+			// Killfeed: no override → hand the widget back to the engine's stomp
+			// (re-cache the pointer we null below) so Reset / removed-entry restores
+			// the stock scoreboard-aware positioning exactly.
+			if (Alias == TEXT("killfeed") && HUD->KillIconWidget == nullptr)
+			{
+				HUD->KillIconWidget = Cast<UUTHUDWidgetMessage_KillIconMessages>(W);
+			}
+
 			// No override → restore stock snapshot so Reset / removed-entry
 			// returns the widget to exactly where the engine put it on spawn.
 			if (FNCPlusWidgetDefaults* D = GWidgetDefaults.Find(Alias))
@@ -1167,6 +2074,9 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 				W->ScreenPosition = D->ScreenPosition;
 				W->Position       = D->Position;
 				W->Origin         = D->Origin;
+				// Engine PreDraw re-asserts Origin from RealOrigin every frame
+				// (UTHUDWidget.cpp:413) — writing Origin alone is a no-op.
+				W->RealOrigin     = D->Origin;
 				W->SetHidden(D->bHidden);
 
 				if (D->bIsWeaponBar)
@@ -1194,6 +2104,10 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 		const FVector2D AnchorCoords = FNCPlusHUDLayout::AnchorToScreenCoords(Elem->Anchor);
 		W->ScreenPosition = AnchorCoords;
 		W->Origin         = AnchorCoords;
+		// Engine PreDraw re-asserts Origin from RealOrigin every frame (UTHUDWidget.cpp:413)
+		// — without this the anchor pivot silently reverted to the ctor origin, which is
+		// why seeded CenterLeft/CenterRight weapon bars rendered ~270px above intent.
+		W->RealOrigin     = AnchorCoords;
 		W->Position       = Elem->Offset;
 		W->SetHidden(Elem->bHidden);
 
@@ -1208,6 +2122,21 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 			SetVec2Prop(W, TEXT("HorizontalPosition"),       Elem->Offset);
 			SetVec2Prop(W, TEXT("VerticalScreenPosition"),   AnchorCoords);
 			SetVec2Prop(W, TEXT("VerticalPosition"),         Elem->Offset);
+		}
+		// Killfeed special-case: stock AUTHUD::DrawHUD re-stomps
+		// KillIconWidget->ScreenPosition EVERY frame (UTHUD.cpp:842-845, to (0,0) or
+		// the scoreboard spot) right before the widget render loop — and our apply
+		// runs BEFORE Super::DrawHUD, so the anchor write above never survived to
+		// PreDraw. That's why nchud moves "didn't take until map change" (only the
+		// pixel Offset ever applied; anchors never did). Null the HUD's cached
+		// pointer while an override exists: the stomp branch is skipped, our writes
+		// stick, and AddHudWidget only re-caches on widget creation so the null
+		// holds for the match. Restored in the no-override branch above. Trade-off
+		// (accepted): the stock "drop the feed below the scoreboard" reposition is
+		// disabled while the user has a custom placement.
+		if (Alias == TEXT("killfeed"))
+		{
+			HUD->KillIconWidget = nullptr;
 		}
 		// Scale reserved for Phase 3.
 

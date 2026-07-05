@@ -41,6 +41,11 @@ struct FElimPlusStatsEntry
 	 *  fired -> scoreboard prints "-" instead of a misleading 0%. */
 	UPROPERTY()
 	int32 LinkGunAccuracyTimes100 = -1;
+
+	/** Global leaderboard rank (1-based) for this player's frozen ELO. 0 = unranked
+	 *  / unknown / bot -> the scoreboard then shows no "(rank)". Set at match start + end. */
+	UPROPERTY()
+	int32 GlobalRank = 0;
 };
 
 UCLASS(NotPlaceable)
@@ -49,9 +54,15 @@ class NETCODEPLUS_API AElimPlusStatsReplicator : public AInfo
 	GENERATED_UCLASS_BODY()
 
 public:
-	/** Replicated per-player stats array. Server writes, clients read. */
-	UPROPERTY(Replicated, Transient)
+	/** Replicated per-player stats array. Server writes, clients read. RepNotify rebuilds
+	 *  the O(1) PlayerId→index map the HUD reads (was a linear case-insensitive FString
+	 *  scan per pip, twice per pip, every frame). */
+	UPROPERTY(ReplicatedUsing=OnRep_StatsEntries, Transient)
 	TArray<FElimPlusStatsEntry> StatsEntries;
+
+	/** Client RepNotify: refresh the PlayerId→index lookup when StatsEntries replicates. */
+	UFUNCTION()
+	void OnRep_StatsEntries();
 
 	/** Mirror of AUTTeamGameMode::bBalanceTeams (parsed from the
 	 *  ?BalanceTeams=true|false URL flag in InitGame). Replicated so the
@@ -87,6 +98,10 @@ public:
 	 *  HandleMatchHasEnded (NOT per round — display stays frozen until then). */
 	void SetPlayerEloAndDelta(const FString& UniqueIdStr, int32 NewElo, int32 DeltaThisMatch);
 
+	/** Server-only: gamemode / rating system pushes a player's global leaderboard
+	 *  rank (1-based; 0 = unranked) at match start + end, alongside the ELO. */
+	void SetPlayerGlobalRank(const FString& UniqueIdStr, int32 Rank);
+
 	/** Server-only: gamemode pushes its bBalanceTeams flag here so it can
 	 *  replicate to client HUDs. */
 	void SetBalanceTeamsActive(bool bActive);
@@ -95,11 +110,19 @@ public:
 	bool IsBalanceTeamsActive() const { return bBalanceTeamsActive; }
 
 private:
+	/** PlayerId → index into StatsEntries. Rebuilt server-side at the end of
+	 *  UpdateFromPlayerStates and client-side in OnRep_StatsEntries, so FindEntry is
+	 *  an O(1) hash lookup instead of an O(n) linear scan per call. Not replicated —
+	 *  derived from StatsEntries on each side. Case-insensitive, matching FString==. */
+	TMap<FString, int32> EntryIndexByPlayerId;
+	void RebuildEntryIndex();
+
 	/** Server-only side caches populated by setters. Not replicated; values
 	 *  land in StatsEntries each Tick via UpdateFromPlayerStates. */
 	TMap<FString, float> PPRCurrentCache;
 	TMap<FString, int32> EloCache;
 	TMap<FString, int32> EloDeltaCache;
+	TMap<FString, int32> GlobalRankCache;
 
 private:
 	float UpdateInterval = 1.0f;

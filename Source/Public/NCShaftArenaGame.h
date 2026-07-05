@@ -34,11 +34,24 @@ class NETCODEPLUS_API ANCShaftArenaGame : public AUTTeamDMGameMode
 	GENERATED_UCLASS_BODY()
 
 public:
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
+	/** Defer a host/rcon unpause behind a short server-only resume countdown
+	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	virtual bool ClearPause() override;
+
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void BeginPlay() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleMatchHasEnded() override;
+
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat via OverrideHatClass so the
+	// community master's withheld cosmetic entitlements can't strip it. Server-side, never kicks. See impl
+	// (mirrors ANCPlusCTFGameMode / AUWipeoutGame).
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
 
 	virtual void ScoreDamage_Implementation(int32 DamageAmount,
 		AUTPlayerState* Victim, AUTPlayerState* Attacker) override;

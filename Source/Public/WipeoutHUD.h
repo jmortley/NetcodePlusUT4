@@ -55,6 +55,22 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void NotifyMatchStateChange() override;
 
 private:
+	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
-	bool bNCPScreenshotEnabled = true;
+	float PostMatchScreenshotStable = -1.f;
+
+	/** Per-PlayerState HP readout cache for the portrait strip: last-rendered FText +
+	 *  measured extents keyed on (HP, armor, font), so an unchanged value skips the
+	 *  Printf + StrLen + FText::FromString each frame. Keyed weakly; self-expires with
+	 *  the PS. (Fitted names cached separately by NCPlusHUDDrawCall::ResolveFittedName.) */
+	struct FWipeoutPipCache
+	{
+		const UFont* HpFont = nullptr;
+		int32 HpKeyHP = MIN_int32;
+		int32 HpKeyAR = MIN_int32;
+		FText  HpText;
+		float  HpWidth  = 0.f;
+		float  HpHeight = 0.f;
+	};
+	TMap<TWeakObjectPtr<AUTPlayerState>, FWipeoutPipCache> PipCacheByPS;
 };

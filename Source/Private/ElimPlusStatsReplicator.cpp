@@ -1,6 +1,7 @@
 // ElimPlusStatsReplicator.cpp
 
 #include "ElimPlusStatsReplicator.h"
+#include "ElimPlusGame.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
@@ -84,11 +85,26 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 			Entry.PPRCurrent = *PPRPtr;
 		}
 
-		// DamageDone is server-side on AUTPlayerState but not replicated — pull via reflection
-		UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
-		if (DmgProp)
+		// DMG column shows OVERKILL-INCLUSIVE match damage (each hit at full value, incl.
+		// the portion beyond victim HP) so the "100 dmg = 1 pt" PPR rule stays exact and
+		// the columns line up. Source is the gamemode's per-player accumulator (server-
+		// only; this runs on Authority). Engine AUTPlayerState::DamageDone (overkill-
+		// stripped, sent to StatSQL) is the fallback for listen-server/standalone where
+		// the gamemode cast is unavailable.
+		bool bGotOverkillDamage = false;
+		if (AElimPlusGame* EG = GetWorld()->GetAuthGameMode<AElimPlusGame>())
 		{
-			Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
+			Entry.DamageDone = FMath::RoundToInt(EG->GetMatchDamageForPlayer(UTPS));
+			bGotOverkillDamage = true;
+		}
+		if (!bGotOverkillDamage)
+		{
+			// Fallback: engine DamageDone via reflection (server-side, not replicated).
+			UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
+			if (DmgProp)
+			{
+				Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
+			}
 		}
 
 		// ELO: source of truth is FElimPlusRatingSystem on the gamemode. It pushes
@@ -105,15 +121,24 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		{
 			Entry.EloDeltaThisMatch = *DeltaPtr;
 		}
+		// Global leaderboard rank — pushed by the gamemode/rating system at match
+		// start + end (frozen like ELO). 0 stays for bots / unranked players.
+		if (const int32* RankPtr = GlobalRankCache.Find(Entry.PlayerId))
+		{
+			Entry.GlobalRank = *RankPtr;
+		}
 
 		// PPR + EloDeltaThisMatch are populated by the gamemode (next phase).
 		// For now they stay at defaults — the LG accuracy is computed below.
 
 		// "LG_Acc" is hitscan accuracy. In instagib it's the instagib rifle;
-		// otherwise it's the Sniper / Lightning Gun — the LG is a Blueprint
-		// reskin of AUTPlusSniper, so both skins record to the SAME
-		// NAME_SniperHits/NAME_SniperShots stats and one read covers either.
-		// Auto-detect instagib via NAME_InstagibShots.
+		// otherwise it's the Sniper OR the Lightning Gun. The LG is a Blueprint reskin of
+		// AUTPlusSniper but OVERRIDES the stat names in its Class Defaults to
+		// LightningRifleHits/LightningRifleShots (NOT SniperHits/Shots) — so we must read BOTH
+		// weapons and sum them. A player runs one or the other, so the unused weapon's stats are
+		// 0 and the sum is the right per-shot ratio. Auto-detect instagib via NAME_InstagibShots.
+		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
+		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
 		float HitscanShots = 0.f;
 		float HitscanHits  = 0.f;
 		const float InstagibShots = UTPS->GetStatsValue(NAME_InstagibShots);
@@ -124,15 +149,9 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		}
 		else
 		{
-			// Non-instagib "LG" = the Lightning Gun, a Blueprint reskin of our
-			// AUTPlusSniper (players run the Sniper OR the LG skin — both are
-			// AUTPlusSniper). It records single-shot hitscan accuracy to
-			// NAME_SniperHits / NAME_SniperShots via ModifyStatsValue
-			// (UTPlusSniper.cpp), so this is a clean per-shot hit ratio.
-			// BUG FIX: was reading the Link Gun beam (NAME_LinkHits/LinkBeamShots),
-			// which stays ~0 in ElimPlus — that's why the column was stuck at 0%.
-			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits);
-			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots);
+			// Sniper + Lightning Gun (the LG writes LightningRifle* stats, the Sniper writes Sniper*).
+			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NAME_LightningRifleHits);
+			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NAME_LightningRifleShots);
 		}
 		if (HitscanShots > 0.f)
 		{
@@ -148,15 +167,37 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 
 		StatsEntries.Add(Entry);
 	}
+
+	// Server-side: keep the O(1) lookup in sync (clients refresh via OnRep_StatsEntries).
+	RebuildEntryIndex();
+}
+
+void AElimPlusStatsReplicator::RebuildEntryIndex()
+{
+	EntryIndexByPlayerId.Reset();
+	for (int32 i = 0; i < StatsEntries.Num(); ++i)
+	{
+		// Keep first-match semantics (matches the old linear scan) if two entries ever
+		// share a PlayerId (e.g. two bots with the same name → same "BOT:<name>" key).
+		if (!EntryIndexByPlayerId.Contains(StatsEntries[i].PlayerId))
+		{
+			EntryIndexByPlayerId.Add(StatsEntries[i].PlayerId, i);
+		}
+	}
+}
+
+void AElimPlusStatsReplicator::OnRep_StatsEntries()
+{
+	RebuildEntryIndex();
 }
 
 const FElimPlusStatsEntry* AElimPlusStatsReplicator::FindEntry(const FString& UniqueIdStr) const
 {
-	for (const FElimPlusStatsEntry& E : StatsEntries)
+	if (const int32* Idx = EntryIndexByPlayerId.Find(UniqueIdStr))
 	{
-		if (E.PlayerId == UniqueIdStr)
+		if (StatsEntries.IsValidIndex(*Idx))
 		{
-			return &E;
+			return &StatsEntries[*Idx];
 		}
 	}
 	return nullptr;
@@ -203,4 +244,10 @@ void AElimPlusStatsReplicator::SetPlayerEloAndDelta(const FString& UniqueIdStr, 
 	if (Role != ROLE_Authority) return;
 	EloCache.FindOrAdd(UniqueIdStr) = NewElo;
 	EloDeltaCache.FindOrAdd(UniqueIdStr) = DeltaThisMatch;
+}
+
+void AElimPlusStatsReplicator::SetPlayerGlobalRank(const FString& UniqueIdStr, int32 Rank)
+{
+	if (Role != ROLE_Authority) return;
+	GlobalRankCache.FindOrAdd(UniqueIdStr) = Rank;
 }

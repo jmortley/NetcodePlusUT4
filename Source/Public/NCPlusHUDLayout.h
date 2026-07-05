@@ -110,6 +110,7 @@ namespace NCPlusHUDDragMode
 {
 	NETCODEPLUS_API bool IsActive();
 	NETCODEPLUS_API void SetActive(bool bActive);
+	NETCODEPLUS_API void Reset();   // hard-clear the refcount (level-transition backstop)
 }
 
 /**
@@ -182,6 +183,38 @@ struct FNCPlusHUDLayout
 	 *  NCPlusCTF, ShockDom — so users configure once and it applies everywhere.) */
 	static FString GetDefaultLayoutPath();
 
+	/** Which bottom-bar widget family this client loads at HUD construction:
+	 *  true = stock weapon bar / ammo / health-armor (familiar, self-reads the
+	 *  player's HUD profile); false = the NCPlus custom widgets. [NetcodePlus]
+	 *  StockBottomBar in Mod.ini overrides; default = fresh install (no saved
+	 *  HUDLayout.json) so new players get the stock-like bar and customized users
+	 *  keep NCPlus. Read once per HUD spawn — a change applies on the next map. */
+	static bool WantsStockBottomBar();
+
+	/** Persist the bottom-bar choice ([NetcodePlus] StockBottomBar in Mod.ini). Call ONLY from an
+	 *  explicit user toggle — never unconditionally — so a fresh install (no saved HUDLayout.json)
+	 *  is not silently locked to stock (see WantsStockBottomBar). Owned by the HUD editor. */
+	static void SetStockBottomBar(bool bStock);
+
+	/** Stock top-left team roster (slanted name + HP/armor plates) vs the NCPlus
+	 *  portrait strip. [NetcodePlus] StockTeamPanel in Mod.ini overrides; default =
+	 *  fresh install (no saved HUDLayout.json) so new players get the stock-style
+	 *  roster and customized users keep the portraits. Cached after first resolve
+	 *  (called per-frame from DrawHUD); SetStockTeamPanel refreshes the cache. */
+	static bool WantsStockTeamPanel();
+
+	/** Persist + refresh-cache the team-panel choice ([NetcodePlus] StockTeamPanel).
+	 *  Call ONLY from an explicit user toggle (see WantsStockTeamPanel). */
+	static void SetStockTeamPanel(bool bStock);
+
+	/** Background opacity for the NCPlus scoreboards (ElimPlus/Wipeout), 0.05..1.0.
+	 *  [NetcodePlus] ScoreboardOpacity in Mod.ini; default 0.3 (the prior hard-coded
+	 *  value). Cached; SetScoreboardOpacity refreshes it. */
+	static float GetScoreboardOpacity();
+
+	/** Persist + refresh-cache the scoreboard opacity ([NetcodePlus] ScoreboardOpacity), clamped. */
+	static void SetScoreboardOpacity(float Opacity);
+
 	/** Deprecated alias for GetDefaultLayoutPath; kept temporarily for compat. */
 	static FString GetDefaultElimPlusPath() { return GetDefaultLayoutPath(); }
 
@@ -222,6 +255,11 @@ struct FNCPlusHUDLayout
 
 	/** Cleared automatically by ApplyLayoutToWidgets after a successful apply. */
 	static void ClearLiveDirty();
+
+	/** Monotonic revision counter, bumped on every live-layout mutation (reload,
+	 *  reset, and each editor edit via MarkLiveDirty). HUD-side per-player caches
+	 *  (e.g. fitted names) key on this so a layout edit invalidates them next frame. */
+	static uint32 GetLiveRevision();
 };
 
 /**
@@ -301,11 +339,71 @@ namespace NCPlusHUDDrawCall
 	 *  reached from a free function — the HUD subclass has it in scope already). */
 	NETCODEPLUS_API void DrawDamageFlash(class AUTHUD* HUD, class UCanvas* Canvas);
 
+	/** Held-pickup status — amp/berserk/siphon REMAINING TIME + jump-boot charges —
+	 *  drawn in C++ for NCPlus modes. Replaces the stock bpHW_Powerups widget, which
+	 *  only draws when the player's "Show Powerups on MiniHUD" profile option is off
+	 *  and which NCPlus's QuickStats replacement otherwise suppresses (so MiniHUD
+	 *  users lost the display). Held-pickup STATUS only — your own powerups/boots —
+	 *  NOT map item respawn timers. No-op in stock-bottom-bar mode (the vanilla
+	 *  widgets handle it) or when the `powerups` alias is hidden. Honors the
+	 *  `powerups` alias position/anchor/offset, scale, and opacity. Call from each
+	 *  NCPlus HUD's DrawHUD (Canvas passed by caller — see DrawDamageFlash note). */
+	NETCODEPLUS_API void DrawHeldPowerups(class AUTHUD* HUD, class UCanvas* Canvas);
+
+	/** Swap the bottom-bar widget family (stock vs NCPlus) on a LIVE HUD so the menu's
+	 *  Stock-bottom-bar toggle applies THIS match instead of next level (the family is
+	 *  otherwise fixed at HUD construction). bWantStock = the menu's current choice, passed
+	 *  in to avoid a GConfig re-read race against the just-written value. Removes the family
+	 *  no longer wanted and adds the one now wanted; no-op on a dedicated server / non-UT HUD. */
+	NETCODEPLUS_API void RefreshBottomBarWidgets(class AHUD* HUD, bool bWantStock);
+
+	/** Draw one outlined text string as a single batched FCanvasTextItem (4 diagonal
+	 *  outline passes + 1 fill, ONE DrawItem — no per-pass ICU word-wrap / FText churn).
+	 *  Drop-in for the hand-rolled 4-offset-DrawText stacks in the HUD paths. Opacity
+	 *  scales both fill and outline alpha. Shadow is intentionally omitted — the outline
+	 *  replaces it (the old stacks paid a shadow double-raster on every one of 5 passes). */
+	NETCODEPLUS_API void DrawOutlinedText(class UCanvas* Canvas, const class UFont* Font,
+		const FText& Text, float X, float Y, float Scale,
+		FLinearColor Fill, FLinearColor Outline = FLinearColor::Black, float Opacity = 1.f);
+
+	/** Fit a player name into MaxWidthPx at draw Scale, caching the fitted result per
+	 *  PlayerState so the per-frame chop-one-char StrLen loop runs only when an input
+	 *  (name / font / width bucket / layout revision) actually changes. Fills OutText
+	 *  (ready-to-draw FText) and OutWidth/OutHeight (UNSCALED StrLen extents — multiply
+	 *  by Scale for pixels). The cache clears wholesale on world change (level
+	 *  transition) and on a layout-revision bump. */
+	NETCODEPLUS_API void ResolveFittedName(class UCanvas* Canvas, class APlayerState* PS,
+		class UFont* Font, const FString& Src, float MaxWidthPx, float Scale,
+		FText& OutText, float& OutWidth, float& OutHeight);
+
+	/** Stock-style top-left team roster: red row then blue row of slanted, team-
+	 *  colored plates (name over "+HP armor" for teammates, name only for enemies).
+	 *  Dead players are skipped so the row reflows — plate count = alive count. Drawn
+	 *  by ElimPlus/Wipeout DrawHUD when FNCPlusHUDLayout::WantsStockTeamPanel(), in
+	 *  place of the portrait strip. Honors the `team_panel` alias (pos/scale/opacity/
+	 *  hide). Canvas passed by caller (see DrawDamageFlash note). */
+	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
+
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).
 	 *  Honors font / font_scale / color_text / opacity. Canvas passed by caller
 	 *  (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD, class UCanvas* Canvas);
+
+	/** Replay-only corner feed of fire-validation samples. No-op unless a demo is
+	 *  playing back. Reads the server-written FireVal_*.csv (newest in Saved/Logs, or
+	 *  the path in the `ncp.FireValReplayCsv` cvar) and draws each shot synced to the
+	 *  replayed server clock (GameState->GetServerWorldTimeSeconds). Pure client
+	 *  display — no replication, never runs in live play. */
+	NETCODEPLUS_API void DrawFireValReplayFeed(class AUTHUD* HUD, class UCanvas* Canvas);
+
+	/** Auto post-match high-res screenshot, shared by ElimPlus/Wipeout/iCTF (and Duel/Shaft via AWipeoutHUD).
+	 *  Fires ONCE, on the final scoreboard rather than the instant replay: it counts consecutive qualifying
+	 *  DrawHUD frames (match ended, not in a replay), which naturally pauses while the HUD is suspended during
+	 *  the replay's separate killcam world and resumes fresh afterward. Client opt-in via [NetcodePlus]
+	 *  HighResScreenshotPostMatch. The caller stores StableFrames + bTaken (init false) as HUD members and
+	 *  calls this every frame from DrawHUD. */
+	NETCODEPLUS_API void ServicePostMatchScreenshot(class AUTHUD* HUD, float& StableFrames, bool& bTaken);
 }
 
 /**

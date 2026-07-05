@@ -64,6 +64,15 @@ private:
 	void PostStateChangeWithPlayers(const FString& State);
 	void PostFlagCapture(AUTPlayerState* Scorer);
 	void PostMatchEnded();
+	/** /reward POST — unified endpoint for kill-streak highlights.
+	 *  Type      = "monster" | "spree".
+	 *  Level     = raw engine value (MultiKillLevel for monster, Spree/5 for spree).
+	 *  Multiplier = display multiplier for the bot. Monster: 1 = first Monster
+	 *               (5 frags), 2 = next kill in window (6 frags), etc. — bot
+	 *               edits the existing embed instead of posting a new one when
+	 *               Multiplier > 1. Spree: always 1 (each spree milestone is a
+	 *               distinct event). */
+	void PostReward(AUTPlayerState* Scorer, const FString& Type, int32 Level, int32 Multiplier);
 
 	// ── Player Readiness Polling ──────────────────────────────────────
 	FTimerHandle ReadyCheckTimer;
@@ -81,6 +90,13 @@ private:
 	UFUNCTION()
 	void OnFlagHolderChanged(AUTCarriedObject* Flag);
 
+	// ── Kill-streak highlights ───────────────────────────────────────
+	/** Called from ScoreKill_Implementation after Super:: has updated the
+	 *  killer's MultiKillLevel / Spree. Posts /reward for Monster Kill (exact
+	 *  threshold) and for Spree levels 3..5 (Dominating, Unstoppable, Godlike). */
+	void ScoreKill_PostHighlights(AUTPlayerState* KillerPS);
+
+private:
 	// ── Helpers ────────────────────────────────────────────────────────
 	FString BuildPlayerListJson() const;
 	FString BuildTeamScoresJson() const;

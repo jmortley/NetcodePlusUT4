@@ -18,6 +18,7 @@
 #include "NCPlusHUDWidget_Accuracy.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
+#include "NCShaftArenaHUD.h"          // shaft-only default-on gate in ShouldDraw
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
@@ -95,12 +96,19 @@ bool UNCPlusHUDWidget_Accuracy::ShouldDraw_Implementation(bool bShowScores)
 	AUTPlayerState* PS = UTHUDOwner->UTPlayerOwner->UTPlayerState;
 	if (!IsValid(PS) || PS->bOnlySpectator) return false;
 
-	// Opt-in: the widget renders only when the user has placed it via nchud
-	// (or a mode that wants it on by default has seeded a layout entry — see
-	// NCShaftArenaHUD::BeginPlay). bHidden inside the entry honors the eye
-	// toggle in the editor.
+	// Opt-in: the widget renders only when the user has placed it via nchud —
+	// EXCEPT shaft arena, where accuracy is on by default. That default is a MODE
+	// CHECK here (2026-07-01), not a layout-entry seed: the old NCShaftArenaHUD::
+	// BeginPlay seed wrote into the shared live map, and the nchud editor/drag
+	// overlay auto-saves the whole map on close — playing shaft once + touching the
+	// editor baked a visible accuracy entry into HUDLayout.json for EVERY mode.
+	// With no entry, Draw falls back to sane defaults (scale 1, Large font, ctor
+	// bottom-right position). bHidden in an entry honors the editor's eye toggle.
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("accuracy"));
-	if (!E) return false;
+	if (!E)
+	{
+		return Cast<ANCShaftArenaHUD>(UTHUDOwner) != nullptr;
+	}
 	if (E->bHidden) return false;
 	return true;
 }
@@ -207,6 +215,12 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 	SmallFnt = NCPlusHUDFonts::Resolve(TEXT("accuracy"), UTHUDOwner, SmallFnt);
 	if (!BigFont || !SmallFnt) return;
 
+	// Honor the editor's Scale + Opacity rows. Layout Scale multiplies the text
+	// scale; opacity routes through DrawText's DrawOpacity arg. Both default to 1.0.
+	const FNCPlusHUDElement* AccElem = FNCPlusHUDLayout::GetLive().Find(TEXT("accuracy"));
+	const float ElemScale = AccElem ? AccElem->Scale : 1.f;
+	const float Op = AccElem ? AccElem->GetExtraFloat(TEXT("opacity"), 1.f) : 1.f;
+
 	// Optional small label above the number — only when a specific weapon is
 	// pinned, so the user knows what they're looking at. Current-weapon mode
 	// shows just the number since the held weapon is obvious from the rest of
@@ -215,21 +229,21 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 	if (!SmallLabel.IsEmpty())
 	{
 		DrawText(FText::FromString(SmallLabel), Size.X * 0.5f, 0.f,
-			SmallFnt, RenderScale, 1.0f, FLinearColor(1.f, 1.f, 1.f, 0.75f),
+			SmallFnt, RenderScale * ElemScale, Op, FLinearColor(1.f, 1.f, 1.f, 0.75f),
 			ETextHorzPos::Center, ETextVertPos::Top);
-		NumberY = 14.f;
+		NumberY = 14.f * ElemScale;
 	}
 
 	const FString PctStr = (Shots > 0)
 		? FString::Printf(TEXT("%d%%"), FMath::RoundToInt(Pct))
 		: FString(TEXT("--"));
 	DrawText(FText::FromString(PctStr), Size.X * 0.5f, NumberY,
-		BigFont, RenderScale, 1.0f, PctColor,
+		BigFont, RenderScale * ElemScale, Op, PctColor,
 		ETextHorzPos::Center, ETextVertPos::Top);
 
 	const FString SubStr = FString::Printf(TEXT("%d / %d"), Hits, Shots);
-	DrawText(FText::FromString(SubStr), Size.X * 0.5f, NumberY + 48.f,
-		SmallFnt, RenderScale, 1.0f, FLinearColor(1.f, 1.f, 1.f, 0.85f),
+	DrawText(FText::FromString(SubStr), Size.X * 0.5f, NumberY + 48.f * ElemScale,
+		SmallFnt, RenderScale * ElemScale, Op, FLinearColor(1.f, 1.f, 1.f, 0.85f),
 		ETextHorzPos::Center, ETextVertPos::Top);
 }
 

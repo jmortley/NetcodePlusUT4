@@ -83,6 +83,11 @@ class NETCODEPLUS_API AElimPlusGame : public AUTTeamGameMode {
 public:
 	AElimPlusGame(const FObjectInitializer& ObjectInitializer);
 
+	// Unlock entitlement-gated cosmetics (boxhat etc.): force the chosen hat via OverrideHatClass so the
+	// community master's withheld cosmetic entitlements can't strip it. Server-side, never kicks. See impl
+	// (mirrors ANCPlusCTFGameMode / AUWipeoutGame).
+	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
+
 	// === Configurable Timings ===
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Timing")
 	float AwardDisplayTime;
@@ -293,6 +298,7 @@ public:
 	virtual void InitGameState() override;
 	//virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void HandleMatchHasStarted() override;
+	virtual void HandlePlayerIntro() override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual void DefaultTimer() override;
@@ -306,6 +312,14 @@ public:
 	virtual void CallMatchStateChangeNotify() override;
 	virtual bool ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured, AController* InstigatedBy, const FHitResult& HitInfo, AActor* DamageCauser, TSubclassOf<UDamageType> DamageType) override;
 
+	/** Stock pause permissions + Mod.ini-gated match-host pause ([NetcodePlus]
+	 *  bAllowHostPause — see NCPlusHostPause.h). */
+	virtual bool AllowPausing(APlayerController* PC) override;
+
+	/** Defer a host/rcon unpause behind a short server-only resume countdown
+	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	virtual bool ClearPause() override;
+
 	/** Override core UT score check to allow win by 2 */
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer) override;
 
@@ -316,6 +330,13 @@ public:
 	virtual void    RestartPlayer(AController* NewPlayer) override;
 	virtual void    ScoreKill_Implementation(AController* Killer, AController* Other, APawn* KilledPawn, TSubclassOf<UDamageType> DamageType) override;
 	virtual void	ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerState* Victim, AUTPlayerState* Attacker) override;
+	/** ElimPlus arena rule: players NEVER drop their loadout — not on death, not at
+	 *  round reset. Override the stock weapon/Enforcer/powerup toss to destroy the
+	 *  pawn's inventory in place (AUTCharacter::DiscardAllInventory) so no
+	 *  AUTDroppedPickup ever spawns. Candy orbs (BP PreventDeath spawns them as
+	 *  separate AUTPickupHealth world actors) are NOT inventory, so unaffected. */
+	virtual void DiscardInventory(APawn* Other, AController* Killer) override;
+
 	virtual APawn* SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot) override;
 
 	/** Glicko-aware team picker. Refines tie-breaks among smallest-size teams using
@@ -329,6 +350,13 @@ public:
 	 *  match at the WaitingToStart -> PlayerIntro transition so players can
 	 *  watch the shuffle on the auto-shown scoreboard during the countdown. */
 	void RebalanceTeamsForMatchStart();
+
+	/** 6-0 blowout shuffle (publics): re-split BOTH teams by CURRENT-match PPR
+	 *  — who is performing THIS match — rather than the lifetime Glicko that
+	 *  just produced the 6-0. Armed by EndRoundForTeam, consumed at the next
+	 *  StartNextRound before anything spawns (silent moves, same rationale as
+	 *  the pre-match rebalance). Scores are NOT reset. */
+	void MidGameShufflePPR();
 
 	// -------- Victory Audio (Blueprint Editable) --------
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|Victory Audio")
@@ -369,6 +397,11 @@ public:
 
 	// -------- Anti-Camp Configuration --------
 
+	// Anti-camp. These are the BP/CDO defaults; each is overridable per-server at
+	// runtime via Mod.ini [NetcodePlus] (read in InitGame): ElimEnableAntiCamp /
+	// ElimCampThreshold / ElimCampCheckInterval / ElimCampWarnCooldown. A key left
+	// out of Mod.ini keeps the default below. Detection is C++ (CheckForCampers);
+	// the response is Blueprint (BP_OnCamperDetected / BP_OnCamperClear).
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Arena|AntiCamp")
 	bool bEnableAntiCamp = true;
 
@@ -446,6 +479,35 @@ protected:
 	 *  Set true the first time the rebalance runs. */
 	UPROPERTY(Transient)
 	bool bDidPreMatchRebalance = false;
+
+	/** True when this match was launched as a bot PUG (?PugId on the URL). Set in
+	 *  InitGame. Uneven-team health scaling is gated to NON-PUG games only. */
+	bool bIsPugMatch = false;
+
+	/** 6-0 blowout mid-game shuffle (non-PUG, requires ?BalanceTeams): default
+	 *  ON; Mod.ini [NetcodePlus] ElimMidGameShuffle=false disables. See
+	 *  MidGameShufflePPR. */
+	bool bElimMidGameShuffle = true;
+	/** Armed by EndRoundForTeam when the score reaches exactly 6-0; consumed at
+	 *  the next StartNextRound. Fires at most once per match (bDidMidGameShuffle). */
+	UPROPERTY(Transient)
+	bool bPendingMidGameShuffle = false;
+	UPROPERTY(Transient)
+	bool bDidMidGameShuffle = false;
+
+	/** Uneven-team health scaling (NON-PUG only): when the teams differ in size,
+	 *  the short-handed team spawns tougher and the larger team softer, scaled
+	 *  PROPORTIONALLY to the head-count gap — ElimUnevenHealthPct% per missing
+	 *  player (4v5 = ±5%, 4v6 = ±10%, ...), capped at ±50%. Read from Mod.ini
+	 *  [NetcodePlus] in InitGame (ElimUnevenHealthScaling / ElimUnevenHealthPct).
+	 *  HP is read from the pawn's BP-set HealthMax and scaled — never hardcoded;
+	 *  armor is left untouched. */
+	bool  bElimUnevenHealthScaling = true;
+	float ElimUnevenHealthPct      = 5.f;
+
+	/** Scale a freshly-spawned pawn's HealthMax+Health for uneven teams (non-PUG).
+	 *  No-op on even teams / PUGs / when disabled. Server-only. */
+	void ApplyUnevenTeamHealthScaling(class AUTCharacter* Char);
 
 	// -------- Round flow --------
 	UPROPERTY()
@@ -707,6 +769,19 @@ protected:
 	 *  RoundKills + RoundDamage * 0.01. */
 	TMap<TWeakObjectPtr<AUTPlayerState>, float> PerPlayerMatchPPRSum;
 	TMap<TWeakObjectPtr<AUTPlayerState>, int32> PerPlayerMatchPPRRoundCount;
+
+	/** Per-player OVERKILL-INCLUSIVE match-cumulative damage (each hit counted at full
+	 *  value incl. the portion beyond victim HP). Drives the scoreboard DMG column via
+	 *  AElimPlusStatsReplicator — NOT the engine AUTPlayerState::DamageDone, which stays
+	 *  overkill-stripped for StatSQL. Accumulated in ScoreDamage; cleared on InitGame;
+	 *  entry removed on Logout. */
+	TMap<TWeakObjectPtr<AUTPlayerState>, float> PerPlayerMatchDamage;
+
+public:
+	/** Server-only: overkill-inclusive match damage for a player (0 if none).
+	 *  Read by AElimPlusStatsReplicator to populate the scoreboard DMG column. */
+	float GetMatchDamageForPlayer(AUTPlayerState* PS) const;
+protected:
 
 	void CheckRoundAchievements(int32 WinnerTeamIndex, FName Reason);
 	void CheckForACE(int32 WinnerTeamIndex);

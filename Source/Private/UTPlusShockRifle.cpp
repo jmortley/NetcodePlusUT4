@@ -34,8 +34,13 @@ AUTPlusShockRifle::AUTPlusShockRifle(const FObjectInitializer& ObjectInitializer
 	AltDeathStatsName = NAME_ShockCoreDeaths;
 	HitsStatsName = NAME_ShockRifleHits;
 	ShotsStatsName = NAME_ShockRifleShots;
-	bCheckHeadSphere = true;
-	bCheckMovingHeadSphere = true;
+	// Shock rifle (and its children) must NOT run the head-sphere check: the base
+	// UTWeaponFix::FireInstantHit head-magnetism path (gated by bCheckHeadSphere) re-points
+	// a near-miss onto a nearby head, which is unwanted for shock — it isn't a headshot
+	// weapon, and in instagib it one-shots anyway. Children inherit this (their ctor runs
+	// this Super first); the flag gates the base block, so it's skipped entirely for shock.
+	bCheckHeadSphere = false;
+	bCheckMovingHeadSphere = false;
 	bTrackHitScanReplication = true;
 
 	WeaponCustomizationTag = EpicWeaponCustomizationTags::ShockRifle;

@@ -29,23 +29,12 @@ void ANCShaftArenaHUD::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Seed a default accuracy entry so the widget is visible by default in
-	// shaft arena. Other HUDs leave the entry empty (widget hidden) so users
-	// must opt in via the nchud editor. The seed only writes if no entry
-	// exists yet — explicit user customization (drag, hide, weapon override)
-	// is preserved across launches.
-	FNCPlusHUDLayout& Live = FNCPlusHUDLayout::GetLive();
-	if (!Live.Elements.Contains(TEXT("accuracy")))
-	{
-		FNCPlusHUDElement Entry;
-		Entry.Anchor = NCPlusHUDAliases::GetStockAnchor(TEXT("accuracy"));
-		Entry.Offset = NCPlusHUDAliases::GetStockOffset(TEXT("accuracy"));
-		// "current" is the default behavior (held weapon) — record it
-		// explicitly so the editor's weapon dropdown shows the right choice.
-		Entry.Extras.Add(TEXT("weapon"), TEXT("current"));
-		Live.Elements.Add(TEXT("accuracy"), Entry);
-		FNCPlusHUDLayout::MarkLiveDirty();
-	}
+	// NOTE: the old "seed a default accuracy entry" block is GONE (2026-07-01). It
+	// wrote into the process-global live layout, and the nchud editor/drag overlay
+	// auto-saves that whole map on close — so playing shaft once + touching the
+	// editor baked a visible accuracy entry into HUDLayout.json for EVERY mode.
+	// Shaft's accuracy-on-by-default now lives in the widget's own ShouldDraw
+	// (mode check, no shared-state mutation) — see NCPlusHUDWidget_Accuracy.cpp.
 }
 
 // Mirrors AWipeoutHUD::DrawTeamScoreBar's boxed-bars + score boxes + center

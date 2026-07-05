@@ -19,6 +19,10 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	virtual void DrawHUD() override;
 	virtual FLinearColor GetBaseHUDColor() override;
 
+	/** Swap the stock spectator slide-out for UNCPlusSpectatorSlideOut so the
+	 *  weapon-stats panel lists the Elim loadout with replicated accuracy. */
+	virtual void AddSpectatorWidgets() override;
+
 	// Portrait atlas icons — same UV coords as AUTFlagRunHUD / AWipeoutHUD
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, NoClear)
 	FCanvasIcon RedTeamIcon;
@@ -58,8 +62,9 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	void DrawPreMatchTeamPreview();
 
 private:
+	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
-	bool bNCPScreenshotEnabled = true;
+	float PostMatchScreenshotStable = -1.f;
 
 	/** Per-player ELO chip animation state. Triggered the first frame the
 	 *  replicator's EloDeltaThisMatch transitions from 0 to non-zero (= match end);
@@ -71,8 +76,34 @@ private:
 		int32 ToElo      = 0;
 		int32 FinalDelta = 0;
 	};
-	TMap<FString, FElimPlusEloAnim> EloAnimByPlayerId;
+	// Keyed on the PlayerState (weak) rather than the UniqueId string — no per-pip
+	// FString hashing, and entries self-expire when the PS is destroyed.
+	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPlusEloAnim> EloAnimByPlayerId;
 	static constexpr float EloAnimDurationSec = 4.0f;
+
+	/** Per-PlayerState portrait-strip caches: the immutable UniqueId string (built once),
+	 *  and the last-rendered ELO-chip / HP FText + measured width keyed on the values they
+	 *  display, so an unchanged frame skips the Printf + StrLen + FText::FromString. Keyed
+	 *  weakly; entries self-expire with the PS. (Fitted names are cached separately by
+	 *  NCPlusHUDDrawCall::ResolveFittedName.) */
+	struct FElimPipCache
+	{
+		FString UidStr;
+		bool    bUidValid = false;
+
+		int32 EloKeyElo   = MIN_int32;
+		int32 EloKeyDelta = MIN_int32;
+		FText  EloText;
+		float  EloWidth   = 0.f;
+
+		const UFont* HpFont = nullptr;
+		int32 HpKeyHP = MIN_int32;
+		int32 HpKeyAR = MIN_int32;
+		FText  HpText;
+		float  HpWidth  = 0.f;
+		float  HpHeight = 0.f;
+	};
+	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPipCache> PipCacheByPS;
 
 	/** Client-side timestamp captured the first frame the gamestate reports
 	 *  CountdownToBegin. DrawPreMatchTeamPreview fades the overlay alpha from

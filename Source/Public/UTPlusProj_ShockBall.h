@@ -22,6 +22,11 @@ public:
 	virtual void PostNetReceiveVelocity(const FVector& NewVelocity) override;
 	virtual void Explode_Implementation(const FVector& HitLocation, const FVector& HitNormal, UPrimitiveComponent* HitComp = nullptr) override;
 	virtual bool ShouldIgnoreHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp) override;
+	virtual void DamageImpactedActor_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal) override;
+
+	// Diagnostic hooks (ncp.ShockDebug) — Super-passthrough + event-gated logging only, no behaviour change.
+	virtual void ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal) override;
+	virtual void PostNetReceiveLocationAndRotation() override;
 
 private:
 	// Forward declaration for safety
@@ -49,10 +54,15 @@ protected:
 	FVector OriginalFireDirection;
 	bool bHasCachedFireDirection;
 
-	/** Time the projectile has been near-zero velocity on the server.
-	 *  If it exceeds StuckExplodeDelay, force-explode to prevent stuck balls. */
+	/** Time the projectile has been embedded in static geometry while not travelling.
+	 *  If it exceeds StuckExplodeDelay, force-explode to clear a pinned/embedded core. */
 	float StuckTime;
 	static constexpr float StuckExplodeDelay = 0.05f;
+
+	/** Last server location sampled for the stuck-progress test (see Tick). */
+	FVector LastStuckProgressLoc;
+	/** Max net movement (units) over the debounce window that still counts as "not travelling". */
+	static constexpr float StuckProgressThreshold = 6.f;
 
 public:
 	virtual bool CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const override;

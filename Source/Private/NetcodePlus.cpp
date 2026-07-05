@@ -3,9 +3,12 @@
 #include "Modules/ModuleManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
+#include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
 #include "UTPlayerController.h"
+#include "UTPlayerInput.h"
 #include "UTProfileSettings.h"
 #include "UTLocalPlayer.h"
+#include "UTGameState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTWeaponFix.h"
@@ -19,12 +22,16 @@
 #include "WipeoutHUD.h"
 #include "NCPlusCTFHUD.h"
 #include "ShockDomHUD.h"
+#include "NCPlusForceModels.h"
+#include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
 
 // -ncpconnect launcher direct-connect support
 #include "Containers/Ticker.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Misc/CoreMisc.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"                // FPaths::GeneratedConfigDir (NoAlias Mod.ini scrub)
 #include "Engine/GameInstance.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
@@ -39,6 +46,9 @@ static TWeakPtr<SUTCosmeticSelector> ActiveCosmeticSelector;
 /** Weak reference to active HUD layout editor */
 static TWeakPtr<SNCPlusHUDEditor>      ActiveHUDEditor;
 static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
+
+/** PreLoadMap delegate handle — self-heals the menu input state across level loads. */
+static FDelegateHandle GNCPPreLoadMapHandle;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -241,14 +251,47 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 	UGameViewportClient* ViewportClient = World->GetGameViewport();
 	if (!ViewportClient) return;
 
+	// Optional first arg picks the opening tab: `ncpmenu forcemodels` (or the
+	// teamskins/models synonyms) → Force Models, `general` → General; bare
+	// `ncpmenu` / F5 → About.
+	ENCPMenuTab InitialTab = ENCPMenuTab::About;
+	if (Args.Num() > 0)
+	{
+		const FString Tab = Args[0].ToLower();
+		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
+		{
+			InitialTab = ENCPMenuTab::ForceModels;
+		}
+		else if (Tab == TEXT("general"))
+		{
+			InitialTab = ENCPMenuTab::General;
+		}
+	}
+
 	TSharedRef<SUTNCPlusMenu> Menu =
 		SNew(SUTNCPlusMenu)
-		.PlayerOwner(LP);
+		.PlayerOwner(LP)
+		.InitialTab(InitialTab);
 
 	ViewportClient->AddViewportWidgetContent(Menu, 100);
 	FSlateApplication::Get().SetKeyboardFocus(Menu, EFocusCause::SetDirectly);
 
 	ActiveNCPMenu = Menu;
+}
+
+// On a level transition the GameViewportClient drops our menu widgets WITHOUT
+// calling ClosePanel(). Each panel's destructor now releases its own
+// NCPlusHUDDragMode count (RAII), but close the F5 menu cleanly here first while
+// the outgoing PC is still valid (so its input mode is properly restored), then
+// hard-clear the refcount as a final backstop against any leaked count.
+static void OnNCPPreLoadMap(const FString& /*MapName*/)
+{
+	if (ActiveNCPMenu.IsValid())
+	{
+		ActiveNCPMenu.Pin()->ClosePanel();
+		ActiveNCPMenu.Reset();
+	}
+	NCPlusHUDDragMode::Reset();
 }
 
 static void HandleCosmetics(const TArray<FString>& Args)
@@ -423,7 +466,8 @@ static FDelegateHandle GNcpConnectTickerHandle;
 static FString         GNcpConnectURL;
 static float           GNcpConnectElapsed = 0.0f;
 
-/** Connect anyway after this long if MCP sign-in never completes (offline/slow login). */
+/** Connect anyway after this long if the MCP profile/progression never finish
+ *  loading (offline / slow login) — the deadlock backstop for the readiness gate. */
 static const float GNcpConnectLoginTimeout = 45.0f;
 
 /** Drop the password option so it never reaches the log. */
@@ -463,24 +507,41 @@ static bool TickNcpConnect(float DeltaTime)
 		return true; // front-end map not up yet
 	}
 
-	// Wait for MCP sign-in so trusted PUG servers accept us; fall back on timeout.
+	// Wait for MCP sign-in AND the cloud profile (keybinds) + progression (XP) to
+	// finish downloading before we travel. IsLoggedIn() alone only means OSS auth is
+	// done; the profile + progression cloud reads land asynchronously AFTER that, so
+	// travelling on login alone races them — a fast client joins with DEFAULT BINDS
+	// and 0 XP (and a later profile save-back can overwrite the cloud binds with those
+	// defaults: the "binds lost" report). We mirror stock UT4's own data-ready gate,
+	// IsPlayerCardDataLoaded() == IsLoggedIn() && !IsPendingMCPLoad() (SUTMenuBase.cpp),
+	// which stock defines but never applies to its own join/travel path. Falls back on
+	// the timeout below if MCP is slow/offline (same degraded outcome as before).
 	UUTLocalPlayer* UTLP = nullptr;
 	if (UGameInstance* GI = GameWorld->GetGameInstance())
 	{
 		UTLP = Cast<UUTLocalPlayer>(GI->GetFirstGamePlayer());
 	}
 
-	const bool bLoggedIn = (UTLP && UTLP->IsLoggedIn());
+	// All four accessors are public + tick-safe; the two getters are only null-COMPARED
+	// (never dereferenced), so any not-yet-ready / early-null signal keeps bReady false
+	// and we keep waiting. IsPendingMCPLoad() is the OR of the profile + progression
+	// pending flags, so it is false only once BOTH cloud reads complete — exactly
+	// "keybinds loaded AND XP loaded" in one read (UTLocalPlayer.cpp).
+	const bool bReady = (UTLP
+		&& UTLP->IsLoggedIn()
+		&& !UTLP->IsPendingMCPLoad()
+		&& UTLP->GetProfileSettings() != nullptr
+		&& UTLP->GetProgressionStorage() != nullptr);
 	const bool bTimedOut = (GNcpConnectElapsed >= GNcpConnectLoginTimeout);
-	if (!bLoggedIn && !bTimedOut)
+	if (!bReady && !bTimedOut)
 	{
-		return true; // keep waiting for sign-in
+		return true; // keep waiting for sign-in + profile/progression download
 	}
 
 	// Warning verbosity survives Shipping (Log/Verbose are stripped there).
 	UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpconnect -> ClientTravel to %s%s"),
 		*RedactConnectURL(GNcpConnectURL),
-		bLoggedIn ? TEXT("") : TEXT(" (not signed in; connecting anyway after timeout)"));
+		bReady ? TEXT("") : TEXT(" (profile/progression not ready; connecting anyway after timeout)"));
 
 	GEngine->SetClientTravel(GameWorld, *GNcpConnectURL, TRAVEL_Absolute);
 
@@ -488,7 +549,229 @@ static bool TickNcpConnect(float DeltaTime)
 	return false; // single shot — unregister
 }
 
+// ---------------------------------------------------------------------------
+// HUD team-colour recolour (Force Models "HUD" flag). Persistent client core ticker,
+// self-throttled to ~4 Hz (matching the BP's "Update team colour" 0.25s timer), that
+// re-asserts each team's TeamColor to the configured skin colour. Re-assertion is needed
+// because TeamColor is replicated and the server periodically reverts it. No-op unless a
+// game world exists and the feature + HUD flag are on (see NCPlusForceModels::SyncHudTeamColours).
+// ---------------------------------------------------------------------------
+static FDelegateHandle GHudColourTickerHandle;
+static float           GHudColourAccum = 0.0f;
+// Post-match-join killcam crash guard (see TickHudTeamColours). GIRGuardWorld = the game world whose
+// initial match state we've already evaluated (raw ptr, compared only, never dereferenced);
+// GSavedInstantReplay = the user's UT.EnableInstantReplay value while we suppress it (-1 = not suppressing).
+static UWorld*         GIRGuardWorld = nullptr;
+static int32           GSavedInstantReplay = -1;
+
+static bool TickHudTeamColours(float DeltaTime)
+{
+	// Flag-cloth wind needs a per-frame update (smooth gusting/direction); the colour/outline work is
+	// throttled to ~4 Hz (matching the BP's 0.25s "Update team colour" timer).
+	GHudColourAccum += DeltaTime;
+	const bool bSlowTick = (GHudColourAccum >= 0.25f);
+	if (bSlowTick) { GHudColourAccum = 0.0f; }
+
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game && Context.World())
+			{
+				UWorld* const W = Context.World();
+				NCPlusForceModels::TickFlagWind(W, DeltaTime);   // every frame
+
+				// Post-match-join killcam crash guard. The stock killcam recorder
+				// (AUTGameState::StartRecordingReplay, armed on a 0.5s timer in ReceivedGameModeClass) has NO
+				// match-state gate, so a client that JOINS a server already in post-match bootstraps a _DeathCam
+				// replay with no data -> a 2nd, local LoadMap -> the UPlayer::Exec world-mismatch assert
+				// (Player.cpp:98). Its sole arming condition is the cvar UT.EnableInstantReplay==1. We force it
+				// to 0 ONLY for a client that joined STRAIGHT INTO post-match (first time we see this world it is
+				// already ended), and restore the user's value once a live match is in progress -- so a player
+				// present the whole match (recorder already running) is never touched and still gets the
+				// end-of-match replay. Client-only, no GameState subclass (replicated-class-identity crash, the
+				// CTF ABI doctrine), no stock-source edit. HasMatchEnded()/IsMatchInProgress() are call-only
+				// engine accessors; SetByConsole so it wins over however the user enabled it.
+				if (AUTGameState* const GS = W->GetGameState<AUTGameState>())
+				{
+					if (IConsoleVariable* const CVarIR = IConsoleManager::Get().FindConsoleVariable(TEXT("UT.EnableInstantReplay")))
+					{
+						const bool bNewWorld = (W != GIRGuardWorld);
+						GIRGuardWorld = W;
+						if (bNewWorld && GSavedInstantReplay < 0 && GS->HasMatchEnded())
+						{
+							GSavedInstantReplay = CVarIR->GetInt();
+							CVarIR->Set(TEXT("0"), ECVF_SetByConsole);
+						}
+						else if (GSavedInstantReplay >= 0 && !GS->HasMatchEnded())
+						{
+							// No longer post-match (same world restarted, or we travelled to the next match's
+							// world while it's still in warmup) -> restore BEFORE that world's 0.5s recorder timer
+							// fires, so the next match's killcam records normally.
+							CVarIR->Set(*FString::FromInt(GSavedInstantReplay), ECVF_SetByConsole);
+							GSavedInstantReplay = -1;
+						}
+					}
+				}
+
+				if (bSlowTick)
+				{
+					NCPlusForceModels::SyncHudTeamColours(W);
+					NCPlusForceModels::SyncFlagColours(W);
+					NCPlusForceModels::SuppressFlagCarrierOutlines(W);
+				}
+				// Per-frame: LOS traces gate the ForceModels outline (visible -> outlined, occluded ->
+				// none — the stock stencil has no visible-only mode, see OutlinePlayers). bSlowTick
+				// re-asserts + refreshes the MPC colours. After Suppress so carriers stay suppressed.
+				NCPlusForceModels::OutlinePlayers(W, bSlowTick);
+				break;
+			}
+		}
+	}
+	return true; // persistent
+}
+
 IMPLEMENT_MODULE(FNetcodePlus, NetcodePlus)
+
+// Debug: dump the current ForceModels config + every installed AUTCharacterContent path,
+// so you can copy a valid path into [ForceModels.Model.<side>] Class= before the picker UI exists.
+static void HandleForceModelsList(const TArray<FString>& Args)
+{
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] Enabled=%d Models=%d Style=%d"),
+		C.bEnabled ? 1 : 0, C.bModels ? 1 : 0, (int32)C.Style);
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels]   Enemy='%s' Team='%s' Red='%s' Blue='%s'"),
+		*C.Enemy.ContentPath, *C.Team.ContentPath, *C.Red.ContentPath, *C.Blue.ContentPath);
+
+	// Audit path: include the curated-out (HiddenModels) entries too, marked [HIDDEN], so you can see the
+	// full set and decide what to add to [ForceModels] HiddenModels=.
+	TArray<NCPlusForceModels::FContentEntry> Entries;
+	NCPlusForceModels::EnumerateContent(Entries, /*bIncludeHidden=*/true);
+	int32 NumHidden = 0;
+	for (const NCPlusForceModels::FContentEntry& E : Entries) { if (E.bHidden) { ++NumHidden; } }
+	UE_LOG(LogTemp, Warning, TEXT("[ForceModels] %d installed character(s) (%d hidden via drop-list / HiddenModels / bHideInUI). Name -> Class path:"), Entries.Num(), NumHidden);
+	for (const NCPlusForceModels::FContentEntry& E : Entries)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("  %s%s  ->  %s"), E.bHidden ? TEXT("[HIDDEN] ") : TEXT(""), *E.DisplayName, *E.ClassPath);
+	}
+}
+
+// On-demand: dump every visible character's body materials + parameter names. No respawn needed,
+// works in online/Shipping clients (Warning verbosity survives Shipping; not #if'd out).
+static void HandleForceModelsDumpMats(const TArray<FString>& /*Args*/, UWorld* World)
+{
+	NCPlusForceModels::DumpAllCharacterMaterials(World);
+}
+
+// =============================================================================
+// NoAlias Mod.ini scrub — repair the [OldIdentifiers]/[Identifiers] damage left
+// by the legacy NoAlias BP (cooked into hub paks; recooking needs every hub
+// owner to act, so fix the DATA instead). The BP appends "<epicid>_<name>" on
+// every launch with no dedupe, and the BP gamemodes' testing-era default player
+// name ("Christian") injects a bogus rename event each session — the array
+// ping-pongs real-name/Christian forever (observed ~110 entries) and the BP's
+// join-time chat spam reads it all out. The BP reads these sections from Mod.ini
+// via GConfig at map join, so sanitizing BEFORE world load (module startup +
+// every PreLoadMap, catching mid-session re-pollution) starves the spam with no
+// pak change. CLIENT-side; each client repairs only its own file. Conservative
+// gate: act ONLY when the append-loop fingerprint (exact-duplicate entries) is
+// present — a legit one-time rename history is never rewritten.
+// =============================================================================
+static FDelegateHandle GNCPNoAliasScrubMapHandle;
+
+static void ScrubNoAliasIdentifiers()
+{
+	if (!GConfig) return;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	TArray<FString> OldIds;
+	GConfig->GetArray(TEXT("OldIdentifiers"), TEXT("IDArray"), OldIds, ModIni);
+	if (OldIds.Num() == 0) return;
+
+	TArray<FString> CurIds;
+	GConfig->GetArray(TEXT("Identifiers"), TEXT("IDArray"), CurIds, ModIni);
+
+	// ALWAYS: drop "old" entries equal to a CURRENT identifier — the BP re-appends
+	// the current identity every launch, so without this every join announces
+	// "I am also known as <my current name>", which is spam by definition, never
+	// information. Exact-identity match only (same account id, same name); real
+	// aliases are untouched. Runs regardless of the duplicate fingerprint below.
+	TArray<FString> Cleaned = OldIds;
+	for (const FString& Cur : CurIds) { Cleaned.Remove(Cur); }
+
+	// Fingerprint for the DEEP clean: the BP's append loop produces exact
+	// duplicates. No dupes = healthy rename history — only the self-identity
+	// redundancy above is removed, nothing else is rewritten.
+	TSet<FString> Unique;
+	for (const FString& Id : OldIds) { Unique.Add(Id); }
+	const bool bHasDupes = (Unique.Num() != OldIds.Num());
+	if (!bHasDupes && Cleaned.Num() == OldIds.Num()) return;   // healthy and no self-entries: no write
+
+	// "<32-hex-epicid>_<name>" -> name; empty when the entry doesn't match that shape.
+	auto NamePart = [](const FString& Id) -> FString
+	{
+		if (Id.Len() <= 33 || Id[32] != TEXT('_')) return FString();
+		for (int32 i = 0; i < 32; ++i) { if (!FChar::IsHexDigit(Id[i])) return FString(); }
+		return Id.Mid(33);
+	};
+	// The BP gamemodes' testing-era DefaultPlayerName — the manufactured "alias".
+	auto IsBogus = [&NamePart](const FString& Id)
+	{
+		return NamePart(Id).Equals(TEXT("Christian"), ESearchCase::CaseSensitive);
+	};
+
+	bool bCurChanged = false;
+	if (bHasDupes)
+	{
+		// 1) Dedupe, preserving first-appearance order.
+		TArray<FString> Deduped;
+		for (const FString& Id : Cleaned) { Deduped.AddUnique(Id); }
+		Cleaned = MoveTemp(Deduped);
+
+		// 2) Drop the manufactured default-name entries.
+		Cleaned.RemoveAll(IsBogus);
+
+		// 3) Heal a stale [Identifiers] stuck on the bogus default: promote the most
+		//    recent REAL alias (last well-formed, non-bogus occurrence in original order)
+		//    belonging to the SAME 32-hex account — never another local account's alias
+		//    (shared-machine files can interleave accounts). Replace only the offending
+		//    last entry; any other current identifiers are left alone.
+		if (CurIds.Num() > 0 && IsBogus(CurIds.Last()))
+		{
+			const FString AccountPrefix = CurIds.Last().Left(32);
+			for (int32 i = OldIds.Num() - 1; i >= 0; --i)
+			{
+				if (!NamePart(OldIds[i]).IsEmpty() && !IsBogus(OldIds[i])
+					&& OldIds[i].Left(32) == AccountPrefix)
+				{
+					CurIds.Last() = OldIds[i];
+					bCurChanged = true;
+					break;
+				}
+			}
+		}
+
+		// 4) The (possibly just-healed) current identity is not an "old" one.
+		for (const FString& Cur : CurIds) { Cleaned.Remove(Cur); }
+
+		// 5) Cap the tail (most recent 8) so the section can't grow without bound.
+		if (Cleaned.Num() > 8) { Cleaned.RemoveAt(0, Cleaned.Num() - 8); }
+	}
+
+	GConfig->SetArray(TEXT("OldIdentifiers"), TEXT("IDArray"), Cleaned, ModIni);
+	if (bCurChanged)
+	{
+		GConfig->SetArray(TEXT("Identifiers"), TEXT("IDArray"), CurIds, ModIni);
+	}
+	GConfig->Flush(false, ModIni);
+	UE_LOG(LogLoad, Warning, TEXT("netcodeplus: NoAlias identifier scrub — %d -> %d old aliases%s"),
+		OldIds.Num(), Cleaned.Num(), bCurChanged ? TEXT(" (stale current identity healed)") : TEXT(""));
+}
+
+static void ScrubNoAliasIdentifiersOnLoad(const FString& /*MapName*/)
+{
+	ScrubNoAliasIdentifiers();
+}
 
 void FNetcodePlus::StartupModule()
 {
@@ -534,17 +817,72 @@ void FNetcodePlus::StartupModule()
 		ECVF_Default
 	);
 
-	// Bind F5 to ncpmenu by default
-	if (GEngine)
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("forcemodels_list"),
+		TEXT("Log the current ForceModels config + every installed AUTCharacterContent class path"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleForceModelsList),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("forcemodels_dumpmats"),
+		TEXT("Dump every visible character's body materials + parameter names (recolour diagnostics; on-demand, Shipping-safe)"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleForceModelsDumpMats),
+		ECVF_Default
+	);
+
+	// Bind F5 -> ncpmenu by SEEDING the UUTPlayerInput CDO's CustomBinds at startup (pure run-once).
+	// The CDO exists by now (GetMutableDefault constructs + config-loads it if needed), so this adds on top
+	// of whatever Input.ini had; new UUTPlayerInput instances inherit the CDO's CustomBinds, and
+	// UTForceRebuildingKeyMaps(true) (the settings "restore defaults" path) copies the CDO too. add-if-missing.
+	// Client-only. F5 is otherwise free (old CTFPlus-UI BP retired). NB if F5 still doesn't bind, instances
+	// are re-LoadConfig'ing CustomBinds from the file over the CDO inheritance — fall back to binding the
+	// live UUTPlayerInput via a per-map ticker.
+	if (!IsRunningDedicatedServer())
 	{
-		UPlayerInput* DefInput = GetMutableDefault<UPlayerInput>();
-		if (DefInput)
+		UUTPlayerInput* InputCDO = GetMutableDefault<UUTPlayerInput>();
+		bool bHasNcpMenuBind = false;
+		for (const FCustomKeyBinding& B : InputCDO->CustomBinds)
 		{
-			FKeyBind Bind;
-			Bind.Key = EKeys::F5;
-			Bind.Command = TEXT("ncpmenu");
-			DefInput->DebugExecBindings.Add(Bind);
+			if (B.Command.Contains(TEXT("ncpmenu"))) { bHasNcpMenuBind = true; break; }
 		}
+		if (!bHasNcpMenuBind)
+		{
+			InputCDO->CustomBinds.Add(FCustomKeyBinding(FName(TEXT("F5")), IE_Pressed, TEXT("ncpmenu")));
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: F5 -> ncpmenu seeded on UUTPlayerInput CDO"));
+		}
+
+		// Spectators take a SEPARATE bind path: UUTPlayerInput::ExecuteCustomBind checks
+		// SpectatorBinds first while bOnlySpectator/bOutOfLives, so the CustomBinds seed
+		// above never fires F5 for a spectator. Seed it into SpectatorBinds too.
+		bool bHasNcpMenuSpecBind = false;
+		for (const FCustomKeyBinding& B : InputCDO->SpectatorBinds)
+		{
+			if (B.Command.Contains(TEXT("ncpmenu"))) { bHasNcpMenuSpecBind = true; break; }
+		}
+		if (!bHasNcpMenuSpecBind)
+		{
+			InputCDO->SpectatorBinds.Add(FCustomKeyBinding(FName(TEXT("F5")), IE_Pressed, TEXT("ncpmenu")));
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: F5 -> ncpmenu seeded on UUTPlayerInput CDO SpectatorBinds"));
+		}
+	}
+
+	// Self-heal the menu input state across level transitions: LoadMap drops our
+	// viewport widgets without ClosePanel, which would otherwise leak a
+	// NCPlusHUDDragMode count and strand the cursor on the next map. Client only.
+	if (!IsRunningDedicatedServer())
+	{
+		GNCPPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPPreLoadMap);
+	}
+
+	// NoAlias Mod.ini scrub (see ScrubNoAliasIdentifiers above): once at startup so
+	// the first hub join reads clean data, and again before every map load so a
+	// mid-session re-pollution never reaches the next join's chat spam. Client only;
+	// the early-outs make the per-map cost two GetArray calls when healthy.
+	if (!IsRunningDedicatedServer())
+	{
+		ScrubNoAliasIdentifiers();
+		GNCPNoAliasScrubMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&ScrubNoAliasIdentifiersOnLoad);
 	}
 
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
@@ -563,6 +901,25 @@ void FNetcodePlus::StartupModule()
 		}
 	}
 
+	// HUD team-colour recolour ticker (Force Models "HUD" flag). Client-only; cheap no-op until a
+	// game world exists and the feature + HUD flag are enabled. Self-throttled to ~4 Hz.
+	if (!IsRunningDedicatedServer())
+	{
+		GHudColourAccum = 0.0f;
+		GHudColourTickerHandle = FTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateStatic(&TickHudTeamColours), 0.0f);
+	}
+
+	// Hub advisor: on dedicated servers, auto-spawn the version gate in ADVISOR
+	// mode (private whisper, never kick) for every lobby joiner — the hub is the
+	// one place a plugin-less client still has working chat/UI to be told
+	// anything. Instances keep the kick-mode gate spawned from each NCPlus
+	// gamemode's PostLogin; the event handler filters on IsLobbyServer().
+	if (IsRunningDedicatedServer())
+	{
+		NCPlusVersionGate::RegisterHubAdvisor();
+	}
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
@@ -575,6 +932,16 @@ void FNetcodePlus::ShutdownModule()
 		GNcpConnectTickerHandle.Reset();
 	}
 
+	// Stop the HUD team-colour ticker.
+	if (GHudColourTickerHandle.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(GHudColourTickerHandle);
+		GHudColourTickerHandle.Reset();
+	}
+
+	// Unbind the hub-advisor PostLogin hook (no-op if never registered).
+	NCPlusVersionGate::UnregisterHubAdvisor();
+
 	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())
 	{
@@ -582,6 +949,18 @@ void FNetcodePlus::ShutdownModule()
 		ActiveSkinSelector.Reset();
 	}
 	SUTWeaponSkinSelector_CleanupCache();
+
+	if (GNCPPreLoadMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPPreLoadMapHandle);
+		GNCPPreLoadMapHandle.Reset();
+	}
+
+	if (GNCPNoAliasScrubMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPNoAliasScrubMapHandle);
+		GNCPNoAliasScrubMapHandle.Reset();
+	}
 
 	IConsoleObject* Cmd = IConsoleManager::Get().FindConsoleObject(TEXT("weaponhand"));
 	if (Cmd) { IConsoleManager::Get().UnregisterConsoleObject(Cmd, false); }
