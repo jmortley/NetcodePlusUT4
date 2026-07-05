@@ -225,16 +225,35 @@ static AElimPlusStatsReplicator* FindElimPlusStatsReplicator(UWorld* World)
 	if (!World) return nullptr;
 	static TWeakObjectPtr<UWorld> CachedWorld;
 	static TWeakObjectPtr<AElimPlusStatsReplicator> CachedRep;
+	static float NextRetryTime = 0.f;   // world-time gate for the not-yet-found case
+
 	if (CachedWorld.Get() == World && CachedRep.IsValid())
 	{
 		return CachedRep.Get();
 	}
+
+	// Negative cache: before the replicator has spawned/replicated in (fresh join or
+	// map travel) the scan below finds nothing, so without this we'd walk the entire
+	// actor list EVERY frame. Retry at most ~1x/second while it's absent. A world change
+	// bypasses the gate immediately via the CachedWorld mismatch.
+	const float Now = World->GetTimeSeconds();
+	if (CachedWorld.Get() == World && Now < NextRetryTime)
+	{
+		return nullptr;
+	}
+
 	for (TActorIterator<AElimPlusStatsReplicator> It(World); It; ++It)
 	{
 		CachedWorld = World;
 		CachedRep   = *It;
 		return *It;
 	}
+
+	// Not found — arm the retry gate (and stamp the world so a world change still forces
+	// an immediate rescan rather than waiting out this gate).
+	CachedWorld   = World;
+	CachedRep     = nullptr;
+	NextRetryTime = Now + 1.0f;
 	return nullptr;
 }
 
@@ -491,26 +510,12 @@ void AElimPlusHUD::DrawHUD()
 				/* Portraits (Red)/(Blue) Font + FontSz now restyle the player name. */ const FName PortraitAlias = (TeamIdx == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red")); UFont* NameFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
 					const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
 				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
-				FFontRenderInfo NameRI;
-				NameRI.bEnableShadow = true;
-				FString Name = UTPS->PlayerName;
-				float NXL, NYL;
-				Canvas->StrLen(NameFont, Name, NXL, NYL);
-				while (NXL * NameScale > PipSize && Name.Len() > 3)
-				{
-					Name = Name.Left(Name.Len() - 1);
-					Canvas->StrLen(NameFont, Name, NXL, NYL);
-				}
-				const float NameX = XOffset + (PipSize * 0.5f) - (NXL * NameScale * 0.5f);
+				// Cached fit (no per-frame chop-one-char StrLen loop) + one outlined item.
+				FText NameText; float NW, NH;
+				NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
+				const float NameX = XOffset + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
 				const float NameY = YForTeam + 2.f;
-				const float OL = 1.f;
-				Canvas->SetLinearDrawColor(FLinearColor::Black);
-				Canvas->DrawText(NameFont, FText::FromString(Name), NameX - OL, NameY, NameScale, NameScale, NameRI);
-				Canvas->DrawText(NameFont, FText::FromString(Name), NameX + OL, NameY, NameScale, NameScale, NameRI);
-				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY - OL, NameScale, NameScale, NameRI);
-				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY + OL, NameScale, NameScale, NameRI);
-				Canvas->SetLinearDrawColor(FLinearColor::White);
-				Canvas->DrawText(NameFont, FText::FromString(Name), NameX, NameY, NameScale, NameScale, NameRI);
+				NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
 			}
 
 			// Last-man-standing pulse: white-flashing border at 1Hz when this
@@ -534,11 +539,17 @@ void AElimPlusHUD::DrawHUD()
 			// Bots use the synthetic "BOT:<name>" key so randomized bot ELOs render too.
 			if (Stats && UTPS)
 			{
-				const FString UidStr = UTPS->UniqueId.IsValid()
-					? UTPS->UniqueId.ToString()
-					: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
-				const int32 ServerElo = Stats->GetEloForPlayer(UidStr);
-				const int32 ServerDelta = Stats->GetEloDeltaForPlayer(UidStr);
+				FElimPipCache& PC = PipCacheByPS.FindOrAdd(UTPS);
+				if (!PC.bUidValid)
+				{
+					// UniqueId never changes — build the replicator key once per player.
+					PC.UidStr = UTPS->UniqueId.IsValid()
+						? UTPS->UniqueId.ToString()
+						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					PC.bUidValid = true;
+				}
+				const int32 ServerElo = Stats->GetEloForPlayer(PC.UidStr);
+				const int32 ServerDelta = Stats->GetEloDeltaForPlayer(PC.UidStr);
 
 				int32 DisplayElo = ServerElo;
 				int32 DisplayDelta = ServerDelta;
@@ -547,11 +558,11 @@ void AElimPlusHUD::DrawHUD()
 				if (ServerDelta == 0)
 				{
 					// Mid-match (or pre-match). Drop any stale anim entry.
-					EloAnimByPlayerId.Remove(UidStr);
+					EloAnimByPlayerId.Remove(UTPS);
 				}
 				else
 				{
-					FElimPlusEloAnim& Anim = EloAnimByPlayerId.FindOrAdd(UidStr);
+					FElimPlusEloAnim& Anim = EloAnimByPlayerId.FindOrAdd(UTPS);
 					if (Anim.FinalDelta == 0)  // freshly created this frame
 					{
 						Anim.StartTime  = GetWorld()->TimeSeconds;
@@ -567,34 +578,34 @@ void AElimPlusHUD::DrawHUD()
 				}
 
 				const float ChipScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
-				FFontRenderInfo ChipRI;
-				ChipRI.bEnableShadow = true;
 
-				FString EloStr = FString::Printf(TEXT("%d"), DisplayElo);
-				if (DisplayDelta != 0)
+				// Rebuild the chip FText + measured width only when the displayed value
+				// changes (stable mid-match; only the 4s match-end count-up churns it).
+				if (PC.EloKeyElo != DisplayElo || PC.EloKeyDelta != DisplayDelta)
 				{
-					EloStr += (DisplayDelta > 0)
-						? FString::Printf(TEXT(" +%d"), DisplayDelta)
-						: FString::Printf(TEXT(" %d"), DisplayDelta);
+					FString EloStr = FString::Printf(TEXT("%d"), DisplayElo);
+					if (DisplayDelta != 0)
+					{
+						EloStr += (DisplayDelta > 0)
+							? FString::Printf(TEXT(" +%d"), DisplayDelta)
+							: FString::Printf(TEXT(" %d"), DisplayDelta);
+					}
+					float CXL, CYL;
+					Canvas->StrLen(TinyFont, EloStr, CXL, CYL);
+					PC.EloText     = FText::FromString(EloStr);
+					PC.EloWidth    = CXL;
+					PC.EloKeyElo   = DisplayElo;
+					PC.EloKeyDelta = DisplayDelta;
 				}
-				float CXL, CYL;
-				Canvas->StrLen(TinyFont, EloStr, CXL, CYL);
-				const float ChipX = XOffset + (PipSize * 0.5f) - (CXL * ChipScale * 0.5f);
-				const float ChipY = YForTeam + PipHeight + 2.f;
-				const float OL = 1.f;
 
-				Canvas->SetLinearDrawColor(FLinearColor::Black);
-				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX - OL, ChipY, ChipScale, ChipScale, ChipRI);
-				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX + OL, ChipY, ChipScale, ChipScale, ChipRI);
-				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX, ChipY - OL, ChipScale, ChipScale, ChipRI);
-				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX, ChipY + OL, ChipScale, ChipScale, ChipRI);
+				const float ChipX = XOffset + (PipSize * 0.5f) - (PC.EloWidth * ChipScale * 0.5f);
+				const float ChipY = YForTeam + PipHeight + 2.f;
 
 				FLinearColor TargetColor = FLinearColor::White;
 				if (DisplayDelta > 0)      TargetColor = FLinearColor(0.4f, 1.f, 0.4f, 1.f);
 				else if (DisplayDelta < 0) TargetColor = FLinearColor(1.f, 0.4f, 0.4f, 1.f);
 				const FLinearColor EloColor = FMath::Lerp(FLinearColor::White, TargetColor, ColorBlend);
-				Canvas->SetLinearDrawColor(EloColor);
-				Canvas->DrawText(TinyFont, FText::FromString(EloStr), ChipX, ChipY, ChipScale, ChipScale, ChipRI);
+				NCPlusHUDDrawCall::DrawOutlinedText(Canvas, TinyFont, PC.EloText, ChipX, ChipY, ChipScale, EloColor);
 			}
 
 			// Advance the column offset for the next portrait
@@ -923,27 +934,30 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 			if (UTC && !UTC->IsDead())
 			{
 				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale * PipFontExtra;
-				FFontRenderInfo TextRenderInfo;
-				TextRenderInfo.bEnableShadow = true;
 
 				const int32 HP = UTC->Health;
 				const int32 Armor = UTC->GetArmorAmount();
-				FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
 
-				float XL, YL;
-				Canvas->StrLen(PipFont, HPStr, XL, YL);
+				// Rebuild the HP FText + measured extents only when HP/armor (or the font)
+				// change — otherwise the string is identical frame to frame.
+				FElimPipCache& PC = PipCacheByPS.FindOrAdd(PlayerState);
+				if (PC.HpKeyHP != HP || PC.HpKeyAR != Armor || PC.HpFont != PipFont)
+				{
+					const FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
+					float XL, YL;
+					Canvas->StrLen(PipFont, HPStr, XL, YL);
+					PC.HpText   = FText::FromString(HPStr);
+					PC.HpWidth  = XL;
+					PC.HpHeight = YL;
+					PC.HpKeyHP  = HP;
+					PC.HpKeyAR  = Armor;
+					PC.HpFont   = PipFont;
+				}
 
-				const float TextX = XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f);
-				const float TextY = YOffset + PipHeight - (YL * FontRenderScale) - 2.f;
-				const float OutlineOffset = 1.f;
-				Canvas->SetLinearDrawColor(Tinted(FLinearColor::Black));
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX - OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX + OutlineOffset, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY - OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY + OutlineOffset, FontRenderScale, FontRenderScale, TextRenderInfo);
-
-				Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
-				Canvas->DrawText(PipFont, FText::FromString(HPStr), TextX, TextY, FontRenderScale, FontRenderScale, TextRenderInfo);
+				const float TextX = XOffset + (PipSize * 0.5f) - (PC.HpWidth * FontRenderScale * 0.5f);
+				const float TextY = YOffset + PipHeight - (PC.HpHeight * FontRenderScale) - 2.f;
+				NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.HpText, TextX, TextY,
+					FontRenderScale, FLinearColor::White, FLinearColor::Black, Op);
 			}
 		}
 	}

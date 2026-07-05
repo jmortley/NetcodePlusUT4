@@ -325,16 +325,19 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 	DrawTexture(UTHUDOwner->ScoreboardAtlas, XOffset, YOffset, ScaledCellWidth, 0.95f * CellHeight * RenderScale,
 		149, 138, 32, 32, FinalBarOpacity, BarColor);
 
-	// Concept-D MVP row: the top-PPR player (Index 1) gets a team-colored border +
-	// faint tint over the cell. Additive — over the cell bg, under the row content.
-	if (Index == 1)
+	// Concept-D "you are here" row: the LOCAL player's own row gets the team-colored
+	// border + faint tint (was the top-PPR row — redundant once the board is
+	// score-sorted; finding your own row is the real mid-match scan task). True
+	// spectators have no row in the team lists, so nothing highlights for them.
+	// Additive — over the cell bg, under the row content.
+	if (bIsOwner)
 	{
-		const uint8 MvpTeam = PlayerState->GetTeamNum();
+		const uint8 OwnTeam = PlayerState->GetTeamNum();
 		const bool bUseTC = HasCustomTeamColors() && NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
-		FLinearColor Accent = (MvpTeam == 1) ? FLinearColor(0.05f, 0.1f, 0.9f, 1.f) : FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
-		if (bUseTC && UTGameState && UTGameState->Teams.IsValidIndex(MvpTeam) && UTGameState->Teams[MvpTeam])
+		FLinearColor Accent = (OwnTeam == 1) ? FLinearColor(0.05f, 0.1f, 0.9f, 1.f) : FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
+		if (bUseTC && UTGameState && UTGameState->Teams.IsValidIndex(OwnTeam) && UTGameState->Teams[OwnTeam])
 		{
-			Accent = UTGameState->Teams[MvpTeam]->TeamColor;
+			Accent = UTGameState->Teams[OwnTeam]->TeamColor;
 		}
 		const float CW = ScaledCellWidth, CHgt = 0.95f * CellHeight * RenderScale, BW = 2.f * RenderScale;
 		FLinearColor Tint = Accent; Tint.A = 0.12f;

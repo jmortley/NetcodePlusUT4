@@ -31,6 +31,7 @@
 #include "Misc/Parse.h"
 #include "Misc/CoreMisc.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"                // FPaths::GeneratedConfigDir (NoAlias Mod.ini scrub)
 #include "Engine/GameInstance.h"
 
 /** Weak reference to active skin selector — only one can be open at a time */
@@ -662,6 +663,116 @@ static void HandleForceModelsDumpMats(const TArray<FString>& /*Args*/, UWorld* W
 	NCPlusForceModels::DumpAllCharacterMaterials(World);
 }
 
+// =============================================================================
+// NoAlias Mod.ini scrub — repair the [OldIdentifiers]/[Identifiers] damage left
+// by the legacy NoAlias BP (cooked into hub paks; recooking needs every hub
+// owner to act, so fix the DATA instead). The BP appends "<epicid>_<name>" on
+// every launch with no dedupe, and the BP gamemodes' testing-era default player
+// name ("Christian") injects a bogus rename event each session — the array
+// ping-pongs real-name/Christian forever (observed ~110 entries) and the BP's
+// join-time chat spam reads it all out. The BP reads these sections from Mod.ini
+// via GConfig at map join, so sanitizing BEFORE world load (module startup +
+// every PreLoadMap, catching mid-session re-pollution) starves the spam with no
+// pak change. CLIENT-side; each client repairs only its own file. Conservative
+// gate: act ONLY when the append-loop fingerprint (exact-duplicate entries) is
+// present — a legit one-time rename history is never rewritten.
+// =============================================================================
+static FDelegateHandle GNCPNoAliasScrubMapHandle;
+
+static void ScrubNoAliasIdentifiers()
+{
+	if (!GConfig) return;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	TArray<FString> OldIds;
+	GConfig->GetArray(TEXT("OldIdentifiers"), TEXT("IDArray"), OldIds, ModIni);
+	if (OldIds.Num() == 0) return;
+
+	TArray<FString> CurIds;
+	GConfig->GetArray(TEXT("Identifiers"), TEXT("IDArray"), CurIds, ModIni);
+
+	// ALWAYS: drop "old" entries equal to a CURRENT identifier — the BP re-appends
+	// the current identity every launch, so without this every join announces
+	// "I am also known as <my current name>", which is spam by definition, never
+	// information. Exact-identity match only (same account id, same name); real
+	// aliases are untouched. Runs regardless of the duplicate fingerprint below.
+	TArray<FString> Cleaned = OldIds;
+	for (const FString& Cur : CurIds) { Cleaned.Remove(Cur); }
+
+	// Fingerprint for the DEEP clean: the BP's append loop produces exact
+	// duplicates. No dupes = healthy rename history — only the self-identity
+	// redundancy above is removed, nothing else is rewritten.
+	TSet<FString> Unique;
+	for (const FString& Id : OldIds) { Unique.Add(Id); }
+	const bool bHasDupes = (Unique.Num() != OldIds.Num());
+	if (!bHasDupes && Cleaned.Num() == OldIds.Num()) return;   // healthy and no self-entries: no write
+
+	// "<32-hex-epicid>_<name>" -> name; empty when the entry doesn't match that shape.
+	auto NamePart = [](const FString& Id) -> FString
+	{
+		if (Id.Len() <= 33 || Id[32] != TEXT('_')) return FString();
+		for (int32 i = 0; i < 32; ++i) { if (!FChar::IsHexDigit(Id[i])) return FString(); }
+		return Id.Mid(33);
+	};
+	// The BP gamemodes' testing-era DefaultPlayerName — the manufactured "alias".
+	auto IsBogus = [&NamePart](const FString& Id)
+	{
+		return NamePart(Id).Equals(TEXT("Christian"), ESearchCase::CaseSensitive);
+	};
+
+	bool bCurChanged = false;
+	if (bHasDupes)
+	{
+		// 1) Dedupe, preserving first-appearance order.
+		TArray<FString> Deduped;
+		for (const FString& Id : Cleaned) { Deduped.AddUnique(Id); }
+		Cleaned = MoveTemp(Deduped);
+
+		// 2) Drop the manufactured default-name entries.
+		Cleaned.RemoveAll(IsBogus);
+
+		// 3) Heal a stale [Identifiers] stuck on the bogus default: promote the most
+		//    recent REAL alias (last well-formed, non-bogus occurrence in original order)
+		//    belonging to the SAME 32-hex account — never another local account's alias
+		//    (shared-machine files can interleave accounts). Replace only the offending
+		//    last entry; any other current identifiers are left alone.
+		if (CurIds.Num() > 0 && IsBogus(CurIds.Last()))
+		{
+			const FString AccountPrefix = CurIds.Last().Left(32);
+			for (int32 i = OldIds.Num() - 1; i >= 0; --i)
+			{
+				if (!NamePart(OldIds[i]).IsEmpty() && !IsBogus(OldIds[i])
+					&& OldIds[i].Left(32) == AccountPrefix)
+				{
+					CurIds.Last() = OldIds[i];
+					bCurChanged = true;
+					break;
+				}
+			}
+		}
+
+		// 4) The (possibly just-healed) current identity is not an "old" one.
+		for (const FString& Cur : CurIds) { Cleaned.Remove(Cur); }
+
+		// 5) Cap the tail (most recent 8) so the section can't grow without bound.
+		if (Cleaned.Num() > 8) { Cleaned.RemoveAt(0, Cleaned.Num() - 8); }
+	}
+
+	GConfig->SetArray(TEXT("OldIdentifiers"), TEXT("IDArray"), Cleaned, ModIni);
+	if (bCurChanged)
+	{
+		GConfig->SetArray(TEXT("Identifiers"), TEXT("IDArray"), CurIds, ModIni);
+	}
+	GConfig->Flush(false, ModIni);
+	UE_LOG(LogLoad, Warning, TEXT("netcodeplus: NoAlias identifier scrub — %d -> %d old aliases%s"),
+		OldIds.Num(), Cleaned.Num(), bCurChanged ? TEXT(" (stale current identity healed)") : TEXT(""));
+}
+
+static void ScrubNoAliasIdentifiersOnLoad(const FString& /*MapName*/)
+{
+	ScrubNoAliasIdentifiers();
+}
+
 void FNetcodePlus::StartupModule()
 {
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -764,6 +875,16 @@ void FNetcodePlus::StartupModule()
 		GNCPPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPPreLoadMap);
 	}
 
+	// NoAlias Mod.ini scrub (see ScrubNoAliasIdentifiers above): once at startup so
+	// the first hub join reads clean data, and again before every map load so a
+	// mid-session re-pollution never reaches the next join's chat spam. Client only;
+	// the early-outs make the per-map cost two GetArray calls when healthy.
+	if (!IsRunningDedicatedServer())
+	{
+		ScrubNoAliasIdentifiers();
+		GNCPNoAliasScrubMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&ScrubNoAliasIdentifiersOnLoad);
+	}
+
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
 	// Register the ticker ONLY when the arg is present, so there is zero overhead
 	// on normal launches. bShouldStopOnComma=false keeps a comma in the password.
@@ -833,6 +954,12 @@ void FNetcodePlus::ShutdownModule()
 	{
 		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPPreLoadMapHandle);
 		GNCPPreLoadMapHandle.Reset();
+	}
+
+	if (GNCPNoAliasScrubMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPNoAliasScrubMapHandle);
+		GNCPNoAliasScrubMapHandle.Reset();
 	}
 
 	IConsoleObject* Cmd = IConsoleManager::Get().FindConsoleObject(TEXT("weaponhand"));

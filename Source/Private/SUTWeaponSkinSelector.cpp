@@ -627,6 +627,8 @@ void SUTWeaponSkinSelector::LoadSettings()
 				ShockBeamColor = Parsed;
 			}
 		}
+		// Seed the BP-side apply gate (see header) so an existing True survives a save.
+		GConfig->GetBool(TEXT("WeaponSkinsPlus"), TEXT("CustomShockBeam"), bShockBeamCustomized, ModIniPath);
 		// Swatches re-poll via TAttribute on next paint — nothing to push.
 	}
 
@@ -690,6 +692,11 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	// reads back unchanged. Applies on next weapon spawn (BPs read at BeginPlay).
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("LGColor"),  *HitscanBeamColor.ToString(), ModIniPath);
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("ShockBeam"), *ShockBeamColor.ToString(),  ModIniPath);
+	// The shock BP only applies ShockBeam when this gate is True (see header) —
+	// written from the latched flag so saving unrelated settings never force-enables
+	// a custom beam for users who never picked a shock color.
+	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("CustomShockBeam"),
+		bShockBeamCustomized ? TEXT("True") : TEXT("False"), ModIniPath);
 
 	// Save hide states and skin selections to config only — no server RPCs.
 	// Skins apply on next spawn; hide states are client-local (checked in BringUp).
@@ -945,6 +952,11 @@ void SUTWeaponSkinSelector::OnHitscanColorCommitted(FLinearColor NewColor)
 void SUTWeaponSkinSelector::OnShockColorCommitted(FLinearColor NewColor)
 {
 	ShockBeamColor = NewColor;
+	// Picking a shock color IS the customization intent — latch the BP apply gate
+	// so the save writes CustomShockBeam=True (see header; the gate was previously
+	// never written by this selector, so the picked color silently did nothing for
+	// anyone the retired BP tool hadn't already flagged).
+	bShockBeamCustomized = true;
 }
 
 void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<void(FLinearColor)> OnCommit)

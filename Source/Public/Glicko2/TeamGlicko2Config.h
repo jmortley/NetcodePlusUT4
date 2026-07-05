@@ -98,8 +98,38 @@ namespace TeamGlicko2 {
     // a thrown win (good player, big-negative lobby impact) still nets a LOSS. A flat
     // win-floor was tried + rejected (it rescued throwers too). Keep the Django rebuild
     // ELIM_CARRY_WEIGHT in sync. Compile-time — retune = server rebuild, no Mod.ini knob.
+    // 2026-07-03 EXPECTATION-CENTERED re-fix (see TeamGlicko2System.cpp blend branch):
+    // the eff formula above is now centered on the player's Glicko expected score E
+    // instead of 0.5, with the impact term recentered on the LOBBY-MEAN impact so the
+    // carry channel is zero-sum per round — eff = clamp(E + kCarryWeight*(impact-
+    // meanImpact) + (1-kCarryWeight)*(outcome-0.5), 0, 1). The 0.5-centered form made
+    // every high-rated player bleed toward the lobby mean (score rating-agnostic, E
+    // rating-dependent; a 1688 regular ground to ~1475 in a week while mostly WINNING),
+    // and the un-recentered impact deflated whole lobbies (right-skewed round perf
+    // through a saturating logistic). Rank-order validation (Spearman 0.937) couldn't
+    // see either drift — it only checks ordering, not stationarity. Residual by design:
+    // the [0,1] clip is a soft one-sided ceiling for heavy favorites (E>~0.6), NOT
+    // symmetric there. kCarryWeight/kPerfSlope keep their meaning as the ADJUSTMENT
+    // weights around E.
     static const double kCarryWeight = 0.85;  // share of score from cross-lobby impact vs team W/L
     static const double kPerfSlope = 2.5;     // logistic steepness of the lobby-impact map
+
+    // 2026-07-04 PARTIAL OPPONENT-STRENGTH ANCHOR (see TeamGlicko2System.cpp).
+    // The pure centered blend is opponent-blind in the interior: impact is
+    // z-scored only vs the lobby actually played, so a strong-lobby-only
+    // regular (league player, e.g. BulkBogan) integrated to ~890 — far below
+    // any honest read — while underrated players climbed only by raw
+    // integration. eff gains a -kAnchorWeight*(E-0.5) restoring term pulling
+    // every rating toward its Glicko-consistent level FROM BOTH SIDES
+    // (overrated-average decays, underrated gets a boost). 0 = opponent-blind;
+    // 1 = the full legacy pull (the drift bug). LOCKED 0.6 from the 2026-07-04
+    // real-history sweep (0/0.25/0.4/0.6/0.8 on 2,900 matches): league
+    // regulars land ~1200, aurafarmer #18->#11, top re-compresses mildly.
+    // MUST equal ut4stats ELIM_ANCHOR_WEIGHT/WIPEOUT_ANCHOR_WEIGHT + the
+    // team_glicko2_port default. Equilibrium is granularity-independent
+    // (anchor and carry scale together), so per-round hub == per-match rebuild
+    // target; the hub just converges faster.
+    static const double kAnchorWeight = 0.6;
 
 
     // ========== Optional Rating Change Clamping ==========

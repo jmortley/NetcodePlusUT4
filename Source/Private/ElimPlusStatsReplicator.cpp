@@ -167,15 +167,37 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 
 		StatsEntries.Add(Entry);
 	}
+
+	// Server-side: keep the O(1) lookup in sync (clients refresh via OnRep_StatsEntries).
+	RebuildEntryIndex();
+}
+
+void AElimPlusStatsReplicator::RebuildEntryIndex()
+{
+	EntryIndexByPlayerId.Reset();
+	for (int32 i = 0; i < StatsEntries.Num(); ++i)
+	{
+		// Keep first-match semantics (matches the old linear scan) if two entries ever
+		// share a PlayerId (e.g. two bots with the same name → same "BOT:<name>" key).
+		if (!EntryIndexByPlayerId.Contains(StatsEntries[i].PlayerId))
+		{
+			EntryIndexByPlayerId.Add(StatsEntries[i].PlayerId, i);
+		}
+	}
+}
+
+void AElimPlusStatsReplicator::OnRep_StatsEntries()
+{
+	RebuildEntryIndex();
 }
 
 const FElimPlusStatsEntry* AElimPlusStatsReplicator::FindEntry(const FString& UniqueIdStr) const
 {
-	for (const FElimPlusStatsEntry& E : StatsEntries)
+	if (const int32* Idx = EntryIndexByPlayerId.Find(UniqueIdStr))
 	{
-		if (E.PlayerId == UniqueIdStr)
+		if (StatsEntries.IsValidIndex(*Idx))
 		{
-			return &E;
+			return &StatsEntries[*Idx];
 		}
 	}
 	return nullptr;

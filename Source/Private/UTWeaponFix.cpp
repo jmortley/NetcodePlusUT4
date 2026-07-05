@@ -63,12 +63,29 @@ static FORCEINLINE bool FireDbg()
 // PutDown / ServerStopFireFixed. No replicated/RPC change; pairs with ncp.FireDebug.
 static TAutoConsoleVariable<int32> CVarGhostFix(
     TEXT("ncp.GhostFix"), 0,
-    TEXT("Ghost-rocket-on-weapon-switch fix: 1=carry real held-fire across a switch (no phantom rocket/shock), 0=legacy. Off by default."),
+    TEXT("Ghost-rocket-on-weapon-switch fix: 1=carry real held-fire across a switch, 0=legacy. KNOWN ISSUE (live-confirmed 2026-07-05): 1 BREAKS consecutive held weapon switches (per-weapon held flag never arms on auto-fired weapons) — DO NOT ENABLE until the pawn-level v2. Off by default."),
     ECVF_Default);
 
 static FORCEINLINE bool GhostFix()
 {
     return CVarGhostFix.GetValueOnGameThread() > 0;
+}
+
+// Held-beam stall fix (shock "hold M1, nothing comes out"). A cross-mode press landing
+// inside the other mode's firing cycle used to be dropped with NO retry — input is
+// edge-triggered, so a HELD button never re-fires the request and the beam stalls until
+// re-press. Deterministic repro (captured [FireDbg] 2026-07-05): hold M2 to the edge of
+// the 2nd core, release, immediately hold M1. 1 = schedule the same retry the same-mode
+// cooldown path uses (fires at cycle end; released tap auto-cancels via StopFire's
+// unconditional retry-clear). 0 = legacy drop. Client-side, no replication, no bump.
+static TAutoConsoleVariable<int32> CVarCrossModeRetry(
+    TEXT("ncp.CrossModeRetry"), 1,
+    TEXT("Cross-mode held-fire retry (fixes the held-M1 shock beam stall after a ball): 1=queue a retry at the current cycle's end (default), 0=restore the legacy drop (kill-switch). Standalone-safe with ncp.GhostFix 0: the PutDown graduation skips cross-mode-armed retries (bCrossModeRetryArmed), so no ghost shot on a fast weapon switch."),
+    ECVF_Default);
+
+static FORCEINLINE bool CrossModeRetry()
+{
+    return CVarCrossModeRetry.GetValueOnGameThread() > 0;
 }
 
 // =========================================================================
@@ -240,6 +257,8 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     bHandlingRetry = false;
     bFireHeldByPlayer[0] = false;
     bFireHeldByPlayer[1] = false;
+    bCrossModeRetryArmed[0] = false;
+    bCrossModeRetryArmed[1] = false;
     HitScanPadding = 30.f;
     HitScanPaddingStationary = 10.0f;
 	FudgeFactorMs = 20;
@@ -610,6 +629,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                 RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
                 GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, 0.01f, false);
             }
+            if (FireModeNum < 2) { bCrossModeRetryArmed[FireModeNum] = false; }   // same-mode arm owns the handle now
             if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] mode=%d ON-COOLDOWN -> retry scheduled (delay=%.3f)"), FireModeNum, Delay);
         }
         return;
@@ -677,6 +697,48 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		// B) Legacy/Fallback Logic (Standard UT behavior)
 		if (CurrentState->IsFiring())
 		{
+			// Stall fix (ncp.CrossModeRetry): the StopFire(CurrentlyFiringMode) above does NOT
+			// exit the transactional firing state (the cycle runs out on its own timer), so a
+			// press landing in the refire tail still reaches here. Stock keeps PendingFire set
+			// and the Active-state pending check fires it at cycle end — but our
+			// DeferredGotoActiveState clears PendingFire on cooldown end (see the RETRY LOGIC
+			// comment above), so mirror the same-mode ON-COOLDOWN path instead: queue a retry
+			// for the moment every mode's refire has elapsed. A release before then cancels it
+			// (StopFire clears RetryFireHandle unconditionally) — tap behaves like stock too.
+			if (CrossModeRetry() && FireModeNum < 2 && UTOwner && UTOwner->IsLocallyControlled())
+			{
+				float MaxReadyTime = 0.f;
+				for (int32 i = 0; i < LastFireTime.Num(); i++)
+				{
+					if (LastFireTime[i] > 0.0f)
+					{
+						float ModeReadyTime = LastFireTime[i] + GetRefireTime(i);
+						if (ModeReadyTime > MaxReadyTime)
+						{
+							MaxReadyTime = ModeReadyTime;
+						}
+					}
+				}
+				if (EarliestFireTime > MaxReadyTime)
+				{
+					MaxReadyTime = EarliestFireTime;
+				}
+				const float Delay = FMath::Max(MaxReadyTime - GetWorld()->GetTimeSeconds(), 0.f) + 0.01f;
+				FTimerDelegate RetryDel;
+				RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
+				GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, Delay, false);
+				bCrossModeRetryArmed[FireModeNum] = true;   // legacy PutDown graduation must skip this arm
+				if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] mode=%d CROSS-MODE IsFiring -> retry queued in %.3fs (stall fix)"), FireModeNum, Delay);
+				// OnMultiPress only on the PHYSICAL press — a retry re-entry that lands while
+				// the state is still firing re-arms above but must not re-trigger the hook
+				// (stock fires it once per press; a re-triggering retry would mode-cycle/spam
+				// any weapon whose OnMultiPress does work, e.g. RL-style charged states).
+				if (!bHandlingRetry)
+				{
+					OnMultiPress(FireModeNum);
+				}
+				return;
+			}
 			if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] mode=%d CROSS-MODE IsFiring -> clear PendingFire + OnMultiPress + RETURN (no fire, NO retry queued)"), FireModeNum);
 			if (UTOwner) UTOwner->SetPendingFire(FireModeNum, false);
 			OnMultiPress(FireModeNum);
@@ -735,6 +797,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                 RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
                 // Add a tiny buffer (0.01s) to ensure the next frame's check passes
                 GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, Delay + 0.01f, false);
+                bCrossModeRetryArmed[FireModeNum] = false;   // same-mode arm owns the handle now
             }
         }
 
@@ -3121,9 +3184,20 @@ bool AUTWeaponFix::PutDown()
                 }
                 else if (GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]))
                 {
-                    // LEGACY (ncp.GhostFix=0): graduate the local retry timer to a Pawn flag
-                    UTOwner->SetPendingFire(i, true);
-                    UE_LOG(LogUTWeaponFix, Verbose, TEXT("PutDown: Transferring Retry %d to Pawn PendingFire"), i);
+                    // LEGACY (ncp.GhostFix=0): graduate the local retry timer to a Pawn flag.
+                    // NEVER graduate a cross-mode stall-fix retry (ncp.CrossModeRetry): that
+                    // arm covers a press landing in another mode's firing tail — the classic
+                    // tap-then-switch motion — and graduating it makes the next weapon fire a
+                    // shot the player never pressed (the exact ghost class GhostFix targets).
+                    if (!bCrossModeRetryArmed[i])
+                    {
+                        UTOwner->SetPendingFire(i, true);
+                        UE_LOG(LogUTWeaponFix, Verbose, TEXT("PutDown: Transferring Retry %d to Pawn PendingFire"), i);
+                    }
+                    else if (FireDbg())
+                    {
+                        UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] PutDown SKIP graduation of cross-mode retry mode=%d (stall-fix arm, not held intent)"), i);
+                    }
                 }
             }
         }

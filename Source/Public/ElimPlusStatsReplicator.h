@@ -54,9 +54,15 @@ class NETCODEPLUS_API AElimPlusStatsReplicator : public AInfo
 	GENERATED_UCLASS_BODY()
 
 public:
-	/** Replicated per-player stats array. Server writes, clients read. */
-	UPROPERTY(Replicated, Transient)
+	/** Replicated per-player stats array. Server writes, clients read. RepNotify rebuilds
+	 *  the O(1) PlayerId→index map the HUD reads (was a linear case-insensitive FString
+	 *  scan per pip, twice per pip, every frame). */
+	UPROPERTY(ReplicatedUsing=OnRep_StatsEntries, Transient)
 	TArray<FElimPlusStatsEntry> StatsEntries;
+
+	/** Client RepNotify: refresh the PlayerId→index lookup when StatsEntries replicates. */
+	UFUNCTION()
+	void OnRep_StatsEntries();
 
 	/** Mirror of AUTTeamGameMode::bBalanceTeams (parsed from the
 	 *  ?BalanceTeams=true|false URL flag in InitGame). Replicated so the
@@ -104,6 +110,13 @@ public:
 	bool IsBalanceTeamsActive() const { return bBalanceTeamsActive; }
 
 private:
+	/** PlayerId → index into StatsEntries. Rebuilt server-side at the end of
+	 *  UpdateFromPlayerStates and client-side in OnRep_StatsEntries, so FindEntry is
+	 *  an O(1) hash lookup instead of an O(n) linear scan per call. Not replicated —
+	 *  derived from StatsEntries on each side. Case-insensitive, matching FString==. */
+	TMap<FString, int32> EntryIndexByPlayerId;
+	void RebuildEntryIndex();
+
 	/** Server-only side caches populated by setters. Not replicated; values
 	 *  land in StatsEntries each Tick via UpdateFromPlayerStates. */
 	TMap<FString, float> PPRCurrentCache;

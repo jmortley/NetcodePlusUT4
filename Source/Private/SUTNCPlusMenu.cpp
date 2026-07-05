@@ -160,7 +160,10 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				.AutoWidth()
 				[
 					SNew(SButton)
-					.Text(FText::FromString(TEXT("Close")))
+					// "Cancel", not "Close" — this button DISCARDS unsaved checkbox
+					// edits (only Save persists + live-applies); "Close" read as
+					// "apply and dismiss" and users lost their changes.
+					.Text(FText::FromString(TEXT("Cancel")))
 					.OnClicked(this, &SUTNCPlusMenu::OnCloseClicked)
 				]
 			]
@@ -712,7 +715,12 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 				// M_OutlinePP rim is fixed screen-space width and reads too big on distant players;
 				// needs the material-edit width fix). Code stays live: dogfood via Mod.ini
 				// [ForceModels] Outline=true; re-expose by restoring the MakeFlagCheck slot.
-				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Cosmetics"), &FMConfig.bCosmetics) ]
+				// Label says what CHECKED does — the bare "Cosmetics" read as "show
+				// cosmetics" when checked actually STRIPS hats/eyewear/leader crown
+				// from force-modeled players (field confusion 2026-07-05: "crown not
+				// removed" = box unchecked, plus the separate Cosmetics launcher
+				// button in this same menu). Ini key [ForceModels] Cosmetics unchanged.
+				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Remove Cosmetics"), &FMConfig.bCosmetics) ]
 			]
 
 			// Style selector

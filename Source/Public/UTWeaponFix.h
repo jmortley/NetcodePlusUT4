@@ -310,6 +310,15 @@ protected:
     // PutDown switch boundary so held intent carries across a weapon switch WITHOUT
     // graduating a stale cooldown-retry into a phantom rocket/shock fire.
     bool bFireHeldByPlayer[2];
+
+    // True while RetryFireHandle[mode] is armed BY THE CROSS-MODE stall-fix block
+    // (ncp.CrossModeRetry) rather than the same-mode cooldown paths. The legacy
+    // (ncp.GhostFix=0) PutDown retry-graduation must NOT graduate these — a tapped
+    // cross-mode press followed by a fast weapon switch would become a ghost shot
+    // on the next weapon. Set only at the cross-mode arm site; every other arm site
+    // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
+    bool bCrossModeRetryArmed[2];
+
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
 

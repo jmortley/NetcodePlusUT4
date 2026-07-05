@@ -1,10 +1,13 @@
 // ============================================================================
 // Vendored from https://github.com/tronunator/Glicko2 @ a2db253b
 // © Tron (tronunator). No upstream LICENSE file at vendor time; included here
-// with author authorization (relayed via NetcodePlus author). Local
-// modifications: NONE — vendored verbatim. Cross-file includes resolved via
-// Plugins/NetcodePlus/Source/Public/Glicko2 added to NetcodePlus.Build.cs
-// PublicIncludePaths. Update: re-pull from upstream and re-vendor.
+// with author authorization (relayed via NetcodePlus author). LOCAL MODS (this
+// header): the bLobbyImpactBlend parameter on ProcessMatch (ElimPlus/Wipeout
+// carry-aware blend, expectation-centered 2026-07-03) — re-pulling upstream
+// verbatim would drop that API and break the ElimPlus/Wipeout callers.
+// Cross-file includes resolved via Plugins/NetcodePlus/Source/Public/Glicko2
+// added to NetcodePlus.Build.cs PublicIncludePaths. Update: re-pull from
+// upstream, re-vendor, then re-apply the LOCAL MODs.
 // ============================================================================
 #ifndef GLICKO2_INCLUDE_TEAMGLICKO2SYSTEM_H_
 #define GLICKO2_INCLUDE_TEAMGLICKO2SYSTEM_H_
@@ -44,8 +47,12 @@ namespace TeamGlicko2 {
         /// Process a match and update all player ratings
         /// @param match Match result with player ratings and performance scores
         /// @param bLobbyImpactBlend When true (ElimPlus/Wipeout), z-score perf
-        ///        across BOTH teams and blend it into the Glicko score
-        ///        (eff = kCarryWeight*logistic(kPerfSlope*z) + (1-kCarryWeight)*W/L).
+        ///        across BOTH teams and blend it into the Glicko score,
+        ///        CENTERED on the player's expected score E with a partial
+        ///        opponent-strength anchor (2026-07-03/04):
+        ///        eff = clamp(E - kAnchorWeight*(E-0.5)
+        ///                      + kCarryWeight*(impact - meanLobbyImpact)
+        ///                      + (1-kCarryWeight)*(W/L-0.5), 0, 1).
         ///        When false (default; 1v1 Duel/ShaftArena + CTF), use the
         ///        original within-team multiplicative performance scaler.
         /// This function modifies the rating member of each MatchPlayer in place
