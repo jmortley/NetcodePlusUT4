@@ -5,6 +5,9 @@
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
 #include "UTHUDWidgetMessage_KillIconMessages.h"   // killfeed special-case (KillIconWidget stomp bypass)
+#include "UTTeamPlayerStart.h"                     // warmup spawn markers (TeamNum coloring)
+#include "Engine/PlayerStartPIE.h"                 // warmup spawn markers (skip editor-only starts; 4.15 path is Engine/, not GameFramework/)
+#include "EngineUtils.h"                           // TActorIterator (warmup spawn markers)
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "UTPlayerState.h"
@@ -1446,6 +1449,95 @@ namespace NCPlusHUDDrawCall
 			DrawOutlinedText(Canvas, L.Font, L.Text, L.X, L.Y, L.Scale, L.Color, FLinearColor::Black, Op);
 		}
 
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
+
+	// =============================================================================
+	// Warmup spawn markers — learning aid (iCTF community ask, 2026-07-06): show
+	// EVERY placed PlayerStart during warmup so players can learn pre-aim angles
+	// and enemy approach lanes. LINE-OF-SIGHT ONLY (user call 2026-07-06): a
+	// visibility trace gates each marker so nothing renders through walls —
+	// warmup-only and dozens of traces at most, so the cost is negligible.
+	// Placed level actors exist client-side, so this is pure local drawing:
+	// no replication, no version bump.
+	// =============================================================================
+
+	static TAutoConsoleVariable<int32> CVarWarmupSpawns(
+		TEXT("ncp.WarmupSpawns"), 1,
+		TEXT("Warmup-only spawn-point markers (team-colored, through-wall, facing tick + distance). 1=on (default), 0=off."),
+		ECVF_Default);
+
+	void DrawWarmupSpawnMarkers(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (!HUD || !Canvas || !HUD->TinyFont) return;
+		if (CVarWarmupSpawns.GetValueOnGameThread() == 0) return;
+
+		UWorld* World = HUD->GetWorld();
+		if (!World) return;
+		AUTGameState* GS = World->GetGameState<AUTGameState>();
+		if (!GS || GS->GetMatchState() != MatchState::WaitingToStart) return;
+
+		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+		const float MarkSize = 14.f * RenderScale;
+		const FVector ViewLoc = (HUD->PlayerOwner && HUD->PlayerOwner->PlayerCameraManager)
+			? HUD->PlayerOwner->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
+
+		for (TActorIterator<APlayerStart> It(World); It; ++It)
+		{
+			APlayerStart* Start = *It;
+			if (!Start || Start->IsA(APlayerStartPIE::StaticClass())) continue;
+
+			const FVector Loc = Start->GetActorLocation();
+			const FVector Screen = Canvas->Project(Loc);
+			if (Screen.Z <= 0.f) continue;   // behind camera — no edge clamping, keep the view clean
+
+			// Line-of-sight gate: no through-wall markers. Blocked visibility
+			// trace from the camera to the spawn point = skip.
+			FCollisionQueryParams TraceParams(FName(TEXT("WarmupSpawnLOS")), /*bTraceComplex=*/ false);
+			if (HUD->PlayerOwner && HUD->PlayerOwner->GetPawn())
+			{
+				TraceParams.AddIgnoredActor(HUD->PlayerOwner->GetPawn());
+			}
+			if (World->LineTraceTestByChannel(ViewLoc, Loc, ECC_Visibility, TraceParams))
+			{
+				continue;
+			}
+
+			// Team color from AUTTeamPlayerStart (0=red, 1=blue); untagged/neutral = grey.
+			FLinearColor Col(0.75f, 0.75f, 0.75f, 0.9f);
+			if (const AUTTeamPlayerStart* TPS = Cast<AUTTeamPlayerStart>(Start))
+			{
+				if (TPS->TeamNum == 0)      { Col = FLinearColor(1.f, 0.25f, 0.25f, 0.9f); }
+				else if (TPS->TeamNum == 1) { Col = FLinearColor(0.2f, 0.4f, 1.f, 0.9f); }
+			}
+
+			// Facing tick: a short line toward where the spawned player will LOOK —
+			// half of pre-aiming is knowing which way they face when they appear.
+			const FVector FaceEnd = Loc + Start->GetActorForwardVector() * 220.f;
+			const FVector FaceScreen = Canvas->Project(FaceEnd);
+			if (FaceScreen.Z > 0.f)
+			{
+				FCanvasLineItem Line(FVector2D(Screen.X, Screen.Y), FVector2D(FaceScreen.X, FaceScreen.Y));
+				Line.SetColor(Col);
+				Line.LineThickness = 2.f * RenderScale;
+				Canvas->DrawItem(Line);
+			}
+
+			Canvas->SetLinearDrawColor(Col);
+			Canvas->DrawTile(Canvas->DefaultTexture,
+				Screen.X - MarkSize * 0.5f, Screen.Y - MarkSize * 0.5f,
+				MarkSize, MarkSize, 0, 0, 1, 1, BLEND_Translucent);
+
+			// Distance label — the depth cue that makes through-wall markers readable.
+			const int32 Meters = FMath::RoundToInt(FVector::Dist(ViewLoc, Loc) / 100.f);
+			const FString DistStr = FString::Printf(TEXT("%dm"), Meters);
+			float XL, YL;
+			Canvas->StrLen(HUD->TinyFont, DistStr, XL, YL);
+			const float TextScale = 0.8f * RenderScale;
+			DrawOutlinedText(Canvas, HUD->TinyFont, FText::FromString(DistStr),
+				Screen.X - XL * TextScale * 0.5f, Screen.Y + MarkSize * 0.6f,
+				TextScale, Col);
+		}
 		Canvas->SetLinearDrawColor(FLinearColor::White);
 	}
 

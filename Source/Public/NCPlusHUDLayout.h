@@ -390,6 +390,16 @@ namespace NCPlusHUDDrawCall
 	 *  (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD, class UCanvas* Canvas);
 
+	/** WARMUP-ONLY spawn-point markers (learning aid — pre-aim angles / enemy
+	 *  approach lanes): team-colored markers at every placed PlayerStart with a
+	 *  facing tick (the way a spawned player looks) and a distance label.
+	 *  LINE-OF-SIGHT ONLY — a visibility trace gates each marker, nothing draws
+	 *  through walls. Placed level actors exist client-side, so this is pure
+	 *  local drawing — no replication, no server involvement, no version bump.
+	 *  Self-gates to MatchState::WaitingToStart + cvar ncp.WarmupSpawns (default
+	 *  on); caller should skip while the scoreboard is up. */
+	NETCODEPLUS_API void DrawWarmupSpawnMarkers(class AUTHUD* HUD, class UCanvas* Canvas);
+
 	/** Replay-only corner feed of fire-validation samples. No-op unless a demo is
 	 *  playing back. Reads the server-written FireVal_*.csv (newest in Saved/Logs, or
 	 *  the path in the `ncp.FireValReplayCsv` cvar) and draws each shot synced to the

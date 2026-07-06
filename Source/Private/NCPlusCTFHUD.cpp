@@ -242,6 +242,9 @@ void ANCPlusCTFHUD::DrawHUD()
 	if (GS && !ScoreboardIsUp())
 	{
 		DrawSpectatorTarget();
+		// Warmup-only spawn-point markers (learning aid) — self-gates to
+		// WaitingToStart + ncp.WarmupSpawns, so this is a no-op in live play.
+		NCPlusHUDDrawCall::DrawWarmupSpawnMarkers(this, Canvas);
 	}
 
 	// Held-pickup status (amp/berserk/siphon countdown + boot charges) — NCPlus mode only.
