@@ -213,8 +213,10 @@ public:
 
     /** Half-width (seconds) of the server-side bidirectional time-search fallback in
      *  HitScanTrace, used when the client claimed a hit the primary rewind missed.
-     *  Per-weapon overridable. Base 30ms; shock/instagib widen to 45ms. */
-    virtual float GetHitscanTimeSearchWindow() const { return 0.030f; }
+     *  Per-weapon overridable. Standard 45ms for ALL hitscan (2026-07-07: sniper/LG
+     *  raised from 30ms to match the shock family — the search probes fixed 15ms
+     *  rungs {15,30,45}, so 45 is the last rung before the ±60 defender tradeoff). */
+    virtual float GetHitscanTimeSearchWindow() const { return 0.045f; }
     virtual void FireShot() override;
 
     // Guard against race condition: replicated fire RPC arrives after owner dies

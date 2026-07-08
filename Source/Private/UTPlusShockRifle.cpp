@@ -187,14 +187,6 @@ float AUTPlusShockRifle::GetHitValidationPredictionTime() const
 	return Super::GetHitValidationPredictionTime();
 }
 
-float AUTPlusShockRifle::GetHitscanTimeSearchWindow() const
-{
-	// Widen the server-side bidirectional time-search fallback to 45ms (half-window) for
-	// the shock family (this class + the BP instagib rifle child). Recovers high-ping
-	// claimed hits on the ~5% smaller iCTF hitbox; other weapons keep the base 30ms.
-	return 0.045f;
-}
-
 bool AUTPlusShockRifle::WaitingForCombo()
 {
 	if (ComboTarget != NULL && !ComboTarget->IsPendingKillPending() && !ComboTarget->bExploded)
