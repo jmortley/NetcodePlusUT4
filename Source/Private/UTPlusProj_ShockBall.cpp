@@ -42,6 +42,24 @@ static TAutoConsoleVariable<float> CVarShockMatchFakeDot(
 	TEXT("CanMatchFake direction gate (dot). 0.5=shipped (~60deg), 0.95=stock (~18deg: rejects divergent fake/real pairs)."),
 	ECVF_Default);
 
+// FAKE-THEFT FIX (2026-07-08). Captured live: a foreign core 3498u away paired with the local
+// fake at dot 0.8571 (gate 0.5), was teleported onto it and rewrote its velocity — the
+// long-reported "curve/swoosh"; the correct real arrived 57ms later, found its fake stolen,
+// and stayed visible (double core / stuck-then-vanished family). Root: the stock pairing loop
+// (UTProjectile.cpp:290-322) gates on class + CanMatchFake only, and foreign cores fall into
+// the LOCAL player's fake list because a remote InstigatorController never exists on this
+// client (UTProjectile.cpp:275 falls back to the first local PC). Two new gates, individually
+// kill-switchable, client-side only, no version bump.
+static TAutoConsoleVariable<int32> CVarShockMatchFakeInstigator(
+	TEXT("ncp.ShockMatchFakeInstigator"), 1,
+	TEXT("CanMatchFake instigator gate. 1=on (default): a replicated core may only pair with a fake fired by the SAME pawn; rejects (fail-closed) when either Instigator is null - a null on the real means the shooter's pawn hasn't resolved on this client, i.e. a foreign core, exactly the fake-theft population. 0=off (pre-fix behaviour: any local fake can be stolen)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarShockMatchFakeMaxDist(
+	TEXT("ncp.ShockMatchFakeMaxDist"), 1000.f,
+	TEXT("CanMatchFake max fake<->real distance in units, measured post-CatchupTick (healthy own pairs measure 21-26u; consecutive shots sit >=~1450u apart). Rejects same-instigator stale/ghost fakes the instigator gate can't see. Kept loose on purpose: after burst packet loss the RELIABLE ServerStartFireFixed channel retransmit delivers a legit real unboundedly late (~480-1200u separation; the proactive +40/+80ms resends only cover ~100-220u) - do NOT tighten below ~1000 unless live inst-ok/dist-FAIL captures prove those are wrong-pairs, not retransmit reals. <=0 disables this gate and the no-progress staleness gate."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarShockServerTickHz(
 	TEXT("ncp.ShockServerTickHz"), 0,
 	TEXT("Server shock-core tick rate. 0=240Hz (shipped); >0=that Hz (clamped 30..720); <0=unset/tick-every-frame (stock-like). Read at spawn — set BEFORE firing."),
@@ -212,6 +230,15 @@ void AUTPlusProj_ShockBall::BeginPlay()
 	bHasCachedFireDirection = false;
 	StuckTime = 0.f;
 	LastStuckProgressLoc = GetActorLocation();
+
+	// Curve diagnostics state (ncp.ShockDebug) — see Tick / PostNetReceiveVelocity.
+	FireLineOrigin = GetActorLocation();
+	NextCurveLatLog = 20.f;
+	NextCurveVelDegLog = 3.f;
+	ConvergePullAccum = FVector::ZeroVector;
+	NextConvergePullLog = 25.f;
+	FirstRepVelDir = FVector::ZeroVector;
+	bLoggedFirstRepVel = false;
 	if (ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero())
 	{
 		OriginalFireDirection = ProjectileMovement->Velocity.GetSafeNormal();
@@ -252,6 +279,44 @@ void AUTPlusProj_ShockBall::BeginPlay()
 void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// CURVE diagnostics (ncp.ShockDebug, FAKE only — the core the shooter actually sees).
+	// Two independent signals, each event-gated by a doubling threshold so a straight core
+	// logs NOTHING and a bending one traces its bend in a handful of lines:
+	//  - CURVE-LAT: perpendicular distance of the fake from the original fire LINE. The
+	//    convergence pull below moves the fake via AddActorWorldOffset — position only,
+	//    velocity untouched — so no velocity check can ever see it. This is the signal
+	//    that catches a convergence-driven swoosh.
+	//  - CURVE-VEL: heading deviation of the fake's VELOCITY from OriginalFireDirection.
+	//    Only meaningful while ncp.ShockDriftCorrect=0 (bisect mode): with the re-assert
+	//    on, velocity is snapped back to the fire line every tick and this can only ever
+	//    see a single tick of PMC float error.
+	if (ShockDbg() && bFakeClientProjectile && bHasCachedFireDirection && ProjectileMovement && !bExploded)
+	{
+		const FVector Rel = GetActorLocation() - FireLineOrigin;
+		const float Fwd = Rel | OriginalFireDirection;
+		const float Lat = (Rel - Fwd * OriginalFireDirection).Size();
+		if (Lat >= NextCurveLatLog)
+		{
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] CURVE-LAT fake lat=%.1f fwd=%.1f @%s fireDir=%s converge=%d driftCorrect=%d age=%.3f"),
+				Lat, Fwd, *GetActorLocation().ToString(), *OriginalFireDirection.ToString(),
+				CVarShockConverge.GetValueOnGameThread(), CVarShockDriftCorrect.GetValueOnGameThread(),
+				GetWorld()->GetTimeSeconds() - CreationTime);
+			while (Lat >= NextCurveLatLog) { NextCurveLatLog *= 2.f; }
+		}
+		if (!ProjectileMovement->Velocity.IsNearlyZero())
+		{
+			const float VelDot = ProjectileMovement->Velocity.GetSafeNormal() | OriginalFireDirection;
+			const float VelDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(VelDot, -1.f, 1.f)));
+			if (VelDeg >= NextCurveVelDegLog)
+			{
+				UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] CURVE-VEL fake deg=%.2f velDir=%s fireDir=%s driftCorrect=%d age=%.3f"),
+					VelDeg, *ProjectileMovement->Velocity.GetSafeNormal().ToString(), *OriginalFireDirection.ToString(),
+					CVarShockDriftCorrect.GetValueOnGameThread(), GetWorld()->GetTimeSeconds() - CreationTime);
+				while (VelDeg >= NextCurveVelDegLog) { NextCurveVelDegLog *= 2.f; }
+			}
+		}
+	}
 
 	// Drift correction: floating-point accumulation in ProjectileMovementComponent
 	// rotates the velocity direction slightly per tick; over a slow shock ball's long
@@ -383,6 +448,24 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 			const float Alpha = FMath::Clamp(DeltaTime / ConvergeTime, 0.f, 1.f);
 			const FVector Correction = Delta * Alpha;
 			MyFakeProjectile->AddActorWorldOffset(Correction, false, nullptr, ETeleportType::TeleportPhysics);
+
+			// CURVE diagnostics: total pull the convergence has applied to the fake this
+			// flight. A sustained one-sided pull (real walking away on a diverged heading,
+			// converge dragging the fake after it) is the leading unlogged bend mechanism —
+			// pairs with the fake's CURVE-LAT lines. Doubling threshold, same as the rest.
+			if (ShockDbg())
+			{
+				ConvergePullAccum += Correction;
+				const float Pulled = ConvergePullAccum.Size();
+				if (Pulled >= NextConvergePullLog)
+				{
+					UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] CONVERGE-PULL accum=%.1f pullDir=%s realFakeDist=%.1f fake@%s age=%.3f"),
+						Pulled, *ConvergePullAccum.GetSafeNormal().ToString(), DeltaSize,
+						*MyFakeProjectile->GetActorLocation().ToString(),
+						GetWorld()->GetTimeSeconds() - CreationTime);
+					while (Pulled >= NextConvergePullLog) { NextConvergePullLog *= 2.f; }
+				}
+			}
 		}
 	}
 
@@ -441,6 +524,43 @@ void AUTPlusProj_ShockBall::OnRep_Slomo()
 void AUTPlusProj_ShockBall::PostNetReceiveVelocity(const FVector& NewVelocity)
 {
 	Super::PostNetReceiveVelocity(NewVelocity);
+
+	// CURVE diagnostics: the SERVER's heading as replicated (shock movement replicates at
+	// spawn/stop/explode only, so this is cheap). Runs before the pairing early-return on
+	// purpose — an unpaired real (e.g. a CanMatchFake reject at ncp.ShockMatchFakeDot 0.95)
+	// must still log. First non-stop update = the heading the server actually fired on;
+	// compared against the fake's TRUE fire line this measures client/server aim mismatch
+	// directly (velocity quantization cannot produce whole degrees at 2415u/s). A later
+	// non-stop update on a different heading = the server core itself bent mid-flight —
+	// should never happen; if that line ever fires the cause is server-side.
+	if (ShockDbg() && GetNetMode() == NM_Client && !bFakeClientProjectile && !NewVelocity.IsNearlyZero(2.0f))
+	{
+		const FVector NewDir = NewVelocity.GetSafeNormal();
+		if (!bLoggedFirstRepVel)
+		{
+			bLoggedFirstRepVel = true;
+			FirstRepVelDir = NewDir;
+			AUTPlusProj_ShockBall* Fake = Cast<AUTPlusProj_ShockBall>(MyFakeProjectile);
+			const bool bHaveFakeDir = (Fake && Fake->bHasCachedFireDirection);
+			const float FakeDot = bHaveFakeDir ? (NewDir | Fake->OriginalFireDirection) : 0.f;
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV first-vel dotVsFakeFireDir=%.4f deg=%.2f repDir=%s paired=%d age=%.3f"),
+				bHaveFakeDir ? FakeDot : -2.f,
+				bHaveFakeDir ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FakeDot, -1.f, 1.f))) : -1.f,
+				*NewDir.ToString(), MyFakeProjectile ? 1 : 0, GetWorld()->GetTimeSeconds() - CreationTime);
+		}
+		else
+		{
+			const float ChangeDot = NewDir | FirstRepVelDir;
+			if (ChangeDot < 0.99939f) // > ~2deg heading change between replicated updates
+			{
+				UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV heading-change deg=%.2f prev=%s new=%s age=%.3f"),
+					FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(ChangeDot, -1.f, 1.f))),
+					*FirstRepVelDir.ToString(), *NewDir.ToString(), GetWorld()->GetTimeSeconds() - CreationTime);
+				// Re-baseline so a sustained bend logs once per change, not once per update.
+				FirstRepVelDir = NewDir;
+			}
+		}
+	}
 
 	if (GetNetMode() != NM_Client || bFakeClientProjectile || !MyFakeProjectile || MyFakeProjectile->IsPendingKillPending())
 	{
@@ -508,20 +628,94 @@ void AUTPlusProj_ShockBall::Explode_Implementation(const FVector& HitLocation, c
 
 bool AUTPlusProj_ShockBall::CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const
 {
-	// Relaxed direction check for shock balls. The stock 0.95 dot product threshold
-	// is too strict when the cached transactional rotation differs slightly from the
-	// server's (sub-frame mouse jitter, network quantization). At 2415 u/s with
-	// typically one core in flight, 0.5 (~60 degrees) prevents double-core visuals
-	// while still rejecting obviously wrong matches.
+	// The call site null-checks every candidate (UTProjectile.cpp:293) — stay defensive anyway.
+	if (InFakeProjectile == nullptr)
+	{
+		return false;
+	}
+
+	// Never match an exploded-but-not-yet-destroyed fake: the caller consumes the pairing
+	// (RemoveAt, UTProjectile.cpp:325) BEFORE BeginFakeProjectileSynch bails on a corpse
+	// (:373-377), so accepting one burns the real's only pairing chance on a dead fake and
+	// leaves the real permanently visible.
+	if (InFakeProjectile->bExploded)
+	{
+		if (ShockDbg())
+		{
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/%s] CanMatchFake reject fakeProj=%s bExploded"),
+				ShockDbgSide(this), *InFakeProjectile->GetName());
+		}
+		return false;
+	}
+
+	// GATE 1 — direction. Relaxed 0.5 (~60deg) vs stock 0.95 for sub-frame rotation and
+	// quantization differences between the cached transactional rotation and the server's.
+	// Tertiary now that gates 2/3 exist; healthy pairs measure dot=1.0000, so tightening
+	// toward 0.95 is a live-cvar experiment before any default change.
 	const float Dot = (InFakeProjectile->GetVelocity().GetSafeNormal() | VelDir);
 	const float MatchGate = FMath::Clamp(CVarShockMatchFakeDot.GetValueOnGameThread(), -1.f, 1.f);
-	const bool bMatch = (Dot > MatchGate);
+	const bool bDotOK = (Dot > MatchGate);
+
+	// GATE 2 — instigator equality, FAIL-CLOSED on null (the fake-theft fix, see the cvar
+	// comment block up top). AActor::Instigator is replicated and applied before the
+	// BeginPlay pairing loop runs, so equality against the fake's Instigator (always the
+	// local pawn: Params.Instigator = UTOwner at spawn) is decidable here. A null
+	// real-Instigator means the shooter's pawn hasn't resolved on this client — that IS
+	// the foreign-theft population, so null rejects. null==null also rejects: a GC-nulled
+	// fake (owner died in flight) meeting an unresolved foreign core is not a pair. Own
+	// reals can't arrive null outside shooter-already-dead edges, where one transient
+	// unpaired-but-visible core is the correct conservative outcome.
+	const bool bInstGateOn = (CVarShockMatchFakeInstigator.GetValueOnGameThread() != 0);
+	const bool bInstOK = !bInstGateOn
+		|| (Instigator != nullptr && InFakeProjectile->Instigator == Instigator);
+
+	// GATE 3 — max distance, post-CatchupTick (UTProjectile.cpp:279-283 runs before the
+	// pairing loop). Backstop for same-instigator stale fakes gate 2 is blind to:
+	// server-rejected fires leave ghost fakes flying their full lifespan kilounits downrange.
+	const float MaxDist = CVarShockMatchFakeMaxDist.GetValueOnGameThread();
+	const float Dist = FVector::Dist(InFakeProjectile->GetActorLocation(), GetActorLocation());
+	const bool bDistOK = (MaxDist <= 0.f) || (Dist <= MaxDist);
+
+	// GATE 3b — staleness/progress. An EMBEDDED ghost fake defeats all three gates above:
+	// same instigator, drift-correct holds its heading at dot~1.0 (the embed-skip and stuck
+	// force-explode are authority-only, so client fakes keep re-asserting full speed), and
+	// it is wedged against the very wall the player refires at, so distance passes. It is
+	// the one candidate whose displacement-from-spawn sits grossly below speed*age — a
+	// free-flying fake (including one pairing late off a reliable-channel retransmit)
+	// always shows ~full progress. The age floor keeps every fresh pair untouched.
+	// Shares the MaxDist kill-switch (<=0 disables both).
+	bool bStaleOK = true;
+	float FakeAge = 0.f;
+	float FakeDisp = -1.f;
+	const AUTPlusProj_ShockBall* FakeShock = Cast<AUTPlusProj_ShockBall>(InFakeProjectile);
+	if (FakeShock != nullptr && GetWorld() != nullptr)
+	{
+		FakeAge = GetWorld()->GetTimeSeconds() - InFakeProjectile->CreationTime;
+		FakeDisp = FVector::Dist(InFakeProjectile->GetActorLocation(), FakeShock->FireLineOrigin);
+		if (MaxDist > 0.f && FakeAge > 0.3f)
+		{
+			const float ExpectedDisp = InFakeProjectile->GetVelocity().Size() * FakeAge;
+			bStaleOK = (FakeDisp >= 0.25f * ExpectedDisp);
+		}
+	}
+
+	const bool bMatch = bDotOK && bInstOK && bDistOK && bStaleOK;
+
 	if (ShockDbg())
 	{
-		// A match landing in 0.5-0.95 is one stock (0.95) would have REJECTED — seeds a diverged pair.
-		UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/%s] CanMatchFake %s dot=%.4f (gate %.2f) fakeRealDist=%.1f"),
-			ShockDbgSide(this), bMatch ? TEXT("ACCEPT") : TEXT("reject"), Dot, MatchGate,
-			InFakeProjectile ? FVector::Dist(InFakeProjectile->GetActorLocation(), GetActorLocation()) : -1.f);
+		// Per-gate verdicts + fake age/displacement. The residual wrong-pair classes
+		// (late-retransmit real vs stale ghost) read identical on dot/dist/inst and differ
+		// ONLY on age/progress, so captures need both fields to be attributable.
+		UE_LOG(LogShockDbg, Warning,
+			TEXT("[ShockDbg/%s] CanMatchFake %s dot=%.4f (gate %.2f %s) dist=%.1f (max %.0f %s) inst=%s real=%s fake=%s fakeAge=%.3f fakeDisp=%.1f stale=%s fakeProj=%s"),
+			ShockDbgSide(this), bMatch ? TEXT("ACCEPT") : TEXT("reject"),
+			Dot, MatchGate, bDotOK ? TEXT("ok") : TEXT("FAIL"),
+			Dist, MaxDist, bDistOK ? TEXT("ok") : TEXT("FAIL"),
+			!bInstGateOn ? TEXT("off") : (bInstOK ? TEXT("ok") : TEXT("FAIL")),
+			Instigator ? *Instigator->GetName() : TEXT("null"),
+			InFakeProjectile->Instigator ? *InFakeProjectile->Instigator->GetName() : TEXT("null"),
+			FakeAge, FakeDisp, bStaleOK ? TEXT("ok") : TEXT("FAIL"),
+			*InFakeProjectile->GetName());
 	}
 	return bMatch;
 }

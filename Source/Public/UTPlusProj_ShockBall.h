@@ -64,6 +64,24 @@ protected:
 	/** Max net movement (units) over the debounce window that still counts as "not travelling". */
 	static constexpr float StuckProgressThreshold = 6.f;
 
+	// ---- Curve diagnostics (ncp.ShockDebug) — logging state only, zero behaviour change ----
+	// The open-air mid-flight bend ("swoosh") has never been captured because every existing
+	// log line is tied to a stop/hit/reveal event. These track the flight itself, event-gated
+	// by doubling thresholds so a straight core logs nothing. See Tick/PostNetReceiveVelocity.
+	/** Spawn location = origin of the original fire line (lateral offset is measured from this ray). */
+	FVector FireLineOrigin;
+	/** Next lateral-offset-from-fire-line (units) that triggers a CURVE-LAT log; doubles each log. */
+	float NextCurveLatLog;
+	/** Next velocity-heading deviation (degrees) that triggers a CURVE-VEL log; doubles each log. */
+	float NextCurveVelDegLog;
+	/** Vector sum of convergence corrections applied to the fake (lives on the REAL instance). */
+	FVector ConvergePullAccum;
+	/** Next accumulated-pull magnitude (units) that triggers a CONVERGE-PULL log; doubles each log. */
+	float NextConvergePullLog;
+	/** First non-stop replicated velocity heading (REAL instance) — baseline for mid-flight heading changes. */
+	FVector FirstRepVelDir;
+	bool bLoggedFirstRepVel;
+
 public:
 	virtual bool CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const override;
 
