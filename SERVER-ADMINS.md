@@ -318,6 +318,13 @@ weapon stuff, etc.) belong to **other** mutators/paks and are not covered here.
 | `CaptainPauseCooldownSec` | int | `8` | server | Min unpaused seconds between captain pauses (0 = no cooldown). |
 | `UnpauseCountdownSec` | int | `7` | server | "Resuming in N…" countdown before an unpause takes effect (0 = instant). |
 | `VersionReportTimeoutSec` | float | `100.0` | server | Grace window for a joining client to report its plugin build (clamped 1–120). *Mismatch* kicks always fire; the *no‑reply* timeout kick is currently disabled. |
+| `ElimEnableAntiCamp` | bool | `true` | server | **ElimPlus only.** Enable the anti-camp watch (flags a player who holds a tight box). Detection is C++; the warn/response is Blueprint. |
+| `ElimCampThreshold` | float | `400` | server | **ElimPlus.** Box radius/extent (uu) a player must stay within to be flagged. |
+| `ElimCampCheckInterval` | float | `1.0` | server | **ElimPlus.** Seconds between camp position samples. `0` disables the camp timer entirely. |
+| `ElimCampWarnCooldown` | float | `5.0` | server | **ElimPlus.** Minimum seconds between camp warnings for a player. |
+| `ElimUnevenHealthScaling` | bool | `true` | server | **ElimPlus.** On uneven team counts, spawn the short-handed team tougher / the larger team softer. |
+| `ElimUnevenHealthPct` | float | `5.0` | server | **ElimPlus.** Spawn-health swing per missing player (4v5 = ±5%, 4v6 = ±10% …), capped ±50%. |
+| `ElimMidGameShuffle` | bool | `true` | server | **ElimPlus.** Re-shuffle teams by PPR on an exact 6-0 blowout (non-PUG + `?BalanceTeams` only; once per match, applied at the next round). |
 
 ### 5.2 `[UTPUGS_STATS]` — CTF rating, respawn, auto‑pause, ELO upload
 
@@ -406,6 +413,11 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 > The rocket trio `MaxWindowMs` / `GraceMs` / `MaxPingMs` are meant to be kept **matched** (defaults
 > 200/200/150). Bumping `ut.RocketLagCompMaxPingMs` to 150 is the live fix for high‑ping no‑reg.
 
+> **Compiled default (not a cvar):** the server‑side hitscan **time‑search fallback** — the ±window the
+> server sweeps after primary capsule rewind to catch a client‑claimed hit inside the jitter window — is
+> now **±45 ms in fixed 15 ms rungs (±15 / ±30 / ±45), uniform across every weapon** (it was 30 ms base,
+> with shock the only 45 ms exception). It's baked into the build; there is no runtime knob for it.
+
 ### 6.2 Client‑side (rendering / prediction — for player support)
 
 These are set by players, not the server, but admins should know them for troubleshooting:
@@ -421,6 +433,12 @@ These are set by players, not the server, but admins should know them for troubl
 | `ncp.HideArmorShield` | `0` | Force Models: hide the armour shield overlay instead of recolouring it. |
 | `ncp.DebugHeads` | `0` | Draw the headshot sphere (green) vs mesh head (red) — calibration aid for `ncp.HeadCapsuleDrop`. |
 | `ncp.FlagDebug` | `0` | Log CTF flag/mesh state (~1.5 s) for Force Models flag‑recolour debugging. |
+| `ncp.CrossModeRetry` | `1` | Re‑fire a held primary that landed mid‑cycle after a shock ball / cross‑mode switch (fixes the "hold M1, nothing comes out" beam stall). `0` = legacy drop (kill‑switch). |
+| `ncp.GhostFix` | `0` | **Leave at 0 — do not enable.** Parked held‑fire‑across‑switch experiment; the current version breaks consecutive held weapon switches. A pawn‑level v2 is pending. |
+| `ncp.FireDebug` | `0` | Client fire‑input diagnostics: `1` logs every StartFire / StopFire / retry decision (traces the held‑M1 beam stall). Pure logging, no behaviour change. |
+| `ncp.ShockConverge` | `1` | Client fake→real shock‑ball convergence interp (the ~700 ms, 60 uu‑capped pull of the rendered fake toward the real). `0` = fake renders its own predicted path. |
+| `ncp.ShockHandoff` | `1` | Client stuck‑ball handoff: when the real ball stops, destroy the fake and reveal the real so the shooter sees the stop. `0` = no reveal. |
+| `ncp.WarmupSpawns` | `1` | Warmup‑only spawn‑point markers (team‑colored, facing tick + distance) in CTF / iCTF, as a learning aid. `0` = off. |
 
 ---
 
@@ -701,11 +719,20 @@ other NetcodePlus gamemodes (no `SetNetSpeed` — it's a native gamemode).
 ## 12. Keeping a hub updated
 
 The plugin's signed manifest lists the current build's URL + SHA‑256. These scripts read it, verify the
-download, back up the old plugin, and extract the new one. They only touch the **NetcodePlus plugin** —
+download, back up the old plugin **outside `Plugins/`**, and extract the new one. They only touch the **NetcodePlus plugin** —
 update StatSQL/ServerShield from their release (§10) when a matched pair is published.
 
 **Ready‑to‑run copies live in [`tools/`](tools/):** [`tools/update-hub.sh`](tools/update-hub.sh) (Linux)
 and [`tools/update-hub.ps1`](tools/update-hub.ps1) (Windows) — identical to the listings below.
+
+> **Why the backup lands in a sibling `PluginBackups/`, not next to the plugin:** UE4 scans *everything*
+> under `Plugins/` for `.uplugin` files. A leftover `NetcodePlus.bak.*` **inside** `Plugins/` is a second
+> copy of the plugin — on Linux the scan order is arbitrary, so the stale backup can be discovered first
+> and **shadow the live plugin** (you'll see a `second location will be ignored` line in the log and the
+> server silently keeps running the OLD DLL). The scripts move the old build to
+> `<UnrealTournament install>/UnrealTournament/PluginBackups/` (a sibling of `Plugins/`), sweep any legacy
+> in‑`Plugins/` backups out on the way, and keep the two most recent. Older copies of these scripts kept
+> the backup in `Plugins/` — if you ran one, the next run relocates that stray for you.
 
 > The canonical trust root is the launcher's minisign‑signed manifest. These scripts verify the
 > **SHA‑256** from that manifest (fetched over HTTPS), which is enough for a server‑side convenience
@@ -735,9 +762,26 @@ curl -fsSL "$URL" -o "$tmp/ncp.zip"
 echo "${SHA}  ${tmp}/ncp.zip" | sha256sum -c -
 
 dest="$PLUGINS_DIR/NetcodePlus"
-[ -d "$dest" ] && mv "$dest" "${dest}.bak.$(date +%Y%m%d%H%M%S)"
+# Backups must live OUTSIDE Plugins/: UE4 scans everything under Plugins/ for
+# .uplugin files, and on Linux directory order is arbitrary — a leftover
+# NetcodePlus.bak.* INSIDE Plugins/ can be discovered first, shadowing the real
+# plugin ("second location will be ignored") so the server silently runs the
+# OLD DLL. Same failure class as the launcher's client-side .old leftovers.
+backup_root="$(dirname "$PLUGINS_DIR")/PluginBackups"
+mkdir -p "$backup_root"
+
+# Sweep legacy in-Plugins backups left by older versions of this script.
+for old in "$PLUGINS_DIR"/NetcodePlus.bak.*; do
+  [ -d "$old" ] && mv "$old" "$backup_root/" && echo "Relocated legacy backup: $(basename "$old")"
+done
+
+[ -d "$dest" ] && mv "$dest" "$backup_root/NetcodePlus.bak.$(date +%Y%m%d%H%M%S)"
 mkdir -p "$dest"
 unzip -q "$tmp/ncp.zip" -d "$dest"
+
+# Keep the two newest backups, prune the rest.
+ls -1dt "$backup_root"/NetcodePlus.bak.* 2>/dev/null | tail -n +3 | xargs -r rm -rf
+
 echo "Installed build $VER -> $dest . Restart the server."
 ```
 
@@ -762,9 +806,24 @@ try {
     if ($got -ne $p.sha256.ToLower()) { throw "SHA-256 mismatch: expected $($p.sha256), got $got" }
 
     $dest = Join-Path $PluginsDir 'NetcodePlus'
-    if (Test-Path $dest) { Rename-Item $dest "NetcodePlus.bak.$(Get-Date -Format yyyyMMddHHmmss)" }
+    # Backups must live OUTSIDE Plugins\: UE4 scans everything under Plugins\
+    # for .uplugin files — a leftover NetcodePlus.bak.* inside it can shadow
+    # the real plugin and the server silently runs the OLD DLL.
+    $backupRoot = Join-Path (Split-Path $PluginsDir -Parent) 'PluginBackups'
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+
+    # Sweep legacy in-Plugins backups left by older versions of this script.
+    Get-ChildItem -Path $PluginsDir -Directory -Filter 'NetcodePlus.bak.*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Host "Relocated legacy backup: $($_.Name)"; Move-Item $_.FullName $backupRoot }
+
+    if (Test-Path $dest) { Move-Item $dest (Join-Path $backupRoot "NetcodePlus.bak.$(Get-Date -Format yyyyMMddHHmmss)") }
     New-Item -ItemType Directory -Path $dest | Out-Null
     Expand-Archive -Path $zip -DestinationPath $dest -Force
+
+    # Keep the two newest backups, prune the rest.
+    Get-ChildItem -Path $backupRoot -Directory -Filter 'NetcodePlus.bak.*' |
+        Sort-Object Name -Descending | Select-Object -Skip 2 | Remove-Item -Recurse -Force
+
     Write-Host "Installed build $($p.version) -> $dest . Restart the server."
 }
 finally { Remove-Item $tmp -Recurse -Force }
@@ -777,8 +836,12 @@ finally { Remove-Item $tmp -Recurse -Force }
 These live in each **player's** Mod.ini and are set in‑game (F5 menu / `mutate` commands). Listed so
 admins understand what's player‑side vs server‑side. None of these are server‑enforced.
 
-- **`[NetcodePlus]`** (client): `StockBottomBar` (use stock HUD bar), `HighResScreenshotPostMatch`,
-  `OwnFootstepVolume` (iCTF own‑footstep volume).
+- **`[NetcodePlus]`** (client): `StockBottomBar` (use the stock bottom HUD bar instead of the NCPlus one),
+  `StockTeamPanel` (stock slanted team‑roster panel instead of the portrait strip), `ScoreboardOpacity`
+  (scoreboard background alpha, default `0.3`, clamped 0.05–1.0), `HighResScreenshotPostMatch`,
+  `OwnFootstepVolume` (iCTF own‑footstep volume). The three HUD toggles are written by the in‑game HUD
+  editor (`nchud`), which also repositions stock widgets — including the **killfeed**, which now holds its
+  custom spot mid‑match. A fresh install with no saved layout defaults to the stock bar/panel.
 - **`[InstagibCTF]`** (client): `RagdollTime`, `bAllowGib`, `bShowRagdoll` (corpse/ragdoll behavior).
 - **`[ForceModels]`** (client): `Enabled`, `Models`, `HUD`, `Armour`, `Flags`, `DarkenBodies`,
   `Cosmetics`, `Style`, `AllowAnyModel`, `HiddenModels`, `AllowModels`, `RecolorParams`,
@@ -786,7 +849,8 @@ admins understand what's player‑side vs server‑side. None of these are serve
   (`Class`, `H`/`S`/`V`, `Brightness`, `Complimentary`, `ArmourMode`); `[ForceModels.FlagWind]`
   (cloth animation). Migrated once from dc's legacy `[TeamSkins.Enable]`.
 - **`[WeaponSkinsPlus]` / `[NetcodePlus.WeaponSettings]`** (client): `LGColor`, `ShockBeam`,
-  `HitscanChoice`, per‑weapon `Skin.<tag>`, `Hide.<weapon>`, `HiddenBeamBack`/`HiddenBeamDown`.
+  `CustomShockBeam` (gate set by the F5 shock‑colour picker so the weapon reads the custom `ShockBeam`
+  at spawn), `HitscanChoice`, per‑weapon `Skin.<tag>`, `Hide.<weapon>`, `HiddenBeamBack`/`HiddenBeamDown`.
 - **`[NetcodePlus.Cosmetics]`** (client): saved cosmetic selections.
 - **`[ClientHitsounds]` / `[Hitsounds.Enemy]` / `[Hitsounds.Friendly]`** — config for the *future*
   native C++ hitsounds port; **not the live path** (live hitsounds = `dcHitsounds` BP, `mutate

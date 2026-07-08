@@ -4,6 +4,11 @@ A UT4 plugin focused on improving netcode feel and adding new game modes for com
 
 Built on UE4 4.15 (UT4 fork, CL-3525360). Targets up to 720Hz on modern hardware.
 
+**Current build: 327.** Players install NetcodePlus and stay current through the community
+**[NetcodePlus launcher](https://github.com/jmortley/netcodeplus-launcher)** — it keeps the client DLL and
+the game-mode content paks up to date, so there's nothing to hand-copy. Running a server? The companion
+**[Server Admin Guide](SERVER-ADMINS.md)** has the full install / cvar / ruleset reference.
+
 ## What it does
 
 NetcodePlus replaces stock UT4's hit registration and projectile prediction with a hybrid lag-compensation system inspired by UTComp's NewNet, with added performance optimizations for high-refresh-rate displays. It also ships several new game modes and quality-of-life improvements built on top of that netcode layer.
@@ -15,11 +20,12 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 - **Server-side capsule rewind for hit validation** — every shot is validated against rewound target capsules at the time of fire, scaled by ping. Players at 100ms ping get the same shot effectiveness as players at 20ms.
 - **Tiered projectile rewind compensation** — full half-RTT rewind below 100ms ping, linear scale-down to 50% by 150ms, hard cliff above. Prevents extreme-ping shooters from getting unfair compensation while keeping mid-ping play fair.
 - **Split prediction system** — visual prediction (0ms) is decoupled from hit validation (~120ms ping-based), so players see enemies in real-time while shots are validated against rewound positions.
-- **Bidirectional time-search** — when primary rewind misses on a client-claimed target, server searches ±30ms in 15ms steps to catch hits within the network jitter window.
-- **HitScan padding for moving targets** — claimed targets get +40 units of capsule padding at fire time (10 units stationary), compensating for tight UT4 hitboxes vs. visible mesh silhouette.
+- **Bidirectional time-search** — when primary rewind misses on a client-claimed target, the server searches ±45ms in 15ms steps (rungs ±15 / ±30 / ±45, now uniform across every hitscan weapon) to catch hits inside the network jitter window.
+- **HitScan padding for moving targets** — claimed targets get +45 units of capsule padding at fire time (10 units stationary), compensating for tight UT4 hitboxes vs. visible mesh silhouette.
 - **Transactional fire events** — every shot has a unique event index for client/server agreement; resend queue protects against unreliable RPC loss.
 - **Strict tap-fire enforcement** — tap-mashing the fire button can no longer fire faster than holding it. Click queueing via retry timer means responsiveness is preserved.
 - **Trade-kill grace period** (200ms) — fire RPCs in flight when the shooter dies still register, so reciprocal kills count.
+- **Held-fire retry across weapon modes** — holding primary right after a shock ball (or across a fast weapon switch) used to eat the input, because the press landed inside the other mode's firing cycle and was dropped with no retry; the request is now re-queued to fire at the cycle's end. Client-side, on by default (`ncp.CrossModeRetry`, kill-switch `0`).
 - **Client-side hit detection (CSHD) for link gun beam** — predictive damage with server sanity-trace validation. Less laggy at high ping without giving the client total authority.
 - **Quake-style LG accuracy** — stock UT4 ticks `NAME_LinkShots` once per trigger pull, so sustained-beam Hits/Shots ratios explode past 1000%. NetcodePlus adds `NAME_LinkBeamShots` (one per refire interval, server-only) and rate-matches the hit increment via a per-interval flag (`bHitDuringCurrentRefireInterval`). Result: Hits ≤ Shots is mathematically guaranteed, scoreboards / HUD widgets show meaningful 30-70% accuracy in normal play instead of always 100%.
 
@@ -57,6 +63,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
   - HUD scorebar shows count-up overtime clock with "Overtime" label (replicated via `ANCPlusCTFOTInfo`); spectator list deduplicates the engine's stock count text.
   - **Size-keyed respawn** — `MaxPlayers <= CTFSmallGameMaxPlayers` (default 2 = 1v1 / w00t) uses `CTFRespawnWaitSmall` (1.0s); larger uses `CTFRespawnWait` (1.5s). Works for bot-hosted PUGs and hub rulesets without anyone needing `?RespawnWait`.
   - **`mutate warmup`** — warmup-only roam mode (`AWarmupRoamMutator`, auto-added). Toggles invulnerability + disables firing on the calling player so they can learn the map without dying or fragging others. Re-asserted on respawn; stripped from everyone the instant the match leaves `WaitingToStart`, so it can never carry into live play.
+  - **Warmup spawn markers** (`ncp.WarmupSpawns`, default on) — during warmup only, team-colored markers sit on the map's spawn points with a facing tick and a distance label, a learning aid for approach/pre-aim lanes. They disappear the instant the match starts.
   - **Flag-status banners** (`UNCPlusHUDWidget_CTFFlagStatus`) — full nchud control of the world-projected carrier indicator (orange flag over enemy carrier's head), the yellow "You have the flag!" banner, and a new red "Enemy has your flag, recover it!" banner (engine had the text but never drew it; restored as a UT99-style alarm for audio-off players). Each piece independently positionable/hideable/colorable/styleable.
   - **Crosshair flag-grab flash suppressed** by default (the engine's team-colored flag that pops over the crosshair for 3s after a grab). Opt back in via nchud → CTF section. Implemented as a `LastFlagGrabTime` save/restore around `Super::DrawHUD()` — touches only the one flash path, no other side effects.
 - **NCLeagueDuel** — Strict 1v1 with paired-weapon first-spawn fairness:
@@ -78,6 +85,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
   - Lifetime PPR persistence (`TotalPoints` + `RoundsPlayed` columns in `NCRatingElimPlus`, queryable via sqlite).
   - Match-winning-kill instant replay via `ClientPlayInstantReplay` with conditional 7s EndGame delay (skipped in standalone PIE).
   - Hidden-while-respawning portrait visuals + last-man-standing pulse.
+  - Optional **anti-camp** watch (server-tunable, default on) — flags a player who holds a tight box too long; detection is C++, the warn/response is Blueprint. Retune or disable via `[NetcodePlus] ElimEnableAntiCamp` / `ElimCampThreshold` / `ElimCampCheckInterval` / `ElimCampWarnCooldown` (SERVER-ADMINS §5).
 - **Wipeout** — Team elimination with respawn waves, portrait-strip HUD, side-by-side scoreboard with player portraits, K/D + B/A tracking, sudden death OT, alternating-team-first round spawning. Same carry-aware Glicko blend as ElimPlus.
 - **ShockDom** — 4v4 Shock-Domination (3 control points). Includes match clock HUD, opposing-side cluster spawning at match start, configurable scoring tick.
 
@@ -110,7 +118,7 @@ NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-
 - **JSON share via clipboard** — Copy / Paste buttons in the editor footer serialize the layout to/from the system clipboard. Validation + confirm dialog on paste. Same payload as `Saved/NetcodePlus/HUDLayout.json`.
 - **Preset gallery** — 3 curated presets (Streamer Friendly / Comp Minimal / Quake Live Throwback) plus user save/delete, with procedural Slate thumbnails. First-run seeds Streamer Friendly so new installs get a polished baseline instead of stock UT defaults.
 - **Multi-mode** — single layout file applies across all NetcodePlus modes (ElimPlus / Wipeout / NCPlusCTF / ShockDom / NCLeagueDuel / NCShaftArena).
-- **Movable engine widgets** too — the alias table covers stock crosshair, killfeed, spectator score, announcements, voice-chat status, etc. Position overrides write straight to the widget's `ScreenPosition` / `Position` / `Origin` fields.
+- **Movable engine widgets** too — the alias table covers stock crosshair, killfeed, spectator score, announcements, voice-chat status, etc. Position overrides write straight to the widget's `ScreenPosition` / `Position` / `Origin` fields. A relocated killfeed now holds its spot mid-match (the engine re-anchors it every frame; NetcodePlus suppresses that stomp while a custom position is set).
 - **FSE-safe color picker** — opens via a snapshot-and-restore window-mode swap (Fullscreen → WindowedFullscreen → restore on close) so the OS doesn't minimize the game and trap the picker in a bounce loop.
 
 Open the editor in-game with the `nchud` console command. Layout persists to `Saved/NetcodePlus/HUDLayout.json`.
@@ -126,7 +134,7 @@ Open the editor in-game with the `nchud` console command. Layout persists to `Sa
 
 - **`weaponskins` console command** — opens Slate UI for per-weapon hide/show, skin selection, hitscan choice (Sniper / LG), **beam colors** (Sniper/LG via `LGColor`, Shock via `ShockBeam` — FSE-safe color picker, format matches the BP defaults' `Convert String to Linear Color` parser so the weapon BPs read the new color at spawn without parser changes), and **hidden-weapon beam origin** (`Back` / `Down` spinners — the tracer/beam spawn point relative to the camera when the weapon is hidden; defaults 10 / 35 reproduce stomach-height; try 10 / 20 for chest or 10 / 60 for hip-fire feel).
 - **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
-- **Plugin-version gate (`ANCVersionGate`)** — server-spawned per-player `AInfo` in `PostLogin`, owner-only replication. Client's `PostNetInit` reports `NETCODE_PLUGIN_VERSION` immediately; server `KickPlayer`s mismatches with a clear "server v325, you are vN — update via launcher" message. Server-side timeout (default 10s, `[NetcodePlus] VersionReportTimeoutSec`, clamp 1–60) catches clients that don't have the gate class at all and never respond. Wired into every NCPlus mode's `PostLogin`. Bots + listen-host local PC exempt.
+- **Plugin-version gate (`ANCVersionGate`)** — server-spawned per-player `AInfo` in `PostLogin`, owner-only replication. Client's `PostNetInit` reports `NETCODE_PLUGIN_VERSION` immediately; the server `KickPlayer`s a **mismatched** build with a clear "server v327, you are vN — update via launcher" message, and the player can rejoin once the launcher updates them. Players with **no** plugin are not auto-kicked — the no-reply timeout kick is currently disabled, so the grace window (`[NetcodePlus] VersionReportTimeoutSec`, default 100s, clamped 1–120) is the mitigation, not a hard gate. Wired into every NCPlus mode's `PostLogin`. Bots + listen-host local PC exempt.
 - **Custom siphon powerup** — life-steal pickup spawning at sniper location with 90s timer.
 - **Hit-plot replicator** — server analyzes hit positions for ServerShield-style debug visualization.
 - **Stats integration** — replicates per-player accuracy + damage + armor counts via mode-specific `AInfo` replicators (`ANCLeagueDuelStatsReplicator`, `ANCShaftArenaStatsReplicator`, `AElimPlusStatsReplicator`, `ACTFStatsReplicator`, `AWipeoutDamageReplicator`, `AShockDomReplicator`) so dedicated-server clients can read stats that are server-only on `AUTPlayerState`.
@@ -145,17 +153,28 @@ For server admins: ensure `Binaries/Linux/` and `Binaries/Win64/` are committed 
 
 ### Console Variables
 
+A player-facing subset is below; the **full server-side cvar / Mod.ini / URL reference lives in
+[SERVER-ADMINS.md](SERVER-ADMINS.md)**. Every NetcodePlus cvar is `ut.*` or `ncp.*`, and none are
+cheat-gated.
+
 | CVar | Default | Description |
 |------|---------|-------------|
-| `ut.ProjectileTickRate` | 240 | Client-side projectile sim rate (Hz). Range 120-720. |
+| `ut.ProjectileTickRate` | 240 | Client-side projectile sim rate (Hz). Snapped to multiples of 60, clamped 120-720. Server always ticks 120. |
 | `ut.EnableProjectilePrediction` | 1 | Visual prediction for non-hitscan weapons. Set 0 for raw server positions. |
+| `ncp.CrossModeRetry` | 1 | Re-fire a held primary that landed mid-cycle after a shock ball / mode switch. 0 = legacy drop (kill-switch). |
+| `ncp.ShockDriftCorrect` | 1 | Shock-ball per-tick heading re-assert (the high-FPS drift fix). 0 = stock-like. |
+| `ncp.WarmupSpawns` | 1 | Warmup-only spawn-point learning markers (CTF / iCTF). |
+
+> ⚠️ **Don't enable `ncp.GhostFix`.** It's a parked experiment (0 by default) — the current version breaks
+> consecutive held weapon switches. A pawn-level v2 is pending; leave it at `0`.
 
 ### Mod.ini
 
 Lives at `<Saved>/Config/Mod.ini`. Most plugin-side knobs go here; some are per-player (client `Saved/`), some are per-server (server `Saved/`), some apply to both — noted per section.
 
 **`[NetcodePlus]`** (server-side):
-- `VersionReportTimeoutSec=10.0` — how long the version gate waits for a client to report its NETCODE_PLUGIN_VERSION before kicking. Default 10s; clamped 1–60s. Garbage / missing value falls back to default.
+- `VersionReportTimeoutSec=100.0` — grace window (s) for a joining client to report its `NETCODE_PLUGIN_VERSION`. Default 100s; clamped 1–120s; garbage / missing value falls back to the default. (Mismatched builds are always kicked; the *no-reply* timeout kick itself is currently disabled — see the version-gate note above.)
+- ElimPlus also reads `[NetcodePlus]` on the server for anti-camp (`ElimEnableAntiCamp` / `ElimCampThreshold` / `ElimCampCheckInterval` / `ElimCampWarnCooldown`), uneven-team health scaling, and the 6-0 mid-game shuffle. Full list with defaults in [SERVER-ADMINS.md](SERVER-ADMINS.md) §5.
 
 **`[NetcodePlus.WeaponSettings]`** (per-player):
 - `Hide.<WeaponClassName>=1|0` — hide/show first-person mesh per weapon.
