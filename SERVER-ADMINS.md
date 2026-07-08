@@ -42,8 +42,22 @@ rules — just add `NCWepMut` and the gunplay is NetcodePlus.
   Duel, Shaft Arena, Shock Domination — §4) layer ELO, fair‑spawn logic, the custom HUD, end‑of‑match
   cap replays, host/captain pause and the version gate **on top of** those same weapons.
 
-Requires clients to run the NetcodePlus plugin (via the launcher) and to have the `NCWepMut` pak (§2).
-`NCWepMut` is **not** auto‑added by anything — you add it per ruleset.
+**Two weapon‑balance flavors — pick one.** There are two weapon‑replacement paks; both run on the *same*
+NetcodePlus netcode and differ only in weapon **balance**:
+
+- **`NCWepMut`** — the **NA‑style** competitive balance (the tuning the UTPugs / North‑American scene
+  plays). The default choice for a NetcodePlus hub.
+- **`NCStockWeapons`** — **stock UT4 weapon balance** on the NetcodePlus netcode, for admins / leagues
+  that want Epic's stock feel with the better hit registration. Primary fire and the normal charged shots
+  are **100% stock values**, just lag‑compensated. *Caveat:* the Rocket Launcher keeps the NetcodePlus
+  behaviour (spiraling rockets + grenades), so RL is not bit‑for‑bit stock — everything else is.
+
+Pick exactly one and add it like any other token (**don't run both**) — e.g. `?mutator=...,NCStockWeapons`
+in place of `NCWepMut`.
+
+Requires clients to run the NetcodePlus plugin (via the launcher) and to have the matching weapon pak —
+`NCWepMut` **or** `NCStockWeapons` (both are launcher‑maintained; §2). Neither is auto‑added by anything —
+you add the one you want per ruleset.
 
 > **Example — stock CTF, now on NetcodePlus weapons** (keep your existing mutators, add `NCWepMut`):
 > ```
@@ -158,7 +172,14 @@ every client.
 | `NCWepMut-WindowsNoEditor` | 2042 | `NCWepMut` | NetcodePlus **weapon replacement** — drops NetcodePlus weapons into **any** gamemode (the on‑ramp, see Start Here) |
 | `UTPlus-WindowsNoEditor` | 852 | `UTPlus` | UT+ weapon/movement content |
 
-~792 MB total on a first pull.
+~792 MB for the six core paks on a first pull.
+
+> **Optional 7th pak — `NCStockWeapons`** (UTCC **2058**,
+> <https://utcustomcontent.com/mutator/2058-NCStockWeapons>). `NCStockWeapons-WindowsNoEditor.pak` is the
+> **stock weapon‑balance** alternative to `NCWepMut` (see Start Here) — a small weapon pak the launcher
+> also keeps current, so launcher clients already have it; only hubs running a stock‑balance ruleset use
+> it. Redirect‑based hubs: add it like the six above — its full `RedirectReferences=` line (with checksum)
+> is on the UTCC page linked here.
 
 ### 2.1 How clients get them — two paths
 
@@ -287,6 +308,7 @@ Notes:
 | `dcHitsounds` | Damage hitsounds (replaces `MutHitsounds`) | client content, added to chain |
 | `MutInstagibNCP` | Instagib weapon set (makes a CTF mode iCTF) | server (external BP pak) |
 | `NCWepMut` | NetcodePlus weapon replacement — turns **any** gamemode into NetcodePlus weapons (see Start Here) | server (pak) |
+| `NCStockWeapons` | Same, but **stock** UT4 weapon balance on the NetcodePlus netcode (the stock‑balance alternative to `NCWepMut`; RL keeps NCP spirals + grenades). Run one or the other, not both | server (pak) |
 | `MutStatSQL` | Stats upload to ut4stats.com — §9 | server |
 | `MutServerShield` | Behavioral anti‑cheat — §10 | server |
 
