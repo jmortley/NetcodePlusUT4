@@ -3762,13 +3762,15 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 	}
 }
 
-// 6-0 blowout shuffle. Strength = each player's CURRENT-match mean PPR (the
+// 6-0 blowout balance. Strength = each player's CURRENT-match mean PPR (the
 // per-round kills + damage/100 metric the scoreboard shows), NOT lifetime
-// Glicko — the lifetime split is exactly what just produced the 6-0. The
-// balancer only compares strength sums, so scale is free; PPR is passed x100
-// to keep the numbers in a familiar range in logs. Bots and no-history
-// joiners (no completed rounds yet) get the human mean — neutral placement
-// rather than a scale-breaking default.
+// Glicko — the lifetime split is exactly what just produced the 6-0. Makes at
+// most ONE change (best 1-for-1 swap, or one move off a stronger-and-larger
+// team); see the header doc + the inline block below for why the full
+// re-partition was retired. Strength comparisons are sum-based, so scale is
+// free; PPR is passed x100 to keep the numbers in a familiar range in logs.
+// Bots and no-history joiners (no completed rounds yet) get the human mean —
+// neutral placement rather than a scale-breaking default.
 void AElimPlusGame::MidGameShufflePPR()
 {
 	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2)
@@ -3833,68 +3835,121 @@ void AElimPlusGame::MidGameShufflePPR()
 		}
 	}
 
-	const FElimPlusBalanceResult Result = RatingSystem->ComputeBalancedTeams(Inputs);
-	if (!Result.bValid)
+	// SINGLE CHANGE ONLY (2026-07-11). The old full re-partition
+	// (ComputeBalancedTeams over all slots) could re-seat most of the lobby —
+	// players experienced a different match rather than a correction, and the
+	// blowout usually continued anyway. Instead: evaluate every 1-for-1 swap
+	// (team sizes preserved) plus, when the stronger team is also up a man,
+	// every single move off it (one change fixes strength AND headcount), and
+	// apply the one that lands the PPR sums closest to even. No-op if the gap
+	// is already small or nothing improves it.
+
+	// Partition the slots by CURRENT team and total each side's strength.
+	TArray<int32> Team0Slots, Team1Slots;
+	float S0 = 0.f, S1 = 0.f;
+	for (int32 i = 0; i < Inputs.Num(); ++i)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: TeamBalancer returned invalid assignment, skipping"));
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(ControllersByIndex[i]->PlayerState);
+		const uint8 T = (UTPS && UTPS->Team) ? UTPS->Team->TeamIndex : 255;
+		if (T == 0)      { Team0Slots.Add(i); S0 += Inputs[i].StrengthOverride; }
+		else if (T == 1) { Team1Slots.Add(i); S1 += Inputs[i].StrengthOverride; }
+	}
+	if (Team0Slots.Num() == 0 || Team1Slots.Num() == 0)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: skipped (one side has no slots)"));
 		return;
 	}
 
-	int32 MovesMade = 0;
-	auto AssignToTeam = [this, &ControllersByIndex, &MovesMade](const TArray<int32>& Indices, uint8 TargetTeam)
+	const float Gap = S0 - S1;               // signed; positive = red stronger on match PPR
+	const float CurrentDiff = FMath::Abs(Gap);
+	// A 6-0 with near-equal PPR sums isn't a personnel gap (clutching/teamwork
+	// is winning the rounds) — a swap would yank someone for cosmetics. 50 =
+	// half a mean-PPR point of team strength at the x100 scale.
+	if (CurrentDiff < 50.f)
 	{
-		for (int32 SlotIdx : Indices)
-		{
-			if (!ControllersByIndex.IsValidIndex(SlotIdx)) continue;
-			AController* C = ControllersByIndex[SlotIdx];
-			AUTPlayerState* UTPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
-			if (!UTPS) continue;
-			if (UTPS->Team && UTPS->Team->TeamIndex == TargetTeam) continue;  // already there
-			MovePlayerToTeam(C, UTPS, TargetTeam);
-			++MovesMade;
-		}
-	};
-	AssignToTeam(Result.Team0Indices, 0);
-	AssignToTeam(Result.Team1Indices, 1);
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: no-op — PPR gap already small (%.1f)"), CurrentDiff / 100.f);
+		return;
+	}
 
-	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: %d players, Team0=%d ppr=%.1f, Team1=%d ppr=%.1f, diff=%.1f, moves=%d"),
-		Inputs.Num(),
-		Result.Team0Indices.Num(), Result.Team0Strength / 100.f,
-		Result.Team1Indices.Num(), Result.Team1Strength / 100.f,
-		Result.StrengthDifference / 100.f, MovesMade);
-
-	// Roster broadcast, name(ppr) per player — same stationary-chat-reference
-	// rationale as the pre-match rebalance broadcast.
-	auto BuildTeamLine = [this, &ControllersByIndex, &Inputs](const TArray<int32>& Indices, const TCHAR* Prefix, float Strength) -> FString
+	// Swapping A(red) with B(blue) changes the signed gap by -2*(Sa - Sb);
+	// moving a player across changes it by -2*S (red->blue) or +2*S (blue->red).
+	int32 BestRed = INDEX_NONE, BestBlue = INDEX_NONE;   // both set = swap; one set = single move
+	float BestDiff = CurrentDiff;
+	for (int32 A : Team0Slots)
 	{
-		FString Names;
-		for (int32 SlotIdx : Indices)
+		for (int32 B : Team1Slots)
 		{
-			if (!ControllersByIndex.IsValidIndex(SlotIdx) || !Inputs.IsValidIndex(SlotIdx)) continue;
-			AController* C = ControllersByIndex[SlotIdx];
-			AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
-			if (!PS) continue;
-			if (!Names.IsEmpty()) Names += TEXT(", ");
-			Names += FString::Printf(TEXT("%s(%.1f)"), *PS->PlayerName, Inputs[SlotIdx].StrengthOverride / 100.f);
+			const float NewDiff = FMath::Abs(Gap - 2.f * (Inputs[A].StrengthOverride - Inputs[B].StrengthOverride));
+			if (NewDiff < BestDiff) { BestDiff = NewDiff; BestRed = A; BestBlue = B; }
 		}
-		return FString::Printf(TEXT("%s (ppr=%.1f): %s"), Prefix, Strength / 100.f, *Names);
+	}
+	if (Gap > 0.f && Team0Slots.Num() > Team1Slots.Num())
+	{
+		for (int32 A : Team0Slots)
+		{
+			const float NewDiff = FMath::Abs(Gap - 2.f * Inputs[A].StrengthOverride);
+			if (NewDiff < BestDiff) { BestDiff = NewDiff; BestRed = A; BestBlue = INDEX_NONE; }
+		}
+	}
+	else if (Gap < 0.f && Team1Slots.Num() > Team0Slots.Num())
+	{
+		for (int32 B : Team1Slots)
+		{
+			const float NewDiff = FMath::Abs(Gap + 2.f * Inputs[B].StrengthOverride);
+			if (NewDiff < BestDiff) { BestDiff = NewDiff; BestRed = INDEX_NONE; BestBlue = B; }
+		}
+	}
+
+	if (BestRed == INDEX_NONE && BestBlue == INDEX_NONE)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: no-op — no single change narrows the PPR gap (%.1f)"), CurrentDiff / 100.f);
+		return;
+	}
+
+	auto SlotName = [&ControllersByIndex, &Inputs](int32 SlotIdx) -> FString
+	{
+		AController* C = ControllersByIndex.IsValidIndex(SlotIdx) ? ControllersByIndex[SlotIdx] : nullptr;
+		AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+		return PS ? FString::Printf(TEXT("%s(%.1f)"), *PS->PlayerName, Inputs[SlotIdx].StrengthOverride / 100.f) : FString(TEXT("?"));
+	};
+	auto MoveSlot = [this, &ControllersByIndex](int32 SlotIdx, uint8 TargetTeam)
+	{
+		AController* C = ControllersByIndex.IsValidIndex(SlotIdx) ? ControllersByIndex[SlotIdx] : nullptr;
+		AUTPlayerState* UTPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+		if (C && UTPS) { MovePlayerToTeam(C, UTPS, TargetTeam); }
 	};
 
-	const FString Header   = FString::Printf(TEXT("=== 6-0: Teams shuffled by current match performance (PPR) — moves=%d ==="), MovesMade);
-	const FString RedLine  = BuildTeamLine(Result.Team0Indices, TEXT("RED  "), Result.Team0Strength);
-	const FString BlueLine = BuildTeamLine(Result.Team1Indices, TEXT("BLUE "), Result.Team1Strength);
+	FString ChangeDesc;
+	if (BestRed != INDEX_NONE && BestBlue != INDEX_NONE)
+	{
+		ChangeDesc = FString::Printf(TEXT("%s <-> %s"), *SlotName(BestRed), *SlotName(BestBlue));
+		MoveSlot(BestRed, 1);
+		MoveSlot(BestBlue, 0);
+	}
+	else if (BestRed != INDEX_NONE)
+	{
+		ChangeDesc = FString::Printf(TEXT("%s RED -> BLUE"), *SlotName(BestRed));
+		MoveSlot(BestRed, 1);
+	}
+	else
+	{
+		ChangeDesc = FString::Printf(TEXT("%s BLUE -> RED"), *SlotName(BestBlue));
+		MoveSlot(BestBlue, 0);
+	}
 
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: %s — team ppr %.1f vs %.1f, gap %.1f -> %.1f"),
+		*ChangeDesc, S0 / 100.f, S1 / 100.f, CurrentDiff / 100.f, BestDiff / 100.f);
+
+	// One-line broadcast naming exactly who moved — a single swap doesn't need
+	// the full roster dump the old re-partition printed.
+	const FString Header = FString::Printf(TEXT("=== 6-0: balance swap by current match PPR: %s (gap %.1f -> %.1f) ==="),
+		*ChangeDesc, CurrentDiff / 100.f, BestDiff / 100.f);
 	UE_LOG(LogGameMode, Warning, TEXT("%s"), *Header);
-	UE_LOG(LogGameMode, Warning, TEXT("%s"), *RedLine);
-	UE_LOG(LogGameMode, Warning, TEXT("%s"), *BlueLine);
-
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
 		APlayerController* PC = It->Get();
 		if (!PC) continue;
 		PC->ClientMessage(Header);
-		PC->ClientMessage(RedLine);
-		PC->ClientMessage(BlueLine);
 	}
 }
 

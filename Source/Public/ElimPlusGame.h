@@ -351,11 +351,15 @@ public:
 	 *  watch the shuffle on the auto-shown scoreboard during the countdown. */
 	void RebalanceTeamsForMatchStart();
 
-	/** 6-0 blowout shuffle (publics): re-split BOTH teams by CURRENT-match PPR
-	 *  — who is performing THIS match — rather than the lifetime Glicko that
-	 *  just produced the 6-0. Armed by EndRoundForTeam, consumed at the next
-	 *  StartNextRound before anything spawns (silent moves, same rationale as
-	 *  the pre-match rebalance). Scores are NOT reset. */
+	/** 6-0 blowout balance (publics): make the SINGLE change — one 1-for-1 swap,
+	 *  or one move off a team that is both stronger and up a man — that best
+	 *  narrows the CURRENT-match PPR gap (who is performing THIS match, not the
+	 *  lifetime Glicko that just produced the 6-0). Replaced the full TeamBalancer
+	 *  re-partition (2026-07-11), which could re-seat most of the lobby mid-match.
+	 *  No-ops when the PPR gap is already small or no single change improves it.
+	 *  Armed by EndRoundForTeam, consumed at the next StartNextRound before
+	 *  anything spawns (same rationale as the pre-match rebalance). Scores are
+	 *  NOT reset. */
 	void MidGameShufflePPR();
 
 	// -------- Victory Audio (Blueprint Editable) --------
