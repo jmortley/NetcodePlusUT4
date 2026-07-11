@@ -1,13 +1,14 @@
 // NCPlusHUDWidget_CTFFlagStatus - nchud-controllable subclass of the engine
 // CTF flag status widget.
 //
-// Overrides two engine draws so they consult FNCPlusHUDLayout:
+// Overrides the engine's CTF indicator draws so they consult FNCPlusHUDLayout:
 //
-//   1. DrawFlagWorld
-//      Controls the world-projected flag icon that appears over the carrier's
-//      head ("the orange flag over the enemy") via alias `ctf_carrier_indicator`.
-//      Layout fields honored: scale, offset_x/y (screen px after world projection),
-//      hidden, opacity.
+//   1. DrawFlagWorld + DrawFlagBaseWorld
+//      One Hide toggle controls both world-projected flag indicators: the icon
+//      over the carrier and the missing-flag exclamation at the base. The legacy
+//      alias key `ctf_carrier_indicator` is retained so existing layouts migrate
+//      automatically. Scale, offset and opacity continue to affect the carrier
+//      indicator only.
 //
 //   2. DrawStatusMessage
 //      Controls TWO independent banner texts:
@@ -34,6 +35,12 @@ class NETCODEPLUS_API UNCPlusHUDWidget_CTFFlagStatus : public UUTHUDWidget_CTFFl
 	 *  body with layout overrides applied (parent path is non-trivial to delegate
 	 *  to without sacrificing per-element control). */
 	virtual void DrawFlagWorld(class AUTCTFGameState* GameState, FVector PlayerViewPoint,
+		FRotator PlayerViewRotation, uint8 TeamNum, class AUTCTFFlagBase* FlagBase,
+		class AUTFlag* Flag, class AUTPlayerState* FlagHolder) override;
+
+	/** Gate the missing-flag/base exclamation on the same legacy alias as the
+	 *  carrier indicator, giving nchud one "CTF World Indicators" Hide toggle. */
+	virtual void DrawFlagBaseWorld(class AUTCTFGameState* GameState, FVector PlayerViewPoint,
 		FRotator PlayerViewRotation, uint8 TeamNum, class AUTCTFFlagBase* FlagBase,
 		class AUTFlag* Flag, class AUTPlayerState* FlagHolder) override;
 

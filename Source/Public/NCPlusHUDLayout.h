@@ -55,6 +55,16 @@ struct FNCPlusHUDElement
 
 	/** Read an extras key as a bool. Accepts "true"/"false"/"1"/"0" (case-insensitive). */
 	bool GetExtraBool(FName Key, bool Fallback) const;
+
+private:
+	// Extras are editable strings, but their typed values only change when the
+	// live-layout revision changes. Malformed/missing values deliberately are not
+	// cached because their caller-provided fallback can differ by use site.
+	mutable uint32 ExtrasCacheRevision = 0;
+	mutable TMap<FName, FLinearColor> ExtraColorCache;
+	mutable TMap<FName, float> ExtraFloatCache;
+	mutable TMap<FName, bool> ExtraBoolCache;
+public:
 };
 
 /** Hex ↔ FLinearColor utilities for the HUD layout's per-element color overrides. */
@@ -365,6 +375,16 @@ namespace NCPlusHUDDrawCall
 	NETCODEPLUS_API void DrawOutlinedText(class UCanvas* Canvas, const class UFont* Font,
 		const FText& Text, float X, float Y, float Scale,
 		FLinearColor Fill, FLinearColor Outline = FLinearColor::Black, float Opacity = 1.f);
+
+	/** Resolve a measured FText for HUD strings that usually remain unchanged for
+	 *  hundreds of frames (scores, clocks, labels, spectator names). Cached by
+	 *  text/font/scale and invalidated on world or live-layout revision changes. */
+	NETCODEPLUS_API void ResolveStableText(class UCanvas* Canvas, class UFont* Font,
+		const FString& Source, float ScaleX, float ScaleY,
+		FText& OutText, float& OutWidth, float& OutHeight);
+	NETCODEPLUS_API void DrawResolvedText(class UCanvas* Canvas, const class UFont* Font,
+		const FText& Text, float X, float Y, float ScaleX, float ScaleY, const FColor& Color,
+		bool bEnableShadow = false);
 
 	/** Fit a player name into MaxWidthPx at draw Scale, caching the fitted result per
 	 *  PlayerState so the per-frame chop-one-char StrLen loop runs only when an input

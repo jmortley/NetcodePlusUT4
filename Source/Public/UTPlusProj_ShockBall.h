@@ -64,12 +64,24 @@ protected:
 	/** Max net movement (units) over the debounce window that still counts as "not travelling". */
 	static constexpr float StuckProgressThreshold = 6.f;
 
+	// ---- Behavioural pairing state (NOT diagnostics — consumed by CanMatchFake / handoff) ----
+	/** Fake spawn origin. Consumed by CanMatchFake gate 3b (displacement-from-spawn) AND the curve
+	 *  diagnostics. Written unconditionally in BeginPlay, so behaviour is identical with ncp.ShockDebug 0/1. */
+	FVector FireLineOrigin;
+	/** Fake-only: integral of |velocity|*dt over the fake's life (the actor tick delta is already
+	 *  scaled by CustomTimeDilation). CanMatchFake gate 3b's expected-displacement term — correct under
+	 *  Slomo and it freezes on a PMC stop, unlike currentSpeed*wallAge. Accumulated every Tick, ungated. */
+	float ExpectedDispAccum;
+	/** Real-only: set true once a replicated velocity ~0 (server-confirmed stop) has been received.
+	 *  Sticky. Log-only in this build; commit 2 gates the reveal on it (replicated vs local-only stop). */
+	bool bServerConfirmedStop;
+
 	// ---- Curve diagnostics (ncp.ShockDebug) — logging state only, zero behaviour change ----
 	// The open-air mid-flight bend ("swoosh") has never been captured because every existing
 	// log line is tied to a stop/hit/reveal event. These track the flight itself, event-gated
 	// by doubling thresholds so a straight core logs nothing. See Tick/PostNetReceiveVelocity.
-	/** Spawn location = origin of the original fire line (lateral offset is measured from this ray). */
-	FVector FireLineOrigin;
+	// Initialised in the CONSTRUCTOR, not BeginPlay: on a replicated real PostNetReceiveVelocity
+	// fires before BeginPlay, so BeginPlay-init would wipe the FirstRepVelDir baseline it records.
 	/** Next lateral-offset-from-fire-line (units) that triggers a CURVE-LAT log; doubles each log. */
 	float NextCurveLatLog;
 	/** Next velocity-heading deviation (degrees) that triggers a CURVE-VEL log; doubles each log. */
@@ -78,7 +90,8 @@ protected:
 	FVector ConvergePullAccum;
 	/** Next accumulated-pull magnitude (units) that triggers a CONVERGE-PULL log; doubles each log. */
 	float NextConvergePullLog;
-	/** First non-stop replicated velocity heading (REAL instance) — baseline for mid-flight heading changes. */
+	/** First non-stop replicated velocity heading (REAL instance) — the server's true fire heading;
+	 *  baseline for the deferred PNRV paired-cmp (emitted in BeginPlay) + mid-flight heading changes. */
 	FVector FirstRepVelDir;
 	bool bLoggedFirstRepVel;
 

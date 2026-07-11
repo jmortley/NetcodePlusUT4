@@ -415,6 +415,47 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 			]
 		]
 
+		// ── Weapon Effects ──
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 15, 0, 5)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Weapon Effects")))
+			.Font(BoldFont(18))
+			.ColorAndOpacity(FLinearColor::White)
+		]
+
+		// Show Own Beam
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bShowOwnBeam ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnShowOwnBeamChanged)
+				.ToolTipText(FText::FromString(TEXT("Show the beam for your own iCTF shots. Turning this off keeps the muzzle flash, impact effect, sound, and other players' beams.")))
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show Own Beam")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+				.ToolTipText(FText::FromString(TEXT("Show the beam for your own iCTF shots. Turning this off keeps the muzzle flash, impact effect, sound, and other players' beams.")))
+			]
+		]
+
 		// ── Footstep Settings ──
 		+ SVerticalBox::Slot()
 		.AutoHeight()
@@ -633,6 +674,9 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 		[
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 5.f, 0.25f) ]
+			// "Armour Glow": dims the emissive armour/shield overlay so armoured pawns aren't radioactive.
+			// 1 = stock full-bright (current), 0 = no glow. Consumed in TeamArenaCharacter::UpdateArmorOverlay.
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Armour Glow"), &Side->ArmourGlow, 0.f, 1.f, 0.05f) ]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
@@ -820,6 +864,11 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		RagdollTime = 3.0f;
 
+	if (GConfig->GetString(IGCTFSection, TEXT("bShowOwnBeam"), Val, ConfigPath))
+		bShowOwnBeam = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+	else
+		bShowOwnBeam = true;   // preserve the current beam visuals for existing users
+
 	if (GConfig->GetString(NCPSection, TEXT("OwnFootstepVolume"), Val, ConfigPath))
 		OwnFootstepVolume = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
 	else
@@ -864,6 +913,7 @@ void SUTNCPlusMenu::SaveSettings()
 	// than a literal 0 (rate<=0) which never fires = keep forever. Non-zero values pass through unchanged.
 	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"),
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
+	GConfig->SetString(IGCTFSection, TEXT("bShowOwnBeam"), bShowOwnBeam ? TEXT("True") : TEXT("False"), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
@@ -942,6 +992,11 @@ void SUTNCPlusMenu::OnRagdollTimeChanged(float NewValue, ETextCommit::Type Commi
 	// Slider value the user sees (0..10). 0 = remove instantly (remapped to 0.01 on save, since a literal 0
 	// would keep ragdolls forever); N = despawn after N seconds. See the semantics note at the top of the file.
 	RagdollTime = FMath::Clamp(NewValue, 0.f, 10.f);
+}
+
+void SUTNCPlusMenu::OnShowOwnBeamChanged(ECheckBoxState NewState)
+{
+	bShowOwnBeam = (NewState == ECheckBoxState::Checked);
 }
 
 void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType)

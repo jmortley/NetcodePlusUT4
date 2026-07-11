@@ -50,6 +50,7 @@ private:
 	bool bAllowGib;
 	bool bShowRagdoll;
 	float RagdollTime;
+	bool bShowOwnBeam;
 	float OwnFootstepVolume;
 	bool bHighResScreenshotPostMatch;
 
@@ -82,6 +83,7 @@ private:
 	void OnAllowGibChanged(ECheckBoxState NewState);
 	void OnShowRagdollChanged(ECheckBoxState NewState);
 	void OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType);
+	void OnShowOwnBeamChanged(ECheckBoxState NewState);
 	void OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnScreenshotChanged(ECheckBoxState NewState);
 

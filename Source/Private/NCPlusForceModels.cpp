@@ -153,6 +153,7 @@ namespace
 		GConfig->GetFloat (*Sec, TEXT("S"),     Out.S,           Path);
 		GConfig->GetFloat (*Sec, TEXT("V"),     Out.V,           Path);
 		GConfig->GetFloat (*Sec, TEXT("Brightness"), Out.Brightness, Path);
+		GConfig->GetFloat (*Sec, TEXT("ArmourGlow"), Out.ArmourGlow, Path);   // absent key -> struct default 1.f (= current full-bright behaviour)
 		int32 Comp = 0; GConfig->GetInt(*Sec, TEXT("Complimentary"), Comp, Path); Out.bComplimentary = (Comp != 0);
 		int32 AM   = 0; GConfig->GetInt(*Sec, TEXT("ArmourMode"),    AM,   Path); Out.ArmourMode = (ENCPlusArmourMode)AM;
 	}
@@ -166,6 +167,7 @@ namespace
 		GConfig->SetFloat (*Sec, TEXT("S"),             S.S,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("V"),             S.V,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("Brightness"),    S.Brightness,              Path);
+		GConfig->SetFloat (*Sec, TEXT("ArmourGlow"),    S.ArmourGlow,              Path);
 		GConfig->SetInt   (*Sec, TEXT("Complimentary"), S.bComplimentary ? 1 : 0,  Path);
 		GConfig->SetInt   (*Sec, TEXT("ArmourMode"),    (int32)S.ArmourMode,       Path);
 	}

@@ -773,6 +773,11 @@ static void ScrubNoAliasIdentifiersOnLoad(const FString& /*MapName*/)
 	ScrubNoAliasIdentifiers();
 }
 
+// NCAmpRespawnFix.cpp — server-side amp respawn-interval correction (headerless: pure static hook,
+// no UObject/UHT surface, keeps this a server-DLL-only change).
+extern void RegisterNCAmpRespawnFix();
+extern void UnregisterNCAmpRespawnFix();
+
 void FNetcodePlus::StartupModule()
 {
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -920,6 +925,10 @@ void FNetcodePlus::StartupModule()
 		NCPlusVersionGate::RegisterHubAdvisor();
 	}
 
+	// Amp respawn-interval fix: world-init hook, acts only on authority game worlds (the callback
+	// itself no-ops for NM_Client), Mod.ini-gated ([NetcodePlus] AmpRespawnFix). See NCAmpRespawnFix.cpp.
+	RegisterNCAmpRespawnFix();
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
@@ -941,6 +950,9 @@ void FNetcodePlus::ShutdownModule()
 
 	// Unbind the hub-advisor PostLogin hook (no-op if never registered).
 	NCPlusVersionGate::UnregisterHubAdvisor();
+
+	// Unbind the amp respawn-fix world-init hook.
+	UnregisterNCAmpRespawnFix();
 
 	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())

@@ -3029,6 +3029,12 @@ void AElimPlusGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 				OverkillDamage += static_cast<float>(-VictimChar->Health);
 			}
 		}
+		// Stock UT uses very large sentinel damage for forced kills (telefrags use
+		// 100,000). Keep normal overkill-inclusive accounting, but mirror the HUD
+		// damage-number ceiling so one event cannot corrupt DMG, PPR, achievements,
+		// or rating persistence. This changes accounting only; gameplay damage and
+		// the resulting kill have already been applied by AUTCharacter::TakeDamage.
+		OverkillDamage = FMath::Min(OverkillDamage, 255.f);
 
 		// Per-round (drives PPR + high-damage-carry achievement) and match-cumulative
 		// (drives the scoreboard DMG column via the stats replicator). Engine DamageDone

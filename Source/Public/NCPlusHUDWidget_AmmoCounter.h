@@ -34,6 +34,17 @@ private:
 	float PickupPulseEnd;
 	float SwapFlashEnd;
 
+	// Typed layout extras, refreshed only when live editing bumps the revision.
+	uint32 CachedLayoutRevision;
+	uint8 CachedStyle;
+	float CachedOpacity;
+	FLinearColor CachedNumColor;
+	FLinearColor CachedMaxColor;
+	FLinearColor CachedFullColor;
+	FLinearColor CachedWarnColor;
+	FLinearColor CachedDangerColor;
+	FLinearColor CachedBgColor;
+
 	struct FAmmoColors
 	{
 		FLinearColor NumColor;       // base number color

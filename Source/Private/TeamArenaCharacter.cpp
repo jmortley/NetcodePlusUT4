@@ -545,7 +545,8 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
 	if (!MID) { return; }
 
-	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly));
+	const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(Side);
 
 	// Stock "Color" is a BRIGHT ~(1,1,0) yellow that drives the armour's emissive glow; our configured
 	// colour is usually dimmer (V<1), so reusing it flat washed the glow out. Push our hue to full
@@ -554,6 +555,10 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	FLinearColor Glow = ArmourColour;
 	const float MaxCh = FMath::Max3(Glow.R, Glow.G, Glow.B);
 	if (MaxCh > KINDA_SMALL_NUMBER) { Glow /= MaxCh; }
+	// Per-side "Armour Glow" (F5): dim the emissive shell so armoured/shielded pawns aren't radioactive.
+	// 1.0 = stock full-bright (bit-identical to before this knob existed); lower = calmer; 0 = no glow
+	// (armour still tinted via TeamColor below, just not emissive). This scales ONLY the emissive "Color".
+	Glow *= FMath::Clamp(Side.ArmourGlow, 0.f, 1.f);
 	static const FName NAME_ArmorColor(TEXT("Color"));
 	static const FName NAME_ArmorTeamColor(TEXT("TeamColor"));
 	MID->SetVectorParameterValue(NAME_ArmorColor, Glow);

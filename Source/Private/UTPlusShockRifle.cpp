@@ -162,6 +162,37 @@ void AUTPlusShockRifle::PlayFiringEffects()
 	}
 }
 
+void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
+	const FVector& SpawnLocation, const FRotator& SpawnRotation)
+{
+	// Client-local iCTF preference. The current iCTF rifle is an Instagib-named BP child of this
+	// class; normal shock-rifle children intentionally keep their beam regardless of this setting.
+	bool bShowOwnBeam = true;
+	if (GetClass() && GetClass()->GetName().Contains(TEXT("Instagib")) && GConfig)
+	{
+		const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		FString Value;
+		if (GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowOwnBeam"), Value, ConfigPath))
+		{
+			bShowOwnBeam = Value.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+		}
+	}
+
+	if (bShowOwnBeam || !FireEffect.IsValidIndex(FireMode) || FireEffect[FireMode] == nullptr)
+	{
+		Super::PlayImpactEffects_Implementation(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+		return;
+	}
+
+	// FireEffect is the beam only. Temporarily removing it keeps the stock path for the muzzle,
+	// endpoint impact, sound and animation intact. Third-person beams use AUTWeaponAttachment and
+	// never enter this first-person/view-target override.
+	UParticleSystem* SavedBeam = FireEffect[FireMode];
+	FireEffect[FireMode] = nullptr;
+	Super::PlayImpactEffects_Implementation(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+	FireEffect[FireMode] = SavedBeam;
+}
+
 void AUTPlusShockRifle::HitScanTrace(const FVector& StartLocation, const FVector& EndTrace, float TraceRadius, FHitResult& Hit, float PredictionTime)
 {
 	// UTWeaponFix will automatically use GetHitValidationPredictionTime()

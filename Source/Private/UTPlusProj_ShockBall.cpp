@@ -56,8 +56,8 @@ static TAutoConsoleVariable<int32> CVarShockMatchFakeInstigator(
 	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarShockMatchFakeMaxDist(
-	TEXT("ncp.ShockMatchFakeMaxDist"), 1000.f,
-	TEXT("CanMatchFake max fake<->real distance in units, measured post-CatchupTick (healthy own pairs measure 21-26u; consecutive shots sit >=~1450u apart). Rejects same-instigator stale/ghost fakes the instigator gate can't see. Kept loose on purpose: after burst packet loss the RELIABLE ServerStartFireFixed channel retransmit delivers a legit real unboundedly late (~480-1200u separation; the proactive +40/+80ms resends only cover ~100-220u) - do NOT tighten below ~1000 unless live inst-ok/dist-FAIL captures prove those are wrong-pairs, not retransmit reals. <=0 disables this gate and the no-progress staleness gate."),
+	TEXT("ncp.ShockMatchFakeMaxDist"), 1250.f,
+	TEXT("CanMatchFake max fake<->real distance in units, measured post-CatchupTick (healthy own pairs measure 21-26u). A LOOSE backstop to the instigator gate (gate 2 is the real theft defense); mainly rejects same-instigator stale/ghost fakes at long range. Default 1250 covers the documented legit retransmit band (after burst loss the RELIABLE ServerStartFireFixed channel delivers a legit real ~480-1200u behind its OWN fake; the proactive +40/+80ms resends only cover ~100-220u) - raised from 1000, which rejected the 1000-1200u top of that band and reintroduced double cores on lossy links. NOT a cross-pair boundary: the gate measures real<->fake, and a real lagging its own fake by S units sits (1401-S)u from the NEXT shot's fake (consecutive fakes are 0.58s*2415=1401u apart), so for S>700 the next fake is CLOSER and the stock closest-match loop cross-pairs it at any gate value - that residual (own real adopting the next shot's fake) needs shot-identity to fix, not distance (pre-existing; stock's dot-only gate cross-paired too). Raising 1000->1250 does NOT worsen it (cross-pairs need S>700, where the wrong fake is <701u, already inside the old 1000 gate). Bias LOW when tuning: a missed pair is a brief double core, a cross-pair is a teleporting fake. <=0 disables this gate AND the no-progress staleness gate."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarShockServerTickHz(
@@ -110,6 +110,21 @@ AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectIni
 	FlightEffectVisual = nullptr;
 	bVisualInitialized = false; // Start as false
 	VisualInterpSpeed = 100.0f;
+
+	// Curve-diagnostic state is initialised HERE, not in BeginPlay: on a replicated real,
+	// PostNetReceiveVelocity fires before BeginPlay (the initial-bunch rep-notify precedes
+	// PostNetInit->BeginPlay), so BeginPlay-init would erase the FirstRepVelDir baseline that the
+	// pre-BeginPlay PNRV call records. FireLineOrigin is the exception (it needs the spawn location).
+	NextCurveLatLog = 20.f;
+	NextCurveVelDegLog = 3.f;
+	ConvergePullAccum = FVector::ZeroVector;
+	NextConvergePullLog = 25.f;
+	FirstRepVelDir = FVector::ZeroVector;
+	bLoggedFirstRepVel = false;
+
+	// Behavioural pairing state.
+	ExpectedDispAccum = 0.f;
+	bServerConfirmedStop = false;
 }
 
 void AUTPlusProj_ShockBall::NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage)
@@ -231,14 +246,12 @@ void AUTPlusProj_ShockBall::BeginPlay()
 	StuckTime = 0.f;
 	LastStuckProgressLoc = GetActorLocation();
 
-	// Curve diagnostics state (ncp.ShockDebug) — see Tick / PostNetReceiveVelocity.
+	// Spawn origin for CanMatchFake gate 3b + curve diagnostics (needs actor location, so BeginPlay
+	// not constructor). The curve-diagnostic LATCH members are constructor-init'd on purpose (see the
+	// constructor) and must NOT be reset here, or a replicated real's pre-BeginPlay PNRV baseline is
+	// wiped. ExpectedDispAccum resets per spawn (harmless; also constructor-zeroed).
 	FireLineOrigin = GetActorLocation();
-	NextCurveLatLog = 20.f;
-	NextCurveVelDegLog = 3.f;
-	ConvergePullAccum = FVector::ZeroVector;
-	NextConvergePullLog = 25.f;
-	FirstRepVelDir = FVector::ZeroVector;
-	bLoggedFirstRepVel = false;
+	ExpectedDispAccum = 0.f;
 	if (ProjectileMovement && !ProjectileMovement->Velocity.IsNearlyZero())
 	{
 		OriginalFireDirection = ProjectileMovement->Velocity.GetSafeNormal();
@@ -272,6 +285,29 @@ void AUTPlusProj_ShockBall::BeginPlay()
 			ProjectileMovement->SetComponentTickInterval(ClientInterval);
 		}
 	}
+
+	// Deferred PNRV paired comparison (ncp.ShockDebug). The first replicated velocity (the server's
+	// true fire heading) is captured by PostNetReceiveVelocity BEFORE this BeginPlay runs, when the
+	// fake isn't paired yet. Now that Super::BeginPlay() has run the pairing loop, emit the aim-mismatch
+	// comparison against the paired fake's fire line — the measurement the old inline log could never
+	// produce (it always saw MyFakeProjectile == null and printed the -2 sentinel).
+	if (ShockDbg() && GetNetMode() == NM_Client && !bFakeClientProjectile && bLoggedFirstRepVel)
+	{
+		const AUTPlusProj_ShockBall* Fake = Cast<AUTPlusProj_ShockBall>(MyFakeProjectile);
+		if (Fake != nullptr && Fake->bHasCachedFireDirection)
+		{
+			const float FakeDot = FirstRepVelDir | Fake->OriginalFireDirection;
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV paired-cmp dotVsFakeFireDir=%.4f deg=%.2f repDir=%s fakeFireDir=%s age=%.3f"),
+				FakeDot, FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FakeDot, -1.f, 1.f))),
+				*FirstRepVelDir.ToString(), *Fake->OriginalFireDirection.ToString(),
+				GetWorld()->GetTimeSeconds() - CreationTime);
+		}
+		else
+		{
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV paired-cmp unpaired (no fake at BeginPlay) repDir=%s age=%.3f"),
+				*FirstRepVelDir.ToString(), GetWorld()->GetTimeSeconds() - CreationTime);
+		}
+	}
 }
 
 
@@ -279,6 +315,17 @@ void AUTPlusProj_ShockBall::BeginPlay()
 void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Gate 3b input (behavioural, NOT diagnostics — runs regardless of ncp.ShockDebug). Integrate the
+	// fake's own expected travel with the actor tick delta, which is already scaled by CustomTimeDilation.
+	// Unlike currentSpeed*wallAge this stays correct under Slomo and FREEZES when the PMC stops, so a
+	// penetrating ghost (drift-correct re-asserts full speed while wedged and not displacing) accumulates
+	// far past its actual displacement and fails gate 3b, while a legit dilated or late-retransmit fake
+	// tracks its displacement and passes. Fake-only; server cores and the client real never accumulate.
+	if (bFakeClientProjectile && ProjectileMovement)
+	{
+		ExpectedDispAccum += ProjectileMovement->Velocity.Size() * DeltaTime;
+	}
 
 	// CURVE diagnostics (ncp.ShockDebug, FAKE only — the core the shooter actually sees).
 	// Two independent signals, each event-gated by a doubling threshold so a straight core
@@ -481,12 +528,18 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	{
 		if (ShockDbg())
 		{
-			// geoUnder=0 with the core continuing to move afterward = a FALSE reveal (invisible-curve);
+			// stopSrc=local-only + geoUnder=0 = the false-handoff population (the real's OWN PMC
+			// stopped locally, no replicated stop). replTruthDist = how far this local reveal position
+			// is from the last server snapshot (UTProjReplicatedMovement.Location) — the teleport
+			// magnitude commit 2 removes by revealing at server truth instead of local sim.
 			// geoUnder=1 = a legitimate wall-stop reveal.
 			UE_LOG(LogShockDbg, Warning,
-				TEXT("[ShockDbg/CLI] HANDOFF real@%s fake@%s realFakeDist=%.1f vel=%.1f geoUnder=%d tickHz=%d age=%.3f"),
+				TEXT("[ShockDbg/CLI] HANDOFF stopSrc=%s real@%s fake@%s realFakeDist=%.1f replTruth@%s replTruthDist=%.1f vel=%.1f geoUnder=%d tickHz=%d age=%.3f"),
+				bServerConfirmedStop ? TEXT("replicated") : TEXT("local-only"),
 				*GetActorLocation().ToString(), *MyFakeProjectile->GetActorLocation().ToString(),
 				FVector::Dist(GetActorLocation(), MyFakeProjectile->GetActorLocation()),
+				*UTProjReplicatedMovement.Location.ToString(),
+				FVector::Dist(GetActorLocation(), (FVector)UTProjReplicatedMovement.Location),
 				ProjectileMovement ? ProjectileMovement->Velocity.Size() : -1.f,
 				ShockDbgGeoUnder(this, CollisionComp) ? 1 : 0, AUTWeaponFix::GetTargetProjectileTickRate(),
 				GetWorld()->GetTimeSeconds() - CreationTime);
@@ -525,6 +578,16 @@ void AUTPlusProj_ShockBall::PostNetReceiveVelocity(const FVector& NewVelocity)
 {
 	Super::PostNetReceiveVelocity(NewVelocity);
 
+	// Record a server-confirmed stop (replicated velocity ~0). Sticky, and set BEFORE the pairing
+	// early-return so it is a pure "did the server tell us it stopped" signal. Log-only in this build;
+	// commit 2 gates the HANDOFF / stop-snap reveals on it so the false-handoff population (the real's
+	// OWN local PMC stop, with no replicated stop) routes through a contradiction reveal instead of
+	// teleporting the fake to a local-sim position.
+	if (GetNetMode() == NM_Client && !bFakeClientProjectile && NewVelocity.IsNearlyZero(2.0f))
+	{
+		bServerConfirmedStop = true;
+	}
+
 	// CURVE diagnostics: the SERVER's heading as replicated (shock movement replicates at
 	// spawn/stop/explode only, so this is cheap). Runs before the pairing early-return on
 	// purpose — an unpaired real (e.g. a CanMatchFake reject at ncp.ShockMatchFakeDot 0.95)
@@ -538,14 +601,13 @@ void AUTPlusProj_ShockBall::PostNetReceiveVelocity(const FVector& NewVelocity)
 		const FVector NewDir = NewVelocity.GetSafeNormal();
 		if (!bLoggedFirstRepVel)
 		{
+			// DEFERRED comparison: on the initial replicated bunch this runs before the pairing loop
+			// (rep-notify precedes PostNetInit->BeginPlay), so MyFakeProjectile is null here. Record
+			// the server's true fire heading now; BeginPlay emits 'PNRV paired-cmp' once the fake is
+			// known. Constructor-init + no BeginPlay reset keep this baseline intact until then.
 			bLoggedFirstRepVel = true;
 			FirstRepVelDir = NewDir;
-			AUTPlusProj_ShockBall* Fake = Cast<AUTPlusProj_ShockBall>(MyFakeProjectile);
-			const bool bHaveFakeDir = (Fake && Fake->bHasCachedFireDirection);
-			const float FakeDot = bHaveFakeDir ? (NewDir | Fake->OriginalFireDirection) : 0.f;
-			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV first-vel dotVsFakeFireDir=%.4f deg=%.2f repDir=%s paired=%d age=%.3f"),
-				bHaveFakeDir ? FakeDot : -2.f,
-				bHaveFakeDir ? FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FakeDot, -1.f, 1.f))) : -1.f,
+			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV first-vel repDir=%s paired=%d age=%.3f (cmp deferred to BeginPlay)"),
 				*NewDir.ToString(), MyFakeProjectile ? 1 : 0, GetWorld()->GetTimeSeconds() - CreationTime);
 		}
 		else
@@ -676,26 +738,32 @@ bool AUTPlusProj_ShockBall::CanMatchFake(AUTProjectile* InFakeProjectile, const 
 	const float Dist = FVector::Dist(InFakeProjectile->GetActorLocation(), GetActorLocation());
 	const bool bDistOK = (MaxDist <= 0.f) || (Dist <= MaxDist);
 
-	// GATE 3b — staleness/progress. An EMBEDDED ghost fake defeats all three gates above:
-	// same instigator, drift-correct holds its heading at dot~1.0 (the embed-skip and stuck
-	// force-explode are authority-only, so client fakes keep re-asserting full speed), and
-	// it is wedged against the very wall the player refires at, so distance passes. It is
-	// the one candidate whose displacement-from-spawn sits grossly below speed*age — a
-	// free-flying fake (including one pairing late off a reliable-channel retransmit)
-	// always shows ~full progress. The age floor keeps every fresh pair untouched.
-	// Shares the MaxDist kill-switch (<=0 disables both).
+	// GATE 3b — staleness/progress. Rejects a PENETRATING ghost fake that defeats gates 1-3: same
+	// instigator, and while it is wedged (embedded via overlap, never a clean blocking hit, so
+	// StopSimulating never ran) drift-correct keeps re-asserting full speed at dot~1.0 and it sits
+	// against the very wall the player refires at, so direction+distance pass. Its tell: expected
+	// travel (integrated over the flight) races far past its actual displacement-from-spawn. Expected
+	// travel comes from the fake's own ExpectedDispAccum (|vel|*dt each Tick), NOT currentSpeed*wallAge:
+	// the accumulator is dilation-correct (Slomo) and FREEZES on a PMC stop.
+	// NOTE this build does NOT reject a CLEANLY-stopped fake (velocity 0 -> AUTProjectile::GetVelocity
+	// returns 0): its accumulator froze near its real displacement so the ratio ~1 and 3b passes it by
+	// design — a stopped fake is rejected here only incidentally by gate 1 (dot=0), which holds while
+	// ncp.ShockMatchFakeDot >= 0 (strict '>'; a negative gate deliberately reopens stopped-fake matching).
+	// Structural stopped-fake handling needs the real's motion state and is deferred (commit 2). The age
+	// floor keeps every fresh pair untouched; shares the MaxDist kill-switch (<=0 disables gate 3 AND 3b).
 	bool bStaleOK = true;
 	float FakeAge = 0.f;
 	float FakeDisp = -1.f;
+	float FakeExpDisp = -1.f;
 	const AUTPlusProj_ShockBall* FakeShock = Cast<AUTPlusProj_ShockBall>(InFakeProjectile);
 	if (FakeShock != nullptr && GetWorld() != nullptr)
 	{
 		FakeAge = GetWorld()->GetTimeSeconds() - InFakeProjectile->CreationTime;
 		FakeDisp = FVector::Dist(InFakeProjectile->GetActorLocation(), FakeShock->FireLineOrigin);
+		FakeExpDisp = FakeShock->ExpectedDispAccum;
 		if (MaxDist > 0.f && FakeAge > 0.3f)
 		{
-			const float ExpectedDisp = InFakeProjectile->GetVelocity().Size() * FakeAge;
-			bStaleOK = (FakeDisp >= 0.25f * ExpectedDisp);
+			bStaleOK = (FakeDisp >= 0.25f * FakeExpDisp);
 		}
 	}
 
@@ -707,14 +775,14 @@ bool AUTPlusProj_ShockBall::CanMatchFake(AUTProjectile* InFakeProjectile, const 
 		// (late-retransmit real vs stale ghost) read identical on dot/dist/inst and differ
 		// ONLY on age/progress, so captures need both fields to be attributable.
 		UE_LOG(LogShockDbg, Warning,
-			TEXT("[ShockDbg/%s] CanMatchFake %s dot=%.4f (gate %.2f %s) dist=%.1f (max %.0f %s) inst=%s real=%s fake=%s fakeAge=%.3f fakeDisp=%.1f stale=%s fakeProj=%s"),
+			TEXT("[ShockDbg/%s] CanMatchFake %s dot=%.4f (gate %.2f %s) dist=%.1f (max %.0f %s) inst=%s real=%s fake=%s fakeAge=%.3f fakeDisp=%.1f fakeExpDisp=%.1f stale=%s fakeProj=%s"),
 			ShockDbgSide(this), bMatch ? TEXT("ACCEPT") : TEXT("reject"),
 			Dot, MatchGate, bDotOK ? TEXT("ok") : TEXT("FAIL"),
 			Dist, MaxDist, bDistOK ? TEXT("ok") : TEXT("FAIL"),
 			!bInstGateOn ? TEXT("off") : (bInstOK ? TEXT("ok") : TEXT("FAIL")),
 			Instigator ? *Instigator->GetName() : TEXT("null"),
 			InFakeProjectile->Instigator ? *InFakeProjectile->Instigator->GetName() : TEXT("null"),
-			FakeAge, FakeDisp, bStaleOK ? TEXT("ok") : TEXT("FAIL"),
+			FakeAge, FakeDisp, FakeExpDisp, bStaleOK ? TEXT("ok") : TEXT("FAIL"),
 			*InFakeProjectile->GetName());
 	}
 	return bMatch;
@@ -739,7 +807,63 @@ void AUTPlusProj_ShockBall::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 				*HitLocation.ToString(), *GetActorLocation().ToString(), bFakeClientProjectile ? 1 : 0);
 		}
 	}
+
+	// STUCK-VANISH INSTRUMENTATION (ncp.ShockDebug, log-only). The suspected dominant "stuck then
+	// silently vanished" path: the HIDDEN client real (collision live; pairing hid only visuals) takes
+	// a non-ignored LOCAL blocking hit — a wall (the 'Projectile' profile blocks WorldStatic) or another
+	// shock core (ShouldIgnoreHit un-ignores shock-vs-shock). Stock ProcessHit then runs the paired
+	// branch (UTProjectile.cpp:824-828): forward the hit to the fake, then Destroy() self. On a CLIENT
+	// that Destroy() is REFUSED (UWorld::DestroyActor rejects a non-authority, non-net-forced,
+	// non-net-temporary actor; AUTProjectile sets bNetTemporary=false), and the forwarded hit is a no-op
+	// because our fake's ShouldIgnoreHit returns true — so nothing explodes, the real survives hidden
+	// with its PMC stopped, and the velocity-only HANDOFF next Tick is what actually destroys the fake
+	// and reveals the real. A wall hit emits none of the existing HANDOFF/REVEAL-SNAP/PROC-HIT lines,
+	// which is why it was invisible until now.
+	//
+	// bReachDestroy MIRRORS stock's gating so destroy=REFUSED is only claimed when stock GENUINELY
+	// reaches the Destroy() call: the outer predicate (:807), a non-ignored hit, and a live paired fake.
+	// It excludes PAWN hits (the only case with stock's team-ignore early-return at :819-823), so the
+	// verdict never speaks for a path that returned before Destroy(); the investigation targets wall /
+	// core hits anyway, and the PRE line's other-class makes any pawn hit obvious. ShouldIgnoreHit is a
+	// BlueprintNativeEvent but is side-effect-free across this hierarchy (pure casts+reads; the shipped
+	// shock BP does not override it), so the one extra evaluation keeps ShockDebug behaviour-neutral.
+	const bool bDiagPairedReal = ShockDbg() && GetNetMode() == NM_Client && !bFakeClientProjectile
+		&& !bExploded && bHasSpawnedFully && OtherActor != nullptr && OtherActor != this && OtherComp != nullptr
+		&& (OtherActor != Instigator || Instigator == nullptr || bCanHitInstigator)
+		&& MyFakeProjectile != nullptr && !MyFakeProjectile->IsPendingKillPending();
+	bool bPreSelfPK = false;
+	bool bReachDestroy = false;
+	if (bDiagPairedReal)
+	{
+		bPreSelfPK = IsPendingKillPending();
+		const bool bIgnore = ShouldIgnoreHit(OtherActor, OtherComp);
+		const bool bPawn = (Cast<APawn>(OtherActor) != nullptr);
+		bReachDestroy = !bIgnore && !bPawn; // non-pawn + non-ignored + (outer/fake already checked) => stock reaches Destroy()
+		UE_LOG(LogShockDbg, Warning,
+			TEXT("[ShockDbg/CLI] PROC-HIT/real PRE other=%s(%s) ignore=%d pawn=%d reachDestroy=%d selfPK=%d fakePK=%d vel=%.1f tearOff=%d netTemp=%d role=%d hit@%s self@%s age=%.3f"),
+			*OtherActor->GetName(), *OtherActor->GetClass()->GetName(),
+			bIgnore ? 1 : 0, bPawn ? 1 : 0, bReachDestroy ? 1 : 0, bPreSelfPK ? 1 : 0,
+			MyFakeProjectile->IsPendingKillPending() ? 1 : 0,
+			ProjectileMovement ? ProjectileMovement->Velocity.Size() : -1.f,
+			bTearOff ? 1 : 0, bNetTemporary ? 1 : 0, (int32)Role,
+			*HitLocation.ToString(), *GetActorLocation().ToString(),
+			GetWorld()->GetTimeSeconds() - CreationTime);
+	}
+
 	Super::ProcessHit_Implementation(OtherActor, OtherComp, HitLocation, HitNormal);
+
+	// Verdict only where stock genuinely reached Destroy(). Reading members after a same-frame Destroy()
+	// is safe (pending-kill defers actual teardown). selfPK 0->0 == the engine refused the destroy.
+	if (bReachDestroy)
+	{
+		const bool bPostSelfPK = IsPendingKillPending();
+		const bool bFakeValid = (MyFakeProjectile != nullptr && !MyFakeProjectile->IsPendingKillPending());
+		UE_LOG(LogShockDbg, Warning,
+			TEXT("[ShockDbg/CLI] PROC-HIT/real POST selfPK %d->%d destroy=%s fakeValid=%d"),
+			bPreSelfPK ? 1 : 0, bPostSelfPK ? 1 : 0,
+			bPostSelfPK ? TEXT("took-effect") : TEXT("REFUSED"),
+			bFakeValid ? 1 : 0);
+	}
 }
 
 void AUTPlusProj_ShockBall::PostNetReceiveLocationAndRotation()

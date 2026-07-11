@@ -104,6 +104,8 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 
 	virtual UAnimMontage* GetFiringAnim(uint8 FireMode, bool bOnHands = false) const;
 	virtual void PlayFiringEffects();
+	virtual void PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
+		const FVector& SpawnLocation, const FRotator& SpawnRotation) override;
 
 	UFUNCTION(BlueprintImplementableEvent, BlueprintCosmetic)
 	void Play1PComboEffects();
