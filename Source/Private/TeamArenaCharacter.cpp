@@ -10,6 +10,8 @@
 #include "UTPlusShockRifle.h"
 #include "UTGameState.h"
 #include "UTWeap_LinkGun.h"
+#include "UTWeap_LightningRifle.h"
+#include "UTWeapAttachment_LightningRifle.h"
 #include "UTArmor.h"
 #include "UTDamageType.h"
 #include "Net/UnrealNetwork.h"
@@ -743,6 +745,19 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 
 void ATeamArenaCharacter::FiringInfoUpdated()
 {
+    // The stock Lightning Rifle is a hybrid projectile/hitscan weapon whose attachment
+    // remaps FireMode and FireEffect from FlashExtra.  The NC+ generic visual-prediction
+    // and forced-beam path bypasses that protocol, so let the stock implementation own
+    // all LR presentation on clients (including a listen-server host).
+    const bool bStockLightningRifle =
+        Cast<AUTWeap_LightningRifle>(Weapon) != nullptr ||
+        Cast<AUTWeapAttachment_LightningRifle>(WeaponAttachment) != nullptr;
+    if (GetNetMode() != NM_DedicatedServer && bStockLightningRifle)
+    {
+        Super::FiringInfoUpdated();
+        return;
+    }
+
     // 1. Interrupt Animation (Standard)
     UAnimInstance* AnimInstance = GetMesh()->GetAnimInstance();
     if (AnimInstance != NULL)
