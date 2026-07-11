@@ -744,10 +744,16 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
-		&& !MyFakeProjectile->IsPendingKillPending())
+	if (GetNetMode() == NM_Client && !bFakeClientProjectile)
 	{
-		AdvanceAuthoritativeEstimate(DeltaTime);
+		// Keep estimate advancement restricted to a live paired fake, but always service an
+		// active recovery. TickLocalStopRecovery owns the null/pending-kill guard and calls
+		// EndLocalStopRecovery("fake-gone"), restoring the real's saved WorldStatic response.
+		// Previously the outer fake-validity gate made that cleanup branch unreachable.
+		if (MyFakeProjectile != nullptr && !MyFakeProjectile->IsPendingKillPending())
+		{
+			AdvanceAuthoritativeEstimate(DeltaTime);
+		}
 		TickLocalStopRecovery(DeltaTime);
 	}
 

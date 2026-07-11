@@ -1596,6 +1596,15 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 	// the missing coverage for WaitingToStart.
 	if (NewPlayer->GetPawn())
 	{
+		// Whoever already owns a live pawn IS a participant. Every round's pawns
+		// normally spawn through the recording branch below (ResetPlayersForNewRound
+		// destroys all pawns first), so this is belt-and-braces for any alternate
+		// possession path: the set is cleared at every round start, so pre-round
+		// entries wash out and can't pollute a round's rating.
+		if (AUTPlayerState* AlivePS = Cast<AUTPlayerState>(NewPlayer->PlayerState))
+		{
+			RoundParticipants.Add(AlivePS);
+		}
 		return;
 	}
 
@@ -1611,6 +1620,19 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 	if (bLineupIsActive)
 	{
 		Super::RestartPlayer(NewPlayer);
+		// Lineups normally precede a round (intro) or follow the match (summary),
+		// and round pawns are destroyed + respawned through the recording branch
+		// below — but if a lineup ever overlaps the round spawn queue, this spawn
+		// IS the player's round pawn. Record on success so that race can't leave
+		// a playing pawn unrated (mixed-set case the empty-set fail-safe in
+		// EndRoundForTeam cannot cover).
+		if (NewPlayer->GetPawn())
+		{
+			if (AUTPlayerState* SpawnedPS = Cast<AUTPlayerState>(NewPlayer->PlayerState))
+			{
+				RoundParticipants.Add(SpawnedPS);
+			}
+		}
 		return;
 	}
 
