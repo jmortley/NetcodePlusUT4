@@ -435,7 +435,20 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 	// Stat columns
 	if (UTGameState && UTGameState->HasMatchStarted())
 	{
-		DrawPlayerScore(PlayerState, XOffset, YOffset, ScaledCellWidth, DrawColor);
+		if (PlayerState->bPendingTeamSwitch && !PlayerState->bIsABot)
+		{
+			// Queued team change (stock replicated bPendingTeamSwitch — set by
+			// AUTTeamGameMode::ChangeTeam when a mid-match switch has to wait for
+			// balance or a counterpart). Stock TEAM SWAP tag in place of the stat
+			// columns, same treatment as the CTF/Duel/Shaft scoreboards.
+			DrawText(TeamSwapText, XOffset + (ScaledCellWidth * ColumnHeaderScoreX),
+				YOffset + ColumnY, UTHUDOwner->SmallFont, RenderScale, 1.0f,
+				FLinearColor::White, ETextHorzPos::Center, ETextVertPos::Center);
+		}
+		else
+		{
+			DrawPlayerScore(PlayerState, XOffset, YOffset, ScaledCellWidth, DrawColor);
+		}
 	}
 	else
 	{
