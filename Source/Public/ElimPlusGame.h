@@ -175,6 +175,14 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Arena|Bridge")
 	TArray<AUTPlayerState*> Team1AlivePlayers;
 
+	/** PlayerStates that actually SPAWNED into the current round. Recorded by
+	 *  RestartPlayer on a successful live spawn, cleared in ResetPlayersForNewRound.
+	 *  EndRoundForTeam rates (ELO + PPR accumulators) only these: a late joiner
+	 *  who connects mid-round and never spawns must not eat a 0-kill/0-damage
+	 *  rated round — worst on the match's LAST round, where a fresh high-RD
+	 *  rating could bleed up to the per-round cap without ever playing. */
+	TSet<TWeakObjectPtr<AUTPlayerState>> RoundParticipants;
+
 	UFUNCTION(BlueprintImplementableEvent, Category = "Arena|Bridge")
 	void BP_OnLastManStanding(int32 LastManTeamIndex, AUTPlayerState* LastManPlayerState);
 

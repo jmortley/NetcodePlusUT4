@@ -946,16 +946,6 @@ void AElimPlusGame::StartNextRound()
 		UE_LOG(LogGameMode, Warning, TEXT("Disabled team announcements for subsequent rounds"));
 	}
 
-	// 6-0 blowout shuffle (armed by EndRoundForTeam): re-split on current-match
-	// PPR before anything spawns for this round — the same pre-spawn silence
-	// rationale as the pre-match rebalance. Once per match.
-	if (bPendingMidGameShuffle)
-	{
-		bPendingMidGameShuffle = false;
-		bDidMidGameShuffle = true;
-		MidGameShufflePPR();
-	}
-
 	// Reset per-round trackers
 	CamperTracker.Empty();
 	StartCampCheckTimer();
@@ -972,6 +962,19 @@ void AElimPlusGame::StartNextRound()
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
 	ResetPlayersForNewRound();
+
+	// 6-0 blowout shuffle (armed by EndRoundForTeam): reset first so every
+	// controller is unpossessed before MovePlayerToTeam runs. Stock deliberately
+	// suicides a possessed pawn during a team change; doing the swap before this
+	// reset created a false inter-round death/score/replay event for a surviving
+	// player. This remains pre-spawn and makes no replicated/schema change.
+	if (bPendingMidGameShuffle)
+	{
+		bPendingMidGameShuffle = false;
+		bDidMidGameShuffle = true;
+		MidGameShufflePPR();
+	}
+
 	// Sweep AFTER the reset, on the canonical round-start path. CleanupWorldForNewRound
 	// also runs in DefaultTimer at intermission-end, but that fires BEFORE StartNextRound
 	// (and a BP-driven state transition can bypass it), so any pickup still on the floor
@@ -1159,6 +1162,13 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 				if (!UTPS || UTPS->bOnlySpectator || !UTPS->UniqueId.IsValid()) continue;
 
+				// Only players who actually SPAWNED this round accumulate PPR —
+				// a late joiner who never spawned must not have their match/lifetime
+				// PPR mean dragged down by a 0-point round they never played.
+				// Fail-safe: an empty set means participation tracking saw no spawns
+				// (unexpected BP-driven round flow) — fall back to the full roster.
+				if (RoundParticipants.Num() > 0 && !RoundParticipants.Contains(UTPS)) continue;
+
 				// PPR damage = PlayerRoundDamage, which now accumulates OVERKILL-INCLUSIVE
 				// damage per round (full hit value incl. the portion beyond victim HP —
 				// see ScoreDamage_Implementation, which reconstructs the overkill the
@@ -1209,6 +1219,16 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 					if (!UTPS || UTPS->bOnlySpectator) continue;
 					if (UTPS->GetTeamNum() != TeamIdx) continue;
+					// Rate only players who actually SPAWNED into this round. A late
+					// joiner who connects mid-round and never spawns used to be fed in
+					// with 0 kills / 0 damage — a bottom-of-lobby z-score that could
+					// bleed a fresh high-RD rating up to the per-round cap on the
+					// match's final round without them ever playing. Bots follow the
+					// same rule, so team sizes stay honest (a never-spawned roster
+					// entry isn't fighting this round on EITHER side of the math).
+					// Fail-safe: an empty set = tracking saw no spawns (unexpected
+					// BP-driven round flow) — fall back to the full roster.
+					if (RoundParticipants.Num() > 0 && !RoundParticipants.Contains(UTPS)) continue;
 
 					FElimPlusPlayerRoundPerf P;
 					// Bots have invalid UniqueIds. We still include them so the rating
@@ -1475,6 +1495,9 @@ void AElimPlusGame::ResetPlayersForNewRound()
 	Team0RoundDamage = 0.0f;
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
+	// New round = new participation slate. Repopulated by RestartPlayer as the
+	// staggered spawn queue (and any mid-round-respawn config) spawns players.
+	RoundParticipants.Empty();
 
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 	{
@@ -1611,6 +1634,13 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 			// Pawn now carries its BP defaults (HealthMax 125 + the vest's 100 armor
 			// from default inventory). Scale HP for uneven teams (non-PUG) here.
 			ApplyUnevenTeamHealthScaling(Cast<AUTCharacter>(NewPlayer->GetPawn()));
+
+			// Round participation (humans AND bots — team-size honesty): only
+			// players who actually spawned get rated/PPR'd for this round.
+			if (AUTPlayerState* SpawnedPS = Cast<AUTPlayerState>(NewPlayer->PlayerState))
+			{
+				RoundParticipants.Add(SpawnedPS);
+			}
 		}
 	}
 }

@@ -3,6 +3,7 @@
 #include "UTPlusShockRifle.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Engine/DemoNetDriver.h"
+#include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "HAL/IConsoleManager.h"
 #include "Components/SphereComponent.h"
@@ -78,7 +79,22 @@ static TAutoConsoleVariable<int32> CVarShockServerTickHz(
 // without a rebuild). Both are client-side cosmetic fake/real reconciliation — no replication, no version bump.
 static TAutoConsoleVariable<int32> CVarShockConverge(
 	TEXT("ncp.ShockConverge"), 1,
-	TEXT("Client fake->real convergence interp (the ~700ms, 60u-capped pull of the rendered fake toward the real). 1=on (shipped), 0=off (fake renders its own predicted path, no pull)."),
+	TEXT("Client fake->authoritative-estimate convergence. 1=on (dogfood default: bounded soft phase correction, never a mid-flight backward snap), 0=off (fake renders its own predicted path; legacy >120u movement-update snap remains as a safety fallback)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarShockConvergeTime(
+	TEXT("ncp.ShockConvergeTime"), 0.25f,
+	TEXT("Desired time in seconds for client shock-core phase error to converge toward the server estimate (clamped 0.10..1.00). Correction speed is also bounded by ncp.ShockConvergeMaxSpeed and 75% of current travel speed so the visible core cannot reverse."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarShockConvergeMaxSpeed(
+	TEXT("ncp.ShockConvergeMaxSpeed"), 1200.f,
+	TEXT("Maximum client shock-core phase-correction speed in uu/s (clamped 100..2000). Default 1200 keeps a 2415uu/s core moving forward even while correcting backward."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarShockConvergeMaxDist(
+	TEXT("ncp.ShockConvergeMaxDist"), 500.f,
+	TEXT("Largest paired fake<->server-estimate error eligible for soft in-flight phase convergence (uu; clamped 60..2000). Default 500 covers normal high-ping phase error while avoiding aggressive correction of loss-delayed/cross-paired outliers."),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarShockHandoff(
@@ -142,6 +158,42 @@ static void ShockDumpAll()
 				continue;
 			}
 			WorldCount++;
+
+			UDemoNetDriver* DemoDriver = World->DemoNetDriver;
+			const bool bReplayPlayback = DemoDriver != nullptr && DemoDriver->IsPlaying();
+			const bool bReplayFastForward = bReplayPlayback && DemoDriver->IsFastForwarding();
+			const bool bWorldPaused = World->IsPaused();
+
+			APlayerController* ListenerPC = nullptr;
+			for (FConstPlayerControllerIterator PCIt = World->GetPlayerControllerIterator(); PCIt; ++PCIt)
+			{
+				APlayerController* Candidate = PCIt->Get();
+				if (Candidate != nullptr && Candidate->IsLocalPlayerController())
+				{
+					ListenerPC = Candidate;
+					break;
+				}
+			}
+
+			FVector ListenerLocation = FVector::ZeroVector;
+			FRotator ListenerRotation = FRotator::ZeroRotator;
+			const bool bHasListener = ListenerPC != nullptr;
+			if (bHasListener)
+			{
+				ListenerPC->GetPlayerViewPoint(ListenerLocation, ListenerRotation);
+			}
+
+			AActor* ViewTarget = ListenerPC != nullptr ? ListenerPC->GetViewTarget() : nullptr;
+			UE_LOG(LogShockDbg, Warning,
+				TEXT("[ShockDbg/DUMP] WORLD name=%s path=%s type=%d netMode=%d replay=%d paused=%d fastForward=%d worldTime=%.3f realTime=%.3f listener=%s viewTarget=%s listenerLoc=%s listenerRot=%s"),
+				*World->GetName(), *World->GetPathName(), (int32)Context.WorldType, (int32)World->GetNetMode(),
+				bReplayPlayback ? 1 : 0, bWorldPaused ? 1 : 0, bReplayFastForward ? 1 : 0,
+				World->GetTimeSeconds(), World->GetRealTimeSeconds(),
+				ListenerPC ? *ListenerPC->GetName() : TEXT("none"),
+				ViewTarget ? *ViewTarget->GetName() : TEXT("none"),
+				bHasListener ? *ListenerLocation.ToString() : TEXT("none"),
+				bHasListener ? *ListenerRotation.ToString() : TEXT("none"));
+
 			for (TActorIterator<AUTPlusProj_ShockBall> It(World); It; ++It)
 			{
 				AUTPlusProj_ShockBall* Core = *It;
@@ -152,23 +204,36 @@ static void ShockDumpAll()
 				CoreCount++;
 				TArray<UAudioComponent*> AudioComponents;
 				Core->GetComponents<UAudioComponent>(AudioComponents);
+				const float CoreListenerDistance = bHasListener
+					? FVector::Dist(Core->GetActorLocation(), ListenerLocation)
+					: -1.f;
 				UE_LOG(LogShockDbg, Warning,
-					TEXT("[ShockDbg/DUMP] core=%s class=%s age=%.3f life=%.3f role=%d hidden=%d fake=%d master=%s pairedFake=%s exploded=%d pendingKill=%d loc=%s vel=%s audio=%d"),
+					TEXT("[ShockDbg/DUMP] world=%s replay=%d paused=%d core=%s class=%s age=%.3f life=%.3f role=%d hidden=%d fake=%d master=%s pairedFake=%s exploded=%d pendingKill=%d loc=%s listenerDist=%.1f vel=%s audio=%d"),
+					*World->GetName(), bReplayPlayback ? 1 : 0, bWorldPaused ? 1 : 0,
 					*Core->GetName(), *Core->GetClass()->GetName(), Core->GetGameTimeSinceCreation(), Core->GetLifeSpan(),
 					(int32)Core->Role, Core->bHidden ? 1 : 0, Core->bFakeClientProjectile ? 1 : 0,
 					Core->MasterProjectile ? *Core->MasterProjectile->GetName() : TEXT("none"),
 					Core->MyFakeProjectile ? *Core->MyFakeProjectile->GetName() : TEXT("none"),
 					Core->bExploded ? 1 : 0, Core->IsPendingKillPending() ? 1 : 0,
-					*Core->GetActorLocation().ToString(), *Core->GetVelocity().ToString(), AudioComponents.Num());
+					*Core->GetActorLocation().ToString(), CoreListenerDistance,
+					*Core->GetVelocity().ToString(), AudioComponents.Num());
 				for (UAudioComponent* Audio : AudioComponents)
 				{
 					if (Audio != nullptr)
 					{
+						const FVector AudioLocation = Audio->GetComponentLocation();
+						const float AudioListenerDistance = bHasListener
+							? FVector::Dist(AudioLocation, ListenerLocation)
+							: -1.f;
+						USceneComponent* AttachParent = Audio->GetAttachParent();
 						UE_LOG(LogShockDbg, Warning,
-							TEXT("[ShockDbg/DUMP]   audioComp=%s playing=%d active=%d sound=%s duration=%.3f"),
+							TEXT("[ShockDbg/DUMP]   audioComp=%s playing=%d active=%d sound=%s duration=%.3f owner=%s attachParent=%s loc=%s listenerDist=%.1f"),
 							*Audio->GetName(), Audio->IsPlaying() ? 1 : 0, Audio->IsActive() ? 1 : 0,
 							Audio->Sound ? *Audio->Sound->GetName() : TEXT("none"),
-							Audio->Sound ? Audio->Sound->GetDuration() : 0.f);
+							Audio->Sound ? Audio->Sound->GetDuration() : 0.f,
+							Audio->GetOwner() ? *Audio->GetOwner()->GetName() : TEXT("none"),
+							AttachParent ? *AttachParent->GetName() : TEXT("none"),
+							*AudioLocation.ToString(), AudioListenerDistance);
 					}
 				}
 			}
@@ -179,7 +244,7 @@ static void ShockDumpAll()
 
 static FAutoConsoleCommand CmdShockDump(
 	TEXT("ncp.ShockDump"),
-	TEXT("Dump every live NetcodePlus shock core and its audio components in the current game world."),
+	TEXT("Dump every live NetcodePlus shock core and its audio components in all current game/replay worlds."),
 	FConsoleCommandDelegate::CreateStatic(&ShockDumpAll));
 
 
@@ -701,7 +766,7 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	// Two independent signals, each event-gated by a doubling threshold so a straight core
 	// logs NOTHING and a bending one traces its bend in a handful of lines:
 	//  - CURVE-LAT: perpendicular distance of the fake from the original fire LINE. The
-	//    convergence pull below moves the fake via AddActorWorldOffset — position only,
+	//    convergence pull below moves the fake via collision-free SetActorLocation — position only,
 	//    velocity untouched — so no velocity check can ever see it. This is the signal
 	//    that catches a convergence-driven swoosh.
 	//  - CURVE-VEL: heading deviation of the fake's VELOCITY from OriginalFireDirection.
@@ -828,11 +893,16 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 		}
 	}
 
-	// Small in-flight convergence now targets the independent collision-free server-anchor estimate,
+	// In-flight convergence targets the independent collision-free server-anchor estimate,
 	// not GetActorLocation() on the hidden real. bMoveFakeToReplicatedPos=false makes stock substitute
 	// the fake's position into that real, so the old target was a contaminated local ghost. Keep real
 	// and fake co-located after every correction: fake TakeDamage forwards to the master's location for
 	// combo reporting, and a visual-only correction would report the wrong point to the server.
+	//
+	// Correct PHASE rather than snapping position. At high ping a fresh projected server sample can sit
+	// behind the locally-fired fake; the former 120u failsafe teleported the visible core backward, after
+	// which normal projectile movement sent it forward again. Bound correction to 75% of travel speed,
+	// so a behind-target correction can only slow the core — never reverse its visible direction.
 	if (CVarShockConverge.GetValueOnGameThread() > 0
 		&& GetNetMode() == NM_Client && !bFakeClientProjectile && MyFakeProjectile
 		&& !MyFakeProjectile->IsPendingKillPending()
@@ -842,31 +912,38 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 		const FVector FakeLoc = MyFakeProjectile->GetActorLocation();
 		const FVector Delta = AuthEstimateLocation - FakeLoc;
 		const float DeltaSize = Delta.Size();
+		const FVector FakeVelocity = MyFakeProjectile->GetVelocity();
+		const float TravelSpeed = FakeVelocity.Size();
+		const FVector TravelDirection = FakeVelocity.GetSafeNormal();
+		const float PhaseError = Delta | TravelDirection;
+		const float PhaseErrorSize = FMath::Abs(PhaseError);
 
-		// Apply only in the small-drift range. The 120u snap path in
-		// PostNetReceiveVelocity catches anything larger (combo, server
-		// teleport, replication hiccup) — let it handle those.
-		if (DeltaSize > 1.f && DeltaSize < 60.f)
+		const float MaxConvergeDist = FMath::Clamp(CVarShockConvergeMaxDist.GetValueOnGameThread(), 60.f, 2000.f);
+		if (PhaseErrorSize > 1.f && DeltaSize <= MaxConvergeDist && !TravelDirection.IsNearlyZero())
 		{
-			constexpr float ConvergeTime = 0.7f;
-			const float Alpha = FMath::Clamp(DeltaTime / ConvergeTime, 0.f, 1.f);
-			const FVector Correction = Delta * Alpha;
-			const FVector CorrectedLocation = FakeLoc + Correction;
+			const float ConvergeTime = FMath::Clamp(CVarShockConvergeTime.GetValueOnGameThread(), 0.10f, 1.00f);
+			const float ConfigMaxSpeed = FMath::Clamp(CVarShockConvergeMaxSpeed.GetValueOnGameThread(), 100.f, 2000.f);
+			const float NoReverseMaxSpeed = TravelSpeed * 0.75f;
+			const float DesiredCorrectionSpeed = PhaseErrorSize / ConvergeTime;
+			const float CorrectionSpeed = FMath::Min3(DesiredCorrectionSpeed, ConfigMaxSpeed, NoReverseMaxSpeed);
+			// Move only along the fake's current flight line. Correcting the full 3D delta can bend the
+			// rendered core toward a slightly different server aim line — phase correction must not curve it.
+			const FVector PhaseTarget = FakeLoc + TravelDirection * PhaseError;
+			const FVector CorrectedLocation = FMath::VInterpConstantTo(FakeLoc, PhaseTarget, DeltaTime, CorrectionSpeed);
+			const FVector Correction = CorrectedLocation - FakeLoc;
 			SetActorLocation(CorrectedLocation, false, nullptr, ETeleportType::TeleportPhysics);
 			MyFakeProjectile->SetActorLocation(CorrectedLocation, false, nullptr, ETeleportType::TeleportPhysics);
 
-			// CURVE diagnostics: total pull the convergence has applied to the fake this
-			// flight. A sustained one-sided pull (real walking away on a diverged heading,
-			// converge dragging the fake after it) is the leading unlogged bend mechanism —
-			// pairs with the fake's CURVE-LAT lines. Doubling threshold, same as the rest.
+			// Diagnostics: total phase correction applied this flight. This correction is constrained
+			// to the fake's flight line, so any CURVE-LAT event must have another cause.
 			if (ShockDbg())
 			{
 				ConvergePullAccum += Correction;
 				const float Pulled = ConvergePullAccum.Size();
 				if (Pulled >= NextConvergePullLog)
 				{
-					UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] CONVERGE-PULL accum=%.1f pullDir=%s realFakeDist=%.1f fake@%s age=%.3f"),
-						Pulled, *ConvergePullAccum.GetSafeNormal().ToString(), DeltaSize,
+					UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] CONVERGE-PULL accum=%.1f pullDir=%s estimateDist=%.1f phaseError=%.1f fake@%s age=%.3f"),
+						Pulled, *ConvergePullAccum.GetSafeNormal().ToString(), DeltaSize, PhaseError,
 						*MyFakeProjectile->GetActorLocation().ToString(),
 						GetWorld()->GetTimeSeconds() - CreationTime);
 					while (Pulled >= NextConvergePullLog) { NextConvergePullLog *= 2.f; }
@@ -1038,20 +1115,35 @@ void AUTPlusProj_ShockBall::PostNetReceiveVelocity(const FVector& NewVelocity)
 		return;
 	}
 
-	// Optional fail-safe: only if drift from the freshly projected RAW server sample is huge.
-	// This must remain ungated by bServerConfirmedStop because a nonzero update is movement truth.
+	// A fresh nonzero movement update is authoritative evidence that the core is still travelling, but
+	// its projected position can be behind the owning client's fake at high ping. With convergence on,
+	// queue that error for bounded phase correction in Tick instead of teleporting backward. Keep the
+	// legacy snap only behind the convergence kill-switch as a safety fallback.
 	const float MaxDrift = 120.f;
 	const FVector TruthLocation = GetAuthoritativeTarget();
 	if (FVector::DistSquared(MyFakeProjectile->GetActorLocation(), TruthLocation) > FMath::Square(MaxDrift))
 	{
-		if (ShockDbg())
+		const float Drift = FVector::Dist(MyFakeProjectile->GetActorLocation(), TruthLocation);
+		if (CVarShockConverge.GetValueOnGameThread() > 0)
 		{
-			UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV 120u failsafe snap core=%s dist=%.1f truth=%s newVel=%.1f"),
-				*GetName(), FVector::Dist(MyFakeProjectile->GetActorLocation(), TruthLocation),
-				*TruthLocation.ToString(), NewVelocity.Size());
+			if (ShockDbg())
+			{
+				const float SoftWindow = FMath::Clamp(CVarShockConvergeMaxDist.GetValueOnGameThread(), 60.f, 2000.f);
+				UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV soft-resync core=%s dist=%.1f eligible=%d window=%.1f target=%s newVel=%.1f"),
+					*GetName(), Drift, Drift <= SoftWindow ? 1 : 0, SoftWindow,
+					*TruthLocation.ToString(), NewVelocity.Size());
+			}
 		}
-		SetActorLocation(TruthLocation, false, nullptr, ETeleportType::TeleportPhysics);
-		MyFakeProjectile->SetActorLocation(TruthLocation, false, nullptr, ETeleportType::TeleportPhysics);
+		else
+		{
+			if (ShockDbg())
+			{
+				UE_LOG(LogShockDbg, Warning, TEXT("[ShockDbg/CLI] PNRV legacy 120u failsafe snap core=%s dist=%.1f truth=%s newVel=%.1f"),
+					*GetName(), Drift, *TruthLocation.ToString(), NewVelocity.Size());
+			}
+			SetActorLocation(TruthLocation, false, nullptr, ETeleportType::TeleportPhysics);
+			MyFakeProjectile->SetActorLocation(TruthLocation, false, nullptr, ETeleportType::TeleportPhysics);
+		}
 		if (ProjectileMovement)
 		{
 			ProjectileMovement->Velocity = NewVelocity;

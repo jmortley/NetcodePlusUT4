@@ -131,6 +131,21 @@ static TAutoConsoleVariable<float> CVarRocketLagCompMaxPingMs(
     ECVF_Default
 );
 
+// Projectile-rewind claim diagnostics. These can be high-volume on a live server, so keep
+// them opt-in just like ncp.RocketPairDebug and ncp.ShockDebug. Gameplay validation and
+// rewind decisions are unchanged when logging is disabled.
+static TAutoConsoleVariable<int32> CVarRocketLagCompDebug(
+    TEXT("ut.RocketLagCompDebug"),
+    0,
+    TEXT("Projectile rewind claim diagnostics. 0=off (default), 1=claim/rejection/save logs."),
+    ECVF_Default
+);
+
+static FORCEINLINE bool RocketLagCompDbg()
+{
+    return CVarRocketLagCompDebug.GetValueOnGameThread() > 0;
+}
+
 int32 AUTWeaponFix::GetTargetProjectileTickRate()
 {
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
@@ -4106,17 +4121,23 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	// shooter ping and how many projectiles are currently tracked. Tells us whether claims are
 	// even arriving for high-ping shooters, and whether their rocket got tracked at all.
 	const int32 TrackedAtClaim = ActiveServerProjectiles.Num();
-	UE_LOG(LogUTWeaponFix, Warning,
-		TEXT("ProjRewind CLAIM: tgt=%s fm=%d ping=%.0f tracked=%d"),
-		*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TrackedAtClaim);
+	if (RocketLagCompDbg())
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("ProjRewind CLAIM: tgt=%s fm=%d ping=%.0f tracked=%d"),
+			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TrackedAtClaim);
+	}
 
 	if (PingMs > CVarRocketLagCompMaxPingMs.GetValueOnGameThread())
 	{
 		// DIAGNOSTIC: previously a silent return — now logged so over-cutoff shooters (e.g. Kuj
 		// at ~143) show up in the log instead of vanishing.
-		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind REJECTED: shooter over ping cutoff (ping=%.0f > %.0f)"),
-			PingMs, CVarRocketLagCompMaxPingMs.GetValueOnGameThread());
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("ProjRewind REJECTED: shooter over ping cutoff (ping=%.0f > %.0f)"),
+				PingMs, CVarRocketLagCompMaxPingMs.GetValueOnGameThread());
+		}
 		return; // shooter too laggy for projectile lag comp
 	}
 	const float MaxWindowMs = CVarRocketLagCompMaxWindowMs.GetValueOnGameThread();
@@ -4240,9 +4261,12 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		// No live projectile AND nothing rescuable in the grace buffer. The server rocket either
 		// hit the target present-time and applied damage (normal), or detonated/whiffed and its
 		// grace window already expired (claim arrived too late, or grace disabled). Don't re-apply.
-		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind no-op: no live/grace proj (fm=%d ping=%.0f tracked=%d fmDroppedTooOld=%d newestAge=%.0fms fmInvalidNoResolve=%d grace=%.0fms) — present-time hit OR claim past grace"),
-			(int32)ClaimedFireMode, PingMs, TrackedAtClaim, DiagFmDroppedTooOld, DiagNewestDroppedAgeMs, DiagFmInvalidNoExpire, GraceSec * 1000.f);
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("ProjRewind no-op: no live/grace proj (fm=%d ping=%.0f tracked=%d fmDroppedTooOld=%d newestAge=%.0fms fmInvalidNoResolve=%d grace=%.0fms) — present-time hit OR claim past grace"),
+				(int32)ClaimedFireMode, PingMs, TrackedAtClaim, DiagFmDroppedTooOld, DiagNewestDroppedAgeMs, DiagFmInvalidNoExpire, GraceSec * 1000.f);
+		}
 		return;
 	}
 
@@ -4277,9 +4301,12 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	const float ClaimMatchTol = CapRadius + 25.f;
 	if (BestDistSq > ClaimMatchTol * ClaimMatchTol)
 	{
-		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind REJECTED: target not at claim (dist=%.1f ping=%.0f win=%.0fms)"),
-			FMath::Sqrt(BestDistSq), PingMs, WindowSec * 1000.f);
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("ProjRewind REJECTED: target not at claim (dist=%.1f ping=%.0f win=%.0fms)"),
+				FMath::Sqrt(BestDistSq), PingMs, WindowSec * 1000.f);
+		}
 		return;
 	}
 
@@ -4332,16 +4359,22 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	{
 		// Real projectile did NOT pass within the capsule at that instant: not a confirmable
 		// direct hit. v1 declines (present-time already handled any true contact).
-		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind REJECTED: no server contact (dist=%.1f need=%.1f ping=%.0f win=%.0fms delta=%.0fms)"),
-			FMath::Sqrt(ContactDistSq), ContactRadius, PingMs, WindowSec * 1000.f, BestDelta * 1000.f);
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("ProjRewind REJECTED: no server contact (dist=%.1f need=%.1f ping=%.0f win=%.0fms delta=%.0fms)"),
+				FMath::Sqrt(ContactDistSq), ContactRadius, PingMs, WindowSec * 1000.f, BestDelta * 1000.f);
+		}
 		return;
 	}
 
 	// Anti-fabrication #2: the claimed point must also lie on the real projectile path.
 	if (FVector::DistSquared(ProjPast, ClaimedHitLocation) > FMath::Square(ContactRadius + ClaimMatchTol))
 	{
-		UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: claim off projectile path"));
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: claim off projectile path"));
+		}
 		return;
 	}
 
@@ -4351,7 +4384,10 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	WallParams.AddIgnoredActor(UTOwner);
 	if (GetWorld()->LineTraceTestByChannel(ProjPast, BestCenter, COLLISION_TRACE_WEAPON, WallParams))
 	{
-		UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: wall between projectile and target"));
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: wall between projectile and target"));
+		}
 		return;
 	}
 
@@ -4370,11 +4406,14 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		// forced to full (a direct hit deals full damage regardless of radial falloff). The
 		// double-damage guard already ensured this projectile did NOT hit ClaimedTarget present-time,
 		// and same-team was rejected earlier — so this is a clean rescue, not a re-application.
-		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind GRACE SAVE: tgt=%s fm=%d shooterPing=%.0f targetPing=%.0f win=%.0fms rewind=%.0fms graceAge=%.0fms contact=%.1f targetMoved=%.1f dmg=%.0f"),
-			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TargetPingMs,
-			WindowSec * 1000.f, BestDelta * 1000.f, (NowSec - GraceExpireTime) * 1000.f,
-			FMath::Sqrt(ContactDistSq), TargetMoved, GraceBaseDamage);
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("ProjRewind GRACE SAVE: tgt=%s fm=%d shooterPing=%.0f targetPing=%.0f win=%.0fms rewind=%.0fms graceAge=%.0fms contact=%.1f targetMoved=%.1f dmg=%.0f"),
+				*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TargetPingMs,
+				WindowSec * 1000.f, BestDelta * 1000.f, (NowSec - GraceExpireTime) * 1000.f,
+				FMath::Sqrt(ContactDistSq), TargetMoved, GraceBaseDamage);
+		}
 
 		FUTRadialDamageEvent DmgEvent;
 		DmgEvent.BaseMomentumMag = GraceMomentum;
@@ -4394,10 +4433,13 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		// Live projectile still in flight: reuse stock damage semantics — ProcessHit ->
 		// DamageImpactedActor + Explode (incl. direct/splash dedup), consuming the projectile
 		// (bExploded) so the present-time collision cannot also fire.
-		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind SAVE: tgt=%s fm=%d shooterPing=%.0f targetPing=%.0f win=%.0fms rewind=%.0fms contact=%.1f targetMoved=%.1f"),
-			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TargetPingMs,
-			WindowSec * 1000.f, BestDelta * 1000.f, FMath::Sqrt(ContactDistSq), TargetMoved);
+		if (RocketLagCompDbg())
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("ProjRewind SAVE: tgt=%s fm=%d shooterPing=%.0f targetPing=%.0f win=%.0fms rewind=%.0fms contact=%.1f targetMoved=%.1f"),
+				*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TargetPingMs,
+				WindowSec * 1000.f, BestDelta * 1000.f, FMath::Sqrt(ContactDistSq), TargetMoved);
+		}
 
 		RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(), OnCap, HitNormal);
 	}
