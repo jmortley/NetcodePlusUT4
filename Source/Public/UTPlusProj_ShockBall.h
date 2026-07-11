@@ -17,10 +17,14 @@ public:
 	AUTPlusProj_ShockBall(const FObjectInitializer& ObjectInitializer);
 	virtual void Tick(float DeltaTime) override;
 	virtual void BeginPlay() override;
+	virtual void BeginFakeProjectileSynch(AUTProjectile* InFakeProjectile) override;
 	virtual void NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage) override;
 	virtual void OnRep_Slomo() override;
+	virtual void OnRep_UTProjReplicatedMovement() override;
 	virtual void PostNetReceiveVelocity(const FVector& NewVelocity) override;
 	virtual void Explode_Implementation(const FVector& HitLocation, const FVector& HitNormal, UPrimitiveComponent* HitComp = nullptr) override;
+	virtual void ShutDown() override;
+	virtual void Destroyed() override;
 	virtual bool ShouldIgnoreHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp) override;
 	virtual void DamageImpactedActor_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal) override;
 
@@ -73,8 +77,34 @@ protected:
 	 *  Slomo and it freezes on a PMC stop, unlike currentSpeed*wallAge. Accumulated every Tick, ungated. */
 	float ExpectedDispAccum;
 	/** Real-only: set true once a replicated velocity ~0 (server-confirmed stop) has been received.
-	 *  Sticky. Log-only in this build; commit 2 gates the reveal on it (replicated vs local-only stop). */
+	 *  Sticky. Gates truth-position handoff versus local-only contradiction recovery. */
 	bool bServerConfirmedStop;
+
+	// ---- Client authoritative-anchor estimator / local-stop recovery ----
+	/** Collision-free estimate derived from the latest raw server movement sample. It advances only
+	 *  while this owning-client real remains paired with its fake. */
+	FVector AuthEstimateLocation;
+	FVector AuthEstimateVelocity;
+	bool bAuthEstimateValid;
+	float AuthEstimateSampleTime;
+
+	/** A local-only collision stopped the paired client representations while the server still reports
+	 *  motion. During recovery both actors remain co-located for combo correctness. */
+	bool bLocalStopRecovery;
+	bool bRecoveryIgnoringWorldStatic;
+	float LocalStopRecoveryStartTime;
+	FVector LocalStopRecoveryStartLocation;
+	TArray<TWeakObjectPtr<UPrimitiveComponent>> RecoveryCollisionComponents;
+	TArray<TEnumAsByte<ECollisionResponse>> RecoveryCollisionResponses;
+
+	void CaptureRawAuthoritativeAnchor();
+	void AdvanceAuthoritativeEstimate(float DeltaTime);
+	bool BeginLocalStopRecovery(const TCHAR* Trigger);
+	void TickLocalStopRecovery(float DeltaTime);
+	void EndLocalStopRecovery(const TCHAR* Reason);
+	void SetRecoveryWorldStaticIgnored(bool bIgnore);
+	void RestartRecoveryProjectile(AUTProjectile* Projectile, const FVector& Location, const FVector& Velocity);
+	FVector GetAuthoritativeTarget() const;
 
 	// ---- Curve diagnostics (ncp.ShockDebug) — logging state only, zero behaviour change ----
 	// The open-air mid-flight bend ("swoosh") has never been captured because every existing

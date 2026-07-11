@@ -869,6 +869,27 @@ FLinearColor NCPlusForceModels::GetArmourColour(const FNCPlusModelSettings& Side
 	return GetSkinColour(Side);   // MatchSkin
 }
 
+float NCPlusForceModels::GetArmourEmissiveScale(const FNCPlusModelSettings& Side)
+{
+	float Scale = FMath::Clamp(Side.ArmourGlow, 0.f, 1.f);
+	// Simple forward shading auto-dim. Only counts when the shaders were compiled with support
+	// (mirrors IsSimpleForwardShadingEnabled, RenderUtils.cpp:819 — without r.SupportSimpleForwardShading
+	// the runtime cvar is ignored with a warning and the deferred path keeps rendering).
+	static const auto* SFSVar     = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SimpleForwardShading"));
+	static const auto* SupportVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SupportSimpleForwardShading"));
+	if (SFSVar && SupportVar
+		&& SFSVar->GetValueOnGameThread() != 0 && SupportVar->GetValueOnGameThread() != 0)
+	{
+		// Emissive renders at full HDR intensity regardless of the lighting path; SFS darkens and
+		// flattens everything around it and auto-exposure re-brightens the frame, so the belt blooms
+		// out. 0.35 lands the default (Armour Glow 1.0) near the deferred look; the slider still
+		// scales below it.
+		static const float SimpleForwardEmissiveDim = 0.35f;
+		Scale *= SimpleForwardEmissiveDim;
+	}
+	return Scale;
+}
+
 TSubclassOf<AUTCharacterContent> NCPlusForceModels::GetModelClass(const FNCPlusModelSettings& Side)
 {
 	if (Side.ContentPath.IsEmpty()) { return nullptr; }

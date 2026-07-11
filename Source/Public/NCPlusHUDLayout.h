@@ -337,6 +337,16 @@ namespace NCPlusHUDDrawCall
 	 *  portrait_blue, and scorebar. */
 	NETCODEPLUS_API bool GetUseTeamColor(FName Alias);
 
+	/** Client-side instagib detection for HUD gating. True when a mutator whose
+	 *  class name contains "Instagib" exists in the world (MutInstagibNCP is
+	 *  replicated + bAlwaysRelevant so it's client-visible from warmup on;
+	 *  standalone/listen sees every mutator locally) or when a replicated
+	 *  ACTFStatsReplicator reports bIsInstagibMatch. Sticky true per world once
+	 *  seen; until then rechecks at 1Hz so late replication is picked up without
+	 *  walking the actor list at render rate. Stock instagib on a non-NetcodePlus
+	 *  dedicated server is NOT detectable (AInfo mutators don't replicate). */
+	NETCODEPLUS_API bool IsInstagibMatch(class UWorld* World);
+
 	/** Effective anchor for an alias: layout override if present, otherwise
 	 *  the alias's stock anchor (NCPlusHUDAliases::GetStockAnchor). */
 	NETCODEPLUS_API ENCPlusHUDAnchor GetEffectiveAnchor(FName Alias);

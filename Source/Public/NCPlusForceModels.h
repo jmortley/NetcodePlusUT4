@@ -163,6 +163,14 @@ namespace NCPlusForceModels
 	 *  (hue + 180, ArmourMode=Complimentary). Used to override the stock yellow armour overlay. */
 	NETCODEPLUS_API FLinearColor GetArmourColour(const FNCPlusModelSettings& Side);
 
+	/** Effective armour-overlay emissive scale for a side: the user's Armour Glow (0-1), with an
+	 *  automatic extra dim when r.SimpleForwardShading is active. Emissive output is lighting-
+	 *  independent, so under SFS (lightmap + stationary dir light + skylight ONLY — every other
+	 *  lighting feature off) the belt keeps full HDR intensity in a darker, flatter scene and
+	 *  auto-exposure pushes it far past the bloom threshold ("radioactive"). EVERY writer of the
+	 *  overlay MID's "Color" param must scale through this so no per-frame path stomps the glow. */
+	NETCODEPLUS_API float GetArmourEmissiveScale(const FNCPlusModelSettings& Side);
+
 	/** Resolve + GC-pin + cache a side's AUTCharacterContent class (nullptr if none/unloadable). */
 	NETCODEPLUS_API TSubclassOf<AUTCharacterContent> GetModelClass(const FNCPlusModelSettings& Side);
 

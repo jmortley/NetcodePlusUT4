@@ -16,6 +16,8 @@
 #include "UTInventory.h"
 #include "UTTimedPowerup.h"
 #include "UTJumpBoots.h"
+#include "UTMutator.h"              // IsInstagibMatch: replicated MutInstagibNCP walk
+#include "CTFStatsReplicator.h"     // IsInstagibMatch: replicated bIsInstagibMatch fallback
 #include "Engine/Canvas.h"
 #include "CanvasItem.h"
 #include "SceneInterface.h"
@@ -1039,11 +1041,15 @@ namespace NCPlusHUDDrawCall
 
 			friend uint32 GetTypeHash(const FNCStableTextKey& Key)
 			{
+				// Int members combine raw: inside a friend named GetTypeHash, MSVC's
+				// friend name injection hides the global GetTypeHash(int32) overloads
+				// (Key.Font still resolves via ADL on TWeakObjectPtr), and UE's int
+				// overloads are identity hashes anyway.
 				uint32 Hash = GetTypeHash(Key.Font);
 				Hash = HashCombine(Hash, Key.SourceHash);
-				Hash = HashCombine(Hash, GetTypeHash(Key.SourceLen));
-				Hash = HashCombine(Hash, GetTypeHash(Key.ScaleXKey));
-				return HashCombine(Hash, GetTypeHash(Key.ScaleYKey));
+				Hash = HashCombine(Hash, uint32(Key.SourceLen));
+				Hash = HashCombine(Hash, uint32(Key.ScaleXKey));
+				return HashCombine(Hash, uint32(Key.ScaleYKey));
 			}
 		};
 
@@ -1278,6 +1284,50 @@ namespace NCPlusHUDDrawCall
 		if (const bool* Found = Cache.Find(Alias)) return *Found;
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
 		return Cache.Add(Alias, E ? E->GetExtraBool(TEXT("use_team_color"), true) : true);
+	}
+
+	// Sticky per-world: instagib can't turn off mid-match, so the first positive
+	// latches and stops the actor walks. Until then, recheck at 1Hz — the
+	// replicated mutator/replicator can arrive a few frames after the HUD starts
+	// drawing (same late-replication window TeamArenaCharacter's iCTF gate handles).
+	static TWeakObjectPtr<UWorld> GInstagibWorld;
+	static bool GInstagibFound = false;
+	static float GInstagibNextCheck = 0.f;
+
+	bool IsInstagibMatch(UWorld* World)
+	{
+		if (!World) return false;
+		if (GInstagibWorld.Get() != World)
+		{
+			GInstagibWorld = World;
+			GInstagibFound = false;
+			GInstagibNextCheck = 0.f;
+		}
+		if (GInstagibFound) return true;
+		const float Now = World->GetTimeSeconds();
+		if (Now < GInstagibNextCheck) return false;
+		GInstagibNextCheck = Now + 1.f;
+
+		// Contains() catches MutInstagibNCP, BP "_C" suffixes, and stock instagib
+		// in standalone/listen where mutators exist locally.
+		for (TActorIterator<AUTMutator> It(World); It; ++It)
+		{
+			if (It->GetClass()->GetName().Contains(TEXT("Instagib")))
+			{
+				GInstagibFound = true;
+				return true;
+			}
+		}
+		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It)
+		{
+			if (It->bIsInstagibMatch)
+			{
+				GInstagibFound = true;
+				return true;
+			}
+			break;
+		}
+		return false;
 	}
 
 	ENCPlusHUDAnchor GetEffectiveAnchor(FName Alias)

@@ -92,11 +92,23 @@ float UNCPlusHUDWidget_QuickStats::GetDrawScaleOverride()
 
 bool UNCPlusHUDWidget_QuickStats::ShouldDraw_Implementation(bool bShowScores)
 {
-	return Super::ShouldDraw_Implementation(bShowScores)
-		&& UTHUDOwner != nullptr
-		&& UTHUDOwner->UTPlayerOwner != nullptr
-		&& !UTHUDOwner->bShowComsMenu
-		&& !UTHUDOwner->bShowWeaponWheel;
+	if (!Super::ShouldDraw_Implementation(bShowScores)
+		|| UTHUDOwner == nullptr
+		|| UTHUDOwner->UTPlayerOwner == nullptr
+		|| UTHUDOwner->bShowComsMenu
+		|| UTHUDOwner->bShowWeaponWheel)
+	{
+		return false;
+	}
+	// Instagib (client-detected): every hit kills regardless of HP/armor, so the
+	// bar is noise — hidden by default. Opt back in via the hp_armor element's
+	// "Show in Instagib" checkbox in nchud (extras key "show_in_instagib").
+	if (NCPlusHUDDrawCall::IsInstagibMatch(UTHUDOwner->GetWorld()))
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
+		return E && E->GetExtraBool(TEXT("show_in_instagib"), false);
+	}
+	return true;
 }
 
 void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)

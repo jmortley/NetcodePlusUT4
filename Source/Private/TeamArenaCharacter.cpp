@@ -558,7 +558,9 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	// Per-side "Armour Glow" (F5): dim the emissive shell so armoured/shielded pawns aren't radioactive.
 	// 1.0 = stock full-bright (bit-identical to before this knob existed); lower = calmer; 0 = no glow
 	// (armour still tinted via TeamColor below, just not emissive). This scales ONLY the emissive "Color".
-	Glow *= FMath::Clamp(Side.ArmourGlow, 0.f, 1.f);
+	// Shared helper also folds in the r.SimpleForwardShading auto-dim; Tick's per-frame overlay
+	// recolour scales through the same helper so the two writers can't fight.
+	Glow *= NCPlusForceModels::GetArmourEmissiveScale(Side);
 	static const FName NAME_ArmorColor(TEXT("Color"));
 	static const FName NAME_ArmorTeamColor(TEXT("TeamColor"));
 	MID->SetVectorParameterValue(NAME_ArmorColor, Glow);
@@ -1256,6 +1258,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	{
 		FLinearColor SkinCol = GetTeamColor();
 		bool bForcedSkin = false;
+		float ArmourEmissive = 1.f;
 		// Outline mode: don't re-tint the shield/armour overlay to the skin colour — leave it stock.
 		// Cached gate: this runs per pawn per frame; the full check is refreshed once per frame.
 		if (NCPlusForceModels::IsEnabled() && !NCPlusForceModels::OutlineModeActiveCached())
@@ -1268,8 +1271,9 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				TSubclassOf<AUTCharacterContent> Content = NCPlusForceModels::GetModelClass(Side);
 				if (Content && NCPlusForceModels::IsModelAllowed(Content))
 				{
-					SkinCol     = NCPlusForceModels::GetSkinColour(Side);
-					bForcedSkin = true;
+					SkinCol        = NCPlusForceModels::GetSkinColour(Side);
+					ArmourEmissive = NCPlusForceModels::GetArmourEmissiveScale(Side);
+					bForcedSkin    = true;
 				}
 			}
 		}
@@ -1283,8 +1287,11 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				// "Color" is the lever that recolours the shield-belt: stock UpdateArmorOverlay puts the
 				// gold on the "Color" param (it also sets "TeamColor" to the team colour, but that doesn't
 				// drive the gold). We set both so non-shield overlays that key off TeamColor recolour too.
+				// This block re-writes EVERY frame, so it must scale by the Armour Glow itself — it used
+				// to write the raw skin colour and stomped the glow-scaled value UpdateArmorOverlay set
+				// (the F5 Armour Glow slider appeared dead whenever a model was forced).
 				OvMID->SetVectorParameterValue(NAME_OverlayTeamColor, SkinCol);
-				OvMID->SetVectorParameterValue(NAME_OverlayColor, SkinCol);
+				OvMID->SetVectorParameterValue(NAME_OverlayColor, SkinCol * ArmourEmissive);
 			}
 		}
 	}

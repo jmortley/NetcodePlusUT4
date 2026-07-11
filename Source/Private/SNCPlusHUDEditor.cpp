@@ -163,10 +163,12 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Row.DisplayName   = NCPlusHUDAliases::GetDisplayName(Alias);
 		Row.AnchorChoices = NCHUDEdit::BuildAnchorChoices();
 
-		// hp_armor: style picker + font picker + color overrides.
+		// hp_armor: style picker + font picker + color overrides + instagib opt-in
+		// (the widget hides itself in instagib matches unless the user re-enables it).
 		if (Alias == TEXT("hp_armor"))
 		{
-			Row.bHasStylePicker = true;
+			Row.bHasStylePicker    = true;
+			Row.bHasInstagibToggle = true;
 			Row.bHasFontPicker  = true;
 			Row.FontChoices     = NCPlusHUDFonts::GetChoices();
 			Row.StyleChoices    = NCPlusHPArmorStyle::GetChoices();
@@ -488,6 +490,22 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 			];
 	}
 
+	// Helper for the optional show-in-instagib checkbox (hp_armor). Unchecked
+	// (default) = the HP/armor widget hides itself in instagib matches.
+	TSharedRef<SWidget> InstagibSlot = SNullWidget::NullWidget;
+	if (Row.bHasInstagibToggle)
+	{
+		InstagibSlot = SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetShowInInstagibState, Alias)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnShowInInstagibChanged, Alias)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show in Instagib")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			];
+	}
+
 	// Helper for the optional style picker - only shown if Row.bHasStylePicker.
 	TSharedRef<SWidget> StyleSlot = SNullWidget::NullWidget;
 	if (Row.bHasStylePicker && Row.StyleChoices.Num() > 0)
@@ -628,6 +646,9 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 		// "Use Team Color" checkbox - only populated for portrait/scorebar rows.
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[ TeamColorSlot ]
+		// "Show in Instagib" checkbox - hp_armor row only.
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[ InstagibSlot ]
 		// Per-row reset
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
@@ -780,6 +801,19 @@ void SNCPlusHUDEditor::OnTeamColorChanged(ECheckBoxState NewState, FName Alias)
 {
 	const FString S = (NewState == ECheckBoxState::Checked) ? TEXT("true") : TEXT("false");
 	MutateElement(Alias, [&S](FNCPlusHUDElement& E){ E.Extras.Add(TEXT("use_team_color"), S); });
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetShowInInstagibState(FName Alias) const
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	const bool bShow = E ? E->GetExtraBool(TEXT("show_in_instagib"), false) : false;
+	return bShow ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnShowInInstagibChanged(ECheckBoxState NewState, FName Alias)
+{
+	const FString S = (NewState == ECheckBoxState::Checked) ? TEXT("true") : TEXT("false");
+	MutateElement(Alias, [&S](FNCPlusHUDElement& E){ E.Extras.Add(TEXT("show_in_instagib"), S); });
 }
 
 TOptional<float> SNCPlusHUDEditor::GetOpacity(FName Alias) const
