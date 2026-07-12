@@ -23,6 +23,10 @@ public:
     virtual bool CanDodge() override;
     virtual void UTCallServerMove() override;
     virtual void SmoothClientPosition(float DeltaTime) override;
+    /** BSP slope-edge stick fix: stock reduces only Result.Z in the slope-dodge-boost
+     *  branch, tilting the slide vector into the surface it just left; we apply the same
+     *  Z limit by rescaling the whole vector so it stays plane-parallel. See .cpp notes. */
+    virtual FVector ComputeSlideVectorUT(const float DeltaTime, const FVector& Delta, const float Time, const FVector& Normal, const FHitResult& Hit) override;
     //~ End UUTCharacterMovement Interface
 
     /** How often to update team collision ignores (seconds). Default 0.25s */
