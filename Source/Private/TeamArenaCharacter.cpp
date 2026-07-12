@@ -762,15 +762,12 @@ void ATeamArenaCharacter::FiringInfoUpdated()
     // remaps FireMode and FireEffect from FlashExtra. Identify it by the actual weapon
     // class, not by its attachment class: the NC+ Lightning Gun is an AUTPlusSniper BP
     // that deliberately reuses the stock LR attachment. Remote viewers receive
-    // WeaponClass, and AUTWeaponAttachment::BeginPlay() copies that class to WeaponType.
+    // WeaponClass, which is also the source AUTWeaponAttachment::BeginPlay() uses
+    // internally for its protected WeaponType field.
     TSubclassOf<AUTWeapon> ActiveWeaponClass = GetWeaponClass();
     if (Weapon != nullptr)
     {
         ActiveWeaponClass = Weapon->GetClass();
-    }
-    else if (ActiveWeaponClass == nullptr && WeaponAttachment != nullptr)
-    {
-        ActiveWeaponClass = WeaponAttachment->WeaponType;
     }
 
     const bool bStockLightningRifle =
