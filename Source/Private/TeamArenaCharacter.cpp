@@ -12,7 +12,6 @@
 #include "UTGameMode.h"
 #include "UTWeap_LinkGun.h"
 #include "UTWeap_LightningRifle.h"
-#include "UTWeapAttachment_LightningRifle.h"
 #include "UTArmor.h"
 #include "UTDamageType.h"
 #include "Net/UnrealNetwork.h"
@@ -760,12 +759,23 @@ void ATeamArenaCharacter::UTUpdateSimulatedPosition(const FVector& NewLocation, 
 void ATeamArenaCharacter::FiringInfoUpdated()
 {
     // The stock Lightning Rifle is a hybrid projectile/hitscan weapon whose attachment
-    // remaps FireMode and FireEffect from FlashExtra.  The NC+ generic visual-prediction
-    // and forced-beam path bypasses that protocol, so let the stock implementation own
-    // all LR presentation on clients (including a listen-server host).
+    // remaps FireMode and FireEffect from FlashExtra. Identify it by the actual weapon
+    // class, not by its attachment class: the NC+ Lightning Gun is an AUTPlusSniper BP
+    // that deliberately reuses the stock LR attachment. Remote viewers receive
+    // WeaponClass, and AUTWeaponAttachment::BeginPlay() copies that class to WeaponType.
+    TSubclassOf<AUTWeapon> ActiveWeaponClass = GetWeaponClass();
+    if (Weapon != nullptr)
+    {
+        ActiveWeaponClass = Weapon->GetClass();
+    }
+    else if (ActiveWeaponClass == nullptr && WeaponAttachment != nullptr)
+    {
+        ActiveWeaponClass = WeaponAttachment->WeaponType;
+    }
+
     const bool bStockLightningRifle =
-        Cast<AUTWeap_LightningRifle>(Weapon) != nullptr ||
-        Cast<AUTWeapAttachment_LightningRifle>(WeaponAttachment) != nullptr;
+        ActiveWeaponClass != nullptr &&
+        ActiveWeaponClass->IsChildOf(AUTWeap_LightningRifle::StaticClass());
     if (GetNetMode() != NM_DedicatedServer && bStockLightningRifle)
     {
         Super::FiringInfoUpdated();
