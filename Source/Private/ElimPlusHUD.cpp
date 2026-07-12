@@ -880,7 +880,7 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 
 void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive, float XOffset, float YOffset, float PipSize)
 {
-	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
+	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
 	if (CharIcon.Texture == nullptr)
 	{
 		return;

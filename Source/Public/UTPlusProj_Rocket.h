@@ -43,4 +43,5 @@ private:
 	FVector PrimarySyncEstimateLocation;
 	FVector PrimarySyncEstimateVelocity;
 	float PrimarySyncCorrectionSpeed;
+	bool bForcingShutdownExplosion;
 };

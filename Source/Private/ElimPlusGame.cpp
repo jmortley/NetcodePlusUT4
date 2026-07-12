@@ -1522,6 +1522,27 @@ void AElimPlusGame::ResetPlayersForNewRound()
 			Pawn->Destroy();
 		}
 	}
+
+	// The controller pass cannot see a live pawn that was unpossessed earlier in
+	// the round. Such an orphan survives CleanupWorldForNewRound() (which only
+	// removes dead characters), and stock true-spectator TacCom outlines every
+	// AUTCharacter it finds, exposing the orphan as a frozen X-ray ghost. This
+	// reset runs before the new spawn queue starts, so no character remaining at
+	// this point belongs to the incoming round.
+	TArray<AUTCharacter*> LeftoverCharacters;
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+	{
+		AUTCharacter* UTC = Cast<AUTCharacter>(It->Get());
+		if (UTC && !UTC->IsPendingKill())
+		{
+			LeftoverCharacters.Add(UTC);
+		}
+	}
+
+	for (AUTCharacter* UTC : LeftoverCharacters)
+	{
+		UTC->Destroy();
+	}
 }
 
 // ElimPlus arena rule: players never drop their loadout. Stock

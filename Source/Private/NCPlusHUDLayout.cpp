@@ -10,6 +10,7 @@
 #include "EngineUtils.h"                           // TActorIterator (warmup spawn markers)
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTCharacterContent.h"
 #include "UTPlayerState.h"
 #include "UTTeamInfo.h"
 #include "UTGameState.h"
@@ -416,6 +417,42 @@ namespace NCPlusHUDColor
 			return FString::Printf(TEXT("#%02X%02X%02X%02X"), C.R, C.G, C.B, C.A);
 		}
 		return FString::Printf(TEXT("#%02X%02X%02X"), C.R, C.G, C.B);
+	}
+}
+
+namespace NCPlusHUDPortraits
+{
+	static bool IsDrawable(const FCanvasIcon& Icon)
+	{
+		return Icon.Texture != nullptr && FMath::Abs(Icon.UL) > KINDA_SMALL_NUMBER
+			&& FMath::Abs(Icon.VL) > KINDA_SMALL_NUMBER;
+	}
+
+	FCanvasIcon Resolve(const AUTPlayerState* PlayerState)
+	{
+		FCanvasIcon Result = PlayerState ? PlayerState->GetHUDIcon() : FCanvasIcon();
+		if (IsDrawable(Result))
+		{
+			return Result;
+		}
+
+		// AUTCharacter's native CDO constructor synchronously loads the guaranteed
+		// stock Malcolm character content. Resolve once, then reuse the value; this
+		// path is entered only for missing/malformed remote portrait references.
+		static bool bFallbackResolved = false;
+		static FCanvasIcon Fallback;
+		if (!bFallbackResolved)
+		{
+			bFallbackResolved = true;
+			const AUTCharacter* DefaultCharacter = GetDefault<AUTCharacter>();
+			const AUTCharacterContent* DefaultContent = DefaultCharacter
+				? DefaultCharacter->GetCharacterData() : nullptr;
+			if (DefaultContent && IsDrawable(DefaultContent->DefaultCharacterPortrait))
+			{
+				Fallback = DefaultContent->DefaultCharacterPortrait;
+			}
+		}
+		return Fallback;
 	}
 }
 

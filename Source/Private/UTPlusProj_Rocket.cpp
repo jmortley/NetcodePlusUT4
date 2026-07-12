@@ -53,7 +53,7 @@ static TAutoConsoleVariable<float> CVarRocketSoftSyncMaxDist(
 
 static TAutoConsoleVariable<int32> CVarRocketServerFirstExplosionVisual(
 	TEXT("ncp.RocketServerFirstExplosionVisual"), 1,
-	TEXT("When the server real resolves before its visible fake, make the fake play the authoritative explosion instead of silently shutting down. 1=on (dogfood default), 0=stock silent shutdown."),
+	TEXT("Guarantee a paired rocket fake plays the authoritative explosion when its server real resolves first, including the stock exploded-master -> fake ShutDown fallback path. 1=on (dogfood default), 0=stock silent shutdown."),
 	ECVF_Default);
 
 static FORCEINLINE bool RocketPairDbg()
@@ -90,6 +90,7 @@ AUTPlusProj_Rocket::AUTPlusProj_Rocket(const FObjectInitializer& ObjectInitializ
 	PrimarySyncEstimateLocation = FVector::ZeroVector;
 	PrimarySyncEstimateVelocity = FVector::ZeroVector;
 	PrimarySyncCorrectionSpeed = 0.f;
+	bForcingShutdownExplosion = false;
 }
 
 bool AUTPlusProj_Rocket::CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const
@@ -299,6 +300,41 @@ void AUTPlusProj_Rocket::ShutDown()
 			MyFakeProjectile ? *MyFakeProjectile->GetName() : TEXT("null"),
 			bHidden ? 1 : 0, *GetActorLocation().ToString(),
 			GetWorld() ? GetWorld()->GetTimeSeconds() - CreationTime : -1.f);
+	}
+
+	// Final visual guarantee. Stock AUTProjectile::Explode suppresses the hidden real's effect whenever
+	// MyFakeProjectile exists, then delegates only ShutDown() to that fake. Our real-side Explode hook
+	// normally converts the fake first, but Blueprint/lifecycle variants can reach this delegate without
+	// executing that hook. If this is the still-unexploded visible fake and its paired master is already
+	// exploded, play exactly one cosmetic explosion now instead of silently disappearing. Each rocket in
+	// a loaded spread owns its own master/fake pair, so the guarantee applies independently to the volley.
+	if (CVarRocketServerFirstExplosionVisual.GetValueOnGameThread() > 0
+		&& GetNetMode() == NM_Client && bFakeClientProjectile && !bExploded && !bForcingShutdownExplosion
+		&& MasterProjectile != nullptr && !MasterProjectile->IsPendingKillPending()
+		&& MasterProjectile->bExploded)
+	{
+		const FVector ExplosionLocation = MasterProjectile->GetActorLocation();
+		FVector ImpactNormal = -GetVelocity().GetSafeNormal();
+		if (ImpactNormal.IsNearlyZero())
+		{
+			ImpactNormal = FVector(0.f, 0.f, 1.f);
+		}
+		SetActorLocation(ExplosionLocation, false, nullptr, ETeleportType::TeleportPhysics);
+		if (ProjectileMovement)
+		{
+			ProjectileMovement->Velocity = FVector::ZeroVector;
+			ProjectileMovement->UpdateComponentVelocity();
+		}
+		if (RocketPairDbg())
+		{
+			UE_LOG(LogRocketDbg, Warning,
+				TEXT("[RocketDbg/FAKE] SHUTDOWN-FALLBACK explode fake=%s master=%s hit=%s"),
+				*GetName(), *MasterProjectile->GetName(), *ExplosionLocation.ToString());
+		}
+		bForcingShutdownExplosion = true;
+		Explode(ExplosionLocation, ImpactNormal, nullptr);
+		bForcingShutdownExplosion = false;
+		return;
 	}
 	Super::ShutDown();
 }

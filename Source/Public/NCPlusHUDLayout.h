@@ -77,6 +77,15 @@ namespace NCPlusHUDColor
 	NETCODEPLUS_API FString ToHexString(const FLinearColor& Color, bool bIncludeAlpha = true);
 }
 
+/** Local-only portrait resolution for NCPlus HUDs/scoreboards. A remote player's
+ *  SelectedCharacter may reference a client-only package that other clients cannot
+ *  load, leaving AUTPlayerState::GetHUDIcon() empty. In that case, use the stock
+ *  default character portrait without changing replicated character selection. */
+namespace NCPlusHUDPortraits
+{
+	NETCODEPLUS_API FCanvasIcon Resolve(const class AUTPlayerState* PlayerState);
+}
+
 /** Visual variants for the HP/Armor widget (mirrors Docs/HudMockups SVGs). */
 enum class ENCPlusHPArmorStyle : uint8
 {

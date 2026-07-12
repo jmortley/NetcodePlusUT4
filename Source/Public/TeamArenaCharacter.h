@@ -148,6 +148,11 @@ public:
 
 	// ArmorPlus: override damage absorption
 	// Belt armor always absorbs at 100%, non-belt absorbs at 66.67%
+	virtual void GiveArmor(class AUTArmor* InArmorType) override;
+	virtual void SetArmorAmount(class AUTArmor* InArmorType, int32 Amount) override;
+	virtual void RemoveArmor(int32 Amount) override;
+	virtual void ServerDropArmor_Implementation() override;
+
 	virtual bool ModifyDamageTaken_Implementation(
 		int32& AppliedDamage, int32& Damage, FVector& Momentum,
 		AUTInventory*& HitArmor, const FHitResult& HitInfo,
@@ -225,9 +230,15 @@ public:
 	bool IsLocalPlayerPawn() const;
 
 protected:
-	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
-	// Server-only; synced when ArmorType is belt, decremented on damage.
+	// ArmorPlus: tracks the 100%-absorb portion of the replicated total armor pool.
+	// Server-authoritative and updated when armor is granted or removed.
 	int32 BeltArmorRemaining = 0;
+
+	// The most recently collected regular armor CDO. While a mixed stack still has
+	// belt remaining, ArmorType stays on the belt for its shell/effects; this becomes
+	// ArmorType when the belt portion reaches zero. Server-only; CDOs are always rooted.
+	UPROPERTY(Transient)
+	class AUTArmor* LastRegularArmorType = nullptr;
 
 	// ── Force Models state ──
 	/** Re-evaluate this pawn and apply (or clear) the forced model + team-recolour. Client-only.

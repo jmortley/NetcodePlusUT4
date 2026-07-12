@@ -215,7 +215,7 @@ void UWipeoutScoreboard::DrawPortraitPip(AUTPlayerState* PlayerState, float XOff
 	Canvas->SetLinearDrawColor(FLinearColor::White);
 
 	// Layer 2: Character portrait
-	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
+	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
 	if (CharIcon.Texture != nullptr)
 	{
 		if (bIsDead)

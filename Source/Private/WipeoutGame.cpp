@@ -2438,6 +2438,27 @@ void AUWipeoutGame::ResetPlayersForNewRound()
 			Pawn->Destroy();
 		}
 	}
+
+	// The controller pass cannot see a live pawn that was unpossessed earlier in
+	// the round. Such an orphan survives CleanupWorldForNewRound() (which only
+	// removes dead characters), and stock true-spectator TacCom outlines every
+	// AUTCharacter it finds, exposing the orphan as a frozen X-ray ghost. This
+	// reset runs before the next round's pawns are spawned, so every character
+	// still present here is stale.
+	TArray<AUTCharacter*> LeftoverCharacters;
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+	{
+		AUTCharacter* UTC = Cast<AUTCharacter>(It->Get());
+		if (UTC && !UTC->IsPendingKill())
+		{
+			LeftoverCharacters.Add(UTC);
+		}
+	}
+
+	for (AUTCharacter* UTC : LeftoverCharacters)
+	{
+		UTC->Destroy();
+	}
 }
 
 

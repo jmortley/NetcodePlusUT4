@@ -227,7 +227,7 @@ void UElimPlusScoreboard::DrawPortraitPip(AUTPlayerState* PlayerState, float XOf
 	Canvas->SetLinearDrawColor(FLinearColor::White);
 
 	// Layer 2: Character portrait (dimmed if dead)
-	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
+	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
 	if (CharIcon.Texture != nullptr)
 	{
 		if (bIsDead)

@@ -9,6 +9,7 @@
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
 #include "UTGameState.h"
+#include "UTGameMode.h"
 #include "UTWeap_LinkGun.h"
 #include "UTWeap_LightningRifle.h"
 #include "UTWeapAttachment_LightningRifle.h"
@@ -33,6 +34,19 @@ static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("If 1, enables one-way latency visual prediction for non hitscan weapons.\n")
 	TEXT("Players can set to 0 to opt-out (force server positions)."),
 	ECVF_Default); // Saves to user config
+
+namespace
+{
+	constexpr int32 ArmorPlusMaxTotal = 150;
+	constexpr int32 ArmorPlusSoftLimit = 100;
+
+	// Stock belt is the only armor grant above 100. Use the behavior-proven amount
+	// instead of relying on the descriptive ArmorType tag being populated in the BP.
+	bool IsArmorPlusBelt(const AUTArmor* Armor)
+	{
+		return Armor != nullptr && Armor->ArmorAmount > ArmorPlusSoftLimit;
+	}
+}
 
 // Headshot sphere CENTRE distance below the capsule top, in units. LOWER = the sphere moves UP toward the head
 // (it does NOT change the sphere SIZE — that's HeadRadius). Live-tunable so it can be calibrated in warmup against
@@ -997,13 +1011,24 @@ void ATeamArenaCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// SERVER ONLY: Register our custom material so SetCharacterOverlayEffect works without warnings
-	if (Role == ROLE_Authority && SpawnProtectionMaterial)
+	if (Role == ROLE_Authority)
 	{
-		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-		if (GS)
+		// ArmorPlus rule: armor pickups are always consumable, even when the
+		// resulting belt/regular total is already capped. Stock defaults this true,
+		// but reassert it in case a BP game mode serialized an older false value.
+		if (AUTGameMode* GM = GetWorld()->GetAuthGameMode<AUTGameMode>())
 		{
-			GS->AddOverlayMaterial(SpawnProtectionMaterial, nullptr);
+			GM->bAllowAllArmorPickups = true;
+		}
+
+		// Register our custom material so SetCharacterOverlayEffect works without warnings.
+		if (SpawnProtectionMaterial)
+		{
+			AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+			if (GS)
+			{
+				GS->AddOverlayMaterial(SpawnProtectionMaterial, nullptr);
+			}
 		}
 	}
 
@@ -1472,7 +1497,90 @@ bool ATeamArenaCharacter::Died(AController* EventInstigator, const FDamageEvent&
 		AmbientSoundComp->Stop();
 	}
 
+	BeltArmorRemaining = 0;
+	LastRegularArmorType = nullptr;
+
 	return Super::Died(EventInstigator, DamageEvent, DamageCauser);
+}
+
+void ATeamArenaCharacter::GiveArmor(AUTArmor* InArmorType)
+{
+	if (InArmorType == nullptr)
+	{
+		InArmorType = AUTGameMode::StaticClass()->GetDefaultObject<AUTGameMode>()
+			->StartingArmorClass.GetDefaultObject();
+		if (InArmorType == nullptr)
+		{
+			return;
+		}
+	}
+
+	if (IsArmorPlusBelt(InArmorType))
+	{
+		// A new belt replaces any mixed stack with a full, pure belt. The pickup
+		// remains consumable at any armor value through stock bAllowAllArmorPickups.
+		BeltArmorRemaining = FMath::Clamp(InArmorType->ArmorAmount, 0, ArmorPlusMaxTotal);
+		LastRegularArmorType = nullptr;
+		Super::SetArmorAmount(InArmorType, BeltArmorRemaining);
+		return;
+	}
+
+	const int32 CurrentTotal = FMath::Clamp(GetArmorAmount(), 0, ArmorPlusMaxTotal);
+	const int32 CurrentBelt = FMath::Clamp(BeltArmorRemaining, 0, CurrentTotal);
+	const int32 CurrentRegular = FMath::Clamp(CurrentTotal - CurrentBelt, 0, ArmorPlusSoftLimit);
+	const int32 PickupAmount = FMath::Max(0, InArmorType->ArmorAmount);
+	const int32 NewRegular = FMath::Min(ArmorPlusSoftLimit, CurrentRegular + PickupAmount);
+	const int32 NewTotal = FMath::Min(ArmorPlusMaxTotal, CurrentBelt + NewRegular);
+
+	LastRegularArmorType = InArmorType;
+	BeltArmorRemaining = CurrentBelt;
+
+	// Preserve the belt class/effects while any 100%-absorb portion remains.
+	AUTArmor* DisplayArmorType = (CurrentBelt > 0 && ArmorType != nullptr)
+		? ArmorType
+		: InArmorType;
+	Super::SetArmorAmount(DisplayArmorType, NewTotal);
+}
+
+void ATeamArenaCharacter::SetArmorAmount(AUTArmor* InArmorType, int32 Amount)
+{
+	// Direct setters (starting/player-card armor, dropped armor, BP calls) do not
+	// carry a belt/regular split, so treat the supplied type as a pure pool.
+	const bool bBelt = IsArmorPlusBelt(InArmorType);
+	const int32 Limit = bBelt ? ArmorPlusMaxTotal : ArmorPlusSoftLimit;
+	const int32 NewTotal = FMath::Clamp(Amount, 0, Limit);
+
+	BeltArmorRemaining = bBelt ? NewTotal : 0;
+	LastRegularArmorType = (!bBelt && NewTotal > 0) ? InArmorType : nullptr;
+	Super::SetArmorAmount(InArmorType, NewTotal);
+}
+
+void ATeamArenaCharacter::RemoveArmor(int32 Amount)
+{
+	Super::RemoveArmor(Amount);
+
+	const int32 CurrentTotal = FMath::Max(0, GetArmorAmount());
+	BeltArmorRemaining = FMath::Clamp(BeltArmorRemaining, 0, CurrentTotal);
+
+	if (CurrentTotal <= 0)
+	{
+		BeltArmorRemaining = 0;
+		LastRegularArmorType = nullptr;
+	}
+	else if (BeltArmorRemaining == 0 && LastRegularArmorType != nullptr && ArmorType != LastRegularArmorType)
+	{
+		// ArmorType is replicated; clients run its RepNotify. The authority needs
+		// the explicit overlay refresh because it does not receive its own RepNotify.
+		ArmorType = LastRegularArmorType;
+		UpdateArmorOverlay();
+	}
+}
+
+void ATeamArenaCharacter::ServerDropArmor_Implementation()
+{
+	// AUTDroppedArmor serializes only one type and one total, so it cannot represent
+	// a mixed belt/regular pool without turning the whole pickup into belt armor.
+	// The stock UI path is disabled; reject modified-client calls as well.
 }
 
 bool ATeamArenaCharacter::ModifyDamageTaken_Implementation(
@@ -1506,18 +1614,10 @@ bool ATeamArenaCharacter::ModifyDamageTaken_Implementation(
 			int32 AbsorbedDamage = 0;
 			int32 InitialDamage = Damage;
 
-			// Sync BeltArmorRemaining when current armor type is belt (CDO ArmorAmount > 100)
-			if (ArmorType != nullptr)
-			{
-				const AUTArmor* ArmorCDO = ArmorType->GetClass()->GetDefaultObject<AUTArmor>();
-				if (ArmorCDO != nullptr && ArmorCDO->ArmorAmount > 100)
-				{
-					BeltArmorRemaining = FMath::Max(BeltArmorRemaining, CurrentArmor);
-				}
-			}
-
-			// Clamp belt remaining to actual armor pool
-			int32 BeltPortion = FMath::Min(BeltArmorRemaining, CurrentArmor);
+			// Pickup-time state is authoritative. Clamp defensively for legacy/direct
+			// writes, but never infer belt from the combined armor total here.
+			BeltArmorRemaining = FMath::Clamp(BeltArmorRemaining, 0, CurrentArmor);
+			int32 BeltPortion = BeltArmorRemaining;
 			int32 RegularPortion = CurrentArmor - BeltPortion;
 
 			// Phase 1: Belt armor absorbs at 100%

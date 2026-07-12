@@ -315,18 +315,12 @@ void AWipeoutHUD::DrawHUD()
 
 	// ─── Custom team score bar (replaces bpHW_TeamGameClock) ───
 	// Respects dynamic team colors from TeamSkins mutator.
-	// Suppress the redundant scorebar when the stock team panel is on AND actually DRAWN; the
-	// panel draws team scores + the round clock itself. Panel hidden → scorebar returns.
-	// bShouldDrawPortraits is load-bearing: NCLeagueDuel (1v1) sets it false so the panel block
-	// below never runs there — without it the toggle alone suppressed the scorebar in duel and
-	// NOTHING drew at the top (community report 2026-07-01).
-	const bool bStockPanelActive = bShouldDrawPortraits && FNCPlusHUDLayout::WantsStockTeamPanel() && !NCPlusHUDDrawCall::IsHidden(TEXT("team_panel"));
+	// Wipeout always uses the portrait top bar: its per-player respawn sweep and
+	// countdown are gameplay information the stock Elim-style roster cannot show.
+	// ElimPlusHUD continues to honor the user's Stock Team Panel preference.
 	if (GS && !bScoreboardIsUp)
 	{
-		if (!bStockPanelActive)
-		{
-			DrawTeamScoreBar(GS);
-		}
+		DrawTeamScoreBar(GS);
 		// NOW WATCHING banner — self-guards when not spectating another pawn.
 		DrawSpectatorTarget();
 	}
@@ -342,16 +336,6 @@ void AWipeoutHUD::DrawHUD()
 
 		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 
-		// Stock team panel (top-left roster) replaces the portrait strip when the
-		// user opts in (default for fresh installs). Same teammate HP/alive data,
-		// different presentation. Score/KDA below still draws in both modes.
-		const bool bStockTeamPanel = FNCPlusHUDLayout::WantsStockTeamPanel();
-		if (bStockTeamPanel)
-		{
-			NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
-		}
-		else
-		{
 		float TeammateScale = 0.4f;
 
 		float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
@@ -524,7 +508,6 @@ void AWipeoutHUD::DrawHUD()
 				XOffsetBlue += BlueGrowSign * 1.1f * PipSize;
 			}
 		}
-		} // end else — NCPlus portrait strip (stock panel handled above)
 		// ─── Score / KDA mini widget (top right) ───
 		// Layout-aware via "score_kda" alias. Position, scale, and font are
 		// nchud-overridable; layout scale multiplies into FontScale so editor
@@ -820,7 +803,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 
 void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float PipSize)
 {
-	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
+	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
 	if (CharIcon.Texture == nullptr)
 	{
 		return;
