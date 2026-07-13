@@ -338,24 +338,36 @@ FVector UTeamArenaCharacterMovement::ComputeSlideVectorUT(const float DeltaTime,
             if (Result.Z > Delta.Z * Time)
             {
                 // CHANGED vs stock: stock did `Result.Z = Max(Result.Z * SlopeDodgeScaling,
-                // Delta.Z*Time)` and left XY alone. Same TargetZ here (both max() operands are
-                // < Result.Z inside this branch, so it always reduces), but applied by scaling
-                // the whole vector so the slide stays parallel to the impact plane.
-                const FVector SlideResult = Result;
-                const float TargetZ = FMath::Max(Result.Z * SlopeDodgeScaling, Delta.Z * Time);
-                // Divide is safe unguarded: the enclosing `Result.Z > 0.f` gate guarantees a
-                // positive divisor, and TargetZ < Result.Z bounds the factor to (0, 1). Note we
-                // deliberately do NOT gate on ZLimit like the clamp branch below: ZLimit <= 0
+                // Delta.Z*Time)` and left XY alone, which tilts the slide into the plane and
+                // re-collides with the surface it just left (the BSP slope-edge stick). We take
+                // the exact same Z, then cancel the into-plane component by adjusting the
+                // horizontal part along the slope's horizontal normal only — cross-slope motion
+                // is untouched. Algebraically identical to "rescale the whole vector and give
+                // the clipped remainder back tangentially", but with no normalize and no
+                // GetSafeNormal2D degeneracy: for near-vertical normals (|Normal.XY|^2 <
+                // SMALL_NUMBER) that idiom silently restored FULL XY and re-tilted the vector
+                // into the plane, so we fall back to a uniform rescale there instead — still
+                // exactly plane-parallel.
+                // Deliberately NOT gated on ZLimit like the clamp branch below: ZLimit <= 0
                 // (descending into the slope) is the main slope-dodge-boost case, and stock
                 // still applies the 0.93 scaling there.
-                Result *= TargetZ / Result.Z;
+                const FVector SlideResult = Result;
+                const float TargetZ = FMath::Max(Result.Z * SlopeDodgeScaling, Delta.Z * Time);
+                Result.Z = TargetZ;
 
-                // Return the clipped portion as horizontal motion along the surface. The added
-                // part is plane-parallel by construction (tangential, Z == 0), so Z stays at
-                // TargetZ and the vector still cannot point into the surface.
-                const FVector RemainderXY = (SlideResult - Result) * FVector(1.f, 1.f, 0.f);
-                const FVector NormalXY = Normal.GetSafeNormal2D();
-                Result += UCharacterMovementComponent::ComputeSlideVector(RemainderXY, 1.f, NormalXY, Hit);
+                const FVector HorizontalNormal(Normal.X, Normal.Y, 0.f);
+                const float HorizontalNormalSq = HorizontalNormal.SizeSquared();
+                if (HorizontalNormalSq >= SMALL_NUMBER)
+                {
+                    Result -= HorizontalNormal * ((Result | Normal) / HorizontalNormalSq);
+                }
+                else
+                {
+                    // Uniform rescale keeps the projection's direction (parallel by
+                    // construction); the divisor is > 0 via the enclosing Result.Z > 0 gate.
+                    Result = SlideResult * (TargetZ / SlideResult.Z);
+                    Result.Z = TargetZ;
+                }
             }
         }
         else
