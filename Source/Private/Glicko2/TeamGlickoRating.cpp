@@ -2,11 +2,13 @@
 // Vendored from https://github.com/tronunator/Glicko2 @ a2db253b
 // © Tron (tronunator). No upstream LICENSE file at vendor time; included here
 // with author authorization (relayed via NetcodePlus author). Local
-// modifications: NONE — vendored verbatim. Cross-file includes resolved via
+// modification: explicit <algorithm> include for unity-independent builds.
+// Cross-file includes resolved via
 // Plugins/NetcodePlus/Source/Public/Glicko2 added to NetcodePlus.Build.cs
 // PublicIncludePaths. Update: re-pull from upstream and re-vendor.
 // ============================================================================
 #include "TeamGlickoRating.h"
+#include <algorithm>
 #include <cmath>
 
 #ifndef M_PI
