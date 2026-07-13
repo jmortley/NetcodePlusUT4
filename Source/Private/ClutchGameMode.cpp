@@ -118,7 +118,7 @@ namespace
 			Flag->GetWorldTimerManager().ClearAllTimersForObject(Flag);
 			if (Flag->Collision)
 			{
-				Flag->Collision->SetGenerateOverlapEvents(false);
+				Flag->Collision->bGenerateOverlapEvents = false;
 				Flag->Collision->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 			}
 			if (Flag->ObjectState != CarriedObjectState::Home)
