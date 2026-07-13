@@ -3,29 +3,26 @@
 // (no client roll, no NETCODE_PLUGIN_VERSION bump).
 //
 // WHY: the community BP mutators (NCWepMut / NCStockWeapons — standalone BP children of stock
-// UTMutator, no C++ base to hook) swap the map amp via CheckRelevance. In modes that are NOT
+// UTMutator, no C++ base to hook) swap the map amp via CheckRelevance. In affected modes outside
 // CTF/iCTF they erroneously spawn the CTF amp pickup, whose BP RespawnTime is tuned for CTF
 // pacing (1:50) instead of the intended 90s. The swap itself can't be prevented BP-side without
 // a pak recook, so this follows up from C++: shortly after each server world initialises, sweep
-// amp pickups and force RespawnTime to the target in non-CTF modes.
+// amp pickups and force RespawnTime to the target in DM, TDM, and FlagRun/Blitz only.
 //
-// MECHANICS (verified in stock source): AUTPickup reads RespawnTime FRESH at every take —
-// StartSleeping_Implementation does SetTimer(WakeUpTimerHandle, ..., RespawnTime) at
-// UTPickup.cpp:276 — so one property write per pickup INSTANCE (never the class default; a CDO
-// write could leak across worlds in one process) retunes every subsequent respawn. If the pickup
-// is already mid-sleep at sweep time (the bDelayedSpawn initial cycle), re-calling the public
-// StartSleeping() rebuilds BOTH the wake-up and pre-spawn timers AND refreshes the client-facing
-// timer ring at the new value — stock's own resync path. One exception, handled below: a
-// bFixedRespawnInterval pickup deliberately refuses the re-arm while its timer runs
-// (UTPickup.cpp:275); its current cycle finishes on the old clock and every later cycle uses the
-// new value.
+// MECHANICS (verified in stock source): AUTPickup reads RespawnTime when each new sleep cycle
+// begins. One property write per pickup INSTANCE (never the class default; a CDO write could leak
+// across worlds in one process) therefore retunes subsequent respawns. An already-running initial
+// sleep keeps its old deadline; deliberately do not re-enter BlueprintNativeEvent StartSleeping()
+// here, because public game-mode/pickup Blueprints may destroy or replace pickups from that path.
 //
 // ATTACHMENT: FWorldDelegates::OnPostWorldInitialization (module-level; precedent — this module
 // already hooks FCoreUObjectDelegates::PreLoadMap). The GameMode does not exist yet at world-init
 // time, so the sweep runs on a short timer and retries briefly until the mode is up; by then the
 // BP mutators' CheckRelevance swap has long since happened (it runs during level actor init).
-// Anything deriving AUTCTFBaseGame — stock CTF, NCPlusCTF, iCTF — is skipped: the CTF amp pacing
-// is intended there.
+// The sweep is positively restricted to the stock native DM, TDM, and FlagRun/Blitz roots plus
+// Blueprint-only descendants rooted directly in them. Native derivatives such as Duel, Showdown,
+// Shaft Arena, and FlagRun PvE/Siege are not treated as those three modes. In particular, using
+// AUTTeamGameMode as the gate would be far too broad.
 //
 // IDENTITY: pickup is an AUTPickupInventory whose InventoryType derives AUTTimedPowerup AND either
 // the inventory CDO's StatsNameCount == "UDamageCount" (the stock amp stat identity, inherited by
@@ -51,7 +48,9 @@
 #include "UTPickupInventory.h"
 #include "UTInventory.h"
 #include "UTTimedPowerup.h"
-#include "UTCTFBaseGame.h"
+#include "UTDMGameMode.h"
+#include "UTTeamDMGameMode.h"
+#include "UTFlagRunGame.h"
 #include "GameFramework/GameModeBase.h"
 
 namespace
@@ -76,6 +75,20 @@ void AmpFixReadConfig(int32& bOutEnabled, float& OutTarget, TArray<FString>& Out
 		Token.Trim();          // UE4.15: mutates in place (no TrimStartAndEnd here)
 		Token.TrimTrailing();
 	}
+}
+
+bool AmpFixIsTargetMode(const AGameModeBase* GameMode)
+{
+	// IsA(AUTTeamDMGameMode) also accepts Duel/Showdown and IsA(AUTFlagRunGame) accepts Siege.
+	// Strip only Blueprint-generated layers, then require one of the three exact native roots.
+	const UClass* NativeModeClass = GameMode != nullptr ? GameMode->GetClass() : nullptr;
+	while (NativeModeClass != nullptr && NativeModeClass->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
+	{
+		NativeModeClass = NativeModeClass->GetSuperClass();
+	}
+	return NativeModeClass == AUTDMGameMode::StaticClass()
+		|| NativeModeClass == AUTTeamDMGameMode::StaticClass()
+		|| NativeModeClass == AUTFlagRunGame::StaticClass();
 }
 
 bool AmpFixIsAmpPickup(const AUTPickupInventory* Pickup, const TArray<FString>& Tokens)
@@ -108,7 +121,7 @@ void AmpFixSweep(TWeakObjectPtr<UWorld> WeakWorld, int32 Attempt)
 	UWorld* World = WeakWorld.Get();
 	if (World == nullptr)
 	{
-		return; // world died (travel/shutdown) — its timers died with it, this is only the weak-ptr race
+		return; // GameInstance timers can outlive a world; the weak pointer makes that callback a no-op.
 	}
 
 	AGameModeBase* GameMode = World->GetAuthGameMode();
@@ -124,9 +137,9 @@ void AmpFixSweep(TWeakObjectPtr<UWorld> WeakWorld, int32 Attempt)
 		return;
 	}
 
-	if (GameMode->IsA(AUTCTFBaseGame::StaticClass()))
+	if (!AmpFixIsTargetMode(GameMode))
 	{
-		UE_LOG(LogGameMode, Verbose, TEXT("[AmpFix] CTF-family mode %s — amp pacing intended, skipping"),
+		UE_LOG(LogGameMode, Verbose, TEXT("[AmpFix] mode %s is not DM, TDM, or FlagRun — skipping"),
 			*GameMode->GetClass()->GetName());
 		return;
 	}
@@ -155,26 +168,10 @@ void AmpFixSweep(TWeakObjectPtr<UWorld> WeakWorld, int32 Attempt)
 		const float OldTime = Pickup->RespawnTime;
 		Pickup->RespawnTime = Target; // instance only — never the class default
 
-		// Mid-sleep (the bDelayedSpawn initial cycle): re-run stock's own sleep routine so BOTH the
-		// wake-up and pre-spawn timers rebuild at the new interval. On an already-sleeping pickup its
-		// hide/collision calls are no-ops. bFixedRespawnInterval refuses this re-arm by design — that
-		// one finishes its current cycle on the old clock and is correct from the next cycle on.
-		const TCHAR* Note = TEXT("");
-		if (World->GetTimerManager().IsTimerActive(Pickup->WakeUpTimerHandle))
-		{
-			if (!Pickup->bFixedRespawnInterval)
-			{
-				Pickup->StartSleeping();
-				Note = TEXT(" (mid-sleep, timers rebuilt)");
-			}
-			else
-			{
-				Note = TEXT(" (fixed-interval: current cycle keeps the old clock, next cycles corrected)");
-			}
-		}
-
-		UE_LOG(LogGameMode, Log, TEXT("[AmpFix] %s inv=%s RespawnTime %.0f -> %.0f%s (mode %s)"),
-			*Pickup->GetName(), *GetNameSafe(Pickup->GetInventoryType()), OldTime, Target, Note,
+		// Property-only correction: an active sleep keeps its current deadline. Avoid dispatching the
+		// BlueprintNativeEvent StartSleeping(), which can destroy/replace pickups in public game modes.
+		UE_LOG(LogGameMode, Log, TEXT("[AmpFix] %s inv=%s RespawnTime %.0f -> %.0f (mode %s)"),
+			*Pickup->GetName(), *GetNameSafe(Pickup->GetInventoryType()), OldTime, Target,
 			*GameMode->GetClass()->GetName());
 	}
 }
