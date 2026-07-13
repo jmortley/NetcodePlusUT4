@@ -77,4 +77,8 @@ protected:
 
 	UPROPERTY()
 	UTexture2D* LegacyDefendProgressTexture;
+
+	/** Exact 2560x1440 transparent header recovered from ClutchMini. */
+	UPROPERTY()
+	UTexture2D* LegacyTopFrameTexture;
 };

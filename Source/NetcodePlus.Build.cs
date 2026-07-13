@@ -35,6 +35,7 @@ namespace UnrealBuildTool.Rules
 				"AssetRegistry",
 				"AppFramework",   // SColorPicker (used by SNCPlusHUDEditor color swatches)
 				"Http",
+				"ImageWrapper",   // Runtime decode for recovered Clutch HUD PNG resources
 				"Json",
 				"JsonUtilities",
 				"RenderCore"      // GWhiteTexture (QuickStats DrawArc canvas fallback)

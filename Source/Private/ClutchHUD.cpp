@@ -12,6 +12,11 @@
 #include "Engine/Canvas.h"
 #include "Engine/Texture2D.h"
 #include "EngineUtils.h"
+#include "Interfaces/IImageWrapper.h"
+#include "Interfaces/IImageWrapperModule.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
 
 
 namespace
@@ -51,6 +56,60 @@ namespace
 		return Texture || !FallbackPath
 			? Texture
 			: LoadObject<UTexture2D>(nullptr, FallbackPath);
+	}
+
+	static UTexture2D* LoadPluginPngTexture(const TCHAR* RelativePath)
+	{
+#if !UE_SERVER
+		const FString GamePluginsDir = FPaths::GamePluginsDir();
+		const FString FilePath = FPaths::Combine(
+			*GamePluginsDir,
+			TEXT("NetcodePlus/Resources/ClutchHUD"),
+			RelativePath);
+		TArray<uint8> CompressedData;
+		if (!FFileHelper::LoadFileToArray(CompressedData, *FilePath)
+			|| CompressedData.Num() == 0)
+		{
+			return nullptr;
+		}
+
+		IImageWrapperModule& ImageWrapperModule =
+			FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+		IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+		const TArray<uint8>* RawData = nullptr;
+		if (!ImageWrapper.IsValid()
+			|| !ImageWrapper->SetCompressed(CompressedData.GetData(), CompressedData.Num())
+			|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData)
+			|| !RawData)
+		{
+			return nullptr;
+		}
+
+		const int32 Width = ImageWrapper->GetWidth();
+		const int32 Height = ImageWrapper->GetHeight();
+		if (Width <= 0 || Height <= 0 || RawData->Num() != Width * Height * 4)
+		{
+			return nullptr;
+		}
+
+		UTexture2D* Texture = UTexture2D::CreateTransient(
+			Width, Height, PF_B8G8R8A8);
+		if (!Texture || !Texture->PlatformData || Texture->PlatformData->Mips.Num() == 0)
+		{
+			return nullptr;
+		}
+
+		Texture->SRGB = true;
+		Texture->NeverStream = true;
+		FTexture2DMipMap& Mip = Texture->PlatformData->Mips[0];
+		void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
+		FMemory::Memcpy(TextureData, RawData->GetData(), RawData->Num());
+		Mip.BulkData.Unlock();
+		Texture->UpdateResource();
+		return Texture;
+#else
+		return nullptr;
+#endif
 	}
 
 	static void DrawTextureTile(UCanvas* Canvas, UTexture2D* Texture,
@@ -102,6 +161,7 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	LegacyDefendRailBackTexture = nullptr;
 	LegacyDefendRailFrontTexture = nullptr;
 	LegacyDefendProgressTexture = nullptr;
+	LegacyTopFrameTexture = nullptr;
 }
 
 
@@ -136,80 +196,108 @@ void AClutchHUD::DrawTeamScoreBar(AUTGameState* GameState)
 		return;
 	}
 
-	// Do not delegate this to AWipeoutHUD: its wide RED/BLUE name bars are a
-	// different visual language. Clutch uses the compact Elite header from the
-	// recovered reference: portraits, two score cells, and the round clock.
+	LoadRecoveredHUDTextures();
+
+	// Do not delegate this to AWipeoutHUD. ClutchMini used a transparent
+	// 2560x1440 overlay whose angular red/blue frame is now recovered verbatim.
 	const float RenderScale = FMath::Min(
 		static_cast<float>(Canvas->SizeX) / 1920.0f,
 		static_cast<float>(Canvas->SizeY) / 1080.0f);
 	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
 	const float HUDScale = GetHUDWidgetScaleOverride();
-	const float UnitScale = RenderScale * ScoreScale * HUDScale;
+	const float FrameScale = ScoreScale * HUDScale;
+	const float UnitScale = RenderScale * FrameScale;
 	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(
 		TEXT("scorebar"), Canvas, FVector2D(Canvas->ClipX * 0.5f, 2.0f * RenderScale));
 	const float CenterX = ScoreBarPos.X;
 	const float TopY = ScoreBarPos.Y;
-	const float ScoreWidth = 44.0f * UnitScale;
-	const float ScoreHeight = 38.0f * UnitScale;
-	const float CenterGap = 4.0f * UnitScale;
-	const float Score0X = CenterX - CenterGap * 0.5f - ScoreWidth;
-	const float Score1X = CenterX + CenterGap * 0.5f;
-	const float PipSize = 42.0f * UnitScale;
-	const float PipStep = PipSize + 3.0f * UnitScale;
-	const float PortraitSpan = PipSize + 2.0f * PipStep;
 	const float ScoreOpacity = NCPlusHUDDrawCall::GetOpacity(TEXT("scorebar"));
-	const FLinearColor Navy(0.015f, 0.055f, 0.095f, 0.94f * ScoreOpacity);
-	FLinearColor TeamColors[2] = {
-		FLinearColor(0.92f, 0.045f, 0.02f, ScoreOpacity),
-		FLinearColor(0.12f, 0.17f, 1.0f, ScoreOpacity)
-	};
+	float ScoreCenters[2] = { 0.0f, 0.0f };
+	float ScoreTextY = TopY;
+	float ScoreFontScale = 1.02f * UnitScale;
+	float ClockY = TopY;
+	float ClockFontScale = 0.82f * UnitScale;
 
-	if (NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar")))
+	if (LegacyTopFrameTexture)
 	{
-		for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+		const float FrameWidth = Canvas->ClipX * FrameScale;
+		const float FrameHeight = Canvas->ClipY * FrameScale;
+		const float FrameX = CenterX - FrameWidth * 0.5f;
+		const float FrameY = TopY - 2.0f * RenderScale;
+		const float FrameScaleX = FrameWidth / 2560.0f;
+		const float FrameScaleY = FrameHeight / 1440.0f;
+
+		DrawTextureTile(Canvas, LegacyTopFrameTexture,
+			FrameX, FrameY, FrameWidth, FrameHeight,
+			FLinearColor(1.0f, 1.0f, 1.0f, ScoreOpacity));
+
+		// Coordinates are taken from the recovered ClutchMini texture. Keeping
+		// them in its source space makes the art, scores and portraits scale as
+		// one composition at every viewport resolution.
+		ScoreCenters[0] = FrameX + 1130.0f * FrameScaleX;
+		ScoreCenters[1] = FrameX + 1430.0f * FrameScaleX;
+		ScoreTextY = FrameY + 15.0f * FrameScaleY;
+		ScoreFontScale = 1.08f * UnitScale;
+		ClockY = FrameY + 82.0f * FrameScaleY;
+		ClockFontScale = 0.78f * UnitScale;
+	}
+	else
+	{
+		// Safe fallback for installs that copy only the binary and omit Resources.
+		const float ScoreWidth = 44.0f * UnitScale;
+		const float ScoreHeight = 38.0f * UnitScale;
+		const float CenterGap = 4.0f * UnitScale;
+		const float Score0X = CenterX - CenterGap * 0.5f - ScoreWidth;
+		const float Score1X = CenterX + CenterGap * 0.5f;
+		const float PipSize = 42.0f * UnitScale;
+		const float PipStep = PipSize + 3.0f * UnitScale;
+		const float PortraitSpan = PipSize + 2.0f * PipStep;
+		const FLinearColor Navy(0.015f, 0.055f, 0.095f, 0.94f * ScoreOpacity);
+		FLinearColor TeamColors[2] = {
+			FLinearColor(0.92f, 0.045f, 0.02f, ScoreOpacity),
+			FLinearColor(0.12f, 0.17f, 1.0f, ScoreOpacity)
+		};
+
+		if (NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar")))
 		{
-			if (GameState->Teams.IsValidIndex(TeamIndex) && GameState->Teams[TeamIndex])
+			for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
 			{
-				TeamColors[TeamIndex] = GameState->Teams[TeamIndex]->TeamColor;
-				TeamColors[TeamIndex].A = ScoreOpacity;
+				if (GameState->Teams.IsValidIndex(TeamIndex) && GameState->Teams[TeamIndex])
+				{
+					TeamColors[TeamIndex] = GameState->Teams[TeamIndex]->TeamColor;
+					TeamColors[TeamIndex].A = ScoreOpacity;
+				}
 			}
 		}
+
+		DrawSolidTile(Canvas, Score0X - 4.0f * UnitScale, TopY,
+			ScoreWidth * 2.0f + CenterGap + 8.0f * UnitScale,
+			ScoreHeight + 5.0f * UnitScale, Navy);
+		DrawSolidTile(Canvas, Score0X - PortraitSpan,
+			TopY + ScoreHeight - 4.0f * UnitScale,
+			PortraitSpan, 4.0f * UnitScale, TeamColors[0]);
+		DrawSolidTile(Canvas, Score1X + ScoreWidth,
+			TopY + ScoreHeight - 4.0f * UnitScale,
+			PortraitSpan, 4.0f * UnitScale, TeamColors[1]);
+
+		FLinearColor ScoreColors[2] = { TeamColors[0], TeamColors[1] };
+		for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+		{
+			ScoreColors[TeamIndex].R *= 0.78f;
+			ScoreColors[TeamIndex].G *= 0.78f;
+			ScoreColors[TeamIndex].B *= 0.78f;
+		}
+		DrawSolidTile(Canvas, Score0X, TopY, ScoreWidth, ScoreHeight, ScoreColors[0]);
+		DrawSolidTile(Canvas, Score1X, TopY, ScoreWidth, ScoreHeight, ScoreColors[1]);
+		DrawSolidTile(Canvas, CenterX - 1.0f * UnitScale, TopY,
+			2.0f * UnitScale, ScoreHeight + 5.0f * UnitScale,
+			FLinearColor(0.85f, 0.93f, 1.0f, ScoreOpacity));
+
+		ScoreCenters[0] = Score0X + ScoreWidth * 0.5f;
+		ScoreCenters[1] = Score1X + ScoreWidth * 0.5f;
+		ScoreTextY = TopY + 2.0f * UnitScale;
+		ClockY = TopY + ScoreHeight + 5.0f * UnitScale;
 	}
-
-	// A dark center plate keeps the scores readable, while the slim team rails
-	// visually bind the three portrait slots to their score without drawing the
-	// Wipeout team-name banners.
-	DrawSolidTile(Canvas,
-		Score0X - 4.0f * UnitScale,
-		TopY,
-		ScoreWidth * 2.0f + CenterGap + 8.0f * UnitScale,
-		ScoreHeight + 5.0f * UnitScale,
-		Navy);
-	DrawSolidTile(Canvas,
-		Score0X - PortraitSpan,
-		TopY + ScoreHeight - 4.0f * UnitScale,
-		PortraitSpan,
-		4.0f * UnitScale,
-		TeamColors[0]);
-	DrawSolidTile(Canvas,
-		Score1X + ScoreWidth,
-		TopY + ScoreHeight - 4.0f * UnitScale,
-		PortraitSpan,
-		4.0f * UnitScale,
-		TeamColors[1]);
-
-	FLinearColor ScoreColors[2] = { TeamColors[0], TeamColors[1] };
-	ScoreColors[0].R *= 0.78f;
-	ScoreColors[0].G *= 0.78f;
-	ScoreColors[0].B *= 0.78f;
-	ScoreColors[1].R *= 0.78f;
-	ScoreColors[1].G *= 0.78f;
-	ScoreColors[1].B *= 0.78f;
-	DrawSolidTile(Canvas, Score0X, TopY, ScoreWidth, ScoreHeight, ScoreColors[0]);
-	DrawSolidTile(Canvas, Score1X, TopY, ScoreWidth, ScoreHeight, ScoreColors[1]);
-	DrawSolidTile(Canvas, CenterX - 1.0f * UnitScale, TopY,
-		2.0f * UnitScale, ScoreHeight + 5.0f * UnitScale,
-		FLinearColor(0.85f, 0.93f, 1.0f, ScoreOpacity));
 
 	const int32 Scores[2] = {
 		GameState->Teams.IsValidIndex(0) && GameState->Teams[0]
@@ -220,15 +308,13 @@ void AClutchHUD::DrawTeamScoreBar(AUTGameState* GameState)
 	const uint8 TextAlpha = static_cast<uint8>(FMath::Clamp(
 		FMath::RoundToInt(ScoreOpacity * 255.0f), 0, 255));
 	const FColor HeaderText(255, 255, 255, TextAlpha);
-	const float ScoreFontScale = 1.02f * UnitScale;
 	DrawCenteredCanvasText(Canvas, MediumFont, FString::FromInt(Scores[0]),
-		Score0X + ScoreWidth * 0.5f, TopY + 2.0f * UnitScale,
+		ScoreCenters[0], ScoreTextY,
 		ScoreFontScale, HeaderText);
 	DrawCenteredCanvasText(Canvas, MediumFont, FString::FromInt(Scores[1]),
-		Score1X + ScoreWidth * 0.5f, TopY + 2.0f * UnitScale,
+		ScoreCenters[1], ScoreTextY,
 		ScoreFontScale, HeaderText);
 
-	const float ClockY = TopY + ScoreHeight + 5.0f * UnitScale;
 	const float Now = GameState->GetServerWorldTimeSeconds();
 	const int32 Remaining = State->RoundEndServerTime > 0.0f
 		? FMath::Max(0, FMath::CeilToInt(State->RoundEndServerTime - Now))
@@ -236,7 +322,7 @@ void AClutchHUD::DrawTeamScoreBar(AUTGameState* GameState)
 	const FString Clock = FString::Printf(TEXT("%02d:%02d"),
 		Remaining / 60, Remaining % 60);
 	DrawCenteredCanvasText(Canvas, SmallFont, Clock, CenterX, ClockY,
-		0.82f * UnitScale,
+		ClockFontScale,
 		Remaining <= 10 && State->IsGameplayPhase()
 			? FColor(255, 80, 80, TextAlpha)
 			: HeaderText);
@@ -290,33 +376,58 @@ void AClutchHUD::LoadRecoveredHUDTextures()
 	// Clutch package. These are the circular assets from the reference captures,
 	// not the unrelated square Center_PB prototype.
 	LegacyCircleTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_circle.clutch_circle"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_circle.clutch_circle"));
 	LegacyInnerCircleTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_inner_circle.clutch_inner_circle"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_inner_circle.clutch_inner_circle"));
 	LegacyAttackingTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_attacking.clutch_attacking"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attacking.clutch_attacking"));
 	LegacyLeftGadgetTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_left_gadget.clutch_left_gadget"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_left_gadget.clutch_left_gadget"));
 	LegacyRightGadgetTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_right_gadget.clutch_right_gadget"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_right_gadget.clutch_right_gadget"));
 	LegacyShieldTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_shield.clutch_shield"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_shield.clutch_shield"));
 	LegacyInstaTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_insta.clutch_insta"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_insta.clutch_insta"));
 	LegacyRocketTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_rocket.clutch_rocket"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_rocket.clutch_rocket"));
 	LegacyAttackRailBackTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_attack_rail_back.clutch_attack_rail_back"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attack_rail_back.clutch_attack_rail_back"));
 	LegacyAttackRailFrontTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_attack_rail_front.clutch_attack_rail_front"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attack_rail_front.clutch_attack_rail_front"));
 	LegacyAttackProgressTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_attack_progress.clutch_attack_progress"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attack_progress.clutch_attack_progress"));
 	LegacyDefendRailBackTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_defend_rail_back.clutch_defend_rail_back"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_defend_rail_back.clutch_defend_rail_back"));
 	LegacyDefendRailFrontTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_defend_rail_front.clutch_defend_rail_front"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_defend_rail_front.clutch_defend_rail_front"));
 	LegacyDefendProgressTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/clutch_defend_progress.clutch_defend_progress"),
 		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_defend_progress.clutch_defend_progress"));
+
+	// Prefer a normal editor asset when one has been imported. The checked-in
+	// PNG fallback keeps the exact recovered ClutchMini frame available in both
+	// source and binary plugin installs without relying on its cooked uasset.
+	LegacyTopFrameTexture = LoadTextureWithFallback(
+		TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/hud_top_bottom2.hud_top_bottom2"),
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/hud_top_bottom2.hud_top_bottom2"));
+	if (!LegacyTopFrameTexture)
+	{
+		LegacyTopFrameTexture = LoadPluginPngTexture(TEXT("hud_top_bottom2.png"));
+	}
 }
 
 
@@ -327,20 +438,44 @@ void AClutchHUD::DrawClutchPortraits(AClutchRoundState* State)
 	{
 		return;
 	}
+	LoadRecoveredHUDTextures();
 
 	const float RenderScale = FMath::Min(
 		static_cast<float>(Canvas->SizeX) / 1920.0f,
 		static_cast<float>(Canvas->SizeY) / 1080.0f);
-	const float UnitScale = RenderScale
-		* NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))
+	const float FrameScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))
 		* GetHUDWidgetScaleOverride();
+	const float UnitScale = RenderScale * FrameScale;
 	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(
 		TEXT("scorebar"), Canvas, FVector2D(Canvas->ClipX * 0.5f, 2.0f * RenderScale));
-	const float PipSize = 42.0f * UnitScale;
-	const float PipStep = PipSize + 3.0f * UnitScale;
-	const float ScoreEdgeGap = 46.0f * UnitScale;
 	const float CenterX = ScoreBarPos.X;
-	const float PortraitY = ScoreBarPos.Y;
+	float PipSize = 42.0f * UnitScale;
+	float PipStep = PipSize + 3.0f * UnitScale;
+	float PortraitY = ScoreBarPos.Y;
+	float FirstPortraitX[2] = {
+		CenterX - 46.0f * UnitScale - PipSize,
+		CenterX + 46.0f * UnitScale
+	};
+	float PortraitDirection[2] = { -1.0f, 1.0f };
+
+	if (LegacyTopFrameTexture)
+	{
+		const float FrameWidth = Canvas->ClipX * FrameScale;
+		const float FrameHeight = Canvas->ClipY * FrameScale;
+		const float FrameX = CenterX - FrameWidth * 0.5f;
+		const float FrameY = ScoreBarPos.Y - 2.0f * RenderScale;
+		const float FrameScaleX = FrameWidth / 2560.0f;
+		const float FrameScaleY = FrameHeight / 1440.0f;
+
+		// ClutchMini's portrait boxes were laid directly over the recovered
+		// frame. These source-space anchors place the inside portrait first,
+		// then grow each team away from its score cell.
+		PipSize = 76.0f * FrameScaleX;
+		PipStep = 79.0f * FrameScaleX;
+		PortraitY = FrameY + 4.0f * FrameScaleY;
+		FirstPortraitX[0] = FrameX + 980.0f * FrameScaleX;
+		FirstPortraitX[1] = FrameX + 1504.0f * FrameScaleX;
+	}
 	int32 DrawnPerTeam[2] = { 0, 0 };
 
 	// Roster slots are stable across rounds, so the same portrait stays in the
@@ -357,9 +492,8 @@ void AClutchHUD::DrawClutchPortraits(AClutchRoundState* State)
 
 			const int32 TeamIndex = Entry.TeamIndex;
 			const int32 DrawIndex = DrawnPerTeam[TeamIndex]++;
-			const float PortraitX = TeamIndex == 0
-				? CenterX - ScoreEdgeGap - PipSize - DrawIndex * PipStep
-				: CenterX + ScoreEdgeGap + DrawIndex * PipStep;
+			const float PortraitX = FirstPortraitX[TeamIndex]
+				+ PortraitDirection[TeamIndex] * DrawIndex * PipStep;
 			const float LiveScaling = Entry.PlayerStatus == EClutchStatus::Active
 				? 1.0f
 				: 0.0f;
@@ -540,10 +674,10 @@ void AClutchHUD::DrawRolePanel(AClutchRoundState* State)
 	}
 	else
 	{
-		DrawSolidTile(Canvas, CenterX - TitleWidth * 0.5f, TitleY,
-			TitleWidth, TitleHeight, Navy);
+		// The recovered attacker title is image art. ClutchMini's defender
+		// title was plain white lettering; it did not use Wipeout's navy box.
 		DrawCenteredCanvasText(Canvas, MediumFont, Title, CenterX,
-			TitleY + 9.0f * RenderScale, 0.72f * RenderScale,
+			TitleY + 11.0f * RenderScale, 0.72f * RenderScale,
 			FColor::White);
 	}
 
