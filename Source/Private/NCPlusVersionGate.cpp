@@ -437,9 +437,15 @@ void ANCVersionGate::KickOwner(const FString& Reason)
 	// it routes through ClientWasKicked (which shows the reason on the client) plus a
 	// 1s-delayed Destroy, and skips the instance-ban add. An outdated client sees the
 	// version message and can rejoin once they've updated via the launcher.
-	if (AUTBasePlayerController* PC = Cast<AUTBasePlayerController>(GetOwner()))
+	AUTBasePlayerController* PC = Cast<AUTBasePlayerController>(GetOwner());
+	if (PC && !PC->IsPendingKillPending()
+		&& PC->APlayerController::GetNetConnection() != nullptr)
 	{
-		PC->GuaranteedKick(FText::FromString(Reason), /*bKickToHubIfPossible*/ false);
+		// Use the stock non-banning implementation directly. The current shipped Linux
+		// virtual slot matches, but qualification avoids depending on that ABI slot and
+		// bypasses any native controller-subclass override.
+		PC->AUTBasePlayerController::GuaranteedKick(
+			FText::FromString(Reason), /*bKickToHubIfPossible*/ false);
 	}
 	Destroy();
 }
