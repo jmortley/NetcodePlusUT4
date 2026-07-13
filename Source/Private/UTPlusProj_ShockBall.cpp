@@ -70,6 +70,11 @@ static TAutoConsoleVariable<float> CVarShockMatchStoppedFakeGrace(
 	TEXT("Seconds after firing that a cleanly-stopped fake may match using its cached fire direction instead of zero current velocity. Same-instigator, distance, and staleness gates still apply. Default 0.25 for dogfood; <=0 disables the fallback."),
 	ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarShockOrphanStoppedTimeout(
+	TEXT("ncp.ShockOrphanStoppedTimeout"), 1.5f,
+	TEXT("Seconds an unpaired local shock fake may remain stopped before quiet client-only removal. Stops audio and destroys without an explosion; <=0 disables the reaper. Default 1.5."),
+	ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarShockServerTickHz(
 	TEXT("ncp.ShockServerTickHz"), 0,
 	TEXT("Server shock-core tick rate. 0=240Hz (shipped); >0=that Hz (clamped 30..720); <0=unset/tick-every-frame (stock-like). Read at spawn — set BEFORE firing."),
@@ -269,6 +274,7 @@ AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectIni
 
 	// Behavioural pairing state.
 	ExpectedDispAccum = 0.f;
+	OrphanStoppedStartTime = -1.f;
 	bServerConfirmedStop = false;
 	AuthEstimateLocation = FVector::ZeroVector;
 	AuthEstimateVelocity = FVector::ZeroVector;
@@ -766,6 +772,66 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	if (bFakeClientProjectile && ProjectileMovement)
 	{
 		ExpectedDispAccum += ProjectileMovement->Velocity.Size() * DeltaTime;
+	}
+
+	// An owning client can create a fake whose server shot never arrives (rejected/unmatched fire,
+	// death, or round transition), or whose delayed real cannot pass the pairing gates after the
+	// fake has already stopped on geometry. With no master, the stock projectile lifespan leaves
+	// that fake visibly rolling in the wall (and playing flight audio) for roughly eight seconds.
+	// Reap only the exact orphan signature: local predicted fake, no master, unexploded, and
+	// continuously stopped for the configured WORLD-time interval. World time keeps the timeout
+	// independent of projectile Slomo. Do not Explode(): the server never confirmed an impact there.
+	if (GetNetMode() == NM_Client && bFakeClientProjectile && MasterProjectile == nullptr
+		&& !bExploded && !IsPendingKillPending() && ProjectileMovement != nullptr && GetWorld() != nullptr)
+	{
+		const float Timeout = CVarShockOrphanStoppedTimeout.GetValueOnGameThread();
+		if (Timeout > 0.f && ProjectileMovement->Velocity.IsNearlyZero(2.f))
+		{
+			const float Now = GetWorld()->GetTimeSeconds();
+			if (OrphanStoppedStartTime < 0.f)
+			{
+				OrphanStoppedStartTime = Now;
+			}
+			else if (Now - OrphanStoppedStartTime >= Timeout)
+			{
+				AUTPlayerController* MyPlayer = Cast<AUTPlayerController>(InstigatorController
+					? InstigatorController
+					: (GEngine != nullptr ? GEngine->GetFirstLocalPlayerController(GetWorld()) : nullptr));
+				if (MyPlayer != nullptr)
+				{
+					MyPlayer->FakeProjectiles.Remove(this);
+				}
+
+				TArray<UAudioComponent*> AudioComponents;
+				GetComponents<UAudioComponent>(AudioComponents);
+				for (UAudioComponent* Audio : AudioComponents)
+				{
+					if (Audio != nullptr)
+					{
+						Audio->Stop();
+					}
+				}
+
+				if (ShockDbg())
+				{
+					UE_LOG(LogShockDbg, Warning,
+						TEXT("[ShockDbg/CLI] ORPHAN-REAP fake=%s stoppedFor=%.3f age=%.3f loc=%s"),
+						*GetName(), Now - OrphanStoppedStartTime, Now - CreationTime,
+						*GetActorLocation().ToString());
+				}
+				Destroy();
+				return;
+			}
+		}
+		else
+		{
+			// Only continuous stopped time counts. A resumed fake gets a fresh grace interval.
+			OrphanStoppedStartTime = -1.f;
+		}
+	}
+	else
+	{
+		OrphanStoppedStartTime = -1.f;
 	}
 
 	// CURVE diagnostics (ncp.ShockDebug, FAKE only — the core the shooter actually sees).

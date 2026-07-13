@@ -76,6 +76,9 @@ protected:
 	 *  scaled by CustomTimeDilation). CanMatchFake gate 3b's expected-displacement term — correct under
 	 *  Slomo and it freezes on a PMC stop, unlike currentSpeed*wallAge. Accumulated every Tick, ungated. */
 	float ExpectedDispAccum;
+	/** Client-fake only: world time when an unpaired fake first remained stopped.
+	 *  Used by the quiet orphan reaper; negative means it is moving, paired, or unobserved. */
+	float OrphanStoppedStartTime;
 	/** Real-only: set true once a replicated velocity ~0 (server-confirmed stop) has been received.
 	 *  Sticky. Gates truth-position handoff versus local-only contradiction recovery. */
 	bool bServerConfirmedStop;
