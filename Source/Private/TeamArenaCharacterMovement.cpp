@@ -343,10 +343,12 @@ FVector UTeamArenaCharacterMovement::ComputeSlideVectorUT(const float DeltaTime,
                 // the whole vector so the slide stays parallel to the impact plane.
                 const FVector SlideResult = Result;
                 const float TargetZ = FMath::Max(Result.Z * SlopeDodgeScaling, Delta.Z * Time);
-                if (Result.Z > KINDA_SMALL_NUMBER)
-                {
-                    Result *= TargetZ / Result.Z;
-                }
+                // Divide is safe unguarded: the enclosing `Result.Z > 0.f` gate guarantees a
+                // positive divisor, and TargetZ < Result.Z bounds the factor to (0, 1). Note we
+                // deliberately do NOT gate on ZLimit like the clamp branch below: ZLimit <= 0
+                // (descending into the slope) is the main slope-dodge-boost case, and stock
+                // still applies the 0.93 scaling there.
+                Result *= TargetZ / Result.Z;
 
                 // Return the clipped portion as horizontal motion along the surface. The added
                 // part is plane-parallel by construction (tangential, Z == 0), so Z stays at
