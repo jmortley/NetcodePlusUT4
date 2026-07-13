@@ -29,6 +29,7 @@ protected:
 	AClutchRoundState* ResolveClutchState();
 	AUTPlayerState* ResolveDisplayedPlayerState(AClutchRoundState* State) const;
 	void LoadRecoveredHUDTextures();
+	void DrawClutchPortraits(AClutchRoundState* State);
 	void DrawRolePanel(AClutchRoundState* State);
 	void DrawCapturePanel(AClutchRoundState* State);
 
@@ -36,14 +37,44 @@ protected:
 	bool bTriedLoadRecoveredHUDTextures;
 
 	UPROPERTY()
-	UTexture2D* RecoveredBaseTexture;
+	UTexture2D* LegacyCircleTexture;
 
 	UPROPERTY()
-	UTexture2D* RecoveredKnobTexture;
+	UTexture2D* LegacyInnerCircleTexture;
 
 	UPROPERTY()
-	UTexture2D* RecoveredRocketTexture;
+	UTexture2D* LegacyAttackingTexture;
 
 	UPROPERTY()
-	UTexture2D* WeaponIconAtlas;
+	UTexture2D* LegacyLeftGadgetTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyRightGadgetTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyShieldTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyInstaTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyRocketTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyAttackRailBackTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyAttackRailFrontTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyAttackProgressTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyDefendRailBackTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyDefendRailFrontTexture;
+
+	UPROPERTY()
+	UTexture2D* LegacyDefendProgressTexture;
 };

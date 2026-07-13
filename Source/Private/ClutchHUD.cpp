@@ -7,6 +7,7 @@
 #include "UTCharacter.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
+#include "UTTeamInfo.h"
 #include "UTWeapon.h"
 #include "Engine/Canvas.h"
 #include "Engine/Texture2D.h"
@@ -80,25 +81,34 @@ namespace
 AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	// The recovered Clutch reference uses the Wipeout portrait strip around the
-	// scores. Its active/benched/eliminated treatment also maps cleanly to the
-	// stock AUTPlayerState life flags used by Clutch.
-	bShouldDrawPortraits = true;
+	// Clutch draws a compact portrait strip immediately around the score boxes.
+	// Disable Wipeout's wide 40%/60% anchors and its unrelated KDA panel.
+	bShouldDrawPortraits = false;
 	HudWidgetClasses.Remove(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ClutchScoreboard"));
 
 	bTriedLoadRecoveredHUDTextures = false;
-	RecoveredBaseTexture = nullptr;
-	RecoveredKnobTexture = nullptr;
-	RecoveredRocketTexture = nullptr;
-	WeaponIconAtlas = nullptr;
+	LegacyCircleTexture = nullptr;
+	LegacyInnerCircleTexture = nullptr;
+	LegacyAttackingTexture = nullptr;
+	LegacyLeftGadgetTexture = nullptr;
+	LegacyRightGadgetTexture = nullptr;
+	LegacyShieldTexture = nullptr;
+	LegacyInstaTexture = nullptr;
+	LegacyRocketTexture = nullptr;
+	LegacyAttackRailBackTexture = nullptr;
+	LegacyAttackRailFrontTexture = nullptr;
+	LegacyAttackProgressTexture = nullptr;
+	LegacyDefendRailBackTexture = nullptr;
+	LegacyDefendRailFrontTexture = nullptr;
+	LegacyDefendProgressTexture = nullptr;
 }
 
 
 void AClutchHUD::DrawHUD()
 {
 	// AWipeoutHUD supplies the established NetcodePlus widget stack and calls
-	// our virtual DrawTeamScoreBar. Portraits are disabled in the constructor.
+	// our virtual DrawTeamScoreBar. Its wide portraits are disabled above.
 	Super::DrawHUD();
 
 	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
@@ -110,15 +120,15 @@ void AClutchHUD::DrawHUD()
 
 	if (AClutchRoundState* State = ResolveClutchState())
 	{
-		DrawRolePanel(State);
+		DrawClutchPortraits(State);
 		DrawCapturePanel(State);
+		DrawRolePanel(State);
 	}
 }
 
 
 void AClutchHUD::DrawTeamScoreBar(AUTGameState* GameState)
 {
-	Super::DrawTeamScoreBar(GameState);
 	AClutchRoundState* State = ResolveClutchState();
 	if (!Canvas || !GameState || !State || !SmallFont || !MediumFont
 		|| NCPlusHUDDrawCall::IsHidden(TEXT("scorebar")))
@@ -126,26 +136,110 @@ void AClutchHUD::DrawTeamScoreBar(AUTGameState* GameState)
 		return;
 	}
 
-	const float RenderScale = static_cast<float>(Canvas->SizeX) / 1920.0f;
+	// Do not delegate this to AWipeoutHUD: its wide RED/BLUE name bars are a
+	// different visual language. Clutch uses the compact Elite header from the
+	// recovered reference: portraits, two score cells, and the round clock.
+	const float RenderScale = FMath::Min(
+		static_cast<float>(Canvas->SizeX) / 1920.0f,
+		static_cast<float>(Canvas->SizeY) / 1080.0f);
 	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
+	const float HUDScale = GetHUDWidgetScaleOverride();
+	const float UnitScale = RenderScale * ScoreScale * HUDScale;
 	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(
 		TEXT("scorebar"), Canvas, FVector2D(Canvas->ClipX * 0.5f, 2.0f * RenderScale));
 	const float CenterX = ScoreBarPos.X;
-	const float BarHeight = 36.0f * RenderScale * ScoreScale;
-	const float ClockY = ScoreBarPos.Y + BarHeight + 1.0f * RenderScale;
-	const float FontScale = RenderScale * ScoreScale;
-	const float Now = GameState->GetServerWorldTimeSeconds();
+	const float TopY = ScoreBarPos.Y;
+	const float ScoreWidth = 44.0f * UnitScale;
+	const float ScoreHeight = 38.0f * UnitScale;
+	const float CenterGap = 4.0f * UnitScale;
+	const float Score0X = CenterX - CenterGap * 0.5f - ScoreWidth;
+	const float Score1X = CenterX + CenterGap * 0.5f;
+	const float PipSize = 42.0f * UnitScale;
+	const float PipStep = PipSize + 3.0f * UnitScale;
+	const float PortraitSpan = PipSize + 2.0f * PipStep;
+	const float ScoreOpacity = NCPlusHUDDrawCall::GetOpacity(TEXT("scorebar"));
+	const FLinearColor Navy(0.015f, 0.055f, 0.095f, 0.94f * ScoreOpacity);
+	FLinearColor TeamColors[2] = {
+		FLinearColor(0.92f, 0.045f, 0.02f, ScoreOpacity),
+		FLinearColor(0.12f, 0.17f, 1.0f, ScoreOpacity)
+	};
 
-	if (State->IsGameplayPhase() && State->RoundEndServerTime > 0.0f)
+	if (NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar")))
 	{
-		const int32 Remaining = FMath::Max(0,
-			FMath::CeilToInt(State->RoundEndServerTime - Now));
-		const FString Clock = FString::Printf(TEXT("%02d:%02d"),
-			Remaining / 60, Remaining % 60);
-		DrawCenteredCanvasText(Canvas, MediumFont, Clock, CenterX, ClockY,
-			0.78f * FontScale,
-			Remaining <= 10 ? FColor(255, 70, 70, 255) : FColor::White);
+		for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+		{
+			if (GameState->Teams.IsValidIndex(TeamIndex) && GameState->Teams[TeamIndex])
+			{
+				TeamColors[TeamIndex] = GameState->Teams[TeamIndex]->TeamColor;
+				TeamColors[TeamIndex].A = ScoreOpacity;
+			}
+		}
 	}
+
+	// A dark center plate keeps the scores readable, while the slim team rails
+	// visually bind the three portrait slots to their score without drawing the
+	// Wipeout team-name banners.
+	DrawSolidTile(Canvas,
+		Score0X - 4.0f * UnitScale,
+		TopY,
+		ScoreWidth * 2.0f + CenterGap + 8.0f * UnitScale,
+		ScoreHeight + 5.0f * UnitScale,
+		Navy);
+	DrawSolidTile(Canvas,
+		Score0X - PortraitSpan,
+		TopY + ScoreHeight - 4.0f * UnitScale,
+		PortraitSpan,
+		4.0f * UnitScale,
+		TeamColors[0]);
+	DrawSolidTile(Canvas,
+		Score1X + ScoreWidth,
+		TopY + ScoreHeight - 4.0f * UnitScale,
+		PortraitSpan,
+		4.0f * UnitScale,
+		TeamColors[1]);
+
+	FLinearColor ScoreColors[2] = { TeamColors[0], TeamColors[1] };
+	ScoreColors[0].R *= 0.78f;
+	ScoreColors[0].G *= 0.78f;
+	ScoreColors[0].B *= 0.78f;
+	ScoreColors[1].R *= 0.78f;
+	ScoreColors[1].G *= 0.78f;
+	ScoreColors[1].B *= 0.78f;
+	DrawSolidTile(Canvas, Score0X, TopY, ScoreWidth, ScoreHeight, ScoreColors[0]);
+	DrawSolidTile(Canvas, Score1X, TopY, ScoreWidth, ScoreHeight, ScoreColors[1]);
+	DrawSolidTile(Canvas, CenterX - 1.0f * UnitScale, TopY,
+		2.0f * UnitScale, ScoreHeight + 5.0f * UnitScale,
+		FLinearColor(0.85f, 0.93f, 1.0f, ScoreOpacity));
+
+	const int32 Scores[2] = {
+		GameState->Teams.IsValidIndex(0) && GameState->Teams[0]
+			? static_cast<int32>(GameState->Teams[0]->Score) : 0,
+		GameState->Teams.IsValidIndex(1) && GameState->Teams[1]
+			? static_cast<int32>(GameState->Teams[1]->Score) : 0
+	};
+	const uint8 TextAlpha = static_cast<uint8>(FMath::Clamp(
+		FMath::RoundToInt(ScoreOpacity * 255.0f), 0, 255));
+	const FColor HeaderText(255, 255, 255, TextAlpha);
+	const float ScoreFontScale = 1.02f * UnitScale;
+	DrawCenteredCanvasText(Canvas, MediumFont, FString::FromInt(Scores[0]),
+		Score0X + ScoreWidth * 0.5f, TopY + 2.0f * UnitScale,
+		ScoreFontScale, HeaderText);
+	DrawCenteredCanvasText(Canvas, MediumFont, FString::FromInt(Scores[1]),
+		Score1X + ScoreWidth * 0.5f, TopY + 2.0f * UnitScale,
+		ScoreFontScale, HeaderText);
+
+	const float ClockY = TopY + ScoreHeight + 5.0f * UnitScale;
+	const float Now = GameState->GetServerWorldTimeSeconds();
+	const int32 Remaining = State->RoundEndServerTime > 0.0f
+		? FMath::Max(0, FMath::CeilToInt(State->RoundEndServerTime - Now))
+		: 0;
+	const FString Clock = FString::Printf(TEXT("%02d:%02d"),
+		Remaining / 60, Remaining % 60);
+	DrawCenteredCanvasText(Canvas, SmallFont, Clock, CenterX, ClockY,
+		0.82f * UnitScale,
+		Remaining <= 10 && State->IsGameplayPhase()
+			? FColor(255, 80, 80, TextAlpha)
+			: HeaderText);
 }
 
 
@@ -192,33 +286,87 @@ void AClutchHUD::LoadRecoveredHUDTextures()
 	}
 	bTriedLoadRecoveredHUDTextures = true;
 
-	// These are the recovered 2020 Clutch packages. The _2 object-name
-	// fallbacks preserve the names embedded in the supplied duplicate files.
-	RecoveredBaseTexture = LoadTextureWithFallback(
-		TEXT("/Game/Clutch/HUD/Textures/base.base"),
-		TEXT("/Game/Clutch/HUD/Textures/base.base_2"));
-	if (!RecoveredBaseTexture)
+	// Editor-safe imports of the layered HUD artwork recovered from the 2020
+	// Clutch package. These are the circular assets from the reference captures,
+	// not the unrelated square Center_PB prototype.
+	LegacyCircleTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_circle.clutch_circle"));
+	LegacyInnerCircleTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_inner_circle.clutch_inner_circle"));
+	LegacyAttackingTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attacking.clutch_attacking"));
+	LegacyLeftGadgetTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_left_gadget.clutch_left_gadget"));
+	LegacyRightGadgetTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_right_gadget.clutch_right_gadget"));
+	LegacyShieldTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_shield.clutch_shield"));
+	LegacyInstaTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_insta.clutch_insta"));
+	LegacyRocketTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_rocket.clutch_rocket"));
+	LegacyAttackRailBackTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attack_rail_back.clutch_attack_rail_back"));
+	LegacyAttackRailFrontTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attack_rail_front.clutch_attack_rail_front"));
+	LegacyAttackProgressTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_attack_progress.clutch_attack_progress"));
+	LegacyDefendRailBackTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_defend_rail_back.clutch_defend_rail_back"));
+	LegacyDefendRailFrontTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_defend_rail_front.clutch_defend_rail_front"));
+	LegacyDefendProgressTexture = LoadTextureWithFallback(
+		TEXT("/Game/Clutch/HUD/Textures/Legacy/clutch_defend_progress.clutch_defend_progress"));
+}
+
+
+void AClutchHUD::DrawClutchPortraits(AClutchRoundState* State)
+{
+	if (!State || !Canvas || ScoreboardIsUp()
+		|| NCPlusHUDDrawCall::IsHidden(TEXT("scorebar")))
 	{
-		RecoveredBaseTexture = LoadTextureWithFallback(
-			TEXT("/NetcodePlus/Clutch/HUD/Textures/base.base"),
-			TEXT("/NetcodePlus/Clutch/HUD/Textures/base.base_2"));
+		return;
 	}
-	RecoveredKnobTexture = LoadTextureWithFallback(
-		TEXT("/Game/Clutch/HUD/Textures/knob_copie.knob_copie"));
-	if (!RecoveredKnobTexture)
+
+	const float RenderScale = FMath::Min(
+		static_cast<float>(Canvas->SizeX) / 1920.0f,
+		static_cast<float>(Canvas->SizeY) / 1080.0f);
+	const float UnitScale = RenderScale
+		* NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))
+		* GetHUDWidgetScaleOverride();
+	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(
+		TEXT("scorebar"), Canvas, FVector2D(Canvas->ClipX * 0.5f, 2.0f * RenderScale));
+	const float PipSize = 42.0f * UnitScale;
+	const float PipStep = PipSize + 3.0f * UnitScale;
+	const float ScoreEdgeGap = 46.0f * UnitScale;
+	const float CenterX = ScoreBarPos.X;
+	const float PortraitY = ScoreBarPos.Y;
+	int32 DrawnPerTeam[2] = { 0, 0 };
+
+	// Roster slots are stable across rounds, so the same portrait stays in the
+	// same position while active/benched roles rotate.
+	for (int32 Slot = 0; Slot < 6; ++Slot)
 	{
-		RecoveredKnobTexture = LoadTextureWithFallback(
-			TEXT("/NetcodePlus/Clutch/HUD/Textures/knob_copie.knob_copie"));
+		for (const FClutchRosterEntry& Entry : State->Roster)
+		{
+			if (!Entry.PlayerState || Entry.TeamIndex > 1
+				|| Entry.RosterSlot != Slot || DrawnPerTeam[Entry.TeamIndex] >= 3)
+			{
+				continue;
+			}
+
+			const int32 TeamIndex = Entry.TeamIndex;
+			const int32 DrawIndex = DrawnPerTeam[TeamIndex]++;
+			const float PortraitX = TeamIndex == 0
+				? CenterX - ScoreEdgeGap - PipSize - DrawIndex * PipStep
+				: CenterX + ScoreEdgeGap + DrawIndex * PipStep;
+			const float LiveScaling = Entry.PlayerStatus == EClutchStatus::Active
+				? 1.0f
+				: 0.0f;
+			DrawPlayerIcon(Entry.PlayerState, LiveScaling,
+				PortraitX, PortraitY, PipSize);
+		}
 	}
-	RecoveredRocketTexture = LoadTextureWithFallback(
-		TEXT("/Game/Clutch/HUD/Textures/rocket.rocket"));
-	if (!RecoveredRocketTexture)
-	{
-		RecoveredRocketTexture = LoadTextureWithFallback(
-			TEXT("/NetcodePlus/Clutch/HUD/Textures/rocket.rocket"));
-	}
-	WeaponIconAtlas = LoadTextureWithFallback(
-		TEXT("/Game/RestrictedAssets/UI/WeaponAtlas01.WeaponAtlas01"));
 }
 
 
@@ -235,150 +383,183 @@ void AClutchHUD::DrawRolePanel(AClutchRoundState* State)
 		: nullptr;
 
 	FString Title = GetPhaseLabel(State->Phase);
-	FString Subtitle;
 	FLinearColor Accent(0.35f, 0.55f, 0.95f, 1.0f);
+	bool bActiveAttacker = false;
+	bool bActiveDefender = false;
 	if (Entry)
 	{
+		// The original HUD's right rail and weapon glow follow the player's
+		// team, while green is reserved for health/armor on the left rail.
+		Accent = Entry->TeamIndex == 0
+			? FLinearColor(1.0f, 0.12f, 0.05f, 1.0f)
+			: FLinearColor(0.27f, 0.29f, 1.0f, 1.0f);
+
 		if (Entry->PlayerStatus == EClutchStatus::Active
 			&& Entry->PlayerRole == EClutchRole::Attacker)
 		{
 			Title = TEXT("ATTACKING");
-			Subtitle = TEXT("ELIMINATE DEFENDERS OR CAPTURE THE POLE");
-			Accent = FLinearColor(1.0f, 0.55f, 0.08f, 1.0f);
+			bActiveAttacker = true;
 		}
 		else if (Entry->PlayerStatus == EClutchStatus::Active
 			&& Entry->PlayerRole == EClutchRole::Defender)
 		{
 			Title = TEXT("DEFENDING");
-			Subtitle = TEXT("STOP THE ATTACKER");
-			Accent = FLinearColor(0.20f, 0.75f, 1.0f, 1.0f);
+			bActiveDefender = true;
 		}
 		else if (Entry->PlayerStatus == EClutchStatus::Benched)
 		{
 			Title = TEXT("SPECTATING");
-			Subtitle = TEXT("YOUR ATTACKER IS ACTIVE");
 			Accent = FLinearColor(0.72f, 0.72f, 0.72f, 1.0f);
 		}
 		else if (Entry->PlayerStatus == EClutchStatus::Eliminated)
 		{
 			Title = TEXT("ELIMINATED");
-			Subtitle = TEXT("SPECTATING TEAMMATES");
 			Accent = FLinearColor(0.85f, 0.20f, 0.20f, 1.0f);
 		}
 		else
 		{
 			Title = TEXT("WAITING");
-			Subtitle = TEXT("WAITING FOR BOTH TEAMS AND A POLE");
 		}
-	}
-	else if (State->Phase == EClutchRoundPhase::Waiting)
-	{
-		Subtitle = TEXT("WAITING FOR BOTH TEAMS AND A POLE");
 	}
 
 	LoadRecoveredHUDTextures();
 
 	const float RenderScale = static_cast<float>(Canvas->SizeY) / 1080.0f;
 	const float CenterX = Canvas->ClipX * 0.5f;
-	const float ModuleCenterY = Canvas->ClipY - 70.0f * RenderScale;
-	const float ModuleSize = 72.0f * RenderScale;
-	const float RailY = ModuleCenterY - 2.0f * RenderScale;
+	const float ModuleCenterY = Canvas->ClipY - 50.0f * RenderScale;
+	const float CircleWidth = 120.0f * RenderScale;
+	const float CircleHeight = 113.0f * RenderScale;
+	const float RailY = ModuleCenterY - 2.5f * RenderScale;
 	const float RailHeight = 5.0f * RenderScale;
-	const float RailWidth = 150.0f * RenderScale;
-	const float RailGap = ModuleSize * 0.43f;
+	const float RailWidth = 168.0f * RenderScale;
+	const float RailGap = 48.0f * RenderScale;
 	const FLinearColor Navy(0.02f, 0.07f, 0.12f, 0.78f);
 	const FLinearColor HealthGreen(0.36f, 1.0f, 0.28f, 0.95f);
 
-	// Thin mirrored rails and the recovered circular center module reproduce
-	// the compact original HUD without covering the weapon or center view.
-	DrawSolidTile(Canvas, CenterX - RailGap - RailWidth, RailY,
-		RailWidth, RailHeight, Navy);
-	DrawSolidTile(Canvas, CenterX + RailGap, RailY,
-		RailWidth, RailHeight, Navy);
-
 	float LeftRatio = 1.0f;
-	if (Entry && Entry->PlayerRole == EClutchRole::Attacker)
+	if (bActiveAttacker)
 	{
 		LeftRatio = static_cast<float>(State->GetEntryArmorRemaining(*Entry))
 			/ static_cast<float>(FMath::Max<int32>(1, State->MaxAttackerHits));
 	}
-	DrawSolidTile(Canvas, CenterX - RailGap - RailWidth, RailY,
-		RailWidth * FMath::Clamp(LeftRatio, 0.0f, 1.0f), RailHeight, HealthGreen);
-	DrawSolidTile(Canvas, CenterX + RailGap, RailY,
-		RailWidth, RailHeight, Accent);
+	LeftRatio = FMath::Clamp(LeftRatio, 0.0f, 1.0f);
 
-	const float ModuleX = CenterX - ModuleSize * 0.5f;
-	const float ModuleY = ModuleCenterY - ModuleSize * 0.5f;
-	if (RecoveredBaseTexture || RecoveredKnobTexture)
+	// Draw the original one-pixel rail art as scalable crisp lines. The back
+	// layer establishes the shape, while the progress layer carries gameplay
+	// color and the same left/right proportions as the recovered PSD.
+	const float LeftRailX = CenterX - RailGap - RailWidth;
+	const float RightRailX = CenterX + RailGap;
+	UTexture2D* RailBack = bActiveAttacker
+		? LegacyAttackRailBackTexture
+		: LegacyDefendRailBackTexture;
+	UTexture2D* RailFront = bActiveAttacker
+		? LegacyAttackRailFrontTexture
+		: LegacyDefendRailFrontTexture;
+	UTexture2D* RailProgress = bActiveAttacker
+		? LegacyAttackProgressTexture
+		: LegacyDefendProgressTexture;
+	if (RailBack || RailFront)
 	{
-		DrawTextureTile(Canvas, RecoveredBaseTexture, ModuleX, ModuleY,
-			ModuleSize, ModuleSize, FLinearColor::White);
-		const float KnobSize = ModuleSize * 0.84f;
-		DrawTextureTile(Canvas, RecoveredKnobTexture,
-			CenterX - KnobSize * 0.5f, ModuleCenterY - KnobSize * 0.5f,
-			KnobSize, KnobSize, FLinearColor::White);
+		DrawTextureTile(Canvas, RailBack, LeftRailX, RailY,
+			RailWidth, RailHeight, FLinearColor::White);
+		DrawTextureTile(Canvas, RailBack, RightRailX, RailY,
+			RailWidth, RailHeight, FLinearColor::White);
+		DrawTextureTile(Canvas, RailFront, LeftRailX, RailY,
+			RailWidth * LeftRatio, RailHeight, HealthGreen);
+		DrawTextureTile(Canvas, RailFront, RightRailX, RailY,
+			RailWidth, RailHeight, Accent);
+		DrawTextureTile(Canvas, RailProgress, LeftRailX, RailY - 2.0f * RenderScale,
+			RailWidth * LeftRatio, RailHeight, HealthGreen);
+		DrawTextureTile(Canvas, RailProgress, RightRailX,
+			RailY - 2.0f * RenderScale, RailWidth, RailHeight, Accent);
 	}
 	else
 	{
-		DrawSolidTile(Canvas, ModuleX, ModuleY, ModuleSize, ModuleSize, Navy);
-		DrawSolidTile(Canvas, ModuleX + 3.0f * RenderScale,
-			ModuleY + 3.0f * RenderScale,
-			ModuleSize - 6.0f * RenderScale,
-			ModuleSize - 6.0f * RenderScale,
-			FLinearColor(0.75f, 0.82f, 0.9f, 0.9f));
-		DrawSolidTile(Canvas, ModuleX + 8.0f * RenderScale,
-			ModuleY + 8.0f * RenderScale,
-			ModuleSize - 16.0f * RenderScale,
-			ModuleSize - 16.0f * RenderScale, Navy);
+		DrawSolidTile(Canvas, LeftRailX, RailY, RailWidth, RailHeight, Navy);
+		DrawSolidTile(Canvas, LeftRailX, RailY,
+			RailWidth * LeftRatio, RailHeight, HealthGreen);
+		DrawSolidTile(Canvas, RightRailX, RailY, RailWidth, RailHeight, Accent);
 	}
 
-	AUTCharacter* Character = DisplayedState ? DisplayedState->GetUTCharacter() : nullptr;
-	AUTWeapon* Weapon = Character ? Character->GetWeapon() : nullptr;
-	if (Weapon && WeaponIconAtlas && Weapon->WeaponBarSelectedUVs.UL > 0.0f
-		&& Weapon->WeaponBarSelectedUVs.VL > 0.0f)
+	const float ShieldWidth = 24.0f * RenderScale;
+	const float ShieldHeight = 27.0f * RenderScale;
+	DrawTextureTile(Canvas, LegacyShieldTexture,
+		LeftRailX - 18.0f * RenderScale,
+		ModuleCenterY - ShieldHeight * 0.5f,
+		ShieldWidth, ShieldHeight, HealthGreen);
+
+	// Gadget wings sit behind the circle in the original composition.
+	DrawTextureTile(Canvas, LegacyLeftGadgetTexture,
+		CenterX - 88.0f * RenderScale,
+		ModuleCenterY - 16.5f * RenderScale,
+		94.0f * RenderScale, 33.0f * RenderScale, FLinearColor::White);
+	DrawTextureTile(Canvas, LegacyRightGadgetTexture,
+		CenterX - 6.0f * RenderScale,
+		ModuleCenterY - 16.5f * RenderScale,
+		94.0f * RenderScale, 33.0f * RenderScale, FLinearColor::White);
+
+	const float CircleX = CenterX - CircleWidth * 0.5f;
+	const float CircleY = ModuleCenterY - CircleHeight * 0.5f;
+	if (LegacyCircleTexture)
 	{
-		const FTextureUVs& UVs = Weapon->WeaponBarSelectedUVs;
-		const float IconWidth = 48.0f * RenderScale;
-		const float IconHeight = IconWidth * UVs.VL / UVs.UL;
-		Canvas->SetLinearDrawColor(FLinearColor::White);
-		Canvas->DrawTile(WeaponIconAtlas,
+		DrawTextureTile(Canvas, LegacyCircleTexture, CircleX, CircleY,
+			CircleWidth, CircleHeight, FLinearColor::White);
+		DrawTextureTile(Canvas, LegacyInnerCircleTexture,
+			CenterX - 11.0f * RenderScale,
+			ModuleCenterY - 11.0f * RenderScale,
+			22.0f * RenderScale, 22.0f * RenderScale, FLinearColor::White);
+	}
+	else
+	{
+		DrawSolidTile(Canvas, CircleX, CircleY, CircleWidth, CircleHeight, Navy);
+	}
+
+	UTexture2D* RoleWeaponTexture = bActiveDefender
+		? LegacyRocketTexture
+		: LegacyInstaTexture;
+	if (RoleWeaponTexture)
+	{
+		const float IconWidth = static_cast<float>(RoleWeaponTexture->GetSizeX())
+			* RenderScale;
+		const float IconHeight = static_cast<float>(RoleWeaponTexture->GetSizeY())
+			* RenderScale;
+		DrawTextureTile(Canvas, RoleWeaponTexture,
 			CenterX - IconWidth * 0.5f,
 			ModuleCenterY - IconHeight * 0.5f,
-			IconWidth, IconHeight, UVs.U, UVs.V, UVs.UL, UVs.VL,
-			BLEND_Translucent);
-	}
-	else if (Entry && Entry->PlayerRole == EClutchRole::Defender)
-	{
-		DrawTextureTile(Canvas, RecoveredRocketTexture,
-			CenterX - 26.0f * RenderScale,
-			ModuleCenterY - 13.0f * RenderScale,
-			52.0f * RenderScale, 25.0f * RenderScale,
-			FLinearColor::White);
+			IconWidth, IconHeight, FLinearColor::White);
 	}
 
-	DrawCenteredCanvasText(Canvas, MediumFont, Title, CenterX,
-		ModuleY - 38.0f * RenderScale, 0.82f * RenderScale,
-		FColor::White);
-	if (!Subtitle.IsEmpty())
+	const float TitleWidth = 226.0f * RenderScale;
+	const float TitleHeight = 50.0f * RenderScale;
+	const float TitleY = ModuleCenterY - 91.0f * RenderScale;
+	if (bActiveAttacker && LegacyAttackingTexture)
 	{
-		DrawCenteredCanvasText(Canvas, SmallFont, Subtitle, CenterX,
-			ModuleY - 15.0f * RenderScale, 0.48f * RenderScale,
-			FColor(220, 225, 235, 220));
+		DrawTextureTile(Canvas, LegacyAttackingTexture,
+			CenterX - TitleWidth * 0.5f, TitleY,
+			TitleWidth, TitleHeight, FLinearColor::White);
+	}
+	else
+	{
+		DrawSolidTile(Canvas, CenterX - TitleWidth * 0.5f, TitleY,
+			TitleWidth, TitleHeight, Navy);
+		DrawCenteredCanvasText(Canvas, MediumFont, Title, CenterX,
+			TitleY + 9.0f * RenderScale, 0.72f * RenderScale,
+			FColor::White);
 	}
 
-	if (Entry && Entry->PlayerRole == EClutchRole::Attacker)
+	if (bActiveAttacker)
 	{
 		const int32 PipCount = FMath::Clamp<int32>(State->MaxAttackerHits, 1, 10);
 		const int32 ArmorRemaining = State->GetEntryArmorRemaining(*Entry);
-		const float PipWidth = 15.0f * RenderScale;
-		const float PipHeight = 8.0f * RenderScale;
-		const float PipGap = 4.0f * RenderScale;
-		const float StartX = CenterX + RailGap + RailWidth + 8.0f * RenderScale;
+		const float PipWidth = 13.0f * RenderScale;
+		const float PipHeight = 7.0f * RenderScale;
+		const float PipGap = 3.0f * RenderScale;
+		const float StartX = CenterX + 52.0f * RenderScale;
 		for (int32 Index = 0; Index < PipCount; ++Index)
 		{
 			DrawSolidTile(Canvas,
 				StartX + Index * (PipWidth + PipGap),
-				RailY - 2.0f * RenderScale,
+				RailY - 3.0f * RenderScale,
 				PipWidth, PipHeight,
 				Index < ArmorRemaining
 					? Accent
@@ -400,10 +581,11 @@ void AClutchHUD::DrawCapturePanel(AClutchRoundState* State)
 		? GameState->GetServerWorldTimeSeconds()
 		: GetWorld()->GetTimeSeconds();
 	const float RenderScale = static_cast<float>(Canvas->SizeY) / 1080.0f;
-	const float BarWidth = 360.0f * RenderScale;
-	const float BarHeight = 12.0f * RenderScale;
+	const float BarWidth = 300.0f * RenderScale;
+	const float BarHeight = 6.0f * RenderScale;
 	const float BarX = (Canvas->ClipX - BarWidth) * 0.5f;
-	const float BarY = Canvas->ClipY - 178.0f * RenderScale;
+	// Keep objective state above the recovered 50px role banner.
+	const float BarY = Canvas->ClipY - 190.0f * RenderScale;
 	const float Progress = FMath::Clamp(State->PoleProgress, 0.0f, 100.0f) / 100.0f;
 
 	FString Label;
@@ -422,9 +604,9 @@ void AClutchHUD::DrawCapturePanel(AClutchRoundState* State)
 	}
 
 	Canvas->SetLinearDrawColor(FLinearColor(0.01f, 0.015f, 0.025f, 0.88f));
-	Canvas->DrawTile(Canvas->DefaultTexture, BarX - 3.0f * RenderScale,
-		BarY - 3.0f * RenderScale, BarWidth + 6.0f * RenderScale,
-		BarHeight + 6.0f * RenderScale, 0, 0, 1, 1, BLEND_Translucent);
+	Canvas->DrawTile(Canvas->DefaultTexture, BarX - 2.0f * RenderScale,
+		BarY - 2.0f * RenderScale, BarWidth + 4.0f * RenderScale,
+		BarHeight + 4.0f * RenderScale, 0, 0, 1, 1, BLEND_Translucent);
 	Canvas->SetLinearDrawColor(FLinearColor(0.12f, 0.12f, 0.14f, 1.0f));
 	Canvas->DrawTile(Canvas->DefaultTexture, BarX, BarY,
 		BarWidth, BarHeight, 0, 0, 1, 1);
@@ -432,5 +614,5 @@ void AClutchHUD::DrawCapturePanel(AClutchRoundState* State)
 	Canvas->DrawTile(Canvas->DefaultTexture, BarX, BarY,
 		BarWidth * Progress, BarHeight, 0, 0, 1, 1);
 	DrawCenteredCanvasText(Canvas, SmallFont, Label, Canvas->ClipX * 0.5f,
-		BarY - 21.0f * RenderScale, 0.62f * RenderScale, FColor::White);
+		BarY - 17.0f * RenderScale, 0.52f * RenderScale, FColor::White);
 }

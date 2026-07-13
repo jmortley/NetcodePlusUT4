@@ -102,7 +102,10 @@ namespace
 		if (FlagBase->MyFlag)
 		{
 			AUTFlag* Flag = FlagBase->MyFlag;
-			Flag->SetActorHiddenInGame(!bIsPole);
+			// The flag base supplies the neutral pole location. Hide the actual
+			// team-colored flag so alternating attackers never appear to capture
+			// their "own" CTF objective.
+			Flag->SetActorHiddenInGame(true);
 
 			// Disabling all collision makes AUTCarriedObject fall through the
 			// world. FellOutOfWorld() then calls SendHome() forever, and stock UT
