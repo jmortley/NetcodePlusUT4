@@ -14,6 +14,7 @@ UENUM(BlueprintType)
 enum class EClutchRoundPhase : uint8
 {
 	Waiting,
+	OrderSelection,
 	Intermission,
 	Combat,
 	Capture,
@@ -70,6 +71,14 @@ struct FClutchRosterEntry
 	UPROPERTY(BlueprintReadOnly, Category = "Clutch|Roster")
 	uint8 RosterSlot;
 
+	/** Team-selected attacker position. Zero attacks first; 255 is unassigned. */
+	UPROPERTY(BlueprintReadOnly, Category = "Clutch|Roster")
+	uint8 AttackOrderIndex;
+
+	/** This teammate may submit the pre-match attack order for their team. */
+	UPROPERTY(BlueprintReadOnly, Category = "Clutch|Roster")
+	bool bAttackOrderSelector;
+
 	/** 0 or 1 for a playing team; 255 means no team. */
 	UPROPERTY(BlueprintReadOnly, Category = "Clutch|Roster")
 	uint8 TeamIndex;
@@ -121,6 +130,14 @@ public:
 
 	UPROPERTY(Replicated, Transient, BlueprintReadOnly, Category = "Clutch|Round")
 	int32 RoundNumber;
+
+	/** Bit 0 locks team 0's order; bit 1 locks team 1's order. */
+	UPROPERTY(Replicated, Transient, BlueprintReadOnly, Category = "Clutch|Order")
+	uint8 AttackOrderLockedMask;
+
+	/** Server-time deadline for the pre-match order picker. */
+	UPROPERTY(Replicated, Transient, BlueprintReadOnly, Category = "Clutch|Order")
+	float AttackOrderDeadlineServerTime;
 
 	/** All timestamps use AGameStateBase::GetServerWorldTimeSeconds(). */
 	UPROPERTY(Replicated, Transient, BlueprintReadOnly, Category = "Clutch|Timing")
@@ -204,11 +221,24 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Clutch|Derived")
 	int32 GetPlayerArmorRemaining(AUTPlayerState* PlayerState) const;
 
+	UFUNCTION(BlueprintPure, Category = "Clutch|Order")
+	bool IsAttackOrderLocked(uint8 TeamIndex) const;
+
+	UFUNCTION(BlueprintPure, Category = "Clutch|Order")
+	bool AreAttackOrdersLocked() const;
+
+	UFUNCTION(BlueprintPure, Category = "Clutch|Order")
+	bool IsPlayerAttackOrderSelector(AUTPlayerState* PlayerState) const;
+
+	/** Returns connected team roster slots in the replicated selected order. */
+	void GetTeamAttackOrderSlots(uint8 TeamIndex, TArray<int32>& OutSlots) const;
+
 	// ---------------------------------------------------------------------
 	// Authority-only mutation API
 	// ---------------------------------------------------------------------
 
 	bool ResetForMatch(int32 InScoreGoal, uint8 InMaxAttackerHits);
+	bool BeginAttackOrderSelection(float InDeadlineServerTime);
 
 	bool BeginRound(uint8 InAttackingTeamIndex, AUTPlayerState* InActiveAttacker,
 		int32 InRoundNumber, float InRoundStartServerTime,
@@ -227,6 +257,11 @@ public:
 	bool DetachPlayer(AUTPlayerState* PlayerState);
 
 	bool ClearRoster();
+	bool SetTeamAttackOrder(uint8 TeamIndex, const TArray<int32>& OrderedRosterSlots,
+		bool bLockOrder);
+	bool SetAttackOrderLocked(uint8 TeamIndex, bool bLocked);
+	bool SetAttackOrderSelectors(AUTPlayerState* Team0Selector,
+		AUTPlayerState* Team1Selector);
 	bool SetPlayerRoundState(AUTPlayerState* PlayerState, EClutchRole PlayerRole,
 		EClutchStatus PlayerStatus, uint8 HitsTaken);
 	bool SetPlayerHitCount(AUTPlayerState* PlayerState, uint8 HitsTaken);
@@ -239,8 +274,29 @@ public:
 	/** Returns the next sorted eligible slot after PreviousSlot, wrapping once. */
 	static int32 SelectNextRotationSlot(const TArray<int32>& EligibleSlots, int32 PreviousSlot);
 
+	/** Validates that ProposedSlots is an exact, duplicate-free permutation. */
+	static bool IsValidAttackOrder(const TArray<int32>& EligibleSlots,
+		const TArray<int32>& ProposedSlots);
+
+	/** Returns the entry after PreviousSlot while preserving the supplied order. */
+	static int32 SelectNextOrderedSlot(const TArray<int32>& OrderedSlots,
+		int32 PreviousSlot);
+
 	/** Maps a valid two-team attacker index to the defending team; otherwise 255. */
 	static uint8 GetDefendingTeam(uint8 InAttackingTeamIndex);
+
+	/** Shared rule used by live spectator cycling and deterministic tests. */
+	static bool CanSpectateRosterEntry(uint8 ViewerTeamIndex,
+		const FClutchRosterEntry& TargetEntry, bool bTargetAlive);
+
+	/** Advances the 0..100 pole meter for one server step. */
+	static float AdvancePoleProgress(float CurrentProgress, float DeltaSeconds,
+		bool bAttackerPresent, bool bDefenderPresent,
+		float CaptureSeconds, float DecaySeconds);
+
+	/** Resolves the role-vs-role damage override; zero means the hit is invalid. */
+	static int32 ResolveRoleDamage(EClutchRole DamageDealerRole,
+		EClutchRole VictimRole, int32 DefenderDamage, int32 AttackerDamage);
 
 	/**
 	 * Resolves a round using Elite's deterministic priority:

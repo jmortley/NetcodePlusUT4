@@ -24,6 +24,8 @@ class NETCODEPLUS_API AClutchHUD : public AWipeoutHUD
 public:
 	virtual void DrawHUD() override;
 	virtual void DrawTeamScoreBar(AUTGameState* GameState) override;
+	virtual void NotifyHitBoxClick(FName BoxName) override;
+	virtual void Destroyed() override;
 
 protected:
 	AClutchRoundState* ResolveClutchState();
@@ -32,9 +34,23 @@ protected:
 	void DrawClutchPortraits(AClutchRoundState* State);
 	void DrawRolePanel(AClutchRoundState* State);
 	void DrawCapturePanel(AClutchRoundState* State);
+	void DrawAttackOrderPanel(AClutchRoundState* State);
+	void UpdateAttackOrderInput(AClutchRoundState* State, bool bPanelVisible);
+	void RestoreAttackOrderInput();
+	void ResetAttackOrderDraft(AClutchRoundState* State, uint8 TeamIndex);
+	void PickAttackOrderSlot(uint8 RosterSlot);
+	void SubmitAttackOrderDraft();
 
 	TWeakObjectPtr<AClutchRoundState> CachedClutchState;
 	bool bTriedLoadRecoveredHUDTextures;
+	bool bAttackOrderInputActive;
+	bool bSavedShowMouseCursor;
+	bool bSavedEnableClickEvents;
+	bool bSavedEnableMouseOverEvents;
+	bool bAttackOrderSubmitted;
+	uint8 DraftAttackOrderTeam;
+	FString DraftAttackOrderRosterKey;
+	TArray<uint8> DraftAttackOrderSlots;
 
 	UPROPERTY()
 	UTexture2D* LegacyCircleTexture;

@@ -12,8 +12,10 @@
 #include "Engine/Canvas.h"
 #include "Engine/Texture2D.h"
 #include "EngineUtils.h"
+#if !UE_SERVER
 #include "Interfaces/IImageWrapper.h"
 #include "Interfaces/IImageWrapperModule.h"
+#endif
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
@@ -26,6 +28,7 @@ namespace
 		switch (Phase)
 		{
 		case EClutchRoundPhase::Waiting: return TEXT("WAITING");
+		case EClutchRoundPhase::OrderSelection: return TEXT("CHOOSE ATTACK ORDER");
 		case EClutchRoundPhase::Intermission: return TEXT("ROUND SETUP");
 		case EClutchRoundPhase::Combat: return TEXT("POLE LOCKED");
 		case EClutchRoundPhase::Capture: return TEXT("POLE ACTIVE");
@@ -134,6 +137,40 @@ namespace
 		Canvas->DrawTile(Canvas->DefaultTexture, X, Y, Width, Height,
 			0.0f, 0.0f, 1.0f, 1.0f, BLEND_Translucent);
 	}
+
+	static FString BuildAttackOrderRosterKey(
+		const AClutchRoundState* State, uint8 TeamIndex)
+	{
+		if (!State || TeamIndex > 1)
+		{
+			return FString();
+		}
+		TArray<int32> Slots;
+		State->GetTeamAttackOrderSlots(TeamIndex, Slots);
+		FString Key = FString::Printf(TEXT("%d:"), TeamIndex);
+		for (int32 Slot : Slots)
+		{
+			Key += FString::Printf(TEXT("%d,"), Slot);
+		}
+		return Key;
+	}
+
+	static const FClutchRosterEntry* FindTeamRosterSlot(
+		const AClutchRoundState* State, uint8 TeamIndex, int32 RosterSlot)
+	{
+		if (State)
+		{
+			for (const FClutchRosterEntry& Entry : State->Roster)
+			{
+				if (Entry.PlayerState && Entry.TeamIndex == TeamIndex
+					&& Entry.RosterSlot == RosterSlot)
+				{
+					return &Entry;
+				}
+			}
+		}
+		return nullptr;
+	}
 }
 
 
@@ -147,6 +184,12 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ClutchScoreboard"));
 
 	bTriedLoadRecoveredHUDTextures = false;
+	bAttackOrderInputActive = false;
+	bSavedShowMouseCursor = false;
+	bSavedEnableClickEvents = false;
+	bSavedEnableMouseOverEvents = false;
+	bAttackOrderSubmitted = false;
+	DraftAttackOrderTeam = AClutchRoundState::NoTeam;
 	LegacyCircleTexture = nullptr;
 	LegacyInnerCircleTexture = nullptr;
 	LegacyAttackingTexture = nullptr;
@@ -173,16 +216,394 @@ void AClutchHUD::DrawHUD()
 
 	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
 		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
+	AClutchRoundState* State = ResolveClutchState();
+	const bool bPanelVisible = bRenderCustomHUD && Canvas && SmallFont
+		&& !ScoreboardIsUp() && State
+		&& State->Phase == EClutchRoundPhase::OrderSelection;
+	UpdateAttackOrderInput(State, bPanelVisible);
 	if (!bRenderCustomHUD || !Canvas || !SmallFont || ScoreboardIsUp())
 	{
 		return;
 	}
 
-	if (AClutchRoundState* State = ResolveClutchState())
+	if (State)
 	{
 		DrawClutchPortraits(State);
+		if (State->Phase == EClutchRoundPhase::OrderSelection)
+		{
+			DrawAttackOrderPanel(State);
+			return;
+		}
 		DrawCapturePanel(State);
 		DrawRolePanel(State);
+	}
+}
+
+
+void AClutchHUD::UpdateAttackOrderInput(
+	AClutchRoundState* State, bool bPanelVisible)
+{
+	AUTPlayerState* OwnState = UTPlayerOwner
+		? Cast<AUTPlayerState>(UTPlayerOwner->PlayerState)
+		: nullptr;
+	const FClutchRosterEntry* OwnEntry = OwnState && State
+		? State->FindEntry(OwnState)
+		: nullptr;
+	if (State && OwnEntry && OwnEntry->TeamIndex <= 1)
+	{
+		const FString RosterKey = BuildAttackOrderRosterKey(State, OwnEntry->TeamIndex);
+		if (DraftAttackOrderTeam != OwnEntry->TeamIndex
+			|| DraftAttackOrderRosterKey != RosterKey)
+		{
+			ResetAttackOrderDraft(State, OwnEntry->TeamIndex);
+		}
+	}
+
+	TArray<int32> TeamSlots;
+	if (State && OwnEntry)
+	{
+		State->GetTeamAttackOrderSlots(OwnEntry->TeamIndex, TeamSlots);
+	}
+	const bool bShouldEnable = bPanelVisible && OwnEntry
+		&& OwnEntry->bAttackOrderSelector
+		&& !State->IsAttackOrderLocked(OwnEntry->TeamIndex)
+		&& TeamSlots.Num() > 1
+		&& !bAttackOrderSubmitted;
+
+	if (bShouldEnable && !bAttackOrderInputActive && UTPlayerOwner)
+	{
+		bSavedShowMouseCursor = UTPlayerOwner->bShowMouseCursor;
+		bSavedEnableClickEvents = UTPlayerOwner->bEnableClickEvents;
+		bSavedEnableMouseOverEvents = UTPlayerOwner->bEnableMouseOverEvents;
+		UTPlayerOwner->bShowMouseCursor = true;
+		UTPlayerOwner->bEnableClickEvents = true;
+		UTPlayerOwner->bEnableMouseOverEvents = true;
+		bAttackOrderInputActive = true;
+	}
+	else if (!bShouldEnable)
+	{
+		RestoreAttackOrderInput();
+	}
+}
+
+
+void AClutchHUD::RestoreAttackOrderInput()
+{
+	if (!bAttackOrderInputActive)
+	{
+		return;
+	}
+	if (UTPlayerOwner)
+	{
+		UTPlayerOwner->bShowMouseCursor = bSavedShowMouseCursor;
+		UTPlayerOwner->bEnableClickEvents = bSavedEnableClickEvents;
+		UTPlayerOwner->bEnableMouseOverEvents = bSavedEnableMouseOverEvents;
+	}
+	bAttackOrderInputActive = false;
+}
+
+
+void AClutchHUD::ResetAttackOrderDraft(
+	AClutchRoundState* State, uint8 TeamIndex)
+{
+	DraftAttackOrderTeam = TeamIndex;
+	DraftAttackOrderRosterKey = BuildAttackOrderRosterKey(State, TeamIndex);
+	DraftAttackOrderSlots.Reset();
+	bAttackOrderSubmitted = false;
+}
+
+
+void AClutchHUD::PickAttackOrderSlot(uint8 RosterSlot)
+{
+	AClutchRoundState* State = ResolveClutchState();
+	if (!State || State->Phase != EClutchRoundPhase::OrderSelection
+		|| DraftAttackOrderTeam > 1
+		|| DraftAttackOrderSlots.Contains(RosterSlot))
+	{
+		return;
+	}
+
+	TArray<int32> EligibleSlots;
+	State->GetTeamAttackOrderSlots(DraftAttackOrderTeam, EligibleSlots);
+	if (!EligibleSlots.Contains(static_cast<int32>(RosterSlot)))
+	{
+		return;
+	}
+	DraftAttackOrderSlots.Add(RosterSlot);
+
+	// Once every meaningful choice is made, append the sole remaining player.
+	if (EligibleSlots.Num() > 1
+		&& DraftAttackOrderSlots.Num() == EligibleSlots.Num() - 1)
+	{
+		for (int32 Slot : EligibleSlots)
+		{
+			if (!DraftAttackOrderSlots.Contains(static_cast<uint8>(Slot)))
+			{
+				DraftAttackOrderSlots.Add(static_cast<uint8>(Slot));
+			}
+		}
+	}
+}
+
+
+void AClutchHUD::SubmitAttackOrderDraft()
+{
+	AClutchRoundState* State = ResolveClutchState();
+	if (!State || !UTPlayerOwner || DraftAttackOrderTeam > 1)
+	{
+		return;
+	}
+
+	TArray<int32> EligibleSlots;
+	TArray<int32> ProposedSlots;
+	State->GetTeamAttackOrderSlots(DraftAttackOrderTeam, EligibleSlots);
+	for (uint8 Slot : DraftAttackOrderSlots)
+	{
+		ProposedSlots.Add(static_cast<int32>(Slot));
+	}
+	if (!AClutchRoundState::IsValidAttackOrder(EligibleSlots, ProposedSlots))
+	{
+		return;
+	}
+
+	FString Command(TEXT("ClutchOrder"));
+	for (int32 Slot : ProposedSlots)
+	{
+		Command += FString::Printf(TEXT(" %d"), Slot);
+	}
+	// AUTPlayerController::Mutate uses the stock reliable ServerMutate RPC.
+	UTPlayerOwner->Mutate(Command);
+	bAttackOrderSubmitted = true;
+	RestoreAttackOrderInput();
+}
+
+
+void AClutchHUD::NotifyHitBoxClick(FName BoxName)
+{
+	const FString Name = BoxName.ToString();
+	const FString PickPrefix(TEXT("ClutchOrderPick_"));
+	if (Name.StartsWith(PickPrefix, ESearchCase::IgnoreCase))
+	{
+		const FString SlotText = Name.RightChop(PickPrefix.Len());
+		if (SlotText.IsNumeric())
+		{
+			PickAttackOrderSlot(static_cast<uint8>(FMath::Clamp(
+				FCString::Atoi(*SlotText), 0, 255))));
+		}
+		return;
+	}
+	if (Name.Equals(TEXT("ClutchOrderConfirm"), ESearchCase::IgnoreCase))
+	{
+		SubmitAttackOrderDraft();
+		return;
+	}
+	if (Name.Equals(TEXT("ClutchOrderReset"), ESearchCase::IgnoreCase))
+	{
+		ResetAttackOrderDraft(ResolveClutchState(), DraftAttackOrderTeam);
+		return;
+	}
+
+	Super::NotifyHitBoxClick(BoxName);
+}
+
+
+void AClutchHUD::Destroyed()
+{
+	RestoreAttackOrderInput();
+	Super::Destroyed();
+}
+
+
+void AClutchHUD::DrawAttackOrderPanel(AClutchRoundState* State)
+{
+	if (!State || !Canvas || !SmallFont || !MediumFont || !UTPlayerOwner)
+	{
+		return;
+	}
+
+	AUTPlayerState* OwnState = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
+	const FClutchRosterEntry* OwnEntry = OwnState ? State->FindEntry(OwnState) : nullptr;
+	if (!OwnEntry || OwnEntry->TeamIndex > 1)
+	{
+		return;
+	}
+
+	const uint8 TeamIndex = OwnEntry->TeamIndex;
+	TArray<int32> OrderedSlots;
+	State->GetTeamAttackOrderSlots(TeamIndex, OrderedSlots);
+	if (OrderedSlots.Num() == 0)
+	{
+		return;
+	}
+
+	if (DraftAttackOrderTeam != TeamIndex
+		|| DraftAttackOrderRosterKey != BuildAttackOrderRosterKey(State, TeamIndex))
+	{
+		ResetAttackOrderDraft(State, TeamIndex);
+	}
+
+	const float Scale = FMath::Min(
+		static_cast<float>(Canvas->SizeX) / 1920.0f,
+		static_cast<float>(Canvas->SizeY) / 1080.0f);
+	const float PanelWidth = 720.0f * Scale;
+	const float PanelHeight = 350.0f * Scale;
+	const float PanelX = (Canvas->ClipX - PanelWidth) * 0.5f;
+	const float PanelY = (Canvas->ClipY - PanelHeight) * 0.46f;
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const FLinearColor TeamColor = TeamIndex == 0
+		? FLinearColor(0.95f, 0.08f, 0.025f, 1.0f)
+		: FLinearColor(0.20f, 0.25f, 1.0f, 1.0f);
+
+	DrawSolidTile(Canvas, PanelX, PanelY, PanelWidth, PanelHeight,
+		FLinearColor(0.008f, 0.018f, 0.035f, 0.94f));
+	DrawSolidTile(Canvas, PanelX, PanelY, PanelWidth, 5.0f * Scale, TeamColor);
+	DrawCenteredCanvasText(Canvas, MediumFont, TEXT("CHOOSE YOUR ATTACK ORDER"),
+		CenterX, PanelY + 24.0f * Scale, 0.86f * Scale, FColor::White);
+
+	AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
+	const float Now = GameState
+		? GameState->GetServerWorldTimeSeconds()
+		: GetWorld()->GetTimeSeconds();
+	const int32 SecondsRemaining = FMath::Max(0, FMath::CeilToInt(
+		State->AttackOrderDeadlineServerTime - Now));
+	DrawCenteredCanvasText(Canvas, SmallFont,
+		FString::Printf(TEXT("%d seconds"), SecondsRemaining),
+		CenterX, PanelY + 58.0f * Scale, 0.55f * Scale,
+		SecondsRemaining <= 5 ? FColor(255, 90, 90) : FColor(190, 210, 230));
+
+	const bool bLocked = State->IsAttackOrderLocked(TeamIndex);
+	const bool bCanEdit = OwnEntry->bAttackOrderSelector && !bLocked
+		&& !bAttackOrderSubmitted && OrderedSlots.Num() > 1;
+	if (!bCanEdit)
+	{
+		FString StatusText;
+		if (bLocked)
+		{
+			StatusText = TEXT("ORDER LOCKED");
+		}
+		else if (bAttackOrderSubmitted)
+		{
+			StatusText = TEXT("ORDER SENT - WAITING FOR SERVER");
+		}
+		else
+		{
+			FString SelectorName(TEXT("YOUR TEAM SELECTOR"));
+			for (const FClutchRosterEntry& Entry : State->Roster)
+			{
+				if (Entry.TeamIndex == TeamIndex && Entry.bAttackOrderSelector)
+				{
+					SelectorName = Entry.PlayerState
+						? Entry.PlayerState->PlayerName
+						: Entry.PlayerNameFallback;
+					break;
+				}
+			}
+			StatusText = FString::Printf(TEXT("WAITING FOR %s"), *SelectorName.ToUpper());
+		}
+		DrawCenteredCanvasText(Canvas, MediumFont, StatusText, CenterX,
+			PanelY + 94.0f * Scale, 0.66f * Scale,
+			bLocked ? FColor(100, 255, 130) : FColor(210, 220, 235));
+
+		const float RowY = PanelY + 145.0f * Scale;
+		const float RowWidth = (PanelWidth - 80.0f * Scale)
+			/ static_cast<float>(FMath::Max(1, OrderedSlots.Num()));
+		for (int32 Index = 0; Index < OrderedSlots.Num(); ++Index)
+		{
+			const FClutchRosterEntry* Entry = FindTeamRosterSlot(
+				State, TeamIndex, OrderedSlots[Index]);
+			const float X = PanelX + 40.0f * Scale + Index * RowWidth;
+			DrawSolidTile(Canvas, X + 3.0f * Scale, RowY,
+				RowWidth - 6.0f * Scale, 105.0f * Scale,
+				FLinearColor(0.035f, 0.07f, 0.12f, 0.92f));
+			DrawCenteredCanvasText(Canvas, MediumFont,
+				FString::FromInt(Index + 1), X + RowWidth * 0.5f,
+				RowY + 10.0f * Scale, 0.75f * Scale, TeamColor.ToFColor(true));
+			DrawCenteredCanvasText(Canvas, SmallFont,
+				Entry && Entry->PlayerState ? Entry->PlayerState->PlayerName
+					: Entry ? Entry->PlayerNameFallback : TEXT("PLAYER"),
+				X + RowWidth * 0.5f, RowY + 58.0f * Scale,
+				0.56f * Scale, FColor::White);
+		}
+		return;
+	}
+
+	FString Prompt(TEXT("CHOOSE FIRST ATTACKER"));
+	if (DraftAttackOrderSlots.Num() == 1 && OrderedSlots.Num() > 2)
+	{
+		Prompt = TEXT("CHOOSE SECOND ATTACKER");
+	}
+	else if (DraftAttackOrderSlots.Num() == OrderedSlots.Num())
+	{
+		Prompt = TEXT("REVIEW AND CONFIRM");
+	}
+	DrawCenteredCanvasText(Canvas, MediumFont, Prompt, CenterX,
+		PanelY + 91.0f * Scale, 0.70f * Scale, FColor::White);
+
+	const float CardsY = PanelY + 132.0f * Scale;
+	const float CardsWidth = PanelWidth - 70.0f * Scale;
+	const float CardWidth = CardsWidth
+		/ static_cast<float>(FMath::Max(1, OrderedSlots.Num()));
+	for (int32 CardIndex = 0; CardIndex < OrderedSlots.Num(); ++CardIndex)
+	{
+		const uint8 Slot = static_cast<uint8>(OrderedSlots[CardIndex]);
+		const int32 SelectedIndex = DraftAttackOrderSlots.Find(Slot);
+		const FClutchRosterEntry* Entry = FindTeamRosterSlot(State, TeamIndex, Slot);
+		const float X = PanelX + 35.0f * Scale + CardIndex * CardWidth;
+		const FLinearColor CardColor = SelectedIndex == INDEX_NONE
+			? FLinearColor(0.04f, 0.085f, 0.145f, 0.96f)
+			: FLinearColor(0.06f, 0.26f, 0.13f, 0.96f);
+		DrawSolidTile(Canvas, X + 4.0f * Scale, CardsY,
+			CardWidth - 8.0f * Scale, 112.0f * Scale, CardColor);
+
+		const TCHAR ButtonLetter = static_cast<TCHAR>('A' + CardIndex);
+		DrawCenteredCanvasText(Canvas, MediumFont,
+			FString::Printf(TEXT("[%c]"), ButtonLetter),
+			X + CardWidth * 0.5f, CardsY + 8.0f * Scale,
+			0.66f * Scale, TeamColor.ToFColor(true));
+		DrawCenteredCanvasText(Canvas, SmallFont,
+			Entry && Entry->PlayerState ? Entry->PlayerState->PlayerName
+				: Entry ? Entry->PlayerNameFallback : TEXT("PLAYER"),
+			X + CardWidth * 0.5f, CardsY + 60.0f * Scale,
+			0.54f * Scale, FColor::White);
+		if (SelectedIndex != INDEX_NONE)
+		{
+			DrawCenteredCanvasText(Canvas, SmallFont,
+				FString::Printf(TEXT("PICK %d"), SelectedIndex + 1),
+				X + CardWidth * 0.5f, CardsY + 88.0f * Scale,
+				0.48f * Scale, FColor(100, 255, 130));
+		}
+		else
+		{
+			AddHitBox(FVector2D(X + 4.0f * Scale, CardsY),
+				FVector2D(CardWidth - 8.0f * Scale, 112.0f * Scale),
+				FName(*FString::Printf(TEXT("ClutchOrderPick_%d"), Slot)), true, 20);
+		}
+	}
+
+	const float ButtonY = PanelY + PanelHeight - 63.0f * Scale;
+	if (DraftAttackOrderSlots.Num() > 0)
+	{
+		const float ResetX = CenterX - 210.0f * Scale;
+		DrawSolidTile(Canvas, ResetX, ButtonY, 170.0f * Scale, 38.0f * Scale,
+			FLinearColor(0.14f, 0.16f, 0.19f, 0.98f));
+		DrawCenteredCanvasText(Canvas, SmallFont, TEXT("RESET"),
+			ResetX + 85.0f * Scale, ButtonY + 8.0f * Scale,
+			0.54f * Scale, FColor::White);
+		AddHitBox(FVector2D(ResetX, ButtonY),
+			FVector2D(170.0f * Scale, 38.0f * Scale),
+			FName(TEXT("ClutchOrderReset")), true, 30);
+	}
+	if (DraftAttackOrderSlots.Num() == OrderedSlots.Num())
+	{
+		const float ConfirmX = CenterX + 40.0f * Scale;
+		DrawSolidTile(Canvas, ConfirmX, ButtonY, 170.0f * Scale, 38.0f * Scale,
+			FLinearColor(0.08f, 0.55f, 0.20f, 0.98f));
+		DrawCenteredCanvasText(Canvas, SmallFont, TEXT("CONFIRM ORDER"),
+			ConfirmX + 85.0f * Scale, ButtonY + 8.0f * Scale,
+			0.54f * Scale, FColor::White);
+		AddHitBox(FVector2D(ConfirmX, ButtonY),
+			FVector2D(170.0f * Scale, 38.0f * Scale),
+			FName(TEXT("ClutchOrderConfirm")), true, 30);
 	}
 }
 
@@ -316,8 +737,11 @@ void AClutchHUD::DrawTeamScoreBar(AUTGameState* GameState)
 		ScoreFontScale, HeaderText);
 
 	const float Now = GameState->GetServerWorldTimeSeconds();
-	const int32 Remaining = State->RoundEndServerTime > 0.0f
-		? FMath::Max(0, FMath::CeilToInt(State->RoundEndServerTime - Now))
+	const float RelevantEndTime = State->Phase == EClutchRoundPhase::OrderSelection
+		? State->AttackOrderDeadlineServerTime
+		: State->RoundEndServerTime;
+	const int32 Remaining = RelevantEndTime > 0.0f
+		? FMath::Max(0, FMath::CeilToInt(RelevantEndTime - Now))
 		: 0;
 	const FString Clock = FString::Printf(TEXT("%02d:%02d"),
 		Remaining / 60, Remaining % 60);
@@ -476,28 +900,27 @@ void AClutchHUD::DrawClutchPortraits(AClutchRoundState* State)
 		FirstPortraitX[0] = FrameX + 980.0f * FrameScaleX;
 		FirstPortraitX[1] = FrameX + 1504.0f * FrameScaleX;
 	}
-	int32 DrawnPerTeam[2] = { 0, 0 };
-
-	// Roster slots are stable across rounds, so the same portrait stays in the
-	// same position while active/benched roles rotate.
-	for (int32 Slot = 0; Slot < 6; ++Slot)
+	// The portrait nearest each score is that team's chosen first attacker.
+	// This makes the persistent top strip double as a compact order reminder.
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
 	{
-		for (const FClutchRosterEntry& Entry : State->Roster)
+		TArray<int32> OrderedSlots;
+		State->GetTeamAttackOrderSlots(static_cast<uint8>(TeamIndex), OrderedSlots);
+		for (int32 DrawIndex = 0; DrawIndex < OrderedSlots.Num() && DrawIndex < 3; ++DrawIndex)
 		{
-			if (!Entry.PlayerState || Entry.TeamIndex > 1
-				|| Entry.RosterSlot != Slot || DrawnPerTeam[Entry.TeamIndex] >= 3)
+			const FClutchRosterEntry* Entry = FindTeamRosterSlot(
+				State, static_cast<uint8>(TeamIndex), OrderedSlots[DrawIndex]);
+			if (!Entry || !Entry->PlayerState)
 			{
 				continue;
 			}
 
-			const int32 TeamIndex = Entry.TeamIndex;
-			const int32 DrawIndex = DrawnPerTeam[TeamIndex]++;
 			const float PortraitX = FirstPortraitX[TeamIndex]
 				+ PortraitDirection[TeamIndex] * DrawIndex * PipStep;
-			const float LiveScaling = Entry.PlayerStatus == EClutchStatus::Active
+			const float LiveScaling = Entry->PlayerStatus == EClutchStatus::Active
 				? 1.0f
 				: 0.0f;
-			DrawPlayerIcon(Entry.PlayerState, LiveScaling,
+			DrawPlayerIcon(Entry->PlayerState, LiveScaling,
 				PortraitX, PortraitY, PipSize);
 		}
 	}

@@ -11,6 +11,8 @@ FClutchRosterEntry::FClutchRosterEntry()
 	: PlayerState(nullptr)
 	, PlayerIdFallback(INDEX_NONE)
 	, RosterSlot(AClutchRoundState::UnassignedSlot)
+	, AttackOrderIndex(AClutchRoundState::UnassignedSlot)
+	, bAttackOrderSelector(false)
 	, TeamIndex(AClutchRoundState::NoTeam)
 	, PlayerRole(EClutchRole::None)
 	, PlayerStatus(EClutchStatus::Queued)
@@ -33,6 +35,8 @@ AClutchRoundState::AClutchRoundState(const FObjectInitializer& ObjectInitializer
 	ActiveAttacker = nullptr;
 	AttackingTeamIndex = NoTeam;
 	RoundNumber = 0;
+	AttackOrderLockedMask = 0;
+	AttackOrderDeadlineServerTime = 0.0f;
 	RoundStartServerTime = 0.0f;
 	PoleUnlockServerTime = 0.0f;
 	RoundEndServerTime = 0.0f;
@@ -53,6 +57,8 @@ void AClutchRoundState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AClutchRoundState, ActiveAttacker);
 	DOREPLIFETIME(AClutchRoundState, AttackingTeamIndex);
 	DOREPLIFETIME(AClutchRoundState, RoundNumber);
+	DOREPLIFETIME(AClutchRoundState, AttackOrderLockedMask);
+	DOREPLIFETIME(AClutchRoundState, AttackOrderDeadlineServerTime);
 	DOREPLIFETIME(AClutchRoundState, RoundStartServerTime);
 	DOREPLIFETIME(AClutchRoundState, PoleUnlockServerTime);
 	DOREPLIFETIME(AClutchRoundState, RoundEndServerTime);
@@ -307,6 +313,67 @@ int32 AClutchRoundState::GetPlayerArmorRemaining(AUTPlayerState* PlayerState) co
 }
 
 
+bool AClutchRoundState::IsAttackOrderLocked(uint8 TeamIndex) const
+{
+	return TeamIndex <= 1
+		&& (AttackOrderLockedMask & static_cast<uint8>(1 << TeamIndex)) != 0;
+}
+
+
+bool AClutchRoundState::AreAttackOrdersLocked() const
+{
+	return (AttackOrderLockedMask & 0x03) == 0x03;
+}
+
+
+bool AClutchRoundState::IsPlayerAttackOrderSelector(AUTPlayerState* PlayerState) const
+{
+	const FClutchRosterEntry* Entry = FindEntry(PlayerState);
+	return Entry && Entry->bAttackOrderSelector;
+}
+
+
+void AClutchRoundState::GetTeamAttackOrderSlots(
+	uint8 TeamIndex, TArray<int32>& OutSlots) const
+{
+	OutSlots.Reset();
+	if (TeamIndex > 1)
+	{
+		return;
+	}
+
+	// First honor every assigned order index. The second pass appends a newly
+	// joined or otherwise unassigned player in stable roster-slot order.
+	for (int32 OrderIndex = 0; OrderIndex < 6; ++OrderIndex)
+	{
+		for (const FClutchRosterEntry& Entry : Roster)
+		{
+			if (Entry.PlayerState && Entry.PlayerStatus != EClutchStatus::Disconnected
+				&& Entry.TeamIndex == TeamIndex
+				&& Entry.RosterSlot != UnassignedSlot
+				&& Entry.AttackOrderIndex == OrderIndex)
+			{
+				OutSlots.AddUnique(static_cast<int32>(Entry.RosterSlot));
+			}
+		}
+	}
+
+	for (int32 RosterSlot = 0; RosterSlot < 6; ++RosterSlot)
+	{
+		for (const FClutchRosterEntry& Entry : Roster)
+		{
+			if (Entry.PlayerState && Entry.PlayerStatus != EClutchStatus::Disconnected
+				&& Entry.TeamIndex == TeamIndex
+				&& Entry.RosterSlot == RosterSlot)
+			{
+				OutSlots.AddUnique(RosterSlot);
+				break;
+			}
+		}
+	}
+}
+
+
 bool AClutchRoundState::ResetForMatch(int32 InScoreGoal, uint8 InMaxAttackerHits)
 {
 	if (!HasAuthority())
@@ -319,6 +386,8 @@ bool AClutchRoundState::ResetForMatch(int32 InScoreGoal, uint8 InMaxAttackerHits
 	ActiveAttacker = nullptr;
 	AttackingTeamIndex = NoTeam;
 	RoundNumber = 0;
+	AttackOrderLockedMask = 0;
+	AttackOrderDeadlineServerTime = 0.0f;
 	RoundStartServerTime = 0.0f;
 	PoleUnlockServerTime = 0.0f;
 	RoundEndServerTime = 0.0f;
@@ -327,6 +396,37 @@ bool AClutchRoundState::ResetForMatch(int32 InScoreGoal, uint8 InMaxAttackerHits
 	MaxAttackerHits = static_cast<uint8>(FMath::Clamp<int32>(InMaxAttackerHits, 1, 255));
 	LastWinningTeamIndex = NoTeam;
 	LastEndReason = NAME_None;
+
+	MarkStateDirty();
+	return true;
+}
+
+
+bool AClutchRoundState::BeginAttackOrderSelection(float InDeadlineServerTime)
+{
+	if (!HasAuthority())
+	{
+		return false;
+	}
+
+	Phase = EClutchRoundPhase::OrderSelection;
+	ActiveAttacker = nullptr;
+	AttackingTeamIndex = NoTeam;
+	AttackOrderLockedMask = 0;
+	AttackOrderDeadlineServerTime = FMath::Max(0.0f, InDeadlineServerTime);
+	RoundStartServerTime = 0.0f;
+	PoleUnlockServerTime = 0.0f;
+	RoundEndServerTime = 0.0f;
+	PoleProgress = 0.0f;
+	for (FClutchRosterEntry& Entry : Roster)
+	{
+		if (Entry.PlayerState && Entry.PlayerStatus != EClutchStatus::Disconnected)
+		{
+			Entry.PlayerRole = EClutchRole::None;
+			Entry.PlayerStatus = EClutchStatus::Queued;
+			Entry.HitsTaken = 0;
+		}
+	}
 
 	MarkStateDirty();
 	return true;
@@ -344,6 +444,7 @@ bool AClutchRoundState::BeginRound(uint8 InAttackingTeamIndex,
 	}
 
 	Phase = EClutchRoundPhase::Intermission;
+	AttackOrderDeadlineServerTime = 0.0f;
 	ActiveAttacker = InActiveAttacker;
 	AttackingTeamIndex = InAttackingTeamIndex;
 	RoundNumber = FMath::Max(1, InRoundNumber);
@@ -452,6 +553,7 @@ bool AClutchRoundState::UpsertPlayer(AUTPlayerState* PlayerState, uint8 TeamInde
 	}
 
 	AUTPlayerState* PreviousPlayerState = Entry->PlayerState;
+	const uint8 PreviousTeamIndex = Entry->TeamIndex;
 	const bool bWasActiveAttacker = ActiveAttacker == PreviousPlayerState
 		|| (Entry->PlayerRole == EClutchRole::Attacker
 			&& Entry->PlayerStatus == EClutchStatus::Active);
@@ -465,6 +567,11 @@ bool AClutchRoundState::UpsertPlayer(AUTPlayerState* PlayerState, uint8 TeamInde
 	Entry->PlayerNameFallback = PlayerState->PlayerName;
 	Entry->TeamIndex = TeamIndex;
 	Entry->RosterSlot = RosterSlot;
+	if (PreviousTeamIndex != TeamIndex)
+	{
+		Entry->AttackOrderIndex = UnassignedSlot;
+		Entry->bAttackOrderSelector = false;
+	}
 	Entry->PlayerRole = PlayerRole;
 	Entry->PlayerStatus = PlayerStatus;
 	if (PlayerRole != EClutchRole::Attacker)
@@ -504,10 +611,12 @@ bool AClutchRoundState::DetachPlayer(AUTPlayerState* PlayerState)
 		ActiveAttacker = nullptr;
 	}
 
-	// Preserve StablePlayerId, PlayerIdFallback, name, team, and rotation slot.
+	// Preserve identity, team, rotation slot, and chosen attack-order position so
+	// a reconnect can reclaim the same place. A disconnected player cannot select.
 	Entry->PlayerState = nullptr;
 	Entry->PlayerRole = EClutchRole::None;
 	Entry->PlayerStatus = EClutchStatus::Disconnected;
+	Entry->bAttackOrderSelector = false;
 	Entry->HitsTaken = 0;
 
 	MarkStateDirty();
@@ -524,6 +633,91 @@ bool AClutchRoundState::ClearRoster()
 
 	Roster.Reset();
 	ActiveAttacker = nullptr;
+	AttackOrderLockedMask = 0;
+	AttackOrderDeadlineServerTime = 0.0f;
+	MarkStateDirty();
+	return true;
+}
+
+
+bool AClutchRoundState::SetTeamAttackOrder(uint8 TeamIndex,
+	const TArray<int32>& OrderedRosterSlots, bool bLockOrder)
+{
+	if (!HasAuthority() || TeamIndex > 1)
+	{
+		return false;
+	}
+
+	TArray<int32> EligibleSlots;
+	GetTeamAttackOrderSlots(TeamIndex, EligibleSlots);
+	if (!IsValidAttackOrder(EligibleSlots, OrderedRosterSlots))
+	{
+		return false;
+	}
+
+	for (FClutchRosterEntry& Entry : Roster)
+	{
+		if (Entry.TeamIndex == TeamIndex)
+		{
+			Entry.AttackOrderIndex = UnassignedSlot;
+		}
+	}
+	for (int32 OrderIndex = 0; OrderIndex < OrderedRosterSlots.Num(); ++OrderIndex)
+	{
+		for (FClutchRosterEntry& Entry : Roster)
+		{
+			if (Entry.TeamIndex == TeamIndex
+				&& Entry.RosterSlot == OrderedRosterSlots[OrderIndex])
+			{
+				Entry.AttackOrderIndex = static_cast<uint8>(OrderIndex);
+				break;
+			}
+		}
+	}
+
+	if (bLockOrder)
+	{
+		AttackOrderLockedMask |= static_cast<uint8>(1 << TeamIndex);
+	}
+	MarkStateDirty();
+	return true;
+}
+
+
+bool AClutchRoundState::SetAttackOrderLocked(uint8 TeamIndex, bool bLocked)
+{
+	if (!HasAuthority() || TeamIndex > 1)
+	{
+		return false;
+	}
+
+	const uint8 TeamBit = static_cast<uint8>(1 << TeamIndex);
+	const uint8 NewMask = bLocked
+		? static_cast<uint8>(AttackOrderLockedMask | TeamBit)
+		: static_cast<uint8>(AttackOrderLockedMask & ~TeamBit);
+	if (NewMask != AttackOrderLockedMask)
+	{
+		AttackOrderLockedMask = NewMask;
+		MarkStateDirty();
+	}
+	return true;
+}
+
+
+bool AClutchRoundState::SetAttackOrderSelectors(
+	AUTPlayerState* Team0Selector, AUTPlayerState* Team1Selector)
+{
+	if (!HasAuthority())
+	{
+		return false;
+	}
+
+	for (FClutchRosterEntry& Entry : Roster)
+	{
+		Entry.bAttackOrderSelector = Entry.PlayerState
+			&& ((Entry.TeamIndex == 0 && Entry.PlayerState == Team0Selector)
+				|| (Entry.TeamIndex == 1 && Entry.PlayerState == Team1Selector));
+	}
 	MarkStateDirty();
 	return true;
 }
@@ -646,11 +840,116 @@ int32 AClutchRoundState::SelectNextRotationSlot(
 }
 
 
+bool AClutchRoundState::IsValidAttackOrder(
+	const TArray<int32>& EligibleSlots, const TArray<int32>& ProposedSlots)
+{
+	TArray<int32> UniqueEligibleSlots;
+	for (int32 Slot : EligibleSlots)
+	{
+		if (Slot >= 0)
+		{
+			UniqueEligibleSlots.AddUnique(Slot);
+		}
+	}
+	if (UniqueEligibleSlots.Num() == 0
+		|| ProposedSlots.Num() != UniqueEligibleSlots.Num())
+	{
+		return false;
+	}
+
+	TArray<int32> UniqueProposedSlots;
+	for (int32 Slot : ProposedSlots)
+	{
+		if (!UniqueEligibleSlots.Contains(Slot)
+			|| UniqueProposedSlots.Contains(Slot))
+		{
+			return false;
+		}
+		UniqueProposedSlots.Add(Slot);
+	}
+	return true;
+}
+
+
+int32 AClutchRoundState::SelectNextOrderedSlot(
+	const TArray<int32>& OrderedSlots, int32 PreviousSlot)
+{
+	TArray<int32> SanitizedSlots;
+	for (int32 Slot : OrderedSlots)
+	{
+		if (Slot >= 0)
+		{
+			SanitizedSlots.AddUnique(Slot);
+		}
+	}
+	if (SanitizedSlots.Num() == 0)
+	{
+		return INDEX_NONE;
+	}
+
+	const int32 PreviousIndex = SanitizedSlots.Find(PreviousSlot);
+	return PreviousIndex == INDEX_NONE
+		? SanitizedSlots[0]
+		: SanitizedSlots[(PreviousIndex + 1) % SanitizedSlots.Num()];
+}
+
+
 uint8 AClutchRoundState::GetDefendingTeam(uint8 InAttackingTeamIndex)
 {
 	return InAttackingTeamIndex <= 1
 		? static_cast<uint8>(1 - InAttackingTeamIndex)
 		: NoTeam;
+}
+
+
+bool AClutchRoundState::CanSpectateRosterEntry(uint8 ViewerTeamIndex,
+	const FClutchRosterEntry& TargetEntry, bool bTargetAlive)
+{
+	return bTargetAlive
+		&& ViewerTeamIndex <= 1
+		&& TargetEntry.TeamIndex == ViewerTeamIndex
+		&& TargetEntry.PlayerStatus == EClutchStatus::Active;
+}
+
+
+float AClutchRoundState::AdvancePoleProgress(float CurrentProgress,
+	float DeltaSeconds, bool bAttackerPresent, bool bDefenderPresent,
+	float CaptureSeconds, float DecaySeconds)
+{
+	float Result = FMath::Clamp(CurrentProgress, 0.0f, 100.0f);
+	if (DeltaSeconds <= 0.0f)
+	{
+		return Result;
+	}
+
+	if (bAttackerPresent && !bDefenderPresent)
+	{
+		Result += DeltaSeconds * (100.0f / FMath::Max(0.1f, CaptureSeconds));
+	}
+	else if (!bAttackerPresent)
+	{
+		Result -= DeltaSeconds * (100.0f / FMath::Max(0.1f, DecaySeconds));
+	}
+	// Attacker + defender is contested and deliberately freezes progress.
+
+	return FMath::Clamp(Result, 0.0f, 100.0f);
+}
+
+
+int32 AClutchRoundState::ResolveRoleDamage(EClutchRole DamageDealerRole,
+	EClutchRole VictimRole, int32 DefenderDamage, int32 AttackerDamage)
+{
+	if (DamageDealerRole == EClutchRole::Defender
+		&& VictimRole == EClutchRole::Attacker)
+	{
+		return FMath::Max(0, DefenderDamage);
+	}
+	if (DamageDealerRole == EClutchRole::Attacker
+		&& VictimRole == EClutchRole::Defender)
+	{
+		return FMath::Max(0, AttackerDamage);
+	}
+	return 0;
 }
 
 

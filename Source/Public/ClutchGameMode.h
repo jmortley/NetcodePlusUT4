@@ -51,6 +51,9 @@ public:
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer) override;
 	virtual bool CanSpectate_Implementation(APlayerController* Viewer, APlayerState* ViewTarget) override;
 
+	/** Server entry point used by the stock ServerMutate transport. */
+	bool SubmitAttackOrder(APlayerController* Sender, const TArray<int32>& OrderedRosterSlots);
+
 	/** Full round duration. Defenders win when it expires. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Rules", meta = (ClampMin = "1.0"))
 	float RoundDurationSeconds;
@@ -82,6 +85,10 @@ public:
 	/** Delay between rounds. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Rules", meta = (ClampMin = "0.0"))
 	float IntermissionSeconds;
+
+	/** Time captains have to choose their team's attacker rotation before round one. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Order", meta = (ClampMin = "1.0"))
+	float AttackOrderSelectionSeconds;
 
 	/** Number of defender projectile hits the attacker can take. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Combat", meta = (ClampMin = "1", ClampMax = "255"))
@@ -131,6 +138,12 @@ public:
 protected:
 	void EnsureClutchState();
 	void RefreshRoster();
+	void BeginAttackOrderSelection();
+	void FinishAttackOrderSelection();
+	void PrepareAttackOrderRoster();
+	void HandleAttackOrderRosterChanged(uint8 ChangedTeamIndex);
+	void AssignAttackOrderSelectors();
+	void GetConnectedTeamSlots(uint8 TeamIndex, TArray<int32>& OutSlots) const;
 	void BeginRound();
 	bool SelectRoundRoles();
 	void BuildRoundSpawnQueue();
@@ -175,6 +188,7 @@ protected:
 	FTimerHandle PoleUnlockTimerHandle;
 	FTimerHandle RoundTimeoutTimerHandle;
 	FTimerHandle IntermissionTimerHandle;
+	FTimerHandle AttackOrderSelectionTimerHandle;
 	FTimerHandle SpawnQueueTimerHandle;
 	TArray<TWeakObjectPtr<AController>> PendingRoundSpawns;
 	TMap<TWeakObjectPtr<AController>, int32> RoundSpawnAttempts;
@@ -185,4 +199,5 @@ protected:
 	bool bRoundTimedOut;
 	bool bPoleCaptured;
 	bool bWinCheckQueued;
+	bool bFinishingAttackOrderSelection;
 };

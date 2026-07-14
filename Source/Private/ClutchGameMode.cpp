@@ -1,5 +1,6 @@
 #include "ClutchGameMode.h"
 #include "ClutchHUD.h"
+#include "ClutchOrderMutator.h"
 #include "ClutchRoundState.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
@@ -179,6 +180,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	PoleCaptureHalfHeight = 160.0f;
 	PoleActorTag = FName(TEXT("ClutchPole"));
 	IntermissionSeconds = 5.0f;
+	AttackOrderSelectionSeconds = 15.0f;
 	MaxAttackerHits = 3;
 	AttackerHealth = 300;
 	DefenderDamagePerHit = 100;
@@ -201,6 +203,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	bRoundTimedOut = false;
 	bPoleCaptured = false;
 	bWinCheckQueued = false;
+	bFinishingAttackOrderSelection = false;
 
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickInterval = 0.05f;
@@ -210,6 +213,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	AddMutatorClass(AClutchOrderMutator::StaticClass());
 
 	// Existing NC-ClutchGM Blueprint assets may have serialized the old UTHUD
 	// parent default. Enforce the native Clutch HUD before players log in so PIE
@@ -225,6 +229,8 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 	PoleCaptureSeconds = ParsePositiveFloatOption(Options, TEXT("PoleCaptureSeconds"), PoleCaptureSeconds);
 	PoleDecaySeconds = ParsePositiveFloatOption(Options, TEXT("PoleDecaySeconds"), PoleDecaySeconds);
 	IntermissionSeconds = ParsePositiveFloatOption(Options, TEXT("IntermissionSeconds"), IntermissionSeconds);
+	AttackOrderSelectionSeconds = ParsePositiveFloatOption(
+		Options, TEXT("AttackOrderSeconds"), AttackOrderSelectionSeconds);
 
 	MaxAttackerHits = FMath::Clamp(
 		UGameplayStatics::GetIntOption(Options, TEXT("AttackerHits"), MaxAttackerHits), 1, 255);
@@ -274,6 +280,21 @@ void AClutchGameMode::PostLogin(APlayerController* NewPlayer)
 	RefreshRoster();
 
 	AUTPlayerState* PlayerState = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+	if (PlayerState && HasMatchStarted() && ClutchState
+		&& ClutchState->RoundNumber == 0)
+	{
+		if (ClutchState->Phase == EClutchRoundPhase::OrderSelection)
+		{
+			HandleAttackOrderRosterChanged(GetPlayerTeamIndex(PlayerState));
+			EnterPlaying(NewPlayer);
+			return;
+		}
+		if (ClutchState->Phase == EClutchRoundPhase::Waiting)
+		{
+			BeginAttackOrderSelection();
+			return;
+		}
+	}
 	if (PlayerState && HasMatchStarted())
 	{
 		const FClutchRosterEntry* Entry = ClutchState ? ClutchState->FindEntry(PlayerState) : nullptr;
@@ -288,9 +309,14 @@ void AClutchGameMode::PostLogin(APlayerController* NewPlayer)
 void AClutchGameMode::Logout(AController* Exiting)
 {
 	AUTPlayerState* PlayerState = Exiting ? Cast<AUTPlayerState>(Exiting->PlayerState) : nullptr;
+	const uint8 ChangedTeamIndex = GetPlayerTeamIndex(PlayerState);
 	if (HasAuthority() && PlayerState)
 	{
 		MarkDisconnected(PlayerState);
+		if (ClutchState && ClutchState->Phase == EClutchRoundPhase::OrderSelection)
+		{
+			HandleAttackOrderRosterChanged(ChangedTeamIndex);
+		}
 	}
 
 	Super::Logout(Exiting);
@@ -316,7 +342,8 @@ void AClutchGameMode::HandleMatchHasStarted()
 	NextAttackerSlot[1] = INDEX_NONE;
 	NextAttackingTeamIndex = 0;
 	bEndingRound = false;
-	BeginNextRound();
+	bFinishingAttackOrderSelection = false;
+	BeginAttackOrderSelection();
 }
 
 
@@ -444,6 +471,308 @@ void AClutchGameMode::RefreshRoster()
 }
 
 
+void AClutchGameMode::GetConnectedTeamSlots(
+	uint8 TeamIndex, TArray<int32>& OutSlots) const
+{
+	OutSlots.Reset();
+	if (!ClutchState || TeamIndex > 1)
+	{
+		return;
+	}
+
+	for (const FClutchRosterEntry& Entry : ClutchState->Roster)
+	{
+		if (Entry.PlayerState && Cast<AController>(Entry.PlayerState->GetOwner())
+			&& Entry.TeamIndex == TeamIndex
+			&& Entry.RosterSlot != AClutchRoundState::UnassignedSlot)
+		{
+			OutSlots.AddUnique(static_cast<int32>(Entry.RosterSlot));
+		}
+	}
+	OutSlots.Sort();
+}
+
+
+void AClutchGameMode::AssignAttackOrderSelectors()
+{
+	if (!ClutchState)
+	{
+		return;
+	}
+
+	AUTPlayerState* Selectors[2] = { nullptr, nullptr };
+	TArray<FString> CaptainIds;
+	const FString CaptainsOption = GetWorld()
+		? GetWorld()->URL.GetOption(TEXT("Captains="), TEXT(""))
+		: FString();
+	if (!CaptainsOption.IsEmpty())
+	{
+		CaptainsOption.ParseIntoArray(CaptainIds, TEXT(","), true);
+		for (FString& CaptainId : CaptainIds)
+		{
+			// UE4.15 exposes the mutating Trim/TrimTrailing pair.
+			CaptainId.Trim();
+			CaptainId.TrimTrailing();
+		}
+	}
+
+	for (const FClutchRosterEntry& Entry : ClutchState->Roster)
+	{
+		if (!Entry.PlayerState || !Cast<AController>(Entry.PlayerState->GetOwner())
+			|| Entry.TeamIndex > 1 || Selectors[Entry.TeamIndex]
+			|| !Entry.PlayerState->UniqueId.IsValid())
+		{
+			continue;
+		}
+
+		const FString PlayerId = Entry.PlayerState->UniqueId.ToString();
+		for (const FString& CaptainId : CaptainIds)
+		{
+			if (CaptainId.Equals(PlayerId, ESearchCase::IgnoreCase))
+			{
+				Selectors[Entry.TeamIndex] = Entry.PlayerState;
+				break;
+			}
+		}
+	}
+
+	// Casual games and PIE do not carry ?Captains=. The lowest stable roster
+	// slot becomes the selector, which is deterministic across reconnects.
+	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		if (Selectors[TeamIndex])
+		{
+			continue;
+		}
+		for (int32 Slot = 0; Slot < 6 && !Selectors[TeamIndex]; ++Slot)
+		{
+			for (const FClutchRosterEntry& Entry : ClutchState->Roster)
+			{
+				if (Entry.PlayerState && Cast<AController>(Entry.PlayerState->GetOwner())
+					&& Entry.TeamIndex == TeamIndex && Entry.RosterSlot == Slot)
+				{
+					Selectors[TeamIndex] = Entry.PlayerState;
+					break;
+				}
+			}
+		}
+	}
+
+	ClutchState->SetAttackOrderSelectors(Selectors[0], Selectors[1]);
+}
+
+
+void AClutchGameMode::PrepareAttackOrderRoster()
+{
+	if (!ClutchState)
+	{
+		return;
+	}
+
+	AssignAttackOrderSelectors();
+	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		TArray<int32> EligibleSlots;
+		TArray<int32> OrderedSlots;
+		GetConnectedTeamSlots(TeamIndex, EligibleSlots);
+		ClutchState->GetTeamAttackOrderSlots(TeamIndex, OrderedSlots);
+		if (!AClutchRoundState::IsValidAttackOrder(EligibleSlots, OrderedSlots))
+		{
+			OrderedSlots = EligibleSlots;
+		}
+		if (OrderedSlots.Num() > 0)
+		{
+			ClutchState->SetTeamAttackOrder(TeamIndex, OrderedSlots, false);
+		}
+	}
+}
+
+
+void AClutchGameMode::BeginAttackOrderSelection()
+{
+	if (!HasAuthority() || HasMatchEnded())
+	{
+		return;
+	}
+
+	EnsureClutchState();
+	RefreshRoster();
+	if (!ClutchState)
+	{
+		return;
+	}
+
+	GetWorldTimerManager().ClearTimer(AttackOrderSelectionTimerHandle);
+	GetWorldTimerManager().ClearTimer(IntermissionTimerHandle);
+	bFinishingAttackOrderSelection = false;
+	bAllowRoundSpawns = false;
+	ClearRoundPawns();
+	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+	{
+		AController* Controller = It->Get();
+		if (Controller && Controller->PlayerState && !Controller->PlayerState->bOnlySpectator)
+		{
+			EnterPlaying(Controller);
+		}
+	}
+
+	const float Now = UTGameState
+		? UTGameState->GetServerWorldTimeSeconds()
+		: GetWorld()->GetTimeSeconds();
+	ClutchState->BeginAttackOrderSelection(
+		Now + FMath::Max(1.0f, AttackOrderSelectionSeconds));
+	PrepareAttackOrderRoster();
+
+	bool bBothTeamsPresent = true;
+	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		TArray<int32> Slots;
+		GetConnectedTeamSlots(TeamIndex, Slots);
+		bBothTeamsPresent &= Slots.Num() > 0;
+		if (Slots.Num() == 1)
+		{
+			ClutchState->SetTeamAttackOrder(TeamIndex, Slots, true);
+		}
+	}
+
+	if (bBothTeamsPresent && ClutchState->AreAttackOrdersLocked())
+	{
+		GetWorldTimerManager().SetTimerForNextTick(
+			this, &AClutchGameMode::FinishAttackOrderSelection);
+	}
+	else
+	{
+		GetWorldTimerManager().SetTimer(
+			AttackOrderSelectionTimerHandle, this,
+			&AClutchGameMode::FinishAttackOrderSelection,
+			FMath::Max(1.0f, AttackOrderSelectionSeconds), false);
+	}
+}
+
+
+void AClutchGameMode::HandleAttackOrderRosterChanged(uint8 ChangedTeamIndex)
+{
+	if (!ClutchState || ClutchState->Phase != EClutchRoundPhase::OrderSelection
+		|| ChangedTeamIndex > 1)
+	{
+		return;
+	}
+
+	AssignAttackOrderSelectors();
+	ClutchState->SetAttackOrderLocked(ChangedTeamIndex, false);
+	TArray<int32> OrderedSlots;
+	ClutchState->GetTeamAttackOrderSlots(ChangedTeamIndex, OrderedSlots);
+	if (OrderedSlots.Num() > 0)
+	{
+		ClutchState->SetTeamAttackOrder(
+			ChangedTeamIndex, OrderedSlots, OrderedSlots.Num() == 1);
+	}
+
+	TArray<int32> Team0Slots;
+	TArray<int32> Team1Slots;
+	GetConnectedTeamSlots(0, Team0Slots);
+	GetConnectedTeamSlots(1, Team1Slots);
+	if (Team0Slots.Num() > 0 && Team1Slots.Num() > 0
+		&& ClutchState->AreAttackOrdersLocked())
+	{
+		GetWorldTimerManager().SetTimerForNextTick(
+			this, &AClutchGameMode::FinishAttackOrderSelection);
+	}
+}
+
+
+bool AClutchGameMode::SubmitAttackOrder(
+	APlayerController* Sender, const TArray<int32>& OrderedRosterSlots)
+{
+	AUTPlayerState* PlayerState = Sender
+		? Cast<AUTPlayerState>(Sender->PlayerState)
+		: nullptr;
+	const FClutchRosterEntry* Entry = PlayerState && ClutchState
+		? ClutchState->FindEntry(PlayerState)
+		: nullptr;
+	if (!HasAuthority() || !Sender || !Entry || Entry->TeamIndex > 1
+		|| !ClutchState || ClutchState->Phase != EClutchRoundPhase::OrderSelection)
+	{
+		if (Sender)
+		{
+			Sender->ClientMessage(TEXT("Attack order can only be selected before round one."));
+		}
+		return false;
+	}
+
+	const uint8 TeamIndex = Entry->TeamIndex;
+	if (!Entry->bAttackOrderSelector)
+	{
+		Sender->ClientMessage(TEXT("Only your team's order selector can confirm the attack order."));
+		return false;
+	}
+	if (ClutchState->IsAttackOrderLocked(TeamIndex))
+	{
+		Sender->ClientMessage(TEXT("Your team's attack order is already locked."));
+		return false;
+	}
+
+	TArray<int32> EligibleSlots;
+	GetConnectedTeamSlots(TeamIndex, EligibleSlots);
+	if (!AClutchRoundState::IsValidAttackOrder(EligibleSlots, OrderedRosterSlots))
+	{
+		Sender->ClientMessage(TEXT("Attack order rejected: select every teammate exactly once."));
+		return false;
+	}
+	if (!ClutchState->SetTeamAttackOrder(TeamIndex, OrderedRosterSlots, true))
+	{
+		Sender->ClientMessage(TEXT("Attack order could not be saved."));
+		return false;
+	}
+
+	Sender->ClientMessage(TEXT("Attack order locked."));
+	UE_LOG(LogClutch, Log, TEXT("Team %d attack order submitted by %s"),
+		TeamIndex, *PlayerState->PlayerName);
+	if (ClutchState->AreAttackOrdersLocked())
+	{
+		GetWorldTimerManager().SetTimerForNextTick(
+			this, &AClutchGameMode::FinishAttackOrderSelection);
+	}
+	return true;
+}
+
+
+void AClutchGameMode::FinishAttackOrderSelection()
+{
+	if (!HasAuthority() || bFinishingAttackOrderSelection || !ClutchState
+		|| ClutchState->Phase != EClutchRoundPhase::OrderSelection)
+	{
+		return;
+	}
+
+	bFinishingAttackOrderSelection = true;
+	GetWorldTimerManager().ClearTimer(AttackOrderSelectionTimerHandle);
+	PrepareAttackOrderRoster();
+	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		TArray<int32> OrderedSlots;
+		ClutchState->GetTeamAttackOrderSlots(TeamIndex, OrderedSlots);
+		if (OrderedSlots.Num() == 0)
+		{
+			// A team left during the picker. Return to the normal waiting loop and
+			// show the picker again as soon as both sides are present.
+			ClutchState->SetPhase(EClutchRoundPhase::Waiting);
+			bFinishingAttackOrderSelection = false;
+			GetWorldTimerManager().SetTimer(
+				AttackOrderSelectionTimerHandle, this,
+				&AClutchGameMode::BeginAttackOrderSelection, 2.0f, false);
+			return;
+		}
+		if (!ClutchState->IsAttackOrderLocked(TeamIndex))
+		{
+			ClutchState->SetTeamAttackOrder(TeamIndex, OrderedSlots, true);
+		}
+	}
+
+	BeginNextRound();
+}
+
+
 void AClutchGameMode::BeginRound()
 {
 	if (!HasAuthority() || HasMatchEnded())
@@ -453,6 +782,7 @@ void AClutchGameMode::BeginRound()
 
 	GetWorldTimerManager().ClearTimer(PoleUnlockTimerHandle);
 	GetWorldTimerManager().ClearTimer(RoundTimeoutTimerHandle);
+	GetWorldTimerManager().ClearTimer(AttackOrderSelectionTimerHandle);
 	GetWorldTimerManager().ClearTimer(SpawnQueueTimerHandle);
 
 	EnsureClutchState();
@@ -518,15 +848,8 @@ bool AClutchGameMode::SelectRoundRoles()
 	}
 
 	TArray<int32> SlotsByTeam[2];
-	for (const FClutchRosterEntry& Entry : ClutchState->Roster)
-	{
-		if (Entry.PlayerState && Cast<AController>(Entry.PlayerState->GetOwner())
-			&& Entry.TeamIndex <= 1
-			&& Entry.RosterSlot != AClutchRoundState::UnassignedSlot)
-		{
-			SlotsByTeam[Entry.TeamIndex].AddUnique(static_cast<int32>(Entry.RosterSlot));
-		}
-	}
+	ClutchState->GetTeamAttackOrderSlots(0, SlotsByTeam[0]);
+	ClutchState->GetTeamAttackOrderSlots(1, SlotsByTeam[1]);
 
 	if (SlotsByTeam[0].Num() == 0 || SlotsByTeam[1].Num() == 0)
 	{
@@ -535,7 +858,7 @@ bool AClutchGameMode::SelectRoundRoles()
 
 	const uint8 AttackingTeam = NextAttackingTeamIndex <= 1 ? NextAttackingTeamIndex : 0;
 	const uint8 DefendingTeam = AClutchRoundState::GetDefendingTeam(AttackingTeam);
-	const int32 SelectedSlot = AClutchRoundState::SelectNextRotationSlot(
+	const int32 SelectedSlot = AClutchRoundState::SelectNextOrderedSlot(
 		SlotsByTeam[AttackingTeam], NextAttackerSlot[AttackingTeam]);
 	if (SelectedSlot == INDEX_NONE)
 	{
@@ -1151,19 +1474,17 @@ bool AClutchGameMode::ModifyDamage_Implementation(int32& Damage, FVector& Moment
 		return true;
 	}
 
-	if (IsActiveRole(AttackerState, EClutchRole::Defender)
-		&& IsActiveRole(VictimState, EClutchRole::Attacker))
+	const FClutchRosterEntry* DamageDealerEntry = ClutchState->FindEntry(AttackerState);
+	const FClutchRosterEntry* VictimEntry = ClutchState->FindEntry(VictimState);
+	Damage = DamageDealerEntry && VictimEntry
+		? AClutchRoundState::ResolveRoleDamage(
+			DamageDealerEntry->PlayerRole,
+			VictimEntry->PlayerRole,
+			DefenderDamagePerHit,
+			AttackerDamagePerHit)
+		: 0;
+	if (Damage <= 0)
 	{
-		Damage = DefenderDamagePerHit;
-	}
-	else if (IsActiveRole(AttackerState, EClutchRole::Attacker)
-		&& IsActiveRole(VictimState, EClutchRole::Defender))
-	{
-		Damage = AttackerDamagePerHit;
-	}
-	else
-	{
-		Damage = 0;
 		Momentum = FVector::ZeroVector;
 	}
 	return true;
@@ -1247,8 +1568,7 @@ bool AClutchGameMode::CanSpectate_Implementation(
 	}
 
 	const FClutchRosterEntry* TargetEntry = TargetState ? ClutchState->FindEntry(TargetState) : nullptr;
-	if (!TargetEntry || TargetEntry->PlayerStatus != EClutchStatus::Active
-		|| GetPlayerTeamIndex(ViewerState) != TargetEntry->TeamIndex)
+	if (!TargetEntry)
 	{
 		return false;
 	}
@@ -1257,7 +1577,10 @@ bool AClutchGameMode::CanSpectate_Implementation(
 	AUTCharacter* TargetCharacter = TargetController
 		? Cast<AUTCharacter>(TargetController->GetPawn())
 		: nullptr;
-	return TargetCharacter && !TargetCharacter->IsDead();
+	return AClutchRoundState::CanSpectateRosterEntry(
+		GetPlayerTeamIndex(ViewerState),
+		*TargetEntry,
+		TargetCharacter && !TargetCharacter->IsDead());
 }
 
 
@@ -1582,16 +1905,13 @@ void AClutchGameMode::UpdatePole(float DeltaSeconds)
 		bDefenderPresent |= IsActiveRole(PlayerState, EClutchRole::Defender);
 	}
 
-	float NewProgress = ClutchState->PoleProgress;
-	if (bAttackerPresent && !bDefenderPresent)
-	{
-		NewProgress += DeltaSeconds * (100.0f / FMath::Max(0.1f, PoleCaptureSeconds));
-	}
-	else if (!bAttackerPresent)
-	{
-		NewProgress -= DeltaSeconds * (100.0f / FMath::Max(0.1f, PoleDecaySeconds));
-	}
-	// Attacker + defender is contested and deliberately freezes progress.
+	const float NewProgress = AClutchRoundState::AdvancePoleProgress(
+		ClutchState->PoleProgress,
+		DeltaSeconds,
+		bAttackerPresent,
+		bDefenderPresent,
+		PoleCaptureSeconds,
+		PoleDecaySeconds);
 
 	ClutchState->SetPoleProgress(NewProgress);
 	if (NewProgress >= 100.0f)

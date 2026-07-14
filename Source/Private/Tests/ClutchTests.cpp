@@ -5,9 +5,11 @@
 #include "ClutchGameMode.h"
 #include "ClutchHUD.h"
 #include "ClutchRoundState.h"
+#include "Engine/Texture2D.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/Paths.h"
 
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -39,8 +41,12 @@ bool FClutchDefaultsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Three attacker hits"), GameMode->MaxAttackerHits, 3);
 	TestEqual(TEXT("Sixty second round"), GameMode->RoundDurationSeconds, 60.0f);
 	TestEqual(TEXT("Pole unlocks at 45 seconds"), GameMode->PoleUnlockDelaySeconds, 45.0f);
+	TestEqual(TEXT("Attack-order picker allows fifteen seconds"),
+		GameMode->AttackOrderSelectionSeconds, 15.0f);
 	TestTrue(TEXT("Round state replicates"), RoundState->GetIsReplicated());
 	TestTrue(TEXT("Round state is always relevant"), RoundState->bAlwaysRelevant);
+	TestEqual(TEXT("Attack orders begin unlocked"),
+		static_cast<int32>(RoundState->AttackOrderLockedMask), 0);
 	return true;
 }
 
@@ -147,5 +153,219 @@ bool FClutchDerivedRosterTest::RunTest(const FString& Parameters)
 	RoundState->MaxAttackerHits = SavedMaxHits;
 	return true;
 }
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClutchSpectatorRulesTest,
+	"NetcodePlus.Clutch.Rules.Spectating",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+
+bool FClutchSpectatorRulesTest::RunTest(const FString& Parameters)
+{
+	FClutchRosterEntry AliveTeammate;
+	AliveTeammate.TeamIndex = 1;
+	AliveTeammate.RosterSlot = 0;
+	AliveTeammate.PlayerRole = EClutchRole::Defender;
+	AliveTeammate.PlayerStatus = EClutchStatus::Active;
+
+	TestTrue(TEXT("Dead defender may view an alive active teammate"),
+		AClutchRoundState::CanSpectateRosterEntry(1, AliveTeammate, true));
+
+	FClutchRosterEntry SecondAliveTeammate = AliveTeammate;
+	SecondAliveTeammate.RosterSlot = 1;
+	TestTrue(TEXT("Spectator cycling may select another alive teammate"),
+		AClutchRoundState::CanSpectateRosterEntry(1, SecondAliveTeammate, true));
+
+	TestFalse(TEXT("A dead teammate is not a valid camera target"),
+		AClutchRoundState::CanSpectateRosterEntry(1, AliveTeammate, false));
+	TestFalse(TEXT("An enemy may not be spectated by a playing-team viewer"),
+		AClutchRoundState::CanSpectateRosterEntry(0, AliveTeammate, true));
+
+	FClutchRosterEntry BenchedTeammate = AliveTeammate;
+	BenchedTeammate.PlayerStatus = EClutchStatus::Benched;
+	TestFalse(TEXT("A benched teammate is not a live camera target"),
+		AClutchRoundState::CanSpectateRosterEntry(1, BenchedTeammate, true));
+
+	FClutchRosterEntry EliminatedTeammate = AliveTeammate;
+	EliminatedTeammate.PlayerStatus = EClutchStatus::Eliminated;
+	TestFalse(TEXT("An eliminated teammate is not a live camera target"),
+		AClutchRoundState::CanSpectateRosterEntry(1, EliminatedTeammate, true));
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClutchAttackOrderTest,
+	"NetcodePlus.Clutch.Rules.AttackOrder",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+
+bool FClutchAttackOrderTest::RunTest(const FString& Parameters)
+{
+	TArray<int32> EligibleSlots;
+	EligibleSlots.Add(0);
+	EligibleSlots.Add(1);
+	EligibleSlots.Add(2);
+
+	TArray<int32> ChosenOrder;
+	ChosenOrder.Add(2);
+	ChosenOrder.Add(0);
+	ChosenOrder.Add(1);
+	TestTrue(TEXT("A complete teammate permutation is accepted"),
+		AClutchRoundState::IsValidAttackOrder(EligibleSlots, ChosenOrder));
+
+	TArray<int32> DuplicateOrder;
+	DuplicateOrder.Add(2);
+	DuplicateOrder.Add(2);
+	DuplicateOrder.Add(1);
+	TestFalse(TEXT("Duplicate teammates are rejected"),
+		AClutchRoundState::IsValidAttackOrder(EligibleSlots, DuplicateOrder));
+
+	TArray<int32> MissingOrder;
+	MissingOrder.Add(2);
+	MissingOrder.Add(0);
+	TestFalse(TEXT("A missing teammate is rejected"),
+		AClutchRoundState::IsValidAttackOrder(EligibleSlots, MissingOrder));
+
+	TArray<int32> ForeignOrder;
+	ForeignOrder.Add(2);
+	ForeignOrder.Add(0);
+	ForeignOrder.Add(5);
+	TestFalse(TEXT("A foreign roster slot is rejected"),
+		AClutchRoundState::IsValidAttackOrder(EligibleSlots, ForeignOrder));
+
+	int32 Previous = INDEX_NONE;
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	TestEqual(TEXT("Chosen first attacker goes first"), Previous, 2);
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	TestEqual(TEXT("Chosen second attacker goes second"), Previous, 0);
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	TestEqual(TEXT("Chosen third attacker goes third"), Previous, 1);
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	TestEqual(TEXT("Chosen order wraps"), Previous, 2);
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClutchPoleProgressTest,
+	"NetcodePlus.Clutch.Rules.PoleProgress",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+
+bool FClutchPoleProgressTest::RunTest(const FString& Parameters)
+{
+	const float Capturing = AClutchRoundState::AdvancePoleProgress(
+		20.0f, 1.0f, true, false, 5.0f, 10.0f);
+	TestTrue(TEXT("Uncontested attacker advances the pole"),
+		FMath::IsNearlyEqual(Capturing, 40.0f));
+
+	const float Contested = AClutchRoundState::AdvancePoleProgress(
+		Capturing, 1.0f, true, true, 5.0f, 10.0f);
+	TestTrue(TEXT("Attacker and defender freeze progress"),
+		FMath::IsNearlyEqual(Contested, Capturing));
+
+	const float DefenderOnly = AClutchRoundState::AdvancePoleProgress(
+		Contested, 1.0f, false, true, 5.0f, 10.0f);
+	TestTrue(TEXT("Defender-only pole decays"),
+		FMath::IsNearlyEqual(DefenderOnly, 30.0f));
+
+	const float EmptyPole = AClutchRoundState::AdvancePoleProgress(
+		DefenderOnly, 1.0f, false, false, 5.0f, 10.0f);
+	TestTrue(TEXT("Unattended pole decays"),
+		FMath::IsNearlyEqual(EmptyPole, 20.0f));
+
+	TestTrue(TEXT("Capture clamps at one hundred"), FMath::IsNearlyEqual(
+		AClutchRoundState::AdvancePoleProgress(95.0f, 1.0f, true, false, 5.0f, 10.0f),
+		100.0f));
+	TestTrue(TEXT("Decay clamps at zero"), FMath::IsNearlyEqual(
+		AClutchRoundState::AdvancePoleProgress(5.0f, 1.0f, false, false, 5.0f, 10.0f),
+		0.0f));
+	TestTrue(TEXT("Non-positive delta does not move the pole"), FMath::IsNearlyEqual(
+		AClutchRoundState::AdvancePoleProgress(55.0f, 0.0f, true, false, 5.0f, 10.0f),
+		55.0f));
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClutchRoleDamageTest,
+	"NetcodePlus.Clutch.Rules.RoleDamage",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+
+bool FClutchRoleDamageTest::RunTest(const FString& Parameters)
+{
+	TestEqual(TEXT("Defender hit removes one attacker armor segment"),
+		AClutchRoundState::ResolveRoleDamage(
+			EClutchRole::Defender, EClutchRole::Attacker, 100, 1000),
+		100);
+	TestEqual(TEXT("Attacker hit is lethal to a defender"),
+		AClutchRoundState::ResolveRoleDamage(
+			EClutchRole::Attacker, EClutchRole::Defender, 100, 1000),
+		1000);
+	TestEqual(TEXT("Defender friendly fire is suppressed"),
+		AClutchRoundState::ResolveRoleDamage(
+			EClutchRole::Defender, EClutchRole::Defender, 100, 1000),
+		0);
+	TestEqual(TEXT("Attacker self-role damage is suppressed"),
+		AClutchRoundState::ResolveRoleDamage(
+			EClutchRole::Attacker, EClutchRole::Attacker, 100, 1000),
+		0);
+	TestEqual(TEXT("Invalid negative damage is clamped away"),
+		AClutchRoundState::ResolveRoleDamage(
+			EClutchRole::Defender, EClutchRole::Attacker, -100, 1000),
+		0);
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClutchHUDAssetsTest,
+	"NetcodePlus.Clutch.Assets.HUD",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+
+bool FClutchHUDAssetsTest::RunTest(const FString& Parameters)
+{
+	const TCHAR* const LegacyTextures[] = {
+		TEXT("clutch_attack_progress"),
+		TEXT("clutch_attack_rail_back"),
+		TEXT("clutch_attack_rail_front"),
+		TEXT("clutch_attacking"),
+		TEXT("clutch_circle"),
+		TEXT("clutch_defend_progress"),
+		TEXT("clutch_defend_rail_back"),
+		TEXT("clutch_defend_rail_front"),
+		TEXT("clutch_inner_circle"),
+		TEXT("clutch_insta"),
+		TEXT("clutch_item_placeholder"),
+		TEXT("clutch_left_gadget"),
+		TEXT("clutch_right_gadget"),
+		TEXT("clutch_rocket"),
+		TEXT("clutch_shield")
+	};
+
+	for (const TCHAR* TextureName : LegacyTextures)
+	{
+		const FString ObjectPath = FString::Printf(
+			TEXT("/NetcodePlus/Clutch/HUD/Textures/Legacy/%s.%s"),
+			TextureName, TextureName);
+		UTexture2D* Texture = LoadObject<UTexture2D>(nullptr, *ObjectPath);
+		TestNotNull(FString::Printf(TEXT("Plugin HUD texture loads: %s"), TextureName), Texture);
+	}
+
+	const TCHAR* const ResourceFiles[] = {
+		TEXT("hud_top_bottom2.png"),
+		TEXT("hud_bottom.png"),
+		TEXT("hud_bottom_Blue.png")
+	};
+	const FString GamePluginsDir = FPaths::GamePluginsDir();
+	const FString ResourceDir = FPaths::Combine(
+		*GamePluginsDir, TEXT("NetcodePlus/Resources/ClutchHUD"));
+	for (const TCHAR* FileName : ResourceFiles)
+	{
+		const FString FilePath = FPaths::Combine(*ResourceDir, FileName);
+		TestTrue(FString::Printf(TEXT("Recovered HUD resource exists: %s"), FileName),
+			FPaths::FileExists(FilePath));
+	}
+	return true;
+}
+
 
 #endif // WITH_DEV_AUTOMATION_TESTS
