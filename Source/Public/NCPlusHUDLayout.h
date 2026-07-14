@@ -226,6 +226,17 @@ struct FNCPlusHUDLayout
 	 *  Call ONLY from an explicit user toggle (see WantsStockTeamPanel). */
 	static void SetStockTeamPanel(bool bStock);
 
+	/** Faithful Elimination 113 artwork/layout inside the stock top-left team panel.
+	 *  This is a nested presentation choice: it has no effect while StockTeamPanel is
+	 *  false. [NetcodePlus] AbsoluteElimTeamPanel in Mod.ini; new profiles default on,
+	 *  while existing profiles without this key retain the procedural stock panel. */
+	static bool WantsAbsoluteElimTeamPanel();
+
+	/** Persist + refresh-cache the Absolute Elim presentation choice. Enabling it also
+	 *  enables StockTeamPanel so an externally-written config cannot select an invisible
+	 *  sub-style. Disabling StockTeamPanel does not clear this remembered choice. */
+	static void SetAbsoluteElimTeamPanel(bool bAbsolute);
+
 	/** Background opacity for the NCPlus scoreboards (ElimPlus/Wipeout), 0.05..1.0.
 	 *  [NetcodePlus] ScoreboardOpacity in Mod.ini; default 0.3 (the prior hard-coded
 	 *  value). Cached; SetScoreboardOpacity refreshes it. */
@@ -422,6 +433,13 @@ namespace NCPlusHUDDrawCall
 	 *  place of the portrait strip. Honors the `team_panel` alias (pos/scale/opacity/
 	 *  hide). Canvas passed by caller (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
+
+	/** Recovered Elimination 113 top-left living-player panel. Uses the original fixed
+	 *  red artwork (and a fixed 240-degree blue variant), score hexes, name plates, and
+	 *  health/armor icons. Honors the shared `team_panel` alias except Team Color, which
+	 *  is intentionally unavailable for this pixel-authentic presentation. Falls back
+	 *  to DrawStockTeamPanel if the loose plugin PNG resources are unavailable. */
+	NETCODEPLUS_API void DrawAbsoluteElimTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
 
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).

@@ -20,6 +20,7 @@
 #include "UTMutator.h"              // IsInstagibMatch: replicated MutInstagibNCP walk
 #include "CTFStatsReplicator.h"     // IsInstagibMatch: replicated bIsInstagibMatch fallback
 #include "Engine/Canvas.h"
+#include "Engine/Texture2D.h"
 #include "CanvasItem.h"
 #include "SceneInterface.h"
 #include "SceneView.h"
@@ -34,6 +35,9 @@
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Interfaces/IImageWrapper.h"
+#include "Interfaces/IImageWrapperModule.h"
+#include "Modules/ModuleManager.h"
 
 // =============================================================================
 // Anchor conversions
@@ -600,6 +604,12 @@ void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
 
 // Cached so the per-frame DrawHUD call never hits FileExists. -1 = unresolved.
 static int8 GStockTeamPanelCache = -1;
+static int8 GAbsoluteElimTeamPanelCache = -1;
+
+static bool NCPlusConfigBool(const FString& Value)
+{
+	return Value.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Value.Equals(TEXT("1"));
+}
 
 bool FNCPlusHUDLayout::WantsStockTeamPanel()
 {
@@ -613,7 +623,14 @@ bool FNCPlusHUDLayout::WantsStockTeamPanel()
 	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), Val, ModIni) && !Val.IsEmpty())
 	{
 		// Explicit choice in Mod.ini wins (written by the editor toggle).
-		bResult = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
+		bResult = NCPlusConfigBool(Val);
+	}
+	else if (WantsAbsoluteElimTeamPanel())
+	{
+		// A fresh profile selects the nested Absolute style by default, which implies
+		// that the outer team-panel family is active. The first-run seed persists both
+		// choices so creating HUDLayout.json cannot change this on the next launch.
+		bResult = true;
 	}
 	else
 	{
@@ -637,6 +654,58 @@ void FNCPlusHUDLayout::SetStockTeamPanel(bool bStock)
 	// Refresh the cache so the change applies on the very next DrawHUD frame
 	// (the panel draws directly from this value — no widget swap needed).
 	GStockTeamPanelCache = bStock ? 1 : 0;
+}
+
+bool FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
+{
+	if (GAbsoluteElimTeamPanelCache >= 0)
+	{
+		return GAbsoluteElimTeamPanelCache != 0;
+	}
+
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString AbsoluteVal;
+	bool bResult = false;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("AbsoluteElimTeamPanel"), AbsoluteVal, ModIni)
+		&& !AbsoluteVal.IsEmpty())
+	{
+		bResult = NCPlusConfigBool(AbsoluteVal);
+	}
+	else
+	{
+		// A legacy explicit StockTeamPanel key proves this is an existing profile;
+		// preserve the procedural panel until the user opts into Absolute. Likewise,
+		// an existing unified/legacy layout belongs to an established user whose HUD
+		// must not change during an update. Only a truly empty profile defaults on.
+		FString LegacyStockVal;
+		const bool bHasLegacyStockChoice = GConfig
+			&& GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), LegacyStockVal, ModIni)
+			&& !LegacyStockVal.IsEmpty();
+		const FString LegacyLayoutPath = FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
+		bResult = !bHasLegacyStockChoice
+			&& !FPaths::FileExists(GetDefaultLayoutPath())
+			&& !FPaths::FileExists(LegacyLayoutPath);
+	}
+
+	GAbsoluteElimTeamPanelCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetAbsoluteElimTeamPanel(bool bAbsolute)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("AbsoluteElimTeamPanel"),
+			bAbsolute ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GAbsoluteElimTeamPanelCache = bAbsolute ? 1 : 0;
+
+	if (bAbsolute)
+	{
+		SetStockTeamPanel(true);
+	}
 }
 
 static float GScoreboardOpacityCache = -1.f;
@@ -1040,6 +1109,13 @@ namespace NCPlusHUDAliases
 
 	FVector2D GetStockOffset(FName Alias)
 	{
+		// The recovered Elim panel's design-space origin is (-2, 8). Make the
+		// editor's displayed/reset value agree with the renderer only while that
+		// nested style is active; the existing procedural panel keeps (16, 12).
+		if (Alias == TEXT("team_panel") && FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel())
+		{
+			return FVector2D(-2.f, 8.f);
+		}
 		for (const FAliasEntry& E : GetAliasTable())
 		{
 			if (E.Alias == Alias) return E.StockOffset;
@@ -1442,6 +1518,327 @@ namespace NCPlusHUDDrawCall
 
 		Canvas->SetLinearDrawColor(FLinearColor(TintColor.R, TintColor.G, TintColor.B, Alpha));
 		Canvas->DrawTile(Canvas->DefaultTexture, 0.f, 0.f, Canvas->ClipX, Canvas->ClipY, 0.f, 0.f, 1.f, 1.f, BLEND_Translucent);
+	}
+
+	// =============================================================================
+	// Absolute Elim 1.13 team panel — recovered top-left artwork/layout
+	// =============================================================================
+	//
+	// The original package supplied red plates and produced blue with a material hue
+	// shift. The recovered PNGs are loaded directly from the plugin Resources folder;
+	// the fixed blue copies are produced once by swapping red/blue channels during
+	// decode. This deliberately ignores custom team colors, matching Elim 1.13.
+	namespace
+	{
+		struct FAbsoluteElimTextures
+		{
+			bool bTriedLoad = false;
+			UTexture2D* NameBackground[2] = { nullptr, nullptr };
+			UTexture2D* NameBorder[2] = { nullptr, nullptr };
+			UTexture2D* ScoreBackground[2] = { nullptr, nullptr };
+			UTexture2D* ScoreBorder[2] = { nullptr, nullptr };
+			UTexture2D* HealthIcon = nullptr;
+			UTexture2D* ArmorIcon = nullptr;
+		};
+
+		FAbsoluteElimTextures GAbsoluteElimTextures;
+
+		UTexture2D* LoadAbsoluteElimTexture(const TCHAR* RelativePath, bool bBlueVariant)
+		{
+#if !UE_SERVER
+			const FString FilePath = FPaths::Combine(
+				*FPaths::GamePluginsDir(),
+				TEXT("NetcodePlus/Resources/AbsoluteElimHUD"),
+				RelativePath);
+			TArray<uint8> CompressedData;
+			if (!FFileHelper::LoadFileToArray(CompressedData, *FilePath)
+				|| CompressedData.Num() == 0)
+			{
+				return nullptr;
+			}
+
+			IImageWrapperModule& ImageWrapperModule =
+				FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+			IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+			const TArray<uint8>* RawData = nullptr;
+			if (!ImageWrapper.IsValid()
+				|| !ImageWrapper->SetCompressed(CompressedData.GetData(), CompressedData.Num())
+				|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData)
+				|| !RawData)
+			{
+				return nullptr;
+			}
+
+			const int32 Width = ImageWrapper->GetWidth();
+			const int32 Height = ImageWrapper->GetHeight();
+			if (Width <= 0 || Height <= 0 || RawData->Num() != Width * Height * 4)
+			{
+				return nullptr;
+			}
+
+			TArray<uint8> Pixels = *RawData;
+			if (bBlueVariant)
+			{
+				// BGRA: exchanging B and R reproduces the original fixed red -> blue
+				// material treatment while preserving highlights and alpha.
+				for (int32 Pixel = 0; Pixel < Pixels.Num(); Pixel += 4)
+				{
+					Swap(Pixels[Pixel], Pixels[Pixel + 2]);
+				}
+			}
+
+			UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
+			if (!Texture || !Texture->PlatformData || Texture->PlatformData->Mips.Num() == 0)
+			{
+				return nullptr;
+			}
+
+			Texture->SRGB = true;
+			Texture->NeverStream = true;
+			FTexture2DMipMap& Mip = Texture->PlatformData->Mips[0];
+			void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
+			FMemory::Memcpy(TextureData, Pixels.GetData(), Pixels.Num());
+			Mip.BulkData.Unlock();
+			Texture->UpdateResource();
+			// The cache is not a UObject owner, so explicitly retain these six tiny
+			// session-lifetime textures across garbage collection.
+			Texture->AddToRoot();
+			return Texture;
+#else
+			return nullptr;
+#endif
+		}
+
+		bool EnsureAbsoluteElimTextures()
+		{
+			FAbsoluteElimTextures& T = GAbsoluteElimTextures;
+			if (!T.bTriedLoad)
+			{
+				T.bTriedLoad = true;
+				for (int32 Team = 0; Team < 2; ++Team)
+				{
+					const bool bBlue = (Team == 1);
+					T.NameBackground[Team] = LoadAbsoluteElimTexture(TEXT("UI-NamePlate-RED-Background.png"), bBlue);
+					T.NameBorder[Team] = LoadAbsoluteElimTexture(TEXT("UI-NamePlate-RED-Border.png"), bBlue);
+					T.ScoreBackground[Team] = LoadAbsoluteElimTexture(TEXT("UI-TeamScore-RED-Background.png"), bBlue);
+					T.ScoreBorder[Team] = LoadAbsoluteElimTexture(TEXT("UI-TeamScore-RED-Border.png"), bBlue);
+				}
+				T.HealthIcon = LoadAbsoluteElimTexture(TEXT("ALTSTEXHealthIcon.png"), false);
+				T.ArmorIcon = LoadAbsoluteElimTexture(TEXT("ALTSTEXArmorIcon.png"), false);
+			}
+
+			return T.NameBackground[0] && T.NameBackground[1]
+				&& T.NameBorder[0] && T.NameBorder[1]
+				&& T.ScoreBackground[0] && T.ScoreBackground[1]
+				&& T.ScoreBorder[0] && T.ScoreBorder[1]
+				&& T.HealthIcon && T.ArmorIcon;
+		}
+
+		void DrawAbsoluteElimTile(UCanvas* Canvas, UTexture2D* Texture,
+			float X, float Y, float Width, float Height, float Opacity)
+		{
+			if (!Canvas || !Texture) return;
+			Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, Opacity));
+			Canvas->DrawTile(Texture, X, Y, Width, Height,
+				0.f, 0.f, float(Texture->GetSizeX()), float(Texture->GetSizeY()), BLEND_Translucent);
+		}
+	}
+
+	void DrawAbsoluteElimTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (!HUD || !Canvas || IsHidden(TEXT("team_panel"))) return;
+
+		UWorld* World = HUD->GetWorld();
+		AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+		if (!GS) return;
+
+		// Missing loose resources should never make the HUD unusable. Fall back to
+		// the procedural stock panel and keep the score/clock path intact.
+		if (!EnsureAbsoluteElimTextures())
+		{
+			DrawStockTeamPanel(HUD, Canvas);
+			return;
+		}
+
+		UFont* NameFont = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD, HUD->SmallFont);
+		if (!NameFont) NameFont = HUD->SmallFont;
+		UFont* StatFont = NameFont;
+		UFont* ScoreFont = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD,
+			HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont);
+		if (!ScoreFont) ScoreFont = HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont;
+		if (!NameFont || !ScoreFont) return;
+
+		uint8 MyTeam = 255;
+		bool bTrueSpectator = false;
+		bool bRevealAllVitals = (GS->GetMatchState() != MatchState::InProgress);
+		if (HUD->UTPlayerOwner)
+		{
+			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
+			{
+				MyTeam = MyPS->GetTeamNum();
+				bTrueSpectator = MyPS->bOnlySpectator;
+				bRevealAllVitals |= bTrueSpectator;
+			}
+		}
+
+		// Elim 1.13 authored this widget at 2560x1440. Preserve its proportions on
+		// other aspect ratios; the ordinary team_panel position/scale/opacity/hide
+		// controls still apply to the complete recovered layout.
+		const float ReferenceScale = FMath::Min(
+			float(Canvas->SizeX) / 2560.f,
+			float(Canvas->SizeY) / 1440.f);
+		const float PanelScale = GetScale(TEXT("team_panel"));
+		const float S = FMath::Max(0.2f, ReferenceScale * PanelScale);
+		const float Op = FMath::Clamp(GetOpacity(TEXT("team_panel")), 0.f, 1.f);
+		const FVector2D Origin = ResolveScreenPos(TEXT("team_panel"), Canvas,
+			FVector2D(-2.f * ReferenceScale, 8.f * ReferenceScale));
+
+		const float ScoreW = 90.f * S;
+		const float ScoreH = 90.f * S;
+		const float BarW = 210.f * S;
+		const float BarH = 70.f * S;
+		const float BarStart = 66.f * S;       // 90 - recovered 24 px overlap
+		const float BarPitch = 181.f * S;      // 210 - recovered 29 px overlap
+		const float TeamPitch = 76.f * S;      // 90 - recovered 14 px overlap
+		const float BarYOffset = 10.f * S;     // center 70 px bar on 90 px score plate
+		const float IconSize = 12.f * S;
+
+		const float FontExtra = NCPlusHUDFonts::ResolveScale(TEXT("team_panel"), 1.f);
+		const float NameScale = 0.56f * S * FontExtra;
+		const float StatScale = 0.56f * S * FontExtra;
+		const float ScoreScale = 0.87f * S * FontExtra;
+
+		int32 TeamOrder[2] = { 0, 1 };
+		if (!bTrueSpectator && MyTeam < 2)
+		{
+			TeamOrder[0] = MyTeam;
+			TeamOrder[1] = MyTeam ^ 1;
+		}
+
+		FAbsoluteElimTextures& T = GAbsoluteElimTextures;
+		for (int32 Row = 0; Row < 2; ++Row)
+		{
+			const int32 TeamIdx = TeamOrder[Row];
+			const float RowY = Origin.Y + Row * TeamPitch;
+
+			DrawAbsoluteElimTile(Canvas, T.ScoreBackground[TeamIdx],
+				Origin.X, RowY, ScoreW, ScoreH, Op);
+			DrawAbsoluteElimTile(Canvas, T.ScoreBorder[TeamIdx],
+				Origin.X, RowY, ScoreW, ScoreH, Op);
+
+			const int32 TeamScore = (GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx])
+				? GS->Teams[TeamIdx]->Score : 0;
+			const FString ScoreString = FString::Printf(TEXT("%d"), TeamScore);
+			float ScoreXL = 0.f, ScoreYL = 0.f;
+			Canvas->StrLen(ScoreFont, ScoreString, ScoreXL, ScoreYL);
+			DrawOutlinedText(Canvas, ScoreFont, FText::FromString(ScoreString),
+				Origin.X + (ScoreW - ScoreXL * ScoreScale) * 0.5f,
+				RowY + (ScoreH - ScoreYL * ScoreScale) * 0.5f,
+				ScoreScale, FLinearColor::White, FLinearColor::Black, Op);
+
+			float BarX = Origin.X + BarStart;
+			for (APlayerState* PSBase : GS->PlayerArray)
+			{
+				AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+				if (!PS || PS->bOnlySpectator || PS->bIsInactive || PS->GetTeamNum() != TeamIdx) continue;
+
+				AUTCharacter* UTC = nullptr;
+				if (AController* Ctrl = Cast<AController>(PS->GetOwner()))
+				{
+					UTC = Cast<AUTCharacter>(Ctrl->GetPawn());
+				}
+				else
+				{
+					UTC = PS->GetUTCharacter();
+				}
+				if (!UTC || UTC->IsDead()) continue;
+
+				const float BarY = RowY + BarYOffset;
+				DrawAbsoluteElimTile(Canvas, T.NameBackground[TeamIdx],
+					BarX, BarY, BarW, BarH, Op);
+				DrawAbsoluteElimTile(Canvas, T.NameBorder[TeamIdx],
+					BarX, BarY, BarW, BarH, Op);
+
+				const bool bShowVitals = (TeamIdx == MyTeam) || bRevealAllVitals;
+				FText NameText;
+				float NameXL = 0.f, NameYL = 0.f;
+				ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName,
+					BarW - 14.f * S, NameScale, NameText, NameXL, NameYL);
+				// Center by the measured glyph height instead of using a fixed top edge.
+				// The recovered plate has distinct upper-name and lower-vitals lanes.
+				const float NameCenterY = BarY + (bShowVitals ? 18.f : 35.f) * S;
+				const float NameY = NameCenterY - NameYL * NameScale * 0.5f;
+				DrawOutlinedText(Canvas, NameFont, NameText,
+					BarX + (BarW - NameXL * NameScale) * 0.5f, NameY,
+					NameScale, FLinearColor::White, FLinearColor::Black, Op);
+
+				if (bShowVitals)
+				{
+					const FString HealthString = FString::Printf(TEXT("%d"), UTC->Health);
+					const FString ArmorString = FString::Printf(TEXT("%d"), UTC->GetArmorAmount());
+					float HealthXL = 0.f, HealthYL = 0.f, ArmorXL = 0.f, ArmorYL = 0.f;
+					Canvas->StrLen(StatFont, HealthString, HealthXL, HealthYL);
+					Canvas->StrLen(StatFont, ArmorString, ArmorXL, ArmorYL);
+
+					const float Gap = 3.f * S;
+					const float MiddleGap = 8.f * S;
+					const float TotalW = IconSize + Gap + HealthXL * StatScale
+						+ MiddleGap + ArmorXL * StatScale + Gap + IconSize;
+					const float GroupX = BarX + (BarW - TotalW) * 0.5f;
+					const float StatCenterY = BarY + 50.f * S;
+					const float StatY = StatCenterY - HealthYL * StatScale * 0.5f;
+
+					DrawAbsoluteElimTile(Canvas, T.HealthIcon, GroupX,
+						StatCenterY - IconSize * 0.5f, IconSize, IconSize, Op);
+					const float HealthX = GroupX + IconSize + Gap;
+					DrawOutlinedText(Canvas, StatFont, FText::FromString(HealthString),
+						HealthX, StatY, StatScale,
+						FLinearColor(0.09672f, 0.93f, 0.0372f, 1.f), FLinearColor::Black, Op);
+					const float ArmorX = HealthX + HealthXL * StatScale + MiddleGap;
+					DrawOutlinedText(Canvas, StatFont, FText::FromString(ArmorString),
+						ArmorX, StatCenterY - ArmorYL * StatScale * 0.5f, StatScale,
+						FLinearColor(0.7f, 0.578083f, 0.035f, 1.f), FLinearColor::Black, Op);
+					DrawAbsoluteElimTile(Canvas, T.ArmorIcon,
+						ArmorX + ArmorXL * StatScale + Gap,
+						StatCenterY - IconSize * 0.5f, IconSize, IconSize, Op);
+				}
+
+				BarX += BarPitch;
+			}
+		}
+
+		// The center scorebar is hidden while either top-left roster is active, so
+		// retain its round clock beneath the recovered score plates.
+		int32 RoundTime = -1;
+		static UClass* CachedClockClass = nullptr;
+		static UIntProperty* CachedClockProperty = nullptr;
+		UClass* GSClass = GS->GetClass();
+		if (CachedClockClass != GSClass)
+		{
+			CachedClockClass = GSClass;
+			CachedClockProperty = FindField<UIntProperty>(GSClass, TEXT("RoundSecondsRemaining"));
+		}
+		if (CachedClockProperty)
+		{
+			RoundTime = CachedClockProperty->GetPropertyValue_InContainer(GS);
+		}
+		if (RoundTime >= 0)
+		{
+			const FString ClockString = FString::Printf(TEXT("%02d:%02d"), RoundTime / 60, RoundTime % 60);
+			float ClockXL = 0.f, ClockYL = 0.f;
+			Canvas->StrLen(ScoreFont, ClockString, ClockXL, ClockYL);
+			const float ClockScale = 0.64f * S * FontExtra;
+			const float ClockCenterX = Origin.X + ScoreW * 0.5f;
+			const float ClockCenterY = Origin.Y + TeamPitch + ScoreH + 17.f * S;
+			const FLinearColor ClockColor = (RoundTime <= 30)
+				? FLinearColor(1.f, 0.24f, 0.24f, 1.f) : FLinearColor::White;
+			DrawOutlinedText(Canvas, ScoreFont, FText::FromString(ClockString),
+				ClockCenterX - ClockXL * ClockScale * 0.5f,
+				ClockCenterY - ClockYL * ClockScale * 0.5f,
+				ClockScale, ClockColor, FLinearColor::Black, Op);
+		}
+
+		Canvas->SetLinearDrawColor(FLinearColor::White);
 	}
 
 	// =============================================================================
@@ -2339,6 +2736,24 @@ void FNCPlusHUDLayout::ReloadLive()
 	// (NCPlusHUDPresets::GetCurated()[0] = "Stock") so new players get the
 	// familiar stock-style layout (default UT font). On first Save,
 	// the seeded layout is written to NewPath.
+	//
+	// Absolute Elim is the presentation default only for a genuinely new profile.
+	// Persist both nested choices now: without explicit keys, saving HUDLayout.json
+	// would make the old file-existence fallback select portraits next launch.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString ExistingStockChoice;
+	FString ExistingAbsoluteChoice;
+	const bool bHasStockChoice = GConfig
+		&& GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), ExistingStockChoice, ModIni)
+		&& !ExistingStockChoice.IsEmpty();
+	const bool bHasAbsoluteChoice = GConfig
+		&& GConfig->GetString(TEXT("NetcodePlus"), TEXT("AbsoluteElimTeamPanel"), ExistingAbsoluteChoice, ModIni)
+		&& !ExistingAbsoluteChoice.IsEmpty();
+	if (!bHasStockChoice && !bHasAbsoluteChoice)
+	{
+		SetStockTeamPanel(true);
+		SetAbsoluteElimTeamPanel(true);
+	}
 	const TArray<FNCPlusHUDPreset>& Curated = NCPlusHUDPresets::GetCurated();
 	if (Curated.Num() > 0)
 	{

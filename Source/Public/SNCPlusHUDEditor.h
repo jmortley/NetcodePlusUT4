@@ -174,6 +174,10 @@ private:
 	// Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
 	ECheckBoxState GetStockTeamPanelState() const;
 	void OnStockTeamPanelChanged(ECheckBoxState NewState);
+	EVisibility GetAbsoluteElimTeamPanelVisibility() const;
+	ECheckBoxState GetAbsoluteElimTeamPanelState() const;
+	void OnAbsoluteElimTeamPanelChanged(ECheckBoxState NewState);
+	bool IsTeamColorControlEnabled(FName Alias) const;
 
 	// Scoreboard background opacity (0.05..1.0). Global; persists [NetcodePlus] ScoreboardOpacity.
 	TOptional<float> GetScoreboardOpacityValue() const;

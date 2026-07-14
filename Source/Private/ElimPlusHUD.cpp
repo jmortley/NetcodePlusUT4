@@ -409,13 +409,20 @@ void AElimPlusHUD::DrawHUD()
 
 		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 
-		// Stock team panel (top-left roster) replaces the portrait strip when the
-		// user opts in (default for fresh installs). Same teammate HP/alive data,
-		// different presentation. Score/KDA below still draws in both modes.
+		// A top-left team panel replaces the portrait strip when the user opts in.
+		// Fresh installs use the recovered Absolute Elim 1.13 artwork; existing
+		// users keep their prior procedural-stock/portrait choice.
 		const bool bStockTeamPanel = FNCPlusHUDLayout::WantsStockTeamPanel();
 		if (bStockTeamPanel)
 		{
-			NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
+			if (FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel())
+			{
+				NCPlusHUDDrawCall::DrawAbsoluteElimTeamPanel(this, Canvas);
+			}
+			else
+			{
+				NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
+			}
 		}
 		else
 		{

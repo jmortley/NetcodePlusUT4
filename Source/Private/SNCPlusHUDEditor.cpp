@@ -441,6 +441,31 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
 			]
 		]
+		// Nested presentation choice for the ElimPlus stock team panel. Collapsed
+		// with the outer toggle off so the hierarchy reads as one control family.
+		+ SVerticalBox::Slot().AutoHeight().Padding(24,4,0,0)
+		[
+			SNew(SVerticalBox)
+			.Visibility(this, &SNCPlusHUDEditor::GetAbsoluteElimTeamPanelVisibility)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SCheckBox)
+				.IsChecked(this, &SNCPlusHUDEditor::GetAbsoluteElimTeamPanelState)
+				.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnAbsoluteElimTeamPanelChanged)
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Absolute Elim 113 layout")))
+					.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(22,2,0,0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Uses the original fixed red/blue plates; custom Team Color is unavailable.")))
+				.ColorAndOpacity(FLinearColor(0.62f, 0.62f, 0.62f, 1.f))
+			]
+		]
 		// Scoreboard background opacity (0.05..1.0). Global across the NCPlus scoreboards.
 		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
 		[
@@ -480,6 +505,7 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 	if (Row.bHasTeamColorToggle)
 	{
 		TeamColorSlot = SNew(SCheckBox)
+			.IsEnabled(this, &SNCPlusHUDEditor::IsTeamColorControlEnabled, Alias)
 			.IsChecked(this, &SNCPlusHUDEditor::GetTeamColorState, Alias)
 			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnTeamColorChanged, Alias)
 			.Content()
@@ -963,6 +989,31 @@ void SNCPlusHUDEditor::OnStockTeamPanelChanged(ECheckBoxState NewState)
 	// no widget swap needed.
 	FNCPlusHUDLayout::SetStockTeamPanel(bStock);
 	SetStatus(bStock ? TEXT("Team display: Stock roster (applies now).") : TEXT("Team display: Portraits (applies now)."));
+}
+
+EVisibility SNCPlusHUDEditor::GetAbsoluteElimTeamPanelVisibility() const
+{
+	return FNCPlusHUDLayout::WantsStockTeamPanel() ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetAbsoluteElimTeamPanelState() const
+{
+	return FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
+		? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnAbsoluteElimTeamPanelChanged(ECheckBoxState NewState)
+{
+	const bool bAbsolute = (NewState == ECheckBoxState::Checked);
+	FNCPlusHUDLayout::SetAbsoluteElimTeamPanel(bAbsolute);
+	SetStatus(bAbsolute
+		? TEXT("Team display: Absolute Elim 113 (fixed red/blue, applies now).")
+		: TEXT("Team display: NCPlus stock roster (applies now)."));
+}
+
+bool SNCPlusHUDEditor::IsTeamColorControlEnabled(FName Alias) const
+{
+	return Alias != TEXT("team_panel") || !FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel();
 }
 
 TOptional<float> SNCPlusHUDEditor::GetScoreboardOpacityValue() const
