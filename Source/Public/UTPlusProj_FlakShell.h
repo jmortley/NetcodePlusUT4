@@ -23,4 +23,16 @@ public:
 
 	virtual void ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp,
 		const FVector& HitLocation, const FVector& HitNormal) override;
+
+	// Server-first explosion visual (mirrors AUTPlusProj_Rocket): when the replicated real
+	// resolves before its visible fake, drive the fake to play the authoritative explosion at
+	// truth instead of vanishing mid-air. No soft-sync — the shell arcs under gravity, which the
+	// rocket's straight-line phase correction does not model (and is gated off for it anyway).
+	virtual void Explode_Implementation(const FVector& HitLocation, const FVector& HitNormal,
+		UPrimitiveComponent* HitComp = nullptr) override;
+	virtual void ShutDown() override;
+
+private:
+	// Re-entrancy guard for the ShutDown->Explode fallback (see .cpp).
+	bool bForcingShutdownExplosion;
 };
