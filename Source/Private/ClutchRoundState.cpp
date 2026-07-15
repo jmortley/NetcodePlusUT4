@@ -334,7 +334,7 @@ bool AClutchRoundState::IsPlayerAttackOrderSelector(AUTPlayerState* PlayerState)
 
 
 void AClutchRoundState::GetTeamAttackOrderSlots(
-	uint8 TeamIndex, TArray<int32>& OutSlots) const
+	uint8 TeamIndex, TArray<int32>& OutSlots, bool bIncludeDisconnected) const
 {
 	OutSlots.Reset();
 	if (TeamIndex > 1)
@@ -342,13 +342,26 @@ void AClutchRoundState::GetTeamAttackOrderSlots(
 		return;
 	}
 
+	// A live entry is a connected player. A disconnected entry keeps its preserved
+	// TeamIndex/RosterSlot/AttackOrderIndex (see DetachPlayer) and is only counted when
+	// the caller wants the full rotation order — used to advance past a departed
+	// previous attacker without collapsing the sequence back to the front.
+	auto EntryCounts = [bIncludeDisconnected](const FClutchRosterEntry& Entry) -> bool
+	{
+		const bool bLive = Entry.PlayerState != nullptr
+			&& Entry.PlayerStatus != EClutchStatus::Disconnected;
+		const bool bReserved = bIncludeDisconnected
+			&& Entry.PlayerStatus == EClutchStatus::Disconnected;
+		return bLive || bReserved;
+	};
+
 	// First honor every assigned order index. The second pass appends a newly
 	// joined or otherwise unassigned player in stable roster-slot order.
 	for (int32 OrderIndex = 0; OrderIndex < 6; ++OrderIndex)
 	{
 		for (const FClutchRosterEntry& Entry : Roster)
 		{
-			if (Entry.PlayerState && Entry.PlayerStatus != EClutchStatus::Disconnected
+			if (EntryCounts(Entry)
 				&& Entry.TeamIndex == TeamIndex
 				&& Entry.RosterSlot != UnassignedSlot
 				&& Entry.AttackOrderIndex == OrderIndex)
@@ -362,7 +375,7 @@ void AClutchRoundState::GetTeamAttackOrderSlots(
 	{
 		for (const FClutchRosterEntry& Entry : Roster)
 		{
-			if (Entry.PlayerState && Entry.PlayerStatus != EClutchStatus::Disconnected
+			if (EntryCounts(Entry)
 				&& Entry.TeamIndex == TeamIndex
 				&& Entry.RosterSlot == RosterSlot)
 			{
@@ -872,25 +885,42 @@ bool AClutchRoundState::IsValidAttackOrder(
 
 
 int32 AClutchRoundState::SelectNextOrderedSlot(
-	const TArray<int32>& OrderedSlots, int32 PreviousSlot)
+	const TArray<int32>& FullOrder, const TArray<int32>& ConnectedSlots, int32 PreviousSlot)
 {
-	TArray<int32> SanitizedSlots;
-	for (int32 Slot : OrderedSlots)
+	TArray<int32> Order;
+	for (int32 Slot : FullOrder)
 	{
 		if (Slot >= 0)
 		{
-			SanitizedSlots.AddUnique(Slot);
+			Order.AddUnique(Slot);
 		}
 	}
-	if (SanitizedSlots.Num() == 0)
+	if (Order.Num() == 0 || ConnectedSlots.Num() == 0)
 	{
 		return INDEX_NONE;
 	}
 
-	const int32 PreviousIndex = SanitizedSlots.Find(PreviousSlot);
-	return PreviousIndex == INDEX_NONE
-		? SanitizedSlots[0]
-		: SanitizedSlots[(PreviousIndex + 1) % SanitizedSlots.Num()];
+	// Anchor on the previous attacker's position within the FULL order. Because a
+	// disconnected previous attacker's slot is preserved there, it is still found and
+	// we advance to the next teammate rather than resetting to the front. When it is
+	// absent (first selection, or a slot never assigned), start just before the front
+	// so the earliest connected slot in order is chosen. Walk forward, skipping any
+	// disconnected slots, and return the first slot that is still connected.
+	const int32 PreviousIndex = Order.Find(PreviousSlot);
+	const int32 Anchor = (PreviousIndex == INDEX_NONE) ? -1 : PreviousIndex;
+	const int32 Count = Order.Num();
+	for (int32 Step = 1; Step <= Count; ++Step)
+	{
+		const int32 Candidate = Order[(Anchor + Step) % Count];
+		if (ConnectedSlots.Contains(Candidate))
+		{
+			return Candidate;
+		}
+	}
+
+	// No connected slot appears in FullOrder (defensive — connected slots are normally
+	// all present). Fall back to the first supplied connected slot.
+	return ConnectedSlots[0];
 }
 
 

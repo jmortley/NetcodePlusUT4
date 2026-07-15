@@ -230,8 +230,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Clutch|Order")
 	bool IsPlayerAttackOrderSelector(AUTPlayerState* PlayerState) const;
 
-	/** Returns connected team roster slots in the replicated selected order. */
-	void GetTeamAttackOrderSlots(uint8 TeamIndex, TArray<int32>& OutSlots) const;
+	/** Returns team roster slots in the replicated selected order. By default only
+	 *  connected slots are returned; pass bIncludeDisconnected to also include slots
+	 *  whose player has dropped (DetachPlayer preserves their slot/order position),
+	 *  which the rotation uses to advance past a departed previous attacker. */
+	void GetTeamAttackOrderSlots(uint8 TeamIndex, TArray<int32>& OutSlots,
+		bool bIncludeDisconnected = false) const;
 
 	// ---------------------------------------------------------------------
 	// Authority-only mutation API
@@ -278,9 +282,13 @@ public:
 	static bool IsValidAttackOrder(const TArray<int32>& EligibleSlots,
 		const TArray<int32>& ProposedSlots);
 
-	/** Returns the entry after PreviousSlot while preserving the supplied order. */
-	static int32 SelectNextOrderedSlot(const TArray<int32>& OrderedSlots,
-		int32 PreviousSlot);
+	/** Advances the attack rotation. FullOrder is the team order by AttackOrderIndex and
+	 *  may still contain a disconnected previous attacker (their slot is preserved on
+	 *  detach); returns the first slot after PreviousSlot that is still present in
+	 *  ConnectedSlots, wrapping once. Keeps a mid-match drop of the previous attacker
+	 *  from resetting the sequence to the front and skipping the next teammate. */
+	static int32 SelectNextOrderedSlot(const TArray<int32>& FullOrder,
+		const TArray<int32>& ConnectedSlots, int32 PreviousSlot);
 
 	/** Maps a valid two-team attacker index to the defending team; otherwise 255. */
 	static uint8 GetDefendingTeam(uint8 InAttackingTeamIndex);

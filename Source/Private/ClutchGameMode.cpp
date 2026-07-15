@@ -911,8 +911,16 @@ bool AClutchGameMode::SelectRoundRoles()
 
 	const uint8 AttackingTeam = NextAttackingTeamIndex <= 1 ? NextAttackingTeamIndex : 0;
 	const uint8 DefendingTeam = AClutchRoundState::GetDefendingTeam(AttackingTeam);
+
+	// Advance the rotation across the FULL locked order (including a slot whose player
+	// just disconnected — DetachPlayer keeps its order position), so a mid-match drop of
+	// the previous attacker advances to the next teammate instead of resetting the
+	// sequence to the front. SlotsByTeam holds the currently connected slots.
+	TArray<int32> AttackingFullOrder;
+	ClutchState->GetTeamAttackOrderSlots(
+		AttackingTeam, AttackingFullOrder, /*bIncludeDisconnected*/ true);
 	const int32 SelectedSlot = AClutchRoundState::SelectNextOrderedSlot(
-		SlotsByTeam[AttackingTeam], NextAttackerSlot[AttackingTeam]);
+		AttackingFullOrder, SlotsByTeam[AttackingTeam], NextAttackerSlot[AttackingTeam]);
 	if (SelectedSlot == INDEX_NONE)
 	{
 		return false;
@@ -1268,25 +1276,32 @@ void AClutchGameMode::EndRound(uint8 WinningTeamIndex, FName Reason)
 		bWinByTwo,
 		MinimumWinMargin);
 
+	// Round decided. Match Wipeout's round-cooldown feel: never strip control from a
+	// player who is still standing. Everyone still alive stays in NAME_Playing and can
+	// roam freely through the intermission — round damage and knockback are already
+	// gated off by bEndingRound (see ModifyDamage), and bAllowRoundSpawns=false blocks
+	// respawns, so this is purely harmless free movement until BeginRound clears pawns
+	// for the next round. Only players already out of the round (dead this round, or
+	// benched/queued with no pawn) stay spectating; re-aim their cam at a surviving
+	// winner so the cooldown has a good subject. This mirrors Wipeout's
+	// ForceLosersToViewWinners, which likewise leaves the living untouched.
 	AUTPlayerState* PreferredTarget = FindBestPlayerOnTeam(WinningTeamIndex);
-	AController* PreferredController = PreferredTarget
-		? Cast<AController>(PreferredTarget->GetOwner())
-		: nullptr;
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 	{
 		AController* Controller = It->Get();
-		if (Controller && Controller != PreferredController
-			&& Controller->PlayerState && !Controller->PlayerState->bOnlySpectator)
+		AUTPlayerState* PlayerState = Controller
+			? Cast<AUTPlayerState>(Controller->PlayerState)
+			: nullptr;
+		if (!PlayerState || PlayerState->bOnlySpectator)
+		{
+			continue;
+		}
+		AUTCharacter* Character = Cast<AUTCharacter>(Controller->GetPawn());
+		if (!Character || Character->IsDead())
 		{
 			EnterSpectating(Controller, PreferredTarget);
 		}
-	}
-	// Switch the view-target owner last so every other client captures a stable
-	// pawn target before that controller enters Spectating.
-	if (PreferredController && PreferredController->PlayerState
-		&& !PreferredController->PlayerState->bOnlySpectator)
-	{
-		EnterSpectating(PreferredController, PreferredTarget);
+		// Alive: left in NAME_Playing with their pawn — full movement, no round damage.
 	}
 
 	UE_LOG(LogClutch, Log, TEXT("Round %d ended: team %d (%s), score %d-%d"),

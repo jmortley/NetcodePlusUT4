@@ -232,15 +232,39 @@ bool FClutchAttackOrderTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("A foreign roster slot is rejected"),
 		AClutchRoundState::IsValidAttackOrder(EligibleSlots, ForeignOrder));
 
+	// Happy path: nobody has disconnected, so the full order and the connected set are
+	// identical and the rotation cycles the chosen permutation.
 	int32 Previous = INDEX_NONE;
-	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, ChosenOrder, Previous);
 	TestEqual(TEXT("Chosen first attacker goes first"), Previous, 2);
-	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, ChosenOrder, Previous);
 	TestEqual(TEXT("Chosen second attacker goes second"), Previous, 0);
-	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, ChosenOrder, Previous);
 	TestEqual(TEXT("Chosen third attacker goes third"), Previous, 1);
-	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, Previous);
+	Previous = AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, ChosenOrder, Previous);
 	TestEqual(TEXT("Chosen order wraps"), Previous, 2);
+
+	// Regression: the previous attacker (slot 0) disconnects mid-match. The full locked
+	// order still lists slot 0, so the rotation must advance PAST it to the next teammate
+	// (slot 1) instead of collapsing back to the front (slot 2) — which would give slot 2
+	// consecutive team turns while skipping slot 1.
+	TArray<int32> ConnectedAfterDrop;
+	ConnectedAfterDrop.Add(2);
+	ConnectedAfterDrop.Add(1);
+	TestEqual(TEXT("Rotation advances past a disconnected previous attacker"),
+		AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, ConnectedAfterDrop, 0), 1);
+
+	// After slot 1 takes its turn the sequence keeps wrapping over the connected slots.
+	TestEqual(TEXT("Rotation continues after the skip"),
+		AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, ConnectedAfterDrop, 1), 2);
+
+	// A fresh selection (no previous) starts at the first connected slot even when the
+	// front of the locked order has disconnected.
+	TArray<int32> ConnectedFrontGone;
+	ConnectedFrontGone.Add(0);
+	ConnectedFrontGone.Add(1);
+	TestEqual(TEXT("Fresh selection skips a disconnected order front"),
+		AClutchRoundState::SelectNextOrderedSlot(ChosenOrder, ConnectedFrontGone, INDEX_NONE), 0);
 	return true;
 }
 
