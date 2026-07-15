@@ -133,6 +133,15 @@ public:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     bool bAllowGrenades;
 
+    /** Hard-disable fire mode 1 (rocket loading) for single-rocket-only loadouts
+     *  (Clutch defenders). Gated in BeginFiringSequence — the one funnel both the
+     *  local StartFire path and ServerStartFireFixed pass through — so the server
+     *  rejects modified clients too. Non-replicated config: no schema change, no
+     *  new RPC. Also suppresses the lock-on timer (only loaded rockets can seek,
+     *  so an acquired lock would be unconsumable) and the AI's alt-fire pick. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    bool bDisableAltLoading;
+
     // === SPREAD SETTINGS ===
 
     /** Spread amount for loaded rockets (non-seeking) */
@@ -280,6 +289,7 @@ public:
     void ClientAbortLoad();
 
     // Firing
+    virtual bool BeginFiringSequence(uint8 FireModeNum, bool bClientFired) override;
     virtual void FireShot() override;
     virtual AUTProjectile* FireProjectile() override;
     virtual AUTProjectile* FireRocketProjectile();

@@ -53,6 +53,7 @@ AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer&
     // Fire Modes - Enable by default now that we have spiral
     bAllowAltModes = true;
     bAllowGrenades = true; // Legacy compatibility
+    bDisableAltLoading = false; // Clutch defender BPs opt in (single rockets only)
 
     // Target Locking
     bLockedOnTarget = false;
@@ -116,6 +117,22 @@ void AUTPlusWeap_RocketLauncher::PostInitProperties()
     {
         FiringState[1] = NewObject<UUTWeaponStateFiringChargedRocket_Transactional>(this, UUTWeaponStateFiringChargedRocket_Transactional::StaticClass());
     }
+}
+
+bool AUTPlusWeap_RocketLauncher::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
+{
+    // Single-rocket-only loadouts: reject alt fire BEFORE Super. The stock body
+    // latches UTOwner->SetPendingFire(1) immediately, and while mode 0 is firing
+    // it delegates to FiringState[0]->BeginFiringSequence(1), which records
+    // PendingFireSequence=1 and would switch into loading at the next refire
+    // check. Both the owning client's StartFire and the server's
+    // ServerStartFireFixed funnel through here, so this also rejects mode-1
+    // requests from modified clients with no new RPC.
+    if (bDisableAltLoading && FireModeNum == 1)
+    {
+        return false;
+    }
+    return Super::BeginFiringSequence(FireModeNum, bClientFired);
 }
 
 
@@ -1011,7 +1028,10 @@ void AUTPlusWeap_RocketLauncher::StateChanged()
 {
     Super::StateChanged();
 
-    if (Role == ROLE_Authority && CurrentState != InactiveState && CurrentState != EquippingState && CurrentState != UnequippingState)
+    // Lock acquisition is pointless with alt loading disabled — only loaded
+    // (seeking) rockets consume a lock — so skip the timer entirely: no phantom
+    // lock reticle/sound for the shooter, no periodic lock traces on the server.
+    if (Role == ROLE_Authority && !bDisableAltLoading && CurrentState != InactiveState && CurrentState != EquippingState && CurrentState != UnequippingState)
     {
         GetWorldTimerManager().SetTimer(UpdateLockHandle, this, &AUTPlusWeap_RocketLauncher::UpdateLock, LockCheckTime, true);
     }
@@ -1416,7 +1436,14 @@ float AUTPlusWeap_RocketLauncher::SuggestAttackStyle_Implementation()
 bool AUTPlusWeap_RocketLauncher::CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc)
 {
     // Simplified AI attack logic - full implementation would include predictive firing
-    return Super::CanAttack_Implementation(Target, TargetLoc, bDirectOnly, bPreferCurrentMode, BestFireMode, OptimalTargetLoc);
+    const bool bResult = Super::CanAttack_Implementation(Target, TargetLoc, bDirectOnly, bPreferCurrentMode, BestFireMode, OptimalTargetLoc);
+    if (bDisableAltLoading && BestFireMode == 1)
+    {
+        // Never suggest a trigger BeginFiringSequence will reject — a bot would
+        // otherwise hold alt-fire indefinitely without firing.
+        BestFireMode = 0;
+    }
+    return bResult;
 }
 
 
