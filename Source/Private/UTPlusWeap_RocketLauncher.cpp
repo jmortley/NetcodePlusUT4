@@ -68,6 +68,8 @@ AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer&
     LastValidTargetTime = 0.0f;
     LockAim = 0.997f;
     LockOffset = 800.f;
+    LockDisplayLingerTime = 0.4f;   // reticle hangs on the last target 0.4s after the lock clears
+    LockClearedTime = -1000.0f;
     bTargetLockingActive = true;
     LastTargetLockCheckTime = 0.0f;
 
@@ -1266,6 +1268,7 @@ void AUTPlusWeap_RocketLauncher::UpdateLock()
 
 void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
 {
+	AActor* PreviousTarget = LockedTarget;   // capture before overwrite for the reticle linger
 	LockedTarget = NewTarget;
 
 	if (LockedTarget != nullptr)
@@ -1275,6 +1278,7 @@ void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
 			// Just acquired lock
 			bLockedOnTarget = true;
 			LastLockedOnTime = GetWorld()->TimeSeconds;
+			LingerLockedTarget = nullptr;   // a fresh lock supersedes any pending linger
 
 			// Play lock acquired sound for local player
 			if (GetNetMode() != NM_DedicatedServer &&
@@ -1295,6 +1299,11 @@ void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
 		{
 			// Just lost lock
 			bLockedOnTarget = false;
+
+			// Arm the reticle linger so it doesn't blink off the instant the lock clears
+			// (e.g. on load release). Display-only; the lock state stays cleared.
+			LingerLockedTarget = PreviousTarget;
+			LockClearedTime = GetWorld()->TimeSeconds;
 
 			// Play lock lost sound for local player
 			if (GetNetMode() != NM_DedicatedServer &&
@@ -1494,10 +1503,22 @@ void AUTPlusWeap_RocketLauncher::DrawWeaponCrosshair_Implementation(UUTHUDWidget
         float CrosshairRot = GetWorld()->TimeSeconds * 90.0f;
         const float AcquireDisplayTime = 0.6f;
 
-        // A. Draw Locked Target (Solid Red)
+        // A. Draw Locked Target (Solid Red) — with a short linger on the last target after the
+        //    lock clears, so releasing the load doesn't blink the reticle off instantly.
+        AActor* LockReticleTarget = nullptr;
         if (HasLockedTarget() && LockedTarget)
         {
-            FVector ScreenTarget = WeaponHudWidget->GetCanvas()->Project(LockedTarget->GetActorLocation());
+            LockReticleTarget = LockedTarget;
+        }
+        else if (LingerLockedTarget.IsValid()
+            && (GetWorld()->GetTimeSeconds() - LockClearedTime) < LockDisplayLingerTime)
+        {
+            LockReticleTarget = LingerLockedTarget.Get();
+        }
+
+        if (LockReticleTarget)
+        {
+            FVector ScreenTarget = WeaponHudWidget->GetCanvas()->Project(LockReticleTarget->GetActorLocation());
 
             // Adjust for canvas center offset if necessary, though Project usually returns absolute screen coordinates.
             // Stock UT offset logic:

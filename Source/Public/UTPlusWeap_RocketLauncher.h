@@ -195,6 +195,12 @@ public:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
     float LockOffset;
 
+    /** How long the lock reticle keeps drawing on the last target after the lock clears
+     *  (e.g. when the load is released). Display-only linger — does NOT keep the lock state
+     *  alive, so seekers won't acquire during it. 0 = clear instantly (old behaviour). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockDisplayLingerTime;
+
     UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher|Lock")
     bool bLockedOnTarget;
 
@@ -203,6 +209,12 @@ public:
 
     UPROPERTY()
     float LastLockedOnTime;
+
+    /** Client draw-linger state: the target the lock was last on, and when it cleared.
+     *  Consumed only by DrawWeaponCrosshair for the reticle linger. */
+    TWeakObjectPtr<AActor> LingerLockedTarget;
+    UPROPERTY()
+    float LockClearedTime;
 
     UPROPERTY()
     float PendingLockedTargetTime;
