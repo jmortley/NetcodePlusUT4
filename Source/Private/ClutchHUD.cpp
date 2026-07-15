@@ -240,6 +240,25 @@ void AClutchHUD::DrawHUD()
 }
 
 
+EInputMode::Type AClutchHUD::GetInputMode_Implementation() const
+{
+	// While this player's attack-order picker is active, the mouse cursor must stay free
+	// and visible for its click hitboxes. The base AWipeoutHUD forces EIM_GameOnly for the
+	// entire InProgress match (capturing the mouse and hiding the cursor, which
+	// UTBasePlayerController::UpdateInputMode re-applies every tick and clobbers any
+	// cursor flag the HUD sets), so override to GameAndUI for the picker window.
+	// bAttackOrderInputActive is the single flag that mirrors the full enable predicate
+	// (local selector, order unlocked, more than one eligible slot, panel visible, not yet
+	// submitted), so it flips back off the moment the order locks/submits and the base
+	// GameOnly capture resumes.
+	if (bAttackOrderInputActive)
+	{
+		return EInputMode::EIM_GameAndUI;
+	}
+	return Super::GetInputMode_Implementation();
+}
+
+
 void AClutchHUD::UpdateAttackOrderInput(
 	AClutchRoundState* State, bool bPanelVisible)
 {

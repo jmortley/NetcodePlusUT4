@@ -27,6 +27,11 @@ public:
 	virtual void NotifyHitBoxClick(FName BoxName) override;
 	virtual void Destroyed() override;
 
+	/** Frees/shows the mouse cursor during the attack-order picker. The base
+	 *  AWipeoutHUD forces EIM_GameOnly for the whole InProgress match, which captures
+	 *  the mouse and hides the cursor the picker's click hitboxes need. */
+	virtual EInputMode::Type GetInputMode_Implementation() const override;
+
 protected:
 	AClutchRoundState* ResolveClutchState();
 	AUTPlayerState* ResolveDisplayedPlayerState(AClutchRoundState* State) const;
