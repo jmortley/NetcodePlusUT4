@@ -12,6 +12,7 @@
 #include "UTProjectile.h"
 #include "UTTeamInfo.h"
 #include "UTInventory.h"
+#include "UTWeapon.h"
 #include "UTPickup.h"
 #include "UTGenericObjectivePoint.h"
 #include "UTCTFFlagBase.h"
@@ -190,6 +191,9 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	AttackerDamagePerHit = 1000;
 	bWinByTwo = false;
 	MinimumWinMargin = 2;
+	RoleWeaponMagazine = 4;
+	RoleWeaponAmmoRegenInterval = 1.5f;
+	RoleWeaponEmptyReloadPause = 0.5f;
 
 	// Resolved to concrete stock Blueprint weapons in InitGame unless a BP child
 	// supplies the recovered Clutch loadouts first.
@@ -244,6 +248,31 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 	bWinByTwo = EvalBoolOptions(UGameplayStatics::ParseOption(Options, TEXT("WinByTwo")), bWinByTwo);
 	MinimumWinMargin = FMath::Max(1,
 		UGameplayStatics::GetIntOption(Options, TEXT("WinMargin"), MinimumWinMargin));
+
+	RoleWeaponMagazine = FMath::Max(0,
+		UGameplayStatics::GetIntOption(Options, TEXT("RoleMag"), RoleWeaponMagazine));
+	RoleWeaponAmmoRegenInterval = ParsePositiveFloatOption(
+		Options, TEXT("AmmoRegen"), RoleWeaponAmmoRegenInterval);
+	const FString EmptyReloadOption = UGameplayStatics::ParseOption(Options, TEXT("EmptyReload"));
+	if (!EmptyReloadOption.IsEmpty())
+	{
+		// Parsed directly rather than via ParsePositiveFloatOption so an explicit 0
+		// is honored (0 still restarts the refill clock from empty).
+		RoleWeaponEmptyReloadPause = FMath::Max(0.0f, FCString::Atof(*EmptyReloadOption));
+	}
+
+	// A regenerating clip only bites if the stock ammo path actually spends rounds.
+	// With bAmmoIsLimited off, ConsumeAmmo skips the decrement until Ammo exceeds 9,
+	// so a small magazine would never deplete. Force limited ammo whenever the
+	// feature is on; leave the flag untouched when disabled so the mode keeps its
+	// historical infinite-ammo behavior.
+	if (RoleWeaponMagazine > 0 && !bAmmoIsLimited)
+	{
+		bAmmoIsLimited = true;
+		UE_LOG(LogClutch, Log,
+			TEXT("Forcing limited ammo for the %d-round regenerating role magazine"),
+			RoleWeaponMagazine);
+	}
 
 	PoleUnlockDelaySeconds = FMath::Clamp(PoleUnlockDelaySeconds, 0.0f, RoundDurationSeconds);
 	if (!AttackerWeaponClass || AttackerWeaponClass->HasAnyClassFlags(CLASS_Abstract))
@@ -369,9 +398,18 @@ void AClutchGameMode::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 
-	if (HasAuthority() && ClutchState && ClutchState->Phase == EClutchRoundPhase::Capture)
+	if (!HasAuthority() || !ClutchState)
+	{
+		return;
+	}
+
+	if (ClutchState->Phase == EClutchRoundPhase::Capture)
 	{
 		UpdatePole(DeltaSeconds);
+	}
+	if (IsCombatPhase())
+	{
+		UpdateAmmoRegen(DeltaSeconds);
 	}
 }
 
@@ -1421,7 +1459,19 @@ void AClutchGameMode::GiveDefaultInventory(APawn* PlayerPawn)
 	}
 	if (RoleInventory)
 	{
-		Character->K2_CreateInventory(RoleInventory, true);
+		AUTWeapon* RoleWeapon = Cast<AUTWeapon>(
+			Character->K2_CreateInventory(RoleInventory, true));
+		if (RoleWeapon && RoleWeaponMagazine > 0)
+		{
+			// Start on a full fixed clip. bCanRegenerateAmmo keeps the stock
+			// out-of-ammo path from switching the weapon away while it is empty;
+			// UpdateAmmoRegen ticks the rounds back in. Pawns and their weapons are
+			// rebuilt every round, so this also resets the clip at each round start.
+			RoleWeapon->MaxAmmo = RoleWeaponMagazine;
+			RoleWeapon->Ammo = RoleWeaponMagazine;
+			RoleWeapon->bCanRegenerateAmmo = true;
+			AmmoRegenState.Remove(RoleWeapon);
+		}
 	}
 }
 
@@ -1617,6 +1667,10 @@ void AClutchGameMode::ClearRoundPawns()
 			Character->Destroy();
 		}
 	}
+
+	// Weapons were just destroyed; drop their regen carries so the next round starts
+	// every clip from a clean full state.
+	AmmoRegenState.Reset();
 }
 
 
@@ -1983,6 +2037,65 @@ void AClutchGameMode::UpdatePole(float DeltaSeconds)
 	{
 		bPoleCaptured = true;
 		QueueWinCheck();
+	}
+}
+
+
+void AClutchGameMode::UpdateAmmoRegen(float DeltaSeconds)
+{
+	if (RoleWeaponMagazine <= 0 || !ClutchState || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+
+	// Drop carries for weapons destroyed since the last pass (round change, death).
+	for (auto It = AmmoRegenState.CreateIterator(); It; ++It)
+	{
+		if (!It->Key.IsValid())
+		{
+			It.RemoveCurrent();
+		}
+	}
+
+	for (const FClutchRosterEntry& Entry : ClutchState->Roster)
+	{
+		if (!Entry.PlayerState || Entry.PlayerStatus != EClutchStatus::Active
+			|| (Entry.PlayerRole != EClutchRole::Attacker
+				&& Entry.PlayerRole != EClutchRole::Defender))
+		{
+			continue;
+		}
+
+		AController* Controller = Cast<AController>(Entry.PlayerState->GetOwner());
+		AUTCharacter* Character = Controller ? Cast<AUTCharacter>(Controller->GetPawn()) : nullptr;
+		AUTWeapon* Weapon = (Character && !Character->IsDead()) ? Character->GetWeapon() : nullptr;
+		if (!Weapon)
+		{
+			continue;
+		}
+
+		FClutchAmmoRegenState& State = AmmoRegenState.FindOrAdd(Weapon);
+
+		// SM-style empty penalty: the moment the clip drops to zero, arm a negative
+		// carry so the first round returns EmptyReloadPause + RegenInterval later.
+		// Keying off the >0 -> 0 transition (not the raw zero) applies the pause once
+		// and restarts the refill clock from empty, so dump speed no longer changes
+		// how soon the first round comes back.
+		if (Weapon->Ammo == 0 && State.LastAmmo > 0)
+		{
+			State.Accumulator = -RoleWeaponEmptyReloadPause;
+		}
+
+		const int32 Grants = AClutchRoundState::AdvanceAmmoRegen(
+			State.Accumulator, DeltaSeconds, Weapon->Ammo, RoleWeaponMagazine,
+			RoleWeaponAmmoRegenInterval);
+		if (Grants > 0)
+		{
+			// Authority-side; AddAmmo clamps to MaxAmmo and replicates Ammo to the
+			// owning client, which drives the HUD count and refire availability.
+			Weapon->AddAmmo(Grants);
+		}
+		State.LastAmmo = Weapon->Ammo;
 	}
 }
 

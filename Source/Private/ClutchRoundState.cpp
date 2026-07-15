@@ -936,6 +936,38 @@ float AClutchRoundState::AdvancePoleProgress(float CurrentProgress,
 }
 
 
+int32 AClutchRoundState::AdvanceAmmoRegen(float& AccumulatorSeconds,
+	float DeltaSeconds, int32 CurrentAmmo, int32 MagazineSize, float RegenInterval)
+{
+	if (MagazineSize <= 0 || RegenInterval <= 0.0f || CurrentAmmo >= MagazineSize)
+	{
+		// A full clip (or a disabled feature) parks the timer at zero so the refill
+		// clock always restarts from the shot that drops it below capacity.
+		AccumulatorSeconds = 0.0f;
+		return 0;
+	}
+
+	if (DeltaSeconds > 0.0f)
+	{
+		AccumulatorSeconds += DeltaSeconds;
+	}
+
+	int32 Grants = FMath::FloorToInt(AccumulatorSeconds / RegenInterval);
+	if (Grants <= 0)
+	{
+		return 0;
+	}
+
+	Grants = FMath::Min(Grants, MagazineSize - CurrentAmmo);
+	AccumulatorSeconds -= Grants * RegenInterval;
+	if (CurrentAmmo + Grants >= MagazineSize)
+	{
+		AccumulatorSeconds = 0.0f;
+	}
+	return Grants;
+}
+
+
 int32 AClutchRoundState::ResolveRoleDamage(EClutchRole DamageDealerRole,
 	EClutchRole VictimRole, int32 DefenderDamage, int32 AttackerDamage)
 {

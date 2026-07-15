@@ -11,6 +11,16 @@ class AClutchRoundState;
 class AClutchPoleVisual;
 class AUTInventory;
 class AUTPlayerState;
+class AUTWeapon;
+
+/** Runtime-only per-weapon ammo-regen bookkeeping (never replicated). */
+struct FClutchAmmoRegenState
+{
+	/** Time banked toward the next round; negative while an empty pause is serving. */
+	float Accumulator = 0.0f;
+	/** Ammo seen at the end of the previous pass, for the >0 -> 0 empty transition. */
+	int32 LastAmmo = INDEX_NONE;
+};
 
 /**
  * ShootMania Elite-style 3v3 mode for UT4.
@@ -119,6 +129,28 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout")
 	TSubclassOf<AUTInventory> DefenderWeaponClass;
 
+	/**
+	 * Fixed regenerating magazine size shared by both role weapons. Zero disables
+	 * the feature and restores the mode's historical infinite ammo. When positive,
+	 * InitGame also forces bAmmoIsLimited so shots actually spend rounds.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout", meta = (ClampMin = "0"))
+	int32 RoleWeaponMagazine;
+
+	/** Seconds to restore one round of the role-weapon magazine, up to its size. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout", meta = (ClampMin = "0.1"))
+	float RoleWeaponAmmoRegenInterval;
+
+	/**
+	 * Extra ShootMania-style pause before the first round refills after the clip is
+	 * fully emptied. Layers on top of the regen interval, so the first round returns
+	 * RoleWeaponAmmoRegenInterval + this many seconds after hitting empty. Even zero
+	 * restarts the refill clock from empty, so dump speed no longer changes how soon
+	 * the first round comes back.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout", meta = (ClampMin = "0.0"))
+	float RoleWeaponEmptyReloadPause;
+
 	/** Optional match rule. Disabled gives a literal first-to-nine result. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Rules")
 	bool bWinByTwo;
@@ -188,6 +220,7 @@ protected:
 	AActor* ResolvePoleActor();
 	void EnsurePoleVisual();
 	void UpdatePole(float DeltaSeconds);
+	void UpdateAmmoRegen(float DeltaSeconds);
 	bool IsCombatPhase() const;
 	bool IsActiveRoundPlayer(const AUTPlayerState* PlayerState) const;
 	bool IsActiveRole(const AUTPlayerState* PlayerState, EClutchRole Role) const;
@@ -202,6 +235,8 @@ protected:
 	FTimerHandle SpawnQueueTimerHandle;
 	TArray<TWeakObjectPtr<AController>> PendingRoundSpawns;
 	TMap<TWeakObjectPtr<AController>, int32> RoundSpawnAttempts;
+	/** Per-weapon regen bookkeeping, keyed by the active role weapon instance. */
+	TMap<TWeakObjectPtr<AUTWeapon>, FClutchAmmoRegenState> AmmoRegenState;
 	int32 NextAttackerSlot[2];
 	uint8 NextAttackingTeamIndex;
 	bool bAllowRoundSpawns;

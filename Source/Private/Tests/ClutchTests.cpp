@@ -317,6 +317,72 @@ bool FClutchRoleDamageTest::RunTest(const FString& Parameters)
 
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClutchAmmoRegenTest,
+	"NetcodePlus.Clutch.Rules.AmmoRegen",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+
+bool FClutchAmmoRegenTest::RunTest(const FString& Parameters)
+{
+	// A full clip never regenerates and parks a stale carry back to zero.
+	float Accumulator = 1.0f;
+	TestEqual(TEXT("Full magazine grants nothing"),
+		AClutchRoundState::AdvanceAmmoRegen(Accumulator, 1.5f, 4, 4, 1.5f), 0);
+	TestTrue(TEXT("Full magazine parks the timer at zero"),
+		FMath::IsNearlyEqual(Accumulator, 0.0f));
+
+	// Below capacity, nothing arrives until a whole interval has elapsed.
+	Accumulator = 0.0f;
+	TestEqual(TEXT("Sub-interval grants nothing"),
+		AClutchRoundState::AdvanceAmmoRegen(Accumulator, 0.05f, 1, 4, 1.5f), 0);
+
+	// From one round, refills exactly one per 1.5s until the four-round clip is full.
+	// A 0.5s tick divides 1.5 cleanly, so the step count is deterministic.
+	Accumulator = 0.0f;
+	int32 Ammo = 1;
+	int32 Steps = 0;
+	while (Ammo < 4 && Steps < 100)
+	{
+		Ammo += AClutchRoundState::AdvanceAmmoRegen(Accumulator, 0.5f, Ammo, 4, 1.5f);
+		++Steps;
+	}
+	TestEqual(TEXT("Refills to a full four-round clip"), Ammo, 4);
+	TestEqual(TEXT("Three rounds at three 0.5s ticks each"), Steps, 9);
+
+	// A long hitch grants several rounds at once but never overfills the clip.
+	Accumulator = 0.0f;
+	TestEqual(TEXT("Catch-up is capped at the remaining deficit"),
+		AClutchRoundState::AdvanceAmmoRegen(Accumulator, 10.0f, 2, 4, 1.5f), 2);
+	TestTrue(TEXT("Hitting the cap re-parks the timer"),
+		FMath::IsNearlyEqual(Accumulator, 0.0f));
+
+	// A disabled feature (zero magazine) is inert regardless of elapsed time.
+	Accumulator = 3.0f;
+	TestEqual(TEXT("Disabled magazine grants nothing"),
+		AClutchRoundState::AdvanceAmmoRegen(Accumulator, 1.5f, 0, 0, 1.5f), 0);
+
+	// SM-style empty penalty: arming a negative carry (-pause) delays the first round
+	// by pause + interval. -0.5 -> +1.5 is 2.0s; at a 0.5s tick that is four ticks.
+	Accumulator = -0.5f;
+	int32 PausedAmmo = 0;
+	int32 PausedSteps = 0;
+	while (PausedAmmo < 1 && PausedSteps < 200)
+	{
+		PausedAmmo += AClutchRoundState::AdvanceAmmoRegen(Accumulator, 0.5f, PausedAmmo, 4, 1.5f);
+		++PausedSteps;
+	}
+	TestEqual(TEXT("Empty pause delays the first round by pause + interval"), PausedSteps, 4);
+
+	// A negative carry grants nothing mid-pause and just keeps counting up.
+	Accumulator = -0.5f;
+	TestEqual(TEXT("Armed pause grants nothing mid-pause"),
+		AClutchRoundState::AdvanceAmmoRegen(Accumulator, 0.25f, 0, 4, 1.5f), 0);
+	TestTrue(TEXT("Armed pause keeps counting up from negative"),
+		FMath::IsNearlyEqual(Accumulator, -0.25f));
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FClutchHUDAssetsTest,
 	"NetcodePlus.Clutch.Assets.HUD",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)

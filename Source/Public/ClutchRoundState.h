@@ -294,6 +294,15 @@ public:
 		bool bAttackerPresent, bool bDefenderPresent,
 		float CaptureSeconds, float DecaySeconds);
 
+	/**
+	 * Advances a fixed regenerating weapon magazine for one server step. Returns
+	 * the rounds to grant now (already capped to the remaining deficit) and
+	 * updates AccumulatorSeconds with the unspent time. A full magazine parks the
+	 * accumulator at zero so the refill clock restarts from the next shot.
+	 */
+	static int32 AdvanceAmmoRegen(float& AccumulatorSeconds, float DeltaSeconds,
+		int32 CurrentAmmo, int32 MagazineSize, float RegenInterval);
+
 	/** Resolves the role-vs-role damage override; zero means the hit is invalid. */
 	static int32 ResolveRoleDamage(EClutchRole DamageDealerRole,
 		EClutchRole VictimRole, int32 DefenderDamage, int32 AttackerDamage);
