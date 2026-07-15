@@ -375,7 +375,7 @@ constructor):
 `EnemyBlockPenalty`, `EnemyLOSBlockRange`, `EnemyLOSPenalty`, `FlagBaseProximityRadius`,
 `FlagSpawnPenaltyRadius`, `SpawnRecentPenaltyMultiplier`, `SpawnNearLastRadius`, `SpawnNearLastPenalty`,
 `SpawnTieBandWidth`, `SpawnFreshnessBonus`, `SpawnFreshnessWindow`, `SpawnFlagVicinityRadius`,
-`SpawnKillerAvoidRadius`, `SpawnRobbedBaseAvoidCount`.
+`SpawnKillerAvoidRadius`, `SpawnFlagCarrierLOSAvoidRadius` (default `3500`), `SpawnRobbedBaseAvoidCount`.
 
 ---
 

@@ -388,7 +388,7 @@ void AClutchHUD::NotifyHitBoxClick(FName BoxName)
 		if (SlotText.IsNumeric())
 		{
 			PickAttackOrderSlot(static_cast<uint8>(FMath::Clamp(
-				FCString::Atoi(*SlotText), 0, 255))));
+				FCString::Atoi(*SlotText), 0, 255)));
 		}
 		return;
 	}

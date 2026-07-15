@@ -19,8 +19,10 @@
 #include "Engine/Texture2D.h"
 #include "ElimPlusStatsReplicator.h"
 #include "EngineUtils.h"
+#if !UE_SERVER
 #include "Interfaces/IImageWrapper.h"
 #include "Interfaces/IImageWrapperModule.h"
+#endif
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"

@@ -117,6 +117,7 @@ DEFINE_VTABLE_PTR_HELPER_CTOR_CALLER(ATeamArenaCharacter); \
 #define UnrealTournament_Plugins_NetcodePlus_Source_Public_TeamArenaCharacter_h_33_PRIVATE_PROPERTY_OFFSET \
 	FORCEINLINE static uint32 __PPO__CachedPredictionPC() { return STRUCT_OFFSET(ATeamArenaCharacter, CachedPredictionPC); } \
 	FORCEINLINE static uint32 __PPO__LastEquippedWeapon() { return STRUCT_OFFSET(ATeamArenaCharacter, LastEquippedWeapon); } \
+	FORCEINLINE static uint32 __PPO__LastRegularArmorType() { return STRUCT_OFFSET(ATeamArenaCharacter, LastRegularArmorType); } \
 	FORCEINLINE static uint32 __PPO__LastForcedContent() { return STRUCT_OFFSET(ATeamArenaCharacter, LastForcedContent); }
 
 

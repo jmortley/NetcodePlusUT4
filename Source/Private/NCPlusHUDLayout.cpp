@@ -35,8 +35,10 @@
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
+#if !UE_SERVER
 #include "Interfaces/IImageWrapper.h"
 #include "Interfaces/IImageWrapperModule.h"
+#endif
 #include "Modules/ModuleManager.h"
 
 // =============================================================================

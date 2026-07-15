@@ -35,11 +35,18 @@ namespace UnrealBuildTool.Rules
 				"AssetRegistry",
 				"AppFramework",   // SColorPicker (used by SNCPlusHUDEditor color swatches)
 				"Http",
-				"ImageWrapper",   // Runtime decode for recovered Clutch HUD PNG resources
 				"Json",
 				"JsonUtilities",
 				"RenderCore"      // GWhiteTexture (QuickStats DrawArc canvas fallback)
             });
+
+			// Recovered Clutch HUD PNGs are decoded only by rendered clients/editors.
+			// Dedicated Linux servers do not ship the libPNG archive required by
+			// ImageWrapper, and the decoding code is compiled out under UE_SERVER.
+			if (Target.Type != TargetRules.TargetType.Server)
+			{
+				PrivateDependencyModuleNames.Add("ImageWrapper");
+			}
 		}
 	}
 }

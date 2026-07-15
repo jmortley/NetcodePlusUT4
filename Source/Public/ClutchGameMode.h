@@ -8,6 +8,7 @@
 #include "ClutchGameMode.generated.h"
 
 class AClutchRoundState;
+class AClutchPoleVisual;
 class AUTInventory;
 class AUTPlayerState;
 
@@ -82,6 +83,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Pole")
 	FName PoleActorTag;
 
+	/** Spawn the recovered original pole mesh when a map only supplies a marker. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Pole")
+	bool bUseRecoveredPoleVisual;
+
 	/** Delay between rounds. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Rules", meta = (ClampMin = "0.0"))
 	float IntermissionSeconds;
@@ -128,6 +133,10 @@ public:
 	/** Resolved pole marker. Tag any map actor ClutchPole to override discovery. */
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Clutch|Pole")
 	AActor* PoleActor;
+
+	/** Replicated presentation actor spawned at the resolved pole marker. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Clutch|Pole")
+	AClutchPoleVisual* PoleVisualActor;
 
 	UFUNCTION(BlueprintPure, Category = "Clutch")
 	AClutchRoundState* GetClutchState() const { return ClutchState; }
@@ -177,6 +186,7 @@ protected:
 	void DeferredEnterSpectating(AUTPlayerState* PlayerState);
 	AUTPlayerState* FindActiveTeammate(const AUTPlayerState* PlayerState) const;
 	AActor* ResolvePoleActor();
+	void EnsurePoleVisual();
 	void UpdatePole(float DeltaSeconds);
 	bool IsCombatPhase() const;
 	bool IsActiveRoundPlayer(const AUTPlayerState* PlayerState) const;

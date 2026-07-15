@@ -158,6 +158,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnKillerAvoidRadius;
 
+	/** Hard-exclude starts with direct LOS to the enemy flag carrier inside this
+	 *  radius when a safer start remains. Falls back rather than failing to spawn.
+	 *  0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnFlagCarrierLOSAvoidRadius;
+
 	/** When your OWN flag isn't home (stolen or dropped), drop this many of your
 	 *  team's starts nearest your flag base form the avoid SET — exactly ONE of
 	 *  them is excluded per respawn, rotating through the set (nearest, then

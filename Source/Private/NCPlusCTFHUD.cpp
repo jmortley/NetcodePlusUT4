@@ -184,16 +184,32 @@ EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
 		return EInputMode::EIM_GameAndUI;
 	}
 
-	// Same pattern as WipeoutHUD: keep mouse captured during match.
-	// CTF doesn't have elimination, but this prevents click-off during
-	// death spectating and halftime transitions.
+	// Same pattern as WipeoutHUD: keep mouse captured during live play.
+	// Stock UTHUD only recognizes MatchState::InProgress here. When CTF
+	// changes to MatchIsInOvertime it falls through to EIM_None, which the
+	// base player controller converts to GameOnly. That hides the cursor and
+	// breaks the interactive spectator controls (POV and 1P/3P switching).
+	//
+	// Do not use IsMatchInProgress() alone: AUTCTFGameState also returns true
+	// for halftime/intermission states. Explicitly list the two live states.
 	if (UTPlayerOwner != nullptr)
 	{
 		AUTPlayerState* PS = UTPlayerOwner->UTPlayerState;
 		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-		if (PS && !PS->bOnlySpectator && GS && GS->GetMatchState() == MatchState::InProgress)
+		const FName MatchStateName = GS ? GS->GetMatchState() : NAME_None;
+		const bool bLiveMatch = MatchStateName == MatchState::InProgress
+			|| MatchStateName == MatchState::MatchIsInOvertime;
+		if (PS && bLiveMatch)
 		{
-			return EInputMode::EIM_GameOnly;
+			if (!PS->bOnlySpectator)
+			{
+				return EInputMode::EIM_GameOnly;
+			}
+
+			// Preserve stock live-spectator behavior in both regulation and OT.
+			return (bShowScores || UTPlayerOwner->bSpectatorMouseChangesView)
+				? EInputMode::EIM_GameOnly
+				: EInputMode::EIM_UIOnly;
 		}
 	}
 	return Super::GetInputMode_Implementation();

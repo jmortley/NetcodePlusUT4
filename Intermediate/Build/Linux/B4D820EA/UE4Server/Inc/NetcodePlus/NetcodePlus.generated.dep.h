@@ -9,6 +9,15 @@
 #ifndef NETCODEPLUS_ClientHitsounds_generated_h
 	#include "Public/ClientHitsounds.h"
 #endif
+#ifndef NETCODEPLUS_ClutchRoundState_generated_h
+	#include "Public/ClutchRoundState.h"
+#endif
+#ifndef NETCODEPLUS_ClutchGameMode_generated_h
+	#include "Public/ClutchGameMode.h"
+#endif
+#ifndef NETCODEPLUS_ClutchScoreboard_generated_h
+	#include "Public/ClutchScoreboard.h"
+#endif
 #ifndef NETCODEPLUS_CTFStatsReplicator_generated_h
 	#include "Public/CTFStatsReplicator.h"
 #endif
@@ -179,6 +188,9 @@
 #endif
 #ifndef NETCODEPLUS_WipeoutHUD_generated_h
 	#include "Public/WipeoutHUD.h"
+#endif
+#ifndef NETCODEPLUS_ClutchHUD_generated_h
+	#include "Public/ClutchHUD.h"
 #endif
 #ifndef NETCODEPLUS_NCLeagueDuelHUD_generated_h
 	#include "Public/NCLeagueDuelHUD.h"

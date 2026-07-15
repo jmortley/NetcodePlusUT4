@@ -1,6 +1,7 @@
 #include "ClutchGameMode.h"
 #include "ClutchHUD.h"
 #include "ClutchOrderMutator.h"
+#include "ClutchPoleVisual.h"
 #include "ClutchRoundState.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
@@ -18,6 +19,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerStart.h"
+#include "Components/StaticMeshComponent.h"
 #include "UObject/UnrealType.h"
 
 
@@ -179,6 +181,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	PoleCaptureRadius = 180.0f;
 	PoleCaptureHalfHeight = 160.0f;
 	PoleActorTag = FName(TEXT("ClutchPole"));
+	bUseRecoveredPoleVisual = true;
 	IntermissionSeconds = 5.0f;
 	AttackOrderSelectionSeconds = 15.0f;
 	MaxAttackerHits = 3;
@@ -195,6 +198,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 
 	ClutchState = nullptr;
 	PoleActor = nullptr;
+	PoleVisualActor = nullptr;
 	NextAttackerSlot[0] = INDEX_NONE;
 	NextAttackerSlot[1] = INDEX_NONE;
 	NextAttackingTeamIndex = 0;
@@ -338,6 +342,7 @@ void AClutchGameMode::HandleMatchHasStarted()
 	EnsureClutchState();
 	RefreshRoster();
 	PoleActor = ResolvePoleActor();
+	EnsurePoleVisual();
 	NextAttackerSlot[0] = INDEX_NONE;
 	NextAttackerSlot[1] = INDEX_NONE;
 	NextAttackingTeamIndex = 0;
@@ -1871,6 +1876,66 @@ AActor* AClutchGameMode::ResolvePoleActor()
 		TEXT("No pole marker found. Tag a map actor '%s' or place exactly one AUTGenericObjectivePoint."),
 		*PoleActorTag.ToString());
 	return nullptr;
+}
+
+
+void AClutchGameMode::EnsurePoleVisual()
+{
+	if (!HasAuthority() || !bUseRecoveredPoleVisual || !PoleActor
+		|| IsValid(PoleVisualActor))
+	{
+		return;
+	}
+
+	// Original CL maps may already contain the recovered Blueprint pole. Preserve
+	// any explicit visible mesh instead of layering a second copy over it. Dumb
+	// CTF maps are deliberately replaced regardless of the flag base components.
+	if (!Cast<AUTCTFFlagBase>(PoleActor))
+	{
+		TArray<UStaticMeshComponent*> ExistingMeshes;
+		PoleActor->GetComponents<UStaticMeshComponent>(ExistingMeshes);
+		for (UStaticMeshComponent* ExistingMesh : ExistingMeshes)
+		{
+			if (ExistingMesh && ExistingMesh->GetStaticMesh() && ExistingMesh->IsVisible())
+			{
+				UE_LOG(LogClutch, Log,
+					TEXT("Pole marker '%s' already supplies a visible mesh; recovered visual not spawned"),
+					*PoleActor->GetName());
+				return;
+			}
+		}
+	}
+
+	FActorSpawnParameters Params;
+	Params.Owner = this;
+	Params.Name = FName(TEXT("ClutchRecoveredPoleVisual"));
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	PoleVisualActor = GetWorld()->SpawnActor<AClutchPoleVisual>(
+		AClutchPoleVisual::StaticClass(),
+		PoleActor->GetActorLocation(),
+		PoleActor->GetActorRotation(),
+		Params);
+
+	if (!PoleVisualActor || !PoleVisualActor->HasValidMesh())
+	{
+		UE_LOG(LogClutch, Warning,
+			TEXT("Recovered Clutch pole mesh is unavailable; retaining the map marker visual"));
+		if (PoleVisualActor)
+		{
+			PoleVisualActor->Destroy();
+			PoleVisualActor = nullptr;
+		}
+		return;
+	}
+
+	if (AUTCTFFlagBase* FlagBase = Cast<AUTCTFFlagBase>(PoleActor))
+	{
+		FlagBase->SetActorHiddenInGame(true);
+	}
+
+	UE_LOG(LogClutch, Log,
+		TEXT("Spawned recovered Clutch pole visual at marker '%s'"),
+		*PoleActor->GetName());
 }
 
 
