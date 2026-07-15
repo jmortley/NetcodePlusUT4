@@ -1489,6 +1489,16 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     UWorld* World = GetWorld();
     if (!World) return;
 
+    // Server-authoritative fire policy (e.g. single-rocket-only loadouts). Reject a
+    // vetoed mode HERE — before the trade-kill spawn, the SetPendingFire latch below, and
+    // any state entry — so a modified client cannot latch PendingFire and let stock
+    // UUTWeaponStateActive::BeginState auto-enter the firing state. The resend RPC funnels
+    // back through this function, so this covers that path too.
+    if (!AllowServerFireMode(FireModeNum))
+    {
+        return;
+    }
+
     // --- TRADE-KILL GRACE PERIOD (projectiles only) ---
     // If UTOwner is null (weapon removed on death) but within the grace window,
     // spawn the projectile directly using the cached position from Removed().

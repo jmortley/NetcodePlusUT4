@@ -302,6 +302,7 @@ public:
 
     // Firing
     virtual bool BeginFiringSequence(uint8 FireModeNum, bool bClientFired) override;
+    virtual bool AllowServerFireMode(uint8 FireModeNum) const override;
     virtual void FireShot() override;
     virtual AUTProjectile* FireProjectile() override;
     virtual AUTProjectile* FireRocketProjectile();

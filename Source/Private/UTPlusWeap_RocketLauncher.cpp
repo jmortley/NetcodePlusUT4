@@ -123,18 +123,36 @@ void AUTPlusWeap_RocketLauncher::PostInitProperties()
 
 bool AUTPlusWeap_RocketLauncher::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
 {
-    // Single-rocket-only loadouts: reject alt fire BEFORE Super. The stock body
-    // latches UTOwner->SetPendingFire(1) immediately, and while mode 0 is firing
-    // it delegates to FiringState[0]->BeginFiringSequence(1), which records
-    // PendingFireSequence=1 and would switch into loading at the next refire
-    // check. Both the owning client's StartFire and the server's
-    // ServerStartFireFixed funnel through here, so this also rejects mode-1
-    // requests from modified clients with no new RPC.
+    // Single-rocket-only loadouts: reject alt fire BEFORE Super. The stock body latches
+    // UTOwner->SetPendingFire(1) immediately, and while mode 0 is firing it delegates to
+    // FiringState[0]->BeginFiringSequence(1), which records PendingFireSequence=1 and
+    // would switch into loading at the next refire check. This gate handles the owning
+    // client's local StartFire prediction and the stock ServerStartFire path (which never
+    // latches PendingFire when we return false first).
+    //
+    // NOTE: this gate is NOT sufficient on its own for the server. AUTWeaponFix's
+    // transactional ServerStartFireFixed latches PendingFire BEFORE calling
+    // BeginFiringSequence (and its cross-mode branch re-enters ActiveState before reaching
+    // here), so stock UUTWeaponStateActive::BeginState could auto-enter the load from the
+    // latched flag. The authoritative rejection therefore lives in AllowServerFireMode(),
+    // which ServerStartFireFixed consults at its RPC entry before any latch.
     if (bDisableAltLoading && FireModeNum == 1)
     {
         return false;
     }
     return Super::BeginFiringSequence(FireModeNum, bClientFired);
+}
+
+bool AUTPlusWeap_RocketLauncher::AllowServerFireMode(uint8 FireModeNum) const
+{
+    // Authoritative single-rocket restriction. Refused at the ServerStartFireFixed RPC
+    // entry (before the trade-kill spawn, the PendingFire latch, and any state entry), so
+    // a modified client cannot smuggle a mode-1 load past the BeginFiringSequence gate.
+    if (bDisableAltLoading && FireModeNum == 1)
+    {
+        return false;
+    }
+    return Super::AllowServerFireMode(FireModeNum);
 }
 
 

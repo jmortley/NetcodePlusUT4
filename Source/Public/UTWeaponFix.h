@@ -200,6 +200,16 @@ public:
     virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
+
+    /** Server-authoritative fire policy hook. Return false to hard-reject a fire mode
+     *  at every server fire entry (ServerStartFireFixed and the resend funnel) BEFORE any
+     *  trade-kill spawn, SetPendingFire latch, or state entry. A subclass restriction that
+     *  lives only in BeginFiringSequence is bypassable: ServerStartFireFixed latches
+     *  PendingFire before that gate, and stock UUTWeaponStateActive::BeginState then
+     *  auto-enters the firing state from the latched flag without re-consulting the gate.
+     *  Vetoing the mode here closes that path. Base allows every mode. */
+    virtual bool AllowServerFireMode(uint8 FireModeNum) const { return true; }
+
     virtual void PostInitProperties() override;
     virtual void Tick(float DeltaTime) override;
     virtual void DetachFromOwner_Implementation() override;
