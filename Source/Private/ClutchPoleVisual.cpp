@@ -23,12 +23,14 @@ AClutchPoleVisual::AClutchPoleVisual(const FObjectInitializer& ObjectInitializer
 	PoleMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -3.0f));
 	PoleMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 0.7724762f));
 
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> RecoveredPoleMesh(
-		TEXT("StaticMesh'/NetcodePlus/Clutch/Objective/SM_DarkHell_Pole.SM_DarkHell_Pole'"));
-	if (RecoveredPoleMesh.Succeeded())
-	{
-		PoleMesh->SetStaticMesh(RecoveredPoleMesh.Object);
-	}
+	// Recovered pole mesh intentionally NOT loaded for now (the mesh isn't shipped).
+	// Do not resurrect a CDO-time ConstructorHelpers::FObjectFinder for it: the CDO is
+	// built during early module startup before the /NetcodePlus/ content mount is ready,
+	// so the find fails — and, being a function-static, it caches that failure for the
+	// whole session. When the mesh ships, load it at runtime instead (LoadObject in
+	// EnsurePoleVisual/BeginPlay, the way the Clutch HUD textures do) and flip
+	// AClutchGameMode::bUseRecoveredPoleVisual back on. With no mesh set, HasValidMesh()
+	// stays false and the game mode keeps the map's own pole marker.
 }
 
 

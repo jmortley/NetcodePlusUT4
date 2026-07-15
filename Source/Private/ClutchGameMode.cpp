@@ -192,7 +192,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	PoleCaptureRadius = 180.0f;
 	PoleCaptureHalfHeight = 160.0f;
 	PoleActorTag = FName(TEXT("ClutchPole"));
-	bUseRecoveredPoleVisual = true;
+	bUseRecoveredPoleVisual = false; // Recovered pole mesh not shipped yet — use the map's own marker
 	IntermissionSeconds = 5.0f;
 	AttackOrderSelectionSeconds = 15.0f;
 	MaxAttackerHits = 3;
