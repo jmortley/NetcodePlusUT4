@@ -48,6 +48,16 @@ namespace
 			: AClutchRoundState::NoTeam;
 	}
 
+	// A projectile deals its direct-impact damage from ProcessHit before Explode()
+	// flips bExploded; the radial HurtRadius pass runs afterwards with bExploded
+	// true. So an exploded projectile causer means this event is rocket splash, not
+	// a direct hit. Non-projectile (e.g. hitscan) causers are always direct.
+	static bool IsRocketSplashDamage(const AActor* DamageCauser)
+	{
+		const AUTProjectile* Projectile = Cast<AUTProjectile>(DamageCauser);
+		return Projectile != nullptr && Projectile->bExploded;
+	}
+
 	static bool GetClutchStartRole(const AActor* Start, EClutchRole& OutRole)
 	{
 		if (!Start)
@@ -1531,13 +1541,39 @@ bool AClutchGameMode::ModifyDamage_Implementation(int32& Damage, FVector& Moment
 
 	const FClutchRosterEntry* DamageDealerEntry = ClutchState->FindEntry(AttackerState);
 	const FClutchRosterEntry* VictimEntry = ClutchState->FindEntry(VictimState);
-	Damage = DamageDealerEntry && VictimEntry
-		? AClutchRoundState::ResolveRoleDamage(
-			DamageDealerEntry->PlayerRole,
-			VictimEntry->PlayerRole,
-			DefenderDamagePerHit,
-			AttackerDamagePerHit)
-		: 0;
+	const EClutchRole DealerRole = DamageDealerEntry ? DamageDealerEntry->PlayerRole : EClutchRole::None;
+	const EClutchRole VictimRole = VictimEntry ? VictimEntry->PlayerRole : EClutchRole::None;
+
+	// Only a direct defender hit damages the attacker and spends an armor pip.
+	// Rocket splash is knockback-only: its damage is zeroed (so it never chips
+	// health or a pip) while its momentum is preserved, letting defenders shove the
+	// attacker off the pole without cheesing the "three clean hits" armor. The pip
+	// is registered here rather than in ScoreDamage because only the damage pipeline
+	// can separate a direct impact from radial splash (the causing projectile's
+	// bExploded is still false during the direct DamageImpactedActor pass, and true
+	// once Explode's HurtRadius runs). This holds for both present-time hits and
+	// rewind-confirmed hits, which re-enter through the same ProcessHit path.
+	if (DealerRole == EClutchRole::Defender && VictimRole == EClutchRole::Attacker)
+	{
+		if (IsRocketSplashDamage(DamageCauser))
+		{
+			// Momentum is applied even at zero damage (AUTCharacter::TakeDamage gates
+			// its impulse on "ResultDamage > 0 || !ResultMomentum.IsZero()").
+			Damage = 0;
+			return true; // Momentum deliberately left intact
+		}
+		Damage = FMath::Max(0, DefenderDamagePerHit);
+		if (Damage <= 0)
+		{
+			Momentum = FVector::ZeroVector;
+		}
+		ClutchState->AddAttackerHit(VictimState);
+		QueueWinCheck();
+		return true;
+	}
+
+	Damage = AClutchRoundState::ResolveRoleDamage(
+		DealerRole, VictimRole, DefenderDamagePerHit, AttackerDamagePerHit);
 	if (Damage <= 0)
 	{
 		Momentum = FVector::ZeroVector;
@@ -1549,18 +1585,10 @@ bool AClutchGameMode::ModifyDamage_Implementation(int32& Damage, FVector& Moment
 void AClutchGameMode::ScoreDamage_Implementation(
 	int32 DamageAmount, AUTPlayerState* Victim, AUTPlayerState* Attacker)
 {
+	// Attacker armor pips are registered in ModifyDamage, which can tell a direct
+	// defender hit from radial rocket splash. ScoreDamage only sees the applied
+	// amount and cannot make that distinction, so it no longer counts hits here.
 	Super::ScoreDamage_Implementation(DamageAmount, Victim, Attacker);
-
-	if (!ClutchState || DamageAmount <= 0 || !IsCombatPhase())
-	{
-		return;
-	}
-	if (IsActiveRole(Attacker, EClutchRole::Defender)
-		&& IsActiveRole(Victim, EClutchRole::Attacker))
-	{
-		ClutchState->AddAttackerHit(Victim);
-		QueueWinCheck();
-	}
 }
 
 
