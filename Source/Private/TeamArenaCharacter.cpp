@@ -198,10 +198,19 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 				// materials have no emissive source (only the eyes do, which is why only they glowed). So
 				// Glow OVERBRIGHTS the recolour colour. The emissive scalars are still fed (harmless; helps
 				// any model that does have a body emissive channel).
-				const float Glow = FMath::Clamp(Side.Brightness, 1.f, 5.f);
+				// Hard cap at 3.5 (was 5): a blinding-bright forced model is a visibility
+				// advantage, so clamp here at the authoritative apply point — this covers the
+				// F5 slider, a hand-edited Mod.ini, and any stale stored 5.0 alike.
+				const float Glow = FMath::Clamp(Side.Brightness, 1.f, 3.5f);
 				Colour        = NCPlusForceModels::GetSkinColour(Side) * Glow;
 				Colour.A      = 1.f;                       // operator* scales alpha too; keep it opaque
-				GlowIntensity = (Glow - 1.f) * 1.25f;      // 1 -> 0, 5 -> 5 emissive (only shows where supported)
+				// Emissive is DECOUPLED from the albedo overbright and capped harder. The albedo (above)
+				// keeps scaling to x3.5 so models stay vivid/readable, but the self-lit emissive — the
+				// "radioactive" bloom that ignores scene lighting — is clamped to EmissiveGlowCap so a
+				// high Glow can't turn a lineup into neon. Emissive still ramps 0..cap for Glow 1..~2.4,
+				// then holds flat while the colour keeps brightening.
+				static const float EmissiveGlowCap = 2.5f;   // lower = calmer bloom
+				GlowIntensity = FMath::Min((Glow - 1.f) * 1.25f, EmissiveGlowCap);
 				bWantForce    = true;
 			}
 		}

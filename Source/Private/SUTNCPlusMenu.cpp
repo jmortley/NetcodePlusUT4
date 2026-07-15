@@ -673,7 +673,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 		.Padding(0, 2, 0, 2)
 		[
 			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 5.f, 0.25f) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 3.5f, 0.25f) ]
 			// "Armour Glow": dims the emissive armour/shield overlay so armoured pawns aren't radioactive.
 			// 1 = stock full-bright (current), 0 = no glow. Consumed in TeamArenaCharacter::UpdateArmorOverlay.
 			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Armour Glow"), &Side->ArmourGlow, 0.f, 1.f, 0.05f) ]
