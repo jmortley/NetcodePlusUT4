@@ -155,6 +155,55 @@ bool FClutchDerivedRosterTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FClutchRosterIdentityTest,
+	"NetcodePlus.Clutch.Rules.RosterIdentity",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
+
+bool FClutchRosterIdentityTest::RunTest(const FString& Parameters)
+{
+	AClutchRoundState* RoundState = GetMutableDefault<AClutchRoundState>();
+	TestNotNull(TEXT("Round-state CDO exists"), RoundState);
+	if (!RoundState)
+	{
+		return false;
+	}
+
+	// Identity lookups must only ever reclaim VACATED rows (PlayerState == nullptr,
+	// as DetachPlayer leaves them). Hub bots can collide on session PlayerIds, and a
+	// lookup that matched a LIVE row let one bot hijack another's entry, cross-linking
+	// the roster until a team had no valid slots and selection wedged.
+	const TArray<FClutchRosterEntry> SavedRoster = RoundState->Roster;
+	RoundState->Roster.Reset();
+
+	FClutchRosterEntry LiveRow;
+	// Any non-null marker works; identity lookups never dereference it.
+	LiveRow.PlayerState = GetMutableDefault<AUTPlayerState>();
+	LiveRow.StablePlayerId = TEXT("name:barktooth");
+	LiveRow.PlayerIdFallback = 7;
+	LiveRow.TeamIndex = 0;
+	RoundState->Roster.Add(LiveRow);
+
+	TestNull(TEXT("A live row is never matched by stable id"),
+		RoundState->FindEntryByIdentity(TEXT("name:barktooth"), INDEX_NONE));
+	TestNull(TEXT("A live row is never matched by a colliding PlayerId"),
+		RoundState->FindEntryByIdentity(TEXT("name:kali"), 7));
+
+	// Vacate the row the way DetachPlayer does and identity reclaim opens up.
+	RoundState->Roster[0].PlayerState = nullptr;
+
+	TestNotNull(TEXT("A vacated row is reclaimed by the same stable id"),
+		RoundState->FindEntryByIdentity(TEXT("name:barktooth"), INDEX_NONE));
+	TestNotNull(TEXT("A vacated row is reclaimed via the PlayerId fallback"),
+		RoundState->FindEntryByIdentity(TEXT("name:kali"), 7));
+	TestNull(TEXT("An unmatched online uid never falls back to PlayerId reuse"),
+		RoundState->FindEntryByIdentity(TEXT("uid:12345"), 7));
+
+	RoundState->Roster = SavedRoster;
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FClutchSpectatorRulesTest,
 	"NetcodePlus.Clutch.Rules.Spectating",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EngineFilter)
