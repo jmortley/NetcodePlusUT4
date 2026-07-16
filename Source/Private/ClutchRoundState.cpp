@@ -119,11 +119,18 @@ const FClutchRosterEntry* AClutchRoundState::FindEntry(const AUTPlayerState* Pla
 const FClutchRosterEntry* AClutchRoundState::FindEntryByIdentity(
 	const FString& StablePlayerId, int32 PlayerIdFallback) const
 {
+	// Identity matching exists solely so a RECONNECT can reclaim the row DetachPlayer
+	// vacated (PlayerState == nullptr). A row that a living PlayerState still owns must
+	// never be stolen: hub bots can share names and non-unique session PlayerIds, and
+	// matching one bot's lookup onto another bot's live row cross-links the roster -
+	// every refresh then re-flips the tangled rows (observed as endless same-direction
+	// "team change" log pairs) until a team has no valid slots and selection wedges.
 	if (!StablePlayerId.IsEmpty())
 	{
 		for (const FClutchRosterEntry& Entry : Roster)
 		{
-			if (!Entry.StablePlayerId.IsEmpty() && Entry.StablePlayerId == StablePlayerId)
+			if (Entry.PlayerState == nullptr
+				&& !Entry.StablePlayerId.IsEmpty() && Entry.StablePlayerId == StablePlayerId)
 			{
 				return &Entry;
 			}
@@ -141,7 +148,8 @@ const FClutchRosterEntry* AClutchRoundState::FindEntryByIdentity(
 	{
 		for (const FClutchRosterEntry& Entry : Roster)
 		{
-			if (Entry.PlayerIdFallback == PlayerIdFallback
+			if (Entry.PlayerState == nullptr
+				&& Entry.PlayerIdFallback == PlayerIdFallback
 				&& !Entry.StablePlayerId.StartsWith(TEXT("uid:")))
 			{
 				return &Entry;
@@ -175,11 +183,15 @@ FClutchRosterEntry* AClutchRoundState::FindMutableEntry(const AUTPlayerState* Pl
 FClutchRosterEntry* AClutchRoundState::FindMutableEntryByIdentity(
 	const FString& StablePlayerId, int32 PlayerIdFallback)
 {
+	// Mirrors FindEntryByIdentity: identity may only reclaim a VACATED row (see the
+	// const overload for the full rationale). UpsertPlayer routes through here, so a
+	// live row that failed the pointer pass must produce a NEW row, never a hijack.
 	if (!StablePlayerId.IsEmpty())
 	{
 		for (FClutchRosterEntry& Entry : Roster)
 		{
-			if (!Entry.StablePlayerId.IsEmpty() && Entry.StablePlayerId == StablePlayerId)
+			if (Entry.PlayerState == nullptr
+				&& !Entry.StablePlayerId.IsEmpty() && Entry.StablePlayerId == StablePlayerId)
 			{
 				return &Entry;
 			}
@@ -195,7 +207,8 @@ FClutchRosterEntry* AClutchRoundState::FindMutableEntryByIdentity(
 	{
 		for (FClutchRosterEntry& Entry : Roster)
 		{
-			if (Entry.PlayerIdFallback == PlayerIdFallback
+			if (Entry.PlayerState == nullptr
+				&& Entry.PlayerIdFallback == PlayerIdFallback
 				&& !Entry.StablePlayerId.StartsWith(TEXT("uid:")))
 			{
 				return &Entry;
