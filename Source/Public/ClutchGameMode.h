@@ -12,6 +12,7 @@ class AClutchPoleVisual;
 class AUTInventory;
 class AUTPlayerState;
 class AUTWeapon;
+class APlayerStart;
 
 /** Runtime-only per-weapon ammo-regen bookkeeping (never replicated). */
 struct FClutchAmmoRegenState
@@ -47,6 +48,7 @@ public:
 	virtual bool PlayerCanRestart_Implementation(APlayerController* Player) override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual AActor* ChoosePlayerStart_Implementation(AController* Player) override;
+	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
 	virtual void SetPlayerDefaults(APawn* PlayerPawn) override;
 	virtual void GiveDefaultInventory(APawn* PlayerPawn) override;
 	virtual void DiscardInventory(APawn* Other, AController* Killer = nullptr) override;
@@ -184,6 +186,31 @@ protected:
 	void PrepareAttackOrderRoster();
 	void HandleAttackOrderRosterChanged(uint8 ChangedTeamIndex);
 	void AssignAttackOrderSelectors();
+
+	/** Locks the current/default order for any team that has players but no human who
+	 *  could ever submit one (bot-filled sides). Fires the finish check when that
+	 *  completes the lock set, so a lone human vs bots starts as soon as they confirm. */
+	void EvaluateAttackOrderAutoLocks();
+
+	/** True when any connected roster entry on the team is a human player. */
+	bool TeamHasHumanPlayer(uint8 TeamIndex) const;
+
+	/** False while the server still owes bodies to the bot fill. Auto-lock fast-starts
+	 *  wait for this so a round can't begin 1v1 four milliseconds after match start
+	 *  while five bots are still trickling in; the selection deadline stays the
+	 *  backstop, so a fill that never completes cannot wedge the match. */
+	bool IsRosterFillSettled() const;
+
+	/** Gameplay-phase watchdog: folds late joiners into the roster (some bot paths
+	 *  bypass PostLogin AND ChangeTeam) and benches any pawn whose owner is not an
+	 *  Active round participant, so stragglers cannot wander a live round. */
+	void EnforceRoundMembership();
+
+	/** Polled during OrderSelection: when the connected roster changes (bots join via
+	 *  AddBot with no PostLogin, humans leave, ...), re-run the roster/lock/selector
+	 *  reconciliation. Join-path agnostic by design. */
+	UFUNCTION()
+	void OnOrderSelectionRosterWatch();
 	void GetConnectedTeamSlots(uint8 TeamIndex, TArray<int32>& OutSlots) const;
 	void BeginRound();
 	bool SelectRoundRoles();
@@ -222,6 +249,14 @@ protected:
 	void UpdatePole(float DeltaSeconds);
 	void UpdateAmmoRegen(float DeltaSeconds);
 	bool IsCombatPhase() const;
+
+	/** Shared clip-regen step for one weapon (empty-pause arming, grant, bookkeeping). */
+	void AdvanceWeaponClipRegen(AUTWeapon* Weapon, float DeltaSeconds);
+
+	/** Regenerates the equipped weapon of every living pawn outside combat rounds
+	 *  (warmup, waiting, intermission), so the both-guns practice loadout keeps the
+	 *  round's magazine behavior instead of running dry forever. */
+	void UpdateWarmupAmmoRegen(float DeltaSeconds);
 	bool IsActiveRoundPlayer(const AUTPlayerState* PlayerState) const;
 	bool IsActiveRole(const AUTPlayerState* PlayerState, EClutchRole Role) const;
 	int32 CountActiveDefenders() const;
@@ -233,8 +268,20 @@ protected:
 	FTimerHandle IntermissionTimerHandle;
 	FTimerHandle AttackOrderSelectionTimerHandle;
 	FTimerHandle SpawnQueueTimerHandle;
+	FTimerHandle OrderRosterWatchTimerHandle;
+	/** Connected-player counts per team last seen by the OrderSelection roster watch. */
+	int32 OrderRosterWatchCounts[2];
+	/** Last time the round-blocked reason was logged, to throttle the waiting loop. */
+	float LastWaitingLogTime;
+	/** Accumulates Tick time toward the once-per-second round-membership check. */
+	float MembershipWatchAccumulator;
 	TArray<TWeakObjectPtr<AController>> PendingRoundSpawns;
 	TMap<TWeakObjectPtr<AController>, int32> RoundSpawnAttempts;
+	/** Role starts already handed out during the current round's spawn pass, so
+	 *  sequential same-role spawns (and retries) spread across the available starts
+	 *  instead of all colliding on the single best one. Raw pointers are safe: player
+	 *  starts are stable level actors and this is cleared each BuildRoundSpawnQueue. */
+	TArray<APlayerStart*> RoundAssignedStarts;
 	/** Per-weapon regen bookkeeping, keyed by the active role weapon instance. */
 	TMap<TWeakObjectPtr<AUTWeapon>, FClutchAmmoRegenState> AmmoRegenState;
 	int32 NextAttackerSlot[2];

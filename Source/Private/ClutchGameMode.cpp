@@ -171,8 +171,12 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	// The rules scale from 1v1 through 3v3. This keeps two-client PIE usable;
 	// SelectRoundRoles still waits until at least one player exists on each team.
 	bRequireFull = false;
-	bForceNoBots = true;
-	bBalanceTeams = true;
+	// Bots are supported (InitGame default-fills empty slots on dedicated servers).
+	bForceNoBots = false;
+	// Never auto-shuffle teams: Clutch rotates attack/defend by round, so mid-match
+	// rebalancing desyncs the round roster (and thus each player's displayed role) from
+	// their live team. Join-time smallest-team assignment still applies.
+	bBalanceTeams = false;
 	bUseTeamStarts = true;
 	bAnnounceTeam = false;
 	bForceRespawn = false;
@@ -222,6 +226,10 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	bPoleCaptured = false;
 	bWinCheckQueued = false;
 	bFinishingAttackOrderSelection = false;
+	OrderRosterWatchCounts[0] = -1;
+	OrderRosterWatchCounts[1] = -1;
+	LastWaitingLogTime = -1000.0f;
+	MembershipWatchAccumulator = 0.0f;
 
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickInterval = 0.05f;
@@ -300,10 +308,25 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 		GameSession->MaxPlayers = DefaultMaxPlayers;
 	}
 
+	// Clutch rotates roles by round, so team auto-balancing must stay off regardless of
+	// any ruleset/URL BalanceTeams value (Super::InitGame may have re-enabled it).
+	bBalanceTeams = false;
+
+	// Bots: stock InitGame only auto-fills on standalone/LAN or when ?Bots=/?BotFill= is
+	// given, so a dedicated Clutch server otherwise spawns none and admins must addbots by
+	// hand. When no explicit bot count is requested, fill empty slots with bots up to the
+	// player cap (they are auto-removed as humans join, per CheckBotCount). An explicit
+	// ?BotFill= / ?Bots= (including ?BotFill=0 to force none) still wins.
+	if (!UGameplayStatics::HasOption(Options, TEXT("BotFill"))
+		&& !UGameplayStatics::HasOption(Options, TEXT("Bots")))
+	{
+		BotFillCount = DefaultMaxPlayers;
+	}
+
 	UE_LOG(LogClutch, Log,
-		TEXT("InitGame: first-to-%d, round %.1fs, pole unlock %.1fs, capture %.1fs, hits %d"),
+		TEXT("InitGame: first-to-%d, round %.1fs, pole unlock %.1fs, capture %.1fs, hits %d, botfill %d"),
 		GoalScore, RoundDurationSeconds, PoleUnlockDelaySeconds, PoleCaptureSeconds,
-		MaxAttackerHits);
+		MaxAttackerHits, BotFillCount);
 }
 
 
@@ -391,6 +414,243 @@ void AClutchGameMode::HandleMatchHasStarted()
 }
 
 
+bool AClutchGameMode::TeamHasHumanPlayer(uint8 TeamIndex) const
+{
+	if (!ClutchState || TeamIndex > 1)
+	{
+		return false;
+	}
+	for (const FClutchRosterEntry& Entry : ClutchState->Roster)
+	{
+		// A human's PlayerState is owned by an APlayerController; bots are owned by
+		// AI controllers. This needs no bot flag and works for every join path.
+		if (Entry.PlayerState && Entry.TeamIndex == TeamIndex
+			&& Entry.PlayerStatus != EClutchStatus::Disconnected
+			&& Cast<APlayerController>(Entry.PlayerState->GetOwner()) != nullptr)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+
+bool AClutchGameMode::IsRosterFillSettled() const
+{
+	// CheckBotCount keeps adding bots until humans+bots reach BotFillCount; while it
+	// still owes bodies, single-slot and bot-team auto-locks must not fast-start the
+	// round (a 1v1 lock race four milliseconds after match start skipped the picker
+	// and left late bots outside the round entirely).
+	//
+	// Count from the live PlayerArray rather than NumPlayers/NumBots: hub bots are
+	// counted in NumBots the moment AddBot runs, several ticks before their
+	// PlayerState/controller/team wiring exists ("fill 1+5/6" passed while the roster
+	// could only see 1v1). A player counts as settled only once they are actually
+	// team-assigned and rosterable.
+	int32 EligibleCount = 0;
+	int32 TeamAssignedCount = 0;
+	if (UTGameState)
+	{
+		for (APlayerState* RawPlayerState : UTGameState->PlayerArray)
+		{
+			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(RawPlayerState);
+			if (!PlayerState || PlayerState->bOnlySpectator || PlayerState->bIsInactive
+				|| !Cast<AController>(PlayerState->GetOwner()))
+			{
+				continue;
+			}
+			++EligibleCount;
+			if (GetPlayerTeamIndex(PlayerState) <= 1)
+			{
+				++TeamAssignedCount;
+			}
+		}
+	}
+
+	// Anyone connected but not yet on a team is still mid-join; wait for them.
+	if (TeamAssignedCount < EligibleCount)
+	{
+		return false;
+	}
+	return TeamAssignedCount >= FMath::Min(BotFillCount, DefaultMaxPlayers);
+}
+
+
+void AClutchGameMode::EnforceRoundMembership()
+{
+	if (!HasAuthority() || !ClutchState || !ClutchState->IsGameplayPhase() || bEndingRound)
+	{
+		return;
+	}
+
+	// Fold in anyone the roster has never seen (some bot-add paths bypass PostLogin
+	// AND ChangeTeam), and re-sync anyone whose LIVE team no longer matches their
+	// roster row (an unnoticed team move would otherwise leave them playing the
+	// wrong role - e.g. a red teammate still rostered as an active blue defender).
+	if (UTGameState)
+	{
+		for (APlayerState* RawPlayerState : UTGameState->PlayerArray)
+		{
+			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(RawPlayerState);
+			if (!PlayerState || PlayerState->bOnlySpectator || PlayerState->bIsInactive
+				|| !Cast<AController>(PlayerState->GetOwner()))
+			{
+				continue;
+			}
+			const FClutchRosterEntry* Entry = ClutchState->FindEntry(PlayerState);
+			const uint8 LiveTeam = GetPlayerTeamIndex(PlayerState);
+			if (!Entry)
+			{
+				UE_LOG(LogClutch, Log,
+					TEXT("Mid-round joiner %s entered outside PostLogin/ChangeTeam - adding to roster as queued"),
+					*PlayerState->PlayerName);
+				RefreshRoster();
+				break;
+			}
+			if (LiveTeam <= 1 && Entry->TeamIndex != LiveTeam)
+			{
+				UE_LOG(LogClutch, Warning,
+					TEXT("Roster/live team mismatch for %s (roster %d, live %d) - re-syncing; they re-queue for next round"),
+					*PlayerState->PlayerName, Entry->TeamIndex, LiveTeam);
+				RefreshRoster();
+				break;
+			}
+		}
+	}
+
+	// Only Active round participants may hold a pawn during a live round. Anything
+	// else (a straggler spawned by stock bot logic or a Blueprint path around our
+	// RestartPlayer gate) is benched to spectate until the next round rotates it in.
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+	{
+		AUTCharacter* Character = Cast<AUTCharacter>(It->Get());
+		if (!Character || Character->IsPendingKillPending() || Character->IsDead())
+		{
+			continue;
+		}
+		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(Character->PlayerState);
+		if (!PlayerState || IsActiveRoundPlayer(PlayerState))
+		{
+			continue;
+		}
+
+		UE_LOG(LogClutch, Warning,
+			TEXT("Benching out-of-round pawn %s (no active roster slot this round)"),
+			*PlayerState->PlayerName);
+		AController* Controller = Character->GetController();
+		if (Controller)
+		{
+			Controller->UnPossess();
+		}
+		Character->DiscardAllInventory();
+		Character->Destroy();
+		if (Controller)
+		{
+			EnterSpectating(Controller, FindActiveTeammate(PlayerState));
+		}
+	}
+}
+
+
+void AClutchGameMode::EvaluateAttackOrderAutoLocks()
+{
+	if (!ClutchState || ClutchState->Phase != EClutchRoundPhase::OrderSelection)
+	{
+		return;
+	}
+
+	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		TArray<int32> ConnectedSlots;
+		GetConnectedTeamSlots(TeamIndex, ConnectedSlots);
+		if (ConnectedSlots.Num() == 0 || TeamHasHumanPlayer(TeamIndex)
+			|| ClutchState->IsAttackOrderLocked(TeamIndex))
+		{
+			continue;
+		}
+
+		// No human on this side will ever press confirm; a bot "selector" would make
+		// the round wait out the full deadline for nothing. Lock the current (or
+		// default slot-order) rotation now.
+		TArray<int32> OrderedSlots;
+		ClutchState->GetTeamAttackOrderSlots(TeamIndex, OrderedSlots);
+		if (!AClutchRoundState::IsValidAttackOrder(ConnectedSlots, OrderedSlots))
+		{
+			OrderedSlots = ConnectedSlots;
+		}
+		if (ClutchState->SetTeamAttackOrder(TeamIndex, OrderedSlots, true))
+		{
+			UE_LOG(LogClutch, Log,
+				TEXT("Attack order auto-locked for bot-only team %d (%d slots)"),
+				TeamIndex, OrderedSlots.Num());
+		}
+	}
+
+	TArray<int32> Team0Slots;
+	TArray<int32> Team1Slots;
+	GetConnectedTeamSlots(0, Team0Slots);
+	GetConnectedTeamSlots(1, Team1Slots);
+	if (Team0Slots.Num() > 0 && Team1Slots.Num() > 0
+		&& ClutchState->AreAttackOrdersLocked()
+		&& IsRosterFillSettled())
+	{
+		GetWorldTimerManager().SetTimerForNextTick(
+			this, &AClutchGameMode::FinishAttackOrderSelection);
+	}
+}
+
+
+void AClutchGameMode::OnOrderSelectionRosterWatch()
+{
+	if (!HasAuthority() || !ClutchState
+		|| ClutchState->Phase != EClutchRoundPhase::OrderSelection)
+	{
+		GetWorldTimerManager().ClearTimer(OrderRosterWatchTimerHandle);
+		return;
+	}
+
+	// Count connected non-spectator players per team straight from the live player
+	// list, so the check is independent of how they joined (bots never PostLogin).
+	int32 Counts[2] = { 0, 0 };
+	if (UTGameState)
+	{
+		for (APlayerState* RawPlayerState : UTGameState->PlayerArray)
+		{
+			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(RawPlayerState);
+			if (!PlayerState || PlayerState->bOnlySpectator || PlayerState->bIsInactive
+				|| !Cast<AController>(PlayerState->GetOwner()))
+			{
+				continue;
+			}
+			const uint8 TeamIndex = GetPlayerTeamIndex(PlayerState);
+			if (TeamIndex <= 1)
+			{
+				++Counts[TeamIndex];
+			}
+		}
+	}
+
+	if (Counts[0] == OrderRosterWatchCounts[0] && Counts[1] == OrderRosterWatchCounts[1])
+	{
+		return;
+	}
+
+	UE_LOG(LogClutch, Log,
+		TEXT("Order-selection roster changed: team0 %d -> %d, team1 %d -> %d - reconciling"),
+		OrderRosterWatchCounts[0], Counts[0], OrderRosterWatchCounts[1], Counts[1]);
+	OrderRosterWatchCounts[0] = Counts[0];
+	OrderRosterWatchCounts[1] = Counts[1];
+
+	// Fold the newcomers/leavers into the roster, drop stale locks (a single-slot
+	// auto-lock taken before a team filled up must not reject the human's real pick),
+	// reassign selectors, and re-run the bot auto-locks.
+	RefreshRoster();
+	HandleAttackOrderRosterChanged(0);
+	HandleAttackOrderRosterChanged(1);
+	EvaluateAttackOrderAutoLocks();
+}
+
+
 void AClutchGameMode::HandleMatchHasEnded()
 {
 	GetWorldTimerManager().ClearAllTimersForObject(this);
@@ -420,6 +680,20 @@ void AClutchGameMode::Tick(float DeltaSeconds)
 	if (IsCombatPhase())
 	{
 		UpdateAmmoRegen(DeltaSeconds);
+
+		MembershipWatchAccumulator += DeltaSeconds;
+		if (MembershipWatchAccumulator >= 1.0f)
+		{
+			MembershipWatchAccumulator = 0.0f;
+			EnforceRoundMembership();
+		}
+	}
+	else
+	{
+		MembershipWatchAccumulator = 0.0f;
+		// Warmup, waiting, and intermission pawns carry the practice loadout; keep
+		// their clips regenerating so they don't run dry with no round to reset them.
+		UpdateWarmupAmmoRegen(DeltaSeconds);
 	}
 }
 
@@ -519,6 +793,20 @@ void AClutchGameMode::RefreshRoster()
 			Status = Existing->PlayerStatus;
 		}
 
+		// Change-only logging: joins and team moves are the events every roster bug
+		// so far has hinged on, and they were invisible in server logs.
+		if (!Existing)
+		{
+			UE_LOG(LogClutch, Log, TEXT("Rostered %s on team %d slot %d"),
+				*PlayerState->PlayerName, TeamIndex, Slot);
+		}
+		else if (Existing->TeamIndex != TeamIndex)
+		{
+			UE_LOG(LogClutch, Log,
+				TEXT("Roster team change for %s: %d -> %d (re-queued for next round)"),
+				*PlayerState->PlayerName, Existing->TeamIndex, TeamIndex);
+		}
+
 		ClutchState->UpsertPlayer(PlayerState, TeamIndex, Slot, Role, Status);
 	}
 }
@@ -591,21 +879,29 @@ void AClutchGameMode::AssignAttackOrderSelectors()
 
 	// Casual games and PIE do not carry ?Captains=. The lowest stable roster
 	// slot becomes the selector, which is deterministic across reconnects.
+	// Humans are preferred over bots: a bot selector can never confirm an order,
+	// which would leave the team waiting out the full deadline for nothing.
 	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
 	{
 		if (Selectors[TeamIndex])
 		{
 			continue;
 		}
-		for (int32 Slot = 0; Slot < 6 && !Selectors[TeamIndex]; ++Slot)
+		for (int32 Pass = 0; Pass < 2 && !Selectors[TeamIndex]; ++Pass)
 		{
-			for (const FClutchRosterEntry& Entry : ClutchState->Roster)
+			const bool bHumansOnly = Pass == 0;
+			for (int32 Slot = 0; Slot < 6 && !Selectors[TeamIndex]; ++Slot)
 			{
-				if (Entry.PlayerState && Cast<AController>(Entry.PlayerState->GetOwner())
-					&& Entry.TeamIndex == TeamIndex && Entry.RosterSlot == Slot)
+				for (const FClutchRosterEntry& Entry : ClutchState->Roster)
 				{
-					Selectors[TeamIndex] = Entry.PlayerState;
-					break;
+					if (Entry.PlayerState && Cast<AController>(Entry.PlayerState->GetOwner())
+						&& Entry.TeamIndex == TeamIndex && Entry.RosterSlot == Slot
+						&& (!bHumansOnly
+							|| Cast<APlayerController>(Entry.PlayerState->GetOwner()) != nullptr))
+					{
+						Selectors[TeamIndex] = Entry.PlayerState;
+						break;
+					}
 				}
 			}
 		}
@@ -677,10 +973,12 @@ void AClutchGameMode::BeginAttackOrderSelection()
 	PrepareAttackOrderRoster();
 
 	bool bBothTeamsPresent = true;
+	int32 SlotCounts[2] = { 0, 0 };
 	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
 	{
 		TArray<int32> Slots;
 		GetConnectedTeamSlots(TeamIndex, Slots);
+		SlotCounts[TeamIndex] = Slots.Num();
 		bBothTeamsPresent &= Slots.Num() > 0;
 		if (Slots.Num() == 1)
 		{
@@ -688,7 +986,26 @@ void AClutchGameMode::BeginAttackOrderSelection()
 		}
 	}
 
-	if (bBothTeamsPresent && ClutchState->AreAttackOrdersLocked())
+	// Teams that can never submit a pick (no human) lock their default order now.
+	EvaluateAttackOrderAutoLocks();
+
+	// Late joiners can arrive through paths with no PostLogin (AddBot). Poll the
+	// connected roster while the picker is open and reconcile on any change; the
+	// watcher retires itself once the phase moves on.
+	OrderRosterWatchCounts[0] = -1;
+	OrderRosterWatchCounts[1] = -1;
+	GetWorldTimerManager().SetTimer(
+		OrderRosterWatchTimerHandle, this,
+		&AClutchGameMode::OnOrderSelectionRosterWatch, 0.5f, true);
+
+	UE_LOG(LogClutch, Log,
+		TEXT("Attack-order selection open: team0 %d slot(s), team1 %d slot(s), lock mask 0x%02x, deadline %.0fs, fill %d+%d/%d%s"),
+		SlotCounts[0], SlotCounts[1], ClutchState->AttackOrderLockedMask,
+		AttackOrderSelectionSeconds, NumPlayers, NumBots, BotFillCount,
+		IsRosterFillSettled() ? TEXT("") : TEXT(" (fast-start held for bot fill)"));
+
+	if (bBothTeamsPresent && ClutchState->AreAttackOrdersLocked()
+		&& IsRosterFillSettled())
 	{
 		GetWorldTimerManager().SetTimerForNextTick(
 			this, &AClutchGameMode::FinishAttackOrderSelection);
@@ -726,7 +1043,8 @@ void AClutchGameMode::HandleAttackOrderRosterChanged(uint8 ChangedTeamIndex)
 	GetConnectedTeamSlots(0, Team0Slots);
 	GetConnectedTeamSlots(1, Team1Slots);
 	if (Team0Slots.Num() > 0 && Team1Slots.Num() > 0
-		&& ClutchState->AreAttackOrdersLocked())
+		&& ClutchState->AreAttackOrdersLocked()
+		&& IsRosterFillSettled())
 	{
 		GetWorldTimerManager().SetTimerForNextTick(
 			this, &AClutchGameMode::FinishAttackOrderSelection);
@@ -748,6 +1066,11 @@ bool AClutchGameMode::SubmitAttackOrder(
 	{
 		if (Sender)
 		{
+			UE_LOG(LogClutch, Log,
+				TEXT("Attack order rejected for %s: outside the selection window (entry=%d phase=%d)"),
+				PlayerState ? *PlayerState->PlayerName : TEXT("unknown"),
+				Entry != nullptr,
+				ClutchState ? static_cast<int32>(ClutchState->Phase) : -1);
 			Sender->ClientMessage(TEXT("Attack order can only be selected before round one."));
 		}
 		return false;
@@ -756,11 +1079,15 @@ bool AClutchGameMode::SubmitAttackOrder(
 	const uint8 TeamIndex = Entry->TeamIndex;
 	if (!Entry->bAttackOrderSelector)
 	{
+		UE_LOG(LogClutch, Log, TEXT("Attack order rejected for %s: not team %d's selector"),
+			*PlayerState->PlayerName, TeamIndex);
 		Sender->ClientMessage(TEXT("Only your team's order selector can confirm the attack order."));
 		return false;
 	}
 	if (ClutchState->IsAttackOrderLocked(TeamIndex))
 	{
+		UE_LOG(LogClutch, Log, TEXT("Attack order rejected for %s: team %d already locked"),
+			*PlayerState->PlayerName, TeamIndex);
 		Sender->ClientMessage(TEXT("Your team's attack order is already locked."));
 		return false;
 	}
@@ -769,11 +1096,16 @@ bool AClutchGameMode::SubmitAttackOrder(
 	GetConnectedTeamSlots(TeamIndex, EligibleSlots);
 	if (!AClutchRoundState::IsValidAttackOrder(EligibleSlots, OrderedRosterSlots))
 	{
+		UE_LOG(LogClutch, Log,
+			TEXT("Attack order rejected for %s: not a permutation of team %d's %d slot(s)"),
+			*PlayerState->PlayerName, TeamIndex, EligibleSlots.Num());
 		Sender->ClientMessage(TEXT("Attack order rejected: select every teammate exactly once."));
 		return false;
 	}
 	if (!ClutchState->SetTeamAttackOrder(TeamIndex, OrderedRosterSlots, true))
 	{
+		UE_LOG(LogClutch, Warning, TEXT("Attack order save failed for %s (team %d)"),
+			*PlayerState->PlayerName, TeamIndex);
 		Sender->ClientMessage(TEXT("Attack order could not be saved."));
 		return false;
 	}
@@ -800,6 +1132,12 @@ void AClutchGameMode::FinishAttackOrderSelection()
 
 	bFinishingAttackOrderSelection = true;
 	GetWorldTimerManager().ClearTimer(AttackOrderSelectionTimerHandle);
+	GetWorldTimerManager().ClearTimer(OrderRosterWatchTimerHandle);
+
+	// Fold in anyone who joined since the picker opened (AddBot has no PostLogin);
+	// finishing against a stale roster is how an auto-filled team ended up with zero
+	// order slots and wedged the match in a silent selection loop.
+	RefreshRoster();
 	PrepareAttackOrderRoster();
 	for (uint8 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
 	{
@@ -809,6 +1147,9 @@ void AClutchGameMode::FinishAttackOrderSelection()
 		{
 			// A team left during the picker. Return to the normal waiting loop and
 			// show the picker again as soon as both sides are present.
+			UE_LOG(LogClutch, Warning,
+				TEXT("Attack-order selection finished with EMPTY team %d - waiting for players, picker re-opens in 2s"),
+				TeamIndex);
 			ClutchState->SetPhase(EClutchRoundPhase::Waiting);
 			bFinishingAttackOrderSelection = false;
 			GetWorldTimerManager().SetTimer(
@@ -819,9 +1160,13 @@ void AClutchGameMode::FinishAttackOrderSelection()
 		if (!ClutchState->IsAttackOrderLocked(TeamIndex))
 		{
 			ClutchState->SetTeamAttackOrder(TeamIndex, OrderedSlots, true);
+			UE_LOG(LogClutch, Log,
+				TEXT("Attack order defaulted for team %d at the deadline (%d slots)"),
+				TeamIndex, OrderedSlots.Num());
 		}
 	}
 
+	UE_LOG(LogClutch, Log, TEXT("Attack orders locked for both teams; starting round play"));
 	BeginNextRound();
 }
 
@@ -837,6 +1182,7 @@ void AClutchGameMode::BeginRound()
 	GetWorldTimerManager().ClearTimer(RoundTimeoutTimerHandle);
 	GetWorldTimerManager().ClearTimer(AttackOrderSelectionTimerHandle);
 	GetWorldTimerManager().ClearTimer(SpawnQueueTimerHandle);
+	GetWorldTimerManager().ClearTimer(OrderRosterWatchTimerHandle);
 
 	EnsureClutchState();
 	RefreshRoster();
@@ -852,6 +1198,18 @@ void AClutchGameMode::BeginRound()
 
 	if (!ClutchState || !PoleActor || !SelectRoundRoles())
 	{
+		// Name the blocker, throttled: this branch retries every 2 seconds and used to
+		// be completely silent, which made a wedged match undiagnosable from the log.
+		const float Now = GetWorld()->GetTimeSeconds();
+		if (Now - LastWaitingLogTime > 10.0f)
+		{
+			LastWaitingLogTime = Now;
+			UE_LOG(LogClutch, Warning,
+				TEXT("Round blocked: %s - holding in Waiting (retry every 2s, next log in 10s)"),
+				!ClutchState ? TEXT("no ClutchRoundState")
+				: !PoleActor ? TEXT("no pole marker (see ResolvePoleActor warnings)")
+				: TEXT("role selection failed (see SelectRoundRoles messages)"));
+		}
 		if (ClutchState)
 		{
 			ClutchState->SetPhase(EClutchRoundPhase::Waiting);
@@ -906,6 +1264,9 @@ bool AClutchGameMode::SelectRoundRoles()
 
 	if (SlotsByTeam[0].Num() == 0 || SlotsByTeam[1].Num() == 0)
 	{
+		UE_LOG(LogClutch, Verbose,
+			TEXT("SelectRoundRoles: no connected slots (team0=%d team1=%d)"),
+			SlotsByTeam[0].Num(), SlotsByTeam[1].Num());
 		return false;
 	}
 
@@ -923,6 +1284,9 @@ bool AClutchGameMode::SelectRoundRoles()
 		AttackingFullOrder, SlotsByTeam[AttackingTeam], NextAttackerSlot[AttackingTeam]);
 	if (SelectedSlot == INDEX_NONE)
 	{
+		UE_LOG(LogClutch, Warning,
+			TEXT("SelectRoundRoles: no selectable attacker slot on team %d (order=%d connected=%d)"),
+			AttackingTeam, AttackingFullOrder.Num(), SlotsByTeam[AttackingTeam].Num());
 		return false;
 	}
 
@@ -939,6 +1303,9 @@ bool AClutchGameMode::SelectRoundRoles()
 	}
 	if (!SelectedAttacker)
 	{
+		UE_LOG(LogClutch, Warning,
+			TEXT("SelectRoundRoles: no connected entry for team %d roster slot %d"),
+			AttackingTeam, SelectedSlot);
 		return false;
 	}
 
@@ -980,6 +1347,32 @@ bool AClutchGameMode::SelectRoundRoles()
 		}
 	}
 
+	// Round-setup diagnostics: dump the per-player role/status so a broken assignment
+	// (wrong team, missing defenders, everyone benched) is visible in the server log
+	// before combat, instead of being inferred from an instant round result.
+	int32 AttackerCount = 0, DefenderCount = 0, BenchedCount = 0;
+	for (const FClutchRosterEntry& Entry : ClutchState->Roster)
+	{
+		if (!Entry.PlayerState || !Cast<AController>(Entry.PlayerState->GetOwner()))
+		{
+			continue;
+		}
+		if (Entry.PlayerStatus == EClutchStatus::Active
+			&& Entry.PlayerRole == EClutchRole::Attacker) { ++AttackerCount; }
+		else if (Entry.PlayerStatus == EClutchStatus::Active
+			&& Entry.PlayerRole == EClutchRole::Defender) { ++DefenderCount; }
+		else if (Entry.PlayerStatus == EClutchStatus::Benched) { ++BenchedCount; }
+		UE_LOG(LogClutch, Log, TEXT("  roster %s: team=%d role=%d status=%d slot=%d"),
+			*Entry.PlayerState->PlayerName, Entry.TeamIndex,
+			static_cast<int32>(Entry.PlayerRole), static_cast<int32>(Entry.PlayerStatus),
+			static_cast<int32>(Entry.RosterSlot));
+	}
+	UE_LOG(LogClutch, Log,
+		TEXT("Round %d roles: team %d attacks (%s) - attackers=%d defenders=%d benched=%d"),
+		ClutchState->RoundNumber, AttackingTeam,
+		SelectedAttacker ? *SelectedAttacker->PlayerName : TEXT("none"),
+		AttackerCount, DefenderCount, BenchedCount);
+
 	// Inventory and health are assigned during this short spawn phase. Combat
 	// begins only after every active controller has received exactly one pawn.
 	ClutchState->SetPhase(EClutchRoundPhase::Intermission);
@@ -991,6 +1384,7 @@ void AClutchGameMode::BuildRoundSpawnQueue()
 {
 	PendingRoundSpawns.Reset();
 	RoundSpawnAttempts.Reset();
+	RoundAssignedStarts.Reset();
 	AUTPlayerState* ActiveAttacker = GetActiveAttacker();
 
 	// Attacker first so benched teammates have a valid same-team view target.
@@ -1057,6 +1451,9 @@ void AClutchGameMode::ProcessNextRoundSpawn()
 		if (Controller->GetPawn())
 		{
 			FreezeRoundPawn(Controller);
+			UE_LOG(LogClutch, Verbose, TEXT("  spawned %s at %s"),
+				*PlayerState->PlayerName,
+				*Controller->GetPawn()->GetActorLocation().ToString());
 		}
 		else
 		{
@@ -1147,10 +1544,19 @@ void AClutchGameMode::FinalizeRoundStart()
 		}
 	}
 
-	UE_LOG(LogClutch, Log, TEXT("Round %d started: team %d attacks with %s"),
+	const int32 SpawnedDefenders = CountActiveDefenders();
+	UE_LOG(LogClutch, Log, TEXT("Round %d started: team %d attacks with %s vs %d defender(s)"),
 		ClutchState->RoundNumber,
 		ClutchState->AttackingTeamIndex,
-		ClutchState->ActiveAttacker ? *ClutchState->ActiveAttacker->PlayerName : TEXT("none"));
+		ClutchState->ActiveAttacker ? *ClutchState->ActiveAttacker->PlayerName : TEXT("none"),
+		SpawnedDefenders);
+	if (SpawnedDefenders <= 0)
+	{
+		UE_LOG(LogClutch, Warning,
+			TEXT("Round %d started with NO living defenders - it will resolve instantly by ")
+			TEXT("elimination. Check the role dump and any 'Failed to spawn' errors above."),
+			ClutchState->RoundNumber);
+	}
 	QueueWinCheck();
 }
 
@@ -1389,8 +1795,19 @@ AActor* AClutchGameMode::ChoosePlayerStart_Implementation(AController* Player)
 		return Super::ChoosePlayerStart_Implementation(Player);
 	}
 
+	// Role starts are independent of red/blue ownership because teams rotate attack every
+	// round, so bypass AUTTeamGameMode's team-number rejection and score with the base
+	// rater (retains stock occupancy/proximity scoring). Prefer the best-rated role start
+	// we have NOT already handed out this round's spawn pass, so several same-role players
+	// (and spawn retries) spread across the available starts instead of all piling onto the
+	// single best one — which on maps with clustered role starts made them collide, fail to
+	// spawn, and get wrongly eliminated (collapsing the defending side, ending rounds in
+	// milliseconds). Fall back to the best rated start, then the stock chooser, so a player
+	// always spawns rather than failing.
 	APlayerStart* BestStart = nullptr;
 	float BestRating = -MAX_FLT;
+	APlayerStart* BestFreshStart = nullptr;
+	float BestFreshRating = -MAX_FLT;
 	for (TActorIterator<APlayerStart> It(GetWorld()); It; ++It)
 	{
 		APlayerStart* Candidate = *It;
@@ -1400,18 +1817,42 @@ AActor* AClutchGameMode::ChoosePlayerStart_Implementation(AController* Player)
 			continue;
 		}
 
-		// Role starts are independent of red/blue ownership because teams rotate
-		// attack every round. Bypass AUTTeamGameMode's team-number rejection while
-		// retaining stock occupancy/proximity scoring.
 		const float Rating = AUTGameMode::RatePlayerStart(Candidate, Player);
 		if (!BestStart || Rating > BestRating)
 		{
 			BestStart = Candidate;
 			BestRating = Rating;
 		}
+		if (!RoundAssignedStarts.Contains(Candidate)
+			&& (!BestFreshStart || Rating > BestFreshRating))
+		{
+			BestFreshStart = Candidate;
+			BestFreshRating = Rating;
+		}
 	}
 
-	return BestStart ? BestStart : Super::ChoosePlayerStart_Implementation(Player);
+	APlayerStart* Chosen = BestFreshStart ? BestFreshStart : BestStart;
+	if (!Chosen)
+	{
+		return Super::ChoosePlayerStart_Implementation(Player);
+	}
+	RoundAssignedStarts.Add(Chosen);
+	return Chosen;
+}
+
+
+bool AClutchGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)
+{
+	const bool bChanged = Super::ChangeTeam(Player, NewTeam, bBroadcast);
+	if (bChanged && HasAuthority())
+	{
+		// Keep the roster's team (and therefore each player's displayed role) in sync when
+		// someone switches sides, so a mid-round move doesn't leave the scoreboard showing
+		// the old team's role. RefreshRoster preserves role/status for unchanged players and
+		// resets a mover to Queued until the next round assigns them a fresh role.
+		RefreshRoster();
+	}
+	return bChanged;
 }
 
 
@@ -1449,48 +1890,71 @@ void AClutchGameMode::SetPlayerDefaults(APawn* PlayerPawn)
 
 void AClutchGameMode::GiveDefaultInventory(APawn* PlayerPawn)
 {
-	if (!HasMatchStarted())
+	AUTCharacter* Character = Cast<AUTCharacter>(PlayerPawn);
+	AUTPlayerState* PlayerState = Character ? Cast<AUTPlayerState>(Character->PlayerState) : nullptr;
+	if (!Character || !PlayerState)
 	{
 		Super::GiveDefaultInventory(PlayerPawn);
 		return;
 	}
 
-	AUTCharacter* Character = Cast<AUTCharacter>(PlayerPawn);
-	AUTPlayerState* PlayerState = Character ? Cast<AUTPlayerState>(Character->PlayerState) : nullptr;
-	if (!Character || !PlayerState)
+	if (HasMatchStarted())
 	{
-		return;
+		Character->DefaultCharacterInventory.Empty();
+		Character->DiscardAllInventory();
+		for (AUTInventory* Preserved : PlayerState->PreservedKeepOnDeathInventoryList)
+		{
+			if (Preserved && !Preserved->IsPendingKillPending())
+			{
+				Preserved->Destroy();
+			}
+		}
+		PlayerState->PreservedKeepOnDeathInventoryList.Empty();
+	}
+	else
+	{
+		// Warmup spawns still honor stock/mutator hooks (DefaultInventory is empty,
+		// so this grants nothing by itself).
+		Super::GiveDefaultInventory(PlayerPawn);
 	}
 
-	Character->DefaultCharacterInventory.Empty();
-	Character->DiscardAllInventory();
-	for (AUTInventory* Preserved : PlayerState->PreservedKeepOnDeathInventoryList)
+	// During a round each Active player carries exactly their role weapon. Outside a
+	// round (warmup before match start, or the neutral waiting spawns) everyone gets
+	// BOTH role guns to practice with, on the same magazine/regen rules as real play.
+	// The classes come from AttackerWeaponClass/DefenderWeaponClass, i.e. whatever
+	// the Blueprint child supplied; InitGame's stock fallback applies only when the
+	// BP left them unset.
+	TArray<TSubclassOf<AUTInventory>> Loadout;
+	if (HasMatchStarted() && IsActiveRole(PlayerState, EClutchRole::Attacker))
 	{
-		if (Preserved && !Preserved->IsPendingKillPending())
+		Loadout.Add(AttackerWeaponClass);
+	}
+	else if (HasMatchStarted() && IsActiveRole(PlayerState, EClutchRole::Defender))
+	{
+		Loadout.Add(DefenderWeaponClass);
+	}
+	else
+	{
+		Loadout.Add(DefenderWeaponClass);
+		if (AttackerWeaponClass != DefenderWeaponClass)
 		{
-			Preserved->Destroy();
+			Loadout.Add(AttackerWeaponClass);
 		}
 	}
-	PlayerState->PreservedKeepOnDeathInventoryList.Empty();
 
-	TSubclassOf<AUTInventory> RoleInventory;
-	if (IsActiveRole(PlayerState, EClutchRole::Attacker) && AttackerWeaponClass)
+	for (TSubclassOf<AUTInventory> InventoryClass : Loadout)
 	{
-		RoleInventory = AttackerWeaponClass;
-	}
-	else if (IsActiveRole(PlayerState, EClutchRole::Defender) && DefenderWeaponClass)
-	{
-		RoleInventory = DefenderWeaponClass;
-	}
-	if (RoleInventory)
-	{
+		if (!InventoryClass)
+		{
+			continue;
+		}
 		AUTWeapon* RoleWeapon = Cast<AUTWeapon>(
-			Character->K2_CreateInventory(RoleInventory, true));
+			Character->K2_CreateInventory(InventoryClass, true));
 		if (RoleWeapon && RoleWeaponMagazine > 0)
 		{
 			// Start on a full fixed clip. bCanRegenerateAmmo keeps the stock
 			// out-of-ammo path from switching the weapon away while it is empty;
-			// UpdateAmmoRegen ticks the rounds back in. Pawns and their weapons are
+			// the regen tick puts the rounds back in. Pawns and their weapons are
 			// rebuilt every round, so this also resets the clip at each round start.
 			RoleWeapon->MaxAmmo = RoleWeaponMagazine;
 			RoleWeapon->Ammo = RoleWeaponMagazine;
@@ -1527,6 +1991,14 @@ bool AClutchGameMode::ModifyDamage_Implementation(int32& Damage, FVector& Moment
 {
 	Super::ModifyDamage_Implementation(
 		Damage, Momentum, Injured, InstigatedBy, HitInfo, DamageCauser, DamageType);
+
+	// Warmup plays with stock damage rules (both practice guns fully live). The
+	// zero-damage gate below only protects the round machinery once the match has
+	// started: order selection, spawn freeze, and intermission roaming.
+	if (!HasMatchStarted())
+	{
+		return true;
+	}
 
 	if (Damage <= 0 || !IsCombatPhase())
 	{
@@ -2117,28 +2589,64 @@ void AClutchGameMode::UpdateAmmoRegen(float DeltaSeconds)
 			continue;
 		}
 
-		FClutchAmmoRegenState& State = AmmoRegenState.FindOrAdd(Weapon);
+		AdvanceWeaponClipRegen(Weapon, DeltaSeconds);
+	}
+}
 
-		// SM-style empty penalty: the moment the clip drops to zero, arm a negative
-		// carry so the first round returns EmptyReloadPause + RegenInterval later.
-		// Keying off the >0 -> 0 transition (not the raw zero) applies the pause once
-		// and restarts the refill clock from empty, so dump speed no longer changes
-		// how soon the first round comes back.
-		if (Weapon->Ammo == 0 && State.LastAmmo > 0)
-		{
-			State.Accumulator = -RoleWeaponEmptyReloadPause;
-		}
 
-		const int32 Grants = AClutchRoundState::AdvanceAmmoRegen(
-			State.Accumulator, DeltaSeconds, Weapon->Ammo, RoleWeaponMagazine,
-			RoleWeaponAmmoRegenInterval);
-		if (Grants > 0)
+void AClutchGameMode::AdvanceWeaponClipRegen(AUTWeapon* Weapon, float DeltaSeconds)
+{
+	FClutchAmmoRegenState& State = AmmoRegenState.FindOrAdd(Weapon);
+
+	// SM-style empty penalty: the moment the clip drops to zero, arm a negative
+	// carry so the first round returns EmptyReloadPause + RegenInterval later.
+	// Keying off the >0 -> 0 transition (not the raw zero) applies the pause once
+	// and restarts the refill clock from empty, so dump speed no longer changes
+	// how soon the first round comes back.
+	if (Weapon->Ammo == 0 && State.LastAmmo > 0)
+	{
+		State.Accumulator = -RoleWeaponEmptyReloadPause;
+	}
+
+	const int32 Grants = AClutchRoundState::AdvanceAmmoRegen(
+		State.Accumulator, DeltaSeconds, Weapon->Ammo, RoleWeaponMagazine,
+		RoleWeaponAmmoRegenInterval);
+	if (Grants > 0)
+	{
+		// Authority-side; AddAmmo clamps to MaxAmmo and replicates Ammo to the
+		// owning client, which drives the HUD count and refire availability.
+		Weapon->AddAmmo(Grants);
+	}
+	State.LastAmmo = Weapon->Ammo;
+}
+
+
+void AClutchGameMode::UpdateWarmupAmmoRegen(float DeltaSeconds)
+{
+	if (RoleWeaponMagazine <= 0 || DeltaSeconds <= 0.0f)
+	{
+		return;
+	}
+
+	for (auto It = AmmoRegenState.CreateIterator(); It; ++It)
+	{
+		if (!It->Key.IsValid())
 		{
-			// Authority-side; AddAmmo clamps to MaxAmmo and replicates Ammo to the
-			// owning client, which drives the HUD count and refire availability.
-			Weapon->AddAmmo(Grants);
+			It.RemoveCurrent();
 		}
-		State.LastAmmo = Weapon->Ammo;
+	}
+
+	// Outside combat there is no Active roster to walk; regen whatever each living
+	// pawn currently holds so the warmup/waiting practice loadout matches round play.
+	// The stowed second gun keeps its clip until equipped, same as a single-gun round.
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+	{
+		AUTCharacter* Character = Cast<AUTCharacter>(It->Get());
+		AUTWeapon* Weapon = (Character && !Character->IsDead()) ? Character->GetWeapon() : nullptr;
+		if (Weapon)
+		{
+			AdvanceWeaponClipRegen(Weapon, DeltaSeconds);
+		}
 	}
 }
 
