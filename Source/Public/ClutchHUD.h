@@ -53,6 +53,10 @@ protected:
 	bool bSavedEnableClickEvents;
 	bool bSavedEnableMouseOverEvents;
 	bool bAttackOrderSubmitted;
+	/** When the confirm was sent. The submit latch is provisional: if the replicated
+	 *  team lock has not appeared shortly after, the server rejected the pick (stale
+	 *  lock, roster change) and the picker re-opens instead of dying silently. */
+	float AttackOrderSubmitTime;
 	uint8 DraftAttackOrderTeam;
 	FString DraftAttackOrderRosterKey;
 	TArray<uint8> DraftAttackOrderSlots;

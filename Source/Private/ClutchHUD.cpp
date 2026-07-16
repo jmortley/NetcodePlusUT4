@@ -189,6 +189,7 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	bSavedEnableClickEvents = false;
 	bSavedEnableMouseOverEvents = false;
 	bAttackOrderSubmitted = false;
+	AttackOrderSubmitTime = -1000.0f;
 	DraftAttackOrderTeam = AClutchRoundState::NoTeam;
 	LegacyCircleTexture = nullptr;
 	LegacyInnerCircleTexture = nullptr;
@@ -283,6 +284,18 @@ void AClutchHUD::UpdateAttackOrderInput(
 	{
 		State->GetTeamAttackOrderSlots(OwnEntry->TeamIndex, TeamSlots);
 	}
+
+	// The submit latch is provisional until the server's lock replicates back. If the
+	// lock never appears, the pick was rejected (e.g. a stale single-slot auto-lock at
+	// the time of the click) - re-open the picker so the selector can try again
+	// instead of leaving them convinced they already picked.
+	if (bAttackOrderSubmitted && State && OwnEntry && OwnEntry->TeamIndex <= 1
+		&& !State->IsAttackOrderLocked(OwnEntry->TeamIndex)
+		&& GetWorld()->GetTimeSeconds() - AttackOrderSubmitTime > 2.0f)
+	{
+		bAttackOrderSubmitted = false;
+	}
+
 	const bool bShouldEnable = bPanelVisible && OwnEntry
 		&& OwnEntry->bAttackOrderSelector
 		&& !State->IsAttackOrderLocked(OwnEntry->TeamIndex)
@@ -329,6 +342,7 @@ void AClutchHUD::ResetAttackOrderDraft(
 	DraftAttackOrderRosterKey = BuildAttackOrderRosterKey(State, TeamIndex);
 	DraftAttackOrderSlots.Reset();
 	bAttackOrderSubmitted = false;
+	AttackOrderSubmitTime = -1000.0f;
 }
 
 
@@ -393,6 +407,7 @@ void AClutchHUD::SubmitAttackOrderDraft()
 	// AUTPlayerController::Mutate uses the stock reliable ServerMutate RPC.
 	UTPlayerOwner->Mutate(Command);
 	bAttackOrderSubmitted = true;
+	AttackOrderSubmitTime = GetWorld()->GetTimeSeconds();
 	RestoreAttackOrderInput();
 }
 
