@@ -1355,6 +1355,7 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					P.UniqueId = UTPS->UniqueId.IsValid()
 						? UTPS->UniqueId.ToString()
 						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					P.PlayerName = UTPS->PlayerName;
 					P.Kills    = UTPS->RoundKills;
 					// Wipeout has mid-round respawns, so a single bOutOfLives flag
 					// at round-end can under-count actual deaths. PlayerDeathCounts
@@ -1378,6 +1379,7 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				const int32 LoserIdx = (WinnerTeamIndex == 0) ? 1 : 0;
 				RoundResult.WinnerTeam = BuildPerf(WinnerTeamIndex);
 				RoundResult.LoserTeam  = BuildPerf(LoserIdx);
+				RoundResult.WinnerTeamIndex = WinnerTeamIndex;
 			}
 
 			RatingSystem->ProcessRound(RoundResult);
