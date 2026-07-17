@@ -1159,6 +1159,7 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 	// appends more without a rebuild (e.g. a newly-cooked custom char). No bHideInUI CDO loads here.
 	static const TCHAR* const DefaultAllowed[] = {
 		TEXT("NecrisFemaleCoat"), TEXT("Genghis"), TEXT("LiandriRobot"),       // custom content
+		TEXT("GenghisNew"), TEXT("LiandriRobotNew"),                           // bright-material variants (NCStockWeapons pak)
 		TEXT("NecrisFemale"), TEXT("NecrisMale"), TEXT("NecrisMale_Damian"),   // stock families (coalesced)
 		TEXT("NecrisMale_Necroth"), TEXT("SkaarjMale"), TEXT("TC_Male"),
 	};
