@@ -61,6 +61,17 @@ static FORCEINLINE bool FireDbg()
 // 0 = legacy retry-graduation + :1779-guarded server clear (today's behaviour).
 // Runtime-toggleable (rcon) so ONE hub can A/B it live. See StartFire / StopFire /
 // PutDown / ServerStopFireFixed. No replicated/RPC change; pairs with ncp.FireDebug.
+static TAutoConsoleVariable<float> CVarMouseDebounceCap(
+    TEXT("ncp.MouseDebounceCap"), 0.01f,
+    TEXT("Client cap (seconds) on every weapon's MouseDebounceWindow: effective window = min(weapon BP value, this). ")
+    TEXT("Default 0.01 (2026-07-17): the BP 30ms default eats REAL clicks on modern mice — optical switches (Viper V3/")
+    TEXT("DeathAdder V3) cannot bounce at all, mechanical mice already debounce in firmware (4-8ms), and a fast tap-firer's ")
+    TEXT("release->press gap dips under 30ms (high duty cycle; frame quantization stops padding it at high fps). Eaten ")
+    TEXT("click = 'my weapon didn't fire'; a rare double-event just gets absorbed by the server ROF gate — so bias small. ")
+    TEXT("10ms still covers degraded switches + keeps scroll-wheel notch trains coalescing as held intent. ")
+    TEXT("0 = debounce fully off; -1 = no cap (pure BP values, pre-2026-07-17 behaviour)."),
+    ECVF_Default);
+
 static TAutoConsoleVariable<int32> CVarGhostFix(
     TEXT("ncp.GhostFix"), 0,
     TEXT("Ghost-rocket-on-weapon-switch fix: 1=carry real held-fire across a switch, 0=legacy. KNOWN ISSUE (live-confirmed 2026-07-05): 1 BREAKS consecutive held weapon switches (per-weapon held flag never arms on auto-fired weapons) — DO NOT ENABLE until the pawn-level v2. Off by default."),
@@ -415,29 +426,41 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
     // ---------------------------------------------------------
     // MOUSE-BOUNCE / SCROLL-WHEEL DEBOUNCE
     // ---------------------------------------------------------
-    // Low-debounce mice and scroll-wheel-bound fire actions generate rapid
-    // release+press event pairs that the engine surfaces as separate clicks.
-    // Without this guard, every spurious bounce reaches the cooldown gate and
-    // either gets absorbed into the retry queue (fine) or — under specific
-    // race conditions — eats the user's held intent (broken). The 25ms default
-    // floor is well below human physiological double-click cadence (~50-80ms
-    // minimum), so this can only catch bounces, not intentional rapid fire.
-    //
-    // Coalesce, do not block: keep PendingFire=true so any held intent is
-    // preserved and refire continues normally. The bounce simply doesn't
-    // generate a new fire event.
+    // Coalesce rapid release+press pairs into held intent (PendingFire stays
+    // true, no new fire event). 2026-07-17 REFRAME: the original 30ms BP default
+    // was tuned against a "hardware bounce ceiling" that modern mice don't have —
+    // optical switches (Viper V3 / DeathAdder V3 class) cannot bounce, and
+    // mechanical gaming mice debounce in firmware (4-8ms) before the OS sees an
+    // event. Meanwhile the window keys on the RELEASE->press gap, not the full
+    // double-click cycle: a fast tap-firer at high duty cycle produces legit
+    // gaps under 30ms, and at high fps the frame-quantized timestamps stop
+    // padding tiny gaps upward — which is exactly why high-fps players on
+    // optical mice reported eaten clicks ("weapon didn't fire"). The failure
+    // cost is asymmetric: a rare genuine double-event that slips through is
+    // absorbed by the server ROF gate; an eaten real click is the worst feel in
+    // the game. So the effective window is CAPPED by ncp.MouseDebounceCap
+    // (default 0.01) rather than trusting the per-weapon BP 0.03. Cap semantics:
+    // min(BP, cap); cap 0 = debounce off; cap -1 = pure BP (legacy kill-switch).
+    float EffectiveDebounce = MouseDebounceWindow;
+    {
+        const float Cap = CVarMouseDebounceCap.GetValueOnGameThread();
+        if (Cap >= 0.f)
+        {
+            EffectiveDebounce = FMath::Min(MouseDebounceWindow, Cap);
+        }
+    }
     if (UTOwner && UTOwner->IsLocallyControlled() &&
-        MouseDebounceWindow > 0.f &&
+        EffectiveDebounce > 0.f &&
         LastReleaseTime.IsValidIndex(FireModeNum) &&
         LastReleaseTime[FireModeNum] > 0.0f)
     {
         const float SinceRelease = GetWorld()->GetTimeSeconds() - LastReleaseTime[FireModeNum];
-        if (SinceRelease >= 0.f && SinceRelease < MouseDebounceWindow)
+        if (SinceRelease >= 0.f && SinceRelease < EffectiveDebounce)
         {
             // Verbose log so testers can confirm the debounce is engaging
             // when investigating low-debounce-mouse complaints. Off by default.
-            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[NCFire.Debounce] mode=%d sinceRelease=%.4f window=%.4f"),
-                FireModeNum, SinceRelease, MouseDebounceWindow);
+            UE_LOG(LogUTWeaponFix, Verbose, TEXT("[NCFire.Debounce] mode=%d sinceRelease=%.4f window=%.4f (bp=%.4f)"),
+                FireModeNum, SinceRelease, EffectiveDebounce, MouseDebounceWindow);
             UTOwner->SetPendingFire(FireModeNum, true);
             return;
         }

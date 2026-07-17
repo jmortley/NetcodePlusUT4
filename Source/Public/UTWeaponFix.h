@@ -272,11 +272,16 @@ public:
     /** Mouse-bounce debounce window in seconds. A press event arriving
      *  within this many seconds of the prior release is treated as a bounce
      *  (or scroll-wheel rapid-fire) — PendingFire is kept true so any held
-     *  intent is preserved, but no new fire event is triggered. Default
-     *  30ms sits comfortably between hardware bounce ceiling (~20ms) and
-     *  human double-click physiological floor (~40-80ms), so it cannot eat
-     *  intentional rapid clicks. Tune higher per-weapon if low-debounce
-     *  mice still produce rejected shots; set to 0 to disable entirely. */
+     *  intent is preserved, but no new fire event is triggered.
+     *  ⚠ 2026-07-17: the runtime CAPS this at ncp.MouseDebounceCap (default
+     *  0.01) — the old 30ms rationale ("bounce ceiling ~20ms vs double-click
+     *  floor ~40-80ms") doesn't survive modern mice: optical switches can't
+     *  bounce, mechanicals debounce in firmware, and fast tap-fire
+     *  release->press gaps dip under 30ms (eaten clicks on Viper V3-class
+     *  mice, worst at high fps). Effective window = min(this, cap). This BP
+     *  value now mostly matters as a lower-than-cap override; set 0 to
+     *  disable for a weapon. Raising it above the cap has no effect unless
+     *  the cap cvar is raised/-1 too. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Weapon")
     float MouseDebounceWindow;
 
