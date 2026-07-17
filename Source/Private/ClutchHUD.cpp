@@ -64,10 +64,10 @@ namespace
 	static UTexture2D* LoadPluginPngTexture(const TCHAR* RelativePath)
 	{
 #if !UE_SERVER
-		const FString GamePluginsDir = FPaths::GamePluginsDir();
+		const FString ResourcesDir = FNCPlusHUDLayout::PluginResourcesDir();
 		const FString FilePath = FPaths::Combine(
-			*GamePluginsDir,
-			TEXT("NetcodePlus/Resources/ClutchHUD"),
+			*ResourcesDir,
+			TEXT("ClutchHUD"),
 			RelativePath);
 		TArray<uint8> CompressedData;
 		if (!FFileHelper::LoadFileToArray(CompressedData, *FilePath)

@@ -202,6 +202,12 @@ struct FNCPlusHUDLayout
 	 *  NCPlusCTF, ShockDom — so users configure once and it applies everywhere.) */
 	static FString GetDefaultLayoutPath();
 
+	/** This plugin's Resources/ folder, resolved through the plugin manager so a
+	 *  renamed install folder (e.g. a hand-extracted "NetcodePlus-327") still
+	 *  locates the recovered artwork. Falls back to the conventional
+	 *  <ProjectPlugins>/NetcodePlus/Resources if the descriptor lookup fails. */
+	static FString PluginResourcesDir();
+
 	/** Which bottom-bar widget family this client loads at HUD construction:
 	 *  true = stock weapon bar / ammo / health-armor (familiar, self-reads the
 	 *  player's HUD profile); false = the NCPlus custom widgets. [NetcodePlus]

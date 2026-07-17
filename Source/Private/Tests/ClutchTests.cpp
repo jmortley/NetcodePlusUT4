@@ -5,6 +5,7 @@
 #include "ClutchGameMode.h"
 #include "ClutchHUD.h"
 #include "ClutchRoundState.h"
+#include "NCPlusHUDLayout.h"   // FNCPlusHUDLayout::PluginResourcesDir
 #include "Engine/Texture2D.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
@@ -494,9 +495,8 @@ bool FClutchHUDAssetsTest::RunTest(const FString& Parameters)
 		TEXT("hud_bottom.png"),
 		TEXT("hud_bottom_Blue.png")
 	};
-	const FString GamePluginsDir = FPaths::GamePluginsDir();
 	const FString ResourceDir = FPaths::Combine(
-		*GamePluginsDir, TEXT("NetcodePlus/Resources/ClutchHUD"));
+		*FNCPlusHUDLayout::PluginResourcesDir(), TEXT("ClutchHUD"));
 	for (const TCHAR* FileName : ResourceFiles)
 	{
 		const FString FilePath = FPaths::Combine(*ResourceDir, FileName);

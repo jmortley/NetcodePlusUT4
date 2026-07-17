@@ -37,6 +37,7 @@ namespace UnrealBuildTool.Rules
 				"Http",
 				"Json",
 				"JsonUtilities",
+				"Projects",       // IPluginManager (FNCPlusHUDLayout::PluginResourcesDir)
 				"RenderCore"      // GWhiteTexture (QuickStats DrawArc canvas fallback)
             });
 

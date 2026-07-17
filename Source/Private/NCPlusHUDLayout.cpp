@@ -35,6 +35,7 @@
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Interfaces/IPluginManager.h"
 #if !UE_SERVER
 #include "Interfaces/IImageWrapper.h"
 #include "Interfaces/IImageWrapperModule.h"
@@ -555,6 +556,19 @@ FName FNCPlusHUDLayout::GetWeaponSide(UClass* WeaponClass) const
 FString FNCPlusHUDLayout::GetDefaultLayoutPath()
 {
 	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
+}
+
+FString FNCPlusHUDLayout::PluginResourcesDir()
+{
+	// Hand-extracted installs sometimes keep the release zip's folder name
+	// (e.g. Plugins/NetcodePlus-327), so the conventional Plugins/NetcodePlus
+	// path may not exist even though the plugin loaded fine.
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("NetcodePlus"));
+	if (Plugin.IsValid())
+	{
+		return FPaths::Combine(*Plugin->GetBaseDir(), TEXT("Resources"));
+	}
+	return FPaths::Combine(*FPaths::GamePluginsDir(), TEXT("NetcodePlus/Resources"));
 }
 
 // Cached so the per-frame DrawHeldPowerups call never hits GConfig/FileExists (mirror
@@ -1549,8 +1563,8 @@ namespace NCPlusHUDDrawCall
 		{
 #if !UE_SERVER
 			const FString FilePath = FPaths::Combine(
-				*FPaths::GamePluginsDir(),
-				TEXT("NetcodePlus/Resources/AbsoluteElimHUD"),
+				*FNCPlusHUDLayout::PluginResourcesDir(),
+				TEXT("AbsoluteElimHUD"),
 				RelativePath);
 			TArray<uint8> CompressedData;
 			if (!FFileHelper::LoadFileToArray(CompressedData, *FilePath)

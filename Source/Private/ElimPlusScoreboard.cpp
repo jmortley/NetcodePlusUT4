@@ -55,8 +55,8 @@ namespace
 	{
 #if !UE_SERVER
 		const FString FilePath = FPaths::Combine(
-			*FPaths::GamePluginsDir(),
-			TEXT("NetcodePlus/Resources/AbsoluteElimHUD"),
+			*FNCPlusHUDLayout::PluginResourcesDir(),
+			TEXT("AbsoluteElimHUD"),
 			RelativePath);
 		TArray<uint8> CompressedData;
 		if (!FFileHelper::LoadFileToArray(CompressedData, *FilePath)
