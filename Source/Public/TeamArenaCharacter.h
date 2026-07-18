@@ -53,6 +53,10 @@ public:
 
 	virtual void Tick(float DeltaTime) override;
 
+	// Reject ambient loops emitted by inactive stock weapons before they can become
+	// replicated, persistent character audio (notably the Link Gun overheat loop).
+	virtual void SetAmbientSound(USoundBase* NewAmbientSound, bool bClear = false) override;
+
     /**
      * Override replication callback to use visual prediction time.
      * This is THE critical change for split prediction.

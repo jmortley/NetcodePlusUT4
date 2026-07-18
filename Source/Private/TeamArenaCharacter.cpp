@@ -1056,6 +1056,44 @@ void ATeamArenaCharacter::BeginPlay()
 
 
 
+void ATeamArenaCharacter::SetAmbientSound(USoundBase* NewAmbientSound, bool bClear)
+{
+	// Stock AUTWeap_LinkGun::Tick() applies its overheat sound to the owner while
+	// cooling down even when the weapon is inactive. Inventory ticks run after the
+	// owner, so a Tick-side cleanup alone is too early and the sound is immediately
+	// restored. Reject the inactive weapon's assignment at the character boundary
+	// on both authority and clients, without changing the weapon's cooldown state.
+	if (!bClear && NewAmbientSound != nullptr)
+	{
+		AUTWeapon* ActiveWeapon = GetWeapon();
+		AUTWeap_LinkGun* ActiveLinkGun = Cast<AUTWeap_LinkGun>(ActiveWeapon);
+		const bool bActiveLinkOwnsSound =
+			ActiveLinkGun != nullptr && ActiveLinkGun->OverheatSound == NewAmbientSound;
+
+		if (!bActiveLinkOwnsSound)
+		{
+			for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
+			{
+				AUTWeap_LinkGun* InactiveLinkGun = Cast<AUTWeap_LinkGun>(*It);
+				if (*It != ActiveWeapon && InactiveLinkGun != nullptr &&
+					InactiveLinkGun->OverheatSound == NewAmbientSound)
+				{
+					// Clear an already-active copy using the exact-match API, then
+					// ignore the inactive Link Gun's attempt to restore it.
+					if (AmbientSound == NewAmbientSound)
+					{
+						Super::SetAmbientSound(NewAmbientSound, true);
+					}
+					return;
+				}
+			}
+		}
+	}
+
+	Super::SetAmbientSound(NewAmbientSound, bClear);
+}
+
+
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
 	// Flush any forced-model apply coalesced from this frame's replication burst (see NotifyTeamChanged).
@@ -1132,34 +1170,43 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 	}
 
-	// --- FIX: Kill ambient sounds from inactive weapons (stock link gun overheat bug) ---
-	// Stock UTWeap_LinkGun::Tick() sets overheat ambient sound on the owner even when
-	// the link gun is inactive in inventory. This causes spectators to hear a looping
-	// overheat sound on players who aren't even holding the link gun.
-	if (GetNetMode() != NM_DedicatedServer && AmbientSound)
+	// --- Safety net: clear weapon fire loops that outlive their firing state ---
+	// UUTWeaponStateFiring normally exact-clears FireLoopingSound in EndState(). If an
+	// abnormal transition misses that cleanup, the replicated character ambient sound
+	// otherwise survives indefinitely and permanently consumes an audio voice. Only
+	// authority may validate weapon state here: simulated spectator weapon state is
+	// reconstructed from separately replicated firing fields and can lag the ambient
+	// sound update, misclassifying a legitimate secondary-fire loop as stale.
+	if (Role == ROLE_Authority && AmbientSound != nullptr)
 	{
 		AUTWeapon* ActiveWeapon = GetWeapon();
-		if (ActiveWeapon)
+		USoundBase* CurrentAmbientSound = AmbientSound;
+		bool bMatchesWeaponFireLoop = false;
+		bool bIsLegitimateActiveLoop = false;
+
+		for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
 		{
-			// If active weapon is a link gun, the sound is legitimate
-			AUTWeap_LinkGun* ActiveLinkGun = Cast<AUTWeap_LinkGun>(ActiveWeapon);
-			if (!ActiveLinkGun || ActiveLinkGun->OverheatSound != AmbientSound)
+			AUTWeapon* InventoryWeapon = *It;
+			if (InventoryWeapon == nullptr)
 			{
-				// Active weapon is NOT a link gun, or its overheat sound doesn't match.
-				// Check if an inactive link gun in inventory is the culprit.
-				for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
+				continue;
+			}
+
+			for (int32 FireMode = 0; FireMode < InventoryWeapon->FireLoopingSound.Num(); ++FireMode)
+			{
+				if (InventoryWeapon->FireLoopingSound[FireMode] == CurrentAmbientSound)
 				{
-					if (*It != ActiveWeapon)
-					{
-						AUTWeap_LinkGun* InactiveLinkGun = Cast<AUTWeap_LinkGun>(*It);
-						if (InactiveLinkGun && InactiveLinkGun->OverheatSound == AmbientSound)
-						{
-							SetAmbientSound(nullptr, true);
-							break;
-						}
-					}
+					bMatchesWeaponFireLoop = true;
+					bIsLegitimateActiveLoop = bIsLegitimateActiveLoop ||
+						(InventoryWeapon == ActiveWeapon && InventoryWeapon->IsFiring() &&
+						 InventoryWeapon->GetCurrentFireMode() == FireMode);
 				}
 			}
+		}
+
+		if (bMatchesWeaponFireLoop && !bIsLegitimateActiveLoop)
+		{
+			SetAmbientSound(CurrentAmbientSound, true);
 		}
 	}
 
@@ -1504,9 +1551,9 @@ bool ATeamArenaCharacter::Died(AController* EventInstigator, const FDamageEvent&
 {
 	// Force-clear ALL ambient sounds on death to prevent looping
 	// (e.g. link gun overheat sound continuing after death)
-	SetAmbientSound(nullptr, true);
-	SetStatusAmbientSound(nullptr, true);
-	SetLocalAmbientSound(nullptr, true);
+	SetAmbientSound(nullptr);
+	SetStatusAmbientSound(nullptr);
+	SetLocalAmbientSound(nullptr);
 
 	if (AmbientSoundComp && AmbientSoundComp->IsPlaying())
 	{
