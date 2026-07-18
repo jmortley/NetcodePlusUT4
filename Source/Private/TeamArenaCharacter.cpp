@@ -1510,11 +1510,19 @@ void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
 	AUTWeap_LinkGun* LinkGun = Cast<AUTWeap_LinkGun>(Weapon);
 	if (LinkGun)
 	{
+		// OverheatFactor is locally simulated rather than replicated, so a newly
+		// viewed remote Link Gun can carry a bogus spectator-side meter value.
 		LinkGun->OverheatFactor = 0.0f;
-	}
 
-	// Clear any stuck audio on the pawn
-	SetAmbientSound(nullptr);
+		// Clear only the stale overheat loop. Clearing the character's ambient
+		// slot unconditionally also kills a legitimate secondary-fire beam that
+		// was already active when spectating began; the server may not resend an
+		// unchanged AmbientSound afterward.
+		if (AmbientSound == LinkGun->OverheatSound)
+		{
+			SetAmbientSound(LinkGun->OverheatSound, true);
+		}
+	}
 }
 
 
