@@ -10,10 +10,10 @@
 #include "Components/AudioComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
 #include "EngineUtils.h"
 #include "Sound/SoundBase.h"
 #include "UTKillcamPlayback.h"
-#include "UTLocalPlayer.h"
 
 // =========================================================================
 // SHOCK-CORE DIAGNOSTICS (ncp.ShockDebug)
@@ -263,8 +263,9 @@ enum class ENCPKillcamWorldState : uint8
 };
 
 /** Distinguish UT's retained instant-replay world from ordinary demo playback. The replay driver
- *  alone cannot do that: both worlds report IsPlaying(). Matching the local player's killcam manager
- *  also avoids touching a normal replay, and IsEnabled tracks the stock viewport handoff. */
+ *  alone cannot do that: both worlds report IsPlaying(). Keep all UT killcam state access behind
+ *  exported/virtual functions: the source editor's UUTLocalPlayer layout differs from the shipping
+ *  client, so inlining GetKillcamPlaybackManager() here is ABI-unsafe. */
 static ENCPKillcamWorldState GetNCPKillcamWorldState(const UWorld* World)
 {
 	if (World == nullptr || World->DemoNetDriver == nullptr || !World->DemoNetDriver->IsPlaying())
@@ -278,17 +279,19 @@ static ENCPKillcamWorldState GetNCPKillcamWorldState(const UWorld* World)
 		return ENCPKillcamWorldState::NotKillcam;
 	}
 
-	for (auto PlayerIt = GameInstance->GetLocalPlayerIterator(); PlayerIt; ++PlayerIt)
+	// This function is implemented in the shipping UnrealTournament DLL, where it reads the runtime
+	// UUTLocalPlayer layout correctly. Do not replace it with the tempting inline manager getter.
+	if (!UUTKillcamPlayback::IsKillcamWorld(GameInstance, World))
 	{
-		const UUTLocalPlayer* LocalPlayer = Cast<UUTLocalPlayer>(*PlayerIt);
-		UUTKillcamPlayback* Playback = LocalPlayer ? LocalPlayer->GetKillcamPlaybackManager() : nullptr;
-		if (Playback != nullptr && Playback->GetKillcamWorld() == World)
-		{
-			return Playback->IsEnabled() ? ENCPKillcamWorldState::Visible : ENCPKillcamWorldState::Hidden;
-		}
+		return ENCPKillcamWorldState::NotKillcam;
 	}
 
-	return ENCPKillcamWorldState::NotKillcam;
+	// UUTGameViewportClient::GetWorld() is virtual and returns its active-world override while the
+	// killcam is shown. Through the base pointer this remains ABI-safe across the source/shipping gap.
+	UGameViewportClient* ViewportClient = GameInstance->GetGameViewportClient();
+	return ViewportClient != nullptr && ViewportClient->GetWorld() == World
+		? ENCPKillcamWorldState::Visible
+		: ENCPKillcamWorldState::Hidden;
 }
 
 
