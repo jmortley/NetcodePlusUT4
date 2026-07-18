@@ -9,8 +9,11 @@
 #include "Components/SphereComponent.h"
 #include "Components/AudioComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
 #include "EngineUtils.h"
 #include "Sound/SoundBase.h"
+#include "UTKillcamPlayback.h"
+#include "UTLocalPlayer.h"
 
 // =========================================================================
 // SHOCK-CORE DIAGNOSTICS (ncp.ShockDebug)
@@ -252,6 +255,42 @@ static FAutoConsoleCommand CmdShockDump(
 	TEXT("Dump every live NetcodePlus shock core and its audio components in all current game/replay worlds."),
 	FConsoleCommandDelegate::CreateStatic(&ShockDumpAll));
 
+enum class ENCPKillcamWorldState : uint8
+{
+	NotKillcam,
+	Hidden,
+	Visible
+};
+
+/** Distinguish UT's retained instant-replay world from ordinary demo playback. The replay driver
+ *  alone cannot do that: both worlds report IsPlaying(). Matching the local player's killcam manager
+ *  also avoids touching a normal replay, and IsEnabled tracks the stock viewport handoff. */
+static ENCPKillcamWorldState GetNCPKillcamWorldState(const UWorld* World)
+{
+	if (World == nullptr || World->DemoNetDriver == nullptr || !World->DemoNetDriver->IsPlaying())
+	{
+		return ENCPKillcamWorldState::NotKillcam;
+	}
+
+	UGameInstance* GameInstance = World->GetGameInstance();
+	if (GameInstance == nullptr)
+	{
+		return ENCPKillcamWorldState::NotKillcam;
+	}
+
+	for (auto PlayerIt = GameInstance->GetLocalPlayerIterator(); PlayerIt; ++PlayerIt)
+	{
+		const UUTLocalPlayer* LocalPlayer = Cast<UUTLocalPlayer>(*PlayerIt);
+		UUTKillcamPlayback* Playback = LocalPlayer ? LocalPlayer->GetKillcamPlaybackManager() : nullptr;
+		if (Playback != nullptr && Playback->GetKillcamWorld() == World)
+		{
+			return Playback->IsEnabled() ? ENCPKillcamWorldState::Visible : ENCPKillcamWorldState::Hidden;
+		}
+	}
+
+	return ENCPKillcamWorldState::NotKillcam;
+}
+
 
 
 AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectInitializer)
@@ -284,6 +323,7 @@ AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectIni
 	bRecoveryIgnoringWorldStatic = false;
 	LocalStopRecoveryStartTime = 0.f;
 	LocalStopRecoveryStartLocation = FVector::ZeroVector;
+	bKillcamAudioSuppressed = false;
 }
 
 void AUTPlusProj_ShockBall::NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage)
@@ -654,6 +694,7 @@ void AUTPlusProj_ShockBall::TickLocalStopRecovery(float DeltaTime)
 void AUTPlusProj_ShockBall::BeginPlay()
 {
 	Super::BeginPlay();
+	UpdateKillcamAudioSuppression();
 
 	// During instant replay / demo playback, the real projectile was hidden by
 	// BeginFakeProjectileSynch in the original game (fake was rendering authority).
@@ -749,6 +790,7 @@ void AUTPlusProj_ShockBall::BeginPlay()
 void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+	UpdateKillcamAudioSuppression();
 
 	if (GetNetMode() == NM_Client && !bFakeClientProjectile)
 	{
@@ -1086,6 +1128,67 @@ void AUTPlusProj_ShockBall::Tick(float DeltaTime)
 	}
 }
 
+
+void AUTPlusProj_ShockBall::UpdateKillcamAudioSuppression()
+{
+	const ENCPKillcamWorldState KillcamState = GetNCPKillcamWorldState(GetWorld());
+	if (KillcamState == ENCPKillcamWorldState::NotKillcam)
+	{
+		return;
+	}
+
+	if (KillcamState == ENCPKillcamWorldState::Hidden)
+	{
+		TArray<UAudioComponent*> AudioComponents;
+		GetComponents<UAudioComponent>(AudioComponents);
+
+		int32 StoppedThisCall = 0;
+		for (UAudioComponent* AudioComponent : AudioComponents)
+		{
+			if (AudioComponent != nullptr && AudioComponent->IsPlaying())
+			{
+				KillcamAudioComponentsToResume.AddUnique(TWeakObjectPtr<UAudioComponent>(AudioComponent));
+				AudioComponent->Stop();
+				++StoppedThisCall;
+			}
+		}
+
+		if (!bKillcamAudioSuppressed)
+		{
+			bKillcamAudioSuppressed = true;
+			if (ShockDbg())
+			{
+				UE_LOG(LogShockDbg, Warning,
+					TEXT("[ShockDbg/REPLAY-AUDIO] suppress core=%s components=%d world=%s"),
+					*GetName(), StoppedThisCall, *GetWorld()->GetPathName());
+			}
+		}
+		return;
+	}
+
+	if (bKillcamAudioSuppressed)
+	{
+		int32 Resumed = 0;
+		for (const TWeakObjectPtr<UAudioComponent>& WeakAudioComponent : KillcamAudioComponentsToResume)
+		{
+			UAudioComponent* AudioComponent = WeakAudioComponent.Get();
+			if (AudioComponent != nullptr && AudioComponent->Sound != nullptr && !AudioComponent->IsPlaying())
+			{
+				AudioComponent->Play();
+				++Resumed;
+			}
+		}
+
+		KillcamAudioComponentsToResume.Reset();
+		bKillcamAudioSuppressed = false;
+		if (ShockDbg())
+		{
+			UE_LOG(LogShockDbg, Warning,
+				TEXT("[ShockDbg/REPLAY-AUDIO] resume core=%s components=%d world=%s"),
+				*GetName(), Resumed, *GetWorld()->GetPathName());
+		}
+	}
+}
 
 // 1. SHIELD / SLOWMO FIX (Replicated Variable)
 void AUTPlusProj_ShockBall::OnRep_Slomo()
