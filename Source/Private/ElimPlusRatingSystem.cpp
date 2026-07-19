@@ -223,18 +223,32 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 		TArray<FDatabaseRow> SchemaRows;
 		if (ExecSql(World, TEXT("PRAGMA table_info(NCRatingElimPlus);"), SchemaRows) && SchemaRows.Num() > 0)
 		{
-			bool bHasV3Columns = false;
+			// The v3 INSERT writes BOTH columns and the two ALTERs above are
+			// independent, so a partial migration (exactly one landed) is reachable:
+			// classify V3 only when both exist, V2 only when neither does, and fail
+			// a partial closed as Unknown — the ALTERs retry next session.
+			bool bHasTotalDamage = false;
+			bool bHasPlayerName  = false;
 			for (const FDatabaseRow& Row : SchemaRows)
 			{
-				if (Row.Text.Contains(TEXT("TotalDamage"))) { bHasV3Columns = true; break; }
+				bHasTotalDamage = bHasTotalDamage || Row.Text.Contains(TEXT("TotalDamage"));
+				bHasPlayerName  = bHasPlayerName  || Row.Text.Contains(TEXT("PlayerName"));
 			}
-			Impl->Schema = bHasV3Columns
-				? FElimPlusRatingSystemImpl::EDbSchema::V3
-				: FElimPlusRatingSystemImpl::EDbSchema::V2;
-			if (!bHasV3Columns)
+			if (bHasTotalDamage && bHasPlayerName)
 			{
+				Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::V3;
+			}
+			else if (!bHasTotalDamage && !bHasPlayerName)
+			{
+				Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::V2;
 				UE_LOG(LogElimPlusRating, Warning,
 					TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER — v2-shape writes this session, damage/name capture deferred"));
+			}
+			else
+			{
+				Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::Unknown;
+				UE_LOG(LogElimPlusRating, Warning,
+					TEXT("InitDatabase: PARTIAL v3 migration (one of TotalDamage/PlayerName missing) — failing closed to v3-shape writes; ALTERs retry next session"));
 			}
 		}
 		else
