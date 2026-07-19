@@ -100,17 +100,6 @@ static FORCEINLINE bool CrossModeRetry()
     return CVarCrossModeRetry.GetValueOnGameThread() > 0;
 }
 
-// High-ping hitscan fairness gate. TeamArenaCharacter keeps hitscan visuals at
-// zero prediction while its collision anchor follows replicated movement, so a
-// server-only rewind can intersect a pawn the shooter never claimed locally.
-// Keep world traces/effects intact, but do not let that unclaimed intersection
-// become pawn damage for remote human shooters at/above this RTT.
-static TAutoConsoleVariable<float> CVarRequireHitscanClaimPingMs(
-    TEXT("ncp.RequireHitscanClaimPingMs"), 100.0f,
-    TEXT("Server RTT threshold (ms) where remote human exact-hitscan shots must include ClientHitChar to damage a pawn. ")
-    TEXT("World impacts still trace normally. -1 disables the gate. Default: 100."),
-    ECVF_Default);
-
 static TAutoConsoleVariable<float> CVarVisualHitscanClaimTolerance(
     TEXT("ncp.VisualHitscanClaimTolerance"), 4.0f,
     TEXT("Client-only extra radius (units) when confirming an actor-capsule hit against the rendered-position capsule. Default: 4."),
@@ -2337,41 +2326,6 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         }
         // --- FIX END ---
     }
-
-	// A remote NC+ client performs the same exact-hitscan capsule trace before
-	// sending ServerStartFireFixed. At high ping, do not let the server turn that
-	// client's explicit miss (no ClientHitChar) into pawn damage against a rewound
-	// capsule the player may not have seen. Preserve the original world-geometry
-	// Hit computed above so beams and impact effects still terminate correctly.
-	const float RequireClaimPingMs = CVarRequireHitscanClaimPingMs.GetValueOnGameThread();
-	const AUTPlayerController* ShooterPC = UTOwner ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
-	const bool bClientCanReportExactHitscan =
-		bTrackHitScanReplication &&
-		InstantHitInfo.IsValidIndex(CurrentFireMode) &&
-		InstantHitInfo[CurrentFireMode].DamageType != nullptr &&
-		InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.0f;
-	const bool bRejectUnclaimedHighPingPawnHit =
-		Role == ROLE_Authority &&
-		GetNetMode() != NM_Standalone &&
-		ShooterPC != nullptr &&
-		!ShooterPC->IsLocalController() &&
-		UTOwner != nullptr && UTOwner->PlayerState != nullptr &&
-		RequireClaimPingMs >= 0.0f &&
-		UTOwner->PlayerState->ExactPing >= RequireClaimPingMs &&
-		bClientCanReportExactHitscan &&
-		ReceivedHitScanHitChar == nullptr;
-
-	if (bRejectUnclaimedHighPingPawnHit && BestTarget != nullptr)
-	{
-		UE_LOG(LogUTWeaponFix, Verbose,
-			TEXT("UnclaimedHitscanGate: rejected server-only pawn hit on %s (ping %.1fms, threshold %.1fms)"),
-			*BestTarget->GetName(), UTOwner->PlayerState->ExactPing, RequireClaimPingMs);
-		BestTarget = nullptr;
-		BestPoint = FVector::ZeroVector;
-		BestCapsulePoint = FVector::ZeroVector;
-		BestCollisionRadius = 0.0f;
-		LastHitscanPaddedRadius = 0.0f;
-	}
 
 	// ============================================================
 	// NEWNET-STYLE BIDIRECTIONAL TIME SEARCH
