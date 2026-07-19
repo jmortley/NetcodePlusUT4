@@ -213,36 +213,35 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 	// LoadPlayerFromDB degrades gracefully either way; this just explains the session.
 	{
 		// The probe result is CACHED and drives the flush's INSERT shape for the whole
-		// session (see FlushAtMatchEnd). A failed v3 probe alone proves nothing — it
-		// could be a missing column OR a busy/unreadable db, and the bool-only exec
-		// API cannot tell them apart. Only a POSITIVE core-columns read alongside the
-		// failed v3 probe establishes a real v2 table; anything else stays Unknown and
-		// the flush fails closed to the v3 shape (a v2-shape REPLACE chosen off a
-		// transient would reset every flushed veteran's TotalDamage/PlayerName and
-		// downgrade SchemaVersion for the entire session).
-		TArray<FDatabaseRow> ProbeRows;
-		if (ExecSql(World, TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus LIMIT 1;"), ProbeRows))
+		// session (see FlushAtMatchEnd). ONE statement decides it: sequential probes
+		// race — a v3 SELECT can time out on a lock that clears before a follow-up
+		// core SELECT, misclassifying a healthy v3 table as v2, whose shorter REPLACE
+		// shape then wipes TotalDamage/PlayerName at every flush. table_info succeeds
+		// or fails atomically: on success the column list is a consistent snapshot,
+		// so the ABSENCE of TotalDamage positively establishes v2; on failure we know
+		// nothing -> Unknown, and the flush fails closed to the v3 shape.
+		TArray<FDatabaseRow> SchemaRows;
+		if (ExecSql(World, TEXT("PRAGMA table_info(NCRatingElimPlus);"), SchemaRows) && SchemaRows.Num() > 0)
 		{
-			Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::V3;
-		}
-		else
-		{
-			TArray<FDatabaseRow> CoreRows;
-			const bool bCoreReadable =
-				ExecSql(World, TEXT("SELECT Rating FROM NCRatingElimPlus LIMIT 1;"), CoreRows);
-			Impl->Schema = bCoreReadable
-				? FElimPlusRatingSystemImpl::EDbSchema::V2
-				: FElimPlusRatingSystemImpl::EDbSchema::Unknown;
-			if (bCoreReadable)
+			bool bHasV3Columns = false;
+			for (const FDatabaseRow& Row : SchemaRows)
+			{
+				if (Row.Text.Contains(TEXT("TotalDamage"))) { bHasV3Columns = true; break; }
+			}
+			Impl->Schema = bHasV3Columns
+				? FElimPlusRatingSystemImpl::EDbSchema::V3
+				: FElimPlusRatingSystemImpl::EDbSchema::V2;
+			if (!bHasV3Columns)
 			{
 				UE_LOG(LogElimPlusRating, Warning,
 					TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER — v2-shape writes this session, damage/name capture deferred"));
 			}
-			else
-			{
-				UE_LOG(LogElimPlusRating, Warning,
-					TEXT("InitDatabase: schema probe unreadable (db busy?) — failing closed to v3-shape writes; flushes may fail-and-count until the db recovers"));
-			}
+		}
+		else
+		{
+			Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::Unknown;
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("InitDatabase: schema probe unreadable (db busy or table missing?) — failing closed to v3-shape writes; flushes may fail-and-count until the db recovers"));
 		}
 	}
 
