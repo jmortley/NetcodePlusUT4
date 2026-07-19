@@ -2488,8 +2488,15 @@ void AElimPlusGame::SelectSpawnLayoutForRound()
 void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount)
 {
 	ClearHybridRoundSpawnState();
-	if (!bEnableHybridRoundSpawns || (Team0PlayerCount <= 0 && Team1PlayerCount <= 0))
+	if (Team0PlayerCount <= 0 && Team1PlayerCount <= 0)
 	{
+		return;
+	}
+	if (!bEnableHybridRoundSpawns)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[HybridSpawn] ElimPlus disabled by config; using PlayerStart-only round spawns (players %d/%d)"),
+			Team0PlayerCount, Team1PlayerCount);
 		return;
 	}
 
@@ -2510,8 +2517,8 @@ void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
 	bHybridRoundSpawnWindow = Team0HybridSpawnQueue.Num() > 0 || Team1HybridSpawnQueue.Num() > 0;
 
-	UE_LOG(LogGameMode, Log,
-		TEXT("ElimPlus hybrid spawns: anchors %s/%s, separation %.0f, radius %.0f, players %d/%d, queues %d/%d"),
+	UE_LOG(LogGameMode, Warning,
+		TEXT("[HybridSpawn] ElimPlus active: anchors %s/%s, separation %.0f, radius %.0f, players %d/%d, queues %d/%d"),
 		*Result.Team0AnchorName.ToString(), *Result.Team1AnchorName.ToString(),
 		Result.AnchorDistance2D, Result.TeamRadius, Team0PlayerCount, Team1PlayerCount,
 		Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
