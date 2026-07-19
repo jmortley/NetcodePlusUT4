@@ -419,6 +419,7 @@ void FWipeoutRatingSystem::FlushAtMatchEnd(UWorld* World)
 
 	int32 PersistedCount = 0;
 	int32 SkippedCount   = 0;
+	int32 FailedCount    = 0;
 	int32 CappedCount    = 0;
 
 	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
@@ -469,12 +470,23 @@ void FWipeoutRatingSystem::FlushAtMatchEnd(UWorld* World)
 			PR.GetRating(), PR.GetRD(), PR.GetSigma(),
 			PR.GetPerfIndexEMA(), PR.GetPerfGames(),
 			static_cast<long long>(NowUtc));
-		WO_ExecSqlNoRows(World, Sql);
-		++PersistedCount;
+		// Count what actually landed — an unchecked failure here used to report
+		// "persisted" while the stored row silently went one match stale.
+		if (WO_ExecSqlNoRows(World, Sql))
+		{
+			++PersistedCount;
+		}
+		else
+		{
+			++FailedCount;
+			UE_LOG(LogWipeoutRating, Warning,
+				TEXT("Flush FAILED for %s: rating write did not persist (db busy/locked?) — stored row is now one match stale"),
+				*UniqueId);
+		}
 	}
 
-	UE_LOG(LogWipeoutRating, Log, TEXT("FlushAtMatchEnd: persisted %d, skipped %d (didn't play), capped %d (no human opposition)"),
-		PersistedCount, SkippedCount, CappedCount);
+	UE_LOG(LogWipeoutRating, Log, TEXT("FlushAtMatchEnd: persisted %d, failed %d, skipped %d (didn't play), capped %d (no human opposition)"),
+		PersistedCount, FailedCount, SkippedCount, CappedCount);
 }
 
 int32 FWipeoutRatingSystem::GetCachedElo(const FString& UniqueId) const

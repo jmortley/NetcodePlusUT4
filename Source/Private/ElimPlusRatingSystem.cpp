@@ -97,6 +97,14 @@ struct FElimPlusRatingSystemImpl
 	 *  joiner pick up a match-start baseline at LoadPlayerFromDB time. */
 	bool bMatchActive = false;
 
+	/** True when InitDatabase's probe confirmed the v3 columns (TotalDamage/
+	 *  PlayerName) exist. FlushAtMatchEnd selects the v3 or v2 INSERT shape from
+	 *  THIS — never from a runtime write failure: treating a transient
+	 *  SQLITE_BUSY as "unmigrated table" once let the v2 fallback REPLACE
+	 *  rewrite a veteran's row without TotalDamage/PlayerName on a real v3
+	 *  table whenever the lock cleared between the two statements. */
+	bool bV3SchemaConfirmed = false;
+
 	// ---- Testing: random bot ELO assignment ----
 	/** When true, GetOrAssignBotElo returns a random rating in [BotEloMin, BotEloMax]
 	 *  on first lookup of a synthetic bot key, cached for the session. */
@@ -201,7 +209,15 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 	// LoadPlayerFromDB degrades gracefully either way; this just explains the session.
 	{
 		TArray<FDatabaseRow> ProbeRows;
-		if (!ExecSql(World, TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus LIMIT 1;"), ProbeRows))
+		// The probe result is CACHED and drives the flush's v3-vs-v2 INSERT shape for
+		// the whole session (see FlushAtMatchEnd). A transient probe failure on a good
+		// v3 table would demote this session's flushes to the v2 shape — acceptable:
+		// busy_timeout is already set above, and a session-scoped demotion only defers
+		// damage/name persistence, unlike the per-write fallback this replaced (which
+		// could wipe those columns on any cleared lock).
+		Impl->bV3SchemaConfirmed =
+			ExecSql(World, TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus LIMIT 1;"), ProbeRows);
+		if (!Impl->bV3SchemaConfirmed)
 		{
 			UE_LOG(LogElimPlusRating, Warning,
 				TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER (db busy?) — damage/name capture degraded this session"));
@@ -573,6 +589,7 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 
 	int32 PersistedCount = 0;
 	int32 SkippedCount   = 0;
+	int32 FailedCount    = 0;
 	int32 CappedCount    = 0;
 
 	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
@@ -634,10 +651,19 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			static_cast<long long>(NowUtc),
 			TotalPoints, RoundsPlayed,
 			TotalDamage, *SqlEscape(PlayerName));
-		if (!ExecSqlNoRows(World, Sql))
+		// INSERT shape comes from the InitDatabase schema probe, NEVER from a write
+		// failure: a failed v3 write here is contention/IO, not "unmigrated table",
+		// and falling back to the shorter v2 REPLACE on error could rewrite the row
+		// without TotalDamage/PlayerName the moment the lock cleared.
+		bool bPersisted = false;
+		if (Impl->bV3SchemaConfirmed)
 		{
-			// Unmigrated (v2) table: never lose the session's rating update — persist the
-			// core row; damage/name wait for the migration (InitDatabase warned).
+			bPersisted = ExecSqlNoRows(World, Sql);
+		}
+		else
+		{
+			// Unmigrated (v2) table this session: persist the core row; damage/name
+			// wait for the migration (InitDatabase warned).
 			const FString V2Sql = FString::Printf(
 				TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")
 				TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, SchemaVersion) ")
@@ -647,7 +673,14 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 				PR.GetPerfIndexEMA(), PR.GetPerfGames(),
 				static_cast<long long>(NowUtc),
 				TotalPoints, RoundsPlayed);
-			ExecSqlNoRows(World, V2Sql);
+			bPersisted = ExecSqlNoRows(World, V2Sql);
+		}
+		if (!bPersisted)
+		{
+			++FailedCount;
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("Flush FAILED for %s: rating write did not persist (db busy/locked?) — stored row is now one match stale"),
+				*UniqueId);
 		}
 
 		if (Replicator)
@@ -657,11 +690,14 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			// rating, so the end-of-match scoreboard reflects updated standings.
 			Replicator->SetPlayerGlobalRank(UniqueId, GetPlayerGlobalRank(World, UniqueId));
 		}
-		++PersistedCount;
+		if (bPersisted)
+		{
+			++PersistedCount;
+		}
 	}
 
-	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, skipped %d (didn't play), capped %d (no human opposition)"),
-		PersistedCount, SkippedCount, CappedCount);
+	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, failed %d, skipped %d (didn't play), capped %d (no human opposition)"),
+		PersistedCount, FailedCount, SkippedCount, CappedCount);
 
 	Impl->bMatchActive = false;
 }
