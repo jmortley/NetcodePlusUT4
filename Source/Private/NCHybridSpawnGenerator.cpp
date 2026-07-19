@@ -14,7 +14,12 @@ FNCHybridSpawnSettings::FNCHybridSpawnSettings()
 	, TraceStartOffsetZ(90.f)
 	, TraceEndOffsetZ(-2000.f)
 	, TraceRadius(40.f)
-	, TraceHalfHeight(92.f)
+	// Must match AUTCharacter's STANDING capsule (40x108, UTCharacter.cpp InitCapsuleSize),
+	// not APlayerStart's 40x92: the floor-sweep hit is this capsule's center, so the half-
+	// height is both the clearance the validation proves AND the Z the pawn is placed at.
+	// At 92 every generated spawn sat 16uu low and 186-216uu ceilings validated but
+	// wedged the spawned pawn.
+	, TraceHalfHeight(108.f)
 	, PitTestDistanceHorizontal(60.f)
 	, PitTestDistanceVertical(600.f)
 	, MinDistanceFromKillZ(200.f)
