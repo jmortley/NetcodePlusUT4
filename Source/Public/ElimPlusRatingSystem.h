@@ -112,9 +112,12 @@ public:
 	FElimPlusRatingSystem();
 	~FElimPlusRatingSystem();   // Out-of-line: TUniquePtr<Impl> dtor needs the complete type.
 
-	/** Run the CREATE TABLE IF NOT EXISTS on Mods.db. Call once from gamemode
-	 *  BeginPlay (server only). Idempotent. */
-	static bool InitDatabase(UWorld* World);
+	/** Run the CREATE TABLE IF NOT EXISTS + migrations on Mods.db and probe the
+	 *  schema version (cached on this instance — FlushAtMatchEnd picks its INSERT
+	 *  shape from it). Instance method since the probe result must land on the
+	 *  Impl. Call once from gamemode BeginPlay (server only), on the instance,
+	 *  after construction. Idempotent. */
+	bool InitDatabase(UWorld* World);
 
 	/** Pull this player's rating row from Mods.db into the in-memory cache.
 	 *  If no row exists, creates an INSERT with default 1400/350/0.06 and caches

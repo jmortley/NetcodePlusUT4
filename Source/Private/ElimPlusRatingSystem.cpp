@@ -97,13 +97,17 @@ struct FElimPlusRatingSystemImpl
 	 *  joiner pick up a match-start baseline at LoadPlayerFromDB time. */
 	bool bMatchActive = false;
 
-	/** True when InitDatabase's probe confirmed the v3 columns (TotalDamage/
-	 *  PlayerName) exist. FlushAtMatchEnd selects the v3 or v2 INSERT shape from
-	 *  THIS — never from a runtime write failure: treating a transient
-	 *  SQLITE_BUSY as "unmigrated table" once let the v2 fallback REPLACE
-	 *  rewrite a veteran's row without TotalDamage/PlayerName on a real v3
-	 *  table whenever the lock cleared between the two statements. */
-	bool bV3SchemaConfirmed = false;
+	/** InitDatabase's schema probe result. FlushAtMatchEnd selects its INSERT
+	 *  shape from THIS — never from a runtime write failure: treating a transient
+	 *  SQLITE_BUSY as "unmigrated table" once let the v2 fallback REPLACE rewrite
+	 *  a veteran's row without TotalDamage/PlayerName on a real v3 table.
+	 *  Tri-state because a FAILED probe proves nothing: the v2 shape may only be
+	 *  used when a probe POSITIVELY established a v2 table (core columns readable,
+	 *  v3 columns absent). Unknown fails closed to the v3 shape — on a real v3
+	 *  table that is simply correct, and on an unreadable db the write fails and
+	 *  is COUNTED rather than downgraded into a column-wiping v2 REPLACE. */
+	enum class EDbSchema : uint8 { Unknown, V2, V3 };
+	EDbSchema Schema = EDbSchema::Unknown;
 
 	// ---- Testing: random bot ELO assignment ----
 	/** When true, GetOrAssignBotElo returns a random rating in [BotEloMin, BotEloMax]
@@ -208,19 +212,37 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 	// SQLITE_BUSY — hub instances share one Mods.db and the engine sets no busy_timeout).
 	// LoadPlayerFromDB degrades gracefully either way; this just explains the session.
 	{
+		// The probe result is CACHED and drives the flush's INSERT shape for the whole
+		// session (see FlushAtMatchEnd). A failed v3 probe alone proves nothing — it
+		// could be a missing column OR a busy/unreadable db, and the bool-only exec
+		// API cannot tell them apart. Only a POSITIVE core-columns read alongside the
+		// failed v3 probe establishes a real v2 table; anything else stays Unknown and
+		// the flush fails closed to the v3 shape (a v2-shape REPLACE chosen off a
+		// transient would reset every flushed veteran's TotalDamage/PlayerName and
+		// downgrade SchemaVersion for the entire session).
 		TArray<FDatabaseRow> ProbeRows;
-		// The probe result is CACHED and drives the flush's v3-vs-v2 INSERT shape for
-		// the whole session (see FlushAtMatchEnd). A transient probe failure on a good
-		// v3 table would demote this session's flushes to the v2 shape — acceptable:
-		// busy_timeout is already set above, and a session-scoped demotion only defers
-		// damage/name persistence, unlike the per-write fallback this replaced (which
-		// could wipe those columns on any cleared lock).
-		Impl->bV3SchemaConfirmed =
-			ExecSql(World, TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus LIMIT 1;"), ProbeRows);
-		if (!Impl->bV3SchemaConfirmed)
+		if (ExecSql(World, TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus LIMIT 1;"), ProbeRows))
 		{
-			UE_LOG(LogElimPlusRating, Warning,
-				TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER (db busy?) — damage/name capture degraded this session"));
+			Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::V3;
+		}
+		else
+		{
+			TArray<FDatabaseRow> CoreRows;
+			const bool bCoreReadable =
+				ExecSql(World, TEXT("SELECT Rating FROM NCRatingElimPlus LIMIT 1;"), CoreRows);
+			Impl->Schema = bCoreReadable
+				? FElimPlusRatingSystemImpl::EDbSchema::V2
+				: FElimPlusRatingSystemImpl::EDbSchema::Unknown;
+			if (bCoreReadable)
+			{
+				UE_LOG(LogElimPlusRating, Warning,
+					TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER — v2-shape writes this session, damage/name capture deferred"));
+			}
+			else
+			{
+				UE_LOG(LogElimPlusRating, Warning,
+					TEXT("InitDatabase: schema probe unreadable (db busy?) — failing closed to v3-shape writes; flushes may fail-and-count until the db recovers"));
+			}
 		}
 	}
 
@@ -654,15 +676,17 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 		// INSERT shape comes from the InitDatabase schema probe, NEVER from a write
 		// failure: a failed v3 write here is contention/IO, not "unmigrated table",
 		// and falling back to the shorter v2 REPLACE on error could rewrite the row
-		// without TotalDamage/PlayerName the moment the lock cleared.
+		// without TotalDamage/PlayerName the moment the lock cleared. Unknown fails
+		// CLOSED to the v3 shape: correct on a v3 table, and on an unreadable db the
+		// write fails and is counted — never downgraded.
 		bool bPersisted = false;
-		if (Impl->bV3SchemaConfirmed)
+		if (Impl->Schema != FElimPlusRatingSystemImpl::EDbSchema::V2)
 		{
 			bPersisted = ExecSqlNoRows(World, Sql);
 		}
 		else
 		{
-			// Unmigrated (v2) table this session: persist the core row; damage/name
+			// POSITIVELY-confirmed v2 table: persist the core row; damage/name
 			// wait for the migration (InitDatabase warned).
 			const FString V2Sql = FString::Printf(
 				TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")

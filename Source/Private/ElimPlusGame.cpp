@@ -258,7 +258,7 @@ void AElimPlusGame::BeginPlay()
 	if (HasAuthority() && !RatingSystem.IsValid())
 	{
 		RatingSystem = MakeUnique<FElimPlusRatingSystem>();
-		FElimPlusRatingSystem::InitDatabase(GetWorld());
+		RatingSystem->InitDatabase(GetWorld());
 
 		// Push the testing-config bot ELO range into the rating system so both
 		// PickBalancedTeam and the per-round Glicko placeholder use the same
