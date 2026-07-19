@@ -111,6 +111,74 @@ static TAutoConsoleVariable<float> CVarRequireHitscanClaimPingMs(
     TEXT("World impacts still trace normally. -1 disables the gate. Default: 100."),
     ECVF_Default);
 
+static TAutoConsoleVariable<float> CVarVisualHitscanClaimTolerance(
+    TEXT("ncp.VisualHitscanClaimTolerance"), 4.0f,
+    TEXT("Client-only extra radius (units) when confirming an actor-capsule hit against the rendered-position capsule. Default: 4."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVisualHitscanClaimDebug(
+    TEXT("ncp.VisualHitscanClaimDebug"), 0,
+    TEXT("Client rendered-capsule claim diagnostics: 0=off, 1=rejections, 2=all actor-capsule candidates."),
+    ECVF_Default);
+
+static bool ShotIntersectsRenderedCapsule(
+    AUTCharacter* Target,
+    const FVector& StartLocation,
+    const FVector& EndTrace,
+    float TraceRadius,
+    FVector& OutVisualOffset,
+    float& OutMissBy)
+{
+    OutVisualOffset = FVector::ZeroVector;
+    OutMissBy = 0.0f;
+
+    // Fail open if visual data is unavailable: this safeguard must never turn a
+    // missing/unregistered mesh into a genuine no-reg.
+    if (Target == nullptr || Target->GetMesh() == nullptr || !Target->GetMesh()->IsRegistered() ||
+        Target->GetCapsuleComponent() == nullptr)
+    {
+        return true;
+    }
+
+    // Network smoothing moves the mesh relative to the actor/capsule. Remove the
+    // character's normal mesh offset to recover the capsule centre that was
+    // actually rendered to the shooter.
+    const FVector ActorLocation = Target->GetActorLocation();
+    const FVector ExpectedMeshLocation =
+        ActorLocation + Target->GetActorQuat().RotateVector(Target->GetBaseTranslationOffset());
+    OutVisualOffset = Target->GetMesh()->GetComponentLocation() - ExpectedMeshLocation;
+    FVector VisualTargetLocation = ActorLocation + OutVisualOffset;
+
+    float CollisionHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    if (Target->UTCharacterMovement && Target->UTCharacterMovement->bIsFloorSliding)
+    {
+        VisualTargetLocation.Z = VisualTargetLocation.Z - CollisionHeight + Target->SlideTargetHeight;
+        CollisionHeight = Target->SlideTargetHeight;
+    }
+    const float CollisionRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+
+    FVector ClosestPoint = FVector::ZeroVector;
+    FVector ClosestCapsulePoint = VisualTargetLocation;
+    if (CollisionRadius >= CollisionHeight)
+    {
+        ClosestPoint = FMath::ClosestPointOnSegment(VisualTargetLocation, StartLocation, EndTrace);
+    }
+    else
+    {
+        const FVector CapsuleSegment(0.0f, 0.0f, CollisionHeight - CollisionRadius);
+        FMath::SegmentDistToSegmentSafe(
+            StartLocation, EndTrace,
+            VisualTargetLocation - CapsuleSegment, VisualTargetLocation + CapsuleSegment,
+            ClosestPoint, ClosestCapsulePoint);
+    }
+
+    const float BaseRadius = CollisionRadius + TraceRadius;
+    const float Distance = FVector::Dist(ClosestPoint, ClosestCapsulePoint);
+    OutMissBy = Distance - BaseRadius;
+    const float Tolerance = FMath::Max(0.0f, CVarVisualHitscanClaimTolerance.GetValueOnGameThread());
+    return Distance <= BaseRadius + Tolerance;
+}
+
 // =========================================================================
 // PROJECTILE DIRECT-HIT LAG COMPENSATION (rocket + flak shell) — server-only.
 // Validates a client's direct-hit claim by finding, in the target's rewound
@@ -990,6 +1058,36 @@ void AUTWeaponFix::FireShot()
 			FHitResult PreHit;
 			HitScanTrace(SpawnLocation, EndTrace, InstantHitInfo[CurrentFireMode].TraceHalfSize, PreHit, 0.0f);
 			ClientHitChar = Cast<AUTCharacter>(PreHit.Actor.Get());
+
+			// ClientHitChar must mean "the ray crossed what I saw", not merely
+			// "the ray crossed the invisible replicated actor anchor". TeamArenaCharacter's
+			// network smoothing can leave the rendered mesh behind that anchor at high ping.
+			if (ClientHitChar != nullptr)
+			{
+				FVector VisualOffset = FVector::ZeroVector;
+				float VisualMissBy = 0.0f;
+				const bool bVisualCapsuleHit = ShotIntersectsRenderedCapsule(
+					ClientHitChar, SpawnLocation, EndTrace,
+					InstantHitInfo[CurrentFireMode].TraceHalfSize, VisualOffset, VisualMissBy);
+				const int32 VisualClaimDebug = CVarVisualHitscanClaimDebug.GetValueOnGameThread();
+
+				if (!bVisualCapsuleHit)
+				{
+					if (VisualClaimDebug >= 1)
+					{
+						UE_LOG(LogUTWeaponFix, Warning,
+							TEXT("[VisualClaim] REJECT %s actor candidate: visual offset=%s, missed rendered capsule by %.2fuu"),
+							*ClientHitChar->GetName(), *VisualOffset.ToString(), VisualMissBy);
+					}
+					ClientHitChar = nullptr;
+				}
+				else if (VisualClaimDebug >= 2)
+				{
+					UE_LOG(LogUTWeaponFix, Warning,
+						TEXT("[VisualClaim] ACCEPT %s actor candidate: visual offset=%s, visual margin=%.2fuu"),
+						*ClientHitChar->GetName(), *VisualOffset.ToString(), -VisualMissBy);
+				}
+			}
 
 			// 327 client-informed headshot (SECURE): report WHERE the client rendered the target's head —
 			// the offset of its rendered mesh head bone from the target's body — but only when the shot
@@ -3763,11 +3861,30 @@ void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, b
 		{
 			Char->FirstPersonMesh->HideBoneByName(NAME_UpperArmL, PBO_None);
 			Char->FirstPersonMesh->HideBoneByName(NAME_UpperArmR, PBO_None);
+			// BP parity: the BP's hide chain then re-seated the arms rig at an
+			// ABSOLUTE relative transform — loc (-10,-20,-10), rot (0,-90,0) — i.e.
+			// ~20uu left + 10 down of the stock (-15,0,0) hands seat: its
+			// "centergun" position (same values its `mutate centergun` used on
+			// visible guns). The 1P weapon Mesh hangs off FirstPersonMesh, so the
+			// muzzle socket — and therefore the hidden BEAM ORIGIN — rides this
+			// seat: center-low and bobbing, NOT the right-hand muzzle.
+			Char->FirstPersonMesh->SetRelativeLocationAndRotation(
+				FVector(-10.f, -20.f, -10.f), FRotator(0.f, -90.f, 0.f));
 		}
 		else
 		{
 			Char->FirstPersonMesh->UnHideBoneByName(NAME_UpperArmL);
 			Char->FirstPersonMesh->UnHideBoneByName(NAME_UpperArmR);
+			// Restore the class-default seat (what stock UpdateWeaponHand re-applies
+			// each equip anyway) so a mid-equip `weaponhand show` doesn't leave the
+			// arms parked at the hidden offset until the next weapon switch.
+			AUTCharacter* CharCDO = Char->GetClass()->GetDefaultObject<AUTCharacter>();
+			if (CharCDO != nullptr && CharCDO->FirstPersonMesh != nullptr)
+			{
+				Char->FirstPersonMesh->SetRelativeLocationAndRotation(
+					CharCDO->FirstPersonMesh->RelativeLocation,
+					CharCDO->FirstPersonMesh->RelativeRotation);
+			}
 		}
 	}
 }
