@@ -420,6 +420,22 @@ void ATeamArenaCharacter::PlayDying()
 	SpawnSkeletonDissolve();
 }
 
+void ATeamArenaCharacter::SetOutlineLocal(bool bNowOutlined, bool bWhenUnoccluded)
+{
+	// UT renders outlines with a separate CustomDepth skeletal-mesh duplicate. SetVisibility(false)
+	// on the normal body does not make that duplicate ineligible, and true-spectator TacCom calls
+	// SetOutlineLocal(true) every tick. That can expose a cleaned-up corpse as an otherwise invisible
+	// red/blue pawn. Explicit component visibility is the narrow gate we want: ping-compensated spawn
+	// uses SetActorHiddenInGame (not SetVisibility), and living visible pawns retain stock X-ray.
+	const USkeletalMeshComponent* BodyMesh = GetMesh();
+	if (bNowOutlined && BodyMesh != nullptr && !BodyMesh->IsVisible())
+	{
+		bNowOutlined = false;
+	}
+
+	Super::SetOutlineLocal(bNowOutlined, bWhenUnoccluded);
+}
+
 // On death, hide the corpse mesh after a delay. Two roles:
 //  (1) "Darken Bodies" toggle (any mode): hide after the ~1s death-effects fade (instant hide looked abrupt).
 //      Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across models); this
@@ -500,6 +516,10 @@ void ATeamArenaCharacter::HideDeadBody()
 	if (!BodyMesh) { return; }
 
 	BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
+
+	// Drop any already-registered CustomDepth mesh immediately. Future TacCom re-assertions are
+	// rejected by SetOutlineLocal() while the body remains explicitly invisible.
+	SetOutlineLocal(false);
 
 	// Don't let the corpse-hide blank a carried FLAG. An instagib flag carrier who dies drops the flag,
 	// but if that detach hasn't processed yet the flag's root is still parented to this body mesh, and the
@@ -1146,22 +1166,9 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				bShouldHide = bHidden && *bHidden;
 			}
 
-			if (bShouldHide)
-			{
-				CurrentWeapon->GetMesh()->SetHiddenInGame(true);
-				if (FirstPersonMesh)
-				{
-					FirstPersonMesh->SetHiddenInGame(true);
-				}
-			}
-			else
-			{
-				CurrentWeapon->GetMesh()->SetHiddenInGame(false);
-				if (FirstPersonMesh)
-				{
-					FirstPersonMesh->SetHiddenInGame(false);
-				}
-			}
+			// BP-parity apply (visibility-only; also restores when not hidden).
+			// See AUTWeaponFix::ApplyWeaponHideState for why not SetHiddenInGame.
+			AUTWeaponFix::ApplyWeaponHideState(CurrentWeapon, this, bShouldHide);
 		}
 		// Clear stale reference if weapon was removed (death, drop)
 		if (LastEquippedWeapon && (!CurrentWeapon || CurrentWeapon->IsPendingKillPending()))

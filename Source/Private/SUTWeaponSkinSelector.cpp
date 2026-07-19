@@ -129,10 +129,10 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 							]
 						]
 
-						// Hidden-weapon beam origin — two numeric spinners that drive
-						// AUTWeaponFix::HiddenBeamBackOffset / HiddenBeamDownOffset.
-						// Only matters when a weapon is set Hidden; controls where
-						// the tracer/beam spawns relative to the camera.
+						// LEGACY (2026-07-19): these spinners still write
+						// AUTWeaponFix::HiddenBeamBackOffset / HiddenBeamDownOffset,
+						// but nothing reads them anymore — the BP-parity hide keeps
+						// the stock muzzle-socket beam origin. Candidates for removal.
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 0, 0, 8)
@@ -675,11 +675,10 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	// Hidden-weapon beam offsets — push to AUTWeaponFix statics so the next
-	// fire reads the new values (GetImpactSpawnPosition reads the statics
-	// directly), and persist to Mod.ini so they survive a restart. Clamp here
-	// too — the spinner Min/Max already enforces, but a manual edit could
-	// poke in something weird.
+	// Hidden-weapon beam offsets — LEGACY (2026-07-19): pushed to the AUTWeaponFix
+	// statics and persisted to Mod.ini, but inert — the BP-parity hide keeps the
+	// stock muzzle-socket beam origin, so no code reads these anymore. Clamp kept
+	// so a manual Mod.ini edit can't store something weird.
 	AUTWeaponFix::HiddenBeamBackOffset = FMath::Clamp(HiddenBeamBack, 0.f, 100.f);
 	AUTWeaponFix::HiddenBeamDownOffset = FMath::Clamp(HiddenBeamDown, 0.f, 100.f);
 	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamBack"),

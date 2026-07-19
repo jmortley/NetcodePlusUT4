@@ -93,49 +93,34 @@ static void HandleWeaponHand(const TArray<FString>& Args)
 		}
 		else if (Hand == TEXT("hidden") || Hand == TEXT("h") || Hand == TEXT("hide"))
 		{
-			// Per-weapon hide — hides the CURRENT weapon by its tag
+			// Per-weapon hide — keyed by CLASS NAME (2026-07-19 fix: this used to
+			// key by WeaponSkinCustomizationTag, which BringUp / TeamArenaCharacter /
+			// LoadWeaponSettings never read — the entry only worked until respawn).
+			// Works for any weapon class now, stock included.
 			AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
 			if (UTChar && UTChar->GetWeapon())
 			{
-				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
-				if (FixWeapon && FixWeapon->WeaponSkinCustomizationTag != NAME_None)
-				{
-					AUTWeaponFix::HiddenWeaponsByTag.Add(FixWeapon->WeaponSkinCustomizationTag, true);
-					AUTWeaponFix::SaveWeaponSettings();
-
-					if (FixWeapon->GetMesh())
-						FixWeapon->GetMesh()->SetVisibility(false, true);
-					if (UTChar->FirstPersonMesh)
-						UTChar->FirstPersonMesh->SetVisibility(false, true);
-
-					PC->ClientMessage(FString::Printf(TEXT("Hidden: %s (saved to Mod.ini)"), *FixWeapon->WeaponSkinCustomizationTag.ToString()));
-				}
-				else
-				{
-					PC->ClientMessage(TEXT("Current weapon is not a NetcodePlus weapon."));
-				}
+				AUTWeapon* CurWeap = UTChar->GetWeapon();
+				const FName HideKey = FName(*CurWeap->GetClass()->GetName());
+				AUTWeaponFix::HiddenWeaponsByTag.Add(HideKey, true);
+				AUTWeaponFix::SaveWeaponSettings();
+				AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, true);
+				PC->ClientMessage(FString::Printf(TEXT("Hidden: %s (saved to Mod.ini)"), *HideKey.ToString()));
 			}
 			return;
 		}
 		else if (Hand == TEXT("show") || Hand == TEXT("s"))
 		{
-			// Per-weapon show — unhides the CURRENT weapon by its tag
+			// Per-weapon show — unhides the CURRENT weapon by its class name
 			AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
 			if (UTChar && UTChar->GetWeapon())
 			{
-				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
-				if (FixWeapon && FixWeapon->WeaponSkinCustomizationTag != NAME_None)
-				{
-					AUTWeaponFix::HiddenWeaponsByTag.Add(FixWeapon->WeaponSkinCustomizationTag, false);
-					AUTWeaponFix::SaveWeaponSettings();
-
-					if (FixWeapon->GetMesh())
-						FixWeapon->GetMesh()->SetVisibility(true, true);
-					if (UTChar->FirstPersonMesh)
-						UTChar->FirstPersonMesh->SetVisibility(true, true);
-
-					PC->ClientMessage(FString::Printf(TEXT("Shown: %s (saved to Mod.ini)"), *FixWeapon->WeaponSkinCustomizationTag.ToString()));
-				}
+				AUTWeapon* CurWeap = UTChar->GetWeapon();
+				const FName HideKey = FName(*CurWeap->GetClass()->GetName());
+				AUTWeaponFix::HiddenWeaponsByTag.Add(HideKey, false);
+				AUTWeaponFix::SaveWeaponSettings();
+				AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, false);
+				PC->ClientMessage(FString::Printf(TEXT("Shown: %s (saved to Mod.ini)"), *HideKey.ToString()));
 			}
 			// Re-apply current hand position
 			NewHand = PC->GetWeaponHand();

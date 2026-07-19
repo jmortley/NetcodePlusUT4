@@ -15,6 +15,7 @@
 #include "UTPlusProj_FlakShell.h"
 #include "UTDamageType.h"   // FUTRadialDamageEvent (grace-buffer direct-hit damage)
 #include "UTPlusWeap_RocketLauncher.h"
+#include "UTDualWeapon.h"   // ApplyWeaponHideState: dual-enforcer LeftMesh
 #include "UTWeaponSkin.h"
 #include "UObject/UObjectIterator.h"
 #include "ClientHitsounds.h"
@@ -3653,36 +3654,15 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 		LoadWeaponSettings();
 	}
 
-	// Per-weapon hide: check if this weapon's class is marked hidden
-	FName HideKey = FName(*GetClass()->GetName());
-	if (UTOwner)
+	// Per-weapon hide (BP-parity, 2026-07-19): visibility-only — see
+	// ApplyWeaponHideState. Applied BOTH ways every equip so the shared arm
+	// bones, and a mesh left invisible by a previous owner's local hide, are
+	// restored when this weapon is NOT hidden. Local viewer only: this is pure
+	// render state; hiding bones server-side would be wasted work.
+	if (UTOwner && GetNetMode() != NM_DedicatedServer && UTOwner->IsLocallyControlled())
 	{
-		bool* bHidden = HiddenWeaponsByTag.Find(HideKey);
-		if (bHidden && *bHidden)
-		{
-			if (Mesh)
-			{
-				Mesh->SetHiddenInGame(true);
-			}
-			if (UTOwner->FirstPersonMesh)
-			{
-				UTOwner->FirstPersonMesh->SetHiddenInGame(true);
-
-				// Reset 1P mesh to default relative transform so the muzzle socket
-				// is at a consistent position regardless of which weapon's VeryLowMeshOffset
-				// was applied by UpdateWeaponHand. Without this, swapping between
-				// hidden weapons shifts the beam origin because each weapon has different offsets.
-				USkeletalMeshComponent* FPMesh = UTOwner->FirstPersonMesh;
-				USkeletalMeshComponent* FPMeshArchetype = Cast<USkeletalMeshComponent>(FPMesh->GetArchetype());
-				if (FPMeshArchetype)
-				{
-					FPMesh->SetRelativeLocationAndRotation(
-						FPMeshArchetype->RelativeLocation,
-						FPMeshArchetype->RelativeRotation
-					);
-				}
-			}
-		}
+		bool* bHidden = HiddenWeaponsByTag.Find(FName(*GetClass()->GetName()));
+		ApplyWeaponHideState(this, UTOwner, bHidden && *bHidden);
 	}
 
 	// Skin cache lookup + MID creation + SavedMeshMaterials patching.
@@ -3735,59 +3715,60 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 
 
 
-void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation)
+// BP-parity hidden-weapon apply (2026-07-19). The old HiddenWeaponsUTPL BP hid
+// weapons by turning off RENDERING only — SetVisibility(false, propagate) on the
+// gun mesh + HideBoneByName(upperarm_l/r) on the arms — leaving every transform
+// and the weapon-hand pipeline untouched, so stock GetImpactSpawnPosition kept
+// spawning beams from the live muzzle socket. Constraints that shape this:
+//  - bVisible is OURS here; stock code owns bHiddenInGame (zoom, OverlayMesh
+//    parking, spectate paths all toggle it) — using SetHiddenInGame gets fought.
+//  - propagate=true also silences the muzzle-flash PSC children for free
+//    (UE4.15 ActivateSystem never forces visibility back on).
+//  - Arms are hidden per-BONE, not per-component: the component keeps rendering
+//    (zero-scaled) and ticking, so the hand socket the weapon hangs from stays
+//    live, and stock behind-view/spectate visibility logic is never fought.
+void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, bool bHide)
 {
-	// When weapon is hidden, spawn beam effects from camera center
-	// instead of the muzzle socket (which is at a wrong position due to VeryLowMeshOffset).
-	// This makes beams fire straight from the crosshair, matching projectile behavior.
-	FName HideKey = FName(*GetClass()->GetName());
-	bool* bHidden = HiddenWeaponsByTag.Find(HideKey);
-	if (bHidden && *bHidden && UTOwner && UTOwner->CharacterCameraComponent)
+	USkeletalMeshComponent* WeapMesh = (Weapon != nullptr) ? Weapon->GetMesh() : nullptr;
+	if (WeapMesh != nullptr)
 	{
-		SpawnRotation = UTOwner->CharacterCameraComponent->GetComponentRotation();
-		// Offset back+down from camera so the beam is visible (spawning at exact
-		// camera position makes the beam edge-on/invisible when stationary).
-		// Magnitudes come from Mod.ini [NetcodePlus.WeaponSettings] HiddenBeamBack
-		// + HiddenBeamDown via LoadWeaponSettings; the weaponskins menu has
-		// sliders. Defaults (10 / 35) reproduce the original hardcoded behavior.
-		const FVector Forward = SpawnRotation.Vector();
-		const FVector Down(0.f, 0.f, -1.f);
-		SpawnLocation = UTOwner->CharacterCameraComponent->GetComponentLocation()
-			+ Forward * -HiddenBeamBackOffset   // pulls particles back into body
-			+ Down    *  HiddenBeamDownOffset;   // drop below eye line
-		return;
-	}
-
-	Super::GetImpactSpawnPosition(TargetLoc, SpawnLocation, SpawnRotation);
-}
-
-void AUTWeaponFix::PlayFiringEffects()
-{
-	// When the weapon is locally hidden, the muzzle flash PSC is still attached to
-	// the (hidden) muzzle socket while the beam/impact spawns from the camera-adjusted
-	// origin (see GetImpactSpawnPosition). That mismatch produces a visible puff at
-	// the hand while the beam comes from chest height. Suppress only the muzzle flash
-	// for the current fire mode — sound, anim, kickback, and beam all still fire.
-	UParticleSystemComponent* SavedPSC = nullptr;
-	int32 SavedIndex = INDEX_NONE;
-	const FName HideKey = FName(*GetClass()->GetName());
-	const bool* bHidden = HiddenWeaponsByTag.Find(HideKey);
-	if (bHidden && *bHidden && UTOwner)
-	{
-		const uint8 EffectFiringMode = (Role == ROLE_Authority || UTOwner->Controller != nullptr) ? CurrentFireMode : UTOwner->FireMode;
-		if (MuzzleFlash.IsValidIndex(EffectFiringMode))
+		if (bHide)
 		{
-			SavedPSC = MuzzleFlash[EffectFiringMode];
-			SavedIndex = EffectFiringMode;
-			MuzzleFlash[EffectFiringMode] = nullptr;
+			// One-shot pose bake: a weapon hidden from BringUp may never render,
+			// and the ctor's OnlyTickPoseWhenRendered would leave its bones at REF
+			// pose — the BP's poll always hid after a rendered frame, freezing at
+			// idle. Bake once so the muzzle socket freezes at idle too. A direct
+			// RefreshBoneTransforms has no rendered/update-flag gate in 4.15; only
+			// the per-frame tick path is gated.
+			WeapMesh->TickAnimation(0.f, false);
+			WeapMesh->RefreshBoneTransforms();
+		}
+		WeapMesh->SetVisibility(!bHide, true);
+
+		// Dual-wield second gun — the BP toggled LeftMesh alongside Mesh.
+		AUTDualWeapon* Dual = Cast<AUTDualWeapon>(Weapon);
+		if (Dual != nullptr && Dual->LeftMesh != nullptr)
+		{
+			Dual->LeftMesh->SetVisibility(!bHide, true);
 		}
 	}
 
-	Super::PlayFiringEffects();
-
-	if (SavedIndex != INDEX_NONE && MuzzleFlash.IsValidIndex(SavedIndex))
+	if (Char != nullptr && Char->FirstPersonMesh != nullptr)
 	{
-		MuzzleFlash[SavedIndex] = SavedPSC;
+		// Bone names verified against the HiddenWeaponsUTPL export; missing bones
+		// on a custom hands skeleton just log a warning.
+		static const FName NAME_UpperArmL(TEXT("upperarm_l"));
+		static const FName NAME_UpperArmR(TEXT("upperarm_r"));
+		if (bHide)
+		{
+			Char->FirstPersonMesh->HideBoneByName(NAME_UpperArmL, PBO_None);
+			Char->FirstPersonMesh->HideBoneByName(NAME_UpperArmR, PBO_None);
+		}
+		else
+		{
+			Char->FirstPersonMesh->UnHideBoneByName(NAME_UpperArmL);
+			Char->FirstPersonMesh->UnHideBoneByName(NAME_UpperArmR);
+		}
 	}
 }
 

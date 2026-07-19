@@ -170,12 +170,20 @@ public:
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
     static TMap<FName, bool> HiddenWeaponsByTag;
 
-    /** Tracer/beam origin offsets used when the firing weapon is hidden.
-     *  Plumbed into GetImpactSpawnPosition (camera-relative). Set via the
-     *  weaponskins menu; persisted in Mod.ini [NetcodePlus.WeaponSettings]
-     *  HiddenBeamBack + HiddenBeamDown. Defaults match the original hardcoded
-     *  values (10 back, 35 down = "stomach"). 0 back + 0 down = camera-origin
-     *  (beam can render edge-on / invisible when stationary). */
+    /** Apply or restore the hidden-weapon state the way the old HiddenWeaponsUTPL
+     *  BP did: rendering-only (SetVisibility(propagate) on the gun mesh + arm-bone
+     *  hiding on the shared FirstPersonMesh). Transforms and bHiddenInGame are
+     *  never touched — stock code owns that flag (zoom/overlay/spectate) — so the
+     *  stock muzzle-socket beam origin keeps working while hidden. Works on any
+     *  AUTWeapon (stock included). Callers: BringUp, TeamArenaCharacter's
+     *  weapon-swap detector, and the "weaponhand hidden/show" console command. */
+    static void ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, bool bHide);
+
+    /** LEGACY (2026-07-19): beam origin no longer reads these — the BP-parity hide
+     *  above leaves the stock muzzle-socket beam path intact, so the old
+     *  camera-relative GetImpactSpawnPosition override is gone. Kept only because
+     *  the weaponskins menu sliders and Mod.ini keys (HiddenBeamBack/HiddenBeamDown)
+     *  still read/write them; the values are inert. */
     static float HiddenBeamBackOffset;
     static float HiddenBeamDownOffset;
 
@@ -196,8 +204,6 @@ public:
     /** Whether settings have been loaded from Mod.ini this session */
     static bool bWeaponSettingsLoaded;
     //~ Begin AUTWeapon Interface
-    virtual void GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation) override;
-    virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
 

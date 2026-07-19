@@ -221,6 +221,11 @@ public:
 	// bDarkenBodies.
 	virtual void PlayDying() override;
 
+	/** Keep TacCom/X-ray from rendering the separate CustomDepth duplicate after this pawn's body mesh
+	 *  has been explicitly hidden by corpse cleanup. Stock TacCom re-calls SetOutlineLocal(true) every
+	 *  spectator tick, so clearing the outline only once in PlayDying is not sufficient. */
+	virtual void SetOutlineLocal(bool bNowOutlined, bool bWhenUnoccluded = false) override;
+
 	// iCTF-only: scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting
 	// ([NetcodePlus] OwnFootstepVolume, 0..1; 1 = stock). Remote/enemy footsteps and other modes are
 	// untouched. UTPlaySound has no volume arg, so a non-stock volume is played via PlayOwnFootstepScaled.
