@@ -1,4 +1,5 @@
 #include "ElimPlusGame.h"
+#include "NCHybridSpawnGenerator.h"
 #include "NCFireValCollector.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
@@ -219,6 +220,9 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 
 		// 6-0 blowout mid-game PPR shuffle (default: on; non-PUG + ?BalanceTeams only).
 		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimMidGameShuffle"), bElimMidGameShuffle, ModIni);
+
+		// Absolute-derived transform queues (default on; immediate rollback switch).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimHybridRoundSpawns"), bEnableHybridRoundSpawns, ModIni);
 
 		// Anti-camp (defaults: on, threshold 400u, check 1.0s, cooldown 5.0s).
 		// ElimCampCheckInterval=0 disables the camp timer (StartCampCheckTimer gate).
@@ -1000,6 +1004,8 @@ void AElimPlusGame::StartNextRound()
 	// into enemies, or the Z-fix can't detect the first pawn yet.
 	// One spawn per frame lets each capsule register before the next.
 	PendingSpawnQueue.Empty();
+	int32 HybridTeam0Players = 0;
+	int32 HybridTeam1Players = 0;
 	bAllowPlayerRespawns = true;
 
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
@@ -1019,9 +1025,18 @@ void AElimPlusGame::StartNextRound()
 				PC->ClientGotoState(NAME_Playing);
 			}
 
+			if (PS->Team)
+			{
+				if (PS->Team->TeamIndex == 0) ++HybridTeam0Players;
+				else if (PS->Team->TeamIndex == 1) ++HybridTeam1Players;
+			}
 			PendingSpawnQueue.Add(C);
 		}
 	}
+
+	// Uses the selected layout only as a quality-ranked anchor pool. The
+	// generated queues supply one validated transform per player at any size.
+	PrepareHybridRoundSpawnQueues(HybridTeam0Players, HybridTeam1Players);
 
 	// Process first spawn immediately, rest on subsequent frames
 	if (PendingSpawnQueue.Num() > 0)
@@ -1088,6 +1103,7 @@ void AElimPlusGame::ProcessNextSpawn()
 void AElimPlusGame::OnAllPlayersSpawned()
 {
 	bAllowPlayerRespawns = false;
+	ClearHybridRoundSpawnState();
 
 	UE_LOG(LogGameMode, Verbose, TEXT("Round starting sizes - Team0: %d, Team1: %d"), Team0StartingSize, Team1StartingSize);
 
@@ -1661,11 +1677,60 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 
 	if (bShouldAllowSpawn)
 	{
-		AActor* ChosenStart = ChoosePlayerStart_Implementation(NewPlayer);
+		AUTPlayerState* SpawnPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+		const int32 TeamIndex = (SpawnPS && SpawnPS->Team) ? SpawnPS->Team->TeamIndex : INDEX_NONE;
+		AActor* ChosenStart = nullptr;
+		FTransform HybridTransform;
+		bool bUsedHybridTransform = false;
+
+		if (bHybridRoundSpawnWindow && (TeamIndex == 0 || TeamIndex == 1))
+		{
+			bUsedHybridTransform = TryConsumeHybridSpawnTransform(TeamIndex, HybridTransform);
+			if (bUsedHybridTransform)
+			{
+				const TArray<APlayerStart*>& PreferredStarts =
+					(TeamIndex == 0) ? Team0SelectedSpawns : Team1SelectedSpawns;
+				ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+					PreferredStarts, HybridTransform.GetLocation());
+				if (!ChosenStart)
+				{
+					ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+						AllSpawnPointsList, HybridTransform.GetLocation());
+				}
+			}
+			else
+			{
+				UE_LOG(LogGameMode, Warning,
+					TEXT("ElimPlus hybrid queue exhausted for %s (team %d); using PlayerStart fallback"),
+					SpawnPS ? *SpawnPS->PlayerName : TEXT("Unknown"), TeamIndex);
+			}
+		}
+
+		if (!ChosenStart)
+		{
+			bUsedHybridTransform = false;
+			ChosenStart = ChoosePlayerStart_Implementation(NewPlayer);
+		}
+
+		bHasPendingHybridSpawnTransform = bUsedHybridTransform && (ChosenStart != nullptr);
+		if (bHasPendingHybridSpawnTransform)
+		{
+			PendingHybridSpawnTransform = HybridTransform;
+		}
 
 		OverriddenPlayerStart  = ChosenStart;
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
+		bHasPendingHybridSpawnTransform = false;
+
+		if (bUsedHybridTransform && NewPlayer->GetPawn())
+		{
+			FRotator SpawnRotation = HybridTransform.Rotator();
+			SpawnRotation.Pitch = 0.f;
+			SpawnRotation.Roll = 0.f;
+			NewPlayer->SetControlRotation(SpawnRotation);
+			NewPlayer->ClientSetRotation(SpawnRotation, true);
+		}
 
 		if (!NewPlayer->GetPawn())
 		{
@@ -1777,9 +1842,19 @@ bool AElimPlusGame::ValidateSpawnLocation(const FVector& TestLocation)
 
 APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot)
 {
+	if (!StartSpot && !bHasPendingHybridSpawnTransform)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: no PlayerStart or hybrid transform"));
+		return nullptr;
+	}
+
 	FRotator StartRotation(ForceInit);
-	StartRotation.Yaw = StartSpot->GetActorRotation().Yaw;
-	FVector StartLocation = StartSpot->GetActorLocation();
+	StartRotation.Yaw = bHasPendingHybridSpawnTransform
+		? PendingHybridSpawnTransform.Rotator().Yaw
+		: StartSpot->GetActorRotation().Yaw;
+	FVector StartLocation = bHasPendingHybridSpawnTransform
+		? PendingHybridSpawnTransform.GetLocation()
+		: StartSpot->GetActorLocation();
 
 	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
 	if (!PawnClass)
@@ -1814,7 +1889,7 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 			ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation + Offset), SpawnInfo);
 			if (ResultPawn)
 			{
-				UE_LOG(LogGameMode, Log, TEXT("SpawnDefaultPawnFor: Used offset spawn at %s"), *StartSpot->GetName());
+				UE_LOG(LogGameMode, Log, TEXT("SpawnDefaultPawnFor: Used offset spawn at %s"), *GetNameSafe(StartSpot));
 				break;
 			}
 		}
@@ -1829,7 +1904,7 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		FVector JitteredLocation = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 0.f);
 		ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, JitteredLocation), SpawnInfo);
-		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: Force-spawned at %s"), *StartSpot->GetName());
+		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: Force-spawned at %s"), *GetNameSafe(StartSpot));
 	}
 
 	if (!ResultPawn)
@@ -2410,8 +2485,84 @@ void AElimPlusGame::SelectSpawnLayoutForRound()
 		Team0SelectedSpawns.Num(), Team1SelectedSpawns.Num());
 }
 
+void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount)
+{
+	ClearHybridRoundSpawnState();
+	if (!bEnableHybridRoundSpawns || (Team0PlayerCount <= 0 && Team1PlayerCount <= 0))
+	{
+		return;
+	}
+
+	FNCHybridSpawnSettings Settings;
+	Settings.MinimumCrossTeamDistance = MinimumEnemySpawnDistance;
+
+	FNCHybridSpawnResult Result;
+	if (!FNCHybridSpawnGenerator::Generate(
+		GetWorld(), AllSpawnPointsList, Team0SelectedSpawns, Team1SelectedSpawns,
+		Team0PlayerCount, Team1PlayerCount, Settings, Result))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("ElimPlus hybrid spawn generation had no safe anchor pair; using PlayerStart fallback"));
+		return;
+	}
+
+	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
+	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
+	bHybridRoundSpawnWindow = Team0HybridSpawnQueue.Num() > 0 || Team1HybridSpawnQueue.Num() > 0;
+
+	UE_LOG(LogGameMode, Log,
+		TEXT("ElimPlus hybrid spawns: anchors %s/%s, separation %.0f, radius %.0f, players %d/%d, queues %d/%d"),
+		*Result.Team0AnchorName.ToString(), *Result.Team1AnchorName.ToString(),
+		Result.AnchorDistance2D, Result.TeamRadius, Team0PlayerCount, Team1PlayerCount,
+		Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+
+	if (!Result.bTeam0Complete || !Result.bTeam1Complete)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("ElimPlus hybrid queues are partial (needed %d/%d, built %d/%d); missing players use the existing fallback"),
+			Team0PlayerCount, Team1PlayerCount,
+			Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+	}
+
+	UE_LOG(LogGameMode, Verbose,
+		TEXT("ElimPlus hybrid rejects T0[R=%d F=%d S=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d F=%d S=%d C=%d D=%d K=%d P=%d V=%d]"),
+		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedFloor,
+		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedClearance,
+		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
+		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
+		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedFloor,
+		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedClearance,
+		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,
+		Result.Team1Stats.RejectedPit, Result.Team1Stats.RejectedPainVolume);
+}
+
+bool AElimPlusGame::TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform)
+{
+	TArray<FTransform>* Queue = nullptr;
+	if (TeamIndex == 0) Queue = &Team0HybridSpawnQueue;
+	else if (TeamIndex == 1) Queue = &Team1HybridSpawnQueue;
+
+	if (!Queue || Queue->Num() == 0)
+	{
+		return false;
+	}
+
+	OutTransform = (*Queue)[0];
+	Queue->RemoveAt(0, 1, false);
+	return true;
+}
+
+void AElimPlusGame::ClearHybridRoundSpawnState()
+{
+	bHybridRoundSpawnWindow = false;
+	bHasPendingHybridSpawnTransform = false;
+	Team0HybridSpawnQueue.Empty();
+	Team1HybridSpawnQueue.Empty();
+}
+
 void AElimPlusGame::ResetSpawnSelectionForNewRound()
 {
+	ClearHybridRoundSpawnState();
 	Team0SelectedSpawns.Empty();
 	Team1SelectedSpawns.Empty();
 	++CurrentRoundNumber;

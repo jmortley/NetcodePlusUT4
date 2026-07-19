@@ -689,7 +689,7 @@ protected:
 	//FTimerHandle TH_NextRound;
 	//float OvertimeStartTimeSeconds = 0.f;
 
-	// -------- Spawn Selection (Wipeout-style: per-team pool + dynamic per-player scoring) --------
+	// -------- Spawn Selection (quality-ranked anchors + dynamic transform queues) --------
 	/** Flat list of every APlayerStart found at map-load time. Source data for
 	 *  PrecomputeSpawnLayouts. */
 	UPROPERTY(Transient)
@@ -737,6 +737,18 @@ protected:
 	void PrecomputeSpawnLayouts();
 	void SelectSpawnLayoutForRound();
 	void ResetSpawnSelectionForNewRound();
+	void PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount);
+	bool TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform);
+	void ClearHybridRoundSpawnState();
+
+	/** Default-on; Mod.ini [NetcodePlus] ElimHybridRoundSpawns=false restores
+	 *  the previous PlayerStart-only behavior. */
+	bool bEnableHybridRoundSpawns = true;
+	bool bHybridRoundSpawnWindow = false;
+	bool bHasPendingHybridSpawnTransform = false;
+	FTransform PendingHybridSpawnTransform;
+	TArray<FTransform> Team0HybridSpawnQueue;
+	TArray<FTransform> Team1HybridSpawnQueue;
 	
 	UPROPERTY(Transient)
 	AActor* OverriddenPlayerStart;

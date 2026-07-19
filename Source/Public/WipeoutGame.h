@@ -322,6 +322,15 @@ public:
 	UPROPERTY(Transient)
 	AActor* OverriddenPlayerStart;
 
+	/** Opening-spawn-only transform queues. Mid-round respawns never consume
+	 *  these and continue through ChooseMidRoundSpawn. */
+	bool bEnableHybridRoundSpawns = true;
+	bool bHybridRoundSpawnWindow = false;
+	bool bHasPendingHybridSpawnTransform = false;
+	FTransform PendingHybridSpawnTransform;
+	TArray<FTransform> Team0HybridSpawnQueue;
+	TArray<FTransform> Team1HybridSpawnQueue;
+
 	TArray<FWipeoutSpawnLayout> ValidLayouts_2v2;
 	TArray<FWipeoutSpawnLayout> ValidLayouts_1v1;
 
@@ -737,6 +746,9 @@ protected:
 	void PrecomputeSpawnLayouts();
 	void SelectSpawnLayoutForRound();
 	void ResetSpawnSelectionForNewRound();
+	void PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount);
+	bool TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform);
+	void ClearHybridRoundSpawnState();
 
 	UPROPERTY(Transient)
 	TArray<APlayerStart*> AllSpawnPointsList;
