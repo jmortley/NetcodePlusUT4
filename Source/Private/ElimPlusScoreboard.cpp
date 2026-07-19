@@ -430,7 +430,10 @@ void UElimPlusScoreboard::DrawAbsoluteScoreHeaders(float RenderDelta, float& YOf
 	const float TextY = YOffset + 11.f * S;
 	const float TextScale = 0.8f * S;
 	const FLinearColor TextColor(0.75f, 0.75f, 0.75f, 1.f);
-	const TCHAR* Labels[] = { TEXT("PING"), TEXT("ELO"), TEXT("DMG"), TEXT("K"), TEXT("D") };
+	// Column order mirrors the standard ElimPlus board (K | D | DMG | ELO, ping
+	// last) so both scoreboard skins read the same left-to-right. Header, player
+	// row, and totals row all share these slots — keep the three in sync.
+	const TCHAR* Labels[] = { TEXT("K"), TEXT("D"), TEXT("DMG"), TEXT("ELO"), TEXT("PING") };
 	const float Offsets[] = { 400.f, 470.f, 549.f, 640.f, 740.f };
 
 	DrawText(FText::FromString(TEXT("PLAYER")), LeftRowX + 80.f * S, TextY,
@@ -544,16 +547,16 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 	}
 	else
 	{
-		DrawText(FText::FromString(PingString), ColumnX(400.f), TextY,
-			RowFont, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(FText::AsNumber(Elo), ColumnX(470.f), TextY,
+		DrawText(FText::AsNumber(Kills), ColumnX(400.f), TextY,
+			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		DrawText(FText::AsNumber(PlayerState->Deaths), ColumnX(470.f), TextY,
 			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 		DrawText(FText::AsNumber(Damage), ColumnX(549.f), TextY,
 			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(FText::AsNumber(Kills), ColumnX(640.f), TextY,
+		DrawText(FText::AsNumber(Elo), ColumnX(640.f), TextY,
 			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(FText::AsNumber(PlayerState->Deaths), ColumnX(740.f), TextY,
-			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		DrawText(FText::FromString(PingString), ColumnX(740.f), TextY,
+			RowFont, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 }
 
@@ -599,13 +602,16 @@ void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOf
 			}
 		}
 
+		// Rank by TOTAL damage (the number the DMG column shows), not the PPR
+		// mean: PPR divides by rounds-played, so a late joiner's one hot round
+		// outranked players carrying the whole match. Kills then score tiebreak.
 		Players.Sort([GetEntry](const AUTPlayerState& A, const AUTPlayerState& B)
 		{
 			const FElimPlusStatsEntry* EA = GetEntry(&A);
 			const FElimPlusStatsEntry* EB = GetEntry(&B);
-			const float PA = EA ? EA->PPRCurrent : 0.f;
-			const float PB = EB ? EB->PPRCurrent : 0.f;
-			if (PA != PB) return PA > PB;
+			const int32 DA = EA ? EA->DamageDone : int32(A.DamageDone);
+			const int32 DB = EB ? EB->DamageDone : int32(B.DamageDone);
+			if (DA != DB) return DA > DB;
 			const int32 KA = A.Kills + A.KillAssists;
 			const int32 KB = B.Kills + B.KillAssists;
 			if (KA != KB) return KA > KB;
@@ -660,19 +666,19 @@ void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOf
 			DrawText(FText::FromString(TEXT("TOTAL")), ColumnX(80.f), TextY,
 				Font, 1.2f * S, 1.f, TextColor,
 				ETextHorzPos::Left, ETextVertPos::Center);
-			if (PingCount > 0)
-			{
-				DrawText(FText::AsNumber(int32(TotalPing / PingCount)), ColumnX(400.f), TextY,
-					Font, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-			}
-			DrawText(FText::AsNumber(EloCount > 0 ? int32(TotalElo / EloCount) : 1400), ColumnX(470.f), TextY,
+			DrawText(FText::AsNumber(TotalKills), ColumnX(400.f), TextY,
+				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::AsNumber(TotalDeaths), ColumnX(470.f), TextY,
 				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(FText::AsNumber(TotalDamage), ColumnX(549.f), TextY,
 				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(FText::AsNumber(TotalKills), ColumnX(640.f), TextY,
+			DrawText(FText::AsNumber(EloCount > 0 ? int32(TotalElo / EloCount) : 1400), ColumnX(640.f), TextY,
 				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(FText::AsNumber(TotalDeaths), ColumnX(740.f), TextY,
-				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			if (PingCount > 0)
+			{
+				DrawText(FText::AsNumber(int32(TotalPing / PingCount)), ColumnX(740.f), TextY,
+					Font, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			}
 			DrawY += RowH;
 		}
 
@@ -988,19 +994,19 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 	float MaxYOffset = 0.f;
 	TArray<FString> SpectatorNames;
 
-	// PPR(Current) lookup for row ordering — same replicator + uid resolution
-	// DrawPlayerScore uses (bots key on the synthetic "BOT:<name>"). 0 fallback
-	// when the replicator isn't up or no round has completed yet, in which case
-	// the kills/score tiebreaks below preserve a sensible order.
+	// Damage lookup for row ordering — same replicator + uid resolution
+	// DrawPlayerScore uses (bots key on the synthetic "BOT:<name>"). Falls back
+	// to the PlayerState's own tally when the replicator isn't up yet, so the
+	// board still orders sensibly in the opening seconds.
 	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-	auto GetPPR = [Stats](AUTPlayerState* PS) -> float
+	auto GetDamage = [Stats](AUTPlayerState* PS) -> int32
 	{
-		if (!Stats || !PS) return 0.f;
+		if (!PS) return 0;
 		const FString PId = PS->UniqueId.IsValid()
 			? PS->UniqueId.ToString()
 			: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
-		const FElimPlusStatsEntry* E = PId.IsEmpty() ? nullptr : Stats->FindEntry(PId);
-		return E ? E->PPRCurrent : 0.f;
+		const FElimPlusStatsEntry* E = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
+		return E ? E->DamageDone : int32(PS->DamageDone);
 	};
 
 	for (int8 Team = 0; Team < 2; Team++)
@@ -1010,11 +1016,11 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 		const int32 NumPlayersToShow = ShouldDrawScoringStats() ? 5 : UTGameState->PlayerArray.Num();
 
 		// Collect this team's players (harvesting spectators once, on the team-0
-		// pass), then sort by PPR(Current) desc so the board ranks by PPR. Kills
-		// then score break ties (and carry the ordering before any round ends,
-		// when every PPR is still 0).
+		// pass), then sort by total damage desc. Damage, not the PPR mean: PPR
+		// divides by rounds-played, so a late joiner's one hot round outranked
+		// players carrying the whole match. Kills then score break ties.
 		TArray<AUTPlayerState*> TeamPlayers;
-		TMap<const AUTPlayerState*, float> PPRByPlayer;
+		TMap<const AUTPlayerState*, int32> DamageByPlayer;
 		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
 		{
 			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(UTGameState->PlayerArray[i]);
@@ -1030,14 +1036,14 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			if (PlayerState->GetTeamNum() == Team)
 			{
 				TeamPlayers.Add(PlayerState);
-				PPRByPlayer.Add(PlayerState, GetPPR(PlayerState));
+				DamageByPlayer.Add(PlayerState, GetDamage(PlayerState));
 			}
 		}
-		TeamPlayers.Sort([&PPRByPlayer](const AUTPlayerState& A, const AUTPlayerState& B)
+		TeamPlayers.Sort([&DamageByPlayer](const AUTPlayerState& A, const AUTPlayerState& B)
 		{
-			const float PA = PPRByPlayer.FindRef(&A);
-			const float PB = PPRByPlayer.FindRef(&B);
-			if (PA != PB) return PA > PB;
+			const int32 DA = DamageByPlayer.FindRef(&A);
+			const int32 DB = DamageByPlayer.FindRef(&B);
+			if (DA != DB) return DA > DB;
 			const int32 KA = A.Kills + A.KillAssists;
 			const int32 KB = B.Kills + B.KillAssists;
 			if (KA != KB) return KA > KB;
@@ -1084,9 +1090,9 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 				if (!TP) continue;
 				SumK += TP->Kills;
 				SumD += TP->Deaths;
-				SumPPR += PPRByPlayer.FindRef(TP);
 				const FString PId = TP->UniqueId.IsValid() ? TP->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *TP->PlayerName);
 				const FElimPlusStatsEntry* E = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
+				SumPPR += E ? E->PPRCurrent : 0.f;
 				SumDMG += E ? E->DamageDone : int32(TP->DamageDone);
 				SumElo += E ? E->Elo : 1400; ++CountElo;
 				if (E && E->LinkGunAccuracyTimes100 >= 0) { SumAcc += float(E->LinkGunAccuracyTimes100) / 100.f; ++CountAcc; }

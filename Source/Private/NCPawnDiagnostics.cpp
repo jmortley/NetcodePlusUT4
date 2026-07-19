@@ -10,6 +10,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
+#include "UObject/UObjectIterator.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCPPawnDbg, Log, All);
 
@@ -29,6 +30,8 @@ namespace
 		int32 WorldCount = 0;
 		int32 CharacterCount = 0;
 		int32 SuspectCount = 0;
+		int32 OutlineComponentCount = 0;
+		int32 OrphanOutlineCount = 0;
 
 		if (GEngine == nullptr)
 		{
@@ -127,14 +130,55 @@ namespace
 					Reasons.IsEmpty() ? TEXT("none") : *Reasons);
 				UE_LOG(LogNCPPawnDbg, Warning, TEXT("%s"), *PawnLog);
 			}
+			for (TObjectIterator<USkeletalMeshComponent> It; It; ++It)
+			{
+				USkeletalMeshComponent* const DepthMesh = *It;
+				if (DepthMesh->HasAnyFlags(RF_ClassDefaultObject)
+					|| DepthMesh->GetWorld() != World
+					|| !DepthMesh->IsRegistered()
+					|| !DepthMesh->bRenderCustomDepth
+					|| DepthMesh->bRenderInMainPass)
+				{
+					continue;
+				}
+
+				++OutlineComponentCount;
+				AActor* const Owner = DepthMesh->GetOwner();
+				USceneComponent* const AttachParent = DepthMesh->GetAttachParent();
+				USkinnedMeshComponent* const MasterPose = DepthMesh->MasterPoseComponent.Get();
+				const bool bOwnerPending = Owner != nullptr && Owner->IsPendingKill();
+				const bool bOwnerDestroying = Owner != nullptr && Owner->IsActorBeingDestroyed();
+				const bool bOrphan = Owner == nullptr || bOwnerPending || bOwnerDestroying;
+				if (bOrphan)
+				{
+					++OrphanOutlineCount;
+				}
+
+				FString DepthLog = FString::Printf(
+					TEXT("[PawnDbg][DEPTH]%s component=%s owner=%s ownerClass=%s"),
+					bOrphan ? TEXT("[ORPHAN]") : TEXT(""),
+					*DepthMesh->GetPathName(),
+					Owner ? *Owner->GetName() : TEXT("none"),
+					Owner ? *Owner->GetClass()->GetName() : TEXT("none"));
+				DepthLog += FString::Printf(
+					TEXT(" ownerPending=%d ownerDestroying=%d visible=%d hiddenInGame=%d stencil=%u loc=%s"),
+					bOwnerPending ? 1 : 0, bOwnerDestroying ? 1 : 0,
+					DepthMesh->IsVisible() ? 1 : 0, DepthMesh->bHiddenInGame ? 1 : 0,
+					(uint32)DepthMesh->CustomDepthStencilValue, *DepthMesh->GetComponentLocation().ToString());
+				DepthLog += FString::Printf(
+					TEXT(" attachParent=%s masterPose=%s"),
+					AttachParent ? *AttachParent->GetPathName() : TEXT("none"),
+					MasterPose ? *MasterPose->GetPathName() : TEXT("none"));
+				UE_LOG(LogNCPPawnDbg, Warning, TEXT("%s"), *DepthLog);
+			}
 		}
 
-		UE_LOG(LogNCPPawnDbg, Warning, TEXT("[PawnDbg] complete worlds=%d characters=%d suspects=%d"),
-			WorldCount, CharacterCount, SuspectCount);
+		UE_LOG(LogNCPPawnDbg, Warning, TEXT("[PawnDbg] complete worlds=%d characters=%d suspects=%d depth=%d orphanDepth=%d"),
+			WorldCount, CharacterCount, SuspectCount, OutlineComponentCount, OrphanOutlineCount);
 	}
 
 	FAutoConsoleCommand GNCPPawnDumpCmd(
 		TEXT("ncp.PawnDump"),
-		TEXT("Dump character death, ownership, visibility, and CustomDepth state for spectator X-ray diagnosis."),
+		TEXT("Dump character lifecycle plus every registered outline CustomDepth component for spectator X-ray diagnosis."),
 		FConsoleCommandDelegate::CreateStatic(&DumpNCPPawns));
 }

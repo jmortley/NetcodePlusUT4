@@ -220,6 +220,9 @@ public:
 	// effects are still visible briefly). Client-side (PlayDying runs per-client), gated by bEnabled +
 	// bDarkenBodies.
 	virtual void PlayDying() override;
+	/** Clear client-local outline duplicates before stock teardown destroys the weapon attachment.
+	 *  Prematch lineup pawns are destroyed alive, so they never pass through PlayDying(). */
+	virtual void Destroyed() override;
 
 	/** Keep TacCom/X-ray from rendering the separate CustomDepth duplicate after this pawn's body mesh
 	 *  has been explicitly hidden by corpse cleanup. Stock TacCom re-calls SetOutlineLocal(true) every
@@ -287,6 +290,8 @@ protected:
 	/** DarkenBodies: on death, schedule the corpse to hide after a short delay (lets death/ragdoll effects
 	 *  play first). Gated by bEnabled + bDarkenBodies. Called from PlayDying (client-side). */
 	void SpawnSkeletonDissolve();
+	/** Permanently retire this pawn's client-local body and weapon CustomDepth render state. */
+	void ClearLocalOutlineRenderState();
 	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
 	void HideDeadBody();
 

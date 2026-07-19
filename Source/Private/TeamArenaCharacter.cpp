@@ -417,7 +417,40 @@ void ATeamArenaCharacter::LeaderHatStatusChanged_Implementation()
 void ATeamArenaCharacter::PlayDying()
 {
 	Super::PlayDying();
+	ClearLocalOutlineRenderState();
 	SpawnSkeletonDissolve();
+}
+
+void ATeamArenaCharacter::Destroyed()
+{
+	// AUTLineUpHelper destroys its prematch preview pawns while they are still alive. That
+	// bypasses PlayDying(), and stock AUTCharacter::Destroyed() destroys WeaponAttachment
+	// without first unregistering either duplicated CustomDepth mesh. Retire both while all
+	// pointers are still valid, before handing the pawn to stock teardown.
+	ClearLocalOutlineRenderState();
+	Super::Destroyed();
+}
+
+void ATeamArenaCharacter::ClearLocalOutlineRenderState()
+{
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	// A dying/destroying pawn must never be re-outlined by a later spectator TacCom pass.
+	// Stock UpdateOutline unregisters both the body duplicate and WeaponAttachment duplicate
+	// while the attachment pointer is still valid.
+	bForceNoOutline = true;
+	SetOutlineLocal(false);
+
+	// Stock only unregisters the character duplicate; destroy it so no registered render
+	// primitive can outlive an alive-destroyed lineup pawn through GC/teardown ordering.
+	if (CustomDepthMesh != nullptr)
+	{
+		CustomDepthMesh->DestroyComponent();
+		CustomDepthMesh = nullptr;
+	}
 }
 
 void ATeamArenaCharacter::SetOutlineLocal(bool bNowOutlined, bool bWhenUnoccluded)

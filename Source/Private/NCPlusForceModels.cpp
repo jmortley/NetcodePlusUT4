@@ -26,6 +26,7 @@
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
 #include "Engine/Canvas.h"            // DrawHeadDebug: Canvas->Project / K2_DrawLine
+#include "UObject/UObjectIterator.h" // reap registered outline duplicates whose owning lineup actor is gone
 
 namespace
 {
@@ -669,6 +670,32 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// ALWAYS (AlwaysTickPoseAndRefreshBones) — LOS gating returns occluded players to
 	// OnlyTickPoseWhenRendered. Nothing replicates; no-op on a dedicated server.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
+
+	// Intro-lineup pawns are destroyed alive. Stock character/weapon-attachment teardown does not
+	// explicitly unregister their dynamically duplicated CustomDepth meshes, so an already leaked
+	// silhouette can remain in the scene after its actor disappears. Sweep only the exact UT outline
+	// signature, only when its owner is gone, and only on the existing 4 Hz slow tick.
+	if (bSlowTick)
+	{
+		for (TObjectIterator<USkeletalMeshComponent> It; It; ++It)
+		{
+			USkeletalMeshComponent* const DepthMesh = *It;
+			if (DepthMesh->HasAnyFlags(RF_ClassDefaultObject)
+				|| DepthMesh->GetWorld() != World
+				|| !DepthMesh->IsRegistered()
+				|| !DepthMesh->bRenderCustomDepth
+				|| DepthMesh->bRenderInMainPass)
+			{
+				continue;
+			}
+
+			AActor* const Owner = DepthMesh->GetOwner();
+			if (Owner == nullptr || Owner->IsPendingKill() || Owner->IsActorBeingDestroyed())
+			{
+				DepthMesh->UnregisterComponent();
+			}
+		}
+	}
 
 	// Refresh the per-frame gate cache BEFORE any early-out so the tint call sites always read a
 	// current verdict (TacCom/intermission freeze the outline STATE, not the mode decision).
