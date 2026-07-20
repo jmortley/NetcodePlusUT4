@@ -38,6 +38,7 @@ protected:
 	void LoadRecoveredHUDTextures();
 	void DrawClutchPortraits(AClutchRoundState* State);
 	void DrawRolePanel(AClutchRoundState* State);
+	void DrawDefenderAttackerPanel(AClutchRoundState* State);
 	void DrawCapturePanel(AClutchRoundState* State);
 	void DrawAttackOrderPanel(AClutchRoundState* State);
 	void UpdateAttackOrderInput(AClutchRoundState* State, bool bPanelVisible);
@@ -45,6 +46,8 @@ protected:
 	void ResetAttackOrderDraft(AClutchRoundState* State, uint8 TeamIndex);
 	void PickAttackOrderSlot(uint8 RosterSlot);
 	void SubmitAttackOrderDraft();
+	void UpdateEliminatedCameraRestriction(AClutchRoundState* State);
+	void RestoreSpectatorCameraPreference();
 
 	TWeakObjectPtr<AClutchRoundState> CachedClutchState;
 	bool bTriedLoadRecoveredHUDTextures;
@@ -53,6 +56,8 @@ protected:
 	bool bSavedEnableClickEvents;
 	bool bSavedEnableMouseOverEvents;
 	bool bAttackOrderSubmitted;
+	bool bEliminatedCameraForced;
+	bool bSavedSpectateBehindView;
 	/** When the confirm was sent. The submit latch is provisional: if the replicated
 	 *  team lock has not appeared shortly after, the server rejected the pick (stale
 	 *  lock, roster change) and the picker re-opens instead of dying silently. */

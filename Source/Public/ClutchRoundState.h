@@ -93,6 +93,14 @@ struct FClutchRosterEntry
 	UPROPERTY(BlueprintReadOnly, Category = "Clutch|Roster")
 	uint8 HitsTaken;
 
+	/** Direct hits landed while defending across this match. Splash never counts. */
+	UPROPERTY(BlueprintReadOnly, Category = "Clutch|Stats")
+	int32 DefenderDirectHits;
+
+	/** Rounds won by this player while they were the active attacker. */
+	UPROPERTY(BlueprintReadOnly, Category = "Clutch|Stats")
+	int32 AttackerRoundsWon;
+
 	FClutchRosterEntry();
 };
 
@@ -243,6 +251,8 @@ public:
 
 	bool ResetForMatch(int32 InScoreGoal, uint8 InMaxAttackerHits);
 	bool BeginAttackOrderSelection(float InDeadlineServerTime);
+	/** Reuses the picker deadline for the locked-order review countdown. */
+	bool BeginAttackOrderReview(float InDeadlineServerTime);
 
 	bool BeginRound(uint8 InAttackingTeamIndex, AUTPlayerState* InActiveAttacker,
 		int32 InRoundNumber, float InRoundStartServerTime,
@@ -270,6 +280,8 @@ public:
 		EClutchStatus PlayerStatus, uint8 HitsTaken);
 	bool SetPlayerHitCount(AUTPlayerState* PlayerState, uint8 HitsTaken);
 	uint8 AddAttackerHit(AUTPlayerState* PlayerState);
+	bool AddDefenderDirectHit(AUTPlayerState* PlayerState);
+	bool AddAttackerRoundWin(AUTPlayerState* PlayerState);
 
 	// ---------------------------------------------------------------------
 	// Pure rules helpers (no world or actor mutation)

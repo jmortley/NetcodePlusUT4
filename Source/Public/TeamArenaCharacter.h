@@ -14,6 +14,7 @@
 
 class UTeamArenaCharacterMovement;
 class ACTFStatsReplicator;
+class AClutchRoundState;
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -229,9 +230,8 @@ public:
 	 *  spectator tick, so clearing the outline only once in PlayDying is not sufficient. */
 	virtual void SetOutlineLocal(bool bNowOutlined, bool bWhenUnoccluded = false) override;
 
-	// iCTF-only: scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting
-	// ([NetcodePlus] OwnFootstepVolume, 0..1; 1 = stock). Remote/enemy footsteps and other modes are
-	// untouched. UTPlaySound has no volume arg, so a non-stock volume is played via PlayOwnFootstepScaled.
+	// Clutch defenders play at 10% on every client. Outside Clutch, the iCTF-only F5
+	// "Own Footstep Volume" setting still affects only this local player's own pawn.
 	virtual void PlayFootstep(uint8 FootNum, bool bFirstPerson = false) override;
 
 	/** True iff this pawn is controlled by a LOCAL HUMAN player — i.e. it's "my own" pawn (incl. split-screen).
@@ -298,6 +298,11 @@ protected:
 	// ── Own footstep volume (iCTF) ──
 	/** Reimplemented own-footstep play honouring OwnFootstepVolumeScale (UTPlaySound has no volume arg). */
 	void PlayOwnFootstepScaled(uint8 FootNum);
+	/** Reimplemented footstep play with a per-source volume multiplier. */
+	void PlayFootstepScaled(uint8 FootNum, bool bFirstPerson, float VolumeScale);
+	/** Client-side Clutch role lookup; returns 0.1 for a live-round defender, otherwise 1. */
+	float GetClutchFootstepVolumeScale();
+	TWeakObjectPtr<AClutchRoundState> CachedClutchFootstepState;
 	/** 0..1 multiplier on the local player's own footstep; 1 = stock (no override). Read once from config. */
 	float OwnFootstepVolumeScale = 1.f;
 	bool bOwnFootstepVolumeRead = false;

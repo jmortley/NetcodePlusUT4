@@ -189,6 +189,8 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	bSavedEnableClickEvents = false;
 	bSavedEnableMouseOverEvents = false;
 	bAttackOrderSubmitted = false;
+	bEliminatedCameraForced = false;
+	bSavedSpectateBehindView = false;
 	AttackOrderSubmitTime = -1000.0f;
 	DraftAttackOrderTeam = AClutchRoundState::NoTeam;
 	LegacyCircleTexture = nullptr;
@@ -218,6 +220,7 @@ void AClutchHUD::DrawHUD()
 	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
 		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
 	AClutchRoundState* State = ResolveClutchState();
+	UpdateEliminatedCameraRestriction(State);
 	const bool bPanelVisible = bRenderCustomHUD && Canvas && SmallFont
 		&& !ScoreboardIsUp() && State
 		&& State->Phase == EClutchRoundPhase::OrderSelection;
@@ -235,6 +238,7 @@ void AClutchHUD::DrawHUD()
 			DrawAttackOrderPanel(State);
 			return;
 		}
+		DrawDefenderAttackerPanel(State);
 		DrawCapturePanel(State);
 		DrawRolePanel(State);
 	}
@@ -444,7 +448,58 @@ void AClutchHUD::NotifyHitBoxClick(FName BoxName)
 void AClutchHUD::Destroyed()
 {
 	RestoreAttackOrderInput();
+	RestoreSpectatorCameraPreference();
 	Super::Destroyed();
+}
+
+
+void AClutchHUD::UpdateEliminatedCameraRestriction(AClutchRoundState* State)
+{
+	AUTPlayerState* OwnState = UTPlayerOwner
+		? Cast<AUTPlayerState>(UTPlayerOwner->PlayerState)
+		: nullptr;
+	const FClutchRosterEntry* OwnEntry = OwnState && State
+		? State->FindEntry(OwnState)
+		: nullptr;
+	const bool bShouldForceFirstPerson = UTPlayerOwner && OwnState
+		&& !OwnState->bOnlySpectator
+		&& UTPlayerOwner->IsInState(NAME_Spectating)
+		&& OwnEntry && OwnEntry->PlayerStatus == EClutchStatus::Eliminated
+		&& State->IsGameplayPhase();
+	if (!bShouldForceFirstPerson)
+	{
+		RestoreSpectatorCameraPreference();
+		return;
+	}
+
+	if (!bEliminatedCameraForced)
+	{
+		bSavedSpectateBehindView = UTPlayerOwner->bSpectateBehindView;
+		bEliminatedCameraForced = true;
+	}
+	if (UTPlayerOwner->bSpectateBehindView || UTPlayerOwner->IsBehindView())
+	{
+		// ToggleBehindView may be bound locally and never reaches the game mode.
+		// Reassert first person from the owning HUD every frame while eliminated.
+		UTPlayerOwner->BehindView(false);
+	}
+}
+
+
+void AClutchHUD::RestoreSpectatorCameraPreference()
+{
+	if (!bEliminatedCameraForced)
+	{
+		return;
+	}
+
+	bEliminatedCameraForced = false;
+	if (UTPlayerOwner)
+	{
+		// A true spectator/caster never enters the restriction. If a playing client
+		// leaves the eliminated state, restore exactly the preference they had before.
+		UTPlayerOwner->BehindView(bSavedSpectateBehindView);
+	}
 }
 
 
@@ -957,6 +1012,64 @@ void AClutchHUD::DrawClutchPortraits(AClutchRoundState* State)
 			DrawPlayerIcon(Entry->PlayerState, LiveScaling,
 				PortraitX, PortraitY, PipSize);
 		}
+	}
+}
+
+
+void AClutchHUD::DrawDefenderAttackerPanel(AClutchRoundState* State)
+{
+	if (!State || !Canvas || !SmallFont || !MediumFont || !UTPlayerOwner
+		|| !State->IsGameplayPhase() || !State->ActiveAttacker)
+	{
+		return;
+	}
+
+	AUTPlayerState* OwnState = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
+	const FClutchRosterEntry* OwnEntry = OwnState ? State->FindEntry(OwnState) : nullptr;
+	const FClutchRosterEntry* AttackerEntry = State->FindEntry(State->ActiveAttacker);
+	if (!OwnState || OwnState->bOnlySpectator || !OwnEntry || !AttackerEntry
+		|| OwnEntry->PlayerRole != EClutchRole::Defender
+		|| (OwnEntry->PlayerStatus != EClutchStatus::Active
+			&& OwnEntry->PlayerStatus != EClutchStatus::Eliminated))
+	{
+		return;
+	}
+
+	const float Scale = static_cast<float>(Canvas->SizeY) / 1080.0f;
+	const float PanelWidth = 340.0f * Scale;
+	const float PanelHeight = 45.0f * Scale;
+	const float PanelX = (Canvas->ClipX - PanelWidth) * 0.5f;
+	const float PanelY = Canvas->ClipY - 252.0f * Scale;
+	const FLinearColor TeamAccent = State->AttackingTeamIndex == 0
+		? FLinearColor(0.95f, 0.08f, 0.025f, 0.96f)
+		: FLinearColor(0.20f, 0.25f, 1.0f, 0.96f);
+	DrawSolidTile(Canvas, PanelX, PanelY, PanelWidth, PanelHeight,
+		FLinearColor(0.008f, 0.018f, 0.035f, 0.88f));
+	DrawSolidTile(Canvas, PanelX, PanelY, 4.0f * Scale, PanelHeight, TeamAccent);
+
+	const FString AttackerName = State->ActiveAttacker->PlayerName.IsEmpty()
+		? AttackerEntry->PlayerNameFallback
+		: State->ActiveAttacker->PlayerName;
+	DrawCenteredCanvasText(Canvas, SmallFont,
+		FString::Printf(TEXT("ATTACKER  %s"), *AttackerName),
+		Canvas->ClipX * 0.5f, PanelY + 4.0f * Scale,
+		0.58f * Scale, FColor::White);
+
+	const int32 PipCount = FMath::Clamp<int32>(State->MaxAttackerHits, 1, 10);
+	const int32 Remaining = State->GetEntryArmorRemaining(*AttackerEntry);
+	const float PipWidth = 22.0f * Scale;
+	const float PipHeight = 7.0f * Scale;
+	const float PipGap = 5.0f * Scale;
+	const float TotalPipWidth = PipCount * PipWidth + (PipCount - 1) * PipGap;
+	const float FirstPipX = Canvas->ClipX * 0.5f - TotalPipWidth * 0.5f;
+	const float PipY = PanelY + 29.0f * Scale;
+	for (int32 Index = 0; Index < PipCount; ++Index)
+	{
+		DrawSolidTile(Canvas, FirstPipX + Index * (PipWidth + PipGap), PipY,
+			PipWidth, PipHeight,
+			Index < Remaining
+				? FLinearColor(0.36f, 1.0f, 0.28f, 0.98f)
+				: FLinearColor(0.18f, 0.18f, 0.18f, 0.82f));
 	}
 }
 

@@ -42,12 +42,19 @@ bool FClutchDefaultsTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Three attacker hits"), GameMode->MaxAttackerHits, 3);
 	TestEqual(TEXT("Sixty second round"), GameMode->RoundDurationSeconds, 60.0f);
 	TestEqual(TEXT("Pole unlocks at 45 seconds"), GameMode->PoleUnlockDelaySeconds, 45.0f);
-	TestEqual(TEXT("Attack-order picker allows fifteen seconds"),
-		GameMode->AttackOrderSelectionSeconds, 15.0f);
+	TestEqual(TEXT("Attack-order picker allows twenty seconds"),
+		GameMode->AttackOrderSelectionSeconds, 20.0f);
+	TestEqual(TEXT("Locked attack orders review for four seconds"),
+		GameMode->AttackOrderReviewSeconds, 4.0f);
 	TestTrue(TEXT("Round state replicates"), RoundState->GetIsReplicated());
 	TestTrue(TEXT("Round state is always relevant"), RoundState->bAlwaysRelevant);
 	TestEqual(TEXT("Attack orders begin unlocked"),
 		static_cast<int32>(RoundState->AttackOrderLockedMask), 0);
+	const FClutchRosterEntry FreshEntry;
+	TestEqual(TEXT("Defender direct-hit counter begins at zero"),
+		FreshEntry.DefenderDirectHits, 0);
+	TestEqual(TEXT("Attacker round-win counter begins at zero"),
+		FreshEntry.AttackerRoundsWon, 0);
 	return true;
 }
 

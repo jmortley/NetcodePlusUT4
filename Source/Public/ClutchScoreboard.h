@@ -18,6 +18,7 @@ public:
 
 protected:
 	virtual void DrawTeamPanel(float RenderDelta, float& YOffset) override;
+	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset,
 		float YOffset, float Width, FLinearColor DrawColor) override;
 

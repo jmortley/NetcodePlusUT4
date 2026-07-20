@@ -107,6 +107,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Order", meta = (ClampMin = "1.0"))
 	float AttackOrderSelectionSeconds;
 
+	/** Locked-order review shown after selection and before round one starts. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Order", meta = (ClampMin = "0.0"))
+	float AttackOrderReviewSeconds;
+
 	/** Number of defender projectile hits the attacker can take. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Combat", meta = (ClampMin = "1", ClampMax = "255"))
 	int32 MaxAttackerHits;

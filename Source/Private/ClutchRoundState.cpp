@@ -17,6 +17,8 @@ FClutchRosterEntry::FClutchRosterEntry()
 	, PlayerRole(EClutchRole::None)
 	, PlayerStatus(EClutchStatus::Queued)
 	, HitsTaken(0)
+	, DefenderDirectHits(0)
+	, AttackerRoundsWon(0)
 {
 }
 
@@ -459,6 +461,23 @@ bool AClutchRoundState::BeginAttackOrderSelection(float InDeadlineServerTime)
 }
 
 
+bool AClutchRoundState::BeginAttackOrderReview(float InDeadlineServerTime)
+{
+	if (!HasAuthority() || Phase != EClutchRoundPhase::OrderSelection
+		|| !AreAttackOrdersLocked())
+	{
+		return false;
+	}
+
+	// Keep the same phase and replicated deadline used by the picker. Existing
+	// clients already render a locked order plus this countdown, so the review
+	// window is entirely server-driven and needs no new wire field or RPC.
+	AttackOrderDeadlineServerTime = FMath::Max(0.0f, InDeadlineServerTime);
+	MarkStateDirty();
+	return true;
+}
+
+
 bool AClutchRoundState::BeginRound(uint8 InAttackingTeamIndex,
 	AUTPlayerState* InActiveAttacker, int32 InRoundNumber,
 	float InRoundStartServerTime, float InPoleUnlockServerTime,
@@ -832,6 +851,49 @@ uint8 AClutchRoundState::AddAttackerHit(AUTPlayerState* PlayerState)
 	}
 
 	return Entry->HitsTaken;
+}
+
+
+bool AClutchRoundState::AddDefenderDirectHit(AUTPlayerState* PlayerState)
+{
+	if (!HasAuthority() || !PlayerState)
+	{
+		return false;
+	}
+
+	FClutchRosterEntry* Entry = FindMutableEntry(PlayerState);
+	if (!Entry || Entry->PlayerRole != EClutchRole::Defender
+		|| Entry->PlayerStatus != EClutchStatus::Active)
+	{
+		return false;
+	}
+
+	Entry->DefenderDirectHits = Entry->DefenderDirectHits >= MAX_int32
+		? MAX_int32
+		: FMath::Max(0, Entry->DefenderDirectHits) + 1;
+	MarkStateDirty();
+	return true;
+}
+
+
+bool AClutchRoundState::AddAttackerRoundWin(AUTPlayerState* PlayerState)
+{
+	if (!HasAuthority() || !PlayerState)
+	{
+		return false;
+	}
+
+	FClutchRosterEntry* Entry = FindMutableEntry(PlayerState);
+	if (!Entry || Entry->PlayerRole != EClutchRole::Attacker)
+	{
+		return false;
+	}
+
+	Entry->AttackerRoundsWon = Entry->AttackerRoundsWon >= MAX_int32
+		? MAX_int32
+		: FMath::Max(0, Entry->AttackerRoundsWon) + 1;
+	MarkStateDirty();
+	return true;
 }
 
 

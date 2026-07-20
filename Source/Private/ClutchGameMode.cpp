@@ -41,6 +41,12 @@ namespace
 		return Parsed > 0.0f ? Parsed : Fallback;
 	}
 
+	static float ParseNonNegativeFloatOption(const FString& Options, const TCHAR* Key, float Fallback)
+	{
+		const FString Value = UGameplayStatics::ParseOption(Options, Key);
+		return Value.IsEmpty() ? Fallback : FMath::Max(0.0f, FCString::Atof(*Value));
+	}
+
 	static uint8 GetPlayerTeamIndex(const AUTPlayerState* PlayerState)
 	{
 		return PlayerState && PlayerState->Team && PlayerState->Team->TeamIndex <= 1
@@ -198,7 +204,8 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	PoleActorTag = FName(TEXT("ClutchPole"));
 	bUseRecoveredPoleVisual = false; // Recovered pole mesh not shipped yet — use the map's own marker
 	IntermissionSeconds = 5.0f;
-	AttackOrderSelectionSeconds = 15.0f;
+	AttackOrderSelectionSeconds = 20.0f;
+	AttackOrderReviewSeconds = 4.0f;
 	MaxAttackerHits = 3;
 	AttackerHealth = 300;
 	DefenderDamagePerHit = 100;
@@ -257,6 +264,8 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 	IntermissionSeconds = ParsePositiveFloatOption(Options, TEXT("IntermissionSeconds"), IntermissionSeconds);
 	AttackOrderSelectionSeconds = ParsePositiveFloatOption(
 		Options, TEXT("AttackOrderSeconds"), AttackOrderSelectionSeconds);
+	AttackOrderReviewSeconds = ParseNonNegativeFloatOption(
+		Options, TEXT("AttackOrderReviewSeconds"), AttackOrderReviewSeconds);
 
 	MaxAttackerHits = FMath::Clamp(
 		UGameplayStatics::GetIntOption(Options, TEXT("AttackerHits"), MaxAttackerHits), 1, 255);
@@ -640,6 +649,11 @@ void AClutchGameMode::OnOrderSelectionRosterWatch()
 		OrderRosterWatchCounts[0], Counts[0], OrderRosterWatchCounts[1], Counts[1]);
 	OrderRosterWatchCounts[0] = Counts[0];
 	OrderRosterWatchCounts[1] = Counts[1];
+	if (bFinishingAttackOrderSelection)
+	{
+		BeginAttackOrderSelection();
+		return;
+	}
 
 	// Fold the newcomers/leavers into the roster, drop stale locks (a single-slot
 	// auto-lock taken before a team filled up must not reject the human's real pick),
@@ -1027,6 +1041,15 @@ void AClutchGameMode::HandleAttackOrderRosterChanged(uint8 ChangedTeamIndex)
 	{
 		return;
 	}
+	if (bFinishingAttackOrderSelection)
+	{
+		// A join/leave during the locked review invalidates the composition being
+		// reviewed. Re-open a full picker instead of starting on a stale order.
+		UE_LOG(LogClutch, Log,
+			TEXT("Attack-order roster changed during review - restarting selection"));
+		BeginAttackOrderSelection();
+		return;
+	}
 
 	AssignAttackOrderSelectors();
 	ClutchState->SetAttackOrderLocked(ChangedTeamIndex, false);
@@ -1132,7 +1155,6 @@ void AClutchGameMode::FinishAttackOrderSelection()
 
 	bFinishingAttackOrderSelection = true;
 	GetWorldTimerManager().ClearTimer(AttackOrderSelectionTimerHandle);
-	GetWorldTimerManager().ClearTimer(OrderRosterWatchTimerHandle);
 
 	// Fold in anyone who joined since the picker opened (AddBot has no PostLogin);
 	// finishing against a stale roster is how an auto-filled team ended up with zero
@@ -1166,8 +1188,31 @@ void AClutchGameMode::FinishAttackOrderSelection()
 		}
 	}
 
-	UE_LOG(LogClutch, Log, TEXT("Attack orders locked for both teams; starting round play"));
-	BeginNextRound();
+	const float Now = UTGameState
+		? UTGameState->GetServerWorldTimeSeconds()
+		: GetWorld()->GetTimeSeconds();
+	const float ReviewSeconds = FMath::Max(0.0f, AttackOrderReviewSeconds);
+	if (ReviewSeconds <= KINDA_SMALL_NUMBER)
+	{
+		UE_LOG(LogClutch, Log,
+			TEXT("Attack orders locked for both teams; review disabled, starting round play"));
+		BeginNextRound();
+		return;
+	}
+
+	if (!ClutchState->BeginAttackOrderReview(Now + ReviewSeconds))
+	{
+		UE_LOG(LogClutch, Warning,
+			TEXT("Attack-order review could not start after locking; reopening selection"));
+		BeginAttackOrderSelection();
+		return;
+	}
+	UE_LOG(LogClutch, Log,
+		TEXT("Attack orders locked for both teams; reviewing final order for %.1fs"),
+		ReviewSeconds);
+	GetWorldTimerManager().SetTimer(
+		AttackOrderSelectionTimerHandle, this, &AClutchGameMode::BeginNextRound,
+		ReviewSeconds, false);
 }
 
 
@@ -1665,6 +1710,11 @@ void AClutchGameMode::EndRound(uint8 WinningTeamIndex, FName Reason)
 	GetWorldTimerManager().ClearTimer(RoundTimeoutTimerHandle);
 	GetWorldTimerManager().ClearTimer(SpawnQueueTimerHandle);
 
+	if (WinningTeamIndex == ClutchState->AttackingTeamIndex
+		&& ClutchState->ActiveAttacker)
+	{
+		ClutchState->AddAttackerRoundWin(ClutchState->ActiveAttacker);
+	}
 	ClutchState->FinishRound(WinningTeamIndex, Reason, false);
 	const int32 OldScore = Teams[WinningTeamIndex]->Score;
 	Teams[WinningTeamIndex]->Score = OldScore + 1;
@@ -2054,6 +2104,7 @@ bool AClutchGameMode::ModifyDamage_Implementation(int32& Damage, FVector& Moment
 		{
 			Momentum = FVector::ZeroVector;
 		}
+		ClutchState->AddDefenderDirectHit(AttackerState);
 		ClutchState->AddAttackerHit(VictimState);
 		QueueWinCheck();
 		return true;

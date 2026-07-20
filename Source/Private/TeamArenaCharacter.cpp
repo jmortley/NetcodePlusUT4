@@ -19,6 +19,7 @@
 #include "UTPlayerState.h"            // GetSelectedCharacter (DarkenBodies skeleton fallback)
 #include "UTCharacterContent.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 #include "NCPlusForceModels.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
@@ -26,6 +27,7 @@
 #include "Kismet/GameplayStatics.h" // SpawnSound2D (own-footstep volume)
 #include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
 #include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
+#include "ClutchRoundState.h"       // Clutch defender footstep role/phase lookup
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -38,6 +40,7 @@ namespace
 {
 	constexpr int32 ArmorPlusMaxTotal = 150;
 	constexpr int32 ArmorPlusSoftLimit = 100;
+	constexpr float ClutchDefenderFootstepVolume = 0.10f;
 
 	// Stock belt is the only armor grant above 100. Use the behavior-proven amount
 	// instead of relying on the descriptive ArmorType tag being populated in the BP.
@@ -1850,6 +1853,16 @@ void ATeamArenaCharacter::RevealAfterPingComp()
 // played via SpawnSoundAttached with a VolumeMultiplier.
 void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
 {
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		const float ClutchVolumeScale = GetClutchFootstepVolumeScale();
+		if (ClutchVolumeScale < 1.0f)
+		{
+			PlayFootstepScaled(FootNum, bFirstPerson, ClutchVolumeScale);
+			return;
+		}
+	}
+
 	if (GetNetMode() != NM_DedicatedServer && IsLocalPlayerPawn())
 	{
 		// Read the 0..1 setting once (mid-match F5 changes apply next life). Default 1.0 = stock.
@@ -1916,6 +1929,204 @@ void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
 	}
 
 	Super::PlayFootstep(FootNum, bFirstPerson);
+}
+
+float ATeamArenaCharacter::GetClutchFootstepVolumeScale()
+{
+	if (!CachedClutchFootstepState.IsValid())
+	{
+		for (TActorIterator<AClutchRoundState> It(GetWorld()); It; ++It)
+		{
+			CachedClutchFootstepState = *It;
+			break;
+		}
+	}
+
+	AClutchRoundState* State = CachedClutchFootstepState.Get();
+	AUTPlayerState* SourceState = Cast<AUTPlayerState>(PlayerState);
+	const FClutchRosterEntry* Entry = State && SourceState
+		? State->FindEntry(SourceState)
+		: nullptr;
+	return State && State->IsGameplayPhase() && Entry
+		&& Entry->PlayerRole == EClutchRole::Defender
+		&& Entry->PlayerStatus == EClutchStatus::Active
+		? ClutchDefenderFootstepVolume
+		: 1.0f;
+}
+
+void ATeamArenaCharacter::PlayFootstepScaled(
+	uint8 FootNum, bool bFirstPerson, float VolumeScale)
+{
+	if ((GetWorld()->TimeSeconds - LastFootstepTime < 0.1f) || bFeigningDeath
+		|| IsDead() || bIsCrouched || GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	AUTPlayerController* OwningPC = Cast<AUTPlayerController>(Controller);
+	if (OwningPC && IsLocallyControlled() && !bFirstPerson && !OwningPC->IsBehindView())
+	{
+		return;
+	}
+
+	UParticleSystem* FootstepEffect = nullptr;
+	float MaxParticleDistance = 1500.0f;
+	USoundBase* SoundToPlay = FootstepSound;
+	if (FeetAreInWater())
+	{
+		SoundToPlay = WaterFootstepSound;
+		FootstepEffect = WaterFootstepEffect;
+		MaxParticleDistance = 5000.0f;
+	}
+	else
+	{
+		AUTPlayerController* LocalViewer = GetLocalViewer();
+		const bool bLocalViewer = LocalViewer != nullptr;
+		if (bApplyWallSlide)
+		{
+			if (UTCharacterMovement && UTCharacterMovement->WallRunMaterial)
+			{
+				const EPhysicalSurface SurfaceType = UPhysicalMaterial::DetermineSurfaceType(
+					UTCharacterMovement->WallRunMaterial);
+				if (USoundBase* SurfaceSound = GetFootstepSoundForSurfaceType(
+					SurfaceType, bLocalViewer))
+				{
+					SoundToPlay = SurfaceSound;
+				}
+			}
+		}
+		else
+		{
+			static const FName FootstepTraceName(TEXT("ClutchFootstepSurface"));
+			FCollisionQueryParams QueryParams(FootstepTraceName, false, this);
+			QueryParams.bReturnPhysicalMaterial = true;
+			QueryParams.bTraceAsyncScene = true;
+			float PawnRadius = 0.0f;
+			float PawnHalfHeight = 0.0f;
+			GetCapsuleComponent()->GetScaledCapsuleSize(PawnRadius, PawnHalfHeight);
+			const FVector TraceStart = GetCapsuleComponent()->GetComponentLocation();
+			FHitResult SurfaceHit(1.0f);
+			if (GetWorld()->LineTraceSingleByChannel(
+				SurfaceHit, TraceStart,
+				TraceStart + FVector(0.0f, 0.0f, -(40.0f + PawnHalfHeight)),
+				GetCapsuleComponent()->GetCollisionObjectType(), QueryParams)
+				&& SurfaceHit.PhysMaterial.IsValid())
+			{
+				const EPhysicalSurface SurfaceType = UPhysicalMaterial::DetermineSurfaceType(
+					SurfaceHit.PhysMaterial.Get());
+				if (USoundBase* SurfaceSound = GetFootstepSoundForSurfaceType(
+					SurfaceType, bLocalViewer))
+				{
+					SoundToPlay = SurfaceSound;
+				}
+			}
+		}
+
+		FootstepEffect = GetVelocity().Size() > 500.0f
+			&& (!LocalViewer || LocalViewer->IsBehindView())
+			? GroundFootstepEffect
+			: nullptr;
+	}
+
+	VolumeScale = FMath::Clamp(VolumeScale, 0.0f, 1.0f);
+	if (SoundToPlay && VolumeScale > 0.0f)
+	{
+		AUTPlayerController* LocalPC = Cast<AUTPlayerController>(
+			GetWorld()->GetFirstPlayerController());
+		const bool bViewedSource = LocalPC && LocalPC->GetViewTarget() == this;
+		if (bViewedSource)
+		{
+			UGameplayStatics::SpawnSound2D(this, SoundToPlay,
+				VolumeScale * LocalPC->FootStepAmp.OwnVolumeMultiplier,
+				LocalPC->FootStepAmp.OwnPitchMultiplier);
+		}
+		else
+		{
+			float ListenerVolume = 1.0f;
+			float ListenerPitch = 1.0f;
+			USoundAttenuation* AttenuationOverride = nullptr;
+			bool bSameTeam = false;
+			if (LocalPC)
+			{
+				AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
+				bSameTeam = GameState && GameState->OnSameTeam(LocalPC, this);
+				if (bSameTeam)
+				{
+					AttenuationOverride = LocalPC->FootStepAmp.TeammateAttenuation;
+					ListenerVolume = LocalPC->FootStepAmp.TeammateVolumeMultiplier;
+					ListenerPitch = LocalPC->FootStepAmp.TeammatePitchMultiplier;
+				}
+				else
+				{
+					FVector ViewPoint;
+					FRotator ViewRotation;
+					LocalPC->GetActorEyesViewPoint(ViewPoint, ViewRotation);
+					if ((ViewRotation.Vector()
+						| (GetActorLocation() - ViewPoint).GetSafeNormal()) < 0.7f)
+					{
+						ListenerVolume = 3.0f;
+					}
+				}
+
+				FVector ViewPoint;
+				FRotator ViewRotation;
+				LocalPC->GetActorEyesViewPoint(ViewPoint, ViewRotation);
+				FCollisionQueryParams Params(FName(TEXT("ClutchFootstepLOS")), true, this);
+				Params.AddIgnoredActor(LocalPC->GetViewTarget());
+				const bool bOccluded = GetWorld()->LineTraceTestByChannel(
+					ViewPoint, GetActorLocation(), ECC_Visibility, Params);
+				if (bOccluded)
+				{
+					if (LocalPC->FootStepAmp.OccludedAttenuation)
+					{
+						AttenuationOverride = LocalPC->FootStepAmp.OccludedAttenuation;
+					}
+					else
+					{
+						const float MaxAudibleDistance = SoundToPlay->GetAttenuationSettingsToApply()
+							? SoundToPlay->GetAttenuationSettingsToApply()->GetMaxDimension()
+							: 4000.0f;
+						if ((GetActorLocation() - ViewPoint).Size()
+							> MaxAudibleDistance * (bSameTeam ? 0.2f : 0.4f))
+						{
+							SoundToPlay = nullptr;
+						}
+						else
+						{
+							ListenerVolume *= 0.7f;
+						}
+					}
+				}
+			}
+
+			if (SoundToPlay)
+			{
+				UGameplayStatics::SpawnSoundAttached(SoundToPlay, GetRootComponent(),
+					NAME_None, FVector::ZeroVector, EAttachLocation::KeepRelativeOffset,
+					false, VolumeScale * ListenerVolume, ListenerPitch, 0.0f,
+					AttenuationOverride);
+			}
+		}
+	}
+
+	if (FootstepEffect && GetMesh()
+		&& GetWorld()->GetTimeSeconds() - GetMesh()->LastRenderTime < 0.05f
+		&& (GetLocalViewer() || GetCachedScalabilityCVars().DetailMode != 0))
+	{
+		AUTWorldSettings* WorldSettings = Cast<AUTWorldSettings>(GetWorld()->GetWorldSettings());
+		if (WorldSettings && WorldSettings->EffectIsRelevant(this, GetActorLocation(), true,
+			Cast<APlayerController>(GetController()) != nullptr,
+			MaxParticleDistance, 0.0f, false))
+		{
+			FVector EffectLocation = GetActorLocation();
+			EffectLocation.Z += 4.0f - GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+			UGameplayStatics::SpawnEmitterAtLocation(
+				GetWorld(), FootstepEffect, EffectLocation, GetActorRotation(), true);
+		}
+	}
+
+	LastFoot = FootNum;
+	LastFootstepTime = GetWorld()->TimeSeconds;
 }
 
 void ATeamArenaCharacter::PlayOwnFootstepScaled(uint8 FootNum)
