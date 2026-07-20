@@ -20,6 +20,8 @@
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogClutchHUD, Log, All);
+
 
 namespace
 {
@@ -225,19 +227,32 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 
 void AClutchHUD::DrawHUD()
 {
+	AClutchRoundState* State = ResolveClutchState();
+	const bool bOrderSelection = State
+		&& State->Phase == EClutchRoundPhase::OrderSelection;
+	if (bOrderSelection && bShowScoresWhileDead)
+	{
+		// ClearRoundPawns can leave the stock two-second death-scoreboard timer armed.
+		// If it fires while the modal picker is open, ScoreboardIsUp() would otherwise
+		// hide the picker and disable its click input for the rest of the deadline.
+		bShowScoresWhileDead = false;
+		UE_LOG(LogClutchHUD, Log,
+			TEXT("Suppressed automatic death scoreboard during attack-order selection"));
+	}
+
 	// AWipeoutHUD supplies the established NetcodePlus widget stack and calls
 	// our virtual DrawTeamScoreBar. Its wide portraits are disabled above.
 	Super::DrawHUD();
 
 	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
 		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
-	AClutchRoundState* State = ResolveClutchState();
 	UpdateEliminatedCameraRestriction(State);
+	const bool bScoreboardUp = ScoreboardIsUp();
 	const bool bPanelVisible = bRenderCustomHUD && Canvas && SmallFont
-		&& !ScoreboardIsUp() && State
-		&& State->Phase == EClutchRoundPhase::OrderSelection;
+		&& bOrderSelection;
 	UpdateAttackOrderInput(State, bPanelVisible);
-	if (!bRenderCustomHUD || !Canvas || !SmallFont || ScoreboardIsUp())
+	if (!bRenderCustomHUD || !Canvas || !SmallFont
+		|| (bScoreboardUp && !bOrderSelection))
 	{
 		return;
 	}
@@ -330,6 +345,17 @@ void AClutchHUD::UpdateAttackOrderInput(
 	}
 	else if (!bShouldEnable)
 	{
+		if (bAttackOrderInputActive)
+		{
+			UE_LOG(LogClutchHUD, Log,
+				TEXT("Attack-order input disabled: panel=%d entry=%d selector=%d locked=%d slots=%d submitted=%d phase=%d"),
+				bPanelVisible, OwnEntry != nullptr,
+				OwnEntry ? OwnEntry->bAttackOrderSelector : false,
+				State && OwnEntry && OwnEntry->TeamIndex <= 1
+					? State->IsAttackOrderLocked(OwnEntry->TeamIndex) : false,
+				TeamSlots.Num(), bAttackOrderSubmitted,
+				State ? static_cast<int32>(State->Phase) : -1);
+		}
 		RestoreAttackOrderInput();
 	}
 }
@@ -369,6 +395,12 @@ void AClutchHUD::PickAttackOrderSlot(uint8 RosterSlot)
 		|| DraftAttackOrderTeam > 1
 		|| DraftAttackOrderSlots.Contains(RosterSlot))
 	{
+		UE_LOG(LogClutchHUD, Warning,
+			TEXT("Attack-order pick ignored: slot=%d state=%d phase=%d team=%d duplicate=%d"),
+			RosterSlot, State != nullptr,
+			State ? static_cast<int32>(State->Phase) : -1,
+			DraftAttackOrderTeam,
+			DraftAttackOrderSlots.Contains(RosterSlot));
 		return;
 	}
 
@@ -376,6 +408,9 @@ void AClutchHUD::PickAttackOrderSlot(uint8 RosterSlot)
 	State->GetTeamAttackOrderSlots(DraftAttackOrderTeam, EligibleSlots);
 	if (!EligibleSlots.Contains(static_cast<int32>(RosterSlot)))
 	{
+		UE_LOG(LogClutchHUD, Warning,
+			TEXT("Attack-order pick ignored: slot %d is not eligible for team %d"),
+			RosterSlot, DraftAttackOrderTeam);
 		return;
 	}
 	DraftAttackOrderSlots.Add(RosterSlot);
@@ -392,6 +427,11 @@ void AClutchHUD::PickAttackOrderSlot(uint8 RosterSlot)
 			}
 		}
 	}
+
+	UE_LOG(LogClutchHUD, Log,
+		TEXT("Attack-order picked slot %d for team %d: draft contains %d/%d slots"),
+		RosterSlot, DraftAttackOrderTeam,
+		DraftAttackOrderSlots.Num(), EligibleSlots.Num());
 }
 
 
@@ -421,6 +461,9 @@ void AClutchHUD::SubmitAttackOrderDraft()
 		Command += FString::Printf(TEXT(" %d"), Slot);
 	}
 	// AUTPlayerController::Mutate uses the stock reliable ServerMutate RPC.
+	UE_LOG(LogClutchHUD, Log,
+		TEXT("Submitting attack order for team %d: %s"),
+		DraftAttackOrderTeam, *Command);
 	UTPlayerOwner->Mutate(Command);
 	bAttackOrderSubmitted = true;
 	AttackOrderSubmitTime = GetWorld()->GetTimeSeconds();
