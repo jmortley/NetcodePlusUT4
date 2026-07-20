@@ -1004,10 +1004,11 @@ void AClutchGameMode::BeginAttackOrderSelection()
 	EvaluateAttackOrderAutoLocks();
 
 	// Late joiners can arrive through paths with no PostLogin (AddBot). Poll the
-	// connected roster while the picker is open and reconcile on any change; the
-	// watcher retires itself once the phase moves on.
-	OrderRosterWatchCounts[0] = -1;
-	OrderRosterWatchCounts[1] = -1;
+	// connected roster while the picker is open and reconcile on any subsequent
+	// change; the roster was just prepared above, so seed the real baseline instead
+	// of forcing a redundant reconciliation through the clients' click window.
+	OrderRosterWatchCounts[0] = SlotCounts[0];
+	OrderRosterWatchCounts[1] = SlotCounts[1];
 	GetWorldTimerManager().SetTimer(
 		OrderRosterWatchTimerHandle, this,
 		&AClutchGameMode::OnOrderSelectionRosterWatch, 0.5f, true);

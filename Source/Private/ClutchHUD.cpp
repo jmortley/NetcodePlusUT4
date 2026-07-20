@@ -146,7 +146,19 @@ namespace
 			return FString();
 		}
 		TArray<int32> Slots;
-		State->GetTeamAttackOrderSlots(TeamIndex, Slots);
+		for (const FClutchRosterEntry& Entry : State->Roster)
+		{
+			// The draft only becomes stale when team membership changes. Do not key it
+			// to AttackOrderIndex (the server may legitimately rewrite order metadata)
+			// or PlayerState resolution (actor references can arrive a frame later).
+			if (Entry.TeamIndex == TeamIndex
+				&& Entry.PlayerStatus != EClutchStatus::Disconnected
+				&& Entry.RosterSlot != AClutchRoundState::UnassignedSlot)
+			{
+				Slots.AddUnique(static_cast<int32>(Entry.RosterSlot));
+			}
+		}
+		Slots.Sort();
 		FString Key = FString::Printf(TEXT("%d:"), TeamIndex);
 		for (int32 Slot : Slots)
 		{
