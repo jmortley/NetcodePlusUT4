@@ -2576,13 +2576,15 @@ void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 	}
 
 	UE_LOG(LogGameMode, Verbose,
-		TEXT("ElimPlus hybrid rejects T0[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
-		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedFloor,
+		TEXT("ElimPlus hybrid rejects T0[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
+		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedPath,
+		Result.Team0Stats.RejectedFloor,
 		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedDrop,
 		Result.Team0Stats.RejectedClearance,
 		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
 		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
-		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedFloor,
+		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedPath,
+		Result.Team1Stats.RejectedFloor,
 		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedDrop,
 		Result.Team1Stats.RejectedClearance,
 		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,

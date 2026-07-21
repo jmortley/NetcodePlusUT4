@@ -2151,7 +2151,7 @@ AActor* AUWipeoutGame::FindPlayerStart_Implementation(AController* Player, const
 
 
 // ============================================================================
-// SPAWN PAWN (AlwaysSpawn to prevent collisions on stack spawns)
+// SPAWN PAWN — tiered: adjust-or-fail → shoulder offsets → AlwaysSpawn fallback
 // ============================================================================
 
 APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot)
@@ -2162,21 +2162,73 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 		return nullptr;
 	}
 
+	const bool bUsingHybridTransform = bHasPendingHybridSpawnTransform;
 	FRotator StartRotation(ForceInit);
-	StartRotation.Yaw = bHasPendingHybridSpawnTransform
+	StartRotation.Yaw = bUsingHybridTransform
 		? PendingHybridSpawnTransform.Rotator().Yaw
 		: StartSpot->GetActorRotation().Yaw;
-	FVector StartLocation = bHasPendingHybridSpawnTransform
+	FVector StartLocation = bUsingHybridTransform
 		? PendingHybridSpawnTransform.GetLocation()
 		: StartSpot->GetActorLocation();
 
+	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
+	if (!PawnClass)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout::SpawnDefaultPawnFor: No PawnClass for %s"), *GetNameSafe(NewPlayer));
+		return nullptr;
+	}
+
+	// Tiered spawn, mirroring ElimPlus and the engine adjust-first default the
+	// original Absolute mode relied on. The old single raw AlwaysSpawn at the
+	// transform was why residual bad hybrid candidates were EXPOSED verbatim in
+	// Wipeout — pawns planted inside geometry their own capsule collides with —
+	// while ElimPlus's pattern masked the same class. Every path still ends in an
+	// AlwaysSpawn, so round-start stack spawns can never fail outright.
+	// --- ATTEMPT 1: adjust-or-fail at the exact transform ---
 	FActorSpawnParameters SpawnInfo;
 	SpawnInfo.Instigator = Instigator;
 	SpawnInfo.ObjectFlags |= RF_Transient;
-	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
+	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 	APawn* ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation), SpawnInfo);
+
+	// --- ATTEMPT 2: cardinal shoulder-width offsets (just outside a 40uu capsule) ---
+	if (!ResultPawn)
+	{
+		const FVector Offsets[] = {
+			FVector(45.f,   0.f, 0.f),
+			FVector(-45.f,  0.f, 0.f),
+			FVector(0.f,   45.f, 0.f),
+			FVector(0.f,  -45.f, 0.f),
+		};
+		for (const FVector& Offset : Offsets)
+		{
+			ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation + Offset), SpawnInfo);
+			if (ResultPawn)
+			{
+				UE_LOG(LogGameMode, Log, TEXT("Wipeout::SpawnDefaultPawnFor: Used offset spawn at %s"), *GetNameSafe(StartSpot));
+				break;
+			}
+		}
+	}
+
+	// --- ATTEMPT 3: force spawn. A hybrid transform that failed every
+	// collision-aware attempt must not be its own recovery destination — force
+	// at the AUTHORED start instead; micro-jitter prevents two force-spawned
+	// pawns sharing an exact origin (physics explosion). ---
+	if (!ResultPawn)
+	{
+		if (bUsingHybridTransform && StartSpot)
+		{
+			StartLocation = StartSpot->GetActorLocation();
+			StartRotation.Yaw = StartSpot->GetActorRotation().Yaw;
+			UE_LOG(LogGameMode, Warning,
+				TEXT("Wipeout::SpawnDefaultPawnFor: Hybrid transform blocked; falling back to authored PlayerStart %s"),
+				*GetNameSafe(StartSpot));
+		}
+		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		const FVector JitteredLocation = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 0.f);
+		ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, JitteredLocation), SpawnInfo);
+	}
 
 	if (!ResultPawn)
 	{
@@ -3260,13 +3312,15 @@ void AUWipeoutGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 	}
 
 	UE_LOG(LogGameMode, Verbose,
-		TEXT("Wipeout hybrid rejects T0[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
-		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedFloor,
+		TEXT("Wipeout hybrid rejects T0[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
+		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedPath,
+		Result.Team0Stats.RejectedFloor,
 		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedDrop,
 		Result.Team0Stats.RejectedClearance,
 		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
 		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
-		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedFloor,
+		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedPath,
+		Result.Team1Stats.RejectedFloor,
 		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedDrop,
 		Result.Team1Stats.RejectedClearance,
 		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,

@@ -52,6 +52,7 @@ FNCHybridSpawnBuildStats::FNCHybridSpawnBuildStats()
 	: SeedCount(0)
 	, GeneratedCount(0)
 	, RejectedRadius(0)
+	, RejectedPath(0)
 	, RejectedFloor(0)
 	, RejectedSlope(0)
 	, RejectedDrop(0)
@@ -191,11 +192,29 @@ namespace NCHybridSpawn
 		return false;
 	}
 
+	// All generator geometry queries run on the PAWN channel, not an
+	// ObjectType(WorldStatic) mask. A channel query resolves what actually BLOCKS
+	// a pawn — doors, lifts, movers, physics props included — the same semantics
+	// the engine's own spawn-encroachment test uses. The old WorldStatic-only mask
+	// was blind to BlockAllDynamic/InvisibleWallDynamic geometry: the clearance
+	// capsule passed inside closed movers ("spawned half in a wall") and the floor
+	// sweep tunnelled through lift platforms to the static shaft below ("spawned
+	// under the map"). The original Absolute BP traced [Pawn, WorldStatic] objects;
+	// the channel form is a strict superset of that. Pawn-typed bodies are ignored
+	// outright: both modes build their queues after destroying all pawns, and a
+	// straggler must not poison a whole field.
+	static FCollisionResponseParams PawnBlockingResponse()
+	{
+		FCollisionResponseParams Response(ECR_Block);
+		Response.CollisionResponse.SetResponse(ECC_Pawn, ECR_Ignore);
+		return Response;
+	}
+
 	static bool HasPitSupport(
 		UWorld* World,
 		const FVector& Location,
 		const FNCHybridSpawnSettings& Settings,
-		const FCollisionObjectQueryParams& StaticObjects,
+		const FCollisionResponseParams& PawnResponse,
 		const FCollisionQueryParams& QueryParams)
 	{
 		const FVector2D Diagonals[] =
@@ -213,7 +232,7 @@ namespace NCHybridSpawn
 					Diagonal.Y * Settings.PitTestDistanceHorizontal,
 					-Settings.PitTestDistanceVertical);
 			FHitResult Hit;
-			if (!World->LineTraceSingleByObjectType(Hit, Location, End, StaticObjects, QueryParams))
+			if (!World->LineTraceSingleByChannel(Hit, Location, End, ECC_Pawn, QueryParams, PawnResponse))
 			{
 				return false;
 			}
@@ -226,7 +245,7 @@ namespace NCHybridSpawn
 		const FVector& Location,
 		float Yaw,
 		const FNCHybridSpawnSettings& Settings,
-		const FCollisionObjectQueryParams& StaticObjects,
+		const FCollisionResponseParams& PawnResponse,
 		const FCollisionQueryParams& QueryParams)
 	{
 		const FVector Forward = FRotator(0.f, Yaw, 0.f).Vector();
@@ -234,8 +253,8 @@ namespace NCHybridSpawn
 
 		FHitResult WallHit;
 		const FCollisionShape ShoulderShape = FCollisionShape::MakeSphere(Settings.TraceRadius);
-		if (World->SweepSingleByObjectType(
-			WallHit, Location, Ahead, FQuat::Identity, StaticObjects, ShoulderShape, QueryParams))
+		if (World->SweepSingleByChannel(
+			WallHit, Location, Ahead, FQuat::Identity, ECC_Pawn, ShoulderShape, QueryParams, PawnResponse))
 		{
 			return false;
 		}
@@ -243,8 +262,8 @@ namespace NCHybridSpawn
 		FHitResult FloorAhead;
 		const FVector FloorTraceStart = Ahead + FVector(0.f, 0.f, Settings.TraceStartOffsetZ);
 		const FVector FloorTraceEnd = Ahead - FVector(0.f, 0.f, Settings.PitTestDistanceVertical);
-		return World->LineTraceSingleByObjectType(
-			FloorAhead, FloorTraceStart, FloorTraceEnd, StaticObjects, QueryParams)
+		return World->LineTraceSingleByChannel(
+			FloorAhead, FloorTraceStart, FloorTraceEnd, ECC_Pawn, QueryParams, PawnResponse)
 			&& FloorAhead.ImpactNormal.Z > 0.7058f;
 	}
 
@@ -253,14 +272,14 @@ namespace NCHybridSpawn
 		const FVector& Location,
 		float PreferredYaw,
 		const FNCHybridSpawnSettings& Settings,
-		const FCollisionObjectQueryParams& StaticObjects,
+		const FCollisionResponseParams& PawnResponse,
 		const FCollisionQueryParams& QueryParams)
 	{
 		const float YawOffsets[] = { 0.f, 45.f, -45.f, 90.f, -90.f, 135.f, -135.f, 180.f };
 		for (float Offset : YawOffsets)
 		{
 			const float TestYaw = FRotator::NormalizeAxis(PreferredYaw + Offset);
-			if (IsFacingSafe(World, Location, TestYaw, Settings, StaticObjects, QueryParams))
+			if (IsFacingSafe(World, Location, TestYaw, Settings, PawnResponse, QueryParams))
 			{
 				return TestYaw;
 			}
@@ -297,7 +316,7 @@ namespace NCHybridSpawn
 			return false;
 		}
 
-		const FCollisionObjectQueryParams StaticObjects(ECC_WorldStatic);
+		const FCollisionResponseParams PawnResponse = PawnBlockingResponse();
 		FCollisionQueryParams QueryParams(TEXT("NCHybridSpawnFinal"), false);
 		QueryParams.bFindInitialOverlaps = true;
 		const FCollisionShape Capsule = FCollisionShape::MakeCapsule(
@@ -316,14 +335,16 @@ namespace NCHybridSpawn
 			return false;
 		}
 
-		if (World->OverlapAnyTestByObjectType(
-			Location, FQuat::Identity, StaticObjects, Capsule, QueryParams))
+		// Blocking variant, NOT OverlapAnyTest: overlap-only volumes (triggers,
+		// pickup spheres) must not reject a perfectly good spawn spot.
+		if (World->OverlapBlockingTestByChannel(
+			Location, FQuat::Identity, ECC_Pawn, Capsule, QueryParams, PawnResponse))
 		{
 			++Stats.RejectedClearance;
 			return false;
 		}
 
-		if (!HasPitSupport(World, Location, Settings, StaticObjects, QueryParams))
+		if (!HasPitSupport(World, Location, Settings, PawnResponse, QueryParams))
 		{
 			++Stats.RejectedPit;
 			return false;
@@ -336,7 +357,7 @@ namespace NCHybridSpawn
 		}
 
 		const float Yaw = bFindSafeRotation
-			? FindSafeYaw(World, Location, PreferredYaw, Settings, StaticObjects, QueryParams)
+			? FindSafeYaw(World, Location, PreferredYaw, Settings, PawnResponse, QueryParams)
 			: FRotator::NormalizeAxis(PreferredYaw);
 		OutTransform = FTransform(FRotator(0.f, Yaw, 0.f), Location);
 		return true;
@@ -368,13 +389,13 @@ namespace NCHybridSpawn
 			+ FVector(0.f, 0.f, Settings.TraceHalfHeight * 1.02f);
 		const FVector LocalTraceEnd = AuthoredLocation
 			- FVector(0.f, 0.f, Settings.TraceHalfHeight * 0.98f);
-		const FCollisionObjectQueryParams StaticObjects(ECC_WorldStatic);
+		const FCollisionResponseParams PawnResponse = PawnBlockingResponse();
 		FCollisionQueryParams QueryParams(TEXT("NCHybridAuthoredSeed"), false);
 
 		FVector SeedLocation = AuthoredLocation + FVector(0.f, 0.f, 10.f);
 		FHitResult LocalFloorHit;
-		if (World->LineTraceSingleByObjectType(
-			LocalFloorHit, LocalTraceStart, LocalTraceEnd, StaticObjects, QueryParams))
+		if (World->LineTraceSingleByChannel(
+			LocalFloorHit, LocalTraceStart, LocalTraceEnd, ECC_Pawn, QueryParams, PawnResponse))
 		{
 			// Absolute adds two units to the capsule-center correction and then
 			// another ten to the final authored transform. Retain that clearance
@@ -390,6 +411,7 @@ namespace NCHybridSpawn
 
 	static bool ProjectAndValidateCandidate(
 		UWorld* World,
+		const FVector& SourceLocation,
 		const FVector& CandidateLocation,
 		float PreferredYaw,
 		const FVector& Anchor,
@@ -417,18 +439,51 @@ namespace NCHybridSpawn
 			return false;
 		}
 
-		const FCollisionObjectQueryParams StaticObjects(ECC_WorldStatic);
+		const FCollisionResponseParams PawnResponse = PawnBlockingResponse();
 		FCollisionQueryParams QueryParams(TEXT("NCHybridSpawn"), false);
 		QueryParams.bFindInitialOverlaps = true;
 
 		const FCollisionShape Capsule = FCollisionShape::MakeCapsule(
 			Settings.TraceRadius, Settings.TraceHalfHeight);
+
+		// Connectivity gate, restored from the original Absolute BP: its
+		// LineTraceForBlocking(source+10Z → candidate+90Z, offsets relative to the
+		// capsule-center-seated transforms) ran BEFORE any floor projection —
+		// dropped in the port, which is how expansion tunnelled through walls onto
+		// wall cavities and out-of-map shells within the step-drop clamp. Kept as
+		// the BP's exact LINE geometry, deliberately NOT a capsule: the chest-high
+		// rising line (~floor+120 → +200) clears stair risers and walkable ramps
+		// to ~33° uphill over a 303uu step while still hitting any wall, whereas a
+		// full-height capsule grazes the source floor on inclines ≳2° and
+		// collapses the field to flat-and-downhill. Pawn FIT at the destination is
+		// already proven by the clearance overlap below; this gate only proves the
+		// step doesn't cross a pawn-blocker.
+		FHitResult PathHit;
+		if (World->LineTraceSingleByChannel(
+			PathHit,
+			SourceLocation + FVector(0.f, 0.f, 10.f),
+			CandidateLocation + FVector(0.f, 0.f, 90.f),
+			ECC_Pawn, QueryParams, PawnResponse))
+		{
+			++Stats.RejectedPath;
+			return false;
+		}
+
 		const FVector TraceStart = CandidateLocation + FVector(0.f, 0.f, Settings.TraceStartOffsetZ);
 		const FVector TraceEnd = CandidateLocation + FVector(0.f, 0.f, Settings.TraceEndOffsetZ);
 
 		FHitResult FloorHit;
-		if (!World->SweepSingleByObjectType(
-			FloorHit, TraceStart, TraceEnd, FQuat::Identity, StaticObjects, Capsule, QueryParams))
+		if (!World->SweepSingleByChannel(
+			FloorHit, TraceStart, TraceEnd, FQuat::Identity, ECC_Pawn, Capsule, QueryParams, PawnResponse))
+		{
+			++Stats.RejectedFloor;
+			return false;
+		}
+
+		// Absolute's sweep-time gate: a floor hit that begins embedded (Time ≈ 0 /
+		// start-penetrating) is a wall or ceiling the sweep started inside, not a
+		// floor — its depenetration normal can masquerade as walkable.
+		if (FloorHit.bStartPenetrating || FloorHit.Time <= 0.01f)
 		{
 			++Stats.RejectedFloor;
 			return false;
@@ -541,7 +596,7 @@ namespace NCHybridSpawn
 					const FVector Candidate = Source.GetLocation() + Direction * Step;
 					FTransform GeneratedTransform;
 					if (ProjectAndValidateCandidate(
-						World, Candidate, SourceYaw, Anchor, TowardEnemyDirection,
+						World, Source.GetLocation(), Candidate, SourceYaw, Anchor, TowardEnemyDirection,
 						TeamRadius, MaxForwardExtent, Accepted, MinimumAcceptedSpacing,
 						Settings, OutStats,
 						GeneratedTransform))

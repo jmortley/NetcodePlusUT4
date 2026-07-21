@@ -37,6 +37,7 @@ struct FNCHybridSpawnBuildStats
 	int32 SeedCount;
 	int32 GeneratedCount;
 	int32 RejectedRadius;
+	int32 RejectedPath;        // source→candidate capsule sweep hit a pawn-blocker (wall/door/mover)
 	int32 RejectedFloor;
 	int32 RejectedSlope;
 	int32 RejectedDrop;
