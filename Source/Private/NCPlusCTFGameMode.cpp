@@ -746,6 +746,10 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	{
 		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atof(*V->GetValue()); }
 	};
+	auto ReadBool = [Section](const TCHAR* Key, bool& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = V->GetValue().ToBool(); }
+	};
 
 	// Penalty weights (the side-clustering knobs — soften these to let mid back in).
 	ReadFloat(TEXT("FlagCarrierSpawnPenalty"), FlagCarrierSpawnPenalty);
@@ -769,10 +773,12 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadFloat(TEXT("SpawnKillerAvoidRadius"),  SpawnKillerAvoidRadius);
 	ReadFloat(TEXT("SpawnFlagCarrierLOSAvoidRadius"), SpawnFlagCarrierLOSAvoidRadius);
 	ReadFloat(TEXT("SpawnRobbedBaseAvoidCount"), SpawnRobbedBaseAvoidCount);
+	ReadBool(TEXT("LogSpawnChoices"), bLogSpawnChoices);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f efcLOSAvoid=%.0f robbedAvoid=%.0f | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f efcLOSAvoid=%.0f robbedAvoid=%.0f logChoices=%s | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
 		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius, SpawnFlagCarrierLOSAvoidRadius, SpawnRobbedBaseAvoidCount,
+		bLogSpawnChoices ? TEXT("true") : TEXT("false"),
 		FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange);
 }
 
@@ -876,13 +882,11 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 		}
 	}
 
-	// Spawn log — gated to LIVE match (warmup respawns were inflating the count so it
-	// never matched real deaths) and reporting the PAWN's ACTUAL world location. The
-	// previous version logged NewPlayer->StartSpot, which can lag the real per-life
-	// spawn and falsely read "same"; StartSpot is printed alongside so any divergence
-	// from the pawn is visible. Warning verbosity to survive the Shipping UE_LOG strip.
+	// Optional spawn diagnostics — gated to LIVE match and reporting the PAWN's
+	// actual world location. Warning verbosity survives Shipping when an admin opts in.
 	APawn* SpawnedPawnForLog = NewPlayer ? NewPlayer->GetPawn() : nullptr;
-	if (SpawnedPawnForLog && CTFGameState && CTFGameState->IsMatchInProgress())
+	if (bLogSpawnChoices && SpawnedPawnForLog && CTFGameState
+		&& CTFGameState->IsMatchInProgress())
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 		const int32 TeamIdx = (PS && PS->Team) ? int32(PS->Team->TeamIndex) : -1;
@@ -1370,20 +1374,22 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		SpawnLastUsedTime.Add(Best, Now);
 	}
 
-	// Confirmation log (Warning survives the Shipping UE_LOG strip). Pairs with the
-	// "NCPlusCTF spawn:" line in RestartPlayer to show selection is ours + rotating.
-	int32 KillerBlocked = 0, EFCLOSBlocked = 0, RobbedBlocked = 0;
-	for (int32 i = 0; i < Cands.Num(); ++i)
+	// Optional selection diagnostics. Pairs with RestartPlayer's actual-pawn line.
+	if (bLogSpawnChoices)
 	{
-		if (Eligible(i)) { continue; }
-		if ((BestSafetyTier & 4) && bHaveKiller && KillerAdj[i]) { KillerBlocked++; }
-		else if ((BestSafetyTier & 2) && EnemyFlagCarrier && EFCLOSAdj[i]) { EFCLOSBlocked++; }
-		else if ((BestSafetyTier & 1) && RobbedAdj[i]) { RobbedBlocked++; }
+		int32 KillerBlocked = 0, EFCLOSBlocked = 0, RobbedBlocked = 0;
+		for (int32 i = 0; i < Cands.Num(); ++i)
+		{
+			if (Eligible(i)) { continue; }
+			if ((BestSafetyTier & 4) && bHaveKiller && KillerAdj[i]) { KillerBlocked++; }
+			else if ((BestSafetyTier & 2) && EnemyFlagCarrier && EFCLOSAdj[i]) { EFCLOSBlocked++; }
+			else if ((BestSafetyTier & 1) && RobbedAdj[i]) { RobbedBlocked++; }
+		}
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF pick: %s(T%d) -> %s | tier=%u band=%d fresh=%d kblk=%d efcblk=%d rbblk=%d (pool=%d)"),
+			*PS->PlayerName, TeamIndex, *Best->GetName(), (uint32)BestSafetyTier, TopBand.Num(), bForceFresh ? 1 : 0,
+			KillerBlocked, EFCLOSBlocked, RobbedBlocked, Pool.Num());
 	}
-	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF pick: %s(T%d) -> %s | tier=%u band=%d fresh=%d kblk=%d efcblk=%d rbblk=%d (pool=%d)"),
-		*PS->PlayerName, TeamIndex, *Best->GetName(), (uint32)BestSafetyTier, TopBand.Num(), bForceFresh ? 1 : 0,
-		KillerBlocked, EFCLOSBlocked, RobbedBlocked, Pool.Num());
 
 	return Best;
 }

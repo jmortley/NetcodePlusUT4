@@ -436,6 +436,10 @@ protected:
 	 *  rotation/dist log that doesn't depend on the (sometimes stale) StartSpot. */
 	TMap<TWeakObjectPtr<AController>, FVector> PlayerLastSpawnLoc;
 
+	/** Emit one detailed Warning-level line for every live CTF/iCTF spawn.
+	 *  Default-off; Mod.ini [UTPUGS_SPAWN] LogSpawnChoices=true enables it. */
+	bool bLogSpawnChoices = false;
+
 	/** Penalty multiplier for using the same spawn as 2 spawns ago (0.5 = half score). IG+ default. */
 	float SpawnRecentPenaltyMultiplier = 0.5f;
 

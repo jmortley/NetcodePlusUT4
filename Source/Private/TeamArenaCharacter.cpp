@@ -10,6 +10,7 @@
 #include "UTPlusShockRifle.h"
 #include "UTGameState.h"
 #include "UTGameMode.h"
+#include "UTCTFBaseGame.h"
 #include "UTWeap_LinkGun.h"
 #include "UTWeap_LightningRifle.h"
 #include "UTArmor.h"
@@ -1136,19 +1137,28 @@ void ATeamArenaCharacter::BeginPlay()
 
 	if (Role == ROLE_Authority)
 	{
+		AUTGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AUTGameMode>() : nullptr;
+		const bool bIsICTF = GM && GM->bIsInstagib && GM->IsA(AUTCTFBaseGame::StaticClass());
+
 		// ArmorPlus rule: armor pickups are always consumable, even when the
 		// resulting belt/regular total is already capped. Stock defaults this true,
 		// but reassert it in case a BP game mode serialized an older false value.
-		if (AUTGameMode* GM = GetWorld()->GetAuthGameMode<AUTGameMode>())
+		if (GM)
 		{
 			GM->bAllowAllArmorPickups = true;
 		}
 
-		// Register our custom material so SetCharacterOverlayEffect works without warnings.
-		if (SpawnProtectionMaterial)
+		// iCTF has no spawn protection, so do not briefly render/register its visual
+		// overlay on every respawn. The registration itself also emits a late-startup
+		// warning for every pawn even when the material is already in the GameState.
+		if (bIsICTF)
+		{
+			bSpawnProtectionEligible = false;
+		}
+		else if (SpawnProtectionMaterial)
 		{
 			AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-			if (GS)
+			if (GS && GS->FindOverlayMaterial(SpawnProtectionMaterial) == INDEX_NONE)
 			{
 				GS->AddOverlayMaterial(SpawnProtectionMaterial, nullptr);
 			}
