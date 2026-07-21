@@ -868,7 +868,10 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 		Out.V = 1.f;
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
-		if (Out.ContentPath.IsEmpty())
+		// UNLESS the side opted into tint-only ("Tint skin"): that checkbox promises real models tinted
+		// red/blue, and the Red/Blue rows have no model picker — with the silent borrow, the checkbox
+		// was a no-op for anyone who had a Team/Enemy model configured.
+		if (Out.ContentPath.IsEmpty() && !Out.bTint)
 		{
 			Out.ContentPath = !C.Team.ContentPath.IsEmpty() ? C.Team.ContentPath : C.Enemy.ContentPath;
 		}
@@ -1103,7 +1106,8 @@ static void MaybeMigrateFromTeamSkins(const FString& Path)
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    (EnCosmetics != 0), Path);
 	GConfig->SetInt (TEXT("ForceModels"), TEXT("Style"),        EnStyle,            Path);
 
-	// Per-side: map colour + model, then write all 7 keys via the existing WriteSide.
+	// Per-side: map colour + model, then write all 9 keys via the existing WriteSide
+	// (migrated sides get Tint=0 — dc rendered nothing for an un-forced side either).
 	FNCPlusModelSettings Enemy, Team, Red, Blue;
 	MigrateOneSide(Entries, TEXT("Enemy"), Path, Enemy);
 	MigrateOneSide(Entries, TEXT("Team"),  Path, Team);

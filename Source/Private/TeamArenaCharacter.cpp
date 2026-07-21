@@ -263,7 +263,9 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// has NOT run, so restore the real model first — mirroring the un-force branch
 	// above — and let the tint land on the pawn's own rebuilt BodyMIs. On the
 	// NotifyTeamChanged/flush path the base already reverted the mesh this frame.
-	if (!bWantForce && bForcedModelApplied && LastForcedContent != nullptr)
+	// Not for the own pawn: bColourOnly never swapped its mesh, so there is nothing
+	// to restore and the base re-run would be a needless full mesh rebuild.
+	if (!bWantForce && !bColourOnly && bForcedModelApplied && LastForcedContent != nullptr)
 	{
 		if (!bForceReapply)
 		{
@@ -347,8 +349,13 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			// Outline mode: NEUTRAL body — NoTeam path (255) with NO team-colour blend, so both teams look
 			// the same and the LOS outline is the SOLE team indicator (not red/blue). TeamBlendMax 0 keeps
 			// the model's base albedo un-tinted. (Exact neutral look is model-dependent.)
-			MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
-			MID->SetScalarParameterValue(NAME_TeamBlendMax, 0.f);
+			// Tint-only pawns whose REAL model is param-less/baked are left untouched — same "force no
+			// skin on a model the user didn't force" carve-out as below; the outline still renders.
+			if (bWantForce || bRecolour)
+			{
+				MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
+				MID->SetScalarParameterValue(NAME_TeamBlendMax, 0.f);
+			}
 			continue;
 		}
 
@@ -663,6 +670,13 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	if (!MID) { return; }
 
 	const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+	// Same model-or-tint gate as ApplyForcedModel and the per-frame overlay/glow
+	// writers. This OnRep writer was the one site that still tinted armour for a
+	// side with a colour but neither a forced model nor "Tint skin" — and being an
+	// OnRep, its write STUCK, because the correctly-gated Tick writer refused to
+	// repaint it back to stock.
+	TSubclassOf<AUTCharacterContent> GateContent = NCPlusForceModels::GetModelClass(Side);
+	if (!((GateContent && NCPlusForceModels::IsModelAllowed(GateContent)) || Side.bTint)) { return; }
 	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(Side);
 
 	// Stock "Color" is a BRIGHT ~(1,1,0) yellow that drives the armour's emissive glow; our configured
