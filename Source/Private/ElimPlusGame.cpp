@@ -204,6 +204,7 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 	bDidPreMatchRebalance = false;
 	bPendingMidGameShuffle = false;
 	bDidMidGameShuffle = false;
+	ResetClutchTelemetryForMatch();
 
 	// Bot PUGs always carry ?PugId (the bot adds it); public/hub games never do.
 	// Uneven-team health scaling is for public games only.
@@ -290,6 +291,11 @@ void AElimPlusGame::HandleMatchHasStarted()
 	// map load, but a single PIE/server session can host multiple matches in a
 	// row. Reset here so a subsequent match can flush its own ratings.
 	bRatingFlushedThisMatch = false;
+
+	// Same defense-in-depth for clutch telemetry: a second match in the same
+	// session must not upload the previous match's attempts or continue its
+	// death-ordinal sequence (mirrors SnapshotMatchStart clearing RoundLog).
+	ResetClutchTelemetryForMatch();
 
 	// Spawn stats replicator now — all clients are fully loaded at this point.
 	// Spawning in BeginPlay was too early and could cause client crashes.
@@ -515,6 +521,14 @@ void AElimPlusGame::HandleMatchHasEnded()
 				P.Damage     = static_cast<int32>(UTPS->DamageDone);
 				UploadIn.Players.Add(MoveTemp(P));
 			}
+
+			// Completed clutch attempts ride the SAME upload (additive JSON keys
+			// — no second endpoint). Open/unfinalized attempts from an aborted
+			// final round are intentionally absent: only rounds that went
+			// through EndRoundForTeam produced records. The
+			// bRatingFlushedThisMatch guard above makes this a single-shot copy
+			// even when the engine routes HandleMatchHasEnded twice.
+			UploadIn.Clutches = CompletedClutches;
 
 			const FString Json = RatingSystem->BuildResultPayload(GetWorld(), UploadIn);
 			if (!Json.IsEmpty())
@@ -987,6 +1001,10 @@ void AElimPlusGame::StartNextRound()
 	// Sweeping here guarantees a clean floor regardless of how the round was started.
 	CleanupWorldForNewRound();
 	DarkHorseCandidates.Empty();
+	// Open attempts are normally consumed by FinalizeClutchAttempts in
+	// EndRoundForTeam; this sweep only catches a BP-driven round start that
+	// bypassed it. CompletedClutches (match scope) is deliberately kept.
+	DiscardOpenClutchAttempts();
 	ResetSpawnSelectionForNewRound();
 	Team0AlivePlayers.Empty();
 	Team1AlivePlayers.Empty();
@@ -1159,6 +1177,12 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 
 	// Stop overtime if it's running
 	StopOvertime();
+
+	// Resolve open clutch attempts against this round's authoritative outcome
+	// (win/loss/draw, candidate-alive state) and bank them for the match-end
+	// upload. Uses the RoundIndex captured at open — TotalRoundsPlayed was
+	// already incremented above.
+	FinalizeClutchAttempts(WinnerTeamIndex);
 
 	// Check achievements before we score (in case of end-game)
 	CheckRoundAchievements(WinnerTeamIndex, Reason);
@@ -2013,6 +2037,22 @@ void AElimPlusGame::ScoreKill_Implementation(AController* Killer, AController* O
 	{
 		OtherPS->bOutOfLives = true;
 		OtherPS->ForceNetUpdate();
+	}
+
+	// --- Clutch telemetry, in strict order for this death event: ---
+	// (1) assign the match-local death ordinal, (2) credit the kill to any
+	// already-open attempt whose candidate is still alive, (3) mark a dying
+	// candidate dead (freezing the boundary BEFORE any later event can award a
+	// posthumous kill), then (4) CheckLastManStanding below may open a NEW
+	// attempt starting at this same ordinal.
+	const int32 DeathOrdinal = ClutchDeathOrdinal++;
+	{
+		// Suicides (Killer == Other) and world deaths (no killer) credit nobody;
+		// team kills are rejected inside CreditClutchDirectKill via the team check.
+		AUTPlayerState* KillerPS = (Killer && Killer != Other)
+			? Cast<AUTPlayerState>(Killer->PlayerState) : nullptr;
+		CreditClutchDirectKill(KillerPS, OtherPS);
+		MarkClutchCandidateDead(OtherPS, DeathOrdinal);
 	}
 
 	int32 Alive0, Alive1;
@@ -2994,6 +3034,8 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive1)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive1);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 0) vs %d enemies."), *ClutchPlayer->PlayerName, Alive1);
+			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
+			OpenClutchAttempt(0, ClutchPlayer, Alive1);
 		}
 	}
 	if (Team1StartingSize > 1 && Alive1 == 1 && !bTeam1LastManAnnounced)
@@ -3017,6 +3059,8 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive0)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive0);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 1) vs %d enemies."), *ClutchPlayer->PlayerName, Alive0);
+			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
+			OpenClutchAttempt(1, ClutchPlayer, Alive0);
 		}
 	}
 }
@@ -3026,6 +3070,135 @@ void AElimPlusGame::BroadcastLastManStanding(int32 LastManTeamIndex, AUTPlayerSt
 	// Call Blueprint implementation first (for players without C++ plugin)
 	BP_OnLastManStanding(LastManTeamIndex, LastManPlayerState);
 
+}
+
+// ============================================================================
+// Server-authored clutch telemetry
+// ============================================================================
+
+void AElimPlusGame::ResetClutchTelemetryForMatch()
+{
+	ActiveClutch[0] = FElimPlusClutchTracker();
+	ActiveClutch[1] = FElimPlusClutchTracker();
+	CompletedClutches.Empty();
+	ClutchDeathOrdinal = 0;
+}
+
+void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate, int32 EnemiesAlive)
+{
+	if (TeamIndex < 0 || TeamIndex > 1 || EnemiesAlive < 1) return;
+	if (ActiveClutch[TeamIndex].bOpen) return;   // at most one attempt per team per round
+	// Bots (and any state without a resolvable StatsID) are never uploaded as
+	// historical player attempts — don't even open a tracker for them.
+	if (!Candidate || !Candidate->UniqueId.IsValid()) return;
+
+	FElimPlusClutchTracker& A = ActiveClutch[TeamIndex];
+	A = FElimPlusClutchTracker();
+	A.bOpen           = true;
+	A.UniqueId        = Candidate->UniqueId.ToString();  // captured NOW — candidate may leave
+	A.Candidate       = Candidate;
+	// TotalRoundsPlayed increments in EndRoundForTeam, so DURING a round it
+	// equals the round's 0-based index.
+	A.RoundIndex      = TotalRoundsPlayed;
+	A.EnemiesAtStart  = FMath::Clamp(EnemiesAlive, 1, 4);
+	A.bCandidateAlive = true;
+	// The opening death was assigned its ordinal earlier in this ScoreKill call.
+	A.StartEventIndex = FMath::Max(0, ClutchDeathOrdinal - 1);
+	A.StartTime       = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	UE_LOG(LogGameMode, Log, TEXT("Clutch attempt open: team %d, %s 1v%d (round %d, event %d)"),
+		TeamIndex, *Candidate->PlayerName, A.EnemiesAtStart, A.RoundIndex, A.StartEventIndex);
+}
+
+void AElimPlusGame::CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
+{
+	if (!KillerPS || !VictimPS) return;
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		FElimPlusClutchTracker& A = ActiveClutch[Team];
+		// bCandidateAlive gates POSTHUMOUS projectile kills: once the candidate's
+		// own death event was processed, nothing they fired earlier may count.
+		if (!A.bOpen || !A.bCandidateAlive) continue;
+		if (A.Candidate.Get() != KillerPS) continue;
+		// Only kills of the OPPOSING team count (excludes team kills; suicides
+		// and world deaths never reach here because the caller passes null).
+		if (static_cast<int32>(VictimPS->GetTeamNum()) != (1 - Team)) continue;
+		A.DirectKills++;
+	}
+}
+
+void AElimPlusGame::MarkClutchCandidateDead(AUTPlayerState* VictimPS, int32 DeathOrdinal)
+{
+	if (!VictimPS) return;
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		FElimPlusClutchTracker& A = ActiveClutch[Team];
+		if (!A.bOpen || !A.bCandidateAlive) continue;
+		if (A.Candidate.Get() != VictimPS) continue;
+		A.bCandidateAlive = false;
+		// Freeze the attempt boundary at the candidate's death: a delayed
+		// projectile that later ends the round must not extend it.
+		A.EndEventIndex = FMath::Max(A.StartEventIndex, DeathOrdinal);
+		A.EndTime       = GetWorld() ? GetWorld()->GetTimeSeconds() : A.StartTime;
+	}
+}
+
+void AElimPlusGame::FinalizeClutchAttempts(int32 WinnerTeamIndex)
+{
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		FElimPlusClutchTracker& A = ActiveClutch[Team];
+		if (!A.bOpen) continue;
+
+		FNCElimPlusClutchInput Out;
+		Out.UniqueId       = A.UniqueId;
+		Out.RoundIndex     = A.RoundIndex;
+		Out.TeamIndex      = Team;
+		Out.EnemiesAtStart = A.EnemiesAtStart;
+		Out.DirectKills    = A.DirectKills;
+		// Win requires the candidate's team to take the round AND the candidate
+		// to still be alive — a posthumous projectile round-winner is a loss for
+		// the dead candidate. Timeout/health-tiebreak wins count normally.
+		if (WinnerTeamIndex == INDEX_NONE)
+		{
+			Out.Result = TEXT("draw");
+		}
+		else if (WinnerTeamIndex == Team && A.bCandidateAlive)
+		{
+			Out.Result = TEXT("win");
+		}
+		else
+		{
+			Out.Result = TEXT("loss");
+		}
+		Out.bCleanFinish = (Out.Result == TEXT("win")) && (A.DirectKills == A.EnemiesAtStart);
+		Out.StartEventIndex = A.StartEventIndex;
+		Out.StartTime       = A.StartTime;
+		if (A.EndEventIndex >= 0)
+		{
+			// Candidate died/left mid-attempt — boundary already frozen there.
+			Out.EndEventIndex = A.EndEventIndex;
+			Out.EndTime       = A.EndTime;
+		}
+		else
+		{
+			// Candidate survived to the round boundary (win, draw, or a
+			// tiebreak loss): close at the round's last death ordinal.
+			Out.EndEventIndex = FMath::Max(A.StartEventIndex, ClutchDeathOrdinal - 1);
+			Out.EndTime       = FMath::Max(A.StartTime, Now);
+		}
+		if (!Out.UniqueId.IsEmpty())
+		{
+			CompletedClutches.Add(MoveTemp(Out));
+		}
+		A = FElimPlusClutchTracker();
+	}
+}
+
+void AElimPlusGame::DiscardOpenClutchAttempts()
+{
+	ActiveClutch[0] = FElimPlusClutchTracker();
+	ActiveClutch[1] = FElimPlusClutchTracker();
 }
 
 void AElimPlusGame::CheckRoundWinConditions()
@@ -3632,6 +3805,9 @@ void AElimPlusGame::BP_RestartCurrentRound()
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	bTeam0LastManAnnounced = false;
 	bTeam1LastManAnnounced = false;
+	// The aborted round is voided (never scored, never in the rounds[] log), so
+	// any open attempt from it must vanish rather than be recorded.
+	DiscardOpenClutchAttempts();
 	Team0StartingSize = 0;
 	Team1StartingSize = 0;
 	Team0RoundDamage = 0.0f;
@@ -3713,6 +3889,12 @@ void AElimPlusGame::Logout(AController* Exiting)
 		AUTPlayerState* PS = Cast<AUTPlayerState>(Exiting->PlayerState);
 		if (PS)
 		{
+			// A leaving clutch candidate cannot win ("remains alive" rule) and
+			// their PlayerState is about to be destroyed — close their attempt
+			// boundary NOW at the last observed death ordinal. The stable
+			// StatsID was captured at open, so the record still uploads.
+			MarkClutchCandidateDead(PS, FMath::Max(0, ClutchDeathOrdinal - 1));
+
 			// --- THIS IS THE FIX ---
 			// The PlayerState is about to be destroyed.
 			// We MUST remove it from our TMap to prevent

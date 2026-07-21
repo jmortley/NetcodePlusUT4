@@ -93,6 +93,27 @@ struct FNCElimPlusPlayerInput
 	int32   Damage    = 0;
 };
 
+/** One COMPLETED server-authored clutch attempt (a last-player-standing 1vX,
+ *  win or lose), captured live by AElimPlusGame and emitted as the additive
+ *  clutches[] array in BuildResultPayload. UniqueId is the same StatsID string
+ *  used by players[]/rounds[] — captured the moment the attempt opened, so a
+ *  candidate who later disconnects still uploads. Server-only plain struct:
+ *  never replicated, never NetSerialized. */
+struct FNCElimPlusClutchInput
+{
+	FString UniqueId;
+	int32   RoundIndex      = 0;    // 0-based, captured at attempt open (pre-increment)
+	int32   TeamIndex       = 0;    // 0 = red, 1 = blue
+	int32   EnemiesAtStart  = 0;    // living enemies at the 2->1 transition (1..4)
+	FString Result;                 // "win" | "loss" | "draw"
+	int32   DirectKills     = 0;    // enemy kills by the candidate while alive, post-open
+	bool    bCleanFinish    = false;// win with DirectKills == EnemiesAtStart
+	int32   StartEventIndex = 0;    // match-local death-event ordinal at open
+	int32   EndEventIndex   = 0;    // ordinal at candidate death/leave, else last of round
+	float   StartTime       = 0.f;  // world seconds
+	float   EndTime         = 0.f;
+};
+
 /** Match-end payload input. WinnerTeamIndex is 0/1; -1 means draw. */
 struct FNCElimPlusMatchInput
 {
@@ -100,6 +121,12 @@ struct FNCElimPlusMatchInput
 	int32 RedScore        = 0;
 	int32 BlueScore       = 0;
 	TArray<FNCElimPlusPlayerInput> Players;
+
+	/** Completed clutch attempts for the whole match (both teams, wins AND
+	 *  failures). Serialized as the additive clutch_version/clutches[] JSON
+	 *  keys — an empty array is still emitted so ut4stats can distinguish
+	 *  "no attempts" from "old plugin". */
+	TArray<FNCElimPlusClutchInput> Clutches;
 };
 
 /** Pimpl: opaque forward decl of the implementation struct. The real definition

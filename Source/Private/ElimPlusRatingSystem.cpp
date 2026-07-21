@@ -1060,6 +1060,34 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 	}
 	Writer->WriteArrayEnd();
 
+	// Server-authored clutch telemetry (additive keys, 2026-07-20). ut4stats
+	// consumes these as source="server_v1", cross-checked against the rounds[]
+	// manifest + KillLog before acceptance. clutch_version is emitted even when
+	// the array is empty so a zero-attempt match is distinguishable from an
+	// old-build hub that never sent the keys. Bots/invalid IDs are filtered at
+	// capture (attempt open requires a valid UniqueId) — the emptiness check
+	// here is belt-and-suspenders only.
+	Writer->WriteValue(TEXT("clutch_version"), 1);
+	Writer->WriteArrayStart(TEXT("clutches"));
+	for (const FNCElimPlusClutchInput& C : In.Clutches)
+	{
+		if (C.UniqueId.IsEmpty()) continue;
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("round_index"),       C.RoundIndex);
+		Writer->WriteValue(TEXT("id"),                C.UniqueId);
+		Writer->WriteValue(TEXT("team"),              C.TeamIndex);
+		Writer->WriteValue(TEXT("enemies_at_start"),  C.EnemiesAtStart);
+		Writer->WriteValue(TEXT("result"),            C.Result);
+		Writer->WriteValue(TEXT("direct_kills"),      C.DirectKills);
+		Writer->WriteValue(TEXT("clean_finish"),      C.bCleanFinish);
+		Writer->WriteValue(TEXT("start_event_index"), C.StartEventIndex);
+		Writer->WriteValue(TEXT("end_event_index"),   C.EndEventIndex);
+		Writer->WriteValue(TEXT("start_time"),        static_cast<double>(C.StartTime));
+		Writer->WriteValue(TEXT("end_time"),          static_cast<double>(C.EndTime));
+		Writer->WriteObjectEnd();
+	}
+	Writer->WriteArrayEnd();
+
 	Writer->WriteObjectEnd();
 	Writer->Close();
 
