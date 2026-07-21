@@ -9,12 +9,15 @@
 #include "HAL/IConsoleManager.h"
 
 #if WITH_EDITOR
-static TAutoConsoleVariable<int32> CVarNCHybridSpawnPIEPreview(
+static void DrawHybridSpawnPIEPreviewCommand(const TArray<FString>& Args, UWorld* World);
+
+static FAutoConsoleCommandWithWorldAndArgs CmdNCHybridSpawnPIEPreview(
 	TEXT("nc.HybridSpawnPIEPreview"),
-	0,
-	TEXT("Draw the exhaustive accepted NetcodePlus hybrid spawn field in PIE.\n")
-	TEXT(" 0: disabled\n")
-	TEXT(" 1: draw the current round's full team fields"),
+	TEXT("Draw the map-wide NetcodePlus hybrid spawn potential field in the local PIE world.\n")
+	TEXT(" Usage: nc.HybridSpawnPIEPreview [1|page N|0]\n")
+	TEXT(" 1 (or no argument): capped whole-map overview\n")
+	TEXT(" page N: draw 500 exact candidates; 0: clear persistent debug lines"),
+	FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&DrawHybridSpawnPIEPreviewCommand),
 	ECVF_Cheat);
 #endif
 
@@ -82,11 +85,21 @@ namespace NCHybridSpawn
 		float Distance2D;
 	};
 
-	static void ShuffleTier(TArray<FTransform>& Tier)
+	static int32 RandRange(
+		int32 MinValue,
+		int32 MaxValue,
+		FRandomStream* RandomStream)
+	{
+		return RandomStream
+			? RandomStream->RandRange(MinValue, MaxValue)
+			: FMath::RandRange(MinValue, MaxValue);
+	}
+
+	static void ShuffleTier(TArray<FTransform>& Tier, FRandomStream* RandomStream)
 	{
 		for (int32 Index = Tier.Num() - 1; Index > 0; --Index)
 		{
-			Tier.Swap(Index, FMath::RandRange(0, Index));
+			Tier.Swap(Index, RandRange(0, Index, RandomStream));
 		}
 	}
 
@@ -95,7 +108,8 @@ namespace NCHybridSpawn
 		const TArray<APlayerStart*>& Team1Candidates,
 		int32 LargestTeam,
 		const FNCHybridSpawnSettings& Settings,
-		FAnchorPair& OutPair)
+		FAnchorPair& OutPair,
+		FRandomStream* RandomStream)
 	{
 		TArray<FAnchorPair> Pairs;
 		float BestDistance = -1.f;
@@ -144,7 +158,8 @@ namespace NCHybridSpawn
 			return false;
 		}
 
-		OutPair = Pairs[QualifiedIndices[FMath::RandRange(0, QualifiedIndices.Num() - 1)]];
+		OutPair = Pairs[QualifiedIndices[
+			RandRange(0, QualifiedIndices.Num() - 1, RandomStream)]];
 		return true;
 	}
 
@@ -263,6 +278,7 @@ namespace NCHybridSpawn
 		float TeamRadius,
 		float MaxForwardExtent,
 		const TArray<FTransform>& Accepted,
+		float MinimumAcceptedSpacing,
 		const FNCHybridSpawnSettings& Settings,
 		FNCHybridSpawnBuildStats& Stats,
 		FTransform& OutTransform)
@@ -294,8 +310,7 @@ namespace NCHybridSpawn
 			return false;
 		}
 
-		const float MinimumSpacing = Settings.PlayerMinRadius - 2.f * Settings.TraceRadius;
-		if (!IsFarEnoughFromAccepted(Location, Accepted, MinimumSpacing))
+		if (!IsFarEnoughFromAccepted(Location, Accepted, MinimumAcceptedSpacing))
 		{
 			++Stats.RejectedSpacing;
 			return false;
@@ -335,6 +350,7 @@ namespace NCHybridSpawn
 		float TeamRadius,
 		float MaxForwardExtent,
 		const TArray<FTransform>& Accepted,
+		float MinimumAcceptedSpacing,
 		const FNCHybridSpawnSettings& Settings,
 		FNCHybridSpawnBuildStats& Stats,
 		FTransform& OutTransform)
@@ -369,7 +385,7 @@ namespace NCHybridSpawn
 		return ValidateAndBuildTransform(
 			World, SeedLocation, Start->GetActorRotation().Yaw, false,
 			Anchor, TowardEnemyDirection, TeamRadius, MaxForwardExtent,
-			Accepted, Settings, Stats, OutTransform);
+			Accepted, MinimumAcceptedSpacing, Settings, Stats, OutTransform);
 	}
 
 	static bool ProjectAndValidateCandidate(
@@ -381,6 +397,7 @@ namespace NCHybridSpawn
 		float TeamRadius,
 		float MaxForwardExtent,
 		const TArray<FTransform>& Accepted,
+		float MinimumAcceptedSpacing,
 		const FNCHybridSpawnSettings& Settings,
 		FNCHybridSpawnBuildStats& Stats,
 		FTransform& OutTransform)
@@ -435,7 +452,7 @@ namespace NCHybridSpawn
 		return ValidateAndBuildTransform(
 			World, ProjectedLocation, PreferredYaw, true,
 			Anchor, TowardEnemyDirection, TeamRadius, MaxForwardExtent,
-			Accepted, Settings, Stats, OutTransform);
+			Accepted, MinimumAcceptedSpacing, Settings, Stats, OutTransform);
 	}
 
 	static void BuildTeamQueue(
@@ -445,9 +462,11 @@ namespace NCHybridSpawn
 		const FVector& OpposingAnchor,
 		int32 PlayerCount,
 		float TeamRadius,
+		float MinimumAcceptedSpacing,
 		const FNCHybridSpawnSettings& Settings,
 		TArray<FTransform>& OutQueue,
-		FNCHybridSpawnBuildStats& OutStats)
+		FNCHybridSpawnBuildStats& OutStats,
+		FRandomStream* RandomStream)
 	{
 		OutQueue.Empty();
 		OutStats = FNCHybridSpawnBuildStats();
@@ -485,7 +504,7 @@ namespace NCHybridSpawn
 			FTransform SeedTransform;
 			if (BuildAuthoredSeed(
 				World, Start, Anchor, TowardEnemyDirection, TeamRadius, MaxForwardExtent,
-				Accepted, Settings, OutStats, SeedTransform))
+				Accepted, MinimumAcceptedSpacing, Settings, OutStats, SeedTransform))
 			{
 				Accepted.Add(SeedTransform);
 				PreviousTier.Add(SeedTransform);
@@ -502,7 +521,7 @@ namespace NCHybridSpawn
 		}
 
 		TArray<FTransform> ShuffledSeeds = PreviousTier;
-		ShuffleTier(ShuffledSeeds);
+		ShuffleTier(ShuffledSeeds, RandomStream);
 		OutQueue.Append(ShuffledSeeds);
 
 		const float Step = Settings.PlayerMinRadius * Settings.GeneratedSpacingMultiplier;
@@ -523,7 +542,8 @@ namespace NCHybridSpawn
 					FTransform GeneratedTransform;
 					if (ProjectAndValidateCandidate(
 						World, Candidate, SourceYaw, Anchor, TowardEnemyDirection,
-						TeamRadius, MaxForwardExtent, Accepted, Settings, OutStats,
+						TeamRadius, MaxForwardExtent, Accepted, MinimumAcceptedSpacing,
+						Settings, OutStats,
 						GeneratedTransform))
 					{
 						Accepted.Add(GeneratedTransform);
@@ -536,7 +556,7 @@ namespace NCHybridSpawn
 			}
 
 			if (NewTier.Num() == 0) break;
-			ShuffleTier(NewTier);
+			ShuffleTier(NewTier, RandomStream);
 			OutQueue.Append(NewTier);
 			PreviousTier = NewTier;
 		}
@@ -563,7 +583,7 @@ bool FNCHybridSpawnGenerator::Generate(
 	NCHybridSpawn::FAnchorPair Pair;
 	if (!NCHybridSpawn::PickAnchorPair(
 		Team0AnchorCandidates, Team1AnchorCandidates,
-		FMath::Max(Team0PlayerCount, Team1PlayerCount), Settings, Pair))
+		FMath::Max(Team0PlayerCount, Team1PlayerCount), Settings, Pair, nullptr))
 	{
 		return false;
 	}
@@ -583,12 +603,14 @@ bool FNCHybridSpawnGenerator::Generate(
 
 	NCHybridSpawn::BuildTeamQueue(
 		World, AllStarts, OutResult.Team0Anchor, OutResult.Team1Anchor,
-		Team0PlayerCount, OutResult.TeamRadius, Settings,
-		OutResult.Team0Queue, OutResult.Team0Stats);
+		Team0PlayerCount, OutResult.TeamRadius,
+		Settings.PlayerMinRadius - 2.f * Settings.TraceRadius, Settings,
+		OutResult.Team0Queue, OutResult.Team0Stats, nullptr);
 	NCHybridSpawn::BuildTeamQueue(
 		World, AllStarts, OutResult.Team1Anchor, OutResult.Team0Anchor,
-		Team1PlayerCount, OutResult.TeamRadius, Settings,
-		OutResult.Team1Queue, OutResult.Team1Stats);
+		Team1PlayerCount, OutResult.TeamRadius,
+		Settings.PlayerMinRadius - 2.f * Settings.TraceRadius, Settings,
+		OutResult.Team1Queue, OutResult.Team1Stats, nullptr);
 
 	OutResult.bTeam0Complete = (Team0PlayerCount <= 0 || OutResult.Team0Queue.Num() >= Team0PlayerCount);
 	OutResult.bTeam1Complete = (Team1PlayerCount <= 0 || OutResult.Team1Queue.Num() >= Team1PlayerCount);
@@ -614,133 +636,184 @@ APlayerStart* FNCHybridSpawnGenerator::FindNearestPlayerStart(
 	return BestStart;
 }
 
-void FNCHybridSpawnGenerator::DrawPIEPreview(
-	UWorld* World,
-	const TArray<APlayerStart*>& AllStarts,
-	const FNCHybridSpawnSettings& Settings,
-	const FNCHybridSpawnResult& RoundResult)
-{
 #if WITH_EDITOR
-	if (!World || World->WorldType != EWorldType::PIE
-		|| CVarNCHybridSpawnPIEPreview.GetValueOnGameThread() <= 0
-		|| !RoundResult.bAnchorsValid)
-	{
-		return;
-	}
-
-	APlayerStart* Team0Anchor = nullptr;
-	APlayerStart* Team1Anchor = nullptr;
-	for (APlayerStart* Start : AllStarts)
-	{
-		if (!Start || Start->IsPendingKill()) continue;
-		if (Start->GetFName() == RoundResult.Team0AnchorName) Team0Anchor = Start;
-		if (Start->GetFName() == RoundResult.Team1AnchorName) Team1Anchor = Start;
-	}
-
-	if (!Team0Anchor || !Team1Anchor)
+static void DrawHybridSpawnPIEPreviewCommand(const TArray<FString>& Args, UWorld* World)
+{
+	if (!World || World->WorldType != EWorldType::PIE)
 	{
 		UE_LOG(LogTemp, Warning,
-			TEXT("[HybridSpawnPIE] Could not recover selected anchors %s/%s"),
-			*RoundResult.Team0AnchorName.ToString(),
-			*RoundResult.Team1AnchorName.ToString());
+			TEXT("[HybridSpawnPIE] Run nc.HybridSpawnPIEPreview from a PIE viewport"));
 		return;
 	}
 
-	// The live queue stops at team size + 20. A deliberately unreachable goal
-	// makes the preview continue until the field naturally exhausts or reaches
-	// the same 30-tier safety cap as gameplay. With a 303uu grid inside a 3100uu
-	// radius, 10,000 is safely above the geometrically possible count.
-	FNCHybridSpawnSettings PreviewSettings = Settings;
-	PreviewSettings.ExtraSpawnPadding = 10000;
-	TArray<APlayerStart*> Team0Anchors;
-	TArray<APlayerStart*> Team1Anchors;
-	Team0Anchors.Add(Team0Anchor);
-	Team1Anchors.Add(Team1Anchor);
-
-	FNCHybridSpawnResult PreviewResult;
-	if (!Generate(
-		World, AllStarts, Team0Anchors, Team1Anchors,
-		1, 1, PreviewSettings, PreviewResult))
+	if (Args.Num() > 0
+		&& (Args[0].Equals(TEXT("0")) || Args[0].Equals(TEXT("clear"), ESearchCase::IgnoreCase)))
 	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[HybridSpawnPIE] Full-field generation failed for anchors %s/%s"),
-			*RoundResult.Team0AnchorName.ToString(),
-			*RoundResult.Team1AnchorName.ToString());
+		FlushPersistentDebugLines(World);
+		UE_LOG(LogTemp, Warning, TEXT("[HybridSpawnPIE] Cleared persistent debug lines"));
 		return;
 	}
 
-	// Preview lines intentionally persist until PIE stops or the built-in
-	// FlushPersistentDebugLines command is issued.
+	// Never stack one preview on another. The original implementation could add
+	// tens of thousands of persistent capsules and arrows to the line batcher;
+	// clearing up front bounds renderer memory even when the command is repeated.
+	FlushPersistentDebugLines(World);
+
+	const bool bExactPage = Args.Num() > 0
+		&& Args[0].Equals(TEXT("page"), ESearchCase::IgnoreCase);
+	const int32 RequestedPage = bExactPage && Args.Num() > 1
+		? FMath::Max(1, FCString::Atoi(*Args[1]))
+		: 1;
+
+	TArray<APlayerStart*> AllStarts;
+	for (TActorIterator<APlayerStart> It(World); It; ++It)
+	{
+		APlayerStart* Start = *It;
+		if (Start && !Start->IsPendingKill())
+		{
+			AllStarts.Add(Start);
+		}
+	}
+	if (AllStarts.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[HybridSpawnPIE] This PIE world has no PlayerStarts"));
+		return;
+	}
+
+	// This is deliberately independent of a live round. Build a conservative
+	// map-wide potential field around every authored PlayerStart, with the live
+	// maximum radius and no opposing-team midpoint plane. A real round can only
+	// remove points from this superset by choosing a smaller pair radius or by
+	// applying its cross-team plane.
+	FNCHybridSpawnSettings Settings;
+	Settings.ExtraSpawnPadding = 10000;
+	const float PreviewAcceptedSpacing = bExactPage
+		? 10.f
+		: Settings.PlayerMinRadius - 2.f * Settings.TraceRadius;
+	TArray<FTransform> MapField;
+	TSet<FIntVector> SeenLocations;
+	int32 TotalDropRejects = 0;
+
+	for (int32 AnchorIndex = 0; AnchorIndex < AllStarts.Num(); ++AnchorIndex)
+	{
+		APlayerStart* Anchor = AllStarts[AnchorIndex];
+		TArray<FTransform> AnchorField;
+		FNCHybridSpawnBuildStats AnchorStats;
+		FRandomStream PreviewRandom(0x4E435000 + AnchorIndex);
+
+		// Equal anchor/opposing locations make TowardEnemyDirection zero, which
+		// disables the round-specific forward plane. Exact pages use only 10uu
+		// duplicate suppression so random live acceptance order cannot hide a
+		// geometrically reachable location. The default overview uses live 220uu
+		// spacing to keep its collision-query and allocation cost bounded.
+		NCHybridSpawn::BuildTeamQueue(
+			World, AllStarts,
+			Anchor->GetActorLocation(), Anchor->GetActorLocation(),
+			1, Settings.MaxTeamSpawnRadius, PreviewAcceptedSpacing, Settings,
+			AnchorField, AnchorStats, &PreviewRandom);
+		TotalDropRejects += AnchorStats.RejectedDrop;
+
+		for (const FTransform& Transform : AnchorField)
+		{
+			const FVector Location = Transform.GetLocation();
+			const FIntVector Key(
+				FMath::RoundToInt(Location.X / 10.f),
+				FMath::RoundToInt(Location.Y / 10.f),
+				FMath::RoundToInt(Location.Z / 10.f));
+			if (!SeenLocations.Contains(Key))
+			{
+				SeenLocations.Add(Key);
+				MapField.Add(Transform);
+			}
+		}
+	}
+
+	const int32 ExactPageSize = 500;
+	const int32 ExactPageCount = FMath::Max(
+		1, (MapField.Num() + ExactPageSize - 1) / ExactPageSize);
+	TArray<int32> DrawIndices;
+
+	if (bExactPage)
+	{
+		const int32 Page = FMath::Clamp(RequestedPage, 1, ExactPageCount);
+		const int32 FirstIndex = (Page - 1) * ExactPageSize;
+		const int32 EndIndex = FMath::Min(FirstIndex + ExactPageSize, MapField.Num());
+		for (int32 Index = FirstIndex; Index < EndIndex; ++Index)
+		{
+			DrawIndices.Add(Index);
+		}
+	}
+	else
+	{
+		// One representative per 250uu 3D cell gives a useful whole-map safety
+		// picture without asking the renderer to retain every near-duplicate
+		// transform. If a very large map still exceeds the hard limit, sample the
+		// representatives evenly instead of truncating one end of the map.
+		const float OverviewCellSize = 250.f;
+		const int32 MaxOverviewPoints = 1000;
+		TArray<int32> Representatives;
+		TSet<FIntVector> SeenOverviewCells;
+		for (int32 Index = 0; Index < MapField.Num(); ++Index)
+		{
+			const FVector Location = MapField[Index].GetLocation();
+			const FIntVector Cell(
+				FMath::FloorToInt(Location.X / OverviewCellSize),
+				FMath::FloorToInt(Location.Y / OverviewCellSize),
+				FMath::FloorToInt(Location.Z / OverviewCellSize));
+			if (!SeenOverviewCells.Contains(Cell))
+			{
+				SeenOverviewCells.Add(Cell);
+				Representatives.Add(Index);
+			}
+		}
+
+		const int32 DrawCount = FMath::Min(MaxOverviewPoints, Representatives.Num());
+		for (int32 DrawIndex = 0; DrawIndex < DrawCount; ++DrawIndex)
+		{
+			const int32 RepresentativeIndex = Representatives.Num() <= MaxOverviewPoints
+				? DrawIndex
+				: FMath::FloorToInt(
+					(float)DrawIndex * (float)Representatives.Num() / (float)DrawCount);
+			DrawIndices.Add(Representatives[RepresentativeIndex]);
+		}
+	}
+
 	const bool bPersistent = true;
 	const float LifeTime = -1.f;
 	const uint8 DepthPriority = 0;
-	const float CapsuleThickness = 1.5f;
-	const float ArrowLength = 90.f;
-	const float ArrowSize = 18.f;
-	const FColor Team0Generated(255, 32, 32);
-	const FColor Team0Seed(255, 160, 32);
-	const FColor Team1Generated(32, 96, 255);
-	const FColor Team1Seed(32, 240, 255);
+	const FColor PotentialColor(64, 255, 128);
+	const FColor AuthoredColor(255, 190, 32);
 
-	auto DrawTeam = [&](const TArray<FTransform>& Queue, int32 SeedCount,
-		const FVector& AnchorLocation, const FColor& GeneratedColor,
-		const FColor& SeedColor)
+	// Points are intentional: one capsule plus arrow expands to many persistent
+	// line primitives. At 35k candidates that was enough to nearly hang PIE.
+	for (int32 Index : DrawIndices)
 	{
-		for (int32 Index = 0; Index < Queue.Num(); ++Index)
-		{
-			const FTransform& Transform = Queue[Index];
-			const FVector Location = Transform.GetLocation();
-			const FColor Color = (Index < SeedCount) ? SeedColor : GeneratedColor;
-			DrawDebugCapsule(
-				World, Location, Settings.TraceHalfHeight, Settings.TraceRadius,
-				FQuat::Identity, Color, bPersistent, LifeTime,
-				DepthPriority, CapsuleThickness);
+		DrawDebugPoint(
+			World, MapField[Index].GetLocation(), 12.f, PotentialColor,
+			bPersistent, LifeTime, DepthPriority);
+	}
 
-			const FVector FacingEnd = Location
-				+ FRotator(0.f, Transform.Rotator().Yaw, 0.f).Vector() * ArrowLength;
-			DrawDebugDirectionalArrow(
-				World, Location, FacingEnd, ArrowSize, Color,
-				bPersistent, LifeTime, DepthPriority, CapsuleThickness);
+	for (APlayerStart* Start : AllStarts)
+	{
+		DrawDebugSphere(
+			World, Start->GetActorLocation(), 70.f, 16, AuthoredColor,
+			bPersistent, LifeTime, DepthPriority, 4.f);
+	}
 
-			if (FMath::Abs(Location.Z - AnchorLocation.Z) > 50.f)
-			{
-				const FVector AnchorZ(Location.X, Location.Y, AnchorLocation.Z);
-				DrawDebugLine(
-					World, Location, AnchorZ,
-					FColor(Color.R / 2, Color.G / 2, Color.B / 2),
-					bPersistent, LifeTime, DepthPriority, 0.75f);
-			}
-		}
-	};
-
-	DrawTeam(
-		PreviewResult.Team0Queue, PreviewResult.Team0Stats.SeedCount,
-		PreviewResult.Team0Anchor, Team0Generated, Team0Seed);
-	DrawTeam(
-		PreviewResult.Team1Queue, PreviewResult.Team1Stats.SeedCount,
-		PreviewResult.Team1Anchor, Team1Generated, Team1Seed);
-
-	DrawDebugSphere(
-		World, PreviewResult.Team0Anchor, 70.f, 16, Team0Seed,
-		bPersistent, LifeTime, DepthPriority, 4.f);
-	DrawDebugSphere(
-		World, PreviewResult.Team1Anchor, 70.f, 16, Team1Seed,
-		bPersistent, LifeTime, DepthPriority, 4.f);
-	DrawDebugLine(
-		World, PreviewResult.Team0Anchor, PreviewResult.Team1Anchor,
-		FColor::Yellow, bPersistent, LifeTime, DepthPriority, 2.f);
-
-	UE_LOG(LogTemp, Warning,
-		TEXT("[HybridSpawnPIE] Drew exhaustive fields: T0=%d (seeds=%d) T1=%d (seeds=%d), radius=%.0f, Z-drop rejects=%d/%d. Use FlushPersistentDebugLines to clear."),
-		PreviewResult.Team0Queue.Num(), PreviewResult.Team0Stats.SeedCount,
-		PreviewResult.Team1Queue.Num(), PreviewResult.Team1Stats.SeedCount,
-		PreviewResult.TeamRadius,
-		PreviewResult.Team0Stats.RejectedDrop,
-		PreviewResult.Team1Stats.RejectedDrop);
-#else
-	(void)World;
-	(void)AllStarts;
-	(void)Settings;
-	(void)RoundResult;
-#endif
+	if (bExactPage)
+	{
+		const int32 Page = FMath::Clamp(RequestedPage, 1, ExactPageCount);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[HybridSpawnPIE] Drew exact page %d/%d: %d green points from %d exact transforms (%d authored PlayerStarts, radius %.0f, Z-drop rejects %d). Use page N or 0 to clear."),
+			Page, ExactPageCount, DrawIndices.Num(), MapField.Num(), AllStarts.Num(),
+			Settings.MaxTeamSpawnRadius, TotalDropRejects);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[HybridSpawnPIE] Drew capped whole-map overview: %d green points from %d live-spaced transforms (%d authored PlayerStarts, radius %.0f, Z-drop rejects %d). Use 'nc.HybridSpawnPIEPreview page 1' for paged exhaustive detail or 0 to clear."),
+			DrawIndices.Num(), MapField.Num(), AllStarts.Num(),
+			Settings.MaxTeamSpawnRadius, TotalDropRejects);
+	}
 }
+#endif

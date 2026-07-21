@@ -94,14 +94,4 @@ public:
 		const TArray<APlayerStart*>& Starts,
 		const FVector& Location);
 
-	/**
-	 * Editor-only visualization of the complete accepted field around the
-	 * round's selected anchor pair. Enable in PIE with:
-	 *   nc.HybridSpawnPIEPreview 1
-	 */
-	static void DrawPIEPreview(
-		UWorld* World,
-		const TArray<APlayerStart*>& AllStarts,
-		const FNCHybridSpawnSettings& Settings,
-		const FNCHybridSpawnResult& RoundResult);
 };

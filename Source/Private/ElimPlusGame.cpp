@@ -1743,6 +1743,28 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 			// from default inventory). Scale HP for uneven teams (non-PUG) here.
 			ApplyUnevenTeamHealthScaling(Cast<AUTCharacter>(NewPlayer->GetPawn()));
 
+#if WITH_EDITOR
+			// Stock AUTGameMode only sends ClientSwitchToBestWeapon for a remote
+			// controller. A listen-server PIE controller is local, so after the
+			// round reset it can own the full default inventory but have no active
+			// weapon. Wipeout already performs this next-tick recovery for every
+			// spawn; keep the ElimPlus workaround editor-only so production behavior
+			// and wire traffic are unchanged.
+			AUTPlayerController* PIEPlayer = Cast<AUTPlayerController>(NewPlayer);
+			if (GetWorld()->WorldType == EWorldType::PIE
+				&& PIEPlayer && PIEPlayer->IsLocalController())
+			{
+				TWeakObjectPtr<AUTPlayerController> WeakPIEPlayer = PIEPlayer;
+				GetWorldTimerManager().SetTimerForNextTick([WeakPIEPlayer]()
+				{
+					if (WeakPIEPlayer.IsValid() && WeakPIEPlayer->GetPawn())
+					{
+						WeakPIEPlayer->ClientSwitchToBestWeapon();
+					}
+				});
+			}
+#endif
+
 			// Round participation (humans AND bots — team-size honesty): only
 			// players who actually spawned get rated/PPR'd for this round.
 			if (AUTPlayerState* SpawnedPS = Cast<AUTPlayerState>(NewPlayer->PlayerState))
@@ -2535,9 +2557,6 @@ void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 			TEXT("ElimPlus hybrid spawn generation had no safe anchor pair; using PlayerStart fallback"));
 		return;
 	}
-	FNCHybridSpawnGenerator::DrawPIEPreview(
-		GetWorld(), AllSpawnPointsList, Settings, Result);
-
 	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
 	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
 	bHybridRoundSpawnWindow = Team0HybridSpawnQueue.Num() > 0 || Team1HybridSpawnQueue.Num() > 0;

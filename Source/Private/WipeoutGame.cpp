@@ -3241,9 +3241,6 @@ void AUWipeoutGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 			TEXT("Wipeout hybrid opening spawn generation had no safe anchor pair; using PlayerStart fallback"));
 		return;
 	}
-	FNCHybridSpawnGenerator::DrawPIEPreview(
-		GetWorld(), AllSpawnPointsList, Settings, Result);
-
 	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
 	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
 	bHybridRoundSpawnWindow = Team0HybridSpawnQueue.Num() > 0 || Team1HybridSpawnQueue.Num() > 0;
