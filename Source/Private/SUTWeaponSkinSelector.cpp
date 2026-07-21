@@ -129,10 +129,34 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 							]
 						]
 
-						// LEGACY (2026-07-19): these spinners still write
-						// AUTWeaponFix::HiddenBeamBackOffset / HiddenBeamDownOffset,
-						// but nothing reads them anymore — the BP-parity hide keeps
-						// the stock muzzle-socket beam origin. Candidates for removal.
+						// Hidden-weapon style toggle — unchecked (default) = BP-parity
+						// visibility-only hide, beam from the live muzzle socket;
+						// checked = classic camera-relative beam (pre-2026-07-19),
+						// which is what the Back/Down spinners below feed.
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0, 0, 0, 8)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+							[
+								SNew(SCheckBox)
+								.IsChecked(this, &SUTWeaponSkinSelector::GetClassicHideState)
+								.OnCheckStateChanged(this, &SUTWeaponSkinSelector::OnClassicHideChanged)
+								.ToolTipText(LOCTEXT("ClassicHideTooltip", "Hidden weapons: fire the beam from the camera (classic style) instead of the gun's muzzle. Uses the Back/Down offsets below."))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("ClassicHideLabel", "Classic hidden-weapon beam (from camera)"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
+								.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
+							]
+						]
+
+						// Camera-beam origin offsets — read by AUTWeaponFix::
+						// GetImpactSpawnPosition ONLY in the classic style above;
+						// inert (but still persisted) in the default BP-parity hide.
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 0, 0, 8)
@@ -600,10 +624,11 @@ void SUTWeaponSkinSelector::LoadSettings()
 	// Copy hide state from the static map (keyed by class name)
 	HideState = AUTWeaponFix::HiddenWeaponsByTag;
 
-	// Pick up hidden-weapon beam offsets from the now-populated statics so the
-	// spinners reflect whatever Mod.ini already had on disk.
+	// Pick up hidden-weapon beam offsets + style from the now-populated statics so
+	// the spinners/checkbox reflect whatever Mod.ini already had on disk.
 	HiddenBeamBack = AUTWeaponFix::HiddenBeamBackOffset;
 	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
+	bClassicWeaponHide = AUTWeaponFix::bClassicWeaponHide;
 
 	// Beam colors from Mod.ini [WeaponSkinsPlus]. Format = FLinearColor::ToString
 	// output "(R=...,G=...,B=...,A=...)" so the BP parser (Convert String to
@@ -675,10 +700,13 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	// Hidden-weapon beam offsets — LEGACY (2026-07-19): pushed to the AUTWeaponFix
-	// statics and persisted to Mod.ini, but inert — the BP-parity hide keeps the
-	// stock muzzle-socket beam origin, so no code reads these anymore. Clamp kept
-	// so a manual Mod.ini edit can't store something weird.
+	// Hidden-weapon style + camera-beam offsets — pushed to the AUTWeaponFix
+	// statics so the next fire reads them (GetImpactSpawnPosition reads the
+	// statics directly in classic style), and persisted to Mod.ini so they
+	// survive a restart. Clamp here too — the spinner Min/Max already enforces,
+	// but a manual edit could poke in something weird.
+	AUTWeaponFix::bClassicWeaponHide = bClassicWeaponHide;
+	GConfig->SetBool(TEXT("NetcodePlus.WeaponSettings"), TEXT("ClassicWeaponHide"), bClassicWeaponHide, ModIniPath);
 	AUTWeaponFix::HiddenBeamBackOffset = FMath::Clamp(HiddenBeamBack, 0.f, 100.f);
 	AUTWeaponFix::HiddenBeamDownOffset = FMath::Clamp(HiddenBeamDown, 0.f, 100.f);
 	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamBack"),
@@ -741,6 +769,18 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), *CurrentHitscanChoice, ModIniPath);
 
 	GConfig->Flush(false, ModIniPath);
+
+	// Re-apply to the CURRENT weapon so hide/style changes take effect now — the
+	// BringUp/swap-detector paths only fire on a weapon CHANGE, so without this a
+	// style flip while a hidden weapon is equipped strands the old style's state
+	// until the next switch.
+	AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
+	if (UTChar && UTChar->GetWeapon())
+	{
+		AUTWeapon* CurWeap = UTChar->GetWeapon();
+		bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(FName(*CurWeap->GetClass()->GetName()));
+		AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, bHidden && *bHidden);
+	}
 
 	// Send hitscan choice to server via console command — defers through the command pipeline
 	// instead of calling ServerMutate directly (which executes inline on listen servers).

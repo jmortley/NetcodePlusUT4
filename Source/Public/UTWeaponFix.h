@@ -170,20 +170,37 @@ public:
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
     static TMap<FName, bool> HiddenWeaponsByTag;
 
-    /** Apply or restore the hidden-weapon state the way the old HiddenWeaponsUTPL
-     *  BP did: rendering-only (SetVisibility(propagate) on the gun mesh + arm-bone
-     *  hiding on the shared FirstPersonMesh). Transforms and bHiddenInGame are
-     *  never touched — stock code owns that flag (zoom/overlay/spectate) — so the
-     *  stock muzzle-socket beam origin keeps working while hidden. Works on any
-     *  AUTWeapon (stock included). Callers: BringUp, TeamArenaCharacter's
-     *  weapon-swap detector, and the "weaponhand hidden/show" console command. */
+    /** Apply or restore the hidden-weapon state. Two selectable styles:
+     *  DEFAULT (bClassicWeaponHide=false) = BP-parity, rendering-only —
+     *  SetVisibility(propagate) on the gun mesh + arm-bone hiding on the shared
+     *  FirstPersonMesh; bHiddenInGame never touched (stock owns that flag:
+     *  zoom/overlay/spectate), so the stock muzzle-socket beam origin keeps
+     *  working while hidden. CLASSIC (true) = the pre-BP behavior: SetHiddenInGame
+     *  on gun + FirstPersonMesh with the camera-relative beam origin
+     *  (GetImpactSpawnPosition below). The SHOW path heals both styles' residue —
+     *  but ONLY state this code set itself (ComponentTags on the touched meshes),
+     *  so it never fights the old UT+ BP content hiding guns/arms with the same
+     *  primitives — and re-seats via stock UpdateWeaponHand(), which re-applies the viewer's
+     *  weapon-position preference (Lowered/Very Low = LowMeshOffset/
+     *  VeryLowMeshOffset) — a bare archetype reset here is what broke Very Low
+     *  for visible weapons in the 2026-07-19 roll. Works on any AUTWeapon (stock
+     *  included). Callers: BringUp, TeamArenaCharacter's weapon-swap detector,
+     *  the "weaponhand hidden/show" console command, and the weaponskins menu. */
     static void ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, bool bHide);
 
-    /** LEGACY (2026-07-19): beam origin no longer reads these — the BP-parity hide
-     *  above leaves the stock muzzle-socket beam path intact, so the old
-     *  camera-relative GetImpactSpawnPosition override is gone. Kept only because
-     *  the weaponskins menu sliders and Mod.ini keys (HiddenBeamBack/HiddenBeamDown)
-     *  still read/write them; the values are inert. */
+    /** Hidden-weapon style toggle (weaponskins menu; Mod.ini
+     *  [NetcodePlus.WeaponSettings] ClassicWeaponHide). False (default) = BP-parity
+     *  visibility-only hide, beam from the live muzzle socket. True = classic
+     *  camera-relative beam (SetHiddenInGame + GetImpactSpawnPosition override
+     *  reading the HiddenBeam offsets below) — kill-switch back to the pre-2026-07-19
+     *  behavior. Client-local render state only. */
+    static bool bClassicWeaponHide;
+
+    /** Tracer/beam origin offsets for CLASSIC hide (bClassicWeaponHide) — inert in
+     *  the default BP-parity style, which keeps the stock muzzle-socket origin.
+     *  Set via the weaponskins menu sliders; persisted in Mod.ini
+     *  [NetcodePlus.WeaponSettings] HiddenBeamBack + HiddenBeamDown. Defaults match
+     *  the original hardcoded values (10 back, 35 down = "stomach"). */
     static float HiddenBeamBackOffset;
     static float HiddenBeamDownOffset;
 
@@ -204,6 +221,15 @@ public:
     /** Whether settings have been loaded from Mod.ini this session */
     static bool bWeaponSettingsLoaded;
     //~ Begin AUTWeapon Interface
+    /** CLASSIC hide only (bClassicWeaponHide + weapon hidden): camera-relative beam
+     *  origin using the HiddenBeam offsets. In the default BP-parity style this is
+     *  a pure pass-through to Super (live muzzle socket). */
+    virtual void GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation) override;
+    /** CLASSIC hide only: suppress the muzzle flash for the firing mode — the PSC
+     *  sits on the hidden weapon's muzzle socket while the beam spawns from the
+     *  camera-adjusted origin. BP-parity style relies on SetVisibility(propagate)
+     *  silencing the PSC children instead, so this passes through untouched. */
+    virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
 

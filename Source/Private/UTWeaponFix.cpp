@@ -248,6 +248,8 @@ TMap<FName, bool> AUTWeaponFix::HiddenWeaponsByTag;
 TMap<FName, FString> AUTWeaponFix::SavedSkinPaths;
 TMap<FName, UUTWeaponSkin*> AUTWeaponFix::CachedSkinAssets;
 bool AUTWeaponFix::bWeaponSettingsLoaded = false;
+// Default = BP-parity hide; true = classic camera-beam hide (pre-2026-07-19).
+bool AUTWeaponFix::bClassicWeaponHide = false;
 // Stomach-height defaults; LoadWeaponSettings overrides from Mod.ini.
 float AUTWeaponFix::HiddenBeamBackOffset = 10.f;
 float AUTWeaponFix::HiddenBeamDownOffset = 35.f;
@@ -275,6 +277,10 @@ void AUTWeaponFix::LoadWeaponSettings()
 			HiddenBeamDownOffset = FMath::Clamp(FCString::Atof(*OffsetStr), 0.f, 100.f);
 		}
 	}
+
+	// Hidden-weapon style. Absent key = BP-parity default, so configs from before
+	// this option (and untouched seq-51 configs) render without any ini edit.
+	GConfig->GetBool(WEAPON_SETTINGS_SECTION, TEXT("ClassicWeaponHide"), bClassicWeaponHide, ModIniPath);
 
 	// Load hide settings — read keys by class name
 	// We iterate weapon classes to get all possible class names, then check Mod.ini for each
@@ -335,6 +341,8 @@ void AUTWeaponFix::SaveWeaponSettings()
 		FString Key = FString::Printf(TEXT("Hide.%s"), *Pair.Key.ToString());
 		GConfig->SetString(WEAPON_SETTINGS_SECTION, *Key, Pair.Value ? TEXT("1") : TEXT("0"), ModIniPath);
 	}
+
+	GConfig->SetBool(WEAPON_SETTINGS_SECTION, TEXT("ClassicWeaponHide"), bClassicWeaponHide, ModIniPath);
 
 	GConfig->Flush(false, ModIniPath);
 }
@@ -3767,6 +3775,71 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 
 
 
+void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation)
+{
+	// CLASSIC hide only: spawn beam effects from camera center instead of the
+	// muzzle socket (while classic-hidden the 1P rig is parked at its default
+	// archetype seat, so the socket is nowhere near the crosshair). Makes beams
+	// fire straight from the crosshair, matching projectile behavior. The default
+	// BP-parity hide never enters this branch — its muzzle socket stays live at
+	// the centergun seat, so Super's socket origin is correct.
+	if (bClassicWeaponHide)
+	{
+		const bool* bHidden = HiddenWeaponsByTag.Find(FName(*GetClass()->GetName()));
+		if (bHidden && *bHidden && UTOwner && UTOwner->CharacterCameraComponent)
+		{
+			SpawnRotation = UTOwner->CharacterCameraComponent->GetComponentRotation();
+			// Offset back+down from camera so the beam is visible (spawning at exact
+			// camera position makes the beam edge-on/invisible when stationary).
+			// Magnitudes come from Mod.ini [NetcodePlus.WeaponSettings] HiddenBeamBack
+			// + HiddenBeamDown via LoadWeaponSettings; the weaponskins menu has
+			// sliders. Defaults (10 / 35) reproduce the original hardcoded behavior.
+			const FVector Forward = SpawnRotation.Vector();
+			const FVector Down(0.f, 0.f, -1.f);
+			SpawnLocation = UTOwner->CharacterCameraComponent->GetComponentLocation()
+				+ Forward * -HiddenBeamBackOffset   // pulls particles back into body
+				+ Down    *  HiddenBeamDownOffset;   // drop below eye line
+			return;
+		}
+	}
+
+	Super::GetImpactSpawnPosition(TargetLoc, SpawnLocation, SpawnRotation);
+}
+
+void AUTWeaponFix::PlayFiringEffects()
+{
+	// CLASSIC hide only: the muzzle flash PSC is still attached to the (hidden)
+	// muzzle socket while the beam/impact spawns from the camera-adjusted origin
+	// (see GetImpactSpawnPosition). That mismatch produces a visible puff at the
+	// hand while the beam comes from chest height. Suppress only the muzzle flash
+	// for the current fire mode — sound, anim, kickback, and beam all still fire.
+	// The default BP-parity hide needs none of this: SetVisibility(propagate)
+	// already silenced the PSC children.
+	UParticleSystemComponent* SavedPSC = nullptr;
+	int32 SavedIndex = INDEX_NONE;
+	if (bClassicWeaponHide && UTOwner)
+	{
+		const bool* bHidden = HiddenWeaponsByTag.Find(FName(*GetClass()->GetName()));
+		if (bHidden && *bHidden)
+		{
+			const uint8 EffectFiringMode = (Role == ROLE_Authority || UTOwner->Controller != nullptr) ? CurrentFireMode : UTOwner->FireMode;
+			if (MuzzleFlash.IsValidIndex(EffectFiringMode))
+			{
+				SavedPSC = MuzzleFlash[EffectFiringMode];
+				SavedIndex = EffectFiringMode;
+				MuzzleFlash[EffectFiringMode] = nullptr;
+			}
+		}
+	}
+
+	Super::PlayFiringEffects();
+
+	if (SavedIndex != INDEX_NONE && MuzzleFlash.IsValidIndex(SavedIndex))
+	{
+		MuzzleFlash[SavedIndex] = SavedPSC;
+	}
+}
+
 // BP-parity hidden-weapon apply (2026-07-19). The old HiddenWeaponsUTPL BP hid
 // weapons by turning off RENDERING only — SetVisibility(false, propagate) on the
 // gun mesh + HideBoneByName(upperarm_l/r) on the arms — leaving every transform
@@ -3779,9 +3852,87 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 //  - Arms are hidden per-BONE, not per-component: the component keeps rendering
 //    (zero-scaled) and ticking, so the hand socket the weapon hangs from stays
 //    live, and stock behind-view/spectate visibility logic is never fought.
+// Per-component attribution of what THIS code hid (ComponentTags on the meshes it
+// touched), so the show path only heals its own residue. The old UT+ content
+// (HiddenWeaponsUTPL / WeaponSkinsPlus BPs, Mod.ini [UTPL] HideGun) hides with the
+// SAME primitives (bVisible + bone hiding) on its own poll — force-showing state
+// we didn't set wins or loses against that poll by tick order and intermittently
+// un-hides guns/arms those players expect hidden (seq-51 never fought them; it
+// only ever touched bHiddenInGame). Tags rather than session statics: they live
+// and die with the component instance, so a hidden weapon dropped on death still
+// heals on re-pickup, a respawned pawn's fresh arms are untagged (no one-shot
+// reveal of bones a BP hid), and nothing cross-talks between local players.
+static const FName NAME_NCPHidGun(TEXT("NCP_HidGun"));
+static const FName NAME_NCPHidArms(TEXT("NCP_HidArms"));
+
+// Remove-and-report: true if WE had hidden this component (tag present).
+static bool TakeNCPHideTag(UActorComponent* Comp, const FName& Tag)
+{
+	return Comp != nullptr && Comp->ComponentTags.Remove(Tag) > 0;
+}
+
 void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, bool bHide)
 {
 	USkeletalMeshComponent* WeapMesh = (Weapon != nullptr) ? Weapon->GetMesh() : nullptr;
+	AUTDualWeapon* Dual = Cast<AUTDualWeapon>(Weapon);
+	USkeletalMeshComponent* LeftMesh = (Dual != nullptr) ? Dual->LeftMesh : nullptr;
+	USkeletalMeshComponent* ArmsMesh = (Char != nullptr) ? Char->FirstPersonMesh : nullptr;
+	// Bone names verified against the HiddenWeaponsUTPL export; missing bones
+	// on a custom hands skeleton just log a warning.
+	static const FName NAME_UpperArmL(TEXT("upperarm_l"));
+	static const FName NAME_UpperArmR(TEXT("upperarm_r"));
+
+	if (bHide && bClassicWeaponHide)
+	{
+		// CLASSIC hide (pre-2026-07-19 behavior, selectable in the weaponskins
+		// menu): SetHiddenInGame both meshes; the beam comes from the camera via
+		// the GetImpactSpawnPosition override. Heal BP-style residue first (style
+		// flipped while hidden) — but only where the tag says it's ours.
+		if (WeapMesh != nullptr)
+		{
+			if (TakeNCPHideTag(WeapMesh, NAME_NCPHidGun))
+			{
+				WeapMesh->SetVisibility(true, true);
+			}
+			WeapMesh->SetHiddenInGame(true);
+			WeapMesh->ComponentTags.AddUnique(NAME_NCPHidGun);
+		}
+		if (LeftMesh != nullptr)
+		{
+			// Diverges from the gun mesh's pure-bHiddenInGame classic hide on
+			// purpose: a mid-wield dual upgrade runs AttachLeftMesh's
+			// SetHiddenInGame(false) with no BringUp and no weapon-pointer change
+			// (no re-apply fires), so the hide must ALSO ride bVisible, which
+			// AttachLeftMesh never touches. The show path restores both, tag-gated.
+			LeftMesh->SetVisibility(false, true);
+			LeftMesh->SetHiddenInGame(true);
+			LeftMesh->ComponentTags.AddUnique(NAME_NCPHidGun);
+		}
+		if (ArmsMesh != nullptr)
+		{
+			if (TakeNCPHideTag(ArmsMesh, NAME_NCPHidArms))
+			{
+				ArmsMesh->UnHideBoneByName(NAME_UpperArmL);
+				ArmsMesh->UnHideBoneByName(NAME_UpperArmR);
+			}
+			ArmsMesh->SetHiddenInGame(true);
+			ArmsMesh->ComponentTags.AddUnique(NAME_NCPHidArms);
+
+			// seq-51 parity: reset the 1P rig to its default seat while hidden.
+			// Behaviorally inert in classic — the beam origin is computed from the
+			// camera, not this seat, and the mesh is hidden; the show path re-seats
+			// via UpdateWeaponHand. Kept so classic matches seq-51 exactly.
+			USkeletalMeshComponent* FPMeshArchetype = Cast<USkeletalMeshComponent>(ArmsMesh->GetArchetype());
+			if (FPMeshArchetype != nullptr)
+			{
+				ArmsMesh->SetRelativeLocationAndRotation(
+					FPMeshArchetype->RelativeLocation,
+					FPMeshArchetype->RelativeRotation);
+			}
+		}
+		return;
+	}
+
 	if (WeapMesh != nullptr)
 	{
 		if (bHide)
@@ -3794,27 +3945,60 @@ void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, b
 			// the per-frame tick path is gated.
 			WeapMesh->TickAnimation(0.f, false);
 			WeapMesh->RefreshBoneTransforms();
+			// Heal classic-style residue (style flipped while hidden, ours only):
+			// this hide works through bVisible; a stuck bHiddenInGame would stop
+			// the 1P rig rendering and break the muzzle socket the beam rides on.
+			if (WeapMesh->ComponentTags.Contains(NAME_NCPHidGun))
+			{
+				WeapMesh->SetHiddenInGame(false);
+			}
+			WeapMesh->SetVisibility(false, true);
+			WeapMesh->ComponentTags.AddUnique(NAME_NCPHidGun);
+			// Dual-wield second gun — the BP toggled LeftMesh alongside Mesh.
+			// bVisible=false must survive a later single→dual upgrade so the left
+			// gun comes up hidden too; bHiddenInGame stays stock's (true while
+			// single-wielding, cleared by AttachLeftMesh on going dual).
+			if (LeftMesh != nullptr)
+			{
+				LeftMesh->SetVisibility(false, true);
+				LeftMesh->ComponentTags.AddUnique(NAME_NCPHidGun);
+			}
 		}
-		WeapMesh->SetVisibility(!bHide, true);
-
-		// Dual-wield second gun — the BP toggled LeftMesh alongside Mesh.
-		AUTDualWeapon* Dual = Cast<AUTDualWeapon>(Weapon);
-		if (Dual != nullptr && Dual->LeftMesh != nullptr)
+		else
 		{
-			Dual->LeftMesh->SetVisibility(!bHide, true);
+			// Show heals ONLY components WE tagged — force-showing anything else
+			// would fight the old UT+ BP hide (see NAME_NCPHidGun above).
+			if (TakeNCPHideTag(WeapMesh, NAME_NCPHidGun))
+			{
+				WeapMesh->SetVisibility(true, true);
+				WeapMesh->SetHiddenInGame(false);   // classic residue
+			}
+			if (TakeNCPHideTag(LeftMesh, NAME_NCPHidGun))
+			{
+				LeftMesh->SetVisibility(true, true);
+				// Stock keeps LeftMesh bHiddenInGame=true while single-wielding
+				// (cleared only by AttachLeftMesh on going dual) — clearing it
+				// here would reveal a phantom second gun to a single-wield user.
+				if (Dual->bDualWeaponMode)
+				{
+					LeftMesh->SetHiddenInGame(false);
+				}
+			}
 		}
 	}
 
-	if (Char != nullptr && Char->FirstPersonMesh != nullptr)
+	if (ArmsMesh != nullptr)
 	{
-		// Bone names verified against the HiddenWeaponsUTPL export; missing bones
-		// on a custom hands skeleton just log a warning.
-		static const FName NAME_UpperArmL(TEXT("upperarm_l"));
-		static const FName NAME_UpperArmR(TEXT("upperarm_r"));
 		if (bHide)
 		{
-			Char->FirstPersonMesh->HideBoneByName(NAME_UpperArmL, PBO_None);
-			Char->FirstPersonMesh->HideBoneByName(NAME_UpperArmR, PBO_None);
+			// Heal classic residue (ours only), then the BP hide chain.
+			if (ArmsMesh->ComponentTags.Contains(NAME_NCPHidArms))
+			{
+				ArmsMesh->SetHiddenInGame(false);
+			}
+			ArmsMesh->HideBoneByName(NAME_UpperArmL, PBO_None);
+			ArmsMesh->HideBoneByName(NAME_UpperArmR, PBO_None);
+			ArmsMesh->ComponentTags.AddUnique(NAME_NCPHidArms);
 			// BP parity: the BP's hide chain then re-seated the arms rig at an
 			// ABSOLUTE relative transform — loc (-10,-20,-10), rot (0,-90,0) — i.e.
 			// ~20uu left + 10 down of the stock (-15,0,0) hands seat: its
@@ -3822,22 +4006,31 @@ void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, b
 			// visible guns). The 1P weapon Mesh hangs off FirstPersonMesh, so the
 			// muzzle socket — and therefore the hidden BEAM ORIGIN — rides this
 			// seat: center-low and bobbing, NOT the right-hand muzzle.
-			Char->FirstPersonMesh->SetRelativeLocationAndRotation(
+			ArmsMesh->SetRelativeLocationAndRotation(
 				FVector(-10.f, -20.f, -10.f), FRotator(0.f, -90.f, 0.f));
 		}
 		else
 		{
-			Char->FirstPersonMesh->UnHideBoneByName(NAME_UpperArmL);
-			Char->FirstPersonMesh->UnHideBoneByName(NAME_UpperArmR);
-			// Restore the class-default seat (what stock UpdateWeaponHand re-applies
-			// each equip anyway) so a mid-equip `weaponhand show` doesn't leave the
-			// arms parked at the hidden offset until the next weapon switch.
-			AUTCharacter* CharCDO = Char->GetClass()->GetDefaultObject<AUTCharacter>();
-			if (CharCDO != nullptr && CharCDO->FirstPersonMesh != nullptr)
+			// Only undo arm state WE tagged — the old UT+ BP hides these same
+			// bones on its own schedule for its own users (see NAME_NCPHidArms).
+			if (TakeNCPHideTag(ArmsMesh, NAME_NCPHidArms))
 			{
-				Char->FirstPersonMesh->SetRelativeLocationAndRotation(
-					CharCDO->FirstPersonMesh->RelativeLocation,
-					CharCDO->FirstPersonMesh->RelativeRotation);
+				ArmsMesh->UnHideBoneByName(NAME_UpperArmL);
+				ArmsMesh->UnHideBoneByName(NAME_UpperArmR);
+				ArmsMesh->SetHiddenInGame(false);
+			}
+			// Re-seat through stock UpdateWeaponHand, NOT a bare archetype reset:
+			// the archetype seat is only correct for HAND_Right. UpdateWeaponHand
+			// re-applies the viewer's weapon-position preference on top — Lowered =
+			// LowMeshOffset, Very Low (HAND_Hidden) = VeryLowMeshOffset — which
+			// stock only applies at equip time, so stomping it here made visible
+			// guns render at the normal seat and ignore the preference (the
+			// seq-52 "very low is gone / guns look huge" regression). It also
+			// covers the case this reset was for: a mid-equip `weaponhand show`
+			// no longer parks the arms at the hidden (-10,-20,-10) seat.
+			if (Weapon != nullptr)
+			{
+				Weapon->UpdateWeaponHand();
 			}
 		}
 	}
