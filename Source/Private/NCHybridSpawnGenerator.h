@@ -19,6 +19,7 @@ struct FNCHybridSpawnSettings
 	float GeneratedSpacingMultiplier;
 	float TraceStartOffsetZ;
 	float TraceEndOffsetZ;
+	float MaxGeneratedStepDrop;
 	float TraceRadius;
 	float TraceHalfHeight;
 	float PitTestDistanceHorizontal;
@@ -38,6 +39,7 @@ struct FNCHybridSpawnBuildStats
 	int32 RejectedRadius;
 	int32 RejectedFloor;
 	int32 RejectedSlope;
+	int32 RejectedDrop;
 	int32 RejectedClearance;
 	int32 RejectedSpacing;
 	int32 RejectedKillZ;
@@ -91,4 +93,15 @@ public:
 	static APlayerStart* FindNearestPlayerStart(
 		const TArray<APlayerStart*>& Starts,
 		const FVector& Location);
+
+	/**
+	 * Editor-only visualization of the complete accepted field around the
+	 * round's selected anchor pair. Enable in PIE with:
+	 *   nc.HybridSpawnPIEPreview 1
+	 */
+	static void DrawPIEPreview(
+		UWorld* World,
+		const TArray<APlayerStart*>& AllStarts,
+		const FNCHybridSpawnSettings& Settings,
+		const FNCHybridSpawnResult& RoundResult);
 };

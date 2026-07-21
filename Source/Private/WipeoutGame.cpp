@@ -1649,9 +1649,12 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		{
 			PendingHybridSpawnTransform = HybridTransform;
 		}
-		const FVector IntendedSpawnLocation = bUsedHybridTransform
-			? HybridTransform.GetLocation()
-			: (ChosenStart ? ChosenStart->GetActorLocation() : FVector::ZeroVector);
+		// The watchdog anchor must be an independently safe authored start. Using
+		// the hybrid transform here made a transform on an under-map surface its
+		// own recovery destination, so the watchdog could never rescue it.
+		const FVector IntendedSpawnLocation = ChosenStart
+			? ChosenStart->GetActorLocation()
+			: FVector::ZeroVector;
 
 		OverriddenPlayerStart = ChosenStart;
 		Super::RestartPlayer(NewPlayer);
@@ -3238,6 +3241,8 @@ void AUWipeoutGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 			TEXT("Wipeout hybrid opening spawn generation had no safe anchor pair; using PlayerStart fallback"));
 		return;
 	}
+	FNCHybridSpawnGenerator::DrawPIEPreview(
+		GetWorld(), AllSpawnPointsList, Settings, Result);
 
 	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
 	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
@@ -3258,13 +3263,15 @@ void AUWipeoutGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 	}
 
 	UE_LOG(LogGameMode, Verbose,
-		TEXT("Wipeout hybrid rejects T0[R=%d F=%d S=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d F=%d S=%d C=%d D=%d K=%d P=%d V=%d]"),
+		TEXT("Wipeout hybrid rejects T0[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
 		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedFloor,
-		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedClearance,
+		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedDrop,
+		Result.Team0Stats.RejectedClearance,
 		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
 		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
 		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedFloor,
-		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedClearance,
+		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedDrop,
+		Result.Team1Stats.RejectedClearance,
 		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,
 		Result.Team1Stats.RejectedPit, Result.Team1Stats.RejectedPainVolume);
 }

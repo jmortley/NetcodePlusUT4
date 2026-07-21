@@ -1,10 +1,22 @@
 #include "NCHybridSpawnGenerator.h"
 
+#include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/PainCausingVolume.h"
 #include "GameFramework/PlayerStart.h"
 #include "GameFramework/WorldSettings.h"
+#include "HAL/IConsoleManager.h"
+
+#if WITH_EDITOR
+static TAutoConsoleVariable<int32> CVarNCHybridSpawnPIEPreview(
+	TEXT("nc.HybridSpawnPIEPreview"),
+	0,
+	TEXT("Draw the exhaustive accepted NetcodePlus hybrid spawn field in PIE.\n")
+	TEXT(" 0: disabled\n")
+	TEXT(" 1: draw the current round's full team fields"),
+	ECVF_Cheat);
+#endif
 
 FNCHybridSpawnSettings::FNCHybridSpawnSettings()
 	: MaxTeamSpawnRadius(3100.f)
@@ -13,6 +25,10 @@ FNCHybridSpawnSettings::FNCHybridSpawnSettings()
 	, GeneratedSpacingMultiplier(1.01f)
 	, TraceStartOffsetZ(90.f)
 	, TraceEndOffsetZ(-2000.f)
+	// One hex step is 303uu and accepted floors are limited to roughly 45 degrees.
+	// 400uu leaves margin for uneven terrain without allowing a probe to snap to
+	// an unrelated floor one or two thousand units below the source tier.
+	, MaxGeneratedStepDrop(400.f)
 	, TraceRadius(40.f)
 	// Must match AUTCharacter's STANDING capsule (40x108, UTCharacter.cpp InitCapsuleSize),
 	// not APlayerStart's 40x92: the floor-sweep hit is this capsule's center, so the half-
@@ -35,6 +51,7 @@ FNCHybridSpawnBuildStats::FNCHybridSpawnBuildStats()
 	, RejectedRadius(0)
 	, RejectedFloor(0)
 	, RejectedSlope(0)
+	, RejectedDrop(0)
 	, RejectedClearance(0)
 	, RejectedSpacing(0)
 	, RejectedKillZ(0)
@@ -236,6 +253,125 @@ namespace NCHybridSpawn
 		return FRotator::NormalizeAxis(PreferredYaw);
 	}
 
+	static bool ValidateAndBuildTransform(
+		UWorld* World,
+		const FVector& Location,
+		float PreferredYaw,
+		bool bFindSafeRotation,
+		const FVector& Anchor,
+		const FVector& TowardEnemyDirection,
+		float TeamRadius,
+		float MaxForwardExtent,
+		const TArray<FTransform>& Accepted,
+		const FNCHybridSpawnSettings& Settings,
+		FNCHybridSpawnBuildStats& Stats,
+		FTransform& OutTransform)
+	{
+		// Absolute uses a full 3D radius for its authored and generated fields.
+		// Checking again after projection also rejects transforms that landed on a
+		// vertically unrelated floor even though their XY stayed inside the field.
+		if ((Location - Anchor).Size() > TeamRadius)
+		{
+			++Stats.RejectedRadius;
+			return false;
+		}
+		if (FVector::DotProduct(Location - Anchor, TowardEnemyDirection) > MaxForwardExtent)
+		{
+			++Stats.RejectedRadius;
+			return false;
+		}
+
+		const FCollisionObjectQueryParams StaticObjects(ECC_WorldStatic);
+		FCollisionQueryParams QueryParams(TEXT("NCHybridSpawnFinal"), false);
+		QueryParams.bFindInitialOverlaps = true;
+		const FCollisionShape Capsule = FCollisionShape::MakeCapsule(
+			Settings.TraceRadius, Settings.TraceHalfHeight);
+
+		const AWorldSettings* WorldSettings = World->GetWorldSettings();
+		if (WorldSettings && Location.Z < WorldSettings->KillZ + Settings.MinDistanceFromKillZ)
+		{
+			++Stats.RejectedKillZ;
+			return false;
+		}
+
+		const float MinimumSpacing = Settings.PlayerMinRadius - 2.f * Settings.TraceRadius;
+		if (!IsFarEnoughFromAccepted(Location, Accepted, MinimumSpacing))
+		{
+			++Stats.RejectedSpacing;
+			return false;
+		}
+
+		if (World->OverlapAnyTestByObjectType(
+			Location, FQuat::Identity, StaticObjects, Capsule, QueryParams))
+		{
+			++Stats.RejectedClearance;
+			return false;
+		}
+
+		if (!HasPitSupport(World, Location, Settings, StaticObjects, QueryParams))
+		{
+			++Stats.RejectedPit;
+			return false;
+		}
+
+		if (IsInsidePainVolume(World, Location, Settings.TraceRadius))
+		{
+			++Stats.RejectedPainVolume;
+			return false;
+		}
+
+		const float Yaw = bFindSafeRotation
+			? FindSafeYaw(World, Location, PreferredYaw, Settings, StaticObjects, QueryParams)
+			: FRotator::NormalizeAxis(PreferredYaw);
+		OutTransform = FTransform(FRotator(0.f, Yaw, 0.f), Location);
+		return true;
+	}
+
+	static bool BuildAuthoredSeed(
+		UWorld* World,
+		APlayerStart* Start,
+		const FVector& Anchor,
+		const FVector& TowardEnemyDirection,
+		float TeamRadius,
+		float MaxForwardExtent,
+		const TArray<FTransform>& Accepted,
+		const FNCHybridSpawnSettings& Settings,
+		FNCHybridSpawnBuildStats& Stats,
+		FTransform& OutTransform)
+	{
+		if (!Start)
+		{
+			return false;
+		}
+
+		// Match Absolute's authored-start treatment: trust the mapper's PlayerStart
+		// and only correct a floor intersecting its local capsule. Never run an
+		// authored seed through the generated candidate's 2000uu floor projection.
+		const FVector AuthoredLocation = Start->GetActorLocation();
+		const FVector LocalTraceStart = AuthoredLocation
+			+ FVector(0.f, 0.f, Settings.TraceHalfHeight * 1.02f);
+		const FVector LocalTraceEnd = AuthoredLocation
+			- FVector(0.f, 0.f, Settings.TraceHalfHeight * 0.98f);
+		const FCollisionObjectQueryParams StaticObjects(ECC_WorldStatic);
+		FCollisionQueryParams QueryParams(TEXT("NCHybridAuthoredSeed"), false);
+
+		FVector SeedLocation = AuthoredLocation + FVector(0.f, 0.f, 10.f);
+		FHitResult LocalFloorHit;
+		if (World->LineTraceSingleByObjectType(
+			LocalFloorHit, LocalTraceStart, LocalTraceEnd, StaticObjects, QueryParams))
+		{
+			// Absolute adds two units to the capsule-center correction and then
+			// another ten to the final authored transform. Retain that clearance
+			// while using the actual 108uu standing pawn capsule.
+			SeedLocation.Z = LocalFloorHit.Location.Z + Settings.TraceHalfHeight + 12.f;
+		}
+
+		return ValidateAndBuildTransform(
+			World, SeedLocation, Start->GetActorRotation().Yaw, false,
+			Anchor, TowardEnemyDirection, TeamRadius, MaxForwardExtent,
+			Accepted, Settings, Stats, OutTransform);
+	}
+
 	static bool ProjectAndValidateCandidate(
 		UWorld* World,
 		const FVector& CandidateLocation,
@@ -249,7 +385,7 @@ namespace NCHybridSpawn
 		FNCHybridSpawnBuildStats& Stats,
 		FTransform& OutTransform)
 	{
-		if ((CandidateLocation - Anchor).Size2D() > TeamRadius)
+		if ((CandidateLocation - Anchor).Size() > TeamRadius)
 		{
 			++Stats.RejectedRadius;
 			return false;
@@ -290,54 +426,16 @@ namespace NCHybridSpawn
 		// Sweep hit location is the capsule center at contact. Lift it very slightly
 		// so the subsequent occupancy test does not count the supporting floor.
 		const FVector ProjectedLocation = FloorHit.Location + FVector(0.f, 0.f, 2.f);
-		if ((ProjectedLocation - Anchor).Size2D() > TeamRadius)
+		if (CandidateLocation.Z - ProjectedLocation.Z > Settings.MaxGeneratedStepDrop)
 		{
-			++Stats.RejectedRadius;
-			return false;
-		}
-		if (FVector::DotProduct(ProjectedLocation - Anchor, TowardEnemyDirection) > MaxForwardExtent)
-		{
-			++Stats.RejectedRadius;
+			++Stats.RejectedDrop;
 			return false;
 		}
 
-		const AWorldSettings* WorldSettings = World->GetWorldSettings();
-		if (WorldSettings && ProjectedLocation.Z < WorldSettings->KillZ + Settings.MinDistanceFromKillZ)
-		{
-			++Stats.RejectedKillZ;
-			return false;
-		}
-
-		const float MinimumSpacing = Settings.PlayerMinRadius - 2.f * Settings.TraceRadius;
-		if (!IsFarEnoughFromAccepted(ProjectedLocation, Accepted, MinimumSpacing))
-		{
-			++Stats.RejectedSpacing;
-			return false;
-		}
-
-		if (World->OverlapAnyTestByObjectType(
-			ProjectedLocation, FQuat::Identity, StaticObjects, Capsule, QueryParams))
-		{
-			++Stats.RejectedClearance;
-			return false;
-		}
-
-		if (!HasPitSupport(World, ProjectedLocation, Settings, StaticObjects, QueryParams))
-		{
-			++Stats.RejectedPit;
-			return false;
-		}
-
-		if (IsInsidePainVolume(World, ProjectedLocation, Settings.TraceRadius))
-		{
-			++Stats.RejectedPainVolume;
-			return false;
-		}
-
-		const float SafeYaw = FindSafeYaw(
-			World, ProjectedLocation, PreferredYaw, Settings, StaticObjects, QueryParams);
-		OutTransform = FTransform(FRotator(0.f, SafeYaw, 0.f), ProjectedLocation);
-		return true;
+		return ValidateAndBuildTransform(
+			World, ProjectedLocation, PreferredYaw, true,
+			Anchor, TowardEnemyDirection, TeamRadius, MaxForwardExtent,
+			Accepted, Settings, Stats, OutTransform);
 	}
 
 	static void BuildTeamQueue(
@@ -374,20 +472,19 @@ namespace NCHybridSpawn
 		}
 		OrderedStarts.Sort([&Anchor](const APlayerStart& A, const APlayerStart& B)
 		{
-			return (A.GetActorLocation() - Anchor).SizeSquared2D()
-				< (B.GetActorLocation() - Anchor).SizeSquared2D();
+			return (A.GetActorLocation() - Anchor).SizeSquared()
+				< (B.GetActorLocation() - Anchor).SizeSquared();
 		});
 
 		TArray<FTransform> Accepted;
 		TArray<FTransform> PreviousTier;
 		for (APlayerStart* Start : OrderedStarts)
 		{
-			if ((Start->GetActorLocation() - Anchor).Size2D() > InitialRadius) break;
+			if ((Start->GetActorLocation() - Anchor).Size() > InitialRadius) break;
 
 			FTransform SeedTransform;
-			if (ProjectAndValidateCandidate(
-				World, Start->GetActorLocation(), Start->GetActorRotation().Yaw,
-				Anchor, TowardEnemyDirection, TeamRadius, MaxForwardExtent,
+			if (BuildAuthoredSeed(
+				World, Start, Anchor, TowardEnemyDirection, TeamRadius, MaxForwardExtent,
 				Accepted, Settings, OutStats, SeedTransform))
 			{
 				Accepted.Add(SeedTransform);
@@ -515,4 +612,135 @@ APlayerStart* FNCHybridSpawnGenerator::FindNearestPlayerStart(
 		}
 	}
 	return BestStart;
+}
+
+void FNCHybridSpawnGenerator::DrawPIEPreview(
+	UWorld* World,
+	const TArray<APlayerStart*>& AllStarts,
+	const FNCHybridSpawnSettings& Settings,
+	const FNCHybridSpawnResult& RoundResult)
+{
+#if WITH_EDITOR
+	if (!World || World->WorldType != EWorldType::PIE
+		|| CVarNCHybridSpawnPIEPreview.GetValueOnGameThread() <= 0
+		|| !RoundResult.bAnchorsValid)
+	{
+		return;
+	}
+
+	APlayerStart* Team0Anchor = nullptr;
+	APlayerStart* Team1Anchor = nullptr;
+	for (APlayerStart* Start : AllStarts)
+	{
+		if (!Start || Start->IsPendingKill()) continue;
+		if (Start->GetFName() == RoundResult.Team0AnchorName) Team0Anchor = Start;
+		if (Start->GetFName() == RoundResult.Team1AnchorName) Team1Anchor = Start;
+	}
+
+	if (!Team0Anchor || !Team1Anchor)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[HybridSpawnPIE] Could not recover selected anchors %s/%s"),
+			*RoundResult.Team0AnchorName.ToString(),
+			*RoundResult.Team1AnchorName.ToString());
+		return;
+	}
+
+	// The live queue stops at team size + 20. A deliberately unreachable goal
+	// makes the preview continue until the field naturally exhausts or reaches
+	// the same 30-tier safety cap as gameplay. With a 303uu grid inside a 3100uu
+	// radius, 10,000 is safely above the geometrically possible count.
+	FNCHybridSpawnSettings PreviewSettings = Settings;
+	PreviewSettings.ExtraSpawnPadding = 10000;
+	TArray<APlayerStart*> Team0Anchors;
+	TArray<APlayerStart*> Team1Anchors;
+	Team0Anchors.Add(Team0Anchor);
+	Team1Anchors.Add(Team1Anchor);
+
+	FNCHybridSpawnResult PreviewResult;
+	if (!Generate(
+		World, AllStarts, Team0Anchors, Team1Anchors,
+		1, 1, PreviewSettings, PreviewResult))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[HybridSpawnPIE] Full-field generation failed for anchors %s/%s"),
+			*RoundResult.Team0AnchorName.ToString(),
+			*RoundResult.Team1AnchorName.ToString());
+		return;
+	}
+
+	// Preview lines intentionally persist until PIE stops or the built-in
+	// FlushPersistentDebugLines command is issued.
+	const bool bPersistent = true;
+	const float LifeTime = -1.f;
+	const uint8 DepthPriority = 0;
+	const float CapsuleThickness = 1.5f;
+	const float ArrowLength = 90.f;
+	const float ArrowSize = 18.f;
+	const FColor Team0Generated(255, 32, 32);
+	const FColor Team0Seed(255, 160, 32);
+	const FColor Team1Generated(32, 96, 255);
+	const FColor Team1Seed(32, 240, 255);
+
+	auto DrawTeam = [&](const TArray<FTransform>& Queue, int32 SeedCount,
+		const FVector& AnchorLocation, const FColor& GeneratedColor,
+		const FColor& SeedColor)
+	{
+		for (int32 Index = 0; Index < Queue.Num(); ++Index)
+		{
+			const FTransform& Transform = Queue[Index];
+			const FVector Location = Transform.GetLocation();
+			const FColor Color = (Index < SeedCount) ? SeedColor : GeneratedColor;
+			DrawDebugCapsule(
+				World, Location, Settings.TraceHalfHeight, Settings.TraceRadius,
+				FQuat::Identity, Color, bPersistent, LifeTime,
+				DepthPriority, CapsuleThickness);
+
+			const FVector FacingEnd = Location
+				+ FRotator(0.f, Transform.Rotator().Yaw, 0.f).Vector() * ArrowLength;
+			DrawDebugDirectionalArrow(
+				World, Location, FacingEnd, ArrowSize, Color,
+				bPersistent, LifeTime, DepthPriority, CapsuleThickness);
+
+			if (FMath::Abs(Location.Z - AnchorLocation.Z) > 50.f)
+			{
+				const FVector AnchorZ(Location.X, Location.Y, AnchorLocation.Z);
+				DrawDebugLine(
+					World, Location, AnchorZ,
+					FColor(Color.R / 2, Color.G / 2, Color.B / 2),
+					bPersistent, LifeTime, DepthPriority, 0.75f);
+			}
+		}
+	};
+
+	DrawTeam(
+		PreviewResult.Team0Queue, PreviewResult.Team0Stats.SeedCount,
+		PreviewResult.Team0Anchor, Team0Generated, Team0Seed);
+	DrawTeam(
+		PreviewResult.Team1Queue, PreviewResult.Team1Stats.SeedCount,
+		PreviewResult.Team1Anchor, Team1Generated, Team1Seed);
+
+	DrawDebugSphere(
+		World, PreviewResult.Team0Anchor, 70.f, 16, Team0Seed,
+		bPersistent, LifeTime, DepthPriority, 4.f);
+	DrawDebugSphere(
+		World, PreviewResult.Team1Anchor, 70.f, 16, Team1Seed,
+		bPersistent, LifeTime, DepthPriority, 4.f);
+	DrawDebugLine(
+		World, PreviewResult.Team0Anchor, PreviewResult.Team1Anchor,
+		FColor::Yellow, bPersistent, LifeTime, DepthPriority, 2.f);
+
+	UE_LOG(LogTemp, Warning,
+		TEXT("[HybridSpawnPIE] Drew exhaustive fields: T0=%d (seeds=%d) T1=%d (seeds=%d), radius=%.0f, Z-drop rejects=%d/%d. Use FlushPersistentDebugLines to clear."),
+		PreviewResult.Team0Queue.Num(), PreviewResult.Team0Stats.SeedCount,
+		PreviewResult.Team1Queue.Num(), PreviewResult.Team1Stats.SeedCount,
+		PreviewResult.TeamRadius,
+		PreviewResult.Team0Stats.RejectedDrop,
+		PreviewResult.Team1Stats.RejectedDrop);
+#else
+	(void)World;
+	(void)AllStarts;
+	(void)Settings;
+	(void)RoundResult;
+#endif
 }

@@ -1855,6 +1855,13 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 	FVector StartLocation = bHasPendingHybridSpawnTransform
 		? PendingHybridSpawnTransform.GetLocation()
 		: StartSpot->GetActorLocation();
+	const bool bUsingHybridTransform = bHasPendingHybridSpawnTransform;
+	const FVector AuthoredFallbackLocation = StartSpot
+		? StartSpot->GetActorLocation()
+		: StartLocation;
+	const FRotator AuthoredFallbackRotation = StartSpot
+		? StartSpot->GetActorRotation()
+		: StartRotation;
 
 	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
 	if (!PawnClass)
@@ -1901,6 +1908,17 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 	// sharing the exact same origin (which causes physics explosions).
 	if (!ResultPawn)
 	{
+		// A hybrid transform that failed every collision-aware attempt is no
+		// longer a valid recovery anchor. Force-spawn at the real authored
+		// PlayerStart retained for engine bookkeeping instead.
+		if (bUsingHybridTransform && StartSpot)
+		{
+			StartLocation = AuthoredFallbackLocation;
+			StartRotation.Yaw = AuthoredFallbackRotation.Yaw;
+			UE_LOG(LogGameMode, Warning,
+				TEXT("SpawnDefaultPawnFor: Hybrid transform blocked; falling back to authored PlayerStart %s"),
+				*GetNameSafe(StartSpot));
+		}
 		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		FVector JitteredLocation = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 0.f);
 		ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, JitteredLocation), SpawnInfo);
@@ -1942,9 +1960,14 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 	// Recovery: teleport back with jitter to prevent overlap explosions
 	if (bLocationBad)
 	{
-		FVector SafeRecoveryLoc = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 20.0f);
+		const FVector RecoveryBase = (bUsingHybridTransform && StartSpot)
+			? AuthoredFallbackLocation
+			: StartLocation;
+		FVector SafeRecoveryLoc = RecoveryBase + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 20.0f);
 		ResultPawn->SetActorLocation(SafeRecoveryLoc, false, nullptr, ETeleportType::TeleportPhysics);
-		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: Bad location detected, reset to PlayerStart"));
+		UE_LOG(LogGameMode, Warning,
+			TEXT("SpawnDefaultPawnFor: Bad location detected, reset to authored PlayerStart %s"),
+			*GetNameSafe(StartSpot));
 	}
 
 	return ResultPawn;
@@ -2512,6 +2535,8 @@ void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 			TEXT("ElimPlus hybrid spawn generation had no safe anchor pair; using PlayerStart fallback"));
 		return;
 	}
+	FNCHybridSpawnGenerator::DrawPIEPreview(
+		GetWorld(), AllSpawnPointsList, Settings, Result);
 
 	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
 	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
@@ -2532,13 +2557,15 @@ void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 
 	}
 
 	UE_LOG(LogGameMode, Verbose,
-		TEXT("ElimPlus hybrid rejects T0[R=%d F=%d S=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d F=%d S=%d C=%d D=%d K=%d P=%d V=%d]"),
+		TEXT("ElimPlus hybrid rejects T0[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
 		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedFloor,
-		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedClearance,
+		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedDrop,
+		Result.Team0Stats.RejectedClearance,
 		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
 		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
 		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedFloor,
-		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedClearance,
+		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedDrop,
+		Result.Team1Stats.RejectedClearance,
 		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,
 		Result.Team1Stats.RejectedPit, Result.Team1Stats.RejectedPainVolume);
 }
