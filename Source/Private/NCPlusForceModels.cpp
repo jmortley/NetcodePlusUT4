@@ -157,6 +157,7 @@ namespace
 		GConfig->GetFloat (*Sec, TEXT("ArmourGlow"), Out.ArmourGlow, Path);   // absent key -> struct default 1.f (= current full-bright behaviour)
 		int32 Comp = 0; GConfig->GetInt(*Sec, TEXT("Complimentary"), Comp, Path); Out.bComplimentary = (Comp != 0);
 		int32 AM   = 0; GConfig->GetInt(*Sec, TEXT("ArmourMode"),    AM,   Path); Out.ArmourMode = (ENCPlusArmourMode)AM;
+		int32 Tint = 0; GConfig->GetInt(*Sec, TEXT("Tint"),          Tint, Path); Out.bTint = (Tint != 0);   // absent key -> false: colour stays model-gated as before
 	}
 
 	void WriteSide(const TCHAR* Suffix, const FNCPlusModelSettings& S)
@@ -171,6 +172,7 @@ namespace
 		GConfig->SetFloat (*Sec, TEXT("ArmourGlow"),    S.ArmourGlow,              Path);
 		GConfig->SetInt   (*Sec, TEXT("Complimentary"), S.bComplimentary ? 1 : 0,  Path);
 		GConfig->SetInt   (*Sec, TEXT("ArmourMode"),    (int32)S.ArmourMode,       Path);
+		GConfig->SetInt   (*Sec, TEXT("Tint"),          S.bTint ? 1 : 0,           Path);
 	}
 }
 

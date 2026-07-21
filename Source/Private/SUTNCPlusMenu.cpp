@@ -667,6 +667,18 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			+ SHorizontalBox::Slot().AutoWidth()                      [ MakeLabeledSpin(TEXT("V"), &Side->V, 0.f, 1.f, 0.02f) ]
 		]
 
+		// Tint without a model — decouples "colour this side" from the model pick.
+		// Checked: the colour above lands on whatever model each pawn really has
+		// (body recolour where the materials support it, armour overlay, spawn glow).
+		// Picking a model always tints regardless of this. Also shown on the
+		// fixed-colour Red/Blue rows: there it means "tint real models red/blue".
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 2, 0, 2)
+		[
+			MakeFlagCheck(TEXT("Tint skin (no model needed)"), &Side->bTint)
+		]
+
 		// Glow + Armour mode
 		+ SVerticalBox::Slot()
 		.AutoHeight()

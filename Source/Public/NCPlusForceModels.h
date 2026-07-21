@@ -33,6 +33,7 @@ struct FNCPlusModelSettings
 	float             V = 1.f;                       // HSV value = base brightness within the normal 0-1 range
 	float             Brightness = 1.f;             // "Glow": brightness multiplier 1-5 (1 = normal); overbrights the recolour albedo (+ emissive) in ApplyForcedModel
 	float             ArmourGlow = 1.f;            // "Armour Glow": armour-overlay emissive intensity 0-1 (1 = stock full-bright / current; lower = calmer, less radioactive). See TeamArenaCharacter::UpdateArmorOverlay.
+	bool              bTint = false;               // "Tint skin": colour this side even with NO forced model — the tint lands on the pawn's real model (body + armour overlay + spawn glow). A forced model always tints; default false so pre-existing configs render unchanged.
 	bool              bComplimentary = false;
 	ENCPlusArmourMode ArmourMode = ENCPlusArmourMode::MatchSkin;
 };

@@ -179,6 +179,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	FLinearColor Colour = FLinearColor::White;
 	float        GlowIntensity = 0.f;          // subtle-highlight emissive strength, from Brightness
 	bool bWantForce = false;
+	bool bWantTint  = false;
 
 	if (NCPlusForceModels::IsEnabled())
 	{
@@ -193,7 +194,13 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 
 			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
 			Content = NCPlusForceModels::GetModelClass(Side);
-			if (Content && NCPlusForceModels::IsModelAllowed(Content))
+			const bool bModelOK = Content && NCPlusForceModels::IsModelAllowed(Content);
+			// A side is active when it forces a model OR opts into tint-only (the F5
+			// "Tint skin" checkbox / [ForceModels.Model.<side>] Tint). The colour was
+			// historically gated on the model pick, which read as a bug: the chosen
+			// colour showed on the HUD (ungated) but never on bodies until a model
+			// was also selected.
+			if (bModelOK || Side.bTint)
 			{
 				// "Glow" (1 = normal .. 5 = 5x) brightens the model toward the flat, unlit HUD swatch.
 				// The lever that actually brightens the BODY is the ALBEDO (the team-colour params below —
@@ -214,13 +221,18 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 				// then holds flat while the colour keeps brightening.
 				static const float EmissiveGlowCap = 2.5f;   // lower = calmer bloom
 				GlowIntensity = FMath::Min((Glow - 1.f) * 1.25f, EmissiveGlowCap);
-				bWantForce    = true;
+				bWantForce    = bModelOK;
+				bWantTint     = true;
+			}
+			if (!bModelOK)
+			{
+				Content = nullptr;   // tint-only: never a mesh-swap target (also keeps the dirty latch honest)
 			}
 		}
 	}
 
 	// ── Natural: feature off, FFA, or friendly under Enemy-Only → this pawn keeps its real model. ──
-	if (!bWantForce)
+	if (!bWantTint)
 	{
 		if (bForcedModelApplied)
 		{
@@ -246,12 +258,30 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		return;
 	}
 
+	// Forced MESH dropped but tint kept (model unpicked in F5, or the bucket flipped
+	// to a tint-only side on a team change): on the refresh path the base team-change
+	// has NOT run, so restore the real model first — mirroring the un-force branch
+	// above — and let the tint land on the pawn's own rebuilt BodyMIs. On the
+	// NotifyTeamChanged/flush path the base already reverted the mesh this frame.
+	if (!bWantForce && bForcedModelApplied && LastForcedContent != nullptr)
+	{
+		if (!bForceReapply)
+		{
+			bApplyingForcedModel = true;
+			bAllowCharacterDataOverride = true;
+			AUTCharacter::NotifyTeamChanged();        // ApplyCharacterData(real) + TeamSelect + weapon/hat
+			bApplyingForcedModel = false;
+		}
+		UpdateCosmeticStrip(false);   // no longer reskinned -> cosmetics come back
+	}
+
 	bApplyingForcedModel = true;
 
 	// Force the mesh via UT's own swap (rebuilds BodyMIs). Flag must be set BEFORE the call —
 	// stock ApplyCharacterData early-returns unless bAllowCharacterDataOverride is true.
-	// Own pawn (bColourOnly): skip the mesh swap — keep the real model and its existing BodyMIs, tint only.
-	if (!bColourOnly)
+	// Own pawn (bColourOnly) and tint-only sides (no model picked): skip the mesh swap —
+	// keep the real model and its existing BodyMIs, tint only.
+	if (bWantForce && !bColourOnly)
 	{
 		bAllowCharacterDataOverride = true;
 		ApplyCharacterData(Content);
@@ -324,9 +354,15 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 
 		if (!bRecolour)
 		{
-			// Non-recolourable model: route to its baked red/blue skin rather than the futile NoTeam
-			// recolour (which would leave it a flat default). The baked textures carry the team look.
-			MID->SetScalarParameterValue(NAME_TeamSelect, BakedTeamSelect);
+			if (bWantForce)
+			{
+				// Non-recolourable model: route to its baked red/blue skin rather than the futile NoTeam
+				// recolour (which would leave it a flat default). The baked textures carry the team look.
+				MID->SetScalarParameterValue(NAME_TeamSelect, BakedTeamSelect);
+			}
+			// Tint-only on a param-less/baked NATURAL model: leave it untouched — re-routing
+			// a real player's baked team skin off the colour heuristic (R vs B) could dress a
+			// blue player in the red baked skin. The user forced no model, so force no skin.
 			continue;
 		}
 
@@ -352,8 +388,9 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// Cosmetic strip (the "Cosmetics" flag, on = remove): drop + suppress hats/eyewear on this reskinned
 	// pawn. Set BEFORE OnRep_PlayerState's later SetCosmeticsFromPlayerState so the setter overrides catch
 	// the re-add. (NotifyTeamChanged runs first at OnRep, this gate second.)
-	// Not for the own pawn — colour-only doesn't reskin, so keep your full character (hat/eyewear).
-	if (!bColourOnly)
+	// Only when actually reskinned — the own pawn and tint-only sides keep the real
+	// character, so they keep its hat/eyewear too.
+	if (bWantForce && !bColourOnly)
 	{
 		UpdateCosmeticStrip(NCPlusForceModels::Get().bCosmetics);
 	}
@@ -1415,7 +1452,9 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				const bool bFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
 				const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bFriendly);
 				TSubclassOf<AUTCharacterContent> Content = NCPlusForceModels::GetModelClass(Side);
-				if (Content && NCPlusForceModels::IsModelAllowed(Content))
+				// Model-or-tint: a tint-only side ("Tint skin", no model picked) recolours
+				// the armour/shield overlay too — same gate as ApplyForcedModel.
+				if ((Content && NCPlusForceModels::IsModelAllowed(Content)) || Side.bTint)
 				{
 					SkinCol        = NCPlusForceModels::GetSkinColour(Side);
 					ArmourEmissive = NCPlusForceModels::GetArmourEmissiveScale(Side);
@@ -1470,7 +1509,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				const bool bGlowFriendly = (GlowTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
 				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly);
 				TSubclassOf<AUTCharacterContent> GlowContent = NCPlusForceModels::GetModelClass(GlowSide);
-				if (GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent))
+				// Model-or-tint, matching ApplyForcedModel and the overlay recolour above.
+				if ((GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent)) || GlowSide.bTint)
 				{
 					GlowColour = NCPlusForceModels::GetSkinColour(GlowSide);
 				}
