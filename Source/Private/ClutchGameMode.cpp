@@ -16,10 +16,12 @@
 #include "UTPickup.h"
 #include "UTGenericObjectivePoint.h"
 #include "UTCTFFlagBase.h"
+#include "UTCTFRoleMessage.h"
 #include "UTTeamPlayerStart.h"
 #include "Kismet/GameplayStatics.h"
 #include "EngineUtils.h"
 #include "GameFramework/PlayerStart.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "UObject/UnrealType.h"
 
@@ -214,6 +216,8 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	MinimumWinMargin = 2;
 	RoleWeaponMagazine = 4;
 	RoleWeaponAmmoRegenInterval = 1.5f;
+	AttackerWeaponAmmoRegenInterval = 1.9f;
+	DefenderWeaponAmmoRegenInterval = 1.0f;
 	RoleWeaponEmptyReloadPause = 0.5f;
 
 	// Resolved to concrete stock Blueprint weapons in InitGame unless a BP child
@@ -278,8 +282,23 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 
 	RoleWeaponMagazine = FMath::Max(0,
 		UGameplayStatics::GetIntOption(Options, TEXT("RoleMag"), RoleWeaponMagazine));
-	RoleWeaponAmmoRegenInterval = ParsePositiveFloatOption(
-		Options, TEXT("AmmoRegen"), RoleWeaponAmmoRegenInterval);
+	// Preserve the original shared URL option for existing server launch lines,
+	// then allow either role to override it independently.
+	const FString SharedAmmoRegenOption = UGameplayStatics::ParseOption(
+		Options, TEXT("AmmoRegen"));
+	if (!SharedAmmoRegenOption.IsEmpty())
+	{
+		const float SharedInterval = FCString::Atof(*SharedAmmoRegenOption);
+		if (SharedInterval > 0.0f)
+		{
+			AttackerWeaponAmmoRegenInterval = SharedInterval;
+			DefenderWeaponAmmoRegenInterval = SharedInterval;
+		}
+	}
+	AttackerWeaponAmmoRegenInterval = ParsePositiveFloatOption(
+		Options, TEXT("AttackerAmmoRegen"), AttackerWeaponAmmoRegenInterval);
+	DefenderWeaponAmmoRegenInterval = ParsePositiveFloatOption(
+		Options, TEXT("DefenderAmmoRegen"), DefenderWeaponAmmoRegenInterval);
 	const FString EmptyReloadOption = UGameplayStatics::ParseOption(Options, TEXT("EmptyReload"));
 	if (!EmptyReloadOption.IsEmpty())
 	{
@@ -300,6 +319,12 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 			TEXT("Forcing limited ammo for the %d-round regenerating role magazine"),
 			RoleWeaponMagazine);
 	}
+	UE_LOG(LogClutch, Log,
+		TEXT("Role ammo settings: magazine=%d attacker=%.2fs defender=%.2fs empty-pause=%.2fs"),
+		RoleWeaponMagazine,
+		AttackerWeaponAmmoRegenInterval,
+		DefenderWeaponAmmoRegenInterval,
+		RoleWeaponEmptyReloadPause);
 
 	PoleUnlockDelaySeconds = FMath::Clamp(PoleUnlockDelaySeconds, 0.0f, RoundDurationSeconds);
 	if (!AttackerWeaponClass || AttackerWeaponClass->HasAnyClassFlags(CLASS_Abstract))
@@ -1590,6 +1615,19 @@ void AClutchGameMode::FinalizeRoundStart()
 		}
 	}
 
+	// This is Epic's stock Flag Run role announcement, so an updated server can
+	// notify an existing Clutch client without introducing a new message class or
+	// requiring a client-plugin rollout.
+	if (ClutchState->ActiveAttacker)
+	{
+		if (AUTPlayerController* AttackerController = Cast<AUTPlayerController>(
+			ClutchState->ActiveAttacker->GetOwner()))
+		{
+			AttackerController->ClientReceiveLocalizedMessage(
+				UUTCTFRoleMessage::StaticClass(), 1);
+		}
+	}
+
 	const int32 SpawnedDefenders = CountActiveDefenders();
 	UE_LOG(LogClutch, Log, TEXT("Round %d started: team %d attacks with %s vs %d defender(s)"),
 		ClutchState->RoundNumber,
@@ -2082,6 +2120,19 @@ bool AClutchGameMode::ModifyDamage_Implementation(int32& Damage, FVector& Moment
 	const EClutchRole DealerRole = DamageDealerEntry ? DamageDealerEntry->PlayerRole : EClutchRole::None;
 	const EClutchRole VictimRole = VictimEntry ? VictimEntry->PlayerRole : EClutchRole::None;
 
+	// Defenders may rocket-jump without spending health. Keep this narrower than
+	// ordinary same-team splash: only the shooter's own radial rocket event gets
+	// knockback, so teammates still cannot boost one another around the arena.
+	// AUTCharacter applies non-zero momentum even when the final damage is zero.
+	if (DealerRole == EClutchRole::Defender
+		&& VictimRole == EClutchRole::Defender
+		&& VictimState == AttackerState
+		&& IsRocketSplashDamage(DamageCauser))
+	{
+		Damage = 0;
+		return true; // Momentum deliberately left intact
+	}
+
 	// Only a direct defender hit damages the attacker and spends an armor pip.
 	// Rocket splash is knockback-only: its damage is zeroed (so it never chips
 	// health or a pip) while its momentum is preserved, letting defenders shove the
@@ -2570,7 +2621,8 @@ void AClutchGameMode::UpdatePole(float DeltaSeconds)
 	bool bAttackerPresent = false;
 	bool bDefenderPresent = false;
 	const FVector PoleLocation = PoleActor->GetActorLocation();
-	const float RadiusSq = FMath::Square(PoleCaptureRadius);
+	const uint8 AttackingTeam = ClutchState->AttackingTeamIndex;
+	const uint8 DefendingTeam = AClutchRoundState::GetDefendingTeam(AttackingTeam);
 
 	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 	{
@@ -2579,16 +2631,51 @@ void AClutchGameMode::UpdatePole(float DeltaSeconds)
 		{
 			continue;
 		}
+		float CharacterRadius = 0.0f;
+		float CharacterHalfHeight = 0.0f;
+		if (UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
+		{
+			Capsule->GetScaledCapsuleSize(CharacterRadius, CharacterHalfHeight);
+		}
+
+		// Treat touching the capture cylinder as occupying it. Testing only the
+		// pawn origin can make a defender visibly inside the point fail to contest
+		// at the rim (and around small height changes such as steps).
 		const FVector Offset = Character->GetActorLocation() - PoleLocation;
-		if (FVector2D(Offset.X, Offset.Y).SizeSquared() > RadiusSq
-			|| FMath::Abs(Offset.Z) > PoleCaptureHalfHeight)
+		const float OccupancyRadiusSq = FMath::Square(PoleCaptureRadius + CharacterRadius);
+		if (FVector2D(Offset.X, Offset.Y).SizeSquared() > OccupancyRadiusSq
+			|| FMath::Abs(Offset.Z) > PoleCaptureHalfHeight + CharacterHalfHeight)
 		{
 			continue;
 		}
 
 		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(Character->PlayerState);
-		bAttackerPresent |= IsActiveRole(PlayerState, EClutchRole::Attacker);
-		bDefenderPresent |= IsActiveRole(PlayerState, EClutchRole::Defender);
+		const FClutchRosterEntry* Entry = PlayerState
+			? ClutchState->FindEntry(PlayerState)
+			: nullptr;
+		if (!Entry || Entry->PlayerStatus != EClutchStatus::Active)
+		{
+			continue;
+		}
+
+		// Team membership is the authoritative side of the point. The role is a
+		// round presentation/loadout detail and can briefly lag a roster refresh;
+		// using it as the sole contest key can ignore an otherwise valid defender.
+		const uint8 PlayerTeam = GetPlayerTeamIndex(PlayerState);
+		if (PlayerTeam == AttackingTeam)
+		{
+			bAttackerPresent = true;
+		}
+		else if (PlayerTeam == DefendingTeam)
+		{
+			bDefenderPresent = true;
+		}
+		else
+		{
+			// Defensive fallback for an incomplete team pointer during possession.
+			bAttackerPresent |= Entry->PlayerRole == EClutchRole::Attacker;
+			bDefenderPresent |= Entry->PlayerRole == EClutchRole::Defender;
+		}
 	}
 
 	const float NewProgress = AClutchRoundState::AdvancePoleProgress(
@@ -2641,12 +2728,16 @@ void AClutchGameMode::UpdateAmmoRegen(float DeltaSeconds)
 			continue;
 		}
 
-		AdvanceWeaponClipRegen(Weapon, DeltaSeconds);
+		const float RegenInterval = Entry.PlayerRole == EClutchRole::Attacker
+			? AttackerWeaponAmmoRegenInterval
+			: DefenderWeaponAmmoRegenInterval;
+		AdvanceWeaponClipRegen(Weapon, DeltaSeconds, RegenInterval);
 	}
 }
 
 
-void AClutchGameMode::AdvanceWeaponClipRegen(AUTWeapon* Weapon, float DeltaSeconds)
+void AClutchGameMode::AdvanceWeaponClipRegen(
+	AUTWeapon* Weapon, float DeltaSeconds, float RegenInterval)
 {
 	FClutchAmmoRegenState& State = AmmoRegenState.FindOrAdd(Weapon);
 
@@ -2662,7 +2753,7 @@ void AClutchGameMode::AdvanceWeaponClipRegen(AUTWeapon* Weapon, float DeltaSecon
 
 	const int32 Grants = AClutchRoundState::AdvanceAmmoRegen(
 		State.Accumulator, DeltaSeconds, Weapon->Ammo, RoleWeaponMagazine,
-		RoleWeaponAmmoRegenInterval);
+		RegenInterval);
 	if (Grants > 0)
 	{
 		// Authority-side; AddAmmo clamps to MaxAmmo and replicates Ammo to the
@@ -2697,7 +2788,11 @@ void AClutchGameMode::UpdateWarmupAmmoRegen(float DeltaSeconds)
 		AUTWeapon* Weapon = (Character && !Character->IsDead()) ? Character->GetWeapon() : nullptr;
 		if (Weapon)
 		{
-			AdvanceWeaponClipRegen(Weapon, DeltaSeconds);
+			const float RegenInterval = AttackerWeaponClass
+				&& Weapon->IsA(AttackerWeaponClass.Get())
+				? AttackerWeaponAmmoRegenInterval
+				: DefenderWeaponAmmoRegenInterval;
+			AdvanceWeaponClipRegen(Weapon, DeltaSeconds, RegenInterval);
 		}
 	}
 }

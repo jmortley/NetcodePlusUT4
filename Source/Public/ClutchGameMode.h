@@ -143,14 +143,22 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout", meta = (ClampMin = "0"))
 	int32 RoleWeaponMagazine;
 
-	/** Seconds to restore one round of the role-weapon magazine, up to its size. */
+	/** Legacy shared interval retained for serialized Blueprint compatibility. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout", meta = (ClampMin = "0.1"))
 	float RoleWeaponAmmoRegenInterval;
+
+	/** Seconds to restore one attacker-rifle round, up to the shared magazine size. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout", meta = (ClampMin = "0.1"))
+	float AttackerWeaponAmmoRegenInterval;
+
+	/** Seconds to restore one defender-rocket round, up to the shared magazine size. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Clutch|Loadout", meta = (ClampMin = "0.1"))
+	float DefenderWeaponAmmoRegenInterval;
 
 	/**
 	 * Extra ShootMania-style pause before the first round refills after the clip is
 	 * fully emptied. Layers on top of the regen interval, so the first round returns
-	 * RoleWeaponAmmoRegenInterval + this many seconds after hitting empty. Even zero
+	 * the applicable role interval + this many seconds after hitting empty. Even zero
 	 * restarts the refill clock from empty, so dump speed no longer changes how soon
 	 * the first round comes back.
 	 */
@@ -255,7 +263,8 @@ protected:
 	bool IsCombatPhase() const;
 
 	/** Shared clip-regen step for one weapon (empty-pause arming, grant, bookkeeping). */
-	void AdvanceWeaponClipRegen(AUTWeapon* Weapon, float DeltaSeconds);
+	void AdvanceWeaponClipRegen(
+		AUTWeapon* Weapon, float DeltaSeconds, float RegenInterval);
 
 	/** Regenerates the equipped weapon of every living pawn outside combat rounds
 	 *  (warmup, waiting, intermission), so the both-guns practice loadout keeps the
