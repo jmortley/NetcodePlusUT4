@@ -13,6 +13,7 @@
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
 #include "UTPlusProj_FlakShell.h"
+#include "UTPlusProj_StingerShard.h"
 #include "UTDamageType.h"   // FUTRadialDamageEvent (grace-buffer direct-hit damage)
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTDualWeapon.h"   // ApplyWeaponHideState: dual-enforcer LeftMesh
@@ -2777,11 +2778,18 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 		NewProjectile->HitsStatsName = HitsStatsName;
 
 		// Track server projectile for rewind validation (if enabled).
-		// Only claim-capable projectiles (rocket + flak shell) are tracked; tracking e.g.
-		// flak shards (9/shot) would FIFO-evict the shell/rocket from the 10-entry list
-		// before its claim RPC arrives.
+		// Only claim-capable projectiles are tracked; tracking e.g. flak shards
+		// (9/shot) would FIFO-evict the shell/rocket from the 10-entry list before
+		// its claim RPC arrives. The minigun stinger shard IS claim-capable
+		// (AUTPlusProj_StingerShard) and is included: alt-fire is ~0.45s cadence
+		// with a 5s lifespan, so up to ~11 could co-exist and clip the 10-cap, but
+		// shards air-explode on approach and rarely live out their lifespan, so
+		// steady-state concurrency stays well under the cap. If eviction shows up
+		// in ProjRewind logs for the shard, raise the per-weapon cap below.
 		const bool bTrackForRewind = bEnableProjectileRewind && NewProjectile &&
-			(NewProjectile->IsA(AUTPlusProj_Rocket::StaticClass()) || NewProjectile->IsA(AUTPlusProj_FlakShell::StaticClass()));
+			(NewProjectile->IsA(AUTPlusProj_Rocket::StaticClass())
+			 || NewProjectile->IsA(AUTPlusProj_FlakShell::StaticClass())
+			 || NewProjectile->IsA(AUTPlusProj_StingerShard::StaticClass()));
 		if (bTrackForRewind)
 		{
 			int32 ServerEventIdx = AuthoritativeFireEventIndex.IsValidIndex(CurrentFireMode)

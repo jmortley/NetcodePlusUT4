@@ -42,19 +42,54 @@ AUTWeap_Minigun_Plus::AUTWeap_Minigun_Plus(const FObjectInitializer& OI)
 
 void AUTWeap_Minigun_Plus::StartFire(uint8 FireModeNum)
 {
-	// Bypass AUTWeaponFix transactional RPC path. Stock spin-up state handles
-	// timing; we want AUTWeaponFix's HitScanTrace override via vtable only.
-	AUTWeapon::StartFire(FireModeNum);
+	// MODE SPLIT (2026-07-21):
+	//  - Mode 0 (spin-up hitscan): bypass the transactional RPC path — the stock
+	//    spin-up firing state owns refire timing server-side and there is no
+	//    per-shot client message to transact. We only want AUTWeaponFix's
+	//    rewind-aware HitScanTrace, which arrives via vtable regardless.
+	//  - Mode 1 (stinger shard projectile): route THROUGH the transactional
+	//    path — per-shot fire events with ROF validation + anti-dup, and the
+	//    client fake / server auth projectile pairing with ExactPing-based
+	//    catch-up (SpawnNetPredictedProjectile). This is what makes the shard
+	//    register at high ping WITHOUT the BP's ServerNegotiatePredictionPing
+	//    hack (the Fix path never consults MaxPredictionPing).
+	// Sniper precedent inverted: AUTPlusSniper keeps BOTH modes on the Fix path
+	// because its alt (zoom) is not a fire event; here the primary is the mode
+	// with its own server-side state machine.
+	if (FireModeNum == 1)
+	{
+		AUTWeaponFix::StartFire(FireModeNum);
+	}
+	else
+	{
+		AUTWeapon::StartFire(FireModeNum);
+	}
 }
 
 void AUTWeap_Minigun_Plus::StopFire(uint8 FireModeNum)
 {
-	AUTWeapon::StopFire(FireModeNum);
+	if (FireModeNum == 1)
+	{
+		AUTWeaponFix::StopFire(FireModeNum);
+	}
+	else
+	{
+		AUTWeapon::StopFire(FireModeNum);
+	}
 }
 
 void AUTWeap_Minigun_Plus::FireShot()
 {
-	AUTWeapon::FireShot();
+	// Called by the active firing state for the CURRENT mode: shard shots need
+	// the Fix version (fire-event consume + pairing), spin-up shots the stock one.
+	if (CurrentFireMode == 1)
+	{
+		AUTWeaponFix::FireShot();
+	}
+	else
+	{
+		AUTWeapon::FireShot();
+	}
 }
 
 void AUTWeap_Minigun_Plus::PlayFiringEffects()
