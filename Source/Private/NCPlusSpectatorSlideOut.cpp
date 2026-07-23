@@ -113,7 +113,7 @@ void UNCPlusSpectatorSlideOut::BuildLoadoutRows(AUTPlayerState* PS, TArray<FNCSl
 	// Read the player's ACTUAL carried weapons = the real loadout (BP-defined,
 	// no hardcoded list). Hits/ShotsStatsName are CDO defaults, client-readable
 	// (same source NCPlusHUDWidget_Accuracy uses for the held weapon). The
-	// ANCUTPlus weapon swaps (AUTPlusShockRifle etc.) and the stock-modified
+	// NC+ weapon swaps (AUTPlusShockRifle etc.) and the stock-modified
 	// guns all inherit/set these, so each row resolves to the right stat.
 	AUTCharacter* Char = PS->GetUTCharacter();
 	if (IsValid(Char))

@@ -118,7 +118,6 @@ Open the editor in-game with the `nchud` console command. Layout persists to `Sa
 
 ### Mutators
 
-- **NCUTPlus** — primary mutator that replaces stock weapons with their NetcodePlus variants. Configurable per-weapon hide/show via `weaponskins` console command.
 - **ClientHitsounds** — client-side hit prediction with batched server confirmation. Configurable hitsound packs.
 - **ElimPlusMutator** — adds the ElimPlus-specific behaviors (rating/replicator hookup, BP CheckRelevance for placed-pickup filtering). Required when running `ElimPlus` game mode.
 - **AWarmupRoamMutator** — auto-added by NCPlusCTF (incl. iCTF). Powers the `mutate warmup` console command: warmup-only invuln + firing-disable so players can learn the map. Stripped from everyone at match start via `NotifyMatchStateChange`; can never carry into live play.
