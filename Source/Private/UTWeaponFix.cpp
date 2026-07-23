@@ -84,6 +84,28 @@ static FORCEINLINE bool GhostFix()
     return CVarGhostFix.GetValueOnGameThread() > 0;
 }
 
+// Ghost-rocket first fix (2026-07-22): a received ServerStopFireFixed always clears that
+// mode's pawn PendingFire, regardless of the weapon's current state. Restores the stock
+// EndFiringSequence semantics (stock clears unconditionally, UTWeapon.cpp:817) that the
+// state-gated clear in ServerStopFireFixed lost: a release whose Stop landed while this
+// weapon was Unequipping/Equipping/Active left the server's PendingFire latched, and stock
+// UUTWeaponStateActive::BeginState then auto-fired the NEXT weapon on equip — the
+// authoritative ghost rocket/flak. Safe for hold-through-switch: every client StopFire
+// path that emits this RPC has already cleared the client's own PendingFire for the mode
+// (in-state EndFiringSequence, the out-of-state else-branch, or the charged Super path),
+// and a held switch emits no Stop at all — so this only ever converges server state to
+// what the client already applied. Independent of ncp.GhostFix (per-weapon held
+// prototype, known broken, stays off). 0 = legacy state-gated clear (kill switch).
+static TAutoConsoleVariable<int32> CVarStopClearsPending(
+    TEXT("ncp.StopClearsPending"), 1,
+    TEXT("Server honors every received Stop: 1=always clear that mode's pawn PendingFire in ServerStopFireFixed regardless of weapon state (default; fixes the authoritative ghost rocket on release-during-switch), 0=legacy state-gated clear (kill switch)."),
+    ECVF_Default);
+
+static FORCEINLINE bool StopClearsPending()
+{
+    return CVarStopClearsPending.GetValueOnGameThread() > 0;
+}
+
 // Held-beam stall fix (shock "hold M1, nothing comes out"). A cross-mode press landing
 // inside the other mode's firing cycle used to be dropped with NO retry — input is
 // edge-triggered, so a HELD button never re-fires the request and the beam stalls until
@@ -2024,22 +2046,36 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
 
-    // GHOST FIX (server): the guard below skips EndFiringSequence (and its PendingFire
-    // clear) when the weapon is mid-cooldown / Unequipping — so a genuine release in
-    // that window leaves the SERVER's PendingFire stale, and the server auto-fires the
-    // next weapon on equip (the authoritative ghost rocket). Stock EndFiringSequence
-    // clears PendingFire unconditionally; mirror that on the genuine release this RPC
-    // represents. WATCH: this RPC is ALSO sent for an internal continue-fire stop
-    // (client StopFire), so a HELD switch could clear it too — verify hold-through-switch
-    // on the test hub (ncp.FireDebug logs role/state/pending below).
-    if (GhostFix() && UTOwner)
+    // Server Stop honor (ncp.StopClearsPending, default ON — see the cvar comment for the
+    // full rationale): a received Stop is authoritative notice that this fire mode is no
+    // longer held, so clear the pawn flag REGARDLESS of weapon state. The state-gated
+    // EndFiringSequence below stays as-is for firing/effect cleanup; this line is what the
+    // guard was silently dropping when the Stop landed mid-switch. GhostFix() kept in the
+    // gate so flipping that prototype on doesn't lose its old clear if this cvar is 0.
+    if ((StopClearsPending() || GhostFix()) && UTOwner)
     {
+        const bool bWasPending = UTOwner->IsPendingFire(FireModeNum);
+        const bool bInMatchingFiringState = FiringState.IsValidIndex(FireModeNum)
+            && GetCurrentState() == FiringState[FireModeNum];
+        // The exact hazard this cvar exists for: flag latched + Stop arrived out-of-state.
+        // Without the clear, the next UUTWeaponStateActive::BeginState auto-fire reads it.
+        // Logged always (not just FireDbg) — proves the stale condition occurred, not that
+        // a shot was certain — so a dogfood roll can count occurrences per match.
+        if (bWasPending && !bInMatchingFiringState)
+        {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[StalePending] %s (%s) cleared out-of-state PendingFire mode=%d state=%s pendingWpn=%d"),
+                *GetName(),
+                UTOwner->PlayerState ? *UTOwner->PlayerState->PlayerName : TEXT("?"),
+                FireModeNum,
+                (GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null")),
+                (UTOwner->GetPendingWeapon() ? 1 : 0));
+        }
         if (FireDbg())
         {
             UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] ServerStopFire clear mode=%d role=%d state=%s wasPending=%d pendingWpn=%d"),
                 FireModeNum, (int32)Role,
                 (GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null")),
-                (UTOwner->IsPendingFire(FireModeNum) ? 1 : 0),
+                (bWasPending ? 1 : 0),
                 (UTOwner->GetPendingWeapon() ? 1 : 0));
         }
         UTOwner->SetPendingFire(FireModeNum, false);
