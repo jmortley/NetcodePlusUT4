@@ -59,10 +59,31 @@ struct FPendingFireEventFix
     float ClientTimestamp;
     FRotator ClientViewRot;
     uint8 ZOffset;
-    TWeakObjectPtr<AUTCharacter> HitChar; // <--- ADDED THIS
+    TWeakObjectPtr<AUTCharacter> HitChar;
+    FVector ClientHeadOffset;
 
-    FPendingFireEventFix(bool bStart, uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot, uint8 Z, AUTCharacter* InChar)
-        : bIsStartFire(bStart), FireModeNum(Mode), FireEventIndex(EventIdx), ClientTimestamp(Timestamp), ClientViewRot(ViewRot), ZOffset(Z), HitChar(InChar)
+    FPendingFireEventFix(uint8 Mode, int32 EventIdx)
+        : bIsStartFire(false)
+        , FireModeNum(Mode)
+        , FireEventIndex(EventIdx)
+        , ClientTimestamp(0.0f)
+        , ClientViewRot(FRotator::ZeroRotator)
+        , ZOffset(0)
+        , HitChar(nullptr)
+        , ClientHeadOffset(FVector::ZeroVector)
+    {
+    }
+
+    FPendingFireEventFix(uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot,
+        AUTCharacter* InChar, uint8 Z, FVector HeadOffset)
+        : bIsStartFire(true)
+        , FireModeNum(Mode)
+        , FireEventIndex(EventIdx)
+        , ClientTimestamp(Timestamp)
+        , ClientViewRot(ViewRot)
+        , ZOffset(Z)
+        , HitChar(InChar)
+        , ClientHeadOffset(HeadOffset)
     {
     }
 };
@@ -105,9 +126,6 @@ struct FActiveServerProjectile
     TWeakObjectPtr<AUTProjectile> Projectile;
 
     UPROPERTY()
-    int32 EventIndex;
-
-    UPROPERTY()
     uint8 FireMode;
 
     // --- Grace buffer (populated when the projectile RESOLVES / explodes) ---
@@ -134,14 +152,12 @@ struct FActiveServerProjectile
     TWeakObjectPtr<class AUTCharacter> DamagedTarget;
 
     FActiveServerProjectile()
-        : EventIndex(-1)
-        , FireMode(0)
+        : FireMode(0)
     {
     }
 
-    FActiveServerProjectile(AUTProjectile* InProj, int32 InIndex, uint8 InMode)
+    FActiveServerProjectile(AUTProjectile* InProj, uint8 InMode)
         : Projectile(InProj)
-        , EventIndex(InIndex)
         , FireMode(InMode)
     {
     }
@@ -407,13 +423,14 @@ public:
 protected:
 
     FTimerHandle DeferredActiveStateHandle;
-    /**
- * Server-side authoritative fire event index for each fire mode.
- * This is the ground truth that clients must sync to.
- * Replicated to clients for verification.
- */
-    UPROPERTY(Replicated)
+    /** Server-side ground truth for the last accepted fire event in each mode.
+     *  Owning clients are corrected explicitly through ClientConfirmFireEvent. */
+    UPROPERTY(Transient)
     TArray<int32> AuthoritativeFireEventIndex;
+
+    /** Server-side deduplication for initial/retried stop events. */
+    UPROPERTY(Transient)
+    TArray<int32> LastProcessedStopEventIndex;
 
     /**
      * Client-side fire event counter for each fire mode.
@@ -448,20 +465,19 @@ protected:
      * @param FireModeNum - Which fire mode to activate
      * @param InFireEventIndex - Unique sequence number for this fire event
      * @param ClientTimestamp - Client's GetWorld()->GetTimeSeconds() when fire was initiated
-     * @param bClientPredicted - Whether client has already predicted this shot
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
 
     /**
      * Server RPC to stop firing.
      *
      * @param FireModeNum - Which fire mode to deactivate
      * @param InFireEventIndex - Final event index from client
-     * @param ClientTimestamp - Client's timestamp when fire was stopped
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
+    void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
 
     /**
      * Client RPC to confirm a fire event or correct client's event index.
@@ -483,6 +499,10 @@ protected:
      * @return true if request is valid and should be processed
      */
     bool ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime);
+
+    /** Shared RPC-edge validation so initial and retry start payloads use identical checks. */
+    bool ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFireEventIndex,
+        float ClientTimestamp, FRotator ClientViewRot, FVector ClientHeadOffset);
 
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
     float SmoothingMs = 20.0f;
@@ -567,15 +587,19 @@ protected:
     TArray<FPendingFireEventFix> ResendFireEvents;
     FTimerHandle ResendFireHandle;
 
-    void QueueResendFireFixed(bool bIsStartFire, uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar);
+    void QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+    void QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
+    void QueueResendFireEventFixed(const FPendingFireEventFix& Event);
     void ResendNextFireEventFixed();
     void ClearFireEventsFixed();
 
     UFUNCTION(Server, Unreliable, WithValidation)
-    void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar);
+    void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
 
     UFUNCTION(Server, Unreliable, WithValidation)
-    void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
+    void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
 
     UPROPERTY()
     TArray<FPendingFakeProjectile> PendingFakeProjectiles;
@@ -612,9 +636,9 @@ protected:
     /** Server RPC: Client's fake projectile hit a target, validate with rewind */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
-        int32 ClaimedEventIndex, uint8 ClaimedFireMode);
+        uint8 ClaimedFireMode);
 
-    /** Server-side tracking of authoritative projectiles by EventIndex */
+    /** Server-side tracking of authoritative projectiles, matched oldest-first by fire mode. */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
 

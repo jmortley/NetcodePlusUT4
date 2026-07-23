@@ -367,6 +367,7 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
 {
     // Initialize arrays for standard two fire modes
     AuthoritativeFireEventIndex.SetNum(2);
+    LastProcessedStopEventIndex.SetNum(2);
     ClientFireEventIndex.SetNum(2);
     LastFireTime.SetNum(2);
     LastReleaseTime.SetNum(2);
@@ -389,6 +390,7 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     for (int32 i = 0; i < 2; i++)
     {
         AuthoritativeFireEventIndex[i] = 0;
+        LastProcessedStopEventIndex[i] = INDEX_NONE;
         ClientFireEventIndex[i] = 0;
         LastFireTime[i] = -1.0f;
         LastReleaseTime[i] = -1.0f;
@@ -1098,8 +1100,11 @@ void AUTWeaponFix::FireShot()
 			}
 		}
 
-		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
-        QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
+		const float ClientTimestamp = GetWorld()->GetGameState()->GetServerWorldTimeSeconds();
+		ServerStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
+			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
+        QueueResendStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
+            ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
 
 		// Cache the client's exact aim direction at fire-press time.
 		// GetBaseFireRotation() will use this for the fake projectile spawn,
@@ -1249,44 +1254,6 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     {
         bIsChargedMode = true;
     }
-/*
-    if (bIsChargedMode)
-    {
-        // Don't log for Mode 0 stops (normal during swaps), but log for Mode 1
-        if (FireModeNum == 1)
-        {
-            //UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Bypassing Transactional Stop for Charged State (Mode 1)"));
-        }
-
-        // Standard UT logic handles the release (launching rockets or clearing pending fire)
-        Super::StopFire(FireModeNum);
-        // --- FIX START: Send Transactional Stop Packet for Charged Release ---
-        if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
-        {
-            // A. Manually Increment Index 
-            // Crucial because charged weapons skip the standard FireShot() which usually does this.
-            int32 EventIndex = 0;
-            if (ClientFireEventIndex.IsValidIndex(FireModeNum))
-            {
-                ClientFireEventIndex[FireModeNum]++;
-                EventIndex = ClientFireEventIndex[FireModeNum];
-            }
-
-            // B. Capture Data
-            float CurrentTime = GetWorld()->GetTimeSeconds();
-            FRotator ClientRot = UTOwner->GetViewRotation();
-
-            // C. Send RPC (With Rotation)
-            ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime, ClientRot);
-
-            // D. Queue Retry (With Rotation)
-            QueueResendFireFixed(false, FireModeNum, EventIndex, CurrentTime, ClientRot, 0, nullptr);
-        }
-        // --- FIX END ---
-        // CRITICAL: Return here so we don't hit GotoActiveState() below
-        return;
-    }
-*/
     if (bIsChargedMode)
     {
         if (FireModeNum == 1)
@@ -1307,11 +1274,9 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
                 EventIndex = ClientFireEventIndex[FireModeNum];
             }
 
-            // 3. Send transactional packet WITH rotation
-            float CurrentTime = GetWorld()->GetTimeSeconds();
-            FRotator ClientRot = UTOwner->GetViewRotation();
-            ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime, ClientRot);
-            QueueResendFireFixed(false, FireModeNum, EventIndex, CurrentTime, ClientRot, 0, nullptr);
+            // 3. Send the transactional stop and queue identical retries.
+            ServerStopFireFixed(FireModeNum, EventIndex);
+            QueueResendStopFireFixed(FireModeNum, EventIndex);
         }
         else
         {
@@ -1385,13 +1350,8 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     {
         int32 EventIndex = ClientFireEventIndex.IsValidIndex(FireModeNum) ?
             ClientFireEventIndex[FireModeNum] : 0;
-        float CurrentTime = GetWorld()->GetTimeSeconds();
-        // Capture aim at the moment of release
-        FRotator ClientRot = UTOwner->GetViewRotation();
-
-        // Pass ClientRot to the server
-        ServerStopFireFixed(FireModeNum, EventIndex, CurrentTime, ClientRot);
-        QueueResendFireFixed(false, FireModeNum, EventIndex, CurrentTime, FRotator::ZeroRotator, 0, nullptr);
+        ServerStopFireFixed(FireModeNum, EventIndex);
+        QueueResendStopFireFixed(FireModeNum, EventIndex);
     }
     
 }
@@ -1563,7 +1523,8 @@ bool AUTWeaponFix::IsFireEventSequenceValid(uint8 FireModeNum, int32 InEventInde
 
 
 
-void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
+    FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
     // 1. VALIDATION (Your existing transactional checks)
     UWorld* World = GetWorld();
@@ -1701,7 +1662,9 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
             GotoActiveState();
         }
         // BeginState() inside the new class will fire the first shot automatically.
-        BeginFiringSequence(FireModeNum, bClientPredicted);
+        // This RPC is sent from the client's predicted FireShot path, so the server
+        // can derive the value instead of trusting a redundant wire parameter.
+        BeginFiringSequence(FireModeNum, true);
     }
 
     bIsTransactionalFire = false;
@@ -1825,34 +1788,68 @@ void AUTWeaponFix::Tick(float DeltaTime)
 }
 
 
-bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+bool AUTWeaponFix::ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFireEventIndex,
+    float ClientTimestamp, FRotator ClientViewRot, FVector ClientHeadOffset)
 {
     // Sanity-bound the client head offset at the RPC edge. The headshot gate clamps it downstream, but a NaN
     // defeats FMath::Clamp (NaN fails every comparison) and that clamp is currently the sole defense, so reject
     // NaN/Inf or an absurd magnitude here. A legit offset is the rendered head relative to the body (~110u up),
     // so the 1000u bound is hugely generous — no honest client is ever caught; only a tampered one is dropped.
-    if (ClientHeadOffset.ContainsNaN() || ClientHeadOffset.SizeSquared() > FMath::Square(1000.0f))
+    if (ClientHeadOffset.ContainsNaN()
+        || ClientHeadOffset.SizeSquared() > FMath::Square(1000.0f)
+        || ClientViewRot.ContainsNaN())
     {
         return false;
     }
     return FireModeNum < GetNumFireModes() &&
         InFireEventIndex > 0 &&
+        FMath::IsFinite(ClientTimestamp) &&
         ClientTimestamp > 0.0f;
+}
+
+bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex,
+    float ClientTimestamp, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset,
+    FVector ClientHeadOffset)
+{
+    return ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
+        ClientViewRot, ClientHeadOffset);
 }
 
 
 
 
-void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
+void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex)
 {
-    // FIX: Update sequence ID to reject late Start packets
+    // Initial and retry RPCs carry the same stop. Process whichever arrives first,
+    // then make later copies idempotent.
+    if (LastProcessedStopEventIndex.IsValidIndex(FireModeNum)
+        && InFireEventIndex <= LastProcessedStopEventIndex[FireModeNum])
+    {
+        return;
+    }
+
+    // A stop for an older press must not cancel a newer held fire. Also reject an
+    // implausible jump instead of letting a client move the authoritative sequence
+    // far enough ahead to suppress legitimate starts.
     if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum))
     {
-        // Only update if this Stop is newer than what we've seen
-        if (InFireEventIndex > AuthoritativeFireEventIndex[FireModeNum])
+        const int32 LastAuthoritativeIndex = AuthoritativeFireEventIndex[FireModeNum];
+        if (InFireEventIndex < LastAuthoritativeIndex)
         {
-            AuthoritativeFireEventIndex[FireModeNum] = InFireEventIndex;
+            return;
         }
+        if (int64(InFireEventIndex) > int64(LastAuthoritativeIndex) + 10)
+        {
+            UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[ServerStopFireFixed] Rejected sequence jump. Mode %d EventIndex %d vs LastProcessed %d"),
+                FireModeNum, InFireEventIndex, LastAuthoritativeIndex);
+            return;
+        }
+        AuthoritativeFireEventIndex[FireModeNum] = InFireEventIndex;
+    }
+    if (LastProcessedStopEventIndex.IsValidIndex(FireModeNum))
+    {
+        LastProcessedStopEventIndex[FireModeNum] = InFireEventIndex;
     }
     
     // 1. Clear authoritative state flags
@@ -2008,9 +2005,9 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
 }
 
 
-bool AUTWeaponFix::ServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
+bool AUTWeaponFix::ServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex)
 {
-    return FireModeNum < GetNumFireModes();
+    return FireModeNum < GetNumFireModes() && InFireEventIndex >= 0;
 }
 
 
@@ -2035,7 +2032,6 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
-    DOREPLIFETIME(AUTWeaponFix, AuthoritativeFireEventIndex);
     DOREPLIFETIME(AUTWeaponFix, FireModeActiveState);
 }
 
@@ -2653,9 +2649,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			 || NewProjectile->IsA(AUTPlusProj_StingerShard::StaticClass()));
 		if (bTrackForRewind)
 		{
-			int32 ServerEventIdx = AuthoritativeFireEventIndex.IsValidIndex(CurrentFireMode)
-				? AuthoritativeFireEventIndex[CurrentFireMode] : -1;
-			ActiveServerProjectiles.Add(FActiveServerProjectile(NewProjectile, ServerEventIdx, CurrentFireMode));
+			ActiveServerProjectiles.Add(FActiveServerProjectile(NewProjectile, CurrentFireMode));
 
 			// Cleanup stale entries
 			for (int32 i = ActiveServerProjectiles.Num() - 1; i >= 0; i--)
@@ -3931,19 +3925,28 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 // ============================================================================
 
 // 1. QUEUE LOGIC (Client Side)
-// Call this inside your FireShot() client block
-void AUTWeaponFix::QueueResendFireFixed(bool bIsStartFire, uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar)
+void AUTWeaponFix::QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex,
+    float ClientTimestamp, FRotator ClientViewRot, AUTCharacter* ClientHitChar,
+    uint8 ZOffset, FVector ClientHeadOffset)
+{
+    QueueResendFireEventFixed(FPendingFireEventFix(FireModeNum, InFireEventIndex,
+        ClientTimestamp, ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset));
+}
+
+void AUTWeaponFix::QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex)
+{
+    QueueResendFireEventFixed(FPendingFireEventFix(FireModeNum, InFireEventIndex));
+}
+
+void AUTWeaponFix::QueueResendFireEventFixed(const FPendingFireEventFix& Event)
 {
     // Only the owning client needs to queue retries
     if (Role == ROLE_Authority && GetNetMode() != NM_Standalone) return;
 
-    // Create the payload
-    FPendingFireEventFix NewEvent(bIsStartFire, FireModeNum, InFireEventIndex, ClientTimestamp, ClientViewRot, ZOffset, ClientHitChar);
-
     // Queue 2 copies. This gives us 2 retry attempts (spaced by the timer delay)
     // before we give up. This prevents infinite network flooding if the connection is dead.
-    ResendFireEvents.Add(NewEvent);
-    ResendFireEvents.Add(NewEvent);
+    ResendFireEvents.Add(Event);
+    ResendFireEvents.Add(Event);
 
     // Start the heartbeat timer if it's not running
     if (!GetWorldTimerManager().IsTimerActive(ResendFireHandle))
@@ -3974,11 +3977,13 @@ void AUTWeaponFix::ResendNextFireEventFixed()
         // It does NOT execute the fire logic locally again.
         if (Event.bIsStartFire)
         {
-            ResendServerStartFireFixed(Event.FireModeNum, Event.FireEventIndex, Event.ClientTimestamp, Event.ClientViewRot, Event.ZOffset, Event.HitChar.Get());
+            ResendServerStartFireFixed(Event.FireModeNum, Event.FireEventIndex,
+                Event.ClientTimestamp, Event.ClientViewRot, Event.HitChar.Get(),
+                Event.ZOffset, Event.ClientHeadOffset);
         }
         else
         {
-            ResendServerStopFireFixed(Event.FireModeNum, Event.FireEventIndex, Event.ClientTimestamp, Event.ClientViewRot);
+            ResendServerStopFireFixed(Event.FireModeNum, Event.FireEventIndex);
         }
     }
 
@@ -4139,7 +4144,9 @@ void AUTWeaponFix::ClearPendingFakeProjectiles()
 
 // 5. SERVER HANDLER (Start Fire)
 // This receives the retry packet
-void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar)
+void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
+    int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot,
+    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
     // DUPLICATE CHECK
     // If the server already processed this index (or a newer one), ignore this packet.
@@ -4157,43 +4164,35 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum, 
     // Set flag so internal logic knows this is a delayed/retry shot
     bNetDelayedShot = true;
 
-    // Execute the actual fire logic
-    // This calculates the delay and fast-forwards the projectile to catch up
-    // Resent (dropped-packet) shots don't carry the client head offset (it isn't threaded through the
-    // resend path) — pass zero; these fall back to the stock capsule-relative head check. Rare + graceful.
-    ServerStartFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, true, ClientViewRot, ClientHitChar, ZOffset, FVector::ZeroVector);
+    // Execute the same implementation with the same logical payload. The retry-only
+    // context still lets projectile spawning compensate for network delay.
+    ServerStartFireFixed_Implementation(FireModeNum, InFireEventIndex, ClientTimestamp,
+        ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset);
 
     bNetDelayedShot = false;
 }
 
 // 6. SERVER HANDLER (Stop Fire)
-void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
+void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum,
+    int32 InFireEventIndex)
 {
-    // Duplicate check for Stop Fire is less critical but good for consistency
-    if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum))
-    {
-        int32 LastIdx = AuthoritativeFireEventIndex[FireModeNum];
-        if (InFireEventIndex <= LastIdx && (LastIdx - InFireEventIndex) < 100) return;
-    }
-    if (UTOwner && UTOwner->PlayerState)
-    {
-        float CurrentPing = UTOwner->PlayerState->ExactPing;
-        UE_LOG(LogUTWeaponFix, Verbose, TEXT("[Retry] STOP Fire Accepted for %s. Index: %d | Ping: %.2f ms | RTT Correction Applied"),
-            *UTOwner->PlayerState->PlayerName, InFireEventIndex, CurrentPing);
-    }
     bNetDelayedShot = true;
-    ServerStopFireFixed(FireModeNum, InFireEventIndex, ClientTimestamp, ClientViewRot);
+    ServerStopFireFixed_Implementation(FireModeNum, InFireEventIndex);
     bNetDelayedShot = false;
 }
 
-bool AUTWeaponFix::ResendServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar)
+bool AUTWeaponFix::ResendServerStartFireFixed_Validate(uint8 FireModeNum,
+    int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot,
+    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
-    return true;
+    return ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
+        ClientViewRot, ClientHeadOffset);
 }
 
-bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot)
+bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum,
+    int32 InFireEventIndex)
 {
-    return true;
+    return FireModeNum < GetNumFireModes() && InFireEventIndex >= 0;
 }
 
 
@@ -4234,7 +4233,7 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 	// Send the claim with FireMode only — server matches against ActiveServerProjectiles
 	// by fire mode (oldest first). No EventIndex needed from the client since we're
 	// using the replicated real projectile, not the fake (which is already destroyed).
-	ServerProjectileHitClaim(HitTarget, HitLocation, -1, FireModeNum);
+	ServerProjectileHitClaim(HitTarget, HitLocation, FireModeNum);
 }
 
 void AUTWeaponFix::OnTrackedProjectileResolved(AUTProjectile* Proj, AUTCharacter* DamagedChar)
@@ -4271,14 +4270,14 @@ void AUTWeaponFix::OnTrackedProjectileResolved(AUTProjectile* Proj, AUTCharacter
 	}
 }
 
-bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
-	int32 ClaimedEventIndex, uint8 ClaimedFireMode)
+bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget,
+	FVector ClaimedHitLocation, uint8 ClaimedFireMode)
 {
 	return true;
 }
 
-void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
-	int32 ClaimedEventIndex, uint8 ClaimedFireMode)
+void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* ClaimedTarget,
+	FVector ClaimedHitLocation, uint8 ClaimedFireMode)
 {
 	// Master gates: per-weapon feature flag (also gates the client send) AND server kill-switch.
 	if (!bEnableProjectileRewind || CVarRocketLagComp.GetValueOnGameThread() == 0)
@@ -4338,7 +4337,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	WindowSec = FMath::Clamp(WindowSec, 0.016f, MaxWindowMs * 0.001f);
 
 	// 3. Find the real (authoritative) projectile
-	// Match by FireMode, oldest first (FIFO). EventIndex match preferred if provided.
+	// Match by FireMode, oldest first (FIFO).
 	// Prefer a LIVE projectile; if none, fall back to the GRACE BUFFER — a matching projectile
 	// that resolved (exploded) within ut.RocketLagCompGraceMs, for the close-range timing race
 	// where the server projectile detonated before this ~RTT-late claim arrived.
@@ -4395,9 +4394,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 				continue;
 			}
 			// Eligible grace fallback if it matches; remember the first (oldest) one.
-			if (GraceIndex == -1
-				&& Entry.FireMode == ClaimedFireMode
-				&& (ClaimedEventIndex < 0 || Entry.EventIndex == ClaimedEventIndex))
+			if (GraceIndex == -1 && Entry.FireMode == ClaimedFireMode)
 			{
 				GraceIndex = i;
 			}
@@ -4405,11 +4402,6 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		}
 
 		if (Entry.FireMode != ClaimedFireMode)
-		{
-			continue;
-		}
-		// If client sent a specific EventIndex, require exact match
-		if (ClaimedEventIndex >= 0 && Entry.EventIndex != ClaimedEventIndex)
 		{
 			continue;
 		}
