@@ -21,15 +21,7 @@
 #include "UObject/UObjectIterator.h"
 #include "ClientHitsounds.h"
 #include "EngineUtils.h"
-#include "UTGameMode.h"
-#include "UTCTFBaseGame.h"
 #include "UTPlayerState.h"
-#include "ElimPlusGame.h"
-#include "WipeoutGame.h"
-#include "MutBotEvents.h"
-#include "NCFireValCollector.h"
-#include "UTPlusSniper.h"
-#include "UTPlusShockRifle.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
@@ -82,6 +74,28 @@ static TAutoConsoleVariable<int32> CVarGhostFix(
 static FORCEINLINE bool GhostFix()
 {
     return CVarGhostFix.GetValueOnGameThread() > 0;
+}
+
+// Ghost-rocket first fix (2026-07-22): a received ServerStopFireFixed always clears that
+// mode's pawn PendingFire, regardless of the weapon's current state. Restores the stock
+// EndFiringSequence semantics (stock clears unconditionally, UTWeapon.cpp:817) that the
+// state-gated clear in ServerStopFireFixed lost: a release whose Stop landed while this
+// weapon was Unequipping/Equipping/Active left the server's PendingFire latched, and stock
+// UUTWeaponStateActive::BeginState then auto-fired the NEXT weapon on equip — the
+// authoritative ghost rocket/flak. Safe for hold-through-switch: every client StopFire
+// path that emits this RPC has already cleared the client's own PendingFire for the mode
+// (in-state EndFiringSequence, the out-of-state else-branch, or the charged Super path),
+// and a held switch emits no Stop at all — so this only ever converges server state to
+// what the client already applied. Independent of ncp.GhostFix (per-weapon held
+// prototype, known broken, stays off). 0 = legacy state-gated clear (kill switch).
+static TAutoConsoleVariable<int32> CVarStopClearsPending(
+    TEXT("ncp.StopClearsPending"), 1,
+    TEXT("Server honors every received Stop: 1=always clear that mode's pawn PendingFire in ServerStopFireFixed regardless of weapon state (default; fixes the authoritative ghost rocket on release-during-switch), 0=legacy state-gated clear (kill switch)."),
+    ECVF_Default);
+
+static FORCEINLINE bool StopClearsPending()
+{
+    return CVarStopClearsPending.GetValueOnGameThread() > 0;
 }
 
 // Held-beam stall fix (shock "hold M1, nothing comes out"). A cross-mode press landing
@@ -420,39 +434,6 @@ void AUTWeaponFix::BeginPlay()
         FireModeActiveState[i] = 0;
     }
 
-    // Fire-validation telemetry gate — decided server-side where the gamemode is
-    // unambiguous, then replicated to the owning client. Two conditions, both
-    // required:
-    //   1. Mode: Elim, instagib-CTF, or Wipeout (regular CTF / Duel / ShockDom off).
-    //   2. Weapon: this instance is a UTPlusSniper or UTPlusShockRifle (or child).
-    //      Covers instagib rifle + shock rifle (shock children) and sniper + LG
-    //      (LG is a sniper reskin). Excludes minigun/enforcer — also hitscan, but
-    //      not precision, and would otherwise feed false low-dwell samples.
-    if (Role == ROLE_Authority)
-    {
-        AUTGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AUTGameMode>() : nullptr;
-        const bool bElim = GM && GM->IsA(AElimPlusGame::StaticClass());
-        const bool bICTF = GM && GM->bIsInstagib && GM->IsA(AUTCTFBaseGame::StaticClass());
-        const bool bWipeout = GM && GM->IsA(AUWipeoutGame::StaticClass());
-        const bool bFireValWeapon = IsA(AUTPlusSniper::StaticClass()) || IsA(AUTPlusShockRifle::StaticClass());
-        // 3. Server master switch: Mod.ini [NetcodePlus] EnableFireVal (default OFF). Gated
-        //    here server-side, so when it's off bFireValActive stays false and the
-        //    owner-only replicated flag never tells any client to start the tracker.
-        const bool bEnabled = FNCFireValCollector::IsEnabled();
-        bFireValActive = bEnabled && (bElim || bICTF || bWipeout) && bFireValWeapon;
-
-        // One-time diagnostic for the relevant weapons, so a "no samples" result is never
-        // a mystery again: it shows whether the gate armed and which condition failed.
-        // (No line at all while holding a sniper/shock => that weapon isn't a UTPlus class.)
-        // Log once per process (not per weapon spawn) to confirm the gate without spam.
-        static bool bLoggedFireValGate = false;
-        if (bFireValWeapon && !bLoggedFireValGate)
-        {
-            bLoggedFireValGate = true;
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireVal] gate: weapon=%s enabled=%d elim=%d ictf=%d wipeout=%d -> active=%d"),
-                *GetClass()->GetName(), bEnabled ? 1 : 0, bElim ? 1 : 0, bICTF ? 1 : 0, bWipeout ? 1 : 0, bFireValActive ? 1 : 0);
-        }
-    }
 }
 
 void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
@@ -1120,38 +1101,6 @@ void AUTWeaponFix::FireShot()
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), false, ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
         QueueResendFireFixed(true, CurrentFireMode, NextEventIndex, GetWorld()->GetGameState()->GetServerWorldTimeSeconds(), ClientRot, ZOffset, ClientHitChar);
 
-        // Telemetry sidecar — separate UNRELIABLE RPC, never folded into the fire
-        // path above. Sample every shot taken WHILE THE CROSSHAIR IS ON A VISIBLE
-        // ENEMY — hits AND on-target misses (a capsule-edge whiff is real signal) —
-        // but NOT off-target spam, which would flood the data with meaningless
-        // dwell=0 and inflate everyone's low-dwell share. FireValAcquireTime>=0 means
-        // the per-frame tracker had an enemy as of last tick; the ClientHitChar
-        // fallback catches a fresh flick whose hit lands the same frame the tick
-        // hasn't run yet (dwell ~0). bClaimedHit lets the server split hit vs miss.
-        if (bFireValActive)
-        {
-            bool bHitEnemy = false;
-            if (ClientHitChar != nullptr && UTOwner && !ClientHitChar->IsDead())
-            {
-                const uint8 MyTeam = UTOwner->GetTeamNum();
-                const uint8 ThTeam = ClientHitChar->GetTeamNum();
-                bHitEnemy = (MyTeam == 255 || ThTeam == 255 || MyTeam != ThTeam);
-            }
-            if (FireValAcquireTime >= 0.0f || bHitEnemy)
-            {
-                // Fresh-flick fallback (acquire<0 but the muzzle trace hit an enemy:
-                // Tick hadn't registered the target yet this frame): floor dwell to
-                // ONE frame, not 0 — a literal 0 ms implies impossible negative
-                // reaction and would inflate the zero bucket for fast legit flickers.
-                const float DwellSec = (FireValAcquireTime >= 0.0f && GetWorld())
-                    ? FMath::Max(0.0f, GetWorld()->GetTimeSeconds() - FireValAcquireTime)
-                    : FireValFrameTimeEMA;
-                const int32 DwellMs = FMath::Clamp(FMath::RoundToInt(DwellSec * 1000.0f), 0, 60000);
-                const uint8 FrameMs = (uint8)FMath::Clamp(FMath::RoundToInt(FireValFrameTimeEMA * 1000.0f), 0, 255);
-                ServerReportFireValidation(DwellMs, FrameMs, bHitEnemy);
-            }
-        }
-
 		// Cache the client's exact aim direction at fire-press time.
 		// GetBaseFireRotation() will use this for the fake projectile spawn,
 		// ensuring the fake fires exactly where the crosshair was — no curve from
@@ -1801,13 +1750,6 @@ void AUTWeaponFix::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    // Fire-validation telemetry — local client only, gated to the equipped weapon
-    // in an active mode. One occlusion-aware crosshair trace; see UpdateFireValTracker.
-    if (bFireValActive && Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
-    {
-        UpdateFireValTracker(DeltaTime);
-    }
-
     // --- WATCHDOG UNLOCK ---
     // If the weapon is marked as firing a mode, but the state machine says we are "Active" (Idle),
     // it means the Charged State finished (rockets fired/loaded) and returned to idle
@@ -1883,100 +1825,6 @@ void AUTWeaponFix::Tick(float DeltaTime)
 }
 
 
-void AUTWeaponFix::UpdateFireValTracker(float DeltaTime)
-{
-    // Smooth the client frame time regardless of on-target state, so the fps
-    // context we ship is the player's actual cadence (EMA, ~last 20 frames).
-    FireValFrameTimeEMA = (FireValFrameTimeEMA <= 0.0f) ? DeltaTime
-                    : FMath::Lerp(FireValFrameTimeEMA, DeltaTime, 0.05f);
-
-    // Only meaningful for the equipped weapon on a living owner.
-    if (!UTOwner || UTOwner->IsDead() || UTOwner->GetWeapon() != this)
-    {
-        FireValAcquireTime = -1.0f;
-        return;
-    }
-
-    UWorld* World = GetWorld();
-    if (!World) { FireValAcquireTime = -1.0f; return; }
-
-    const FVector Start = UTOwner->GetPawnViewLocation();
-    const FVector Dir   = UTOwner->GetViewRotation().Vector();
-    const FVector End   = Start + Dir * 100000.0f; // beyond any UT sightline; line-trace cost is ~flat in length
-
-    // COLLISION_TRACE_WEAPON blocks on world geometry AND characters — the same
-    // channel UT's own crosshair/visibility traces use (UTWeapon.cpp). So the FIRST
-    // blocking hit is either a wall (occluded -> reset) or the enemy under the
-    // crosshair: one trace yields "crosshair on a VISIBLE enemy", occlusion free.
-    // Simple collision (bTraceComplex=false) -> tests the capsule, which is what we want.
-    FCollisionQueryParams Params(FName(TEXT("FireValTrace")), false, UTOwner);
-    FHitResult Hit;
-    const bool bBlocked = World->LineTraceSingleByChannel(Hit, Start, End, COLLISION_TRACE_WEAPON, Params);
-
-    AUTCharacter* OnEnemy = nullptr;
-    if (bBlocked)
-    {
-        AUTCharacter* HitChar = Cast<AUTCharacter>(Hit.GetActor());
-        if (HitChar && HitChar != UTOwner && !HitChar->IsDead())
-        {
-            const uint8 MyTeam = UTOwner->GetTeamNum();
-            const uint8 ThTeam = HitChar->GetTeamNum();
-            // 255 = no team (FFA): everyone is an enemy. Otherwise differing teams.
-            if (MyTeam == 255 || ThTeam == 255 || MyTeam != ThTeam)
-            {
-                OnEnemy = HitChar;
-            }
-        }
-    }
-
-    if (OnEnemy)
-    {
-        // Re-acquire (reset dwell) when the crosshair is on a DIFFERENT enemy than
-        // last frame. Without this, a snap from a long-tracked target onto a freshly
-        // revealed one would inherit the old dwell and hide a fire-validation's
-        // target-to-target snap as a "patient" shot. Weak ptr so a destroyed-then-
-        // reused address can't be mistaken for the same target.
-        if (FireValAcquireTime < 0.0f || FireValLastTarget.Get() != OnEnemy)
-        {
-            FireValAcquireTime = World->GetTimeSeconds();
-        }
-        FireValLastTarget = OnEnemy;
-    }
-    else
-    {
-        // LOS broken or no enemy under the crosshair -> end the run.
-        FireValAcquireTime = -1.0f;
-        FireValLastTarget = nullptr;
-    }
-}
-
-AMutBotEvents* AUTWeaponFix::FindBotEventsMutator() const
-{
-    UWorld* World = GetWorld();
-    if (!World) return nullptr;
-    for (TActorIterator<AMutBotEvents> It(World); It; ++It)
-    {
-        return *It;
-    }
-    return nullptr;
-}
-
-void AUTWeaponFix::ServerReportFireValidation_Implementation(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
-{
-    AUTPlayerState* PS = UTOwner ? Cast<AUTPlayerState>(UTOwner->PlayerState) : nullptr;
-    if (!PS) return;
-    // Record into the standalone collector — mutator-INDEPENDENT, so it works on any
-    // NetcodePlus server (NA autopug doesn't load MutBotEvents). Clamp server-side; this
-    // is review-only data, never gameplay-affecting.
-    FNCFireValCollector::Get().Record(GetWorld(), PS, FMath::Clamp(DwellMs, 0, 60000), FrameMs, bClaimedHit);
-}
-
-bool AUTWeaponFix::ServerReportFireValidation_Validate(int32 DwellMs, uint8 FrameMs, bool bClaimedHit)
-{
-    // Pure telemetry — bounds are enforced in the impl; nothing to reject here.
-    return true;
-}
-
 bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
     // Sanity-bound the client head offset at the RPC edge. The headshot gate clamps it downstream, but a NaN
@@ -2024,22 +1872,36 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
 
-    // GHOST FIX (server): the guard below skips EndFiringSequence (and its PendingFire
-    // clear) when the weapon is mid-cooldown / Unequipping — so a genuine release in
-    // that window leaves the SERVER's PendingFire stale, and the server auto-fires the
-    // next weapon on equip (the authoritative ghost rocket). Stock EndFiringSequence
-    // clears PendingFire unconditionally; mirror that on the genuine release this RPC
-    // represents. WATCH: this RPC is ALSO sent for an internal continue-fire stop
-    // (client StopFire), so a HELD switch could clear it too — verify hold-through-switch
-    // on the test hub (ncp.FireDebug logs role/state/pending below).
-    if (GhostFix() && UTOwner)
+    // Server Stop honor (ncp.StopClearsPending, default ON — see the cvar comment for the
+    // full rationale): a received Stop is authoritative notice that this fire mode is no
+    // longer held, so clear the pawn flag REGARDLESS of weapon state. The state-gated
+    // EndFiringSequence below stays as-is for firing/effect cleanup; this line is what the
+    // guard was silently dropping when the Stop landed mid-switch. GhostFix() kept in the
+    // gate so flipping that prototype on doesn't lose its old clear if this cvar is 0.
+    if ((StopClearsPending() || GhostFix()) && UTOwner)
     {
+        const bool bWasPending = UTOwner->IsPendingFire(FireModeNum);
+        const bool bInMatchingFiringState = FiringState.IsValidIndex(FireModeNum)
+            && GetCurrentState() == FiringState[FireModeNum];
+        // The exact hazard this cvar exists for: flag latched + Stop arrived out-of-state.
+        // Without the clear, the next UUTWeaponStateActive::BeginState auto-fire reads it.
+        // Logged always (not just FireDbg) — proves the stale condition occurred, not that
+        // a shot was certain — so a dogfood roll can count occurrences per match.
+        if (bWasPending && !bInMatchingFiringState)
+        {
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[StalePending] %s (%s) cleared out-of-state PendingFire mode=%d state=%s pendingWpn=%d"),
+                *GetName(),
+                UTOwner->PlayerState ? *UTOwner->PlayerState->PlayerName : TEXT("?"),
+                FireModeNum,
+                (GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null")),
+                (UTOwner->GetPendingWeapon() ? 1 : 0));
+        }
         if (FireDbg())
         {
             UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] ServerStopFire clear mode=%d role=%d state=%s wasPending=%d pendingWpn=%d"),
                 FireModeNum, (int32)Role,
                 (GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null")),
-                (UTOwner->IsPendingFire(FireModeNum) ? 1 : 0),
+                (bWasPending ? 1 : 0),
                 (UTOwner->GetPendingWeapon() ? 1 : 0));
         }
         UTOwner->SetPendingFire(FireModeNum, false);
@@ -2175,7 +2037,6 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
     DOREPLIFETIME(AUTWeaponFix, AuthoritativeFireEventIndex);
     DOREPLIFETIME(AUTWeaponFix, FireModeActiveState);
-    DOREPLIFETIME_CONDITION(AUTWeaponFix, bFireValActive, COND_OwnerOnly);
 }
 
 

@@ -1,6 +1,5 @@
 #include "ElimPlusGame.h"
 #include "NCHybridSpawnGenerator.h"
-#include "NCFireValCollector.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
@@ -283,8 +282,6 @@ void AElimPlusGame::HandleMatchHasStarted()
 	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus build marker: rebalance+warnings+broadcast (post-ca60db0)"));
 	Super::HandleMatchHasStarted();
 
-	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id for this match
-
 	bWarmupMode = false;
 
 	// Defense-in-depth reset of the flush guard: InitGame already resets it on
@@ -467,8 +464,6 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 void AElimPlusGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
-
-	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (guards double-route)
 
 	// Persist updated ratings to Mods.db and emit the final ELO + match delta
 	// to the replicator. Engine routes HandleMatchHasEnded twice in some paths

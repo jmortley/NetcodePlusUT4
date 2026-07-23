@@ -274,8 +274,6 @@ void ANCPlusCTFHUD::DrawHUD()
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
 	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
 
-	// Replay-only: fire-validation corner feed (self-guards to demo playback).
-	NCPlusHUDDrawCall::DrawFireValReplayFeed(this, Canvas);
 }
 
 void ANCPlusCTFHUD::DrawSpectatorTarget()

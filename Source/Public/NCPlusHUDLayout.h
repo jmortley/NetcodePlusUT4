@@ -463,13 +463,6 @@ namespace NCPlusHUDDrawCall
 	 *  on); caller should skip while the scoreboard is up. */
 	NETCODEPLUS_API void DrawWarmupSpawnMarkers(class AUTHUD* HUD, class UCanvas* Canvas);
 
-	/** Replay-only corner feed of fire-validation samples. No-op unless a demo is
-	 *  playing back. Reads the server-written FireVal_*.csv (newest in Saved/Logs, or
-	 *  the path in the `ncp.FireValReplayCsv` cvar) and draws each shot synced to the
-	 *  replayed server clock (GameState->GetServerWorldTimeSeconds). Pure client
-	 *  display — no replication, never runs in live play. */
-	NETCODEPLUS_API void DrawFireValReplayFeed(class AUTHUD* HUD, class UCanvas* Canvas);
-
 	/** Auto post-match high-res screenshot, shared by ElimPlus/Wipeout/iCTF (and Duel/Shaft via AWipeoutHUD).
 	 *  Fires ONCE, on the final scoreboard rather than the instant replay: it counts consecutive qualifying
 	 *  DrawHUD frames (match ended, not in a replay), which naturally pauses while the HUD is suspended during
