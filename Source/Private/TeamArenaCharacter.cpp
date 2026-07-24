@@ -4,6 +4,7 @@
 #include "TeamArenaCharacterMovement.h"
 #include "UTWeaponAttachment.h"
 #include "UTWeaponFix.h"
+#include "UTWeaponSkin.h"
 #include "GameFramework/PlayerController.h"
 #include "UTWorldSettings.h"
 #include "UTPlusSniper.h"
@@ -1211,6 +1212,411 @@ void ATeamArenaCharacter::SetAmbientSound(USoundBase* NewAmbientSound, bool bCle
 }
 
 
+static bool NCPHasExactWeaponSkinSelection(
+	const TArray<UUTWeaponSkin*>& Skins, FName WeaponTag, UUTWeaponSkin* Selection)
+{
+	int32 MatchingEntries = 0;
+	bool bFoundSelection = false;
+	for (UUTWeaponSkin* ExistingSkin : Skins)
+	{
+		if (ExistingSkin != nullptr &&
+			ExistingSkin->WeaponSkinCustomizationTag == WeaponTag)
+		{
+			++MatchingEntries;
+			bFoundSelection = bFoundSelection || ExistingSkin == Selection;
+		}
+	}
+	return Selection != nullptr
+		? MatchingEntries == 1 && bFoundSelection
+		: MatchingEntries == 0;
+}
+
+
+static void NCPReplaceWeaponSkinSelection(
+	TArray<UUTWeaponSkin*>& Skins, FName WeaponTag, UUTWeaponSkin* Selection)
+{
+	for (int32 Index = Skins.Num() - 1; Index >= 0; --Index)
+	{
+		UUTWeaponSkin* ExistingSkin = Skins[Index];
+		if (ExistingSkin != nullptr &&
+			ExistingSkin->WeaponSkinCustomizationTag == WeaponTag)
+		{
+			Skins.RemoveAt(Index);
+		}
+	}
+	if (Selection != nullptr)
+	{
+		Skins.Add(Selection);
+	}
+}
+
+
+void ATeamArenaCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	if (Role == ROLE_Authority)
+	{
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState))
+		{
+			bool bRemovedNullEntry = false;
+			for (int32 Index = PS->WeaponSkins.Num() - 1; Index >= 0; --Index)
+			{
+				if (PS->WeaponSkins[Index] == nullptr)
+				{
+					PS->WeaponSkins.RemoveAt(Index);
+					bRemovedNullEntry = true;
+				}
+			}
+			// Preserve any stock/profile entries outside our catalog. NCP resolves
+			// only its manifest, while explicit F5 changes replace the matching tag.
+			WeaponSkins = PS->WeaponSkins;
+			if (bRemovedNullEntry)
+			{
+				PS->ForceNetUpdate();
+			}
+			ForceNetUpdate();
+		}
+	}
+}
+
+
+bool ATeamArenaCharacter::AddInventory(AUTInventory* InvToAdd, bool bAutoActivate)
+{
+	const bool bAdded = Super::AddInventory(InvToAdd, bAutoActivate);
+	if (bAdded && Role == ROLE_Authority)
+	{
+		AUTWeapon* AddedWeapon = Cast<AUTWeapon>(InvToAdd);
+		// A dropped weapon keeps the physical skin already copied into it. Fresh
+		// inventory inherits this player's persistent server-approved preference.
+		if (AddedWeapon != nullptr && AddedWeapon->WeaponSkin == nullptr)
+		{
+			AddedWeapon->WeaponSkin = ResolveWeaponSkinForClass(AddedWeapon->GetClass());
+		}
+	}
+	return bAdded;
+}
+
+
+UUTWeaponSkin* ATeamArenaCharacter::ResolveWeaponSkinForClass(UClass* WeaponClassToMatch) const
+{
+	return AUTWeaponFix::FindWeaponSkinForClass(WeaponSkins, WeaponClassToMatch);
+}
+
+
+void ATeamArenaCharacter::SetSkinForWeapon(UUTWeaponSkin* Skin)
+{
+	if (Skin == nullptr)
+	{
+		return;
+	}
+	if (AUTWeaponFix::FindPreloadedWeaponSkin(Skin->GetPathName()) != Skin)
+	{
+		// Keep Epic's stock/profile path intact for assets outside NCP's manifest.
+		Super::SetSkinForWeapon(Skin);
+		return;
+	}
+	if (Role != ROLE_Authority || Skin->WeaponSkinCustomizationTag == NAME_None)
+	{
+		return;
+	}
+
+	bool bMatchesInventory = false;
+	for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
+	{
+		AUTWeapon* InventoryWeapon = *It;
+		if (InventoryWeapon != nullptr &&
+			AUTWeaponFix::IsWeaponSkinCompatible(Skin, InventoryWeapon->GetClass()))
+		{
+			bMatchesInventory = true;
+			break;
+		}
+	}
+	if (!bMatchesInventory)
+	{
+		return;
+	}
+
+	const FName WeaponTag = Skin->WeaponSkinCustomizationTag;
+	NCPReplaceWeaponSkinSelection(WeaponSkins, WeaponTag, Skin);
+
+	for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
+	{
+		AUTWeapon* InventoryWeapon = *It;
+		if (InventoryWeapon != nullptr &&
+			InventoryWeapon->WeaponSkinCustomizationTag == WeaponTag)
+		{
+			InventoryWeapon->WeaponSkin =
+				ResolveWeaponSkinForClass(InventoryWeapon->GetClass());
+		}
+	}
+
+	UpdateWeaponSkin();
+	if (Role == ROLE_Authority)
+	{
+		ForceNetUpdate();
+	}
+}
+
+
+bool ATeamArenaCharacter::ServerSetNCPWeaponSkin_Validate(
+	AUTWeapon* /*InWeapon*/, const FString& SkinPath)
+{
+	// Functional rejection happens in the implementation so a stale weapon ref
+	// during a switch cannot disconnect an otherwise legitimate client.
+	return SkinPath.Len() <= 512;
+}
+
+
+void ATeamArenaCharacter::ServerSetNCPWeaponSkin_Implementation(
+	AUTWeapon* InWeapon, const FString& SkinPath)
+{
+	if (Role != ROLE_Authority || InWeapon == nullptr || InWeapon->IsPendingKillPending() ||
+		!InWeapon->IsA(AUTWeaponFix::StaticClass()) || InWeapon->GetUTOwner() != this)
+	{
+		return;
+	}
+
+	bool bOwnedWeapon = false;
+	for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
+	{
+		if (*It == InWeapon)
+		{
+			bOwnedWeapon = true;
+			break;
+		}
+	}
+	AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+	if (!bOwnedWeapon || PS == nullptr || PS->bOnlySpectator)
+	{
+		return;
+	}
+	const FName WeaponTag = InWeapon->WeaponSkinCustomizationTag;
+	if (WeaponTag == NAME_None)
+	{
+		return;
+	}
+
+	// Count every owned, well-formed request before path resolution. This caps
+	// invalid and semantic no-op calls as well as successful visual mutations.
+	if (UWorld* World = GetWorld())
+	{
+		const float Now = World->GetTimeSeconds();
+		if (Now - WeaponSkinRequestWindowStart >= 1.f)
+		{
+			WeaponSkinRequestWindowStart = Now;
+			WeaponSkinRequestsInWindow = 0;
+		}
+		if (WeaponSkinRequestsInWindow >= 4)
+		{
+			return;
+		}
+		++WeaponSkinRequestsInWindow;
+	}
+
+	UUTWeaponSkin* Skin = nullptr;
+	if (!SkinPath.IsEmpty())
+	{
+		Skin = AUTWeaponFix::FindPreloadedWeaponSkin(SkinPath);
+		if (Skin == nullptr ||
+			Skin->WeaponSkinCustomizationTag != InWeapon->WeaponSkinCustomizationTag ||
+			!AUTWeaponFix::IsWeaponSkinCompatible(Skin, InWeapon->GetClass()) ||
+			!PS->ValidateEntitlementSingleObject(Skin))
+		{
+			return;
+		}
+	}
+	if (NCPHasExactWeaponSkinSelection(PS->WeaponSkins, WeaponTag, Skin) &&
+		NCPHasExactWeaponSkinSelection(WeaponSkins, WeaponTag, Skin))
+	{
+		return;
+	}
+
+	ApplyServerWeaponSkinSelection(InWeapon, Skin);
+}
+
+
+void ATeamArenaCharacter::ApplyServerWeaponSkinSelection(
+	AUTWeapon* InWeapon, UUTWeaponSkin* Skin)
+{
+	AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+	if (Role != ROLE_Authority || InWeapon == nullptr || PS == nullptr)
+	{
+		return;
+	}
+
+	const FName WeaponTag = InWeapon->WeaponSkinCustomizationTag;
+	if (WeaponTag == NAME_None ||
+		(Skin != nullptr && Skin->WeaponSkinCustomizationTag != WeaponTag))
+	{
+		return;
+	}
+	if (NCPHasExactWeaponSkinSelection(PS->WeaponSkins, WeaponTag, Skin) &&
+		NCPHasExactWeaponSkinSelection(WeaponSkins, WeaponTag, Skin))
+	{
+		return;
+	}
+
+	// Persistent choice and this pawn's physical choice share the requested
+	// family only. Unrelated skins picked up from dropped weapons remain intact.
+	NCPReplaceWeaponSkinSelection(PS->WeaponSkins, WeaponTag, Skin);
+	NCPReplaceWeaponSkinSelection(WeaponSkins, WeaponTag, Skin);
+	for (TInventoryIterator<AUTWeapon> It(this); It; ++It)
+	{
+		AUTWeapon* InventoryWeapon = *It;
+		if (InventoryWeapon != nullptr &&
+			InventoryWeapon->WeaponSkinCustomizationTag == WeaponTag)
+		{
+			InventoryWeapon->WeaponSkin =
+				AUTWeaponFix::FindWeaponSkinForClass(WeaponSkins, InventoryWeapon->GetClass());
+		}
+	}
+
+	PS->ForceNetUpdate();
+	ForceNetUpdate();
+	UpdateWeaponSkin();
+}
+
+
+void ATeamArenaCharacter::UpdateWeaponSkinPrefFromProfile(AUTWeapon* InWeapon)
+{
+	AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(InWeapon);
+	if (FixWeapon == nullptr || !IsLocalPlayerPawn())
+	{
+		Super::UpdateWeaponSkinPrefFromProfile(InWeapon);
+		return;
+	}
+
+	SubmitConfiguredWeaponSkin(FixWeapon, false);
+}
+
+
+void ATeamArenaCharacter::SubmitConfiguredWeaponSkin(AUTWeaponFix* FixWeapon, bool bForce)
+{
+	if (FixWeapon == nullptr || !IsLocalPlayerPawn())
+	{
+		return;
+	}
+
+	UUTWeaponSkin* DesiredSkin = AUTWeaponFix::GetConfiguredWeaponSkin(FixWeapon);
+	const FString DesiredPath = DesiredSkin != nullptr
+		? DesiredSkin->GetPathName()
+		: FString();
+	AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+	UUTWeaponSkin* AuthoritativeSkin = PS != nullptr
+		? AUTWeaponFix::FindWeaponSkinForClass(PS->WeaponSkins, FixWeapon->GetClass())
+		: nullptr;
+	const FString AuthoritativePath = AuthoritativeSkin != nullptr
+		? AuthoritativeSkin->GetPathName()
+		: FString();
+	if (!bForce && AuthoritativePath == DesiredPath)
+	{
+		return;
+	}
+
+	// PlayerState is the persistent acknowledgement. Character state may differ
+	// intentionally after a skinned dropped pickup; ordinary re-equips preserve it.
+	ServerSetNCPWeaponSkin(FixWeapon, DesiredPath);
+}
+
+
+void ATeamArenaCharacter::ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin)
+{
+	AUTWeaponAttachment* Attachment = WeaponAttachment;
+	if (Attachment == nullptr || Attachment->Mesh == nullptr ||
+		Attachment->Mesh->GetNumMaterials() < 1)
+	{
+		SkinnedWeaponAttachment.Reset();
+		OriginalWeaponAttachmentMaterial = nullptr;
+		AppliedWeaponAttachmentMaterial = nullptr;
+		WeaponAttachmentSkinMID = nullptr;
+		bCapturedWeaponAttachmentMaterial = false;
+		return;
+	}
+
+	if (SkinnedWeaponAttachment.Get() != Attachment)
+	{
+		SkinnedWeaponAttachment = Attachment;
+		OriginalWeaponAttachmentMaterial = nullptr;
+		AppliedWeaponAttachmentMaterial = nullptr;
+		WeaponAttachmentSkinMID = nullptr;
+		bCapturedWeaponAttachmentMaterial = false;
+	}
+
+	while (Attachment->SavedMeshMaterials.Num() < Attachment->Mesh->GetNumMaterials())
+	{
+		Attachment->SavedMeshMaterials.Add(
+			Attachment->Mesh->GetMaterial(Attachment->SavedMeshMaterials.Num()));
+	}
+	if (!bCapturedWeaponAttachmentMaterial)
+	{
+		OriginalWeaponAttachmentMaterial = Attachment->SavedMeshMaterials[0];
+		bCapturedWeaponAttachmentMaterial = true;
+	}
+
+	const bool bUseSelectedMaterial = Skin != nullptr && Skin->Material != nullptr;
+	UMaterialInterface* DesiredParent =
+		bUseSelectedMaterial
+		? Skin->Material
+		: OriginalWeaponAttachmentMaterial;
+	if (DesiredParent != AppliedWeaponAttachmentMaterial ||
+		bUseSelectedMaterial != (WeaponAttachmentSkinMID != nullptr))
+	{
+		AppliedWeaponAttachmentMaterial = DesiredParent;
+		WeaponAttachmentSkinMID =
+			(bUseSelectedMaterial && DesiredParent != nullptr)
+			? UMaterialInstanceDynamic::Create(DesiredParent, Attachment->Mesh)
+			: nullptr;
+	}
+
+	UMaterialInterface* DesiredSlotMaterial = WeaponAttachmentSkinMID != nullptr
+		? Cast<UMaterialInterface>(WeaponAttachmentSkinMID)
+		: OriginalWeaponAttachmentMaterial;
+	Attachment->SavedMeshMaterials[0] = DesiredSlotMaterial;
+	if (GetSkin() == nullptr && Attachment->Mesh->GetMaterial(0) != DesiredSlotMaterial)
+	{
+		Attachment->Mesh->SetMaterial(0, DesiredSlotMaterial);
+	}
+}
+
+
+void ATeamArenaCharacter::UpdateWeaponSkin()
+{
+	if (WeaponClass == nullptr ||
+		!WeaponClass->IsChildOf(AUTWeaponFix::StaticClass()))
+	{
+		SkinnedWeaponAttachment.Reset();
+		OriginalWeaponAttachmentMaterial = nullptr;
+		AppliedWeaponAttachmentMaterial = nullptr;
+		WeaponAttachmentSkinMID = nullptr;
+		bCapturedWeaponAttachmentMaterial = false;
+		Super::UpdateWeaponSkin();
+		return;
+	}
+
+	UUTWeaponSkin* ReplicatedSkin = ResolveWeaponSkinForClass(WeaponClass);
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		ApplyWeaponAttachmentSkin(ReplicatedSkin);
+	}
+
+	if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(GetWeapon()))
+	{
+		FixWeapon->ApplyResolvedWeaponSkin(ReplicatedSkin);
+	}
+}
+
+
+void ATeamArenaCharacter::UpdateSkin()
+{
+	Super::UpdateSkin();
+	if (WeaponClass != nullptr && WeaponClass->IsChildOf(AUTWeaponFix::StaticClass()))
+	{
+		UpdateWeaponSkin();
+	}
+}
+
+
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
 	// Flush any forced-model apply coalesced from this frame's replication burst (see NotifyTeamChanged).
@@ -1630,6 +2036,10 @@ void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
 			SetAmbientSound(LinkGun->OverheatSound, true);
 		}
 	}
+
+	// OnRepWeaponSkin may have run before a remote first-person weapon existed.
+	// Re-resolve now so a newly spectated player shows the same skin as third person.
+	UpdateWeaponSkin();
 }
 
 

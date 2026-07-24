@@ -15,6 +15,9 @@
 class UTeamArenaCharacterMovement;
 class ACTFStatsReplicator;
 class AClutchRoundState;
+class AUTWeaponFix;
+class UUTWeaponSkin;
+class UMaterialInstanceDynamic;
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -53,6 +56,17 @@ public:
 		AUTCharacter* ShotInstigator, float PredictionTime) override;
 
 	virtual void Tick(float DeltaTime) override;
+	virtual void PossessedBy(AController* NewController) override;
+	virtual bool AddInventory(AUTInventory* InvToAdd, bool bAutoActivate) override;
+	virtual void SetSkinForWeapon(UUTWeaponSkin* WeaponSkin) override;
+	virtual void UpdateWeaponSkinPrefFromProfile(AUTWeapon* Weapon) override;
+	virtual void UpdateWeaponSkin() override;
+	virtual void UpdateSkin() override;
+	void SubmitConfiguredWeaponSkin(AUTWeaponFix* Weapon, bool bForce);
+
+	/** Submit the local F5 choice for an owned weapon. Empty SkinPath is Default. */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerSetNCPWeaponSkin(AUTWeapon* InWeapon, const FString& SkinPath);
 
 	// Reject ambient loops emitted by inactive stock weapons before they can become
 	// replicated, persistent character audio (notably the Link Gun overheat loop).
@@ -138,6 +152,25 @@ protected:
 
 	// Saved original transform to restore when weapon is shown
 	FTransform SavedFirstPersonMeshTransform;
+
+	// --- Replicated weapon skins ---
+	/** Server-side burst limiter for the reliable cosmetic selection RPC. */
+	float WeaponSkinRequestWindowStart = 0.f;
+	uint8 WeaponSkinRequestsInWindow = 0;
+
+	/** Per-attachment slot-0 cache. Rebuilt only when the attachment or parent changes. */
+	TWeakObjectPtr<AUTWeaponAttachment> SkinnedWeaponAttachment;
+	UPROPERTY(Transient)
+	UMaterialInterface* OriginalWeaponAttachmentMaterial = nullptr;
+	UPROPERTY(Transient)
+	UMaterialInterface* AppliedWeaponAttachmentMaterial = nullptr;
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* WeaponAttachmentSkinMID = nullptr;
+	bool bCapturedWeaponAttachmentMaterial = false;
+
+	UUTWeaponSkin* ResolveWeaponSkinForClass(UClass* WeaponClassToMatch) const;
+	void ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin);
+	void ApplyServerWeaponSkinSelection(AUTWeapon* InWeapon, UUTWeaponSkin* Skin);
 
 	// --- Spectator rotation smoothing ---
 	// Smoothed rotation for spectators viewing this character (prevents jitter at 480fps)

@@ -8,11 +8,11 @@
 #include "UTWeapon.h"
 #include "UTWeaponFix.h"
 #include "UTWeaponSkin.h"
+#include "TeamArenaCharacter.h"
 #include "UTProfileSettings.h"
 #include "UTGameplayStatics.h"
 #include "UTGameMode.h"
 #include "UTGameState.h"
-#include "AssetRegistryModule.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Widgets/Input/SNumericEntryBox.h"  // SNumericEntryBox<float> (was leaking transitively via the unity build)
@@ -22,12 +22,8 @@
 
 #define LOCTEXT_NAMESPACE "WeaponSkins"
 
-/** Static cache — skins only loaded once per session.
- *  Skin pointers are AddToRoot'd to prevent GC while cached. */
-static bool bSkinsCached = false;
-static TMap<FName, TArray<UUTWeaponSkin*>> CachedSkinsByTag;
+/** Main-menu fallback populated from the last in-game inventory. */
 static TArray<FNetcodePlusWeaponInfo> CachedWeapons;
-static TArray<UUTWeaponSkin*> CachedSkinGCRefs; // Prevents GC of cached skin assets
 
 void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 {
@@ -493,40 +489,25 @@ void SUTWeaponSkinSelector::GatherWeapons()
 
 void SUTWeaponSkinSelector::GatherSkins()
 {
-	if (bSkinsCached)
+	SkinsByTag.Empty();
+
+	// Lifecycle preload owns all asset loading. Opening F5 only groups pointers
+	// already resident in the shared catalog, so the menu cannot reintroduce a
+	// synchronous first-open hitch.
+	TArray<UUTWeaponSkin*> CatalogSkins;
+	AUTWeaponFix::GetPreloadedWeaponSkins(CatalogSkins);
+	if (CatalogSkins.Num() == 0)
 	{
-		SkinsByTag = CachedSkinsByTag;
-		// Update bHasSkins on weapons
 		for (auto& W : Weapons)
 		{
-			W.bHasSkins = SkinsByTag.Contains(W.Tag) && SkinsByTag[W.Tag].Num() > 0;
+			W.bHasSkins = false;
 		}
 		return;
 	}
 
-	SkinsByTag.Empty();
-
-	FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	IAssetRegistry& AR = ARM.Get();
-
-	TArray<FAssetData> AssetList;
-	AR.GetAssetsByClass(UUTWeaponSkin::StaticClass()->GetFName(), AssetList, true);
-
-	// Build a map of weapon class → tag from our weapon list
-	// Also build set of valid weapon classes for skin matching
-	TMap<FString, FName> WeaponClassToTag; // WeaponType class path → tag
-	for (const auto& W : Weapons)
-	{
-		if (W.WeaponClass)
-		{
-			WeaponClassToTag.Add(W.WeaponClass->GetPathName(), W.Tag);
-		}
-	}
-
 	TSet<FString> SeenSkinPaths; // Deduplicate
-	for (const FAssetData& Asset : AssetList)
+	for (UUTWeaponSkin* Skin : CatalogSkins)
 	{
-		UUTWeaponSkin* Skin = Cast<UUTWeaponSkin>(Asset.GetAsset());
 		if (!Skin) continue;
 		if (Skin->WeaponSkinCustomizationTag == NAME_None) continue;
 
@@ -543,18 +524,9 @@ void SUTWeaponSkinSelector::GatherSkins()
 		for (const auto& W : Weapons)
 		{
 			if (!W.WeaponClass) continue;
+			if (Skin->WeaponSkinCustomizationTag != W.Tag) continue;
 
-			// Direct class path match
-			if (SkinWeaponType.Contains(W.WeaponClass->GetName()))
-			{
-				bMatchesInventory = true;
-				MatchedTag = W.Tag;
-				break;
-			}
-
-			// Check if our weapon is a child of the skin's target class
-			UClass* SkinTargetClass = Skin->WeaponType.TryLoadClass<AUTWeapon>();
-			if (SkinTargetClass && W.WeaponClass->IsChildOf(SkinTargetClass))
+			if (AUTWeaponFix::IsWeaponSkinCompatible(Skin, W.WeaponClass))
 			{
 				bMatchesInventory = true;
 				MatchedTag = W.Tag;
@@ -590,37 +562,10 @@ void SUTWeaponSkinSelector::GatherSkins()
 		});
 	}
 
-	// Cache and prevent GC on skin assets
-	CachedSkinsByTag = SkinsByTag;
-	CachedWeapons = Weapons;
-	// Clean up any previous root refs before adding new ones
-	for (UUTWeaponSkin* OldSkin : CachedSkinGCRefs)
-	{
-		if (OldSkin && OldSkin->IsRooted())
-		{
-			OldSkin->RemoveFromRoot();
-		}
-	}
-	CachedSkinGCRefs.Empty();
-	for (auto& Pair : SkinsByTag)
-	{
-		for (UUTWeaponSkin* Skin : Pair.Value)
-		{
-			if (Skin)
-			{
-				Skin->AddToRoot();
-				CachedSkinGCRefs.Add(Skin);
-			}
-		}
-	}
-	bSkinsCached = true;
 }
 
 void SUTWeaponSkinSelector::LoadSettings()
 {
-	// Ensure weapon settings are loaded
-	AUTWeaponFix::LoadWeaponSettings();
-
 	// Copy hide state from the static map (keyed by class name)
 	HideState = AUTWeaponFix::HiddenWeaponsByTag;
 
@@ -757,7 +702,6 @@ void SUTWeaponSkinSelector::SaveAndApply()
 					AUTWeaponFix::SavedSkinPaths.Add(W.Tag, SkinPath);
 					if (SelectedSkin)
 					{
-						SelectedSkin->AddToRoot();
 						AUTWeaponFix::CachedSkinAssets.Add(W.Tag, SelectedSkin);
 					}
 				}
@@ -780,6 +724,21 @@ void SUTWeaponSkinSelector::SaveAndApply()
 		AUTWeapon* CurWeap = UTChar->GetWeapon();
 		bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(FName(*CurWeap->GetClass()->GetName()));
 		AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, bHidden && *bHidden);
+		if (ATeamArenaCharacter* TeamChar = Cast<ATeamArenaCharacter>(UTChar))
+		{
+			if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(CurWeap))
+			{
+				TeamChar->SubmitConfiguredWeaponSkin(FixWeapon, true);
+			}
+			else
+			{
+				UTChar->UpdateWeaponSkinPrefFromProfile(CurWeap);
+			}
+		}
+		else
+		{
+			UTChar->UpdateWeaponSkinPrefFromProfile(CurWeap);
+		}
 	}
 
 	// Send hitscan choice to server via console command — defers through the command pipeline
@@ -1080,17 +1039,7 @@ FReply SUTWeaponSkinSelector::OnKeyDown(const FGeometry& MyGeometry, const FKeyE
 /** Static cleanup — call when module shuts down or cache should be invalidated */
 void SUTWeaponSkinSelector_CleanupCache()
 {
-	for (UUTWeaponSkin* Skin : CachedSkinGCRefs)
-	{
-		if (Skin && Skin->IsRooted())
-		{
-			Skin->RemoveFromRoot();
-		}
-	}
-	CachedSkinGCRefs.Empty();
-	CachedSkinsByTag.Empty();
 	CachedWeapons.Empty();
-	bSkinsCached = false;
 }
 
 SUTWeaponSkinSelector::~SUTWeaponSkinSelector()

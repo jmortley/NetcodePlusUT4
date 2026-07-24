@@ -18,7 +18,12 @@
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTDualWeapon.h"   // ApplyWeaponHideState: dual-enforcer LeftMesh
 #include "UTWeaponSkin.h"
-#include "UObject/UObjectIterator.h"
+#include "AssetRegistryModule.h"
+#include "Modules/ModuleManager.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Misc/ConfigCacheIni.h"
+#include "HAL/PlatformTime.h"
+#include "UObject/GCObject.h"
 #include "ClientHitsounds.h"
 #include "EngineUtils.h"
 #include "UTPlayerState.h"
@@ -43,6 +48,16 @@ static TAutoConsoleVariable<int32> CVarFireDebug(
     TEXT("ncp.FireDebug"), 0,
     TEXT("Client fire-input diagnostics: 1=log every StartFire/StopFire/retry decision (traces the held-M1 beam stall). Off by default, no behaviour change."),
     ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarSkinTiming(
+    TEXT("ncp.SkinTiming"), 0,
+    TEXT("Weapon-skin timing diagnostics: 1=log settings preload, SetSkin, and BringUp timing. Off by default."),
+    ECVF_Default);
+
+static FORCEINLINE bool SkinTiming()
+{
+    return CVarSkinTiming.GetValueOnGameThread() > 0;
+}
 
 static FORCEINLINE bool FireDbg()
 {
@@ -262,6 +277,22 @@ static int32 GetClampedProjectileHz()
 TMap<FName, bool> AUTWeaponFix::HiddenWeaponsByTag;
 TMap<FName, FString> AUTWeaponFix::SavedSkinPaths;
 TMap<FName, UUTWeaponSkin*> AUTWeaponFix::CachedSkinAssets;
+static TMap<FName, FString> PendingWeaponSkinPaths;
+static TMap<FString, UUTWeaponSkin*> PreloadedWeaponSkinCatalog;
+static bool bWeaponSkinCatalogReady = false;
+
+class FNCPWeaponSkinCatalogReferences : public FGCObject
+{
+public:
+	TArray<UObject*> Assets;
+
+	virtual void AddReferencedObjects(FReferenceCollector& Collector) override
+	{
+		Collector.AddReferencedObjects(Assets);
+	}
+};
+
+static FNCPWeaponSkinCatalogReferences* WeaponSkinCatalogReferences = nullptr;
 bool AUTWeaponFix::bWeaponSettingsLoaded = false;
 // Default = BP-parity hide; true = classic camera-beam hide (pre-2026-07-19).
 bool AUTWeaponFix::bClassicWeaponHide = false;
@@ -270,11 +301,229 @@ float AUTWeaponFix::HiddenBeamBackOffset = 10.f;
 float AUTWeaponFix::HiddenBeamDownOffset = 35.f;
 
 static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings");
+static const FName WEAPON_SKIN_CATALOG_ROOT(TEXT("/Game/Blueprints/UT+/UT+/WeaponSkinsPlus"));
+
+// Versioned public selection manifest shared by the current 38-asset RC PAK
+// and the older 59-asset staged cook. These 29 paths are unrestricted and carry
+// a real weapon-family tag; utility and cook-specific variants remain invalid.
+// Future folder additions do not become network-valid automatically.
+static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
+{
+	TEXT("BlackDeath"),
+	TEXT("FlakDefault"),
+	TEXT("FlakPink"),
+	TEXT("FlakRedDeath"),
+	TEXT("FlakVoid"),
+	TEXT("InvisibleBio"),
+	TEXT("LinkBee"),
+	TEXT("LinkBeeElim"),
+	TEXT("LinkFreedom"),
+	TEXT("LinkMint"),
+	TEXT("Rocket99"),
+	TEXT("Rocket99Elim"),
+	TEXT("RocketBee"),
+	TEXT("RocketBeeElim"),
+	TEXT("RocketBurn"),
+	TEXT("RocketBurnElim"),
+	TEXT("RocketMahogany"),
+	TEXT("RocketMahoganyElim"),
+	TEXT("RocketSnowElim"),
+	TEXT("RocketTiger"),
+	TEXT("ShockBlackTiger"),
+	TEXT("ShockBlueBird"),
+	TEXT("ShockBlueBirdElim"),
+	TEXT("ShockFreedom"),
+	TEXT("SniperBlueBird"),
+	TEXT("SniperMahogany"),
+	TEXT("SniperPink"),
+	TEXT("SniperRedBird"),
+	TEXT("SniperSport")
+};
+
+static FString GetWeaponSkinObjectPath(const TCHAR* AssetName)
+{
+	return FString::Printf(TEXT("%s/%s.%s"),
+		*WEAPON_SKIN_CATALOG_ROOT.ToString(), AssetName, AssetName);
+}
+
+static int32 RefreshWeaponSkinCatalog()
+{
+	FAssetRegistryModule& AssetRegistryModule =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	TArray<FAssetData> Assets;
+	AssetRegistryModule.Get().GetAssetsByPath(WEAPON_SKIN_CATALOG_ROOT, Assets, true);
+	TMap<FString, FAssetData> ManifestAssetData;
+	for (const FAssetData& Asset : Assets)
+	{
+		if (Asset.AssetClass != UUTWeaponSkin::StaticClass()->GetFName())
+		{
+			continue;
+		}
+		ManifestAssetData.Add(Asset.ObjectPath.ToString(), Asset);
+	}
+
+	TMap<FString, UUTWeaponSkin*> NewCatalog;
+	int32 LoadedRequiredCount = 0;
+	auto LoadManifestGroup = [&ManifestAssetData, &NewCatalog](
+		const TCHAR* const* AssetNames, int32 AssetCount, int32& LoadedCount)
+	{
+		for (int32 Index = 0; Index < AssetCount; ++Index)
+		{
+			const FString ObjectPath = GetWeaponSkinObjectPath(AssetNames[Index]);
+			const FAssetData* AssetData = ManifestAssetData.Find(ObjectPath);
+			if (AssetData == nullptr)
+			{
+				continue;
+			}
+
+			// This is the only synchronous load in the feature, and it occurs during
+			// lifecycle preload. Unlisted folder assets are never loaded or approved.
+			UUTWeaponSkin* Skin = Cast<UUTWeaponSkin>(AssetData->GetAsset());
+			if (Skin == nullptr || Skin->GetPathName() != ObjectPath ||
+				Skin->WeaponType.ToString().IsEmpty() ||
+				Skin->WeaponSkinCustomizationTag == NAME_None || Skin->bRequiresItem ||
+				Skin->RequiredAchievement != NAME_None)
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("Weapon skin manifest entry rejected: %s"), *ObjectPath);
+				continue;
+			}
+
+			NewCatalog.Add(ObjectPath, Skin);
+			++LoadedCount;
+		}
+	};
+
+	LoadManifestGroup(REQUIRED_WEAPON_SKIN_ASSETS,
+		ARRAY_COUNT(REQUIRED_WEAPON_SKIN_ASSETS), LoadedRequiredCount);
+
+	if (LoadedRequiredCount == ARRAY_COUNT(REQUIRED_WEAPON_SKIN_ASSETS))
+	{
+		if (WeaponSkinCatalogReferences == nullptr)
+		{
+			WeaponSkinCatalogReferences = new FNCPWeaponSkinCatalogReferences();
+		}
+		WeaponSkinCatalogReferences->Assets.Empty(NewCatalog.Num());
+		for (const TPair<FString, UUTWeaponSkin*>& Pair : NewCatalog)
+		{
+			WeaponSkinCatalogReferences->Assets.Add(Pair.Value);
+		}
+		PreloadedWeaponSkinCatalog = MoveTemp(NewCatalog);
+		bWeaponSkinCatalogReady = true;
+	}
+	else if (!bWeaponSkinCatalogReady)
+	{
+		PreloadedWeaponSkinCatalog.Empty();
+	}
+
+	if (!bWeaponSkinCatalogReady)
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("Weapon skin manifest incomplete: loaded=%d required=%d"),
+			LoadedRequiredCount, ARRAY_COUNT(REQUIRED_WEAPON_SKIN_ASSETS));
+	}
+	return PreloadedWeaponSkinCatalog.Num();
+}
+
+UUTWeaponSkin* AUTWeaponFix::FindPreloadedWeaponSkin(const FString& SkinPath)
+{
+	return (!bWeaponSkinCatalogReady || SkinPath.IsEmpty())
+		? nullptr
+		: PreloadedWeaponSkinCatalog.FindRef(SkinPath);
+}
+
+void AUTWeaponFix::GetPreloadedWeaponSkins(TArray<UUTWeaponSkin*>& OutSkins)
+{
+	if (!bWeaponSkinCatalogReady)
+	{
+		OutSkins.Empty();
+		return;
+	}
+	OutSkins.Empty(PreloadedWeaponSkinCatalog.Num());
+	PreloadedWeaponSkinCatalog.GenerateValueArray(OutSkins);
+	OutSkins.Sort([](const UUTWeaponSkin& A, const UUTWeaponSkin& B)
+	{
+		return A.GetPathName() < B.GetPathName();
+	});
+}
+
+bool AUTWeaponFix::IsWeaponSkinCompatible(UUTWeaponSkin* Skin, UClass* WeaponClass)
+{
+	if (Skin == nullptr || WeaponClass == nullptr)
+	{
+		return false;
+	}
+	const AUTWeapon* WeaponCDO = Cast<AUTWeapon>(WeaponClass->GetDefaultObject());
+	if (Skin->WeaponSkinCustomizationTag == NAME_None || WeaponCDO == nullptr ||
+		WeaponCDO->WeaponSkinCustomizationTag == NAME_None ||
+		Skin->WeaponSkinCustomizationTag != WeaponCDO->WeaponSkinCustomizationTag)
+	{
+		return false;
+	}
+
+	FString TargetClassPath = Skin->WeaponType.ToString();
+	TargetClassPath.RemoveFromStart(TEXT("BlueprintGeneratedClass'"));
+	TargetClassPath.RemoveFromStart(TEXT("Class'"));
+	TargetClassPath.RemoveFromEnd(TEXT("'"));
+	for (UClass* Candidate = WeaponClass;
+		Candidate != nullptr && Candidate->IsChildOf(AUTWeapon::StaticClass());
+		Candidate = Candidate->GetSuperClass())
+	{
+		if (Candidate->GetPathName() == TargetClassPath)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+UUTWeaponSkin* AUTWeaponFix::FindWeaponSkinForClass(
+	const TArray<UUTWeaponSkin*>& WeaponSkins, UClass* WeaponClass)
+{
+	for (int32 Index = WeaponSkins.Num() - 1; Index >= 0; --Index)
+	{
+		UUTWeaponSkin* Candidate = WeaponSkins[Index];
+		if (Candidate != nullptr &&
+			FindPreloadedWeaponSkin(Candidate->GetPathName()) == Candidate &&
+			IsWeaponSkinCompatible(Candidate, WeaponClass))
+		{
+			return Candidate;
+		}
+	}
+	return nullptr;
+}
+
+FString AUTWeaponFix::GetConfiguredWeaponSkinPath(const AUTWeapon* Weapon)
+{
+	if (!bSkinsEnabled || Weapon == nullptr || Weapon->WeaponSkinCustomizationTag == NAME_None)
+	{
+		return FString();
+	}
+
+	const FString* SkinPath = SavedSkinPaths.Find(Weapon->WeaponSkinCustomizationTag);
+	return SkinPath != nullptr ? *SkinPath : FString();
+}
+
+UUTWeaponSkin* AUTWeaponFix::GetConfiguredWeaponSkin(const AUTWeapon* Weapon)
+{
+	if (Weapon == nullptr)
+	{
+		return nullptr;
+	}
+
+	UUTWeaponSkin* Skin = FindPreloadedWeaponSkin(GetConfiguredWeaponSkinPath(Weapon));
+	return IsWeaponSkinCompatible(Skin, Weapon->GetClass()) ? Skin : nullptr;
+}
 
 void AUTWeaponFix::LoadWeaponSettings()
 {
-	if (bWeaponSettingsLoaded) return;
+	if (bWeaponSettingsLoaded || GConfig == nullptr) return;
 	bWeaponSettingsLoaded = true;
+	const bool bLogTiming = SkinTiming();
+	const double LoadStartTime = bLogTiming ? FPlatformTime::Seconds() : 0.0;
+	const int32 CatalogSkinCount = bSkinsEnabled ? RefreshWeaponSkinCatalog() : 0;
+	int32 LoadedSelectionCount = 0;
 
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
@@ -297,53 +546,127 @@ void AUTWeaponFix::LoadWeaponSettings()
 	// this option (and untouched seq-51 configs) render without any ini edit.
 	GConfig->GetBool(WEAPON_SETTINGS_SECTION, TEXT("ClassicWeaponHide"), bClassicWeaponHide, ModIniPath);
 
-	// Load hide settings — read keys by class name
-	// We iterate weapon classes to get all possible class names, then check Mod.ini for each
-	TSet<FName> SeenSkinTags;
-	for (TObjectIterator<UClass> It; It; ++It)
+	// Enumerate persisted keys directly so settings can be loaded before map packages
+	// (and their Blueprint weapon classes) are resident.
+	FConfigSection* SettingsSection = GConfig->GetSectionPrivate(
+		WEAPON_SETTINGS_SECTION, false, true, ModIniPath);
+	if (SettingsSection != nullptr)
 	{
-		if (It->IsChildOf(AUTWeapon::StaticClass()) && !It->HasAnyClassFlags(CLASS_Abstract))
+		TSet<FName> SeenSkinTags;
+		for (FConfigSection::TIterator It(*SettingsSection); It; ++It)
 		{
-			FName HideKey = FName(*It->GetName());
-			if (!HiddenWeaponsByTag.Contains(HideKey))
+			const FString Key = It.Key().ToString();
+			const FString Value = It.Value().GetValue();
+			if (Key.StartsWith(TEXT("Hide.")))
 			{
-				FString Key = FString::Printf(TEXT("Hide.%s"), *HideKey.ToString());
-				FString Value;
-				if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *Key, Value, ModIniPath))
+				const FName HideKey(*Key.Mid(5));
+				if (HideKey != NAME_None)
 				{
-					HiddenWeaponsByTag.Add(HideKey, Value == TEXT("1"));
+					HiddenWeaponsByTag.Add(HideKey,
+						Value == TEXT("1") || Value.Equals(TEXT("true"), ESearchCase::IgnoreCase));
 				}
 			}
-
-			// Load saved skin paths — keyed by WeaponSkinCustomizationTag.
-			// Disabled via bSkinsEnabled gate (see UTWeaponFix.h): LoadObject sync
-			// load hitches the main thread, and MIDs aren't being applied anyway.
-			if (bSkinsEnabled)
+			else if (bSkinsEnabled && !IsRunningDedicatedServer() &&
+				Key.StartsWith(TEXT("Skin.")) && !Value.IsEmpty())
 			{
-				AUTWeapon* WeaponCDO = Cast<AUTWeapon>(It->GetDefaultObject());
-				if (WeaponCDO && WeaponCDO->WeaponSkinCustomizationTag != NAME_None)
+				const FName SkinTag(*Key.Mid(5));
+				if (SkinTag != NAME_None && !SeenSkinTags.Contains(SkinTag))
 				{
-					FName Tag = WeaponCDO->WeaponSkinCustomizationTag;
-					if (!SeenSkinTags.Contains(Tag))
+					SeenSkinTags.Add(SkinTag);
+					SavedSkinPaths.Add(SkinTag, Value);
+					if (UUTWeaponSkin* Skin = FindPreloadedWeaponSkin(Value))
 					{
-						SeenSkinTags.Add(Tag);
-						FString SkinKey = FString::Printf(TEXT("Skin.%s"), *Tag.ToString());
-						FString SkinPath;
-						if (GConfig->GetString(WEAPON_SETTINGS_SECTION, *SkinKey, SkinPath, ModIniPath) && !SkinPath.IsEmpty())
-						{
-							SavedSkinPaths.Add(Tag, SkinPath);
-							UUTWeaponSkin* Skin = LoadObject<UUTWeaponSkin>(nullptr, *SkinPath);
-							if (Skin)
-							{
-								Skin->AddToRoot();
-								CachedSkinAssets.Add(Tag, Skin);
-							}
-						}
+						CachedSkinAssets.Add(SkinTag, Skin);
+						++LoadedSelectionCount;
+					}
+					else
+					{
+						PendingWeaponSkinPaths.Add(SkinTag, Value);
+						UE_LOG(LogUTWeaponFix, Warning,
+							TEXT("Weapon skin preload deferred: tag=%s path=%s"),
+							*SkinTag.ToString(), *Value);
 					}
 				}
 			}
 		}
 	}
+
+	if (bLogTiming)
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[SkinTiming] catalog/settings preload: catalog=%d selected=%d time=%.3fms"),
+			CatalogSkinCount, LoadedSelectionCount,
+			(FPlatformTime::Seconds() - LoadStartTime) * 1000.0);
+	}
+}
+
+void AUTWeaponFix::RetryPendingWeaponSkins()
+{
+	const bool bLogTiming = SkinTiming();
+	const double RetryStartTime = bLogTiming ? FPlatformTime::Seconds() : 0.0;
+	const int32 CatalogSkinCount = bSkinsEnabled
+		? (bWeaponSkinCatalogReady
+			? PreloadedWeaponSkinCatalog.Num()
+			: RefreshWeaponSkinCatalog())
+		: 0;
+	if (IsRunningDedicatedServer() || PendingWeaponSkinPaths.Num() == 0)
+	{
+		if (bLogTiming)
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[SkinTiming] catalog retry: catalog=%d time=%.3fms"),
+				CatalogSkinCount,
+				(FPlatformTime::Seconds() - RetryStartTime) * 1000.0);
+		}
+		return;
+	}
+
+	const TMap<FName, FString> RetryPaths = PendingWeaponSkinPaths;
+	PendingWeaponSkinPaths.Empty();
+	int32 LoadedSkinCount = 0;
+
+	for (const TPair<FName, FString>& Pair : RetryPaths)
+	{
+		const FString* CurrentPath = SavedSkinPaths.Find(Pair.Key);
+		if (CurrentPath == nullptr || *CurrentPath != Pair.Value)
+		{
+			continue;
+		}
+
+		if (UUTWeaponSkin* Skin = FindPreloadedWeaponSkin(Pair.Value))
+		{
+			CachedSkinAssets.Add(Pair.Key, Skin);
+			++LoadedSkinCount;
+		}
+		else
+		{
+			PendingWeaponSkinPaths.Add(Pair.Key, Pair.Value);
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("Weapon skin unavailable after world initialization: tag=%s path=%s"),
+				*Pair.Key.ToString(), *Pair.Value);
+		}
+	}
+
+	if (bLogTiming)
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[SkinTiming] world-init retry: catalog=%d requested=%d loaded=%d pending=%d time=%.3fms"),
+			CatalogSkinCount, RetryPaths.Num(), LoadedSkinCount,
+			PendingWeaponSkinPaths.Num(),
+			(FPlatformTime::Seconds() - RetryStartTime) * 1000.0);
+	}
+}
+
+void AUTWeaponFix::CleanupWeaponSettings()
+{
+	CachedSkinAssets.Empty();
+	SavedSkinPaths.Empty();
+	PendingWeaponSkinPaths.Empty();
+	PreloadedWeaponSkinCatalog.Empty();
+	bWeaponSkinCatalogReady = false;
+	delete WeaponSkinCatalogReferences;
+	WeaponSkinCatalogReferences = nullptr;
+	bWeaponSettingsLoaded = false;
 }
 
 void AUTWeaponFix::SaveWeaponSettings()
@@ -386,6 +709,10 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     LastShockCoreSpawnTime = 0.0f;
     LastFlakShellSpawnTime = 0.0f;
     MouseDebounceWindow = 0.030f;  // 30ms — mouse-bounce / scroll-wheel coalesce
+    OriginalFPSMaterial = nullptr;
+    AppliedFPSMaterial = nullptr;
+    AppliedFPSMaterialInstance = nullptr;
+    bCapturedOriginalFPSMaterial = false;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -3463,8 +3790,95 @@ void AUTWeaponFix::FireCone()
 
 
 
+void AUTWeaponFix::PrepareConfiguredWeaponSkin()
+{
+	if (!bSkinsEnabled || UTOwner == nullptr)
+	{
+		ApplyResolvedWeaponSkin(nullptr);
+		return;
+	}
+
+	// The replicated Character array is the acknowledgement for every viewer,
+	// including the owner. Never let an unaccepted local config remain visible.
+	ApplyResolvedWeaponSkin(FindWeaponSkinForClass(UTOwner->WeaponSkins, GetClass()));
+}
+
+void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
+{
+	// Only authority needs the weapon-level identity: it is copied to a dropped
+	// pickup. Viewers resolve their materials from the replicated Character array.
+	if (Role == ROLE_Authority)
+	{
+		WeaponSkin = Skin;
+	}
+	if (!bSkinsEnabled || GetNetMode() == NM_DedicatedServer || Mesh == nullptr ||
+		Mesh->GetNumMaterials() < 1)
+	{
+		return;
+	}
+
+	// Capture only slot 0 here. SetupSpecialMaterials() owns slots such as the
+	// Shock Rifle screen, and stock SetSkin() must capture those after setup.
+	if (SavedMeshMaterials.Num() == 0)
+	{
+		SavedMeshMaterials.Add(Mesh->GetMaterial(0));
+	}
+	if (!bCapturedOriginalFPSMaterial)
+	{
+		OriginalFPSMaterial = SavedMeshMaterials[0];
+		bCapturedOriginalFPSMaterial = true;
+	}
+
+	const bool bUseSelectedMaterial = Skin != nullptr && Skin->FPSMaterial != nullptr;
+	UMaterialInterface* DesiredParent =
+		bUseSelectedMaterial
+		? Skin->FPSMaterial
+		: OriginalFPSMaterial;
+	if (DesiredParent != AppliedFPSMaterial ||
+		bUseSelectedMaterial != (AppliedFPSMaterialInstance != nullptr))
+	{
+		AppliedFPSMaterial = DesiredParent;
+		AppliedFPSMaterialInstance =
+			(bUseSelectedMaterial && DesiredParent != nullptr)
+			? UMaterialInstanceDynamic::Create(DesiredParent, Mesh)
+			: nullptr;
+	}
+
+	UMaterialInterface* DesiredSlotMaterial = AppliedFPSMaterialInstance != nullptr
+		? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
+		: OriginalFPSMaterial;
+	SavedMeshMaterials[0] = DesiredSlotMaterial;
+
+	// Character body overrides own every visible weapon slot while active. The
+	// SavedMeshMaterials patch above makes their later clear restore this choice.
+	if (UTOwner == nullptr || UTOwner->GetSkin() == nullptr)
+	{
+		Mesh->SetMaterial(0, DesiredSlotMaterial);
+		// MeshMIDs is compact, but index 0 is the slot-0 MID whenever slot 0
+		// has a material. Avoid touching it for the null-slot edge case.
+		if ((OriginalFPSMaterial != nullptr || AppliedFPSMaterialInstance != nullptr) &&
+			MeshMIDs.IsValidIndex(0))
+		{
+			MeshMIDs[0] = Cast<UMaterialInstanceDynamic>(DesiredSlotMaterial);
+			if (MeshMIDs[0] != nullptr)
+			{
+				static const FName NAME_Scale(TEXT("Scale"));
+				MeshMIDs[0]->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
+			}
+		}
+		if (SkinTiming())
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[SkinTiming] %s applied slot-0 skin=%s"), *GetName(),
+				Skin != nullptr ? *Skin->GetName() : TEXT("Default"));
+		}
+	}
+}
+
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
+	const bool bLogSkinTiming = SkinTiming();
+	const double BringUpStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
  
 
 
@@ -3560,22 +3974,10 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 		}
 	}
 
-	// Skin support is gated via bSkinsEnabled — see UTWeaponFix.h. When disabled
-	// we null WeaponSkin before Super::BringUp so Epic's AttachToOwner->SetSkin
-	// path can't kick off a per-equip CreateAndSetMaterialInstanceDynamic chain.
-	// The per-life MID allocation was a visible ~1-3ms hitch in duel on respawn.
-	if (!bSkinsEnabled)
-	{
-		WeaponSkin = nullptr;
-	}
-
+	PrepareConfiguredWeaponSkin();
+	const double SuperStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
 	Super::BringUp(OverflowTime);
-
-	// Load settings from Mod.ini on first weapon equip
-	if (!bWeaponSettingsLoaded)
-	{
-		LoadWeaponSettings();
-	}
+	const double SuperEndTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
 
 	// Per-weapon hide (BP-parity, 2026-07-19): visibility-only — see
 	// ApplyWeaponHideState. Applied BOTH ways every equip so the shared arm
@@ -3588,51 +3990,17 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 		ApplyWeaponHideState(this, UTOwner, bHidden && *bHidden);
 	}
 
-	// Skin cache lookup + MID creation + SavedMeshMaterials patching.
-	// Gated off via bSkinsEnabled — see UTWeaponFix.h. The MID creation path
-	// (CreateAndSetMaterialInstanceDynamicFromMaterial) is the per-life duel
-	// hitch: every fresh weapon instance post-respawn allocates 1-N new MIDs.
-	if (bSkinsEnabled)
+	if (bLogSkinTiming)
 	{
-		if (!WeaponSkin && WeaponSkinCustomizationTag != NAME_None)
-		{
-			UUTWeaponSkin** Cached = CachedSkinAssets.Find(WeaponSkinCustomizationTag);
-			if (Cached && *Cached)
-			{
-				WeaponSkin = *Cached;
-			}
-		}
-
-		if (WeaponSkin && Mesh && WeaponSkin->FPSMaterial)
-		{
-			int32 NumSlots = Mesh->GetNumMaterials();
-			if (CachedSkinMIDs.Num() != NumSlots)
-			{
-				CachedSkinMIDs.Empty();
-				for (int32 i = 0; i < NumSlots; i++)
-				{
-					UMaterialInstanceDynamic* MID = Mesh->CreateAndSetMaterialInstanceDynamicFromMaterial(i, WeaponSkin->FPSMaterial);
-					CachedSkinMIDs.Add(MID);
-				}
-			}
-			else
-			{
-				for (int32 i = 0; i < NumSlots; i++)
-				{
-					if (CachedSkinMIDs[i])
-					{
-						Mesh->SetMaterial(i, CachedSkinMIDs[i]);
-					}
-				}
-			}
-			for (int32 i = 0; i < CachedSkinMIDs.Num(); i++)
-			{
-				if (CachedSkinMIDs[i] && SavedMeshMaterials.IsValidIndex(i))
-				{
-					SavedMeshMaterials[i] = CachedSkinMIDs[i];
-				}
-			}
-		}
+		const double BringUpEndTime = FPlatformTime::Seconds();
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[SkinTiming] %s BringUp: pre-super=%.3fms super=%.3fms post=%.3fms total=%.3fms skin=%s"),
+			*GetName(),
+			(SuperStartTime - BringUpStartTime) * 1000.0,
+			(SuperEndTime - SuperStartTime) * 1000.0,
+			(BringUpEndTime - SuperEndTime) * 1000.0,
+			(BringUpEndTime - BringUpStartTime) * 1000.0,
+			WeaponSkin != nullptr ? *WeaponSkin->GetName() : TEXT("None"));
 	}
 }
 
@@ -3901,22 +4269,56 @@ void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, b
 
 void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
+	const bool bLogSkinTiming = SkinTiming();
+	const double SetSkinStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
+	UMaterialInterface* SlotZeroBefore = (Mesh != nullptr && Mesh->GetNumMaterials() > 0)
+		? Mesh->GetMaterial(0)
+		: nullptr;
+	UMaterialInterface* DesiredSlotMaterial = AppliedFPSMaterialInstance != nullptr
+		? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
+		: OriginalFPSMaterial;
+	if (SavedMeshMaterials.IsValidIndex(0) && bCapturedOriginalFPSMaterial)
+	{
+		SavedMeshMaterials[0] = DesiredSlotMaterial;
+	}
+
 	Super::SetSkin(NewSkin);
 
-	// Cached-MID re-apply path. Gated off via bSkinsEnabled (see UTWeaponFix.h).
-	// With skins disabled, WeaponSkin is nulled in BringUp and CachedSkinMIDs is
-	// never populated — this block is already inert, but the explicit gate
-	// documents intent and short-circuits the branch chain.
-	if (bSkinsEnabled && !NewSkin && WeaponSkin && Mesh && CachedSkinMIDs.Num() > 0)
+	bool bReusedSlotZero = false;
+	UMaterialInstanceDynamic* DesiredSlotMID =
+		Cast<UMaterialInstanceDynamic>(DesiredSlotMaterial);
+	if (NewSkin == nullptr && DesiredSlotMID != nullptr && Mesh != nullptr &&
+		Mesh->GetNumMaterials() > 0)
 	{
-		int32 NumSlots = FMath::Min(Mesh->GetNumMaterials(), CachedSkinMIDs.Num());
-		for (int32 i = 0; i < NumSlots; i++)
+		// A selected skin already has one actor-local MID. Default may itself be
+		// a Blueprint-created MID; in both cases restore that exact instance.
+		Mesh->SetMaterial(0, DesiredSlotMID);
+		if (SavedMeshMaterials.IsValidIndex(0))
 		{
-			if (CachedSkinMIDs[i])
-			{
-				Mesh->SetMaterial(i, CachedSkinMIDs[i]);
-			}
+			SavedMeshMaterials[0] = DesiredSlotMaterial;
 		}
+		if ((OriginalFPSMaterial != nullptr || AppliedFPSMaterialInstance != nullptr) &&
+			MeshMIDs.IsValidIndex(0))
+		{
+			MeshMIDs[0] = DesiredSlotMID;
+			static const FName NAME_Scale(TEXT("Scale"));
+			DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
+		}
+		bReusedSlotZero = true;
+	}
+
+	if (bLogSkinTiming)
+	{
+		UMaterialInterface* SlotZeroAfter = (Mesh != nullptr && Mesh->GetNumMaterials() > 0)
+			? Mesh->GetMaterial(0)
+			: nullptr;
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[SkinTiming] %s SetSkin: body-override=%d slots=%d unchanged=%d slot0-cache=%d time=%.3fms"),
+			*GetName(), NewSkin != nullptr ? 1 : 0,
+			Mesh != nullptr ? Mesh->GetNumMaterials() : 0,
+			SlotZeroBefore != nullptr && SlotZeroBefore == SlotZeroAfter ? 1 : 0,
+			bReusedSlotZero ? 1 : 0,
+			(FPlatformTime::Seconds() - SetSkinStartTime) * 1000.0);
 	}
 }
 

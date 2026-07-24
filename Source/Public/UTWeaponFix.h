@@ -7,6 +7,7 @@
 #include "UTWeaponFix.generated.h"
 
 class UUTWeaponSkin;
+class UMaterialInstanceDynamic;
 
 /**
  * Enhanced weapon base class combining three critical fixes:
@@ -174,12 +175,8 @@ public:
     virtual void BeginPlay() override;
     static int32 GetTargetProjectileTickRate();
 
-    /** Master gate for weapon skin support. Disabled for now: stock skin allocation
-     *  (LoadObject + per-instance MID creation) causes a ~1-3ms hitch every life in
-     *  duel when you pick up a fresh weapon. Hide/show is independent of this and
-     *  stays enabled. Flip to true to re-enable skins once the per-life MID cost
-     *  is addressed (e.g., static shared MID pool keyed by WeaponClass+SkinPath). */
-    static constexpr bool bSkinsEnabled = false;
+    /** Master gate for the NetcodePlus weapon-skin path. */
+    static constexpr bool bSkinsEnabled = true;
 
     /** Per-weapon hide state — keyed by class name.
      *  Set via "weaponskins" menu or "weaponhand hidden/show" console command.
@@ -224,18 +221,47 @@ public:
      *  Loaded from Mod.ini, applied in BringUp(). */
     static TMap<FName, FString> SavedSkinPaths;
 
-    /** Pre-loaded skin assets — keyed by WeaponSkinCustomizationTag.
-     *  Loaded eagerly in LoadWeaponSettings() so BringUp() avoids a blocking LoadObject. */
+    /** Locally selected skin assets — keyed by WeaponSkinCustomizationTag.
+     *  Borrowed from the session catalog loaded by LoadWeaponSettings(). */
     static TMap<FName, UUTWeaponSkin*> CachedSkinAssets;
 
-    /** Load weapon settings (skins + hide state) from Mod.ini. Called once on first BringUp. */
+    /** Load weapon settings and retain selected skins before gameplay. */
     static void LoadWeaponSettings();
+
+    /** Retry skin assets that were unavailable until the map packages mounted. */
+    static void RetryPendingWeaponSkins();
+
+    /** Release weapon-skin assets retained by LoadWeaponSettings(). */
+    static void CleanupWeaponSettings();
+
+    /** Return a skin only when it belongs to the preloaded, server-approved catalog. */
+    static UUTWeaponSkin* FindPreloadedWeaponSkin(const FString& SkinPath);
+
+    /** Snapshot the preloaded catalog for the F5 selector without loading assets. */
+    static void GetPreloadedWeaponSkins(TArray<UUTWeaponSkin*>& OutSkins);
+
+    /** True when Skin targets WeaponClass or one of its native/Blueprint parents. */
+    static bool IsWeaponSkinCompatible(UUTWeaponSkin* Skin, UClass* WeaponClass);
+
+    /** Find the authoritative entry for WeaponClass in a replicated stock skin array. */
+    static UUTWeaponSkin* FindWeaponSkinForClass(
+        const TArray<UUTWeaponSkin*>& WeaponSkins, UClass* WeaponClass);
+
+    /** Resolve the local F5 selection for this weapon from the preloaded catalog. */
+    static UUTWeaponSkin* GetConfiguredWeaponSkin(const AUTWeapon* Weapon);
+
+    /** Resolve the configured object path; empty means the explicit stock default. */
+    static FString GetConfiguredWeaponSkinPath(const AUTWeapon* Weapon);
 
     /** Save weapon settings to Mod.ini. */
     static void SaveWeaponSettings();
 
     /** Whether settings have been loaded from Mod.ini this session */
     static bool bWeaponSettingsLoaded;
+
+    /** Apply an already-resolved selection to slot 0; authority also keeps pickup identity. */
+    void ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin);
+
     //~ Begin AUTWeapon Interface
     /** CLASSIC hide only (bClassicWeaponHide + weapon hidden): camera-relative beam
      *  origin using the HiddenBeam offsets. In the default BP-parity style this is
@@ -397,9 +423,21 @@ protected:
     /** Max time after death to still allow pending fire RPCs (seconds) */
     static constexpr float TradeKillGracePeriod = 0.20f;
 
-    /** Cached weapon skin MIDs — created once in BringUp, reused in SetSkin to avoid per-call GPU allocations */
+    /** Slot-0 material captured before NetcodePlus applies a configured skin. */
     UPROPERTY(Transient)
-    TArray<UMaterialInstanceDynamic*> CachedSkinMIDs;
+    UMaterialInterface* OriginalFPSMaterial;
+
+    /** Immutable slot-0 parent selected for this actor, or OriginalFPSMaterial. */
+    UPROPERTY(Transient)
+    UMaterialInterface* AppliedFPSMaterial;
+
+    /** Actor-local slot-0 MID for the selected FPS material; never shared. */
+    UPROPERTY(Transient)
+    UMaterialInstanceDynamic* AppliedFPSMaterialInstance;
+
+    bool bCapturedOriginalFPSMaterial;
+
+    void PrepareConfiguredWeaponSkin();
 
 public:
     /** Server-side only: impact point from the last FireInstantHit trace.

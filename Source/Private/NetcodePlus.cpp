@@ -3,6 +3,7 @@
 #include "Modules/ModuleManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
 #include "UTPlayerController.h"
 #include "UTPlayerInput.h"
@@ -51,6 +52,10 @@ static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
 
 /** PreLoadMap delegate handle — self-heals the menu input state across level loads. */
 static FDelegateHandle GNCPPreLoadMapHandle;
+static FDelegateHandle GNCPSkinPreLoadMapHandle;
+static FDelegateHandle GNCPPostLoadMapHandle;
+static FDelegateHandle GNCPSkinWorldInitHandle;
+static bool GNCPSkinRetryArmed = false;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -279,6 +284,43 @@ static void OnNCPPreLoadMap(const FString& /*MapName*/)
 		ActiveNCPMenu.Reset();
 	}
 	NCPlusHUDDragMode::Reset();
+}
+
+static void OnNCPSkinPreLoadMap(const FString& /*MapName*/)
+{
+	// Resolve the shared catalog while travel is already loading. This callback
+	// is registered on dedicated servers too, so replicated spectator choices
+	// are resident before the first pawn can publish them.
+	if (AUTWeaponFix::bWeaponSettingsLoaded)
+	{
+		AUTWeaponFix::RetryPendingWeaponSkins();
+	}
+	else
+	{
+		AUTWeaponFix::LoadWeaponSettings();
+	}
+	GNCPSkinRetryArmed = true;
+}
+
+static void OnNCPSkinWorldInitialized(UWorld* World, const UWorld::InitializationValues)
+{
+	if (World != nullptr && World->IsGameWorld())
+	{
+		if (!AUTWeaponFix::bWeaponSettingsLoaded)
+		{
+			AUTWeaponFix::LoadWeaponSettings();
+		}
+		else if (GNCPSkinRetryArmed)
+		{
+			AUTWeaponFix::RetryPendingWeaponSkins();
+		}
+		GNCPSkinRetryArmed = false;
+	}
+}
+
+static void OnNCPPostLoadMap()
+{
+	GNCPSkinRetryArmed = false;
 }
 
 static void HandleCosmetics(const TArray<FString>& Args)
@@ -971,6 +1013,10 @@ void FNetcodePlus::StartupModule()
 	{
 		GNCPPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPPreLoadMap);
 	}
+	GNCPSkinPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPSkinPreLoadMap);
+	GNCPPostLoadMapHandle = FCoreUObjectDelegates::PostLoadMap.AddStatic(&OnNCPPostLoadMap);
+	GNCPSkinWorldInitHandle = FWorldDelegates::OnPostWorldInitialization.AddStatic(
+		&OnNCPSkinWorldInitialized);
 
 	// NoAlias Mod.ini scrub (see ScrubNoAliasIdentifiers above): once at startup so
 	// the first hub join reads clean data, and again before every map load so a
@@ -1053,12 +1099,29 @@ void FNetcodePlus::ShutdownModule()
 		ActiveSkinSelector.Reset();
 	}
 	SUTWeaponSkinSelector_CleanupCache();
+	AUTWeaponFix::CleanupWeaponSettings();
 
 	if (GNCPPreLoadMapHandle.IsValid())
 	{
 		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPPreLoadMapHandle);
 		GNCPPreLoadMapHandle.Reset();
 	}
+	if (GNCPSkinPreLoadMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPSkinPreLoadMapHandle);
+		GNCPSkinPreLoadMapHandle.Reset();
+	}
+	if (GNCPPostLoadMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PostLoadMap.Remove(GNCPPostLoadMapHandle);
+		GNCPPostLoadMapHandle.Reset();
+	}
+	if (GNCPSkinWorldInitHandle.IsValid())
+	{
+		FWorldDelegates::OnPostWorldInitialization.Remove(GNCPSkinWorldInitHandle);
+		GNCPSkinWorldInitHandle.Reset();
+	}
+	GNCPSkinRetryArmed = false;
 
 	if (GNCPNoAliasScrubMapHandle.IsValid())
 	{

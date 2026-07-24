@@ -8,7 +8,7 @@
 class UUTLocalPlayer;
 class SColorBlock;
 
-/** Free all cached skin assets (call on module shutdown or map change) */
+/** Clear the UI index; AUTWeaponFix owns the session-retained skin assets. */
 void SUTWeaponSkinSelector_CleanupCache();
 
 /** Info about a discovered NetcodePlus weapon */
