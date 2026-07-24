@@ -259,7 +259,34 @@ public:
     /** Whether settings have been loaded from Mod.ini this session */
     static bool bWeaponSettingsLoaded;
 
-    /** Apply an already-resolved selection to slot 0; authority also keeps pickup identity. */
+    /** Highest slot index + 1 that GetWeaponSkinTargetSlotMask can ever set. */
+    static constexpr int32 MaxWeaponSkinTargetSlots = 2;
+
+    /** Bitmask of mesh material slots a weapon family renders its skin on, for one
+     *  view. Bit N = slot N. Verified in-editor against the shipped skin assets'
+     *  own texture sets:
+     *    Flak          — 1P and 3P both {0,1}: FlakVoid's M_Flak_Skin_Void01_P /
+     *                    M_Flak_Skin_Void01 replace M_Flak_Gun_Inst /
+     *                    M_Flak_Gun_3P_Inst, and BOTH Flak meshes carry that body
+     *                    material on slot 0 AND slot 1.
+     *    Lightning Gun — ASYMMETRIC: 1P {0}, 3P {1}. PinkLG's 1P
+     *                    MAT_INS_LG_Pink_E0_1p carries the PartTWO texture set
+     *                    (T_LightingGunTwo_*), which Lightning_Gun_1p has on slot 0;
+     *                    its 3P MAT_INS_LG_Pink_E1_3p carries the PartONE set
+     *                    (T_LightingGun_one_*), which Lightning_Gun_3p has on slot 1.
+     *                    The authored E0/E1 names ARE the element indices. Writing the
+     *                    other slot paints a section with the wrong part's textures.
+     *    everything else — {0}, i.e. unchanged stock behaviour.
+     *  Keyed on the replicated WeaponSkinCustomizationTag — loads no asset. Slot names
+     *  on these meshes are unreliable, so these are verified explicit indices and every
+     *  caller bounds-checks each slot against the live GetNumMaterials(). Slots outside
+     *  the mask (Shock screen, ammo counters, decals, glass, the LG's other part) are
+     *  never captured or written and stay owned by the mesh / SetupSpecialMaterials(). */
+    static uint32 GetWeaponSkinTargetSlotMask(FName WeaponSkinCustomizationTag,
+        bool bFirstPersonMesh);
+
+    /** Apply an already-resolved selection to the weapon-family body slots (slot 0,
+     *  plus slot 1 for Flak/Lightning); authority also keeps pickup identity. */
     void ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin);
 
     //~ Begin AUTWeapon Interface
@@ -423,15 +450,22 @@ protected:
     /** Max time after death to still allow pending fire RPCs (seconds) */
     static constexpr float TradeKillGracePeriod = 0.20f;
 
-    /** Slot-0 material captured before NetcodePlus applies a configured skin. */
+    /** Slot-0 body material captured before NetcodePlus applies a configured skin. */
     UPROPERTY(Transient)
     UMaterialInterface* OriginalFPSMaterial;
 
-    /** Immutable slot-0 parent selected for this actor, or OriginalFPSMaterial. */
+    /** Slot-1 body material, captured only when this weapon's 1P target mask includes
+     *  slot 1 (Flak); nullptr otherwise — including the Lightning Gun, whose 1P skin
+     *  is slot 0 only. */
+    UPROPERTY(Transient)
+    UMaterialInterface* OriginalFPSMaterialSecondary;
+
+    /** Immutable body-material parent selected for this actor, or OriginalFPSMaterial. */
     UPROPERTY(Transient)
     UMaterialInterface* AppliedFPSMaterial;
 
-    /** Actor-local slot-0 MID for the selected FPS material; never shared. */
+    /** Actor-local MID for the selected FPS material, reused across the family's body
+     *  slots on this mesh; never shared between actors. */
     UPROPERTY(Transient)
     UMaterialInstanceDynamic* AppliedFPSMaterialInstance;
 

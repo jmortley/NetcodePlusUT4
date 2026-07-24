@@ -1528,6 +1528,7 @@ void ATeamArenaCharacter::ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin)
 	{
 		SkinnedWeaponAttachment.Reset();
 		OriginalWeaponAttachmentMaterial = nullptr;
+		OriginalWeaponAttachmentMaterialSecondary = nullptr;
 		AppliedWeaponAttachmentMaterial = nullptr;
 		WeaponAttachmentSkinMID = nullptr;
 		bCapturedWeaponAttachmentMaterial = false;
@@ -1538,10 +1539,24 @@ void ATeamArenaCharacter::ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin)
 	{
 		SkinnedWeaponAttachment = Attachment;
 		OriginalWeaponAttachmentMaterial = nullptr;
+		OriginalWeaponAttachmentMaterialSecondary = nullptr;
 		AppliedWeaponAttachmentMaterial = nullptr;
 		WeaponAttachmentSkinMID = nullptr;
 		bCapturedWeaponAttachmentMaterial = false;
 	}
+
+	// Slots the 3P attachment renders its skin on: slot 0 for normal weapons, slots 0+1
+	// for Flak, and slot 1 ONLY for the Lightning Gun (its 3P skin material carries the
+	// PartOne textures, which Lightning_Gun_3p has on slot 1 — slot 0 must keep its
+	// original). The attachment carries no skin tag of its own, so the family is read
+	// from the equipped weapon class CDO — stable even when clearing to Default
+	// (Skin == null).
+	AUTWeapon* WeaponCDO = (WeaponClass != nullptr)
+		? WeaponClass->GetDefaultObject<AUTWeapon>()
+		: nullptr;
+	const uint32 TargetSlotMask = AUTWeaponFix::GetWeaponSkinTargetSlotMask(
+		WeaponCDO != nullptr ? WeaponCDO->WeaponSkinCustomizationTag : NAME_None,
+		/*bFirstPersonMesh=*/false);
 
 	while (Attachment->SavedMeshMaterials.Num() < Attachment->Mesh->GetNumMaterials())
 	{
@@ -1550,15 +1565,27 @@ void ATeamArenaCharacter::ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin)
 	}
 	if (!bCapturedWeaponAttachmentMaterial)
 	{
-		OriginalWeaponAttachmentMaterial = Attachment->SavedMeshMaterials[0];
+		OriginalWeaponAttachmentMaterial =
+			((TargetSlotMask & 0x1u) != 0u && Attachment->SavedMeshMaterials.IsValidIndex(0))
+			? Attachment->SavedMeshMaterials[0]
+			: nullptr;
+		OriginalWeaponAttachmentMaterialSecondary =
+			((TargetSlotMask & 0x2u) != 0u && Attachment->SavedMeshMaterials.IsValidIndex(1))
+			? Attachment->SavedMeshMaterials[1]
+			: nullptr;
 		bCapturedWeaponAttachmentMaterial = true;
 	}
 
+	// Fallback parent / change-detection sentinel is the lowest targeted slot's
+	// original — slot 1's for the Lightning Gun, whose slot 0 is not ours to touch.
+	UMaterialInterface* const PrimaryOriginal = ((TargetSlotMask & 0x1u) != 0u)
+		? OriginalWeaponAttachmentMaterial
+		: OriginalWeaponAttachmentMaterialSecondary;
 	const bool bUseSelectedMaterial = Skin != nullptr && Skin->Material != nullptr;
 	UMaterialInterface* DesiredParent =
 		bUseSelectedMaterial
 		? Skin->Material
-		: OriginalWeaponAttachmentMaterial;
+		: PrimaryOriginal;
 	if (DesiredParent != AppliedWeaponAttachmentMaterial ||
 		bUseSelectedMaterial != (WeaponAttachmentSkinMID != nullptr))
 	{
@@ -1569,13 +1596,30 @@ void ATeamArenaCharacter::ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin)
 			: nullptr;
 	}
 
-	UMaterialInterface* DesiredSlotMaterial = WeaponAttachmentSkinMID != nullptr
-		? Cast<UMaterialInterface>(WeaponAttachmentSkinMID)
-		: OriginalWeaponAttachmentMaterial;
-	Attachment->SavedMeshMaterials[0] = DesiredSlotMaterial;
-	if (GetSkin() == nullptr && Attachment->Mesh->GetMaterial(0) != DesiredSlotMaterial)
+	// One actor-local MID (WeaponAttachmentSkinMID) is reused across every targeted
+	// slot of this attachment mesh; Default restores each slot's captured original. The
+	// SavedMeshMaterials patch lets a later body-override clear restore this choice.
+	UMaterialInterface* const OriginalBySlot[AUTWeaponFix::MaxWeaponSkinTargetSlots] =
+		{ OriginalWeaponAttachmentMaterial, OriginalWeaponAttachmentMaterialSecondary };
+	const bool bBodyOverrideActive = (GetSkin() != nullptr);
+	for (int32 Slot = 0; Slot < AUTWeaponFix::MaxWeaponSkinTargetSlots; ++Slot)
 	{
-		Attachment->Mesh->SetMaterial(0, DesiredSlotMaterial);
+		if (((TargetSlotMask >> Slot) & 0x1u) == 0u ||
+			Slot >= Attachment->Mesh->GetNumMaterials())
+		{
+			continue;
+		}
+		UMaterialInterface* DesiredSlotMaterial = WeaponAttachmentSkinMID != nullptr
+			? Cast<UMaterialInterface>(WeaponAttachmentSkinMID)
+			: OriginalBySlot[Slot];
+		if (Attachment->SavedMeshMaterials.IsValidIndex(Slot))
+		{
+			Attachment->SavedMeshMaterials[Slot] = DesiredSlotMaterial;
+		}
+		if (!bBodyOverrideActive && Attachment->Mesh->GetMaterial(Slot) != DesiredSlotMaterial)
+		{
+			Attachment->Mesh->SetMaterial(Slot, DesiredSlotMaterial);
+		}
 	}
 }
 

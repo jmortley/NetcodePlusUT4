@@ -304,9 +304,12 @@ static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings")
 static const FName WEAPON_SKIN_CATALOG_ROOT(TEXT("/Game/Blueprints/UT+/UT+/WeaponSkinsPlus"));
 
 // Versioned public selection manifest shared by the current 38-asset RC PAK
-// and the older 59-asset staged cook. These 29 paths are unrestricted and carry
+// and the older 59-asset staged cook. These 30 paths are unrestricted and carry
 // a real weapon-family tag; utility and cook-specific variants remain invalid.
 // Future folder additions do not become network-valid automatically.
+// NOTE: this list is all-or-nothing — RefreshWeaponSkinCatalog() only marks the
+// catalog ready when EVERY entry resolves, so an entry missing from the shipped
+// PAK disables weapon skins entirely. Only add assets that are actually cooked.
 static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 {
 	TEXT("BlackDeath"),
@@ -319,6 +322,7 @@ static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 	TEXT("LinkBeeElim"),
 	TEXT("LinkFreedom"),
 	TEXT("LinkMint"),
+	TEXT("PinkLG"),
 	TEXT("Rocket99"),
 	TEXT("Rocket99Elim"),
 	TEXT("RocketBee"),
@@ -3803,6 +3807,43 @@ void AUTWeaponFix::PrepareConfiguredWeaponSkin()
 	ApplyResolvedWeaponSkin(FindWeaponSkinForClass(UTOwner->WeaponSkins, GetClass()));
 }
 
+uint32 AUTWeaponFix::GetWeaponSkinTargetSlotMask(FName WeaponSkinCustomizationTag,
+	bool bFirstPersonMesh)
+{
+	// Verified in-editor (328-rc) by matching each shipped skin material's texture set
+	// against the mesh slot it replaces:
+	//   Flak — FlakVoid 1P M_Flak_Skin_Void01_P / 3P M_Flak_Skin_Void01 replace
+	//     M_Flak_Gun_Inst / M_Flak_Gun_3P_Inst, and Flak_Cannon_1p AND _3p each carry
+	//     that body material on slot 0 AND slot 1 -> {0,1} in both views.
+	//   Lightning Gun — ASYMMETRIC. PinkLG 1P MAT_INS_LG_Pink_E0_1p uses the PartTWO
+	//     textures (T_LightingGunTwo_*), which Lightning_Gun_1p carries on slot 0.
+	//     PinkLG 3P MAT_INS_LG_Pink_E1_3p uses the PartONE textures
+	//     (T_LightingGun_one_*), which Lightning_Gun_3p carries on slot 1. The authored
+	//     E0/E1 names are the element indices -> 1P {0}, 3P {1}. Writing the other slot
+	//     would paint that section with the wrong part's textures.
+	//   Everything else keeps stock behaviour: slot 0 only.
+	// Slots outside the mask are never captured or written, so ammo counters, decals,
+	// glass, the LG's other part, and SetupSpecialMaterials()' Shock Rifle screen all
+	// keep their originals. Slot NAMES on these meshes are unreliable (scrambled /
+	// generic), which is why these are explicit verified indices.
+	static const FName NAME_FlakCannonSkins(TEXT("FlakCannon_Skins"));
+	// Both spellings accepted while the LG weapon/skin tags are being harmonised
+	// (UTNPLightningGun CDO reads LightningRifle_Skins; PinkLG reads LG_Skins).
+	static const FName NAME_LGSkins(TEXT("LG_Skins"));
+	static const FName NAME_LightningRifleSkins(TEXT("LightningRifle_Skins"));
+
+	if (WeaponSkinCustomizationTag == NAME_FlakCannonSkins)
+	{
+		return 0x3u;
+	}
+	if (WeaponSkinCustomizationTag == NAME_LGSkins ||
+		WeaponSkinCustomizationTag == NAME_LightningRifleSkins)
+	{
+		return bFirstPersonMesh ? 0x1u : 0x2u;
+	}
+	return 0x1u;
+}
+
 void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 {
 	// Only authority needs the weapon-level identity: it is copied to a dropped
@@ -3817,15 +3858,31 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 		return;
 	}
 
-	// Capture only slot 0 here. SetupSpecialMaterials() owns slots such as the
-	// Shock Rifle screen, and stock SetSkin() must capture those after setup.
-	if (SavedMeshMaterials.Num() == 0)
+	// Slots this weapon family renders its 1P skin on: slot 0 for normal weapons and
+	// the Lightning Gun, slots 0+1 for Flak. Slots outside the mask (counters, decals,
+	// glass, the Shock screen) stay owned by the mesh / SetupSpecialMaterials() and are
+	// never captured or touched here.
+	const uint32 TargetSlotMask = GetWeaponSkinTargetSlotMask(WeaponSkinCustomizationTag, true);
+
+	// Capture the untouched originals once, per targeted slot, so Default restores the
+	// exact instance the slot shipped with. Stock SetSkin() captures every slot; if it
+	// has not run yet, seed up to the highest slot we are going to patch.
+	const int32 SeedSlotCount = FMath::Min(
+		((TargetSlotMask & 0x2u) != 0u) ? 2 : 1, Mesh->GetNumMaterials());
+	while (SavedMeshMaterials.Num() < SeedSlotCount)
 	{
-		SavedMeshMaterials.Add(Mesh->GetMaterial(0));
+		SavedMeshMaterials.Add(Mesh->GetMaterial(SavedMeshMaterials.Num()));
 	}
 	if (!bCapturedOriginalFPSMaterial)
 	{
-		OriginalFPSMaterial = SavedMeshMaterials[0];
+		OriginalFPSMaterial =
+			((TargetSlotMask & 0x1u) != 0u && SavedMeshMaterials.IsValidIndex(0))
+			? SavedMeshMaterials[0]
+			: nullptr;
+		OriginalFPSMaterialSecondary =
+			((TargetSlotMask & 0x2u) != 0u && SavedMeshMaterials.IsValidIndex(1))
+			? SavedMeshMaterials[1]
+			: nullptr;
 		bCapturedOriginalFPSMaterial = true;
 	}
 
@@ -3844,34 +3901,49 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 			: nullptr;
 	}
 
-	UMaterialInterface* DesiredSlotMaterial = AppliedFPSMaterialInstance != nullptr
-		? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
-		: OriginalFPSMaterial;
-	SavedMeshMaterials[0] = DesiredSlotMaterial;
-
-	// Character body overrides own every visible weapon slot while active. The
-	// SavedMeshMaterials patch above makes their later clear restore this choice.
-	if (UTOwner == nullptr || UTOwner->GetSkin() == nullptr)
+	// One actor-local MID (AppliedFPSMaterialInstance) is reused across every targeted
+	// slot of THIS mesh; Default restores each slot's captured original. The
+	// SavedMeshMaterials patch makes a later body-override clear restore this choice.
+	UMaterialInterface* const OriginalBySlot[MaxWeaponSkinTargetSlots] =
+		{ OriginalFPSMaterial, OriginalFPSMaterialSecondary };
+	const bool bBodyOverrideActive = (UTOwner != nullptr && UTOwner->GetSkin() != nullptr);
+	static const FName NAME_Scale(TEXT("Scale"));
+	for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
 	{
-		Mesh->SetMaterial(0, DesiredSlotMaterial);
-		// MeshMIDs is compact, but index 0 is the slot-0 MID whenever slot 0
-		// has a material. Avoid touching it for the null-slot edge case.
-		if ((OriginalFPSMaterial != nullptr || AppliedFPSMaterialInstance != nullptr) &&
-			MeshMIDs.IsValidIndex(0))
+		if (((TargetSlotMask >> Slot) & 0x1u) == 0u || Slot >= Mesh->GetNumMaterials())
 		{
-			MeshMIDs[0] = Cast<UMaterialInstanceDynamic>(DesiredSlotMaterial);
-			if (MeshMIDs[0] != nullptr)
+			continue;
+		}
+		UMaterialInterface* DesiredSlotMaterial = AppliedFPSMaterialInstance != nullptr
+			? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
+			: OriginalBySlot[Slot];
+		if (SavedMeshMaterials.IsValidIndex(Slot))
+		{
+			SavedMeshMaterials[Slot] = DesiredSlotMaterial;
+		}
+		// Character body overrides own every visible weapon slot while active.
+		if (bBodyOverrideActive)
+		{
+			continue;
+		}
+		Mesh->SetMaterial(Slot, DesiredSlotMaterial);
+		// MeshMIDs is compact; index i is slot i's MID whenever slot i has a
+		// material. Avoid touching it for the null-slot edge case.
+		if ((OriginalBySlot[Slot] != nullptr || AppliedFPSMaterialInstance != nullptr) &&
+			MeshMIDs.IsValidIndex(Slot))
+		{
+			MeshMIDs[Slot] = Cast<UMaterialInstanceDynamic>(DesiredSlotMaterial);
+			if (MeshMIDs[Slot] != nullptr)
 			{
-				static const FName NAME_Scale(TEXT("Scale"));
-				MeshMIDs[0]->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
+				MeshMIDs[Slot]->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
 			}
 		}
-		if (SkinTiming())
-		{
-			UE_LOG(LogUTWeaponFix, Warning,
-				TEXT("[SkinTiming] %s applied slot-0 skin=%s"), *GetName(),
-				Skin != nullptr ? *Skin->GetName() : TEXT("Default"));
-		}
+	}
+	if (!bBodyOverrideActive && SkinTiming())
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[SkinTiming] %s applied skin=%s slot-mask=0x%x"), *GetName(),
+			Skin != nullptr ? *Skin->GetName() : TEXT("Default"), TargetSlotMask);
 	}
 }
 
@@ -4271,40 +4343,59 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
 	const bool bLogSkinTiming = SkinTiming();
 	const double SetSkinStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
+	const uint32 TargetSlotMask = (Mesh != nullptr)
+		? GetWeaponSkinTargetSlotMask(WeaponSkinCustomizationTag, true)
+		: 0u;
 	UMaterialInterface* SlotZeroBefore = (Mesh != nullptr && Mesh->GetNumMaterials() > 0)
 		? Mesh->GetMaterial(0)
 		: nullptr;
-	UMaterialInterface* DesiredSlotMaterial = AppliedFPSMaterialInstance != nullptr
-		? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
-		: OriginalFPSMaterial;
-	if (SavedMeshMaterials.IsValidIndex(0) && bCapturedOriginalFPSMaterial)
+
+	// The selected skin's one actor-local MID is reused across every targeted slot;
+	// Default restores each slot's captured original. Patch SavedMeshMaterials first
+	// so stock's restore path below reproduces this choice on every affected slot.
+	UMaterialInterface* const OriginalBySlot[MaxWeaponSkinTargetSlots] =
+		{ OriginalFPSMaterial, OriginalFPSMaterialSecondary };
+	UMaterialInstanceDynamic* const DesiredSlotMID = AppliedFPSMaterialInstance;
+	if (bCapturedOriginalFPSMaterial)
 	{
-		SavedMeshMaterials[0] = DesiredSlotMaterial;
+		for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
+		{
+			if (((TargetSlotMask >> Slot) & 0x1u) != 0u && SavedMeshMaterials.IsValidIndex(Slot))
+			{
+				SavedMeshMaterials[Slot] = (DesiredSlotMID != nullptr)
+					? Cast<UMaterialInterface>(DesiredSlotMID)
+					: OriginalBySlot[Slot];
+			}
+		}
 	}
 
 	Super::SetSkin(NewSkin);
 
 	bool bReusedSlotZero = false;
-	UMaterialInstanceDynamic* DesiredSlotMID =
-		Cast<UMaterialInstanceDynamic>(DesiredSlotMaterial);
-	if (NewSkin == nullptr && DesiredSlotMID != nullptr && Mesh != nullptr &&
-		Mesh->GetNumMaterials() > 0)
+	if (NewSkin == nullptr && DesiredSlotMID != nullptr && Mesh != nullptr)
 	{
-		// A selected skin already has one actor-local MID. Default may itself be
-		// a Blueprint-created MID; in both cases restore that exact instance.
-		Mesh->SetMaterial(0, DesiredSlotMID);
-		if (SavedMeshMaterials.IsValidIndex(0))
+		// A selected skin already has one actor-local MID, and stock's MeshMIDs
+		// rebuild would re-wrap it. Restore that exact instance on each targeted slot.
+		static const FName NAME_Scale(TEXT("Scale"));
+		for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
 		{
-			SavedMeshMaterials[0] = DesiredSlotMaterial;
+			if (((TargetSlotMask >> Slot) & 0x1u) == 0u || Slot >= Mesh->GetNumMaterials())
+			{
+				continue;
+			}
+			Mesh->SetMaterial(Slot, DesiredSlotMID);
+			if (SavedMeshMaterials.IsValidIndex(Slot))
+			{
+				SavedMeshMaterials[Slot] = DesiredSlotMID;
+			}
+			if ((OriginalBySlot[Slot] != nullptr || AppliedFPSMaterialInstance != nullptr) &&
+				MeshMIDs.IsValidIndex(Slot))
+			{
+				MeshMIDs[Slot] = DesiredSlotMID;
+				DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
+			}
+			bReusedSlotZero = true;
 		}
-		if ((OriginalFPSMaterial != nullptr || AppliedFPSMaterialInstance != nullptr) &&
-			MeshMIDs.IsValidIndex(0))
-		{
-			MeshMIDs[0] = DesiredSlotMID;
-			static const FName NAME_Scale(TEXT("Scale"));
-			DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
-		}
-		bReusedSlotZero = true;
 	}
 
 	if (bLogSkinTiming)
@@ -4313,9 +4404,9 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 			? Mesh->GetMaterial(0)
 			: nullptr;
 		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("[SkinTiming] %s SetSkin: body-override=%d slots=%d unchanged=%d slot0-cache=%d time=%.3fms"),
+			TEXT("[SkinTiming] %s SetSkin: body-override=%d slots=%d slot-mask=0x%x unchanged=%d skin-reasserted=%d time=%.3fms"),
 			*GetName(), NewSkin != nullptr ? 1 : 0,
-			Mesh != nullptr ? Mesh->GetNumMaterials() : 0,
+			Mesh != nullptr ? Mesh->GetNumMaterials() : 0, TargetSlotMask,
 			SlotZeroBefore != nullptr && SlotZeroBefore == SlotZeroAfter ? 1 : 0,
 			bReusedSlotZero ? 1 : 0,
 			(FPlatformTime::Seconds() - SetSkinStartTime) * 1000.0);
