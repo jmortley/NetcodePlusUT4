@@ -422,6 +422,21 @@ protected:
     bool bHandlingRetry;
     FTimerHandle RetryFireHandle[2];
 
+    /** True when the charged-rocket state can no longer self-transition: not charging and
+     *  none of its four timers (load / grace / burst / post-burst refire) active. A
+     *  legitimately active charged state ALWAYS has one of those in flight, so this is the
+     *  wedge signature (the state that silently swallows primaries — see the Tick watchdog
+     *  and the ServerStartFireFixed fast recovery). Loaded-rocket handling is the CALLER's
+     *  job: the fast recovery paths only act when nothing is loaded, so a false positive
+     *  can never abandon a loaded volley. */
+    bool IsChargedRocketStateWedged(class UUTWeaponStateFiringChargedRocket_Transactional* Chg);
+
+    /** First watchdog tick an EMPTY wedge was observed; -1 = not currently observed.
+     *  Debounces the fast recovery (~0.25s) so a transient no-timer instant between state
+     *  callbacks can't false-trigger it. Reset on recovery, on busy, and on leaving the
+     *  charged state. */
+    float ChargedWedgeFirstSeenTime = -1.f;
+
     // Ghost-rocket fix (ncp.GhostFix): the REAL fire-button-held state per mode,
     // tracked from genuine input on the locally-controlled client (set in StartFire
     // when !bHandlingRetry, cleared in StopFire on a non-switch release). Read at the
