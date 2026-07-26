@@ -135,7 +135,11 @@ void AClientHitsounds::RefreshCatalog()
 		Preset.Low  = LoadHitsoundCue(Entry.Folder, Entry.Low);
 		Preset.Med  = LoadHitsoundCue(Entry.Folder, Entry.Med);
 		Preset.High = LoadHitsoundCue(Entry.Folder, Entry.High);
-		Preset.Volume = 1.0f;
+		// 2.0 is dc's CONFIG-READ default, which is what set the out-of-box
+		// loudness his users know (his bank literals said 1.0 but every unset
+		// slot read back as 2.0). Seeding 1.0 here would migrate dc users at
+		// half volume.
+		Preset.Volume = 2.0f;
 		Preset.Pitch = 1.9f;
 		Preset.bCustom = false;
 
@@ -228,6 +232,18 @@ void AClientHitsounds::EnsureCatalog()
 	if (!bHitsoundCatalogBuilt)
 	{
 		RefreshCatalog();
+	}
+}
+
+void AClientHitsounds::ShutdownCatalog()
+{
+	HitsoundCatalog.Empty();
+	bHitsoundCatalogBuilt = false;
+	bHitsoundCatalogReady = false;
+	if (HitsoundCatalogReferences != nullptr)
+	{
+		delete HitsoundCatalogReferences;
+		HitsoundCatalogReferences = nullptr;
 	}
 }
 
@@ -357,7 +373,11 @@ void AClientHitsounds::Mutate_Implementation(const FString& MutateString, APlaye
 	{
 		return;
 	}
-	if (!MutateString.TrimStartAndEnd().Equals(TEXT("hitsounds"), ESearchCase::IgnoreCase))
+	// 4.15 API: TrimStartAndEnd does not exist yet; Trim()/TrimTrailing() are
+	// non-const, so work on a copy (multi-word mutate commands can arrive with
+	// a leading space — see the setname/ss_detail precedent).
+	const FString Command = FString(MutateString).Trim().TrimTrailing();
+	if (!Command.Equals(TEXT("hitsounds"), ESearchCase::IgnoreCase))
 	{
 		return;
 	}
@@ -522,7 +542,13 @@ void AClientHitsounds::NotifyDamage(int32 Damage, AController* CausedBy, APawn* 
 			continue;
 		}
 
-		bool bShouldReceive = (AttackerPawn != nullptr && PC->GetViewTarget() == AttackerPawn);
+		// The attacker's own controller ALWAYS receives — a posthumous hit
+		// confirm (your rocket lands after you traded) has AttackerPawn == null
+		// and a death-cam view target, and losing that sound breaks trade-kill
+		// feedback. Everyone else qualifies by watching the attacker's pawn,
+		// or by being a demo recorder.
+		bool bShouldReceive = (PC == CausedBy) ||
+			(AttackerPawn != nullptr && PC->GetViewTarget() == AttackerPawn);
 		if (!bShouldReceive)
 		{
 			if (AUTPlayerState* WatcherPS = Cast<AUTPlayerState>(PC->PlayerState))
@@ -697,15 +723,15 @@ void AClientHitsounds::PlayHitsound(int32 Damage, bool bIsFriendly)
 		}
 		FNCPHitsoundPitch Zero = ResolvePlaybackFor(Preset, 0, ENCPHitsoundStyle::Flat);
 		PlayResolved(this, Zero, Preset.Volume * Config.UserMultiplier);
-		LastClientHitsoundTime = GetWorld() ? GetWorld()->GetTimeSeconds() : LastClientHitsoundTime;
 		return;
 	}
 
+	// Deliberately does NOT touch LastClientHitsoundTime: that timestamp is
+	// armed only by PREDICTED sounds. If authoritative playback armed it too,
+	// authoritative sounds would suppress each other through the dedup window —
+	// a spectator (who predicts nothing) would hear at most ~4 sounds/second of
+	// a minigun stream, and a two-victim flak hit would play once.
 	PlayResolved(this, ResolvePlayback(Preset, Damage), Preset.Volume * Config.UserMultiplier);
-	if (UWorld* World = GetWorld())
-	{
-		LastClientHitsoundTime = World->GetTimeSeconds();
-	}
 }
 
 void AClientHitsounds::PlayPreview(UObject* WorldContext, const FHitsoundsConfig& InConfig, bool bFriendly, int32 Damage)
@@ -741,14 +767,26 @@ void AClientHitsounds::PlayClientPredictedHitsound(int32 EstimatedDamage, bool b
 		return;
 	}
 
-	// Team-aware: predicting the ENEMY cue for a teammate you just pinged for
-	// zero damage is worse than staying silent.
-	if (bFriendly && EstimatedDamage <= 0 && !Config.bPlayZeroFriendly)
+	// Friendly targets: never predict a PITCHED sound. EstimatedDamage here is
+	// the weapon's configured base damage — but the server applies TeamDamagePct
+	// BEFORE the mutator chain, so on a no-FF server the real damage is 0 and a
+	// pitched "125 damage" cue would be loud false feedback. The client cannot
+	// know the server's FF scaling, so the only honest prediction for a teammate
+	// is the flat zero cue (if the user opted into it) or silence — the
+	// authoritative message carries the truth either way.
+	if (bFriendly)
 	{
+		if (!Config.bPlayZeroFriendly)
+		{
+			return;
+		}
+		FNCPHitsoundPitch Zero = ResolvePlaybackFor(Config.Friendly, 0, ENCPHitsoundStyle::Flat);
+		PlayResolved(this, Zero, Config.Friendly.Volume * Config.UserMultiplier);
+		LastClientHitsoundTime = Now;
 		return;
 	}
 
-	const FHitsound& Preset = bFriendly ? Config.Friendly : Config.Enemy;
+	const FHitsound& Preset = Config.Enemy;
 	PlayResolved(this, ResolvePlayback(Preset, EstimatedDamage), Preset.Volume * Config.UserMultiplier);
 	LastClientHitsoundTime = Now;
 }
@@ -892,8 +930,11 @@ bool AClientHitsounds::IsPelletDamage(TSubclassOf<UDamageType> DamageType) const
 	{
 		return false;
 	}
-	const FString Name = DamageType->GetName();
-	return Name.Contains(TEXT("Flak")) || Name.Contains(TEXT("Shard"));
+	// Shard damage only (UTDmg_FlakShard, stinger shards). Matching bare "Flak"
+	// would also coalesce the flak ALT shell (UTDmg_FlakShell) — a single-hit
+	// damage type dc deliberately excluded — adding 35ms of pointless latency
+	// to every shell hit.
+	return DamageType->GetName().Contains(TEXT("Shard"));
 }
 
 bool AClientHitsounds::IsIgnoredDamage(TSubclassOf<UDamageType> DamageType) const

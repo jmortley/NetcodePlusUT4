@@ -295,6 +295,9 @@ public:
 	/** Force a rebuild (used after a late PAK mount adds custom packs). */
 	static void RefreshCatalog();
 
+	/** Module shutdown: release the GC-rooted cues and the FGCObject. */
+	static void ShutdownCatalog();
+
 	/** All presets: built-in manifest entries first (in authored order), then custom packs. */
 	static const TArray<FHitsound>& GetCatalog();
 
@@ -435,7 +438,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flak")
 	float FlakHitMinAge;
 
-	/** Timestamp of the last locally played hitsound (predicted or authoritative). */
+	/** Timestamp of the last PREDICTED hitsound only. Authoritative playback
+	 *  must never arm this: it feeds ShouldSuppressServerHitsound, and if
+	 *  authoritative sounds armed it they would suppress each other (a
+	 *  spectator predicts nothing and would lose most of a minigun stream). */
 	float LastClientHitsoundTime;
 
 	/** Client-side prediction master switch. */

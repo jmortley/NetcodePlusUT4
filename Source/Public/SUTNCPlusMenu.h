@@ -37,6 +37,11 @@ class SUTNCPlusMenu : public SCompoundWidget
 	void Construct(const FArguments& InArgs);
 	void ClosePanel();
 
+	/** Switch the visible tab in place (used when `ncpmenu <tab>` targets an
+	 *  already-open panel — closing it instead would punish dc muscle memory
+	 *  like typing "mutate hitsounds" with F5 open). */
+	void SwitchTab(ENCPMenuTab Tab);
+
 	/** RAII backstop: release a held NCPlusHUDDragMode count if this panel is torn
 	 *  down without ClosePanel (e.g. viewport widgets dropped on a map load). */
 	virtual ~SUTNCPlusMenu();

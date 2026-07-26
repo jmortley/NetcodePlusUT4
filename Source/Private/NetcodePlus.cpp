@@ -212,9 +212,42 @@ static void HandleWeaponSkins(const TArray<FString>& Args)
 
 static void HandleNCPMenu(const TArray<FString>& Args)
 {
-	// Toggle: if already open, close it
+	// Optional first arg picks the tab (parsed up front so an explicit tab
+	// request can retarget an already-open panel).
+	ENCPMenuTab InitialTab = ENCPMenuTab::About;
+	bool bExplicitTab = false;
+	if (Args.Num() > 0)
+	{
+		const FString Tab = Args[0].ToLower();
+		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
+		{
+			InitialTab = ENCPMenuTab::ForceModels;
+			bExplicitTab = true;
+		}
+		else if (Tab == TEXT("general"))
+		{
+			InitialTab = ENCPMenuTab::General;
+			bExplicitTab = true;
+		}
+		else if (Tab == TEXT("hitsounds"))
+		{
+			InitialTab = ENCPMenuTab::Hitsounds;
+			bExplicitTab = true;
+		}
+	}
+
+	// Toggle: bare `ncpmenu` / F5 on an open panel closes it. An EXPLICIT tab
+	// request on an open panel switches tabs instead — otherwise "mutate
+	// hitsounds" typed with F5 open would close the menu in the user's face.
 	if (ActiveNCPMenu.IsValid())
 	{
+		if (bExplicitTab)
+		{
+			TSharedPtr<SUTNCPlusMenu> Menu = ActiveNCPMenu.Pin();
+			Menu->SwitchTab(InitialTab);
+			FSlateApplication::Get().SetKeyboardFocus(Menu, EFocusCause::SetDirectly);
+			return;
+		}
 		ActiveNCPMenu.Pin()->ClosePanel();
 		ActiveNCPMenu.Reset();
 		return;
@@ -242,27 +275,6 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 
 	UGameViewportClient* ViewportClient = World->GetGameViewport();
 	if (!ViewportClient) return;
-
-	// Optional first arg picks the opening tab: `ncpmenu forcemodels` (or the
-	// teamskins/models synonyms) → Force Models, `general` → General; bare
-	// `ncpmenu` / F5 → About.
-	ENCPMenuTab InitialTab = ENCPMenuTab::About;
-	if (Args.Num() > 0)
-	{
-		const FString Tab = Args[0].ToLower();
-		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
-		{
-			InitialTab = ENCPMenuTab::ForceModels;
-		}
-		else if (Tab == TEXT("general"))
-		{
-			InitialTab = ENCPMenuTab::General;
-		}
-		else if (Tab == TEXT("hitsounds"))
-		{
-			InitialTab = ENCPMenuTab::Hitsounds;
-		}
-	}
 
 	TSharedRef<SUTNCPlusMenu> Menu =
 		SNew(SUTNCPlusMenu)
@@ -1104,6 +1116,7 @@ void FNetcodePlus::ShutdownModule()
 	}
 	SUTWeaponSkinSelector_CleanupCache();
 	AUTWeaponFix::CleanupWeaponSettings();
+	AClientHitsounds::ShutdownCatalog();
 
 	if (GNCPPreLoadMapHandle.IsValid())
 	{

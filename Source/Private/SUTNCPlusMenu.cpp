@@ -211,12 +211,17 @@ FReply SUTNCPlusMenu::OnLaunchClicked(FString Command)
 
 FReply SUTNCPlusMenu::OnTabClicked(ENCPMenuTab Tab)
 {
+	SwitchTab(Tab);
+	return FReply::Handled();
+}
+
+void SUTNCPlusMenu::SwitchTab(ENCPMenuTab Tab)
+{
 	ActiveTab = Tab;
 	if (ContentArea.IsValid())
 	{
 		ContentArea->SetContent(BuildTabContent(Tab));
 	}
-	return FReply::Handled();
 }
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
@@ -886,11 +891,12 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHitsoundsTab()
 					.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
 					{
 						if (!NewSel.IsValid()) { return; }
-						const float KeepVolume = Side->Volume;
-						const float KeepPitch = Side->Pitch;
+						// Adopt the preset's authored Volume/Pitch wholesale:
+						// built-ins carry dc's defaults (2.0/1.9) and custom
+						// packs carry their author's levels — which would be
+						// silently discarded if we kept the previous slot's
+						// values. The sliders are right below for re-tuning.
 						*Side = AClientHitsounds::FindPreset(*NewSel);
-						Side->Volume = KeepVolume;
-						Side->Pitch = KeepPitch;
 					})
 				]
 			];
@@ -1097,7 +1103,13 @@ void SUTNCPlusMenu::LoadSettings()
 
 	// Hitsounds — read straight from Mod.ini so the tab works whether or not a
 	// match is running the mutator. The catalog is static and client-side, so
-	// the preset list is available here too.
+	// the preset list is available here too. If a previous build came up empty
+	// (content PAK not yet mounted at the time), retry now — menu open is the
+	// natural moment a late-mounted custom pack can join.
+	if (!AClientHitsounds::IsCatalogReady())
+	{
+		AClientHitsounds::RefreshCatalog();
+	}
 	HSConfig = AClientHitsounds::LoadConfigFromIni();
 
 	HSPresetOptions.Reset();
