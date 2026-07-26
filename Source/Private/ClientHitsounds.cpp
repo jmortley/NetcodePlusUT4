@@ -295,6 +295,7 @@ AClientHitsounds::AClientHitsounds(const FObjectInitializer& ObjectInitializer)
 	bClientSideHitsoundsEnabled = true;
 	ClientHitsoundDedupWindow = 0.25f;
 	ClientHitsoundMinInterval = 0.05f;
+	MenuRequestCooldown = 2.0f;
 
 	// The client's own replicated copy is what resolves OptionalObject, so this
 	// actor must replicate and always be relevant.
@@ -359,6 +360,38 @@ void AClientHitsounds::Mutate_Implementation(const FString& MutateString, APlaye
 	if (!MutateString.TrimStartAndEnd().Equals(TEXT("hitsounds"), ESearchCase::IgnoreCase))
 	{
 		return;
+	}
+
+	// Throttle per player. The multicast reaches EVERY client, so an unthrottled
+	// request is one player's spam amplified across the whole server.
+	if (MenuRequestCooldown > 0.f)
+	{
+		UWorld* World = GetWorld();
+		const float Now = World ? World->GetTimeSeconds() : 0.f;
+		const TWeakObjectPtr<APlayerController> Key(Sender);
+
+		if (const float* Last = LastMenuRequestTimes.Find(Key))
+		{
+			if ((Now - *Last) < MenuRequestCooldown)
+			{
+				UE_LOG(LogClientHitsounds, Verbose,
+					TEXT("Throttled 'mutate hitsounds' from %s (%.2fs since last, cooldown %.2fs)"),
+					*GetNameSafe(Sender), Now - *Last, MenuRequestCooldown);
+				return;
+			}
+		}
+
+		// Drop entries for players who have since left, so the map stays bounded
+		// by the current player count rather than by churn over the match.
+		for (auto It = LastMenuRequestTimes.CreateIterator(); It; ++It)
+		{
+			if (!It.Key().IsValid())
+			{
+				It.RemoveCurrent();
+			}
+		}
+
+		LastMenuRequestTimes.Add(Key, Now);
 	}
 
 	MulticastShowHitsoundMenu(Sender);

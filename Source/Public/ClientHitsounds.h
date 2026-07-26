@@ -450,6 +450,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Prediction")
 	float ClientHitsoundMinInterval;
 
+	/** Server-side: minimum seconds between accepted "mutate hitsounds" requests
+	 *  from one player. The menu-open is a reliable multicast (a mutator has no
+	 *  owning connection, so it cannot be a Client RPC), which means an
+	 *  unthrottled client could fan its spam out to every player on the server.
+	 *  0 disables the limit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitsounds")
+	float MenuRequestCooldown;
+
+	/** Server-side: last accepted menu request per player. Weak keys so a
+	 *  disconnecting player's entry can be pruned rather than leaked. */
+	TMap<TWeakObjectPtr<APlayerController>, float> LastMenuRequestTimes;
+
 	/** True if this damage type arrives one event per pellet and should be coalesced. */
 	bool IsPelletDamage(TSubclassOf<UDamageType> DamageType) const;
 
