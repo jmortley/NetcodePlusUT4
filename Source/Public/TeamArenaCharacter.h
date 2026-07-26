@@ -243,6 +243,8 @@ public:
 	// + team-recolour, driven by the local NCPlusForceModels config. Fires on spawn /
 	// team-change (both route through NotifyTeamChanged) and is a no-op on a dedicated server.
 	virtual void NotifyTeamChanged() override;
+	/** Keep stock outline recreation out of ApplyCharacterData's body-mesh reregister window. */
+	virtual void ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data) override;
 
 	// Force Models: redirect the stock yellow armour overlay to our match/complimentary armour colour.
 	virtual void UpdateArmorOverlay() override;
