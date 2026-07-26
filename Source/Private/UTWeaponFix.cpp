@@ -141,16 +141,20 @@ static TAutoConsoleVariable<int32> CVarVisualHitscanClaimDebug(
     ECVF_Default);
 
 // =========================================================================
-// HIT-ATTRIBUTION TELEMETRY (server-only, read-only, default OFF).
-// One [HitAttrib] line per server-validated hitscan, attributing the
+// HIT-ATTRIBUTION TELEMETRY (read-only, log-only).
+// Server: one [HitAttrib] line per validated hitscan, attributing the
 // acceptance route: bare rewound-capsule hit vs claim-conditional forgiveness
-// (moving/stationary padding, bidirectional time search) vs miss. Exists to
-// answer which route grants "gifted" hits landing ahead of the rendered model
-// at low ping. Changes no validation behavior at any setting.
+// (moving/stationary padding, bidirectional time search) vs miss. Client: one
+// [HitAttrib.Client] line per claim-capable shot with the anchor pre-trace
+// result, the rendered-vs-anchor visual offset, and the claim actually sent.
+// Exists to answer which route grants "gifted" hits landing ahead of the
+// rendered model at low ping. Changes no validation behavior at any setting.
+// DEFAULT 1 FOR THE 328-RC DOGFOOD ONLY — flip back to 0 before the 328 live
+// release (2026-08-14).
 // =========================================================================
 static TAutoConsoleVariable<int32> CVarHitAttribDebug(
-    TEXT("ncp.HitAttribDebug"), 0,
-    TEXT("Server hitscan acceptance attribution: 0=off (default), 1=log one [HitAttrib] line per validated hitscan shot."),
+    TEXT("ncp.HitAttribDebug"), 1,
+    TEXT("Hitscan acceptance attribution: 0=off, 1=log one [HitAttrib] line per server-validated shot and one [HitAttrib.Client] line per client claim decision. Default 1 during 328-RC dogfood; revert to 0 for live."),
     ECVF_Default);
 
 // leadUU diagnostic only: the server cannot see what the shooter's client
@@ -1417,6 +1421,12 @@ void AUTWeaponFix::FireShot()
 			HitScanTrace(SpawnLocation, EndTrace, InstantHitInfo[CurrentFireMode].TraceHalfSize, PreHit, 0.0f);
 			ClientHitChar = Cast<AUTCharacter>(PreHit.Actor.Get());
 
+			// [HitAttrib.Client] capture: the anchor-trace result BEFORE the visual
+			// filter, and the visual offset/missBy the filter measured.
+			AUTCharacter* AttribPretraceHit = ClientHitChar;
+			FVector AttribVisualOffset = FVector::ZeroVector;
+			float AttribVisualMissBy = 0.0f;
+
 			// ClientHitChar must mean "the ray crossed what I saw", not merely
 			// "the ray crossed the invisible replicated actor anchor". TeamArenaCharacter's
 			// network smoothing can leave the rendered mesh behind that anchor at high ping.
@@ -1427,6 +1437,8 @@ void AUTWeaponFix::FireShot()
 				const bool bVisualCapsuleHit = ShotIntersectsRenderedCapsule(
 					ClientHitChar, SpawnLocation, EndTrace,
 					InstantHitInfo[CurrentFireMode].TraceHalfSize, VisualOffset, VisualMissBy);
+				AttribVisualOffset = VisualOffset;
+				AttribVisualMissBy = VisualMissBy;
 				const int32 VisualClaimDebug = CVarVisualHitscanClaimDebug.GetValueOnGameThread();
 
 				if (!bVisualCapsuleHit)
@@ -1463,6 +1475,30 @@ void AUTWeaponFix::FireShot()
 				{
 					ClientHeadOffset = RenderedHead - ClientHitChar->GetActorLocation();
 				}
+			}
+
+			// [HitAttrib.Client] shooter-side half of the attribution table, same
+			// cvar as the server line: what the anchor pre-trace crossed, how far
+			// the rendered mesh sat from the replicated anchor (visOffset — the
+			// smoothing term the claim filter corrects; animation pose is NOT in
+			// it), the filter's missBy vs the rendered capsule, and the claim that
+			// was actually sent. Lands in the SHOOTER's client log.
+			if (CVarHitAttribDebug.GetValueOnGameThread() > 0)
+			{
+				const float ClientPing = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->ExactPing : 0.f;
+				const FString ShooterName = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->PlayerName
+					: (UTOwner ? UTOwner->GetName() : FString(TEXT("unknown")));
+				const FString PretraceName = AttribPretraceHit
+					? (AttribPretraceHit->PlayerState ? AttribPretraceHit->PlayerState->PlayerName : AttribPretraceHit->GetName())
+					: FString(TEXT("none"));
+				const TCHAR* ClaimSent = (ClientHitChar == nullptr)
+					? TEXT("none") : (!ClientHeadOffset.IsZero() ? TEXT("head") : TEXT("body"));
+				UE_LOG(LogUTWeaponFix, Log,
+					TEXT("[HitAttrib.Client] shooter=%s ping=%.0f wep=%s mode=%d pretraceHit=%s speed=%.0f visOffset=%.1f visMissBy=%.1f claimSent=%s"),
+					*ShooterName, ClientPing, *GetClass()->GetName(), CurrentFireMode,
+					*PretraceName,
+					AttribPretraceHit ? AttribPretraceHit->GetVelocity().Size() : 0.f,
+					AttribVisualOffset.Size(), AttribVisualMissBy, ClaimSent);
 			}
 		}
 
