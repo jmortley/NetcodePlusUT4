@@ -332,6 +332,9 @@ TMap<FName, UUTWeaponSkin*> AUTWeaponFix::CachedSkinAssets;
 static TMap<FName, FString> PendingWeaponSkinPaths;
 static TMap<FString, UUTWeaponSkin*> PreloadedWeaponSkinCatalog;
 static bool bWeaponSkinCatalogReady = false;
+/** Ready AND every optional entry loaded. Ready gates catalog use; complete gates the
+ *  periodic rescan, so an optional skin whose PAK mounts late can still join. */
+static bool bWeaponSkinCatalogComplete = false;
 
 class FNCPWeaponSkinCatalogReferences : public FGCObject
 {
@@ -356,12 +359,18 @@ static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings")
 static const FName WEAPON_SKIN_CATALOG_ROOT(TEXT("/Game/Blueprints/UT+/UT+/WeaponSkinsPlus"));
 
 // Versioned public selection manifest shared by the current 38-asset RC PAK
-// and the older 59-asset staged cook. These 30 paths are unrestricted and carry
+// and the older 59-asset staged cook. These paths are unrestricted and carry
 // a real weapon-family tag; utility and cook-specific variants remain invalid.
 // Future folder additions do not become network-valid automatically.
-// NOTE: this list is all-or-nothing — RefreshWeaponSkinCatalog() only marks the
-// catalog ready when EVERY entry resolves, so an entry missing from the shipped
-// PAK disables weapon skins entirely. Only add assets that are actually cooked.
+// Two tiers:
+//   REQUIRED — all-or-nothing: the catalog only goes ready when EVERY entry
+//     resolves, so a missing entry disables weapon skins entirely. This is the
+//     deployment tripwire for content proven to be in the shipped PAK.
+//   OPTIONAL — best-effort: entries that resolve join the catalog; missing ones
+//     are logged and skipped without taking the feature down. New/experimental
+//     skins go here until their cook is proven, then graduate to REQUIRED.
+// Both tiers pass the same per-asset validation; nothing outside these lists
+// ever becomes network-valid.
 static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 {
 	TEXT("BlackDeath"),
@@ -374,7 +383,6 @@ static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 	TEXT("LinkBeeElim"),
 	TEXT("LinkFreedom"),
 	TEXT("LinkMint"),
-	TEXT("PinkLG"),
 	TEXT("Rocket99"),
 	TEXT("Rocket99Elim"),
 	TEXT("RocketBee"),
@@ -394,6 +402,11 @@ static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 	TEXT("SniperPink"),
 	TEXT("SniperRedBird"),
 	TEXT("SniperSport")
+};
+
+static const TCHAR* const OPTIONAL_WEAPON_SKIN_ASSETS[] =
+{
+	TEXT("PinkLG")
 };
 
 static FString GetWeaponSkinObjectPath(const TCHAR* AssetName)
@@ -420,6 +433,7 @@ static int32 RefreshWeaponSkinCatalog()
 
 	TMap<FString, UUTWeaponSkin*> NewCatalog;
 	int32 LoadedRequiredCount = 0;
+	int32 LoadedOptionalCount = 0;
 	auto LoadManifestGroup = [&ManifestAssetData, &NewCatalog](
 		const TCHAR* const* AssetNames, int32 AssetCount, int32& LoadedCount)
 	{
@@ -452,6 +466,8 @@ static int32 RefreshWeaponSkinCatalog()
 
 	LoadManifestGroup(REQUIRED_WEAPON_SKIN_ASSETS,
 		ARRAY_COUNT(REQUIRED_WEAPON_SKIN_ASSETS), LoadedRequiredCount);
+	LoadManifestGroup(OPTIONAL_WEAPON_SKIN_ASSETS,
+		ARRAY_COUNT(OPTIONAL_WEAPON_SKIN_ASSETS), LoadedOptionalCount);
 
 	if (LoadedRequiredCount == ARRAY_COUNT(REQUIRED_WEAPON_SKIN_ASSETS))
 	{
@@ -464,8 +480,25 @@ static int32 RefreshWeaponSkinCatalog()
 		{
 			WeaponSkinCatalogReferences->Assets.Add(Pair.Value);
 		}
+		// Missing optionals must be surfaced before NewCatalog is consumed below.
+		if (LoadedOptionalCount != ARRAY_COUNT(OPTIONAL_WEAPON_SKIN_ASSETS))
+		{
+			for (int32 Index = 0; Index < ARRAY_COUNT(OPTIONAL_WEAPON_SKIN_ASSETS); ++Index)
+			{
+				const FString ObjectPath =
+					GetWeaponSkinObjectPath(OPTIONAL_WEAPON_SKIN_ASSETS[Index]);
+				if (!NewCatalog.Contains(ObjectPath))
+				{
+					UE_LOG(LogUTWeaponFix, Warning,
+						TEXT("Weapon skin manifest optional entry missing: %s"),
+						*ObjectPath);
+				}
+			}
+		}
 		PreloadedWeaponSkinCatalog = MoveTemp(NewCatalog);
 		bWeaponSkinCatalogReady = true;
+		bWeaponSkinCatalogComplete =
+			LoadedOptionalCount == ARRAY_COUNT(OPTIONAL_WEAPON_SKIN_ASSETS);
 	}
 	else if (!bWeaponSkinCatalogReady)
 	{
@@ -660,8 +693,10 @@ void AUTWeaponFix::RetryPendingWeaponSkins()
 {
 	const bool bLogTiming = SkinTiming();
 	const double RetryStartTime = bLogTiming ? FPlatformTime::Seconds() : 0.0;
+	// Gate the rescan on COMPLETE, not ready: a ready-but-incomplete catalog keeps
+	// refreshing here so an optional skin whose PAK mounts late can still join.
 	const int32 CatalogSkinCount = bSkinsEnabled
-		? (bWeaponSkinCatalogReady
+		? (bWeaponSkinCatalogComplete
 			? PreloadedWeaponSkinCatalog.Num()
 			: RefreshWeaponSkinCatalog())
 		: 0;
@@ -720,6 +755,7 @@ void AUTWeaponFix::CleanupWeaponSettings()
 	PendingWeaponSkinPaths.Empty();
 	PreloadedWeaponSkinCatalog.Empty();
 	bWeaponSkinCatalogReady = false;
+	bWeaponSkinCatalogComplete = false;
 	delete WeaponSkinCatalogReferences;
 	WeaponSkinCatalogReferences = nullptr;
 	bWeaponSettingsLoaded = false;
