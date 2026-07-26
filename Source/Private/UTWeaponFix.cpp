@@ -2645,9 +2645,25 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     // NOTE: We cannot simply call Super::HitScanTrace because it doesn't support our custom padding logic.
     // We must reimplement the trace logic here.
 
+    // A previous trace's demotion must never leak into this one (the sniper /
+    // head-sphere fallbacks consult this flag after we return).
+    bLastUnclaimedRenderDemoted = false;
+
+    // Claim-capable = a mode whose FIRED shots carry hit claims (exact-trace,
+    // damaging, replication-tracked). Gates both the attribution telemetry and
+    // the unclaimed render check. Deliberately excludes per-tick beam re-traces
+    // (Link beam runs FireInstantHit every server tick for remote visuals and
+    // would flood one line per tick) and spread/zoom modes.
+    const bool bClaimCapableMode =
+        bTrackHitScanReplication &&
+        InstantHitInfo.IsValidIndex(CurrentFireMode) &&
+        InstantHitInfo[CurrentFireMode].DamageType != nullptr &&
+        InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.0f;
+
     // [HitAttrib] read-only per-shot attribution state; populated only when the
     // cvar is on, never feeds back into the validation result.
-    const bool bHitAttrib = (Role == ROLE_Authority) && (CVarHitAttribDebug.GetValueOnGameThread() > 0);
+    const bool bHitAttrib = (Role == ROLE_Authority) && bClaimCapableMode &&
+        (CVarHitAttribDebug.GetValueOnGameThread() > 0);
     float AttribClaimMissBy = BIG_NUMBER;   // claimed target's primary-trace distance beyond the UNPADDED radius
     float AttribClaimPad = 0.f;             // padding the claimed target was granted in the primary loop
     bool bAttribTimeSearchHit = false;
@@ -2887,6 +2903,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     AUTCharacter* RenderChkDemotedTarget = nullptr;
     const int32 UnclaimedRenderGate = CVarUnclaimedRenderGate.GetValueOnGameThread();
     if (BestTarget != nullptr && ReceivedHitScanHitChar == nullptr &&
+        bClaimCapableMode &&
         (bHitAttrib || UnclaimedRenderGate > 0) &&
         Role == ROLE_Authority && GetNetMode() != NM_Standalone &&
         UTOwner != nullptr && UTOwner->PlayerState != nullptr)
@@ -2895,45 +2912,53 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         // shooter is a remote human and this mode COULD have claimed. Bots and
         // spread weapons never claim, so their unclaimed hits are legitimate.
         const AUTPlayerController* ShooterPC = Cast<AUTPlayerController>(UTOwner->Controller);
-        const bool bClaimCapableMode =
-            bTrackHitScanReplication &&
-            InstantHitInfo.IsValidIndex(CurrentFireMode) &&
-            InstantHitInfo[CurrentFireMode].DamageType != nullptr &&
-            InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.0f;
-        if (ShooterPC != nullptr && !ShooterPC->IsLocalController() && bClaimCapableMode)
+        if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
         {
             bRenderChkApplicable = true;
 
             const float RenderMs = UTOwner->PlayerState->ExactPing * 0.5f +
                 FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
             const float RenderT = FMath::Clamp(RenderMs * 0.001f, 0.f, 0.25f);
-            FVector RenderLoc = BestTarget->GetRewindLocation(RenderT);
+            const FVector RenderLoc = BestTarget->GetRewindLocation(RenderT);
+            const float RenderColRadius = BestTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
+            const float RenderColHeight = BestTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
-            // Mirror the primary loop's capsule math exactly, at render time.
-            float RenderColHeight = BestTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+            // Position history stores location only — not capsule posture. Test
+            // the ray against BOTH plausible postures and take the best: the
+            // full standing capsule always (it strictly contains the slide-
+            // adjusted capsule at the same anchor, so it also covers a target
+            // that WAS sliding at render time), plus the slide-adjusted capsule
+            // when the target is currently sliding (its recorded anchor may
+            // already reflect slide posture). A mandatory reject must not
+            // hinge on posture we cannot reconstruct.
+            auto RenderMissBy = [&](const FVector& CapsuleCentre, float HalfHeight) -> float
+            {
+                FVector ClosestOnRay(0.f);
+                FVector ClosestOnCapsule = CapsuleCentre;
+                float EffRadius;
+                if (RenderColRadius >= HalfHeight)
+                {
+                    ClosestOnRay = FMath::ClosestPointOnSegment(CapsuleCentre, StartLocation, Hit.Location);
+                    EffRadius = HalfHeight;
+                }
+                else
+                {
+                    const FVector Seg(0.f, 0.f, HalfHeight - RenderColRadius);
+                    FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
+                        CapsuleCentre - Seg, CapsuleCentre + Seg, ClosestOnRay, ClosestOnCapsule);
+                    EffRadius = RenderColRadius;
+                }
+                return FVector::Dist(ClosestOnRay, ClosestOnCapsule) - (EffRadius + TraceRadius);
+            };
+
+            RenderChkMissBy = RenderMissBy(RenderLoc, RenderColHeight);
             if (BestTarget->UTCharacterMovement && BestTarget->UTCharacterMovement->bIsFloorSliding)
             {
-                RenderLoc.Z = RenderLoc.Z - RenderColHeight + BestTarget->SlideTargetHeight;
-                RenderColHeight = BestTarget->SlideTargetHeight;
+                FVector SlideLoc = RenderLoc;
+                SlideLoc.Z = SlideLoc.Z - RenderColHeight + BestTarget->SlideTargetHeight;
+                RenderChkMissBy = FMath::Min(RenderChkMissBy,
+                    RenderMissBy(SlideLoc, BestTarget->SlideTargetHeight));
             }
-            const float RenderColRadius = BestTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
-
-            FVector RenderClosest(0.f);
-            FVector RenderCapsulePoint = RenderLoc;
-            float RenderEffRadius;
-            if (RenderColRadius >= RenderColHeight)
-            {
-                RenderClosest = FMath::ClosestPointOnSegment(RenderLoc, StartLocation, Hit.Location);
-                RenderEffRadius = RenderColHeight;
-            }
-            else
-            {
-                const FVector RenderSeg(0.f, 0.f, RenderColHeight - RenderColRadius);
-                FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
-                    RenderLoc - RenderSeg, RenderLoc + RenderSeg, RenderClosest, RenderCapsulePoint);
-                RenderEffRadius = RenderColRadius;
-            }
-            RenderChkMissBy = FVector::Dist(RenderClosest, RenderCapsulePoint) - (RenderEffRadius + TraceRadius);
             bRenderChkPass = RenderChkMissBy <= FMath::Max(0.f, CVarUnclaimedRenderSlack.GetValueOnGameThread());
 
             if (!bRenderChkPass && UnclaimedRenderGate > 0)
@@ -2942,11 +2967,15 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 // effects still terminate correctly (same shape as the reverted
                 // 2026-07-18 gate's rejection, but render-reconstructed instead
                 // of claim-presence-based, and ping-independent).
+                // [RenderGate] is its own tag ON PURPOSE: it stays visible in
+                // live logs when ncp.HitAttribDebug=0, and [HitAttrib] parsers
+                // never double-count a demoted shot.
                 UE_LOG(LogUTWeaponFix, Log,
-                    TEXT("[HitAttrib] UnclaimedRenderGate DEMOTED %s: missed render-time capsule by %.1fuu (ping %.0f, renderMs %.1f)"),
+                    TEXT("[RenderGate] DEMOTED %s: missed render-time capsule by %.1fuu (ping %.0f, renderMs %.1f)"),
                     *BestTarget->GetName(), RenderChkMissBy, UTOwner->PlayerState->ExactPing, RenderMs);
                 RenderChkDemotedTarget = BestTarget;
                 bRenderChkDemoted = true;
+                bLastUnclaimedRenderDemoted = true;
                 BestTarget = nullptr;
                 BestPoint = FVector::ZeroVector;
                 BestCapsulePoint = FVector::ZeroVector;
@@ -3788,7 +3817,10 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
 
     // 3. Check for headshot (using the SAME SpawnLocation and FireDir)
-    if (UTPC && bCheckHeadSphere && (Cast<AUTCharacter>(Hit.Actor.Get()) == nullptr) &&
+    // bLastUnclaimedRenderDemoted: HitScanTrace demoted this ray's pawn hit at
+    // the render check — the head-sphere fallback must not resurrect it.
+    if (UTPC && bCheckHeadSphere && !bLastUnclaimedRenderDemoted &&
+        (Cast<AUTCharacter>(Hit.Actor.Get()) == nullptr) &&
         ((Spread.Num() <= GetCurrentFireMode()) || (Spread[GetCurrentFireMode()] == 0.f)) &&
         (UTOwner->GetVelocity().IsNearlyZero() || bCheckMovingHeadSphere))
     {

@@ -498,6 +498,13 @@ public:
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
 
+    /** Server-side only: set when THIS trace's pawn hit was demoted by the
+     *  unclaimed-hit render check (ncp.UnclaimedRenderGate). Head-sphere
+     *  fallbacks (base FireInstantHit and sniper subclasses) must not
+     *  resurrect the demoted target from the same ray. Reset at every
+     *  HitScanTrace entry. */
+    bool bLastUnclaimedRenderDemoted = false;
+
     /** Server-side only (327 client-informed headshot): WHERE the client rendered the claimed target's
      *  head — the offset of its rendered mesh head bone from the target's body. Lets the server place a
      *  NORMAL-size head sphere at the head the player actually saw (forced models render their own head
