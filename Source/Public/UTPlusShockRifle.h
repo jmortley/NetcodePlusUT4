@@ -104,6 +104,8 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 
 	virtual UAnimMontage* GetFiringAnim(uint8 FireMode, bool bOnHands = false) const;
 	virtual void PlayFiringEffects();
+	virtual void PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
+		const FVector& SpawnLocation, const FRotator& SpawnRotation) override;
 
 	UFUNCTION(BlueprintImplementableEvent, BlueprintCosmetic)
 	void Play1PComboEffects();
@@ -141,10 +143,6 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	 * Beam mode uses standard validation for forgiving hitscan.
 	 */
 	virtual float GetHitValidationPredictionTime() const override;
-
-	/** Widen the server-side hitscan time-search fallback to 45ms (half-window) for the
-	 *  shock family (incl. the BP instagib child); other weapons keep the base 30ms. */
-	virtual float GetHitscanTimeSearchWindow() const override;
 };
 
 #ifdef _MSC_VER

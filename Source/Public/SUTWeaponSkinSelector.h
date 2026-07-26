@@ -8,7 +8,7 @@
 class UUTLocalPlayer;
 class SColorBlock;
 
-/** Free all cached skin assets (call on module shutdown or map change) */
+/** Clear the UI index; AUTWeaponFix owns the session-retained skin assets. */
 void SUTWeaponSkinSelector_CleanupCache();
 
 /** Info about a discovered NetcodePlus weapon */
@@ -95,9 +95,19 @@ private:
 	TSharedPtr<STextBlock> HitscanValueText;
 	FReply OnHitscanToggleClicked();
 
-	/** Hidden-weapon beam origin offsets (read into AUTWeaponFix statics).
-	 *  Live values shown in the spinner; LoadSettings seeds them from the
-	 *  static (which was filled from Mod.ini); SaveAndApply pushes them back. */
+	/** Hidden-weapon style: false (default) = BP-parity visibility-only hide with
+	 *  the beam from the live muzzle socket; true = classic camera-relative beam
+	 *  (the pre-2026-07-19 behavior, offsets below). Mirrors
+	 *  AUTWeaponFix::bClassicWeaponHide; LoadSettings seeds it, SaveAndApply
+	 *  pushes it back and re-applies to the current weapon. */
+	bool bClassicWeaponHide = false;
+	ECheckBoxState GetClassicHideState() const { return bClassicWeaponHide ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; }
+	void OnClassicHideChanged(ECheckBoxState NewState) { bClassicWeaponHide = (NewState == ECheckBoxState::Checked); }
+
+	/** Hidden-weapon beam origin offsets (read into AUTWeaponFix statics). Only
+	 *  used by the classic hide style above. Live values shown in the spinner;
+	 *  LoadSettings seeds them from the static (which was filled from Mod.ini);
+	 *  SaveAndApply pushes them back. */
 	float HiddenBeamBack;
 	float HiddenBeamDown;
 	TOptional<float> GetHiddenBeamBack() const { return HiddenBeamBack; }

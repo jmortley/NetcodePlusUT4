@@ -70,6 +70,28 @@ struct FCamperDataElimPlus
 };
 
 
+/** Server-only live state for ONE open clutch attempt (a team down to its last
+ *  living player with >= 1 enemy alive). Plain struct on purpose — no USTRUCT,
+ *  no UPROPERTY, so nothing here can ever replicate or serialize. The stable
+ *  StatsID is captured the moment the attempt opens because the candidate can
+ *  disconnect before the round resolves; the weak PlayerState pointer is only a
+ *  fast identity check for kill crediting and goes stale harmlessly. */
+struct FElimPlusClutchTracker
+{
+	bool    bOpen = false;
+	FString UniqueId;                          // captured at open; survives Logout
+	TWeakObjectPtr<AUTPlayerState> Candidate;  // live identity only, never trusted after leave
+	int32   RoundIndex      = 0;               // 0-based (TotalRoundsPlayed at open, pre-increment)
+	int32   EnemiesAtStart  = 0;
+	int32   DirectKills     = 0;
+	bool    bCandidateAlive = true;
+	int32   StartEventIndex = 0;               // match-local death-event ordinal
+	int32   EndEventIndex   = -1;              // set at candidate death/leave; -1 = still alive
+	float   StartTime       = 0.f;             // world seconds
+	float   EndTime         = 0.f;
+};
+
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerACEElimPlus, AUTPlayerState*, PlayerState);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerDarkHorseElimPlus, AUTPlayerState*, PlayerState, int32, EnemiesKilled);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerHighDamageCarryElimPlus, AUTPlayerState*, PlayerState, float, DamagePercentage);
@@ -174,6 +196,14 @@ public:
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Arena|Bridge")
 	TArray<AUTPlayerState*> Team1AlivePlayers;
+
+	/** PlayerStates that actually SPAWNED into the current round. Recorded by
+	 *  RestartPlayer on a successful live spawn, cleared in ResetPlayersForNewRound.
+	 *  EndRoundForTeam rates (ELO + PPR accumulators) only these: a late joiner
+	 *  who connects mid-round and never spawns must not eat a 0-kill/0-damage
+	 *  rated round — worst on the match's LAST round, where a fresh high-RD
+	 *  rating could bleed up to the per-round cap without ever playing. */
+	TSet<TWeakObjectPtr<AUTPlayerState>> RoundParticipants;
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Arena|Bridge")
 	void BP_OnLastManStanding(int32 LastManTeamIndex, AUTPlayerState* LastManPlayerState);
@@ -351,11 +381,15 @@ public:
 	 *  watch the shuffle on the auto-shown scoreboard during the countdown. */
 	void RebalanceTeamsForMatchStart();
 
-	/** 6-0 blowout shuffle (publics): re-split BOTH teams by CURRENT-match PPR
-	 *  — who is performing THIS match — rather than the lifetime Glicko that
-	 *  just produced the 6-0. Armed by EndRoundForTeam, consumed at the next
-	 *  StartNextRound before anything spawns (silent moves, same rationale as
-	 *  the pre-match rebalance). Scores are NOT reset. */
+	/** 6-0 blowout balance (publics): make the SINGLE change — one 1-for-1 swap,
+	 *  or one move off a team that is both stronger and up a man — that best
+	 *  narrows the CURRENT-match PPR gap (who is performing THIS match, not the
+	 *  lifetime Glicko that just produced the 6-0). Replaced the full TeamBalancer
+	 *  re-partition (2026-07-11), which could re-seat most of the lobby mid-match.
+	 *  No-ops when the PPR gap is already small or no single change improves it.
+	 *  Armed by EndRoundForTeam, consumed at the next StartNextRound before
+	 *  anything spawns (same rationale as the pre-match rebalance). Scores are
+	 *  NOT reset. */
 	void MidGameShufflePPR();
 
 	// -------- Victory Audio (Blueprint Editable) --------
@@ -677,7 +711,7 @@ protected:
 	//FTimerHandle TH_NextRound;
 	//float OvertimeStartTimeSeconds = 0.f;
 
-	// -------- Spawn Selection (Wipeout-style: per-team pool + dynamic per-player scoring) --------
+	// -------- Spawn Selection (quality-ranked anchors + dynamic transform queues) --------
 	/** Flat list of every APlayerStart found at map-load time. Source data for
 	 *  PrecomputeSpawnLayouts. */
 	UPROPERTY(Transient)
@@ -725,6 +759,18 @@ protected:
 	void PrecomputeSpawnLayouts();
 	void SelectSpawnLayoutForRound();
 	void ResetSpawnSelectionForNewRound();
+	void PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount);
+	bool TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform);
+	void ClearHybridRoundSpawnState();
+
+	/** Default-on; Mod.ini [NetcodePlus] ElimHybridRoundSpawns=false restores
+	 *  the previous PlayerStart-only behavior. */
+	bool bEnableHybridRoundSpawns = true;
+	bool bHybridRoundSpawnWindow = false;
+	bool bHasPendingHybridSpawnTransform = false;
+	FTransform PendingHybridSpawnTransform;
+	TArray<FTransform> Team0HybridSpawnQueue;
+	TArray<FTransform> Team1HybridSpawnQueue;
 	
 	UPROPERTY(Transient)
 	AActor* OverriddenPlayerStart;
@@ -788,4 +834,49 @@ protected:
 	void CheckForDarkHorse(int32 WinnerTeamIndex);
 	void CheckForHighDamageCarry(int32 WinnerTeamIndex);
 	TMap<TWeakObjectPtr<AUTPlayerState>, int32> DarkHorseCandidates;
+
+	// -------- Server-authored clutch telemetry (uploaded via /elo_entry/) -----
+	// DarkHorseCandidates only covers 1v3+ candidates for the replay/achievement
+	// path; this tracker records EVERY last-player attempt (both teams, 1v1..1v4,
+	// wins, failures, draws) with exact direct-kill and posthumous-kill
+	// boundaries. Server-only: no UPROPERTY, no replication, no RPC — the data
+	// leaves the server exclusively inside the existing ELO JSON POST.
+
+	/** At most one open attempt per team per round, indexed by team. */
+	FElimPlusClutchTracker ActiveClutch[2];
+
+	/** Completed attempts for the whole match; copied into
+	 *  FNCElimPlusMatchInput at HandleMatchHasEnded. Cleared at match start. */
+	TArray<FNCElimPlusClutchInput> CompletedClutches;
+
+	/** Match-local death-event ordinal. Incremented once per death processed by
+	 *  ScoreKill while a round is live; gives clutch attempts stable, ordered
+	 *  start/end indexes without relying on any external log. */
+	int32 ClutchDeathOrdinal = 0;
+
+	/** Clear ALL clutch state (match scope). InitGame + HandleMatchHasStarted. */
+	void ResetClutchTelemetryForMatch();
+
+	/** Open an attempt for TeamIndex if none is open this round. Called beside
+	 *  the CheckLastManStanding announce (same 2->1 transition semantics).
+	 *  No-ops for bots/invalid IDs and when no enemy remains. */
+	void OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate, int32 EnemiesAlive);
+
+	/** Credit a direct kill to an open attempt whose still-alive candidate is
+	 *  KillerPS and whose enemy team contains VictimPS. Suicides/world deaths
+	 *  are excluded by the caller (KillerPS null), team kills by the team check. */
+	void CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS);
+
+	/** Mark VictimPS's open attempt candidate dead and freeze its end
+	 *  index/time so later (posthumous-projectile) events can neither extend
+	 *  the attempt nor award further kills. Also used by Logout. */
+	void MarkClutchCandidateDead(AUTPlayerState* VictimPS, int32 DeathOrdinal);
+
+	/** Resolve every open attempt against the round outcome (WinnerTeamIndex,
+	 *  INDEX_NONE = draw) and move them to CompletedClutches. EndRoundForTeam only. */
+	void FinalizeClutchAttempts(int32 WinnerTeamIndex);
+
+	/** Drop open attempts WITHOUT recording them (voided round — admin round
+	 *  restart, defensive round-start sweep). Completed attempts are kept. */
+	void DiscardOpenClutchAttempts();
 };

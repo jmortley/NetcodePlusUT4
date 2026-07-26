@@ -4,6 +4,8 @@
 #include "UTProj_ShockBall.h"
 #include "UTPlusProj_ShockBall.generated.h"
 
+class UAudioComponent;
+
 /**
  * Custom shock ball projectile for UTPlusShockRifle.
  * Same as stock shock ball but references UTPlusShockRifle instead of UTWeap_ShockRifle.
@@ -17,10 +19,14 @@ public:
 	AUTPlusProj_ShockBall(const FObjectInitializer& ObjectInitializer);
 	virtual void Tick(float DeltaTime) override;
 	virtual void BeginPlay() override;
+	virtual void BeginFakeProjectileSynch(AUTProjectile* InFakeProjectile) override;
 	virtual void NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage) override;
 	virtual void OnRep_Slomo() override;
+	virtual void OnRep_UTProjReplicatedMovement() override;
 	virtual void PostNetReceiveVelocity(const FVector& NewVelocity) override;
 	virtual void Explode_Implementation(const FVector& HitLocation, const FVector& HitNormal, UPrimitiveComponent* HitComp = nullptr) override;
+	virtual void ShutDown() override;
+	virtual void Destroyed() override;
 	virtual bool ShouldIgnoreHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp) override;
 	virtual void DamageImpactedActor_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp, const FVector& HitLocation, const FVector& HitNormal) override;
 
@@ -63,6 +69,74 @@ protected:
 	FVector LastStuckProgressLoc;
 	/** Max net movement (units) over the debounce window that still counts as "not travelling". */
 	static constexpr float StuckProgressThreshold = 6.f;
+
+	// ---- Behavioural pairing state (NOT diagnostics — consumed by CanMatchFake / handoff) ----
+	/** Fake spawn origin. Consumed by CanMatchFake gate 3b (displacement-from-spawn) AND the curve
+	 *  diagnostics. Written unconditionally in BeginPlay, so behaviour is identical with ncp.ShockDebug 0/1. */
+	FVector FireLineOrigin;
+	/** Fake-only: integral of |velocity|*dt over the fake's life (the actor tick delta is already
+	 *  scaled by CustomTimeDilation). CanMatchFake gate 3b's expected-displacement term — correct under
+	 *  Slomo and it freezes on a PMC stop, unlike currentSpeed*wallAge. Accumulated every Tick, ungated. */
+	float ExpectedDispAccum;
+	/** Client-fake only: world time when an unpaired fake first remained stopped.
+	 *  Used by the quiet orphan reaper; negative means it is moving, paired, or unobserved. */
+	float OrphanStoppedStartTime;
+	/** Real-only: set true once a replicated velocity ~0 (server-confirmed stop) has been received.
+	 *  Sticky. Gates truth-position handoff versus local-only contradiction recovery. */
+	bool bServerConfirmedStop;
+
+	// ---- Client authoritative-anchor estimator / local-stop recovery ----
+	/** Collision-free estimate derived from the latest raw server movement sample. It advances only
+	 *  while this owning-client real remains paired with its fake. */
+	FVector AuthEstimateLocation;
+	FVector AuthEstimateVelocity;
+	bool bAuthEstimateValid;
+	float AuthEstimateSampleTime;
+
+	/** A local-only collision stopped the paired client representations while the server still reports
+	 *  motion. During recovery both actors remain co-located for combo correctness. */
+	bool bLocalStopRecovery;
+	bool bRecoveryIgnoringWorldStatic;
+	float LocalStopRecoveryStartTime;
+	FVector LocalStopRecoveryStartLocation;
+	TArray<TWeakObjectPtr<UPrimitiveComponent>> RecoveryCollisionComponents;
+	TArray<TEnumAsByte<ECollisionResponse>> RecoveryCollisionResponses;
+
+	void CaptureRawAuthoritativeAnchor();
+	void AdvanceAuthoritativeEstimate(float DeltaTime);
+	bool BeginLocalStopRecovery(const TCHAR* Trigger);
+	void TickLocalStopRecovery(float DeltaTime);
+	void EndLocalStopRecovery(const TCHAR* Reason);
+	void SetRecoveryWorldStaticIgnored(bool bIgnore);
+	void RestartRecoveryProjectile(AUTProjectile* Projectile, const FVector& Location, const FVector& Velocity);
+	FVector GetAuthoritativeTarget() const;
+
+	// ---- Instant-replay audio ownership ----
+	/** The retained killcam world is loaded and then paused while hidden. Blueprint auto-activated
+	 *  travel loops spawned during that bootstrap otherwise remain active indefinitely. Remember only
+	 *  the components we stop so they can be restarted if this exact killcam world is shown later. */
+	bool bKillcamAudioSuppressed;
+	TArray<TWeakObjectPtr<UAudioComponent>> KillcamAudioComponentsToResume;
+	void UpdateKillcamAudioSuppression();
+
+	// ---- Curve diagnostics (ncp.ShockDebug) — logging state only, zero behaviour change ----
+	// The open-air mid-flight bend ("swoosh") has never been captured because every existing
+	// log line is tied to a stop/hit/reveal event. These track the flight itself, event-gated
+	// by doubling thresholds so a straight core logs nothing. See Tick/PostNetReceiveVelocity.
+	// Initialised in the CONSTRUCTOR, not BeginPlay: on a replicated real PostNetReceiveVelocity
+	// fires before BeginPlay, so BeginPlay-init would wipe the FirstRepVelDir baseline it records.
+	/** Next lateral-offset-from-fire-line (units) that triggers a CURVE-LAT log; doubles each log. */
+	float NextCurveLatLog;
+	/** Next velocity-heading deviation (degrees) that triggers a CURVE-VEL log; doubles each log. */
+	float NextCurveVelDegLog;
+	/** Vector sum of convergence corrections applied to the fake (lives on the REAL instance). */
+	FVector ConvergePullAccum;
+	/** Next accumulated-pull magnitude (units) that triggers a CONVERGE-PULL log; doubles each log. */
+	float NextConvergePullLog;
+	/** First non-stop replicated velocity heading (REAL instance) — the server's true fire heading;
+	 *  baseline for the deferred PNRV paired-cmp (emitted in BeginPlay) + mid-flight heading changes. */
+	FVector FirstRepVelDir;
+	bool bLoggedFirstRepVel;
 
 public:
 	virtual bool CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const override;

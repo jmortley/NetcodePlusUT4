@@ -5,6 +5,7 @@
 
 #include "NCShaftArenaGame.h"
 #include "NCPlusVersionGate.h"
+#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
@@ -196,6 +197,8 @@ void ANCShaftArenaGame::PostLogin(APlayerController* NewPlayer)
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 	if (Role != ROLE_Authority || !RatingSystem || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (!PS) return;

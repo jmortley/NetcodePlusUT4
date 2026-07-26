@@ -5,16 +5,25 @@
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
 #include "UTHUDWidgetMessage_KillIconMessages.h"   // killfeed special-case (KillIconWidget stomp bypass)
+#include "UTTeamPlayerStart.h"                     // warmup spawn markers (TeamNum coloring)
+#include "Engine/PlayerStartPIE.h"                 // warmup spawn markers (skip editor-only starts; 4.15 path is Engine/, not GameFramework/)
+#include "EngineUtils.h"                           // TActorIterator (warmup spawn markers)
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTCharacterContent.h"
 #include "UTPlayerState.h"
 #include "UTTeamInfo.h"
 #include "UTGameState.h"
 #include "UTInventory.h"
 #include "UTTimedPowerup.h"
 #include "UTJumpBoots.h"
+#include "UTMutator.h"              // IsInstagibMatch: replicated MutInstagibNCP walk
+#include "CTFStatsReplicator.h"     // IsInstagibMatch: replicated bIsInstagibMatch fallback
 #include "Engine/Canvas.h"
+#include "Engine/Texture2D.h"
 #include "CanvasItem.h"
+#include "SceneInterface.h"
+#include "SceneView.h"
 #include "Engine/Font.h"
 #include "Json.h"
 #include "JsonUtilities.h"
@@ -22,10 +31,15 @@
 #include "Misc/FileHelper.h"
 #include "Engine/World.h"
 #include "Engine/DemoNetDriver.h"
-#include "GameFramework/GameStateBase.h"
 #include "HAL/FileManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Interfaces/IPluginManager.h"
+#if !UE_SERVER
+#include "Interfaces/IImageWrapper.h"
+#include "Interfaces/IImageWrapperModule.h"
+#endif
+#include "Modules/ModuleManager.h"
 
 // =============================================================================
 // Anchor conversions
@@ -412,30 +426,88 @@ namespace NCPlusHUDColor
 	}
 }
 
+namespace NCPlusHUDPortraits
+{
+	static bool IsDrawable(const FCanvasIcon& Icon)
+	{
+		return Icon.Texture != nullptr && FMath::Abs(Icon.UL) > KINDA_SMALL_NUMBER
+			&& FMath::Abs(Icon.VL) > KINDA_SMALL_NUMBER;
+	}
+
+	FCanvasIcon Resolve(const AUTPlayerState* PlayerState)
+	{
+		FCanvasIcon Result = PlayerState ? PlayerState->GetHUDIcon() : FCanvasIcon();
+		if (IsDrawable(Result))
+		{
+			return Result;
+		}
+
+		// AUTCharacter's native CDO constructor synchronously loads the guaranteed
+		// stock Malcolm character content. Resolve once, then reuse the value; this
+		// path is entered only for missing/malformed remote portrait references.
+		static bool bFallbackResolved = false;
+		static FCanvasIcon Fallback;
+		if (!bFallbackResolved)
+		{
+			bFallbackResolved = true;
+			const AUTCharacter* DefaultCharacter = GetDefault<AUTCharacter>();
+			const AUTCharacterContent* DefaultContent = DefaultCharacter
+				? DefaultCharacter->GetCharacterData() : nullptr;
+			if (DefaultContent && IsDrawable(DefaultContent->DefaultCharacterPortrait))
+			{
+				Fallback = DefaultContent->DefaultCharacterPortrait;
+			}
+		}
+		return Fallback;
+	}
+}
+
 FLinearColor FNCPlusHUDElement::GetExtraColor(FName Key, const FLinearColor& Fallback) const
 {
+	const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+	if (ExtrasCacheRevision != Revision)
+	{
+		ExtraColorCache.Reset(); ExtraFloatCache.Reset(); ExtraBoolCache.Reset();
+		ExtrasCacheRevision = Revision;
+	}
+	if (const FLinearColor* Cached = ExtraColorCache.Find(Key)) return *Cached;
 	const FString* V = Extras.Find(Key);
 	if (!V) return Fallback;
 	FLinearColor Out;
-	return NCPlusHUDColor::TryParse(*V, Out) ? Out : Fallback;
+	if (!NCPlusHUDColor::TryParse(*V, Out)) return Fallback;
+	return ExtraColorCache.Add(Key, Out);
 }
 
 float FNCPlusHUDElement::GetExtraFloat(FName Key, float Fallback) const
 {
+	const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+	if (ExtrasCacheRevision != Revision)
+	{
+		ExtraColorCache.Reset(); ExtraFloatCache.Reset(); ExtraBoolCache.Reset();
+		ExtrasCacheRevision = Revision;
+	}
+	if (const float* Cached = ExtraFloatCache.Find(Key)) return *Cached;
 	const FString* V = Extras.Find(Key);
 	if (!V || V->IsEmpty()) return Fallback;
-	return FCString::Atof(**V);
+	return ExtraFloatCache.Add(Key, FCString::Atof(**V));
 }
 
 bool FNCPlusHUDElement::GetExtraBool(FName Key, bool Fallback) const
 {
+	const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+	if (ExtrasCacheRevision != Revision)
+	{
+		ExtraColorCache.Reset(); ExtraFloatCache.Reset(); ExtraBoolCache.Reset();
+		ExtrasCacheRevision = Revision;
+	}
+	if (const bool* Cached = ExtraBoolCache.Find(Key)) return *Cached;
 	const FString* V = Extras.Find(Key);
 	if (!V || V->IsEmpty()) return Fallback;
 	FString S = *V;
 	S.Trim();
 	S = S.ToLower();
-	if (S == TEXT("true")  || S == TEXT("1")) return true;
-	if (S == TEXT("false") || S == TEXT("0")) return false;
+	if (S == TEXT("true")  || S == TEXT("1")) return ExtraBoolCache.Add(Key, true);
+	if (S == TEXT("false") || S == TEXT("0")) return ExtraBoolCache.Add(Key, false);
 	return Fallback;
 }
 
@@ -485,9 +557,22 @@ FString FNCPlusHUDLayout::GetDefaultLayoutPath()
 	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
 }
 
+FString FNCPlusHUDLayout::PluginResourcesDir()
+{
+	// Hand-extracted installs sometimes keep the release zip's folder name
+	// (e.g. Plugins/NetcodePlus-327), so the conventional Plugins/NetcodePlus
+	// path may not exist even though the plugin loaded fine.
+	TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("NetcodePlus"));
+	if (Plugin.IsValid())
+	{
+		return FPaths::Combine(*Plugin->GetBaseDir(), TEXT("Resources"));
+	}
+	return FPaths::Combine(*FPaths::GamePluginsDir(), TEXT("NetcodePlus/Resources"));
+}
+
 // Cached so the per-frame DrawHeldPowerups call never hits GConfig/FileExists (mirror
-// GStockTeamPanelCache). -1 = unresolved. Invalidated by SetStockBottomBar (explicit
-// change) and SaveLive (the FileExists fallback flips the first time a layout is saved).
+// GStockTeamPanelCache). -1 = unresolved. Only SetStockBottomBar invalidates/updates
+// it: saving layout data must not switch the live widget family under the running HUD.
 static int8 GStockBottomBarCache = -1;
 
 bool FNCPlusHUDLayout::WantsStockBottomBar()
@@ -534,6 +619,12 @@ void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
 
 // Cached so the per-frame DrawHUD call never hits FileExists. -1 = unresolved.
 static int8 GStockTeamPanelCache = -1;
+static int8 GAbsoluteElimTeamPanelCache = -1;
+
+static bool NCPlusConfigBool(const FString& Value)
+{
+	return Value.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Value.Equals(TEXT("1"));
+}
 
 bool FNCPlusHUDLayout::WantsStockTeamPanel()
 {
@@ -547,7 +638,14 @@ bool FNCPlusHUDLayout::WantsStockTeamPanel()
 	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), Val, ModIni) && !Val.IsEmpty())
 	{
 		// Explicit choice in Mod.ini wins (written by the editor toggle).
-		bResult = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Val.Equals(TEXT("1"));
+		bResult = NCPlusConfigBool(Val);
+	}
+	else if (WantsAbsoluteElimTeamPanel())
+	{
+		// A fresh profile selects the nested Absolute style by default, which implies
+		// that the outer team-panel family is active. The first-run seed persists both
+		// choices so creating HUDLayout.json cannot change this on the next launch.
+		bResult = true;
 	}
 	else
 	{
@@ -571,6 +669,58 @@ void FNCPlusHUDLayout::SetStockTeamPanel(bool bStock)
 	// Refresh the cache so the change applies on the very next DrawHUD frame
 	// (the panel draws directly from this value — no widget swap needed).
 	GStockTeamPanelCache = bStock ? 1 : 0;
+}
+
+bool FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
+{
+	if (GAbsoluteElimTeamPanelCache >= 0)
+	{
+		return GAbsoluteElimTeamPanelCache != 0;
+	}
+
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString AbsoluteVal;
+	bool bResult = false;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("AbsoluteElimTeamPanel"), AbsoluteVal, ModIni)
+		&& !AbsoluteVal.IsEmpty())
+	{
+		bResult = NCPlusConfigBool(AbsoluteVal);
+	}
+	else
+	{
+		// A legacy explicit StockTeamPanel key proves this is an existing profile;
+		// preserve the procedural panel until the user opts into Absolute. Likewise,
+		// an existing unified/legacy layout belongs to an established user whose HUD
+		// must not change during an update. Only a truly empty profile defaults on.
+		FString LegacyStockVal;
+		const bool bHasLegacyStockChoice = GConfig
+			&& GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), LegacyStockVal, ModIni)
+			&& !LegacyStockVal.IsEmpty();
+		const FString LegacyLayoutPath = FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
+		bResult = !bHasLegacyStockChoice
+			&& !FPaths::FileExists(GetDefaultLayoutPath())
+			&& !FPaths::FileExists(LegacyLayoutPath);
+	}
+
+	GAbsoluteElimTeamPanelCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetAbsoluteElimTeamPanel(bool bAbsolute)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("AbsoluteElimTeamPanel"),
+			bAbsolute ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GAbsoluteElimTeamPanelCache = bAbsolute ? 1 : 0;
+
+	if (bAbsolute)
+	{
+		SetStockTeamPanel(true);
+	}
 }
 
 static float GScoreboardOpacityCache = -1.f;
@@ -853,7 +1003,7 @@ namespace NCPlusHUDAliases
 			// World-projected flag icon over the enemy carrier's head. Anchor
 			// nominal (world projection, not screen-anchored). Offset shifts the
 			// icon in screen pixels AFTER world projection.
-			T.Emplace(TEXT("ctf_carrier_indicator"), FString(),                                                                  FText::FromString(TEXT("CTF Carrier Indicator")), true, ENCPlusHUDAnchor::Center);
+			T.Emplace(TEXT("ctf_carrier_indicator"), FString(),                                                                  FText::FromString(TEXT("CTF World Indicators")), true, ENCPlusHUDAnchor::Center);
 			// "You have the flag!" banner (yellow, pulsing). Engine already drew
 			// this; we expose position + scale + color via nchud. BottomCenter
 			// matches the stock engine placement.
@@ -974,6 +1124,13 @@ namespace NCPlusHUDAliases
 
 	FVector2D GetStockOffset(FName Alias)
 	{
+		// The recovered Elim panel's design-space origin is (-2, 8). Make the
+		// editor's displayed/reset value agree with the renderer only while that
+		// nested style is active; the existing procedural panel keeps (16, 12).
+		if (Alias == TEXT("team_panel") && FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel())
+		{
+			return FVector2D(-2.f, 8.f);
+		}
 		for (const FAliasEntry& E : GetAliasTable())
 		{
 			if (E.Alias == Alias) return E.StockOffset;
@@ -992,6 +1149,131 @@ namespace NCPlusHUDDrawCall
 	// Collapse the hand-rolled "4 offset DrawText + 1 fill, all shadowed" stacks (each
 	// UCanvas::DrawText paid a full ICU word-wrap + allocs, x2 for the shadow) into one
 	// batched FCanvasTextItem, and cache the per-frame name-fit StrLen loops per player.
+
+	namespace
+	{
+		struct FNCStableTextKey
+		{
+			TWeakObjectPtr<UFont> Font;
+			uint32 SourceHash = 0;
+			int32 SourceLen = 0;
+			int32 ScaleXKey = 0;
+			int32 ScaleYKey = 0;
+
+			bool operator==(const FNCStableTextKey& Other) const
+			{
+				return Font == Other.Font && SourceHash == Other.SourceHash
+					&& SourceLen == Other.SourceLen && ScaleXKey == Other.ScaleXKey
+					&& ScaleYKey == Other.ScaleYKey;
+			}
+
+			friend uint32 GetTypeHash(const FNCStableTextKey& Key)
+			{
+				// Int members combine raw: inside a friend named GetTypeHash, MSVC's
+				// friend name injection hides the global GetTypeHash(int32) overloads
+				// (Key.Font still resolves via ADL on TWeakObjectPtr), and UE's int
+				// overloads are identity hashes anyway.
+				uint32 Hash = GetTypeHash(Key.Font);
+				Hash = HashCombine(Hash, Key.SourceHash);
+				Hash = HashCombine(Hash, uint32(Key.SourceLen));
+				Hash = HashCombine(Hash, uint32(Key.ScaleXKey));
+				return HashCombine(Hash, uint32(Key.ScaleYKey));
+			}
+		};
+
+		struct FNCStableTextValue
+		{
+			FString Source;
+			FText Text;
+			float Width = 0.f;
+			float Height = 0.f;
+		};
+		struct FNCStableTextBucket
+		{
+			TArray<FNCStableTextValue, TInlineAllocator<1>> Values;
+		};
+
+		TMap<FNCStableTextKey, FNCStableTextBucket> GStableTextCache;
+		TWeakObjectPtr<UWorld> GStableTextWorld;
+		uint32 GStableTextRevision = 0;
+	}
+
+	void ResolveStableText(UCanvas* Canvas, UFont* Font, const FString& Source,
+		float ScaleX, float ScaleY, FText& OutText, float& OutWidth, float& OutHeight)
+	{
+		if (!Canvas || !Font)
+		{
+			OutText = FText::FromString(Source);
+			OutWidth = OutHeight = 0.f;
+			return;
+		}
+
+		const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+		UWorld* World = (Canvas->SceneView && Canvas->SceneView->Family && Canvas->SceneView->Family->Scene)
+			? Canvas->SceneView->Family->Scene->GetWorld() : nullptr;
+		if (GStableTextRevision != Revision || GStableTextWorld.Get() != World)
+		{
+			GStableTextCache.Reset();
+			GStableTextRevision = Revision;
+			GStableTextWorld = World;
+		}
+
+		FNCStableTextKey Key;
+		Key.Font = Font;
+		Key.SourceHash = GetTypeHash(Source);
+		Key.SourceLen = Source.Len();
+		// Render/UI scales are stable in practice; quantization prevents microscopic
+		// float jitter from creating a new cache entry every frame.
+		Key.ScaleXKey = FMath::RoundToInt(ScaleX * 10000.f);
+		Key.ScaleYKey = FMath::RoundToInt(ScaleY * 10000.f);
+
+		FNCStableTextValue* Value = nullptr;
+		FNCStableTextBucket* Bucket = GStableTextCache.Find(Key);
+		if (Bucket)
+		{
+			for (FNCStableTextValue& Candidate : Bucket->Values)
+			{
+				// FString operator== is case-INSENSITIVE; player names differing only
+				// by case must not share an entry (wrong casing + wrong measured width).
+				if (Candidate.Source.Equals(Source, ESearchCase::CaseSensitive))
+				{
+					Value = &Candidate;
+					break;
+				}
+			}
+		}
+		if (!Value)
+		{
+			// Score/timer values are bounded, but map travel and long sessions can still
+			// accumulate variants. A wholesale reset is cheap and avoids an unbounded cache.
+			if (GStableTextCache.Num() >= 256)
+			{
+				GStableTextCache.Reset();
+			}
+			Bucket = &GStableTextCache.FindOrAdd(Key);
+			FNCStableTextValue& NewValue = Bucket->Values[Bucket->Values.AddDefaulted()];
+			NewValue.Source = Source;
+			NewValue.Text = FText::FromString(Source);
+			Canvas->TextSize(Font, Source, NewValue.Width, NewValue.Height, ScaleX, ScaleY);
+			Value = &NewValue;
+		}
+
+		OutText = Value->Text;
+		OutWidth = Value->Width;
+		OutHeight = Value->Height;
+	}
+
+	void DrawResolvedText(UCanvas* Canvas, const UFont* Font, const FText& Text,
+		float X, float Y, float ScaleX, float ScaleY, const FColor& Color, bool bEnableShadow)
+	{
+		if (!Canvas || !Font || Text.IsEmpty()) return;
+		FCanvasTextItem Item(FVector2D(Canvas->OrgX + X, Canvas->OrgY + Y),
+			Text, Font, FLinearColor(Color));
+		Item.Scale = FVector2D(ScaleX, ScaleY);
+		Item.BlendMode = SE_BLEND_Translucent;
+		if (bEnableShadow) Item.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(Item);
+	}
 
 	void DrawOutlinedText(UCanvas* Canvas, const UFont* Font, const FText& Text,
 		float X, float Y, float Scale, FLinearColor Fill, FLinearColor Outline, float Opacity)
@@ -1104,14 +1386,76 @@ namespace NCPlusHUDDrawCall
 
 	float GetOpacity(FName Alias)
 	{
+		static uint32 CacheRevision = 0;
+		static TMap<FName, float> Cache;
+		const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+		if (CacheRevision != Revision)
+		{
+			Cache.Reset();
+			CacheRevision = Revision;
+		}
+		if (const float* Found = Cache.Find(Alias)) return *Found;
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		return E ? FMath::Clamp(E->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
+		return Cache.Add(Alias, E ? FMath::Clamp(E->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f);
 	}
 
 	bool GetUseTeamColor(FName Alias)
 	{
+		static uint32 CacheRevision = 0;
+		static TMap<FName, bool> Cache;
+		const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+		if (CacheRevision != Revision)
+		{
+			Cache.Reset();
+			CacheRevision = Revision;
+		}
+		if (const bool* Found = Cache.Find(Alias)) return *Found;
 		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-		return E ? E->GetExtraBool(TEXT("use_team_color"), true) : true;
+		return Cache.Add(Alias, E ? E->GetExtraBool(TEXT("use_team_color"), true) : true);
+	}
+
+	// Sticky per-world: instagib can't turn off mid-match, so the first positive
+	// latches and stops the actor walks. Until then, recheck at 1Hz — the
+	// replicated mutator/replicator can arrive a few frames after the HUD starts
+	// drawing (same late-replication window TeamArenaCharacter's iCTF gate handles).
+	static TWeakObjectPtr<UWorld> GInstagibWorld;
+	static bool GInstagibFound = false;
+	static float GInstagibNextCheck = 0.f;
+
+	bool IsInstagibMatch(UWorld* World)
+	{
+		if (!World) return false;
+		if (GInstagibWorld.Get() != World)
+		{
+			GInstagibWorld = World;
+			GInstagibFound = false;
+			GInstagibNextCheck = 0.f;
+		}
+		if (GInstagibFound) return true;
+		const float Now = World->GetTimeSeconds();
+		if (Now < GInstagibNextCheck) return false;
+		GInstagibNextCheck = Now + 1.f;
+
+		// Contains() catches MutInstagibNCP, BP "_C" suffixes, and stock instagib
+		// in standalone/listen where mutators exist locally.
+		for (TActorIterator<AUTMutator> It(World); It; ++It)
+		{
+			if (It->GetClass()->GetName().Contains(TEXT("Instagib")))
+			{
+				GInstagibFound = true;
+				return true;
+			}
+		}
+		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It)
+		{
+			if (It->bIsInstagibMatch)
+			{
+				GInstagibFound = true;
+				return true;
+			}
+			break;
+		}
+		return false;
 	}
 
 	ENCPlusHUDAnchor GetEffectiveAnchor(FName Alias)
@@ -1189,6 +1533,327 @@ namespace NCPlusHUDDrawCall
 
 		Canvas->SetLinearDrawColor(FLinearColor(TintColor.R, TintColor.G, TintColor.B, Alpha));
 		Canvas->DrawTile(Canvas->DefaultTexture, 0.f, 0.f, Canvas->ClipX, Canvas->ClipY, 0.f, 0.f, 1.f, 1.f, BLEND_Translucent);
+	}
+
+	// =============================================================================
+	// Absolute Elim 1.13 team panel — recovered top-left artwork/layout
+	// =============================================================================
+	//
+	// The original package supplied red plates and produced blue with a material hue
+	// shift. The recovered PNGs are loaded directly from the plugin Resources folder;
+	// the fixed blue copies are produced once by swapping red/blue channels during
+	// decode. This deliberately ignores custom team colors, matching Elim 1.13.
+	namespace
+	{
+		struct FAbsoluteElimTextures
+		{
+			bool bTriedLoad = false;
+			UTexture2D* NameBackground[2] = { nullptr, nullptr };
+			UTexture2D* NameBorder[2] = { nullptr, nullptr };
+			UTexture2D* ScoreBackground[2] = { nullptr, nullptr };
+			UTexture2D* ScoreBorder[2] = { nullptr, nullptr };
+			UTexture2D* HealthIcon = nullptr;
+			UTexture2D* ArmorIcon = nullptr;
+		};
+
+		FAbsoluteElimTextures GAbsoluteElimTextures;
+
+		UTexture2D* LoadAbsoluteElimTexture(const TCHAR* RelativePath, bool bBlueVariant)
+		{
+#if !UE_SERVER
+			const FString FilePath = FPaths::Combine(
+				*FNCPlusHUDLayout::PluginResourcesDir(),
+				TEXT("AbsoluteElimHUD"),
+				RelativePath);
+			TArray<uint8> CompressedData;
+			if (!FFileHelper::LoadFileToArray(CompressedData, *FilePath)
+				|| CompressedData.Num() == 0)
+			{
+				return nullptr;
+			}
+
+			IImageWrapperModule& ImageWrapperModule =
+				FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+			IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+			const TArray<uint8>* RawData = nullptr;
+			if (!ImageWrapper.IsValid()
+				|| !ImageWrapper->SetCompressed(CompressedData.GetData(), CompressedData.Num())
+				|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData)
+				|| !RawData)
+			{
+				return nullptr;
+			}
+
+			const int32 Width = ImageWrapper->GetWidth();
+			const int32 Height = ImageWrapper->GetHeight();
+			if (Width <= 0 || Height <= 0 || RawData->Num() != Width * Height * 4)
+			{
+				return nullptr;
+			}
+
+			TArray<uint8> Pixels = *RawData;
+			if (bBlueVariant)
+			{
+				// BGRA: exchanging B and R reproduces the original fixed red -> blue
+				// material treatment while preserving highlights and alpha.
+				for (int32 Pixel = 0; Pixel < Pixels.Num(); Pixel += 4)
+				{
+					Swap(Pixels[Pixel], Pixels[Pixel + 2]);
+				}
+			}
+
+			UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
+			if (!Texture || !Texture->PlatformData || Texture->PlatformData->Mips.Num() == 0)
+			{
+				return nullptr;
+			}
+
+			Texture->SRGB = true;
+			Texture->NeverStream = true;
+			FTexture2DMipMap& Mip = Texture->PlatformData->Mips[0];
+			void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
+			FMemory::Memcpy(TextureData, Pixels.GetData(), Pixels.Num());
+			Mip.BulkData.Unlock();
+			Texture->UpdateResource();
+			// The cache is not a UObject owner, so explicitly retain these six tiny
+			// session-lifetime textures across garbage collection.
+			Texture->AddToRoot();
+			return Texture;
+#else
+			return nullptr;
+#endif
+		}
+
+		bool EnsureAbsoluteElimTextures()
+		{
+			FAbsoluteElimTextures& T = GAbsoluteElimTextures;
+			if (!T.bTriedLoad)
+			{
+				T.bTriedLoad = true;
+				for (int32 Team = 0; Team < 2; ++Team)
+				{
+					const bool bBlue = (Team == 1);
+					T.NameBackground[Team] = LoadAbsoluteElimTexture(TEXT("UI-NamePlate-RED-Background.png"), bBlue);
+					T.NameBorder[Team] = LoadAbsoluteElimTexture(TEXT("UI-NamePlate-RED-Border.png"), bBlue);
+					T.ScoreBackground[Team] = LoadAbsoluteElimTexture(TEXT("UI-TeamScore-RED-Background.png"), bBlue);
+					T.ScoreBorder[Team] = LoadAbsoluteElimTexture(TEXT("UI-TeamScore-RED-Border.png"), bBlue);
+				}
+				T.HealthIcon = LoadAbsoluteElimTexture(TEXT("ALTSTEXHealthIcon.png"), false);
+				T.ArmorIcon = LoadAbsoluteElimTexture(TEXT("ALTSTEXArmorIcon.png"), false);
+			}
+
+			return T.NameBackground[0] && T.NameBackground[1]
+				&& T.NameBorder[0] && T.NameBorder[1]
+				&& T.ScoreBackground[0] && T.ScoreBackground[1]
+				&& T.ScoreBorder[0] && T.ScoreBorder[1]
+				&& T.HealthIcon && T.ArmorIcon;
+		}
+
+		void DrawAbsoluteElimTile(UCanvas* Canvas, UTexture2D* Texture,
+			float X, float Y, float Width, float Height, float Opacity)
+		{
+			if (!Canvas || !Texture) return;
+			Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, Opacity));
+			Canvas->DrawTile(Texture, X, Y, Width, Height,
+				0.f, 0.f, float(Texture->GetSizeX()), float(Texture->GetSizeY()), BLEND_Translucent);
+		}
+	}
+
+	void DrawAbsoluteElimTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (!HUD || !Canvas || IsHidden(TEXT("team_panel"))) return;
+
+		UWorld* World = HUD->GetWorld();
+		AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+		if (!GS) return;
+
+		// Missing loose resources should never make the HUD unusable. Fall back to
+		// the procedural stock panel and keep the score/clock path intact.
+		if (!EnsureAbsoluteElimTextures())
+		{
+			DrawStockTeamPanel(HUD, Canvas);
+			return;
+		}
+
+		UFont* NameFont = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD, HUD->SmallFont);
+		if (!NameFont) NameFont = HUD->SmallFont;
+		UFont* StatFont = NameFont;
+		UFont* ScoreFont = NCPlusHUDFonts::Resolve(TEXT("team_panel"), HUD,
+			HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont);
+		if (!ScoreFont) ScoreFont = HUD->MediumFont ? HUD->MediumFont : HUD->SmallFont;
+		if (!NameFont || !ScoreFont) return;
+
+		uint8 MyTeam = 255;
+		bool bTrueSpectator = false;
+		bool bRevealAllVitals = (GS->GetMatchState() != MatchState::InProgress);
+		if (HUD->UTPlayerOwner)
+		{
+			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
+			{
+				MyTeam = MyPS->GetTeamNum();
+				bTrueSpectator = MyPS->bOnlySpectator;
+				bRevealAllVitals |= bTrueSpectator;
+			}
+		}
+
+		// Elim 1.13 authored this widget at 2560x1440. Preserve its proportions on
+		// other aspect ratios; the ordinary team_panel position/scale/opacity/hide
+		// controls still apply to the complete recovered layout.
+		const float ReferenceScale = FMath::Min(
+			float(Canvas->SizeX) / 2560.f,
+			float(Canvas->SizeY) / 1440.f);
+		const float PanelScale = GetScale(TEXT("team_panel"));
+		const float S = FMath::Max(0.2f, ReferenceScale * PanelScale);
+		const float Op = FMath::Clamp(GetOpacity(TEXT("team_panel")), 0.f, 1.f);
+		const FVector2D Origin = ResolveScreenPos(TEXT("team_panel"), Canvas,
+			FVector2D(-2.f * ReferenceScale, 8.f * ReferenceScale));
+
+		const float ScoreW = 90.f * S;
+		const float ScoreH = 90.f * S;
+		const float BarW = 210.f * S;
+		const float BarH = 70.f * S;
+		const float BarStart = 66.f * S;       // 90 - recovered 24 px overlap
+		const float BarPitch = 181.f * S;      // 210 - recovered 29 px overlap
+		const float TeamPitch = 76.f * S;      // 90 - recovered 14 px overlap
+		const float BarYOffset = 10.f * S;     // center 70 px bar on 90 px score plate
+		const float IconSize = 12.f * S;
+
+		const float FontExtra = NCPlusHUDFonts::ResolveScale(TEXT("team_panel"), 1.f);
+		const float NameScale = 0.56f * S * FontExtra;
+		const float StatScale = 0.56f * S * FontExtra;
+		const float ScoreScale = 0.87f * S * FontExtra;
+
+		int32 TeamOrder[2] = { 0, 1 };
+		if (!bTrueSpectator && MyTeam < 2)
+		{
+			TeamOrder[0] = MyTeam;
+			TeamOrder[1] = MyTeam ^ 1;
+		}
+
+		FAbsoluteElimTextures& T = GAbsoluteElimTextures;
+		for (int32 Row = 0; Row < 2; ++Row)
+		{
+			const int32 TeamIdx = TeamOrder[Row];
+			const float RowY = Origin.Y + Row * TeamPitch;
+
+			DrawAbsoluteElimTile(Canvas, T.ScoreBackground[TeamIdx],
+				Origin.X, RowY, ScoreW, ScoreH, Op);
+			DrawAbsoluteElimTile(Canvas, T.ScoreBorder[TeamIdx],
+				Origin.X, RowY, ScoreW, ScoreH, Op);
+
+			const int32 TeamScore = (GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx])
+				? GS->Teams[TeamIdx]->Score : 0;
+			const FString ScoreString = FString::Printf(TEXT("%d"), TeamScore);
+			float ScoreXL = 0.f, ScoreYL = 0.f;
+			Canvas->StrLen(ScoreFont, ScoreString, ScoreXL, ScoreYL);
+			DrawOutlinedText(Canvas, ScoreFont, FText::FromString(ScoreString),
+				Origin.X + (ScoreW - ScoreXL * ScoreScale) * 0.5f,
+				RowY + (ScoreH - ScoreYL * ScoreScale) * 0.5f,
+				ScoreScale, FLinearColor::White, FLinearColor::Black, Op);
+
+			float BarX = Origin.X + BarStart;
+			for (APlayerState* PSBase : GS->PlayerArray)
+			{
+				AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+				if (!PS || PS->bOnlySpectator || PS->bIsInactive || PS->GetTeamNum() != TeamIdx) continue;
+
+				AUTCharacter* UTC = nullptr;
+				if (AController* Ctrl = Cast<AController>(PS->GetOwner()))
+				{
+					UTC = Cast<AUTCharacter>(Ctrl->GetPawn());
+				}
+				else
+				{
+					UTC = PS->GetUTCharacter();
+				}
+				if (!UTC || UTC->IsDead()) continue;
+
+				const float BarY = RowY + BarYOffset;
+				DrawAbsoluteElimTile(Canvas, T.NameBackground[TeamIdx],
+					BarX, BarY, BarW, BarH, Op);
+				DrawAbsoluteElimTile(Canvas, T.NameBorder[TeamIdx],
+					BarX, BarY, BarW, BarH, Op);
+
+				const bool bShowVitals = (TeamIdx == MyTeam) || bRevealAllVitals;
+				FText NameText;
+				float NameXL = 0.f, NameYL = 0.f;
+				ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName,
+					BarW - 14.f * S, NameScale, NameText, NameXL, NameYL);
+				// Center by the measured glyph height instead of using a fixed top edge.
+				// The recovered plate has distinct upper-name and lower-vitals lanes.
+				const float NameCenterY = BarY + (bShowVitals ? 18.f : 35.f) * S;
+				const float NameY = NameCenterY - NameYL * NameScale * 0.5f;
+				DrawOutlinedText(Canvas, NameFont, NameText,
+					BarX + (BarW - NameXL * NameScale) * 0.5f, NameY,
+					NameScale, FLinearColor::White, FLinearColor::Black, Op);
+
+				if (bShowVitals)
+				{
+					const FString HealthString = FString::Printf(TEXT("%d"), UTC->Health);
+					const FString ArmorString = FString::Printf(TEXT("%d"), UTC->GetArmorAmount());
+					float HealthXL = 0.f, HealthYL = 0.f, ArmorXL = 0.f, ArmorYL = 0.f;
+					Canvas->StrLen(StatFont, HealthString, HealthXL, HealthYL);
+					Canvas->StrLen(StatFont, ArmorString, ArmorXL, ArmorYL);
+
+					const float Gap = 3.f * S;
+					const float MiddleGap = 8.f * S;
+					const float TotalW = IconSize + Gap + HealthXL * StatScale
+						+ MiddleGap + ArmorXL * StatScale + Gap + IconSize;
+					const float GroupX = BarX + (BarW - TotalW) * 0.5f;
+					const float StatCenterY = BarY + 50.f * S;
+					const float StatY = StatCenterY - HealthYL * StatScale * 0.5f;
+
+					DrawAbsoluteElimTile(Canvas, T.HealthIcon, GroupX,
+						StatCenterY - IconSize * 0.5f, IconSize, IconSize, Op);
+					const float HealthX = GroupX + IconSize + Gap;
+					DrawOutlinedText(Canvas, StatFont, FText::FromString(HealthString),
+						HealthX, StatY, StatScale,
+						FLinearColor(0.09672f, 0.93f, 0.0372f, 1.f), FLinearColor::Black, Op);
+					const float ArmorX = HealthX + HealthXL * StatScale + MiddleGap;
+					DrawOutlinedText(Canvas, StatFont, FText::FromString(ArmorString),
+						ArmorX, StatCenterY - ArmorYL * StatScale * 0.5f, StatScale,
+						FLinearColor(0.7f, 0.578083f, 0.035f, 1.f), FLinearColor::Black, Op);
+					DrawAbsoluteElimTile(Canvas, T.ArmorIcon,
+						ArmorX + ArmorXL * StatScale + Gap,
+						StatCenterY - IconSize * 0.5f, IconSize, IconSize, Op);
+				}
+
+				BarX += BarPitch;
+			}
+		}
+
+		// The center scorebar is hidden while either top-left roster is active, so
+		// retain its round clock beneath the recovered score plates.
+		int32 RoundTime = -1;
+		static UClass* CachedClockClass = nullptr;
+		static UIntProperty* CachedClockProperty = nullptr;
+		UClass* GSClass = GS->GetClass();
+		if (CachedClockClass != GSClass)
+		{
+			CachedClockClass = GSClass;
+			CachedClockProperty = FindField<UIntProperty>(GSClass, TEXT("RoundSecondsRemaining"));
+		}
+		if (CachedClockProperty)
+		{
+			RoundTime = CachedClockProperty->GetPropertyValue_InContainer(GS);
+		}
+		if (RoundTime >= 0)
+		{
+			const FString ClockString = FString::Printf(TEXT("%02d:%02d"), RoundTime / 60, RoundTime % 60);
+			float ClockXL = 0.f, ClockYL = 0.f;
+			Canvas->StrLen(ScoreFont, ClockString, ClockXL, ClockYL);
+			const float ClockScale = 0.64f * S * FontExtra;
+			const float ClockCenterX = Origin.X + ScoreW * 0.5f;
+			const float ClockCenterY = Origin.Y + TeamPitch + ScoreH + 17.f * S;
+			const FLinearColor ClockColor = (RoundTime <= 30)
+				? FLinearColor(1.f, 0.24f, 0.24f, 1.f) : FLinearColor::White;
+			DrawOutlinedText(Canvas, ScoreFont, FText::FromString(ClockString),
+				ClockCenterX - ClockXL * ClockScale * 0.5f,
+				ClockCenterY - ClockYL * ClockScale * 0.5f,
+				ClockScale, ClockColor, FLinearColor::Black, Op);
+		}
+
+		Canvas->SetLinearDrawColor(FLinearColor::White);
 	}
 
 	// =============================================================================
@@ -1446,6 +2111,176 @@ namespace NCPlusHUDDrawCall
 			DrawOutlinedText(Canvas, L.Font, L.Text, L.X, L.Y, L.Scale, L.Color, FLinearColor::Black, Op);
 		}
 
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
+
+	// =============================================================================
+	// Warmup spawn markers — learning aid (iCTF community ask, 2026-07-06): show
+	// EVERY placed PlayerStart during warmup so players can learn pre-aim angles
+	// and enemy approach lanes. LINE-OF-SIGHT ONLY (user call 2026-07-06): a
+	// visibility trace gates each marker so nothing renders through walls. LOS and
+	// distance data are refreshed at a bounded rate; projection remains render-rate
+	// so marker motion is visually smooth.
+	// Placed level actors exist client-side, so this is pure local drawing:
+	// no replication, no version bump.
+	// =============================================================================
+
+	static TAutoConsoleVariable<int32> CVarWarmupSpawns(
+		TEXT("ncp.WarmupSpawns"), 1,
+		TEXT("Warmup-only visible spawn-point markers (team-colored, facing tick + distance). 1=on (default), 0=off."),
+		ECVF_Default);
+
+	struct FNCWarmupStartCache
+	{
+		TWeakObjectPtr<APlayerStart> Start;
+		bool bVisible = false;
+		int32 DistanceMeters = MIN_int32;
+		TWeakObjectPtr<UFont> DistanceFont;
+		FText DistanceText;
+		float DistanceXL = 0.f;
+		float DistanceYL = 0.f;
+	};
+
+	static TWeakObjectPtr<UWorld> GWarmupMarkerWorld;
+	static TArray<FNCWarmupStartCache> GWarmupStarts;
+	static float GWarmupNextStartRefresh = 0.f;
+	static float GWarmupNextLOSRefresh = 0.f;
+	static FVector GWarmupLastViewLoc = FVector::ZeroVector;
+	static FRotator GWarmupLastViewRot = FRotator::ZeroRotator;
+	static bool bWarmupHasViewSample = false;
+
+	static void RefreshWarmupStarts(UWorld* World)
+	{
+		GWarmupStarts.Reset();
+		for (TActorIterator<APlayerStart> It(World); It; ++It)
+		{
+			APlayerStart* Start = *It;
+			if (!Start || Start->IsA(APlayerStartPIE::StaticClass())) continue;
+			FNCWarmupStartCache& Entry = GWarmupStarts[GWarmupStarts.AddDefaulted()];
+			Entry.Start = Start;
+		}
+	}
+
+	void DrawWarmupSpawnMarkers(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (!HUD || !Canvas || !HUD->TinyFont) return;
+
+		UWorld* World = HUD->GetWorld();
+		if (!World) return;
+		AUTGameState* GS = World->GetGameState<AUTGameState>();
+		if (!GS || GS->GetMatchState() != MatchState::WaitingToStart) return;
+		if (CVarWarmupSpawns.GetValueOnGameThread() == 0) return;
+
+		if (!HUD->PlayerOwner || !HUD->PlayerOwner->PlayerCameraManager) return;
+		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+		const float MarkSize = 14.f * RenderScale;
+		const FVector ViewLoc = HUD->PlayerOwner->PlayerCameraManager->GetCameraLocation();
+		const FRotator ViewRot = HUD->PlayerOwner->PlayerCameraManager->GetCameraRotation();
+		const float Now = World->GetTimeSeconds();
+
+		if (GWarmupMarkerWorld.Get() != World)
+		{
+			GWarmupMarkerWorld = World;
+			GWarmupNextStartRefresh = 0.f;
+			GWarmupNextLOSRefresh = 0.f;
+			bWarmupHasViewSample = false;
+			GWarmupStarts.Reset();
+		}
+
+		// PlayerStarts are normally static. Refresh once per second so streamed
+		// levels and dynamically-created starts still become visible without paying
+		// a full actor-list walk at render frequency.
+		if (Now >= GWarmupNextStartRefresh)
+		{
+			RefreshWarmupStarts(World);
+			GWarmupNextStartRefresh = Now + 1.f;
+			GWarmupNextLOSRefresh = 0.f;
+		}
+
+		const bool bCameraMoved = !bWarmupHasViewSample
+			|| FVector::DistSquared(ViewLoc, GWarmupLastViewLoc) > FMath::Square(50.f)
+			|| FMath::Abs(FMath::FindDeltaAngleDegrees(ViewRot.Yaw, GWarmupLastViewRot.Yaw)) > 3.f
+			|| FMath::Abs(FMath::FindDeltaAngleDegrees(ViewRot.Pitch, GWarmupLastViewRot.Pitch)) > 3.f;
+		if (bCameraMoved || Now >= GWarmupNextLOSRefresh)
+		{
+			static const FName NAME_WarmupSpawnLOS(TEXT("WarmupSpawnLOS"));
+			FCollisionQueryParams TraceParams(NAME_WarmupSpawnLOS, /*bTraceComplex=*/ false);
+			if (HUD->PlayerOwner && HUD->PlayerOwner->GetPawn())
+			{
+				TraceParams.AddIgnoredActor(HUD->PlayerOwner->GetPawn());
+			}
+			const FVector ViewForward = ViewRot.Vector();
+			for (FNCWarmupStartCache& Entry : GWarmupStarts)
+			{
+				APlayerStart* Start = Entry.Start.Get();
+				if (!Start)
+				{
+					Entry.bVisible = false;
+					continue;
+				}
+				const FVector Loc = Start->GetActorLocation();
+				// Behind-camera starts do not need a trace until the camera turns.
+				Entry.bVisible = FVector::DotProduct(ViewForward, Loc - ViewLoc) > 0.f
+					&& !World->LineTraceTestByChannel(ViewLoc, Loc, ECC_Visibility, TraceParams);
+				if (Entry.bVisible)
+				{
+					const int32 Meters = FMath::RoundToInt(FVector::Dist(ViewLoc, Loc) / 100.f);
+					if (Entry.DistanceMeters != Meters || Entry.DistanceFont.Get() != HUD->TinyFont)
+					{
+						const FString DistStr = FString::Printf(TEXT("%dm"), Meters);
+						Canvas->StrLen(HUD->TinyFont, DistStr, Entry.DistanceXL, Entry.DistanceYL);
+						Entry.DistanceText = FText::FromString(DistStr);
+						Entry.DistanceMeters = Meters;
+						Entry.DistanceFont = HUD->TinyFont;
+					}
+				}
+			}
+			GWarmupLastViewLoc = ViewLoc;
+			GWarmupLastViewRot = ViewRot;
+			bWarmupHasViewSample = true;
+			GWarmupNextLOSRefresh = Now + (1.f / 60.f);
+		}
+
+		for (const FNCWarmupStartCache& Entry : GWarmupStarts)
+		{
+			APlayerStart* Start = Entry.Start.Get();
+			if (!Start || !Entry.bVisible) continue;
+
+			const FVector Loc = Start->GetActorLocation();
+			const FVector Screen = Canvas->Project(Loc);
+			if (Screen.Z <= 0.f) continue;   // behind camera — no edge clamping, keep the view clean
+
+			// Team color from AUTTeamPlayerStart (0=red, 1=blue); untagged/neutral = grey.
+			FLinearColor Col(0.75f, 0.75f, 0.75f, 0.9f);
+			if (const AUTTeamPlayerStart* TPS = Cast<AUTTeamPlayerStart>(Start))
+			{
+				if (TPS->TeamNum == 0)      { Col = FLinearColor(1.f, 0.25f, 0.25f, 0.9f); }
+				else if (TPS->TeamNum == 1) { Col = FLinearColor(0.2f, 0.4f, 1.f, 0.9f); }
+			}
+
+			// Facing tick: a short line toward where the spawned player will LOOK —
+			// half of pre-aiming is knowing which way they face when they appear.
+			const FVector FaceEnd = Loc + Start->GetActorForwardVector() * 220.f;
+			const FVector FaceScreen = Canvas->Project(FaceEnd);
+			if (FaceScreen.Z > 0.f)
+			{
+				FCanvasLineItem Line(FVector2D(Screen.X, Screen.Y), FVector2D(FaceScreen.X, FaceScreen.Y));
+				Line.SetColor(Col);
+				Line.LineThickness = 2.f * RenderScale;
+				Canvas->DrawItem(Line);
+			}
+
+			Canvas->SetLinearDrawColor(Col);
+			Canvas->DrawTile(Canvas->DefaultTexture,
+				Screen.X - MarkSize * 0.5f, Screen.Y - MarkSize * 0.5f,
+				MarkSize, MarkSize, 0, 0, 1, 1, BLEND_Translucent);
+
+			// Distance label — a compact depth cue for visible spawn points.
+			const float TextScale = 0.8f * RenderScale;
+			DrawOutlinedText(Canvas, HUD->TinyFont, Entry.DistanceText,
+				Screen.X - Entry.DistanceXL * TextScale * 0.5f, Screen.Y + MarkSize * 0.6f,
+				TextScale, Col);
+		}
 		Canvas->SetLinearDrawColor(FLinearColor::White);
 	}
 
@@ -1743,133 +2578,6 @@ namespace NCPlusHUDDrawCall
 		Canvas->DrawText(Font, Label, Pos.X, Pos.Y, Scale, Scale);
 	}
 
-	// ── Replay-only fire-validation corner feed ────────────────────────
-	// Reads the server-written FireVal_*.csv and overlays each sampled shot during
-	// demo playback, synced to the replayed server clock. Pure client display.
-
-	struct FNCFireValReplayEvent { float Time; FString Name; int32 Dwell; int32 Frame; bool bHit; };
-
-	static TArray<FNCFireValReplayEvent> GFireValEvents;        // sorted ascending by Time
-	static FString                   GFireValLoadedPath;    // CSV currently cached ("" = none)
-	static TWeakObjectPtr<UWorld>    GFireValLoadedWorld;   // reload when the replay world changes
-
-	static TAutoConsoleVariable<FString> CVarFireValReplayCsv(
-		TEXT("ncp.FireValReplayCsv"), TEXT(""),
-		TEXT("Path to a FireVal_*.csv for the replay overlay. Empty = newest in Saved/Logs."));
-
-	static FString FindNewestFireValCsv()
-	{
-		const FString Dir = FPaths::GameSavedDir() / TEXT("Logs");
-		TArray<FString> Names;
-		IFileManager::Get().FindFiles(Names, *(Dir / TEXT("FireVal_*.csv")), true, false);
-		FString Best;
-		FDateTime BestTime = FDateTime::MinValue();
-		for (const FString& N : Names)
-		{
-			const FString Full = Dir / N;
-			const FDateTime T = IFileManager::Get().GetTimeStamp(*Full);
-			if (T >= BestTime) { BestTime = T; Best = Full; }
-		}
-		return Best;
-	}
-
-	static void LoadFireValCsv(const FString& Path)
-	{
-		GFireValEvents.Reset();
-		GFireValLoadedPath = Path;
-		if (Path.IsEmpty()) return;
-
-		TArray<FString> Lines;
-		FString Whole;
-		if (!FFileHelper::LoadFileToString(Whole, *Path)) return;  // 4.15 has LoadFileToString, not ...Array
-		Whole.ParseIntoArray(Lines, TEXT("\n"), /*CullEmpty=*/true);
-
-		for (int32 i = 0; i < Lines.Num(); ++i)
-		{
-			if (i == 0 && Lines[i].StartsWith(TEXT("server_time"))) continue; // header
-			TArray<FString> F;
-			Lines[i].ParseIntoArray(F, TEXT(","), false);
-			if (F.Num() < 5) continue;
-			FNCFireValReplayEvent E;
-			E.Time  = FCString::Atof(*F[0]);
-			E.Name  = F[1];
-			E.Dwell = FCString::Atoi(*F[2]);
-			E.Frame = FCString::Atoi(*F[3]);
-			E.bHit  = (FCString::Atoi(*F[4]) != 0);
-			GFireValEvents.Add(E);
-		}
-		GFireValEvents.Sort([](const FNCFireValReplayEvent& A, const FNCFireValReplayEvent& B) { return A.Time < B.Time; });
-	}
-
-	void DrawFireValReplayFeed(AUTHUD* HUD, UCanvas* Canvas)
-	{
-		if (HUD == nullptr || Canvas == nullptr) return;
-
-		UWorld* World = HUD->GetWorld();
-		// Replay-only: identical guard the plugin uses elsewhere (UTPlusProj_ShockBall).
-		if (World == nullptr || World->DemoNetDriver == nullptr || !World->DemoNetDriver->IsPlaying()) return;
-
-		AGameStateBase* GS = World->GetGameState();
-		UFont* Font = HUD->SmallFont;
-		if (GS == nullptr || Font == nullptr) return;
-
-		const float NowServer = GS->GetServerWorldTimeSeconds();
-
-		// (Re)load once per replay, or when the cvar points somewhere new. Once
-		// we've attempted a load for this world we don't re-scan disk per frame —
-		// even if no CSV was found (drop one in + restart the replay, or set the
-		// cvar, to pick it up).
-		const FString CVarPath = CVarFireValReplayCsv.GetValueOnGameThread();
-		const bool bSameWorld  = (GFireValLoadedWorld.Get() == World);
-		FString Desired;
-		if (!CVarPath.IsEmpty())  Desired = CVarPath;
-		else                      Desired = bSameWorld ? GFireValLoadedPath : FindNewestFireValCsv();
-		if (!bSameWorld || Desired != GFireValLoadedPath)
-		{
-			LoadFireValCsv(Desired);
-			GFireValLoadedWorld = World;
-		}
-
-		const float RenderScale = Canvas->ClipY / 1080.f;
-		const float Scale = RenderScale * 0.9f;
-		const float X     = 24.f  * RenderScale;
-		float       Y     = 220.f * RenderScale;   // below the top-left clock region
-		const float LineH = 22.f  * RenderScale;
-		const float Window = 6.0f;                 // seconds of history shown
-		const int32 MaxLines = 8;
-
-		Canvas->DrawColor = FColor(170, 170, 170, 200);
-		Canvas->DrawText(Font, GFireValEvents.Num() > 0
-			? FString(TEXT("Fire (replay)"))
-			: FString(TEXT("Fire (replay): no FireVal_*.csv in Saved/Logs")),
-			X, Y, Scale, Scale);
-		Y += LineH * 1.2f;
-		if (GFireValEvents.Num() == 0) return;
-
-		int32 Drawn = 0;
-		for (int32 i = GFireValEvents.Num() - 1; i >= 0 && Drawn < MaxLines; --i)
-		{
-			const FNCFireValReplayEvent& E = GFireValEvents[i];
-			const float Age = NowServer - E.Time;
-			if (Age < -0.25f) continue;  // shot is ahead of the playback head — skip
-			if (Age > Window) break;     // sorted: everything earlier is older still
-
-			const float Alpha = FMath::Clamp(1.f - Age / Window, 0.15f, 1.f);
-			const bool bFirstFrame = (E.Frame > 0) ? (E.Dwell <= E.Frame) : (E.Dwell <= 16);
-			FLinearColor C = bFirstFrame ? FLinearColor(1.f, 0.25f, 0.2f, 1.f)
-				: (E.Dwell <= 50 ? FLinearColor(1.f, 0.7f, 0.15f, 1.f)
-				                 : FLinearColor(0.9f, 0.9f, 0.9f, 1.f));
-			C.A = Alpha;
-			Canvas->DrawColor = C.ToFColor(true);
-
-			const FString Line = FString::Printf(TEXT("%s  %dms  %s%s"),
-				*E.Name, E.Dwell, E.bHit ? TEXT("hit") : TEXT("miss"),
-				bFirstFrame ? TEXT("  <<first-frame") : TEXT(""));
-			Canvas->DrawText(Font, Line, X, Y, Scale, Scale);
-			Y += LineH;
-			++Drawn;
-		}
-	}
 }
 
 // =============================================================================
@@ -1916,6 +2624,24 @@ void FNCPlusHUDLayout::ReloadLive()
 	// (NCPlusHUDPresets::GetCurated()[0] = "Stock") so new players get the
 	// familiar stock-style layout (default UT font). On first Save,
 	// the seeded layout is written to NewPath.
+	//
+	// Absolute Elim is the presentation default only for a genuinely new profile.
+	// Persist both nested choices now: without explicit keys, saving HUDLayout.json
+	// would make the old file-existence fallback select portraits next launch.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString ExistingStockChoice;
+	FString ExistingAbsoluteChoice;
+	const bool bHasStockChoice = GConfig
+		&& GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), ExistingStockChoice, ModIni)
+		&& !ExistingStockChoice.IsEmpty();
+	const bool bHasAbsoluteChoice = GConfig
+		&& GConfig->GetString(TEXT("NetcodePlus"), TEXT("AbsoluteElimTeamPanel"), ExistingAbsoluteChoice, ModIni)
+		&& !ExistingAbsoluteChoice.IsEmpty();
+	if (!bHasStockChoice && !bHasAbsoluteChoice)
+	{
+		SetStockTeamPanel(true);
+		SetAbsoluteElimTeamPanel(true);
+	}
 	const TArray<FNCPlusHUDPreset>& Curated = NCPlusHUDPresets::GetCurated();
 	if (Curated.Num() > 0)
 	{
@@ -1936,14 +2662,13 @@ bool FNCPlusHUDLayout::SaveLive()
 {
 	// Save doesn't change in-memory state → no need to mark dirty.
 	const bool bOk = GetLive().SaveToFile(GetDefaultElimPlusPath());
-	// The first successful save creates the layout file, which flips the
-	// "no saved layout → stock" fallback shared by BOTH WantsStockBottomBar and
-	// WantsStockTeamPanel ("anyone who saved a layout keeps the NCPlus widgets/
-	// portraits"). Drop both caches so they re-resolve next call — WantsStockTeamPanel
-	// is consulted live every frame, so a fresh-install user who customizes + saves
-	// flips to the portrait strip immediately instead of staying on the stock roster
-	// until restart (mirrors the SetStock* refresh).
-	if (bOk) { GStockBottomBarCache = -1; GStockTeamPanelCache = -1; }
+	// Do NOT invalidate the presentation caches here. On a fresh install, creating
+	// HUDLayout.json changes the file-existence fallback, but the running HUD still
+	// owns the widget family selected at construction. Re-resolving immediately made
+	// DrawHeldPowerups switch to the NCPlus path while the stock bottom-bar widgets
+	// remained registered. Explicit Stock Bottom Bar / Team Panel toggles are the
+	// only operations allowed to change the live presentation. A new process starts
+	// with unresolved caches and naturally observes the newly-created layout file.
 	return bOk;
 }
 

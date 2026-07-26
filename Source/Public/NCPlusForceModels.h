@@ -32,6 +32,8 @@ struct FNCPlusModelSettings
 	float             S = 1.f;
 	float             V = 1.f;                       // HSV value = base brightness within the normal 0-1 range
 	float             Brightness = 1.f;             // "Glow": brightness multiplier 1-5 (1 = normal); overbrights the recolour albedo (+ emissive) in ApplyForcedModel
+	float             ArmourGlow = 1.f;            // "Armour Glow": armour-overlay emissive intensity 0-1 (1 = stock full-bright / current; lower = calmer, less radioactive). See TeamArenaCharacter::UpdateArmorOverlay.
+	bool              bTint = false;               // "Tint skin": colour this side even with NO forced model — the tint lands on the pawn's real model (body + armour overlay + spawn glow). A forced model always tints; default false so pre-existing configs render unchanged.
 	bool              bComplimentary = false;
 	ENCPlusArmourMode ArmourMode = ENCPlusArmourMode::MatchSkin;
 };
@@ -161,6 +163,14 @@ namespace NCPlusForceModels
 	/** Armour-overlay colour for a side: the skin colour (ArmourMode=MatchSkin) or its complement
 	 *  (hue + 180, ArmourMode=Complimentary). Used to override the stock yellow armour overlay. */
 	NETCODEPLUS_API FLinearColor GetArmourColour(const FNCPlusModelSettings& Side);
+
+	/** Effective armour-overlay emissive scale for a side: the user's Armour Glow (0-1), with an
+	 *  automatic extra dim when r.SimpleForwardShading is active. Emissive output is lighting-
+	 *  independent, so under SFS (lightmap + stationary dir light + skylight ONLY — every other
+	 *  lighting feature off) the belt keeps full HDR intensity in a darker, flatter scene and
+	 *  auto-exposure pushes it far past the bloom threshold ("radioactive"). EVERY writer of the
+	 *  overlay MID's "Color" param must scale through this so no per-frame path stomps the glow. */
+	NETCODEPLUS_API float GetArmourEmissiveScale(const FNCPlusModelSettings& Side);
 
 	/** Resolve + GC-pin + cache a side's AUTCharacterContent class (nullptr if none/unloadable). */
 	NETCODEPLUS_API TSubclassOf<AUTCharacterContent> GetModelClass(const FNCPlusModelSettings& Side);

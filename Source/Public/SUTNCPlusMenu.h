@@ -6,6 +6,7 @@
 #include "NetcodePlus.h"     // PCH preamble (UT/core types first)
 #include "SlateBasics.h"
 #include "NCPlusForceModels.h"
+#include "ClientHitsounds.h"
 
 class UUTLocalPlayer;
 
@@ -15,6 +16,7 @@ enum class ENCPMenuTab : uint8
 	About,
 	General,
 	ForceModels,
+	Hitsounds,
 };
 
 /**
@@ -35,6 +37,11 @@ class SUTNCPlusMenu : public SCompoundWidget
 	void Construct(const FArguments& InArgs);
 	void ClosePanel();
 
+	/** Switch the visible tab in place (used when `ncpmenu <tab>` targets an
+	 *  already-open panel — closing it instead would punish dc muscle memory
+	 *  like typing "mutate hitsounds" with F5 open). */
+	void SwitchTab(ENCPMenuTab Tab);
+
 	/** RAII backstop: release a held NCPlusHUDDragMode count if this panel is torn
 	 *  down without ClosePanel (e.g. viewport widgets dropped on a map load). */
 	virtual ~SUTNCPlusMenu();
@@ -50,6 +57,7 @@ private:
 	bool bAllowGib;
 	bool bShowRagdoll;
 	float RagdollTime;
+	bool bShowOwnBeam;
 	float OwnFootstepVolume;
 	bool bHighResScreenshotPostMatch;
 
@@ -62,12 +70,20 @@ private:
 	TArray<TSharedPtr<FString>> FMStyleOptions;                // Team/Enemy, Red/Blue, Enemy Only
 	TArray<TSharedPtr<FString>> FMArmourOptions;               // Match Skin, Complimentary
 
+	// ── Hitsounds settings ── working copy, edited in place and written to Mod.ini on Save.
+	// Option lists are members so each STextComboBox::OptionsSource stays valid for the
+	// panel's lifetime (same lifetime contract as the Force Models lists above).
+	FHitsoundsConfig HSConfig;
+	TArray<TSharedPtr<FString>> HSPresetOptions;   // every catalog preset, built-in then custom
+	TArray<TSharedPtr<FString>> HSStyleOptions;    // Absolute / UTComp / Flat
+
 	// ── Tabs ──
 	ENCPMenuTab ActiveTab = ENCPMenuTab::About;
 	TSharedPtr<class SBox> ContentArea;
 	TSharedRef<SWidget> BuildAboutTab();
 	TSharedRef<SWidget> BuildGeneralTab();
 	TSharedRef<SWidget> BuildForceModelsTab();
+	TSharedRef<SWidget> BuildHitsoundsTab();
 	TSharedRef<SWidget> BuildTabContent(ENCPMenuTab Tab);
 	TSharedRef<SWidget> MakeTabButton(const FString& Label, ENCPMenuTab Tab);
 	FReply OnTabClicked(ENCPMenuTab Tab);
@@ -82,6 +98,7 @@ private:
 	void OnAllowGibChanged(ECheckBoxState NewState);
 	void OnShowRagdollChanged(ECheckBoxState NewState);
 	void OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType);
+	void OnShowOwnBeamChanged(ECheckBoxState NewState);
 	void OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnScreenshotChanged(ECheckBoxState NewState);
 

@@ -37,6 +37,19 @@ private:
 	float HealthPickupPulseEnd;
 	float ArmorPickupPulseEnd;
 
+	// Parsed layout extras are immutable between live-layout revision bumps.
+	// Keeping their typed forms here avoids reparsing colors/style/opacity at render rate.
+	uint32 CachedLayoutRevision;
+	uint8 CachedStyle;
+	float CachedOpacity;
+	FLinearColor CachedLowHpRed;
+	FLinearColor CachedWarningHp;
+	FLinearColor CachedDamageFlash;
+	FLinearColor CachedHealthAccent;
+	FLinearColor CachedArmorAccent;
+	FLinearColor CachedHealthNumBase;
+	FLinearColor CachedArmorNumBase;
+
 	// Per-style draw functions. Health/Armor passed as ints so each function
 	// can present them however it likes; the shared header in Draw_Implementation
 	// computes flash/pulse colors and passes them in.

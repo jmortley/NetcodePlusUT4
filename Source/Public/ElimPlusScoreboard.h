@@ -1,4 +1,4 @@
-// ElimPlusScoreboard — Portrait-row scoreboard for ElimPlus (TeamArena).
+// ElimPlusScoreboard — flag-row scoreboard for ElimPlus (TeamArena).
 // Mirrors UWipeoutScoreboard structure but with the ElimPlus column set:
 //   Name | Kills | Deaths | Damage | PPR(Cur) | PPR(Ovr) | ELO | LG_Acc | BestWpn | Ping
 // Reads stats from AElimPlusStatsReplicator (replicated AInfo).
@@ -14,19 +14,6 @@ class NETCODEPLUS_API UElimPlusScoreboard : public UUTTeamScoreboard
 	GENERATED_UCLASS_BODY()
 
 public:
-	// Portrait atlas icons — same UV coords as the HUD strip (assigned at draw time)
-	UPROPERTY()
-	FCanvasIcon RedTeamIcon;
-
-	UPROPERTY()
-	FCanvasIcon BlueTeamIcon;
-
-	UPROPERTY()
-	FCanvasIcon RedTeamOverlay;
-
-	UPROPERTY()
-	FCanvasIcon BlueTeamOverlay;
-
 	// Column header texts (CH_Kills, CH_Deaths, CH_PlayerName, CH_Score, CH_Skill,
 	// CH_Ping are inherited from UUTScoreboard — set their values in the ctor.)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
@@ -69,6 +56,16 @@ protected:
 	/** True when team colors are non-standard (TeamSkins active). */
 	bool HasCustomTeamColors() const;
 
-	/** Small portrait pip on the scoreboard row. */
-	void DrawPortraitPip(AUTPlayerState* PlayerState, float XOffset, float YOffset, float PipWidth, float PipHeight);
+	/** Country flag used by the normal and Absolute Elim scoreboard rows. */
+	void DrawPlayerFlag(AUTPlayerState* PlayerState, float XOffset, float YOffset,
+		float FlagWidth, float FlagHeight, float Opacity = 1.f);
+
+	/** Recovered Elimination 1.13 scoreboard path selected with the existing
+	 *  Absolute Elim 113 top-panel toggle. */
+	bool ShouldDrawAbsoluteElimScoreboard() const;
+	void DrawAbsoluteTeamPanel(float RenderDelta, float& YOffset);
+	void DrawAbsoluteScoreHeaders(float RenderDelta, float& YOffset);
+	void DrawAbsolutePlayerScores(float RenderDelta, float& YOffset);
+	void DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 TeamIndex,
+		float XOffset, float YOffset, float AbsoluteScale);
 };

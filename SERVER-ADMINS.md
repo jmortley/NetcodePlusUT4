@@ -240,7 +240,7 @@ Players tune their own hitsounds in‑game with **`mutate hitsounds`**.
 
 Team skins / forced enemy models are now a **client feature** of NetcodePlus called **Force Models**.
 It is *purely client‑local* — there is **no server mutator and no `?mutator=` token**, and it is a no‑op
-on a dedicated server. Players open it with **F5** or `mutate teamskins` / `mutate forcemodels`.
+on a dedicated server. Players open it with **F5** or `ncpmenu forcemodels`.
 
 **Admin action:** just stop running `MutTeamSkins` (and drop its pak/redirect). There is nothing to add
 server‑side. The per‑player settings live in each client's Mod.ini under `[ForceModels]` (documented in
@@ -309,7 +309,6 @@ Notes:
 | `MutInstagibNCP` | Instagib weapon set (makes a CTF mode iCTF) | server (external BP pak) |
 | `NCWepMut` | NetcodePlus weapon replacement — turns **any** gamemode into NetcodePlus weapons (see Start Here) | server (pak) |
 | `NCStockWeapons` | Same, but **stock** UT4 weapon balance on the NetcodePlus netcode (the stock‑balance alternative to `NCWepMut`; RL keeps NCP spirals + grenades). Run one or the other, not both | server (pak) |
-| `NetcodePlus.NCUTPlus` | Native weapon‑replacement mutator (`ANCUTPlus`); usually a BP subclass classpath | server |
 | `MutStatSQL` | Stats upload to ut4stats.com — §9 | server |
 | `MutServerShield` | Behavioral anti‑cheat — §10 | server |
 
@@ -404,7 +403,7 @@ constructor):
 `EnemyBlockPenalty`, `EnemyLOSBlockRange`, `EnemyLOSPenalty`, `FlagBaseProximityRadius`,
 `FlagSpawnPenaltyRadius`, `SpawnRecentPenaltyMultiplier`, `SpawnNearLastRadius`, `SpawnNearLastPenalty`,
 `SpawnTieBandWidth`, `SpawnFreshnessBonus`, `SpawnFreshnessWindow`, `SpawnFlagVicinityRadius`,
-`SpawnKillerAvoidRadius`, `SpawnRobbedBaseAvoidCount`.
+`SpawnKillerAvoidRadius`, `SpawnFlagCarrierLOSAvoidRadius` (default `3500`), `SpawnRobbedBaseAvoidCount`.
 
 ---
 

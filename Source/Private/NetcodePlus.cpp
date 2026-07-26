@@ -3,6 +3,7 @@
 #include "Modules/ModuleManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
 #include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
 #include "UTPlayerController.h"
 #include "UTPlayerInput.h"
@@ -24,6 +25,8 @@
 #include "ShockDomHUD.h"
 #include "NCPlusForceModels.h"
 #include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
+#include "NCConcedeVote.h"            // gg concede vote: client command routing + bind seeding
+#include "EngineUtils.h"              // TActorIterator (concede vote channel lookup)
 
 // -ncpconnect launcher direct-connect support
 #include "Containers/Ticker.h"
@@ -49,6 +52,10 @@ static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
 
 /** PreLoadMap delegate handle — self-heals the menu input state across level loads. */
 static FDelegateHandle GNCPPreLoadMapHandle;
+static FDelegateHandle GNCPSkinPreLoadMapHandle;
+static FDelegateHandle GNCPPostLoadMapHandle;
+static FDelegateHandle GNCPSkinWorldInitHandle;
+static bool GNCPSkinRetryArmed = false;
 
 static void HandleWeaponHand(const TArray<FString>& Args)
 {
@@ -93,49 +100,34 @@ static void HandleWeaponHand(const TArray<FString>& Args)
 		}
 		else if (Hand == TEXT("hidden") || Hand == TEXT("h") || Hand == TEXT("hide"))
 		{
-			// Per-weapon hide — hides the CURRENT weapon by its tag
+			// Per-weapon hide — keyed by CLASS NAME (2026-07-19 fix: this used to
+			// key by WeaponSkinCustomizationTag, which BringUp / TeamArenaCharacter /
+			// LoadWeaponSettings never read — the entry only worked until respawn).
+			// Works for any weapon class now, stock included.
 			AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
 			if (UTChar && UTChar->GetWeapon())
 			{
-				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
-				if (FixWeapon && FixWeapon->WeaponSkinCustomizationTag != NAME_None)
-				{
-					AUTWeaponFix::HiddenWeaponsByTag.Add(FixWeapon->WeaponSkinCustomizationTag, true);
-					AUTWeaponFix::SaveWeaponSettings();
-
-					if (FixWeapon->GetMesh())
-						FixWeapon->GetMesh()->SetVisibility(false, true);
-					if (UTChar->FirstPersonMesh)
-						UTChar->FirstPersonMesh->SetVisibility(false, true);
-
-					PC->ClientMessage(FString::Printf(TEXT("Hidden: %s (saved to Mod.ini)"), *FixWeapon->WeaponSkinCustomizationTag.ToString()));
-				}
-				else
-				{
-					PC->ClientMessage(TEXT("Current weapon is not a NetcodePlus weapon."));
-				}
+				AUTWeapon* CurWeap = UTChar->GetWeapon();
+				const FName HideKey = FName(*CurWeap->GetClass()->GetName());
+				AUTWeaponFix::HiddenWeaponsByTag.Add(HideKey, true);
+				AUTWeaponFix::SaveWeaponSettings();
+				AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, true);
+				PC->ClientMessage(FString::Printf(TEXT("Hidden: %s (saved to Mod.ini)"), *HideKey.ToString()));
 			}
 			return;
 		}
 		else if (Hand == TEXT("show") || Hand == TEXT("s"))
 		{
-			// Per-weapon show — unhides the CURRENT weapon by its tag
+			// Per-weapon show — unhides the CURRENT weapon by its class name
 			AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
 			if (UTChar && UTChar->GetWeapon())
 			{
-				AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(UTChar->GetWeapon());
-				if (FixWeapon && FixWeapon->WeaponSkinCustomizationTag != NAME_None)
-				{
-					AUTWeaponFix::HiddenWeaponsByTag.Add(FixWeapon->WeaponSkinCustomizationTag, false);
-					AUTWeaponFix::SaveWeaponSettings();
-
-					if (FixWeapon->GetMesh())
-						FixWeapon->GetMesh()->SetVisibility(true, true);
-					if (UTChar->FirstPersonMesh)
-						UTChar->FirstPersonMesh->SetVisibility(true, true);
-
-					PC->ClientMessage(FString::Printf(TEXT("Shown: %s (saved to Mod.ini)"), *FixWeapon->WeaponSkinCustomizationTag.ToString()));
-				}
+				AUTWeapon* CurWeap = UTChar->GetWeapon();
+				const FName HideKey = FName(*CurWeap->GetClass()->GetName());
+				AUTWeaponFix::HiddenWeaponsByTag.Add(HideKey, false);
+				AUTWeaponFix::SaveWeaponSettings();
+				AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, false);
+				PC->ClientMessage(FString::Printf(TEXT("Shown: %s (saved to Mod.ini)"), *HideKey.ToString()));
 			}
 			// Re-apply current hand position
 			NewHand = PC->GetWeaponHand();
@@ -220,9 +212,42 @@ static void HandleWeaponSkins(const TArray<FString>& Args)
 
 static void HandleNCPMenu(const TArray<FString>& Args)
 {
-	// Toggle: if already open, close it
+	// Optional first arg picks the tab (parsed up front so an explicit tab
+	// request can retarget an already-open panel).
+	ENCPMenuTab InitialTab = ENCPMenuTab::About;
+	bool bExplicitTab = false;
+	if (Args.Num() > 0)
+	{
+		const FString Tab = Args[0].ToLower();
+		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
+		{
+			InitialTab = ENCPMenuTab::ForceModels;
+			bExplicitTab = true;
+		}
+		else if (Tab == TEXT("general"))
+		{
+			InitialTab = ENCPMenuTab::General;
+			bExplicitTab = true;
+		}
+		else if (Tab == TEXT("hitsounds"))
+		{
+			InitialTab = ENCPMenuTab::Hitsounds;
+			bExplicitTab = true;
+		}
+	}
+
+	// Toggle: bare `ncpmenu` / F5 on an open panel closes it. An EXPLICIT tab
+	// request on an open panel switches tabs instead — otherwise "mutate
+	// hitsounds" typed with F5 open would close the menu in the user's face.
 	if (ActiveNCPMenu.IsValid())
 	{
+		if (bExplicitTab)
+		{
+			TSharedPtr<SUTNCPlusMenu> Menu = ActiveNCPMenu.Pin();
+			Menu->SwitchTab(InitialTab);
+			FSlateApplication::Get().SetKeyboardFocus(Menu, EFocusCause::SetDirectly);
+			return;
+		}
 		ActiveNCPMenu.Pin()->ClosePanel();
 		ActiveNCPMenu.Reset();
 		return;
@@ -251,23 +276,6 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 	UGameViewportClient* ViewportClient = World->GetGameViewport();
 	if (!ViewportClient) return;
 
-	// Optional first arg picks the opening tab: `ncpmenu forcemodels` (or the
-	// teamskins/models synonyms) → Force Models, `general` → General; bare
-	// `ncpmenu` / F5 → About.
-	ENCPMenuTab InitialTab = ENCPMenuTab::About;
-	if (Args.Num() > 0)
-	{
-		const FString Tab = Args[0].ToLower();
-		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
-		{
-			InitialTab = ENCPMenuTab::ForceModels;
-		}
-		else if (Tab == TEXT("general"))
-		{
-			InitialTab = ENCPMenuTab::General;
-		}
-	}
-
 	TSharedRef<SUTNCPlusMenu> Menu =
 		SNew(SUTNCPlusMenu)
 		.PlayerOwner(LP)
@@ -292,6 +300,43 @@ static void OnNCPPreLoadMap(const FString& /*MapName*/)
 		ActiveNCPMenu.Reset();
 	}
 	NCPlusHUDDragMode::Reset();
+}
+
+static void OnNCPSkinPreLoadMap(const FString& /*MapName*/)
+{
+	// Resolve the shared catalog while travel is already loading. This callback
+	// is registered on dedicated servers too, so replicated spectator choices
+	// are resident before the first pawn can publish them.
+	if (AUTWeaponFix::bWeaponSettingsLoaded)
+	{
+		AUTWeaponFix::RetryPendingWeaponSkins();
+	}
+	else
+	{
+		AUTWeaponFix::LoadWeaponSettings();
+	}
+	GNCPSkinRetryArmed = true;
+}
+
+static void OnNCPSkinWorldInitialized(UWorld* World, const UWorld::InitializationValues)
+{
+	if (World != nullptr && World->IsGameWorld())
+	{
+		if (!AUTWeaponFix::bWeaponSettingsLoaded)
+		{
+			AUTWeaponFix::LoadWeaponSettings();
+		}
+		else if (GNCPSkinRetryArmed)
+		{
+			AUTWeaponFix::RetryPendingWeaponSkins();
+		}
+		GNCPSkinRetryArmed = false;
+	}
+}
+
+static void OnNCPPostLoadMap()
+{
+	GNCPSkinRetryArmed = false;
 }
 
 static void HandleCosmetics(const TArray<FString>& Args)
@@ -773,6 +818,60 @@ static void ScrubNoAliasIdentifiersOnLoad(const FString& /*MapName*/)
 	ScrubNoAliasIdentifiers();
 }
 
+// NCAmpRespawnFix.cpp — server-side amp respawn-interval correction (headerless: pure static hook,
+// no UObject/UHT surface, keeps this a server-DLL-only change).
+extern void RegisterNCAmpRespawnFix();
+extern void UnregisterNCAmpRespawnFix();
+
+// Concede vote (gg / F1 / F4): route the local player's action to the server. On a
+// listen host / standalone the local PC IS the authority, so call the vote handler
+// directly; on a net client find our per-player vote channel (owner-only-relevant,
+// so the iterator sees at most our own instance) and RPC through it. Old servers
+// without the feature simply have no channel — silent no-op.
+static void ConcedeCommand(uint8 Action)
+{
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+	if (!World) return;
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC) return;
+
+	if (PC->HasAuthority())
+	{
+		// Listen host / standalone only: the LOCAL PC is the authority. On a DEDICATED
+		// server GetFirstPlayerController() is some remote player's PC (also authoritative
+		// there) — a server-console / RCON 'gg' must never cast a vote on their behalf.
+		if (PC->IsLocalController())
+		{
+			NCConcede::HandleVote(PC, Action);
+		}
+		return;
+	}
+	for (TActorIterator<ANCConcedeVote> It(World); It; ++It)
+	{
+		if (It->GetOwner() == PC)
+		{
+			It->ServerConcede(Action);
+			return;
+		}
+	}
+}
+
+static void HandleConcedeStart(const TArray<FString>& /*Args*/)   { ConcedeCommand(NCConcede::kActionStartOrConfirm); }
+static void HandleConcedeConfirm(const TArray<FString>& /*Args*/) { ConcedeCommand(NCConcede::kActionConfirmOnly); }
+static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeCommand(NCConcede::kActionCancel); }
+
 void FNetcodePlus::StartupModule()
 {
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -831,6 +930,27 @@ void FNetcodePlus::StartupModule()
 		ECVF_Default
 	);
 
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("gg"),
+		TEXT("Concede vote: start (or confirm) a vote to forfeit the match — losing team only, >50% must agree"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleConcedeStart),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("concedeconfirm"),
+		TEXT("Concede vote: confirm the active vote (default bind F1; never starts a vote)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleConcedeConfirm),
+		ECVF_Default
+	);
+
+	IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("concedecancel"),
+		TEXT("Concede vote: withdraw your vote (default bind F4)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleConcedeCancel),
+		ECVF_Default
+	);
+
 	// Bind F5 -> ncpmenu by SEEDING the UUTPlayerInput CDO's CustomBinds at startup (pure run-once).
 	// The CDO exists by now (GetMutableDefault constructs + config-loads it if needed), so this adds on top
 	// of whatever Input.ini had; new UUTPlayerInput instances inherit the CDO's CustomBinds, and
@@ -865,6 +985,41 @@ void FNetcodePlus::StartupModule()
 			InputCDO->SpectatorBinds.Add(FCustomKeyBinding(FName(TEXT("F5")), IE_Pressed, TEXT("ncpmenu")));
 			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: F5 -> ncpmenu seeded on UUTPlayerInput CDO SpectatorBinds"));
 		}
+
+		// Concede binds — F1 confirm / F4 cancel by default, honouring whatever keys the
+		// player already configured for zo's CustomHUD BP concede (its Game.ini section
+		// persists 'Confirm Key String'/'Cancel Key String'; spaced keys + slash sections
+		// are valid GConfig lookups). add-if-missing, so a hand-rebound command wins.
+		// ALSO seeded into SpectatorBinds: dead players (bOutOfLives) route through them
+		// first, and eliminated players must be able to vote mid-round; a true spectator
+		// pressing the keys is rejected server-side (not on a team).
+		{
+			FString ConfirmKey = TEXT("F1");
+			FString CancelKey  = TEXT("F4");
+			if (GConfig)
+			{
+				static const TCHAR* kZoHUDSection =
+					TEXT("/Game/Blueprints/ElimPlusStuff/Mutator/ELIMCustomHUD/ElimZoHUD.ElimZoHUD_C");
+				GConfig->GetString(kZoHUDSection, TEXT("Confirm Key String"), ConfirmKey, GGameIni);
+				GConfig->GetString(kZoHUDSection, TEXT("Cancel Key String"),  CancelKey,  GGameIni);
+			}
+			if (ConfirmKey.IsEmpty()) { ConfirmKey = TEXT("F1"); }
+			if (CancelKey.IsEmpty())  { CancelKey  = TEXT("F4"); }
+
+			auto SeedConcedeBind = [](TArray<FCustomKeyBinding>& Binds, const FString& Key, const TCHAR* Cmd)
+			{
+				for (const FCustomKeyBinding& B : Binds)
+				{
+					if (B.Command.Contains(Cmd)) { return; }
+				}
+				Binds.Add(FCustomKeyBinding(FName(*Key), IE_Pressed, Cmd));
+				UE_LOG(LogLoad, Warning, TEXT("netcodeplus: %s -> %s seeded on UUTPlayerInput CDO"), *Key, Cmd);
+			};
+			SeedConcedeBind(InputCDO->CustomBinds,    ConfirmKey, TEXT("concedeconfirm"));
+			SeedConcedeBind(InputCDO->CustomBinds,    CancelKey,  TEXT("concedecancel"));
+			SeedConcedeBind(InputCDO->SpectatorBinds, ConfirmKey, TEXT("concedeconfirm"));
+			SeedConcedeBind(InputCDO->SpectatorBinds, CancelKey,  TEXT("concedecancel"));
+		}
 	}
 
 	// Self-heal the menu input state across level transitions: LoadMap drops our
@@ -874,6 +1029,10 @@ void FNetcodePlus::StartupModule()
 	{
 		GNCPPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPPreLoadMap);
 	}
+	GNCPSkinPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPSkinPreLoadMap);
+	GNCPPostLoadMapHandle = FCoreUObjectDelegates::PostLoadMap.AddStatic(&OnNCPPostLoadMap);
+	GNCPSkinWorldInitHandle = FWorldDelegates::OnPostWorldInitialization.AddStatic(
+		&OnNCPSkinWorldInitialized);
 
 	// NoAlias Mod.ini scrub (see ScrubNoAliasIdentifiers above): once at startup so
 	// the first hub join reads clean data, and again before every map load so a
@@ -920,6 +1079,10 @@ void FNetcodePlus::StartupModule()
 		NCPlusVersionGate::RegisterHubAdvisor();
 	}
 
+	// Amp respawn-interval fix: world-init hook, acts only on authority game worlds (the callback
+	// itself no-ops for NM_Client), Mod.ini-gated ([NetcodePlus] AmpRespawnFix). See NCAmpRespawnFix.cpp.
+	RegisterNCAmpRespawnFix();
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
@@ -942,6 +1105,9 @@ void FNetcodePlus::ShutdownModule()
 	// Unbind the hub-advisor PostLogin hook (no-op if never registered).
 	NCPlusVersionGate::UnregisterHubAdvisor();
 
+	// Unbind the amp respawn-fix world-init hook.
+	UnregisterNCAmpRespawnFix();
+
 	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())
 	{
@@ -949,12 +1115,30 @@ void FNetcodePlus::ShutdownModule()
 		ActiveSkinSelector.Reset();
 	}
 	SUTWeaponSkinSelector_CleanupCache();
+	AUTWeaponFix::CleanupWeaponSettings();
+	AClientHitsounds::ShutdownCatalog();
 
 	if (GNCPPreLoadMapHandle.IsValid())
 	{
 		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPPreLoadMapHandle);
 		GNCPPreLoadMapHandle.Reset();
 	}
+	if (GNCPSkinPreLoadMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PreLoadMap.Remove(GNCPSkinPreLoadMapHandle);
+		GNCPSkinPreLoadMapHandle.Reset();
+	}
+	if (GNCPPostLoadMapHandle.IsValid())
+	{
+		FCoreUObjectDelegates::PostLoadMap.Remove(GNCPPostLoadMapHandle);
+		GNCPPostLoadMapHandle.Reset();
+	}
+	if (GNCPSkinWorldInitHandle.IsValid())
+	{
+		FWorldDelegates::OnPostWorldInitialization.Remove(GNCPSkinWorldInitHandle);
+		GNCPSkinWorldInitHandle.Reset();
+	}
+	GNCPSkinRetryArmed = false;
 
 	if (GNCPNoAliasScrubMapHandle.IsValid())
 	{
@@ -997,6 +1181,15 @@ void FNetcodePlus::ShutdownModule()
 
 	IConsoleObject* Cmd5 = IConsoleManager::Get().FindConsoleObject(TEXT("nchud"));
 	if (Cmd5) { IConsoleManager::Get().UnregisterConsoleObject(Cmd5, false); }
+
+	IConsoleObject* CmdGG = IConsoleManager::Get().FindConsoleObject(TEXT("gg"));
+	if (CmdGG) { IConsoleManager::Get().UnregisterConsoleObject(CmdGG, false); }
+
+	IConsoleObject* CmdCC = IConsoleManager::Get().FindConsoleObject(TEXT("concedeconfirm"));
+	if (CmdCC) { IConsoleManager::Get().UnregisterConsoleObject(CmdCC, false); }
+
+	IConsoleObject* CmdCX = IConsoleManager::Get().FindConsoleObject(TEXT("concedecancel"));
+	if (CmdCX) { IConsoleManager::Get().UnregisterConsoleObject(CmdCX, false); }
 
 	// Close drag overlay if open
 	if (ActiveDragOverlay.IsValid())

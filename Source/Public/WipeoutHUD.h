@@ -45,7 +45,7 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void DrawTeamScoreBar(AUTGameState* GS);
 
 	/** "NOW WATCHING <player>" spectator banner, ported from iCTF (ANCPlusCTFHUD).
-	 *  Self-guards: draws nothing unless we're viewing another player's pawn. */
+	 *  Canonical banner for dead players and true spectators; the stock duplicate is frame-suppressed. */
 	void DrawSpectatorTarget();
 
 	/** Force game-only input when dead but match in progress — prevents mouse escaping viewport */
@@ -71,6 +71,11 @@ private:
 		FText  HpText;
 		float  HpWidth  = 0.f;
 		float  HpHeight = 0.f;
+		const UFont* CountdownFont = nullptr;
+		int32 CountdownSeconds = MIN_int32;
+		FText CountdownText;
+		float CountdownWidth = 0.f;
+		float CountdownHeight = 0.f;
 	};
 	TMap<TWeakObjectPtr<AUTPlayerState>, FWipeoutPipCache> PipCacheByPS;
 };

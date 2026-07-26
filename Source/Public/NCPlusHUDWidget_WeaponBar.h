@@ -31,6 +31,19 @@ public:
 	 *  AUTWeapon are pixel coordinates into THIS texture (not HUDAtlas). */
 	UPROPERTY()
 	class UTexture2D* WeaponIconAtlas;
+
+private:
+	// Parsed layout style. Extras are strings in the editable layout, but they
+	// only need parsing when the live revision changes.
+	uint32 CachedStyleRevision;
+	bool bCachedVertical;
+	float CachedOpacity;
+	FLinearColor CachedSlotBgInactive;
+	FLinearColor CachedSlotBgActive;
+	FLinearColor CachedActiveOutline;
+	FLinearColor CachedAmmoFillFull;
+	FLinearColor CachedAmmoFillWarn;
+	FLinearColor CachedAmmoFillDanger;
 };
 
 UCLASS()

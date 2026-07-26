@@ -162,6 +162,37 @@ void AUTPlusShockRifle::PlayFiringEffects()
 	}
 }
 
+void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
+	const FVector& SpawnLocation, const FRotator& SpawnRotation)
+{
+	// Client-local iCTF preference. The current iCTF rifle is an Instagib-named BP child of this
+	// class; normal shock-rifle children intentionally keep their beam regardless of this setting.
+	bool bShowOwnBeam = true;
+	if (GetClass() && GetClass()->GetName().Contains(TEXT("Instagib")) && GConfig)
+	{
+		const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		FString Value;
+		if (GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowOwnBeam"), Value, ConfigPath))
+		{
+			bShowOwnBeam = Value.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+		}
+	}
+
+	if (bShowOwnBeam || !FireEffect.IsValidIndex(FireMode) || FireEffect[FireMode] == nullptr)
+	{
+		Super::PlayImpactEffects_Implementation(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+		return;
+	}
+
+	// FireEffect is the beam only. Temporarily removing it keeps the stock path for the muzzle,
+	// endpoint impact, sound and animation intact. Third-person beams use AUTWeaponAttachment and
+	// never enter this first-person/view-target override.
+	UParticleSystem* SavedBeam = FireEffect[FireMode];
+	FireEffect[FireMode] = nullptr;
+	Super::PlayImpactEffects_Implementation(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+	FireEffect[FireMode] = SavedBeam;
+}
+
 void AUTPlusShockRifle::HitScanTrace(const FVector& StartLocation, const FVector& EndTrace, float TraceRadius, FHitResult& Hit, float PredictionTime)
 {
 	// UTWeaponFix will automatically use GetHitValidationPredictionTime()
@@ -185,14 +216,6 @@ float AUTPlusShockRifle::GetHitValidationPredictionTime() const
 	// Just use parent's implementation (120ms default)
 	// Projectiles don't use HitScanTrace anyway, so this only affects beam
 	return Super::GetHitValidationPredictionTime();
-}
-
-float AUTPlusShockRifle::GetHitscanTimeSearchWindow() const
-{
-	// Widen the server-side bidirectional time-search fallback to 45ms (half-window) for
-	// the shock family (this class + the BP instagib rifle child). Recovers high-ping
-	// claimed hits on the ~5% smaller iCTF hitbox; other weapons keep the base 30ms.
-	return 0.045f;
 }
 
 bool AUTPlusShockRifle::WaitingForCombo()

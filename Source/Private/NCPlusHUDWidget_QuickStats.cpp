@@ -71,6 +71,16 @@ UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitialize
 	ArmorDamageFlashEnd    = 0.f;
 	HealthPickupPulseEnd   = 0.f;
 	ArmorPickupPulseEnd    = 0.f;
+	CachedLayoutRevision   = 0;
+	CachedStyle            = uint8(ENCPlusHPArmorStyle::MinimalTypography);
+	CachedOpacity          = 1.f;
+	CachedLowHpRed         = FLinearColor(1.f, 0.32f, 0.28f, 1.f);
+	CachedWarningHp        = FLinearColor(1.f, 0.78f, 0.20f, 1.f);
+	CachedDamageFlash      = FLinearColor(1.f, 0.45f, 0.30f, 1.f);
+	CachedHealthAccent     = FLinearColor(0.37f, 0.96f, 0.48f, 1.f);
+	CachedArmorAccent      = FLinearColor(0.95f, 0.83f, 0.34f, 1.f);
+	CachedHealthNumBase    = FLinearColor::White;
+	CachedArmorNumBase     = FLinearColor::White;
 }
 
 float UNCPlusHUDWidget_QuickStats::GetDrawScaleOverride()
@@ -82,11 +92,23 @@ float UNCPlusHUDWidget_QuickStats::GetDrawScaleOverride()
 
 bool UNCPlusHUDWidget_QuickStats::ShouldDraw_Implementation(bool bShowScores)
 {
-	return Super::ShouldDraw_Implementation(bShowScores)
-		&& UTHUDOwner != nullptr
-		&& UTHUDOwner->UTPlayerOwner != nullptr
-		&& !UTHUDOwner->bShowComsMenu
-		&& !UTHUDOwner->bShowWeaponWheel;
+	if (!Super::ShouldDraw_Implementation(bShowScores)
+		|| UTHUDOwner == nullptr
+		|| UTHUDOwner->UTPlayerOwner == nullptr
+		|| UTHUDOwner->bShowComsMenu
+		|| UTHUDOwner->bShowWeaponWheel)
+	{
+		return false;
+	}
+	// Instagib (client-detected): every hit kills regardless of HP/armor, so the
+	// bar is noise — hidden by default. Opt back in via the hp_armor element's
+	// "Show in Instagib" checkbox in nchud (extras key "show_in_instagib").
+	if (NCPlusHUDDrawCall::IsInstagibMatch(UTHUDOwner->GetWorld()))
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
+		return E && E->GetExtraBool(TEXT("show_in_instagib"), false);
+	}
+	return true;
 }
 
 void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
@@ -126,36 +148,44 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 	// NOTE: Colors carry their natural alpha — we DON'T pre-multiply Opacity in
 	// because UUTHUDWidget::DrawTexture overwrites color.A. Each draw site must
 	// pass `color.A * C.Opacity` through the explicit DrawOpacity argument.
-	const FLinearColor White = FLinearColor::White;
-	const FNCPlusHUDElement* ColorElem = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
-	auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
+	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
+	if (CachedLayoutRevision != LayoutRevision)
 	{
-		return ColorElem ? ColorElem->GetExtraColor(Key, Default) : Default;
-	};
+		const FNCPlusHUDElement* ColorElem = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
+		auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
+		{
+			return ColorElem ? ColorElem->GetExtraColor(Key, Default) : Default;
+		};
+		CachedLowHpRed      = Col(TEXT("color_low_hp"), FLinearColor(1.f, 0.32f, 0.28f, 1.f));
+		CachedWarningHp     = Col(TEXT("color_warning_hp"), FLinearColor(1.f, 0.78f, 0.20f, 1.f));
+		CachedDamageFlash   = Col(TEXT("color_damage_flash"), FLinearColor(1.f, 0.45f, 0.30f, 1.f));
+		CachedHealthAccent  = Col(TEXT("color_health"), FLinearColor(0.37f, 0.96f, 0.48f, 1.f));
+		CachedArmorAccent   = Col(TEXT("color_armor"), FLinearColor(0.95f, 0.83f, 0.34f, 1.f));
+		CachedHealthNumBase = Col(TEXT("color_health_number"), FLinearColor::White);
+		CachedArmorNumBase  = Col(TEXT("color_armor_number"), FLinearColor::White);
+		CachedOpacity       = ColorElem ? FMath::Clamp(ColorElem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
+		CachedStyle         = uint8(ColorElem
+			? NCPlusHPArmorStyle::Parse(ColorElem->GetExtra(TEXT("style")))
+			: ENCPlusHPArmorStyle::MinimalTypography);
+		CachedLayoutRevision = LayoutRevision;
+	}
 	// Two-tier low-HP coloring: warning (45-70) and critical (<=45). The
 	// "color_low_hp" extras key keeps its historical meaning (critical red)
 	// for backwards-compat with users who've customized it. New
 	// "color_warning_hp" key tunes the 45-70 warning tone independently.
-	const FLinearColor LowHpRed     = Col(TEXT("color_low_hp"),      FLinearColor(1.f,  0.32f, 0.28f, 1.f));
-	const FLinearColor WarningHp    = Col(TEXT("color_warning_hp"),  FLinearColor(1.f,  0.78f, 0.20f, 1.f));
-	const FLinearColor DamageFlash  = Col(TEXT("color_damage_flash"), FLinearColor(1.f, 0.45f, 0.30f, 1.f));
-
 	FStatColors C;
-	C.Opacity      = ColorElem ? FMath::Clamp(ColorElem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
-	C.HealthAccent = Col(TEXT("color_health"), FLinearColor(0.37f, 0.96f, 0.48f, 1.f));
-	C.ArmorAccent  = Col(TEXT("color_armor"),  FLinearColor(0.95f, 0.83f, 0.34f, 1.f));
+	C.Opacity      = CachedOpacity;
+	C.HealthAccent = CachedHealthAccent;
+	C.ArmorAccent  = CachedArmorAccent;
 
 	// Base number colors are user-overridable; low-HP red + damage flash still
 	// lerp over the top so behavior remains intact when colors are customized.
-	const FLinearColor HealthNumBase = Col(TEXT("color_health_number"), White);
-	const FLinearColor ArmorNumBase  = Col(TEXT("color_armor_number"),  White);
-
-	C.HealthNumColor = HealthNumBase;
+	C.HealthNumColor = CachedHealthNumBase;
 	if (Health <= CriticalHealthCutoff)
 	{
 		// <=45 HP: any single hitscan (sniper, shock combo) is a one-shot
 		// kill. Solid critical red — no lerp to base, the danger is binary.
-		C.HealthNumColor = LowHpRed;
+		C.HealthNumColor = CachedLowHpRed;
 	}
 	else if (Health <= WarningHealthCutoff)
 	{
@@ -165,19 +195,19 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 		const float t = FMath::Clamp(
 			float(Health - CriticalHealthCutoff) /
 			float(WarningHealthCutoff - CriticalHealthCutoff), 0.f, 1.f);
-		C.HealthNumColor = FMath::Lerp(WarningHp, HealthNumBase, t);
+		C.HealthNumColor = FMath::Lerp(CachedWarningHp, CachedHealthNumBase, t);
 	}
 	if (Now < HealthDamageFlashEnd)
 	{
 		const float t = (HealthDamageFlashEnd - Now) / FlashDuration;
-		C.HealthNumColor = FMath::Lerp(C.HealthNumColor, DamageFlash, t);
+		C.HealthNumColor = FMath::Lerp(C.HealthNumColor, CachedDamageFlash, t);
 	}
 
-	C.ArmorNumColor = ArmorNumBase;
+	C.ArmorNumColor = CachedArmorNumBase;
 	if (Now < ArmorDamageFlashEnd)
 	{
 		const float t = (ArmorDamageFlashEnd - Now) / FlashDuration;
-		C.ArmorNumColor = FMath::Lerp(C.ArmorNumColor, DamageFlash, t);
+		C.ArmorNumColor = FMath::Lerp(C.ArmorNumColor, CachedDamageFlash, t);
 	}
 
 	C.HealthPulse = (Now >= HealthPickupPulseEnd) ? 0.f : (HealthPickupPulseEnd - Now) / PulseDuration;
@@ -186,10 +216,7 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 	const bool bDrawArmor = (Armor > 0);
 
 	// --- Dispatch to chosen style ---
-	const FNCPlusHUDElement* LayoutElem = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
-	const ENCPlusHPArmorStyle Style = LayoutElem
-		? NCPlusHPArmorStyle::Parse(LayoutElem->GetExtra(TEXT("style")))
-		: ENCPlusHPArmorStyle::MinimalTypography;
+	const ENCPlusHPArmorStyle Style = ENCPlusHPArmorStyle(CachedStyle);
 
 	switch (Style)
 	{
@@ -401,14 +428,14 @@ namespace
 		Canvas->DrawItem(Item);
 	}
 
-	// Helper: draw a filled arc as a triangle ring around widget-local (CX, CY)
+	// Helper: append a filled arc to the shared triangle ring around widget-local (CX, CY)
 	// with given inner/outer radius (design pixels), sweep angle (radians,
-	// 0 = north, clockwise), N segments. Batches into one K2_DrawTriangle call.
-	void DrawArc(UCanvas* Canvas, const FVector2D& RenderPos, float Scale,
+	// 0 = north, clockwise), N segments. The caller submits all rings in one batch.
+	void AppendArc(TArray<FCanvasUVTri>& Tris, const FVector2D& RenderPos, float Scale,
 	             float CX, float CY, float InnerR, float OuterR,
 	             float StartRad, float EndRad, int32 N, const FLinearColor& Color)
 	{
-		if (!Canvas || N <= 0 || EndRad <= StartRad) return;
+		if (N <= 0 || EndRad <= StartRad) return;
 		const float Step = (EndRad - StartRad) / float(N);
 
 		// 0 rad = pointing UP (negative Y), increasing CW. Returns SCREEN coords.
@@ -416,9 +443,6 @@ namespace
 			const FVector2D Local(CX + FMath::Sin(Rad) * R, CY - FMath::Cos(Rad) * R);
 			return LocalToScreen(Local, RenderPos, Scale);
 		};
-
-		TArray<FCanvasUVTri> Tris;
-		Tris.Reserve(N * 2);
 
 		for (int32 i = 0; i < N; i++)
 		{
@@ -439,8 +463,6 @@ namespace
 			T2.V0_Pos = Inner0; T2.V1_Pos = Outer1; T2.V2_Pos = Inner1;
 			Tris.Add(T2);
 		}
-
-		DrawTrisTranslucent(Canvas, MoveTemp(Tris));
 	}
 }
 
@@ -458,23 +480,26 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 	const float CY = ContentTopY + OuterR_HP;
 	const float Thick = 6.f;
 
-	// Track ring (dim background — full circle). DrawArc submits translucent
+	// Track ring (dim background — full circle). AppendArc submits translucent
 	// triangles (DrawTrisTranslucent), so pre-multiplying Opacity into color.A
 	// renders correctly. (It used to go through K2_DrawTriangle, whose OPAQUE
 	// default blend ignored every alpha here.)
 	FLinearColor TrackHP(0.10f, 0.16f, 0.12f, 0.85f * C.Opacity);
 	FLinearColor TrackAR(0.16f, 0.14f, 0.10f, 0.85f * C.Opacity);
-	DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP, 0.f, 2.f * PI, 48, TrackHP);
+	TArray<FCanvasUVTri> Tris;
+	// Worst case: two full tracks + two full value rings, two triangles/segment.
+	Tris.Reserve((48 + 40 + 48 + 40) * 2);
+	AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP, 0.f, 2.f * PI, 48, TrackHP);
 	if (bDrawArmor)
 	{
-		DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR, 0.f, 2.f * PI, 40, TrackAR);
+		AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR, 0.f, 2.f * PI, 40, TrackAR);
 	}
 
 	// HP arc — full sweep maps to MaxHealth (200).
 	const float HPFrac = FMath::Clamp(float(Health) / float(MaxHealth), 0.f, 1.f);
 	FLinearColor HPColor = C.HealthAccent;
 	HPColor.A = (0.9f + C.HealthPulse * 0.1f) * C.Opacity;
-	DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP,
+	AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP,
 	        0.f, HPFrac * 2.f * PI, FMath::Max(8, FMath::FloorToInt(HPFrac * 48.f)), HPColor);
 
 	// Armor arc — full sweep maps to MaxArmor (150).
@@ -483,9 +508,10 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 		const float ARFrac = FMath::Clamp(float(Armor) / float(MaxArmor), 0.f, 1.f);
 		FLinearColor ARColor = C.ArmorAccent;
 		ARColor.A = (0.9f + C.ArmorPulse * 0.1f) * C.Opacity;
-		DrawArc(Canvas, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR,
+		AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR,
 		        0.f, ARFrac * 2.f * PI, FMath::Max(6, FMath::FloorToInt(ARFrac * 40.f)), ARColor);
 	}
+	DrawTrisTranslucent(Canvas, MoveTemp(Tris));
 
 	// Numbers stacked in the center of the rings — DrawText needs DrawOpacity arg.
 	DrawText(FText::AsNumber(Health), CX, CY - 14.f, NumberFont,
@@ -516,10 +542,9 @@ namespace
 	//       /         /
 	//      /         /
 	//   (0,H/2)──(S,  H)──(W, H)
-	void DrawChevron(UCanvas* Canvas, const FVector2D& RenderPos, float Scale,
+	void AppendChevron(TArray<FCanvasUVTri>& Tris, const FVector2D& RenderPos, float Scale,
 	                 float X, float Y, float W, float H, float Slant, const FLinearColor& Color)
 	{
-		if (!Canvas) return;
 		// Widget-local polygon points → transform to screen space.
 		const FVector2D P0 = LocalToScreen({X + Slant,     Y          }, RenderPos, Scale); // top-left
 		const FVector2D P1 = LocalToScreen({X + W,         Y          }, RenderPos, Scale); // top-right
@@ -529,20 +554,18 @@ namespace
 		const FVector2D P5 = LocalToScreen({X,             Y + H*0.5f }, RenderPos, Scale); // back-tip
 
 		// 4-triangle fan from P0
-		TArray<FCanvasUVTri> Tris;
-		Tris.SetNum(4);
-		for (FCanvasUVTri& T : Tris)
+		const int32 BaseIndex = Tris.AddDefaulted(4);
+		for (int32 i = 0; i < 4; ++i)
 		{
+			FCanvasUVTri& T = Tris[BaseIndex + i];
 			T.V0_Color = T.V1_Color = T.V2_Color = Color;
 			T.V0_UV = T.V1_UV = T.V2_UV = FVector2D::ZeroVector;
 			T.V0_Pos = P0;
 		}
-		Tris[0].V1_Pos = P1; Tris[0].V2_Pos = P2;
-		Tris[1].V1_Pos = P2; Tris[1].V2_Pos = P3;
-		Tris[2].V1_Pos = P3; Tris[2].V2_Pos = P4;
-		Tris[3].V1_Pos = P4; Tris[3].V2_Pos = P5;
-
-		DrawTrisTranslucent(Canvas, MoveTemp(Tris));
+		Tris[BaseIndex + 0].V1_Pos = P1; Tris[BaseIndex + 0].V2_Pos = P2;
+		Tris[BaseIndex + 1].V1_Pos = P2; Tris[BaseIndex + 1].V2_Pos = P3;
+		Tris[BaseIndex + 2].V1_Pos = P3; Tris[BaseIndex + 2].V2_Pos = P4;
+		Tris[BaseIndex + 3].V1_Pos = P4; Tris[BaseIndex + 3].V2_Pos = P5;
 	}
 }
 
@@ -567,18 +590,12 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 	const float NumScale = 0.75f;   // small enough to fit inside ChevH visually
 	const float NumNudgeY = -4.f;   // compensate for font glyph-box asymmetry
 
-	auto DrawRow = [&](int32 Value, int32 SegCount, float Y,
-	                   const FLinearColor& FillColor, const FLinearColor& NumColor, float Pulse)
+	TArray<FCanvasUVTri> Tris;
+	Tris.Reserve((HealthSegCount + ArmorSegCount) * 4);
+	auto AppendRow = [&](int32 Value, int32 SegCount, float Y,
+	                   const FLinearColor& FillColor, float Pulse)
 	{
-		// Number on the left, visually centered on the chevron row. Uses the user's
-		// HP#/AR# number colors (incl. low-HP/flash tiers) — it used to draw with the
-		// row ACCENT, so the number-color settings did nothing here (2026-07-01).
-		DrawText(FText::AsNumber(Value), NumWidth, Y + ChevH * 0.5f + NumNudgeY, NumberFont,
-			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumScale, NumColor.A * C.Opacity, NumColor,
-			ETextHorzPos::Right, ETextVertPos::Center);
-
-		// DrawChevron submits translucent triangles → bake Opacity into color.A.
+		// AppendChevron submits translucent triangles → bake Opacity into color.A.
 		FLinearColor EmptyOutline(0.18f, 0.20f, 0.18f, 0.55f * C.Opacity);
 		FLinearColor PulsedFill = FillColor;
 		PulsedFill.A = (0.85f + Pulse * 0.15f) * C.Opacity;
@@ -591,26 +608,40 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 			const float X = StripX + i * (ChevW + ChevGap);
 			if (i < FullCount)
 			{
-				DrawChevron(Canvas, RenderPosition, RenderScale, X, Y, ChevW, ChevH, ChevSlant, PulsedFill);
+				AppendChevron(Tris, RenderPosition, RenderScale, X, Y, ChevW, ChevH, ChevSlant, PulsedFill);
 			}
 			else if (i == FullCount && ActiveFrac > 0.f)
 			{
 				// Partial: blend toward fill via alpha (chevron clipping is hard).
 				FLinearColor PartialColor = FMath::Lerp(EmptyOutline, PulsedFill, ActiveFrac);
-				DrawChevron(Canvas, RenderPosition, RenderScale, X, Y, ChevW, ChevH, ChevSlant, PartialColor);
+				AppendChevron(Tris, RenderPosition, RenderScale, X, Y, ChevW, ChevH, ChevSlant, PartialColor);
 			}
 			else
 			{
-				DrawChevron(Canvas, RenderPosition, RenderScale, X, Y, ChevW, ChevH, ChevSlant, EmptyOutline);
+				AppendChevron(Tris, RenderPosition, RenderScale, X, Y, ChevW, ChevH, ChevSlant, EmptyOutline);
 			}
 		}
 	};
 
-	DrawRow(Health, HealthSegCount, RowY[0], C.HealthAccent, C.HealthNumColor, C.HealthPulse);
+	AppendRow(Health, HealthSegCount, RowY[0], C.HealthAccent, C.HealthPulse);
 	if (bDrawArmor)
 	{
-		DrawRow(Armor, ArmorSegCount, RowY[1], C.ArmorAccent, C.ArmorNumColor, C.ArmorPulse);
+		AppendRow(Armor, ArmorSegCount, RowY[1], C.ArmorAccent, C.ArmorPulse);
 	}
+	// Preserve the original ordering (text, then chevron ink) while collapsing all
+	// chevrons into one geometry submission.
+	DrawText(FText::AsNumber(Health), NumWidth, RowY[0] + ChevH * 0.5f + NumNudgeY, NumberFont,
+		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
+		NumScale, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
+		ETextHorzPos::Right, ETextVertPos::Center);
+	if (bDrawArmor)
+	{
+		DrawText(FText::AsNumber(Armor), NumWidth, RowY[1] + ChevH * 0.5f + NumNudgeY, NumberFont,
+			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
+			NumScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
+			ETextHorzPos::Right, ETextVertPos::Center);
+	}
+	DrawTrisTranslucent(Canvas, MoveTemp(Tris));
 }
 
 // =============================================================================

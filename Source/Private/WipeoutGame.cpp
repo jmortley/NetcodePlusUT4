@@ -1,6 +1,7 @@
 #include "WipeoutGame.h"
+#include "NCHybridSpawnGenerator.h"
 #include "NCPlusVersionGate.h"
-#include "NCFireValCollector.h"
+#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -23,6 +24,8 @@
 #include "NCAccuracyStatsReplicator.h"
 #include "TeamArenaCharacter.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 #include "TimerManager.h"
 #include "GameFramework/HUD.h"
 #include "GameFramework/PlayerStart.h"
@@ -220,6 +223,14 @@ void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FSt
 	// A bot-hosted PUG passes ?PugId=N — gate team pinning to real PUGs.
 	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
 
+	// Default-on opening-round hybrid queue. Mid-round Wipeout respawns never
+	// enter this path. This Mod.ini switch is the immediate rollback lever.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("WipeoutHybridRoundSpawns"), bEnableHybridRoundSpawns, ModIni);
+	}
+
 	// Bot-assigned teams: ?PugTeams=<ut4id>:0,<ut4id>:1,...  The bot balanced the
 	// teams off the ut4stats ladder; pin each listed player to their side in
 	// ChangeTeam so the engine's warmup auto-balance can't reshuffle them. Keys are
@@ -354,8 +365,6 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	Super::HandleMatchHasStarted();
 	bWarmupMode = false;
 
-	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id; accumulate across all rounds
-
 	// Defense-in-depth reset: InitGame already clears this on map load, but a
 	// single server session can host multiple matches. Reset here so a subsequent
 	// match can flush its own ratings.
@@ -397,6 +406,8 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 
 	// Server-only: pull this player's rating from Mods.db into the cache so it's
 	// ready before the first round ends. Late joiners arriving mid-match also
@@ -415,8 +426,6 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 void AUWipeoutGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
-
-	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (server-side; guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -1220,6 +1229,18 @@ void AUWipeoutGame::StartNextRound()
 	ResetSpawnSelectionForNewRound();
 	SelectSpawnLayoutForRound();
 
+	int32 HybridTeam0Players = 0;
+	int32 HybridTeam1Players = 0;
+	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+	{
+		AController* C = It->Get();
+		AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+		if (!PS || PS->bOnlySpectator || !PS->Team) continue;
+		if (PS->Team->TeamIndex == 0) ++HybridTeam0Players;
+		else if (PS->Team->TeamIndex == 1) ++HybridTeam1Players;
+	}
+	PrepareHybridRoundSpawnQueues(HybridTeam0Players, HybridTeam1Players);
+
 	// Fallback if layout selection failed
 	if (Team0SelectedSpawns.Num() == 0 || Team1SelectedSpawns.Num() == 0)
 	{
@@ -1269,6 +1290,7 @@ void AUWipeoutGame::StartNextRound()
 		FirstTeam, SecondTeam);
 
 	bAllowPlayerRespawns = false;
+	ClearHybridRoundSpawnState();
 
 	UE_LOG(LogGameMode, Warning, TEXT("Wipeout round starting: Team0=%d, Team1=%d"), Team0StartingSize, Team1StartingSize);
 
@@ -1355,6 +1377,7 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					P.UniqueId = UTPS->UniqueId.IsValid()
 						? UTPS->UniqueId.ToString()
 						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					P.PlayerName = UTPS->PlayerName;
 					P.Kills    = UTPS->RoundKills;
 					// Wipeout has mid-round respawns, so a single bOutOfLives flag
 					// at round-end can under-count actual deaths. PlayerDeathCounts
@@ -1378,6 +1401,7 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				const int32 LoserIdx = (WinnerTeamIndex == 0) ? 1 : 0;
 				RoundResult.WinnerTeam = BuildPerf(WinnerTeamIndex);
 				RoundResult.LoserTeam  = BuildPerf(LoserIdx);
+				RoundResult.WinnerTeamIndex = WinnerTeamIndex;
 			}
 
 			RatingSystem->ProcessRound(RoundResult);
@@ -1574,9 +1598,35 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 	if (bShouldAllowSpawn)
 	{
 		AActor* ChosenStart = nullptr;
+		const int32 TeamIndex = (PS && PS->Team) ? PS->Team->TeamIndex : INDEX_NONE;
+		FTransform HybridTransform;
+		bool bUsedHybridTransform = false;
+
+		if (bHybridRoundSpawnWindow && (TeamIndex == 0 || TeamIndex == 1))
+		{
+			bUsedHybridTransform = TryConsumeHybridSpawnTransform(TeamIndex, HybridTransform);
+			if (bUsedHybridTransform)
+			{
+				const TArray<APlayerStart*>& PreferredStarts =
+					(TeamIndex == 0) ? Team0SelectedSpawns : Team1SelectedSpawns;
+				ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+					PreferredStarts, HybridTransform.GetLocation());
+				if (!ChosenStart)
+				{
+					ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+						AllSpawnPointsList, HybridTransform.GetLocation());
+				}
+			}
+			else
+			{
+				UE_LOG(LogGameMode, Warning,
+					TEXT("Wipeout hybrid opening queue exhausted for %s (team %d); using PlayerStart fallback"),
+					PS ? *PS->PlayerName : TEXT("Unknown"), TeamIndex);
+			}
+		}
 
 		// Determine if this is a round-start spawn or mid-round respawn
-		if (bRoundInProgress && Team0StartingSize > 0)
+		if (!ChosenStart && bRoundInProgress && Team0StartingSize > 0)
 		{
 			// Mid-round respawn — use dynamic spawn selection away from enemies
 			ChosenStart = ChooseMidRoundSpawn(NewPlayer);
@@ -1588,16 +1638,42 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 			ChosenStart = ChoosePlayerStart_Implementation(NewPlayer);
 		}
 
+		if (!ChosenStart)
+		{
+			bUsedHybridTransform = false;
+		}
+		bHasPendingHybridSpawnTransform = bUsedHybridTransform && (ChosenStart != nullptr);
+		if (bHasPendingHybridSpawnTransform)
+		{
+			PendingHybridSpawnTransform = HybridTransform;
+		}
+		// The watchdog anchor must be an independently safe authored start. Using
+		// the hybrid transform here made a transform on an under-map surface its
+		// own recovery destination, so the watchdog could never rescue it.
+		const FVector IntendedSpawnLocation = ChosenStart
+			? ChosenStart->GetActorLocation()
+			: FVector::ZeroVector;
+
 		OverriddenPlayerStart = ChosenStart;
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
+		bHasPendingHybridSpawnTransform = false;
+
+		if (bUsedHybridTransform && NewPlayer->GetPawn())
+		{
+			FRotator SpawnRotation = HybridTransform.Rotator();
+			SpawnRotation.Pitch = 0.f;
+			SpawnRotation.Roll = 0.f;
+			NewPlayer->SetControlRotation(SpawnRotation);
+			NewPlayer->ClientSetRotation(SpawnRotation, true);
+		}
 
 		// Bad-spawn remediation: the start is fine, but engine collision handling
 		// can eject the fresh pawn off/under the map. Watch it briefly and snap
 		// it back to the intended start if that happens.
-		if (NewPlayer->GetPawn() && ChosenStart)
+		if (NewPlayer->GetPawn() && (bUsedHybridTransform || ChosenStart))
 		{
-			ArmSpawnRemediation(NewPlayer->GetPawn(), ChosenStart->GetActorLocation());
+			ArmSpawnRemediation(NewPlayer->GetPawn(), IntendedSpawnLocation);
 		}
 
 		// Ping-compensated spawn: hide pawn until client confirms control.
@@ -2073,22 +2149,84 @@ AActor* AUWipeoutGame::FindPlayerStart_Implementation(AController* Player, const
 
 
 // ============================================================================
-// SPAWN PAWN (AlwaysSpawn to prevent collisions on stack spawns)
+// SPAWN PAWN — tiered: adjust-or-fail → shoulder offsets → AlwaysSpawn fallback
 // ============================================================================
 
 APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot)
 {
-	FRotator StartRotation(ForceInit);
-	StartRotation.Yaw = StartSpot->GetActorRotation().Yaw;
-	FVector StartLocation = StartSpot->GetActorLocation();
+	if (!StartSpot && !bHasPendingHybridSpawnTransform)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout::SpawnDefaultPawnFor: no PlayerStart or hybrid transform"));
+		return nullptr;
+	}
 
+	const bool bUsingHybridTransform = bHasPendingHybridSpawnTransform;
+	FRotator StartRotation(ForceInit);
+	StartRotation.Yaw = bUsingHybridTransform
+		? PendingHybridSpawnTransform.Rotator().Yaw
+		: StartSpot->GetActorRotation().Yaw;
+	FVector StartLocation = bUsingHybridTransform
+		? PendingHybridSpawnTransform.GetLocation()
+		: StartSpot->GetActorLocation();
+
+	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
+	if (!PawnClass)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout::SpawnDefaultPawnFor: No PawnClass for %s"), *GetNameSafe(NewPlayer));
+		return nullptr;
+	}
+
+	// Tiered spawn, mirroring ElimPlus and the engine adjust-first default the
+	// original Absolute mode relied on. The old single raw AlwaysSpawn at the
+	// transform was why residual bad hybrid candidates were EXPOSED verbatim in
+	// Wipeout — pawns planted inside geometry their own capsule collides with —
+	// while ElimPlus's pattern masked the same class. Every path still ends in an
+	// AlwaysSpawn, so round-start stack spawns can never fail outright.
+	// --- ATTEMPT 1: adjust-or-fail at the exact transform ---
 	FActorSpawnParameters SpawnInfo;
 	SpawnInfo.Instigator = Instigator;
 	SpawnInfo.ObjectFlags |= RF_Transient;
-	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
+	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 	APawn* ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation), SpawnInfo);
+
+	// --- ATTEMPT 2: cardinal shoulder-width offsets (just outside a 40uu capsule) ---
+	if (!ResultPawn)
+	{
+		const FVector Offsets[] = {
+			FVector(45.f,   0.f, 0.f),
+			FVector(-45.f,  0.f, 0.f),
+			FVector(0.f,   45.f, 0.f),
+			FVector(0.f,  -45.f, 0.f),
+		};
+		for (const FVector& Offset : Offsets)
+		{
+			ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation + Offset), SpawnInfo);
+			if (ResultPawn)
+			{
+				UE_LOG(LogGameMode, Log, TEXT("Wipeout::SpawnDefaultPawnFor: Used offset spawn at %s"), *GetNameSafe(StartSpot));
+				break;
+			}
+		}
+	}
+
+	// --- ATTEMPT 3: force spawn. A hybrid transform that failed every
+	// collision-aware attempt must not be its own recovery destination — force
+	// at the AUTHORED start instead; micro-jitter prevents two force-spawned
+	// pawns sharing an exact origin (physics explosion). ---
+	if (!ResultPawn)
+	{
+		if (bUsingHybridTransform && StartSpot)
+		{
+			StartLocation = StartSpot->GetActorLocation();
+			StartRotation.Yaw = StartSpot->GetActorRotation().Yaw;
+			UE_LOG(LogGameMode, Warning,
+				TEXT("Wipeout::SpawnDefaultPawnFor: Hybrid transform blocked; falling back to authored PlayerStart %s"),
+				*GetNameSafe(StartSpot));
+		}
+		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		const FVector JitteredLocation = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 0.f);
+		ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, JitteredLocation), SpawnInfo);
+	}
 
 	if (!ResultPawn)
 	{
@@ -2437,6 +2575,27 @@ void AUWipeoutGame::ResetPlayersForNewRound()
 			C->UnPossess();
 			Pawn->Destroy();
 		}
+	}
+
+	// The controller pass cannot see a live pawn that was unpossessed earlier in
+	// the round. Such an orphan survives CleanupWorldForNewRound() (which only
+	// removes dead characters), and stock true-spectator TacCom outlines every
+	// AUTCharacter it finds, exposing the orphan as a frozen X-ray ghost. This
+	// reset runs before the next round's pawns are spawned, so every character
+	// still present here is stale.
+	TArray<AUTCharacter*> LeftoverCharacters;
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+	{
+		AUTCharacter* UTC = Cast<AUTCharacter>(It->Get());
+		if (UTC && !UTC->IsPendingKill())
+		{
+			LeftoverCharacters.Add(UTC);
+		}
+	}
+
+	for (AUTCharacter* UTC : LeftoverCharacters)
+	{
+		UTC->Destroy();
 	}
 }
 
@@ -3105,9 +3264,95 @@ void AUWipeoutGame::SelectSpawnLayoutForRound()
 	}
 }
 
+void AUWipeoutGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount)
+{
+	ClearHybridRoundSpawnState();
+	if (Team0PlayerCount <= 0 && Team1PlayerCount <= 0)
+	{
+		return;
+	}
+	if (!bEnableHybridRoundSpawns)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[HybridSpawn] Wipeout disabled by config; using PlayerStart-only opening spawns (players %d/%d)"),
+			Team0PlayerCount, Team1PlayerCount);
+		return;
+	}
+
+	FNCHybridSpawnSettings Settings;
+	Settings.MinimumCrossTeamDistance = MinimumEnemySpawnDistance;
+
+	FNCHybridSpawnResult Result;
+	if (!FNCHybridSpawnGenerator::Generate(
+		GetWorld(), AllSpawnPointsList, Team0SelectedSpawns, Team1SelectedSpawns,
+		Team0PlayerCount, Team1PlayerCount, Settings, Result))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("Wipeout hybrid opening spawn generation had no safe anchor pair; using PlayerStart fallback"));
+		return;
+	}
+	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
+	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
+	bHybridRoundSpawnWindow = Team0HybridSpawnQueue.Num() > 0 || Team1HybridSpawnQueue.Num() > 0;
+
+	UE_LOG(LogGameMode, Warning,
+		TEXT("[HybridSpawn] Wipeout active: anchors %s/%s, separation %.0f, radius %.0f, players %d/%d, queues %d/%d"),
+		*Result.Team0AnchorName.ToString(), *Result.Team1AnchorName.ToString(),
+		Result.AnchorDistance2D, Result.TeamRadius, Team0PlayerCount, Team1PlayerCount,
+		Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+
+	if (!Result.bTeam0Complete || !Result.bTeam1Complete)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("Wipeout hybrid opening queues are partial (needed %d/%d, built %d/%d); missing players use the existing fallback"),
+			Team0PlayerCount, Team1PlayerCount,
+			Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+	}
+
+	UE_LOG(LogGameMode, Verbose,
+		TEXT("Wipeout hybrid rejects T0[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
+		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedPath,
+		Result.Team0Stats.RejectedFloor,
+		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedDrop,
+		Result.Team0Stats.RejectedClearance,
+		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
+		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
+		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedPath,
+		Result.Team1Stats.RejectedFloor,
+		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedDrop,
+		Result.Team1Stats.RejectedClearance,
+		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,
+		Result.Team1Stats.RejectedPit, Result.Team1Stats.RejectedPainVolume);
+}
+
+bool AUWipeoutGame::TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform)
+{
+	TArray<FTransform>* Queue = nullptr;
+	if (TeamIndex == 0) Queue = &Team0HybridSpawnQueue;
+	else if (TeamIndex == 1) Queue = &Team1HybridSpawnQueue;
+
+	if (!Queue || Queue->Num() == 0)
+	{
+		return false;
+	}
+
+	OutTransform = (*Queue)[0];
+	Queue->RemoveAt(0, 1, false);
+	return true;
+}
+
+void AUWipeoutGame::ClearHybridRoundSpawnState()
+{
+	bHybridRoundSpawnWindow = false;
+	bHasPendingHybridSpawnTransform = false;
+	Team0HybridSpawnQueue.Empty();
+	Team1HybridSpawnQueue.Empty();
+}
+
 
 void AUWipeoutGame::ResetSpawnSelectionForNewRound()
 {
+	ClearHybridRoundSpawnState();
 	Team0SelectedSpawns.Empty();
 	Team1SelectedSpawns.Empty();
 	++CurrentRoundNumber;

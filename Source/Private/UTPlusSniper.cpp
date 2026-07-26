@@ -158,7 +158,12 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		}
 	}
 	*/
-	if (UTOwner && Cast<AUTCharacter>(Hit.Actor.Get()) == NULL)
+	// bLastUnclaimedRenderDemoted: the base HitScanTrace demoted this ray's
+	// unclaimed pawn hit at the render-time check (ncp.UnclaimedRenderGate).
+	// The secondary head search must not resurrect it — the same ray would be
+	// re-tested against the head sphere at the PRIMARY rewind time, undoing
+	// the demotion (Codex audit blocker, 2026-07-26).
+	if (UTOwner && Cast<AUTCharacter>(Hit.Actor.Get()) == NULL && !bLastUnclaimedRenderDemoted)
 	{
 		// Find potential head targets using Epic's ChooseBestAimTarget
 		AUTCharacter* AltTarget = Cast<AUTCharacter>(UUTGameplayStatics::ChooseBestAimTarget(

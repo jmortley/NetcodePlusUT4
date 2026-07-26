@@ -133,6 +133,15 @@ public:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
     bool bAllowGrenades;
 
+    /** Hard-disable fire mode 1 (rocket loading) for single-rocket-only loadouts
+     *  (Clutch defenders). Gated in BeginFiringSequence — the one funnel both the
+     *  local StartFire path and ServerStartFireFixed pass through — so the server
+     *  rejects modified clients too. Non-replicated config: no schema change, no
+     *  new RPC. Also suppresses the lock-on timer (only loaded rockets can seek,
+     *  so an acquired lock would be unconsumable) and the AI's alt-fire pick. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher")
+    bool bDisableAltLoading;
+
     // === SPREAD SETTINGS ===
 
     /** Spread amount for loaded rockets (non-seeking) */
@@ -186,6 +195,12 @@ public:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
     float LockOffset;
 
+    /** How long the lock reticle keeps drawing on the last target after the lock clears
+     *  (e.g. when the load is released). Display-only linger — does NOT keep the lock state
+     *  alive, so seekers won't acquire during it. 0 = clear instantly (old behaviour). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Rocket Launcher|Lock")
+    float LockDisplayLingerTime;
+
     UPROPERTY(BlueprintReadOnly, Category = "Rocket Launcher|Lock")
     bool bLockedOnTarget;
 
@@ -194,6 +209,12 @@ public:
 
     UPROPERTY()
     float LastLockedOnTime;
+
+    /** Client draw-linger state: the target the lock was last on, and when it cleared.
+     *  Consumed only by DrawWeaponCrosshair for the reticle linger. */
+    TWeakObjectPtr<AActor> LingerLockedTarget;
+    UPROPERTY()
+    float LockClearedTime;
 
     UPROPERTY()
     float PendingLockedTargetTime;
@@ -280,6 +301,8 @@ public:
     void ClientAbortLoad();
 
     // Firing
+    virtual bool BeginFiringSequence(uint8 FireModeNum, bool bClientFired) override;
+    virtual bool AllowServerFireMode(uint8 FireModeNum) const override;
     virtual void FireShot() override;
     virtual AUTProjectile* FireProjectile() override;
     virtual AUTProjectile* FireRocketProjectile();

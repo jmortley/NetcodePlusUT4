@@ -8,11 +8,11 @@
 #include "UTWeapon.h"
 #include "UTWeaponFix.h"
 #include "UTWeaponSkin.h"
+#include "TeamArenaCharacter.h"
 #include "UTProfileSettings.h"
 #include "UTGameplayStatics.h"
 #include "UTGameMode.h"
 #include "UTGameState.h"
-#include "AssetRegistryModule.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Colors/SColorBlock.h"
 #include "Widgets/Input/SNumericEntryBox.h"  // SNumericEntryBox<float> (was leaking transitively via the unity build)
@@ -22,12 +22,8 @@
 
 #define LOCTEXT_NAMESPACE "WeaponSkins"
 
-/** Static cache — skins only loaded once per session.
- *  Skin pointers are AddToRoot'd to prevent GC while cached. */
-static bool bSkinsCached = false;
-static TMap<FName, TArray<UUTWeaponSkin*>> CachedSkinsByTag;
+/** Main-menu fallback populated from the last in-game inventory. */
 static TArray<FNetcodePlusWeaponInfo> CachedWeapons;
-static TArray<UUTWeaponSkin*> CachedSkinGCRefs; // Prevents GC of cached skin assets
 
 void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 {
@@ -129,10 +125,34 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 							]
 						]
 
-						// Hidden-weapon beam origin — two numeric spinners that drive
-						// AUTWeaponFix::HiddenBeamBackOffset / HiddenBeamDownOffset.
-						// Only matters when a weapon is set Hidden; controls where
-						// the tracer/beam spawns relative to the camera.
+						// Hidden-weapon style toggle — unchecked (default) = BP-parity
+						// visibility-only hide, beam from the live muzzle socket;
+						// checked = classic camera-relative beam (pre-2026-07-19),
+						// which is what the Back/Down spinners below feed.
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0, 0, 0, 8)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+							[
+								SNew(SCheckBox)
+								.IsChecked(this, &SUTWeaponSkinSelector::GetClassicHideState)
+								.OnCheckStateChanged(this, &SUTWeaponSkinSelector::OnClassicHideChanged)
+								.ToolTipText(LOCTEXT("ClassicHideTooltip", "Hidden weapons: fire the beam from the camera (classic style) instead of the gun's muzzle. Uses the Back/Down offsets below."))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("ClassicHideLabel", "Classic hidden-weapon beam (from camera)"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
+								.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
+							]
+						]
+
+						// Camera-beam origin offsets — read by AUTWeaponFix::
+						// GetImpactSpawnPosition ONLY in the classic style above;
+						// inert (but still persisted) in the default BP-parity hide.
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 0, 0, 8)
@@ -469,40 +489,25 @@ void SUTWeaponSkinSelector::GatherWeapons()
 
 void SUTWeaponSkinSelector::GatherSkins()
 {
-	if (bSkinsCached)
+	SkinsByTag.Empty();
+
+	// Lifecycle preload owns all asset loading. Opening F5 only groups pointers
+	// already resident in the shared catalog, so the menu cannot reintroduce a
+	// synchronous first-open hitch.
+	TArray<UUTWeaponSkin*> CatalogSkins;
+	AUTWeaponFix::GetPreloadedWeaponSkins(CatalogSkins);
+	if (CatalogSkins.Num() == 0)
 	{
-		SkinsByTag = CachedSkinsByTag;
-		// Update bHasSkins on weapons
 		for (auto& W : Weapons)
 		{
-			W.bHasSkins = SkinsByTag.Contains(W.Tag) && SkinsByTag[W.Tag].Num() > 0;
+			W.bHasSkins = false;
 		}
 		return;
 	}
 
-	SkinsByTag.Empty();
-
-	FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	IAssetRegistry& AR = ARM.Get();
-
-	TArray<FAssetData> AssetList;
-	AR.GetAssetsByClass(UUTWeaponSkin::StaticClass()->GetFName(), AssetList, true);
-
-	// Build a map of weapon class → tag from our weapon list
-	// Also build set of valid weapon classes for skin matching
-	TMap<FString, FName> WeaponClassToTag; // WeaponType class path → tag
-	for (const auto& W : Weapons)
-	{
-		if (W.WeaponClass)
-		{
-			WeaponClassToTag.Add(W.WeaponClass->GetPathName(), W.Tag);
-		}
-	}
-
 	TSet<FString> SeenSkinPaths; // Deduplicate
-	for (const FAssetData& Asset : AssetList)
+	for (UUTWeaponSkin* Skin : CatalogSkins)
 	{
-		UUTWeaponSkin* Skin = Cast<UUTWeaponSkin>(Asset.GetAsset());
 		if (!Skin) continue;
 		if (Skin->WeaponSkinCustomizationTag == NAME_None) continue;
 
@@ -519,18 +524,9 @@ void SUTWeaponSkinSelector::GatherSkins()
 		for (const auto& W : Weapons)
 		{
 			if (!W.WeaponClass) continue;
+			if (Skin->WeaponSkinCustomizationTag != W.Tag) continue;
 
-			// Direct class path match
-			if (SkinWeaponType.Contains(W.WeaponClass->GetName()))
-			{
-				bMatchesInventory = true;
-				MatchedTag = W.Tag;
-				break;
-			}
-
-			// Check if our weapon is a child of the skin's target class
-			UClass* SkinTargetClass = Skin->WeaponType.TryLoadClass<AUTWeapon>();
-			if (SkinTargetClass && W.WeaponClass->IsChildOf(SkinTargetClass))
+			if (AUTWeaponFix::IsWeaponSkinCompatible(Skin, W.WeaponClass))
 			{
 				bMatchesInventory = true;
 				MatchedTag = W.Tag;
@@ -566,44 +562,18 @@ void SUTWeaponSkinSelector::GatherSkins()
 		});
 	}
 
-	// Cache and prevent GC on skin assets
-	CachedSkinsByTag = SkinsByTag;
-	CachedWeapons = Weapons;
-	// Clean up any previous root refs before adding new ones
-	for (UUTWeaponSkin* OldSkin : CachedSkinGCRefs)
-	{
-		if (OldSkin && OldSkin->IsRooted())
-		{
-			OldSkin->RemoveFromRoot();
-		}
-	}
-	CachedSkinGCRefs.Empty();
-	for (auto& Pair : SkinsByTag)
-	{
-		for (UUTWeaponSkin* Skin : Pair.Value)
-		{
-			if (Skin)
-			{
-				Skin->AddToRoot();
-				CachedSkinGCRefs.Add(Skin);
-			}
-		}
-	}
-	bSkinsCached = true;
 }
 
 void SUTWeaponSkinSelector::LoadSettings()
 {
-	// Ensure weapon settings are loaded
-	AUTWeaponFix::LoadWeaponSettings();
-
 	// Copy hide state from the static map (keyed by class name)
 	HideState = AUTWeaponFix::HiddenWeaponsByTag;
 
-	// Pick up hidden-weapon beam offsets from the now-populated statics so the
-	// spinners reflect whatever Mod.ini already had on disk.
+	// Pick up hidden-weapon beam offsets + style from the now-populated statics so
+	// the spinners/checkbox reflect whatever Mod.ini already had on disk.
 	HiddenBeamBack = AUTWeaponFix::HiddenBeamBackOffset;
 	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
+	bClassicWeaponHide = AUTWeaponFix::bClassicWeaponHide;
 
 	// Beam colors from Mod.ini [WeaponSkinsPlus]. Format = FLinearColor::ToString
 	// output "(R=...,G=...,B=...,A=...)" so the BP parser (Convert String to
@@ -675,11 +645,13 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	// Hidden-weapon beam offsets — push to AUTWeaponFix statics so the next
-	// fire reads the new values (GetImpactSpawnPosition reads the statics
-	// directly), and persist to Mod.ini so they survive a restart. Clamp here
-	// too — the spinner Min/Max already enforces, but a manual edit could
-	// poke in something weird.
+	// Hidden-weapon style + camera-beam offsets — pushed to the AUTWeaponFix
+	// statics so the next fire reads them (GetImpactSpawnPosition reads the
+	// statics directly in classic style), and persisted to Mod.ini so they
+	// survive a restart. Clamp here too — the spinner Min/Max already enforces,
+	// but a manual edit could poke in something weird.
+	AUTWeaponFix::bClassicWeaponHide = bClassicWeaponHide;
+	GConfig->SetBool(TEXT("NetcodePlus.WeaponSettings"), TEXT("ClassicWeaponHide"), bClassicWeaponHide, ModIniPath);
 	AUTWeaponFix::HiddenBeamBackOffset = FMath::Clamp(HiddenBeamBack, 0.f, 100.f);
 	AUTWeaponFix::HiddenBeamDownOffset = FMath::Clamp(HiddenBeamDown, 0.f, 100.f);
 	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamBack"),
@@ -730,7 +702,6 @@ void SUTWeaponSkinSelector::SaveAndApply()
 					AUTWeaponFix::SavedSkinPaths.Add(W.Tag, SkinPath);
 					if (SelectedSkin)
 					{
-						SelectedSkin->AddToRoot();
 						AUTWeaponFix::CachedSkinAssets.Add(W.Tag, SelectedSkin);
 					}
 				}
@@ -742,6 +713,33 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), *CurrentHitscanChoice, ModIniPath);
 
 	GConfig->Flush(false, ModIniPath);
+
+	// Re-apply to the CURRENT weapon so hide/style changes take effect now — the
+	// BringUp/swap-detector paths only fire on a weapon CHANGE, so without this a
+	// style flip while a hidden weapon is equipped strands the old style's state
+	// until the next switch.
+	AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
+	if (UTChar && UTChar->GetWeapon())
+	{
+		AUTWeapon* CurWeap = UTChar->GetWeapon();
+		bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(FName(*CurWeap->GetClass()->GetName()));
+		AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, bHidden && *bHidden);
+		if (ATeamArenaCharacter* TeamChar = Cast<ATeamArenaCharacter>(UTChar))
+		{
+			if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(CurWeap))
+			{
+				TeamChar->SubmitConfiguredWeaponSkin(FixWeapon, true);
+			}
+			else
+			{
+				UTChar->UpdateWeaponSkinPrefFromProfile(CurWeap);
+			}
+		}
+		else
+		{
+			UTChar->UpdateWeaponSkinPrefFromProfile(CurWeap);
+		}
+	}
 
 	// Send hitscan choice to server via console command — defers through the command pipeline
 	// instead of calling ServerMutate directly (which executes inline on listen servers).
@@ -1041,17 +1039,7 @@ FReply SUTWeaponSkinSelector::OnKeyDown(const FGeometry& MyGeometry, const FKeyE
 /** Static cleanup — call when module shuts down or cache should be invalidated */
 void SUTWeaponSkinSelector_CleanupCache()
 {
-	for (UUTWeaponSkin* Skin : CachedSkinGCRefs)
-	{
-		if (Skin && Skin->IsRooted())
-		{
-			Skin->RemoveFromRoot();
-		}
-	}
-	CachedSkinGCRefs.Empty();
-	CachedSkinsByTag.Empty();
 	CachedWeapons.Empty();
-	bSkinsCached = false;
 }
 
 SUTWeaponSkinSelector::~SUTWeaponSkinSelector()

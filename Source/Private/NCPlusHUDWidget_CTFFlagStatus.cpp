@@ -65,8 +65,9 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagWorld(AUTCTFGameState* GameState,
 {
 	if (!Flag) return;
 
-	static const FName CarrierAlias(TEXT("ctf_carrier_indicator"));
-	const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(CarrierAlias);
+	// Keep the legacy alias key so existing saved layouts continue to apply.
+	static const FName WorldIndicatorsAlias(TEXT("ctf_carrier_indicator"));
+	const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(WorldIndicatorsAlias);
 	if (Elem && Elem->bHidden) return;
 
 	const float LayoutScale   = Elem ? FMath::Max(Elem->Scale, 0.01f) : 1.f;
@@ -258,6 +259,26 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagWorld(AUTCTFGameState* GameState,
 	CircleBorderTemplate.RenderOpacity = 1.f;
 
 	bScaleByDesignedResolution = true;
+}
+
+// =============================================================================
+// DrawFlagBaseWorld - missing-flag/base exclamation indicator.
+//
+// The screenshot's carrier and base icons are separate engine draw paths. Route
+// both through one nchud Hide toggle while leaving the parent's base rendering
+// untouched when visible. Scale/offset/opacity remain carrier-only because
+// supporting them here would require duplicating the full engine renderer.
+// =============================================================================
+void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagBaseWorld(AUTCTFGameState* GameState,
+	FVector PlayerViewPoint, FRotator PlayerViewRotation, uint8 TeamNum,
+	AUTCTFFlagBase* FlagBase, AUTFlag* Flag, AUTPlayerState* FlagHolder)
+{
+	static const FName WorldIndicatorsAlias(TEXT("ctf_carrier_indicator"));
+	const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(WorldIndicatorsAlias);
+	if (Elem && Elem->bHidden) return;
+
+	Super::DrawFlagBaseWorld(GameState, PlayerViewPoint, PlayerViewRotation,
+		TeamNum, FlagBase, Flag, FlagHolder);
 }
 
 // =============================================================================

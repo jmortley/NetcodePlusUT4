@@ -31,6 +31,9 @@ class UWorld;
 struct FWipeoutPlayerRoundPerf
 {
 	FString UniqueId;
+	/** Display name at round time. Only consumed by the upload's leaver naming
+	 *  (the PlayerState is gone by match end); safe to leave empty. */
+	FString PlayerName;
 	int32 Kills = 0;
 	int32 Deaths = 0;
 	float Damage = 0.f;
@@ -49,6 +52,10 @@ struct FWipeoutRoundResult
 	TArray<FWipeoutPlayerRoundPerf> WinnerTeam;
 	TArray<FWipeoutPlayerRoundPerf> LoserTeam;
 	bool bIsDraw = false;
+	/** Team index (0/1) of WinnerTeam's side; ignored when bIsDraw (the call site
+	 *  fills WinnerTeam with team 0 on a draw). Consumed by the upload's per-round
+	 *  box-score log — the rating math itself doesn't need it. */
+	int32 WinnerTeamIndex = -1;
 };
 
 /** Per-player audit info supplied by the gamemode at match end. UniqueId must

@@ -26,6 +26,7 @@
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
 #include "Engine/Canvas.h"            // DrawHeadDebug: Canvas->Project / K2_DrawLine
+#include "UObject/UObjectIterator.h" // reap registered outline duplicates whose owning lineup actor is gone
 
 namespace
 {
@@ -153,8 +154,10 @@ namespace
 		GConfig->GetFloat (*Sec, TEXT("S"),     Out.S,           Path);
 		GConfig->GetFloat (*Sec, TEXT("V"),     Out.V,           Path);
 		GConfig->GetFloat (*Sec, TEXT("Brightness"), Out.Brightness, Path);
+		GConfig->GetFloat (*Sec, TEXT("ArmourGlow"), Out.ArmourGlow, Path);   // absent key -> struct default 1.f (= current full-bright behaviour)
 		int32 Comp = 0; GConfig->GetInt(*Sec, TEXT("Complimentary"), Comp, Path); Out.bComplimentary = (Comp != 0);
 		int32 AM   = 0; GConfig->GetInt(*Sec, TEXT("ArmourMode"),    AM,   Path); Out.ArmourMode = (ENCPlusArmourMode)AM;
+		int32 Tint = 0; GConfig->GetInt(*Sec, TEXT("Tint"),          Tint, Path); Out.bTint = (Tint != 0);   // absent key -> false: colour stays model-gated as before
 	}
 
 	void WriteSide(const TCHAR* Suffix, const FNCPlusModelSettings& S)
@@ -166,8 +169,10 @@ namespace
 		GConfig->SetFloat (*Sec, TEXT("S"),             S.S,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("V"),             S.V,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("Brightness"),    S.Brightness,              Path);
+		GConfig->SetFloat (*Sec, TEXT("ArmourGlow"),    S.ArmourGlow,              Path);
 		GConfig->SetInt   (*Sec, TEXT("Complimentary"), S.bComplimentary ? 1 : 0,  Path);
 		GConfig->SetInt   (*Sec, TEXT("ArmourMode"),    (int32)S.ArmourMode,       Path);
+		GConfig->SetInt   (*Sec, TEXT("Tint"),          S.bTint ? 1 : 0,           Path);
 	}
 }
 
@@ -668,6 +673,32 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// OnlyTickPoseWhenRendered. Nothing replicates; no-op on a dedicated server.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
 
+	// Intro-lineup pawns are destroyed alive. Stock character/weapon-attachment teardown does not
+	// explicitly unregister their dynamically duplicated CustomDepth meshes, so an already leaked
+	// silhouette can remain in the scene after its actor disappears. Sweep only the exact UT outline
+	// signature, only when its owner is gone, and only on the existing 4 Hz slow tick.
+	if (bSlowTick)
+	{
+		for (TObjectIterator<USkeletalMeshComponent> It; It; ++It)
+		{
+			USkeletalMeshComponent* const DepthMesh = *It;
+			if (DepthMesh->HasAnyFlags(RF_ClassDefaultObject)
+				|| DepthMesh->GetWorld() != World
+				|| !DepthMesh->IsRegistered()
+				|| !DepthMesh->bRenderCustomDepth
+				|| DepthMesh->bRenderInMainPass)
+			{
+				continue;
+			}
+
+			AActor* const Owner = DepthMesh->GetOwner();
+			if (Owner == nullptr || Owner->IsPendingKill() || Owner->IsActorBeingDestroyed())
+			{
+				DepthMesh->UnregisterComponent();
+			}
+		}
+	}
+
 	// Refresh the per-frame gate cache BEFORE any early-out so the tint call sites always read a
 	// current verdict (TacCom/intermission freeze the outline STATE, not the mode decision).
 	// A verdict FLIP (menu save, style/colour change, viewer team switch under Team/Enemy styles)
@@ -837,7 +868,10 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 		Out.V = 1.f;
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
-		if (Out.ContentPath.IsEmpty())
+		// UNLESS the side opted into tint-only ("Tint skin"): that checkbox promises real models tinted
+		// red/blue, and the Red/Blue rows have no model picker — with the silent borrow, the checkbox
+		// was a no-op for anyone who had a Team/Enemy model configured.
+		if (Out.ContentPath.IsEmpty() && !Out.bTint)
 		{
 			Out.ContentPath = !C.Team.ContentPath.IsEmpty() ? C.Team.ContentPath : C.Enemy.ContentPath;
 		}
@@ -865,6 +899,27 @@ FLinearColor NCPlusForceModels::GetArmourColour(const FNCPlusModelSettings& Side
 		return FLinearColor(H, Side.S, Side.V, 1.f).HSVToLinearRGB();
 	}
 	return GetSkinColour(Side);   // MatchSkin
+}
+
+float NCPlusForceModels::GetArmourEmissiveScale(const FNCPlusModelSettings& Side)
+{
+	float Scale = FMath::Clamp(Side.ArmourGlow, 0.f, 1.f);
+	// Simple forward shading auto-dim. Only counts when the shaders were compiled with support
+	// (mirrors IsSimpleForwardShadingEnabled, RenderUtils.cpp:819 — without r.SupportSimpleForwardShading
+	// the runtime cvar is ignored with a warning and the deferred path keeps rendering).
+	static const auto* SFSVar     = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SimpleForwardShading"));
+	static const auto* SupportVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SupportSimpleForwardShading"));
+	if (SFSVar && SupportVar
+		&& SFSVar->GetValueOnGameThread() != 0 && SupportVar->GetValueOnGameThread() != 0)
+	{
+		// Emissive renders at full HDR intensity regardless of the lighting path; SFS darkens and
+		// flattens everything around it and auto-exposure re-brightens the frame, so the belt blooms
+		// out. 0.35 lands the default (Armour Glow 1.0) near the deferred look; the slider still
+		// scales below it.
+		static const float SimpleForwardEmissiveDim = 0.35f;
+		Scale *= SimpleForwardEmissiveDim;
+	}
+	return Scale;
 }
 
 TSubclassOf<AUTCharacterContent> NCPlusForceModels::GetModelClass(const FNCPlusModelSettings& Side)
@@ -1051,7 +1106,8 @@ static void MaybeMigrateFromTeamSkins(const FString& Path)
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    (EnCosmetics != 0), Path);
 	GConfig->SetInt (TEXT("ForceModels"), TEXT("Style"),        EnStyle,            Path);
 
-	// Per-side: map colour + model, then write all 7 keys via the existing WriteSide.
+	// Per-side: map colour + model, then write all 9 keys via the existing WriteSide
+	// (migrated sides get Tint=0 — dc rendered nothing for an un-forced side either).
 	FNCPlusModelSettings Enemy, Team, Red, Blue;
 	MigrateOneSide(Entries, TEXT("Enemy"), Path, Enemy);
 	MigrateOneSide(Entries, TEXT("Team"),  Path, Team);
@@ -1136,6 +1192,7 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 	// appends more without a rebuild (e.g. a newly-cooked custom char). No bHideInUI CDO loads here.
 	static const TCHAR* const DefaultAllowed[] = {
 		TEXT("NecrisFemaleCoat"), TEXT("Genghis"), TEXT("LiandriRobot"),       // custom content
+		TEXT("GenghisNew"), TEXT("LiandriRobotNew"),                           // bright-material variants (NCStockWeapons pak)
 		TEXT("NecrisFemale"), TEXT("NecrisMale"), TEXT("NecrisMale_Damian"),   // stock families (coalesced)
 		TEXT("NecrisMale_Necroth"), TEXT("SkaarjMale"), TEXT("TC_Male"),
 	};

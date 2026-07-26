@@ -163,10 +163,12 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		Row.DisplayName   = NCPlusHUDAliases::GetDisplayName(Alias);
 		Row.AnchorChoices = NCHUDEdit::BuildAnchorChoices();
 
-		// hp_armor: style picker + font picker + color overrides.
+		// hp_armor: style picker + font picker + color overrides + instagib opt-in
+		// (the widget hides itself in instagib matches unless the user re-enables it).
 		if (Alias == TEXT("hp_armor"))
 		{
-			Row.bHasStylePicker = true;
+			Row.bHasStylePicker    = true;
+			Row.bHasInstagibToggle = true;
 			Row.bHasFontPicker  = true;
 			Row.FontChoices     = NCPlusHUDFonts::GetChoices();
 			Row.StyleChoices    = NCPlusHPArmorStyle::GetChoices();
@@ -439,6 +441,31 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
 			]
 		]
+		// Nested presentation choice for the ElimPlus stock team panel. Collapsed
+		// with the outer toggle off so the hierarchy reads as one control family.
+		+ SVerticalBox::Slot().AutoHeight().Padding(24,4,0,0)
+		[
+			SNew(SVerticalBox)
+			.Visibility(this, &SNCPlusHUDEditor::GetAbsoluteElimTeamPanelVisibility)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SCheckBox)
+				.IsChecked(this, &SNCPlusHUDEditor::GetAbsoluteElimTeamPanelState)
+				.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnAbsoluteElimTeamPanelChanged)
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Absolute Elim 113 layout")))
+					.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(22,2,0,0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Uses the original fixed red/blue plates; custom Team Color is unavailable.")))
+				.ColorAndOpacity(FLinearColor(0.62f, 0.62f, 0.62f, 1.f))
+			]
+		]
 		// Scoreboard background opacity (0.05..1.0). Global across the NCPlus scoreboards.
 		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
 		[
@@ -478,12 +505,29 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 	if (Row.bHasTeamColorToggle)
 	{
 		TeamColorSlot = SNew(SCheckBox)
+			.IsEnabled(this, &SNCPlusHUDEditor::IsTeamColorControlEnabled, Alias)
 			.IsChecked(this, &SNCPlusHUDEditor::GetTeamColorState, Alias)
 			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnTeamColorChanged, Alias)
 			.Content()
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("Team Color")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			];
+	}
+
+	// Helper for the optional show-in-instagib checkbox (hp_armor). Unchecked
+	// (default) = the HP/armor widget hides itself in instagib matches.
+	TSharedRef<SWidget> InstagibSlot = SNullWidget::NullWidget;
+	if (Row.bHasInstagibToggle)
+	{
+		InstagibSlot = SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetShowInInstagibState, Alias)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnShowInInstagibChanged, Alias)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show in Instagib")))
 				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
 			];
 	}
@@ -628,6 +672,9 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildRow(FNCHUDEditorRow& Row)
 		// "Use Team Color" checkbox - only populated for portrait/scorebar rows.
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
 		[ TeamColorSlot ]
+		// "Show in Instagib" checkbox - hp_armor row only.
+		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0,0,8,0)
+		[ InstagibSlot ]
 		// Per-row reset
 		+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
 		[
@@ -782,6 +829,19 @@ void SNCPlusHUDEditor::OnTeamColorChanged(ECheckBoxState NewState, FName Alias)
 	MutateElement(Alias, [&S](FNCPlusHUDElement& E){ E.Extras.Add(TEXT("use_team_color"), S); });
 }
 
+ECheckBoxState SNCPlusHUDEditor::GetShowInInstagibState(FName Alias) const
+{
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+	const bool bShow = E ? E->GetExtraBool(TEXT("show_in_instagib"), false) : false;
+	return bShow ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnShowInInstagibChanged(ECheckBoxState NewState, FName Alias)
+{
+	const FString S = (NewState == ECheckBoxState::Checked) ? TEXT("true") : TEXT("false");
+	MutateElement(Alias, [&S](FNCPlusHUDElement& E){ E.Extras.Add(TEXT("show_in_instagib"), S); });
+}
+
 TOptional<float> SNCPlusHUDEditor::GetOpacity(FName Alias) const
 {
 	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
@@ -929,6 +989,31 @@ void SNCPlusHUDEditor::OnStockTeamPanelChanged(ECheckBoxState NewState)
 	// no widget swap needed.
 	FNCPlusHUDLayout::SetStockTeamPanel(bStock);
 	SetStatus(bStock ? TEXT("Team display: Stock roster (applies now).") : TEXT("Team display: Portraits (applies now)."));
+}
+
+EVisibility SNCPlusHUDEditor::GetAbsoluteElimTeamPanelVisibility() const
+{
+	return FNCPlusHUDLayout::WantsStockTeamPanel() ? EVisibility::Visible : EVisibility::Collapsed;
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetAbsoluteElimTeamPanelState() const
+{
+	return FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
+		? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnAbsoluteElimTeamPanelChanged(ECheckBoxState NewState)
+{
+	const bool bAbsolute = (NewState == ECheckBoxState::Checked);
+	FNCPlusHUDLayout::SetAbsoluteElimTeamPanel(bAbsolute);
+	SetStatus(bAbsolute
+		? TEXT("Team display: Absolute Elim 113 (fixed red/blue, applies now).")
+		: TEXT("Team display: NCPlus stock roster (applies now)."));
+}
+
+bool SNCPlusHUDEditor::IsTeamColorControlEnabled(FName Alias) const
+{
+	return Alias != TEXT("team_panel") || !FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel();
 }
 
 TOptional<float> SNCPlusHUDEditor::GetScoreboardOpacityValue() const

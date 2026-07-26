@@ -158,6 +158,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnKillerAvoidRadius;
 
+	/** Hard-exclude starts with direct LOS to the enemy flag carrier inside this
+	 *  radius when a safer start remains. Falls back rather than failing to spawn.
+	 *  0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnFlagCarrierLOSAvoidRadius;
+
 	/** When your OWN flag isn't home (stolen or dropped), drop this many of your
 	 *  team's starts nearest your flag base form the avoid SET — exactly ONE of
 	 *  them is excluded per respawn, rotating through the set (nearest, then
@@ -429,6 +435,10 @@ protected:
 	/** Per-player last ACTUAL spawn (pawn) world location, for a truthful in-match
 	 *  rotation/dist log that doesn't depend on the (sometimes stale) StartSpot. */
 	TMap<TWeakObjectPtr<AController>, FVector> PlayerLastSpawnLoc;
+
+	/** Emit one detailed Warning-level line for every live CTF/iCTF spawn.
+	 *  Default-off; Mod.ini [UTPUGS_SPAWN] LogSpawnChoices=true enables it. */
+	bool bLogSpawnChoices = false;
 
 	/** Penalty multiplier for using the same spawn as 2 spawns ago (0.5 = half score). IG+ default. */
 	float SpawnRecentPenaltyMultiplier = 0.5f;

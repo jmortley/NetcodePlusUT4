@@ -124,9 +124,9 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				[
-					// Opens the BP hitsounds menu (the C++ hitsounds port isn't ready yet):
-					// close this menu + run "mutate hitsounds" (routes to the BP mutator's Mutate handler).
-					MakeLaunchButton(TEXT("Hitsounds"), TEXT("mutate hitsounds"))
+					// Native tab now — was a launch button into the BP mutator's UMG menu
+					// before the C++ hitsounds port landed.
+					MakeTabButton(TEXT("Hitsounds"), ENCPMenuTab::Hitsounds)
 				]
 			]
 
@@ -211,12 +211,17 @@ FReply SUTNCPlusMenu::OnLaunchClicked(FString Command)
 
 FReply SUTNCPlusMenu::OnTabClicked(ENCPMenuTab Tab)
 {
+	SwitchTab(Tab);
+	return FReply::Handled();
+}
+
+void SUTNCPlusMenu::SwitchTab(ENCPMenuTab Tab)
+{
 	ActiveTab = Tab;
 	if (ContentArea.IsValid())
 	{
 		ContentArea->SetContent(BuildTabContent(Tab));
 	}
-	return FReply::Handled();
 }
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
@@ -225,6 +230,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
 	{
 		case ENCPMenuTab::ForceModels: return BuildForceModelsTab();
 		case ENCPMenuTab::General:     return BuildGeneralTab();
+		case ENCPMenuTab::Hitsounds:   return BuildHitsoundsTab();
 		case ENCPMenuTab::About:
 		default:                       return BuildAboutTab();
 	}
@@ -412,6 +418,47 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 				.OnValueCommitted(this, &SUTNCPlusMenu::OnRagdollTimeChanged)
 				.MinDesiredWidth(80.f)
 				.ToolTipText(FText::FromString(TEXT("Seconds a ragdoll stays before despawning. 0 = remove instantly (no ragdoll); e.g. 3 = despawn after 3s. Max 10.")))
+			]
+		]
+
+		// ── Weapon Effects ──
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 15, 0, 5)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Weapon Effects")))
+			.Font(BoldFont(18))
+			.ColorAndOpacity(FLinearColor::White)
+		]
+
+		// Show Own Beam
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bShowOwnBeam ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnShowOwnBeamChanged)
+				.ToolTipText(FText::FromString(TEXT("Show the beam for your own iCTF shots. Turning this off keeps the muzzle flash, impact effect, sound, and other players' beams.")))
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show Own Beam")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+				.ToolTipText(FText::FromString(TEXT("Show the beam for your own iCTF shots. Turning this off keeps the muzzle flash, impact effect, sound, and other players' beams.")))
 			]
 		]
 
@@ -626,13 +673,28 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			+ SHorizontalBox::Slot().AutoWidth()                      [ MakeLabeledSpin(TEXT("V"), &Side->V, 0.f, 1.f, 0.02f) ]
 		]
 
+		// Tint without a model — decouples "colour this side" from the model pick.
+		// Checked: the colour above lands on whatever model each pawn really has
+		// (body recolour where the materials support it, armour overlay, spawn glow).
+		// Picking a model always tints regardless of this. Also shown on the
+		// fixed-colour Red/Blue rows: there it means "tint real models red/blue".
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 2, 0, 2)
+		[
+			MakeFlagCheck(TEXT("Tint skin (no model needed)"), &Side->bTint)
+		]
+
 		// Glow + Armour mode
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 2)
 		[
 			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 5.f, 0.25f) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 3.5f, 0.25f) ]
+			// "Armour Glow": dims the emissive armour/shield overlay so armoured pawns aren't radioactive.
+			// 1 = stock full-bright (current), 0 = no glow. Consumed in TeamArenaCharacter::UpdateArmorOverlay.
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Armour Glow"), &Side->ArmourGlow, 0.f, 1.f, 0.05f) ]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
@@ -793,6 +855,189 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 		];
 }
 
+TSharedRef<SWidget> SUTNCPlusMenu::BuildHitsoundsTab()
+{
+	// Preset picker for one side (enemy / friendly). Swapping preset keeps the
+	// user's own volume + pitch — only the cues change.
+	auto MakePresetRow = [this](const FString& Label, FHitsound* Side) -> TSharedRef<SWidget>
+	{
+		const int32 CurrentIndex = HSPresetOptions.IndexOfByPredicate(
+			[Side](const TSharedPtr<FString>& P) { return P.IsValid() && P->Equals(Side->DisplayName, ESearchCase::IgnoreCase); });
+
+		return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SBox)
+				.WidthOverride(120.f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(Label))
+					.Font(RegularFont(12))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(220.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&HSPresetOptions)
+					.InitiallySelectedItem(HSPresetOptions.IsValidIndex(CurrentIndex) ? HSPresetOptions[CurrentIndex] : nullptr)
+					.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+					{
+						if (!NewSel.IsValid()) { return; }
+						// Adopt the preset's authored Volume/Pitch wholesale:
+						// built-ins carry dc's defaults (2.0/1.9) and custom
+						// packs carry their author's levels — which would be
+						// silently discarded if we kept the previous slot's
+						// values. The sliders are right below for re-tuning.
+						*Side = AClientHitsounds::FindPreset(*NewSel);
+					})
+				]
+			];
+	};
+
+	// Live preview — same call the real hit path makes, so what you hear here
+	// is exactly what you will hear in a match.
+	auto MakePreviewButton = [this](const FString& Label, bool bFriendly, int32 Damage) -> TSharedRef<SWidget>
+	{
+		return SNew(SButton)
+			.ContentPadding(FMargin(12, 4))
+			.OnClicked_Lambda([this, bFriendly, Damage]()
+			{
+				if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+				{
+					AClientHitsounds::PlayPreview(PlayerOwner->PlayerController, HSConfig, bFriendly, Damage);
+				}
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(Label))
+				.Font(RegularFont(11))
+			];
+	};
+
+	const int32 StyleIndex = FMath::Clamp((int32)HSConfig.Style, 0, HSStyleOptions.Num() - 1);
+
+	TSharedRef<SVerticalBox> Root = SNew(SVerticalBox);
+
+	// Nothing loaded means dc's sound content is not installed on this client.
+	if (!AClientHitsounds::IsCatalogReady())
+	{
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(0, 0, 0, 12)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("No hitsound presets found. The hitsound content is missing from this install — hitsounds will stay silent.")))
+				.Font(RegularFont(11))
+				.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.25f, 1.f))
+				.AutoWrapText(true)
+			];
+	}
+
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 6)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Enemy hits")))
+			.Font(BoldFont(13))
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakePresetRow(TEXT("Sound"), &HSConfig.Enemy) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Volume"), &HSConfig.Enemy.Volume, 0.f, 3.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)[ MakeLabeledSpin(TEXT("Pitch (UTComp style only)"), &HSConfig.Enemy.Pitch, 0.1f, 4.f, 0.05f) ];
+
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 6)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Teammate hits")))
+			.Font(BoldFont(13))
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakePresetRow(TEXT("Sound"), &HSConfig.Friendly) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Volume"), &HSConfig.Friendly.Volume, 0.f, 3.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Pitch (UTComp style only)"), &HSConfig.Friendly.Pitch, 0.1f, 4.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)
+		[ MakeFlagCheck(TEXT("Cue teammate hits that did no damage"), &HSConfig.bPlayZeroFriendly) ];
+
+	// Style
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 4)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SBox)
+				.WidthOverride(120.f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Pitch style")))
+					.Font(RegularFont(12))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(220.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&HSStyleOptions)
+					.InitiallySelectedItem(HSStyleOptions.IsValidIndex(StyleIndex) ? HSStyleOptions[StyleIndex] : nullptr)
+					.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+					{
+						if (!NewSel.IsValid()) { return; }
+						const int32 Idx = HSStyleOptions.IndexOfByPredicate(
+							[&](const TSharedPtr<FString>& P) { return P.IsValid() && *P == *NewSel; });
+						if (Idx != INDEX_NONE) { HSConfig.Style = (ENCPHitsoundStyle)Idx; }
+					})
+				]
+			]
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)
+		[ MakeLabeledSpin(TEXT("Master volume"), &HSConfig.UserMultiplier, 0.f, 3.f, 0.05f) ];
+
+	// Previews across the damage range, so the pitch curve is audible while tuning.
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 8)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 15"), false, 15) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 45"), false, 45) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 100"), false, 100) ]
+			+ SHorizontalBox::Slot().AutoWidth()[ MakePreviewButton(TEXT("Test teammate"), true, 45) ]
+		];
+
+	Root->AddSlot()
+		.AutoHeight()
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Absolute sweeps pitch continuously with damage (more damage = lower pitch). UTComp uses one cue on a hyperbolic curve. Flat ignores damage. Custom sound packs installed on this client appear in the Sound lists automatically.")))
+			.Font(RegularFont(10))
+			.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+			.AutoWrapText(true)
+		];
+
+	return Root;
+}
+
 void SUTNCPlusMenu::LoadSettings()
 {
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
@@ -819,6 +1064,11 @@ void SUTNCPlusMenu::LoadSettings()
 	}
 	else
 		RagdollTime = 3.0f;
+
+	if (GConfig->GetString(IGCTFSection, TEXT("bShowOwnBeam"), Val, ConfigPath))
+		bShowOwnBeam = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+	else
+		bShowOwnBeam = true;   // preserve the current beam visuals for existing users
 
 	if (GConfig->GetString(NCPSection, TEXT("OwnFootstepVolume"), Val, ConfigPath))
 		OwnFootstepVolume = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
@@ -850,6 +1100,27 @@ void SUTNCPlusMenu::LoadSettings()
 	FMArmourOptions.Reset();
 	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Match Skin"))));
 	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Complimentary"))));
+
+	// Hitsounds — read straight from Mod.ini so the tab works whether or not a
+	// match is running the mutator. The catalog is static and client-side, so
+	// the preset list is available here too. If a previous build came up empty
+	// (content PAK not yet mounted at the time), retry now — menu open is the
+	// natural moment a late-mounted custom pack can join.
+	if (!AClientHitsounds::IsCatalogReady())
+	{
+		AClientHitsounds::RefreshCatalog();
+	}
+	HSConfig = AClientHitsounds::LoadConfigFromIni();
+
+	HSPresetOptions.Reset();
+	for (const FHitsound& Preset : AClientHitsounds::GetCatalog())
+	{
+		HSPresetOptions.Add(MakeShareable(new FString(Preset.DisplayName)));
+	}
+	HSStyleOptions.Reset();   // index order matches ENCPHitsoundStyle
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("Absolute (pitch tracks damage)"))));
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("UTComp"))));
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("Flat pitch"))));
 }
 
 void SUTNCPlusMenu::SaveSettings()
@@ -864,6 +1135,7 @@ void SUTNCPlusMenu::SaveSettings()
 	// than a literal 0 (rate<=0) which never fires = keep forever. Non-zero values pass through unchanged.
 	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"),
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
+	GConfig->SetString(IGCTFSection, TEXT("bShowOwnBeam"), bShowOwnBeam ? TEXT("True") : TEXT("False"), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
@@ -872,6 +1144,11 @@ void SUTNCPlusMenu::SaveSettings()
 	// Force Models — write the working copy through to the live config + Mod.ini [ForceModels].
 	NCPlusForceModels::Mutable() = FMConfig;
 	NCPlusForceModels::Save();
+
+	// Hitsounds — persist and push to a live mutator instance so the change is
+	// audible immediately rather than at the next map load.
+	AClientHitsounds::SaveConfigToIni(HSConfig,
+		(PlayerOwner.IsValid() && PlayerOwner->PlayerController) ? (UObject*)PlayerOwner->PlayerController : nullptr);
 
 	// Live re-apply so changes show immediately without a respawn / rejoin.
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
@@ -942,6 +1219,11 @@ void SUTNCPlusMenu::OnRagdollTimeChanged(float NewValue, ETextCommit::Type Commi
 	// Slider value the user sees (0..10). 0 = remove instantly (remapped to 0.01 on save, since a literal 0
 	// would keep ragdolls forever); N = despawn after N seconds. See the semantics note at the top of the file.
 	RagdollTime = FMath::Clamp(NewValue, 0.f, 10.f);
+}
+
+void SUTNCPlusMenu::OnShowOwnBeamChanged(ECheckBoxState NewState)
+{
+	bShowOwnBeam = (NewState == ECheckBoxState::Checked);
 }
 
 void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType)

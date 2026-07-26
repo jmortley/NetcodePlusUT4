@@ -293,7 +293,10 @@ void SUTCosmeticSelector::Construct(const FArguments& InArgs)
 		]
 	];
 
-	// Build slot tabs
+	// Build slot tabs. Dark button tint + explicit light text: the default light
+	// SButton brush under pale grey/green text was the "hard to read" report —
+	// same fix as the item rows below. Active tab reads amber (F5 menu accent),
+	// via attribute lambdas so clicking re-colors without rebuilding the tabs.
 	for (uint8 i = 0; i < (uint8)ECosmeticSlot::MAX; i++)
 	{
 		ECosmeticSlot Slot = (ECosmeticSlot)i;
@@ -305,8 +308,25 @@ void SUTCosmeticSelector::Construct(const FArguments& InArgs)
 		.Padding(2, 0)
 		[
 			SNew(SButton)
-			.Text(FText::FromString(FString::Printf(TEXT("%s (%d)"), *GetSlotName(Slot), Count)))
 			.OnClicked(FOnClicked::CreateSP(this, &SUTCosmeticSelector::OnSlotTabClicked, Slot))
+			.ContentPadding(FMargin(12, 5))
+			.ButtonColorAndOpacity_Lambda([this, Slot]() -> FSlateColor
+			{
+				return (CurrentSlot == Slot)
+					? FLinearColor(0.85f, 0.55f, 0.10f, 1.f)    // active: amber
+					: FLinearColor(0.10f, 0.10f, 0.10f, 1.f);   // inactive: dark plate
+			})
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(FString::Printf(TEXT("%s (%d)"), *GetSlotName(Slot), Count)))
+				.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), 13))
+				.ColorAndOpacity_Lambda([this, Slot]() -> FSlateColor
+				{
+					return (CurrentSlot == Slot)
+						? FLinearColor::White
+						: FLinearColor(0.85f, 0.85f, 0.85f, 1.f);
+				})
+			]
 		];
 	}
 
@@ -324,39 +344,42 @@ void SUTCosmeticSelector::RebuildItemList()
 	int32* SelPtr = SelectedIndex.Find(CurrentSlot);
 	int32 SelIdx = SelPtr ? *SelPtr : -1;
 
-	// "None" option
-	FLinearColor NoneColor = (SelIdx < 0) ? FLinearColor(0.3f, 0.9f, 0.3f) : FLinearColor(0.8f, 0.8f, 0.8f);
-	ItemListContainer->AddSlot()
-	.AutoHeight()
-	.Padding(2, 1)
-	[
-		SNew(SButton)
-		.OnClicked(FOnClicked::CreateSP(this, &SUTCosmeticSelector::OnItemClicked, -1))
+	// Row styling: the default light SButton brush under pale text was unreadable
+	// (light-on-light). Dark plates + near-white text; the selected row gets a
+	// dark-green plate + bright green bold text so it pops without relying on a
+	// subtle hue shift. The list rebuilds on every click, so static colors are fine.
+	const FLinearColor RowPlate     (0.10f, 0.10f, 0.10f, 1.f);
+	const FLinearColor SelectedPlate(0.06f, 0.28f, 0.10f, 1.f);
+	const FLinearColor RowText      (0.90f, 0.90f, 0.90f, 1.f);
+	const FLinearColor SelectedText (0.45f, 1.00f, 0.45f, 1.f);
+	const FString RegularFontPath = FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf");
+	const FString BoldFontPath    = FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf");
+
+	auto AddItemRow = [&](const FString& Label, int32 ItemIndex, bool bSelected)
+	{
+		ItemListContainer->AddSlot()
+		.AutoHeight()
+		.Padding(2, 2)
 		[
-			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Default (None)")))
-			.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
-			.ColorAndOpacity(NoneColor)
-		]
-	];
+			SNew(SButton)
+			.OnClicked(FOnClicked::CreateSP(this, &SUTCosmeticSelector::OnItemClicked, ItemIndex))
+			.ButtonColorAndOpacity(bSelected ? SelectedPlate : RowPlate)
+			.ContentPadding(FMargin(8, 3))
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(bSelected ? FString::Printf(TEXT("\x25B6 %s"), *Label) : Label))
+				.Font(FSlateFontInfo(bSelected ? BoldFontPath : RegularFontPath, 14))
+				.ColorAndOpacity(bSelected ? SelectedText : RowText)
+			]
+		];
+	};
+
+	// "None" option
+	AddItemRow(TEXT("Default (None)"), -1, SelIdx < 0);
 
 	for (int32 i = 0; i < Items->Num(); i++)
 	{
-		FLinearColor Color = (i == SelIdx) ? FLinearColor(0.3f, 0.9f, 0.3f) : FLinearColor(0.8f, 0.8f, 0.8f);
-
-		ItemListContainer->AddSlot()
-		.AutoHeight()
-		.Padding(2, 1)
-		[
-			SNew(SButton)
-			.OnClicked(FOnClicked::CreateSP(this, &SUTCosmeticSelector::OnItemClicked, i))
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString((*Items)[i].DisplayName))
-				.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
-				.ColorAndOpacity(Color)
-			]
-		];
+		AddItemRow((*Items)[i].DisplayName, i, i == SelIdx);
 	}
 }
 

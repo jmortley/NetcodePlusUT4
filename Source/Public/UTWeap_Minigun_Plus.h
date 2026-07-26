@@ -9,14 +9,17 @@
  *
  * NetcodePlus minigun. Inherits from AUTWeaponFix so the server-side
  * HitScanTrace override (with ping-based capsule rewind) applies automatically
- * via virtual dispatch. Firing flow is routed to the grandparent AUTWeapon
- * directly (bypassing AUTWeaponFix's transactional event / fake projectile
- * machinery), because the stock spin-up firing state handles refire timing
- * and the minigun doesn't need per-shot event indexing.
+ * via virtual dispatch.
  *
- * Hit reg on high ping improves "for free" since every FireInstantHit call
- * eventually dispatches HitScanTrace through the vtable to AUTWeaponFix's
- * rewind-aware implementation.
+ * Firing flow is MODE-SPLIT (2026-07-21):
+ *  - Mode 0 (spin-up hitscan) routes to the grandparent AUTWeapon directly,
+ *    bypassing the transactional event machinery — the stock spin-up firing
+ *    state owns refire timing server-side and there is no per-shot client
+ *    message to transact. Rewind hit reg still applies via HitScanTrace.
+ *  - Mode 1 (stinger shard projectile) routes THROUGH AUTWeaponFix's
+ *    transactional path: per-shot fire events (ROF validation + anti-dup) and
+ *    client-fake/server-auth projectile pairing with ExactPing-based catch-up,
+ *    independent of the player's negotiated MaxPredictionPing.
  */
 UCLASS(abstract)
 class NETCODEPLUS_API AUTWeap_Minigun_Plus : public AUTWeaponFix

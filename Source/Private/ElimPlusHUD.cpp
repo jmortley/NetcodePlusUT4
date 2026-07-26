@@ -14,6 +14,7 @@
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads) — warmup-only head-hitbox calibration
 #include "NCPlusSpectatorSlideOut.h"
 #include "UTHUDWidget_SpectatorSlideOut.h"
+#include "UTHUDWidget_Spectator.h"
 #include "EngineUtils.h"
 
 AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
@@ -259,7 +260,9 @@ static AElimPlusStatsReplicator* FindElimPlusStatsReplicator(UWorld* World)
 
 // "NOW WATCHING <player>" spectator banner (verbatim port of ANCPlusCTFHUD::
 // DrawSpectatorTarget). Bottom-right, suppressed by the caller when the
-// scoreboard is up. Self-guards to nothing when we're playing our own pawn.
+// scoreboard is up. This is the canonical viewed-player banner for both dead
+// players and true spectators; DrawHUD suppresses the stock duplicate only for
+// the frame where this banner can replace it.
 void AElimPlusHUD::DrawSpectatorTarget()
 {
 	if (!Canvas || !MediumFont || !SmallFont) return;
@@ -279,12 +282,13 @@ void AElimPlusHUD::DrawSpectatorTarget()
 	const float HeaderScale = RenderScale * 0.75f;
 	const float NameScale   = RenderScale * 1.30f;
 
-	const FString HeaderText = TEXT("NOW WATCHING");
-	const FString NameText   = PS->PlayerName;
+	static const FString HeaderText(TEXT("NOW WATCHING"));
+	const FString& NameText = PS->PlayerName;
 
+	FText HeaderDrawText, NameDrawText;
 	float HeaderW, HeaderH, NameW, NameH;
-	Canvas->TextSize(SmallFont,  HeaderText, HeaderW, HeaderH, HeaderScale, HeaderScale);
-	Canvas->TextSize(MediumFont, NameText,   NameW,   NameH,   NameScale,   NameScale);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, SmallFont, HeaderText, HeaderScale, HeaderScale, HeaderDrawText, HeaderW, HeaderH);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, MediumFont, NameText, NameScale, NameScale, NameDrawText, NameW, NameH);
 
 	const float PadX = 16.f * RenderScale;
 	const float PadY = 8.f  * RenderScale;
@@ -308,12 +312,12 @@ void AElimPlusHUD::DrawSpectatorTarget()
 	Canvas->DrawTile(Canvas->DefaultTexture, PanelX, PanelY, 3.f * RenderScale, PanelH, 0, 0, 1, 1);
 
 	Canvas->DrawColor = FColor(180, 180, 180, 255);
-	Canvas->DrawText(SmallFont, HeaderText,
-		PanelX + (PanelW - HeaderW) * 0.5f, PanelY + PadY, HeaderScale, HeaderScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, SmallFont, HeaderDrawText,
+		PanelX + (PanelW - HeaderW) * 0.5f, PanelY + PadY, HeaderScale, HeaderScale, Canvas->DrawColor);
 
 	Canvas->DrawColor = AccentColor.ToFColor(true);
-	Canvas->DrawText(MediumFont, NameText,
-		PanelX + (PanelW - NameW) * 0.5f, PanelY + PadY + HeaderH + Gap, NameScale, NameScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, NameDrawText,
+		PanelX + (PanelW - NameW) * 0.5f, PanelY + PadY + HeaderH + Gap, NameScale, NameScale, Canvas->DrawColor);
 }
 
 void AElimPlusHUD::DrawHUD()
@@ -322,11 +326,41 @@ void AElimPlusHUD::DrawHUD()
 	// immediately (Phase 2 live preview). Cheap — just a few field assignments
 	// per registered widget, gated by a class-name lookup.
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
+		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
+
+	// True spectators normally get UUTHUDWidget_Spectator's bottom-right "Now viewing"
+	// panel as well as our compact banner. Suppress that stock panel only during an
+	// in-progress frame where our banner has a valid player pawn to draw. Restore its
+	// prior hidden state immediately after Super so warmup/respawn/end-state messages,
+	// scoreboard behaviour, and the user's nchud visibility choice remain stock-owned.
+	bool bRestoreStockSpectator = false;
+	bool bStockSpectatorWasHidden = false;
+	if (bRenderCustomHUD && SpectatorMessageWidget && UTPlayerOwner->UTPlayerState
+		&& UTPlayerOwner->UTPlayerState->bOnlySpectator && !ScoreboardIsUp())
+	{
+		AUTGameState* PreDrawGS = GetWorld()->GetGameState<AUTGameState>();
+		APawn* ViewedPawn = Cast<APawn>(UTPlayerOwner->GetViewTarget());
+		AUTPlayerState* ViewedPS = ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->PlayerState) : nullptr;
+		if (PreDrawGS && PreDrawGS->GetMatchState() == MatchState::InProgress
+			&& ViewedPawn != UTPlayerOwner->GetPawn() && ViewedPS && !ViewedPS->PlayerName.IsEmpty())
+		{
+			bRestoreStockSpectator = true;
+			bStockSpectatorWasHidden = SpectatorMessageWidget->IsHidden();
+			SpectatorMessageWidget->SetHidden(true);
+		}
+	}
 
 	Super::DrawHUD();
 
+	if (bRestoreStockSpectator)
+	{
+		SpectatorMessageWidget->SetHidden(bStockSpectatorWasHidden);
+	}
+
 	// Auto post-match screenshot (shared; waits for the instant replay to end + the scoreboard to settle).
 	NCPlusHUDDrawCall::ServicePostMatchScreenshot(this, PostMatchScreenshotStable, bPostMatchScreenshotTaken);
+	if (!bRenderCustomHUD) return;
 
 	// Guard: Canvas or fonts may be null during Slate UI overlays
 	if (!Canvas || !SmallFont) return;
@@ -375,13 +409,20 @@ void AElimPlusHUD::DrawHUD()
 
 		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 
-		// Stock team panel (top-left roster) replaces the portrait strip when the
-		// user opts in (default for fresh installs). Same teammate HP/alive data,
-		// different presentation. Score/KDA below still draws in both modes.
+		// A top-left team panel replaces the portrait strip when the user opts in.
+		// Fresh installs use the recovered Absolute Elim 1.13 artwork; existing
+		// users keep their prior procedural-stock/portrait choice.
 		const bool bStockTeamPanel = FNCPlusHUDLayout::WantsStockTeamPanel();
 		if (bStockTeamPanel)
 		{
-			NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
+			if (FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel())
+			{
+				NCPlusHUDDrawCall::DrawAbsoluteElimTeamPanel(this, Canvas);
+			}
+			else
+			{
+				NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
+			}
 		}
 		else
 		{
@@ -627,8 +668,18 @@ void AElimPlusHUD::DrawHUD()
 			const int32 Deaths = MyPS->Deaths;
 			const int32 Assists = MyPS->KillAssists;
 
-			FString ScoreStr = FString::Printf(TEXT("Score: %d"), Score);
-			FString KDAStr = FString::Printf(TEXT("KDA: %d / %d / %d"), Kills, Deaths, Assists);
+			static TWeakObjectPtr<AUTPlayerState> CachedKdaPS;
+			static int32 CachedScore = MAX_int32, CachedKills = MAX_int32;
+			static int32 CachedDeaths = MAX_int32, CachedAssists = MAX_int32;
+			static FString ScoreStr, KDAStr;
+			if (CachedKdaPS.Get() != MyPS || CachedScore != Score || CachedKills != Kills
+				|| CachedDeaths != Deaths || CachedAssists != Assists)
+			{
+				CachedKdaPS = MyPS;
+				CachedScore = Score; CachedKills = Kills; CachedDeaths = Deaths; CachedAssists = Assists;
+				ScoreStr = FString::Printf(TEXT("Score: %d"), Score);
+				KDAStr = FString::Printf(TEXT("KDA: %d / %d / %d"), Kills, Deaths, Assists);
+			}
 
 			const FVector2D StockPos(Canvas->ClipX * 0.98f, Canvas->ClipY * 0.015f);
 			const FVector2D ResolvedPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("score_kda"), Canvas, StockPos);
@@ -643,15 +694,16 @@ void AElimPlusHUD::DrawHUD()
 			float KDAXPos = ResolvedPos.X;
 			float KDAYPos = ResolvedPos.Y;
 
+			FText ResolvedText;
 			float XL, YL;
-			Canvas->TextSize(KDAFont, ScoreStr, XL, YL, FontScale, FontScale);
+			NCPlusHUDDrawCall::ResolveStableText(Canvas, KDAFont, ScoreStr, FontScale, FontScale, ResolvedText, XL, YL);
 			Canvas->DrawColor = FColor(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(220.f * KdaOp), 0, 255));
-			Canvas->DrawText(KDAFont, ScoreStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
+			NCPlusHUDDrawCall::DrawResolvedText(Canvas, KDAFont, ResolvedText, KDAXPos - XL, KDAYPos, FontScale, FontScale, Canvas->DrawColor);
 			KDAYPos += YL * 1.1f;
 
-			Canvas->TextSize(KDAFont, KDAStr, XL, YL, FontScale, FontScale);
+			NCPlusHUDDrawCall::ResolveStableText(Canvas, KDAFont, KDAStr, FontScale, FontScale, ResolvedText, XL, YL);
 			Canvas->DrawColor = FColor(200, 200, 200, (uint8)FMath::Clamp(FMath::RoundToInt(200.f * KdaOp), 0, 255));
-			Canvas->DrawText(KDAFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
+			NCPlusHUDDrawCall::DrawResolvedText(Canvas, KDAFont, ResolvedText, KDAXPos - XL, KDAYPos, FontScale, FontScale, Canvas->DrawColor);
 		}
 	}
 
@@ -663,8 +715,6 @@ void AElimPlusHUD::DrawHUD()
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
 	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
 
-	// Replay-only: fire-validation corner feed (self-guards to demo playback).
-	NCPlusHUDDrawCall::DrawFireValReplayFeed(this, Canvas);
 }
 
 // Custom team score bar — dynamic team colors, round clock. Same pattern as Wipeout.
@@ -701,8 +751,12 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		Team1Color = TC;
 	}
 
-	FString Team0Name = bCustomColors ? TEXT("Phayder (R)") : TEXT("RED");
-	FString Team1Name = bCustomColors ? TEXT("Liandri (B)") : TEXT("BLUE");
+	static const FString CustomTeam0Name(TEXT("Phayder (R)"));
+	static const FString CustomTeam1Name(TEXT("Liandri (B)"));
+	static const FString StockTeam0Name(TEXT("RED"));
+	static const FString StockTeam1Name(TEXT("BLUE"));
+	const FString& Team0Name = bCustomColors ? CustomTeam0Name : StockTeam0Name;
+	const FString& Team1Name = bCustomColors ? CustomTeam1Name : StockTeam1Name;
 
 	const int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
 	const int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
@@ -763,27 +817,34 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	if (!TeamNameFont)  TeamNameFont  = SmallFont;
 	if (!TeamScoreFont) TeamScoreFont = LargeFont;
 
-	Canvas->TextSize(TeamNameFont, Team0Name, XL, YL, FontScale, FontScale);
+	FText ResolvedText;
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team0Name, FontScale, FontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamNameFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
-	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
-	Canvas->TextSize(TeamScoreFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
+	static bool bHasCachedScore0 = false;
+	static int32 CachedScore0 = 0;
+	static FString Score0Str;
+	if (!bHasCachedScore0 || CachedScore0 != Score0) { bHasCachedScore0 = true; CachedScore0 = Score0; Score0Str = FString::FromInt(Score0); }
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score0Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamScoreFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
 
-	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
-	Canvas->TextSize(TeamScoreFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	static bool bHasCachedScore1 = false;
+	static int32 CachedScore1 = 0;
+	static FString Score1Str;
+	if (!bHasCachedScore1 || CachedScore1 != Score1) { bHasCachedScore1 = true; CachedScore1 = Score1; Score1Str = FString::FromInt(Score1); }
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score1Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamScoreFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
 
-	Canvas->TextSize(TeamNameFont, Team1Name, XL, YL, FontScale, FontScale);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team1Name, FontScale, FontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamNameFont, Team1Name, RightBarX + 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, RightBarX + 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
 	// Round Clock — read RoundSecondsRemaining from BP GameState via reflection.
 	// Static cache: FindField walks the class hierarchy and was running every
@@ -809,16 +870,22 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	{
 		const int32 RMins = RoundTime / 60;
 		const int32 RSecs = RoundTime % 60;
-		FString RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
-		Canvas->TextSize(MediumFont, RoundClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		static int32 CachedRoundTime = MAX_int32;
+		static FString RoundClockStr;
+		if (CachedRoundTime != RoundTime)
+		{
+			CachedRoundTime = RoundTime;
+			RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
+		}
+		NCPlusHUDDrawCall::ResolveStableText(Canvas, MediumFont, RoundClockStr, RoundClockScale, RoundClockScale, ResolvedText, XL, YL);
 		Canvas->DrawColor = (RoundTime <= 30) ? FColor(255, 60, 60, WhiteOp.A) : WhiteOp;
-		Canvas->DrawText(MediumFont, RoundClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, ResolvedText, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale, Canvas->DrawColor);
 	}
 }
 
 void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive, float XOffset, float YOffset, float PipSize)
 {
-	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
+	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
 	if (CharIcon.Texture == nullptr)
 	{
 		return;

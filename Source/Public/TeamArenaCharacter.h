@@ -14,6 +14,10 @@
 
 class UTeamArenaCharacterMovement;
 class ACTFStatsReplicator;
+class AClutchRoundState;
+class AUTWeaponFix;
+class UUTWeaponSkin;
+class UMaterialInstanceDynamic;
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -52,6 +56,21 @@ public:
 		AUTCharacter* ShotInstigator, float PredictionTime) override;
 
 	virtual void Tick(float DeltaTime) override;
+	virtual void PossessedBy(AController* NewController) override;
+	virtual bool AddInventory(AUTInventory* InvToAdd, bool bAutoActivate) override;
+	virtual void SetSkinForWeapon(UUTWeaponSkin* WeaponSkin) override;
+	virtual void UpdateWeaponSkinPrefFromProfile(AUTWeapon* Weapon) override;
+	virtual void UpdateWeaponSkin() override;
+	virtual void UpdateSkin() override;
+	void SubmitConfiguredWeaponSkin(AUTWeaponFix* Weapon, bool bForce);
+
+	/** Submit the local F5 choice for an owned weapon. Empty SkinPath is Default. */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerSetNCPWeaponSkin(AUTWeapon* InWeapon, const FString& SkinPath);
+
+	// Reject ambient loops emitted by inactive stock weapons before they can become
+	// replicated, persistent character audio (notably the Link Gun overheat loop).
+	virtual void SetAmbientSound(USoundBase* NewAmbientSound, bool bClear = false) override;
 
     /**
      * Override replication callback to use visual prediction time.
@@ -134,6 +153,30 @@ protected:
 	// Saved original transform to restore when weapon is shown
 	FTransform SavedFirstPersonMeshTransform;
 
+	// --- Replicated weapon skins ---
+	/** Server-side burst limiter for the reliable cosmetic selection RPC. */
+	float WeaponSkinRequestWindowStart = 0.f;
+	uint8 WeaponSkinRequestsInWindow = 0;
+
+	/** Per-attachment body-slot cache. Rebuilt only when the attachment or parent changes. */
+	TWeakObjectPtr<AUTWeaponAttachment> SkinnedWeaponAttachment;
+	UPROPERTY(Transient)
+	UMaterialInterface* OriginalWeaponAttachmentMaterial = nullptr;
+	/** Slot-1 3P material, captured only when the attachment's target mask includes
+	 *  slot 1 — Flak (slots 0+1) and the Lightning Gun (slot 1 ONLY; its slot 0 keeps
+	 *  the original). nullptr for slot-0-only weapons. */
+	UPROPERTY(Transient)
+	UMaterialInterface* OriginalWeaponAttachmentMaterialSecondary = nullptr;
+	UPROPERTY(Transient)
+	UMaterialInterface* AppliedWeaponAttachmentMaterial = nullptr;
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* WeaponAttachmentSkinMID = nullptr;
+	bool bCapturedWeaponAttachmentMaterial = false;
+
+	UUTWeaponSkin* ResolveWeaponSkinForClass(UClass* WeaponClassToMatch) const;
+	void ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin);
+	void ApplyServerWeaponSkinSelection(AUTWeapon* InWeapon, UUTWeaponSkin* Skin);
+
 	// --- Spectator rotation smoothing ---
 	// Smoothed rotation for spectators viewing this character (prevents jitter at 480fps)
 	mutable FRotator SmoothedViewRotation;
@@ -148,6 +191,11 @@ public:
 
 	// ArmorPlus: override damage absorption
 	// Belt armor always absorbs at 100%, non-belt absorbs at 66.67%
+	virtual void GiveArmor(class AUTArmor* InArmorType) override;
+	virtual void SetArmorAmount(class AUTArmor* InArmorType, int32 Amount) override;
+	virtual void RemoveArmor(int32 Amount) override;
+	virtual void ServerDropArmor_Implementation() override;
+
 	virtual bool ModifyDamageTaken_Implementation(
 		int32& AppliedDamage, int32& Damage, FVector& Momentum,
 		AUTInventory*& HitArmor, const FHitResult& HitInfo,
@@ -211,10 +259,17 @@ public:
 	// effects are still visible briefly). Client-side (PlayDying runs per-client), gated by bEnabled +
 	// bDarkenBodies.
 	virtual void PlayDying() override;
+	/** Clear client-local outline duplicates before stock teardown destroys the weapon attachment.
+	 *  Prematch lineup pawns are destroyed alive, so they never pass through PlayDying(). */
+	virtual void Destroyed() override;
 
-	// iCTF-only: scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting
-	// ([NetcodePlus] OwnFootstepVolume, 0..1; 1 = stock). Remote/enemy footsteps and other modes are
-	// untouched. UTPlaySound has no volume arg, so a non-stock volume is played via PlayOwnFootstepScaled.
+	/** Keep TacCom/X-ray from rendering the separate CustomDepth duplicate after this pawn's body mesh
+	 *  has been explicitly hidden by corpse cleanup. Stock TacCom re-calls SetOutlineLocal(true) every
+	 *  spectator tick, so clearing the outline only once in PlayDying is not sufficient. */
+	virtual void SetOutlineLocal(bool bNowOutlined, bool bWhenUnoccluded = false) override;
+
+	// Clutch defenders play at 10% on every client. Outside Clutch, the iCTF-only F5
+	// "Own Footstep Volume" setting still affects only this local player's own pawn.
 	virtual void PlayFootstep(uint8 FootNum, bool bFirstPerson = false) override;
 
 	/** True iff this pawn is controlled by a LOCAL HUMAN player — i.e. it's "my own" pawn (incl. split-screen).
@@ -225,9 +280,15 @@ public:
 	bool IsLocalPlayerPawn() const;
 
 protected:
-	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
-	// Server-only; synced when ArmorType is belt, decremented on damage.
+	// ArmorPlus: tracks the 100%-absorb portion of the replicated total armor pool.
+	// Server-authoritative and updated when armor is granted or removed.
 	int32 BeltArmorRemaining = 0;
+
+	// The most recently collected regular armor CDO. While a mixed stack still has
+	// belt remaining, ArmorType stays on the belt for its shell/effects; this becomes
+	// ArmorType when the belt portion reaches zero. Server-only; CDOs are always rooted.
+	UPROPERTY(Transient)
+	class AUTArmor* LastRegularArmorType = nullptr;
 
 	// ── Force Models state ──
 	/** Re-evaluate this pawn and apply (or clear) the forced model + team-recolour. Client-only.
@@ -267,12 +328,19 @@ protected:
 	/** DarkenBodies: on death, schedule the corpse to hide after a short delay (lets death/ragdoll effects
 	 *  play first). Gated by bEnabled + bDarkenBodies. Called from PlayDying (client-side). */
 	void SpawnSkeletonDissolve();
+	/** Permanently retire this pawn's client-local body and weapon CustomDepth render state. */
+	void ClearLocalOutlineRenderState();
 	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
 	void HideDeadBody();
 
 	// ── Own footstep volume (iCTF) ──
 	/** Reimplemented own-footstep play honouring OwnFootstepVolumeScale (UTPlaySound has no volume arg). */
 	void PlayOwnFootstepScaled(uint8 FootNum);
+	/** Reimplemented footstep play with a per-source volume multiplier. */
+	void PlayFootstepScaled(uint8 FootNum, bool bFirstPerson, float VolumeScale);
+	/** Client-side Clutch role lookup; returns 0.1 for a live-round defender, otherwise 1. */
+	float GetClutchFootstepVolumeScale();
+	TWeakObjectPtr<AClutchRoundState> CachedClutchFootstepState;
 	/** 0..1 multiplier on the local player's own footstep; 1 = stock (no override). Read once from config. */
 	float OwnFootstepVolumeScale = 1.f;
 	bool bOwnFootstepVolumeRead = false;

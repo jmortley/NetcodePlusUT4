@@ -1,6 +1,7 @@
 #include "ElimPlusGame.h"
-#include "NCFireValCollector.h"
+#include "NCHybridSpawnGenerator.h"
 #include "NCPlusVersionGate.h"
+#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
@@ -203,6 +204,7 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 	bDidPreMatchRebalance = false;
 	bPendingMidGameShuffle = false;
 	bDidMidGameShuffle = false;
+	ResetClutchTelemetryForMatch();
 
 	// Bot PUGs always carry ?PugId (the bot adds it); public/hub games never do.
 	// Uneven-team health scaling is for public games only.
@@ -219,6 +221,9 @@ void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FSt
 
 		// 6-0 blowout mid-game PPR shuffle (default: on; non-PUG + ?BalanceTeams only).
 		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimMidGameShuffle"), bElimMidGameShuffle, ModIni);
+
+		// Absolute-derived transform queues (default on; immediate rollback switch).
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ElimHybridRoundSpawns"), bEnableHybridRoundSpawns, ModIni);
 
 		// Anti-camp (defaults: on, threshold 400u, check 1.0s, cooldown 5.0s).
 		// ElimCampCheckInterval=0 disables the camp timer (StartCampCheckTimer gate).
@@ -254,7 +259,7 @@ void AElimPlusGame::BeginPlay()
 	if (HasAuthority() && !RatingSystem.IsValid())
 	{
 		RatingSystem = MakeUnique<FElimPlusRatingSystem>();
-		FElimPlusRatingSystem::InitDatabase(GetWorld());
+		RatingSystem->InitDatabase(GetWorld());
 
 		// Push the testing-config bot ELO range into the rating system so both
 		// PickBalancedTeam and the per-round Glicko placeholder use the same
@@ -278,14 +283,17 @@ void AElimPlusGame::HandleMatchHasStarted()
 	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus build marker: rebalance+warnings+broadcast (post-ca60db0)"));
 	Super::HandleMatchHasStarted();
 
-	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id for this match
-
 	bWarmupMode = false;
 
 	// Defense-in-depth reset of the flush guard: InitGame already resets it on
 	// map load, but a single PIE/server session can host multiple matches in a
 	// row. Reset here so a subsequent match can flush its own ratings.
 	bRatingFlushedThisMatch = false;
+
+	// Same defense-in-depth for clutch telemetry: a second match in the same
+	// session must not upload the previous match's attempts or continue its
+	// death-ordinal sequence (mirrors SnapshotMatchStart clearing RoundLog).
+	ResetClutchTelemetryForMatch();
 
 	// Spawn stats replicator now — all clients are fully loaded at this point.
 	// Spawning in BeginPlay was too early and could cause client crashes.
@@ -387,6 +395,8 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 
 	// Server-only: pull this player's rating from Mods.db into the cache so it's
 	// ready before the first round ends. Late joiners who arrive mid-match also
@@ -458,8 +468,6 @@ void AElimPlusGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
 
-	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (guards double-route)
-
 	// Persist updated ratings to Mods.db and emit the final ELO + match delta
 	// to the replicator. Engine routes HandleMatchHasEnded twice in some paths
 	// (state-machine + derived); guard with bRatingFlushedThisMatch so we only
@@ -511,6 +519,14 @@ void AElimPlusGame::HandleMatchHasEnded()
 				P.Damage     = static_cast<int32>(UTPS->DamageDone);
 				UploadIn.Players.Add(MoveTemp(P));
 			}
+
+			// Completed clutch attempts ride the SAME upload (additive JSON keys
+			// — no second endpoint). Open/unfinalized attempts from an aborted
+			// final round are intentionally absent: only rounds that went
+			// through EndRoundForTeam produced records. The
+			// bRatingFlushedThisMatch guard above makes this a single-shot copy
+			// even when the engine routes HandleMatchHasEnded twice.
+			UploadIn.Clutches = CompletedClutches;
 
 			const FString Json = RatingSystem->BuildResultPayload(GetWorld(), UploadIn);
 			if (!Json.IsEmpty())
@@ -946,16 +962,6 @@ void AElimPlusGame::StartNextRound()
 		UE_LOG(LogGameMode, Warning, TEXT("Disabled team announcements for subsequent rounds"));
 	}
 
-	// 6-0 blowout shuffle (armed by EndRoundForTeam): re-split on current-match
-	// PPR before anything spawns for this round — the same pre-spawn silence
-	// rationale as the pre-match rebalance. Once per match.
-	if (bPendingMidGameShuffle)
-	{
-		bPendingMidGameShuffle = false;
-		bDidMidGameShuffle = true;
-		MidGameShufflePPR();
-	}
-
 	// Reset per-round trackers
 	CamperTracker.Empty();
 	StartCampCheckTimer();
@@ -972,6 +978,19 @@ void AElimPlusGame::StartNextRound()
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
 	ResetPlayersForNewRound();
+
+	// 6-0 blowout shuffle (armed by EndRoundForTeam): reset first so every
+	// controller is unpossessed before MovePlayerToTeam runs. Stock deliberately
+	// suicides a possessed pawn during a team change; doing the swap before this
+	// reset created a false inter-round death/score/replay event for a surviving
+	// player. This remains pre-spawn and makes no replicated/schema change.
+	if (bPendingMidGameShuffle)
+	{
+		bPendingMidGameShuffle = false;
+		bDidMidGameShuffle = true;
+		MidGameShufflePPR();
+	}
+
 	// Sweep AFTER the reset, on the canonical round-start path. CleanupWorldForNewRound
 	// also runs in DefaultTimer at intermission-end, but that fires BEFORE StartNextRound
 	// (and a BP-driven state transition can bypass it), so any pickup still on the floor
@@ -980,6 +999,10 @@ void AElimPlusGame::StartNextRound()
 	// Sweeping here guarantees a clean floor regardless of how the round was started.
 	CleanupWorldForNewRound();
 	DarkHorseCandidates.Empty();
+	// Open attempts are normally consumed by FinalizeClutchAttempts in
+	// EndRoundForTeam; this sweep only catches a BP-driven round start that
+	// bypassed it. CompletedClutches (match scope) is deliberately kept.
+	DiscardOpenClutchAttempts();
 	ResetSpawnSelectionForNewRound();
 	Team0AlivePlayers.Empty();
 	Team1AlivePlayers.Empty();
@@ -997,6 +1020,8 @@ void AElimPlusGame::StartNextRound()
 	// into enemies, or the Z-fix can't detect the first pawn yet.
 	// One spawn per frame lets each capsule register before the next.
 	PendingSpawnQueue.Empty();
+	int32 HybridTeam0Players = 0;
+	int32 HybridTeam1Players = 0;
 	bAllowPlayerRespawns = true;
 
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
@@ -1016,9 +1041,18 @@ void AElimPlusGame::StartNextRound()
 				PC->ClientGotoState(NAME_Playing);
 			}
 
+			if (PS->Team)
+			{
+				if (PS->Team->TeamIndex == 0) ++HybridTeam0Players;
+				else if (PS->Team->TeamIndex == 1) ++HybridTeam1Players;
+			}
 			PendingSpawnQueue.Add(C);
 		}
 	}
+
+	// Uses the selected layout only as a quality-ranked anchor pool. The
+	// generated queues supply one validated transform per player at any size.
+	PrepareHybridRoundSpawnQueues(HybridTeam0Players, HybridTeam1Players);
 
 	// Process first spawn immediately, rest on subsequent frames
 	if (PendingSpawnQueue.Num() > 0)
@@ -1085,6 +1119,7 @@ void AElimPlusGame::ProcessNextSpawn()
 void AElimPlusGame::OnAllPlayersSpawned()
 {
 	bAllowPlayerRespawns = false;
+	ClearHybridRoundSpawnState();
 
 	UE_LOG(LogGameMode, Verbose, TEXT("Round starting sizes - Team0: %d, Team1: %d"), Team0StartingSize, Team1StartingSize);
 
@@ -1141,6 +1176,12 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 	// Stop overtime if it's running
 	StopOvertime();
 
+	// Resolve open clutch attempts against this round's authoritative outcome
+	// (win/loss/draw, candidate-alive state) and bank them for the match-end
+	// upload. Uses the RoundIndex captured at open — TotalRoundsPlayed was
+	// already incremented above.
+	FinalizeClutchAttempts(WinnerTeamIndex);
+
 	// Check achievements before we score (in case of end-game)
 	CheckRoundAchievements(WinnerTeamIndex, Reason);
 
@@ -1158,6 +1199,13 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 			{
 				AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 				if (!UTPS || UTPS->bOnlySpectator || !UTPS->UniqueId.IsValid()) continue;
+
+				// Only players who actually SPAWNED this round accumulate PPR —
+				// a late joiner who never spawned must not have their match/lifetime
+				// PPR mean dragged down by a 0-point round they never played.
+				// Fail-safe: an empty set means participation tracking saw no spawns
+				// (unexpected BP-driven round flow) — fall back to the full roster.
+				if (RoundParticipants.Num() > 0 && !RoundParticipants.Contains(UTPS)) continue;
 
 				// PPR damage = PlayerRoundDamage, which now accumulates OVERKILL-INCLUSIVE
 				// damage per round (full hit value incl. the portion beyond victim HP —
@@ -1209,6 +1257,16 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 					if (!UTPS || UTPS->bOnlySpectator) continue;
 					if (UTPS->GetTeamNum() != TeamIdx) continue;
+					// Rate only players who actually SPAWNED into this round. A late
+					// joiner who connects mid-round and never spawns used to be fed in
+					// with 0 kills / 0 damage — a bottom-of-lobby z-score that could
+					// bleed a fresh high-RD rating up to the per-round cap on the
+					// match's final round without them ever playing. Bots follow the
+					// same rule, so team sizes stay honest (a never-spawned roster
+					// entry isn't fighting this round on EITHER side of the math).
+					// Fail-safe: an empty set = tracking saw no spawns (unexpected
+					// BP-driven round flow) — fall back to the full roster.
+					if (RoundParticipants.Num() > 0 && !RoundParticipants.Contains(UTPS)) continue;
 
 					FElimPlusPlayerRoundPerf P;
 					// Bots have invalid UniqueIds. We still include them so the rating
@@ -1475,6 +1533,9 @@ void AElimPlusGame::ResetPlayersForNewRound()
 	Team0RoundDamage = 0.0f;
 	Team1RoundDamage = 0.0f;
 	PlayerRoundDamage.Empty();
+	// New round = new participation slate. Repopulated by RestartPlayer as the
+	// staggered spawn queue (and any mid-round-respawn config) spawns players.
+	RoundParticipants.Empty();
 
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 	{
@@ -1498,6 +1559,27 @@ void AElimPlusGame::ResetPlayersForNewRound()
 			C->UnPossess();
 			Pawn->Destroy();
 		}
+	}
+
+	// The controller pass cannot see a live pawn that was unpossessed earlier in
+	// the round. Such an orphan survives CleanupWorldForNewRound() (which only
+	// removes dead characters), and stock true-spectator TacCom outlines every
+	// AUTCharacter it finds, exposing the orphan as a frozen X-ray ghost. This
+	// reset runs before the new spawn queue starts, so no character remaining at
+	// this point belongs to the incoming round.
+	TArray<AUTCharacter*> LeftoverCharacters;
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+	{
+		AUTCharacter* UTC = Cast<AUTCharacter>(It->Get());
+		if (UTC && !UTC->IsPendingKill())
+		{
+			LeftoverCharacters.Add(UTC);
+		}
+	}
+
+	for (AUTCharacter* UTC : LeftoverCharacters)
+	{
+		UTC->Destroy();
 	}
 }
 
@@ -1573,6 +1655,15 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 	// the missing coverage for WaitingToStart.
 	if (NewPlayer->GetPawn())
 	{
+		// Whoever already owns a live pawn IS a participant. Every round's pawns
+		// normally spawn through the recording branch below (ResetPlayersForNewRound
+		// destroys all pawns first), so this is belt-and-braces for any alternate
+		// possession path: the set is cleared at every round start, so pre-round
+		// entries wash out and can't pollute a round's rating.
+		if (AUTPlayerState* AlivePS = Cast<AUTPlayerState>(NewPlayer->PlayerState))
+		{
+			RoundParticipants.Add(AlivePS);
+		}
 		return;
 	}
 
@@ -1588,6 +1679,19 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 	if (bLineupIsActive)
 	{
 		Super::RestartPlayer(NewPlayer);
+		// Lineups normally precede a round (intro) or follow the match (summary),
+		// and round pawns are destroyed + respawned through the recording branch
+		// below — but if a lineup ever overlaps the round spawn queue, this spawn
+		// IS the player's round pawn. Record on success so that race can't leave
+		// a playing pawn unrated (mixed-set case the empty-set fail-safe in
+		// EndRoundForTeam cannot cover).
+		if (NewPlayer->GetPawn())
+		{
+			if (AUTPlayerState* SpawnedPS = Cast<AUTPlayerState>(NewPlayer->PlayerState))
+			{
+				RoundParticipants.Add(SpawnedPS);
+			}
+		}
 		return;
 	}
 
@@ -1595,11 +1699,60 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 
 	if (bShouldAllowSpawn)
 	{
-		AActor* ChosenStart = ChoosePlayerStart_Implementation(NewPlayer);
+		AUTPlayerState* SpawnPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
+		const int32 TeamIndex = (SpawnPS && SpawnPS->Team) ? SpawnPS->Team->TeamIndex : INDEX_NONE;
+		AActor* ChosenStart = nullptr;
+		FTransform HybridTransform;
+		bool bUsedHybridTransform = false;
+
+		if (bHybridRoundSpawnWindow && (TeamIndex == 0 || TeamIndex == 1))
+		{
+			bUsedHybridTransform = TryConsumeHybridSpawnTransform(TeamIndex, HybridTransform);
+			if (bUsedHybridTransform)
+			{
+				const TArray<APlayerStart*>& PreferredStarts =
+					(TeamIndex == 0) ? Team0SelectedSpawns : Team1SelectedSpawns;
+				ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+					PreferredStarts, HybridTransform.GetLocation());
+				if (!ChosenStart)
+				{
+					ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+						AllSpawnPointsList, HybridTransform.GetLocation());
+				}
+			}
+			else
+			{
+				UE_LOG(LogGameMode, Warning,
+					TEXT("ElimPlus hybrid queue exhausted for %s (team %d); using PlayerStart fallback"),
+					SpawnPS ? *SpawnPS->PlayerName : TEXT("Unknown"), TeamIndex);
+			}
+		}
+
+		if (!ChosenStart)
+		{
+			bUsedHybridTransform = false;
+			ChosenStart = ChoosePlayerStart_Implementation(NewPlayer);
+		}
+
+		bHasPendingHybridSpawnTransform = bUsedHybridTransform && (ChosenStart != nullptr);
+		if (bHasPendingHybridSpawnTransform)
+		{
+			PendingHybridSpawnTransform = HybridTransform;
+		}
 
 		OverriddenPlayerStart  = ChosenStart;
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
+		bHasPendingHybridSpawnTransform = false;
+
+		if (bUsedHybridTransform && NewPlayer->GetPawn())
+		{
+			FRotator SpawnRotation = HybridTransform.Rotator();
+			SpawnRotation.Pitch = 0.f;
+			SpawnRotation.Roll = 0.f;
+			NewPlayer->SetControlRotation(SpawnRotation);
+			NewPlayer->ClientSetRotation(SpawnRotation, true);
+		}
 
 		if (!NewPlayer->GetPawn())
 		{
@@ -1611,6 +1764,35 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 			// Pawn now carries its BP defaults (HealthMax 125 + the vest's 100 armor
 			// from default inventory). Scale HP for uneven teams (non-PUG) here.
 			ApplyUnevenTeamHealthScaling(Cast<AUTCharacter>(NewPlayer->GetPawn()));
+
+#if WITH_EDITOR
+			// Stock AUTGameMode only sends ClientSwitchToBestWeapon for a remote
+			// controller. A listen-server PIE controller is local, so after the
+			// round reset it can own the full default inventory but have no active
+			// weapon. Wipeout already performs this next-tick recovery for every
+			// spawn; keep the ElimPlus workaround editor-only so production behavior
+			// and wire traffic are unchanged.
+			AUTPlayerController* PIEPlayer = Cast<AUTPlayerController>(NewPlayer);
+			if (GetWorld()->WorldType == EWorldType::PIE
+				&& PIEPlayer && PIEPlayer->IsLocalController())
+			{
+				TWeakObjectPtr<AUTPlayerController> WeakPIEPlayer = PIEPlayer;
+				GetWorldTimerManager().SetTimerForNextTick([WeakPIEPlayer]()
+				{
+					if (WeakPIEPlayer.IsValid() && WeakPIEPlayer->GetPawn())
+					{
+						WeakPIEPlayer->ClientSwitchToBestWeapon();
+					}
+				});
+			}
+#endif
+
+			// Round participation (humans AND bots — team-size honesty): only
+			// players who actually spawned get rated/PPR'd for this round.
+			if (AUTPlayerState* SpawnedPS = Cast<AUTPlayerState>(NewPlayer->PlayerState))
+			{
+				RoundParticipants.Add(SpawnedPS);
+			}
 		}
 	}
 }
@@ -1704,9 +1886,26 @@ bool AElimPlusGame::ValidateSpawnLocation(const FVector& TestLocation)
 
 APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot)
 {
+	if (!StartSpot && !bHasPendingHybridSpawnTransform)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: no PlayerStart or hybrid transform"));
+		return nullptr;
+	}
+
 	FRotator StartRotation(ForceInit);
-	StartRotation.Yaw = StartSpot->GetActorRotation().Yaw;
-	FVector StartLocation = StartSpot->GetActorLocation();
+	StartRotation.Yaw = bHasPendingHybridSpawnTransform
+		? PendingHybridSpawnTransform.Rotator().Yaw
+		: StartSpot->GetActorRotation().Yaw;
+	FVector StartLocation = bHasPendingHybridSpawnTransform
+		? PendingHybridSpawnTransform.GetLocation()
+		: StartSpot->GetActorLocation();
+	const bool bUsingHybridTransform = bHasPendingHybridSpawnTransform;
+	const FVector AuthoredFallbackLocation = StartSpot
+		? StartSpot->GetActorLocation()
+		: StartLocation;
+	const FRotator AuthoredFallbackRotation = StartSpot
+		? StartSpot->GetActorRotation()
+		: StartRotation;
 
 	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
 	if (!PawnClass)
@@ -1741,7 +1940,7 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 			ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation + Offset), SpawnInfo);
 			if (ResultPawn)
 			{
-				UE_LOG(LogGameMode, Log, TEXT("SpawnDefaultPawnFor: Used offset spawn at %s"), *StartSpot->GetName());
+				UE_LOG(LogGameMode, Log, TEXT("SpawnDefaultPawnFor: Used offset spawn at %s"), *GetNameSafe(StartSpot));
 				break;
 			}
 		}
@@ -1753,10 +1952,21 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 	// sharing the exact same origin (which causes physics explosions).
 	if (!ResultPawn)
 	{
+		// A hybrid transform that failed every collision-aware attempt is no
+		// longer a valid recovery anchor. Force-spawn at the real authored
+		// PlayerStart retained for engine bookkeeping instead.
+		if (bUsingHybridTransform && StartSpot)
+		{
+			StartLocation = AuthoredFallbackLocation;
+			StartRotation.Yaw = AuthoredFallbackRotation.Yaw;
+			UE_LOG(LogGameMode, Warning,
+				TEXT("SpawnDefaultPawnFor: Hybrid transform blocked; falling back to authored PlayerStart %s"),
+				*GetNameSafe(StartSpot));
+		}
 		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		FVector JitteredLocation = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 0.f);
 		ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, JitteredLocation), SpawnInfo);
-		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: Force-spawned at %s"), *StartSpot->GetName());
+		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: Force-spawned at %s"), *GetNameSafe(StartSpot));
 	}
 
 	if (!ResultPawn)
@@ -1794,9 +2004,14 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 	// Recovery: teleport back with jitter to prevent overlap explosions
 	if (bLocationBad)
 	{
-		FVector SafeRecoveryLoc = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 20.0f);
+		const FVector RecoveryBase = (bUsingHybridTransform && StartSpot)
+			? AuthoredFallbackLocation
+			: StartLocation;
+		FVector SafeRecoveryLoc = RecoveryBase + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 20.0f);
 		ResultPawn->SetActorLocation(SafeRecoveryLoc, false, nullptr, ETeleportType::TeleportPhysics);
-		UE_LOG(LogGameMode, Warning, TEXT("SpawnDefaultPawnFor: Bad location detected, reset to PlayerStart"));
+		UE_LOG(LogGameMode, Warning,
+			TEXT("SpawnDefaultPawnFor: Bad location detected, reset to authored PlayerStart %s"),
+			*GetNameSafe(StartSpot));
 	}
 
 	return ResultPawn;
@@ -1820,6 +2035,22 @@ void AElimPlusGame::ScoreKill_Implementation(AController* Killer, AController* O
 	{
 		OtherPS->bOutOfLives = true;
 		OtherPS->ForceNetUpdate();
+	}
+
+	// --- Clutch telemetry, in strict order for this death event: ---
+	// (1) assign the match-local death ordinal, (2) credit the kill to any
+	// already-open attempt whose candidate is still alive, (3) mark a dying
+	// candidate dead (freezing the boundary BEFORE any later event can award a
+	// posthumous kill), then (4) CheckLastManStanding below may open a NEW
+	// attempt starting at this same ordinal.
+	const int32 DeathOrdinal = ClutchDeathOrdinal++;
+	{
+		// Suicides (Killer == Other) and world deaths (no killer) credit nobody;
+		// team kills are rejected inside CreditClutchDirectKill via the team check.
+		AUTPlayerState* KillerPS = (Killer && Killer != Other)
+			? Cast<AUTPlayerState>(Killer->PlayerState) : nullptr;
+		CreditClutchDirectKill(KillerPS, OtherPS);
+		MarkClutchCandidateDead(OtherPS, DeathOrdinal);
 	}
 
 	int32 Alive0, Alive1;
@@ -2337,8 +2568,94 @@ void AElimPlusGame::SelectSpawnLayoutForRound()
 		Team0SelectedSpawns.Num(), Team1SelectedSpawns.Num());
 }
 
+void AElimPlusGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount)
+{
+	ClearHybridRoundSpawnState();
+	if (Team0PlayerCount <= 0 && Team1PlayerCount <= 0)
+	{
+		return;
+	}
+	if (!bEnableHybridRoundSpawns)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[HybridSpawn] ElimPlus disabled by config; using PlayerStart-only round spawns (players %d/%d)"),
+			Team0PlayerCount, Team1PlayerCount);
+		return;
+	}
+
+	FNCHybridSpawnSettings Settings;
+	Settings.MinimumCrossTeamDistance = MinimumEnemySpawnDistance;
+
+	FNCHybridSpawnResult Result;
+	if (!FNCHybridSpawnGenerator::Generate(
+		GetWorld(), AllSpawnPointsList, Team0SelectedSpawns, Team1SelectedSpawns,
+		Team0PlayerCount, Team1PlayerCount, Settings, Result))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("ElimPlus hybrid spawn generation had no safe anchor pair; using PlayerStart fallback"));
+		return;
+	}
+	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
+	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
+	bHybridRoundSpawnWindow = Team0HybridSpawnQueue.Num() > 0 || Team1HybridSpawnQueue.Num() > 0;
+
+	UE_LOG(LogGameMode, Warning,
+		TEXT("[HybridSpawn] ElimPlus active: anchors %s/%s, separation %.0f, radius %.0f, players %d/%d, queues %d/%d"),
+		*Result.Team0AnchorName.ToString(), *Result.Team1AnchorName.ToString(),
+		Result.AnchorDistance2D, Result.TeamRadius, Team0PlayerCount, Team1PlayerCount,
+		Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+
+	if (!Result.bTeam0Complete || !Result.bTeam1Complete)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("ElimPlus hybrid queues are partial (needed %d/%d, built %d/%d); missing players use the existing fallback"),
+			Team0PlayerCount, Team1PlayerCount,
+			Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+	}
+
+	UE_LOG(LogGameMode, Verbose,
+		TEXT("ElimPlus hybrid rejects T0[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
+		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedPath,
+		Result.Team0Stats.RejectedFloor,
+		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedDrop,
+		Result.Team0Stats.RejectedClearance,
+		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
+		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
+		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedPath,
+		Result.Team1Stats.RejectedFloor,
+		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedDrop,
+		Result.Team1Stats.RejectedClearance,
+		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,
+		Result.Team1Stats.RejectedPit, Result.Team1Stats.RejectedPainVolume);
+}
+
+bool AElimPlusGame::TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform)
+{
+	TArray<FTransform>* Queue = nullptr;
+	if (TeamIndex == 0) Queue = &Team0HybridSpawnQueue;
+	else if (TeamIndex == 1) Queue = &Team1HybridSpawnQueue;
+
+	if (!Queue || Queue->Num() == 0)
+	{
+		return false;
+	}
+
+	OutTransform = (*Queue)[0];
+	Queue->RemoveAt(0, 1, false);
+	return true;
+}
+
+void AElimPlusGame::ClearHybridRoundSpawnState()
+{
+	bHybridRoundSpawnWindow = false;
+	bHasPendingHybridSpawnTransform = false;
+	Team0HybridSpawnQueue.Empty();
+	Team1HybridSpawnQueue.Empty();
+}
+
 void AElimPlusGame::ResetSpawnSelectionForNewRound()
 {
+	ClearHybridRoundSpawnState();
 	Team0SelectedSpawns.Empty();
 	Team1SelectedSpawns.Empty();
 	++CurrentRoundNumber;
@@ -2715,6 +3032,8 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive1)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive1);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 0) vs %d enemies."), *ClutchPlayer->PlayerName, Alive1);
+			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
+			OpenClutchAttempt(0, ClutchPlayer, Alive1);
 		}
 	}
 	if (Team1StartingSize > 1 && Alive1 == 1 && !bTeam1LastManAnnounced)
@@ -2738,6 +3057,8 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive0)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive0);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 1) vs %d enemies."), *ClutchPlayer->PlayerName, Alive0);
+			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
+			OpenClutchAttempt(1, ClutchPlayer, Alive0);
 		}
 	}
 }
@@ -2747,6 +3068,135 @@ void AElimPlusGame::BroadcastLastManStanding(int32 LastManTeamIndex, AUTPlayerSt
 	// Call Blueprint implementation first (for players without C++ plugin)
 	BP_OnLastManStanding(LastManTeamIndex, LastManPlayerState);
 
+}
+
+// ============================================================================
+// Server-authored clutch telemetry
+// ============================================================================
+
+void AElimPlusGame::ResetClutchTelemetryForMatch()
+{
+	ActiveClutch[0] = FElimPlusClutchTracker();
+	ActiveClutch[1] = FElimPlusClutchTracker();
+	CompletedClutches.Empty();
+	ClutchDeathOrdinal = 0;
+}
+
+void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate, int32 EnemiesAlive)
+{
+	if (TeamIndex < 0 || TeamIndex > 1 || EnemiesAlive < 1) return;
+	if (ActiveClutch[TeamIndex].bOpen) return;   // at most one attempt per team per round
+	// Bots (and any state without a resolvable StatsID) are never uploaded as
+	// historical player attempts — don't even open a tracker for them.
+	if (!Candidate || !Candidate->UniqueId.IsValid()) return;
+
+	FElimPlusClutchTracker& A = ActiveClutch[TeamIndex];
+	A = FElimPlusClutchTracker();
+	A.bOpen           = true;
+	A.UniqueId        = Candidate->UniqueId.ToString();  // captured NOW — candidate may leave
+	A.Candidate       = Candidate;
+	// TotalRoundsPlayed increments in EndRoundForTeam, so DURING a round it
+	// equals the round's 0-based index.
+	A.RoundIndex      = TotalRoundsPlayed;
+	A.EnemiesAtStart  = FMath::Clamp(EnemiesAlive, 1, 4);
+	A.bCandidateAlive = true;
+	// The opening death was assigned its ordinal earlier in this ScoreKill call.
+	A.StartEventIndex = FMath::Max(0, ClutchDeathOrdinal - 1);
+	A.StartTime       = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	UE_LOG(LogGameMode, Log, TEXT("Clutch attempt open: team %d, %s 1v%d (round %d, event %d)"),
+		TeamIndex, *Candidate->PlayerName, A.EnemiesAtStart, A.RoundIndex, A.StartEventIndex);
+}
+
+void AElimPlusGame::CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
+{
+	if (!KillerPS || !VictimPS) return;
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		FElimPlusClutchTracker& A = ActiveClutch[Team];
+		// bCandidateAlive gates POSTHUMOUS projectile kills: once the candidate's
+		// own death event was processed, nothing they fired earlier may count.
+		if (!A.bOpen || !A.bCandidateAlive) continue;
+		if (A.Candidate.Get() != KillerPS) continue;
+		// Only kills of the OPPOSING team count (excludes team kills; suicides
+		// and world deaths never reach here because the caller passes null).
+		if (static_cast<int32>(VictimPS->GetTeamNum()) != (1 - Team)) continue;
+		A.DirectKills++;
+	}
+}
+
+void AElimPlusGame::MarkClutchCandidateDead(AUTPlayerState* VictimPS, int32 DeathOrdinal)
+{
+	if (!VictimPS) return;
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		FElimPlusClutchTracker& A = ActiveClutch[Team];
+		if (!A.bOpen || !A.bCandidateAlive) continue;
+		if (A.Candidate.Get() != VictimPS) continue;
+		A.bCandidateAlive = false;
+		// Freeze the attempt boundary at the candidate's death: a delayed
+		// projectile that later ends the round must not extend it.
+		A.EndEventIndex = FMath::Max(A.StartEventIndex, DeathOrdinal);
+		A.EndTime       = GetWorld() ? GetWorld()->GetTimeSeconds() : A.StartTime;
+	}
+}
+
+void AElimPlusGame::FinalizeClutchAttempts(int32 WinnerTeamIndex)
+{
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		FElimPlusClutchTracker& A = ActiveClutch[Team];
+		if (!A.bOpen) continue;
+
+		FNCElimPlusClutchInput Out;
+		Out.UniqueId       = A.UniqueId;
+		Out.RoundIndex     = A.RoundIndex;
+		Out.TeamIndex      = Team;
+		Out.EnemiesAtStart = A.EnemiesAtStart;
+		Out.DirectKills    = A.DirectKills;
+		// Win requires the candidate's team to take the round AND the candidate
+		// to still be alive — a posthumous projectile round-winner is a loss for
+		// the dead candidate. Timeout/health-tiebreak wins count normally.
+		if (WinnerTeamIndex == INDEX_NONE)
+		{
+			Out.Result = TEXT("draw");
+		}
+		else if (WinnerTeamIndex == Team && A.bCandidateAlive)
+		{
+			Out.Result = TEXT("win");
+		}
+		else
+		{
+			Out.Result = TEXT("loss");
+		}
+		Out.bCleanFinish = (Out.Result == TEXT("win")) && (A.DirectKills == A.EnemiesAtStart);
+		Out.StartEventIndex = A.StartEventIndex;
+		Out.StartTime       = A.StartTime;
+		if (A.EndEventIndex >= 0)
+		{
+			// Candidate died/left mid-attempt — boundary already frozen there.
+			Out.EndEventIndex = A.EndEventIndex;
+			Out.EndTime       = A.EndTime;
+		}
+		else
+		{
+			// Candidate survived to the round boundary (win, draw, or a
+			// tiebreak loss): close at the round's last death ordinal.
+			Out.EndEventIndex = FMath::Max(A.StartEventIndex, ClutchDeathOrdinal - 1);
+			Out.EndTime       = FMath::Max(A.StartTime, Now);
+		}
+		if (!Out.UniqueId.IsEmpty())
+		{
+			CompletedClutches.Add(MoveTemp(Out));
+		}
+		A = FElimPlusClutchTracker();
+	}
+}
+
+void AElimPlusGame::DiscardOpenClutchAttempts()
+{
+	ActiveClutch[0] = FElimPlusClutchTracker();
+	ActiveClutch[1] = FElimPlusClutchTracker();
 }
 
 void AElimPlusGame::CheckRoundWinConditions()
@@ -3029,6 +3479,12 @@ void AElimPlusGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 				OverkillDamage += static_cast<float>(-VictimChar->Health);
 			}
 		}
+		// Stock UT uses very large sentinel damage for forced kills (telefrags use
+		// 100,000). Keep normal overkill-inclusive accounting, but mirror the HUD
+		// damage-number ceiling so one event cannot corrupt DMG, PPR, achievements,
+		// or rating persistence. This changes accounting only; gameplay damage and
+		// the resulting kill have already been applied by AUTCharacter::TakeDamage.
+		OverkillDamage = FMath::Min(OverkillDamage, 255.f);
 
 		// Per-round (drives PPR + high-damage-carry achievement) and match-cumulative
 		// (drives the scoreboard DMG column via the stats replicator). Engine DamageDone
@@ -3347,6 +3803,9 @@ void AElimPlusGame::BP_RestartCurrentRound()
 	LastRoundWinningTeamIndex = INDEX_NONE;
 	bTeam0LastManAnnounced = false;
 	bTeam1LastManAnnounced = false;
+	// The aborted round is voided (never scored, never in the rounds[] log), so
+	// any open attempt from it must vanish rather than be recorded.
+	DiscardOpenClutchAttempts();
 	Team0StartingSize = 0;
 	Team1StartingSize = 0;
 	Team0RoundDamage = 0.0f;
@@ -3428,6 +3887,12 @@ void AElimPlusGame::Logout(AController* Exiting)
 		AUTPlayerState* PS = Cast<AUTPlayerState>(Exiting->PlayerState);
 		if (PS)
 		{
+			// A leaving clutch candidate cannot win ("remains alive" rule) and
+			// their PlayerState is about to be destroyed — close their attempt
+			// boundary NOW at the last observed death ordinal. The stable
+			// StatsID was captured at open, so the record still uploads.
+			MarkClutchCandidateDead(PS, FMath::Max(0, ClutchDeathOrdinal - 1));
+
 			// --- THIS IS THE FIX ---
 			// The PlayerState is about to be destroyed.
 			// We MUST remove it from our TMap to prevent
@@ -3756,13 +4221,15 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 	}
 }
 
-// 6-0 blowout shuffle. Strength = each player's CURRENT-match mean PPR (the
+// 6-0 blowout balance. Strength = each player's CURRENT-match mean PPR (the
 // per-round kills + damage/100 metric the scoreboard shows), NOT lifetime
-// Glicko — the lifetime split is exactly what just produced the 6-0. The
-// balancer only compares strength sums, so scale is free; PPR is passed x100
-// to keep the numbers in a familiar range in logs. Bots and no-history
-// joiners (no completed rounds yet) get the human mean — neutral placement
-// rather than a scale-breaking default.
+// Glicko — the lifetime split is exactly what just produced the 6-0. Makes at
+// most ONE change (best 1-for-1 swap, or one move off a stronger-and-larger
+// team); see the header doc + the inline block below for why the full
+// re-partition was retired. Strength comparisons are sum-based, so scale is
+// free; PPR is passed x100 to keep the numbers in a familiar range in logs.
+// Bots and no-history joiners (no completed rounds yet) get the human mean —
+// neutral placement rather than a scale-breaking default.
 void AElimPlusGame::MidGameShufflePPR()
 {
 	if (!HasAuthority() || !RatingSystem.IsValid() || Teams.Num() < 2)
@@ -3827,68 +4294,121 @@ void AElimPlusGame::MidGameShufflePPR()
 		}
 	}
 
-	const FElimPlusBalanceResult Result = RatingSystem->ComputeBalancedTeams(Inputs);
-	if (!Result.bValid)
+	// SINGLE CHANGE ONLY (2026-07-11). The old full re-partition
+	// (ComputeBalancedTeams over all slots) could re-seat most of the lobby —
+	// players experienced a different match rather than a correction, and the
+	// blowout usually continued anyway. Instead: evaluate every 1-for-1 swap
+	// (team sizes preserved) plus, when the stronger team is also up a man,
+	// every single move off it (one change fixes strength AND headcount), and
+	// apply the one that lands the PPR sums closest to even. No-op if the gap
+	// is already small or nothing improves it.
+
+	// Partition the slots by CURRENT team and total each side's strength.
+	TArray<int32> Team0Slots, Team1Slots;
+	float S0 = 0.f, S1 = 0.f;
+	for (int32 i = 0; i < Inputs.Num(); ++i)
 	{
-		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: TeamBalancer returned invalid assignment, skipping"));
+		AUTPlayerState* UTPS = Cast<AUTPlayerState>(ControllersByIndex[i]->PlayerState);
+		const uint8 T = (UTPS && UTPS->Team) ? UTPS->Team->TeamIndex : 255;
+		if (T == 0)      { Team0Slots.Add(i); S0 += Inputs[i].StrengthOverride; }
+		else if (T == 1) { Team1Slots.Add(i); S1 += Inputs[i].StrengthOverride; }
+	}
+	if (Team0Slots.Num() == 0 || Team1Slots.Num() == 0)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: skipped (one side has no slots)"));
 		return;
 	}
 
-	int32 MovesMade = 0;
-	auto AssignToTeam = [this, &ControllersByIndex, &MovesMade](const TArray<int32>& Indices, uint8 TargetTeam)
+	const float Gap = S0 - S1;               // signed; positive = red stronger on match PPR
+	const float CurrentDiff = FMath::Abs(Gap);
+	// A 6-0 with near-equal PPR sums isn't a personnel gap (clutching/teamwork
+	// is winning the rounds) — a swap would yank someone for cosmetics. 50 =
+	// half a mean-PPR point of team strength at the x100 scale.
+	if (CurrentDiff < 50.f)
 	{
-		for (int32 SlotIdx : Indices)
-		{
-			if (!ControllersByIndex.IsValidIndex(SlotIdx)) continue;
-			AController* C = ControllersByIndex[SlotIdx];
-			AUTPlayerState* UTPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
-			if (!UTPS) continue;
-			if (UTPS->Team && UTPS->Team->TeamIndex == TargetTeam) continue;  // already there
-			MovePlayerToTeam(C, UTPS, TargetTeam);
-			++MovesMade;
-		}
-	};
-	AssignToTeam(Result.Team0Indices, 0);
-	AssignToTeam(Result.Team1Indices, 1);
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: no-op — PPR gap already small (%.1f)"), CurrentDiff / 100.f);
+		return;
+	}
 
-	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 shuffle: %d players, Team0=%d ppr=%.1f, Team1=%d ppr=%.1f, diff=%.1f, moves=%d"),
-		Inputs.Num(),
-		Result.Team0Indices.Num(), Result.Team0Strength / 100.f,
-		Result.Team1Indices.Num(), Result.Team1Strength / 100.f,
-		Result.StrengthDifference / 100.f, MovesMade);
-
-	// Roster broadcast, name(ppr) per player — same stationary-chat-reference
-	// rationale as the pre-match rebalance broadcast.
-	auto BuildTeamLine = [this, &ControllersByIndex, &Inputs](const TArray<int32>& Indices, const TCHAR* Prefix, float Strength) -> FString
+	// Swapping A(red) with B(blue) changes the signed gap by -2*(Sa - Sb);
+	// moving a player across changes it by -2*S (red->blue) or +2*S (blue->red).
+	int32 BestRed = INDEX_NONE, BestBlue = INDEX_NONE;   // both set = swap; one set = single move
+	float BestDiff = CurrentDiff;
+	for (int32 A : Team0Slots)
 	{
-		FString Names;
-		for (int32 SlotIdx : Indices)
+		for (int32 B : Team1Slots)
 		{
-			if (!ControllersByIndex.IsValidIndex(SlotIdx) || !Inputs.IsValidIndex(SlotIdx)) continue;
-			AController* C = ControllersByIndex[SlotIdx];
-			AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
-			if (!PS) continue;
-			if (!Names.IsEmpty()) Names += TEXT(", ");
-			Names += FString::Printf(TEXT("%s(%.1f)"), *PS->PlayerName, Inputs[SlotIdx].StrengthOverride / 100.f);
+			const float NewDiff = FMath::Abs(Gap - 2.f * (Inputs[A].StrengthOverride - Inputs[B].StrengthOverride));
+			if (NewDiff < BestDiff) { BestDiff = NewDiff; BestRed = A; BestBlue = B; }
 		}
-		return FString::Printf(TEXT("%s (ppr=%.1f): %s"), Prefix, Strength / 100.f, *Names);
+	}
+	if (Gap > 0.f && Team0Slots.Num() > Team1Slots.Num())
+	{
+		for (int32 A : Team0Slots)
+		{
+			const float NewDiff = FMath::Abs(Gap - 2.f * Inputs[A].StrengthOverride);
+			if (NewDiff < BestDiff) { BestDiff = NewDiff; BestRed = A; BestBlue = INDEX_NONE; }
+		}
+	}
+	else if (Gap < 0.f && Team1Slots.Num() > Team0Slots.Num())
+	{
+		for (int32 B : Team1Slots)
+		{
+			const float NewDiff = FMath::Abs(Gap + 2.f * Inputs[B].StrengthOverride);
+			if (NewDiff < BestDiff) { BestDiff = NewDiff; BestRed = INDEX_NONE; BestBlue = B; }
+		}
+	}
+
+	if (BestRed == INDEX_NONE && BestBlue == INDEX_NONE)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: no-op — no single change narrows the PPR gap (%.1f)"), CurrentDiff / 100.f);
+		return;
+	}
+
+	auto SlotName = [&ControllersByIndex, &Inputs](int32 SlotIdx) -> FString
+	{
+		AController* C = ControllersByIndex.IsValidIndex(SlotIdx) ? ControllersByIndex[SlotIdx] : nullptr;
+		AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+		return PS ? FString::Printf(TEXT("%s(%.1f)"), *PS->PlayerName, Inputs[SlotIdx].StrengthOverride / 100.f) : FString(TEXT("?"));
+	};
+	auto MoveSlot = [this, &ControllersByIndex](int32 SlotIdx, uint8 TargetTeam)
+	{
+		AController* C = ControllersByIndex.IsValidIndex(SlotIdx) ? ControllersByIndex[SlotIdx] : nullptr;
+		AUTPlayerState* UTPS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+		if (C && UTPS) { MovePlayerToTeam(C, UTPS, TargetTeam); }
 	};
 
-	const FString Header   = FString::Printf(TEXT("=== 6-0: Teams shuffled by current match performance (PPR) — moves=%d ==="), MovesMade);
-	const FString RedLine  = BuildTeamLine(Result.Team0Indices, TEXT("RED  "), Result.Team0Strength);
-	const FString BlueLine = BuildTeamLine(Result.Team1Indices, TEXT("BLUE "), Result.Team1Strength);
+	FString ChangeDesc;
+	if (BestRed != INDEX_NONE && BestBlue != INDEX_NONE)
+	{
+		ChangeDesc = FString::Printf(TEXT("%s <-> %s"), *SlotName(BestRed), *SlotName(BestBlue));
+		MoveSlot(BestRed, 1);
+		MoveSlot(BestBlue, 0);
+	}
+	else if (BestRed != INDEX_NONE)
+	{
+		ChangeDesc = FString::Printf(TEXT("%s RED -> BLUE"), *SlotName(BestRed));
+		MoveSlot(BestRed, 1);
+	}
+	else
+	{
+		ChangeDesc = FString::Printf(TEXT("%s BLUE -> RED"), *SlotName(BestBlue));
+		MoveSlot(BestBlue, 0);
+	}
 
+	UE_LOG(LogGameMode, Warning, TEXT("ElimPlus 6-0 balance: %s — team ppr %.1f vs %.1f, gap %.1f -> %.1f"),
+		*ChangeDesc, S0 / 100.f, S1 / 100.f, CurrentDiff / 100.f, BestDiff / 100.f);
+
+	// One-line broadcast naming exactly who moved — a single swap doesn't need
+	// the full roster dump the old re-partition printed.
+	const FString Header = FString::Printf(TEXT("=== 6-0: balance swap by current match PPR: %s (gap %.1f -> %.1f) ==="),
+		*ChangeDesc, CurrentDiff / 100.f, BestDiff / 100.f);
 	UE_LOG(LogGameMode, Warning, TEXT("%s"), *Header);
-	UE_LOG(LogGameMode, Warning, TEXT("%s"), *RedLine);
-	UE_LOG(LogGameMode, Warning, TEXT("%s"), *BlueLine);
-
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
 		APlayerController* PC = It->Get();
 		if (!PC) continue;
 		PC->ClientMessage(Header);
-		PC->ClientMessage(RedLine);
-		PC->ClientMessage(BlueLine);
 	}
 }
 

@@ -6,6 +6,7 @@
 #include "UTGameState.h"
 #include "UTCharacter.h"
 #include "Engine/World.h"
+#include "Components/CapsuleComponent.h"   // GetScaledCapsuleSize in ComputeSlideVectorUT
 
 
 // This prevents visual jitter when the server sends small corrections
@@ -287,4 +288,108 @@ void UTeamArenaCharacterMovement::SmoothClientPosition(float DeltaSeconds)
     // TODO: Hard clamp for extreme corrections (IG+ style) — disabled for now,
     // needs more testing with water volumes and movement mode transitions.
     Super::SmoothClientPosition(DeltaSeconds);
+}
+
+// ── BSP slope-edge stick fix ─────────────────────────────────────────────────
+// Copy of UUTCharacterMovement::ComputeSlideVectorUT (UTCharacterMovement.cpp:1651,
+// engine fork CL-3525360 — frozen, no drift risk) with ONE branch changed.
+//
+// Stock reduces only Result.Z in the slope-dodge-boost branch. Result comes from a
+// plane projection (Result|Normal == 0), so a Z-only reduction points the slide
+// vector back INTO any upward-facing surface (Result|Normal < 0) and the very next
+// move re-collides with the face it just left. On flat faces TwoWallAdjust
+// self-heals; on BSP seams/convex edges the re-impact returns edge normals, the
+// delta collapses, and PhysFalling rebuilds velocity from actual displacement —
+// the player hard-sticks mid-slope (timiimit/UT4UU-Public#4, the BunnyTrack slope
+// bug). Epic's own comment in the full-clamp branch below names the failure mode.
+//
+// Fix: keep the exact stock Z limit (slope-dodge boost + uphill cap unchanged) but
+// apply it by rescaling the WHOLE vector so the slide stays plane-parallel, then
+// return the clipped portion as horizontal motion along the surface — the same
+// idiom the full-clamp branch (and engine HandleSlopeBoosting) already uses.
+//
+// Runs in client prediction AND server move replay: shared simulation, so it must
+// ship client+server together (NETCODE_PLUGIN_VERSION bump; the gate enforces it).
+
+// Matches the file-local MAX_STEP_SIDE_Z in UTCharacterMovement.cpp:14 (internal
+// linkage there, not referenceable from this module).
+static const float NCP_MAX_STEP_SIDE_Z = 0.08f;
+
+FVector UTeamArenaCharacterMovement::ComputeSlideVectorUT(const float DeltaTime, const FVector& InDelta, const float Time, const FVector& Normal, const FHitResult& Hit)
+{
+    const bool bFalling = IsFalling();
+    FVector Delta = InDelta;
+    FVector Result = UMovementComponent::ComputeSlideVector(Delta, Time, Normal, Hit);
+
+    // prevent boosting up slopes
+    if (bFalling && Result.Z > 0.f)
+    {
+        float PawnRadius, PawnHalfHeight;
+        CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleSize(PawnRadius, PawnHalfHeight);
+        if (Delta.Z < 0.f && (Hit.ImpactNormal.Z < NCP_MAX_STEP_SIDE_Z))
+        {
+            // (stock) We were moving downward, but a slide was going to send us upward. We want
+            // to aim straight down for the next move to make sure we get the most upward-facing
+            // opposing normal.
+            Result = FVector(0.f, 0.f, Delta.Z);
+        }
+        else if (bAllowSlopeDodgeBoost && (((CharacterOwner->GetActorLocation() - Hit.ImpactPoint).Size2D() > 0.93f * PawnRadius) || (Hit.ImpactNormal.Z > 0.2f)))
+        {
+            if (Result.Z > Delta.Z * Time)
+            {
+                // CHANGED vs stock: stock did `Result.Z = Max(Result.Z * SlopeDodgeScaling,
+                // Delta.Z*Time)` and left XY alone, which tilts the slide into the plane and
+                // re-collides with the surface it just left (the BSP slope-edge stick). We take
+                // the exact same Z, then cancel the into-plane component by adjusting the
+                // horizontal part along the slope's horizontal normal only — cross-slope motion
+                // is untouched. Algebraically identical to "rescale the whole vector and give
+                // the clipped remainder back tangentially", but with no normalize and no
+                // GetSafeNormal2D degeneracy: for near-vertical normals (|Normal.XY|^2 <
+                // SMALL_NUMBER) that idiom silently restored FULL XY and re-tilted the vector
+                // into the plane, so we fall back to a uniform rescale there instead — still
+                // exactly plane-parallel.
+                // Deliberately NOT gated on ZLimit like the clamp branch below: ZLimit <= 0
+                // (descending into the slope) is the main slope-dodge-boost case, and stock
+                // still applies the 0.93 scaling there.
+                const FVector SlideResult = Result;
+                const float TargetZ = FMath::Max(Result.Z * SlopeDodgeScaling, Delta.Z * Time);
+                Result.Z = TargetZ;
+
+                const FVector HorizontalNormal(Normal.X, Normal.Y, 0.f);
+                const float HorizontalNormalSq = HorizontalNormal.SizeSquared();
+                if (HorizontalNormalSq >= SMALL_NUMBER)
+                {
+                    Result -= HorizontalNormal * ((Result | Normal) / HorizontalNormalSq);
+                }
+                else
+                {
+                    // Uniform rescale keeps the projection's direction (parallel by
+                    // construction); the divisor is > 0 via the enclosing Result.Z > 0 gate.
+                    Result = SlideResult * (TargetZ / SlideResult.Z);
+                    Result.Z = TargetZ;
+                }
+            }
+        }
+        else
+        {
+            // (stock) Don't move any higher than we originally intended.
+            const float ZLimit = Delta.Z * Time;
+            if (Result.Z > ZLimit && ZLimit > KINDA_SMALL_NUMBER)
+            {
+                FVector SlideResult = Result;
+
+                // Rescale the entire vector (not just the Z component) otherwise we change the
+                // direction and likely head right back into the impact.
+                const float UpPercent = ZLimit / Result.Z;
+                Result *= UpPercent;
+
+                // Make remaining portion of original result horizontal and parallel to impact normal.
+                const FVector RemainderXY = (SlideResult - Result) * FVector(1.f, 1.f, 0.f);
+                const FVector NormalXY = Normal.GetSafeNormal2D();
+                const FVector Adjust = UCharacterMovementComponent::ComputeSlideVector(RemainderXY, 1.f, NormalXY, Hit);
+                Result += Adjust;
+            }
+        }
+    }
+    return Result;
 }

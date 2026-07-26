@@ -3,7 +3,9 @@
 // © Tron (tronunator). No upstream LICENSE file at vendor time; included here
 // with author authorization (relayed via NetcodePlus author). LOCAL MODS (this
 // file): LobbyImpact() + the bLobbyImpactBlend branch of ProcessMatch (the
-// ElimPlus/Wipeout carry-aware blend, expectation-centered 2026-07-03) — see
+// ElimPlus/Wipeout carry-aware blend, expectation-centered 2026-07-03) + the
+// man-advantage opponent-mu shift after Step 2 (2026-07-11, headcount-aware
+// expectations for uneven teams) — see
 // the comment blocks at each site and TeamGlicko2Config.h. Cross-file includes
 // resolved via Plugins/NetcodePlus/Source/Public/Glicko2 added to
 // NetcodePlus.Build.cs PublicIncludePaths. Update: re-pull from upstream,
@@ -48,6 +50,25 @@ namespace TeamGlicko2 {
         // Step 2: Compute team aggregated ratings (each team = one opponent)
         TeamRatingStats statsA = TeamRatingAggregator::ComputeTeamStats(teamARatings);
         TeamRatingStats statsB = TeamRatingAggregator::ComputeTeamStats(teamBRatings);
+
+        // LOCAL MOD (man-advantage, 2026-07-11): the average-mu team strength is
+        // headcount-blind — shift each side's PERCEIVED opponent by the headcount
+        // difference so a short-handed side is priced as the underdog it really is
+        // (see TeamGlicko2Config.h). statsB is consumed only as team A's opponent
+        // and statsA only as team B's, in both branches below, so the asymmetric
+        // in-place shift is safe. Sign check: A short a man => teamB.size()-
+        // teamA.size() > 0 => statsB.mu rises => A's E drops => A's losses cheap,
+        // wins pay; B sees the mirrored negative shift on statsA.
+        {
+            int sizeDiff = int(match.teamB.size()) - int(match.teamA.size());
+            if (sizeDiff > kManAdvantageMaxDiff) sizeDiff = kManAdvantageMaxDiff;
+            else if (sizeDiff < -kManAdvantageMaxDiff) sizeDiff = -kManAdvantageMaxDiff;
+            if (sizeDiff != 0) {
+                const double muShift = (kManAdvantageRating / kScale) * double(sizeDiff);
+                statsB.mu += muShift;   // as faced by team A
+                statsA.mu -= muShift;   // as faced by team B (mirrored)
+            }
+        }
 
         // LOCAL MOD (ElimPlus/Wipeout carry-rework): carry-aware lobby-impact
         // blend (see TeamGlicko2Config.h). z-score perf across the WHOLE LOBBY so
