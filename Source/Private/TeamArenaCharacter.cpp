@@ -133,6 +133,25 @@ void ATeamArenaCharacter::NotifyTeamChanged()
 	}
 }
 
+void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data)
+{
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		Super::ApplyCharacterData(Data);
+		return;
+	}
+
+	// Stock ApplyCharacterData rebuilds CustomDepthMesh while GetMesh() is still inside an
+	// FComponentReregisterContext. If X-ray is active, that replacement can register without
+	// its CharacterMesh0 parent and remain at world origin. Preserve the requested outline
+	// state, suppress only the premature rebuild, then recreate it after GetMesh() is registered.
+	{
+		TGuardValue<bool> SuppressOutline(bForceNoOutline, true);
+		Super::ApplyCharacterData(Data);
+	}
+	UpdateOutline();
+}
+
 // Apply the coalesced forced-model work, at most once per frame. Called from the top of Tick on clients,
 // which runs AFTER this frame's network replication dispatch — so the N NotifyTeamChanged calls from a
 // single replication burst collapse into ONE ApplyCharacterData rebuild here. bForceReapply MUST be true:
