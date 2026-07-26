@@ -183,8 +183,8 @@ static TAutoConsoleVariable<float> CVarHitAttribRenderExtraMs(
 // shooters on claim-capable modes (bots and spread weapons never claim).
 // =========================================================================
 static TAutoConsoleVariable<int32> CVarUnclaimedRenderGate(
-    TEXT("ncp.UnclaimedRenderGate"), 0,
-    TEXT("Unclaimed exact-hitscan pawn hits must also cross the target's render-time rewound capsule: 0=shadow (default; verdict logged via ncp.HitAttribDebug, no behavior change), 1=enforce (failing hits demote to world impact). Claimed routes unaffected."),
+    TEXT("ncp.UnclaimedRenderGate"), 1,
+    TEXT("Unclaimed exact-hitscan pawn hits must also cross the target's render-time rewound capsule: 1=enforce (default; failing hits demote to world impact), 0=shadow kill switch (verdict still logged via ncp.HitAttribDebug, no behavior change). Server-side only; flippable live on the server console. Claimed routes unaffected."),
     ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarUnclaimedRenderSlack(
@@ -2877,9 +2877,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
     // ---- UNCLAIMED-HIT RENDER CHECK (see cvar block at top of file) ----
     // Runs when a pawn hit is about to be granted with NO claim. Computes
-    // whether the shot also crosses the target's render-time capsule; shadow
-    // mode (gate 0) only records the verdict for the [HitAttrib] line,
-    // enforce mode (gate 1) demotes failing hits to the world impact.
+    // whether the shot also crosses the target's render-time capsule; enforce
+    // mode (gate 1, default) demotes failing hits to the world impact, shadow
+    // mode (gate 0) only records the verdict for the [HitAttrib] line.
     bool bRenderChkApplicable = false;
     bool bRenderChkPass = true;
     bool bRenderChkDemoted = false;
