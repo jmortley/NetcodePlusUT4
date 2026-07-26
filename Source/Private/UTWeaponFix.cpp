@@ -168,6 +168,30 @@ static TAutoConsoleVariable<float> CVarHitAttribRenderExtraMs(
     TEXT("[HitAttrib] estimated render latency beyond half-RTT (net update interval + client smoothing), ms. Diagnostic only. Default: 30."),
     ECVF_Default);
 
+// =========================================================================
+// UNCLAIMED-HIT RENDER CHECK — the "fix the server claim" gate.
+// Phase-1 attribution (LA dogfood 2026-07-26) showed the gifted leading-edge
+// hits arrive as route=primary-rewind-unclaimed: the shooter's client crossed
+// NOTHING (claimSent=none) yet the server's under-rewound capsule was hit.
+// Rather than hard-requiring claim presence (the reverted 2026-07-18 gate —
+// it starved shooters whose claims are lost or unproduceable), the server
+// reconstructs the claim: an UNCLAIMED exact-hitscan pawn hit must also cross
+// the target's RENDER-TIME rewound capsule (halfRTT + ncp.HitAttribRenderExtraMs,
+// plus slack). Shots aimed at the rendered body pass even with a lost claim,
+// at any ping; shots at the invisible leading edge fail. Claimed routes
+// (primary/padding/time-search) are untouched. Applies only to remote human
+// shooters on claim-capable modes (bots and spread weapons never claim).
+// =========================================================================
+static TAutoConsoleVariable<int32> CVarUnclaimedRenderGate(
+    TEXT("ncp.UnclaimedRenderGate"), 0,
+    TEXT("Unclaimed exact-hitscan pawn hits must also cross the target's render-time rewound capsule: 0=shadow (default; verdict logged via ncp.HitAttribDebug, no behavior change), 1=enforce (failing hits demote to world impact). Claimed routes unaffected."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarUnclaimedRenderSlack(
+    TEXT("ncp.UnclaimedRenderSlack"), 20.0f,
+    TEXT("Extra radius (uu) forgiven by the unclaimed render-time check, absorbing render-lag estimate error and ping jitter. Default: 20."),
+    ECVF_Default);
+
 static bool ShotIntersectsRenderedCapsule(
     AUTCharacter* Target,
     const FVector& StartLocation,
@@ -2851,6 +2875,87 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 	}
 
 
+    // ---- UNCLAIMED-HIT RENDER CHECK (see cvar block at top of file) ----
+    // Runs when a pawn hit is about to be granted with NO claim. Computes
+    // whether the shot also crosses the target's render-time capsule; shadow
+    // mode (gate 0) only records the verdict for the [HitAttrib] line,
+    // enforce mode (gate 1) demotes failing hits to the world impact.
+    bool bRenderChkApplicable = false;
+    bool bRenderChkPass = true;
+    bool bRenderChkDemoted = false;
+    float RenderChkMissBy = 0.f;
+    AUTCharacter* RenderChkDemotedTarget = nullptr;
+    const int32 UnclaimedRenderGate = CVarUnclaimedRenderGate.GetValueOnGameThread();
+    if (BestTarget != nullptr && ReceivedHitScanHitChar == nullptr &&
+        (bHitAttrib || UnclaimedRenderGate > 0) &&
+        Role == ROLE_Authority && GetNetMode() != NM_Standalone &&
+        UTOwner != nullptr && UTOwner->PlayerState != nullptr)
+    {
+        // Same applicability envelope as the claim generator in FireShot: the
+        // shooter is a remote human and this mode COULD have claimed. Bots and
+        // spread weapons never claim, so their unclaimed hits are legitimate.
+        const AUTPlayerController* ShooterPC = Cast<AUTPlayerController>(UTOwner->Controller);
+        const bool bClaimCapableMode =
+            bTrackHitScanReplication &&
+            InstantHitInfo.IsValidIndex(CurrentFireMode) &&
+            InstantHitInfo[CurrentFireMode].DamageType != nullptr &&
+            InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.0f;
+        if (ShooterPC != nullptr && !ShooterPC->IsLocalController() && bClaimCapableMode)
+        {
+            bRenderChkApplicable = true;
+
+            const float RenderMs = UTOwner->PlayerState->ExactPing * 0.5f +
+                FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
+            const float RenderT = FMath::Clamp(RenderMs * 0.001f, 0.f, 0.25f);
+            FVector RenderLoc = BestTarget->GetRewindLocation(RenderT);
+
+            // Mirror the primary loop's capsule math exactly, at render time.
+            float RenderColHeight = BestTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+            if (BestTarget->UTCharacterMovement && BestTarget->UTCharacterMovement->bIsFloorSliding)
+            {
+                RenderLoc.Z = RenderLoc.Z - RenderColHeight + BestTarget->SlideTargetHeight;
+                RenderColHeight = BestTarget->SlideTargetHeight;
+            }
+            const float RenderColRadius = BestTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
+
+            FVector RenderClosest(0.f);
+            FVector RenderCapsulePoint = RenderLoc;
+            float RenderEffRadius;
+            if (RenderColRadius >= RenderColHeight)
+            {
+                RenderClosest = FMath::ClosestPointOnSegment(RenderLoc, StartLocation, Hit.Location);
+                RenderEffRadius = RenderColHeight;
+            }
+            else
+            {
+                const FVector RenderSeg(0.f, 0.f, RenderColHeight - RenderColRadius);
+                FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
+                    RenderLoc - RenderSeg, RenderLoc + RenderSeg, RenderClosest, RenderCapsulePoint);
+                RenderEffRadius = RenderColRadius;
+            }
+            RenderChkMissBy = FVector::Dist(RenderClosest, RenderCapsulePoint) - (RenderEffRadius + TraceRadius);
+            bRenderChkPass = RenderChkMissBy <= FMath::Max(0.f, CVarUnclaimedRenderSlack.GetValueOnGameThread());
+
+            if (!bRenderChkPass && UnclaimedRenderGate > 0)
+            {
+                // Demote to the world impact computed above; beams and impact
+                // effects still terminate correctly (same shape as the reverted
+                // 2026-07-18 gate's rejection, but render-reconstructed instead
+                // of claim-presence-based, and ping-independent).
+                UE_LOG(LogUTWeaponFix, Log,
+                    TEXT("[HitAttrib] UnclaimedRenderGate DEMOTED %s: missed render-time capsule by %.1fuu (ping %.0f, renderMs %.1f)"),
+                    *BestTarget->GetName(), RenderChkMissBy, UTOwner->PlayerState->ExactPing, RenderMs);
+                RenderChkDemotedTarget = BestTarget;
+                bRenderChkDemoted = true;
+                BestTarget = nullptr;
+                BestPoint = FVector::ZeroVector;
+                BestCapsulePoint = FVector::ZeroVector;
+                BestCollisionRadius = 0.f;
+                LastHitscanPaddedRadius = 0.f;
+            }
+        }
+    }
+
     if (BestTarget)
     {
         // we found a player to hit, so update hit result
@@ -2910,7 +3015,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             }
         }
 
-        AUTCharacter* AttribTarget = BestTarget ? BestTarget : ReceivedHitScanHitChar;
+        AUTCharacter* AttribTarget = BestTarget ? BestTarget
+            : (RenderChkDemotedTarget ? RenderChkDemotedTarget : ReceivedHitScanHitChar);
         const float RenderEstMs = ShooterPing * 0.5f + FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
         FString LeadStr(TEXT("na"));
         FString DeltaMagStr(TEXT("na"));
@@ -2933,14 +3039,18 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             ? FString::Printf(TEXT("%.0f"), AttribTimeSearchRungMs) : TEXT("na");
         const FString TsMissStr = bAttribTimeSearchHit
             ? FString::Printf(TEXT("%.1f"), AttribTimeSearchMissBy) : TEXT("na");
+        const FString RenderChkStr = !bRenderChkApplicable ? TEXT("na")
+            : (bRenderChkPass ? TEXT("pass") : (bRenderChkDemoted ? TEXT("fail-demoted") : TEXT("fail")));
+        const FString RenderChkMissStr = bRenderChkApplicable
+            ? FString::Printf(TEXT("%.1f"), RenderChkMissBy) : TEXT("na");
 
         UE_LOG(LogUTWeaponFix, Log,
-            TEXT("[HitAttrib] shooter=%s ping=%.0f wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s"),
+            TEXT("[HitAttrib] shooter=%s ping=%.0f wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s renderChk=%s renderChkMissBy=%s"),
             *AttribName(UTOwner), ShooterPing, *GetClass()->GetName(), CurrentFireMode,
             ActualPredictionTime * 1000.f, *ClaimStr, *AttribName(AttribTarget),
             AttribTarget ? AttribTarget->GetVelocity().Size() : 0.f,
             Route, *ClaimMissStr, AttribClaimPad, *TsRungStr, *TsMissStr,
-            RenderEstMs, *LeadStr, *DeltaMagStr);
+            RenderEstMs, *LeadStr, *DeltaMagStr, *RenderChkStr, *RenderChkMissStr);
     }
 
     if (Role == ROLE_Authority)
