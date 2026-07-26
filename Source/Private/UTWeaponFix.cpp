@@ -140,6 +140,30 @@ static TAutoConsoleVariable<int32> CVarVisualHitscanClaimDebug(
     TEXT("Client rendered-capsule claim diagnostics: 0=off, 1=rejections, 2=all actor-capsule candidates."),
     ECVF_Default);
 
+// =========================================================================
+// HIT-ATTRIBUTION TELEMETRY (server-only, read-only, default OFF).
+// One [HitAttrib] line per server-validated hitscan, attributing the
+// acceptance route: bare rewound-capsule hit vs claim-conditional forgiveness
+// (moving/stationary padding, bidirectional time search) vs miss. Exists to
+// answer which route grants "gifted" hits landing ahead of the rendered model
+// at low ping. Changes no validation behavior at any setting.
+// =========================================================================
+static TAutoConsoleVariable<int32> CVarHitAttribDebug(
+    TEXT("ncp.HitAttribDebug"), 0,
+    TEXT("Server hitscan acceptance attribution: 0=off (default), 1=log one [HitAttrib] line per validated hitscan shot."),
+    ECVF_Default);
+
+// leadUU diagnostic only: the server cannot see what the shooter's client
+// actually rendered, so it approximates the rendered target position as
+// GetRewindLocation(halfRTT + this many ms). The extra term stands in for the
+// server->client net update interval plus client-side mesh smoothing delay.
+// This is an ESTIMATE from server-side history (it ignores client interp
+// filtering); calibrate against phase-2 render-latency measurements.
+static TAutoConsoleVariable<float> CVarHitAttribRenderExtraMs(
+    TEXT("ncp.HitAttribRenderExtraMs"), 30.0f,
+    TEXT("[HitAttrib] estimated render latency beyond half-RTT (net update interval + client smoothing), ms. Diagnostic only. Default: 30."),
+    ECVF_Default);
+
 static bool ShotIntersectsRenderedCapsule(
     AUTCharacter* Target,
     const FVector& StartLocation,
@@ -2561,6 +2585,15 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     // NOTE: We cannot simply call Super::HitScanTrace because it doesn't support our custom padding logic.
     // We must reimplement the trace logic here.
 
+    // [HitAttrib] read-only per-shot attribution state; populated only when the
+    // cvar is on, never feeds back into the validation result.
+    const bool bHitAttrib = (Role == ROLE_Authority) && (CVarHitAttribDebug.GetValueOnGameThread() > 0);
+    float AttribClaimMissBy = BIG_NUMBER;   // claimed target's primary-trace distance beyond the UNPADDED radius
+    float AttribClaimPad = 0.f;             // padding the claimed target was granted in the primary loop
+    bool bAttribTimeSearchHit = false;
+    float AttribTimeSearchRungMs = 0.f;
+    float AttribTimeSearchMissBy = 0.f;
+
     ECollisionChannel TraceChannel = COLLISION_TRACE_WEAPONNOCHARACTER;
     FCollisionQueryParams QueryParams(GetClass()->GetFName(), true, UTOwner);
     AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
@@ -2660,6 +2693,20 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                     bHitTarget = ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CollisionRadius + TraceRadius + ExtraHitPadding));
                 }
 
+                // [HitAttrib] how far outside the bare rewound capsule the claimed
+                // target sat: <=0 means the unpadded rewind trace alone hits it,
+                // >0 means only the claim padding (if any) can rescue it.
+                if (bHitAttrib && Target == ReceivedHitScanHitChar)
+                {
+                    const bool bSphereBranch = (CollisionRadius >= CollisionHeight);
+                    const float AttribDist = bSphereBranch
+                        ? FVector::Dist(ClosestPoint, TargetLocation)
+                        : FVector::Dist(ClosestPoint, ClosestCapsulePoint);
+                    const float AttribUnpaddedRadius = (bSphereBranch ? CollisionHeight : CollisionRadius) + TraceRadius;
+                    AttribClaimMissBy = AttribDist - AttribUnpaddedRadius;
+                    AttribClaimPad = ExtraHitPadding;
+                }
+
                 // If we hit, update best target
                 if (bHitTarget && (!BestTarget || ((ClosestPoint - StartLocation).SizeSquared() < (BestPoint - StartLocation).SizeSquared())))
                 {
@@ -2742,6 +2789,16 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 					BestCapsulePoint = ClosestCapsulePoint;
 					BestCollisionRadius = CapRadius;
 
+					if (bHitAttrib)
+					{
+						bAttribTimeSearchHit = true;
+						AttribTimeSearchRungMs = SearchOffset * 1000.f;
+						// vs the UNPADDED radius at the accepted rung: <=0 is a genuine
+						// capsule hit at the alternate time, >0 rode the 45uu search pad.
+						AttribTimeSearchMissBy =
+							FVector::Dist(ClosestPoint, ClosestCapsulePoint) - (CapRadius + TraceRadius);
+					}
+
 					UE_LOG(LogUTWeaponFix, Verbose,
 						TEXT("TimeSearch: Found claimed hit at offset %.1fms (base %.1fms)"),
 						SearchOffset * 1000.f, ActualPredictionTime * 1000.f);
@@ -2773,6 +2830,81 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         Hit.Component = BestTarget->GetCapsuleComponent();
         Hit.ImpactPoint = BestPoint;
         Hit.Time = (BestPoint - StartLocation).Size() / (EndTrace - StartLocation).Size();
+    }
+
+    // [HitAttrib] one line per validated hitscan: who fired at what ping, what
+    // was claimed, which acceptance route decided the shot, and how far the
+    // validation-time rewound capsule leads a render-latency-estimate rewind
+    // (leadUU > 0 = validation capsule AHEAD of the estimated rendered image
+    // along the target's velocity — the "gifted shot" direction).
+    if (bHitAttrib)
+    {
+        auto AttribName = [](const AUTCharacter* C) -> FString
+        {
+            if (C == nullptr)
+            {
+                return FString(TEXT("none"));
+            }
+            return C->PlayerState ? C->PlayerState->PlayerName : C->GetName();
+        };
+
+        const float ShooterPing = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->ExactPing : 0.f;
+        const FString ClaimStr = (ReceivedHitScanHitChar == nullptr)
+            ? TEXT("none")
+            : (!ReceivedHeadOffset.IsZero() ? TEXT("head") : TEXT("body"));
+
+        const TCHAR* Route = TEXT("miss");
+        if (BestTarget != nullptr)
+        {
+            if (bAttribTimeSearchHit)
+            {
+                Route = TEXT("timesearch-rescue");
+            }
+            else if (ReceivedHitScanHitChar != nullptr && BestTarget == ReceivedHitScanHitChar)
+            {
+                Route = (AttribClaimMissBy <= 0.f) ? TEXT("primary-rewind") : TEXT("padding-rescue");
+            }
+            else if (ReceivedHitScanHitChar != nullptr)
+            {
+                Route = TEXT("primary-rewind-otherthanclaim");
+            }
+            else
+            {
+                Route = TEXT("primary-rewind-unclaimed");
+            }
+        }
+
+        AUTCharacter* AttribTarget = BestTarget ? BestTarget : ReceivedHitScanHitChar;
+        const float RenderEstMs = ShooterPing * 0.5f + FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
+        FString LeadStr(TEXT("na"));
+        FString DeltaMagStr(TEXT("na"));
+        if (AttribTarget != nullptr)
+        {
+            const float RenderEstTime = FMath::Clamp(RenderEstMs * 0.001f, 0.f, 0.25f);
+            const FVector ValPos = (ActualPredictionTime > 0.f)
+                ? AttribTarget->GetRewindLocation(ActualPredictionTime) : AttribTarget->GetActorLocation();
+            const FVector RenPos = (RenderEstTime > 0.f)
+                ? AttribTarget->GetRewindLocation(RenderEstTime) : AttribTarget->GetActorLocation();
+            const FVector ValMinusRender = ValPos - RenPos;
+            LeadStr = FString::Printf(TEXT("%.1f"),
+                FVector::DotProduct(ValMinusRender, AttribTarget->GetVelocity().GetSafeNormal()));
+            DeltaMagStr = FString::Printf(TEXT("%.1f"), ValMinusRender.Size());
+        }
+
+        const FString ClaimMissStr = (AttribClaimMissBy < BIG_NUMBER)
+            ? FString::Printf(TEXT("%.1f"), AttribClaimMissBy) : TEXT("na");
+        const FString TsRungStr = bAttribTimeSearchHit
+            ? FString::Printf(TEXT("%.0f"), AttribTimeSearchRungMs) : TEXT("na");
+        const FString TsMissStr = bAttribTimeSearchHit
+            ? FString::Printf(TEXT("%.1f"), AttribTimeSearchMissBy) : TEXT("na");
+
+        UE_LOG(LogUTWeaponFix, Log,
+            TEXT("[HitAttrib] shooter=%s ping=%.0f wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s"),
+            *AttribName(UTOwner), ShooterPing, *GetClass()->GetName(), CurrentFireMode,
+            ActualPredictionTime * 1000.f, *ClaimStr, *AttribName(AttribTarget),
+            AttribTarget ? AttribTarget->GetVelocity().Size() : 0.f,
+            Route, *ClaimMissStr, AttribClaimPad, *TsRungStr, *TsMissStr,
+            RenderEstMs, *LeadStr, *DeltaMagStr);
     }
 
     if (Role == ROLE_Authority)
