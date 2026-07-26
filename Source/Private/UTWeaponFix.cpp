@@ -1562,14 +1562,18 @@ void AUTWeaponFix::FireShot()
 			}
 		}
 
-		// Client-side hitsound prediction for hitscan weapons
+		// Client-side hitsound prediction for hitscan weapons.
+		// Team-aware: predicting the ENEMY cue for a teammate (who on a no-FF
+		// server takes no damage at all) is worse feedback than silence.
 		if (ClientHitChar != nullptr && Role != ROLE_Authority)
 		{
 			AClientHitsounds* HitsoundsMut = FindClientHitsoundsMutator();
 			if (HitsoundsMut)
 			{
+				AUTGameState* HitsoundGS = GetWorld()->GetGameState<AUTGameState>();
+				const bool bFriendlyTarget = HitsoundGS && HitsoundGS->OnSameTeam(UTOwner, ClientHitChar);
 				int32 EstDamage = InstantHitInfo.IsValidIndex(CurrentFireMode) ? InstantHitInfo[CurrentFireMode].Damage : 0;
-				HitsoundsMut->PlayClientPredictedHitsound(EstDamage);
+				HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
 			}
 		}
 
@@ -5199,25 +5203,35 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 		return;
 	}
 
-	// Client-side hitsound prediction for projectile weapons
-	if (HitTarget != nullptr && Role != ROLE_Authority)
+	if (!bEnableProjectileRewind || !HitTarget)
+	{
+		return;
+	}
+
+	// Client-side hitsound prediction for projectile weapons.
+	// Deliberately AFTER the bEnableProjectileRewind gate: this is the claim
+	// path, so a weapon with rewind disabled must not produce a predicted
+	// hitsound for a hit it never claims (UTPlusProj_StingerShard's comment
+	// already documented that contract — previously the block sat above the
+	// gate and broke it).
+	if (Role != ROLE_Authority)
 	{
 		AClientHitsounds* HitsoundsMut = FindClientHitsoundsMutator();
 		if (HitsoundsMut)
 		{
+			AUTGameState* HitsoundGS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+			const bool bFriendlyTarget = HitsoundGS && HitsoundGS->OnSameTeam(UTOwner, HitTarget);
+
 			int32 EstDamage = 0;
 			if (ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum])
 			{
-				AUTProjectile* DefProj = ProjClass[FireModeNum]->GetDefaultObject<AUTProjectile>();
-				if (DefProj) EstDamage = DefProj->DamageParams.BaseDamage;
+				if (AUTProjectile* DefProj = ProjClass[FireModeNum]->GetDefaultObject<AUTProjectile>())
+				{
+					EstDamage = DefProj->DamageParams.BaseDamage;
+				}
 			}
-			HitsoundsMut->PlayClientPredictedHitsound(EstDamage);
+			HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
 		}
-	}
-
-	if (!bEnableProjectileRewind || !HitTarget)
-	{
-		return;
 	}
 
 	// Send the claim with FireMode only — server matches against ActiveServerProjectiles

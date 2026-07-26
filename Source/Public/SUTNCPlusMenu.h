@@ -6,6 +6,7 @@
 #include "NetcodePlus.h"     // PCH preamble (UT/core types first)
 #include "SlateBasics.h"
 #include "NCPlusForceModels.h"
+#include "ClientHitsounds.h"
 
 class UUTLocalPlayer;
 
@@ -15,6 +16,7 @@ enum class ENCPMenuTab : uint8
 	About,
 	General,
 	ForceModels,
+	Hitsounds,
 };
 
 /**
@@ -63,12 +65,20 @@ private:
 	TArray<TSharedPtr<FString>> FMStyleOptions;                // Team/Enemy, Red/Blue, Enemy Only
 	TArray<TSharedPtr<FString>> FMArmourOptions;               // Match Skin, Complimentary
 
+	// ── Hitsounds settings ── working copy, edited in place and written to Mod.ini on Save.
+	// Option lists are members so each STextComboBox::OptionsSource stays valid for the
+	// panel's lifetime (same lifetime contract as the Force Models lists above).
+	FHitsoundsConfig HSConfig;
+	TArray<TSharedPtr<FString>> HSPresetOptions;   // every catalog preset, built-in then custom
+	TArray<TSharedPtr<FString>> HSStyleOptions;    // Absolute / UTComp / Flat
+
 	// ── Tabs ──
 	ENCPMenuTab ActiveTab = ENCPMenuTab::About;
 	TSharedPtr<class SBox> ContentArea;
 	TSharedRef<SWidget> BuildAboutTab();
 	TSharedRef<SWidget> BuildGeneralTab();
 	TSharedRef<SWidget> BuildForceModelsTab();
+	TSharedRef<SWidget> BuildHitsoundsTab();
 	TSharedRef<SWidget> BuildTabContent(ENCPMenuTab Tab);
 	TSharedRef<SWidget> MakeTabButton(const FString& Label, ENCPMenuTab Tab);
 	FReply OnTabClicked(ENCPMenuTab Tab);

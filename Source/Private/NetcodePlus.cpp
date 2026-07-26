@@ -258,6 +258,10 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 		{
 			InitialTab = ENCPMenuTab::General;
 		}
+		else if (Tab == TEXT("hitsounds"))
+		{
+			InitialTab = ENCPMenuTab::Hitsounds;
+		}
 	}
 
 	TSharedRef<SUTNCPlusMenu> Menu =

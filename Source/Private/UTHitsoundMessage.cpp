@@ -1,64 +1,60 @@
 // UTHitsoundMessage.cpp
-// LocalMessage for delivering hitsound events to clients
+// LocalMessage that delivers hitsound events to clients.
 
 #include "UTHitsoundMessage.h"
 #include "ClientHitsounds.h"
 #include "UTPlayerController.h"
-#include "UTAnnouncer.h"
+#include "Engine/World.h"
+#include "Engine/DemoNetDriver.h"
 #include "Kismet/GameplayStatics.h"
 
 UUTHitsoundMessage::UUTHitsoundMessage(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
-    // This message is handled entirely in code, no announcer
+    // Audio-only: never announced, never drawn.
     bIsStatusAnnouncement = false;
     bIsPartiallyUnique = false;
-    Lifetime = 0.0f; // Don't display on HUD
+    Lifetime = 0.0f;
     MessageArea = FName(TEXT("None"));
+
+    // A killcam re-runs recorded messages; replaying the victim's hitsounds
+    // over the kill replay is noise, not feedback.
+    bPlayDuringInstantReplay = false;
 }
 
 void UUTHitsoundMessage::ClientReceive(const FClientReceiveData& ClientData) const
 {
-    // ClientData.MessageIndex = Switch (0 = Enemy, 1 = Friendly)
-    // ClientData.OptionalObject = ClientHitsounds actor
-    // ClientData.RelatedPlayerState_1 = Attacker PlayerState
-    // We pack damage into the upper bits of MessageIndex or use a custom approach
-
-    // Get the mutator from OptionalObject
-    AClientHitsounds* Mutator = Cast<AClientHitsounds>(ClientData.OptionalObject);
-    if (!Mutator)
+    // Deliberately NOT calling Super: the base implementation drives the
+    // announcer and HUD message queue, neither of which applies to an
+    // audio-only trigger. That means we must reproduce its demo guard here —
+    // without it, seeking or fast-forwarding a demo bursts every hitsound
+    // recorded in the skipped span at once.
+    if (ClientData.LocalPC == nullptr)
+    {
+        return;
+    }
+    const UWorld* World = ClientData.LocalPC->GetWorld();
+    if (World && World->DemoNetDriver && World->DemoNetDriver->IsFastForwarding())
     {
         return;
     }
 
-    // Dedup: suppress server hitsound if client already played a predicted one recently
+    // OptionalObject resolves to THIS client's replicated copy of the mutator,
+    // which carries this client's own config.
+    AClientHitsounds* Mutator = Cast<AClientHitsounds>(ClientData.OptionalObject);
+    if (Mutator == nullptr)
+    {
+        return;
+    }
+
+    // The client already played a predicted hitsound for this hit.
     if (Mutator->ShouldSuppressServerHitsound())
     {
         return;
     }
 
-    // Unpack the message
-    // Switch 0 = Enemy, Switch 1 = Friendly
-    bool bIsFriendly = (ClientData.MessageIndex & 0x1) != 0;
+    const bool bIsFriendly = (ClientData.MessageIndex & 0x1) != 0;
+    const int32 Damage = ClientData.MessageIndex >> 1;
 
-    // Damage is packed in upper bits (shift by 1)
-    int32 Damage = ClientData.MessageIndex >> 1;
-
-    // Get the appropriate hitsound preset
-    const FHitsoundsConfig& Config = Mutator->GetConfig();
-    const FHitsound& HitsoundPreset = bIsFriendly ? Config.Friendly : Config.Enemy;
-
-    // Check if we should play zero damage friendly hits
-    if (bIsFriendly && Damage == 0 && !Config.bPlayZeroFriendly)
-    {
-        return;
-    }
-
-    // Select sound based on damage
-    USoundBase* SoundToPlay = Mutator->SelectSoundForDamage(HitsoundPreset, Damage);
-    if (SoundToPlay)
-    {
-        float FinalVolume = HitsoundPreset.Volume * Config.UserMultiplier;
-        UGameplayStatics::PlaySound2D(Mutator, SoundToPlay, FinalVolume, HitsoundPreset.Pitch);
-    }
+    Mutator->PlayHitsound(Damage, bIsFriendly);
 }

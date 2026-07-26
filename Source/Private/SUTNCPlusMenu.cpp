@@ -124,9 +124,9 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				[
-					// Opens the BP hitsounds menu (the C++ hitsounds port isn't ready yet):
-					// close this menu + run "mutate hitsounds" (routes to the BP mutator's Mutate handler).
-					MakeLaunchButton(TEXT("Hitsounds"), TEXT("mutate hitsounds"))
+					// Native tab now — was a launch button into the BP mutator's UMG menu
+					// before the C++ hitsounds port landed.
+					MakeTabButton(TEXT("Hitsounds"), ENCPMenuTab::Hitsounds)
 				]
 			]
 
@@ -225,6 +225,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
 	{
 		case ENCPMenuTab::ForceModels: return BuildForceModelsTab();
 		case ENCPMenuTab::General:     return BuildGeneralTab();
+		case ENCPMenuTab::Hitsounds:   return BuildHitsoundsTab();
 		case ENCPMenuTab::About:
 		default:                       return BuildAboutTab();
 	}
@@ -849,6 +850,188 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 		];
 }
 
+TSharedRef<SWidget> SUTNCPlusMenu::BuildHitsoundsTab()
+{
+	// Preset picker for one side (enemy / friendly). Swapping preset keeps the
+	// user's own volume + pitch — only the cues change.
+	auto MakePresetRow = [this](const FString& Label, FHitsound* Side) -> TSharedRef<SWidget>
+	{
+		const int32 CurrentIndex = HSPresetOptions.IndexOfByPredicate(
+			[Side](const TSharedPtr<FString>& P) { return P.IsValid() && P->Equals(Side->DisplayName, ESearchCase::IgnoreCase); });
+
+		return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SBox)
+				.WidthOverride(120.f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(Label))
+					.Font(RegularFont(12))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(220.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&HSPresetOptions)
+					.InitiallySelectedItem(HSPresetOptions.IsValidIndex(CurrentIndex) ? HSPresetOptions[CurrentIndex] : nullptr)
+					.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+					{
+						if (!NewSel.IsValid()) { return; }
+						const float KeepVolume = Side->Volume;
+						const float KeepPitch = Side->Pitch;
+						*Side = AClientHitsounds::FindPreset(*NewSel);
+						Side->Volume = KeepVolume;
+						Side->Pitch = KeepPitch;
+					})
+				]
+			];
+	};
+
+	// Live preview — same call the real hit path makes, so what you hear here
+	// is exactly what you will hear in a match.
+	auto MakePreviewButton = [this](const FString& Label, bool bFriendly, int32 Damage) -> TSharedRef<SWidget>
+	{
+		return SNew(SButton)
+			.ContentPadding(FMargin(12, 4))
+			.OnClicked_Lambda([this, bFriendly, Damage]()
+			{
+				if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+				{
+					AClientHitsounds::PlayPreview(PlayerOwner->PlayerController, HSConfig, bFriendly, Damage);
+				}
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(Label))
+				.Font(RegularFont(11))
+			];
+	};
+
+	const int32 StyleIndex = FMath::Clamp((int32)HSConfig.Style, 0, HSStyleOptions.Num() - 1);
+
+	TSharedRef<SVerticalBox> Root = SNew(SVerticalBox);
+
+	// Nothing loaded means dc's sound content is not installed on this client.
+	if (!AClientHitsounds::IsCatalogReady())
+	{
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(0, 0, 0, 12)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("No hitsound presets found. The hitsound content is missing from this install — hitsounds will stay silent.")))
+				.Font(RegularFont(11))
+				.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.25f, 1.f))
+				.AutoWrapText(true)
+			];
+	}
+
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 6)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Enemy hits")))
+			.Font(BoldFont(13))
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakePresetRow(TEXT("Sound"), &HSConfig.Enemy) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Volume"), &HSConfig.Enemy.Volume, 0.f, 3.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)[ MakeLabeledSpin(TEXT("Pitch (UTComp style only)"), &HSConfig.Enemy.Pitch, 0.1f, 4.f, 0.05f) ];
+
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 6)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Teammate hits")))
+			.Font(BoldFont(13))
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakePresetRow(TEXT("Sound"), &HSConfig.Friendly) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Volume"), &HSConfig.Friendly.Volume, 0.f, 3.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Pitch (UTComp style only)"), &HSConfig.Friendly.Pitch, 0.1f, 4.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)
+		[ MakeFlagCheck(TEXT("Cue teammate hits that did no damage"), &HSConfig.bPlayZeroFriendly) ];
+
+	// Style
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 4)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SBox)
+				.WidthOverride(120.f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Pitch style")))
+					.Font(RegularFont(12))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(220.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&HSStyleOptions)
+					.InitiallySelectedItem(HSStyleOptions.IsValidIndex(StyleIndex) ? HSStyleOptions[StyleIndex] : nullptr)
+					.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+					{
+						if (!NewSel.IsValid()) { return; }
+						const int32 Idx = HSStyleOptions.IndexOfByPredicate(
+							[&](const TSharedPtr<FString>& P) { return P.IsValid() && *P == *NewSel; });
+						if (Idx != INDEX_NONE) { HSConfig.Style = (ENCPHitsoundStyle)Idx; }
+					})
+				]
+			]
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)
+		[ MakeLabeledSpin(TEXT("Master volume"), &HSConfig.UserMultiplier, 0.f, 3.f, 0.05f) ];
+
+	// Previews across the damage range, so the pitch curve is audible while tuning.
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 8)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 15"), false, 15) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 45"), false, 45) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 100"), false, 100) ]
+			+ SHorizontalBox::Slot().AutoWidth()[ MakePreviewButton(TEXT("Test teammate"), true, 45) ]
+		];
+
+	Root->AddSlot()
+		.AutoHeight()
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Absolute sweeps pitch continuously with damage (more damage = lower pitch). UTComp uses one cue on a hyperbolic curve. Flat ignores damage. Custom sound packs installed on this client appear in the Sound lists automatically.")))
+			.Font(RegularFont(10))
+			.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+			.AutoWrapText(true)
+		];
+
+	return Root;
+}
+
 void SUTNCPlusMenu::LoadSettings()
 {
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
@@ -911,6 +1094,21 @@ void SUTNCPlusMenu::LoadSettings()
 	FMArmourOptions.Reset();
 	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Match Skin"))));
 	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Complimentary"))));
+
+	// Hitsounds — read straight from Mod.ini so the tab works whether or not a
+	// match is running the mutator. The catalog is static and client-side, so
+	// the preset list is available here too.
+	HSConfig = AClientHitsounds::LoadConfigFromIni();
+
+	HSPresetOptions.Reset();
+	for (const FHitsound& Preset : AClientHitsounds::GetCatalog())
+	{
+		HSPresetOptions.Add(MakeShareable(new FString(Preset.DisplayName)));
+	}
+	HSStyleOptions.Reset();   // index order matches ENCPHitsoundStyle
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("Absolute (pitch tracks damage)"))));
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("UTComp"))));
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("Flat pitch"))));
 }
 
 void SUTNCPlusMenu::SaveSettings()
@@ -934,6 +1132,11 @@ void SUTNCPlusMenu::SaveSettings()
 	// Force Models — write the working copy through to the live config + Mod.ini [ForceModels].
 	NCPlusForceModels::Mutable() = FMConfig;
 	NCPlusForceModels::Save();
+
+	// Hitsounds — persist and push to a live mutator instance so the change is
+	// audible immediately rather than at the next map load.
+	AClientHitsounds::SaveConfigToIni(HSConfig,
+		(PlayerOwner.IsValid() && PlayerOwner->PlayerController) ? (UObject*)PlayerOwner->PlayerController : nullptr);
 
 	// Live re-apply so changes show immediately without a respawn / rejoin.
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
