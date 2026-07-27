@@ -1,6 +1,7 @@
 #include "ElimPlusGame.h"
 #include "NCHybridSpawnGenerator.h"
 #include "NCPlusVersionGate.h"
+#include "NCPlusRoundSpectate.h"      // late-joiner / reconnect free-camera lock
 #include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
@@ -623,6 +624,12 @@ void AElimPlusGame::DefaultTimer()
 
 	//Because we don't call super defaulttimer except when roundinprogress. Need to do server management work here
 	HandleServerManagement();
+
+	// Re-assert the round camera lock once a second. The immediate lock at join
+	// can be raced by the joining client's own BeginSpectatingState, which spawns
+	// its spectator pawn locally and points the camera at it without telling the
+	// server — so the sweep, not the join-time call, is what actually holds.
+	EnforceRoundSpectatorLock();
 
 
 	// --- Intermission Logic-- -
@@ -1697,6 +1704,21 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 
 	const bool bShouldAllowSpawn = (bAllowRespawnMidRound || bAllowPlayerRespawns || bWarmupMode || GetMatchState() == MatchState::WaitingToStart);
 
+	if (!bShouldAllowSpawn)
+	{
+		// Refusing to spawn mid-round leaves this controller pawn-less in
+		// NAME_Spectating with no view target, which IS the free-fly camera. Take
+		// it away now rather than waiting for the next sweep.
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(NewPlayer))
+		{
+			AUTPlayerState* PS = Cast<AUTPlayerState>(PC->PlayerState);
+			if (bRoundInProgress && NCPlusRoundSpectate::ShouldLock(PC, PS))
+			{
+				NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+			}
+		}
+	}
+
 	if (bShouldAllowSpawn)
 	{
 		AUTPlayerState* SpawnPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
@@ -2661,6 +2683,42 @@ void AElimPlusGame::ResetSpawnSelectionForNewRound()
 	++CurrentRoundNumber;
 	//UE_LOG(LogGameMode, Log, TEXT("ResetSpawnSelectionForNewRound: Starting round %d"), CurrentRoundNumber);
 	FMath::SRandInit(static_cast<int32>(FPlatformTime::Cycles()));
+}
+
+void AElimPlusGame::EnforceRoundSpectatorLock()
+{
+	// Only while a round is actually running: between rounds and in warmup being
+	// pawn-less is normal and the free camera is harmless.
+	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
+		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		if (!NCPlusRoundSpectate::ShouldLock(PC, PS))
+		{
+			continue;
+		}
+		// Someone already queued for a spawn is not a late joiner. PendingSpawnQueue
+		// is drained one controller per frame at round start, so without this a sweep
+		// landing inside that window would park a player who is about to spawn.
+		if (PendingSpawnQueue.Contains(PC))
+		{
+			continue;
+		}
+		// Re-resolved every sweep, so the camera follows the survivors as the
+		// team-mate they were watching is eliminated.
+		NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+	}
 }
 
 void AElimPlusGame::ForceTeamSpectate(AUTPlayerState* DeadPS)

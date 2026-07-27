@@ -728,6 +728,15 @@ protected:
 	// =======================================================================
 
 	void ForceTeamSpectate(AUTPlayerState* DeadPS);
+
+	/**
+	 * Take the free-roaming spectator camera away from anyone who is pawn-less in
+	 * the middle of a live round without having died in it. Wipeout normally spawns
+	 * late joiners and reconnects straight away, so this mostly covers the cases
+	 * RestartPlayer still refuses — a reconnect during sudden death above all.
+	 * See NCPlusRoundSpectate.cpp. No-op between rounds and in warmup.
+	 */
+	void EnforceRoundSpectatorLock();
 	AUTPlayerState* FindAliveTeammate(AUTPlayerState* PS) const;
 	AUTPlayerState* FindAliveEnemy(AUTPlayerState* PS) const;
 	AUTPlayerState* FindAliveOnTeamPS(int32 TeamIndex) const;

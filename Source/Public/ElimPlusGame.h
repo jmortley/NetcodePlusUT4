@@ -638,6 +638,14 @@ protected:
 	/** Force a dead player into spectate. Prefer teammates; if none alive, allow enemy spectate. */
 	void ForceTeamSpectate(class AUTPlayerState* DeadPS);
 
+	/**
+	 * Take the free-roaming spectator camera away from anyone who is pawn-less in
+	 * the middle of a live round without having died in it — a late joiner or a
+	 * reconnect, who would otherwise be able to fly the map and read every enemy
+	 * position. See NCPlusRoundSpectate.cpp. No-op between rounds and in warmup.
+	 */
+	void EnforceRoundSpectatorLock();
+
 	/** Finds a living teammate for PS (nullptr if none). */
 	class AUTPlayerState* FindAliveTeammate(class AUTPlayerState* PS) const;
 

@@ -1,4 +1,5 @@
 #include "WipeoutGame.h"
+#include "NCPlusRoundSpectate.h"      // late-joiner / reconnect free-camera lock
 #include "NCHybridSpawnGenerator.h"
 #include "NCPlusVersionGate.h"
 #include "NCConcedeVote.h"
@@ -531,6 +532,12 @@ void AUWipeoutGame::DefaultTimer()
 	if (GS == nullptr || GS->IsPendingKill() || GetWorld()->bIsTearingDown) return;
 
 	HandleServerManagement();
+
+	// Re-assert the round camera lock once a second: the immediate lock at the
+	// RestartPlayer refusal can be raced by the joining client's own
+	// BeginSpectatingState, which spawns its spectator pawn locally and points the
+	// camera at it without telling the server.
+	EnforceRoundSpectatorLock();
 
 	// --- Intermission Logic ---
 	if (GS->GetMatchState() == MatchState::MatchIntermission || GetMatchState() == FName(TEXT("RoundCooldown")))
@@ -1594,6 +1601,20 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 	const bool bShouldAllowSpawn = (bAllowPlayerRespawns || bWarmupMode
 		|| GetMatchState() == MatchState::WaitingToStart
 		|| bIsLateJoiner || bIsReconnect);
+
+	if (!bShouldAllowSpawn)
+	{
+		// Refused mid-round (chiefly a reconnect during sudden death, which
+		// bIsReconnect deliberately excludes): the controller is left pawn-less in
+		// NAME_Spectating with no view target, which IS the free-fly camera.
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(NewPlayer))
+		{
+			if (bRoundInProgress && NCPlusRoundSpectate::ShouldLock(PC, PS))
+			{
+				NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+			}
+		}
+	}
 
 	if (bShouldAllowSpawn)
 	{
@@ -2733,6 +2754,31 @@ void AUWipeoutGame::DelayedInitialWinCheck()
 // ============================================================================
 // SPECTATING
 // ============================================================================
+
+void AUWipeoutGame::EnforceRoundSpectatorLock()
+{
+	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
+		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		if (!NCPlusRoundSpectate::ShouldLock(PC, PS))
+		{
+			continue;
+		}
+		NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+	}
+}
 
 void AUWipeoutGame::ForceTeamSpectate(AUTPlayerState* DeadPS)
 {
