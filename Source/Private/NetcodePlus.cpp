@@ -32,6 +32,8 @@
 #include "Containers/Ticker.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "Misc/Char.h"                 // FChar::IsAlnum (launcher credential handoff)
+#include "HAL/PlatformMisc.h"          // Get/SetEnvironmentVar (launcher credential handoff)
 #include "Misc/CoreMisc.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Paths.h"                // FPaths::GeneratedConfigDir (NoAlias Mod.ini scrub)
@@ -491,6 +493,69 @@ static void HandleHUDDragOverlay(const TArray<FString>& Args)
 }
 
 // ---------------------------------------------------------------------------
+// Launcher credential handoff (NCP_AUTH_PASSWORD -> -AUTH_PASSWORD).
+//
+// The engine writes the whole command line to the log ("LogInit: Command line:",
+// LaunchEngineLoop AppInit) and into the CommandLine property of every crash
+// report. Players routinely post those files publicly when asking for help, so
+// the one-shot Epic exchange code the UT4 Community Launcher passes as
+// -AUTH_PASSWORD leaks with them — a live login credential until it is redeemed.
+//
+// Launcher builds that detect this handoff in the installed plugin pass the code
+// in the NCP_AUTH_PASSWORD environment variable instead of on the command line,
+// and we append it back here. FCommandLine::Append writes ONLY the live command
+// line: the two copies the engine keeps for logging are snapshotted in
+// FCommandLine::Set and never rebuilt, so an appended value can never reach the
+// log line or the crash context. Environment variables are not logged.
+//
+// Timing: StartupModule runs after the engine has already logged the command
+// line, and well before anything reads AUTH_PASSWORD (the MCP autologin, the
+// login hook DLL, and the EULA check in UUTGameEngine all run later in startup).
+// ---------------------------------------------------------------------------
+static void ApplyLauncherAuthHandoff()
+{
+	// 4.15 only offers the fixed-buffer form of GetEnvironmentVariable. Exchange
+	// codes are 32 hex characters; 128 is headroom with no heap allocation.
+	TCHAR CodeBuf[128] = { 0 };
+	FPlatformMisc::GetEnvironmentVariable(TEXT("NCP_AUTH_PASSWORD"), CodeBuf, ARRAY_COUNT(CodeBuf));
+	CodeBuf[ARRAY_COUNT(CodeBuf) - 1] = 0;
+
+	FString Code(CodeBuf);
+
+	// Clear it either way: nothing else needs it, and it keeps the code out of the
+	// environment block this process would hand to anything it later spawns.
+	FPlatformMisc::SetEnvironmentVar(TEXT("NCP_AUTH_PASSWORD"), TEXT(""));
+
+	Code.Trim();
+	Code.TrimTrailing();
+	if (Code.IsEmpty())
+	{
+		return;
+	}
+
+	// The append is parser input, so accept only a bare token — whitespace, a
+	// quote or a dash in this value could otherwise inject further switches.
+	for (int32 Index = 0; Index < Code.Len(); ++Index)
+	{
+		if (!FChar::IsAlnum(Code[Index]) && Code[Index] != TEXT('_'))
+		{
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: ignoring malformed NCP_AUTH_PASSWORD"));
+			return;
+		}
+	}
+
+	// An explicit -AUTH_PASSWORD wins (a hand-made shortcut, or a launcher that
+	// sent both): never append a second one for FParse to pick between.
+	FString Existing;
+	if (FParse::Value(FCommandLine::Get(), TEXT("AUTH_PASSWORD="), Existing))
+	{
+		return;
+	}
+
+	FCommandLine::Append(*FString::Printf(TEXT(" -AUTH_PASSWORD=%s"), *Code));
+}
+
+// ---------------------------------------------------------------------------
 // -ncpconnect: UT4 Community Launcher direct-connect to a PUG server.
 //
 // The retail SHIPPING client compiles out every stock command-line connect path
@@ -874,6 +939,10 @@ static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeComma
 
 void FNetcodePlus::StartupModule()
 {
+	// First: hand the launcher's login credential from the environment back onto
+	// the command line, before any consumer reads it (see ApplyLauncherAuthHandoff).
+	ApplyLauncherAuthHandoff();
+
 	IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("weaponhand"),
 		TEXT("Set weapon position. Usage: weaponhand [right|left|center|hidden]"),
