@@ -121,12 +121,12 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 		float CollisionHeight = Capsule->GetScaledCapsuleHalfHeight();
 		float CollisionRadius = Capsule->GetScaledCapsuleRadius();
 
-		// Floor-slide adjustment — capsule is shorter during slide.
-		if (Target->UTCharacterMovement && Target->UTCharacterMovement->bIsFloorSliding)
-		{
-			TargetLocation.Z = TargetLocation.Z - CollisionHeight + Target->SlideTargetHeight;
-			CollisionHeight = Target->SlideTargetHeight;
-		}
+		// Floor-slide posture: standing envelope inside the ncp.SlideGraceMs window
+		// after slide start, classic slide shrink after (shared validation rule —
+		// see AUTWeaponFix::ApplySlidePostureForValidation).
+		ApplySlidePostureForValidation(Target,
+			(ActualPredictionTime > 0.f && Role == ROLE_Authority) ? ActualPredictionTime : 0.f,
+			TargetLocation, CollisionHeight);
 
 		// Padding based on target movement state.
 		const bool bIsMoving = !Target->GetVelocity().IsNearlyZero(1.0f);

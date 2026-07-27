@@ -308,6 +308,69 @@ static FORCEINLINE bool RocketLagCompDbg()
     return CVarRocketLagCompDebug.GetValueOnGameThread() > 0;
 }
 
+// ── Slide-posture grace for hit validation ─────────────────────────────────
+// A floor slide shrinks the authoritative capsule THE SAME FRAME it starts
+// (bWantsToCrouch |= bIsFloorSliding), but the shooter's screen keeps a
+// mostly-standing body for one replication interp (~50-100ms) plus the animBP
+// blend-in (~150-250ms). Position rewind cannot fix this: it reconstructs WHERE
+// the target was, never WHAT SHAPE. Slide posture, unlike posture in general,
+// IS reconstructible after the fact — PerformFloorSlide re-stamps
+// FloorSlideTapTime at true slide start (landing slides included), so the slide
+// age at the claimed moment is (movement-time now - tap time) - rewind.
+static TAutoConsoleVariable<float> CVarSlideGraceMs(
+    TEXT("ncp.SlideGraceMs"),
+    250.0f,
+    TEXT("Grace window (ms) after a floor slide starts during which hitscan validation\n")
+    TEXT("tests the standing capsule envelope instead of the slide capsule, covering the\n")
+    TEXT("replication interp + slide anim blend-in still on the shooter's screen.\n")
+    TEXT("0 = off (always the slide capsule, the pre-grace behavior)."),
+    ECVF_Default
+);
+
+void AUTWeaponFix::ApplySlidePostureForValidation(const AUTCharacter* Target,
+    float RewindTime, FVector& InOutTargetLocation, float& InOutCollisionHeight)
+{
+    if (Target == nullptr || Target->UTCharacterMovement == nullptr ||
+        !Target->UTCharacterMovement->bIsFloorSliding)
+    {
+        return;
+    }
+
+    const float GraceSeconds =
+        FMath::Max(0.f, CVarSlideGraceMs.GetValueOnGameThread() * 0.001f);
+    // Slide age at the claimed moment, not at validation time: the claim is
+    // RewindTime in the past. Negative = target had not even started sliding at
+    // the claimed moment, which the standing envelope also covers.
+    const float SlideElapsedAtClaim =
+        (Target->UTCharacterMovement->GetCurrentMovementTime() -
+            Target->UTCharacterMovement->FloorSlideTapTime) - RewindTime;
+    if (GraceSeconds > 0.f && SlideElapsedAtClaim < GraceSeconds)
+    {
+        // Bottom-aligned standing envelope. Raising the (already crouch-shrunk)
+        // live capsule centre by (standing - live) covers BOTH regimes a rewound
+        // location can be in: its top reaches a pre-shrink standing head exactly,
+        // its bottom keeps the post-shrink feet. Standing strictly contains the
+        // slide capsule (same radius, greater half-height), so one test suffices.
+        const ACharacter* DefaultChar =
+            Target->GetClass()->GetDefaultObject<ACharacter>();
+        const float StandingHalfHeight =
+            (DefaultChar != nullptr && DefaultChar->GetCapsuleComponent() != nullptr)
+            ? DefaultChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()
+            : InOutCollisionHeight;
+        if (StandingHalfHeight > InOutCollisionHeight)
+        {
+            InOutTargetLocation.Z += StandingHalfHeight - InOutCollisionHeight;
+            InOutCollisionHeight = StandingHalfHeight;
+        }
+        return;
+    }
+
+    // Established slide (or grace disabled): the classic bottom-aligned shrink.
+    InOutTargetLocation.Z =
+        InOutTargetLocation.Z - InOutCollisionHeight + Target->SlideTargetHeight;
+    InOutCollisionHeight = Target->SlideTargetHeight;
+}
+
 int32 AUTWeaponFix::GetTargetProjectileTickRate()
 {
     int32 TargetHz = CVarProjectileTickRate.GetValueOnGameThread();
@@ -2782,11 +2845,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 }
                 // now see if trace would hit the capsule
                 float CollisionHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-                if (Target->UTCharacterMovement && Target->UTCharacterMovement->bIsFloorSliding)
-                {
-                    TargetLocation.Z = TargetLocation.Z - CollisionHeight + Target->SlideTargetHeight;
-                    CollisionHeight = Target->SlideTargetHeight;
-                }
+                ApplySlidePostureForValidation(Target,
+                    ((ActualPredictionTime > 0.f) && (Role == ROLE_Authority)) ? ActualPredictionTime : 0.f,
+                    TargetLocation, CollisionHeight);
                 float CollisionRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
 
                 bool bCheckOutsideHit = false;
@@ -2868,13 +2929,10 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 			{
 				FVector AltTargetLoc = ClaimedTarget->GetRewindLocation(AltRewindTime);
 
-				// Handle floor sliding at alternate time
+				// Handle floor sliding at alternate time (grace-windowed posture:
+				// AltRewindTime is this rung's effective claim age).
 				float AltCapHeight = CapHeight;
-				if (ClaimedTarget->UTCharacterMovement && ClaimedTarget->UTCharacterMovement->bIsFloorSliding)
-				{
-					AltTargetLoc.Z = AltTargetLoc.Z - CapHeight + ClaimedTarget->SlideTargetHeight;
-					AltCapHeight = ClaimedTarget->SlideTargetHeight;
-				}
+				ApplySlidePostureForValidation(ClaimedTarget, AltRewindTime, AltTargetLoc, AltCapHeight);
 
 				// Capsule-to-line distance check
 				FVector ClosestPoint, ClosestCapsulePoint;
@@ -4166,11 +4224,9 @@ void AUTWeaponFix::FireCone()
             {
                 // now see if trace would hit the capsule
                 float CollisionHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-                if (Target->UTCharacterMovement && Target->UTCharacterMovement->bIsFloorSliding)
-                {
-                    TargetLocation.Z = TargetLocation.Z - CollisionHeight + Target->SlideTargetHeight;
-                    CollisionHeight = Target->SlideTargetHeight;
-                }
+                ApplySlidePostureForValidation(Target,
+                    ((PredictionTime > 0.f) && (Role == ROLE_Authority)) ? PredictionTime : 0.f,
+                    TargetLocation, CollisionHeight);
                 float CollisionRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
 
                 bool bHitTarget = false;

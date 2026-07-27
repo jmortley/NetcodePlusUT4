@@ -328,6 +328,22 @@ public:
      *  raised from 30ms to match the shock family — the search probes fixed 15ms
      *  rungs {15,30,45}, so 45 is the last rung before the ±60 defender tradeoff). */
     virtual float GetHitscanTimeSearchWindow() const { return 0.045f; }
+
+    /** Slide-posture selection for hitscan capsule tests. A floor slide shrinks the
+     *  authoritative capsule the same frame it starts, but a remote shooter keeps
+     *  rendering a mostly-standing body for one replication interp plus the animBP
+     *  blend-in — shots aimed at that rendered torso were unhittable air on the
+     *  server. Within ncp.SlideGraceMs of the target's slide start (rewind-adjusted
+     *  via RewindTime; slide age is reconstructible because PerformFloorSlide
+     *  re-stamps FloorSlideTapTime at true slide start), substitutes the
+     *  bottom-aligned STANDING capsule envelope, which strictly contains the slide
+     *  capsule; afterwards applies the classic SlideTargetHeight shrink. Mutates
+     *  the test location/half-height in place; no-op for non-sliding targets.
+     *  Shared by HitScanTrace, the claim time-search fallback, FireCone's pawn
+     *  sweep, and the Enforcer trace so every hitscan path judges one posture. */
+    static void ApplySlidePostureForValidation(const AUTCharacter* Target,
+        float RewindTime, FVector& InOutTargetLocation, float& InOutCollisionHeight);
+
     virtual void FireShot() override;
 
     // Guard against race condition: replicated fire RPC arrives after owner dies
