@@ -78,6 +78,9 @@ you add the one you want per ruleset.
 > NetcodePlus **gamemode** (§4) has no such issue — the cursor works normally there. Weapons, netcode,
 > hit registration and every server‑side feature are unaffected; this is purely the client‑side menu
 > cursor. Players who only ever change settings from the main menu never see it.
+>
+> See **§6.3** for this and the other stuck‑cursor case (launcher join / map change with a menu open),
+> both with the same `~` workaround — handy to have in one place when answering tickets.
 
 ---
 
@@ -508,6 +511,22 @@ These are set by players, not the server, but admins should know them for troubl
 | `ncp.ShockConverge` | `1` | Client fake→real shock‑ball convergence interp (the ~700 ms, 60 uu‑capped pull of the rendered fake toward the real). `0` = fake renders its own predicted path. |
 | `ncp.ShockHandoff` | `1` | Client stuck‑ball handoff: when the real ball stops, destroy the fake and reveal the real so the shooter sees the stop. `0` = no reveal. |
 | `ncp.WarmupSpawns` | `1` | Warmup‑only spawn‑point markers (team‑colored, facing tick + distance) in CTF / iCTF, as a learning aid. `0` = off. |
+
+### 6.3 Known issues players will report — "my mouse is stuck / the menu won't click"
+
+Two **different** bugs share one symptom and one workaround. Neither loses progress, neither affects
+gameplay, hit registration or anything server‑side, and in both cases:
+
+> **Workaround: press `~` (tilde).** Opening the console frees the mouse cursor. The menu is fully
+> usable afterwards, and closing the console does not re‑capture it.
+
+| What the player did | What happens | Why |
+|---|---|---|
+| Opened **F5** (or `nchud` / `weaponskins` / cosmetics) on a **stock** gamemode — stock TDM, DM, stock CTF, Duel… typically while running `NCWepMut` / `NCStockWeapons` on a stock ruleset | Menu draws, but the cursor stays captured for camera look, so nothing is clickable | Those panels ask the HUD to release the cursor and only the **NetcodePlus HUDs** honour it. A stock gamemode runs a stock HUD, which re‑captures the mouse every tick. **Not an issue on any NetcodePlus gamemode** (§4). |
+| **Joined from the launcher** (`-ncpconnect`), or the server changed map, **while the front‑end menu was open** | A "ghost" main menu is left behind: cursor stuck, `Esc` does nothing, input dead | A stock UE4/UT ordering race — the deferred menu close is dropped when the loading movie finishes on the same event the map load rides. A fix exists but was pulled during unrelated crash triage and is **deliberately not in 328**; the `~` workaround stands. |
+
+If a player reports either, the answer is the same one line: **press `~`**. Worth pinning in your
+hub's Discord/rules channel — it's the single most common "the game is broken" ticket that isn't.
 
 ---
 
