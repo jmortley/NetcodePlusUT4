@@ -4,7 +4,7 @@ A UT4 plugin focused on improving netcode feel and adding new game modes for com
 
 Built on UE4 4.15 (UT4 fork, CL-3525360). Targets up to 720Hz on modern hardware.
 
-**Current build: 327.** Players install NetcodePlus and stay current through the community
+**Current build: 328.** Players install NetcodePlus and stay current through the community
 **[NetcodePlus launcher](https://github.com/jmortley/netcodeplus-launcher)** — it keeps the client DLL and
 the game-mode content paks up to date, so there's nothing to hand-copy. Running a server? The companion
 **[Server Admin Guide](SERVER-ADMINS.md)** has the full install / cvar / ruleset reference.
@@ -22,6 +22,8 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 - **Split prediction system** — visual prediction (0ms) is decoupled from hit validation (~120ms ping-based), so players see enemies in real-time while shots are validated against rewound positions.
 - **Bidirectional time-search** — when primary rewind misses on a client-claimed target, the server searches ±45ms in 15ms steps (rungs ±15 / ±30 / ±45, now uniform across every hitscan weapon) to catch hits inside the network jitter window.
 - **HitScan padding for moving targets** — claimed targets get +45 units of capsule padding at fire time (10 units stationary), compensating for tight UT4 hitboxes vs. visible mesh silhouette.
+- **Unclaimed-hit render check (new in 328)** — the counterweight to all of the above. Rewind and padding are generous by design, and at high ping that generosity could hand a shooter a hit their own client never thought was a hit ("gifted shots"). The server now reconstructs what the shooter actually had *rendered* at fire time and rejects hits the client never claimed. On by default (`ncp.UnclaimedRenderGate`); if honest aim is ever demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate.
+- **Slide posture grace (new in 328)** — a floor slide shrinks the server capsule the same frame it starts, but a remote shooter keeps seeing a standing body for one replication interp plus the animation blend, so shots through the visible torso were server-side air. Validation now accepts the standing envelope for the first `ncp.SlideGraceMs` (250ms) of a slide. Rewind reconstructs *where* a target was, never *what shape* it was — this closes that gap for the one posture change fast enough to matter.
 - **Transactional fire events** — every shot has a unique event index for client/server agreement; resend queue protects against unreliable RPC loss.
 - **Strict tap-fire enforcement** — tap-mashing the fire button can no longer fire faster than holding it. Click queueing via retry timer means responsiveness is preserved.
 - **Trade-kill grace period** (200ms) — fire RPCs in flight when the shooter dies still register, so reciprocal kills count.
@@ -126,7 +128,7 @@ Open the editor in-game with the `nchud` console command. Layout persists to `Sa
 
 ### Mutators
 
-- **ClientHitsounds** — client-side hit prediction with batched server confirmation. Configurable hitsound packs.
+- **ClientHitsounds** — native damage hitsounds (`?mutator=ClientHitsounds`), the optional replacement for the `dcHitsounds` blueprint. 10 built-in presets with damage-pitched playback, client-side prediction so the sound lands at fire time instead of a round-trip later, and real pellet coalescing (a flak spread is one sound, not nine). Players can add their own by shipping a `UHitsoundPack` data asset (DisplayName + Low/Med/High) in a pak — discovered automatically, custom wins a name clash, and it needs no server support since hitsounds are resolved entirely client-side. Configured at **F5 → Hitsounds**. Shares the `Hitsounds` mutator group with `dcHitsounds`, so run one or the other.
 - **ElimPlusMutator** — adds the ElimPlus-specific behaviors (rating/replicator hookup, BP CheckRelevance for placed-pickup filtering). Required when running `ElimPlus` game mode.
 - **AWarmupRoamMutator** — auto-added by NCPlusCTF (incl. iCTF). Powers the `mutate warmup` console command: warmup-only invuln + firing-disable so players can learn the map. Stripped from everyone at match start via `NotifyMatchStateChange`; can never carry into live play.
 
@@ -134,7 +136,10 @@ Open the editor in-game with the `nchud` console command. Layout persists to `Sa
 
 - **`weaponskins` console command** — opens Slate UI for per-weapon hide/show, skin selection, hitscan choice (Sniper / LG), **beam colors** (Sniper/LG via `LGColor`, Shock via `ShockBeam` — FSE-safe color picker, format matches the BP defaults' `Convert String to Linear Color` parser so the weapon BPs read the new color at spawn without parser changes), and **hidden-weapon beam origin** (`Back` / `Down` spinners — the tracer/beam spawn point relative to the camera when the weapon is hidden; defaults 10 / 35 reproduce stomach-height; try 10 / 20 for chest or 10 / 60 for hip-fire feel).
 - **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
-- **Plugin-version gate (`ANCVersionGate`)** — server-spawned per-player `AInfo` in `PostLogin`, owner-only replication. Client's `PostNetInit` reports `NETCODE_PLUGIN_VERSION` immediately; the server `KickPlayer`s a **mismatched** build with a clear "server v327, you are vN — update via launcher" message, and the player can rejoin once the launcher updates them. Players with **no** plugin are not auto-kicked — the no-reply timeout kick is currently disabled, so the grace window (`[NetcodePlus] VersionReportTimeoutSec`, default 100s, clamped 1–120) is the mitigation, not a hard gate. Wired into every NCPlus mode's `PostLogin`. Bots + listen-host local PC exempt.
+- **Network-visible weapon skins (new in 328)** — skins picked at F5 are no longer local-only cosmetics: the choice is validated server-side against a **fixed manifest of approved skins**, replicated, and rendered for everyone — other players, spectators (including joining spectate mid-match), on respawn/re-equip, and on dropped weapons, which keep the skin they were dropped with. Entitlement-checked and rate-limited, with a dedicated-server visual short-circuit so servers do no rendering work. Weapons whose skin doesn't live on material slot 0 (Flak, and the Lightning Gun — which is asymmetric, slot 0 in first person and slot 1 in third) are handled per-family rather than assuming slot 0.
+- **Plugin-version gate (`ANCVersionGate`)** — server-spawned per-player `AInfo` in `PostLogin`, owner-only replication. Client's `PostNetInit` reports `NETCODE_PLUGIN_VERSION` immediately; the server `KickPlayer`s a **mismatched** build with a clear "server v328, you are vN — update via launcher" message, and the player can rejoin once the launcher updates them. Players with **no** plugin are not auto-kicked — the no-reply timeout kick is currently disabled, so the grace window (`[NetcodePlus] VersionReportTimeoutSec`, default 100s, clamped 1–120) is the mitigation, not a hard gate. Wired into every NCPlus mode's `PostLogin`. Bots + listen-host local PC exempt.
+- **Concede vote ("gg vote")** — the losing team can end a lost match instead of playing it out. Any player types **`gg`** (or presses **F1** to confirm / **F4** to cancel) and the vote passes at **>50% of that team's humans**; the leading team is notified that a vote is brewing rather than being surprised by a sudden end. Server-authoritative, bots excluded from the count.
+- **Announcer packs** — optional replacement announcer voice sets, plus a "legacy immediacy" option that restores the snappier old announcement timing. Selected per player (F5); persisted as `[NetcodePlus] AnnouncerPack` in Mod.ini. Client-side only.
 - **Custom siphon powerup** — life-steal pickup spawning at sniper location with 90s timer.
 - **Hit-plot replicator** — server analyzes hit positions for ServerShield-style debug visualization.
 - **Stats integration** — replicates per-player accuracy + damage + armor counts via mode-specific `AInfo` replicators (`ANCLeagueDuelStatsReplicator`, `ANCShaftArenaStatsReplicator`, `AElimPlusStatsReplicator`, `ACTFStatsReplicator`, `AWipeoutDamageReplicator`, `AShockDomReplicator`) so dedicated-server clients can read stats that are server-only on `AUTPlayerState`.
@@ -164,6 +169,8 @@ cheat-gated.
 | `ncp.CrossModeRetry` | 1 | Re-fire a held primary that landed mid-cycle after a shock ball / mode switch. 0 = legacy drop (kill-switch). |
 | `ncp.ShockDriftCorrect` | 1 | Shock-ball per-tick heading re-assert (the high-FPS drift fix). 0 = stock-like. |
 | `ncp.WarmupSpawns` | 1 | Warmup-only spawn-point learning markers (CTF / iCTF). |
+| `ncp.UnclaimedRenderGate` | 1 | Server-side. Reject hits the shooter's client never claimed (the "gifted shots" fix). Leave on; widen `ncp.UnclaimedRenderSlack` (default 40) instead of disabling. |
+| `ncp.SlideGraceMs` | 250 | Server-side. Grace window after a slide starts where validation accepts the standing capsule, covering the replication + anim-blend delay on the shooter's screen. 0 = pre-328 behaviour. |
 
 > ⚠️ **Don't enable `ncp.GhostFix`.** It's a parked experiment (0 by default) — the current version breaks
 > consecutive held weapon switches. A pawn-level v2 is pending; leave it at `0`.
@@ -180,7 +187,7 @@ Lives at `<Saved>/Config/Mod.ini`. Most plugin-side knobs go here; some are per-
 - `Hide.<WeaponClassName>=1|0` — hide/show first-person mesh per weapon.
 - `HiddenBeamBack=10.0` — when a weapon is hidden, how far behind the camera the tracer/beam spawns (units). Clamped 0–100.
 - `HiddenBeamDown=35.0` — how far below the camera. Defaults 10 / 35 = stomach height; 10 / 20 = chest; 10 / 60 = hip-fire.
-- `Skin.<WeaponSkinTag>=<AssetPath>` — applied skin per weapon family (currently disabled in code; see `bSkinsEnabled` gate).
+- `Skin.<WeaponSkinTag>=<AssetPath>` — applied skin per weapon family. **Enabled in 328** (previously gated off). Chosen at F5 → Weapon Skins; the selection is validated server-side against a fixed manifest of approved skins, replicated, and visible to other players and spectators — including on dropped/picked-up weapons.
 
 **`[WeaponSkinsPlus]`** (per-player):
 - `HitscanChoice=Sniper|LG` — hitscan weapon preference (Sniper Rifle vs Lightning Gun). Set via the `weaponskins` menu toggle.
