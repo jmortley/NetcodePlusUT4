@@ -615,8 +615,10 @@ void AUWipeoutGame::DefaultTimer()
 					return;
 				}
 
-				// Time is up — start 3-second grace period before sudden death.
+				// Time is up — start the grace period before sudden death.
 				// Players with pending respawns within the grace window can still spawn.
+				// (SuddenDeathGraceSeconds is shared with the HUD, which uses it to X
+				// out respawn countdowns that can no longer land — keep them in sync.)
 				bSuddenDeathPending = true;
 
 				FTimerDelegate SuddenDeathDelegate;
@@ -651,7 +653,8 @@ void AUWipeoutGame::DefaultTimer()
 				});
 
 				FTimerHandle SuddenDeathGraceHandle;
-				GetWorldTimerManager().SetTimer(SuddenDeathGraceHandle, SuddenDeathDelegate, 3.0f, false);
+				GetWorldTimerManager().SetTimer(SuddenDeathGraceHandle, SuddenDeathDelegate,
+					SuddenDeathGraceSeconds, false);
 				return;
 			}
 		}
@@ -2451,6 +2454,16 @@ void AUWipeoutGame::CreditHealing(AUTPlayerState* HealerPS, int32 Amount)
 	}
 	int32& Total = HealingDoneThisMatch.FindOrAdd(HealerPS);
 	Total += Amount;
+}
+
+int32 AUWipeoutGame::GetHealingDoneForPlayer(AUTPlayerState* PS) const
+{
+	if (PS == nullptr)
+	{
+		return 0;
+	}
+	const int32* Found = HealingDoneThisMatch.Find(PS);
+	return (Found != nullptr) ? *Found : 0;
 }
 
 // ============================================================================

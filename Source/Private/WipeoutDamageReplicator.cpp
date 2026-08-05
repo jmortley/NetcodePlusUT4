@@ -4,6 +4,7 @@
 #include "UTPlayerState.h"
 #include "UTGameState.h"
 #include "StatNames.h"
+#include "WipeoutGame.h"
 #include "Net/UnrealNetwork.h"
 
 AWipeoutDamageReplicator::AWipeoutDamageReplicator(const FObjectInitializer& ObjectInitializer)
@@ -54,6 +55,11 @@ void AWipeoutDamageReplicator::UpdateFromPlayerStates()
 		return;
 	}
 
+	// Server-only path, so the authoritative GameMode is reachable here. Null in
+	// any non-Wipeout mode that somehow spawns this replicator — healing simply
+	// stays 0 rather than failing the whole refresh.
+	AUWipeoutGame* WipeoutGame = GetWorld()->GetAuthGameMode<AUWipeoutGame>();
+
 	DamageEntries.Reset();
 
 	for (APlayerState* PS : GS->PlayerArray)
@@ -77,6 +83,17 @@ void AWipeoutDamageReplicator::UpdateFromPlayerStates()
 		// Belt and Amp pickup counts — server-side stats
 		Entry.BeltPickups = UTPS->GetStatsValue(NAME_ShieldBeltCount);
 		Entry.AmpPickups = UTPS->GetStatsValue(NAME_UDamageCount);
+
+		// Vest, and Siphon (which reuses the Berserk stat names — see
+		// SiphonPowerup.cpp — so no engine-side stat had to be added).
+		Entry.VestPickups = UTPS->GetStatsValue(NAME_ArmorVestCount);
+		Entry.SiphonPickups = UTPS->GetStatsValue(NAME_BerserkCount);
+
+		// Healing is accumulated on the GameMode, not the PlayerState.
+		if (WipeoutGame != nullptr)
+		{
+			Entry.HealingDone = WipeoutGame->GetHealingDoneForPlayer(UTPS);
+		}
 
 		DamageEntries.Add(Entry);
 	}
@@ -113,6 +130,42 @@ int32 AWipeoutDamageReplicator::GetAmpsForPlayer(const FString& UniqueIdStr) con
 		if (Entry.PlayerId == UniqueIdStr)
 		{
 			return Entry.AmpPickups;
+		}
+	}
+	return 0;
+}
+
+int32 AWipeoutDamageReplicator::GetVestsForPlayer(const FString& UniqueIdStr) const
+{
+	for (const FReplicatedDamageEntry& Entry : DamageEntries)
+	{
+		if (Entry.PlayerId == UniqueIdStr)
+		{
+			return Entry.VestPickups;
+		}
+	}
+	return 0;
+}
+
+int32 AWipeoutDamageReplicator::GetSiphonsForPlayer(const FString& UniqueIdStr) const
+{
+	for (const FReplicatedDamageEntry& Entry : DamageEntries)
+	{
+		if (Entry.PlayerId == UniqueIdStr)
+		{
+			return Entry.SiphonPickups;
+		}
+	}
+	return 0;
+}
+
+int32 AWipeoutDamageReplicator::GetHealingForPlayer(const FString& UniqueIdStr) const
+{
+	for (const FReplicatedDamageEntry& Entry : DamageEntries)
+	{
+		if (Entry.PlayerId == UniqueIdStr)
+		{
+			return Entry.HealingDone;
 		}
 	}
 	return 0;

@@ -26,6 +26,21 @@ struct FReplicatedDamageEntry
 
 	UPROPERTY()
 	int32 AmpPickups = 0;
+
+	UPROPERTY()
+	int32 VestPickups = 0;
+
+	/** Siphon powerup pickups. SiphonPowerup deliberately reuses the stock
+	 *  Berserk stat names (SiphonPowerup.cpp) to avoid an engine edit, so this
+	 *  reads NAME_BerserkCount. */
+	UPROPERTY()
+	int32 SiphonPickups = 0;
+
+	/** Health given to teammates this match. Lives on the GameMode
+	 *  (AUWipeoutGame::HealingDoneThisMatch, credited by CreditHealing) — server
+	 *  only, hence the trip through this replicator like DamageDone. */
+	UPROPERTY()
+	int32 HealingDone = 0;
 };
 
 UCLASS(NotPlaceable)
@@ -46,6 +61,9 @@ public:
 	int32 GetDamageForPlayer(const FString& UniqueIdStr) const;
 	int32 GetBeltsForPlayer(const FString& UniqueIdStr) const;
 	int32 GetAmpsForPlayer(const FString& UniqueIdStr) const;
+	int32 GetVestsForPlayer(const FString& UniqueIdStr) const;
+	int32 GetSiphonsForPlayer(const FString& UniqueIdStr) const;
+	int32 GetHealingForPlayer(const FString& UniqueIdStr) const;
 
 	/** Server-only: refresh DamageEntries from all PlayerStates */
 	void UpdateFromPlayerStates();

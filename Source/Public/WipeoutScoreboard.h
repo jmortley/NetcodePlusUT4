@@ -33,8 +33,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	FText CH_Damage;
 
+	/** Vest / Siphon pickup counts, same "a/b" form as CH_BeltAmp. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
-	FText CH_Efficiency;
+	FText CH_VestSiphon;
+
+	/** HP restored to teammates this match. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	FText CH_Heal;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	FText CH_DmgPerLife;
@@ -49,7 +54,10 @@ public:
 	float ColumnHeaderDamageX;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
-	float ColumnHeaderEfficiencyX;
+	float ColumnHeaderVestSiphonX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	float ColumnHeaderHealX;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	float ColumnHeaderDmgPerLifeX;

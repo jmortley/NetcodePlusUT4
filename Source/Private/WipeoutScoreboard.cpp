@@ -28,17 +28,22 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	// Column positions (fraction of CellWidth) — 6 data columns after player name
 	ColumnHeaderPlayerX = 0.10f;    // Name starts after portrait
 	ColumnHeaderScoreX = 0.38f;     // Score/round wins (unused in Wipeout but keep for base class)
-	ColumnHeaderKDX = 0.40f;
-	ColumnHeaderBeltAmpX = 0.50f;
-	ColumnHeaderDamageX = 0.59f;
-	ColumnHeaderEfficiencyX = 0.68f;
-	ColumnHeaderDmgPerLifeX = 0.79f;
+	// Even 0.09 spacing across the six stat columns. Efficiency was dropped (it is
+	// just K/(K+D), already readable straight off the K/D column) and its slot went
+	// to the two stats that were previously invisible: V/S and HEAL.
+	ColumnHeaderKDX = 0.37f;
+	ColumnHeaderBeltAmpX = 0.46f;
+	ColumnHeaderVestSiphonX = 0.55f;
+	ColumnHeaderDamageX = 0.64f;
+	ColumnHeaderHealX = 0.73f;
+	ColumnHeaderDmgPerLifeX = 0.82f;
 	ColumnHeaderPingX = 0.92f;
 
 	CH_KD = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_KD", "K/D");
 	CH_BeltAmp = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_BeltAmp", "B/A");
 	CH_Damage = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Damage", "DMG");
-	CH_Efficiency = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Efficiency", "Eff%");
+	CH_VestSiphon = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_VestSiphon", "V/S");
+	CH_Heal = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Heal", "HEAL");
 	CH_DmgPerLife = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_DmgPerLife", "DMG/Life");
 
 	bUseRoundKills = false;  // Show overall match stats, not per-round
@@ -168,7 +173,9 @@ void UWipeoutScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_Damage, XOffset + (ScaledCellWidth * ColumnHeaderDamageX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(CH_Efficiency, XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX), YOffset + ColumnHeaderY,
+			DrawText(CH_VestSiphon, XOffset + (ScaledCellWidth * ColumnHeaderVestSiphonX), YOffset + ColumnHeaderY,
+				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(CH_Heal, XOffset + (ScaledCellWidth * ColumnHeaderHealX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_DmgPerLife, XOffset + (ScaledCellWidth * ColumnHeaderDmgPerLifeX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
@@ -536,17 +543,46 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DmgColor, ETextHorzPos::Center, ETextVertPos::Center);
 
-	// Efficiency — kills / (kills + deaths), shown as percentage
-	int32 EffKills = bUseRoundKills ? PlayerState->RoundKills : PlayerState->Kills;
-	int32 EffDeaths = PlayerState->Deaths;
-	float EffPct = (EffKills + EffDeaths > 0) ? (float(EffKills) / float(EffKills + EffDeaths)) * 100.f : 0.f;
-	FLinearColor EffColor = (EffPct >= 60.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
-		: (EffPct >= 40.f) ? FLinearColor(1.f, 1.f, 0.25f, 1.f)
-		: FLinearColor(1.f, 0.4f, 0.4f, 1.f);
-	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) EffColor *= 0.6f;
-	FString EffStr = FString::Printf(TEXT("%d%%"), FMath::RoundToInt(EffPct));
-	DrawText(FText::FromString(EffStr), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
-		UTHUDOwner->TinyFont, 1.0f, 1.0f, EffColor, ETextHorzPos::Center, ETextVertPos::Center);
+	// Vest / Siphon pickups and healing — all three live on the same replicator as
+	// Damage (vest + siphon are PlayerState stats the client never sees; healing is
+	// GameMode state). Reuse the DmgRep resolved above rather than iterating actors
+	// again per column. No listen-server fallback: unlike DamageDone these have no
+	// client-readable equivalent, so they simply read 0 if the replicator is absent.
+	int32 Vests = 0;
+	int32 Siphons = 0;
+	int32 Healing = 0;
+	{
+		AWipeoutDamageReplicator* StatRep = nullptr;
+		UWorld* World = GetWorld();
+		if (World)
+		{
+			for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
+			{
+				StatRep = *It;
+				break;
+			}
+		}
+		if (StatRep && PlayerState->UniqueId.IsValid())
+		{
+			const FString PlayerIdStr = PlayerState->UniqueId.ToString();
+			Vests = StatRep->GetVestsForPlayer(PlayerIdStr);
+			Siphons = StatRep->GetSiphonsForPlayer(PlayerIdStr);
+			Healing = StatRep->GetHealingForPlayer(PlayerIdStr);
+		}
+	}
+
+	FString VSStr = FString::Printf(TEXT("%d/%d"), Vests, Siphons);
+	FLinearColor VSColor = FLinearColor(0.6f, 0.85f, 1.f, 1.f); // pale blue — pickup family
+	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) VSColor *= 0.6f;
+	DrawText(FText::FromString(VSStr), XOffset + (Width * ColumnHeaderVestSiphonX), YOffset + ColumnY,
+		UTHUDOwner->TinyFont, 1.0f, 1.0f, VSColor, ETextHorzPos::Center, ETextVertPos::Center);
+
+	FLinearColor HealColor = (Healing > 0)
+		? FLinearColor(0.3f, 1.f, 0.5f, 1.f)          // green — support contribution
+		: FLinearColor(0.55f, 0.55f, 0.55f, 1.f);     // grey zero, so it never competes with DMG
+	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) HealColor *= 0.6f;
+	DrawText(FText::AsNumber(Healing), XOffset + (Width * ColumnHeaderHealX), YOffset + ColumnY,
+		UTHUDOwner->TinyFont, 1.0f, 1.0f, HealColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// DMG/Life — average damage dealt per life
 	int32 Lives = PlayerState->Deaths + 1;

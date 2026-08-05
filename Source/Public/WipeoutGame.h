@@ -193,8 +193,18 @@ public:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	bool bInSuddenDeath;
 
-	/** True during the 3-second grace period before sudden death activates */
+	/** True during the grace period before sudden death activates */
 	bool bSuddenDeathPending = false;
+
+	/** Length of that grace period. A respawn already queued when the round clock
+	 *  hits zero still lands if it fires inside this window; anything later is
+	 *  cancelled when sudden death empties PendingRespawns.
+	 *  COMPILE-TIME SHARED WITH THE CLIENT: WipeoutHUD reads this to decide when a
+	 *  dead player's respawn countdown has become unreachable and should render "X"
+	 *  instead. Both sides are in this plugin so the value cannot drift — but if it
+	 *  ever becomes config/BP-driven it must be replicated (GameMode is server-only)
+	 *  or the HUD will silently disagree with the server. */
+	static constexpr float SuddenDeathGraceSeconds = 3.0f;
 
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	int32 LastRoundWinningTeamIndex;
@@ -260,6 +270,15 @@ public:
 	 *  only; no-op on null healer / Amount <= 0. */
 	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
 	void CreditHealing(AUTPlayerState* HealerPS, int32 Amount);
+
+	/** Healing credited to this player so far, 0 if none/unknown. Server-side read
+	 *  for AWipeoutDamageReplicator, which is what carries it to the scoreboard
+	 *  (this map is GameMode state and never replicates).
+	 *  UFUNCTION so StatSQL can resolve it by name via FindFunction/ProcessEvent at
+	 *  match end without taking a build dependency on NetcodePlus — do not rename
+	 *  without updating MutStatSQL.cpp's lookup. */
+	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
+	int32 GetHealingDoneForPlayer(AUTPlayerState* PS) const;
 
 
 	// =======================================================================
