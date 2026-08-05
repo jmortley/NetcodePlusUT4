@@ -13,6 +13,7 @@
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTWeaponFix.h"
+#include "NCPlusAnnouncer.h"
 #include "UTATypes.h"
 #include "SUTWeaponSkinSelector.h"
 #include "SUTNCPlusMenu.h"
@@ -943,6 +944,11 @@ void FNetcodePlus::StartupModule()
 	// the command line, before any consumer reads it (see ApplyLauncherAuthHandoff).
 	ApplyLauncherAuthHandoff();
 
+	if (!IsRunningDedicatedServer())
+	{
+		NCPlusAnnouncerPacks::Install();
+	}
+
 	IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("weaponhand"),
 		TEXT("Set weapon position. Usage: weaponhand [right|left|center|hidden]"),
@@ -1157,6 +1163,8 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
+	NCPlusAnnouncerPacks::Uninstall();
+
 	// Stop the -ncpconnect ticker if it never fired.
 	if (GNcpConnectTickerHandle.IsValid())
 	{

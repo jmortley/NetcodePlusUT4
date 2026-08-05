@@ -322,6 +322,15 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 {
+	const int32 AnnouncerIndex = AnnouncerPackEntries.IndexOfByPredicate(
+		[this](const FNCPlusAnnouncerPackOption& Pack) { return Pack.Id == SelectedAnnouncerPackId; });
+	const TSharedPtr<FString> InitialAnnouncer = AnnouncerPackOptions.IsValidIndex(AnnouncerIndex)
+		? AnnouncerPackOptions[AnnouncerIndex]
+		: (AnnouncerPackOptions.Num() > 0 ? AnnouncerPackOptions[0] : nullptr);
+	const EVisibility AnnouncerVisibility = AnnouncerPackEntries.Num() > 1
+		? EVisibility::Visible
+		: EVisibility::Collapsed;
+
 	return SNew(SVerticalBox)
 
 		// ── Gore Settings ──
@@ -529,6 +538,69 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 				.Text(FText::FromString(TEXT("High Res Screenshot PostMatch")))
 				.Font(RegularFont(14))
 				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
+
+		// Optional announcer packs are soft-discovered. With no optional pak,
+		// Stock UT4 is used and this section does not take up menu space.
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 15, 0, 5)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Visibility(AnnouncerVisibility)
+			.Text(FText::FromString(TEXT("Announcer")))
+			.Font(BoldFont(18))
+			.ColorAndOpacity(FLinearColor::White)
+		]
+
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			.Visibility(AnnouncerVisibility)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 12, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Voice")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(220.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&AnnouncerPackOptions)
+					.InitiallySelectedItem(InitialAnnouncer)
+					.ToolTipText(FText::FromString(TEXT("Optional voices appear only when their local content pak is installed. Stock UT4 is always available.")))
+					.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+					{
+						if (!NewSelection.IsValid())
+						{
+							return;
+						}
+
+						const int32 Index = AnnouncerPackOptions.IndexOfByPredicate(
+							[&NewSelection](const TSharedPtr<FString>& Option)
+							{
+								return Option.IsValid() && *Option == *NewSelection;
+							});
+						if (AnnouncerPackEntries.IsValidIndex(Index))
+						{
+							SelectedAnnouncerPackId = AnnouncerPackEntries[Index].Id;
+						}
+					})
+				]
 			]
 		];
 }
@@ -1080,6 +1152,16 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		bHighResScreenshotPostMatch = true;
 
+	// Announcer choices use stable IDs, while the UI only exposes packs whose
+	// optional package is mounted. A stale or missing selection displays Stock UT4.
+	NCPlusAnnouncerPacks::EnumerateAvailable(AnnouncerPackEntries);
+	SelectedAnnouncerPackId = NCPlusAnnouncerPacks::GetConfiguredPackId();
+	AnnouncerPackOptions.Reset();
+	for (const FNCPlusAnnouncerPackOption& Pack : AnnouncerPackEntries)
+	{
+		AnnouncerPackOptions.Add(MakeShareable(new FString(Pack.DisplayName)));
+	}
+
 	// Force Models — take a working copy of the live config (loads Mod.ini [ForceModels] on first access).
 	FMConfig = NCPlusForceModels::Get();
 
@@ -1140,6 +1222,11 @@ void SUTNCPlusMenu::SaveSettings()
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
 	GConfig->Flush(false, ConfigPath);
+
+	NCPlusAnnouncerPacks::SaveAndApply(SelectedAnnouncerPackId,
+		(PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+			? Cast<AUTPlayerController>(PlayerOwner->PlayerController)
+			: nullptr);
 
 	// Force Models — write the working copy through to the live config + Mod.ini [ForceModels].
 	NCPlusForceModels::Mutable() = FMConfig;

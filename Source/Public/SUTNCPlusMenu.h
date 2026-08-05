@@ -6,6 +6,7 @@
 #include "NetcodePlus.h"     // PCH preamble (UT/core types first)
 #include "SlateBasics.h"
 #include "NCPlusForceModels.h"
+#include "NCPlusAnnouncer.h"
 #include "ClientHitsounds.h"
 
 class UUTLocalPlayer;
@@ -60,6 +61,9 @@ private:
 	bool bShowOwnBeam;
 	float OwnFootstepVolume;
 	bool bHighResScreenshotPostMatch;
+	TArray<FNCPlusAnnouncerPackOption> AnnouncerPackEntries;
+	TArray<TSharedPtr<FString>> AnnouncerPackOptions;
+	FString SelectedAnnouncerPackId;
 
 	// ── Force Models settings ── working copy of the live config, edited in-place by the tab's
 	// widgets via bool*/float* lambdas and written back on Save. The combo option lists are members
