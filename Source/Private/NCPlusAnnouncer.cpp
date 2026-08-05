@@ -104,8 +104,11 @@ namespace
 
 	FString ResolveAvailablePackId(const FString& RequestedId)
 	{
+		// 4.15 API: TrimStartAndEnd/TrimStartAndEndInline do not exist yet —
+		// Trim() (leading) + TrimTrailing() are the in-place equivalents.
 		FString TrimmedId = RequestedId;
-		TrimmedId.TrimStartAndEndInline();
+		TrimmedId.Trim();
+		TrimmedId.TrimTrailing();
 		if (TrimmedId.IsEmpty() || TrimmedId.Equals(StockPackId, ESearchCase::IgnoreCase))
 		{
 			return StockPackId;

@@ -33,6 +33,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	FText CH_Damage;
 
+	/** Retained for subclasses only — Wipeout itself no longer draws an efficiency
+	 *  column. NCShaftArena, NCLeagueDuel and ShockDom derive from this scoreboard
+	 *  and reuse this text/slot (ShockDom as real efficiency; the others repurpose
+	 *  the position for DMG and the armour icon row). Do not remove. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	FText CH_Efficiency;
+
 	/** Vest / Siphon pickup counts, same "a/b" form as CH_BeltAmp. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	FText CH_VestSiphon;
@@ -52,6 +59,10 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	float ColumnHeaderDamageX;
+
+	/** Retained for subclasses only — see CH_Efficiency above. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
+	float ColumnHeaderEfficiencyX;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
 	float ColumnHeaderVestSiphonX;

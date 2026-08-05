@@ -38,12 +38,18 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	ColumnHeaderHealX = 0.73f;
 	ColumnHeaderDmgPerLifeX = 0.82f;
 	ColumnHeaderPingX = 0.92f;
+	// Unused by Wipeout now, but inherited (and repurposed) by the ShaftArena,
+	// LeagueDuel and ShockDom scoreboards — keep the default they were built on.
+	ColumnHeaderEfficiencyX = 0.68f;
 
 	CH_KD = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_KD", "K/D");
 	CH_BeltAmp = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_BeltAmp", "B/A");
 	CH_Damage = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Damage", "DMG");
 	CH_VestSiphon = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_VestSiphon", "V/S");
 	CH_Heal = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Heal", "HEAL");
+	// Wipeout no longer draws this, but ShockDom (which inherits this scoreboard)
+	// still renders it as a real efficiency column and relies on this default.
+	CH_Efficiency = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_Efficiency", "Eff%");
 	CH_DmgPerLife = NSLOCTEXT("WipeoutScoreboard", "ColumnHeader_DmgPerLife", "DMG/Life");
 
 	bUseRoundKills = false;  // Show overall match stats, not per-round

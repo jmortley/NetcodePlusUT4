@@ -1,6 +1,7 @@
 // UTWeap_Enforcer_Plus.cpp
 #include "UTWeap_Enforcer_Plus.h"
 #include "UnrealTournament.h"
+#include "UTWeaponFix.h"   // shared slide-posture validation rule (static)
 #include "UTCharacter.h"
 #include "UTCharacterMovement.h"
 #include "UTGameState.h"
@@ -124,7 +125,8 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 		// Floor-slide posture: standing envelope inside the ncp.SlideGraceMs window
 		// after slide start, classic slide shrink after (shared validation rule —
 		// see AUTWeaponFix::ApplySlidePostureForValidation).
-		ApplySlidePostureForValidation(Target,
+		// Qualified: this class extends AUTWeap_Enforcer, not AUTWeaponFix.
+		AUTWeaponFix::ApplySlidePostureForValidation(Target,
 			(ActualPredictionTime > 0.f && Role == ROLE_Authority) ? ActualPredictionTime : 0.f,
 			TargetLocation, CollisionHeight);
 
