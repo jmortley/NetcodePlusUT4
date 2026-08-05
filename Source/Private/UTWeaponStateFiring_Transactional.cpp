@@ -5,6 +5,22 @@
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTBot.h"
+#include "UTPlusWeap_RocketLauncher.h"
+#include "HAL/IConsoleManager.h"
+
+static FORCEINLINE int32 RocketPrimaryDiagLevelTransactional()
+{
+	static IConsoleVariable* DiagVar = IConsoleManager::Get().FindConsoleVariable(TEXT("ncp.RocketPrimaryDiag"));
+	return DiagVar ? DiagVar->GetInt() : 0;
+}
+
+static FORCEINLINE bool RocketPrimaryDiagTransactional(AUTWeapon* Weapon)
+{
+	const int32 Level = RocketPrimaryDiagLevelTransactional();
+	return Weapon != nullptr && Level > 0
+		&& Cast<AUTPlusWeap_RocketLauncher>(Weapon) != nullptr
+		&& (Weapon->GetCurrentFireMode() == 0 || Level >= 2);
+}
 
 UUTWeaponStateFiring_Transactional::UUTWeaponStateFiring_Transactional(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -33,6 +49,21 @@ void UUTWeaponStateFiring_Transactional::BeginState(const UUTWeaponState* PrevSt
 		float RefireTime = GetOuterAUTWeapon()->GetRefireTime(GetOuterAUTWeapon()->GetCurrentFireMode());
 		GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(RefireCheckHandle, this, &UUTWeaponStateFiring_Transactional::RefireCheckTimer, RefireTime, true);
 	}
+	if (RocketPrimaryDiagTransactional(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		const float Now = W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f;
+		const float Lft = Cast<AUTWeaponFix>(W) && Cast<AUTWeaponFix>(W)->LastFireTime.IsValidIndex(0)
+			? Cast<AUTWeaponFix>(W)->LastFireTime[0] : -1.f;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] TX_BEGIN_STATE frame=%u t=%.4f role=%d net=%d local=%d state=%p prev=%s currentMode=%d pending0=%d lft0=%.4f refire=%.4f timerRate=%.4f timerRemain=%.4f"),
+			(uint32)GFrameCounter, Now, (int32)W->Role, (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
+			PrevState ? *PrevState->GetClass()->GetName() : TEXT("null"), W->GetCurrentFireMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			Lft, W->GetRefireTime(0), W->GetWorldTimerManager().GetTimerRate(RefireCheckHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+	}
 	FireShot();
 	GetOuterAUTWeapon()->bNetDelayedShot = false;
 	
@@ -47,6 +78,17 @@ void UUTWeaponStateFiring_Transactional::BeginState(const UUTWeaponState* PrevSt
 
 void UUTWeaponStateFiring_Transactional::EndState()
 {
+	if (RocketPrimaryDiagTransactional(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] TX_END_STATE frame=%u t=%.4f role=%d net=%d local=%d state=%p currentMode=%d pending0=%d timerRemain=%.4f"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
+			W->GetCurrentFireMode(), (W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+	}
 	if (GetOuterAUTWeapon())
 	{
 		GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(RefireCheckHandle);
@@ -165,7 +207,56 @@ void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 		return;
 	}
 
-	if (GetOuterAUTWeapon()->HandleContinuedFiring())
+	AUTWeapon* DiagWeapon = GetOuterAUTWeapon();
+	const bool bRocketDiag = RocketPrimaryDiagTransactional(DiagWeapon);
+	AUTCharacter* PreOwner = nullptr;
+	uint8 PreMode = 0;
+	UUTWeaponState* PreState = nullptr;
+	bool bPrePending0 = false;
+	bool bPrePendingCurrent = false;
+	bool bPrePendingWeapon = false;
+	bool bPreHasAmmo = false;
+	bool bPreRootBlocked = false;
+	if (bRocketDiag)
+	{
+		PreOwner = DiagWeapon->GetUTOwner();
+		PreMode = DiagWeapon->GetCurrentFireMode();
+		PreState = DiagWeapon->GetCurrentState();
+		bPrePending0 = PreOwner && PreOwner->IsPendingFire(0);
+		bPrePendingCurrent = PreOwner && PreOwner->IsPendingFire(PreMode);
+		bPrePendingWeapon = PreOwner && PreOwner->GetPendingWeapon() != nullptr;
+		bPreHasAmmo = DiagWeapon->AmmoCost.IsValidIndex(PreMode)
+			&& DiagWeapon->Ammo >= FMath::Min(1, DiagWeapon->AmmoCost[PreMode]);
+		bPreRootBlocked = DiagWeapon->bRootWhileFiring && PreOwner
+			&& PreOwner->GetCharacterMovement() != nullptr
+			&& PreOwner->GetCharacterMovement()->MovementMode != MOVE_Falling;
+	}
+
+	const bool bContinued = DiagWeapon->HandleContinuedFiring();
+	if (bRocketDiag)
+	{
+		AUTWeapon* W = DiagWeapon;
+		AUTWeaponFix* Fix = Cast<AUTWeaponFix>(W);
+		const float Now = W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f;
+		const float Lft = Fix && Fix->LastFireTime.IsValidIndex(0) ? Fix->LastFireTime[0] : -1.f;
+		const float Ready = Lft > 0.f ? Lft + W->GetRefireTime(0) : -1.f;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] TX_REFIRE frame=%u t=%.4f wep=%p player=%s role=%d net=%d local=%d continued=%d preMode=%d preState=%s postState=%s prePending0=%d prePendingCurrent=%d prePendingWpn=%d preAmmoOK=%d preRootBlocked=%d postPending0=%d lft0=%.4f ready=%.4f lateBy=%.4f timerRate=%.4f timerRemain=%.4f"),
+			(uint32)GFrameCounter, Now, W,
+			(PreOwner && PreOwner->PlayerState) ? *PreOwner->PlayerState->PlayerName : TEXT("?"),
+			(int32)W->Role, (int32)W->GetNetMode(), (PreOwner && PreOwner->IsLocallyControlled()) ? 1 : 0,
+			bContinued ? 1 : 0, PreMode,
+			PreState ? *PreState->GetClass()->GetName() : TEXT("null"),
+			W->GetCurrentState() ? *W->GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			bPrePending0 ? 1 : 0, bPrePendingCurrent ? 1 : 0, bPrePendingWeapon ? 1 : 0,
+			bPreHasAmmo ? 1 : 0, bPreRootBlocked ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			Lft, Ready, Ready >= 0.f ? Now - Ready : -1.f,
+			W->GetWorldTimerManager().GetTimerRate(RefireCheckHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+	}
+
+	if (bContinued)
 	{
 		FireShot();
 	}
@@ -224,9 +315,23 @@ void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 
 void UUTWeaponStateFiring_Transactional::TransactionalFire()
 {
+	const bool bWasNetDelayedShot = GetOuterAUTWeapon()->bNetDelayedShot;
 	GetOuterAUTWeapon()->bNetDelayedShot = false;
 
-	if (GetOuterAUTWeapon()->HandleContinuedFiring())
+	const bool bContinued = GetOuterAUTWeapon()->HandleContinuedFiring();
+	if (RocketPrimaryDiagTransactional(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] TX_SERVER_DISPATCH frame=%u t=%.4f role=%d net=%d local=%d continued=%d pending0=%d currentMode=%d state=%p wasNetDelayed=%d"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0,
+			bContinued ? 1 : 0, (W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			W->GetCurrentFireMode(), this, bWasNetDelayedShot ? 1 : 0);
+	}
+
+	if (bContinued)
 	{
 		FireShot();
 	}

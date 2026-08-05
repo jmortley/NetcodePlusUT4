@@ -33,6 +33,7 @@
 #include "EngineUtils.h"
 #include "UTCountDownMessage.h"
 #include "UTGameMessage.h"
+#include "UTShowdownStatusMessage.h"
 #include "WipeoutHUD.h"
 #include "SiphonPowerup.h"
 #include "WipeoutRatingSystem.h"
@@ -595,6 +596,8 @@ void AUWipeoutGame::DefaultTimer()
 			BP_OnSetRound(true, RoundRemain, LastRoundWinningTeamIndex,
 				Alive0, Alive1, Team0DeathCount, Team1DeathCount);
 
+			CheckFinalLifeAnnouncements();
+
 			if (RoundRemain == 0 && !bInSuddenDeath && !bSuddenDeathPending)
 			{
 				// Solo/practice: time's up vs an empty team — no sudden death against
@@ -756,6 +759,57 @@ float AUWipeoutGame::GetPlayerRespawnTimeRemaining(AUTPlayerState* PS) const
 }
 
 
+void AUWipeoutGame::CheckFinalLifeAnnouncements(int32 TeamFilter)
+{
+	if (!HasAuthority() || !bRoundInProgress || bInSuddenDeath || bSuddenDeathPending
+		|| RoundEndTimeSeconds <= 0.f)
+	{
+		return;
+	}
+
+	// Solo/practice rounds end at regulation expiry instead of entering sudden death.
+	if ((Team0StartingSize == 0) ^ (Team1StartingSize == 0))
+	{
+		return;
+	}
+
+	const int32 RoundSecondsRemaining = FMath::Max(0,
+		FMath::CeilToInt(RoundEndTimeSeconds - GetWorld()->GetTimeSeconds()));
+	const float RespawnWindow = float(RoundSecondsRemaining) + SuddenDeathGraceSeconds;
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(*It);
+		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		if (!PS || PS->bOnlySpectator || PS->bOutOfLives || !PS->Team || !PC->GetPawn()
+			|| FinalLifeAnnouncedPlayers.Contains(PS))
+		{
+			continue;
+		}
+
+		const int32 TeamIndex = PS->Team->TeamIndex;
+		if (TeamIndex > 1 || (TeamFilter != INDEX_NONE && TeamIndex != TeamFilter))
+		{
+			continue;
+		}
+
+		const float NextRespawnDelay = ComputeRespawnDelay(TeamIndex, PS);
+		if (NextRespawnDelay <= RespawnWindow)
+		{
+			continue;
+		}
+
+		FinalLifeAnnouncedPlayers.Add(PS);
+		PC->ClientReceiveLocalizedMessage(
+			UUTShowdownStatusMessage::StaticClass(), 5, PS, nullptr, nullptr);
+
+		UE_LOG(LogGameMode, Log,
+			TEXT("Wipeout: final life announced for %s (next respawn %.1fs, window %.1fs)"),
+			*PS->PlayerName, NextRespawnDelay, RespawnWindow);
+	}
+}
+
+
 bool AUWipeoutGame::IsPlayerWaitingToRespawn(AUTPlayerState* PS) const
 {
 	if (!PS) return false;
@@ -813,6 +867,10 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 	// Track per-player deaths too
 	int32& PlayerDeaths = PlayerDeathCounts.FindOrAdd(DeadPS);
 	PlayerDeaths++;
+
+	// A shared counter can make every surviving teammate's next death final at
+	// this instant, so do not wait for the next one-second round-clock tick.
+	CheckFinalLifeAnnouncements(TeamIndex);
 
 	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s died (Team %d, death #%d). Respawn in %.1fs"),
 		*DeadPS->PlayerName, TeamIndex,
@@ -923,6 +981,7 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 
 		// Notify Blueprint
 		BP_OnPlayerRespawnedMidRound(PS);
+		CheckFinalLifeAnnouncements();
 
 		UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s respawned successfully"), *PS->PlayerName);
 	}
@@ -1222,6 +1281,7 @@ void AUWipeoutGame::StartNextRound()
 	Team0DeathCount = 0;
 	Team1DeathCount = 0;
 	PlayerDeathCounts.Empty();
+	FinalLifeAnnouncedPlayers.Empty();
 	CancelAllPendingRespawns();
 	SpawnProtectedUntil.Empty();
 	LinkHealAccumulator.Empty();
@@ -1325,6 +1385,10 @@ void AUWipeoutGame::StartNextRound()
 		BP_OnSetIntermission(false, 0);
 		GS->ForceNetUpdate();
 	}
+
+	// Handles custom rounds whose opening clock is already shorter than a
+	// player's first possible respawn window.
+	CheckFinalLifeAnnouncements();
 
 	// Reset pickup timers at round start so Shield Belt and UDamage
 	// respawn on a clean schedule each round
@@ -3818,6 +3882,7 @@ void AUWipeoutGame::Logout(AController* Exiting)
 			// Clean up all tracking maps to prevent stale pointer access
 			PlayerRoundDamage.Remove(PS);
 			PlayerDeathCounts.Remove(PS);
+			FinalLifeAnnouncedPlayers.Remove(PS);
 			CancelPendingRespawn(PS);
 			SpawnProtectedUntil.Remove(PS);
 		}

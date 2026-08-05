@@ -38,6 +38,13 @@ static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("Players can set to 0 to opt-out (force server positions)."),
 	ECVF_Default); // Saves to user config
 
+// Server-side league opt-in; balance change, so OFF by default. The decision and
+// the charge state are server-only — nothing about this cvar needs the client.
+static TAutoConsoleVariable<int32> CVarHelmetBlocksHeadshot(
+	TEXT("ncp.HelmetBlocksHeadshot"),
+	0,
+	TEXT("1 = an Armor_Small (helmet) pickup blocks exactly one headshot, UT3-style: both players hear the ding, BlockedHeadshotDamage applies, and the charge is consumed — re-armed only by another helmet pickup. 0 = stock (headshots are never blocked)."));
+
 namespace
 {
 	constexpr int32 ArmorPlusMaxTotal = 150;
@@ -49,6 +56,30 @@ namespace
 	bool IsArmorPlusBelt(const AUTArmor* Armor)
 	{
 		return Armor != nullptr && Armor->ArmorAmount > ArmorPlusSoftLimit;
+	}
+
+	// The live "helmet slot" pickup. Class-path match, walking Super for BP
+	// children — NOT an ArmorAmount heuristic, because starting/bespoke armour
+	// classes that happen to be small must not grant head protection.
+	// Armor_Helmet is the deprecated thin wrapper around Armor_Small (not
+	// reliably cooked, see NCLeagueDuelScoreboard); matched directly and via
+	// inheritance in case a map still places it.
+	bool IsHelmetArmor(const AUTArmor* Armor)
+	{
+		if (Armor == nullptr)
+		{
+			return false;
+		}
+		for (const UClass* C = Armor->GetClass(); C != nullptr; C = C->GetSuperClass())
+		{
+			const FString Path = C->GetPathName();
+			if (Path == TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Small.Armor_Small_C") ||
+				Path == TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_Helmet.Armor_Helmet_C"))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 }
 
@@ -2166,6 +2197,16 @@ void ATeamArenaCharacter::GiveArmor(AUTArmor* InArmorType)
 		}
 	}
 
+	if (IsHelmetArmor(InArmorType))
+	{
+		// One non-stacking charge: a second helmet before being shot changes
+		// nothing, a pickup after a spent block re-arms. Grant is tracked even
+		// with ncp.HelmetBlocksHeadshot off (the cvar gates the BLOCK decision),
+		// so an admin flipping it mid-match behaves sanely.
+		bHeadArmorCharge = true;
+		HeadArmorChargeValue = FMath::Max(0, InArmorType->ArmorAmount);
+	}
+
 	if (IsArmorPlusBelt(InArmorType))
 	{
 		// A new belt replaces any mixed stack with a full, pure belt. The pickup
@@ -2195,6 +2236,12 @@ void ATeamArenaCharacter::GiveArmor(AUTArmor* InArmorType)
 
 void ATeamArenaCharacter::SetArmorAmount(AUTArmor* InArmorType, int32 Amount)
 {
+	// A direct set is a full re-spec of the armour state; any helmet charge
+	// belonged to the pool being replaced. (GiveArmor is unaffected: it calls
+	// Super::SetArmorAmount directly, so a fresh helmet grant survives.)
+	bHeadArmorCharge = false;
+	HeadArmorChargeValue = 0;
+
 	// Direct setters (starting/player-card armor, dropped armor, BP calls) do not
 	// carry a belt/regular split, so treat the supplied type as a pure pool.
 	const bool bBelt = IsArmorPlusBelt(InArmorType);
@@ -2217,6 +2264,9 @@ void ATeamArenaCharacter::RemoveArmor(int32 Amount)
 	{
 		BeltArmorRemaining = 0;
 		LastRegularArmorType = nullptr;
+		// No armour left = no helmet left: the pool the helmet lived in is gone.
+		// Prevents a naked 0-armour player carrying a banked block around.
+		bHeadArmorCharge = false;
 	}
 	else if (BeltArmorRemaining == 0 && LastRegularArmorType != nullptr && ArmorType != LastRegularArmorType)
 	{
@@ -2232,6 +2282,43 @@ void ATeamArenaCharacter::ServerDropArmor_Implementation()
 	// AUTDroppedArmor serializes only one type and one total, so it cannot represent
 	// a mixed belt/regular pool without turning the whole pickup into belt armor.
 	// The stock UI path is disabled; reject modified-client calls as well.
+}
+
+bool ATeamArenaCharacter::BlockedHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling, bool bConsumeArmor, AUTCharacter* ShotInstigator)
+{
+	// Stock path first: inventory items implementing PreventHeadShot. Nothing in
+	// this build implements it, but a future BP item stays honoured.
+	if (Super::BlockedHeadShot(HitLocation, ShotDirection, WeaponHeadScaling, bConsumeArmor, ShotInstigator))
+	{
+		return true;
+	}
+
+	if (CVarHelmetBlocksHeadshot.GetValueOnGameThread() == 0 || !bHeadArmorCharge)
+	{
+		return false;
+	}
+
+	// Server-authoritative: FireInstantHit also runs on the owning client and
+	// calls this unguarded. The charge is server-only state, so a client must
+	// neither decide nor consume (its copy is always false anyway — this is
+	// belt and braces).
+	if (Role != ROLE_Authority)
+	{
+		return false;
+	}
+
+	if (bConsumeArmor)
+	{
+		// One and done: the Epic-era helmet blocked headshots indefinitely; this
+		// one dies with the block and only another helmet pickup re-arms it.
+		// The helmet's armour points go with it BEFORE the blocked damage
+		// resolves against whatever remains — the shot destroys the helmet,
+		// UT3-style. Clear the charge first so RemoveArmor's depletion handling
+		// never sees a stale one.
+		bHeadArmorCharge = false;
+		RemoveArmor(HeadArmorChargeValue);
+	}
+	return true;
 }
 
 bool ATeamArenaCharacter::ModifyDamageTaken_Implementation(

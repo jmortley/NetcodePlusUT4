@@ -104,6 +104,7 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 
 	virtual UAnimMontage* GetFiringAnim(uint8 FireMode, bool bOnHands = false) const;
 	virtual void PlayFiringEffects();
+	virtual void PlayPredictedImpactEffects(FVector ImpactLoc) override;
 	virtual void PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
 		const FVector& SpawnLocation, const FRotator& SpawnRotation) override;
 
@@ -143,6 +144,14 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	 * Beam mode uses standard validation for forgiving hitscan.
 	 */
 	virtual float GetHitValidationPredictionTime() const override;
+
+private:
+	/** True only for the Instagib shock-rifle variants; normal Shock children stay stock. */
+	bool IsInstagibBeamWeapon() const;
+	bool ShouldShowOwnInstagibBeam() const;
+	bool NeedsLegacyInstagibBeamLayer() const;
+	void SpawnLegacyInstagibBeamLayer(const FVector& TargetLoc, uint8 FireMode,
+		const FVector& SpawnLocation, const FRotator& SpawnRotation);
 };
 
 #ifdef _MSC_VER

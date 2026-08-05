@@ -47,14 +47,16 @@ void UUTHitsoundMessage::ClientReceive(const FClientReceiveData& ClientData) con
         return;
     }
 
-    // The client already played a predicted hitsound for this hit.
-    if (Mutator->ShouldSuppressServerHitsound())
+    const bool bIsFriendly = (ClientData.MessageIndex & 0x1) != 0;
+    const int32 Damage = ClientData.MessageIndex >> 1;
+
+    // The client already played a predicted hitsound for this hit AND the
+    // authoritative pair resolves to the same tier — a pure duplicate. A
+    // different tier plays through as the misprediction correction.
+    if (Mutator->ShouldSuppressServerHitsound(Damage, bIsFriendly))
     {
         return;
     }
-
-    const bool bIsFriendly = (ClientData.MessageIndex & 0x1) != 0;
-    const int32 Damage = ClientData.MessageIndex >> 1;
 
     Mutator->PlayHitsound(Damage, bIsFriendly);
 }

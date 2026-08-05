@@ -196,6 +196,11 @@ public:
 	virtual void RemoveArmor(int32 Amount) override;
 	virtual void ServerDropArmor_Implementation() override;
 
+	// Helmet: an Armor_Small pickup grants exactly ONE headshot block (UT3-style
+	// ding + BlockedHeadshotDamage), consumed on use. Config-gated by
+	// ncp.HelmetBlocksHeadshot, default 0 = stock (headshots never blocked).
+	virtual bool BlockedHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling, bool bConsumeArmor, AUTCharacter* ShotInstigator) override;
+
 	virtual bool ModifyDamageTaken_Implementation(
 		int32& AppliedDamage, int32& Damage, FVector& Momentum,
 		AUTInventory*& HitArmor, const FHitResult& HitInfo,
@@ -291,6 +296,20 @@ protected:
 	// ArmorType when the belt portion reaches zero. Server-only; CDOs are always rooted.
 	UPROPERTY(Transient)
 	class AUTArmor* LastRegularArmorType = nullptr;
+
+	// ── Helmet (head armour charge) ──
+	// True while the pawn wears an UNSPENT helmet: set by an Armor_Small pickup,
+	// consumed by exactly one blocked headshot — one-and-done, so the Epic-era bug
+	// where a helmet blocked indefinitely cannot come back — and cleared when the
+	// armour pool is force-respecced (SetArmorAmount) or fully depleted. A second
+	// helmet before being shot changes nothing; a pickup after a spent block
+	// re-arms. Server-only; never replicated (the client must not know or decide).
+	bool bHeadArmorCharge = false;
+
+	// ArmorAmount the granting helmet carried; removed from the pool when the
+	// block fires ("the shot destroys the helmet"), BEFORE the blocked damage
+	// resolves against whatever armour remains.
+	int32 HeadArmorChargeValue = 0;
 
 	// ── Force Models state ──
 	/** Re-evaluate this pawn and apply (or clear) the forced model + team-recolour. Client-only.

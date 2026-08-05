@@ -20,8 +20,15 @@
 #include "UTGameState.h"
 #include "UTHUDWidget.h"
 #include "CanvasItem.h"
+#include "HAL/IConsoleManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTRocketLauncher, Log, All);
+
+static FORCEINLINE int32 RocketPrimaryDiagLevelLocal()
+{
+    static IConsoleVariable* DiagVar = IConsoleManager::Get().FindConsoleVariable(TEXT("ncp.RocketPrimaryDiag"));
+    return DiagVar ? DiagVar->GetInt() : 0;
+}
 
 AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
@@ -123,6 +130,22 @@ void AUTPlusWeap_RocketLauncher::PostInitProperties()
 
 bool AUTPlusWeap_RocketLauncher::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
 {
+	const int32 BeginDiagLevel = RocketPrimaryDiagLevelLocal();
+	if (BeginDiagLevel > 0 && (FireModeNum == 0 || BeginDiagLevel >= 2))
+	{
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
+		UE_LOG(LogUTRocketLauncher, Warning,
+			TEXT("[RocketM1Diag] BEGIN_SEQUENCE frame=%u t=%.4f role=%d net=%d local=%d requested=%d clientFired=%d currentMode=%d tracker=%d active0=%d pending0=%d pending1=%d state=%s lft0=%.4f earliest=%.4f"),
+			(uint32)GFrameCounter, Now, (int32)Role, (int32)GetNetMode(),
+			(UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0, FireModeNum, bClientFired ? 1 : 0,
+			CurrentFireMode, CurrentlyFiringMode,
+			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			(UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f, EarliestFireTime);
+	}
+
     // Single-rocket-only loadouts: reject alt fire BEFORE Super. The stock body latches
     // UTOwner->SetPendingFire(1) immediately, and while mode 0 is firing it delegates to
     // FiringState[0]->BeginFiringSequence(1), which records PendingFireSequence=1 and
@@ -364,10 +387,25 @@ void AUTPlusWeap_RocketLauncher::FireShot()
     // we ABORT immediately to protect the Rhythm Logic.
     // ----------------------------------------------------------------
     AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(this);
+	const bool bOnCooldown = FixWeapon && FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime);
+	const int32 FireShotDiagLevel = RocketPrimaryDiagLevelLocal();
+	if (FireShotDiagLevel > 0 && (CurrentFireMode == 0 || FireShotDiagLevel >= 2))
+	{
+		const float Refire = GetRefireTime(0);
+		const float SinceLast = PrevLFT0 > 0.f ? CurrentTime - PrevLFT0 : -1.f;
+		UE_LOG(LogUTRocketLauncher, Warning,
+			TEXT("[RocketM1Diag] FIRE_SHOT_GATE %s frame=%u t=%.4f role=%d net=%d local=%d state=%s currentMode=%d tracker=%d pending0=%d active0=%d lft0=%.4f since=%.4f refire=%.4f earliest=%.4f earliestRemain=%.4f"),
+			bOnCooldown ? TEXT("BLOCK") : TEXT("PASS"), (uint32)GFrameCounter, CurrentTime,
+			(int32)Role, (int32)GetNetMode(), (UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentFireMode, CurrentlyFiringMode, (UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			PrevLFT0, SinceLast, Refire, EarliestFireTime, EarliestFireTime - CurrentTime);
+	}
     if (FixWeapon)
     {
         // Check if we are physically allowed to fire right now
-        if (FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime))
+        if (bOnCooldown)
         {
             // DIAGNOSTIC (net-safe, survives Shipping): this silent abort is a rocket no-reg suspect.
             // Surface an ABNORMAL (>1s) block server-side so a repro names the values that caused it.
@@ -555,7 +593,18 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
             SpawnLocation = AdjustedSpawnLoc;
         }
 
-        AUTProjectile* SpawnedProjectile = SpawnNetPredictedProjectile(RocketFireModes[0].ProjClass, SpawnLocation, SpawnRotation);
+		AUTProjectile* SpawnedProjectile = SpawnNetPredictedProjectile(RocketFireModes[0].ProjClass, SpawnLocation, SpawnRotation);
+		const int32 ProjectileDiagLevel = RocketPrimaryDiagLevelLocal();
+		if (ProjectileDiagLevel > 0 && (CurrentFireMode == 0 || ProjectileDiagLevel >= 2))
+		{
+			UE_LOG(LogUTRocketLauncher, Warning,
+				TEXT("[RocketM1Diag] FIRE_PROJECTILE_RESULT frame=%u t=%.4f role=%d net=%d local=%d result=%s class=%s currentMode=%d pending0=%d"),
+				(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+				(int32)Role, (int32)GetNetMode(), UTOwner->IsLocallyControlled() ? 1 : 0,
+				SpawnedProjectile ? *SpawnedProjectile->GetName() : TEXT("null/deferred"),
+				RocketFireModes[0].ProjClass ? *RocketFireModes[0].ProjClass->GetName() : TEXT("null"),
+				CurrentFireMode, UTOwner->IsPendingFire(0) ? 1 : 0);
+		}
         NumLoadedRockets = 0;
         NumLoadedBarrels = 0;
         return SpawnedProjectile;

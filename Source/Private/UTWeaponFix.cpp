@@ -13,6 +13,8 @@
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
 #include "UTPlusProj_FlakShell.h"
+#include "UTProj_FlakShard.h"
+#include "UTProj_FlakShell.h"
 #include "UTPlusProj_StingerShard.h"
 #include "UTDamageType.h"   // FUTRadialDamageEvent (grace-buffer direct-hit damage)
 #include "UTPlusWeap_RocketLauncher.h"
@@ -62,6 +64,34 @@ static FORCEINLINE bool SkinTiming()
 static FORCEINLINE bool FireDbg()
 {
     return CVarFireDebug.GetValueOnGameThread() > 0;
+}
+
+// Rocket primary diagnostics only. This intentionally changes no firing state, timers,
+// timestamps, or RPC payloads. Level 1 traces the M1 transaction/cadence lifecycle; level 2
+// also traces predicted projectile delay and charged-state contamination evidence.
+// 328-RC-RELEASE: restore the default below to 0 before shipping 328-rc.
+static TAutoConsoleVariable<int32> CVarRocketPrimaryDiag(
+    TEXT("ncp.RocketPrimaryDiag"), 2,
+    TEXT("Rocket M1 diagnostics: 0=off (required for 328-rc release), 1=refire/event/server/ACK lifecycle, 2=also fake-delay and charged-state details (temporary default during diagnosis). Logging only; no behavior change."),
+    ECVF_Default);
+
+static FORCEINLINE int32 RocketPrimaryDiagLevel()
+{
+    return CVarRocketPrimaryDiag.GetValueOnGameThread();
+}
+
+static FORCEINLINE bool RocketPrimaryDiagFor(AUTWeaponFix* Weapon, uint8 FireModeNum = 0, int32 RequiredLevel = 1)
+{
+	const int32 Level = RocketPrimaryDiagLevel();
+	return Level >= RequiredLevel
+		&& (FireModeNum == 0 || Level >= 2)
+		&& Cast<AUTPlusWeap_RocketLauncher>(Weapon) != nullptr;
+}
+
+static FORCEINLINE const TCHAR* RocketPrimaryDiagPlayer(AUTWeaponFix* Weapon)
+{
+	return Weapon && Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState
+		? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?");
 }
 
 // "Ghost rocket" fix toggle (default OFF so the build is identical to today until
@@ -863,6 +893,7 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     LastMultiPressTime = 0.f;
     LastShockCoreSpawnTime = 0.0f;
     LastFlakShellSpawnTime = 0.0f;
+    NextDelayedFlakReservationId = 1;
     MouseDebounceWindow = 0.030f;  // 30ms — mouse-bounce / scroll-wheel coalesce
     OriginalFPSMaterial = nullptr;
     AppliedFPSMaterial = nullptr;
@@ -946,6 +977,19 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
 {
     
     bHandlingRetry = true;
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] RETRY_CALLBACK frame=%u t=%.4f role=%d net=%d local=%d mode=%d state=%s tracker=%d pending0=%d retryRemain=%.4f deferredRemain=%.4f lft0=%.4f earliest=%.4f"),
+			(uint32)GFrameCounter, Now, (int32)Role, (int32)GetNetMode(),
+			(UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0, FireModeNum,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentlyFiringMode, (UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			FireModeNum < 2 ? GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]) : -1.f,
+			GetWorldTimerManager().GetTimerRemaining(DeferredActiveStateHandle),
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f, EarliestFireTime);
+	}
     UE_LOG(LogUTWeaponFix, Verbose, TEXT("[OnRetryTimer] Mode %d: Retry firing — calling StartFire"), FireModeNum);
     if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] OnRetryTimer mode=%d -> StartFire"), FireModeNum);
     StartFire(FireModeNum);
@@ -962,6 +1006,22 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
 
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] START_INPUT frame=%u t=%.4f role=%d net=%d local=%d mode=%d retry=%d state=%s tracker=%d active0=%d pending0=%d pending1=%d lft0=%.4f refire=%.4f earliest=%.4f retryRemain=%.4f deferredRemain=%.4f"),
+			(uint32)GFrameCounter, Now, (int32)Role, (int32)GetNetMode(),
+			(UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0, FireModeNum, bHandlingRetry ? 1 : 0,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentlyFiringMode, FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			(UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f, GetRefireTime(0), EarliestFireTime,
+			GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[0]),
+			GetWorldTimerManager().GetTimerRemaining(DeferredActiveStateHandle));
+	}
+
     if (FireDbg())
     {
         UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] StartFire mode=%d curFiring=%d state=%s"),
@@ -1158,6 +1218,20 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
     if (!bIsSwitchingModes &&  IsFireModeOnCooldown(FireModeNum, CurrentTime))
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			const float Lft = LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f;
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] START_COOLDOWN frame=%u t=%.4f role=%d local=%d state=%s ownsState=%d pending0=%d lft0=%.4f since=%.4f refire=%.4f earliestRemain=%.4f deferredRemain=%.4f"),
+				(uint32)GFrameCounter, CurrentTime, (int32)Role,
+				(UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
+				GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+				(FiringState.IsValidIndex(0) && GetCurrentState() == FiringState[0]) ? 1 : 0,
+				(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, Lft,
+				Lft > 0.f ? CurrentTime - Lft : -1.f, GetRefireTime(0), EarliestFireTime - CurrentTime,
+				GetWorldTimerManager().GetTimerRemaining(DeferredActiveStateHandle));
+		}
+
         // If we are in FiringState for this mode with a deferred GotoActiveState
         // timer active, the user tapped and is re-pressing during cooldown.
         // Do NOT return early — fall through to the retry logic below so a
@@ -1233,6 +1307,15 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                 GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, 0.01f, false);
             }
             if (FireModeNum < 2) { bCrossModeRetryArmed[FireModeNum] = false; }   // same-mode arm owns the handle now
+			if (RocketPrimaryDiagFor(this, FireModeNum))
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[RocketM1Diag] START_RETRY_ARMED frame=%u t=%.4f mode=%d computedDelay=%.4f timerRate=%.4f timerRemain=%.4f pending0=%d"),
+					(uint32)GFrameCounter, CurrentTime, FireModeNum, Delay,
+					GetWorldTimerManager().GetTimerRate(RetryFireHandle[FireModeNum]),
+					GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]),
+					(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0);
+			}
             if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] mode=%d ON-COOLDOWN -> retry scheduled (delay=%.3f)"), FireModeNum, Delay);
         }
         return;
@@ -1432,6 +1515,14 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         }
         else
         {
+			if (RocketPrimaryDiagFor(this, FireModeNum))
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[RocketM1Diag] START_ALREADY_FIRING_RETURN frame=%u t=%.4f mode=%d state=%s pending0=%d deferredActive=0"),
+					(uint32)GFrameCounter, CurrentTime, FireModeNum,
+					GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+					(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0);
+			}
             return;
         }
     }
@@ -1457,6 +1548,16 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		bIsTransactionalFire = true;
 	}
 
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] START_DISPATCH frame=%u t=%.4f role=%d net=%d mode=%d state=%s tracker=%d active0=%d pending0=%d trans=%d"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)Role, (int32)GetNetMode(), FireModeNum,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentlyFiringMode, FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, bIsTransactionalFire ? 1 : 0);
+	}
 	BeginFiringSequence(FireModeNum, false);
 
 	if (Role == ROLE_Authority)
@@ -1472,6 +1573,20 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
 void AUTWeaponFix::FireShot()
 {
+	if (RocketPrimaryDiagFor(this, CurrentFireMode))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] FIRE_SHOT_ENTER frame=%u t=%.4f role=%d net=%d local=%d currentMode=%d tracker=%d state=%s pending0=%d active0=%d trans=%d delayed=%d lft0=%.4f"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)Role, (int32)GetNetMode(), (UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
+			CurrentFireMode, CurrentlyFiringMode,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			bIsTransactionalFire ? 1 : 0, bNetDelayedShot ? 1 : 0,
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f);
+	}
+
 	// --- REPLAY PLAYBACK: skip all NC prediction/rewind, use stock behavior ---
 	// During instant replay, there's no server to do the rewind dance with.
 	// Fake projectile handoff, ServerStartFireFixed RPCs, and ClientHitChar
@@ -1635,12 +1750,34 @@ void AUTWeaponFix::FireShot()
 			{
 				AUTGameState* HitsoundGS = GetWorld()->GetGameState<AUTGameState>();
 				const bool bFriendlyTarget = HitsoundGS && HitsoundGS->OnSameTeam(UTOwner, ClientHitChar);
-				int32 EstDamage = InstantHitInfo.IsValidIndex(CurrentFireMode) ? InstantHitInfo[CurrentFireMode].Damage : 0;
+				// A shot that is sending a head claim predicts the headshot
+				// damage (AUTPlusSniper override), not the base damage — a
+				// sniper headshot must not sound like a bodyshot. If the server
+				// rejects or demotes the claim, the authoritative sound plays
+				// through the dedup window as the correction (different tier).
+				int32 EstDamage = GetPredictedHitsoundDamage(CurrentFireMode, !ClientHeadOffset.IsZero());
+				// Mirror the server broadcast's amp scaling (GetScaledDamage):
+				// it reports DamageScaling * damage, and an uncompensated
+				// prediction would register as a different tier on every amped
+				// bullet and re-play through the correction path.
+				if (UTOwner != nullptr)
+				{
+					EstDamage = FMath::TruncToInt(UTOwner->DamageScaling * (float)EstDamage);
+				}
 				HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
 			}
 		}
 
 		const float ClientTimestamp = GetWorld()->GetGameState()->GetServerWorldTimeSeconds();
+		if (RocketPrimaryDiagFor(this, CurrentFireMode))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] CLIENT_SEND frame=%u t=%.4f serverT=%.4f event=%d mode=%d state=%s pending0=%d lft0=%.4f refire=%.4f"),
+				(uint32)GFrameCounter, GetWorld()->GetTimeSeconds(), ClientTimestamp, NextEventIndex,
+				CurrentFireMode, GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+				(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+				LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f, GetRefireTime(0));
+		}
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
 			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
         QueueResendStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
@@ -1673,6 +1810,16 @@ void AUTWeaponFix::FireShot()
 
 		if (!bIsTransactionalFire && !bNetDelayedShot && !bIsListenServerHost && !bInChargedState && !bIsStateFiring)
 		{
+			if (RocketPrimaryDiagFor(this, CurrentFireMode))
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[RocketM1Diag] SERVER_FIRE_GATE_BLOCK frame=%u t=%.4f state=%s trans=%d delayed=%d listen=%d charged=%d stateFiring=%d pending0=%d tracker=%d"),
+					(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+					GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+					bIsTransactionalFire ? 1 : 0, bNetDelayedShot ? 1 : 0, bIsListenServerHost ? 1 : 0,
+					bInChargedState ? 1 : 0, bIsStateFiring ? 1 : 0,
+					(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, CurrentlyFiringMode);
+			}
 			UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireShot] GATEKEEPER BLOCKED Mode %d. Trans=%d Delayed=%d Listen=%d Charged=%d StateFiring=%d"),
 				CurrentFireMode, bIsTransactionalFire, bNetDelayedShot, bIsListenServerHost, bInChargedState, bIsStateFiring);
 			return;
@@ -1727,6 +1874,21 @@ void AUTWeaponFix::FireShot()
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] STOP_INPUT frame=%u t=%.4f role=%d net=%d local=%d mode=%d state=%s tracker=%d active0=%d pending0=%d pending1=%d lft0=%.4f retryRemain=%.4f deferredRemain=%.4f"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)Role, (int32)GetNetMode(), (UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
+			FireModeNum, GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentlyFiringMode, FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			(UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f,
+			GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[0]),
+			GetWorldTimerManager().GetTimerRemaining(DeferredActiveStateHandle));
+	}
+
     if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] StopFire mode=%d curFiring=%d"), FireModeNum, CurrentlyFiringMode);
 
     // Mouse-bounce debounce: stamp the release time so the next StartFire
@@ -1890,6 +2052,16 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     {
         int32 EventIndex = ClientFireEventIndex.IsValidIndex(FireModeNum) ?
             ClientFireEventIndex[FireModeNum] : 0;
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] CLIENT_STOP_SEND frame=%u t=%.4f mode=%d event=%d state=%s pending0=%d deferredRemain=%.4f"),
+				(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+				FireModeNum, EventIndex,
+				GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+				UTOwner->IsPendingFire(0) ? 1 : 0,
+				GetWorldTimerManager().GetTimerRemaining(DeferredActiveStateHandle));
+		}
         ServerStopFireFixed(FireModeNum, EventIndex);
         QueueResendStopFireFixed(FireModeNum, EventIndex);
     }
@@ -1912,6 +2084,13 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     // Validate fire mode
     if (!FireModeActiveState.IsValidIndex(FireModeNum))
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_VALIDATE_REJECT reason=BAD_MODE frame=%u t=%.4f mode=%d event=%d"),
+				(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+				FireModeNum, InEventIndex);
+		}
         return false;
     }
 
@@ -1919,6 +2098,13 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     if (!IsFireEventSequenceValid(FireModeNum, InEventIndex))
     {
         int32 LastProcessed = AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1;
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_VALIDATE_REJECT reason=STALE_OR_JUMP frame=%u t=%.4f mode=%d event=%d authEvent=%d clientT=%.4f"),
+				(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+				FireModeNum, InEventIndex, LastProcessed, ClientTime);
+		}
         UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] STALE EVENT. Mode %d EventIndex %d vs LastProcessed %d"),
             *PlayerName, FireModeNum, InEventIndex, LastProcessed);
         return false;
@@ -1931,6 +2117,12 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     // Allow reasonable network delay but reject obviously wrong timestamps
     if (TimeDiff > 1.0f) // 1 second tolerance should be more than enough
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_VALIDATE_REJECT reason=TIME_DESYNC frame=%u serverT=%.4f clientT=%.4f diff=%.4f mode=%d event=%d"),
+				(uint32)GFrameCounter, ServerTime, ClientTime, TimeDiff, FireModeNum, InEventIndex);
+		}
         UE_LOG(LogTemp, Warning, TEXT("WeaponFix: Rejected fire due to time desync: %f"), TimeDiff);
         return false;
     }
@@ -1970,6 +2162,14 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
         // rhythm compensation snaps Delta to exactly MinInterval (e.g., 0.550 < 0.550).
         if (TimeSinceLastFire < MinInterval - SMALL_NUMBER)
         {
+			if (RocketPrimaryDiagFor(this, FireModeNum))
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[RocketM1Diag] SERVER_VALIDATE_REJECT reason=EARLY frame=%u t=%.4f mode=%d event=%d authEvent=%d lft=%.4f delta=%.4f min=%.4f refire=%.4f tolerance=%.4f"),
+					(uint32)GFrameCounter, ServerTime, FireModeNum, InEventIndex,
+					AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1,
+					LastFireTime[FireModeNum], TimeSinceLastFire, MinInterval, RefireTime, JitterTolerance);
+			}
             UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] REJECTED Rapid Fire. Mode %d. Delta: %.3f < Min: %.3f"),
                 *PlayerName, FireModeNum, TimeSinceLastFire, MinInterval);
             return false;
@@ -1987,6 +2187,15 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     {
         AuthoritativeFireEventIndex[FireModeNum] = InEventIndex;
     }
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] SERVER_VALIDATE_ACCEPT frame=%u t=%.4f mode=%d event=%d clientT=%.4f state=%s pending0=%d lft0=%.4f"),
+			(uint32)GFrameCounter, ServerTime, FireModeNum, InEventIndex, ClientTime,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f);
+	}
 
     return true;
 }
@@ -2069,6 +2278,19 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     // 1. VALIDATION (Your existing transactional checks)
     UWorld* World = GetWorld();
     if (!World) return;
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] SERVER_RX frame=%u t=%.4f wep=%p player=%s resend=%d mode=%d event=%d clientT=%.4f authEvent=%d state=%s currentMode=%d tracker=%d active0=%d pending0=%d lft0=%.4f"),
+			(uint32)GFrameCounter, World->GetTimeSeconds(), this, RocketPrimaryDiagPlayer(this),
+			bNetDelayedShot ? 1 : 0, FireModeNum, InFireEventIndex, ClientTimestamp,
+			AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentFireMode, CurrentlyFiringMode,
+			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f);
+	}
 
     // Server-authoritative fire policy (e.g. single-rocket-only loadouts). Reject a
     // vetoed mode HERE — before the trade-kill spawn, the SetPendingFire latch below, and
@@ -2077,6 +2299,12 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     // back through this function, so this covers that path too.
     if (!AllowServerFireMode(FireModeNum))
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_REJECT reason=MODE_POLICY frame=%u t=%.4f mode=%d event=%d"),
+				(uint32)GFrameCounter, World->GetTimeSeconds(), FireModeNum, InFireEventIndex);
+		}
         return;
     }
 
@@ -2113,6 +2341,15 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
     if (!ValidateFireRequest(FireModeNum, InFireEventIndex, ClientTimestamp))
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_REJECT reason=VALIDATION frame=%u t=%.4f mode=%d event=%d ack=%d state=%s pending0=%d"),
+				(uint32)GFrameCounter, World->GetTimeSeconds(), FireModeNum, InFireEventIndex,
+				AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : 0,
+				GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+				(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0);
+		}
         ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : 0);
         return;
     }
@@ -2254,11 +2491,28 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
     if (TransState && GetCurrentFireMode() == FireModeNum)
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_DISPATCH_EXISTING frame=%u t=%.4f mode=%d event=%d state=%s pending0=%d tracker=%d"),
+				(uint32)GFrameCounter, World->GetTimeSeconds(), FireModeNum, InFireEventIndex,
+				GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+				(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, CurrentlyFiringMode);
+		}
         // STATE IS ACTIVE: Just trigger the next shot in the sequence.
         TransState->TransactionalFire();
     }
     else
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_DISPATCH_ENTER frame=%u t=%.4f mode=%d event=%d state=%s currentMode=%d transState=%d pending0=%d tracker=%d"),
+				(uint32)GFrameCounter, World->GetTimeSeconds(), FireModeNum, InFireEventIndex,
+				GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+				GetCurrentFireMode(), TransState ? 1 : 0,
+				(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, CurrentlyFiringMode);
+		}
         // STATE IS INACTIVE: Enter the state.
         // If we're currently firing a DIFFERENT mode, stop it first — mirrors
         // the client's cross-mode fix in StartFire. Without this, Mode 1 Start
@@ -2291,12 +2545,26 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     // 80+ ping visual hitch. See that function for details.
     if (UTOwner)
     {
+		if (RocketPrimaryDiagFor(this, FireModeNum))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] SERVER_ACK_SEND frame=%u t=%.4f wep=%p player=%s mode=%d event=%d state=%s currentMode=%d tracker=%d pending0=%d lft0=%.4f"),
+				(uint32)GFrameCounter, World->GetTimeSeconds(), this, RocketPrimaryDiagPlayer(this),
+				FireModeNum, InFireEventIndex,
+				GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+				CurrentFireMode, CurrentlyFiringMode, UTOwner->IsPendingFire(0) ? 1 : 0,
+				LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f);
+		}
         ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
     }
 }
 
 void AUTWeaponFix::Removed()
 {
+	// A delayed Flak prediction belongs to this weapon instance. Once it is removed,
+	// the authoritative replicated projectile (if any) is the only valid visual source.
+	ClearDelayedFlakFakeProjectiles();
+
 	// Cache the owner's last known fire position before Super::Removed() nulls UTOwner.
 	// This enables the trade-kill grace period — if a fire RPC arrives within
 	// TradeKillGracePeriod after death, we can still spawn the projectile.
@@ -2384,6 +2652,21 @@ void AUTWeaponFix::Tick(float DeltaTime)
             if (ChargedWedgeFirstSeenTime < 0.f)
             {
                 ChargedWedgeFirstSeenTime = Now;
+				if (RocketPrimaryDiagFor(this, 0, 2))
+				{
+					UE_LOG(LogUTWeaponFix, Warning,
+						TEXT("[RocketM1Diag] WEDGE_ARMED frame=%u t=%.4f role=%d net=%d state=%s currentMode=%d tracker=%d loaded=%d pending0=%d pending1=%d lft0=%.4f timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+						(uint32)GFrameCounter, Now, (int32)Role, (int32)GetNetMode(),
+						GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+						CurrentFireMode, CurrentlyFiringMode, LoadedCount,
+						(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+						(UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
+						LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f,
+						GetWorldTimerManager().GetTimerRemaining(Chg->LoadTimerHandle),
+						GetWorldTimerManager().GetTimerRemaining(Chg->GraceTimerHandle),
+						GetWorldTimerManager().GetTimerRemaining(Chg->FireLoadedRocketHandle),
+						GetWorldTimerManager().GetTimerRemaining(Chg->RefireCheckHandle));
+				}
                 UE_LOG(LogUTWeaponFix, Warning, TEXT("[WedgeArmed] %s (%s) charged state idle without exit: mode=%d CurFiring=%d loaded=%d pend0=%d pend1=%d sinceFire0=%.2fs sinceFire1=%.2fs pendingWpn=%d"),
                     *GetName(),
                     (UTOwner && UTOwner->PlayerState) ? *UTOwner->PlayerState->PlayerName : TEXT("?"),
@@ -2427,6 +2710,15 @@ void AUTWeaponFix::Tick(float DeltaTime)
             }
             UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s fast-recovered an empty WEDGED ChargedRocket state (mode=%d CurFiring=%d wedged=%.2fs)"),
                 *GetName(), CurrentFireMode, CurrentlyFiringMode, Now - ChargedWedgeFirstSeenTime);
+			if (RocketPrimaryDiagFor(this, 0, 2))
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[RocketM1Diag] WEDGE_RECOVER frame=%u t=%.4f wedgedFor=%.4f state=%s currentMode=%d tracker=%d pending0=%d loaded=%d"),
+					(uint32)GFrameCounter, Now, Now - ChargedWedgeFirstSeenTime,
+					GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+					CurrentFireMode, CurrentlyFiringMode,
+					(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, LoadedCount);
+			}
             ChargedWedgeFirstSeenTime = -1.f;
             CurrentlyFiringMode = 255;
             for (int32 i = 0; i < FireModeActiveState.Num(); i++) { FireModeActiveState[i] = 0; }
@@ -2489,6 +2781,19 @@ bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFire
 
 void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex)
 {
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] SERVER_STOP_RX frame=%u t=%.4f mode=%d event=%d authEvent=%d lastStop=%d state=%s tracker=%d active0=%d pending0=%d"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			FireModeNum, InFireEventIndex,
+			AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1,
+			LastProcessedStopEventIndex.IsValidIndex(FireModeNum) ? LastProcessedStopEventIndex[FireModeNum] : -1,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentlyFiringMode, FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0);
+	}
+
     // Initial and retry RPCs carry the same stop. Process whichever arrives first,
     // then make later copies idempotent.
     if (LastProcessedStopEventIndex.IsValidIndex(FireModeNum)
@@ -2629,6 +2934,23 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
 void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
 {
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		const bool bOwnsExpectedState = FiringState.IsValidIndex(FireModeNum)
+			&& GetCurrentState() == FiringState[FireModeNum];
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] DEFERRED_ACTIVE_CALLBACK frame=%u t=%.4f role=%d net=%d mode=%d ownsExpected=%d state=%s expected=%s tracker=%d active0=%d pendingBefore0=%d retryRemain=%.4f lft0=%.4f"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)Role, (int32)GetNetMode(), FireModeNum, bOwnsExpectedState ? 1 : 0,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			FiringState.IsValidIndex(FireModeNum) && FiringState[FireModeNum]
+				? *FiringState[FireModeNum]->GetClass()->GetName() : TEXT("null"),
+			CurrentlyFiringMode, FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[0]),
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f);
+	}
+
     // EndFiringSequence already ran in StopFire/ServerStopFireFixed — no need to call it again.
     // Only transition to ActiveState if we are actually still in a firing state.
     // If we are already unequipping or inactive, GotoActiveState would be wrong.
@@ -3293,11 +3615,64 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 
 void AUTWeaponFix::SpawnDelayedFakeProjectile()
 {
-	// Updated variable name
+	// Legacy non-Flak path. Kept unchanged while ncp.RocketPrimaryDiag establishes
+	// whether the M1 symptom is cosmetic prediction delay or authoritative cadence loss.
+	if (RocketPrimaryDiagFor(this, 0, 2))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] FAKE_DELAY_CALLBACK frame=%u t=%.4f role=%d net=%d currentMode=%d class=%s timerActive=%d timerRate=%.4f timerRemain=%.4f pendingFakes=%d"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)Role, (int32)GetNetMode(), CurrentFireMode,
+			NetcodeDelayedProjectile.ProjectileClass ? *NetcodeDelayedProjectile.ProjectileClass->GetName() : TEXT("null"),
+			GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle) ? 1 : 0,
+			GetWorldTimerManager().GetTimerRate(SpawnDelayedFakeProjHandle),
+			GetWorldTimerManager().GetTimerRemaining(SpawnDelayedFakeProjHandle),
+			PendingFakeProjectiles.Num());
+	}
 	if (NetcodeDelayedProjectile.ProjectileClass != nullptr)
 	{
 		SpawnNetPredictedProjectile(NetcodeDelayedProjectile.ProjectileClass, NetcodeDelayedProjectile.SpawnLocation, NetcodeDelayedProjectile.SpawnRotation);
 	}
+}
+
+void AUTWeaponFix::SpawnDelayedFlakFakeProjectile(uint32 ReservationId)
+{
+    int32 RequestIndex = INDEX_NONE;
+    for (int32 i = 0; i < DelayedFlakProjectiles.Num(); ++i)
+    {
+        if (DelayedFlakProjectiles[i].ReservationId == ReservationId)
+        {
+            RequestIndex = i;
+            break;
+        }
+    }
+
+    if (RequestIndex == INDEX_NONE)
+    {
+        return; // ACK/cleanup won the race and cancelled this request.
+    }
+
+    // Copy before RemoveAtSwap: timer delegates carry only the stable ID, never an array
+    // element reference that could have been invalidated by another shard reservation.
+    const FNetcodeDelayedFlakProjectile Request = DelayedFlakProjectiles[RequestIndex];
+    DelayedFlakProjectiles.RemoveAtSwap(RequestIndex, 1, false);
+
+    SpawnNetPredictedProjectileInternal(
+        Request.ProjectileClass,
+        Request.SpawnLocation,
+        Request.SpawnRotation,
+        Request.FireMode,
+        Request.EventIndex,
+        false); // direct spawn: the callback never re-enters the excess-ping decision
+}
+
+void AUTWeaponFix::ClearDelayedFlakFakeProjectiles()
+{
+    for (FNetcodeDelayedFlakProjectile& Request : DelayedFlakProjectiles)
+    {
+        GetWorldTimerManager().ClearTimer(Request.TimerHandle);
+    }
+    DelayedFlakProjectiles.Empty();
 }
 
 
@@ -3306,16 +3681,40 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	FVector SpawnLocation,
 	FRotator SpawnRotation)
 {
+	const uint8 CapturedFireMode = CurrentFireMode;
+	const int32 CapturedEventIndex = ClientFireEventIndex.IsValidIndex(CapturedFireMode)
+		? ClientFireEventIndex[CapturedFireMode]
+		: INDEX_NONE;
+
+	return SpawnNetPredictedProjectileInternal(
+		ProjectileClass,
+		SpawnLocation,
+		SpawnRotation,
+		CapturedFireMode,
+		CapturedEventIndex,
+		true);
+}
+
+AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
+	TSubclassOf<AUTProjectile> ProjectileClass,
+	FVector SpawnLocation,
+	FRotator SpawnRotation,
+	uint8 CapturedFireMode,
+	int32 CapturedEventIndex,
+	bool bAllowDelay)
+{
 	// Pitch clamp for shells/rockets firing straight down
 	FRotator AdjustedRot = SpawnRotation;
 	AdjustedRot.Normalize();
     bool bIsShockCore = ProjectileClass &&
         ProjectileClass->IsChildOf(AUTPlusProj_ShockBall::StaticClass());
     bool bIsFlakShell = ProjectileClass &&
-        (ProjectileClass->GetName().Contains(TEXT("FlakShell")) ||
-            ProjectileClass->GetName().Contains(TEXT("Shell")));
-    // Anti-duplicate guards: each type has its own timestamp so fast weapon-switching
-    // cannot block a legitimate first-fire on the other weapon type.
+        ProjectileClass->IsChildOf(AUTProj_FlakShell::StaticClass());
+    const bool bIsPrimaryFlakShard = CapturedFireMode == 0 && ProjectileClass &&
+        ProjectileClass->IsChildOf(AUTProj_FlakShard::StaticClass());
+
+    // Preserve the existing Shock guard exactly. Flak shell duplicate prevention is
+    // intentionally deferred until the actor is actually about to spawn below.
     if (bIsShockCore)
     {
         float CurrentTime = GetWorld()->GetTimeSeconds();
@@ -3326,17 +3725,6 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
             return nullptr;
         }
         LastShockCoreSpawnTime = CurrentTime;
-    }
-    else if (bIsFlakShell)
-    {
-        float CurrentTime = GetWorld()->GetTimeSeconds();
-        float TimeSinceLast = CurrentTime - LastFlakShellSpawnTime;
-        if (TimeSinceLast < 0.2f)
-        {
-            if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("FlakShell anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
-            return nullptr;
-        }
-        LastFlakShellSpawnTime = CurrentTime;
     }
 	bool bIsShellOrRocket = ProjectileClass &&
 		(ProjectileClass->GetName().Contains(TEXT("Shell")) ||
@@ -3374,7 +3762,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 	// ----------------------------------------
 	// 3) Client: Check if we should delay spawn for extreme ping
 	// ----------------------------------------
-	if ((Role != ROLE_Authority) && OwningPlayer)
+	if (bAllowDelay && (Role != ROLE_Authority) && OwningPlayer)
 	{
 		float ExcessPing = CurrentPing - FudgeFactorMs - ProjectilePredictionCapMs;
 
@@ -3382,7 +3770,78 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 		{
 			float SleepTime = ExcessPing * 0.001f;
 
-			if (!GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle))
+			if (bIsPrimaryFlakShard || bIsFlakShell)
+			{
+				// One shell reservation per logical event; unlike the shell, every primary
+				// shard is intentional and must receive its own request despite sharing the
+				// same event index.
+				if (bIsFlakShell)
+				{
+					for (const FNetcodeDelayedFlakProjectile& Existing : DelayedFlakProjectiles)
+					{
+						if (Existing.Kind == ENetcodeDelayedFlakKind::SecondaryShell
+							&& Existing.FireMode == CapturedFireMode
+							&& Existing.EventIndex == CapturedEventIndex
+							&& Existing.ProjectileClass == ProjectileClass)
+						{
+							return nullptr;
+						}
+					}
+				}
+
+				int32 ProjectileOrdinal = 0;
+				const ENetcodeDelayedFlakKind Kind = bIsFlakShell
+					? ENetcodeDelayedFlakKind::SecondaryShell
+					: ENetcodeDelayedFlakKind::PrimaryShard;
+				for (const FNetcodeDelayedFlakProjectile& Existing : DelayedFlakProjectiles)
+				{
+					if (Existing.Kind == Kind
+						&& Existing.FireMode == CapturedFireMode
+						&& Existing.EventIndex == CapturedEventIndex)
+					{
+						ProjectileOrdinal = FMath::Max(ProjectileOrdinal, Existing.ProjectileOrdinal + 1);
+					}
+				}
+
+				const int32 AddedIndex = DelayedFlakProjectiles.AddDefaulted();
+				FNetcodeDelayedFlakProjectile& Request = DelayedFlakProjectiles[AddedIndex];
+				Request.ProjectileClass = ProjectileClass;
+				Request.SpawnLocation = SpawnLocation;
+				Request.SpawnRotation = SpawnRotation;
+				Request.FireMode = CapturedFireMode;
+				Request.EventIndex = CapturedEventIndex;
+				Request.ReservationId = NextDelayedFlakReservationId++;
+				if (NextDelayedFlakReservationId == 0)
+				{
+					NextDelayedFlakReservationId = 1;
+				}
+				Request.ProjectileOrdinal = ProjectileOrdinal;
+				Request.RequestTime = GetWorld()->GetTimeSeconds();
+				Request.Kind = Kind;
+
+				FTimerDelegate DelayedDelegate = FTimerDelegate::CreateUObject(
+					this,
+					&AUTWeaponFix::SpawnDelayedFlakFakeProjectile,
+					Request.ReservationId);
+				GetWorldTimerManager().SetTimer(Request.TimerHandle, DelayedDelegate, SleepTime, false);
+				return nullptr;
+			}
+
+			// Legacy non-Flak behavior remains available for the rocket diagnostic run.
+			const bool bLegacyTimerAlreadyActive = GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle);
+			if (RocketPrimaryDiagFor(this, CapturedFireMode, 2))
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("[RocketM1Diag] FAKE_DELAY_DECISION frame=%u t=%.4f event=%d mode=%d ping=%.1f excess=%.1f sleep=%.4f action=%s existingClass=%s newClass=%s timerRate=%.4f timerRemain=%.4f"),
+					(uint32)GFrameCounter, GetWorld()->GetTimeSeconds(), CapturedEventIndex, CapturedFireMode,
+					CurrentPing, ExcessPing, SleepTime,
+					bLegacyTimerAlreadyActive ? TEXT("SUPPRESS_SHARED_TIMER_BUSY") : TEXT("ARM_SHARED_TIMER"),
+					NetcodeDelayedProjectile.ProjectileClass ? *NetcodeDelayedProjectile.ProjectileClass->GetName() : TEXT("null"),
+					ProjectileClass ? *ProjectileClass->GetName() : TEXT("null"),
+					GetWorldTimerManager().GetTimerRate(SpawnDelayedFakeProjHandle),
+					GetWorldTimerManager().GetTimerRemaining(SpawnDelayedFakeProjHandle));
+			}
+			if (!bLegacyTimerAlreadyActive)
 			{
 				NetcodeDelayedProjectile.ProjectileClass = ProjectileClass;
 				NetcodeDelayedProjectile.SpawnLocation = SpawnLocation;
@@ -3394,6 +3853,24 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 					&AUTWeaponFix::SpawnDelayedFakeProjectile,
 					SleepTime,
 					false);
+			}
+			return nullptr;
+		}
+	}
+
+	// The reservation is the pre-spawn duplicate guard. Only an actual spawn may
+	// consume the wall-clock guard; scheduling or a failed SpawnActor must not.
+	if (bIsFlakShell)
+	{
+		const float CurrentTime = GetWorld()->GetTimeSeconds();
+		const float TimeSinceLast = CurrentTime - LastFlakShellSpawnTime;
+		if (LastFlakShellSpawnTime > 0.f && TimeSinceLast < 0.2f)
+		{
+			if (FireDbg())
+			{
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("FlakShell anti-dup guard BLOCKED actual spawn. TimeSinceLast=%.4f Role=%d mode=%d event=%d"),
+					TimeSinceLast, (int32)Role, CapturedFireMode, CapturedEventIndex);
 			}
 			return nullptr;
 		}
@@ -3441,7 +3918,35 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 
 	if (!NewProjectile)
 	{
+		if (RocketPrimaryDiagFor(this, CapturedFireMode, 2))
+		{
+			UE_LOG(LogUTWeaponFix, Warning,
+				TEXT("[RocketM1Diag] PROJECTILE_SPAWN_FAIL frame=%u t=%.4f wep=%p player=%s role=%d net=%d event=%d capturedEvent=%d mode=%d class=%s allowDelay=%d"),
+				(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+				this, RocketPrimaryDiagPlayer(this), (int32)Role, (int32)GetNetMode(),
+				Role == ROLE_Authority && AuthoritativeFireEventIndex.IsValidIndex(CapturedFireMode)
+					? AuthoritativeFireEventIndex[CapturedFireMode] : CapturedEventIndex,
+				CapturedEventIndex, CapturedFireMode,
+				ProjectileClass ? *ProjectileClass->GetName() : TEXT("null"), bAllowDelay ? 1 : 0);
+		}
 		return nullptr;
+	}
+	if (RocketPrimaryDiagFor(this, CapturedFireMode, 2))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] PROJECTILE_SPAWN_OK frame=%u t=%.4f wep=%p player=%s role=%d net=%d local=%d event=%d capturedEvent=%d mode=%d projectile=%s class=%s allowDelay=%d ping=%.1f catchup=%.4f"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			this, RocketPrimaryDiagPlayer(this), (int32)Role, (int32)GetNetMode(),
+			(UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
+			Role == ROLE_Authority && AuthoritativeFireEventIndex.IsValidIndex(CapturedFireMode)
+				? AuthoritativeFireEventIndex[CapturedFireMode] : CapturedEventIndex,
+			CapturedEventIndex, CapturedFireMode, *NewProjectile->GetName(), *NewProjectile->GetClass()->GetName(),
+			bAllowDelay ? 1 : 0, CurrentPing, CatchupTickDelta);
+	}
+
+	if (bIsFlakShell)
+	{
+		LastFlakShellSpawnTime = GetWorld()->GetTimeSeconds();
 	}
 
     // ----------------------------------------
@@ -3536,7 +4041,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectile(
 			 || NewProjectile->IsA(AUTPlusProj_StingerShard::StaticClass()));
 		if (bTrackForRewind)
 		{
-			ActiveServerProjectiles.Add(FActiveServerProjectile(NewProjectile, CurrentFireMode));
+			ActiveServerProjectiles.Add(FActiveServerProjectile(NewProjectile, CapturedFireMode));
 
 			// Cleanup stale entries
 			for (int32 i = ActiveServerProjectiles.Num() - 1; i >= 0; i--)
@@ -3790,11 +4295,9 @@ else
 {
     NewProjectile->InitFakeProjectile(OwningPlayer);
 
-    // Track in our custom array for rejection cleanup via ClientConfirmFireEvent
-    int32 EventIdx = ClientFireEventIndex.IsValidIndex(CurrentFireMode)
-        ? ClientFireEventIndex[CurrentFireMode] : -1;
-
-    PendingFakeProjectiles.Add(FPendingFakeProjectile(NewProjectile, EventIdx, CurrentFireMode));
+    // Track against the immutable logical shot captured before any high-ping delay.
+    // CurrentFireMode and ClientFireEventIndex may have moved on while the timer slept.
+    PendingFakeProjectiles.Add(FPendingFakeProjectile(NewProjectile, CapturedEventIndex, CapturedFireMode));
 
     // Cleanup: Remove stale entries (destroyed projectiles or old indices)
     // Keep array from growing indefinitely
@@ -4035,6 +4538,7 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
 {
     GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
+	ClearDelayedFlakFakeProjectiles();
     // Safety: Kill timers if the weapon is destroyed or dropped
     for (int32 i = 0; i < 2; i++)
     {
@@ -5126,6 +5630,20 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
 void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
 {
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] CLIENT_ACK frame=%u t=%.4f mode=%d ack=%d localEvent=%d state=%s currentMode=%d tracker=%d pending0=%d pendingFakes=%d resend=%d legacyDelayActive=%d"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			FireModeNum, InAuthorizedEventIndex,
+			ClientFireEventIndex.IsValidIndex(FireModeNum) ? ClientFireEventIndex[FireModeNum] : -1,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentFireMode, CurrentlyFiringMode,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			PendingFakeProjectiles.Num(), ResendFireEvents.Num(),
+			GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle) ? 1 : 0);
+	}
+
     // FIX 1: Do NOT rollback the local sequence generator.
     // Only update if server is AHEAD (rare resync case).
     if (ClientFireEventIndex.IsValidIndex(FireModeNum))
@@ -5136,6 +5654,19 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
         }
     }
 
+	// An ACK means the server already spawned the authoritative projectile. Cancel any
+	// Flak fake that is still sleeping instead of letting it appear late beside the real.
+	// Each primary shard owns an independent request even though all nine share one event.
+	for (int32 i = DelayedFlakProjectiles.Num() - 1; i >= 0; --i)
+	{
+		FNetcodeDelayedFlakProjectile& Request = DelayedFlakProjectiles[i];
+		if (Request.FireMode == FireModeNum && Request.EventIndex <= InAuthorizedEventIndex)
+		{
+			GetWorldTimerManager().ClearTimer(Request.TimerHandle);
+			DelayedFlakProjectiles.RemoveAtSwap(i, 1, false);
+		}
+	}
+
     // FIX 2: Destroy CONFIRMED fakes only (server spawned the real one).
     // Do NOT touch fakes with index > authorized - those are still in-flight, not rejected.
     for (int32 i = PendingFakeProjectiles.Num() - 1; i >= 0; i--)
@@ -5145,18 +5676,31 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
         if (Pending.FireMode == FireModeNum && Pending.EventIndex <= InAuthorizedEventIndex)
         {
             // Confirmed — server spawned the real projectile.
-            // For shock balls: DON'T destroy the fake. BeginFakeProjectileSynch has
-            // already paired it with the auth. The fake renders smoothly while the
-            // real is hidden. Destroying the fake would cause a visual hitch at 80+ ping
-            // as the real un-hides at its forward-ticked position. The fake is cleaned
-            // up naturally when the real explodes/expires.
-            // For all other projectiles: destroy the fake as before.
+            // Keep the projectile types whose stock fake/real handoff deliberately leaves
+            // the fake responsible for visuals. This is mandatory for Flak primary because
+            // AUTProj_FlakShard is bNetTemporary: after pairing, the replicated real destroys
+            // itself. Destroying the fake on ACK therefore erases the shard permanently.
+            // Flak shells use the normal hidden-real handoff, so destroying their visible fake
+            // during the ACK/replication race causes the same cosmetic disappearance.
             if (Pending.Projectile.IsValid())
             {
-                if (!Cast<AUTPlusProj_ShockBall>(Pending.Projectile.Get())
-                    && !Cast<AUTPlusProj_Rocket>(Pending.Projectile.Get()))
+				AUTProjectile* Fake = Pending.Projectile.Get();
+				const bool bExistingRetentionType = Fake->IsA(AUTPlusProj_ShockBall::StaticClass())
+					|| Fake->IsA(AUTPlusProj_Rocket::StaticClass());
+				const bool bFlakRetentionType =
+					(Pending.FireMode == 0 && Fake->IsA(AUTProj_FlakShard::StaticClass()))
+					|| (Pending.FireMode == 1 && Fake->IsA(AUTProj_FlakShell::StaticClass()));
+				// Secondary impact fragments are AUTProj_FlakShard-derived too, but are spawned
+				// by the authoritative shell explosion and never enter this weapon-pending list.
+				// The exact ACK may arrive before replication/pairing, so preserve that fake.
+				// For an older event, retain Flak only if pairing already proved it had a real;
+				// otherwise a skipped/rejected old event must not become a permanent ghost.
+				const bool bRetainVisualFake = bExistingRetentionType
+					|| (bFlakRetentionType
+						&& (Pending.EventIndex == InAuthorizedEventIndex || Fake->MasterProjectile != nullptr));
+				if (!bRetainVisualFake)
                 {
-                    Pending.Projectile->Destroy();
+					Fake->Destroy();
                 }
             }
             PendingFakeProjectiles.RemoveAt(i);
@@ -5285,6 +5829,11 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 				{
 					EstDamage = DefProj->DamageParams.BaseDamage;
 				}
+			}
+			// Mirror the server broadcast's amp scaling (see the hitscan site).
+			if (UTOwner != nullptr)
+			{
+				EstDamage = FMath::TruncToInt(UTOwner->DamageScaling * (float)EstDamage);
 			}
 			HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
 		}
@@ -5739,4 +6288,11 @@ AClientHitsounds* AUTWeaponFix::FindClientHitsoundsMutator()
 	}
 
 	return nullptr;
+}
+
+int32 AUTWeaponFix::GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshotClaimed)
+{
+	// Base weapons have no headshot mechanic: a head claim from this weapon is
+	// positional data for the server, not a damage upgrade.
+	return InstantHitInfo.IsValidIndex(FireModeNum) ? InstantHitInfo[FireModeNum].Damage : 0;
 }

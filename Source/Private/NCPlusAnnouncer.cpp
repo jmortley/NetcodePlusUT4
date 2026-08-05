@@ -3,9 +3,11 @@
 #include "UnrealTournament.h"
 #include "Components/AudioComponent.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Sound/SoundBase.h"
 #include "TimerManager.h"
 #include "UTGameState.h"
 #include "UTLocalMessage.h"
@@ -13,10 +15,23 @@
 #include "UTPlayerController.h"
 #include "UTSpreeMessage.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogNCPlusAnnouncer, Log, All);
+
+// Temporary client-side announcer diagnostics. Pure logging: no queue, playback,
+// replication, or RPC behavior changes.
+// 328-RC-RELEASE: restore the default below to 0 before shipping 328-rc.
+static TAutoConsoleVariable<int32> CVarAnnouncerTrace(
+	TEXT("ncp.AnnouncerTrace"), 1,
+	TEXT("Announcer diagnostics: 0=off (required for 328-rc release), 1=trace install/defaults, queue admission, sound lookup/cache, and playback (temporary default during diagnosis)."),
+	ECVF_Default);
+
 namespace
 {
 	const TCHAR* ConfigSection = TEXT("NetcodePlus");
 	const TCHAR* ConfigKey = TEXT("AnnouncerPack");
+	const TCHAR* OriginalAnnouncerPathConfigKey = TEXT("OriginalAnnouncerPath");
+	const TCHAR* PlayerControllerAnnouncerPathKey = TEXT("AnnouncerPath");
+	const TCHAR* CanonicalStockAnnouncerClassPath = TEXT("/Game/RestrictedAssets/Blueprints/RewardAnnouncerMale.RewardAnnouncerMale_C");
 	const TCHAR* StockPackId = TEXT("Stock");
 	const TCHAR* StockDisplayName = TEXT("Stock UT4");
 
@@ -65,6 +80,116 @@ namespace
 	FStringClassReference OriginalAnnouncerPath;
 	bool bAnnouncerInstalled = false;
 
+	bool AnnouncerTraceEnabled()
+	{
+		return CVarAnnouncerTrace.GetValueOnAnyThread() > 0;
+	}
+
+	FString DescribeAnnouncement(const FAnnouncementInfo& Announcement)
+	{
+		return Announcement.MessageClass != nullptr
+			? FString::Printf(TEXT("%s:%d"), *Announcement.MessageClass->GetName(), Announcement.Switch)
+			: FString(TEXT("None"));
+	}
+
+	FString DescribeObject(const UObject* Object)
+	{
+		return Object != nullptr ? Object->GetPathName() : FString(TEXT("None"));
+	}
+
+	struct FAnnouncerLookupTrace
+	{
+		FString CacheState = TEXT("not-applicable");
+		FString ExplicitListMatch = TEXT("None");
+		FString PackageName = TEXT("None");
+		FString ObjectPath = TEXT("None");
+		bool bPackageExists = false;
+	};
+
+	FString DescribeCacheState(UUTAnnouncer* Announcer, bool bStatus, FName SoundName)
+	{
+		if (Announcer == nullptr || SoundName == NAME_None || SoundName == NAME_Custom)
+		{
+			return TEXT("not-applicable");
+		}
+
+		USoundBase** CachePtr = bStatus
+			? Announcer->StatusCachedAudio.Find(SoundName) : Announcer->RewardCachedAudio.Find(SoundName);
+		if (CachePtr == nullptr)
+		{
+			return TEXT("absent");
+		}
+		if (*CachePtr == nullptr)
+		{
+			return TEXT("cached-null");
+		}
+		return FString::Printf(TEXT("hit:%s"), *DescribeObject(*CachePtr));
+	}
+
+	FAnnouncerLookupTrace BuildLookupTrace(UUTAnnouncer* Announcer, bool bStatus, FName SoundName)
+	{
+		FAnnouncerLookupTrace Result;
+		if (Announcer == nullptr || SoundName == NAME_None || SoundName == NAME_Custom)
+		{
+			return Result;
+		}
+
+		Result.CacheState = DescribeCacheState(Announcer, bStatus, SoundName);
+
+		const TArray<FAnnouncerSound>& AudioList = bStatus
+			? Announcer->StatusAudioList : Announcer->RewardAudioList;
+		for (const FAnnouncerSound& Entry : AudioList)
+		{
+			if (Entry.SoundName == SoundName)
+			{
+				Result.ExplicitListMatch = Entry.Sound != nullptr
+					? DescribeObject(Entry.Sound) : FString(TEXT("entry-null"));
+				break;
+			}
+		}
+
+		FString AudioPath = bStatus ? Announcer->StatusAudioPath : Announcer->RewardAudioPath;
+		if (!AudioPath.EndsWith(TEXT("/")))
+		{
+			AudioPath += TEXT("/");
+		}
+		const FString AudioPrefix = bStatus
+			? Announcer->StatusAudioNamePrefix : Announcer->RewardAudioNamePrefix;
+		Result.PackageName = AudioPath + AudioPrefix + SoundName.ToString();
+		Result.ObjectPath = Result.PackageName + TEXT(".") + AudioPrefix + SoundName.ToString();
+		Result.bPackageExists = FPackageName::DoesPackageExist(Result.PackageName);
+		return Result;
+	}
+
+	void TracePackDefaults(const TCHAR* Phase, const UUTAnnouncer* Announcer)
+	{
+		if (!AnnouncerTraceEnabled())
+		{
+			return;
+		}
+
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] %s object=%s class=%s template=%d outer=%s type=%d rewardPath=\"%s\" rewardPrefix=\"%s\" rewardList=%d rewardCache=%d statusPath=\"%s\" statusPrefix=\"%s\" statusList=%d statusCache=%d comp=%s playing=%d sound=%s"),
+			Phase,
+			*DescribeObject(Announcer),
+			Announcer != nullptr ? *Announcer->GetClass()->GetPathName() : TEXT("None"),
+			Announcer != nullptr && Announcer->IsTemplate() ? 1 : 0,
+			Announcer != nullptr ? *DescribeObject(Announcer->GetOuter()) : TEXT("None"),
+			Announcer != nullptr ? int32(Announcer->Type) : -1,
+			Announcer != nullptr ? *Announcer->RewardAudioPath : TEXT(""),
+			Announcer != nullptr ? *Announcer->RewardAudioNamePrefix : TEXT(""),
+			Announcer != nullptr ? Announcer->RewardAudioList.Num() : -1,
+			Announcer != nullptr ? Announcer->RewardCachedAudio.Num() : -1,
+			Announcer != nullptr ? *Announcer->StatusAudioPath : TEXT(""),
+			Announcer != nullptr ? *Announcer->StatusAudioNamePrefix : TEXT(""),
+			Announcer != nullptr ? Announcer->StatusAudioList.Num() : -1,
+			Announcer != nullptr ? Announcer->StatusCachedAudio.Num() : -1,
+			Announcer != nullptr ? *DescribeObject(Announcer->AnnouncementComp) : TEXT("None"),
+			Announcer != nullptr && Announcer->AnnouncementComp != nullptr && Announcer->AnnouncementComp->IsPlaying() ? 1 : 0,
+			Announcer != nullptr && Announcer->AnnouncementComp != nullptr
+				? *DescribeObject(Announcer->AnnouncementComp->Sound) : TEXT("None"));
+	}
+
 	FString GetConfigPath()
 	{
 		return FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
@@ -95,11 +220,163 @@ namespace
 			: nullptr;
 	}
 
+	bool TryResolveBaseAnnouncerPath(const FString& Candidate,
+		FStringClassReference& OutAnnouncerPath)
+	{
+		FString TrimmedCandidate = Candidate;
+		TrimmedCandidate.Trim();
+		TrimmedCandidate.TrimTrailing();
+		if (TrimmedCandidate.IsEmpty())
+		{
+			return false;
+		}
+
+		const UUTAnnouncer* Defaults = LoadAnnouncerDefaults(TrimmedCandidate);
+		if (Defaults == nullptr
+			|| Defaults->GetClass()->IsChildOf(UNCPlusAnnouncer::StaticClass()))
+		{
+			return false;
+		}
+
+		OutAnnouncerPath = FStringClassReference(TrimmedCandidate);
+		return true;
+	}
+
+	bool TryGetSourceAnnouncerPath(FString& OutAnnouncerPath)
+	{
+		if (GConfig == nullptr || GGameIni.IsEmpty())
+		{
+			return false;
+		}
+
+		FConfigFile* GameConfig = GConfig->FindConfigFile(GGameIni);
+		if (GameConfig == nullptr || GameConfig->SourceConfigFile == nullptr)
+		{
+			return false;
+		}
+
+		const FString PlayerControllerSection = AUTPlayerController::StaticClass()->GetPathName();
+		return GameConfig->SourceConfigFile->GetString(
+			*PlayerControllerSection, PlayerControllerAnnouncerPathKey, OutAnnouncerPath);
+	}
+
+	bool ResolveOriginalAnnouncerPath(const FStringClassReference& CurrentPath,
+		UClass* CurrentClass, FStringClassReference& OutAnnouncerPath, FString& OutSource)
+	{
+		if (TryResolveBaseAnnouncerPath(CurrentPath.ToString(), OutAnnouncerPath))
+		{
+			OutSource = TEXT("current-player-controller-default");
+			return true;
+		}
+
+		// Do not turn an intentionally empty or invalid announcer setting back on.
+		// Recovery fallbacks are reserved for the self-reference written by an earlier
+		// NetcodePlus run (or for hot reload while our native class is still installed).
+		if (CurrentClass == nullptr
+			|| !CurrentClass->IsChildOf(UNCPlusAnnouncer::StaticClass()))
+		{
+			return false;
+		}
+
+		FString Candidate;
+		if (GConfig != nullptr
+			&& GConfig->GetString(ConfigSection, OriginalAnnouncerPathConfigKey,
+				Candidate, GetConfigPath())
+			&& TryResolveBaseAnnouncerPath(Candidate, OutAnnouncerPath))
+		{
+			OutSource = TEXT("saved-netcodeplus-original");
+			return true;
+		}
+
+		Candidate.Empty();
+		if (TryGetSourceAnnouncerPath(Candidate)
+			&& TryResolveBaseAnnouncerPath(Candidate, OutAnnouncerPath))
+		{
+			OutSource = TEXT("untainted-game-default");
+			return true;
+		}
+
+		if (TryResolveBaseAnnouncerPath(CanonicalStockAnnouncerClassPath, OutAnnouncerPath))
+		{
+			OutSource = TEXT("canonical-stock-fallback");
+			return true;
+		}
+
+		return false;
+	}
+
+	void PersistOriginalAnnouncerPath()
+	{
+		if (GConfig == nullptr || !OriginalAnnouncerPath.IsValid())
+		{
+			return;
+		}
+
+		const FString ConfigPath = GetConfigPath();
+		const FString OriginalPath = OriginalAnnouncerPath.ToString();
+		FString SavedPath;
+		if (GConfig->GetString(ConfigSection, OriginalAnnouncerPathConfigKey,
+			SavedPath, ConfigPath)
+			&& SavedPath == OriginalPath)
+		{
+			return;
+		}
+
+		GConfig->SetString(ConfigSection, OriginalAnnouncerPathConfigKey,
+			*OriginalPath, ConfigPath);
+		GConfig->Flush(false, ConfigPath);
+	}
+
+	void RepairPlayerControllerAnnouncerConfig(bool bOnlyIfNativePath)
+	{
+		if (GConfig == nullptr || GGameIni.IsEmpty() || !OriginalAnnouncerPath.IsValid())
+		{
+			return;
+		}
+
+		const FString PlayerControllerSection = AUTPlayerController::StaticClass()->GetPathName();
+		const FString OriginalPath = OriginalAnnouncerPath.ToString();
+		const FString NativePath = FStringClassReference(UNCPlusAnnouncer::StaticClass()).ToString();
+		FString ConfiguredPath;
+		const bool bHasConfiguredPath = GConfig->GetString(*PlayerControllerSection,
+			PlayerControllerAnnouncerPathKey, ConfiguredPath, GGameIni);
+
+		if (bOnlyIfNativePath
+			&& (!bHasConfiguredPath || ConfiguredPath != NativePath))
+		{
+			return;
+		}
+		if (bHasConfiguredPath && ConfiguredPath == OriginalPath)
+		{
+			return;
+		}
+
+		GConfig->SetString(*PlayerControllerSection, PlayerControllerAnnouncerPathKey,
+			*OriginalPath, GGameIni);
+		GConfig->Flush(false, GGameIni);
+
+		UE_LOG(LogLoad, Log,
+			TEXT("netcodeplus: repaired persisted announcer path from %s to %s"),
+			bHasConfiguredPath ? *ConfiguredPath : TEXT("None"), *OriginalPath);
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] CONFIG-REPAIR gameIni=%s old=%s new=%s"),
+				*GGameIni, bHasConfiguredPath ? *ConfiguredPath : TEXT("None"), *OriginalPath);
+		}
+	}
+
 	const UUTAnnouncer* GetStockDefaults()
 	{
-		return OriginalAnnouncerPath.IsValid()
-			? LoadAnnouncerDefaults(OriginalAnnouncerPath.ToString())
-			: nullptr;
+		if (!OriginalAnnouncerPath.IsValid())
+		{
+			return nullptr;
+		}
+
+		const UUTAnnouncer* Defaults = LoadAnnouncerDefaults(OriginalAnnouncerPath.ToString());
+		return (Defaults != nullptr
+			&& !Defaults->GetClass()->IsChildOf(UNCPlusAnnouncer::StaticClass()))
+			? Defaults : nullptr;
 	}
 
 	FString ResolveAvailablePackId(const FString& RequestedId)
@@ -143,6 +420,15 @@ namespace
 		FString AppliedId;
 		const UUTAnnouncer* SourceDefaults = ResolvePackDefaults(ResolvedId, AppliedId);
 		UNCPlusAnnouncer* NativeDefaults = GetMutableDefault<UNCPlusAnnouncer>();
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] APPLY requested=%s resolved=%s applied=%s localPC=%s source=%s native=%s"),
+				*RequestedId, *ResolvedId, *AppliedId, *DescribeObject(LocalPlayerController),
+				*DescribeObject(SourceDefaults), *DescribeObject(NativeDefaults));
+			TracePackDefaults(TEXT("APPLY-SOURCE"), SourceDefaults);
+			TracePackDefaults(TEXT("APPLY-NATIVE-BEFORE"), NativeDefaults);
+		}
 		if (SourceDefaults == nullptr || NativeDefaults == nullptr)
 		{
 			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: unable to apply announcer pack %s; stock announcer was unavailable"),
@@ -151,6 +437,7 @@ namespace
 		}
 
 		NativeDefaults->CopyPackDefaultsFrom(SourceDefaults);
+		TracePackDefaults(TEXT("APPLY-NATIVE-AFTER"), NativeDefaults);
 		if (LocalPlayerController != nullptr)
 		{
 			if (UNCPlusAnnouncer* LiveAnnouncer = Cast<UNCPlusAnnouncer>(LocalPlayerController->Announcer))
@@ -158,6 +445,16 @@ namespace
 				// Do not clear CurrentAnnouncement, QueuedAnnouncements, or the audio component.
 				// The current line finishes; queued and future lines resolve against the new pack.
 				LiveAnnouncer->CopyPackDefaultsFrom(SourceDefaults);
+				TracePackDefaults(TEXT("APPLY-LIVE-AFTER"), LiveAnnouncer);
+			}
+			else if (AnnouncerTraceEnabled())
+			{
+				UE_LOG(LogNCPlusAnnouncer, Warning,
+					TEXT("[AnnouncerTrace] APPLY-LIVE-SKIP pc=%s announcer=%s class=%s"),
+					*DescribeObject(LocalPlayerController),
+					*DescribeObject(LocalPlayerController->Announcer),
+					LocalPlayerController->Announcer != nullptr
+						? *LocalPlayerController->Announcer->GetClass()->GetPathName() : TEXT("None"));
 			}
 		}
 
@@ -171,12 +468,37 @@ UNCPlusAnnouncer::UNCPlusAnnouncer(const FObjectInitializer& ObjectInitializer)
 {
 }
 
+void UNCPlusAnnouncer::PostInitProperties()
+{
+	// Runtime changes to the native CDO are not reliably propagated through UE4's
+	// precomputed native-class defaults. Seed the live object explicitly before
+	// UUTAnnouncer::PostInitProperties() precaches the current game mode's sounds.
+	if (!IsTemplate() && bAnnouncerInstalled)
+	{
+		const UNCPlusAnnouncer* SelectedDefaults = Cast<UNCPlusAnnouncer>(
+			UNCPlusAnnouncer::StaticClass()->GetDefaultObject(false));
+		if (SelectedDefaults != nullptr && SelectedDefaults != this)
+		{
+			CopyPackDefaultsFrom(SelectedDefaults);
+		}
+	}
+
+	Super::PostInitProperties();
+	if (IsInGameThread())
+	{
+		TracePackDefaults(IsTemplate() ? TEXT("POSTINIT-TEMPLATE") : TEXT("POSTINIT-LIVE"), this);
+	}
+}
+
 void UNCPlusAnnouncer::CopyPackDefaultsFrom(const UUTAnnouncer* Source)
 {
 	if (Source == nullptr)
 	{
 		return;
 	}
+
+	TracePackDefaults(TEXT("COPY-DEST-BEFORE"), this);
+	TracePackDefaults(TEXT("COPY-SOURCE"), Source);
 
 	Type = Source->Type;
 	RewardAudioPath = Source->RewardAudioPath;
@@ -187,6 +509,7 @@ void UNCPlusAnnouncer::CopyPackDefaultsFrom(const UUTAnnouncer* Source)
 	StatusAudioList = Source->StatusAudioList;
 	RewardCachedAudio.Empty();
 	StatusCachedAudio.Empty();
+	TracePackDefaults(TEXT("COPY-DEST-AFTER"), this);
 }
 
 bool UNCPlusAnnouncer::IsLegacyImmediateReward(const FAnnouncementInfo& Announcement)
@@ -225,6 +548,10 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 {
 	if (MessageClass == nullptr)
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning, TEXT("[AnnouncerTrace] ADMIT-DROP reason=null-message"));
+		}
 		return;
 	}
 
@@ -239,18 +566,57 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 	const bool bLegacyImmediateReward = IsLegacyImmediateReward(NewAnnouncement);
 	if (!Message->ShouldStillPlay(GetWorld()->GetGameState<AUTGameState>(), NewAnnouncement))
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] ADMIT-DROP reason=should-still-play msg=%s switch=%d status=%d current=%s queue=%d"),
+				*MessageClass->GetPathName(), Switch, Message->bIsStatusAnnouncement ? 1 : 0,
+				*DescribeAnnouncement(CurrentAnnouncement), QueuedAnnouncements.Num());
+		}
 		return;
 	}
 
 	const FName SoundName = Message->GetAnnouncementName(Switch, OptionalObject, PlayerState1, PlayerState2);
 	if (SoundName == NAME_None)
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] ADMIT-DROP reason=sound-none msg=%s switch=%d current=%s queue=%d"),
+				*MessageClass->GetPathName(), Switch, *DescribeAnnouncement(CurrentAnnouncement),
+				QueuedAnnouncements.Num());
+		}
 		return;
+	}
+
+	if (AnnouncerTraceEnabled())
+	{
+		AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
+		const bool bTimerActive = GetWorld()->GetTimerManager().IsTimerActive(PlayNextAnnouncementHandle);
+		const FAnnouncerLookupTrace LookupTrace = BuildLookupTrace(
+			this, Message->bIsStatusAnnouncement, SoundName);
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] ADMIT announcer=%s outer=%s msg=%s switch=%d status=%d legacy=%d sound=%s match=%s current=%s queue=%d timer=%d cache=%s explicit=%s package=%s object=%s exists=%d compPlaying=%d compSound=%s"),
+			*GetClass()->GetPathName(), *DescribeObject(GetOuter()), *MessageClass->GetPathName(), Switch,
+			Message->bIsStatusAnnouncement ? 1 : 0, bLegacyImmediateReward ? 1 : 0,
+			*SoundName.ToString(), GameState != nullptr ? *GameState->GetMatchState().ToString() : TEXT("None"),
+			*DescribeAnnouncement(CurrentAnnouncement), QueuedAnnouncements.Num(), bTimerActive ? 1 : 0,
+			*LookupTrace.CacheState, *LookupTrace.ExplicitListMatch, *LookupTrace.PackageName,
+			*LookupTrace.ObjectPath, LookupTrace.bPackageExists ? 1 : 0,
+			AnnouncementComp != nullptr && AnnouncementComp->IsPlaying() ? 1 : 0,
+			AnnouncementComp != nullptr ? *DescribeObject(AnnouncementComp->Sound) : TEXT("None"));
 	}
 
 	if (CurrentAnnouncement.MessageClass != nullptr
 		&& ShouldInterruptForLegacyReward(NewAnnouncement, CurrentAnnouncement))
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] ADMIT-INTERRUPT incoming=%s:%d current=%s queue=%d"),
+				*MessageClass->GetName(), Switch, *DescribeAnnouncement(CurrentAnnouncement),
+				QueuedAnnouncements.Num());
+		}
 		if (CurrentAnnouncement.MessageClass.GetDefaultObject()->EnableAnnouncerLogging())
 		{
 			UE_LOG(UT, Warning, TEXT("%s %d immediate interrupting %s %d"),
@@ -262,6 +628,13 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 		{
 			if (ShouldInterruptForLegacyReward(NewAnnouncement, QueuedAnnouncements[Index]))
 			{
+				if (AnnouncerTraceEnabled())
+				{
+					UE_LOG(LogNCPlusAnnouncer, Warning,
+						TEXT("[AnnouncerTrace] ADMIT-REMOVE incoming=%s:%d queued=%s reason=interrupt-current-branch"),
+						*MessageClass->GetName(), Switch,
+						*DescribeAnnouncement(QueuedAnnouncements[Index]));
+				}
 				if (QueuedAnnouncements[Index].MessageClass.GetDefaultObject()->EnableAnnouncerLogging())
 				{
 					UE_LOG(UT, Warning, TEXT("%s %d also interrupting %s %d"),
@@ -294,6 +667,12 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 			CurrentAnnouncement.MessageClass, CurrentAnnouncement.Switch,
 			CurrentAnnouncement.OptionalObject))
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] ADMIT-CANCEL incoming=%s:%d by-current=%s"),
+				*MessageClass->GetName(), Switch, *DescribeAnnouncement(CurrentAnnouncement));
+		}
 		if (Message->EnableAnnouncerLogging())
 		{
 			UE_LOG(UT, Warning, TEXT("%s %d cancelled by %s %d"), *MessageClass->GetName(),
@@ -307,6 +686,13 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 		{
 			if (ShouldInterruptForLegacyReward(NewAnnouncement, QueuedAnnouncements[Index]))
 			{
+				if (AnnouncerTraceEnabled())
+				{
+					UE_LOG(LogNCPlusAnnouncer, Warning,
+						TEXT("[AnnouncerTrace] ADMIT-REMOVE incoming=%s:%d queued=%s reason=interrupt"),
+						*MessageClass->GetName(), Switch,
+						*DescribeAnnouncement(QueuedAnnouncements[Index]));
+				}
 				if (QueuedAnnouncements[Index].MessageClass.GetDefaultObject()->EnableAnnouncerLogging())
 				{
 					UE_LOG(UT, Warning, TEXT("%s %d interrupting %s %d"),
@@ -320,6 +706,13 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 				QueuedAnnouncements[Index].MessageClass, QueuedAnnouncements[Index].Switch,
 				QueuedAnnouncements[Index].OptionalObject))
 			{
+				if (AnnouncerTraceEnabled())
+				{
+					UE_LOG(LogNCPlusAnnouncer, Warning,
+						TEXT("[AnnouncerTrace] ADMIT-CANCEL incoming=%s:%d by-queued=%s"),
+						*MessageClass->GetName(), Switch,
+						*DescribeAnnouncement(QueuedAnnouncements[Index]));
+				}
 				if (Message->EnableAnnouncerLogging())
 				{
 					UE_LOG(UT, Warning, TEXT("%s %d cancelled by %s %d"),
@@ -334,6 +727,12 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 
 	if (bCancelThisAnnouncement)
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] ADMIT-DROP reason=cancelled msg=%s:%d"),
+				*MessageClass->GetName(), Switch);
+		}
 		return;
 	}
 
@@ -361,35 +760,136 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 		QueuedAnnouncements.Add(NewAnnouncement);
 	}
 
-	if (CurrentAnnouncement.MessageClass == nullptr && !AnnouncementComp->IsPlaying()
+	const bool bComponentPlaying = AnnouncementComp != nullptr && AnnouncementComp->IsPlaying();
+	const bool bStartNow = CurrentAnnouncement.MessageClass == nullptr && AnnouncementComp != nullptr
+		&& !bComponentPlaying
 		&& (bLegacyImmediateReward
-			|| !GetWorld()->GetTimerManager().IsTimerActive(PlayNextAnnouncementHandle)))
+			|| !GetWorld()->GetTimerManager().IsTimerActive(PlayNextAnnouncementHandle));
+	if (AnnouncerTraceEnabled())
+	{
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] ADMIT-QUEUED msg=%s:%d insert=%d queue=%d startNow=%d current=%s compPlaying=%d"),
+			*MessageClass->GetName(), Switch, InsertIndex, QueuedAnnouncements.Num(), bStartNow ? 1 : 0,
+			*DescribeAnnouncement(CurrentAnnouncement), bComponentPlaying ? 1 : 0);
+	}
+	if (bStartNow)
 	{
 		StartNextAnnouncement(false);
+		if (AnnouncerTraceEnabled())
+		{
+			const FString CacheAfter = DescribeCacheState(
+				this, Message->bIsStatusAnnouncement, SoundName);
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] ADMIT-DISPATCHED msg=%s:%d sound=%s cache=%s current=%s queue=%d compPlaying=%d compSound=%s"),
+				*MessageClass->GetName(), Switch, *SoundName.ToString(), *CacheAfter,
+				*DescribeAnnouncement(CurrentAnnouncement), QueuedAnnouncements.Num(),
+				AnnouncementComp != nullptr && AnnouncementComp->IsPlaying() ? 1 : 0,
+				AnnouncementComp != nullptr ? *DescribeObject(AnnouncementComp->Sound) : TEXT("None"));
+		}
 	}
+}
+
+void UNCPlusAnnouncer::PlayNextAnnouncement()
+{
+	if (!AnnouncerTraceEnabled())
+	{
+		Super::PlayNextAnnouncement();
+		return;
+	}
+
+	const bool bHadQueued = QueuedAnnouncements.Num() > 0;
+	const FAnnouncementInfo TracedAnnouncement = bHadQueued
+		? QueuedAnnouncements[0] : FAnnouncementInfo();
+
+	const float QueueAge = bHadQueued && GetWorld() != nullptr
+		? GetWorld()->GetTimeSeconds() - TracedAnnouncement.QueueTime : -1.f;
+	UE_LOG(LogNCPlusAnnouncer, Warning,
+		TEXT("[AnnouncerTrace] PLAYNEXT-BEFORE front=%s age=%.3f queue=%d current=%s timer=%d rewardCache=%d statusCache=%d saving=%d gc=%d compPlaying=%d compSound=%s volume=%.3f soundClass=%s"),
+		*DescribeAnnouncement(TracedAnnouncement), QueueAge, QueuedAnnouncements.Num(),
+		*DescribeAnnouncement(CurrentAnnouncement),
+		GetWorld() != nullptr && GetWorld()->GetTimerManager().IsTimerActive(PlayNextAnnouncementHandle) ? 1 : 0,
+		RewardCachedAudio.Num(), StatusCachedAudio.Num(),
+		GIsSavingPackage ? 1 : 0, IsGarbageCollecting() ? 1 : 0,
+		AnnouncementComp != nullptr && AnnouncementComp->IsPlaying() ? 1 : 0,
+		AnnouncementComp != nullptr ? *DescribeObject(AnnouncementComp->Sound) : TEXT("None"),
+		AnnouncementComp != nullptr ? AnnouncementComp->VolumeMultiplier : -1.f,
+		AnnouncementComp != nullptr ? *DescribeObject(AnnouncementComp->SoundClassOverride) : TEXT("None"));
+
+	Super::PlayNextAnnouncement();
+
+	UE_LOG(LogNCPlusAnnouncer, Warning,
+		TEXT("[AnnouncerTrace] PLAYNEXT-AFTER traced=%s current=%s queue=%d timer=%d rewardCache=%d statusCache=%d compPlaying=%d compSound=%s volume=%.3f soundClass=%s"),
+		*DescribeAnnouncement(TracedAnnouncement), *DescribeAnnouncement(CurrentAnnouncement),
+		QueuedAnnouncements.Num(),
+		GetWorld() != nullptr && GetWorld()->GetTimerManager().IsTimerActive(PlayNextAnnouncementHandle) ? 1 : 0,
+		RewardCachedAudio.Num(), StatusCachedAudio.Num(),
+		AnnouncementComp != nullptr && AnnouncementComp->IsPlaying() ? 1 : 0,
+		AnnouncementComp != nullptr ? *DescribeObject(AnnouncementComp->Sound) : TEXT("None"),
+		AnnouncementComp != nullptr ? AnnouncementComp->VolumeMultiplier : -1.f,
+		AnnouncementComp != nullptr ? *DescribeObject(AnnouncementComp->SoundClassOverride) : TEXT("None"));
 }
 
 void NCPlusAnnouncerPacks::Install()
 {
 	if (bAnnouncerInstalled)
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning, TEXT("[AnnouncerTrace] INSTALL-SKIP reason=already-installed"));
+		}
 		return;
 	}
 
 	AUTPlayerController* PlayerControllerCDO = GetMutableDefault<AUTPlayerController>();
-	if (PlayerControllerCDO == nullptr || !PlayerControllerCDO->AnnouncerPath.IsValid())
+	if (PlayerControllerCDO == nullptr)
 	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] INSTALL-DROP reason=null-pc-cdo"));
+		}
 		return;
 	}
 
-	UClass* CurrentAnnouncerClass = PlayerControllerCDO->AnnouncerPath.TryLoadClass<UUTAnnouncer>();
-	if (CurrentAnnouncerClass != nullptr
-		&& CurrentAnnouncerClass->IsChildOf(UNCPlusAnnouncer::StaticClass()))
+	if (AnnouncerTraceEnabled())
 	{
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] INSTALL-BEGIN pcCDO=%s path=%s"),
+			*DescribeObject(PlayerControllerCDO), *PlayerControllerCDO->AnnouncerPath.ToString());
+	}
+	UClass* CurrentAnnouncerClass = PlayerControllerCDO->AnnouncerPath.IsValid()
+		? PlayerControllerCDO->AnnouncerPath.TryLoadClass<UUTAnnouncer>() : nullptr;
+	if (AnnouncerTraceEnabled())
+	{
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] INSTALL-CURRENT class=%s"), *DescribeObject(CurrentAnnouncerClass));
+	}
+
+	FString RecoverySource;
+	FStringClassReference ResolvedOriginalPath;
+	if (!ResolveOriginalAnnouncerPath(PlayerControllerCDO->AnnouncerPath,
+		CurrentAnnouncerClass, ResolvedOriginalPath, RecoverySource))
+	{
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] INSTALL-DROP reason=no-valid-base path=%s class=%s"),
+				*PlayerControllerCDO->AnnouncerPath.ToString(),
+				*DescribeObject(CurrentAnnouncerClass));
+		}
+		UE_LOG(LogLoad, Warning,
+			TEXT("netcodeplus: could not resolve a valid non-NetcodePlus announcer from %s; leaving announcer configuration unchanged"),
+			*PlayerControllerCDO->AnnouncerPath.ToString());
 		return;
 	}
 
-	OriginalAnnouncerPath = PlayerControllerCDO->AnnouncerPath;
+	OriginalAnnouncerPath = ResolvedOriginalPath;
+	if (AnnouncerTraceEnabled())
+	{
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] INSTALL-ORIGINAL path=%s source=%s"),
+			*OriginalAnnouncerPath.ToString(), *RecoverySource);
+	}
 	if (GetStockDefaults() == nullptr)
 	{
 		UE_LOG(LogLoad, Warning, TEXT("netcodeplus: could not load configured stock announcer %s"),
@@ -398,8 +898,14 @@ void NCPlusAnnouncerPacks::Install()
 		return;
 	}
 
+	// Keep the recovery record and the platform Game.ini clean before installing
+	// the runtime-only CDO override. Do not call SaveConfig() or ReloadConfig().
+	PersistOriginalAnnouncerPath();
+	RepairPlayerControllerAnnouncerConfig(true);
+
 	FString ConfiguredId;
-	if (!GConfig->GetString(ConfigSection, ConfigKey, ConfiguredId, GetConfigPath()))
+	if (GConfig == nullptr
+		|| !GConfig->GetString(ConfigSection, ConfigKey, ConfiguredId, GetConfigPath()))
 	{
 		ConfiguredId = StockPackId;
 	}
@@ -407,6 +913,13 @@ void NCPlusAnnouncerPacks::Install()
 
 	PlayerControllerCDO->AnnouncerPath = FStringClassReference(UNCPlusAnnouncer::StaticClass());
 	bAnnouncerInstalled = true;
+	if (AnnouncerTraceEnabled())
+	{
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] INSTALL-DONE configured=%s path=%s"),
+			*ConfiguredId, *PlayerControllerCDO->AnnouncerPath.ToString());
+		TracePackDefaults(TEXT("INSTALL-FINAL-NATIVE-DEFAULTS"), GetDefault<UNCPlusAnnouncer>());
+	}
 }
 
 void NCPlusAnnouncerPacks::Uninstall()
@@ -418,10 +931,28 @@ void NCPlusAnnouncerPacks::Uninstall()
 
 	AUTPlayerController* PlayerControllerCDO = GetMutableDefault<AUTPlayerController>();
 	const FStringClassReference NativeAnnouncerPath(UNCPlusAnnouncer::StaticClass());
+	bool bRestoredPlayerControllerDefault = false;
 	if (PlayerControllerCDO != nullptr
 		&& PlayerControllerCDO->AnnouncerPath.ToString() == NativeAnnouncerPath.ToString())
 	{
 		PlayerControllerCDO->AnnouncerPath = OriginalAnnouncerPath;
+		bRestoredPlayerControllerDefault = true;
+	}
+
+	if (bRestoredPlayerControllerDefault)
+	{
+		// A controller SaveConfig() may have written the runtime class during play.
+		// Only repair it while we still own the matching CDO override so a later
+		// legitimate announcer installer wins.
+		RepairPlayerControllerAnnouncerConfig(true);
+	}
+	if (AnnouncerTraceEnabled())
+	{
+		UE_LOG(LogNCPlusAnnouncer, Warning,
+			TEXT("[AnnouncerTrace] UNINSTALL restoredCDO=%d original=%s finalCDO=%s"),
+			bRestoredPlayerControllerDefault ? 1 : 0,
+			*OriginalAnnouncerPath.ToString(), PlayerControllerCDO != nullptr
+				? *PlayerControllerCDO->AnnouncerPath.ToString() : TEXT("None"));
 	}
 
 	OriginalAnnouncerPath = FStringClassReference();

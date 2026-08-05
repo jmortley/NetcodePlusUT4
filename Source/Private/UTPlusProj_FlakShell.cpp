@@ -7,6 +7,54 @@
 #include "UTProjectileMovementComponent.h"
 #include "HAL/IConsoleManager.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogFlakShellPair, Log, All);
+
+static TAutoConsoleVariable<int32> CVarFlakShellPairDebug(
+	TEXT("ncp.FlakShellPairDebug"), 0,
+	TEXT("Flak-shell fake matching diagnostics. 0=off (default), 1=log every accepted/rejected candidate."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarFlakShellMatchFakeMaxDist(
+	TEXT("ncp.FlakShellMatchFakeMaxDist"), 1250.f,
+	TEXT("Maximum real/fake Flak-shell separation considered for pairing (uu; clamped 100..5000)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarFlakShellMatchFakeMaxPhase(
+	TEXT("ncp.FlakShellMatchFakeMaxPhase"), 0.60f,
+	TEXT("Maximum inferred ballistic phase separation considered for Flak-shell pairing (seconds; clamped 0.05..1.5)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarFlakShellMatchFakeMinHorizDot(
+	TEXT("ncp.FlakShellMatchFakeMinHorizDot"), 0.98f,
+	TEXT("Minimum horizontal velocity-direction dot for Flak-shell pairing (clamped -1..1)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarFlakShellMatchFakeMaxPosError(
+	TEXT("ncp.FlakShellMatchFakeMaxPosError"), 256.f,
+	TEXT("Maximum position residual after ballistic phase compensation (uu; clamped 16..2000)."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarFlakShellMatchFakeMaxVelError(
+	TEXT("ncp.FlakShellMatchFakeMaxVelError"), 200.f,
+	TEXT("Maximum velocity residual after ballistic phase compensation (uu/s; clamped 16..2000)."),
+	ECVF_Default);
+
+static void AdvanceFlakShellBallisticState(const UProjectileMovementComponent* Movement,
+	float DeltaTime, FVector& InOutLocation, FVector& InOutVelocity)
+{
+	// ComputeVelocity is public in UE4.15; ComputeMoveDelta is protected. This mirrors the
+	// movement component's trapezoidal integration without advancing an actor or touching state.
+	float Remaining = FMath::Max(0.f, DeltaTime);
+	while (Remaining > KINDA_SMALL_NUMBER)
+	{
+		const float Step = FMath::Min(Remaining, 1.f / 120.f);
+		const FVector NewVelocity = Movement->ComputeVelocity(InOutVelocity, Step);
+		InOutLocation += (InOutVelocity + NewVelocity) * (0.5f * Step);
+		InOutVelocity = NewVelocity;
+		Remaining -= Step;
+	}
+}
+
 // Mirror of ncp.RocketServerFirstExplosionVisual for the flak alt-fire shell. 1=on (default),
 // 0=stock silent shutdown. Server-only presentation; no replication/schema impact.
 static TAutoConsoleVariable<int32> CVarFlakShellServerFirstExplosionVisual(
@@ -18,6 +66,149 @@ AUTPlusProj_FlakShell::AUTPlusProj_FlakShell(const FObjectInitializer& ObjectIni
 	: Super(ObjectInitializer)
 {
 	bForcingShutdownExplosion = false;
+}
+
+bool AUTPlusProj_FlakShell::CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const
+{
+	(void)VelDir; // Stock's gravity path ignores this entirely; the gates below use full velocity.
+
+	if (InFakeProjectile == nullptr)
+	{
+		if (CVarFlakShellPairDebug.GetValueOnGameThread() > 0)
+		{
+			UE_LOG(LogFlakShellPair, Warning, TEXT("[FlakShellPair] reject real=%s fake=null reason=null-candidate"), *GetName());
+		}
+		return false;
+	}
+
+	const bool bExactClass = InFakeProjectile->GetClass() == GetClass();
+	const bool bSameWorld = InFakeProjectile->GetWorld() == GetWorld();
+	const bool bLiveReal = !IsPendingKillPending() && !bExploded && !bFakeClientProjectile
+		&& bHasSpawnedFully && MyFakeProjectile == nullptr;
+	const bool bLiveFake = !InFakeProjectile->IsPendingKillPending()
+		&& InFakeProjectile->bFakeClientProjectile && InFakeProjectile->bHasSpawnedFully
+		&& !InFakeProjectile->bExploded && InFakeProjectile->MasterProjectile == nullptr;
+	const bool bSameInstigator = Instigator != nullptr
+		&& InFakeProjectile->Instigator != nullptr
+		&& InFakeProjectile->Instigator == Instigator;
+	const bool bHasMovement = ProjectileMovement != nullptr
+		&& InFakeProjectile->ProjectileMovement != nullptr;
+
+	const FVector DeltaLocation = InFakeProjectile->GetActorLocation() - GetActorLocation();
+	const float Distance = DeltaLocation.Size();
+	const float MaxDistance = FMath::Clamp(CVarFlakShellMatchFakeMaxDist.GetValueOnGameThread(), 100.f, 5000.f);
+	const bool bDistanceOK = Distance <= MaxDistance;
+
+	float HorizontalDot = -1.f;
+	float PhaseTime = BIG_NUMBER;
+	float PositionError = BIG_NUMBER;
+	float VelocityError = BIG_NUMBER;
+	bool bDirectionOK = false;
+	bool bPhaseOK = false;
+	bool bTrajectoryOK = false;
+
+	if (bExactClass && bSameWorld && bLiveReal && bLiveFake && bSameInstigator
+		&& bHasMovement && bDistanceOK)
+	{
+		const FVector RealVelocity = ProjectileMovement->Velocity;
+		const FVector FakeVelocity = InFakeProjectile->ProjectileMovement->Velocity;
+		const FVector RealHorizontal(RealVelocity.X, RealVelocity.Y, 0.f);
+		const FVector FakeHorizontal(FakeVelocity.X, FakeVelocity.Y, 0.f);
+		const float RealHorizontalSpeed = RealHorizontal.Size();
+		const float FakeHorizontalSpeed = FakeHorizontal.Size();
+		const float DirectionThreshold = FMath::Clamp(
+			CVarFlakShellMatchFakeMinHorizDot.GetValueOnGameThread(), -1.f, 1.f);
+
+		if (RealHorizontalSpeed >= 10.f && FakeHorizontalSpeed >= 10.f)
+		{
+			HorizontalDot = RealHorizontal.GetSafeNormal() | FakeHorizontal.GetSafeNormal();
+			bDirectionOK = HorizontalDot >= DirectionThreshold;
+		}
+		else
+		{
+			// A nearly vertical shot has no stable horizontal direction. Same-instigator,
+			// bounded distance, phase, and the full ballistic residuals remain mandatory.
+			HorizontalDot = 1.f;
+			bDirectionOK = true;
+		}
+
+		const FVector AverageVelocity = (RealVelocity + FakeVelocity) * 0.5f;
+		if (AverageVelocity.SizeSquared() > 100.f)
+		{
+			// For constant acceleration, displacement over a phase interval is exactly
+			// average velocity * dt. Projecting also tolerates small replication error.
+			PhaseTime = (DeltaLocation | AverageVelocity) / AverageVelocity.SizeSquared();
+		}
+		else
+		{
+			const FVector Acceleration(0.f, 0.f, ProjectileMovement->GetGravityZ());
+			if (Acceleration.SizeSquared() > KINDA_SMALL_NUMBER)
+			{
+				PhaseTime = ((FakeVelocity - RealVelocity) | Acceleration) / Acceleration.SizeSquared();
+			}
+			else
+			{
+				PhaseTime = 0.f;
+			}
+		}
+
+		const float MaxPhase = FMath::Clamp(CVarFlakShellMatchFakeMaxPhase.GetValueOnGameThread(), 0.05f, 1.5f);
+		bPhaseOK = FMath::Abs(PhaseTime) <= MaxPhase;
+		if (bDirectionOK && bPhaseOK)
+		{
+			FVector ProjectedLocation;
+			FVector ProjectedVelocity;
+			FVector TargetLocation;
+			FVector TargetVelocity;
+			const UProjectileMovementComponent* ProjectedMovement;
+
+			if (PhaseTime >= 0.f)
+			{
+				ProjectedLocation = GetActorLocation();
+				ProjectedVelocity = RealVelocity;
+				TargetLocation = InFakeProjectile->GetActorLocation();
+				TargetVelocity = FakeVelocity;
+				ProjectedMovement = ProjectileMovement;
+			}
+			else
+			{
+				ProjectedLocation = InFakeProjectile->GetActorLocation();
+				ProjectedVelocity = FakeVelocity;
+				TargetLocation = GetActorLocation();
+				TargetVelocity = RealVelocity;
+				ProjectedMovement = InFakeProjectile->ProjectileMovement;
+			}
+
+			AdvanceFlakShellBallisticState(ProjectedMovement, FMath::Abs(PhaseTime),
+				ProjectedLocation, ProjectedVelocity);
+			PositionError = FVector::Dist(ProjectedLocation, TargetLocation);
+			VelocityError = FVector::Dist(ProjectedVelocity, TargetVelocity);
+
+			const float MaxPositionError = FMath::Clamp(
+				CVarFlakShellMatchFakeMaxPosError.GetValueOnGameThread(), 16.f, 2000.f);
+			const float MaxVelocityError = FMath::Clamp(
+				CVarFlakShellMatchFakeMaxVelError.GetValueOnGameThread(), 16.f, 2000.f);
+			bTrajectoryOK = PositionError <= MaxPositionError && VelocityError <= MaxVelocityError;
+		}
+	}
+
+	const bool bMatch = bExactClass && bSameWorld && bLiveReal && bLiveFake
+		&& bSameInstigator && bHasMovement && bDistanceOK && bDirectionOK && bPhaseOK && bTrajectoryOK;
+	if (CVarFlakShellPairDebug.GetValueOnGameThread() > 0)
+	{
+		UE_LOG(LogFlakShellPair, Warning,
+			TEXT("[FlakShellPair] %s real=%s fake=%s class=%d world=%d liveReal=%d liveFake=%d inst=%d move=%d dist=%.1f/%.1f hdot=%.4f dir=%d phase=%.4f phaseOK=%d posErr=%.1f velErr=%.1f traj=%d realInst=%s fakeInst=%s fakeAge=%.3f"),
+			bMatch ? TEXT("ACCEPT") : TEXT("reject"), *GetName(), *InFakeProjectile->GetName(),
+			bExactClass ? 1 : 0, bSameWorld ? 1 : 0, bLiveReal ? 1 : 0, bLiveFake ? 1 : 0,
+			bSameInstigator ? 1 : 0, bHasMovement ? 1 : 0, Distance, MaxDistance,
+			HorizontalDot, bDirectionOK ? 1 : 0, PhaseTime, bPhaseOK ? 1 : 0,
+			PositionError, VelocityError, bTrajectoryOK ? 1 : 0,
+			Instigator ? *Instigator->GetName() : TEXT("null"),
+			InFakeProjectile->Instigator ? *InFakeProjectile->Instigator->GetName() : TEXT("null"),
+			GetWorld() ? GetWorld()->GetTimeSeconds() - InFakeProjectile->CreationTime : -1.f);
+	}
+
+	return bMatch;
 }
 
 void AUTPlusProj_FlakShell::Explode_Implementation(const FVector& HitLocation, const FVector& HitNormal,

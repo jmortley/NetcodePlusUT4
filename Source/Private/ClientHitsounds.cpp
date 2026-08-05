@@ -18,8 +18,18 @@
 #include "Sound/SoundBase.h"
 #include "AssetRegistryModule.h"
 #include "IAssetRegistry.h"
+#include "HAL/IConsoleManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogClientHitsounds, Log, All);
+
+// Client-side. When on, an authoritative hitsound inside the dedup window still
+// plays if it resolves to a DIFFERENT tier than the predicted sound (rejected or
+// demoted head claim, blocked headshot, FF scaling) — a wrong confirm gets
+// audibly corrected at the cost of an occasional double-blip. 0 = 327 behavior:
+// any predicted sound blanket-suppresses the authoritative one for the window.
+static TAutoConsoleVariable<int32> CVarHitsoundCorrection(
+	TEXT("ncp.HitsoundCorrection"), 1,
+	TEXT("1 = authoritative hitsounds that resolve to a different tier than the predicted sound play through the dedup window (audible misprediction correction). 0 = suppress all authoritative sounds inside the window."));
 
 const FString AClientHitsounds::ConfigSection = TEXT("ClientHitsounds");
 
@@ -308,6 +318,8 @@ AClientHitsounds::AClientHitsounds(const FObjectInitializer& ObjectInitializer)
 	FlakHitMinAge = 0.035f;
 
 	LastClientHitsoundTime = 0.0f;
+	LastPredictedDamage = 0;
+	bLastPredictedFriendly = false;
 	bClientSideHitsoundsEnabled = true;
 	ClientHitsoundDedupWindow = 0.25f;
 	ClientHitsoundMinInterval = 0.05f;
@@ -783,22 +795,73 @@ void AClientHitsounds::PlayClientPredictedHitsound(int32 EstimatedDamage, bool b
 		FNCPHitsoundPitch Zero = ResolvePlaybackFor(Config.Friendly, 0, ENCPHitsoundStyle::Flat);
 		PlayResolved(this, Zero, Config.Friendly.Volume * Config.UserMultiplier);
 		LastClientHitsoundTime = Now;
+		LastPredictedDamage = 0;
+		bLastPredictedFriendly = true;
 		return;
 	}
 
 	const FHitsound& Preset = Config.Enemy;
 	PlayResolved(this, ResolvePlayback(Preset, EstimatedDamage), Preset.Volume * Config.UserMultiplier);
 	LastClientHitsoundTime = Now;
+	LastPredictedDamage = EstimatedDamage;
+	bLastPredictedFriendly = false;
 }
 
-bool AClientHitsounds::ShouldSuppressServerHitsound() const
+bool AClientHitsounds::ShouldSuppressServerHitsound(int32 AuthoritativeDamage, bool bIsFriendly) const
 {
 	UWorld* World = GetWorld();
 	if (World == nullptr || !bClientSideHitsoundsEnabled)
 	{
 		return false;
 	}
-	return (World->GetTimeSeconds() - LastClientHitsoundTime) < ClientHitsoundDedupWindow;
+	if ((World->GetTimeSeconds() - LastClientHitsoundTime) >= ClientHitsoundDedupWindow)
+	{
+		return false;
+	}
+	if (CVarHitsoundCorrection.GetValueOnGameThread() == 0)
+	{
+		return true;
+	}
+	// Inside the window: suppress only a true duplicate. If the authoritative
+	// pair resolves to a different cue or a clearly different pitch than what
+	// was predicted, it carries information the prediction got wrong — play it.
+	return PredictionResolvesSameTier(AuthoritativeDamage, bIsFriendly);
+}
+
+bool AClientHitsounds::PredictionResolvesSameTier(int32 AuthoritativeDamage, bool bAuthoritativeFriendly) const
+{
+	// Different preset (enemy vs friendly) is always a different tier. This also
+	// covers the cross-victim case: a friendly prediction arming the window must
+	// not swallow an authoritative ENEMY confirm from the same volley.
+	if (bAuthoritativeFriendly != bLastPredictedFriendly)
+	{
+		return false;
+	}
+
+	const FHitsound& Preset = bAuthoritativeFriendly ? Config.Friendly : Config.Enemy;
+
+	// Mirror EXACTLY what PlayClientPredictedHitsound emitted: friendly
+	// predictions are always the flat zero cue, enemy predictions are pitched.
+	const FNCPHitsoundPitch Predicted = bLastPredictedFriendly
+		? ResolvePlaybackFor(Preset, 0, ENCPHitsoundStyle::Flat)
+		: ResolvePlayback(Preset, LastPredictedDamage);
+	const FNCPHitsoundPitch Authoritative = ResolvePlayback(Preset, AuthoritativeDamage);
+
+	if (Predicted.Sound != Authoritative.Sound)
+	{
+		return false;
+	}
+
+	// Same cue: call it the same tier while the pitch ratio stays under about
+	// a whole tone. Small damage-estimate error (70 predicted vs 65 real) stays
+	// suppressed; a demoted head claim (125 -> 70 resolves ~1.5x apart in the
+	// Absolute style) plays. Styles that themselves compress the difference
+	// (UTComp bottoms out all big hits, Flat encodes nothing) naturally
+	// resolve equal here — no correction, because none would be audible.
+	const float Hi = FMath::Max(Predicted.Pitch, Authoritative.Pitch);
+	const float Lo = FMath::Max(KINDA_SMALL_NUMBER, FMath::Min(Predicted.Pitch, Authoritative.Pitch));
+	const float SameTierMaxPitchRatio = 1.10f;
+	return (Hi / Lo) <= SameTierMaxPitchRatio;
 }
 
 // =========================================================================

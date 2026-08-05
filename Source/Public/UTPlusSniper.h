@@ -81,6 +81,11 @@ public:
 
 	virtual bool CanHeadShot();
 
+	/** Head claims predict the headshot damage so the predicted hitsound tier
+	 *  matches the authoritative one when the claim validates. Covers the
+	 *  Lightning Gun and any other AUTPlusSniper-derived weapon for free. */
+	virtual int32 GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshotClaimed) override;
+
 	virtual void PlayPredictedImpactEffects(FVector ImpactLoc) override;
 
 	virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime) override;

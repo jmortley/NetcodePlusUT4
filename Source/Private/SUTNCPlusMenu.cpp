@@ -95,7 +95,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
 				[
-					MakeTabButton(TEXT("iCTF"), ENCPMenuTab::General)
+					MakeTabButton(TEXT("General"), ENCPMenuTab::General)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()

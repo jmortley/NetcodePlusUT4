@@ -7,6 +7,9 @@
 #include "Engine.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTGameViewportClient.h"
+#include "Kismet/GameplayStatics.h"
+#include "Particles/ParticleSystemComponent.h"
 #include "Net/UnrealNetwork.h"
 
 const FName NAME_ShockPrimaryShots(TEXT("ShockPrimaryShots"));
@@ -162,13 +165,22 @@ void AUTPlusShockRifle::PlayFiringEffects()
 	}
 }
 
-void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
-	const FVector& SpawnLocation, const FRotator& SpawnRotation)
+bool AUTPlusShockRifle::IsInstagibBeamWeapon() const
 {
-	// Client-local iCTF preference. The current iCTF rifle is an Instagib-named BP child of this
-	// class; normal shock-rifle children intentionally keep their beam regardless of this setting.
+	// The external iCTF package has historically used an Instagib-named BP, while
+	// stock-derived variants identify themselves through the standard Instagib stats.
+	// Either signal is exclusive to Instagib and keeps normal Shock children untouched.
+	const bool bInstagibName = GetClass() && GetClass()->GetName().Contains(TEXT("Instagib"));
+	const bool bInstagibStats = ShotsStatsName == NAME_InstagibShots
+		|| HitsStatsName == NAME_InstagibHits
+		|| KillStatsName == NAME_InstagibKills;
+	return bInstagibName || bInstagibStats;
+}
+
+bool AUTPlusShockRifle::ShouldShowOwnInstagibBeam() const
+{
 	bool bShowOwnBeam = true;
-	if (GetClass() && GetClass()->GetName().Contains(TEXT("Instagib")) && GConfig)
+	if (IsInstagibBeamWeapon() && GConfig)
 	{
 		const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 		FString Value;
@@ -177,10 +189,106 @@ void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLo
 			bShowOwnBeam = Value.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 		}
 	}
+	return bShowOwnBeam;
+}
+
+bool AUTPlusShockRifle::NeedsLegacyInstagibBeamLayer() const
+{
+	if (!IsInstagibBeamWeapon() || CurrentFireMode != 0 || UTOwner == nullptr
+		|| !UTOwner->IsLocallyControlled() || !ShouldPlay1PVisuals())
+	{
+		return false;
+	}
+
+	AUTPlayerController* UTPC = Cast<AUTPlayerController>(UTOwner->Controller);
+	return UTPC != nullptr && UTPC->PlayerState != nullptr
+		&& GetNetMode() != NM_Standalone
+		&& UTPC->GetProjectileSleepTime() > KINDA_SMALL_NUMBER;
+}
+
+void AUTPlusShockRifle::PlayPredictedImpactEffects(FVector ImpactLoc)
+{
+	if (IsInstagibBeamWeapon() && CurrentFireMode == 0 && UTOwner != nullptr
+		&& UTOwner->IsLocallyControlled())
+	{
+		// A hitscan beam is immediate feedback. Damage still waits for the server's
+		// normal rewind/validation path; SetFlashLocation only drives local cosmetics
+		// and causes AUTCharacter to ignore the later duplicate owner replication.
+		UTOwner->SetFlashLocation(ImpactLoc, CurrentFireMode);
+		return;
+	}
+
+	Super::PlayPredictedImpactEffects(ImpactLoc);
+}
+
+void AUTPlusShockRifle::SpawnLegacyInstagibBeamLayer(const FVector& TargetLoc, uint8 FireMode,
+	const FVector& SpawnLocation, const FRotator& SpawnRotation)
+{
+	if (!FireEffect.IsValidIndex(FireMode) || FireEffect[FireMode] == nullptr)
+	{
+		return;
+	}
+
+	FVector AdjustedSpawnLocation = SpawnLocation;
+	if (Mesh != nullptr)
+	{
+		for (FLocalPlayerIterator It(GEngine, GetWorld()); It; ++It)
+		{
+			if (It->PlayerController != nullptr && It->PlayerController->GetViewTarget() == UTOwner)
+			{
+				UUTGameViewportClient* UTViewport = Cast<UUTGameViewportClient>(It->ViewportClient);
+				if (UTViewport != nullptr)
+				{
+					const FVector PaniniLocation = UTViewport->PaniniProjectLocationForPlayer(
+						*It, SpawnLocation, Mesh->GetMaterial(0));
+					if (!PaniniLocation.ContainsNaN())
+					{
+						AdjustedSpawnLocation = PaniniLocation;
+					}
+				}
+				break;
+			}
+		}
+	}
+
+	UParticleSystemComponent* PSC = UGameplayStatics::SpawnEmitterAtLocation(
+		GetWorld(), FireEffect[FireMode], AdjustedSpawnLocation, SpawnRotation, true);
+	if (PSC == nullptr)
+	{
+		return;
+	}
+
+	static const FName NAME_HitLocation(TEXT("HitLocation"));
+	static const FName NAME_LocalHitLocation(TEXT("LocalHitLocation"));
+	const FVector AdjustedTargetLoc = MaxTracerDist > 0.0f
+		&& (TargetLoc - AdjustedSpawnLocation).SizeSquared() > FMath::Square<float>(MaxTracerDist)
+		? AdjustedSpawnLocation + MaxTracerDist * (TargetLoc - AdjustedSpawnLocation).GetSafeNormal()
+		: TargetLoc;
+	PSC->SetVectorParameter(NAME_HitLocation, AdjustedTargetLoc);
+	PSC->SetVectorParameter(NAME_LocalHitLocation, PSC->ComponentToWorld.InverseTransformPosition(AdjustedTargetLoc));
+	ModifyFireEffect(PSC);
+}
+
+void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
+	const FVector& SpawnLocation, const FRotator& SpawnRotation)
+{
+	const bool bInstagibBeam = IsInstagibBeamWeapon() && FireMode == 0;
+	const bool bShowOwnBeam = !bInstagibBeam || ShouldShowOwnInstagibBeam();
 
 	if (bShowOwnBeam || !FireEffect.IsValidIndex(FireMode) || FireEffect[FireMode] == nullptr)
 	{
 		Super::PlayImpactEffects_Implementation(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+
+		// Above the prediction budget, stock UT4 historically allowed the delayed
+		// local/server effects to overlap. Players perceive that additive overlap as
+		// the normal thick iCTF beam. Recreate only that second beam layer now, on the
+		// same frame as the prediction, instead of waiting for network replication.
+		// Do not replay the impact effect, sound, muzzle flash, or any gameplay logic.
+		if (bInstagibBeam && bShowOwnBeam && NeedsLegacyInstagibBeamLayer()
+			&& FireEffectCount == 0)
+		{
+			SpawnLegacyInstagibBeamLayer(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+		}
 		return;
 	}
 

@@ -33,6 +33,8 @@ public:
 	virtual void PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClass, int32 Switch,
 		const APlayerState* PlayerState1, const APlayerState* PlayerState2,
 		const UObject* OptionalObject) override;
+	virtual void PlayNextAnnouncement() override;
+	virtual void PostInitProperties() override;
 
 	/** Copy the sound-pack data from the announcer selected by UT. */
 	void CopyPackDefaultsFrom(const UUTAnnouncer* Source);

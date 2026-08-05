@@ -458,6 +458,19 @@ bool AUTPlusSniper::CanHeadShot()
 	return true;
 }
 
+int32 AUTPlusSniper::GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshotClaimed)
+{
+	// Deliberately ignores helmets: a blocked headshot still HIT the head, and
+	// over-predicting there is wanted (UT3 played a loud ding for exactly that).
+	// The authoritative BlockedHeadshotDamage sound corrects through the dedup
+	// window as a different tier.
+	if (bHeadshotClaimed && CanHeadShot())
+	{
+		return HeadshotDamage;
+	}
+	return Super::GetPredictedHitsoundDamage(FireModeNum, bHeadshotClaimed);
+}
+
 
 int32 AUTPlusSniper::GetHitScanDamage()
 {

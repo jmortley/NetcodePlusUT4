@@ -713,6 +713,13 @@ protected:
 	/** Get the respawn delay for the Nth death on a team */
 	float ComputeRespawnDelay(int32 TeamIndex, AUTPlayerState* PS) const;
 
+	/** Warn each living player once their next death can no longer respawn before
+	 *  sudden death. Uses the same round-clock + grace-window rule as the HUD's X. */
+	void CheckFinalLifeAnnouncements(int32 TeamFilter = INDEX_NONE);
+
+	/** Players who have already received the final-life warning this round. */
+	TSet<TWeakObjectPtr<AUTPlayerState>> FinalLifeAnnouncedPlayers;
+
 	/** Respawn countdown tick (fires every second for BP_OnPlayerRespawnCountdown) */
 	void TickRespawnCountdowns();
 	FTimerHandle RespawnCountdownTickHandle;

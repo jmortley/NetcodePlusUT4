@@ -52,6 +52,44 @@ struct FNetcodeDelayedProjectile
 	}
 };
 
+/** What produced a delayed Flak prediction request. Shell-impact fragments are deliberately
+ * absent: they are spawned authoritatively by AUTProj_FlakShell::Explode() and never enter
+ * the weapon prediction path. */
+enum class ENetcodeDelayedFlakKind : uint8
+{
+    PrimaryShard,
+    SecondaryShell
+};
+
+/** One immutable delayed Flak fake request. Primary fire owns nine independent records even
+ * though all shards share one fire-event index; secondary owns one shell record. */
+struct FNetcodeDelayedFlakProjectile
+{
+    TSubclassOf<AUTProjectile> ProjectileClass;
+    FVector SpawnLocation;
+    FRotator SpawnRotation;
+    FTimerHandle TimerHandle;
+    uint8 FireMode;
+    int32 EventIndex;
+    uint32 ReservationId;
+    int32 ProjectileOrdinal;
+    float RequestTime;
+    ENetcodeDelayedFlakKind Kind;
+
+    FNetcodeDelayedFlakProjectile()
+        : ProjectileClass(nullptr)
+        , SpawnLocation(FVector::ZeroVector)
+        , SpawnRotation(FRotator::ZeroRotator)
+        , FireMode(0)
+        , EventIndex(INDEX_NONE)
+        , ReservationId(0)
+        , ProjectileOrdinal(0)
+        , RequestTime(0.f)
+        , Kind(ENetcodeDelayedFlakKind::PrimaryShard)
+    {
+    }
+};
+
 struct FPendingFireEventFix
 {
     bool bIsStartFire;
@@ -682,7 +720,16 @@ protected:
     virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime);
 
 	// Helper function for the timer
-	void SpawnDelayedFakeProjectile();
+	virtual void SpawnDelayedFakeProjectile() override;
+	void SpawnDelayedFlakFakeProjectile(uint32 ReservationId);
+	void ClearDelayedFlakFakeProjectiles();
+	AUTProjectile* SpawnNetPredictedProjectileInternal(
+		TSubclassOf<AUTProjectile> ProjectileClass,
+		FVector SpawnLocation,
+		FRotator SpawnRotation,
+		uint8 CapturedFireMode,
+		int32 CapturedEventIndex,
+		bool bAllowDelay);
 
 	// Timer handle
 	FTimerHandle SpawnDelayedFakeProjHandle;
@@ -690,6 +737,12 @@ protected:
 	// RENAMED TO AVOID SHADOWING PARENT CLASS VARIABLE
 	UPROPERTY()
 	FNetcodeDelayedProjectile NetcodeDelayedProjectile;
+
+	/** Flak-only delayed predictions. Kept separate so a nine-shard volley cannot collapse
+	 * into the legacy single payload and so rocket behavior remains unchanged while its
+	 * independent M1 cadence problem is being diagnosed. */
+	TArray<FNetcodeDelayedFlakProjectile> DelayedFlakProjectiles;
+	uint32 NextDelayedFlakReservationId;
 
 	// Guard Rail Cap (120ms)
 	const float MaxCatchupTime = 0.10f;
@@ -759,6 +812,15 @@ protected:
 
     /** Find and cache the ClientHitsounds mutator from the game state mutator chain */
     AClientHitsounds* FindClientHitsoundsMutator();
+
+    /** Damage the hitsound prediction should assume for a hit in this fire mode.
+     *  bHeadshotClaimed is true when the shot is sending a head claim
+     *  (ClientHeadOffset non-zero). Base weapons ignore the claim and return the
+     *  fire mode's InstantHitInfo damage; headshot-capable weapons override and
+     *  return their headshot damage so the predicted cue matches what the server
+     *  will report if the claim validates. Estimation only — never used for
+     *  actual damage. */
+    virtual int32 GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshotClaimed);
 
     /** Cached pointer to the ClientHitsounds mutator */
     UPROPERTY()
