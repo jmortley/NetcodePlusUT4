@@ -889,6 +889,12 @@ static void ScrubNoAliasIdentifiersOnLoad(const FString& /*MapName*/)
 extern void RegisterNCAmpRespawnFix();
 extern void UnregisterNCAmpRespawnFix();
 
+// Exact-class Wipeout health-banner stabilization. Runs on every game world so
+// clients disable the Blueprint child-body simulation locally; only authority
+// selects and replicates the final floor transform.
+extern void RegisterNCBuffBannerFix();
+extern void UnregisterNCBuffBannerFix();
+
 // Concede vote (gg / F1 / F4): route the local player's action to the server. On a
 // listen host / standalone the local PC IS the authority, so call the vote handler
 // directly; on a net client find our per-player vote channel (owner-only-relevant,
@@ -1158,6 +1164,11 @@ void FNetcodePlus::StartupModule()
 	// itself no-ops for NM_Client), Mod.ini-gated ([NetcodePlus] AmpRespawnFix). See NCAmpRespawnFix.cpp.
 	RegisterNCAmpRespawnFix();
 
+	// Wipeout healing banner: keep its physics child attached to the replicated
+	// actor root on server and clients. Exact Blueprint-class match; no other
+	// placeable powerups are changed. See NCBuffBannerFix.cpp.
+	RegisterNCBuffBannerFix();
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
@@ -1184,6 +1195,9 @@ void FNetcodePlus::ShutdownModule()
 
 	// Unbind the amp respawn-fix world-init hook.
 	UnregisterNCAmpRespawnFix();
+
+	// Unbind per-world banner spawn handlers before worlds or the module unload.
+	UnregisterNCBuffBannerFix();
 
 	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())
