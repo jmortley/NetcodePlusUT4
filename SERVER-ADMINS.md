@@ -67,6 +67,18 @@ you add the one you want per ruleset.
 > `SetNetSpeed` still works here because the gamemode is stock (only the NetcodePlus gamemodes ignore it
 > — §3.3). StatSQL + ServerShield run hub‑wide via `Game.ini` `ConfigMutators` (§8.1), not in the chain.
 
+> ⚠️ **Known limitation on stock gamemodes — the in‑game menus open without a mouse cursor.**
+> On a **stock** gamemode (TDM, DM, stock CTF, Duel…), the F5 menu — and `nchud`, `weaponskins`,
+> the cosmetics picker — will appear but the cursor stays captured for camera look, so nothing is
+> clickable. **Workaround: press `~` (tilde) to open the console, which frees the cursor; the menu is
+> then fully usable.** Closing the console does not re‑capture it while the menu is open.
+>
+> Why: those panels ask the HUD to release the cursor, and only the **NetcodePlus HUDs** honour that
+> request. A stock gamemode uses a stock HUD, which re‑captures the mouse every tick. Running any
+> NetcodePlus **gamemode** (§4) has no such issue — the cursor works normally there. Weapons, netcode,
+> hit registration and every server‑side feature are unaffected; this is purely the client‑side menu
+> cursor. Players who only ever change settings from the main menu never see it.
+
 ---
 
 ## 0. TL;DR — migrating a hub off stock

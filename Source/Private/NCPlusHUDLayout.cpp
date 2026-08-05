@@ -133,6 +133,23 @@ namespace NCPlusHUDDragMode
 	// menus each request the cursor-free input mode on open. Active while ANY are
 	// open; only the last close lets the HUD's GetInputMode poll re-capture the
 	// cursor. (Was a plain bool — one menu closing cleared another's request.)
+	//
+	// KNOWN LIMITATION — STOCK GAMEMODES GET NO CURSOR (documented in
+	// SERVER-ADMINS.md "Start here"; workaround is to press ~ ):
+	// this flag is only READ by the NetcodePlus HUD subclasses
+	// (WipeoutHUD/ElimPlusHUD/NCPlusCTFHUD + the AWipeoutHUD children, in their
+	// GetInputMode_Implementation). On a stock gamemode the HUD is a plain AUTHUD
+	// that knows nothing about it, so AUTBasePlayerController::UpdateInputMode
+	// polls the stock GetInputMode, gets EIM_GameOnly for the whole match, and
+	// re-captures the mouse every tick — the panel opens with no usable cursor.
+	// The console works around it because AreMenusOpen() is checked BEFORE the HUD
+	// and forces EIM_UIOnly.
+	// Fixing it needs one of: (a) the panels re-asserting cursor + GameAndUI from a
+	// Slate Tick — must skip while AreMenusOpen() or it fights the console/escape
+	// menu, and must not re-apply SetWidgetToFocus every tick or it steals focus
+	// from the panels' text boxes; or (b) hosting the panels as real UT menu
+	// windows (UUTLocalPlayer::OpenWindow) so the engine's own EIM_UIOnly branch
+	// handles it — cleaner, but modal. Deferred past 328 deliberately.
 	static int32 GActiveCount = 0;
 
 	bool IsActive()              { return GActiveCount > 0; }
