@@ -88,6 +88,16 @@ void AUTWeap_Minigun_Plus::FireShot()
 	}
 	else
 	{
+		// The stock route bypasses AUTWeaponFix::FireShot — the only stamp site on
+		// this path — so LastFireTime[0] would sit at its -1 sentinel and the Fix
+		// Tick stuck-fire watchdog would StopFire the spin-up stream on its first
+		// authoritative tick. Stamp it here so the watchdog sees a live stream.
+		// Authority-only on purpose: the client's cross-mode ready checks keep
+		// seeing the sentinel, exactly as before the mode split.
+		if (Role == ROLE_Authority && LastFireTime.IsValidIndex(CurrentFireMode))
+		{
+			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+		}
 		AUTWeapon::FireShot();
 	}
 }

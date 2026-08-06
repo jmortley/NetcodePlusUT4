@@ -2736,14 +2736,31 @@ void AUTWeaponFix::Tick(float DeltaTime)
         // (e.g., for Link Gun (0.12s), if silent for 0.3s, kill it).
         float TimeoutThreshold = FMath::Max(0.25f, RefireTime * 2.5f);
 
-        // LastFireTime is updated in ServerStartFireFixed
-        if (LastFireTime.IsValidIndex(CurrentFireMode) &&
-            GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode] > TimeoutThreshold)
+        // LastFireTime is stamped by AUTWeaponFix::FireShot and the transactional/beam
+        // states — and by stock-routed overrides (minigun mode 0) that must stamp it
+        // themselves, because nothing else on the stock path writes it.
+        if (LastFireTime.IsValidIndex(CurrentFireMode))
         {
-            // Charged states never reach here — every wedge path above returns. This is the
-            // generic stuck-firing watchdog (client disconnect / lost Stop) for the other
-            // firing states only. Force stop: kills the looping audio and resets the state.
-            StopFire(CurrentFireMode);
+            if (LastFireTime[CurrentFireMode] <= 0.f)
+            {
+                // Constructor sentinel: this mode has never stamped. Comparing against -1
+                // reads as instantly stale and would StopFire a healthy stream on its first
+                // tick (the NCPMinigun mode-0 collapse). Arm the clock from now instead —
+                // a genuinely dead state still gets cleaned up one threshold later.
+                LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+            }
+            else if (GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode] > TimeoutThreshold)
+            {
+                // Charged states never reach here — every wedge path above returns. This is the
+                // generic stuck-firing watchdog (client disconnect / lost Stop) for the other
+                // firing states only. Force stop: kills the looping audio and resets the state.
+                UE_LOG(LogUTWeaponFix, Warning,
+                    TEXT("[FireBlock] %s stuck-fire watchdog StopFire: mode=%d idle=%.2fs threshold=%.2fs state=%s"),
+                    *GetName(), CurrentFireMode,
+                    GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode], TimeoutThreshold,
+                    GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"));
+                StopFire(CurrentFireMode);
+            }
         }
     }
 }

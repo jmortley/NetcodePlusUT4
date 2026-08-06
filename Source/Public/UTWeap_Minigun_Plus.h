@@ -16,6 +16,9 @@
  *    bypassing the transactional event machinery — the stock spin-up firing
  *    state owns refire timing server-side and there is no per-shot client
  *    message to transact. Rewind hit reg still applies via HitScanTrace.
+ *    FireShot stamps LastFireTime[0] on the server (nothing on the stock
+ *    route writes it) so AUTWeaponFix::Tick's stuck-fire watchdog sees a
+ *    live stream instead of the -1 sentinel it would kill on sight.
  *  - Mode 1 (stinger shard projectile) routes THROUGH AUTWeaponFix's
  *    transactional path: per-shot fire events (ROF validation + anti-dup) and
  *    client-fake/server-auth projectile pairing with ExactPing-based catch-up,
