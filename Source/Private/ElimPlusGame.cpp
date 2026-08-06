@@ -3729,7 +3729,7 @@ void AElimPlusGame::ExecuteOvertimeWave()
 			DamageToApply = FMath::Max(0.f, C->Health - 1.f);
 			if (DamageToApply <= 0.f) continue;
 		}
-		UE_LOG(LogGameMode, Log, TEXT("Applying %.1f damage to %s (Health: %d, Armor: %.1f)"),
+		UE_LOG(LogGameMode, Verbose, TEXT("Applying %.1f damage to %s (Health: %d, Armor: %.1f)"),
 			DamageToApply, *C->GetName(), C->Health, C->GetArmorAmount());
 		bool bWillKillPlayer = (C->Health - DamageToApply) <= 0;
 		FHitResult Hit;

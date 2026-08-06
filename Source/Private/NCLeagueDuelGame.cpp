@@ -743,7 +743,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	// and is deferred to Super. If you see fewer than 3 lines with this prefix
 	// per match, something is intercepting calls before they reach us (BP
 	// override, mutator, etc.).
-	UE_LOG(LogNCLeagueDuel, Log,
+	UE_LOG(LogNCLeagueDuel, Verbose,
 		TEXT("ChoosePlayerStart entry: PS=%s team=%d bHasRespawnChoices=%d RespawnChoiceA=%s RespawnChoiceB=%s bChosePrimary=%d"),
 		*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 		bHasRespawnChoices ? 1 : 0,
@@ -760,7 +760,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	if (bHasRespawnChoices && PS->RespawnChoiceA != nullptr && PS->RespawnChoiceB != nullptr)
 	{
 		AActor* SuperPick = Super::ChoosePlayerStart_Implementation(Player);
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("ChoosePlayerStart spawn-actual: deferring to Super — returned %s (chose %s)"),
 			SuperPick ? *SuperPick->GetActorLocation().ToString() : TEXT("(null)"),
 			PS->bChosePrimaryRespawnChoice ? TEXT("A") : TEXT("B"));
@@ -810,7 +810,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	// above returns first).
 	{
 		const FVector* TKL = LastKillerLocation.Find(Player);
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("Tier 1 entry for %s (team %d): bIsFirstSpawn=%d killerLoc=%s exclude=%s minKillerDist=%.0f minEnemyDist=%.0f"),
 			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 			bIsFirstSpawn ? 1 : 0,
@@ -883,7 +883,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		// player to confirm distance filters honoured (chose location should
 		// be > MinKillerSpawnDistance from killerLoc, and > 2500uu from
 		// exclude when ExcludeStart is set).
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("Tier 1 result for %s (team %d): chose %s score=%.1f"),
 			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 			*BestSpawn->GetActorLocation().ToString(), BestScore);
@@ -922,7 +922,7 @@ AActor* ANCLeagueDuelGame::FindPlayerStart_Implementation(AController* Player, c
 				: PS->RespawnChoiceB;
 			if (Picked)
 			{
-				UE_LOG(LogNCLeagueDuel, Log,
+				UE_LOG(LogNCLeagueDuel, Verbose,
 					TEXT("FindPlayerStart short-circuit for %s (team %d): chose %s -> %s | A=%s B=%s"),
 					*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 					PS->bChosePrimaryRespawnChoice ? TEXT("A") : TEXT("B"),
@@ -939,7 +939,7 @@ AActor* ANCLeagueDuelGame::FindPlayerStart_Implementation(AController* Player, c
 	AActor* Result = Super::FindPlayerStart_Implementation(Player, IncomingName);
 	if (AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr)
 	{
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("FindPlayerStart fallthrough for %s (team %d): Super returned %s | A=%s B=%s bChosePrimary=%d"),
 			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 			Result ? *Result->GetActorLocation().ToString() : TEXT("(null)"),

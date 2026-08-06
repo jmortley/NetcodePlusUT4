@@ -872,7 +872,7 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 	// this instant, so do not wait for the next one-second round-clock tick.
 	CheckFinalLifeAnnouncements(TeamIndex);
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s died (Team %d, death #%d). Respawn in %.1fs"),
+	UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s died (Team %d, death #%d). Respawn in %.1fs"),
 		*DeadPS->PlayerName, TeamIndex,
 		(TeamIndex == 0) ? Team0DeathCount : Team1DeathCount,
 		RespawnDelay);
@@ -940,7 +940,7 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 		return;
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn timer fired for %s"), *PS->PlayerName);
+	UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: Respawn timer fired for %s"), *PS->PlayerName);
 
 	// Remove from pending list
 	PendingRespawns.Remove(PS);
@@ -983,7 +983,7 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 		BP_OnPlayerRespawnedMidRound(PS);
 		CheckFinalLifeAnnouncements();
 
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s respawned successfully"), *PS->PlayerName);
+		UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s respawned successfully"), *PS->PlayerName);
 	}
 	else
 	{
@@ -2044,7 +2044,7 @@ AActor* AUWipeoutGame::ChooseMidRoundSpawn(AController* Player)
 
 	if (BestSpawn)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Mid-round spawn for %s at %s (dist from enemy: %.0f)"),
+		UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: Mid-round spawn for %s at %s (dist from enemy: %.0f)"),
 			*PS->PlayerName, *BestSpawn->GetName(), BestMinDist);
 		return BestSpawn;
 	}
@@ -2217,7 +2217,7 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s (team %d) assigned spawn at %s (curated pool %d)"),
+	UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s (team %d) assigned spawn at %s (curated pool %d)"),
 		*PS->PlayerName, TeamIndex,
 		BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"),
 		MySpawns.Num());
@@ -3390,12 +3390,12 @@ void AUWipeoutGame::SelectSpawnLayoutForRound()
 	for (int32 i = 0; i < Team0SelectedSpawns.Num(); i++)
 	{
 		if (Team0SelectedSpawns[i])
-			UE_LOG(LogGameMode, Log, TEXT("  T0[%d] = %s"), i, *Team0SelectedSpawns[i]->GetActorLocation().ToString());
+			UE_LOG(LogGameMode, Verbose, TEXT("  T0[%d] = %s"), i, *Team0SelectedSpawns[i]->GetActorLocation().ToString());
 	}
 	for (int32 i = 0; i < Team1SelectedSpawns.Num(); i++)
 	{
 		if (Team1SelectedSpawns[i])
-			UE_LOG(LogGameMode, Log, TEXT("  T1[%d] = %s"), i, *Team1SelectedSpawns[i]->GetActorLocation().ToString());
+			UE_LOG(LogGameMode, Verbose, TEXT("  T1[%d] = %s"), i, *Team1SelectedSpawns[i]->GetActorLocation().ToString());
 	}
 }
 

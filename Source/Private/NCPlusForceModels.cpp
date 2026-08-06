@@ -309,13 +309,13 @@ bool NCPlusForceModels::IsEnabled()
 	return C.bEnabled && C.bModels;
 }
 
-// TEMP head-hitbox calibration aid. ECVF_Default (NOT cheat) so it can be toggled on a live server —
-// strip / cheat-gate before final ship (it visualises enemy head positions).
+// TEMP head-hitbox calibration aid. Cheat-gated: it visualises enemy head positions, so live
+// players must never be able to toggle it — PIE / cheat-enabled servers only.
 static TAutoConsoleVariable<int32> CVarNCPDebugHeads(
 	TEXT("ncp.DebugHeads"), 0,
 	TEXT("NetcodePlus: draw the capsule-relative headshot sphere (GREEN = what the server validates) and the ")
 	TEXT("mesh head bone (RED cross = the visible head) for every other pawn, client-side. 1=on."),
-	ECVF_Default);
+	ECVF_Cheat);
 
 void NCPlusForceModels::DrawHeadDebug(UCanvas* Canvas, APlayerController* PC)
 {
