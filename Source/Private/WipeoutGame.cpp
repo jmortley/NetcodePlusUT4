@@ -2550,6 +2550,18 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 		int32 TotalHP = VictimChar->Health + FMath::FloorToInt(VictimChar->GetArmorAmount());
 		ActualDamage = FMath::Min(DamageAmount, TotalHP);
 	}
+	else
+	{
+		// Victim pawn already destroyed (telefrag cleanup order): there is no
+		// HP left to cap against, and a telefrag arrives as a raw 100000 —
+		// bound the credit instead of forwarding the sentinel to the stats.
+		ActualDamage = FMath::Min(DamageAmount, 300);
+	}
+	// A dying victim's Health is already negative, so the HP cap can go
+	// negative on overkill shots (and ~-100k on a just-telefragged body).
+	// Damage credit is never negative — this fed corrupt rounds[] damage to
+	// the ELO payload (ut4stats match 3321: stored -99512 and +100180).
+	ActualDamage = FMath::Max(ActualDamage, 0);
 
 	if (!PlayerRoundDamage.Contains(Attacker))
 	{
