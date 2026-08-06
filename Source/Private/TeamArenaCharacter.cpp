@@ -20,6 +20,7 @@
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"            // GetSelectedCharacter (DarkenBodies skeleton fallback)
 #include "UTCharacterContent.h"
+#include "Engine/SkeletalMesh.h"      // identify the two curated *_bright meshes without class-name guessing
 #include "Materials/MaterialInstanceDynamic.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "NCPlusForceModels.h"
@@ -345,7 +346,18 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	static const FName NAME_TeamBlendMax(TEXT("Team Color Blend Max"));
 	static const FName NAME_EmissiveMax(TEXT("Emissive Max"));
 	static const FName NAME_EmissionPower(TEXT("Emission Power"));
+	static const FName NAME_GenghisBrightMesh(TEXT("ghengis_3p_bright"));
+	static const FName NAME_LiandriRobotBrightMesh(TEXT("robot_3p_bright"));
 	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames();
+	// These two curated content classes use dedicated *_bright meshes whose static material instances
+	// deliberately author HDR team-colour values (2.5). The generic recolour pass used to replace those
+	// values with the raw F5 colour and silently throw away the very compensation the bright variants
+	// were created to provide. Restrict preservation to the two known variants: an arbitrary community
+	// material with an HDR colour parameter must not acquire a visibility advantage automatically.
+	const USkeletalMesh* const ActiveBodyMesh = GetMesh() ? GetMesh()->SkeletalMesh : nullptr;
+	const bool bPreserveBrightVariantTint = ActiveBodyMesh
+		&& (ActiveBodyMesh->GetFName() == NAME_GenghisBrightMesh
+			|| ActiveBodyMesh->GetFName() == NAME_LiandriRobotBrightMesh);
 
 	// Decide ONCE whether this model can be recoloured. It can't if either (a) no non-skipped body
 	// material exposes any of our team-colour params (param-less models, e.g. Garog — auto-detected),
@@ -434,9 +446,38 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		MID->SetScalarParameterValue(NAME_EmissiveMax, GlowIntensity);
 		// Some masters gate the emissive via an "Emission Power" scalar too — drive it (no-op where absent).
 		MID->SetScalarParameterValue(NAME_EmissionPower, GlowIntensity);
+
+		FLinearColor MaterialColour = Colour;
+		if (bPreserveBrightVariantTint && Src)
+		{
+			// Read the immutable parent MI, not the MID we modify below, so NotifyTeamChanged/reapply can
+			// never compound the boost. Both shipped bright variants resolve to a 2.5 authored peak here.
+			float AuthoredPeak = 1.f;
+			for (const FName& P : Params)
+			{
+				FLinearColor AuthoredColour;
+				if (Src->GetVectorParameterValue(P, AuthoredColour))
+				{
+					AuthoredPeak = FMath::Max(AuthoredPeak,
+						FMath::Max3(AuthoredColour.R, AuthoredColour.G, AuthoredColour.B));
+				}
+			}
+
+			// The regular models retain the global 3.5 peak cap. These intrinsically dark variants may
+			// preserve their authored boost, but stop at the old global maximum of 5 rather than reaching
+			// 8.75 when the F5 Glow slider is also at its current 3.5 maximum.
+			static const float BrightVariantMaxPeak = 5.f;
+			const float RequestedPeak = FMath::Max3(Colour.R, Colour.G, Colour.B);
+			const float MaxSafeBoost = (RequestedPeak > KINDA_SMALL_NUMBER)
+				? BrightVariantMaxPeak / RequestedPeak
+				: AuthoredPeak;
+			const float AppliedBoost = FMath::Clamp(AuthoredPeak, 1.f, FMath::Max(1.f, MaxSafeBoost));
+			MaterialColour *= AppliedBoost;
+			MaterialColour.A = 1.f;
+		}
 		for (const FName& P : Params)
 		{
-			MID->SetVectorParameterValue(P, Colour);
+			MID->SetVectorParameterValue(P, MaterialColour);
 		}
 	}
 
