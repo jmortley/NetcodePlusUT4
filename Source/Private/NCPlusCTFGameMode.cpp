@@ -27,6 +27,7 @@
 #include "UTFlag.h"
 #include "NPPlayerController.h"
 #include "NCPlusCTFHUD.h"
+#include "NCPlusHostPause.h"   // ResyncServerWorldTime (EndAutoPause); re-included by the pause section below, harmless via pragma once
 #include "WarmupRoamMutator.h"
 #include "NCPlusVersionGate.h"
 #include "NCConcedeVote.h"
@@ -496,6 +497,8 @@ void ANCPlusCTFGameMode::EndAutoPause(const TCHAR* Reason)
 	{
 		WS->Pauser = nullptr;
 	}
+	// Direct Pauser clear bypasses ClearPause — resync client clocks here too.
+	NCPlusHostPause::ResyncServerWorldTime(this);
 	bAutoPaused = false;
 	AutoPauseAwaitIds.Reset();
 	UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF auto-pause: resuming (%s)"), Reason);
@@ -1630,6 +1633,98 @@ void ANCPlusCTFGameMode::CheckGameTime()
 	}
 }
 
+void ANCPlusCTFGameMode::BroadcastLocalized(AActor* Sender, TSubclassOf<ULocalMessage> Message, int32 Switch, APlayerState* RelatedPlayerState_1, APlayerState* RelatedPlayerState_2, UObject* OptionalObject)
+{
+	// Regrab-alarm detection: the flags themselves have no pickup-from-dropped
+	// notification, but every transition message funnels through here. A
+	// taken(4) that follows a drop signal for the same team flag is a regrab.
+	if (Message)
+	{
+		AUTCarriedObject* Flag = Cast<AUTCarriedObject>(Sender);
+		const uint8 FlagTeam = Flag ? Flag->GetTeamNum() : 255;
+		if (FlagTeam < 2)
+		{
+			if (Message->IsChildOf(UUTCTFGameMessage::StaticClass()))
+			{
+				if (Switch == 3)
+				{
+					bFlagWasDropped[FlagTeam] = true;
+				}
+				else if ((Switch == 0 || Switch == 1) && !Flag->bGradualAutoReturn)
+				{
+					// A return (touch or auto). No ObjectState check: genuine returns
+					// broadcast while the flag is still Dropped (UTCarriedObject.cpp:357
+					// — Home happens later in the same stack). The ONLY mid-drop 0/1
+					// emitter is the gradual-auto-return reminder (UTCarriedObject.cpp
+					// :873-876), excluded by the bGradualAutoReturn guard; that flag is
+					// always false for NCPlusCTF flags, and even on a hypothetical
+					// gradual map the 1Hz sampler re-marks Dropped within a second.
+					bFlagWasDropped[FlagTeam] = false;
+				}
+				else if (Switch == 4)
+				{
+					if (bFlagWasDropped[FlagTeam])
+					{
+						PlayRegrabTakenAlarm(Flag);
+					}
+					bFlagWasDropped[FlagTeam] = false;
+				}
+			}
+			else if (Message->IsChildOf(UUTCTFRewardMessage::StaticClass()) && Switch == 6)
+			{
+				// Near-cap "Denied" drop (UTCTFFlag::Drop): the dropped(3) broadcast
+				// is deferred 0.8s and self-suppresses if the flag is regrabbed
+				// first — this reward message is the authoritative drop signal for
+				// that path, so an instant cherry-pick at the stand still alarms.
+				bFlagWasDropped[FlagTeam] = true;
+			}
+		}
+	}
+
+	Super::BroadcastLocalized(Sender, Message, Switch, RelatedPlayerState_1, RelatedPlayerState_2, OptionalObject);
+}
+
+void ANCPlusCTFGameMode::PlayRegrabTakenAlarm(AUTCarriedObject* Flag)
+{
+	if (!bRegrabTakenAlarm || Flag == nullptr)
+	{
+		return;
+	}
+	AUTCTFFlagBase* Base = Cast<AUTCTFFlagBase>(Flag->HomeBase);
+	if (Base == nullptr || Base->FlagTakenSound == nullptr)
+	{
+		return;
+	}
+	const uint8 FlagTeam = Flag->GetTeamNum();
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (FlagTeam > 1 || Now - LastRegrabAlarmTime[FlagTeam] < 1.f)
+	{
+		return;
+	}
+	LastRegrabAlarmTime[FlagTeam] = Now;
+
+	// Mirror of AUTCTFFlagBase::ObjectWasPickedUp's bWasHome branch
+	// (UTCTFFlagBase.cpp:98-115), with the enemy's positional cue moved from
+	// the base stand to where the flag was actually grabbed.
+	USoundBase* EnemyCue = Base->EnemyFlagTakenSound ? Base->EnemyFlagTakenSound : Base->FlagTakenSound;
+	for (FConstPlayerControllerIterator Iterator = GetWorld()->GetPlayerControllerIterator(); Iterator; ++Iterator)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(*Iterator);
+		if (PC == nullptr)
+		{
+			continue;
+		}
+		if ((PC->PlayerState && PC->PlayerState->bOnlySpectator) || (PC->GetTeamNum() == FlagTeam))
+		{
+			PC->UTClientPlaySound(Base->FlagTakenSound);
+		}
+		else
+		{
+			PC->HearSound(EnemyCue, Flag, Flag->GetActorLocation(), true, false, SAT_None);
+		}
+	}
+}
+
 void ANCPlusCTFGameMode::DefaultTimer()
 {
 	Super::DefaultTimer();
@@ -1637,6 +1732,27 @@ void ANCPlusCTFGameMode::DefaultTimer()
 	// Role-aware ratings: sample every living player's map zone once per second
 	// (DefaultTimer is 1Hz) while the match is live. Self-guards on match state.
 	SampleRoleDwell();
+
+	// Regrab-alarm bookkeeping: sample flag states at 1Hz so a dropped flag is
+	// tracked even when the dropped(3) broadcast was deferred (the near-cap
+	// "Denied" path in UTCTFFlag::Drop delays it 0.8s and DelayedDropMessage
+	// self-suppresses if any newer flag message landed in between). A flag
+	// observed back Home clears the mark.
+	if (CTFGameState)
+	{
+		for (int32 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
+		{
+			const FName FlagState = CTFGameState->GetFlagState((uint8)TeamIdx);
+			if (FlagState == CarriedObjectState::Dropped)
+			{
+				bFlagWasDropped[TeamIdx] = true;
+			}
+			else if (FlagState == CarriedObjectState::Home)
+			{
+				bFlagWasDropped[TeamIdx] = false;
+			}
+		}
+	}
 
 	// Tick advantage timer (DefaultTimer fires every second).
 	// Advantage lasts up to AdvantageMaxDuration (5 min default).

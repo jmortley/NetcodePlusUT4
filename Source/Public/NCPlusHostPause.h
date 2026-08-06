@@ -57,4 +57,13 @@ namespace NCPlusHostPause
 	 *  affects the stock pause path (host via [NetcodePlus] bAllowHostPause, or rcon);
 	 *  auto-pause-on-drop clears WorldSettings->Pauser directly and is unaffected. */
 	NETCODEPLUS_API bool DeferUnpauseForCountdown(AUTBaseGameMode* GM);
+
+	/** Call right after ANY successful unpause (ClearPause override post-Super, or a
+	 *  direct WorldSettings->Pauser clear). Forces an immediate ReplicatedWorldTimeSeconds
+	 *  refresh + net update so clients' GetServerWorldTimeSeconds estimates re-sync NOW
+	 *  instead of at the engine's 5s cadence — a pause freezes the server clock while
+	 *  unpaused clients keep counting, and until the re-sync every fire RPC used to fail
+	 *  ValidateFireRequest's 1s timestamp gate (fire-dead players, the 13.3s desync
+	 *  log bursts of 2026-08-06). Server-only no-op elsewhere. */
+	NETCODEPLUS_API void ResyncServerWorldTime(class AGameModeBase* GM);
 }

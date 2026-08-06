@@ -2,6 +2,8 @@
 
 #include "UnrealTournament.h"
 #include "Components/AudioComponent.h"
+#include "Containers/Ticker.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/ConfigCacheIni.h"
@@ -9,6 +11,7 @@
 #include "Misc/Paths.h"
 #include "Sound/SoundBase.h"
 #include "TimerManager.h"
+#include "UTCTFGameMessage.h"
 #include "UTGameState.h"
 #include "UTLocalMessage.h"
 #include "UTMultiKillMessage.h"
@@ -23,6 +26,17 @@ DEFINE_LOG_CATEGORY_STATIC(LogNCPlusAnnouncer, Log, All);
 static TAutoConsoleVariable<int32> CVarAnnouncerTrace(
 	TEXT("ncp.AnnouncerTrace"), 1,
 	TEXT("Announcer diagnostics: 0=off (required for 328-rc release), 1=trace install/defaults, queue admission, sound lookup/cache, and playback (temporary default during diagnosis)."),
+	ECVF_Default);
+
+// Flag-taken audibility (frenchempire 2026-08-06, "flag re-taken is silent"):
+// stock UUTCTFGameMessage::CancelByAnnouncement cancels an incoming taken(4)
+// whenever ANY taken(4) is current or queued — with no team comparison, so the
+// OTHER flag's line (routine two-flag traffic) eats it — and also while a
+// scoring/halftime/overtime line is up. Regrabs have no base alarm to mask the
+// loss (that alarm is bWasHome-gated), so the eaten line IS the event.
+static TAutoConsoleVariable<int32> CVarFlagTakenGuarantee(
+	TEXT("ncp.FlagTakenGuarantee"), 1,
+	TEXT("Flag-taken announcements are never cancelled by unrelated announcements: 0=stock cancellation rules, 1=always queue (deduped against an identical queued line)."),
 	ECVF_Default);
 
 namespace
@@ -79,6 +93,7 @@ namespace
 
 	FStringClassReference OriginalAnnouncerPath;
 	bool bAnnouncerInstalled = false;
+	FDelegateHandle AnnouncerUpgradeTickerHandle;
 
 	bool AnnouncerTraceEnabled()
 	{
@@ -95,6 +110,14 @@ namespace
 	FString DescribeObject(const UObject* Object)
 	{
 		return Object != nullptr ? Object->GetPathName() : FString(TEXT("None"));
+	}
+
+	bool IsGuaranteedFlagTaken(const FAnnouncementInfo& Announcement)
+	{
+		return CVarFlagTakenGuarantee.GetValueOnGameThread() > 0
+			&& Announcement.MessageClass != nullptr
+			&& Announcement.MessageClass->IsChildOf(UUTCTFGameMessage::StaticClass())
+			&& Announcement.Switch == 4;
 	}
 
 	struct FAnnouncerLookupTrace
@@ -461,6 +484,66 @@ namespace
 		UE_LOG(LogLoad, Log, TEXT("netcodeplus: announcer pack set to %s"), *AppliedId);
 		return AppliedId;
 	}
+
+	/** BP PlayerController subclasses (Elim/Wipeout's ElimUTPlayerController_C)
+	 *  carry their own AnnouncerPath default, so the base-CDO override written by
+	 *  Install() never reaches them and InitInputSystem builds the stock
+	 *  announcer — the pack silently stops working in those modes (log signature:
+	 *  APPLY-LIVE-SKIP with announcer=RewardAnnouncerMale_C). This low-frequency
+	 *  client ticker rebuilds any local PC's foreign announcer as ours;
+	 *  PostInitProperties seeds the selected pack from the native CDO and
+	 *  precaches, exactly like a normal install. A PC with NO announcer is left
+	 *  alone (an intentionally disabled announcer stays disabled). */
+	bool TickUpgradeLocalAnnouncers(float /*DeltaTime*/)
+	{
+		if (!bAnnouncerInstalled || GEngine == nullptr)
+		{
+			return true;
+		}
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			UWorld* World = Context.World();
+			if (World == nullptr
+				|| (Context.WorldType != EWorldType::Game && Context.WorldType != EWorldType::PIE))
+			{
+				continue;
+			}
+			for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+			{
+				AUTPlayerController* PC = Cast<AUTPlayerController>(*It);
+				if (PC == nullptr || !PC->IsLocalPlayerController()
+					|| PC->Announcer == nullptr
+					|| PC->Announcer->IsA<UNCPlusAnnouncer>())
+				{
+					continue;
+				}
+				// Replace only a FULLY idle announcer; retry on the next tick.
+				// Mid-line is obvious, but the between-lines spacing gap matters
+				// too: AnnouncementFinished has cleared CurrentAnnouncement and
+				// armed PlayNextAnnouncementHandle while queued lines remain —
+				// swapping there orphans the queue AND the armed timer keeps
+				// ticking on the orphan, which can play audio on its own until GC.
+				if (PC->Announcer->CurrentAnnouncement.MessageClass != nullptr
+					|| PC->Announcer->QueuedAnnouncements.Num() > 0
+					|| World->GetTimerManager().IsTimerActive(PC->Announcer->PlayNextAnnouncementHandle)
+					|| (PC->Announcer->AnnouncementComp != nullptr
+						&& PC->Announcer->AnnouncementComp->IsPlaying()))
+				{
+					continue;
+				}
+				UUTAnnouncer* OldAnnouncer = PC->Announcer;
+				PC->Announcer = NewObject<UNCPlusAnnouncer>(PC);
+				if (AnnouncerTraceEnabled())
+				{
+					UE_LOG(LogNCPlusAnnouncer, Warning,
+						TEXT("[AnnouncerTrace] UPGRADE pc=%s old=%s new=%s"),
+						*DescribeObject(PC), *DescribeObject(OldAnnouncer),
+						*DescribeObject(PC->Announcer));
+				}
+			}
+		}
+		return true;
+	}
 }
 
 UNCPlusAnnouncer::UNCPlusAnnouncer(const FObjectInitializer& ObjectInitializer)
@@ -662,7 +745,41 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 
 	bool bCancelThisAnnouncement = false;
 	const float AnnouncementPriority = Message->GetAnnouncementPriority(NewAnnouncement);
-	if (CurrentAnnouncement.MessageClass != nullptr
+	if (IsGuaranteedFlagTaken(NewAnnouncement))
+	{
+		// Bypass every CancelByAnnouncement gate (see CVarFlagTakenGuarantee):
+		// the line always queues and the queue always drains, so it always
+		// plays. Dedup: an identical line already QUEUED is the guarantee —
+		// drop this copy, one pending call suffices. Key includes PS1 because
+		// the switch-4 sound depends on it ("YouHaveTheFlag_02" vs
+		// "Red/BlueFlagTaken") — a teammate's regrab line must not be eaten by
+		// the local player's own pending line. Deliberately NOT deduped against
+		// CurrentAnnouncement: two audible taken lines are two real grab
+		// events, and when the intervening dropped/Denied line was lost the
+		// second line is the ONLY signal of the regrab (2026-08-06 review,
+		// finding 4 verification).
+		for (int32 Index = 0; Index < QueuedAnnouncements.Num(); ++Index)
+		{
+			if (QueuedAnnouncements[Index].MessageClass == NewAnnouncement.MessageClass
+				&& QueuedAnnouncements[Index].Switch == NewAnnouncement.Switch
+				&& QueuedAnnouncements[Index].OptionalObject == NewAnnouncement.OptionalObject
+				&& QueuedAnnouncements[Index].RelatedPlayerState_1 == NewAnnouncement.RelatedPlayerState_1)
+			{
+				bCancelThisAnnouncement = true;
+				break;
+			}
+		}
+		if (AnnouncerTraceEnabled())
+		{
+			UE_LOG(LogNCPlusAnnouncer, Warning,
+				TEXT("[AnnouncerTrace] %s msg=%s:%d current=%s queue=%d"),
+				bCancelThisAnnouncement ? TEXT("ADMIT-DROP reason=guaranteed-dup-queued")
+					: TEXT("ADMIT-GUARANTEE"),
+				*MessageClass->GetName(), Switch,
+				*DescribeAnnouncement(CurrentAnnouncement), QueuedAnnouncements.Num());
+		}
+	}
+	else if (CurrentAnnouncement.MessageClass != nullptr
 		&& Message->CancelByAnnouncement(Switch, OptionalObject,
 			CurrentAnnouncement.MessageClass, CurrentAnnouncement.Switch,
 			CurrentAnnouncement.OptionalObject))
@@ -913,6 +1030,14 @@ void NCPlusAnnouncerPacks::Install()
 
 	PlayerControllerCDO->AnnouncerPath = FStringClassReference(UNCPlusAnnouncer::StaticClass());
 	bAnnouncerInstalled = true;
+
+	// Catch PlayerController SUBCLASSES whose own AnnouncerPath default bypasses
+	// the base-CDO override above (Elim/Wipeout BP controllers). ~2Hz, client-only.
+	if (!AnnouncerUpgradeTickerHandle.IsValid())
+	{
+		AnnouncerUpgradeTickerHandle = FTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateStatic(&TickUpgradeLocalAnnouncers), 0.5f);
+	}
 	if (AnnouncerTraceEnabled())
 	{
 		UE_LOG(LogNCPlusAnnouncer, Warning,
@@ -927,6 +1052,12 @@ void NCPlusAnnouncerPacks::Uninstall()
 	if (!bAnnouncerInstalled)
 	{
 		return;
+	}
+
+	if (AnnouncerUpgradeTickerHandle.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(AnnouncerUpgradeTickerHandle);
+		AnnouncerUpgradeTickerHandle.Reset();
 	}
 
 	AUTPlayerController* PlayerControllerCDO = GetMutableDefault<AUTPlayerController>();

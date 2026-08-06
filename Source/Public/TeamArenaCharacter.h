@@ -250,6 +250,8 @@ public:
 	virtual void NotifyTeamChanged() override;
 	/** Keep stock outline recreation out of ApplyCharacterData's body-mesh reregister window. */
 	virtual void ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data) override;
+	/** Coalesce outline requests while ApplyCharacterData's replacement is deferred. */
+	virtual void UpdateOutline() override;
 
 	// Force Models: redirect the stock yellow armour overlay to our match/complimentary armour colour.
 	virtual void UpdateArmorOverlay() override;
@@ -337,6 +339,11 @@ protected:
 	bool bRefreshOthersDirty = false;
 	/** Flush the coalesced forced-model work (the dirty flags) — called from the top of Tick on clients. */
 	void FlushForcedModelUpdate();
+	/** ApplyCharacterData suppresses stock's outline rebuild while CharacterMesh0 is being
+	 *  reregistered. The replacement is created at the start of the following character tick. */
+	bool bDeferredOutlineUpdatePending = false;
+	/** Recreate a queued body outline, repair its parent, then let stock register/update it. */
+	void FlushDeferredOutlineUpdate();
 
 	/** True while this reskinned pawn should have its cosmetics stripped — gates the setter overrides. */
 	bool bForceModelStripCosmetics = false;

@@ -4259,5 +4259,11 @@ bool AUWipeoutGame::ClearPause()
 	{
 		return false;
 	}
-	return Super::ClearPause();
+	const bool bUnpaused = Super::ClearPause();
+	if (bUnpaused)
+	{
+		// Immediate client clock resync — see NCPlusHostPause::ResyncServerWorldTime.
+		NCPlusHostPause::ResyncServerWorldTime(this);
+	}
+	return bUnpaused;
 }

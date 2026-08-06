@@ -100,6 +100,24 @@ static FORCEINLINE const TCHAR* RocketPrimaryDiagPlayer(AUTWeaponFix* Weapon)
 // 0 = legacy retry-graduation + :1779-guarded server clear (today's behaviour).
 // Runtime-toggleable (rcon) so ONE hub can A/B it live. See StartFire / StopFire /
 // PutDown / ServerStopFireFixed. No replicated/RPC change; pairs with ncp.FireDebug.
+// Click buffer (ncp.ClickBufferMs): "if you clicked and ROF allowed it, the gun
+// fires." A press queued to the next legal fire time (cooldown/debounce retry)
+// whose RELEASE arrives while the shot is due within this many ms stays queued
+// and fires exactly once at the legal time, instead of the release cancelling
+// it. 0 = off (legacy stock-parity: an early tap fully inside cooldown fires
+// nothing).
+// DEFAULT 0 (2026-08-06 review): the buffered shot keeps only a bool — no aim
+// snapshot — so it fires with the view rotation AT EXPIRY, up to the window
+// after the release. A post-release flick sends the delayed shot at whatever
+// the crosshair is on NOW (wrong-target ghost shot). Do not enable above 0
+// until the buffer captures aim at press/release (CachedTransactionalRotation
+// is the likely vehicle) and that path is audited.
+static TAutoConsoleVariable<float> CVarClickBufferMs(
+    TEXT("ncp.ClickBufferMs"), 0.0f,
+    TEXT("Rapid-click reliability: a queued (cooldown-blocked) click released while its shot is due within this many ms still ")
+    TEXT("fires once at the legal time instead of being cancelled by the release. 0 = off (release cancels, stock-parity)."),
+    ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarMouseDebounceCap(
     TEXT("ncp.MouseDebounceCap"), 0.01f,
     TEXT("Client cap (seconds) on every weapon's MouseDebounceWindow: effective window = min(weapon BP value, this). ")
@@ -895,6 +913,8 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     LastFlakShellSpawnTime = 0.0f;
     NextDelayedFlakReservationId = 1;
     MouseDebounceWindow = 0.030f;  // 30ms — mouse-bounce / scroll-wheel coalesce
+    bBufferedClickPending[0] = false;
+    bBufferedClickPending[1] = false;
     OriginalFPSMaterial = nullptr;
     AppliedFPSMaterial = nullptr;
     AppliedFPSMaterialInstance = nullptr;
@@ -994,6 +1014,17 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
     if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] OnRetryTimer mode=%d -> StartFire"), FireModeNum);
     StartFire(FireModeNum);
     bHandlingRetry = false;
+
+    // Buffered click (released before the shot was due): the dispatch above just
+    // fired the queued shot; end the sequence now — the physical button is up,
+    // so nothing else will ever send the stop. If StartFire got re-blocked by a
+    // float-boundary re-arm instead, StopFire's buffer check re-buffers the tiny
+    // remaining wait and this converges next frame.
+    if (FireModeNum < 2 && bBufferedClickPending[FireModeNum])
+    {
+        bBufferedClickPending[FireModeNum] = false;
+        StopFire(FireModeNum);
+    }
 }
 
 
@@ -1074,7 +1105,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             EffectiveDebounce = FMath::Min(MouseDebounceWindow, Cap);
         }
     }
-    if (UTOwner && UTOwner->IsLocallyControlled() &&
+    if (!bHandlingRetry && UTOwner && UTOwner->IsLocallyControlled() &&
         EffectiveDebounce > 0.f &&
         LastReleaseTime.IsValidIndex(FireModeNum) &&
         LastReleaseTime[FireModeNum] > 0.0f)
@@ -1087,6 +1118,46 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[NCFire.Debounce] mode=%d sinceRelease=%.4f window=%.4f (bp=%.4f)"),
                 FireModeNum, SinceRelease, EffectiveDebounce, MouseDebounceWindow);
             UTOwner->SetPendingFire(FireModeNum, true);
+            // R4 (2026-08-06): queue the press instead of eating it. The bare
+            // early-return relied on the pending flag being honoured later, but
+            // DeferredGotoActiveState deliberately clears it — a chatter pair
+            // mid-hold left the gun silent until a fresh physical click. Arm the
+            // same retry the cooldown path arms so this press fires at the next
+            // legal time; a genuine release cancels it (or converts it to a
+            // buffered click) in StopFire exactly like any queued press.
+            if (FireModeNum < 2)
+            {
+                // GhostFix held-intent: this early return consumes the press, so
+                // record the physical hold HERE — a weapon switch during the
+                // debounce window otherwise graduates a stale false flag in
+                // PutDown. A genuine release still clears it in StopFire.
+                if (GhostFix())
+                {
+                    bFireHeldByPlayer[FireModeNum] = true;
+                }
+                bBufferedClickPending[FireModeNum] = false;   // this press owns the timer now
+                if (!GetWorldTimerManager().IsTimerActive(RetryFireHandle[FireModeNum]))
+                {
+                    float MaxReadyTime = 0.f;
+                    for (int32 i = 0; i < LastFireTime.Num(); i++)
+                    {
+                        if (LastFireTime[i] > 0.0f)
+                        {
+                            MaxReadyTime = FMath::Max(MaxReadyTime, LastFireTime[i] + GetRefireTime(i));
+                        }
+                    }
+                    MaxReadyTime = FMath::Max(MaxReadyTime, EarliestFireTime);
+                    const float Delay = MaxReadyTime - GetWorld()->GetTimeSeconds();
+                    FTimerDelegate RetryDel;
+                    RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
+                    // Exact delay, no slack — timers never fire early; a tiny
+                    // handle-bound rate (not SetTimerForNextTick) keeps the
+                    // due-now case cancellable by StopFire.
+                    GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel,
+                        (Delay > 0.f) ? Delay : 0.001f, false);
+                    bCrossModeRetryArmed[FireModeNum] = false;
+                }
+            }
             return;
         }
     }
@@ -1120,7 +1191,13 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                 // [FIX] Set to false to consume the "Click" immediately.
                 // This prevents the engine from re-running StartFire on the next frame.
                 UTOwner->SetPendingFire(FireModeNum, false);
-                OnMultiPress(FireModeNum);
+                // Mode-cycle only on the PHYSICAL press — a retry re-entry landing
+                // during loading must not phantom-cycle the rocket type (mirrors
+                // the cross-mode block's bHandlingRetry guard).
+                if (!bHandlingRetry)
+                {
+                    OnMultiPress(FireModeNum);
+                }
                 return;
             }
 			return;
@@ -1164,6 +1241,13 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 	// real new input press — not a retry (bHandlingRetry) nor a buffered re-entry.
 	// Set even when the press is deferred by cooldown, so a held-during-cooldown switch
 	// still carries. Cleared on a genuine release in StopFire; read in PutDown.
+	// A fresh physical press owns the input from here — a previously buffered
+	// (released) click must not double-fire behind it.
+	if (!bHandlingRetry && FireModeNum < 2)
+	{
+		bBufferedClickPending[FireModeNum] = false;
+	}
+
 	if (GhostFix() && !bHandlingRetry && FireModeNum < 2 && UTOwner && UTOwner->IsLocallyControlled())
 	{
 		bFireHeldByPlayer[FireModeNum] = true;
@@ -1291,21 +1375,16 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 			}
             float Delay = MaxReadyTime - CurrentTime;
 
-            // Schedule a retry if the delay is significant
-            if (Delay > 0.01f)
-            {
-                float WaitTime = Delay + 0.01f;
-                FTimerDelegate RetryDel;
-                RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
-                GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, WaitTime, false);
-            }
-            else
-            {
-                // Poll next frame if delay is tiny (animation lag)
-                FTimerDelegate RetryDel;
-                RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
-                GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, 0.01f, false);
-            }
+            // Exact-delay arm (2026-08-06): timers never fire early, so the old
+            // +10ms slack only made every rescued click land 1-2 frames late at
+            // high fps. If float-boundary timing re-blocks the shot, StartFire
+            // re-arms through this same path and costs one frame, not 10ms. The
+            // due-now case uses a tiny handle-bound rate (not SetTimerForNextTick)
+            // so a release can still cancel it.
+            FTimerDelegate RetryDel;
+            RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
+            GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel,
+                (Delay > 0.f) ? Delay : 0.001f, false);
             if (FireModeNum < 2) { bCrossModeRetryArmed[FireModeNum] = false; }   // same-mode arm owns the handle now
 			if (RocketPrimaryDiagFor(this, FireModeNum))
 			{
@@ -1915,7 +1994,31 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     }
     if (FireModeNum < 2)
     {
-        GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+        // Click buffer (ncp.ClickBufferMs): a queued same-mode click whose shot
+        // is due within the window survives its own release and fires once at
+        // the legal time — OnRetryTimer ends the sequence after the shot.
+        // Outside the window, buffer off, or a cross-mode stall-fix arm (not
+        // same-mode click intent): legacy behavior — release cancels the queued
+        // shot, stock-parity for early taps.
+        const float BufferWindow = CVarClickBufferMs.GetValueOnGameThread() * 0.001f;
+        if (BufferWindow > 0.f
+            && UTOwner && UTOwner->IsLocallyControlled()
+            && !bCrossModeRetryArmed[FireModeNum]
+            && GetWorldTimerManager().IsTimerActive(RetryFireHandle[FireModeNum])
+            && GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]) <= BufferWindow)
+        {
+            bBufferedClickPending[FireModeNum] = true;
+            if (FireDbg())
+            {
+                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] StopFire BUFFERED queued click mode=%d remain=%.3f"),
+                    FireModeNum, GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]));
+            }
+        }
+        else
+        {
+            GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+            bBufferedClickPending[FireModeNum] = false;
+        }
     }
 
 	// We must clean these flags BEFORE any early returns.
@@ -2114,17 +2217,33 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     float ServerTime = GetWorld()->GetTimeSeconds();
     float TimeDiff = FMath::Abs(ServerTime - ClientTime);
 
-    // Allow reasonable network delay but reject obviously wrong timestamps
-    if (TimeDiff > 1.0f) // 1 second tolerance should be more than enough
+    // Stale client clock estimate. ClientTime is the client's
+    // GetServerWorldTimeSeconds, which the engine re-syncs only every 5s
+    // (GameStateBase ServerWorldTimeSecondsUpdateFrequency) — a pause freezes
+    // the server clock while unpaused clients keep counting, so for seconds
+    // after any unpause every honest fire RPC arrives with a huge offset (the
+    // 13.3s bursts of 2026-08-06). The timestamp is VALIDATION-ONLY today
+    // (rewind uses ping, never this value), so a stale clock must not
+    // fire-dead the player: accept the shot, log throttled. Unpause paths also
+    // force an immediate resync (NCPlusHostPause::ResyncServerWorldTime), so
+    // this staying loud means a genuine client hitch or a new unpause path.
+    if (TimeDiff > 1.0f)
     {
 		if (RocketPrimaryDiagFor(this, FireModeNum))
 		{
 			UE_LOG(LogUTWeaponFix, Warning,
-				TEXT("[RocketM1Diag] SERVER_VALIDATE_REJECT reason=TIME_DESYNC frame=%u serverT=%.4f clientT=%.4f diff=%.4f mode=%d event=%d"),
+				TEXT("[RocketM1Diag] SERVER_VALIDATE_DESYNC_ACCEPT frame=%u serverT=%.4f clientT=%.4f diff=%.4f mode=%d event=%d"),
 				(uint32)GFrameCounter, ServerTime, ClientTime, TimeDiff, FireModeNum, InEventIndex);
 		}
-        UE_LOG(LogTemp, Warning, TEXT("WeaponFix: Rejected fire due to time desync: %f"), TimeDiff);
-        return false;
+        static double LastDesyncWarnTime = 0.0;
+        const double NowRT = FPlatformTime::Seconds();
+        if (NowRT - LastDesyncWarnTime >= 5.0)
+        {
+            LastDesyncWarnTime = NowRT;
+            UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[TimeDesync] %s fire timestamp off by %.2fs — accepting (validation-only value; likely post-pause clock staleness, throttled 5s)"),
+                *PlayerName, TimeDiff);
+        }
     }
 
     /* Check refire rate
@@ -3404,10 +3523,12 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 // effects still terminate correctly (same shape as the reverted
                 // 2026-07-18 gate's rejection, but render-reconstructed instead
                 // of claim-presence-based, and ping-independent).
-                // [RenderGate] is its own tag ON PURPOSE: it stays visible in
-                // live logs when ncp.HitAttribDebug=0, and [HitAttrib] parsers
-                // never double-count a demoted shot.
-                UE_LOG(LogUTWeaponFix, Log,
+                // [RenderGate] keeps its own tag so [HitAttrib] parsers never
+                // double-count a demoted shot. Verbose since 2026-08-06 (was
+                // Log): silent on live by default; the checklist blocker-5
+                // verification pass re-enables it with `Log LogUTWeaponFix
+                // Verbose` at the server console — no rebuild needed.
+                UE_LOG(LogUTWeaponFix, Verbose,
                     TEXT("[RenderGate] DEMOTED %s: missed render-time capsule by %.1fuu (ping %.0f, renderMs %.1f)"),
                     *BestTarget->GetName(), RenderChkMissBy, UTOwner->PlayerState->ExactPing, RenderMs);
                 RenderChkDemotedTarget = BestTarget;
@@ -4618,7 +4739,9 @@ bool AUTWeaponFix::PutDown()
                     // arm covers a press landing in another mode's firing tail — the classic
                     // tap-then-switch motion — and graduating it makes the next weapon fire a
                     // shot the player never pressed (the exact ghost class GhostFix targets).
-                    if (!bCrossModeRetryArmed[i])
+                    // Buffered clicks are spent input, not held intent — graduating
+                    // one would fire a ghost shot on the next weapon.
+                    if (!bCrossModeRetryArmed[i] && !bBufferedClickPending[i])
                     {
                         UTOwner->SetPendingFire(i, true);
                         UE_LOG(LogUTWeaponFix, Verbose, TEXT("PutDown: Transferring Retry %d to Pawn PendingFire"), i);
@@ -4630,10 +4753,11 @@ bool AUTWeaponFix::PutDown()
                 }
             }
         }
-        // A) Kill any pending retry timers
+        // A) Kill any pending retry timers (a buffered click dies with the switch)
         for (int32 i = 0; i < 2; i++)
         {
             GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
+            bBufferedClickPending[i] = false;
         }
         // B) Reset the Gatekeeper Flags
         // This fixes the "Jam" bug where the weapon remembers it was firing Mode 1.

@@ -21,6 +21,7 @@
 #include "UTPlayerState.h"            // GetSelectedCharacter (DarkenBodies skeleton fallback)
 #include "UTCharacterContent.h"
 #include "Engine/SkeletalMesh.h"      // identify the two curated *_bright meshes without class-name guessing
+#include "Materials/Material.h"       // default material for the locally-created outline duplicate
 #include "Materials/MaterialInstanceDynamic.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "NCPlusForceModels.h"
@@ -176,13 +177,117 @@ void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Da
 
 	// Stock ApplyCharacterData rebuilds CustomDepthMesh while GetMesh() is still inside an
 	// FComponentReregisterContext. If X-ray is active, that replacement can register without
-	// its CharacterMesh0 parent and remain at world origin. Preserve the requested outline
-	// state, suppress only the premature rebuild, then recreate it after GetMesh() is registered.
+	// its CharacterMesh0 parent and remain at world origin. Remember whether stock would have
+	// refreshed the outline, suppress that premature rebuild, and recreate it next Tick after
+	// every ApplyCharacterData/reregister stack has unwound.
+	const bool bNeedsDeferredOutlineUpdate = (CustomDepthMesh != nullptr) || IsOutlined();
 	{
 		TGuardValue<bool> SuppressOutline(bForceNoOutline, true);
 		Super::ApplyCharacterData(Data);
 	}
-	UpdateOutline();
+	if (bNeedsDeferredOutlineUpdate && !bForceNoOutline)
+	{
+		bDeferredOutlineUpdatePending = true;
+	}
+}
+
+void ATeamArenaCharacter::UpdateOutline()
+{
+	// TacCom and replicated outline state can request another refresh after ApplyCharacterData
+	// but before this pawn's next Tick. Keep those requests coalesced so none can recreate the
+	// body duplicate during the unsafe window; the flush reads the latest outline state.
+	if (!bDeferredOutlineUpdatePending)
+	{
+		Super::UpdateOutline();
+	}
+}
+
+void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
+{
+	bDeferredOutlineUpdatePending = false;
+
+	USkeletalMeshComponent* const BodyMesh = GetMesh();
+	if (GetNetMode() == NM_DedicatedServer || bForceNoOutline || BodyMesh == nullptr)
+	{
+		return;
+	}
+
+	// A character tick can coincide with component teardown/reregistration. Keep the outline
+	// absent and try again on the next character tick instead of registering against that state.
+	if (!BodyMesh->IsRegistered())
+	{
+		bDeferredOutlineUpdatePending = true;
+		return;
+	}
+
+	// Create and initialize the duplicate without registering it. This lets us verify/repair the
+	// critical parent invariant before stock gets the opportunity to call RegisterComponent().
+	if (IsOutlined() && CustomDepthMesh == nullptr)
+	{
+		CustomDepthMesh = DuplicateObject<USkeletalMeshComponent>(BodyMesh, this);
+		if (!ensureMsgf(CustomDepthMesh != nullptr,
+			TEXT("Failed to create deferred outline for %s; refusing to register it."),
+			*GetName()))
+		{
+			return;
+		}
+
+		// Mirror UT's CreateCustomDepthOutlineMesh initialization locally. That helper is not
+		// exported from the UnrealTournament module, so a plugin cannot link against it safely.
+		CustomDepthMesh->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
+		USkeletalMeshComponent* const DefaultMesh =
+			CustomDepthMesh->GetClass()->GetDefaultObject<USkeletalMeshComponent>();
+		CustomDepthMesh->PrimaryComponentTick = DefaultMesh->PrimaryComponentTick;
+		CustomDepthMesh->PostPhysicsComponentTick = DefaultMesh->PostPhysicsComponentTick;
+		CustomDepthMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		CustomDepthMesh->SetSimulatePhysics(false);
+		CustomDepthMesh->SetCastShadow(false);
+		CustomDepthMesh->SetMasterPoseComponent(BodyMesh);
+		for (int32 MaterialIndex = 0; MaterialIndex < CustomDepthMesh->GetNumMaterials(); ++MaterialIndex)
+		{
+			CustomDepthMesh->SetMaterial(MaterialIndex, UMaterial::GetDefaultMaterial(MD_Surface));
+		}
+		CustomDepthMesh->BoundsScale = 15000.f;
+		CustomDepthMesh->bVisible = true;
+		CustomDepthMesh->bHiddenInGame = false;
+		CustomDepthMesh->bRenderInMainPass = false;
+		CustomDepthMesh->bRenderCustomDepth = true;
+		CustomDepthMesh->AttachToComponent(BodyMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		CustomDepthMesh->RelativeLocation = FVector::ZeroVector;
+		CustomDepthMesh->RelativeRotation = FRotator::ZeroRotator;
+		CustomDepthMesh->RelativeScale3D = FVector(1.0f);
+	}
+
+	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
+	{
+		ensureMsgf(false,
+			TEXT("Deferred outline for %s was detached before registration; repairing CharacterMesh0 attachment."),
+			*GetName());
+
+		// A different outline request may have registered the component between ApplyCharacterData
+		// and this tick. Retire that render state before repairing so no detached primitive survives.
+		if (CustomDepthMesh->IsRegistered())
+		{
+			CustomDepthMesh->UnregisterComponent();
+		}
+		CustomDepthMesh->SetMasterPoseComponent(BodyMesh);
+		CustomDepthMesh->AttachToComponent(BodyMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		CustomDepthMesh->RelativeLocation = FVector::ZeroVector;
+		CustomDepthMesh->RelativeRotation = FRotator::ZeroRotator;
+		CustomDepthMesh->RelativeScale3D = FVector(1.0f);
+	}
+
+	ensureMsgf(CustomDepthMesh == nullptr || CustomDepthMesh->GetAttachParent() == BodyMesh,
+		TEXT("Deferred outline for %s could not attach to CharacterMesh0; refusing to register it."),
+		*GetName());
+	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
+	{
+		CustomDepthMesh->DestroyComponent();
+		CustomDepthMesh = nullptr;
+		return;
+	}
+
+	Super::UpdateOutline();
 }
 
 // Apply the coalesced forced-model work, at most once per frame. Called from the top of Tick on clients,
@@ -573,6 +678,8 @@ void ATeamArenaCharacter::Destroyed()
 
 void ATeamArenaCharacter::ClearLocalOutlineRenderState()
 {
+	bDeferredOutlineUpdatePending = false;
+
 	if (GetNetMode() == NM_DedicatedServer)
 	{
 		return;
@@ -1754,6 +1861,14 @@ void ATeamArenaCharacter::UpdateSkin()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
+	// Flush work queued by an earlier ApplyCharacterData before any forced-model apply below can
+	// queue another rebuild. This ordering guarantees an ApplyCharacterData reached from this Tick
+	// cannot recreate its outline until the following character tick.
+	if (bDeferredOutlineUpdatePending)
+	{
+		FlushDeferredOutlineUpdate();
+	}
+
 	// Flush any forced-model apply coalesced from this frame's replication burst (see NotifyTeamChanged).
 	// Runs here — after net dispatch, before Super::Tick/render — so N team OnReps collapse to one mesh
 	// rebuild and the reskin is in place for this frame. No-op on a dedicated server (flags never set).

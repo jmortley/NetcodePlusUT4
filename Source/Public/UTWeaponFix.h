@@ -506,6 +506,15 @@ protected:
     // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
     bool bCrossModeRetryArmed[2];
 
+    // True while RetryFireHandle[mode] holds a BUFFERED CLICK: a queued
+    // (cooldown-blocked) press that was then RELEASED while its shot was due
+    // within ncp.ClickBufferMs. The release keeps the timer alive (StopFire)
+    // and OnRetryTimer fires exactly one shot then ends the sequence itself.
+    // Cleared by any fresh physical press, consumed in OnRetryTimer, killed on
+    // PutDown. Never graduated to pawn PendingFire — it is a spent click, not
+    // held intent.
+    bool bBufferedClickPending[2];
+
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
 

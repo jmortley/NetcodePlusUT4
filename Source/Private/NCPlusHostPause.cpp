@@ -9,6 +9,8 @@
 #include "UTATypes.h"                 // ChatDestinations
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"  // AWorldSettings::Pauser
+#include "GameFramework/GameModeBase.h"    // GameState member (ResyncServerWorldTime)
+#include "GameFramework/GameStateBase.h"   // ReplicatedWorldTimeSeconds reflection
 #include "Containers/Ticker.h"
 #include "Misc/ConfigCacheIni.h"          // GConfig
 #include "Misc/Paths.h"                    // FPaths
@@ -286,5 +288,31 @@ namespace NCPlusHostPause
 			FTickerDelegate::CreateStatic(&UnpauseTick), 1.0f);
 		UE_LOG(LogNCHostPause, Log, TEXT("[HostPause] unpause requested — holding %ds countdown"), GUnpauseSec);
 		return true;   // defer: stay paused until the countdown fires the real clear
+	}
+
+	void ResyncServerWorldTime(AGameModeBase* GM)
+	{
+		// The engine refreshes ReplicatedWorldTimeSeconds only every 5s
+		// (GameStateBase.cpp ServerWorldTimeSecondsUpdateFrequency), and a pause
+		// freezes the server clock while unpaused clients keep counting — so for
+		// up to 5s after an unpause every honest fire RPC arrives with a >1s
+		// timestamp offset. The property and its updater are protected on
+		// AGameStateBase, so push the refresh through the reflected UPROPERTY and
+		// force an immediate net update; the client OnRep recomputes its delta on
+		// arrival.
+		AGameStateBase* GS = GM ? GM->GameState : nullptr;
+		UWorld* World = GS ? GS->GetWorld() : nullptr;
+		if (World == nullptr || GS->Role != ROLE_Authority)
+		{
+			return;
+		}
+		static UFloatProperty* RepTimeProp =
+			FindField<UFloatProperty>(AGameStateBase::StaticClass(), TEXT("ReplicatedWorldTimeSeconds"));
+		if (RepTimeProp != nullptr)
+		{
+			RepTimeProp->SetPropertyValue_InContainer(GS, World->GetTimeSeconds());
+			GS->ForceNetUpdate();
+			UE_LOG(LogNCHostPause, Log, TEXT("[HostPause] forced server-world-time resync on unpause (t=%.2f)"), World->GetTimeSeconds());
+		}
 	}
 }

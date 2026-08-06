@@ -202,6 +202,15 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
 	float OvertimeRespawnTime;
 
+	/** Regrab audibility (frenchempire 2026-08-06): stock plays the loud
+	 *  flag-taken alarm only for grabs from the base stand
+	 *  (AUTCTFFlagBase::ObjectWasPickedUp gates on bWasHome), so re-taking a
+	 *  DROPPED flag is nearly silent — a positional pickup blip plus a voice
+	 *  line the announcer can cancel. When enabled, picking up a dropped flag
+	 *  replays the base's alarm cues at the grab location. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Announcements")
+	bool bRegrabTakenAlarm = true;
+
 	// ── Game Flow Overrides ──────────────────────────────────────────
 	// NOTE: Floor slide disable is enforced via ATeamArenaCharacter::CanSlide_Implementation()
 	// which reads bAllowFloorSlide from this game mode. No RestartPlayer override needed.
@@ -235,6 +244,25 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void CheckGameTime() override;
 	virtual void DefaultTimer() override;
 	virtual float GetTravelDelay() override;
+
+	/** Regrab-alarm hook: every flag transition announces through here
+	 *  (AUTCarriedObject::SendGameMessage), so the dropped(3)→taken(4) pair
+	 *  identifies a regrab without subclassing the engine flag actors.
+	 *  Only ever adds sounds — no message is suppressed or altered. */
+	virtual void BroadcastLocalized(AActor* Sender, TSubclassOf<ULocalMessage> Message, int32 Switch = 0, APlayerState* RelatedPlayerState_1 = NULL, APlayerState* RelatedPlayerState_2 = NULL, UObject* OptionalObject = NULL) override;
+
+	/** Play the home base's taken-alarm cues for a regrab, positioned at the
+	 *  flag's current location instead of the base stand. */
+	void PlayRegrabTakenAlarm(AUTCarriedObject* Flag);
+
+	/** Per-team-flag drop tracking for the regrab alarm. Set by the dropped(3)
+	 *  broadcast or the 1Hz state sampling in DefaultTimer (which covers the
+	 *  near-cap "Denied" path that defers the dropped broadcast — see
+	 *  UTCTFFlag::Drop); consumed by the next taken(4). */
+	bool bFlagWasDropped[2] = { false, false };
+
+	/** Debounce so message storms can't replay the alarm back-to-back. */
+	float LastRegrabAlarmTime[2] = { -100.f, -100.f };
 
 	virtual void HandleFlagCapture(AUTCharacter* HolderPawn, AUTPlayerState* Holder) override;
 	virtual void HandleMatchIntermission() override;
