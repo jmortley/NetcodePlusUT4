@@ -1,5 +1,5 @@
-#include "NetcodePlus.h"
 #include "UTWeap_LinkGun_NCP.h"
+#include "NetcodePlus.h"
 #include "UTWeaponStateFiringLinkBeam_NCP.h"
 
 #include "Animation/AnimInstance.h"
@@ -210,8 +210,10 @@ void AUTWeap_LinkGun_NCP::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Hei
 			SideScreenMI->SetVectorParameterValue(FName(TEXT("Screen Low Color")), ScreenColor);
 		}
 		C->SetDrawColor(ScreenColor.ToFColor(true));
-		FUTCanvasTextItem Item(FVector2D(Width / 2 - XL * 0.5f, Height / 2 - YL * 0.5f),
-			FText::FromString(OverheatText), ScreenFont, ScreenColor, WordWrapper);
+		// FUTCanvasTextItem's implementation is not exported from UnrealTournament,
+		// so plugin DLLs must use the engine canvas item just like LinkGun_Plus.
+		FCanvasTextItem Item(FVector2D(Width / 2 - XL * 0.5f, Height / 2 - YL * 0.5f),
+			FText::FromString(OverheatText), ScreenFont, ScreenColor);
 		Item.FontRenderInfo = RenderInfo;
 		C->DrawItem(Item);
 	}

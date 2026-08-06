@@ -1,6 +1,6 @@
+#include "UTWeaponStateFiringLinkBeam_NCP.h"
 #include "NetcodePlus.h"
 #include "UTWeap_LinkGun_NCP.h"
-#include "UTWeaponStateFiringLinkBeam_NCP.h"
 #include "Animation/AnimInstance.h"
 
 UUTWeaponStateFiringLinkBeam_NCP::UUTWeaponStateFiringLinkBeam_NCP(const FObjectInitializer& OI)

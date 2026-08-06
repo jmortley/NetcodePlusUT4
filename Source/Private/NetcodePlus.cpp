@@ -4,6 +4,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "UObject/UObjectBase.h"      // UObjectInitialized (late module-shutdown guard)
 #include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
 #include "UTPlayerController.h"
 #include "UTPlayerInput.h"
@@ -946,6 +947,14 @@ static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeComma
 
 void FNetcodePlus::StartupModule()
 {
+	// This module's startup work is entirely runtime-facing.  Cook commandlets still
+	// load the module so native classes are registered, but must not install UI,
+	// mutate gameplay CDOs, or register world/ticker hooks.
+	if (IsRunningCommandlet())
+	{
+		return;
+	}
+
 	// First: hand the launcher's login credential from the environment back onto
 	// the command line, before any consumer reads it (see ApplyLauncherAuthHandoff).
 	ApplyLauncherAuthHandoff();
@@ -1174,6 +1183,15 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
+	// UE4.15 unloads runtime modules after CoreUObject::StaticExit during final
+	// process teardown.  At that point GetMutableDefault(), StaticClass(), weak
+	// UObject lookups, and cache cleanup are no longer legal.  Dynamic/hot unloads
+	// happen while CoreUObject is live and still take the full cleanup path below.
+	if (IsRunningCommandlet() || !UObjectInitialized())
+	{
+		return;
+	}
+
 	NCPlusAnnouncerPacks::Uninstall();
 
 	// Stop the -ncpconnect ticker if it never fired.
