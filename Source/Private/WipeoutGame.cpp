@@ -62,6 +62,10 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	bAnnounceTeam = true;
 	bRecordReplays = true;
 
+	// Siphon placement: a sniper base must be at least this far (3D uu) from the
+	// nearest Amp for Siphon to spawn there; otherwise the bio base hosts it.
+	SiphonMinAmpDistance = 3000.f;
+
 	// Sound defaults
 	RedTeamVictorySound = nullptr;
 	BlueTeamVictorySound = nullptr;
@@ -309,8 +313,15 @@ void AUWipeoutGame::BeginPlay()
 	// whether the stashed vest pickup should become a ShieldBelt.
 	ResolveShieldBeltSubstitution();
 
-	// Siphon powerup spawned in HandleMatchHasStarted — BP actors may not
-	// be fully loaded during BeginPlay (same issue as DamageReplicator).
+	// Siphon spawns 1s into WARMUP so its spot can be scouted before the match
+	// (2026-08-06). Spawning inside BeginPlay itself fails — the BP package may
+	// not be fully loaded yet (same issue as DamageReplicator) — so defer a
+	// beat; HandleMatchHasStarted remains the safety net if this attempt fails.
+	if (HasAuthority())
+	{
+		FTimerHandle SiphonWarmupHandle;
+		GetWorldTimerManager().SetTimer(SiphonWarmupHandle, this, &AUWipeoutGame::TrySpawnSiphonPickup, 1.0f, false);
+	}
 
 	// Damage replicator is spawned in HandleMatchHasStarted instead of here —
 	// spawning bAlwaysRelevant actors during BeginPlay can trigger package
@@ -4057,46 +4068,126 @@ void AUWipeoutGame::ResolveShieldBeltSubstitution()
 }
 
 
+// Warmup-time spawn attempt, deferred 1s from BeginPlay so the Siphon spot can
+// be scouted before the match. Guarded so the HandleMatchHasStarted fallback
+// can't double-spawn (and vice versa).
+void AUWipeoutGame::TrySpawnSiphonPickup()
+{
+	if (HasAuthority() && !SiphonPickup)
+	{
+		SpawnSiphonPickup();
+	}
+}
+
 // ─── SpawnSiphonPickup ─────────────────────────────────────────────────
-// Finds the highest-Z sniper weapon base on the map and spawns a
-// PowerupBase pickup there with Siphon as the inventory type.
+// Replaces a weapon base with the Siphon pickup. Placement rule: prefer the
+// sniper base FARTHEST (3D) from the nearest Amp/UDamage pickup, but only if
+// that distance clears SiphonMinAmpDistance — otherwise take whichever base
+// (farthest sniper or farthest Bio Rifle) is farther from the Amp.
+// (dasnaksta 2026-08-06: amp and siphon
+// end up "one dodge apart" on Rankin/Faze/Deck/Andok; maps whose sniper is
+// already far, e.g. Ages/Garrison, keep their placement.) No amp on the map
+// falls back to the legacy highest-Z sniper choice.
 void AUWipeoutGame::SpawnSiphonPickup()
 {
 	SiphonPickup = nullptr;
 
-	// Find the highest sniper weapon base
-	FVector BestLoc = FVector::ZeroVector;
-	FRotator BestRot = FRotator::ZeroRotator;
-	float HighestZ = -FLT_MAX;
-	AUTPickupWeapon* BestSniperPickup = nullptr;
+	// Threshold is tunable without a rebuild: [NetcodePlus] SiphonMinAmpDistance
+	// in Mod.ini overrides the class default.
+	float MinAmpDist = SiphonMinAmpDistance;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("SiphonMinAmpDistance"), MinAmpDist, ModIni);
+	}
+
+	// Amp anchors — same inventory-type identification as ResetPickupTimers.
+	TArray<FVector> AmpLocs;
+	for (TActorIterator<AUTPickupInventory> It(GetWorld()); It; ++It)
+	{
+		AUTPickupInventory* Pickup = *It;
+		if (!Pickup || Pickup->IsPendingKillPending() || !Pickup->GetInventoryType()) continue;
+		const FString InvName = Pickup->GetInventoryType()->GetName();
+		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")))
+		{
+			AmpLocs.Add(Pickup->GetActorLocation());
+		}
+	}
+
+	auto MinDistToAmp = [&AmpLocs](const FVector& Loc) -> float
+	{
+		float Best = FLT_MAX;
+		for (const FVector& AmpLoc : AmpLocs)
+		{
+			Best = FMath::Min(Best, (Loc - AmpLoc).Size());
+		}
+		return Best;
+	};
+
+	// Farthest-from-amp sniper and bio bases; highest-Z sniper kept as the
+	// no-amp fallback.
+	AUTPickupWeapon* FarSniper = nullptr;   float FarSniperDist = -FLT_MAX;
+	AUTPickupWeapon* FarBio = nullptr;      float FarBioDist = -FLT_MAX;
+	AUTPickupWeapon* HighSniper = nullptr;  float HighestZ = -FLT_MAX;
 
 	for (TActorIterator<AUTPickupWeapon> It(GetWorld()); It; ++It)
 	{
 		AUTPickupWeapon* WP = *It;
 		if (!WP || !WP->WeaponType) continue;
 
-		FString WeaponName = WP->WeaponType->GetName();
-		if (WeaponName.Contains(TEXT("Sniper")))
+		const FString WeaponName = WP->WeaponType->GetName();
+		const bool bSniper = WeaponName.Contains(TEXT("Sniper"));
+		// "BioRifle" not "Bio" — the stock BioLauncher must not pool with the rifle
+		const bool bBio = WeaponName.Contains(TEXT("BioRifle"));
+		if (!bSniper && !bBio) continue;
+
+		const float AmpDist = MinDistToAmp(WP->GetActorLocation());
+		if (bSniper)
 		{
-			float Z = WP->GetActorLocation().Z;
-			if (Z > HighestZ)
-			{
-				HighestZ = Z;
-				BestLoc = WP->GetActorLocation();
-				BestRot = WP->GetActorRotation();
-				BestSniperPickup = WP;
-			}
+			if (AmpDist > FarSniperDist) { FarSniperDist = AmpDist; FarSniper = WP; }
+			const float Z = WP->GetActorLocation().Z;
+			if (Z > HighestZ) { HighestZ = Z; HighSniper = WP; }
+		}
+		else if (AmpDist > FarBioDist)
+		{
+			FarBioDist = AmpDist;
+			FarBio = WP;
 		}
 	}
 
-	if (!BestSniperPickup)
+	AUTPickupWeapon* Chosen = nullptr;
+	if (AmpLocs.Num() == 0)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: No sniper weapon base found — skipping Siphon pickup"));
+		Chosen = HighSniper;   // no amp to measure against — legacy behavior
+	}
+	else if (FarSniper && FarSniperDist >= MinAmpDist)
+	{
+		Chosen = FarSniper;
+	}
+	else
+	{
+		// Sniper missed the threshold: take whichever candidate is farther from
+		// the amp — a bio even closer than the rejected sniper must not win.
+		// (Null candidates carry -FLT_MAX, so this also covers missing bases;
+		// tie prefers the sniper.)
+		Chosen = (FarBioDist > FarSniperDist) ? FarBio : FarSniper;
+	}
+
+	if (!Chosen)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: no usable weapon base for Siphon (amps=%d) — skipping"), AmpLocs.Num());
 		return;
 	}
 
-	// Remove the sniper weapon pickup we're replacing
-	BestSniperPickup->Destroy();
+	const FVector BestLoc = Chosen->GetActorLocation();
+	const FRotator BestRot = Chosen->GetActorRotation();
+	UE_LOG(LogGameMode, Log,
+		TEXT("Wipeout: Siphon placement — amps=%d farSniper=%.0fuu farBio=%.0fuu threshold=%.0f -> %s base at %s"),
+		AmpLocs.Num(),
+		(FarSniper && AmpLocs.Num() > 0) ? FarSniperDist : -1.f,
+		(FarBio && AmpLocs.Num() > 0) ? FarBioDist : -1.f,
+		MinAmpDist,
+		(Chosen == FarBio) ? TEXT("BIO") : TEXT("SNIPER"), *BestLoc.ToString());
 
 	// Try BP class first, fall back to hardcoded PowerupBase_C
 	TSubclassOf<AUTPickupInventory> SpawnClass = SiphonPickupClass;
@@ -4119,6 +4210,10 @@ void AUWipeoutGame::SpawnSiphonPickup()
 
 	if (SiphonPickup)
 	{
+		// Spawn succeeded — only now remove the weapon base we replaced, so a
+		// failed spawn can never cost the map its sniper/bio outright.
+		Chosen->Destroy();
+
 		// If using fallback PowerupBase (not custom BP), set inventory type
 		if (!SiphonPickupClass)
 		{
@@ -4136,8 +4231,7 @@ void AUWipeoutGame::SpawnSiphonPickup()
 			}
 		}
 
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Spawned Siphon pickup at sniper location %s (Z=%.0f)"),
-			*BestLoc.ToString(), HighestZ);
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Spawned Siphon pickup at %s"), *BestLoc.ToString());
 	}
 	else
 	{

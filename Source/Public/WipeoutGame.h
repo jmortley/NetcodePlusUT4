@@ -359,21 +359,33 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning")
 	bool bEnablePingCompensatedSpawn = true;
 
-	// SIPHON POWERUP (spawned at highest sniper location)
+	// SIPHON POWERUP (spawned at a weapon base far from the Amp)
 	// =======================================================================
 
-	/** Blueprint pickup class to spawn at highest sniper location.
+	/** Blueprint pickup class to spawn at the chosen weapon base (see
+	 *  SpawnSiphonPickup for the placement rule).
 	 *  Set in the BP subclass to a child of PowerupBase with custom mesh/ghost.
 	 *  If None, no siphon pickup is spawned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Siphon")
 	TSubclassOf<class AUTPickupInventory> SiphonPickupClass;
 
-	/** The siphon pickup spawned at the highest sniper weapon base location */
+	/** Minimum 3D distance (uu) between a sniper base and the nearest Amp/UDamage
+	 *  pickup for Siphon to spawn at the sniper. If no sniper clears this, Siphon
+	 *  goes to whichever base — farthest sniper or farthest Bio Rifle — is farther
+	 *  from the Amp. 0 (or negative) disables the rule — the sniper always wins.
+	 *  Mod.ini override: [NetcodePlus] SiphonMinAmpDistance. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Siphon")
+	float SiphonMinAmpDistance;
+
+	/** The siphon pickup spawned at the chosen weapon base location */
 	UPROPERTY(Transient)
 	class AUTPickupInventory* SiphonPickup;
 
-	/** Finds the highest sniper weapon base and spawns a Siphon powerup pickup there */
+	/** Picks the weapon base for Siphon (sniper far from Amp, else bio) and spawns the pickup there */
 	void SpawnSiphonPickup();
+
+	/** Guarded warmup-time spawn attempt (deferred from BeginPlay); HandleMatchHasStarted is the fallback */
+	void TrySpawnSiphonPickup();
 
 
 	// =======================================================================
