@@ -53,6 +53,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
 | `AUTPlusFlakCannon` | Flak primary (shards) and alt (shell) with rewind validation |
 | `AUTPlusWeap_RocketLauncher` | RL with charged-state transactional fire + force-fire-on-death |
 | `AUTWeap_LinkGun_Plus` | Link gun with CSHD beam damage + reliable yoink |
+| `AUTWeap_LinkGun_NCP` | Stock-authoritative Link Gun; stock rapid plasma path + rewound beam trace |
 | `AUTWeap_Minigun_Plus` | Minigun with rewind via virtual dispatch |
 | `AUTWeap_Enforcer_Plus` | Enforcer with body-shot rewind, preserves dual-wield |
 | `AUTPlusProj_Rocket` | Rocket projectile with rewind hit validation |
