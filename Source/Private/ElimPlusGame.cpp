@@ -5,6 +5,7 @@
 #include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
+#include "NCPCandyLiftGuard.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "ElimPlusHUD.h"
 #include "ElimPlusRatingSystem.h"
@@ -307,6 +308,10 @@ void AElimPlusGame::HandleMatchHasStarted()
 
 	// Per-weapon hits/shots replicator for the accuracy HUD widget.
 	ANCAccuracyStatsReplicator::EnsureSpawned(this);
+
+	// Keeps PreventDeath candy orbs grabbable around lifts (the BP's own
+	// reset-lift chain is structurally broken — see NCPCandyLiftGuard.h).
+	ANCPCandyLiftGuard::EnsureSpawned(GetWorld());
 
 	// Replicate the bBalanceTeams URL flag to clients so the HUD's pre-match
 	// team-balance preview overlay can hide when the admin disabled balancing.

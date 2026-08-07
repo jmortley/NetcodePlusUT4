@@ -23,6 +23,7 @@
 #include "Engine/DemoNetDriver.h"
 #include "WipeoutDamageReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
+#include "NCPCandyLiftGuard.h"
 #include "TeamArenaCharacter.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ConfigCacheIni.h"
@@ -403,6 +404,10 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	// Per-weapon hits/shots replicator — Wipeout doesn't show accuracy by
 	// default but the widget is opt-in via nchud, so spawn defensively.
 	ANCAccuracyStatsReplicator::EnsureSpawned(this);
+
+	// Keeps PreventDeath candy orbs grabbable around lifts (the BP's own
+	// reset-lift chain is structurally broken — see NCPCandyLiftGuard.h).
+	ANCPCandyLiftGuard::EnsureSpawned(GetWorld());
 
 	// Spawn Siphon pickup here — BP actors fail to spawn during BeginPlay
 	// because their packages aren't fully loaded yet.
