@@ -309,16 +309,23 @@ void AUWipeoutGame::BeginPlay()
 
 	PrecomputeSpawnLayouts();
 
-	// All actors have passed through CheckRelevance by now — resolve
-	// whether the stashed vest pickup should become a ShieldBelt.
-	ResolveShieldBeltSubstitution();
-
-	// Siphon spawns 1s into WARMUP so its spot can be scouted before the match
-	// (2026-08-06). Spawning inside BeginPlay itself fails — the BP package may
-	// not be fully loaded yet (same issue as DamageReplicator) — so defer a
-	// beat; HandleMatchHasStarted remains the safety net if this attempt fails.
+	// All actors have passed through CheckRelevance by now. Belt substitution
+	// and Siphon both spawn 1s into WARMUP: loading/spawning BP pickup classes
+	// inside BeginPlay itself fails — packages may not be fully loaded yet
+	// (same issue as DamageReplicator) — and the early spot lets both be
+	// scouted before the match. HandleMatchHasStarted is the safety net for
+	// each. (Belt substitution rebuilt on the Siphon replace pattern
+	// 2026-08-06 — the old in-place SetInventoryType conversion did its
+	// LoadClass at BeginPlay time and never survived contact with a live map.)
 	if (HasAuthority())
 	{
+		if (!bMapHasShieldBelt && !PendingVestPickup)
+		{
+			UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has no ShieldBelt and no vest — nothing to substitute"));
+		}
+		FTimerHandle BeltSubstitutionHandle;
+		GetWorldTimerManager().SetTimer(BeltSubstitutionHandle, this, &AUWipeoutGame::TryResolveShieldBeltSubstitution, 1.0f, false);
+
 		FTimerHandle SiphonWarmupHandle;
 		GetWorldTimerManager().SetTimer(SiphonWarmupHandle, this, &AUWipeoutGame::TrySpawnSiphonPickup, 1.0f, false);
 	}
@@ -403,6 +410,10 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	{
 		SpawnSiphonPickup();
 	}
+
+	// Belt-substitution safety net — no-op unless the warmup attempt failed
+	// (ResolveShieldBeltSubstitution keeps PendingVestPickup on failure).
+	TryResolveShieldBeltSubstitution();
 
 	// Snapshot every loaded player's current rating as their "match-start" value
 	// for the per-match delta reported in BuildResultPayload.
@@ -2344,8 +2355,9 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 // CheckRelevance — Strip pickups not appropriate for Wipeout:
 //   - Remove Redeemer weapon base (and its weapon)
 //   - Remove ALL health pickups and vials
-//   - Remove armor EXCEPT ShieldBelt
-//   - Remove powerups EXCEPT UDamage/Amp
+//   - Remove armor EXCEPT ShieldBelt and ThighPads; stash the first
+//     Chest/Vest for the belt substitution
+//   - Remove powerups EXCEPT UDamage/Amp/Siphon
 //   - Keep all other weapon bases (ammo refill encourages movement)
 // ---------------------------------------------------------------------------
 bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
@@ -2393,6 +2405,12 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 	{
 		FString InvName = InvPickup->GetInventoryType()->GetName();
 
+		// Keep: UDamage / Amp / Siphon
+		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")) || InvName.Contains(TEXT("Berserk")) || InvName.Contains(TEXT("Siphon")))
+		{
+			return Super::CheckRelevance_Implementation(Other);
+		}
+
 		// Keep: ShieldBelt
 		if (InvName.Contains(TEXT("ShieldBelt")))
 		{
@@ -2400,20 +2418,20 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
-		// Keep: UDamage / Amp / Siphon
-		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")) || InvName.Contains(TEXT("Berserk")) || InvName.Contains(TEXT("Siphon")))
+		// Keep: thigh pads — spawn normally with stock respawn cadence (2026-08-06)
+		if (InvName.Contains(TEXT("ThighPads")))
 		{
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
-		// Stash the first Chest/Vest pickup — might become a ShieldBelt later
+		// Stash the first Chest/Vest pickup — a fresh belt base replaces it later
 		if (!PendingVestPickup && InvName.Contains(TEXT("Armor_Chest")))
 		{
 			PendingVestPickup = InvPickup;
 			return Super::CheckRelevance_Implementation(Other); // keep alive for now
 		}
 
-		// Remove everything else (Thighpads, extra Chests, Helmet, Jumpboots, Invisibility, etc.)
+		// Remove everything else (extra Chests, Helmet, Jumpboots, Invisibility, etc.)
 		return false;
 	}
 
@@ -3984,7 +4002,8 @@ void AUWipeoutGame::ResetPickupTimers()
 
 		float DelaySeconds = 0.f;
 
-		// Shield Belt — spawn 60s into the round
+		// Shield Belt — spawn 60s into the round (the substituted belt's
+		// inventory is stock Armor_ShieldBelt_C, so the name check covers it)
 		if (ClassName.Contains(TEXT("ShieldBelt")))
 		{
 			DelaySeconds = 60.f;
@@ -3996,7 +4015,7 @@ void AUWipeoutGame::ResetPickupTimers()
 		}
 		else
 		{
-			continue; // Don't touch other pickups
+			continue; // Don't touch other pickups (thigh pads keep stock respawn)
 		}
 
 		// Hide the pickup and set it to respawn after the delay
@@ -4024,9 +4043,15 @@ void AUWipeoutGame::ResetPickupTimers()
 
 
 // ─── ResolveShieldBeltSubstitution ──────────────────────────────────────
-// Called from BeginPlay after all actors have been CheckRelevance'd.
-// If the map had no ShieldBelt pickup, spawn a fresh ArmorBase pickup at the
-// vest's location with ShieldBelt as its inventory type (Showdown pattern).
+// Deferred 1s past BeginPlay (TryResolveShieldBeltSubstitution) — BP classes
+// can fail to LoadClass/spawn during BeginPlay itself, the same package-load
+// issue the Siphon and DamageReplicator dodge. If the map has no ShieldBelt
+// pickup, REPLACE the stashed vest with a freshly spawned belt base — the
+// SpawnSiphonPickup pattern: spawn the new pickup first, destroy the replaced
+// one only on success, keep the stash alive on failure so the match-start
+// fallback can retry. (The old in-place SetInventoryType conversion is gone:
+// its BeginPlay-time LoadClass could fail, and mutating a level-placed,
+// potentially net-dormant pickup left clients still seeing a vest.)
 void AUWipeoutGame::ResolveShieldBeltSubstitution()
 {
 	if (bMapHasShieldBelt)
@@ -4041,30 +4066,69 @@ void AUWipeoutGame::ResolveShieldBeltSubstitution()
 		return;
 	}
 
-	if (!PendingVestPickup)
+	if (!PendingVestPickup || PendingVestPickup->IsPendingKillPending())
 	{
-		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has no ShieldBelt and no vest — nothing to substitute"));
+		PendingVestPickup = nullptr;
 		return;
 	}
 
-	// No ShieldBelt on this map — swap the vest's inventory type to ShieldBelt.
-	// The vest is already a valid AUTPickupInventory in the world; SetInventoryType
-	// updates the replicated InventoryType, rebuilds the mesh, and handles respawn.
 	TSubclassOf<AUTInventory> ShieldBeltClass = LoadClass<AUTInventory>(
 		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_ShieldBelt.Armor_ShieldBelt_C"));
-	if (ShieldBeltClass)
+	if (!ShieldBeltClass)
 	{
-		PendingVestPickup->SetInventoryType(ShieldBeltClass);
-		bMapHasShieldBelt = true;
-		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Converted vest to ShieldBelt at %s"),
-			*PendingVestPickup->GetActorLocation().ToString());
-	}
-	else
-	{
-		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: Failed to load Armor_ShieldBelt class"));
+		// Keep the stash — the HandleMatchHasStarted fallback retries the load.
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: Failed to load Armor_ShieldBelt class — will retry at match start"));
+		return;
 	}
 
+	// Try the stock armor base BP first, fall back to the powerup base the
+	// Siphon spawn also uses.
+	TSubclassOf<AUTPickupInventory> BaseClass = LoadClass<AUTPickupInventory>(
+		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/ArmorBase.ArmorBase_C"));
+	if (!BaseClass)
+	{
+		BaseClass = LoadClass<AUTPickupInventory>(
+			nullptr, TEXT("/Game/RestrictedAssets/Pickups/Powerups/PowerupBase.PowerupBase_C"));
+	}
+	if (!BaseClass)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: No pickup base class for belt substitution — will retry at match start"));
+		return;
+	}
+
+	const FVector SpawnLoc = PendingVestPickup->GetActorLocation();
+	const FRotator SpawnRot = PendingVestPickup->GetActorRotation();
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AUTPickupInventory* BeltPickup = GetWorld()->SpawnActor<AUTPickupInventory>(BaseClass, SpawnLoc, SpawnRot, Params);
+
+	if (!BeltPickup)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: SpawnActor failed for belt base at %s (class=%s) — vest kept, will retry at match start"),
+			*SpawnLoc.ToString(), *BaseClass->GetPathName());
+		return;
+	}
+
+	// Spawn succeeded — only now remove the vest we replaced, so a failed
+	// spawn can never cost the map its 100 armor outright.
+	PendingVestPickup->Destroy();
 	PendingVestPickup = nullptr;
+	BeltPickup->SetInventoryType(ShieldBeltClass);
+	bMapHasShieldBelt = true;
+	UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Spawned ShieldBelt base (%s) replacing vest at %s"),
+		*BaseClass->GetPathName(), *SpawnLoc.ToString());
+}
+
+// Guarded substitution attempt — warmup timer (1s past BeginPlay) and the
+// HandleMatchHasStarted safety net both funnel through here. Retry-safe:
+// every failure path in Resolve keeps PendingVestPickup alive.
+void AUWipeoutGame::TryResolveShieldBeltSubstitution()
+{
+	if (HasAuthority() && PendingVestPickup)
+	{
+		ResolveShieldBeltSubstitution();
+	}
 }
 
 
