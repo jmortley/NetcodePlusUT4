@@ -40,11 +40,12 @@ static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("Players can set to 0 to opt-out (force server positions)."),
 	ECVF_Default); // Saves to user config
 
-// Server-side league opt-in; balance change, so OFF by default. The decision and
-// the charge state are server-only — nothing about this cvar needs the client.
+// Server-side balance rule, ON by default since 328 (announced in the 328 patch
+// notes; set 0 to restore stock). The decision and the charge state are
+// server-only — nothing about this cvar needs the client.
 static TAutoConsoleVariable<int32> CVarHelmetBlocksHeadshot(
 	TEXT("ncp.HelmetBlocksHeadshot"),
-	0,
+	1,
 	TEXT("1 = an Armor_Small (helmet) pickup blocks exactly one headshot, UT3-style: both players hear the ding, BlockedHeadshotDamage applies, and the charge is consumed — re-armed only by another helmet pickup. 0 = stock (headshots are never blocked)."));
 
 namespace

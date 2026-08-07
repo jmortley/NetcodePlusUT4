@@ -198,7 +198,7 @@ public:
 
 	// Helmet: an Armor_Small pickup grants exactly ONE headshot block (UT3-style
 	// ding + BlockedHeadshotDamage), consumed on use. Config-gated by
-	// ncp.HelmetBlocksHeadshot, default 0 = stock (headshots never blocked).
+	// ncp.HelmetBlocksHeadshot, default 1 since 328 (0 = stock, never blocked).
 	virtual bool BlockedHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling, bool bConsumeArmor, AUTCharacter* ShotInstigator) override;
 
 	virtual bool ModifyDamageTaken_Implementation(
