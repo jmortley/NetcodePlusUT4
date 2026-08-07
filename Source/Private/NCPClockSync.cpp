@@ -1,5 +1,4 @@
 // NCPClockSync.cpp — see NCPClockSync.h for the why and the architecture.
-#include "NetcodePlus.h"
 #include "NCPClockSync.h"
 #include "UTGameState.h"
 #include "Net/UnrealNetwork.h"

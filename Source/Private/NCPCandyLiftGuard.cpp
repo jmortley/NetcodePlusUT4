@@ -1,5 +1,4 @@
 // NCPCandyLiftGuard.cpp — see NCPCandyLiftGuard.h for the why.
-#include "NetcodePlus.h"
 #include "NCPCandyLiftGuard.h"
 #include "UTLift.h"
 #include "UTPickupHealth.h"
