@@ -250,13 +250,23 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 	if (UTPS && UTPS->UniqueId.IsValid())
 	{
 		const FString Uid = UTPS->UniqueId.ToString();
-		RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
-		// Mid-match joiner: stamp first-seen time for the leaver presence calc.
-		// (Warmup joiners are stamped en-masse in HandleMatchHasStarted.) Keep
-		// the earliest sighting on a rejoin.
-		if (!PlayerJoinWorldTime.Contains(Uid))
+		// Spectators skip the rating preload (mirrors the HandleMatchHasStarted
+		// bulk-load gate): they are never rated, but this used to run for every
+		// mid-match caster join — a synchronous DB read (plus a first-timer
+		// INSERT + fsync) on the game thread while everyone plays. A spectator
+		// who later enters play is loaded by EnsureRatingLoadedForPlayer via
+		// ChangeTeam instead. The auto-pause resume below stays ungated — an
+		// awaited drop must clear the pause even if they land as a spectator.
+		if (!UTPS->bOnlySpectator)
 		{
-			PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+			RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
+			// Mid-match joiner: stamp first-seen time for the leaver presence calc.
+			// (Warmup joiners are stamped en-masse in HandleMatchHasStarted.) Keep
+			// the earliest sighting on a rejoin.
+			if (!PlayerJoinWorldTime.Contains(Uid))
+			{
+				PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+			}
 		}
 
 		// Auto-pause: an awaited drop just rejoined — resume once everyone we're
@@ -297,14 +307,50 @@ bool ANCPlusCTFGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBr
 				// (MovePlayerToTeam kills the pawn on an actual move).
 				if (PS->Team && PS->Team->TeamIndex == Want)
 				{
+					EnsureRatingLoadedForPlayer(Player);
 					return true;
 				}
-				return MovePlayerToTeam(Player, PS, Want);
+				const bool bMoved = MovePlayerToTeam(Player, PS, Want);
+				if (bMoved)
+				{
+					EnsureRatingLoadedForPlayer(Player);
+				}
+				return bMoved;
 			}
 		}
 	}
 
-	return Super::ChangeTeam(Player, NewTeam, bBroadcast);
+	const bool bChanged = Super::ChangeTeam(Player, NewTeam, bBroadcast);
+	if (bChanged)
+	{
+		EnsureRatingLoadedForPlayer(Player);
+	}
+	return bChanged;
+}
+
+// Rating preload for a player ENTERING PLAY mid-match. PostLogin deliberately
+// skips spectators (they are never rated; the preload was hitching caster
+// joins), so every successful team entry funnels through here instead.
+// Idempotent and cheap on repeat: LoadPlayerFromDB is cache-first, the
+// first-seen stamp is Contains-guarded, and pre-match calls no-op because
+// RatingSystem isn't constructed until match start (the bulk load covers those).
+void ANCPlusCTFGameMode::EnsureRatingLoadedForPlayer(AController* Player)
+{
+	if (!HasAuthority() || !RatingSystem.IsValid() || !Player)
+	{
+		return;
+	}
+	AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+	if (!PS || !PS->UniqueId.IsValid())
+	{
+		return;
+	}
+	const FString Uid = PS->UniqueId.ToString();
+	RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
+	if (!PlayerJoinWorldTime.Contains(Uid))
+	{
+		PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+	}
 }
 
 void ANCPlusCTFGameMode::HandleMatchHasEnded()

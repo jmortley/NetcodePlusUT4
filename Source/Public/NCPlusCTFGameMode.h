@@ -225,6 +225,11 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  CountdownToBegin auto-balance — all route through ChangeTeam. Non-roster
 	 *  joiners (subs/late fills) defer to Super's stock balancing. */
 	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
+
+	/** Rating preload for a player entering play mid-match (spec→player and team
+	 *  entries; PostLogin skips spectators so caster joins stop touching the DB).
+	 *  Idempotent — cache-first load, first-seen stamped once, no-op pre-match. */
+	void EnsureRatingLoadedForPlayer(AController* Player);
 	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
