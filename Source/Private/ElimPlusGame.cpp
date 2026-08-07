@@ -6,6 +6,7 @@
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
 #include "NCPCandyLiftGuard.h"
+#include "WarmupRoamMutator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "ElimPlusHUD.h"
 #include "ElimPlusRatingSystem.h"
@@ -191,6 +192,13 @@ void AElimPlusGame::UpdateVictoryMessageSounds()
 void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+
+	// Warmup roam, same as NCPlusCTF/iCTF: `mutate warmup` = invulnerable +
+	// fire-disabled map roaming during warmup only. The mutator strips everyone
+	// the instant the match leaves WaitingToStart — the engine notifies mutators
+	// straight from SetMatchState, independent of our
+	// CallMatchStateChangeNotify override, so the strip can never be skipped.
+	AddMutatorClass(AWarmupRoamMutator::StaticClass());
 
 	// Override GoalScore with ScoreLimit, as ScoreLimit is our "rounds to win"
 	GoalScore = ScoreLimit;

@@ -24,6 +24,7 @@
 #include "WipeoutDamageReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "NCPCandyLiftGuard.h"
+#include "WarmupRoamMutator.h"
 #include "TeamArenaCharacter.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ConfigCacheIni.h"
@@ -214,6 +215,13 @@ void AUWipeoutGame::BP_SetMatchState_InProgress()
 void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+
+	// Warmup roam, same as NCPlusCTF/iCTF: `mutate warmup` = invulnerable +
+	// fire-disabled map roaming during warmup only. The mutator strips everyone
+	// the instant the match leaves WaitingToStart — the engine notifies mutators
+	// straight from SetMatchState, independent of our
+	// CallMatchStateChangeNotify override, so the strip can never be skipped.
+	AddMutatorClass(AWarmupRoamMutator::StaticClass());
 	// Super::InitGame already parses ?GoalScore=X from the URL.
 	// Only override if the URL explicitly provided a GoalScore option;
 	// otherwise keep the BP default (GoalScore set in constructor).
