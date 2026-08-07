@@ -1,5 +1,6 @@
 
 #include "UTWeaponFix.h"
+#include "NCPClockSync.h"
 #include "UTGameState.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
@@ -961,6 +962,15 @@ void AUTWeaponFix::PostInitProperties()
 void AUTWeaponFix::BeginPlay()
 {
     Super::BeginPlay();
+
+    // Lazily ensure the world's clock-sync beacon (server only). Weapons exist
+    // in every hub mode from warmup onward — including stock TDM, where no
+    // NetcodePlus game-mode code ever runs — so this is the one hook that
+    // covers them all.
+    if (Role == ROLE_Authority)
+    {
+        ANCPClockSync::Ensure(GetWorld());
+    }
 
     // Clear any residual state
     CurrentlyFiringMode = 255;
