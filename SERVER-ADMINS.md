@@ -382,7 +382,7 @@ weapon stuff, etc.) belong to **other** mutators/paks and are not covered here.
 | `bAllowHostPause` | bool | `false` | server | Let the recognized match host (`?HostId`) pause/unpause with the `pause` command. |
 | `bAllowCaptainPause` | bool | `false` | server | Let bot‑designated team captains (`?Captains`) pause in PUGs. |
 | `CaptainPauseCooldownSec` | int | `8` | server | Min unpaused seconds between captain pauses (0 = no cooldown). |
-| `UnpauseCountdownSec` | int | `7` | server | "Resuming in N…" countdown before an unpause takes effect (0 = instant). |
+| `UnpauseCountdownSec` | int | `7` | server | "Resuming in N…" countdown before a host/rcon or CTF auto-pause resume takes effect (clamped 0–60; 0 = instant). |
 | `VersionReportTimeoutSec` | float | `100.0` | server | Grace window for a joining client to report its plugin build (clamped 1–120). *Mismatch* kicks always fire; the *no‑reply* timeout kick is currently disabled. |
 | `AnnouncerPack` | string | *(stock)* | **client** | **New in 328.** Player's chosen announcer voice pack (set at F5, not by admins). Listed here only so you recognise it in a player's Mod.ini — it is client‑side and never affects the server. |
 | `ElimEnableAntiCamp` | bool | `true` | server | **ElimPlus only.** Enable the anti-camp watch (flags a player who holds a tight box). Detection is C++; the warn/response is Blueprint. |
@@ -402,7 +402,7 @@ Shared section (StatSQL reads `Key`/`ServerName`/`SendStats` here too — see §
 | `CTFRespawnWait` | float | `1.5` | Regulation respawn delay (s) in CTF (fractional supported). |
 | `CTFRespawnWaitSmall` | float | `1.0` | Respawn delay (s) in small games (≤ `CTFSmallGameMaxPlayers`). |
 | `CTFSmallGameMaxPlayers` | int | `2` | At/below this player count a CTF match is "small" (2 = 1v1; raise to 4 for 2v2). |
-| `AutoPauseOnDrop` | bool | `true` | Auto‑pause a bot PUG (`?PugId`) when a participant drops, until they rejoin or an admin unpauses. |
+| `AutoPauseOnDrop` | bool | `true` | Immediately auto‑pause a bot PUG (`?PugId`) when a participant drops. Once all awaited IDs return (or an unpause is requested), resume through `UnpauseCountdownSec`; another tracked drop cancels that countdown. |
 | `CTFPerfEnabled` | bool | `true` | Enable the CTF performance‑rating model (false = legacy K/D only). |
 | `CTFRatingShadow` | bool | `true` | Shadow mode: live Glicko delta uses legacy perf; new perf is only observed/uploaded. |
 | `CTFPerfObjectiveWeight` | float | `1.0` | Multiplier on the objective (flag‑play) half of the CTF perf score. |

@@ -4,6 +4,7 @@
 #include "UTCTFGameState.h"
 #include "UTCTFScoring.h"
 #include "UTCTFBaseGame.h"
+#include "Containers/Ticker.h"
 
 // Full include needed (not forward decl) because TUniquePtr<FNCPlusCTFRatingSystem>
 // instantiates its destructor at this header — `delete` requires the complete type.
@@ -11,6 +12,8 @@
 #include "NCPlusCTFRatingSystem.h"
 
 #include "NCPlusCTFGameMode.generated.h"
+
+class ANCAutoPauseState;
 
 // Safe property access across DLL boundary — uses runtime UProperty reflection
 // instead of direct member access which has wrong offsets due to layout mismatch.
@@ -69,9 +72,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  bAllowHostPause — see NCPlusHostPause.h). */
 	virtual bool AllowPausing(APlayerController* PC) override;
 
-	/** Defer a host/rcon unpause behind a short server-only resume countdown
-	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	/** Defer host/rcon and automatic-pause resumes behind a pause-safe countdown.
+	 *  Automatic pauses use their replicated, cancellable state machine; other
+	 *  pauses use NCPlusHostPause::DeferUnpauseForCountdown. */
 	virtual bool ClearPause() override;
+
+	/** Prevent a departing pause marker's engine cleanup from masquerading as a
+	 *  player-requested resume before Logout can update the exact-ID wait. */
+	virtual void ForceClearUnpauseDelegates(AActor* PauseActor) override;
 
 	// ── Advantage Configuration ──────────────────────────────────────
 
@@ -217,6 +225,7 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 	virtual bool ReadyToStartMatch_Implementation() override;
 	virtual void Logout(AController* Exiting) override;
@@ -350,10 +359,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	int32 CTFSmallGameMaxPlayers = 2;
 
 	/** Auto-pause the match when a participant drops out of a bot PUG (?PugId),
-	 *  until they (and any others who dropped) rejoin, or an admin unpauses via
-	 *  the `pause` command. Uses the engine world-pause (WorldSettings->Pauser).
-	 *  No auto-resume timeout yet. Mod.ini [UTPUGS_STATS] AutoPauseOnDrop. */
+	 *  until they (and any others who dropped) rejoin, or a manual unpause is
+	 *  requested. Uses the engine world-pause (WorldSettings->Pauser).
+	 *  Mod.ini [UTPUGS_STATS] AutoPauseOnDrop. */
 	bool bAutoPauseOnDrop = true;
+
+	/** Pause-safe automatic resume countdown. Defaults to the shared host-pause
+	 *  value and reads [NetcodePlus] UnpauseCountdownSec from Mod.ini. */
+	int32 AutoPauseResumeCountdownSec = 7;
 
 	/** True when this match was launched as a bot PUG (?PugId present). */
 	bool bIsPugMatch = false;
@@ -371,6 +384,24 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	/** UniqueIds of dropped participants we're waiting on before resuming. */
 	TSet<FString> AutoPauseAwaitIds;
+
+	/** Human participant IDs observed during this PUG. Kept across spectator
+	 *  transitions so returning-as-spectator cannot evade drop tracking. */
+	TSet<FString> AutoPauseTrackedIds;
+
+	/** Logical exact-ID wait is active but no live PlayerState can hold Pauser. */
+	bool bAutoPauseDormantNoMarker = false;
+
+	/** Replicated authoritative pause snapshot consumed by the CTF HUD. */
+	UPROPERTY(Transient)
+	ANCAutoPauseState* AutoPauseStateActor = nullptr;
+
+	/** Pause-immune automatic-resume ticker state (server-only). */
+	FDelegateHandle AutoPauseResumeTicker;
+	int32 AutoPauseResumeSecondsRemaining = 0;
+	float AutoPauseResumeEndRealTime = 0.0f;
+	bool bAutoPauseResumeCountdownActive = false;
+	bool bForceClearingPauseActor = false;
 
 	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
 	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
@@ -392,13 +423,19 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	/** Load CTFPerfConfig + CTFRatingMinPresenceFrac from Mod.ini [UTPUGS_STATS]. */
 	void LoadCTFPerfConfig();
 
-	/** Auto-pause helpers (server-only). BeginOrHoldAutoPause records a dropped
-	 *  participant and (re)points the engine pause marker at a still-present
-	 *  player; EndAutoPause clears it; FindAutoPauseMarker returns a present,
-	 *  non-dropped PlayerState to hold the pause on (or null if none remain). */
-	void BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName);
-	void EndAutoPause(const TCHAR* Reason);
-	class APlayerState* FindAutoPauseMarker() const;
+	/** Auto-pause helpers (server-only). Pausing is an explicit Pauser assignment;
+	 *  resuming is an explicit clear after a pause-immune authoritative countdown.
+	 *  A new tracked drop cancels an active resume and republishes Paused state. */
+	void BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName,
+		const APlayerState* ExitingPlayerState);
+	void BeginAutoPauseResumeCountdown(const FString& Reason);
+	void CancelAutoPauseResumeCountdown(const FString& Reason);
+	void CompleteAutoPauseResume(const FString& Reason);
+	bool TickAutoPauseResume(float DeltaTime);
+	ANCAutoPauseState* GetOrCreateAutoPauseState();
+	void PublishAutoPausePaused(const FString& Reason);
+	TArray<FString> GetSortedAutoPauseAwaitIds() const;
+	class APlayerState* FindAutoPauseMarker(const APlayerState* Excluded = nullptr) const;
 
 	/** Override spawn penalty weights + selection knobs from Mod.ini [UTPUGS_SPAWN]. */
 	void LoadSpawnConfig();

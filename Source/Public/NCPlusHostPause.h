@@ -54,9 +54,18 @@ namespace NCPlusHostPause
 	 *  unpause as before). Driven by a pause-immune core FTicker (the world is frozen
 	 *  while paused) that is SELF-COMPLETING — worst case it always resumes after the
 	 *  countdown, so it can never wedge a match even if the pauser disconnects. Only
-	 *  affects the stock pause path (host via [NetcodePlus] bAllowHostPause, or rcon);
-	 *  auto-pause-on-drop clears WorldSettings->Pauser directly and is unaffected. */
+	 *  affects the stock pause path (host via [NetcodePlus] bAllowHostPause, or rcon).
+	 *  CTF auto-pause owns a separate authoritative countdown and explicitly skips
+	 *  this path so the two tickers can never race. */
 	NETCODEPLUS_API bool DeferUnpauseForCountdown(AUTBaseGameMode* GM);
+
+	/** Shared configured countdown duration ([NetcodePlus]
+	 *  UnpauseCountdownSec), clamped to a safe 0..60 second range. */
+	NETCODEPLUS_API int32 GetUnpauseCountdownSeconds();
+
+	/** Cancel this match's pending shared host/rcon countdown. Auto-pause calls
+	 *  this when a tracked player drops so no older resume path can still fire. */
+	NETCODEPLUS_API void CancelDeferredUnpause(AUTBaseGameMode* GM);
 
 	/** Call right after ANY successful unpause (ClearPause override post-Super, or a
 	 *  direct WorldSettings->Pauser clear). Forces an immediate ReplicatedWorldTimeSeconds

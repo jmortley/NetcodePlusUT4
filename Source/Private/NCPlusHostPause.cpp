@@ -70,7 +70,7 @@ static void LoadUnpauseConfig()
 	GUnpauseCfgLoaded = true;
 	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	GConfig->GetInt(TEXT("NetcodePlus"), TEXT("UnpauseCountdownSec"), GUnpauseSec, ModIni);
-	if (GUnpauseSec < 0) GUnpauseSec = 0;
+	GUnpauseSec = FMath::Clamp(GUnpauseSec, 0, 60);
 }
 
 // Live countdown state (one match per server, so file-static is fine; CreateStatic
@@ -134,6 +134,12 @@ static bool UnpauseTick(float /*DeltaTime*/)
 
 namespace NCPlusHostPause
 {
+	int32 GetUnpauseCountdownSeconds()
+	{
+		LoadUnpauseConfig();
+		return GUnpauseSec;
+	}
+
 	bool HostMayPause(APlayerController* PC, AUTBaseGameMode* GM)
 	{
 		LoadHostPauseConfig();
@@ -288,6 +294,27 @@ namespace NCPlusHostPause
 			FTickerDelegate::CreateStatic(&UnpauseTick), 1.0f);
 		UE_LOG(LogNCHostPause, Log, TEXT("[HostPause] unpause requested — holding %ds countdown"), GUnpauseSec);
 		return true;   // defer: stay paused until the countdown fires the real clear
+	}
+
+	void CancelDeferredUnpause(AUTBaseGameMode* GM)
+	{
+		if (GM == nullptr || GUnpauseGM.Get() != GM)
+		{
+			return;
+		}
+
+		// Do not RemoveTicker while its completion callback is re-entering
+		// ClearPause (GUnpauseActive is already false in that case).
+		if (GUnpauseActive && GUnpauseTicker.IsValid())
+		{
+			FTicker::GetCoreTicker().RemoveTicker(GUnpauseTicker);
+		}
+		GUnpauseTicker.Reset();
+		GUnpauseGM.Reset();
+		GUnpauseRemain = 0;
+		GUnpauseActive = false;
+		GUnpauseFiring = false;
+		UE_LOG(LogNCHostPause, Log, TEXT("[HostPause] deferred unpause cancelled"));
 	}
 
 	void ResyncServerWorldTime(AGameModeBase* GM)

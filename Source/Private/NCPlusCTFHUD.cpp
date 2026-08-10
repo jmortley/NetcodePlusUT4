@@ -44,6 +44,9 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"));
 	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
+	// Authoritative automatic-pause banner/countdown. Registered after the
+	// scoreboard so it remains readable while the score panel is open.
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AutoPause"));
 	// NCPlus CTF flag-status subclass — drops in for the stock engine widget.
 	// Adds nchud control over carrier indicator + you-have-flag banner + the
 	// NEW enemy-has-flag banner (engine had the FText defined but never rendered).
