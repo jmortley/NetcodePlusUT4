@@ -2680,26 +2680,16 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 	if (UTGameState->OnSameTeam(Victim, Attacker)) return;
 	if (!bRoundInProgress || !Attacker->Team || DamageAmount <= 0) return;
 
-	// Calculate actual damage dealt (no overkill)
-	int32 ActualDamage = DamageAmount;
-	if (Victim && Victim->GetUTCharacter())
-	{
-		AUTCharacter* VictimChar = Victim->GetUTCharacter();
-		int32 TotalHP = VictimChar->Health + FMath::FloorToInt(VictimChar->GetArmorAmount());
-		ActualDamage = FMath::Min(DamageAmount, TotalHP);
-	}
-	else
-	{
-		// Victim pawn already destroyed (telefrag cleanup order): there is no
-		// HP left to cap against, and a telefrag arrives as a raw 100000 —
-		// bound the credit instead of forwarding the sentinel to the stats.
-		ActualDamage = FMath::Min(DamageAmount, 300);
-	}
-	// A dying victim's Health is already negative, so the HP cap can go
-	// negative on overkill shots (and ~-100k on a just-telefragged body).
-	// Damage credit is never negative — this fed corrupt rounds[] damage to
-	// the ELO payload (ut4stats match 3321: stored -99512 and +100180).
-	ActualDamage = FMath::Max(ActualDamage, 0);
+	// Bound the credit, don't re-derive it: the only game-mode ScoreDamage
+	// caller (stock UTCharacter::TakeDamage :1023) already clamps DamageAmount
+	// to the HP+armor the hit actually removed, and by the time it calls us the
+	// victim's Health is post-decrement — so capping against the REMAINING pool
+	// credited every killing blow 0 (Health <= 0) and a just-telefragged body
+	// ~-100k (ut4stats match 3321 stored -99512 and +100180 in rounds[]). The
+	// raw telefrag sentinel (100000) only reaches us when the pawn is already
+	// destroyed, so one flat bound covers both branches: 300 > any legitimate
+	// single hit (100 HP + 150 armor).
+	int32 ActualDamage = FMath::Clamp(DamageAmount, 0, 300);
 
 	if (!PlayerRoundDamage.Contains(Attacker))
 	{

@@ -22,10 +22,10 @@ DEFINE_LOG_CATEGORY_STATIC(LogNCPlusAnnouncer, Log, All);
 
 // Temporary client-side announcer diagnostics. Pure logging: no queue, playback,
 // replication, or RPC behavior changes.
-// 328-RC-RELEASE: restore the default below to 0 before shipping 328-rc.
+// Default 0 for live (restored for the 2026-08-14 328 cut; was 1 during the 328-RC dogfood).
 static TAutoConsoleVariable<int32> CVarAnnouncerTrace(
-	TEXT("ncp.AnnouncerTrace"), 1,
-	TEXT("Announcer diagnostics: 0=off (required for 328-rc release), 1=trace install/defaults, queue admission, sound lookup/cache, and playback (temporary default during diagnosis)."),
+	TEXT("ncp.AnnouncerTrace"), 0,
+	TEXT("Announcer diagnostics: 0=off, 1=trace install/defaults, queue admission, sound lookup/cache, and playback."),
 	ECVF_Default);
 
 // Flag-taken audibility (frenchempire 2026-08-06, "flag re-taken is silent"):

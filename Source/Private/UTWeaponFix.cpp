@@ -11,6 +11,7 @@
 #include "UTWeaponStateFiring_Transactional.h"
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
 #include "UTWeaponStateZooming.h"
+#include "UTWeaponStateFiringSpinUp.h"
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
 #include "UTPlusProj_FlakShell.h"
@@ -70,10 +71,10 @@ static FORCEINLINE bool FireDbg()
 // Rocket primary diagnostics only. This intentionally changes no firing state, timers,
 // timestamps, or RPC payloads. Level 1 traces the M1 transaction/cadence lifecycle; level 2
 // also traces predicted projectile delay and charged-state contamination evidence.
-// 328-RC-RELEASE: restore the default below to 0 before shipping 328-rc.
+// Default 0 for live (restored for the 2026-08-14 328 cut; was 2 during the 328-RC dogfood).
 static TAutoConsoleVariable<int32> CVarRocketPrimaryDiag(
-    TEXT("ncp.RocketPrimaryDiag"), 2,
-    TEXT("Rocket M1 diagnostics: 0=off (required for 328-rc release), 1=refire/event/server/ACK lifecycle, 2=also fake-delay and charged-state details (temporary default during diagnosis). Logging only; no behavior change."),
+    TEXT("ncp.RocketPrimaryDiag"), 0,
+    TEXT("Rocket M1 diagnostics: 0=off, 1=refire/event/server/ACK lifecycle, 2=also fake-delay and charged-state details. Logging only; no behavior change."),
     ECVF_Default);
 
 static FORCEINLINE int32 RocketPrimaryDiagLevel()
@@ -198,12 +199,12 @@ static TAutoConsoleVariable<int32> CVarVisualHitscanClaimDebug(
 // result, the rendered-vs-anchor visual offset, and the claim actually sent.
 // Exists to answer which route grants "gifted" hits landing ahead of the
 // rendered model at low ping. Changes no validation behavior at any setting.
-// DEFAULT 1 FOR THE 328-RC DOGFOOD ONLY — flip back to 0 before the 328 live
-// release (2026-08-14).
+// Default 0 for live (restored for the 2026-08-14 328 cut; was 1 during the
+// 328-RC dogfood — SERVER-ADMINS.md documents the live default).
 // =========================================================================
 static TAutoConsoleVariable<int32> CVarHitAttribDebug(
-    TEXT("ncp.HitAttribDebug"), 1,
-    TEXT("Hitscan acceptance attribution: 0=off, 1=log one [HitAttrib] line per server-validated shot and one [HitAttrib.Client] line per client claim decision. Default 1 during 328-RC dogfood; revert to 0 for live."),
+    TEXT("ncp.HitAttribDebug"), 0,
+    TEXT("Hitscan acceptance attribution: 0=off, 1=log one [HitAttrib] line per server-validated shot and one [HitAttrib.Client] line per client claim decision."),
     ECVF_Default);
 
 // leadUU diagnostic only: the server cannot see what the shooter's client
@@ -2880,15 +2881,31 @@ void AUTWeaponFix::Tick(float DeltaTime)
             }
             else if (GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode] > TimeoutThreshold)
             {
-                // Charged states never reach here — every wedge path above returns. This is the
-                // generic stuck-firing watchdog (client disconnect / lost Stop) for the other
-                // firing states only. Force stop: kills the looping audio and resets the state.
-                UE_LOG(LogUTWeaponFix, Warning,
-                    TEXT("[FireBlock] %s stuck-fire watchdog StopFire: mode=%d idle=%.2fs threshold=%.2fs state=%s"),
-                    *GetName(), CurrentFireMode,
-                    GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode], TimeoutThreshold,
-                    GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"));
-                StopFire(CurrentFireMode);
+                // Spin-down is not a wedge: after release, stock UUTWeaponStateFiringSpinUp
+                // stays the current state (IsFiring) through CoolDownTime with nothing
+                // stamping LastFireTime, so the stale test trips on nearly every minigun
+                // release — and StopFire here repeats every tick (it never exits the state)
+                // while erasing a re-pressed PendingFire mid-cooldown (feathered-respin
+                // no-reg). A live cooldown timer proves the state exits on its own; keep
+                // the idle clock current instead, so a state that somehow outlives its
+                // cooldown is still reaped one threshold later.
+                UUTWeaponStateFiringSpinUp* SpinDown = Cast<UUTWeaponStateFiringSpinUp>(CurrentState);
+                if (SpinDown != nullptr && GetWorldTimerManager().IsTimerActive(SpinDown->CoolDownFinishedHandle))
+                {
+                    LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+                }
+                else
+                {
+                    // Charged states never reach here — every wedge path above returns. This is the
+                    // generic stuck-firing watchdog (client disconnect / lost Stop) for the other
+                    // firing states only. Force stop: kills the looping audio and resets the state.
+                    UE_LOG(LogUTWeaponFix, Warning,
+                        TEXT("[FireBlock] %s stuck-fire watchdog StopFire: mode=%d idle=%.2fs threshold=%.2fs state=%s"),
+                        *GetName(), CurrentFireMode,
+                        GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode], TimeoutThreshold,
+                        GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"));
+                    StopFire(CurrentFireMode);
+                }
             }
         }
     }

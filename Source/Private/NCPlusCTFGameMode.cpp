@@ -35,6 +35,7 @@
 #include "NCConcedeVote.h"
 #include "CTFStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
+#include "NCICTFFlagLiftGuard.h"
 #include "NCPlusCTFOTInfo.h"
 #include "NCPlusCTFRatingSystem.h"
 #include "NCEloUploader.h"
@@ -1899,6 +1900,9 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	}
 
 	APlayerStart* Best = nullptr;
+	// Starts in real contention for this pick — weighted mode counts live (non-zero)
+	// ceilings, legacy counts the tie band. Feeds band= in the pick diagnostic below.
+	int32 ContentionCount = 0;
 	if (bSpawnWeightedRandom)
 	{
 		// IG+ weighted-random pick (NewTDM.uc: CurrentScore = Rand(Max(DefaultSpawnWeight
@@ -1925,6 +1929,7 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 
 			const float Ceiling = SpawnRandomBase - (BestScore - Scores[i]) * SpawnRandomSpread;
 			if (Ceiling <= 0.f) { continue; }
+			ContentionCount++;
 			const float Draw = FMath::FRandRange(0.f, Ceiling);
 			if (Draw > BestDraw)
 			{
@@ -1945,6 +1950,7 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 			if (!Eligible(i)) { continue; }
 			if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
 		}
+		ContentionCount = TopBand.Num();
 		if (TopBand.Num() > 0) { Best = TopBand[FMath::RandRange(0, TopBand.Num() - 1)]; }
 	}
 
@@ -1973,7 +1979,7 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		}
 		UE_LOG(LogGameMode, Warning,
 			TEXT("NCPlusCTF pick: %s(T%d) -> %s | tier=%u band=%d fresh=%d kblk=%d efcblk=%d rbblk=%d (pool=%d)"),
-			*PS->PlayerName, TeamIndex, *Best->GetName(), (uint32)BestSafetyTier, TopBand.Num(), bForceFresh ? 1 : 0,
+			*PS->PlayerName, TeamIndex, *Best->GetName(), (uint32)BestSafetyTier, ContentionCount, bForceFresh ? 1 : 0,
 			KillerBlocked, EFCLOSBlocked, RobbedBlocked, Pool.Num());
 	}
 
@@ -2662,6 +2668,14 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		OTInfo->bHasHalftime = bHasHalftime;
 	}
 
+	// iCTF only: replace Epic's immediate lift-crush flag return with a swept,
+	// safe relocation that preserves the normal auto-return timer. The guard
+	// remains spawned when its runtime CVar is off so it can be re-enabled live.
+	if (HasAuthority() && bIsInstagib)
+	{
+		ANCICTFFlagLiftGuard::EnsureSpawned(GetWorld());
+	}
+
 	// Rating system: construct ONCE per map load, locking in bIsInstagib now
 	// that the mutator chain is reliably settled. The `!IsValid()` guard makes
 	// the halftime second call a no-op so we don't reconstruct mid-match.
@@ -2778,6 +2792,16 @@ void ANCPlusCTFGameMode::HandleEnteringOvertime()
 
 void ANCPlusCTFGameMode::HandleMatchInOvertime()
 {
+	// Every OT entry dispatches here, including EndOfHalf's direct
+	// SetMatchState(MatchIsInOvertime) — the only path 3v3+ games take, since
+	// HandleEnteringOvertime (the other stamp site) is reachable solely via the
+	// <=4-player halftime config. Unstamped, the respawn ramp read 0, computed
+	// OTElapsed as total world uptime, and opened at the 10s cap on OT's first
+	// tick instead of holding the 2s base for OvertimeEscalationDelay.
+	if (OvertimeStartWorldTime <= 0.f)
+	{
+		OvertimeStartWorldTime = GetWorld()->GetTimeSeconds();
+	}
 	BroadcastLocalized(this, UUTCTFMajorMessage::StaticClass(), 12, nullptr, nullptr, nullptr);
 	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);
 	bGracePeriodActive = false;
