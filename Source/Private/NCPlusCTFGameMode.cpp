@@ -825,6 +825,11 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadFloat(TEXT("SpawnNearLastPenalty"),    SpawnNearLastPenalty);
 
 	// Selection knobs (tie-band + freshness + killer-avoid).
+	ReadBool(TEXT("SpawnWeightedRandom"),      bSpawnWeightedRandom);
+	ReadFloat(TEXT("SpawnRandomBase"),         SpawnRandomBase);
+	ReadFloat(TEXT("SpawnRandomSpread"),       SpawnRandomSpread);
+	ReadFloat(TEXT("SpawnEnemyHardRadius"),    SpawnEnemyHardRadius);
+	ReadFloat(TEXT("SpawnEnemyBelowZ"),        SpawnEnemyBelowZ);
 	ReadFloat(TEXT("SpawnTieBandWidth"),       SpawnTieBandWidth);
 	ReadFloat(TEXT("SpawnFreshnessBonus"),     SpawnFreshnessBonus);
 	ReadFloat(TEXT("SpawnFreshnessWindow"),    SpawnFreshnessWindow);
@@ -835,8 +840,10 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadBool(TEXT("LogSpawnChoices"), bLogSpawnChoices);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f efcLOSAvoid=%.0f robbedAvoid=%.0f logChoices=%s | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: pick=%s randBase=%.1f randSpread=%.2f tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f efcLOSAvoid=%.0f robbedAvoid=%.0f enemyHard=%.0f enemyBelowZ=%.0f logChoices=%s | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		bSpawnWeightedRandom ? TEXT("weighted-random") : TEXT("tie-band"), SpawnRandomBase, SpawnRandomSpread,
 		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius, SpawnFlagCarrierLOSAvoidRadius, SpawnRobbedBaseAvoidCount,
+		SpawnEnemyHardRadius, SpawnEnemyBelowZ,
 		bLogSpawnChoices ? TEXT("true") : TEXT("false"),
 		FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange);
 }
@@ -936,6 +943,7 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 		if (UsedStart)
 		{
 			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(TWeakObjectPtr<AController>(NewPlayer));
+			Recent.ThirdLast = Recent.SecondLast;
 			Recent.SecondLast = Recent.Last;
 			Recent.Last = UsedStart;
 		}
@@ -1104,8 +1112,18 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 			const FVector EnemyLoc = EnemyChar->GetActorLocation();
 			const float DistToEnemy = (StartLoc - EnemyLoc).Size();
 
+			// IG+ MinSpawnZVariance (NewTDM.uc): an enemy well BELOW a start is
+			// separated by a floor, not standing next to it. Plain 3D distance
+			// counts a pit dweller as adjacent, which on vertical maps pushes the
+			// picker off perfectly good starts and crowds everyone onto the few
+			// remaining ones. Only the PROXIMITY term is discounted here — if he
+			// can actually see the start the LOS penalty below still lands (a
+			// deliberate refinement; IG+ drops both).
+			const bool bEnemyWellBelow = (SpawnEnemyBelowZ > 0.f)
+				&& ((StartLoc.Z - EnemyLoc.Z) >= SpawnEnemyBelowZ);
+
 			// Distance-based penalty: closer enemy = bigger penalty
-			if (EnemyBlockRange > 0.f && DistToEnemy < EnemyBlockRange)
+			if (!bEnemyWellBelow && EnemyBlockRange > 0.f && DistToEnemy < EnemyBlockRange)
 			{
 				float DistFactor = 1.f - (DistToEnemy / EnemyBlockRange);
 				Result -= EnemyBlockPenalty * DistFactor;
@@ -1146,8 +1164,11 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 			{
 				return 0.001f;
 			}
-			// Penalize using the spawn from 2 lives ago
-			if (Recent->SecondLast.IsValid() && Recent->SecondLast.Get() == P)
+			// Penalize the spawns from 2 AND 3 lives ago (IG+ LastStartSpot2/3).
+			// Three-deep memory is what stops a two-start map alternating A-B-A-B
+			// forever: with only 2 remembered, the third choice is unconstrained.
+			if ((Recent->SecondLast.IsValid() && Recent->SecondLast.Get() == P)
+				|| (Recent->ThirdLast.IsValid() && Recent->ThirdLast.Get() == P))
 			{
 				Result *= SpawnRecentPenaltyMultiplier; // 0.5x
 			}
@@ -1312,13 +1333,16 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	TArray<float> Scores;
 	TArray<bool> KillerAdj;
 	TArray<bool> EFCLOSAdj;
+	TArray<bool> EnemyAdj;
 	TArray<float> DistOwnBase;
 	Cands.Reserve(Pool.Num());
 	Scores.Reserve(Pool.Num());
 	KillerAdj.Reserve(Pool.Num());
 	EFCLOSAdj.Reserve(Pool.Num());
+	EnemyAdj.Reserve(Pool.Num());
 	DistOwnBase.Reserve(Pool.Num());
 	static FName NAME_CTFSpawnEFCLOS = FName(TEXT("CTFSpawnEFCLOS"));
+	static FName NAME_CTFSpawnEnemy = FName(TEXT("CTFSpawnEnemy"));
 	for (const TWeakObjectPtr<APlayerStart>& WP : Pool)
 	{
 		APlayerStart* Candidate = WP.Get();
@@ -1353,6 +1377,46 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 			}
 		}
 		EFCLOSAdj.Add(bHasEFCLOS);
+
+		// IG+ MinSpawnDistance (NewTDM.uc): a start with a live enemy this close is
+		// REFUSED, not merely penalised — a score penalty can still lose to a start
+		// that scores well on everything else, which is how players end up
+		// materialising in someone's face. Escape hatch, also IG+: an enemy well
+		// BELOW the start with no sightline to it is floor-separated, not a threat.
+		// This is only a tier preference — if every start in the pool is violated
+		// (small map, heavy pressure) the bit drops out of every tier and spawning
+		// proceeds on the remaining protections.
+		bool bEnemyTooClose = false;
+		if (SpawnEnemyHardRadius > 0.f)
+		{
+			const FVector CandLoc = Candidate->GetActorLocation();
+			for (FConstControllerIterator EIt = GetWorld()->GetControllerIterator(); EIt && !bEnemyTooClose; ++EIt)
+			{
+				AController* EC = EIt->Get();
+				if (!EC || !EC->GetPawn()) { continue; }
+				AUTPlayerState* EPS = Cast<AUTPlayerState>(EC->PlayerState);
+				if (!EPS || !EPS->Team || EPS->Team->TeamIndex == TeamIndex) { continue; }
+				AUTCharacter* EChar = Cast<AUTCharacter>(EC->GetPawn());
+				if (!EChar || EChar->IsDead()) { continue; }
+
+				const FVector ELoc = EChar->GetActorLocation();
+				if ((CandLoc - ELoc).Size() >= SpawnEnemyHardRadius) { continue; }
+
+				if (SpawnEnemyBelowZ > 0.f && (CandLoc.Z - ELoc.Z) >= SpawnEnemyBelowZ)
+				{
+					// Below us: only dangerous if he can actually see the start.
+					const FVector SpawnEye = CandLoc + FVector(0.f, 0.f, 64.f);
+					const FVector EnemyEye = ELoc + FVector(0.f, 0.f, EChar->BaseEyeHeight);
+					const bool bClearLOS = !GetWorld()->LineTraceTestByChannel(
+						SpawnEye, EnemyEye, COLLISION_TRACE_WEAPONNOCHARACTER,
+						FCollisionQueryParams(NAME_CTFSpawnEnemy, false));
+					if (!bClearLOS) { continue; }
+				}
+				bEnemyTooClose = true;
+			}
+		}
+		EnemyAdj.Add(bEnemyTooClose);
+
 		DistOwnBase.Add(bOwnFlagOut ? (Candidate->GetActorLocation() - OwnBaseLoc).Size() : FLT_MAX);
 	}
 
@@ -1384,17 +1448,19 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		}
 	}
 
-	// Lexicographic safety tier: last-killer clearance is highest priority, then
-	// EFC LOS clearance, then the rotating robbed-base exclusion. Each lower bit
-	// can only decide between candidates tied on every higher-priority rule. If all
-	// starts violate a rule, that bit is absent from every tier and spawning still
-	// succeeds using the remaining protections.
+	// Lexicographic safety tier: no-enemy-on-top-of-us is highest priority (IG+
+	// MinSpawnDistance), then last-killer clearance, then EFC LOS clearance, then
+	// the rotating robbed-base exclusion. Each lower bit can only decide between
+	// candidates tied on every higher-priority rule. If all starts violate a rule,
+	// that bit is absent from every tier and spawning still succeeds using the
+	// remaining protections.
 	uint8 BestSafetyTier = 0;
 	auto GetSafetyTier = [&](int32 i) -> uint8
 	{
+		const bool bEnemyClear = !EnemyAdj[i];
 		const bool bKillerClear = !(bHaveKiller && KillerAdj[i]);
 		const bool bEFCClear = !(EnemyFlagCarrier && EFCLOSAdj[i]);
-		return (bKillerClear ? 4 : 0) | (bEFCClear ? 2 : 0) | (!RobbedAdj[i] ? 1 : 0);
+		return (bEnemyClear ? 8 : 0) | (bKillerClear ? 4 : 0) | (bEFCClear ? 2 : 0) | (!RobbedAdj[i] ? 1 : 0);
 	};
 	for (int32 i = 0; i < Cands.Num(); ++i)
 	{
@@ -1412,15 +1478,56 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		BestScore = FMath::Max(BestScore, Scores[i]);
 	}
 
-	// Collect the tie-band (all within SpawnTieBandWidth of the best) and pick one at random.
-	TArray<APlayerStart*> TopBand;
-	for (int32 i = 0; i < Cands.Num(); ++i)
+	APlayerStart* Best = nullptr;
+	if (bSpawnWeightedRandom)
 	{
-		if (!Eligible(i)) { continue; }
-		if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
+		// IG+ weighted-random pick (NewTDM.uc: CurrentScore = Rand(Max(DefaultSpawnWeight
+		// + CurrentScore, 0)), highest draw wins). Every start still in contention
+		// draws from [0, ceiling); equal starts are a true coin-flip and a slightly
+		// worse start still wins a real share of the time. This is what the tie-band
+		// could not do — it picked the SAME start every life whenever one led by more
+		// than SpawnTieBandWidth ("siempre en el mismo sitio").
+		//
+		// Ceilings are measured DOWN FROM THE BEST, never up from the worst: Epic's
+		// base rating returns hard negatives for starts it has already rejected
+		// (-8 just-used, -5 respawn choice, -10 telefrag, -20 wrong team — and our
+		// Result<=0 early-out passes them through untouched), so a worst-relative
+		// ceiling would have handed the start you just left a real chance of coming
+		// back. Falling off the best instead gives anything SpawnRandomBase /
+		// SpawnRandomSpread points below the leader a ceiling of zero — no draw, no
+		// chance — which keeps every engine rejection excluded.
+		float BestDraw = -1.f;
+		APlayerStart* TopScorer = nullptr;
+		for (int32 i = 0; i < Cands.Num(); ++i)
+		{
+			if (!Eligible(i)) { continue; }
+			if (TopScorer == nullptr && Scores[i] >= BestScore) { TopScorer = Cands[i]; }
+
+			const float Ceiling = SpawnRandomBase - (BestScore - Scores[i]) * SpawnRandomSpread;
+			if (Ceiling <= 0.f) { continue; }
+			const float Draw = FMath::FRandRange(0.f, Ceiling);
+			if (Draw > BestDraw)
+			{
+				BestDraw = Draw;
+				Best = Cands[i];
+			}
+		}
+		// Only reachable if SpawnRandomBase was configured to 0 or below: keep the
+		// scorer's verdict rather than dropping to the engine picker.
+		if (Best == nullptr) { Best = TopScorer; }
+	}
+	else
+	{
+		// Legacy: coin-flip among everything within SpawnTieBandWidth of the best.
+		TArray<APlayerStart*> TopBand;
+		for (int32 i = 0; i < Cands.Num(); ++i)
+		{
+			if (!Eligible(i)) { continue; }
+			if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
+		}
+		if (TopBand.Num() > 0) { Best = TopBand[FMath::RandRange(0, TopBand.Num() - 1)]; }
 	}
 
-	APlayerStart* Best = (TopBand.Num() > 0) ? TopBand[FMath::RandRange(0, TopBand.Num() - 1)] : nullptr;
 	if (!Best)
 	{
 		return Super::ChoosePlayerStart_Implementation(Player);

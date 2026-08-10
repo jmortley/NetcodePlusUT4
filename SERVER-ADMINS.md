@@ -449,7 +449,26 @@ constructor):
 `EnemyBlockPenalty`, `EnemyLOSBlockRange`, `EnemyLOSPenalty`, `FlagBaseProximityRadius`,
 `FlagSpawnPenaltyRadius`, `SpawnRecentPenaltyMultiplier`, `SpawnNearLastRadius`, `SpawnNearLastPenalty`,
 `SpawnTieBandWidth`, `SpawnFreshnessBonus`, `SpawnFreshnessWindow`, `SpawnFlagVicinityRadius`,
-`SpawnKillerAvoidRadius`, `SpawnFlagCarrierLOSAvoidRadius` (default `3500`), `SpawnRobbedBaseAvoidCount`.
+`SpawnKillerAvoidRadius`, `SpawnFlagCarrierLOSAvoidRadius` (default `3500`), `SpawnRobbedBaseAvoidCount`,
+`LogSpawnChoices` (bool, default `false` — one log line per live spawn, for A/B testing).
+
+**How the winner is chosen (328).** Scoring is unchanged, but the final pick is now
+Deaod's InstaGibPlus method: every start still in contention draws a random number from
+`[0, ceiling)` and the highest draw wins, where the ceiling falls off from the best start.
+Equal starts are a true coin‑flip and a slightly worse start still wins a real share of the
+time, so the picker is **never** deterministic — the old tie‑band chose the same start every
+life whenever one led by more than `SpawnTieBandWidth`.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `SpawnWeightedRandom` | bool | `true` | `false` restores the old tie‑band coin‑flip (uses `SpawnTieBandWidth`). |
+| `SpawnRandomBase` | float | `20` | Draw ceiling of the best start. **Raise for more variety.** |
+| `SpawnRandomSpread` | float | `1.0` | Ceiling lost per score point behind the leader. Raise to favour quality; a start more than `Base/Spread` points behind can never be picked (this is what keeps just‑used and telefrag starts out). |
+| `SpawnEnemyHardRadius` | float | `1200` | A start with a live enemy this close is **refused**, not just penalised. Waived if every start in the pool violates it. `0` = off. |
+| `SpawnEnemyBelowZ` | float | `190` | An enemy at least this far *below* a start counts as floor‑separated: no proximity penalty, and it clears the hard radius above when he also has no line of sight. `0` = off. |
+
+Per‑player anti‑repeat now remembers **three** spawns (the last is blocked outright, the two
+before it are halved), matching IG+.
 
 ---
 

@@ -456,12 +456,15 @@ protected:
 	bool bGracePeriodActive;
 
 	// ── Recent Spawn Tracking (IG+ style) ───────────────────────────
-	// Penalize reusing the same spawn point. Tracks last 2 spawns per player.
+	// Penalize reusing the same spawn point. Tracks the last 3 spawns per player,
+	// matching IG+ (StartSpot hard-blocked, LastStartSpot2/3 score-penalised —
+	// NewTDM.uc FindPlayerStartAdvanced).
 
 	struct FRecentSpawns
 	{
 		TWeakObjectPtr<APlayerStart> Last;
 		TWeakObjectPtr<APlayerStart> SecondLast;
+		TWeakObjectPtr<APlayerStart> ThirdLast;
 	};
 
 	TMap<TWeakObjectPtr<AController>, FRecentSpawns> PlayerRecentSpawns;
@@ -482,6 +485,37 @@ protected:
 
 	/** Penalty scale for near-last-spawn distance */
 	float SpawnNearLastPenalty = 6.f;
+
+	// ── IG+ weighted-random selection (Deaod's NewTDM.uc port) ───────
+	// The tie-band picks deterministically whenever one start is more than
+	// SpawnTieBandWidth ahead — on many maps that is the SAME start every life,
+	// which is the "siempre en el mismo sitio" report. IG+ instead gives every
+	// eligible start a random draw whose ceiling grows with its score and takes
+	// the highest draw: a start half as good as the best still wins ~25% of the
+	// time, and equal starts are a true coin-flip. Never deterministic.
+
+	/** 1 = IG+ weighted-random draw (default), 0 = legacy tie-band coin-flip. */
+	bool bSpawnWeightedRandom = true;
+
+	/** Draw ceiling of the BEST eligible start. Larger = flatter (more random). */
+	float SpawnRandomBase = 20.f;
+
+	/** Ceiling lost per score point below the best eligible start. A start more
+	 *  than (SpawnRandomBase / SpawnRandomSpread) points behind the leader draws
+	 *  nothing and can never be picked — which is what keeps Epic's rejected
+	 *  starts (just-used -8, respawn-choice -5, telefrag -10, wrong-team -20)
+	 *  out. Larger = greedier; smaller = more variety AND more risk. */
+	float SpawnRandomSpread = 1.f;
+
+	/** IG+ MinSpawnDistance: a start with a live enemy inside this radius is
+	 *  REFUSED (own safety tier), not merely penalised. Waived if every start in
+	 *  the pool violates it. 0 = off. */
+	float SpawnEnemyHardRadius = 1200.f;
+
+	/** IG+ MinSpawnZVariance: an enemy at least this far BELOW a start is treated
+	 *  as floor-separated rather than adjacent (discounts the proximity penalty,
+	 *  and clears the hard radius above when he also has no sightline). 0 = off. */
+	float SpawnEnemyBelowZ = 190.f;
 
 	// ── Team-aware spawn pools (curated from author TeamNum tags) ─────
 	// Built lazily on the first ChoosePlayerStart. Server-only; never replicated.
