@@ -380,7 +380,10 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		{
 			C->NotifyBlockedHeadShot(UTOwner);
 		}
-		if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None))
+		// No accuracy credit for detonating projectiles (shooting a core/rocket
+		// out of the air) — same rule as UTWeaponFix::FireInstantHit (2026-08-10).
+		if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None)
+			&& Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
 		{
 			PS->ModifyStatsValue(HitsStatsName, 1);
 		}

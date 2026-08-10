@@ -185,7 +185,10 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 						FireDir * (LinkGun->GetImpartedMomentumMag(Hit.Actor.Get()) * float(AppliedDamage) / float(DamageInfo.Damage))),
 					LinkDamageInstigator,
 					LinkGun);
-				if (PS != nullptr && LinkGun->HitsStatsName != NAME_None)
+				// No accuracy credit for melting projectiles (cores/rockets) —
+				// same rule as UTWeaponFix::FireInstantHit (2026-08-10).
+				if (PS != nullptr && LinkGun->HitsStatsName != NAME_None
+					&& Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
 				{
 					PS->ModifyStatsValue(LinkGun->HitsStatsName, AppliedDamage / FMath::Max(LinkedDamage, 1.f));
 				}
