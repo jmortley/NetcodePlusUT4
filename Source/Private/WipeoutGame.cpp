@@ -21,6 +21,10 @@
 #include "UTPickupHealth.h"
 #include "UTPickupAmmo.h"
 #include "UTPickupInventory.h"
+#include "UTInventory.h"
+#include "UTTimedPowerup.h"
+#include "UTJumpBoots.h"
+#include "StatNames.h"
 #include "Engine/DemoNetDriver.h"
 #include "WipeoutDamageReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
@@ -44,6 +48,53 @@
 #include "GameFramework/WorldSettings.h"            // KillZ for bad-spawn detection
 #include "Components/CapsuleComponent.h"            // capsule half-height for snap-back
 #include "GameFramework/CharacterMovementComponent.h" // IsFalling / StopMovementImmediately
+
+
+namespace
+{
+	bool IsAmpInventoryClass(UClass* InventoryClass)
+	{
+		if (!InventoryClass)
+		{
+			return false;
+		}
+
+		const AUTInventory* InventoryCDO = Cast<AUTInventory>(InventoryClass->GetDefaultObject());
+		const FString ClassName = InventoryClass->GetName();
+		return (InventoryCDO && InventoryCDO->StatsNameCount == NAME_UDamageCount)
+			|| ClassName.Contains(TEXT("UDamage"))
+			|| ClassName.Contains(TEXT("Amp"));
+	}
+
+	bool IsSiphonInventoryClass(UClass* InventoryClass)
+	{
+		return InventoryClass && InventoryClass->IsChildOf(AUTSiphonPowerup::StaticClass());
+	}
+
+	bool IsBerserkInventoryClass(UClass* InventoryClass)
+	{
+		const AUTInventory* InventoryCDO = InventoryClass
+			? Cast<AUTInventory>(InventoryClass->GetDefaultObject())
+			: nullptr;
+		return InventoryClass
+			&& ((InventoryCDO && InventoryCDO->StatsNameCount == NAME_BerserkCount)
+				|| InventoryClass->GetName().Contains(TEXT("Berserk")));
+	}
+
+	bool IsSiphonPowerupCandidate(UClass* InventoryClass)
+	{
+		return InventoryClass
+			&& InventoryClass->IsChildOf(AUTTimedPowerup::StaticClass())
+			&& !InventoryClass->IsChildOf(AUTJumpBoots::StaticClass())
+			&& !IsAmpInventoryClass(InventoryClass)
+			&& !IsSiphonInventoryClass(InventoryClass);
+	}
+
+	uint8 GetSiphonPowerupPriority(UClass* InventoryClass)
+	{
+		return IsBerserkInventoryClass(InventoryClass) ? 0 : 1;
+	}
+}
 
 
 // ============================================================================
@@ -2380,7 +2431,8 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 //   - Remove ALL health pickups and vials
 //   - Remove armor EXCEPT ShieldBelt and ThighPads; stash the first
 //     Chest/Vest for the belt substitution
-//   - Remove powerups EXCEPT UDamage/Amp/Siphon
+//   - Preserve UDamage/Amp and Berserk; record non-Amp timed-powerup spots for
+//     Siphon before removing the originals that Wipeout does not keep
 //   - Keep all other weapon bases (ammo refill encourages movement)
 // ---------------------------------------------------------------------------
 bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
@@ -2426,12 +2478,46 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 	AUTPickupInventory* InvPickup = Cast<AUTPickupInventory>(Other);
 	if (InvPickup && InvPickup->GetInventoryType())
 	{
-		FString InvName = InvPickup->GetInventoryType()->GetName();
+		UClass* InvClass = *InvPickup->GetInventoryType();
+		FString InvName = InvClass->GetName();
 
-		// Keep: UDamage / Amp / Siphon
-		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")) || InvName.Contains(TEXT("Berserk")) || InvName.Contains(TEXT("Siphon")))
+		// A map-authored Siphon already satisfies the placement requirement. Keep
+		// it and suppress the deferred replacement spawn.
+		if (IsSiphonInventoryClass(InvClass))
 		{
-			return Super::CheckRelevance_Implementation(Other);
+			const bool bRelevant = Super::CheckRelevance_Implementation(Other);
+			if (bRelevant)
+			{
+				SiphonPickup = InvPickup;
+			}
+			return bRelevant;
+		}
+
+		// Capture the authored spot before Wipeout removes powerups such as Invis
+		// or Vengeance. Berserk currently survives until the Siphon replacement
+		// succeeds; the weak pointer lets us remove that live source afterward.
+		int32 CapturedSiphonCandidateIndex = INDEX_NONE;
+		if (IsSiphonPowerupCandidate(InvClass))
+		{
+			CapturedSiphonCandidateIndex = SiphonPowerupCandidates.Emplace(
+				InvPickup->GetActorTransform(),
+				InvPickup->GetPathName(),
+				InvName,
+				InvPickup,
+				GetSiphonPowerupPriority(InvClass));
+		}
+
+		// Keep: UDamage / Amp / Berserk / Siphon
+		if (IsAmpInventoryClass(InvClass) || IsBerserkInventoryClass(InvClass) || InvName.Contains(TEXT("Siphon")))
+		{
+			const bool bRelevant = Super::CheckRelevance_Implementation(Other);
+			if (!bRelevant && CapturedSiphonCandidateIndex != INDEX_NONE)
+			{
+				// Respect a downstream mutator that deliberately removes a powerup
+				// Wipeout itself intended to keep (normally this is Berserk).
+				SiphonPowerupCandidates.RemoveAt(CapturedSiphonCandidateIndex);
+			}
+			return bRelevant;
 		}
 
 		// Keep: ShieldBelt
@@ -4167,10 +4253,11 @@ void AUWipeoutGame::TrySpawnSiphonPickup()
 }
 
 // ─── SpawnSiphonPickup ─────────────────────────────────────────────────
-// Replaces a weapon base with the Siphon pickup. Placement rule: prefer the
-// sniper base FARTHEST (3D) from the nearest Amp/UDamage pickup, but only if
-// that distance clears SiphonMinAmpDistance — otherwise take whichever base
-// (farthest sniper or farthest Bio Rifle) is farther from the Amp.
+// Prefer a map-authored non-Amp timed-powerup base for Siphon (Berserk first,
+// then farthest from Amp with a stable tie-break). If none exists, use the
+// existing weapon fallback: prefer the sniper FARTHEST (3D) from the nearest
+// Amp/UDamage, but only if it clears SiphonMinAmpDistance; otherwise take the
+// farther of the farthest sniper and farthest Bio Rifle.
 // (dasnaksta 2026-08-06: amp and siphon
 // end up "one dodge apart" on Rankin/Faze/Deck/Andok; maps whose sniper is
 // already far, e.g. Ages/Garrison, keep their placement.) No amp on the map
@@ -4188,14 +4275,14 @@ void AUWipeoutGame::SpawnSiphonPickup()
 		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("SiphonMinAmpDistance"), MinAmpDist, ModIni);
 	}
 
-	// Amp anchors — same inventory-type identification as ResetPickupTimers.
+	// Amp anchors. The CDO stat check also recognizes WipeoutMutator's custom
+	// UDamage replacement classes, not just stock class names.
 	TArray<FVector> AmpLocs;
 	for (TActorIterator<AUTPickupInventory> It(GetWorld()); It; ++It)
 	{
 		AUTPickupInventory* Pickup = *It;
 		if (!Pickup || Pickup->IsPendingKillPending() || !Pickup->GetInventoryType()) continue;
-		const FString InvName = Pickup->GetInventoryType()->GetName();
-		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")))
+		if (IsAmpInventoryClass(*Pickup->GetInventoryType()))
 		{
 			AmpLocs.Add(Pickup->GetActorLocation());
 		}
@@ -4210,6 +4297,36 @@ void AUWipeoutGame::SpawnSiphonPickup()
 		}
 		return Best;
 	};
+
+	// Prefer a map-authored non-Amp timed-powerup spot. Revalidate a source that
+	// is still alive because a mutator may have changed its InventoryType after
+	// Wipeout captured the original CheckRelevance input.
+	const FWipeoutSiphonPowerupCandidate* BestPowerup = nullptr;
+	float BestPowerupAmpDist = -FLT_MAX;
+	for (const FWipeoutSiphonPowerupCandidate& Candidate : SiphonPowerupCandidates)
+	{
+		AUTPickupInventory* LiveSource = Cast<AUTPickupInventory>(Candidate.SourcePickup.Get());
+		if (LiveSource && !LiveSource->IsPendingKillPending())
+		{
+			if (!LiveSource->GetInventoryType()
+				|| !IsSiphonPowerupCandidate(*LiveSource->GetInventoryType()))
+			{
+				continue;
+			}
+		}
+
+		const float AmpDist = MinDistToAmp(Candidate.Transform.GetLocation());
+		const bool bBetterPriority = !BestPowerup || Candidate.Priority < BestPowerup->Priority;
+		const bool bSamePriority = BestPowerup && Candidate.Priority == BestPowerup->Priority;
+		const bool bBetterDistance = bSamePriority && AmpDist > BestPowerupAmpDist;
+		const bool bStableTieBreak = bSamePriority && AmpDist == BestPowerupAmpDist
+			&& Candidate.StableName.Compare(BestPowerup->StableName, ESearchCase::CaseSensitive) < 0;
+		if (bBetterPriority || bBetterDistance || bStableTieBreak)
+		{
+			BestPowerup = &Candidate;
+			BestPowerupAmpDist = AmpDist;
+		}
+	}
 
 	// Farthest-from-amp sniper and bio bases; highest-Z sniper kept as the
 	// no-amp fallback.
@@ -4260,21 +4377,34 @@ void AUWipeoutGame::SpawnSiphonPickup()
 		Chosen = (FarBioDist > FarSniperDist) ? FarBio : FarSniper;
 	}
 
-	if (!Chosen)
+	if (!BestPowerup && !Chosen)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: no usable weapon base for Siphon (amps=%d) — skipping"), AmpLocs.Num());
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: no usable powerup, sniper, or bio base for Siphon (amps=%d) — skipping"), AmpLocs.Num());
 		return;
 	}
 
-	const FVector BestLoc = Chosen->GetActorLocation();
-	const FRotator BestRot = Chosen->GetActorRotation();
-	UE_LOG(LogGameMode, Log,
-		TEXT("Wipeout: Siphon placement — amps=%d farSniper=%.0fuu farBio=%.0fuu threshold=%.0f -> %s base at %s"),
-		AmpLocs.Num(),
-		(FarSniper && AmpLocs.Num() > 0) ? FarSniperDist : -1.f,
-		(FarBio && AmpLocs.Num() > 0) ? FarBioDist : -1.f,
-		MinAmpDist,
-		(Chosen == FarBio) ? TEXT("BIO") : TEXT("SNIPER"), *BestLoc.ToString());
+	const FTransform BestTransform = BestPowerup
+		? BestPowerup->Transform
+		: FTransform(Chosen->GetActorRotation(), Chosen->GetActorLocation());
+	const FVector BestLoc = BestTransform.GetLocation();
+	AActor* ReplacedPickup = BestPowerup ? BestPowerup->SourcePickup.Get() : Chosen;
+	if (BestPowerup)
+	{
+		UE_LOG(LogGameMode, Log,
+			TEXT("Wipeout: Siphon placement - %d powerup candidate(s), amps=%d -> %s at %s (distance=%.0fuu)"),
+			SiphonPowerupCandidates.Num(), AmpLocs.Num(), *BestPowerup->InventoryName,
+			*BestLoc.ToString(), AmpLocs.Num() > 0 ? BestPowerupAmpDist : -1.f);
+	}
+	else
+	{
+		UE_LOG(LogGameMode, Log,
+			TEXT("Wipeout: Siphon placement — amps=%d farSniper=%.0fuu farBio=%.0fuu threshold=%.0f -> %s base at %s"),
+			AmpLocs.Num(),
+			(FarSniper && AmpLocs.Num() > 0) ? FarSniperDist : -1.f,
+			(FarBio && AmpLocs.Num() > 0) ? FarBioDist : -1.f,
+			MinAmpDist,
+			(Chosen == FarBio) ? TEXT("BIO") : TEXT("SNIPER"), *BestLoc.ToString());
+	}
 
 	// Try BP class first, fall back to hardcoded PowerupBase_C
 	TSubclassOf<AUTPickupInventory> SpawnClass = SiphonPickupClass;
@@ -4293,13 +4423,16 @@ void AUWipeoutGame::SpawnSiphonPickup()
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Spawning Siphon class=%s at %s"), *SpawnClass->GetPathName(), *BestLoc.ToString());
-	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(SpawnClass, BestLoc, BestRot, Params);
+	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(SpawnClass, BestTransform, Params);
 
 	if (SiphonPickup)
 	{
-		// Spawn succeeded — only now remove the weapon base we replaced, so a
-		// failed spawn can never cost the map its sniper/bio outright.
-		Chosen->Destroy();
+		// Spawn succeeded; only now remove a surviving source pickup, so a failed
+		// spawn can never cost the map its original powerup or weapon base.
+		if (ReplacedPickup && !ReplacedPickup->IsPendingKillPending())
+		{
+			ReplacedPickup->Destroy();
+		}
 
 		// If using fallback PowerupBase (not custom BP), set inventory type
 		if (!SiphonPickupClass)

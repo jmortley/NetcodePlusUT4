@@ -21,6 +21,30 @@
 class AUTHUD;
 class AController;
 class APlayerStart;
+class AUTPickupInventory;
+
+
+// Server-only record of a map-authored timed-powerup spot that Wipeout can
+// reuse for Siphon. Some of these pickups are removed during CheckRelevance,
+// so the transform must survive independently of the source actor.
+struct FWipeoutSiphonPowerupCandidate
+{
+	FTransform Transform;
+	FString StableName;
+	FString InventoryName;
+	TWeakObjectPtr<AActor> SourcePickup;
+	uint8 Priority;
+
+	FWipeoutSiphonPowerupCandidate(const FTransform& InTransform, const FString& InStableName,
+		const FString& InInventoryName, AActor* InSourcePickup, uint8 InPriority)
+		: Transform(InTransform)
+		, StableName(InStableName)
+		, InventoryName(InInventoryName)
+		, SourcePickup(InSourcePickup)
+		, Priority(InPriority)
+	{
+	}
+};
 
 
 // ============================================================================
@@ -359,10 +383,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning")
 	bool bEnablePingCompensatedSpawn = true;
 
-	// SIPHON POWERUP (spawned at a weapon base far from the Amp)
+	// SIPHON POWERUP (prefers a non-Amp powerup base, then sniper/bio)
 	// =======================================================================
 
-	/** Blueprint pickup class to spawn at the chosen weapon base (see
+	/** Blueprint pickup class to spawn at the chosen pickup base (see
 	 *  SpawnSiphonPickup for the placement rule).
 	 *  Set in the BP subclass to a child of PowerupBase with custom mesh/ghost.
 	 *  If None, no siphon pickup is spawned. */
@@ -377,11 +401,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Siphon")
 	float SiphonMinAmpDistance;
 
-	/** The siphon pickup spawned at the chosen weapon base location */
+	/** The siphon pickup spawned at the chosen pickup-base location */
 	UPROPERTY(Transient)
 	class AUTPickupInventory* SiphonPickup;
 
-	/** Picks the weapon base for Siphon (sniper far from Amp, else bio) and spawns the pickup there */
+	/** Map-authored non-Amp timed-powerup spots captured before relevance filtering removes them */
+	TArray<FWipeoutSiphonPowerupCandidate> SiphonPowerupCandidates;
+
+	/** Prefers a captured powerup base, otherwise uses the sniper/bio placement rule */
 	void SpawnSiphonPickup();
 
 	/** Guarded warmup-time spawn attempt (deferred from BeginPlay); HandleMatchHasStarted is the fallback */
