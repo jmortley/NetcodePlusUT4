@@ -205,10 +205,20 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	// ── Overtime Configuration ────────────────────────────────────────
 
-	/** Respawn wait time during overtime (seconds). Replaces Epic's extended
-	 *  overtime that escalated to 10s. Set to 0 to use normal respawn time. */
+	/** Respawn wait CAP during overtime (seconds). The escalation below climbs
+	 *  from the 2s base toward this. Set to 0 to disable OT respawn handling. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
 	float OvertimeRespawnTime;
+
+	/** Seconds of overtime the 2s base holds before escalation begins.
+	 *  Default 360 (tOxX 2026-08-10; the old NewCTF ramp used a hardcoded 300). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
+	float OvertimeEscalationDelay;
+
+	/** Seconds of overtime per +1s of respawn wait once escalation is running.
+	 *  Default 60 = +1s every minute (old ramp: hardcoded 120). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
+	float OvertimeEscalationInterval;
 
 	/** Regrab audibility (frenchempire 2026-08-06): stock plays the loud
 	 *  flag-taken alarm only for grabs from the base stand

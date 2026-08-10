@@ -84,7 +84,9 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 
 	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
-	OvertimeRespawnTime = 6.f;          // Fixed 6s respawn in overtime (replaces Epic's 10s escalation)
+	OvertimeRespawnTime = 10.f;         // OT respawn cap (327 was 6; raised with the tOxX ramp 2026-08-10)
+	OvertimeEscalationDelay = 360.f;    // 2s base holds for the first 6 min of OT (tOxX 2026-08-10; was 5)
+	OvertimeEscalationInterval = 60.f;  // then +1s per minute (was +1s per 2 minutes)
 
 	// Internal state
 	AdvantageTimeRemaining = 0;
@@ -2356,17 +2358,22 @@ void ANCPlusCTFGameMode::DefaultTimer()
 		}
 	}
 
-	// Overtime respawn escalation (NewCTF style): base respawn for first 5 minutes,
-	// then escalate +1s per 2 minutes, capping at OvertimeRespawnTime (6s). Only for 3v3+.
-	// Ramp: 0-5min=2s, 5-7min=3s, 7-9min=4s, 9-11min=5s, 11min+=6s
+	// Overtime respawn escalation: the 2s base applies from the first OT tick
+	// (jumping up from the normal match wait — the "immediate" bump players
+	// notice), holds through OvertimeEscalationDelay, then gains +1s per
+	// OvertimeEscalationInterval, capping at OvertimeRespawnTime. Defaults
+	// (tOxX 2026-08-10): 0-6min=2s, then 3s at 6:00, 4s at 7:00 ... 10s cap at
+	// 13:00. (Old NewCTF ramp: 5-min hold, +1s per 2 min, 6s cap.) 3v3+ only.
 	if (CTFGameState && CTFGameState->IsMatchInOvertime() && OvertimeRespawnTime > 0.f
 		&& GameSession && GameSession->MaxPlayers > 4)
 	{
 		float OTElapsed = GetWorld()->GetTimeSeconds() - OvertimeStartWorldTime;
 		float BaseRespawn = 2.f;
-		float OTEscalationStartTime = 300.f; // 5 minutes before escalation begins
-		int32 ExtraSeconds = (OTElapsed > OTEscalationStartTime)
-			? FMath::FloorToInt((OTElapsed - OTEscalationStartTime) / 120.f)
+		// First +1 lands AT the delay boundary ("after 6 min it starts
+		// increasing"), then one more per interval.
+		int32 ExtraSeconds = (OTElapsed >= OvertimeEscalationDelay)
+			? 1 + FMath::FloorToInt((OTElapsed - OvertimeEscalationDelay)
+				/ FMath::Max(1.f, OvertimeEscalationInterval))
 			: 0;
 		float NewRespawn = FMath::Min(BaseRespawn + (float)ExtraSeconds, OvertimeRespawnTime);
 		if (NewRespawn > RespawnWaitTime)
