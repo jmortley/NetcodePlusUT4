@@ -1209,11 +1209,13 @@ namespace NCPlusHUDDrawCall
 		struct FNCStableTextBucket
 		{
 			TArray<FNCStableTextValue, TInlineAllocator<1>> Values;
+			uint64 LastUsedSerial = 0;
 		};
 
 		TMap<FNCStableTextKey, FNCStableTextBucket> GStableTextCache;
 		TWeakObjectPtr<UWorld> GStableTextWorld;
 		uint32 GStableTextRevision = 0;
+		uint64 GStableTextUseSerial = 0;
 	}
 
 	void ResolveStableText(UCanvas* Canvas, UFont* Font, const FString& Source,
@@ -1234,7 +1236,9 @@ namespace NCPlusHUDDrawCall
 			GStableTextCache.Reset();
 			GStableTextRevision = Revision;
 			GStableTextWorld = World;
+			GStableTextUseSerial = 0;
 		}
+		const uint64 UseSerial = ++GStableTextUseSerial;
 
 		FNCStableTextKey Key;
 		Key.Font = Font;
@@ -1249,6 +1253,7 @@ namespace NCPlusHUDDrawCall
 		FNCStableTextBucket* Bucket = GStableTextCache.Find(Key);
 		if (Bucket)
 		{
+			Bucket->LastUsedSerial = UseSerial;
 			for (FNCStableTextValue& Candidate : Bucket->Values)
 			{
 				// FString operator== is case-INSENSITIVE; player names differing only
@@ -1263,12 +1268,28 @@ namespace NCPlusHUDDrawCall
 		if (!Value)
 		{
 			// Score/timer values are bounded, but map travel and long sessions can still
-			// accumulate variants. A wholesale reset is cheap and avoids an unbounded cache.
-			if (GStableTextCache.Num() >= 256)
+			// accumulate variants. Evict only the least-recently-used bucket so reaching
+			// the cap cannot invalidate every stable label on the same rendered frame.
+			if (!Bucket && GStableTextCache.Num() >= 256)
 			{
-				GStableTextCache.Reset();
+				const FNCStableTextKey* OldestKey = nullptr;
+				uint64 OldestSerial = MAX_uint64;
+				for (const TPair<FNCStableTextKey, FNCStableTextBucket>& Pair : GStableTextCache)
+				{
+					if (Pair.Value.LastUsedSerial < OldestSerial)
+					{
+						OldestSerial = Pair.Value.LastUsedSerial;
+						OldestKey = &Pair.Key;
+					}
+				}
+				if (OldestKey)
+				{
+					const FNCStableTextKey KeyToRemove = *OldestKey;
+					GStableTextCache.Remove(KeyToRemove);
+				}
 			}
 			Bucket = &GStableTextCache.FindOrAdd(Key);
+			Bucket->LastUsedSerial = UseSerial;
 			FNCStableTextValue& NewValue = Bucket->Values[Bucket->Values.AddDefaulted()];
 			NewValue.Source = Source;
 			NewValue.Text = FText::FromString(Source);
@@ -1755,6 +1776,34 @@ namespace NCPlusHUDDrawCall
 			Canvas->DrawTile(Texture, X, Y, Width, Height,
 				0.f, 0.f, float(Texture->GetSizeX()), float(Texture->GetSizeY()), BLEND_Translucent);
 		}
+	}
+
+	void PreloadAbsoluteElimTeamPanelTextures()
+	{
+		EnsureAbsoluteElimTextures();
+	}
+
+	void ReleaseAbsoluteElimTeamPanelTextures()
+	{
+		FAbsoluteElimTextures& T = GAbsoluteElimTextures;
+		auto ReleaseTexture = [](UTexture2D*& Texture)
+		{
+			if (Texture && Texture->IsRooted())
+			{
+				Texture->RemoveFromRoot();
+			}
+			Texture = nullptr;
+		};
+		for (int32 Team = 0; Team < 2; ++Team)
+		{
+			ReleaseTexture(T.NameBackground[Team]);
+			ReleaseTexture(T.NameBorder[Team]);
+			ReleaseTexture(T.ScoreBackground[Team]);
+			ReleaseTexture(T.ScoreBorder[Team]);
+		}
+		ReleaseTexture(T.HealthIcon);
+		ReleaseTexture(T.ArmorIcon);
+		T.bTriedLoad = false;
 	}
 
 	void DrawAbsoluteElimTeamPanel(AUTHUD* HUD, UCanvas* Canvas)

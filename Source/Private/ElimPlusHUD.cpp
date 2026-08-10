@@ -9,6 +9,7 @@
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
+#include "ElimPlusScoreboard.h"
 #include "ElimPlusStatsReplicator.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads) — warmup-only head-hitbox calibration
@@ -118,6 +119,14 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 void AElimPlusHUD::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Absolute Elim uses loose recovered PNGs. Decode and upload both the live
+	// panel and scoreboard sets during HUD setup, never for the first time in Draw.
+	if (!IsRunningDedicatedServer() && FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel())
+	{
+		NCPlusHUDDrawCall::PreloadAbsoluteElimTeamPanelTextures();
+		UElimPlusScoreboard::PreloadAbsoluteTextures();
+	}
 
 	// Snapshot the engine-spawned widget positions/origins BEFORE we override
 	// anything. ApplyLayoutToWidgets uses these as the "no override" fallback

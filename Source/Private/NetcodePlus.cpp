@@ -22,9 +22,11 @@
 #include "SNCPlusHUDEditor.h"
 #include "SNCPlusHUDDragOverlay.h"
 #include "ElimPlusHUD.h"
+#include "ElimPlusScoreboard.h"
 #include "WipeoutHUD.h"
 #include "NCPlusCTFHUD.h"
 #include "ShockDomHUD.h"
+#include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
 #include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
 #include "NCConcedeVote.h"            // gg concede vote: client command routing + bind seeding
@@ -1231,6 +1233,8 @@ void FNetcodePlus::ShutdownModule()
 	SUTWeaponSkinSelector_CleanupCache();
 	AUTWeaponFix::CleanupWeaponSettings();
 	AClientHitsounds::ShutdownCatalog();
+	NCPlusHUDDrawCall::ReleaseAbsoluteElimTeamPanelTextures();
+	UElimPlusScoreboard::ReleaseAbsoluteTextures();
 
 	if (GNCPPreLoadMapHandle.IsValid())
 	{

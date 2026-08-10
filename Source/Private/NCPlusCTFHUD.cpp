@@ -348,6 +348,41 @@ void ANCPlusCTFHUD::DrawSpectatorTarget()
 		NameScale, NameScale, Canvas->DrawColor);
 }
 
+ANCPlusCTFOTInfo* ANCPlusCTFHUD::FindOTInfo()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (CachedOTInfoWorld.Get() != World)
+	{
+		CachedOTInfoWorld = World;
+		CachedOTInfo.Reset();
+		NextOTInfoSearchTime = 0.f;
+	}
+	if (CachedOTInfo.IsValid() && CachedOTInfo->GetWorld() == World)
+	{
+		return CachedOTInfo.Get();
+	}
+	CachedOTInfo.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextOTInfoSearchTime)
+	{
+		return nullptr;
+	}
+	NextOTInfoSearchTime = Now + 1.f;
+	for (TActorIterator<ANCPlusCTFOTInfo> It(World); It; ++It)
+	{
+		CachedOTInfo = *It;
+		NextOTInfoSearchTime = 0.f;
+		return *It;
+	}
+	return nullptr;
+}
+
 void ANCPlusCTFHUD::DrawTeamScoreBar()
 {
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
@@ -492,23 +527,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	// Resolve the OT replicator once — OT clock, Advantage clock, and the
 	// status-label branch all read off it. ANCPlusCTFOTInfo is spawned
 	// authority-only and replicates to every client; lazy-find + cache.
-	static TWeakObjectPtr<UWorld> CachedWorld;
-	static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
-	ANCPlusCTFOTInfo* Info = nullptr;
-	if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
-	{
-		Info = CachedInfo.Get();
-	}
-	else
-	{
-		for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
-		{
-			CachedWorld = GetWorld();
-			CachedInfo = *It;
-			Info = *It;
-			break;
-		}
-	}
+	ANCPlusCTFOTInfo* Info = FindOTInfo();
 
 	// OT detection: GetMatchState() == MatchState::MatchIsInOvertime.
 	// IsMatchInOvertime() is virtual on UTGameState so it reads the same on

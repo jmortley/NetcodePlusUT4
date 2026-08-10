@@ -65,6 +65,7 @@ private:
 	TArray<FNCPlusAnnouncerPackOption> AnnouncerPackEntries;
 	TArray<TSharedPtr<FString>> AnnouncerPackOptions;
 	FString SelectedAnnouncerPackId;
+	bool bAnnouncerDataInitialized = false;
 
 	// ── Force Models settings ── working copy of the live config, edited in-place by the tab's
 	// widgets via bool*/float* lambdas and written back on Save. The combo option lists are members
@@ -74,6 +75,7 @@ private:
 	TArray<TSharedPtr<FString>> FMModelOptions;                // "(none)" + each FMContentEntries display name
 	TArray<TSharedPtr<FString>> FMStyleOptions;                // Team/Enemy, Red/Blue, Enemy Only
 	TArray<TSharedPtr<FString>> FMArmourOptions;               // Match Skin, Complimentary
+	bool bForceModelDataInitialized = false;
 
 	// ── Hitsounds settings ── working copy, edited in place and written to Mod.ini on Save.
 	// Option lists are members so each STextComboBox::OptionsSource stays valid for the
@@ -81,6 +83,7 @@ private:
 	FHitsoundsConfig HSConfig;
 	TArray<TSharedPtr<FString>> HSPresetOptions;   // every catalog preset, built-in then custom
 	TArray<TSharedPtr<FString>> HSStyleOptions;    // Absolute / UTComp / Flat
+	bool bHitsoundDataInitialized = false;
 
 	// ── Tabs ──
 	ENCPMenuTab ActiveTab = ENCPMenuTab::Home;
@@ -98,6 +101,9 @@ private:
 
 	void LoadSettings();
 	void SaveSettings();
+	void EnsureAnnouncerData();
+	void EnsureForceModelData();
+	void EnsureHitsoundData();
 
 	// Home/ready-up handlers
 	class AUTPlayerController* GetUTPlayerController() const;

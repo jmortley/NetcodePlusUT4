@@ -301,6 +301,11 @@ public:
 	/** All presets: built-in manifest entries first (in authored order), then custom packs. */
 	static const TArray<FHitsound>& GetCatalog();
 
+	/** Menu discovery entry point. Builds once on first use; an earlier empty build
+	 *  is retried on a process-wide cooldown so late-mounted PAKs can appear without
+	 *  repeating registry/disk work on every menu open. */
+	static const TArray<FHitsound>& GetCatalogForMenu();
+
 	/** True once the built-in manifest has loaded at least one usable preset. */
 	static bool IsCatalogReady();
 

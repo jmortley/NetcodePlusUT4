@@ -35,9 +35,7 @@ protected:
 	FCtfColumnLayout NormalLayout;
 	FCtfColumnLayout InstagibLayout;
 
-	/** Pick the right layout for the current frame (depends on the
-	 *  replicated bIsInstagibMatch flag). Falls back to NormalLayout if
-	 *  the replicator isn't found yet. */
+	/** Return the mode decision sampled once in PreDraw. */
 	const FCtfColumnLayout& GetActiveLayout();
 
 	// Column header texts
@@ -63,11 +61,18 @@ protected:
 		float RenderDelta, float XOffset, float YOffset) override;
 
 private:
-	/** Cached replicator reference (found once, reused) */
-	UPROPERTY()
-	ACTFStatsReplicator* CachedStatsRep = nullptr;
+	/** Stable per-match actor and mode sample. Positive lookups are weak so actor
+	 *  replacement/travel is safe; negative lookups and inventory fallback are
+	 *  throttled instead of repeated for every scoreboard row. */
+	UPROPERTY(Transient)
+	TWeakObjectPtr<ACTFStatsReplicator> CachedStatsRep;
+	TWeakObjectPtr<UWorld> CachedStatsRepWorld;
+	float NextStatsRepSearchTime = 0.f;
+	float NextModeProbeTime = 0.f;
+	bool bCachedInstagibMode = false;
 
 	ACTFStatsReplicator* FindStatsReplicator();
+	void UpdateCachedMatchMode();
 
 	/** Draw a 4-icon armor row (Belt / Vest / Pads / Helm) centered at
 	 *  CenterX with each cell showing icon + count below. Mirrors the duel

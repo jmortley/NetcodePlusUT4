@@ -99,74 +99,50 @@ void AWipeoutDamageReplicator::UpdateFromPlayerStates()
 	}
 }
 
-int32 AWipeoutDamageReplicator::GetDamageForPlayer(const FString& UniqueIdStr) const
+const FReplicatedDamageEntry* AWipeoutDamageReplicator::FindEntry(const FString& UniqueIdStr) const
 {
 	for (const FReplicatedDamageEntry& Entry : DamageEntries)
 	{
 		if (Entry.PlayerId == UniqueIdStr)
 		{
-			return Entry.DamageDone;
+			return &Entry;
 		}
 	}
-	return 0;
+	return nullptr;
+}
+
+int32 AWipeoutDamageReplicator::GetDamageForPlayer(const FString& UniqueIdStr) const
+{
+	const FReplicatedDamageEntry* Entry = FindEntry(UniqueIdStr);
+	return Entry ? Entry->DamageDone : 0;
 }
 
 int32 AWipeoutDamageReplicator::GetBeltsForPlayer(const FString& UniqueIdStr) const
 {
-	for (const FReplicatedDamageEntry& Entry : DamageEntries)
-	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			return Entry.BeltPickups;
-		}
-	}
-	return 0;
+	const FReplicatedDamageEntry* Entry = FindEntry(UniqueIdStr);
+	return Entry ? Entry->BeltPickups : 0;
 }
 
 int32 AWipeoutDamageReplicator::GetAmpsForPlayer(const FString& UniqueIdStr) const
 {
-	for (const FReplicatedDamageEntry& Entry : DamageEntries)
-	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			return Entry.AmpPickups;
-		}
-	}
-	return 0;
+	const FReplicatedDamageEntry* Entry = FindEntry(UniqueIdStr);
+	return Entry ? Entry->AmpPickups : 0;
 }
 
 int32 AWipeoutDamageReplicator::GetVestsForPlayer(const FString& UniqueIdStr) const
 {
-	for (const FReplicatedDamageEntry& Entry : DamageEntries)
-	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			return Entry.VestPickups;
-		}
-	}
-	return 0;
+	const FReplicatedDamageEntry* Entry = FindEntry(UniqueIdStr);
+	return Entry ? Entry->VestPickups : 0;
 }
 
 int32 AWipeoutDamageReplicator::GetSiphonsForPlayer(const FString& UniqueIdStr) const
 {
-	for (const FReplicatedDamageEntry& Entry : DamageEntries)
-	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			return Entry.SiphonPickups;
-		}
-	}
-	return 0;
+	const FReplicatedDamageEntry* Entry = FindEntry(UniqueIdStr);
+	return Entry ? Entry->SiphonPickups : 0;
 }
 
 int32 AWipeoutDamageReplicator::GetHealingForPlayer(const FString& UniqueIdStr) const
 {
-	for (const FReplicatedDamageEntry& Entry : DamageEntries)
-	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			return Entry.HealingDone;
-		}
-	}
-	return 0;
+	const FReplicatedDamageEntry* Entry = FindEntry(UniqueIdStr);
+	return Entry ? Entry->HealingDone : 0;
 }

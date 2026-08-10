@@ -8,6 +8,8 @@
 #include "UTHUD_CTF.h"
 #include "NCPlusCTFHUD.generated.h"
 
+class ANCPlusCTFOTInfo;
+
 UCLASS()
 class NETCODEPLUS_API ANCPlusCTFHUD : public AUTHUD_CTF
 {
@@ -33,6 +35,13 @@ private:
 
 	/** Draw "NOW WATCHING / PlayerName" bottom-right when viewing another player */
 	void DrawSpectatorTarget();
+
+	/** Cached OT actor; misses are throttled because regulation matches spend
+	 *  nearly their entire lifetime without one on a newly joined client. */
+	TWeakObjectPtr<UWorld> CachedOTInfoWorld;
+	TWeakObjectPtr<ANCPlusCTFOTInfo> CachedOTInfo;
+	float NextOTInfoSearchTime = 0.f;
+	ANCPlusCTFOTInfo* FindOTInfo();
 
 	/** Post-match high-res screenshot state — serviced each frame by
 	 *  NCPlusHUDDrawCall::ServicePostMatchScreenshot (fires after the replay ends + scoreboard settles). */

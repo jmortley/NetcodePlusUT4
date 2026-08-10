@@ -226,6 +226,19 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 }
 
 
+void AClutchHUD::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Keep synchronous package lookup / PNG decode / texture upload out of the
+	// first HUD Draw. The guarded calls in the draw paths remain as fallbacks.
+	if (!IsRunningDedicatedServer())
+	{
+		LoadRecoveredHUDTextures();
+	}
+}
+
+
 void AClutchHUD::DrawHUD()
 {
 	AClutchRoundState* State = ResolveClutchState();

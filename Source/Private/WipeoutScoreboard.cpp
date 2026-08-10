@@ -78,6 +78,43 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	RedTeamOverlay.VL = 310.0f;
 }
 
+AWipeoutDamageReplicator* UWipeoutScoreboard::FindDamageReplicator()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (CachedDamageReplicatorWorld.Get() != World)
+	{
+		CachedDamageReplicatorWorld = World;
+		CachedDamageReplicator.Reset();
+		NextDamageReplicatorSearchTime = 0.f;
+	}
+
+	if (CachedDamageReplicator.IsValid()
+		&& CachedDamageReplicator->GetWorld() == World)
+	{
+		return CachedDamageReplicator.Get();
+	}
+	CachedDamageReplicator.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextDamageReplicatorSearchTime)
+	{
+		return nullptr;
+	}
+	NextDamageReplicatorSearchTime = Now + 1.f;
+	for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
+	{
+		CachedDamageReplicator = *It;
+		NextDamageReplicatorSearchTime = 0.f;
+		return *It;
+	}
+	return nullptr;
+}
+
 void UWipeoutScoreboard::DrawReadyText(AUTPlayerState* PlayerState,
 	float XOffset, float YOffset, float Width)
 {
@@ -506,6 +543,13 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 
 void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor)
 {
+	AWipeoutDamageReplicator* DmgRep = FindDamageReplicator();
+	const bool bHasPlayerId = PlayerState->UniqueId.IsValid();
+	const FString PlayerId = bHasPlayerId ? PlayerState->UniqueId.ToString() : FString();
+	const FReplicatedDamageEntry* Entry = (DmgRep && bHasPlayerId)
+		? DmgRep->FindEntry(PlayerId)
+		: nullptr;
+
 	// K/D — merged kills and deaths
 	int32 DisplayKills = bUseRoundKills ? (PlayerState->RoundKills + PlayerState->RoundKillAssists) : (PlayerState->Kills + PlayerState->KillAssists);
 	FString KDStr = FString::Printf(TEXT("%d/%d"), DisplayKills, PlayerState->Deaths);
@@ -513,26 +557,8 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// B/A — belt and amp pickup counts (from replicated damage replicator)
-	int32 Belts = 0;
-	int32 Amps = 0;
-	{
-		AWipeoutDamageReplicator* DmgRep = nullptr;
-		UWorld* BAWorld = GetWorld();
-		if (BAWorld)
-		{
-			for (TActorIterator<AWipeoutDamageReplicator> It(BAWorld); It; ++It)
-			{
-				DmgRep = *It;
-				break;
-			}
-		}
-		if (DmgRep && PlayerState->UniqueId.IsValid())
-		{
-			FString PId = PlayerState->UniqueId.ToString();
-			Belts = DmgRep->GetBeltsForPlayer(PId);
-			Amps = DmgRep->GetAmpsForPlayer(PId);
-		}
-	}
+	const int32 Belts = Entry ? Entry->BeltPickups : 0;
+	const int32 Amps = Entry ? Entry->AmpPickups : 0;
 	FString BAStr = FString::Printf(TEXT("%d/%d"), Belts, Amps);
 	FLinearColor BAColor = FLinearColor(0.9f, 0.8f, 0.2f, 1.f); // gold
 	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) BAColor *= 0.6f;
@@ -541,28 +567,9 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 
 	// Damage — read from the replicated damage replicator if available,
 	// otherwise fall back to PlayerState (works on listen server / standalone)
-	int32 Damage = 0;
-	{
-		AWipeoutDamageReplicator* DmgRep = nullptr;
-		UWorld* World = GetWorld();
-		if (World)
-		{
-			for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
-			{
-				DmgRep = *It;
-				break;
-			}
-		}
-		if (DmgRep && PlayerState->UniqueId.IsValid())
-		{
-			Damage = DmgRep->GetDamageForPlayer(PlayerState->UniqueId.ToString());
-		}
-		else
-		{
-			// Fallback: direct read (works on server/listen server)
-			Damage = int32(PlayerState->DamageDone);
-		}
-	}
+	const int32 Damage = (DmgRep && bHasPlayerId)
+		? (Entry ? Entry->DamageDone : 0)
+		: int32(PlayerState->DamageDone);
 	FLinearColor DmgColor = FLinearColor(1.f, 0.8f, 0.25f, 1.f);
 	if (!PlayerState->GetUTCharacter() && !PlayerState->bOutOfLives) DmgColor *= 0.6f;
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
@@ -573,28 +580,9 @@ void UWipeoutScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOff
 	// GameMode state). Reuse the DmgRep resolved above rather than iterating actors
 	// again per column. No listen-server fallback: unlike DamageDone these have no
 	// client-readable equivalent, so they simply read 0 if the replicator is absent.
-	int32 Vests = 0;
-	int32 Siphons = 0;
-	int32 Healing = 0;
-	{
-		AWipeoutDamageReplicator* StatRep = nullptr;
-		UWorld* World = GetWorld();
-		if (World)
-		{
-			for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
-			{
-				StatRep = *It;
-				break;
-			}
-		}
-		if (StatRep && PlayerState->UniqueId.IsValid())
-		{
-			const FString PlayerIdStr = PlayerState->UniqueId.ToString();
-			Vests = StatRep->GetVestsForPlayer(PlayerIdStr);
-			Siphons = StatRep->GetSiphonsForPlayer(PlayerIdStr);
-			Healing = StatRep->GetHealingForPlayer(PlayerIdStr);
-		}
-	}
+	const int32 Vests = Entry ? Entry->VestPickups : 0;
+	const int32 Siphons = Entry ? Entry->SiphonPickups : 0;
+	const int32 Healing = Entry ? Entry->HealingDone : 0;
 
 	FString VSStr = FString::Printf(TEXT("%d/%d"), Vests, Siphons);
 	FLinearColor VSColor = FLinearColor(0.6f, 0.85f, 1.f, 1.f); // pale blue — pickup family

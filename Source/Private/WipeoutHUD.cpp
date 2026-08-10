@@ -223,10 +223,30 @@ void AWipeoutHUD::NotifyMatchStateChange()
 
 void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 {
-	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-	if (!GS) return;
+	UWorld* World = GetWorld();
+	AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+	if (!GS)
+	{
+		if (&SortedPlayers == &PortraitRenderPlayers)
+		{
+			PortraitRenderPlayers.Reset();
+		}
+		return;
+	}
+
+	const bool bContextChanged = CachedPortraitWorld.Get() != World
+		|| CachedPortraitGameState.Get() != GS;
+	if (bContextChanged)
+	{
+		CachedPortraitWorld = World;
+		CachedPortraitGameState = GS;
+		CachedPortraitSignature.Reset();
+		PortraitRenderPlayers.Reset();
+		PipCacheByPS.Reset();
+	}
 
 	AUTPlayerState* HUDPS = GetScorerPlayerState();
+	CurrentPortraitSignature.Reset(GS->PlayerArray.Num());
 	for (APlayerState* PS : GS->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
@@ -237,11 +257,80 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 		if (UTPS != nullptr && !UTPS->bOnlySpectator && !UTPS->bIsInactive
 			&& (UTPS->Team != nullptr || UTPS->GetTeamNum() != 255))
 		{
-			UTPS->SelectionOrder = (UTPS == HUDPS) ? -1 : UTPS->SpectatingIDTeam;
-			SortedPlayers.Add(UTPS);
+			const int32 SortKey = (UTPS == HUDPS) ? -1 : int32(UTPS->SpectatingIDTeam);
+			UTPS->SelectionOrder = SortKey;
+			FPortraitOrderSignature Signature;
+			Signature.PlayerState = UTPS;
+			Signature.TeamNum = UTPS->GetTeamNum();
+			Signature.SortKey = SortKey;
+			CurrentPortraitSignature.Add(Signature);
 		}
 	}
-	SortedPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B) { return A.SelectionOrder > B.SelectionOrder; });
+
+	bool bOrderChanged = bContextChanged
+		|| CurrentPortraitSignature.Num() != CachedPortraitSignature.Num();
+	if (!bOrderChanged)
+	{
+		for (int32 Index = 0; Index < CurrentPortraitSignature.Num(); ++Index)
+		{
+			const FPortraitOrderSignature& Current = CurrentPortraitSignature[Index];
+			const FPortraitOrderSignature& Cached = CachedPortraitSignature[Index];
+			if (Current.PlayerState.Get() != Cached.PlayerState.Get()
+				|| Current.TeamNum != Cached.TeamNum
+				|| Current.SortKey != Cached.SortKey)
+			{
+				bOrderChanged = true;
+				break;
+			}
+		}
+	}
+
+	if (bOrderChanged)
+	{
+		CachedPortraitSignature = CurrentPortraitSignature;
+		PortraitRenderPlayers.Reset(CurrentPortraitSignature.Num());
+		for (const FPortraitOrderSignature& Signature : CurrentPortraitSignature)
+		{
+			if (AUTPlayerState* PlayerState = Signature.PlayerState.Get())
+			{
+				PortraitRenderPlayers.Add(PlayerState);
+			}
+		}
+		PortraitRenderPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B)
+		{
+			return A.SelectionOrder > B.SelectionOrder;
+		});
+
+		for (auto It = PipCacheByPS.CreateIterator(); It; ++It)
+		{
+			bool bStillPresent = false;
+			for (const FPortraitOrderSignature& Signature : CurrentPortraitSignature)
+			{
+				if (Signature.PlayerState.Get() == It.Key().Get())
+				{
+					bStillPresent = true;
+					break;
+				}
+			}
+			if (!bStillPresent)
+			{
+				It.RemoveCurrent();
+			}
+		}
+	}
+
+	if (&SortedPlayers != &PortraitRenderPlayers)
+	{
+		const bool bWasEmpty = SortedPlayers.Num() == 0;
+		SortedPlayers.Append(PortraitRenderPlayers);
+		if (!bWasEmpty)
+		{
+			SortedPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B)
+			{
+				return A.SelectionOrder > B.SelectionOrder;
+			});
+		}
+	}
 }
 
 // "NOW WATCHING <player>" spectator banner (verbatim port of ANCPlusCTFHUD::
@@ -428,8 +517,8 @@ void AWipeoutHUD::DrawHUD()
 		float YOffsetBlue = BlueStart.Y;
 		float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split (kept for safety)
 
-		TArray<AUTPlayerState*> LivePlayers;
-		GetPlayerListForIcons(LivePlayers);
+		GetPlayerListForIcons(PortraitRenderPlayers);
+		const TArray<AUTPlayerState*>& LivePlayers = PortraitRenderPlayers;
 
 		// Pre-pass: find the next-to-spawn teammate (lowest RespawnTime > 0)
 		AUTPlayerState* MyPS_ForSpawn = Cast<AUTPlayerState>(UTPlayerOwner ? UTPlayerOwner->PlayerState : nullptr);

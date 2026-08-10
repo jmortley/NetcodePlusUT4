@@ -108,57 +108,7 @@ static bool NCCharHasInstagibWeapon(AUTCharacter* Char)
 
 const UNCPlusCTFScoreboard::FCtfColumnLayout& UNCPlusCTFScoreboard::GetActiveLayout()
 {
-	// Replicator-driven path - works once HandleMatchHasStarted has fired.
-	// Trusted authoritative source: ACTFStatsReplicator::bIsInstagibMatch is
-	// seeded from GM->bIsInstagib in BeginPlay.
-	if (ACTFStatsReplicator* Rep = FindStatsReplicator())
-	{
-		return Rep->bIsInstagibMatch ? InstagibLayout : NormalLayout;
-	}
-
-	// Warmup fallback. Replicator MUST defer to HandleMatchHasStarted to avoid
-	// client crashes (see feedback_replicator_spawn_timing.md), so during
-	// warmup it doesn't exist yet. Sniff inventory instead - purely client-side,
-	// no replication timing to worry about.
-	//
-	// Three layers of fallback for "no local pawn yet" cases:
-	//   1. Local player has a pawn → check that pawn's inventory.
-	//   2. No local pawn (joined as spectator, hasn't picked a team, or is
-	//      dead mid-warmup) → walk world AUTCharacters for any with an
-	//      instagib weapon.
-	//   3. No characters in world yet (very first second of warmup, no one
-	//      has spawned) → fall through to NormalLayout. The replicator will
-	//      take over once HandleMatchHasStarted fires; this brief window is
-	//      harmless.
-	//
-	// Each access is null-/IsValid-guarded; the helper handles pending-kill
-	// pawns and stale inventory pointers.
-	if (IsValid(UTHUDOwner) && IsValid(UTHUDOwner->UTPlayerOwner))
-	{
-		APawn* LocalPawn = UTHUDOwner->UTPlayerOwner->GetPawn();
-		if (NCCharHasInstagibWeapon(Cast<AUTCharacter>(LocalPawn)))
-		{
-			return InstagibLayout;
-		}
-	}
-
-	// Spectator / not-yet-joined fallback: walk world AUTCharacters. Cheap
-	// (~6-8 chars max in CTF) and only reached during warmup before the
-	// replicator exists. TActorIterator skips destroyed actors automatically;
-	// the helper guards pending-kill ones.
-	UWorld* World = IsValid(UTHUDOwner) ? UTHUDOwner->GetWorld() : nullptr;
-	if (World)
-	{
-		for (TActorIterator<AUTCharacter> CharIt(World); CharIt; ++CharIt)
-		{
-			if (NCCharHasInstagibWeapon(*CharIt))
-			{
-				return InstagibLayout;
-			}
-		}
-	}
-
-	return NormalLayout;
+	return bCachedInstagibMode ? InstagibLayout : NormalLayout;
 }
 
 void UNCPlusCTFScoreboard::PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanvas* InCanvas, FVector2D InCanvasCenter)
@@ -167,18 +117,89 @@ void UNCPlusCTFScoreboard::PreDraw(float DeltaTime, AUTHUD* InUTHUDOwner, UCanva
 	// Parent CTFScoreboard::PreDraw sets bDrawMinimapInScoreboard = true every frame.
 	// Force it off — we don't want the minimap on the scoreboard.
 	bDrawMinimapInScoreboard = false;
+	UpdateCachedMatchMode();
 }
 
 ACTFStatsReplicator* UNCPlusCTFScoreboard::FindStatsReplicator()
 {
-	if (CachedStatsRep) return CachedStatsRep;
+	UWorld* World = IsValid(UTHUDOwner) ? UTHUDOwner->GetWorld() : GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
 
-	for (TActorIterator<ACTFStatsReplicator> It(UTHUDOwner->GetWorld()); It; ++It)
+	if (CachedStatsRepWorld.Get() != World)
+	{
+		CachedStatsRepWorld = World;
+		CachedStatsRep.Reset();
+		NextStatsRepSearchTime = 0.f;
+		NextModeProbeTime = 0.f;
+		bCachedInstagibMode = false;
+	}
+	if (CachedStatsRep.IsValid() && CachedStatsRep->GetWorld() == World)
+	{
+		return CachedStatsRep.Get();
+	}
+	CachedStatsRep.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextStatsRepSearchTime)
+	{
+		return nullptr;
+	}
+	NextStatsRepSearchTime = Now + 1.f;
+	for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It)
 	{
 		CachedStatsRep = *It;
-		return CachedStatsRep;
+		NextStatsRepSearchTime = 0.f;
+		return *It;
 	}
 	return nullptr;
+}
+
+void UNCPlusCTFScoreboard::UpdateCachedMatchMode()
+{
+	UWorld* World = IsValid(UTHUDOwner) ? UTHUDOwner->GetWorld() : GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Once the replicated actor exists it is the authoritative source. Sample
+	// once per PreDraw so a late true replication still replaces the default false.
+	if (ACTFStatsReplicator* Rep = FindStatsReplicator())
+	{
+		bCachedInstagibMode = Rep->bIsInstagibMatch;
+		return;
+	}
+
+	// Until the authoritative replicated state exists, resample the warmup
+	// inventory heuristic at 2 Hz rather than walking every character/inventory
+	// once for every scoreboard row. Allow a prior positive result to clear if a
+	// temporary instagib weapon disappears before the match starts.
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextModeProbeTime)
+	{
+		return;
+	}
+	NextModeProbeTime = Now + 0.5f;
+	bCachedInstagibMode = false;
+
+	if (IsValid(UTHUDOwner) && IsValid(UTHUDOwner->UTPlayerOwner)
+		&& NCCharHasInstagibWeapon(Cast<AUTCharacter>(UTHUDOwner->UTPlayerOwner->GetPawn())))
+	{
+		bCachedInstagibMode = true;
+		return;
+	}
+
+	for (TActorIterator<AUTCharacter> CharIt(World); CharIt; ++CharIt)
+	{
+		if (NCCharHasInstagibWeapon(*CharIt))
+		{
+			bCachedInstagibMode = true;
+			return;
+		}
+	}
 }
 
 void UNCPlusCTFScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
@@ -237,6 +258,7 @@ void UNCPlusCTFScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XO
 	const FString PlayerId = PlayerState->UniqueId.IsValid()
 		? PlayerState->UniqueId.ToString()
 		: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
+	const FCTFReplicatedStatsEntry* Entry = Rep ? Rep->FindEntry(PlayerId) : nullptr;
 	const FCtfColumnLayout& L = GetActiveLayout();
 	const bool bInstagib = (&L == &InstagibLayout);
 
@@ -268,8 +290,8 @@ void UNCPlusCTFScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XO
 
 	// Accuracy (from replicator — LG-only or Instagib depending on match mode)
 	{
-		int32 Hits = 0, Shots = 0;
-		if (Rep) Rep->GetAccuracyForPlayer(PlayerId, Hits, Shots);
+		const int32 Hits = Entry ? Entry->HitscanHits : 0;
+		const int32 Shots = Entry ? Entry->HitscanShots : 0;
 		const float AccPct = (Shots > 0) ? (float(Hits) / float(Shots) * 100.f) : 0.f;
 		const FLinearColor AccColor = (AccPct >= 40.f) ? FLinearColor(0.25f, 0.8f, 0.25f, 1.f)
 		                            : (AccPct >= 25.f) ? FLinearColor(0.8f,  0.8f, 0.25f, 1.f)
@@ -289,7 +311,7 @@ void UNCPlusCTFScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XO
 
 	// Grabs
 	{
-		int32 Grabs = (Rep) ? Rep->GetGrabsForPlayer(PlayerId) : 0;
+		const int32 Grabs = Entry ? Entry->FlagGrabs : 0;
 		DrawText(FText::AsNumber(Grabs),
 			XOffset + (Width * L.GrabsX), YOffset + ColumnY,
 			UTHUDOwner->TinyFont, RenderScale, 1.0f, DrawColor,
@@ -307,13 +329,18 @@ void UNCPlusCTFScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XO
 	if (!bInstagib && Rep)
 	{
 		uint8 ArmorCounts[4] = { 0, 0, 0, 0 };
-		Rep->GetArmorCountsForPlayer(PlayerId, ArmorCounts);
+		if (Entry)
+		{
+			ArmorCounts[0] = Entry->BeltCount;
+			ArmorCounts[1] = Entry->VestCount;
+			ArmorCounts[2] = Entry->PadsCount;
+			ArmorCounts[3] = Entry->HelmetCount;
+		}
 		DrawArmorIconRow(XOffset + (Width * L.ArmorsX), YOffset + ColumnY,
 			ArmorCounts, FLinearColor::White);
 
-		uint8 AmpCount = 0;
-		int32 AmpTimeS = 0;
-		Rep->GetAmpForPlayer(PlayerId, AmpCount, AmpTimeS);
+		const uint8 AmpCount = Entry ? Entry->AmpCount : 0;
+		const int32 AmpTimeS = Entry ? Entry->AmpTimeS : 0;
 		DrawAmpCell(XOffset + (Width * L.AmpX), YOffset + ColumnY,
 			AmpCount, AmpTimeS, DrawColor);
 	}

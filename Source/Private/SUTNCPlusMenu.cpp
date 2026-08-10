@@ -243,6 +243,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 {
+	EnsureAnnouncerData();
+
 	const FString VersionLine = FString::Printf(TEXT("Version %d"), NETCODE_PLUGIN_VERSION);
 	const int32 AnnouncerIndex = AnnouncerPackEntries.IndexOfByPredicate(
 		[this](const FNCPlusAnnouncerPackOption& Pack) { return Pack.Id == SelectedAnnouncerPackId; });
@@ -968,6 +970,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 {
+	EnsureForceModelData();
+
 	return SNew(SBox)
 		.WidthOverride(620.f)
 		[
@@ -1097,6 +1101,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildHitsoundsTab()
 {
+	EnsureHitsoundData();
+
 	// Preset picker for one side (enemy / friendly). Swapping preset keeps the
 	// user's own volume + pitch — only the cues change.
 	auto MakePresetRow = [this](const FString& Label, FHitsound* Side) -> TSharedRef<SWidget>
@@ -1320,8 +1326,17 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		bHighResScreenshotPostMatch = true;
 
-	// Announcer choices use stable IDs, while the UI only exposes packs whose
-	// optional package is mounted. A stale or missing selection displays Stock UT4.
+}
+
+void SUTNCPlusMenu::EnsureAnnouncerData()
+{
+	if (bAnnouncerDataInitialized)
+	{
+		return;
+	}
+	bAnnouncerDataInitialized = true;
+
+	// Only the Home tab needs optional announcer package discovery.
 	NCPlusAnnouncerPacks::EnumerateAvailable(AnnouncerPackEntries);
 	SelectedAnnouncerPackId = NCPlusAnnouncerPacks::GetConfiguredPackId();
 	AnnouncerPackOptions.Reset();
@@ -1329,12 +1344,18 @@ void SUTNCPlusMenu::LoadSettings()
 	{
 		AnnouncerPackOptions.Add(MakeShareable(new FString(Pack.DisplayName)));
 	}
+}
 
-	// Force Models — take a working copy of the live config (loads Mod.ini [ForceModels] on first access).
+void SUTNCPlusMenu::EnsureForceModelData()
+{
+	if (bForceModelDataInitialized)
+	{
+		return;
+	}
+	bForceModelDataInitialized = true;
+
+	// Load the working copy and discover installed characters only when this tab opens.
 	FMConfig = NCPlusForceModels::Get();
-
-	// Build the combo option lists once. Installed characters first ("(none)" lets a side be cleared),
-	// then the fixed Style / Armour lists (index order matches the ENCPlusSkinStyle / ENCPlusArmourMode ints).
 	FMContentEntries.Reset();
 	NCPlusForceModels::EnumerateContent(FMContentEntries);
 	FMModelOptions.Reset();
@@ -1350,20 +1371,23 @@ void SUTNCPlusMenu::LoadSettings()
 	FMArmourOptions.Reset();
 	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Match Skin"))));
 	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Complimentary"))));
+}
 
-	// Hitsounds — read straight from Mod.ini so the tab works whether or not a
-	// match is running the mutator. The catalog is static and client-side, so
-	// the preset list is available here too. If a previous build came up empty
-	// (content PAK not yet mounted at the time), retry now — menu open is the
-	// natural moment a late-mounted custom pack can join.
-	if (!AClientHitsounds::IsCatalogReady())
+void SUTNCPlusMenu::EnsureHitsoundData()
+{
+	if (bHitsoundDataInitialized)
 	{
-		AClientHitsounds::RefreshCatalog();
+		return;
 	}
-	HSConfig = AClientHitsounds::LoadConfigFromIni();
+	bHitsoundDataInitialized = true;
 
+	// Build once on first use. A later menu instance retries only when an earlier
+	// process-wide build was empty, preserving late-mounted PAK discovery without
+	// the old same-open double refresh.
+	const TArray<FHitsound>& Catalog = AClientHitsounds::GetCatalogForMenu();
+	HSConfig = AClientHitsounds::LoadConfigFromIni();
 	HSPresetOptions.Reset();
-	for (const FHitsound& Preset : AClientHitsounds::GetCatalog())
+	for (const FHitsound& Preset : Catalog)
 	{
 		HSPresetOptions.Add(MakeShareable(new FString(Preset.DisplayName)));
 	}
@@ -1391,22 +1415,30 @@ void SUTNCPlusMenu::SaveSettings()
 
 	GConfig->Flush(false, ConfigPath);
 
-	NCPlusAnnouncerPacks::SaveAndApply(SelectedAnnouncerPackId,
-		(PlayerOwner.IsValid() && PlayerOwner->PlayerController)
-			? Cast<AUTPlayerController>(PlayerOwner->PlayerController)
-			: nullptr);
+	if (bAnnouncerDataInitialized)
+	{
+		NCPlusAnnouncerPacks::SaveAndApply(SelectedAnnouncerPackId,
+			(PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+				? Cast<AUTPlayerController>(PlayerOwner->PlayerController)
+				: nullptr);
+	}
 
-	// Force Models — write the working copy through to the live config + Mod.ini [ForceModels].
-	NCPlusForceModels::Mutable() = FMConfig;
-	NCPlusForceModels::Save();
+	// Only write subsystem working copies for tabs that were actually opened.
+	if (bForceModelDataInitialized)
+	{
+		NCPlusForceModels::Mutable() = FMConfig;
+		NCPlusForceModels::Save();
+	}
 
-	// Hitsounds — persist and push to a live mutator instance so the change is
-	// audible immediately rather than at the next map load.
-	AClientHitsounds::SaveConfigToIni(HSConfig,
-		(PlayerOwner.IsValid() && PlayerOwner->PlayerController) ? (UObject*)PlayerOwner->PlayerController : nullptr);
+	if (bHitsoundDataInitialized)
+	{
+		// Persist and push to a live mutator instance so the change is audible immediately.
+		AClientHitsounds::SaveConfigToIni(HSConfig,
+			(PlayerOwner.IsValid() && PlayerOwner->PlayerController) ? (UObject*)PlayerOwner->PlayerController : nullptr);
+	}
 
 	// Live re-apply so changes show immediately without a respawn / rejoin.
-	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	if (bForceModelDataInitialized && PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		NCPlusForceModels::ReapplyAll(PlayerOwner->PlayerController->GetWorld());
 	}

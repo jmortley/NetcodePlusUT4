@@ -5,6 +5,8 @@
 #include "UTTeamScoreboard.h"
 #include "WipeoutScoreboard.generated.h"
 
+class AWipeoutDamageReplicator;
+
 UCLASS()
 class NETCODEPLUS_API UWipeoutScoreboard : public UUTTeamScoreboard
 {
@@ -86,4 +88,14 @@ protected:
 
 	/** Draw a small portrait pip at the given position. */
 	void DrawPortraitPip(AUTPlayerState* PlayerState, float XOffset, float YOffset, float PipWidth, float PipHeight);
+
+private:
+	/** Stable per-match actor. Weak/world-aware so seamless travel or a respawned
+	 *  replicator is discovered safely; misses retry at most once per second. */
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AWipeoutDamageReplicator> CachedDamageReplicator;
+	TWeakObjectPtr<UWorld> CachedDamageReplicatorWorld;
+	float NextDamageReplicatorSearchTime = 0.f;
+
+	AWipeoutDamageReplicator* FindDamageReplicator();
 };

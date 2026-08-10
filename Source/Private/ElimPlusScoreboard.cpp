@@ -189,6 +189,34 @@ UElimPlusScoreboard::UElimPlusScoreboard(const FObjectInitializer& ObjectInitial
 
 }
 
+void UElimPlusScoreboard::PreloadAbsoluteTextures()
+{
+	EnsureAbsoluteElimScoreboardTextures();
+}
+
+void UElimPlusScoreboard::ReleaseAbsoluteTextures()
+{
+	FAbsoluteElimScoreboardTextures& T = GAbsoluteElimScoreboardTextures;
+	auto ReleaseTexture = [](UTexture2D*& Texture)
+	{
+		if (Texture && Texture->IsRooted())
+		{
+			Texture->RemoveFromRoot();
+		}
+		Texture = nullptr;
+	};
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		ReleaseTexture(T.Banner[Team]);
+		for (int32 Style = 0; Style < 3; ++Style)
+		{
+			ReleaseTexture(T.Row[Team][Style]);
+		}
+	}
+	ReleaseTexture(T.Categories);
+	T.bTriedLoad = false;
+}
+
 void UElimPlusScoreboard::DrawReadyText(AUTPlayerState* PlayerState,
 	float XOffset, float YOffset, float Width)
 {
@@ -374,15 +402,176 @@ void UElimPlusScoreboard::DrawPlayerFlag(AUTPlayerState* PlayerState, float XOff
 	Canvas->SetLinearDrawColor(FLinearColor::White);
 }
 
-// Helper: locate the stats replicator on this client
-static AElimPlusStatsReplicator* FindElimPlusStatsRep(UWorld* World)
+AElimPlusStatsReplicator* UElimPlusScoreboard::FindStatsReplicator()
 {
-	if (!World) return nullptr;
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (CachedStatsReplicatorWorld.Get() != World)
+	{
+		CachedStatsReplicatorWorld = World;
+		CachedStatsReplicator.Reset();
+		NextStatsReplicatorSearchTime = 0.f;
+		ResetCachedRoster();
+	}
+	if (CachedStatsReplicator.IsValid()
+		&& CachedStatsReplicator->GetWorld() == World)
+	{
+		return CachedStatsReplicator.Get();
+	}
+	CachedStatsReplicator.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextStatsReplicatorSearchTime)
+	{
+		return nullptr;
+	}
+	NextStatsReplicatorSearchTime = Now + 1.f;
 	for (TActorIterator<AElimPlusStatsReplicator> It(World); It; ++It)
 	{
+		CachedStatsReplicator = *It;
+		NextStatsReplicatorSearchTime = 0.f;
 		return *It;
 	}
 	return nullptr;
+}
+
+void UElimPlusScoreboard::ResetCachedRoster()
+{
+	CachedRoster.Reset();
+	RosterScratch.Reset();
+	CachedTeamRosterIndices[0].Reset();
+	CachedTeamRosterIndices[1].Reset();
+	CachedRosterIndexByPlayer.Reset();
+	CachedSpectatorNames.Reset();
+}
+
+void UElimPlusScoreboard::UpdateCachedRoster(AElimPlusStatsReplicator* StatsReplicator)
+{
+	CachedSpectatorNames.Reset();
+	RosterScratch.Reset();
+	if (!UTGameState)
+	{
+		ResetCachedRoster();
+		return;
+	}
+	RosterScratch.Reserve(UTGameState->PlayerArray.Num());
+	CachedSpectatorNames.Reserve(UTGameState->PlayerArray.Num());
+
+	for (APlayerState* PlayerBase : UTGameState->PlayerArray)
+	{
+		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(PlayerBase);
+		if (!PlayerState)
+		{
+			continue;
+		}
+		if (PlayerState->bOnlySpectator)
+		{
+			if (!PlayerState->bIsDemoRecording)
+			{
+				CachedSpectatorNames.Add(PlayerState->PlayerName);
+			}
+			continue;
+		}
+
+		const int32 TeamIndex = PlayerState->GetTeamNum();
+		if (TeamIndex < 0 || TeamIndex > 1)
+		{
+			continue;
+		}
+
+		FCachedRosterEntry Snapshot;
+		Snapshot.PlayerState = PlayerState;
+		Snapshot.TeamIndex = TeamIndex;
+		Snapshot.KillsAndAssists = PlayerState->Kills + PlayerState->KillAssists;
+		Snapshot.Score = PlayerState->Score;
+
+		const FString PlayerId = PlayerState->UniqueId.IsValid()
+			? PlayerState->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
+		const FElimPlusStatsEntry* Entry = StatsReplicator
+			? StatsReplicator->FindEntry(PlayerId)
+			: nullptr;
+		Snapshot.DamageDone = Entry ? Entry->DamageDone : int32(PlayerState->DamageDone);
+		if (Entry)
+		{
+			Snapshot.PPRCurrent = Entry->PPRCurrent;
+			Snapshot.Elo = Entry->Elo;
+			Snapshot.EloDeltaThisMatch = Entry->EloDeltaThisMatch;
+			Snapshot.LinkGunAccuracyTimes100 = Entry->LinkGunAccuracyTimes100;
+			Snapshot.GlobalRank = Entry->GlobalRank;
+		}
+		RosterScratch.Add(MoveTemp(Snapshot));
+	}
+
+	bool bSortStateChanged = CachedRoster.Num() != RosterScratch.Num();
+	bool bAnyDataChanged = bSortStateChanged;
+	if (!bAnyDataChanged)
+	{
+		for (int32 Index = 0; Index < RosterScratch.Num(); ++Index)
+		{
+			if (!CachedRoster[Index].HasSameSortState(RosterScratch[Index]))
+			{
+				bSortStateChanged = true;
+				bAnyDataChanged = true;
+				break;
+			}
+			if (!CachedRoster[Index].HasSameData(RosterScratch[Index]))
+			{
+				bAnyDataChanged = true;
+			}
+		}
+	}
+	if (!bAnyDataChanged)
+	{
+		return;
+	}
+
+	CachedRoster = RosterScratch;
+	if (!bSortStateChanged)
+	{
+		return;
+	}
+
+	CachedTeamRosterIndices[0].Reset();
+	CachedTeamRosterIndices[1].Reset();
+	CachedRosterIndexByPlayer.Reset();
+	for (int32 Index = 0; Index < CachedRoster.Num(); ++Index)
+	{
+		const FCachedRosterEntry& Entry = CachedRoster[Index];
+		if (AUTPlayerState* PlayerState = Entry.PlayerState.Get())
+		{
+			CachedRosterIndexByPlayer.Add(PlayerState, Index);
+			CachedTeamRosterIndices[Entry.TeamIndex].Add(Index);
+		}
+	}
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		CachedTeamRosterIndices[TeamIndex].Sort([this](int32 A, int32 B)
+		{
+			const FCachedRosterEntry& Left = CachedRoster[A];
+			const FCachedRosterEntry& Right = CachedRoster[B];
+			if (Left.DamageDone != Right.DamageDone)
+			{
+				return Left.DamageDone > Right.DamageDone;
+			}
+			if (Left.KillsAndAssists != Right.KillsAndAssists)
+			{
+				return Left.KillsAndAssists > Right.KillsAndAssists;
+			}
+			return Left.Score > Right.Score;
+		});
+	}
+}
+
+const UElimPlusScoreboard::FCachedRosterEntry* UElimPlusScoreboard::FindCachedRosterEntry(
+	const AUTPlayerState* PlayerState) const
+{
+	const int32* Index = CachedRosterIndexByPlayer.Find(PlayerState);
+	return Index && CachedRoster.IsValidIndex(*Index) ? &CachedRoster[*Index] : nullptr;
 }
 
 void UElimPlusScoreboard::DrawAbsoluteTeamPanel(float RenderDelta, float& YOffset)
@@ -532,13 +721,9 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 		ETextHorzPos::Left,
 		ETextVertPos::Center);
 
-	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-	const FString PlayerId = PlayerState->UniqueId.IsValid()
-		? PlayerState->UniqueId.ToString()
-		: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
-	const FElimPlusStatsEntry* Entry = Stats ? Stats->FindEntry(PlayerId) : nullptr;
-	const int32 Damage = Entry ? Entry->DamageDone : int32(PlayerState->DamageDone);
-	const int32 Elo = Entry ? Entry->Elo : 1400;
+	const FCachedRosterEntry* CachedEntry = FindCachedRosterEntry(PlayerState);
+	const int32 Damage = CachedEntry ? CachedEntry->DamageDone : int32(PlayerState->DamageDone);
+	const int32 Elo = CachedEntry ? CachedEntry->Elo : 1400;
 	const int32 Kills = PlayerState->Kills + PlayerState->KillAssists;
 
 	FString PingString;
@@ -596,79 +781,40 @@ void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOf
 	const float RowW = 830.f * S;
 	const float RowH = 64.f * S;
 	float MaxY = YOffset;
-	TArray<FString> SpectatorNames;
-	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-
-	auto GetEntry = [Stats](const AUTPlayerState* PlayerState) -> const FElimPlusStatsEntry*
-	{
-		if (!Stats || !PlayerState) return nullptr;
-		const FString PlayerId = PlayerState->UniqueId.IsValid()
-			? PlayerState->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
-		return Stats->FindEntry(PlayerId);
-	};
+	UpdateCachedRoster(FindStatsReplicator());
 
 	for (int32 Team = 0; Team < 2; ++Team)
 	{
-		TArray<AUTPlayerState*> Players;
-		for (APlayerState* PlayerBase : UTGameState->PlayerArray)
-		{
-			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(PlayerBase);
-			if (!PlayerState) continue;
-			if (PlayerState->bOnlySpectator)
-			{
-				if (Team == 0 && !PlayerState->bIsDemoRecording)
-				{
-					SpectatorNames.Add(PlayerState->PlayerName);
-				}
-				continue;
-			}
-			if (PlayerState->GetTeamNum() == Team)
-			{
-				Players.Add(PlayerState);
-			}
-		}
-
-		// Rank by TOTAL damage (the number the DMG column shows), not the PPR
-		// mean: PPR divides by rounds-played, so a late joiner's one hot round
-		// outranked players carrying the whole match. Kills then score tiebreak.
-		Players.Sort([GetEntry](const AUTPlayerState& A, const AUTPlayerState& B)
-		{
-			const FElimPlusStatsEntry* EA = GetEntry(&A);
-			const FElimPlusStatsEntry* EB = GetEntry(&B);
-			const int32 DA = EA ? EA->DamageDone : int32(A.DamageDone);
-			const int32 DB = EB ? EB->DamageDone : int32(B.DamageDone);
-			if (DA != DB) return DA > DB;
-			const int32 KA = A.Kills + A.KillAssists;
-			const int32 KB = B.Kills + B.KillAssists;
-			if (KA != KB) return KA > KB;
-			return A.Score > B.Score;
-		});
+		const TArray<int32>& PlayerIndices = CachedTeamRosterIndices[Team];
 
 		const float RowX = Team == 0 ? CenterX - RowW : CenterX;
 		float DrawY = YOffset;
-		const int32 MaxRows = ShouldDrawScoringStats() ? 5 : Players.Num();
+		const int32 MaxRows = ShouldDrawScoringStats() ? 5 : PlayerIndices.Num();
 		int32 DrawnRows = 0;
-		for (AUTPlayerState* PlayerState : Players)
+		for (int32 RosterIndex : PlayerIndices)
 		{
 			if (DrawnRows >= MaxRows) break;
+			AUTPlayerState* PlayerState = CachedRoster[RosterIndex].PlayerState.Get();
+			if (!PlayerState) continue;
 			DrawAbsolutePlayer(PlayerState, Team, RowX, DrawY, S);
 			DrawY += RowH;
 			++DrawnRows;
 		}
 
-		if (Players.Num() > 0)
+		if (PlayerIndices.Num() > 0)
 		{
 			int32 TotalKills = 0, TotalDeaths = 0, TotalDamage = 0;
 			int64 TotalElo = 0, TotalPing = 0;
 			int32 EloCount = 0, PingCount = 0;
-			for (AUTPlayerState* PlayerState : Players)
+			for (int32 RosterIndex : PlayerIndices)
 			{
-				const FElimPlusStatsEntry* Entry = GetEntry(PlayerState);
+				const FCachedRosterEntry& Entry = CachedRoster[RosterIndex];
+				AUTPlayerState* PlayerState = Entry.PlayerState.Get();
+				if (!PlayerState) continue;
 				TotalKills += PlayerState->Kills + PlayerState->KillAssists;
 				TotalDeaths += PlayerState->Deaths;
-				TotalDamage += Entry ? Entry->DamageDone : int32(PlayerState->DamageDone);
-				TotalElo += Entry ? Entry->Elo : 1400;
+				TotalDamage += Entry.DamageDone;
+				TotalElo += Entry.Elo;
 				++EloCount;
 				if (!Cast<AUTBot>(PlayerState->GetOwner()) && GetWorld()->GetNetMode() != NM_Standalone)
 				{
@@ -713,9 +859,9 @@ void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOf
 	}
 
 	YOffset = MaxY;
-	if (SpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
+	if (CachedSpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
 	{
-		const FString Spectators = TEXT("Spectators: ") + FString::Join(SpectatorNames, TEXT(", "));
+		const FString Spectators = TEXT("Spectators: ") + FString::Join(CachedSpectatorNames, TEXT(", "));
 		DrawText(FText::FromString(Spectators), CenterX, YOffset + 26.f * S,
 			UTHUDOwner->SmallFont, 0.8f * S, 1.f,
 			FLinearColor(0.75f, 0.75f, 0.75f, 1.f),
@@ -914,19 +1060,15 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 
 void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor)
 {
-	// Resolve replicator + player id once. Bots have invalid UniqueIds, so use
-	// the same synthetic "BOT:<name>" key the rating/replicator pair publishes
-	// — so when bRandomizeBotElo is on, bots show their assigned ELO instead
-	// of the default 1400 fallback.
-	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-	FString PId;
-	if (PlayerState)
-	{
-		PId = PlayerState->UniqueId.IsValid()
-			? PlayerState->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
-	}
-	const FElimPlusStatsEntry* Entry = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
+	// The per-frame roster snapshot already resolved this player's full stats
+	// entry, so every displayed column reads the same replicated sample.
+	const FCachedRosterEntry* Entry = FindCachedRosterEntry(PlayerState);
+	int32 Damage = Entry ? Entry->DamageDone : int32(PlayerState->DamageDone);
+	const float PPRCur = Entry ? Entry->PPRCurrent : 0.f;
+	const int32 Elo = Entry ? Entry->Elo : 1400;
+	const int32 EloDelta = Entry ? Entry->EloDeltaThisMatch : 0;
+	const int32 Rank = Entry ? Entry->GlobalRank : 0;
+	const int32 LGAccPacked = Entry ? Entry->LinkGunAccuracyTimes100 : -1;
 
 	const FLinearColor DimColor = (PlayerState->GetUTCharacter() == nullptr) ? FLinearColor(0.6f, 0.6f, 0.6f, 1.f) * DrawColor : DrawColor;
 
@@ -942,22 +1084,12 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, DimColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// Damage — replicator preferred; fall back to direct PlayerState read on listen-server
-	int32 Damage = 0;
-	if (Entry)
-	{
-		Damage = Entry->DamageDone;
-	}
-	else
-	{
-		Damage = int32(PlayerState->DamageDone);
-	}
 	const FLinearColor DmgColor = FLinearColor(1.f, 0.8f, 0.25f, 1.f) * (DimColor / DrawColor);
 	DrawText(FText::AsNumber(Damage),
 		XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, DmgColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// PPR (Current) — match-running mean across completed rounds (gamemode populates)
-	const float PPRCur = Entry ? Entry->PPRCurrent : 0.f;
 	DrawText(FText::FromString(FString::Printf(TEXT("%.1f"), PPRCur)),
 		XOffset + (Width * ColumnHeaderPPRCurX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, DimColor, ETextHorzPos::Center, ETextVertPos::Center);
@@ -965,9 +1097,6 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 	// ELO + delta — source of truth is the replicator (gamemode pushes from
 	// Mods.db). Don't fall back to PlayerState rank fields — TDMRank etc. are
 	// defunct in this fork (see feedback_no_epic_mcp_or_tdmrank memory).
-	const int32 Elo = Entry ? Entry->Elo : 1400;
-	const int32 EloDelta = Entry ? Entry->EloDeltaThisMatch : 0;
-	const int32 Rank = Entry ? Entry->GlobalRank : 0;
 	FString EloStr = FString::Printf(TEXT("%d"), Elo);
 	if (Rank > 0)
 	{
@@ -995,7 +1124,6 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 	// LG_Acc — Sniper / Lightning Gun hitscan accuracy, computed + replicated
 	// server-side (NAME_SniperHits/Shots). -1 = no sniper shots fired -> show "-"
 	// (matches NCPlusCTFScoreboard) instead of a misleading 0%.
-	const int32 LGAccPacked = Entry ? Entry->LinkGunAccuracyTimes100 : -1;
 	const bool bHasLGAcc = (LGAccPacked >= 0);
 	const float LGAcc = bHasLGAcc ? (static_cast<float>(LGAccPacked) / 100.f) : 0.f;
 	const FLinearColor LGColor = !bHasLGAcc       ? FLinearColor(0.5f, 0.5f, 0.5f, 1.f)
@@ -1019,22 +1147,7 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 
 	int32 XOffset = ScaledEdgeSize;
 	float MaxYOffset = 0.f;
-	TArray<FString> SpectatorNames;
-
-	// Damage lookup for row ordering — same replicator + uid resolution
-	// DrawPlayerScore uses (bots key on the synthetic "BOT:<name>"). Falls back
-	// to the PlayerState's own tally when the replicator isn't up yet, so the
-	// board still orders sensibly in the opening seconds.
-	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-	auto GetDamage = [Stats](AUTPlayerState* PS) -> int32
-	{
-		if (!PS) return 0;
-		const FString PId = PS->UniqueId.IsValid()
-			? PS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
-		const FElimPlusStatsEntry* E = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
-		return E ? E->DamageDone : int32(PS->DamageDone);
-	};
+	UpdateCachedRoster(FindStatsReplicator());
 
 	for (int8 Team = 0; Team < 2; Team++)
 	{
@@ -1042,40 +1155,9 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 		float DrawOffset = YOffset;
 		const int32 NumPlayersToShow = ShouldDrawScoringStats() ? 5 : UTGameState->PlayerArray.Num();
 
-		// Collect this team's players (harvesting spectators once, on the team-0
-		// pass), then sort by total damage desc. Damage, not the PPR mean: PPR
-		// divides by rounds-played, so a late joiner's one hot round outranked
-		// players carrying the whole match. Kills then score break ties.
-		TArray<AUTPlayerState*> TeamPlayers;
-		TMap<const AUTPlayerState*, int32> DamageByPlayer;
-		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
-		{
-			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(UTGameState->PlayerArray[i]);
-			if (!PlayerState) continue;
-			if (PlayerState->bOnlySpectator)
-			{
-				if (Team == 0 && !PlayerState->bIsDemoRecording)
-				{
-					SpectatorNames.Add(PlayerState->PlayerName);
-				}
-				continue;
-			}
-			if (PlayerState->GetTeamNum() == Team)
-			{
-				TeamPlayers.Add(PlayerState);
-				DamageByPlayer.Add(PlayerState, GetDamage(PlayerState));
-			}
-		}
-		TeamPlayers.Sort([&DamageByPlayer](const AUTPlayerState& A, const AUTPlayerState& B)
-		{
-			const int32 DA = DamageByPlayer.FindRef(&A);
-			const int32 DB = DamageByPlayer.FindRef(&B);
-			if (DA != DB) return DA > DB;
-			const int32 KA = A.Kills + A.KillAssists;
-			const int32 KB = B.Kills + B.KillAssists;
-			if (KA != KB) return KA > KB;
-			return A.Score > B.Score;
-		});
+		// Reuse the roster order until membership or the exact damage/kills/score
+		// sort keys change. Row values such as ping still read live below.
+		const TArray<int32>& TeamPlayers = CachedTeamRosterIndices[Team];
 
 		// Concept-D dark panel backdrop behind this team's rows + a thin team-color
 		// top accent (no new texture — a translucent dark tile under the rows).
@@ -1093,8 +1175,10 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			Canvas->SetLinearDrawColor(FLinearColor::White);
 		}
 
-		for (AUTPlayerState* PlayerState : TeamPlayers)
+		for (int32 RosterIndex : TeamPlayers)
 		{
+			AUTPlayerState* PlayerState = CachedRoster[RosterIndex].PlayerState.Get();
+			if (!PlayerState) continue;
 			DrawPlayer(Place, PlayerState, RenderDelta, XOffset, DrawOffset);
 			Place++;
 			DrawOffset += CellHeight * RenderScale;
@@ -1112,17 +1196,17 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			float SumAcc = 0.f; int32 CountAcc = 0;  // LG_Acc: average of players with data
 			int64 SumPing = 0; int32 CountPing = 0;  // Ping: average of HUMANs (bots show skill)
 			const bool bNetworked = (GetWorld()->GetNetMode() != NM_Standalone);
-			for (AUTPlayerState* TP : TeamPlayers)
+			for (int32 RosterIndex : TeamPlayers)
 			{
+				const FCachedRosterEntry& Entry = CachedRoster[RosterIndex];
+				AUTPlayerState* TP = Entry.PlayerState.Get();
 				if (!TP) continue;
 				SumK += TP->Kills;
 				SumD += TP->Deaths;
-				const FString PId = TP->UniqueId.IsValid() ? TP->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *TP->PlayerName);
-				const FElimPlusStatsEntry* E = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
-				SumPPR += E ? E->PPRCurrent : 0.f;
-				SumDMG += E ? E->DamageDone : int32(TP->DamageDone);
-				SumElo += E ? E->Elo : 1400; ++CountElo;
-				if (E && E->LinkGunAccuracyTimes100 >= 0) { SumAcc += float(E->LinkGunAccuracyTimes100) / 100.f; ++CountAcc; }
+				SumPPR += Entry.PPRCurrent;
+				SumDMG += Entry.DamageDone;
+				SumElo += Entry.Elo; ++CountElo;
+				if (Entry.LinkGunAccuracyTimes100 >= 0) { SumAcc += float(Entry.LinkGunAccuracyTimes100) / 100.f; ++CountAcc; }
 				if (bNetworked && !Cast<AUTBot>(TP->GetOwner()))
 				{
 					const bool bTPOwner = (UTHUDOwner && UTHUDOwner->UTPlayerOwner && UTHUDOwner->UTPlayerOwner->UTPlayerState == TP);
@@ -1184,9 +1268,9 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 
-	if (SpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
+	if (CachedSpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
 	{
-		FString SpecStr = TEXT("Spectators: ") + FString::Join(SpectatorNames, TEXT(", "));
+		FString SpecStr = TEXT("Spectators: ") + FString::Join(CachedSpectatorNames, TEXT(", "));
 		DrawText(FText::FromString(SpecStr), Size.X * 0.5f, 765.f * RenderScale,
 			UTHUDOwner->SmallFont, 1.0f, 1.0f, FLinearColor(0.75f, 0.75f, 0.75f, 1.f),
 			ETextHorzPos::Center, ETextVertPos::Bottom);

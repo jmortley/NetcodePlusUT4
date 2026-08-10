@@ -59,6 +59,7 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
+	const FCTFReplicatedStatsEntry* FindEntry(const FString& UniqueIdStr) const;
 	int32 GetGrabsForPlayer(const FString& UniqueIdStr) const;
 	void GetAccuracyForPlayer(const FString& UniqueIdStr, int32& OutHits, int32& OutShots) const;
 	void GetArmorCountsForPlayer(const FString& UniqueIdStr, uint8 OutCounts[4]) const;

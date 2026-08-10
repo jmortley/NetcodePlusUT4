@@ -15,6 +15,42 @@ UShockDomScoreboard::UShockDomScoreboard(const FObjectInitializer& ObjectInitial
 }
 
 
+AShockDomReplicator* UShockDomScoreboard::FindDomReplicator()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (CachedDomReplicatorWorld.Get() != World)
+	{
+		CachedDomReplicatorWorld = World;
+		CachedDomReplicator.Reset();
+		NextDomReplicatorSearchTime = 0.f;
+	}
+	if (CachedDomReplicator.IsValid() && CachedDomReplicator->GetWorld() == World)
+	{
+		return CachedDomReplicator.Get();
+	}
+	CachedDomReplicator.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextDomReplicatorSearchTime)
+	{
+		return nullptr;
+	}
+	NextDomReplicatorSearchTime = Now + 1.f;
+	for (TActorIterator<AShockDomReplicator> It(World); It; ++It)
+	{
+		CachedDomReplicator = *It;
+		NextDomReplicatorSearchTime = 0.f;
+		return *It;
+	}
+	return nullptr;
+}
+
+
 void UShockDomScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 {
 	float XOffset = ScaledEdgeSize;
@@ -63,24 +99,16 @@ void UShockDomScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// Find DOM replicator (reused for captures + damage below)
-	AShockDomReplicator* DomRep = nullptr;
-	{
-		UWorld* World = GetWorld();
-		if (World)
-		{
-			for (TActorIterator<AShockDomReplicator> It(World); It; ++It)
-			{
-				DomRep = *It;
-				break;
-			}
-		}
-	}
+	AShockDomReplicator* DomRep = FindDomReplicator();
+	const FString PlayerId = PlayerState->UniqueId.IsValid()
+		? PlayerState->UniqueId.ToString()
+		: FString();
 
 	// Captures
 	int32 Captures = 0;
-	if (DomRep && PlayerState->UniqueId.IsValid())
+	if (DomRep && !PlayerId.IsEmpty())
 	{
-		Captures = DomRep->GetCapturesForPlayer(PlayerState->UniqueId.ToString());
+		Captures = DomRep->GetCapturesForPlayer(PlayerId);
 	}
 	FLinearColor CapColor = FLinearColor(0.2f, 1.f, 0.4f, 1.f); // Green
 	if (!PlayerState->GetUTCharacter()) CapColor *= 0.6f;
@@ -89,9 +117,9 @@ void UShockDomScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 
 	// Damage — from DOM replicator (reuse the one we already found)
 	int32 Damage = 0;
-	if (DomRep && PlayerState->UniqueId.IsValid())
+	if (DomRep && !PlayerId.IsEmpty())
 	{
-		Damage = DomRep->GetDamageForPlayer(PlayerState->UniqueId.ToString());
+		Damage = DomRep->GetDamageForPlayer(PlayerId);
 	}
 	else
 	{

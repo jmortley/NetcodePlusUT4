@@ -1,6 +1,7 @@
 // SNCPlusHUDEditor.cpp - implementation of the live HUD layout editor.
 #include "SNCPlusHUDEditor.h"
 #include "NCPlusHUDLayout.h"
+#include "ElimPlusScoreboard.h"
 #include "SNCPlusHUDPresetGallery.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
@@ -1005,6 +1006,13 @@ ECheckBoxState SNCPlusHUDEditor::GetAbsoluteElimTeamPanelState() const
 void SNCPlusHUDEditor::OnAbsoluteElimTeamPanelChanged(ECheckBoxState NewState)
 {
 	const bool bAbsolute = (NewState == ECheckBoxState::Checked);
+	if (bAbsolute && !IsRunningDedicatedServer())
+	{
+		// Pay the loose-PNG decode/upload cost on the explicit UI action, before
+		// the next HUD/scoreboard draw observes the enabled setting.
+		NCPlusHUDDrawCall::PreloadAbsoluteElimTeamPanelTextures();
+		UElimPlusScoreboard::PreloadAbsoluteTextures();
+	}
 	FNCPlusHUDLayout::SetAbsoluteElimTeamPanel(bAbsolute);
 	SetStatus(bAbsolute
 		? TEXT("Team display: Absolute Elim 113 (fixed red/blue, applies now).")

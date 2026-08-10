@@ -12,6 +12,8 @@
 #include "UTHUDWidget.h"
 #include "NCPlusHUDWidget_HealAbility.generated.h"
 
+class UPlayerInput;
+
 UCLASS()
 class NETCODEPLUS_API UNCPlusHUDWidget_HealAbility : public UUTHUDWidget
 {
@@ -20,4 +22,14 @@ class NETCODEPLUS_API UNCPlusHUDWidget_HealAbility : public UUTHUDWidget
 	virtual void Draw_Implementation(float DeltaTime) override;
 	virtual bool ShouldDraw_Implementation(bool bShowScores) override;
 	virtual float GetDrawScaleOverride() override;
+
+private:
+	/** Input mappings change rarely, so keep the resolved label between draws and
+	 *  resample once per second to support live rebinding without render-rate scans. */
+	TWeakObjectPtr<UWorld> CachedBindingWorld;
+	TWeakObjectPtr<UPlayerInput> CachedBindingInput;
+	uint32 CachedBindingLayoutRevision;
+	float NextBindingRefreshTime;
+	FString CachedBindOverride;
+	FText CachedDisplayLabel;
 };

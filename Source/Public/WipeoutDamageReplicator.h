@@ -56,8 +56,10 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
-	/** Look up a player's replicated damage by their UniqueNetId string.
-	 *  Returns 0 if not found. Safe to call on clients. */
+	/** Look up a player's full replicated snapshot by UniqueNetId string. */
+	const FReplicatedDamageEntry* FindEntry(const FString& UniqueIdStr) const;
+
+	/** Look up individual values. Missing players return 0. Safe on clients. */
 	int32 GetDamageForPlayer(const FString& UniqueIdStr) const;
 	int32 GetBeltsForPlayer(const FString& UniqueIdStr) const;
 	int32 GetAmpsForPlayer(const FString& UniqueIdStr) const;

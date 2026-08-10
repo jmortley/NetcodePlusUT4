@@ -25,4 +25,10 @@ protected:
 		float YOffset, float Width) override;
 
 	AClutchRoundState* ResolveClutchState() const;
+
+private:
+	UPROPERTY(Transient)
+	mutable TWeakObjectPtr<AClutchRoundState> CachedClutchState;
+	mutable TWeakObjectPtr<UWorld> CachedClutchStateWorld;
+	mutable float NextClutchStateSearchTime = 0.f;
 };

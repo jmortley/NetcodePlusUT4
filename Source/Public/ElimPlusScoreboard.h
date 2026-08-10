@@ -8,12 +8,20 @@
 #include "UTTeamScoreboard.h"
 #include "ElimPlusScoreboard.generated.h"
 
+class AElimPlusStatsReplicator;
+
 UCLASS()
 class NETCODEPLUS_API UElimPlusScoreboard : public UUTTeamScoreboard
 {
 	GENERATED_UCLASS_BODY()
 
 public:
+	/** Decode and upload the recovered Absolute Elim scoreboard textures before
+	 *  the scoreboard's draw path needs them. Safe to call repeatedly. */
+	static void PreloadAbsoluteTextures();
+	/** Release rooted transient artwork during a live module unload. */
+	static void ReleaseAbsoluteTextures();
+
 	// Column header texts (CH_Kills, CH_Deaths, CH_PlayerName, CH_Score, CH_Skill,
 	// CH_Ping are inherited from UUTScoreboard — set their values in the ctor.)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Scoreboard")
@@ -69,4 +77,54 @@ protected:
 	void DrawAbsolutePlayerScores(float RenderDelta, float& YOffset);
 	void DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 TeamIndex,
 		float XOffset, float YOffset, float AbsoluteScale);
+
+private:
+	struct FCachedRosterEntry
+	{
+		TWeakObjectPtr<AUTPlayerState> PlayerState;
+		int32 TeamIndex = INDEX_NONE;
+		int32 DamageDone = 0;
+		int32 KillsAndAssists = 0;
+		float Score = 0.f;
+		float PPRCurrent = 0.f;
+		int32 Elo = 1400;
+		int32 EloDeltaThisMatch = 0;
+		int32 LinkGunAccuracyTimes100 = -1;
+		int32 GlobalRank = 0;
+
+		bool HasSameSortState(const FCachedRosterEntry& Other) const
+		{
+			return PlayerState.Get() == Other.PlayerState.Get()
+				&& TeamIndex == Other.TeamIndex
+				&& DamageDone == Other.DamageDone
+				&& KillsAndAssists == Other.KillsAndAssists
+				&& Score == Other.Score;
+		}
+
+		bool HasSameData(const FCachedRosterEntry& Other) const
+		{
+			return HasSameSortState(Other)
+				&& PPRCurrent == Other.PPRCurrent
+				&& Elo == Other.Elo
+				&& EloDeltaThisMatch == Other.EloDeltaThisMatch
+				&& LinkGunAccuracyTimes100 == Other.LinkGunAccuracyTimes100
+				&& GlobalRank == Other.GlobalRank;
+		}
+	};
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AElimPlusStatsReplicator> CachedStatsReplicator;
+	TWeakObjectPtr<UWorld> CachedStatsReplicatorWorld;
+	float NextStatsReplicatorSearchTime = 0.f;
+
+	TArray<FCachedRosterEntry> CachedRoster;
+	TArray<FCachedRosterEntry> RosterScratch;
+	TArray<int32> CachedTeamRosterIndices[2];
+	TMap<const AUTPlayerState*, int32> CachedRosterIndexByPlayer;
+	TArray<FString> CachedSpectatorNames;
+
+	AElimPlusStatsReplicator* FindStatsReplicator();
+	void UpdateCachedRoster(AElimPlusStatsReplicator* StatsReplicator);
+	const FCachedRosterEntry* FindCachedRosterEntry(const AUTPlayerState* PlayerState) const;
+	void ResetCachedRoster();
 };

@@ -444,6 +444,12 @@ namespace NCPlusHUDDrawCall
 	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas,
 		const FElimPlusHUDSnapshot& Snapshot);
 
+	/** Decode and upload the recovered Absolute Elim team-panel textures before
+	 *  the render path needs them. Safe to call repeatedly. */
+	NETCODEPLUS_API void PreloadAbsoluteElimTeamPanelTextures();
+	/** Release session-lifetime transient textures during a live module unload. */
+	NETCODEPLUS_API void ReleaseAbsoluteElimTeamPanelTextures();
+
 	/** Recovered Elimination 113 top-left living-player panel. Uses the original fixed
 	 *  red artwork (and a fixed 240-degree blue variant), score hexes, name plates, and
 	 *  health/armor icons. Honors the shared `team_panel` alias except Team Color, which

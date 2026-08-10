@@ -19,6 +19,7 @@
 #include "AssetRegistryModule.h"
 #include "IAssetRegistry.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogClientHitsounds, Log, All);
 
@@ -95,6 +96,8 @@ static FNCPHitsoundCatalogReferences* HitsoundCatalogReferences = nullptr;
 static TArray<FHitsound> HitsoundCatalog;
 static bool bHitsoundCatalogBuilt = false;
 static bool bHitsoundCatalogReady = false;
+static double HitsoundCatalogLastBuildTime = -1.0e30;
+static constexpr double EmptyCatalogRetryIntervalSeconds = 30.0;
 
 static USoundBase* LoadHitsoundCue(const TCHAR* Folder, const TCHAR* AssetName)
 {
@@ -117,6 +120,7 @@ static USoundBase* LoadHitsoundCue(const TCHAR* Folder, const TCHAR* AssetName)
 
 void AClientHitsounds::RefreshCatalog()
 {
+	HitsoundCatalogLastBuildTime = FPlatformTime::Seconds();
 	// Sounds are a client-side concern; a headless server never needs the cues
 	// (and must not pay a synchronous asset load for them).
 	if (IsRunningDedicatedServer())
@@ -250,6 +254,7 @@ void AClientHitsounds::ShutdownCatalog()
 	HitsoundCatalog.Empty();
 	bHitsoundCatalogBuilt = false;
 	bHitsoundCatalogReady = false;
+	HitsoundCatalogLastBuildTime = -1.0e30;
 	if (HitsoundCatalogReferences != nullptr)
 	{
 		delete HitsoundCatalogReferences;
@@ -260,6 +265,22 @@ void AClientHitsounds::ShutdownCatalog()
 const TArray<FHitsound>& AClientHitsounds::GetCatalog()
 {
 	EnsureCatalog();
+	return HitsoundCatalog;
+}
+
+const TArray<FHitsound>& AClientHitsounds::GetCatalogForMenu()
+{
+	// Capture the state before EnsureCatalog(): an empty first-ever build must not
+	// immediately repeat the same disk/registry work, while a later menu opening
+	// should retain late-mounted-PAK recovery at a bounded retry cadence.
+	const bool bRetryPreviouslyEmptyCatalog = bHitsoundCatalogBuilt
+		&& !bHitsoundCatalogReady
+		&& FPlatformTime::Seconds() - HitsoundCatalogLastBuildTime >= EmptyCatalogRetryIntervalSeconds;
+	EnsureCatalog();
+	if (bRetryPreviouslyEmptyCatalog)
+	{
+		RefreshCatalog();
+	}
 	return HitsoundCatalog;
 }
 

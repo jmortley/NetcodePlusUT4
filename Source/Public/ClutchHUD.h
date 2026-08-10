@@ -22,6 +22,7 @@ class NETCODEPLUS_API AClutchHUD : public AWipeoutHUD
 	GENERATED_UCLASS_BODY()
 
 public:
+	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
 	virtual void DrawTeamScoreBar(AUTGameState* GameState) override;
 	virtual void NotifyHitBoxClick(FName BoxName) override;
