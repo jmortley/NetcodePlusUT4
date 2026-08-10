@@ -770,8 +770,6 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 				.Font(RegularFont(14))
 				.ColorAndOpacity(FLinearColor::White)
 			]
-		]
-
 		];
 }
 
