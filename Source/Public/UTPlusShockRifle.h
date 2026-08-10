@@ -149,6 +149,24 @@ private:
 	/** True only for the Instagib shock-rifle variants; normal Shock children stay stock. */
 	bool IsInstagibBeamWeapon() const;
 	bool ShouldShowOwnInstagibBeam() const;
+
+	/** Lazily-resolved caches for the two checks above, so the fire path costs no
+	 *  FString building, name Contains() scans, or config lookups per shot.
+	 *  -1 = unresolved.
+	 *
+	 *  IsInstagibBeamWeapon's inputs really are fixed for the life of an instance
+	 *  (class identity, stats names, damage type, attachment).
+	 *
+	 *  ShouldShowOwnInstagibBeam's is NOT, and caching it is a deliberate
+	 *  trade: the F5 menu writes bShowOwnBeam through GConfig itself
+	 *  (SUTNCPlusMenu.cpp SetString + Flush), which updates the same in-memory
+	 *  cache the old per-shot GetString read — so toggling "Show Own Beam"
+	 *  mid-match used to apply on the very next shot, and now applies when the
+	 *  next weapon instance is built (your next respawn or re-pickup). Only a
+	 *  hand-edit of Mod.ini was ever ignored. If live toggling is wanted back,
+	 *  bump a generation counter on menu save and re-resolve when it changes. */
+	mutable int8 CachedIsInstagibBeamWeapon = -1;
+	mutable int8 CachedShowOwnBeam = -1;
 	bool NeedsLegacyInstagibBeamLayer() const;
 	void SpawnLegacyInstagibBeamLayer(const FVector& TargetLoc, uint8 FireMode,
 		const FVector& SpawnLocation, const FRotator& SpawnRotation);

@@ -168,34 +168,43 @@ void AUTPlusShockRifle::PlayFiringEffects()
 
 bool AUTPlusShockRifle::IsInstagibBeamWeapon() const
 {
-	// IGPlusRifle is deliberately abbreviated and retains the ShockRifle stat names,
-	// but its primary damage type and attachment are the stock Instagib classes.
-	// Accept any of these Instagib-exclusive signals while leaving normal Shock children stock.
-	const bool bInstagibName = GetClass() && GetClass()->GetName().Contains(TEXT("Instagib"));
-	const bool bInstagibStats = ShotsStatsName == NAME_InstagibShots
-		|| HitsStatsName == NAME_InstagibHits
-		|| KillStatsName == NAME_InstagibKills;
-	const bool bInstagibDamageType = InstantHitInfo.IsValidIndex(0)
-		&& InstantHitInfo[0].DamageType != nullptr
-		&& InstantHitInfo[0].DamageType->GetName().Contains(TEXT("Instagib"));
-	const bool bInstagibAttachment = AttachmentType != nullptr
-		&& AttachmentType->GetName().Contains(TEXT("Instagib"));
-	return bInstagibName || bInstagibStats || bInstagibDamageType || bInstagibAttachment;
+	if (CachedIsInstagibBeamWeapon < 0)
+	{
+		// IGPlusRifle is deliberately abbreviated and retains the ShockRifle stat names,
+		// but its primary damage type and attachment are the stock Instagib classes.
+		// Accept any of these Instagib-exclusive signals while leaving normal Shock children stock.
+		const bool bInstagibName = GetClass() && GetClass()->GetName().Contains(TEXT("Instagib"));
+		const bool bInstagibStats = ShotsStatsName == NAME_InstagibShots
+			|| HitsStatsName == NAME_InstagibHits
+			|| KillStatsName == NAME_InstagibKills;
+		const bool bInstagibDamageType = InstantHitInfo.IsValidIndex(0)
+			&& InstantHitInfo[0].DamageType != nullptr
+			&& InstantHitInfo[0].DamageType->GetName().Contains(TEXT("Instagib"));
+		const bool bInstagibAttachment = AttachmentType != nullptr
+			&& AttachmentType->GetName().Contains(TEXT("Instagib"));
+		CachedIsInstagibBeamWeapon =
+			(bInstagibName || bInstagibStats || bInstagibDamageType || bInstagibAttachment) ? 1 : 0;
+	}
+	return CachedIsInstagibBeamWeapon != 0;
 }
 
 bool AUTPlusShockRifle::ShouldShowOwnInstagibBeam() const
 {
-	bool bShowOwnBeam = true;
-	if (IsInstagibBeamWeapon() && GConfig)
+	if (CachedShowOwnBeam < 0)
 	{
-		const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
-		FString Value;
-		if (GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowOwnBeam"), Value, ConfigPath))
+		bool bShowOwnBeam = true;
+		if (IsInstagibBeamWeapon() && GConfig)
 		{
-			bShowOwnBeam = Value.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+			const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+			FString Value;
+			if (GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowOwnBeam"), Value, ConfigPath))
+			{
+				bShowOwnBeam = Value.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+			}
 		}
+		CachedShowOwnBeam = bShowOwnBeam ? 1 : 0;
 	}
-	return bShowOwnBeam;
+	return CachedShowOwnBeam != 0;
 }
 
 bool AUTPlusShockRifle::NeedsLegacyInstagibBeamLayer() const
