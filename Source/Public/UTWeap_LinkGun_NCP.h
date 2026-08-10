@@ -11,6 +11,7 @@ class UCanvasRenderTarget2D;
 class UFont;
 class UMaterialInstanceDynamic;
 class UParticleSystem;
+class UParticleSystemComponent;
 class USoundBase;
 class UTexture2D;
 class UUTHUDWidget;
@@ -73,6 +74,18 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = LinkGun)
 	FLinearColor ReadyToPullColor;
+
+	/**
+	 * Returns true only when the persistent first-person Link beam needs its
+	 * configured local color reapplied (new effect instance or an F5 color
+	 * change). The muzzle particle color is updated here on the same change.
+	 *
+	 * This is deliberately owner-local cosmetic state: it never replicates and
+	 * is disabled for remote weapons, dedicated servers, and replay playback.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
+	bool RefreshConfiguredLinkColor(UObject* BeamEffect, UParticleSystemComponent* MuzzleEffect,
+		FLinearColor& OutColor);
 
 	UPROPERTY(BlueprintReadWrite, Category = LinkGun)
 	int32 LastFiredPlasmaTime;
@@ -215,4 +228,10 @@ public:
 protected:
 	/** Keep the stock high-ping delayed fake callback for rapid plasma. */
 	virtual void SpawnDelayedFakeProjectile() override;
+
+	/** Weak identity caches avoid retaining transient Blueprint beam actors. */
+	TWeakObjectPtr<UObject> LastColoredLinkEffect;
+	TWeakObjectPtr<UParticleSystemComponent> LastColoredLinkMuzzle;
+	uint32 LastLinkEffectColorGeneration;
+	uint32 LastLinkMuzzleColorGeneration;
 };

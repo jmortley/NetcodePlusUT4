@@ -1,10 +1,13 @@
 #include "UTWeap_LinkGun_NCP.h"
+#include "NCWeaponColorSettings.h"
 #include "NetcodePlus.h"
 #include "UTWeaponStateFiringLinkBeam_NCP.h"
 
 #include "Animation/AnimInstance.h"
 #include "Engine/Canvas.h"
 #include "Engine/CanvasRenderTarget2D.h"
+#include "Engine/DemoNetDriver.h"
+#include "Particles/ParticleSystemComponent.h"
 #include "StatNames.h"
 #include "UTProj_LinkPlasma.h"
 #include "UTRewardMessage.h"
@@ -64,6 +67,8 @@ AUTWeap_LinkGun_NCP::AUTWeap_LinkGun_NCP(const FObjectInitializer& OI)
 	SideScreenMaterialID = 1;
 	FiringBeamKickbackY = 0.f;
 	LinkPullKickbackY = 300.f;
+	LastLinkEffectColorGeneration = 0;
+	LastLinkMuzzleColorGeneration = 0;
 
 	WeaponCustomizationTag = EpicWeaponCustomizationTags::LinkGun;
 	WeaponSkinCustomizationTag = EpicWeaponSkinCustomizationTags::LinkGun;
@@ -73,6 +78,50 @@ AUTWeap_LinkGun_NCP::AUTWeap_LinkGun_NCP(const FObjectInitializer& OI)
 	HighlightText = NSLOCTEXT("Weapon", "LinkHighlightText", "Plasma Boy");
 	LowMeshOffset = FVector(0.f, 0.f, -3.f);
 	VeryLowMeshOffset = FVector(0.f, 0.f, -10.f);
+}
+
+bool AUTWeap_LinkGun_NCP::RefreshConfiguredLinkColor(UObject* BeamEffect,
+	UParticleSystemComponent* MuzzleEffect, FLinearColor& OutColor)
+{
+	OutColor = FLinearColor::White;
+	UWorld* World = GetWorld();
+	if (World == nullptr || GetNetMode() == NM_DedicatedServer || UTOwner == nullptr
+		|| !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
+		|| !ShouldPlay1PVisuals()
+		|| (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsPlaying()))
+	{
+		return false;
+	}
+
+	const FNCWeaponColorSnapshot& Colors = NCWeaponColors::GetSnapshot();
+	if (!Colors.bHasLinkColor)
+	{
+		return false;
+	}
+	OutColor = Colors.LinkColor;
+
+	const bool bValidBeamEffect = BeamEffect != nullptr && !BeamEffect->IsPendingKill();
+	const bool bRefreshBeam = bValidBeamEffect
+		&& (LastColoredLinkEffect.Get() != BeamEffect
+			|| LastLinkEffectColorGeneration != Colors.Generation);
+
+	if (MuzzleEffect != nullptr && !MuzzleEffect->IsPendingKill()
+		&& (LastColoredLinkMuzzle.Get() != MuzzleEffect
+			|| LastLinkMuzzleColorGeneration != Colors.Generation))
+	{
+		static const FName NAME_ShockMuzzleColorParam(TEXT("ShockMuzzleColorParam"));
+		MuzzleEffect->SetColorParameter(NAME_ShockMuzzleColorParam, Colors.LinkColor);
+		LastColoredLinkMuzzle = MuzzleEffect;
+		LastLinkMuzzleColorGeneration = Colors.Generation;
+	}
+
+	if (bRefreshBeam)
+	{
+		LastColoredLinkEffect = BeamEffect;
+		LastLinkEffectColorGeneration = Colors.Generation;
+	}
+
+	return bRefreshBeam;
 }
 
 void AUTWeap_LinkGun_NCP::StartFire(uint8 FireModeNum)

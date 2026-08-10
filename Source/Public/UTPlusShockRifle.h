@@ -4,6 +4,10 @@
 #include "UTWeaponFix.h"
 #include "UTPlusShockRifle.generated.h"
 
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
+class UParticleSystemComponent;
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4273)
@@ -30,6 +34,10 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	// internal RPC: server to owning client, then calls OnImpressive()
 	UFUNCTION(Client, Reliable)
 	void ClientNotifyImpressive();
+
+	/** Apply the owning player's local Shock color to a newly spawned first-person beam. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
+	void ApplyConfiguredShockBeamColor(UParticleSystemComponent* Effect);
 
 	/** shock ball bot is waiting to combo */
 	UPROPERTY()
@@ -89,6 +97,7 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	float LastScreenUpdateTime = 0.0f;
 
 	virtual void SetupSpecialMaterials() override;
+	virtual void OnRep_Ammo() override;
 
 	UFUNCTION()
 	virtual void UpdateScreenTexture(UCanvas* C, int32 Width, int32 Height);
@@ -146,6 +155,47 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	virtual float GetHitValidationPredictionTime() const override;
 
 private:
+	/** Slot-2 ammo-glow MID created by the Shock Blueprint construction script. */
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CachedShockAmmoGlowMID;
+
+	/** Slot-3 ammo-count MID created by the Shock Blueprint construction script. */
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CachedShockAmmoCountMID;
+
+	/** Last materials observed in slots 2 and 3, including incompatible materials. */
+	UPROPERTY(Transient)
+	UMaterialInterface* ObservedShockAmmoGlowMaterial;
+
+	UPROPERTY(Transient)
+	UMaterialInterface* ObservedShockAmmoCountMaterial;
+
+	/** Cheap inputs used to avoid inventory and material parameter work on steady frames. */
+	TWeakObjectPtr<class AUTCharacter> ObservedShockAmmoOwner;
+	int32 ObservedShockAmmoValue;
+	int32 ObservedShockMaxAmmoValue;
+
+	/** Values last applied to the two ammo materials. */
+	int32 AppliedShockDisplayAmmo;
+	int32 AppliedShockMaxAmmo;
+	int8 AppliedShockLowAmmoState;
+	bool bShockAmmoMaterialRefreshPending;
+
+	void BindShockAmmoMaterials();
+	void RefreshShockAmmoMaterials(bool bForce);
+
+	/** One weapon-owned material instance is shared by its short-lived beam PSCs. */
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CachedShockBeamMID;
+
+	/** Authored slot-1 material used to build CachedShockBeamMID. */
+	UPROPERTY(Transient)
+	UMaterialInterface* CachedShockBeamSourceMaterial;
+
+	/** Settings generation baked into CachedShockBeamMID. */
+	UPROPERTY(Transient)
+	uint32 CachedShockBeamColorGeneration;
+
 	/** True only for the Instagib shock-rifle variants; normal Shock children stay stock. */
 	bool IsInstagibBeamWeapon() const;
 	bool ShouldShowOwnInstagibBeam() const;

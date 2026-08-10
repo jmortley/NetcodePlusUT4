@@ -3,6 +3,18 @@
 #include "UTWeaponFix.h"
 #include "UTPlusSniper.generated.h"
 
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
+class UParticleSystemComponent;
+
+/** Effect-specific parameter layout used by the shared hitscan color bridge. */
+UENUM(BlueprintType)
+enum class ENCHitscanBeamColorProfile : uint8
+{
+	Sniper UMETA(DisplayName = "Sniper"),
+	LightningGun UMETA(DisplayName = "Lightning Gun")
+};
+
 /**
  * UTPlusSniper
  * Combines Epic's Sniper Rifle logic with UTWeaponFix netcode architecture.
@@ -33,6 +45,10 @@ public:
 
 	UFUNCTION(Client, Reliable)
 	void ClientNotifyImpressive();
+
+	/** Applies the owning player's local hitscan color to a newly spawned first-person beam. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Appearance")
+	void ApplyHitscanBeamColor(UParticleSystemComponent* Effect, ENCHitscanBeamColorProfile Profile);
 
 	/** Headshot damage amount */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Sniper")
@@ -94,4 +110,15 @@ public:
 
 	/** Return hitscan damage amount. */
 	virtual int32 GetHitScanDamage();
+
+protected:
+	/** Lightning beams share this weapon-owned MID instead of allocating one for every shot. */
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CachedLightningBeamMID;
+
+	UPROPERTY(Transient)
+	UMaterialInterface* CachedLightningBeamSourceMaterial;
+
+	UPROPERTY(Transient)
+	uint32 CachedLightningBeamColorGeneration;
 };

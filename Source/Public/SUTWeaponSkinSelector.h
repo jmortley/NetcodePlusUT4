@@ -115,14 +115,13 @@ private:
 	void OnHiddenBeamBackChanged(float NewVal) { HiddenBeamBack = NewVal; }
 	void OnHiddenBeamDownChanged(float NewVal) { HiddenBeamDown = NewVal; }
 
-	/** Beam (tracer) colors stored in Mod.ini [WeaponSkinsPlus] keys LGColor +
-	 *  ShockBeam. Read by the UTNPLightningGun / UTNPSniper / UTNPShockRifle
-	 *  blueprint defaults at spawn. LGColor is shared by Sniper + LG (unified
-	 *  hitscan). String format = FLinearColor::ToString output "(R=...,G=...,
-	 *  B=...,A=...)" so BP "Convert String to LinearColor" reads it directly. */
+	/** Beam colors stored in Mod.ini [WeaponSkinsPlus] keys LGColor, ShockBeam,
+	 *  and LinkBeam. The shared native snapshot reads these once for local weapon
+	 *  effects; the legacy keys remain compatible with the existing Blueprints. */
 	FLinearColor HitscanBeamColor;
 	FLinearColor ShockBeamColor;
-	/** The UTNPShockRifle BP applies ShockBeam ONLY when [WeaponSkinsPlus]
+	FLinearColor LinkBeamColor;
+	/** The Shock color path applies ShockBeam ONLY when [WeaponSkinsPlus]
 	 *  CustomShockBeam=True — a gate historically written by the retired BP tool,
 	 *  never by this selector, so fresh users picked a color that silently did
 	 *  nothing. Seeded from the ini at load, latched by a shock color commit,
@@ -133,13 +132,16 @@ private:
 	// swatch re-polls each paint and reflects edits automatically.
 	FLinearColor GetHitscanBeamColor() const { return HitscanBeamColor; }
 	FLinearColor GetShockBeamColor()   const { return ShockBeamColor;   }
+	FLinearColor GetLinkBeamColor()    const { return LinkBeamColor;    }
 	FReply OnHitscanColorClicked();
 	FReply OnShockColorClicked();
+	FReply OnLinkColorClicked();
 	/** Shared FSE-safe color picker. Mirrors the nchud OnSwatchClicked pattern
 	 *  (snapshot mode, swap to borderless, restore on close). */
 	void OpenBeamColorPicker(FLinearColor Initial, TFunction<void(FLinearColor)> OnCommit);
 	void OnHitscanColorCommitted(FLinearColor NewColor);
 	void OnShockColorCommitted(FLinearColor NewColor);
+	void OnLinkColorCommitted(FLinearColor NewColor);
 
 	FSlateBrush BackgroundBrush;
 };

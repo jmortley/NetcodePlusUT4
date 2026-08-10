@@ -1,5 +1,6 @@
 // Copyright 1998-2016 Epic Games, Inc. All Rights Reserved.
 #include "UTPlusShockRifle.h"
+#include "NCWeaponColorSettings.h"
 #include "UTWeaponAttachment.h"
 #include "UTProj_ShockBall.h"
 #include "UTCanvasRenderTarget2D.h"
@@ -10,11 +11,31 @@
 #include "UTCharacter.h"
 #include "UTGameViewportClient.h"
 #include "Kismet/GameplayStatics.h"
+#include "Engine/DemoNetDriver.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Net/UnrealNetwork.h"
 
 const FName NAME_ShockPrimaryShots(TEXT("ShockPrimaryShots"));
 const FName NAME_ShockPrimaryHits(TEXT("ShockPrimaryHits"));
+
+namespace
+{
+	const FName NAME_ShockDissipationColor(TEXT("DissipationColor"));
+	const FName NAME_ShockPlasmaHot(TEXT("Plasma_Hot"));
+	const FName NAME_ShockPlasmaCold(TEXT("Plasma_Cold"));
+	const FName NAME_ShockAmmoLerp(TEXT("AmmoLERP"));
+	const FName NAME_ShockMaxAmmoInt(TEXT("MaxAmmoInt"));
+	const int32 ShockAmmoGlowMaterialSlot = 2;
+	const int32 ShockAmmoCountMaterialSlot = 3;
+	const int32 ShockLowAmmoWarningAmount = 5;
+
+	FLinearColor MultiplyShockColors(const FLinearColor& A, const FLinearColor& B)
+	{
+		return FLinearColor(A.R * B.R, A.G * B.G, A.B * B.B, A.A * B.A);
+	}
+}
 
 // Suppress DLL linkage warnings when overriding base game functions in a plugin
 #ifdef _MSC_VER
@@ -23,6 +44,19 @@ const FName NAME_ShockPrimaryHits(TEXT("ShockPrimaryHits"));
 
 AUTPlusShockRifle::AUTPlusShockRifle(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+	, CachedShockAmmoGlowMID(nullptr)
+	, CachedShockAmmoCountMID(nullptr)
+	, ObservedShockAmmoGlowMaterial(nullptr)
+	, ObservedShockAmmoCountMaterial(nullptr)
+	, ObservedShockAmmoValue(INDEX_NONE)
+	, ObservedShockMaxAmmoValue(INDEX_NONE)
+	, AppliedShockDisplayAmmo(INDEX_NONE)
+	, AppliedShockMaxAmmo(INDEX_NONE)
+	, AppliedShockLowAmmoState(-1)
+	, bShockAmmoMaterialRefreshPending(true)
+	, CachedShockBeamMID(nullptr)
+	, CachedShockBeamSourceMaterial(nullptr)
+	, CachedShockBeamColorGeneration(0)
 {
 	DefaultGroup = 4;
 	BaseAISelectRating = 0.65f;
@@ -60,6 +94,78 @@ AUTPlusShockRifle::AUTPlusShockRifle(const FObjectInitializer& ObjectInitializer
 	VeryLowMeshOffset = FVector(0.f, 0.f, -15.f);
 }
 
+void AUTPlusShockRifle::ApplyConfiguredShockBeamColor(UParticleSystemComponent* Effect)
+{
+	UWorld* World = GetWorld();
+	if (Effect == nullptr || Effect->IsPendingKill() || World == nullptr
+		|| GetNetMode() == NM_DedicatedServer || UTOwner == nullptr
+		|| !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
+		|| !ShouldPlay1PVisuals())
+	{
+		return;
+	}
+
+	// Preferences are process-local. A live demo recording remains eligible,
+	// but replay playback must retain the recorded/stock presentation.
+	UDemoNetDriver* DemoNetDriver = World->DemoNetDriver;
+	if (DemoNetDriver != nullptr && DemoNetDriver->IsPlaying())
+	{
+		return;
+	}
+
+	const FNCWeaponColorSnapshot& Snapshot = NCWeaponColors::GetSnapshot();
+	if (!Snapshot.bCustomShock || !Snapshot.bHasShockColor)
+	{
+		return;
+	}
+
+	const FLinearColor& ShockColor = Snapshot.ShockColor;
+	Effect->SetColorParameter(NAME_ShockDissipationColor,
+		FLinearColor(2.f * ShockColor.R, 1.5f * ShockColor.G,
+			10.f * ShockColor.B, ShockColor.A));
+
+	UMaterialInterface* SourceMaterial = Effect->GetMaterial(1);
+	if (SourceMaterial == CachedShockBeamMID)
+	{
+		SourceMaterial = CachedShockBeamSourceMaterial;
+	}
+	if (SourceMaterial == nullptr || SourceMaterial->IsPendingKill())
+	{
+		return;
+	}
+
+	if (CachedShockBeamMID == nullptr || CachedShockBeamMID->IsPendingKill()
+		|| CachedShockBeamSourceMaterial != SourceMaterial
+		|| CachedShockBeamColorGeneration != Snapshot.Generation)
+	{
+		FLinearColor OriginalHot;
+		if (!SourceMaterial->GetVectorParameterValue(NAME_ShockPlasmaHot, OriginalHot))
+		{
+			return;
+		}
+
+		UMaterialInstanceDynamic* NewMID = UMaterialInstanceDynamic::Create(SourceMaterial, this);
+		if (NewMID == nullptr)
+		{
+			CachedShockBeamMID = nullptr;
+			CachedShockBeamSourceMaterial = nullptr;
+			CachedShockBeamColorGeneration = 0;
+			return;
+		}
+
+		const FLinearColor HotColor = MultiplyShockColors(OriginalHot, ShockColor);
+		const FLinearColor ColdColor = MultiplyShockColors(HotColor, ShockColor);
+		NewMID->SetVectorParameterValue(NAME_ShockPlasmaHot, HotColor);
+		NewMID->SetVectorParameterValue(NAME_ShockPlasmaCold, ColdColor);
+
+		CachedShockBeamMID = NewMID;
+		CachedShockBeamSourceMaterial = SourceMaterial;
+		CachedShockBeamColorGeneration = Snapshot.Generation;
+	}
+
+	Effect->SetMaterial(1, CachedShockBeamMID);
+}
+
 
 void AUTPlusShockRifle::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
@@ -85,6 +191,127 @@ void AUTPlusShockRifle::SetupSpecialMaterials()
 		ScreenTexture->OnCanvasRenderTargetUpdate.AddDynamic(this, &AUTPlusShockRifle::UpdateScreenTexture);
 		ScreenMI->SetTextureParameterValue(FName(TEXT("ScreenTexture")), ScreenTexture);
 	}
+
+	BindShockAmmoMaterials();
+	RefreshShockAmmoMaterials(true);
+}
+
+void AUTPlusShockRifle::OnRep_Ammo()
+{
+	Super::OnRep_Ammo();
+	if (UTOwner != nullptr && UTOwner->GetWeapon() == this)
+	{
+		RefreshShockAmmoMaterials(false);
+	}
+}
+
+void AUTPlusShockRifle::BindShockAmmoMaterials()
+{
+	CachedShockAmmoGlowMID = nullptr;
+	CachedShockAmmoCountMID = nullptr;
+
+	if (IsRunningDedicatedServer() || Mesh == nullptr)
+	{
+		ObservedShockAmmoGlowMaterial = nullptr;
+		ObservedShockAmmoCountMaterial = nullptr;
+		bShockAmmoMaterialRefreshPending = false;
+		return;
+	}
+
+	UMaterialInterface* GlowMaterial = ShockAmmoGlowMaterialSlot < Mesh->GetNumMaterials()
+		? Mesh->GetMaterial(ShockAmmoGlowMaterialSlot)
+		: nullptr;
+	UMaterialInterface* CountMaterial = ShockAmmoCountMaterialSlot < Mesh->GetNumMaterials()
+		? Mesh->GetMaterial(ShockAmmoCountMaterialSlot)
+		: nullptr;
+
+	// AUTPlusShockRifle has non-Shock children. Only claim these slots when the
+	// authored materials expose the same parameters as UTNPShockRifle.
+	float IgnoredValue = 0.f;
+	const bool bCompatibleGlowMaterial = GlowMaterial != nullptr
+		&& GlowMaterial->GetScalarParameterValue(NAME_ShockAmmoLerp, IgnoredValue)
+		&& GlowMaterial->GetScalarParameterValue(NAME_ShockMaxAmmoInt, IgnoredValue);
+	const bool bCompatibleCountMaterial = CountMaterial != nullptr
+		&& CountMaterial->GetScalarParameterValue(NAME_ShockAmmoLerp, IgnoredValue);
+	if (bCompatibleGlowMaterial && bCompatibleCountMaterial)
+	{
+		CachedShockAmmoGlowMID = Cast<UMaterialInstanceDynamic>(GlowMaterial);
+		if (CachedShockAmmoGlowMID == nullptr)
+		{
+			CachedShockAmmoGlowMID = Mesh->CreateAndSetMaterialInstanceDynamic(ShockAmmoGlowMaterialSlot);
+		}
+		CachedShockAmmoCountMID = Cast<UMaterialInstanceDynamic>(CountMaterial);
+		if (CachedShockAmmoCountMID == nullptr)
+		{
+			CachedShockAmmoCountMID = Mesh->CreateAndSetMaterialInstanceDynamic(ShockAmmoCountMaterialSlot);
+		}
+	}
+
+	// CreateAndSetMaterialInstanceDynamic() may have replaced either slot.
+	ObservedShockAmmoGlowMaterial = ShockAmmoGlowMaterialSlot < Mesh->GetNumMaterials()
+		? Mesh->GetMaterial(ShockAmmoGlowMaterialSlot)
+		: nullptr;
+	ObservedShockAmmoCountMaterial = ShockAmmoCountMaterialSlot < Mesh->GetNumMaterials()
+		? Mesh->GetMaterial(ShockAmmoCountMaterialSlot)
+		: nullptr;
+	bShockAmmoMaterialRefreshPending = CachedShockAmmoGlowMID != nullptr
+		|| CachedShockAmmoCountMID != nullptr;
+}
+
+void AUTPlusShockRifle::RefreshShockAmmoMaterials(bool bForce)
+{
+	if (IsRunningDedicatedServer())
+	{
+		return;
+	}
+
+	UMaterialInterface* CurrentGlowMaterial = Mesh != nullptr
+		&& ShockAmmoGlowMaterialSlot < Mesh->GetNumMaterials()
+		? Mesh->GetMaterial(ShockAmmoGlowMaterialSlot)
+		: nullptr;
+	UMaterialInterface* CurrentCountMaterial = Mesh != nullptr
+		&& ShockAmmoCountMaterialSlot < Mesh->GetNumMaterials()
+		? Mesh->GetMaterial(ShockAmmoCountMaterialSlot)
+		: nullptr;
+	if (CurrentGlowMaterial != ObservedShockAmmoGlowMaterial
+		|| CurrentCountMaterial != ObservedShockAmmoCountMaterial)
+	{
+		BindShockAmmoMaterials();
+	}
+	if (UTOwner == nullptr)
+	{
+		return;
+	}
+
+	const int32 DisplayAmmo = UTOwner->GetAmmoAmount(GetClass());
+	const int8 bLowAmmo = DisplayAmmo <= ShockLowAmmoWarningAmount ? 1 : 0;
+	const bool bRefreshAll = bForce || bShockAmmoMaterialRefreshPending;
+
+	if (CachedShockAmmoGlowMID != nullptr)
+	{
+		if (bRefreshAll || AppliedShockDisplayAmmo != DisplayAmmo)
+		{
+			CachedShockAmmoGlowMID->SetScalarParameterValue(NAME_ShockAmmoLerp, float(DisplayAmmo));
+		}
+		if (bRefreshAll || AppliedShockMaxAmmo != MaxAmmo)
+		{
+			CachedShockAmmoGlowMID->SetScalarParameterValue(NAME_ShockMaxAmmoInt, float(MaxAmmo));
+		}
+	}
+
+	if (CachedShockAmmoCountMID != nullptr
+		&& (bRefreshAll || AppliedShockLowAmmoState != bLowAmmo))
+	{
+		CachedShockAmmoCountMID->SetScalarParameterValue(NAME_ShockAmmoLerp, float(bLowAmmo));
+	}
+
+	ObservedShockAmmoOwner = UTOwner;
+	ObservedShockAmmoValue = Ammo;
+	ObservedShockMaxAmmoValue = MaxAmmo;
+	AppliedShockDisplayAmmo = DisplayAmmo;
+	AppliedShockMaxAmmo = MaxAmmo;
+	AppliedShockLowAmmoState = bLowAmmo;
+	bShockAmmoMaterialRefreshPending = false;
 }
 
 void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Height)
@@ -119,7 +346,7 @@ void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Heigh
 		C->TextSize(ScreenFont, AmmoText, XL, YL);
 
 		// Use standard FCanvasTextItem instead of FUTCanvasTextItem to avoid linker issues
-		FCanvasTextItem Item(FVector2D(Width / 2 - XL * 0.5f, Height / 2 - YL * 0.5f), FText::FromString(AmmoText), ScreenFont, (Ammo <= 5) ? FLinearColor::Red : FLinearColor::White);
+		FCanvasTextItem Item(FVector2D(Width / 2 - XL * 0.5f, Height / 2 - YL * 0.5f), FText::FromString(AmmoText), ScreenFont, (Ammo <= ShockLowAmmoWarningAmount) ? FLinearColor::Red : FLinearColor::White);
 		Item.FontRenderInfo = RenderInfo;
 		Item.bOutlined = true;
 		Item.OutlineColor = FLinearColor::Black;
@@ -130,6 +357,29 @@ void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Heigh
 void AUTPlusShockRifle::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Actor Tick is required by AUTWeapon even while holstered. Keep our added
+	// work dormant until this weapon is actually the pawn's visible weapon.
+	if (!IsRunningDedicatedServer() && UTOwner != nullptr && UTOwner->GetWeapon() == this)
+	{
+		UMaterialInterface* CurrentGlowMaterial = Mesh != nullptr
+			&& ShockAmmoGlowMaterialSlot < Mesh->GetNumMaterials()
+			? Mesh->GetMaterial(ShockAmmoGlowMaterialSlot)
+			: nullptr;
+		UMaterialInterface* CurrentCountMaterial = Mesh != nullptr
+			&& ShockAmmoCountMaterialSlot < Mesh->GetNumMaterials()
+			? Mesh->GetMaterial(ShockAmmoCountMaterialSlot)
+			: nullptr;
+		if (bShockAmmoMaterialRefreshPending
+			|| ObservedShockAmmoOwner.Get() != UTOwner
+			|| ObservedShockAmmoValue != Ammo
+			|| ObservedShockMaxAmmoValue != MaxAmmo
+			|| ObservedShockAmmoGlowMaterial != CurrentGlowMaterial
+			|| ObservedShockAmmoCountMaterial != CurrentCountMaterial)
+		{
+			RefreshShockAmmoMaterials(false);
+		}
+	}
 
 	// Throttle screen texture updates to 30Hz — ammo counter doesn't need 480fps updates
 	if (ScreenTexture != NULL && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)

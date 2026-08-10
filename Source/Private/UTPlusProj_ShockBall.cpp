@@ -1,6 +1,8 @@
 
 #include "UTPlusProj_ShockBall.h"
+#include "NCWeaponColorSettings.h"
 #include "UTPlusShockRifle.h"
+#include "UTCharacter.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Engine/DemoNetDriver.h"
 #include "GameFramework/PlayerController.h"
@@ -14,6 +16,22 @@
 #include "EngineUtils.h"
 #include "Sound/SoundBase.h"
 #include "UTKillcamPlayback.h"
+
+namespace
+{
+	const FName ShockCoreColorParameters[] =
+	{
+		FName(TEXT("RayColor")),
+		FName(TEXT("FlaresColor")),
+		FName(TEXT("CoreBG")),
+		FName(TEXT("SmallCoreArcColor")),
+		FName(TEXT("OrbColorLife")),
+		FName(TEXT("ArcColor")),
+		FName(TEXT("OrbRadius")),
+		FName(TEXT("Orb2")),
+		FName(TEXT("FlareRun"))
+	};
+}
 
 // =========================================================================
 // SHOCK-CORE DIAGNOSTICS (ncp.ShockDebug)
@@ -300,6 +318,8 @@ AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectIni
 	: Super(ObjectInitializer)
 {
 	FlightEffectVisual = nullptr;
+	LastConfiguredShockCoreEffect = nullptr;
+	LastConfiguredShockCoreGeneration = 0;
 	bVisualInitialized = false; // Start as false
 	VisualInterpSpeed = 100.0f;
 
@@ -327,6 +347,59 @@ AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectIni
 	LocalStopRecoveryStartTime = 0.f;
 	LocalStopRecoveryStartLocation = FVector::ZeroVector;
 	bKillcamAudioSuppressed = false;
+}
+
+void AUTPlusProj_ShockBall::ApplyConfiguredShockCoreColor(UParticleSystemComponent* FlightEffect)
+{
+	UWorld* World = GetWorld();
+	if (FlightEffect == nullptr || FlightEffect->IsPendingKill() || World == nullptr
+		|| GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	UDemoNetDriver* DemoNetDriver = World->DemoNetDriver;
+	if (DemoNetDriver != nullptr && DemoNetDriver->IsPlaying())
+	{
+		return;
+	}
+
+	AUTCharacter* InstigatorCharacter = Cast<AUTCharacter>(GetInstigator());
+	if (InstigatorCharacter == nullptr || !InstigatorCharacter->IsLocallyControlled()
+		|| !InstigatorCharacter->IsPlayerControlled())
+	{
+		return;
+	}
+	// The projectile class already identifies the effect profile. Do not query the
+	// pawn's current weapon: the authoritative real can arrive after a fast swap.
+
+	const FNCWeaponColorSnapshot& Snapshot = NCWeaponColors::GetSnapshot();
+	if (!Snapshot.bCustomShock || !Snapshot.bHasShockColor)
+	{
+		return;
+	}
+
+	FLinearColor CoreColor = Snapshot.ShockColor;
+	if (CoreColor.R < 0.09f && CoreColor.G < 0.09f && CoreColor.B < 0.09f)
+	{
+		// Preserve the legacy graph's bright fallback so a configured black core
+		// cannot become effectively invisible.
+		CoreColor = FLinearColor(2.208334f, 1.5f, 10.f, 1.f);
+	}
+
+	if (LastConfiguredShockCoreEffect == FlightEffect
+		&& LastConfiguredShockCoreGeneration == Snapshot.Generation)
+	{
+		return;
+	}
+
+	for (const FName& ParameterName : ShockCoreColorParameters)
+	{
+		FlightEffect->SetColorParameter(ParameterName, CoreColor);
+	}
+
+	LastConfiguredShockCoreEffect = FlightEffect;
+	LastConfiguredShockCoreGeneration = Snapshot.Generation;
 }
 
 void AUTPlusProj_ShockBall::NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage)

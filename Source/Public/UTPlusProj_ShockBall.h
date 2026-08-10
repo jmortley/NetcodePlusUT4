@@ -5,6 +5,7 @@
 #include "UTPlusProj_ShockBall.generated.h"
 
 class UAudioComponent;
+class UParticleSystemComponent;
 
 /**
  * Custom shock ball projectile for UTPlusShockRifle.
@@ -17,6 +18,11 @@ class NETCODEPLUS_API AUTPlusProj_ShockBall : public AUTProj_ShockBall
 
 public:
 	AUTPlusProj_ShockBall(const FObjectInitializer& ObjectInitializer);
+
+	/** Apply the local firing player's configured color to this core's flight effect. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
+	void ApplyConfiguredShockCoreColor(UParticleSystemComponent* FlightEffect);
+
 	virtual void Tick(float DeltaTime) override;
 	virtual void BeginPlay() override;
 	virtual void BeginFakeProjectileSynch(AUTProjectile* InFakeProjectile) override;
@@ -36,7 +42,14 @@ public:
 
 private:
 	// Forward declaration for safety
-	class UParticleSystemComponent* FlightEffectComponent;
+	UParticleSystemComponent* FlightEffectComponent;
+
+	/** Prevent duplicate parameter writes if Blueprint calls the bridge more than once. */
+	UPROPERTY(Transient)
+	UParticleSystemComponent* LastConfiguredShockCoreEffect;
+
+	UPROPERTY(Transient)
+	uint32 LastConfiguredShockCoreGeneration;
 
 protected:
 	/**
