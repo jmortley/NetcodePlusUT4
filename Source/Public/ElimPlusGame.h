@@ -331,6 +331,7 @@ public:
 	virtual void HandlePlayerIntro() override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual bool ReadyToStartMatch_Implementation() override;
 	virtual void DefaultTimer() override;
 	void Logout(AController* Exiting) override;
 	//void BeginDestroy() override;

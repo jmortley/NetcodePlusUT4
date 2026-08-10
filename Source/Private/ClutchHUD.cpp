@@ -196,6 +196,7 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	bShouldDrawPortraits = false;
 	HudWidgetClasses.Remove(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ClutchScoreboard"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 
 	bTriedLoadRecoveredHUDTextures = false;
 	bAttackOrderInputActive = false;

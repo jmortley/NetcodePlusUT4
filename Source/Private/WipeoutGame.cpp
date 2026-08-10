@@ -1,4 +1,5 @@
 #include "WipeoutGame.h"
+#include "NCReadyUp.h"
 #include "NCPlusRoundSpectate.h"      // late-joiner / reconnect free-camera lock
 #include "NCHybridSpawnGenerator.h"
 #include "NCPlusVersionGate.h"
@@ -215,6 +216,7 @@ void AUWipeoutGame::BP_SetMatchState_InProgress()
 void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Warmup roam, same as NCPlusCTF/iCTF: `mutate warmup` = invulnerable +
 	// fire-disabled map roaming during warmup only. The mutator strips everyone
@@ -440,6 +442,7 @@ void AUWipeoutGame::HandleMatchHasStarted()
 void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
@@ -457,6 +460,13 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 	{
 		RatingSystem->LoadPlayerFromDB(GetWorld(), UTPS->UniqueId.ToString());
 	}
+}
+
+bool AUWipeoutGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 

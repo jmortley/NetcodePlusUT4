@@ -1,6 +1,6 @@
 // SUTNCPlusMenu.h — NetcodePlus client settings panel
 // Console command: ncpmenu (also bound to F5 by default)
-// Tabs: General (gore/footsteps/screenshot) + Force Models
+// Tabs: Home (ready-up/about/announcer), iCTF, Force Models, and Hitsounds
 #pragma once
 
 #include "NetcodePlus.h"     // PCH preamble (UT/core types first)
@@ -14,8 +14,8 @@ class UUTLocalPlayer;
 /** Which settings tab is showing. */
 enum class ENCPMenuTab : uint8
 {
-	About,
-	General,
+	Home,
+	ICTF,
 	ForceModels,
 	Hitsounds,
 };
@@ -23,15 +23,15 @@ enum class ENCPMenuTab : uint8
 /**
  * NetcodePlus settings panel.
  * Opened via "ncpmenu" console command or F5 key (configurable).
- * General tab reads/writes Mod.ini [NetcodePlus]; Force Models tab drives NCPlusForceModels.
+ * iCTF tab reads/writes Mod.ini [NetcodePlus]/[InstagibCTF]; Force Models drives NCPlusForceModels.
  */
 class SUTNCPlusMenu : public SCompoundWidget
 {
 	SLATE_BEGIN_ARGS(SUTNCPlusMenu)
-		: _InitialTab(ENCPMenuTab::About)
+		: _InitialTab(ENCPMenuTab::Home)
 		{}
 	SLATE_ARGUMENT(TWeakObjectPtr<UUTLocalPlayer>, PlayerOwner)
-	/** Tab to show on open — ncpmenu's optional arg (bare F5 = About default). */
+	/** Tab to show on open — ncpmenu's optional arg (bare F5 = Home default). */
 	SLATE_ARGUMENT(ENCPMenuTab, InitialTab)
 	SLATE_END_ARGS()
 
@@ -52,9 +52,10 @@ class SUTNCPlusMenu : public SCompoundWidget
 
 private:
 	TWeakObjectPtr<UUTLocalPlayer> PlayerOwner;
+	mutable TWeakObjectPtr<class ANCReadyUpState> ReadyUpState;
 	bool bHeldDragMode = false;  // true while this panel holds a NCPlusHUDDragMode refcount
 
-	// ── General settings ([NetcodePlus] in Mod.ini) ──
+	// ── iCTF settings ([NetcodePlus]/[InstagibCTF] in Mod.ini) ──
 	bool bAllowGib;
 	bool bShowRagdoll;
 	float RagdollTime;
@@ -82,10 +83,10 @@ private:
 	TArray<TSharedPtr<FString>> HSStyleOptions;    // Absolute / UTComp / Flat
 
 	// ── Tabs ──
-	ENCPMenuTab ActiveTab = ENCPMenuTab::About;
+	ENCPMenuTab ActiveTab = ENCPMenuTab::Home;
 	TSharedPtr<class SBox> ContentArea;
-	TSharedRef<SWidget> BuildAboutTab();
-	TSharedRef<SWidget> BuildGeneralTab();
+	TSharedRef<SWidget> BuildHomeTab();
+	TSharedRef<SWidget> BuildICTFTab();
 	TSharedRef<SWidget> BuildForceModelsTab();
 	TSharedRef<SWidget> BuildHitsoundsTab();
 	TSharedRef<SWidget> BuildTabContent(ENCPMenuTab Tab);
@@ -98,7 +99,17 @@ private:
 	void LoadSettings();
 	void SaveSettings();
 
-	// General handlers
+	// Home/ready-up handlers
+	class AUTPlayerController* GetUTPlayerController() const;
+	class AUTPlayerState* GetUTPlayerState() const;
+	class ANCReadyUpState* GetReadyUpState() const;
+	bool CanSetReady(bool bReady) const;
+	FText GetReadyModeText() const;
+	FText GetReadyCountText() const;
+	FReply OnReadyClicked(bool bReady);
+	FReply OnGitHubClicked();
+
+	// iCTF handlers
 	void OnAllowGibChanged(ECheckBoxState NewState);
 	void OnShowRagdollChanged(ECheckBoxState NewState);
 	void OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType);

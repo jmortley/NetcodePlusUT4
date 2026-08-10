@@ -1,5 +1,6 @@
 #include "ElimPlusGame.h"
 #include "NCHybridSpawnGenerator.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
 #include "NCPlusRoundSpectate.h"      // late-joiner / reconnect free-camera lock
 #include "NCConcedeVote.h"
@@ -192,6 +193,7 @@ void AElimPlusGame::UpdateVictoryMessageSounds()
 void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Warmup roam, same as NCPlusCTF/iCTF: `mutate warmup` = invulnerable +
 	// fire-disabled map roaming during warmup only. The mutator strips everyone
@@ -406,6 +408,7 @@ void AElimPlusGame::HandlePlayerIntro()
 void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
@@ -475,6 +478,13 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 			}
 		}
 	}
+}
+
+bool AElimPlusGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 

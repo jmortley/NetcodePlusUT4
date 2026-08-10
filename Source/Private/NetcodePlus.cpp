@@ -218,19 +218,24 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 {
 	// Optional first arg picks the tab (parsed up front so an explicit tab
 	// request can retarget an already-open panel).
-	ENCPMenuTab InitialTab = ENCPMenuTab::About;
+	ENCPMenuTab InitialTab = ENCPMenuTab::Home;
 	bool bExplicitTab = false;
 	if (Args.Num() > 0)
 	{
 		const FString Tab = Args[0].ToLower();
-		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
+		if (Tab == TEXT("home") || Tab == TEXT("about"))
+		{
+			InitialTab = ENCPMenuTab::Home;
+			bExplicitTab = true;
+		}
+		else if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
 		{
 			InitialTab = ENCPMenuTab::ForceModels;
 			bExplicitTab = true;
 		}
-		else if (Tab == TEXT("general"))
+		else if (Tab == TEXT("ictf") || Tab == TEXT("general"))
 		{
-			InitialTab = ENCPMenuTab::General;
+			InitialTab = ENCPMenuTab::ICTF;
 			bExplicitTab = true;
 		}
 		else if (Tab == TEXT("hitsounds"))
@@ -980,7 +985,7 @@ void FNetcodePlus::StartupModule()
 
 	IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("ncpmenu"),
-		TEXT("Open NetcodePlus settings menu (gore, footsteps, screenshots)"),
+		TEXT("Open NetcodePlus menu (optional tab: home/about, ictf/general, forcemodels, hitsounds)"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleNCPMenu),
 		ECVF_Default
 	);

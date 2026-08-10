@@ -1,6 +1,7 @@
 // NCLeagueDuelGame.cpp — fairness-first 1v1 spawn picker + Glicko2 ELO + stats hooks.
 
 #include "NCLeagueDuelGame.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
 #include "NCConcedeVote.h"
 #include "UnrealTournament.h"
@@ -98,6 +99,7 @@ ANCLeagueDuelGame::ANCLeagueDuelGame(const FObjectInitializer& OI)
 void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Reset per-match state so a re-init (map travel) starts clean.
 	bRatingFlushedThisMatch = false;
@@ -152,6 +154,7 @@ void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options,
 void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
@@ -175,6 +178,13 @@ void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 	// PostLogin only handles the rating-DB preload above; the engine will
 	// transition to PlayerIntro once both players are present, then
 	// EndPlayerIntro runs and does the paired-shuffle A/B assignment.
+}
+
+bool ANCLeagueDuelGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 void ANCLeagueDuelGame::HandleMatchHasStarted()

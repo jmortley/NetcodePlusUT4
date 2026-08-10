@@ -6,6 +6,7 @@
 
 #include "ElimPlusScoreboard.h"
 #include "NCPlusScoreboardHost.h"
+#include "NCPlusScoreboardReady.h"
 #include "NCPlusHUDLayout.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
@@ -186,6 +187,24 @@ UElimPlusScoreboard::UElimPlusScoreboard(const FObjectInitializer& ObjectInitial
 
 	bUseRoundKills = false; // overall match stats
 
+}
+
+void UElimPlusScoreboard::DrawReadyText(AUTPlayerState* PlayerState,
+	float XOffset, float YOffset, float Width)
+{
+	FText PlayerReady;
+	if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
+		TeamSwapText, PlayerReady))
+	{
+		Super::DrawReadyText(PlayerState, XOffset, YOffset, Width);
+		return;
+	}
+
+	ReadyColor = FLinearColor::White;
+	ReadyScale = 1.f;
+	DrawText(PlayerReady, XOffset + ScaledCellWidth * ColumnHeaderScoreX,
+		YOffset + ColumnY, UTHUDOwner->SmallFont, ReadyScale * RenderScale, 1.f,
+		ReadyColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
 
 bool UElimPlusScoreboard::HasCustomTeamColors() const
@@ -540,9 +559,17 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 	const float StatScale = 0.92f * S;
 	if (!UTGameState->HasMatchStarted())
 	{
-		const FString ReadyString = PlayerState->bPendingTeamSwitch
-			? TEXT("SWITCH TEAMS") : (PlayerState->bIsWarmingUp ? TEXT("WARMUP") : TEXT("NOT READY"));
-		DrawText(FText::FromString(ReadyString), ColumnX(640.f), TextY,
+		FText PlayerReady;
+		if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
+			TeamSwapText, PlayerReady))
+		{
+			PlayerReady = PlayerState->bPendingTeamSwitch
+				? NSLOCTEXT("ElimPlusScoreboard", "SwitchTeams", "SWITCH TEAMS")
+				: (PlayerState->bIsWarmingUp
+					? NSLOCTEXT("ElimPlusScoreboard", "Warmup", "WARMUP")
+					: NSLOCTEXT("ElimPlusScoreboard", "NotReady", "NOT READY"));
+		}
+		DrawText(PlayerReady, ColumnX(640.f), TextY,
 			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 	else

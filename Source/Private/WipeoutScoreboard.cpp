@@ -1,6 +1,7 @@
 // WipeoutScoreboard — Portrait-row scoreboard for Wipeout game mode
 #include "WipeoutScoreboard.h"
 #include "NCPlusScoreboardHost.h"
+#include "NCPlusScoreboardReady.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusCTFGameMode.h"
 #include "UnrealTournament.h"
@@ -75,6 +76,24 @@ UWipeoutScoreboard::UWipeoutScoreboard(const FObjectInitializer& ObjectInitializ
 	RedTeamOverlay.V = 330.0f;
 	RedTeamOverlay.UL = 224.0f;
 	RedTeamOverlay.VL = 310.0f;
+}
+
+void UWipeoutScoreboard::DrawReadyText(AUTPlayerState* PlayerState,
+	float XOffset, float YOffset, float Width)
+{
+	FText PlayerReady;
+	if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
+		TeamSwapText, PlayerReady))
+	{
+		Super::DrawReadyText(PlayerState, XOffset, YOffset, Width);
+		return;
+	}
+
+	ReadyColor = FLinearColor::White;
+	ReadyScale = 1.f;
+	DrawText(PlayerReady, XOffset + ScaledCellWidth * ColumnHeaderScoreX,
+		YOffset + ColumnY, UTHUDOwner->SmallFont, ReadyScale * RenderScale, 1.f,
+		ReadyColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
 
 // ─── Custom team colors check ──────────────────────────────────────────

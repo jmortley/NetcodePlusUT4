@@ -2,12 +2,17 @@
 #include "SUTNCPlusMenu.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
+#include "NCReadyUp.h"
 #include "UnrealTournament.h"
+#include "UTGameState.h"
 #include "UTLocalPlayer.h"
+#include "UTPlayerController.h"
+#include "UTPlayerState.h"
+#include "HAL/PlatformProcess.h"
 #include "Widgets/Input/STextComboBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 
-// Mod.ini section (General tab)
+// Mod.ini section (iCTF tab)
 static const TCHAR* NCPSection = TEXT("NetcodePlus");
 // Gib/ragdoll death settings live under [InstagibCTF] — that's the section the iCTF damage type
 // (NCPlusUTDmg_Instagib: ShouldGib reads bAllowGib, PlayDeathEffects reads RagdollTime) actually reads.
@@ -89,13 +94,13 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
 				[
-					MakeTabButton(TEXT("About"), ENCPMenuTab::About)
+					MakeTabButton(TEXT("Home"), ENCPMenuTab::Home)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
 				[
-					MakeTabButton(TEXT("General"), ENCPMenuTab::General)
+					MakeTabButton(TEXT("iCTF"), ENCPMenuTab::ICTF)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
@@ -229,19 +234,27 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
 	switch (Tab)
 	{
 		case ENCPMenuTab::ForceModels: return BuildForceModelsTab();
-		case ENCPMenuTab::General:     return BuildGeneralTab();
+		case ENCPMenuTab::ICTF:        return BuildICTFTab();
 		case ENCPMenuTab::Hitsounds:   return BuildHitsoundsTab();
-		case ENCPMenuTab::About:
-		default:                       return BuildAboutTab();
+		case ENCPMenuTab::Home:
+		default:                       return BuildHomeTab();
 	}
 }
 
-TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
+TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 {
 	const FString VersionLine = FString::Printf(TEXT("Version %d"), NETCODE_PLUGIN_VERSION);
+	const int32 AnnouncerIndex = AnnouncerPackEntries.IndexOfByPredicate(
+		[this](const FNCPlusAnnouncerPackOption& Pack) { return Pack.Id == SelectedAnnouncerPackId; });
+	const TSharedPtr<FString> InitialAnnouncer = AnnouncerPackOptions.IsValidIndex(AnnouncerIndex)
+		? AnnouncerPackOptions[AnnouncerIndex]
+		: (AnnouncerPackOptions.Num() > 0 ? AnnouncerPackOptions[0] : nullptr);
+	const EVisibility AnnouncerVisibility = AnnouncerPackEntries.Num() > 1
+		? EVisibility::Visible
+		: EVisibility::Collapsed;
 
 	return SNew(SBox)
-		.WidthOverride(560.f)
+		.WidthOverride(620.f)
 		[
 			SNew(SVerticalBox)
 
@@ -252,15 +265,15 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("About NetcodePlus")))
-				.Font(BoldFont(18))
-				.ColorAndOpacity(FLinearColor::White)
+				.Text(FText::FromString(TEXT("NETCODEPLUS")))
+				.Font(BoldFont(22))
+				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 			]
 
 			// Version
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(0, 0, 0, 12)
+			.Padding(0, 0, 0, 8)
 			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
@@ -269,50 +282,164 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 			]
 
-			// Blurb
+			// UTComp-style player ready-up. All attributes are live so a menu opened
+			// before the state actor replicates updates without needing to be reopened.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(24, 0, 24, 12)
+			.Padding(0, 5, 0, 2)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]() { return GetReadyModeText(); })
+				.Font(BoldFont(15))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 0, 0, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]() { return GetReadyCountText(); })
+				.Font(RegularFont(13))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(30, 0, 30, 10)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(520.f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.f)
+					.Padding(0, 0, 8, 0)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Ready")))
+						.HAlign(HAlign_Center)
+						.ContentPadding(FMargin(28, 8))
+						.IsEnabled_Lambda([this]() { return CanSetReady(true); })
+						.OnClicked(this, &SUTNCPlusMenu::OnReadyClicked, true)
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.f)
+					.Padding(8, 0, 0, 0)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Not Ready")))
+						.HAlign(HAlign_Center)
+						.ContentPadding(FMargin(28, 8))
+						.IsEnabled_Lambda([this]() { return CanSetReady(false); })
+						.OnClicked(this, &SUTNCPlusMenu::OnReadyClicked, false)
+					]
+				]
+			]
+
+			// Optional announcer packs are soft-discovered. With no optional pak,
+			// Stock UT4 is used and this section does not take up menu space.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 5, 0, 5)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Visibility(AnnouncerVisibility)
+				.Text(FText::FromString(TEXT("Announcer")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(40, 0, 40, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				.Visibility(AnnouncerVisibility)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0, 0, 12, 0)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Voice")))
+					.Font(RegularFont(14))
+					.ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.WidthOverride(220.f)
+					[
+						SNew(STextComboBox)
+						.OptionsSource(&AnnouncerPackOptions)
+						.InitiallySelectedItem(InitialAnnouncer)
+						.ToolTipText(FText::FromString(TEXT("Optional voices appear only when their local content pak is installed. Stock UT4 is always available.")))
+						.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+						{
+							if (!NewSelection.IsValid())
+							{
+								return;
+							}
+
+							const int32 Index = AnnouncerPackOptions.IndexOfByPredicate(
+								[&NewSelection](const TSharedPtr<FString>& Option)
+								{
+									return Option.IsValid() && *Option == *NewSelection;
+								});
+							if (AnnouncerPackEntries.IsValidIndex(Index))
+							{
+								SelectedAnnouncerPackId = AnnouncerPackEntries[Index].Id;
+							}
+						})
+					]
+				]
+			]
+
+			// About/link information stays on the landing page, like UTComp.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 2, 24, 5)
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("A community client and server enhancement plugin for UT4: improved netcode and hit registration, extra game modes (Elimination+, Wipeout, Duel, Shaft Arena, Shock Domination), a configurable HUD, weapon skins, and team-model overrides. Unofficial and community-maintained.")))
 				.Font(RegularFont(12))
-				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
-				.AutoWrapText(true)
-			]
-
-			// Console commands heading
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0, 6, 0, 4)
-			.HAlign(HAlign_Center)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Console Commands")))
-				.Font(BoldFont(14))
-				.ColorAndOpacity(FLinearColor::White)
-			]
-
-			// Console commands list
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(24, 0, 24, 4)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("F5  or  ncpmenu  -  open this menu\nweaponskins  -  weapon skin selector\ncosmetics  -  hats, eyewear, characters, taunts\nnchud  -  HUD layout editor\nnchud_drag  -  drag HUD elements\nforcemodels_list / forcemodels_dumpmats  -  team-model diagnostics")))
-				.Font(RegularFont(12))
 				.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.f))
+				.Justification(ETextJustify::Center)
 				.AutoWrapText(true)
 			]
 
-			// Footer hint
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(24, 12, 24, 6)
+			.Padding(0, 1, 0, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SButton)
+				.ContentPadding(FMargin(12, 4))
+				.ToolTipText(FText::FromString(TEXT("Open the NetcodePlusUT4 project on GitHub")))
+				.OnClicked(this, &SUTNCPlusMenu::OnGitHubClicked)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("https://github.com/jmortley/NetcodePlusUT4")))
+					.Font(RegularFont(12))
+					.ColorAndOpacity(FLinearColor(0.2f, 0.75f, 1.f, 1.f))
+				]
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 2, 24, 6)
 			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Use the tabs above for General and Force Models settings.")))
+				.Text(FText::FromString(TEXT("F5 / ncpmenu opens Home. Use the tabs above for iCTF, Force Models, and Hitsounds settings.")))
 				.Font(RegularFont(11))
 				.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
 				.AutoWrapText(true)
@@ -320,17 +447,119 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 		];
 }
 
-TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
+AUTPlayerController* SUTNCPlusMenu::GetUTPlayerController() const
 {
-	const int32 AnnouncerIndex = AnnouncerPackEntries.IndexOfByPredicate(
-		[this](const FNCPlusAnnouncerPackOption& Pack) { return Pack.Id == SelectedAnnouncerPackId; });
-	const TSharedPtr<FString> InitialAnnouncer = AnnouncerPackOptions.IsValidIndex(AnnouncerIndex)
-		? AnnouncerPackOptions[AnnouncerIndex]
-		: (AnnouncerPackOptions.Num() > 0 ? AnnouncerPackOptions[0] : nullptr);
-	const EVisibility AnnouncerVisibility = AnnouncerPackEntries.Num() > 1
-		? EVisibility::Visible
-		: EVisibility::Collapsed;
+	return PlayerOwner.IsValid()
+		? Cast<AUTPlayerController>(PlayerOwner->PlayerController)
+		: nullptr;
+}
 
+AUTPlayerState* SUTNCPlusMenu::GetUTPlayerState() const
+{
+	AUTPlayerController* PC = GetUTPlayerController();
+	return PC != nullptr ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+}
+
+ANCReadyUpState* SUTNCPlusMenu::GetReadyUpState() const
+{
+	if (ReadyUpState.IsValid())
+	{
+		return ReadyUpState.Get();
+	}
+
+	AUTPlayerController* PC = GetUTPlayerController();
+	if (PC != nullptr)
+	{
+		ReadyUpState = ANCReadyUpState::Find(PC->GetWorld());
+	}
+	return ReadyUpState.Get();
+}
+
+bool SUTNCPlusMenu::CanSetReady(bool bReady) const
+{
+	AUTPlayerController* PC = GetUTPlayerController();
+	AUTPlayerState* PS = GetUTPlayerState();
+	ANCReadyUpState* State = GetReadyUpState();
+	AUTGameState* GS = (PC != nullptr && PC->GetWorld() != nullptr)
+		? PC->GetWorld()->GetGameState<AUTGameState>()
+		: nullptr;
+
+	if (PC == nullptr || PS == nullptr || State == nullptr || GS == nullptr
+		|| State->bCountdownLocked || GS->GetMatchState() != MatchState::WaitingToStart
+		|| PS->bOnlySpectator || PS->bIsInactive || PS->bIsABot)
+	{
+		return false;
+	}
+
+	// Each button is an idempotent Set action from the user's perspective: the
+	// already-selected state is disabled, avoiding a double-toggle RPC race.
+	return State->IsPlayerReady(PS) != bReady;
+}
+
+FText SUTNCPlusMenu::GetReadyModeText() const
+{
+	const ANCReadyUpState* State = GetReadyUpState();
+	if (State == nullptr)
+	{
+		return FText::FromString(TEXT("Match Start: Host Controlled"));
+	}
+	return FText::FromString(State->bCountdownLocked
+		? TEXT("Match Start: Player Ready-Up (Countdown Locked)")
+		: TEXT("Match Start: Player Ready-Up"));
+}
+
+FText SUTNCPlusMenu::GetReadyCountText() const
+{
+	ANCReadyUpState* State = GetReadyUpState();
+	if (State == nullptr)
+	{
+		return FText::FromString(TEXT("Ready-up is disabled on this server."));
+	}
+
+	AUTPlayerController* PC = GetUTPlayerController();
+	AUTGameState* GS = (PC != nullptr && PC->GetWorld() != nullptr)
+		? PC->GetWorld()->GetGameState<AUTGameState>()
+		: nullptr;
+	if (GS == nullptr || GS->GetMatchState() != MatchState::WaitingToStart)
+	{
+		return FText::FromString(TEXT("Ready-up is available during pre-match warmup."));
+	}
+
+	if (State->bCountdownLocked)
+	{
+		return FText::FromString(FString::Printf(TEXT("%d / %d players ready - match starting"),
+			State->ReadyCount, State->EligibleCount));
+	}
+
+	AUTPlayerState* PS = GetUTPlayerState();
+	const TCHAR* LocalStatus = (PS == nullptr || PS->bOnlySpectator || PS->bIsInactive || PS->bIsABot)
+		? TEXT(" - Spectating")
+		: (State->IsPlayerReady(PS) ? TEXT(" - You are READY") : TEXT(" - You are NOT READY"));
+	return FText::FromString(FString::Printf(TEXT("%d / %d players ready%s"),
+		State->ReadyCount, State->EligibleCount, LocalStatus));
+}
+
+FReply SUTNCPlusMenu::OnReadyClicked(bool bReady)
+{
+	AUTPlayerController* PC = GetUTPlayerController();
+	if (PC != nullptr && CanSetReady(bReady))
+	{
+		// Ready-up is a match action, not a settings save. Close exactly like the
+		// UTComp menu and leave every unsaved working-copy setting untouched.
+		ClosePanel();
+		PC->Mutate(bReady ? TEXT("nc_ready") : TEXT("nc_notready"));
+	}
+	return FReply::Handled();
+}
+
+FReply SUTNCPlusMenu::OnGitHubClicked()
+{
+	FPlatformProcess::LaunchURL(TEXT("https://github.com/jmortley/NetcodePlusUT4"), nullptr, nullptr);
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
+{
 	return SNew(SVerticalBox)
 
 		// ── Gore Settings ──
@@ -541,67 +770,6 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 			]
 		]
 
-		// Optional announcer packs are soft-discovered. With no optional pak,
-		// Stock UT4 is used and this section does not take up menu space.
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(0, 15, 0, 5)
-		.HAlign(HAlign_Center)
-		[
-			SNew(STextBlock)
-			.Visibility(AnnouncerVisibility)
-			.Text(FText::FromString(TEXT("Announcer")))
-			.Font(BoldFont(18))
-			.ColorAndOpacity(FLinearColor::White)
-		]
-
-		+ SVerticalBox::Slot()
-		.AutoHeight()
-		.Padding(40, 4, 40, 4)
-		.HAlign(HAlign_Center)
-		[
-			SNew(SHorizontalBox)
-			.Visibility(AnnouncerVisibility)
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			.Padding(0, 0, 12, 0)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Voice")))
-				.Font(RegularFont(14))
-				.ColorAndOpacity(FLinearColor::White)
-			]
-			+ SHorizontalBox::Slot()
-			.AutoWidth()
-			.VAlign(VAlign_Center)
-			[
-				SNew(SBox)
-				.WidthOverride(220.f)
-				[
-					SNew(STextComboBox)
-					.OptionsSource(&AnnouncerPackOptions)
-					.InitiallySelectedItem(InitialAnnouncer)
-					.ToolTipText(FText::FromString(TEXT("Optional voices appear only when their local content pak is installed. Stock UT4 is always available.")))
-					.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
-					{
-						if (!NewSelection.IsValid())
-						{
-							return;
-						}
-
-						const int32 Index = AnnouncerPackOptions.IndexOfByPredicate(
-							[&NewSelection](const TSharedPtr<FString>& Option)
-							{
-								return Option.IsValid() && *Option == *NewSelection;
-							});
-						if (AnnouncerPackEntries.IsValidIndex(Index))
-						{
-							SelectedAnnouncerPackId = AnnouncerPackEntries[Index].Id;
-						}
-					})
-				]
-			]
 		];
 }
 

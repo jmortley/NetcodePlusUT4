@@ -21,6 +21,8 @@ protected:
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset,
 		float YOffset, float Width, FLinearColor DrawColor) override;
+	virtual void DrawReadyText(AUTPlayerState* PlayerState, float XOffset,
+		float YOffset, float Width) override;
 
 	AClutchRoundState* ResolveClutchState() const;
 };

@@ -42,6 +42,8 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	// Optional default-hidden overlays — see WipeoutHUD for full notes.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 	// NCPlus CTF flag-status subclass — drops in for the stock engine widget.
 	// Adds nchud control over carrier indicator + you-have-flag banner + the
 	// NEW enemy-has-flag banner (engine had the FText defined but never rendered).
@@ -87,6 +89,7 @@ void ANCPlusCTFHUD::BeginPlay()
 		if (Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
 			|| Entry.Contains(TEXT("CTFScoreboard"))  // stock CTF scoreboard
 			|| Entry.Contains(TEXT("TeamScoreboard")) // stock team scoreboard (fallback)
+			|| Entry == TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator")
 			// The stock CTF flag status widget is registered in DefaultGame.ini as
 			// /Game/RestrictedAssets/UI/HUDWidgets/bpHW_CTFFlagStatus.bpHW_CTFFlagStatus_C
 			// (a BP wrapper around UTHUDWidget_CTFFlagStatus). Matching "CTFFlagStatus"

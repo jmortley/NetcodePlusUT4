@@ -1,5 +1,6 @@
 // NCPlusCTFGameMode.cpp - NetcodePlus CTF with improved advantage time and instant replay
 #include "NCPlusCTFGameMode.h"
+#include "NCReadyUp.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"            // ValidateHat: SetOverrideHatClass / OverrideHatClass
 #include "UTTeamGameMode.h"
@@ -96,6 +97,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Auto-add the warmup-roam mutator (all NCPlusCTF, incl. iCTF). `mutate warmup`
 	// lets players roam the map invulnerable + fire-disabled during warmup; it strips
@@ -230,6 +232,7 @@ void ANCPlusCTFGameMode::BeginPlay()
 void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early version check — kicks outdated/missing-plugin clients within 10s of
 	// PostLogin, BEFORE they can play meaningful warmup. Replaces the BP check
@@ -282,6 +285,13 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 			}
 		}
 	}
+}
+
+bool ANCPlusCTFGameMode::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 bool ANCPlusCTFGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)

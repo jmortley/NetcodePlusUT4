@@ -3,6 +3,7 @@
 #include "ClutchOrderMutator.h"
 #include "ClutchPoleVisual.h"
 #include "ClutchRoundState.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
@@ -250,6 +251,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 	AddMutatorClass(AClutchOrderMutator::StaticClass());
 
 	// Existing NC-ClutchGM Blueprint assets may have serialized the old UTHUD
@@ -367,6 +369,7 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 void AClutchGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 	NCPlusVersionGate::SpawnFor(NewPlayer);
 
 	if (!HasAuthority() || !NewPlayer)
@@ -1239,6 +1242,14 @@ void AClutchGameMode::FinishAttackOrderSelection()
 	GetWorldTimerManager().SetTimer(
 		AttackOrderSelectionTimerHandle, this, &AClutchGameMode::BeginNextRound,
 		ReviewSeconds, false);
+}
+
+
+bool AClutchGameMode::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 

@@ -62,6 +62,8 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
 
 ### Game Modes
 
+- **Optional UTComp-style player ready-up** — set `[NetcodePlus] bUsePlayerReadyUp=True` on the server to replace host-controlled match start across all NCPlus modes. Active human players open F5 and choose Ready/Not Ready while continuing to practice; spectators and bots do not block start. When everyone is ready, the normal final countdown begins and readiness locks — nobody can unready or cancel it unless the server becomes empty.
+
 - **NCPlusCTF** — Capture the Flag with adopted NewCTF advantage/OT mechanics, instant-end on flag-home, 5-min OT cap, ping-compensated spawning. Used for both regular CTF and iCTF (instagib).
   - HUD scorebar shows count-up overtime clock with "Overtime" label (replicated via `ANCPlusCTFOTInfo`); spectator list deduplicates the engine's stock count text.
   - **Size-keyed respawn** — `MaxPlayers <= CTFSmallGameMaxPlayers` (default 2 = 1v1 / w00t) uses `CTFRespawnWaitSmall` (1.0s); larger uses `CTFRespawnWait` (1.5s). Works for bot-hosted PUGs and hub rulesets without anyone needing `?RespawnWait`.
@@ -117,7 +119,7 @@ NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-
   - `server_info` — small server-name plate (font/size/color/opacity). Reads `GameState->ServerName`, falls through to `ServerDescription`, then a string literal. Supports an explicit `name_override` Extras key for hub setups where `ServerName` is overwritten with the ruleset/match label.
   - `crosshair_flag_grab` — bring back the engine's grab flash if you want it.
   - `speedometer`, `minimap`, `accuracy`, `heal_ability` — pre-existing opt-ins.
-- **HOST badge on scoreboards** — gold "HOST" tag next to the player who'll press Enter to start the match, on every NCPlus scoreboard. Warmup-only — disappears the instant the match starts. Identifies the host via `AUTPlayerState::bIsMatchHost` with replicated `AUTGameState::HostIdString` as a fallback.
+- **HOST badge on scoreboards** — on host-controlled servers, a gold "HOST" tag identifies the player who can press Enter to start the match. It is warmup-only and is suppressed entirely when player ready-up is enabled, because no individual player controls the start.
 - **Live preview** — every edit applies to the active HUD without a restart. Reset-per-row and Reset-All snap back to engine defaults snapshotted at startup.
 - **JSON share via clipboard** — Copy / Paste buttons in the editor footer serialize the layout to/from the system clipboard. Validation + confirm dialog on paste. Same payload as `Saved/NetcodePlus/HUDLayout.json`.
 - **Preset gallery** — 3 curated presets (Streamer Friendly / Comp Minimal / Quake Live Throwback) plus user save/delete, with procedural Slate thumbnails. First-run seeds Streamer Friendly so new installs get a polished baseline instead of stock UT defaults.
@@ -181,6 +183,7 @@ cheat-gated.
 Lives at `<Saved>/Config/Mod.ini`. Most plugin-side knobs go here; some are per-player (client `Saved/`), some are per-server (server `Saved/`), some apply to both — noted per section.
 
 **`[NetcodePlus]`** (server-side):
+- `bUsePlayerReadyUp=False` — opt in to UTComp-style F5 Ready/Not Ready instead of host-controlled start. All active human players must be ready; spectators and bots are excluded. The final countdown locks readiness, so it cannot be cancelled by unreadying or roster changes after it begins unless every active human leaves.
 - `VersionReportTimeoutSec=100.0` — grace window (s) for a joining client to report its `NETCODE_PLUGIN_VERSION`. Default 100s; clamped 1–120s; garbage / missing value falls back to the default. (Mismatched builds are always kicked; the *no-reply* timeout kick itself is currently disabled — see the version-gate note above.)
 - ElimPlus also reads `[NetcodePlus]` on the server for anti-camp (`ElimEnableAntiCamp` / `ElimCampThreshold` / `ElimCampCheckInterval` / `ElimCampWarnCooldown`), uneven-team health scaling, and the 6-0 mid-game shuffle. Full list with defaults in [SERVER-ADMINS.md](SERVER-ADMINS.md) §5.
 

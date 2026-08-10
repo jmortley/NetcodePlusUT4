@@ -4,6 +4,7 @@
 // auto-balance / TeamInfo plumbing for free.
 
 #include "NCShaftArenaGame.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
 #include "NCConcedeVote.h"
 #include "UnrealTournament.h"
@@ -78,6 +79,7 @@ ANCShaftArenaGame::ANCShaftArenaGame(const FObjectInitializer& OI)
 void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Reset per-match state so a re-init (map travel) starts clean.
 	bRatingFlushedThisMatch = false;
@@ -194,6 +196,7 @@ void ANCShaftArenaGame::BeginPlay()
 void ANCShaftArenaGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
@@ -204,6 +207,13 @@ void ANCShaftArenaGame::PostLogin(APlayerController* NewPlayer)
 	if (!PS) return;
 	const FString UniqueId = PS->StatsID.IsEmpty() ? PS->PlayerName : PS->StatsID;
 	RatingSystem->LoadPlayerFromDB(GetWorld(), UniqueId);
+}
+
+bool ANCShaftArenaGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 void ANCShaftArenaGame::HandleMatchHasStarted()

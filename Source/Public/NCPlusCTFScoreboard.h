@@ -52,6 +52,7 @@ protected:
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor) override;
 	virtual void DrawPlayerScores(float RenderDelta, float& YOffset) override;
+	virtual void DrawReadyText(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width) override;
 
 	/** Override DrawPlayer so ping/skill draws CENTERED at ColumnHeaderPingX
 	 *  rather than right-aligned at the cell's right edge (engine's hardcoded

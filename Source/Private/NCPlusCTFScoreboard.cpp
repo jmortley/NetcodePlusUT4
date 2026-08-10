@@ -1,6 +1,7 @@
 // NCPlusCTFScoreboard.cpp — K/D/Eff/Acc/C/G/R/Ping columns for CTF.
 #include "NCPlusCTFScoreboard.h"
 #include "NCPlusScoreboardHost.h"
+#include "NCPlusScoreboardReady.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTPlayerController.h"
@@ -61,6 +62,24 @@ UNCPlusCTFScoreboard::UNCPlusCTFScoreboard(const FObjectInitializer& ObjectIniti
 	CH_Returns = NSLOCTEXT("CTFScoreboard", "ReturnsHeader", "Returns");
 	CH_Armors  = NSLOCTEXT("CTFScoreboard", "ArmorsHeader",  "Armors");
 	CH_Amp     = NSLOCTEXT("CTFScoreboard", "AmpHeader",     "Amp");
+}
+
+void UNCPlusCTFScoreboard::DrawReadyText(AUTPlayerState* PlayerState,
+	float XOffset, float YOffset, float Width)
+{
+	FText PlayerReady;
+	if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
+		TeamSwapText, PlayerReady))
+	{
+		Super::DrawReadyText(PlayerState, XOffset, YOffset, Width);
+		return;
+	}
+
+	ReadyColor = FLinearColor::White;
+	ReadyScale = 1.f;
+	DrawText(PlayerReady, XOffset + ScaledCellWidth * ColumnHeaderScoreX,
+		YOffset + ColumnY, UTHUDOwner->SmallFont, ReadyScale * RenderScale, 1.f,
+		ReadyColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
 
 // Local helper: does the character have any weapon whose class name contains

@@ -23,6 +23,7 @@ ANCShaftArenaHUD::ANCShaftArenaHUD(const FObjectInitializer& OI)
 		}
 	}
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCShaftArenaScoreboard"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 }
 
 void ANCShaftArenaHUD::BeginPlay()

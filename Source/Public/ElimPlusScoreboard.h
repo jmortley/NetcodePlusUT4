@@ -52,6 +52,7 @@ protected:
 	virtual void DrawPlayerScores(float RenderDelta, float& DrawY) override;
 	virtual void DrawPlayer(int32 Index, AUTPlayerState* PlayerState, float RenderDelta, float XOffset, float YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor) override;
+	virtual void DrawReadyText(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width) override;
 
 	/** True when team colors are non-standard (TeamSkins active). */
 	bool HasCustomTeamColors() const;
