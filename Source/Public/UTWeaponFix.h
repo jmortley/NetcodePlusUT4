@@ -378,7 +378,10 @@ public:
      *  capsule; afterwards applies the classic SlideTargetHeight shrink. Mutates
      *  the test location/half-height in place; no-op for non-sliding targets.
      *  Shared by HitScanTrace, the claim time-search fallback, FireCone's pawn
-     *  sweep, and the Enforcer trace so every hitscan path judges one posture. */
+     *  sweep, the Enforcer trace, AND all three projectile rewind tests (the
+     *  catchup spawn sweep, the post-fast-forward overlap check, and
+     *  ServerProjectileHitClaim's per-sample anchor search + contact test) so
+     *  every validation path — hitscan and projectile — judges one posture. */
     static void ApplySlidePostureForValidation(const AUTCharacter* Target,
         float RewindTime, FVector& InOutTargetLocation, float& InOutCollisionHeight);
 

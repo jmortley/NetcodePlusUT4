@@ -369,8 +369,8 @@ static FORCEINLINE bool RocketLagCompDbg()
 static TAutoConsoleVariable<float> CVarSlideGraceMs(
     TEXT("ncp.SlideGraceMs"),
     250.0f,
-    TEXT("Grace window (ms) after a floor slide starts during which hitscan validation\n")
-    TEXT("tests the standing capsule envelope instead of the slide capsule, covering the\n")
+    TEXT("Grace window (ms) after a floor slide starts during which hitscan AND projectile\n")
+    TEXT("rewind validation test the standing capsule envelope instead of the slide capsule, covering the\n")
     TEXT("replication interp + slide anim blend-in still on the shooter's screen.\n")
     TEXT("0 = off (always the slide capsule, the pre-grace behavior)."),
     ECVF_Default
@@ -4292,6 +4292,13 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 						float CapRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
 						float CapHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
+						// Posture at the REWOUND moment, not now: a target who started a
+						// floor slide between the client's shot and this validation must be
+						// tested with the same slide-grace envelope hitscan uses, or the
+						// shrunken live capsule turns their rendered torso into a false
+						// miss. Mutates RewoundLoc/CapHeight in place; no-op unless sliding.
+						ApplySlidePostureForValidation(Target, SampleRewindTime, RewoundLoc, CapHeight);
+
 						FVector CapsuleTop = RewoundLoc + FVector(0, 0, CapHeight - CapRadius);
 						FVector CapsuleBot = RewoundLoc - FVector(0, 0, CapHeight - CapRadius);
 
@@ -4359,6 +4366,9 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 						FVector RewoundLoc = Target->GetRewindLocation(RewindTime);
 						float CapRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
 						float CapHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+
+						// Same slide-posture correction as the spawn sweep above.
+						ApplySlidePostureForValidation(Target, RewindTime, RewoundLoc, CapHeight);
 
 						// Point-to-capsule distance check
 						FVector CapsuleTop = RewoundLoc + FVector(0, 0, CapHeight - CapRadius);
@@ -6215,10 +6225,13 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		return;
 	}
 
-	// 4. Capsule dims for the rewound target.
+	// 4. Capsule dims for the rewound target. Half-height is only a BASE here —
+	// posture (floor slide) is re-applied PER REWIND SAMPLE below, because the
+	// shape the target had at the claimed instant, not its current shape, is
+	// what the shot was aimed at. Same helper + grace window as hitscan
+	// validation (see the AltCapHeight pattern in the hitscan claim search).
 	const float CapRadius = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
-	const float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-	const float SegHalf = FMath::Max(0.f, CapHeight - CapRadius);
+	const float BaseCapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
 	// 5. ClaimedHitLocation is a SEARCH ANCHOR only, never the damage origin (using it as the
 	// origin would let a modified client convert a near-miss into a center-mass direct hit).
@@ -6227,10 +6240,14 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	float BestDelta = 0.f;
 	float BestDistSq = BIG_NUMBER;
 	FVector BestCenter = ClaimedTarget->GetActorLocation();
+	float BestSegHalf = FMath::Max(0.f, BaseCapHeight - CapRadius);
 	const float StepSec = 1.f / 240.f;
 	for (float Delta = 0.f; Delta <= WindowSec + KINDA_SMALL_NUMBER; Delta += StepSec)
 	{
-		const FVector Center = ClaimedTarget->GetRewindLocation(Delta);
+		FVector Center = ClaimedTarget->GetRewindLocation(Delta);
+		float SampleCapHeight = BaseCapHeight;
+		ApplySlidePostureForValidation(ClaimedTarget, Delta, Center, SampleCapHeight);
+		const float SegHalf = FMath::Max(0.f, SampleCapHeight - CapRadius);
 		const FVector OnSeg = FMath::ClosestPointOnSegment(ClaimedHitLocation,
 			Center - FVector(0.f, 0.f, SegHalf), Center + FVector(0.f, 0.f, SegHalf));
 		const float DistSq = FVector::DistSquared(ClaimedHitLocation, OnSeg);
@@ -6239,6 +6256,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 			BestDistSq = DistSq;
 			BestDelta = Delta;
 			BestCenter = Center;
+			BestSegHalf = SegHalf;
 		}
 	}
 
@@ -6294,8 +6312,8 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		ProjHitRadius = 10.f;
 	}
 
-	const FVector SegTop = BestCenter + FVector(0.f, 0.f, SegHalf);
-	const FVector SegBot = BestCenter - FVector(0.f, 0.f, SegHalf);
+	const FVector SegTop = BestCenter + FVector(0.f, 0.f, BestSegHalf);
+	const FVector SegBot = BestCenter - FVector(0.f, 0.f, BestSegHalf);
 	const FVector OnCap = FMath::ClosestPointOnSegment(ProjPast, SegBot, SegTop);
 	const float ContactDistSq = FVector::DistSquared(ProjPast, OnCap);
 	const float ContactRadius = CapRadius + ProjHitRadius;
