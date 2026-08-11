@@ -16,6 +16,7 @@
 #include "UTGameState.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Colors/SColorBlock.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Widgets/Input/SNumericEntryBox.h"  // SNumericEntryBox<float> (was leaking transitively via the unity build)
 #include "GameFramework/GameUserSettings.h"
 #include "Engine/Engine.h"
@@ -1018,8 +1019,16 @@ void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<
 	PickerArgs.bOnlyRefreshOnOk = false;
 	PickerArgs.bExpandAdvancedSection = false;
 	PickerArgs.InitialColorOverride = Initial;
+	// The picker window is parented to the game viewport window, NOT to this
+	// panel, so it outlives us (Esc close; map travel drops the viewport widget
+	// without ClosePanel — see ~SUTWeaponSkinSelector). With bOnlyRefreshOnOk
+	// false the wheel drag fires this continuously, so the OnCommit lambdas'
+	// raw `this` captures are a use-after-free once the panel dies. Gate every
+	// callback on the panel still being alive — same lifetime contract as the
+	// nchud swatch's CreateSP binding (SNCPlusHUDEditor::OnSwatchClicked).
+	TWeakPtr<SUTWeaponSkinSelector> WeakSelf = SharedThis(this);
 	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateLambda(
-		[OnCommit](FLinearColor C) { if (OnCommit) OnCommit(C); });
+		[WeakSelf, OnCommit](FLinearColor C) { if (WeakSelf.IsValid() && OnCommit) OnCommit(C); });
 	PickerArgs.ParentWidget = SharedThis(this);
 
 	// Restore on close - same order as nchud (SetFullscreenMode → SetScreenResolution
@@ -1068,10 +1077,22 @@ SUTWeaponSkinSelector::~SUTWeaponSkinSelector()
 {
 	// Map load drops the viewport widget without ClosePanel — release the refcount.
 	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+	// Close any floating swatch picker with us: its commit delegate is now
+	// weak-guarded (no UAF), but an orphaned picker window is dead UI, and
+	// destroying it also runs OnColorPickerWindowClosed's FSE-mode restore.
+	if (FSlateApplication::IsInitialized())
+	{
+		DestroyColorPicker();
+	}
 }
 
 void SUTWeaponSkinSelector::ClosePanel()
 {
+	// Take the floating swatch picker down with the panel (see ~dtor note).
+	if (FSlateApplication::IsInitialized())
+	{
+		DestroyColorPicker();
+	}
 	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
 	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)

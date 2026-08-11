@@ -918,6 +918,7 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     bBufferedClickPending[0] = false;
     bBufferedClickPending[1] = false;
     OriginalFPSMaterial = nullptr;
+    OriginalFPSMaterialSecondary = nullptr;
     AppliedFPSMaterial = nullptr;
     AppliedFPSMaterialInstance = nullptr;
     bCapturedOriginalFPSMaterial = false;
@@ -5130,6 +5131,23 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 			((TargetSlotMask & 0x2u) != 0u && SavedMeshMaterials.IsValidIndex(1))
 			? SavedMeshMaterials[1]
 			: nullptr;
+		if (OriginalFPSMaterial != nullptr && Cast<UMaterialInstanceDynamic>(OriginalFPSMaterial) == nullptr)
+		{
+			if (UMaterialInstanceDynamic* DefaultMID =
+				UMaterialInstanceDynamic::Create(OriginalFPSMaterial, Mesh))
+			{
+				OriginalFPSMaterial = DefaultMID;
+			}
+		}
+		if (OriginalFPSMaterialSecondary != nullptr &&
+			Cast<UMaterialInstanceDynamic>(OriginalFPSMaterialSecondary) == nullptr)
+		{
+			if (UMaterialInstanceDynamic* DefaultMID =
+				UMaterialInstanceDynamic::Create(OriginalFPSMaterialSecondary, Mesh))
+			{
+				OriginalFPSMaterialSecondary = DefaultMID;
+			}
+		}
 		bCapturedOriginalFPSMaterial = true;
 	}
 
@@ -5151,8 +5169,9 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 	// One actor-local MID (AppliedFPSMaterialInstance) is reused across every targeted
 	// slot of THIS mesh; Default restores each slot's captured original. The
 	// SavedMeshMaterials patch makes a later body-override clear restore this choice.
-	UMaterialInterface* const OriginalBySlot[MaxWeaponSkinTargetSlots] =
-		{ OriginalFPSMaterial, OriginalFPSMaterialSecondary };
+	UMaterialInstanceDynamic* const DefaultMIDBySlot[MaxWeaponSkinTargetSlots] =
+		{ Cast<UMaterialInstanceDynamic>(OriginalFPSMaterial),
+		  Cast<UMaterialInstanceDynamic>(OriginalFPSMaterialSecondary) };
 	const bool bBodyOverrideActive = (UTOwner != nullptr && UTOwner->GetSkin() != nullptr);
 	static const FName NAME_Scale(TEXT("Scale"));
 	for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
@@ -5161,12 +5180,19 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 		{
 			continue;
 		}
-		UMaterialInterface* DesiredSlotMaterial = AppliedFPSMaterialInstance != nullptr
-			? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
-			: OriginalBySlot[Slot];
+		UMaterialInstanceDynamic* const DesiredSlotMID = AppliedFPSMaterialInstance != nullptr
+			? AppliedFPSMaterialInstance
+			: DefaultMIDBySlot[Slot];
+		UMaterialInterface* const DesiredSlotMaterial = DesiredSlotMID != nullptr
+			? Cast<UMaterialInterface>(DesiredSlotMID)
+			: ((Slot == 0) ? OriginalFPSMaterial : OriginalFPSMaterialSecondary);
 		if (SavedMeshMaterials.IsValidIndex(Slot))
 		{
 			SavedMeshMaterials[Slot] = DesiredSlotMaterial;
+		}
+		if (DesiredSlotMID != nullptr)
+		{
+			DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
 		}
 		// Character body overrides own every visible weapon slot while active.
 		if (bBodyOverrideActive)
@@ -5176,14 +5202,9 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 		Mesh->SetMaterial(Slot, DesiredSlotMaterial);
 		// MeshMIDs is compact; index i is slot i's MID whenever slot i has a
 		// material. Avoid touching it for the null-slot edge case.
-		if ((OriginalBySlot[Slot] != nullptr || AppliedFPSMaterialInstance != nullptr) &&
-			MeshMIDs.IsValidIndex(Slot))
+		if (DesiredSlotMID != nullptr && MeshMIDs.IsValidIndex(Slot))
 		{
-			MeshMIDs[Slot] = Cast<UMaterialInstanceDynamic>(DesiredSlotMaterial);
-			if (MeshMIDs[Slot] != nullptr)
-			{
-				MeshMIDs[Slot]->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
-			}
+			MeshMIDs[Slot] = DesiredSlotMID;
 		}
 	}
 	if (!bBodyOverrideActive && SkinTiming())
@@ -5600,18 +5621,20 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 	// The selected skin's one actor-local MID is reused across every targeted slot;
 	// Default restores each slot's captured original. Patch SavedMeshMaterials first
 	// so stock's restore path below reproduces this choice on every affected slot.
-	UMaterialInterface* const OriginalBySlot[MaxWeaponSkinTargetSlots] =
-		{ OriginalFPSMaterial, OriginalFPSMaterialSecondary };
-	UMaterialInstanceDynamic* const DesiredSlotMID = AppliedFPSMaterialInstance;
+	UMaterialInstanceDynamic* const DefaultMIDBySlot[MaxWeaponSkinTargetSlots] =
+		{ Cast<UMaterialInstanceDynamic>(OriginalFPSMaterial),
+		  Cast<UMaterialInstanceDynamic>(OriginalFPSMaterialSecondary) };
 	if (bCapturedOriginalFPSMaterial)
 	{
 		for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
 		{
 			if (((TargetSlotMask >> Slot) & 0x1u) != 0u && SavedMeshMaterials.IsValidIndex(Slot))
 			{
-				SavedMeshMaterials[Slot] = (DesiredSlotMID != nullptr)
-					? Cast<UMaterialInterface>(DesiredSlotMID)
-					: OriginalBySlot[Slot];
+				SavedMeshMaterials[Slot] = (AppliedFPSMaterialInstance != nullptr)
+					? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
+					: ((DefaultMIDBySlot[Slot] != nullptr)
+						? Cast<UMaterialInterface>(DefaultMIDBySlot[Slot])
+						: ((Slot == 0) ? OriginalFPSMaterial : OriginalFPSMaterialSecondary));
 			}
 		}
 	}
@@ -5619,14 +5642,21 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 	Super::SetSkin(NewSkin);
 
 	bool bReusedSlotZero = false;
-	if (NewSkin == nullptr && DesiredSlotMID != nullptr && Mesh != nullptr)
+	if (NewSkin == nullptr && bCapturedOriginalFPSMaterial && Mesh != nullptr)
 	{
-		// A selected skin already has one actor-local MID, and stock's MeshMIDs
-		// rebuild would re-wrap it. Restore that exact instance on each targeted slot.
+		// Stock's MeshMIDs rebuild should already preserve existing MIDs, but reassert
+		// the exact actor-local selected/default instance for every targeted slot.
 		static const FName NAME_Scale(TEXT("Scale"));
 		for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
 		{
 			if (((TargetSlotMask >> Slot) & 0x1u) == 0u || Slot >= Mesh->GetNumMaterials())
+			{
+				continue;
+			}
+			UMaterialInstanceDynamic* const DesiredSlotMID = AppliedFPSMaterialInstance != nullptr
+				? AppliedFPSMaterialInstance
+				: DefaultMIDBySlot[Slot];
+			if (DesiredSlotMID == nullptr)
 			{
 				continue;
 			}
@@ -5635,11 +5665,10 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 			{
 				SavedMeshMaterials[Slot] = DesiredSlotMID;
 			}
-			if ((OriginalBySlot[Slot] != nullptr || AppliedFPSMaterialInstance != nullptr) &&
-				MeshMIDs.IsValidIndex(Slot))
+			DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
+			if (MeshMIDs.IsValidIndex(Slot))
 			{
 				MeshMIDs[Slot] = DesiredSlotMID;
-				DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
 			}
 			bReusedSlotZero = true;
 		}

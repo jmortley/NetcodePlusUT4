@@ -23,6 +23,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
 	void ApplyConfiguredShockCoreColor(UParticleSystemComponent* FlightEffect);
 
+	/**
+	 * Apply the local firing player's configured color and expose the effective
+	 * color for Blueprint-owned core parameters such as BallColor. Returns false
+	 * when local cosmetic color overrides are not applicable to this projectile.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
+	bool TryApplyConfiguredShockCoreColor(UParticleSystemComponent* FlightEffect,
+		FLinearColor& OutColor);
+
 	virtual void Tick(float DeltaTime) override;
 	virtual void BeginPlay() override;
 	virtual void BeginFakeProjectileSynch(AUTProjectile* InFakeProjectile) override;

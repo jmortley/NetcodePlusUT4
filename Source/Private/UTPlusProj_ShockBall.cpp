@@ -351,24 +351,32 @@ AUTPlusProj_ShockBall::AUTPlusProj_ShockBall(const FObjectInitializer& ObjectIni
 
 void AUTPlusProj_ShockBall::ApplyConfiguredShockCoreColor(UParticleSystemComponent* FlightEffect)
 {
+	FLinearColor IgnoredColor;
+	TryApplyConfiguredShockCoreColor(FlightEffect, IgnoredColor);
+}
+
+bool AUTPlusProj_ShockBall::TryApplyConfiguredShockCoreColor(
+	UParticleSystemComponent* FlightEffect, FLinearColor& OutColor)
+{
+	OutColor = FLinearColor::White;
 	UWorld* World = GetWorld();
 	if (FlightEffect == nullptr || FlightEffect->IsPendingKill() || World == nullptr
 		|| GetNetMode() == NM_DedicatedServer)
 	{
-		return;
+		return false;
 	}
 
 	UDemoNetDriver* DemoNetDriver = World->DemoNetDriver;
 	if (DemoNetDriver != nullptr && DemoNetDriver->IsPlaying())
 	{
-		return;
+		return false;
 	}
 
 	AUTCharacter* InstigatorCharacter = Cast<AUTCharacter>(GetInstigator());
 	if (InstigatorCharacter == nullptr || !InstigatorCharacter->IsLocallyControlled()
 		|| !InstigatorCharacter->IsPlayerControlled())
 	{
-		return;
+		return false;
 	}
 	// The projectile class already identifies the effect profile. Do not query the
 	// pawn's current weapon: the authoritative real can arrive after a fast swap.
@@ -376,7 +384,7 @@ void AUTPlusProj_ShockBall::ApplyConfiguredShockCoreColor(UParticleSystemCompone
 	const FNCWeaponColorSnapshot& Snapshot = NCWeaponColors::GetSnapshot();
 	if (!Snapshot.bCustomShock || !Snapshot.bHasShockColor)
 	{
-		return;
+		return false;
 	}
 
 	FLinearColor CoreColor = Snapshot.ShockColor;
@@ -386,20 +394,23 @@ void AUTPlusProj_ShockBall::ApplyConfiguredShockCoreColor(UParticleSystemCompone
 		// cannot become effectively invisible.
 		CoreColor = FLinearColor(2.208334f, 1.5f, 10.f, 1.f);
 	}
+	OutColor = CoreColor;
 
-	if (LastConfiguredShockCoreEffect == FlightEffect
-		&& LastConfiguredShockCoreGeneration == Snapshot.Generation)
+	if (LastConfiguredShockCoreEffect != FlightEffect
+		|| LastConfiguredShockCoreGeneration != Snapshot.Generation)
 	{
-		return;
+		for (const FName& ParameterName : ShockCoreColorParameters)
+		{
+			FlightEffect->SetColorParameter(ParameterName, CoreColor);
+		}
+
+		LastConfiguredShockCoreEffect = FlightEffect;
+		LastConfiguredShockCoreGeneration = Snapshot.Generation;
 	}
 
-	for (const FName& ParameterName : ShockCoreColorParameters)
-	{
-		FlightEffect->SetColorParameter(ParameterName, CoreColor);
-	}
-
-	LastConfiguredShockCoreEffect = FlightEffect;
-	LastConfiguredShockCoreGeneration = Snapshot.Generation;
+	// A cached particle write is still a successful color resolution. This lets
+	// Blueprint initialize BallColor even if the compatibility node ran first.
+	return true;
 }
 
 void AUTPlusProj_ShockBall::NotifyClientSideHit(AUTPlayerController* InstigatedBy, FVector HitLocation, AActor* DamageCauser, int32 Damage)
