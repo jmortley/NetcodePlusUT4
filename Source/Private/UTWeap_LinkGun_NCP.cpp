@@ -69,6 +69,8 @@ AUTWeap_LinkGun_NCP::AUTWeap_LinkGun_NCP(const FObjectInitializer& OI)
 	LinkPullKickbackY = 300.f;
 	LastLinkEffectColorGeneration = 0;
 	LastLinkMuzzleColorGeneration = 0;
+	LastScreenUpdateTime = 0.f;
+	LastAppliedPulseScale = -1.f;
 
 	WeaponCustomizationTag = EpicWeaponCustomizationTags::LinkGun;
 	WeaponSkinCustomizationTag = EpicWeaponSkinCustomizationTags::LinkGun;
@@ -85,6 +87,13 @@ bool AUTWeap_LinkGun_NCP::RefreshConfiguredLinkColor(UObject* BeamEffect,
 {
 	OutColor = FLinearColor::White;
 	UWorld* World = GetWorld();
+	// Beam cleanup is not a color feature. Register any client-side first-person
+	// beam before the owner-local color guards so remote first-person spectators
+	// retain the old Blueprint watchdog's stuck-effect protection too.
+	if (World != nullptr && GetNetMode() != NM_DedicatedServer)
+	{
+		ArmLinkBeamWatchdog(BeamEffect);
+	}
 	if (World == nullptr || GetNetMode() == NM_DedicatedServer || UTOwner == nullptr
 		|| !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
 		|| !ShouldPlay1PVisuals()
@@ -122,6 +131,55 @@ bool AUTWeap_LinkGun_NCP::RefreshConfiguredLinkColor(UObject* BeamEffect,
 	}
 
 	return bRefreshBeam;
+}
+
+void AUTWeap_LinkGun_NCP::ArmLinkBeamWatchdog(UObject* BeamEffect)
+{
+	if (BeamEffect == nullptr || BeamEffect->IsPendingKill() || GetWorld() == nullptr)
+	{
+		return;
+	}
+
+	TrackedLinkBeamEffect = BeamEffect;
+	if (!GetWorldTimerManager().IsTimerActive(LinkBeamWatchdogHandle))
+	{
+		// Cosmetic cleanup does not need the old render-frame cadence. This timer
+		// exists only for the lifetime of an actual beam effect.
+		GetWorldTimerManager().SetTimer(LinkBeamWatchdogHandle, this,
+			&AUTWeap_LinkGun_NCP::CheckLinkBeamWatchdog, 1.f / 30.f, true);
+	}
+}
+
+void AUTWeap_LinkGun_NCP::StopLinkBeamWatchdog()
+{
+	if (GetWorld() != nullptr)
+	{
+		GetWorldTimerManager().ClearTimer(LinkBeamWatchdogHandle);
+	}
+	TrackedLinkBeamEffect.Reset();
+}
+
+void AUTWeap_LinkGun_NCP::CheckLinkBeamWatchdog()
+{
+	if (!TrackedLinkBeamEffect.IsValid())
+	{
+		StopLinkBeamWatchdog();
+		return;
+	}
+
+	if (!IsFiring())
+	{
+		// Dispatch through NCPLinkGun's existing Blueprint override: it calls
+		// Parent, deactivates BP_LinkAlt_1P, and clears its BeamEffect variable.
+		StopFiringEffects();
+		StopLinkBeamWatchdog();
+	}
+}
+
+void AUTWeap_LinkGun_NCP::StopFiringEffects_Implementation()
+{
+	StopLinkBeamWatchdog();
+	Super::StopFiringEffects_Implementation();
 }
 
 void AUTWeap_LinkGun_NCP::StartFire(uint8 FireModeNum)
@@ -206,6 +264,7 @@ void AUTWeap_LinkGun_NCP::AttachToOwner_Implementation()
 		ScreenTexture->ClearColor = FLinearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		ScreenTexture->OnCanvasRenderTargetUpdate.AddDynamic(this, &AUTWeap_LinkGun_NCP::UpdateScreenTexture);
 		ScreenMI->SetTextureParameterValue(FName(TEXT("ScreenTexture")), ScreenTexture);
+		LastScreenUpdateTime = 0.f;
 
 		if (SideScreenMaterialID < Mesh->GetNumMaterials())
 		{
@@ -270,6 +329,7 @@ void AUTWeap_LinkGun_NCP::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Hei
 
 void AUTWeap_LinkGun_NCP::Removed()
 {
+	StopLinkBeamWatchdog();
 	if (UTOwner != nullptr)
 	{
 		UTOwner->SetAmbientSound(OverheatSound, true);
@@ -279,6 +339,7 @@ void AUTWeap_LinkGun_NCP::Removed()
 
 void AUTWeap_LinkGun_NCP::ClientRemoved()
 {
+	StopLinkBeamWatchdog();
 	if (UTOwner != nullptr)
 	{
 		UTOwner->SetAmbientSound(OverheatSound, true);
@@ -335,16 +396,28 @@ void AUTWeap_LinkGun_NCP::Tick(float DeltaTime)
 		bIsInCoolDown = OverheatFactor > 1.f;
 	}
 
-	if (ScreenTexture != nullptr && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
+	const float Now = GetWorld()->TimeSeconds;
+	if (ScreenTexture != nullptr && Mesh->IsRegistered() && Now - Mesh->LastRenderTime < 0.1f
+		&& Now - LastScreenUpdateTime >= 1.f / 30.f)
 	{
+		LastScreenUpdateTime = Now;
 		ScreenTexture->FastUpdateResource();
 	}
 
 	if (UTOwner != nullptr && UTOwner->GetWeapon() == this && MuzzleFlash.IsValidIndex(1) && MuzzleFlash[1] != nullptr)
 	{
 		static FName NAME_PulseScale(TEXT("PulseScale"));
-		const float NewScale = 1.0f + FMath::Max<float>(0.0f, 1.0f - (GetWorld()->GetTimeSeconds() - LastBeamPulseTime) / 0.35f);
-		MuzzleFlash[1]->SetVectorParameter(NAME_PulseScale, FVector(NewScale, NewScale, NewScale));
+		UParticleSystemComponent* const PulseEffect = MuzzleFlash[1];
+		const float PulseAge = Now - LastBeamPulseTime;
+		const float NewScale = 1.0f + FMath::Max<float>(0.0f, 1.0f - PulseAge / 0.35f);
+		const bool bEffectChanged = LastPulseScaleEffect.Get() != PulseEffect;
+		// Animate while the pulse is live, then write the settled value once.
+		if (bEffectChanged || PulseAge < 0.35f || LastAppliedPulseScale != NewScale)
+		{
+			PulseEffect->SetVectorParameter(NAME_PulseScale, FVector(NewScale, NewScale, NewScale));
+			LastPulseScaleEffect = PulseEffect;
+			LastAppliedPulseScale = NewScale;
+		}
 	}
 
 	if (UTOwner != nullptr && IsFiring() && Role == ROLE_Authority &&

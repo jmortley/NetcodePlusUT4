@@ -18,6 +18,7 @@ class AClutchRoundState;
 class AUTWeaponFix;
 class UUTWeaponSkin;
 class UMaterialInstanceDynamic;
+class UMaterialInterface;
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -339,6 +340,12 @@ protected:
 	bool bRefreshOthersDirty = false;
 	/** Flush the coalesced forced-model work (the dirty flags) — called from the top of Tick on clients. */
 	void FlushForcedModelUpdate();
+	/** Re-apply the Force Models armour-overlay tint after an overlay/team/config change. */
+	void RefreshForcedArmourOverlay();
+	/** Coalesces armour material writes; steady-state character ticks perform no MID parameter updates. */
+	bool bForcedArmourOverlayDirty = false;
+	/** Last observed slot-0 overlay material; identity changes catch rebuilds that bypass our override. */
+	TWeakObjectPtr<UMaterialInterface> ObservedArmourOverlayMaterial;
 	/** ApplyCharacterData suppresses stock's outline rebuild while CharacterMesh0 is being
 	 *  reregistered. The replacement is created at the start of the following character tick. */
 	bool bDeferredOutlineUpdatePending = false;

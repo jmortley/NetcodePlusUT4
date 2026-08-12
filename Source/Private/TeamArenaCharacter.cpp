@@ -142,6 +142,11 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 // the pawn dirty and re-assert the forced model once on the next Tick (FlushForcedModelUpdate).
 void ATeamArenaCharacter::NotifyTeamChanged()
 {
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		// Super may rebuild the armour overlay through our UpdateArmorOverlay override.
+		bForcedArmourOverlayDirty = true;
+	}
 	Super::NotifyTeamChanged();
 
 	// Coalesce the forced-model apply. PossessedBy / OnRep_PlayerState / the PlayerState's own
@@ -307,6 +312,10 @@ void ATeamArenaCharacter::FlushForcedModelUpdate()
 	{
 		bRefreshOthersDirty = false;
 		RefreshOtherForcedModels();
+	}
+	if (bForcedArmourOverlayDirty)
+	{
+		RefreshForcedArmourOverlay();
 	}
 }
 
@@ -845,17 +854,41 @@ void ATeamArenaCharacter::RefreshOtherForcedModels()
 	for (ATeamArenaCharacter* Other : Others)
 	{
 		Other->ApplyForcedModel(/*bForceReapply=*/false);
+		// The local viewer's team can move this pawn between friendly/enemy colour buckets without
+		// any armour replication on the pawn itself. Re-run stock overlay setup, then our tint once.
+		Other->UpdateArmorOverlay();
 	}
 }
 
 void ATeamArenaCharacter::UpdateArmorOverlay()
 {
 	Super::UpdateArmorOverlay();   // sets up the armour overlay (+ the stock hardcoded yellow "Color")
+	bForcedArmourOverlayDirty = true;
+	RefreshForcedArmourOverlay();
+}
 
+void ATeamArenaCharacter::RefreshForcedArmourOverlay()
+{
 	// Redirect that yellow to our match/complimentary armour colour, for pawns we reskin. Client-only
-	// (OverlayMesh's MID only exists off the dedicated server). This is the ArmorType OnRep, so it
-	// re-fires on every armour change and always runs AFTER the stock colour, winning cleanly.
-	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn() || !OverlayMesh) { return; }  // skip MY pawn (offline-safe)
+	// (OverlayMesh's MID only exists off the dedicated server). Callers run this after stock overlay
+	// setup, on viewer-team/config changes, or when Tick observes a replacement material.
+	if (GetNetMode() == NM_DedicatedServer || IsLocalPlayerPawn())
+	{
+		bForcedArmourOverlayDirty = false;
+		return;
+	}
+	// Keep the dirty bit armed while the component is temporarily absent/unregistered. If the same MID
+	// is reused when registration completes, pointer identity alone cannot tell that stock rewrote it.
+	if (!OverlayMesh)
+	{
+		ObservedArmourOverlayMaterial.Reset();
+		bForcedArmourOverlayDirty = false;
+		return;
+	}
+	if (!OverlayMesh->IsRegistered()) { return; }
+	UMaterialInterface* const OverlayMaterial = OverlayMesh->GetMaterial(0);
+	ObservedArmourOverlayMaterial = OverlayMaterial;
+	bForcedArmourOverlayDirty = false;
 
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	if (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(GetWorld())) { return; }   // Outline mode: leave stock armour (no super-tint)
@@ -867,15 +900,12 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));   // spectator -> red is "ours"
 	if (C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }   // Enemy-Only leaves teammates stock
 
-	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
+	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMaterial);
 	if (!MID) { return; }
 
 	const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
-	// Same model-or-tint gate as ApplyForcedModel and the per-frame overlay/glow
-	// writers. This OnRep writer was the one site that still tinted armour for a
-	// side with a colour but neither a forced model nor "Tint skin" — and being an
-	// OnRep, its write STUCK, because the correctly-gated Tick writer refused to
-	// repaint it back to stock.
+	// Same model-or-tint gate as ApplyForcedModel and the spawn-protection glow. A side with neither
+	// a forced model nor "Tint skin" leaves the stock overlay untouched.
 	TSubclassOf<AUTCharacterContent> GateContent = NCPlusForceModels::GetModelClass(Side);
 	if (!((GateContent && NCPlusForceModels::IsModelAllowed(GateContent)) || Side.bTint)) { return; }
 	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(Side);
@@ -890,8 +920,7 @@ void ATeamArenaCharacter::UpdateArmorOverlay()
 	// Per-side "Armour Glow" (F5): dim the emissive shell so armoured/shielded pawns aren't radioactive.
 	// 1.0 = stock full-bright (bit-identical to before this knob existed); lower = calmer; 0 = no glow
 	// (armour still tinted via TeamColor below, just not emissive). This scales ONLY the emissive "Color".
-	// Shared helper also folds in the r.SimpleForwardShading auto-dim; Tick's per-frame overlay
-	// recolour scales through the same helper so the two writers can't fight.
+	// Shared helper also folds in the r.SimpleForwardShading auto-dim.
 	Glow *= NCPlusForceModels::GetArmourEmissiveScale(Side);
 	static const FName NAME_ArmorColor(TEXT("Color"));
 	static const FName NAME_ArmorTeamColor(TEXT("TeamColor"));
@@ -2080,7 +2109,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				FVector ViewLoc;
 				FRotator ViewRot;
 				LocalPC->GetPlayerViewPoint(ViewLoc, ViewRot);
-				constexpr float OverlayCullDistSq = 5500.f * 5500.f;
+				constexpr float OverlayCullDistSq = 6500.f * 6500.f;
 				if (FVector::DistSquared(GetActorLocation(), ViewLoc) > OverlayCullDistSq)
 				{
 					bShouldShow = false;
@@ -2089,7 +2118,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 
 		// ── ForceModels: optional fallback — HIDE the shield-belt overlay (ncp.HideArmorShield 1) ──
-		// The continuous recolour below tints the shield to the team skin colour via the "Color" param
+		// The event-driven recolour tints the shield to the team skin colour via the "Color" param
 		// (the working path, DEFAULT). This hide is the fallback for community models whose shield
 		// material bakes the gold and ignores that recolour. Gated on IsEnabled so it also catches
 		// transiently-unrecoloured pawns; other overlays (UDamage, etc.) are untouched, and vanilla
@@ -2109,57 +2138,19 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		}
 	}
 
-	// =========================================================================
-	// Character/armour OVERLAY recolour (CONTINUOUS) — armour/shield outlives spawn protection
-	// =========================================================================
-	// The OverlayMesh (shield-belt / OverlayElimCharacter / any active char overlay) carries a hardcoded
-	// gold: stock UTCharacter::UpdateArmorOverlay (UTCharacter.cpp:5544) sets the shield MID's "Color"
-	// param to (1,1,0) for blue / (0.75,0.75,0.1) for red, and "TeamColor" to the team colour — the
-	// "Color" write is the gold lever (TeamColor alone won't shift it). Re-tint it to the ForceModels
-	// skin colour EVERY frame, NOT gated on spawn protection: the shield-belt persists with armour and is
-	// re-applied on any overlay rebuild, so the old spawn-protection-only tint reverted to gold the
-	// instant protection dropped. No-op when ForceModels isn't recolouring this pawn / there's no overlay MID.
+	// Armour overlays are normally rebuilt through UpdateArmorOverlay(), where the Force Models tint
+	// is now applied once. Keep only a cheap material-identity guard here for third-party/Blueprint
+	// overlay replacement paths that bypass that virtual hook.
+	UMaterialInterface* const CurrentArmourOverlayMaterial =
+		(OverlayMesh && OverlayMesh->IsRegistered()) ? OverlayMesh->GetMaterial(0) : nullptr;
+	if (CurrentArmourOverlayMaterial != ObservedArmourOverlayMaterial.Get())
 	{
-		FLinearColor SkinCol = GetTeamColor();
-		bool bForcedSkin = false;
-		float ArmourEmissive = 1.f;
-		// Outline mode: don't re-tint the shield/armour overlay to the skin colour — leave it stock.
-		// Cached gate: this runs per pawn per frame; the full check is refreshed once per frame.
-		if (NCPlusForceModels::IsEnabled() && !NCPlusForceModels::OutlineModeActiveCached())
-		{
-			const int32 MyTeam = (int32)GetTeamNum();
-			if (MyTeam != 255)
-			{
-				const bool bFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
-				const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bFriendly);
-				TSubclassOf<AUTCharacterContent> Content = NCPlusForceModels::GetModelClass(Side);
-				// Model-or-tint: a tint-only side ("Tint skin", no model picked) recolours
-				// the armour/shield overlay too — same gate as ApplyForcedModel.
-				if ((Content && NCPlusForceModels::IsModelAllowed(Content)) || Side.bTint)
-				{
-					SkinCol        = NCPlusForceModels::GetSkinColour(Side);
-					ArmourEmissive = NCPlusForceModels::GetArmourEmissiveScale(Side);
-					bForcedSkin    = true;
-				}
-			}
-		}
-
-		static const FName NAME_OverlayTeamColor(TEXT("TeamColor"));
-		static const FName NAME_OverlayColor(TEXT("Color"));
-		if (bForcedSkin && OverlayMesh && OverlayMesh->IsRegistered())
-		{
-			if (UMaterialInstanceDynamic* OvMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0)))
-			{
-				// "Color" is the lever that recolours the shield-belt: stock UpdateArmorOverlay puts the
-				// gold on the "Color" param (it also sets "TeamColor" to the team colour, but that doesn't
-				// drive the gold). We set both so non-shield overlays that key off TeamColor recolour too.
-				// This block re-writes EVERY frame, so it must scale by the Armour Glow itself — it used
-				// to write the raw skin colour and stomped the glow-scaled value UpdateArmorOverlay set
-				// (the F5 Armour Glow slider appeared dead whenever a model was forced).
-				OvMID->SetVectorParameterValue(NAME_OverlayTeamColor, SkinCol);
-				OvMID->SetVectorParameterValue(NAME_OverlayColor, SkinCol * ArmourEmissive);
-			}
-		}
+		ObservedArmourOverlayMaterial = CurrentArmourOverlayMaterial;
+		bForcedArmourOverlayDirty = true;
+	}
+	if (bForcedArmourOverlayDirty)
+	{
+		RefreshForcedArmourOverlay();
 	}
 
 	// --- CASE 1: Active Spawn Protection ---
@@ -2179,8 +2170,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 		// Resolve the glow colour ONCE for the body hit-flash. Default = stock team colour (unchanged
 		// vanilla behaviour); use the ForceModels skin colour when it's recolouring this enemy's body.
-		// (The OVERLAY recolour now lives in the CONTINUOUS block above — the armour/shield overlay
-		// outlives spawn protection, so it can't be gated on it.)
+		// (The OVERLAY recolour is handled independently above — the armour/shield overlay outlives
+		// spawn protection, so it can't be gated on it.)
 		FLinearColor GlowColour = GetTeamColor();
 		if (bShowGlowToViewer && NCPlusForceModels::IsEnabled())
 		{

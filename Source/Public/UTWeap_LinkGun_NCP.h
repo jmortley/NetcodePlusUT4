@@ -2,6 +2,7 @@
 
 #include "NetcodePlus.h"
 #include "UTWeaponFix.h"
+#include "TimerManager.h"
 #include "UTWeap_LinkGun_NCP.generated.h"
 
 class AUTProjectile;
@@ -176,6 +177,7 @@ public:
 	UMaterialInstanceDynamic* SideScreenMI;
 
 	virtual void AttachToOwner_Implementation() override;
+	virtual void StopFiringEffects_Implementation() override;
 
 	UFUNCTION()
 	virtual void UpdateScreenTexture(UCanvas* C, int32 Width, int32 Height);
@@ -229,9 +231,22 @@ protected:
 	/** Keep the stock high-ping delayed fake callback for rapid plasma. */
 	virtual void SpawnDelayedFakeProjectile() override;
 
+	/** Poll for the rare stuck Blueprint beam only while a beam actor exists. */
+	void ArmLinkBeamWatchdog(UObject* BeamEffect);
+	void StopLinkBeamWatchdog();
+	void CheckLinkBeamWatchdog();
+
 	/** Weak identity caches avoid retaining transient Blueprint beam actors. */
 	TWeakObjectPtr<UObject> LastColoredLinkEffect;
 	TWeakObjectPtr<UParticleSystemComponent> LastColoredLinkMuzzle;
 	uint32 LastLinkEffectColorGeneration;
 	uint32 LastLinkMuzzleColorGeneration;
+
+	TWeakObjectPtr<UObject> TrackedLinkBeamEffect;
+	FTimerHandle LinkBeamWatchdogHandle;
+
+	/** Render/material update caches; none of these values replicate. */
+	float LastScreenUpdateTime;
+	TWeakObjectPtr<UParticleSystemComponent> LastPulseScaleEffect;
+	float LastAppliedPulseScale;
 };
