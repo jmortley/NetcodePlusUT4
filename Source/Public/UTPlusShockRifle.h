@@ -166,6 +166,21 @@ private:
 	UPROPERTY(Transient)
 	uint32 CachedShockBeamColorGeneration;
 
+	/** Material currently assigned to the authored ammo-glow slot. */
+	UPROPERTY(Transient)
+	UMaterialInterface* CachedAmmoGlowMaterial;
+
+	/** Existing MID adopted from the ammo-glow slot; this class never creates or replaces it. */
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CachedAmmoGlowMID;
+
+	/** Last values pushed to CachedAmmoGlowMID. */
+	int32 CachedAmmoGlowAmmo;
+	int32 CachedAmmoGlowMaxAmmo;
+
+	/** Rebind the live ammo-glow slot and update it only when its material or values changed. */
+	void RefreshAmmoGlowMaterial(bool bForceRefresh);
+
 	/** True only for the Instagib shock-rifle variants; normal Shock children stay stock. */
 	bool IsInstagibBeamWeapon() const;
 	bool ShouldShowOwnInstagibBeam() const;

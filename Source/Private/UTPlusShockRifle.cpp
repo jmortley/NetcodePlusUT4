@@ -25,6 +25,9 @@ namespace
 	const FName NAME_ShockDissipationColor(TEXT("DissipationColor"));
 	const FName NAME_ShockPlasmaHot(TEXT("Plasma_Hot"));
 	const FName NAME_ShockPlasmaCold(TEXT("Plasma_Cold"));
+	const FName NAME_ShockAmmoLerp(TEXT("AmmoLERP"));
+	const FName NAME_ShockMaxAmmo(TEXT("MaxAmmoInt"));
+	const int32 ShockAmmoGlowMaterialID = 2;
 
 	FLinearColor MultiplyShockColors(const FLinearColor& A, const FLinearColor& B)
 	{
@@ -43,6 +46,10 @@ AUTPlusShockRifle::AUTPlusShockRifle(const FObjectInitializer& ObjectInitializer
 	, CachedShockBeamMID(nullptr)
 	, CachedShockBeamSourceMaterial(nullptr)
 	, CachedShockBeamColorGeneration(0)
+	, CachedAmmoGlowMaterial(nullptr)
+	, CachedAmmoGlowMID(nullptr)
+	, CachedAmmoGlowAmmo(MIN_int32)
+	, CachedAmmoGlowMaxAmmo(MIN_int32)
 {
 	DefaultGroup = 4;
 	BaseAISelectRating = 0.65f;
@@ -177,6 +184,56 @@ void AUTPlusShockRifle::SetupSpecialMaterials()
 		ScreenTexture->OnCanvasRenderTargetUpdate.AddDynamic(this, &AUTPlusShockRifle::UpdateScreenTexture);
 		ScreenMI->SetTextureParameterValue(FName(TEXT("ScreenTexture")), ScreenTexture);
 	}
+
+	// Slot 2's MID is authored by the Blueprint/stock material setup. Adopt that
+	// exact live instance and initialize it; never allocate or replace it here.
+	RefreshAmmoGlowMaterial(true);
+}
+
+void AUTPlusShockRifle::RefreshAmmoGlowMaterial(bool bForceRefresh)
+{
+	if (IsRunningDedicatedServer() || Mesh == nullptr ||
+		ShockAmmoGlowMaterialID >= Mesh->GetNumMaterials())
+	{
+		CachedAmmoGlowMaterial = nullptr;
+		CachedAmmoGlowMID = nullptr;
+		CachedAmmoGlowAmmo = MIN_int32;
+		CachedAmmoGlowMaxAmmo = MIN_int32;
+		return;
+	}
+
+	UMaterialInterface* const CurrentMaterial = Mesh->GetMaterial(ShockAmmoGlowMaterialID);
+	if (CurrentMaterial != CachedAmmoGlowMaterial)
+	{
+		CachedAmmoGlowMaterial = CurrentMaterial;
+		CachedAmmoGlowMID = Cast<UMaterialInstanceDynamic>(CurrentMaterial);
+		float UnusedParameterValue = 0.0f;
+		if (CachedAmmoGlowMID != nullptr &&
+			(!CachedAmmoGlowMID->GetScalarParameterValue(NAME_ShockAmmoLerp, UnusedParameterValue) ||
+			 !CachedAmmoGlowMID->GetScalarParameterValue(NAME_ShockMaxAmmo, UnusedParameterValue)))
+		{
+			CachedAmmoGlowMID = nullptr;
+		}
+		CachedAmmoGlowAmmo = MIN_int32;
+		CachedAmmoGlowMaxAmmo = MIN_int32;
+		bForceRefresh = true;
+	}
+
+	if (CachedAmmoGlowMID == nullptr || CachedAmmoGlowMID->IsPendingKill())
+	{
+		return;
+	}
+
+	if (bForceRefresh || CachedAmmoGlowAmmo != Ammo)
+	{
+		CachedAmmoGlowMID->SetScalarParameterValue(NAME_ShockAmmoLerp, float(Ammo));
+		CachedAmmoGlowAmmo = Ammo;
+	}
+	if (bForceRefresh || CachedAmmoGlowMaxAmmo != MaxAmmo)
+	{
+		CachedAmmoGlowMID->SetScalarParameterValue(NAME_ShockMaxAmmo, float(MaxAmmo));
+		CachedAmmoGlowMaxAmmo = MaxAmmo;
+	}
 }
 
 void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Height)
@@ -223,6 +280,16 @@ void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Heigh
 void AUTPlusShockRifle::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Weapon actors continue ticking while holstered, so only poll the material for
+	// the current, locally visible first-person weapon. Steady state is pointer/int
+	// comparisons; render parameters are written only when their values change.
+	if (!IsRunningDedicatedServer() && Mesh != nullptr && Mesh->IsRegistered() &&
+		UTOwner != nullptr && UTOwner->GetWeapon() == this && ShouldPlay1PVisuals() &&
+		GetWorld() != nullptr && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
+	{
+		RefreshAmmoGlowMaterial(false);
+	}
 
 	// Throttle screen texture updates to 30Hz — ammo counter doesn't need 480fps updates
 	if (ScreenTexture != NULL && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
@@ -821,8 +888,6 @@ void AUTPlusShockRifle::FiringExtraUpdated_Implementation(uint8 NewFlashExtra, u
 {
 	bPlayComboEffects = (InFireMode == 0 && (NewFlashExtra > 0));
 }
-
-
 
 
 
