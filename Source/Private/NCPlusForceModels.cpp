@@ -70,8 +70,8 @@ namespace
 	// lightweight call sites — the full check copies side settings (FStrings) + does HSV math, so
 	// cache the published verdict and refresh it from OutlinePlayers.
 	bool GOutlineModeActiveCache = false;
-	// The orphan CustomDepth scan is a recovery sweep. Keep it dormant while the
-	// hidden outline mode is unused and rate-limit it while the mode is active.
+	// The orphan CustomDepth scan is a general recovery sweep for both Force Models and stock TacCom.
+	// Rate-limit the global UObject iteration independently of Force Models' outline setting.
 	TWeakObjectPtr<UWorld> GOutlineSweepWorld;
 	float GNextOutlineSweepTime = 0.f;
 
@@ -677,28 +677,11 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// OnlyTickPoseWhenRendered. Nothing replicates; no-op on a dedicated server.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
 
-	const FNCPlusForceModelsConfig& C = Get();
-	const bool bConfigured = C.bEnabled && C.bOutline;
-	if (!bConfigured && !GOutlineModeActiveCache && GOutlined.Num() == 0)
-	{
-		return;
-	}
-
-	// Refresh the gate before doing any outline work. A verdict flip must re-tint every body or
-	// pawns retain the previous outline-mode tint until their next unrelated reapply event.
-	const bool bWasActive = GOutlineModeActiveCache;
-	const bool bGate = OutlineModeActive(World);
-	if (bGate != GOutlineModeActiveCache)
-	{
-		GOutlineModeActiveCache = bGate;
-		ReapplyAll(World);
-	}
-
 	// Intro-lineup pawns are destroyed alive. Stock character/weapon-attachment teardown does not
 	// explicitly unregister their dynamically duplicated CustomDepth meshes, so an already leaked
 	// silhouette can remain in the scene after its actor disappears. Sweep only the exact UT outline
-	// signature and only when its owner is gone. This is a recovery scan, not normal frame work:
-	// run it at 1 Hz while the mode is active, plus once when the mode is disabled.
+	// signature and only when its owner is gone. TacCom can create these independently of Force Models,
+	// so this 1 Hz recovery scan must remain outside the feature-disabled fast path below.
 	if (GOutlineSweepWorld.Get() != World)
 	{
 		GOutlineSweepWorld = World;
@@ -709,8 +692,7 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	{
 		GNextOutlineSweepTime = 0.f;
 	}
-	const bool bSweepDue = (bWasActive && !bGate)
-		|| (bGate && bSlowTick && Now >= GNextOutlineSweepTime);
+	const bool bSweepDue = bSlowTick && Now >= GNextOutlineSweepTime;
 	if (bSweepDue)
 	{
 		GNextOutlineSweepTime = Now + 1.f;
@@ -732,6 +714,22 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 				DepthMesh->UnregisterComponent();
 			}
 		}
+	}
+
+	const FNCPlusForceModelsConfig& C = Get();
+	const bool bConfigured = C.bEnabled && C.bOutline;
+	if (!bConfigured && !GOutlineModeActiveCache && GOutlined.Num() == 0)
+	{
+		return;
+	}
+
+	// Refresh the gate before doing any Force Models outline work. A verdict flip must re-tint every
+	// body or pawns retain the previous outline-mode tint until their next unrelated reapply event.
+	const bool bGate = OutlineModeActive(World);
+	if (bGate != GOutlineModeActiveCache)
+	{
+		GOutlineModeActiveCache = bGate;
+		ReapplyAll(World);
 	}
 
 	// A disabled verdict has already been published to tint call sites above. Restore any state this
