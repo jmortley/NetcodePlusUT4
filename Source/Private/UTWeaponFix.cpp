@@ -469,11 +469,11 @@ float AUTWeaponFix::HiddenBeamBackOffset = 10.f;
 float AUTWeaponFix::HiddenBeamDownOffset = 35.f;
 
 static const TCHAR* WEAPON_SETTINGS_SECTION = TEXT("NetcodePlus.WeaponSettings");
-static const FName WEAPON_SKIN_CATALOG_ROOT(TEXT("/Game/Blueprints/UT+/UT+/WeaponSkinsPlus"));
+static const FName WEAPON_SKIN_CATALOG_ROOT(TEXT("/Game/NetcodePlusOptional"));
 
-// Versioned public selection manifest shared by the current 38-asset RC PAK
-// and the older 59-asset staged cook. These paths are unrestricted and carry
-// a real weapon-family tag; utility and cook-specific variants remain invalid.
+// Versioned public selection manifest for the weapon skins shipped in the
+// MutAnnouncers optional-content PAK. These paths are unrestricted and carry a
+// real weapon-family tag; utility and cook-specific variants remain invalid.
 // Future folder additions do not become network-valid automatically.
 // Two tiers:
 //   REQUIRED — all-or-nothing: the catalog only goes ready when EVERY entry
@@ -486,35 +486,20 @@ static const FName WEAPON_SKIN_CATALOG_ROOT(TEXT("/Game/Blueprints/UT+/UT+/Weapo
 // ever becomes network-valid.
 static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 {
-	TEXT("BlackDeath"),
-	TEXT("FlakDefault"),
 	TEXT("FlakPink"),
 	TEXT("FlakRedDeath"),
 	TEXT("FlakVoid"),
 	TEXT("InvisibleBio"),
-	TEXT("LinkBee"),
-	TEXT("LinkBeeElim"),
-	TEXT("LinkFreedom"),
-	TEXT("LinkMint"),
-	TEXT("Rocket99"),
-	TEXT("Rocket99Elim"),
-	TEXT("RocketBee"),
+	TEXT("InvisibleLinkElim"),
 	TEXT("RocketBeeElim"),
 	TEXT("RocketBurn"),
-	TEXT("RocketBurnElim"),
-	TEXT("RocketMahogany"),
 	TEXT("RocketMahoganyElim"),
 	TEXT("RocketSnowElim"),
-	TEXT("RocketTiger"),
 	TEXT("ShockBlackTiger"),
 	TEXT("ShockBlueBird"),
-	TEXT("ShockBlueBirdElim"),
-	TEXT("ShockFreedom"),
 	TEXT("SniperBlueBird"),
 	TEXT("SniperMahogany"),
-	TEXT("SniperPink"),
-	TEXT("SniperRedBird"),
-	TEXT("SniperSport")
+	TEXT("SniperPink")
 };
 
 static const TCHAR* const OPTIONAL_WEAPON_SKIN_ASSETS[] =
