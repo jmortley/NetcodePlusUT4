@@ -228,7 +228,7 @@ public:
 	 *  instead. Both sides are in this plugin so the value cannot drift — but if it
 	 *  ever becomes config/BP-driven it must be replicated (GameMode is server-only)
 	 *  or the HUD will silently disagree with the server. */
-	static constexpr float SuddenDeathGraceSeconds = 3.0f;
+	static constexpr float SuddenDeathGraceSeconds = 1.0f;
 
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	int32 LastRoundWinningTeamIndex;
