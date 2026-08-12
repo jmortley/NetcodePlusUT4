@@ -63,7 +63,7 @@ bool ANCPCandyLiftGuard::IsCandy(const AActor* Actor)
 
 void ANCPCandyLiftGuard::HardenPrim(UPrimitiveComponent* Prim)
 {
-	if (Prim == nullptr || !Prim->IsSimulatingPhysics())
+	if (Prim == nullptr)
 	{
 		return;
 	}
@@ -81,6 +81,10 @@ void ANCPCandyLiftGuard::HardenPrim(UPrimitiveComponent* Prim)
 
 void ANCPCandyLiftGuard::HardenCandy(AActor* Candy)
 {
+	if (Candy == nullptr)
+	{
+		return;
+	}
 	TInlineComponentArray<UPrimitiveComponent*> Prims(Candy);
 	for (UPrimitiveComponent* Prim : Prims)
 	{
@@ -90,11 +94,19 @@ void ANCPCandyLiftGuard::HardenCandy(AActor* Candy)
 
 void ANCPCandyLiftGuard::HardenClassTemplates(UClass* CandyClass)
 {
+	if (CandyClass == nullptr)
+	{
+		return;
+	}
 	// Fix the archetypes up the BP chain: SCS component templates plus the
 	// templates behind BeginPlay AddComponent nodes (the bouncing orb mesh
 	// lives there). Live physics state doesn't exist on templates, so the
 	// response/flag writes are plain data edits — every spawn after this is
 	// born hardened. Process-lifetime change, re-applied per map by BeginPlay.
+	// The Blueprint CDO also owns inherited/native default subobjects that are
+	// not necessarily represented by SCS or ComponentTemplates.
+	HardenCandy(Cast<AActor>(CandyClass->GetDefaultObject()));
+
 	for (UClass* C = CandyClass; C != nullptr; C = C->GetSuperClass())
 	{
 		UBlueprintGeneratedClass* BPClass = Cast<UBlueprintGeneratedClass>(C);
@@ -114,6 +126,59 @@ void ANCPCandyLiftGuard::HardenClassTemplates(UClass* CandyClass)
 				{
 					HardenPrim(Cast<UPrimitiveComponent>(Node->ComponentTemplate));
 				}
+			}
+		}
+	}
+}
+
+void ANCPCandyLiftGuard::MakeLiftIgnoreCandy(AUTLift* Lift, AActor* Candy)
+{
+	if (Lift != nullptr && Candy != nullptr)
+	{
+		if (UPrimitiveComponent* LiftComp = Lift->GetEncroachComponent())
+		{
+			// Do not assume every map's lift uses ECC_WorldDynamic. This is a
+			// directional mover ignore, so the candy keeps its floor collision.
+			LiftComp->IgnoreActorWhenMoving(Candy, true);
+		}
+	}
+}
+
+void ANCPCandyLiftGuard::OnActorSpawned(AActor* Actor)
+{
+	if (Role != ROLE_Authority || Actor == nullptr)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
+
+	if (IsCandy(Actor))
+	{
+		// Broadcast is synchronous before SpawnActor returns to PreventDeath.
+		// Deferred BP construction may not have created every component yet,
+		// which is why class templates are also hardened; the directional lift
+		// ignore below needs only the actor pointer and closes the race now.
+		HardenCandy(Actor);
+		for (TActorIterator<AUTLift> It(World); It; ++It)
+		{
+			MakeLiftIgnoreCandy(*It, Actor);
+		}
+		UE_LOG(LogNCPCandyGuard, Verbose,
+			TEXT("[CandyGuard] hardened spawned candy %s"), *Actor->GetName());
+	}
+	else if (AUTLift* Lift = Cast<AUTLift>(Actor))
+	{
+		// Streaming/dynamically spawned lifts must ignore existing candies too.
+		for (TActorIterator<AUTPickupHealth> It(World); It; ++It)
+		{
+			if (IsCandy(*It))
+			{
+				MakeLiftIgnoreCandy(Lift, *It);
 			}
 		}
 	}
@@ -139,7 +204,27 @@ void ANCPCandyLiftGuard::BeginPlay()
 		{
 			UE_LOG(LogNCPCandyGuard, Log, TEXT("[CandyGuard] CandyPlaceholder class not found — relying on instance hardening"));
 		}
+
+		if (UWorld* World = GetWorld())
+		{
+			ActorSpawnedDelegateHandle = World->AddOnActorSpawnedHandler(
+				FOnActorSpawned::FDelegate::CreateUObject(
+					this, &ANCPCandyLiftGuard::OnActorSpawned));
+		}
 	}
+}
+
+void ANCPCandyLiftGuard::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (ActorSpawnedDelegateHandle.IsValid())
+		{
+			World->RemoveOnActorSpawnedHandler(ActorSpawnedDelegateHandle);
+			ActorSpawnedDelegateHandle.Reset();
+		}
+	}
+	Super::EndPlay(EndPlayReason);
 }
 
 void ANCPCandyLiftGuard::RelocateCandy(AActor* Candy, const FVector& Target)
@@ -315,7 +400,16 @@ void ANCPCandyLiftGuard::Sweep()
 		if (bFirstSight)
 		{
 			HardenedCandies.Add(Candy);
+			// Also covers deferred Blueprint construction: OnActorSpawned may run
+			// before every BP component exists, while first sight happens afterward.
 			HardenCandy(Candy);
+		}
+
+		// Catch-all for pre-existing actors, streaming lifts, or a missed spawn
+		// notification. Reapplying an existing move-ignore relationship is cheap.
+		for (const FLiftInfo& Info : Lifts)
+		{
+			MakeLiftIgnoreCandy(Info.Lift, Candy);
 		}
 
 		const FVector Loc = Candy->GetActorLocation();

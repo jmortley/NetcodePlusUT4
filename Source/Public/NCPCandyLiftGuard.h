@@ -22,16 +22,19 @@
 //
 // THE FIX — never command the lift; make the jam impossible and keep the orb
 // grabbable. Three layers:
-//   1. HARDEN: every simulating candy body ignores ECC_WorldDynamic — a lift
-//      sweep can no longer block on it, so a stuck lift is structurally
-//      impossible (worst case the platform passes through the orb). The same
+//   1. HARDEN: every candy primitive ignores ECC_WorldDynamic, and each lift's
+//      encroach component directionally ignores every candy while moving — a
+//      lift sweep can no longer block on it regardless of the lift's object
+//      channel (worst case the platform passes through the orb). The same
 //      pass makes the orb non-shootable per Jeremy 2026-08-06: ignore
 //      COLLISION_PROJECTILE + both weapon trace channels, and ignore radial
 //      impulse/force so splash can't shove it either. Applied at TWO levels:
 //      the CandyPlaceholder class archetypes are fixed once at match start
 //      (every later orb is born hardened — no first-sweep window in which a
-//      moving lift could still wedge on a fresh corpse-drop), and each live
-//      instance is re-hardened on first sight as the catch-all.
+//      moving lift could still wedge on a fresh corpse-drop), and a synchronous
+//      world-spawn callback hardens each live instance before SpawnActor returns.
+//      The periodic sweep re-applies lift relationships and performs one
+//      post-construction instance hardening pass as the catch-all.
 //   2. EVICT (4 Hz sweep): a candy inside a lift's swept path (platform bounds
 //      replayed across GetStops(), plus margins) — including the died-mid-lift
 //      spawn case on first sight — teleports to its last known-good resting
@@ -61,6 +64,7 @@ class NETCODEPLUS_API ANCPCandyLiftGuard : public AInfo
 
 public:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 
 	/** Find-or-spawn the world's guard. Server only; cheap to call repeatedly. */
@@ -82,17 +86,26 @@ private:
 	 *  CheckRelevance whitelists use (AUTPickupHealth subclass named *Candy*). */
 	static bool IsCandy(const AActor* Actor);
 
-	/** Collision hardening for one simulating body: lift sweeps can't block on
-	 *  it (no jam), weapons can't hit it, splash can't shove it. Safe on both
-	 *  live components and class-default templates. */
+	/** Collision hardening for one primitive: normal lifts can't block on it,
+	 *  weapons can't hit it, splash can't shove it. Deliberately does not require
+	 *  a live physics body, so it works on class templates and non-simulating
+	 *  collision primitives as well as live simulated bodies. */
 	static void HardenPrim(class UPrimitiveComponent* Prim);
 
-	/** Instance-level hardening: every simulating component of a live candy. */
+	/** Instance-level hardening: every primitive component of a candy or CDO. */
 	static void HardenCandy(AActor* Candy);
 
 	/** Archetype-level hardening: fix the candy class's SCS + AddComponent
 	 *  templates so every future spawn is born hardened. */
 	static void HardenClassTemplates(UClass* CandyClass);
+
+	/** Directional mover relationship: the lift ignores this candy during its
+	 *  own swept movement without changing the candy's floor collision. */
+	static void MakeLiftIgnoreCandy(AUTLift* Lift, AActor* Candy);
+
+	/** Synchronous post-spawn hook. Candies are hardened before SpawnActor
+	 *  returns; dynamically spawned lifts immediately ignore existing candies. */
+	void OnActorSpawned(AActor* Actor);
 
 	/** Teleport the candy (actor + every simulating component) to Target with
 	 *  velocities zeroed, and flush dormancy so the move replicates. */
@@ -114,6 +127,8 @@ private:
 
 	/** Last sweep's platform-component location per lift, for movement detection. */
 	TMap<TWeakObjectPtr<UPrimitiveComponent>, FVector> LiftCompLastPos;
+
+	FDelegateHandle ActorSpawnedDelegateHandle;
 
 	float SweepAccumulator = 0.f;
 };
