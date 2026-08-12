@@ -1249,6 +1249,28 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadBool(TEXT("SpawnWeightedRandom"),      bSpawnWeightedRandom);
 	ReadFloat(TEXT("SpawnRandomBase"),         SpawnRandomBase);
 	ReadFloat(TEXT("SpawnRandomSpread"),       SpawnRandomSpread);
+	const float ConfiguredSpawnRandomBase = SpawnRandomBase;
+	const float ConfiguredSpawnRandomSpread = SpawnRandomSpread;
+	SpawnRandomBase = FMath::IsFinite(SpawnRandomBase)
+		? FMath::Max(0.f, SpawnRandomBase)
+		: 20.f;
+	SpawnRandomSpread = FMath::IsFinite(SpawnRandomSpread)
+		? FMath::Max(0.f, SpawnRandomSpread)
+		: 1.f;
+	if (bSpawnWeightedRandom && SpawnRandomSpread <= 0.f)
+	{
+		// A zero/negative spread either removes score weighting or reverses it.
+		// Weighted mode must retain a positive score-to-ceiling relationship.
+		SpawnRandomSpread = 1.f;
+	}
+	if (SpawnRandomBase != ConfiguredSpawnRandomBase
+		|| SpawnRandomSpread != ConfiguredSpawnRandomSpread)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF spawn config corrected: SpawnRandomBase %.2f -> %.2f, SpawnRandomSpread %.2f -> %.2f"),
+			ConfiguredSpawnRandomBase, SpawnRandomBase,
+			ConfiguredSpawnRandomSpread, SpawnRandomSpread);
+	}
 	ReadFloat(TEXT("SpawnEnemyHardRadius"),    SpawnEnemyHardRadius);
 	ReadFloat(TEXT("SpawnEnemyBelowZ"),        SpawnEnemyBelowZ);
 	ReadFloat(TEXT("SpawnTieBandWidth"),       SpawnTieBandWidth);
