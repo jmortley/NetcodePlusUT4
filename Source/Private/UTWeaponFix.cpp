@@ -18,12 +18,14 @@
 #include "UTProj_FlakShard.h"
 #include "UTProj_FlakShell.h"
 #include "UTPlusProj_StingerShard.h"
+#include "UTInventory.h"    // TInventoryIterator (FindFiringWeaponForProjectile)
 #include "UTDamageType.h"   // FUTRadialDamageEvent (grace-buffer direct-hit damage)
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTDualWeapon.h"   // ApplyWeaponHideState: dual-enforcer LeftMesh
 #include "UTWeaponSkin.h"
 #include "AssetRegistryModule.h"
 #include "Modules/ModuleManager.h"
+#include "Materials/Material.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/ConfigCacheIni.h"
 #include "HAL/PlatformTime.h"
@@ -510,6 +512,7 @@ static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 
 static const TCHAR* const OPTIONAL_WEAPON_SKIN_ASSETS[] =
 {
+	TEXT("InvisibleIGRifle"),
 	TEXT("PinkLG")
 };
 
@@ -908,11 +911,8 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     MouseDebounceWindow = 0.030f;  // 30ms — mouse-bounce / scroll-wheel coalesce
     bBufferedClickPending[0] = false;
     bBufferedClickPending[1] = false;
-    OriginalFPSMaterial = nullptr;
-    OriginalFPSMaterialSecondary = nullptr;
-    AppliedFPSMaterial = nullptr;
-    AppliedFPSMaterialInstance = nullptr;
-    bCapturedOriginalFPSMaterial = false;
+    AppliedFPSMaterialSlotMask = 0u;
+    bCapturedOriginalFPSMaterials = false;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -4176,6 +4176,14 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 		NewProjectile->ShooterRotation = UTOwner->GetActorRotation();
 	}
 
+	// Record what this weapon fires, on whichever side we are. The claim route and the hitsound
+	// prediction both need to get from a projectile back to the weapon that launched it, and
+	// GetWeapon() cannot answer that once the shooter has switched weapons mid-flight.
+	if (NewProjectile != nullptr)
+	{
+		NCPFiredProjClasses.AddUnique(NewProjectile->GetClass());
+	}
+
 	// ----------------------------------------
 	// 6) SERVER: Fast-forward authoritative projectile
 	// ----------------------------------------
@@ -5054,20 +5062,21 @@ uint32 AUTWeaponFix::GetWeaponSkinTargetSlotMask(FName WeaponSkinCustomizationTa
 	//   Flak — FlakVoid 1P M_Flak_Skin_Void01_P / 3P M_Flak_Skin_Void01 replace
 	//     M_Flak_Gun_Inst / M_Flak_Gun_3P_Inst, and Flak_Cannon_1p AND _3p each carry
 	//     that body material on slot 0 AND slot 1 -> {0,1} in both views.
-	//   Lightning Gun — ASYMMETRIC. PinkLG 1P MAT_INS_LG_Pink_E0_1p uses the PartTWO
+	//   Lightning Gun — the one-material FALLBACK is asymmetric. PinkLG 1P
+	//     MAT_INS_LG_Pink_E0_1p uses the PartTWO
 	//     textures (T_LightingGunTwo_*), which Lightning_Gun_1p carries on slot 0.
 	//     PinkLG 3P MAT_INS_LG_Pink_E1_3p uses the PartONE textures
 	//     (T_LightingGun_one_*), which Lightning_Gun_3p carries on slot 1. The authored
 	//     E0/E1 names are the element indices -> 1P {0}, 3P {1}. Writing the other slot
-	//     would paint that section with the wrong part's textures.
+	//     would paint that section with the wrong part's textures. The resolved-skin
+	//     layer expands exact PinkLG to {0,1} and supplies the complementary material.
 	//   Everything else keeps stock behaviour: slot 0 only.
-	// Slots outside the mask are never captured or written, so ammo counters, decals,
-	// glass, the LG's other part, and SetupSpecialMaterials()' Shock Rifle screen all
-	// keep their originals. Slot NAMES on these meshes are unreliable (scrambled /
-	// generic), which is why these are explicit verified indices.
+	// Normal skins do not write slots outside this base mask, so ammo counters, decals,
+	// glass, and SetupSpecialMaterials()' Shock Rifle screen keep their originals. Slot
+	// NAMES on these meshes are unreliable (scrambled/generic), which is why these are
+	// explicit verified indices.
 	static const FName NAME_FlakCannonSkins(TEXT("FlakCannon_Skins"));
-	// Both spellings accepted while the LG weapon/skin tags are being harmonised
-	// (UTNPLightningGun CDO reads LightningRifle_Skins; PinkLG reads LG_Skins).
+	// Accept both legacy/current spellings while existing cooked content is harmonised.
 	static const FName NAME_LGSkins(TEXT("LG_Skins"));
 	static const FName NAME_LightningRifleSkins(TEXT("LightningRifle_Skins"));
 
@@ -5081,6 +5090,100 @@ uint32 AUTWeaponFix::GetWeaponSkinTargetSlotMask(FName WeaponSkinCustomizationTa
 		return bFirstPersonMesh ? 0x1u : 0x2u;
 	}
 	return 0x1u;
+}
+
+static bool UsesAuthenticInvisibilityMaterial(const UMaterialInterface* Material)
+{
+	static const FString InvisibilityBaseMaterialPath(
+		TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/M_Invis_Skin.M_Invis_Skin"));
+	const UMaterial* const BaseMaterial = (Material != nullptr) ? Material->GetMaterial() : nullptr;
+	return BaseMaterial != nullptr && BaseMaterial->GetPathName() == InvisibilityBaseMaterialPath;
+}
+
+static bool IsPinkLGWeaponSkin(const UUTWeaponSkin* Skin)
+{
+	static const FString PinkLGPath(TEXT("/Game/NetcodePlusOptional/PinkLG.PinkLG"));
+	return Skin != nullptr && Skin->GetPathName() == PinkLGPath;
+}
+
+static uint32 MakeLowestMaterialSlotMask(int32 MaterialSlotCount)
+{
+	const int32 ClampedSlotCount = FMath::Clamp(MaterialSlotCount, 0,
+		AUTWeaponFix::MaxWeaponSkinTargetSlots);
+	return (ClampedSlotCount == AUTWeaponFix::MaxWeaponSkinTargetSlots)
+		? MAX_uint32
+		: ((ClampedSlotCount > 0) ? ((1u << ClampedSlotCount) - 1u) : 0u);
+}
+
+uint32 AUTWeaponFix::GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Skin,
+	FName WeaponSkinCustomizationTag, bool bFirstPersonMesh, int32 MaterialSlotCount)
+{
+	const UMaterialInterface* const ViewMaterial = (Skin == nullptr)
+		? nullptr
+		: (bFirstPersonMesh ? Skin->FPSMaterial : Skin->Material);
+	if (UsesAuthenticInvisibilityMaterial(ViewMaterial) && MaterialSlotCount > 0)
+	{
+		return MakeLowestMaterialSlotMask(MaterialSlotCount);
+	}
+	if (IsPinkLGWeaponSkin(Skin))
+	{
+		return MakeLowestMaterialSlotMask(FMath::Min(MaterialSlotCount, 2));
+	}
+
+	return GetWeaponSkinTargetSlotMask(WeaponSkinCustomizationTag, bFirstPersonMesh);
+}
+
+UMaterialInterface* AUTWeaponFix::GetResolvedWeaponSkinMaterialForSlot(
+	const UUTWeaponSkin* Skin, bool bFirstPersonMesh, int32 MaterialSlot)
+{
+	UMaterialInterface* const ViewMaterial = (Skin == nullptr)
+		? nullptr
+		: (bFirstPersonMesh ? Skin->FPSMaterial : Skin->Material);
+	if (!IsPinkLGWeaponSkin(Skin) || UsesAuthenticInvisibilityMaterial(ViewMaterial))
+	{
+		return ViewMaterial;
+	}
+
+	// PinkLG's data asset supplies E0_1p and E1_3p. MutAnnouncers holds the cook
+	// references for the opposite elements; load them only after mounted selection.
+	if (bFirstPersonMesh && MaterialSlot == 1)
+	{
+		static const TCHAR* const MaterialPath =
+			TEXT("/Game/Blueprints/UT+/UT+/UTPlusNew/MAT_INS_LG_Pink_E1_1p.MAT_INS_LG_Pink_E1_1p");
+		UMaterialInstance* const Material =
+			LoadObject<UMaterialInstance>(nullptr, MaterialPath);
+		if (Material == nullptr)
+		{
+			static bool bLoggedMissingFirstPersonMaterial = false;
+			if (!bLoggedMissingFirstPersonMaterial)
+			{
+				bLoggedMissingFirstPersonMaterial = true;
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("PinkLG missing E1_1p material: %s"), MaterialPath);
+			}
+		}
+		return Material;
+	}
+	if (!bFirstPersonMesh && MaterialSlot == 0)
+	{
+		static const TCHAR* const MaterialPath =
+			TEXT("/Game/Blueprints/UT+/UT+/UTPlusNew/MAT_INS_LG_Pink_E0_3p.MAT_INS_LG_Pink_E0_3p");
+		UMaterialInstance* const Material =
+			LoadObject<UMaterialInstance>(nullptr, MaterialPath);
+		if (Material == nullptr)
+		{
+			static bool bLoggedMissingThirdPersonMaterial = false;
+			if (!bLoggedMissingThirdPersonMaterial)
+			{
+				bLoggedMissingThirdPersonMaterial = true;
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("PinkLG missing E0_3p material: %s"), MaterialPath);
+			}
+		}
+		return Material;
+	}
+
+	return ViewMaterial;
 }
 
 void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
@@ -5097,86 +5200,108 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 		return;
 	}
 
-	// Slots this weapon family renders its 1P skin on: slot 0 for normal weapons and
-	// the Lightning Gun, slots 0+1 for Flak. Slots outside the mask (counters, decals,
-	// glass, the Shock screen) stay owned by the mesh / SetupSpecialMaterials() and are
-	// never captured or touched here.
-	const uint32 TargetSlotMask = GetWeaponSkinTargetSlotMask(WeaponSkinCustomizationTag, true);
+	const int32 MaterialSlotCount = FMath::Min(Mesh->GetNumMaterials(),
+		MaxWeaponSkinTargetSlots);
+	const uint32 TargetSlotMask = GetResolvedWeaponSkinTargetSlotMask(Skin,
+		WeaponSkinCustomizationTag, /*bFirstPersonMesh=*/true, MaterialSlotCount);
 
-	// Capture the untouched originals once, per targeted slot, so Default restores the
-	// exact instance the slot shipped with. Stock SetSkin() captures every slot; if it
-	// has not run yet, seed up to the highest slot we are going to patch.
-	const int32 SeedSlotCount = FMath::Min(
-		((TargetSlotMask & 0x2u) != 0u) ? 2 : 1, Mesh->GetNumMaterials());
-	while (SavedMeshMaterials.Num() < SeedSlotCount)
+	// Capture every original once. Ordinary skins still write only their family mask;
+	// the full cache is needed so an invisibility skin can cover every mesh section and
+	// later restore counters, decals, glass, screens, and multipart weapon sections.
+	while (SavedMeshMaterials.Num() < Mesh->GetNumMaterials())
 	{
 		SavedMeshMaterials.Add(Mesh->GetMaterial(SavedMeshMaterials.Num()));
 	}
-	if (!bCapturedOriginalFPSMaterial)
+	if (!bCapturedOriginalFPSMaterials ||
+		OriginalFPSMaterials.Num() != MaterialSlotCount)
 	{
-		OriginalFPSMaterial =
-			((TargetSlotMask & 0x1u) != 0u && SavedMeshMaterials.IsValidIndex(0))
-			? SavedMeshMaterials[0]
-			: nullptr;
-		OriginalFPSMaterialSecondary =
-			((TargetSlotMask & 0x2u) != 0u && SavedMeshMaterials.IsValidIndex(1))
-			? SavedMeshMaterials[1]
-			: nullptr;
-		if (OriginalFPSMaterial != nullptr && Cast<UMaterialInstanceDynamic>(OriginalFPSMaterial) == nullptr)
+		OriginalFPSMaterials.Empty(MaterialSlotCount);
+		for (int32 Slot = 0; Slot < MaterialSlotCount; ++Slot)
 		{
-			if (UMaterialInstanceDynamic* DefaultMID =
-				UMaterialInstanceDynamic::Create(OriginalFPSMaterial, Mesh))
+			UMaterialInterface* Original = SavedMeshMaterials.IsValidIndex(Slot)
+				? SavedMeshMaterials[Slot]
+				: Mesh->GetMaterial(Slot);
+			if (Original != nullptr && Cast<UMaterialInstanceDynamic>(Original) == nullptr)
 			{
-				OriginalFPSMaterial = DefaultMID;
+				if (UMaterialInstanceDynamic* DefaultMID =
+					UMaterialInstanceDynamic::Create(Original, Mesh))
+				{
+					Original = DefaultMID;
+				}
 			}
+			OriginalFPSMaterials.Add(Original);
 		}
-		if (OriginalFPSMaterialSecondary != nullptr &&
-			Cast<UMaterialInstanceDynamic>(OriginalFPSMaterialSecondary) == nullptr)
-		{
-			if (UMaterialInstanceDynamic* DefaultMID =
-				UMaterialInstanceDynamic::Create(OriginalFPSMaterialSecondary, Mesh))
-			{
-				OriginalFPSMaterialSecondary = DefaultMID;
-			}
-		}
-		bCapturedOriginalFPSMaterial = true;
+		AppliedFPSMaterialInstances.Empty();
+		AppliedFPSMaterialParents.Empty();
+		AppliedFPSMaterialSlotMask = 0u;
+		bCapturedOriginalFPSMaterials = true;
 	}
 
-	const bool bUseSelectedMaterial = Skin != nullptr && Skin->FPSMaterial != nullptr;
-	UMaterialInterface* DesiredParent =
-		bUseSelectedMaterial
-		? Skin->FPSMaterial
-		: OriginalFPSMaterial;
-	if (DesiredParent != AppliedFPSMaterial ||
-		bUseSelectedMaterial != (AppliedFPSMaterialInstance != nullptr))
+	TArray<UMaterialInterface*> DesiredParents;
+	DesiredParents.AddZeroed(MaterialSlotCount);
+	if (Skin != nullptr)
 	{
-		AppliedFPSMaterial = DesiredParent;
-		AppliedFPSMaterialInstance =
-			(bUseSelectedMaterial && DesiredParent != nullptr)
-			? UMaterialInstanceDynamic::Create(DesiredParent, Mesh)
-			: nullptr;
+		for (int32 Slot = 0; Slot < MaterialSlotCount; ++Slot)
+		{
+			if (((TargetSlotMask >> Slot) & 0x1u) != 0u)
+			{
+				DesiredParents[Slot] = GetResolvedWeaponSkinMaterialForSlot(
+					Skin, /*bFirstPersonMesh=*/true, Slot);
+			}
+		}
 	}
+	const uint32 PreviousSlotMask = AppliedFPSMaterialSlotMask;
+	bool bMaterialParentsChanged =
+		AppliedFPSMaterialParents.Num() != DesiredParents.Num();
+	for (int32 Slot = 0; !bMaterialParentsChanged && Slot < MaterialSlotCount; ++Slot)
+	{
+		bMaterialParentsChanged =
+			AppliedFPSMaterialParents[Slot] != DesiredParents[Slot];
+	}
+	if (bMaterialParentsChanged || TargetSlotMask != AppliedFPSMaterialSlotMask ||
+		AppliedFPSMaterialInstances.Num() != MaterialSlotCount)
+	{
+		AppliedFPSMaterialParents = DesiredParents;
+		AppliedFPSMaterialInstances.Empty(MaterialSlotCount);
+		AppliedFPSMaterialInstances.AddZeroed(MaterialSlotCount);
+		for (int32 Slot = 0; Slot < MaterialSlotCount; ++Slot)
+		{
+			if (((TargetSlotMask >> Slot) & 0x1u) != 0u &&
+				DesiredParents[Slot] != nullptr)
+			{
+				AppliedFPSMaterialInstances[Slot] =
+					UMaterialInstanceDynamic::Create(DesiredParents[Slot], Mesh);
+			}
+		}
+	}
+	AppliedFPSMaterialSlotMask = TargetSlotMask;
 
-	// One actor-local MID (AppliedFPSMaterialInstance) is reused across every targeted
-	// slot of THIS mesh; Default restores each slot's captured original. The
-	// SavedMeshMaterials patch makes a later body-override clear restore this choice.
-	UMaterialInstanceDynamic* const DefaultMIDBySlot[MaxWeaponSkinTargetSlots] =
-		{ Cast<UMaterialInstanceDynamic>(OriginalFPSMaterial),
-		  Cast<UMaterialInstanceDynamic>(OriginalFPSMaterialSecondary) };
+	// Restore every slot owned by the previous skin but not the new one. This is what
+	// makes invisibility -> PinkLG/ordinary/Default transitions lossless.
+	const uint32 SlotsToUpdate = PreviousSlotMask | TargetSlotMask;
 	const bool bBodyOverrideActive = (UTOwner != nullptr && UTOwner->GetSkin() != nullptr);
 	static const FName NAME_Scale(TEXT("Scale"));
-	for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
+	for (int32 Slot = 0; Slot < MaterialSlotCount; ++Slot)
 	{
-		if (((TargetSlotMask >> Slot) & 0x1u) == 0u || Slot >= Mesh->GetNumMaterials())
+		if (((SlotsToUpdate >> Slot) & 0x1u) == 0u)
 		{
 			continue;
 		}
-		UMaterialInstanceDynamic* const DesiredSlotMID = AppliedFPSMaterialInstance != nullptr
-			? AppliedFPSMaterialInstance
-			: DefaultMIDBySlot[Slot];
-		UMaterialInterface* const DesiredSlotMaterial = DesiredSlotMID != nullptr
-			? Cast<UMaterialInterface>(DesiredSlotMID)
-			: ((Slot == 0) ? OriginalFPSMaterial : OriginalFPSMaterialSecondary);
+		const bool bTargetedByNewSkin = ((TargetSlotMask >> Slot) & 0x1u) != 0u;
+		UMaterialInterface* const DesiredSlotParent = bTargetedByNewSkin
+			? DesiredParents[Slot]
+			: nullptr;
+		UMaterialInstanceDynamic* const DesiredSlotMID =
+			(DesiredSlotParent != nullptr &&
+			 AppliedFPSMaterialInstances.IsValidIndex(Slot))
+			? AppliedFPSMaterialInstances[Slot]
+			: Cast<UMaterialInstanceDynamic>(OriginalFPSMaterials[Slot]);
+		UMaterialInterface* const DesiredSlotMaterial =
+			(DesiredSlotParent != nullptr)
+			? ((DesiredSlotMID != nullptr)
+				? Cast<UMaterialInterface>(DesiredSlotMID)
+				: DesiredSlotParent)
+			: OriginalFPSMaterials[Slot];
 		if (SavedMeshMaterials.IsValidIndex(Slot))
 		{
 			SavedMeshMaterials[Slot] = DesiredSlotMaterial;
@@ -5197,6 +5322,14 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 		{
 			MeshMIDs[Slot] = DesiredSlotMID;
 		}
+	}
+	// A screen/counter slot may have runtime state created by SetupSpecialMaterials().
+	// Rebuild that state after an all-slot invisibility skin gives ownership back to an
+	// ordinary family mask. Do not call this while applying invisibility: its purpose is
+	// to cover those special sections too.
+	if (!bBodyOverrideActive && (PreviousSlotMask & ~TargetSlotMask) != 0u)
+	{
+		SetupSpecialMaterials();
 	}
 	if (!bBodyOverrideActive && SkinTiming())
 	{
@@ -5602,66 +5735,83 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 {
 	const bool bLogSkinTiming = SkinTiming();
 	const double SetSkinStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
-	const uint32 TargetSlotMask = (Mesh != nullptr)
-		? GetWeaponSkinTargetSlotMask(WeaponSkinCustomizationTag, true)
+	const uint32 TargetSlotMask = bCapturedOriginalFPSMaterials
+		? AppliedFPSMaterialSlotMask
 		: 0u;
 	UMaterialInterface* SlotZeroBefore = (Mesh != nullptr && Mesh->GetNumMaterials() > 0)
 		? Mesh->GetMaterial(0)
 		: nullptr;
 
-	// The selected skin's one actor-local MID is reused across every targeted slot;
-	// Default restores each slot's captured original. Patch SavedMeshMaterials first
-	// so stock's restore path below reproduces this choice on every affected slot.
-	UMaterialInstanceDynamic* const DefaultMIDBySlot[MaxWeaponSkinTargetSlots] =
-		{ Cast<UMaterialInstanceDynamic>(OriginalFPSMaterial),
-		  Cast<UMaterialInstanceDynamic>(OriginalFPSMaterialSecondary) };
-	if (bCapturedOriginalFPSMaterial)
+	// Patch stock's restore array first so clearing a character-body override brings
+	// back the configured weapon skin, including every slot of invisibility skins.
+	if (bCapturedOriginalFPSMaterials)
 	{
-		for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
+		for (int32 Slot = 0; Slot < OriginalFPSMaterials.Num(); ++Slot)
 		{
 			if (((TargetSlotMask >> Slot) & 0x1u) != 0u && SavedMeshMaterials.IsValidIndex(Slot))
 			{
-				SavedMeshMaterials[Slot] = (AppliedFPSMaterialInstance != nullptr)
-					? Cast<UMaterialInterface>(AppliedFPSMaterialInstance)
-					: ((DefaultMIDBySlot[Slot] != nullptr)
-						? Cast<UMaterialInterface>(DefaultMIDBySlot[Slot])
-						: ((Slot == 0) ? OriginalFPSMaterial : OriginalFPSMaterialSecondary));
+				UMaterialInstanceDynamic* const SelectedMID =
+					AppliedFPSMaterialInstances.IsValidIndex(Slot)
+					? AppliedFPSMaterialInstances[Slot]
+					: nullptr;
+				UMaterialInterface* const SelectedParent =
+					AppliedFPSMaterialParents.IsValidIndex(Slot)
+					? AppliedFPSMaterialParents[Slot]
+					: nullptr;
+				SavedMeshMaterials[Slot] = (SelectedParent != nullptr)
+					? ((SelectedMID != nullptr)
+						? Cast<UMaterialInterface>(SelectedMID)
+						: SelectedParent)
+					: OriginalFPSMaterials[Slot];
 			}
 		}
 	}
 
 	Super::SetSkin(NewSkin);
 
-	bool bReusedSlotZero = false;
-	if (NewSkin == nullptr && bCapturedOriginalFPSMaterial && Mesh != nullptr)
+	bool bReassertedWeaponSkin = false;
+	if (NewSkin == nullptr && bCapturedOriginalFPSMaterials && Mesh != nullptr)
 	{
 		// Stock's MeshMIDs rebuild should already preserve existing MIDs, but reassert
 		// the exact actor-local selected/default instance for every targeted slot.
 		static const FName NAME_Scale(TEXT("Scale"));
-		for (int32 Slot = 0; Slot < MaxWeaponSkinTargetSlots; ++Slot)
+		const int32 MaterialSlotCount = FMath::Min(OriginalFPSMaterials.Num(),
+			Mesh->GetNumMaterials());
+		for (int32 Slot = 0; Slot < MaterialSlotCount; ++Slot)
 		{
-			if (((TargetSlotMask >> Slot) & 0x1u) == 0u || Slot >= Mesh->GetNumMaterials())
+			if (((TargetSlotMask >> Slot) & 0x1u) == 0u)
 			{
 				continue;
 			}
-			UMaterialInstanceDynamic* const DesiredSlotMID = AppliedFPSMaterialInstance != nullptr
-				? AppliedFPSMaterialInstance
-				: DefaultMIDBySlot[Slot];
-			if (DesiredSlotMID == nullptr)
-			{
-				continue;
-			}
-			Mesh->SetMaterial(Slot, DesiredSlotMID);
+			UMaterialInstanceDynamic* const SelectedMID =
+				AppliedFPSMaterialInstances.IsValidIndex(Slot)
+				? AppliedFPSMaterialInstances[Slot]
+				: nullptr;
+			UMaterialInterface* const SelectedParent =
+				AppliedFPSMaterialParents.IsValidIndex(Slot)
+				? AppliedFPSMaterialParents[Slot]
+				: nullptr;
+			UMaterialInterface* const DesiredSlotMaterial = (SelectedParent != nullptr)
+				? ((SelectedMID != nullptr)
+					? Cast<UMaterialInterface>(SelectedMID)
+					: SelectedParent)
+				: OriginalFPSMaterials[Slot];
+			UMaterialInstanceDynamic* const DesiredSlotMID =
+				Cast<UMaterialInstanceDynamic>(DesiredSlotMaterial);
+			Mesh->SetMaterial(Slot, DesiredSlotMaterial);
 			if (SavedMeshMaterials.IsValidIndex(Slot))
 			{
-				SavedMeshMaterials[Slot] = DesiredSlotMID;
+				SavedMeshMaterials[Slot] = DesiredSlotMaterial;
 			}
-			DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
-			if (MeshMIDs.IsValidIndex(Slot))
+			if (DesiredSlotMID != nullptr)
 			{
-				MeshMIDs[Slot] = DesiredSlotMID;
+				DesiredSlotMID->SetScalarParameterValue(NAME_Scale, WeaponRenderScale);
+				if (MeshMIDs.IsValidIndex(Slot))
+				{
+					MeshMIDs[Slot] = DesiredSlotMID;
+				}
 			}
-			bReusedSlotZero = true;
+			bReassertedWeaponSkin = true;
 		}
 	}
 
@@ -5675,7 +5825,7 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 			*GetName(), NewSkin != nullptr ? 1 : 0,
 			Mesh != nullptr ? Mesh->GetNumMaterials() : 0, TargetSlotMask,
 			SlotZeroBefore != nullptr && SlotZeroBefore == SlotZeroAfter ? 1 : 0,
-			bReusedSlotZero ? 1 : 0,
+			bReassertedWeaponSkin ? 1 : 0,
 			(FPlatformTime::Seconds() - SetSkinStartTime) * 1000.0);
 	}
 }
@@ -6000,7 +6150,8 @@ bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum,
 // PROJECTILE REWIND LAG COMPENSATION
 // =========================================================================
 
-void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum)
+void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum,
+	AUTProjectile* SourceProj)
 {
 	// During replay playback, skip all rewind/prediction logic
 	UWorld* W = GetWorld();
@@ -6028,8 +6179,18 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 			AUTGameState* HitsoundGS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
 			const bool bFriendlyTarget = HitsoundGS && HitsoundGS->OnSameTeam(UTOwner, HitTarget);
 
+			// Prefer the reporting projectile's OWN damage. `this` is the weapon the
+			// shooter is holding right now, which is not necessarily the one that fired:
+			// ProjClass[FireModeNum] on a swapped-to weapon estimates a completely
+			// different projectile (rocket in flight + switch to flak => flak shard's
+			// damage). The instance also carries Blueprint-authored overrides, which the
+			// C++ CDO of a stock class does not.
 			int32 EstDamage = 0;
-			if (ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum])
+			if (SourceProj != nullptr)
+			{
+				EstDamage = SourceProj->DamageParams.BaseDamage;
+			}
+			else if (ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum])
 			{
 				if (AUTProjectile* DefProj = ProjClass[FireModeNum]->GetDefaultObject<AUTProjectile>())
 				{
@@ -6479,6 +6640,31 @@ void AUTWeaponFix::ServerUpdateFiringStates_Implementation(uint8 FireSettings)
 // =========================================================================
 // CLIENT-SIDE HITSOUND PREDICTION HELPER
 // =========================================================================
+
+AUTWeaponFix* AUTWeaponFix::FindFiringWeaponForProjectile(AUTCharacter* OwnerChar, AUTProjectile* Proj)
+{
+	if (OwnerChar == nullptr || Proj == nullptr)
+	{
+		return nullptr;
+	}
+
+	const TSubclassOf<AUTProjectile> ProjectileClass = Proj->GetClass();
+	for (TInventoryIterator<AUTWeapon> It(OwnerChar); It; ++It)
+	{
+		// The inventory chain can hand back a stale entry while it is mid-mutation
+		// (see NCPlusCTFScoreboard.cpp), so null-check every step rather than the cast alone.
+		AUTWeaponFix* const Candidate = Cast<AUTWeaponFix>(*It);
+		if (Candidate != nullptr && Candidate->NCPFiredProjClasses.Contains(ProjectileClass))
+		{
+			return Candidate;
+		}
+	}
+
+	// Nothing recorded for this class: the shooter never spawned one locally (no fake), or the
+	// projectile came from a path other than SpawnNetPredictedProjectileInternal. Fall back to
+	// the pre-existing held-weapon route so behaviour degrades to exactly what it was before.
+	return Cast<AUTWeaponFix>(OwnerChar->GetWeapon());
+}
 
 AClientHitsounds* AUTWeaponFix::FindClientHitsoundsMutator()
 {

@@ -392,10 +392,12 @@ void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiv
 			// locally-controlled shooter so only routable claims are sent.
 			if (OwnerChar && OwnerChar->IsLocallyControlled())
 			{
-				AUTWeaponFix* Weapon = Cast<AUTWeaponFix>(OwnerChar->GetWeapon());
+				// The launcher that FIRED this rocket, not whatever is held now: a mid-flight
+				// weapon switch would otherwise route the claim to a weapon that never tracked it.
+				AUTWeaponFix* Weapon = AUTWeaponFix::FindFiringWeaponForProjectile(OwnerChar, this);
 				if (Weapon)
 				{
-					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 0); // FireMode 0 = primary (rockets)
+					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 0, this); // FireMode 0 = primary (rockets)
 				}
 			}
 		}

@@ -295,10 +295,12 @@ void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 			// where GetWeapon() resolves a weapon we don't own → "No owning connection" RPC drop.
 			if (OwnerChar && OwnerChar->IsLocallyControlled())
 			{
-				AUTWeaponFix* Weapon = Cast<AUTWeaponFix>(OwnerChar->GetWeapon());
+				// The flak cannon that FIRED this shell, not whatever is held now: a mid-flight
+				// weapon switch would otherwise route the claim to a weapon that never tracked it.
+				AUTWeaponFix* Weapon = AUTWeaponFix::FindFiringWeaponForProjectile(OwnerChar, this);
 				if (Weapon)
 				{
-					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 1); // FireMode 1 = alt-fire (flak shell)
+					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 1, this); // FireMode 1 = alt-fire (flak shell)
 				}
 			}
 		}

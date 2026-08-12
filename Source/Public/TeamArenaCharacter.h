@@ -159,20 +159,16 @@ protected:
 	float WeaponSkinRequestWindowStart = 0.f;
 	uint8 WeaponSkinRequestsInWindow = 0;
 
-	/** Per-attachment body-slot cache. Rebuilt only when the attachment or parent changes. */
+	/** Per-attachment material-slot cache. Rebuilt on attachment/parent changes. */
 	TWeakObjectPtr<AUTWeaponAttachment> SkinnedWeaponAttachment;
 	UPROPERTY(Transient)
-	UMaterialInterface* OriginalWeaponAttachmentMaterial = nullptr;
-	/** Slot-1 3P material, captured only when the attachment's target mask includes
-	 *  slot 1 — Flak (slots 0+1) and the Lightning Gun (slot 1 ONLY; its slot 0 keeps
-	 *  the original). nullptr for slot-0-only weapons. */
+	TArray<UMaterialInterface*> OriginalWeaponAttachmentMaterials;
 	UPROPERTY(Transient)
-	UMaterialInterface* OriginalWeaponAttachmentMaterialSecondary = nullptr;
+	TArray<UMaterialInterface*> AppliedWeaponAttachmentMaterialParents;
 	UPROPERTY(Transient)
-	UMaterialInterface* AppliedWeaponAttachmentMaterial = nullptr;
-	UPROPERTY(Transient)
-	UMaterialInstanceDynamic* WeaponAttachmentSkinMID = nullptr;
-	bool bCapturedWeaponAttachmentMaterial = false;
+	TArray<UMaterialInstanceDynamic*> WeaponAttachmentSkinMIDs;
+	uint32 AppliedWeaponAttachmentSlotMask = 0u;
+	bool bCapturedWeaponAttachmentMaterials = false;
 
 	UUTWeaponSkin* ResolveWeaponSkinForClass(UClass* WeaponClassToMatch) const;
 	void ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin);

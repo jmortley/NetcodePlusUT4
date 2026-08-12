@@ -882,7 +882,54 @@ bool AClientHitsounds::PredictionResolvesSameTier(int32 AuthoritativeDamage, boo
 	const float Hi = FMath::Max(Predicted.Pitch, Authoritative.Pitch);
 	const float Lo = FMath::Max(KINDA_SMALL_NUMBER, FMath::Min(Predicted.Pitch, Authoritative.Pitch));
 	const float SameTierMaxPitchRatio = 1.10f;
-	return (Hi / Lo) <= SameTierMaxPitchRatio;
+	if ((Hi / Lo) > SameTierMaxPitchRatio)
+	{
+		return false;
+	}
+
+	// Pitch alone cannot separate LARGE hits. The Absolute curve compresses hard at the top:
+	// 115 -> 1.0992, 125 -> 1.0560, 190+ -> 1.0000 all sit inside the ratio above, so a flak
+	// shell's prediction reads as "the same tier" as an authoritative shock combo or sniper
+	// headshot and silently swallows it — two hits, one sound. Where the style actually
+	// encodes damage, require the damages to agree as well.
+	//
+	// This only runs once the pitch test has ALREADY passed, so it is self-limiting to the
+	// saturated band. Hits small enough for the curve to still be expressive differ in pitch
+	// first and never reach here — which is why server-summed pellets (predicted one, confirmed
+	// as a sum) are unaffected: they diverge low on the curve, where pitch is steep.
+	//
+	// Thresholded, not exact: a few points of estimate error must still count as the same hit
+	// (the 70-predicted / 65-real case the ratio comment above describes). 10% clears that and
+	// the 115-vs-125 case at 8%, while catching 115-vs-100 at 13%.
+	//
+	// Only correct when the correction would be AUDIBLE. If the two pitches are already within a
+	// hair of each other, playing the authoritative sound adds a second blip that sounds identical
+	// to the first and tells the player nothing. Gating on audibility rather than on the style enum
+	// covers three cases at once: Flat (encodes no damage, so every pair lands here), Absolute's
+	// plateau at D >= MaxDamage (an amped 200 predicted vs a 170 confirm resolves 1.00000 vs
+	// 1.00050 — 15% apart in damage, inaudible in pitch), and UTComp's clamps at both ends.
+	const float AudiblePitchRatio = 1.01f;
+	if ((Hi / Lo) <= AudiblePitchRatio)
+	{
+		return true;
+	}
+
+	// The friendly path is exempt separately: its prediction is always the flat zero cue rather
+	// than a damage estimate, so LastPredictedDamage is 0 and a damage comparison is meaningless.
+	if (bAuthoritativeFriendly)
+	{
+		return true;
+	}
+
+	const int32 HiDamage = FMath::Max(LastPredictedDamage, AuthoritativeDamage);
+	const int32 LoDamage = FMath::Min(LastPredictedDamage, AuthoritativeDamage);
+	if (HiDamage <= 0)
+	{
+		return true;
+	}
+
+	const float SameTierMaxDamagePct = 0.10f;
+	return (float)(HiDamage - LoDamage) <= SameTierMaxDamagePct * (float)HiDamage;
 }
 
 // =========================================================================

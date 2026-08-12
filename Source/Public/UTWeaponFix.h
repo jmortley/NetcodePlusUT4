@@ -297,8 +297,8 @@ public:
     /** Whether settings have been loaded from Mod.ini this session */
     static bool bWeaponSettingsLoaded;
 
-    /** Highest slot index + 1 that GetWeaponSkinTargetSlotMask can ever set. */
-    static constexpr int32 MaxWeaponSkinTargetSlots = 2;
+    /** uint32-backed material-slot masks support slots 0 through 31. */
+    static constexpr int32 MaxWeaponSkinTargetSlots = 32;
 
     /** Bitmask of mesh material slots a weapon family renders its skin on, for one
      *  view. Bit N = slot N. Verified in-editor against the shipped skin assets'
@@ -307,7 +307,10 @@ public:
      *                    M_Flak_Skin_Void01 replace M_Flak_Gun_Inst /
      *                    M_Flak_Gun_3P_Inst, and BOTH Flak meshes carry that body
      *                    material on slot 0 AND slot 1.
-     *    Lightning Gun — ASYMMETRIC: 1P {0}, 3P {1}. PinkLG's 1P
+     *    Lightning Gun — single-material fallback is asymmetric: 1P {0}, 3P {1}.
+     *                    PinkLG is expanded by GetResolvedWeaponSkinTargetSlotMask()
+     *                    to {0,1} in both views, with a different E0/E1 material on
+     *                    each slot. Its 1P
      *                    MAT_INS_LG_Pink_E0_1p carries the PartTWO texture set
      *                    (T_LightingGunTwo_*), which Lightning_Gun_1p has on slot 0;
      *                    its 3P MAT_INS_LG_Pink_E1_3p carries the PartONE set
@@ -318,13 +321,26 @@ public:
      *  Keyed on the replicated WeaponSkinCustomizationTag — loads no asset. Slot names
      *  on these meshes are unreliable, so these are verified explicit indices and every
      *  caller bounds-checks each slot against the live GetNumMaterials(). Slots outside
-     *  the mask (Shock screen, ammo counters, decals, glass, the LG's other part) are
-     *  never captured or written and stay owned by the mesh / SetupSpecialMaterials(). */
+     *  the resolved mask (Shock screen, ammo counters, decals, glass) stay owned by
+     *  the mesh / SetupSpecialMaterials(). */
     static uint32 GetWeaponSkinTargetSlotMask(FName WeaponSkinCustomizationTag,
         bool bFirstPersonMesh);
 
-    /** Apply an already-resolved selection to the weapon-family body slots (slot 0,
-     *  plus slot 1 for Flak/Lightning); authority also keeps pickup identity. */
+    /** Resolve the final slot mask for one skin/view. Authentic invisibility
+     *  materials replace every live mesh slot; PinkLG uses both E0/E1 slots; other
+     *  authored skins retain the verified per-family mask above. */
+    static uint32 GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Skin,
+        FName WeaponSkinCustomizationTag, bool bFirstPersonMesh,
+        int32 MaterialSlotCount);
+
+    /** Material for one targeted slot. Most skins return their one per-view material;
+     *  PinkLG loads its MutAnnouncers-cooked E1_1p / E0_3p supplement so both
+     *  multipart LG sections receive the matching texture set. */
+    UMaterialInterface* GetResolvedWeaponSkinMaterialForSlot(
+        const UUTWeaponSkin* Skin, bool bFirstPersonMesh, int32 MaterialSlot);
+
+    /** Apply an already-resolved selection to the correct material slots for that
+     *  skin/view; authority also keeps pickup identity. */
     void ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin);
 
     //~ Begin AUTWeapon Interface
@@ -409,7 +425,24 @@ public:
     // Called by UTPlusProj_Rocket / UTPlusProj_FlakShell when fake hits a pawn.
     // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
     // =========================================================================
-    void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum);
+    /** @param SourceProj  The projectile reporting the hit. Callers resolve `this` weapon from
+     *                     UTCharacter::GetWeapon() at IMPACT time, which is the weapon currently
+     *                     HELD — not necessarily the one that fired. Fire a rocket, switch to flak,
+     *                     rocket lands: `this` is the flak cannon. Passing the projectile lets the
+     *                     hitsound prediction read damage off the instance that actually hit,
+     *                     instead of ProjClass[FireModeNum] on the wrong weapon. Optional: a null
+     *                     SourceProj keeps the legacy CDO lookup. */
+    void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum,
+        AUTProjectile* SourceProj = nullptr);
+
+    /** Resolve the weapon that FIRED Proj, rather than the one OwnerChar happens to be holding.
+     *  AUTCharacter::GetWeapon() is evaluated at IMPACT: fire a rocket, switch to flak, and the
+     *  rocket's claim routes to the flak cannon, whose ActiveServerProjectiles never held it, so
+     *  the server drops the claim and that shot silently loses lag compensation. Matching on the
+     *  projectile's exact class is unambiguous — each claim-capable class comes from exactly one
+     *  weapon. Falls back to the held weapon when nothing was recorded, so the worst case is the
+     *  behaviour that shipped. Call this instead of GetWeapon() from projectile impact handlers. */
+    static AUTWeaponFix* FindFiringWeaponForProjectile(AUTCharacter* OwnerChar, AUTProjectile* Proj);
 
     /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves (explodes) to
      *  snapshot its final state into ActiveServerProjectiles for the lag-comp grace buffer, so a claim
@@ -531,26 +564,21 @@ protected:
     /** Max time after death to still allow pending fire RPCs (seconds) */
     static constexpr float TradeKillGracePeriod = 0.20f;
 
-    /** Slot-0 body material captured before NetcodePlus applies a configured skin. */
+    /** Per-slot originals captured before NetcodePlus applies a configured skin. */
     UPROPERTY(Transient)
-    UMaterialInterface* OriginalFPSMaterial;
+    TArray<UMaterialInterface*> OriginalFPSMaterials;
 
-    /** Slot-1 body material, captured only when this weapon's 1P target mask includes
-     *  slot 1 (Flak); nullptr otherwise — including the Lightning Gun, whose 1P skin
-     *  is slot 0 only. */
+    /** Immutable selected body-material parent per slot, or nullptr for Default. */
     UPROPERTY(Transient)
-    UMaterialInterface* OriginalFPSMaterialSecondary;
+    TArray<UMaterialInterface*> AppliedFPSMaterialParents;
 
-    /** Immutable body-material parent selected for this actor, or OriginalFPSMaterial. */
+    /** One actor-local selected-material MID per targeted slot. Separate MIDs keep
+     *  SetupSpecialMaterials() changes isolated to the slot they configure. */
     UPROPERTY(Transient)
-    UMaterialInterface* AppliedFPSMaterial;
+    TArray<UMaterialInstanceDynamic*> AppliedFPSMaterialInstances;
 
-    /** Actor-local MID for the selected FPS material, reused across the family's body
-     *  slots on this mesh; never shared between actors. */
-    UPROPERTY(Transient)
-    UMaterialInstanceDynamic* AppliedFPSMaterialInstance;
-
-    bool bCapturedOriginalFPSMaterial;
+    uint32 AppliedFPSMaterialSlotMask;
+    bool bCapturedOriginalFPSMaterials;
 
     void PrepareConfiguredWeaponSkin();
 
@@ -816,6 +844,13 @@ protected:
     /** Server-side tracking of authoritative projectiles, matched oldest-first by fire mode. */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
+
+    /** Every projectile class this weapon has spawned, recorded on BOTH server and the firing
+     *  client (the client records it when it spawns the fake). Not replicated and never needs to
+     *  be: each side populates its own copy from its own spawn. Bounded by the number of distinct
+     *  projectile classes a weapon can fire (1-3), so it is add-unique and never cleared. */
+    UPROPERTY()
+    TArray<TSubclassOf<AUTProjectile>> NCPFiredProjClasses;
 
 
     // =========================================================================

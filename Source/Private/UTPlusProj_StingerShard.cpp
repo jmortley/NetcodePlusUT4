@@ -33,11 +33,13 @@ void AUTPlusProj_StingerShard::TrySendShardHitClaim(AUTCharacter* HitChar, const
 		return;
 	}
 
-	AUTWeaponFix* Weapon = Cast<AUTWeaponFix>(OwnerChar->GetWeapon());
+	// The minigun that FIRED this shard, not whatever is held now: a mid-flight weapon
+	// switch would otherwise route the claim to a weapon that never tracked it.
+	AUTWeaponFix* Weapon = AUTWeaponFix::FindFiringWeaponForProjectile(OwnerChar, this);
 	if (Weapon != nullptr)
 	{
 		bSentShardHitClaim = true;
-		Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 1); // FireMode 1 = minigun alt (shard)
+		Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 1, this); // FireMode 1 = minigun alt (shard)
 	}
 }
 
