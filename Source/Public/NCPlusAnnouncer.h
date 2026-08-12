@@ -19,8 +19,8 @@ struct FNCPlusAnnouncerPackOption
 };
 
 /**
- * UT announcer queue with immediate multikill/spree rewards while preserving
- * status announcements already in progress.
+ * UT announcer queue with immediate multikill/spree scheduling while preserving
+ * unrelated rewards and status announcements already in progress.
  */
 UCLASS(Blueprintable)
 class NETCODEPLUS_API UNCPlusAnnouncer : public UUTAnnouncer
@@ -41,7 +41,7 @@ public:
 
 private:
 	static bool IsLegacyImmediateReward(const FAnnouncementInfo& Announcement);
-	static bool ShouldInterruptForLegacyReward(const FAnnouncementInfo& Incoming,
+	static bool ShouldInterruptAnnouncement(const FAnnouncementInfo& Incoming,
 		const FAnnouncementInfo& Existing);
 };
 

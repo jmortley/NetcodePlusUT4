@@ -607,7 +607,7 @@ bool UNCPlusAnnouncer::IsLegacyImmediateReward(const FAnnouncementInfo& Announce
 		|| IncomingClass->IsChildOf(UUTSpreeMessage::StaticClass());
 }
 
-bool UNCPlusAnnouncer::ShouldInterruptForLegacyReward(const FAnnouncementInfo& Incoming,
+bool UNCPlusAnnouncer::ShouldInterruptAnnouncement(const FAnnouncementInfo& Incoming,
 	const FAnnouncementInfo& Existing)
 {
 	if (Incoming.MessageClass == nullptr || Existing.MessageClass == nullptr)
@@ -615,12 +615,11 @@ bool UNCPlusAnnouncer::ShouldInterruptForLegacyReward(const FAnnouncementInfo& I
 		return false;
 	}
 
-	if (IsLegacyImmediateReward(Incoming))
-	{
-		const UUTLocalMessage* ExistingMessage = Existing.MessageClass.GetDefaultObject();
-		return !ExistingMessage->bIsStatusAnnouncement;
-	}
-
+	// "Immediate" controls queue timing, not which rewards are disposable. Stock
+	// message classes already encode the semantic replacements they permit (for
+	// example, a newer normal spree replacing an older one). The former blanket
+	// non-status interruption dropped same-kill rewards that arrive before a spree:
+	// Double Kill/Headshot -> Rampage should remain an audible sequence.
 	const UUTLocalMessage* IncomingMessage = Incoming.MessageClass.GetDefaultObject();
 	return IncomingMessage->InterruptAnnouncement(Incoming, Existing);
 }
@@ -691,7 +690,7 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 	}
 
 	if (CurrentAnnouncement.MessageClass != nullptr
-		&& ShouldInterruptForLegacyReward(NewAnnouncement, CurrentAnnouncement))
+		&& ShouldInterruptAnnouncement(NewAnnouncement, CurrentAnnouncement))
 	{
 		if (AnnouncerTraceEnabled())
 		{
@@ -709,7 +708,7 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 
 		for (int32 Index = QueuedAnnouncements.Num() - 1; Index >= 0; --Index)
 		{
-			if (ShouldInterruptForLegacyReward(NewAnnouncement, QueuedAnnouncements[Index]))
+			if (ShouldInterruptAnnouncement(NewAnnouncement, QueuedAnnouncements[Index]))
 			{
 				if (AnnouncerTraceEnabled())
 				{
@@ -801,7 +800,7 @@ void UNCPlusAnnouncer::PlayAnnouncement(TSubclassOf<UUTLocalMessage> MessageClas
 	{
 		for (int32 Index = QueuedAnnouncements.Num() - 1; Index >= 0; --Index)
 		{
-			if (ShouldInterruptForLegacyReward(NewAnnouncement, QueuedAnnouncements[Index]))
+			if (ShouldInterruptAnnouncement(NewAnnouncement, QueuedAnnouncements[Index]))
 			{
 				if (AnnouncerTraceEnabled())
 				{
