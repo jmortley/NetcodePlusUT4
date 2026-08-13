@@ -295,6 +295,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
 	void CreditHealing(AUTPlayerState* HealerPS, int32 Amount);
 
+	/** Apply a clamped heal to Target and credit the HP ACTUALLY restored.
+	 *  Returns that amount (0 if nothing was healed).
+	 *
+	 *  This exists so heal-over-time Blueprints (the buff banner) stop doing
+	 *  their own Health arithmetic. Doing it in BP means computing the credit
+	 *  as NewHealth - OldHealth, and the obvious mistake is to credit the
+	 *  requested HealAmount instead: a player at 95/100 healed for 10 receives
+	 *  5, so crediting the request inflates the stat exactly where banners are
+	 *  used most. One node makes that impossible to get wrong, and any future
+	 *  heal source inherits the same clamp.
+	 *
+	 *  Self-healing IS applied but NOT credited. "Healing done" exists to
+	 *  measure support play — and, per the ELO plan, to eventually feed a
+	 *  support term in the Wipeout perf — so standing in your own banner must
+	 *  not score. The link beam never had to make this choice because it
+	 *  cannot target its own owner.
+	 *
+	 *  Server-authority only. No-op on a null, dead, or already-full target. */
+	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
+	int32 HealCharacterAndCredit(class AUTCharacter* Target, int32 HealAmount,
+		AUTPlayerState* HealerPS);
+
 	/** Healing credited to this player so far, 0 if none/unknown. Server-side read
 	 *  for AWipeoutDamageReplicator, which is what carries it to the scoreboard
 	 *  (this map is GameMode state and never replicates).
@@ -904,6 +926,41 @@ protected:
 	UPROPERTY() AUTPlayerState* RoundWinningKiller;
 	UPROPERTY() APawn* WinningKillerPawn = nullptr;
 	float RoundWinningKillTime;
+
+
+	// =======================================================================
+	// CLUTCH / LMS-HOLD TELEMETRY  (uploaded as wipeout_clutches[])
+	// =======================================================================
+	// One open hold per team. Opened at the same 2->1 transition that drives
+	// the "last player alive" announcement, so telemetry and the in-game cue
+	// can never disagree about what counts as a clutch.
+
+	/** Live state for one team's open hold. */
+	struct FWipeoutClutchTracker
+	{
+		bool    bOpen = false;
+		FString UniqueId;                          // captured at open; survives Logout
+		TWeakObjectPtr<AUTPlayerState> Holder;     // live identity only
+		int32   RoundIndex         = 0;
+		int32   EnemiesAtStart     = 0;
+		int32   DirectKills        = 0;
+		int32   TeammatesRespawned = 0;
+		bool    bSuddenDeath       = false;
+		float   StartTime          = 0.f;
+	};
+	FWipeoutClutchTracker ActiveHold[2];
+
+	/** Finished holds for the whole match; copied into the upload at match end. */
+	TArray<FNCWipeoutClutchInput> CompletedClutches;
+
+	/** Clear all clutch telemetry. Match start only. */
+	void ResetClutchTelemetryForMatch();
+	/** Open a hold for TeamIndex. No-op if one is already open. */
+	void OpenClutchHold(int32 TeamIndex, AUTPlayerState* Holder, int32 EnemiesAlive);
+	/** Credit an enemy kill to an open hold whose holder is KillerPS. */
+	void CreditClutchHoldKill(AUTPlayerState* KillerPS);
+	/** Close TeamIndex's hold with Outcome and move it to CompletedClutches. */
+	void CloseClutchHold(int32 TeamIndex, const TCHAR* Outcome);
 
 
 	// =======================================================================
