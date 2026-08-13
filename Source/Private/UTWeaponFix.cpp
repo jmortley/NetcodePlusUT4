@@ -5096,8 +5096,17 @@ static bool UsesAuthenticInvisibilityMaterial(const UMaterialInterface* Material
 {
 	static const FString InvisibilityBaseMaterialPath(
 		TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/M_Invis_Skin.M_Invis_Skin"));
+	static const FString NCPInvisibilityBaseMaterialPath(
+		TEXT("/Game/NetcodePlusOptional/M_Invis_SkinNCP.M_Invis_SkinNCP"));
 	const UMaterial* const BaseMaterial = (Material != nullptr) ? Material->GetMaterial() : nullptr;
-	return BaseMaterial != nullptr && BaseMaterial->GetPathName() == InvisibilityBaseMaterialPath;
+	if (BaseMaterial == nullptr)
+	{
+		return false;
+	}
+
+	const FString BaseMaterialPath = BaseMaterial->GetPathName();
+	return BaseMaterialPath == InvisibilityBaseMaterialPath ||
+		BaseMaterialPath == NCPInvisibilityBaseMaterialPath;
 }
 
 static bool IsPinkLGWeaponSkin(const UUTWeaponSkin* Skin)
