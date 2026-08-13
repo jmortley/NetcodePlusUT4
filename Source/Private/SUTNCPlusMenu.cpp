@@ -2,6 +2,7 @@
 #include "SUTNCPlusMenu.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
+#include "NCPlusPerformanceSettings.h"
 #include "NCReadyUp.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
@@ -254,6 +255,17 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 	const EVisibility AnnouncerVisibility = AnnouncerPackEntries.Num() > 1
 		? EVisibility::Visible
 		: EVisibility::Collapsed;
+	const int32 OverlayDistanceIndex = CharacterOverlayDistance < 3750.f ? 0
+		: (CharacterOverlayDistance < 5500.f ? 1 : 2);
+	// The UI intentionally exposes presets rather than an arbitrary number. Snap
+	// a hand-edited in-range Mod.ini value to the preset we actually display so
+	// pressing Save cannot preserve a hidden threshold under a misleading label.
+	CharacterOverlayDistance = OverlayDistanceIndex == 0 ? 3000.f
+		: (OverlayDistanceIndex == 1 ? 4500.f : 6500.f);
+	const TSharedPtr<FString> InitialOverlayDistance =
+		CharacterOverlayDistanceOptions.IsValidIndex(OverlayDistanceIndex)
+			? CharacterOverlayDistanceOptions[OverlayDistanceIndex]
+			: nullptr;
 
 	return SNew(SBox)
 		.WidthOverride(620.f)
@@ -403,6 +415,70 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 						})
 					]
 				]
+			]
+
+			// Client-local render-cost control. The underlying OverlayMesh can carry
+			// armour, shield and other character effects, so describe the complete
+			// visual tradeoff rather than presenting this as armour-only.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 5, 0, 5)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Performance")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(40, 0, 40, 3)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0, 0, 12, 0)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Character Overlay Distance")))
+					.Font(RegularFont(14))
+					.ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.WidthOverride(190.f)
+					[
+						SNew(STextComboBox)
+						.OptionsSource(&CharacterOverlayDistanceOptions)
+						.InitiallySelectedItem(InitialOverlayDistance)
+						.ToolTipText(FText::FromString(TEXT("Lower values improve performance but hide armour, shield, and other character overlay effects sooner.")))
+						.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+						{
+							const int32 Index = CharacterOverlayDistanceOptions.IndexOfByKey(NewSelection);
+							if (Index == 0)      { CharacterOverlayDistance = 3000.f; }
+							else if (Index == 1) { CharacterOverlayDistance = 4500.f; }
+							else if (Index == 2) { CharacterOverlayDistance = 6500.f; }
+						})
+					]
+				]
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 0, 24, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Lower distances can improve frame-time consistency in busy scenes. Save applies the change immediately.")))
+				.Font(RegularFont(10))
+				.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+				.AutoWrapText(true)
 			]
 
 			// About/link information stays on the landing page, like UTComp.
@@ -1286,6 +1362,12 @@ void SUTNCPlusMenu::LoadSettings()
 {
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
+	CharacterOverlayDistance = NCPlusPerformanceSettings::GetCharacterOverlayDistance();
+	CharacterOverlayDistanceOptions.Reset();
+	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Performance (3000)"))));
+	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Balanced (4500)"))));
+	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Full (6500)"))));
+
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
 	// RagdollTime). bShowRagdoll is consumed by ATeamArenaCharacter::SpawnSkeletonDissolve since
@@ -1398,6 +1480,10 @@ void SUTNCPlusMenu::EnsureHitsoundData()
 void SUTNCPlusMenu::SaveSettings()
 {
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// Client-local only. Setter persists the clamped value and refreshes the
+	// cached squared distance used by character ticks immediately.
+	NCPlusPerformanceSettings::SetCharacterOverlayDistance(CharacterOverlayDistance);
 
 	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.

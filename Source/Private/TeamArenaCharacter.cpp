@@ -25,6 +25,7 @@
 #include "Materials/MaterialInstanceDynamic.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "NCPlusForceModels.h"
+#include "NCPlusPerformanceSettings.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
 #include "UTCarriedObject.h"        // HideDeadBody: don't blank a carried flag still parented to the corpse
@@ -2121,8 +2122,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	// OverlayMesh has BoundsScale=15000 set by Epic in UTCharacter::UpdateCharOverlays,
 	// which disables engine frustum/HZB culling on it. We piggy-back on the main mesh
 	// (normal bounds) to cull overlays for characters that are off-screen, occluded,
-	// or far from the local viewer. SetVisibility only fires when state changes to
-	// avoid redundant MarkRenderStateDirty.
+	// or beyond this client's cached CharacterOverlayDistance preference. SetVisibility
+	// only fires when state changes to avoid redundant MarkRenderStateDirty.
 	if (OverlayMesh && OverlayMesh->IsRegistered())
 	{
 		bool bShouldShow = true;
@@ -2143,8 +2144,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				FVector ViewLoc;
 				FRotator ViewRot;
 				LocalPC->GetPlayerViewPoint(ViewLoc, ViewRot);
-				constexpr float OverlayCullDistSq = 6500.f * 6500.f;
-				if (FVector::DistSquared(GetActorLocation(), ViewLoc) > OverlayCullDistSq)
+				if (FVector::DistSquared(GetActorLocation(), ViewLoc)
+					> NCPlusPerformanceSettings::GetCharacterOverlayDistanceSquared())
 				{
 					bShouldShow = false;
 				}
