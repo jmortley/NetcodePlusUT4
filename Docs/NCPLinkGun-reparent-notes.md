@@ -40,9 +40,29 @@ Both inputs retain stock firing-state timing:
   depends on transactional `LastFireTime`; using it on a non-transactional Link
   beam would falsely stop a healthy beam after roughly 0.25 seconds.
 
-The existing CSHD assets and classes (`UTNPLinkGun`, `UTNPShaftLink`,
-`AUTWeap_LinkGun_Plus`, and `UUTWeaponStateFiringLinkBeamPlus`) are independent
-and must not be reparented, copied, or wired into this path.
+The existing CSHD Link asset/class (`UTNPLinkGun`, `AUTWeap_LinkGun_Plus`, and
+`UUTWeaponStateFiringLinkBeamPlus`) remains independent and must not be copied
+or wired into the stock-adjacent `NCPLinkGun` path.
+
+`UTNPShaftLink` now has a dedicated migration path: reparent it to
+`AUTWeap_LinkGun_Shaft_NCP`. That class derives from `AUTWeap_LinkGun_NCP`,
+installs `UUTWeaponStateFiringLinkBeam_NCP` in both fire-mode slots (primary is
+converted from plasma to beam), and canonicalizes both fire inputs to the
+Blueprint-authored mode 1. That preserves the mode-1 beam actor, muzzle,
+looping sound, animations, and replicated cosmetic mode instead of combining
+mode-0 projectile cosmetics with beam damage. It disables Link pull/primary
+overheat and keeps two unused legacy tuning-property aliases so the existing
+Shaft BP can recompile without its old CSHD defaults becoming missing-property
+errors. The NCP beam state records `LinkBeamShots` once per refire interval,
+matching the existing Shaft HUD, scoreboard, and shared accuracy replicator;
+stock `LinkShots` is intentionally not used as the beam denominator. At
+runtime, guarded `PostInitProperties()` and `PostInitializeComponents()` passes
+replace either serialized legacy firing state after Blueprint defaults load.
+This is required because UE4 keeps the inherited `FiringState` objects from the
+Blueprint's previous parent when the asset is reparented. It also copies the
+proven mode-1 beam
+damage/cadence/ammo data to mode 0 and clears `ProjClass[0]`, so neither stale
+state objects nor plasma-era mode-0 arrays can undo the conversion.
 
 ## Why one blank Blueprint is not sufficient
 
@@ -103,9 +123,31 @@ the NetcodePlus transaction/ACK disappearance class, because Link primary never
 enters that machinery. Test shooter visuals and authoritative hits separately
 at the intended maximum ping before release.
 
+## Shaft Link migration
+
+After building the module and restarting the editor:
+
+1. Make a backup duplicate of `/Game/Blueprints/Netcode/UTNPShaftLink`.
+2. Reparent `UTNPShaftLink` to native `UTWeap_LinkGun_Shaft_NCP`.
+3. Compile and save. The two legacy CSHD tuning fields referenced by the asset
+   remain available as inert compatibility properties; do not add any CSHD
+   beam-hit RPC graph to the new parent.
+4. Verify `FiringState[0]` and `FiringState[1]` are both
+   `UTWeaponStateFiringLinkBeam_NCP`. No slot may retain
+   `UTWeaponStateFiringLinkBeamPlus` or a looping projectile state at runtime.
+   The authoritative `[StateLayout] UTNPShaftLink_C` log line must report the
+   NCP state in both slots; the source asset may retain an unused legacy class
+   reference in its serialized dependency table after reparenting.
+5. Verify both inputs render and sound like the intended mode-1 Shaft beam and
+   that neither produces a plasma projectile. Link pull/yoink must remain
+   disabled.
+6. Because the asset path is unchanged, the existing `NCShaftArena`
+   `ShaftLinkClass` or `[NCShaftArena] WeaponClass=...UTNPShaftLink_C` setting
+   remains valid. Recook the gameplay pak that owns `UTNPShaftLink`.
+
 ## Static verification before the user build
 
-- New source files contain no references to `UTWeap_LinkGun_Plus`,
+- New source files have no compile/link dependency on `UTWeap_LinkGun_Plus`,
   `UTWeaponStateFiringLinkBeamPlus`, CSHD processing, or a custom beam-hit RPC.
 - Primary dispatch is explicitly qualified to `AUTWeapon`, preventing virtual
   fallback into `AUTWeaponFix::SpawnNetPredictedProjectile`.

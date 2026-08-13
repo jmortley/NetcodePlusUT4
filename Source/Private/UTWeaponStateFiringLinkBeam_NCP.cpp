@@ -125,7 +125,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 		}
 		else
 		{
-			EndFiringSequence(1);
+			EndFiringSequence(GetFireMode());
 			return;
 		}
 	}
@@ -150,6 +150,23 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 		AUTPlayerState* PS = (LinkGun->Role == ROLE_Authority && LinkGun->GetUTOwner() != nullptr && LinkGun->GetUTOwner()->Controller != nullptr)
 			? Cast<AUTPlayerState>(LinkGun->GetUTOwner()->Controller->PlayerState)
 			: nullptr;
+
+		// Shaft HUD/scoreboard accuracy uses a Quake-style denominator: one
+		// sample per beam refire interval, not stock NAME_LinkShots (one trigger
+		// pull). Keep the accumulator bounded on every role, but only authority
+		// writes stats. Floor handles an unusually long frame without silently
+		// losing one or more beam samples.
+		if (RefireTime > KINDA_SMALL_NUMBER && AccumulatedFiringTime >= RefireTime)
+		{
+			const int32 BeamSamples = FMath::FloorToInt(AccumulatedFiringTime / RefireTime);
+			AccumulatedFiringTime -= float(BeamSamples) * RefireTime;
+			if (PS != nullptr)
+			{
+				static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+				PS->ModifyStatsValue(NAME_LinkBeamShots, BeamSamples);
+			}
+		}
+
 		LinkGun->bLinkBeamImpacting = Hit.Time < 1.f;
 		AActor* OldLinkedTarget = LinkGun->CurrentLinkedTarget;
 		LinkGun->CurrentLinkedTarget = nullptr;
@@ -167,12 +184,6 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 
 			const float LinkedDamage = float(DamageInfo.Damage);
 			Accumulator += LinkedDamage / RefireTime * DeltaTime;
-			if (PS != nullptr && LinkGun->ShotsStatsName != NAME_None && AccumulatedFiringTime > RefireTime)
-			{
-				AccumulatedFiringTime -= RefireTime;
-				PS->ModifyStatsValue(LinkGun->ShotsStatsName, 1);
-			}
-
 			if (Accumulator >= MinDamage)
 			{
 				const int32 AppliedDamage = FMath::TruncToInt(Accumulator);
@@ -194,12 +205,6 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 				}
 			}
 		}
-		else if (PS != nullptr && LinkGun->ShotsStatsName != NAME_None && AccumulatedFiringTime > RefireTime)
-		{
-			AccumulatedFiringTime -= RefireTime;
-			PS->ModifyStatsValue(LinkGun->ShotsStatsName, 1);
-		}
-
 		if (OldLinkedTarget != LinkGun->CurrentLinkedTarget)
 		{
 			LinkGun->LinkStartTime = GetWorld()->GetTimeSeconds();
@@ -207,7 +212,8 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 		}
 		else if (LinkGun->CurrentLinkedTarget != nullptr && !LinkGun->IsLinkPulsing())
 		{
-			LinkGun->bReadyToPull = GetWorld()->GetTimeSeconds() - LinkGun->LinkStartTime > LinkGun->PullWarmupTime;
+			LinkGun->bReadyToPull = LinkGun->SupportsLinkPull() &&
+				GetWorld()->GetTimeSeconds() - LinkGun->LinkStartTime > LinkGun->PullWarmupTime;
 		}
 
 		// The owning client traces only its beam endpoint. Damage above remains

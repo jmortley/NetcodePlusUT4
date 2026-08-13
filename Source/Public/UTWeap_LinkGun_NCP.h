@@ -204,6 +204,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = LinkGun)
 	USoundBase* PullFailed;
 
+	/** Whether releasing a charged beam may perform the stock Link pull. */
+	virtual bool SupportsLinkPull() const { return true; }
+
 	virtual void StartLinkPull();
 	virtual void Tick(float DeltaTime) override;
 	virtual void FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode) override;
@@ -228,6 +231,9 @@ public:
 	virtual void ClientRemoved() override;
 
 protected:
+	/** Stock-adjacent Link uses mode-zero plasma overheat; Shaft beam does not. */
+	virtual bool UsesPrimaryOverheat() const { return true; }
+
 	/** Keep the stock high-ping delayed fake callback for rapid plasma. */
 	virtual void SpawnDelayedFakeProjectile() override;
 

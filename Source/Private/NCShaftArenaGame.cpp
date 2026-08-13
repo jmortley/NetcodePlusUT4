@@ -23,11 +23,22 @@
 #include "NCEloUploader.h"
 #include "NCStatsUploader.h"
 #include "UTWeap_LinkGun_Plus.h"
+#include "UTWeap_LinkGun_Shaft_NCP.h"
 #include "UTPickup.h"
 #include "UTDroppedPickup.h"
 #include "EngineUtils.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCShaftArena, Log, All);
+
+namespace
+{
+	bool IsSupportedShaftLinkClass(const UClass* WeaponClass)
+	{
+		return WeaponClass != nullptr &&
+			(WeaponClass->IsChildOf(AUTWeap_LinkGun_Plus::StaticClass()) ||
+			 WeaponClass->IsChildOf(AUTWeap_LinkGun_Shaft_NCP::StaticClass()));
+	}
+}
 
 bool ANCShaftArenaGame::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
 {
@@ -107,7 +118,8 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 	if (GConfig->GetString(TEXT("NCShaftArena"), TEXT("WeaponClass"), WeaponPath, ConfigPath)
 		&& !WeaponPath.IsEmpty())
 	{
-		if (UClass* Loaded = LoadClass<AUTWeap_LinkGun_Plus>(nullptr, *WeaponPath))
+		UClass* Loaded = LoadClass<AUTWeaponFix>(nullptr, *WeaponPath);
+		if (IsSupportedShaftLinkClass(Loaded))
 		{
 			ShaftLinkClass = Loaded;
 			UE_LOG(LogNCShaftArena, Log, TEXT("InitGame: loaded ShaftLinkClass from Mod.ini: %s"), *WeaponPath);
@@ -115,9 +127,21 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 		else
 		{
 			UE_LOG(LogNCShaftArena, Warning,
-				TEXT("InitGame: Mod.ini WeaponClass='%s' did not resolve to an AUTWeap_LinkGun_Plus subclass"),
+				TEXT("InitGame: Mod.ini WeaponClass='%s' is not a supported Shaft Link class ")
+				TEXT("(expected UTWeap_LinkGun_Plus or UTWeap_LinkGun_Shaft_NCP family)"),
 				*WeaponPath);
 		}
+	}
+
+	// The widened reflected type lets both supported native families serialize
+	// into BP defaults. Keep the actual mode strict if an unrelated AUTWeapon
+	// was assigned through the broader editor class picker.
+	if (ShaftLinkClass && !IsSupportedShaftLinkClass(*ShaftLinkClass))
+	{
+		UE_LOG(LogNCShaftArena, Warning,
+			TEXT("InitGame: rejecting unsupported BP ShaftLinkClass=%s"),
+			*ShaftLinkClass->GetPathName());
+		ShaftLinkClass = nullptr;
 	}
 
 	if (ShaftLinkClass)

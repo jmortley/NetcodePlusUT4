@@ -2,10 +2,10 @@
 // vampirism, first-to-N kills win-by-2, persistent ELO + accuracy awards
 // in Mods.db (NCRatingShaftArena table).
 //
-// The loadout weapon is configurable: any AUTWeap_LinkGun_Plus subclass
-// (typically a Blueprint) where both fire modes act as the beam. The BP
-// owns all the visuals (tracers, beam mesh, sounds) and fire-mode wiring;
-// this gamemode just hands it to players via DefaultInventory.
+// The loadout weapon is configurable: either a legacy AUTWeap_LinkGun_Plus
+// subclass or the server-authoritative AUTWeap_LinkGun_Shaft_NCP family.
+// The BP owns all visuals and tuned content; this gamemode validates the
+// native family and hands the class to players via DefaultInventory.
 //
 // Set the class via:
 //   - BP subclass of NCShaftArenaGame (DefaultProperties → ShaftLinkClass), or
@@ -25,7 +25,7 @@
 
 #include "NCShaftArenaGame.generated.h"
 
-class AUTWeap_LinkGun_Plus;
+class AUTWeaponFix;
 class ANCShaftArenaStatsReplicator;
 
 UCLASS()
@@ -85,7 +85,7 @@ public:
 	 *  [NCShaftArena] WeaponClass=/Game/Path/To/BP_ShaftLink.BP_ShaftLink_C.
 	 *  Players spawn with this in their inventory and nothing else. */
 	UPROPERTY(EditDefaultsOnly, Category = "NCShaftArena")
-	TSubclassOf<AUTWeap_LinkGun_Plus> ShaftLinkClass;
+	TSubclassOf<AUTWeaponFix> ShaftLinkClass;
 
 	/** Bridges StatsData (server-only) and DamageDone (also server-only) to
 	 *  clients for the scoreboard. Without this, dedicated-server play shows

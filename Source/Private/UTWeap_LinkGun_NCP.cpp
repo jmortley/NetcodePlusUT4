@@ -368,7 +368,13 @@ void AUTWeap_LinkGun_NCP::Tick(float DeltaTime)
 	// remain unset and falsely stop a healthy continuous beam after 0.25s.
 	AUTWeapon::Tick(DeltaTime);
 
-	if (bIsInCoolDown)
+	const bool bUsePrimaryOverheat = UsesPrimaryOverheat();
+	if (!bUsePrimaryOverheat)
+	{
+		OverheatFactor = 0.f;
+		bIsInCoolDown = false;
+	}
+	else if (bIsInCoolDown)
 	{
 		OverheatFactor -= 2.f * DeltaTime;
 		if (OverheatFactor <= 0.f)
@@ -454,7 +460,7 @@ void AUTWeap_LinkGun_NCP::Tick(float DeltaTime)
 	UUTWeaponStateFiring_LoopingFire* LoopingState = Cast<UUTWeaponStateFiring_LoopingFire>(GetCurrentState());
 	if (LoopingState != nullptr)
 	{
-		if (bIsInCoolDown)
+		if (bUsePrimaryOverheat && bIsInCoolDown)
 		{
 			LoopingState->EnterCooldown();
 		}
@@ -469,6 +475,12 @@ void AUTWeap_LinkGun_NCP::StartLinkPull()
 {
 	bReadyToPull = false;
 	PulseTarget = nullptr;
+	if (!SupportsLinkPull())
+	{
+		CurrentLinkedTarget = nullptr;
+		LinkStartTime = -100.f;
+		return;
+	}
 	if (UTOwner != nullptr && IsValidLinkTarget(CurrentLinkedTarget) && UTOwner->IsLocallyControlled())
 	{
 		LastBeamPulseTime = GetWorld()->TimeSeconds;
@@ -525,7 +537,7 @@ bool AUTWeap_LinkGun_NCP::ServerSetPulseTarget_Validate(AActor* InTarget)
 
 void AUTWeap_LinkGun_NCP::ServerSetPulseTarget_Implementation(AActor* InTarget)
 {
-	if (UTOwner == nullptr || UTOwner->Controller == nullptr || InTarget == nullptr)
+	if (!SupportsLinkPull() || UTOwner == nullptr || UTOwner->Controller == nullptr || InTarget == nullptr)
 	{
 		return;
 	}
