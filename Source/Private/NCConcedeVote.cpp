@@ -10,6 +10,7 @@
 #include "UTATypes.h"                 // ChatDestinations
 #include "NCLeagueDuelGame.h"         // duel-only winner-PS score consistency
 #include "Engine/World.h"
+#include "Kismet/GameplayStatics.h"   // ParseOption: per-ruleset AllowConcede opt-out
 
 namespace
 {
@@ -41,6 +42,32 @@ namespace
 	bool IsVotingHuman(const AUTPlayerState* PS)
 	{
 		return PS && !PS->bOnlySpectator && !PS->bIsABot;
+	}
+
+	// Per-RULESET opt-out: ?AllowConcede=0 in a ruleset's gameOptions. Defaults ON, so an
+	// admin who changes nothing keeps the shipping behaviour.
+	//
+	// Deliberately keyed on the ruleset, not the gamemode class: iCTF is NOT its own mode —
+	// it is ANCPlusCTFGameMode plus the instagib mutator (AUTGameMode::bIsInstagib), so a
+	// per-class switch could not tell iCTF from regular CTF. Rulesets can, and this generalises
+	// to every mode for free without touching any of the six PostLogin wiring sites.
+	//
+	// OptionsString is fixed at InitGame, so the answer is stable for the whole match — a vote
+	// can never be enabled or disabled underneath a match that is already running.
+	//
+	// The off-spellings are matched by hand rather than through the engine's EvalBoolOptions:
+	// that is an ENGINE_API free function whose declaring header is not in this translation
+	// unit's include set (C3861), and it is not worth dragging a gamemode header in for three
+	// string compares. Absent or unrecognised -> ON, so a typo can never silently disable the
+	// vote; only a deliberate 0 / false / no turns it off.
+	bool ConcedeAllowedFor(const AUTGameMode* GM)
+	{
+		if (GM == nullptr) { return true; }
+		const FString Opt = UGameplayStatics::ParseOption(GM->OptionsString, TEXT("AllowConcede"));
+		if (Opt.IsEmpty()) { return true; }
+		return !(Opt.Equals(TEXT("0"),     ESearchCase::IgnoreCase)
+		      || Opt.Equals(TEXT("false"), ESearchCase::IgnoreCase)
+		      || Opt.Equals(TEXT("no"),    ESearchCase::IgnoreCase));
 	}
 
 	// '[System]' chat line to one player (stock RPC — renders on any client with a UT HUD).
@@ -170,6 +197,17 @@ void NCConcede::HandleVote(APlayerController* PC, uint8 Action)
 	AUTGameMode* const GM = Cast<AUTGameMode>(World->GetAuthGameMode());
 	AUTGameState* const GS = World->GetGameState<AUTGameState>();
 	if (!GM || !GS || GS->Teams.Num() != 2 || !GS->Teams[0] || !GS->Teams[1]) { return; }
+
+	// Ruleset opt-out. Answered BEFORE the match-state gate (which stays silent in warmup):
+	// the player typed a command, so tell them it is off here rather than leaving a dead key
+	// that reads as broken. Covers both entry points — the per-player RPC channel and the
+	// listen host's direct call — because every path funnels through HandleVote.
+	if (!ConcedeAllowedFor(GM))
+	{
+		SayTo(PC, TEXT("Concede: the gg vote is disabled on this server."));
+		return;
+	}
+
 	if (!GM->IsMatchInProgress() || GS->HasMatchEnded())
 	{
 		// ElimPlus round breaks are custom match states (RoundCooldown/Intermission) that
