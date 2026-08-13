@@ -1609,13 +1609,36 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 
 		if (bCanEndMatch)
 		{
-			BroadcastKillReplay();
+			// A replay only actually plays off-standalone and when a winning kill was
+			// captured — the same three fields BroadcastKillReplay self-guards on.
+			const bool bIsReplayGoingToPlay = (GetNetMode() != NM_Standalone)
+				&& RoundWinningKiller != nullptr
+				&& RoundWinningKillTime > 0.f
+				&& WinningKillerPawn != nullptr;
+			if (bIsReplayGoingToPlay)
+			{
+				BroadcastKillReplay();
+			}
 			UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Team %d wins the match!"), WinnerTeamIndex);
 
+			// POST-GAME CRASH FIX. Firing EndGame mid-replay destroys WinningKillerPawn while
+			// the client's replay thread is still resolving its NetworkGUID —
+			// EXCEPTION_ACCESS_VIOLATION in TaskGraphThreadNP / CoreUObject.dll. It presents as
+			// an intermittent "random crash right after the match ends", because whether the
+			// client is mid-resolve when EndGame lands is a race.
+			//
+			// ClientPlayInstantReplay arms its own stop at TimeToRewind + StartDelay
+			// (UTPlayerController.cpp:4970-4974), and BroadcastKillReplay passes
+			// TimeToRewind = (now - RoundWinningKillTime) + 5.0 with StartDelay = 0.5 — so the
+			// playback runs 5.5s AT MINIMUM, and longer the further back the winning kill was.
+			// The old unconditional 1.0f therefore ALWAYS landed mid-playback.
+			//
+			// Mirrors the fix already proven in AElimPlusGame::EndRoundForTeam.
+			const float EndGameDelay = bIsReplayGoingToPlay ? 7.0f : 0.5f;
 			FTimerHandle UnusedHandle;
 			FTimerDelegate TimerDel;
 			TimerDel.BindUFunction(this, FName("DelayedEndGame"), WinnerTeamIndex, FName(TEXT("ScoreLimit")));
-			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, 1.0f, false);
+			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, EndGameDelay, false);
 			return;
 		}
 	}

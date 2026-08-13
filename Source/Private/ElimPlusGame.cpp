@@ -1387,11 +1387,15 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 		if (bReplayTriggered)
 		{
 			// DELAY EndGame so the replay can actually play.
-			// 7.0 seconds gives time for the 0.5s delay + ~6s of replay footage
+			// 7.0 seconds gives time for the 0.5s delay + ~6s of replay footage.
+			// This site said 7.0 in the comment but set 1.0f in the code — the same
+			// mid-replay EndGame that the win-by-two branch below documents as
+			// EXCEPTION_ACCESS_VIOLATION in TaskGraphThreadNP / CoreUObject. Only
+			// reachable with bReplayTriggered, so the delay is unconditional here.
 			FTimerHandle UnusedHandle;
 			FTimerDelegate TimerDel;
 			TimerDel.BindUFunction(this, FName("DelayedEndGame"), WinnerTeamIndex, FName(TEXT("ScoreLimit")));
-			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, 1.0f, false);
+			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, 7.0f, false);
 
 			return; // EXIT NOW, do not call EndGame immediately
 		}
