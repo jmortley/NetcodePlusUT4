@@ -313,7 +313,9 @@ void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 	if (Role == ROLE_Authority)
 	{
 		AUTCharacter* OwnerChar = Cast<AUTCharacter>(GetInstigator());
-		AUTWeaponFix* Weapon = OwnerChar ? Cast<AUTWeaponFix>(OwnerChar->GetWeapon()) : nullptr;
+		// Resolve the cannon that fired this shell, not the weapon held when it explodes.
+		// The tracked grace entry lives on the firing weapon, matching the client claim route.
+		AUTWeaponFix* Weapon = AUTWeaponFix::FindFiringWeaponForProjectile(OwnerChar, this);
 		if (Weapon)
 		{
 			Weapon->OnTrackedProjectileResolved(this, Cast<AUTCharacter>(OtherActor));
