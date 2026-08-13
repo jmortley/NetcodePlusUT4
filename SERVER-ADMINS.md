@@ -359,6 +359,12 @@ below).
 > surprised by a sudden end. Server‑authoritative. Worth knowing before your first "why did that match
 > end early?" ticket — and worth mentioning to league admins, since a team can now forfeit a match that
 > would previously have been played to the clock.
+>
+> **To turn it off for a ruleset, add `?AllowConcede=0` to its `gameOptions`** (§7). It is per‑ruleset,
+> not per‑gamemode, which is what lets you disable it for **iCTF while leaving regular CTF alone** —
+> those two are the same gamemode class, so only the ruleset can tell them apart. A disabled server
+> replies "the gg vote is disabled on this server" in chat rather than leaving `gg` as a dead key.
+> The setting is read once at map load, so it can't change under a match that is already running.
 
 > **StatSQL and ServerShield are best added hub‑wide, not per ruleset** — put them in `Game.ini` as
 > `ConfigMutators` (§8.1) so they run on every match. Don't also list them in a ruleset `?mutator=`
@@ -491,9 +497,9 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.HeadBandXY` | `22` | Headshot validation: max head‑centre off‑axis offset (uu). |
 | `ncp.HeadSlackScale` | `1.0` | High‑ping head slack = `targetSpeed · rewindTime · scale` (velocity‑gated; 0 disables). |
 | `ncp.HeadSlackMax` | `25` | Hard cap (uu) on the high‑ping head slack. |
-| `ncp.UnclaimedRenderGate` | `1` | **New in 328.** Server rejects a hitscan hit the shooter's own client never claimed, by reconstructing what that shooter actually had rendered. This is the "gifted shots at high ping" fix. **Leave at `1`** — if honest aim is being demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate. |
-| `ncp.UnclaimedRenderSlack` | `40` | Extra tolerance (uu) the render check allows before demoting a hit. Raise if live logs show demotes clustered on honest body aim. |
-| `ncp.HitAttribRenderExtraMs` | `0` | Extra time (ms) added to the render reconstruction window. Second lever if slack alone isn't enough for a very-high-ping population. |
+| `ncp.UnclaimedRenderGate` | `1` | Server rejects a hitscan hit the shooter's own client never claimed, by reconstructing what that shooter actually had rendered. This is the "gifted shots at high ping" fix. Shipped to production **on 327** (backported), not new in 328. **Leave at `1`** — if honest aim is being demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate. |
+| `ncp.UnclaimedRenderSlack` | `20` | Extra tolerance (uu) the render check allows before demoting a hit. Raise if live logs show demotes clustered on honest body aim. |
+| `ncp.HitAttribRenderExtraMs` | `30` | Extra time (ms) added to the render reconstruction window. Second lever if slack alone isn't enough for a very-high-ping population. |
 | `ncp.SlideGraceMs` | `250` | **New in 328.** Window after a floor slide starts during which validation accepts the standing capsule. A slide shrinks the server capsule instantly, but the shooter still sees a standing body for one replication interp plus the anim blend — without this, shots through the visible torso were server-side air. `0` = off (pre-328 behaviour). |
 | `ncp.HitAttribDebug` | `0` | Per‑shot hit‑attribution telemetry (`[HitAttrib]` log lines). Diagnostic only — **high volume on a populated server**, leave `0` unless investigating a specific report. |
 | `ncp.ShockServerTickHz` | `0` | Server shock‑core tick rate (0 = 240 Hz; >0 = that Hz, 30–720; read at spawn). |
@@ -557,6 +563,7 @@ The `?Key=Value` tokens NetcodePlus itself parses (in addition to stock UT4 opti
 | Option | Type | Default | Modes | Meaning |
 |---|---|---|---|---|
 | `?AdvantageMaxDuration` | int s | `300` (min 60) | CTF/iCTF | Max flag‑advantage period before the match force‑ends. |
+| `?AllowConcede` | bool | `1` (on) | all NCPlus team modes | `0` / `false` / `no` (any casing) disables the **gg concede vote** for that ruleset — see §4.2. Absent or unrecognised = **on**, so a typo can't silently disable it. This is the per‑ruleset switch, and it is the only way to separate **iCTF from regular CTF**: they are the same gamemode class (`ANCPlusCTFGameMode` + the instagib mutator), so nothing keyed on the mode itself can tell them apart. |
 | `?GracePeriod` | int s | `10` (min 3) | CTF/iCTF | Grace window after a flag event before advantage/OT logic acts. |
 | `?HalftimeDuration` | int s | *(BP)* | CTF/iCTF | Halftime length (1v1/2v2 only; auto‑off for 3v3+). |
 | `?MaxPoints` | int | *(BP)* | ShockDom | Number of control points to spawn. |
