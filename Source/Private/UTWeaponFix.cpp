@@ -513,7 +513,8 @@ static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 static const TCHAR* const OPTIONAL_WEAPON_SKIN_ASSETS[] =
 {
 	TEXT("InvisibleIGRifle"),
-	TEXT("PinkLG")
+	TEXT("PinkLG"),
+	TEXT("RocketPink")
 };
 
 static FString GetWeaponSkinObjectPath(const TCHAR* AssetName)
