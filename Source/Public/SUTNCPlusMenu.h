@@ -61,6 +61,7 @@ private:
 	float RagdollTime;
 	bool bShowOwnBeam;
 	float OwnFootstepVolume;
+	bool bPlayFlagCarrierSound;
 	bool bHighResScreenshotPostMatch;
 	TArray<FNCPlusAnnouncerPackOption> AnnouncerPackEntries;
 	TArray<TSharedPtr<FString>> AnnouncerPackOptions;
@@ -126,6 +127,7 @@ private:
 	void OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnShowOwnBeamChanged(ECheckBoxState NewState);
 	void OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType);
+	void OnPlayFlagCarrierSoundChanged(ECheckBoxState NewState);
 	void OnScreenshotChanged(ECheckBoxState NewState);
 
 	// Force Models tab builders/helpers

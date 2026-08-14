@@ -26,6 +26,7 @@
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "NCPlusForceModels.h"
 #include "NCPlusPerformanceSettings.h"
+#include "NCPlusICTFAudioSettings.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
 #include "UTCarriedObject.h"        // HideDeadBody: don't blank a carried flag still parented to the corpse
@@ -1440,6 +1441,36 @@ void ATeamArenaCharacter::SetAmbientSound(USoundBase* NewAmbientSound, bool bCle
 	Super::SetAmbientSound(NewAmbientSound, bClear);
 }
 
+void ATeamArenaCharacter::SetStatusAmbientSound(USoundBase* NewAmbientSound,
+	float SoundVolume, float PitchMultiplier, bool bClear)
+{
+	// AUTCharacter::Tick reapplies the local viewer's HeldFlagAmbientSound every
+	// frame. Intercept that exact assignment at the virtual boundary; stopping the
+	// component once would only let stock restart it on the next tick.
+	if (!bClear && NewAmbientSound != nullptr && GetNetMode() != NM_DedicatedServer &&
+		IsLocalPlayerPawn() && !NCPlusICTFAudioSettings::GetPlayFlagCarrierSound())
+	{
+		AUTCarriedObject* CarriedObject = GetCarriedObject();
+		if (CarriedObject != nullptr && NewAmbientSound == CarriedObject->HeldFlagAmbientSound &&
+			IsICTFMatch())
+		{
+			// A live F5 change can find the flag loop already playing. Clear the
+			// occupied status slot once: stock gives the flag loop priority over
+			// low health, so retaining the previous low-health loop here could leave
+			// it stuck after the carrier heals. Stock restores the appropriate
+			// low-health state on the first tick after the flag is dropped.
+			if (StatusAmbientSound != nullptr ||
+				(StatusAmbientSoundComp != nullptr && StatusAmbientSoundComp->IsPlaying()))
+			{
+				Super::SetStatusAmbientSound(nullptr, 0.f, 1.f, false);
+			}
+			return;
+		}
+	}
+
+	Super::SetStatusAmbientSound(NewAmbientSound, SoundVolume, PitchMultiplier, bClear);
+}
+
 
 static bool NCPHasExactWeaponSkinSelection(
 	const TArray<UUTWeaponSkin*>& Skins, FName WeaponTag, UUTWeaponSkin* Selection)
@@ -2653,6 +2684,48 @@ void ATeamArenaCharacter::RevealAfterPingComp()
 	GetWorldTimerManager().ClearTimer(SpawnRevealHandle);
 }
 
+// ── Shared client-side iCTF detection ───────────────────────────────────────
+bool ATeamArenaCharacter::IsICTFMatch()
+{
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return false;
+	}
+
+	if (!bIctfModeResolved)
+	{
+		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It)
+		{
+			CachedCTFRep = *It;
+			break;
+		}
+
+		// ACTFStatsReplicator arrives at match start. The replicated MutInstagibNCP
+		// mutator is present during warmup, so it supplies the early iCTF signal.
+		if (!bIctfMutatorFound)
+		{
+			for (TActorIterator<AUTMutator> It(World); It; ++It)
+			{
+				if (It->GetClass()->GetName().Contains(TEXT("MutInstagibNCP")))
+				{
+					bIctfMutatorFound = true;
+					break;
+				}
+			}
+		}
+
+		// Stop walking actor lists forever outside iCTF. A cached replicator's
+		// replicated bool remains live, so a later true update is still observed.
+		if (CachedCTFRep.IsValid() || bIctfMutatorFound || (World->GetTimeSeconds() - CreationTime) > 8.f)
+		{
+			bIctfModeResolved = true;
+		}
+	}
+
+	return bIctfMutatorFound || (CachedCTFRep.IsValid() && CachedCTFRep->bIsInstagibMatch);
+}
+
 // ── Own footstep volume (iCTF) ─────────────────────────────────────────────
 // Scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting. Only the local
 // human's own pawn, only in iCTF, only when the setting is below stock (1.0); everything else falls through
@@ -2689,38 +2762,7 @@ void ATeamArenaCharacter::PlayFootstep(uint8 FootNum, bool bFirstPerson)
 		// lazily while null so it still binds if the first footstep precedes its replication.
 		if (OwnFootstepVolumeScale < 1.f)
 		{
-			// Resolve the iCTF gate once: search until the replicator is found, or give up ~8s after spawn
-			// so non-iCTF modes (ElimPlus etc., which have no ACTFStatsReplicator) don't iterate every
-			// footstep forever. The window also covers a first footstep that precedes the replicator's arrival.
-			if (!bIctfFootstepResolved)
-			{
-				for (TActorIterator<ACTFStatsReplicator> It(GetWorld()); It; ++It)
-				{
-					CachedCTFRep = *It;
-					break;
-				}
-				// WARMUP signal: ACTFStatsReplicator only spawns at match start, so during warmup the
-				// replicator gate is null and footsteps fall through to stock. The replicated MutInstagibNCP
-				// mutator is present from match init (through warmup), so finding it confirms iCTF early.
-				// Contains() handles the BP "_C" suffix; latched so we don't iterate mutators every step.
-				if (!bIctfMutatorFound)
-				{
-					for (TActorIterator<AUTMutator> It(GetWorld()); It; ++It)
-					{
-						if (It->GetClass()->GetName().Contains(TEXT("MutInstagibNCP")))
-						{
-							bIctfMutatorFound = true;
-							break;
-						}
-					}
-				}
-				if (CachedCTFRep.IsValid() || bIctfMutatorFound || (GetWorld()->GetTimeSeconds() - CreationTime) > 8.f)
-				{
-					bIctfFootstepResolved = true;
-				}
-			}
-			// iCTF if EITHER signal fires: the mutator (covers warmup) or the authoritative replicator flag.
-			if (bIctfMutatorFound || (CachedCTFRep.IsValid() && CachedCTFRep->bIsInstagibMatch))
+			if (IsICTFMatch())
 			{
 				// Mirror stock's double-footstep filter: drop the 3rd-person step while in first-person view
 				// (otherwise both the 1P and 3P notifies would play the own footstep twice).

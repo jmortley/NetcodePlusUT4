@@ -3,6 +3,7 @@
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
 #include "NCPlusPerformanceSettings.h"
+#include "NCPlusICTFAudioSettings.h"
 #include "NCClutchOverlay.h"
 #include "NCReadyUp.h"
 #include "UnrealTournament.h"
@@ -816,14 +817,14 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 			]
 		]
 
-		// ── Footstep Settings ──
+		// ── Audio Settings ──
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 15, 0, 5)
 		.HAlign(HAlign_Center)
 		[
 			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Footstep Settings")))
+			.Text(FText::FromString(TEXT("Audio Settings")))
 			.Font(BoldFont(18))
 			.ColorAndOpacity(FLinearColor::White)
 		]
@@ -856,6 +857,35 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 				.Value(OwnFootstepVolume)
 				.OnValueCommitted(this, &SUTNCPlusMenu::OnFootstepVolumeChanged)
 				.MinDesiredWidth(80.f)
+			]
+		]
+
+		// Local flag-carrier ambient loop
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bPlayFlagCarrierSound ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnPlayFlagCarrierSoundChanged)
+				.ToolTipText(FText::FromString(TEXT("Play the looping cloth/flapping sound while you carry the enemy flag in iCTF. Client-side only; pickup, drop, capture, announcer, and other players' sounds are unchanged.")))
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Play Flag-Carrying Flap Sound")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+				.ToolTipText(FText::FromString(TEXT("Play the looping cloth/flapping sound while you carry the enemy flag in iCTF. Client-side only; pickup, drop, capture, announcer, and other players' sounds are unchanged.")))
 			]
 		]
 
@@ -1435,6 +1465,8 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		bShowOwnBeam = true;   // preserve the current beam visuals for existing users
 
+	bPlayFlagCarrierSound = NCPlusICTFAudioSettings::GetPlayFlagCarrierSound();
+
 	if (GConfig->GetString(NCPSection, TEXT("OwnFootstepVolume"), Val, ConfigPath))
 		OwnFootstepVolume = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
 	else
@@ -1534,10 +1566,14 @@ void SUTNCPlusMenu::SaveSettings()
 	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"),
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
 	GConfig->SetString(IGCTFSection, TEXT("bShowOwnBeam"), bShowOwnBeam ? TEXT("True") : TEXT("False"), ConfigPath);
+	GConfig->SetString(IGCTFSection, TEXT("bPlayFlagCarrierSound"), bPlayFlagCarrierSound ? TEXT("True") : TEXT("False"), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
 	GConfig->Flush(false, ConfigPath);
+	// Publish the newly saved value to the character's lazy cache so muting or
+	// restoring the loop takes effect on the next stock character tick.
+	NCPlusICTFAudioSettings::Reload();
 
 	if (bAnnouncerDataInitialized)
 	{
@@ -1640,6 +1676,11 @@ void SUTNCPlusMenu::OnShowOwnBeamChanged(ECheckBoxState NewState)
 void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType)
 {
 	OwnFootstepVolume = FMath::Clamp(NewValue, 0.f, 1.f);
+}
+
+void SUTNCPlusMenu::OnPlayFlagCarrierSoundChanged(ECheckBoxState NewState)
+{
+	bPlayFlagCarrierSound = (NewState == ECheckBoxState::Checked);
 }
 
 void SUTNCPlusMenu::OnScreenshotChanged(ECheckBoxState NewState)

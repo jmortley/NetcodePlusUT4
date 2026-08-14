@@ -72,6 +72,9 @@ public:
 	// Reject ambient loops emitted by inactive stock weapons before they can become
 	// replicated, persistent character audio (notably the Link Gun overheat loop).
 	virtual void SetAmbientSound(USoundBase* NewAmbientSound, bool bClear = false) override;
+	/** Suppress only this client's carried-flag loop when disabled in the F5 iCTF settings. */
+	virtual void SetStatusAmbientSound(USoundBase* NewAmbientSound, float SoundVolume = 0.f,
+		float PitchMultiplier = 1.f, bool bClear = false) override;
 
     /**
      * Override replication callback to use visual prediction time.
@@ -371,15 +374,15 @@ protected:
 	void PlayFootstepScaled(uint8 FootNum, bool bFirstPerson, float VolumeScale);
 	/** Client-side Clutch role lookup; returns 0.1 for a live-round defender, otherwise 1. */
 	float GetClutchFootstepVolumeScale();
+	/** Cached client-side iCTF detection shared by personal audio preferences. */
+	bool IsICTFMatch();
 	TWeakObjectPtr<AClutchRoundState> CachedClutchFootstepState;
 	/** 0..1 multiplier on the local player's own footstep; 1 = stock (no override). Read once from config. */
 	float OwnFootstepVolumeScale = 1.f;
 	bool bOwnFootstepVolumeRead = false;
-	/** Cached iCTF gate (ACTFStatsReplicator::bIsInstagibMatch) — present only in NCPlusCTF instagib.
-	 *  Searched lazily while null (so it resolves even if the first footstep precedes replication), then
-	 *  latched by bIctfFootstepResolved to avoid iterating every footstep forever in non-iCTF modes. */
+	/** Cached iCTF gate (ACTFStatsReplicator::bIsInstagibMatch), shared by local audio settings. */
 	TWeakObjectPtr<ACTFStatsReplicator> CachedCTFRep;
-	bool bIctfFootstepResolved = false;
+	bool bIctfModeResolved = false;
 	/** Warmup iCTF signal: the replicated MutInstagibNCP mutator is present from match init (incl. warmup),
 	 *  unlike ACTFStatsReplicator which only spawns at match start. Latched once found. */
 	bool bIctfMutatorFound = false;
