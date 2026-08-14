@@ -9,7 +9,7 @@ namespace
 	// -1 = not loaded, 0 = disabled, 1 = enabled.
 	int8 GPlayFlagCarrierSound = -1;
 
-	FString GetModIniPath()
+	FString GetICTFAudioModIniPath()
 	{
 		return FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	}
@@ -26,7 +26,7 @@ namespace
 			TEXT("InstagibCTF"),
 			TEXT("bPlayFlagCarrierSound"),
 			bPlaySound,
-			GetModIniPath());
+			GetICTFAudioModIniPath());
 		GPlayFlagCarrierSound = bPlaySound ? 1 : 0;
 	}
 }
