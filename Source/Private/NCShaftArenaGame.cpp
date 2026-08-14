@@ -30,6 +30,11 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCShaftArena, Log, All);
 
+/** NCP-only stat name (not in StatNames.h): one sample per beam refire interval,
+ *  written by UTWeaponStateFiringLinkBeam_NCP / UTWeap_LinkGun_Plus. This is the
+ *  denominator LinkHits is measured against for beam fire. */
+static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+
 namespace
 {
 	bool IsSupportedShaftLinkClass(const UClass* WeaponClass)
@@ -410,7 +415,15 @@ float ANCShaftArenaGame::ComputeLinkAccuracyPct(AUTPlayerState* PS) const
 {
 	if (!PS) return 0.f;
 	const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
-	const int32 Shots = PS->GetStatsValue(NAME_LinkShots);
+	// Beam denominator: the authoritative NCP beam state counts one sample per
+	// refire interval into LinkBeamShots (UTWeaponStateFiringLinkBeam_NCP.cpp),
+	// which is the unit LinkHits is accumulated in. Stock NAME_LinkShots only
+	// ticks per trigger pull and receives NOTHING from the beam — reading it
+	// here persisted 0.00 for every Shaft match (beam-only weapon, so mode 0
+	// never fires) while the scoreboard, HUD and replicators all showed the
+	// correct value from LinkBeamShots. Sum both so a variant that also fires
+	// plasma still counts those trigger pulls.
+	const int32 Shots = PS->GetStatsValue(NAME_LinkBeamShots) + PS->GetStatsValue(NAME_LinkShots);
 	return (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
 }
 
@@ -437,8 +450,10 @@ void ANCShaftArenaGame::BuildMatchSummary(FNCMatchSummary& Out) const
 		P.Deaths     = UTPS->Deaths;
 		P.Ping       = UTPS->Ping;
 		P.Team       = UTPS->Team ? UTPS->Team->TeamIndex : 0;
+		// Shots = beam samples + plasma trigger pulls; see ComputeLinkAccuracyPct.
 		P.WeaponAccuracy.Add(FName(TEXT("LinkGun")),
-			FIntPoint(UTPS->GetStatsValue(NAME_LinkShots), UTPS->GetStatsValue(NAME_LinkHits)));
+			FIntPoint(UTPS->GetStatsValue(NAME_LinkBeamShots) + UTPS->GetStatsValue(NAME_LinkShots),
+				UTPS->GetStatsValue(NAME_LinkHits)));
 
 		if (RatingSystem)
 		{

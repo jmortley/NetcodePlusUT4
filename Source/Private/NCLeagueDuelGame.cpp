@@ -30,6 +30,11 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCLeagueDuel, Log, All);
 
+/** NCP-only stat name (not in StatNames.h): one sample per beam refire interval,
+ *  written by UTWeaponStateFiringLinkBeam_NCP / UTWeap_LinkGun_Plus. This is the
+ *  denominator LinkHits is measured against for beam fire. */
+static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+
 namespace
 {
 	/** Match weapon class against one of the 6 known league weapons.
@@ -1021,8 +1026,14 @@ void ANCLeagueDuelGame::BuildMatchSummary(FNCMatchSummary& Out) const
 
 		// Per-weapon accuracy from the engine stats system.
 		// FIntPoint stores Shots in X and Hits in Y.
+		// Link shots come from two counters: stock NAME_LinkShots (one per plasma
+		// trigger pull) and NAME_LinkBeamShots (one per beam refire interval, the
+		// unit LinkHits accumulates in — see UTWeaponStateFiringLinkBeam_NCP.cpp).
+		// Reading only the stock name counted plasma shots against plasma AND beam
+		// hits, inflating link accuracy past 100% for anyone using the beam.
 		P.WeaponAccuracy.Add(FName(TEXT("LinkGun")),
-			FIntPoint(UTPS->GetStatsValue(NAME_LinkShots), UTPS->GetStatsValue(NAME_LinkHits)));
+			FIntPoint(UTPS->GetStatsValue(NAME_LinkBeamShots) + UTPS->GetStatsValue(NAME_LinkShots),
+				UTPS->GetStatsValue(NAME_LinkHits)));
 		P.WeaponAccuracy.Add(FName(TEXT("ShockRifle")),
 			FIntPoint(UTPS->GetStatsValue(NAME_ShockRifleShots), UTPS->GetStatsValue(NAME_ShockRifleHits)));
 		P.WeaponAccuracy.Add(FName(TEXT("SniperRifle")),
