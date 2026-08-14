@@ -4823,7 +4823,45 @@ void AUWipeoutGame::CloseClutchHold(int32 TeamIndex, const TCHAR* Outcome)
 
 	if (!Rec.UniqueId.IsEmpty())
 	{
-		CompletedClutches.Add(MoveTemp(Rec));
+		// A round can legitimately produce more than one hold for the same player:
+		// the team drops to one alive (hold opens), a respawn wave closes it
+		// "reinforced", that teammate dies, and the same player is alone again.
+		// ut4stats stores one row per (match, round, player) — its unique key —
+		// so emit at most one record per (round, player) and fold the repeats
+		// into it rather than dropping them. HoldSeconds sums the time actually
+		// spent alone (not EndTime-StartTime, which would count the reinforced
+		// gap); the outcome is the last one, because that is what settled the
+		// round. Teams are NOT deduped: two different players each holding in
+		// the same round is legal and the schema stores both.
+		const int32 ExistingIdx = CompletedClutches.IndexOfByPredicate(
+			[&Rec](const FNCWipeoutClutchInput& Prev)
+			{
+				return Prev.RoundIndex == Rec.RoundIndex
+					&& Prev.UniqueId == Rec.UniqueId;
+			});
+		if (ExistingIdx != INDEX_NONE)
+		{
+			FNCWipeoutClutchInput& Prev = CompletedClutches[ExistingIdx];
+			UE_LOG(LogGameMode, Verbose,
+				TEXT("Wipeout clutch: folding repeat hold for %s in round %d (%s + %s)"),
+				*Rec.UniqueId, Rec.RoundIndex, *Prev.Outcome, *Rec.Outcome);
+			Prev.EnemiesAtStart     = FMath::Max(Prev.EnemiesAtStart, Rec.EnemiesAtStart);
+			Prev.DirectKills        += Rec.DirectKills;
+			Prev.TeammatesRespawned += Rec.TeammatesRespawned;
+			Prev.bSuddenDeath       = Prev.bSuddenDeath || Rec.bSuddenDeath;
+			Prev.StartTime          = FMath::Min(Prev.StartTime, Rec.StartTime);
+			Prev.EndTime            = FMath::Max(Prev.EndTime, Rec.EndTime);
+			Prev.HoldSeconds        += Rec.HoldSeconds;
+			Prev.Outcome            = Rec.Outcome;
+			// Recompute against the folded totals so the flag still means
+			// "won without letting an enemy through".
+			Prev.bCleanFinish       = (Prev.Outcome == TEXT("won"))
+				&& Prev.EnemiesAtStart > 0 && Prev.DirectKills >= Prev.EnemiesAtStart;
+		}
+		else
+		{
+			CompletedClutches.Add(MoveTemp(Rec));
+		}
 	}
 	H = FWipeoutClutchTracker();
 }

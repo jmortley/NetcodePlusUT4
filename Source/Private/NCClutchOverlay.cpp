@@ -178,8 +178,14 @@ void NCClutchOverlay::Draw(AUTHUD* HUD, UCanvas* Canvas,
 	const FVector2D Anchor = NCPlusHUDDrawCall::ResolveScreenPos(
 		TEXT("clutch_overlay"), Canvas,
 		FVector2D(Canvas->ClipX * 0.5f, 138.f * ResolutionScale));
-	const float StackHeight = VisibleCount * CardHeight + (VisibleCount - 1) * CardGap;
-	float CardY = Anchor.Y - StackHeight * 0.5f;
+	// Anchor the FIRST card and grow the stack downward, rather than centring the
+	// whole stack on the anchor. Centring pushed the top card up by half the stack
+	// height as soon as a second one appeared, and the two-card case is not an edge
+	// case — it is the design case (1v1: both teams hold simultaneously), which is
+	// exactly when the top card landed on the score bar and round clock. Growing
+	// down keeps the single-card position pixel-identical and puts the second card
+	// in empty space below.
+	float CardY = Anchor.Y - CardHeight * 0.5f;
 
 	for (int32 Index = 0; Index < VisibleCount; ++Index)
 	{
