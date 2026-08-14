@@ -70,6 +70,7 @@ private:
 	// ── Home performance settings ── client-local working copy, applied on Save.
 	float CharacterOverlayDistance = 6500.f;
 	TArray<TSharedPtr<FString>> CharacterOverlayDistanceOptions;
+	bool bShowClutchOverlay = true;
 
 	// ── Force Models settings ── working copy of the live config, edited in-place by the tab's
 	// widgets via bool*/float* lambdas and written back on Save. The combo option lists are members

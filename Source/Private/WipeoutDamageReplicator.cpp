@@ -21,6 +21,163 @@ void AWipeoutDamageReplicator::GetLifetimeReplicatedProps(TArray<FLifetimeProper
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AWipeoutDamageReplicator, DamageEntries);
+	DOREPLIFETIME(AWipeoutDamageReplicator, Team0ClutchOverlay);
+	DOREPLIFETIME(AWipeoutDamageReplicator, Team1ClutchOverlay);
+}
+
+FNCClutchOverlayState* AWipeoutDamageReplicator::GetMutableClutchOverlayState(int32 TeamIndex)
+{
+	return TeamIndex == 0 ? &Team0ClutchOverlay
+		: (TeamIndex == 1 ? &Team1ClutchOverlay : nullptr);
+}
+
+const FNCClutchOverlayState* AWipeoutDamageReplicator::GetClutchOverlayState(int32 TeamIndex) const
+{
+	return TeamIndex == 0 ? &Team0ClutchOverlay
+		: (TeamIndex == 1 ? &Team1ClutchOverlay : nullptr);
+}
+
+float AWipeoutDamageReplicator::GetClutchOverlayServerTime() const
+{
+	const AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+	return GS ? GS->GetServerWorldTimeSeconds()
+		: (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f);
+}
+
+void AWipeoutDamageReplicator::BeginClutchOverlay(int32 TeamIndex,
+	AUTPlayerState* Candidate, int32 EnemiesAlive, bool bSuddenDeath)
+{
+	if (Role != ROLE_Authority || !Candidate || EnemiesAlive < 1)
+	{
+		return;
+	}
+
+	FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+	if (!State || State->bActive)
+	{
+		return;
+	}
+
+	const uint32 NextGeneration = State->Generation + 1;
+	*State = FNCClutchOverlayState();
+	State->Generation = NextGeneration;
+	State->bActive = true;
+	State->bRespawnHold = true;
+	State->bSuddenDeath = bSuddenDeath;
+	State->TeamIndex = static_cast<uint8>(TeamIndex);
+	State->Candidate = Candidate;
+	State->CandidateName = Candidate->PlayerName;
+	State->CandidateId = Candidate->UniqueId.IsValid()
+		? Candidate->UniqueId.ToString()
+		: FString::Printf(TEXT("BOT:%s"), *Candidate->PlayerName);
+	State->EnemiesAtStart = EnemiesAlive;
+	State->EnemiesRemaining = EnemiesAlive;
+	State->StartServerTime = GetClutchOverlayServerTime();
+	ForceNetUpdate();
+}
+
+void AWipeoutDamageReplicator::CreditClutchOverlayKill(
+	AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
+{
+	if (Role != ROLE_Authority || !KillerPS || !VictimPS)
+	{
+		return;
+	}
+
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		if (State && State->bActive && State->Candidate == KillerPS
+			&& static_cast<int32>(VictimPS->GetTeamNum()) == 1 - TeamIndex)
+		{
+			++State->DirectKills;
+			ForceNetUpdate();
+			return;
+		}
+	}
+}
+
+void AWipeoutDamageReplicator::UpdateClutchOverlayRemaining(
+	int32 AliveTeam0, int32 AliveTeam1)
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	const int32 AliveByTeam[2] = { AliveTeam0, AliveTeam1 };
+	bool bChanged = false;
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		if (State && State->bActive)
+		{
+			const int32 NewRemaining = FMath::Max(0, AliveByTeam[1 - TeamIndex]);
+			if (State->EnemiesRemaining != NewRemaining)
+			{
+				State->EnemiesRemaining = NewRemaining;
+				bChanged = true;
+			}
+		}
+	}
+	if (bChanged)
+	{
+		ForceNetUpdate();
+	}
+}
+
+void AWipeoutDamageReplicator::PromoteClutchOverlayToSuddenDeath(int32 TeamIndex)
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+	FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+	if (State && State->bActive && !State->bSuddenDeath)
+	{
+		State->bSuddenDeath = true;
+		ForceNetUpdate();
+	}
+}
+
+void AWipeoutDamageReplicator::EndClutchOverlay(int32 TeamIndex,
+	ENCClutchOverlayOutcome Outcome, int32 TeammatesRespawned)
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+	FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+	if (!State || !State->bActive)
+	{
+		return;
+	}
+
+	State->bActive = false;
+	State->Candidate = nullptr;
+	State->Outcome = Outcome;
+	State->EndServerTime = GetClutchOverlayServerTime();
+	State->TeammatesRespawned = FMath::Max(0, TeammatesRespawned);
+	ForceNetUpdate();
+}
+
+void AWipeoutDamageReplicator::ClearClutchOverlays()
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		const uint32 NextGeneration = State->Generation + 1;
+		*State = FNCClutchOverlayState();
+		State->Generation = NextGeneration;
+		State->TeamIndex = static_cast<uint8>(TeamIndex);
+		State->bRespawnHold = true;
+	}
+	ForceNetUpdate();
 }
 
 void AWipeoutDamageReplicator::BeginPlay()

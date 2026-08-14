@@ -735,7 +735,8 @@ protected:
 	void TryResolveShieldBeltSubstitution();
 	void CheckWipeoutCondition();
 	void EndRoundForTeam(int32 WinnerTeamIndex, FName Reason);
-	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const;
+	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1,
+		const AUTPlayerState* IgnoredPlayer = nullptr) const;
 	int32 GetTiebreakWinnerByTeamHealth() const;
 	void ResetPlayersForNewRound();
 	void CleanupWorldForNewRound();
@@ -832,7 +833,8 @@ protected:
 	void EnforceRoundSpectatorLock();
 	AUTPlayerState* FindAliveTeammate(AUTPlayerState* PS) const;
 	AUTPlayerState* FindAliveEnemy(AUTPlayerState* PS) const;
-	AUTPlayerState* FindAliveOnTeamPS(int32 TeamIndex) const;
+	AUTPlayerState* FindAliveOnTeamPS(int32 TeamIndex,
+		const AUTPlayerState* IgnoredPlayer = nullptr) const;
 	AUTPlayerState* FindAnyOnTeamPS(int32 TeamIndex) const;
 	int32 CountAliveOnTeam(int32 TeamIndex) const;
 
@@ -955,10 +957,15 @@ protected:
 
 	/** Clear all clutch telemetry. Match start only. */
 	void ResetClutchTelemetryForMatch();
+	/** Drop live holds without clearing completed match telemetry. */
+	void DiscardOpenClutchHolds();
+	/** Idempotent alive-count transition handler used by deaths, respawns and the timer fallback. */
+	void UpdateClutchHoldTransitions(int32 AliveTeam0, int32 AliveTeam1,
+		const AUTPlayerState* IgnoredPlayer = nullptr);
 	/** Open a hold for TeamIndex. No-op if one is already open. */
 	void OpenClutchHold(int32 TeamIndex, AUTPlayerState* Holder, int32 EnemiesAlive);
 	/** Credit an enemy kill to an open hold whose holder is KillerPS. */
-	void CreditClutchHoldKill(AUTPlayerState* KillerPS);
+	void CreditClutchHoldKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS);
 	/** Close TeamIndex's hold with Outcome and move it to CompletedClutches. */
 	void CloseClutchHold(int32 TeamIndex, const TCHAR* Outcome);
 

@@ -5,6 +5,9 @@
 #include "UTHUD.h"
 #include "WipeoutHUD.generated.h"
 
+class AWipeoutDamageReplicator;
+class AUTGameState;
+
 UCLASS()
 class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 {
@@ -55,6 +58,12 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void NotifyMatchStateChange() override;
 
 private:
+	AWipeoutDamageReplicator* FindDamageReplicator(UWorld* World);
+	TWeakObjectPtr<UWorld> CachedDamageReplicatorWorld;
+	TWeakObjectPtr<AUTGameState> CachedDamageReplicatorGameState;
+	TWeakObjectPtr<AWipeoutDamageReplicator> CachedDamageReplicator;
+	float NextDamageReplicatorRetryTime = 0.f;
+
 	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
 	float PostMatchScreenshotStable = -1.f;

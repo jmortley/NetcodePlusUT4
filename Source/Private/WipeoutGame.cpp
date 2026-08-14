@@ -741,6 +741,16 @@ void AUWipeoutGame::DefaultTimer()
 
 					bInSuddenDeath = true;
 					PendingRespawns.Empty();
+					if (DamageReplicator)
+					{
+						for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+						{
+							if (ActiveHold[TeamIndex].bOpen)
+							{
+								DamageReplicator->PromoteClutchOverlayToSuddenDeath(TeamIndex);
+							}
+						}
+					}
 
 					// Restart the round clock so players can time items during OT.
 					RoundEndTimeSeconds = GetWorld()->GetTimeSeconds() + 300.f;
@@ -759,6 +769,11 @@ void AUWipeoutGame::DefaultTimer()
 
 					int32 A0, A1;
 					GetAliveCounts(A0, A1);
+					// A sub-one-second pending respawn may have suppressed the normal
+					// cue. Once sudden death clears that queue, this is a real clutch.
+					if (A0 == 1 && !ActiveHold[0].bOpen) bTeam0LastAliveAnnounced = false;
+					if (A1 == 1 && !ActiveHold[1].bOpen) bTeam1LastAliveAnnounced = false;
+					UpdateClutchHoldTransitions(A0, A1);
 					if (A0 == 0 || A1 == 0)
 					{
 						CheckWipeoutCondition();
@@ -774,60 +789,7 @@ void AUWipeoutGame::DefaultTimer()
 
 		// Normal tick: check for wipeout
 		CheckWipeoutCondition();
-
-		// Reset LMS announce flag when team goes back above 1 alive (teammate respawned)
-		if (Alive0 > 1) bTeam0LastAliveAnnounced = false;
-		if (Alive1 > 1) bTeam1LastAliveAnnounced = false;
-
-		// A team climbing back above 1 alive means the hold was REINFORCED: the
-		// holder bought enough time for a teammate to respawn. That is the
-		// success case for this mode, so it closes the hold as a positive
-		// outcome, not a failure. Counted before the open-edge below so a
-		// reinforce and a fresh 2->1 in the same tick can't collide.
-		{
-			const int32 AliveByTeam[2] = { Alive0, Alive1 };
-			for (int32 T = 0; T < 2; ++T)
-			{
-				if (ActiveHold[T].bOpen && AliveByTeam[T] > 1)
-				{
-					ActiveHold[T].TeammatesRespawned = FMath::Max(1, AliveByTeam[T] - 1);
-					CloseClutchHold(T, TEXT("reinforced"));
-				}
-			}
-		}
-
-		// Check for "last player alive" situations (clutch)
-		if (Alive0 == 1 && Team0StartingSize > 1 && !bTeam0LastAliveAnnounced)
-		{
-			AUTPlayerState* LastPS = FindAliveOnTeamPS(0);
-			if (LastPS)
-			{
-				bTeam0LastAliveAnnounced = true;
-				// Suppress LMS sound if a teammate respawns within 1 second
-				if (!HasImminentRespawnOnTeam(0, 1.0f))
-				{
-					BP_OnLastPlayerAlive(0, LastPS, Alive1);
-					OnClutchSituationStarted.Broadcast(LastPS, Alive1);
-					// Telemetry opens on the SAME gate as the cue, so a recorded
-					// hold and the sound the players heard always agree.
-					OpenClutchHold(0, LastPS, Alive1);
-				}
-			}
-		}
-		if (Alive1 == 1 && Team1StartingSize > 1 && !bTeam1LastAliveAnnounced)
-		{
-			AUTPlayerState* LastPS = FindAliveOnTeamPS(1);
-			if (LastPS)
-			{
-				bTeam1LastAliveAnnounced = true;
-				if (!HasImminentRespawnOnTeam(1, 1.0f))
-				{
-					BP_OnLastPlayerAlive(1, LastPS, Alive0);
-					OnClutchSituationStarted.Broadcast(LastPS, Alive0);
-					OpenClutchHold(1, LastPS, Alive0);
-				}
-			}
-		}
+		UpdateClutchHoldTransitions(Alive0, Alive1);
 
 		Super::DefaultTimer();
 	}
@@ -1113,6 +1075,10 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 		// Notify Blueprint
 		BP_OnPlayerRespawnedMidRound(PS);
 		CheckFinalLifeAnnouncements();
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1);
+		UpdateClutchHoldTransitions(Alive0, Alive1);
 
 		UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s respawned successfully"), *PS->PlayerName);
 	}
@@ -1198,6 +1164,10 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 
 	AUTPlayerState* OtherPS = Other ? Cast<AUTPlayerState>(Other->PlayerState) : nullptr;
 	if (!OtherPS) return;
+	// Decide the bad-spawn refund before publishing any clutch transition. The
+	// refund restores this life, so it must not award progress or flash DENIED.
+	const bool bRefundBadSpawnDeath = !bInSuddenDeath
+		&& WasBadSpawnDeath(OtherPS, Killer, Other);
 
 	// Track the killing blow for potential replay
 	if (Killer && Killer->PlayerState)
@@ -1214,20 +1184,20 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 	// --- Clutch/LMS-hold telemetry, in strict order for this death event ---
 	// Credit BEFORE the death close: a holder who trades with the last enemy
 	// must keep the kill that made it a trade.
-	if (Killer && Killer->PlayerState)
+	if (!bRefundBadSpawnDeath && Killer && Killer->PlayerState)
 	{
 		if (AUTPlayerState* KillerPS = Cast<AUTPlayerState>(Killer->PlayerState))
 		{
 			if (KillerPS != OtherPS)   // suicides/self-damage credit nothing
 			{
-				CreditClutchHoldKill(KillerPS);
+				CreditClutchHoldKill(KillerPS, OtherPS);
 			}
 		}
 	}
 	// The holder dying ends their hold. GetAliveCounts is not consulted here:
 	// this pawn is not marked out-of-lives until further down, so an alive-count
 	// read at this point would still include the player who just died.
-	for (int32 T = 0; T < 2; ++T)
+	for (int32 T = 0; !bRefundBadSpawnDeath && T < 2; ++T)
 	{
 		if (ActiveHold[T].bOpen && ActiveHold[T].Holder.Get() == OtherPS)
 		{
@@ -1266,7 +1236,7 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		});
 		GetWorldTimerManager().SetTimer(SuddenDeathSpecHandle, SpecDelegate, SpectateDelay, false);
 	}
-	else if (WasBadSpawnDeath(OtherPS, Killer, Other))
+	else if (bRefundBadSpawnDeath)
 	{
 		// Bad-spawn artifact (engine ejected them off/under the map shortly after
 		// spawning): refund it — undo the death, free instant respawn, and do NOT
@@ -1279,6 +1249,19 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 	{
 		// Normal: start the escalating respawn timer
 		StartRespawnTimer(OtherPS);
+	}
+
+	// Publish exact remaining-enemy counts and open/close transitions now;
+	// DefaultTimer retains this same idempotent path as a one-second fallback.
+	// A refunded bad-spawn death is physically pawnless until next tick even
+	// though its life has already been restored, so sampling it here would open
+	// a false 2->1 hold and immediately close it as HELD after the respawn.
+	if (!bRefundBadSpawnDeath)
+	{
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1);
+		UpdateClutchHoldTransitions(Alive0, Alive1);
 	}
 
 	// Check for wipeout with a brief grace period
@@ -1422,6 +1405,9 @@ void AUWipeoutGame::StartNextRound()
 		bRoundInProgress = false;
 		return;
 	}
+	// Defensive clear: normal round endings close every hold, while admin or
+	// exceptional paths must not carry one into the next round.
+	DiscardOpenClutchHolds();
 
 	if (bAnnounceTeam)
 	{
@@ -3002,7 +2988,8 @@ void AUWipeoutGame::CleanupWorldForNewRound()
 // ALIVE COUNTS & HELPERS
 // ============================================================================
 
-bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const
+bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1,
+	const AUTPlayerState* IgnoredPlayer) const
 {
 	OutAliveTeam0 = 0;
 	OutAliveTeam1 = 0;
@@ -3013,7 +3000,7 @@ bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 	for (APlayerState* PSBase : GS->PlayerArray)
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
-		if (!PS || PS->bOnlySpectator || PS->bIsInactive || !PS->Team) continue;
+		if (!PS || PS == IgnoredPlayer || PS->bOnlySpectator || PS->bIsInactive || !PS->Team) continue;
 
 		AUTCharacter* Pawn = Cast<AUTCharacter>(PS->GetUTCharacter());
 		if (!Pawn || Pawn->IsDead() || Pawn->Health <= 0) continue;
@@ -3206,7 +3193,8 @@ AUTPlayerState* AUWipeoutGame::FindAliveEnemy(AUTPlayerState* PS) const
 }
 
 
-AUTPlayerState* AUWipeoutGame::FindAliveOnTeamPS(int32 TeamIndex) const
+AUTPlayerState* AUWipeoutGame::FindAliveOnTeamPS(
+	int32 TeamIndex, const AUTPlayerState* IgnoredPlayer) const
 {
 	if (!Teams.IsValidIndex(TeamIndex)) return nullptr;
 	TArray<AController*> Members = Teams[TeamIndex]->GetTeamMembers();
@@ -3214,7 +3202,7 @@ AUTPlayerState* AUWipeoutGame::FindAliveOnTeamPS(int32 TeamIndex) const
 	{
 		if (!C) continue;
 		AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState);
-		if (!PS || PS->bOnlySpectator) continue;
+		if (!PS || PS == IgnoredPlayer || PS->bOnlySpectator) continue;
 		APawn* P = C->GetPawn();
 		const AUTCharacter* UTC = Cast<AUTCharacter>(P);
 		if (P && (!UTC || !UTC->IsDead())) return PS;
@@ -4133,6 +4121,8 @@ void AUWipeoutGame::HandleInstanceCleanup()
 
 void AUWipeoutGame::Logout(AController* Exiting)
 {
+	AUTPlayerState* DepartingPS = Exiting
+		? Cast<AUTPlayerState>(Exiting->PlayerState) : nullptr;
 	if (bCompetitiveAutoPause && IsMatchInProgress() && !HasMatchEnded() && !GetWorld()->IsPaused())
 	{
 		if (Exiting)
@@ -4148,9 +4138,17 @@ void AUWipeoutGame::Logout(AController* Exiting)
 
 	if (Exiting)
 	{
-		AUTPlayerState* PS = Cast<AUTPlayerState>(Exiting->PlayerState);
+		AUTPlayerState* PS = DepartingPS;
 		if (PS)
 		{
+			for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+			{
+				if (ActiveHold[TeamIndex].bOpen
+					&& ActiveHold[TeamIndex].Holder.Get() == PS)
+				{
+					CloseClutchHold(TeamIndex, TEXT("died"));
+				}
+			}
 			// Clean up all tracking maps to prevent stale pointer access
 			PlayerRoundDamage.Remove(PS);
 			PlayerDeathCounts.Remove(PS);
@@ -4161,6 +4159,18 @@ void AUWipeoutGame::Logout(AController* Exiting)
 	}
 
 	Super::Logout(Exiting);
+
+	// Controller cleanup removes PlayerState only after Logout returns. Exclude
+	// it explicitly so active 1vX counts and any newly-created sole survivor are
+	// correct immediately, even while competitive auto-pause freezes timers.
+	if (HasAuthority() && bRoundInProgress && DepartingPS
+		&& !DepartingPS->bOnlySpectator && DepartingPS->Team)
+	{
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1, DepartingPS);
+		UpdateClutchHoldTransitions(Alive0, Alive1, DepartingPS);
+	}
 }
 
 
@@ -4174,6 +4184,7 @@ void AUWipeoutGame::BP_RestartCurrentRound()
 	if (bWarmupMode || !HasMatchStarted()) return;
 
 	UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Admin restarting current round"));
+	DiscardOpenClutchHolds();
 
 	StopOvertime();
 	CancelAllPendingRespawns();
@@ -4631,24 +4642,103 @@ bool AUWipeoutGame::ClearPause()
 
 void AUWipeoutGame::ResetClutchTelemetryForMatch()
 {
+	DiscardOpenClutchHolds();
+	CompletedClutches.Reset();
+}
+
+void AUWipeoutGame::DiscardOpenClutchHolds()
+{
 	ActiveHold[0] = FWipeoutClutchTracker();
 	ActiveHold[1] = FWipeoutClutchTracker();
-	CompletedClutches.Reset();
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearClutchOverlays();
+	}
+}
+
+void AUWipeoutGame::UpdateClutchHoldTransitions(int32 AliveTeam0, int32 AliveTeam1,
+	const AUTPlayerState* IgnoredPlayer)
+{
+	if (!HasAuthority() || !bRoundInProgress)
+	{
+		return;
+	}
+
+	const int32 AliveByTeam[2] = { AliveTeam0, AliveTeam1 };
+	if (DamageReplicator)
+	{
+		DamageReplicator->UpdateClutchOverlayRemaining(AliveTeam0, AliveTeam1);
+	}
+
+	// A teammate returning completes a normal Wipeout HOLD. Close before
+	// considering a new 2->1 edge so a same-frame transition cannot collide.
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		if (ActiveHold[TeamIndex].bOpen && AliveByTeam[TeamIndex] > 1)
+		{
+			ActiveHold[TeamIndex].TeammatesRespawned =
+				FMath::Max(1, AliveByTeam[TeamIndex] - 1);
+			CloseClutchHold(TeamIndex, TEXT("reinforced"));
+		}
+	}
+
+	if (AliveTeam0 > 1) bTeam0LastAliveAnnounced = false;
+	if (AliveTeam1 > 1) bTeam1LastAliveAnnounced = false;
+
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		const int32 EnemiesAlive = AliveByTeam[1 - TeamIndex];
+		bool& bAnnounced = TeamIndex == 0
+			? bTeam0LastAliveAnnounced : bTeam1LastAliveAnnounced;
+		const int32 StartingSize = TeamIndex == 0 ? Team0StartingSize : Team1StartingSize;
+		if (AliveByTeam[TeamIndex] != 1 || EnemiesAlive < 1
+			|| StartingSize <= 1 || bAnnounced)
+		{
+			continue;
+		}
+
+		AUTPlayerState* LastPS = FindAliveOnTeamPS(TeamIndex, IgnoredPlayer);
+		if (!LastPS)
+		{
+			continue;
+		}
+
+		// Match the long-standing audio/telemetry rule: a sub-one-second
+		// near-respawn is too brief to count as a hold. Do not consume the
+		// announcement edge yet: if that respawn is cancelled or fails, the
+		// timer fallback must still be able to open the genuine last-alive hold.
+		if (HasImminentRespawnOnTeam(TeamIndex, 1.0f))
+		{
+			continue;
+		}
+		bAnnounced = true;
+
+		BP_OnLastPlayerAlive(TeamIndex, LastPS, EnemiesAlive);
+		OnClutchSituationStarted.Broadcast(LastPS, EnemiesAlive);
+		if (DamageReplicator)
+		{
+			DamageReplicator->BeginClutchOverlay(
+				TeamIndex, LastPS, EnemiesAlive, bInSuddenDeath);
+		}
+		// Upload telemetry remains human-only, while the replicated presentation
+		// above can still show bots in offline/caster tests.
+		OpenClutchHold(TeamIndex, LastPS, EnemiesAlive);
+	}
 }
 
 void AUWipeoutGame::OpenClutchHold(int32 TeamIndex, AUTPlayerState* Holder, int32 EnemiesAlive)
 {
-	if (!HasAuthority() || TeamIndex < 0 || TeamIndex > 1 || Holder == nullptr) { return; }
-	// Bots have no UniqueId and are filtered from every other payload; filter
-	// here too so a bot can never occupy the slot a human hold would need.
-	if (!Holder->UniqueId.IsValid()) { return; }
-
+	if (!HasAuthority() || TeamIndex < 0 || TeamIndex > 1
+		|| Holder == nullptr || EnemiesAlive < 1) { return; }
 	FWipeoutClutchTracker& H = ActiveHold[TeamIndex];
 	if (H.bOpen) { return; }   // already holding; the 2->1 edge fired twice
 
 	H = FWipeoutClutchTracker();
 	H.bOpen              = true;
-	H.UniqueId           = Holder->UniqueId.ToString();
+	// Empty for bots: keep the live tracker/presentation functional, then omit
+	// the completed record from the human-only upload below.
+	H.UniqueId           = Holder->UniqueId.IsValid()
+		? Holder->UniqueId.ToString() : FString();
 	H.Holder             = Holder;
 	H.RoundIndex         = CurrentRoundNumber;
 	H.EnemiesAtStart     = FMath::Max(0, EnemiesAlive);
@@ -4656,15 +4746,20 @@ void AUWipeoutGame::OpenClutchHold(int32 TeamIndex, AUTPlayerState* Holder, int3
 	H.StartTime          = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 }
 
-void AUWipeoutGame::CreditClutchHoldKill(AUTPlayerState* KillerPS)
+void AUWipeoutGame::CreditClutchHoldKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
 {
-	if (!HasAuthority() || KillerPS == nullptr) { return; }
+	if (!HasAuthority() || KillerPS == nullptr || VictimPS == nullptr) { return; }
+	if (DamageReplicator)
+	{
+		DamageReplicator->CreditClutchOverlayKill(KillerPS, VictimPS);
+	}
 	for (int32 T = 0; T < 2; ++T)
 	{
 		FWipeoutClutchTracker& H = ActiveHold[T];
 		// Match on the live PlayerState, not the id string: only a holder who is
 		// still the same object can be scoring kills right now.
-		if (H.bOpen && H.Holder.Get() == KillerPS)
+		if (H.bOpen && H.Holder.Get() == KillerPS
+			&& static_cast<int32>(VictimPS->GetTeamNum()) == 1 - T)
 		{
 			++H.DirectKills;
 			return;
@@ -4677,6 +4772,16 @@ void AUWipeoutGame::CloseClutchHold(int32 TeamIndex, const TCHAR* Outcome)
 	if (TeamIndex < 0 || TeamIndex > 1) { return; }
 	FWipeoutClutchTracker& H = ActiveHold[TeamIndex];
 	if (!H.bOpen) { return; }
+
+	// If the holder dies but a pending teammate lands inside the wipeout grace,
+	// that teammate becomes a new sole survivor. Release the edge now so the
+	// respawn callback can open their distinct hold instead of inheriting the
+	// dead holder's latched announcement state.
+	if (FCString::Stricmp(Outcome, TEXT("died")) == 0)
+	{
+		if (TeamIndex == 0) bTeam0LastAliveAnnounced = false;
+		else                bTeam1LastAliveAnnounced = false;
+	}
 
 	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : H.StartTime;
 
@@ -4695,6 +4800,30 @@ void AUWipeoutGame::CloseClutchHold(int32 TeamIndex, const TCHAR* Outcome)
 	Rec.bCleanFinish       = (Rec.Outcome == TEXT("won"))
 		&& H.EnemiesAtStart > 0 && H.DirectKills >= H.EnemiesAtStart;
 
-	CompletedClutches.Add(MoveTemp(Rec));
+	if (DamageReplicator)
+	{
+		ENCClutchOverlayOutcome OverlayOutcome = ENCClutchOverlayOutcome::Cancelled;
+		if (Rec.Outcome == TEXT("reinforced"))
+		{
+			OverlayOutcome = ENCClutchOverlayOutcome::Held;
+		}
+		else if (Rec.Outcome == TEXT("won"))
+		{
+			OverlayOutcome = (H.bSuddenDeath || bInSuddenDeath)
+				? ENCClutchOverlayOutcome::Clutched
+				: ENCClutchOverlayOutcome::Held;
+		}
+		else if (Rec.Outcome == TEXT("died"))
+		{
+			OverlayOutcome = ENCClutchOverlayOutcome::Denied;
+		}
+		DamageReplicator->EndClutchOverlay(
+			TeamIndex, OverlayOutcome, H.TeammatesRespawned);
+	}
+
+	if (!Rec.UniqueId.IsEmpty())
+	{
+		CompletedClutches.Add(MoveTemp(Rec));
+	}
 	H = FWipeoutClutchTracker();
 }

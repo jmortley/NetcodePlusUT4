@@ -11,6 +11,7 @@
 #include "UTTeamInfo.h"
 #include "ElimPlusScoreboard.h"
 #include "ElimPlusStatsReplicator.h"
+#include "NCClutchOverlay.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads) — warmup-only head-hitbox calibration
 #include "NCPlusSpectatorSlideOut.h"
@@ -548,6 +549,11 @@ void AElimPlusHUD::DrawHUD()
 		}
 		// NOW WATCHING banner — self-guards when not spectating another pawn.
 		DrawSpectatorTarget();
+		if (AElimPlusStatsReplicator* Stats = FindStatsReplicator(GetWorld()))
+		{
+			NCClutchOverlay::Draw(this, Canvas,
+				Stats->Team0ClutchOverlay, Stats->Team1ClutchOverlay);
+		}
 	}
 
 	// Keep portraits up through the round-win window ("RoundCooldown") so the

@@ -9,9 +9,12 @@
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
 #include "NCPlusHUDLayout.h"
+#include "NCClutchOverlay.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 #include "UTHUDWidget_Spectator.h"
 #include "WipeoutGame.h"   // SuddenDeathGraceSeconds (shared client/server constant)
+#include "WipeoutDamageReplicator.h"
+#include "EngineUtils.h"
 
 // True when a dead player's queued respawn cannot possibly fire before sudden
 // death begins, i.e. the countdown on their portrait is unreachable and should
@@ -338,6 +341,40 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 // scoreboard is up. This is the canonical viewed-player banner for both dead
 // players and true spectators; DrawHUD suppresses the stock duplicate only for
 // the frame where this banner can replace it.
+AWipeoutDamageReplicator* AWipeoutHUD::FindDamageReplicator(UWorld* World)
+{
+	if (!World) return nullptr;
+	AUTGameState* CurrentGS = World->GetGameState<AUTGameState>();
+	if (CachedDamageReplicatorWorld.Get() != World
+		|| CachedDamageReplicatorGameState.Get() != CurrentGS)
+	{
+		CachedDamageReplicatorWorld = World;
+		CachedDamageReplicatorGameState = CurrentGS;
+		CachedDamageReplicator = nullptr;
+		NextDamageReplicatorRetryTime = 0.f;
+	}
+	if (CachedDamageReplicator.IsValid())
+	{
+		return CachedDamageReplicator.Get();
+	}
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextDamageReplicatorRetryTime)
+	{
+		return nullptr;
+	}
+	for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
+	{
+		CachedDamageReplicator = *It;
+		NextDamageReplicatorRetryTime = 0.f;
+		return *It;
+	}
+
+	CachedDamageReplicator = nullptr;
+	NextDamageReplicatorRetryTime = Now + 1.f;
+	return nullptr;
+}
+
 void AWipeoutHUD::DrawSpectatorTarget()
 {
 	if (!Canvas || !MediumFont || !SmallFont) return;
@@ -460,6 +497,11 @@ void AWipeoutHUD::DrawHUD()
 		DrawTeamScoreBar(GS);
 		// NOW WATCHING banner — self-guards when not spectating another pawn.
 		DrawSpectatorTarget();
+		if (AWipeoutDamageReplicator* DamageRep = FindDamageReplicator(GetWorld()))
+		{
+			NCClutchOverlay::Draw(this, Canvas,
+				DamageRep->Team0ClutchOverlay, DamageRep->Team1ClutchOverlay);
+		}
 	}
 
 	// Keep portraits up through the round-win window ("RoundCooldown") so the

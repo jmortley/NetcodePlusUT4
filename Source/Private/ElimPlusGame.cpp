@@ -2104,8 +2104,12 @@ void AElimPlusGame::ScoreKill_Implementation(AController* Killer, AController* O
 
 	int32 Alive0, Alive1;
 	GetAliveCounts(Alive0, Alive1);
+	if (StatsReplicator)
+	{
+		StatsReplicator->UpdateClutchOverlayRemaining(Alive0, Alive1);
+	}
 
-	CheckLastManStanding(Alive0, Alive1);
+	CheckLastManStanding(Alive0, Alive1, DeathOrdinal);
 
 	const bool Team0Eliminated = (Alive0 == 0);
 	const bool Team1Eliminated = (Alive1 == 0);
@@ -2992,7 +2996,8 @@ bool AElimPlusGame::CanSpectate_Implementation(APlayerController* Viewer, APlaye
 
 
 
-AUTPlayerState* AElimPlusGame::FindAliveOnTeamPS(int32 TeamIndex) const
+AUTPlayerState* AElimPlusGame::FindAliveOnTeamPS(
+	int32 TeamIndex, const AUTPlayerState* IgnoredPlayer) const
 {
 	if (!Teams.IsValidIndex(TeamIndex)) return nullptr;
 
@@ -3002,7 +3007,7 @@ AUTPlayerState* AElimPlusGame::FindAliveOnTeamPS(int32 TeamIndex) const
 		if (!C) continue;
 
 		AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState);
-		if (!PS || PS->bOnlySpectator) continue;
+		if (!PS || PS == IgnoredPlayer || PS->bOnlySpectator) continue;
 
 		APawn* P = C->GetPawn();
 		const AUTCharacter* UTC = Cast<AUTCharacter>(P);
@@ -3034,7 +3039,8 @@ AUTPlayerState* AElimPlusGame::FindAnyOnTeamPS(int32 TeamIndex) const
 	return nullptr;
 }
 
-bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const
+bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1,
+	const AUTPlayerState* IgnoredPlayer) const
 {
 	OutAliveTeam0 = 0;
 	OutAliveTeam1 = 0;
@@ -3059,7 +3065,7 @@ bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 	for (APlayerState* PSBase : GS->PlayerArray)
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
-		if (!PS) continue;
+		if (!PS || PS == IgnoredPlayer) continue;
 		if (PS->bOnlySpectator)
 		{
 			Spectators++;
@@ -3095,11 +3101,13 @@ bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 	return true;
 }
 
-void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
+void AElimPlusGame::CheckLastManStanding(
+	int32 Alive0, int32 Alive1, int32 AttemptStartEventIndex,
+	const AUTPlayerState* IgnoredPlayer)
 {
 	if (Team0StartingSize > 1 && Alive0 == 1 && !bTeam0LastManAnnounced)
 	{
-		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(0);
+		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(0, IgnoredPlayer);
 		BroadcastLastManStanding(0, ClutchPlayer);
 		bTeam0LastManAnnounced = true;
 		// NEW: Track dark horse potential - Team0 player is now 1 vs Alive1 enemies
@@ -3117,13 +3125,17 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive1)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive1);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 0) vs %d enemies."), *ClutchPlayer->PlayerName, Alive1);
+			if (StatsReplicator)
+			{
+				StatsReplicator->BeginClutchOverlay(0, ClutchPlayer, Alive1);
+			}
 			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
-			OpenClutchAttempt(0, ClutchPlayer, Alive1);
+			OpenClutchAttempt(0, ClutchPlayer, Alive1, AttemptStartEventIndex);
 		}
 	}
 	if (Team1StartingSize > 1 && Alive1 == 1 && !bTeam1LastManAnnounced)
 	{
-		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(1);
+		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(1, IgnoredPlayer);
 		BroadcastLastManStanding(1, ClutchPlayer);
 		bTeam1LastManAnnounced = true;
 		// NEW: Track dark horse potential - Team1 player is now 1 vs Alive0 enemies
@@ -3142,8 +3154,12 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive0)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive0);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 1) vs %d enemies."), *ClutchPlayer->PlayerName, Alive0);
+			if (StatsReplicator)
+			{
+				StatsReplicator->BeginClutchOverlay(1, ClutchPlayer, Alive0);
+			}
 			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
-			OpenClutchAttempt(1, ClutchPlayer, Alive0);
+			OpenClutchAttempt(1, ClutchPlayer, Alive0, AttemptStartEventIndex);
 		}
 	}
 }
@@ -3165,9 +3181,14 @@ void AElimPlusGame::ResetClutchTelemetryForMatch()
 	ActiveClutch[1] = FElimPlusClutchTracker();
 	CompletedClutches.Empty();
 	ClutchDeathOrdinal = 0;
+	if (StatsReplicator)
+	{
+		StatsReplicator->ClearClutchOverlays();
+	}
 }
 
-void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate, int32 EnemiesAlive)
+void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate,
+	int32 EnemiesAlive, int32 StartEventIndex)
 {
 	if (TeamIndex < 0 || TeamIndex > 1 || EnemiesAlive < 1) return;
 	if (ActiveClutch[TeamIndex].bOpen) return;   // at most one attempt per team per round
@@ -3185,8 +3206,10 @@ void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate
 	A.RoundIndex      = TotalRoundsPlayed;
 	A.EnemiesAtStart  = FMath::Clamp(EnemiesAlive, 1, 4);
 	A.bCandidateAlive = true;
-	// The opening death was assigned its ordinal earlier in this ScoreKill call.
-	A.StartEventIndex = FMath::Max(0, ClutchDeathOrdinal - 1);
+	// A kill-created attempt starts at that death's ordinal. A disconnect-created
+	// attempt starts at the next ordinal so its range never absorbs an earlier,
+	// unrelated death event.
+	A.StartEventIndex = FMath::Max(0, StartEventIndex);
 	A.StartTime       = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 	UE_LOG(LogGameMode, Log, TEXT("Clutch attempt open: team %d, %s 1v%d (round %d, event %d)"),
 		TeamIndex, *Candidate->PlayerName, A.EnemiesAtStart, A.RoundIndex, A.StartEventIndex);
@@ -3195,6 +3218,10 @@ void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate
 void AElimPlusGame::CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
 {
 	if (!KillerPS || !VictimPS) return;
+	if (StatsReplicator)
+	{
+		StatsReplicator->CreditClutchOverlayKill(KillerPS, VictimPS);
+	}
 	for (int32 Team = 0; Team < 2; ++Team)
 	{
 		FElimPlusClutchTracker& A = ActiveClutch[Team];
@@ -3212,6 +3239,11 @@ void AElimPlusGame::CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerSt
 void AElimPlusGame::MarkClutchCandidateDead(AUTPlayerState* VictimPS, int32 DeathOrdinal)
 {
 	if (!VictimPS) return;
+	if (StatsReplicator)
+	{
+		StatsReplicator->EndClutchOverlayForCandidate(
+			VictimPS, ENCClutchOverlayOutcome::Denied);
+	}
 	for (int32 Team = 0; Team < 2; ++Team)
 	{
 		FElimPlusClutchTracker& A = ActiveClutch[Team];
@@ -3227,6 +3259,10 @@ void AElimPlusGame::MarkClutchCandidateDead(AUTPlayerState* VictimPS, int32 Deat
 
 void AElimPlusGame::FinalizeClutchAttempts(int32 WinnerTeamIndex)
 {
+	if (StatsReplicator)
+	{
+		StatsReplicator->FinalizeClutchOverlays(WinnerTeamIndex);
+	}
 	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 	for (int32 Team = 0; Team < 2; ++Team)
 	{
@@ -3282,6 +3318,10 @@ void AElimPlusGame::DiscardOpenClutchAttempts()
 {
 	ActiveClutch[0] = FElimPlusClutchTracker();
 	ActiveClutch[1] = FElimPlusClutchTracker();
+	if (StatsReplicator)
+	{
+		StatsReplicator->ClearClutchOverlays();
+	}
 }
 
 void AElimPlusGame::CheckRoundWinConditions()
@@ -3947,6 +3987,8 @@ void AElimPlusGame::BP_SetTeamScores(int32 RedScore, int32 BlueScore)
 
 void AElimPlusGame::Logout(AController* Exiting)
 {
+	AUTPlayerState* DepartingPS = Exiting
+		? Cast<AUTPlayerState>(Exiting->PlayerState) : nullptr;
 	if (bCompetitiveAutoPause && IsMatchInProgress() && !HasMatchEnded() && !GetWorld()->IsPaused())
 	{
 		if (Exiting)
@@ -3969,7 +4011,7 @@ void AElimPlusGame::Logout(AController* Exiting)
 	
 	if (Exiting)
 	{
-		AUTPlayerState* PS = Cast<AUTPlayerState>(Exiting->PlayerState);
+		AUTPlayerState* PS = DepartingPS;
 		if (PS)
 		{
 			// A leaving clutch candidate cannot win ("remains alive" rule) and
@@ -3994,6 +4036,23 @@ void AElimPlusGame::Logout(AController* Exiting)
 	}
 
 	Super::Logout(Exiting);
+
+	// A disconnect is an authoritative roster transition just like a death for
+	// caster presentation. Controller cleanup removes PlayerState after Logout
+	// returns, so explicitly exclude it while refreshing counts and selecting a
+	// newly-created last survivor.
+	if (HasAuthority() && bRoundInProgress && DepartingPS
+		&& !DepartingPS->bOnlySpectator && DepartingPS->Team)
+	{
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1, DepartingPS);
+		if (StatsReplicator)
+		{
+			StatsReplicator->UpdateClutchOverlayRemaining(Alive0, Alive1);
+		}
+		CheckLastManStanding(Alive0, Alive1, ClutchDeathOrdinal, DepartingPS);
+	}
 }
 
 

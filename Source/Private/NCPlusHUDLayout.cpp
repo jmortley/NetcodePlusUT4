@@ -1066,6 +1066,9 @@ namespace NCPlusHUDAliases
 			// color_text / opacity.
 			T.Emplace(TEXT("server_info"),      FString(),                                                                       FText::FromString(TEXT("Server Name Plate")),  true,  ENCPlusHUDAnchor::TopLeft,     FVector2D(20.f, 14.f));
 			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),  true,  ENCPlusHUDAnchor::TopCenter);
+			// Spectator/caster-only 1vX card. The renderer owns the spectator gate;
+			// this draw-call alias supplies position, scale, opacity and Hide.
+			T.Emplace(TEXT("clutch_overlay"),   FString(),                                                                       FText::FromString(TEXT("Caster Clutch Overlay")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 138.f));
 			// Top-right "Score: N" + "KDA: K/D/A" mini panel. Drawn inline by
 			// ElimPlusHUD::DrawHUD and WipeoutHUD::DrawHUD. Default offset
 			// approximates the original hard-coded (ClipX*0.98, ClipY*0.015).

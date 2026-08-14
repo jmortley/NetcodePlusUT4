@@ -3,6 +3,7 @@
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
 #include "NCPlusPerformanceSettings.h"
+#include "NCClutchOverlay.h"
 #include "NCReadyUp.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
@@ -479,6 +480,43 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 				.Font(RegularFont(10))
 				.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
 				.AutoWrapText(true)
+			]
+
+			// Local spectator/caster presentation. The server replicates only sparse
+			// clutch transitions; this controls whether this client draws the card.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 4, 0, 3)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Spectator & Caster")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(40, 0, 40, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]()
+				{
+					return bShowClutchOverlay
+						? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+				})
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState NewState)
+				{
+					bShowClutchOverlay = NewState == ECheckBoxState::Checked;
+				})
+				.ToolTipText(FText::FromString(TEXT("Show the 1vX clutch / last-alive card while you are a true spectator. It never changes your camera.")))
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Show clutch / last-alive overlay")))
+					.Font(RegularFont(14))
+					.ColorAndOpacity(FLinearColor::White)
+				]
 			]
 
 			// About/link information stays on the landing page, like UTComp.
@@ -1367,6 +1405,7 @@ void SUTNCPlusMenu::LoadSettings()
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Performance (3000)"))));
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Balanced (4500)"))));
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Full (6500)"))));
+	bShowClutchOverlay = NCClutchOverlay::IsEnabled();
 
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
@@ -1484,6 +1523,7 @@ void SUTNCPlusMenu::SaveSettings()
 	// Client-local only. Setter persists the clamped value and refreshes the
 	// cached squared distance used by character ticks immediately.
 	NCPlusPerformanceSettings::SetCharacterOverlayDistance(CharacterOverlayDistance);
+	NCClutchOverlay::SetEnabled(bShowClutchOverlay);
 
 	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.
