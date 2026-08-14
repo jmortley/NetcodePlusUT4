@@ -7,6 +7,7 @@
 class AClutchRoundState;
 class AUTGameState;
 class AUTPlayerState;
+class USoundBase;
 class UTexture2D;
 
 /**
@@ -41,6 +42,8 @@ protected:
 	void DrawRolePanel(AClutchRoundState* State);
 	void DrawDefenderAttackerPanel(AClutchRoundState* State);
 	void DrawCapturePanel(AClutchRoundState* State);
+	void UpdatePoleAudio(AClutchRoundState* State);
+	void UpdateAttackerArmorFeedback(AClutchRoundState* State);
 	void DrawAttackOrderPanel(AClutchRoundState* State);
 	void UpdateAttackOrderInput(AClutchRoundState* State, bool bPanelVisible);
 	void RestoreAttackOrderInput();
@@ -59,6 +62,13 @@ protected:
 	bool bAttackOrderSubmitted;
 	bool bEliminatedCameraForced;
 	bool bSavedSpectateBehindView;
+	int32 PoleAudioRoundNumber;
+	int32 LastPoleCountdownSecond;
+	bool bPlayedPoleUnlockedAudio;
+	int32 ObservedArmorRoundNumber;
+	int32 LastObservedAttackerHits;
+	float AttackerHitFlashEndTime;
+	TWeakObjectPtr<AUTPlayerState> ObservedArmorAttacker;
 	/** When the confirm was sent. The submit latch is provisional: if the replicated
 	 *  team lock has not appeared shortly after, the server rejected the pick (stale
 	 *  lock, roster change) and the picker re-opens instead of dying silently. */
@@ -66,6 +76,13 @@ protected:
 	uint8 DraftAttackOrderTeam;
 	FString DraftAttackOrderRosterKey;
 	TArray<uint8> DraftAttackOrderSlots;
+
+	/** Indexed by the spoken number; element zero is intentionally unused. */
+	UPROPERTY(Transient)
+	TArray<USoundBase*> PoleCountdownSounds;
+
+	UPROPERTY(Transient)
+	USoundBase* PoleUnlockedSound;
 
 	UPROPERTY()
 	UTexture2D* LegacyCircleTexture;
