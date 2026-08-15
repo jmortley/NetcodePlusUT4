@@ -12,55 +12,8 @@
 #include "NCClutchOverlay.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 #include "UTHUDWidget_Spectator.h"
-#include "WipeoutGame.h"   // SuddenDeathGraceSeconds (shared client/server constant)
 #include "WipeoutDamageReplicator.h"
 #include "EngineUtils.h"
-
-// True when a dead player's queued respawn cannot possibly fire before sudden
-// death begins, i.e. the countdown on their portrait is unreachable and should
-// read "X" instead.
-//
-// Round modes replicate RoundSecondsRemaining on their BP GameState (the same
-// field DrawTeamScoreBar reads for the match clock), and RespawnTime is
-// replicated on AUTPlayerState — so every viewer, on both teams, can reach the
-// same verdict locally with no extra replication and no server round-trip.
-//
-// Both clocks tick down in lockstep, so the comparison is stable from the moment
-// of death rather than flickering as the round runs out. Returns false for
-// non-round modes (no RoundSecondsRemaining field → no sudden death to miss).
-static bool WipeoutRespawnIsUnreachable(AUTGameState* GS, AUTPlayerState* PS)
-{
-	if (GS == nullptr || PS == nullptr || PS->RespawnTime <= 0.f)
-	{
-		return false;
-	}
-
-	// UClass field tables are fixed at runtime — cache the lookup like the clock
-	// path does rather than walking the hierarchy for every pip, every frame.
-	static UClass* CachedRoundCls = nullptr;
-	static UIntProperty* CachedRoundProp = nullptr;
-	UClass* GSCls = GS->GetClass();
-	if (CachedRoundCls != GSCls)
-	{
-		CachedRoundCls = GSCls;
-		CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
-	}
-	if (CachedRoundProp == nullptr)
-	{
-		return false;
-	}
-
-	const int32 RoundSecondsLeft = CachedRoundProp->GetPropertyValue_InContainer(GS);
-	if (RoundSecondsLeft < 0)
-	{
-		return false;
-	}
-
-	// During the grace window RoundSecondsLeft is already 0, so this correctly
-	// reduces to "will the respawn beat the remaining grace?".
-	return PS->RespawnTime >
-		(float(RoundSecondsLeft) + AUWipeoutGame::SuddenDeathGraceSeconds);
-}
 
 AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -570,7 +523,8 @@ void AWipeoutHUD::DrawHUD()
 		for (AUTPlayerState* UTPS : LivePlayers)
 		{
 			if (UTPS && UTPS != MyPS_ForSpawn && UTPS->GetTeamNum() == MyTeam
-				&& UTPS->RespawnTime > 0.f && UTPS->RespawnTime < LowestRespawnTime)
+				&& UTPS->RespawnWaitTime > 0.f && UTPS->RespawnTime > 0.f
+				&& UTPS->RespawnTime < LowestRespawnTime)
 			{
 				AUTCharacter* UTC = UTPS->GetUTCharacter();
 				bool bDead = !UTC || UTC->IsDead();
@@ -613,7 +567,9 @@ void AWipeoutHUD::DrawHUD()
 
 			// Respawn progress: 0 = fully dead/waiting, 1 = alive
 			float LiveScaling = 1.f;
-			if (!bPlayerAlive && UTPS->RespawnTime > 0.f && UTPS->RespawnWaitTime > 0.f)
+			const bool bReachableRespawn = !bPlayerAlive
+				&& UTPS->RespawnTime > 0.f && UTPS->RespawnWaitTime > 0.f;
+			if (bReachableRespawn)
 			{
 				LiveScaling = FMath::Clamp(1.f - UTPS->RespawnTime / UTPS->RespawnWaitTime, 0.f, 1.f);
 			}
@@ -1075,18 +1031,14 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	if (!PipFont) PipFont = MediumFont;
 	const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
 
-	// A queued respawn is only real if it fires before sudden death empties
-	// PendingRespawns. Both clocks tick down together, so the verdict is fixed the
-	// moment the player dies: showing a live countdown that can never reach zero in
-	// time just lies to them. Decided client-side from data every viewer already
-	// has (replicated RespawnTime + the round clock), so both teams see the same
-	// thing with no extra replication.
-	const bool bRespawnUnreachable =
-		(PlayerState->RespawnTime > 0.f) &&
-		WipeoutRespawnIsUnreachable(GetWorld()->GetGameState<AUTGameState>(), PlayerState);
+	// RespawnWaitTime is stock UT's replicated queue marker; RespawnTime is only
+	// the locally ticking display value. A canceled queue must therefore become X
+	// even if that stale local countdown is still positive for a frame.
+	const bool bRespawnQueued = PlayerState->bOutOfLives
+		&& PlayerState->RespawnWaitTime > 0.f;
 
 	// Layer 5 (Wipeout-specific): Respawn countdown text on dead portraits
-	if (LiveScaling < 1.f && PlayerState->RespawnTime > 0.f && !bRespawnUnreachable)
+	if (LiveScaling < 1.f && bRespawnQueued && PlayerState->RespawnTime > 0.f)
 	{
 		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
 
@@ -1113,11 +1065,9 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			FontRenderScale, FontRenderScale, Canvas->DrawColor, true);
 	}
 
-	// Layer 5b: "X" on dead portraits with no respawn — already locked out by
-	// sudden death, OR still counting down but mathematically unable to land
-	// before it starts (see bRespawnUnreachable above).
-	if (LiveScaling < 1.f &&
-		((PlayerState->RespawnTime <= 0.f && PlayerState->bOutOfLives) || bRespawnUnreachable))
+	// Layer 5b: "X" on dead portraits with no authoritative respawn queue.
+	if (LiveScaling < 1.f && PlayerState->bOutOfLives
+		&& !bRespawnQueued)
 	{
 		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
 		FFontRenderInfo TextRenderInfo;
