@@ -905,11 +905,12 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
 	// ── Clock (big, centered below bars) ──
-	// Round-based modes (Wipeout, ElimPlus) replicate RoundSecondsRemaining
-	// on a BP GameState — read it via reflection. Time-based modes (Duel,
-	// CTF, etc.) use stock AUTGameState::RemainingTime instead. Try the BP
-	// field first; fall back to the stock match clock so non-round modes
-	// (NCLeagueDuel especially) still get a visible timer.
+	// Wipeout publishes an exact server-time deadline through its always-relevant
+	// damage replicator. Deriving from that anchor every frame keeps this display
+	// on the same schedule as Belt/Amp/Siphon instead of showing the legacy BP
+	// GameState's up-to-one-second-old 1 Hz sample. Older servers and other
+	// round-based modes still fall back to BP RoundSecondsRemaining; time-based
+	// modes (Duel, CTF, etc.) finally fall back to stock RemainingTime.
 	//
 	// Static caches: UClass field tables don't change at runtime, so a single
 	// FindField per (GameState class, property name) is enough. Stock
@@ -917,6 +918,11 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	// trick for hot HUD paths that read replicated ints by name.
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	int32 ClockSeconds = -1;
+	if (AWipeoutDamageReplicator* DamageRep = FindDamageReplicator(GetWorld()))
+	{
+		ClockSeconds = DamageRep->GetRoundClockSecondsRemaining();
+	}
+	if (ClockSeconds < 0)
 	{
 		static UClass* CachedRoundCls = nullptr;
 		static UIntProperty* CachedRoundProp = nullptr;

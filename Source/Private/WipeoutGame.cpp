@@ -532,6 +532,10 @@ bool AUWipeoutGame::ReadyToStartMatch_Implementation()
 void AUWipeoutGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearRoundClockDeadline();
+	}
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -754,6 +758,10 @@ void AUWipeoutGame::DefaultTimer()
 
 					// Restart the round clock so players can time items during OT.
 					RoundEndTimeSeconds = GetWorld()->GetTimeSeconds() + 300.f;
+					if (DamageReplicator)
+					{
+						DamageReplicator->SetRoundClockDeadline(RoundEndTimeSeconds);
+					}
 
 					// Force all dead players to spectate
 					for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
@@ -1381,6 +1389,10 @@ void AUWipeoutGame::StartIntermission(int32 Seconds)
 	bRoundInProgress = false;
 	IntermissionSecondsRemaining = FMath::Max(1, Seconds);
 	RoundEndTimeSeconds = 0.f;
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearRoundClockDeadline();
+	}
 
 	// Stop overtime and cancel pending respawns
 	StopOvertime();
@@ -1516,6 +1528,17 @@ void AUWipeoutGame::StartNextRound()
 	}
 
 	bRoundInProgress = true;
+	if (DamageReplicator)
+	{
+		if (RoundEndTimeSeconds > 0.f)
+		{
+			DamageReplicator->SetRoundClockDeadline(RoundEndTimeSeconds);
+		}
+		else
+		{
+			DamageReplicator->ClearRoundClockDeadline();
+		}
+	}
 
 	if (AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>())
 	{
@@ -1562,6 +1585,10 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 
 	bRoundInProgress = false;
 	RoundEndTimeSeconds = 0.f;
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearRoundClockDeadline();
+	}
 	LastRoundWinningTeamIndex = WinnerTeamIndex;
 	TotalRoundsPlayed++;
 

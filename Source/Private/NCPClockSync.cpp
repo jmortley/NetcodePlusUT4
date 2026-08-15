@@ -8,11 +8,12 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCPClockSync, Log, All);
 
-// Server value gates anchoring + the terminal zero write; each client's own
-// value gates the display applier. Runtime-flippable, no restart needed.
+// Server-side switch: the replicated bClockOwned state tells clients whether
+// to apply the anchored clock. Letting each client opt out independently would
+// recreate the server/display split this actor exists to prevent.
 static TAutoConsoleVariable<int32> CVarNCPClockSync(
 	TEXT("ncp.ClockSync"), 1,
-	TEXT("Anchored match-clock sync. 1 (default): server replicates a {value, server-world-time} anchor at clock start and clients re-derive the displayed clock from it every frame. 0: stock behavior (free-running local 1s timer + 10s value snaps)."),
+	TEXT("Server-side anchored match-clock sync. 1 (default): replicate a {value, server-world-time} anchor at clock start and have clients re-derive the displayed clock every frame. 0: stock behavior (free-running local 1s timer + 10s value snaps)."),
 	ECVF_Default);
 
 ANCPClockSync::ANCPClockSync(const FObjectInitializer& ObjectInitializer)
@@ -134,15 +135,18 @@ void ANCPClockSync::ServerTick()
 
 void ANCPClockSync::ClientTick()
 {
-	if (CVarNCPClockSync.GetValueOnGameThread() == 0)
+	UWorld* World = GetWorld();
+	if (World == nullptr || World->GetNetMode() != NM_Client)
 	{
-		LastAppliedRemaining = -1;
 		return;
 	}
-	UWorld* World = GetWorld();
-	if (World == nullptr || World->DemoNetDriver != nullptr || World->GetNetMode() != NM_Client)
+
+	// A live client normally has a DemoNetDriver because UT records the local
+	// source world for instant replays. That driver is recording, not playing;
+	// only an actual replay world should keep its recorded clock untouched.
+	if (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsPlaying())
 	{
-		// Demo playback / replay scrubbing: leave the recorded clock alone.
+		LastAppliedRemaining = -1;
 		return;
 	}
 	AUTGameState* GS = World->GetGameState<AUTGameState>();
