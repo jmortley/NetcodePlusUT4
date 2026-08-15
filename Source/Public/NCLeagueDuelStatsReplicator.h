@@ -73,6 +73,11 @@ public:
 	uint8 GetPadsCountForPlayer  (const FString& UniqueIdStr) const;
 	uint8 GetHelmetCountForPlayer(const FString& UniqueIdStr) const;
 
+	/** Client-safe bulk armor lookup. Returns false until this player's
+	 *  replicated entry exists, keeping "not received yet" distinct from a
+	 *  legitimate four-zero snapshot. OutCounts is always initialized. */
+	bool GetArmorCountsForPlayer(const FString& UniqueIdStr, uint8 OutCounts[4]) const;
+
 	/** Client-safe: total damage dealt this match. 0 if no entry yet. */
 	int32 GetDamageForPlayer(const FString& UniqueIdStr) const;
 
