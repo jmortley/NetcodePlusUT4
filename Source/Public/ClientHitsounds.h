@@ -170,6 +170,11 @@ struct FHitsoundsConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitsounds")
 	bool bPlayZeroFriendly;
 
+	/** Play immediately from the local hit prediction. False waits for the
+	 *  authoritative server damage message. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitsounds")
+	bool bClientSideHitsounds;
+
 	/** Master volume multiplier applied on top of the preset volume. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hitsounds")
 	float UserMultiplier;
@@ -177,6 +182,7 @@ struct FHitsoundsConfig
 	FHitsoundsConfig()
 		: Style(ENCPHitsoundStyle::Absolute)
 		, bPlayZeroFriendly(false)
+		, bClientSideHitsounds(true)
 		, UserMultiplier(1.0f)
 	{
 	}
@@ -341,7 +347,11 @@ public:
 	const FHitsoundsConfig& GetConfig() const { return Config; }
 
 	/** Replace the live config (menu path — does not write to disk). */
-	void SetConfig(const FHitsoundsConfig& InConfig) { Config = InConfig; }
+	void SetConfig(const FHitsoundsConfig& InConfig)
+	{
+		Config = InConfig;
+		bClientSideHitsoundsEnabled = InConfig.bClientSideHitsounds;
+	}
 
 	// ============================================================
 	// Menu
