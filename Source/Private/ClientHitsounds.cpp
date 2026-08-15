@@ -1001,6 +1001,10 @@ FHitsoundsConfig AClientHitsounds::LoadConfigFromIni()
 	UUTGameplayStatics::GetModConfigInt(ConfigSection, TEXT("PlayZeroFriendly"), PlayZeroFriendly);
 	Out.bPlayZeroFriendly = (PlayZeroFriendly != 0);
 
+	int32 ClientSideHitsounds = 1;
+	UUTGameplayStatics::GetModConfigInt(ConfigSection, TEXT("ClientSideHitsounds"), ClientSideHitsounds);
+	Out.bClientSideHitsounds = (ClientSideHitsounds != 0);
+
 	float UserMult = 1.0f;
 	UUTGameplayStatics::GetModConfigFloat(ConfigSection, TEXT("UserMultiplier"), UserMult);
 	Out.UserMultiplier = UserMult;
@@ -1020,6 +1024,7 @@ void AClientHitsounds::SaveConfigToIni(const FHitsoundsConfig& InConfig, UObject
 
 	UUTGameplayStatics::SetModConfigInt(ConfigSection, TEXT("Style"), (int32)InConfig.Style);
 	UUTGameplayStatics::SetModConfigInt(ConfigSection, TEXT("PlayZeroFriendly"), InConfig.bPlayZeroFriendly ? 1 : 0);
+	UUTGameplayStatics::SetModConfigInt(ConfigSection, TEXT("ClientSideHitsounds"), InConfig.bClientSideHitsounds ? 1 : 0);
 	UUTGameplayStatics::SetModConfigFloat(ConfigSection, TEXT("UserMultiplier"), InConfig.UserMultiplier);
 	UUTGameplayStatics::SaveModConfig();
 
@@ -1039,17 +1044,15 @@ void AClientHitsounds::SaveConfigToIni(const FHitsoundsConfig& InConfig, UObject
 void AClientHitsounds::ReadConfig()
 {
 	Config = LoadConfigFromIni();
-
-	int32 ClientSideHitsounds = 1;
-	UUTGameplayStatics::GetModConfigInt(ConfigSection, TEXT("ClientSideHitsounds"), ClientSideHitsounds);
-	bClientSideHitsoundsEnabled = (ClientSideHitsounds != 0);
+	bClientSideHitsoundsEnabled = Config.bClientSideHitsounds;
 }
 
 void AClientHitsounds::WriteConfig()
 {
+	// Preserve the Blueprint-facing runtime property as the source of truth for
+	// this legacy entry point. The F5 path updates both via SetConfig().
+	Config.bClientSideHitsounds = bClientSideHitsoundsEnabled;
 	SaveConfigToIni(Config, this);
-	UUTGameplayStatics::SetModConfigInt(ConfigSection, TEXT("ClientSideHitsounds"), bClientSideHitsoundsEnabled ? 1 : 0);
-	UUTGameplayStatics::SaveModConfig();
 }
 
 // =========================================================================

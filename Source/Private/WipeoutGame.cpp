@@ -532,6 +532,10 @@ bool AUWipeoutGame::ReadyToStartMatch_Implementation()
 void AUWipeoutGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearRoundClockDeadline();
+	}
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -728,10 +732,8 @@ void AUWipeoutGame::DefaultTimer()
 					return;
 				}
 
-				// Time is up — start the grace period before sudden death.
-				// Players with pending respawns within the grace window can still spawn.
-				// (SuddenDeathGraceSeconds is shared with the HUD, which uses it to X
-				// out respawn countdowns that can no longer land — keep them in sync.)
+				// Time is up — start the grace period before sudden death. Respawns
+				// accepted by the authoritative cutoff may still land inside it.
 				bSuddenDeathPending = true;
 
 				FTimerDelegate SuddenDeathDelegate;
@@ -740,7 +742,11 @@ void AUWipeoutGame::DefaultTimer()
 					if (!bRoundInProgress || bInSuddenDeath) return;
 
 					bInSuddenDeath = true;
-					PendingRespawns.Empty();
+					// These respawns are no longer merely absent from the server queue:
+					// publish that cancellation to clients too. RespawnTime itself is
+					// client-local in AUTPlayerState; RespawnWaitTime is the replicated
+					// queue marker that drives it.
+					CancelAllPendingRespawns();
 					if (DamageReplicator)
 					{
 						for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
@@ -754,6 +760,10 @@ void AUWipeoutGame::DefaultTimer()
 
 					// Restart the round clock so players can time items during OT.
 					RoundEndTimeSeconds = GetWorld()->GetTimeSeconds() + 300.f;
+					if (DamageReplicator)
+					{
+						DamageReplicator->SetRoundClockDeadline(RoundEndTimeSeconds);
+					}
 
 					// Force all dead players to spectate
 					for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
@@ -866,9 +876,8 @@ void AUWipeoutGame::CheckFinalLifeAnnouncements(int32 TeamFilter)
 		return;
 	}
 
-	const int32 RoundSecondsRemaining = FMath::Max(0,
-		FMath::CeilToInt(RoundEndTimeSeconds - GetWorld()->GetTimeSeconds()));
-	const float RespawnWindow = float(RoundSecondsRemaining) + SuddenDeathGraceSeconds;
+	const float RespawnWindow = FMath::Max(0.f,
+		RoundEndTimeSeconds + SuddenDeathGraceSeconds - GetWorld()->GetTimeSeconds());
 
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
@@ -887,7 +896,9 @@ void AUWipeoutGame::CheckFinalLifeAnnouncements(int32 TeamFilter)
 		}
 
 		const float NextRespawnDelay = ComputeRespawnDelay(TeamIndex, PS);
-		if (NextRespawnDelay <= RespawnWindow)
+		// Landing exactly on the cutoff is not reachable; StartRespawnTimer uses
+		// the same strict boundary to avoid racing sudden-death cancellation.
+		if (NextRespawnDelay < RespawnWindow)
 		{
 			continue;
 		}
@@ -965,6 +976,49 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 	// this instant, so do not wait for the next one-second round-clock tick.
 	CheckFinalLifeAnnouncements(TeamIndex);
 
+	// In a real Wipeout round, losing the last living pawn ends the round even
+	// when teammates still have queued waves. Do not advertise a respawn for the
+	// final victim during the deferred 0.15s simultaneous-kill check: that timer
+	// can never fire and should be an X from the first replicated frame. Solo
+	// practice is the exception; its lone player keeps respawning until time.
+	int32 AliveTeam0 = 0;
+	int32 AliveTeam1 = 0;
+	const bool bHaveAliveCounts = GetAliveCounts(AliveTeam0, AliveTeam1);
+	const bool bSoloRound = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+	const bool bTeamWiped = bHaveAliveCounts && !bSoloRound
+		&& ((TeamIndex == 0) ? (AliveTeam0 == 0) : (AliveTeam1 == 0));
+	const bool bMissesRespawnCutoff = !bSoloRound && RoundEndTimeSeconds > 0.f
+		&& (GetWorld()->GetTimeSeconds() + RespawnDelay
+			>= RoundEndTimeSeconds + SuddenDeathGraceSeconds);
+	if (bTeamWiped || bMissesRespawnCutoff)
+	{
+		DeadPS->RespawnWaitTime = 0.f;
+		DeadPS->RespawnTime = 0.f;
+		DeadPS->ForceNetUpdate();
+
+		// There is no pending-respawn entry for the normal spectate-delay block
+		// below to recognize. Preserve the death-cam handoff for a non-final
+		// player whose wave cannot beat the cutoff.
+		FTimerHandle CutoffSpectateDelayHandle;
+		FTimerDelegate CutoffSpectateDelegate;
+		CutoffSpectateDelegate.BindLambda([this, DeadPS]()
+		{
+			if (DeadPS && !DeadPS->IsPendingKill() && bRoundInProgress && DeadPS->bOutOfLives)
+			{
+				ForceTeamSpectate(DeadPS);
+			}
+		});
+		GetWorldTimerManager().SetTimer(CutoffSpectateDelayHandle,
+			CutoffSpectateDelegate, SpectateDelay, false);
+
+		UE_LOG(LogGameMode, Verbose,
+			TEXT("Wipeout: %s died with no reachable respawn (Team %d death #%d, wiped=%d, cutoff=%d)."),
+			*DeadPS->PlayerName, TeamIndex,
+			(TeamIndex == 0) ? Team0DeathCount : Team1DeathCount,
+			bTeamWiped ? 1 : 0, bMissesRespawnCutoff ? 1 : 0);
+		return;
+	}
+
 	UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s died (Team %d, death #%d). Respawn in %.1fs"),
 		*DeadPS->PlayerName, TeamIndex,
 		(TeamIndex == 0) ? Team0DeathCount : Team1DeathCount,
@@ -1019,14 +1073,23 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 	if (!bRoundInProgress)
 	{
 		PendingRespawns.Remove(PS);
+		PS->RespawnWaitTime = 0.f;
+		PS->RespawnTime = 0.f;
+		PS->ForceNetUpdate();
 		return;
 	}
 
-	// Sudden death — round timer expired, no more respawns allowed
-	if (bInSuddenDeath)
+	// Sudden death — or the exact regulation grace cutoff — allows no more
+	// respawns. Recheck the absolute deadline in case a server hitch delays both
+	// this timer callback and the one-second state transition.
+	const bool bSoloRound = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
+	const bool bPastRespawnCutoff = !bSoloRound && RoundEndTimeSeconds > 0.f
+		&& GetWorld()->GetTimeSeconds() >= RoundEndTimeSeconds + SuddenDeathGraceSeconds;
+	if (bInSuddenDeath || bPastRespawnCutoff)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn blocked for %s — sudden death active"), *PS->PlayerName);
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn blocked for %s — cutoff reached"), *PS->PlayerName);
 		PendingRespawns.Remove(PS);
+		PS->RespawnWaitTime = 0.f;
 		PS->RespawnTime = 0.f;
 		PS->ForceNetUpdate();
 		ForceTeamSpectate(PS);
@@ -1097,6 +1160,17 @@ void AUWipeoutGame::CancelAllPendingRespawns()
 		{
 			GetWorldTimerManager().ClearTimer(Pair.Value.RespawnTimerHandle);
 		}
+
+		// RespawnTime is not replicated by stock UT. Clearing only the timer/map
+		// leaves clients counting down the last replicated RespawnWaitTime after a
+		// wipeout or the sudden-death cutoff. Clear both sides of the state and
+		// force the replicated queue marker out immediately.
+		if (AUTPlayerState* PS = Pair.Key.Get())
+		{
+			PS->RespawnWaitTime = 0.f;
+			PS->RespawnTime = 0.f;
+			PS->ForceNetUpdate();
+		}
 	}
 	PendingRespawns.Empty();
 
@@ -1122,6 +1196,9 @@ void AUWipeoutGame::CancelPendingRespawn(AUTPlayerState* PS)
 			GetWorldTimerManager().ClearTimer(Pending->RespawnTimerHandle);
 		}
 		PendingRespawns.Remove(PS);
+		PS->RespawnWaitTime = 0.f;
+		PS->RespawnTime = 0.f;
+		PS->ForceNetUpdate();
 	}
 }
 
@@ -1381,6 +1458,10 @@ void AUWipeoutGame::StartIntermission(int32 Seconds)
 	bRoundInProgress = false;
 	IntermissionSecondsRemaining = FMath::Max(1, Seconds);
 	RoundEndTimeSeconds = 0.f;
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearRoundClockDeadline();
+	}
 
 	// Stop overtime and cancel pending respawns
 	StopOvertime();
@@ -1516,6 +1597,17 @@ void AUWipeoutGame::StartNextRound()
 	}
 
 	bRoundInProgress = true;
+	if (DamageReplicator)
+	{
+		if (RoundEndTimeSeconds > 0.f)
+		{
+			DamageReplicator->SetRoundClockDeadline(RoundEndTimeSeconds);
+		}
+		else
+		{
+			DamageReplicator->ClearRoundClockDeadline();
+		}
+	}
 
 	if (AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>())
 	{
@@ -1562,6 +1654,10 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 
 	bRoundInProgress = false;
 	RoundEndTimeSeconds = 0.f;
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearRoundClockDeadline();
+	}
 	LastRoundWinningTeamIndex = WinnerTeamIndex;
 	TotalRoundsPlayed++;
 

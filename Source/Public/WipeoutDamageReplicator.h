@@ -89,6 +89,16 @@ public:
 		int32 TeammatesRespawned = 0);
 	void ClearClutchOverlays();
 
+	/** Authority-only event updates for the exact round-clock anchor. The
+	 *  deadline rides as a reserved metadata row in the existing DamageEntries
+	 *  replication stream, preserving the actor and struct layouts. */
+	void SetRoundClockDeadline(float EndServerTime);
+	void ClearRoundClockDeadline();
+
+	/** Client-safe exact round time. -1 means no active replicated anchor, so
+	 *  callers should fall back to the legacy BP/stock clock. */
+	int32 GetRoundClockSecondsRemaining() const;
+
 	/** Server-only: refresh DamageEntries from all PlayerStates */
 	void UpdateFromPlayerStates();
 

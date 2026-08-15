@@ -272,30 +272,6 @@ without that guard you'd get every hitsound twice. Players configure it at **F5 
 > **player's** Mod.ini (appendix); nothing about hitsounds is server‑configured, and no hitsound
 > settings ever cross the network.
 
-##### Immediate vs server-confirmed hitsounds (`Mod.ini`)
-
-Each player can choose whether the native mutator plays an immediate locally predicted hitsound or
-waits for the server's authoritative damage confirmation. The F5 checkbox **Immediate hitsounds
-(client prediction)** writes this player-local setting:
-
-```ini
-[ClientHitsounds]
-; 1 = play immediately from the local hit prediction (default)
-; 0 = wait for server-confirmed damage
-ClientSideHitsounds=1
-```
-
-- `1` gives the lowest perceived latency. A matching server confirmation is de-duplicated so the hit
-  does not play twice, but a shot rejected by the server can still have produced a predicted sound.
-- `0` never plays from the local prediction. The sound arrives after the server confirms damage, so
-  it is authoritative but delayed by the network round trip.
-
-This switch changes only **when the local client plays audio**. It does not change hit validation,
-damage, replication, or any server setting. The server must still run `ClientHitsounds` for either
-mode. F5 → Hitsounds → **Apply & Save** applies the choice immediately. For a manual edit, change
-`<Documents>\UnrealTournament\Saved\Config\Mod.ini` while UT4 is closed, then relaunch it. A missing
-`ClientSideHitsounds` key is treated as `1` for backward compatibility.
-
 ### 3.2 `MutTeamSkins` → Force Models (client‑side)
 
 Team skins / forced enemy models are now a **client feature** of NetcodePlus called **Force Models**.
@@ -990,11 +966,9 @@ admins understand what's player‑side vs server‑side. None of these are serve
   `CustomShockBeam` (gate set by the F5 shock‑colour picker so the weapon reads the custom `ShockBeam`
   at spawn), `HitscanChoice`, per‑weapon `Skin.<tag>`, `Hide.<weapon>`, `HiddenBeamBack`/`HiddenBeamDown`.
 - **`[NetcodePlus.Cosmetics]`** (client): saved cosmetic selections.
-- **`[ClientHitsounds]` / `[Hitsounds.Enemy]` / `[Hitsounds.Friendly]`** (client): native hitsound
-  style, master multiplier, prediction/server-confirmation choice, and the player's enemy/friendly
-  sound selections. `ClientSideHitsounds=1` enables immediate local prediction (default); `0` waits
-  for authoritative server damage (§3.1). These settings are used only when the server runs the
-  native `ClientHitsounds` mutator; `dcHitsounds` keeps its own Blueprint configuration path.
+- **`[ClientHitsounds]` / `[Hitsounds.Enemy]` / `[Hitsounds.Friendly]`** — config for the *future*
+  native C++ hitsounds port; **not the live path** (live hitsounds = `dcHitsounds` BP, `mutate
+  hitsounds`).
 
 ## Appendix B — quick checklist
 

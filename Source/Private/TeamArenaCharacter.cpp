@@ -1558,6 +1558,32 @@ bool ATeamArenaCharacter::AddInventory(AUTInventory* InvToAdd, bool bAutoActivat
 }
 
 
+void ATeamArenaCharacter::UpdateWeaponAttachment()
+{
+	Super::UpdateWeaponAttachment();
+
+	// AUTWeaponAttachment exists only outside dedicated-server worlds, so allowing
+	// it to block queries creates geometry that the authoritative server never has.
+	// Disable the whole actor rather than Mesh3P alone: Blueprint-added primitives
+	// and runtime overlay duplicates must remain cosmetic too.
+	if (WeaponAttachment != nullptr)
+	{
+		WeaponAttachment->SetActorEnableCollision(false);
+	}
+}
+
+
+void ATeamArenaCharacter::UpdateHolsteredWeaponAttachment()
+{
+	Super::UpdateHolsteredWeaponAttachment();
+
+	if (HolsteredWeaponAttachment != nullptr)
+	{
+		HolsteredWeaponAttachment->SetActorEnableCollision(false);
+	}
+}
+
+
 UUTWeaponSkin* ATeamArenaCharacter::ResolveWeaponSkinForClass(UClass* WeaponClassToMatch) const
 {
 	return AUTWeaponFix::FindWeaponSkinForClass(WeaponSkins, WeaponClassToMatch);
