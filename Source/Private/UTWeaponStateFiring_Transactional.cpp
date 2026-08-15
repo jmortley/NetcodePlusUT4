@@ -106,19 +106,47 @@ void UUTWeaponStateFiring_Transactional::EndState()
 	{
 		TWeakObjectPtr<AUTCharacter> WeakOwner = Owner;
 		TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+		TWeakObjectPtr<UUTWeaponStateFiring_Transactional> WeakExitedState = this;
+		const uint8 ExpectedFlashCount = Owner->FlashCount;
+		const uint8 ExpectedFlashLocationCount = Owner->FlashLocation.Count;
+		const FVector ExpectedFlashLocation = Owner->FlashLocation.Position;
+		const uint8 ExpectedFlashExtra = Owner->FlashExtra;
+		const uint8 ExpectedFireMode = Owner->FireMode;
+		const bool bExpectedLocalFlashLocation = Owner->bLocalFlashLoc;
 
 		Owner->GetWorldTimerManager().SetTimerForNextTick(
-			FTimerDelegate::CreateLambda([WeakOwner, WeakWeapon]()
+			FTimerDelegate::CreateLambda([WeakOwner, WeakWeapon, WeakExitedState, ExpectedFlashCount, ExpectedFlashLocationCount, ExpectedFlashLocation, ExpectedFlashExtra, ExpectedFireMode, bExpectedLocalFlashLocation]()
+			{
+				AUTCharacter* CurrentOwner = WeakOwner.Get();
+				if (CurrentOwner == nullptr)
 				{
-					if (WeakOwner.IsValid())
-					{
-						// Only clear if owner hasn't started firing a new weapon
-						if (WeakOwner->GetWeapon() != WeakWeapon.Get())
-						{
-							WeakOwner->ClearFiringInfo();
-						}
-					}
-				})
+					return;
+				}
+
+				// Clear only the exact pawn-global firing info this state
+				// observed. Any field change means a newer shot/state owns it.
+				if (CurrentOwner->FlashCount != ExpectedFlashCount
+					|| CurrentOwner->FlashLocation.Count != ExpectedFlashLocationCount
+					|| CurrentOwner->FlashLocation.Position != ExpectedFlashLocation
+					|| CurrentOwner->FlashExtra != ExpectedFlashExtra
+					|| CurrentOwner->FireMode != ExpectedFireMode
+					|| CurrentOwner->bLocalFlashLoc != bExpectedLocalFlashLocation)
+				{
+					return;
+				}
+
+				// State objects are reused. If this same firing state was
+				// re-entered before it wrote new flash data, leave it alone.
+				AUTWeapon* OldWeapon = WeakWeapon.Get();
+				if (OldWeapon && CurrentOwner->GetWeapon() == OldWeapon
+					&& WeakExitedState.IsValid()
+					&& OldWeapon->GetCurrentState() == WeakExitedState.Get())
+				{
+					return;
+				}
+
+				CurrentOwner->ClearFiringInfo();
+			})
 		);
 	}
 
