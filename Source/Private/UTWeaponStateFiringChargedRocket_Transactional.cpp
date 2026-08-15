@@ -6,7 +6,15 @@
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTBot.h"
+#include "HAL/IConsoleManager.h"
 // UTWeaponStateFiringChargedRocket_Transactional.cpp
+
+static FORCEINLINE bool RocketPrimaryChargedDiag(AUTWeapon* Weapon)
+{
+	static IConsoleVariable* DiagVar = IConsoleManager::Get().FindConsoleVariable(TEXT("ncp.RocketPrimaryDiag"));
+	return Weapon != nullptr && DiagVar && DiagVar->GetInt() >= 2
+		&& Cast<AUTPlusWeap_RocketLauncher>(Weapon) != nullptr;
+}
 
 
 UUTWeaponStateFiringChargedRocket_Transactional::UUTWeaponStateFiringChargedRocket_Transactional(const FObjectInitializer& ObjectInitializer)
@@ -35,6 +43,21 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ClearAllTimers()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeaponState* PrevState)
 {
+	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		AUTPlusWeap_RocketLauncher* RL = Cast<AUTPlusWeap_RocketLauncher>(W);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_BEGIN frame=%u t=%.4f role=%d net=%d local=%d state=%p prev=%s fireMode=%d currentMode=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
+			PrevState ? *PrevState->GetClass()->GetName() : TEXT("null"), GetFireMode(), W->GetCurrentFireMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
+			bCharging ? 1 : 0, RL ? RL->NumLoadedRockets : -1, RL ? RL->NumLoadedBarrels : -1);
+	}
+
     // 1. Notify weapon that firing has started
     GetOuterAUTWeapon()->OnStartedFiring();
     if (GetOuterAUTWeapon())
@@ -95,6 +118,25 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
 
 void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
 {
+	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		AUTPlusWeap_RocketLauncher* RL = Cast<AUTPlusWeap_RocketLauncher>(W);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_END frame=%u t=%.4f role=%d net=%d local=%d state=%p fireMode=%d currentMode=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
+			GetFireMode(), W->GetCurrentFireMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
+			bCharging ? 1 : 0, RL ? RL->NumLoadedRockets : -1, RL ? RL->NumLoadedBarrels : -1,
+			W->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+	}
+
     // 1. Clear all timers
     ClearAllTimers();
 
@@ -222,6 +264,24 @@ void UUTWeaponStateFiringChargedRocket_Transactional::GraceTimer()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
 {
+	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_END_SEQUENCE frame=%u t=%.4f role=%d net=%d requested=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(), FireModeNum, GetFireMode(), W->GetCurrentFireMode(),
+			W->GetCurrentState() == this ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
+			bCharging ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
+			RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1,
+			W->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+	}
+
     if (FireModeNum != GetFireMode()) return;
 
     // Re-entry guard: if a burst is already in progress (FireLoadedRocketHandle
@@ -350,6 +410,19 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 
 void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 {
+	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_FIRE_LOADED frame=%u t=%.4f role=%d net=%d fireMode=%d currentMode=%d owns=%d pending0=%d charging=%d loadedR=%d loadedB=%d"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(), GetFireMode(), W->GetCurrentFireMode(),
+			W->GetCurrentState() == this ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			bCharging ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
+			RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1);
+	}
+
     if (!RocketLauncher || RocketLauncher->NumLoadedRockets <= 0)
     {
         // Done firing - cleanup
@@ -475,6 +548,25 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
 {
+	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_REFIRE frame=%u t=%.4f role=%d net=%d local=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0,
+			GetFireMode(), W->GetCurrentFireMode(), W->GetCurrentState() == this ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
+			bCharging ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
+			RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1,
+			W->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+	}
+
     // 1. Integrity Check
     if (GetOuterAUTWeapon()->GetCurrentState() != this) return;
 

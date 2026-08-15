@@ -25,14 +25,13 @@ class NETCODEPLUS_API AWarmupRoamMutator : public AUTMutator
 
 public:
 	/** `mutate warmup` toggles roam for the sender (warmup-only; rejected otherwise).
-	 *  `mutate host` replies with the match host's name over ClientMessage — server-side
-	 *  stopgap for the unreliable HOST badge until the ANCHostInfo client roll lands. */
+	 *  `mutate host` reports player ready-up when enabled; host-controlled servers
+	 *  retain the existing match-host lookup. */
 	virtual void Mutate_Implementation(const FString& MutateString, APlayerController* Sender) override;
 
-	/** Auto-announce the match host in the console on join (same stopgap as `mutate
-	 *  host`, but pushed instead of queried): each human joiner gets "Match host: X"
-	 *  ~10s after login (past the loading screen + version-gate window), and when the
-	 *  HOST joins, everyone already connected is told — covering both join orders. */
+	/** Auto-announce warmup start control in the console on join. Ready-up servers
+	 *  receive the F5 instruction; host-controlled servers retain the delayed host
+	 *  name and host-join announcement. */
 	virtual void PostPlayerInit_Implementation(AController* C) override;
 
 	/** Re-assert roam on a respawned pawn (firing/invuln reset to defaults each spawn). */
@@ -63,7 +62,7 @@ protected:
 	 *  host's PS when connected; bOutHostConfigured = whether ?HostId= is set at all. */
 	AUTPlayerState* ResolveHostPS(bool& bOutHostConfigured) const;
 
-	/** Delayed per-joiner console line ("Match host: X" / "hasn't joined yet").
-	 *  No-ops if the player left or the match started during the delay. */
-	void SendHostInfoTo(TWeakObjectPtr<APlayerController> WeakPC);
+	/** Delayed per-joiner ready-up or host-control console line. No-ops if the
+	 *  player left or the match started during the delay. */
+	void SendWarmupStartInfoTo(TWeakObjectPtr<APlayerController> WeakPC);
 };

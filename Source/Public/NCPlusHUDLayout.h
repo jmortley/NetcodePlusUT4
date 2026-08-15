@@ -332,6 +332,8 @@ namespace NCPlusHUDAliases
 	NETCODEPLUS_API FVector2D GetStockOffset(FName Alias);
 }
 
+struct FElimPlusHUDSnapshot;
+
 /**
  * Helpers for C++-drawn HUD pieces (portrait strips, scorebar) that aren't
  * UUTHUDWidget instances. The HUD's DrawHUD calls into these to get the user's
@@ -439,6 +441,14 @@ namespace NCPlusHUDDrawCall
 	 *  place of the portrait strip. Honors the `team_panel` alias (pos/scale/opacity/
 	 *  hide). Canvas passed by caller (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
+	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas,
+		const FElimPlusHUDSnapshot& Snapshot);
+
+	/** Decode and upload the recovered Absolute Elim team-panel textures before
+	 *  the render path needs them. Safe to call repeatedly. */
+	NETCODEPLUS_API void PreloadAbsoluteElimTeamPanelTextures();
+	/** Release session-lifetime transient textures during a live module unload. */
+	NETCODEPLUS_API void ReleaseAbsoluteElimTeamPanelTextures();
 
 	/** Recovered Elimination 113 top-left living-player panel. Uses the original fixed
 	 *  red artwork (and a fixed 240-degree blue variant), score hexes, name plates, and
@@ -446,6 +456,8 @@ namespace NCPlusHUDDrawCall
 	 *  is intentionally unavailable for this pixel-authentic presentation. Falls back
 	 *  to DrawStockTeamPanel if the loose plugin PNG resources are unavailable. */
 	NETCODEPLUS_API void DrawAbsoluteElimTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
+	NETCODEPLUS_API void DrawAbsoluteElimTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas,
+		const FElimPlusHUDSnapshot& Snapshot);
 
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).

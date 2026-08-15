@@ -52,6 +52,44 @@ struct FNetcodeDelayedProjectile
 	}
 };
 
+/** What produced a delayed Flak prediction request. Shell-impact fragments are deliberately
+ * absent: they are spawned authoritatively by AUTProj_FlakShell::Explode() and never enter
+ * the weapon prediction path. */
+enum class ENetcodeDelayedFlakKind : uint8
+{
+    PrimaryShard,
+    SecondaryShell
+};
+
+/** One immutable delayed Flak fake request. Primary fire owns nine independent records even
+ * though all shards share one fire-event index; secondary owns one shell record. */
+struct FNetcodeDelayedFlakProjectile
+{
+    TSubclassOf<AUTProjectile> ProjectileClass;
+    FVector SpawnLocation;
+    FRotator SpawnRotation;
+    FTimerHandle TimerHandle;
+    uint8 FireMode;
+    int32 EventIndex;
+    uint32 ReservationId;
+    int32 ProjectileOrdinal;
+    float RequestTime;
+    ENetcodeDelayedFlakKind Kind;
+
+    FNetcodeDelayedFlakProjectile()
+        : ProjectileClass(nullptr)
+        , SpawnLocation(FVector::ZeroVector)
+        , SpawnRotation(FRotator::ZeroRotator)
+        , FireMode(0)
+        , EventIndex(INDEX_NONE)
+        , ReservationId(0)
+        , ProjectileOrdinal(0)
+        , RequestTime(0.f)
+        , Kind(ENetcodeDelayedFlakKind::PrimaryShard)
+    {
+    }
+};
+
 struct FPendingFireEventFix
 {
     bool bIsStartFire;
@@ -259,8 +297,8 @@ public:
     /** Whether settings have been loaded from Mod.ini this session */
     static bool bWeaponSettingsLoaded;
 
-    /** Highest slot index + 1 that GetWeaponSkinTargetSlotMask can ever set. */
-    static constexpr int32 MaxWeaponSkinTargetSlots = 2;
+    /** uint32-backed material-slot masks support slots 0 through 31. */
+    static constexpr int32 MaxWeaponSkinTargetSlots = 32;
 
     /** Bitmask of mesh material slots a weapon family renders its skin on, for one
      *  view. Bit N = slot N. Verified in-editor against the shipped skin assets'
@@ -269,7 +307,10 @@ public:
      *                    M_Flak_Skin_Void01 replace M_Flak_Gun_Inst /
      *                    M_Flak_Gun_3P_Inst, and BOTH Flak meshes carry that body
      *                    material on slot 0 AND slot 1.
-     *    Lightning Gun — ASYMMETRIC: 1P {0}, 3P {1}. PinkLG's 1P
+     *    Lightning Gun — single-material fallback is asymmetric: 1P {0}, 3P {1}.
+     *                    PinkLG is expanded by GetResolvedWeaponSkinTargetSlotMask()
+     *                    to {0,1} in both views, with a different E0/E1 material on
+     *                    each slot. Its 1P
      *                    MAT_INS_LG_Pink_E0_1p carries the PartTWO texture set
      *                    (T_LightingGunTwo_*), which Lightning_Gun_1p has on slot 0;
      *                    its 3P MAT_INS_LG_Pink_E1_3p carries the PartONE set
@@ -280,13 +321,26 @@ public:
      *  Keyed on the replicated WeaponSkinCustomizationTag — loads no asset. Slot names
      *  on these meshes are unreliable, so these are verified explicit indices and every
      *  caller bounds-checks each slot against the live GetNumMaterials(). Slots outside
-     *  the mask (Shock screen, ammo counters, decals, glass, the LG's other part) are
-     *  never captured or written and stay owned by the mesh / SetupSpecialMaterials(). */
+     *  the resolved mask (Shock screen, ammo counters, decals, glass) stay owned by
+     *  the mesh / SetupSpecialMaterials(). */
     static uint32 GetWeaponSkinTargetSlotMask(FName WeaponSkinCustomizationTag,
         bool bFirstPersonMesh);
 
-    /** Apply an already-resolved selection to the weapon-family body slots (slot 0,
-     *  plus slot 1 for Flak/Lightning); authority also keeps pickup identity. */
+    /** Resolve the final slot mask for one skin/view. Authentic invisibility
+     *  materials replace every live mesh slot; PinkLG uses both E0/E1 slots; other
+     *  authored skins retain the verified per-family mask above. */
+    static uint32 GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Skin,
+        FName WeaponSkinCustomizationTag, bool bFirstPersonMesh,
+        int32 MaterialSlotCount);
+
+    /** Material for one targeted slot. Most skins return their one per-view material;
+     *  PinkLG loads its MutAnnouncers-cooked E1_1p / E0_3p supplement so both
+     *  multipart LG sections receive the matching texture set. */
+    UMaterialInterface* GetResolvedWeaponSkinMaterialForSlot(
+        const UUTWeaponSkin* Skin, bool bFirstPersonMesh, int32 MaterialSlot);
+
+    /** Apply an already-resolved selection to the correct material slots for that
+     *  skin/view; authority also keeps pickup identity. */
     void ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin);
 
     //~ Begin AUTWeapon Interface
@@ -328,6 +382,25 @@ public:
      *  raised from 30ms to match the shock family — the search probes fixed 15ms
      *  rungs {15,30,45}, so 45 is the last rung before the ±60 defender tradeoff). */
     virtual float GetHitscanTimeSearchWindow() const { return 0.045f; }
+
+    /** Slide-posture selection for hitscan capsule tests. A floor slide shrinks the
+     *  authoritative capsule the same frame it starts, but a remote shooter keeps
+     *  rendering a mostly-standing body for one replication interp plus the animBP
+     *  blend-in — shots aimed at that rendered torso were unhittable air on the
+     *  server. Within ncp.SlideGraceMs of the target's slide start (rewind-adjusted
+     *  via RewindTime; slide age is reconstructible because PerformFloorSlide
+     *  re-stamps FloorSlideTapTime at true slide start), substitutes the
+     *  bottom-aligned STANDING capsule envelope, which strictly contains the slide
+     *  capsule; afterwards applies the classic SlideTargetHeight shrink. Mutates
+     *  the test location/half-height in place; no-op for non-sliding targets.
+     *  Shared by HitScanTrace, the claim time-search fallback, FireCone's pawn
+     *  sweep, the Enforcer trace, AND all three projectile rewind tests (the
+     *  catchup spawn sweep, the post-fast-forward overlap check, and
+     *  ServerProjectileHitClaim's per-sample anchor search + contact test) so
+     *  every validation path — hitscan and projectile — judges one posture. */
+    static void ApplySlidePostureForValidation(const AUTCharacter* Target,
+        float RewindTime, FVector& InOutTargetLocation, float& InOutCollisionHeight);
+
     virtual void FireShot() override;
 
     // Guard against race condition: replicated fire RPC arrives after owner dies
@@ -352,7 +425,24 @@ public:
     // Called by UTPlusProj_Rocket / UTPlusProj_FlakShell when fake hits a pawn.
     // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
     // =========================================================================
-    void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum);
+    /** @param SourceProj  The projectile reporting the hit. Callers resolve `this` weapon from
+     *                     UTCharacter::GetWeapon() at IMPACT time, which is the weapon currently
+     *                     HELD — not necessarily the one that fired. Fire a rocket, switch to flak,
+     *                     rocket lands: `this` is the flak cannon. Passing the projectile lets the
+     *                     hitsound prediction read damage off the instance that actually hit,
+     *                     instead of ProjClass[FireModeNum] on the wrong weapon. Optional: a null
+     *                     SourceProj keeps the legacy CDO lookup. */
+    void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum,
+        AUTProjectile* SourceProj = nullptr);
+
+    /** Resolve the weapon that FIRED Proj, rather than the one OwnerChar happens to be holding.
+     *  AUTCharacter::GetWeapon() is evaluated at IMPACT: fire a rocket, switch to flak, and the
+     *  rocket's claim routes to the flak cannon, whose ActiveServerProjectiles never held it, so
+     *  the server drops the claim and that shot silently loses lag compensation. Matching on the
+     *  projectile's exact class is unambiguous — each claim-capable class comes from exactly one
+     *  weapon. Falls back to the held weapon when nothing was recorded, so the worst case is the
+     *  behaviour that shipped. Call this instead of GetWeapon() from projectile impact handlers. */
+    static AUTWeaponFix* FindFiringWeaponForProjectile(AUTCharacter* OwnerChar, AUTProjectile* Proj);
 
     /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves (explodes) to
      *  snapshot its final state into ActiveServerProjectiles for the lag-comp grace buffer, so a claim
@@ -452,6 +542,15 @@ protected:
     // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
     bool bCrossModeRetryArmed[2];
 
+    // True while RetryFireHandle[mode] holds a BUFFERED CLICK: a queued
+    // (cooldown-blocked) press that was then RELEASED while its shot was due
+    // within ncp.ClickBufferMs. The release keeps the timer alive (StopFire)
+    // and OnRetryTimer fires exactly one shot then ends the sequence itself.
+    // Cleared by any fresh physical press, consumed in OnRetryTimer, killed on
+    // PutDown. Never graduated to pawn PendingFire — it is a spent click, not
+    // held intent.
+    bool bBufferedClickPending[2];
+
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
 
@@ -465,26 +564,21 @@ protected:
     /** Max time after death to still allow pending fire RPCs (seconds) */
     static constexpr float TradeKillGracePeriod = 0.20f;
 
-    /** Slot-0 body material captured before NetcodePlus applies a configured skin. */
+    /** Per-slot originals captured before NetcodePlus applies a configured skin. */
     UPROPERTY(Transient)
-    UMaterialInterface* OriginalFPSMaterial;
+    TArray<UMaterialInterface*> OriginalFPSMaterials;
 
-    /** Slot-1 body material, captured only when this weapon's 1P target mask includes
-     *  slot 1 (Flak); nullptr otherwise — including the Lightning Gun, whose 1P skin
-     *  is slot 0 only. */
+    /** Immutable selected body-material parent per slot, or nullptr for Default. */
     UPROPERTY(Transient)
-    UMaterialInterface* OriginalFPSMaterialSecondary;
+    TArray<UMaterialInterface*> AppliedFPSMaterialParents;
 
-    /** Immutable body-material parent selected for this actor, or OriginalFPSMaterial. */
+    /** One actor-local selected-material MID per targeted slot. Separate MIDs keep
+     *  SetupSpecialMaterials() changes isolated to the slot they configure. */
     UPROPERTY(Transient)
-    UMaterialInterface* AppliedFPSMaterial;
+    TArray<UMaterialInstanceDynamic*> AppliedFPSMaterialInstances;
 
-    /** Actor-local MID for the selected FPS material, reused across the family's body
-     *  slots on this mesh; never shared between actors. */
-    UPROPERTY(Transient)
-    UMaterialInstanceDynamic* AppliedFPSMaterialInstance;
-
-    bool bCapturedOriginalFPSMaterial;
+    uint32 AppliedFPSMaterialSlotMask;
+    bool bCapturedOriginalFPSMaterials;
 
     void PrepareConfiguredWeaponSkin();
 
@@ -666,7 +760,16 @@ protected:
     virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime);
 
 	// Helper function for the timer
-	void SpawnDelayedFakeProjectile();
+	virtual void SpawnDelayedFakeProjectile() override;
+	void SpawnDelayedFlakFakeProjectile(uint32 ReservationId);
+	void ClearDelayedFlakFakeProjectiles();
+	AUTProjectile* SpawnNetPredictedProjectileInternal(
+		TSubclassOf<AUTProjectile> ProjectileClass,
+		FVector SpawnLocation,
+		FRotator SpawnRotation,
+		uint8 CapturedFireMode,
+		int32 CapturedEventIndex,
+		bool bAllowDelay);
 
 	// Timer handle
 	FTimerHandle SpawnDelayedFakeProjHandle;
@@ -674,6 +777,12 @@ protected:
 	// RENAMED TO AVOID SHADOWING PARENT CLASS VARIABLE
 	UPROPERTY()
 	FNetcodeDelayedProjectile NetcodeDelayedProjectile;
+
+	/** Flak-only delayed predictions. Kept separate so a nine-shard volley cannot collapse
+	 * into the legacy single payload and so rocket behavior remains unchanged while its
+	 * independent M1 cadence problem is being diagnosed. */
+	TArray<FNetcodeDelayedFlakProjectile> DelayedFlakProjectiles;
+	uint32 NextDelayedFlakReservationId;
 
 	// Guard Rail Cap (120ms)
 	const float MaxCatchupTime = 0.10f;
@@ -736,6 +845,13 @@ protected:
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
 
+    /** Every projectile class this weapon has spawned, recorded on BOTH server and the firing
+     *  client (the client records it when it spawns the fake). Not replicated and never needs to
+     *  be: each side populates its own copy from its own spawn. Bounded by the number of distinct
+     *  projectile classes a weapon can fire (1-3), so it is add-unique and never cleared. */
+    UPROPERTY()
+    TArray<TSubclassOf<AUTProjectile>> NCPFiredProjClasses;
+
 
     // =========================================================================
     // CLIENT-SIDE HITSOUND PREDICTION HELPER
@@ -743,6 +859,15 @@ protected:
 
     /** Find and cache the ClientHitsounds mutator from the game state mutator chain */
     AClientHitsounds* FindClientHitsoundsMutator();
+
+    /** Damage the hitsound prediction should assume for a hit in this fire mode.
+     *  bHeadshotClaimed is true when the shot is sending a head claim
+     *  (ClientHeadOffset non-zero). Base weapons ignore the claim and return the
+     *  fire mode's InstantHitInfo damage; headshot-capable weapons override and
+     *  return their headshot damage so the predicted cue matches what the server
+     *  will report if the claim validates. Estimation only — never used for
+     *  actual damage. */
+    virtual int32 GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshotClaimed);
 
     /** Cached pointer to the ClientHitsounds mutator */
     UPROPERTY()

@@ -14,6 +14,8 @@ class NETCODEPLUS_API AClutchPoleVisual : public AActor
 	GENERATED_UCLASS_BODY()
 
 public:
+	virtual void BeginPlay() override;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Clutch|Pole")
 	UStaticMeshComponent* PoleMesh;
 

@@ -43,6 +43,7 @@ AClutchRoundState::AClutchRoundState(const FObjectInitializer& ObjectInitializer
 	PoleUnlockServerTime = 0.0f;
 	RoundEndServerTime = 0.0f;
 	PoleProgress = 0.0f;
+	PoleActivity = EClutchPoleActivity::Idle;
 	ScoreGoal = 9;
 	MaxAttackerHits = 3;
 	LastWinningTeamIndex = NoTeam;
@@ -65,6 +66,7 @@ void AClutchRoundState::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(AClutchRoundState, PoleUnlockServerTime);
 	DOREPLIFETIME(AClutchRoundState, RoundEndServerTime);
 	DOREPLIFETIME(AClutchRoundState, PoleProgress);
+	DOREPLIFETIME(AClutchRoundState, PoleActivity);
 	DOREPLIFETIME(AClutchRoundState, ScoreGoal);
 	DOREPLIFETIME(AClutchRoundState, MaxAttackerHits);
 	DOREPLIFETIME(AClutchRoundState, LastWinningTeamIndex);
@@ -420,6 +422,7 @@ bool AClutchRoundState::ResetForMatch(int32 InScoreGoal, uint8 InMaxAttackerHits
 	PoleUnlockServerTime = 0.0f;
 	RoundEndServerTime = 0.0f;
 	PoleProgress = 0.0f;
+	PoleActivity = EClutchPoleActivity::Idle;
 	ScoreGoal = FMath::Max(1, InScoreGoal);
 	MaxAttackerHits = static_cast<uint8>(FMath::Clamp<int32>(InMaxAttackerHits, 1, 255));
 	LastWinningTeamIndex = NoTeam;
@@ -446,6 +449,7 @@ bool AClutchRoundState::BeginAttackOrderSelection(float InDeadlineServerTime)
 	PoleUnlockServerTime = 0.0f;
 	RoundEndServerTime = 0.0f;
 	PoleProgress = 0.0f;
+	PoleActivity = EClutchPoleActivity::Idle;
 	for (FClutchRosterEntry& Entry : Roster)
 	{
 		if (Entry.PlayerState && Entry.PlayerStatus != EClutchStatus::Disconnected)
@@ -497,6 +501,7 @@ bool AClutchRoundState::BeginRound(uint8 InAttackingTeamIndex,
 	PoleUnlockServerTime = FMath::Max(RoundStartServerTime, InPoleUnlockServerTime);
 	RoundEndServerTime = FMath::Max(PoleUnlockServerTime, InRoundEndServerTime);
 	PoleProgress = 0.0f;
+	PoleActivity = EClutchPoleActivity::Idle;
 	LastWinningTeamIndex = NoTeam;
 	LastEndReason = NAME_None;
 
@@ -522,6 +527,7 @@ bool AClutchRoundState::StartRoundClock(float InRoundStartServerTime,
 	}
 
 	Phase = EClutchRoundPhase::Combat;
+	PoleActivity = EClutchPoleActivity::Idle;
 	RoundStartServerTime = FMath::Max(0.0f, InRoundStartServerTime);
 	PoleUnlockServerTime = FMath::Max(RoundStartServerTime, InPoleUnlockServerTime);
 	RoundEndServerTime = FMath::Max(PoleUnlockServerTime, InRoundEndServerTime);
@@ -540,6 +546,10 @@ bool AClutchRoundState::SetPhase(EClutchRoundPhase NewPhase)
 	if (Phase != NewPhase)
 	{
 		Phase = NewPhase;
+		if (Phase != EClutchRoundPhase::Capture)
+		{
+			PoleActivity = EClutchPoleActivity::Idle;
+		}
 		MarkStateDirty();
 	}
 	return true;
@@ -565,6 +575,24 @@ bool AClutchRoundState::SetPoleProgress(float NewProgress)
 }
 
 
+bool AClutchRoundState::SetPoleActivity(EClutchPoleActivity NewActivity)
+{
+	if (!HasAuthority())
+	{
+		return false;
+	}
+
+	if (PoleActivity != NewActivity)
+	{
+		PoleActivity = NewActivity;
+		// Occupancy transitions are sparse and player-facing. Push them immediately;
+		// the continuously moving percentage remains capped by NetUpdateFrequency.
+		MarkStateDirty();
+	}
+	return true;
+}
+
+
 bool AClutchRoundState::FinishRound(uint8 WinningTeamIndex, FName EndReason, bool bMatchEnded)
 {
 	if (!HasAuthority() || (WinningTeamIndex > 1 && WinningTeamIndex != NoTeam))
@@ -573,6 +601,7 @@ bool AClutchRoundState::FinishRound(uint8 WinningTeamIndex, FName EndReason, boo
 	}
 
 	Phase = bMatchEnded ? EClutchRoundPhase::MatchEnd : EClutchRoundPhase::RoundEnd;
+	PoleActivity = EClutchPoleActivity::Idle;
 	LastWinningTeamIndex = WinningTeamIndex;
 	LastEndReason = EndReason;
 	MarkStateDirty();
@@ -1038,6 +1067,21 @@ float AClutchRoundState::AdvancePoleProgress(float CurrentProgress,
 	// Attacker + defender is contested and deliberately freezes progress.
 
 	return FMath::Clamp(Result, 0.0f, 100.0f);
+}
+
+
+EClutchPoleActivity AClutchRoundState::ResolvePoleActivity(
+	bool bAttackerPresent, bool bDefenderPresent, float NewProgress)
+{
+	if (bAttackerPresent)
+	{
+		return bDefenderPresent
+			? EClutchPoleActivity::Contested
+			: EClutchPoleActivity::Capturing;
+	}
+	return NewProgress > KINDA_SMALL_NUMBER
+		? EClutchPoleActivity::Decaying
+		: EClutchPoleActivity::Idle;
 }
 
 

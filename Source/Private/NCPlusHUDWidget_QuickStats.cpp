@@ -81,6 +81,16 @@ UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitialize
 	CachedArmorAccent      = FLinearColor(0.95f, 0.83f, 0.34f, 1.f);
 	CachedHealthNumBase    = FLinearColor::White;
 	CachedArmorNumBase     = FLinearColor::White;
+	CachedRadialRenderPosition = FVector2D(BIG_NUMBER, BIG_NUMBER);
+	CachedRadialSize       = FVector2D(BIG_NUMBER, BIG_NUMBER);
+	CachedRadialRenderScale = -1.f;
+	CachedRadialHealth = MIN_int32;
+	CachedRadialArmor = MIN_int32;
+	bCachedRadialDrawArmor = false;
+	RadialTrackHPStart = RadialTrackHPCount = 0;
+	RadialTrackARStart = RadialTrackARCount = 0;
+	RadialValueHPStart = RadialValueHPCount = 0;
+	RadialValueARStart = RadialValueARCount = 0;
 }
 
 float UNCPlusHUDWidget_QuickStats::GetDrawScaleOverride()
@@ -418,7 +428,7 @@ namespace
 	// (the hp/armor opacity setting, pulse dims, track rings, partial-segment blends)
 	// was silently IGNORED — the arc/chevron ink always rendered solid (community
 	// "opacity doesn't change radial circles or hex chevrons", 2026-07-01).
-	void DrawTrisTranslucent(UCanvas* Canvas, TArray<FCanvasUVTri>&& Tris)
+	void DrawTrisTranslucent(UCanvas* Canvas, TArray<FCanvasUVTri>& Tris)
 	{
 		if (!Canvas || Tris.Num() == 0) return;
 		FCanvasTriangleItem Item(FVector2D::ZeroVector, FVector2D::ZeroVector, FVector2D::ZeroVector,
@@ -426,6 +436,20 @@ namespace
 		Item.TriangleList = MoveTemp(Tris);
 		Item.BlendMode = SE_BLEND_Translucent;
 		Canvas->DrawItem(Item);
+		// DrawItem copies the vertices into FCanvas' batched elements synchronously.
+		// Move the allocation back so the next frame reuses it instead of reallocating.
+		Tris = MoveTemp(Item.TriangleList);
+	}
+
+	void SetTriangleRangeColor(TArray<FCanvasUVTri>& Tris, int32 Start, int32 Count,
+		const FLinearColor& Color)
+	{
+		const int32 End = FMath::Min(Start + Count, Tris.Num());
+		for (int32 Index = FMath::Max(Start, 0); Index < End; ++Index)
+		{
+			FCanvasUVTri& Tri = Tris[Index];
+			Tri.V0_Color = Tri.V1_Color = Tri.V2_Color = Color;
+		}
 	}
 
 	// Helper: append a filled arc to the shared triangle ring around widget-local (CX, CY)
@@ -486,32 +510,60 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 	// default blend ignored every alpha here.)
 	FLinearColor TrackHP(0.10f, 0.16f, 0.12f, 0.85f * C.Opacity);
 	FLinearColor TrackAR(0.16f, 0.14f, 0.10f, 0.85f * C.Opacity);
-	TArray<FCanvasUVTri> Tris;
-	// Worst case: two full tracks + two full value rings, two triangles/segment.
-	Tris.Reserve((48 + 40 + 48 + 40) * 2);
-	AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP, 0.f, 2.f * PI, 48, TrackHP);
-	if (bDrawArmor)
-	{
-		AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR, 0.f, 2.f * PI, 40, TrackAR);
-	}
-
-	// HP arc — full sweep maps to MaxHealth (200).
-	const float HPFrac = FMath::Clamp(float(Health) / float(MaxHealth), 0.f, 1.f);
 	FLinearColor HPColor = C.HealthAccent;
 	HPColor.A = (0.9f + C.HealthPulse * 0.1f) * C.Opacity;
-	AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP,
-	        0.f, HPFrac * 2.f * PI, FMath::Max(8, FMath::FloorToInt(HPFrac * 48.f)), HPColor);
+	FLinearColor ARColor = C.ArmorAccent;
+	ARColor.A = (0.9f + C.ArmorPulse * 0.1f) * C.Opacity;
+	const bool bRebuildGeometry = CachedRadialTris.Num() == 0
+		|| CachedRadialRenderPosition != RenderPosition
+		|| CachedRadialSize != Size
+		|| CachedRadialRenderScale != RenderScale
+		|| CachedRadialHealth != Health
+		|| CachedRadialArmor != Armor
+		|| bCachedRadialDrawArmor != bDrawArmor;
+	if (bRebuildGeometry)
+	{
+		// Worst case: two full tracks + two full value rings, two triangles/segment.
+		CachedRadialTris.Reset((48 + 40 + 48 + 40) * 2);
+		RadialTrackHPStart = CachedRadialTris.Num();
+		AppendArc(CachedRadialTris, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP, 0.f, 2.f * PI, 48, TrackHP);
+		RadialTrackHPCount = CachedRadialTris.Num() - RadialTrackHPStart;
+		RadialTrackARStart = CachedRadialTris.Num();
+		if (bDrawArmor)
+		{
+			AppendArc(CachedRadialTris, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR, 0.f, 2.f * PI, 40, TrackAR);
+		}
+		RadialTrackARCount = CachedRadialTris.Num() - RadialTrackARStart;
+
+	// HP arc — full sweep maps to MaxHealth (200).
+		const float HPFrac = FMath::Clamp(float(Health) / float(MaxHealth), 0.f, 1.f);
+		RadialValueHPStart = CachedRadialTris.Num();
+		AppendArc(CachedRadialTris, RenderPosition, RenderScale, CX, CY, OuterR_HP - Thick, OuterR_HP,
+			0.f, HPFrac * 2.f * PI, FMath::Max(8, FMath::FloorToInt(HPFrac * 48.f)), HPColor);
+		RadialValueHPCount = CachedRadialTris.Num() - RadialValueHPStart;
 
 	// Armor arc — full sweep maps to MaxArmor (150).
-	if (bDrawArmor)
-	{
-		const float ARFrac = FMath::Clamp(float(Armor) / float(MaxArmor), 0.f, 1.f);
-		FLinearColor ARColor = C.ArmorAccent;
-		ARColor.A = (0.9f + C.ArmorPulse * 0.1f) * C.Opacity;
-		AppendArc(Tris, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR,
-		        0.f, ARFrac * 2.f * PI, FMath::Max(6, FMath::FloorToInt(ARFrac * 40.f)), ARColor);
+		RadialValueARStart = CachedRadialTris.Num();
+		if (bDrawArmor)
+		{
+			const float ARFrac = FMath::Clamp(float(Armor) / float(MaxArmor), 0.f, 1.f);
+			AppendArc(CachedRadialTris, RenderPosition, RenderScale, CX, CY, OuterR_AR - (Thick - 1.f), OuterR_AR,
+				0.f, ARFrac * 2.f * PI, FMath::Max(6, FMath::FloorToInt(ARFrac * 40.f)), ARColor);
+		}
+		RadialValueARCount = CachedRadialTris.Num() - RadialValueARStart;
+		CachedRadialRenderPosition = RenderPosition;
+		CachedRadialSize = Size;
+		CachedRadialRenderScale = RenderScale;
+		CachedRadialHealth = Health;
+		CachedRadialArmor = Armor;
+		bCachedRadialDrawArmor = bDrawArmor;
 	}
-	DrawTrisTranslucent(Canvas, MoveTemp(Tris));
+
+	SetTriangleRangeColor(CachedRadialTris, RadialTrackHPStart, RadialTrackHPCount, TrackHP);
+	SetTriangleRangeColor(CachedRadialTris, RadialTrackARStart, RadialTrackARCount, TrackAR);
+	SetTriangleRangeColor(CachedRadialTris, RadialValueHPStart, RadialValueHPCount, HPColor);
+	SetTriangleRangeColor(CachedRadialTris, RadialValueARStart, RadialValueARCount, ARColor);
+	DrawTrisTranslucent(Canvas, CachedRadialTris);
 
 	// Numbers stacked in the center of the rings — DrawText needs DrawOpacity arg.
 	DrawText(FText::AsNumber(Health), CX, CY - 14.f, NumberFont,
@@ -641,7 +693,7 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 			NumScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
 	}
-	DrawTrisTranslucent(Canvas, MoveTemp(Tris));
+	DrawTrisTranslucent(Canvas, Tris);
 }
 
 // =============================================================================

@@ -362,6 +362,19 @@ bool FClutchPoleProgressTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Non-positive delta does not move the pole"), FMath::IsNearlyEqual(
 		AClutchRoundState::AdvancePoleProgress(55.0f, 0.0f, true, false, 5.0f, 10.0f),
 		55.0f));
+
+	TestTrue(TEXT("Attacker alone reports capturing"),
+		AClutchRoundState::ResolvePoleActivity(true, false, Capturing)
+			== EClutchPoleActivity::Capturing);
+	TestTrue(TEXT("Both sides report contested"),
+		AClutchRoundState::ResolvePoleActivity(true, true, Contested)
+			== EClutchPoleActivity::Contested);
+	TestTrue(TEXT("Abandoned progress reports decay"),
+		AClutchRoundState::ResolvePoleActivity(false, false, EmptyPole)
+			== EClutchPoleActivity::Decaying);
+	TestTrue(TEXT("An empty zeroed pole reports idle"),
+		AClutchRoundState::ResolvePoleActivity(false, true, 0.0f)
+			== EClutchPoleActivity::Idle);
 	return true;
 }
 

@@ -1,16 +1,66 @@
 // UTWeap_Enforcer_Plus.cpp
 #include "UTWeap_Enforcer_Plus.h"
 #include "UnrealTournament.h"
+#include "UTWeaponFix.h"   // shared slide-posture validation rule (static)
+#include "UTWeaponStateFiring_Enforcer.h"
+#include "UTWeaponStateFiringBurstEnforcer.h"
 #include "UTCharacter.h"
 #include "UTCharacterMovement.h"
 #include "UTGameState.h"
 #include "UTPlayerState.h"
 #include "Components/CapsuleComponent.h"
+#include "Particles/ParticleSystem.h"
+#include "Particles/ParticleSystemComponent.h"
+#include "UObject/ConstructorHelpers.h"
 
 AUTWeap_Enforcer_Plus::AUTWeap_Enforcer_Plus(const FObjectInitializer& OI)
-	: Super(OI)
+	: Super(OI
+		.SetDefaultSubobjectClass<UUTWeaponStateFiring_Enforcer>(TEXT("FiringState0"))
+		.SetDefaultSubobjectClass<UUTWeaponStateFiringBurstEnforcer>(TEXT("FiringState1")))
 {
-	// Inherit all stock enforcer defaults; NetcodePlus tuning below.
+	// The stock weapon's presentation is authored in Enforcer.uasset rather than
+	// AUTWeap_Enforcer.  Supply the two SCS-only muzzle templates natively so a
+	// direct Blueprint child never needs cross-class component references.
+	Muzzle = OI.CreateDefaultSubobject<UParticleSystemComponent>(this, TEXT("Muzzle"));
+	LeftMuzzle = OI.CreateDefaultSubobject<UParticleSystemComponent>(this, TEXT("LeftMuzzle"));
+
+	static ConstructorHelpers::FObjectFinder<UParticleSystem> MuzzleTemplate(
+		TEXT("ParticleSystem'/Game/RestrictedAssets/Weapons/Weapon_Effects/Particles/P_Enforcer_MF_01_1P.P_Enforcer_MF_01_1P'"));
+
+	if (Muzzle != nullptr)
+	{
+		Muzzle->SetupAttachment(Mesh, FName(TEXT("MuzzleFlashSocket")));
+		Muzzle->SetRelativeRotation(FRotator(0.f, 90.f, 0.f));
+		Muzzle->SetAutoActivate(false);
+		Muzzle->bReceivesDecals = false;
+		Muzzle->CastShadow = false;
+		if (MuzzleTemplate.Succeeded())
+		{
+			Muzzle->SetTemplate(MuzzleTemplate.Object);
+		}
+	}
+
+	if (LeftMuzzle != nullptr)
+	{
+		LeftMuzzle->SetupAttachment(LeftMesh, FName(TEXT("MuzzleFlashSocket")));
+		LeftMuzzle->SetRelativeRotation(FRotator(0.f, 90.f, 0.f));
+		LeftMuzzle->SetRelativeScale3D(FVector(-1.f, 1.f, 1.f));
+		LeftMuzzle->SetAutoActivate(false);
+		LeftMuzzle->bReceivesDecals = false;
+		LeftMuzzle->CastShadow = false;
+		if (MuzzleTemplate.Succeeded())
+		{
+			LeftMuzzle->SetTemplate(MuzzleTemplate.Object);
+		}
+	}
+
+	MuzzleFlash.Empty(4);
+	MuzzleFlash.Add(Muzzle);
+	MuzzleFlash.Add(Muzzle);
+	MuzzleFlash.Add(LeftMuzzle);
+	MuzzleFlash.Add(LeftMuzzle);
+
+	// NetcodePlus tuning below.
 	MaxRewindMs = 250.f;
 	FudgeFactorMs = 20.f;
 	MovingTargetPadding = 25.f;
@@ -64,27 +114,43 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 	// AUTWeaponFix::HitScanTrace semantics without touching transactional fire.
 	const float ActualPredictionTime = GetRewindSeconds();
 
-	// 1) World geometry trace (no character collision). Same as stock.
+	// 1) World geometry trace (no character collision). Preserve stock's
+	//    projectile-ignore behavior, but use an actually bounded retry loop.
 	ECollisionChannel TraceChannel = COLLISION_TRACE_WEAPONNOCHARACTER;
 	FCollisionQueryParams QueryParams(GetClass()->GetFName(), true, UTOwner);
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	int32 RemainingIgnoredHits = (TraceRadius <= 0.f) ? 3 : 2;
 
-	if (TraceRadius <= 0.f)
+	while (true)
 	{
-		GetWorld()->LineTraceSingleByChannel(Hit, StartLocation, EndTrace, TraceChannel, QueryParams);
-	}
-	else
-	{
-		GetWorld()->SweepSingleByChannel(Hit, StartLocation, EndTrace, FQuat::Identity, TraceChannel, FCollisionShape::MakeSphere(TraceRadius), QueryParams);
-	}
+		const bool bBlockingHit = (TraceRadius <= 0.f)
+			? GetWorld()->LineTraceSingleByChannel(Hit, StartLocation, EndTrace, TraceChannel, QueryParams)
+			: GetWorld()->SweepSingleByChannel(Hit, StartLocation, EndTrace, FQuat::Identity, TraceChannel, FCollisionShape::MakeSphere(TraceRadius), QueryParams);
 
-	if (!Hit.bBlockingHit)
-	{
-		Hit.Location = EndTrace;
+		if (!bBlockingHit)
+		{
+			Hit.Location = EndTrace;
+			break;
+		}
+
+		if (TraceRadius > 0.f)
+		{
+			// Keep the reported impact point on the target surface for swept traces.
+			Hit.Location += (EndTrace - StartLocation).GetSafeNormal() * TraceRadius;
+		}
+
+		if (RemainingIgnoredHits > 0 && Hit.Actor.IsValid() && ShouldTraceIgnore(Hit.GetActor()))
+		{
+			QueryParams.AddIgnoredActor(Hit.GetActor());
+			--RemainingIgnoredHits;
+			continue;
+		}
+
+		break;
 	}
 
 	// 2) Pawn iteration with rewind. Find the closest pawn hit that's also
 	//    closer than the world-geometry hit (which set Hit.Location above).
-	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	AUTCharacter* BestTarget = nullptr;
 	FVector BestPoint(0.f);
 	FVector BestCapsulePoint(0.f);
@@ -101,8 +167,8 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 		{
 			continue;
 		}
-		// Teammate check: skip if same team (unless bTeammatesBlockHitscan is set).
-		if (!(bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target)))
+		// Match stock: team projectiles enabled means teammates also block hitscan.
+		if (!(bTeammatesBlockHitscan || !GS || GS->bTeamProjHits || !GS->OnSameTeam(UTOwner, Target)))
 		{
 			continue;
 		}
@@ -121,12 +187,13 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 		float CollisionHeight = Capsule->GetScaledCapsuleHalfHeight();
 		float CollisionRadius = Capsule->GetScaledCapsuleRadius();
 
-		// Floor-slide adjustment — capsule is shorter during slide.
-		if (Target->UTCharacterMovement && Target->UTCharacterMovement->bIsFloorSliding)
-		{
-			TargetLocation.Z = TargetLocation.Z - CollisionHeight + Target->SlideTargetHeight;
-			CollisionHeight = Target->SlideTargetHeight;
-		}
+		// Floor-slide posture: standing envelope inside the ncp.SlideGraceMs window
+		// after slide start, classic slide shrink after (shared validation rule —
+		// see AUTWeaponFix::ApplySlidePostureForValidation).
+		// Qualified: this class extends AUTWeap_Enforcer, not AUTWeaponFix.
+		AUTWeaponFix::ApplySlidePostureForValidation(Target,
+			(ActualPredictionTime > 0.f && Role == ROLE_Authority) ? ActualPredictionTime : 0.f,
+			TargetLocation, CollisionHeight);
 
 		// Padding based on target movement state.
 		const bool bIsMoving = !Target->GetVelocity().IsNearlyZero(1.0f);
@@ -134,21 +201,63 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 
 		// Distance between trace and capsule.
 		bool bHitTarget = false;
+		bool bNeedsPaddingLOS = false;
 		FVector ClosestPoint(0.f);
 		FVector ClosestCapsulePoint = TargetLocation;
+		float CapsuleSurfaceRadius = CollisionRadius;
 
 		if (CollisionRadius >= CollisionHeight)
 		{
+			CapsuleSurfaceRadius = CollisionHeight;
 			// Short-stocky capsule — treat as sphere centered on TargetLocation.
 			ClosestPoint = FMath::ClosestPointOnSegment(TargetLocation, StartLocation, Hit.Location);
-			bHitTarget = ((ClosestPoint - TargetLocation).SizeSquared() < FMath::Square(CollisionHeight + TraceRadius + ExtraHitPadding));
+			bHitTarget = ((ClosestPoint - TargetLocation).SizeSquared() < FMath::Square(CapsuleSurfaceRadius + TraceRadius));
+			if (!bHitTarget && ExtraHitPadding > 0.f)
+			{
+				bHitTarget = ((ClosestPoint - TargetLocation).SizeSquared() < FMath::Square(CapsuleSurfaceRadius + TraceRadius + ExtraHitPadding));
+				bNeedsPaddingLOS = bHitTarget;
+			}
 		}
 		else
 		{
 			// Tall capsule — segment-to-segment distance between trace and capsule axis.
 			const FVector CapsuleSegment = FVector(0.f, 0.f, CollisionHeight - CollisionRadius);
 			FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location, TargetLocation - CapsuleSegment, TargetLocation + CapsuleSegment, ClosestPoint, ClosestCapsulePoint);
-			bHitTarget = ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CollisionRadius + TraceRadius + ExtraHitPadding));
+			bHitTarget = ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CapsuleSurfaceRadius + TraceRadius));
+			if (!bHitTarget && ExtraHitPadding > 0.f)
+			{
+				bHitTarget = ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CapsuleSurfaceRadius + TraceRadius + ExtraHitPadding));
+				bNeedsPaddingLOS = bHitTarget;
+			}
+		}
+
+		// Padding-only hits still need clear line of sight to the real capsule.
+		if (bNeedsPaddingLOS)
+		{
+			const FVector CapsuleToTrace = (ClosestPoint - ClosestCapsulePoint).GetSafeNormal();
+			const FVector PointToCheck = ClosestCapsulePoint + CapsuleSurfaceRadius * CapsuleToTrace;
+			FCollisionQueryParams PaddingQueryParams = QueryParams;
+			int32 RemainingPaddingIgnores = 3;
+			bHitTarget = false;
+
+			while (true)
+			{
+				FHitResult CheckHit;
+				if (!GetWorld()->LineTraceSingleByChannel(CheckHit, StartLocation, PointToCheck, TraceChannel, PaddingQueryParams))
+				{
+					bHitTarget = true;
+					break;
+				}
+
+				if (RemainingPaddingIgnores > 0 && CheckHit.Actor.IsValid() && ShouldTraceIgnore(CheckHit.GetActor()))
+				{
+					PaddingQueryParams.AddIgnoredActor(CheckHit.GetActor());
+					--RemainingPaddingIgnores;
+					continue;
+				}
+
+				break;
+			}
 		}
 
 		// Keep closest pawn hit.
@@ -157,7 +266,7 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 			BestTarget = Target;
 			BestPoint = ClosestPoint;
 			BestCapsulePoint = ClosestCapsulePoint;
-			BestCollisionRadius = CollisionRadius;
+			BestCollisionRadius = CapsuleSurfaceRadius;
 		}
 	}
 

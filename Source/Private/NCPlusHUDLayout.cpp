@@ -1,6 +1,7 @@
 // NCPlusHUDLayout — implementation. JSON I/O + alias map + apply-to-widgets pass.
 #include "NCPlusHUDLayout.h"
 #include "NCPlusHUDPresets.h"
+#include "ElimPlusHUD.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
@@ -132,6 +133,23 @@ namespace NCPlusHUDDragMode
 	// menus each request the cursor-free input mode on open. Active while ANY are
 	// open; only the last close lets the HUD's GetInputMode poll re-capture the
 	// cursor. (Was a plain bool — one menu closing cleared another's request.)
+	//
+	// KNOWN LIMITATION — STOCK GAMEMODES GET NO CURSOR (documented in
+	// SERVER-ADMINS.md "Start here"; workaround is to press ~ ):
+	// this flag is only READ by the NetcodePlus HUD subclasses
+	// (WipeoutHUD/ElimPlusHUD/NCPlusCTFHUD + the AWipeoutHUD children, in their
+	// GetInputMode_Implementation). On a stock gamemode the HUD is a plain AUTHUD
+	// that knows nothing about it, so AUTBasePlayerController::UpdateInputMode
+	// polls the stock GetInputMode, gets EIM_GameOnly for the whole match, and
+	// re-captures the mouse every tick — the panel opens with no usable cursor.
+	// The console works around it because AreMenusOpen() is checked BEFORE the HUD
+	// and forces EIM_UIOnly.
+	// Fixing it needs one of: (a) the panels re-asserting cursor + GameAndUI from a
+	// Slate Tick — must skip while AreMenusOpen() or it fights the console/escape
+	// menu, and must not re-apply SetWidgetToFocus every tick or it steals focus
+	// from the panels' text boxes; or (b) hosting the panels as real UT menu
+	// windows (UUTLocalPlayer::OpenWindow) so the engine's own EIM_UIOnly branch
+	// handles it — cleaner, but modal. Deferred past 328 deliberately.
 	static int32 GActiveCount = 0;
 
 	bool IsActive()              { return GActiveCount > 0; }
@@ -979,7 +997,7 @@ namespace NCPlusHUDAliases
 			// first drag jump a full screen width once anchors take real effect (see the
 			// killfeed special-case in ApplyLayoutToWidgets).
 			T.Emplace(TEXT("killfeed"),         TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"), FText::FromString(TEXT("Killfeed")), false, ENCPlusHUDAnchor::TopLeft);
-			T.Emplace(TEXT("spectator"),        TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")), false, ENCPlusHUDAnchor::TopRight);
+			T.Emplace(TEXT("spectator"),        TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"),                          FText::FromString(TEXT("Spectator Score / KDA")), false, ENCPlusHUDAnchor::TopRight);
 			T.Emplace(TEXT("announcements"),    TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),                       FText::FromString(TEXT("Announcements")),      false, ENCPlusHUDAnchor::TopCenter);
 			T.Emplace(TEXT("console_msgs"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),             FText::FromString(TEXT("Console Messages")),   false, ENCPlusHUDAnchor::BottomLeft);
 			T.Emplace(TEXT("voice_status"),     TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),             FText::FromString(TEXT("Voice Chat Status")),  false, ENCPlusHUDAnchor::TopCenter);
@@ -1048,6 +1066,9 @@ namespace NCPlusHUDAliases
 			// color_text / opacity.
 			T.Emplace(TEXT("server_info"),      FString(),                                                                       FText::FromString(TEXT("Server Name Plate")),  true,  ENCPlusHUDAnchor::TopLeft,     FVector2D(20.f, 14.f));
 			T.Emplace(TEXT("scorebar"),         FString(),                                                                       FText::FromString(TEXT("Score Bar / Clock")),  true,  ENCPlusHUDAnchor::TopCenter);
+			// Spectator/caster-only 1vX card. The renderer owns the spectator gate;
+			// this draw-call alias supplies position, scale, opacity and Hide.
+			T.Emplace(TEXT("clutch_overlay"),   FString(),                                                                       FText::FromString(TEXT("Caster Clutch Overlay")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 138.f));
 			// Top-right "Score: N" + "KDA: K/D/A" mini panel. Drawn inline by
 			// ElimPlusHUD::DrawHUD and WipeoutHUD::DrawHUD. Default offset
 			// approximates the original hard-coded (ClipX*0.98, ClipY*0.015).
@@ -1191,11 +1212,13 @@ namespace NCPlusHUDDrawCall
 		struct FNCStableTextBucket
 		{
 			TArray<FNCStableTextValue, TInlineAllocator<1>> Values;
+			uint64 LastUsedSerial = 0;
 		};
 
 		TMap<FNCStableTextKey, FNCStableTextBucket> GStableTextCache;
 		TWeakObjectPtr<UWorld> GStableTextWorld;
 		uint32 GStableTextRevision = 0;
+		uint64 GStableTextUseSerial = 0;
 	}
 
 	void ResolveStableText(UCanvas* Canvas, UFont* Font, const FString& Source,
@@ -1216,7 +1239,9 @@ namespace NCPlusHUDDrawCall
 			GStableTextCache.Reset();
 			GStableTextRevision = Revision;
 			GStableTextWorld = World;
+			GStableTextUseSerial = 0;
 		}
+		const uint64 UseSerial = ++GStableTextUseSerial;
 
 		FNCStableTextKey Key;
 		Key.Font = Font;
@@ -1231,6 +1256,7 @@ namespace NCPlusHUDDrawCall
 		FNCStableTextBucket* Bucket = GStableTextCache.Find(Key);
 		if (Bucket)
 		{
+			Bucket->LastUsedSerial = UseSerial;
 			for (FNCStableTextValue& Candidate : Bucket->Values)
 			{
 				// FString operator== is case-INSENSITIVE; player names differing only
@@ -1245,12 +1271,28 @@ namespace NCPlusHUDDrawCall
 		if (!Value)
 		{
 			// Score/timer values are bounded, but map travel and long sessions can still
-			// accumulate variants. A wholesale reset is cheap and avoids an unbounded cache.
-			if (GStableTextCache.Num() >= 256)
+			// accumulate variants. Evict only the least-recently-used bucket so reaching
+			// the cap cannot invalidate every stable label on the same rendered frame.
+			if (!Bucket && GStableTextCache.Num() >= 256)
 			{
-				GStableTextCache.Reset();
+				const FNCStableTextKey* OldestKey = nullptr;
+				uint64 OldestSerial = MAX_uint64;
+				for (const TPair<FNCStableTextKey, FNCStableTextBucket>& Pair : GStableTextCache)
+				{
+					if (Pair.Value.LastUsedSerial < OldestSerial)
+					{
+						OldestSerial = Pair.Value.LastUsedSerial;
+						OldestKey = &Pair.Key;
+					}
+				}
+				if (OldestKey)
+				{
+					const FNCStableTextKey KeyToRemove = *OldestKey;
+					GStableTextCache.Remove(KeyToRemove);
+				}
 			}
 			Bucket = &GStableTextCache.FindOrAdd(Key);
+			Bucket->LastUsedSerial = UseSerial;
 			FNCStableTextValue& NewValue = Bucket->Values[Bucket->Values.AddDefaulted()];
 			NewValue.Source = Source;
 			NewValue.Text = FText::FromString(Source);
@@ -1545,6 +1587,86 @@ namespace NCPlusHUDDrawCall
 	// decode. This deliberately ignores custom team colors, matching Elim 1.13.
 	namespace
 	{
+		enum class ENCHUDNumberFormat : uint8
+		{
+			Plain,
+			LeadingPlus,
+			Clock
+		};
+
+		TMap<int32, FString> GHUDPlainNumberStrings;
+		TMap<int32, FString> GHUDPlusNumberStrings;
+		TMap<int32, FString> GHUDClockStrings;
+
+		const FString& ResolveCachedHUDNumber(int32 Value, ENCHUDNumberFormat Format)
+		{
+			TMap<int32, FString>* Cache = &GHUDPlainNumberStrings;
+			if (Format == ENCHUDNumberFormat::LeadingPlus) Cache = &GHUDPlusNumberStrings;
+			else if (Format == ENCHUDNumberFormat::Clock) Cache = &GHUDClockStrings;
+
+			if (const FString* Existing = Cache->Find(Value)) return *Existing;
+			if (Cache->Num() >= 256) Cache->Reset();
+
+			FString& Result = Cache->FindOrAdd(Value);
+			if (Format == ENCHUDNumberFormat::LeadingPlus)
+			{
+				Result = FString::Printf(TEXT("+%d"), Value);
+			}
+			else if (Format == ENCHUDNumberFormat::Clock)
+			{
+				Result = FString::Printf(TEXT("%02d:%02d"), Value / 60, Value % 60);
+			}
+			else
+			{
+				Result = FString::FromInt(Value);
+			}
+			return Result;
+		}
+
+		// Compatibility path for callers compiled against the original exported
+		// two-argument panel helpers. ElimPlus itself supplies its shared frame
+		// snapshot through the overloads below, so this scan is not on its normal
+		// DrawHUD path.
+		void BuildLegacyPanelSnapshot(AUTHUD* HUD, FElimPlusHUDSnapshot& OutSnapshot)
+		{
+			UWorld* World = HUD ? HUD->GetWorld() : nullptr;
+			AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+			OutSnapshot.ResetFrame(GS ? GS->PlayerArray.Num() : 0);
+			OutSnapshot.LocalPS = (HUD && HUD->UTPlayerOwner)
+				? Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState) : nullptr;
+			if (!GS) return;
+
+			for (APlayerState* PSBase : GS->PlayerArray)
+			{
+				AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+				if (!PS || PS->bOnlySpectator || PS->bIsInactive) continue;
+
+				const uint8 TeamNum = PS->GetTeamNum();
+				if (TeamNum > 1) continue;
+
+				AUTCharacter* Character = nullptr;
+				if (AController* Controller = Cast<AController>(PS->GetOwner()))
+				{
+					Character = Cast<AUTCharacter>(Controller->GetPawn());
+				}
+				else
+				{
+					Character = PS->GetUTCharacter();
+				}
+
+				FElimPlusHUDPlayerSnapshot FramePlayer;
+				FramePlayer.PlayerState = PS;
+				FramePlayer.Character = Character;
+				FramePlayer.TeamNum = TeamNum;
+				FramePlayer.bAlive = Character != nullptr && !Character->IsDead();
+				FramePlayer.Health = Character ? Character->Health : 0;
+				FramePlayer.Armor = Character ? Character->GetArmorAmount() : 0;
+
+				const int32 PlayerIndex = OutSnapshot.Players.Add(FramePlayer);
+				OutSnapshot.TeamPlayerIndices[TeamNum].Add(PlayerIndex);
+			}
+		}
+
 		struct FAbsoluteElimTextures
 		{
 			bool bTriedLoad = false;
@@ -1659,7 +1781,44 @@ namespace NCPlusHUDDrawCall
 		}
 	}
 
+	void PreloadAbsoluteElimTeamPanelTextures()
+	{
+		EnsureAbsoluteElimTextures();
+	}
+
+	void ReleaseAbsoluteElimTeamPanelTextures()
+	{
+		FAbsoluteElimTextures& T = GAbsoluteElimTextures;
+		auto ReleaseTexture = [](UTexture2D*& Texture)
+		{
+			if (Texture && Texture->IsRooted())
+			{
+				Texture->RemoveFromRoot();
+			}
+			Texture = nullptr;
+		};
+		for (int32 Team = 0; Team < 2; ++Team)
+		{
+			ReleaseTexture(T.NameBackground[Team]);
+			ReleaseTexture(T.NameBorder[Team]);
+			ReleaseTexture(T.ScoreBackground[Team]);
+			ReleaseTexture(T.ScoreBorder[Team]);
+		}
+		ReleaseTexture(T.HealthIcon);
+		ReleaseTexture(T.ArmorIcon);
+		T.bTriedLoad = false;
+	}
+
 	void DrawAbsoluteElimTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (!HUD || !Canvas || IsHidden(TEXT("team_panel"))) return;
+		FElimPlusHUDSnapshot Snapshot;
+		BuildLegacyPanelSnapshot(HUD, Snapshot);
+		DrawAbsoluteElimTeamPanel(HUD, Canvas, Snapshot);
+	}
+
+	void DrawAbsoluteElimTeamPanel(AUTHUD* HUD, UCanvas* Canvas,
+		const FElimPlusHUDSnapshot& Snapshot)
 	{
 		if (!HUD || !Canvas || IsHidden(TEXT("team_panel"))) return;
 
@@ -1671,7 +1830,7 @@ namespace NCPlusHUDDrawCall
 		// the procedural stock panel and keep the score/clock path intact.
 		if (!EnsureAbsoluteElimTextures())
 		{
-			DrawStockTeamPanel(HUD, Canvas);
+			DrawStockTeamPanel(HUD, Canvas, Snapshot);
 			return;
 		}
 
@@ -1686,14 +1845,11 @@ namespace NCPlusHUDDrawCall
 		uint8 MyTeam = 255;
 		bool bTrueSpectator = false;
 		bool bRevealAllVitals = (GS->GetMatchState() != MatchState::InProgress);
-		if (HUD->UTPlayerOwner)
+		if (Snapshot.LocalPS)
 		{
-			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
-			{
-				MyTeam = MyPS->GetTeamNum();
-				bTrueSpectator = MyPS->bOnlySpectator;
-				bRevealAllVitals |= bTrueSpectator;
-			}
+			MyTeam = Snapshot.LocalPS->GetTeamNum();
+			bTrueSpectator = Snapshot.LocalPS->bOnlySpectator;
+			bRevealAllVitals |= bTrueSpectator;
 		}
 
 		// Elim 1.13 authored this widget at 2560x1440. Preserve its proportions on
@@ -1743,30 +1899,23 @@ namespace NCPlusHUDDrawCall
 
 			const int32 TeamScore = (GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx])
 				? GS->Teams[TeamIdx]->Score : 0;
-			const FString ScoreString = FString::Printf(TEXT("%d"), TeamScore);
+			const FString& ScoreString = ResolveCachedHUDNumber(TeamScore, ENCHUDNumberFormat::Plain);
+			FText ScoreText;
 			float ScoreXL = 0.f, ScoreYL = 0.f;
-			Canvas->StrLen(ScoreFont, ScoreString, ScoreXL, ScoreYL);
-			DrawOutlinedText(Canvas, ScoreFont, FText::FromString(ScoreString),
-				Origin.X + (ScoreW - ScoreXL * ScoreScale) * 0.5f,
-				RowY + (ScoreH - ScoreYL * ScoreScale) * 0.5f,
+			ResolveStableText(Canvas, ScoreFont, ScoreString, ScoreScale, ScoreScale,
+				ScoreText, ScoreXL, ScoreYL);
+			DrawOutlinedText(Canvas, ScoreFont, ScoreText,
+				Origin.X + (ScoreW - ScoreXL) * 0.5f,
+				RowY + (ScoreH - ScoreYL) * 0.5f,
 				ScoreScale, FLinearColor::White, FLinearColor::Black, Op);
 
 			float BarX = Origin.X + BarStart;
-			for (APlayerState* PSBase : GS->PlayerArray)
+			for (int32 PlayerIndex : Snapshot.TeamPlayerIndices[TeamIdx])
 			{
-				AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
-				if (!PS || PS->bOnlySpectator || PS->bIsInactive || PS->GetTeamNum() != TeamIdx) continue;
-
-				AUTCharacter* UTC = nullptr;
-				if (AController* Ctrl = Cast<AController>(PS->GetOwner()))
-				{
-					UTC = Cast<AUTCharacter>(Ctrl->GetPawn());
-				}
-				else
-				{
-					UTC = PS->GetUTCharacter();
-				}
-				if (!UTC || UTC->IsDead()) continue;
+				if (!Snapshot.Players.IsValidIndex(PlayerIndex)) continue;
+				const FElimPlusHUDPlayerSnapshot& FramePlayer = Snapshot.Players[PlayerIndex];
+				AUTPlayerState* PS = FramePlayer.PlayerState;
+				if (!PS || !FramePlayer.bAlive) continue;
 
 				const float BarY = RowY + BarYOffset;
 				DrawAbsoluteElimTile(Canvas, T.NameBackground[TeamIdx],
@@ -1789,32 +1938,35 @@ namespace NCPlusHUDDrawCall
 
 				if (bShowVitals)
 				{
-					const FString HealthString = FString::Printf(TEXT("%d"), UTC->Health);
-					const FString ArmorString = FString::Printf(TEXT("%d"), UTC->GetArmorAmount());
+					FText HealthText, ArmorText;
 					float HealthXL = 0.f, HealthYL = 0.f, ArmorXL = 0.f, ArmorYL = 0.f;
-					Canvas->StrLen(StatFont, HealthString, HealthXL, HealthYL);
-					Canvas->StrLen(StatFont, ArmorString, ArmorXL, ArmorYL);
+					ResolveStableText(Canvas, StatFont,
+						ResolveCachedHUDNumber(FramePlayer.Health, ENCHUDNumberFormat::Plain), StatScale, StatScale,
+						HealthText, HealthXL, HealthYL);
+					ResolveStableText(Canvas, StatFont,
+						ResolveCachedHUDNumber(FramePlayer.Armor, ENCHUDNumberFormat::Plain), StatScale, StatScale,
+						ArmorText, ArmorXL, ArmorYL);
 
 					const float Gap = 3.f * S;
 					const float MiddleGap = 8.f * S;
-					const float TotalW = IconSize + Gap + HealthXL * StatScale
-						+ MiddleGap + ArmorXL * StatScale + Gap + IconSize;
+					const float TotalW = IconSize + Gap + HealthXL
+						+ MiddleGap + ArmorXL + Gap + IconSize;
 					const float GroupX = BarX + (BarW - TotalW) * 0.5f;
 					const float StatCenterY = BarY + 50.f * S;
-					const float StatY = StatCenterY - HealthYL * StatScale * 0.5f;
+					const float StatY = StatCenterY - HealthYL * 0.5f;
 
 					DrawAbsoluteElimTile(Canvas, T.HealthIcon, GroupX,
 						StatCenterY - IconSize * 0.5f, IconSize, IconSize, Op);
 					const float HealthX = GroupX + IconSize + Gap;
-					DrawOutlinedText(Canvas, StatFont, FText::FromString(HealthString),
+					DrawOutlinedText(Canvas, StatFont, HealthText,
 						HealthX, StatY, StatScale,
 						FLinearColor(0.09672f, 0.93f, 0.0372f, 1.f), FLinearColor::Black, Op);
-					const float ArmorX = HealthX + HealthXL * StatScale + MiddleGap;
-					DrawOutlinedText(Canvas, StatFont, FText::FromString(ArmorString),
-						ArmorX, StatCenterY - ArmorYL * StatScale * 0.5f, StatScale,
+					const float ArmorX = HealthX + HealthXL + MiddleGap;
+					DrawOutlinedText(Canvas, StatFont, ArmorText,
+						ArmorX, StatCenterY - ArmorYL * 0.5f, StatScale,
 						FLinearColor(0.7f, 0.578083f, 0.035f, 1.f), FLinearColor::Black, Op);
 					DrawAbsoluteElimTile(Canvas, T.ArmorIcon,
-						ArmorX + ArmorXL * StatScale + Gap,
+						ArmorX + ArmorXL + Gap,
 						StatCenterY - IconSize * 0.5f, IconSize, IconSize, Op);
 				}
 
@@ -1839,17 +1991,19 @@ namespace NCPlusHUDDrawCall
 		}
 		if (RoundTime >= 0)
 		{
-			const FString ClockString = FString::Printf(TEXT("%02d:%02d"), RoundTime / 60, RoundTime % 60);
-			float ClockXL = 0.f, ClockYL = 0.f;
-			Canvas->StrLen(ScoreFont, ClockString, ClockXL, ClockYL);
 			const float ClockScale = 0.64f * S * FontExtra;
+			FText ClockText;
+			float ClockXL = 0.f, ClockYL = 0.f;
+			ResolveStableText(Canvas, ScoreFont,
+				ResolveCachedHUDNumber(RoundTime, ENCHUDNumberFormat::Clock), ClockScale, ClockScale,
+				ClockText, ClockXL, ClockYL);
 			const float ClockCenterX = Origin.X + ScoreW * 0.5f;
 			const float ClockCenterY = Origin.Y + TeamPitch + ScoreH + 17.f * S;
 			const FLinearColor ClockColor = (RoundTime <= 30)
 				? FLinearColor(1.f, 0.24f, 0.24f, 1.f) : FLinearColor::White;
-			DrawOutlinedText(Canvas, ScoreFont, FText::FromString(ClockString),
-				ClockCenterX - ClockXL * ClockScale * 0.5f,
-				ClockCenterY - ClockYL * ClockScale * 0.5f,
+			DrawOutlinedText(Canvas, ScoreFont, ClockText,
+				ClockCenterX - ClockXL * 0.5f,
+				ClockCenterY - ClockYL * 0.5f,
 				ClockScale, ClockColor, FLinearColor::Black, Op);
 		}
 
@@ -1869,6 +2023,15 @@ namespace NCPlusHUDDrawCall
 	// only the look differs. Honors the `team_panel` alias (position / scale /
 	// opacity / hide).
 	void DrawStockTeamPanel(AUTHUD* HUD, UCanvas* Canvas)
+	{
+		if (!HUD || !Canvas || IsHidden(TEXT("team_panel"))) return;
+		FElimPlusHUDSnapshot Snapshot;
+		BuildLegacyPanelSnapshot(HUD, Snapshot);
+		DrawStockTeamPanel(HUD, Canvas, Snapshot);
+	}
+
+	void DrawStockTeamPanel(AUTHUD* HUD, UCanvas* Canvas,
+		const FElimPlusHUDSnapshot& Snapshot)
 	{
 		if (HUD == nullptr || Canvas == nullptr) return;
 		if (IsHidden(TEXT("team_panel"))) return;
@@ -1895,13 +2058,10 @@ namespace NCPlusHUDDrawCall
 		// gain live enemy info mid-round).
 		uint8 MyTeam = 255;
 		bool  bRevealAllVitals = (GS->GetMatchState() != MatchState::InProgress);
-		if (HUD->UTPlayerOwner)
+		if (Snapshot.LocalPS)
 		{
-			if (AUTPlayerState* MyPS = Cast<AUTPlayerState>(HUD->UTPlayerOwner->PlayerState))
-			{
-				MyTeam = MyPS->GetTeamNum();
-				bRevealAllVitals |= MyPS->bOnlySpectator;
-			}
+			MyTeam = Snapshot.LocalPS->GetTeamNum();
+			bRevealAllVitals |= Snapshot.LocalPS->bOnlySpectator;
 		}
 
 		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
@@ -1938,7 +2098,7 @@ namespace NCPlusHUDDrawCall
 		// "all fills, then all text" preserves z-order.
 		TArray<FCanvasUVTri> PlateTris;
 		struct FPanelLabel { UFont* Font; FText Text; float X; float Y; float Scale; FLinearColor Color; };
-		TArray<FPanelLabel> Labels;
+		TArray<FPanelLabel, TInlineAllocator<32>> Labels;
 
 		auto AddQuad = [&](const FVector2D& A, const FVector2D& B, const FVector2D& C, const FVector2D& D, FLinearColor Col)
 		{
@@ -1955,16 +2115,16 @@ namespace NCPlusHUDDrawCall
 			PlateTris.Add(T2);
 		};
 
-		// Center a SHORT label on (CenterX, CenterY) and queue it. StrLen is fine here —
-		// these are 2-5 char score/clock/HP/armor strings, not the long player names
-		// (those go through the cached ResolveFittedName below).
+		// Center a short label and queue it. Stable values reuse shaped text and
+		// scaled measurement; names use the fitted-name cache below.
 		auto PushCentered = [&](UFont* Font, const FString& Text, float CenterX, float CenterY, float Scale, const FLinearColor& Color)
 		{
 			if (!Font || Text.IsEmpty()) return;
-			float XL, YL;
-			Canvas->StrLen(Font, Text, XL, YL);
-			Labels.Add(FPanelLabel{ Font, FText::FromString(Text),
-				CenterX - XL * Scale * 0.5f, CenterY - YL * Scale * 0.5f, Scale, Color });
+			FText ResolvedText;
+			float Width = 0.f, Height = 0.f;
+			ResolveStableText(Canvas, Font, Text, Scale, Scale, ResolvedText, Width, Height);
+			Labels.Add(FPanelLabel{ Font, ResolvedText,
+				CenterX - Width * 0.5f, CenterY - Height * 0.5f, Scale, Color });
 		};
 
 		for (int32 TeamIdx = 0; TeamIdx < 2; ++TeamIdx)
@@ -1993,27 +2153,21 @@ namespace NCPlusHUDDrawCall
 				const FVector2D A(x + Skew, RowY), B(x + Skew + ScoreW, RowY), C(x + ScoreW, RowY + PlateH), D(x, RowY + PlateH);
 				AddQuad(A, B, C, D, ScoreBoxCol);
 				const int32 TeamScore = (GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx]) ? GS->Teams[TeamIdx]->Score : 0;
-				PushCentered(ScoreFont, FString::Printf(TEXT("%d"), TeamScore),
+				PushCentered(ScoreFont, ResolveCachedHUDNumber(TeamScore, ENCHUDNumberFormat::Plain),
 					x + Skew * 0.5f + ScoreW * 0.5f, RowY + PlateH * 0.5f, ScoreScale, FLinearColor::White);
 			}
 
 			float PlateX = Origin.X + ScoreW + Gap;
 
-			for (APlayerState* PSBase : GS->PlayerArray)
+			for (int32 PlayerIndex : Snapshot.TeamPlayerIndices[TeamIdx])
 			{
-				AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
-				if (!PS || PS->bOnlySpectator || PS->bIsInactive) continue;
-				if (PS->GetTeamNum() != TeamIdx) continue;
+				if (!Snapshot.Players.IsValidIndex(PlayerIndex)) continue;
+				const FElimPlusHUDPlayerSnapshot& FramePlayer = Snapshot.Players[PlayerIndex];
+				AUTPlayerState* PS = FramePlayer.PlayerState;
+				if (!PS || !FramePlayer.bAlive) continue;
 
-				// Alive check — controller's pawn on the server, GetUTCharacter()
-				// fallback on clients (GetOwner() is null for remote player states).
-				// Same logic as the portrait strip; dead/unknown players are skipped
-				// so the row reflows (plate count = alive count).
-				AUTCharacter* UTC = nullptr;
-				if (AController* Ctrl = Cast<AController>(PS->GetOwner())) { UTC = Cast<AUTCharacter>(Ctrl->GetPawn()); }
-				else                                                        { UTC = PS->GetUTCharacter(); }
-				if (!UTC || UTC->IsDead()) continue;
-
+				// Dead/unknown players were identified by the frame snapshot and are
+				// skipped so the row reflows (plate count = alive count).
 				const float x = PlateX;
 				const FVector2D A(x + Skew, RowY), B(x + Skew + PlateW, RowY), C(x + PlateW, RowY + PlateH), D(x, RowY + PlateH);
 				AddQuad(A, B, C, D, PlateCol);
@@ -2033,10 +2187,8 @@ namespace NCPlusHUDDrawCall
 						CenterX - NW * NameScale * 0.5f, (RowY + PlateH * 0.30f) - NH * NameScale * 0.5f,
 						NameScale, FLinearColor(0.90f, 0.90f, 0.92f, 1.f) });
 
-					const int32 HP = UTC->Health;
-					const int32 AR = UTC->GetArmorAmount();
-					const FString HPStr = FString::Printf(TEXT("+%d"), HP);
-					const FString ARStr = FString::Printf(TEXT("%d"), AR);
+					const int32 HP = FramePlayer.Health;
+					const int32 AR = FramePlayer.Armor;
 					const FLinearColor HPCol = (HP <= 34) ? FLinearColor(1.f, 0.42f, 0.42f, 1.f)
 					                         : (HP <= 90) ? FLinearColor(0.92f, 0.82f, 0.30f, 1.f)
 					                                      : FLinearColor(0.37f, 0.85f, 0.37f, 1.f);
@@ -2044,16 +2196,22 @@ namespace NCPlusHUDDrawCall
 					                                     : FLinearColor(0.93f, 0.83f, 0.29f, 1.f);
 
 					// "+HP   armor", centered as a group (green health, yellow armor).
+					FText HPText, ARText;
 					float hpXL, hpYL, arXL, arYL;
-					Canvas->StrLen(StatFont, HPStr, hpXL, hpYL);
-					Canvas->StrLen(StatFont, ARStr, arXL, arYL);
+					ResolveStableText(Canvas, StatFont,
+						ResolveCachedHUDNumber(HP, ENCHUDNumberFormat::LeadingPlus), StatScale, StatScale,
+						HPText, hpXL, hpYL);
+					ResolveStableText(Canvas, StatFont,
+						ResolveCachedHUDNumber(AR, ENCHUDNumberFormat::Plain), StatScale, StatScale,
+						ARText, arXL, arYL);
 					const float SpaceW = 10.f * S;
-					const float TotalW = (hpXL + arXL) * StatScale + SpaceW;
-					const float StatY  = RowY + PlateH - (hpYL * StatScale) - 1.f * S;
+					const float TotalW = hpXL + arXL + SpaceW;
+					const float StatY  = RowY + PlateH - hpYL - 1.f * S;
+					const float ArmorY = RowY + PlateH - arYL - 1.f * S;
 					const float gx = CenterX - TotalW * 0.5f;
-					const float arX = gx + hpXL * StatScale + SpaceW;
-					Labels.Add(FPanelLabel{ StatFont, FText::FromString(HPStr), gx,  StatY, StatScale, HPCol });
-					Labels.Add(FPanelLabel{ StatFont, FText::FromString(ARStr), arX, StatY, StatScale, ARCol });
+					const float arX = gx + hpXL + SpaceW;
+					Labels.Add(FPanelLabel{ StatFont, HPText, gx,  StatY, StatScale, HPCol });
+					Labels.Add(FPanelLabel{ StatFont, ARText, arX, ArmorY, StatScale, ARCol });
 				}
 				else
 				{
@@ -2088,13 +2246,13 @@ namespace NCPlusHUDDrawCall
 			}
 			if (RoundTime >= 0)
 			{
-				const FString ClockStr = FString::Printf(TEXT("%02d:%02d"), RoundTime / 60, RoundTime % 60);
 				// Below both team rows, centered on the score-box column (left edge is free
 				// once the spectator slide-out is suppressed).
 				const float ClockCX = Origin.X + Skew * 0.5f + ScoreW * 0.5f;
 				const float ClockCY = Origin.Y + 2.f * PlateH + RowGap + PlateH * 0.5f;
 				const FLinearColor ClockCol = (RoundTime <= 30) ? FLinearColor(1.f, 0.24f, 0.24f, 1.f) : FLinearColor::White;
-				PushCentered(ScoreFont, ClockStr, ClockCX, ClockCY, ScoreScale, ClockCol);
+				PushCentered(ScoreFont, ResolveCachedHUDNumber(RoundTime, ENCHUDNumberFormat::Clock),
+					ClockCX, ClockCY, ScoreScale, ClockCol);
 			}
 		}
 

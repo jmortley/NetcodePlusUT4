@@ -1,9 +1,13 @@
 #include "ElimPlusGame.h"
 #include "NCHybridSpawnGenerator.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
+#include "NCPlusRoundSpectate.h"      // late-joiner / reconnect free-camera lock
 #include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "ElimPlusStatsReplicator.h"
+#include "NCPCandyLiftGuard.h"
+#include "WarmupRoamMutator.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "ElimPlusHUD.h"
 #include "ElimPlusRatingSystem.h"
@@ -189,6 +193,14 @@ void AElimPlusGame::UpdateVictoryMessageSounds()
 void AElimPlusGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
+
+	// Warmup roam, same as NCPlusCTF/iCTF: `mutate warmup` = invulnerable +
+	// fire-disabled map roaming during warmup only. The mutator strips everyone
+	// the instant the match leaves WaitingToStart — the engine notifies mutators
+	// straight from SetMatchState, independent of our
+	// CallMatchStateChangeNotify override, so the strip can never be skipped.
+	AddMutatorClass(AWarmupRoamMutator::StaticClass());
 
 	// Override GoalScore with ScoreLimit, as ScoreLimit is our "rounds to win"
 	GoalScore = ScoreLimit;
@@ -307,6 +319,10 @@ void AElimPlusGame::HandleMatchHasStarted()
 	// Per-weapon hits/shots replicator for the accuracy HUD widget.
 	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 
+	// Keeps PreventDeath candy orbs grabbable around lifts (the BP's own
+	// reset-lift chain is structurally broken — see NCPCandyLiftGuard.h).
+	ANCPCandyLiftGuard::EnsureSpawned(GetWorld());
+
 	// Replicate the bBalanceTeams URL flag to clients so the HUD's pre-match
 	// team-balance preview overlay can hide when the admin disabled balancing.
 	if (HasAuthority() && StatsReplicator)
@@ -392,6 +408,7 @@ void AElimPlusGame::HandlePlayerIntro()
 void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
@@ -461,6 +478,13 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 			}
 		}
 	}
+}
+
+bool AElimPlusGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 
@@ -623,6 +647,12 @@ void AElimPlusGame::DefaultTimer()
 
 	//Because we don't call super defaulttimer except when roundinprogress. Need to do server management work here
 	HandleServerManagement();
+
+	// Re-assert the round camera lock once a second. The immediate lock at join
+	// can be raced by the joining client's own BeginSpectatingState, which spawns
+	// its spectator pawn locally and points the camera at it without telling the
+	// server — so the sweep, not the join-time call, is what actually holds.
+	EnforceRoundSpectatorLock();
 
 
 	// --- Intermission Logic-- -
@@ -1357,11 +1387,15 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 		if (bReplayTriggered)
 		{
 			// DELAY EndGame so the replay can actually play.
-			// 7.0 seconds gives time for the 0.5s delay + ~6s of replay footage
+			// 7.0 seconds gives time for the 0.5s delay + ~6s of replay footage.
+			// This site said 7.0 in the comment but set 1.0f in the code — the same
+			// mid-replay EndGame that the win-by-two branch below documents as
+			// EXCEPTION_ACCESS_VIOLATION in TaskGraphThreadNP / CoreUObject. Only
+			// reachable with bReplayTriggered, so the delay is unconditional here.
 			FTimerHandle UnusedHandle;
 			FTimerDelegate TimerDel;
 			TimerDel.BindUFunction(this, FName("DelayedEndGame"), WinnerTeamIndex, FName(TEXT("ScoreLimit")));
-			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, 1.0f, false);
+			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, 7.0f, false);
 
 			return; // EXIT NOW, do not call EndGame immediately
 		}
@@ -1696,6 +1730,21 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 	}
 
 	const bool bShouldAllowSpawn = (bAllowRespawnMidRound || bAllowPlayerRespawns || bWarmupMode || GetMatchState() == MatchState::WaitingToStart);
+
+	if (!bShouldAllowSpawn)
+	{
+		// Refusing to spawn mid-round leaves this controller pawn-less in
+		// NAME_Spectating with no view target, which IS the free-fly camera. Take
+		// it away now rather than waiting for the next sweep.
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(NewPlayer))
+		{
+			AUTPlayerState* PS = Cast<AUTPlayerState>(PC->PlayerState);
+			if (bRoundInProgress && NCPlusRoundSpectate::ShouldLock(PC, PS))
+			{
+				NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+			}
+		}
+	}
 
 	if (bShouldAllowSpawn)
 	{
@@ -2055,8 +2104,12 @@ void AElimPlusGame::ScoreKill_Implementation(AController* Killer, AController* O
 
 	int32 Alive0, Alive1;
 	GetAliveCounts(Alive0, Alive1);
+	if (StatsReplicator)
+	{
+		StatsReplicator->UpdateClutchOverlayRemaining(Alive0, Alive1);
+	}
 
-	CheckLastManStanding(Alive0, Alive1);
+	CheckLastManStanding(Alive0, Alive1, DeathOrdinal);
 
 	const bool Team0Eliminated = (Alive0 == 0);
 	const bool Team1Eliminated = (Alive1 == 0);
@@ -2663,6 +2716,42 @@ void AElimPlusGame::ResetSpawnSelectionForNewRound()
 	FMath::SRandInit(static_cast<int32>(FPlatformTime::Cycles()));
 }
 
+void AElimPlusGame::EnforceRoundSpectatorLock()
+{
+	// Only while a round is actually running: between rounds and in warmup being
+	// pawn-less is normal and the free camera is harmless.
+	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
+		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		if (!NCPlusRoundSpectate::ShouldLock(PC, PS))
+		{
+			continue;
+		}
+		// Someone already queued for a spawn is not a late joiner. PendingSpawnQueue
+		// is drained one controller per frame at round start, so without this a sweep
+		// landing inside that window would park a player who is about to spawn.
+		if (PendingSpawnQueue.Contains(PC))
+		{
+			continue;
+		}
+		// Re-resolved every sweep, so the camera follows the survivors as the
+		// team-mate they were watching is eliminated.
+		NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+	}
+}
+
 void AElimPlusGame::ForceTeamSpectate(AUTPlayerState* DeadPS)
 {
 	if (DeadPS == nullptr) return;
@@ -2907,7 +2996,8 @@ bool AElimPlusGame::CanSpectate_Implementation(APlayerController* Viewer, APlaye
 
 
 
-AUTPlayerState* AElimPlusGame::FindAliveOnTeamPS(int32 TeamIndex) const
+AUTPlayerState* AElimPlusGame::FindAliveOnTeamPS(
+	int32 TeamIndex, const AUTPlayerState* IgnoredPlayer) const
 {
 	if (!Teams.IsValidIndex(TeamIndex)) return nullptr;
 
@@ -2917,7 +3007,7 @@ AUTPlayerState* AElimPlusGame::FindAliveOnTeamPS(int32 TeamIndex) const
 		if (!C) continue;
 
 		AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState);
-		if (!PS || PS->bOnlySpectator) continue;
+		if (!PS || PS == IgnoredPlayer || PS->bOnlySpectator) continue;
 
 		APawn* P = C->GetPawn();
 		const AUTCharacter* UTC = Cast<AUTCharacter>(P);
@@ -2949,7 +3039,8 @@ AUTPlayerState* AElimPlusGame::FindAnyOnTeamPS(int32 TeamIndex) const
 	return nullptr;
 }
 
-bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const
+bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1,
+	const AUTPlayerState* IgnoredPlayer) const
 {
 	OutAliveTeam0 = 0;
 	OutAliveTeam1 = 0;
@@ -2974,7 +3065,7 @@ bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 	for (APlayerState* PSBase : GS->PlayerArray)
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
-		if (!PS) continue;
+		if (!PS || PS == IgnoredPlayer) continue;
 		if (PS->bOnlySpectator)
 		{
 			Spectators++;
@@ -3010,11 +3101,13 @@ bool AElimPlusGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 	return true;
 }
 
-void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
+void AElimPlusGame::CheckLastManStanding(
+	int32 Alive0, int32 Alive1, int32 AttemptStartEventIndex,
+	const AUTPlayerState* IgnoredPlayer)
 {
 	if (Team0StartingSize > 1 && Alive0 == 1 && !bTeam0LastManAnnounced)
 	{
-		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(0);
+		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(0, IgnoredPlayer);
 		BroadcastLastManStanding(0, ClutchPlayer);
 		bTeam0LastManAnnounced = true;
 		// NEW: Track dark horse potential - Team0 player is now 1 vs Alive1 enemies
@@ -3032,13 +3125,17 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive1)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive1);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 0) vs %d enemies."), *ClutchPlayer->PlayerName, Alive1);
+			if (StatsReplicator)
+			{
+				StatsReplicator->BeginClutchOverlay(0, ClutchPlayer, Alive1);
+			}
 			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
-			OpenClutchAttempt(0, ClutchPlayer, Alive1);
+			OpenClutchAttempt(0, ClutchPlayer, Alive1, AttemptStartEventIndex);
 		}
 	}
 	if (Team1StartingSize > 1 && Alive1 == 1 && !bTeam1LastManAnnounced)
 	{
-		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(1);
+		AUTPlayerState* ClutchPlayer = FindAliveOnTeamPS(1, IgnoredPlayer);
 		BroadcastLastManStanding(1, ClutchPlayer);
 		bTeam1LastManAnnounced = true;
 		// NEW: Track dark horse potential - Team1 player is now 1 vs Alive0 enemies
@@ -3057,8 +3154,12 @@ void AElimPlusGame::CheckLastManStanding(int32 Alive0, int32 Alive1)
 			// Pass the player and the number of enemies they are facing (Alive0)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive0);
 			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 1) vs %d enemies."), *ClutchPlayer->PlayerName, Alive0);
+			if (StatsReplicator)
+			{
+				StatsReplicator->BeginClutchOverlay(1, ClutchPlayer, Alive0);
+			}
 			// Telemetry attempt (all 1vX, not just the 1v3+ dark-horse band).
-			OpenClutchAttempt(1, ClutchPlayer, Alive0);
+			OpenClutchAttempt(1, ClutchPlayer, Alive0, AttemptStartEventIndex);
 		}
 	}
 }
@@ -3080,9 +3181,14 @@ void AElimPlusGame::ResetClutchTelemetryForMatch()
 	ActiveClutch[1] = FElimPlusClutchTracker();
 	CompletedClutches.Empty();
 	ClutchDeathOrdinal = 0;
+	if (StatsReplicator)
+	{
+		StatsReplicator->ClearClutchOverlays();
+	}
 }
 
-void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate, int32 EnemiesAlive)
+void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate,
+	int32 EnemiesAlive, int32 StartEventIndex)
 {
 	if (TeamIndex < 0 || TeamIndex > 1 || EnemiesAlive < 1) return;
 	if (ActiveClutch[TeamIndex].bOpen) return;   // at most one attempt per team per round
@@ -3100,8 +3206,10 @@ void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate
 	A.RoundIndex      = TotalRoundsPlayed;
 	A.EnemiesAtStart  = FMath::Clamp(EnemiesAlive, 1, 4);
 	A.bCandidateAlive = true;
-	// The opening death was assigned its ordinal earlier in this ScoreKill call.
-	A.StartEventIndex = FMath::Max(0, ClutchDeathOrdinal - 1);
+	// A kill-created attempt starts at that death's ordinal. A disconnect-created
+	// attempt starts at the next ordinal so its range never absorbs an earlier,
+	// unrelated death event.
+	A.StartEventIndex = FMath::Max(0, StartEventIndex);
 	A.StartTime       = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 	UE_LOG(LogGameMode, Log, TEXT("Clutch attempt open: team %d, %s 1v%d (round %d, event %d)"),
 		TeamIndex, *Candidate->PlayerName, A.EnemiesAtStart, A.RoundIndex, A.StartEventIndex);
@@ -3110,6 +3218,10 @@ void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate
 void AElimPlusGame::CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
 {
 	if (!KillerPS || !VictimPS) return;
+	if (StatsReplicator)
+	{
+		StatsReplicator->CreditClutchOverlayKill(KillerPS, VictimPS);
+	}
 	for (int32 Team = 0; Team < 2; ++Team)
 	{
 		FElimPlusClutchTracker& A = ActiveClutch[Team];
@@ -3127,6 +3239,11 @@ void AElimPlusGame::CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerSt
 void AElimPlusGame::MarkClutchCandidateDead(AUTPlayerState* VictimPS, int32 DeathOrdinal)
 {
 	if (!VictimPS) return;
+	if (StatsReplicator)
+	{
+		StatsReplicator->EndClutchOverlayForCandidate(
+			VictimPS, ENCClutchOverlayOutcome::Denied);
+	}
 	for (int32 Team = 0; Team < 2; ++Team)
 	{
 		FElimPlusClutchTracker& A = ActiveClutch[Team];
@@ -3142,6 +3259,10 @@ void AElimPlusGame::MarkClutchCandidateDead(AUTPlayerState* VictimPS, int32 Deat
 
 void AElimPlusGame::FinalizeClutchAttempts(int32 WinnerTeamIndex)
 {
+	if (StatsReplicator)
+	{
+		StatsReplicator->FinalizeClutchOverlays(WinnerTeamIndex);
+	}
 	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 	for (int32 Team = 0; Team < 2; ++Team)
 	{
@@ -3197,6 +3318,10 @@ void AElimPlusGame::DiscardOpenClutchAttempts()
 {
 	ActiveClutch[0] = FElimPlusClutchTracker();
 	ActiveClutch[1] = FElimPlusClutchTracker();
+	if (StatsReplicator)
+	{
+		StatsReplicator->ClearClutchOverlays();
+	}
 }
 
 void AElimPlusGame::CheckRoundWinConditions()
@@ -3671,7 +3796,7 @@ void AElimPlusGame::ExecuteOvertimeWave()
 			DamageToApply = FMath::Max(0.f, C->Health - 1.f);
 			if (DamageToApply <= 0.f) continue;
 		}
-		UE_LOG(LogGameMode, Log, TEXT("Applying %.1f damage to %s (Health: %d, Armor: %.1f)"),
+		UE_LOG(LogGameMode, Verbose, TEXT("Applying %.1f damage to %s (Health: %d, Armor: %.1f)"),
 			DamageToApply, *C->GetName(), C->Health, C->GetArmorAmount());
 		bool bWillKillPlayer = (C->Health - DamageToApply) <= 0;
 		FHitResult Hit;
@@ -3862,6 +3987,8 @@ void AElimPlusGame::BP_SetTeamScores(int32 RedScore, int32 BlueScore)
 
 void AElimPlusGame::Logout(AController* Exiting)
 {
+	AUTPlayerState* DepartingPS = Exiting
+		? Cast<AUTPlayerState>(Exiting->PlayerState) : nullptr;
 	if (bCompetitiveAutoPause && IsMatchInProgress() && !HasMatchEnded() && !GetWorld()->IsPaused())
 	{
 		if (Exiting)
@@ -3884,7 +4011,7 @@ void AElimPlusGame::Logout(AController* Exiting)
 	
 	if (Exiting)
 	{
-		AUTPlayerState* PS = Cast<AUTPlayerState>(Exiting->PlayerState);
+		AUTPlayerState* PS = DepartingPS;
 		if (PS)
 		{
 			// A leaving clutch candidate cannot win ("remains alive" rule) and
@@ -3909,6 +4036,23 @@ void AElimPlusGame::Logout(AController* Exiting)
 	}
 
 	Super::Logout(Exiting);
+
+	// A disconnect is an authoritative roster transition just like a death for
+	// caster presentation. Controller cleanup removes PlayerState after Logout
+	// returns, so explicitly exclude it while refreshing counts and selecting a
+	// newly-created last survivor.
+	if (HasAuthority() && bRoundInProgress && DepartingPS
+		&& !DepartingPS->bOnlySpectator && DepartingPS->Team)
+	{
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1, DepartingPS);
+		if (StatsReplicator)
+		{
+			StatsReplicator->UpdateClutchOverlayRemaining(Alive0, Alive1);
+		}
+		CheckLastManStanding(Alive0, Alive1, ClutchDeathOrdinal, DepartingPS);
+	}
 }
 
 
@@ -4431,5 +4575,11 @@ bool AElimPlusGame::ClearPause()
 	{
 		return false;
 	}
-	return Super::ClearPause();
+	const bool bUnpaused = Super::ClearPause();
+	if (bUnpaused)
+	{
+		// Immediate client clock resync — see NCPlusHostPause::ResyncServerWorldTime.
+		NCPlusHostPause::ResyncServerWorldTime(this);
+	}
+	return bUnpaused;
 }

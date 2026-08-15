@@ -4,6 +4,8 @@
 #include "UTWeap_Enforcer.h"
 #include "UTWeap_Enforcer_Plus.generated.h"
 
+class UParticleSystemComponent;
+
 /**
  * AUTWeap_Enforcer_Plus
  *
@@ -28,6 +30,15 @@ class NETCODEPLUS_API AUTWeap_Enforcer_Plus : public AUTWeap_Enforcer
 	GENERATED_UCLASS_BODY()
 
 public:
+	/** Native equivalents of the stock Enforcer Blueprint's two SCS muzzle
+	 *  components.  Keeping them on the native parent makes a fresh Blueprint
+	 *  child complete without copying foreign component templates. */
+	UPROPERTY(VisibleDefaultsOnly, BlueprintReadOnly, Category = "Effects")
+	UParticleSystemComponent* Muzzle;
+
+	UPROPERTY(VisibleDefaultsOnly, BlueprintReadOnly, Category = "Effects")
+	UParticleSystemComponent* LeftMuzzle;
+
 	/** Max one-way rewind window (ms). Mirrors AUTWeaponFix::MaxRewindMs default. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "NetcodePlus")
 	float MaxRewindMs;

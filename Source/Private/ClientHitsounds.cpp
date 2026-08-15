@@ -18,8 +18,19 @@
 #include "Sound/SoundBase.h"
 #include "AssetRegistryModule.h"
 #include "IAssetRegistry.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogClientHitsounds, Log, All);
+
+// Client-side. When on, an authoritative hitsound inside the dedup window still
+// plays if it resolves to a DIFFERENT tier than the predicted sound (rejected or
+// demoted head claim, blocked headshot, FF scaling) — a wrong confirm gets
+// audibly corrected at the cost of an occasional double-blip. 0 = 327 behavior:
+// any predicted sound blanket-suppresses the authoritative one for the window.
+static TAutoConsoleVariable<int32> CVarHitsoundCorrection(
+	TEXT("ncp.HitsoundCorrection"), 1,
+	TEXT("1 = authoritative hitsounds that resolve to a different tier than the predicted sound play through the dedup window (audible misprediction correction). 0 = suppress all authoritative sounds inside the window."));
 
 const FString AClientHitsounds::ConfigSection = TEXT("ClientHitsounds");
 
@@ -85,6 +96,8 @@ static FNCPHitsoundCatalogReferences* HitsoundCatalogReferences = nullptr;
 static TArray<FHitsound> HitsoundCatalog;
 static bool bHitsoundCatalogBuilt = false;
 static bool bHitsoundCatalogReady = false;
+static double HitsoundCatalogLastBuildTime = -1.0e30;
+static constexpr double EmptyCatalogRetryIntervalSeconds = 30.0;
 
 static USoundBase* LoadHitsoundCue(const TCHAR* Folder, const TCHAR* AssetName)
 {
@@ -107,6 +120,7 @@ static USoundBase* LoadHitsoundCue(const TCHAR* Folder, const TCHAR* AssetName)
 
 void AClientHitsounds::RefreshCatalog()
 {
+	HitsoundCatalogLastBuildTime = FPlatformTime::Seconds();
 	// Sounds are a client-side concern; a headless server never needs the cues
 	// (and must not pay a synchronous asset load for them).
 	if (IsRunningDedicatedServer())
@@ -240,6 +254,7 @@ void AClientHitsounds::ShutdownCatalog()
 	HitsoundCatalog.Empty();
 	bHitsoundCatalogBuilt = false;
 	bHitsoundCatalogReady = false;
+	HitsoundCatalogLastBuildTime = -1.0e30;
 	if (HitsoundCatalogReferences != nullptr)
 	{
 		delete HitsoundCatalogReferences;
@@ -250,6 +265,22 @@ void AClientHitsounds::ShutdownCatalog()
 const TArray<FHitsound>& AClientHitsounds::GetCatalog()
 {
 	EnsureCatalog();
+	return HitsoundCatalog;
+}
+
+const TArray<FHitsound>& AClientHitsounds::GetCatalogForMenu()
+{
+	// Capture the state before EnsureCatalog(): an empty first-ever build must not
+	// immediately repeat the same disk/registry work, while a later menu opening
+	// should retain late-mounted-PAK recovery at a bounded retry cadence.
+	const bool bRetryPreviouslyEmptyCatalog = bHitsoundCatalogBuilt
+		&& !bHitsoundCatalogReady
+		&& FPlatformTime::Seconds() - HitsoundCatalogLastBuildTime >= EmptyCatalogRetryIntervalSeconds;
+	EnsureCatalog();
+	if (bRetryPreviouslyEmptyCatalog)
+	{
+		RefreshCatalog();
+	}
 	return HitsoundCatalog;
 }
 
@@ -308,6 +339,8 @@ AClientHitsounds::AClientHitsounds(const FObjectInitializer& ObjectInitializer)
 	FlakHitMinAge = 0.035f;
 
 	LastClientHitsoundTime = 0.0f;
+	LastPredictedDamage = 0;
+	bLastPredictedFriendly = false;
 	bClientSideHitsoundsEnabled = true;
 	ClientHitsoundDedupWindow = 0.25f;
 	ClientHitsoundMinInterval = 0.05f;
@@ -783,22 +816,120 @@ void AClientHitsounds::PlayClientPredictedHitsound(int32 EstimatedDamage, bool b
 		FNCPHitsoundPitch Zero = ResolvePlaybackFor(Config.Friendly, 0, ENCPHitsoundStyle::Flat);
 		PlayResolved(this, Zero, Config.Friendly.Volume * Config.UserMultiplier);
 		LastClientHitsoundTime = Now;
+		LastPredictedDamage = 0;
+		bLastPredictedFriendly = true;
 		return;
 	}
 
 	const FHitsound& Preset = Config.Enemy;
 	PlayResolved(this, ResolvePlayback(Preset, EstimatedDamage), Preset.Volume * Config.UserMultiplier);
 	LastClientHitsoundTime = Now;
+	LastPredictedDamage = EstimatedDamage;
+	bLastPredictedFriendly = false;
 }
 
-bool AClientHitsounds::ShouldSuppressServerHitsound() const
+bool AClientHitsounds::ShouldSuppressServerHitsound(int32 AuthoritativeDamage, bool bIsFriendly) const
 {
 	UWorld* World = GetWorld();
 	if (World == nullptr || !bClientSideHitsoundsEnabled)
 	{
 		return false;
 	}
-	return (World->GetTimeSeconds() - LastClientHitsoundTime) < ClientHitsoundDedupWindow;
+	if ((World->GetTimeSeconds() - LastClientHitsoundTime) >= ClientHitsoundDedupWindow)
+	{
+		return false;
+	}
+	if (CVarHitsoundCorrection.GetValueOnGameThread() == 0)
+	{
+		return true;
+	}
+	// Inside the window: suppress only a true duplicate. If the authoritative
+	// pair resolves to a different cue or a clearly different pitch than what
+	// was predicted, it carries information the prediction got wrong — play it.
+	return PredictionResolvesSameTier(AuthoritativeDamage, bIsFriendly);
+}
+
+bool AClientHitsounds::PredictionResolvesSameTier(int32 AuthoritativeDamage, bool bAuthoritativeFriendly) const
+{
+	// Different preset (enemy vs friendly) is always a different tier. This also
+	// covers the cross-victim case: a friendly prediction arming the window must
+	// not swallow an authoritative ENEMY confirm from the same volley.
+	if (bAuthoritativeFriendly != bLastPredictedFriendly)
+	{
+		return false;
+	}
+
+	const FHitsound& Preset = bAuthoritativeFriendly ? Config.Friendly : Config.Enemy;
+
+	// Mirror EXACTLY what PlayClientPredictedHitsound emitted: friendly
+	// predictions are always the flat zero cue, enemy predictions are pitched.
+	const FNCPHitsoundPitch Predicted = bLastPredictedFriendly
+		? ResolvePlaybackFor(Preset, 0, ENCPHitsoundStyle::Flat)
+		: ResolvePlayback(Preset, LastPredictedDamage);
+	const FNCPHitsoundPitch Authoritative = ResolvePlayback(Preset, AuthoritativeDamage);
+
+	if (Predicted.Sound != Authoritative.Sound)
+	{
+		return false;
+	}
+
+	// Same cue: call it the same tier while the pitch ratio stays under about
+	// a whole tone. Small damage-estimate error (70 predicted vs 65 real) stays
+	// suppressed; a demoted head claim (125 -> 70 resolves ~1.5x apart in the
+	// Absolute style) plays. Styles that themselves compress the difference
+	// (UTComp bottoms out all big hits, Flat encodes nothing) naturally
+	// resolve equal here — no correction, because none would be audible.
+	const float Hi = FMath::Max(Predicted.Pitch, Authoritative.Pitch);
+	const float Lo = FMath::Max(KINDA_SMALL_NUMBER, FMath::Min(Predicted.Pitch, Authoritative.Pitch));
+	const float SameTierMaxPitchRatio = 1.10f;
+	if ((Hi / Lo) > SameTierMaxPitchRatio)
+	{
+		return false;
+	}
+
+	// Pitch alone cannot separate LARGE hits. The Absolute curve compresses hard at the top:
+	// 115 -> 1.0992, 125 -> 1.0560, 190+ -> 1.0000 all sit inside the ratio above, so a flak
+	// shell's prediction reads as "the same tier" as an authoritative shock combo or sniper
+	// headshot and silently swallows it — two hits, one sound. Where the style actually
+	// encodes damage, require the damages to agree as well.
+	//
+	// This only runs once the pitch test has ALREADY passed, so it is self-limiting to the
+	// saturated band. Hits small enough for the curve to still be expressive differ in pitch
+	// first and never reach here — which is why server-summed pellets (predicted one, confirmed
+	// as a sum) are unaffected: they diverge low on the curve, where pitch is steep.
+	//
+	// Thresholded, not exact: a few points of estimate error must still count as the same hit
+	// (the 70-predicted / 65-real case the ratio comment above describes). 10% clears that and
+	// the 115-vs-125 case at 8%, while catching 115-vs-100 at 13%.
+	//
+	// Only correct when the correction would be AUDIBLE. If the two pitches are already within a
+	// hair of each other, playing the authoritative sound adds a second blip that sounds identical
+	// to the first and tells the player nothing. Gating on audibility rather than on the style enum
+	// covers three cases at once: Flat (encodes no damage, so every pair lands here), Absolute's
+	// plateau at D >= MaxDamage (an amped 200 predicted vs a 170 confirm resolves 1.00000 vs
+	// 1.00050 — 15% apart in damage, inaudible in pitch), and UTComp's clamps at both ends.
+	const float AudiblePitchRatio = 1.01f;
+	if ((Hi / Lo) <= AudiblePitchRatio)
+	{
+		return true;
+	}
+
+	// The friendly path is exempt separately: its prediction is always the flat zero cue rather
+	// than a damage estimate, so LastPredictedDamage is 0 and a damage comparison is meaningless.
+	if (bAuthoritativeFriendly)
+	{
+		return true;
+	}
+
+	const int32 HiDamage = FMath::Max(LastPredictedDamage, AuthoritativeDamage);
+	const int32 LoDamage = FMath::Min(LastPredictedDamage, AuthoritativeDamage);
+	if (HiDamage <= 0)
+	{
+		return true;
+	}
+
+	const float SameTierMaxDamagePct = 0.10f;
+	return (float)(HiDamage - LoDamage) <= SameTierMaxDamagePct * (float)HiDamage;
 }
 
 // =========================================================================

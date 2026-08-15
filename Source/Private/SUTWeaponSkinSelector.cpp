@@ -1,6 +1,7 @@
 // SUTWeaponSkinSelector.cpp — NetcodePlus weapon settings implementation
 #include "SUTWeaponSkinSelector.h"
 #include "NCPlusHUDLayout.h"
+#include "NCWeaponColorSettings.h"
 #include "UTLocalPlayer.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
@@ -15,6 +16,7 @@
 #include "UTGameState.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Colors/SColorBlock.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Widgets/Input/SNumericEntryBox.h"  // SNumericEntryBox<float> (was leaking transitively via the unity build)
 #include "GameFramework/GameUserSettings.h"
 #include "Engine/Engine.h"
@@ -56,6 +58,7 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 	// Hitscan: warm orange (matches stock sniper feel). Shock: cyan.
 	HitscanBeamColor = FLinearColor(1.f, 0.55f, 0.f, 1.f);
 	ShockBeamColor   = FLinearColor(0.2f, 0.85f, 1.f, 1.f);
+	LinkBeamColor    = FLinearColor(0.061f, 0.66f, 0.f, 1.f);
 
 	BackgroundBrush.TintColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.85f);
 
@@ -205,9 +208,8 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 							]
 						]
 
-						// Beam (tracer) colors — drive the UTNPLightningGun /
-						// UTNPSniper (shared LGColor) and UTNPShockRifle (ShockBeam)
-						// BP defaults which read [WeaponSkinsPlus] in Mod.ini at spawn.
+						// Local beam colors: Sniper/LG share LGColor; Shock and Link
+						// keep their legacy keys. Native effects consume the cached snapshot.
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 0, 0, 8)
@@ -246,7 +248,7 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
 								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
 							]
-							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 16, 0)
 							[
 								SNew(SBox).WidthOverride(56.f).HeightOverride(18.f)
 								[
@@ -257,6 +259,26 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 										.Color(TAttribute<FLinearColor>::Create(
 											TAttribute<FLinearColor>::FGetter::CreateSP(
 												this, &SUTWeaponSkinSelector::GetShockBeamColor)))
+									]
+								]
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+							[
+								SNew(STextBlock).Text(LOCTEXT("LinkColorLbl", "Link beam"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
+								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(SBox).WidthOverride(56.f).HeightOverride(18.f)
+								[
+									SNew(SButton)
+									.OnClicked(this, &SUTWeaponSkinSelector::OnLinkColorClicked)
+									[
+										SNew(SColorBlock)
+										.Color(TAttribute<FLinearColor>::Create(
+											TAttribute<FLinearColor>::FGetter::CreateSP(
+												this, &SUTWeaponSkinSelector::GetLinkBeamColor)))
 									]
 								]
 							]
@@ -575,31 +597,15 @@ void SUTWeaponSkinSelector::LoadSettings()
 	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
 	bClassicWeaponHide = AUTWeaponFix::bClassicWeaponHide;
 
-	// Beam colors from Mod.ini [WeaponSkinsPlus]. Format = FLinearColor::ToString
-	// output "(R=...,G=...,B=...,A=...)" so the BP parser (Convert String to
-	// LinearColor) reads it directly. Bad / empty value = keep ctor defaults.
+	// The shared snapshot owns the one-time Mod.ini color read and validation.
+	// Swatches simply mirror that process-local state.
 	{
-		FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
-		FString S;
-		if (GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("LGColor"), S, ModIniPath) && !S.IsEmpty())
-		{
-			FLinearColor Parsed;
-			if (Parsed.InitFromString(S))
-			{
-				HitscanBeamColor = Parsed;
-			}
-		}
-		if (GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("ShockBeam"), S, ModIniPath) && !S.IsEmpty())
-		{
-			FLinearColor Parsed;
-			if (Parsed.InitFromString(S))
-			{
-				ShockBeamColor = Parsed;
-			}
-		}
-		// Seed the BP-side apply gate (see header) so an existing True survives a save.
-		GConfig->GetBool(TEXT("WeaponSkinsPlus"), TEXT("CustomShockBeam"), bShockBeamCustomized, ModIniPath);
-		// Swatches re-poll via TAttribute on next paint — nothing to push.
+		const FNCWeaponColorSnapshot& Colors = NCWeaponColors::GetSnapshot();
+		HitscanBeamColor = Colors.HitscanColor;
+		ShockBeamColor = Colors.ShockColor;
+		LinkBeamColor = Colors.LinkColor;
+		bShockBeamCustomized = Colors.bCustomShock;
+		// Swatches re-poll via TAttribute on next paint - nothing to push.
 	}
 
 	// Load hitscan choice from Mod.ini
@@ -659,12 +665,13 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamDown"),
 		*FString::Printf(TEXT("%.3f"), AUTWeaponFix::HiddenBeamDownOffset), ModIniPath);
 
-	// Beam colors → [WeaponSkinsPlus] LGColor / ShockBeam. FLinearColor::ToString
-	// writes "(R=...,G=...,B=...,A=...)" which BP's "Convert String to LinearColor"
-	// reads back unchanged. Applies on next weapon spawn (BPs read at BeginPlay).
+	// Beam colors -> legacy [WeaponSkinsPlus] LGColor / ShockBeam / LinkBeam.
+	// Legacy Blueprint readers remain compatible; the native snapshot refreshes
+	// immediately below and effects consume its generation when they spawn/update.
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("LGColor"),  *HitscanBeamColor.ToString(), ModIniPath);
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("ShockBeam"), *ShockBeamColor.ToString(),  ModIniPath);
-	// The shock BP only applies ShockBeam when this gate is True (see header) —
+	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("LinkBeam"), *LinkBeamColor.ToString(), ModIniPath);
+	// The Shock effect only applies ShockBeam when this gate is True (see header) —
 	// written from the latched flag so saving unrelated settings never force-enables
 	// a custom beam for users who never picked a shock color.
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("CustomShockBeam"),
@@ -713,6 +720,11 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), *CurrentHitscanChoice, ModIniPath);
 
 	GConfig->Flush(false, ModIniPath);
+
+	// Publish the saved values immediately. Existing local effects compare the
+	// generation and can refresh without touching config or waiting for a respawn.
+	NCWeaponColors::SetFromSelector(HitscanBeamColor, ShockBeamColor,
+		LinkBeamColor, bShockBeamCustomized);
 
 	// Re-apply to the CURRENT weapon so hide/style changes take effect now — the
 	// BringUp/swap-detector paths only fire on a weapon CHANGE, so without this a
@@ -941,6 +953,12 @@ FReply SUTWeaponSkinSelector::OnShockColorClicked()
 	return FReply::Handled();
 }
 
+FReply SUTWeaponSkinSelector::OnLinkColorClicked()
+{
+	OpenBeamColorPicker(LinkBeamColor, [this](FLinearColor NewC) { OnLinkColorCommitted(NewC); });
+	return FReply::Handled();
+}
+
 void SUTWeaponSkinSelector::OnHitscanColorCommitted(FLinearColor NewColor)
 {
 	// TAttribute binding re-polls the getter on next paint — no swatch push needed.
@@ -950,11 +968,16 @@ void SUTWeaponSkinSelector::OnHitscanColorCommitted(FLinearColor NewColor)
 void SUTWeaponSkinSelector::OnShockColorCommitted(FLinearColor NewColor)
 {
 	ShockBeamColor = NewColor;
-	// Picking a shock color IS the customization intent — latch the BP apply gate
+	// Picking a shock color IS the customization intent — latch the apply gate
 	// so the save writes CustomShockBeam=True (see header; the gate was previously
 	// never written by this selector, so the picked color silently did nothing for
 	// anyone the retired BP tool hadn't already flagged).
 	bShockBeamCustomized = true;
+}
+
+void SUTWeaponSkinSelector::OnLinkColorCommitted(FLinearColor NewColor)
+{
+	LinkBeamColor = NewColor;
 }
 
 void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<void(FLinearColor)> OnCommit)
@@ -996,8 +1019,16 @@ void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<
 	PickerArgs.bOnlyRefreshOnOk = false;
 	PickerArgs.bExpandAdvancedSection = false;
 	PickerArgs.InitialColorOverride = Initial;
+	// The picker window is parented to the game viewport window, NOT to this
+	// panel, so it outlives us (Esc close; map travel drops the viewport widget
+	// without ClosePanel — see ~SUTWeaponSkinSelector). With bOnlyRefreshOnOk
+	// false the wheel drag fires this continuously, so the OnCommit lambdas'
+	// raw `this` captures are a use-after-free once the panel dies. Gate every
+	// callback on the panel still being alive — same lifetime contract as the
+	// nchud swatch's CreateSP binding (SNCPlusHUDEditor::OnSwatchClicked).
+	TWeakPtr<SUTWeaponSkinSelector> WeakSelf = SharedThis(this);
 	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateLambda(
-		[OnCommit](FLinearColor C) { if (OnCommit) OnCommit(C); });
+		[WeakSelf, OnCommit](FLinearColor C) { if (WeakSelf.IsValid() && OnCommit) OnCommit(C); });
 	PickerArgs.ParentWidget = SharedThis(this);
 
 	// Restore on close - same order as nchud (SetFullscreenMode → SetScreenResolution
@@ -1046,10 +1077,22 @@ SUTWeaponSkinSelector::~SUTWeaponSkinSelector()
 {
 	// Map load drops the viewport widget without ClosePanel — release the refcount.
 	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+	// Close any floating swatch picker with us: its commit delegate is now
+	// weak-guarded (no UAF), but an orphaned picker window is dead UI, and
+	// destroying it also runs OnColorPickerWindowClosed's FSE-mode restore.
+	if (FSlateApplication::IsInitialized())
+	{
+		DestroyColorPicker();
+	}
 }
 
 void SUTWeaponSkinSelector::ClosePanel()
 {
+	// Take the floating swatch picker down with the panel (see ~dtor note).
+	if (FSlateApplication::IsInitialized())
+	{
+		DestroyColorPicker();
+	}
 	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
 	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)

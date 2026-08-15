@@ -42,6 +42,11 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	// Optional default-hidden overlays — see WipeoutHUD for full notes.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
+	// Authoritative automatic-pause banner/countdown. Registered after the
+	// scoreboard so it remains readable while the score panel is open.
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AutoPause"));
 	// NCPlus CTF flag-status subclass — drops in for the stock engine widget.
 	// Adds nchud control over carrier indicator + you-have-flag banner + the
 	// NEW enemy-has-flag banner (engine had the FText defined but never rendered).
@@ -87,6 +92,7 @@ void ANCPlusCTFHUD::BeginPlay()
 		if (Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
 			|| Entry.Contains(TEXT("CTFScoreboard"))  // stock CTF scoreboard
 			|| Entry.Contains(TEXT("TeamScoreboard")) // stock team scoreboard (fallback)
+			|| Entry == TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator")
 			// The stock CTF flag status widget is registered in DefaultGame.ini as
 			// /Game/RestrictedAssets/UI/HUDWidgets/bpHW_CTFFlagStatus.bpHW_CTFFlagStatus_C
 			// (a BP wrapper around UTHUDWidget_CTFFlagStatus). Matching "CTFFlagStatus"
@@ -345,6 +351,41 @@ void ANCPlusCTFHUD::DrawSpectatorTarget()
 		NameScale, NameScale, Canvas->DrawColor);
 }
 
+ANCPlusCTFOTInfo* ANCPlusCTFHUD::FindOTInfo()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (CachedOTInfoWorld.Get() != World)
+	{
+		CachedOTInfoWorld = World;
+		CachedOTInfo.Reset();
+		NextOTInfoSearchTime = 0.f;
+	}
+	if (CachedOTInfo.IsValid() && CachedOTInfo->GetWorld() == World)
+	{
+		return CachedOTInfo.Get();
+	}
+	CachedOTInfo.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextOTInfoSearchTime)
+	{
+		return nullptr;
+	}
+	NextOTInfoSearchTime = Now + 1.f;
+	for (TActorIterator<ANCPlusCTFOTInfo> It(World); It; ++It)
+	{
+		CachedOTInfo = *It;
+		NextOTInfoSearchTime = 0.f;
+		return *It;
+	}
+	return nullptr;
+}
+
 void ANCPlusCTFHUD::DrawTeamScoreBar()
 {
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
@@ -489,23 +530,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	// Resolve the OT replicator once — OT clock, Advantage clock, and the
 	// status-label branch all read off it. ANCPlusCTFOTInfo is spawned
 	// authority-only and replicates to every client; lazy-find + cache.
-	static TWeakObjectPtr<UWorld> CachedWorld;
-	static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
-	ANCPlusCTFOTInfo* Info = nullptr;
-	if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
-	{
-		Info = CachedInfo.Get();
-	}
-	else
-	{
-		for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
-		{
-			CachedWorld = GetWorld();
-			CachedInfo = *It;
-			Info = *It;
-			break;
-		}
-	}
+	ANCPlusCTFOTInfo* Info = FindOTInfo();
 
 	// OT detection: GetMatchState() == MatchState::MatchIsInOvertime.
 	// IsMatchInOvertime() is virtual on UTGameState so it reads the same on

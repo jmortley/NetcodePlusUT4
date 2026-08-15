@@ -42,6 +42,7 @@ private:
 	static constexpr float ScoreboardArmorRevealDelay = 4.0f;
 	struct FArmorDelayState
 	{
+		bool bInitialized = false;
 		uint8 DisplayedCounts[4]   = { 0, 0, 0, 0 };
 		float PendingRevealAt[4]   = { 0.f, 0.f, 0.f, 0.f };
 	};

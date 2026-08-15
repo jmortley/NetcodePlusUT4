@@ -9,6 +9,8 @@
 #include "UTATypes.h"                 // ChatDestinations
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"  // AWorldSettings::Pauser
+#include "GameFramework/GameModeBase.h"    // GameState member (ResyncServerWorldTime)
+#include "GameFramework/GameStateBase.h"   // ReplicatedWorldTimeSeconds reflection
 #include "Containers/Ticker.h"
 #include "Misc/ConfigCacheIni.h"          // GConfig
 #include "Misc/Paths.h"                    // FPaths
@@ -68,7 +70,7 @@ static void LoadUnpauseConfig()
 	GUnpauseCfgLoaded = true;
 	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	GConfig->GetInt(TEXT("NetcodePlus"), TEXT("UnpauseCountdownSec"), GUnpauseSec, ModIni);
-	if (GUnpauseSec < 0) GUnpauseSec = 0;
+	GUnpauseSec = FMath::Clamp(GUnpauseSec, 0, 60);
 }
 
 // Live countdown state (one match per server, so file-static is fine; CreateStatic
@@ -132,6 +134,12 @@ static bool UnpauseTick(float /*DeltaTime*/)
 
 namespace NCPlusHostPause
 {
+	int32 GetUnpauseCountdownSeconds()
+	{
+		LoadUnpauseConfig();
+		return GUnpauseSec;
+	}
+
 	bool HostMayPause(APlayerController* PC, AUTBaseGameMode* GM)
 	{
 		LoadHostPauseConfig();
@@ -286,5 +294,52 @@ namespace NCPlusHostPause
 			FTickerDelegate::CreateStatic(&UnpauseTick), 1.0f);
 		UE_LOG(LogNCHostPause, Log, TEXT("[HostPause] unpause requested — holding %ds countdown"), GUnpauseSec);
 		return true;   // defer: stay paused until the countdown fires the real clear
+	}
+
+	void CancelDeferredUnpause(AUTBaseGameMode* GM)
+	{
+		if (GM == nullptr || GUnpauseGM.Get() != GM)
+		{
+			return;
+		}
+
+		// Do not RemoveTicker while its completion callback is re-entering
+		// ClearPause (GUnpauseActive is already false in that case).
+		if (GUnpauseActive && GUnpauseTicker.IsValid())
+		{
+			FTicker::GetCoreTicker().RemoveTicker(GUnpauseTicker);
+		}
+		GUnpauseTicker.Reset();
+		GUnpauseGM.Reset();
+		GUnpauseRemain = 0;
+		GUnpauseActive = false;
+		GUnpauseFiring = false;
+		UE_LOG(LogNCHostPause, Log, TEXT("[HostPause] deferred unpause cancelled"));
+	}
+
+	void ResyncServerWorldTime(AGameModeBase* GM)
+	{
+		// The engine refreshes ReplicatedWorldTimeSeconds only every 5s
+		// (GameStateBase.cpp ServerWorldTimeSecondsUpdateFrequency), and a pause
+		// freezes the server clock while unpaused clients keep counting — so for
+		// up to 5s after an unpause every honest fire RPC arrives with a >1s
+		// timestamp offset. The property and its updater are protected on
+		// AGameStateBase, so push the refresh through the reflected UPROPERTY and
+		// force an immediate net update; the client OnRep recomputes its delta on
+		// arrival.
+		AGameStateBase* GS = GM ? GM->GameState : nullptr;
+		UWorld* World = GS ? GS->GetWorld() : nullptr;
+		if (World == nullptr || GS->Role != ROLE_Authority)
+		{
+			return;
+		}
+		static UFloatProperty* RepTimeProp =
+			FindField<UFloatProperty>(AGameStateBase::StaticClass(), TEXT("ReplicatedWorldTimeSeconds"));
+		if (RepTimeProp != nullptr)
+		{
+			RepTimeProp->SetPropertyValue_InContainer(GS, World->GetTimeSeconds());
+			GS->ForceNetUpdate();
+			UE_LOG(LogNCHostPause, Log, TEXT("[HostPause] forced server-world-time resync on unpause (t=%.2f)"), World->GetTimeSeconds());
+		}
 	}
 }

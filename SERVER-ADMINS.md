@@ -14,7 +14,7 @@ Games.
 > <https://downloads.ut4ever.box.ca/server/HubGuide.pdf> — then come back here. Quick prerequisites
 > checklist in §1.0.
 
-> Engine target: UT4 **4.15** (CL‑3525360). Current plugin build: **327**.
+> Engine target: UT4 **4.15** (CL‑3525360). Current plugin build: **328**.
 > Repos: [`jmortley/NetcodePlusUT4`](https://github.com/jmortley/NetcodePlusUT4) ·
 > [`jmortley/StatSQL`](https://github.com/jmortley/StatSQL) · ServerShield (private — see §10).
 
@@ -67,6 +67,21 @@ you add the one you want per ruleset.
 > `SetNetSpeed` still works here because the gamemode is stock (only the NetcodePlus gamemodes ignore it
 > — §3.3). StatSQL + ServerShield run hub‑wide via `Game.ini` `ConfigMutators` (§8.1), not in the chain.
 
+> ⚠️ **Known limitation on stock gamemodes — the in‑game menus open without a mouse cursor.**
+> On a **stock** gamemode (TDM, DM, stock CTF, Duel…), the F5 menu — and `nchud`, `weaponskins`,
+> the cosmetics picker — will appear but the cursor stays captured for camera look, so nothing is
+> clickable. **Workaround: press `~` (tilde) to open the console, which frees the cursor; the menu is
+> then fully usable.** Closing the console does not re‑capture it while the menu is open.
+>
+> Why: those panels ask the HUD to release the cursor, and only the **NetcodePlus HUDs** honour that
+> request. A stock gamemode uses a stock HUD, which re‑captures the mouse every tick. Running any
+> NetcodePlus **gamemode** (§4) has no such issue — the cursor works normally there. Weapons, netcode,
+> hit registration and every server‑side feature are unaffected; this is purely the client‑side menu
+> cursor. Players who only ever change settings from the main menu never see it.
+>
+> See **§6.3** for this and the other stuck‑cursor case (launcher join / map change with a menu open),
+> both with the same `~` workaround — handy to have in one place when answering tickets.
+
 ---
 
 ## 0. TL;DR — migrating a hub off stock
@@ -116,7 +131,7 @@ is live.
 Download the latest plugin zip from the releases page:
 
 **<https://github.com/jmortley/NetcodePlusUT4/releases>** → tag **`plugin-latest`** → asset
-**`NetcodePlus-327.zip`**.
+**`NetcodePlus-328.zip`**.
 
 Every release zip contains **all** build targets — you don't need a separate "server build":
 
@@ -231,10 +246,31 @@ added. The content ships inside the NetcodePlus paks, so launcher users already 
 **Admin action:** in your `?mutator=` chains, replace the token `MutHitsounds` with `dcHitsounds`.
 Players tune their own hitsounds in‑game with **`mutate hitsounds`**.
 
-> A native C++ hitsounds port (`AClientHitsounds`, config under `[ClientHitsounds]` / `[Hitsounds.Enemy]`
-> / `[Hitsounds.Friendly]`) is compiled into the plugin but is **not yet the shipping path** — the live
-> hitsounds is the `dcHitsounds` blueprint. Those Mod.ini keys are listed in the appendix for
-> completeness but don't drive anything yet.
+#### Native hitsounds (new in 328) — optional replacement for `dcHitsounds`
+
+328 ships a **native C++ hitsounds mutator** (`AClientHitsounds`, shown in menus as **"Hitsounds"**) that
+can replace the `dcHitsounds` blueprint. Same 10 presets and the same damage‑pitched behaviour, plus:
+
+- **Client‑side prediction** — the sound plays on the shooter's own machine at fire time instead of
+  waiting a server round‑trip, so it feels tighter at range/ping.
+- **Correctness fixes** over the blueprint: no more enemy cue on self‑damage in FFA, pellet weapons
+  coalesce into one sound instead of one per shard, damage amps are compensated, and replay
+  fast‑forward no longer bursts every recorded hitsound.
+- **No content dependency** — it's compiled into the plugin. It reads the same cue assets the paks
+  already ship.
+- **Players can supply their own sounds** — drop a `UHitsoundPack` data asset (a `DisplayName` plus
+  Low/Med/High sounds) into a pak and it appears in the list alongside the built‑ins; a custom pack
+  wins a name clash. This is entirely client‑side and needs **no server support or approval**.
+
+**Admin action (optional):** swap the token — use **`ClientHitsounds`** *instead of* `dcHitsounds`, not
+alongside it. Both declare the mutator group `Hitsounds`, so UT will refuse to load the second one;
+without that guard you'd get every hitsound twice. Players configure it at **F5 → Hitsounds** (or
+`ncpmenu hitsounds`).
+
+> Staying on `dcHitsounds` is perfectly fine — it still works on 328. The native one is opt‑in.
+> Config keys live under `[ClientHitsounds]` / `[Hitsounds.Enemy]` / `[Hitsounds.Friendly]` in each
+> **player's** Mod.ini (appendix); nothing about hitsounds is server‑configured, and no hitsound
+> settings ever cross the network.
 
 ### 3.2 `MutTeamSkins` → Force Models (client‑side)
 
@@ -306,14 +342,29 @@ Notes:
 | Token (`?mutator=`) | What it is | Side |
 |---|---|---|
 | `dcHitsounds` | Damage hitsounds (replaces `MutHitsounds`) | client content, added to chain |
+| `ClientHitsounds` | **New in 328.** Native C++ hitsounds — optional replacement for `dcHitsounds` (§3.1). Adds client‑side prediction + custom `UHitsoundPack` support. **Use one or the other**, never both (same `Hitsounds` mutator group) | server (compiled in, no pak) |
 | `MutInstagibNCP` | Instagib weapon set (makes a CTF mode iCTF) | server (external BP pak) |
 | `NCWepMut` | NetcodePlus weapon replacement — turns **any** gamemode into NetcodePlus weapons (see Start Here) | server (pak) |
 | `NCStockWeapons` | Same, but **stock** UT4 weapon balance on the NetcodePlus netcode (the stock‑balance alternative to `NCWepMut`; RL keeps NCP spirals + grenades). Run one or the other, not both | server (pak) |
 | `MutStatSQL` | Stats upload to ut4stats.com — §9 | server |
 | `MutServerShield` | Behavioral anti‑cheat — §10 | server |
 
-There is **no token** for: Force Models (client‑only), the version gate (auto), Warmup Roam (auto), or
-host/captain pause (the in‑game `pause` command, gated by Mod.ini).
+There is **no token** for: Force Models (client‑only), the version gate (auto), Warmup Roam (auto),
+host/captain pause (the in‑game `pause` command, gated by Mod.ini), or the concede vote (auto — see
+below).
+
+> **Concede vote ("gg vote") — new in 328, on by default, no token.** The losing team can end a lost
+> match early: a player types **`gg`** (or F1 to confirm / F4 to cancel) and it passes at **>50% of that
+> team's humans** (bots don't count). The leading team is told a vote is brewing rather than being
+> surprised by a sudden end. Server‑authoritative. Worth knowing before your first "why did that match
+> end early?" ticket — and worth mentioning to league admins, since a team can now forfeit a match that
+> would previously have been played to the clock.
+>
+> **To turn it off for a ruleset, add `?AllowConcede=0` to its `gameOptions`** (§7). It is per‑ruleset,
+> not per‑gamemode, which is what lets you disable it for **iCTF while leaving regular CTF alone** —
+> those two are the same gamemode class, so only the ruleset can tell them apart. A disabled server
+> replies "the gg vote is disabled on this server" in chat rather than leaving `gg` as a dead key.
+> The setting is read once at map load, so it can't change under a match that is already running.
 
 > **StatSQL and ServerShield are best added hub‑wide, not per ruleset** — put them in `Game.ini` as
 > `ConfigMutators` (§8.1) so they run on every match. Don't also list them in a ruleset `?mutator=`
@@ -337,8 +388,9 @@ weapon stuff, etc.) belong to **other** mutators/paks and are not covered here.
 | `bAllowHostPause` | bool | `false` | server | Let the recognized match host (`?HostId`) pause/unpause with the `pause` command. |
 | `bAllowCaptainPause` | bool | `false` | server | Let bot‑designated team captains (`?Captains`) pause in PUGs. |
 | `CaptainPauseCooldownSec` | int | `8` | server | Min unpaused seconds between captain pauses (0 = no cooldown). |
-| `UnpauseCountdownSec` | int | `7` | server | "Resuming in N…" countdown before an unpause takes effect (0 = instant). |
+| `UnpauseCountdownSec` | int | `7` | server | "Resuming in N…" countdown before a host/rcon or CTF auto-pause resume takes effect (clamped 0–60; 0 = instant). |
 | `VersionReportTimeoutSec` | float | `100.0` | server | Grace window for a joining client to report its plugin build (clamped 1–120). *Mismatch* kicks always fire; the *no‑reply* timeout kick is currently disabled. |
+| `AnnouncerPack` | string | *(stock)* | **client** | **New in 328.** Player's chosen announcer voice pack (set at F5, not by admins). Listed here only so you recognise it in a player's Mod.ini — it is client‑side and never affects the server. |
 | `ElimEnableAntiCamp` | bool | `true` | server | **ElimPlus only.** Enable the anti-camp watch (flags a player who holds a tight box). Detection is C++; the warn/response is Blueprint. |
 | `ElimCampThreshold` | float | `400` | server | **ElimPlus.** Box radius/extent (uu) a player must stay within to be flagged. |
 | `ElimCampCheckInterval` | float | `1.0` | server | **ElimPlus.** Seconds between camp position samples. `0` disables the camp timer entirely. |
@@ -356,7 +408,7 @@ Shared section (StatSQL reads `Key`/`ServerName`/`SendStats` here too — see §
 | `CTFRespawnWait` | float | `1.5` | Regulation respawn delay (s) in CTF (fractional supported). |
 | `CTFRespawnWaitSmall` | float | `1.0` | Respawn delay (s) in small games (≤ `CTFSmallGameMaxPlayers`). |
 | `CTFSmallGameMaxPlayers` | int | `2` | At/below this player count a CTF match is "small" (2 = 1v1; raise to 4 for 2v2). |
-| `AutoPauseOnDrop` | bool | `true` | Auto‑pause a bot PUG (`?PugId`) when a participant drops, until they rejoin or an admin unpauses. |
+| `AutoPauseOnDrop` | bool | `true` | Immediately auto‑pause a bot PUG (`?PugId`) when a participant drops. Once all awaited IDs return (or an unpause is requested), resume through `UnpauseCountdownSec`; another tracked drop cancels that countdown. |
 | `CTFPerfEnabled` | bool | `true` | Enable the CTF performance‑rating model (false = legacy K/D only). |
 | `CTFRatingShadow` | bool | `true` | Shadow mode: live Glicko delta uses legacy perf; new perf is only observed/uploaded. |
 | `CTFPerfObjectiveWeight` | float | `1.0` | Multiplier on the objective (flag‑play) half of the CTF perf score. |
@@ -403,7 +455,26 @@ constructor):
 `EnemyBlockPenalty`, `EnemyLOSBlockRange`, `EnemyLOSPenalty`, `FlagBaseProximityRadius`,
 `FlagSpawnPenaltyRadius`, `SpawnRecentPenaltyMultiplier`, `SpawnNearLastRadius`, `SpawnNearLastPenalty`,
 `SpawnTieBandWidth`, `SpawnFreshnessBonus`, `SpawnFreshnessWindow`, `SpawnFlagVicinityRadius`,
-`SpawnKillerAvoidRadius`, `SpawnFlagCarrierLOSAvoidRadius` (default `3500`), `SpawnRobbedBaseAvoidCount`.
+`SpawnKillerAvoidRadius`, `SpawnFlagCarrierLOSAvoidRadius` (default `3500`), `SpawnRobbedBaseAvoidCount`,
+`LogSpawnChoices` (bool, default `false` — one log line per live spawn, for A/B testing).
+
+**How the winner is chosen (328).** Scoring is unchanged, but the final pick is now
+Deaod's InstaGibPlus method: every start still in contention draws a random number from
+`[0, ceiling)` and the highest draw wins, where the ceiling falls off from the best start.
+Equal starts are a true coin‑flip and a slightly worse start still wins a real share of the
+time, so the picker is **never** deterministic — the old tie‑band chose the same start every
+life whenever one led by more than `SpawnTieBandWidth`.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `SpawnWeightedRandom` | bool | `true` | `false` restores the old tie‑band coin‑flip (uses `SpawnTieBandWidth`). |
+| `SpawnRandomBase` | float | `20` | Draw ceiling of the best start. **Raise for more variety.** |
+| `SpawnRandomSpread` | float | `1.0` | Ceiling lost per score point behind the leader. Raise to favour quality; a start more than `Base/Spread` points behind can never be picked (this is what keeps just‑used and telefrag starts out). |
+| `SpawnEnemyHardRadius` | float | `1200` | A start with a live enemy this close is **refused**, not just penalised. Waived if every start in the pool violates it. `0` = off. |
+| `SpawnEnemyBelowZ` | float | `190` | An enemy at least this far *below* a start counts as floor‑separated: no proximity penalty, and it clears the hard radius above when he also has no line of sight. `0` = off. |
+
+Per‑player anti‑repeat now remembers **three** spawns (the last is blocked outright, the two
+before it are halved), matching IG+.
 
 ---
 
@@ -426,6 +497,11 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.HeadBandXY` | `22` | Headshot validation: max head‑centre off‑axis offset (uu). |
 | `ncp.HeadSlackScale` | `1.0` | High‑ping head slack = `targetSpeed · rewindTime · scale` (velocity‑gated; 0 disables). |
 | `ncp.HeadSlackMax` | `25` | Hard cap (uu) on the high‑ping head slack. |
+| `ncp.UnclaimedRenderGate` | `1` | Server rejects a hitscan hit the shooter's own client never claimed, by reconstructing what that shooter actually had rendered. This is the "gifted shots at high ping" fix. Shipped to production **on 327** (backported), not new in 328. **Leave at `1`** — if honest aim is being demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate. |
+| `ncp.UnclaimedRenderSlack` | `20` | Extra tolerance (uu) the render check allows before demoting a hit. Raise if live logs show demotes clustered on honest body aim. |
+| `ncp.HitAttribRenderExtraMs` | `30` | Extra time (ms) added to the render reconstruction window. Second lever if slack alone isn't enough for a very-high-ping population. |
+| `ncp.SlideGraceMs` | `250` | **New in 328.** Window after a floor slide starts during which validation accepts the standing capsule. A slide shrinks the server capsule instantly, but the shooter still sees a standing body for one replication interp plus the anim blend — without this, shots through the visible torso were server-side air. `0` = off (pre-328 behaviour). |
+| `ncp.HitAttribDebug` | `0` | Per‑shot hit‑attribution telemetry (`[HitAttrib]` log lines). Diagnostic only — **high volume on a populated server**, leave `0` unless investigating a specific report. |
 | `ncp.ShockServerTickHz` | `0` | Server shock‑core tick rate (0 = 240 Hz; >0 = that Hz, 30–720; read at spawn). |
 | `ncp.CTFReplayMinDemoSeconds` | `200` | Min server‑demo age before the end‑of‑match decisive‑cap replay fires (0 = always — not advised; can crash the killcam in an early match). Requires a replay server (§8). |
 | `ncp.CTFReplayBuildupSeconds` | `8` | Seconds of run‑up shown before the featured cap. |
@@ -461,6 +537,22 @@ These are set by players, not the server, but admins should know them for troubl
 | `ncp.ShockHandoff` | `1` | Client stuck‑ball handoff: when the real ball stops, destroy the fake and reveal the real so the shooter sees the stop. `0` = no reveal. |
 | `ncp.WarmupSpawns` | `1` | Warmup‑only spawn‑point markers (team‑colored, facing tick + distance) in CTF / iCTF, as a learning aid. `0` = off. |
 
+### 6.3 Known issues players will report — "my mouse is stuck / the menu won't click"
+
+Two **different** bugs share one symptom and one workaround. Neither loses progress, neither affects
+gameplay, hit registration or anything server‑side, and in both cases:
+
+> **Workaround: press `~` (tilde).** Opening the console frees the mouse cursor. The menu is fully
+> usable afterwards, and closing the console does not re‑capture it.
+
+| What the player did | What happens | Why |
+|---|---|---|
+| Opened **F5** (or `nchud` / `weaponskins` / cosmetics) on a **stock** gamemode — stock TDM, DM, stock CTF, Duel… typically while running `NCWepMut` / `NCStockWeapons` on a stock ruleset | Menu draws, but the cursor stays captured for camera look, so nothing is clickable | Those panels ask the HUD to release the cursor and only the **NetcodePlus HUDs** honour it. A stock gamemode runs a stock HUD, which re‑captures the mouse every tick. **Not an issue on any NetcodePlus gamemode** (§4). |
+| **Joined from the launcher** (`-ncpconnect`), or the server changed map, **while the front‑end menu was open** | A "ghost" main menu is left behind: cursor stuck, `Esc` does nothing, input dead | A stock UE4/UT ordering race — the deferred menu close is dropped when the loading movie finishes on the same event the map load rides. A fix exists but was pulled during unrelated crash triage and is **deliberately not in 328**; the `~` workaround stands. |
+
+If a player reports either, the answer is the same one line: **press `~`**. Worth pinning in your
+hub's Discord/rules channel — it's the single most common "the game is broken" ticket that isn't.
+
 ---
 
 ## 7. Launch / URL options (ruleset `gameOptions`)
@@ -471,6 +563,7 @@ The `?Key=Value` tokens NetcodePlus itself parses (in addition to stock UT4 opti
 | Option | Type | Default | Modes | Meaning |
 |---|---|---|---|---|
 | `?AdvantageMaxDuration` | int s | `300` (min 60) | CTF/iCTF | Max flag‑advantage period before the match force‑ends. |
+| `?AllowConcede` | bool | `1` (on) | all NCPlus team modes | `0` / `false` / `no` (any casing) disables the **gg concede vote** for that ruleset — see §4.2. Absent or unrecognised = **on**, so a typo can't silently disable it. This is the per‑ruleset switch, and it is the only way to separate **iCTF from regular CTF**: they are the same gamemode class (`ANCPlusCTFGameMode` + the instagib mutator), so nothing keyed on the mode itself can tell them apart. |
 | `?GracePeriod` | int s | `10` (min 3) | CTF/iCTF | Grace window after a flag event before advantage/OT logic acts. |
 | `?HalftimeDuration` | int s | *(BP)* | CTF/iCTF | Halftime length (1v1/2v2 only; auto‑off for 3v3+). |
 | `?MaxPoints` | int | *(BP)* | ShockDom | Number of control points to spawn. |

@@ -23,12 +23,188 @@ void AElimPlusStatsReplicator::GetLifetimeReplicatedProps(TArray<FLifetimeProper
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AElimPlusStatsReplicator, StatsEntries);
 	DOREPLIFETIME(AElimPlusStatsReplicator, bBalanceTeamsActive);
+	DOREPLIFETIME(AElimPlusStatsReplicator, Team0ClutchOverlay);
+	DOREPLIFETIME(AElimPlusStatsReplicator, Team1ClutchOverlay);
 }
 
 void AElimPlusStatsReplicator::SetBalanceTeamsActive(bool bActive)
 {
 	if (Role != ROLE_Authority) return;
 	bBalanceTeamsActive = bActive;
+}
+
+FNCClutchOverlayState* AElimPlusStatsReplicator::GetMutableClutchOverlayState(int32 TeamIndex)
+{
+	return TeamIndex == 0 ? &Team0ClutchOverlay
+		: (TeamIndex == 1 ? &Team1ClutchOverlay : nullptr);
+}
+
+const FNCClutchOverlayState* AElimPlusStatsReplicator::GetClutchOverlayState(int32 TeamIndex) const
+{
+	return TeamIndex == 0 ? &Team0ClutchOverlay
+		: (TeamIndex == 1 ? &Team1ClutchOverlay : nullptr);
+}
+
+float AElimPlusStatsReplicator::GetClutchOverlayServerTime() const
+{
+	const AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+	return GS ? GS->GetServerWorldTimeSeconds()
+		: (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f);
+}
+
+void AElimPlusStatsReplicator::BeginClutchOverlay(int32 TeamIndex,
+	AUTPlayerState* Candidate, int32 EnemiesAlive)
+{
+	if (Role != ROLE_Authority || !Candidate || EnemiesAlive < 1)
+	{
+		return;
+	}
+
+	FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+	if (!State || State->bActive)
+	{
+		return;
+	}
+
+	const uint32 NextGeneration = State->Generation + 1;
+	*State = FNCClutchOverlayState();
+	State->Generation = NextGeneration;
+	State->bActive = true;
+	State->TeamIndex = static_cast<uint8>(TeamIndex);
+	State->Candidate = Candidate;
+	State->CandidateName = Candidate->PlayerName;
+	State->CandidateId = Candidate->UniqueId.IsValid()
+		? Candidate->UniqueId.ToString()
+		: FString::Printf(TEXT("BOT:%s"), *Candidate->PlayerName);
+	State->EnemiesAtStart = EnemiesAlive;
+	State->EnemiesRemaining = EnemiesAlive;
+	State->StartServerTime = GetClutchOverlayServerTime();
+	ForceNetUpdate();
+}
+
+void AElimPlusStatsReplicator::CreditClutchOverlayKill(
+	AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
+{
+	if (Role != ROLE_Authority || !KillerPS || !VictimPS)
+	{
+		return;
+	}
+
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		if (State && State->bActive && State->Candidate == KillerPS
+			&& static_cast<int32>(VictimPS->GetTeamNum()) == 1 - TeamIndex)
+		{
+			++State->DirectKills;
+			ForceNetUpdate();
+			return;
+		}
+	}
+}
+
+void AElimPlusStatsReplicator::UpdateClutchOverlayRemaining(
+	int32 AliveTeam0, int32 AliveTeam1)
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	const int32 AliveByTeam[2] = { AliveTeam0, AliveTeam1 };
+	bool bChanged = false;
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		if (State && State->bActive)
+		{
+			const int32 NewRemaining = FMath::Max(0, AliveByTeam[1 - TeamIndex]);
+			if (State->EnemiesRemaining != NewRemaining)
+			{
+				State->EnemiesRemaining = NewRemaining;
+				bChanged = true;
+			}
+		}
+	}
+	if (bChanged)
+	{
+		ForceNetUpdate();
+	}
+}
+
+void AElimPlusStatsReplicator::EndClutchOverlayForCandidate(
+	AUTPlayerState* Candidate, ENCClutchOverlayOutcome Outcome)
+{
+	if (Role != ROLE_Authority || !Candidate)
+	{
+		return;
+	}
+
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		if (State && State->bActive && State->Candidate == Candidate)
+		{
+			State->bActive = false;
+			State->Candidate = nullptr;
+			State->Outcome = Outcome;
+			State->EndServerTime = GetClutchOverlayServerTime();
+			ForceNetUpdate();
+			return;
+		}
+	}
+}
+
+void AElimPlusStatsReplicator::FinalizeClutchOverlays(int32 WinnerTeamIndex)
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	bool bChanged = false;
+	const float ServerNow = GetClutchOverlayServerTime();
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		if (!State || !State->bActive)
+		{
+			continue;
+		}
+
+		State->bActive = false;
+		State->Candidate = nullptr;
+		State->EnemiesRemaining = WinnerTeamIndex == TeamIndex ? 0 : State->EnemiesRemaining;
+		State->Outcome = WinnerTeamIndex == TeamIndex
+			? ENCClutchOverlayOutcome::Clutched
+			: (WinnerTeamIndex == INDEX_NONE
+				? ENCClutchOverlayOutcome::Cancelled
+				: ENCClutchOverlayOutcome::Denied);
+		State->EndServerTime = ServerNow;
+		bChanged = true;
+	}
+	if (bChanged)
+	{
+		ForceNetUpdate();
+	}
+}
+
+void AElimPlusStatsReplicator::ClearClutchOverlays()
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		FNCClutchOverlayState* State = GetMutableClutchOverlayState(TeamIndex);
+		const uint32 NextGeneration = State->Generation + 1;
+		*State = FNCClutchOverlayState();
+		State->Generation = NextGeneration;
+		State->TeamIndex = static_cast<uint8>(TeamIndex);
+	}
+	ForceNetUpdate();
 }
 
 void AElimPlusStatsReplicator::BeginPlay()

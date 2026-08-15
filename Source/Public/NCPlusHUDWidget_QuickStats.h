@@ -6,6 +6,7 @@
 #include "NetcodePlus.h"
 #include "UnrealTournament.h"
 #include "UTHUDWidget.h"
+#include "CanvasItem.h"
 #include "NCPlusHUDWidget_QuickStats.generated.h"
 
 /**
@@ -49,6 +50,25 @@ private:
 	FLinearColor CachedArmorAccent;
 	FLinearColor CachedHealthNumBase;
 	FLinearColor CachedArmorNumBase;
+
+	// RadialArcs is static between vital/layout changes. Retain the exact
+	// tessellated vertices and the allocation; only vertex colors are refreshed
+	// during pickup pulses. This removes render-rate trig without changing pixels.
+	TArray<FCanvasUVTri> CachedRadialTris;
+	FVector2D CachedRadialRenderPosition;
+	FVector2D CachedRadialSize;
+	float CachedRadialRenderScale;
+	int32 CachedRadialHealth;
+	int32 CachedRadialArmor;
+	bool bCachedRadialDrawArmor;
+	int32 RadialTrackHPStart;
+	int32 RadialTrackHPCount;
+	int32 RadialTrackARStart;
+	int32 RadialTrackARCount;
+	int32 RadialValueHPStart;
+	int32 RadialValueHPCount;
+	int32 RadialValueARStart;
+	int32 RadialValueARCount;
 
 	// Per-style draw functions. Health/Armor passed as ints so each function
 	// can present them however it likes; the shared header in Draw_Implementation

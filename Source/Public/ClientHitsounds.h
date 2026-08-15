@@ -301,6 +301,11 @@ public:
 	/** All presets: built-in manifest entries first (in authored order), then custom packs. */
 	static const TArray<FHitsound>& GetCatalog();
 
+	/** Menu discovery entry point. Builds once on first use; an earlier empty build
+	 *  is retried on a process-wide cooldown so late-mounted PAKs can appear without
+	 *  repeating registry/disk work on every menu open. */
+	static const TArray<FHitsound>& GetCatalogForMenu();
+
 	/** True once the built-in manifest has loaded at least one usable preset. */
 	static bool IsCatalogReady();
 
@@ -401,9 +406,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Hitsounds|Prediction")
 	void PlayClientPredictedHitsound(int32 EstimatedDamage, bool bFriendly);
 
-	/** True if the authoritative message should be suppressed because we just predicted one. */
+	/** True if the authoritative message should be suppressed because we just
+	 *  predicted one AND the prediction resolves to the same audible tier as the
+	 *  authoritative (damage, friendly) pair. A materially different resolve —
+	 *  rejected/demoted head claim, blocked headshot, FF scaling, a different
+	 *  victim class — returns false so the authoritative sound plays as an
+	 *  audible correction (ncp.HitsoundCorrection 0 restores blanket dedup). */
 	UFUNCTION(BlueprintPure, Category = "Hitsounds|Prediction")
-	bool ShouldSuppressServerHitsound() const;
+	bool ShouldSuppressServerHitsound(int32 AuthoritativeDamage, bool bIsFriendly) const;
 
 	// ============================================================
 	// Client RPCs
@@ -443,6 +453,18 @@ protected:
 	 *  authoritative sounds armed it they would suppress each other (a
 	 *  spectator predicts nothing and would lose most of a minigun stream). */
 	float LastClientHitsoundTime;
+
+	/** What the last predicted hitsound encoded, captured alongside
+	 *  LastClientHitsoundTime. Only meaningful inside the dedup window; lets the
+	 *  suppress decision compare the prediction's resolved tier against the
+	 *  authoritative one instead of blanket-suppressing. */
+	int32 LastPredictedDamage;
+	bool bLastPredictedFriendly;
+
+	/** True when the remembered prediction resolves to the same cue and a
+	 *  near-identical pitch as the authoritative (damage, friendly) pair under
+	 *  the CURRENT style — i.e. suppressing loses no information. */
+	bool PredictionResolvesSameTier(int32 AuthoritativeDamage, bool bAuthoritativeFriendly) const;
 
 	/** Client-side prediction master switch. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Prediction")

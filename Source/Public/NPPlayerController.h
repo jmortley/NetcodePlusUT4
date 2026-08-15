@@ -1,13 +1,25 @@
 // NPPlayerController.h
-// Custom PlayerController that fixes input swallowing on low/zero-debounce mice.
+// Neutral C++ PlayerController shell — behaviorally identical to stock
+// AUTPlayerController. Kept as the proven-safe home for future PC-level work
+// (e.g. an ncp.FlushNetOnFire experiment) that must not live in a Blueprint.
 //
-// UE 4.15 uses polling-based input: mouse press+release events are queued into
-// DeferredFireInputs and replayed in the same frame. If both arrive between polls,
-// StartFire→StopFire executes back-to-back and the weapon never gets a tick to fire.
+// HISTORY (2026-08-06): this class previously carried a deferred-fire-queue
+// rewrite that tried to rescue sub-frame clicks by delaying a same-frame
+// StopFire one tick. Two independent audits retired it:
+//  - Inert on every healthy frame: the scan ran before Super::PlayerTick, but
+//    fire input enqueues INSIDE Super and the queue drains the same frame at
+//    the end of UUTCharacterMovement::TickComponent — the scan always saw an
+//    empty queue.
+//  - Harmful on the rare frames where it DID run (skipped drains at ragdoll/
+//    pause/hitch boundaries): re-injecting the deferred Stop ahead of a
+//    retained Start reordered [Start,Stop] into [Stop,Start], leaving a
+//    released click logically HELD with no future release event (stuck fire).
+// Click reliability lives at the weapon layer instead, which owns the ROF
+// state: AUTWeaponFix debounce-retry + ncp.ClickBufferMs.
 //
-// Fix: Pre-process the deferred queue each tick. When a StartFire+StopFire pair
-// for the same fire mode appears in the same frame, remove the StopFire and defer
-// it to the next tick — giving the weapon state machine time to actually fire.
+// NotBlueprintable is load-bearing: creating a BP child of a custom PC hangs
+// the editor in a pump-less O(N^2) reinstance/recompile. Assign this class
+// directly from C++ (game mode InitGame), never via a BP subclass.
 
 #pragma once
 
@@ -15,17 +27,11 @@
 #include "UTPlayerController.h"
 #include "NPPlayerController.generated.h"
 
-UCLASS()
+UCLASS(NotBlueprintable)
 class NETCODEPLUS_API ANPPlayerController : public AUTPlayerController
 {
 	GENERATED_BODY()
 
 public:
 	ANPPlayerController(const FObjectInitializer& ObjectInitializer);
-
-	virtual void PlayerTick(float DeltaTime) override;
-
-protected:
-	/** Fire modes whose StopFire was deferred from the previous tick. */
-	TArray<uint8> DeferredStopFires;
 };

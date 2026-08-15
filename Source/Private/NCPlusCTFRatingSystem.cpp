@@ -216,6 +216,16 @@ bool FNCPlusCTFRatingSystem::InitDatabase(UWorld* World)
 	// creation is idempotent and cheap.
 	bool bAllOk = true;
 
+	// Quiet the disk: WAL journal + synchronous=NORMAL so a mid-match
+	// INSERT/UPDATE is a WAL append instead of a full fsync — on the NFO VMs'
+	// shared storage a per-commit fsync can stall the game thread for tens of
+	// ms (the spectator-join hitch). journal_mode=WAL persists IN THE DB FILE,
+	// so every system sharing Mods.db benefits; synchronous=NORMAL applies to
+	// the connection and is re-asserted on every map's InitDatabase. The
+	// journal_mode pragma returns a row; ExecSql discards rows harmlessly.
+	CTFR_ExecSqlNoRows(World, TEXT("PRAGMA journal_mode=WAL;"));
+	CTFR_ExecSqlNoRows(World, TEXT("PRAGMA synchronous=NORMAL;"));
+
 	for (int32 Variant = 0; Variant < 2; ++Variant)
 	{
 		const bool bInstagib = (Variant == 1);

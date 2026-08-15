@@ -4,6 +4,7 @@
 #include "HAL/IConsoleManager.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "UObject/UObjectBase.h"      // UObjectInitialized (late module-shutdown guard)
 #include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
 #include "UTPlayerController.h"
 #include "UTPlayerInput.h"
@@ -13,6 +14,7 @@
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTWeaponFix.h"
+#include "NCPlusAnnouncer.h"
 #include "UTATypes.h"
 #include "SUTWeaponSkinSelector.h"
 #include "SUTNCPlusMenu.h"
@@ -20,9 +22,11 @@
 #include "SNCPlusHUDEditor.h"
 #include "SNCPlusHUDDragOverlay.h"
 #include "ElimPlusHUD.h"
+#include "ElimPlusScoreboard.h"
 #include "WipeoutHUD.h"
 #include "NCPlusCTFHUD.h"
 #include "ShockDomHUD.h"
+#include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
 #include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
 #include "NCConcedeVote.h"            // gg concede vote: client command routing + bind seeding
@@ -32,6 +36,8 @@
 #include "Containers/Ticker.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "Misc/Char.h"                 // FChar::IsAlnum (launcher credential handoff)
+#include "HAL/PlatformMisc.h"          // Get/SetEnvironmentVar (launcher credential handoff)
 #include "Misc/CoreMisc.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/Paths.h"                // FPaths::GeneratedConfigDir (NoAlias Mod.ini scrub)
@@ -214,19 +220,24 @@ static void HandleNCPMenu(const TArray<FString>& Args)
 {
 	// Optional first arg picks the tab (parsed up front so an explicit tab
 	// request can retarget an already-open panel).
-	ENCPMenuTab InitialTab = ENCPMenuTab::About;
+	ENCPMenuTab InitialTab = ENCPMenuTab::Home;
 	bool bExplicitTab = false;
 	if (Args.Num() > 0)
 	{
 		const FString Tab = Args[0].ToLower();
-		if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
+		if (Tab == TEXT("home") || Tab == TEXT("about"))
+		{
+			InitialTab = ENCPMenuTab::Home;
+			bExplicitTab = true;
+		}
+		else if (Tab == TEXT("forcemodels") || Tab == TEXT("teamskins") || Tab == TEXT("models"))
 		{
 			InitialTab = ENCPMenuTab::ForceModels;
 			bExplicitTab = true;
 		}
-		else if (Tab == TEXT("general"))
+		else if (Tab == TEXT("ictf") || Tab == TEXT("general"))
 		{
-			InitialTab = ENCPMenuTab::General;
+			InitialTab = ENCPMenuTab::ICTF;
 			bExplicitTab = true;
 		}
 		else if (Tab == TEXT("hitsounds"))
@@ -488,6 +499,69 @@ static void HandleHUDDragOverlay(const TArray<FString>& Args)
 	FSlateApplication::Get().SetKeyboardFocus(Overlay, EFocusCause::SetDirectly);
 
 	ActiveDragOverlay = Overlay;
+}
+
+// ---------------------------------------------------------------------------
+// Launcher credential handoff (NCP_AUTH_PASSWORD -> -AUTH_PASSWORD).
+//
+// The engine writes the whole command line to the log ("LogInit: Command line:",
+// LaunchEngineLoop AppInit) and into the CommandLine property of every crash
+// report. Players routinely post those files publicly when asking for help, so
+// the one-shot Epic exchange code the UT4 Community Launcher passes as
+// -AUTH_PASSWORD leaks with them — a live login credential until it is redeemed.
+//
+// Launcher builds that detect this handoff in the installed plugin pass the code
+// in the NCP_AUTH_PASSWORD environment variable instead of on the command line,
+// and we append it back here. FCommandLine::Append writes ONLY the live command
+// line: the two copies the engine keeps for logging are snapshotted in
+// FCommandLine::Set and never rebuilt, so an appended value can never reach the
+// log line or the crash context. Environment variables are not logged.
+//
+// Timing: StartupModule runs after the engine has already logged the command
+// line, and well before anything reads AUTH_PASSWORD (the MCP autologin, the
+// login hook DLL, and the EULA check in UUTGameEngine all run later in startup).
+// ---------------------------------------------------------------------------
+static void ApplyLauncherAuthHandoff()
+{
+	// 4.15 only offers the fixed-buffer form of GetEnvironmentVariable. Exchange
+	// codes are 32 hex characters; 128 is headroom with no heap allocation.
+	TCHAR CodeBuf[128] = { 0 };
+	FPlatformMisc::GetEnvironmentVariable(TEXT("NCP_AUTH_PASSWORD"), CodeBuf, ARRAY_COUNT(CodeBuf));
+	CodeBuf[ARRAY_COUNT(CodeBuf) - 1] = 0;
+
+	FString Code(CodeBuf);
+
+	// Clear it either way: nothing else needs it, and it keeps the code out of the
+	// environment block this process would hand to anything it later spawns.
+	FPlatformMisc::SetEnvironmentVar(TEXT("NCP_AUTH_PASSWORD"), TEXT(""));
+
+	Code.Trim();
+	Code.TrimTrailing();
+	if (Code.IsEmpty())
+	{
+		return;
+	}
+
+	// The append is parser input, so accept only a bare token — whitespace, a
+	// quote or a dash in this value could otherwise inject further switches.
+	for (int32 Index = 0; Index < Code.Len(); ++Index)
+	{
+		if (!FChar::IsAlnum(Code[Index]) && Code[Index] != TEXT('_'))
+		{
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: ignoring malformed NCP_AUTH_PASSWORD"));
+			return;
+		}
+	}
+
+	// An explicit -AUTH_PASSWORD wins (a hand-made shortcut, or a launcher that
+	// sent both): never append a second one for FParse to pick between.
+	FString Existing;
+	if (FParse::Value(FCommandLine::Get(), TEXT("AUTH_PASSWORD="), Existing))
+	{
+		return;
+	}
+
+	FCommandLine::Append(*FString::Printf(TEXT(" -AUTH_PASSWORD=%s"), *Code));
 }
 
 // ---------------------------------------------------------------------------
@@ -823,6 +897,12 @@ static void ScrubNoAliasIdentifiersOnLoad(const FString& /*MapName*/)
 extern void RegisterNCAmpRespawnFix();
 extern void UnregisterNCAmpRespawnFix();
 
+// Exact-class Wipeout health-banner stabilization. Runs on every game world so
+// clients disable the Blueprint child-body simulation locally; only authority
+// selects and replicates the final floor transform.
+extern void RegisterNCBuffBannerFix();
+extern void UnregisterNCBuffBannerFix();
+
 // Concede vote (gg / F1 / F4): route the local player's action to the server. On a
 // listen host / standalone the local PC IS the authority, so call the vote handler
 // directly; on a net client find our per-player vote channel (owner-only-relevant,
@@ -874,6 +954,23 @@ static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeComma
 
 void FNetcodePlus::StartupModule()
 {
+	// This module's startup work is entirely runtime-facing.  Cook commandlets still
+	// load the module so native classes are registered, but must not install UI,
+	// mutate gameplay CDOs, or register world/ticker hooks.
+	if (IsRunningCommandlet())
+	{
+		return;
+	}
+
+	// First: hand the launcher's login credential from the environment back onto
+	// the command line, before any consumer reads it (see ApplyLauncherAuthHandoff).
+	ApplyLauncherAuthHandoff();
+
+	if (!IsRunningDedicatedServer())
+	{
+		NCPlusAnnouncerPacks::Install();
+	}
+
 	IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("weaponhand"),
 		TEXT("Set weapon position. Usage: weaponhand [right|left|center|hidden]"),
@@ -890,7 +987,7 @@ void FNetcodePlus::StartupModule()
 
 	IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("ncpmenu"),
-		TEXT("Open NetcodePlus settings menu (gore, footsteps, screenshots)"),
+		TEXT("Open NetcodePlus menu (optional tab: home/about, ictf/general, forcemodels, hitsounds)"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleNCPMenu),
 		ECVF_Default
 	);
@@ -1083,11 +1180,27 @@ void FNetcodePlus::StartupModule()
 	// itself no-ops for NM_Client), Mod.ini-gated ([NetcodePlus] AmpRespawnFix). See NCAmpRespawnFix.cpp.
 	RegisterNCAmpRespawnFix();
 
+	// Wipeout healing banner: keep its physics child attached to the replicated
+	// actor root on server and clients. Exact Blueprint-class match; no other
+	// placeable powerups are changed. See NCBuffBannerFix.cpp.
+	RegisterNCBuffBannerFix();
+
 	UE_LOG(LogLoad, Log, TEXT("netcodeplus loaded"));
 }
 
 void FNetcodePlus::ShutdownModule()
 {
+	// UE4.15 unloads runtime modules after CoreUObject::StaticExit during final
+	// process teardown.  At that point GetMutableDefault(), StaticClass(), weak
+	// UObject lookups, and cache cleanup are no longer legal.  Dynamic/hot unloads
+	// happen while CoreUObject is live and still take the full cleanup path below.
+	if (IsRunningCommandlet() || !UObjectInitialized())
+	{
+		return;
+	}
+
+	NCPlusAnnouncerPacks::Uninstall();
+
 	// Stop the -ncpconnect ticker if it never fired.
 	if (GNcpConnectTickerHandle.IsValid())
 	{
@@ -1108,6 +1221,9 @@ void FNetcodePlus::ShutdownModule()
 	// Unbind the amp respawn-fix world-init hook.
 	UnregisterNCAmpRespawnFix();
 
+	// Unbind per-world banner spawn handlers before worlds or the module unload.
+	UnregisterNCBuffBannerFix();
+
 	// Close skin selector if open and free cached assets
 	if (ActiveSkinSelector.IsValid())
 	{
@@ -1117,6 +1233,8 @@ void FNetcodePlus::ShutdownModule()
 	SUTWeaponSkinSelector_CleanupCache();
 	AUTWeaponFix::CleanupWeaponSettings();
 	AClientHitsounds::ShutdownCatalog();
+	NCPlusHUDDrawCall::ReleaseAbsoluteElimTeamPanelTextures();
+	UElimPlusScoreboard::ReleaseAbsoluteTextures();
 
 	if (GNCPPreLoadMapHandle.IsValid())
 	{

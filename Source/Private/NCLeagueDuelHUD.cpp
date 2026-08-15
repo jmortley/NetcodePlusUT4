@@ -24,6 +24,7 @@ ANCLeagueDuelHUD::ANCLeagueDuelHUD(const FObjectInitializer& OI)
 		}
 	}
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCLeagueDuelScoreboard"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 
 	// Spawn-choice picker — engine widget that captures both PlayerStart views
 	// and lets the dead player toggle between A and B. Stock UTHUD_Duel registers

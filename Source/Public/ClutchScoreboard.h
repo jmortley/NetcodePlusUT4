@@ -21,6 +21,14 @@ protected:
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset,
 		float YOffset, float Width, FLinearColor DrawColor) override;
+	virtual void DrawReadyText(AUTPlayerState* PlayerState, float XOffset,
+		float YOffset, float Width) override;
 
 	AClutchRoundState* ResolveClutchState() const;
+
+private:
+	UPROPERTY(Transient)
+	mutable TWeakObjectPtr<AClutchRoundState> CachedClutchState;
+	mutable TWeakObjectPtr<UWorld> CachedClutchStateWorld;
+	mutable float NextClutchStateSearchTime = 0.f;
 };

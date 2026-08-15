@@ -15,6 +15,7 @@ AShockDomHUD::AShockDomHUD(const FObjectInitializer& ObjectInitializer)
 	// Replace WipeoutScoreboard with ShockDomScoreboard in widget list
 	HudWidgetClasses.Remove(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ShockDomScoreboard"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 }
 
 

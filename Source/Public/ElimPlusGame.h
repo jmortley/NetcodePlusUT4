@@ -331,6 +331,7 @@ public:
 	virtual void HandlePlayerIntro() override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual bool ReadyToStartMatch_Implementation() override;
 	virtual void DefaultTimer() override;
 	void Logout(AController* Exiting) override;
 	//void BeginDestroy() override;
@@ -417,7 +418,8 @@ public:
 	USoundBase* EnemyLastManStandingSound;
 
 	/** Check and broadcast last man standing status */
-	void CheckLastManStanding(int32 Alive0, int32 Alive1);
+	void CheckLastManStanding(int32 Alive0, int32 Alive1, int32 AttemptStartEventIndex,
+		const AUTPlayerState* IgnoredPlayer = nullptr);
 
 	/** Broadcast last man standing sounds */
 	void BroadcastLastManStanding(int32 LastManTeamIndex, AUTPlayerState* LastManPlayerState);
@@ -576,7 +578,8 @@ protected:
 	void CheckRoundWinConditions();
 	//void PrepareNextRound(); // This function is no longer needed and has been removed.
 
-	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const;
+	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1,
+		const AUTPlayerState* IgnoredPlayer = nullptr) const;
 
 	/**
 	 * REWRITTEN: Now handles scoring, checks for game-end, and calls StartIntermission.
@@ -638,13 +641,22 @@ protected:
 	/** Force a dead player into spectate. Prefer teammates; if none alive, allow enemy spectate. */
 	void ForceTeamSpectate(class AUTPlayerState* DeadPS);
 
+	/**
+	 * Take the free-roaming spectator camera away from anyone who is pawn-less in
+	 * the middle of a live round without having died in it — a late joiner or a
+	 * reconnect, who would otherwise be able to fly the map and read every enemy
+	 * position. See NCPlusRoundSpectate.cpp. No-op between rounds and in warmup.
+	 */
+	void EnforceRoundSpectatorLock();
+
 	/** Finds a living teammate for PS (nullptr if none). */
 	class AUTPlayerState* FindAliveTeammate(class AUTPlayerState* PS) const;
 
 	/** Finds a living enemy for PS (nullptr if none). */
 	class AUTPlayerState* FindAliveEnemy(class AUTPlayerState* PS) const;
 
-	AUTPlayerState* FindAliveOnTeamPS(int32 TeamIndex) const;
+	AUTPlayerState* FindAliveOnTeamPS(int32 TeamIndex,
+		const AUTPlayerState* IgnoredPlayer = nullptr) const;
 	AUTPlayerState* FindAnyOnTeamPS(int32 TeamIndex) const;
 
 	UFUNCTION(BlueprintCallable, Category = "Team Arena")
@@ -860,7 +872,8 @@ protected:
 	/** Open an attempt for TeamIndex if none is open this round. Called beside
 	 *  the CheckLastManStanding announce (same 2->1 transition semantics).
 	 *  No-ops for bots/invalid IDs and when no enemy remains. */
-	void OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate, int32 EnemiesAlive);
+	void OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate,
+		int32 EnemiesAlive, int32 StartEventIndex);
 
 	/** Credit a direct kill to an open attempt whose still-alive candidate is
 	 *  KillerPS and whose enemy team contains VictimPS. Suicides/world deaths

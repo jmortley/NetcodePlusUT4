@@ -21,6 +21,10 @@ class NETCODEPLUS_API AUTPlusProj_FlakShell : public AUTProj_FlakShell
 public:
 	AUTPlusProj_FlakShell(const FObjectInitializer& ObjectInitializer);
 
+	/** Stock accepts every gravity projectile candidate. Flak shells instead require an
+	 * unpaired live fake from the same instigator and a compatible ballistic phase. */
+	virtual bool CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const override;
+
 	virtual void ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp,
 		const FVector& HitLocation, const FVector& HitNormal) override;
 

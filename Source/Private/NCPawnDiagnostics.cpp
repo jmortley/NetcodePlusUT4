@@ -5,11 +5,13 @@
 #include "UTCharacter.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
+#include "Components/AudioComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h"
+#include "Sound/SoundBase.h"
 #include "UObject/UObjectIterator.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCPPawnDbg, Log, All);
@@ -25,6 +27,80 @@ namespace
 		Reasons += Reason;
 	}
 
+	void LogActiveAudioComponent(UAudioComponent* AudioComponent, UWorld* World,
+		int32& ActiveAudioCount, int32& LoopingAudioCount,
+		int32& DeadOwnerAudioCount, int32& SuspectAudioCount)
+	{
+		++ActiveAudioCount;
+
+		USoundBase* const Sound = AudioComponent->Sound;
+		AActor* const Owner = AudioComponent->GetOwner();
+		AUTCharacter* const CharacterOwner = Cast<AUTCharacter>(Owner);
+		AUTPlayerState* const OwnerPS = CharacterOwner != nullptr
+			? Cast<AUTPlayerState>(CharacterOwner->PlayerState)
+			: nullptr;
+		USceneComponent* const AttachParent = AudioComponent->GetAttachParent();
+		UObject* const Outer = AudioComponent->GetOuter();
+
+		const bool bLooping = Sound != nullptr && Sound->IsLooping();
+		const bool bDeadOwner = CharacterOwner != nullptr && CharacterOwner->IsDead();
+		const bool bComponentPending = AudioComponent->IsPendingKill();
+		const bool bOwnerPending = Owner != nullptr && Owner->IsPendingKillPending();
+		const bool bOwnerDestroying = Owner != nullptr && Owner->IsActorBeingDestroyed();
+		const bool bSuspect = bComponentPending || bOwnerPending || bOwnerDestroying
+			|| (bLooping && bDeadOwner);
+		UWorld* const OwnerWorld = Owner ? Owner->GetWorld() : nullptr;
+		const float DeathAge = bDeadOwner && OwnerWorld
+			? OwnerWorld->GetTimeSeconds() - CharacterOwner->TimeOfDeath
+			: -1.f;
+
+		LoopingAudioCount += bLooping ? 1 : 0;
+		DeadOwnerAudioCount += bDeadOwner ? 1 : 0;
+		SuspectAudioCount += bSuspect ? 1 : 0;
+
+		FString AudioLog = FString::Printf(
+			TEXT("[PawnDbg][AUDIO]%s world=%s worldType=%d netMode=%d time=%.3f component=%s outer=%s"),
+			bSuspect ? TEXT("[SUSPECT]") : TEXT(""),
+			World ? *World->GetPathName() : TEXT("none"),
+			World ? (int32)World->WorldType : -1,
+			World ? (int32)World->GetNetMode() : -1,
+			World ? World->GetTimeSeconds() : -1.f,
+			*AudioComponent->GetPathName(),
+			Outer ? *Outer->GetPathName() : TEXT("none"));
+		AudioLog += FString::Printf(
+			TEXT(" sound=%s soundClass=%s duration=%.3f looping=%d"),
+			Sound ? *Sound->GetPathName() : TEXT("none"),
+			Sound ? *Sound->GetClass()->GetName() : TEXT("none"),
+			Sound ? Sound->GetDuration() : 0.f,
+			bLooping ? 1 : 0);
+		AudioLog += FString::Printf(
+			TEXT(" owner=%s ownerClass=%s player=%s ownerPending=%d ownerDestroying=%d ownerHidden=%d ownerLoc=%s"),
+			Owner ? *Owner->GetPathName() : TEXT("none"),
+			Owner ? *Owner->GetClass()->GetName() : TEXT("none"),
+			OwnerPS ? *OwnerPS->PlayerName : TEXT("none"),
+			bOwnerPending ? 1 : 0, bOwnerDestroying ? 1 : 0,
+			(Owner && Owner->bHidden) ? 1 : 0,
+			Owner ? *Owner->GetActorLocation().ToString() : TEXT("none"));
+		AudioLog += FString::Printf(
+			TEXT(" ownerCharacter=%d ownerHealth=%d ownerDead=%d ownerAge=%.3f ownerLife=%.3f deathAge=%.3f componentPending=%d registered=%d paused=%d loc=%s attachParent=%s"),
+			CharacterOwner ? 1 : 0, CharacterOwner ? CharacterOwner->Health : 0,
+			bDeadOwner ? 1 : 0, OwnerWorld ? Owner->GetGameTimeSinceCreation() : -1.f,
+			OwnerWorld ? Owner->GetLifeSpan() : -1.f, DeathAge,
+			bComponentPending ? 1 : 0,
+			AudioComponent->IsRegistered() ? 1 : 0, AudioComponent->bIsPaused ? 1 : 0,
+			*AudioComponent->GetComponentLocation().ToString(),
+			AttachParent ? *AttachParent->GetPathName() : TEXT("none"));
+		AudioLog += FString::Printf(
+			TEXT(" spatial=%d ui=%d autoDestroy=%d stopWithOwner=%d remainIfDropped=%d ignoreFlush=%d volume=%.3f pitch=%.3f audioAllowed=%d"),
+			AudioComponent->bAllowSpatialization ? 1 : 0, AudioComponent->bIsUISound ? 1 : 0,
+			AudioComponent->bAutoDestroy ? 1 : 0, AudioComponent->bStopWhenOwnerDestroyed ? 1 : 0,
+			AudioComponent->bShouldRemainActiveIfDropped ? 1 : 0,
+			AudioComponent->bIgnoreForFlushing ? 1 : 0,
+			AudioComponent->VolumeMultiplier, AudioComponent->PitchMultiplier,
+			World ? (World->AllowAudioPlayback() ? 1 : 0) : -1);
+		UE_LOG(LogNCPPawnDbg, Warning, TEXT("%s"), *AudioLog);
+	}
+
 	void DumpNCPPawns()
 	{
 		int32 WorldCount = 0;
@@ -32,6 +108,12 @@ namespace
 		int32 SuspectCount = 0;
 		int32 OutlineComponentCount = 0;
 		int32 OrphanOutlineCount = 0;
+		int32 ActiveAudioComponentCount = 0;
+		int32 LoopingAudioComponentCount = 0;
+		int32 DeadOwnerAudioComponentCount = 0;
+		int32 SuspectAudioComponentCount = 0;
+		int32 NoWorldAudioComponentCount = 0;
+		int32 NonGameWorldAudioComponentCount = 0;
 
 		if (GEngine == nullptr)
 		{
@@ -173,12 +255,38 @@ namespace
 			}
 		}
 
-		UE_LOG(LogNCPPawnDbg, Warning, TEXT("[PawnDbg] complete worlds=%d characters=%d suspects=%d depth=%d orphanDepth=%d"),
+		// Audio can survive in a replay, preview, or no-world context. Scan globally once so
+		// the snapshot includes all active components, not just those in the game worlds above.
+		for (TObjectIterator<UAudioComponent> It; It; ++It)
+		{
+			UAudioComponent* const AudioComponent = *It;
+			if (AudioComponent->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject)
+				|| !AudioComponent->IsPlaying())
+			{
+				continue;
+			}
+
+			UWorld* const AudioWorld = AudioComponent->GetWorld();
+			NoWorldAudioComponentCount += AudioWorld == nullptr ? 1 : 0;
+			NonGameWorldAudioComponentCount += AudioWorld != nullptr && !AudioWorld->IsGameWorld() ? 1 : 0;
+			LogActiveAudioComponent(AudioComponent, AudioWorld,
+				ActiveAudioComponentCount, LoopingAudioComponentCount,
+				DeadOwnerAudioComponentCount, SuspectAudioComponentCount);
+		}
+
+		FString SummaryLog = FString::Printf(
+			TEXT("[PawnDbg] complete worlds=%d characters=%d suspects=%d depth=%d orphanDepth=%d"),
 			WorldCount, CharacterCount, SuspectCount, OutlineComponentCount, OrphanOutlineCount);
+		SummaryLog += FString::Printf(
+			TEXT(" activeAudio=%d loopingAudio=%d deadOwnerAudio=%d suspectAudio=%d noWorldAudio=%d nonGameWorldAudio=%d"),
+			ActiveAudioComponentCount, LoopingAudioComponentCount,
+			DeadOwnerAudioComponentCount, SuspectAudioComponentCount,
+			NoWorldAudioComponentCount, NonGameWorldAudioComponentCount);
+		UE_LOG(LogNCPPawnDbg, Warning, TEXT("%s"), *SummaryLog);
 	}
 
 	FAutoConsoleCommand GNCPPawnDumpCmd(
 		TEXT("ncp.PawnDump"),
-		TEXT("Dump character lifecycle plus every registered outline CustomDepth component for spectator X-ray diagnosis."),
+		TEXT("Dump character lifecycle, registered outline CustomDepth, and active audio components for spectator diagnosis."),
 		FConsoleCommandDelegate::CreateStatic(&DumpNCPPawns));
 }

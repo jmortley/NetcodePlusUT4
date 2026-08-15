@@ -1,7 +1,10 @@
 #include "ClutchPoleVisual.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
-#include "UObject/ConstructorHelpers.h"
+#include "UObject/UObjectGlobals.h"
+
+
+DEFINE_LOG_CATEGORY_STATIC(LogClutchPoleVisual, Log, All);
 
 
 AClutchPoleVisual::AClutchPoleVisual(const FObjectInitializer& ObjectInitializer)
@@ -23,14 +26,37 @@ AClutchPoleVisual::AClutchPoleVisual(const FObjectInitializer& ObjectInitializer
 	PoleMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -3.0f));
 	PoleMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 0.7724762f));
 
-	// Recovered pole mesh intentionally NOT loaded for now (the mesh isn't shipped).
-	// Do not resurrect a CDO-time ConstructorHelpers::FObjectFinder for it: the CDO is
-	// built during early module startup before the /NetcodePlus/ content mount is ready,
-	// so the find fails — and, being a function-static, it caches that failure for the
-	// whole session. When the mesh ships, load it at runtime instead (LoadObject in
-	// EnsurePoleVisual/BeginPlay, the way the Clutch HUD textures do) and flip
-	// AClutchGameMode::bUseRecoveredPoleVisual back on. With no mesh set, HasValidMesh()
-	// stays false and the game mode keeps the map's own pole marker.
+	// Load the mesh in BeginPlay rather than through ConstructorHelpers here.
+	// Native CDOs can be constructed before optional /Game content paks mount;
+	// caching a failed constructor-time lookup would keep the pole invisible.
+}
+
+
+void AClutchPoleVisual::BeginPlay()
+{
+	Super::BeginPlay();
+
+	if (!PoleMesh || PoleMesh->GetStaticMesh())
+	{
+		return;
+	}
+
+	static const TCHAR* PoleMeshPath =
+		TEXT("/Game/NetcodePlusOptional/SM_DarkHell_Pole.SM_DarkHell_Pole");
+	UStaticMesh* RecoveredPoleMesh = LoadObject<UStaticMesh>(nullptr, PoleMeshPath);
+	if (RecoveredPoleMesh)
+	{
+		PoleMesh->SetStaticMesh(RecoveredPoleMesh);
+		PoleMesh->SetVisibility(true, true);
+		PoleMesh->SetHiddenInGame(false, true);
+		UE_LOG(LogClutchPoleVisual, Log,
+			TEXT("Loaded recovered Clutch pole mesh '%s'"), PoleMeshPath);
+	}
+	else
+	{
+		UE_LOG(LogClutchPoleVisual, Warning,
+			TEXT("Unable to load recovered Clutch pole mesh '%s'"), PoleMeshPath);
+	}
 }
 
 

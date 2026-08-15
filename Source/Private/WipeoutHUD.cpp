@@ -9,8 +9,58 @@
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
 #include "NCPlusHUDLayout.h"
+#include "NCClutchOverlay.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 #include "UTHUDWidget_Spectator.h"
+#include "WipeoutGame.h"   // SuddenDeathGraceSeconds (shared client/server constant)
+#include "WipeoutDamageReplicator.h"
+#include "EngineUtils.h"
+
+// True when a dead player's queued respawn cannot possibly fire before sudden
+// death begins, i.e. the countdown on their portrait is unreachable and should
+// read "X" instead.
+//
+// Round modes replicate RoundSecondsRemaining on their BP GameState (the same
+// field DrawTeamScoreBar reads for the match clock), and RespawnTime is
+// replicated on AUTPlayerState — so every viewer, on both teams, can reach the
+// same verdict locally with no extra replication and no server round-trip.
+//
+// Both clocks tick down in lockstep, so the comparison is stable from the moment
+// of death rather than flickering as the round runs out. Returns false for
+// non-round modes (no RoundSecondsRemaining field → no sudden death to miss).
+static bool WipeoutRespawnIsUnreachable(AUTGameState* GS, AUTPlayerState* PS)
+{
+	if (GS == nullptr || PS == nullptr || PS->RespawnTime <= 0.f)
+	{
+		return false;
+	}
+
+	// UClass field tables are fixed at runtime — cache the lookup like the clock
+	// path does rather than walking the hierarchy for every pip, every frame.
+	static UClass* CachedRoundCls = nullptr;
+	static UIntProperty* CachedRoundProp = nullptr;
+	UClass* GSCls = GS->GetClass();
+	if (CachedRoundCls != GSCls)
+	{
+		CachedRoundCls = GSCls;
+		CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+	}
+	if (CachedRoundProp == nullptr)
+	{
+		return false;
+	}
+
+	const int32 RoundSecondsLeft = CachedRoundProp->GetPropertyValue_InContainer(GS);
+	if (RoundSecondsLeft < 0)
+	{
+		return false;
+	}
+
+	// During the grace window RoundSecondsLeft is already 0, so this correctly
+	// reduces to "will the respawn beat the remaining grace?".
+	return PS->RespawnTime >
+		(float(RoundSecondsLeft) + AUWipeoutGame::SuddenDeathGraceSeconds);
+}
 
 AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -91,7 +141,7 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"));
-	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"));
 	// Optional opt-in accuracy widget — registered on every NetcodePlus HUD
 	// (NCLeagueDuel, ShockDom, NCShaftArena, Wipeout itself) but defaults to
 	// hidden because UNCPlusHUDWidget_Accuracy::ShouldDraw requires a layout
@@ -110,6 +160,7 @@ AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_HealAbility"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 	// Our custom portrait-row scoreboard
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 }
@@ -175,10 +226,30 @@ void AWipeoutHUD::NotifyMatchStateChange()
 
 void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 {
-	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-	if (!GS) return;
+	UWorld* World = GetWorld();
+	AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+	if (!GS)
+	{
+		if (&SortedPlayers == &PortraitRenderPlayers)
+		{
+			PortraitRenderPlayers.Reset();
+		}
+		return;
+	}
+
+	const bool bContextChanged = CachedPortraitWorld.Get() != World
+		|| CachedPortraitGameState.Get() != GS;
+	if (bContextChanged)
+	{
+		CachedPortraitWorld = World;
+		CachedPortraitGameState = GS;
+		CachedPortraitSignature.Reset();
+		PortraitRenderPlayers.Reset();
+		PipCacheByPS.Reset();
+	}
 
 	AUTPlayerState* HUDPS = GetScorerPlayerState();
+	CurrentPortraitSignature.Reset(GS->PlayerArray.Num());
 	for (APlayerState* PS : GS->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
@@ -189,11 +260,80 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 		if (UTPS != nullptr && !UTPS->bOnlySpectator && !UTPS->bIsInactive
 			&& (UTPS->Team != nullptr || UTPS->GetTeamNum() != 255))
 		{
-			UTPS->SelectionOrder = (UTPS == HUDPS) ? -1 : UTPS->SpectatingIDTeam;
-			SortedPlayers.Add(UTPS);
+			const int32 SortKey = (UTPS == HUDPS) ? -1 : int32(UTPS->SpectatingIDTeam);
+			UTPS->SelectionOrder = SortKey;
+			FPortraitOrderSignature Signature;
+			Signature.PlayerState = UTPS;
+			Signature.TeamNum = UTPS->GetTeamNum();
+			Signature.SortKey = SortKey;
+			CurrentPortraitSignature.Add(Signature);
 		}
 	}
-	SortedPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B) { return A.SelectionOrder > B.SelectionOrder; });
+
+	bool bOrderChanged = bContextChanged
+		|| CurrentPortraitSignature.Num() != CachedPortraitSignature.Num();
+	if (!bOrderChanged)
+	{
+		for (int32 Index = 0; Index < CurrentPortraitSignature.Num(); ++Index)
+		{
+			const FPortraitOrderSignature& Current = CurrentPortraitSignature[Index];
+			const FPortraitOrderSignature& Cached = CachedPortraitSignature[Index];
+			if (Current.PlayerState.Get() != Cached.PlayerState.Get()
+				|| Current.TeamNum != Cached.TeamNum
+				|| Current.SortKey != Cached.SortKey)
+			{
+				bOrderChanged = true;
+				break;
+			}
+		}
+	}
+
+	if (bOrderChanged)
+	{
+		CachedPortraitSignature = CurrentPortraitSignature;
+		PortraitRenderPlayers.Reset(CurrentPortraitSignature.Num());
+		for (const FPortraitOrderSignature& Signature : CurrentPortraitSignature)
+		{
+			if (AUTPlayerState* PlayerState = Signature.PlayerState.Get())
+			{
+				PortraitRenderPlayers.Add(PlayerState);
+			}
+		}
+		PortraitRenderPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B)
+		{
+			return A.SelectionOrder > B.SelectionOrder;
+		});
+
+		for (auto It = PipCacheByPS.CreateIterator(); It; ++It)
+		{
+			bool bStillPresent = false;
+			for (const FPortraitOrderSignature& Signature : CurrentPortraitSignature)
+			{
+				if (Signature.PlayerState.Get() == It.Key().Get())
+				{
+					bStillPresent = true;
+					break;
+				}
+			}
+			if (!bStillPresent)
+			{
+				It.RemoveCurrent();
+			}
+		}
+	}
+
+	if (&SortedPlayers != &PortraitRenderPlayers)
+	{
+		const bool bWasEmpty = SortedPlayers.Num() == 0;
+		SortedPlayers.Append(PortraitRenderPlayers);
+		if (!bWasEmpty)
+		{
+			SortedPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B)
+			{
+				return A.SelectionOrder > B.SelectionOrder;
+			});
+		}
+	}
 }
 
 // "NOW WATCHING <player>" spectator banner (verbatim port of ANCPlusCTFHUD::
@@ -201,6 +341,40 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 // scoreboard is up. This is the canonical viewed-player banner for both dead
 // players and true spectators; DrawHUD suppresses the stock duplicate only for
 // the frame where this banner can replace it.
+AWipeoutDamageReplicator* AWipeoutHUD::FindDamageReplicator(UWorld* World)
+{
+	if (!World) return nullptr;
+	AUTGameState* CurrentGS = World->GetGameState<AUTGameState>();
+	if (CachedDamageReplicatorWorld.Get() != World
+		|| CachedDamageReplicatorGameState.Get() != CurrentGS)
+	{
+		CachedDamageReplicatorWorld = World;
+		CachedDamageReplicatorGameState = CurrentGS;
+		CachedDamageReplicator = nullptr;
+		NextDamageReplicatorRetryTime = 0.f;
+	}
+	if (CachedDamageReplicator.IsValid())
+	{
+		return CachedDamageReplicator.Get();
+	}
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextDamageReplicatorRetryTime)
+	{
+		return nullptr;
+	}
+	for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
+	{
+		CachedDamageReplicator = *It;
+		NextDamageReplicatorRetryTime = 0.f;
+		return *It;
+	}
+
+	CachedDamageReplicator = nullptr;
+	NextDamageReplicatorRetryTime = Now + 1.f;
+	return nullptr;
+}
+
 void AWipeoutHUD::DrawSpectatorTarget()
 {
 	if (!Canvas || !MediumFont || !SmallFont) return;
@@ -323,6 +497,11 @@ void AWipeoutHUD::DrawHUD()
 		DrawTeamScoreBar(GS);
 		// NOW WATCHING banner — self-guards when not spectating another pawn.
 		DrawSpectatorTarget();
+		if (AWipeoutDamageReplicator* DamageRep = FindDamageReplicator(GetWorld()))
+		{
+			NCClutchOverlay::Draw(this, Canvas,
+				DamageRep->Team0ClutchOverlay, DamageRep->Team1ClutchOverlay);
+		}
 	}
 
 	// Keep portraits up through the round-win window ("RoundCooldown") so the
@@ -380,8 +559,8 @@ void AWipeoutHUD::DrawHUD()
 		float YOffsetBlue = BlueStart.Y;
 		float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split (kept for safety)
 
-		TArray<AUTPlayerState*> LivePlayers;
-		GetPlayerListForIcons(LivePlayers);
+		GetPlayerListForIcons(PortraitRenderPlayers);
+		const TArray<AUTPlayerState*>& LivePlayers = PortraitRenderPlayers;
 
 		// Pre-pass: find the next-to-spawn teammate (lowest RespawnTime > 0)
 		AUTPlayerState* MyPS_ForSpawn = Cast<AUTPlayerState>(UTPlayerOwner ? UTPlayerOwner->PlayerState : nullptr);
@@ -890,8 +1069,18 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	if (!PipFont) PipFont = MediumFont;
 	const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
 
+	// A queued respawn is only real if it fires before sudden death empties
+	// PendingRespawns. Both clocks tick down together, so the verdict is fixed the
+	// moment the player dies: showing a live countdown that can never reach zero in
+	// time just lies to them. Decided client-side from data every viewer already
+	// has (replicated RespawnTime + the round clock), so both teams see the same
+	// thing with no extra replication.
+	const bool bRespawnUnreachable =
+		(PlayerState->RespawnTime > 0.f) &&
+		WipeoutRespawnIsUnreachable(GetWorld()->GetGameState<AUTGameState>(), PlayerState);
+
 	// Layer 5 (Wipeout-specific): Respawn countdown text on dead portraits
-	if (LiveScaling < 1.f && PlayerState->RespawnTime > 0.f)
+	if (LiveScaling < 1.f && PlayerState->RespawnTime > 0.f && !bRespawnUnreachable)
 	{
 		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
 
@@ -918,8 +1107,11 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			FontRenderScale, FontRenderScale, Canvas->DrawColor, true);
 	}
 
-	// Layer 5b: "X" on dead portraits with no respawn (OT / sudden death)
-	if (LiveScaling < 1.f && PlayerState->RespawnTime <= 0.f && PlayerState->bOutOfLives)
+	// Layer 5b: "X" on dead portraits with no respawn — already locked out by
+	// sudden death, OR still counting down but mathematically unable to land
+	// before it starts (see bRespawnUnreachable above).
+	if (LiveScaling < 1.f &&
+		((PlayerState->RespawnTime <= 0.f && PlayerState->bOutOfLives) || bRespawnUnreachable))
 	{
 		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
 		FFontRenderInfo TextRenderInfo;

@@ -67,9 +67,13 @@ namespace
 	bool GOutlineTriedMat = false;
 
 	// Last OutlineModeActive verdict, refreshed once per frame by OutlinePlayers. For per-pawn
-	// per-frame call sites (TeamArenaCharacter::Tick overlay retint) — the full check copies the
-	// side settings (FStrings) + does HSV math, too heavy to run per pawn per frame.
+	// lightweight call sites — the full check copies side settings (FStrings) + does HSV math, so
+	// cache the published verdict and refresh it from OutlinePlayers.
 	bool GOutlineModeActiveCache = false;
+	// The orphan CustomDepth scan is a general recovery sweep for both Force Models and stock TacCom.
+	// Rate-limit the global UObject iteration independently of Force Models' outline setting.
+	TWeakObjectPtr<UWorld> GOutlineSweepWorld;
+	float GNextOutlineSweepTime = 0.f;
 
 	template<typename T>
 	T* ResolveOutlineAsset(const FString& Path, bool& bTriedThisWorld)
@@ -309,13 +313,13 @@ bool NCPlusForceModels::IsEnabled()
 	return C.bEnabled && C.bModels;
 }
 
-// TEMP head-hitbox calibration aid. ECVF_Default (NOT cheat) so it can be toggled on a live server —
-// strip / cheat-gate before final ship (it visualises enemy head positions).
+// TEMP head-hitbox calibration aid. Cheat-gated: it visualises enemy head positions, so live
+// players must never be able to toggle it — PIE / cheat-enabled servers only.
 static TAutoConsoleVariable<int32> CVarNCPDebugHeads(
 	TEXT("ncp.DebugHeads"), 0,
 	TEXT("NetcodePlus: draw the capsule-relative headshot sphere (GREEN = what the server validates) and the ")
 	TEXT("mesh head bone (RED cross = the visible head) for every other pawn, client-side. 1=on."),
-	ECVF_Default);
+	ECVF_Cheat);
 
 void NCPlusForceModels::DrawHeadDebug(UCanvas* Canvas, APlayerController* PC)
 {
@@ -676,9 +680,22 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// Intro-lineup pawns are destroyed alive. Stock character/weapon-attachment teardown does not
 	// explicitly unregister their dynamically duplicated CustomDepth meshes, so an already leaked
 	// silhouette can remain in the scene after its actor disappears. Sweep only the exact UT outline
-	// signature, only when its owner is gone, and only on the existing 4 Hz slow tick.
-	if (bSlowTick)
+	// signature and only when its owner is gone. TacCom can create these independently of Force Models,
+	// so this 1 Hz recovery scan must remain outside the feature-disabled fast path below.
+	if (GOutlineSweepWorld.Get() != World)
 	{
+		GOutlineSweepWorld = World;
+		GNextOutlineSweepTime = 0.f;
+	}
+	const float Now = World->GetTimeSeconds();
+	if (Now + 1.f < GNextOutlineSweepTime)
+	{
+		GNextOutlineSweepTime = 0.f;
+	}
+	const bool bSweepDue = bSlowTick && Now >= GNextOutlineSweepTime;
+	if (bSweepDue)
+	{
+		GNextOutlineSweepTime = Now + 1.f;
 		for (TObjectIterator<USkeletalMeshComponent> It; It; ++It)
 		{
 			USkeletalMeshComponent* const DepthMesh = *It;
@@ -699,18 +716,33 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 		}
 	}
 
-	// Refresh the per-frame gate cache BEFORE any early-out so the tint call sites always read a
-	// current verdict (TacCom/intermission freeze the outline STATE, not the mode decision).
-	// A verdict FLIP (menu save, style/colour change, viewer team switch under Team/Enemy styles)
-	// must re-tint every body — outline-mode NEUTRAL <-> normal super-tint — or pawns keep the old
-	// look until their next reapply event.
+	const FNCPlusForceModelsConfig& C = Get();
+	const bool bConfigured = C.bEnabled && C.bOutline;
+	if (!bConfigured && !GOutlineModeActiveCache && GOutlined.Num() == 0)
 	{
-		const bool bGate = OutlineModeActive(World);
-		if (bGate != GOutlineModeActiveCache)
+		return;
+	}
+
+	// Refresh the gate before doing any Force Models outline work. A verdict flip must re-tint every
+	// body or pawns retain the previous outline-mode tint until their next unrelated reapply event.
+	const bool bGate = OutlineModeActive(World);
+	if (bGate != GOutlineModeActiveCache)
+	{
+		GOutlineModeActiveCache = bGate;
+		ReapplyAll(World);
+	}
+
+	// A disabled verdict has already been published to tint call sites above. Restore any state this
+	// feature owned before returning; TacCom/intermission early-outs below apply only while active.
+	if (!bGate)
+	{
+		for (const TPair<TWeakObjectPtr<AUTCharacter>, bool>& Prev : GOutlined)
 		{
-			GOutlineModeActiveCache = bGate;
-			ReapplyAll(World);
+			AUTCharacter* const Ch = Prev.Key.Get();
+			if (Prev.Value && Ch && !Ch->IsDead()) { Ch->SetOutlineLocal(false); }
 		}
+		GOutlined.Reset();
+		return;
 	}
 
 	// Authoring paths (once) + per-world load-attempt re-arm, then keep the camera manager pointed at
@@ -749,8 +781,6 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 		if (GS->IsMatchIntermission()) { return; }
 	}
 
-	const FNCPlusForceModelsConfig& C = Get();
-	const bool bWant = GOutlineModeActiveCache;   // computed above this frame
 	const int32 ViewerTeam = GetViewerTeam(World);
 
 	// Push the per-team outline colours into MPC_NCPOutline (slow tick) so a matching M_OutlinePP renders
@@ -758,7 +788,7 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// until that collection asset exists. Colours are by ABSOLUTE team; NB our LOS outline's stencil
 	// carries the +128 unoccluded bit, so the material's team decode must mask it (stencil & 0x7F:
 	// 129 -> Team0, 130 -> Team1).
-	if (bWant && bSlowTick)
+	if (bSlowTick)
 	{
 		// Resolved FRESH each slow tick (FindObject = cheap hash lookup, silent): a raw static cache
 		// dangles once GC purges the collection on map travel (it's only world/material-referenced) and
@@ -784,7 +814,7 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 
 	// The LOS traces need a viewer eye; during a map transition the camera manager can briefly be
 	// missing — freeze rather than mass-clear (states recover next frame).
-	if (bWant && (!LocalPC || !LocalPC->PlayerCameraManager)) { return; }
+	if (!LocalPC || !LocalPC->PlayerCameraManager) { return; }
 	const FVector ViewLoc = (LocalPC && LocalPC->PlayerCameraManager)
 		? LocalPC->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
 
@@ -792,7 +822,6 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	const APawn* const LocalPawn = LocalPC ? LocalPC->GetPawn() : nullptr;
 
 	TMap<TWeakObjectPtr<AUTCharacter>, bool> Current;
-	if (bWant)
 	{
 		FCollisionQueryParams TraceParams(FName(TEXT("NCPOutlineLOS")), /*bTraceComplex*/ true, LocalPawn);
 		for (TActorIterator<AUTCharacter> It(World); It; ++It)

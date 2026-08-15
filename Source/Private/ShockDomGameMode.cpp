@@ -1,4 +1,5 @@
 #include "ShockDomGameMode.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
 #include "NCConcedeVote.h"
 #include "UnrealTournament.h"
@@ -111,6 +112,7 @@ AShockDomGameMode::AShockDomGameMode(const FObjectInitializer& ObjectInitializer
 void AShockDomGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Parse URL options
 	int32 URLGoalScore = UGameplayStatics::GetIntOption(Options, TEXT("GoalScore"), -1);
@@ -140,11 +142,19 @@ void AShockDomGameMode::BeginPlay()
 void AShockDomGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
 	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
 	NCConcede::SpawnFor(NewPlayer);
+}
+
+bool AShockDomGameMode::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 

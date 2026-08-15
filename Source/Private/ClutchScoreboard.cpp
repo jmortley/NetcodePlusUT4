@@ -1,5 +1,6 @@
 #include "ClutchScoreboard.h"
 #include "ClutchRoundState.h"
+#include "NCPlusScoreboardReady.h"
 #include "UTPlayerState.h"
 #include "EngineUtils.h"
 
@@ -22,6 +23,24 @@ UClutchScoreboard::UClutchScoreboard(const FObjectInitializer& ObjectInitializer
 	ColumnHeaderScoreX = 0.54f;
 	ColumnHeaderDeathsX = 0.70f;
 	ColumnHeaderPingX = 0.965f;
+}
+
+void UClutchScoreboard::DrawReadyText(AUTPlayerState* PlayerState,
+	float XOffset, float YOffset, float Width)
+{
+	FText PlayerReady;
+	if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
+		TeamSwapText, PlayerReady))
+	{
+		Super::DrawReadyText(PlayerState, XOffset, YOffset, Width);
+		return;
+	}
+
+	ReadyColor = FLinearColor::White;
+	ReadyScale = 1.f;
+	DrawText(PlayerReady, XOffset + ScaledCellWidth * ColumnHeaderScoreX,
+		YOffset + ColumnY, UTHUDOwner->SmallFont, ReadyScale * RenderScale, 1.f,
+		ReadyColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
 
 
@@ -142,8 +161,34 @@ FLinearColor UClutchScoreboard::GetPlayerColorFor(AUTPlayerState* PlayerState) c
 
 AClutchRoundState* UClutchScoreboard::ResolveClutchState() const
 {
-	for (TActorIterator<AClutchRoundState> It(GetWorld()); It; ++It)
+	UWorld* World = GetWorld();
+	if (!World)
 	{
+		return nullptr;
+	}
+
+	if (CachedClutchStateWorld.Get() != World)
+	{
+		CachedClutchStateWorld = World;
+		CachedClutchState.Reset();
+		NextClutchStateSearchTime = 0.f;
+	}
+	if (CachedClutchState.IsValid() && CachedClutchState->GetWorld() == World)
+	{
+		return CachedClutchState.Get();
+	}
+	CachedClutchState.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextClutchStateSearchTime)
+	{
+		return nullptr;
+	}
+	NextClutchStateSearchTime = Now + 1.f;
+	for (TActorIterator<AClutchRoundState> It(World); It; ++It)
+	{
+		CachedClutchState = *It;
+		NextClutchStateSearchTime = 0.f;
 		return *It;
 	}
 	return nullptr;

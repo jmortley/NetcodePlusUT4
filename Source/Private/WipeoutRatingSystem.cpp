@@ -715,6 +715,33 @@ FString FWipeoutRatingSystem::BuildResultPayload(UWorld* World, const FNCWipeout
 	}
 	Writer->WriteArrayEnd();
 
+	// ---- LMS holds (additive; ut4stats stores these in their own table) ----
+	// wipeout_clutch_version is emitted even when the array is empty so a
+	// zero-hold match is distinguishable from an old-build hub that never sent
+	// the keys. Bots are filtered at capture (a hold requires a valid
+	// UniqueId); the emptiness check here is belt-and-suspenders only.
+	Writer->WriteValue(TEXT("wipeout_clutch_version"), 1);
+	Writer->WriteArrayStart(TEXT("wipeout_clutches"));
+	for (const FNCWipeoutClutchInput& C : In.Clutches)
+	{
+		if (C.UniqueId.IsEmpty()) continue;
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("round_index"),         C.RoundIndex);
+		Writer->WriteValue(TEXT("id"),                  C.UniqueId);
+		Writer->WriteValue(TEXT("team"),                C.TeamIndex);
+		Writer->WriteValue(TEXT("enemies_at_start"),    C.EnemiesAtStart);
+		Writer->WriteValue(TEXT("outcome"),             C.Outcome);
+		Writer->WriteValue(TEXT("direct_kills"),        C.DirectKills);
+		Writer->WriteValue(TEXT("teammates_respawned"), C.TeammatesRespawned);
+		Writer->WriteValue(TEXT("clean_finish"),        C.bCleanFinish);
+		Writer->WriteValue(TEXT("sudden_death"),        C.bSuddenDeath);
+		Writer->WriteValue(TEXT("hold_seconds"),        static_cast<double>(C.HoldSeconds));
+		Writer->WriteValue(TEXT("start_time"),          static_cast<double>(C.StartTime));
+		Writer->WriteValue(TEXT("end_time"),            static_cast<double>(C.EndTime));
+		Writer->WriteObjectEnd();
+	}
+	Writer->WriteArrayEnd();
+
 	Writer->WriteObjectEnd();
 	Writer->Close();
 

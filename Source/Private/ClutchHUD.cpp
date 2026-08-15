@@ -12,6 +12,9 @@
 #include "Engine/Canvas.h"
 #include "Engine/Texture2D.h"
 #include "EngineUtils.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
+#include "UObject/ConstructorHelpers.h"
 #if !UE_SERVER
 #include "Interfaces/IImageWrapper.h"
 #include "Interfaces/IImageWrapperModule.h"
@@ -196,6 +199,7 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	bShouldDrawPortraits = false;
 	HudWidgetClasses.Remove(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ClutchScoreboard"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 
 	bTriedLoadRecoveredHUDTextures = false;
 	bAttackOrderInputActive = false;
@@ -205,6 +209,13 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	bAttackOrderSubmitted = false;
 	bEliminatedCameraForced = false;
 	bSavedSpectateBehindView = false;
+	PoleAudioRoundNumber = INDEX_NONE;
+	LastPoleCountdownSecond = INDEX_NONE;
+	bPlayedPoleUnlockedAudio = false;
+	ObservedArmorRoundNumber = INDEX_NONE;
+	LastObservedAttackerHits = INDEX_NONE;
+	AttackerHitFlashEndTime = -1000.0f;
+	ObservedArmorAttacker.Reset();
 	AttackOrderSubmitTime = -1000.0f;
 	DraftAttackOrderTeam = AClutchRoundState::NoTeam;
 	LegacyCircleTexture = nullptr;
@@ -222,12 +233,54 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	LegacyDefendRailFrontTexture = nullptr;
 	LegacyDefendProgressTexture = nullptr;
 	LegacyTopFrameTexture = nullptr;
+	PoleUnlockedSound = nullptr;
+	PoleCountdownSounds.SetNumZeroed(6);
+
+	if (!IsRunningDedicatedServer())
+	{
+		// Use the same stock countdown waves as NetcodePlus automatic pause. They
+		// bypass the announcer queue so combat announcements cannot swallow the
+		// short, objective-critical unlock warning.
+		static ConstructorHelpers::FObjectFinder<USoundBase> CD1(
+			TEXT("SoundWave'/Game/RestrictedAssets/Audio/AnnouncerStatus/A_AnnouncerF_CD1.A_AnnouncerF_CD1'"));
+		static ConstructorHelpers::FObjectFinder<USoundBase> CD2(
+			TEXT("SoundWave'/Game/RestrictedAssets/Audio/AnnouncerStatus/A_AnnouncerF_CD2.A_AnnouncerF_CD2'"));
+		static ConstructorHelpers::FObjectFinder<USoundBase> CD3(
+			TEXT("SoundWave'/Game/RestrictedAssets/Audio/AnnouncerStatus/A_AnnouncerF_CD3.A_AnnouncerF_CD3'"));
+		static ConstructorHelpers::FObjectFinder<USoundBase> CD4(
+			TEXT("SoundWave'/Game/RestrictedAssets/Audio/AnnouncerStatus/A_AnnouncerF_CD4.A_AnnouncerF_CD4'"));
+		static ConstructorHelpers::FObjectFinder<USoundBase> CD5(
+			TEXT("SoundWave'/Game/RestrictedAssets/Audio/AnnouncerStatus/A_AnnouncerF_CD5.A_AnnouncerF_CD5'"));
+		static ConstructorHelpers::FObjectFinder<USoundBase> Capture(
+			TEXT("SoundWave'/Game/RestrictedAssets/Audio/AnnouncerStatus/A_AnnouncerF_Capture.A_AnnouncerF_Capture'"));
+		PoleCountdownSounds[1] = CD1.Object;
+		PoleCountdownSounds[2] = CD2.Object;
+		PoleCountdownSounds[3] = CD3.Object;
+		PoleCountdownSounds[4] = CD4.Object;
+		PoleCountdownSounds[5] = CD5.Object;
+		PoleUnlockedSound = Capture.Object;
+	}
+}
+
+
+void AClutchHUD::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Keep synchronous package lookup / PNG decode / texture upload out of the
+	// first HUD Draw. The guarded calls in the draw paths remain as fallbacks.
+	if (!IsRunningDedicatedServer())
+	{
+		LoadRecoveredHUDTextures();
+	}
 }
 
 
 void AClutchHUD::DrawHUD()
 {
 	AClutchRoundState* State = ResolveClutchState();
+	UpdatePoleAudio(State);
+	UpdateAttackerArmorFeedback(State);
 	const bool bOrderSelection = State
 		&& State->Phase == EClutchRoundPhase::OrderSelection;
 	if (bOrderSelection && bShowScoresWhileDead)
@@ -269,6 +322,87 @@ void AClutchHUD::DrawHUD()
 		DrawCapturePanel(State);
 		DrawRolePanel(State);
 	}
+}
+
+
+void AClutchHUD::UpdatePoleAudio(AClutchRoundState* State)
+{
+	if (!State || !GetWorld() || !State->IsGameplayPhase())
+	{
+		LastPoleCountdownSecond = INDEX_NONE;
+		return;
+	}
+
+	if (PoleAudioRoundNumber != State->RoundNumber)
+	{
+		PoleAudioRoundNumber = State->RoundNumber;
+		LastPoleCountdownSecond = INDEX_NONE;
+		bPlayedPoleUnlockedAudio = false;
+	}
+
+	if (State->Phase == EClutchRoundPhase::Combat)
+	{
+		AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
+		const float Now = GameState
+			? GameState->GetServerWorldTimeSeconds()
+			: GetWorld()->GetTimeSeconds();
+		const int32 Remaining = FMath::Max(0,
+			FMath::CeilToInt(State->PoleUnlockServerTime - Now));
+		if (Remaining >= 1 && Remaining <= 5
+			&& Remaining != LastPoleCountdownSecond
+			&& PoleCountdownSounds.IsValidIndex(Remaining)
+			&& PoleCountdownSounds[Remaining])
+		{
+			UGameplayStatics::PlaySound2D(GetWorld(), PoleCountdownSounds[Remaining]);
+		}
+		LastPoleCountdownSecond = Remaining;
+		return;
+	}
+
+	if (State->Phase == EClutchRoundPhase::Capture && !bPlayedPoleUnlockedAudio)
+	{
+		bPlayedPoleUnlockedAudio = true;
+		if (PoleUnlockedSound)
+		{
+			UGameplayStatics::PlaySound2D(GetWorld(), PoleUnlockedSound);
+		}
+	}
+}
+
+
+void AClutchHUD::UpdateAttackerArmorFeedback(AClutchRoundState* State)
+{
+	if (!State || !GetWorld() || !State->IsGameplayPhase() || !State->ActiveAttacker)
+	{
+		ObservedArmorAttacker.Reset();
+		ObservedArmorRoundNumber = INDEX_NONE;
+		LastObservedAttackerHits = INDEX_NONE;
+		return;
+	}
+
+	const FClutchRosterEntry* AttackerEntry = State->FindEntry(State->ActiveAttacker);
+	if (!AttackerEntry)
+	{
+		return;
+	}
+
+	const int32 HitsTaken = static_cast<int32>(AttackerEntry->HitsTaken);
+	if (ObservedArmorAttacker.Get() != State->ActiveAttacker
+		|| ObservedArmorRoundNumber != State->RoundNumber
+		|| LastObservedAttackerHits == INDEX_NONE)
+	{
+		ObservedArmorAttacker = State->ActiveAttacker;
+		ObservedArmorRoundNumber = State->RoundNumber;
+		LastObservedAttackerHits = HitsTaken;
+		AttackerHitFlashEndTime = -1000.0f;
+		return;
+	}
+
+	if (HitsTaken > LastObservedAttackerHits)
+	{
+		AttackerHitFlashEndTime = GetWorld()->GetTimeSeconds() + 0.75f;
+	}
+	LastObservedAttackerHits = HitsTaken;
 }
 
 
@@ -1079,34 +1213,38 @@ void AClutchHUD::DrawDefenderAttackerPanel(AClutchRoundState* State)
 		return;
 	}
 
-	AUTPlayerState* OwnState = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
-	const FClutchRosterEntry* OwnEntry = OwnState ? State->FindEntry(OwnState) : nullptr;
 	const FClutchRosterEntry* AttackerEntry = State->FindEntry(State->ActiveAttacker);
-	if (!OwnState || OwnState->bOnlySpectator || !OwnEntry || !AttackerEntry
-		|| OwnEntry->PlayerRole != EClutchRole::Defender
-		|| (OwnEntry->PlayerStatus != EClutchStatus::Active
-			&& OwnEntry->PlayerStatus != EClutchStatus::Eliminated))
+	if (!AttackerEntry)
 	{
 		return;
 	}
 
+	// The attacker armor is round-critical shared information. Show this panel to
+	// attackers, defenders, benched teammates, eliminated players and true specs.
+	const bool bHitFlash = GetWorld()
+		&& GetWorld()->GetTimeSeconds() < AttackerHitFlashEndTime;
 	const float Scale = static_cast<float>(Canvas->SizeY) / 1080.0f;
 	const float PanelWidth = 340.0f * Scale;
 	const float PanelHeight = 45.0f * Scale;
 	const float PanelX = (Canvas->ClipX - PanelWidth) * 0.5f;
 	const float PanelY = Canvas->ClipY - 252.0f * Scale;
-	const FLinearColor TeamAccent = State->AttackingTeamIndex == 0
+	const FLinearColor TeamAccent = bHitFlash
+		? FLinearColor(1.0f, 0.42f, 0.04f, 1.0f)
+		: State->AttackingTeamIndex == 0
 		? FLinearColor(0.95f, 0.08f, 0.025f, 0.96f)
 		: FLinearColor(0.20f, 0.25f, 1.0f, 0.96f);
 	DrawSolidTile(Canvas, PanelX, PanelY, PanelWidth, PanelHeight,
-		FLinearColor(0.008f, 0.018f, 0.035f, 0.88f));
+		bHitFlash
+			? FLinearColor(0.30f, 0.055f, 0.01f, 0.94f)
+			: FLinearColor(0.008f, 0.018f, 0.035f, 0.88f));
 	DrawSolidTile(Canvas, PanelX, PanelY, 4.0f * Scale, PanelHeight, TeamAccent);
 
 	const FString AttackerName = State->ActiveAttacker->PlayerName.IsEmpty()
 		? AttackerEntry->PlayerNameFallback
 		: State->ActiveAttacker->PlayerName;
 	DrawCenteredCanvasText(Canvas, SmallFont,
-		FString::Printf(TEXT("ATTACKER  %s"), *AttackerName),
+		FString::Printf(bHitFlash ? TEXT("ATTACKER HIT  %s") : TEXT("ATTACKER  %s"),
+			*AttackerName),
 		Canvas->ClipX * 0.5f, PanelY + 4.0f * Scale,
 		0.58f * Scale, FColor::White);
 
@@ -1120,11 +1258,14 @@ void AClutchHUD::DrawDefenderAttackerPanel(AClutchRoundState* State)
 	const float PipY = PanelY + 29.0f * Scale;
 	for (int32 Index = 0; Index < PipCount; ++Index)
 	{
+		const bool bJustLost = bHitFlash && Index == Remaining;
 		DrawSolidTile(Canvas, FirstPipX + Index * (PipWidth + PipGap), PipY,
 			PipWidth, PipHeight,
 			Index < Remaining
 				? FLinearColor(0.36f, 1.0f, 0.28f, 0.98f)
-				: FLinearColor(0.18f, 0.18f, 0.18f, 0.82f));
+				: bJustLost
+					? FLinearColor(1.0f, 0.18f, 0.03f, 1.0f)
+					: FLinearColor(0.18f, 0.18f, 0.18f, 0.82f));
 	}
 }
 
@@ -1349,17 +1490,38 @@ void AClutchHUD::DrawCapturePanel(AClutchRoundState* State)
 
 	FString Label;
 	FLinearColor Fill(1.0f, 0.55f, 0.08f, 1.0f);
+	FColor LabelColor = FColor::White;
+	int32 UnlockRemaining = INDEX_NONE;
 	if (State->Phase == EClutchRoundPhase::Combat)
 	{
-		const int32 UnlockRemaining = FMath::Max(0,
+		UnlockRemaining = FMath::Max(0,
 			FMath::CeilToInt(State->PoleUnlockServerTime - Now));
 		Label = FString::Printf(TEXT("POLE UNLOCKS IN %d"), UnlockRemaining);
 		Fill = FLinearColor(0.35f, 0.38f, 0.43f, 1.0f);
 	}
 	else
 	{
-		Label = FString::Printf(TEXT("CAPTURE %d%%"),
-			FMath::RoundToInt(State->PoleProgress));
+		const int32 Percent = FMath::RoundToInt(State->PoleProgress);
+		switch (State->PoleActivity)
+		{
+		case EClutchPoleActivity::Capturing:
+			Label = FString::Printf(TEXT("CAPTURING %d%%"), Percent);
+			Fill = FLinearColor(0.20f, 0.95f, 0.28f, 1.0f);
+			break;
+		case EClutchPoleActivity::Contested:
+			Label = FString::Printf(TEXT("CONTESTED %d%%"), Percent);
+			Fill = FLinearColor(1.0f, 0.72f, 0.08f, 1.0f);
+			LabelColor = FColor(255, 210, 70);
+			break;
+		case EClutchPoleActivity::Decaying:
+			Label = FString::Printf(TEXT("DECAYING %d%%"), Percent);
+			Fill = FLinearColor(1.0f, 0.18f, 0.06f, 1.0f);
+			LabelColor = FColor(255, 95, 70);
+			break;
+		default:
+			Label = FString::Printf(TEXT("POLE OPEN %d%%"), Percent);
+			break;
+		}
 	}
 
 	Canvas->SetLinearDrawColor(FLinearColor(0.01f, 0.015f, 0.025f, 0.88f));
@@ -1373,5 +1535,14 @@ void AClutchHUD::DrawCapturePanel(AClutchRoundState* State)
 	Canvas->DrawTile(Canvas->DefaultTexture, BarX, BarY,
 		BarWidth * Progress, BarHeight, 0, 0, 1, 1);
 	DrawCenteredCanvasText(Canvas, SmallFont, Label, Canvas->ClipX * 0.5f,
-		BarY - 17.0f * RenderScale, 0.52f * RenderScale, FColor::White);
+		BarY - 17.0f * RenderScale, 0.52f * RenderScale, LabelColor);
+
+	if (UnlockRemaining >= 1 && UnlockRemaining <= 5)
+	{
+		const float Pulse = 1.0f + 0.06f * FMath::Sin(Now * 8.0f);
+		DrawCenteredCanvasText(Canvas, MediumFont ? MediumFont : SmallFont,
+			FString::Printf(TEXT("POLE OPENS IN %d"), UnlockRemaining),
+			Canvas->ClipX * 0.5f, BarY - 62.0f * RenderScale,
+			0.82f * RenderScale * Pulse, FColor(255, 210, 70));
+	}
 }

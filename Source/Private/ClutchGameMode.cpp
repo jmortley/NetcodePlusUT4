@@ -3,6 +3,7 @@
 #include "ClutchOrderMutator.h"
 #include "ClutchPoleVisual.h"
 #include "ClutchRoundState.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
@@ -204,7 +205,7 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 	PoleCaptureRadius = 180.0f;
 	PoleCaptureHalfHeight = 160.0f;
 	PoleActorTag = FName(TEXT("ClutchPole"));
-	bUseRecoveredPoleVisual = false; // Recovered pole mesh not shipped yet — use the map's own marker
+	bUseRecoveredPoleVisual = true;
 	IntermissionSeconds = 5.0f;
 	AttackOrderSelectionSeconds = 20.0f;
 	AttackOrderReviewSeconds = 4.0f;
@@ -250,12 +251,17 @@ AClutchGameMode::AClutchGameMode(const FObjectInitializer& ObjectInitializer)
 void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 	AddMutatorClass(AClutchOrderMutator::StaticClass());
 
 	// Existing NC-ClutchGM Blueprint assets may have serialized the old UTHUD
 	// parent default. Enforce the native Clutch HUD before players log in so PIE
 	// and cooked servers both initialize the correct scoreboard/widget stack.
 	HUDClass = AClutchHUD::StaticClass();
+	// The recovered pole was previously disabled while its mesh was unavailable.
+	// Override that stale value in existing Blueprint children now that the Clutch
+	// pak supplies the mesh under /Game/NetcodePlusOptional.
+	bUseRecoveredPoleVisual = true;
 	// Likewise, older Blueprint children may have serialized the former 3v3-only
 	// lobby gate. Clutch still supports six players, but two are enough to play.
 	bRequireFull = false;
@@ -367,6 +373,7 @@ void AClutchGameMode::InitGame(const FString& MapName, const FString& Options, F
 void AClutchGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 	NCPlusVersionGate::SpawnFor(NewPlayer);
 
 	if (!HasAuthority() || !NewPlayer)
@@ -1239,6 +1246,14 @@ void AClutchGameMode::FinishAttackOrderSelection()
 	GetWorldTimerManager().SetTimer(
 		AttackOrderSelectionTimerHandle, this, &AClutchGameMode::BeginNextRound,
 		ReviewSeconds, false);
+}
+
+
+bool AClutchGameMode::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 
@@ -2687,6 +2702,8 @@ void AClutchGameMode::UpdatePole(float DeltaSeconds)
 		PoleDecaySeconds);
 
 	ClutchState->SetPoleProgress(NewProgress);
+	ClutchState->SetPoleActivity(AClutchRoundState::ResolvePoleActivity(
+		bAttackerPresent, bDefenderPresent, NewProgress));
 	if (NewProgress >= 100.0f)
 	{
 		bPoleCaptured = true;

@@ -22,6 +22,16 @@ enum class EClutchRoundPhase : uint8
 	MatchEnd
 };
 
+/** What the authoritative pole occupancy is doing to capture progress. */
+UENUM(BlueprintType)
+enum class EClutchPoleActivity : uint8
+{
+	Idle,
+	Capturing,
+	Contested,
+	Decaying
+};
+
 /** A player's gameplay role for the current round. */
 UENUM(BlueprintType)
 enum class EClutchRole : uint8
@@ -161,6 +171,10 @@ public:
 	UPROPERTY(Replicated, Transient, BlueprintReadOnly, Category = "Clutch|Objective")
 	float PoleProgress;
 
+	/** Replicated reason the pole meter is moving or paused. */
+	UPROPERTY(Replicated, Transient, BlueprintReadOnly, Category = "Clutch|Objective")
+	EClutchPoleActivity PoleActivity;
+
 	UPROPERTY(Replicated, Transient, BlueprintReadOnly, Category = "Clutch|Rules")
 	int32 ScoreGoal;
 
@@ -262,6 +276,7 @@ public:
 
 	bool SetPhase(EClutchRoundPhase NewPhase);
 	bool SetPoleProgress(float NewProgress);
+	bool SetPoleActivity(EClutchPoleActivity NewActivity);
 	bool FinishRound(uint8 WinningTeamIndex, FName EndReason, bool bMatchEnded);
 
 	bool UpsertPlayer(AUTPlayerState* PlayerState, uint8 TeamIndex, uint8 RosterSlot,
@@ -313,6 +328,10 @@ public:
 	static float AdvancePoleProgress(float CurrentProgress, float DeltaSeconds,
 		bool bAttackerPresent, bool bDefenderPresent,
 		float CaptureSeconds, float DecaySeconds);
+
+	/** Resolves the client-facing pole status after the meter has advanced. */
+	static EClutchPoleActivity ResolvePoleActivity(bool bAttackerPresent,
+		bool bDefenderPresent, float NewProgress);
 
 	/**
 	 * Advances a fixed regenerating weapon magazine for one server step. Returns

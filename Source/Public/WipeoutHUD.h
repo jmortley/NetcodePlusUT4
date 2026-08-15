@@ -5,6 +5,9 @@
 #include "UTHUD.h"
 #include "WipeoutHUD.generated.h"
 
+class AWipeoutDamageReplicator;
+class AUTGameState;
+
 UCLASS()
 class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 {
@@ -55,9 +58,30 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void NotifyMatchStateChange() override;
 
 private:
+	AWipeoutDamageReplicator* FindDamageReplicator(UWorld* World);
+	TWeakObjectPtr<UWorld> CachedDamageReplicatorWorld;
+	TWeakObjectPtr<AUTGameState> CachedDamageReplicatorGameState;
+	TWeakObjectPtr<AWipeoutDamageReplicator> CachedDamageReplicator;
+	float NextDamageReplicatorRetryTime = 0.f;
+
 	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
 	float PostMatchScreenshotStable = -1.f;
+
+	/** Portrait ordering only changes with roster/scorer/spectating-order state.
+	 *  Keep that order between frames while the draw path still reads volatile
+	 *  pawn, health, armor, and respawn state every frame. */
+	struct FPortraitOrderSignature
+	{
+		TWeakObjectPtr<AUTPlayerState> PlayerState;
+		uint8 TeamNum = 255;
+		int32 SortKey = 0;
+	};
+	TArray<AUTPlayerState*> PortraitRenderPlayers;
+	TArray<FPortraitOrderSignature> CurrentPortraitSignature;
+	TArray<FPortraitOrderSignature> CachedPortraitSignature;
+	TWeakObjectPtr<UWorld> CachedPortraitWorld;
+	TWeakObjectPtr<AUTGameState> CachedPortraitGameState;
 
 	/** Per-PlayerState HP readout cache for the portrait strip: last-rendered FText +
 	 *  measured extents keyed on (HP, armor, font), so an unchanged value skips the
