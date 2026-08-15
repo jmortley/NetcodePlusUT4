@@ -53,6 +53,10 @@ struct FNCHUDEditorRow
 
 	// Optional "Use Team Color" checkbox (portraits + scorebar).
 	bool bHasTeamColorToggle = false;
+
+	// Optional "Show in Instagib" checkbox (hp_armor). The HP/armor widget hides
+	// itself in instagib matches by default; this opts back in.
+	bool bHasInstagibToggle = false;
 };
 
 class SNCPlusHUDEditor : public SCompoundWidget
@@ -157,6 +161,10 @@ private:
 	ECheckBoxState GetTeamColorState(FName Alias) const;
 	void OnTeamColorChanged(ECheckBoxState NewState, FName Alias);
 
+	// Show-in-instagib toggle (hp_armor; extras key "show_in_instagib", default false)
+	ECheckBoxState GetShowInInstagibState(FName Alias) const;
+	void OnShowInInstagibChanged(ECheckBoxState NewState, FName Alias);
+
 	// Stock-vs-NCPlus bottom-bar toggle (global; moved here from the iCTF settings tab).
 	// Applies immediately: persists [NetcodePlus] StockBottomBar + live-swaps the widget family.
 	ECheckBoxState GetStockBottomBarState() const;
@@ -166,6 +174,10 @@ private:
 	// Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
 	ECheckBoxState GetStockTeamPanelState() const;
 	void OnStockTeamPanelChanged(ECheckBoxState NewState);
+	EVisibility GetAbsoluteElimTeamPanelVisibility() const;
+	ECheckBoxState GetAbsoluteElimTeamPanelState() const;
+	void OnAbsoluteElimTeamPanelChanged(ECheckBoxState NewState);
+	bool IsTeamColorControlEnabled(FName Alias) const;
 
 	// Scoreboard background opacity (0.05..1.0). Global; persists [NetcodePlus] ScoreboardOpacity.
 	TOptional<float> GetScoreboardOpacityValue() const;

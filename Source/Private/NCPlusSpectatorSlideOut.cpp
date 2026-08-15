@@ -17,6 +17,9 @@ UNCPlusSpectatorSlideOut::UNCPlusSpectatorSlideOut(const FObjectInitializer& Obj
 {
 	WeaponListMode = ENCSlideOutWeaponMode::Passthrough;
 	bSuppressRosterDraw = false;
+	InstagibFallbackRow.Label = NSLOCTEXT("NCSlideOut", "InstagibRifle", "Instagib Rifle");
+	InstagibFallbackRow.HitsStat = NAME_InstagibHits;
+	InstagibFallbackRow.ShotsStat = NAME_InstagibShots;
 }
 
 void UNCPlusSpectatorSlideOut::Draw_Implementation(float DeltaTime)
@@ -61,22 +64,17 @@ void UNCPlusSpectatorSlideOut::DrawWeaponStats(AUTPlayerState* PS, float DeltaTi
 		return;
 	}
 
-	TArray<FNCSlideRow> Rows;
-	BuildLoadoutRows(PS, Rows);
+	const FString PlayerId = PS->UniqueId.IsValid()
+		? PS->UniqueId.ToString()
+		: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+	const TArray<FNCSlideRow>* Rows = GetLoadoutRows(PS, PlayerId);
+	const bool bUseInstagibFallback = (!Rows || Rows->Num() == 0)
+		&& WeaponListMode == ENCSlideOutWeaponMode::CTFAuto;
 
 	// Instagib safety: if we never saw a pawn for this player (joined dead /
 	// pawn not yet replicated) the inventory read is empty — still show the one
 	// known accuracy weapon so the iCTF panel is never blank.
-	if (Rows.Num() == 0 && WeaponListMode == ENCSlideOutWeaponMode::CTFAuto)
-	{
-		FNCSlideRow R;
-		R.Label     = NSLOCTEXT("NCSlideOut", "InstagibRifle", "Instagib Rifle");
-		R.HitsStat  = NAME_InstagibHits;
-		R.ShotsStat = NAME_InstagibShots;
-		Rows.Add(R);
-	}
-
-	if (Rows.Num() == 0)
+	if ((!Rows || Rows->Num() == 0) && !bUseInstagibFallback)
 	{
 		// Elim player we never saw alive — nothing meaningful to list.
 		return;
@@ -84,41 +82,63 @@ void UNCPlusSpectatorSlideOut::DrawWeaponStats(AUTPlayerState* PS, float DeltaTi
 
 	DrawAccuracyHeader(XOffset, YPos, ScoreWidth, StatsFontInfo);
 
-	for (const FNCSlideRow& R : Rows)
+	auto DrawRow = [&](const FNCSlideRow& R)
 	{
 		int32 Hits = 0;
 		int32 Shots = 0;
-		ResolveAccuracy(PS, R.HitsStat, R.ShotsStat, Hits, Shots);
+		ResolveAccuracy(PS, PlayerId, R.HitsStat, R.ShotsStat, Hits, Shots);
 		const float Accuracy = (Shots > 0) ? FMath::Min(100.f * float(Hits) / float(Shots), 100.f) : 0.f;
 		// Kills/Deaths passed as -1 -> DrawWeaponStatsLine suppresses those two
 		// columns (per-weapon kills/deaths are not replicated to spectators).
 		DrawWeaponStatsLine(R.Label, -1, -1, Shots, Accuracy, DeltaTime, XOffset, YPos, StatsFontInfo, ScoreWidth, false);
+	};
+	if (bUseInstagibFallback)
+	{
+		DrawRow(InstagibFallbackRow);
+	}
+	else
+	{
+		for (const FNCSlideRow& R : *Rows)
+		{
+			DrawRow(R);
+		}
 	}
 }
 
-void UNCPlusSpectatorSlideOut::BuildLoadoutRows(AUTPlayerState* PS, TArray<FNCSlideRow>& OutRows)
+const TArray<UNCPlusSpectatorSlideOut::FNCSlideRow>* UNCPlusSpectatorSlideOut::GetLoadoutRows(AUTPlayerState* PS, const FString& PlayerId)
 {
-	OutRows.Reset();
 	if (!PS)
 	{
-		return;
+		return nullptr;
+	}
+	UWorld* World = IsValid(UTHUDOwner) ? UTHUDOwner->GetWorld() : nullptr;
+	if (!World)
+	{
+		return nullptr;
+	}
+	if (CachedLoadoutWorld.Get() != World)
+	{
+		CachedLoadoutWorld = World;
+		CachedLoadoutByPlayer.Reset();
+		LoadoutScratchRows.Reset();
 	}
 
-	const FString PlayerId = PS->UniqueId.IsValid()
-		? PS->UniqueId.ToString()
-		: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+	FNCSlideLoadoutCache& Cache = CachedLoadoutByPlayer.FindOrAdd(PlayerId);
 
 	static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 
 	// Read the player's ACTUAL carried weapons = the real loadout (BP-defined,
 	// no hardcoded list). Hits/ShotsStatsName are CDO defaults, client-readable
 	// (same source NCPlusHUDWidget_Accuracy uses for the held weapon). The
-	// ANCUTPlus weapon swaps (AUTPlusShockRifle etc.) and the stock-modified
+	// NC+ weapon swaps (AUTPlusShockRifle etc.) and the stock-modified
 	// guns all inherit/set these, so each row resolves to the right stat.
 	AUTCharacter* Char = PS->GetUTCharacter();
-	if (IsValid(Char))
+	const float Now = World->GetTimeSeconds();
+	if (IsValid(Char) && (Cache.Character.Get() != Char || Now >= Cache.NextRefreshTime))
 	{
-		TArray<FNCSlideRow> Live;
+		Cache.Character = Char;
+		Cache.NextRefreshTime = Now + 0.10f;
+		LoadoutScratchRows.Reset();
 		for (TInventoryIterator<AUTWeapon> It(Char); It; ++It)
 		{
 			AUTWeapon* W = *It;
@@ -134,21 +154,15 @@ void UNCPlusSpectatorSlideOut::BuildLoadoutRows(AUTPlayerState* PS, TArray<FNCSl
 			// (NAME_LinkShots) only ticks per trigger pull. Use the per-refire
 			// LinkBeamShots the replicator stores (matches NCPlusHUDWidget_Accuracy).
 			R.ShotsStat = (W->HitsStatsName == NAME_LinkHits) ? NAME_LinkBeamShots : W->ShotsStatsName;
-			Live.Add(R);
+			LoadoutScratchRows.Add(R);
 		}
-		if (Live.Num() > 0)
+		if (LoadoutScratchRows.Num() > 0)
 		{
-			CachedLoadoutByPlayer.Add(PlayerId, Live);   // refresh dead-player fallback
-			OutRows = Live;
-			return;
+			Swap(Cache.Rows, LoadoutScratchRows);
 		}
 	}
 
-	// No live pawn (eliminated): reuse the last loadout we saw for this player.
-	if (const TArray<FNCSlideRow>* Cached = CachedLoadoutByPlayer.Find(PlayerId))
-	{
-		OutRows = *Cached;
-	}
+	return &Cache.Rows;
 }
 
 void UNCPlusSpectatorSlideOut::DrawAccuracyHeader(float XOffset, float& YPos, float ScoreWidth, const FStatsFontInfo& StatsFontInfo)
@@ -161,7 +175,7 @@ void UNCPlusSpectatorSlideOut::DrawAccuracyHeader(float XOffset, float& YPos, fl
 	YPos += StatsFontInfo.TextHeight;
 }
 
-void UNCPlusSpectatorSlideOut::ResolveAccuracy(AUTPlayerState* PS, FName HitsStat, FName ShotsStat, int32& OutHits, int32& OutShots) const
+void UNCPlusSpectatorSlideOut::ResolveAccuracy(AUTPlayerState* PS, const FString& PlayerId, FName HitsStat, FName ShotsStat, int32& OutHits, int32& OutShots) const
 {
 	OutHits = 0;
 	OutShots = 0;
@@ -179,9 +193,6 @@ void UNCPlusSpectatorSlideOut::ResolveAccuracy(AUTPlayerState* PS, FName HitsSta
 	{
 		if (ANCAccuracyStatsReplicator* Rep = GetAccuracyReplicator())
 		{
-			const FString PlayerId = PS->UniqueId.IsValid()
-				? PS->UniqueId.ToString()
-				: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
 			OutHits  = Rep->GetHitsForPlayer(PlayerId, HitsStat);
 			OutShots = Rep->GetShotsForPlayer(PlayerId, ShotsStat);
 		}
@@ -190,10 +201,6 @@ void UNCPlusSpectatorSlideOut::ResolveAccuracy(AUTPlayerState* PS, FName HitsSta
 
 ANCAccuracyStatsReplicator* UNCPlusSpectatorSlideOut::GetAccuracyReplicator() const
 {
-	if (CachedAccuracyReplicator.IsValid())
-	{
-		return CachedAccuracyReplicator.Get();
-	}
 	if (!IsValid(UTHUDOwner))
 	{
 		return nullptr;
@@ -203,6 +210,22 @@ ANCAccuracyStatsReplicator* UNCPlusSpectatorSlideOut::GetAccuracyReplicator() co
 	{
 		return nullptr;
 	}
+	if (CachedAccuracyWorld.Get() != World)
+	{
+		CachedAccuracyWorld = World;
+		CachedAccuracyReplicator = nullptr;
+		NextAccuracyReplicatorRetryTime = 0.f;
+	}
+	if (CachedAccuracyReplicator.IsValid())
+	{
+		return CachedAccuracyReplicator.Get();
+	}
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextAccuracyReplicatorRetryTime)
+	{
+		return nullptr;
+	}
+	NextAccuracyReplicatorRetryTime = Now + 1.f;
 	for (TActorIterator<ANCAccuracyStatsReplicator> It(World); It; ++It)
 	{
 		CachedAccuracyReplicator = *It;
@@ -222,8 +245,25 @@ bool UNCPlusSpectatorSlideOut::IsInstagibMatch() const
 	{
 		return false;
 	}
+	if (CachedInstagibWorld.Get() != World)
+	{
+		CachedInstagibWorld = World;
+		CachedCTFStatsReplicator = nullptr;
+		NextInstagibReplicatorRetryTime = 0.f;
+	}
+	if (CachedCTFStatsReplicator.IsValid())
+	{
+		return CachedCTFStatsReplicator->bIsInstagibMatch;
+	}
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextInstagibReplicatorRetryTime)
+	{
+		return false;
+	}
+	NextInstagibReplicatorRetryTime = Now + 1.f;
 	for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It)
 	{
+		CachedCTFStatsReplicator = *It;
 		return It->bIsInstagibMatch;
 	}
 	return false;

@@ -24,3 +24,11 @@ DerivedDataCache/
 *.uo
 *.uasset
 *.umap
+
+# Recovered Clutch HUD textures are runtime dependencies of AClutchHUD.
+!Content/Clutch/HUD/Center_PB.uasset
+!Content/Clutch/HUD/Textures/*.uasset
+!Content/Clutch/HUD/Textures/Legacy/*.uasset
+
+# Recovered Clutch objective meshes are shared across editor installs.
+!Content/Clutch/Objective/*.uasset

@@ -6,6 +6,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Info.h"
+#include "NCClutchOverlay.h"
 #include "ElimPlusStatsReplicator.generated.h"
 
 /** Per-player snapshot. Keyed by UniqueId string (Epic ID). */
@@ -73,6 +74,14 @@ public:
 	UPROPERTY(Replicated, Transient)
 	bool bBalanceTeamsActive = true;
 
+	/** Event-driven clutch state for each team. Kept separate for UE4.15 UHT and
+	 *  to preserve simultaneous attempts when a round reaches 1v1. */
+	UPROPERTY(Replicated, Transient)
+	FNCClutchOverlayState Team0ClutchOverlay;
+
+	UPROPERTY(Replicated, Transient)
+	FNCClutchOverlayState Team1ClutchOverlay;
+
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	virtual void BeginPlay() override;
@@ -109,6 +118,17 @@ public:
 	/** Client-safe accessor for the replicated bBalanceTeamsActive flag. */
 	bool IsBalanceTeamsActive() const { return bBalanceTeamsActive; }
 
+	/** Client-safe team-slot accessor. Invalid indexes return null. */
+	const FNCClutchOverlayState* GetClutchOverlayState(int32 TeamIndex) const;
+
+	/** Sparse authority-only clutch state mutations. Each forces a prompt net update. */
+	void BeginClutchOverlay(int32 TeamIndex, AUTPlayerState* Candidate, int32 EnemiesAlive);
+	void CreditClutchOverlayKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS);
+	void UpdateClutchOverlayRemaining(int32 AliveTeam0, int32 AliveTeam1);
+	void EndClutchOverlayForCandidate(AUTPlayerState* Candidate, ENCClutchOverlayOutcome Outcome);
+	void FinalizeClutchOverlays(int32 WinnerTeamIndex);
+	void ClearClutchOverlays();
+
 private:
 	/** PlayerId → index into StatsEntries. Rebuilt server-side at the end of
 	 *  UpdateFromPlayerStates and client-side in OnRep_StatsEntries, so FindEntry is
@@ -123,6 +143,9 @@ private:
 	TMap<FString, int32> EloCache;
 	TMap<FString, int32> EloDeltaCache;
 	TMap<FString, int32> GlobalRankCache;
+
+	FNCClutchOverlayState* GetMutableClutchOverlayState(int32 TeamIndex);
+	float GetClutchOverlayServerTime() const;
 
 private:
 	float UpdateInterval = 1.0f;

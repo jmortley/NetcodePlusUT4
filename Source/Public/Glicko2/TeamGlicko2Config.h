@@ -131,6 +131,26 @@ namespace TeamGlicko2 {
     // target; the hub just converges faster.
     static const double kAnchorWeight = 0.6;
 
+    // 2026-07-11 MAN-ADVANTAGE TERM (see TeamGlicko2System.cpp ProcessMatch).
+    // Team strength is the AVERAGE mu (TeamRatingAggregator), which is headcount-
+    // blind: a 4v5 with near-equal averages was priced as a coin flip, so the
+    // short-handed side paid full price for losses it was structurally expected
+    // to take. Each side's PERCEIVED opponent mu now shifts by
+    //   (kManAdvantageRating / kScale) * clamp(Nopp - Nus, +/-kManAdvantageMaxDiff)
+    // The short side sees a stronger opponent (E drops -> losses cheap, wins pay);
+    // the up-a-man side sees a weaker one (wins earn less, losses cost more).
+    // statsA/statsB are consumed ONLY as the other side's opponent, so the shift
+    // flows into E and the update variance consistently in BOTH ProcessMatch
+    // branches (Elim/Wipeout per-round blend + the CTF match path). No-op at even
+    // counts; Duel (always 1v1) is untouched. Team sizes are the actual round/
+    // match participants, so bot backfill counts as a full player. 150 points per
+    // man prices one man down at roughly E 0.30 vs an equal-average side — a
+    // first guess, tune via the ut4stats backtest like kAnchorWeight. MUST be
+    // mirrored in ut4stats (browse/elo_helpers.py + team_glicko2_port.py) before
+    // any site rebuild — same sync contract as kAnchorWeight.
+    static const double kManAdvantageRating = 150.0;  // rating points per man of headcount edge
+    static const int    kManAdvantageMaxDiff = 3;     // sanity clamp on |Nopp - Nus|
+
 
     // ========== Optional Rating Change Clamping ==========
 

@@ -21,6 +21,30 @@
 class AUTHUD;
 class AController;
 class APlayerStart;
+class AUTPickupInventory;
+
+
+// Server-only record of a map-authored timed-powerup spot that Wipeout can
+// reuse for Siphon. Some of these pickups are removed during CheckRelevance,
+// so the transform must survive independently of the source actor.
+struct FWipeoutSiphonPowerupCandidate
+{
+	FTransform Transform;
+	FString StableName;
+	FString InventoryName;
+	TWeakObjectPtr<AActor> SourcePickup;
+	uint8 Priority;
+
+	FWipeoutSiphonPowerupCandidate(const FTransform& InTransform, const FString& InStableName,
+		const FString& InInventoryName, AActor* InSourcePickup, uint8 InPriority)
+		: Transform(InTransform)
+		, StableName(InStableName)
+		, InventoryName(InInventoryName)
+		, SourcePickup(InSourcePickup)
+		, Priority(InPriority)
+	{
+	}
+};
 
 
 // ============================================================================
@@ -193,8 +217,18 @@ public:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	bool bInSuddenDeath;
 
-	/** True during the 3-second grace period before sudden death activates */
+	/** True during the grace period before sudden death activates */
 	bool bSuddenDeathPending = false;
+
+	/** Length of that grace period. A respawn already queued when the round clock
+	 *  hits zero still lands if it fires inside this window; anything later is
+	 *  cancelled when sudden death empties PendingRespawns.
+	 *  COMPILE-TIME SHARED WITH THE CLIENT: WipeoutHUD reads this to decide when a
+	 *  dead player's respawn countdown has become unreachable and should render "X"
+	 *  instead. Both sides are in this plugin so the value cannot drift — but if it
+	 *  ever becomes config/BP-driven it must be replicated (GameMode is server-only)
+	 *  or the HUD will silently disagree with the server. */
+	static constexpr float SuddenDeathGraceSeconds = 1.0f;
 
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Wipeout|State")
 	int32 LastRoundWinningTeamIndex;
@@ -261,6 +295,37 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
 	void CreditHealing(AUTPlayerState* HealerPS, int32 Amount);
 
+	/** Apply a clamped heal to Target and credit the HP ACTUALLY restored.
+	 *  Returns that amount (0 if nothing was healed).
+	 *
+	 *  This exists so heal-over-time Blueprints (the buff banner) stop doing
+	 *  their own Health arithmetic. Doing it in BP means computing the credit
+	 *  as NewHealth - OldHealth, and the obvious mistake is to credit the
+	 *  requested HealAmount instead: a player at 95/100 healed for 10 receives
+	 *  5, so crediting the request inflates the stat exactly where banners are
+	 *  used most. One node makes that impossible to get wrong, and any future
+	 *  heal source inherits the same clamp.
+	 *
+	 *  Self-healing IS applied but NOT credited. "Healing done" exists to
+	 *  measure support play — and, per the ELO plan, to eventually feed a
+	 *  support term in the Wipeout perf — so standing in your own banner must
+	 *  not score. The link beam never had to make this choice because it
+	 *  cannot target its own owner.
+	 *
+	 *  Server-authority only. No-op on a null, dead, or already-full target. */
+	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
+	int32 HealCharacterAndCredit(class AUTCharacter* Target, int32 HealAmount,
+		AUTPlayerState* HealerPS);
+
+	/** Healing credited to this player so far, 0 if none/unknown. Server-side read
+	 *  for AWipeoutDamageReplicator, which is what carries it to the scoreboard
+	 *  (this map is GameMode state and never replicates).
+	 *  UFUNCTION so StatSQL can resolve it by name via FindFunction/ProcessEvent at
+	 *  match end without taking a build dependency on NetcodePlus — do not rename
+	 *  without updating MutStatSQL.cpp's lookup. */
+	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
+	int32 GetHealingDoneForPlayer(AUTPlayerState* PS) const;
+
 
 	// =======================================================================
 	// SPAWN SYSTEM (reused from TeamArena for round-start)
@@ -322,6 +387,15 @@ public:
 	UPROPERTY(Transient)
 	AActor* OverriddenPlayerStart;
 
+	/** Opening-spawn-only transform queues. Mid-round respawns never consume
+	 *  these and continue through ChooseMidRoundSpawn. */
+	bool bEnableHybridRoundSpawns = true;
+	bool bHybridRoundSpawnWindow = false;
+	bool bHasPendingHybridSpawnTransform = false;
+	FTransform PendingHybridSpawnTransform;
+	TArray<FTransform> Team0HybridSpawnQueue;
+	TArray<FTransform> Team1HybridSpawnQueue;
+
 	TArray<FWipeoutSpawnLayout> ValidLayouts_2v2;
 	TArray<FWipeoutSpawnLayout> ValidLayouts_1v1;
 
@@ -331,21 +405,36 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Spawning")
 	bool bEnablePingCompensatedSpawn = true;
 
-	// SIPHON POWERUP (spawned at highest sniper location)
+	// SIPHON POWERUP (prefers a non-Amp powerup base, then sniper/bio)
 	// =======================================================================
 
-	/** Blueprint pickup class to spawn at highest sniper location.
+	/** Blueprint pickup class to spawn at the chosen pickup base (see
+	 *  SpawnSiphonPickup for the placement rule).
 	 *  Set in the BP subclass to a child of PowerupBase with custom mesh/ghost.
 	 *  If None, no siphon pickup is spawned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Siphon")
 	TSubclassOf<class AUTPickupInventory> SiphonPickupClass;
 
-	/** The siphon pickup spawned at the highest sniper weapon base location */
+	/** Minimum 3D distance (uu) between a sniper base and the nearest Amp/UDamage
+	 *  pickup for Siphon to spawn at the sniper. If no sniper clears this, Siphon
+	 *  goes to whichever base — farthest sniper or farthest Bio Rifle — is farther
+	 *  from the Amp. 0 (or negative) disables the rule — the sniper always wins.
+	 *  Mod.ini override: [NetcodePlus] SiphonMinAmpDistance. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Wipeout|Siphon")
+	float SiphonMinAmpDistance;
+
+	/** The siphon pickup spawned at the chosen pickup-base location */
 	UPROPERTY(Transient)
 	class AUTPickupInventory* SiphonPickup;
 
-	/** Finds the highest sniper weapon base and spawns a Siphon powerup pickup there */
+	/** Map-authored non-Amp timed-powerup spots captured before relevance filtering removes them */
+	TArray<FWipeoutSiphonPowerupCandidate> SiphonPowerupCandidates;
+
+	/** Prefers a captured powerup base, otherwise uses the sniper/bio placement rule */
 	void SpawnSiphonPickup();
+
+	/** Guarded warmup-time spawn attempt (deferred from BeginPlay); HandleMatchHasStarted is the fallback */
+	void TrySpawnSiphonPickup();
 
 
 	// =======================================================================
@@ -573,6 +662,7 @@ public:
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual bool ReadyToStartMatch_Implementation() override;
 	virtual void DefaultTimer() override;
 	void Logout(AController* Exiting) override;
 
@@ -630,17 +720,23 @@ protected:
 
 	// --- Shield Belt substitution ---
 	// If a map has no ShieldBelt pickup, the first Chest/Vest pickup is
-	// converted into a ShieldBelt so every map has belt control.
+	// replaced by a freshly spawned belt base so every map has belt control —
+	// the same replace pattern as the Siphon taking over the sniper/bio base.
 	/** True once we've confirmed the map has a native ShieldBelt pickup */
 	bool bMapHasShieldBelt = false;
-	/** First Chest/Vest pickup found — kept alive until BeginPlay resolves it */
+	/** First Chest/Vest pickup found — kept alive until the substitution resolves */
 	UPROPERTY(Transient)
 	AUTPickupInventory* PendingVestPickup = nullptr;
-	/** Resolve the vest→belt swap after all actors have been CheckRelevance'd */
+	/** Spawn a fresh belt base at the stashed vest's spot (or drop the vest if the
+	 *  map has its own belt). Every failure path keeps PendingVestPickup alive so
+	 *  the HandleMatchHasStarted fallback can retry. */
 	void ResolveShieldBeltSubstitution();
+	/** Guarded substitution attempt (deferred from BeginPlay); HandleMatchHasStarted is the fallback */
+	void TryResolveShieldBeltSubstitution();
 	void CheckWipeoutCondition();
 	void EndRoundForTeam(int32 WinnerTeamIndex, FName Reason);
-	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const;
+	bool GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1,
+		const AUTPlayerState* IgnoredPlayer = nullptr) const;
 	int32 GetTiebreakWinnerByTeamHealth() const;
 	void ResetPlayersForNewRound();
 	void CleanupWorldForNewRound();
@@ -685,6 +781,13 @@ protected:
 	/** Get the respawn delay for the Nth death on a team */
 	float ComputeRespawnDelay(int32 TeamIndex, AUTPlayerState* PS) const;
 
+	/** Warn each living player once their next death can no longer respawn before
+	 *  sudden death. Uses the same round-clock + grace-window rule as the HUD's X. */
+	void CheckFinalLifeAnnouncements(int32 TeamFilter = INDEX_NONE);
+
+	/** Players who have already received the final-life warning this round. */
+	TSet<TWeakObjectPtr<AUTPlayerState>> FinalLifeAnnouncedPlayers;
+
 	/** Respawn countdown tick (fires every second for BP_OnPlayerRespawnCountdown) */
 	void TickRespawnCountdowns();
 	FTimerHandle RespawnCountdownTickHandle;
@@ -719,9 +822,19 @@ protected:
 	// =======================================================================
 
 	void ForceTeamSpectate(AUTPlayerState* DeadPS);
+
+	/**
+	 * Take the free-roaming spectator camera away from anyone who is pawn-less in
+	 * the middle of a live round without having died in it. Wipeout normally spawns
+	 * late joiners and reconnects straight away, so this mostly covers the cases
+	 * RestartPlayer still refuses — a reconnect during sudden death above all.
+	 * See NCPlusRoundSpectate.cpp. No-op between rounds and in warmup.
+	 */
+	void EnforceRoundSpectatorLock();
 	AUTPlayerState* FindAliveTeammate(AUTPlayerState* PS) const;
 	AUTPlayerState* FindAliveEnemy(AUTPlayerState* PS) const;
-	AUTPlayerState* FindAliveOnTeamPS(int32 TeamIndex) const;
+	AUTPlayerState* FindAliveOnTeamPS(int32 TeamIndex,
+		const AUTPlayerState* IgnoredPlayer = nullptr) const;
 	AUTPlayerState* FindAnyOnTeamPS(int32 TeamIndex) const;
 	int32 CountAliveOnTeam(int32 TeamIndex) const;
 
@@ -737,6 +850,9 @@ protected:
 	void PrecomputeSpawnLayouts();
 	void SelectSpawnLayoutForRound();
 	void ResetSpawnSelectionForNewRound();
+	void PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount);
+	bool TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform);
+	void ClearHybridRoundSpawnState();
 
 	UPROPERTY(Transient)
 	TArray<APlayerStart*> AllSpawnPointsList;
@@ -812,6 +928,46 @@ protected:
 	UPROPERTY() AUTPlayerState* RoundWinningKiller;
 	UPROPERTY() APawn* WinningKillerPawn = nullptr;
 	float RoundWinningKillTime;
+
+
+	// =======================================================================
+	// CLUTCH / LMS-HOLD TELEMETRY  (uploaded as wipeout_clutches[])
+	// =======================================================================
+	// One open hold per team. Opened at the same 2->1 transition that drives
+	// the "last player alive" announcement, so telemetry and the in-game cue
+	// can never disagree about what counts as a clutch.
+
+	/** Live state for one team's open hold. */
+	struct FWipeoutClutchTracker
+	{
+		bool    bOpen = false;
+		FString UniqueId;                          // captured at open; survives Logout
+		TWeakObjectPtr<AUTPlayerState> Holder;     // live identity only
+		int32   RoundIndex         = 0;
+		int32   EnemiesAtStart     = 0;
+		int32   DirectKills        = 0;
+		int32   TeammatesRespawned = 0;
+		bool    bSuddenDeath       = false;
+		float   StartTime          = 0.f;
+	};
+	FWipeoutClutchTracker ActiveHold[2];
+
+	/** Finished holds for the whole match; copied into the upload at match end. */
+	TArray<FNCWipeoutClutchInput> CompletedClutches;
+
+	/** Clear all clutch telemetry. Match start only. */
+	void ResetClutchTelemetryForMatch();
+	/** Drop live holds without clearing completed match telemetry. */
+	void DiscardOpenClutchHolds();
+	/** Idempotent alive-count transition handler used by deaths, respawns and the timer fallback. */
+	void UpdateClutchHoldTransitions(int32 AliveTeam0, int32 AliveTeam1,
+		const AUTPlayerState* IgnoredPlayer = nullptr);
+	/** Open a hold for TeamIndex. No-op if one is already open. */
+	void OpenClutchHold(int32 TeamIndex, AUTPlayerState* Holder, int32 EnemiesAlive);
+	/** Credit an enemy kill to an open hold whose holder is KillerPS. */
+	void CreditClutchHoldKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS);
+	/** Close TeamIndex's hold with Outcome and move it to CompletedClutches. */
+	void CloseClutchHold(int32 TeamIndex, const TCHAR* Outcome);
 
 
 	// =======================================================================

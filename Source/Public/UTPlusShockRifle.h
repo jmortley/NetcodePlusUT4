@@ -4,6 +4,10 @@
 #include "UTWeaponFix.h"
 #include "UTPlusShockRifle.generated.h"
 
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
+class UParticleSystemComponent;
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4273)
@@ -30,6 +34,10 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	// internal RPC: server to owning client, then calls OnImpressive()
 	UFUNCTION(Client, Reliable)
 	void ClientNotifyImpressive();
+
+	/** Apply the owning player's local Shock color to a newly spawned first-person beam. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
+	void ApplyConfiguredShockBeamColor(UParticleSystemComponent* Effect);
 
 	/** shock ball bot is waiting to combo */
 	UPROPERTY()
@@ -104,6 +112,9 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 
 	virtual UAnimMontage* GetFiringAnim(uint8 FireMode, bool bOnHands = false) const;
 	virtual void PlayFiringEffects();
+	virtual void PlayPredictedImpactEffects(FVector ImpactLoc) override;
+	virtual void PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
+		const FVector& SpawnLocation, const FRotator& SpawnRotation) override;
 
 	UFUNCTION(BlueprintImplementableEvent, BlueprintCosmetic)
 	void Play1PComboEffects();
@@ -142,9 +153,58 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	 */
 	virtual float GetHitValidationPredictionTime() const override;
 
-	/** Widen the server-side hitscan time-search fallback to 45ms (half-window) for the
-	 *  shock family (incl. the BP instagib child); other weapons keep the base 30ms. */
-	virtual float GetHitscanTimeSearchWindow() const override;
+private:
+	/** One weapon-owned material instance is shared by its short-lived beam PSCs. */
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CachedShockBeamMID;
+
+	/** Authored slot-1 material used to build CachedShockBeamMID. */
+	UPROPERTY(Transient)
+	UMaterialInterface* CachedShockBeamSourceMaterial;
+
+	/** Settings generation baked into CachedShockBeamMID. */
+	UPROPERTY(Transient)
+	uint32 CachedShockBeamColorGeneration;
+
+	/** Material currently assigned to the authored ammo-glow slot. */
+	UPROPERTY(Transient)
+	UMaterialInterface* CachedAmmoGlowMaterial;
+
+	/** Existing MID adopted from the ammo-glow slot; this class never creates or replaces it. */
+	UPROPERTY(Transient)
+	UMaterialInstanceDynamic* CachedAmmoGlowMID;
+
+	/** Last values pushed to CachedAmmoGlowMID. */
+	int32 CachedAmmoGlowAmmo;
+	int32 CachedAmmoGlowMaxAmmo;
+
+	/** Rebind the live ammo-glow slot and update it only when its material or values changed. */
+	void RefreshAmmoGlowMaterial(bool bForceRefresh);
+
+	/** True only for the Instagib shock-rifle variants; normal Shock children stay stock. */
+	bool IsInstagibBeamWeapon() const;
+	bool ShouldShowOwnInstagibBeam() const;
+
+	/** Lazily-resolved caches for the two checks above, so the fire path costs no
+	 *  FString building, name Contains() scans, or config lookups per shot.
+	 *  -1 = unresolved.
+	 *
+	 *  IsInstagibBeamWeapon's inputs really are fixed for the life of an instance
+	 *  (class identity, stats names, damage type, attachment).
+	 *
+	 *  ShouldShowOwnInstagibBeam's is NOT, and caching it is a deliberate
+	 *  trade: the F5 menu writes bShowOwnBeam through GConfig itself
+	 *  (SUTNCPlusMenu.cpp SetString + Flush), which updates the same in-memory
+	 *  cache the old per-shot GetString read — so toggling "Show Own Beam"
+	 *  mid-match used to apply on the very next shot, and now applies when the
+	 *  next weapon instance is built (your next respawn or re-pickup). Only a
+	 *  hand-edit of Mod.ini was ever ignored. If live toggling is wanted back,
+	 *  bump a generation counter on menu save and re-resolve when it changes. */
+	mutable int8 CachedIsInstagibBeamWeapon = -1;
+	mutable int8 CachedShowOwnBeam = -1;
+	bool NeedsLegacyInstagibBeamLayer() const;
+	void SpawnLegacyInstagibBeamLayer(const FVector& TargetLoc, uint8 FireMode,
+		const FVector& SpawnLocation, const FRotator& SpawnRotation);
 };
 
 #ifdef _MSC_VER

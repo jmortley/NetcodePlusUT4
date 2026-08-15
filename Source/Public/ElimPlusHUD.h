@@ -10,6 +10,45 @@
 #include "UTHUD.h"
 #include "ElimPlusHUD.generated.h"
 
+class AElimPlusStatsReplicator;
+
+/** One player's render-frame state. Raw UObject pointers are consumed only by the
+ * DrawHUD call that rebuilt the snapshot; nothing here is replicated or serialized. */
+struct FElimPlusHUDPlayerSnapshot
+{
+	AUTPlayerState* PlayerState = nullptr;
+	AUTCharacter* Character = nullptr;
+	uint8 TeamNum = 255;
+	bool bAlive = false;
+	int32 Health = 0;
+	int32 Armor = 0;
+	uint8 PortraitSortKey = 0;
+};
+
+/** Reusable per-HUD roster storage shared by all three ElimPlus roster renderers. */
+struct FElimPlusHUDSnapshot
+{
+	TArray<FElimPlusHUDPlayerSnapshot> Players;
+	TArray<int32> TeamPlayerIndices[2];
+	TArray<int32> PortraitPlayerIndices;
+	AUTPlayerState* ScorerPS = nullptr;
+	AUTPlayerState* LocalPS = nullptr;
+	int32 AliveCountTeam[2] = { 0, 0 };
+	AUTPlayerState* SoleSurvivor[2] = { nullptr, nullptr };
+
+	void ResetFrame(int32 ExpectedPlayers)
+	{
+		Players.Reset(ExpectedPlayers);
+		TeamPlayerIndices[0].Reset(ExpectedPlayers);
+		TeamPlayerIndices[1].Reset(ExpectedPlayers);
+		PortraitPlayerIndices.Reset(ExpectedPlayers);
+		ScorerPS = nullptr;
+		LocalPS = nullptr;
+		AliveCountTeam[0] = AliveCountTeam[1] = 0;
+		SoleSurvivor[0] = SoleSurvivor[1] = nullptr;
+	}
+};
+
 UCLASS()
 class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 {
@@ -46,7 +85,7 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	virtual void DrawTeamScoreBar(AUTGameState* GS);
 
 	/** "NOW WATCHING <player>" spectator banner, ported from iCTF (ANCPlusCTFHUD).
-	 *  Self-guards: draws nothing unless we're viewing another player's pawn. */
+	 *  Canonical banner for dead players and true spectators; the stock duplicate is frame-suppressed. */
 	void DrawSpectatorTarget();
 
 	/** Force game-only input when dead but match in progress — prevents mouse escaping viewport */
@@ -62,6 +101,46 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	void DrawPreMatchTeamPreview();
 
 private:
+	/** Rebuild volatile pawn/vitals state every call, but retain portrait sorting while
+	 * the exact roster/team/spectator-order signature remains unchanged. */
+	void BuildPlayerSnapshot(AUTGameState* GS, AUTPlayerState* ScorerPS);
+	AElimPlusStatsReplicator* FindStatsReplicator(UWorld* World);
+	void DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool bPlayerAlive,
+		float XOffset, float YOffset, float IconSize, const FElimPlusHUDPlayerSnapshot* FramePlayer);
+
+	struct FPortraitOrderSignature
+	{
+		TWeakObjectPtr<AUTPlayerState> PlayerState;
+		uint8 TeamNum = 255;
+		uint8 SortKey = 0;
+	};
+
+	FElimPlusHUDSnapshot PlayerSnapshot;
+	FElimPlusHUDPlayerSnapshot ActiveFramePlayer;
+	bool bHasActiveFramePlayer = false;
+	bool bUsePreparedPlayerSnapshot = false;
+	TArray<AUTPlayerState*> PortraitRenderPlayers;
+	TArray<FPortraitOrderSignature> CachedPortraitSignature;
+	TArray<int32> CachedPortraitOrder;
+	TWeakObjectPtr<UWorld> CachedSnapshotWorld;
+	TWeakObjectPtr<AUTGameState> CachedSnapshotGameState;
+
+	// Per-HUD lookup state avoids live/replay or split-screen worlds evicting one
+	// another from a translation-unit static replicator cache.
+	TWeakObjectPtr<UWorld> CachedStatsWorld;
+	TWeakObjectPtr<AUTGameState> CachedStatsGameState;
+	TWeakObjectPtr<AElimPlusStatsReplicator> CachedStatsReplicator;
+	float NextStatsReplicatorRetryTime = 0.f;
+
+	// Per-HUD KDA strings avoid split-screen scorers invalidating a shared one-entry cache.
+	TWeakObjectPtr<AUTPlayerState> CachedKdaPS;
+	int32 CachedKdaScore = MAX_int32;
+	int32 CachedKdaKills = MAX_int32;
+	int32 CachedKdaDeaths = MAX_int32;
+	int32 CachedKdaAssists = MAX_int32;
+	FString CachedScoreString;
+	FString CachedKdaString;
+
 	// Post-match screenshot state — serviced by NCPlusHUDDrawCall::ServicePostMatchScreenshot from DrawHUD.
 	bool bPostMatchScreenshotTaken = false;
 	float PostMatchScreenshotStable = -1.f;
@@ -77,19 +156,21 @@ private:
 		int32 FinalDelta = 0;
 	};
 	// Keyed on the PlayerState (weak) rather than the UniqueId string — no per-pip
-	// FString hashing, and entries self-expire when the PS is destroyed.
+	// FString hashing. Stale weak keys are pruned when the roster signature changes.
 	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPlusEloAnim> EloAnimByPlayerId;
 	static constexpr float EloAnimDurationSec = 4.0f;
 
-	/** Per-PlayerState portrait-strip caches: the immutable UniqueId string (built once),
+	/** Per-PlayerState portrait-strip caches: the stable stats lookup key,
 	 *  and the last-rendered ELO-chip / HP FText + measured width keyed on the values they
 	 *  display, so an unchanged frame skips the Printf + StrLen + FText::FromString. Keyed
-	 *  weakly; entries self-expire with the PS. (Fitted names are cached separately by
+	 *  weakly and explicitly pruned with the roster. (Fitted names are cached separately by
 	 *  NCPlusHUDDrawCall::ResolveFittedName.) */
 	struct FElimPipCache
 	{
 		FString UidStr;
+		FString UidSourceName;
 		bool    bUidValid = false;
+		bool    bUidFromOnlineId = false;
 
 		int32 EloKeyElo   = MIN_int32;
 		int32 EloKeyDelta = MIN_int32;

@@ -1,6 +1,7 @@
 // SUTWeaponSkinSelector.cpp — NetcodePlus weapon settings implementation
 #include "SUTWeaponSkinSelector.h"
 #include "NCPlusHUDLayout.h"
+#include "NCWeaponColorSettings.h"
 #include "UTLocalPlayer.h"
 #include "UTPlayerController.h"
 #include "UTPlayerState.h"
@@ -8,13 +9,14 @@
 #include "UTWeapon.h"
 #include "UTWeaponFix.h"
 #include "UTWeaponSkin.h"
+#include "TeamArenaCharacter.h"
 #include "UTProfileSettings.h"
 #include "UTGameplayStatics.h"
 #include "UTGameMode.h"
 #include "UTGameState.h"
-#include "AssetRegistryModule.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Colors/SColorBlock.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Widgets/Input/SNumericEntryBox.h"  // SNumericEntryBox<float> (was leaking transitively via the unity build)
 #include "GameFramework/GameUserSettings.h"
 #include "Engine/Engine.h"
@@ -22,12 +24,8 @@
 
 #define LOCTEXT_NAMESPACE "WeaponSkins"
 
-/** Static cache — skins only loaded once per session.
- *  Skin pointers are AddToRoot'd to prevent GC while cached. */
-static bool bSkinsCached = false;
-static TMap<FName, TArray<UUTWeaponSkin*>> CachedSkinsByTag;
+/** Main-menu fallback populated from the last in-game inventory. */
 static TArray<FNetcodePlusWeaponInfo> CachedWeapons;
-static TArray<UUTWeaponSkin*> CachedSkinGCRefs; // Prevents GC of cached skin assets
 
 void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 {
@@ -60,6 +58,7 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 	// Hitscan: warm orange (matches stock sniper feel). Shock: cyan.
 	HitscanBeamColor = FLinearColor(1.f, 0.55f, 0.f, 1.f);
 	ShockBeamColor   = FLinearColor(0.2f, 0.85f, 1.f, 1.f);
+	LinkBeamColor    = FLinearColor(0.061f, 0.66f, 0.f, 1.f);
 
 	BackgroundBrush.TintColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.85f);
 
@@ -129,10 +128,34 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 							]
 						]
 
-						// Hidden-weapon beam origin — two numeric spinners that drive
-						// AUTWeaponFix::HiddenBeamBackOffset / HiddenBeamDownOffset.
-						// Only matters when a weapon is set Hidden; controls where
-						// the tracer/beam spawns relative to the camera.
+						// Hidden-weapon style toggle — unchecked (default) = BP-parity
+						// visibility-only hide, beam from the live muzzle socket;
+						// checked = classic camera-relative beam (pre-2026-07-19),
+						// which is what the Back/Down spinners below feed.
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(0, 0, 0, 8)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+							[
+								SNew(SCheckBox)
+								.IsChecked(this, &SUTWeaponSkinSelector::GetClassicHideState)
+								.OnCheckStateChanged(this, &SUTWeaponSkinSelector::OnClassicHideChanged)
+								.ToolTipText(LOCTEXT("ClassicHideTooltip", "Hidden weapons: fire the beam from the camera (classic style) instead of the gun's muzzle. Uses the Back/Down offsets below."))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("ClassicHideLabel", "Classic hidden-weapon beam (from camera)"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 13))
+								.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.0f))
+							]
+						]
+
+						// Camera-beam origin offsets — read by AUTWeaponFix::
+						// GetImpactSpawnPosition ONLY in the classic style above;
+						// inert (but still persisted) in the default BP-parity hide.
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 0, 0, 8)
@@ -185,9 +208,8 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 							]
 						]
 
-						// Beam (tracer) colors — drive the UTNPLightningGun /
-						// UTNPSniper (shared LGColor) and UTNPShockRifle (ShockBeam)
-						// BP defaults which read [WeaponSkinsPlus] in Mod.ini at spawn.
+						// Local beam colors: Sniper/LG share LGColor; Shock and Link
+						// keep their legacy keys. Native effects consume the cached snapshot.
 						+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0, 0, 0, 8)
@@ -226,7 +248,7 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
 								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
 							]
-							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 16, 0)
 							[
 								SNew(SBox).WidthOverride(56.f).HeightOverride(18.f)
 								[
@@ -237,6 +259,26 @@ void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 										.Color(TAttribute<FLinearColor>::Create(
 											TAttribute<FLinearColor>::FGetter::CreateSP(
 												this, &SUTWeaponSkinSelector::GetShockBeamColor)))
+									]
+								]
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 4, 0)
+							[
+								SNew(STextBlock).Text(LOCTEXT("LinkColorLbl", "Link beam"))
+								.Font(FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Regular.ttf"), 12))
+								.ColorAndOpacity(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								SNew(SBox).WidthOverride(56.f).HeightOverride(18.f)
+								[
+									SNew(SButton)
+									.OnClicked(this, &SUTWeaponSkinSelector::OnLinkColorClicked)
+									[
+										SNew(SColorBlock)
+										.Color(TAttribute<FLinearColor>::Create(
+											TAttribute<FLinearColor>::FGetter::CreateSP(
+												this, &SUTWeaponSkinSelector::GetLinkBeamColor)))
 									]
 								]
 							]
@@ -469,40 +511,25 @@ void SUTWeaponSkinSelector::GatherWeapons()
 
 void SUTWeaponSkinSelector::GatherSkins()
 {
-	if (bSkinsCached)
+	SkinsByTag.Empty();
+
+	// Lifecycle preload owns all asset loading. Opening F5 only groups pointers
+	// already resident in the shared catalog, so the menu cannot reintroduce a
+	// synchronous first-open hitch.
+	TArray<UUTWeaponSkin*> CatalogSkins;
+	AUTWeaponFix::GetPreloadedWeaponSkins(CatalogSkins);
+	if (CatalogSkins.Num() == 0)
 	{
-		SkinsByTag = CachedSkinsByTag;
-		// Update bHasSkins on weapons
 		for (auto& W : Weapons)
 		{
-			W.bHasSkins = SkinsByTag.Contains(W.Tag) && SkinsByTag[W.Tag].Num() > 0;
+			W.bHasSkins = false;
 		}
 		return;
 	}
 
-	SkinsByTag.Empty();
-
-	FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	IAssetRegistry& AR = ARM.Get();
-
-	TArray<FAssetData> AssetList;
-	AR.GetAssetsByClass(UUTWeaponSkin::StaticClass()->GetFName(), AssetList, true);
-
-	// Build a map of weapon class → tag from our weapon list
-	// Also build set of valid weapon classes for skin matching
-	TMap<FString, FName> WeaponClassToTag; // WeaponType class path → tag
-	for (const auto& W : Weapons)
-	{
-		if (W.WeaponClass)
-		{
-			WeaponClassToTag.Add(W.WeaponClass->GetPathName(), W.Tag);
-		}
-	}
-
 	TSet<FString> SeenSkinPaths; // Deduplicate
-	for (const FAssetData& Asset : AssetList)
+	for (UUTWeaponSkin* Skin : CatalogSkins)
 	{
-		UUTWeaponSkin* Skin = Cast<UUTWeaponSkin>(Asset.GetAsset());
 		if (!Skin) continue;
 		if (Skin->WeaponSkinCustomizationTag == NAME_None) continue;
 
@@ -519,18 +546,9 @@ void SUTWeaponSkinSelector::GatherSkins()
 		for (const auto& W : Weapons)
 		{
 			if (!W.WeaponClass) continue;
+			if (Skin->WeaponSkinCustomizationTag != W.Tag) continue;
 
-			// Direct class path match
-			if (SkinWeaponType.Contains(W.WeaponClass->GetName()))
-			{
-				bMatchesInventory = true;
-				MatchedTag = W.Tag;
-				break;
-			}
-
-			// Check if our weapon is a child of the skin's target class
-			UClass* SkinTargetClass = Skin->WeaponType.TryLoadClass<AUTWeapon>();
-			if (SkinTargetClass && W.WeaponClass->IsChildOf(SkinTargetClass))
+			if (AUTWeaponFix::IsWeaponSkinCompatible(Skin, W.WeaponClass))
 			{
 				bMatchesInventory = true;
 				MatchedTag = W.Tag;
@@ -566,70 +584,28 @@ void SUTWeaponSkinSelector::GatherSkins()
 		});
 	}
 
-	// Cache and prevent GC on skin assets
-	CachedSkinsByTag = SkinsByTag;
-	CachedWeapons = Weapons;
-	// Clean up any previous root refs before adding new ones
-	for (UUTWeaponSkin* OldSkin : CachedSkinGCRefs)
-	{
-		if (OldSkin && OldSkin->IsRooted())
-		{
-			OldSkin->RemoveFromRoot();
-		}
-	}
-	CachedSkinGCRefs.Empty();
-	for (auto& Pair : SkinsByTag)
-	{
-		for (UUTWeaponSkin* Skin : Pair.Value)
-		{
-			if (Skin)
-			{
-				Skin->AddToRoot();
-				CachedSkinGCRefs.Add(Skin);
-			}
-		}
-	}
-	bSkinsCached = true;
 }
 
 void SUTWeaponSkinSelector::LoadSettings()
 {
-	// Ensure weapon settings are loaded
-	AUTWeaponFix::LoadWeaponSettings();
-
 	// Copy hide state from the static map (keyed by class name)
 	HideState = AUTWeaponFix::HiddenWeaponsByTag;
 
-	// Pick up hidden-weapon beam offsets from the now-populated statics so the
-	// spinners reflect whatever Mod.ini already had on disk.
+	// Pick up hidden-weapon beam offsets + style from the now-populated statics so
+	// the spinners/checkbox reflect whatever Mod.ini already had on disk.
 	HiddenBeamBack = AUTWeaponFix::HiddenBeamBackOffset;
 	HiddenBeamDown = AUTWeaponFix::HiddenBeamDownOffset;
+	bClassicWeaponHide = AUTWeaponFix::bClassicWeaponHide;
 
-	// Beam colors from Mod.ini [WeaponSkinsPlus]. Format = FLinearColor::ToString
-	// output "(R=...,G=...,B=...,A=...)" so the BP parser (Convert String to
-	// LinearColor) reads it directly. Bad / empty value = keep ctor defaults.
+	// The shared snapshot owns the one-time Mod.ini color read and validation.
+	// Swatches simply mirror that process-local state.
 	{
-		FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
-		FString S;
-		if (GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("LGColor"), S, ModIniPath) && !S.IsEmpty())
-		{
-			FLinearColor Parsed;
-			if (Parsed.InitFromString(S))
-			{
-				HitscanBeamColor = Parsed;
-			}
-		}
-		if (GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("ShockBeam"), S, ModIniPath) && !S.IsEmpty())
-		{
-			FLinearColor Parsed;
-			if (Parsed.InitFromString(S))
-			{
-				ShockBeamColor = Parsed;
-			}
-		}
-		// Seed the BP-side apply gate (see header) so an existing True survives a save.
-		GConfig->GetBool(TEXT("WeaponSkinsPlus"), TEXT("CustomShockBeam"), bShockBeamCustomized, ModIniPath);
-		// Swatches re-poll via TAttribute on next paint — nothing to push.
+		const FNCWeaponColorSnapshot& Colors = NCWeaponColors::GetSnapshot();
+		HitscanBeamColor = Colors.HitscanColor;
+		ShockBeamColor = Colors.ShockColor;
+		LinkBeamColor = Colors.LinkColor;
+		bShockBeamCustomized = Colors.bCustomShock;
+		// Swatches re-poll via TAttribute on next paint - nothing to push.
 	}
 
 	// Load hitscan choice from Mod.ini
@@ -675,11 +651,13 @@ void SUTWeaponSkinSelector::SaveAndApply()
 
 	FString ModIniPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	// Hidden-weapon beam offsets — push to AUTWeaponFix statics so the next
-	// fire reads the new values (GetImpactSpawnPosition reads the statics
-	// directly), and persist to Mod.ini so they survive a restart. Clamp here
-	// too — the spinner Min/Max already enforces, but a manual edit could
-	// poke in something weird.
+	// Hidden-weapon style + camera-beam offsets — pushed to the AUTWeaponFix
+	// statics so the next fire reads them (GetImpactSpawnPosition reads the
+	// statics directly in classic style), and persisted to Mod.ini so they
+	// survive a restart. Clamp here too — the spinner Min/Max already enforces,
+	// but a manual edit could poke in something weird.
+	AUTWeaponFix::bClassicWeaponHide = bClassicWeaponHide;
+	GConfig->SetBool(TEXT("NetcodePlus.WeaponSettings"), TEXT("ClassicWeaponHide"), bClassicWeaponHide, ModIniPath);
 	AUTWeaponFix::HiddenBeamBackOffset = FMath::Clamp(HiddenBeamBack, 0.f, 100.f);
 	AUTWeaponFix::HiddenBeamDownOffset = FMath::Clamp(HiddenBeamDown, 0.f, 100.f);
 	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamBack"),
@@ -687,12 +665,13 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	GConfig->SetString(TEXT("NetcodePlus.WeaponSettings"), TEXT("HiddenBeamDown"),
 		*FString::Printf(TEXT("%.3f"), AUTWeaponFix::HiddenBeamDownOffset), ModIniPath);
 
-	// Beam colors → [WeaponSkinsPlus] LGColor / ShockBeam. FLinearColor::ToString
-	// writes "(R=...,G=...,B=...,A=...)" which BP's "Convert String to LinearColor"
-	// reads back unchanged. Applies on next weapon spawn (BPs read at BeginPlay).
+	// Beam colors -> legacy [WeaponSkinsPlus] LGColor / ShockBeam / LinkBeam.
+	// Legacy Blueprint readers remain compatible; the native snapshot refreshes
+	// immediately below and effects consume its generation when they spawn/update.
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("LGColor"),  *HitscanBeamColor.ToString(), ModIniPath);
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("ShockBeam"), *ShockBeamColor.ToString(),  ModIniPath);
-	// The shock BP only applies ShockBeam when this gate is True (see header) —
+	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("LinkBeam"), *LinkBeamColor.ToString(), ModIniPath);
+	// The Shock effect only applies ShockBeam when this gate is True (see header) —
 	// written from the latched flag so saving unrelated settings never force-enables
 	// a custom beam for users who never picked a shock color.
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("CustomShockBeam"),
@@ -730,7 +709,6 @@ void SUTWeaponSkinSelector::SaveAndApply()
 					AUTWeaponFix::SavedSkinPaths.Add(W.Tag, SkinPath);
 					if (SelectedSkin)
 					{
-						SelectedSkin->AddToRoot();
 						AUTWeaponFix::CachedSkinAssets.Add(W.Tag, SelectedSkin);
 					}
 				}
@@ -742,6 +720,38 @@ void SUTWeaponSkinSelector::SaveAndApply()
 	GConfig->SetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), *CurrentHitscanChoice, ModIniPath);
 
 	GConfig->Flush(false, ModIniPath);
+
+	// Publish the saved values immediately. Existing local effects compare the
+	// generation and can refresh without touching config or waiting for a respawn.
+	NCWeaponColors::SetFromSelector(HitscanBeamColor, ShockBeamColor,
+		LinkBeamColor, bShockBeamCustomized);
+
+	// Re-apply to the CURRENT weapon so hide/style changes take effect now — the
+	// BringUp/swap-detector paths only fire on a weapon CHANGE, so without this a
+	// style flip while a hidden weapon is equipped strands the old style's state
+	// until the next switch.
+	AUTCharacter* UTChar = Cast<AUTCharacter>(PC->GetPawn());
+	if (UTChar && UTChar->GetWeapon())
+	{
+		AUTWeapon* CurWeap = UTChar->GetWeapon();
+		bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(FName(*CurWeap->GetClass()->GetName()));
+		AUTWeaponFix::ApplyWeaponHideState(CurWeap, UTChar, bHidden && *bHidden);
+		if (ATeamArenaCharacter* TeamChar = Cast<ATeamArenaCharacter>(UTChar))
+		{
+			if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(CurWeap))
+			{
+				TeamChar->SubmitConfiguredWeaponSkin(FixWeapon, true);
+			}
+			else
+			{
+				UTChar->UpdateWeaponSkinPrefFromProfile(CurWeap);
+			}
+		}
+		else
+		{
+			UTChar->UpdateWeaponSkinPrefFromProfile(CurWeap);
+		}
+	}
 
 	// Send hitscan choice to server via console command — defers through the command pipeline
 	// instead of calling ServerMutate directly (which executes inline on listen servers).
@@ -943,6 +953,12 @@ FReply SUTWeaponSkinSelector::OnShockColorClicked()
 	return FReply::Handled();
 }
 
+FReply SUTWeaponSkinSelector::OnLinkColorClicked()
+{
+	OpenBeamColorPicker(LinkBeamColor, [this](FLinearColor NewC) { OnLinkColorCommitted(NewC); });
+	return FReply::Handled();
+}
+
 void SUTWeaponSkinSelector::OnHitscanColorCommitted(FLinearColor NewColor)
 {
 	// TAttribute binding re-polls the getter on next paint — no swatch push needed.
@@ -952,11 +968,16 @@ void SUTWeaponSkinSelector::OnHitscanColorCommitted(FLinearColor NewColor)
 void SUTWeaponSkinSelector::OnShockColorCommitted(FLinearColor NewColor)
 {
 	ShockBeamColor = NewColor;
-	// Picking a shock color IS the customization intent — latch the BP apply gate
+	// Picking a shock color IS the customization intent — latch the apply gate
 	// so the save writes CustomShockBeam=True (see header; the gate was previously
 	// never written by this selector, so the picked color silently did nothing for
 	// anyone the retired BP tool hadn't already flagged).
 	bShockBeamCustomized = true;
+}
+
+void SUTWeaponSkinSelector::OnLinkColorCommitted(FLinearColor NewColor)
+{
+	LinkBeamColor = NewColor;
 }
 
 void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<void(FLinearColor)> OnCommit)
@@ -998,8 +1019,16 @@ void SUTWeaponSkinSelector::OpenBeamColorPicker(FLinearColor Initial, TFunction<
 	PickerArgs.bOnlyRefreshOnOk = false;
 	PickerArgs.bExpandAdvancedSection = false;
 	PickerArgs.InitialColorOverride = Initial;
+	// The picker window is parented to the game viewport window, NOT to this
+	// panel, so it outlives us (Esc close; map travel drops the viewport widget
+	// without ClosePanel — see ~SUTWeaponSkinSelector). With bOnlyRefreshOnOk
+	// false the wheel drag fires this continuously, so the OnCommit lambdas'
+	// raw `this` captures are a use-after-free once the panel dies. Gate every
+	// callback on the panel still being alive — same lifetime contract as the
+	// nchud swatch's CreateSP binding (SNCPlusHUDEditor::OnSwatchClicked).
+	TWeakPtr<SUTWeaponSkinSelector> WeakSelf = SharedThis(this);
 	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateLambda(
-		[OnCommit](FLinearColor C) { if (OnCommit) OnCommit(C); });
+		[WeakSelf, OnCommit](FLinearColor C) { if (WeakSelf.IsValid() && OnCommit) OnCommit(C); });
 	PickerArgs.ParentWidget = SharedThis(this);
 
 	// Restore on close - same order as nchud (SetFullscreenMode → SetScreenResolution
@@ -1041,27 +1070,29 @@ FReply SUTWeaponSkinSelector::OnKeyDown(const FGeometry& MyGeometry, const FKeyE
 /** Static cleanup — call when module shuts down or cache should be invalidated */
 void SUTWeaponSkinSelector_CleanupCache()
 {
-	for (UUTWeaponSkin* Skin : CachedSkinGCRefs)
-	{
-		if (Skin && Skin->IsRooted())
-		{
-			Skin->RemoveFromRoot();
-		}
-	}
-	CachedSkinGCRefs.Empty();
-	CachedSkinsByTag.Empty();
 	CachedWeapons.Empty();
-	bSkinsCached = false;
 }
 
 SUTWeaponSkinSelector::~SUTWeaponSkinSelector()
 {
 	// Map load drops the viewport widget without ClosePanel — release the refcount.
 	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
+	// Close any floating swatch picker with us: its commit delegate is now
+	// weak-guarded (no UAF), but an orphaned picker window is dead UI, and
+	// destroying it also runs OnColorPickerWindowClosed's FSE-mode restore.
+	if (FSlateApplication::IsInitialized())
+	{
+		DestroyColorPicker();
+	}
 }
 
 void SUTWeaponSkinSelector::ClosePanel()
 {
+	// Take the floating swatch picker down with the panel (see ~dtor note).
+	if (FSlateApplication::IsInitialized())
+	{
+		DestroyColorPicker();
+	}
 	// Release the mouse capture taken in Construct (see NCPlusHUDDragMode).
 	if (bHeldDragMode) { NCPlusHUDDragMode::SetActive(false); bHeldDragMode = false; }
 	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)

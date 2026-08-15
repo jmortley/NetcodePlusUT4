@@ -7,6 +7,7 @@
 #include "UTWeaponFix.generated.h"
 
 class UUTWeaponSkin;
+class UMaterialInstanceDynamic;
 
 /**
  * Enhanced weapon base class combining three critical fixes:
@@ -51,6 +52,44 @@ struct FNetcodeDelayedProjectile
 	}
 };
 
+/** What produced a delayed Flak prediction request. Shell-impact fragments are deliberately
+ * absent: they are spawned authoritatively by AUTProj_FlakShell::Explode() and never enter
+ * the weapon prediction path. */
+enum class ENetcodeDelayedFlakKind : uint8
+{
+    PrimaryShard,
+    SecondaryShell
+};
+
+/** One immutable delayed Flak fake request. Primary fire owns nine independent records even
+ * though all shards share one fire-event index; secondary owns one shell record. */
+struct FNetcodeDelayedFlakProjectile
+{
+    TSubclassOf<AUTProjectile> ProjectileClass;
+    FVector SpawnLocation;
+    FRotator SpawnRotation;
+    FTimerHandle TimerHandle;
+    uint8 FireMode;
+    int32 EventIndex;
+    uint32 ReservationId;
+    int32 ProjectileOrdinal;
+    float RequestTime;
+    ENetcodeDelayedFlakKind Kind;
+
+    FNetcodeDelayedFlakProjectile()
+        : ProjectileClass(nullptr)
+        , SpawnLocation(FVector::ZeroVector)
+        , SpawnRotation(FRotator::ZeroRotator)
+        , FireMode(0)
+        , EventIndex(INDEX_NONE)
+        , ReservationId(0)
+        , ProjectileOrdinal(0)
+        , RequestTime(0.f)
+        , Kind(ENetcodeDelayedFlakKind::PrimaryShard)
+    {
+    }
+};
+
 struct FPendingFireEventFix
 {
     bool bIsStartFire;
@@ -59,10 +98,31 @@ struct FPendingFireEventFix
     float ClientTimestamp;
     FRotator ClientViewRot;
     uint8 ZOffset;
-    TWeakObjectPtr<AUTCharacter> HitChar; // <--- ADDED THIS
+    TWeakObjectPtr<AUTCharacter> HitChar;
+    FVector ClientHeadOffset;
 
-    FPendingFireEventFix(bool bStart, uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot, uint8 Z, AUTCharacter* InChar)
-        : bIsStartFire(bStart), FireModeNum(Mode), FireEventIndex(EventIdx), ClientTimestamp(Timestamp), ClientViewRot(ViewRot), ZOffset(Z), HitChar(InChar)
+    FPendingFireEventFix(uint8 Mode, int32 EventIdx)
+        : bIsStartFire(false)
+        , FireModeNum(Mode)
+        , FireEventIndex(EventIdx)
+        , ClientTimestamp(0.0f)
+        , ClientViewRot(FRotator::ZeroRotator)
+        , ZOffset(0)
+        , HitChar(nullptr)
+        , ClientHeadOffset(FVector::ZeroVector)
+    {
+    }
+
+    FPendingFireEventFix(uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot,
+        AUTCharacter* InChar, uint8 Z, FVector HeadOffset)
+        : bIsStartFire(true)
+        , FireModeNum(Mode)
+        , FireEventIndex(EventIdx)
+        , ClientTimestamp(Timestamp)
+        , ClientViewRot(ViewRot)
+        , ZOffset(Z)
+        , HitChar(InChar)
+        , ClientHeadOffset(HeadOffset)
     {
     }
 };
@@ -105,9 +165,6 @@ struct FActiveServerProjectile
     TWeakObjectPtr<AUTProjectile> Projectile;
 
     UPROPERTY()
-    int32 EventIndex;
-
-    UPROPERTY()
     uint8 FireMode;
 
     // --- Grace buffer (populated when the projectile RESOLVES / explodes) ---
@@ -134,14 +191,12 @@ struct FActiveServerProjectile
     TWeakObjectPtr<class AUTCharacter> DamagedTarget;
 
     FActiveServerProjectile()
-        : EventIndex(-1)
-        , FireMode(0)
+        : FireMode(0)
     {
     }
 
-    FActiveServerProjectile(AUTProjectile* InProj, int32 InIndex, uint8 InMode)
+    FActiveServerProjectile(AUTProjectile* InProj, uint8 InMode)
         : Projectile(InProj)
-        , EventIndex(InIndex)
         , FireMode(InMode)
     {
     }
@@ -158,24 +213,45 @@ public:
     virtual void BeginPlay() override;
     static int32 GetTargetProjectileTickRate();
 
-    /** Master gate for weapon skin support. Disabled for now: stock skin allocation
-     *  (LoadObject + per-instance MID creation) causes a ~1-3ms hitch every life in
-     *  duel when you pick up a fresh weapon. Hide/show is independent of this and
-     *  stays enabled. Flip to true to re-enable skins once the per-life MID cost
-     *  is addressed (e.g., static shared MID pool keyed by WeaponClass+SkinPath). */
-    static constexpr bool bSkinsEnabled = false;
+    /** Master gate for the NetcodePlus weapon-skin path. */
+    static constexpr bool bSkinsEnabled = true;
 
     /** Per-weapon hide state — keyed by class name.
      *  Set via "weaponskins" menu or "weaponhand hidden/show" console command.
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
     static TMap<FName, bool> HiddenWeaponsByTag;
 
-    /** Tracer/beam origin offsets used when the firing weapon is hidden.
-     *  Plumbed into GetImpactSpawnPosition (camera-relative). Set via the
-     *  weaponskins menu; persisted in Mod.ini [NetcodePlus.WeaponSettings]
-     *  HiddenBeamBack + HiddenBeamDown. Defaults match the original hardcoded
-     *  values (10 back, 35 down = "stomach"). 0 back + 0 down = camera-origin
-     *  (beam can render edge-on / invisible when stationary). */
+    /** Apply or restore the hidden-weapon state. Two selectable styles:
+     *  DEFAULT (bClassicWeaponHide=false) = BP-parity, rendering-only —
+     *  SetVisibility(propagate) on the gun mesh + arm-bone hiding on the shared
+     *  FirstPersonMesh; bHiddenInGame never touched (stock owns that flag:
+     *  zoom/overlay/spectate), so the stock muzzle-socket beam origin keeps
+     *  working while hidden. CLASSIC (true) = the pre-BP behavior: SetHiddenInGame
+     *  on gun + FirstPersonMesh with the camera-relative beam origin
+     *  (GetImpactSpawnPosition below). The SHOW path heals both styles' residue —
+     *  but ONLY state this code set itself (ComponentTags on the touched meshes),
+     *  so it never fights the old UT+ BP content hiding guns/arms with the same
+     *  primitives — and re-seats via stock UpdateWeaponHand(), which re-applies the viewer's
+     *  weapon-position preference (Lowered/Very Low = LowMeshOffset/
+     *  VeryLowMeshOffset) — a bare archetype reset here is what broke Very Low
+     *  for visible weapons in the 2026-07-19 roll. Works on any AUTWeapon (stock
+     *  included). Callers: BringUp, TeamArenaCharacter's weapon-swap detector,
+     *  the "weaponhand hidden/show" console command, and the weaponskins menu. */
+    static void ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, bool bHide);
+
+    /** Hidden-weapon style toggle (weaponskins menu; Mod.ini
+     *  [NetcodePlus.WeaponSettings] ClassicWeaponHide). False (default) = BP-parity
+     *  visibility-only hide, beam from the live muzzle socket. True = classic
+     *  camera-relative beam (SetHiddenInGame + GetImpactSpawnPosition override
+     *  reading the HiddenBeam offsets below) — kill-switch back to the pre-2026-07-19
+     *  behavior. Client-local render state only. */
+    static bool bClassicWeaponHide;
+
+    /** Tracer/beam origin offsets for CLASSIC hide (bClassicWeaponHide) — inert in
+     *  the default BP-parity style, which keeps the stock muzzle-socket origin.
+     *  Set via the weaponskins menu sliders; persisted in Mod.ini
+     *  [NetcodePlus.WeaponSettings] HiddenBeamBack + HiddenBeamDown. Defaults match
+     *  the original hardcoded values (10 back, 35 down = "stomach"). */
     static float HiddenBeamBackOffset;
     static float HiddenBeamDownOffset;
 
@@ -183,23 +259,112 @@ public:
      *  Loaded from Mod.ini, applied in BringUp(). */
     static TMap<FName, FString> SavedSkinPaths;
 
-    /** Pre-loaded skin assets — keyed by WeaponSkinCustomizationTag.
-     *  Loaded eagerly in LoadWeaponSettings() so BringUp() avoids a blocking LoadObject. */
+    /** Locally selected skin assets — keyed by WeaponSkinCustomizationTag.
+     *  Borrowed from the session catalog loaded by LoadWeaponSettings(). */
     static TMap<FName, UUTWeaponSkin*> CachedSkinAssets;
 
-    /** Load weapon settings (skins + hide state) from Mod.ini. Called once on first BringUp. */
+    /** Load weapon settings and retain selected skins before gameplay. */
     static void LoadWeaponSettings();
+
+    /** Retry skin assets that were unavailable until the map packages mounted. */
+    static void RetryPendingWeaponSkins();
+
+    /** Release weapon-skin assets retained by LoadWeaponSettings(). */
+    static void CleanupWeaponSettings();
+
+    /** Return a skin only when it belongs to the preloaded, server-approved catalog. */
+    static UUTWeaponSkin* FindPreloadedWeaponSkin(const FString& SkinPath);
+
+    /** Snapshot the preloaded catalog for the F5 selector without loading assets. */
+    static void GetPreloadedWeaponSkins(TArray<UUTWeaponSkin*>& OutSkins);
+
+    /** True when Skin targets WeaponClass or one of its native/Blueprint parents. */
+    static bool IsWeaponSkinCompatible(UUTWeaponSkin* Skin, UClass* WeaponClass);
+
+    /** Find the authoritative entry for WeaponClass in a replicated stock skin array. */
+    static UUTWeaponSkin* FindWeaponSkinForClass(
+        const TArray<UUTWeaponSkin*>& WeaponSkins, UClass* WeaponClass);
+
+    /** Resolve the local F5 selection for this weapon from the preloaded catalog. */
+    static UUTWeaponSkin* GetConfiguredWeaponSkin(const AUTWeapon* Weapon);
+
+    /** Resolve the configured object path; empty means the explicit stock default. */
+    static FString GetConfiguredWeaponSkinPath(const AUTWeapon* Weapon);
 
     /** Save weapon settings to Mod.ini. */
     static void SaveWeaponSettings();
 
     /** Whether settings have been loaded from Mod.ini this session */
     static bool bWeaponSettingsLoaded;
+
+    /** uint32-backed material-slot masks support slots 0 through 31. */
+    static constexpr int32 MaxWeaponSkinTargetSlots = 32;
+
+    /** Bitmask of mesh material slots a weapon family renders its skin on, for one
+     *  view. Bit N = slot N. Verified in-editor against the shipped skin assets'
+     *  own texture sets:
+     *    Flak          — 1P and 3P both {0,1}: FlakVoid's M_Flak_Skin_Void01_P /
+     *                    M_Flak_Skin_Void01 replace M_Flak_Gun_Inst /
+     *                    M_Flak_Gun_3P_Inst, and BOTH Flak meshes carry that body
+     *                    material on slot 0 AND slot 1.
+     *    Lightning Gun — single-material fallback is asymmetric: 1P {0}, 3P {1}.
+     *                    PinkLG is expanded by GetResolvedWeaponSkinTargetSlotMask()
+     *                    to {0,1} in both views, with a different E0/E1 material on
+     *                    each slot. Its 1P
+     *                    MAT_INS_LG_Pink_E0_1p carries the PartTWO texture set
+     *                    (T_LightingGunTwo_*), which Lightning_Gun_1p has on slot 0;
+     *                    its 3P MAT_INS_LG_Pink_E1_3p carries the PartONE set
+     *                    (T_LightingGun_one_*), which Lightning_Gun_3p has on slot 1.
+     *                    The authored E0/E1 names ARE the element indices. Writing the
+     *                    other slot paints a section with the wrong part's textures.
+     *    everything else — {0}, i.e. unchanged stock behaviour.
+     *  Keyed on the replicated WeaponSkinCustomizationTag — loads no asset. Slot names
+     *  on these meshes are unreliable, so these are verified explicit indices and every
+     *  caller bounds-checks each slot against the live GetNumMaterials(). Slots outside
+     *  the resolved mask (Shock screen, ammo counters, decals, glass) stay owned by
+     *  the mesh / SetupSpecialMaterials(). */
+    static uint32 GetWeaponSkinTargetSlotMask(FName WeaponSkinCustomizationTag,
+        bool bFirstPersonMesh);
+
+    /** Resolve the final slot mask for one skin/view. Authentic invisibility
+     *  materials replace every live mesh slot; PinkLG uses both E0/E1 slots; other
+     *  authored skins retain the verified per-family mask above. */
+    static uint32 GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Skin,
+        FName WeaponSkinCustomizationTag, bool bFirstPersonMesh,
+        int32 MaterialSlotCount);
+
+    /** Material for one targeted slot. Most skins return their one per-view material;
+     *  PinkLG loads its MutAnnouncers-cooked E1_1p / E0_3p supplement so both
+     *  multipart LG sections receive the matching texture set. */
+    UMaterialInterface* GetResolvedWeaponSkinMaterialForSlot(
+        const UUTWeaponSkin* Skin, bool bFirstPersonMesh, int32 MaterialSlot);
+
+    /** Apply an already-resolved selection to the correct material slots for that
+     *  skin/view; authority also keeps pickup identity. */
+    void ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin);
+
     //~ Begin AUTWeapon Interface
+    /** CLASSIC hide only (bClassicWeaponHide + weapon hidden): camera-relative beam
+     *  origin using the HiddenBeam offsets. In the default BP-parity style this is
+     *  a pure pass-through to Super (live muzzle socket). */
     virtual void GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation) override;
+    /** CLASSIC hide only: suppress the muzzle flash for the firing mode — the PSC
+     *  sits on the hidden weapon's muzzle socket while the beam spawns from the
+     *  camera-adjusted origin. BP-parity style relies on SetVisibility(propagate)
+     *  silencing the PSC children instead, so this passes through untouched. */
     virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
+
+    /** Server-authoritative fire policy hook. Return false to hard-reject a fire mode
+     *  at every server fire entry (ServerStartFireFixed and the resend funnel) BEFORE any
+     *  trade-kill spawn, SetPendingFire latch, or state entry. A subclass restriction that
+     *  lives only in BeginFiringSequence is bypassable: ServerStartFireFixed latches
+     *  PendingFire before that gate, and stock UUTWeaponStateActive::BeginState then
+     *  auto-enters the firing state from the latched flag without re-consulting the gate.
+     *  Vetoing the mode here closes that path. Base allows every mode. */
+    virtual bool AllowServerFireMode(uint8 FireModeNum) const { return true; }
+
     virtual void PostInitProperties() override;
     virtual void Tick(float DeltaTime) override;
     virtual void DetachFromOwner_Implementation() override;
@@ -213,8 +378,29 @@ public:
 
     /** Half-width (seconds) of the server-side bidirectional time-search fallback in
      *  HitScanTrace, used when the client claimed a hit the primary rewind missed.
-     *  Per-weapon overridable. Base 30ms; shock/instagib widen to 45ms. */
-    virtual float GetHitscanTimeSearchWindow() const { return 0.030f; }
+     *  Per-weapon overridable. Standard 45ms for ALL hitscan (2026-07-07: sniper/LG
+     *  raised from 30ms to match the shock family — the search probes fixed 15ms
+     *  rungs {15,30,45}, so 45 is the last rung before the ±60 defender tradeoff). */
+    virtual float GetHitscanTimeSearchWindow() const { return 0.045f; }
+
+    /** Slide-posture selection for hitscan capsule tests. A floor slide shrinks the
+     *  authoritative capsule the same frame it starts, but a remote shooter keeps
+     *  rendering a mostly-standing body for one replication interp plus the animBP
+     *  blend-in — shots aimed at that rendered torso were unhittable air on the
+     *  server. Within ncp.SlideGraceMs of the target's slide start (rewind-adjusted
+     *  via RewindTime; slide age is reconstructible because PerformFloorSlide
+     *  re-stamps FloorSlideTapTime at true slide start), substitutes the
+     *  bottom-aligned STANDING capsule envelope, which strictly contains the slide
+     *  capsule; afterwards applies the classic SlideTargetHeight shrink. Mutates
+     *  the test location/half-height in place; no-op for non-sliding targets.
+     *  Shared by HitScanTrace, the claim time-search fallback, FireCone's pawn
+     *  sweep, the Enforcer trace, AND all three projectile rewind tests (the
+     *  catchup spawn sweep, the post-fast-forward overlap check, and
+     *  ServerProjectileHitClaim's per-sample anchor search + contact test) so
+     *  every validation path — hitscan and projectile — judges one posture. */
+    static void ApplySlidePostureForValidation(const AUTCharacter* Target,
+        float RewindTime, FVector& InOutTargetLocation, float& InOutCollisionHeight);
+
     virtual void FireShot() override;
 
     // Guard against race condition: replicated fire RPC arrives after owner dies
@@ -239,7 +425,24 @@ public:
     // Called by UTPlusProj_Rocket / UTPlusProj_FlakShell when fake hits a pawn.
     // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
     // =========================================================================
-    void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum);
+    /** @param SourceProj  The projectile reporting the hit. Callers resolve `this` weapon from
+     *                     UTCharacter::GetWeapon() at IMPACT time, which is the weapon currently
+     *                     HELD — not necessarily the one that fired. Fire a rocket, switch to flak,
+     *                     rocket lands: `this` is the flak cannon. Passing the projectile lets the
+     *                     hitsound prediction read damage off the instance that actually hit,
+     *                     instead of ProjClass[FireModeNum] on the wrong weapon. Optional: a null
+     *                     SourceProj keeps the legacy CDO lookup. */
+    void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum,
+        AUTProjectile* SourceProj = nullptr);
+
+    /** Resolve the weapon that FIRED Proj, rather than the one OwnerChar happens to be holding.
+     *  AUTCharacter::GetWeapon() is evaluated at IMPACT: fire a rocket, switch to flak, and the
+     *  rocket's claim routes to the flak cannon, whose ActiveServerProjectiles never held it, so
+     *  the server drops the claim and that shot silently loses lag compensation. Matching on the
+     *  projectile's exact class is unambiguous — each claim-capable class comes from exactly one
+     *  weapon. Falls back to the held weapon when nothing was recorded, so the worst case is the
+     *  behaviour that shipped. Call this instead of GetWeapon() from projectile impact handlers. */
+    static AUTWeaponFix* FindFiringWeaponForProjectile(AUTCharacter* OwnerChar, AUTProjectile* Proj);
 
     /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves (explodes) to
      *  snapshot its final state into ActiveServerProjectiles for the lag-comp grace buffer, so a claim
@@ -260,11 +463,16 @@ public:
     /** Mouse-bounce debounce window in seconds. A press event arriving
      *  within this many seconds of the prior release is treated as a bounce
      *  (or scroll-wheel rapid-fire) — PendingFire is kept true so any held
-     *  intent is preserved, but no new fire event is triggered. Default
-     *  30ms sits comfortably between hardware bounce ceiling (~20ms) and
-     *  human double-click physiological floor (~40-80ms), so it cannot eat
-     *  intentional rapid clicks. Tune higher per-weapon if low-debounce
-     *  mice still produce rejected shots; set to 0 to disable entirely. */
+     *  intent is preserved, but no new fire event is triggered.
+     *  ⚠ 2026-07-17: the runtime CAPS this at ncp.MouseDebounceCap (default
+     *  0.01) — the old 30ms rationale ("bounce ceiling ~20ms vs double-click
+     *  floor ~40-80ms") doesn't survive modern mice: optical switches can't
+     *  bounce, mechanicals debounce in firmware, and fast tap-fire
+     *  release->press gaps dip under 30ms (eaten clicks on Viper V3-class
+     *  mice, worst at high fps). Effective window = min(this, cap). This BP
+     *  value now mostly matters as a lower-than-cap override; set 0 to
+     *  disable for a weapon. Raising it above the cap has no effect unless
+     *  the cap cvar is raised/-1 too. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Weapon")
     float MouseDebounceWindow;
 
@@ -304,6 +512,21 @@ protected:
     bool bHandlingRetry;
     FTimerHandle RetryFireHandle[2];
 
+    /** True when the charged-rocket state can no longer self-transition: not charging and
+     *  none of its four timers (load / grace / burst / post-burst refire) active. A
+     *  legitimately active charged state ALWAYS has one of those in flight, so this is the
+     *  wedge signature (the state that silently swallows primaries — see the Tick watchdog
+     *  and the ServerStartFireFixed fast recovery). Loaded-rocket handling is the CALLER's
+     *  job: the fast recovery paths only act when nothing is loaded, so a false positive
+     *  can never abandon a loaded volley. */
+    bool IsChargedRocketStateWedged(class UUTWeaponStateFiringChargedRocket_Transactional* Chg);
+
+    /** First watchdog tick an EMPTY wedge was observed; -1 = not currently observed.
+     *  Debounces the fast recovery (~0.25s) so a transient no-timer instant between state
+     *  callbacks can't false-trigger it. Reset on recovery, on busy, and on leaving the
+     *  charged state. */
+    float ChargedWedgeFirstSeenTime = -1.f;
+
     // Ghost-rocket fix (ncp.GhostFix): the REAL fire-button-held state per mode,
     // tracked from genuine input on the locally-controlled client (set in StartFire
     // when !bHandlingRetry, cleared in StopFire on a non-switch release). Read at the
@@ -319,6 +542,15 @@ protected:
     // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
     bool bCrossModeRetryArmed[2];
 
+    // True while RetryFireHandle[mode] holds a BUFFERED CLICK: a queued
+    // (cooldown-blocked) press that was then RELEASED while its shot was due
+    // within ncp.ClickBufferMs. The release keeps the timer alive (StopFire)
+    // and OnRetryTimer fires exactly one shot then ends the sequence itself.
+    // Cleared by any fresh physical press, consumed in OnRetryTimer, killed on
+    // PutDown. Never graduated to pawn PendingFire — it is a spent click, not
+    // held intent.
+    bool bBufferedClickPending[2];
+
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
 
@@ -332,9 +564,23 @@ protected:
     /** Max time after death to still allow pending fire RPCs (seconds) */
     static constexpr float TradeKillGracePeriod = 0.20f;
 
-    /** Cached weapon skin MIDs — created once in BringUp, reused in SetSkin to avoid per-call GPU allocations */
+    /** Per-slot originals captured before NetcodePlus applies a configured skin. */
     UPROPERTY(Transient)
-    TArray<UMaterialInstanceDynamic*> CachedSkinMIDs;
+    TArray<UMaterialInterface*> OriginalFPSMaterials;
+
+    /** Immutable selected body-material parent per slot, or nullptr for Default. */
+    UPROPERTY(Transient)
+    TArray<UMaterialInterface*> AppliedFPSMaterialParents;
+
+    /** One actor-local selected-material MID per targeted slot. Separate MIDs keep
+     *  SetupSpecialMaterials() changes isolated to the slot they configure. */
+    UPROPERTY(Transient)
+    TArray<UMaterialInstanceDynamic*> AppliedFPSMaterialInstances;
+
+    uint32 AppliedFPSMaterialSlotMask;
+    bool bCapturedOriginalFPSMaterials;
+
+    void PrepareConfiguredWeaponSkin();
 
 public:
     /** Server-side only: impact point from the last FireInstantHit trace.
@@ -346,6 +592,13 @@ public:
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
 
+    /** Server-side only: set when THIS trace's pawn hit was demoted by the
+     *  unclaimed-hit render check (ncp.UnclaimedRenderGate). Head-sphere
+     *  fallbacks (base FireInstantHit and sniper subclasses) must not
+     *  resurrect the demoted target from the same ray. Reset at every
+     *  HitScanTrace entry. */
+    bool bLastUnclaimedRenderDemoted = false;
+
     /** Server-side only (327 client-informed headshot): WHERE the client rendered the claimed target's
      *  head — the offset of its rendered mesh head bone from the target's body. Lets the server place a
      *  NORMAL-size head sphere at the head the player actually saw (forced models render their own head
@@ -355,59 +608,17 @@ public:
      *  can't be upgraded). Zero = no claim. Not replicated. */
     FVector ReceivedHeadOffset = FVector::ZeroVector;
 
-    // ============================================================
-    // Fire-validation sample telemetry. Cheap client-only per-frame tracker + an
-    // owner-only gate. The actual per-player accumulation + reporting is server-
-    // authoritative and lives in FNCFireValCollector. Active ONLY in Elim /
-    // instagib-CTF; dormant (zero cost) everywhere else. Pure telemetry — never
-    // affects gameplay/hit-reg/scoring.
-    // ============================================================
-
-    /** Owner-only gate, set server-side in BeginPlay and replicated to the owning
-     *  client. True only when (Elim or instagib-CTF) AND this weapon is a
-     *  UTPlusSniper or UTPlusShockRifle (or child) — i.e. instagib / shock /
-     *  sniper / LG. When false the client tracker and the report RPC are skipped
-     *  entirely. */
-    UPROPERTY(Replicated)
-    bool bFireValActive = false;
-
-    /** Client-side: local-clock time (World->GetTimeSeconds()) at which the
-     *  crosshair FIRST landed on a visible (occlusion-checked) enemy in the current
-     *  continuous run; -1 = not currently on a visible enemy. The interval is read
-     *  at fire as (now - FireValAcquireTime), which avoids the per-frame DeltaTime
-     *  accumulation and the tick/fire ordering jitter the old counter had. Shipped
-     *  full-range in milliseconds (int32, no 255 ms cap), so heavy values no
-     *  longer saturate the server-side mean. */
-    float FireValAcquireTime = -1.0f;
-
-    /** Client-side: the enemy the crosshair is currently resting on. When the
-     *  traced enemy changes (target-to-target snap), the acquire instant resets so
-     *  the new target starts from zero. Weak so a destroyed/reused actor address
-     *  can't masquerade as the same target. */
-    TWeakObjectPtr<class AUTCharacter> FireValLastTarget;
-
-    /** Client-side: smoothed (EMA) frame time in seconds, sent alongside each
-     *  sample as fps context. The low band is still frame-quantized near zero (a
-     *  60 fps client cannot produce a sub-16 ms value), so review must be able to
-     *  see each player's frame rate to discount that bias. */
-    float FireValFrameTimeEMA = 0.0f;
-
-    /** Per-frame client tracker: one occlusion-aware crosshair line trace. */
-    void UpdateFireValTracker(float DeltaTime);
-
-    /** Finds the bot-events mutator (the telemetry sink). Null on non-bot servers. */
-    class AMutBotEvents* FindBotEventsMutator() const;
-
 protected:
 
     FTimerHandle DeferredActiveStateHandle;
-    /**
- * Server-side authoritative fire event index for each fire mode.
- * This is the ground truth that clients must sync to.
- * Replicated to clients for verification.
- */
-    UPROPERTY(Replicated)
+    /** Server-side ground truth for the last accepted fire event in each mode.
+     *  Owning clients are corrected explicitly through ClientConfirmFireEvent. */
+    UPROPERTY(Transient)
     TArray<int32> AuthoritativeFireEventIndex;
+
+    /** Server-side deduplication for initial/retried stop events. */
+    UPROPERTY(Transient)
+    TArray<int32> LastProcessedStopEventIndex;
 
     /**
      * Client-side fire event counter for each fire mode.
@@ -442,30 +653,19 @@ protected:
      * @param FireModeNum - Which fire mode to activate
      * @param InFireEventIndex - Unique sequence number for this fire event
      * @param ClientTimestamp - Client's GetWorld()->GetTimeSeconds() when fire was initiated
-     * @param bClientPredicted - Whether client has already predicted this shot
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, bool bClientPredicted, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+    void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
 
     /**
      * Server RPC to stop firing.
      *
      * @param FireModeNum - Which fire mode to deactivate
      * @param InFireEventIndex - Final event index from client
-     * @param ClientTimestamp - Client's timestamp when fire was stopped
      */
     UFUNCTION(Server, Reliable, WithValidation)
-    void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
-
-    /** Telemetry sidecar — reports a client-side fire-validation sample at the
-     *  moment of a hitscan fire the client believes connected. UNRELIABLE on
-     *  purpose: a dropped sample only thins the distribution, and this must never
-     *  compete with the reliable fire RPCs for bandwidth. Server-side it is clamped
-     *  and routed to FNCFireValCollector; it has ZERO effect on gameplay, hit
-     *  validation, or scoring. Separate from ServerStartFireFixed by design — the
-     *  hit-reg path is never touched. */
-    UFUNCTION(Server, Unreliable, WithValidation)
-    void ServerReportFireValidation(int32 SampleMs, uint8 FrameMs, bool bClaimedHit);
+    void ServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
 
     /**
      * Client RPC to confirm a fire event or correct client's event index.
@@ -487,6 +687,10 @@ protected:
      * @return true if request is valid and should be processed
      */
     bool ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime);
+
+    /** Shared RPC-edge validation so initial and retry start payloads use identical checks. */
+    bool ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFireEventIndex,
+        float ClientTimestamp, FRotator ClientViewRot, FVector ClientHeadOffset);
 
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
     float SmoothingMs = 20.0f;
@@ -556,7 +760,16 @@ protected:
     virtual void OnServerHitScanResult(const FHitResult& Hit, float PredictionTime);
 
 	// Helper function for the timer
-	void SpawnDelayedFakeProjectile();
+	virtual void SpawnDelayedFakeProjectile() override;
+	void SpawnDelayedFlakFakeProjectile(uint32 ReservationId);
+	void ClearDelayedFlakFakeProjectiles();
+	AUTProjectile* SpawnNetPredictedProjectileInternal(
+		TSubclassOf<AUTProjectile> ProjectileClass,
+		FVector SpawnLocation,
+		FRotator SpawnRotation,
+		uint8 CapturedFireMode,
+		int32 CapturedEventIndex,
+		bool bAllowDelay);
 
 	// Timer handle
 	FTimerHandle SpawnDelayedFakeProjHandle;
@@ -565,21 +778,31 @@ protected:
 	UPROPERTY()
 	FNetcodeDelayedProjectile NetcodeDelayedProjectile;
 
+	/** Flak-only delayed predictions. Kept separate so a nine-shard volley cannot collapse
+	 * into the legacy single payload and so rocket behavior remains unchanged while its
+	 * independent M1 cadence problem is being diagnosed. */
+	TArray<FNetcodeDelayedFlakProjectile> DelayedFlakProjectiles;
+	uint32 NextDelayedFlakReservationId;
+
 	// Guard Rail Cap (120ms)
 	const float MaxCatchupTime = 0.10f;
 
     TArray<FPendingFireEventFix> ResendFireEvents;
     FTimerHandle ResendFireHandle;
 
-    void QueueResendFireFixed(bool bIsStartFire, uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar);
+    void QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+    void QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
+    void QueueResendFireEventFixed(const FPendingFireEventFix& Event);
     void ResendNextFireEventFixed();
     void ClearFireEventsFixed();
 
     UFUNCTION(Server, Unreliable, WithValidation)
-    void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot, uint8 ZOffset, AUTCharacter* ClientHitChar);
+    void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
 
     UFUNCTION(Server, Unreliable, WithValidation)
-    void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot); // Added ClientViewRot
+    void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
 
     UPROPERTY()
     TArray<FPendingFakeProjectile> PendingFakeProjectiles;
@@ -616,11 +839,18 @@ protected:
     /** Server RPC: Client's fake projectile hit a target, validate with rewind */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
-        int32 ClaimedEventIndex, uint8 ClaimedFireMode);
+        uint8 ClaimedFireMode);
 
-    /** Server-side tracking of authoritative projectiles by EventIndex */
+    /** Server-side tracking of authoritative projectiles, matched oldest-first by fire mode. */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
+
+    /** Every projectile class this weapon has spawned, recorded on BOTH server and the firing
+     *  client (the client records it when it spawns the fake). Not replicated and never needs to
+     *  be: each side populates its own copy from its own spawn. Bounded by the number of distinct
+     *  projectile classes a weapon can fire (1-3), so it is add-unique and never cleared. */
+    UPROPERTY()
+    TArray<TSubclassOf<AUTProjectile>> NCPFiredProjClasses;
 
 
     // =========================================================================
@@ -629,6 +859,15 @@ protected:
 
     /** Find and cache the ClientHitsounds mutator from the game state mutator chain */
     AClientHitsounds* FindClientHitsoundsMutator();
+
+    /** Damage the hitsound prediction should assume for a hit in this fire mode.
+     *  bHeadshotClaimed is true when the shot is sending a head claim
+     *  (ClientHeadOffset non-zero). Base weapons ignore the claim and return the
+     *  fire mode's InstantHitInfo damage; headshot-capable weapons override and
+     *  return their headshot damage so the predicted cue matches what the server
+     *  will report if the claim validates. Estimation only — never used for
+     *  actual damage. */
+    virtual int32 GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshotClaimed);
 
     /** Cached pointer to the ClientHitsounds mutator */
     UPROPERTY()

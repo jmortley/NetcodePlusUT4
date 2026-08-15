@@ -1,10 +1,12 @@
-// ElimPlusScoreboard.cpp — Portrait-row scoreboard for ElimPlus.
+// ElimPlusScoreboard.cpp — country-flag scoreboard for ElimPlus, with an
+// optional recovered Elimination 1.13 visual skin.
 // Reads stats from AElimPlusStatsReplicator (Damage, PPRCurrent, Elo, LGAcc).
 // Falls back to PlayerState->DamageDone when the replicator isn't available
 // (listen-server / standalone). 7 columns: Name | K | D | DMG | PPR | ELO | LG_Acc | Ping.
 
 #include "ElimPlusScoreboard.h"
 #include "NCPlusScoreboardHost.h"
+#include "NCPlusScoreboardReady.h"
 #include "NCPlusHUDLayout.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
@@ -15,8 +17,146 @@
 #include "UTBot.h"
 #include "Engine/NetDriver.h"
 #include "Engine/NetConnection.h"
+#include "Engine/Texture2D.h"
 #include "ElimPlusStatsReplicator.h"
 #include "EngineUtils.h"
+#if !UE_SERVER
+#include "Interfaces/IImageWrapper.h"
+#include "Interfaces/IImageWrapperModule.h"
+#endif
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+
+namespace
+{
+	enum class EAbsoluteElimRowStyle : uint8
+	{
+		Normal = 0,
+		Dead = 1,
+		Totals = 2
+	};
+
+	struct FAbsoluteElimScoreboardTextures
+	{
+		bool bTriedLoad = false;
+		UTexture2D* Banner[2] = { nullptr, nullptr };
+		UTexture2D* Row[2][3] =
+		{
+			{ nullptr, nullptr, nullptr },
+			{ nullptr, nullptr, nullptr }
+		};
+		UTexture2D* Categories = nullptr;
+	};
+
+	FAbsoluteElimScoreboardTextures GAbsoluteElimScoreboardTextures;
+
+	UTexture2D* LoadAbsoluteElimScoreboardTexture(const TCHAR* RelativePath,
+		float Saturation = 1.f, float Multiply = 1.f)
+	{
+#if !UE_SERVER
+		const FString FilePath = FPaths::Combine(
+			*FNCPlusHUDLayout::PluginResourcesDir(),
+			TEXT("AbsoluteElimHUD"),
+			RelativePath);
+		TArray<uint8> CompressedData;
+		if (!FFileHelper::LoadFileToArray(CompressedData, *FilePath)
+			|| CompressedData.Num() == 0)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[AbsoluteElimScoreboard] Missing resource: %s"), *FilePath);
+			return nullptr;
+		}
+
+		IImageWrapperModule& ImageWrapperModule =
+			FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+		IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+		const TArray<uint8>* RawData = nullptr;
+		if (!ImageWrapper.IsValid()
+			|| !ImageWrapper->SetCompressed(CompressedData.GetData(), CompressedData.Num())
+			|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData)
+			|| !RawData)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[AbsoluteElimScoreboard] Could not decode: %s"), *FilePath);
+			return nullptr;
+		}
+
+		const int32 Width = ImageWrapper->GetWidth();
+		const int32 Height = ImageWrapper->GetHeight();
+		if (Width <= 0 || Height <= 0 || RawData->Num() != Width * Height * 4)
+		{
+			return nullptr;
+		}
+
+		TArray<uint8> Pixels = *RawData;
+		if (!FMath::IsNearlyEqual(Saturation, 1.f) || !FMath::IsNearlyEqual(Multiply, 1.f))
+		{
+			for (int32 Pixel = 0; Pixel < Pixels.Num(); Pixel += 4)
+			{
+				const float B = float(Pixels[Pixel]);
+				const float G = float(Pixels[Pixel + 1]);
+				const float R = float(Pixels[Pixel + 2]);
+				const float Luma = 0.0722f * B + 0.7152f * G + 0.2126f * R;
+				Pixels[Pixel] = uint8(FMath::Clamp(FMath::RoundToInt((Luma + (B - Luma) * Saturation) * Multiply), 0, 255));
+				Pixels[Pixel + 1] = uint8(FMath::Clamp(FMath::RoundToInt((Luma + (G - Luma) * Saturation) * Multiply), 0, 255));
+				Pixels[Pixel + 2] = uint8(FMath::Clamp(FMath::RoundToInt((Luma + (R - Luma) * Saturation) * Multiply), 0, 255));
+			}
+		}
+
+		UTexture2D* Texture = UTexture2D::CreateTransient(Width, Height, PF_B8G8R8A8);
+		if (!Texture || !Texture->PlatformData || Texture->PlatformData->Mips.Num() == 0)
+		{
+			return nullptr;
+		}
+		Texture->SRGB = true;
+		Texture->NeverStream = true;
+		FTexture2DMipMap& Mip = Texture->PlatformData->Mips[0];
+		void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
+		FMemory::Memcpy(TextureData, Pixels.GetData(), Pixels.Num());
+		Mip.BulkData.Unlock();
+		Texture->UpdateResource();
+		Texture->AddToRoot();
+		return Texture;
+#else
+		return nullptr;
+#endif
+	}
+
+	bool EnsureAbsoluteElimScoreboardTextures()
+	{
+		FAbsoluteElimScoreboardTextures& T = GAbsoluteElimScoreboardTextures;
+		if (!T.bTriedLoad)
+		{
+			T.bTriedLoad = true;
+			T.Banner[0] = LoadAbsoluteElimScoreboardTexture(TEXT("LeftTeamBannerRed.png"));
+			T.Banner[1] = LoadAbsoluteElimScoreboardTexture(TEXT("RightTeamBannerBlue.png"));
+			T.Row[0][int32(EAbsoluteElimRowStyle::Normal)] = LoadAbsoluteElimScoreboardTexture(TEXT("RowLeftSideRed.png"));
+			T.Row[1][int32(EAbsoluteElimRowStyle::Normal)] = LoadAbsoluteElimScoreboardTexture(TEXT("RowRightSideBlue.png"));
+			T.Row[0][int32(EAbsoluteElimRowStyle::Dead)] = LoadAbsoluteElimScoreboardTexture(TEXT("RowLeftSideRed.png"), 0.8f, 0.5f);
+			T.Row[1][int32(EAbsoluteElimRowStyle::Dead)] = LoadAbsoluteElimScoreboardTexture(TEXT("RowRightSideBlue.png"), 0.8f, 0.5f);
+			T.Row[0][int32(EAbsoluteElimRowStyle::Totals)] = LoadAbsoluteElimScoreboardTexture(TEXT("RowLeftSideRed.png"), 0.12f, 0.65f);
+			T.Row[1][int32(EAbsoluteElimRowStyle::Totals)] = LoadAbsoluteElimScoreboardTexture(TEXT("RowRightSideBlue.png"), 0.12f, 0.65f);
+			T.Categories = LoadAbsoluteElimScoreboardTexture(TEXT("CategoriesRight.png"));
+		}
+
+		return T.Banner[0] && T.Banner[1] && T.Categories
+			&& T.Row[0][0] && T.Row[0][1] && T.Row[0][2]
+			&& T.Row[1][0] && T.Row[1][1] && T.Row[1][2];
+	}
+
+	void DrawAbsoluteElimScoreboardTile(UCanvas* Canvas, UTexture2D* Texture,
+		float X, float Y, float Width, float Height, float Opacity = 1.f,
+		bool bFlipHorizontal = false)
+	{
+		if (!Canvas || !Texture) return;
+		Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, Opacity));
+		const float TextureWidth = float(Texture->GetSizeX());
+		Canvas->DrawTile(Texture, X, Y, Width, Height,
+			bFlipHorizontal ? TextureWidth : 0.f, 0.f,
+			bFlipHorizontal ? -TextureWidth : TextureWidth, float(Texture->GetSizeY()),
+			BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
+}
 
 UElimPlusScoreboard::UElimPlusScoreboard(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -47,27 +187,52 @@ UElimPlusScoreboard::UElimPlusScoreboard(const FObjectInitializer& ObjectInitial
 
 	bUseRoundKills = false; // overall match stats
 
-	// Portrait atlas UV coords — same as WipeoutScoreboard / FlagRun.
-	// Texture pointer is grabbed from UTHUDOwner at draw time.
-	RedTeamIcon.U = 5.f;
-	RedTeamIcon.V = 5.f;
-	RedTeamIcon.UL = 224.f;
-	RedTeamIcon.VL = 310.f;
+}
 
-	BlueTeamIcon.U = 237.f;
-	BlueTeamIcon.V = 5.f;
-	BlueTeamIcon.UL = 224.f;
-	BlueTeamIcon.VL = 310.f;
+void UElimPlusScoreboard::PreloadAbsoluteTextures()
+{
+	EnsureAbsoluteElimScoreboardTextures();
+}
 
-	BlueTeamOverlay.U = 237.0f;
-	BlueTeamOverlay.V = 330.0f;
-	BlueTeamOverlay.UL = 224.0f;
-	BlueTeamOverlay.VL = 310.0f;
+void UElimPlusScoreboard::ReleaseAbsoluteTextures()
+{
+	FAbsoluteElimScoreboardTextures& T = GAbsoluteElimScoreboardTextures;
+	auto ReleaseTexture = [](UTexture2D*& Texture)
+	{
+		if (Texture && Texture->IsRooted())
+		{
+			Texture->RemoveFromRoot();
+		}
+		Texture = nullptr;
+	};
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		ReleaseTexture(T.Banner[Team]);
+		for (int32 Style = 0; Style < 3; ++Style)
+		{
+			ReleaseTexture(T.Row[Team][Style]);
+		}
+	}
+	ReleaseTexture(T.Categories);
+	T.bTriedLoad = false;
+}
 
-	RedTeamOverlay.U = 5.0f;
-	RedTeamOverlay.V = 330.0f;
-	RedTeamOverlay.UL = 224.0f;
-	RedTeamOverlay.VL = 310.0f;
+void UElimPlusScoreboard::DrawReadyText(AUTPlayerState* PlayerState,
+	float XOffset, float YOffset, float Width)
+{
+	FText PlayerReady;
+	if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
+		TeamSwapText, PlayerReady))
+	{
+		Super::DrawReadyText(PlayerState, XOffset, YOffset, Width);
+		return;
+	}
+
+	ReadyColor = FLinearColor::White;
+	ReadyScale = 1.f;
+	DrawText(PlayerReady, XOffset + ScaledCellWidth * ColumnHeaderScoreX,
+		YOffset + ColumnY, UTHUDOwner->SmallFont, ReadyScale * RenderScale, 1.f,
+		ReadyColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
 
 bool UElimPlusScoreboard::HasCustomTeamColors() const
@@ -92,8 +257,20 @@ bool UElimPlusScoreboard::HasCustomTeamColors() const
 	return false;
 }
 
+bool UElimPlusScoreboard::ShouldDrawAbsoluteElimScoreboard() const
+{
+	return FNCPlusHUDLayout::WantsStockTeamPanel()
+		&& FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
+		&& EnsureAbsoluteElimScoreboardTextures();
+}
+
 void UElimPlusScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 {
+	if (ShouldDrawAbsoluteElimScoreboard())
+	{
+		DrawAbsoluteTeamPanel(RenderDelta, YOffset);
+		return;
+	}
 	if (!UTGameState || UTGameState->Teams.Num() < 2 || !UTGameState->Teams[0] || !UTGameState->Teams[1]) return;
 
 	// Faction names only when custom team colors are in use AND the scorebar's
@@ -166,6 +343,11 @@ void UElimPlusScoreboard::DrawTeamPanel(float RenderDelta, float& YOffset)
 
 void UElimPlusScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 {
+	if (ShouldDrawAbsoluteElimScoreboard())
+	{
+		DrawAbsoluteScoreHeaders(RenderDelta, YOffset);
+		return;
+	}
 	float XOffset = ScaledEdgeSize;
 	const float Height = 23.f * RenderScale;
 
@@ -196,95 +378,495 @@ void UElimPlusScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 	YOffset += Height + 4.f;
 }
 
-void UElimPlusScoreboard::DrawPortraitPip(AUTPlayerState* PlayerState, float XOffset, float YOffset, float PipWidth, float PipHeight)
+void UElimPlusScoreboard::DrawPlayerFlag(AUTPlayerState* PlayerState, float XOffset, float YOffset,
+	float FlagWidth, float FlagHeight, float Opacity)
 {
-	if (!UTHUDOwner || !UTHUDOwner->CharacterPortraitAtlas) return;
+	if (!UTHUDOwner || !Canvas || !PlayerState) return;
 
-	UTexture2D* Atlas = UTHUDOwner->CharacterPortraitAtlas;
-	if (RedTeamIcon.Texture == nullptr)
-	{
-		RedTeamIcon.Texture = Atlas;
-		BlueTeamIcon.Texture = Atlas;
-		RedTeamOverlay.Texture = Atlas;
-		BlueTeamOverlay.Texture = Atlas;
-	}
+	FTextureUVs FlagUV;
+	UTexture2D* FlagTexture = UTHUDOwner->ResolveFlag(PlayerState, FlagUV);
+	if (!FlagTexture) return;
 
-	// In elim, dead means dead-until-round-end. Show portrait dimmed; no countdown.
-	AUTCharacter* UTC_Pip = PlayerState->GetUTCharacter();
-	const bool bIsDead = (UTC_Pip == nullptr || UTC_Pip->IsDead());
-	const uint8 TeamNum = PlayerState->GetTeamNum();
+	const float Border = FMath::Max(1.f, 2.f * RenderScale);
+	Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.85f * Opacity));
+	Canvas->DrawTile(Canvas->DefaultTexture, XOffset - Border, YOffset - Border,
+		FlagWidth + 2.f * Border, FlagHeight + 2.f * Border, 0.f, 0.f, 1.f, 1.f,
+		BLEND_Translucent);
 
-	// Layer 1: Team-colored background (TeamSkins-aware)
-	FLinearColor TeamBGColor = (TeamNum == 1)
-		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
-		: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);
-	if (UTGameState && UTGameState->Teams.IsValidIndex(TeamNum) && UTGameState->Teams[TeamNum])
-	{
-		TeamBGColor = UTGameState->Teams[TeamNum]->TeamColor;
-	}
-	Canvas->SetLinearDrawColor(TeamBGColor);
-	Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipWidth, PipHeight, 0, 0, 1, 1);
+	AUTCharacter* Character = PlayerState->GetUTCharacter();
+	const bool bIsDead = !Character || Character->IsDead();
+	const float Luminance = bIsDead ? 0.35f : 1.f;
+	Canvas->SetLinearDrawColor(FLinearColor(Luminance, Luminance, Luminance, Opacity));
+	Canvas->DrawTile(FlagTexture, XOffset, YOffset, FlagWidth, FlagHeight,
+		FlagUV.U, FlagUV.V, FlagUV.UL, FlagUV.VL, BLEND_Translucent);
 	Canvas->SetLinearDrawColor(FLinearColor::White);
-
-	// Layer 2: Character portrait (dimmed if dead)
-	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
-	if (CharIcon.Texture != nullptr)
-	{
-		if (bIsDead)
-		{
-			Canvas->SetLinearDrawColor(FLinearColor(0.2f, 0.2f, 0.2f, 1.f));
-		}
-		if (TeamNum == 1)
-		{
-			Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipWidth, PipHeight,
-				CharIcon.U + CharIcon.UL, CharIcon.V, CharIcon.UL * -1.0f, CharIcon.VL);
-		}
-		else
-		{
-			Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipWidth, PipHeight,
-				CharIcon.U, CharIcon.V, CharIcon.UL, CharIcon.VL);
-		}
-	}
-
-	// Layer 3: Full-pip dark dim if dead (no sweep — they don't respawn this round)
-	if (bIsDead)
-	{
-		Canvas->SetLinearDrawColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.6f));
-		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipWidth, PipHeight, 0, 0, 1, 1, BLEND_Translucent);
-	}
-
-	// Layer 4: Team-colored frame overlay
-	Canvas->SetLinearDrawColor(FLinearColor::White);
-	const FCanvasIcon& OverlayIcon = (TeamNum == 1) ? BlueTeamOverlay : RedTeamOverlay;
-	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipWidth, PipHeight,
-		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
-
-	// Layer 5: Red "X" on dead portraits (always shown — no respawn this round)
-	if (bIsDead)
-	{
-		const float FontScale = 0.75f * RenderScale;
-		FString XStr = TEXT("X");
-		float XL, YL;
-		Canvas->StrLen(UTHUDOwner->SmallFont, XStr, XL, YL);
-		FFontRenderInfo TextRenderInfo;
-		TextRenderInfo.bEnableShadow = true;
-		Canvas->SetLinearDrawColor(FLinearColor(1.f, 0.2f, 0.2f, 0.95f));
-		Canvas->DrawText(UTHUDOwner->SmallFont, FText::FromString(XStr),
-			XOffset + (PipWidth * 0.5f) - (XL * FontScale * 0.5f),
-			YOffset + (PipHeight * 0.5f) - (YL * FontScale * 0.5f),
-			FontScale, FontScale, TextRenderInfo);
-	}
 }
 
-// Helper: locate the stats replicator on this client
-static AElimPlusStatsReplicator* FindElimPlusStatsRep(UWorld* World)
+AElimPlusStatsReplicator* UElimPlusScoreboard::FindStatsReplicator()
 {
-	if (!World) return nullptr;
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (CachedStatsReplicatorWorld.Get() != World)
+	{
+		CachedStatsReplicatorWorld = World;
+		CachedStatsReplicator.Reset();
+		NextStatsReplicatorSearchTime = 0.f;
+		ResetCachedRoster();
+	}
+	if (CachedStatsReplicator.IsValid()
+		&& CachedStatsReplicator->GetWorld() == World)
+	{
+		return CachedStatsReplicator.Get();
+	}
+	CachedStatsReplicator.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextStatsReplicatorSearchTime)
+	{
+		return nullptr;
+	}
+	NextStatsReplicatorSearchTime = Now + 1.f;
 	for (TActorIterator<AElimPlusStatsReplicator> It(World); It; ++It)
 	{
+		CachedStatsReplicator = *It;
+		NextStatsReplicatorSearchTime = 0.f;
 		return *It;
 	}
 	return nullptr;
+}
+
+void UElimPlusScoreboard::ResetCachedRoster()
+{
+	CachedRoster.Reset();
+	RosterScratch.Reset();
+	CachedTeamRosterIndices[0].Reset();
+	CachedTeamRosterIndices[1].Reset();
+	CachedRosterIndexByPlayer.Reset();
+	CachedSpectatorNames.Reset();
+}
+
+void UElimPlusScoreboard::UpdateCachedRoster(AElimPlusStatsReplicator* StatsReplicator)
+{
+	CachedSpectatorNames.Reset();
+	RosterScratch.Reset();
+	if (!UTGameState)
+	{
+		ResetCachedRoster();
+		return;
+	}
+	RosterScratch.Reserve(UTGameState->PlayerArray.Num());
+	CachedSpectatorNames.Reserve(UTGameState->PlayerArray.Num());
+
+	for (APlayerState* PlayerBase : UTGameState->PlayerArray)
+	{
+		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(PlayerBase);
+		if (!PlayerState)
+		{
+			continue;
+		}
+		if (PlayerState->bOnlySpectator)
+		{
+			if (!PlayerState->bIsDemoRecording)
+			{
+				CachedSpectatorNames.Add(PlayerState->PlayerName);
+			}
+			continue;
+		}
+
+		const int32 TeamIndex = PlayerState->GetTeamNum();
+		if (TeamIndex < 0 || TeamIndex > 1)
+		{
+			continue;
+		}
+
+		FCachedRosterEntry Snapshot;
+		Snapshot.PlayerState = PlayerState;
+		Snapshot.TeamIndex = TeamIndex;
+		Snapshot.KillsAndAssists = PlayerState->Kills + PlayerState->KillAssists;
+		Snapshot.Score = PlayerState->Score;
+
+		const FString PlayerId = PlayerState->UniqueId.IsValid()
+			? PlayerState->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
+		const FElimPlusStatsEntry* Entry = StatsReplicator
+			? StatsReplicator->FindEntry(PlayerId)
+			: nullptr;
+		Snapshot.DamageDone = Entry ? Entry->DamageDone : int32(PlayerState->DamageDone);
+		if (Entry)
+		{
+			Snapshot.PPRCurrent = Entry->PPRCurrent;
+			Snapshot.Elo = Entry->Elo;
+			Snapshot.EloDeltaThisMatch = Entry->EloDeltaThisMatch;
+			Snapshot.LinkGunAccuracyTimes100 = Entry->LinkGunAccuracyTimes100;
+			Snapshot.GlobalRank = Entry->GlobalRank;
+		}
+		RosterScratch.Add(MoveTemp(Snapshot));
+	}
+
+	bool bSortStateChanged = CachedRoster.Num() != RosterScratch.Num();
+	bool bAnyDataChanged = bSortStateChanged;
+	if (!bAnyDataChanged)
+	{
+		for (int32 Index = 0; Index < RosterScratch.Num(); ++Index)
+		{
+			if (!CachedRoster[Index].HasSameSortState(RosterScratch[Index]))
+			{
+				bSortStateChanged = true;
+				bAnyDataChanged = true;
+				break;
+			}
+			if (!CachedRoster[Index].HasSameData(RosterScratch[Index]))
+			{
+				bAnyDataChanged = true;
+			}
+		}
+	}
+	if (!bAnyDataChanged)
+	{
+		return;
+	}
+
+	CachedRoster = RosterScratch;
+	if (!bSortStateChanged)
+	{
+		return;
+	}
+
+	CachedTeamRosterIndices[0].Reset();
+	CachedTeamRosterIndices[1].Reset();
+	CachedRosterIndexByPlayer.Reset();
+	for (int32 Index = 0; Index < CachedRoster.Num(); ++Index)
+	{
+		const FCachedRosterEntry& Entry = CachedRoster[Index];
+		if (AUTPlayerState* PlayerState = Entry.PlayerState.Get())
+		{
+			CachedRosterIndexByPlayer.Add(PlayerState, Index);
+			CachedTeamRosterIndices[Entry.TeamIndex].Add(Index);
+		}
+	}
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		CachedTeamRosterIndices[TeamIndex].Sort([this](int32 A, int32 B)
+		{
+			const FCachedRosterEntry& Left = CachedRoster[A];
+			const FCachedRosterEntry& Right = CachedRoster[B];
+			if (Left.DamageDone != Right.DamageDone)
+			{
+				return Left.DamageDone > Right.DamageDone;
+			}
+			if (Left.KillsAndAssists != Right.KillsAndAssists)
+			{
+				return Left.KillsAndAssists > Right.KillsAndAssists;
+			}
+			return Left.Score > Right.Score;
+		});
+	}
+}
+
+const UElimPlusScoreboard::FCachedRosterEntry* UElimPlusScoreboard::FindCachedRosterEntry(
+	const AUTPlayerState* PlayerState) const
+{
+	const int32* Index = CachedRosterIndexByPlayer.Find(PlayerState);
+	return Index && CachedRoster.IsValidIndex(*Index) ? &CachedRoster[*Index] : nullptr;
+}
+
+void UElimPlusScoreboard::DrawAbsoluteTeamPanel(float RenderDelta, float& YOffset)
+{
+	if (!Canvas || !UTHUDOwner || !UTGameState || UTGameState->Teams.Num() < 2) return;
+
+	const float S = FMath::Min(float(Canvas->ClipX) / 2560.f, float(Canvas->ClipY) / 1440.f);
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float TopY = 314.f * S;
+	const float BannerW = 960.f * S;
+	const float BannerH = 140.f * S;
+	const float BannerY = TopY - BannerH;
+	const float LeftX = CenterX - BannerW;
+	const float RightX = CenterX;
+
+	FAbsoluteElimScoreboardTextures& T = GAbsoluteElimScoreboardTextures;
+	DrawAbsoluteElimScoreboardTile(Canvas, T.Banner[0], LeftX, BannerY, BannerW, BannerH, 0.9275f);
+	DrawAbsoluteElimScoreboardTile(Canvas, T.Banner[1], RightX, BannerY, BannerW, BannerH, 0.9275f, true);
+
+	UFont* TeamNameFont = UTHUDOwner->MediumFont ? UTHUDOwner->MediumFont : UTHUDOwner->SmallFont;
+	UFont* TeamScoreFont = UTHUDOwner->HugeFont ? UTHUDOwner->HugeFont : TeamNameFont;
+	const FLinearColor ScoreboardWhite(0.75f, 0.75f, 0.75f, 1.f);
+	const float NameY = BannerY + 45.f * S;
+	// Keep the large score numerals on the same visual centerline as the team names.
+	const float ScoreY = NameY;
+	DrawText(FText::FromString(TEXT("RED TEAM")), LeftX + 89.f * S, NameY,
+		TeamNameFont, 2.f * S, 1.f, ScoreboardWhite, ETextHorzPos::Left, ETextVertPos::Center);
+	DrawText(FText::FromString(TEXT("BLUE TEAM")), RightX + 89.f * S, NameY,
+		TeamNameFont, 2.f * S, 1.f, ScoreboardWhite, ETextHorzPos::Left, ETextVertPos::Center);
+
+	const int32 RedScore = UTGameState->Teams.IsValidIndex(0) && UTGameState->Teams[0]
+		? UTGameState->Teams[0]->Score : 0;
+	const int32 BlueScore = UTGameState->Teams.IsValidIndex(1) && UTGameState->Teams[1]
+		? UTGameState->Teams[1]->Score : 0;
+	DrawText(FText::AsNumber(RedScore), LeftX + 807.f * S, ScoreY,
+		TeamScoreFont, S * RedScoreScaling, 1.f, FLinearColor::White,
+		ETextHorzPos::Center, ETextVertPos::Center);
+	DrawText(FText::AsNumber(BlueScore), RightX + 807.f * S, ScoreY,
+		TeamScoreFont, S * BlueScoreScaling, 1.f, FLinearColor::White,
+		ETextHorzPos::Center, ETextVertPos::Center);
+
+	BlueScoreScaling = FMath::Max(BlueScoreScaling - RenderDelta, 1.f);
+	RedScoreScaling = FMath::Max(RedScoreScaling - RenderDelta, 1.f);
+	YOffset = TopY;
+}
+
+void UElimPlusScoreboard::DrawAbsoluteScoreHeaders(float RenderDelta, float& YOffset)
+{
+	if (!Canvas || !UTHUDOwner) return;
+
+	const float S = FMath::Min(float(Canvas->ClipX) / 2560.f, float(Canvas->ClipY) / 1440.f);
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float CategoriesW = 800.f * S;
+	const float CategoriesH = 30.f * S;
+	const float RowW = 830.f * S;
+	const float LeftRowX = CenterX - RowW;
+	const float RightRowX = CenterX;
+	DrawAbsoluteElimScoreboardTile(Canvas, GAbsoluteElimScoreboardTextures.Categories,
+		CenterX - CategoriesW, YOffset, CategoriesW, CategoriesH, 0.75f, true);
+	DrawAbsoluteElimScoreboardTile(Canvas, GAbsoluteElimScoreboardTextures.Categories,
+		CenterX, YOffset, CategoriesW, CategoriesH, 0.75f, true);
+
+	UFont* Font = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
+	const float TextY = YOffset + 11.f * S;
+	const float TextScale = 0.8f * S;
+	const FLinearColor TextColor(0.75f, 0.75f, 0.75f, 1.f);
+	// Column order mirrors the standard ElimPlus board (K | D | DMG | ELO, ping
+	// last) so both scoreboard skins read the same left-to-right. Header, player
+	// row, and totals row all share these slots — keep the three in sync.
+	const TCHAR* Labels[] = { TEXT("K"), TEXT("D"), TEXT("DMG"), TEXT("ELO"), TEXT("PING") };
+	const float Offsets[] = { 400.f, 470.f, 549.f, 640.f, 740.f };
+
+	DrawText(FText::FromString(TEXT("PLAYER")), LeftRowX + 80.f * S, TextY,
+		Font, TextScale, 1.f, TextColor, ETextHorzPos::Left, ETextVertPos::Center);
+	DrawText(FText::FromString(TEXT("PLAYER")), RightRowX + 80.f * S, TextY,
+		Font, TextScale, 1.f, TextColor, ETextHorzPos::Left, ETextVertPos::Center);
+	for (int32 Column = 0; Column < 5; ++Column)
+	{
+		const FText Label = FText::FromString(Labels[Column]);
+		DrawText(Label, LeftRowX + Offsets[Column] * S, TextY,
+			Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		DrawText(Label, RightRowX + Offsets[Column] * S, TextY,
+			Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+	}
+
+	YOffset += CategoriesH;
+}
+
+void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 TeamIndex,
+	float XOffset, float YOffset, float AbsoluteScale)
+{
+	if (!Canvas || !UTHUDOwner || !PlayerState) return;
+
+	const float S = AbsoluteScale;
+	const float RowW = 830.f * S;
+	const float RowH = 64.f * S;
+	AUTCharacter* Character = PlayerState->GetUTCharacter();
+	const bool bIsDead = !Character || Character->IsDead();
+	const int32 Style = int32(bIsDead ? EAbsoluteElimRowStyle::Dead : EAbsoluteElimRowStyle::Normal);
+	DrawAbsoluteElimScoreboardTile(Canvas,
+		GAbsoluteElimScoreboardTextures.Row[TeamIndex][Style],
+		XOffset, YOffset, RowW, RowH, 0.9275f);
+
+	if (bIsInteractive)
+	{
+		const FVector4 Bounds(RenderPosition.X + XOffset, RenderPosition.Y + YOffset,
+			RenderPosition.X + XOffset + RowW, RenderPosition.Y + YOffset + RowH);
+		SelectionStack.Add(FSelectionObject(PlayerState, Bounds));
+	}
+
+	const bool bOwner = UTHUDOwner->UTPlayerOwner
+		&& UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState;
+	if (bOwner)
+	{
+		const float Border = FMath::Max(1.f, 2.f * S);
+		Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.9704f, 1.f, 0.9f));
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, RowW, Border, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset + RowH - Border, RowW, Border, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->SetLinearDrawColor(FLinearColor::White);
+	}
+
+	const float FlagW = 36.f * S;
+	const float FlagH = 26.f * S;
+	const float FlagX = XOffset + 30.f * S;
+	DrawPlayerFlag(PlayerState, FlagX, YOffset + 13.f * S, FlagW, FlagH,
+		bIsDead ? 0.6f : 1.f);
+
+	UFont* RowFont = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
+	const float RowTextScale = 1.2f * S;
+	const float TextY = YOffset + RowH * 0.5f + 2.f * S;
+	FLinearColor TextColor = bIsDead
+		? FLinearColor(0.35f, 0.35f, 0.35f, 1.f)
+		: FLinearColor(0.75f, 0.75f, 0.75f, 1.f);
+	if (bOwner)
+	{
+		TextColor = bIsDead
+			? FLinearColor(0.04f, 0.098f, 0.10f, 1.f)
+			: FLinearColor(0.f, 0.9704f, 1.f, 1.f);
+	}
+
+	float NameXL = 0.f, NameYL = 0.f;
+	Canvas->StrLen(RowFont, PlayerState->PlayerName, NameXL, NameYL);
+	const float NameScale = FMath::Min(RowTextScale, 285.f * S / FMath::Max(NameXL, 1.f));
+	const float NameX = XOffset + 80.f * S;
+	DrawText(FText::FromString(PlayerState->PlayerName), NameX, TextY,
+		RowFont, NameScale, 1.f, TextColor,
+		ETextHorzPos::Left,
+		ETextVertPos::Center);
+
+	const FCachedRosterEntry* CachedEntry = FindCachedRosterEntry(PlayerState);
+	const int32 Damage = CachedEntry ? CachedEntry->DamageDone : int32(PlayerState->DamageDone);
+	const int32 Elo = CachedEntry ? CachedEntry->Elo : 1400;
+	const int32 Kills = PlayerState->Kills + PlayerState->KillAssists;
+
+	FString PingString;
+	if (AUTBot* Bot = Cast<AUTBot>(PlayerState->GetOwner()))
+	{
+		PingString = FString::Printf(TEXT("%.1f"), Bot->Skill);
+	}
+	else if (GetWorld()->GetNetMode() != NM_Standalone)
+	{
+		const int32 Ping = bOwner ? PlayerState->ExactPing : PlayerState->Ping * 4;
+		PingString = FString::Printf(TEXT("%d"), Ping);
+	}
+
+	auto ColumnX = [XOffset, S](float Offset)
+	{
+		return XOffset + Offset * S;
+	};
+	const float StatScale = 0.92f * S;
+	if (!UTGameState->HasMatchStarted())
+	{
+		FText PlayerReady;
+		if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
+			TeamSwapText, PlayerReady))
+		{
+			PlayerReady = PlayerState->bPendingTeamSwitch
+				? NSLOCTEXT("ElimPlusScoreboard", "SwitchTeams", "SWITCH TEAMS")
+				: (PlayerState->bIsWarmingUp
+					? NSLOCTEXT("ElimPlusScoreboard", "Warmup", "WARMUP")
+					: NSLOCTEXT("ElimPlusScoreboard", "NotReady", "NOT READY"));
+		}
+		DrawText(PlayerReady, ColumnX(640.f), TextY,
+			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+	}
+	else
+	{
+		DrawText(FText::AsNumber(Kills), ColumnX(400.f), TextY,
+			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		DrawText(FText::AsNumber(PlayerState->Deaths), ColumnX(470.f), TextY,
+			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		DrawText(FText::AsNumber(Damage), ColumnX(549.f), TextY,
+			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		DrawText(FText::AsNumber(Elo), ColumnX(640.f), TextY,
+			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		DrawText(FText::FromString(PingString), ColumnX(740.f), TextY,
+			RowFont, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+	}
+}
+
+void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOffset)
+{
+	if (!Canvas || !UTHUDOwner || !UTGameState) return;
+
+	const float S = FMath::Min(float(Canvas->ClipX) / 2560.f, float(Canvas->ClipY) / 1440.f);
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float RowW = 830.f * S;
+	const float RowH = 64.f * S;
+	float MaxY = YOffset;
+	UpdateCachedRoster(FindStatsReplicator());
+
+	for (int32 Team = 0; Team < 2; ++Team)
+	{
+		const TArray<int32>& PlayerIndices = CachedTeamRosterIndices[Team];
+
+		const float RowX = Team == 0 ? CenterX - RowW : CenterX;
+		float DrawY = YOffset;
+		const int32 MaxRows = ShouldDrawScoringStats() ? 5 : PlayerIndices.Num();
+		int32 DrawnRows = 0;
+		for (int32 RosterIndex : PlayerIndices)
+		{
+			if (DrawnRows >= MaxRows) break;
+			AUTPlayerState* PlayerState = CachedRoster[RosterIndex].PlayerState.Get();
+			if (!PlayerState) continue;
+			DrawAbsolutePlayer(PlayerState, Team, RowX, DrawY, S);
+			DrawY += RowH;
+			++DrawnRows;
+		}
+
+		if (PlayerIndices.Num() > 0)
+		{
+			int32 TotalKills = 0, TotalDeaths = 0, TotalDamage = 0;
+			int64 TotalElo = 0, TotalPing = 0;
+			int32 EloCount = 0, PingCount = 0;
+			for (int32 RosterIndex : PlayerIndices)
+			{
+				const FCachedRosterEntry& Entry = CachedRoster[RosterIndex];
+				AUTPlayerState* PlayerState = Entry.PlayerState.Get();
+				if (!PlayerState) continue;
+				TotalKills += PlayerState->Kills + PlayerState->KillAssists;
+				TotalDeaths += PlayerState->Deaths;
+				TotalDamage += Entry.DamageDone;
+				TotalElo += Entry.Elo;
+				++EloCount;
+				if (!Cast<AUTBot>(PlayerState->GetOwner()) && GetWorld()->GetNetMode() != NM_Standalone)
+				{
+					const bool bOwner = UTHUDOwner->UTPlayerOwner
+						&& UTHUDOwner->UTPlayerOwner->UTPlayerState == PlayerState;
+					TotalPing += bOwner ? PlayerState->ExactPing : PlayerState->Ping * 4;
+					++PingCount;
+				}
+			}
+
+			DrawAbsoluteElimScoreboardTile(Canvas,
+				GAbsoluteElimScoreboardTextures.Row[Team][int32(EAbsoluteElimRowStyle::Totals)],
+				RowX, DrawY, RowW, RowH, 0.9275f);
+			UFont* Font = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
+			const float TextY = DrawY + RowH * 0.5f + 2.f * S;
+			const float TextScale = 0.92f * S;
+			const FLinearColor TextColor(0.75f, 0.75f, 0.75f, 1.f);
+			auto ColumnX = [RowX, S](float Offset)
+			{
+				return RowX + Offset * S;
+			};
+			DrawText(FText::FromString(TEXT("TOTAL")), ColumnX(80.f), TextY,
+				Font, 1.2f * S, 1.f, TextColor,
+				ETextHorzPos::Left, ETextVertPos::Center);
+			DrawText(FText::AsNumber(TotalKills), ColumnX(400.f), TextY,
+				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::AsNumber(TotalDeaths), ColumnX(470.f), TextY,
+				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::AsNumber(TotalDamage), ColumnX(549.f), TextY,
+				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::AsNumber(EloCount > 0 ? int32(TotalElo / EloCount) : 1400), ColumnX(640.f), TextY,
+				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			if (PingCount > 0)
+			{
+				DrawText(FText::AsNumber(int32(TotalPing / PingCount)), ColumnX(740.f), TextY,
+					Font, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			}
+			DrawY += RowH;
+		}
+
+		MaxY = FMath::Max(MaxY, DrawY);
+	}
+
+	YOffset = MaxY;
+	if (CachedSpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
+	{
+		const FString Spectators = TEXT("Spectators: ") + FString::Join(CachedSpectatorNames, TEXT(", "));
+		DrawText(FText::FromString(Spectators), CenterX, YOffset + 26.f * S,
+			UTHUDOwner->SmallFont, 0.8f * S, 1.f,
+			FLinearColor(0.75f, 0.75f, 0.75f, 1.f),
+			ETextHorzPos::Center, ETextVertPos::Top);
+	}
 }
 
 void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, float RenderDelta, float XOffset, float YOffset)
@@ -352,13 +934,13 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 		Canvas->SetLinearDrawColor(FLinearColor::White);
 	}
 
-	// Portrait pip on the left
-	const float PipPadding = 4.f * RenderScale;
-	const float PipHeight = (CellHeight * RenderScale * 0.9f) - (PipPadding * 2.f);
-	const float PipWidth = PipHeight * (224.0f / 310.0f);
-	const float PipX = XOffset + PipPadding;
-	const float PipY = YOffset + PipPadding;
-	DrawPortraitPip(PlayerState, PipX, PipY, PipWidth, PipHeight);
+	// Country flag replaces the old character-portrait pip. Keep the stock UT
+	// 36:26 aspect and center it in the row's icon lane.
+	const float FlagWidth = 54.f * RenderScale;
+	const float FlagHeight = 39.f * RenderScale;
+	const float FlagX = XOffset + 11.f * RenderScale;
+	const float FlagY = YOffset + (0.95f * CellHeight * RenderScale - FlagHeight) * 0.5f;
+	DrawPlayerFlag(PlayerState, FlagX, FlagY, FlagWidth, FlagHeight);
 
 	// Player name
 	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);
@@ -435,7 +1017,20 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 	// Stat columns
 	if (UTGameState && UTGameState->HasMatchStarted())
 	{
-		DrawPlayerScore(PlayerState, XOffset, YOffset, ScaledCellWidth, DrawColor);
+		if (PlayerState->bPendingTeamSwitch && !PlayerState->bIsABot)
+		{
+			// Queued team change (stock replicated bPendingTeamSwitch — set by
+			// AUTTeamGameMode::ChangeTeam when a mid-match switch has to wait for
+			// balance or a counterpart). Stock TEAM SWAP tag in place of the stat
+			// columns, same treatment as the CTF/Duel/Shaft scoreboards.
+			DrawText(TeamSwapText, XOffset + (ScaledCellWidth * ColumnHeaderScoreX),
+				YOffset + ColumnY, UTHUDOwner->SmallFont, RenderScale, 1.0f,
+				FLinearColor::White, ETextHorzPos::Center, ETextVertPos::Center);
+		}
+		else
+		{
+			DrawPlayerScore(PlayerState, XOffset, YOffset, ScaledCellWidth, DrawColor);
+		}
 	}
 	else
 	{
@@ -465,19 +1060,15 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 
 void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor)
 {
-	// Resolve replicator + player id once. Bots have invalid UniqueIds, so use
-	// the same synthetic "BOT:<name>" key the rating/replicator pair publishes
-	// — so when bRandomizeBotElo is on, bots show their assigned ELO instead
-	// of the default 1400 fallback.
-	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-	FString PId;
-	if (PlayerState)
-	{
-		PId = PlayerState->UniqueId.IsValid()
-			? PlayerState->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
-	}
-	const FElimPlusStatsEntry* Entry = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
+	// The per-frame roster snapshot already resolved this player's full stats
+	// entry, so every displayed column reads the same replicated sample.
+	const FCachedRosterEntry* Entry = FindCachedRosterEntry(PlayerState);
+	int32 Damage = Entry ? Entry->DamageDone : int32(PlayerState->DamageDone);
+	const float PPRCur = Entry ? Entry->PPRCurrent : 0.f;
+	const int32 Elo = Entry ? Entry->Elo : 1400;
+	const int32 EloDelta = Entry ? Entry->EloDeltaThisMatch : 0;
+	const int32 Rank = Entry ? Entry->GlobalRank : 0;
+	const int32 LGAccPacked = Entry ? Entry->LinkGunAccuracyTimes100 : -1;
 
 	const FLinearColor DimColor = (PlayerState->GetUTCharacter() == nullptr) ? FLinearColor(0.6f, 0.6f, 0.6f, 1.f) * DrawColor : DrawColor;
 
@@ -493,22 +1084,12 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, DimColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// Damage — replicator preferred; fall back to direct PlayerState read on listen-server
-	int32 Damage = 0;
-	if (Entry)
-	{
-		Damage = Entry->DamageDone;
-	}
-	else
-	{
-		Damage = int32(PlayerState->DamageDone);
-	}
 	const FLinearColor DmgColor = FLinearColor(1.f, 0.8f, 0.25f, 1.f) * (DimColor / DrawColor);
 	DrawText(FText::AsNumber(Damage),
 		XOffset + (Width * ColumnHeaderDamageX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, DmgColor, ETextHorzPos::Center, ETextVertPos::Center);
 
 	// PPR (Current) — match-running mean across completed rounds (gamemode populates)
-	const float PPRCur = Entry ? Entry->PPRCurrent : 0.f;
 	DrawText(FText::FromString(FString::Printf(TEXT("%.1f"), PPRCur)),
 		XOffset + (Width * ColumnHeaderPPRCurX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, RenderScale, RenderScale, DimColor, ETextHorzPos::Center, ETextVertPos::Center);
@@ -516,9 +1097,6 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 	// ELO + delta — source of truth is the replicator (gamemode pushes from
 	// Mods.db). Don't fall back to PlayerState rank fields — TDMRank etc. are
 	// defunct in this fork (see feedback_no_epic_mcp_or_tdmrank memory).
-	const int32 Elo = Entry ? Entry->Elo : 1400;
-	const int32 EloDelta = Entry ? Entry->EloDeltaThisMatch : 0;
-	const int32 Rank = Entry ? Entry->GlobalRank : 0;
 	FString EloStr = FString::Printf(TEXT("%d"), Elo);
 	if (Rank > 0)
 	{
@@ -546,7 +1124,6 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 	// LG_Acc — Sniper / Lightning Gun hitscan accuracy, computed + replicated
 	// server-side (NAME_SniperHits/Shots). -1 = no sniper shots fired -> show "-"
 	// (matches NCPlusCTFScoreboard) instead of a misleading 0%.
-	const int32 LGAccPacked = Entry ? Entry->LinkGunAccuracyTimes100 : -1;
 	const bool bHasLGAcc = (LGAccPacked >= 0);
 	const float LGAcc = bHasLGAcc ? (static_cast<float>(LGAccPacked) / 100.f) : 0.f;
 	const FLinearColor LGColor = !bHasLGAcc       ? FLinearColor(0.5f, 0.5f, 0.5f, 1.f)
@@ -561,26 +1138,16 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 
 void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 {
+	if (ShouldDrawAbsoluteElimScoreboard())
+	{
+		DrawAbsolutePlayerScores(RenderDelta, YOffset);
+		return;
+	}
 	if (!UTGameState) return;
 
 	int32 XOffset = ScaledEdgeSize;
 	float MaxYOffset = 0.f;
-	TArray<FString> SpectatorNames;
-
-	// PPR(Current) lookup for row ordering — same replicator + uid resolution
-	// DrawPlayerScore uses (bots key on the synthetic "BOT:<name>"). 0 fallback
-	// when the replicator isn't up or no round has completed yet, in which case
-	// the kills/score tiebreaks below preserve a sensible order.
-	AElimPlusStatsReplicator* Stats = FindElimPlusStatsRep(GetWorld());
-	auto GetPPR = [Stats](AUTPlayerState* PS) -> float
-	{
-		if (!Stats || !PS) return 0.f;
-		const FString PId = PS->UniqueId.IsValid()
-			? PS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
-		const FElimPlusStatsEntry* E = PId.IsEmpty() ? nullptr : Stats->FindEntry(PId);
-		return E ? E->PPRCurrent : 0.f;
-	};
+	UpdateCachedRoster(FindStatsReplicator());
 
 	for (int8 Team = 0; Team < 2; Team++)
 	{
@@ -588,40 +1155,9 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 		float DrawOffset = YOffset;
 		const int32 NumPlayersToShow = ShouldDrawScoringStats() ? 5 : UTGameState->PlayerArray.Num();
 
-		// Collect this team's players (harvesting spectators once, on the team-0
-		// pass), then sort by PPR(Current) desc so the board ranks by PPR. Kills
-		// then score break ties (and carry the ordering before any round ends,
-		// when every PPR is still 0).
-		TArray<AUTPlayerState*> TeamPlayers;
-		TMap<const AUTPlayerState*, float> PPRByPlayer;
-		for (int32 i = 0; i < UTGameState->PlayerArray.Num(); i++)
-		{
-			AUTPlayerState* PlayerState = Cast<AUTPlayerState>(UTGameState->PlayerArray[i]);
-			if (!PlayerState) continue;
-			if (PlayerState->bOnlySpectator)
-			{
-				if (Team == 0 && !PlayerState->bIsDemoRecording)
-				{
-					SpectatorNames.Add(PlayerState->PlayerName);
-				}
-				continue;
-			}
-			if (PlayerState->GetTeamNum() == Team)
-			{
-				TeamPlayers.Add(PlayerState);
-				PPRByPlayer.Add(PlayerState, GetPPR(PlayerState));
-			}
-		}
-		TeamPlayers.Sort([&PPRByPlayer](const AUTPlayerState& A, const AUTPlayerState& B)
-		{
-			const float PA = PPRByPlayer.FindRef(&A);
-			const float PB = PPRByPlayer.FindRef(&B);
-			if (PA != PB) return PA > PB;
-			const int32 KA = A.Kills + A.KillAssists;
-			const int32 KB = B.Kills + B.KillAssists;
-			if (KA != KB) return KA > KB;
-			return A.Score > B.Score;
-		});
+		// Reuse the roster order until membership or the exact damage/kills/score
+		// sort keys change. Row values such as ping still read live below.
+		const TArray<int32>& TeamPlayers = CachedTeamRosterIndices[Team];
 
 		// Concept-D dark panel backdrop behind this team's rows + a thin team-color
 		// top accent (no new texture — a translucent dark tile under the rows).
@@ -639,8 +1175,10 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			Canvas->SetLinearDrawColor(FLinearColor::White);
 		}
 
-		for (AUTPlayerState* PlayerState : TeamPlayers)
+		for (int32 RosterIndex : TeamPlayers)
 		{
+			AUTPlayerState* PlayerState = CachedRoster[RosterIndex].PlayerState.Get();
+			if (!PlayerState) continue;
 			DrawPlayer(Place, PlayerState, RenderDelta, XOffset, DrawOffset);
 			Place++;
 			DrawOffset += CellHeight * RenderScale;
@@ -658,17 +1196,17 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			float SumAcc = 0.f; int32 CountAcc = 0;  // LG_Acc: average of players with data
 			int64 SumPing = 0; int32 CountPing = 0;  // Ping: average of HUMANs (bots show skill)
 			const bool bNetworked = (GetWorld()->GetNetMode() != NM_Standalone);
-			for (AUTPlayerState* TP : TeamPlayers)
+			for (int32 RosterIndex : TeamPlayers)
 			{
+				const FCachedRosterEntry& Entry = CachedRoster[RosterIndex];
+				AUTPlayerState* TP = Entry.PlayerState.Get();
 				if (!TP) continue;
 				SumK += TP->Kills;
 				SumD += TP->Deaths;
-				SumPPR += PPRByPlayer.FindRef(TP);
-				const FString PId = TP->UniqueId.IsValid() ? TP->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *TP->PlayerName);
-				const FElimPlusStatsEntry* E = (Stats && !PId.IsEmpty()) ? Stats->FindEntry(PId) : nullptr;
-				SumDMG += E ? E->DamageDone : int32(TP->DamageDone);
-				SumElo += E ? E->Elo : 1400; ++CountElo;
-				if (E && E->LinkGunAccuracyTimes100 >= 0) { SumAcc += float(E->LinkGunAccuracyTimes100) / 100.f; ++CountAcc; }
+				SumPPR += Entry.PPRCurrent;
+				SumDMG += Entry.DamageDone;
+				SumElo += Entry.Elo; ++CountElo;
+				if (Entry.LinkGunAccuracyTimes100 >= 0) { SumAcc += float(Entry.LinkGunAccuracyTimes100) / 100.f; ++CountAcc; }
 				if (bNetworked && !Cast<AUTBot>(TP->GetOwner()))
 				{
 					const bool bTPOwner = (UTHUDOwner && UTHUDOwner->UTPlayerOwner && UTHUDOwner->UTPlayerOwner->UTPlayerState == TP);
@@ -730,9 +1268,9 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 
-	if (SpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
+	if (CachedSpectatorNames.Num() > 0 && !ShouldDrawScoringStats())
 	{
-		FString SpecStr = TEXT("Spectators: ") + FString::Join(SpectatorNames, TEXT(", "));
+		FString SpecStr = TEXT("Spectators: ") + FString::Join(CachedSpectatorNames, TEXT(", "));
 		DrawText(FText::FromString(SpecStr), Size.X * 0.5f, 765.f * RenderScale,
 			UTHUDOwner->SmallFont, 1.0f, 1.0f, FLinearColor(0.75f, 0.75f, 0.75f, 1.f),
 			ETextHorzPos::Center, ETextVertPos::Bottom);

@@ -4,6 +4,7 @@
 // with the replicated AUTGameState::HostIdString as a fallback for the warmup
 // window before bIsMatchHost is set. Each scoreboard's DrawPlayer override calls
 // DrawHostMarker just past the player's name so the host's own row is tagged.
+// The badge is suppressed when the server uses player ready-up.
 #pragma once
 
 #include "CoreMinimal.h"

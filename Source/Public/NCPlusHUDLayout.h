@@ -55,6 +55,16 @@ struct FNCPlusHUDElement
 
 	/** Read an extras key as a bool. Accepts "true"/"false"/"1"/"0" (case-insensitive). */
 	bool GetExtraBool(FName Key, bool Fallback) const;
+
+private:
+	// Extras are editable strings, but their typed values only change when the
+	// live-layout revision changes. Malformed/missing values deliberately are not
+	// cached because their caller-provided fallback can differ by use site.
+	mutable uint32 ExtrasCacheRevision = 0;
+	mutable TMap<FName, FLinearColor> ExtraColorCache;
+	mutable TMap<FName, float> ExtraFloatCache;
+	mutable TMap<FName, bool> ExtraBoolCache;
+public:
 };
 
 /** Hex ↔ FLinearColor utilities for the HUD layout's per-element color overrides. */
@@ -65,6 +75,15 @@ namespace NCPlusHUDColor
 
 	/** Convert a color to "#RRGGBBAA" (or "#RRGGBB" if bIncludeAlpha=false). */
 	NETCODEPLUS_API FString ToHexString(const FLinearColor& Color, bool bIncludeAlpha = true);
+}
+
+/** Local-only portrait resolution for NCPlus HUDs/scoreboards. A remote player's
+ *  SelectedCharacter may reference a client-only package that other clients cannot
+ *  load, leaving AUTPlayerState::GetHUDIcon() empty. In that case, use the stock
+ *  default character portrait without changing replicated character selection. */
+namespace NCPlusHUDPortraits
+{
+	NETCODEPLUS_API FCanvasIcon Resolve(const class AUTPlayerState* PlayerState);
 }
 
 /** Visual variants for the HP/Armor widget (mirrors Docs/HudMockups SVGs). */
@@ -183,6 +202,12 @@ struct FNCPlusHUDLayout
 	 *  NCPlusCTF, ShockDom — so users configure once and it applies everywhere.) */
 	static FString GetDefaultLayoutPath();
 
+	/** This plugin's Resources/ folder, resolved through the plugin manager so a
+	 *  renamed install folder (e.g. a hand-extracted "NetcodePlus-327") still
+	 *  locates the recovered artwork. Falls back to the conventional
+	 *  <ProjectPlugins>/NetcodePlus/Resources if the descriptor lookup fails. */
+	static FString PluginResourcesDir();
+
 	/** Which bottom-bar widget family this client loads at HUD construction:
 	 *  true = stock weapon bar / ammo / health-armor (familiar, self-reads the
 	 *  player's HUD profile); false = the NCPlus custom widgets. [NetcodePlus]
@@ -206,6 +231,17 @@ struct FNCPlusHUDLayout
 	/** Persist + refresh-cache the team-panel choice ([NetcodePlus] StockTeamPanel).
 	 *  Call ONLY from an explicit user toggle (see WantsStockTeamPanel). */
 	static void SetStockTeamPanel(bool bStock);
+
+	/** Faithful Elimination 113 artwork/layout inside the stock top-left team panel.
+	 *  This is a nested presentation choice: it has no effect while StockTeamPanel is
+	 *  false. [NetcodePlus] AbsoluteElimTeamPanel in Mod.ini; new profiles default on,
+	 *  while existing profiles without this key retain the procedural stock panel. */
+	static bool WantsAbsoluteElimTeamPanel();
+
+	/** Persist + refresh-cache the Absolute Elim presentation choice. Enabling it also
+	 *  enables StockTeamPanel so an externally-written config cannot select an invisible
+	 *  sub-style. Disabling StockTeamPanel does not clear this remembered choice. */
+	static void SetAbsoluteElimTeamPanel(bool bAbsolute);
 
 	/** Background opacity for the NCPlus scoreboards (ElimPlus/Wipeout), 0.05..1.0.
 	 *  [NetcodePlus] ScoreboardOpacity in Mod.ini; default 0.3 (the prior hard-coded
@@ -296,6 +332,8 @@ namespace NCPlusHUDAliases
 	NETCODEPLUS_API FVector2D GetStockOffset(FName Alias);
 }
 
+struct FElimPlusHUDSnapshot;
+
 /**
  * Helpers for C++-drawn HUD pieces (portrait strips, scorebar) that aren't
  * UUTHUDWidget instances. The HUD's DrawHUD calls into these to get the user's
@@ -326,6 +364,16 @@ namespace NCPlusHUDDrawCall
 	 *  or the stock red/blue palette (false)? Honored by portrait_red,
 	 *  portrait_blue, and scorebar. */
 	NETCODEPLUS_API bool GetUseTeamColor(FName Alias);
+
+	/** Client-side instagib detection for HUD gating. True when a mutator whose
+	 *  class name contains "Instagib" exists in the world (MutInstagibNCP is
+	 *  replicated + bAlwaysRelevant so it's client-visible from warmup on;
+	 *  standalone/listen sees every mutator locally) or when a replicated
+	 *  ACTFStatsReplicator reports bIsInstagibMatch. Sticky true per world once
+	 *  seen; until then rechecks at 1Hz so late replication is picked up without
+	 *  walking the actor list at render rate. Stock instagib on a non-NetcodePlus
+	 *  dedicated server is NOT detectable (AInfo mutators don't replicate). */
+	NETCODEPLUS_API bool IsInstagibMatch(class UWorld* World);
 
 	/** Effective anchor for an alias: layout override if present, otherwise
 	 *  the alias's stock anchor (NCPlusHUDAliases::GetStockAnchor). */
@@ -366,6 +414,16 @@ namespace NCPlusHUDDrawCall
 		const FText& Text, float X, float Y, float Scale,
 		FLinearColor Fill, FLinearColor Outline = FLinearColor::Black, float Opacity = 1.f);
 
+	/** Resolve a measured FText for HUD strings that usually remain unchanged for
+	 *  hundreds of frames (scores, clocks, labels, spectator names). Cached by
+	 *  text/font/scale and invalidated on world or live-layout revision changes. */
+	NETCODEPLUS_API void ResolveStableText(class UCanvas* Canvas, class UFont* Font,
+		const FString& Source, float ScaleX, float ScaleY,
+		FText& OutText, float& OutWidth, float& OutHeight);
+	NETCODEPLUS_API void DrawResolvedText(class UCanvas* Canvas, const class UFont* Font,
+		const FText& Text, float X, float Y, float ScaleX, float ScaleY, const FColor& Color,
+		bool bEnableShadow = false);
+
 	/** Fit a player name into MaxWidthPx at draw Scale, caching the fitted result per
 	 *  PlayerState so the per-frame chop-one-char StrLen loop runs only when an input
 	 *  (name / font / width bucket / layout revision) actually changes. Fills OutText
@@ -383,6 +441,23 @@ namespace NCPlusHUDDrawCall
 	 *  place of the portrait strip. Honors the `team_panel` alias (pos/scale/opacity/
 	 *  hide). Canvas passed by caller (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
+	NETCODEPLUS_API void DrawStockTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas,
+		const FElimPlusHUDSnapshot& Snapshot);
+
+	/** Decode and upload the recovered Absolute Elim team-panel textures before
+	 *  the render path needs them. Safe to call repeatedly. */
+	NETCODEPLUS_API void PreloadAbsoluteElimTeamPanelTextures();
+	/** Release session-lifetime transient textures during a live module unload. */
+	NETCODEPLUS_API void ReleaseAbsoluteElimTeamPanelTextures();
+
+	/** Recovered Elimination 113 top-left living-player panel. Uses the original fixed
+	 *  red artwork (and a fixed 240-degree blue variant), score hexes, name plates, and
+	 *  health/armor icons. Honors the shared `team_panel` alias except Team Color, which
+	 *  is intentionally unavailable for this pixel-authentic presentation. Falls back
+	 *  to DrawStockTeamPanel if the loose plugin PNG resources are unavailable. */
+	NETCODEPLUS_API void DrawAbsoluteElimTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas);
+	NETCODEPLUS_API void DrawAbsoluteElimTeamPanel(class AUTHUD* HUD, class UCanvas* Canvas,
+		const FElimPlusHUDSnapshot& Snapshot);
 
 	/** Optional server-name plate. Reads GameState->ServerName, draws at the
 	 *  `server_info` alias's position. No-op when no entry / hidden (default OFF).
@@ -390,12 +465,15 @@ namespace NCPlusHUDDrawCall
 	 *  (see DrawDamageFlash note). */
 	NETCODEPLUS_API void DrawServerInfo(class AUTHUD* HUD, class UCanvas* Canvas);
 
-	/** Replay-only corner feed of fire-validation samples. No-op unless a demo is
-	 *  playing back. Reads the server-written FireVal_*.csv (newest in Saved/Logs, or
-	 *  the path in the `ncp.FireValReplayCsv` cvar) and draws each shot synced to the
-	 *  replayed server clock (GameState->GetServerWorldTimeSeconds). Pure client
-	 *  display — no replication, never runs in live play. */
-	NETCODEPLUS_API void DrawFireValReplayFeed(class AUTHUD* HUD, class UCanvas* Canvas);
+	/** WARMUP-ONLY spawn-point markers (learning aid — pre-aim angles / enemy
+	 *  approach lanes): team-colored markers at every placed PlayerStart with a
+	 *  facing tick (the way a spawned player looks) and a distance label.
+	 *  LINE-OF-SIGHT ONLY — a visibility trace gates each marker, nothing draws
+	 *  through walls. Placed level actors exist client-side, so this is pure
+	 *  local drawing — no replication, no server involvement, no version bump.
+	 *  Self-gates to MatchState::WaitingToStart + cvar ncp.WarmupSpawns (default
+	 *  on); caller should skip while the scoreboard is up. */
+	NETCODEPLUS_API void DrawWarmupSpawnMarkers(class AUTHUD* HUD, class UCanvas* Canvas);
 
 	/** Auto post-match high-res screenshot, shared by ElimPlus/Wipeout/iCTF (and Duel/Shaft via AWipeoutHUD).
 	 *  Fires ONCE, on the final scoreboard rather than the instant replay: it counts consecutive qualifying

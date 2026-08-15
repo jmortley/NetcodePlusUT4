@@ -14,6 +14,11 @@
 
 class UTeamArenaCharacterMovement;
 class ACTFStatsReplicator;
+class AClutchRoundState;
+class AUTWeaponFix;
+class UUTWeaponSkin;
+class UMaterialInstanceDynamic;
+class UMaterialInterface;
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -52,6 +57,24 @@ public:
 		AUTCharacter* ShotInstigator, float PredictionTime) override;
 
 	virtual void Tick(float DeltaTime) override;
+	virtual void PossessedBy(AController* NewController) override;
+	virtual bool AddInventory(AUTInventory* InvToAdd, bool bAutoActivate) override;
+	virtual void SetSkinForWeapon(UUTWeaponSkin* WeaponSkin) override;
+	virtual void UpdateWeaponSkinPrefFromProfile(AUTWeapon* Weapon) override;
+	virtual void UpdateWeaponSkin() override;
+	virtual void UpdateSkin() override;
+	void SubmitConfiguredWeaponSkin(AUTWeaponFix* Weapon, bool bForce);
+
+	/** Submit the local F5 choice for an owned weapon. Empty SkinPath is Default. */
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerSetNCPWeaponSkin(AUTWeapon* InWeapon, const FString& SkinPath);
+
+	// Reject ambient loops emitted by inactive stock weapons before they can become
+	// replicated, persistent character audio (notably the Link Gun overheat loop).
+	virtual void SetAmbientSound(USoundBase* NewAmbientSound, bool bClear = false) override;
+	/** Suppress only this client's carried-flag loop when disabled in the F5 iCTF settings. */
+	virtual void SetStatusAmbientSound(USoundBase* NewAmbientSound, float SoundVolume = 0.f,
+		float PitchMultiplier = 1.f, bool bClear = false) override;
 
     /**
      * Override replication callback to use visual prediction time.
@@ -134,6 +157,26 @@ protected:
 	// Saved original transform to restore when weapon is shown
 	FTransform SavedFirstPersonMeshTransform;
 
+	// --- Replicated weapon skins ---
+	/** Server-side burst limiter for the reliable cosmetic selection RPC. */
+	float WeaponSkinRequestWindowStart = 0.f;
+	uint8 WeaponSkinRequestsInWindow = 0;
+
+	/** Per-attachment material-slot cache. Rebuilt on attachment/parent changes. */
+	TWeakObjectPtr<AUTWeaponAttachment> SkinnedWeaponAttachment;
+	UPROPERTY(Transient)
+	TArray<UMaterialInterface*> OriginalWeaponAttachmentMaterials;
+	UPROPERTY(Transient)
+	TArray<UMaterialInterface*> AppliedWeaponAttachmentMaterialParents;
+	UPROPERTY(Transient)
+	TArray<UMaterialInstanceDynamic*> WeaponAttachmentSkinMIDs;
+	uint32 AppliedWeaponAttachmentSlotMask = 0u;
+	bool bCapturedWeaponAttachmentMaterials = false;
+
+	UUTWeaponSkin* ResolveWeaponSkinForClass(UClass* WeaponClassToMatch) const;
+	void ApplyWeaponAttachmentSkin(UUTWeaponSkin* Skin);
+	void ApplyServerWeaponSkinSelection(AUTWeapon* InWeapon, UUTWeaponSkin* Skin);
+
 	// --- Spectator rotation smoothing ---
 	// Smoothed rotation for spectators viewing this character (prevents jitter at 480fps)
 	mutable FRotator SmoothedViewRotation;
@@ -148,6 +191,16 @@ public:
 
 	// ArmorPlus: override damage absorption
 	// Belt armor always absorbs at 100%, non-belt absorbs at 66.67%
+	virtual void GiveArmor(class AUTArmor* InArmorType) override;
+	virtual void SetArmorAmount(class AUTArmor* InArmorType, int32 Amount) override;
+	virtual void RemoveArmor(int32 Amount) override;
+	virtual void ServerDropArmor_Implementation() override;
+
+	// Helmet: an Armor_Small pickup grants exactly ONE headshot block (UT3-style
+	// ding + BlockedHeadshotDamage), consumed on use. Config-gated by
+	// ncp.HelmetBlocksHeadshot, default 1 since 328 (0 = stock, never blocked).
+	virtual bool BlockedHeadShot(FVector HitLocation, FVector ShotDirection, float WeaponHeadScaling, bool bConsumeArmor, AUTCharacter* ShotInstigator) override;
+
 	virtual bool ModifyDamageTaken_Implementation(
 		int32& AppliedDamage, int32& Damage, FVector& Momentum,
 		AUTInventory*& HitArmor, const FHitResult& HitInfo,
@@ -195,6 +248,10 @@ public:
 	// + team-recolour, driven by the local NCPlusForceModels config. Fires on spawn /
 	// team-change (both route through NotifyTeamChanged) and is a no-op on a dedicated server.
 	virtual void NotifyTeamChanged() override;
+	/** Keep stock outline recreation out of ApplyCharacterData's body-mesh reregister window. */
+	virtual void ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data) override;
+	/** Coalesce outline requests while ApplyCharacterData's replacement is deferred. */
+	virtual void UpdateOutline() override;
 
 	// Force Models: redirect the stock yellow armour overlay to our match/complimentary armour colour.
 	virtual void UpdateArmorOverlay() override;
@@ -211,10 +268,17 @@ public:
 	// effects are still visible briefly). Client-side (PlayDying runs per-client), gated by bEnabled +
 	// bDarkenBodies.
 	virtual void PlayDying() override;
+	/** Clear client-local outline duplicates before stock teardown destroys the weapon attachment.
+	 *  Prematch lineup pawns are destroyed alive, so they never pass through PlayDying(). */
+	virtual void Destroyed() override;
 
-	// iCTF-only: scale THIS local player's OWN footstep volume by the F5 "Own Footstep Volume" setting
-	// ([NetcodePlus] OwnFootstepVolume, 0..1; 1 = stock). Remote/enemy footsteps and other modes are
-	// untouched. UTPlaySound has no volume arg, so a non-stock volume is played via PlayOwnFootstepScaled.
+	/** Keep TacCom/X-ray from rendering the separate CustomDepth duplicate after this pawn's body mesh
+	 *  has been explicitly hidden by corpse cleanup. Stock TacCom re-calls SetOutlineLocal(true) every
+	 *  spectator tick, so clearing the outline only once in PlayDying is not sufficient. */
+	virtual void SetOutlineLocal(bool bNowOutlined, bool bWhenUnoccluded = false) override;
+
+	// Clutch defenders play at 10% on every client. Outside Clutch, the iCTF-only F5
+	// "Own Footstep Volume" setting still affects only this local player's own pawn.
 	virtual void PlayFootstep(uint8 FootNum, bool bFirstPerson = false) override;
 
 	/** True iff this pawn is controlled by a LOCAL HUMAN player — i.e. it's "my own" pawn (incl. split-screen).
@@ -225,9 +289,29 @@ public:
 	bool IsLocalPlayerPawn() const;
 
 protected:
-	// ArmorPlus: tracks how much of the current armor pool is belt (100% absorb).
-	// Server-only; synced when ArmorType is belt, decremented on damage.
+	// ArmorPlus: tracks the 100%-absorb portion of the replicated total armor pool.
+	// Server-authoritative and updated when armor is granted or removed.
 	int32 BeltArmorRemaining = 0;
+
+	// The most recently collected regular armor CDO. While a mixed stack still has
+	// belt remaining, ArmorType stays on the belt for its shell/effects; this becomes
+	// ArmorType when the belt portion reaches zero. Server-only; CDOs are always rooted.
+	UPROPERTY(Transient)
+	class AUTArmor* LastRegularArmorType = nullptr;
+
+	// ── Helmet (head armour charge) ──
+	// True while the pawn wears an UNSPENT helmet: set by an Armor_Small pickup,
+	// consumed by exactly one blocked headshot — one-and-done, so the Epic-era bug
+	// where a helmet blocked indefinitely cannot come back — and cleared when the
+	// armour pool is force-respecced (SetArmorAmount) or fully depleted. A second
+	// helmet before being shot changes nothing; a pickup after a spent block
+	// re-arms. Server-only; never replicated (the client must not know or decide).
+	bool bHeadArmorCharge = false;
+
+	// ArmorAmount the granting helmet carried; removed from the pool when the
+	// block fires ("the shot destroys the helmet"), BEFORE the blocked damage
+	// resolves against whatever armour remains.
+	int32 HeadArmorChargeValue = 0;
 
 	// ── Force Models state ──
 	/** Re-evaluate this pawn and apply (or clear) the forced model + team-recolour. Client-only.
@@ -255,6 +339,17 @@ protected:
 	bool bRefreshOthersDirty = false;
 	/** Flush the coalesced forced-model work (the dirty flags) — called from the top of Tick on clients. */
 	void FlushForcedModelUpdate();
+	/** Re-apply the Force Models armour-overlay tint after an overlay/team/config change. */
+	void RefreshForcedArmourOverlay();
+	/** Coalesces armour material writes; steady-state character ticks perform no MID parameter updates. */
+	bool bForcedArmourOverlayDirty = false;
+	/** Last observed slot-0 overlay material; identity changes catch rebuilds that bypass our override. */
+	TWeakObjectPtr<UMaterialInterface> ObservedArmourOverlayMaterial;
+	/** ApplyCharacterData suppresses stock's outline rebuild while CharacterMesh0 is being
+	 *  reregistered. The replacement is created at the start of the following character tick. */
+	bool bDeferredOutlineUpdatePending = false;
+	/** Recreate a queued body outline, repair its parent, then let stock register/update it. */
+	void FlushDeferredOutlineUpdate();
 
 	/** True while this reskinned pawn should have its cosmetics stripped — gates the setter overrides. */
 	bool bForceModelStripCosmetics = false;
@@ -267,20 +362,27 @@ protected:
 	/** DarkenBodies: on death, schedule the corpse to hide after a short delay (lets death/ragdoll effects
 	 *  play first). Gated by bEnabled + bDarkenBodies. Called from PlayDying (client-side). */
 	void SpawnSkeletonDissolve();
+	/** Permanently retire this pawn's client-local body and weapon CustomDepth render state. */
+	void ClearLocalOutlineRenderState();
 	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
 	void HideDeadBody();
 
 	// ── Own footstep volume (iCTF) ──
 	/** Reimplemented own-footstep play honouring OwnFootstepVolumeScale (UTPlaySound has no volume arg). */
 	void PlayOwnFootstepScaled(uint8 FootNum);
+	/** Reimplemented footstep play with a per-source volume multiplier. */
+	void PlayFootstepScaled(uint8 FootNum, bool bFirstPerson, float VolumeScale);
+	/** Client-side Clutch role lookup; returns 0.1 for a live-round defender, otherwise 1. */
+	float GetClutchFootstepVolumeScale();
+	/** Cached client-side iCTF detection shared by personal audio preferences. */
+	bool IsICTFMatch();
+	TWeakObjectPtr<AClutchRoundState> CachedClutchFootstepState;
 	/** 0..1 multiplier on the local player's own footstep; 1 = stock (no override). Read once from config. */
 	float OwnFootstepVolumeScale = 1.f;
 	bool bOwnFootstepVolumeRead = false;
-	/** Cached iCTF gate (ACTFStatsReplicator::bIsInstagibMatch) — present only in NCPlusCTF instagib.
-	 *  Searched lazily while null (so it resolves even if the first footstep precedes replication), then
-	 *  latched by bIctfFootstepResolved to avoid iterating every footstep forever in non-iCTF modes. */
+	/** Cached iCTF gate (ACTFStatsReplicator::bIsInstagibMatch), shared by local audio settings. */
 	TWeakObjectPtr<ACTFStatsReplicator> CachedCTFRep;
-	bool bIctfFootstepResolved = false;
+	bool bIctfModeResolved = false;
 	/** Warmup iCTF signal: the replicated MutInstagibNCP mutator is present from match init (incl. warmup),
 	 *  unlike ACTFStatsReplicator which only spawns at match start. Latched once found. */
 	bool bIctfMutatorFound = false;

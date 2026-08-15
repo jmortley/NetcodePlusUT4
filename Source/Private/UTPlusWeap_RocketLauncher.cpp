@@ -20,8 +20,15 @@
 #include "UTGameState.h"
 #include "UTHUDWidget.h"
 #include "CanvasItem.h"
+#include "HAL/IConsoleManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTRocketLauncher, Log, All);
+
+static FORCEINLINE int32 RocketPrimaryDiagLevelLocal()
+{
+    static IConsoleVariable* DiagVar = IConsoleManager::Get().FindConsoleVariable(TEXT("ncp.RocketPrimaryDiag"));
+    return DiagVar ? DiagVar->GetInt() : 0;
+}
 
 AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
@@ -53,6 +60,7 @@ AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer&
     // Fire Modes - Enable by default now that we have spiral
     bAllowAltModes = true;
     bAllowGrenades = true; // Legacy compatibility
+    bDisableAltLoading = false; // Clutch defender BPs opt in (single rockets only)
 
     // Target Locking
     bLockedOnTarget = false;
@@ -67,6 +75,8 @@ AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer&
     LastValidTargetTime = 0.0f;
     LockAim = 0.997f;
     LockOffset = 800.f;
+    LockDisplayLingerTime = 0.4f;   // reticle hangs on the last target 0.4s after the lock clears
+    LockClearedTime = -1000.0f;
     bTargetLockingActive = true;
     LastTargetLockCheckTime = 0.0f;
 
@@ -116,6 +126,56 @@ void AUTPlusWeap_RocketLauncher::PostInitProperties()
     {
         FiringState[1] = NewObject<UUTWeaponStateFiringChargedRocket_Transactional>(this, UUTWeaponStateFiringChargedRocket_Transactional::StaticClass());
     }
+}
+
+bool AUTPlusWeap_RocketLauncher::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
+{
+	const int32 BeginDiagLevel = RocketPrimaryDiagLevelLocal();
+	if (BeginDiagLevel > 0 && (FireModeNum == 0 || BeginDiagLevel >= 2))
+	{
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
+		UE_LOG(LogUTRocketLauncher, Warning,
+			TEXT("[RocketM1Diag] BEGIN_SEQUENCE frame=%u t=%.4f role=%d net=%d local=%d requested=%d clientFired=%d currentMode=%d tracker=%d active0=%d pending0=%d pending1=%d state=%s lft0=%.4f earliest=%.4f"),
+			(uint32)GFrameCounter, Now, (int32)Role, (int32)GetNetMode(),
+			(UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0, FireModeNum, bClientFired ? 1 : 0,
+			CurrentFireMode, CurrentlyFiringMode,
+			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			(UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f, EarliestFireTime);
+	}
+
+    // Single-rocket-only loadouts: reject alt fire BEFORE Super. The stock body latches
+    // UTOwner->SetPendingFire(1) immediately, and while mode 0 is firing it delegates to
+    // FiringState[0]->BeginFiringSequence(1), which records PendingFireSequence=1 and
+    // would switch into loading at the next refire check. This gate handles the owning
+    // client's local StartFire prediction and the stock ServerStartFire path (which never
+    // latches PendingFire when we return false first).
+    //
+    // NOTE: this gate is NOT sufficient on its own for the server. AUTWeaponFix's
+    // transactional ServerStartFireFixed latches PendingFire BEFORE calling
+    // BeginFiringSequence (and its cross-mode branch re-enters ActiveState before reaching
+    // here), so stock UUTWeaponStateActive::BeginState could auto-enter the load from the
+    // latched flag. The authoritative rejection therefore lives in AllowServerFireMode(),
+    // which ServerStartFireFixed consults at its RPC entry before any latch.
+    if (bDisableAltLoading && FireModeNum == 1)
+    {
+        return false;
+    }
+    return Super::BeginFiringSequence(FireModeNum, bClientFired);
+}
+
+bool AUTPlusWeap_RocketLauncher::AllowServerFireMode(uint8 FireModeNum) const
+{
+    // Authoritative single-rocket restriction. Refused at the ServerStartFireFixed RPC
+    // entry (before the trade-kill spawn, the PendingFire latch, and any state entry), so
+    // a modified client cannot smuggle a mode-1 load past the BeginFiringSequence gate.
+    if (bDisableAltLoading && FireModeNum == 1)
+    {
+        return false;
+    }
+    return Super::AllowServerFireMode(FireModeNum);
 }
 
 
@@ -327,10 +387,25 @@ void AUTPlusWeap_RocketLauncher::FireShot()
     // we ABORT immediately to protect the Rhythm Logic.
     // ----------------------------------------------------------------
     AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(this);
+	const bool bOnCooldown = FixWeapon && FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime);
+	const int32 FireShotDiagLevel = RocketPrimaryDiagLevelLocal();
+	if (FireShotDiagLevel > 0 && (CurrentFireMode == 0 || FireShotDiagLevel >= 2))
+	{
+		const float Refire = GetRefireTime(0);
+		const float SinceLast = PrevLFT0 > 0.f ? CurrentTime - PrevLFT0 : -1.f;
+		UE_LOG(LogUTRocketLauncher, Warning,
+			TEXT("[RocketM1Diag] FIRE_SHOT_GATE %s frame=%u t=%.4f role=%d net=%d local=%d state=%s currentMode=%d tracker=%d pending0=%d active0=%d lft0=%.4f since=%.4f refire=%.4f earliest=%.4f earliestRemain=%.4f"),
+			bOnCooldown ? TEXT("BLOCK") : TEXT("PASS"), (uint32)GFrameCounter, CurrentTime,
+			(int32)Role, (int32)GetNetMode(), (UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentFireMode, CurrentlyFiringMode, (UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			PrevLFT0, SinceLast, Refire, EarliestFireTime, EarliestFireTime - CurrentTime);
+	}
     if (FixWeapon)
     {
         // Check if we are physically allowed to fire right now
-        if (FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime))
+        if (bOnCooldown)
         {
             // DIAGNOSTIC (net-safe, survives Shipping): this silent abort is a rocket no-reg suspect.
             // Surface an ABNORMAL (>1s) block server-side so a repro names the values that caused it.
@@ -518,7 +593,18 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
             SpawnLocation = AdjustedSpawnLoc;
         }
 
-        AUTProjectile* SpawnedProjectile = SpawnNetPredictedProjectile(RocketFireModes[0].ProjClass, SpawnLocation, SpawnRotation);
+		AUTProjectile* SpawnedProjectile = SpawnNetPredictedProjectile(RocketFireModes[0].ProjClass, SpawnLocation, SpawnRotation);
+		const int32 ProjectileDiagLevel = RocketPrimaryDiagLevelLocal();
+		if (ProjectileDiagLevel > 0 && (CurrentFireMode == 0 || ProjectileDiagLevel >= 2))
+		{
+			UE_LOG(LogUTRocketLauncher, Warning,
+				TEXT("[RocketM1Diag] FIRE_PROJECTILE_RESULT frame=%u t=%.4f role=%d net=%d local=%d result=%s class=%s currentMode=%d pending0=%d"),
+				(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+				(int32)Role, (int32)GetNetMode(), UTOwner->IsLocallyControlled() ? 1 : 0,
+				SpawnedProjectile ? *SpawnedProjectile->GetName() : TEXT("null/deferred"),
+				RocketFireModes[0].ProjClass ? *RocketFireModes[0].ProjClass->GetName() : TEXT("null"),
+				CurrentFireMode, UTOwner->IsPendingFire(0) ? 1 : 0);
+		}
         NumLoadedRockets = 0;
         NumLoadedBarrels = 0;
         return SpawnedProjectile;
@@ -1011,7 +1097,10 @@ void AUTPlusWeap_RocketLauncher::StateChanged()
 {
     Super::StateChanged();
 
-    if (Role == ROLE_Authority && CurrentState != InactiveState && CurrentState != EquippingState && CurrentState != UnequippingState)
+    // Lock acquisition is pointless with alt loading disabled — only loaded
+    // (seeking) rockets consume a lock — so skip the timer entirely: no phantom
+    // lock reticle/sound for the shooter, no periodic lock traces on the server.
+    if (Role == ROLE_Authority && !bDisableAltLoading && CurrentState != InactiveState && CurrentState != EquippingState && CurrentState != UnequippingState)
     {
         GetWorldTimerManager().SetTimer(UpdateLockHandle, this, &AUTPlusWeap_RocketLauncher::UpdateLock, LockCheckTime, true);
     }
@@ -1246,6 +1335,7 @@ void AUTPlusWeap_RocketLauncher::UpdateLock()
 
 void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
 {
+	AActor* PreviousTarget = LockedTarget;   // capture before overwrite for the reticle linger
 	LockedTarget = NewTarget;
 
 	if (LockedTarget != nullptr)
@@ -1255,6 +1345,7 @@ void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
 			// Just acquired lock
 			bLockedOnTarget = true;
 			LastLockedOnTime = GetWorld()->TimeSeconds;
+			LingerLockedTarget = nullptr;   // a fresh lock supersedes any pending linger
 
 			// Play lock acquired sound for local player
 			if (GetNetMode() != NM_DedicatedServer &&
@@ -1275,6 +1366,11 @@ void AUTPlusWeap_RocketLauncher::SetLockTarget(AActor* NewTarget)
 		{
 			// Just lost lock
 			bLockedOnTarget = false;
+
+			// Arm the reticle linger so it doesn't blink off the instant the lock clears
+			// (e.g. on load release). Display-only; the lock state stays cleared.
+			LingerLockedTarget = PreviousTarget;
+			LockClearedTime = GetWorld()->TimeSeconds;
 
 			// Play lock lost sound for local player
 			if (GetNetMode() != NM_DedicatedServer &&
@@ -1416,7 +1512,14 @@ float AUTPlusWeap_RocketLauncher::SuggestAttackStyle_Implementation()
 bool AUTPlusWeap_RocketLauncher::CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc)
 {
     // Simplified AI attack logic - full implementation would include predictive firing
-    return Super::CanAttack_Implementation(Target, TargetLoc, bDirectOnly, bPreferCurrentMode, BestFireMode, OptimalTargetLoc);
+    const bool bResult = Super::CanAttack_Implementation(Target, TargetLoc, bDirectOnly, bPreferCurrentMode, BestFireMode, OptimalTargetLoc);
+    if (bDisableAltLoading && BestFireMode == 1)
+    {
+        // Never suggest a trigger BeginFiringSequence will reject — a bot would
+        // otherwise hold alt-fire indefinitely without firing.
+        BestFireMode = 0;
+    }
+    return bResult;
 }
 
 
@@ -1467,10 +1570,22 @@ void AUTPlusWeap_RocketLauncher::DrawWeaponCrosshair_Implementation(UUTHUDWidget
         float CrosshairRot = GetWorld()->TimeSeconds * 90.0f;
         const float AcquireDisplayTime = 0.6f;
 
-        // A. Draw Locked Target (Solid Red)
+        // A. Draw Locked Target (Solid Red) — with a short linger on the last target after the
+        //    lock clears, so releasing the load doesn't blink the reticle off instantly.
+        AActor* LockReticleTarget = nullptr;
         if (HasLockedTarget() && LockedTarget)
         {
-            FVector ScreenTarget = WeaponHudWidget->GetCanvas()->Project(LockedTarget->GetActorLocation());
+            LockReticleTarget = LockedTarget;
+        }
+        else if (LingerLockedTarget.IsValid()
+            && (GetWorld()->GetTimeSeconds() - LockClearedTime) < LockDisplayLingerTime)
+        {
+            LockReticleTarget = LingerLockedTarget.Get();
+        }
+
+        if (LockReticleTarget)
+        {
+            FVector ScreenTarget = WeaponHudWidget->GetCanvas()->Project(LockReticleTarget->GetActorLocation());
 
             // Adjust for canvas center offset if necessary, though Project usually returns absolute screen coordinates.
             // Stock UT offset logic:

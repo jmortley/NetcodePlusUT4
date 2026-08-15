@@ -130,28 +130,32 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 	}
 }
 
-int32 ACTFStatsReplicator::GetGrabsForPlayer(const FString& UniqueIdStr) const
+const FCTFReplicatedStatsEntry* ACTFStatsReplicator::FindEntry(const FString& UniqueIdStr) const
 {
 	for (const FCTFReplicatedStatsEntry& Entry : StatsEntries)
 	{
 		if (Entry.PlayerId == UniqueIdStr)
 		{
-			return Entry.FlagGrabs;
+			return &Entry;
 		}
 	}
-	return 0;
+	return nullptr;
+}
+
+int32 ACTFStatsReplicator::GetGrabsForPlayer(const FString& UniqueIdStr) const
+{
+	const FCTFReplicatedStatsEntry* Entry = FindEntry(UniqueIdStr);
+	return Entry ? Entry->FlagGrabs : 0;
 }
 
 void ACTFStatsReplicator::GetAccuracyForPlayer(const FString& UniqueIdStr, int32& OutHits, int32& OutShots) const
 {
-	for (const FCTFReplicatedStatsEntry& Entry : StatsEntries)
+	const FCTFReplicatedStatsEntry* Entry = FindEntry(UniqueIdStr);
+	if (Entry)
 	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			OutHits = Entry.HitscanHits;
-			OutShots = Entry.HitscanShots;
-			return;
-		}
+		OutHits = Entry->HitscanHits;
+		OutShots = Entry->HitscanShots;
+		return;
 	}
 	OutHits = 0;
 	OutShots = 0;
@@ -160,16 +164,13 @@ void ACTFStatsReplicator::GetAccuracyForPlayer(const FString& UniqueIdStr, int32
 void ACTFStatsReplicator::GetArmorCountsForPlayer(const FString& UniqueIdStr, uint8 OutCounts[4]) const
 {
 	OutCounts[0] = OutCounts[1] = OutCounts[2] = OutCounts[3] = 0;
-	for (const FCTFReplicatedStatsEntry& Entry : StatsEntries)
+	const FCTFReplicatedStatsEntry* Entry = FindEntry(UniqueIdStr);
+	if (Entry)
 	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			OutCounts[0] = Entry.BeltCount;
-			OutCounts[1] = Entry.VestCount;
-			OutCounts[2] = Entry.PadsCount;
-			OutCounts[3] = Entry.HelmetCount;
-			return;
-		}
+		OutCounts[0] = Entry->BeltCount;
+		OutCounts[1] = Entry->VestCount;
+		OutCounts[2] = Entry->PadsCount;
+		OutCounts[3] = Entry->HelmetCount;
 	}
 }
 
@@ -177,13 +178,10 @@ void ACTFStatsReplicator::GetAmpForPlayer(const FString& UniqueIdStr, uint8& Out
 {
 	OutCount = 0;
 	OutTimeSeconds = 0;
-	for (const FCTFReplicatedStatsEntry& Entry : StatsEntries)
+	const FCTFReplicatedStatsEntry* Entry = FindEntry(UniqueIdStr);
+	if (Entry)
 	{
-		if (Entry.PlayerId == UniqueIdStr)
-		{
-			OutCount = Entry.AmpCount;
-			OutTimeSeconds = Entry.AmpTimeS;
-			return;
-		}
+		OutCount = Entry->AmpCount;
+		OutTimeSeconds = Entry->AmpTimeS;
 	}
 }

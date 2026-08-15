@@ -29,6 +29,76 @@ namespace NCPlusWB
 	static const FLinearColor AmmoFillFull  (0.4f,  0.95f, 0.48f, 1.f);
 	static const FLinearColor AmmoFillWarn  (1.0f,  0.85f, 0.30f, 1.f);
 	static const FLinearColor AmmoFillDanger(1.0f,  0.32f, 0.28f, 1.f);
+
+	struct FSharedInventoryCache
+	{
+		TWeakObjectPtr<AUTCharacter> Character;
+		uint32 LayoutRevision = 0;
+		uint64 SampledFrame = MAX_uint64;
+		TArray<TWeakObjectPtr<AUTWeapon>> Observed;
+		TArray<TWeakObjectPtr<AUTWeapon>> ClassifiedObserved;
+		TArray<int32> ClassifiedGroups;
+		TArray<TWeakObjectPtr<AUTWeapon>> Left;
+		TArray<TWeakObjectPtr<AUTWeapon>> Right;
+	};
+
+	static FSharedInventoryCache GInventoryCache;
+
+	static const TArray<TWeakObjectPtr<AUTWeapon>>& GetWeaponsForSide(
+		AUTCharacter* Character, const FNCPlusHUDLayout& Layout, uint32 LayoutRevision, int32 SideIndex)
+	{
+		FSharedInventoryCache& Cache = GInventoryCache;
+		if (Cache.SampledFrame != GFrameCounter || Cache.Character.Get() != Character
+			|| Cache.LayoutRevision != LayoutRevision)
+		{
+			Cache.SampledFrame = GFrameCounter;
+			Cache.Observed.Reset();
+			for (TInventoryIterator<AUTWeapon> It(Character); It; ++It)
+			{
+				AUTWeapon* W = *It;
+				if (!W || W->IsPendingKill() || !W->GetClass()) continue;
+				Cache.Observed.Add(W);
+			}
+			bool bInventoryChanged = Cache.ClassifiedObserved.Num() != Cache.Observed.Num();
+			for (int32 i = 0; !bInventoryChanged && i < Cache.Observed.Num(); ++i)
+			{
+				AUTWeapon* W = Cache.Observed[i].Get();
+				bInventoryChanged = Cache.ClassifiedObserved[i] != Cache.Observed[i]
+					|| !Cache.ClassifiedGroups.IsValidIndex(i) || !W || Cache.ClassifiedGroups[i] != W->Group;
+			}
+			if (Cache.Character.Get() != Character || Cache.LayoutRevision != LayoutRevision
+				|| bInventoryChanged)
+			{
+				Cache.Character = Character;
+				Cache.LayoutRevision = LayoutRevision;
+				Cache.ClassifiedObserved = Cache.Observed;
+				Cache.ClassifiedGroups.Reset(Cache.Observed.Num());
+				for (const TWeakObjectPtr<AUTWeapon>& WeakWeapon : Cache.Observed)
+				{
+					AUTWeapon* W = WeakWeapon.Get();
+					Cache.ClassifiedGroups.Add(W ? W->Group : MIN_int32);
+				}
+				Cache.Left.Reset();
+				Cache.Right.Reset();
+				static const FName NAME_Left(TEXT("left"));
+				for (const TWeakObjectPtr<AUTWeapon>& WeakWeapon : Cache.Observed)
+				{
+					AUTWeapon* W = WeakWeapon.Get();
+					if (!W) continue;
+					(Layout.GetWeaponSide(W->GetClass()) == NAME_Left ? Cache.Left : Cache.Right).Add(W);
+				}
+				auto SortByGroup = [](const TWeakObjectPtr<AUTWeapon>& A, const TWeakObjectPtr<AUTWeapon>& B)
+				{
+					const AUTWeapon* WA = A.Get();
+					const AUTWeapon* WB = B.Get();
+					return WA && WB ? WA->Group < WB->Group : WB != nullptr;
+				};
+				Cache.Left.Sort(SortByGroup);
+				Cache.Right.Sort(SortByGroup);
+			}
+		}
+		return SideIndex == 0 ? Cache.Left : Cache.Right;
+	}
 }
 
 // =============================================================================
@@ -39,6 +109,15 @@ UNCPlusHUDWidget_WeaponBar::UNCPlusHUDWidget_WeaponBar(const FObjectInitializer&
 	: Super(OI)
 	, SideIndex(0)
 	, WeaponIconAtlas(nullptr)
+	, CachedStyleRevision(0)
+	, bCachedVertical(true)
+	, CachedOpacity(1.f)
+	, CachedSlotBgInactive(NCPlusWB::SlotBgInactive)
+	, CachedSlotBgActive(NCPlusWB::SlotBgActive)
+	, CachedActiveOutline(NCPlusWB::ActiveOutline)
+	, CachedAmmoFillFull(NCPlusWB::AmmoFillFull)
+	, CachedAmmoFillWarn(NCPlusWB::AmmoFillWarn)
+	, CachedAmmoFillDanger(NCPlusWB::AmmoFillDanger)
 {
 	// Narrow vertical box — slots stack downward from the top-left of the widget.
 	// Size matches a single column so anchoring (e.g. CenterRight) lands the
@@ -149,66 +228,53 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 	}
 
 	const FNCPlusHUDLayout& Layout = FNCPlusHUDLayout::GetLive();
-	const FName MyAlias = (SideIndex == 0) ? FName(TEXT("weapon_bar_left")) : FName(TEXT("weapon_bar_right"));
-	const FNCPlusHUDElement* Elem = Layout.Find(MyAlias);
+	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
 
-	// Orientation: layout extra "orientation" = Auto / Horizontal / Vertical.
-	// Auto = vertical (which is what the side-anchored bars want).
-	bool bVertical = true;
-	if (Elem)
+	if (CachedStyleRevision != LayoutRevision)
 	{
-		const FString OrientStr = Elem->GetExtra(TEXT("orientation"));
-		if (OrientStr.Equals(TEXT("Horizontal"), ESearchCase::IgnoreCase)) bVertical = false;
-		else if (OrientStr.Equals(TEXT("Vertical"), ESearchCase::IgnoreCase)) bVertical = true;
+		const FName MyAlias = (SideIndex == 0) ? FName(TEXT("weapon_bar_left")) : FName(TEXT("weapon_bar_right"));
+		const FNCPlusHUDElement* Elem = Layout.Find(MyAlias);
+		CachedStyleRevision = LayoutRevision;
+		bCachedVertical = true;
+		CachedOpacity = Elem ? FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
+		if (Elem)
+		{
+			const FString OrientStr = Elem->GetExtra(TEXT("orientation"));
+			bCachedVertical = !OrientStr.Equals(TEXT("Horizontal"), ESearchCase::IgnoreCase);
+		}
+		auto ResolveColor = [Elem, this](FName Key, const FLinearColor& Default) -> FLinearColor
+		{
+			FLinearColor Out = Elem ? Elem->GetExtraColor(Key, Default) : Default;
+			Out.A *= CachedOpacity;
+			return Out;
+		};
+		CachedSlotBgInactive = ResolveColor(TEXT("color_slot_bg_inactive"), SlotBgInactive);
+		CachedSlotBgActive   = ResolveColor(TEXT("color_slot_bg_active"), SlotBgActive);
+		CachedActiveOutline  = ResolveColor(TEXT("color_outline"), ActiveOutline);
+		CachedAmmoFillFull   = ResolveColor(TEXT("color_ammo_full"), AmmoFillFull);
+		CachedAmmoFillWarn   = ResolveColor(TEXT("color_ammo_warn"), AmmoFillWarn);
+		CachedAmmoFillDanger = ResolveColor(TEXT("color_ammo_danger"), AmmoFillDanger);
 	}
-
-	// Color overrides (Extras keys). Defaults match the constants in NCPlusWB.
-	// Per-element opacity multiplier scales every color's alpha — easier than
-	// editing alpha on each color individually.
-	const float Opacity = Elem ? FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
-
-	// IMPORTANT: UUTHUDWidget::DrawTexture overwrites the passed DrawColor.A
-	// with (Widget.Opacity * arg.DrawOpacity * HUDOpacity). Baking alpha into
-	// a color and passing it to DrawTexture does NOT fade — we have to pass
-	// the alpha through the explicit DrawOpacity argument at every draw site.
-	// We keep .A populated (Opacity * color_alpha) and read it back as the
-	// DrawOpacity argument when drawing each rect.
-	auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
-	{
-		FLinearColor Out = Elem ? Elem->GetExtraColor(Key, Default) : Default;
-		Out.A *= Opacity;
-		return Out;
-	};
-	const FLinearColor SlotBgInactiveCol = Col(TEXT("color_slot_bg_inactive"), SlotBgInactive);
-	const FLinearColor SlotBgActiveCol   = Col(TEXT("color_slot_bg_active"),   SlotBgActive);
-	const FLinearColor ActiveOutlineCol  = Col(TEXT("color_outline"),          ActiveOutline);
-	const FLinearColor AmmoFillFullCol   = Col(TEXT("color_ammo_full"),        AmmoFillFull);
-	const FLinearColor AmmoFillWarnCol   = Col(TEXT("color_ammo_warn"),        AmmoFillWarn);
-	const FLinearColor AmmoFillDangerCol = Col(TEXT("color_ammo_danger"),      AmmoFillDanger);
+	const bool bVertical = bCachedVertical;
+	const float Opacity = CachedOpacity;
+	const FLinearColor SlotBgInactiveCol = CachedSlotBgInactive;
+	const FLinearColor SlotBgActiveCol   = CachedSlotBgActive;
+	const FLinearColor ActiveOutlineCol  = CachedActiveOutline;
+	const FLinearColor AmmoFillFullCol   = CachedAmmoFillFull;
+	const FLinearColor AmmoFillWarnCol   = CachedAmmoFillWarn;
+	const FLinearColor AmmoFillDangerCol = CachedAmmoFillDanger;
+	if (Opacity <= 0.001f) return;
 
 	// Active weapon — pending swap takes priority over current.
 	AUTWeapon* CurrentWeapon = Char->GetPendingWeapon();
 	if (!CurrentWeapon) CurrentWeapon = Char->GetWeapon();
 
-	// Filter inventory to weapons assigned to this side, sort by Group.
-	// Defensive: skip pending-kill weapons; alt-tab + GC can leave the iterator
-	// returning stale handles that would crash on GetClass() / property access.
-	TArray<AUTWeapon*> MyWeapons;
-	const FName MySide = (SideIndex == 0) ? FName(TEXT("left")) : FName(TEXT("right"));
-	for (TInventoryIterator<AUTWeapon> It(Char); It; ++It)
-	{
-		AUTWeapon* W = *It;
-		if (!W || W->IsPendingKill()) continue;
-		UClass* WClass = W->GetClass();
-		if (!WClass) continue;
-		if (Layout.GetWeaponSide(WClass) == MySide)
-		{
-			MyWeapons.Add(W);
-		}
-	}
+	// The two side widgets share one inventory sample per frame. Classification
+	// and sorting rebuild only when the pawn, inventory signature, or layout
+	// revision changes.
+	const TArray<TWeakObjectPtr<AUTWeapon>>& MyWeapons =
+		GetWeaponsForSide(Char, Layout, LayoutRevision, SideIndex);
 	if (MyWeapons.Num() == 0) return;
-
-	MyWeapons.Sort([](const AUTWeapon& A, const AUTWeapon& B) { return A.Group < B.Group; });
 
 	UFont* GroupFont = UTHUDOwner->TinyFont;
 	UFont* AmmoFont  = UTHUDOwner->SmallFont;
@@ -216,7 +282,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 	// Draw cells
 	for (int32 i = 0; i < MyWeapons.Num(); i++)
 	{
-		AUTWeapon* W = MyWeapons[i];
+		AUTWeapon* W = MyWeapons[i].Get();
 		if (!W || W->IsPendingKill()) continue;
 
 		const float SlotX = bVertical ? 0.f : i * (SlotW + SlotGap);

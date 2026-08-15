@@ -1,5 +1,6 @@
 // NCPlusScoreboardHost.cpp — see header.
 #include "NCPlusScoreboardHost.h"
+#include "NCReadyUp.h"
 #include "NetcodePlus.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
@@ -11,7 +12,7 @@ namespace NCPlusScoreboardHost
 {
 	bool IsHost(AUTPlayerState* PS, AUTGameState* GS)
 	{
-		if (PS == nullptr)
+		if (PS == nullptr || (GS != nullptr && ANCReadyUpState::Find(GS->GetWorld()) != nullptr))
 		{
 			return false;
 		}

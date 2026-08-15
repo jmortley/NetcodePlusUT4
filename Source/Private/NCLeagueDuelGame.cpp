@@ -1,7 +1,9 @@
 // NCLeagueDuelGame.cpp — fairness-first 1v1 spawn picker + Glicko2 ELO + stats hooks.
 
 #include "NCLeagueDuelGame.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
+#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "UTPlayerStart.h"
 #include "UTPickupInventory.h"
@@ -27,6 +29,11 @@
 #include "Particles/ParticleSystemComponent.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCLeagueDuel, Log, All);
+
+/** NCP-only stat name (not in StatNames.h): one sample per beam refire interval,
+ *  written by UTWeaponStateFiringLinkBeam_NCP / UTWeap_LinkGun_Plus. This is the
+ *  denominator LinkHits is measured against for beam fire. */
+static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 
 namespace
 {
@@ -97,6 +104,7 @@ ANCLeagueDuelGame::ANCLeagueDuelGame(const FObjectInitializer& OI)
 void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Reset per-match state so a re-init (map travel) starts clean.
 	bRatingFlushedThisMatch = false;
@@ -151,9 +159,12 @@ void ANCLeagueDuelGame::InitGame(const FString& MapName, const FString& Options,
 void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 
 	if (Role != ROLE_Authority || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
@@ -172,6 +183,13 @@ void ANCLeagueDuelGame::PostLogin(APlayerController* NewPlayer)
 	// PostLogin only handles the rating-DB preload above; the engine will
 	// transition to PlayerIntro once both players are present, then
 	// EndPlayerIntro runs and does the paired-shuffle A/B assignment.
+}
+
+bool ANCLeagueDuelGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 void ANCLeagueDuelGame::HandleMatchHasStarted()
@@ -740,7 +758,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	// and is deferred to Super. If you see fewer than 3 lines with this prefix
 	// per match, something is intercepting calls before they reach us (BP
 	// override, mutator, etc.).
-	UE_LOG(LogNCLeagueDuel, Log,
+	UE_LOG(LogNCLeagueDuel, Verbose,
 		TEXT("ChoosePlayerStart entry: PS=%s team=%d bHasRespawnChoices=%d RespawnChoiceA=%s RespawnChoiceB=%s bChosePrimary=%d"),
 		*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 		bHasRespawnChoices ? 1 : 0,
@@ -757,7 +775,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	if (bHasRespawnChoices && PS->RespawnChoiceA != nullptr && PS->RespawnChoiceB != nullptr)
 	{
 		AActor* SuperPick = Super::ChoosePlayerStart_Implementation(Player);
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("ChoosePlayerStart spawn-actual: deferring to Super — returned %s (chose %s)"),
 			SuperPick ? *SuperPick->GetActorLocation().ToString() : TEXT("(null)"),
 			PS->bChosePrimaryRespawnChoice ? TEXT("A") : TEXT("B"));
@@ -807,7 +825,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 	// above returns first).
 	{
 		const FVector* TKL = LastKillerLocation.Find(Player);
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("Tier 1 entry for %s (team %d): bIsFirstSpawn=%d killerLoc=%s exclude=%s minKillerDist=%.0f minEnemyDist=%.0f"),
 			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 			bIsFirstSpawn ? 1 : 0,
@@ -880,7 +898,7 @@ AActor* ANCLeagueDuelGame::ChoosePlayerStart_Implementation(AController* Player)
 		// player to confirm distance filters honoured (chose location should
 		// be > MinKillerSpawnDistance from killerLoc, and > 2500uu from
 		// exclude when ExcludeStart is set).
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("Tier 1 result for %s (team %d): chose %s score=%.1f"),
 			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 			*BestSpawn->GetActorLocation().ToString(), BestScore);
@@ -919,7 +937,7 @@ AActor* ANCLeagueDuelGame::FindPlayerStart_Implementation(AController* Player, c
 				: PS->RespawnChoiceB;
 			if (Picked)
 			{
-				UE_LOG(LogNCLeagueDuel, Log,
+				UE_LOG(LogNCLeagueDuel, Verbose,
 					TEXT("FindPlayerStart short-circuit for %s (team %d): chose %s -> %s | A=%s B=%s"),
 					*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 					PS->bChosePrimaryRespawnChoice ? TEXT("A") : TEXT("B"),
@@ -936,7 +954,7 @@ AActor* ANCLeagueDuelGame::FindPlayerStart_Implementation(AController* Player, c
 	AActor* Result = Super::FindPlayerStart_Implementation(Player, IncomingName);
 	if (AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr)
 	{
-		UE_LOG(LogNCLeagueDuel, Log,
+		UE_LOG(LogNCLeagueDuel, Verbose,
 			TEXT("FindPlayerStart fallthrough for %s (team %d): Super returned %s | A=%s B=%s bChosePrimary=%d"),
 			*PS->PlayerName, PS->Team ? PS->Team->TeamIndex : -1,
 			Result ? *Result->GetActorLocation().ToString() : TEXT("(null)"),
@@ -1008,8 +1026,14 @@ void ANCLeagueDuelGame::BuildMatchSummary(FNCMatchSummary& Out) const
 
 		// Per-weapon accuracy from the engine stats system.
 		// FIntPoint stores Shots in X and Hits in Y.
+		// Link shots come from two counters: stock NAME_LinkShots (one per plasma
+		// trigger pull) and NAME_LinkBeamShots (one per beam refire interval, the
+		// unit LinkHits accumulates in — see UTWeaponStateFiringLinkBeam_NCP.cpp).
+		// Reading only the stock name counted plasma shots against plasma AND beam
+		// hits, inflating link accuracy past 100% for anyone using the beam.
 		P.WeaponAccuracy.Add(FName(TEXT("LinkGun")),
-			FIntPoint(UTPS->GetStatsValue(NAME_LinkShots), UTPS->GetStatsValue(NAME_LinkHits)));
+			FIntPoint(UTPS->GetStatsValue(NAME_LinkBeamShots) + UTPS->GetStatsValue(NAME_LinkShots),
+				UTPS->GetStatsValue(NAME_LinkHits)));
 		P.WeaponAccuracy.Add(FName(TEXT("ShockRifle")),
 			FIntPoint(UTPS->GetStatsValue(NAME_ShockRifleShots), UTPS->GetStatsValue(NAME_ShockRifleHits)));
 		P.WeaponAccuracy.Add(FName(TEXT("SniperRifle")),

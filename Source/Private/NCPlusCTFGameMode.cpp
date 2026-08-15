@@ -1,6 +1,6 @@
 // NCPlusCTFGameMode.cpp - NetcodePlus CTF with improved advantage time and instant replay
 #include "NCPlusCTFGameMode.h"
-#include "NCFireValCollector.h"
+#include "NCReadyUp.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"            // ValidateHat: SetOverrideHatClass / OverrideHatClass
 #include "UTTeamGameMode.h"
@@ -28,10 +28,14 @@
 #include "UTFlag.h"
 #include "NPPlayerController.h"
 #include "NCPlusCTFHUD.h"
+#include "NCPlusHostPause.h"
+#include "NCAutoPauseState.h"
 #include "WarmupRoamMutator.h"
 #include "NCPlusVersionGate.h"
+#include "NCConcedeVote.h"
 #include "CTFStatsReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
+#include "NCICTFFlagLiftGuard.h"
 #include "NCPlusCTFOTInfo.h"
 #include "NCPlusCTFRatingSystem.h"
 #include "NCEloUploader.h"
@@ -39,6 +43,7 @@
 #include "UTATypes.h"                  // NAME_FCKills / NAME_FlagSupportKills / NAME_FlagGrabs / ...
 #include "Misc/ConfigCacheIni.h"       // FConfigFile — Mod.ini perf knobs
 #include "Misc/Paths.h"                // FPaths::GameSavedDir
+#include "Containers/Ticker.h"
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -75,11 +80,14 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	SpawnFreshnessWindow = 30.0f;       // 30s since last use = fully fresh
 	SpawnFlagVicinityRadius = 4000.f;   // flag within this of our base = "in the vicinity"
 	SpawnKillerAvoidRadius = 2500.f;    // never respawn within this of your last killer (anti-camp)
+	SpawnFlagCarrierLOSAvoidRadius = 3500.f; // prefer starts out of the EFC's direct sightline
 	SpawnRobbedBaseAvoidCount = 2.f;    // when our flag's out, the 2 deepest base spawns form the avoid set — ONE blocked per respawn, alternating
 
 	bHasHalftime = true;                // Default true; auto-set false for 3v3+ in InitGame
 	bAllowFloorSlide = true;            // Enabled by default; set false in BP for Sniper CTF etc.
-	OvertimeRespawnTime = 6.f;          // Fixed 6s respawn in overtime (replaces Epic's 10s escalation)
+	OvertimeRespawnTime = 10.f;         // OT respawn cap (327 was 6; raised with the tOxX ramp 2026-08-10)
+	OvertimeEscalationDelay = 360.f;    // 2s base holds for the first 6 min of OT (tOxX 2026-08-10; was 5)
+	OvertimeEscalationInterval = 60.f;  // then +1s per minute (was +1s per 2 minutes)
 
 	// Internal state
 	AdvantageTimeRemaining = 0;
@@ -94,6 +102,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Auto-add the warmup-roam mutator (all NCPlusCTF, incl. iCTF). `mutate warmup`
 	// lets players roam the map invulnerable + fire-disabled during warmup; it strips
@@ -225,49 +234,141 @@ void ANCPlusCTFGameMode::BeginPlay()
 	}
 }
 
+void ANCPlusCTFGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	NCPlusHostPause::CancelDeferredUnpause(this);
+	if (AutoPauseResumeTicker.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(AutoPauseResumeTicker);
+		AutoPauseResumeTicker.Reset();
+	}
+	bAutoPauseResumeCountdownActive = false;
+	AutoPauseResumeSecondsRemaining = 0;
+	AutoPauseResumeEndRealTime = 0.0f;
+	bAutoPauseDormantNoMarker = false;
+	AutoPauseStateActor = nullptr;
+
+	Super::EndPlay(EndPlayReason);
+}
+
 void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early version check — kicks outdated/missing-plugin clients within 10s of
 	// PostLogin, BEFORE they can play meaningful warmup. Replaces the BP check
 	// that fires at match start (which let them roam the map during warmup,
 	// breaking PUGs when they got kicked at go-time). Skips bots + listen host.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 
 	if (!HasAuthority() || !NewPlayer) return;
 
 	// Warmup joiner: rating system isn't constructed yet. They'll be picked up
 	// en-masse by the GS->PlayerArray walk in HandleMatchHasStarted.
 	// Late joiner (mid-match): rating system already exists, load immediately.
-	if (!RatingSystem.IsValid()) return;
-
 	AUTPlayerState* UTPS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (UTPS && UTPS->UniqueId.IsValid())
 	{
 		const FString Uid = UTPS->UniqueId.ToString();
-		RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
-		// Mid-match joiner: stamp first-seen time for the leaver presence calc.
-		// (Warmup joiners are stamped en-masse in HandleMatchHasStarted.) Keep
-		// the earliest sighting on a rejoin.
-		if (!PlayerJoinWorldTime.Contains(Uid))
+		if (bIsPugMatch && !UTPS->bIsABot && !UTPS->bOnlySpectator
+			&& UTPS->GetTeamNum() <= 1)
 		{
-			PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+			AutoPauseTrackedIds.Add(Uid);
+		}
+		// Spectators skip the rating preload (mirrors the HandleMatchHasStarted
+		// bulk-load gate): they are never rated, but this used to run for every
+		// mid-match caster join — a synchronous DB read (plus a first-timer
+		// INSERT + fsync) on the game thread while everyone plays. A spectator
+		// who later enters play is loaded by EnsureRatingLoadedForPlayer via
+		// ChangeTeam instead. The auto-pause resume below stays ungated — an
+		// awaited drop must clear the pause even if they land as a spectator.
+		if (RatingSystem.IsValid() && !UTPS->bOnlySpectator)
+		{
+			RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
+			// Mid-match joiner: stamp first-seen time for the leaver presence calc.
+			// (Warmup joiners are stamped en-masse in HandleMatchHasStarted.) Keep
+			// the earliest sighting on a rejoin.
+			if (!PlayerJoinWorldTime.Contains(Uid))
+			{
+				PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+			}
 		}
 
 		// Auto-pause: an awaited drop just rejoined — resume once everyone we're
 		// waiting on is back.
-		if (bAutoPaused && AutoPauseAwaitIds.Contains(Uid))
+		if (bAutoPaused && CTFGameState
+			&& (CTFGameState->IsMatchInProgress() || CTFGameState->IsMatchInOvertime()))
 		{
-			AutoPauseAwaitIds.Remove(Uid);
-			UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF auto-pause: %s rejoined (%d still out)"),
-				*UTPS->PlayerName, AutoPauseAwaitIds.Num());
-			if (AutoPauseAwaitIds.Num() == 0)
+			const bool bWasAwaited = AutoPauseAwaitIds.Contains(Uid);
+			bool bRestoredPhysicalPause = false;
+			if (AWorldSettings* WS = GetWorldSettings())
 			{
-				EndAutoPause(TEXT("all dropped players rejoined"));
+				if (WS->Pauser == nullptr && !UTPS->bIsABot
+					&& (bWasAwaited || bAutoPauseDormantNoMarker))
+				{
+					WS->Pauser = UTPS;
+					WS->ForceNetUpdate();
+					bAutoPauseDormantNoMarker = false;
+					bRestoredPhysicalPause = true;
+				}
+			}
+
+			if (bWasAwaited)
+			{
+				AutoPauseAwaitIds.Remove(Uid);
+				UE_LOG(LogGameMode, Warning,
+					TEXT("NCPlusCTF auto-pause: %s rejoined (%d still out)"),
+					*UTPS->PlayerName, AutoPauseAwaitIds.Num());
+				if (AutoPauseAwaitIds.Num() == 0)
+				{
+					BeginAutoPauseResumeCountdown(TEXT("All disconnected players returned"));
+				}
+				else
+				{
+					const FString WaitingReason = FString::Printf(
+						TEXT("Waiting for %d disconnected player%s"),
+						AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
+					if (bAutoPauseResumeCountdownActive)
+					{
+						BeginAutoPauseResumeCountdown(WaitingReason);
+					}
+					else
+					{
+						PublishAutoPausePaused(WaitingReason);
+					}
+				}
+			}
+			else if (bRestoredPhysicalPause)
+			{
+				if (AutoPauseAwaitIds.Num() == 0)
+				{
+					BeginAutoPauseResumeCountdown(TEXT("No disconnected players remain"));
+					return;
+				}
+				const FString WaitingReason = FString::Printf(
+					TEXT("Waiting for %d disconnected player%s"),
+					AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
+				if (bAutoPauseResumeCountdownActive)
+				{
+					BeginAutoPauseResumeCountdown(WaitingReason);
+				}
+				else
+				{
+					PublishAutoPausePaused(WaitingReason);
+				}
 			}
 		}
 	}
+}
+
+bool ANCPlusCTFGameMode::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 bool ANCPlusCTFGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)
@@ -293,21 +394,67 @@ bool ANCPlusCTFGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBr
 				// (MovePlayerToTeam kills the pawn on an actual move).
 				if (PS->Team && PS->Team->TeamIndex == Want)
 				{
+					EnsureRatingLoadedForPlayer(Player);
 					return true;
 				}
-				return MovePlayerToTeam(Player, PS, Want);
+				const bool bMoved = MovePlayerToTeam(Player, PS, Want);
+				if (bMoved)
+				{
+					EnsureRatingLoadedForPlayer(Player);
+				}
+				return bMoved;
 			}
 		}
 	}
 
-	return Super::ChangeTeam(Player, NewTeam, bBroadcast);
+	const bool bChanged = Super::ChangeTeam(Player, NewTeam, bBroadcast);
+	if (bChanged)
+	{
+		EnsureRatingLoadedForPlayer(Player);
+	}
+	return bChanged;
+}
+
+// Rating preload for a player ENTERING PLAY mid-match. PostLogin deliberately
+// skips spectators (they are never rated; the preload was hitching caster
+// joins), so every successful team entry funnels through here instead.
+// Idempotent and cheap on repeat: LoadPlayerFromDB is cache-first, the
+// first-seen stamp is Contains-guarded, and pre-match calls no-op because
+// RatingSystem isn't constructed until match start (the bulk load covers those).
+void ANCPlusCTFGameMode::EnsureRatingLoadedForPlayer(AController* Player)
+{
+	if (!HasAuthority() || !RatingSystem.IsValid() || !Player)
+	{
+		return;
+	}
+	AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+	if (!PS || !PS->UniqueId.IsValid())
+	{
+		return;
+	}
+	const FString Uid = PS->UniqueId.ToString();
+	if (bIsPugMatch && !PS->bIsABot && !PS->bOnlySpectator && PS->GetTeamNum() <= 1)
+	{
+		AutoPauseTrackedIds.Add(Uid);
+	}
+	RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
+	if (!PlayerJoinWorldTime.Contains(Uid))
+	{
+		PlayerJoinWorldTime.Add(Uid, GetWorld()->GetTimeSeconds());
+	}
 }
 
 void ANCPlusCTFGameMode::HandleMatchHasEnded()
 {
+	if (HasAuthority())
+	{
+		if (bAutoPaused)
+		{
+			CompleteAutoPauseResume(TEXT("Match ended"));
+		}
+		AutoPauseTrackedIds.Reset();
+	}
 	Super::HandleMatchHasEnded();
-
-	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -377,6 +524,58 @@ void ANCPlusCTFGameMode::HandleMatchHasEnded()
 	}
 }
 
+void ANCPlusCTFGameMode::ForceClearUnpauseDelegates(AActor* PauseActor)
+{
+	AWorldSettings* WS = GetWorldSettings();
+	APlayerController* DepartingPC = Cast<APlayerController>(PauseActor);
+	APlayerState* DepartingPS = DepartingPC != nullptr ? DepartingPC->PlayerState : nullptr;
+	const bool bWasAutoPauseMarker = bAutoPaused && WS != nullptr
+		&& DepartingPS != nullptr && WS->Pauser == DepartingPS;
+
+	// APlayerController::Destroyed calls this before AController::Destroyed calls
+	// Logout. The parent may invoke virtual ClearPause; mark that call as teardown
+	// so it explicitly clears instead of starting a user-facing resume countdown.
+	bForceClearingPauseActor = true;
+	Super::ForceClearUnpauseDelegates(PauseActor);
+	bForceClearingPauseActor = false;
+
+	const bool bLostNonDormantAutoMarker = bAutoPaused && !bAutoPauseDormantNoMarker
+		&& WS != nullptr && WS->Pauser == nullptr;
+	if ((!bWasAutoPauseMarker && !bLostNonDormantAutoMarker) || !bAutoPaused || WS == nullptr)
+	{
+		return;
+	}
+
+	// Keep the world frozen across the tiny ForceClear -> Logout gap. Logout will
+	// then add a tracked leaver's exact ID and may choose the marker again.
+	if (APlayerState* Replacement = FindAutoPauseMarker(DepartingPS))
+	{
+		WS->Pauser = Replacement;
+		WS->ForceNetUpdate();
+		bAutoPauseDormantNoMarker = false;
+	}
+	else
+	{
+		if (AutoPauseAwaitIds.Num() == 0)
+		{
+			CompleteAutoPauseResume(TEXT("Pause marker left after all players returned"));
+			return;
+		}
+		bAutoPauseDormantNoMarker = true;
+		const FString WaitingReason = FString::Printf(
+			TEXT("Waiting for %d disconnected player%s"),
+			AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
+		if (bAutoPauseResumeCountdownActive)
+		{
+			CancelAutoPauseResumeCountdown(WaitingReason);
+		}
+		else
+		{
+			PublishAutoPausePaused(WaitingReason);
+		}
+	}
+}
+
 void ANCPlusCTFGameMode::Logout(AController* Exiting)
 {
 	// Snapshot a leaver's stats while their PlayerState is still intact (the
@@ -422,63 +621,188 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 	}
 
 	// Auto-pause: a participant dropping mid-PUG freezes the match until they
-	// rejoin (or an admin unpauses). Server-only; uses the engine world-pause
+	// rejoin (or a manual unpause is requested). Server-only; uses the engine world-pause
 	// (WorldSettings->Pauser) — the same primitive as the `pause` command.
 	// Runs BEFORE Super (the leaver's PlayerState is still intact here).
 	if (HasAuthority() && bAutoPauseOnDrop && bIsPugMatch && Exiting && CTFGameState
 		&& (CTFGameState->IsMatchInProgress() || CTFGameState->IsMatchInOvertime()))
 	{
 		AUTPlayerState* LeavePS = Cast<AUTPlayerState>(Exiting->PlayerState);
-		if (LeavePS && !LeavePS->bIsABot && !LeavePS->bOnlySpectator
-			&& LeavePS->UniqueId.IsValid() && LeavePS->GetTeamNum() <= 1)
+		if (LeavePS && !LeavePS->bIsABot && LeavePS->UniqueId.IsValid())
 		{
-			BeginOrHoldAutoPause(LeavePS->UniqueId.ToString(), LeavePS->PlayerName);
+			const FString LeaveId = LeavePS->UniqueId.ToString();
+			if (!LeavePS->bOnlySpectator && LeavePS->GetTeamNum() <= 1)
+			{
+				AutoPauseTrackedIds.Add(LeaveId);
+			}
+			bool bSameIdStillPresent = false;
+			for (APlayerState* OtherPS : CTFGameState->PlayerArray)
+			{
+				AUTPlayerState* OtherUTPS = Cast<AUTPlayerState>(OtherPS);
+				if (OtherUTPS != nullptr && OtherUTPS != LeavePS
+					&& !OtherUTPS->IsPendingKillPending() && OtherUTPS->UniqueId.IsValid()
+					&& OtherUTPS->UniqueId.ToString().Equals(LeaveId, ESearchCase::IgnoreCase))
+				{
+					bSameIdStillPresent = true;
+					break;
+				}
+			}
+			if (AutoPauseTrackedIds.Contains(LeaveId) && !bSameIdStillPresent)
+			{
+				BeginOrHoldAutoPause(LeaveId, LeavePS->PlayerName, LeavePS);
+			}
+		}
+	}
+
+	// If an untracked fallback marker (spectator/bot) leaves, rehome the engine
+	// marker without adding that observer to the exact-ID participant wait.
+	if (HasAuthority() && bAutoPaused && Exiting)
+	{
+		AUTPlayerState* MarkerPS = Cast<AUTPlayerState>(Exiting->PlayerState);
+		AWorldSettings* WS = GetWorldSettings();
+		if (MarkerPS && WS && WS->Pauser == MarkerPS
+			&& (!MarkerPS->UniqueId.IsValid()
+				|| !AutoPauseAwaitIds.Contains(MarkerPS->UniqueId.ToString())))
+		{
+			if (APlayerState* Replacement = FindAutoPauseMarker(MarkerPS))
+			{
+				WS->Pauser = Replacement;
+				WS->ForceNetUpdate();
+				bAutoPauseDormantNoMarker = false;
+			}
+			else
+			{
+				if (AutoPauseAwaitIds.Num() == 0)
+				{
+					CompleteAutoPauseResume(TEXT("Fallback pause marker left after all players returned"));
+				}
+				else
+				{
+					bAutoPauseDormantNoMarker = true;
+					const FString WaitingReason = FString::Printf(
+						TEXT("Waiting for %d disconnected player%s"),
+						AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
+					if (bAutoPauseResumeCountdownActive)
+					{
+						CancelAutoPauseResumeCountdown(WaitingReason);
+					}
+					else
+					{
+						PublishAutoPausePaused(WaitingReason);
+					}
+					const bool bWasPhysicallyPaused = WS->Pauser != nullptr;
+					Super::ClearPause();
+					if (bWasPhysicallyPaused && WS->Pauser == nullptr)
+					{
+						WS->ForceNetUpdate();
+						NCPlusHostPause::ResyncServerWorldTime(this);
+					}
+				}
+			}
 		}
 	}
 
 	Super::Logout(Exiting);
 }
 
-APlayerState* ANCPlusCTFGameMode::FindAutoPauseMarker() const
+APlayerState* ANCPlusCTFGameMode::FindAutoPauseMarker(const APlayerState* Excluded) const
 {
-	// A present, non-spectator player who hasn't dropped — used as the engine
-	// pause marker (WorldSettings->Pauser must be non-null to hold the pause).
+	// Prefer a present human participant who hasn't dropped. A spectator/bot is
+	// a safe physical fallback; Logout rehomes untracked fallback markers without
+	// adding them to the exact-ID participant wait.
 	if (!CTFGameState) return nullptr;
+	APlayerState* Fallback = nullptr;
 	for (APlayerState* PS : CTFGameState->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-		if (UTPS && !UTPS->bOnlySpectator && UTPS->UniqueId.IsValid()
-			&& !AutoPauseAwaitIds.Contains(UTPS->UniqueId.ToString()))
+		if (!UTPS || UTPS == Excluded || UTPS->IsPendingKillPending())
+		{
+			continue;
+		}
+		if (UTPS->UniqueId.IsValid()
+			&& AutoPauseAwaitIds.Contains(UTPS->UniqueId.ToString()))
+		{
+			continue;
+		}
+		if (!UTPS->bOnlySpectator && !UTPS->bIsABot && UTPS->UniqueId.IsValid())
 		{
 			return UTPS;
 		}
+		if (Fallback == nullptr)
+		{
+			Fallback = UTPS;
+		}
 	}
-	return nullptr;
+	return Fallback;
 }
 
-void ANCPlusCTFGameMode::BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName)
+void ANCPlusCTFGameMode::BeginOrHoldAutoPause(const FString& LeaverId,
+	const FString& LeaverName, const APlayerState* ExitingPlayerState)
 {
 	AWorldSettings* WS = GetWorldSettings();
-	if (!WS) return;
+	if (!WS || LeaverId.IsEmpty()) return;
 
+	// A player drop wins over every pending resume path, including a host/rcon
+	// countdown that may have started before this became an automatic pause.
+	NCPlusHostPause::CancelDeferredUnpause(this);
 	AutoPauseAwaitIds.Add(LeaverId);
 
 	// (Re)point the pause marker at a still-present player — never a leaver (their
-	// PlayerState is torn down in Super::Logout). If nobody's left, nothing to do.
-	APlayerState* Marker = FindAutoPauseMarker();
+	// PlayerState is torn down in Super::Logout). With no marker, retain the
+	// logical pause + exact IDs so the first reconnect can restore the freeze.
+	APlayerState* Marker = FindAutoPauseMarker(ExitingPlayerState);
 	if (!Marker)
 	{
-		if (bAutoPaused) { EndAutoPause(TEXT("no players remain")); }
-		else { AutoPauseAwaitIds.Reset(); }
+		const bool bWasAutoPaused = bAutoPaused;
+		bAutoPaused = true;
+		bAutoPauseDormantNoMarker = true;
+		const FString PauseReason = FString::Printf(
+			TEXT("Waiting for %d disconnected player%s"),
+			AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
+		if (bAutoPauseResumeCountdownActive)
+		{
+			CancelAutoPauseResumeCountdown(PauseReason);
+		}
+		else
+		{
+			PublishAutoPausePaused(PauseReason);
+		}
+		if (WS->Pauser == ExitingPlayerState)
+		{
+			const bool bWasPhysicallyPaused = WS->Pauser != nullptr;
+			Super::ClearPause();
+			if (bWasPhysicallyPaused && WS->Pauser == nullptr)
+			{
+				WS->ForceNetUpdate();
+				NCPlusHostPause::ResyncServerWorldTime(this);
+			}
+		}
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF auto-pause: no pause marker remains; preserving %d awaited ID%s%s"),
+			AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"),
+			bWasAutoPaused ? TEXT("") : TEXT(" (logical pause started)"));
 		return;
 	}
 
 	WS->Pauser = Marker;   // engine world-pause; replicated, clients show paused
-	if (!bAutoPaused)
+	WS->ForceNetUpdate();
+	bAutoPauseDormantNoMarker = false;
+	const bool bWasAutoPaused = bAutoPaused;
+	bAutoPaused = true;
+	const FString PauseReason = FString::Printf(TEXT("Waiting for %s to reconnect"), *LeaverName);
+	if (bAutoPauseResumeCountdownActive)
 	{
-		bAutoPaused = true;
+		CancelAutoPauseResumeCountdown(PauseReason);
+	}
+	else
+	{
+		PublishAutoPausePaused(PauseReason);
+	}
+
+	if (!bWasAutoPaused)
+	{
 		UE_LOG(LogGameMode, Warning,
-			TEXT("NCPlusCTF auto-pause: %s dropped — match PAUSED until rejoin (or admin unpause). awaiting=%d"),
+			TEXT("NCPlusCTF auto-pause: %s dropped — match PAUSED until rejoin/manual resume. awaiting=%d"),
 			*LeaverName, AutoPauseAwaitIds.Num());
 	}
 	else
@@ -489,15 +813,170 @@ void ANCPlusCTFGameMode::BeginOrHoldAutoPause(const FString& LeaverId, const FSt
 	}
 }
 
-void ANCPlusCTFGameMode::EndAutoPause(const TCHAR* Reason)
+TArray<FString> ANCPlusCTFGameMode::GetSortedAutoPauseAwaitIds() const
 {
-	if (AWorldSettings* WS = GetWorldSettings())
+	TArray<FString> Result;
+	Result.Reserve(AutoPauseAwaitIds.Num());
+	for (const FString& Id : AutoPauseAwaitIds)
 	{
-		WS->Pauser = nullptr;
+		Result.Add(Id);
+	}
+	Result.Sort();
+	return Result;
+}
+
+ANCAutoPauseState* ANCPlusCTFGameMode::GetOrCreateAutoPauseState()
+{
+	UWorld* World = GetWorld();
+	if (!HasAuthority() || World == nullptr)
+	{
+		return nullptr;
+	}
+
+	if (AutoPauseStateActor != nullptr && AutoPauseStateActor->GetWorld() == World)
+	{
+		return AutoPauseStateActor;
+	}
+
+	if (ANCAutoPauseState* Existing = ANCAutoPauseState::Find(World))
+	{
+		AutoPauseStateActor = Existing;
+		return AutoPauseStateActor;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = GameState;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AutoPauseStateActor = World->SpawnActor<ANCAutoPauseState>(SpawnParams);
+	return AutoPauseStateActor;
+}
+
+void ANCPlusCTFGameMode::PublishAutoPausePaused(const FString& Reason)
+{
+	if (ANCAutoPauseState* State = GetOrCreateAutoPauseState())
+	{
+		State->SetPaused(Reason, GetSortedAutoPauseAwaitIds());
+	}
+}
+
+void ANCPlusCTFGameMode::BeginAutoPauseResumeCountdown(const FString& Reason)
+{
+	if (!HasAuthority() || !bAutoPaused)
+	{
+		return;
+	}
+	if (bAutoPauseResumeCountdownActive)
+	{
+		if (ANCAutoPauseState* State = GetOrCreateAutoPauseState())
+		{
+			State->UpdateResumeCountdown(AutoPauseResumeSecondsRemaining,
+				GetSortedAutoPauseAwaitIds());
+		}
+		return;
+	}
+
+	const int32 Duration = FMath::Clamp(AutoPauseResumeCountdownSec, 0, 60);
+	if (Duration <= 0)
+	{
+		CompleteAutoPauseResume(Reason);
+		return;
+	}
+
+	bAutoPauseResumeCountdownActive = true;
+	AutoPauseResumeSecondsRemaining = Duration;
+	AutoPauseResumeEndRealTime = GetWorld()->GetRealTimeSeconds() + float(Duration);
+	if (ANCAutoPauseState* State = GetOrCreateAutoPauseState())
+	{
+		State->BeginResumeCountdown(Reason, Duration, GetSortedAutoPauseAwaitIds());
+	}
+
+	AutoPauseResumeTicker = FTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &ANCPlusCTFGameMode::TickAutoPauseResume), 0.1f);
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF auto-pause: resume countdown started (%ds, %s)"), Duration, *Reason);
+}
+
+void ANCPlusCTFGameMode::CancelAutoPauseResumeCountdown(const FString& Reason)
+{
+	if (AutoPauseResumeTicker.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(AutoPauseResumeTicker);
+		AutoPauseResumeTicker.Reset();
+	}
+	bAutoPauseResumeCountdownActive = false;
+	AutoPauseResumeSecondsRemaining = 0;
+	AutoPauseResumeEndRealTime = 0.0f;
+	PublishAutoPausePaused(Reason);
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF auto-pause: resume countdown cancelled (%s)"), *Reason);
+}
+
+bool ANCPlusCTFGameMode::TickAutoPauseResume(float /*DeltaTime*/)
+{
+	if (!HasAuthority() || !bAutoPaused || GetWorld() == nullptr)
+	{
+		AutoPauseResumeTicker.Reset();
+		bAutoPauseResumeCountdownActive = false;
+		AutoPauseResumeSecondsRemaining = 0;
+		AutoPauseResumeEndRealTime = 0.0f;
+		return false;
+	}
+
+	const int32 NewRemaining = FMath::Max(0, FMath::CeilToInt(
+		AutoPauseResumeEndRealTime - GetWorld()->GetRealTimeSeconds()));
+	if (NewRemaining != AutoPauseResumeSecondsRemaining)
+	{
+		AutoPauseResumeSecondsRemaining = NewRemaining;
+		if (ANCAutoPauseState* State = GetOrCreateAutoPauseState())
+		{
+			State->UpdateResumeCountdown(AutoPauseResumeSecondsRemaining,
+				GetSortedAutoPauseAwaitIds());
+		}
+	}
+	if (AutoPauseResumeSecondsRemaining > 0)
+	{
+		return true;
+	}
+
+	AutoPauseResumeTicker.Reset();
+	bAutoPauseResumeCountdownActive = false;
+	AutoPauseResumeEndRealTime = 0.0f;
+	CompleteAutoPauseResume(TEXT("Resume countdown completed"));
+	return false;
+}
+
+void ANCPlusCTFGameMode::CompleteAutoPauseResume(const FString& Reason)
+{
+	if (AutoPauseResumeTicker.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(AutoPauseResumeTicker);
+		AutoPauseResumeTicker.Reset();
+	}
+	bAutoPauseResumeCountdownActive = false;
+	AutoPauseResumeSecondsRemaining = 0;
+	AutoPauseResumeEndRealTime = 0.0f;
+
+	AWorldSettings* WS = GetWorldSettings();
+	const bool bWasPaused = WS != nullptr && WS->Pauser != nullptr;
+	// Qualified Super call is an explicit clear (never a toggle). It also removes
+	// stock Pausers delegates if a manual pause overlapped the automatic pause.
+	Super::ClearPause();
+	const bool bDidUnpause = bWasPaused && WS != nullptr && WS->Pauser == nullptr;
+	if (bDidUnpause)
+	{
+		WS->ForceNetUpdate();
+		NCPlusHostPause::ResyncServerWorldTime(this);
 	}
 	bAutoPaused = false;
+	bAutoPauseDormantNoMarker = false;
 	AutoPauseAwaitIds.Reset();
-	UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF auto-pause: resuming (%s)"), Reason);
+	if (ANCAutoPauseState* State = GetOrCreateAutoPauseState())
+	{
+		State->SetInactive(Reason);
+	}
+	UE_LOG(LogGameMode, Warning,
+		TEXT("NCPlusCTF auto-pause: complete (%s, worldUnpaused=%s)"),
+		*Reason, bDidUnpause ? TEXT("true") : TEXT("false"));
 }
 
 void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const
@@ -667,6 +1146,8 @@ void ANCPlusCTFGameMode::ScoreKill_Implementation(AController* Killer, AControll
 
 void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 {
+	AutoPauseResumeCountdownSec = NCPlusHostPause::GetUnpauseCountdownSeconds();
+
 	// Members already hold defaults; only override what Mod.ini [UTPUGS_STATS]
 	// specifies (same section + load pattern as NCEloUploader).
 	const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
@@ -715,12 +1196,12 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	ReadBool(TEXT("AutoPauseOnDrop"),          bAutoPauseOnDrop);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f respawn=%.2f autoPause=%s"),
+		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f respawn=%.2f autoPause=%s resumeCountdown=%ds"),
 		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac,
 		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength, CTFRoleCombatWeight, CTFRespawnWait,
-		bAutoPauseOnDrop ? TEXT("true") : TEXT("false"));
+		bAutoPauseOnDrop ? TEXT("true") : TEXT("false"), AutoPauseResumeCountdownSec);
 }
 
 void ANCPlusCTFGameMode::LoadSpawnConfig()
@@ -745,6 +1226,10 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	{
 		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atof(*V->GetValue()); }
 	};
+	auto ReadBool = [Section](const TCHAR* Key, bool& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = V->GetValue().ToBool(); }
+	};
 
 	// Penalty weights (the side-clustering knobs — soften these to let mid back in).
 	ReadFloat(TEXT("FlagCarrierSpawnPenalty"), FlagCarrierSpawnPenalty);
@@ -761,16 +1246,48 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadFloat(TEXT("SpawnNearLastPenalty"),    SpawnNearLastPenalty);
 
 	// Selection knobs (tie-band + freshness + killer-avoid).
+	ReadBool(TEXT("SpawnWeightedRandom"),      bSpawnWeightedRandom);
+	ReadFloat(TEXT("SpawnRandomBase"),         SpawnRandomBase);
+	ReadFloat(TEXT("SpawnRandomSpread"),       SpawnRandomSpread);
+	const float ConfiguredSpawnRandomBase = SpawnRandomBase;
+	const float ConfiguredSpawnRandomSpread = SpawnRandomSpread;
+	SpawnRandomBase = FMath::IsFinite(SpawnRandomBase)
+		? FMath::Max(0.f, SpawnRandomBase)
+		: 20.f;
+	SpawnRandomSpread = FMath::IsFinite(SpawnRandomSpread)
+		? FMath::Max(0.f, SpawnRandomSpread)
+		: 1.f;
+	if (bSpawnWeightedRandom && SpawnRandomSpread <= 0.f)
+	{
+		// A zero/negative spread either removes score weighting or reverses it.
+		// Weighted mode must retain a positive score-to-ceiling relationship.
+		SpawnRandomSpread = 1.f;
+	}
+	if (SpawnRandomBase != ConfiguredSpawnRandomBase
+		|| SpawnRandomSpread != ConfiguredSpawnRandomSpread)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF spawn config corrected: SpawnRandomBase %.2f -> %.2f, SpawnRandomSpread %.2f -> %.2f"),
+			ConfiguredSpawnRandomBase, SpawnRandomBase,
+			ConfiguredSpawnRandomSpread, SpawnRandomSpread);
+	}
+	ReadFloat(TEXT("SpawnEnemyHardRadius"),    SpawnEnemyHardRadius);
+	ReadFloat(TEXT("SpawnEnemyBelowZ"),        SpawnEnemyBelowZ);
 	ReadFloat(TEXT("SpawnTieBandWidth"),       SpawnTieBandWidth);
 	ReadFloat(TEXT("SpawnFreshnessBonus"),     SpawnFreshnessBonus);
 	ReadFloat(TEXT("SpawnFreshnessWindow"),    SpawnFreshnessWindow);
 	ReadFloat(TEXT("SpawnFlagVicinityRadius"), SpawnFlagVicinityRadius);
 	ReadFloat(TEXT("SpawnKillerAvoidRadius"),  SpawnKillerAvoidRadius);
+	ReadFloat(TEXT("SpawnFlagCarrierLOSAvoidRadius"), SpawnFlagCarrierLOSAvoidRadius);
 	ReadFloat(TEXT("SpawnRobbedBaseAvoidCount"), SpawnRobbedBaseAvoidCount);
+	ReadBool(TEXT("LogSpawnChoices"), bLogSpawnChoices);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f robbedAvoid=%.0f | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
-		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius, SpawnRobbedBaseAvoidCount,
+		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: pick=%s randBase=%.1f randSpread=%.2f tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f efcLOSAvoid=%.0f robbedAvoid=%.0f enemyHard=%.0f enemyBelowZ=%.0f logChoices=%s | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		bSpawnWeightedRandom ? TEXT("weighted-random") : TEXT("tie-band"), SpawnRandomBase, SpawnRandomSpread,
+		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius, SpawnFlagCarrierLOSAvoidRadius, SpawnRobbedBaseAvoidCount,
+		SpawnEnemyHardRadius, SpawnEnemyBelowZ,
+		bLogSpawnChoices ? TEXT("true") : TEXT("false"),
 		FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange);
 }
 
@@ -869,18 +1386,17 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 		if (UsedStart)
 		{
 			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(TWeakObjectPtr<AController>(NewPlayer));
+			Recent.ThirdLast = Recent.SecondLast;
 			Recent.SecondLast = Recent.Last;
 			Recent.Last = UsedStart;
 		}
 	}
 
-	// Spawn log — gated to LIVE match (warmup respawns were inflating the count so it
-	// never matched real deaths) and reporting the PAWN's ACTUAL world location. The
-	// previous version logged NewPlayer->StartSpot, which can lag the real per-life
-	// spawn and falsely read "same"; StartSpot is printed alongside so any divergence
-	// from the pawn is visible. Warning verbosity to survive the Shipping UE_LOG strip.
+	// Optional spawn diagnostics — gated to LIVE match and reporting the PAWN's
+	// actual world location. Warning verbosity survives Shipping when an admin opts in.
 	APawn* SpawnedPawnForLog = NewPlayer ? NewPlayer->GetPawn() : nullptr;
-	if (SpawnedPawnForLog && CTFGameState && CTFGameState->IsMatchInProgress())
+	if (bLogSpawnChoices && SpawnedPawnForLog && CTFGameState
+		&& CTFGameState->IsMatchInProgress())
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 		const int32 TeamIdx = (PS && PS->Team) ? int32(PS->Team->TeamIndex) : -1;
@@ -1039,8 +1555,18 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 			const FVector EnemyLoc = EnemyChar->GetActorLocation();
 			const float DistToEnemy = (StartLoc - EnemyLoc).Size();
 
+			// IG+ MinSpawnZVariance (NewTDM.uc): an enemy well BELOW a start is
+			// separated by a floor, not standing next to it. Plain 3D distance
+			// counts a pit dweller as adjacent, which on vertical maps pushes the
+			// picker off perfectly good starts and crowds everyone onto the few
+			// remaining ones. Only the PROXIMITY term is discounted here — if he
+			// can actually see the start the LOS penalty below still lands (a
+			// deliberate refinement; IG+ drops both).
+			const bool bEnemyWellBelow = (SpawnEnemyBelowZ > 0.f)
+				&& ((StartLoc.Z - EnemyLoc.Z) >= SpawnEnemyBelowZ);
+
 			// Distance-based penalty: closer enemy = bigger penalty
-			if (EnemyBlockRange > 0.f && DistToEnemy < EnemyBlockRange)
+			if (!bEnemyWellBelow && EnemyBlockRange > 0.f && DistToEnemy < EnemyBlockRange)
 			{
 				float DistFactor = 1.f - (DistToEnemy / EnemyBlockRange);
 				Result -= EnemyBlockPenalty * DistFactor;
@@ -1081,8 +1607,11 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 			{
 				return 0.001f;
 			}
-			// Penalize using the spawn from 2 lives ago
-			if (Recent->SecondLast.IsValid() && Recent->SecondLast.Get() == P)
+			// Penalize the spawns from 2 AND 3 lives ago (IG+ LastStartSpot2/3).
+			// Three-deep memory is what stops a two-start map alternating A-B-A-B
+			// forever: with only 2 remembered, the third choice is unconstrained.
+			if ((Recent->SecondLast.IsValid() && Recent->SecondLast.Get() == P)
+				|| (Recent->ThirdLast.IsValid() && Recent->ThirdLast.Get() == P))
 			{
 				Result *= SpawnRecentPenaltyMultiplier; // 0.5x
 			}
@@ -1206,6 +1735,26 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		}
 	}
 
+	// A defender should not materialize in the enemy flag carrier's sightline.
+	// This is an eligibility preference rather than an absolute failure condition:
+	// if every start inside the configured radius has LOS, the tiering below falls
+	// back to the best remaining safety tier and still permits the respawn.
+	AUTCharacter* EnemyFlagCarrier = nullptr;
+	if (SpawnFlagCarrierLOSAvoidRadius > 0.f && CTFGameState)
+	{
+		AUTCTFFlagBase* OwnBase = CTFGameState->GetFlagBase((uint8)TeamIndex);
+		if (IsValid(OwnBase) && IsValid(OwnBase->MyFlag)
+			&& CTFGameState->GetFlagState((uint8)TeamIndex) == CarriedObjectState::Held
+			&& IsValid(OwnBase->MyFlag->HoldingPawn))
+		{
+			AUTCharacter* CarrierChar = Cast<AUTCharacter>(OwnBase->MyFlag->HoldingPawn);
+			if (CarrierChar && !CarrierChar->IsDead())
+			{
+				EnemyFlagCarrier = CarrierChar;
+			}
+		}
+	}
+
 	// When our OWN flag isn't home, drop ONE of the deepest starts at our
 	// (just-robbed) base — alternating which — so we respawn biased forward toward
 	// the carrier's escape rather than behind it: a lightweight slice of UT99's
@@ -1226,11 +1775,17 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	TArray<APlayerStart*> Cands;
 	TArray<float> Scores;
 	TArray<bool> KillerAdj;
+	TArray<bool> EFCLOSAdj;
+	TArray<bool> EnemyAdj;
 	TArray<float> DistOwnBase;
 	Cands.Reserve(Pool.Num());
 	Scores.Reserve(Pool.Num());
 	KillerAdj.Reserve(Pool.Num());
+	EFCLOSAdj.Reserve(Pool.Num());
+	EnemyAdj.Reserve(Pool.Num());
 	DistOwnBase.Reserve(Pool.Num());
+	static FName NAME_CTFSpawnEFCLOS = FName(TEXT("CTFSpawnEFCLOS"));
+	static FName NAME_CTFSpawnEnemy = FName(TEXT("CTFSpawnEnemy"));
 	for (const TWeakObjectPtr<APlayerStart>& WP : Pool)
 	{
 		APlayerStart* Candidate = WP.Get();
@@ -1248,6 +1803,63 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		Cands.Add(Candidate);
 		Scores.Add(Score);
 		KillerAdj.Add(bHaveKiller && ((Candidate->GetActorLocation() - KillerLoc).Size() < SpawnKillerAvoidRadius));
+
+		bool bHasEFCLOS = false;
+		if (EnemyFlagCarrier)
+		{
+			const FVector StartLoc = Candidate->GetActorLocation();
+			const FVector CarrierLoc = EnemyFlagCarrier->GetActorLocation();
+			if ((StartLoc - CarrierLoc).Size() < SpawnFlagCarrierLOSAvoidRadius)
+			{
+				const FVector SpawnEye = StartLoc + FVector(0.f, 0.f, 64.f);
+				const FVector CarrierEye = CarrierLoc + FVector(0.f, 0.f, EnemyFlagCarrier->BaseEyeHeight);
+				bHasEFCLOS = !GetWorld()->LineTraceTestByChannel(
+					SpawnEye, CarrierEye,
+					COLLISION_TRACE_WEAPONNOCHARACTER,
+					FCollisionQueryParams(NAME_CTFSpawnEFCLOS, false));
+			}
+		}
+		EFCLOSAdj.Add(bHasEFCLOS);
+
+		// IG+ MinSpawnDistance (NewTDM.uc): a start with a live enemy this close is
+		// REFUSED, not merely penalised — a score penalty can still lose to a start
+		// that scores well on everything else, which is how players end up
+		// materialising in someone's face. Escape hatch, also IG+: an enemy well
+		// BELOW the start with no sightline to it is floor-separated, not a threat.
+		// This is only a tier preference — if every start in the pool is violated
+		// (small map, heavy pressure) the bit drops out of every tier and spawning
+		// proceeds on the remaining protections.
+		bool bEnemyTooClose = false;
+		if (SpawnEnemyHardRadius > 0.f)
+		{
+			const FVector CandLoc = Candidate->GetActorLocation();
+			for (FConstControllerIterator EIt = GetWorld()->GetControllerIterator(); EIt && !bEnemyTooClose; ++EIt)
+			{
+				AController* EC = EIt->Get();
+				if (!EC || !EC->GetPawn()) { continue; }
+				AUTPlayerState* EPS = Cast<AUTPlayerState>(EC->PlayerState);
+				if (!EPS || !EPS->Team || EPS->Team->TeamIndex == TeamIndex) { continue; }
+				AUTCharacter* EChar = Cast<AUTCharacter>(EC->GetPawn());
+				if (!EChar || EChar->IsDead()) { continue; }
+
+				const FVector ELoc = EChar->GetActorLocation();
+				if ((CandLoc - ELoc).Size() >= SpawnEnemyHardRadius) { continue; }
+
+				if (SpawnEnemyBelowZ > 0.f && (CandLoc.Z - ELoc.Z) >= SpawnEnemyBelowZ)
+				{
+					// Below us: only dangerous if he can actually see the start.
+					const FVector SpawnEye = CandLoc + FVector(0.f, 0.f, 64.f);
+					const FVector EnemyEye = ELoc + FVector(0.f, 0.f, EChar->BaseEyeHeight);
+					const bool bClearLOS = !GetWorld()->LineTraceTestByChannel(
+						SpawnEye, EnemyEye, COLLISION_TRACE_WEAPONNOCHARACTER,
+						FCollisionQueryParams(NAME_CTFSpawnEnemy, false));
+					if (!bClearLOS) { continue; }
+				}
+				bEnemyTooClose = true;
+			}
+		}
+		EnemyAdj.Add(bEnemyTooClose);
+
 		DistOwnBase.Add(bOwnFlagOut ? (Candidate->GetActorLocation() - OwnBaseLoc).Size() : FLT_MAX);
 	}
 
@@ -1279,22 +1891,27 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		}
 	}
 
-	// Tiered eligibility so we never fail to spawn and killer-avoidance (the safety
-	// filter) is the last thing dropped: prefer clear-of-killer AND off-robbed-base,
-	// else clear-of-killer, else anything.
-	int32 nBoth = 0, nKiller = 0;
+	// Lexicographic safety tier: no-enemy-on-top-of-us is highest priority (IG+
+	// MinSpawnDistance), then last-killer clearance, then EFC LOS clearance, then
+	// the rotating robbed-base exclusion. Each lower bit can only decide between
+	// candidates tied on every higher-priority rule. If all starts violate a rule,
+	// that bit is absent from every tier and spawning still succeeds using the
+	// remaining protections.
+	uint8 BestSafetyTier = 0;
+	auto GetSafetyTier = [&](int32 i) -> uint8
+	{
+		const bool bEnemyClear = !EnemyAdj[i];
+		const bool bKillerClear = !(bHaveKiller && KillerAdj[i]);
+		const bool bEFCClear = !(EnemyFlagCarrier && EFCLOSAdj[i]);
+		return (bEnemyClear ? 8 : 0) | (bKillerClear ? 4 : 0) | (bEFCClear ? 2 : 0) | (!RobbedAdj[i] ? 1 : 0);
+	};
 	for (int32 i = 0; i < Cands.Num(); ++i)
 	{
-		const bool kOk = !(bHaveKiller && KillerAdj[i]);
-		if (kOk) { nKiller++; if (!RobbedAdj[i]) { nBoth++; } }
+		BestSafetyTier = FMath::Max(BestSafetyTier, GetSafetyTier(i));
 	}
-	const int32 Tier = (nBoth > 0) ? 2 : (nKiller > 0 ? 1 : 0);
 	auto Eligible = [&](int32 i) -> bool
 	{
-		const bool kOk = !(bHaveKiller && KillerAdj[i]);
-		if (Tier == 2) { return kOk && !RobbedAdj[i]; }
-		if (Tier == 1) { return kOk; }
-		return true;
+		return GetSafetyTier(i) == BestSafetyTier;
 	};
 
 	float BestScore = -FLT_MAX;
@@ -1304,15 +1921,61 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		BestScore = FMath::Max(BestScore, Scores[i]);
 	}
 
-	// Collect the tie-band (all within SpawnTieBandWidth of the best) and pick one at random.
-	TArray<APlayerStart*> TopBand;
-	for (int32 i = 0; i < Cands.Num(); ++i)
+	APlayerStart* Best = nullptr;
+	// Starts in real contention for this pick — weighted mode counts live (non-zero)
+	// ceilings, legacy counts the tie band. Feeds band= in the pick diagnostic below.
+	int32 ContentionCount = 0;
+	if (bSpawnWeightedRandom)
 	{
-		if (!Eligible(i)) { continue; }
-		if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
+		// IG+ weighted-random pick (NewTDM.uc: CurrentScore = Rand(Max(DefaultSpawnWeight
+		// + CurrentScore, 0)), highest draw wins). Every start still in contention
+		// draws from [0, ceiling); equal starts are a true coin-flip and a slightly
+		// worse start still wins a real share of the time. This is what the tie-band
+		// could not do — it picked the SAME start every life whenever one led by more
+		// than SpawnTieBandWidth ("siempre en el mismo sitio").
+		//
+		// Ceilings are measured DOWN FROM THE BEST, never up from the worst: Epic's
+		// base rating returns hard negatives for starts it has already rejected
+		// (-8 just-used, -5 respawn choice, -10 telefrag, -20 wrong team — and our
+		// Result<=0 early-out passes them through untouched), so a worst-relative
+		// ceiling would have handed the start you just left a real chance of coming
+		// back. Falling off the best instead gives anything SpawnRandomBase /
+		// SpawnRandomSpread points below the leader a ceiling of zero — no draw, no
+		// chance — which keeps every engine rejection excluded.
+		float BestDraw = -1.f;
+		APlayerStart* TopScorer = nullptr;
+		for (int32 i = 0; i < Cands.Num(); ++i)
+		{
+			if (!Eligible(i)) { continue; }
+			if (TopScorer == nullptr && Scores[i] >= BestScore) { TopScorer = Cands[i]; }
+
+			const float Ceiling = SpawnRandomBase - (BestScore - Scores[i]) * SpawnRandomSpread;
+			if (Ceiling <= 0.f) { continue; }
+			ContentionCount++;
+			const float Draw = FMath::FRandRange(0.f, Ceiling);
+			if (Draw > BestDraw)
+			{
+				BestDraw = Draw;
+				Best = Cands[i];
+			}
+		}
+		// Only reachable if SpawnRandomBase was configured to 0 or below: keep the
+		// scorer's verdict rather than dropping to the engine picker.
+		if (Best == nullptr) { Best = TopScorer; }
+	}
+	else
+	{
+		// Legacy: coin-flip among everything within SpawnTieBandWidth of the best.
+		TArray<APlayerStart*> TopBand;
+		for (int32 i = 0; i < Cands.Num(); ++i)
+		{
+			if (!Eligible(i)) { continue; }
+			if (Scores[i] >= BestScore - SpawnTieBandWidth) { TopBand.Add(Cands[i]); }
+		}
+		ContentionCount = TopBand.Num();
+		if (TopBand.Num() > 0) { Best = TopBand[FMath::RandRange(0, TopBand.Num() - 1)]; }
 	}
 
-	APlayerStart* Best = (TopBand.Num() > 0) ? TopBand[FMath::RandRange(0, TopBand.Num() - 1)] : nullptr;
 	if (!Best)
 	{
 		return Super::ChoosePlayerStart_Implementation(Player);
@@ -1325,18 +1988,22 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 		SpawnLastUsedTime.Add(Best, Now);
 	}
 
-	// Confirmation log (Warning survives the Shipping UE_LOG strip). Pairs with the
-	// "NCPlusCTF spawn:" line in RestartPlayer to show selection is ours + rotating.
-	int32 KillerBlocked = 0, RobbedBlocked = 0;
-	for (int32 i = 0; i < Cands.Num(); ++i)
+	// Optional selection diagnostics. Pairs with RestartPlayer's actual-pawn line.
+	if (bLogSpawnChoices)
 	{
-		if (Eligible(i)) { continue; }
-		if (bHaveKiller && KillerAdj[i]) { KillerBlocked++; } else { RobbedBlocked++; }
+		int32 KillerBlocked = 0, EFCLOSBlocked = 0, RobbedBlocked = 0;
+		for (int32 i = 0; i < Cands.Num(); ++i)
+		{
+			if (Eligible(i)) { continue; }
+			if ((BestSafetyTier & 4) && bHaveKiller && KillerAdj[i]) { KillerBlocked++; }
+			else if ((BestSafetyTier & 2) && EnemyFlagCarrier && EFCLOSAdj[i]) { EFCLOSBlocked++; }
+			else if ((BestSafetyTier & 1) && RobbedAdj[i]) { RobbedBlocked++; }
+		}
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF pick: %s(T%d) -> %s | tier=%u band=%d fresh=%d kblk=%d efcblk=%d rbblk=%d (pool=%d)"),
+			*PS->PlayerName, TeamIndex, *Best->GetName(), (uint32)BestSafetyTier, ContentionCount, bForceFresh ? 1 : 0,
+			KillerBlocked, EFCLOSBlocked, RobbedBlocked, Pool.Num());
 	}
-	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF pick: %s(T%d) -> %s | band=%d fresh=%d kblk=%d rbblk=%d (pool=%d)"),
-		*PS->PlayerName, TeamIndex, *Best->GetName(), TopBand.Num(), bForceFresh ? 1 : 0,
-		KillerBlocked, RobbedBlocked, Pool.Num());
 
 	return Best;
 }
@@ -1577,6 +2244,98 @@ void ANCPlusCTFGameMode::CheckGameTime()
 	}
 }
 
+void ANCPlusCTFGameMode::BroadcastLocalized(AActor* Sender, TSubclassOf<ULocalMessage> Message, int32 Switch, APlayerState* RelatedPlayerState_1, APlayerState* RelatedPlayerState_2, UObject* OptionalObject)
+{
+	// Regrab-alarm detection: the flags themselves have no pickup-from-dropped
+	// notification, but every transition message funnels through here. A
+	// taken(4) that follows a drop signal for the same team flag is a regrab.
+	if (Message)
+	{
+		AUTCarriedObject* Flag = Cast<AUTCarriedObject>(Sender);
+		const uint8 FlagTeam = Flag ? Flag->GetTeamNum() : 255;
+		if (FlagTeam < 2)
+		{
+			if (Message->IsChildOf(UUTCTFGameMessage::StaticClass()))
+			{
+				if (Switch == 3)
+				{
+					bFlagWasDropped[FlagTeam] = true;
+				}
+				else if ((Switch == 0 || Switch == 1) && !Flag->bGradualAutoReturn)
+				{
+					// A return (touch or auto). No ObjectState check: genuine returns
+					// broadcast while the flag is still Dropped (UTCarriedObject.cpp:357
+					// — Home happens later in the same stack). The ONLY mid-drop 0/1
+					// emitter is the gradual-auto-return reminder (UTCarriedObject.cpp
+					// :873-876), excluded by the bGradualAutoReturn guard; that flag is
+					// always false for NCPlusCTF flags, and even on a hypothetical
+					// gradual map the 1Hz sampler re-marks Dropped within a second.
+					bFlagWasDropped[FlagTeam] = false;
+				}
+				else if (Switch == 4)
+				{
+					if (bFlagWasDropped[FlagTeam])
+					{
+						PlayRegrabTakenAlarm(Flag);
+					}
+					bFlagWasDropped[FlagTeam] = false;
+				}
+			}
+			else if (Message->IsChildOf(UUTCTFRewardMessage::StaticClass()) && Switch == 6)
+			{
+				// Near-cap "Denied" drop (UTCTFFlag::Drop): the dropped(3) broadcast
+				// is deferred 0.8s and self-suppresses if the flag is regrabbed
+				// first — this reward message is the authoritative drop signal for
+				// that path, so an instant cherry-pick at the stand still alarms.
+				bFlagWasDropped[FlagTeam] = true;
+			}
+		}
+	}
+
+	Super::BroadcastLocalized(Sender, Message, Switch, RelatedPlayerState_1, RelatedPlayerState_2, OptionalObject);
+}
+
+void ANCPlusCTFGameMode::PlayRegrabTakenAlarm(AUTCarriedObject* Flag)
+{
+	if (!bRegrabTakenAlarm || Flag == nullptr)
+	{
+		return;
+	}
+	AUTCTFFlagBase* Base = Cast<AUTCTFFlagBase>(Flag->HomeBase);
+	if (Base == nullptr || Base->FlagTakenSound == nullptr)
+	{
+		return;
+	}
+	const uint8 FlagTeam = Flag->GetTeamNum();
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (FlagTeam > 1 || Now - LastRegrabAlarmTime[FlagTeam] < 1.f)
+	{
+		return;
+	}
+	LastRegrabAlarmTime[FlagTeam] = Now;
+
+	// Mirror of AUTCTFFlagBase::ObjectWasPickedUp's bWasHome branch
+	// (UTCTFFlagBase.cpp:98-115), with the enemy's positional cue moved from
+	// the base stand to where the flag was actually grabbed.
+	USoundBase* EnemyCue = Base->EnemyFlagTakenSound ? Base->EnemyFlagTakenSound : Base->FlagTakenSound;
+	for (FConstPlayerControllerIterator Iterator = GetWorld()->GetPlayerControllerIterator(); Iterator; ++Iterator)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(*Iterator);
+		if (PC == nullptr)
+		{
+			continue;
+		}
+		if ((PC->PlayerState && PC->PlayerState->bOnlySpectator) || (PC->GetTeamNum() == FlagTeam))
+		{
+			PC->UTClientPlaySound(Base->FlagTakenSound);
+		}
+		else
+		{
+			PC->HearSound(EnemyCue, Flag, Flag->GetActorLocation(), true, false, SAT_None);
+		}
+	}
+}
+
 void ANCPlusCTFGameMode::DefaultTimer()
 {
 	Super::DefaultTimer();
@@ -1584,6 +2343,27 @@ void ANCPlusCTFGameMode::DefaultTimer()
 	// Role-aware ratings: sample every living player's map zone once per second
 	// (DefaultTimer is 1Hz) while the match is live. Self-guards on match state.
 	SampleRoleDwell();
+
+	// Regrab-alarm bookkeeping: sample flag states at 1Hz so a dropped flag is
+	// tracked even when the dropped(3) broadcast was deferred (the near-cap
+	// "Denied" path in UTCTFFlag::Drop delays it 0.8s and DelayedDropMessage
+	// self-suppresses if any newer flag message landed in between). A flag
+	// observed back Home clears the mark.
+	if (CTFGameState)
+	{
+		for (int32 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
+		{
+			const FName FlagState = CTFGameState->GetFlagState((uint8)TeamIdx);
+			if (FlagState == CarriedObjectState::Dropped)
+			{
+				bFlagWasDropped[TeamIdx] = true;
+			}
+			else if (FlagState == CarriedObjectState::Home)
+			{
+				bFlagWasDropped[TeamIdx] = false;
+			}
+		}
+	}
 
 	// Tick advantage timer (DefaultTimer fires every second).
 	// Advantage lasts up to AdvantageMaxDuration (5 min default).
@@ -1606,17 +2386,22 @@ void ANCPlusCTFGameMode::DefaultTimer()
 		}
 	}
 
-	// Overtime respawn escalation (NewCTF style): base respawn for first 5 minutes,
-	// then escalate +1s per 2 minutes, capping at OvertimeRespawnTime (6s). Only for 3v3+.
-	// Ramp: 0-5min=2s, 5-7min=3s, 7-9min=4s, 9-11min=5s, 11min+=6s
+	// Overtime respawn escalation: the 2s base applies from the first OT tick
+	// (jumping up from the normal match wait — the "immediate" bump players
+	// notice), holds through OvertimeEscalationDelay, then gains +1s per
+	// OvertimeEscalationInterval, capping at OvertimeRespawnTime. Defaults
+	// (tOxX 2026-08-10): 0-6min=2s, then 3s at 6:00, 4s at 7:00 ... 10s cap at
+	// 13:00. (Old NewCTF ramp: 5-min hold, +1s per 2 min, 6s cap.) 3v3+ only.
 	if (CTFGameState && CTFGameState->IsMatchInOvertime() && OvertimeRespawnTime > 0.f
 		&& GameSession && GameSession->MaxPlayers > 4)
 	{
 		float OTElapsed = GetWorld()->GetTimeSeconds() - OvertimeStartWorldTime;
 		float BaseRespawn = 2.f;
-		float OTEscalationStartTime = 300.f; // 5 minutes before escalation begins
-		int32 ExtraSeconds = (OTElapsed > OTEscalationStartTime)
-			? FMath::FloorToInt((OTElapsed - OTEscalationStartTime) / 120.f)
+		// First +1 lands AT the delay boundary ("after 6 min it starts
+		// increasing"), then one more per interval.
+		int32 ExtraSeconds = (OTElapsed >= OvertimeEscalationDelay)
+			? 1 + FMath::FloorToInt((OTElapsed - OvertimeEscalationDelay)
+				/ FMath::Max(1.f, OvertimeEscalationInterval))
 			: 0;
 		float NewRespawn = FMath::Min(BaseRespawn + (float)ExtraSeconds, OvertimeRespawnTime);
 		if (NewRespawn > RespawnWaitTime)
@@ -1872,7 +2657,6 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
-		FNCFireValCollector::Get().Reset();   // first half only — accumulate samples across both halves
 	}
 
 	// Spawn CTF stats replicator for scoreboard (grabs, accuracy).
@@ -1906,6 +2690,14 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		OTInfo->bHasHalftime = bHasHalftime;
 	}
 
+	// iCTF only: replace Epic's immediate lift-crush flag return with a swept,
+	// safe relocation that preserves the normal auto-return timer. The guard
+	// remains spawned when its runtime CVar is off so it can be re-enabled live.
+	if (HasAuthority() && bIsInstagib)
+	{
+		ANCICTFFlagLiftGuard::EnsureSpawned(GetWorld());
+	}
+
 	// Rating system: construct ONCE per map load, locking in bIsInstagib now
 	// that the mutator chain is reliably settled. The `!IsValid()` guard makes
 	// the halftime second call a no-op so we don't reconstruct mid-match.
@@ -1913,6 +2705,7 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 	// PostLogins were skipped because the rating system didn't exist yet.
 	if (HasAuthority() && !RatingSystem.IsValid())
 	{
+		AutoPauseTrackedIds.Reset();
 		const bool bInstagib = bIsInstagib;
 		RatingSystem = MakeUnique<FNCPlusCTFRatingSystem>(bInstagib);
 		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF: rating system constructed for %s ladder"),
@@ -1954,6 +2747,10 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 				if (!UTPS || UTPS->bOnlySpectator) continue;
 				if (!UTPS->UniqueId.IsValid()) continue;   // bot
 				const FString Uid = UTPS->UniqueId.ToString();
+				if (bIsPugMatch && UTPS->GetTeamNum() <= 1)
+				{
+					AutoPauseTrackedIds.Add(Uid);
+				}
 				RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
 				// Present at match start => full presence credit.
 				if (!PlayerJoinWorldTime.Contains(Uid))
@@ -2017,6 +2814,16 @@ void ANCPlusCTFGameMode::HandleEnteringOvertime()
 
 void ANCPlusCTFGameMode::HandleMatchInOvertime()
 {
+	// Every OT entry dispatches here, including EndOfHalf's direct
+	// SetMatchState(MatchIsInOvertime) — the only path 3v3+ games take, since
+	// HandleEnteringOvertime (the other stamp site) is reachable solely via the
+	// <=4-player halftime config. Unstamped, the respawn ramp read 0, computed
+	// OTElapsed as total world uptime, and opened at the 10s cap on OT's first
+	// tick instead of holding the 2s base for OvertimeEscalationDelay.
+	if (OvertimeStartWorldTime <= 0.f)
+	{
+		OvertimeStartWorldTime = GetWorld()->GetTimeSeconds();
+	}
 	BroadcastLocalized(this, UUTCTFMajorMessage::StaticClass(), 12, nullptr, nullptr, nullptr);
 	NCPlusReflection::SetBool(CTFGameState, TEXT("bPlayingAdvantage"), false);
 	bGracePeriodActive = false;
@@ -2106,7 +2913,6 @@ void ANCPlusCTFGameMode::CreateGameURLOptions(TArray<TSharedPtr<TAttributeProper
 // CreateGameURLOptions and can be set via URL params or config.
 
 // --- Mod.ini-gated match-host pause (see NCPlusHostPause.h) ---
-#include "NCPlusHostPause.h"
 
 bool ANCPlusCTFGameMode::AllowPausing(APlayerController* PC)
 {
@@ -2118,11 +2924,67 @@ bool ANCPlusCTFGameMode::AllowPausing(APlayerController* PC)
 
 bool ANCPlusCTFGameMode::ClearPause()
 {
+	if (bForceClearingPauseActor)
+	{
+		AWorldSettings* CleanupWS = GetWorldSettings();
+		const bool bWasPaused = CleanupWS != nullptr && CleanupWS->Pauser != nullptr;
+		const bool bResult = Super::ClearPause();
+		if (bWasPaused && CleanupWS != nullptr && CleanupWS->Pauser == nullptr)
+		{
+			CleanupWS->ForceNetUpdate();
+			NCPlusHostPause::ResyncServerWorldTime(this);
+		}
+		return bResult;
+	}
+
+	// Automatic pauses own one authoritative, cancellable countdown. Never let
+	// the independent host/rcon ticker race it.
+	if (bAutoPaused)
+	{
+		AWorldSettings* AutoPauseWS = GetWorldSettings();
+		if (bAutoPauseDormantNoMarker)
+		{
+			if (AutoPauseWS == nullptr || AutoPauseWS->Pauser == nullptr)
+			{
+				// No world pause remains to count down against. This cannot be the
+				// departing-marker cleanup path (that still has a non-null Pauser),
+				// so treat it as an explicit server/rcon escape from the preserved
+				// logical wait and clear the authoritative snapshot immediately.
+				CompleteAutoPauseResume(TEXT("Dormant unpause requested"));
+				return true;
+			}
+			// A live caller has supplied a new physical marker to a formerly
+			// markerless logical pause. Adopt it and honor the requested resume via
+			// the same authoritative countdown as every other auto-pause.
+			bAutoPauseDormantNoMarker = false;
+			NCPlusHostPause::CancelDeferredUnpause(this);
+			BeginAutoPauseResumeCountdown(TEXT("Dormant unpause requested"));
+			return false;
+		}
+		if (AutoPauseWS == nullptr || AutoPauseWS->Pauser == nullptr)
+		{
+			// Defensive recovery for an externally cleared physical marker.
+			bAutoPauseDormantNoMarker = true;
+			return false;
+		}
+		NCPlusHostPause::CancelDeferredUnpause(this);
+		BeginAutoPauseResumeCountdown(TEXT("Unpause requested"));
+		return false;
+	}
+
 	// Host/rcon unpause: hold behind a short server-only resume countdown
 	// (Mod.ini [NetcodePlus] UnpauseCountdownSec). Only engages while actually paused.
 	if (NCPlusHostPause::DeferUnpauseForCountdown(this))
 	{
 		return false;
 	}
-	return Super::ClearPause();
+	AWorldSettings* WS = GetWorldSettings();
+	const bool bWasPaused = WS != nullptr && WS->Pauser != nullptr;
+	const bool bResult = Super::ClearPause();
+	if (bWasPaused && WS != nullptr && WS->Pauser == nullptr)
+	{
+		WS->ForceNetUpdate();
+		NCPlusHostPause::ResyncServerWorldTime(this);
+	}
+	return bResult;
 }

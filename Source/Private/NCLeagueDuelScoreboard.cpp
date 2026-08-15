@@ -244,12 +244,10 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	// stats replicator with the same authority-fallback the accuracy column
 	// uses so listen-server / standalone don't wait on the 1Hz tick.
 	uint8 RealCounts[4] = { 0, 0, 0, 0 };
+	bool bHasValidCounts = false;
 	if (ANCLeagueDuelStatsReplicator* Rep = FindNCLeagueDuelStatsReplicator(GetWorld()))
 	{
-		RealCounts[0] = Rep->GetBeltCountForPlayer(PlayerId);
-		RealCounts[1] = Rep->GetVestCountForPlayer(PlayerId);
-		RealCounts[2] = Rep->GetPadsCountForPlayer(PlayerId);
-		RealCounts[3] = Rep->GetHelmetCountForPlayer(PlayerId);
+		bHasValidCounts = Rep->GetArmorCountsForPlayer(PlayerId, RealCounts);
 	}
 	if (RealCounts[0] == 0 && RealCounts[1] == 0 && RealCounts[2] == 0 && RealCounts[3] == 0
 		&& GetWorld() && GetWorld()->GetNetMode() != NM_Client)
@@ -261,9 +259,14 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 		RealCounts[1] = Clamp255(PS->GetStatsValue(NAME_ArmorVestCount));
 		RealCounts[2] = Clamp255(PS->GetStatsValue(NAME_ArmorPadsCount));
 		RealCounts[3] = Clamp255(PS->GetStatsValue(NAME_HelmetCount));
+		bHasValidCounts = true;
 	}
 
-	// Anti-timing reveal delay. Pickups (RealCount > Displayed) hold for
+	// Anti-timing reveal delay. The first valid replicated snapshot is the
+	// baseline and displays immediately; otherwise opening the scoreboard for
+	// the first time mid-match misclassifies every historical pickup as new and
+	// shows four zeroes for the next four seconds. Later pickups
+	// (RealCount > Displayed) hold for
 	// ScoreboardArmorRevealDelay seconds before the count increments on the
 	// scoreboard, so viewers (other players, spectators, streamers) can't
 	// time armor pickups by watching the column. Decreases (match reset)
@@ -274,25 +277,40 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	const float Now = GetWorld()->GetTimeSeconds();
 	FArmorDelayState& State = ArmorDelayCache.FindOrAdd(PlayerId);
 	uint8 Counts[4] = { 0, 0, 0, 0 };
-	for (int32 i = 0; i < 4; ++i)
+	if (bHasValidCounts && !State.bInitialized)
 	{
-		if (RealCounts[i] < State.DisplayedCounts[i])
+		State.bInitialized = true;
+		for (int32 i = 0; i < 4; ++i)
 		{
 			State.DisplayedCounts[i] = RealCounts[i];
 			State.PendingRevealAt[i] = 0.f;
 		}
-		else if (RealCounts[i] > State.DisplayedCounts[i])
+	}
+	else if (bHasValidCounts)
+	{
+		for (int32 i = 0; i < 4; ++i)
 		{
-			if (State.PendingRevealAt[i] <= 0.f)
-			{
-				State.PendingRevealAt[i] = Now + ScoreboardArmorRevealDelay;
-			}
-			if (Now >= State.PendingRevealAt[i])
+			if (RealCounts[i] < State.DisplayedCounts[i])
 			{
 				State.DisplayedCounts[i] = RealCounts[i];
 				State.PendingRevealAt[i] = 0.f;
 			}
+			else if (RealCounts[i] > State.DisplayedCounts[i])
+			{
+				if (State.PendingRevealAt[i] <= 0.f)
+				{
+					State.PendingRevealAt[i] = Now + ScoreboardArmorRevealDelay;
+				}
+				if (Now >= State.PendingRevealAt[i])
+				{
+					State.DisplayedCounts[i] = RealCounts[i];
+					State.PendingRevealAt[i] = 0.f;
+				}
+			}
 		}
+	}
+	for (int32 i = 0; i < 4; ++i)
+	{
 		Counts[i] = State.DisplayedCounts[i];
 	}
 

@@ -4,6 +4,8 @@
 #include "WipeoutScoreboard.h"
 #include "ShockDomScoreboard.generated.h"
 
+class AShockDomReplicator;
+
 UCLASS()
 class NETCODEPLUS_API UShockDomScoreboard : public UWipeoutScoreboard
 {
@@ -16,4 +18,12 @@ public:
 protected:
 	virtual void DrawScoreHeaders(float RenderDelta, float& YOffset) override;
 	virtual void DrawPlayerScore(AUTPlayerState* PlayerState, float XOffset, float YOffset, float Width, FLinearColor DrawColor) override;
+
+private:
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AShockDomReplicator> CachedDomReplicator;
+	TWeakObjectPtr<UWorld> CachedDomReplicatorWorld;
+	float NextDomReplicatorSearchTime = 0.f;
+
+	AShockDomReplicator* FindDomReplicator();
 };

@@ -1,5 +1,7 @@
 // Copyright 1998-2016 Epic Games, Inc. All Rights Reserved.
 #include "UTPlusShockRifle.h"
+#include "NCWeaponColorSettings.h"
+#include "UTWeaponAttachment.h"
 #include "UTProj_ShockBall.h"
 #include "UTCanvasRenderTarget2D.h"
 #include "StatNames.h"
@@ -7,10 +9,32 @@
 #include "Engine.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTGameViewportClient.h"
+#include "Kismet/GameplayStatics.h"
+#include "Engine/DemoNetDriver.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
+#include "Particles/ParticleSystemComponent.h"
 #include "Net/UnrealNetwork.h"
 
 const FName NAME_ShockPrimaryShots(TEXT("ShockPrimaryShots"));
 const FName NAME_ShockPrimaryHits(TEXT("ShockPrimaryHits"));
+
+namespace
+{
+	const FName NAME_ShockDissipationColor(TEXT("DissipationColor"));
+	const FName NAME_ShockPlasmaHot(TEXT("Plasma_Hot"));
+	const FName NAME_ShockPlasmaCold(TEXT("Plasma_Cold"));
+	const FName NAME_ShockAmmoLerp(TEXT("AmmoLERP"));
+	const FName NAME_ShockMaxAmmo(TEXT("MaxAmmoInt"));
+	const int32 ShockAmmoGlowMaterialID = 2;
+
+	FLinearColor MultiplyShockColors(const FLinearColor& A, const FLinearColor& B)
+	{
+		return FLinearColor(A.R * B.R, A.G * B.G, A.B * B.B, A.A * B.A);
+	}
+
+}
 
 // Suppress DLL linkage warnings when overriding base game functions in a plugin
 #ifdef _MSC_VER
@@ -19,6 +43,13 @@ const FName NAME_ShockPrimaryHits(TEXT("ShockPrimaryHits"));
 
 AUTPlusShockRifle::AUTPlusShockRifle(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+	, CachedShockBeamMID(nullptr)
+	, CachedShockBeamSourceMaterial(nullptr)
+	, CachedShockBeamColorGeneration(0)
+	, CachedAmmoGlowMaterial(nullptr)
+	, CachedAmmoGlowMID(nullptr)
+	, CachedAmmoGlowAmmo(MIN_int32)
+	, CachedAmmoGlowMaxAmmo(MIN_int32)
 {
 	DefaultGroup = 4;
 	BaseAISelectRating = 0.65f;
@@ -56,6 +87,78 @@ AUTPlusShockRifle::AUTPlusShockRifle(const FObjectInitializer& ObjectInitializer
 	VeryLowMeshOffset = FVector(0.f, 0.f, -15.f);
 }
 
+void AUTPlusShockRifle::ApplyConfiguredShockBeamColor(UParticleSystemComponent* Effect)
+{
+	UWorld* World = GetWorld();
+	if (Effect == nullptr || Effect->IsPendingKill() || World == nullptr
+		|| GetNetMode() == NM_DedicatedServer || UTOwner == nullptr
+		|| !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
+		|| !ShouldPlay1PVisuals())
+	{
+		return;
+	}
+
+	// Preferences are process-local. A live demo recording remains eligible,
+	// but replay playback must retain the recorded/stock presentation.
+	UDemoNetDriver* DemoNetDriver = World->DemoNetDriver;
+	if (DemoNetDriver != nullptr && DemoNetDriver->IsPlaying())
+	{
+		return;
+	}
+
+	const FNCWeaponColorSnapshot& Snapshot = NCWeaponColors::GetSnapshot();
+	if (!Snapshot.bCustomShock || !Snapshot.bHasShockColor)
+	{
+		return;
+	}
+
+	const FLinearColor& ShockColor = Snapshot.ShockColor;
+	Effect->SetColorParameter(NAME_ShockDissipationColor,
+		FLinearColor(2.f * ShockColor.R, 1.5f * ShockColor.G,
+			10.f * ShockColor.B, ShockColor.A));
+
+	UMaterialInterface* SourceMaterial = Effect->GetMaterial(1);
+	if (SourceMaterial == CachedShockBeamMID)
+	{
+		SourceMaterial = CachedShockBeamSourceMaterial;
+	}
+	if (SourceMaterial == nullptr || SourceMaterial->IsPendingKill())
+	{
+		return;
+	}
+
+	if (CachedShockBeamMID == nullptr || CachedShockBeamMID->IsPendingKill()
+		|| CachedShockBeamSourceMaterial != SourceMaterial
+		|| CachedShockBeamColorGeneration != Snapshot.Generation)
+	{
+		FLinearColor OriginalHot;
+		if (!SourceMaterial->GetVectorParameterValue(NAME_ShockPlasmaHot, OriginalHot))
+		{
+			return;
+		}
+
+		UMaterialInstanceDynamic* NewMID = UMaterialInstanceDynamic::Create(SourceMaterial, this);
+		if (NewMID == nullptr)
+		{
+			CachedShockBeamMID = nullptr;
+			CachedShockBeamSourceMaterial = nullptr;
+			CachedShockBeamColorGeneration = 0;
+			return;
+		}
+
+		const FLinearColor HotColor = MultiplyShockColors(OriginalHot, ShockColor);
+		const FLinearColor ColdColor = MultiplyShockColors(HotColor, ShockColor);
+		NewMID->SetVectorParameterValue(NAME_ShockPlasmaHot, HotColor);
+		NewMID->SetVectorParameterValue(NAME_ShockPlasmaCold, ColdColor);
+
+		CachedShockBeamMID = NewMID;
+		CachedShockBeamSourceMaterial = SourceMaterial;
+		CachedShockBeamColorGeneration = Snapshot.Generation;
+	}
+
+	Effect->SetMaterial(1, CachedShockBeamMID);
+}
+
 
 void AUTPlusShockRifle::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
@@ -80,6 +183,56 @@ void AUTPlusShockRifle::SetupSpecialMaterials()
 		ScreenTexture->ClearColor = FLinearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		ScreenTexture->OnCanvasRenderTargetUpdate.AddDynamic(this, &AUTPlusShockRifle::UpdateScreenTexture);
 		ScreenMI->SetTextureParameterValue(FName(TEXT("ScreenTexture")), ScreenTexture);
+	}
+
+	// Slot 2's MID is authored by the Blueprint/stock material setup. Adopt that
+	// exact live instance and initialize it; never allocate or replace it here.
+	RefreshAmmoGlowMaterial(true);
+}
+
+void AUTPlusShockRifle::RefreshAmmoGlowMaterial(bool bForceRefresh)
+{
+	if (IsRunningDedicatedServer() || Mesh == nullptr ||
+		ShockAmmoGlowMaterialID >= Mesh->GetNumMaterials())
+	{
+		CachedAmmoGlowMaterial = nullptr;
+		CachedAmmoGlowMID = nullptr;
+		CachedAmmoGlowAmmo = MIN_int32;
+		CachedAmmoGlowMaxAmmo = MIN_int32;
+		return;
+	}
+
+	UMaterialInterface* const CurrentMaterial = Mesh->GetMaterial(ShockAmmoGlowMaterialID);
+	if (CurrentMaterial != CachedAmmoGlowMaterial)
+	{
+		CachedAmmoGlowMaterial = CurrentMaterial;
+		CachedAmmoGlowMID = Cast<UMaterialInstanceDynamic>(CurrentMaterial);
+		float UnusedParameterValue = 0.0f;
+		if (CachedAmmoGlowMID != nullptr &&
+			(!CachedAmmoGlowMID->GetScalarParameterValue(NAME_ShockAmmoLerp, UnusedParameterValue) ||
+			 !CachedAmmoGlowMID->GetScalarParameterValue(NAME_ShockMaxAmmo, UnusedParameterValue)))
+		{
+			CachedAmmoGlowMID = nullptr;
+		}
+		CachedAmmoGlowAmmo = MIN_int32;
+		CachedAmmoGlowMaxAmmo = MIN_int32;
+		bForceRefresh = true;
+	}
+
+	if (CachedAmmoGlowMID == nullptr || CachedAmmoGlowMID->IsPendingKill())
+	{
+		return;
+	}
+
+	if (bForceRefresh || CachedAmmoGlowAmmo != Ammo)
+	{
+		CachedAmmoGlowMID->SetScalarParameterValue(NAME_ShockAmmoLerp, float(Ammo));
+		CachedAmmoGlowAmmo = Ammo;
+	}
+	if (bForceRefresh || CachedAmmoGlowMaxAmmo != MaxAmmo)
+	{
+		CachedAmmoGlowMID->SetScalarParameterValue(NAME_ShockMaxAmmo, float(MaxAmmo));
+		CachedAmmoGlowMaxAmmo = MaxAmmo;
 	}
 }
 
@@ -114,7 +267,8 @@ void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Heigh
 		float XL, YL;
 		C->TextSize(ScreenFont, AmmoText, XL, YL);
 
-		// Use standard FCanvasTextItem instead of FUTCanvasTextItem to avoid linker issues
+		// FUTCanvasTextItem is not exported from UnrealTournament, so retain the
+		// plugin-safe canvas item used by the working 327 implementation.
 		FCanvasTextItem Item(FVector2D(Width / 2 - XL * 0.5f, Height / 2 - YL * 0.5f), FText::FromString(AmmoText), ScreenFont, (Ammo <= 5) ? FLinearColor::Red : FLinearColor::White);
 		Item.FontRenderInfo = RenderInfo;
 		Item.bOutlined = true;
@@ -126,6 +280,16 @@ void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Heigh
 void AUTPlusShockRifle::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Weapon actors continue ticking while holstered, so only poll the material for
+	// the current, locally visible first-person weapon. Steady state is pointer/int
+	// comparisons; render parameters are written only when their values change.
+	if (!IsRunningDedicatedServer() && Mesh != nullptr && Mesh->IsRegistered() &&
+		UTOwner != nullptr && UTOwner->GetWeapon() == this && ShouldPlay1PVisuals() &&
+		GetWorld() != nullptr && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
+	{
+		RefreshAmmoGlowMaterial(false);
+	}
 
 	// Throttle screen texture updates to 30Hz — ammo counter doesn't need 480fps updates
 	if (ScreenTexture != NULL && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
@@ -162,6 +326,156 @@ void AUTPlusShockRifle::PlayFiringEffects()
 	}
 }
 
+bool AUTPlusShockRifle::IsInstagibBeamWeapon() const
+{
+	if (CachedIsInstagibBeamWeapon < 0)
+	{
+		// IGPlusRifle is deliberately abbreviated and retains the ShockRifle stat names,
+		// but its primary damage type and attachment are the stock Instagib classes.
+		// Accept any of these Instagib-exclusive signals while leaving normal Shock children stock.
+		const bool bInstagibName = GetClass() && GetClass()->GetName().Contains(TEXT("Instagib"));
+		const bool bInstagibStats = ShotsStatsName == NAME_InstagibShots
+			|| HitsStatsName == NAME_InstagibHits
+			|| KillStatsName == NAME_InstagibKills;
+		const bool bInstagibDamageType = InstantHitInfo.IsValidIndex(0)
+			&& InstantHitInfo[0].DamageType != nullptr
+			&& InstantHitInfo[0].DamageType->GetName().Contains(TEXT("Instagib"));
+		const bool bInstagibAttachment = AttachmentType != nullptr
+			&& AttachmentType->GetName().Contains(TEXT("Instagib"));
+		CachedIsInstagibBeamWeapon =
+			(bInstagibName || bInstagibStats || bInstagibDamageType || bInstagibAttachment) ? 1 : 0;
+	}
+	return CachedIsInstagibBeamWeapon != 0;
+}
+
+bool AUTPlusShockRifle::ShouldShowOwnInstagibBeam() const
+{
+	if (CachedShowOwnBeam < 0)
+	{
+		bool bShowOwnBeam = true;
+		if (IsInstagibBeamWeapon() && GConfig)
+		{
+			const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+			FString Value;
+			if (GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowOwnBeam"), Value, ConfigPath))
+			{
+				bShowOwnBeam = Value.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+			}
+		}
+		CachedShowOwnBeam = bShowOwnBeam ? 1 : 0;
+	}
+	return CachedShowOwnBeam != 0;
+}
+
+bool AUTPlusShockRifle::NeedsLegacyInstagibBeamLayer() const
+{
+	if (!IsInstagibBeamWeapon() || CurrentFireMode != 0 || UTOwner == nullptr
+		|| !UTOwner->IsLocallyControlled() || !ShouldPlay1PVisuals())
+	{
+		return false;
+	}
+
+	AUTPlayerController* UTPC = Cast<AUTPlayerController>(UTOwner->Controller);
+	return UTPC != nullptr && UTPC->PlayerState != nullptr
+		&& GetNetMode() != NM_Standalone
+		&& UTPC->GetProjectileSleepTime() > KINDA_SMALL_NUMBER;
+}
+
+void AUTPlusShockRifle::PlayPredictedImpactEffects(FVector ImpactLoc)
+{
+	if (IsInstagibBeamWeapon() && CurrentFireMode == 0 && UTOwner != nullptr
+		&& UTOwner->IsLocallyControlled())
+	{
+		// A hitscan beam is immediate feedback. Damage still waits for the server's
+		// normal rewind/validation path; SetFlashLocation only drives local cosmetics
+		// and causes AUTCharacter to ignore the later duplicate owner replication.
+		UTOwner->SetFlashLocation(ImpactLoc, CurrentFireMode);
+		return;
+	}
+
+	Super::PlayPredictedImpactEffects(ImpactLoc);
+}
+
+void AUTPlusShockRifle::SpawnLegacyInstagibBeamLayer(const FVector& TargetLoc, uint8 FireMode,
+	const FVector& SpawnLocation, const FRotator& SpawnRotation)
+{
+	if (!FireEffect.IsValidIndex(FireMode) || FireEffect[FireMode] == nullptr)
+	{
+		return;
+	}
+
+	FVector AdjustedSpawnLocation = SpawnLocation;
+	if (Mesh != nullptr)
+	{
+		for (FLocalPlayerIterator It(GEngine, GetWorld()); It; ++It)
+		{
+			if (It->PlayerController != nullptr && It->PlayerController->GetViewTarget() == UTOwner)
+			{
+				UUTGameViewportClient* UTViewport = Cast<UUTGameViewportClient>(It->ViewportClient);
+				if (UTViewport != nullptr)
+				{
+					const FVector PaniniLocation = UTViewport->PaniniProjectLocationForPlayer(
+						*It, SpawnLocation, Mesh->GetMaterial(0));
+					if (!PaniniLocation.ContainsNaN())
+					{
+						AdjustedSpawnLocation = PaniniLocation;
+					}
+				}
+				break;
+			}
+		}
+	}
+
+	UParticleSystemComponent* PSC = UGameplayStatics::SpawnEmitterAtLocation(
+		GetWorld(), FireEffect[FireMode], AdjustedSpawnLocation, SpawnRotation, true);
+	if (PSC == nullptr)
+	{
+		return;
+	}
+
+	static const FName NAME_HitLocation(TEXT("HitLocation"));
+	static const FName NAME_LocalHitLocation(TEXT("LocalHitLocation"));
+	const FVector AdjustedTargetLoc = MaxTracerDist > 0.0f
+		&& (TargetLoc - AdjustedSpawnLocation).SizeSquared() > FMath::Square<float>(MaxTracerDist)
+		? AdjustedSpawnLocation + MaxTracerDist * (TargetLoc - AdjustedSpawnLocation).GetSafeNormal()
+		: TargetLoc;
+	PSC->SetVectorParameter(NAME_HitLocation, AdjustedTargetLoc);
+	PSC->SetVectorParameter(NAME_LocalHitLocation, PSC->ComponentToWorld.InverseTransformPosition(AdjustedTargetLoc));
+	ModifyFireEffect(PSC);
+}
+
+void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
+	const FVector& SpawnLocation, const FRotator& SpawnRotation)
+{
+	const bool bInstagibBeam = IsInstagibBeamWeapon() && FireMode == 0;
+	const bool bShowOwnBeam = !bInstagibBeam || ShouldShowOwnInstagibBeam();
+
+	if (bShowOwnBeam || !FireEffect.IsValidIndex(FireMode) || FireEffect[FireMode] == nullptr)
+	{
+		Super::PlayImpactEffects_Implementation(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+
+		// Above the prediction budget, stock UT4 historically allowed the delayed
+		// local/server effects to overlap. Players perceive that additive overlap as
+		// the normal thick iCTF beam. Recreate only that second beam layer now, on the
+		// same frame as the prediction, instead of waiting for network replication.
+		// Do not replay the impact effect, sound, muzzle flash, or any gameplay logic.
+		if (bInstagibBeam && bShowOwnBeam && NeedsLegacyInstagibBeamLayer()
+			&& FireEffectCount == 0)
+		{
+			SpawnLegacyInstagibBeamLayer(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+		}
+		return;
+	}
+
+	// FireEffect is the beam only. Temporarily removing it keeps the stock path for the muzzle,
+	// endpoint impact, sound and animation intact. Third-person beams use AUTWeaponAttachment and
+	// never enter this first-person/view-target override.
+	UParticleSystem* SavedBeam = FireEffect[FireMode];
+	FireEffect[FireMode] = nullptr;
+	Super::PlayImpactEffects_Implementation(TargetLoc, FireMode, SpawnLocation, SpawnRotation);
+	FireEffect[FireMode] = SavedBeam;
+}
+
 void AUTPlusShockRifle::HitScanTrace(const FVector& StartLocation, const FVector& EndTrace, float TraceRadius, FHitResult& Hit, float PredictionTime)
 {
 	// UTWeaponFix will automatically use GetHitValidationPredictionTime()
@@ -185,14 +499,6 @@ float AUTPlusShockRifle::GetHitValidationPredictionTime() const
 	// Just use parent's implementation (120ms default)
 	// Projectiles don't use HitScanTrace anyway, so this only affects beam
 	return Super::GetHitValidationPredictionTime();
-}
-
-float AUTPlusShockRifle::GetHitscanTimeSearchWindow() const
-{
-	// Widen the server-side bidirectional time-search fallback to 45ms (half-window) for
-	// the shock family (this class + the BP instagib rifle child). Recovers high-ping
-	// claimed hits on the ~5% smaller iCTF hitbox; other weapons keep the base 30ms.
-	return 0.045f;
 }
 
 bool AUTPlusShockRifle::WaitingForCombo()
@@ -582,13 +888,6 @@ void AUTPlusShockRifle::FiringExtraUpdated_Implementation(uint8 NewFlashExtra, u
 {
 	bPlayComboEffects = (InFireMode == 0 && (NewFlashExtra > 0));
 }
-
-
-
-
-
-
-
 
 
 

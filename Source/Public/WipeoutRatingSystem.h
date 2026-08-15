@@ -31,6 +31,9 @@ class UWorld;
 struct FWipeoutPlayerRoundPerf
 {
 	FString UniqueId;
+	/** Display name at round time. Only consumed by the upload's leaver naming
+	 *  (the PlayerState is gone by match end); safe to leave empty. */
+	FString PlayerName;
 	int32 Kills = 0;
 	int32 Deaths = 0;
 	float Damage = 0.f;
@@ -49,6 +52,10 @@ struct FWipeoutRoundResult
 	TArray<FWipeoutPlayerRoundPerf> WinnerTeam;
 	TArray<FWipeoutPlayerRoundPerf> LoserTeam;
 	bool bIsDraw = false;
+	/** Team index (0/1) of WinnerTeam's side; ignored when bIsDraw (the call site
+	 *  fills WinnerTeam with team 0 on a draw). Consumed by the upload's per-round
+	 *  box-score log — the rating math itself doesn't need it. */
+	int32 WinnerTeamIndex = -1;
 };
 
 /** Per-player audit info supplied by the gamemode at match end. UniqueId must
@@ -65,6 +72,37 @@ struct FNCWipeoutPlayerInput
 	int32   Damage    = 0;
 };
 
+/** One COMPLETED last-player-standing HOLD, captured live by AUWipeoutGame and
+ *  emitted as the additive wipeout_clutches[] array in BuildResultPayload.
+ *
+ *  Wipeout is NOT elimination: teammates respawn mid-round, so being alone is a
+ *  HOLD with four possible ends, not a binary win/lose. Surviving until a
+ *  teammate returns is the mode's real clutch contribution and is recorded as
+ *  Outcome="reinforced" with TeammatesRespawned > 0 — that is a SUCCESS, not a
+ *  failure, even though no enemies died.
+ *
+ *  Holds that open in sudden death are terminal (no respawns exist), which
+ *  makes them behave like an ElimPlus clutch; bSuddenDeath separates the two so
+ *  they are never averaged together.
+ *
+ *  UniqueId is captured when the hold opens, so a holder who later disconnects
+ *  still uploads. Server-only plain struct: never replicated. */
+struct FNCWipeoutClutchInput
+{
+	FString UniqueId;
+	int32   RoundIndex          = 0;    // CurrentRoundNumber when the hold opened
+	int32   TeamIndex           = 0;    // 0 = red, 1 = blue
+	int32   EnemiesAtStart      = 0;    // living enemies at the 2->1 transition
+	FString Outcome;                    // "reinforced" | "won" | "died" | "round_end"
+	int32   DirectKills         = 0;    // enemies killed by the holder while alone
+	int32   TeammatesRespawned  = 0;    // teammates who returned during the hold
+	bool    bCleanFinish        = false;// won AND DirectKills == EnemiesAtStart
+	bool    bSuddenDeath        = false;// opened in sudden death (no respawns possible)
+	float   HoldSeconds         = 0.f;  // EndTime - StartTime
+	float   StartTime           = 0.f;  // world seconds
+	float   EndTime             = 0.f;
+};
+
 /** Match-end payload input. WinnerTeamIndex is 0/1; -1 means draw. */
 struct FNCWipeoutMatchInput
 {
@@ -72,6 +110,12 @@ struct FNCWipeoutMatchInput
 	int32 RedScore        = 0;
 	int32 BlueScore       = 0;
 	TArray<FNCWipeoutPlayerInput> Players;
+
+	/** Completed LMS holds for the whole match (both teams, every outcome).
+	 *  Serialized as the additive wipeout_clutch_version/wipeout_clutches[]
+	 *  keys — an empty array is still emitted so ut4stats can distinguish
+	 *  "no holds" from "old plugin". */
+	TArray<FNCWipeoutClutchInput> Clutches;
 };
 
 /** Pimpl: opaque forward decl of the implementation struct. */

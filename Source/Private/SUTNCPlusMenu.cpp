@@ -2,12 +2,20 @@
 #include "SUTNCPlusMenu.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
+#include "NCPlusPerformanceSettings.h"
+#include "NCPlusICTFAudioSettings.h"
+#include "NCClutchOverlay.h"
+#include "NCReadyUp.h"
 #include "UnrealTournament.h"
+#include "UTGameState.h"
 #include "UTLocalPlayer.h"
+#include "UTPlayerController.h"
+#include "UTPlayerState.h"
+#include "HAL/PlatformProcess.h"
 #include "Widgets/Input/STextComboBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 
-// Mod.ini section (General tab)
+// Mod.ini section (iCTF tab)
 static const TCHAR* NCPSection = TEXT("NetcodePlus");
 // Gib/ragdoll death settings live under [InstagibCTF] — that's the section the iCTF damage type
 // (NCPlusUTDmg_Instagib: ShouldGib reads bAllowGib, PlayDeathEffects reads RagdollTime) actually reads.
@@ -89,13 +97,13 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
 				[
-					MakeTabButton(TEXT("About"), ENCPMenuTab::About)
+					MakeTabButton(TEXT("Home"), ENCPMenuTab::Home)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
 				[
-					MakeTabButton(TEXT("iCTF"), ENCPMenuTab::General)
+					MakeTabButton(TEXT("iCTF"), ENCPMenuTab::ICTF)
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
@@ -124,9 +132,9 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				[
-					// Opens the BP hitsounds menu (the C++ hitsounds port isn't ready yet):
-					// close this menu + run "mutate hitsounds" (routes to the BP mutator's Mutate handler).
-					MakeLaunchButton(TEXT("Hitsounds"), TEXT("mutate hitsounds"))
+					// Native tab now — was a launch button into the BP mutator's UMG menu
+					// before the C++ hitsounds port landed.
+					MakeTabButton(TEXT("Hitsounds"), ENCPMenuTab::Hitsounds)
 				]
 			]
 
@@ -211,12 +219,17 @@ FReply SUTNCPlusMenu::OnLaunchClicked(FString Command)
 
 FReply SUTNCPlusMenu::OnTabClicked(ENCPMenuTab Tab)
 {
+	SwitchTab(Tab);
+	return FReply::Handled();
+}
+
+void SUTNCPlusMenu::SwitchTab(ENCPMenuTab Tab)
+{
 	ActiveTab = Tab;
 	if (ContentArea.IsValid())
 	{
 		ContentArea->SetContent(BuildTabContent(Tab));
 	}
-	return FReply::Handled();
 }
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
@@ -224,18 +237,40 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildTabContent(ENCPMenuTab Tab)
 	switch (Tab)
 	{
 		case ENCPMenuTab::ForceModels: return BuildForceModelsTab();
-		case ENCPMenuTab::General:     return BuildGeneralTab();
-		case ENCPMenuTab::About:
-		default:                       return BuildAboutTab();
+		case ENCPMenuTab::ICTF:        return BuildICTFTab();
+		case ENCPMenuTab::Hitsounds:   return BuildHitsoundsTab();
+		case ENCPMenuTab::Home:
+		default:                       return BuildHomeTab();
 	}
 }
 
-TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
+TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 {
+	EnsureAnnouncerData();
+
 	const FString VersionLine = FString::Printf(TEXT("Version %d"), NETCODE_PLUGIN_VERSION);
+	const int32 AnnouncerIndex = AnnouncerPackEntries.IndexOfByPredicate(
+		[this](const FNCPlusAnnouncerPackOption& Pack) { return Pack.Id == SelectedAnnouncerPackId; });
+	const TSharedPtr<FString> InitialAnnouncer = AnnouncerPackOptions.IsValidIndex(AnnouncerIndex)
+		? AnnouncerPackOptions[AnnouncerIndex]
+		: (AnnouncerPackOptions.Num() > 0 ? AnnouncerPackOptions[0] : nullptr);
+	const EVisibility AnnouncerVisibility = AnnouncerPackEntries.Num() > 1
+		? EVisibility::Visible
+		: EVisibility::Collapsed;
+	const int32 OverlayDistanceIndex = CharacterOverlayDistance < 3750.f ? 0
+		: (CharacterOverlayDistance < 5500.f ? 1 : 2);
+	// The UI intentionally exposes presets rather than an arbitrary number. Snap
+	// a hand-edited in-range Mod.ini value to the preset we actually display so
+	// pressing Save cannot preserve a hidden threshold under a misleading label.
+	CharacterOverlayDistance = OverlayDistanceIndex == 0 ? 3000.f
+		: (OverlayDistanceIndex == 1 ? 4500.f : 6500.f);
+	const TSharedPtr<FString> InitialOverlayDistance =
+		CharacterOverlayDistanceOptions.IsValidIndex(OverlayDistanceIndex)
+			? CharacterOverlayDistanceOptions[OverlayDistanceIndex]
+			: nullptr;
 
 	return SNew(SBox)
-		.WidthOverride(560.f)
+		.WidthOverride(620.f)
 		[
 			SNew(SVerticalBox)
 
@@ -246,15 +281,15 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("About NetcodePlus")))
-				.Font(BoldFont(18))
-				.ColorAndOpacity(FLinearColor::White)
+				.Text(FText::FromString(TEXT("NETCODEPLUS")))
+				.Font(BoldFont(22))
+				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 			]
 
 			// Version
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(0, 0, 0, 12)
+			.Padding(0, 0, 0, 8)
 			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
@@ -263,50 +298,265 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 			]
 
-			// Blurb
+			// UTComp-style player ready-up. All attributes are live so a menu opened
+			// before the state actor replicates updates without needing to be reopened.
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(24, 0, 24, 12)
+			.Padding(0, 5, 0, 2)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]() { return GetReadyModeText(); })
+				.Font(BoldFont(15))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 0, 0, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]() { return GetReadyCountText(); })
+				.Font(RegularFont(13))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(30, 0, 30, 10)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(520.f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.f)
+					.Padding(0, 0, 8, 0)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Ready")))
+						.HAlign(HAlign_Center)
+						.ContentPadding(FMargin(28, 8))
+						.IsEnabled_Lambda([this]() { return CanSetReady(true); })
+						.OnClicked(this, &SUTNCPlusMenu::OnReadyClicked, true)
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.f)
+					.Padding(8, 0, 0, 0)
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("Not Ready")))
+						.HAlign(HAlign_Center)
+						.ContentPadding(FMargin(28, 8))
+						.IsEnabled_Lambda([this]() { return CanSetReady(false); })
+						.OnClicked(this, &SUTNCPlusMenu::OnReadyClicked, false)
+					]
+				]
+			]
+
+			// Optional announcer packs are soft-discovered. With no optional pak,
+			// Stock UT4 is used and this section does not take up menu space.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 5, 0, 5)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Visibility(AnnouncerVisibility)
+				.Text(FText::FromString(TEXT("Announcer")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(40, 0, 40, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				.Visibility(AnnouncerVisibility)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0, 0, 12, 0)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Voice")))
+					.Font(RegularFont(14))
+					.ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.WidthOverride(220.f)
+					[
+						SNew(STextComboBox)
+						.OptionsSource(&AnnouncerPackOptions)
+						.InitiallySelectedItem(InitialAnnouncer)
+						.ToolTipText(FText::FromString(TEXT("Optional voices appear only when their local content pak is installed. Stock UT4 is always available.")))
+						.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+						{
+							if (!NewSelection.IsValid())
+							{
+								return;
+							}
+
+							const int32 Index = AnnouncerPackOptions.IndexOfByPredicate(
+								[&NewSelection](const TSharedPtr<FString>& Option)
+								{
+									return Option.IsValid() && *Option == *NewSelection;
+								});
+							if (AnnouncerPackEntries.IsValidIndex(Index))
+							{
+								SelectedAnnouncerPackId = AnnouncerPackEntries[Index].Id;
+							}
+						})
+					]
+				]
+			]
+
+			// Client-local render-cost control. The underlying OverlayMesh can carry
+			// armour, shield and other character effects, so describe the complete
+			// visual tradeoff rather than presenting this as armour-only.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 5, 0, 5)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Performance")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(40, 0, 40, 3)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(0, 0, 12, 0)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Character Overlay Distance")))
+					.Font(RegularFont(14))
+					.ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBox)
+					.WidthOverride(190.f)
+					[
+						SNew(STextComboBox)
+						.OptionsSource(&CharacterOverlayDistanceOptions)
+						.InitiallySelectedItem(InitialOverlayDistance)
+						.ToolTipText(FText::FromString(TEXT("Lower values improve performance but hide armour, shield, and other character overlay effects sooner.")))
+						.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSelection, ESelectInfo::Type)
+						{
+							const int32 Index = CharacterOverlayDistanceOptions.IndexOfByKey(NewSelection);
+							if (Index == 0)      { CharacterOverlayDistance = 3000.f; }
+							else if (Index == 1) { CharacterOverlayDistance = 4500.f; }
+							else if (Index == 2) { CharacterOverlayDistance = 6500.f; }
+						})
+					]
+				]
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 0, 24, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Lower distances can improve frame-time consistency in busy scenes. Save applies the change immediately.")))
+				.Font(RegularFont(10))
+				.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+				.AutoWrapText(true)
+			]
+
+			// Local spectator/caster presentation. The server replicates only sparse
+			// clutch transitions; this controls whether this client draws the card.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 4, 0, 3)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Spectator & Caster")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(40, 0, 40, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]()
+				{
+					return bShowClutchOverlay
+						? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+				})
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState NewState)
+				{
+					bShowClutchOverlay = NewState == ECheckBoxState::Checked;
+				})
+				.ToolTipText(FText::FromString(TEXT("Show the 1vX clutch / last-alive card while you are a true spectator. It never changes your camera.")))
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Show clutch / last-alive overlay")))
+					.Font(RegularFont(14))
+					.ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			// About/link information stays on the landing page, like UTComp.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 2, 24, 5)
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("A community client and server enhancement plugin for UT4: improved netcode and hit registration, extra game modes (Elimination+, Wipeout, Duel, Shaft Arena, Shock Domination), a configurable HUD, weapon skins, and team-model overrides. Unofficial and community-maintained.")))
 				.Font(RegularFont(12))
-				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
-				.AutoWrapText(true)
-			]
-
-			// Console commands heading
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0, 6, 0, 4)
-			.HAlign(HAlign_Center)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Console Commands")))
-				.Font(BoldFont(14))
-				.ColorAndOpacity(FLinearColor::White)
-			]
-
-			// Console commands list
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(24, 0, 24, 4)
-			[
-				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("F5  or  ncpmenu  -  open this menu\nweaponskins  -  weapon skin selector\ncosmetics  -  hats, eyewear, characters, taunts\nnchud  -  HUD layout editor\nnchud_drag  -  drag HUD elements\nforcemodels_list / forcemodels_dumpmats  -  team-model diagnostics")))
-				.Font(RegularFont(12))
 				.ColorAndOpacity(FLinearColor(0.8f, 0.8f, 0.8f, 1.f))
+				.Justification(ETextJustify::Center)
 				.AutoWrapText(true)
 			]
 
-			// Footer hint
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(24, 12, 24, 6)
+			.Padding(0, 1, 0, 8)
+			.HAlign(HAlign_Center)
+			[
+				SNew(SButton)
+				.ContentPadding(FMargin(12, 4))
+				.ToolTipText(FText::FromString(TEXT("Open the NetcodePlusUT4 project on GitHub")))
+				.OnClicked(this, &SUTNCPlusMenu::OnGitHubClicked)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("https://github.com/jmortley/NetcodePlusUT4")))
+					.Font(RegularFont(12))
+					.ColorAndOpacity(FLinearColor(0.2f, 0.75f, 1.f, 1.f))
+				]
+			]
+
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24, 2, 24, 6)
 			.HAlign(HAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(TEXT("Use the tabs above for General and Force Models settings.")))
+				.Text(FText::FromString(TEXT("F5 / ncpmenu opens Home. Use the tabs above for iCTF, Force Models, and Hitsounds settings.")))
 				.Font(RegularFont(11))
 				.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
 				.AutoWrapText(true)
@@ -314,7 +564,118 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildAboutTab()
 		];
 }
 
-TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
+AUTPlayerController* SUTNCPlusMenu::GetUTPlayerController() const
+{
+	return PlayerOwner.IsValid()
+		? Cast<AUTPlayerController>(PlayerOwner->PlayerController)
+		: nullptr;
+}
+
+AUTPlayerState* SUTNCPlusMenu::GetUTPlayerState() const
+{
+	AUTPlayerController* PC = GetUTPlayerController();
+	return PC != nullptr ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+}
+
+ANCReadyUpState* SUTNCPlusMenu::GetReadyUpState() const
+{
+	if (ReadyUpState.IsValid())
+	{
+		return ReadyUpState.Get();
+	}
+
+	AUTPlayerController* PC = GetUTPlayerController();
+	if (PC != nullptr)
+	{
+		ReadyUpState = ANCReadyUpState::Find(PC->GetWorld());
+	}
+	return ReadyUpState.Get();
+}
+
+bool SUTNCPlusMenu::CanSetReady(bool bReady) const
+{
+	AUTPlayerController* PC = GetUTPlayerController();
+	AUTPlayerState* PS = GetUTPlayerState();
+	ANCReadyUpState* State = GetReadyUpState();
+	AUTGameState* GS = (PC != nullptr && PC->GetWorld() != nullptr)
+		? PC->GetWorld()->GetGameState<AUTGameState>()
+		: nullptr;
+
+	if (PC == nullptr || PS == nullptr || State == nullptr || GS == nullptr
+		|| State->bCountdownLocked || GS->GetMatchState() != MatchState::WaitingToStart
+		|| PS->bOnlySpectator || PS->bIsInactive || PS->bIsABot)
+	{
+		return false;
+	}
+
+	// Each button is an idempotent Set action from the user's perspective: the
+	// already-selected state is disabled, avoiding a double-toggle RPC race.
+	return State->IsPlayerReady(PS) != bReady;
+}
+
+FText SUTNCPlusMenu::GetReadyModeText() const
+{
+	const ANCReadyUpState* State = GetReadyUpState();
+	if (State == nullptr)
+	{
+		return FText::FromString(TEXT("Match Start: Host Controlled"));
+	}
+	return FText::FromString(State->bCountdownLocked
+		? TEXT("Match Start: Player Ready-Up (Countdown Locked)")
+		: TEXT("Match Start: Player Ready-Up"));
+}
+
+FText SUTNCPlusMenu::GetReadyCountText() const
+{
+	ANCReadyUpState* State = GetReadyUpState();
+	if (State == nullptr)
+	{
+		return FText::FromString(TEXT("Ready-up is disabled on this server."));
+	}
+
+	AUTPlayerController* PC = GetUTPlayerController();
+	AUTGameState* GS = (PC != nullptr && PC->GetWorld() != nullptr)
+		? PC->GetWorld()->GetGameState<AUTGameState>()
+		: nullptr;
+	if (GS == nullptr || GS->GetMatchState() != MatchState::WaitingToStart)
+	{
+		return FText::FromString(TEXT("Ready-up is available during pre-match warmup."));
+	}
+
+	if (State->bCountdownLocked)
+	{
+		return FText::FromString(FString::Printf(TEXT("%d / %d players ready - match starting"),
+			State->ReadyCount, State->EligibleCount));
+	}
+
+	AUTPlayerState* PS = GetUTPlayerState();
+	const TCHAR* LocalStatus = (PS == nullptr || PS->bOnlySpectator || PS->bIsInactive || PS->bIsABot)
+		? TEXT(" - Spectating")
+		: (State->IsPlayerReady(PS) ? TEXT(" - You are READY") : TEXT(" - You are NOT READY"));
+	return FText::FromString(FString::Printf(TEXT("%d / %d players ready%s"),
+		State->ReadyCount, State->EligibleCount, LocalStatus));
+}
+
+FReply SUTNCPlusMenu::OnReadyClicked(bool bReady)
+{
+	AUTPlayerController* PC = GetUTPlayerController();
+	if (PC != nullptr && CanSetReady(bReady))
+	{
+		// Ready-up is a match action, not a settings save. Close exactly like the
+		// UTComp menu and leave every unsaved working-copy setting untouched.
+		ClosePanel();
+		PC->Mutate(bReady ? TEXT("nc_ready") : TEXT("nc_notready"));
+	}
+	return FReply::Handled();
+}
+
+FReply SUTNCPlusMenu::OnGitHubClicked()
+{
+	FPlatformProcess::LaunchURL(TEXT("https://github.com/jmortley/NetcodePlusUT4"), nullptr, nullptr);
+	return FReply::Handled();
+}
+
+TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 {
 	return SNew(SVerticalBox)
 
@@ -415,14 +776,55 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 			]
 		]
 
-		// ── Footstep Settings ──
+		// ── Weapon Effects ──
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 15, 0, 5)
 		.HAlign(HAlign_Center)
 		[
 			SNew(STextBlock)
-			.Text(FText::FromString(TEXT("Footstep Settings")))
+			.Text(FText::FromString(TEXT("Weapon Effects")))
+			.Font(BoldFont(18))
+			.ColorAndOpacity(FLinearColor::White)
+		]
+
+		// Show Own Beam
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bShowOwnBeam ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnShowOwnBeamChanged)
+				.ToolTipText(FText::FromString(TEXT("Show the beam for your own iCTF shots. Turning this off keeps the muzzle flash, impact effect, sound, and other players' beams.")))
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show Own Beam")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+				.ToolTipText(FText::FromString(TEXT("Show the beam for your own iCTF shots. Turning this off keeps the muzzle flash, impact effect, sound, and other players' beams.")))
+			]
+		]
+
+		// ── Audio Settings ──
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 15, 0, 5)
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Audio Settings")))
 			.Font(BoldFont(18))
 			.ColorAndOpacity(FLinearColor::White)
 		]
@@ -455,6 +857,35 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildGeneralTab()
 				.Value(OwnFootstepVolume)
 				.OnValueCommitted(this, &SUTNCPlusMenu::OnFootstepVolumeChanged)
 				.MinDesiredWidth(80.f)
+			]
+		]
+
+		// Local flag-carrier ambient loop
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bPlayFlagCarrierSound ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnPlayFlagCarrierSoundChanged)
+				.ToolTipText(FText::FromString(TEXT("Play the looping cloth/flapping sound while you carry the enemy flag in iCTF. Client-side only; pickup, drop, capture, announcer, and other players' sounds are unchanged.")))
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Play Flag-Carrying Flap Sound")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+				.ToolTipText(FText::FromString(TEXT("Play the looping cloth/flapping sound while you carry the enemy flag in iCTF. Client-side only; pickup, drop, capture, announcer, and other players' sounds are unchanged.")))
 			]
 		]
 
@@ -626,13 +1057,28 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			+ SHorizontalBox::Slot().AutoWidth()                      [ MakeLabeledSpin(TEXT("V"), &Side->V, 0.f, 1.f, 0.02f) ]
 		]
 
+		// Tint without a model — decouples "colour this side" from the model pick.
+		// Checked: the colour above lands on whatever model each pawn really has
+		// (body recolour where the materials support it, armour overlay, spawn glow).
+		// Picking a model always tints regardless of this. Also shown on the
+		// fixed-colour Red/Blue rows: there it means "tint real models red/blue".
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(0, 2, 0, 2)
+		[
+			MakeFlagCheck(TEXT("Tint skin (no model needed)"), &Side->bTint)
+		]
+
 		// Glow + Armour mode
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 2)
 		[
 			SNew(SHorizontalBox)
-			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 5.f, 0.25f) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Glow"), &Side->Brightness, 1.f, 3.5f, 0.25f) ]
+			// "Armour Glow": dims the emissive armour/shield overlay so armoured pawns aren't radioactive.
+			// 1 = stock full-bright (current), 0 = no glow. Consumed in TeamArenaCharacter::UpdateArmorOverlay.
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0) [ MakeLabeledSpin(TEXT("Armour Glow"), &Side->ArmourGlow, 0.f, 1.f, 0.05f) ]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
@@ -666,6 +1112,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 {
+	EnsureForceModelData();
+
 	return SNew(SBox)
 		.WidthOverride(620.f)
 		[
@@ -793,9 +1241,201 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 		];
 }
 
+TSharedRef<SWidget> SUTNCPlusMenu::BuildHitsoundsTab()
+{
+	EnsureHitsoundData();
+
+	// Preset picker for one side (enemy / friendly). Swapping preset keeps the
+	// user's own volume + pitch — only the cues change.
+	auto MakePresetRow = [this](const FString& Label, FHitsound* Side) -> TSharedRef<SWidget>
+	{
+		const int32 CurrentIndex = HSPresetOptions.IndexOfByPredicate(
+			[Side](const TSharedPtr<FString>& P) { return P.IsValid() && P->Equals(Side->DisplayName, ESearchCase::IgnoreCase); });
+
+		return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SBox)
+				.WidthOverride(120.f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(Label))
+					.Font(RegularFont(12))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(220.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&HSPresetOptions)
+					.InitiallySelectedItem(HSPresetOptions.IsValidIndex(CurrentIndex) ? HSPresetOptions[CurrentIndex] : nullptr)
+					.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+					{
+						if (!NewSel.IsValid()) { return; }
+						// Adopt the preset's authored Volume/Pitch wholesale:
+						// built-ins carry dc's defaults (2.0/1.9) and custom
+						// packs carry their author's levels — which would be
+						// silently discarded if we kept the previous slot's
+						// values. The sliders are right below for re-tuning.
+						*Side = AClientHitsounds::FindPreset(*NewSel);
+					})
+				]
+			];
+	};
+
+	// Live preview — same call the real hit path makes, so what you hear here
+	// is exactly what you will hear in a match.
+	auto MakePreviewButton = [this](const FString& Label, bool bFriendly, int32 Damage) -> TSharedRef<SWidget>
+	{
+		return SNew(SButton)
+			.ContentPadding(FMargin(12, 4))
+			.OnClicked_Lambda([this, bFriendly, Damage]()
+			{
+				if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+				{
+					AClientHitsounds::PlayPreview(PlayerOwner->PlayerController, HSConfig, bFriendly, Damage);
+				}
+				return FReply::Handled();
+			})
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(Label))
+				.Font(RegularFont(11))
+			];
+	};
+
+	const int32 StyleIndex = FMath::Clamp((int32)HSConfig.Style, 0, HSStyleOptions.Num() - 1);
+
+	TSharedRef<SVerticalBox> Root = SNew(SVerticalBox);
+
+	// Nothing loaded means dc's sound content is not installed on this client.
+	if (!AClientHitsounds::IsCatalogReady())
+	{
+		Root->AddSlot()
+			.AutoHeight()
+			.Padding(0, 0, 0, 12)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("No hitsound presets found. The hitsound content is missing from this install — hitsounds will stay silent.")))
+				.Font(RegularFont(11))
+				.ColorAndOpacity(FLinearColor(1.f, 0.55f, 0.25f, 1.f))
+				.AutoWrapText(true)
+			];
+	}
+
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 6)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Enemy hits")))
+			.Font(BoldFont(13))
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakePresetRow(TEXT("Sound"), &HSConfig.Enemy) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Volume"), &HSConfig.Enemy.Volume, 0.f, 3.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)[ MakeLabeledSpin(TEXT("Pitch (UTComp style only)"), &HSConfig.Enemy.Pitch, 0.1f, 4.f, 0.05f) ];
+
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 6)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Teammate hits")))
+			.Font(BoldFont(13))
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakePresetRow(TEXT("Sound"), &HSConfig.Friendly) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Volume"), &HSConfig.Friendly.Volume, 0.f, 3.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 4)[ MakeLabeledSpin(TEXT("Pitch (UTComp style only)"), &HSConfig.Friendly.Pitch, 0.1f, 4.f, 0.05f) ];
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)
+		[ MakeFlagCheck(TEXT("Cue teammate hits that did no damage"), &HSConfig.bPlayZeroFriendly) ];
+
+	// Style
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 4)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(0, 0, 10, 0)
+			[
+				SNew(SBox)
+				.WidthOverride(120.f)
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Pitch style")))
+					.Font(RegularFont(12))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SBox)
+				.WidthOverride(220.f)
+				[
+					SNew(STextComboBox)
+					.OptionsSource(&HSStyleOptions)
+					.InitiallySelectedItem(HSStyleOptions.IsValidIndex(StyleIndex) ? HSStyleOptions[StyleIndex] : nullptr)
+					.OnSelectionChanged_Lambda([this](TSharedPtr<FString> NewSel, ESelectInfo::Type)
+					{
+						if (!NewSel.IsValid()) { return; }
+						const int32 Idx = HSStyleOptions.IndexOfByPredicate(
+							[&](const TSharedPtr<FString>& P) { return P.IsValid() && *P == *NewSel; });
+						if (Idx != INDEX_NONE) { HSConfig.Style = (ENCPHitsoundStyle)Idx; }
+					})
+				]
+			]
+		];
+
+	Root->AddSlot().AutoHeight().Padding(0, 0, 0, 10)
+		[ MakeLabeledSpin(TEXT("Master volume"), &HSConfig.UserMultiplier, 0.f, 3.f, 0.05f) ];
+
+	// Previews across the damage range, so the pitch curve is audible while tuning.
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 8)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 15"), false, 15) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 45"), false, 45) ]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 6, 0)[ MakePreviewButton(TEXT("Test 100"), false, 100) ]
+			+ SHorizontalBox::Slot().AutoWidth()[ MakePreviewButton(TEXT("Test teammate"), true, 45) ]
+		];
+
+	Root->AddSlot()
+		.AutoHeight()
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Absolute sweeps pitch continuously with damage (more damage = lower pitch). UTComp uses one cue on a hyperbolic curve. Flat ignores damage. Custom sound packs installed on this client appear in the Sound lists automatically.")))
+			.Font(RegularFont(10))
+			.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+			.AutoWrapText(true)
+		];
+
+	return Root;
+}
+
 void SUTNCPlusMenu::LoadSettings()
 {
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	CharacterOverlayDistance = NCPlusPerformanceSettings::GetCharacterOverlayDistance();
+	CharacterOverlayDistanceOptions.Reset();
+	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Performance (3000)"))));
+	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Balanced (4500)"))));
+	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Full (6500)"))));
+	bShowClutchOverlay = NCClutchOverlay::IsEnabled();
 
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
@@ -820,6 +1460,13 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		RagdollTime = 3.0f;
 
+	if (GConfig->GetString(IGCTFSection, TEXT("bShowOwnBeam"), Val, ConfigPath))
+		bShowOwnBeam = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
+	else
+		bShowOwnBeam = true;   // preserve the current beam visuals for existing users
+
+	bPlayFlagCarrierSound = NCPlusICTFAudioSettings::GetPlayFlagCarrierSound();
+
 	if (GConfig->GetString(NCPSection, TEXT("OwnFootstepVolume"), Val, ConfigPath))
 		OwnFootstepVolume = FMath::Clamp(FCString::Atof(*Val), 0.f, 1.f);
 	else
@@ -830,11 +1477,36 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		bHighResScreenshotPostMatch = true;
 
-	// Force Models — take a working copy of the live config (loads Mod.ini [ForceModels] on first access).
-	FMConfig = NCPlusForceModels::Get();
+}
 
-	// Build the combo option lists once. Installed characters first ("(none)" lets a side be cleared),
-	// then the fixed Style / Armour lists (index order matches the ENCPlusSkinStyle / ENCPlusArmourMode ints).
+void SUTNCPlusMenu::EnsureAnnouncerData()
+{
+	if (bAnnouncerDataInitialized)
+	{
+		return;
+	}
+	bAnnouncerDataInitialized = true;
+
+	// Only the Home tab needs optional announcer package discovery.
+	NCPlusAnnouncerPacks::EnumerateAvailable(AnnouncerPackEntries);
+	SelectedAnnouncerPackId = NCPlusAnnouncerPacks::GetConfiguredPackId();
+	AnnouncerPackOptions.Reset();
+	for (const FNCPlusAnnouncerPackOption& Pack : AnnouncerPackEntries)
+	{
+		AnnouncerPackOptions.Add(MakeShareable(new FString(Pack.DisplayName)));
+	}
+}
+
+void SUTNCPlusMenu::EnsureForceModelData()
+{
+	if (bForceModelDataInitialized)
+	{
+		return;
+	}
+	bForceModelDataInitialized = true;
+
+	// Load the working copy and discover installed characters only when this tab opens.
+	FMConfig = NCPlusForceModels::Get();
 	FMContentEntries.Reset();
 	NCPlusForceModels::EnumerateContent(FMContentEntries);
 	FMModelOptions.Reset();
@@ -852,9 +1524,38 @@ void SUTNCPlusMenu::LoadSettings()
 	FMArmourOptions.Add(MakeShareable(new FString(TEXT("Complimentary"))));
 }
 
+void SUTNCPlusMenu::EnsureHitsoundData()
+{
+	if (bHitsoundDataInitialized)
+	{
+		return;
+	}
+	bHitsoundDataInitialized = true;
+
+	// Build once on first use. A later menu instance retries only when an earlier
+	// process-wide build was empty, preserving late-mounted PAK discovery without
+	// the old same-open double refresh.
+	const TArray<FHitsound>& Catalog = AClientHitsounds::GetCatalogForMenu();
+	HSConfig = AClientHitsounds::LoadConfigFromIni();
+	HSPresetOptions.Reset();
+	for (const FHitsound& Preset : Catalog)
+	{
+		HSPresetOptions.Add(MakeShareable(new FString(Preset.DisplayName)));
+	}
+	HSStyleOptions.Reset();   // index order matches ENCPHitsoundStyle
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("Absolute (pitch tracks damage)"))));
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("UTComp"))));
+	HSStyleOptions.Add(MakeShareable(new FString(TEXT("Flat pitch"))));
+}
+
 void SUTNCPlusMenu::SaveSettings()
 {
 	FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+
+	// Client-local only. Setter persists the clamped value and refreshes the
+	// cached squared distance used by character ticks immediately.
+	NCPlusPerformanceSettings::SetCharacterOverlayDistance(CharacterOverlayDistance);
+	NCClutchOverlay::SetEnabled(bShowClutchOverlay);
 
 	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.
@@ -864,17 +1565,40 @@ void SUTNCPlusMenu::SaveSettings()
 	// than a literal 0 (rate<=0) which never fires = keep forever. Non-zero values pass through unchanged.
 	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"),
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
+	GConfig->SetString(IGCTFSection, TEXT("bShowOwnBeam"), bShowOwnBeam ? TEXT("True") : TEXT("False"), ConfigPath);
+	GConfig->SetString(IGCTFSection, TEXT("bPlayFlagCarrierSound"), bPlayFlagCarrierSound ? TEXT("True") : TEXT("False"), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("OwnFootstepVolume"), *FString::SanitizeFloat(OwnFootstepVolume), ConfigPath);
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
 	GConfig->Flush(false, ConfigPath);
+	// Publish the newly saved value to the character's lazy cache so muting or
+	// restoring the loop takes effect on the next stock character tick.
+	NCPlusICTFAudioSettings::Reload();
 
-	// Force Models — write the working copy through to the live config + Mod.ini [ForceModels].
-	NCPlusForceModels::Mutable() = FMConfig;
-	NCPlusForceModels::Save();
+	if (bAnnouncerDataInitialized)
+	{
+		NCPlusAnnouncerPacks::SaveAndApply(SelectedAnnouncerPackId,
+			(PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+				? Cast<AUTPlayerController>(PlayerOwner->PlayerController)
+				: nullptr);
+	}
+
+	// Only write subsystem working copies for tabs that were actually opened.
+	if (bForceModelDataInitialized)
+	{
+		NCPlusForceModels::Mutable() = FMConfig;
+		NCPlusForceModels::Save();
+	}
+
+	if (bHitsoundDataInitialized)
+	{
+		// Persist and push to a live mutator instance so the change is audible immediately.
+		AClientHitsounds::SaveConfigToIni(HSConfig,
+			(PlayerOwner.IsValid() && PlayerOwner->PlayerController) ? (UObject*)PlayerOwner->PlayerController : nullptr);
+	}
 
 	// Live re-apply so changes show immediately without a respawn / rejoin.
-	if (PlayerOwner.IsValid() && PlayerOwner->PlayerController)
+	if (bForceModelDataInitialized && PlayerOwner.IsValid() && PlayerOwner->PlayerController)
 	{
 		NCPlusForceModels::ReapplyAll(PlayerOwner->PlayerController->GetWorld());
 	}
@@ -944,9 +1668,19 @@ void SUTNCPlusMenu::OnRagdollTimeChanged(float NewValue, ETextCommit::Type Commi
 	RagdollTime = FMath::Clamp(NewValue, 0.f, 10.f);
 }
 
+void SUTNCPlusMenu::OnShowOwnBeamChanged(ECheckBoxState NewState)
+{
+	bShowOwnBeam = (NewState == ECheckBoxState::Checked);
+}
+
 void SUTNCPlusMenu::OnFootstepVolumeChanged(float NewValue, ETextCommit::Type CommitType)
 {
 	OwnFootstepVolume = FMath::Clamp(NewValue, 0.f, 1.f);
+}
+
+void SUTNCPlusMenu::OnPlayFlagCarrierSoundChanged(ECheckBoxState NewState)
+{
+	bPlayFlagCarrierSound = (NewState == ECheckBoxState::Checked);
 }
 
 void SUTNCPlusMenu::OnScreenshotChanged(ECheckBoxState NewState)

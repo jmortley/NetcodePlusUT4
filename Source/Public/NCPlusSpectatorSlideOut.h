@@ -31,6 +31,7 @@
 #include "NCPlusSpectatorSlideOut.generated.h"
 
 class ANCAccuracyStatsReplicator;
+class ACTFStatsReplicator;
 
 UENUM()
 enum class ENCSlideOutWeaponMode : uint8
@@ -83,25 +84,39 @@ private:
 
 	/** Build the rows from the spectated player's LIVE carried inventory (the
 	 *  real BP-defined loadout — each weapon supplies its own Hits/ShotsStatsName).
-	 *  Refreshes a per-player cache while alive; reuses that cache when the player
-	 *  has no pawn (eliminated). No hardcoded weapon list. */
-	void BuildLoadoutRows(AUTPlayerState* PS, TArray<FNCSlideRow>& OutRows);
+	 *  Refreshes each live player's cache at 10 Hz (and immediately on pawn
+	 *  changes); reuses that cache when the player has no pawn. */
+	const TArray<FNCSlideRow>* GetLoadoutRows(AUTPlayerState* PS, const FString& PlayerId);
 
 	/** Last live loadout seen per PlayerId — dead/eliminated-player fallback. */
-	TMap<FString, TArray<FNCSlideRow>> CachedLoadoutByPlayer;
+	struct FNCSlideLoadoutCache
+	{
+		TArray<FNCSlideRow> Rows;
+		TWeakObjectPtr<AUTCharacter> Character;
+		float NextRefreshTime = 0.f;
+	};
+	TMap<FString, FNCSlideLoadoutCache> CachedLoadoutByPlayer;
+	TArray<FNCSlideRow> LoadoutScratchRows;
+	TWeakObjectPtr<UWorld> CachedLoadoutWorld;
+	FNCSlideRow InstagibFallbackRow;
 
 	/** Resolve hits+shots for one stat-name pair. Reads PS->GetStatsValue first
 	 *  (correct on listen/standalone) then falls back to the per-weapon replicator
 	 *  (StatsData is server-only -> 0 on dedicated spectators). */
-	void ResolveAccuracy(AUTPlayerState* PS, FName HitsStat, FName ShotsStat, int32& OutHits, int32& OutShots) const;
+	void ResolveAccuracy(AUTPlayerState* PS, const FString& PlayerId, FName HitsStat, FName ShotsStat, int32& OutHits, int32& OutShots) const;
 
 	/** TActorIterator-cached per-weapon accuracy replicator. Weak so it survives
 	 *  match restarts (replicator re-spawns; next query re-caches). */
 	UPROPERTY(Transient)
 	mutable TWeakObjectPtr<ANCAccuracyStatsReplicator> CachedAccuracyReplicator;
+	mutable TWeakObjectPtr<UWorld> CachedAccuracyWorld;
+	mutable float NextAccuracyReplicatorRetryTime = 0.f;
 	ANCAccuracyStatsReplicator* GetAccuracyReplicator() const;
 
 	/** True if the current match is instagib, read from the replicated
 	 *  ACTFStatsReplicator::bIsInstagibMatch (absent -> false). */
+	mutable TWeakObjectPtr<UWorld> CachedInstagibWorld;
+	mutable TWeakObjectPtr<ACTFStatsReplicator> CachedCTFStatsReplicator;
+	mutable float NextInstagibReplicatorRetryTime = 0.f;
 	bool IsInstagibMatch() const;
 };

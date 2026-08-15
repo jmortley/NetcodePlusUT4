@@ -4,7 +4,9 @@
 // auto-balance / TeamInfo plumbing for free.
 
 #include "NCShaftArenaGame.h"
+#include "NCReadyUp.h"
 #include "NCPlusVersionGate.h"
+#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
@@ -21,11 +23,27 @@
 #include "NCEloUploader.h"
 #include "NCStatsUploader.h"
 #include "UTWeap_LinkGun_Plus.h"
+#include "UTWeap_LinkGun_Shaft_NCP.h"
 #include "UTPickup.h"
 #include "UTDroppedPickup.h"
 #include "EngineUtils.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCShaftArena, Log, All);
+
+/** NCP-only stat name (not in StatNames.h): one sample per beam refire interval,
+ *  written by UTWeaponStateFiringLinkBeam_NCP / UTWeap_LinkGun_Plus. This is the
+ *  denominator LinkHits is measured against for beam fire. */
+static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+
+namespace
+{
+	bool IsSupportedShaftLinkClass(const UClass* WeaponClass)
+	{
+		return WeaponClass != nullptr &&
+			(WeaponClass->IsChildOf(AUTWeap_LinkGun_Plus::StaticClass()) ||
+			 WeaponClass->IsChildOf(AUTWeap_LinkGun_Shaft_NCP::StaticClass()));
+	}
+}
 
 bool ANCShaftArenaGame::ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass)
 {
@@ -77,6 +95,7 @@ ANCShaftArenaGame::ANCShaftArenaGame(const FObjectInitializer& OI)
 void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
 
 	// Reset per-match state so a re-init (map travel) starts clean.
 	bRatingFlushedThisMatch = false;
@@ -104,7 +123,8 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 	if (GConfig->GetString(TEXT("NCShaftArena"), TEXT("WeaponClass"), WeaponPath, ConfigPath)
 		&& !WeaponPath.IsEmpty())
 	{
-		if (UClass* Loaded = LoadClass<AUTWeap_LinkGun_Plus>(nullptr, *WeaponPath))
+		UClass* Loaded = LoadClass<AUTWeaponFix>(nullptr, *WeaponPath);
+		if (IsSupportedShaftLinkClass(Loaded))
 		{
 			ShaftLinkClass = Loaded;
 			UE_LOG(LogNCShaftArena, Log, TEXT("InitGame: loaded ShaftLinkClass from Mod.ini: %s"), *WeaponPath);
@@ -112,9 +132,21 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 		else
 		{
 			UE_LOG(LogNCShaftArena, Warning,
-				TEXT("InitGame: Mod.ini WeaponClass='%s' did not resolve to an AUTWeap_LinkGun_Plus subclass"),
+				TEXT("InitGame: Mod.ini WeaponClass='%s' is not a supported Shaft Link class ")
+				TEXT("(expected UTWeap_LinkGun_Plus or UTWeap_LinkGun_Shaft_NCP family)"),
 				*WeaponPath);
 		}
+	}
+
+	// The widened reflected type lets both supported native families serialize
+	// into BP defaults. Keep the actual mode strict if an unrelated AUTWeapon
+	// was assigned through the broader editor class picker.
+	if (ShaftLinkClass && !IsSupportedShaftLinkClass(*ShaftLinkClass))
+	{
+		UE_LOG(LogNCShaftArena, Warning,
+			TEXT("InitGame: rejecting unsupported BP ShaftLinkClass=%s"),
+			*ShaftLinkClass->GetPathName());
+		ShaftLinkClass = nullptr;
 	}
 
 	if (ShaftLinkClass)
@@ -193,14 +225,24 @@ void ANCShaftArenaGame::BeginPlay()
 void ANCShaftArenaGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 	if (Role != ROLE_Authority || !RatingSystem || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (!PS) return;
 	const FString UniqueId = PS->StatsID.IsEmpty() ? PS->PlayerName : PS->StatsID;
 	RatingSystem->LoadPlayerFromDB(GetWorld(), UniqueId);
+}
+
+bool ANCShaftArenaGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
 }
 
 void ANCShaftArenaGame::HandleMatchHasStarted()
@@ -373,7 +415,15 @@ float ANCShaftArenaGame::ComputeLinkAccuracyPct(AUTPlayerState* PS) const
 {
 	if (!PS) return 0.f;
 	const int32 Hits  = PS->GetStatsValue(NAME_LinkHits);
-	const int32 Shots = PS->GetStatsValue(NAME_LinkShots);
+	// Beam denominator: the authoritative NCP beam state counts one sample per
+	// refire interval into LinkBeamShots (UTWeaponStateFiringLinkBeam_NCP.cpp),
+	// which is the unit LinkHits is accumulated in. Stock NAME_LinkShots only
+	// ticks per trigger pull and receives NOTHING from the beam — reading it
+	// here persisted 0.00 for every Shaft match (beam-only weapon, so mode 0
+	// never fires) while the scoreboard, HUD and replicators all showed the
+	// correct value from LinkBeamShots. Sum both so a variant that also fires
+	// plasma still counts those trigger pulls.
+	const int32 Shots = PS->GetStatsValue(NAME_LinkBeamShots) + PS->GetStatsValue(NAME_LinkShots);
 	return (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
 }
 
@@ -400,8 +450,10 @@ void ANCShaftArenaGame::BuildMatchSummary(FNCMatchSummary& Out) const
 		P.Deaths     = UTPS->Deaths;
 		P.Ping       = UTPS->Ping;
 		P.Team       = UTPS->Team ? UTPS->Team->TeamIndex : 0;
+		// Shots = beam samples + plasma trigger pulls; see ComputeLinkAccuracyPct.
 		P.WeaponAccuracy.Add(FName(TEXT("LinkGun")),
-			FIntPoint(UTPS->GetStatsValue(NAME_LinkShots), UTPS->GetStatsValue(NAME_LinkHits)));
+			FIntPoint(UTPS->GetStatsValue(NAME_LinkBeamShots) + UTPS->GetStatsValue(NAME_LinkShots),
+				UTPS->GetStatsValue(NAME_LinkHits)));
 
 		if (RatingSystem)
 		{

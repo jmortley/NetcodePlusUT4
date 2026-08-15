@@ -4,6 +4,7 @@
 #include "UTCTFGameState.h"
 #include "UTCTFScoring.h"
 #include "UTCTFBaseGame.h"
+#include "Containers/Ticker.h"
 
 // Full include needed (not forward decl) because TUniquePtr<FNCPlusCTFRatingSystem>
 // instantiates its destructor at this header — `delete` requires the complete type.
@@ -11,6 +12,8 @@
 #include "NCPlusCTFRatingSystem.h"
 
 #include "NCPlusCTFGameMode.generated.h"
+
+class ANCAutoPauseState;
 
 // Safe property access across DLL boundary — uses runtime UProperty reflection
 // instead of direct member access which has wrong offsets due to layout mismatch.
@@ -69,9 +72,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  bAllowHostPause — see NCPlusHostPause.h). */
 	virtual bool AllowPausing(APlayerController* PC) override;
 
-	/** Defer a host/rcon unpause behind a short server-only resume countdown
-	 *  (see NCPlusHostPause::DeferUnpauseForCountdown). */
+	/** Defer host/rcon and automatic-pause resumes behind a pause-safe countdown.
+	 *  Automatic pauses use their replicated, cancellable state machine; other
+	 *  pauses use NCPlusHostPause::DeferUnpauseForCountdown. */
 	virtual bool ClearPause() override;
+
+	/** Prevent a departing pause marker's engine cleanup from masquerading as a
+	 *  player-requested resume before Logout can update the exact-ID wait. */
+	virtual void ForceClearUnpauseDelegates(AActor* PauseActor) override;
 
 	// ── Advantage Configuration ──────────────────────────────────────
 
@@ -158,6 +166,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
 	float SpawnKillerAvoidRadius;
 
+	/** Hard-exclude starts with direct LOS to the enemy flag carrier inside this
+	 *  radius when a safer start remains. Falls back rather than failing to spawn.
+	 *  0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Spawning")
+	float SpawnFlagCarrierLOSAvoidRadius;
+
 	/** When your OWN flag isn't home (stolen or dropped), drop this many of your
 	 *  team's starts nearest your flag base form the avoid SET — exactly ONE of
 	 *  them is excluded per respawn, rotating through the set (nearest, then
@@ -191,10 +205,29 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	// ── Overtime Configuration ────────────────────────────────────────
 
-	/** Respawn wait time during overtime (seconds). Replaces Epic's extended
-	 *  overtime that escalated to 10s. Set to 0 to use normal respawn time. */
+	/** Respawn wait CAP during overtime (seconds). The escalation below climbs
+	 *  from the 2s base toward this. Set to 0 to disable OT respawn handling. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
 	float OvertimeRespawnTime;
+
+	/** Seconds of overtime the 2s base holds before escalation begins.
+	 *  Default 360 (tOxX 2026-08-10; the old NewCTF ramp used a hardcoded 300). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
+	float OvertimeEscalationDelay;
+
+	/** Seconds of overtime per +1s of respawn wait once escalation is running.
+	 *  Default 60 = +1s every minute (old ramp: hardcoded 120). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Overtime")
+	float OvertimeEscalationInterval;
+
+	/** Regrab audibility (frenchempire 2026-08-06): stock plays the loud
+	 *  flag-taken alarm only for grabs from the base stand
+	 *  (AUTCTFFlagBase::ObjectWasPickedUp gates on bWasHome), so re-taking a
+	 *  DROPPED flag is nearly silent — a positional pickup blip plus a voice
+	 *  line the announcer can cancel. When enabled, picking up a dropped flag
+	 *  replays the base's alarm cues at the grab location. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "CTF|Announcements")
+	bool bRegrabTakenAlarm = true;
 
 	// ── Game Flow Overrides ──────────────────────────────────────────
 	// NOTE: Floor slide disable is enforced via ATeamArenaCharacter::CanSlide_Implementation()
@@ -202,7 +235,9 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+	virtual bool ReadyToStartMatch_Implementation() override;
 	virtual void Logout(AController* Exiting) override;
 
 	/** Pin bot-PUG players to their bot-assigned team (see PugRosterTeam). The
@@ -210,6 +245,11 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  CountdownToBegin auto-balance — all route through ChangeTeam. Non-roster
 	 *  joiners (subs/late fills) defer to Super's stock balancing. */
 	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
+
+	/** Rating preload for a player entering play mid-match (spec→player and team
+	 *  entries; PostLogin skips spectators so caster joins stop touching the DB).
+	 *  Idempotent — cache-first load, first-seen stamped once, no-op pre-match. */
+	void EnsureRatingLoadedForPlayer(AController* Player);
 	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
@@ -229,6 +269,25 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	virtual void CheckGameTime() override;
 	virtual void DefaultTimer() override;
 	virtual float GetTravelDelay() override;
+
+	/** Regrab-alarm hook: every flag transition announces through here
+	 *  (AUTCarriedObject::SendGameMessage), so the dropped(3)→taken(4) pair
+	 *  identifies a regrab without subclassing the engine flag actors.
+	 *  Only ever adds sounds — no message is suppressed or altered. */
+	virtual void BroadcastLocalized(AActor* Sender, TSubclassOf<ULocalMessage> Message, int32 Switch = 0, APlayerState* RelatedPlayerState_1 = NULL, APlayerState* RelatedPlayerState_2 = NULL, UObject* OptionalObject = NULL) override;
+
+	/** Play the home base's taken-alarm cues for a regrab, positioned at the
+	 *  flag's current location instead of the base stand. */
+	void PlayRegrabTakenAlarm(AUTCarriedObject* Flag);
+
+	/** Per-team-flag drop tracking for the regrab alarm. Set by the dropped(3)
+	 *  broadcast or the 1Hz state sampling in DefaultTimer (which covers the
+	 *  near-cap "Denied" path that defers the dropped broadcast — see
+	 *  UTCTFFlag::Drop); consumed by the next taken(4). */
+	bool bFlagWasDropped[2] = { false, false };
+
+	/** Debounce so message storms can't replay the alarm back-to-back. */
+	float LastRegrabAlarmTime[2] = { -100.f, -100.f };
 
 	virtual void HandleFlagCapture(AUTCharacter* HolderPawn, AUTPlayerState* Holder) override;
 	virtual void HandleMatchIntermission() override;
@@ -310,10 +369,14 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	int32 CTFSmallGameMaxPlayers = 2;
 
 	/** Auto-pause the match when a participant drops out of a bot PUG (?PugId),
-	 *  until they (and any others who dropped) rejoin, or an admin unpauses via
-	 *  the `pause` command. Uses the engine world-pause (WorldSettings->Pauser).
-	 *  No auto-resume timeout yet. Mod.ini [UTPUGS_STATS] AutoPauseOnDrop. */
+	 *  until they (and any others who dropped) rejoin, or a manual unpause is
+	 *  requested. Uses the engine world-pause (WorldSettings->Pauser).
+	 *  Mod.ini [UTPUGS_STATS] AutoPauseOnDrop. */
 	bool bAutoPauseOnDrop = true;
+
+	/** Pause-safe automatic resume countdown. Defaults to the shared host-pause
+	 *  value and reads [NetcodePlus] UnpauseCountdownSec from Mod.ini. */
+	int32 AutoPauseResumeCountdownSec = 7;
 
 	/** True when this match was launched as a bot PUG (?PugId present). */
 	bool bIsPugMatch = false;
@@ -331,6 +394,24 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 
 	/** UniqueIds of dropped participants we're waiting on before resuming. */
 	TSet<FString> AutoPauseAwaitIds;
+
+	/** Human participant IDs observed during this PUG. Kept across spectator
+	 *  transitions so returning-as-spectator cannot evade drop tracking. */
+	TSet<FString> AutoPauseTrackedIds;
+
+	/** Logical exact-ID wait is active but no live PlayerState can hold Pauser. */
+	bool bAutoPauseDormantNoMarker = false;
+
+	/** Replicated authoritative pause snapshot consumed by the CTF HUD. */
+	UPROPERTY(Transient)
+	ANCAutoPauseState* AutoPauseStateActor = nullptr;
+
+	/** Pause-immune automatic-resume ticker state (server-only). */
+	FDelegateHandle AutoPauseResumeTicker;
+	int32 AutoPauseResumeSecondsRemaining = 0;
+	float AutoPauseResumeEndRealTime = 0.0f;
+	bool bAutoPauseResumeCountdownActive = false;
+	bool bForceClearingPauseActor = false;
 
 	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
 	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
@@ -352,13 +433,19 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	/** Load CTFPerfConfig + CTFRatingMinPresenceFrac from Mod.ini [UTPUGS_STATS]. */
 	void LoadCTFPerfConfig();
 
-	/** Auto-pause helpers (server-only). BeginOrHoldAutoPause records a dropped
-	 *  participant and (re)points the engine pause marker at a still-present
-	 *  player; EndAutoPause clears it; FindAutoPauseMarker returns a present,
-	 *  non-dropped PlayerState to hold the pause on (or null if none remain). */
-	void BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName);
-	void EndAutoPause(const TCHAR* Reason);
-	class APlayerState* FindAutoPauseMarker() const;
+	/** Auto-pause helpers (server-only). Pausing is an explicit Pauser assignment;
+	 *  resuming is an explicit clear after a pause-immune authoritative countdown.
+	 *  A new tracked drop cancels an active resume and republishes Paused state. */
+	void BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName,
+		const APlayerState* ExitingPlayerState);
+	void BeginAutoPauseResumeCountdown(const FString& Reason);
+	void CancelAutoPauseResumeCountdown(const FString& Reason);
+	void CompleteAutoPauseResume(const FString& Reason);
+	bool TickAutoPauseResume(float DeltaTime);
+	ANCAutoPauseState* GetOrCreateAutoPauseState();
+	void PublishAutoPausePaused(const FString& Reason);
+	TArray<FString> GetSortedAutoPauseAwaitIds() const;
+	class APlayerState* FindAutoPauseMarker(const APlayerState* Excluded = nullptr) const;
 
 	/** Override spawn penalty weights + selection knobs from Mod.ini [UTPUGS_SPAWN]. */
 	void LoadSpawnConfig();
@@ -416,12 +503,15 @@ protected:
 	bool bGracePeriodActive;
 
 	// ── Recent Spawn Tracking (IG+ style) ───────────────────────────
-	// Penalize reusing the same spawn point. Tracks last 2 spawns per player.
+	// Penalize reusing the same spawn point. Tracks the last 3 spawns per player,
+	// matching IG+ (StartSpot hard-blocked, LastStartSpot2/3 score-penalised —
+	// NewTDM.uc FindPlayerStartAdvanced).
 
 	struct FRecentSpawns
 	{
 		TWeakObjectPtr<APlayerStart> Last;
 		TWeakObjectPtr<APlayerStart> SecondLast;
+		TWeakObjectPtr<APlayerStart> ThirdLast;
 	};
 
 	TMap<TWeakObjectPtr<AController>, FRecentSpawns> PlayerRecentSpawns;
@@ -429,6 +519,10 @@ protected:
 	/** Per-player last ACTUAL spawn (pawn) world location, for a truthful in-match
 	 *  rotation/dist log that doesn't depend on the (sometimes stale) StartSpot. */
 	TMap<TWeakObjectPtr<AController>, FVector> PlayerLastSpawnLoc;
+
+	/** Emit one detailed Warning-level line for every live CTF/iCTF spawn.
+	 *  Default-off; Mod.ini [UTPUGS_SPAWN] LogSpawnChoices=true enables it. */
+	bool bLogSpawnChoices = false;
 
 	/** Penalty multiplier for using the same spawn as 2 spawns ago (0.5 = half score). IG+ default. */
 	float SpawnRecentPenaltyMultiplier = 0.5f;
@@ -438,6 +532,37 @@ protected:
 
 	/** Penalty scale for near-last-spawn distance */
 	float SpawnNearLastPenalty = 6.f;
+
+	// ── IG+ weighted-random selection (Deaod's NewTDM.uc port) ───────
+	// The tie-band picks deterministically whenever one start is more than
+	// SpawnTieBandWidth ahead — on many maps that is the SAME start every life,
+	// which is the "siempre en el mismo sitio" report. IG+ instead gives every
+	// eligible start a random draw whose ceiling grows with its score and takes
+	// the highest draw: a start half as good as the best still wins ~25% of the
+	// time, and equal starts are a true coin-flip. Never deterministic.
+
+	/** 1 = IG+ weighted-random draw (default), 0 = legacy tie-band coin-flip. */
+	bool bSpawnWeightedRandom = true;
+
+	/** Draw ceiling of the BEST eligible start. Larger = flatter (more random). */
+	float SpawnRandomBase = 20.f;
+
+	/** Ceiling lost per score point below the best eligible start. A start more
+	 *  than (SpawnRandomBase / SpawnRandomSpread) points behind the leader draws
+	 *  nothing and can never be picked — which is what keeps Epic's rejected
+	 *  starts (just-used -8, respawn-choice -5, telefrag -10, wrong-team -20)
+	 *  out. Larger = greedier; smaller = more variety AND more risk. */
+	float SpawnRandomSpread = 1.f;
+
+	/** IG+ MinSpawnDistance: a start with a live enemy inside this radius is
+	 *  REFUSED (own safety tier), not merely penalised. Waived if every start in
+	 *  the pool violates it. 0 = off. */
+	float SpawnEnemyHardRadius = 1200.f;
+
+	/** IG+ MinSpawnZVariance: an enemy at least this far BELOW a start is treated
+	 *  as floor-separated rather than adjacent (discounts the proximity penalty,
+	 *  and clears the hard radius above when he also has no sightline). 0 = off. */
+	float SpawnEnemyBelowZ = 190.f;
 
 	// ── Team-aware spawn pools (curated from author TeamNum tags) ─────
 	// Built lazily on the first ChoosePlayerStart. Server-only; never replicated.

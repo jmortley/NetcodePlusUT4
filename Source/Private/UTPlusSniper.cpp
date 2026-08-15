@@ -6,6 +6,11 @@
 #include "StatNames.h"
 #include "Net/UnrealNetwork.h"
 #include "HAL/IConsoleManager.h"
+#include "NCWeaponColorSettings.h"
+#include "Engine/DemoNetDriver.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialInterface.h"
+#include "Particles/ParticleSystemComponent.h"
 
 // ── Headshot calibration (server-side validation; live-tunable for dogfood) ──
 // The secure client-informed head check below places a NORMAL sphere at the client's
@@ -20,9 +25,20 @@ static TAutoConsoleVariable<float> CVarHeadBandXY(    TEXT("ncp.HeadBandXY"),   
 static TAutoConsoleVariable<float> CVarHeadSlackScale(TEXT("ncp.HeadSlackScale"), 1.f, TEXT("High-ping head slack = targetSpeed * rewindTime * this (0 disables)."));
 static TAutoConsoleVariable<float> CVarHeadSlackMax(  TEXT("ncp.HeadSlackMax"),  25.f, TEXT("Hard cap (uu) on the high-ping head slack added to the sphere radius."));
 
+static const FName NAME_NCSniperBeamColor(TEXT("Beam1"));
+static const FName NAME_NCLightningDissipationColor(TEXT("DissipationColor"));
+static const FName NAME_NCLightningElectricColor(TEXT("Elec"));
+static const FName NAME_NCLightningPlasmaHot(TEXT("Plasma_Hot"));
+static const FName NAME_NCLightningPlasmaCold(TEXT("Plasma_Cold"));
+static const FName NAME_NCLightningEmitterOne(TEXT("ParticleEmitter1"));
+static const FName NAME_NCLightningEmitterTwo(TEXT("ParticleEmitter2"));
+
 
 AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UUTWeaponStateZooming>(TEXT("FiringState1")))
+	, CachedLightningBeamMID(nullptr)
+	, CachedLightningBeamSourceMaterial(nullptr)
+	, CachedLightningBeamColorGeneration(0)
 {
 	// Standard Sniper Properties (From UTWeap_Sniper)
 	DefaultGroup = 9;
@@ -71,6 +87,93 @@ AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 	
 	LowMeshOffset = FVector(0.f, 0.f, -5.f);
 	VeryLowMeshOffset = FVector(0.f, 0.f, -11.f);
+}
+
+void AUTPlusSniper::ApplyHitscanBeamColor(UParticleSystemComponent* Effect, ENCHitscanBeamColorProfile Profile)
+{
+	UWorld* World = GetWorld();
+	if (Effect == nullptr || Effect->IsPendingKill() || World == nullptr || GetNetMode() == NM_DedicatedServer
+		|| UTOwner == nullptr || !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
+		|| !ShouldPlay1PVisuals())
+	{
+		return;
+	}
+	// IsPlayerControlled keeps locally simulated listen-server bots from
+	// inheriting the host player's process-local preference.
+
+	// Player preferences are intentionally local-only. Do not recolor replay
+	// playback from the viewer's current config; live demo recording is fine.
+	UDemoNetDriver* DemoNetDriver = World->DemoNetDriver;
+	if (DemoNetDriver != nullptr && DemoNetDriver->IsPlaying())
+	{
+		return;
+	}
+
+	const FNCWeaponColorSnapshot& Snapshot = NCWeaponColors::GetSnapshot();
+	if (!Snapshot.bHasHitscanColor)
+	{
+		return;
+	}
+	FLinearColor BeamColor = Snapshot.HitscanColor;
+	const bool bNearlyBlack = BeamColor.R <= 0.01f && BeamColor.G <= 0.01f && BeamColor.B <= 0.01f;
+
+	switch (Profile)
+	{
+	case ENCHitscanBeamColorProfile::Sniper:
+		if (bNearlyBlack)
+		{
+			BeamColor = FLinearColor(0.945f, 0.067977f, 0.f, 1.f);
+		}
+		Effect->SetColorParameter(NAME_NCSniperBeamColor, BeamColor);
+		return;
+
+	case ENCHitscanBeamColorProfile::LightningGun:
+		if (bNearlyBlack)
+		{
+			BeamColor = FLinearColor(0.f, 0.918349f, 1.f, 1.f);
+		}
+		break;
+
+	default:
+		return;
+	}
+
+	Effect->SetColorParameter(NAME_NCLightningDissipationColor, BeamColor);
+	Effect->SetColorParameter(NAME_NCLightningElectricColor, BeamColor);
+
+	UMaterialInterface* SourceMaterial = Effect->GetMaterial(1);
+	if (SourceMaterial == CachedLightningBeamMID)
+	{
+		SourceMaterial = CachedLightningBeamSourceMaterial;
+	}
+	if (SourceMaterial == nullptr)
+	{
+		return;
+	}
+
+	if (CachedLightningBeamMID == nullptr
+		|| CachedLightningBeamSourceMaterial != SourceMaterial
+		|| CachedLightningBeamColorGeneration != Snapshot.Generation)
+	{
+		UMaterialInstanceDynamic* NewMID = UMaterialInstanceDynamic::Create(SourceMaterial, this);
+		if (NewMID == nullptr)
+		{
+			CachedLightningBeamMID = nullptr;
+			CachedLightningBeamSourceMaterial = nullptr;
+			return;
+		}
+
+		NewMID->SetVectorParameterValue(NAME_NCLightningPlasmaHot, BeamColor);
+		NewMID->SetVectorParameterValue(NAME_NCLightningPlasmaCold, BeamColor);
+		NewMID->SetVectorParameterValue(NAME_NCLightningEmitterOne, BeamColor);
+		NewMID->SetVectorParameterValue(NAME_NCLightningEmitterTwo, BeamColor);
+
+		CachedLightningBeamMID = NewMID;
+		CachedLightningBeamSourceMaterial = SourceMaterial;
+		CachedLightningBeamColorGeneration = Snapshot.Generation;
+	}
+
+	Effect->SetMaterial(1, CachedLightningBeamMID);
 }
 
 
@@ -158,7 +261,12 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		}
 	}
 	*/
-	if (UTOwner && Cast<AUTCharacter>(Hit.Actor.Get()) == NULL)
+	// bLastUnclaimedRenderDemoted: the base HitScanTrace demoted this ray's
+	// unclaimed pawn hit at the render-time check (ncp.UnclaimedRenderGate).
+	// The secondary head search must not resurrect it — the same ray would be
+	// re-tested against the head sphere at the PRIMARY rewind time, undoing
+	// the demotion (Codex audit blocker, 2026-07-26).
+	if (UTOwner && Cast<AUTCharacter>(Hit.Actor.Get()) == NULL && !bLastUnclaimedRenderDemoted)
 	{
 		// Find potential head targets using Epic's ChooseBestAimTarget
 		AUTCharacter* AltTarget = Cast<AUTCharacter>(UUTGameplayStatics::ChooseBestAimTarget(
@@ -375,7 +483,10 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		{
 			C->NotifyBlockedHeadShot(UTOwner);
 		}
-		if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None))
+		// No accuracy credit for detonating projectiles (shooting a core/rocket
+		// out of the air) — same rule as UTWeaponFix::FireInstantHit (2026-08-10).
+		if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None)
+			&& Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
 		{
 			PS->ModifyStatsValue(HitsStatsName, 1);
 		}
@@ -451,6 +562,19 @@ void AUTPlusSniper::OnServerHitScanResult(const FHitResult& Hit, float Predictio
 bool AUTPlusSniper::CanHeadShot()
 {
 	return true;
+}
+
+int32 AUTPlusSniper::GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshotClaimed)
+{
+	// Deliberately ignores helmets: a blocked headshot still HIT the head, and
+	// over-predicting there is wanted (UT3 played a loud ding for exactly that).
+	// The authoritative BlockedHeadshotDamage sound corrects through the dedup
+	// window as a different tier.
+	if (bHeadshotClaimed && CanHeadShot())
+	{
+		return HeadshotDamage;
+	}
+	return Super::GetPredictedHitsoundDamage(FireModeNum, bHeadshotClaimed);
 }
 
 

@@ -155,6 +155,23 @@ uint8 ANCLeagueDuelStatsReplicator::GetHelmetCountForPlayer(const FString& Id) c
 	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
 	return E ? E->HelmetCount : 0;
 }
+
+bool ANCLeagueDuelStatsReplicator::GetArmorCountsForPlayer(const FString& Id, uint8 OutCounts[4]) const
+{
+	OutCounts[0] = OutCounts[1] = OutCounts[2] = OutCounts[3] = 0;
+	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);
+	if (!E)
+	{
+		return false;
+	}
+
+	OutCounts[0] = E->BeltCount;
+	OutCounts[1] = E->VestCount;
+	OutCounts[2] = E->PadsCount;
+	OutCounts[3] = E->HelmetCount;
+	return true;
+}
+
 int32 ANCLeagueDuelStatsReplicator::GetDamageForPlayer(const FString& Id) const
 {
 	const FNCLeagueDuelStatsEntry* E = FindEntry(StatsEntries, Id);

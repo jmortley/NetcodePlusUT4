@@ -30,6 +30,15 @@ UNCPlusHUDWidget_AmmoCounter::UNCPlusHUDWidget_AmmoCounter(const FObjectInitiali
 	, LastAmmo(-1)
 	, PickupPulseEnd(0.f)
 	, SwapFlashEnd(0.f)
+	, CachedLayoutRevision(0)
+	, CachedStyle(uint8(ENCPlusAmmoStyle::BigNumber))
+	, CachedOpacity(1.f)
+	, CachedNumColor(NCPlusAC::NumWhite)
+	, CachedMaxColor(NCPlusAC::MaxDim)
+	, CachedFullColor(NCPlusAC::AccentFull)
+	, CachedWarnColor(NCPlusAC::AccentWarn)
+	, CachedDangerColor(NCPlusAC::AccentDanger)
+	, CachedBgColor(NCPlusAC::PlateBg)
 {
 	// Anchored bottom-right by default. Origin matches anchor so content extends
 	// up-and-to-the-left from the corner — same idiom we use for the WeaponBar.
@@ -107,35 +116,43 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 	LastAmmo = W->Ammo;
 
 	// --- Color palette + opacity ---
-	const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(TEXT("ammo"));
-
-	auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
+	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
+	if (CachedLayoutRevision != LayoutRevision)
 	{
-		return Elem ? Elem->GetExtraColor(Key, Default) : Default;
-	};
+		const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(TEXT("ammo"));
+		auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
+		{
+			return Elem ? Elem->GetExtraColor(Key, Default) : Default;
+		};
+		CachedOpacity    = Elem ? FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
+		CachedNumColor   = Col(TEXT("color_number"), NumWhite);
+		CachedMaxColor   = Col(TEXT("color_max"), MaxDim);
+		CachedFullColor  = Col(TEXT("color_full"), AccentFull);
+		CachedWarnColor  = Col(TEXT("color_warn"), AccentWarn);
+		CachedDangerColor = Col(TEXT("color_danger"), AccentDanger);
+		CachedBgColor    = Col(TEXT("color_bg"), PlateBg);
+		CachedStyle      = uint8(Elem
+			? NCPlusAmmoStyle::Parse(Elem->GetExtra(TEXT("style")))
+			: ENCPlusAmmoStyle::BigNumber);
+		CachedLayoutRevision = LayoutRevision;
+	}
 
 	FAmmoColors C;
-	C.Opacity = Elem ? FMath::Clamp(Elem->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
-
-	const FLinearColor BaseNum   = Col(TEXT("color_number"), NumWhite);
-	const FLinearColor MaxText   = Col(TEXT("color_max"),    MaxDim);
-	const FLinearColor Full      = Col(TEXT("color_full"),   AccentFull);
-	const FLinearColor Warn      = Col(TEXT("color_warn"),   AccentWarn);
-	const FLinearColor Danger    = Col(TEXT("color_danger"), AccentDanger);
+	C.Opacity = CachedOpacity;
 
 	// Accent (state-dependent): danger → warn → full.
-	FLinearColor Accent = Full;
+	FLinearColor Accent = CachedFullColor;
 	if (W->MaxAmmo > 0)
 	{
-		if (W->Ammo <= W->AmmoDangerAmount)       Accent = Danger;
-		else if (W->Ammo <= W->AmmoWarningAmount) Accent = Warn;
+		if (W->Ammo <= W->AmmoDangerAmount)       Accent = CachedDangerColor;
+		else if (W->Ammo <= W->AmmoWarningAmount) Accent = CachedWarnColor;
 	}
 
 	// Number color: lerp toward danger when low, then toward white during swap flash.
-	FLinearColor NumCol = BaseNum;
+	FLinearColor NumCol = CachedNumColor;
 	if (W->MaxAmmo > 0 && W->Ammo <= W->AmmoDangerAmount)
 	{
-		NumCol = Danger;
+		NumCol = CachedDangerColor;
 	}
 	if (Now < SwapFlashEnd)
 	{
@@ -144,9 +161,9 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 	}
 
 	C.NumColor    = NumCol;
-	C.MaxColor    = MaxText;
+	C.MaxColor    = CachedMaxColor;
 	C.AccentColor = Accent;
-	C.BgColor     = Col(TEXT("color_bg"), PlateBg);
+	C.BgColor     = CachedBgColor;
 
 	// Icon color follows UseWeaponColors setting (same as WeaponBar).
 	C.IconColor = (UTHUDOwner->GetUseWeaponColors()) ? W->IconColor : FLinearColor::White;
@@ -155,9 +172,7 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 	C.Pulse = (Now >= PickupPulseEnd) ? 0.f : (PickupPulseEnd - Now) / PickupPulseDuration;
 
 	// --- Dispatch to chosen style ---
-	const ENCPlusAmmoStyle Style = Elem
-		? NCPlusAmmoStyle::Parse(Elem->GetExtra(TEXT("style")))
-		: ENCPlusAmmoStyle::BigNumber;
+	const ENCPlusAmmoStyle Style = ENCPlusAmmoStyle(CachedStyle);
 
 	switch (Style)
 	{

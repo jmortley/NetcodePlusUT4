@@ -16,6 +16,7 @@
 #include "UTCTFFlag.h"
 #include "UTCTFFlagBase.h"
 #include "UTCTFGameState.h"
+#include "NCReadyUp.h"
 #include "Json.h"
 #include "GameFramework/GameStateBase.h"
 #include "Misc/FileHelper.h"
@@ -618,15 +619,18 @@ FString AMutBotEvents::BuildPlayerListJson() const
 
 	AUTGameState* GS = World->GetGameState<AUTGameState>();
 	if (!GS) return TEXT("[]");
+	ANCReadyUpState* ReadyState = ANCReadyUpState::Find(World);
 
 	for (APlayerState* PS : GS->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
 		if (!UTPS || UTPS->bOnlySpectator) continue;
 
-		// With host-controlled matches, "ready" = connected and on a team.
-		// GetTeamNum() returns 255 if not on a team yet.
-		bool bReady = (UTPS->GetTeamNum() < 2);
+		// Player ready-up has its own UTComp-style state. Legacy host-controlled
+		// matches retain the old connected-and-on-a-team meaning for compatibility.
+		const bool bReady = ReadyState != nullptr
+			? (UTPS->bIsABot || ReadyState->IsPlayerReady(UTPS))
+			: (UTPS->GetTeamNum() < 2);
 
 		TSharedRef<FJsonObject> PlayerObj = MakeShareable(new FJsonObject());
 		PlayerObj->SetStringField(TEXT("Name"), UTPS->PlayerName);

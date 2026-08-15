@@ -42,6 +42,11 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	// Optional default-hidden overlays — see WipeoutHUD for full notes.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
+	// Authoritative automatic-pause banner/countdown. Registered after the
+	// scoreboard so it remains readable while the score panel is open.
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_AutoPause"));
 	// NCPlus CTF flag-status subclass — drops in for the stock engine widget.
 	// Adds nchud control over carrier indicator + you-have-flag banner + the
 	// NEW enemy-has-flag banner (engine had the FText defined but never rendered).
@@ -87,6 +92,7 @@ void ANCPlusCTFHUD::BeginPlay()
 		if (Entry.Contains(TEXT("TeamGameClock"))     // stock team score/clock bar
 			|| Entry.Contains(TEXT("CTFScoreboard"))  // stock CTF scoreboard
 			|| Entry.Contains(TEXT("TeamScoreboard")) // stock team scoreboard (fallback)
+			|| Entry == TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator")
 			// The stock CTF flag status widget is registered in DefaultGame.ini as
 			// /Game/RestrictedAssets/UI/HUDWidgets/bpHW_CTFFlagStatus.bpHW_CTFFlagStatus_C
 			// (a BP wrapper around UTHUDWidget_CTFFlagStatus). Matching "CTFFlagStatus"
@@ -184,16 +190,32 @@ EInputMode::Type ANCPlusCTFHUD::GetInputMode_Implementation() const
 		return EInputMode::EIM_GameAndUI;
 	}
 
-	// Same pattern as WipeoutHUD: keep mouse captured during match.
-	// CTF doesn't have elimination, but this prevents click-off during
-	// death spectating and halftime transitions.
+	// Same pattern as WipeoutHUD: keep mouse captured during live play.
+	// Stock UTHUD only recognizes MatchState::InProgress here. When CTF
+	// changes to MatchIsInOvertime it falls through to EIM_None, which the
+	// base player controller converts to GameOnly. That hides the cursor and
+	// breaks the interactive spectator controls (POV and 1P/3P switching).
+	//
+	// Do not use IsMatchInProgress() alone: AUTCTFGameState also returns true
+	// for halftime/intermission states. Explicitly list the two live states.
 	if (UTPlayerOwner != nullptr)
 	{
 		AUTPlayerState* PS = UTPlayerOwner->UTPlayerState;
 		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-		if (PS && !PS->bOnlySpectator && GS && GS->GetMatchState() == MatchState::InProgress)
+		const FName MatchStateName = GS ? GS->GetMatchState() : NAME_None;
+		const bool bLiveMatch = MatchStateName == MatchState::InProgress
+			|| MatchStateName == MatchState::MatchIsInOvertime;
+		if (PS && bLiveMatch)
 		{
-			return EInputMode::EIM_GameOnly;
+			if (!PS->bOnlySpectator)
+			{
+				return EInputMode::EIM_GameOnly;
+			}
+
+			// Preserve stock live-spectator behavior in both regulation and OT.
+			return (bShowScores || UTPlayerOwner->bSpectatorMouseChangesView)
+				? EInputMode::EIM_GameOnly
+				: EInputMode::EIM_UIOnly;
 		}
 	}
 	return Super::GetInputMode_Implementation();
@@ -207,12 +229,14 @@ void ANCPlusCTFHUD::DrawHUD()
 	// Auto post-match high-res screenshot (shared; fires after the replay ends + the scoreboard settles).
 	// Before the Canvas guard so it polls consistently with ElimPlus/Wipeout (it doesn't touch Canvas).
 	NCPlusHUDDrawCall::ServicePostMatchScreenshot(this, PostMatchScreenshotStable, bPostMatchScreenshotTaken);
+	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
+		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
 
 	if (!Canvas || !SmallFont) return;
 
 	// Draw score bar BEFORE Super so flag icons (drawn by Super) render on top
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-	if (GS && !ScoreboardIsUp())
+	if (bRenderCustomHUD && GS && !ScoreboardIsUp())
 	{
 		DrawTeamScoreBar();
 	}
@@ -236,12 +260,16 @@ void ANCPlusCTFHUD::DrawHUD()
 	Super::DrawHUD();
 
 	LastFlagGrabTime = SavedFlagGrabTime;
+	if (!bRenderCustomHUD) return;
 
 	// Spectator banner — drawn after Super so it sits on top of any stock UI
 	// in the same screen region. Suppressed while the scoreboard is open.
 	if (GS && !ScoreboardIsUp())
 	{
 		DrawSpectatorTarget();
+		// Warmup-only spawn-point markers (learning aid) — self-gates to
+		// WaitingToStart + ncp.WarmupSpawns, so this is a no-op in live play.
+		NCPlusHUDDrawCall::DrawWarmupSpawnMarkers(this, Canvas);
 	}
 
 	// Held-pickup status (amp/berserk/siphon countdown + boot charges) — NCPlus mode only.
@@ -252,8 +280,6 @@ void ANCPlusCTFHUD::DrawHUD()
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
 	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
 
-	// Replay-only: fire-validation corner feed (self-guards to demo playback).
-	NCPlusHUDDrawCall::DrawFireValReplayFeed(this, Canvas);
 }
 
 void ANCPlusCTFHUD::DrawSpectatorTarget()
@@ -277,12 +303,13 @@ void ANCPlusCTFHUD::DrawSpectatorTarget()
 	const float HeaderScale = RenderScale * 0.75f;
 	const float NameScale   = RenderScale * 1.30f;
 
-	const FString HeaderText = TEXT("NOW WATCHING");
-	const FString NameText   = PS->PlayerName;
+	static const FString HeaderText(TEXT("NOW WATCHING"));
+	const FString& NameText = PS->PlayerName;
 
+	FText HeaderDrawText, NameDrawText;
 	float HeaderW, HeaderH, NameW, NameH;
-	Canvas->TextSize(SmallFont,  HeaderText, HeaderW, HeaderH, HeaderScale, HeaderScale);
-	Canvas->TextSize(MediumFont, NameText,   NameW,   NameH,   NameScale,   NameScale);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, SmallFont, HeaderText, HeaderScale, HeaderScale, HeaderDrawText, HeaderW, HeaderH);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, MediumFont, NameText, NameScale, NameScale, NameDrawText, NameW, NameH);
 
 	const float PadX = 16.f * RenderScale;
 	const float PadY = 8.f  * RenderScale;
@@ -311,17 +338,52 @@ void ANCPlusCTFHUD::DrawSpectatorTarget()
 
 	// "NOW WATCHING" header — small muted text
 	Canvas->DrawColor = FColor(180, 180, 180, 255);
-	Canvas->DrawText(SmallFont, HeaderText,
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, SmallFont, HeaderDrawText,
 		PanelX + (PanelW - HeaderW) * 0.5f,
 		PanelY + PadY,
-		HeaderScale, HeaderScale);
+		HeaderScale, HeaderScale, Canvas->DrawColor);
 
 	// PlayerName — larger, team-colored
 	Canvas->DrawColor = AccentColor.ToFColor(true);
-	Canvas->DrawText(MediumFont, NameText,
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, NameDrawText,
 		PanelX + (PanelW - NameW) * 0.5f,
 		PanelY + PadY + HeaderH + Gap,
-		NameScale, NameScale);
+		NameScale, NameScale, Canvas->DrawColor);
+}
+
+ANCPlusCTFOTInfo* ANCPlusCTFHUD::FindOTInfo()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (CachedOTInfoWorld.Get() != World)
+	{
+		CachedOTInfoWorld = World;
+		CachedOTInfo.Reset();
+		NextOTInfoSearchTime = 0.f;
+	}
+	if (CachedOTInfo.IsValid() && CachedOTInfo->GetWorld() == World)
+	{
+		return CachedOTInfo.Get();
+	}
+	CachedOTInfo.Reset();
+
+	const float Now = World->GetTimeSeconds();
+	if (Now < NextOTInfoSearchTime)
+	{
+		return nullptr;
+	}
+	NextOTInfoSearchTime = Now + 1.f;
+	for (TActorIterator<ANCPlusCTFOTInfo> It(World); It; ++It)
+	{
+		CachedOTInfo = *It;
+		NextOTInfoSearchTime = 0.f;
+		return *It;
+	}
+	return nullptr;
 }
 
 void ANCPlusCTFHUD::DrawTeamScoreBar()
@@ -359,8 +421,12 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		Team1Color = TC;
 	}
 
-	FString Team0Name = bCustomColors ? TEXT("Phayder (R)") : TEXT("RED");
-	FString Team1Name = bCustomColors ? TEXT("Liandri (B)") : TEXT("BLUE");
+	static const FString CustomTeam0Name(TEXT("Phayder (R)"));
+	static const FString CustomTeam1Name(TEXT("Liandri (B)"));
+	static const FString StockTeam0Name(TEXT("RED"));
+	static const FString StockTeam1Name(TEXT("BLUE"));
+	const FString& Team0Name = bCustomColors ? CustomTeam0Name : StockTeam0Name;
+	const FString& Team1Name = bCustomColors ? CustomTeam1Name : StockTeam1Name;
 
 	int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
 	int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
@@ -424,30 +490,37 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	if (!TeamScoreFont) TeamScoreFont = LargeFont;
 
 	// Team 0 name
-	Canvas->TextSize(TeamNameFont, Team0Name, XL, YL, FontScale, FontScale);
+	FText ResolvedText;
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team0Name, FontScale, FontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamNameFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
 	// Team 0 score
-	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
-	Canvas->TextSize(TeamScoreFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
+	static bool bHasCachedScore0 = false;
+	static int32 CachedScore0 = 0;
+	static FString Score0Str;
+	if (!bHasCachedScore0 || CachedScore0 != Score0) { bHasCachedScore0 = true; CachedScore0 = Score0; Score0Str = FString::FromInt(Score0); }
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score0Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamScoreFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
 
 	// Team 1 score
-	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
-	Canvas->TextSize(TeamScoreFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	static bool bHasCachedScore1 = false;
+	static int32 CachedScore1 = 0;
+	static FString Score1Str;
+	if (!bHasCachedScore1 || CachedScore1 != Score1) { bHasCachedScore1 = true; CachedScore1 = Score1; Score1Str = FString::FromInt(Score1); }
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score1Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamScoreFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
 
 	// Team 1 name
-	Canvas->TextSize(TeamNameFont, Team1Name, XL, YL, FontScale, FontScale);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team1Name, FontScale, FontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamNameFont, Team1Name, RightBarX + 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, RightBarX + 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
 	// Match clock (CTF uses match time, not round time)
 	float ClockY = TopY + BarHeight + 2.f * RenderScale;
@@ -457,23 +530,7 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	// Resolve the OT replicator once — OT clock, Advantage clock, and the
 	// status-label branch all read off it. ANCPlusCTFOTInfo is spawned
 	// authority-only and replicates to every client; lazy-find + cache.
-	static TWeakObjectPtr<UWorld> CachedWorld;
-	static TWeakObjectPtr<ANCPlusCTFOTInfo> CachedInfo;
-	ANCPlusCTFOTInfo* Info = nullptr;
-	if (CachedWorld.Get() == GetWorld() && CachedInfo.IsValid())
-	{
-		Info = CachedInfo.Get();
-	}
-	else
-	{
-		for (TActorIterator<ANCPlusCTFOTInfo> It(GetWorld()); It; ++It)
-		{
-			CachedWorld = GetWorld();
-			CachedInfo = *It;
-			Info = *It;
-			break;
-		}
-	}
+	ANCPlusCTFOTInfo* Info = FindOTInfo();
 
 	// OT detection: GetMatchState() == MatchState::MatchIsInOvertime.
 	// IsMatchInOvertime() is virtual on UTGameState so it reads the same on
@@ -484,18 +541,27 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	// HUD draws a count-up timer instead so spectators can read it.
 	const bool bPlayingAdvantage = !bInOvertime &&
 		NCPlusReflection::GetBool(GS, TEXT("bPlayingAdvantage"));
+	auto ResolveClockText = [&](int32 TotalSeconds)
+	{
+		static int32 CachedSeconds = MAX_int32;
+		static FString ClockText;
+		if (CachedSeconds != TotalSeconds)
+		{
+			CachedSeconds = TotalSeconds;
+			ClockText = FString::Printf(TEXT("%02d:%02d"), TotalSeconds / 60, TotalSeconds % 60);
+		}
+		NCPlusHUDDrawCall::ResolveStableText(Canvas, MediumFont, ClockText,
+			RoundClockScale, RoundClockScale, ResolvedText, XL, YL);
+	};
 
 	if (bInOvertime)
 	{
 		const int32 StartElapsed = (Info && Info->OvertimeStartElapsed >= 0)
 			? Info->OvertimeStartElapsed : GS->ElapsedTime;
 		const int32 OTSeconds = FMath::Max(0, GS->ElapsedTime - StartElapsed);
-		const int32 Mins = OTSeconds / 60;
-		const int32 Secs = OTSeconds % 60;
-		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		ResolveClockText(OTSeconds);
 		Canvas->DrawColor = FColor(255, 200, 60, WhiteOp.A);    // amber for OT
-		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, ResolvedText, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale, Canvas->DrawColor);
 		ClockBottomY = ClockY + YL;
 	}
 	else if (bPlayingAdvantage)
@@ -503,12 +569,9 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		const int32 StartElapsed = (Info && Info->AdvantageStartElapsed >= 0)
 			? Info->AdvantageStartElapsed : GS->ElapsedTime;
 		const int32 AdvSeconds = FMath::Max(0, GS->ElapsedTime - StartElapsed);
-		const int32 Mins = AdvSeconds / 60;
-		const int32 Secs = AdvSeconds % 60;
-		FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-		Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		ResolveClockText(AdvSeconds);
 		Canvas->DrawColor = FColor(255, 200, 60, WhiteOp.A);    // amber matches OT
-		Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, ResolvedText, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale, Canvas->DrawColor);
 		ClockBottomY = ClockY + YL;
 	}
 	else
@@ -516,27 +579,21 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 		int32 RemainingTime = GS->GetRemainingTime();
 		if (RemainingTime >= 0 && GS->TimeLimit > 0)
 		{
-			int32 Mins = RemainingTime / 60;
-			int32 Secs = RemainingTime % 60;
-			FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-			Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+			ResolveClockText(RemainingTime);
 			if (RemainingTime <= 30)
 				Canvas->DrawColor = FColor(255, 60, 60, WhiteOp.A);
 			else
 				Canvas->DrawColor = WhiteOp;
-			Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+			NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, ResolvedText, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale, Canvas->DrawColor);
 			ClockBottomY = ClockY + YL;
 		}
 		else
 		{
 			// No time limit — show elapsed time
 			int32 Elapsed = GS->ElapsedTime;
-			int32 Mins = Elapsed / 60;
-			int32 Secs = Elapsed % 60;
-			FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-			Canvas->TextSize(MediumFont, ClockStr, XL, YL, RoundClockScale, RoundClockScale);
+			ResolveClockText(Elapsed);
 			Canvas->DrawColor = WhiteOp;
-			Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+			NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, ResolvedText, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale, Canvas->DrawColor);
 			ClockBottomY = ClockY + YL;
 		}
 	}
@@ -545,29 +602,33 @@ void ANCPlusCTFHUD::DrawTeamScoreBar()
 	// Halves only show when the gamemode actually has halftime enabled —
 	// OTInfo->bHasHalftime mirrors the server-side decision (false for 3v3+),
 	// so single-period games no longer show a misleading "1st Half" all match.
-	FString StatusStr;
+	static const FString OvertimeStatus(TEXT("Overtime"));
+	static const FString AdvantageStatus(TEXT("Advantage"));
+	static const FString FirstHalfStatus(TEXT("1st Half"));
+	static const FString SecondHalfStatus(TEXT("2nd Half"));
+	const FString* StatusStr = nullptr;
 	FColor StatusColor(200, 200, 200, 255);
 	if (bInOvertime)
 	{
-		StatusStr = TEXT("Overtime");
+		StatusStr = &OvertimeStatus;
 		StatusColor = FColor(255, 200, 60, 255);    // amber to match clock
 	}
 	else if (bPlayingAdvantage)
 	{
-		StatusStr = TEXT("Advantage");
+		StatusStr = &AdvantageStatus;
 		StatusColor = FColor(255, 200, 60, 255);    // amber to match clock
 	}
 	else if (Info && Info->bHasHalftime)
 	{
 		const bool bSecondHalf = NCPlusReflection::GetBool(GS, TEXT("bSecondHalf"));
-		StatusStr = bSecondHalf ? TEXT("2nd Half") : TEXT("1st Half");
+		StatusStr = bSecondHalf ? &SecondHalfStatus : &FirstHalfStatus;
 	}
 
-	if (!StatusStr.IsEmpty())
+	if (StatusStr)
 	{
 		const float StatusScale = RenderScale * 0.7f;
-		Canvas->TextSize(SmallFont, StatusStr, XL, YL, StatusScale, StatusScale);
+		NCPlusHUDDrawCall::ResolveStableText(Canvas, SmallFont, *StatusStr, StatusScale, StatusScale, ResolvedText, XL, YL);
 		StatusColor.A = WhiteOp.A; Canvas->DrawColor = StatusColor;
-		Canvas->DrawText(SmallFont, StatusStr, CenterX - XL * 0.5f, ClockBottomY + 1.f * RenderScale, StatusScale, StatusScale);
+		NCPlusHUDDrawCall::DrawResolvedText(Canvas, SmallFont, ResolvedText, CenterX - XL * 0.5f, ClockBottomY + 1.f * RenderScale, StatusScale, StatusScale, Canvas->DrawColor);
 	}
 }

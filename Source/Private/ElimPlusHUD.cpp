@@ -9,11 +9,14 @@
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
+#include "ElimPlusScoreboard.h"
 #include "ElimPlusStatsReplicator.h"
+#include "NCClutchOverlay.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads) — warmup-only head-hitbox calibration
 #include "NCPlusSpectatorSlideOut.h"
 #include "UTHUDWidget_SpectatorSlideOut.h"
+#include "UTHUDWidget_Spectator.h"
 #include "EngineUtils.h"
 
 AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
@@ -98,13 +101,14 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"));
 	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"));
 	HudWidgetClasses.Add(TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"));
-	HudWidgetClasses.Add(TEXT("/Script/UnrealTournament.UTHUDWidget_Spectator"));
+	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"));
 	// Optional opt-in accuracy widget — hidden by default (ShouldDraw requires
 	// a layout entry); user enables via nchud and picks current/specific weapon.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Accuracy"));
 	// Optional default-hidden overlays — see WipeoutHUD for full notes.
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Speedometer"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Minimap"));
+	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
 	// ElimPlus-only: through-wall world-space markers for the candy orbs
 	// dropped on player death (1 jump-boot + ammo restore on pickup). BP
 	// widget that already does the world-to-screen projection + on-/off-
@@ -116,6 +120,14 @@ AElimPlusHUD::AElimPlusHUD(const FObjectInitializer& ObjectInitializer)
 void AElimPlusHUD::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Absolute Elim uses loose recovered PNGs. Decode and upload both the live
+	// panel and scoreboard sets during HUD setup, never for the first time in Draw.
+	if (!IsRunningDedicatedServer() && FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel())
+	{
+		NCPlusHUDDrawCall::PreloadAbsoluteElimTeamPanelTextures();
+		UElimPlusScoreboard::PreloadAbsoluteTextures();
+	}
 
 	// Snapshot the engine-spawned widget positions/origins BEFORE we override
 	// anything. ApplyLayoutToWidgets uses these as the "no override" fallback
@@ -200,66 +212,210 @@ void AElimPlusHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	if (!GS) return;
 
-	AUTPlayerState* HUDPS = GetScorerPlayerState();
-	for (APlayerState* PS : GS->PlayerArray)
+	if (!bUsePreparedPlayerSnapshot)
 	{
-		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-		if (UTPS != nullptr && !UTPS->bOnlySpectator && !UTPS->bIsInactive
-			&& (UTPS->Team != nullptr || UTPS->GetTeamNum() != 255))
+		BuildPlayerSnapshot(GS, GetScorerPlayerState());
+	}
+	const bool bFastEmptyOutput = SortedPlayers.Num() == 0;
+	SortedPlayers.Reserve(SortedPlayers.Num() + PlayerSnapshot.PortraitPlayerIndices.Num());
+	for (int32 PlayerIndex : PlayerSnapshot.PortraitPlayerIndices)
+	{
+		if (PlayerSnapshot.Players.IsValidIndex(PlayerIndex))
 		{
-			UTPS->SelectionOrder = (UTPS == HUDPS) ? -1 : UTPS->SpectatingIDTeam;
-			SortedPlayers.Add(UTPS);
+			SortedPlayers.Add(PlayerSnapshot.Players[PlayerIndex].PlayerState);
 		}
 	}
-	SortedPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B) { return A.SelectionOrder > B.SelectionOrder; });
+	if (!bFastEmptyOutput)
+	{
+		auto ResolveSortKey = [this](AUTPlayerState* Candidate)
+		{
+			for (const FElimPlusHUDPlayerSnapshot& Player : PlayerSnapshot.Players)
+			{
+				if (Player.PlayerState == Candidate) return Player.PortraitSortKey;
+			}
+			return Candidate ? Candidate->SelectionOrder : uint8(0);
+		};
+		SortedPlayers.Sort([&ResolveSortKey](AUTPlayerState& A, AUTPlayerState& B)
+		{
+			return ResolveSortKey(&A) > ResolveSortKey(&B);
+		});
+	}
 }
 
-// Helper: locate the stats replicator on this client (works on server too).
-// Cached on a weak pointer — once we've found it we can just deref next
-// frame. The replicator is bAlwaysRelevant and spawned once per match, so
-// the cache only invalidates on world tear-down (PIE stop / map travel).
-// TActorIterator walks the entire actor list — for a HUD called every
-// frame at 144Hz+ that's a measurable cost on dense maps.
-static AElimPlusStatsReplicator* FindElimPlusStatsReplicator(UWorld* World)
+void AElimPlusHUD::BuildPlayerSnapshot(AUTGameState* GS, AUTPlayerState* ScorerPS)
+{
+	UWorld* World = GetWorld();
+	if (!World || !GS)
+	{
+		PlayerSnapshot.ResetFrame(0);
+		return;
+	}
+
+	const bool bContextChanged = CachedSnapshotWorld.Get() != World
+		|| CachedSnapshotGameState.Get() != GS;
+	if (bContextChanged)
+	{
+		CachedPortraitSignature.Reset();
+		CachedPortraitOrder.Reset();
+		PipCacheByPS.Reset();
+		EloAnimByPlayerId.Reset();
+		CachedSnapshotWorld = World;
+		CachedSnapshotGameState = GS;
+	}
+
+	PlayerSnapshot.ResetFrame(GS->PlayerArray.Num());
+	PlayerSnapshot.ScorerPS = ScorerPS;
+	PlayerSnapshot.LocalPS = (UTPlayerOwner != nullptr)
+		? Cast<AUTPlayerState>(UTPlayerOwner->PlayerState) : nullptr;
+
+	for (APlayerState* PSBase : GS->PlayerArray)
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
+		if (!PS || PS->bOnlySpectator || PS->bIsInactive) continue;
+
+		const uint8 TeamNum = PS->GetTeamNum();
+		if (TeamNum > 1) continue;
+
+		AUTCharacter* Character = nullptr;
+		if (AController* Controller = Cast<AController>(PS->GetOwner()))
+		{
+			Character = Cast<AUTCharacter>(Controller->GetPawn());
+		}
+		else
+		{
+			Character = PS->GetUTCharacter();
+		}
+
+		FElimPlusHUDPlayerSnapshot FramePlayer;
+		FramePlayer.PlayerState = PS;
+		FramePlayer.Character = Character;
+		FramePlayer.TeamNum = TeamNum;
+		FramePlayer.bAlive = Character != nullptr && !Character->IsDead();
+		FramePlayer.Health = Character ? Character->Health : 0;
+		FramePlayer.Armor = Character ? Character->GetArmorAmount() : 0;
+		// SelectionOrder is uint8 in the stock implementation: assigning -1 wraps
+		// to 255, which places the scorer first under the descending comparator.
+		FramePlayer.PortraitSortKey = (PS == ScorerPS) ? 255 : PS->SpectatingIDTeam;
+
+		const int32 PlayerIndex = PlayerSnapshot.Players.Add(FramePlayer);
+		PlayerSnapshot.TeamPlayerIndices[TeamNum].Add(PlayerIndex);
+		if (FramePlayer.bAlive)
+		{
+			++PlayerSnapshot.AliveCountTeam[TeamNum];
+			PlayerSnapshot.SoleSurvivor[TeamNum] = PS;
+		}
+	}
+
+	for (int32 TeamNum = 0; TeamNum < 2; ++TeamNum)
+	{
+		if (PlayerSnapshot.AliveCountTeam[TeamNum] != 1)
+		{
+			PlayerSnapshot.SoleSurvivor[TeamNum] = nullptr;
+		}
+	}
+
+	bool bPortraitOrderChanged = bContextChanged
+		|| CachedPortraitSignature.Num() != PlayerSnapshot.Players.Num();
+	if (!bPortraitOrderChanged)
+	{
+		for (int32 Index = 0; Index < PlayerSnapshot.Players.Num(); ++Index)
+		{
+			const FElimPlusHUDPlayerSnapshot& Player = PlayerSnapshot.Players[Index];
+			const FPortraitOrderSignature& Signature = CachedPortraitSignature[Index];
+			if (Signature.PlayerState.Get() != Player.PlayerState
+				|| Signature.TeamNum != Player.TeamNum
+				|| Signature.SortKey != Player.PortraitSortKey)
+			{
+				bPortraitOrderChanged = true;
+				break;
+			}
+		}
+	}
+
+	if (bPortraitOrderChanged)
+	{
+		CachedPortraitSignature.Reset(PlayerSnapshot.Players.Num());
+		CachedPortraitOrder.Reset(PlayerSnapshot.Players.Num());
+		for (int32 Index = 0; Index < PlayerSnapshot.Players.Num(); ++Index)
+		{
+			const FElimPlusHUDPlayerSnapshot& Player = PlayerSnapshot.Players[Index];
+			FPortraitOrderSignature Signature;
+			Signature.PlayerState = Player.PlayerState;
+			Signature.TeamNum = Player.TeamNum;
+			Signature.SortKey = Player.PortraitSortKey;
+			CachedPortraitSignature.Add(Signature);
+			CachedPortraitOrder.Add(Index);
+		}
+		CachedPortraitOrder.Sort([this](const int32 A, const int32 B)
+		{
+			const int32 AKey = PlayerSnapshot.Players[A].PortraitSortKey;
+			const int32 BKey = PlayerSnapshot.Players[B].PortraitSortKey;
+			return (AKey != BKey) ? (AKey > BKey) : (A < B);
+		});
+
+		auto IsCurrentRosterPlayer = [this](AUTPlayerState* Candidate)
+		{
+			for (const FElimPlusHUDPlayerSnapshot& Player : PlayerSnapshot.Players)
+			{
+				if (Player.PlayerState == Candidate) return true;
+			}
+			return false;
+		};
+		for (auto It = PipCacheByPS.CreateIterator(); It; ++It)
+		{
+			if (!IsCurrentRosterPlayer(It.Key().Get())) It.RemoveCurrent();
+		}
+		for (auto It = EloAnimByPlayerId.CreateIterator(); It; ++It)
+		{
+			if (!IsCurrentRosterPlayer(It.Key().Get())) It.RemoveCurrent();
+		}
+	}
+
+	PlayerSnapshot.PortraitPlayerIndices.Append(CachedPortraitOrder);
+}
+
+// Locate the stats replicator without walking the actor list every render frame.
+// The weak positive/negative cache is per HUD, so simultaneous worlds do not thrash it.
+AElimPlusStatsReplicator* AElimPlusHUD::FindStatsReplicator(UWorld* World)
 {
 	if (!World) return nullptr;
-	static TWeakObjectPtr<UWorld> CachedWorld;
-	static TWeakObjectPtr<AElimPlusStatsReplicator> CachedRep;
-	static float NextRetryTime = 0.f;   // world-time gate for the not-yet-found case
-
-	if (CachedWorld.Get() == World && CachedRep.IsValid())
+	AUTGameState* CurrentGS = World->GetGameState<AUTGameState>();
+	if (CachedStatsWorld.Get() != World || CachedStatsGameState.Get() != CurrentGS)
 	{
-		return CachedRep.Get();
+		CachedStatsWorld = World;
+		CachedStatsGameState = CurrentGS;
+		CachedStatsReplicator = nullptr;
+		NextStatsReplicatorRetryTime = 0.f;
 	}
+	if (CachedStatsReplicator.IsValid()) return CachedStatsReplicator.Get();
 
 	// Negative cache: before the replicator has spawned/replicated in (fresh join or
 	// map travel) the scan below finds nothing, so without this we'd walk the entire
 	// actor list EVERY frame. Retry at most ~1x/second while it's absent. A world change
-	// bypasses the gate immediately via the CachedWorld mismatch.
+	// bypasses the gate immediately because the per-HUD world cache resets above.
 	const float Now = World->GetTimeSeconds();
-	if (CachedWorld.Get() == World && Now < NextRetryTime)
+	if (Now < NextStatsReplicatorRetryTime)
 	{
 		return nullptr;
 	}
 
 	for (TActorIterator<AElimPlusStatsReplicator> It(World); It; ++It)
 	{
-		CachedWorld = World;
-		CachedRep   = *It;
+		CachedStatsReplicator = *It;
 		return *It;
 	}
 
-	// Not found — arm the retry gate (and stamp the world so a world change still forces
-	// an immediate rescan rather than waiting out this gate).
-	CachedWorld   = World;
-	CachedRep     = nullptr;
-	NextRetryTime = Now + 1.0f;
+	// Not found: retry at most once per second until replication catches up.
+	CachedStatsReplicator = nullptr;
+	NextStatsReplicatorRetryTime = Now + 1.0f;
 	return nullptr;
 }
 
 // "NOW WATCHING <player>" spectator banner (verbatim port of ANCPlusCTFHUD::
 // DrawSpectatorTarget). Bottom-right, suppressed by the caller when the
-// scoreboard is up. Self-guards to nothing when we're playing our own pawn.
+// scoreboard is up. This is the canonical viewed-player banner for both dead
+// players and true spectators; DrawHUD suppresses the stock duplicate only for
+// the frame where this banner can replace it.
 void AElimPlusHUD::DrawSpectatorTarget()
 {
 	if (!Canvas || !MediumFont || !SmallFont) return;
@@ -279,12 +435,13 @@ void AElimPlusHUD::DrawSpectatorTarget()
 	const float HeaderScale = RenderScale * 0.75f;
 	const float NameScale   = RenderScale * 1.30f;
 
-	const FString HeaderText = TEXT("NOW WATCHING");
-	const FString NameText   = PS->PlayerName;
+	static const FString HeaderText(TEXT("NOW WATCHING"));
+	const FString& NameText = PS->PlayerName;
 
+	FText HeaderDrawText, NameDrawText;
 	float HeaderW, HeaderH, NameW, NameH;
-	Canvas->TextSize(SmallFont,  HeaderText, HeaderW, HeaderH, HeaderScale, HeaderScale);
-	Canvas->TextSize(MediumFont, NameText,   NameW,   NameH,   NameScale,   NameScale);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, SmallFont, HeaderText, HeaderScale, HeaderScale, HeaderDrawText, HeaderW, HeaderH);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, MediumFont, NameText, NameScale, NameScale, NameDrawText, NameW, NameH);
 
 	const float PadX = 16.f * RenderScale;
 	const float PadY = 8.f  * RenderScale;
@@ -308,12 +465,12 @@ void AElimPlusHUD::DrawSpectatorTarget()
 	Canvas->DrawTile(Canvas->DefaultTexture, PanelX, PanelY, 3.f * RenderScale, PanelH, 0, 0, 1, 1);
 
 	Canvas->DrawColor = FColor(180, 180, 180, 255);
-	Canvas->DrawText(SmallFont, HeaderText,
-		PanelX + (PanelW - HeaderW) * 0.5f, PanelY + PadY, HeaderScale, HeaderScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, SmallFont, HeaderDrawText,
+		PanelX + (PanelW - HeaderW) * 0.5f, PanelY + PadY, HeaderScale, HeaderScale, Canvas->DrawColor);
 
 	Canvas->DrawColor = AccentColor.ToFColor(true);
-	Canvas->DrawText(MediumFont, NameText,
-		PanelX + (PanelW - NameW) * 0.5f, PanelY + PadY + HeaderH + Gap, NameScale, NameScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, NameDrawText,
+		PanelX + (PanelW - NameW) * 0.5f, PanelY + PadY + HeaderH + Gap, NameScale, NameScale, Canvas->DrawColor);
 }
 
 void AElimPlusHUD::DrawHUD()
@@ -322,11 +479,41 @@ void AElimPlusHUD::DrawHUD()
 	// immediately (Phase 2 live preview). Cheap — just a few field assignments
 	// per registered widget, gated by a class-name lookup.
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
+	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
+		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
+
+	// True spectators normally get UUTHUDWidget_Spectator's bottom-right "Now viewing"
+	// panel as well as our compact banner. Suppress that stock panel only during an
+	// in-progress frame where our banner has a valid player pawn to draw. Restore its
+	// prior hidden state immediately after Super so warmup/respawn/end-state messages,
+	// scoreboard behaviour, and the user's nchud visibility choice remain stock-owned.
+	bool bRestoreStockSpectator = false;
+	bool bStockSpectatorWasHidden = false;
+	if (bRenderCustomHUD && SpectatorMessageWidget && UTPlayerOwner->UTPlayerState
+		&& UTPlayerOwner->UTPlayerState->bOnlySpectator && !ScoreboardIsUp())
+	{
+		AUTGameState* PreDrawGS = GetWorld()->GetGameState<AUTGameState>();
+		APawn* ViewedPawn = Cast<APawn>(UTPlayerOwner->GetViewTarget());
+		AUTPlayerState* ViewedPS = ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->PlayerState) : nullptr;
+		if (PreDrawGS && PreDrawGS->GetMatchState() == MatchState::InProgress
+			&& ViewedPawn != UTPlayerOwner->GetPawn() && ViewedPS && !ViewedPS->PlayerName.IsEmpty())
+		{
+			bRestoreStockSpectator = true;
+			bStockSpectatorWasHidden = SpectatorMessageWidget->IsHidden();
+			SpectatorMessageWidget->SetHidden(true);
+		}
+	}
 
 	Super::DrawHUD();
 
+	if (bRestoreStockSpectator)
+	{
+		SpectatorMessageWidget->SetHidden(bStockSpectatorWasHidden);
+	}
+
 	// Auto post-match screenshot (shared; waits for the instant replay to end + the scoreboard to settle).
 	NCPlusHUDDrawCall::ServicePostMatchScreenshot(this, PostMatchScreenshotStable, bPostMatchScreenshotTaken);
+	if (!bRenderCustomHUD) return;
 
 	// Guard: Canvas or fonts may be null during Slate UI overlays
 	if (!Canvas || !SmallFont) return;
@@ -362,6 +549,11 @@ void AElimPlusHUD::DrawHUD()
 		}
 		// NOW WATCHING banner — self-guards when not spectating another pawn.
 		DrawSpectatorTarget();
+		if (AElimPlusStatsReplicator* Stats = FindStatsReplicator(GetWorld()))
+		{
+			NCClutchOverlay::Draw(this, Canvas,
+				Stats->Team0ClutchOverlay, Stats->Team1ClutchOverlay);
+		}
 	}
 
 	// Keep portraits up through the round-win window ("RoundCooldown") so the
@@ -374,17 +566,34 @@ void AElimPlusHUD::DrawHUD()
 		BluePlayerCount = 0;
 
 		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+		AUTPlayerState* FrameScorerPS = GetScorerPlayerState();
 
-		// Stock team panel (top-left roster) replaces the portrait strip when the
-		// user opts in (default for fresh installs). Same teammate HP/alive data,
-		// different presentation. Score/KDA below still draws in both modes.
+		// A top-left team panel replaces the portrait strip when the user opts in.
+		// Fresh installs use the recovered Absolute Elim 1.13 artwork; existing
+		// users keep their prior procedural-stock/portrait choice.
 		const bool bStockTeamPanel = FNCPlusHUDLayout::WantsStockTeamPanel();
 		if (bStockTeamPanel)
 		{
-			NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas);
+			if (!NCPlusHUDDrawCall::IsHidden(TEXT("team_panel")))
+			{
+				BuildPlayerSnapshot(GS, FrameScorerPS);
+				if (FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel())
+				{
+					NCPlusHUDDrawCall::DrawAbsoluteElimTeamPanel(this, Canvas, PlayerSnapshot);
+				}
+				else
+				{
+					NCPlusHUDDrawCall::DrawStockTeamPanel(this, Canvas, PlayerSnapshot);
+				}
+			}
 		}
 		else
 		{
+		BuildPlayerSnapshot(GS, FrameScorerPS);
+		PortraitRenderPlayers.Reset();
+		bUsePreparedPlayerSnapshot = true;
+		GetPlayerListForIcons(PortraitRenderPlayers);
+		bUsePreparedPlayerSnapshot = false;
 		const float TeammateScale = 0.4f;
 
 		const float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
@@ -429,60 +638,63 @@ void AElimPlusHUD::DrawHUD()
 		const float YOffsetBlue = BlueStart.Y;
 		const float YOffset     = YOffsetRed;  // legacy single-Y for code that doesn't yet split
 
-		TArray<AUTPlayerState*> LivePlayers;
-		GetPlayerListForIcons(LivePlayers);
+		AElimPlusStatsReplicator* Stats = FindStatsReplicator(GetWorld());
 
-		// Last-man-standing detection: count alive per team in this pass below.
-		// We do a quick pre-pass to find who's the lone survivor (if any) so we
-		// can pulse their portrait.
-		int32 AliveCountTeam[2] = { 0, 0 };
-		AUTPlayerState* SoleSurvivor[2] = { nullptr, nullptr };
-		for (AUTPlayerState* UTPS : LivePlayers)
+		for (int32 DrawOrdinal = 0; DrawOrdinal < PortraitRenderPlayers.Num(); ++DrawOrdinal)
 		{
-			const uint8 T = UTPS ? UTPS->GetTeamNum() : 255;
-			if (T > 1) continue;
-			AUTCharacter* UTC = nullptr;
-			AController* C = Cast<AController>(UTPS->GetOwner());
-			if (C != nullptr) { UTC = Cast<AUTCharacter>(C->GetPawn()); }
-			else              { UTC = UTPS->GetUTCharacter(); }
-			const bool bAlive = (UTC != nullptr && !UTC->IsDead());
-			if (bAlive)
+			AUTPlayerState* UTPS = PortraitRenderPlayers[DrawOrdinal];
+			if (!UTPS) continue;
+			const FElimPlusHUDPlayerSnapshot* FramePlayerPtr = nullptr;
+			if (PlayerSnapshot.PortraitPlayerIndices.IsValidIndex(DrawOrdinal))
 			{
-				AliveCountTeam[T]++;
-				SoleSurvivor[T] = UTPS;
+				const int32 CachedIndex = PlayerSnapshot.PortraitPlayerIndices[DrawOrdinal];
+				if (PlayerSnapshot.Players.IsValidIndex(CachedIndex)
+					&& PlayerSnapshot.Players[CachedIndex].PlayerState == UTPS)
+				{
+					FramePlayerPtr = &PlayerSnapshot.Players[CachedIndex];
+				}
 			}
-		}
-
-		// Clear the per-team marker if the team has more than one alive
-		if (AliveCountTeam[0] != 1) SoleSurvivor[0] = nullptr;
-		if (AliveCountTeam[1] != 1) SoleSurvivor[1] = nullptr;
-
-		AElimPlusStatsReplicator* Stats = FindElimPlusStatsReplicator(GetWorld());
-
-		for (AUTPlayerState* UTPS : LivePlayers)
-		{
-			const float OwnerPipScaling = (UTPS == GetScorerPlayerState()) ? 1.25f : 1.f;
+			for (int32 CandidateIndex = 0; !FramePlayerPtr && CandidateIndex < PlayerSnapshot.Players.Num(); ++CandidateIndex)
+			{
+				const FElimPlusHUDPlayerSnapshot& Candidate = PlayerSnapshot.Players[CandidateIndex];
+				if (Candidate.PlayerState == UTPS)
+				{
+					FramePlayerPtr = &Candidate;
+					break;
+				}
+			}
+			FElimPlusHUDPlayerSnapshot FallbackPlayer;
+			if (!FramePlayerPtr)
+			{
+				FallbackPlayer.PlayerState = UTPS;
+				FallbackPlayer.TeamNum = UTPS->GetTeamNum();
+				if (FallbackPlayer.TeamNum > 1) continue;
+				if (AController* Controller = Cast<AController>(UTPS->GetOwner()))
+				{
+					FallbackPlayer.Character = Cast<AUTCharacter>(Controller->GetPawn());
+				}
+				else
+				{
+					FallbackPlayer.Character = UTPS->GetUTCharacter();
+				}
+				FallbackPlayer.bAlive = FallbackPlayer.Character != nullptr
+					&& !FallbackPlayer.Character->IsDead();
+				FallbackPlayer.Health = FallbackPlayer.Character ? FallbackPlayer.Character->Health : 0;
+				FallbackPlayer.Armor = FallbackPlayer.Character
+					? FallbackPlayer.Character->GetArmorAmount() : 0;
+				FramePlayerPtr = &FallbackPlayer;
+			}
+			const FElimPlusHUDPlayerSnapshot& FramePlayer = *FramePlayerPtr;
+			const float OwnerPipScaling = (UTPS == FrameScorerPS) ? 1.25f : 1.f;
 			// Per-team pip size: red strip honors portrait_red.Scale, blue honors
 			// portrait_blue.Scale. Scoring-player gets a 1.25x bump on top.
-			const uint8 PreTeamIdx = UTPS ? UTPS->GetTeamNum() : 255;
+			const uint8 PreTeamIdx = FramePlayer.TeamNum;
 			const float TeamPipBase = (PreTeamIdx == 1) ? BluePipSize : RedPipSize;
 			const float PipSize = TeamPipBase * OwnerPipScaling;
 			const float PipHeight = PipSize * (320.0f / 224.0f);
 
-			// Alive check — server uses controller's pawn directly; clients fall
-			// back to GetUTCharacter() since GetOwner() is null for remote PSs.
-			bool bPlayerAlive = false;
-			AController* C = Cast<AController>(UTPS->GetOwner());
-			if (C != nullptr)
-			{
-				AUTCharacter* UTC = Cast<AUTCharacter>(C->GetPawn());
-				bPlayerAlive = (UTC != nullptr && !UTC->IsDead());
-			}
-			else
-			{
-				AUTCharacter* UTC = UTPS->GetUTCharacter();
-				bPlayerAlive = (UTC != nullptr && !UTC->IsDead());
-			}
+			// Pawn/alive state was sampled once for this render frame.
+			const bool bPlayerAlive = FramePlayer.bAlive;
 
 			// In elim, dead = stays dead until round end. Hide portrait entirely
 			// so the strip reflows toward the center as players die.
@@ -491,7 +703,7 @@ void AElimPlusHUD::DrawHUD()
 				continue;
 			}
 
-			const uint8 TeamIdx = UTPS->GetTeamNum();
+			const uint8 TeamIdx = FramePlayer.TeamNum;
 			// Phase 3.5 hide gates.
 			if (TeamIdx == 0 && bHideRed)  continue;
 			if (TeamIdx == 1 && bHideBlue) continue;
@@ -502,7 +714,10 @@ void AElimPlusHUD::DrawHUD()
 			else                   { continue; }
 
 			const float XOffset = *XOffsetForTeam;
+			ActiveFramePlayer = FramePlayer;
+			bHasActiveFramePlayer = true;
 			DrawPlayerIcon(UTPS, bPlayerAlive, XOffset, YForTeam, PipSize);
+			bHasActiveFramePlayer = false;
 
 			// Player name above icon — multiply by team scale so text stays
 			// proportional when the strip is shrunk via the layout's Sc spinner.
@@ -520,7 +735,7 @@ void AElimPlusHUD::DrawHUD()
 
 			// Last-man-standing pulse: white-flashing border at 1Hz when this
 			// PS is the sole surviving member of their team.
-			if (UTPS == SoleSurvivor[TeamIdx])
+			if (UTPS == PlayerSnapshot.SoleSurvivor[TeamIdx])
 			{
 				const float Pulse = 0.5f + 0.5f * FMath::Sin(GetWorld()->TimeSeconds * 2.f * PI);
 				FLinearColor PulseColor = FMath::Lerp(FLinearColor::White, FLinearColor(1.f, 1.f, 0.4f, 1.f), Pulse);
@@ -540,13 +755,18 @@ void AElimPlusHUD::DrawHUD()
 			if (Stats && UTPS)
 			{
 				FElimPipCache& PC = PipCacheByPS.FindOrAdd(UTPS);
-				if (!PC.bUidValid)
+				const bool bHasOnlineId = UTPS->UniqueId.IsValid();
+				const bool bBotNameChanged = !bHasOnlineId
+					&& !PC.UidSourceName.Equals(UTPS->PlayerName, ESearchCase::CaseSensitive);
+				if (!PC.bUidValid || PC.bUidFromOnlineId != bHasOnlineId || bBotNameChanged)
 				{
-					// UniqueId never changes — build the replicator key once per player.
-					PC.UidStr = UTPS->UniqueId.IsValid()
+					// Refresh when a delayed human UniqueId replaces the provisional bot key.
+					PC.UidStr = bHasOnlineId
 						? UTPS->UniqueId.ToString()
 						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					PC.UidSourceName = bHasOnlineId ? FString() : UTPS->PlayerName;
 					PC.bUidValid = true;
+					PC.bUidFromOnlineId = bHasOnlineId;
 				}
 				const int32 ServerElo = Stats->GetEloForPlayer(PC.UidStr);
 				const int32 ServerDelta = Stats->GetEloDeltaForPlayer(PC.UidStr);
@@ -619,7 +839,7 @@ void AElimPlusHUD::DrawHUD()
 		// scale multiplies into FontScale so resizing in the editor actually
 		// shrinks/grows the rendered text (the unconditional 0.9f stays as
 		// the design-default scale relative to SmallFont).
-		AUTPlayerState* MyPS = GetScorerPlayerState();
+		AUTPlayerState* MyPS = FrameScorerPS;
 		if (MyPS && Canvas && SmallFont && !NCPlusHUDDrawCall::IsHidden(TEXT("score_kda")))
 		{
 			const int32 Score = FMath::TruncToInt(MyPS->Score);
@@ -627,8 +847,17 @@ void AElimPlusHUD::DrawHUD()
 			const int32 Deaths = MyPS->Deaths;
 			const int32 Assists = MyPS->KillAssists;
 
-			FString ScoreStr = FString::Printf(TEXT("Score: %d"), Score);
-			FString KDAStr = FString::Printf(TEXT("KDA: %d / %d / %d"), Kills, Deaths, Assists);
+			if (CachedKdaPS.Get() != MyPS || CachedKdaScore != Score || CachedKdaKills != Kills
+				|| CachedKdaDeaths != Deaths || CachedKdaAssists != Assists)
+			{
+				CachedKdaPS = MyPS;
+				CachedKdaScore = Score;
+				CachedKdaKills = Kills;
+				CachedKdaDeaths = Deaths;
+				CachedKdaAssists = Assists;
+				CachedScoreString = FString::Printf(TEXT("Score: %d"), Score);
+				CachedKdaString = FString::Printf(TEXT("KDA: %d / %d / %d"), Kills, Deaths, Assists);
+			}
 
 			const FVector2D StockPos(Canvas->ClipX * 0.98f, Canvas->ClipY * 0.015f);
 			const FVector2D ResolvedPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("score_kda"), Canvas, StockPos);
@@ -643,15 +872,16 @@ void AElimPlusHUD::DrawHUD()
 			float KDAXPos = ResolvedPos.X;
 			float KDAYPos = ResolvedPos.Y;
 
+			FText ResolvedText;
 			float XL, YL;
-			Canvas->TextSize(KDAFont, ScoreStr, XL, YL, FontScale, FontScale);
+			NCPlusHUDDrawCall::ResolveStableText(Canvas, KDAFont, CachedScoreString, FontScale, FontScale, ResolvedText, XL, YL);
 			Canvas->DrawColor = FColor(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(220.f * KdaOp), 0, 255));
-			Canvas->DrawText(KDAFont, ScoreStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
+			NCPlusHUDDrawCall::DrawResolvedText(Canvas, KDAFont, ResolvedText, KDAXPos - XL, KDAYPos, FontScale, FontScale, Canvas->DrawColor);
 			KDAYPos += YL * 1.1f;
 
-			Canvas->TextSize(KDAFont, KDAStr, XL, YL, FontScale, FontScale);
+			NCPlusHUDDrawCall::ResolveStableText(Canvas, KDAFont, CachedKdaString, FontScale, FontScale, ResolvedText, XL, YL);
 			Canvas->DrawColor = FColor(200, 200, 200, (uint8)FMath::Clamp(FMath::RoundToInt(200.f * KdaOp), 0, 255));
-			Canvas->DrawText(KDAFont, KDAStr, KDAXPos - XL, KDAYPos, FontScale, FontScale);
+			NCPlusHUDDrawCall::DrawResolvedText(Canvas, KDAFont, ResolvedText, KDAXPos - XL, KDAYPos, FontScale, FontScale, Canvas->DrawColor);
 		}
 	}
 
@@ -663,8 +893,6 @@ void AElimPlusHUD::DrawHUD()
 	NCPlusHUDDrawCall::DrawServerInfo(this, Canvas);
 	NCPlusHUDDrawCall::DrawDamageFlash(this, Canvas);
 
-	// Replay-only: fire-validation corner feed (self-guards to demo playback).
-	NCPlusHUDDrawCall::DrawFireValReplayFeed(this, Canvas);
 }
 
 // Custom team score bar — dynamic team colors, round clock. Same pattern as Wipeout.
@@ -701,8 +929,12 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		Team1Color = TC;
 	}
 
-	FString Team0Name = bCustomColors ? TEXT("Phayder (R)") : TEXT("RED");
-	FString Team1Name = bCustomColors ? TEXT("Liandri (B)") : TEXT("BLUE");
+	static const FString CustomTeam0Name(TEXT("Phayder (R)"));
+	static const FString CustomTeam1Name(TEXT("Liandri (B)"));
+	static const FString StockTeam0Name(TEXT("RED"));
+	static const FString StockTeam1Name(TEXT("BLUE"));
+	const FString& Team0Name = bCustomColors ? CustomTeam0Name : StockTeam0Name;
+	const FString& Team1Name = bCustomColors ? CustomTeam1Name : StockTeam1Name;
 
 	const int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
 	const int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
@@ -763,27 +995,34 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	if (!TeamNameFont)  TeamNameFont  = SmallFont;
 	if (!TeamScoreFont) TeamScoreFont = LargeFont;
 
-	Canvas->TextSize(TeamNameFont, Team0Name, XL, YL, FontScale, FontScale);
+	FText ResolvedText;
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team0Name, FontScale, FontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamNameFont, Team0Name, LeftBarX + BarWidth - XL - 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, LeftBarX + BarWidth - XL - 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
-	FString Score0Str = FString::Printf(TEXT("%d"), Score0);
-	Canvas->TextSize(TeamScoreFont, Score0Str, XL, YL, LargeFontScale, LargeFontScale);
+	static bool bHasCachedScore0 = false;
+	static int32 CachedScore0 = 0;
+	static FString Score0Str;
+	if (!bHasCachedScore0 || CachedScore0 != Score0) { bHasCachedScore0 = true; CachedScore0 = Score0; Score0Str = FString::FromInt(Score0); }
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score0Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamScoreFont, Score0Str, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
 
-	FString Score1Str = FString::Printf(TEXT("%d"), Score1);
-	Canvas->TextSize(TeamScoreFont, Score1Str, XL, YL, LargeFontScale, LargeFontScale);
+	static bool bHasCachedScore1 = false;
+	static int32 CachedScore1 = 0;
+	static FString Score1Str;
+	if (!bHasCachedScore1 || CachedScore1 != Score1) { bHasCachedScore1 = true; CachedScore1 = Score1; Score1Str = FString::FromInt(Score1); }
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score1Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamScoreFont, Score1Str, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
 
-	Canvas->TextSize(TeamNameFont, Team1Name, XL, YL, FontScale, FontScale);
+	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team1Name, FontScale, FontScale, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
-	Canvas->DrawText(TeamNameFont, Team1Name, RightBarX + 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, RightBarX + 8.f * RenderScale,
+		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
 	// Round Clock — read RoundSecondsRemaining from BP GameState via reflection.
 	// Static cache: FindField walks the class hierarchy and was running every
@@ -809,16 +1048,30 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	{
 		const int32 RMins = RoundTime / 60;
 		const int32 RSecs = RoundTime % 60;
-		FString RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
-		Canvas->TextSize(MediumFont, RoundClockStr, XL, YL, RoundClockScale, RoundClockScale);
+		static int32 CachedRoundTime = MAX_int32;
+		static FString RoundClockStr;
+		if (CachedRoundTime != RoundTime)
+		{
+			CachedRoundTime = RoundTime;
+			RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
+		}
+		NCPlusHUDDrawCall::ResolveStableText(Canvas, MediumFont, RoundClockStr, RoundClockScale, RoundClockScale, ResolvedText, XL, YL);
 		Canvas->DrawColor = (RoundTime <= 30) ? FColor(255, 60, 60, WhiteOp.A) : WhiteOp;
-		Canvas->DrawText(MediumFont, RoundClockStr, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale);
+		NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, ResolvedText, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale, Canvas->DrawColor);
 	}
 }
 
-void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive, float XOffset, float YOffset, float PipSize)
+void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive,
+	float XOffset, float YOffset, float PipSize)
 {
-	const FCanvasIcon& CharIcon = PlayerState->GetHUDIcon();
+	DrawPlayerIconFromSnapshot(PlayerState, bPlayerAlive, XOffset, YOffset, PipSize,
+		bHasActiveFramePlayer ? &ActiveFramePlayer : nullptr);
+}
+
+void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool bPlayerAlive,
+	float XOffset, float YOffset, float PipSize, const FElimPlusHUDPlayerSnapshot* FramePlayer)
+{
+	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
 	if (CharIcon.Texture == nullptr)
 	{
 		return;
@@ -845,7 +1098,8 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 
 	// Layer 1: Team-colored background (TeamSkins-aware).
 	// Honors per-portrait `use_team_color` extra: when false, locks to stock red/blue.
-	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	AUTGameState* GS = (FramePlayer && CachedSnapshotWorld.Get() == GetWorld())
+		? CachedSnapshotGameState.Get() : GetWorld()->GetGameState<AUTGameState>();
 	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(PortraitAlias);
 	FLinearColor TeamBGColor = (PlayerState->GetTeamNum() == 1)
 		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
@@ -923,20 +1177,21 @@ void AElimPlusHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, bool bPlayerAlive
 	// must not gain live enemy info mid-round).
 	if (bPlayerAlive && UTPlayerOwner)
 	{
-		AUTPlayerState* MyPS = Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
-		AUTGameState* MatchGS = GetWorld()->GetGameState<AUTGameState>();
+		AUTPlayerState* MyPS = FramePlayer ? PlayerSnapshot.LocalPS
+			: Cast<AUTPlayerState>(UTPlayerOwner->PlayerState);
+		AUTGameState* MatchGS = GS;
 		const bool bSameTeam  = MyPS && MyPS->GetTeamNum() == PlayerState->GetTeamNum();
 		const bool bRoundOver = MatchGS && MatchGS->GetMatchState() != MatchState::InProgress;
 		const bool bTrueSpec  = MyPS && MyPS->bOnlySpectator;
 		if (MyPS && MyPS != PlayerState && (bSameTeam || bRoundOver || bTrueSpec))
 		{
-			AUTCharacter* UTC = PlayerState->GetUTCharacter();
+			AUTCharacter* UTC = FramePlayer ? FramePlayer->Character : PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())
 			{
 				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale * PipFontExtra;
 
-				const int32 HP = UTC->Health;
-				const int32 Armor = UTC->GetArmorAmount();
+				const int32 HP = FramePlayer ? FramePlayer->Health : UTC->Health;
+				const int32 Armor = FramePlayer ? FramePlayer->Armor : UTC->GetArmorAmount();
 
 				// Rebuild the HP FText + measured extents only when HP/armor (or the font)
 				// change — otherwise the string is identical frame to frame.
@@ -1020,7 +1275,7 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 	// text mix since SetLinearDrawColor is the source of truth for both.
 	auto Faded = [Alpha](FLinearColor C) { C.A *= Alpha; return C; };
 
-	AElimPlusStatsReplicator* Stats = FindElimPlusStatsReplicator(GetWorld());
+	AElimPlusStatsReplicator* Stats = FindStatsReplicator(GetWorld());
 
 	// Hide the preview overlay entirely when the admin disabled balancing
 	// (?BalanceTeams=false on the server URL). No point telegraphing an

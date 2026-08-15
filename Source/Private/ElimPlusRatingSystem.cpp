@@ -97,6 +97,18 @@ struct FElimPlusRatingSystemImpl
 	 *  joiner pick up a match-start baseline at LoadPlayerFromDB time. */
 	bool bMatchActive = false;
 
+	/** InitDatabase's schema probe result. FlushAtMatchEnd selects its INSERT
+	 *  shape from THIS — never from a runtime write failure: treating a transient
+	 *  SQLITE_BUSY as "unmigrated table" once let the v2 fallback REPLACE rewrite
+	 *  a veteran's row without TotalDamage/PlayerName on a real v3 table.
+	 *  Tri-state because a FAILED probe proves nothing: the v2 shape may only be
+	 *  used when a probe POSITIVELY established a v2 table (core columns readable,
+	 *  v3 columns absent). Unknown fails closed to the v3 shape — on a real v3
+	 *  table that is simply correct, and on an unreadable db the write fails and
+	 *  is COUNTED rather than downgraded into a column-wiping v2 REPLACE. */
+	enum class EDbSchema : uint8 { Unknown, V2, V3 };
+	EDbSchema Schema = EDbSchema::Unknown;
+
 	// ---- Testing: random bot ELO assignment ----
 	/** When true, GetOrAssignBotElo returns a random rating in [BotEloMin, BotEloMax]
 	 *  on first lookup of a synthetic bot key, cached for the session. */
@@ -154,6 +166,19 @@ FElimPlusRatingSystem::~FElimPlusRatingSystem() = default;
 
 bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 {
+	// The engine opens the shared Mods.db handle with NO busy_timeout, so any lock
+	// contention (concurrent instance flushing at its own match end) surfaces as an
+	// instant SQLITE_BUSY failure — which is exactly the "load FAILED / zero rows"
+	// class that seeds veterans at 1400/RD200. 5s of patience collapses most of
+	// those transients into ordinary successful reads. Connection-wide: every
+	// rating system sharing the process handle benefits. NB the PRAGMA returns a
+	// result row, which the no-rows exec helper reports as failure — use the rows
+	// variant and ignore the output; the pragma takes effect regardless.
+	{
+		TArray<FDatabaseRow> PragmaRows;
+		ExecSql(World, TEXT("PRAGMA busy_timeout=5000;"), PragmaRows);
+	}
+
 	const FString Sql =
 		TEXT("CREATE TABLE IF NOT EXISTS NCRatingElimPlus (")
 		TEXT("  UniqueId       TEXT PRIMARY KEY NOT NULL,")
@@ -187,11 +212,50 @@ bool FElimPlusRatingSystem::InitDatabase(UWorld* World)
 	// SQLITE_BUSY — hub instances share one Mods.db and the engine sets no busy_timeout).
 	// LoadPlayerFromDB degrades gracefully either way; this just explains the session.
 	{
-		TArray<FDatabaseRow> ProbeRows;
-		if (!ExecSql(World, TEXT("SELECT TotalDamage, PlayerName FROM NCRatingElimPlus LIMIT 1;"), ProbeRows))
+		// The probe result is CACHED and drives the flush's INSERT shape for the whole
+		// session (see FlushAtMatchEnd). ONE statement decides it: sequential probes
+		// race — a v3 SELECT can time out on a lock that clears before a follow-up
+		// core SELECT, misclassifying a healthy v3 table as v2, whose shorter REPLACE
+		// shape then wipes TotalDamage/PlayerName at every flush. table_info succeeds
+		// or fails atomically: on success the column list is a consistent snapshot,
+		// so the ABSENCE of TotalDamage positively establishes v2; on failure we know
+		// nothing -> Unknown, and the flush fails closed to the v3 shape.
+		TArray<FDatabaseRow> SchemaRows;
+		if (ExecSql(World, TEXT("PRAGMA table_info(NCRatingElimPlus);"), SchemaRows) && SchemaRows.Num() > 0)
 		{
+			// The v3 INSERT writes BOTH columns and the two ALTERs above are
+			// independent, so a partial migration (exactly one landed) is reachable:
+			// classify V3 only when both exist, V2 only when neither does, and fail
+			// a partial closed as Unknown — the ALTERs retry next session.
+			bool bHasTotalDamage = false;
+			bool bHasPlayerName  = false;
+			for (const FDatabaseRow& Row : SchemaRows)
+			{
+				bHasTotalDamage = bHasTotalDamage || Row.Text.Contains(TEXT("TotalDamage"));
+				bHasPlayerName  = bHasPlayerName  || Row.Text.Contains(TEXT("PlayerName"));
+			}
+			if (bHasTotalDamage && bHasPlayerName)
+			{
+				Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::V3;
+			}
+			else if (!bHasTotalDamage && !bHasPlayerName)
+			{
+				Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::V2;
+				UE_LOG(LogElimPlusRating, Warning,
+					TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER — v2-shape writes this session, damage/name capture deferred"));
+			}
+			else
+			{
+				Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::Unknown;
+				UE_LOG(LogElimPlusRating, Warning,
+					TEXT("InitDatabase: PARTIAL v3 migration (one of TotalDamage/PlayerName missing) — failing closed to v3-shape writes; ALTERs retry next session"));
+			}
+		}
+		else
+		{
+			Impl->Schema = FElimPlusRatingSystemImpl::EDbSchema::Unknown;
 			UE_LOG(LogElimPlusRating, Warning,
-				TEXT("InitDatabase: v3 columns (TotalDamage/PlayerName) missing after ALTER (db busy?) — damage/name capture degraded this session"));
+				TEXT("InitDatabase: schema probe unreadable (db busy or table missing?) — failing closed to v3-shape writes; flushes may fail-and-count until the db recovers"));
 		}
 	}
 
@@ -208,18 +272,27 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 
 	const FString Esc = SqlEscape(UniqueId);
 
-	// Core columns FIRST, v2 set only — this SELECT is valid on ANY schema version, so a
-	// failed/blocked v3 migration can never make a veteran look like a new player (whose
-	// defaults-seeded row would then INSERT OR REPLACE over the real rating at flush).
-	const FString Sql = FString::Printf(
-		TEXT("SELECT Rating, RD, Sigma, PerfIndexEMA, PerfGames, TotalPoints, RoundsPlayed FROM NCRatingElimPlus WHERE UniqueId='%s';"),
-		*Esc);
-
-	TArray<FDatabaseRow> Rows;
-	const bool bOk = ExecSql(World, Sql, Rows);
-
-	if (bOk && Rows.Num() > 0 && Rows[0].Text.Num() >= 7)
+	// One load path, used twice (see below). Core columns FIRST, v2 set only — this
+	// SELECT is valid on ANY schema version, so a failed/blocked v3 migration can never
+	// make a veteran look like a new player (whose defaults-seeded row would then
+	// INSERT OR REPLACE over the real rating at flush). Returns: 0=loaded (caches
+	// populated), 1=no row, 2=query failed.
+	auto TryLoadRow = [&]() -> int32
 	{
+		const FString Sql = FString::Printf(
+			TEXT("SELECT Rating, RD, Sigma, PerfIndexEMA, PerfGames, TotalPoints, RoundsPlayed FROM NCRatingElimPlus WHERE UniqueId='%s';"),
+			*Esc);
+
+		TArray<FDatabaseRow> Rows;
+		if (!ExecSql(World, Sql, Rows))
+		{
+			return 2;
+		}
+		if (Rows.Num() == 0 || Rows[0].Text.Num() < 7)
+		{
+			return 1;
+		}
+
 		const double Rating       = FCString::Atod(*Rows[0].Text[0]);
 		const double RD           = FCString::Atod(*Rows[0].Text[1]);
 		const double Sigma        = FCString::Atod(*Rows[0].Text[2]);
@@ -254,13 +327,14 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 		UE_LOG(LogElimPlusRating, Log, TEXT("Loaded %s: Rating=%.1f RD=%.1f sigma=%.4f LifetimePPR=%.2f (%d rounds)"),
 			*UniqueId, Rating, RD, Sigma,
 			(RoundsPlayed > 0) ? float(TotalPoints / RoundsPlayed) : 0.f, RoundsPlayed);
-	}
-	else if (!bOk)
+		return 0;
+	};
+
+	auto SeedDefaultsGuarded = [&](const TCHAR* Why)
 	{
-		// Query FAILED (db locked/unavailable — not "no row"). Cache defaults so the match
-		// can proceed, but guard the flush: we cannot know whether a real row exists, and
-		// persisting a defaults-seeded row would overwrite it. (This hazard predates v3 —
-		// the old code fell through to the new-player branch here.)
+		// Cache defaults so the match can proceed, but guard the flush: we cannot
+		// confirm what the DB really holds for this player, and persisting a
+		// defaults-seeded row via INSERT OR REPLACE would overwrite a real rating.
 		TeamGlicko2::PlayerRating PR(
 			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility);
 		Impl->RatingCache.Add(UniqueId, PR);
@@ -269,40 +343,74 @@ void FElimPlusRatingSystem::LoadPlayerFromDB(UWorld* World, const FString& Uniqu
 		Impl->TotalDamageCache.Add(UniqueId, 0.0);
 		Impl->LoadFailedGuard.Add(UniqueId);
 		UE_LOG(LogElimPlusRating, Warning,
-			TEXT("Load FAILED for %s (db busy/unavailable) — playing on defaults, flush persistence DISABLED for this player"),
-			*UniqueId);
-	}
-	else
-	{
-		TeamGlicko2::PlayerRating PR(
-			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility);
-		Impl->RatingCache.Add(UniqueId, PR);
-		Impl->TotalPointsCache.Add(UniqueId, 0.0);
-		Impl->RoundsPlayedCache.Add(UniqueId, 0);
-		Impl->TotalDamageCache.Add(UniqueId, 0.0);
+			TEXT("Load guard for %s (%s) — playing on defaults, flush persistence DISABLED for this player"),
+			*UniqueId, Why);
+	};
 
-		const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
-		const FString InsertSql = FString::Printf(
-			TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, TotalDamage, PlayerName) ")
-			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0, 0.0, '%s');"),
+	const int32 FirstTry = TryLoadRow();
+	if (FirstTry == 0)
+	{
+		return;
+	}
+	if (FirstTry == 2)
+	{
+		SeedDefaultsGuarded(TEXT("db busy/unavailable"));
+		return;
+	}
+
+	// Zero rows. This is EITHER a genuinely new player OR a veteran whose row was
+	// invisible to this read (fresh per-instance Mods.db is fine; a stale/partial
+	// read against a shared file is the destructive case — the old code seeded
+	// defaults, played the match at RD=200 with ~9x swings, then INSERT OR
+	// REPLACE'd the real row away at flush; the J@r0d -193 incident). Resolve it
+	// with a positive-existence check: INSERT OR IGNORE the default row, then load
+	// WHATEVER the row now holds. A truly new player reads back the defaults we
+	// just wrote; a conflicting pre-existing row survives the IGNORE and reads
+	// back its REAL values — the veteran is rescued instead of destroyed. If the
+	// row still can't be read back, treat it as a failed load and guard the flush.
+	const int64 NowUtc = FDateTime::UtcNow().ToUnixTimestamp();
+	const FString InsertSql = FString::Printf(
+		TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, TotalDamage, PlayerName) ")
+		TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0, 0.0, '%s');"),
+		*Esc,
+		TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility,
+		static_cast<long long>(NowUtc),
+		*SqlEscape(PlayerName));
+	if (!ExecSqlNoRows(World, InsertSql))
+	{
+		// Unmigrated (v2) table: retry with the v2 column set so the player still
+		// gets a row (damage/name wait for the migration; InitDatabase warned).
+		const FString V2InsertSql = FString::Printf(
+			TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed) ")
+			TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0);"),
 			*Esc,
 			TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility,
-			static_cast<long long>(NowUtc),
-			*SqlEscape(PlayerName));
-		if (!ExecSqlNoRows(World, InsertSql))
-		{
-			// Unmigrated (v2) table: retry with the v2 column set so the player still
-			// gets a row (damage/name wait for the migration; InitDatabase warned).
-			const FString V2InsertSql = FString::Printf(
-				TEXT("INSERT OR IGNORE INTO NCRatingElimPlus (UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed) ")
-				TEXT("VALUES ('%s', %.6f, %.6f, %.6f, 0.0, 0, %lld, 0.0, 0);"),
-				*Esc,
-				TeamGlicko2::kDefaultRating, TeamGlicko2::kDefaultRD, TeamGlicko2::kDefaultVolatility,
-				static_cast<long long>(NowUtc));
-			ExecSqlNoRows(World, V2InsertSql);
-		}
-		UE_LOG(LogElimPlusRating, Log, TEXT("New player %s — cached defaults + INSERT OR IGNORE"), *UniqueId);
+			static_cast<long long>(NowUtc));
+		ExecSqlNoRows(World, V2InsertSql);
 	}
+
+	const int32 SecondTry = TryLoadRow();
+	if (SecondTry == 0)
+	{
+		// Distinguish for the log only — both paths loaded whatever the DB truly
+		// holds, so the flush is safe either way.
+		const TeamGlicko2::PlayerRating* PR = Impl->RatingCache.Find(UniqueId);
+		const bool bLooksNew = PR
+			&& FMath::IsNearlyEqual(PR->GetRating(), TeamGlicko2::kDefaultRating, 0.01)
+			&& Impl->RoundsPlayedCache.FindRef(UniqueId) == 0;
+		if (bLooksNew)
+		{
+			UE_LOG(LogElimPlusRating, Log, TEXT("New player %s — row created at defaults"), *UniqueId);
+		}
+		else
+		{
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("RESCUED %s: row was invisible on first read but exists (Rating=%.1f) — loaded real values instead of default-seeding"),
+				*UniqueId, PR ? PR->GetRating() : 0.0);
+		}
+		return;
+	}
+	SeedDefaultsGuarded(TEXT("row unconfirmable after INSERT OR IGNORE"));
 }
 
 void FElimPlusRatingSystem::SnapshotMatchStart()
@@ -516,6 +624,7 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 
 	int32 PersistedCount = 0;
 	int32 SkippedCount   = 0;
+	int32 FailedCount    = 0;
 	int32 CappedCount    = 0;
 
 	for (TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
@@ -577,10 +686,21 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			static_cast<long long>(NowUtc),
 			TotalPoints, RoundsPlayed,
 			TotalDamage, *SqlEscape(PlayerName));
-		if (!ExecSqlNoRows(World, Sql))
+		// INSERT shape comes from the InitDatabase schema probe, NEVER from a write
+		// failure: a failed v3 write here is contention/IO, not "unmigrated table",
+		// and falling back to the shorter v2 REPLACE on error could rewrite the row
+		// without TotalDamage/PlayerName the moment the lock cleared. Unknown fails
+		// CLOSED to the v3 shape: correct on a v3 table, and on an unreadable db the
+		// write fails and is counted — never downgraded.
+		bool bPersisted = false;
+		if (Impl->Schema != FElimPlusRatingSystemImpl::EDbSchema::V2)
 		{
-			// Unmigrated (v2) table: never lose the session's rating update — persist the
-			// core row; damage/name wait for the migration (InitDatabase warned).
+			bPersisted = ExecSqlNoRows(World, Sql);
+		}
+		else
+		{
+			// POSITIVELY-confirmed v2 table: persist the core row; damage/name
+			// wait for the migration (InitDatabase warned).
 			const FString V2Sql = FString::Printf(
 				TEXT("INSERT OR REPLACE INTO NCRatingElimPlus ")
 				TEXT("(UniqueId, Rating, RD, Sigma, PerfIndexEMA, PerfGames, LastSeenUtc, TotalPoints, RoundsPlayed, SchemaVersion) ")
@@ -590,7 +710,14 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 				PR.GetPerfIndexEMA(), PR.GetPerfGames(),
 				static_cast<long long>(NowUtc),
 				TotalPoints, RoundsPlayed);
-			ExecSqlNoRows(World, V2Sql);
+			bPersisted = ExecSqlNoRows(World, V2Sql);
+		}
+		if (!bPersisted)
+		{
+			++FailedCount;
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("Flush FAILED for %s: rating write did not persist (db busy/locked?) — stored row is now one match stale"),
+				*UniqueId);
 		}
 
 		if (Replicator)
@@ -600,11 +727,14 @@ void FElimPlusRatingSystem::FlushAtMatchEnd(UWorld* World, AElimPlusStatsReplica
 			// rating, so the end-of-match scoreboard reflects updated standings.
 			Replicator->SetPlayerGlobalRank(UniqueId, GetPlayerGlobalRank(World, UniqueId));
 		}
-		++PersistedCount;
+		if (bPersisted)
+		{
+			++PersistedCount;
+		}
 	}
 
-	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, skipped %d (didn't play), capped %d (no human opposition)"),
-		PersistedCount, SkippedCount, CappedCount);
+	UE_LOG(LogElimPlusRating, Log, TEXT("FlushAtMatchEnd: persisted %d, failed %d, skipped %d (didn't play), capped %d (no human opposition)"),
+		PersistedCount, FailedCount, SkippedCount, CappedCount);
 
 	Impl->bMatchActive = false;
 }
@@ -712,6 +842,7 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 	// they're absent from RatingCache and don't appear in RatingAtMatchStart.
 	TArray<int32> HumanIndices;
 	HumanIndices.Reserve(In.Players.Num());
+	TSet<FString> RosterIds;
 	for (int32 i = 0; i < In.Players.Num(); ++i)
 	{
 		const FNCElimPlusPlayerInput& P = In.Players[i];
@@ -719,9 +850,27 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 		if (Impl->RatingCache.Contains(P.UniqueId))
 		{
 			HumanIndices.Add(i);
+			RosterIds.Add(P.UniqueId);
 		}
 	}
-	if (HumanIndices.Num() == 0)
+
+	// LEAVER FIX (2026-07-17): In.Players is built from PlayerArray at match end, so
+	// anyone who left mid-match is missing — their rating moved locally (the flush
+	// persists it) but their delta never reached ut4stats: no audit row, no games
+	// increment, hub/site ladders diverge, and the site's round-by-round replay
+	// default-seeds them at 1400/RD200. Prod enumeration (J@r0d): 5 of 5 missing
+	// matches were exactly this; one match's push carried only 6 of 10 players.
+	// Union in every cached human who played a round but is gone from the roster.
+	TArray<FString> LeaverIds;
+	for (const TPair<FString, TeamGlicko2::PlayerRating>& Pair : Impl->RatingCache)
+	{
+		const FString& Id = Pair.Key;
+		if (RosterIds.Contains(Id)) continue;
+		if (!Impl->ActiveHumansThisMatch.Contains(Id)) continue; // login ghosts / pure spectators
+		LeaverIds.Add(Id);
+	}
+
+	if (HumanIndices.Num() == 0 && LeaverIds.Num() == 0)
 	{
 		UE_LOG(LogElimPlusRating, Warning,
 			TEXT("BuildResultPayload: no human players in cache — skipping upload"));
@@ -794,7 +943,87 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 		Writer->WriteValue(TEXT("total_points"),   TotalPoints);
 		Writer->WriteValue(TEXT("rounds_played"),  RoundsPlayed);
 		Writer->WriteValue(TEXT("faced_humans"),   bFacedHumans);
+		if (Impl->LoadFailedGuard.Contains(P.UniqueId))
+		{
+			// This player's session ran on unconfirmed default-seeded state (DB load
+			// guard) — the numbers are not trustworthy. Additive key: old Django
+			// ignores it; new Django records the row without applying the delta.
+			Writer->WriteValue(TEXT("provisional"), true);
+		}
 		Writer->WriteObjectEnd();
+	}
+
+	// Leavers: roster entry is gone, so team + this-match box score come from the
+	// per-round log instead (their per-round lines were captured live while they
+	// played). Rating fields come from the same caches as everyone else.
+	int32 LeaversEmitted = 0;
+	for (const FString& Id : LeaverIds)
+	{
+		const PlayerRating* PR = Impl->RatingCache.Find(Id);
+		if (!PR) continue;
+
+		int32  TeamIndex = -1;
+		int32  Kills = 0, Deaths = 0;
+		double Damage = 0.0;
+		for (const FElimPlusRoundRecord& Rec : Impl->RoundLog)
+		{
+			for (const FElimPlusRoundPlayerRecord& RP : Rec.Players)
+			{
+				if (RP.UniqueId == Id)
+				{
+					TeamIndex = RP.TeamIndex;
+					Kills  += RP.Kills;
+					Deaths += RP.Deaths;
+					Damage += RP.Damage;
+				}
+			}
+		}
+		if (TeamIndex < 0)
+		{
+			// Played (ActiveHumans) but never landed in the round log — can't
+			// attribute a team/result; skip rather than fabricate.
+			UE_LOG(LogElimPlusRating, Warning,
+				TEXT("BuildResultPayload: leaver %s has no round-log lines — omitted from upload"), *Id);
+			continue;
+		}
+
+		const int32 PreElo  = Impl->RatingAtMatchStart.FindRef(Id);
+		const int32 PostElo = FMath::RoundToInt(PR->GetRating());
+		const int32 Delta   = (PreElo != 0) ? (PostElo - PreElo) : 0;
+
+		const TCHAR* Result;
+		if (In.WinnerTeamIndex < 0)      { Result = TEXT("draw"); }
+		else                             { Result = (TeamIndex == In.WinnerTeamIndex) ? TEXT("win") : TEXT("loss"); }
+
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("id"),             Id);
+		Writer->WriteValue(TEXT("name"),           Impl->PlayerNameCache.FindRef(Id));
+		Writer->WriteValue(TEXT("team"),           TeamIndex);
+		Writer->WriteValue(TEXT("result"),         FString(Result));
+		Writer->WriteValue(TEXT("kills"),          Kills);
+		Writer->WriteValue(TEXT("deaths"),         Deaths);
+		Writer->WriteValue(TEXT("damage"),         Damage);
+		Writer->WriteValue(TEXT("pre"),            static_cast<double>(PreElo));
+		Writer->WriteValue(TEXT("post"),           PR->GetRating());
+		Writer->WriteValue(TEXT("delta"),          Delta);
+		Writer->WriteValue(TEXT("rd"),             PR->GetRD());
+		Writer->WriteValue(TEXT("sigma"),          PR->GetSigma());
+		Writer->WriteValue(TEXT("total_points"),   Impl->TotalPointsCache.FindRef(Id));
+		Writer->WriteValue(TEXT("rounds_played"),  Impl->RoundsPlayedCache.FindRef(Id));
+		Writer->WriteValue(TEXT("faced_humans"),   Impl->HumansWithHumanOpposition.Contains(Id));
+		Writer->WriteValue(TEXT("left"),           true);
+		if (Impl->LoadFailedGuard.Contains(Id))
+		{
+			Writer->WriteValue(TEXT("provisional"), true);
+		}
+		Writer->WriteObjectEnd();
+		++LeaversEmitted;
+	}
+	if (LeaversEmitted > 0)
+	{
+		UE_LOG(LogElimPlusRating, Log,
+			TEXT("BuildResultPayload: included %d mid-match leaver(s) alongside %d rostered player(s)"),
+			LeaversEmitted, HumanIndices.Num());
 	}
 
 	Writer->WriteArrayEnd();
@@ -827,6 +1056,34 @@ FString FElimPlusRatingSystem::BuildResultPayload(UWorld* World, const FNCElimPl
 			Writer->WriteObjectEnd();
 		}
 		Writer->WriteArrayEnd();
+		Writer->WriteObjectEnd();
+	}
+	Writer->WriteArrayEnd();
+
+	// Server-authored clutch telemetry (additive keys, 2026-07-20). ut4stats
+	// consumes these as source="server_v1", cross-checked against the rounds[]
+	// manifest + KillLog before acceptance. clutch_version is emitted even when
+	// the array is empty so a zero-attempt match is distinguishable from an
+	// old-build hub that never sent the keys. Bots/invalid IDs are filtered at
+	// capture (attempt open requires a valid UniqueId) — the emptiness check
+	// here is belt-and-suspenders only.
+	Writer->WriteValue(TEXT("clutch_version"), 1);
+	Writer->WriteArrayStart(TEXT("clutches"));
+	for (const FNCElimPlusClutchInput& C : In.Clutches)
+	{
+		if (C.UniqueId.IsEmpty()) continue;
+		Writer->WriteObjectStart();
+		Writer->WriteValue(TEXT("round_index"),       C.RoundIndex);
+		Writer->WriteValue(TEXT("id"),                C.UniqueId);
+		Writer->WriteValue(TEXT("team"),              C.TeamIndex);
+		Writer->WriteValue(TEXT("enemies_at_start"),  C.EnemiesAtStart);
+		Writer->WriteValue(TEXT("result"),            C.Result);
+		Writer->WriteValue(TEXT("direct_kills"),      C.DirectKills);
+		Writer->WriteValue(TEXT("clean_finish"),      C.bCleanFinish);
+		Writer->WriteValue(TEXT("start_event_index"), C.StartEventIndex);
+		Writer->WriteValue(TEXT("end_event_index"),   C.EndEventIndex);
+		Writer->WriteValue(TEXT("start_time"),        static_cast<double>(C.StartTime));
+		Writer->WriteValue(TEXT("end_time"),          static_cast<double>(C.EndTime));
 		Writer->WriteObjectEnd();
 	}
 	Writer->WriteArrayEnd();

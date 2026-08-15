@@ -107,6 +107,8 @@ UNCPlusHUDWidget_HealAbility::UNCPlusHUDWidget_HealAbility(const FObjectInitiali
 	Origin             = FVector2D(0.5f, 1.0f);   // pivot bottom-center
 	DesignedResolution = 1080.f;
 	bShouldKickBack    = false;
+	CachedBindingLayoutRevision = MAX_uint32;
+	NextBindingRefreshTime = 0.f;
 }
 
 float UNCPlusHUDWidget_HealAbility::GetDrawScaleOverride()
@@ -181,25 +183,49 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	// UTProfileSettings.cpp:256), StartActivatePowerup (older boost name),
 	// ToggleTranslocator (translocator-style heal binding). First non-"?"
 	// hit wins.
-	const FString BindOverride = (E ? E->GetExtra(TEXT("bind_command")) : FString());
-	FString KeyLabel;
-	if (!BindOverride.IsEmpty())
+	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
+	const bool bBindingLayoutChanged = CachedBindingLayoutRevision != LayoutRevision;
+	if (bBindingLayoutChanged)
 	{
-		KeyLabel = FindKeyForCommand(PC, BindOverride);
+		CachedBindOverride = E ? E->GetExtra(TEXT("bind_command")) : FString();
 	}
-	else
+	UWorld* World = GetWorld();
+	if (CachedBindingWorld.Get() != World)
 	{
-		static const TCHAR* Candidates[] = {
-			TEXT("ActivateSpecial"),
-			TEXT("StartActivatePowerup"),
-			TEXT("ToggleTranslocator"),
-		};
-		KeyLabel = TEXT("?");
-		for (const TCHAR* Cand : Candidates)
+		CachedBindingWorld = World;
+		CachedBindingInput.Reset();
+		NextBindingRefreshTime = 0.f;
+	}
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+	if (CachedBindingInput.Get() != PC->PlayerInput
+		|| bBindingLayoutChanged
+		|| CachedDisplayLabel.IsEmpty()
+		|| Now >= NextBindingRefreshTime)
+	{
+		const FString& BindOverride = CachedBindOverride;
+		FString KeyLabel;
+		if (!BindOverride.IsEmpty())
 		{
-			FString Found = FindKeyForCommand(PC, Cand);
-			if (Found != TEXT("?")) { KeyLabel = Found; break; }
+			KeyLabel = FindKeyForCommand(PC, BindOverride);
 		}
+		else
+		{
+			static const TCHAR* Candidates[] = {
+				TEXT("ActivateSpecial"),
+				TEXT("StartActivatePowerup"),
+				TEXT("ToggleTranslocator"),
+			};
+			KeyLabel = TEXT("?");
+			for (const TCHAR* Cand : Candidates)
+			{
+				FString Found = FindKeyForCommand(PC, Cand);
+				if (Found != TEXT("?")) { KeyLabel = MoveTemp(Found); break; }
+			}
+		}
+		CachedBindingInput = PC->PlayerInput;
+		CachedBindingLayoutRevision = LayoutRevision;
+		CachedDisplayLabel = FText::FromString(FString::Printf(TEXT("Heal: %s"), *KeyLabel));
+		NextBindingRefreshTime = Now + 1.f;
 	}
 
 	const uint8 Charges = PS->GetRemainingBoosts();
@@ -234,7 +260,7 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	LabelFont = NCPlusHUDFonts::Resolve(TEXT("heal_ability"), UTHUDOwner, LabelFont);
 	if (!LabelFont) return;
 
-	// KeyLabel was resolved above (candidate-list fallback or extras override).
+	// CachedDisplayLabel is refreshed above from the candidate list or override.
 	FLinearColor LabelColor = bAvailable
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
 		: FLinearColor(0.6f, 0.6f, 0.6f, 0.85f);
@@ -243,8 +269,7 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	// Prefix the keybind with "Heal:" so the label is self-explanatory at a
 	// glance instead of reading as a stray letter under the icon. Even with
 	// "?" as the keybind, the "Heal: ?" form makes it obvious what's missing.
-	const FString DisplayLabel = FString::Printf(TEXT("Heal: %s"), *KeyLabel);
-	DrawText(FText::FromString(DisplayLabel), Size.X * 0.5f, IconY + IconSize + 2.f,
+	DrawText(CachedDisplayLabel, Size.X * 0.5f, IconY + IconSize + 2.f,
 		LabelFont, RenderScale, 1.0f, LabelColor,
 		ETextHorzPos::Center, ETextVertPos::Top);
 }

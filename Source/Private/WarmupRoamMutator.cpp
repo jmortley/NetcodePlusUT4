@@ -1,9 +1,11 @@
 // WarmupRoamMutator.cpp - see header.
 #include "WarmupRoamMutator.h"
+#include "NCReadyUp.h"
 #include "UnrealTournament.h"
 #include "UTCharacter.h"
 #include "UTPlayerController.h"
 #include "UTGameState.h"
+#include "UTGameMode.h"
 #include "UTBaseGameMode.h"
 #include "UTPlayerState.h"
 
@@ -89,6 +91,17 @@ void AWarmupRoamMutator::Mutate_Implementation(const FString& MutateString, APla
 	}
 	else if (Sender != nullptr && MutateString.Equals(TEXT("host"), ESearchCase::IgnoreCase))
 	{
+		AUTGameMode* GameMode = GetWorld() ? Cast<AUTGameMode>(GetWorld()->GetAuthGameMode()) : nullptr;
+		if (NCReadyUp::ShouldHandle(GameMode))
+		{
+			ANCReadyUpState* ReadyState = ANCReadyUpState::Find(GetWorld());
+			Sender->ClientMessage(ReadyState != nullptr && ReadyState->bCountdownLocked
+				? TEXT("All players are ready; the match is starting.")
+				: TEXT("Player ready-up is enabled. Press F5; the match starts after every active player is ready."));
+			Super::Mutate_Implementation(MutateString, Sender);
+			return;
+		}
+
 		// Stopgap host visibility: the scoreboard HOST badge is unreliable on some
 		// servers until the ANCHostInfo client roll (feature/host-badge-info-actor),
 		// so let anyone ask the server directly. The answer travels over the stock
@@ -149,11 +162,24 @@ void AWarmupRoamMutator::PostPlayerInit_Implementation(AController* C)
 {
 	Super::PostPlayerInit_Implementation(C);
 
-	// Auto-announce the match host on join — pushed counterpart of `mutate host`.
-	// PostPlayerInit also fires for bots; only humans get console lines.
+	// Auto-announce the active warmup start control. PostPlayerInit also fires
+	// for bots; only humans get console lines.
 	AUTPlayerState* PS = (C != nullptr) ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
 	if (C == nullptr || (PS != nullptr && PS->bIsABot))
 	{
+		return;
+	}
+	AUTGameMode* GameMode = GetWorld() ? Cast<AUTGameMode>(GetWorld()->GetAuthGameMode()) : nullptr;
+	if (IsWarmup() && NCReadyUp::ShouldHandle(GameMode))
+	{
+		if (APlayerController* PC = Cast<APlayerController>(C))
+		{
+			FTimerHandle Unused;
+			GetWorldTimerManager().SetTimer(Unused,
+				FTimerDelegate::CreateUObject(this, &AWarmupRoamMutator::SendWarmupStartInfoTo,
+					TWeakObjectPtr<APlayerController>(PC)),
+				10.f, false);
+		}
 		return;
 	}
 	bool bHostConfigured = false;
@@ -185,17 +211,24 @@ void AWarmupRoamMutator::PostPlayerInit_Implementation(AController* C)
 	{
 		FTimerHandle Unused;
 		GetWorldTimerManager().SetTimer(Unused,
-			FTimerDelegate::CreateUObject(this, &AWarmupRoamMutator::SendHostInfoTo, TWeakObjectPtr<APlayerController>(PC)),
+			FTimerDelegate::CreateUObject(this, &AWarmupRoamMutator::SendWarmupStartInfoTo, TWeakObjectPtr<APlayerController>(PC)),
 			10.f, false);
 	}
 }
 
-void AWarmupRoamMutator::SendHostInfoTo(TWeakObjectPtr<APlayerController> WeakPC)
+void AWarmupRoamMutator::SendWarmupStartInfoTo(TWeakObjectPtr<APlayerController> WeakPC)
 {
 	APlayerController* PC = WeakPC.Get();
 	if (PC == nullptr || !IsWarmup())
 	{
 		return;   // left during the delay, or the match already started
+	}
+	if (ANCReadyUpState* ReadyState = ANCReadyUpState::Find(GetWorld()))
+	{
+		PC->ClientMessage(ReadyState->bCountdownLocked
+			? TEXT("All players are ready; the match is starting.")
+			: TEXT("Player ready-up enabled: press F5 and choose Ready. Readiness locks when the final countdown begins."));
+		return;
 	}
 	bool bHostConfigured = false;
 	AUTPlayerState* HostPS = ResolveHostPS(bHostConfigured);

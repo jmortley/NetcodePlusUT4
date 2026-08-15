@@ -1,6 +1,9 @@
 #include "WipeoutGame.h"
+#include "NCReadyUp.h"
+#include "NCPlusRoundSpectate.h"      // late-joiner / reconnect free-camera lock
+#include "NCHybridSpawnGenerator.h"
 #include "NCPlusVersionGate.h"
-#include "NCFireValCollector.h"
+#include "NCConcedeVote.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -18,17 +21,26 @@
 #include "UTPickupHealth.h"
 #include "UTPickupAmmo.h"
 #include "UTPickupInventory.h"
+#include "UTInventory.h"
+#include "UTTimedPowerup.h"
+#include "UTJumpBoots.h"
+#include "StatNames.h"
 #include "Engine/DemoNetDriver.h"
 #include "WipeoutDamageReplicator.h"
 #include "NCAccuracyStatsReplicator.h"
+#include "NCPCandyLiftGuard.h"
+#include "WarmupRoamMutator.h"
 #include "TeamArenaCharacter.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 #include "TimerManager.h"
 #include "GameFramework/HUD.h"
 #include "GameFramework/PlayerStart.h"
 #include "EngineUtils.h"
 #include "UTCountDownMessage.h"
 #include "UTGameMessage.h"
+#include "UTShowdownStatusMessage.h"
 #include "WipeoutHUD.h"
 #include "SiphonPowerup.h"
 #include "WipeoutRatingSystem.h"
@@ -36,6 +48,53 @@
 #include "GameFramework/WorldSettings.h"            // KillZ for bad-spawn detection
 #include "Components/CapsuleComponent.h"            // capsule half-height for snap-back
 #include "GameFramework/CharacterMovementComponent.h" // IsFalling / StopMovementImmediately
+
+
+namespace
+{
+	bool IsAmpInventoryClass(UClass* InventoryClass)
+	{
+		if (!InventoryClass)
+		{
+			return false;
+		}
+
+		const AUTInventory* InventoryCDO = Cast<AUTInventory>(InventoryClass->GetDefaultObject());
+		const FString ClassName = InventoryClass->GetName();
+		return (InventoryCDO && InventoryCDO->StatsNameCount == NAME_UDamageCount)
+			|| ClassName.Contains(TEXT("UDamage"))
+			|| ClassName.Contains(TEXT("Amp"));
+	}
+
+	bool IsSiphonInventoryClass(UClass* InventoryClass)
+	{
+		return InventoryClass && InventoryClass->IsChildOf(AUTSiphonPowerup::StaticClass());
+	}
+
+	bool IsBerserkInventoryClass(UClass* InventoryClass)
+	{
+		const AUTInventory* InventoryCDO = InventoryClass
+			? Cast<AUTInventory>(InventoryClass->GetDefaultObject())
+			: nullptr;
+		return InventoryClass
+			&& ((InventoryCDO && InventoryCDO->StatsNameCount == NAME_BerserkCount)
+				|| InventoryClass->GetName().Contains(TEXT("Berserk")));
+	}
+
+	bool IsSiphonPowerupCandidate(UClass* InventoryClass)
+	{
+		return InventoryClass
+			&& InventoryClass->IsChildOf(AUTTimedPowerup::StaticClass())
+			&& !InventoryClass->IsChildOf(AUTJumpBoots::StaticClass())
+			&& !IsAmpInventoryClass(InventoryClass)
+			&& !IsSiphonInventoryClass(InventoryClass);
+	}
+
+	uint8 GetSiphonPowerupPriority(UClass* InventoryClass)
+	{
+		return IsBerserkInventoryClass(InventoryClass) ? 0 : 1;
+	}
+}
 
 
 // ============================================================================
@@ -56,6 +115,10 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	bUseTeamStarts = false;
 	bAnnounceTeam = true;
 	bRecordReplays = true;
+
+	// Siphon placement: a sniper base must be at least this far (3D uu) from the
+	// nearest Amp for Siphon to spawn there; otherwise the bio base hosts it.
+	SiphonMinAmpDistance = 3000.f;
 
 	// Sound defaults
 	RedTeamVictorySound = nullptr;
@@ -204,6 +267,14 @@ void AUWipeoutGame::BP_SetMatchState_InProgress()
 void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	NCReadyUp::Initialize(this);
+
+	// Warmup roam, same as NCPlusCTF/iCTF: `mutate warmup` = invulnerable +
+	// fire-disabled map roaming during warmup only. The mutator strips everyone
+	// the instant the match leaves WaitingToStart — the engine notifies mutators
+	// straight from SetMatchState, independent of our
+	// CallMatchStateChangeNotify override, so the strip can never be skipped.
+	AddMutatorClass(AWarmupRoamMutator::StaticClass());
 	// Super::InitGame already parses ?GoalScore=X from the URL.
 	// Only override if the URL explicitly provided a GoalScore option;
 	// otherwise keep the BP default (GoalScore set in constructor).
@@ -219,6 +290,14 @@ void AUWipeoutGame::InitGame(const FString& MapName, const FString& Options, FSt
 
 	// A bot-hosted PUG passes ?PugId=N — gate team pinning to real PUGs.
 	bIsPugMatch = UGameplayStatics::HasOption(Options, TEXT("PugId"));
+
+	// Default-on opening-round hybrid queue. Mid-round Wipeout respawns never
+	// enter this path. This Mod.ini switch is the immediate rollback lever.
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->GetBool(TEXT("NetcodePlus"), TEXT("WipeoutHybridRoundSpawns"), bEnableHybridRoundSpawns, ModIni);
+	}
 
 	// Bot-assigned teams: ?PugTeams=<ut4id>:0,<ut4id>:1,...  The bot balanced the
 	// teams off the ut4stats ladder; pin each listed player to their side in
@@ -292,12 +371,26 @@ void AUWipeoutGame::BeginPlay()
 
 	PrecomputeSpawnLayouts();
 
-	// All actors have passed through CheckRelevance by now — resolve
-	// whether the stashed vest pickup should become a ShieldBelt.
-	ResolveShieldBeltSubstitution();
+	// All actors have passed through CheckRelevance by now. Belt substitution
+	// and Siphon both spawn 1s into WARMUP: loading/spawning BP pickup classes
+	// inside BeginPlay itself fails — packages may not be fully loaded yet
+	// (same issue as DamageReplicator) — and the early spot lets both be
+	// scouted before the match. HandleMatchHasStarted is the safety net for
+	// each. (Belt substitution rebuilt on the Siphon replace pattern
+	// 2026-08-06 — the old in-place SetInventoryType conversion did its
+	// LoadClass at BeginPlay time and never survived contact with a live map.)
+	if (HasAuthority())
+	{
+		if (!bMapHasShieldBelt && !PendingVestPickup)
+		{
+			UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has no ShieldBelt and no vest — nothing to substitute"));
+		}
+		FTimerHandle BeltSubstitutionHandle;
+		GetWorldTimerManager().SetTimer(BeltSubstitutionHandle, this, &AUWipeoutGame::TryResolveShieldBeltSubstitution, 1.0f, false);
 
-	// Siphon powerup spawned in HandleMatchHasStarted — BP actors may not
-	// be fully loaded during BeginPlay (same issue as DamageReplicator).
+		FTimerHandle SiphonWarmupHandle;
+		GetWorldTimerManager().SetTimer(SiphonWarmupHandle, this, &AUWipeoutGame::TrySpawnSiphonPickup, 1.0f, false);
+	}
 
 	// Damage replicator is spawned in HandleMatchHasStarted instead of here —
 	// spawning bAlwaysRelevant actors during BeginPlay can trigger package
@@ -354,8 +447,6 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	Super::HandleMatchHasStarted();
 	bWarmupMode = false;
 
-	FNCFireValCollector::Get().Reset();   // fresh sample table + CSV id; accumulate across all rounds
-
 	// Defense-in-depth reset: InitGame already clears this on map load, but a
 	// single server session can host multiple matches. Reset here so a subsequent
 	// match can flush its own ratings.
@@ -375,6 +466,10 @@ void AUWipeoutGame::HandleMatchHasStarted()
 	// default but the widget is opt-in via nchud, so spawn defensively.
 	ANCAccuracyStatsReplicator::EnsureSpawned(this);
 
+	// Keeps PreventDeath candy orbs grabbable around lifts (the BP's own
+	// reset-lift chain is structurally broken — see NCPCandyLiftGuard.h).
+	ANCPCandyLiftGuard::EnsureSpawned(GetWorld());
+
 	// Spawn Siphon pickup here — BP actors fail to spawn during BeginPlay
 	// because their packages aren't fully loaded yet.
 	if (HasAuthority() && !SiphonPickup)
@@ -382,11 +477,23 @@ void AUWipeoutGame::HandleMatchHasStarted()
 		SpawnSiphonPickup();
 	}
 
+	// Belt-substitution safety net — no-op unless the warmup attempt failed
+	// (ResolveShieldBeltSubstitution keeps PendingVestPickup on failure).
+	TryResolveShieldBeltSubstitution();
+
 	// Snapshot every loaded player's current rating as their "match-start" value
 	// for the per-match delta reported in BuildResultPayload.
 	if (HasAuthority() && RatingSystem.IsValid())
 	{
 		RatingSystem->SnapshotMatchStart();
+	}
+
+	// Clutch/LMS-hold telemetry starts empty for the match, alongside the
+	// rating snapshot, so a map that hosts back-to-back matches never carries
+	// the previous match's holds into the next upload.
+	if (HasAuthority())
+	{
+		ResetClutchTelemetryForMatch();
 	}
 }
 
@@ -394,9 +501,12 @@ void AUWipeoutGame::HandleMatchHasStarted()
 void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
+	NCReadyUp::PostLogin(this, NewPlayer);
 
 	// Early plugin-version check — kicks mismatched clients within 10s of join.
 	NCPlusVersionGate::SpawnFor(NewPlayer);
+	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
+	NCConcede::SpawnFor(NewPlayer);
 
 	// Server-only: pull this player's rating from Mods.db into the cache so it's
 	// ready before the first round ends. Late joiners arriving mid-match also
@@ -411,12 +521,17 @@ void AUWipeoutGame::PostLogin(APlayerController* NewPlayer)
 	}
 }
 
+bool AUWipeoutGame::ReadyToStartMatch_Implementation()
+{
+	return NCReadyUp::ShouldHandle(this)
+		? NCReadyUp::ReadyToStartMatch(this)
+		: Super::ReadyToStartMatch_Implementation();
+}
+
 
 void AUWipeoutGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
-
-	FNCFireValCollector::Get().ReportOnce(GetWorld());   // emit [FireVal] + CSV (server-side; guards double-route)
 
 	if (!HasAuthority() || !RatingSystem.IsValid() || bRatingFlushedThisMatch)
 	{
@@ -461,6 +576,12 @@ void AUWipeoutGame::HandleMatchHasEnded()
 		P.Damage     = static_cast<int32>(UTPS->DamageDone);
 		UploadIn.Players.Add(MoveTemp(P));
 	}
+
+	// Completed LMS holds ride the SAME upload (additive JSON keys — no second
+	// endpoint). Any hold still open here belonged to a round that never
+	// reached EndRoundForTeam, so it is deliberately absent rather than
+	// recorded with a guessed outcome.
+	UploadIn.Clutches = CompletedClutches;
 
 	const FString Json = RatingSystem->BuildResultPayload(GetWorld(), UploadIn);
 	if (!Json.IsEmpty())
@@ -523,6 +644,12 @@ void AUWipeoutGame::DefaultTimer()
 
 	HandleServerManagement();
 
+	// Re-assert the round camera lock once a second: the immediate lock at the
+	// RestartPlayer refusal can be raced by the joining client's own
+	// BeginSpectatingState, which spawns its spectator pawn locally and points the
+	// camera at it without telling the server.
+	EnforceRoundSpectatorLock();
+
 	// --- Intermission Logic ---
 	if (GS->GetMatchState() == MatchState::MatchIntermission || GetMatchState() == FName(TEXT("RoundCooldown")))
 	{
@@ -579,6 +706,8 @@ void AUWipeoutGame::DefaultTimer()
 			BP_OnSetRound(true, RoundRemain, LastRoundWinningTeamIndex,
 				Alive0, Alive1, Team0DeathCount, Team1DeathCount);
 
+			CheckFinalLifeAnnouncements();
+
 			if (RoundRemain == 0 && !bInSuddenDeath && !bSuddenDeathPending)
 			{
 				// Solo/practice: time's up vs an empty team — no sudden death against
@@ -599,8 +728,10 @@ void AUWipeoutGame::DefaultTimer()
 					return;
 				}
 
-				// Time is up — start 3-second grace period before sudden death.
+				// Time is up — start the grace period before sudden death.
 				// Players with pending respawns within the grace window can still spawn.
+				// (SuddenDeathGraceSeconds is shared with the HUD, which uses it to X
+				// out respawn countdowns that can no longer land — keep them in sync.)
 				bSuddenDeathPending = true;
 
 				FTimerDelegate SuddenDeathDelegate;
@@ -610,6 +741,16 @@ void AUWipeoutGame::DefaultTimer()
 
 					bInSuddenDeath = true;
 					PendingRespawns.Empty();
+					if (DamageReplicator)
+					{
+						for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+						{
+							if (ActiveHold[TeamIndex].bOpen)
+							{
+								DamageReplicator->PromoteClutchOverlayToSuddenDeath(TeamIndex);
+							}
+						}
+					}
 
 					// Restart the round clock so players can time items during OT.
 					RoundEndTimeSeconds = GetWorld()->GetTimeSeconds() + 300.f;
@@ -628,6 +769,11 @@ void AUWipeoutGame::DefaultTimer()
 
 					int32 A0, A1;
 					GetAliveCounts(A0, A1);
+					// A sub-one-second pending respawn may have suppressed the normal
+					// cue. Once sudden death clears that queue, this is a real clutch.
+					if (A0 == 1 && !ActiveHold[0].bOpen) bTeam0LastAliveAnnounced = false;
+					if (A1 == 1 && !ActiveHold[1].bOpen) bTeam1LastAliveAnnounced = false;
+					UpdateClutchHoldTransitions(A0, A1);
 					if (A0 == 0 || A1 == 0)
 					{
 						CheckWipeoutCondition();
@@ -635,46 +781,15 @@ void AUWipeoutGame::DefaultTimer()
 				});
 
 				FTimerHandle SuddenDeathGraceHandle;
-				GetWorldTimerManager().SetTimer(SuddenDeathGraceHandle, SuddenDeathDelegate, 3.0f, false);
+				GetWorldTimerManager().SetTimer(SuddenDeathGraceHandle, SuddenDeathDelegate,
+					SuddenDeathGraceSeconds, false);
 				return;
 			}
 		}
 
 		// Normal tick: check for wipeout
 		CheckWipeoutCondition();
-
-		// Reset LMS announce flag when team goes back above 1 alive (teammate respawned)
-		if (Alive0 > 1) bTeam0LastAliveAnnounced = false;
-		if (Alive1 > 1) bTeam1LastAliveAnnounced = false;
-
-		// Check for "last player alive" situations (clutch)
-		if (Alive0 == 1 && Team0StartingSize > 1 && !bTeam0LastAliveAnnounced)
-		{
-			AUTPlayerState* LastPS = FindAliveOnTeamPS(0);
-			if (LastPS)
-			{
-				bTeam0LastAliveAnnounced = true;
-				// Suppress LMS sound if a teammate respawns within 1 second
-				if (!HasImminentRespawnOnTeam(0, 1.0f))
-				{
-					BP_OnLastPlayerAlive(0, LastPS, Alive1);
-					OnClutchSituationStarted.Broadcast(LastPS, Alive1);
-				}
-			}
-		}
-		if (Alive1 == 1 && Team1StartingSize > 1 && !bTeam1LastAliveAnnounced)
-		{
-			AUTPlayerState* LastPS = FindAliveOnTeamPS(1);
-			if (LastPS)
-			{
-				bTeam1LastAliveAnnounced = true;
-				if (!HasImminentRespawnOnTeam(1, 1.0f))
-				{
-					BP_OnLastPlayerAlive(1, LastPS, Alive0);
-					OnClutchSituationStarted.Broadcast(LastPS, Alive0);
-				}
-			}
-		}
+		UpdateClutchHoldTransitions(Alive0, Alive1);
 
 		Super::DefaultTimer();
 	}
@@ -737,6 +852,57 @@ float AUWipeoutGame::GetPlayerRespawnTimeRemaining(AUTPlayerState* PS) const
 }
 
 
+void AUWipeoutGame::CheckFinalLifeAnnouncements(int32 TeamFilter)
+{
+	if (!HasAuthority() || !bRoundInProgress || bInSuddenDeath || bSuddenDeathPending
+		|| RoundEndTimeSeconds <= 0.f)
+	{
+		return;
+	}
+
+	// Solo/practice rounds end at regulation expiry instead of entering sudden death.
+	if ((Team0StartingSize == 0) ^ (Team1StartingSize == 0))
+	{
+		return;
+	}
+
+	const int32 RoundSecondsRemaining = FMath::Max(0,
+		FMath::CeilToInt(RoundEndTimeSeconds - GetWorld()->GetTimeSeconds()));
+	const float RespawnWindow = float(RoundSecondsRemaining) + SuddenDeathGraceSeconds;
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(*It);
+		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		if (!PS || PS->bOnlySpectator || PS->bOutOfLives || !PS->Team || !PC->GetPawn()
+			|| FinalLifeAnnouncedPlayers.Contains(PS))
+		{
+			continue;
+		}
+
+		const int32 TeamIndex = PS->Team->TeamIndex;
+		if (TeamIndex > 1 || (TeamFilter != INDEX_NONE && TeamIndex != TeamFilter))
+		{
+			continue;
+		}
+
+		const float NextRespawnDelay = ComputeRespawnDelay(TeamIndex, PS);
+		if (NextRespawnDelay <= RespawnWindow)
+		{
+			continue;
+		}
+
+		FinalLifeAnnouncedPlayers.Add(PS);
+		PC->ClientReceiveLocalizedMessage(
+			UUTShowdownStatusMessage::StaticClass(), 5, PS, nullptr, nullptr);
+
+		UE_LOG(LogGameMode, Log,
+			TEXT("Wipeout: final life announced for %s (next respawn %.1fs, window %.1fs)"),
+			*PS->PlayerName, NextRespawnDelay, RespawnWindow);
+	}
+}
+
+
 bool AUWipeoutGame::IsPlayerWaitingToRespawn(AUTPlayerState* PS) const
 {
 	if (!PS) return false;
@@ -795,7 +961,11 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 	int32& PlayerDeaths = PlayerDeathCounts.FindOrAdd(DeadPS);
 	PlayerDeaths++;
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s died (Team %d, death #%d). Respawn in %.1fs"),
+	// A shared counter can make every surviving teammate's next death final at
+	// this instant, so do not wait for the next one-second round-clock tick.
+	CheckFinalLifeAnnouncements(TeamIndex);
+
+	UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s died (Team %d, death #%d). Respawn in %.1fs"),
 		*DeadPS->PlayerName, TeamIndex,
 		(TeamIndex == 0) ? Team0DeathCount : Team1DeathCount,
 		RespawnDelay);
@@ -863,7 +1033,7 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 		return;
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: Respawn timer fired for %s"), *PS->PlayerName);
+	UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: Respawn timer fired for %s"), *PS->PlayerName);
 
 	// Remove from pending list
 	PendingRespawns.Remove(PS);
@@ -904,8 +1074,13 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 
 		// Notify Blueprint
 		BP_OnPlayerRespawnedMidRound(PS);
+		CheckFinalLifeAnnouncements();
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1);
+		UpdateClutchHoldTransitions(Alive0, Alive1);
 
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s respawned successfully"), *PS->PlayerName);
+		UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s respawned successfully"), *PS->PlayerName);
 	}
 	else
 	{
@@ -989,6 +1164,10 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 
 	AUTPlayerState* OtherPS = Other ? Cast<AUTPlayerState>(Other->PlayerState) : nullptr;
 	if (!OtherPS) return;
+	// Decide the bad-spawn refund before publishing any clutch transition. The
+	// refund restores this life, so it must not award progress or flash DENIED.
+	const bool bRefundBadSpawnDeath = !bInSuddenDeath
+		&& WasBadSpawnDeath(OtherPS, Killer, Other);
 
 	// Track the killing blow for potential replay
 	if (Killer && Killer->PlayerState)
@@ -1000,6 +1179,30 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 			RoundWinningKiller = OtherPS;
 		}
 		WinningKillerPawn = Killer->GetPawn();   // focus actor for the instant replay (BroadcastKillReplay)
+	}
+
+	// --- Clutch/LMS-hold telemetry, in strict order for this death event ---
+	// Credit BEFORE the death close: a holder who trades with the last enemy
+	// must keep the kill that made it a trade.
+	if (!bRefundBadSpawnDeath && Killer && Killer->PlayerState)
+	{
+		if (AUTPlayerState* KillerPS = Cast<AUTPlayerState>(Killer->PlayerState))
+		{
+			if (KillerPS != OtherPS)   // suicides/self-damage credit nothing
+			{
+				CreditClutchHoldKill(KillerPS, OtherPS);
+			}
+		}
+	}
+	// The holder dying ends their hold. GetAliveCounts is not consulted here:
+	// this pawn is not marked out-of-lives until further down, so an alive-count
+	// read at this point would still include the player who just died.
+	for (int32 T = 0; !bRefundBadSpawnDeath && T < 2; ++T)
+	{
+		if (ActiveHold[T].bOpen && ActiveHold[T].Holder.Get() == OtherPS)
+		{
+			CloseClutchHold(T, TEXT("died"));
+		}
 	}
 
 	// Death recap (the per-life "You dealt N to X | They dealt M to you" system-chat
@@ -1033,7 +1236,7 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 		});
 		GetWorldTimerManager().SetTimer(SuddenDeathSpecHandle, SpecDelegate, SpectateDelay, false);
 	}
-	else if (WasBadSpawnDeath(OtherPS, Killer, Other))
+	else if (bRefundBadSpawnDeath)
 	{
 		// Bad-spawn artifact (engine ejected them off/under the map shortly after
 		// spawning): refund it — undo the death, free instant respawn, and do NOT
@@ -1046,6 +1249,19 @@ void AUWipeoutGame::ScoreKill_Implementation(AController* Killer, AController* O
 	{
 		// Normal: start the escalating respawn timer
 		StartRespawnTimer(OtherPS);
+	}
+
+	// Publish exact remaining-enemy counts and open/close transitions now;
+	// DefaultTimer retains this same idempotent path as a one-second fallback.
+	// A refunded bad-spawn death is physically pawnless until next tick even
+	// though its life has already been restored, so sampling it here would open
+	// a false 2->1 hold and immediately close it as HELD after the respawn.
+	if (!bRefundBadSpawnDeath)
+	{
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1);
+		UpdateClutchHoldTransitions(Alive0, Alive1);
 	}
 
 	// Check for wipeout with a brief grace period
@@ -1189,6 +1405,9 @@ void AUWipeoutGame::StartNextRound()
 		bRoundInProgress = false;
 		return;
 	}
+	// Defensive clear: normal round endings close every hold, while admin or
+	// exceptional paths must not carry one into the next round.
+	DiscardOpenClutchHolds();
 
 	if (bAnnounceTeam)
 	{
@@ -1203,6 +1422,7 @@ void AUWipeoutGame::StartNextRound()
 	Team0DeathCount = 0;
 	Team1DeathCount = 0;
 	PlayerDeathCounts.Empty();
+	FinalLifeAnnouncedPlayers.Empty();
 	CancelAllPendingRespawns();
 	SpawnProtectedUntil.Empty();
 	LinkHealAccumulator.Empty();
@@ -1219,6 +1439,18 @@ void AUWipeoutGame::StartNextRound()
 	ResetPlayersForNewRound();
 	ResetSpawnSelectionForNewRound();
 	SelectSpawnLayoutForRound();
+
+	int32 HybridTeam0Players = 0;
+	int32 HybridTeam1Players = 0;
+	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+	{
+		AController* C = It->Get();
+		AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
+		if (!PS || PS->bOnlySpectator || !PS->Team) continue;
+		if (PS->Team->TeamIndex == 0) ++HybridTeam0Players;
+		else if (PS->Team->TeamIndex == 1) ++HybridTeam1Players;
+	}
+	PrepareHybridRoundSpawnQueues(HybridTeam0Players, HybridTeam1Players);
 
 	// Fallback if layout selection failed
 	if (Team0SelectedSpawns.Num() == 0 || Team1SelectedSpawns.Num() == 0)
@@ -1269,6 +1501,7 @@ void AUWipeoutGame::StartNextRound()
 		FirstTeam, SecondTeam);
 
 	bAllowPlayerRespawns = false;
+	ClearHybridRoundSpawnState();
 
 	UE_LOG(LogGameMode, Warning, TEXT("Wipeout round starting: Team0=%d, Team1=%d"), Team0StartingSize, Team1StartingSize);
 
@@ -1293,6 +1526,10 @@ void AUWipeoutGame::StartNextRound()
 		BP_OnSetIntermission(false, 0);
 		GS->ForceNetUpdate();
 	}
+
+	// Handles custom rounds whose opening clock is already shorter than a
+	// player's first possible respawn window.
+	CheckFinalLifeAnnouncements();
 
 	// Reset pickup timers at round start so Shield Belt and UDamage
 	// respawn on a clean schedule each round
@@ -1328,6 +1565,20 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 	LastRoundWinningTeamIndex = WinnerTeamIndex;
 	TotalRoundsPlayed++;
 
+	// Close any hold still open as the round ends. A holder whose team WON the
+	// round wiped the enemies out and gets "won"; anything else ended
+	// underneath them (clock, abort, opposing wipe) and gets "round_end", which
+	// is scored as neither a success nor a failed hold. Runs BEFORE
+	// CancelAllPendingRespawns so a respawn cancelled by the round ending can
+	// never be mistaken for a reinforcement.
+	for (int32 T = 0; T < 2; ++T)
+	{
+		if (ActiveHold[T].bOpen)
+		{
+			CloseClutchHold(T, (T == WinnerTeamIndex) ? TEXT("won") : TEXT("round_end"));
+		}
+	}
+
 	StopOvertime();
 	CancelAllPendingRespawns();
 
@@ -1355,6 +1606,7 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					P.UniqueId = UTPS->UniqueId.IsValid()
 						? UTPS->UniqueId.ToString()
 						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					P.PlayerName = UTPS->PlayerName;
 					P.Kills    = UTPS->RoundKills;
 					// Wipeout has mid-round respawns, so a single bOutOfLives flag
 					// at round-end can under-count actual deaths. PlayerDeathCounts
@@ -1378,6 +1630,7 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				const int32 LoserIdx = (WinnerTeamIndex == 0) ? 1 : 0;
 				RoundResult.WinnerTeam = BuildPerf(WinnerTeamIndex);
 				RoundResult.LoserTeam  = BuildPerf(LoserIdx);
+				RoundResult.WinnerTeamIndex = WinnerTeamIndex;
 			}
 
 			RatingSystem->ProcessRound(RoundResult);
@@ -1415,13 +1668,36 @@ void AUWipeoutGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 
 		if (bCanEndMatch)
 		{
-			BroadcastKillReplay();
+			// A replay only actually plays off-standalone and when a winning kill was
+			// captured — the same three fields BroadcastKillReplay self-guards on.
+			const bool bIsReplayGoingToPlay = (GetNetMode() != NM_Standalone)
+				&& RoundWinningKiller != nullptr
+				&& RoundWinningKillTime > 0.f
+				&& WinningKillerPawn != nullptr;
+			if (bIsReplayGoingToPlay)
+			{
+				BroadcastKillReplay();
+			}
 			UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Team %d wins the match!"), WinnerTeamIndex);
 
+			// POST-GAME CRASH FIX. Firing EndGame mid-replay destroys WinningKillerPawn while
+			// the client's replay thread is still resolving its NetworkGUID —
+			// EXCEPTION_ACCESS_VIOLATION in TaskGraphThreadNP / CoreUObject.dll. It presents as
+			// an intermittent "random crash right after the match ends", because whether the
+			// client is mid-resolve when EndGame lands is a race.
+			//
+			// ClientPlayInstantReplay arms its own stop at TimeToRewind + StartDelay
+			// (UTPlayerController.cpp:4970-4974), and BroadcastKillReplay passes
+			// TimeToRewind = (now - RoundWinningKillTime) + 5.0 with StartDelay = 0.5 — so the
+			// playback runs 5.5s AT MINIMUM, and longer the further back the winning kill was.
+			// The old unconditional 1.0f therefore ALWAYS landed mid-playback.
+			//
+			// Mirrors the fix already proven in AElimPlusGame::EndRoundForTeam.
+			const float EndGameDelay = bIsReplayGoingToPlay ? 7.0f : 0.5f;
 			FTimerHandle UnusedHandle;
 			FTimerDelegate TimerDel;
 			TimerDel.BindUFunction(this, FName("DelayedEndGame"), WinnerTeamIndex, FName(TEXT("ScoreLimit")));
-			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, 1.0f, false);
+			GetWorldTimerManager().SetTimer(UnusedHandle, TimerDel, EndGameDelay, false);
 			return;
 		}
 	}
@@ -1571,12 +1847,52 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		|| GetMatchState() == MatchState::WaitingToStart
 		|| bIsLateJoiner || bIsReconnect);
 
+	if (!bShouldAllowSpawn)
+	{
+		// Refused mid-round (chiefly a reconnect during sudden death, which
+		// bIsReconnect deliberately excludes): the controller is left pawn-less in
+		// NAME_Spectating with no view target, which IS the free-fly camera.
+		if (AUTPlayerController* PC = Cast<AUTPlayerController>(NewPlayer))
+		{
+			if (bRoundInProgress && NCPlusRoundSpectate::ShouldLock(PC, PS))
+			{
+				NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+			}
+		}
+	}
+
 	if (bShouldAllowSpawn)
 	{
 		AActor* ChosenStart = nullptr;
+		const int32 TeamIndex = (PS && PS->Team) ? PS->Team->TeamIndex : INDEX_NONE;
+		FTransform HybridTransform;
+		bool bUsedHybridTransform = false;
+
+		if (bHybridRoundSpawnWindow && (TeamIndex == 0 || TeamIndex == 1))
+		{
+			bUsedHybridTransform = TryConsumeHybridSpawnTransform(TeamIndex, HybridTransform);
+			if (bUsedHybridTransform)
+			{
+				const TArray<APlayerStart*>& PreferredStarts =
+					(TeamIndex == 0) ? Team0SelectedSpawns : Team1SelectedSpawns;
+				ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+					PreferredStarts, HybridTransform.GetLocation());
+				if (!ChosenStart)
+				{
+					ChosenStart = FNCHybridSpawnGenerator::FindNearestPlayerStart(
+						AllSpawnPointsList, HybridTransform.GetLocation());
+				}
+			}
+			else
+			{
+				UE_LOG(LogGameMode, Warning,
+					TEXT("Wipeout hybrid opening queue exhausted for %s (team %d); using PlayerStart fallback"),
+					PS ? *PS->PlayerName : TEXT("Unknown"), TeamIndex);
+			}
+		}
 
 		// Determine if this is a round-start spawn or mid-round respawn
-		if (bRoundInProgress && Team0StartingSize > 0)
+		if (!ChosenStart && bRoundInProgress && Team0StartingSize > 0)
 		{
 			// Mid-round respawn — use dynamic spawn selection away from enemies
 			ChosenStart = ChooseMidRoundSpawn(NewPlayer);
@@ -1588,16 +1904,42 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 			ChosenStart = ChoosePlayerStart_Implementation(NewPlayer);
 		}
 
+		if (!ChosenStart)
+		{
+			bUsedHybridTransform = false;
+		}
+		bHasPendingHybridSpawnTransform = bUsedHybridTransform && (ChosenStart != nullptr);
+		if (bHasPendingHybridSpawnTransform)
+		{
+			PendingHybridSpawnTransform = HybridTransform;
+		}
+		// The watchdog anchor must be an independently safe authored start. Using
+		// the hybrid transform here made a transform on an under-map surface its
+		// own recovery destination, so the watchdog could never rescue it.
+		const FVector IntendedSpawnLocation = ChosenStart
+			? ChosenStart->GetActorLocation()
+			: FVector::ZeroVector;
+
 		OverriddenPlayerStart = ChosenStart;
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
+		bHasPendingHybridSpawnTransform = false;
+
+		if (bUsedHybridTransform && NewPlayer->GetPawn())
+		{
+			FRotator SpawnRotation = HybridTransform.Rotator();
+			SpawnRotation.Pitch = 0.f;
+			SpawnRotation.Roll = 0.f;
+			NewPlayer->SetControlRotation(SpawnRotation);
+			NewPlayer->ClientSetRotation(SpawnRotation, true);
+		}
 
 		// Bad-spawn remediation: the start is fine, but engine collision handling
 		// can eject the fresh pawn off/under the map. Watch it briefly and snap
 		// it back to the intended start if that happens.
-		if (NewPlayer->GetPawn() && ChosenStart)
+		if (NewPlayer->GetPawn() && (bUsedHybridTransform || ChosenStart))
 		{
-			ArmSpawnRemediation(NewPlayer->GetPawn(), ChosenStart->GetActorLocation());
+			ArmSpawnRemediation(NewPlayer->GetPawn(), IntendedSpawnLocation);
 		}
 
 		// Ping-compensated spawn: hide pawn until client confirms control.
@@ -1880,7 +2222,7 @@ AActor* AUWipeoutGame::ChooseMidRoundSpawn(AController* Player)
 
 	if (BestSpawn)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Mid-round spawn for %s at %s (dist from enemy: %.0f)"),
+		UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: Mid-round spawn for %s at %s (dist from enemy: %.0f)"),
 			*PS->PlayerName, *BestSpawn->GetName(), BestMinDist);
 		return BestSpawn;
 	}
@@ -2053,7 +2395,7 @@ AActor* AUWipeoutGame::ChoosePlayerStart_Implementation(AController* Player)
 		}
 	}
 
-	UE_LOG(LogGameMode, Log, TEXT("Wipeout: %s (team %d) assigned spawn at %s (curated pool %d)"),
+	UE_LOG(LogGameMode, Verbose, TEXT("Wipeout: %s (team %d) assigned spawn at %s (curated pool %d)"),
 		*PS->PlayerName, TeamIndex,
 		BestSpawn ? *BestSpawn->GetActorLocation().ToString() : TEXT("NONE"),
 		MySpawns.Num());
@@ -2073,22 +2415,84 @@ AActor* AUWipeoutGame::FindPlayerStart_Implementation(AController* Player, const
 
 
 // ============================================================================
-// SPAWN PAWN (AlwaysSpawn to prevent collisions on stack spawns)
+// SPAWN PAWN — tiered: adjust-or-fail → shoulder offsets → AlwaysSpawn fallback
 // ============================================================================
 
 APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot)
 {
-	FRotator StartRotation(ForceInit);
-	StartRotation.Yaw = StartSpot->GetActorRotation().Yaw;
-	FVector StartLocation = StartSpot->GetActorLocation();
+	if (!StartSpot && !bHasPendingHybridSpawnTransform)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout::SpawnDefaultPawnFor: no PlayerStart or hybrid transform"));
+		return nullptr;
+	}
 
+	const bool bUsingHybridTransform = bHasPendingHybridSpawnTransform;
+	FRotator StartRotation(ForceInit);
+	StartRotation.Yaw = bUsingHybridTransform
+		? PendingHybridSpawnTransform.Rotator().Yaw
+		: StartSpot->GetActorRotation().Yaw;
+	FVector StartLocation = bUsingHybridTransform
+		? PendingHybridSpawnTransform.GetLocation()
+		: StartSpot->GetActorLocation();
+
+	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
+	if (!PawnClass)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("Wipeout::SpawnDefaultPawnFor: No PawnClass for %s"), *GetNameSafe(NewPlayer));
+		return nullptr;
+	}
+
+	// Tiered spawn, mirroring ElimPlus and the engine adjust-first default the
+	// original Absolute mode relied on. The old single raw AlwaysSpawn at the
+	// transform was why residual bad hybrid candidates were EXPOSED verbatim in
+	// Wipeout — pawns planted inside geometry their own capsule collides with —
+	// while ElimPlus's pattern masked the same class. Every path still ends in an
+	// AlwaysSpawn, so round-start stack spawns can never fail outright.
+	// --- ATTEMPT 1: adjust-or-fail at the exact transform ---
 	FActorSpawnParameters SpawnInfo;
 	SpawnInfo.Instigator = Instigator;
 	SpawnInfo.ObjectFlags |= RF_Transient;
-	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	UClass* PawnClass = GetDefaultPawnClassForController(NewPlayer);
+	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 	APawn* ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation), SpawnInfo);
+
+	// --- ATTEMPT 2: cardinal shoulder-width offsets (just outside a 40uu capsule) ---
+	if (!ResultPawn)
+	{
+		const FVector Offsets[] = {
+			FVector(45.f,   0.f, 0.f),
+			FVector(-45.f,  0.f, 0.f),
+			FVector(0.f,   45.f, 0.f),
+			FVector(0.f,  -45.f, 0.f),
+		};
+		for (const FVector& Offset : Offsets)
+		{
+			ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, StartLocation + Offset), SpawnInfo);
+			if (ResultPawn)
+			{
+				UE_LOG(LogGameMode, Log, TEXT("Wipeout::SpawnDefaultPawnFor: Used offset spawn at %s"), *GetNameSafe(StartSpot));
+				break;
+			}
+		}
+	}
+
+	// --- ATTEMPT 3: force spawn. A hybrid transform that failed every
+	// collision-aware attempt must not be its own recovery destination — force
+	// at the AUTHORED start instead; micro-jitter prevents two force-spawned
+	// pawns sharing an exact origin (physics explosion). ---
+	if (!ResultPawn)
+	{
+		if (bUsingHybridTransform && StartSpot)
+		{
+			StartLocation = StartSpot->GetActorLocation();
+			StartRotation.Yaw = StartSpot->GetActorRotation().Yaw;
+			UE_LOG(LogGameMode, Warning,
+				TEXT("Wipeout::SpawnDefaultPawnFor: Hybrid transform blocked; falling back to authored PlayerStart %s"),
+				*GetNameSafe(StartSpot));
+		}
+		SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		const FVector JitteredLocation = StartLocation + FVector(FMath::RandRange(-10.f, 10.f), FMath::RandRange(-10.f, 10.f), 0.f);
+		ResultPawn = GetWorld()->SpawnActor<APawn>(PawnClass, FTransform(StartRotation, JitteredLocation), SpawnInfo);
+	}
 
 	if (!ResultPawn)
 	{
@@ -2107,8 +2511,10 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 // CheckRelevance — Strip pickups not appropriate for Wipeout:
 //   - Remove Redeemer weapon base (and its weapon)
 //   - Remove ALL health pickups and vials
-//   - Remove armor EXCEPT ShieldBelt
-//   - Remove powerups EXCEPT UDamage/Amp
+//   - Remove armor EXCEPT ShieldBelt and ThighPads; stash the first
+//     Chest/Vest for the belt substitution
+//   - Preserve UDamage/Amp and Berserk; record non-Amp timed-powerup spots for
+//     Siphon before removing the originals that Wipeout does not keep
 //   - Keep all other weapon bases (ammo refill encourages movement)
 // ---------------------------------------------------------------------------
 bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
@@ -2154,7 +2560,47 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 	AUTPickupInventory* InvPickup = Cast<AUTPickupInventory>(Other);
 	if (InvPickup && InvPickup->GetInventoryType())
 	{
-		FString InvName = InvPickup->GetInventoryType()->GetName();
+		UClass* InvClass = *InvPickup->GetInventoryType();
+		FString InvName = InvClass->GetName();
+
+		// A map-authored Siphon already satisfies the placement requirement. Keep
+		// it and suppress the deferred replacement spawn.
+		if (IsSiphonInventoryClass(InvClass))
+		{
+			const bool bRelevant = Super::CheckRelevance_Implementation(Other);
+			if (bRelevant)
+			{
+				SiphonPickup = InvPickup;
+			}
+			return bRelevant;
+		}
+
+		// Capture the authored spot before Wipeout removes powerups such as Invis
+		// or Vengeance. Berserk currently survives until the Siphon replacement
+		// succeeds; the weak pointer lets us remove that live source afterward.
+		int32 CapturedSiphonCandidateIndex = INDEX_NONE;
+		if (IsSiphonPowerupCandidate(InvClass))
+		{
+			CapturedSiphonCandidateIndex = SiphonPowerupCandidates.Emplace(
+				InvPickup->GetActorTransform(),
+				InvPickup->GetPathName(),
+				InvName,
+				InvPickup,
+				GetSiphonPowerupPriority(InvClass));
+		}
+
+		// Keep: UDamage / Amp / Berserk / Siphon
+		if (IsAmpInventoryClass(InvClass) || IsBerserkInventoryClass(InvClass) || InvName.Contains(TEXT("Siphon")))
+		{
+			const bool bRelevant = Super::CheckRelevance_Implementation(Other);
+			if (!bRelevant && CapturedSiphonCandidateIndex != INDEX_NONE)
+			{
+				// Respect a downstream mutator that deliberately removes a powerup
+				// Wipeout itself intended to keep (normally this is Berserk).
+				SiphonPowerupCandidates.RemoveAt(CapturedSiphonCandidateIndex);
+			}
+			return bRelevant;
+		}
 
 		// Keep: ShieldBelt
 		if (InvName.Contains(TEXT("ShieldBelt")))
@@ -2163,20 +2609,20 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
-		// Keep: UDamage / Amp / Siphon
-		if (InvName.Contains(TEXT("UDamage")) || InvName.Contains(TEXT("Amp")) || InvName.Contains(TEXT("Berserk")) || InvName.Contains(TEXT("Siphon")))
+		// Keep: thigh pads — spawn normally with stock respawn cadence (2026-08-06)
+		if (InvName.Contains(TEXT("ThighPads")))
 		{
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
-		// Stash the first Chest/Vest pickup — might become a ShieldBelt later
+		// Stash the first Chest/Vest pickup — a fresh belt base replaces it later
 		if (!PendingVestPickup && InvName.Contains(TEXT("Armor_Chest")))
 		{
 			PendingVestPickup = InvPickup;
 			return Super::CheckRelevance_Implementation(Other); // keep alive for now
 		}
 
-		// Remove everything else (Thighpads, extra Chests, Helmet, Jumpboots, Invisibility, etc.)
+		// Remove everything else (extra Chests, Helmet, Jumpboots, Invisibility, etc.)
 		return false;
 	}
 
@@ -2294,6 +2740,52 @@ void AUWipeoutGame::CreditHealing(AUTPlayerState* HealerPS, int32 Amount)
 	Total += Amount;
 }
 
+int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmount,
+	AUTPlayerState* HealerPS)
+{
+	if (!HasAuthority() || Target == nullptr || HealAmount <= 0)
+	{
+		return 0;
+	}
+	// Never revive: a heal-over-time tick that lands on the same frame as a
+	// death would otherwise put a corpse back on positive health.
+	if (Target->IsDead() || Target->IsPendingKillPending() || Target->Health <= 0)
+	{
+		return 0;
+	}
+
+	const int32 OldHealth = Target->Health;
+	// Clamp to HealthMax, and never move Health DOWN — HealthMax can be below
+	// current Health when a pickup has overcharged the pawn, and a "heal" that
+	// removes HP would be worse than doing nothing.
+	const int32 NewHealth = FMath::Max(OldHealth,
+		FMath::Min(OldHealth + HealAmount, Target->HealthMax));
+	const int32 Actual = NewHealth - OldHealth;
+	if (Actual <= 0)
+	{
+		return 0;   // already full (or overcharged): nothing applied, nothing credited
+	}
+
+	Target->Health = NewHealth;
+
+	// Applied above regardless; credited only when it helped someone else.
+	if (HealerPS != nullptr && Target->PlayerState != HealerPS)
+	{
+		CreditHealing(HealerPS, Actual);
+	}
+	return Actual;
+}
+
+int32 AUWipeoutGame::GetHealingDoneForPlayer(AUTPlayerState* PS) const
+{
+	if (PS == nullptr)
+	{
+		return 0;
+	}
+	const int32* Found = HealingDoneThisMatch.Find(PS);
+	return (Found != nullptr) ? *Found : 0;
+}
+
 // ============================================================================
 // SCORE DAMAGE (damage tracking for achievements)
 // ============================================================================
@@ -2306,14 +2798,16 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 	if (UTGameState->OnSameTeam(Victim, Attacker)) return;
 	if (!bRoundInProgress || !Attacker->Team || DamageAmount <= 0) return;
 
-	// Calculate actual damage dealt (no overkill)
-	int32 ActualDamage = DamageAmount;
-	if (Victim && Victim->GetUTCharacter())
-	{
-		AUTCharacter* VictimChar = Victim->GetUTCharacter();
-		int32 TotalHP = VictimChar->Health + FMath::FloorToInt(VictimChar->GetArmorAmount());
-		ActualDamage = FMath::Min(DamageAmount, TotalHP);
-	}
+	// Bound the credit, don't re-derive it: the only game-mode ScoreDamage
+	// caller (stock UTCharacter::TakeDamage :1023) already clamps DamageAmount
+	// to the HP+armor the hit actually removed, and by the time it calls us the
+	// victim's Health is post-decrement — so capping against the REMAINING pool
+	// credited every killing blow 0 (Health <= 0) and a just-telefragged body
+	// ~-100k (ut4stats match 3321 stored -99512 and +100180 in rounds[]). The
+	// raw telefrag sentinel (100000) only reaches us when the pawn is already
+	// destroyed, so one flat bound covers both branches: 300 > any legitimate
+	// single hit (100 HP + 150 armor).
+	int32 ActualDamage = FMath::Clamp(DamageAmount, 0, 300);
 
 	if (!PlayerRoundDamage.Contains(Attacker))
 	{
@@ -2438,6 +2932,27 @@ void AUWipeoutGame::ResetPlayersForNewRound()
 			Pawn->Destroy();
 		}
 	}
+
+	// The controller pass cannot see a live pawn that was unpossessed earlier in
+	// the round. Such an orphan survives CleanupWorldForNewRound() (which only
+	// removes dead characters), and stock true-spectator TacCom outlines every
+	// AUTCharacter it finds, exposing the orphan as a frozen X-ray ghost. This
+	// reset runs before the next round's pawns are spawned, so every character
+	// still present here is stale.
+	TArray<AUTCharacter*> LeftoverCharacters;
+	for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+	{
+		AUTCharacter* UTC = Cast<AUTCharacter>(It->Get());
+		if (UTC && !UTC->IsPendingKill())
+		{
+			LeftoverCharacters.Add(UTC);
+		}
+	}
+
+	for (AUTCharacter* UTC : LeftoverCharacters)
+	{
+		UTC->Destroy();
+	}
 }
 
 
@@ -2473,7 +2988,8 @@ void AUWipeoutGame::CleanupWorldForNewRound()
 // ALIVE COUNTS & HELPERS
 // ============================================================================
 
-bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) const
+bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1,
+	const AUTPlayerState* IgnoredPlayer) const
 {
 	OutAliveTeam0 = 0;
 	OutAliveTeam1 = 0;
@@ -2484,7 +3000,7 @@ bool AUWipeoutGame::GetAliveCounts(int32& OutAliveTeam0, int32& OutAliveTeam1) c
 	for (APlayerState* PSBase : GS->PlayerArray)
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(PSBase);
-		if (!PS || PS->bOnlySpectator || PS->bIsInactive || !PS->Team) continue;
+		if (!PS || PS == IgnoredPlayer || PS->bOnlySpectator || PS->bIsInactive || !PS->Team) continue;
 
 		AUTCharacter* Pawn = Cast<AUTCharacter>(PS->GetUTCharacter());
 		if (!Pawn || Pawn->IsDead() || Pawn->Health <= 0) continue;
@@ -2575,6 +3091,31 @@ void AUWipeoutGame::DelayedInitialWinCheck()
 // SPECTATING
 // ============================================================================
 
+void AUWipeoutGame::EnforceRoundSpectatorLock()
+{
+	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
+		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		if (!NCPlusRoundSpectate::ShouldLock(PC, PS))
+		{
+			continue;
+		}
+		NCPlusRoundSpectate::Lock(PC, FindAliveTeammate(PS));
+	}
+}
+
 void AUWipeoutGame::ForceTeamSpectate(AUTPlayerState* DeadPS)
 {
 	if (!DeadPS) return;
@@ -2652,7 +3193,8 @@ AUTPlayerState* AUWipeoutGame::FindAliveEnemy(AUTPlayerState* PS) const
 }
 
 
-AUTPlayerState* AUWipeoutGame::FindAliveOnTeamPS(int32 TeamIndex) const
+AUTPlayerState* AUWipeoutGame::FindAliveOnTeamPS(
+	int32 TeamIndex, const AUTPlayerState* IgnoredPlayer) const
 {
 	if (!Teams.IsValidIndex(TeamIndex)) return nullptr;
 	TArray<AController*> Members = Teams[TeamIndex]->GetTeamMembers();
@@ -2660,7 +3202,7 @@ AUTPlayerState* AUWipeoutGame::FindAliveOnTeamPS(int32 TeamIndex) const
 	{
 		if (!C) continue;
 		AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState);
-		if (!PS || PS->bOnlySpectator) continue;
+		if (!PS || PS == IgnoredPlayer || PS->bOnlySpectator) continue;
 		APawn* P = C->GetPawn();
 		const AUTCharacter* UTC = Cast<AUTCharacter>(P);
 		if (P && (!UTC || !UTC->IsDead())) return PS;
@@ -3096,18 +3638,104 @@ void AUWipeoutGame::SelectSpawnLayoutForRound()
 	for (int32 i = 0; i < Team0SelectedSpawns.Num(); i++)
 	{
 		if (Team0SelectedSpawns[i])
-			UE_LOG(LogGameMode, Log, TEXT("  T0[%d] = %s"), i, *Team0SelectedSpawns[i]->GetActorLocation().ToString());
+			UE_LOG(LogGameMode, Verbose, TEXT("  T0[%d] = %s"), i, *Team0SelectedSpawns[i]->GetActorLocation().ToString());
 	}
 	for (int32 i = 0; i < Team1SelectedSpawns.Num(); i++)
 	{
 		if (Team1SelectedSpawns[i])
-			UE_LOG(LogGameMode, Log, TEXT("  T1[%d] = %s"), i, *Team1SelectedSpawns[i]->GetActorLocation().ToString());
+			UE_LOG(LogGameMode, Verbose, TEXT("  T1[%d] = %s"), i, *Team1SelectedSpawns[i]->GetActorLocation().ToString());
 	}
+}
+
+void AUWipeoutGame::PrepareHybridRoundSpawnQueues(int32 Team0PlayerCount, int32 Team1PlayerCount)
+{
+	ClearHybridRoundSpawnState();
+	if (Team0PlayerCount <= 0 && Team1PlayerCount <= 0)
+	{
+		return;
+	}
+	if (!bEnableHybridRoundSpawns)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("[HybridSpawn] Wipeout disabled by config; using PlayerStart-only opening spawns (players %d/%d)"),
+			Team0PlayerCount, Team1PlayerCount);
+		return;
+	}
+
+	FNCHybridSpawnSettings Settings;
+	Settings.MinimumCrossTeamDistance = MinimumEnemySpawnDistance;
+
+	FNCHybridSpawnResult Result;
+	if (!FNCHybridSpawnGenerator::Generate(
+		GetWorld(), AllSpawnPointsList, Team0SelectedSpawns, Team1SelectedSpawns,
+		Team0PlayerCount, Team1PlayerCount, Settings, Result))
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("Wipeout hybrid opening spawn generation had no safe anchor pair; using PlayerStart fallback"));
+		return;
+	}
+	Team0HybridSpawnQueue = MoveTemp(Result.Team0Queue);
+	Team1HybridSpawnQueue = MoveTemp(Result.Team1Queue);
+	bHybridRoundSpawnWindow = Team0HybridSpawnQueue.Num() > 0 || Team1HybridSpawnQueue.Num() > 0;
+
+	UE_LOG(LogGameMode, Warning,
+		TEXT("[HybridSpawn] Wipeout active: anchors %s/%s, separation %.0f, radius %.0f, players %d/%d, queues %d/%d"),
+		*Result.Team0AnchorName.ToString(), *Result.Team1AnchorName.ToString(),
+		Result.AnchorDistance2D, Result.TeamRadius, Team0PlayerCount, Team1PlayerCount,
+		Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+
+	if (!Result.bTeam0Complete || !Result.bTeam1Complete)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("Wipeout hybrid opening queues are partial (needed %d/%d, built %d/%d); missing players use the existing fallback"),
+			Team0PlayerCount, Team1PlayerCount,
+			Team0HybridSpawnQueue.Num(), Team1HybridSpawnQueue.Num());
+	}
+
+	UE_LOG(LogGameMode, Verbose,
+		TEXT("Wipeout hybrid rejects T0[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d] T1[R=%d L=%d F=%d S=%d Z=%d C=%d D=%d K=%d P=%d V=%d]"),
+		Result.Team0Stats.RejectedRadius, Result.Team0Stats.RejectedPath,
+		Result.Team0Stats.RejectedFloor,
+		Result.Team0Stats.RejectedSlope, Result.Team0Stats.RejectedDrop,
+		Result.Team0Stats.RejectedClearance,
+		Result.Team0Stats.RejectedSpacing, Result.Team0Stats.RejectedKillZ,
+		Result.Team0Stats.RejectedPit, Result.Team0Stats.RejectedPainVolume,
+		Result.Team1Stats.RejectedRadius, Result.Team1Stats.RejectedPath,
+		Result.Team1Stats.RejectedFloor,
+		Result.Team1Stats.RejectedSlope, Result.Team1Stats.RejectedDrop,
+		Result.Team1Stats.RejectedClearance,
+		Result.Team1Stats.RejectedSpacing, Result.Team1Stats.RejectedKillZ,
+		Result.Team1Stats.RejectedPit, Result.Team1Stats.RejectedPainVolume);
+}
+
+bool AUWipeoutGame::TryConsumeHybridSpawnTransform(int32 TeamIndex, FTransform& OutTransform)
+{
+	TArray<FTransform>* Queue = nullptr;
+	if (TeamIndex == 0) Queue = &Team0HybridSpawnQueue;
+	else if (TeamIndex == 1) Queue = &Team1HybridSpawnQueue;
+
+	if (!Queue || Queue->Num() == 0)
+	{
+		return false;
+	}
+
+	OutTransform = (*Queue)[0];
+	Queue->RemoveAt(0, 1, false);
+	return true;
+}
+
+void AUWipeoutGame::ClearHybridRoundSpawnState()
+{
+	bHybridRoundSpawnWindow = false;
+	bHasPendingHybridSpawnTransform = false;
+	Team0HybridSpawnQueue.Empty();
+	Team1HybridSpawnQueue.Empty();
 }
 
 
 void AUWipeoutGame::ResetSpawnSelectionForNewRound()
 {
+	ClearHybridRoundSpawnState();
 	Team0SelectedSpawns.Empty();
 	Team1SelectedSpawns.Empty();
 	++CurrentRoundNumber;
@@ -3493,6 +4121,8 @@ void AUWipeoutGame::HandleInstanceCleanup()
 
 void AUWipeoutGame::Logout(AController* Exiting)
 {
+	AUTPlayerState* DepartingPS = Exiting
+		? Cast<AUTPlayerState>(Exiting->PlayerState) : nullptr;
 	if (bCompetitiveAutoPause && IsMatchInProgress() && !HasMatchEnded() && !GetWorld()->IsPaused())
 	{
 		if (Exiting)
@@ -3508,18 +4138,39 @@ void AUWipeoutGame::Logout(AController* Exiting)
 
 	if (Exiting)
 	{
-		AUTPlayerState* PS = Cast<AUTPlayerState>(Exiting->PlayerState);
+		AUTPlayerState* PS = DepartingPS;
 		if (PS)
 		{
+			for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+			{
+				if (ActiveHold[TeamIndex].bOpen
+					&& ActiveHold[TeamIndex].Holder.Get() == PS)
+				{
+					CloseClutchHold(TeamIndex, TEXT("died"));
+				}
+			}
 			// Clean up all tracking maps to prevent stale pointer access
 			PlayerRoundDamage.Remove(PS);
 			PlayerDeathCounts.Remove(PS);
+			FinalLifeAnnouncedPlayers.Remove(PS);
 			CancelPendingRespawn(PS);
 			SpawnProtectedUntil.Remove(PS);
 		}
 	}
 
 	Super::Logout(Exiting);
+
+	// Controller cleanup removes PlayerState only after Logout returns. Exclude
+	// it explicitly so active 1vX counts and any newly-created sole survivor are
+	// correct immediately, even while competitive auto-pause freezes timers.
+	if (HasAuthority() && bRoundInProgress && DepartingPS
+		&& !DepartingPS->bOnlySpectator && DepartingPS->Team)
+	{
+		int32 Alive0 = 0;
+		int32 Alive1 = 0;
+		GetAliveCounts(Alive0, Alive1, DepartingPS);
+		UpdateClutchHoldTransitions(Alive0, Alive1, DepartingPS);
+	}
 }
 
 
@@ -3533,6 +4184,7 @@ void AUWipeoutGame::BP_RestartCurrentRound()
 	if (bWarmupMode || !HasMatchStarted()) return;
 
 	UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Admin restarting current round"));
+	DiscardOpenClutchHolds();
 
 	StopOvertime();
 	CancelAllPendingRespawns();
@@ -3592,7 +4244,8 @@ void AUWipeoutGame::ResetPickupTimers()
 
 		float DelaySeconds = 0.f;
 
-		// Shield Belt — spawn 60s into the round
+		// Shield Belt — spawn 60s into the round (the substituted belt's
+		// inventory is stock Armor_ShieldBelt_C, so the name check covers it)
 		if (ClassName.Contains(TEXT("ShieldBelt")))
 		{
 			DelaySeconds = 60.f;
@@ -3604,7 +4257,7 @@ void AUWipeoutGame::ResetPickupTimers()
 		}
 		else
 		{
-			continue; // Don't touch other pickups
+			continue; // Don't touch other pickups (thigh pads keep stock respawn)
 		}
 
 		// Hide the pickup and set it to respawn after the delay
@@ -3632,9 +4285,15 @@ void AUWipeoutGame::ResetPickupTimers()
 
 
 // ─── ResolveShieldBeltSubstitution ──────────────────────────────────────
-// Called from BeginPlay after all actors have been CheckRelevance'd.
-// If the map had no ShieldBelt pickup, spawn a fresh ArmorBase pickup at the
-// vest's location with ShieldBelt as its inventory type (Showdown pattern).
+// Deferred 1s past BeginPlay (TryResolveShieldBeltSubstitution) — BP classes
+// can fail to LoadClass/spawn during BeginPlay itself, the same package-load
+// issue the Siphon and DamageReplicator dodge. If the map has no ShieldBelt
+// pickup, REPLACE the stashed vest with a freshly spawned belt base — the
+// SpawnSiphonPickup pattern: spawn the new pickup first, destroy the replaced
+// one only on success, keep the stash alive on failure so the match-start
+// fallback can retry. (The old in-place SetInventoryType conversion is gone:
+// its BeginPlay-time LoadClass could fail, and mutating a level-placed,
+// potentially net-dormant pickup left clients still seeing a vest.)
 void AUWipeoutGame::ResolveShieldBeltSubstitution()
 {
 	if (bMapHasShieldBelt)
@@ -3649,73 +4308,236 @@ void AUWipeoutGame::ResolveShieldBeltSubstitution()
 		return;
 	}
 
-	if (!PendingVestPickup)
+	if (!PendingVestPickup || PendingVestPickup->IsPendingKillPending())
 	{
-		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has no ShieldBelt and no vest — nothing to substitute"));
+		PendingVestPickup = nullptr;
 		return;
 	}
 
-	// No ShieldBelt on this map — swap the vest's inventory type to ShieldBelt.
-	// The vest is already a valid AUTPickupInventory in the world; SetInventoryType
-	// updates the replicated InventoryType, rebuilds the mesh, and handles respawn.
 	TSubclassOf<AUTInventory> ShieldBeltClass = LoadClass<AUTInventory>(
 		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/Armor_ShieldBelt.Armor_ShieldBelt_C"));
-	if (ShieldBeltClass)
+	if (!ShieldBeltClass)
 	{
-		PendingVestPickup->SetInventoryType(ShieldBeltClass);
-		bMapHasShieldBelt = true;
-		UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Converted vest to ShieldBelt at %s"),
-			*PendingVestPickup->GetActorLocation().ToString());
-	}
-	else
-	{
-		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: Failed to load Armor_ShieldBelt class"));
+		// Keep the stash — the HandleMatchHasStarted fallback retries the load.
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: Failed to load Armor_ShieldBelt class — will retry at match start"));
+		return;
 	}
 
+	// Try the stock armor base BP first, fall back to the powerup base the
+	// Siphon spawn also uses.
+	TSubclassOf<AUTPickupInventory> BaseClass = LoadClass<AUTPickupInventory>(
+		nullptr, TEXT("/Game/RestrictedAssets/Pickups/Armor/ArmorBase.ArmorBase_C"));
+	if (!BaseClass)
+	{
+		BaseClass = LoadClass<AUTPickupInventory>(
+			nullptr, TEXT("/Game/RestrictedAssets/Pickups/Powerups/PowerupBase.PowerupBase_C"));
+	}
+	if (!BaseClass)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: No pickup base class for belt substitution — will retry at match start"));
+		return;
+	}
+
+	const FVector SpawnLoc = PendingVestPickup->GetActorLocation();
+	const FRotator SpawnRot = PendingVestPickup->GetActorRotation();
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	AUTPickupInventory* BeltPickup = GetWorld()->SpawnActor<AUTPickupInventory>(BaseClass, SpawnLoc, SpawnRot, Params);
+
+	if (!BeltPickup)
+	{
+		UE_LOG(LogGameMode, Warning, TEXT("WipeoutGame: SpawnActor failed for belt base at %s (class=%s) — vest kept, will retry at match start"),
+			*SpawnLoc.ToString(), *BaseClass->GetPathName());
+		return;
+	}
+
+	// Spawn succeeded — only now remove the vest we replaced, so a failed
+	// spawn can never cost the map its 100 armor outright.
+	PendingVestPickup->Destroy();
 	PendingVestPickup = nullptr;
+	BeltPickup->SetInventoryType(ShieldBeltClass);
+	bMapHasShieldBelt = true;
+	UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Spawned ShieldBelt base (%s) replacing vest at %s"),
+		*BaseClass->GetPathName(), *SpawnLoc.ToString());
+}
+
+// Guarded substitution attempt — warmup timer (1s past BeginPlay) and the
+// HandleMatchHasStarted safety net both funnel through here. Retry-safe:
+// every failure path in Resolve keeps PendingVestPickup alive.
+void AUWipeoutGame::TryResolveShieldBeltSubstitution()
+{
+	if (HasAuthority() && PendingVestPickup)
+	{
+		ResolveShieldBeltSubstitution();
+	}
 }
 
 
+// Warmup-time spawn attempt, deferred 1s from BeginPlay so the Siphon spot can
+// be scouted before the match. Guarded so the HandleMatchHasStarted fallback
+// can't double-spawn (and vice versa).
+void AUWipeoutGame::TrySpawnSiphonPickup()
+{
+	if (HasAuthority() && !SiphonPickup)
+	{
+		SpawnSiphonPickup();
+	}
+}
+
 // ─── SpawnSiphonPickup ─────────────────────────────────────────────────
-// Finds the highest-Z sniper weapon base on the map and spawns a
-// PowerupBase pickup there with Siphon as the inventory type.
+// Prefer a map-authored non-Amp timed-powerup base for Siphon (Berserk first,
+// then farthest from Amp with a stable tie-break). If none exists, use the
+// existing weapon fallback: prefer the sniper FARTHEST (3D) from the nearest
+// Amp/UDamage, but only if it clears SiphonMinAmpDistance; otherwise take the
+// farther of the farthest sniper and farthest Bio Rifle.
+// (dasnaksta 2026-08-06: amp and siphon
+// end up "one dodge apart" on Rankin/Faze/Deck/Andok; maps whose sniper is
+// already far, e.g. Ages/Garrison, keep their placement.) No amp on the map
+// falls back to the legacy highest-Z sniper choice.
 void AUWipeoutGame::SpawnSiphonPickup()
 {
 	SiphonPickup = nullptr;
 
-	// Find the highest sniper weapon base
-	FVector BestLoc = FVector::ZeroVector;
-	FRotator BestRot = FRotator::ZeroRotator;
-	float HighestZ = -FLT_MAX;
-	AUTPickupWeapon* BestSniperPickup = nullptr;
+	// Threshold is tunable without a rebuild: [NetcodePlus] SiphonMinAmpDistance
+	// in Mod.ini overrides the class default.
+	float MinAmpDist = SiphonMinAmpDistance;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("SiphonMinAmpDistance"), MinAmpDist, ModIni);
+	}
+
+	// Amp anchors. The CDO stat check also recognizes WipeoutMutator's custom
+	// UDamage replacement classes, not just stock class names.
+	TArray<FVector> AmpLocs;
+	for (TActorIterator<AUTPickupInventory> It(GetWorld()); It; ++It)
+	{
+		AUTPickupInventory* Pickup = *It;
+		if (!Pickup || Pickup->IsPendingKillPending() || !Pickup->GetInventoryType()) continue;
+		if (IsAmpInventoryClass(*Pickup->GetInventoryType()))
+		{
+			AmpLocs.Add(Pickup->GetActorLocation());
+		}
+	}
+
+	auto MinDistToAmp = [&AmpLocs](const FVector& Loc) -> float
+	{
+		float Best = FLT_MAX;
+		for (const FVector& AmpLoc : AmpLocs)
+		{
+			Best = FMath::Min(Best, (Loc - AmpLoc).Size());
+		}
+		return Best;
+	};
+
+	// Prefer a map-authored non-Amp timed-powerup spot. Revalidate a source that
+	// is still alive because a mutator may have changed its InventoryType after
+	// Wipeout captured the original CheckRelevance input.
+	const FWipeoutSiphonPowerupCandidate* BestPowerup = nullptr;
+	float BestPowerupAmpDist = -FLT_MAX;
+	for (const FWipeoutSiphonPowerupCandidate& Candidate : SiphonPowerupCandidates)
+	{
+		AUTPickupInventory* LiveSource = Cast<AUTPickupInventory>(Candidate.SourcePickup.Get());
+		if (LiveSource && !LiveSource->IsPendingKillPending())
+		{
+			if (!LiveSource->GetInventoryType()
+				|| !IsSiphonPowerupCandidate(*LiveSource->GetInventoryType()))
+			{
+				continue;
+			}
+		}
+
+		const float AmpDist = MinDistToAmp(Candidate.Transform.GetLocation());
+		const bool bBetterPriority = !BestPowerup || Candidate.Priority < BestPowerup->Priority;
+		const bool bSamePriority = BestPowerup && Candidate.Priority == BestPowerup->Priority;
+		const bool bBetterDistance = bSamePriority && AmpDist > BestPowerupAmpDist;
+		const bool bStableTieBreak = bSamePriority && AmpDist == BestPowerupAmpDist
+			&& Candidate.StableName.Compare(BestPowerup->StableName, ESearchCase::CaseSensitive) < 0;
+		if (bBetterPriority || bBetterDistance || bStableTieBreak)
+		{
+			BestPowerup = &Candidate;
+			BestPowerupAmpDist = AmpDist;
+		}
+	}
+
+	// Farthest-from-amp sniper and bio bases; highest-Z sniper kept as the
+	// no-amp fallback.
+	AUTPickupWeapon* FarSniper = nullptr;   float FarSniperDist = -FLT_MAX;
+	AUTPickupWeapon* FarBio = nullptr;      float FarBioDist = -FLT_MAX;
+	AUTPickupWeapon* HighSniper = nullptr;  float HighestZ = -FLT_MAX;
 
 	for (TActorIterator<AUTPickupWeapon> It(GetWorld()); It; ++It)
 	{
 		AUTPickupWeapon* WP = *It;
 		if (!WP || !WP->WeaponType) continue;
 
-		FString WeaponName = WP->WeaponType->GetName();
-		if (WeaponName.Contains(TEXT("Sniper")))
+		const FString WeaponName = WP->WeaponType->GetName();
+		const bool bSniper = WeaponName.Contains(TEXT("Sniper"));
+		// "BioRifle" not "Bio" — the stock BioLauncher must not pool with the rifle
+		const bool bBio = WeaponName.Contains(TEXT("BioRifle"));
+		if (!bSniper && !bBio) continue;
+
+		const float AmpDist = MinDistToAmp(WP->GetActorLocation());
+		if (bSniper)
 		{
-			float Z = WP->GetActorLocation().Z;
-			if (Z > HighestZ)
-			{
-				HighestZ = Z;
-				BestLoc = WP->GetActorLocation();
-				BestRot = WP->GetActorRotation();
-				BestSniperPickup = WP;
-			}
+			if (AmpDist > FarSniperDist) { FarSniperDist = AmpDist; FarSniper = WP; }
+			const float Z = WP->GetActorLocation().Z;
+			if (Z > HighestZ) { HighestZ = Z; HighSniper = WP; }
+		}
+		else if (AmpDist > FarBioDist)
+		{
+			FarBioDist = AmpDist;
+			FarBio = WP;
 		}
 	}
 
-	if (!BestSniperPickup)
+	AUTPickupWeapon* Chosen = nullptr;
+	if (AmpLocs.Num() == 0)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: No sniper weapon base found — skipping Siphon pickup"));
+		Chosen = HighSniper;   // no amp to measure against — legacy behavior
+	}
+	else if (FarSniper && FarSniperDist >= MinAmpDist)
+	{
+		Chosen = FarSniper;
+	}
+	else
+	{
+		// Sniper missed the threshold: take whichever candidate is farther from
+		// the amp — a bio even closer than the rejected sniper must not win.
+		// (Null candidates carry -FLT_MAX, so this also covers missing bases;
+		// tie prefers the sniper.)
+		Chosen = (FarBioDist > FarSniperDist) ? FarBio : FarSniper;
+	}
+
+	if (!BestPowerup && !Chosen)
+	{
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: no usable powerup, sniper, or bio base for Siphon (amps=%d) — skipping"), AmpLocs.Num());
 		return;
 	}
 
-	// Remove the sniper weapon pickup we're replacing
-	BestSniperPickup->Destroy();
+	const FTransform BestTransform = BestPowerup
+		? BestPowerup->Transform
+		: FTransform(Chosen->GetActorRotation(), Chosen->GetActorLocation());
+	const FVector BestLoc = BestTransform.GetLocation();
+	AActor* ReplacedPickup = BestPowerup ? BestPowerup->SourcePickup.Get() : Chosen;
+	if (BestPowerup)
+	{
+		UE_LOG(LogGameMode, Log,
+			TEXT("Wipeout: Siphon placement - %d powerup candidate(s), amps=%d -> %s at %s (distance=%.0fuu)"),
+			SiphonPowerupCandidates.Num(), AmpLocs.Num(), *BestPowerup->InventoryName,
+			*BestLoc.ToString(), AmpLocs.Num() > 0 ? BestPowerupAmpDist : -1.f);
+	}
+	else
+	{
+		UE_LOG(LogGameMode, Log,
+			TEXT("Wipeout: Siphon placement — amps=%d farSniper=%.0fuu farBio=%.0fuu threshold=%.0f -> %s base at %s"),
+			AmpLocs.Num(),
+			(FarSniper && AmpLocs.Num() > 0) ? FarSniperDist : -1.f,
+			(FarBio && AmpLocs.Num() > 0) ? FarBioDist : -1.f,
+			MinAmpDist,
+			(Chosen == FarBio) ? TEXT("BIO") : TEXT("SNIPER"), *BestLoc.ToString());
+	}
 
 	// Try BP class first, fall back to hardcoded PowerupBase_C
 	TSubclassOf<AUTPickupInventory> SpawnClass = SiphonPickupClass;
@@ -3734,10 +4556,17 @@ void AUWipeoutGame::SpawnSiphonPickup()
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	UE_LOG(LogGameMode, Warning, TEXT("Wipeout: Spawning Siphon class=%s at %s"), *SpawnClass->GetPathName(), *BestLoc.ToString());
-	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(SpawnClass, BestLoc, BestRot, Params);
+	SiphonPickup = GetWorld()->SpawnActor<AUTPickupInventory>(SpawnClass, BestTransform, Params);
 
 	if (SiphonPickup)
 	{
+		// Spawn succeeded; only now remove a surviving source pickup, so a failed
+		// spawn can never cost the map its original powerup or weapon base.
+		if (ReplacedPickup && !ReplacedPickup->IsPendingKillPending())
+		{
+			ReplacedPickup->Destroy();
+		}
+
 		// If using fallback PowerupBase (not custom BP), set inventory type
 		if (!SiphonPickupClass)
 		{
@@ -3755,8 +4584,7 @@ void AUWipeoutGame::SpawnSiphonPickup()
 			}
 		}
 
-		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Spawned Siphon pickup at sniper location %s (Z=%.0f)"),
-			*BestLoc.ToString(), HighestZ);
+		UE_LOG(LogGameMode, Log, TEXT("Wipeout: Spawned Siphon pickup at %s"), *BestLoc.ToString());
 	}
 	else
 	{
@@ -3784,5 +4612,256 @@ bool AUWipeoutGame::ClearPause()
 	{
 		return false;
 	}
-	return Super::ClearPause();
+	const bool bUnpaused = Super::ClearPause();
+	if (bUnpaused)
+	{
+		// Immediate client clock resync — see NCPlusHostPause::ResyncServerWorldTime.
+		NCPlusHostPause::ResyncServerWorldTime(this);
+	}
+	return bUnpaused;
+}
+
+
+// ============================================================================
+// CLUTCH / LMS-HOLD TELEMETRY
+// ============================================================================
+// Wipeout is not elimination: teammates respawn mid-round, so being the last
+// player alive is a HOLD, not a duel to the death. Four outcomes:
+//
+//   reinforced  a teammate returned before the holder died  -> the hold WORKED
+//   won         the holder wiped the remaining enemies      -> a true clutch
+//   died        the holder died before either happened      -> the hold failed
+//   round_end   the round ended underneath the hold (clock/abort)
+//
+// "reinforced" is a SUCCESS. Buying the seconds a teammate needs to respawn is
+// the mode's real clutch contribution and has no ElimPlus equivalent, which is
+// why Wipeout gets its own table rather than reusing clutches[].
+//
+// Holds opened in sudden death are terminal (no respawns exist) and are flagged
+// so they are never averaged with buy-time holds.
+
+void AUWipeoutGame::ResetClutchTelemetryForMatch()
+{
+	DiscardOpenClutchHolds();
+	CompletedClutches.Reset();
+}
+
+void AUWipeoutGame::DiscardOpenClutchHolds()
+{
+	ActiveHold[0] = FWipeoutClutchTracker();
+	ActiveHold[1] = FWipeoutClutchTracker();
+	if (DamageReplicator)
+	{
+		DamageReplicator->ClearClutchOverlays();
+	}
+}
+
+void AUWipeoutGame::UpdateClutchHoldTransitions(int32 AliveTeam0, int32 AliveTeam1,
+	const AUTPlayerState* IgnoredPlayer)
+{
+	if (!HasAuthority() || !bRoundInProgress)
+	{
+		return;
+	}
+
+	const int32 AliveByTeam[2] = { AliveTeam0, AliveTeam1 };
+	if (DamageReplicator)
+	{
+		DamageReplicator->UpdateClutchOverlayRemaining(AliveTeam0, AliveTeam1);
+	}
+
+	// A teammate returning completes a normal Wipeout HOLD. Close before
+	// considering a new 2->1 edge so a same-frame transition cannot collide.
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		if (ActiveHold[TeamIndex].bOpen && AliveByTeam[TeamIndex] > 1)
+		{
+			ActiveHold[TeamIndex].TeammatesRespawned =
+				FMath::Max(1, AliveByTeam[TeamIndex] - 1);
+			CloseClutchHold(TeamIndex, TEXT("reinforced"));
+		}
+	}
+
+	if (AliveTeam0 > 1) bTeam0LastAliveAnnounced = false;
+	if (AliveTeam1 > 1) bTeam1LastAliveAnnounced = false;
+
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		const int32 EnemiesAlive = AliveByTeam[1 - TeamIndex];
+		bool& bAnnounced = TeamIndex == 0
+			? bTeam0LastAliveAnnounced : bTeam1LastAliveAnnounced;
+		const int32 StartingSize = TeamIndex == 0 ? Team0StartingSize : Team1StartingSize;
+		if (AliveByTeam[TeamIndex] != 1 || EnemiesAlive < 1
+			|| StartingSize <= 1 || bAnnounced)
+		{
+			continue;
+		}
+
+		AUTPlayerState* LastPS = FindAliveOnTeamPS(TeamIndex, IgnoredPlayer);
+		if (!LastPS)
+		{
+			continue;
+		}
+
+		// Match the long-standing audio/telemetry rule: a sub-one-second
+		// near-respawn is too brief to count as a hold. Do not consume the
+		// announcement edge yet: if that respawn is cancelled or fails, the
+		// timer fallback must still be able to open the genuine last-alive hold.
+		if (HasImminentRespawnOnTeam(TeamIndex, 1.0f))
+		{
+			continue;
+		}
+		bAnnounced = true;
+
+		BP_OnLastPlayerAlive(TeamIndex, LastPS, EnemiesAlive);
+		OnClutchSituationStarted.Broadcast(LastPS, EnemiesAlive);
+		if (DamageReplicator)
+		{
+			DamageReplicator->BeginClutchOverlay(
+				TeamIndex, LastPS, EnemiesAlive, bInSuddenDeath);
+		}
+		// Upload telemetry remains human-only, while the replicated presentation
+		// above can still show bots in offline/caster tests.
+		OpenClutchHold(TeamIndex, LastPS, EnemiesAlive);
+	}
+}
+
+void AUWipeoutGame::OpenClutchHold(int32 TeamIndex, AUTPlayerState* Holder, int32 EnemiesAlive)
+{
+	if (!HasAuthority() || TeamIndex < 0 || TeamIndex > 1
+		|| Holder == nullptr || EnemiesAlive < 1) { return; }
+	FWipeoutClutchTracker& H = ActiveHold[TeamIndex];
+	if (H.bOpen) { return; }   // already holding; the 2->1 edge fired twice
+
+	H = FWipeoutClutchTracker();
+	H.bOpen              = true;
+	// Empty for bots: keep the live tracker/presentation functional, then omit
+	// the completed record from the human-only upload below.
+	H.UniqueId           = Holder->UniqueId.IsValid()
+		? Holder->UniqueId.ToString() : FString();
+	H.Holder             = Holder;
+	H.RoundIndex         = CurrentRoundNumber;
+	H.EnemiesAtStart     = FMath::Max(0, EnemiesAlive);
+	H.bSuddenDeath       = bInSuddenDeath;
+	H.StartTime          = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+}
+
+void AUWipeoutGame::CreditClutchHoldKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
+{
+	if (!HasAuthority() || KillerPS == nullptr || VictimPS == nullptr) { return; }
+	if (DamageReplicator)
+	{
+		DamageReplicator->CreditClutchOverlayKill(KillerPS, VictimPS);
+	}
+	for (int32 T = 0; T < 2; ++T)
+	{
+		FWipeoutClutchTracker& H = ActiveHold[T];
+		// Match on the live PlayerState, not the id string: only a holder who is
+		// still the same object can be scoring kills right now.
+		if (H.bOpen && H.Holder.Get() == KillerPS
+			&& static_cast<int32>(VictimPS->GetTeamNum()) == 1 - T)
+		{
+			++H.DirectKills;
+			return;
+		}
+	}
+}
+
+void AUWipeoutGame::CloseClutchHold(int32 TeamIndex, const TCHAR* Outcome)
+{
+	if (TeamIndex < 0 || TeamIndex > 1) { return; }
+	FWipeoutClutchTracker& H = ActiveHold[TeamIndex];
+	if (!H.bOpen) { return; }
+
+	// If the holder dies but a pending teammate lands inside the wipeout grace,
+	// that teammate becomes a new sole survivor. Release the edge now so the
+	// respawn callback can open their distinct hold instead of inheriting the
+	// dead holder's latched announcement state.
+	if (FCString::Stricmp(Outcome, TEXT("died")) == 0)
+	{
+		if (TeamIndex == 0) bTeam0LastAliveAnnounced = false;
+		else                bTeam1LastAliveAnnounced = false;
+	}
+
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : H.StartTime;
+
+	FNCWipeoutClutchInput Rec;
+	Rec.UniqueId           = H.UniqueId;
+	Rec.RoundIndex         = H.RoundIndex;
+	Rec.TeamIndex          = TeamIndex;
+	Rec.EnemiesAtStart     = H.EnemiesAtStart;
+	Rec.Outcome            = Outcome;
+	Rec.DirectKills        = H.DirectKills;
+	Rec.TeammatesRespawned = H.TeammatesRespawned;
+	Rec.bSuddenDeath       = H.bSuddenDeath;
+	Rec.StartTime          = H.StartTime;
+	Rec.EndTime            = Now;
+	Rec.HoldSeconds        = FMath::Max(0.f, Now - H.StartTime);
+	Rec.bCleanFinish       = (Rec.Outcome == TEXT("won"))
+		&& H.EnemiesAtStart > 0 && H.DirectKills >= H.EnemiesAtStart;
+
+	if (DamageReplicator)
+	{
+		ENCClutchOverlayOutcome OverlayOutcome = ENCClutchOverlayOutcome::Cancelled;
+		if (Rec.Outcome == TEXT("reinforced"))
+		{
+			OverlayOutcome = ENCClutchOverlayOutcome::Held;
+		}
+		else if (Rec.Outcome == TEXT("won"))
+		{
+			OverlayOutcome = (H.bSuddenDeath || bInSuddenDeath)
+				? ENCClutchOverlayOutcome::Clutched
+				: ENCClutchOverlayOutcome::Held;
+		}
+		else if (Rec.Outcome == TEXT("died"))
+		{
+			OverlayOutcome = ENCClutchOverlayOutcome::Denied;
+		}
+		DamageReplicator->EndClutchOverlay(
+			TeamIndex, OverlayOutcome, H.TeammatesRespawned);
+	}
+
+	if (!Rec.UniqueId.IsEmpty())
+	{
+		// A round can legitimately produce more than one hold for the same player:
+		// the team drops to one alive (hold opens), a respawn wave closes it
+		// "reinforced", that teammate dies, and the same player is alone again.
+		// ut4stats stores one row per (match, round, player) — its unique key —
+		// so emit at most one record per (round, player) and fold the repeats
+		// into it rather than dropping them. HoldSeconds sums the time actually
+		// spent alone (not EndTime-StartTime, which would count the reinforced
+		// gap); the outcome is the last one, because that is what settled the
+		// round. Teams are NOT deduped: two different players each holding in
+		// the same round is legal and the schema stores both.
+		const int32 ExistingIdx = CompletedClutches.IndexOfByPredicate(
+			[&Rec](const FNCWipeoutClutchInput& Prev)
+			{
+				return Prev.RoundIndex == Rec.RoundIndex
+					&& Prev.UniqueId == Rec.UniqueId;
+			});
+		if (ExistingIdx != INDEX_NONE)
+		{
+			FNCWipeoutClutchInput& Prev = CompletedClutches[ExistingIdx];
+			UE_LOG(LogGameMode, Verbose,
+				TEXT("Wipeout clutch: folding repeat hold for %s in round %d (%s + %s)"),
+				*Rec.UniqueId, Rec.RoundIndex, *Prev.Outcome, *Rec.Outcome);
+			Prev.EnemiesAtStart     = FMath::Max(Prev.EnemiesAtStart, Rec.EnemiesAtStart);
+			Prev.DirectKills        += Rec.DirectKills;
+			Prev.TeammatesRespawned += Rec.TeammatesRespawned;
+			Prev.bSuddenDeath       = Prev.bSuddenDeath || Rec.bSuddenDeath;
+			Prev.StartTime          = FMath::Min(Prev.StartTime, Rec.StartTime);
+			Prev.EndTime            = FMath::Max(Prev.EndTime, Rec.EndTime);
+			Prev.HoldSeconds        += Rec.HoldSeconds;
+			Prev.Outcome            = Rec.Outcome;
+			// Recompute against the folded totals so the flag still means
+			// "won without letting an enemy through".
+			Prev.bCleanFinish       = (Prev.Outcome == TEXT("won"))
+				&& Prev.EnemiesAtStart > 0 && Prev.DirectKills >= Prev.EnemiesAtStart;
+		}
+		else
+		{
+			CompletedClutches.Add(MoveTemp(Rec));
+		}
+	}
+	H = FWipeoutClutchTracker();
 }

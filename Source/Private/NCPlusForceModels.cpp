@@ -26,6 +26,7 @@
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
 #include "Engine/Canvas.h"            // DrawHeadDebug: Canvas->Project / K2_DrawLine
+#include "UObject/UObjectIterator.h" // reap registered outline duplicates whose owning lineup actor is gone
 
 namespace
 {
@@ -66,9 +67,13 @@ namespace
 	bool GOutlineTriedMat = false;
 
 	// Last OutlineModeActive verdict, refreshed once per frame by OutlinePlayers. For per-pawn
-	// per-frame call sites (TeamArenaCharacter::Tick overlay retint) — the full check copies the
-	// side settings (FStrings) + does HSV math, too heavy to run per pawn per frame.
+	// lightweight call sites — the full check copies side settings (FStrings) + does HSV math, so
+	// cache the published verdict and refresh it from OutlinePlayers.
 	bool GOutlineModeActiveCache = false;
+	// The orphan CustomDepth scan is a general recovery sweep for both Force Models and stock TacCom.
+	// Rate-limit the global UObject iteration independently of Force Models' outline setting.
+	TWeakObjectPtr<UWorld> GOutlineSweepWorld;
+	float GNextOutlineSweepTime = 0.f;
 
 	template<typename T>
 	T* ResolveOutlineAsset(const FString& Path, bool& bTriedThisWorld)
@@ -153,8 +158,10 @@ namespace
 		GConfig->GetFloat (*Sec, TEXT("S"),     Out.S,           Path);
 		GConfig->GetFloat (*Sec, TEXT("V"),     Out.V,           Path);
 		GConfig->GetFloat (*Sec, TEXT("Brightness"), Out.Brightness, Path);
+		GConfig->GetFloat (*Sec, TEXT("ArmourGlow"), Out.ArmourGlow, Path);   // absent key -> struct default 1.f (= current full-bright behaviour)
 		int32 Comp = 0; GConfig->GetInt(*Sec, TEXT("Complimentary"), Comp, Path); Out.bComplimentary = (Comp != 0);
 		int32 AM   = 0; GConfig->GetInt(*Sec, TEXT("ArmourMode"),    AM,   Path); Out.ArmourMode = (ENCPlusArmourMode)AM;
+		int32 Tint = 0; GConfig->GetInt(*Sec, TEXT("Tint"),          Tint, Path); Out.bTint = (Tint != 0);   // absent key -> false: colour stays model-gated as before
 	}
 
 	void WriteSide(const TCHAR* Suffix, const FNCPlusModelSettings& S)
@@ -166,8 +173,10 @@ namespace
 		GConfig->SetFloat (*Sec, TEXT("S"),             S.S,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("V"),             S.V,                       Path);
 		GConfig->SetFloat (*Sec, TEXT("Brightness"),    S.Brightness,              Path);
+		GConfig->SetFloat (*Sec, TEXT("ArmourGlow"),    S.ArmourGlow,              Path);
 		GConfig->SetInt   (*Sec, TEXT("Complimentary"), S.bComplimentary ? 1 : 0,  Path);
 		GConfig->SetInt   (*Sec, TEXT("ArmourMode"),    (int32)S.ArmourMode,       Path);
+		GConfig->SetInt   (*Sec, TEXT("Tint"),          S.bTint ? 1 : 0,           Path);
 	}
 }
 
@@ -304,13 +313,13 @@ bool NCPlusForceModels::IsEnabled()
 	return C.bEnabled && C.bModels;
 }
 
-// TEMP head-hitbox calibration aid. ECVF_Default (NOT cheat) so it can be toggled on a live server —
-// strip / cheat-gate before final ship (it visualises enemy head positions).
+// TEMP head-hitbox calibration aid. Cheat-gated: it visualises enemy head positions, so live
+// players must never be able to toggle it — PIE / cheat-enabled servers only.
 static TAutoConsoleVariable<int32> CVarNCPDebugHeads(
 	TEXT("ncp.DebugHeads"), 0,
 	TEXT("NetcodePlus: draw the capsule-relative headshot sphere (GREEN = what the server validates) and the ")
 	TEXT("mesh head bone (RED cross = the visible head) for every other pawn, client-side. 1=on."),
-	ECVF_Default);
+	ECVF_Cheat);
 
 void NCPlusForceModels::DrawHeadDebug(UCanvas* Canvas, APlayerController* PC)
 {
@@ -668,18 +677,72 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// OnlyTickPoseWhenRendered. Nothing replicates; no-op on a dedicated server.
 	if (!World || World->GetNetMode() == NM_DedicatedServer) { return; }
 
-	// Refresh the per-frame gate cache BEFORE any early-out so the tint call sites always read a
-	// current verdict (TacCom/intermission freeze the outline STATE, not the mode decision).
-	// A verdict FLIP (menu save, style/colour change, viewer team switch under Team/Enemy styles)
-	// must re-tint every body — outline-mode NEUTRAL <-> normal super-tint — or pawns keep the old
-	// look until their next reapply event.
+	// Intro-lineup pawns are destroyed alive. Stock character/weapon-attachment teardown does not
+	// explicitly unregister their dynamically duplicated CustomDepth meshes, so an already leaked
+	// silhouette can remain in the scene after its actor disappears. Sweep only the exact UT outline
+	// signature and only when its owner is gone. TacCom can create these independently of Force Models,
+	// so this 1 Hz recovery scan must remain outside the feature-disabled fast path below.
+	if (GOutlineSweepWorld.Get() != World)
 	{
-		const bool bGate = OutlineModeActive(World);
-		if (bGate != GOutlineModeActiveCache)
+		GOutlineSweepWorld = World;
+		GNextOutlineSweepTime = 0.f;
+	}
+	const float Now = World->GetTimeSeconds();
+	if (Now + 1.f < GNextOutlineSweepTime)
+	{
+		GNextOutlineSweepTime = 0.f;
+	}
+	const bool bSweepDue = bSlowTick && Now >= GNextOutlineSweepTime;
+	if (bSweepDue)
+	{
+		GNextOutlineSweepTime = Now + 1.f;
+		for (TObjectIterator<USkeletalMeshComponent> It; It; ++It)
 		{
-			GOutlineModeActiveCache = bGate;
-			ReapplyAll(World);
+			USkeletalMeshComponent* const DepthMesh = *It;
+			if (DepthMesh->HasAnyFlags(RF_ClassDefaultObject)
+				|| DepthMesh->GetWorld() != World
+				|| !DepthMesh->IsRegistered()
+				|| !DepthMesh->bRenderCustomDepth
+				|| DepthMesh->bRenderInMainPass)
+			{
+				continue;
+			}
+
+			AActor* const Owner = DepthMesh->GetOwner();
+			if (Owner == nullptr || Owner->IsPendingKill() || Owner->IsActorBeingDestroyed())
+			{
+				DepthMesh->UnregisterComponent();
+			}
 		}
+	}
+
+	const FNCPlusForceModelsConfig& C = Get();
+	const bool bConfigured = C.bEnabled && C.bOutline;
+	if (!bConfigured && !GOutlineModeActiveCache && GOutlined.Num() == 0)
+	{
+		return;
+	}
+
+	// Refresh the gate before doing any Force Models outline work. A verdict flip must re-tint every
+	// body or pawns retain the previous outline-mode tint until their next unrelated reapply event.
+	const bool bGate = OutlineModeActive(World);
+	if (bGate != GOutlineModeActiveCache)
+	{
+		GOutlineModeActiveCache = bGate;
+		ReapplyAll(World);
+	}
+
+	// A disabled verdict has already been published to tint call sites above. Restore any state this
+	// feature owned before returning; TacCom/intermission early-outs below apply only while active.
+	if (!bGate)
+	{
+		for (const TPair<TWeakObjectPtr<AUTCharacter>, bool>& Prev : GOutlined)
+		{
+			AUTCharacter* const Ch = Prev.Key.Get();
+			if (Prev.Value && Ch && !Ch->IsDead()) { Ch->SetOutlineLocal(false); }
+		}
+		GOutlined.Reset();
+		return;
 	}
 
 	// Authoring paths (once) + per-world load-attempt re-arm, then keep the camera manager pointed at
@@ -718,8 +781,6 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 		if (GS->IsMatchIntermission()) { return; }
 	}
 
-	const FNCPlusForceModelsConfig& C = Get();
-	const bool bWant = GOutlineModeActiveCache;   // computed above this frame
 	const int32 ViewerTeam = GetViewerTeam(World);
 
 	// Push the per-team outline colours into MPC_NCPOutline (slow tick) so a matching M_OutlinePP renders
@@ -727,7 +788,7 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	// until that collection asset exists. Colours are by ABSOLUTE team; NB our LOS outline's stencil
 	// carries the +128 unoccluded bit, so the material's team decode must mask it (stencil & 0x7F:
 	// 129 -> Team0, 130 -> Team1).
-	if (bWant && bSlowTick)
+	if (bSlowTick)
 	{
 		// Resolved FRESH each slow tick (FindObject = cheap hash lookup, silent): a raw static cache
 		// dangles once GC purges the collection on map travel (it's only world/material-referenced) and
@@ -753,7 +814,7 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 
 	// The LOS traces need a viewer eye; during a map transition the camera manager can briefly be
 	// missing — freeze rather than mass-clear (states recover next frame).
-	if (bWant && (!LocalPC || !LocalPC->PlayerCameraManager)) { return; }
+	if (!LocalPC || !LocalPC->PlayerCameraManager) { return; }
 	const FVector ViewLoc = (LocalPC && LocalPC->PlayerCameraManager)
 		? LocalPC->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
 
@@ -761,7 +822,6 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	const APawn* const LocalPawn = LocalPC ? LocalPC->GetPawn() : nullptr;
 
 	TMap<TWeakObjectPtr<AUTCharacter>, bool> Current;
-	if (bWant)
 	{
 		FCollisionQueryParams TraceParams(FName(TEXT("NCPOutlineLOS")), /*bTraceComplex*/ true, LocalPawn);
 		for (TActorIterator<AUTCharacter> It(World); It; ++It)
@@ -837,7 +897,10 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 		Out.V = 1.f;
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
-		if (Out.ContentPath.IsEmpty())
+		// UNLESS the side opted into tint-only ("Tint skin"): that checkbox promises real models tinted
+		// red/blue, and the Red/Blue rows have no model picker — with the silent borrow, the checkbox
+		// was a no-op for anyone who had a Team/Enemy model configured.
+		if (Out.ContentPath.IsEmpty() && !Out.bTint)
 		{
 			Out.ContentPath = !C.Team.ContentPath.IsEmpty() ? C.Team.ContentPath : C.Enemy.ContentPath;
 		}
@@ -865,6 +928,27 @@ FLinearColor NCPlusForceModels::GetArmourColour(const FNCPlusModelSettings& Side
 		return FLinearColor(H, Side.S, Side.V, 1.f).HSVToLinearRGB();
 	}
 	return GetSkinColour(Side);   // MatchSkin
+}
+
+float NCPlusForceModels::GetArmourEmissiveScale(const FNCPlusModelSettings& Side)
+{
+	float Scale = FMath::Clamp(Side.ArmourGlow, 0.f, 1.f);
+	// Simple forward shading auto-dim. Only counts when the shaders were compiled with support
+	// (mirrors IsSimpleForwardShadingEnabled, RenderUtils.cpp:819 — without r.SupportSimpleForwardShading
+	// the runtime cvar is ignored with a warning and the deferred path keeps rendering).
+	static const auto* SFSVar     = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SimpleForwardShading"));
+	static const auto* SupportVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.SupportSimpleForwardShading"));
+	if (SFSVar && SupportVar
+		&& SFSVar->GetValueOnGameThread() != 0 && SupportVar->GetValueOnGameThread() != 0)
+	{
+		// Emissive renders at full HDR intensity regardless of the lighting path; SFS darkens and
+		// flattens everything around it and auto-exposure re-brightens the frame, so the belt blooms
+		// out. 0.35 lands the default (Armour Glow 1.0) near the deferred look; the slider still
+		// scales below it.
+		static const float SimpleForwardEmissiveDim = 0.35f;
+		Scale *= SimpleForwardEmissiveDim;
+	}
+	return Scale;
 }
 
 TSubclassOf<AUTCharacterContent> NCPlusForceModels::GetModelClass(const FNCPlusModelSettings& Side)
@@ -1051,7 +1135,8 @@ static void MaybeMigrateFromTeamSkins(const FString& Path)
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    (EnCosmetics != 0), Path);
 	GConfig->SetInt (TEXT("ForceModels"), TEXT("Style"),        EnStyle,            Path);
 
-	// Per-side: map colour + model, then write all 7 keys via the existing WriteSide.
+	// Per-side: map colour + model, then write all 9 keys via the existing WriteSide
+	// (migrated sides get Tint=0 — dc rendered nothing for an un-forced side either).
 	FNCPlusModelSettings Enemy, Team, Red, Blue;
 	MigrateOneSide(Entries, TEXT("Enemy"), Path, Enemy);
 	MigrateOneSide(Entries, TEXT("Team"),  Path, Team);
@@ -1136,6 +1221,7 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 	// appends more without a rebuild (e.g. a newly-cooked custom char). No bHideInUI CDO loads here.
 	static const TCHAR* const DefaultAllowed[] = {
 		TEXT("NecrisFemaleCoat"), TEXT("Genghis"), TEXT("LiandriRobot"),       // custom content
+		TEXT("GenghisNew"), TEXT("LiandriRobotNew"),                           // bright-material variants (NCStockWeapons pak)
 		TEXT("NecrisFemale"), TEXT("NecrisMale"), TEXT("NecrisMale_Damian"),   // stock families (coalesced)
 		TEXT("NecrisMale_Necroth"), TEXT("SkaarjMale"), TEXT("TC_Male"),
 	};
