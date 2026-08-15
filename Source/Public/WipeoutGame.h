@@ -714,16 +714,16 @@ protected:
 	void ResetPickupTimers();
 
 	// --- Shield Belt substitution ---
-	// If a map has no ShieldBelt pickup, the first Chest/Vest pickup is
-	// replaced by a freshly spawned belt base so every map has belt control —
-	// the same replace pattern as the Siphon taking over the sniper/bio base.
+	// If a map has no ShieldBelt pickup, the first Chest/Vest pickup is replaced
+	// by a freshly spawned belt base so every map has belt control. Maps authored
+	// with both Belt and Vest keep both — only Belt-less maps substitute.
 	/** True once we've confirmed the map has a native ShieldBelt pickup */
 	bool bMapHasShieldBelt = false;
 	/** First Chest/Vest pickup found — kept alive until the substitution resolves */
 	UPROPERTY(Transient)
 	AUTPickupInventory* PendingVestPickup = nullptr;
-	/** Spawn a fresh belt base at the stashed vest's spot (or drop the vest if the
-	 *  map has its own belt). Every failure path keeps PendingVestPickup alive so
+	/** Spawn a fresh belt base at the stashed vest's spot, or keep the authored
+	 *  vest when the map already has a belt. Every failure path keeps the stash alive so
 	 *  the HandleMatchHasStarted fallback can retry. */
 	void ResolveShieldBeltSubstitution();
 	/** Guarded substitution attempt (deferred from BeginPlay); HandleMatchHasStarted is the fallback */
