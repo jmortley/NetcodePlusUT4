@@ -11,6 +11,8 @@
 #include "UTPlayerState.h"
 #include "UTGameState.h"
 #include "UTCharacter.h"
+#include "UTArmor.h"
+#include "UTBotCharacter.h"
 #include "UTPlayerController.h"
 #include "UTHUD.h"
 #include "Engine/World.h"
@@ -359,10 +361,44 @@ void ANCShaftArenaGame::ScoreDamage_Implementation(int32 DamageAmount,
 void ANCShaftArenaGame::ScoreKill_Implementation(AController* Killer, AController* Other,
 	APawn* KilledPawn, TSubclassOf<UDamageType> DamageType)
 {
-	Super::ScoreKill_Implementation(Killer, Other, KilledPawn, DamageType);
-
 	AUTPlayerState* KillerPS = Killer ? Cast<AUTPlayerState>(Killer->PlayerState) : nullptr;
 	AUTPlayerState* VictimPS = Other  ? Cast<AUTPlayerState>(Other->PlayerState)  : nullptr;
+	AUTCharacter* KillerChar = (KillerPS && KillerPS != VictimPS) ? KillerPS->GetUTCharacter() : nullptr;
+	AUTPlayerController* VictimPC = Cast<AUTPlayerController>(Other);
+
+	// Preserve the old ShaftArena mutator's post-frag feedback, but send it
+	// directly to the victim so it cannot be lost among unrelated match chat.
+	// Snapshot before restoring the survivor to the configured spawn baseline.
+	if (KillerChar && !KillerChar->IsDead() && !KillerChar->IsPendingKillPending())
+	{
+		const int32 RemainingHealth = FMath::Max(0, KillerChar->Health);
+
+		KillerChar->Health = KillerChar->HealthMax;
+		KillerChar->OnHealthUpdated();
+
+		AUTArmor* StartingArmor = (bPlayersStartWithArmor && StartingArmorClass)
+			? StartingArmorClass.GetDefaultObject()
+			: nullptr;
+		int32 StartingArmorAmount = StartingArmor ? StartingArmor->ArmorAmount : 0;
+		if (StartingArmorClass && KillerPS->PlayerCard && KillerPS->PlayerCard->ExtraArmor > 0)
+		{
+			StartingArmor = StartingArmorClass.GetDefaultObject();
+			const int32 ExtraArmor = KillerPS->PlayerCard->ExtraArmor;
+			StartingArmorAmount = FMath::Max(
+				FMath::Max(StartingArmorAmount, ExtraArmor),
+				FMath::Min(100, StartingArmorAmount + ExtraArmor));
+		}
+		KillerChar->SetArmorAmount(StartingArmor, StartingArmorAmount);
+
+		if (VictimPC)
+		{
+			VictimPC->ClientSay(nullptr,
+				FString::Printf(TEXT("%s: I had %d HP remaining"), *KillerPS->PlayerName, RemainingHealth),
+				ChatDestinations::System);
+		}
+	}
+
+	Super::ScoreKill_Implementation(Killer, Other, KilledPawn, DamageType);
 
 	if (KillerPS && KillerPS != VictimPS)
 	{

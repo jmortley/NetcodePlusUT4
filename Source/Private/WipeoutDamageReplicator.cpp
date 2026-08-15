@@ -7,6 +7,42 @@
 #include "WipeoutGame.h"
 #include "Net/UnrealNetwork.h"
 
+namespace
+{
+	// Metadata row carried inside the already-replicated DamageEntries array.
+	// The control-prefixed ID plus magic/version fields keep it outside normal
+	// platform-ID formats and make accidental matches fail closed. Older 328
+	// clients simply ignore it because they only look entries up by a real
+	// player's UniqueId. Bit-casting preserves the deadline exactly without
+	// adding a replicated property or changing either native layout.
+	static const FString WipeoutRoundClockEntryId(TEXT("\x001FNCP:WipeClock:1"));
+	static const int32 WipeoutRoundClockMagic = 0x4E435057; // "NCPW"
+	static const int32 WipeoutRoundClockVersion = 1;
+	static const float MaxReasonableRoundClockSeconds = 86400.f;
+
+	bool IsWipeoutRoundClockEntry(const FReplicatedDamageEntry& Entry)
+	{
+		return Entry.PlayerId == WipeoutRoundClockEntryId
+			&& Entry.BeltPickups == WipeoutRoundClockMagic
+			&& Entry.AmpPickups == WipeoutRoundClockVersion;
+	}
+
+	int32 EncodeRoundClockDeadline(float Deadline)
+	{
+		static_assert(sizeof(int32) == sizeof(float), "Round-clock metadata requires 32-bit int and float");
+		int32 Encoded = 0;
+		FMemory::Memcpy(&Encoded, &Deadline, sizeof(Encoded));
+		return Encoded;
+	}
+
+	float DecodeRoundClockDeadline(int32 Encoded)
+	{
+		float Deadline = 0.f;
+		FMemory::Memcpy(&Deadline, &Encoded, sizeof(Deadline));
+		return Deadline;
+	}
+}
+
 AWipeoutDamageReplicator::AWipeoutDamageReplicator(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -180,6 +216,85 @@ void AWipeoutDamageReplicator::ClearClutchOverlays()
 	ForceNetUpdate();
 }
 
+void AWipeoutDamageReplicator::SetRoundClockDeadline(float EndServerTime)
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	if (!FMath::IsFinite(EndServerTime) || EndServerTime <= 0.f)
+	{
+		ClearRoundClockDeadline();
+		return;
+	}
+
+	FReplicatedDamageEntry* ClockEntry = DamageEntries.FindByPredicate(
+		[](const FReplicatedDamageEntry& Entry)
+		{
+			return IsWipeoutRoundClockEntry(Entry);
+		});
+	if (!ClockEntry)
+	{
+		const int32 ClockEntryIndex = DamageEntries.AddDefaulted();
+		ClockEntry = &DamageEntries[ClockEntryIndex];
+		ClockEntry->PlayerId = WipeoutRoundClockEntryId;
+		ClockEntry->BeltPickups = WipeoutRoundClockMagic;
+		ClockEntry->AmpPickups = WipeoutRoundClockVersion;
+	}
+	ClockEntry->DamageDone = EncodeRoundClockDeadline(EndServerTime);
+	ForceNetUpdate();
+}
+
+void AWipeoutDamageReplicator::ClearRoundClockDeadline()
+{
+	if (Role != ROLE_Authority)
+	{
+		return;
+	}
+
+	const int32 Removed = DamageEntries.RemoveAll(
+		[](const FReplicatedDamageEntry& Entry)
+		{
+			return IsWipeoutRoundClockEntry(Entry);
+		});
+	if (Removed > 0)
+	{
+		ForceNetUpdate();
+	}
+}
+
+int32 AWipeoutDamageReplicator::GetRoundClockSecondsRemaining() const
+{
+	const FReplicatedDamageEntry* ClockEntry = DamageEntries.FindByPredicate(
+		[](const FReplicatedDamageEntry& Entry)
+		{
+			return IsWipeoutRoundClockEntry(Entry);
+		});
+	if (!ClockEntry)
+	{
+		return -1;
+	}
+	const float RoundClockEndServerTime = DecodeRoundClockDeadline(ClockEntry->DamageDone);
+	if (!FMath::IsFinite(RoundClockEndServerTime) || RoundClockEndServerTime <= 0.f)
+	{
+		return -1;
+	}
+
+	const AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+	if (!GS)
+	{
+		return -1;
+	}
+
+	const float Remaining = RoundClockEndServerTime - GS->GetServerWorldTimeSeconds();
+	if (!FMath::IsFinite(Remaining) || Remaining > MaxReasonableRoundClockSeconds)
+	{
+		return -1;
+	}
+	return FMath::Max(0, FMath::CeilToInt(FMath::Max(0.f, Remaining)));
+}
+
 void AWipeoutDamageReplicator::BeginPlay()
 {
 	Super::BeginPlay();
@@ -217,6 +332,21 @@ void AWipeoutDamageReplicator::UpdateFromPlayerStates()
 	// stays 0 rather than failing the whole refresh.
 	AUWipeoutGame* WipeoutGame = GetWorld()->GetAuthGameMode<AUWipeoutGame>();
 
+	// Preserve the reserved clock row while rebuilding the player snapshot.
+	// This keeps the event-driven deadline alive through the 1 Hz stats refresh
+	// without adding state to the actor itself.
+	FReplicatedDamageEntry RoundClockEntry;
+	bool bHasRoundClockEntry = false;
+	if (const FReplicatedDamageEntry* ExistingClock = DamageEntries.FindByPredicate(
+		[](const FReplicatedDamageEntry& Entry)
+		{
+			return IsWipeoutRoundClockEntry(Entry);
+		}))
+	{
+		RoundClockEntry = *ExistingClock;
+		bHasRoundClockEntry = true;
+	}
+
 	DamageEntries.Reset();
 
 	for (APlayerState* PS : GS->PlayerArray)
@@ -253,6 +383,11 @@ void AWipeoutDamageReplicator::UpdateFromPlayerStates()
 		}
 
 		DamageEntries.Add(Entry);
+	}
+
+	if (bHasRoundClockEntry)
+	{
+		DamageEntries.Add(MoveTemp(RoundClockEntry));
 	}
 }
 

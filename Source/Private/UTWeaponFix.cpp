@@ -4,6 +4,7 @@
 #include "UTGameState.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "UTWeaponAttachment.h"
 #include "Engine/World.h"
 #include "Engine/DemoNetDriver.h"
 #include "TimerManager.h"
@@ -3255,19 +3256,38 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     FCollisionQueryParams QueryParams(GetClass()->GetFName(), true, UTOwner);
     AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 
-    // Perform the initial trace against world geometry
-    if (TraceRadius <= 0.0f)
+    // Perform the initial trace against world geometry. Weapon attachments are
+    // client-only cosmetics (AUTCharacter never spawns them on a dedicated
+    // server), so a Blueprint that leaves Mesh3P on BlockAll must not shorten
+    // the client's ray or manufacture a client-only impact/claim/hitsound.
+    // Retracing is intentionally bounded and happens only when an attachment is
+    // actually the nearest blocker; normal shots still issue exactly one query.
+    constexpr int32 MaxCosmeticAttachmentSkips = 16;
+    int32 CosmeticAttachmentSkips = 0;
+    for (;;)
     {
-        GetWorld()->LineTraceSingleByChannel(Hit, StartLocation, EndTrace, TraceChannel, QueryParams);
-    }
-    else
-    {
-        GetWorld()->SweepSingleByChannel(Hit, StartLocation, EndTrace, FQuat::Identity, TraceChannel, FCollisionShape::MakeSphere(TraceRadius), QueryParams);
-    }
+        const bool bWorldHit = (TraceRadius <= 0.0f)
+            ? GetWorld()->LineTraceSingleByChannel(
+                Hit, StartLocation, EndTrace, TraceChannel, QueryParams)
+            : GetWorld()->SweepSingleByChannel(
+                Hit, StartLocation, EndTrace, FQuat::Identity, TraceChannel,
+                FCollisionShape::MakeSphere(TraceRadius), QueryParams);
 
-    if (!Hit.bBlockingHit)
-    {
-        Hit.Location = EndTrace;
+        if (!bWorldHit || !Hit.bBlockingHit)
+        {
+            Hit.Location = EndTrace;
+            break;
+        }
+
+        AUTWeaponAttachment* CosmeticAttachment = Cast<AUTWeaponAttachment>(Hit.GetActor());
+        if (CosmeticAttachment == nullptr ||
+            CosmeticAttachmentSkips >= MaxCosmeticAttachmentSkips)
+        {
+            break;
+        }
+
+        QueryParams.AddIgnoredActor(CosmeticAttachment);
+        ++CosmeticAttachmentSkips;
     }
 
 

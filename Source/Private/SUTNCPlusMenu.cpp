@@ -1332,6 +1332,22 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHitsoundsTab()
 
 	Root->AddSlot()
 		.AutoHeight()
+		.Padding(0, 0, 0, 4)
+		[ MakeFlagCheck(TEXT("Immediate hitsounds (client prediction)"), &HSConfig.bClientSideHitsounds) ];
+
+	Root->AddSlot()
+		.AutoHeight()
+		.Padding(0, 0, 0, 10)
+		[
+			SNew(STextBlock)
+			.Text(FText::FromString(TEXT("Unchecked waits for server-confirmed damage. This adds network latency but avoids local predictions for shots the server rejects.")))
+			.Font(RegularFont(10))
+			.ColorAndOpacity(FLinearColor(0.6f, 0.6f, 0.6f, 1.f))
+			.AutoWrapText(true)
+		];
+
+	Root->AddSlot()
+		.AutoHeight()
 		.Padding(0, 0, 0, 6)
 		[
 			SNew(STextBlock)
