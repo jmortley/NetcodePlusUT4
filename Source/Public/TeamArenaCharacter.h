@@ -61,6 +61,10 @@ public:
 	virtual bool AddInventory(AUTInventory* InvToAdd, bool bAutoActivate) override;
 	virtual void SetSkinForWeapon(UUTWeaponSkin* WeaponSkin) override;
 	virtual void UpdateWeaponSkinPrefFromProfile(AUTWeapon* Weapon) override;
+	/** Weapon attachments are client-only cosmetics; they must never contribute collision
+	 *  that the dedicated server cannot reproduce. */
+	virtual void UpdateWeaponAttachment() override;
+	virtual void UpdateHolsteredWeaponAttachment() override;
 	virtual void UpdateWeaponSkin() override;
 	virtual void UpdateSkin() override;
 	void SubmitConfiguredWeaponSkin(AUTWeaponFix* Weapon, bool bForce);
