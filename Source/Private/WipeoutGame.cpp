@@ -976,21 +976,17 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 	// this instant, so do not wait for the next one-second round-clock tick.
 	CheckFinalLifeAnnouncements(TeamIndex);
 
-	// In a real Wipeout round, losing the last living pawn ends the round even
-	// when teammates still have queued waves. Do not advertise a respawn for the
-	// final victim during the deferred 0.15s simultaneous-kill check: that timer
-	// can never fire and should be an X from the first replicated frame. Solo
-	// practice is the exception; its lone player keeps respawning until time.
-	int32 AliveTeam0 = 0;
-	int32 AliveTeam1 = 0;
-	const bool bHaveAliveCounts = GetAliveCounts(AliveTeam0, AliveTeam1);
+	// Do not preempt the authoritative deferred wipeout check here. A team can have
+	// zero living pawns for this instant while a teammate's already-queued timer
+	// is about to fire inside that grace window. Suppressing this victim's queue
+	// now would strand them for the rest of a round that the teammate rescues.
+	// True wipes cancel every newly queued timer in DeferredCheckWipeout;
+	// only the absolute round cutoff is safe to reject synchronously.
 	const bool bSoloRound = (Team0StartingSize == 0) ^ (Team1StartingSize == 0);
-	const bool bTeamWiped = bHaveAliveCounts && !bSoloRound
-		&& ((TeamIndex == 0) ? (AliveTeam0 == 0) : (AliveTeam1 == 0));
 	const bool bMissesRespawnCutoff = !bSoloRound && RoundEndTimeSeconds > 0.f
 		&& (GetWorld()->GetTimeSeconds() + RespawnDelay
 			>= RoundEndTimeSeconds + SuddenDeathGraceSeconds);
-	if (bTeamWiped || bMissesRespawnCutoff)
+	if (bMissesRespawnCutoff)
 	{
 		DeadPS->RespawnWaitTime = 0.f;
 		DeadPS->RespawnTime = 0.f;
@@ -1012,10 +1008,9 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 			CutoffSpectateDelegate, SpectateDelay, false);
 
 		UE_LOG(LogGameMode, Verbose,
-			TEXT("Wipeout: %s died with no reachable respawn (Team %d death #%d, wiped=%d, cutoff=%d)."),
+			TEXT("Wipeout: %s died with no reachable respawn (Team %d death #%d, cutoff reached)."),
 			*DeadPS->PlayerName, TeamIndex,
-			(TeamIndex == 0) ? Team0DeathCount : Team1DeathCount,
-			bTeamWiped ? 1 : 0, bMissesRespawnCutoff ? 1 : 0);
+			(TeamIndex == 0) ? Team0DeathCount : Team1DeathCount);
 		return;
 	}
 
@@ -2607,8 +2602,8 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 // CheckRelevance — Strip pickups not appropriate for Wipeout:
 //   - Remove Redeemer weapon base (and its weapon)
 //   - Remove ALL health pickups and vials
-//   - Remove armor EXCEPT ShieldBelt and ThighPads; stash the first
-//     Chest/Vest for the belt substitution
+//   - Keep ShieldBelt and ThighPads; stash the first Chest/Vest so it can stay
+//     on authored Belt maps or become the belt location on Belt-less maps
 //   - Preserve UDamage/Amp and Berserk; record non-Amp timed-powerup spots for
 //     Siphon before removing the originals that Wipeout does not keep
 //   - Keep all other weapon bases (ammo refill encourages movement)
@@ -2701,6 +2696,9 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 		// Keep: ShieldBelt
 		if (InvName.Contains(TEXT("ShieldBelt")))
 		{
+			// Record authored presence before downstream mutators run. If another
+			// mutator deliberately rejects this Belt, do not synthesize a replacement
+			// Belt later at the Vest location and defeat that mutator's policy.
 			bMapHasShieldBelt = true;
 			return Super::CheckRelevance_Implementation(Other);
 		}
@@ -2711,11 +2709,16 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 			return Super::CheckRelevance_Implementation(Other);
 		}
 
-		// Stash the first Chest/Vest pickup — a fresh belt base replaces it later
+		// Stash the first Chest/Vest pickup. It remains authored content on maps
+		// with a Belt; otherwise a fresh Belt base replaces it later.
 		if (!PendingVestPickup && InvName.Contains(TEXT("Armor_Chest")))
 		{
-			PendingVestPickup = InvPickup;
-			return Super::CheckRelevance_Implementation(Other); // keep alive for now
+			const bool bRelevant = Super::CheckRelevance_Implementation(Other);
+			if (bRelevant)
+			{
+				PendingVestPickup = InvPickup;
+			}
+			return bRelevant;
 		}
 
 		// Remove everything else (extra Chests, Helmet, Jumpboots, Invisibility, etc.)
@@ -2851,11 +2854,13 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 	}
 
 	const int32 OldHealth = Target->Health;
-	// Clamp to HealthMax, and never move Health DOWN — HealthMax can be below
-	// current Health when a pickup has overcharged the pawn, and a "heal" that
-	// removes HP would be worse than doing nothing.
+	// The legacy banner stops at the normal 100 HP stack. HealthMax is not that
+	// gameplay cap and may be raised by a pawn or mode, so using it alone lets
+	// repeated banner ticks push players past 100. Still honor a lower HealthMax,
+	// and never move Health DOWN when another pickup already overcharged the pawn.
+	const int32 HealCap = FMath::Min(Target->HealthMax, 100);
 	const int32 NewHealth = FMath::Max(OldHealth,
-		FMath::Min(OldHealth + HealAmount, Target->HealthMax));
+		FMath::Min(OldHealth + HealAmount, HealCap));
 	const int32 Actual = NewHealth - OldHealth;
 	if (Actual <= 0)
 	{
@@ -2863,6 +2868,7 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 	}
 
 	Target->Health = NewHealth;
+	Target->OnHealthUpdated();
 
 	// Applied above regardless; credited only when it helped someone else.
 	if (HealerPS != nullptr && Target->PlayerState != HealerPS)
@@ -4394,11 +4400,12 @@ void AUWipeoutGame::ResolveShieldBeltSubstitution()
 {
 	if (bMapHasShieldBelt)
 	{
-		// Map already has a belt — destroy the stashed vest
+		// Authored Belt maps keep their authored Vest too (Deck is Belt + Pads +
+		// Amp + Vest). The stash exists only to provide a substitution location
+		// when the map lacks a Belt.
 		if (PendingVestPickup && !PendingVestPickup->IsPendingKillPending())
 		{
-			UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has ShieldBelt — removing stashed vest pickup"));
-			PendingVestPickup->Destroy();
+			UE_LOG(LogGameMode, Log, TEXT("WipeoutGame: Map has ShieldBelt — keeping authored vest pickup"));
 		}
 		PendingVestPickup = nullptr;
 		return;
