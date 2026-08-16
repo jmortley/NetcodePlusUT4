@@ -303,6 +303,76 @@ static bool ShotIntersectsRenderedCapsule(
     return Distance <= BaseRadius + Tolerance;
 }
 
+// Return the same geometry-clipped end point used by HitScanTrace's pawn pass.
+// The rendered capsule must be in front of client-visible cover before an
+// immediate sound is trustworthy. Claims keep their existing path; this extra
+// trace is performed only after a client pawn candidate already exists.
+static FVector GetPredictedHitsoundTraceEnd(
+    UWorld* World,
+    AActor* IgnoreActor,
+    const FVector& StartLocation,
+    const FVector& EndTrace,
+    float TraceRadius)
+{
+    if (World == nullptr)
+    {
+        return EndTrace;
+    }
+
+    FHitResult WorldHit;
+    FCollisionQueryParams QueryParams(
+        FName(TEXT("PredictedHitsoundWorldClip")), true, IgnoreActor);
+
+    constexpr int32 MaxCosmeticAttachmentSkips = 16;
+    int32 CosmeticAttachmentSkips = 0;
+    for (;;)
+    {
+        const bool bWorldHit = (TraceRadius <= 0.0f)
+            ? World->LineTraceSingleByChannel(
+                WorldHit, StartLocation, EndTrace,
+                COLLISION_TRACE_WEAPONNOCHARACTER, QueryParams)
+            : World->SweepSingleByChannel(
+                WorldHit, StartLocation, EndTrace, FQuat::Identity,
+                COLLISION_TRACE_WEAPONNOCHARACTER,
+                FCollisionShape::MakeSphere(TraceRadius), QueryParams);
+
+        if (!bWorldHit || !WorldHit.bBlockingHit)
+        {
+            return EndTrace;
+        }
+
+        AUTWeaponAttachment* CosmeticAttachment =
+            Cast<AUTWeaponAttachment>(WorldHit.GetActor());
+        if (CosmeticAttachment == nullptr ||
+            CosmeticAttachmentSkips >= MaxCosmeticAttachmentSkips)
+        {
+            return WorldHit.Location;
+        }
+
+        QueryParams.AddIgnoredActor(CosmeticAttachment);
+        ++CosmeticAttachmentSkips;
+    }
+}
+
+// Client prediction is intentionally stricter than hit claiming. A claim can
+// still be corrected or rejected by the authority, but an immediate sound
+// cannot be taken back. Keep edge contacts and targets the server is already
+// guaranteed to reject on the authoritative-sound path.
+static bool IsHighConfidencePredictedHitsoundTarget(const AUTCharacter* Target)
+{
+    return Target != nullptr &&
+        !Target->IsDead() &&
+        Target->Health > 0 &&
+        Target->bCanBeDamaged &&
+        !Target->bSpawnProtectionEligible;
+}
+
+// Require the hitscan ray to pass this far inside the rendered capsule before
+// producing speculative audio. This is separate from (and deliberately more
+// conservative than) ncp.VisualHitscanClaimTolerance: edge claims still reach
+// the server and receive an authoritative sound if accepted.
+static constexpr float PredictedHitsoundCapsuleInset = 4.0f;
+
 // =========================================================================
 // PROJECTILE DIRECT-HIT LAG COMPENSATION (rocket + flak shell) — server-only.
 // Validates a client's direct-hit claim by finding, in the target's rewound
@@ -1730,6 +1800,8 @@ void AUTWeaponFix::FireShot()
 
 		AUTCharacter* ClientHitChar = nullptr;
 		FVector ClientHeadOffset = FVector::ZeroVector;
+		float AttribVisualMissBy = 0.0f;
+		bool bHighConfidenceHitsoundGeometry = false;
 		if (bTrackHitScanReplication && InstantHitInfo.IsValidIndex(CurrentFireMode) &&
 			InstantHitInfo[CurrentFireMode].DamageType != NULL &&
 			InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.0f)
@@ -1747,7 +1819,6 @@ void AUTWeaponFix::FireShot()
 			// filter, and the visual offset/missBy the filter measured.
 			AUTCharacter* AttribPretraceHit = ClientHitChar;
 			FVector AttribVisualOffset = FVector::ZeroVector;
-			float AttribVisualMissBy = 0.0f;
 
 			// ClientHitChar must mean "the ray crossed what I saw", not merely
 			// "the ray crossed the invisible replicated actor anchor". TeamArenaCharacter's
@@ -1778,6 +1849,21 @@ void AUTWeaponFix::FireShot()
 					UE_LOG(LogUTWeaponFix, Warning,
 						TEXT("[VisualClaim] ACCEPT %s actor candidate: visual offset=%s, visual margin=%.2fuu"),
 						*ClientHitChar->GetName(), *VisualOffset.ToString(), -VisualMissBy);
+				}
+
+				if (ClientHitChar != nullptr)
+				{
+					const FVector AudibleTraceEnd = GetPredictedHitsoundTraceEnd(
+						World, UTOwner, SpawnLocation, EndTrace,
+						InstantHitInfo[CurrentFireMode].TraceHalfSize);
+					FVector AudibleVisualOffset = FVector::ZeroVector;
+					float AudibleVisualMissBy = 0.0f;
+					const bool bAudibleCapsuleHit = ShotIntersectsRenderedCapsule(
+						ClientHitChar, SpawnLocation, AudibleTraceEnd,
+						InstantHitInfo[CurrentFireMode].TraceHalfSize,
+						AudibleVisualOffset, AudibleVisualMissBy);
+					bHighConfidenceHitsoundGeometry = bAudibleCapsuleHit &&
+						AudibleVisualMissBy <= -PredictedHitsoundCapsuleInset;
 				}
 			}
 
@@ -1827,7 +1913,9 @@ void AUTWeaponFix::FireShot()
 		// Client-side hitsound prediction for hitscan weapons.
 		// Team-aware: predicting the ENEMY cue for a teammate (who on a no-FF
 		// server takes no damage at all) is worse feedback than silence.
-		if (ClientHitChar != nullptr && Role != ROLE_Authority)
+		if (ClientHitChar != nullptr && Role != ROLE_Authority &&
+			bHighConfidenceHitsoundGeometry &&
+			IsHighConfidencePredictedHitsoundTarget(ClientHitChar))
 		{
 			AClientHitsounds* HitsoundsMut = FindClientHitsoundsMutator();
 			if (HitsoundsMut)
@@ -1848,7 +1936,10 @@ void AUTWeaponFix::FireShot()
 				{
 					EstDamage = FMath::TruncToInt(UTOwner->DamageScaling * (float)EstDamage);
 				}
-				HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
+				if (bFriendlyTarget || EstDamage > 0)
+				{
+					HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
+				}
 			}
 		}
 
@@ -6201,7 +6292,7 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 	// hitsound for a hit it never claims (UTPlusProj_StingerShard's comment
 	// already documented that contract — previously the block sat above the
 	// gate and broke it).
-	if (Role != ROLE_Authority)
+	if (Role != ROLE_Authority && IsHighConfidencePredictedHitsoundTarget(HitTarget))
 	{
 		AClientHitsounds* HitsoundsMut = FindClientHitsoundsMutator();
 		if (HitsoundsMut)
@@ -6232,7 +6323,10 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 			{
 				EstDamage = FMath::TruncToInt(UTOwner->DamageScaling * (float)EstDamage);
 			}
-			HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
+			if (bFriendlyTarget || EstDamage > 0)
+			{
+				HitsoundsMut->PlayClientPredictedHitsound(EstDamage, bFriendlyTarget);
+			}
 		}
 	}
 

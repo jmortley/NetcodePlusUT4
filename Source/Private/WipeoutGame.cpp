@@ -2854,11 +2854,13 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 	}
 
 	const int32 OldHealth = Target->Health;
-	// Clamp to HealthMax, and never move Health DOWN — HealthMax can be below
-	// current Health when a pickup has overcharged the pawn, and a "heal" that
-	// removes HP would be worse than doing nothing.
+	// The legacy banner stops at the normal 100 HP stack. HealthMax is not that
+	// gameplay cap and may be raised by a pawn or mode, so using it alone lets
+	// repeated banner ticks push players past 100. Still honor a lower HealthMax,
+	// and never move Health DOWN when another pickup already overcharged the pawn.
+	const int32 HealCap = FMath::Min(Target->HealthMax, 100);
 	const int32 NewHealth = FMath::Max(OldHealth,
-		FMath::Min(OldHealth + HealAmount, Target->HealthMax));
+		FMath::Min(OldHealth + HealAmount, HealCap));
 	const int32 Actual = NewHealth - OldHealth;
 	if (Actual <= 0)
 	{
@@ -2866,6 +2868,7 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 	}
 
 	Target->Health = NewHealth;
+	Target->OnHealthUpdated();
 
 	// Applied above regardless; credited only when it helped someone else.
 	if (HealerPS != nullptr && Target->PlayerState != HealerPS)

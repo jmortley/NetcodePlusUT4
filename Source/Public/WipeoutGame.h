@@ -290,7 +290,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
 	void CreditHealing(AUTPlayerState* HealerPS, int32 Amount);
 
-	/** Apply a clamped heal to Target and credit the HP ACTUALLY restored.
+	/** Apply a heal clamped to the legacy banner's 100 HP ceiling and credit the
+	 *  HP ACTUALLY restored.
 	 *  Returns that amount (0 if nothing was healed).
 	 *
 	 *  This exists so heal-over-time Blueprints (the buff banner) stop doing
@@ -307,7 +308,8 @@ public:
 	 *  not score. The link beam never had to make this choice because it
 	 *  cannot target its own owner.
 	 *
-	 *  Server-authority only. No-op on a null, dead, or already-full target. */
+	 *  A target already over 100 is left unchanged; healing never removes
+	 *  overhealth. Server-authority only. No-op on a null, dead, or full target. */
 	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
 	int32 HealCharacterAndCredit(class AUTCharacter* Target, int32 HealAmount,
 		AUTPlayerState* HealerPS);
