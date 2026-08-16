@@ -2048,6 +2048,40 @@ bool ANCPlusCTFGameMode::AreAllFlagsHome() const
 	return true;
 }
 
+bool ANCPlusCTFGameMode::IsAnyEligibleFlagHeld() const
+{
+	if (!IsValid(CTFGameState))
+	{
+		return false;
+	}
+	for (uint8 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
+	{
+		if (bAdvantageFlagEligible[TeamIdx]
+			&& CTFGameState->GetFlagState(TeamIdx) == CarriedObjectState::Held)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ANCPlusCTFGameMode::IsAnyEligibleFlagOut() const
+{
+	if (!IsValid(CTFGameState))
+	{
+		return false;
+	}
+	for (uint8 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
+	{
+		if (bAdvantageFlagEligible[TeamIdx]
+			&& CTFGameState->GetFlagState(TeamIdx) != CarriedObjectState::Home)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 bool ANCPlusCTFGameMode::ShouldEnterAdvantage() const
 {
 	// Advantage triggers if ANY flag is not home (held or dropped).
@@ -2086,6 +2120,18 @@ void ANCPlusCTFGameMode::EnterAdvantage()
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
 
+	// Eligibility snapshot: only the flags already out (held or dropped) belong to
+	// the play that earned advantage. A flag grabbed fresh AFTER this point buys
+	// nothing — the grab is allowed, but it can neither sustain advantage nor
+	// re-arm the timer. Counters the stand-camper cherry-pick: regrab the
+	// returning flag inside the 1Hz DefaultTimer window and ride a brand-new play
+	// for another AdvantageMaxDuration.
+	for (uint8 TeamIdx = 0; TeamIdx < 2; TeamIdx++)
+	{
+		bAdvantageFlagEligible[TeamIdx] = IsValid(CTFGameState)
+			&& CTFGameState->GetFlagState(TeamIdx) != CarriedObjectState::Home;
+	}
+
 	// Stamp advantage start for the HUD's elapsed-time counter.
 	if (OTInfo && CTFGameState)
 	{
@@ -2116,9 +2162,11 @@ bool ANCPlusCTFGameMode::CheckAdvantage()
 		return false;
 	}
 
-	bool bAnyFlagHeld = IsAnyFlagHeld();
+	// Eligibility-aware: only a flag from the play that earned advantage sustains
+	// it. A retired flag someone fresh-grabbed counts as "not held" here.
+	bool bEligibleFlagHeld = IsAnyEligibleFlagHeld();
 
-	if (bAnyFlagHeld)
+	if (bEligibleFlagHeld)
 	{
 		// A flag is being held - advantage continues, cancel any grace period
 		if (bGracePeriodActive)
@@ -2128,7 +2176,7 @@ bool ANCPlusCTFGameMode::CheckAdvantage()
 		return true;
 	}
 
-	// No flags held - either we're already in grace or need to start it
+	// No eligible flags held - either we're already in grace or need to start it
 	if (!bGracePeriodActive)
 	{
 		StartGracePeriod();
@@ -2145,6 +2193,8 @@ void ANCPlusCTFGameMode::EndOfHalf()
 	NCPlusReflection::SetByte(CTFGameState, TEXT("AdvantageTeamIndex"), 255);
 	bGracePeriodActive = false;
 	GracePeriodTimeRemaining = 0;
+	bAdvantageFlagEligible[0] = false;
+	bAdvantageFlagEligible[1] = false;
 	if (OTInfo)
 	{
 		OTInfo->AdvantageStartElapsed = -1;
@@ -2249,6 +2299,7 @@ void ANCPlusCTFGameMode::BroadcastLocalized(AActor* Sender, TSubclassOf<ULocalMe
 	// Regrab-alarm detection: the flags themselves have no pickup-from-dropped
 	// notification, but every transition message funnels through here. A
 	// taken(4) that follows a drop signal for the same team flag is a regrab.
+	bool bAdvantageFlagReturned = false;
 	if (Message)
 	{
 		AUTCarriedObject* Flag = Cast<AUTCarriedObject>(Sender);
@@ -2271,6 +2322,12 @@ void ANCPlusCTFGameMode::BroadcastLocalized(AActor* Sender, TSubclassOf<ULocalMe
 					// always false for NCPlusCTF flags, and even on a hypothetical
 					// gradual map the 1Hz sampler re-marks Dropped within a second.
 					bFlagWasDropped[FlagTeam] = false;
+
+					// Advantage eligibility: a returned flag's play is over — retire
+					// it. The end-of-half check runs after Super so the return
+					// message reaches players before any half-end cascade.
+					bAdvantageFlagEligible[FlagTeam] = false;
+					bAdvantageFlagReturned = true;
 				}
 				else if (Switch == 4)
 				{
@@ -2293,6 +2350,21 @@ void ANCPlusCTFGameMode::BroadcastLocalized(AActor* Sender, TSubclassOf<ULocalMe
 	}
 
 	Super::BroadcastLocalized(Sender, Message, Switch, RelatedPlayerState_1, RelatedPlayerState_2, OptionalObject);
+
+	// Advantage cherry-pick counter: this return may have retired the LAST eligible
+	// flag. End the half NOW, in the same stack as the return broadcast — the
+	// return fires while the flag is still Dropped (see the switch 0/1 branch
+	// above), provably before any pickup can land — so a stand-camper's instant
+	// regrab arrives after the half is already over instead of buying a fresh
+	// AdvantageMaxDuration. The 1Hz DefaultTimer cannot see a return+grab that
+	// happens inside one second; this site can.
+	if (bAdvantageFlagReturned
+		&& CTFGameState && CTFGameState->IsMatchInProgress()
+		&& NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage"))
+		&& !IsAnyEligibleFlagOut())
+	{
+		EndOfHalf();
+	}
 }
 
 void ANCPlusCTFGameMode::PlayRegrabTakenAlarm(AUTCarriedObject* Flag)
@@ -2367,11 +2439,13 @@ void ANCPlusCTFGameMode::DefaultTimer()
 
 	// Tick advantage timer (DefaultTimer fires every second).
 	// Advantage lasts up to AdvantageMaxDuration (5 min default).
-	// All flags home → instant end (NewCTF style, no grace period).
+	// All ELIGIBLE flags home → instant end (NewCTF style, no grace period).
 	if (CTFGameState && NCPlusReflection::GetBool(CTFGameState, TEXT("bPlayingAdvantage")) && CTFGameState->IsMatchInProgress())
 	{
-		// All flags home → end immediately (NewCTF: IsEveryFlagHome check in Timer)
-		if (AreAllFlagsHome())
+		// Every ELIGIBLE flag home → end immediately (NewCTF: IsEveryFlagHome check
+		// in Timer). Eligible-only so a retired flag fresh-grabbed by a
+		// stand-camper (cherry-pick exploit) no longer keeps advantage alive.
+		if (!IsAnyEligibleFlagOut())
 		{
 			EndOfHalf();
 			return;
