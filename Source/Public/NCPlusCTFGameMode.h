@@ -472,6 +472,11 @@ protected:
 	bool IsAnyFlagHeld() const;
 	bool AreAllFlagsHome() const;
 
+	/** Eligibility-aware variants: only flags marked bAdvantageFlagEligible count,
+	 *  so a retired flag a stand-camper fresh-grabs cannot sustain advantage. */
+	bool IsAnyEligibleFlagHeld() const;
+	bool IsAnyEligibleFlagOut() const;
+
 	/** Determines whether advantage should start when time expires.
 	 *  Halftime: always if a flag is held. End of game: only within 1 cap diff (configurable). */
 	virtual bool ShouldEnterAdvantage() const;
@@ -501,6 +506,14 @@ protected:
 
 	/** True when all flags are home and we're counting down before ending. */
 	bool bGracePeriodActive;
+
+	/** Per-team-flag advantage eligibility: true while this team's flag is part of
+	 *  the play that earned advantage. Snapshotted in EnterAdvantage from which
+	 *  flags were out; a flag's return retires it (BroadcastLocalized switch 0/1).
+	 *  A fresh grab of a retired flag is inert — allowed, but it cannot sustain
+	 *  advantage or re-arm the timer (stand-camper cherry-pick exploit, HuMPTY
+	 *  report). Meaningful only while bPlayingAdvantage. */
+	bool bAdvantageFlagEligible[2] = { false, false };
 
 	// ── Recent Spawn Tracking (IG+ style) ───────────────────────────
 	// Penalize reusing the same spawn point. Tracks the last 3 spawns per player,
