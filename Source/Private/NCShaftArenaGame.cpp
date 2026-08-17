@@ -80,6 +80,7 @@ ANCShaftArenaGame::ANCShaftArenaGame(const FObjectInitializer& OI)
 	MinWinMargin    = 2;
 	SiphonPercent   = 0.5f;
 	HealCap         = 199;
+	StartingHealth  = 150;
 	// ShaftLinkClass: nullptr by default — user supplies it via a BP subclass
 	// of NCShaftArenaGame, or via Mod.ini [NCShaftArena] WeaponClass=...
 	// DefaultInventory is left untouched here; InitGame configures it after
@@ -112,11 +113,21 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 	int32 IniGoal = GoalScore;
-	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("GoalScore"),     IniGoal,        ConfigPath);
-	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("MinWinMargin"),  MinWinMargin,   ConfigPath);
-	GConfig->GetFloat(TEXT("NCShaftArena"), TEXT("SiphonPercent"), SiphonPercent,  ConfigPath);
-	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("HealCap"),       HealCap,        ConfigPath);
+	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("GoalScore"),      IniGoal,        ConfigPath);
+	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("MinWinMargin"),   MinWinMargin,   ConfigPath);
+	GConfig->GetFloat(TEXT("NCShaftArena"), TEXT("SiphonPercent"),  SiphonPercent,  ConfigPath);
+	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("HealCap"),        HealCap,        ConfigPath);
+	GConfig->GetInt  (TEXT("NCShaftArena"), TEXT("StartingHealth"), StartingHealth, ConfigPath);
 	GoalScore = IniGoal;
+	StartingHealth = FMath::Clamp(StartingHealth, 1, 199);
+
+	// No-armor rule (Jeremy 2026-08-17): the StartingHealth pool is the entire
+	// durability budget. Forced AFTER Super::InitGame so neither the BP's
+	// defaults (the shipped NCShaftArena BP inherits the old ShaftArena's
+	// armor-on default) nor a stock option string can re-enable it. The winner
+	// restore in ScoreKill and SetPlayerDefaults both assume this.
+	bPlayersStartWithArmor = false;
+	StartingArmorClass = nullptr;
 
 	// Mod.ini WeaponClass overrides the BP-set ShaftLinkClass when present.
 	// Path format mirrors blueprint asset references:
@@ -166,8 +177,8 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 	}
 
 	UE_LOG(LogNCShaftArena, Log,
-		TEXT("InitGame: GoalScore=%d MinWinMargin=%d Siphon=%.2f HealCap=%d ShaftLinkClass=%s"),
-		GoalScore, MinWinMargin, SiphonPercent, HealCap,
+		TEXT("InitGame: GoalScore=%d MinWinMargin=%d Siphon=%.2f HealCap=%d StartingHealth=%d ShaftLinkClass=%s"),
+		GoalScore, MinWinMargin, SiphonPercent, HealCap, StartingHealth,
 		ShaftLinkClass ? *ShaftLinkClass->GetPathName() : TEXT("(none)"));
 
 	// Stats replicator - server-only StatsData (LinkHits/LinkShots) + DamageDone
@@ -332,6 +343,39 @@ void ANCShaftArenaGame::DiscardInventory(APawn* Other, AController* Killer)
 	// is safe.
 }
 
+void ANCShaftArenaGame::SetPlayerDefaults(APawn* PlayerPawn)
+{
+	Super::SetPlayerDefaults(PlayerPawn);
+
+	AUTCharacter* UTChar = Cast<AUTCharacter>(PlayerPawn);
+	if (UTChar == nullptr)
+	{
+		return;
+	}
+
+	// StartingHealth baseline (default 150). HealthMax is raised too so the
+	// pool is the character's true maximum — HUD fraction, heal logic and the
+	// winner restore (ScoreKill reads HealthMax) all agree — instead of a
+	// health value stranded above a 100 max.
+	UTChar->HealthMax = StartingHealth;
+	UTChar->Health = StartingHealth;
+	UTChar->OnHealthUpdated();
+
+	// Belt-and-braces for the no-armor rule: bPlayersStartWithArmor is already
+	// forced off in InitGame, but a BP DefaultInventory entry could still smuggle
+	// armor in. Strip anything armor-shaped so C++ owns the rule outright.
+	TArray<AUTArmor*> ArmorItems;
+	for (TInventoryIterator<AUTArmor> It(UTChar); It; ++It)
+	{
+		ArmorItems.Add(*It);
+	}
+	for (AUTArmor* Armor : ArmorItems)
+	{
+		UTChar->RemoveInventory(Armor);
+		Armor->Destroy();
+	}
+}
+
 // =============================================================================
 // Vampirism (always-on)
 // =============================================================================
@@ -366,35 +410,31 @@ void ANCShaftArenaGame::ScoreKill_Implementation(AController* Killer, AControlle
 	AUTCharacter* KillerChar = (KillerPS && KillerPS != VictimPS) ? KillerPS->GetUTCharacter() : nullptr;
 	AUTPlayerController* VictimPC = Cast<AUTPlayerController>(Other);
 
-	// Preserve the old ShaftArena mutator's post-frag feedback, but send it
-	// directly to the victim so it cannot be lost among unrelated match chat.
-	// Snapshot before restoring the survivor to the configured spawn baseline.
+	// Preserve the old ShaftArena mutator's post-frag feedback. Sent to BOTH
+	// duelists (Jeremy 2026-08-17): the victim learns how close it was, the
+	// winner gets the same line as a receipt of what they survived with.
+	// Snapshot before restoring the survivor to the spawn baseline.
 	if (KillerChar && !KillerChar->IsDead() && !KillerChar->IsPendingKillPending())
 	{
 		const int32 RemainingHealth = FMath::Max(0, KillerChar->Health);
 
+		// Winner restore = the clean spawn baseline: StartingHealth (HealthMax
+		// is set to it in SetPlayerDefaults) and zero armor. The old
+		// StartingArmorClass / PlayerCard ExtraArmor grants are gone with the
+		// no-armor rule (forced off in InitGame).
 		KillerChar->Health = KillerChar->HealthMax;
 		KillerChar->OnHealthUpdated();
+		KillerChar->SetArmorAmount(nullptr, 0);
 
-		AUTArmor* StartingArmor = (bPlayersStartWithArmor && StartingArmorClass)
-			? StartingArmorClass.GetDefaultObject()
-			: nullptr;
-		int32 StartingArmorAmount = StartingArmor ? StartingArmor->ArmorAmount : 0;
-		if (StartingArmorClass && KillerPS->PlayerCard && KillerPS->PlayerCard->ExtraArmor > 0)
-		{
-			StartingArmor = StartingArmorClass.GetDefaultObject();
-			const int32 ExtraArmor = KillerPS->PlayerCard->ExtraArmor;
-			StartingArmorAmount = FMath::Max(
-				FMath::Max(StartingArmorAmount, ExtraArmor),
-				FMath::Min(100, StartingArmorAmount + ExtraArmor));
-		}
-		KillerChar->SetArmorAmount(StartingArmor, StartingArmorAmount);
-
+		const FString HPMsg = FString::Printf(TEXT("%s: I had %d HP remaining"),
+			*KillerPS->PlayerName, RemainingHealth);
 		if (VictimPC)
 		{
-			VictimPC->ClientSay(nullptr,
-				FString::Printf(TEXT("%s: I had %d HP remaining"), *KillerPS->PlayerName, RemainingHealth),
-				ChatDestinations::System);
+			VictimPC->ClientSay(nullptr, HPMsg, ChatDestinations::System);
+		}
+		if (AUTPlayerController* KillerPC = Cast<AUTPlayerController>(Killer))
+		{
+			KillerPC->ClientSay(nullptr, HPMsg, ChatDestinations::System);
 		}
 	}
 

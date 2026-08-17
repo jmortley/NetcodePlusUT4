@@ -45,6 +45,10 @@ public:
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void BeginPlay() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;
+
+	/** 150 HP / no-armor spawn baseline, enforced in C++ so a BP default or
+	 *  option string cannot reintroduce armor (Jeremy 2026-08-17). */
+	virtual void SetPlayerDefaults(APawn* PlayerPawn) override;
 	virtual bool ReadyToStartMatch_Implementation() override;
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleMatchHasEnded() override;
@@ -80,6 +84,13 @@ public:
 	/** Heal cap (overheal allowed up to 199). */
 	UPROPERTY(EditDefaultsOnly, Category = "NCShaftArena")
 	int32 HealCap;
+
+	/** Spawn (and post-frag winner-restore) health. Shaft baseline is 150:
+	 *  the mode strips every pickup, so this pool IS the durability budget —
+	 *  armor is forced off in InitGame regardless of BP defaults.
+	 *  Configurable via Mod.ini [NCShaftArena] StartingHealth. */
+	UPROPERTY(EditDefaultsOnly, Category = "NCShaftArena")
+	int32 StartingHealth;
 
 	/** Loadout weapon. Set via BP subclass DefaultProperties or Mod.ini
 	 *  [NCShaftArena] WeaponClass=/Game/Path/To/BP_ShaftLink.BP_ShaftLink_C.

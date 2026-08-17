@@ -1,7 +1,7 @@
-// NCShaftArenaScoreboard.cpp - 5-column layout: Player | K/D | Acc | Streak | DMG.
-// Drops Eff%, DMG/Life, and Skill/Ping vs the inherited parent layout - shaft
-// arena cares about kills, accuracy, current spree, and damage; everything else
-// is noise in a 1v1 beam duel.
+// NCShaftArenaScoreboard.cpp - 6-column layout: Player | K/D | Acc | Streak | DMG | Ping.
+// Drops Eff% and DMG/Life vs the inherited parent layout - shaft arena cares
+// about kills, accuracy, current spree, damage, and (since 2026-08-17, Jeremy)
+// ping; the rest is noise in a 1v1 beam duel.
 
 #include "NCShaftArenaScoreboard.h"
 #include "NCPlusScoreboardHost.h"
@@ -18,6 +18,10 @@
 
 namespace
 {
+	/** Ping column centre. Sits in the right margin the 5-column layout left
+	 *  empty; shared by the header and row draws. */
+	constexpr float ShaftColumnPingX = 0.94f;
+
 	/** Cached weak-ptr lookup for the replicator. Same pattern the duel
 	 *  scoreboard uses - re-iterating actors every frame is wasted work. */
 	ANCShaftArenaStatsReplicator* FindNCShaftArenaStatsReplicator(UWorld* World)
@@ -77,7 +81,10 @@ void UNCShaftArenaScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
 			DrawText(CH_Damage, XOffset + (ScaledCellWidth * ColumnHeaderEfficiencyX), YOffset + ColumnHeaderY,
 				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
-			// Eff%, DMG/Life, Skill/Ping intentionally removed.
+			DrawText((GetWorld()->GetNetMode() == NM_Standalone) ? CH_Skill : CH_Ping,
+				XOffset + (ScaledCellWidth * ShaftColumnPingX), YOffset + ColumnHeaderY,
+				UTHUDOwner->TinyFont, 1.0f, 1.0f, FLinearColor::Black, ETextHorzPos::Center, ETextVertPos::Center);
+			// Eff% and DMG/Life intentionally removed; Ping restored 2026-08-17.
 		}
 
 		XOffset = Canvas->ClipX - ScaledCellWidth - ScaledEdgeSize;
@@ -139,6 +146,22 @@ void UNCShaftArenaScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	if (!PS->GetUTCharacter()) DmgColor *= 0.6f;
 	DrawText(FText::AsNumber(Damage), XOffset + (Width * ColumnHeaderEfficiencyX), YOffset + ColumnY,
 		UTHUDOwner->TinyFont, 1.0f, 1.0f, DmgColor, ETextHorzPos::Center, ETextVertPos::Center);
+
+	// Ping (restored 2026-08-17). Stock convention: quantized PS->Ping*4 for
+	// remote rows, ExactPing for the local player's own row. Bots have no ping;
+	// skip the cell rather than draw a lying 0ms.
+	if (!PS->bIsABot)
+	{
+		int32 PingMs = PS->Ping * 4;
+		if (UTHUDOwner && UTHUDOwner->UTPlayerOwner
+			&& UTHUDOwner->UTPlayerOwner->UTPlayerState == PS)
+		{
+			PingMs = int32(PS->ExactPing);
+		}
+		DrawText(FText::Format(PingFormatText, FText::AsNumber(PingMs)),
+			XOffset + (Width * ShaftColumnPingX), YOffset + ColumnY,
+			UTHUDOwner->TinyFont, 1.0f, 1.0f, DrawColor, ETextHorzPos::Center, ETextVertPos::Center);
+	}
 
 	// Eff%, DMG/Life intentionally removed.
 }
@@ -300,7 +323,8 @@ void UNCShaftArenaScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 		DrawReadyText(PlayerState, XOffset, YOffset, ScaledCellWidth);
 	}
 
-	// >>> Skill / Ping right-edge draw OMITTED on purpose. <<<
+	// >>> Parent's right-edge Skill/Ping draw still OMITTED — our own Ping
+	// column (ShaftColumnPingX, drawn in DrawPlayerScore) replaces it. <<<
 
 	if (PlayerState->bOutOfLives)
 	{
