@@ -38,4 +38,11 @@ class NETCODEPLUS_API AUTWeap_Minigun_Plus : public AUTWeaponFix
 	virtual bool CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc) override;
 	virtual bool HasAmmo(uint8 FireModeNum) override;
 	//~ End AUTWeapon Interface
+
+	/** Primary is spread hitscan and never claims, so like the link beam its
+	 *  only acceptance route was the raw validation rewind — same
+	 *  aim-at-rendering vs raw-history offset, on a thinner trace. Opt into
+	 *  the render-credit re-test (ncp.RenderCredit); the spread-adjusted ray
+	 *  is server-owned, so spread composes with the credit pass unchanged. */
+	virtual bool SupportsRenderCredit() const override { return true; }
 };
