@@ -364,10 +364,16 @@ void ANCShaftArenaGame::SetPlayerDefaults(APawn* PlayerPawn)
 	// Belt-and-braces for the no-armor rule: bPlayersStartWithArmor is already
 	// forced off in InitGame, but a BP DefaultInventory entry could still smuggle
 	// armor in. Strip anything armor-shaped so C++ owns the rule outright.
+	// TInventoryIterator<AUTArmor> does not link from the plugin (the game module
+	// exports only the <AUTInventory> and <AUTWeapon> instantiations), so walk
+	// the base iterator and cast — same pattern as NCPlusHUDLayout.cpp:2489.
 	TArray<AUTArmor*> ArmorItems;
-	for (TInventoryIterator<AUTArmor> It(UTChar); It; ++It)
+	for (TInventoryIterator<> It(UTChar); It; ++It)
 	{
-		ArmorItems.Add(*It);
+		if (AUTArmor* Armor = Cast<AUTArmor>(*It))
+		{
+			ArmorItems.Add(Armor);
+		}
 	}
 	for (AUTArmor* Armor : ArmorItems)
 	{
