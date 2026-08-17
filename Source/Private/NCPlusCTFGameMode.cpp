@@ -74,7 +74,7 @@ ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializ
 	EnemyLOSBlockRange = 3000.f;        // BP: EnemyLOSBlockRange — LOS check to nearby enemies
 	EnemyLOSPenalty = 8.f;
 
-	// Spawn selection (tie-band + freshness; tunable via Mod.ini [UTPUGS_SPAWN])
+	// Legacy rollback scoring/selection (tunable via Mod.ini [UTPUGS_SPAWN]).
 	SpawnTieBandWidth = 2.0f;           // starts within ~2 score pts of best = a coin-flip
 	SpawnFreshnessBonus = 10.0f;        // when calm, lift unused starts to spread spawns
 	SpawnFreshnessWindow = 30.0f;       // 30s since last use = fully fresh
@@ -212,6 +212,10 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 	Team0Spawns.Reset();
 	Team1Spawns.Reset();
 	SpawnLastUsedTime.Reset();
+	PlayerRecentSpawns.Reset();
+	PlayerLastSpawnLoc.Reset();
+	RobbedSpawnRotation[0] = 0;
+	RobbedSpawnRotation[1] = 0;
 
 	// Per-match leaver/stat caches reset on each map load.
 	MatchStatCache.Empty();
@@ -700,6 +704,13 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 				}
 			}
 		}
+	}
+
+	if (Exiting)
+	{
+		const TWeakObjectPtr<AController> Key(Exiting);
+		PlayerRecentSpawns.Remove(Key);
+		PlayerLastSpawnLoc.Remove(Key);
 	}
 
 	Super::Logout(Exiting);
@@ -1230,6 +1241,10 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	{
 		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = V->GetValue().ToBool(); }
 	};
+	auto ReadInt = [Section](const TCHAR* Key, int32& Out)
+	{
+		if (const FConfigValue* V = Section->Find(FName(Key))) { Out = FCString::Atoi(*V->GetValue()); }
+	};
 
 	// Penalty weights (the side-clustering knobs — soften these to let mid back in).
 	ReadFloat(TEXT("FlagCarrierSpawnPenalty"), FlagCarrierSpawnPenalty);
@@ -1273,6 +1288,17 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	}
 	ReadFloat(TEXT("SpawnEnemyHardRadius"),    SpawnEnemyHardRadius);
 	ReadFloat(TEXT("SpawnEnemyBelowZ"),        SpawnEnemyBelowZ);
+	ReadBool(TEXT("SpawnUseNewCTFSelection"), bSpawnUseNewCTFSelection);
+	ReadInt(TEXT("SpawnSystemThreshold"), SpawnSystemThreshold);
+	ReadFloat(TEXT("SpawnFriendlyBlockRange"), SpawnFriendlyBlockRange);
+	ReadFloat(TEXT("SpawnFriendlyVisionBlockRange"), SpawnFriendlyVisionBlockRange);
+	ReadFloat(TEXT("SpawnFlagBlockRange"), SpawnFlagBlockRange);
+	ReadInt(TEXT("SpawnMinCycleDistance"), SpawnMinCycleDistance);
+	ReadBool(TEXT("SpawnExtrapolateMovement"), bSpawnExtrapolateMovement);
+	ReadBool(TEXT("SpawnSecondaryEnabled"), bSpawnSecondaryEnabled);
+	ReadFloat(TEXT("SpawnSecondaryMaxDistance"), SpawnSecondaryMaxDistance);
+	ReadFloat(TEXT("SpawnSecondaryOwnTeamWeight"), SpawnSecondaryOwnTeamWeight);
+	ReadFloat(TEXT("SpawnSecondaryCarrierWeight"), SpawnSecondaryCarrierWeight);
 	ReadFloat(TEXT("SpawnTieBandWidth"),       SpawnTieBandWidth);
 	ReadFloat(TEXT("SpawnFreshnessBonus"),     SpawnFreshnessBonus);
 	ReadFloat(TEXT("SpawnFreshnessWindow"),    SpawnFreshnessWindow);
@@ -1282,13 +1308,35 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 	ReadFloat(TEXT("SpawnRobbedBaseAvoidCount"), SpawnRobbedBaseAvoidCount);
 	ReadBool(TEXT("LogSpawnChoices"), bLogSpawnChoices);
 
+	SpawnSystemThreshold = FMath::Max(0, SpawnSystemThreshold);
+	SpawnFriendlyBlockRange = FMath::IsFinite(SpawnFriendlyBlockRange) ? FMath::Max(0.f, SpawnFriendlyBlockRange) : 150.f;
+	SpawnFriendlyVisionBlockRange = FMath::IsFinite(SpawnFriendlyVisionBlockRange) ? FMath::Max(0.f, SpawnFriendlyVisionBlockRange) : 150.f;
+	SpawnFlagBlockRange = FMath::IsFinite(SpawnFlagBlockRange) ? FMath::Max(0.f, SpawnFlagBlockRange) : 750.f;
+	SpawnMinCycleDistance = FMath::Max(0, SpawnMinCycleDistance);
+	SpawnSecondaryMaxDistance = FMath::IsFinite(SpawnSecondaryMaxDistance) ? FMath::Max(1.f, SpawnSecondaryMaxDistance) : 2000.f;
+	SpawnSecondaryOwnTeamWeight = FMath::IsFinite(SpawnSecondaryOwnTeamWeight) ? FMath::Max(0.f, SpawnSecondaryOwnTeamWeight) : 0.2f;
+	SpawnSecondaryCarrierWeight = FMath::IsFinite(SpawnSecondaryCarrierWeight) ? FMath::Max(0.f, SpawnSecondaryCarrierWeight) : 2.f;
+
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: pick=%s randBase=%.1f randSpread=%.2f tieBand=%.1f freshBonus=%.1f freshWin=%.0f flagVic=%.0f killerAvoid=%.0f efcLOSAvoid=%.0f robbedAvoid=%.0f enemyHard=%.0f enemyBelowZ=%.0f logChoices=%s | flagPen=%.1f dropPen=%.1f enemyBlk=%.1f/%.0f enemyLOS=%.1f/%.0f"),
+		TEXT("NCPlusCTF spawn config [UTPUGS_SPAWN]: newctf=%s threshold=%d enemy=%.0f enemyLOS=%.0f friendly=%.0f/%.0f flag=%.0f cycle=%d extrap=%s secondary=%s max=%.0f weights=%.2f/%.2f | legacy=%s randBase=%.1f randSpread=%.2f tieBand=%.1f freshBonus=%.1f freshWin=%.0f killerAvoid=%.0f efcLOSAvoid=%.0f robbedAvoid=%.0f enemyBelowZ=%.0f logChoices=%s"),
+		bSpawnUseNewCTFSelection ? TEXT("true") : TEXT("false"), SpawnSystemThreshold,
+		SpawnEnemyHardRadius, EnemyLOSBlockRange, SpawnFriendlyBlockRange, SpawnFriendlyVisionBlockRange,
+		SpawnFlagBlockRange, SpawnMinCycleDistance, bSpawnExtrapolateMovement ? TEXT("true") : TEXT("false"),
+		bSpawnSecondaryEnabled ? TEXT("true") : TEXT("false"), SpawnSecondaryMaxDistance,
+		SpawnSecondaryOwnTeamWeight, SpawnSecondaryCarrierWeight,
 		bSpawnWeightedRandom ? TEXT("weighted-random") : TEXT("tie-band"), SpawnRandomBase, SpawnRandomSpread,
-		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnFlagVicinityRadius, SpawnKillerAvoidRadius, SpawnFlagCarrierLOSAvoidRadius, SpawnRobbedBaseAvoidCount,
-		SpawnEnemyHardRadius, SpawnEnemyBelowZ,
-		bLogSpawnChoices ? TEXT("true") : TEXT("false"),
-		FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange);
+		SpawnTieBandWidth, SpawnFreshnessBonus, SpawnFreshnessWindow, SpawnKillerAvoidRadius, SpawnFlagCarrierLOSAvoidRadius, SpawnRobbedBaseAvoidCount,
+		SpawnEnemyBelowZ,
+		bLogSpawnChoices ? TEXT("true") : TEXT("false"));
+	if (!bSpawnUseNewCTFSelection)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF legacy spawn config: flagCarrier=%.1f droppedFlag=%.1f carrierLOS=%.1f enemy=%.1f/%.0f enemyLOS=%.1f/%.0f flagBase=%.0f flagRadius=%.0f recent=%.2f nearLast=%.1f/%.0f flagVicinity=%.0f"),
+			FlagCarrierSpawnPenalty, DroppedFlagSpawnPenalty, FlagCarrierLOSPenalty,
+			EnemyBlockPenalty, EnemyBlockRange, EnemyLOSPenalty, EnemyLOSBlockRange,
+			FlagBaseProximityRadius, FlagSpawnPenaltyRadius, SpawnRecentPenaltyMultiplier,
+			SpawnNearLastPenalty, SpawnNearLastRadius, SpawnFlagVicinityRadius);
+	}
 }
 
 bool ANCPlusCTFGameMode::IsFlagNearOwnBase(uint8 TeamIndex) const
@@ -1359,9 +1407,99 @@ bool ANCPlusCTFGameMode::ValidateHat(AUTPlayerState* HatOwner, const FString& Ha
 	return Super::ValidateHat(HatOwner, HatClass);
 }
 
-// ── Floor Slide ─────────────────────────────────────────────────────
-// Floor slide disable temporarily removed — needs reimplementation
-// without changing TeamArenaCharacter class layout
+// ── Spawn Lifecycle ─────────────────────────────────────────────────
+bool ANCPlusCTFGameMode::IsLiveSpawnCommitState() const
+{
+	const FName State = GetMatchState();
+	return State == MatchState::InProgress
+		|| State == MatchState::MatchIsInOvertime
+		|| State == MatchState::MatchExitingIntermission;
+}
+
+void ANCPlusCTFGameMode::ClearCachedRespawnChoices()
+{
+	if (!CTFGameState)
+	{
+		return;
+	}
+	for (APlayerState* BasePS : CTFGameState->PlayerArray)
+	{
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(BasePS))
+		{
+			// These are engine-owned UPROPERTY pointers, so use reflected offsets
+			// across the plugin/engine DLL boundary rather than direct field writes.
+			NCPlusReflection::SetObject(PS, TEXT("RespawnChoiceA"), nullptr);
+			NCPlusReflection::SetObject(PS, TEXT("RespawnChoiceB"), nullptr);
+		}
+	}
+}
+
+void ANCPlusCTFGameMode::RestartPlayerAtPlayerStart(AController* NewPlayer, AActor* StartSpot)
+{
+	APawn* PawnBeforeRestart = NewPlayer ? NewPlayer->GetPawn() : nullptr;
+	Super::RestartPlayerAtPlayerStart(NewPlayer, StartSpot);
+
+	// UE4's normal respawn path passes the selected start as a local variable but
+	// never publishes it back to Controller::StartSpot. Only commit after Super
+	// actually produced a pawn; preview choices and failed spawns must not advance
+	// the team queue or recent-use history.
+	APlayerStart* UsedStart = Cast<APlayerStart>(StartSpot);
+	if (NewPlayer && NewPlayer->GetPawn() && NewPlayer->GetPawn() != PawnBeforeRestart && UsedStart)
+	{
+		if (IsLiveSpawnCommitState())
+		{
+			NewPlayer->StartSpot = UsedStart;
+			CommitUsedSpawn(NewPlayer, UsedStart);
+		}
+	}
+}
+
+void ANCPlusCTFGameMode::CommitUsedSpawn(AController* Player, APlayerStart* UsedStart)
+{
+	if (!Player || !UsedStart || !GetWorld())
+	{
+		return;
+	}
+
+	const TWeakObjectPtr<AController> PlayerKey(Player);
+	FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(PlayerKey);
+	Recent.ThirdLast = Recent.SecondLast;
+	Recent.SecondLast = Recent.Last;
+	Recent.Last = UsedStart;
+	SpawnLastUsedTime.Add(UsedStart, GetWorld()->GetTimeSeconds());
+
+	if (!bSpawnUseNewCTFSelection)
+	{
+		return;
+	}
+
+	AUTPlayerState* PS = Cast<AUTPlayerState>(Player->PlayerState);
+	if (!PS || !PS->Team || PS->Team->TeamIndex > 1)
+	{
+		return;
+	}
+
+	const int32 TeamIndex = int32(PS->Team->TeamIndex);
+	TArray<TWeakObjectPtr<APlayerStart>>& Pool = (TeamIndex == 0) ? Team0Spawns : Team1Spawns;
+	const int32 UsedIndex = Pool.IndexOfByPredicate([UsedStart](const TWeakObjectPtr<APlayerStart>& Entry)
+	{
+		return Entry.Get() == UsedStart;
+	});
+	if (UsedIndex != INDEX_NONE)
+	{
+		const TWeakObjectPtr<APlayerStart> UsedEntry = Pool[UsedIndex];
+		Pool.RemoveAt(UsedIndex, 1, false);
+		Pool.Add(UsedEntry);
+	}
+
+	// Preserve NCP's robbed-base rotation, but advance it only for a real spawn.
+	// ChoosePlayerStart is also called for previews, which must remain side-effect free.
+	if (CTFGameState && CTFGameState->GetFlagState(uint8(TeamIndex)) != CarriedObjectState::Home)
+	{
+		++RobbedSpawnRotation[TeamIndex];
+	}
+}
+
 void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 {
 	// Idempotency guard: a RestartPlayer on a controller that ALREADY has a living pawn
@@ -1369,7 +1507,7 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 	// SetPlayerDefaults -> GiveDefaultInventory, and stock AddInventory dedupes only by
 	// instance (not class), so a second warmup RestartPlayer would grant a second copy of
 	// every default weapon = the doubled weapon bar. First spawn (no pawn) is unaffected;
-	// the anti-repeat tracking below only has fresh StartSpot data when a spawn occurred.
+	// RestartPlayerAtPlayerStart records the real start only when a spawn succeeds.
 	if (NewPlayer && NewPlayer->GetPawn())
 	{
 		return;
@@ -1377,26 +1515,10 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 
 	Super::RestartPlayer(NewPlayer);
 
-	// Anti-repeat tracking (IG+ style): keep PlayerRecentSpawns updated from the
-	// chosen StartSpot so RatePlayerStart's anti-repeat has data. Runs every spawn
-	// (incl. warmup) — harmless.
-	if (NewPlayer && NewPlayer->StartSpot.IsValid())
-	{
-		APlayerStart* UsedStart = Cast<APlayerStart>(NewPlayer->StartSpot.Get());
-		if (UsedStart)
-		{
-			FRecentSpawns& Recent = PlayerRecentSpawns.FindOrAdd(TWeakObjectPtr<AController>(NewPlayer));
-			Recent.ThirdLast = Recent.SecondLast;
-			Recent.SecondLast = Recent.Last;
-			Recent.Last = UsedStart;
-		}
-	}
-
 	// Optional spawn diagnostics — gated to LIVE match and reporting the PAWN's
 	// actual world location. Warning verbosity survives Shipping when an admin opts in.
 	APawn* SpawnedPawnForLog = NewPlayer ? NewPlayer->GetPawn() : nullptr;
-	if (bLogSpawnChoices && SpawnedPawnForLog && CTFGameState
-		&& CTFGameState->IsMatchInProgress())
+	if (bLogSpawnChoices && SpawnedPawnForLog && CTFGameState && IsLiveSpawnCommitState())
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 		const int32 TeamIdx = (PS && PS->Team) ? int32(PS->Team->TeamIndex) : -1;
@@ -1431,12 +1553,17 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 
 float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 {
-	// Small games (1v1, 2v2): use Epic's default spawn system only.
-	// Custom flag + enemy penalties make all spawns equally bad when there
-	// aren't enough spawn points to avoid both flags and enemies.
-	// Epic's base system handles small games well (last-killer avoidance,
-	// 0.2f score floor, ChoosePlayerStart fallback).
-	if (GameSession && GameSession->MaxPlayers <= 4)
+	if (bForceEpicSpawnRating)
+	{
+		return Super::RatePlayerStart(P, Player);
+	}
+
+	// NewCTF's carve-out is based on connected competitors, not the server's
+	// configured capacity. Dead players still count; spectators do not.
+	const bool bUseEpicForSmallGame = bSpawnUseNewCTFSelection
+		? (CountSpawnSystemCompetitors() <= SpawnSystemThreshold)
+		: (GameSession && GameSession->MaxPlayers <= 4);
+	if (bUseEpicForSmallGame)
 	{
 		return Super::RatePlayerStart(P, Player);
 	}
@@ -1633,14 +1760,9 @@ float ANCPlusCTFGameMode::RatePlayerStart(APlayerStart* P, AController* Player)
 }
 
 // ── Team-aware spawn ownership ───────────────────────────────────────
-// We own ChoosePlayerStart (mirroring ElimPlus/Wipeout) so the engine spawn
-// pipeline can't bypass RatePlayerStart. On maps whose UTTeamPlayerStart tags
-// are unreliable, the stock pipeline was starving the rating loop (-20 on every
-// candidate) and falling through to a deterministic engine pick — pinning every
-// player to one spawn for the whole match. Here the candidate pool is curated
-// per-team by nearest flag base (ground truth via GetFlagBase), each team start
-// is retagged so the bUseTeamStarts=true -20 guard trusts geometry, and the pool
-// is scored with the existing RatePlayerStart (flag-state, enemy/LOS, anti-repeat).
+// The map-authored TeamNum pools are rotating queues for the NewCTF primary and
+// secondary passes. The former weighted RatePlayerStart path remains available
+// behind SpawnUseNewCTFSelection for live rollback.
 
 void ANCPlusCTFGameMode::BuildTeamSpawnPools()
 {
@@ -1665,6 +1787,18 @@ void ANCPlusCTFGameMode::BuildTeamSpawnPools()
 		else                        { Skipped++; }
 	}
 
+	// NewCTF gives each team's queue one shake per live match. Thereafter the
+	// first viable start is deterministic and successful uses rotate to the tail.
+	auto ShufflePool = [](TArray<TWeakObjectPtr<APlayerStart>>& Pool)
+	{
+		for (int32 Index = Pool.Num() - 1; Index > 0; --Index)
+		{
+			Pool.Swap(Index, FMath::RandRange(0, Index));
+		}
+	};
+	ShufflePool(Team0Spawns);
+	ShufflePool(Team1Spawns);
+
 	bSpawnPoolsBuilt = true;
 
 	UE_LOG(LogGameMode, Warning,
@@ -1672,7 +1806,382 @@ void ANCPlusCTFGameMode::BuildTeamSpawnPools()
 		Team0Spawns.Num(), Team1Spawns.Num(), Skipped);
 }
 
+int32 ANCPlusCTFGameMode::CountSpawnSystemCompetitors() const
+{
+	int32 Count = 0;
+	const AUTGameState* GS = CTFGameState ? CTFGameState : (GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr);
+	if (!GS)
+	{
+		return Count;
+	}
+
+	for (APlayerState* BasePS : GS->PlayerArray)
+	{
+		const AUTPlayerState* PS = Cast<AUTPlayerState>(BasePS);
+		if (PS && !PS->bOnlySpectator && !PS->bIsInactive && PS->Team && PS->Team->TeamIndex <= 1)
+		{
+			++Count;
+		}
+	}
+	return Count;
+}
+
+AActor* ANCPlusCTFGameMode::ChooseEpicPlayerStart(AController* Player)
+{
+	const bool bPreviousGuard = bForceEpicSpawnRating;
+	bForceEpicSpawnRating = true;
+	AActor* Result = Super::ChoosePlayerStart_Implementation(Player);
+	bForceEpicSpawnRating = bPreviousGuard;
+	return Result;
+}
+
 AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player)
+{
+	if (!bSpawnUseNewCTFSelection)
+	{
+		return ChooseLegacyPlayerStart(Player);
+	}
+
+	// NewCTF keys this threshold to connected competitors, not server capacity
+	// and not the number of pawns that happen to be alive this frame.
+	if (!Player || CountSpawnSystemCompetitors() <= SpawnSystemThreshold)
+	{
+		return ChooseEpicPlayerStart(Player);
+	}
+
+	if (APlayerStart* Best = ChooseNewCTFPlayerStart(Player))
+	{
+		return Best;
+	}
+
+	if (bLogSpawnChoices)
+	{
+		const AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
+		UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF pick: %s -> stock | system=newctf primary=none secondary=none"),
+			PS ? *PS->PlayerName : TEXT("?"));
+	}
+	return ChooseEpicPlayerStart(Player);
+}
+
+APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
+{
+	AUTPlayerState* SpawnPS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
+	if (!SpawnPS || !SpawnPS->Team || SpawnPS->Team->TeamIndex > 1 || !GetWorld())
+	{
+		return nullptr;
+	}
+
+	if (!bSpawnPoolsBuilt)
+	{
+		BuildTeamSpawnPools();
+	}
+
+	const int32 TeamIndex = int32(SpawnPS->Team->TeamIndex);
+	TArray<TWeakObjectPtr<APlayerStart>>& Pool = (TeamIndex == 0) ? Team0Spawns : Team1Spawns;
+	for (int32 Index = Pool.Num() - 1; Index >= 0; --Index)
+	{
+		if (!Pool[Index].IsValid())
+		{
+			Pool.RemoveAt(Index, 1, false);
+		}
+	}
+	if (Pool.Num() == 0)
+	{
+		return nullptr;
+	}
+
+	const int32 CycleExcluded = FMath::Clamp(SpawnMinCycleDistance, 0, FMath::Max(0, Pool.Num() - 1));
+	const int32 EligibleCount = Pool.Num() - CycleExcluded;
+
+	struct FSpawnParticipant
+	{
+		AUTCharacter* Character = nullptr;
+		AUTPlayerState* PlayerState = nullptr;
+		uint8 TeamNum = 255;
+		FVector PawnLocation = FVector::ZeroVector;
+		FVector CurrentEye = FVector::ZeroVector;
+		FVector PredictedEye = FVector::ZeroVector;
+		float DefaultEyeHeight = 0.f;
+		bool bPredicted = false;
+		bool bFlagCarrier = false;
+	};
+
+	TArray<FSpawnParticipant> Participants;
+	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+	{
+		AController* OtherController = It->Get();
+		AUTPlayerState* OtherPS = OtherController ? Cast<AUTPlayerState>(OtherController->PlayerState) : nullptr;
+		AUTCharacter* OtherChar = OtherController ? Cast<AUTCharacter>(OtherController->GetPawn()) : nullptr;
+		if (!OtherPS || OtherPS->bOnlySpectator || OtherPS->bIsInactive || !OtherPS->Team || OtherPS->Team->TeamIndex > 1
+			|| !OtherChar || OtherChar->IsPendingKillPending() || OtherChar->IsDead() || OtherChar->Health <= 0)
+		{
+			continue;
+		}
+
+		FSpawnParticipant Entry;
+		Entry.Character = OtherChar;
+		Entry.PlayerState = OtherPS;
+		Entry.TeamNum = OtherPS->Team->TeamIndex;
+		Entry.PawnLocation = OtherChar->GetActorLocation();
+		Entry.CurrentEye = Entry.PawnLocation + FVector(0.f, 0.f, OtherChar->BaseEyeHeight);
+		Entry.PredictedEye = Entry.CurrentEye;
+		const AUTCharacter* CharacterCDO = OtherChar->GetClass()->GetDefaultObject<AUTCharacter>();
+		Entry.DefaultEyeHeight = CharacterCDO ? CharacterCDO->BaseEyeHeight : OtherChar->BaseEyeHeight;
+		if (bSpawnExtrapolateMovement && OtherChar->GetRemoteRole() == ROLE_AutonomousProxy)
+		{
+			const float HalfRTTSeconds = FMath::Clamp(OtherPS->ExactPing, 0.f, 250.f) * 0.0005f;
+			if (HalfRTTSeconds > 0.f)
+			{
+				Entry.PredictedEye += OtherChar->GetVelocity() * HalfRTTSeconds;
+				Entry.bPredicted = true;
+			}
+		}
+		Entry.bFlagCarrier = Cast<AUTFlag>(OtherChar->GetCarriedObject()) != nullptr;
+		Participants.Add(Entry);
+	}
+
+	AUTCharacter* EnemyFlagCarrier = nullptr;
+	bool bOwnFlagOut = false;
+	FVector OwnBaseLoc = FVector::ZeroVector;
+	if (CTFGameState)
+	{
+		AUTCTFFlagBase* OwnBase = CTFGameState->GetFlagBase(uint8(TeamIndex));
+		if (IsValid(OwnBase))
+		{
+			OwnBaseLoc = OwnBase->GetActorLocation();
+			bOwnFlagOut = CTFGameState->GetFlagState(uint8(TeamIndex)) != CarriedObjectState::Home;
+			if (IsValid(OwnBase->MyFlag) && IsValid(OwnBase->MyFlag->HoldingPawn))
+			{
+				EnemyFlagCarrier = Cast<AUTCharacter>(OwnBase->MyFlag->HoldingPawn);
+			}
+		}
+	}
+
+	// Preserve NCP's rotating robbed-base exclusion as one extra primary rule.
+	APlayerStart* RobbedBlockedStart = nullptr;
+	const int32 RobbedAvoidCount = FMath::Clamp(FMath::TruncToInt(SpawnRobbedBaseAvoidCount), 0, FMath::Max(0, Pool.Num() - 1));
+	if (bOwnFlagOut && RobbedAvoidCount > 0)
+	{
+		TArray<int32> Nearest;
+		for (int32 Rank = 0; Rank < RobbedAvoidCount; ++Rank)
+		{
+			int32 NearestIndex = INDEX_NONE;
+			float NearestDistance = FLT_MAX;
+			for (int32 Index = 0; Index < Pool.Num(); ++Index)
+			{
+				APlayerStart* Candidate = Pool[Index].Get();
+				if (!Candidate || Nearest.Contains(Index))
+				{
+					continue;
+				}
+				const float Distance = (Candidate->GetActorLocation() - OwnBaseLoc).SizeSquared();
+				if (Distance < NearestDistance)
+				{
+					NearestDistance = Distance;
+					NearestIndex = Index;
+				}
+			}
+			if (NearestIndex != INDEX_NONE)
+			{
+				Nearest.Add(NearestIndex);
+			}
+		}
+		if (Nearest.Num() > 0)
+		{
+			RobbedBlockedStart = Pool[Nearest[RobbedSpawnRotation[TeamIndex] % Nearest.Num()]].Get();
+		}
+	}
+
+	static FName NAME_NewCTFSpawnLOS(TEXT("NewCTFSpawnLOS"));
+	auto HasLineOfSight = [this](const FVector& SpawnLocation, const FVector& SpawnEye, const FVector& TargetEye) -> bool
+	{
+		FCollisionQueryParams Params(NAME_NewCTFSpawnLOS, false);
+		return !GetWorld()->LineTraceTestByChannel(SpawnLocation, TargetEye, COLLISION_TRACE_WEAPONNOCHARACTER, Params)
+			|| !GetWorld()->LineTraceTestByChannel(SpawnEye, TargetEye, COLLISION_TRACE_WEAPONNOCHARACTER, Params);
+	};
+
+	// Rejection counters follow NewCTF's documented order, followed by NCP's
+	// last-killer and robbed-base protections.
+	int32 EnemyVisionBlocked = 0;
+	int32 EnemyRangeBlocked = 0;
+	int32 FriendlyVisionBlocked = 0;
+	int32 FriendlyRangeBlocked = 0;
+	int32 CarrierBlocked = 0;
+	int32 FlagBlocked = 0;
+	int32 KillerBlocked = 0;
+	int32 RobbedBlocked = 0;
+	APlayerStart* Primary = nullptr;
+
+	for (int32 Index = 0; Index < EligibleCount && !Primary; ++Index)
+	{
+		APlayerStart* Candidate = Pool[Index].Get();
+		if (!Candidate)
+		{
+			continue;
+		}
+
+		const FVector SpawnLocation = Candidate->GetActorLocation();
+		int32 RejectReason = 0;
+
+		for (const FSpawnParticipant& Other : Participants)
+		{
+			const bool bEnemy = Other.TeamNum != uint8(TeamIndex);
+			const FVector SpawnEye = SpawnLocation + FVector(0.f, 0.f, Other.DefaultEyeHeight);
+			const float Distance = FMath::Min(
+				(SpawnLocation - Other.PawnLocation).Size(),
+				(SpawnEye - Other.PredictedEye).Size());
+			const float VisionRange = bEnemy
+				? ((Other.Character == EnemyFlagCarrier)
+					? FMath::Max(EnemyLOSBlockRange, SpawnFlagCarrierLOSAvoidRadius)
+					: EnemyLOSBlockRange)
+				: SpawnFriendlyVisionBlockRange;
+			const bool bBelowCandidate = bEnemy && SpawnEnemyBelowZ > 0.f
+				&& (SpawnLocation.Z - Other.PawnLocation.Z) >= SpawnEnemyBelowZ;
+			const bool bNeedLOS = (VisionRange > 0.f && Distance <= VisionRange)
+				|| (bBelowCandidate && SpawnEnemyHardRadius > 0.f && Distance <= SpawnEnemyHardRadius);
+			bool bVisible = false;
+			if (bNeedLOS)
+			{
+				bVisible = HasLineOfSight(SpawnLocation, SpawnEye, Other.PredictedEye);
+				if (!bVisible && Other.bPredicted)
+				{
+					bVisible = HasLineOfSight(SpawnLocation, SpawnEye, Other.CurrentEye);
+				}
+			}
+
+			if (bEnemy && VisionRange > 0.f && bVisible && Distance <= VisionRange)
+			{
+				RejectReason = 1;
+				break;
+			}
+			if (bEnemy && SpawnEnemyHardRadius > 0.f && Distance <= SpawnEnemyHardRadius
+				&& !(bBelowCandidate && !bVisible))
+			{
+				RejectReason = 2;
+				break;
+			}
+			if (!bEnemy && SpawnFriendlyVisionBlockRange > 0.f && bVisible && Distance <= SpawnFriendlyVisionBlockRange)
+			{
+				RejectReason = 3;
+				break;
+			}
+			if (!bEnemy && SpawnFriendlyBlockRange > 0.f && Distance <= SpawnFriendlyBlockRange)
+			{
+				RejectReason = 4;
+				break;
+			}
+			if (bEnemy && Other.bFlagCarrier && SpawnFlagBlockRange > 0.f && Distance <= SpawnFlagBlockRange)
+			{
+				RejectReason = 5;
+				break;
+			}
+			if (bEnemy && SpawnKillerAvoidRadius > 0.f && SpawnPS->LastKillerPlayerState == Other.PlayerState
+				&& Distance <= SpawnKillerAvoidRadius)
+			{
+				RejectReason = 8;
+				break;
+			}
+		}
+
+		if (RejectReason == 0 && SpawnFlagBlockRange > 0.f && CTFGameState)
+		{
+			for (uint8 FlagTeam = 0; FlagTeam < 2; ++FlagTeam)
+			{
+				AUTCTFFlagBase* FlagBase = CTFGameState->GetFlagBase(FlagTeam);
+				AUTFlag* Flag = IsValid(FlagBase) ? FlagBase->MyFlag : nullptr;
+				if (IsValid(Flag) && !IsValid(Flag->HoldingPawn)
+					&& (SpawnLocation - Flag->GetActorLocation()).Size() <= SpawnFlagBlockRange)
+				{
+					RejectReason = 6;
+					break;
+				}
+			}
+		}
+
+		if (RejectReason == 0 && Candidate == RobbedBlockedStart)
+		{
+			RejectReason = 9;
+		}
+
+		switch (RejectReason)
+		{
+			case 0: Primary = Candidate; break;
+			case 1: ++EnemyVisionBlocked; break;
+			case 2: ++EnemyRangeBlocked; break;
+			case 3: ++FriendlyVisionBlocked; break;
+			case 4: ++FriendlyRangeBlocked; break;
+			case 5: ++CarrierBlocked; break;
+			case 6: ++FlagBlocked; break;
+			case 8: ++KillerBlocked; break;
+			case 9: ++RobbedBlocked; break;
+			default: break;
+		}
+	}
+
+	if (Primary)
+	{
+		if (bLogSpawnChoices)
+		{
+			UE_LOG(LogGameMode, Warning,
+				TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=primary cycle=%d/%d blocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d"),
+				*SpawnPS->PlayerName, TeamIndex, *Primary->GetName(), CycleExcluded, Pool.Num(),
+				EnemyVisionBlocked, EnemyRangeBlocked, FriendlyVisionBlocked, FriendlyRangeBlocked,
+				CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked);
+		}
+		return Primary;
+	}
+
+	if (!bSpawnSecondaryEnabled)
+	{
+		return nullptr;
+	}
+
+	APlayerStart* Secondary = nullptr;
+	float BestDistanceSum = -FLT_MAX;
+	for (int32 Index = 0; Index < EligibleCount; ++Index)
+	{
+		APlayerStart* Candidate = Pool[Index].Get();
+		if (!Candidate)
+		{
+			continue;
+		}
+
+		float DistanceSum = 0.f;
+		for (const FSpawnParticipant& Other : Participants)
+		{
+			float Distance = FMath::Min(
+				(Candidate->GetActorLocation() - Other.PredictedEye).Size(),
+				SpawnSecondaryMaxDistance);
+			if (Other.TeamNum == uint8(TeamIndex))
+			{
+				Distance *= SpawnSecondaryOwnTeamWeight;
+			}
+			else if (Other.bFlagCarrier)
+			{
+				Distance *= SpawnSecondaryCarrierWeight;
+			}
+			DistanceSum += Distance;
+		}
+
+		if (!Secondary || DistanceSum > BestDistanceSum)
+		{
+			Secondary = Candidate;
+			BestDistanceSum = DistanceSum;
+		}
+	}
+
+	if (Secondary && bLogSpawnChoices)
+	{
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=secondary weight=%.0f cycle=%d/%d primaryBlocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d"),
+			*SpawnPS->PlayerName, TeamIndex, *Secondary->GetName(), BestDistanceSum, CycleExcluded, Pool.Num(),
+			EnemyVisionBlocked, EnemyRangeBlocked, FriendlyVisionBlocked, FriendlyRangeBlocked,
+			CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked);
+	}
+	return Secondary;
+}
+
+AActor* ANCPlusCTFGameMode::ChooseLegacyPlayerStart(AController* Player)
 {
 	// Small games (1v1/2v2): keep Epic's default selection — same carve-out as
 	// RatePlayerStart; too few starts for team pools to help.
@@ -1979,13 +2488,6 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	if (!Best)
 	{
 		return Super::ChoosePlayerStart_Implementation(Player);
-	}
-
-	// Record team-wide use for the freshness spread — only count real in-match spawns
-	// so warmup / pre-match prepopulation picks don't pollute staleness.
-	if (CTFGameState && CTFGameState->IsMatchInProgress())
-	{
-		SpawnLastUsedTime.Add(Best, Now);
 	}
 
 	// Optional selection diagnostics. Pairs with RestartPlayer's actual-pawn line.
@@ -2726,6 +3228,26 @@ void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolM
 
 void ANCPlusCTFGameMode::HandleMatchHasStarted()
 {
+	// Epic restarts every player synchronously inside Super::HandleMatchHasStarted.
+	// Load spawn tuning and discard warmup queue/history before that happens so
+	// the opening live spawns use the configured algorithm and remain recorded.
+	// RatingSystem is constructed below on this same first call and stays valid
+	// through halftime, making this a once-per-map initialization guard.
+	const bool bFirstLiveStart = HasAuthority() && !RatingSystem.IsValid();
+	if (bFirstLiveStart)
+	{
+		LoadSpawnConfig();
+		bSpawnPoolsBuilt = false;
+		Team0Spawns.Reset();
+		Team1Spawns.Reset();
+		SpawnLastUsedTime.Reset();
+		PlayerRecentSpawns.Reset();
+		PlayerLastSpawnLoc.Reset();
+		RobbedSpawnRotation[0] = 0;
+		RobbedSpawnRotation[1] = 0;
+		ClearCachedRespawnChoices();
+	}
+
 	// Only call super (which starts replay recording, announces match, etc.) on first half.
 	// Non-halftime games always call super (there's no second half).
 	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
@@ -2790,7 +3312,6 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 		MatchStartWorldTime = GetWorld()->GetTimeSeconds();
 		MatchFullDurationSeconds = (bHasHalftime ? float(TimeLimit) * 2.f : float(TimeLimit)) * 60.f;
 		LoadCTFPerfConfig();
-		LoadSpawnConfig();
 
 		// Apply the regulation respawn wait, keyed on match size so bot-hosted AND
 		// hub-hosted (ruleset) games both get it automatically from MaxPlayers - no
@@ -2858,6 +3379,17 @@ void ANCPlusCTFGameMode::HandleMatchIntermission()
 void ANCPlusCTFGameMode::HandleExitingIntermission()
 {
 	const bool bWasSecondHalf = NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf"));
+	ClearCachedRespawnChoices();
+	AUTWorldSettings* Settings = GetWorld() ? Cast<AUTWorldSettings>(GetWorld()->GetWorldSettings()) : nullptr;
+	if (Settings && NCPlusReflection::GetBool(Settings, TEXT("bAllowSideSwitching")))
+	{
+		// Super swaps every team actor (including AUTTeamPlayerStart::TeamNum)
+		// before it synchronously respawns the players. Invalidate the cached
+		// authored-team queues now so the first respawn rebuilds them after the swap.
+		bSpawnPoolsBuilt = false;
+		Team0Spawns.Reset();
+		Team1Spawns.Reset();
+	}
 
 	// Set before calling super so HandleMatchHasStarted can read it
 	NCPlusReflection::SetBool(CTFGameState, TEXT("bSecondHalf"), true);

@@ -447,34 +447,50 @@ Fallbacks for the launch‑URL options of the same name (see §7). Leave empty u
 
 ### 5.6 `[UTPUGS_SPAWN]` — CTF spawn‑selection tuning (advanced)
 
-NetcodePlus CTF uses a geometry‑aware spawn scorer. **The defaults are tuned — only touch these if you
-know what you're doing.** Keys (all float unless noted, server‑side, defaults live in the gamemode
-constructor):
+CTF/iCTF uses a two-stage, NewCTF-style server-side selector above `SpawnSystemThreshold`.
+Each team's authored starts are shuffled once. Primary scans that rotating queue and takes
+the first start clear of enemy proximity/vision, teammate proximity/vision, nearby flags,
+the recent-use tail, the last killer, and NCP's flag-carrier/robbed-base protections. A start
+is moved to the queue tail only after a pawn successfully spawns there; preview choices do
+not consume it.
 
-`FlagCarrierSpawnPenalty`, `DroppedFlagSpawnPenalty`, `FlagCarrierLOSPenalty`, `EnemyBlockRange`,
-`EnemyBlockPenalty`, `EnemyLOSBlockRange`, `EnemyLOSPenalty`, `FlagBaseProximityRadius`,
-`FlagSpawnPenaltyRadius`, `SpawnRecentPenaltyMultiplier`, `SpawnNearLastRadius`, `SpawnNearLastPenalty`,
-`SpawnTieBandWidth`, `SpawnFreshnessBonus`, `SpawnFreshnessWindow`, `SpawnFlagVicinityRadius`,
-`SpawnKillerAvoidRadius`, `SpawnFlagCarrierLOSAvoidRadius` (default `3500`), `SpawnRobbedBaseAvoidCount`,
-`LogSpawnChoices` (bool, default `false` — one log line per live spawn, for A/B testing).
-
-**How the winner is chosen (328).** Scoring is unchanged, but the final pick is now
-Deaod's InstaGibPlus method: every start still in contention draws a random number from
-`[0, ceiling)` and the highest draw wins, where the ceiling falls off from the best start.
-Equal starts are a true coin‑flip and a slightly worse start still wins a real share of the
-time, so the picker is **never** deterministic — the old tie‑band chose the same start every
-life whenever one led by more than `SpawnTieBandWidth`.
+If every primary candidate is blocked, secondary chooses the non-cycle start with the
+greatest capped weighted distance from all living players. Teammates contribute less and
+enemy flag carriers contribute more. If secondary is disabled or no tagged team start is
+available, Epic's selector is used.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `SpawnWeightedRandom` | bool | `true` | `false` restores the old tie‑band coin‑flip (uses `SpawnTieBandWidth`). |
-| `SpawnRandomBase` | float | `20` | Draw ceiling of the best start. **Raise for more variety.** |
-| `SpawnRandomSpread` | float | `1.0` | Ceiling lost per score point behind the leader. Raise to favour quality; a start more than `Base/Spread` points behind can never be picked (this is what keeps just‑used and telefrag starts out). |
-| `SpawnEnemyHardRadius` | float | `1200` | A start with a live enemy this close is **refused**, not just penalised. Waived if every start in the pool violates it. `0` = off. |
+| `SpawnUseNewCTFSelection` | bool | `true` | Master switch. `false` restores the pre-port weighted/tie-band selector. |
+| `SpawnSystemThreshold` | int | `4` | Use Epic's selector at or below this many connected competitors. Spectators do not count; dead players and bots do. |
+| `SpawnEnemyHardRadius` | float | `1200` | An enemy this close blocks primary regardless of visibility. `0` = off. |
+| `EnemyLOSBlockRange` | float | `3000` | An enemy with clear LOS inside this range blocks primary. Also remains the legacy LOS-scoring range. |
+| `SpawnFriendlyBlockRange` | float | `150` | A teammate this close blocks primary. |
+| `SpawnFriendlyVisionBlockRange` | float | `150` | A teammate with clear LOS inside this range blocks primary. |
+| `SpawnFlagBlockRange` | float | `750` | An enemy flag carrier or an unheld home/dropped flag this close blocks primary. |
+| `SpawnMinCycleDistance` | int | `1` | Number of most recently used team starts excluded from both primary and secondary. |
+| `SpawnExtrapolateMovement` | bool | `true` | Project remote players by half RTT (capped at 250 ms RTT) for distance/LOS checks. |
+| `SpawnSecondaryEnabled` | bool | `true` | Use the weighted-distance fallback when primary finds no safe start. |
+| `SpawnSecondaryMaxDistance` | float | `2000` | Cap each player's distance contribution to a secondary candidate. |
+| `SpawnSecondaryOwnTeamWeight` | float | `0.2` | Secondary distance multiplier for teammates. |
+| `SpawnSecondaryCarrierWeight` | float | `2.0` | Secondary distance multiplier for enemy flag carriers. |
 | `SpawnEnemyBelowZ` | float | `190` | An enemy at least this far *below* a start counts as floor‑separated: no proximity penalty, and it clears the hard radius above when he also has no line of sight. `0` = off. |
+| `SpawnKillerAvoidRadius` | float | `2500` | Last killer inside this range blocks primary. `0` = off. |
+| `SpawnFlagCarrierLOSAvoidRadius` | float | `3500` | Extends the primary LOS exclusion specifically for the enemy carrying your flag. `0` = off. |
+| `SpawnRobbedBaseAvoidCount` | float | `2` | Size of the nearest-own-base set whose one rotating member is blocked while your flag is out. Kept as a float for compatibility; fractional values are truncated. |
+| `LogSpawnChoices` | bool | `false` | Log primary/secondary route, block counts, selected start, and actual spawned location. |
 
-Per‑player anti‑repeat now remembers **three** spawns (the last is blocked outright, the two
-before it are halved), matching IG+.
+Legacy-only controls used when `SpawnUseNewCTFSelection=false` remain supported:
+`SpawnWeightedRandom`, `SpawnRandomBase`, `SpawnRandomSpread`, `SpawnTieBandWidth`,
+`SpawnFreshnessBonus`, `SpawnFreshnessWindow`, `SpawnFlagVicinityRadius`,
+`SpawnRecentPenaltyMultiplier`, `SpawnNearLastRadius`, `SpawnNearLastPenalty`,
+`FlagCarrierSpawnPenalty`, `DroppedFlagSpawnPenalty`, `FlagCarrierLOSPenalty`,
+`EnemyBlockRange`, `EnemyBlockPenalty`, `EnemyLOSPenalty`, `FlagBaseProximityRadius`,
+and `FlagSpawnPenaltyRadius`.
+
+This section is loaded once when live play first starts. Change `Mod.ini` before the
+next map/match; halftime does not reload it. On maps that swap sides, the team queues
+are rebuilt after the swap so their authored team assignments stay correct.
 
 ---
 
