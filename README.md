@@ -42,6 +42,16 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 - **Configurable projectile tick rate** — `ut.ProjectileTickRate` console var, 120-720 Hz range.
 - **Adjusted character movement smoothing values** — tuned for 480-720fps display rates.
 
+**328 frame-time batch** — a caching and rate-limiting pass across the hottest per-frame paths, aimed at deleting the slow frames rather than raising the average:
+
+- **Hot scoreboard/HUD path caching** — repeated actor searches, roster sorting, number-to-string formatting, and font measurement are cached instead of recomputed every frame; QuickStats health/armor arcs reuse their geometry.
+- **Change-gated material writes** — armor and Shock ammo material parameters update only when the displayed value actually changes (previously rewritten every visible frame).
+- **Weapon-screen update caps** — Shock and NCP Link in-weapon screens tick at 30 Hz instead of following uncapped FPS.
+- **Deferred F5 asset discovery** and less-frequent TacCom/outline cleanup sweeps, with the same recovery coverage.
+- **Character Overlay Distance presets** — F5 → Home → Performance: Performance (3000), Balanced (4500), Full (6500, default); lower settings drop distant character overlays sooner in busy scenes.
+
+Community-measured on the same box, 327 → 328 (CapFrameX, 9850X3D): average 646 → 706 (+9%), 1% lows 473 → 535 (+13%), 0.1% lows 400 → 468 (+17%), minimum 108 → 367 — the deep-stutter frame class is effectively gone, and capped runs now pin their limiter. Gains target frame-time *consistency*; exact numbers vary by system and scene.
+
 ### NetcodePlus Weapons
 
 All weapons inherit lag-compensated hit detection by default. Subclasses provide weapon-specific behavior on top:
