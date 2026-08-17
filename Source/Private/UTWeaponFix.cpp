@@ -245,6 +245,25 @@ static TAutoConsoleVariable<float> CVarUnclaimedRenderSlack(
     TEXT("Extra radius (uu) forgiven by the unclaimed render-time check, absorbing render-lag estimate error and ping jitter. Default: 20."),
     ECVF_Default);
 
+// The INVERSE of the render gate, for claim-INCAPABLE fire (the link beam's
+// per-tick re-traces, spread bullets). Those modes can never claim, so their
+// only acceptance route is the raw validation rewind — but the rewind history
+// stores raw replicated positions while the shooter aims at an interpolated,
+// smoothed RENDERING of the target. When the raw test misses, re-test the same
+// server-owned ray against the target's render-time capsule and accept a hit
+// the shooter's screen genuinely showed. No client input is consulted anywhere
+// (direction, target, and timing are all server-derived) — this is not CSHD.
+// Weapons opt in via AUTWeaponFix::SupportsRenderCredit().
+static TAutoConsoleVariable<int32> CVarRenderCredit(
+    TEXT("ncp.RenderCredit"), 1,
+    TEXT("Claim-incapable fire (link beam, spread) that misses the raw rewind capsule is re-tested against the target's render-time capsule and credited if the shooter's screen showed the hit: 1=on (default), 0=off (raw rewind only, pre-2026-08-17 behavior). Server-side only; flippable live."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarRenderCreditSlack(
+    TEXT("ncp.RenderCreditSlack"), 0.0f,
+    TEXT("Extra radius (uu) forgiven by the render-credit re-test. Deliberately 0 by default: credit only what the render-time capsule itself covers — widen with care, this is the acceptance direction."),
+    ECVF_Default);
+
 static bool ShotIntersectsRenderedCapsule(
     AUTCharacter* Target,
     const FVector& StartLocation,
@@ -3670,6 +3689,93 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 BestCapsulePoint = FVector::ZeroVector;
                 BestCollisionRadius = 0.f;
                 LastHitscanPaddedRadius = 0.f;
+            }
+        }
+    }
+
+    // ---- RENDER CREDIT (see cvar block at top of file) ----
+    // Claim-INCAPABLE modes only: they can never claim, so the raw rewind above
+    // was their one acceptance route, and it tests raw position history against
+    // aim taken at an interpolated, smoothed rendering. Re-test the same
+    // server-owned ray at the render-time estimate and credit what the
+    // shooter's screen showed. Mutually exclusive with the render gate by
+    // construction (the gate requires bClaimCapableMode) — a demoted hit can
+    // never be re-credited here.
+    if (BestTarget == nullptr && !bClaimCapableMode && SupportsRenderCredit() &&
+        CVarRenderCredit.GetValueOnGameThread() > 0 &&
+        Role == ROLE_Authority && GetNetMode() != NM_Standalone &&
+        ActualPredictionTime > 0.f &&
+        UTOwner != nullptr && UTOwner->PlayerState != nullptr)
+    {
+        // Same applicability envelope as the render gate: remote human shooter
+        // (a listen host renders server truth; bots have no screen).
+        const AUTPlayerController* ShooterPC = Cast<AUTPlayerController>(UTOwner->Controller);
+        if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
+        {
+            const float CreditMs = UTOwner->PlayerState->ExactPing * 0.5f +
+                FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
+            const float CreditT = FMath::Clamp(CreditMs * 0.001f, 0.f, 0.25f);
+            const float CreditSlack = FMath::Max(0.f, CVarRenderCreditSlack.GetValueOnGameThread());
+
+            for (FConstPawnIterator Iterator = GetWorld()->GetPawnIterator(); Iterator; ++Iterator)
+            {
+                AUTCharacter* Target = Cast<AUTCharacter>(*Iterator);
+                if (Target == nullptr || Target == UTOwner)
+                {
+                    continue;
+                }
+                // Mirror the primary loop's team guard.
+                if (!bTeammatesBlockHitscan && GS && GS->OnSameTeam(UTOwner, Target))
+                {
+                    continue;
+                }
+
+                const FVector ValidationLoc = Target->GetRewindLocation(ActualPredictionTime);
+                const FVector RenderLoc = Target->GetRewindLocation(CreditT);
+                // Teleport guard: crediting is the widening direction. A render
+                // sample farther from the validation sample than any dodge can
+                // cover inside these few ms means discontinuous history — skip.
+                if (FVector::DistSquared(ValidationLoc, RenderLoc) > FMath::Square(600.f))
+                {
+                    continue;
+                }
+
+                float ColHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+                FVector CreditLoc = RenderLoc;
+                ApplySlidePostureForValidation(Target, CreditT, CreditLoc, ColHeight);
+                const float ColRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+
+                bool bHitTarget = false;
+                FVector ClosestPoint(0.f);
+                FVector ClosestCapsulePoint = CreditLoc;
+                if (ColRadius >= ColHeight)
+                {
+                    ClosestPoint = FMath::ClosestPointOnSegment(CreditLoc, StartLocation, Hit.Location);
+                    bHitTarget = ((ClosestPoint - CreditLoc).SizeSquared() <
+                        FMath::Square(ColHeight + TraceRadius + CreditSlack));
+                }
+                else
+                {
+                    const FVector CapsuleSegment = FVector(0.f, 0.f, ColHeight - ColRadius);
+                    FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
+                        CreditLoc - CapsuleSegment, CreditLoc + CapsuleSegment,
+                        ClosestPoint, ClosestCapsulePoint);
+                    bHitTarget = ((ClosestPoint - ClosestCapsulePoint).SizeSquared() <
+                        FMath::Square(ColRadius + TraceRadius + CreditSlack));
+                }
+
+                if (bHitTarget && (BestTarget == nullptr ||
+                    (ClosestPoint - StartLocation).SizeSquared() < (BestPoint - StartLocation).SizeSquared()))
+                {
+                    BestTarget = Target;
+                    BestPoint = ClosestPoint;
+                    BestCapsulePoint = ClosestCapsulePoint;
+                    BestCollisionRadius = ColRadius;
+                    LastHitscanPaddedRadius = ColRadius + TraceRadius + CreditSlack;
+                    UE_LOG(LogUTWeaponFix, Verbose,
+                        TEXT("[RenderCredit] %s accepted at render-time capsule (ping %.0f, renderMs %.1f)"),
+                        *Target->GetName(), UTOwner->PlayerState->ExactPing, CreditMs);
+                }
             }
         }
     }

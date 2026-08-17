@@ -155,6 +155,11 @@ public:
 	virtual float GetHitValidationPredictionTime() const override;
 	virtual float GetHitscanTimeSearchWindow() const override { return 0.f; }
 
+	/** Beam ticks are claim-incapable by design (claims cleared before every
+	 *  trace), so the render-credit pass is their only recovery for the
+	 *  aim-at-rendering vs raw-history mismatch. See ncp.RenderCredit. */
+	virtual bool SupportsRenderCredit() const override { return true; }
+
 	UPROPERTY(BlueprintReadWrite, Category = Mesh)
 	UCanvasRenderTarget2D* ScreenTexture;
 

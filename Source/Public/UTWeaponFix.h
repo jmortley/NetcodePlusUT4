@@ -383,6 +383,13 @@ public:
      *  rungs {15,30,45}, so 45 is the last rung before the ±60 defender tradeoff). */
     virtual float GetHitscanTimeSearchWindow() const { return 0.045f; }
 
+    /** Opt-in for the render-CREDIT pass in HitScanTrace (cvar ncp.RenderCredit):
+     *  claim-incapable fire that misses the raw validation rewind is re-tested
+     *  against the target's render-time capsule, crediting hits the shooter's
+     *  screen genuinely showed. Server-owned ray and timing — no client input,
+     *  not CSHD. Off per weapon by default; continuous/beam modes opt in. */
+    virtual bool SupportsRenderCredit() const { return false; }
+
     /** Slide-posture selection for hitscan capsule tests. A floor slide shrinks the
      *  authoritative capsule the same frame it starts, but a remote shooter keeps
      *  rendering a mostly-standing body for one replication interp plus the animBP
