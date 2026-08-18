@@ -34,6 +34,12 @@
 #include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
 #include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 #include "ClutchRoundState.h"       // Clutch defender footstep role/phase lookup
+#include "Engine/DemoNetDriver.h"   // deferred-outline warning: tag killcam/instant-replay worlds
+
+// Shipping clients report every ensure with a synchronous game-thread minidump, which hitches the
+// match and hard-crashes under AV hooks (328 Blitz/iCTF cap crash). Recoverable outline states must
+// log through this category instead of ensuring.
+DEFINE_LOG_CATEGORY_STATIC(LogTeamArenaOutline, Log, All);
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -233,10 +239,11 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 	if (IsOutlined() && CustomDepthMesh == nullptr)
 	{
 		CustomDepthMesh = DuplicateObject<USkeletalMeshComponent>(BodyMesh, this);
-		if (!ensureMsgf(CustomDepthMesh != nullptr,
-			TEXT("Failed to create deferred outline for %s; refusing to register it."),
-			*GetName()))
+		if (CustomDepthMesh == nullptr)
 		{
+			UE_LOG(LogTeamArenaOutline, Warning,
+				TEXT("Failed to create deferred outline for %s; refusing to register it."),
+				*GetName());
 			return;
 		}
 
@@ -268,9 +275,15 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 
 	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
 	{
-		ensureMsgf(false,
-			TEXT("Deferred outline for %s was detached before registration; repairing CharacterMesh0 attachment."),
-			*GetName());
+		// Routine in killcam/instant-replay worlds: demo seeks destroy/respawn actors while OnRep
+		// bursts (bServerOutline is ReplicatedUsing=UpdateOutline) land mid-registration. Log only —
+		// this state is repaired below, and an ensure here is what crashed 328 clients at caps.
+		UE_LOG(LogTeamArenaOutline, Warning,
+			TEXT("Deferred outline for %s was detached before registration; repairing %s attachment (outlined=%d registered=%d demo=%d)."),
+			*GetName(), *BodyMesh->GetName(),
+			IsOutlined() ? 1 : 0,
+			CustomDepthMesh->IsRegistered() ? 1 : 0,
+			(GetWorld() != nullptr && GetWorld()->DemoNetDriver != nullptr) ? 1 : 0);
 
 		// A different outline request may have registered the component between ApplyCharacterData
 		// and this tick. Retire that render state before repairing so no detached primitive survives.
@@ -285,11 +298,11 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 		CustomDepthMesh->RelativeScale3D = FVector(1.0f);
 	}
 
-	ensureMsgf(CustomDepthMesh == nullptr || CustomDepthMesh->GetAttachParent() == BodyMesh,
-		TEXT("Deferred outline for %s could not attach to CharacterMesh0; refusing to register it."),
-		*GetName());
 	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
 	{
+		UE_LOG(LogTeamArenaOutline, Warning,
+			TEXT("Deferred outline for %s could not attach to %s; discarding it."),
+			*GetName(), *BodyMesh->GetName());
 		CustomDepthMesh->DestroyComponent();
 		CustomDepthMesh = nullptr;
 		return;
