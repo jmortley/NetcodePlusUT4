@@ -169,8 +169,10 @@ namespace NCDragRects
 	static FInfo Get(FName Alias)
 	{
 		// Portrait strips: each portrait pip is ~96 design px wide × ~134 tall;
-		// 5 pips per team. ResolvedPos is the strip's start anchor.
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue"))
+		// 5 pips per team. ResolvedPos is the strip's start anchor. The
+		// viewer-relative team/enemy slots share the exact geometry.
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
+			|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy"))
 		{
 			return { FVector2D(450.f, 130.f), FVector2D(0.f, 0.f) };
 		}

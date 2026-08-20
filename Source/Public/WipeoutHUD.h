@@ -40,8 +40,21 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	UPROPERTY(EditDefaultsOnly, Category = "WipeoutHUD")
 	bool bShouldDrawPortraits = true;
 
+	/** Mockup-style pip restyle (2026-08): health-over-armor stacked large on the
+	 *  tile face (including the local player) and viewer-relative team/enemy alias
+	 *  resolution. AClutchHUD reuses DrawPlayerIcon for its own small roster tiles
+	 *  and sets this false in its ctor to keep the legacy compact "HP/AR" line and
+	 *  fixed red/blue aliases there. */
+	bool bPortraitMockupRestyle = true;
+
 	virtual void DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float IconSize);
 	virtual void GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers);
+
+	/** Layout alias for one team's portrait strip. Red/blue by default; with
+	 *  [NetcodePlus] ViewerRelativePortraits on, resolves portrait_team /
+	 *  portrait_enemy against the local viewer's team instead (teamless viewer
+	 *  buckets red as "ours", matching NCPlusForceModels::GetViewerTeam). */
+	FName PortraitAliasFor(uint8 TeamIdx) const;
 
 	/** Custom team score bar — replaces bpHW_TeamGameClock to respect TeamSkins colors.
 	 *  Shows "Phayder" (red) vs "Liandri" (blue) when custom team colors are detected. */
@@ -89,12 +102,17 @@ private:
 	 *  the PS. (Fitted names cached separately by NCPlusHUDDrawCall::ResolveFittedName.) */
 	struct FWipeoutPipCache
 	{
+		// Health and armor render as two separately-styled stacked lines on the
+		// portrait (health over armor, mockup style), so each caches its own FText.
 		const UFont* HpFont = nullptr;
 		int32 HpKeyHP = MIN_int32;
-		int32 HpKeyAR = MIN_int32;
 		FText  HpText;
 		float  HpWidth  = 0.f;
 		float  HpHeight = 0.f;
+		int32 ArKeyAR = MIN_int32;
+		FText  ArText;
+		float  ArWidth  = 0.f;
+		float  ArHeight = 0.f;
 		const UFont* CountdownFont = nullptr;
 		int32 CountdownSeconds = MIN_int32;
 		FText CountdownText;
@@ -102,4 +120,17 @@ private:
 		float CountdownHeight = 0.f;
 	};
 	TMap<TWeakObjectPtr<AUTPlayerState>, FWipeoutPipCache> PipCacheByPS;
+
+	/** Per-strip name-row height cache for the container card (index 0 = red
+	 *  strip, 1 = blue). Font metrics only change when the font or scale does —
+	 *  avoids a per-frame StrLen in the extents pre-pass. */
+	const UFont* NameRowFontCache[2] = { nullptr, nullptr };
+	float NameRowScaleCache[2] = { -1.f, -1.f };
+	float NameRowHeightCache[2] = { 0.f, 0.f };
+
+	/** Draw the strip container frame (team-color outline, no fill) around one
+	 *  team's portrait row. Extents are exact: the pre-pass in DrawHUD simulates
+	 *  the pip cursor, so scorer-scaled pips and either grow direction stay inside. */
+	void DrawPortraitStripPanel(float MinX, float MaxX, float TopY, float BottomY,
+		const FLinearColor& BorderColor, float Opacity);
 };

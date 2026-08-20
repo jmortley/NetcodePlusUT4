@@ -471,35 +471,49 @@ void AWipeoutHUD::DrawHUD()
 		float TeammateScale = 0.4f;
 
 		float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
-		// Phase 3.11: per-strip Scale override (independent red/blue resize).
-		const float WO_RedScale  = NCPlusHUDDrawCall::GetScale(TEXT("portrait_red"));
-		const float WO_BlueScale = NCPlusHUDDrawCall::GetScale(TEXT("portrait_blue"));
+		// Strip aliases: portrait_red/_blue by default, or portrait_team/_enemy when
+		// ViewerRelativePortraits is on — placement then follows the viewer's team
+		// instead of a fixed color (PortraitAliasFor).
+		const FName RedAlias  = PortraitAliasFor(0);
+		const FName BlueAlias = PortraitAliasFor(1);
+		static const FName NAME_PortraitEnemyStrip(TEXT("portrait_enemy"));
+		// Phase 3.11: per-strip Scale override (independent resize).
+		const float WO_RedScale  = NCPlusHUDDrawCall::GetScale(RedAlias);
+		const float WO_BlueScale = NCPlusHUDDrawCall::GetScale(BlueAlias);
 		const float WO_RedPipSize  = BasePipSize * WO_RedScale;
 		const float WO_BluePipSize = BasePipSize * WO_BlueScale;
 		float XAdjust = BasePipSize * 1.1f;
 
-		// Stock positions used as fallbacks if the layout has no override.
-		const float StockXRed  = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
-		const float StockXBlue = 0.6f * Canvas->ClipX + XAdjust;
-		const float StockY     = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+		// Stock positions used as fallbacks if the layout has no override. The
+		// LEFT slot belongs to red — or, viewer-relative, to MY team — so the
+		// enemy-keyed strip falls back right regardless of its color.
+		const float StockXLeft  = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
+		const float StockXRight = 0.6f * Canvas->ClipX + XAdjust;
+		const float StockY      = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+		const bool bRedLeft     = (RedAlias != NAME_PortraitEnemyStrip);
+		const float StockXRed   = bRedLeft ? StockXLeft  : StockXRight;
+		const float StockXBlue  = bRedLeft ? StockXRight : StockXLeft;
 
 		// Layout consult (Phase 3.5) — user can move each strip independently.
-		const FVector2D RedStart  = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_red"),  Canvas, FVector2D(StockXRed,  StockY));
-		const FVector2D BlueStart = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_blue"), Canvas, FVector2D(StockXBlue, StockY));
-		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
-		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
+		const FVector2D RedStart  = NCPlusHUDDrawCall::ResolveScreenPos(RedAlias,  Canvas, FVector2D(StockXRed,  StockY));
+		const FVector2D BlueStart = NCPlusHUDDrawCall::ResolveScreenPos(BlueAlias, Canvas, FVector2D(StockXBlue, StockY));
+		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(RedAlias);
+		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(BlueAlias);
 
 		// Per-strip grow direction — derived from RESOLVED screen position, not
 		// the anchor coordinate. Lets dragging the strip across screen-center
 		// (via nchud_drag) auto-flip growth so the visible strip stays on
 		// screen instead of extending off the now-far edge.
-		// Team-defaulted grow direction; flip only if default would clip
-		// off-screen. See ElimPlusHUD for full rationale.
+		// Side-defaulted grow direction (the left-side strip grows leftward);
+		// flip only if the default would clip off-screen. See ElimPlusHUD for
+		// full rationale.
 		const float EstStripWidth = 5.f * XAdjust;
-		float RedGrowSign  = -1.f;
-		float BlueGrowSign = +1.f;
-		if (RedStart.X  - EstStripWidth < 0.f)             RedGrowSign  = +1.f;
-		if (BlueStart.X + EstStripWidth > Canvas->ClipX)   BlueGrowSign = -1.f;
+		float RedGrowSign  = bRedLeft ? -1.f : +1.f;
+		float BlueGrowSign = bRedLeft ? +1.f : -1.f;
+		if (RedGrowSign  < 0.f && RedStart.X  - EstStripWidth < 0.f)            RedGrowSign  = +1.f;
+		else if (RedGrowSign  > 0.f && RedStart.X  + EstStripWidth > Canvas->ClipX) RedGrowSign  = -1.f;
+		if (BlueGrowSign < 0.f && BlueStart.X - EstStripWidth < 0.f)            BlueGrowSign = +1.f;
+		else if (BlueGrowSign > 0.f && BlueStart.X + EstStripWidth > Canvas->ClipX) BlueGrowSign = -1.f;
 
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
@@ -533,6 +547,90 @@ void AWipeoutHUD::DrawHUD()
 					LowestRespawnTime = UTPS->RespawnTime;
 					NextToSpawn = UTPS;
 				}
+			}
+		}
+
+		// Pre-pass: exact strip extents for the container cards. Simulates the
+		// draw loop's cursor (scorer 1.25x pip included) so the card hugs the row
+		// in either grow direction. Names render UNDER the tiles now, so the card
+		// bottom also covers one name row.
+		{
+			float SimXRed = XOffsetRed, SimXBlue = XOffsetBlue;
+			float MinXRed = BIG_NUMBER, MaxXRed = -BIG_NUMBER, MaxPipHRed = 0.f;
+			float MinXBlue = BIG_NUMBER, MaxXBlue = -BIG_NUMBER, MaxPipHBlue = 0.f;
+			int32 SimRedCount = 0, SimBlueCount = 0;
+			AUTPlayerState* const SimScorerPS = GetScorerPlayerState();
+			for (AUTPlayerState* UTPS : LivePlayers)
+			{
+				if (!UTPS) { continue; }
+				const float SimOwnerScaling = (UTPS == SimScorerPS) ? 1.25f : 1.f;
+				const uint8 SimTeam = UTPS->GetTeamNum();
+				if (SimTeam == 0 && !bHideRed)
+				{
+					const float SimPip = WO_RedPipSize * SimOwnerScaling;
+					MinXRed = FMath::Min(MinXRed, SimXRed);
+					MaxXRed = FMath::Max(MaxXRed, SimXRed + SimPip);
+					MaxPipHRed = FMath::Max(MaxPipHRed, SimPip * (320.0f / 224.0f));
+					SimXRed += RedGrowSign * 1.1f * SimPip;
+					++SimRedCount;
+				}
+				else if (SimTeam == 1 && !bHideBlue)
+				{
+					const float SimPip = WO_BluePipSize * SimOwnerScaling;
+					MinXBlue = FMath::Min(MinXBlue, SimXBlue);
+					MaxXBlue = FMath::Max(MaxXBlue, SimXBlue + SimPip);
+					MaxPipHBlue = FMath::Max(MaxPipHBlue, SimPip * (320.0f / 224.0f));
+					SimXBlue += BlueGrowSign * 1.1f * SimPip;
+					++SimBlueCount;
+				}
+			}
+
+			// One name row under the tiles (same font/scale maths as the name
+			// draw). Measured height is cached per strip — StrLen only re-runs
+			// when the font or effective scale changes.
+			auto NameRowHeight = [this](int32 StripIdx, const FName& Alias, float StripScale) -> float
+			{
+				UFont* NameFont = NCPlusHUDFonts::Resolve(Alias, this, SmallFont);
+				if (!NameFont) { NameFont = SmallFont; }
+				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * StripScale
+					* NCPlusHUDFonts::ResolveScale(Alias, 1.f);
+				if (NameRowFontCache[StripIdx] != NameFont || NameRowScaleCache[StripIdx] != NameScale)
+				{
+					float XL = 0.f, YL = 0.f;
+					Canvas->StrLen(NameFont, FString(TEXT("Ay")), XL, YL);
+					NameRowFontCache[StripIdx]   = NameFont;
+					NameRowScaleCache[StripIdx]  = NameScale;
+					NameRowHeightCache[StripIdx] = YL * NameScale + 3.f;
+				}
+				return NameRowHeightCache[StripIdx];
+			};
+			// Border honors the strip's use_team_color extra, like the tiles do.
+			auto StripBorderColor = [this, GS](uint8 TeamIdx, const FName& Alias) -> FLinearColor
+			{
+				FLinearColor C = (TeamIdx == 1)
+					? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
+					: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);
+				if (NCPlusHUDDrawCall::GetUseTeamColor(Alias) && GS
+					&& GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx])
+				{
+					C = GS->Teams[TeamIdx]->TeamColor;
+				}
+				return C;
+			};
+
+			if (SimRedCount > 0)
+			{
+				const float Pad = FMath::Max(3.f, 0.09f * WO_RedPipSize);
+				DrawPortraitStripPanel(MinXRed - Pad, MaxXRed + Pad, YOffsetRed - Pad,
+					YOffsetRed + MaxPipHRed + NameRowHeight(0, RedAlias, WO_RedScale) + Pad,
+					StripBorderColor(0, RedAlias), NCPlusHUDDrawCall::GetOpacity(RedAlias));
+			}
+			if (SimBlueCount > 0)
+			{
+				const float Pad = FMath::Max(3.f, 0.09f * WO_BluePipSize);
+				DrawPortraitStripPanel(MinXBlue - Pad, MaxXBlue + Pad, YOffsetBlue - Pad,
+					YOffsetBlue + MaxPipHBlue + NameRowHeight(1, BlueAlias, WO_BlueScale) + Pad,
+					StripBorderColor(1, BlueAlias), NCPlusHUDDrawCall::GetOpacity(BlueAlias));
 			}
 		}
 
@@ -591,13 +689,14 @@ void AWipeoutHUD::DrawHUD()
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffsetRed, PipSize);
 				// Player name above icon — multiply by team scale so text shrinks with the pip.
 				{
-					/* Portraits (Red) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(FName(TEXT("portrait_red")), this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(FName(TEXT("portrait_red")), 1.f);
+					/* Portraits (Red/My Team) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(RedAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(RedAlias, 1.f);
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_RedScale * NameFontExtra;
 					// Cached fit + one outlined item (was a per-frame StrLen loop + 5 DrawText).
 					FText NameText; float NW, NH;
 					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
 					float NameX = XOffsetRed + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
-					float NameY = YOffsetRed + 2.f;
+					// Below the tile (mockup style) — the big HP/armor stack owns the tile face now.
+					float NameY = YOffsetRed + PipSize * (320.0f / 224.0f) + 2.f;
 					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
 				}
 				if (UTPS == NextToSpawn)
@@ -620,13 +719,14 @@ void AWipeoutHUD::DrawHUD()
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffsetBlue, PipSize);
 				// Player name above icon — multiply by team scale so text shrinks with the pip.
 				{
-					/* Portraits (Blue) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(FName(TEXT("portrait_blue")), this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(FName(TEXT("portrait_blue")), 1.f);
+					/* Portraits (Blue/Enemy) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(BlueAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(BlueAlias, 1.f);
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_BlueScale * NameFontExtra;
 					// Cached fit + one outlined item (was a per-frame StrLen loop + 5 DrawText).
 					FText NameText; float NW, NH;
 					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
 					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
-					float NameY = YOffsetBlue + 2.f;
+					// Below the tile (mockup style) — the big HP/armor stack owns the tile face now.
+					float NameY = YOffsetBlue + PipSize * (320.0f / 224.0f) + 2.f;
 					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
 				}
 				if (UTPS == NextToSpawn)
@@ -810,6 +910,20 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	Canvas->SetLinearDrawColor(FadeL(FLinearColor::White));
 	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
 
+	// ── Section outline (mockup style): one thin light frame around the whole
+	// bar band so the scorebar reads as a contained card. Fills stay untouched —
+	// the outline alone carries the look (user call 2026-08-19).
+	{
+		const float B = FMath::Max(1.f, 2.f * RenderScale);
+		const float FrameX = LeftBarX;
+		const float FrameW = (RightBarX + BarWidth) - LeftBarX;
+		Canvas->SetLinearDrawColor(FadeL(FLinearColor(0.72f, 0.80f, 0.86f, 0.7f)));
+		Canvas->DrawTile(Canvas->DefaultTexture, FrameX, TopY, FrameW, B, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->DrawTile(Canvas->DefaultTexture, FrameX, TopY + BarHeight - B, FrameW, B, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->DrawTile(Canvas->DefaultTexture, FrameX, TopY, B, BarHeight, 0, 0, 1, 1, BLEND_Translucent);
+		Canvas->DrawTile(Canvas->DefaultTexture, FrameX + FrameW - B, TopY, B, BarHeight, 0, 0, 1, 1, BLEND_Translucent);
+	}
+
 	// ── Text ──
 	// Honor per-element font override (Phase 3.8). One alias controls both
 	// team-name and score-number fonts on the scorebar — they read as a
@@ -942,6 +1056,52 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	// Removed: match elapsed timer and "You are on X" text — too cluttered
 }
 
+FName AWipeoutHUD::PortraitAliasFor(uint8 TeamIdx) const
+{
+	static const FName NAME_PortraitRed(TEXT("portrait_red"));
+	static const FName NAME_PortraitBlue(TEXT("portrait_blue"));
+	static const FName NAME_PortraitTeam(TEXT("portrait_team"));
+	static const FName NAME_PortraitEnemy(TEXT("portrait_enemy"));
+	if (!bPortraitMockupRestyle || !FNCPlusHUDLayout::WantsViewerRelativePortraits())
+	{
+		return (TeamIdx == 1) ? NAME_PortraitBlue : NAME_PortraitRed;
+	}
+	// Resolve against the LOCAL viewer's team so "my team" placement follows the
+	// user across matches. A teamless viewer (true spectator) buckets red as
+	// "ours" — the same convention as NCPlusForceModels::GetViewerTeam.
+	uint8 ViewerTeam = 255;
+	if (UTPlayerOwner && UTPlayerOwner->UTPlayerState)
+	{
+		ViewerTeam = UTPlayerOwner->UTPlayerState->GetTeamNum();
+	}
+	if (ViewerTeam == 255)
+	{
+		ViewerTeam = 0;
+	}
+	return (TeamIdx == ViewerTeam) ? NAME_PortraitTeam : NAME_PortraitEnemy;
+}
+
+void AWipeoutHUD::DrawPortraitStripPanel(float MinX, float MaxX, float TopY, float BottomY,
+	const FLinearColor& BorderColor, float Opacity)
+{
+	if (!Canvas || MaxX <= MinX || BottomY <= TopY)
+	{
+		return;
+	}
+	const float W = MaxX - MinX;
+	const float H = BottomY - TopY;
+	// Outline only (user call 2026-08-19): the section reads as a framed card
+	// without darkening what's behind it.
+	FLinearColor Border = BorderColor;
+	Border.A = 0.9f * Opacity;
+	const float B = 2.f;
+	Canvas->SetLinearDrawColor(Border);
+	Canvas->DrawTile(Canvas->DefaultTexture, MinX, TopY, W, B, 0, 0, 1, 1, BLEND_Translucent);
+	Canvas->DrawTile(Canvas->DefaultTexture, MinX, BottomY - B, W, B, 0, 0, 1, 1, BLEND_Translucent);
+	Canvas->DrawTile(Canvas->DefaultTexture, MinX, TopY, B, H, 0, 0, 1, 1, BLEND_Translucent);
+	Canvas->DrawTile(Canvas->DefaultTexture, MaxX - B, TopY, B, H, 0, 0, 1, 1, BLEND_Translucent);
+}
+
 void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float PipSize)
 {
 	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
@@ -952,7 +1112,8 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 
 	// Per-portrait opacity (Phase 3.5+): scale every SetLinearDrawColor alpha
 	// by this so the editor's Op slider fades the entire portrait stack.
-	const FName PortraitAlias = (PlayerState->GetTeamNum() == 1) ? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
+	// Alias is red/blue — or team/enemy when ViewerRelativePortraits is on.
+	const FName PortraitAlias = PortraitAliasFor(PlayerState->GetTeamNum());
 	const float Op = NCPlusHUDDrawCall::GetOpacity(PortraitAlias);
 	auto Tinted = [Op](FLinearColor C) -> FLinearColor { C.A *= Op; return C; };
 
@@ -1084,12 +1245,13 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			FontRenderScale, FontRenderScale, TextRenderInfo);
 	}
 
-	// Layer 6: HP/Armor numbers — alive teammates (not self). ALSO revealed on
-	// enemy pips once the round is over (the strip only draws in
-	// InProgress/RoundCooldown, so != InProgress IS the round-win window — the
-	// winners' final health should be readable), and at ALL times for TRUE
-	// spectators (bOnlySpectator; deliberately NOT bOutOfLives — a dead player
-	// must not gain live enemy info mid-round).
+	// Layer 6: health over armor, stacked LARGE on the portrait face (mockup
+	// style) — alive teammates INCLUDING self (the whole team strip reads as one
+	// card). ALSO revealed on enemy pips once the round is over (the strip only
+	// draws in InProgress/RoundCooldown, so != InProgress IS the round-win
+	// window — the winners' final health should be readable), and at ALL times
+	// for TRUE spectators (bOnlySpectator; deliberately NOT bOutOfLives — a dead
+	// player must not gain live enemy info mid-round).
 	// PipFontExtra is the user's FontSz multiplier — the headline 4K legibility knob.
 	if (LiveScaling >= 1.f && UTPlayerOwner)
 	{
@@ -1098,36 +1260,74 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		const bool bSameTeam  = MyPS && MyPS->GetTeamNum() == PlayerState->GetTeamNum();
 		const bool bRoundOver = MatchGS && MatchGS->GetMatchState() != MatchState::InProgress;
 		const bool bTrueSpec  = MyPS && MyPS->bOnlySpectator;
-		if (MyPS && MyPS != PlayerState && (bSameTeam || bRoundOver || bTrueSpec))
+		// Legacy pips (Clutch) keep the old exclusions: no numbers on self.
+		if (MyPS && (bPortraitMockupRestyle || MyPS != PlayerState)
+			&& (bSameTeam || bRoundOver || bTrueSpec))
 		{
 			AUTCharacter* UTC = PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())
 			{
-				const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale * PipFontExtra;
-
 				int32 HP = UTC->Health;
 				int32 Armor = UTC->GetArmorAmount();
-
-				// Rebuild the HP FText + measured extents only when HP/armor (or the font)
-				// change — otherwise the string is identical frame to frame.
 				FWipeoutPipCache& PC = PipCacheByPS.FindOrAdd(PlayerState);
-				if (PC.HpKeyHP != HP || PC.HpKeyAR != Armor || PC.HpFont != PipFont)
-				{
-					const FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
-					float XL, YL;
-					Canvas->StrLen(PipFont, HPStr, XL, YL);
-					PC.HpText   = FText::FromString(HPStr);
-					PC.HpWidth  = XL;
-					PC.HpHeight = YL;
-					PC.HpKeyHP  = HP;
-					PC.HpKeyAR  = Armor;
-					PC.HpFont   = PipFont;
-				}
 
-				float TextX = XOffset + (PipSize * 0.5f) - (PC.HpWidth * FontRenderScale * 0.5f);
-				float TextY = YOffset + PipHeight - (PC.HpHeight * FontRenderScale) - 2.f;
-				NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.HpText, TextX, TextY,
-					FontRenderScale, FLinearColor::White, FLinearColor::Black, Op);
+				if (bPortraitMockupRestyle)
+				{
+					const float BaseScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
+					const float HpScale = BaseScale * 1.05f;
+					const float ArScale = BaseScale * 0.85f;
+
+					// Rebuild each line's FText + measured extents only when its value
+					// (or the font) changes — otherwise identical frame to frame.
+					if (PC.HpKeyHP != HP || PC.HpFont != PipFont)
+					{
+						const FString HPStr = FString::FromInt(HP);
+						Canvas->StrLen(PipFont, HPStr, PC.HpWidth, PC.HpHeight);
+						PC.HpText  = FText::FromString(HPStr);
+						PC.HpKeyHP = HP;
+						if (PC.HpFont != PipFont)
+						{
+							PC.ArKeyAR = MIN_int32;   // font change invalidates the armor line too
+						}
+						PC.HpFont = PipFont;
+					}
+					if (PC.ArKeyAR != Armor)
+					{
+						const FString ArStr = FString::FromInt(Armor);
+						Canvas->StrLen(PipFont, ArStr, PC.ArWidth, PC.ArHeight);
+						PC.ArText  = FText::FromString(ArStr);
+						PC.ArKeyAR = Armor;
+					}
+
+					const FLinearColor HealthGreen(0.45f, 1.f, 0.35f, 1.f);
+					const FLinearColor ArmorBlue(0.30f, 0.80f, 1.f, 1.f);
+					const float HpX = XOffset + (PipSize * 0.5f) - (PC.HpWidth * HpScale * 0.5f);
+					const float HpY = YOffset + (PipHeight * 0.40f) - (PC.HpHeight * HpScale * 0.5f);
+					const float ArX = XOffset + (PipSize * 0.5f) - (PC.ArWidth * ArScale * 0.5f);
+					const float ArY = YOffset + (PipHeight * 0.66f) - (PC.ArHeight * ArScale * 0.5f);
+					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.HpText, HpX, HpY,
+						HpScale, HealthGreen, FLinearColor::Black, Op);
+					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.ArText, ArX, ArY,
+						ArScale, ArmorBlue, FLinearColor::Black, Op);
+				}
+				else
+				{
+					// Legacy compact "HP/AR" bottom line (pre-restyle look, Clutch tiles).
+					const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * 0.7f * PortraitTextScale * PipFontExtra;
+					if (PC.HpKeyHP != HP || PC.ArKeyAR != Armor || PC.HpFont != PipFont)
+					{
+						const FString HPStr = FString::Printf(TEXT("%d/%d"), HP, Armor);
+						Canvas->StrLen(PipFont, HPStr, PC.HpWidth, PC.HpHeight);
+						PC.HpText  = FText::FromString(HPStr);
+						PC.HpKeyHP = HP;
+						PC.ArKeyAR = Armor;
+						PC.HpFont  = PipFont;
+					}
+					float TextX = XOffset + (PipSize * 0.5f) - (PC.HpWidth * FontRenderScale * 0.5f);
+					float TextY = YOffset + PipHeight - (PC.HpHeight * FontRenderScale) - 2.f;
+					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.HpText, TextX, TextY,
+						FontRenderScale, FLinearColor::White, FLinearColor::Black, Op);
+				}
 			}
 		}
 	}

@@ -179,6 +179,11 @@ private:
 	void OnAbsoluteElimTeamPanelChanged(ECheckBoxState NewState);
 	bool IsTeamColorControlEnabled(FName Alias) const;
 
+	// Viewer-relative portrait slots: strips keyed My Team / Enemy instead of
+	// red/blue. Applies on the next HUD frame; persists [NetcodePlus] ViewerRelativePortraits.
+	ECheckBoxState GetViewerRelativePortraitsState() const;
+	void OnViewerRelativePortraitsChanged(ECheckBoxState NewState);
+
 	// Scoreboard background opacity (0.05..1.0). Global; persists [NetcodePlus] ScoreboardOpacity.
 	TOptional<float> GetScoreboardOpacityValue() const;
 	void OnScoreboardOpacityChanged(float NewValue);

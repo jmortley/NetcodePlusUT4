@@ -232,6 +232,20 @@ struct FNCPlusHUDLayout
 	 *  Call ONLY from an explicit user toggle (see WantsStockTeamPanel). */
 	static void SetStockTeamPanel(bool bStock);
 
+	/** Viewer-relative portrait strips: when true, the portrait strips consult the
+	 *  "portrait_team" / "portrait_enemy" layout aliases (my team vs. the enemy)
+	 *  instead of "portrait_red" / "portrait_blue" — so a user's placement follows
+	 *  THEIR team across matches instead of a fixed color. A teamless viewer (true
+	 *  spectator) buckets red as "ours", matching NCPlusForceModels::GetViewerTeam.
+	 *  [NetcodePlus] ViewerRelativePortraits in Mod.ini; default false (red/blue).
+	 *  Cached; SetViewerRelativePortraits refreshes it. */
+	static bool WantsViewerRelativePortraits();
+
+	/** Persist + refresh-cache the viewer-relative portrait choice
+	 *  ([NetcodePlus] ViewerRelativePortraits). Call ONLY from an explicit user
+	 *  toggle (see WantsViewerRelativePortraits). */
+	static void SetViewerRelativePortraits(bool bViewerRelative);
+
 	/** Faithful Elimination 113 artwork/layout inside the stock top-left team panel.
 	 *  This is a nested presentation choice: it has no effect while StockTeamPanel is
 	 *  false. [NetcodePlus] AbsoluteElimTeamPanel in Mod.ini; new profiles default on,

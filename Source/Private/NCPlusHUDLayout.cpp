@@ -689,6 +689,40 @@ void FNCPlusHUDLayout::SetStockTeamPanel(bool bStock)
 	GStockTeamPanelCache = bStock ? 1 : 0;
 }
 
+// Viewer-relative portrait strips (see header). Same cache discipline as
+// GStockTeamPanelCache: -1 = unresolved, resolved once from Mod.ini, refreshed
+// only by the explicit setter.
+static int8 GViewerRelativePortraitsCache = -1;
+
+bool FNCPlusHUDLayout::WantsViewerRelativePortraits()
+{
+	if (GViewerRelativePortraitsCache >= 0)
+	{
+		return GViewerRelativePortraitsCache != 0;
+	}
+	bool bResult = false;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("ViewerRelativePortraits"), Val, ModIni) && !Val.IsEmpty())
+	{
+		bResult = NCPlusConfigBool(Val);
+	}
+	GViewerRelativePortraitsCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetViewerRelativePortraits(bool bViewerRelative)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("ViewerRelativePortraits"),
+			bViewerRelative ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GViewerRelativePortraitsCache = bViewerRelative ? 1 : 0;
+}
+
 bool FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
 {
 	if (GAbsoluteElimTeamPanelCache >= 0)
@@ -1049,6 +1083,13 @@ namespace NCPlusHUDAliases
 			// them apart in the visual editor.
 			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
 			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
+			// Viewer-relative portrait slots — consulted INSTEAD of the red/blue pair
+			// when [NetcodePlus] ViewerRelativePortraits is on (HUD editor toggle):
+			// "team" is the local viewer's team, "enemy" the other. Defaults mirror
+			// red/blue (team left, enemy right) so flipping the toggle without ever
+			// dragging these keeps the familiar arrangement.
+			T.Emplace(TEXT("portrait_team"),    FString(),                                                                       FText::FromString(TEXT("Portraits (My Team)")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
+			T.Emplace(TEXT("portrait_enemy"),   FString(),                                                                       FText::FromString(TEXT("Portraits (Enemy)")),  true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
 			// Stock top-left team roster (alternative to the portrait strip; see
 			// NCPlusHUDDrawCall::DrawStockTeamPanel). Draw-call alias → movable, with
 			// Scale / Opacity / Hide honored. Default top-left with a small inset.
