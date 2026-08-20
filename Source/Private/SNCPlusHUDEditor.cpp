@@ -51,7 +51,9 @@ namespace NCHUDEdit
 		{
 			return TEXT("Weapon Bars");
 		}
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("score_kda") || Alias == TEXT("team_panel"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
+			|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")
+			|| Alias == TEXT("scorebar") || Alias == TEXT("score_kda") || Alias == TEXT("team_panel"))
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
