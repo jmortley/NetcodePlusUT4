@@ -56,8 +56,8 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	 *  buckets red as "ours", matching NCPlusForceModels::GetViewerTeam). */
 	FName PortraitAliasFor(uint8 TeamIdx) const;
 
-	/** Custom team score bar — replaces bpHW_TeamGameClock to respect TeamSkins colors.
-	 *  Shows "Phayder" (red) vs "Liandri" (blue) when custom team colors are detected. */
+	/** Compact score/clock/score module — replaces bpHW_TeamGameClock while
+	 *  preserving TeamSkins colors and the shared scorebar F5 alias. */
 	virtual void DrawTeamScoreBar(AUTGameState* GS);
 
 	/** "NOW WATCHING <player>" spectator banner, ported from iCTF (ANCPlusCTFHUD).
@@ -121,16 +121,11 @@ private:
 	};
 	TMap<TWeakObjectPtr<AUTPlayerState>, FWipeoutPipCache> PipCacheByPS;
 
-	/** Per-strip name-row height cache for the container card (index 0 = red
-	 *  strip, 1 = blue). Font metrics only change when the font or scale does —
-	 *  avoids a per-frame StrLen in the extents pre-pass. */
+	// Retained for native-instance layout compatibility on the 328 RC. The
+	// compact portrait treatment no longer needs a framed-section pre-pass, so
+	// these caches are intentionally dormant rather than removed this late.
 	const UFont* NameRowFontCache[2] = { nullptr, nullptr };
 	float NameRowScaleCache[2] = { -1.f, -1.f };
 	float NameRowHeightCache[2] = { 0.f, 0.f };
 
-	/** Draw the strip container frame (team-color outline, no fill) around one
-	 *  team's portrait row. Extents are exact: the pre-pass in DrawHUD simulates
-	 *  the pip cursor, so scorer-scaled pips and either grow direction stay inside. */
-	void DrawPortraitStripPanel(float MinX, float MaxX, float TopY, float BottomY,
-		const FLinearColor& BorderColor, float Opacity);
 };

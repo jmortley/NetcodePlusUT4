@@ -15,6 +15,18 @@
 #include "WipeoutDamageReplicator.h"
 #include "EngineUtils.h"
 
+namespace
+{
+	// The pre-compact strip used a 57.6 x 82.29 design-pixel portrait. Match the
+	// new 56px score core without changing the portrait atlas' 224:320 aspect.
+	constexpr float WipeoutPortraitAspect = 320.f / 224.f;
+	constexpr float WipeoutLegacyPipWidth = 32.f + (64.f * 0.4f);
+	constexpr float WipeoutCompactPipHeight = 56.f;
+	constexpr float WipeoutCompactPipWidth = WipeoutCompactPipHeight / WipeoutPortraitAspect;
+	constexpr float WipeoutCompactTextFactor = WipeoutCompactPipHeight
+		/ (WipeoutLegacyPipWidth * WipeoutPortraitAspect);
+}
+
 AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -466,11 +478,16 @@ void AWipeoutHUD::DrawHUD()
 		RedPlayerCount = 0;
 		BluePlayerCount = 0;
 
-		const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+		// Match the F5 layout's 1080p design-pixel scale (and the compact score
+		// module) so portrait proportions remain stable on non-16:9 viewports.
+		const float RenderScale = float(Canvas->SizeY) / 1080.0f;
 
-		float TeammateScale = 0.4f;
-
-		float BasePipSize = (32 + (64 * TeammateScale)) * GetHUDWidgetScaleOverride() * RenderScale;
+		// Restyled Wipeout/Shaft cards now share the score core's 56 design-pixel
+		// height. The legacy width remains available for any base-HUD subclass that
+		// explicitly opts out, while each F5 portrait Scale still multiplies below.
+		const float BasePipDesignWidth = bPortraitMockupRestyle
+			? WipeoutCompactPipWidth : WipeoutLegacyPipWidth;
+		float BasePipSize = BasePipDesignWidth * GetHUDWidgetScaleOverride() * RenderScale;
 		// Strip aliases: portrait_red/_blue by default, or portrait_team/_enemy when
 		// ViewerRelativePortraits is on — placement then follows the viewer's team
 		// instead of a fixed color (PortraitAliasFor).
@@ -507,13 +524,14 @@ void AWipeoutHUD::DrawHUD()
 		// Side-defaulted grow direction (the left-side strip grows leftward);
 		// flip only if the default would clip off-screen. See ElimPlusHUD for
 		// full rationale.
-		const float EstStripWidth = 5.f * XAdjust;
+		const float EstRedStripWidth = 5.f * 1.1f * WO_RedPipSize;
+		const float EstBlueStripWidth = 5.f * 1.1f * WO_BluePipSize;
 		float RedGrowSign  = bRedLeft ? -1.f : +1.f;
 		float BlueGrowSign = bRedLeft ? +1.f : -1.f;
-		if (RedGrowSign  < 0.f && RedStart.X  - EstStripWidth < 0.f)            RedGrowSign  = +1.f;
-		else if (RedGrowSign  > 0.f && RedStart.X  + EstStripWidth > Canvas->ClipX) RedGrowSign  = -1.f;
-		if (BlueGrowSign < 0.f && BlueStart.X - EstStripWidth < 0.f)            BlueGrowSign = +1.f;
-		else if (BlueGrowSign > 0.f && BlueStart.X + EstStripWidth > Canvas->ClipX) BlueGrowSign = -1.f;
+		if (RedGrowSign  < 0.f && RedStart.X  - EstRedStripWidth < 0.f)            RedGrowSign  = +1.f;
+		else if (RedGrowSign  > 0.f && RedStart.X  + EstRedStripWidth > Canvas->ClipX) RedGrowSign  = -1.f;
+		if (BlueGrowSign < 0.f && BlueStart.X - EstBlueStripWidth < 0.f)            BlueGrowSign = +1.f;
+		else if (BlueGrowSign > 0.f && BlueStart.X + EstBlueStripWidth > Canvas->ClipX) BlueGrowSign = -1.f;
 
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
@@ -550,98 +568,15 @@ void AWipeoutHUD::DrawHUD()
 			}
 		}
 
-		// Pre-pass: exact strip extents for the container cards. Simulates the
-		// draw loop's cursor (scorer 1.25x pip included) so the card hugs the row
-		// in either grow direction. Names render UNDER the tiles now, so the card
-		// bottom also covers one name row.
-		{
-			float SimXRed = XOffsetRed, SimXBlue = XOffsetBlue;
-			float MinXRed = BIG_NUMBER, MaxXRed = -BIG_NUMBER, MaxPipHRed = 0.f;
-			float MinXBlue = BIG_NUMBER, MaxXBlue = -BIG_NUMBER, MaxPipHBlue = 0.f;
-			int32 SimRedCount = 0, SimBlueCount = 0;
-			AUTPlayerState* const SimScorerPS = GetScorerPlayerState();
-			for (AUTPlayerState* UTPS : LivePlayers)
-			{
-				if (!UTPS) { continue; }
-				const float SimOwnerScaling = (UTPS == SimScorerPS) ? 1.25f : 1.f;
-				const uint8 SimTeam = UTPS->GetTeamNum();
-				if (SimTeam == 0 && !bHideRed)
-				{
-					const float SimPip = WO_RedPipSize * SimOwnerScaling;
-					MinXRed = FMath::Min(MinXRed, SimXRed);
-					MaxXRed = FMath::Max(MaxXRed, SimXRed + SimPip);
-					MaxPipHRed = FMath::Max(MaxPipHRed, SimPip * (320.0f / 224.0f));
-					SimXRed += RedGrowSign * 1.1f * SimPip;
-					++SimRedCount;
-				}
-				else if (SimTeam == 1 && !bHideBlue)
-				{
-					const float SimPip = WO_BluePipSize * SimOwnerScaling;
-					MinXBlue = FMath::Min(MinXBlue, SimXBlue);
-					MaxXBlue = FMath::Max(MaxXBlue, SimXBlue + SimPip);
-					MaxPipHBlue = FMath::Max(MaxPipHBlue, SimPip * (320.0f / 224.0f));
-					SimXBlue += BlueGrowSign * 1.1f * SimPip;
-					++SimBlueCount;
-				}
-			}
-
-			// One name row under the tiles (same font/scale maths as the name
-			// draw). Measured height is cached per strip — StrLen only re-runs
-			// when the font or effective scale changes.
-			auto NameRowHeight = [this](int32 StripIdx, const FName& Alias, float StripScale) -> float
-			{
-				UFont* NameFont = NCPlusHUDFonts::Resolve(Alias, this, SmallFont);
-				if (!NameFont) { NameFont = SmallFont; }
-				const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * StripScale
-					* NCPlusHUDFonts::ResolveScale(Alias, 1.f);
-				if (NameRowFontCache[StripIdx] != NameFont || NameRowScaleCache[StripIdx] != NameScale)
-				{
-					float XL = 0.f, YL = 0.f;
-					Canvas->StrLen(NameFont, FString(TEXT("Ay")), XL, YL);
-					NameRowFontCache[StripIdx]   = NameFont;
-					NameRowScaleCache[StripIdx]  = NameScale;
-					NameRowHeightCache[StripIdx] = YL * NameScale + 3.f;
-				}
-				return NameRowHeightCache[StripIdx];
-			};
-			// Border honors the strip's use_team_color extra, like the tiles do.
-			auto StripBorderColor = [this, GS](uint8 TeamIdx, const FName& Alias) -> FLinearColor
-			{
-				FLinearColor C = (TeamIdx == 1)
-					? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
-					: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);
-				if (NCPlusHUDDrawCall::GetUseTeamColor(Alias) && GS
-					&& GS->Teams.IsValidIndex(TeamIdx) && GS->Teams[TeamIdx])
-				{
-					C = GS->Teams[TeamIdx]->TeamColor;
-				}
-				return C;
-			};
-
-			if (SimRedCount > 0)
-			{
-				const float Pad = FMath::Max(3.f, 0.09f * WO_RedPipSize);
-				DrawPortraitStripPanel(MinXRed - Pad, MaxXRed + Pad, YOffsetRed - Pad,
-					YOffsetRed + MaxPipHRed + NameRowHeight(0, RedAlias, WO_RedScale) + Pad,
-					StripBorderColor(0, RedAlias), NCPlusHUDDrawCall::GetOpacity(RedAlias));
-			}
-			if (SimBlueCount > 0)
-			{
-				const float Pad = FMath::Max(3.f, 0.09f * WO_BluePipSize);
-				DrawPortraitStripPanel(MinXBlue - Pad, MaxXBlue + Pad, YOffsetBlue - Pad,
-					YOffsetBlue + MaxPipHBlue + NameRowHeight(1, BlueAlias, WO_BlueScale) + Pad,
-					StripBorderColor(1, BlueAlias), NCPlusHUDDrawCall::GetOpacity(BlueAlias));
-			}
-		}
-
 		for (AUTPlayerState* UTPS : LivePlayers)
 		{
 			// In Wipeout everyone respawns, so show all non-spectator players
-			float OwnerPipScaling = (UTPS == GetScorerPlayerState()) ? 1.25f : 1.f;
+			// Keep every portrait the same size. The old scorer/view-target bump made
+			// the row jump and opened uneven gaps whenever spectating changed players.
 			// Per-team Scale: red strip honors portrait_red.Scale, blue honors blue.
 			const uint8 PreTeamIdx = UTPS ? UTPS->GetTeamNum() : 255;
 			const float TeamPipBase = (PreTeamIdx == 1) ? WO_BluePipSize : WO_RedPipSize;
-			float PipSize = TeamPipBase * OwnerPipScaling;
+			const float PipSize = TeamPipBase;
 
 			// Determine if player is alive.
 			// On the server, check the controller's current pawn directly
@@ -687,7 +622,7 @@ void AWipeoutHUD::DrawHUD()
 			{
 				RedPlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffsetRed, PipSize);
-				// Player name above icon — multiply by team scale so text shrinks with the pip.
+				// Player name below icon — multiply by team scale so text shrinks with the pip.
 				{
 					/* Portraits (Red/My Team) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(RedAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(RedAlias, 1.f);
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_RedScale * NameFontExtra;
@@ -696,13 +631,13 @@ void AWipeoutHUD::DrawHUD()
 					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
 					float NameX = XOffsetRed + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
 					// Below the tile (mockup style) — the big HP/armor stack owns the tile face now.
-					float NameY = YOffsetRed + PipSize * (320.0f / 224.0f) + 2.f;
+					float NameY = YOffsetRed + PipSize * WipeoutPortraitAspect + 2.f;
 					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
 				}
 				if (UTPS == NextToSpawn)
 				{
 					// Gold border highlight for next teammate to spawn
-					float PipHeight = PipSize * (320.0f / 224.0f);
+					float PipHeight = PipSize * WipeoutPortraitAspect;
 					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
 					float BorderW = 2.f;
 					Canvas->SetLinearDrawColor(Gold);
@@ -717,7 +652,7 @@ void AWipeoutHUD::DrawHUD()
 			{
 				BluePlayerCount++;
 				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffsetBlue, PipSize);
-				// Player name above icon — multiply by team scale so text shrinks with the pip.
+				// Player name below icon — multiply by team scale so text shrinks with the pip.
 				{
 					/* Portraits (Blue/Enemy) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(BlueAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(BlueAlias, 1.f);
 					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_BlueScale * NameFontExtra;
@@ -726,12 +661,12 @@ void AWipeoutHUD::DrawHUD()
 					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
 					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
 					// Below the tile (mockup style) — the big HP/armor stack owns the tile face now.
-					float NameY = YOffsetBlue + PipSize * (320.0f / 224.0f) + 2.f;
+					float NameY = YOffsetBlue + PipSize * WipeoutPortraitAspect + 2.f;
 					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
 				}
 				if (UTPS == NextToSpawn)
 				{
-					float PipHeight = PipSize * (320.0f / 224.0f);
+					float PipHeight = PipSize * WipeoutPortraitAspect;
 					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
 					float BorderW = 2.f;
 					Canvas->SetLinearDrawColor(Gold);
@@ -808,15 +743,17 @@ void AWipeoutHUD::DrawHUD()
 }
 
 // ─── Custom team score bar ─────────────────────────────────────────────
-// Draws team scores, clock, and "You are on X" text at the top center.
-// Uses dynamic team colors from AUTTeamInfo::TeamColor instead of hardcoded red/blue.
-// When non-standard team colors are detected, shows "Phayder" (red) vs "Liandri" (blue).
+// Compact score/clock module shared by Wipeout, Duel, Shaft Arena and ShockDom.
+// It deliberately carries no mode label: the inherited HUDs do not all represent
+// Wipeout, while the scorebar alias and team-color semantics are shared by them.
 void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
-	if (!Canvas || !SmallFont || !MediumFont || !LargeFont) return;
+	if (!Canvas || !GS || !SmallFont || !MediumFont || !LargeFont) return;
 	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
-	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
+	// HUD-layout offsets and drag geometry are expressed in 1080p design pixels.
+	// Height-based scaling keeps this module consistent on non-16:9 viewports.
+	const float RenderScale = float(Canvas->SizeY) / 1080.0f;
 
 	// Phase 3.5 layout consult — anchor + offset for the whole scorebar.
 	// Stock placement: top-center, 2px from top edge.
@@ -825,156 +762,148 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const float CenterX = ScoreBarPos.X;
 	const float TopY    = ScoreBarPos.Y;
 
-	// Get team colors (respect TeamSkins custom colors).
-	// Honors scorebar's `use_team_color` extra: when false, locks to stock red/blue.
+	// Get team colors (respect TeamSkins custom colors). When use_team_color is
+	// disabled, retain the familiar fixed red/blue fallback.
 	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f); // default red
 	FLinearColor Team1Color = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);  // default blue
-	bool bCustomColors = false;
 	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
 
 	if (bUseTeamColor && GS->Teams.IsValidIndex(0) && GS->Teams[0])
 	{
-		FLinearColor TC = GS->Teams[0]->TeamColor;
-		// Check if non-standard (not close to pure red)
-		if (FMath::Abs(TC.R - 1.f) > 0.2f || TC.G > 0.3f || TC.B > 0.3f)
-			bCustomColors = true;
-		Team0Color = TC;
+		Team0Color = GS->Teams[0]->TeamColor;
 	}
 	if (bUseTeamColor && GS->Teams.IsValidIndex(1) && GS->Teams[1])
 	{
-		FLinearColor TC = GS->Teams[1]->TeamColor;
-		if (FMath::Abs(TC.B - 1.f) > 0.2f || TC.R > 0.3f || TC.G > 0.3f)
-			bCustomColors = true;
-		Team1Color = TC;
+		Team1Color = GS->Teams[1]->TeamColor;
 	}
 
-	// Team names
-	static const FString CustomTeam0Name(TEXT("Phayder (R)"));
-	static const FString CustomTeam1Name(TEXT("Liandri (B)"));
-	static const FString StockTeam0Name(TEXT("RED"));
-	static const FString StockTeam1Name(TEXT("BLUE"));
-	const FString& Team0Name = bCustomColors ? CustomTeam0Name : StockTeam0Name;
-	const FString& Team1Name = bCustomColors ? CustomTeam1Name : StockTeam1Name;
-
 	// Scores
-	int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
-	int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
+	const int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
+	const int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
 
-	// Bar dimensions
-	// Phase 3.11: scorebar Scale override scales the bar + clock font uniformly.
+	// Keep the score/color segments on the same sides as the active portrait
+	// aliases. Fixed red/blue mode remains team 0 left; viewer-relative mode
+	// swaps the score core only when team 0 occupies the enemy/right slot.
+	static const FName NAME_PortraitEnemy(TEXT("portrait_enemy"));
+	const bool bTeam0OnRight = bShouldDrawPortraits && bPortraitMockupRestyle
+		&& PortraitAliasFor(0) == NAME_PortraitEnemy;
+	const int32 LeftTeamIndex = bTeam0OnRight ? 1 : 0;
+	const int32 RightTeamIndex = bTeam0OnRight ? 0 : 1;
+	const FLinearColor TeamColors[2] = { Team0Color, Team1Color };
+
+	// Three restrained segments replace the old 220px team-name slabs and tails:
+	// score | clock | score. All dimensions honor the existing scorebar Scale.
 	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
-	const float BarWidth = 220.f * RenderScale * ScoreScale;
-	const float BarHeight = 36.f * RenderScale * ScoreScale;
-	const float ScoreBoxWidth = 50.f * RenderScale * ScoreScale;
-	const float GapWidth = 8.f * RenderScale;
+	const float ScoreBoxWidth = 84.f * RenderScale * ScoreScale;
+	const float ClockBoxWidth = 168.f * RenderScale * ScoreScale;
+	const float ModuleHeight = 56.f * RenderScale * ScoreScale;
+	const float ModuleWidth = 2.f * ScoreBoxWidth + ClockBoxWidth;
+	const float ModuleX = CenterX - 0.5f * ModuleWidth;
+	const float ScoreBoxX0 = ModuleX;
+	const float ClockBoxX = ScoreBoxX0 + ScoreBoxWidth;
+	const float ScoreBoxX1 = ClockBoxX + ClockBoxWidth;
 
-	// Per-element opacity (the editor's Op slider). FadeL scales every tile color's
-	// alpha; WhiteOp is the faded text color. Op defaults to 1.0 (no override) so
-	// untouched layouts render pixel-identically.
+	// Per-element opacity (the editor's Op slider) remains authoritative for
+	// plates, accents, scores and clock text.
 	const float ScoreOp = NCPlusHUDDrawCall::GetOpacity(TEXT("scorebar"));
 	auto FadeL = [ScoreOp](FLinearColor C) -> FLinearColor { C.A *= ScoreOp; return C; };
 	const FColor WhiteOp(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(ScoreOp * 255.f), 0, 255));
 
-	// ── Team 0 (left side) ──
-	float LeftBarX = CenterX - GapWidth - ScoreBoxWidth - BarWidth;
-	Canvas->SetLinearDrawColor(FadeL(Team0Color));
-	Canvas->DrawTile(Canvas->DefaultTexture, LeftBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
-
-	// Team 0 score box
-	float ScoreBoxX0 = CenterX - GapWidth - ScoreBoxWidth;
-	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, 1.f)));
-	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
-
-	// ── Team 1 (right side) ──
-	float ScoreBoxX1 = CenterX + GapWidth;
-	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, 1.f)));
-	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, BarHeight, 0, 0, 1, 1);
-
-	float RightBarX = CenterX + GapWidth + ScoreBoxWidth;
-	Canvas->SetLinearDrawColor(FadeL(Team1Color));
-	Canvas->DrawTile(Canvas->DefaultTexture, RightBarX, TopY, BarWidth, BarHeight, 0, 0, 1, 1);
-
-	// ── Score color tails (extend below score box, width of the number) ──
-	float TailHeight = 14.f * RenderScale * ScoreScale;
-	float TailAlpha = 1.f;
-
-	// Team 0 tail
-	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team0Color.R * 0.7f, Team0Color.G * 0.7f, Team0Color.B * 0.7f, TailAlpha)));
-	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
-
-	// Team 1 tail
-	Canvas->SetLinearDrawColor(FadeL(FLinearColor(Team1Color.R * 0.7f, Team1Color.G * 0.7f, Team1Color.B * 0.7f, TailAlpha)));
-	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY + BarHeight, ScoreBoxWidth, TailHeight, 0, 0, 1, 1);
-
-	// ── Center divider (white thin line) ──
-	Canvas->SetLinearDrawColor(FadeL(FLinearColor::White));
-	Canvas->DrawTile(Canvas->DefaultTexture, CenterX - 1.f * RenderScale, TopY, 2.f * RenderScale, BarHeight + TailHeight, 0, 0, 1, 1);
-
-	// ── Section outline (mockup style): one thin light frame around the whole
-	// bar band so the scorebar reads as a contained card. Fills stay untouched —
-	// the outline alone carries the look (user call 2026-08-19).
+	// Muted charcoal/team blends retain TeamSkins identity without turning the
+	// whole top of the screen into a pair of saturated ribbons.
+	auto MutedTeamPlate = [](const FLinearColor& TeamColor) -> FLinearColor
 	{
-		const float B = FMath::Max(1.f, 2.f * RenderScale);
-		const float FrameX = LeftBarX;
-		const float FrameW = (RightBarX + BarWidth) - LeftBarX;
-		Canvas->SetLinearDrawColor(FadeL(FLinearColor(0.72f, 0.80f, 0.86f, 0.7f)));
-		Canvas->DrawTile(Canvas->DefaultTexture, FrameX, TopY, FrameW, B, 0, 0, 1, 1, BLEND_Translucent);
-		Canvas->DrawTile(Canvas->DefaultTexture, FrameX, TopY + BarHeight - B, FrameW, B, 0, 0, 1, 1, BLEND_Translucent);
-		Canvas->DrawTile(Canvas->DefaultTexture, FrameX, TopY, B, BarHeight, 0, 0, 1, 1, BLEND_Translucent);
-		Canvas->DrawTile(Canvas->DefaultTexture, FrameX + FrameW - B, TopY, B, BarHeight, 0, 0, 1, 1, BLEND_Translucent);
-	}
+		return FLinearColor(
+			FMath::Clamp(0.025f + 0.30f * TeamColor.R, 0.f, 1.f),
+			FMath::Clamp(0.035f + 0.30f * TeamColor.G, 0.f, 1.f),
+			FMath::Clamp(0.045f + 0.30f * TeamColor.B, 0.f, 1.f),
+			0.94f);
+	};
+	Canvas->SetLinearDrawColor(FadeL(MutedTeamPlate(TeamColors[LeftTeamIndex])));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, ModuleHeight, 0, 0, 1, 1, BLEND_Translucent);
+	Canvas->SetLinearDrawColor(FadeL(FLinearColor(0.015f, 0.028f, 0.040f, 0.92f)));
+	Canvas->DrawTile(Canvas->DefaultTexture, ClockBoxX, TopY, ClockBoxWidth, ModuleHeight, 0, 0, 1, 1, BLEND_Translucent);
+	Canvas->SetLinearDrawColor(FadeL(MutedTeamPlate(TeamColors[RightTeamIndex])));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, ModuleHeight, 0, 0, 1, 1, BLEND_Translucent);
 
-	// ── Text ──
-	// Honor per-element font override (Phase 3.8). One alias controls both
-	// team-name and score-number fonts on the scorebar — they read as a
-	// unit, so a single setting keeps the typography coherent.
-	UFont* TeamNameFont  = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, SmallFont);
+	// One restrained color edge per score segment replaces the full perimeter.
+	const float AccentHeight = FMath::Max(1.f, 1.5f * RenderScale * ScoreScale);
+	FLinearColor LeftAccent = TeamColors[LeftTeamIndex]; LeftAccent.A = 0.82f;
+	FLinearColor RightAccent = TeamColors[RightTeamIndex]; RightAccent.A = 0.82f;
+	Canvas->SetLinearDrawColor(FadeL(LeftAccent));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX0, TopY, ScoreBoxWidth, AccentHeight, 0, 0, 1, 1, BLEND_Translucent);
+	Canvas->SetLinearDrawColor(FadeL(RightAccent));
+	Canvas->DrawTile(Canvas->DefaultTexture, ScoreBoxX1, TopY, ScoreBoxWidth, AccentHeight, 0, 0, 1, 1, BLEND_Translucent);
+
+	// The existing F5 font + font-size setting still styles the complete module.
 	UFont* TeamScoreFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, LargeFont);
-	if (!TeamNameFont)  TeamNameFont  = SmallFont;
+	UFont* ClockFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), this, MediumFont);
 	if (!TeamScoreFont) TeamScoreFont = LargeFont;
+	if (!ClockFont) ClockFont = MediumFont;
 
 	// font_scale Extras lets the user shrink/grow text independently of
-	// bar dimensions. Useful for tall fonts (Extreme) where ScoreScale alone
-	// doesn't shrink LargeFont enough (1.2 * 0.85 ≈ 1.02 = barely changed).
+	// plate dimensions. This remains independent of the element Scale control.
 	const float FontExtraScale = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
-	float FontScale = RenderScale * 0.85f * ScoreScale * FontExtraScale;
-	float LargeFontScale = RenderScale * 1.2f * ScoreScale * FontExtraScale;
+	const float LargeFontScale = RenderScale * 1.15f * ScoreScale * FontExtraScale;
 	float XL, YL;
 
-	// Team 0 name (right-aligned inside left bar)
 	FText ResolvedText;
-	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team0Name, FontScale, FontScale, ResolvedText, XL, YL);
-	Canvas->DrawColor = WhiteOp;
-	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, LeftBarX + BarWidth - XL - 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
+	// F5 exposes both custom fonts and an independent FontSz multiplier. Keep
+	// either from spilling into a neighboring segment or above/below the module
+	// by re-resolving once at the tighter width/height fit when needed.
+	auto ResolvePlateFittedText = [this](UFont* Font, const FString& Source,
+		float DesiredScale, float MaxWidth, float MaxHeight, FText& OutText,
+		float& OutWidth, float& OutHeight) -> float
+	{
+		float FittedScale = DesiredScale;
+		NCPlusHUDDrawCall::ResolveStableText(Canvas, Font, Source,
+			FittedScale, FittedScale, OutText, OutWidth, OutHeight);
+		float FitRatio = 1.f;
+		if (OutWidth > MaxWidth && OutWidth > KINDA_SMALL_NUMBER)
+		{
+			FitRatio = FMath::Min(FitRatio, MaxWidth / OutWidth);
+		}
+		if (OutHeight > MaxHeight && OutHeight > KINDA_SMALL_NUMBER)
+		{
+			FitRatio = FMath::Min(FitRatio, MaxHeight / OutHeight);
+		}
+		if (FitRatio < 1.f)
+		{
+			FittedScale *= FitRatio;
+			NCPlusHUDDrawCall::ResolveStableText(Canvas, Font, Source,
+				FittedScale, FittedScale, OutText, OutWidth, OutHeight);
+		}
+		return FittedScale;
+	};
 
-	// Team 0 score (centered in score box)
 	static bool bHasCachedScore0 = false;
 	static int32 CachedScore0 = 0;
 	static FString Score0Str;
 	if (!bHasCachedScore0 || CachedScore0 != Score0) { bHasCachedScore0 = true; CachedScore0 = Score0; Score0Str = FString::FromInt(Score0); }
-	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score0Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
-	Canvas->DrawColor = WhiteOp;
-	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
-
-	// Team 1 score (centered in score box)
 	static bool bHasCachedScore1 = false;
 	static int32 CachedScore1 = 0;
 	static FString Score1Str;
 	if (!bHasCachedScore1 || CachedScore1 != Score1) { bHasCachedScore1 = true; CachedScore1 = Score1; Score1Str = FString::FromInt(Score1); }
-	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamScoreFont, Score1Str, LargeFontScale, LargeFontScale, ResolvedText, XL, YL);
+
+	const FString& LeftScoreStr = (LeftTeamIndex == 0) ? Score0Str : Score1Str;
+	const FString& RightScoreStr = (RightTeamIndex == 0) ? Score0Str : Score1Str;
+	const float ScoreTextMaxWidth = FMath::Max(1.f,
+		ScoreBoxWidth - 16.f * RenderScale * ScoreScale);
+	const float PlateTextMaxHeight = FMath::Max(1.f,
+		ModuleHeight - 10.f * RenderScale * ScoreScale);
+	const float LeftScoreScale = ResolvePlateFittedText(TeamScoreFont, LeftScoreStr,
+		LargeFontScale, ScoreTextMaxWidth, PlateTextMaxHeight, ResolvedText, XL, YL);
+	Canvas->DrawColor = WhiteOp;
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX0 + (ScoreBoxWidth - XL) * 0.5f,
+		TopY + (ModuleHeight - YL) * 0.5f, LeftScoreScale, LeftScoreScale, Canvas->DrawColor);
+
+	const float RightScoreScale = ResolvePlateFittedText(TeamScoreFont, RightScoreStr,
+		LargeFontScale, ScoreTextMaxWidth, PlateTextMaxHeight, ResolvedText, XL, YL);
 	Canvas->DrawColor = WhiteOp;
 	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamScoreFont, ResolvedText, ScoreBoxX1 + (ScoreBoxWidth - XL) * 0.5f,
-		TopY + (BarHeight - YL) * 0.5f, LargeFontScale, LargeFontScale, Canvas->DrawColor);
+		TopY + (ModuleHeight - YL) * 0.5f, RightScoreScale, RightScoreScale, Canvas->DrawColor);
 
-	// Team 1 name (left-aligned inside right bar)
-	NCPlusHUDDrawCall::ResolveStableText(Canvas, TeamNameFont, Team1Name, FontScale, FontScale, ResolvedText, XL, YL);
-	Canvas->DrawColor = WhiteOp;
-	NCPlusHUDDrawCall::DrawResolvedText(Canvas, TeamNameFont, ResolvedText, RightBarX + 8.f * RenderScale,
-		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
-
-	// ── Clock (big, centered below bars) ──
+	// ── Clock (center segment) ──
 	// Wipeout publishes an exact server-time deadline through its always-relevant
 	// damage replicator. Deriving from that anchor every frame keeps this display
 	// on the same schedule as Belt/Amp/Siphon instead of showing the legacy BP
@@ -986,7 +915,6 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	// FindField per (GameState class, property name) is enough. Stock
 	// FindField walks the class hierarchy on every call; this is the cheap
 	// trick for hot HUD paths that read replicated ints by name.
-	float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	int32 ClockSeconds = -1;
 	if (AWipeoutDamageReplicator* DamageRep = FindDamageReplicator(GetWorld()))
 	{
@@ -1013,9 +941,8 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		// can't access it directly from a plugin TU — UHT-generated reflection
 		// doesn't honor C++ access modifiers, which is what makes this work.
 		// RemainingTime counts down to 0 when a TimeLimit is set, or stays at
-		// TimeLimit (default 0 → no clock) for untimed modes. Skip drawing
-		// when 0/negative so untimed modes don't show "00:00" glued to the
-		// score bar.
+		// zero for untimed modes. TimeLimit below disambiguates terminal 00:00
+		// from the neutral untimed center marker.
 		static UClass* CachedRemCls = nullptr;
 		static UIntProperty* CachedRemProp = nullptr;
 		UClass* GSCls = GS->GetClass();
@@ -1027,11 +954,17 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		if (CachedRemProp)
 		{
 			const int32 RT = CachedRemProp->GetPropertyValue_InContainer(GS);
-			if (RT > 0) ClockSeconds = RT;
+			// TimeLimit distinguishes a real terminal 00:00 from an untimed mode
+			// whose stock RemainingTime also sits at zero.
+			if (GS->TimeLimit > 0) ClockSeconds = FMath::Max(0, RT);
 		}
 	}
 
-	float RoundClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
+	const bool bHasClock = ClockSeconds >= 0;
+	const float DesiredCenterScale = RenderScale * (bHasClock ? 0.95f : 0.72f)
+		* ScoreScale * FontExtraScale;
+	static const FString VersusStr(TEXT("VS"));
+	const FString* CenterStr = &VersusStr;
 	if (ClockSeconds >= 0)
 	{
 		int32 RMins = ClockSeconds / 60;
@@ -1043,15 +976,25 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 			CachedClockSeconds = ClockSeconds;
 			RoundClockStr = FString::Printf(TEXT("%02d:%02d"), RMins, RSecs);
 		}
-		NCPlusHUDDrawCall::ResolveStableText(Canvas, MediumFont, RoundClockStr, RoundClockScale, RoundClockScale, ResolvedText, XL, YL);
-		// Flash red when under 30 seconds
-		if (ClockSeconds <= 30)
-			Canvas->DrawColor = FColor(255, 60, 60, WhiteOp.A);
-		else
-			Canvas->DrawColor = WhiteOp;
-		NCPlusHUDDrawCall::DrawResolvedText(Canvas, MediumFont, ResolvedText, CenterX - XL * 0.5f, ClockY, RoundClockScale, RoundClockScale, Canvas->DrawColor);
-		ClockY += YL + 1.f * RenderScale;
+		CenterStr = &RoundClockStr;
 	}
+
+	// Untimed inherited modes (notably Shaft Arena) get a short neutral marker
+	// instead of an unexplained empty middle slab. Timed modes retain 00:00.
+	const float CenterTextMaxWidth = FMath::Max(1.f,
+		ClockBoxWidth - 20.f * RenderScale * ScoreScale);
+	const float CenterDrawScale = ResolvePlateFittedText(ClockFont, *CenterStr,
+		DesiredCenterScale, CenterTextMaxWidth, PlateTextMaxHeight, ResolvedText, XL, YL);
+	if (bHasClock && ClockSeconds <= 30)
+		Canvas->DrawColor = FColor(255, 60, 60, WhiteOp.A);
+	else if (bHasClock)
+		Canvas->DrawColor = WhiteOp;
+	else
+		Canvas->DrawColor = FColor(205, 218, 228, WhiteOp.A);
+	NCPlusHUDDrawCall::DrawResolvedText(Canvas, ClockFont, ResolvedText,
+		ClockBoxX + (ClockBoxWidth - XL) * 0.5f,
+		TopY + (ModuleHeight - YL) * 0.5f,
+		CenterDrawScale, CenterDrawScale, Canvas->DrawColor);
 
 	// Removed: match elapsed timer and "You are on X" text — too cluttered
 }
@@ -1081,27 +1024,6 @@ FName AWipeoutHUD::PortraitAliasFor(uint8 TeamIdx) const
 	return (TeamIdx == ViewerTeam) ? NAME_PortraitTeam : NAME_PortraitEnemy;
 }
 
-void AWipeoutHUD::DrawPortraitStripPanel(float MinX, float MaxX, float TopY, float BottomY,
-	const FLinearColor& BorderColor, float Opacity)
-{
-	if (!Canvas || MaxX <= MinX || BottomY <= TopY)
-	{
-		return;
-	}
-	const float W = MaxX - MinX;
-	const float H = BottomY - TopY;
-	// Outline only (user call 2026-08-19): the section reads as a framed card
-	// without darkening what's behind it.
-	FLinearColor Border = BorderColor;
-	Border.A = 0.9f * Opacity;
-	const float B = 2.f;
-	Canvas->SetLinearDrawColor(Border);
-	Canvas->DrawTile(Canvas->DefaultTexture, MinX, TopY, W, B, 0, 0, 1, 1, BLEND_Translucent);
-	Canvas->DrawTile(Canvas->DefaultTexture, MinX, BottomY - B, W, B, 0, 0, 1, 1, BLEND_Translucent);
-	Canvas->DrawTile(Canvas->DefaultTexture, MinX, TopY, B, H, 0, 0, 1, 1, BLEND_Translucent);
-	Canvas->DrawTile(Canvas->DefaultTexture, MaxX - B, TopY, B, H, 0, 0, 1, 1, BLEND_Translucent);
-}
-
 void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float PipSize)
 {
 	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
@@ -1119,7 +1041,7 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 
 	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 
-	float PipHeight = PipSize * (320.0f / 224.0f);
+	float PipHeight = PipSize * WipeoutPortraitAspect;
 
 	// Join animation — pop-in over 1 second (same as FlagRun)
 	const float TimeSinceJoin = GetWorld()->TimeSeconds - PlayerState->CreationTime;
@@ -1142,8 +1064,19 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	{
 		TeamBGColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
 	}
-	// Draw solid colored rectangle as background
-	Canvas->SetLinearDrawColor(Tinted(TeamBGColor));
+	// Mockup pips use the team hue as an accent rather than a full saturated
+	// slab. Clutch reuses this renderer with bPortraitMockupRestyle=false, so
+	// its established raw team-color tile remains byte-for-byte on that path.
+	FLinearColor PortraitPlateColor = TeamBGColor;
+	if (bPortraitMockupRestyle)
+	{
+		PortraitPlateColor = FLinearColor(
+			FMath::Clamp(0.020f + 0.24f * TeamBGColor.R, 0.f, 1.f),
+			FMath::Clamp(0.028f + 0.24f * TeamBGColor.G, 0.f, 1.f),
+			FMath::Clamp(0.038f + 0.24f * TeamBGColor.B, 0.f, 1.f),
+			1.f);
+	}
+	Canvas->SetLinearDrawColor(Tinted(PortraitPlateColor));
 	Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight,
 		0, 0, 1, 1);
 	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
@@ -1181,6 +1114,15 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	const FCanvasIcon& OverlayIcon = PlayerState->GetTeamNum() == 1 ? BlueTeamOverlay : RedTeamOverlay;
 	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
 		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
+	if (bPortraitMockupRestyle)
+	{
+		FLinearColor PortraitAccent = TeamBGColor;
+		PortraitAccent.A = 0.82f;
+		const float AccentHeight = FMath::Max(1.f, 0.022f * PipSize);
+		Canvas->SetLinearDrawColor(Tinted(PortraitAccent));
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize,
+			AccentHeight, 0, 0, 1, 1, BLEND_Translucent);
+	}
 
 	// Per-team scale for text inside the pip — keeps countdown / X / HP/Armor
 	// glyphs proportional when the strip is shrunk via the layout's Sc spinner.
@@ -1191,6 +1133,11 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	UFont* PipFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, MediumFont);
 	if (!PipFont) PipFont = MediumFont;
 	const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
+	// Restyled cards lost 31.9% of their stock height (82.29 -> 56 design px),
+	// so their in-card glyphs start from the same proportional reduction. F5
+	// portrait Scale and FontSz remain independent multipliers around that base.
+	const float CompactTextFactor = bPortraitMockupRestyle
+		? WipeoutCompactTextFactor : 1.f;
 
 	// RespawnWaitTime is stock UT's replicated queue marker; RespawnTime is only
 	// the locally ticking display value. A canceled queue must therefore become X
@@ -1201,7 +1148,8 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	// Layer 5 (Wipeout-specific): Respawn countdown text on dead portraits
 	if (LiveScaling < 1.f && bRespawnQueued && PlayerState->RespawnTime > 0.f)
 	{
-		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
+		float FontRenderScale = float(Canvas->SizeY) / 1080.0f
+			* PortraitTextScale * PipFontExtra * CompactTextFactor;
 
 		int32 SecondsRemaining = FMath::CeilToInt(PlayerState->RespawnTime);
 		FWipeoutPipCache& PC = PipCacheByPS.FindOrAdd(PlayerState);
@@ -1212,6 +1160,19 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 			PC.CountdownText = FText::FromString(CountdownStr);
 			PC.CountdownSeconds = SecondsRemaining;
 			PC.CountdownFont = PipFont;
+		}
+		if (bPortraitMockupRestyle)
+		{
+			if (PC.CountdownWidth > 0.f)
+			{
+				FontRenderScale = FMath::Min(FontRenderScale,
+					0.82f * PipSize / PC.CountdownWidth);
+			}
+			if (PC.CountdownHeight > 0.f)
+			{
+				FontRenderScale = FMath::Min(FontRenderScale,
+					0.72f * PipHeight / PC.CountdownHeight);
+			}
 		}
 
 		// Team-tinted countdown color
@@ -1230,13 +1191,25 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	if (LiveScaling < 1.f && PlayerState->bOutOfLives
 		&& !bRespawnQueued)
 	{
-		const float FontRenderScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
+		float FontRenderScale = float(Canvas->SizeY) / 1080.0f
+			* PortraitTextScale * PipFontExtra * CompactTextFactor;
 		FFontRenderInfo TextRenderInfo;
 		TextRenderInfo.bEnableShadow = true;
 
 		FString XStr = TEXT("X");
 		float XL, YL;
 		Canvas->StrLen(PipFont, XStr, XL, YL);
+		if (bPortraitMockupRestyle)
+		{
+			if (XL > 0.f)
+			{
+				FontRenderScale = FMath::Min(FontRenderScale, 0.70f * PipSize / XL);
+			}
+			if (YL > 0.f)
+			{
+				FontRenderScale = FMath::Min(FontRenderScale, 0.70f * PipHeight / YL);
+			}
+		}
 
 		Canvas->SetLinearDrawColor(Tinted(FLinearColor(1.f, 0.2f, 0.2f, 0.9f)));
 		Canvas->DrawText(PipFont, FText::FromString(XStr),
@@ -1273,9 +1246,10 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 
 				if (bPortraitMockupRestyle)
 				{
-					const float BaseScale = float(Canvas->SizeY) / 1080.0f * PortraitTextScale * PipFontExtra;
-					const float HpScale = BaseScale * 1.05f;
-					const float ArScale = BaseScale * 0.85f;
+					const float BaseScale = float(Canvas->SizeY) / 1080.0f
+						* PortraitTextScale * PipFontExtra * CompactTextFactor;
+					float HpScale = BaseScale * 1.15f;
+					float ArScale = BaseScale * 0.95f;
 
 					// Rebuild each line's FText + measured extents only when its value
 					// (or the font) changes — otherwise identical frame to frame.
@@ -1299,12 +1273,41 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 						PC.ArKeyAR = Armor;
 					}
 
+					// Keep boosted 3-digit values inside the portrait face even when a
+					// wide custom F5 font is selected. This only constrains overflow;
+					// ordinary two/three-digit values retain the larger mockup scale.
+					if (PC.HpWidth > 0.f)
+					{
+						HpScale = FMath::Min(HpScale, 0.88f * PipSize / PC.HpWidth);
+					}
+					if (PC.ArWidth > 0.f)
+					{
+						ArScale = FMath::Min(ArScale, 0.88f * PipSize / PC.ArWidth);
+					}
+
+					// Fit the complete two-line stack into 76% of the card height with
+					// a 4% (minimum 1px) gap. Applying one shared correction preserves
+					// the intended HP-over-armor size hierarchy without overlap.
+					const float LineGap = FMath::Max(1.f, 0.04f * PipHeight);
+					float TextStackHeight = PC.HpHeight * HpScale + PC.ArHeight * ArScale;
+					const float MaxStackHeight = 0.76f * PipHeight;
+					if (TextStackHeight + LineGap > MaxStackHeight
+						&& TextStackHeight > KINDA_SMALL_NUMBER)
+					{
+						const float StackFit = FMath::Max(0.f, MaxStackHeight - LineGap)
+							/ TextStackHeight;
+						HpScale *= StackFit;
+						ArScale *= StackFit;
+						TextStackHeight = PC.HpHeight * HpScale + PC.ArHeight * ArScale;
+					}
+					const float StackHeight = TextStackHeight + LineGap;
+
 					const FLinearColor HealthGreen(0.45f, 1.f, 0.35f, 1.f);
 					const FLinearColor ArmorBlue(0.30f, 0.80f, 1.f, 1.f);
 					const float HpX = XOffset + (PipSize * 0.5f) - (PC.HpWidth * HpScale * 0.5f);
-					const float HpY = YOffset + (PipHeight * 0.40f) - (PC.HpHeight * HpScale * 0.5f);
+					const float HpY = YOffset + 0.5f * (PipHeight - StackHeight);
 					const float ArX = XOffset + (PipSize * 0.5f) - (PC.ArWidth * ArScale * 0.5f);
-					const float ArY = YOffset + (PipHeight * 0.66f) - (PC.ArHeight * ArScale * 0.5f);
+					const float ArY = HpY + PC.HpHeight * HpScale + LineGap;
 					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.HpText, HpX, HpY,
 						HpScale, HealthGreen, FLinearColor::Black, Op);
 					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.ArText, ArX, ArY,
