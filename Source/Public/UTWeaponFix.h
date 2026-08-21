@@ -327,14 +327,16 @@ public:
         bool bFirstPersonMesh);
 
     /** Resolve the final slot mask for one skin/view. Authentic invisibility
-     *  materials replace every live mesh slot; PinkLG uses both E0/E1 slots; other
-     *  authored skins retain the verified per-family mask above. */
+     *  materials replace every live mesh slot; the five Ghost skins replace all
+     *  1P slots but explicitly target zero 3P slots; PinkLG uses both E0/E1 slots;
+     *  other authored skins retain the verified per-family mask above. */
     static uint32 GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Skin,
         FName WeaponSkinCustomizationTag, bool bFirstPersonMesh,
         int32 MaterialSlotCount);
 
     /** Material for one targeted slot. Most skins return their one per-view material;
-     *  PinkLG loads its MutAnnouncers-cooked E1_1p / E0_3p supplement so both
+     *  Ghost skins resolve the stock pickup hologram only in 1P and restore stock in
+     *  3P; PinkLG loads its MutAnnouncers-cooked E1_1p / E0_3p supplement so both
      *  multipart LG sections receive the matching texture set. */
     UMaterialInterface* GetResolvedWeaponSkinMaterialForSlot(
         const UUTWeaponSkin* Skin, bool bFirstPersonMesh, int32 MaterialSlot);
@@ -423,9 +425,12 @@ public:
     virtual FRotator GetBaseFireRotation() override;
     virtual void BringUp(float OverflowTime) override;
     virtual void SetSkin(UMaterialInterface* NewSkin) override;
+    virtual void UpdateOutline() override;
+    virtual TArray<UMeshComponent*> Get1PMeshes_Implementation() const override;
     void ClearPendingFakeProjectiles();
     void DeferredGotoActiveState(uint8 FireModeNum);
     virtual void Removed() override;
+    virtual void Destroyed() override;
     //~ End AUTWeapon Interface
 
     // =========================================================================
@@ -588,7 +593,18 @@ protected:
     uint32 AppliedFPSMaterialSlotMask;
     bool bCapturedOriginalFPSMaterials;
 
+    /** Custom-depth silhouette paired with a stock pickup-hologram FPS material.
+     *  The regular Mesh remains the visible, animated 1P weapon; this owner-only
+     *  master-pose slave supplies the depth sampled by M_HoloEffect. */
+    UPROPERTY(Transient)
+    USkeletalMeshComponent* FirstPersonHologramDepthMesh;
+
+    bool bFirstPersonHologramSkinActive;
+
     void PrepareConfiguredWeaponSkin();
+    void ApplyFirstPersonHologramProjectionParams();
+    void UpdateFirstPersonHologramDepthMesh(bool bEnable);
+    void DestroyFirstPersonHologramDepthMesh();
 
 public:
     /** Server-side only: impact point from the last FireInstantHit trace.

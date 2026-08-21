@@ -707,6 +707,11 @@ static const TCHAR* const REQUIRED_WEAPON_SKIN_ASSETS[] =
 
 static const TCHAR* const OPTIONAL_WEAPON_SKIN_ASSETS[] =
 {
+	TEXT("GhostBio"),
+	TEXT("GhostFlak"),
+	TEXT("GhostIGRifle"),
+	TEXT("GhostLG"),
+	TEXT("GhostLinkElim"),
 	TEXT("InvisibleIGRifle"),
 	TEXT("PinkLG"),
 	TEXT("RocketPink")
@@ -1109,6 +1114,8 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     bBufferedClickPending[1] = false;
     AppliedFPSMaterialSlotMask = 0u;
     bCapturedOriginalFPSMaterials = false;
+    FirstPersonHologramDepthMesh = nullptr;
+    bFirstPersonHologramSkinActive = false;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -2903,6 +2910,7 @@ void AUTWeaponFix::Removed()
 	// A delayed Flak prediction belongs to this weapon instance. Once it is removed,
 	// the authoritative replicated projectile (if any) is the only valid visual source.
 	ClearDelayedFlakFakeProjectiles();
+	DestroyFirstPersonHologramDepthMesh();
 
 	// Cache the owner's last known fire position before Super::Removed() nulls UTOwner.
 	// This enables the trade-kill grace period — if a fire RPC arrives within
@@ -2925,6 +2933,14 @@ void AUTWeaponFix::Removed()
 		}
 	}
 	Super::Removed();
+}
+
+void AUTWeaponFix::Destroyed()
+{
+	// Direct replay/admin destruction can bypass normal inventory removal. Break
+	// the master-pose relationship before the actor's component teardown starts.
+	DestroyFirstPersonHologramDepthMesh();
+	Super::Destroyed();
 }
 
 bool AUTWeaponFix::IsChargedRocketStateWedged(UUTWeaponStateFiringChargedRocket_Transactional* Chg)
@@ -5251,6 +5267,7 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
         GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
     }
     ClearPendingFakeProjectiles();
+	DestroyFirstPersonHologramDepthMesh();
     // Call the base class implementation (which does the unregistering/holstering logic you pasted)
     Super::DetachFromOwner_Implementation();
 }
@@ -5634,6 +5651,57 @@ static bool UsesAuthenticInvisibilityMaterial(const UMaterialInterface* Material
 		BaseMaterialPath == NCPInvisibilityBaseMaterialPath;
 }
 
+static bool UsesPickupHologramMaterial(const UMaterialInterface* Material)
+{
+	static const FString PickupHologramBaseMaterialPath(
+		TEXT("/Game/RestrictedAssets/Weapons/Weapon_Base_Effects/Materials/M_HoloEffect.M_HoloEffect"));
+	const UMaterial* const BaseMaterial = (Material != nullptr) ? Material->GetMaterial() : nullptr;
+	return BaseMaterial != nullptr && BaseMaterial->GetPathName() == PickupHologramBaseMaterialPath;
+}
+
+static bool IsFirstPersonHologramWeaponSkin(const UUTWeaponSkin* Skin)
+{
+	if (Skin == nullptr)
+	{
+		return false;
+	}
+
+	// Exact allow-list: these DataAssets are clones of the established Invisible*
+	// entries so their weapon class/tag compatibility and stock 3P material stay
+	// intact. C++ replaces only their 1P material with the stock pickup hologram.
+	const FString Path = Skin->GetPathName();
+	return Path == TEXT("/Game/NetcodePlusOptional/GhostBio.GhostBio") ||
+		Path == TEXT("/Game/NetcodePlusOptional/GhostFlak.GhostFlak") ||
+		Path == TEXT("/Game/NetcodePlusOptional/GhostIGRifle.GhostIGRifle") ||
+		Path == TEXT("/Game/NetcodePlusOptional/GhostLG.GhostLG") ||
+		Path == TEXT("/Game/NetcodePlusOptional/GhostLinkElim.GhostLinkElim");
+}
+
+static UMaterialInterface* GetPickupHologramMaterial()
+{
+	static TWeakObjectPtr<UMaterialInterface> CachedMaterial;
+	if (!CachedMaterial.IsValid())
+	{
+		// BP_UDamage supplies the inventory/mesh, while PowerupBase supplies this
+		// lavender M_HoloEffect child for its unavailable pickup ghost. That is the
+		// exact visual reference used for the five held-weapon variants.
+		static const TCHAR* const MaterialPath =
+			TEXT("/Game/RestrictedAssets/Weapons/Weapon_Base_Effects/Materials/M_HoloEffect_Powerup.M_HoloEffect_Powerup");
+		CachedMaterial = LoadObject<UMaterialInterface>(nullptr, MaterialPath);
+		if (!CachedMaterial.IsValid())
+		{
+			static bool bLoggedMissingMaterial = false;
+			if (!bLoggedMissingMaterial)
+			{
+				bLoggedMissingMaterial = true;
+				UE_LOG(LogUTWeaponFix, Warning,
+					TEXT("First-person hologram material is missing: %s"), MaterialPath);
+			}
+		}
+	}
+	return CachedMaterial.Get();
+}
+
 static bool IsPinkLGWeaponSkin(const UUTWeaponSkin* Skin)
 {
 	static const FString PinkLGPath(TEXT("/Game/NetcodePlusOptional/PinkLG.PinkLG"));
@@ -5652,10 +5720,22 @@ static uint32 MakeLowestMaterialSlotMask(int32 MaterialSlotCount)
 uint32 AUTWeaponFix::GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Skin,
 	FName WeaponSkinCustomizationTag, bool bFirstPersonMesh, int32 MaterialSlotCount)
 {
+	if (IsFirstPersonHologramWeaponSkin(Skin))
+	{
+		// Ghost skins are deliberately first-person only. Returning zero for the
+		// attachment path restores its captured stock materials, while every live
+		// 1P slot participates in the hologram/depth pair.
+		return (bFirstPersonMesh && GetPickupHologramMaterial() != nullptr)
+			? MakeLowestMaterialSlotMask(MaterialSlotCount)
+			: 0u;
+	}
+
 	const UMaterialInterface* const ViewMaterial = (Skin == nullptr)
 		? nullptr
 		: (bFirstPersonMesh ? Skin->FPSMaterial : Skin->Material);
-	if (UsesAuthenticInvisibilityMaterial(ViewMaterial) && MaterialSlotCount > 0)
+	if ((UsesAuthenticInvisibilityMaterial(ViewMaterial) ||
+		 (bFirstPersonMesh && UsesPickupHologramMaterial(ViewMaterial))) &&
+		MaterialSlotCount > 0)
 	{
 		return MakeLowestMaterialSlotMask(MaterialSlotCount);
 	}
@@ -5670,6 +5750,11 @@ uint32 AUTWeaponFix::GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Sk
 UMaterialInterface* AUTWeaponFix::GetResolvedWeaponSkinMaterialForSlot(
 	const UUTWeaponSkin* Skin, bool bFirstPersonMesh, int32 MaterialSlot)
 {
+	if (IsFirstPersonHologramWeaponSkin(Skin))
+	{
+		return bFirstPersonMesh ? GetPickupHologramMaterial() : nullptr;
+	}
+
 	UMaterialInterface* const ViewMaterial = (Skin == nullptr)
 		? nullptr
 		: (bFirstPersonMesh ? Skin->FPSMaterial : Skin->Material);
@@ -5722,15 +5807,35 @@ UMaterialInterface* AUTWeaponFix::GetResolvedWeaponSkinMaterialForSlot(
 
 void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 {
+	const bool bFirstPersonHologramSelection =
+		IsFirstPersonHologramWeaponSkin(Skin);
+	UMaterialInterface* const FirstPersonSkinMaterial =
+		(GetNetMode() != NM_DedicatedServer)
+		? (bFirstPersonHologramSelection
+			? GetPickupHologramMaterial()
+			: ((Skin != nullptr) ? Skin->FPSMaterial : nullptr))
+		: nullptr;
+	bFirstPersonHologramSkinActive = bSkinsEnabled && FirstPersonSkinMaterial != nullptr &&
+		(bFirstPersonHologramSelection ||
+		 UsesPickupHologramMaterial(FirstPersonSkinMaterial));
+
 	// Only authority needs the weapon-level identity: it is copied to a dropped
 	// pickup. Viewers resolve their materials from the replicated Character array.
 	if (Role == ROLE_Authority)
 	{
-		WeaponSkin = Skin;
+		// Ghost skins are a local 1P presentation. Do not copy their cloned
+		// DataAsset material to a dropped pickup; dropped and remote weapons stay
+		// stock, while the replicated Character selection re-applies 1P on equip.
+		WeaponSkin = bFirstPersonHologramSelection ? nullptr : Skin;
 	}
 	if (!bSkinsEnabled || GetNetMode() == NM_DedicatedServer || Mesh == nullptr ||
 		Mesh->GetNumMaterials() < 1)
 	{
+		UpdateFirstPersonHologramDepthMesh(false);
+		if (GetNetMode() != NM_DedicatedServer && Mesh != nullptr && Mesh->IsRegistered())
+		{
+			UpdateOutline();
+		}
 		return;
 	}
 
@@ -5805,6 +5910,22 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 			{
 				AppliedFPSMaterialInstances[Slot] =
 					UMaterialInstanceDynamic::Create(DesiredParents[Slot], Mesh);
+				if (bFirstPersonHologramSkinActive &&
+					AppliedFPSMaterialInstances[Slot] != nullptr)
+				{
+					static const FName NAME_Normal(TEXT("Normal"));
+					UTexture* NormalTexture = nullptr;
+					UMaterialInterface* const OriginalMaterial =
+						OriginalFPSMaterials.IsValidIndex(Slot)
+						? OriginalFPSMaterials[Slot]
+						: nullptr;
+					if (OriginalMaterial != nullptr &&
+						OriginalMaterial->GetTextureParameterValue(NAME_Normal, NormalTexture))
+					{
+						AppliedFPSMaterialInstances[Slot]->SetTextureParameterValue(
+							NAME_Normal, NormalTexture);
+					}
+				}
 			}
 		}
 	}
@@ -5865,12 +5986,164 @@ void AUTWeaponFix::ApplyResolvedWeaponSkin(UUTWeaponSkin* Skin)
 	{
 		SetupSpecialMaterials();
 	}
+	ApplyFirstPersonHologramProjectionParams();
+	UpdateFirstPersonHologramDepthMesh(
+		bFirstPersonHologramSkinActive && !bBodyOverrideActive);
+	if (Mesh->IsRegistered())
+	{
+		UpdateOutline();
+	}
 	if (!bBodyOverrideActive && SkinTiming())
 	{
 		UE_LOG(LogUTWeaponFix, Warning,
 			TEXT("[SkinTiming] %s applied skin=%s slot-mask=0x%x"), *GetName(),
 			Skin != nullptr ? *Skin->GetName() : TEXT("Default"), TargetSlotMask);
 	}
+}
+
+void AUTWeaponFix::UpdateOutline()
+{
+	if (bFirstPersonHologramSkinActive)
+	{
+		// The stock outline mesh would occupy the same custom-depth pixels with a
+		// different stencil and Panini/material projection. Keep that 1P-only mesh
+		// dormant while the Ghost depth slave owns the silhouette. Remote players'
+		// stock 3P weapon attachment/outline is a separate actor and is untouched.
+		if (CustomDepthMesh != nullptr && CustomDepthMesh->IsRegistered())
+		{
+			CustomDepthMesh->UnregisterComponent();
+		}
+		return;
+	}
+
+	Super::UpdateOutline();
+}
+
+void AUTWeaponFix::ApplyFirstPersonHologramProjectionParams()
+{
+	if (!bFirstPersonHologramSkinActive)
+	{
+		return;
+	}
+
+	// M_HoloEffect deliberately has no first-person Panini material graph. The
+	// viewport nevertheless reads these names from slot zero when it projects
+	// muzzle flashes and other weapon children. Store identity values in every
+	// actor-local MID so those children stay aligned with the raw hologram mesh.
+	// The Holo shader ignores the otherwise-unused scalar overrides.
+	static const FName NAME_PaniniD(TEXT("d"));
+	static const FName NAME_PaniniS(TEXT("s"));
+	static const FName NAME_FOVMulti(TEXT("FOV Multi"));
+	static const FName NAME_Scale(TEXT("Scale"));
+	for (int32 Slot = 0; Slot < AppliedFPSMaterialInstances.Num(); ++Slot)
+	{
+		if (((AppliedFPSMaterialSlotMask >> Slot) & 0x1u) == 0u)
+		{
+			continue;
+		}
+		UMaterialInstanceDynamic* const MID = AppliedFPSMaterialInstances[Slot];
+		if (MID != nullptr)
+		{
+			MID->SetScalarParameterValue(NAME_PaniniD, 0.f);
+			MID->SetScalarParameterValue(NAME_PaniniS, 0.f);
+			MID->SetScalarParameterValue(NAME_FOVMulti, 0.f);
+			MID->SetScalarParameterValue(NAME_Scale, 1.f);
+		}
+	}
+}
+
+void AUTWeaponFix::DestroyFirstPersonHologramDepthMesh()
+{
+	if (FirstPersonHologramDepthMesh != nullptr)
+	{
+		FirstPersonHologramDepthMesh->SetMasterPoseComponent(nullptr);
+		FirstPersonHologramDepthMesh->DestroyComponent(false);
+		FirstPersonHologramDepthMesh = nullptr;
+	}
+}
+
+void AUTWeaponFix::UpdateFirstPersonHologramDepthMesh(bool bEnable)
+{
+	if (!bEnable || GetNetMode() == NM_DedicatedServer || Mesh == nullptr ||
+		Mesh->SkeletalMesh == nullptr)
+	{
+		DestroyFirstPersonHologramDepthMesh();
+		return;
+	}
+
+	if (FirstPersonHologramDepthMesh == nullptr)
+	{
+		// Build a fresh slave instead of DuplicateObject(Mesh). Epic's stock helper
+		// is not exported to plugins, and duplicating a live component also copies its
+		// transient AttachChildren pointers; destroying that copy can then walk/log
+		// the real weapon's muzzle and beam children.
+		FirstPersonHologramDepthMesh = NewObject<USkeletalMeshComponent>(this);
+		if (FirstPersonHologramDepthMesh == nullptr)
+		{
+			return;
+		}
+
+		FirstPersonHologramDepthMesh->SetSkeletalMesh(Mesh->SkeletalMesh);
+		FirstPersonHologramDepthMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		FirstPersonHologramDepthMesh->SetSimulatePhysics(false);
+		FirstPersonHologramDepthMesh->SetCastShadow(false);
+		FirstPersonHologramDepthMesh->SetOnlyOwnerSee(true);
+		FirstPersonHologramDepthMesh->bRenderInMainPass = false;
+		FirstPersonHologramDepthMesh->bRenderCustomDepth = true;
+		// Stencil zero is the stock pickup-ghost contract: M_HoloEffect samples
+		// depth, while TacCom/team outlines reserve nonzero stencil values.
+		FirstPersonHologramDepthMesh->CustomDepthStencilValue = 0;
+		FirstPersonHologramDepthMesh->bReceivesDecals = false;
+		FirstPersonHologramDepthMesh->bShouldUpdatePhysicsVolume = false;
+		FirstPersonHologramDepthMesh->bUseAttachParentBound = true;
+		// The stock 1P originals include Panini projection, but M_HoloEffect does
+		// not. Using those originals for depth would bend only the depth carrier
+		// and produce doubled/broken hologram edges. A plain opaque depth material
+		// keeps both passes in the same raw mesh space until a dedicated
+		// Panini-aware NCP hologram master is authored.
+		for (int32 MaterialIndex = 0;
+			MaterialIndex < FirstPersonHologramDepthMesh->GetNumMaterials();
+			++MaterialIndex)
+		{
+			FirstPersonHologramDepthMesh->SetMaterial(
+				MaterialIndex, UMaterial::GetDefaultMaterial(MD_Surface));
+		}
+		FirstPersonHologramDepthMesh->BoundsScale = 15000.f;
+		FirstPersonHologramDepthMesh->SetMasterPoseComponent(Mesh);
+		FirstPersonHologramDepthMesh->UpdateMasterBoneMap();
+		FirstPersonHologramDepthMesh->AttachToComponent(
+			Mesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		FirstPersonHologramDepthMesh->RelativeLocation = FVector::ZeroVector;
+		FirstPersonHologramDepthMesh->RelativeRotation = FRotator::ZeroRotator;
+		FirstPersonHologramDepthMesh->RelativeScale3D = FVector(1.f);
+	}
+
+	// The main weapon mesh owns every muzzle/beam child. This depth-only slave has
+	// none, so never propagate visibility beyond the component itself.
+	FirstPersonHologramDepthMesh->SetVisibility(Mesh->bVisible, false);
+	FirstPersonHologramDepthMesh->SetHiddenInGame(Mesh->bHiddenInGame, false);
+	if (FirstPersonHologramDepthMesh->GetAttachParent() != Mesh)
+	{
+		FirstPersonHologramDepthMesh->SetMasterPoseComponent(Mesh);
+		FirstPersonHologramDepthMesh->AttachToComponent(
+			Mesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		FirstPersonHologramDepthMesh->RelativeLocation = FVector::ZeroVector;
+		FirstPersonHologramDepthMesh->RelativeRotation = FRotator::ZeroRotator;
+		FirstPersonHologramDepthMesh->RelativeScale3D = FVector(1.f);
+	}
+	if (Mesh->IsRegistered() && !FirstPersonHologramDepthMesh->IsRegistered())
+	{
+		FirstPersonHologramDepthMesh->RegisterComponent();
+		FirstPersonHologramDepthMesh->LastRenderTime = Mesh->LastRenderTime;
+		FirstPersonHologramDepthMesh->bRecentlyRendered = Mesh->bRecentlyRendered;
+	}
+}
+
+TArray<UMeshComponent*> AUTWeaponFix::Get1PMeshes_Implementation() const
+{
+	TArray<UMeshComponent*> Result = Super::Get1PMeshes_Implementation();
+	Result.Add(FirstPersonHologramDepthMesh);
+	return Result;
 }
 
 void AUTWeaponFix::BringUp(float OverflowTime)
@@ -5987,6 +6260,14 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 		bool* bHidden = HiddenWeaponsByTag.Find(FName(*GetClass()->GetName()));
 		ApplyWeaponHideState(this, UTOwner, bHidden && *bHidden);
 	}
+	// Super::BringUp/AttachToOwner writes WeaponRenderScale after material setup.
+	// Restore the identity projection required by the non-Panini Holo material.
+	ApplyFirstPersonHologramProjectionParams();
+	// Refresh after the hide policy so the depth-only companion mirrors both
+	// BP-parity bVisible propagation and classic bHiddenInGame on this frame.
+	UpdateFirstPersonHologramDepthMesh(
+		bFirstPersonHologramSkinActive && UTOwner != nullptr &&
+		UTOwner->GetSkin() == nullptr);
 
 	if (bLogSkinTiming)
 	{
@@ -6103,6 +6384,10 @@ static bool TakeNCPHideTag(UActorComponent* Comp, const FName& Tag)
 void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, bool bHide)
 {
 	USkeletalMeshComponent* WeapMesh = (Weapon != nullptr) ? Weapon->GetMesh() : nullptr;
+	AUTWeaponFix* const FixWeapon = Cast<AUTWeaponFix>(Weapon);
+	USkeletalMeshComponent* const HologramDepthMesh = (FixWeapon != nullptr)
+		? FixWeapon->FirstPersonHologramDepthMesh
+		: nullptr;
 	AUTDualWeapon* Dual = Cast<AUTDualWeapon>(Weapon);
 	USkeletalMeshComponent* LeftMesh = (Dual != nullptr) ? Dual->LeftMesh : nullptr;
 	USkeletalMeshComponent* ArmsMesh = (Char != nullptr) ? Char->FirstPersonMesh : nullptr;
@@ -6158,6 +6443,12 @@ void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, b
 					FPMeshArchetype->RelativeLocation,
 					FPMeshArchetype->RelativeRotation);
 			}
+		}
+		if (HologramDepthMesh != nullptr)
+		{
+			// SetHiddenInGame does not propagate by default. Mirror classic hide on
+			// the depth-only companion or it can leave a post-process silhouette.
+			HologramDepthMesh->SetHiddenInGame(true, false);
 		}
 		return;
 	}
@@ -6263,6 +6554,12 @@ void AUTWeaponFix::ApplyWeaponHideState(AUTWeapon* Weapon, AUTCharacter* Char, b
 			}
 		}
 	}
+
+	if (HologramDepthMesh != nullptr && WeapMesh != nullptr)
+	{
+		HologramDepthMesh->SetVisibility(WeapMesh->bVisible, false);
+		HologramDepthMesh->SetHiddenInGame(WeapMesh->bHiddenInGame, false);
+	}
 }
 
 void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
@@ -6348,6 +6645,9 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 			bReassertedWeaponSkin = true;
 		}
 	}
+	ApplyFirstPersonHologramProjectionParams();
+	UpdateFirstPersonHologramDepthMesh(
+		bFirstPersonHologramSkinActive && NewSkin == nullptr);
 
 	if (bLogSkinTiming)
 	{
