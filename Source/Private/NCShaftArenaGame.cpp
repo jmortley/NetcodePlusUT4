@@ -32,11 +32,6 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCShaftArena, Log, All);
 
-/** NCP-only stat name (not in StatNames.h): one sample per beam refire interval,
- *  written by UTWeaponStateFiringLinkBeam_NCP / UTWeap_LinkGun_Plus. This is the
- *  denominator LinkHits is measured against for beam fire. */
-static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
-
 namespace
 {
 	bool IsSupportedShaftLinkClass(const UClass* WeaponClass)
@@ -505,6 +500,9 @@ float ANCShaftArenaGame::ComputeLinkAccuracyPct(AUTPlayerState* PS) const
 	// never fires) while the scoreboard, HUD and replicators all showed the
 	// correct value from LinkBeamShots. Sum both so a variant that also fires
 	// plasma still counts those trigger pulls.
+	// Function-local static (house pattern): a file-scope copy of this NCP-only
+	// stat name is ambiguous against other files' copies inside a unity bucket.
+	static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 	const int32 Shots = PS->GetStatsValue(NAME_LinkBeamShots) + PS->GetStatsValue(NAME_LinkShots);
 	return (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
 }
@@ -533,6 +531,7 @@ void ANCShaftArenaGame::BuildMatchSummary(FNCMatchSummary& Out) const
 		P.Ping       = UTPS->Ping;
 		P.Team       = UTPS->Team ? UTPS->Team->TeamIndex : 0;
 		// Shots = beam samples + plasma trigger pulls; see ComputeLinkAccuracyPct.
+		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 		P.WeaponAccuracy.Add(FName(TEXT("LinkGun")),
 			FIntPoint(UTPS->GetStatsValue(NAME_LinkBeamShots) + UTPS->GetStatsValue(NAME_LinkShots),
 				UTPS->GetStatsValue(NAME_LinkHits)));
