@@ -6,6 +6,7 @@
 #include "UTCharacter.h"
 #include "UTWeaponAttachment.h"
 #include "Engine/World.h"
+#include "Engine/NetConnection.h"
 #include "Engine/DemoNetDriver.h"
 #include "TimerManager.h"
 #include "Net/UnrealNetwork.h"
@@ -210,15 +211,16 @@ static TAutoConsoleVariable<int32> CVarHitAttribDebug(
     TEXT("Hitscan acceptance attribution: 0=off, 1=log one [HitAttrib] line per server-validated shot and one [HitAttrib.Client] line per client claim decision."),
     ECVF_Default);
 
-// leadUU diagnostic only: the server cannot see what the shooter's client
-// actually rendered, so it approximates the rendered target position as
-// GetRewindLocation(halfRTT + this many ms). The extra term stands in for the
-// server->client net update interval plus client-side mesh smoothing delay.
-// This is an ESTIMATE from server-side history (it ignores client interp
-// filtering); calibrate against phase-2 render-latency measurements.
+// The server cannot see what the shooter's client actually rendered, so the
+// render gate, render-authoritative claimless modes, and leadUU telemetry all
+// approximate the rendered target position as GetRewindLocation(halfRTT + this
+// many ms). The extra term stands in for the server->client net update interval
+// plus client-side mesh smoothing delay. This is an ESTIMATE from server-side
+// history (it ignores client interp filtering); calibrate against render-
+// latency measurements.
 static TAutoConsoleVariable<float> CVarHitAttribRenderExtraMs(
     TEXT("ncp.HitAttribRenderExtraMs"), 30.0f,
-    TEXT("[HitAttrib] estimated render latency beyond half-RTT (net update interval + client smoothing), ms. Diagnostic only. Default: 30."),
+    TEXT("Estimated render latency beyond half-RTT (net update interval + client smoothing), ms. Used by the unclaimed render gate, render-authoritative claimless hitscan, and [HitAttrib]. Default: 30."),
     ECVF_Default);
 
 // =========================================================================
@@ -245,24 +247,127 @@ static TAutoConsoleVariable<float> CVarUnclaimedRenderSlack(
     TEXT("Extra radius (uu) forgiven by the unclaimed render-time check, absorbing render-lag estimate error and ping jitter. Default: 20."),
     ECVF_Default);
 
-// The INVERSE of the render gate, for claim-INCAPABLE fire (the link beam's
-// per-tick re-traces, spread bullets). Those modes can never claim, so their
-// only acceptance route is the raw validation rewind — but the rewind history
-// stores raw replicated positions while the shooter aims at an interpolated,
-// smoothed RENDERING of the target. When the raw test misses, re-test the same
-// server-owned ray against the target's render-time capsule and accept a hit
-// the shooter's screen genuinely showed. No client input is consulted anywhere
-// (direction, target, and timing are all server-derived) — this is not CSHD.
-// Weapons opt in via AUTWeaponFix::SupportsRenderCredit().
+// Render-authoritative targeting for opted-in claim-INCAPABLE fire (the Link
+// beam's per-tick re-traces and Minigun spread bullets). Those modes can never
+// provide a client target claim. Testing BOTH raw validation history and the
+// estimated render-time history creates two separate acceptance lobes: a target
+// can be hit at a server-history position the shooter was never shown. With this
+// enabled, the render-time capsule REPLACES the raw capsule as the sole target-
+// selection sample. The ray, world-geometry clipping, timing estimate, and
+// target choice remain server-owned — this is not client-side hit detection.
+// The legacy cvar/method names are retained for live rollback and config
+// compatibility. Weapons opt in via AUTWeaponFix::SupportsRenderCredit().
 static TAutoConsoleVariable<int32> CVarRenderCredit(
     TEXT("ncp.RenderCredit"), 1,
-    TEXT("Claim-incapable fire (link beam, spread) that misses the raw rewind capsule is re-tested against the target's render-time capsule and credited if the shooter's screen showed the hit: 1=on (default), 0=off (raw rewind only, pre-2026-08-17 behavior). Server-side only; flippable live."),
+    TEXT("Opted-in claim-incapable fire (Link beam, Minigun) selects targets only at the estimated render-time capsule: 1=render-authoritative (default), 0=raw rewind only (live rollback). Server-side only; flippable live."),
     ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarRenderCreditSlack(
     TEXT("ncp.RenderCreditSlack"), 0.0f,
-    TEXT("Extra radius (uu) forgiven by the render-credit re-test. Deliberately 0 by default: credit only what the render-time capsule itself covers — widen with care, this is the acceptance direction."),
+    TEXT("Extra radius (uu) around the render-authoritative capsule for opted-in claimless fire. Deliberately 0 by default; widen only with evidence."),
     ECVF_Default);
+
+static bool GetRenderAuthorityRTTMs(const AUTPlayerController* ShooterPC, float& OutRTTMs)
+{
+    OutRTTMs = 0.f;
+    // UT's ExactPing is reported back through an RPC whose validation accepts
+    // any float. Prefer the server connection's ACK-derived RTT so a modified
+    // client cannot select its own target-history epoch. AvgLag initializes to
+    // 9999; fail closed until the server has a measurement instead of treating
+    // an unknown high-ping client as 0ms or trusting the client's fallback.
+    if (ShooterPC != nullptr)
+    {
+        const UNetConnection* Connection = ShooterPC->GetNetConnection();
+        if (Connection != nullptr && Connection->AvgLag >= 0.f && Connection->AvgLag < 5.f)
+        {
+            OutRTTMs = Connection->AvgLag * 1000.f;
+            return true;
+        }
+    }
+    return false;
+}
+
+// GetRewindLocation() silently falls back to the oldest/current location when
+// the requested time is not bracketed by history. That is acceptable for
+// stock-style forgiveness, but not when this sample is the sole authority for
+// what a remote shooter was estimated to have rendered. Require a real bracket
+// and reject any interval containing a teleport marker.
+static bool HasContinuousRenderHistory(AUTCharacter* Target, float RenderTime,
+    float ValidationTime, int32& OutOlderIndex, int32& OutNewerIndex)
+{
+    OutOlderIndex = INDEX_NONE;
+    OutNewerIndex = INDEX_NONE;
+    if (Target == nullptr || Target->GetWorld() == nullptr)
+    {
+        return false;
+    }
+    if (RenderTime <= 0.f)
+    {
+        return true;
+    }
+
+    const TArray<FSavedPosition>& History = Target->SavedPositions;
+    if (History.Num() < 2)
+    {
+        // Preserve the sole available endpoint as a conservative blocker.
+        if (History.Num() == 1)
+        {
+            OutNewerIndex = 0;
+        }
+        return false;
+    }
+
+    const float Now = Target->GetWorld()->GetTimeSeconds();
+    const float RenderWorldTime = Now - RenderTime;
+    for (int32 Index = History.Num() - 1; Index >= 0; --Index)
+    {
+        // Match GetRewindLocation()'s strict comparison so the same two
+        // samples are treated as the render-time bracket.
+        if (History[Index].Time < RenderWorldTime)
+        {
+            OutOlderIndex = Index;
+            break;
+        }
+    }
+
+    if (OutOlderIndex == INDEX_NONE)
+    {
+        // Requested epoch predates retained history. We cannot validate a hit,
+        // but the oldest available capsule must still occlude farther targets.
+        OutNewerIndex = 0;
+        return false;
+    }
+    if (OutOlderIndex == History.Num() - 1)
+    {
+        // No newer sample exists. A stationary authority anchor is still
+        // provable: clamping to it cannot invent a different target position.
+        // A moving/changed anchor remains unverifiable and fails closed.
+        return !History[OutOlderIndex].bTeleported &&
+            (Target->GetActorLocation() - History[OutOlderIndex].Position).IsNearlyZero(0.1f);
+    }
+
+    OutNewerIndex = OutOlderIndex + 1;
+    if (History[OutOlderIndex].bTeleported || History[OutNewerIndex].bTeleported)
+    {
+        return false;
+    }
+
+    const float IntervalStart = Now - FMath::Max(RenderTime, ValidationTime);
+    const float IntervalEnd = Now - FMath::Min(RenderTime, ValidationTime);
+    for (int32 Index = 0; Index < History.Num(); ++Index)
+    {
+        if (History[Index].Time > IntervalEnd)
+        {
+            break;
+        }
+        if (History[Index].Time >= IntervalStart && History[Index].bTeleported)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 static bool ShotIntersectsRenderedCapsule(
     AUTCharacter* Target,
@@ -3340,6 +3445,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     // A previous trace's demotion must never leak into this one (the sniper /
     // head-sphere fallbacks consult this flag after we return).
     bLastUnclaimedRenderDemoted = false;
+    LastHitscanPaddedRadius = 0.f;
 
     // Claim-capable = a mode whose FIRED shots carry hit claims (exact-trace,
     // damaging, replication-tracked). Gates both the attribution telemetry and
@@ -3365,6 +3471,38 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     ECollisionChannel TraceChannel = COLLISION_TRACE_WEAPONNOCHARACTER;
     FCollisionQueryParams QueryParams(GetClass()->GetFName(), true, UTOwner);
     AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+
+    // Applicability is based on the mode's capabilities, not the mutable claim
+    // cache. Link clears claims before every beam trace; Minigun cannot produce
+    // one. A stale/unsolicited claim must never switch either mode back to raw
+    // target history. Bots, standalone, and the listen host keep raw validation
+    // because there is no remote rendered view to reconstruct.
+    const AUTPlayerController* RenderAuthorityShooterPC =
+        (UTOwner != nullptr) ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
+    const bool bRenderAuthoritativeTargeting =
+        !bClaimCapableMode && SupportsRenderCredit() &&
+        CVarRenderCredit.GetValueOnGameThread() > 0 &&
+        Role == ROLE_Authority && GetNetMode() != NM_Standalone &&
+        UTOwner != nullptr && UTOwner->PlayerState != nullptr &&
+        RenderAuthorityShooterPC != nullptr &&
+        !RenderAuthorityShooterPC->IsLocalController();
+    float RenderAuthorityRTTMs = 0.f;
+    const bool bRenderAuthorityTimingValid = bRenderAuthoritativeTargeting &&
+        GetRenderAuthorityRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs);
+    const float RenderAuthoritativeMs = bRenderAuthoritativeTargeting
+        ? RenderAuthorityRTTMs * 0.5f +
+            FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())
+        : 0.f;
+    const float RenderAuthoritativeTime = bRenderAuthoritativeTargeting
+        ? FMath::Clamp(RenderAuthoritativeMs * 0.001f, 0.f, 0.25f)
+        : 0.f;
+    const float RenderAuthoritativeSlack = bRenderAuthoritativeTargeting
+        ? FMath::Max(0.f, CVarRenderCreditSlack.GetValueOnGameThread())
+        : 0.f;
+    const float TargetSampleTime = bRenderAuthoritativeTargeting
+        ? RenderAuthoritativeTime : ActualPredictionTime;
+    const bool bRenderAuthorityDebug = bRenderAuthoritativeTargeting &&
+        CVarHitAttribDebug.GetValueOnGameThread() > 0;
 
     // Perform the initial trace against world geometry. Weapon attachments are
     // client-only cosmetics (AUTCharacter never spawns them on a dedicated
@@ -3406,6 +3544,135 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     FVector BestPoint(0.f);
     FVector BestCapsulePoint(0.f);
     float BestCollisionRadius = 0.f;
+    float BestTargetEntryDistance = BIG_NUMBER;
+    FVector UnverifiableBlockHitLocation(0.f);
+    float UnverifiableBlockEntryDistance = BIG_NUMBER;
+
+    const FVector PawnTraceVector = Hit.Location - StartLocation;
+    const float PawnTraceLength = PawnTraceVector.Size();
+    const FVector PawnTraceDirection = PawnTraceLength > KINDA_SMALL_NUMBER
+        ? PawnTraceVector / PawnTraceLength
+        : (EndTrace - StartLocation).GetSafeNormal();
+    // Exact first entry of this finite ray segment into a vertical capsule.
+    // The capsule is the union of its finite cylinder and endpoint spheres;
+    // expanding Radius by the trace radius is the exact sphere-sweep Minkowski
+    // sum. This avoids the closest-point/back-distance approximation, which is
+    // late for rays angled along the capsule axis.
+    auto RayCapsuleEntryDistance = [&](const FVector& CapsuleCenter,
+        float AxisHalfLength, float CombinedRadius, float& OutEntryDistance)
+    {
+        OutEntryDistance = BIG_NUMBER;
+        AxisHalfLength = FMath::Max(0.f, AxisHalfLength);
+        CombinedRadius = FMath::Max(0.f, CombinedRadius);
+        if (CombinedRadius <= 0.f)
+        {
+            return false;
+        }
+
+        FVector ClosestAxisPoint = CapsuleCenter;
+        ClosestAxisPoint.Z += FMath::Clamp(
+            StartLocation.Z - CapsuleCenter.Z, -AxisHalfLength, AxisHalfLength);
+        if (FVector::DistSquared(StartLocation, ClosestAxisPoint) <
+            FMath::Square(CombinedRadius))
+        {
+            OutEntryDistance = 0.f;
+            return true;
+        }
+        if (PawnTraceLength <= KINDA_SMALL_NUMBER)
+        {
+            return false;
+        }
+
+        auto ConsiderEntry = [&](float EntryDistance)
+        {
+            if (EntryDistance >= 0.f && EntryDistance <= PawnTraceLength)
+            {
+                OutEntryDistance = FMath::Min(OutEntryDistance, EntryDistance);
+            }
+        };
+
+        const FVector Offset = StartLocation - CapsuleCenter;
+        const float CylinderA = FMath::Square(PawnTraceDirection.X) +
+            FMath::Square(PawnTraceDirection.Y);
+        if (AxisHalfLength > 0.f && CylinderA > SMALL_NUMBER)
+        {
+            const float CylinderHalfB = Offset.X * PawnTraceDirection.X +
+                Offset.Y * PawnTraceDirection.Y;
+            const float CylinderC = FMath::Square(Offset.X) +
+                FMath::Square(Offset.Y) - FMath::Square(CombinedRadius);
+            const float CylinderDisc = FMath::Square(CylinderHalfB) -
+                CylinderA * CylinderC;
+            if (CylinderDisc >= 0.f)
+            {
+                const float Root = FMath::Sqrt(CylinderDisc);
+                const float Entries[2] = {
+                    (-CylinderHalfB - Root) / CylinderA,
+                    (-CylinderHalfB + Root) / CylinderA
+                };
+                for (int32 EntryIndex = 0; EntryIndex < 2; ++EntryIndex)
+                {
+                    const float EntryDistance = Entries[EntryIndex];
+                    const float EntryZ = Offset.Z +
+                        PawnTraceDirection.Z * EntryDistance;
+                    if (FMath::Abs(EntryZ) <= AxisHalfLength)
+                    {
+                        ConsiderEntry(EntryDistance);
+                    }
+                }
+            }
+        }
+
+        auto TestEndSphere = [&](const FVector& SphereCenter)
+        {
+            const FVector SphereOffset = StartLocation - SphereCenter;
+            const float SphereHalfB = FVector::DotProduct(
+                SphereOffset, PawnTraceDirection);
+            const float SphereC = SphereOffset.SizeSquared() -
+                FMath::Square(CombinedRadius);
+            const float SphereDisc = FMath::Square(SphereHalfB) - SphereC;
+            if (SphereDisc >= 0.f)
+            {
+                const float Root = FMath::Sqrt(SphereDisc);
+                ConsiderEntry(-SphereHalfB - Root);
+                ConsiderEntry(-SphereHalfB + Root);
+            }
+        };
+        TestEndSphere(CapsuleCenter + FVector(0.f, 0.f, AxisHalfLength));
+        if (AxisHalfLength > 0.f)
+        {
+            TestEndSphere(CapsuleCenter - FVector(0.f, 0.f, AxisHalfLength));
+        }
+
+        return OutEntryDistance < BIG_NUMBER;
+    };
+
+    // If a live/collidable pawn lacks trustworthy render history, it cannot be
+    // damaged in render-authoritative mode. Its known capsule positions must
+    // still conservatively occlude the trace; otherwise "fail closed" for the
+    // first target could become a hit on a pawn/projectile behind it.
+    auto RecordUnverifiableBlocker = [&](AUTCharacter* Target,
+        const FVector& CandidateLocation, float CandidateTime)
+    {
+        FVector BlockerLocation = CandidateLocation;
+        float BlockerHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+        ApplySlidePostureForValidation(Target, CandidateTime, BlockerLocation, BlockerHeight);
+        const float BlockerRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+        const float AxisHalfLength = FMath::Max(0.f, BlockerHeight - BlockerRadius);
+        const float EffectiveRadius = FMath::Min(BlockerRadius, BlockerHeight);
+        const float CombinedRadius = EffectiveRadius + TraceRadius +
+            RenderAuthoritativeSlack;
+        float EntryDistance = BIG_NUMBER;
+        if (RayCapsuleEntryDistance(BlockerLocation, AxisHalfLength,
+            CombinedRadius, EntryDistance))
+        {
+            if (EntryDistance < UnverifiableBlockEntryDistance)
+            {
+                UnverifiableBlockEntryDistance = EntryDistance;
+                UnverifiableBlockHitLocation = StartLocation +
+                    PawnTraceDirection * EntryDistance;
+            }
+        }
+    };
 
     for (FConstPawnIterator Iterator = GetWorld()->GetPawnIterator(); Iterator; ++Iterator)
     {
@@ -3416,12 +3683,51 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             // Standard logic: Teammate checks, etc.
             if (bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target))
             {
-                
+                if (bRenderAuthoritativeTargeting)
+                {
+                    UCapsuleComponent* TargetCapsule = Target->GetCapsuleComponent();
+                    if (Target->IsDead() || Target->IsPendingKillPending() || Target->bHidden ||
+                        !Target->GetActorEnableCollision() || TargetCapsule == nullptr ||
+                        !TargetCapsule->IsQueryCollisionEnabled())
+                    {
+                        continue;
+                    }
+                    int32 RenderOlderIndex = INDEX_NONE;
+                    int32 RenderNewerIndex = INDEX_NONE;
+                    const bool bHasContinuousRenderHistory = HasContinuousRenderHistory(
+                        Target, RenderAuthoritativeTime, ActualPredictionTime,
+                        RenderOlderIndex, RenderNewerIndex);
+                    if (!bRenderAuthorityTimingValid || !bHasContinuousRenderHistory)
+                    {
+                        RecordUnverifiableBlocker(Target, Target->GetActorLocation(), 0.f);
+
+                        // If the requested render epoch straddles a teleport,
+                        // GetRewindLocation() may interpolate across it. Treat
+                        // both real bracket endpoints as non-damageable
+                        // blockers so a farther pawn cannot be hit through the
+                        // target's unverifiable rendered position.
+                        const float Now = GetWorld()->GetTimeSeconds();
+                        if (Target->SavedPositions.IsValidIndex(RenderOlderIndex))
+                        {
+                            RecordUnverifiableBlocker(Target,
+                                Target->SavedPositions[RenderOlderIndex].Position,
+                                FMath::Max(0.f, Now - Target->SavedPositions[RenderOlderIndex].Time));
+                        }
+                        if (Target->SavedPositions.IsValidIndex(RenderNewerIndex))
+                        {
+                            RecordUnverifiableBlocker(Target,
+                                Target->SavedPositions[RenderNewerIndex].Position,
+                                FMath::Max(0.f, Now - Target->SavedPositions[RenderNewerIndex].Time));
+                        }
+                        continue;
+                    }
+                }
+
                 float ExtraHitPadding = 0.f;
 
                 // Only apply padding if the client explicitly claimed THIS target.
                 // If client missed (ReceivedHitScanHitChar is null), this block is skipped (Padding = 0).
-                if (Target == ReceivedHitScanHitChar)
+                if (bClaimCapableMode && Target == ReceivedHitScanHitChar)
                 {
                     // Check velocity to decide WHICH padding to use
                     bool bIsMoving = !Target->GetVelocity().IsNearlyZero(1.0f);
@@ -3439,22 +3745,40 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 					else
 					{
 						// Stationary targets don't need velocity compensation
-						ExtraHitPadding = HitScanPaddingStationary;
+                        ExtraHitPadding = HitScanPaddingStationary;
 					}
                 }
-                // find appropriate rewind position, and test against trace from StartLocation to Hit.Location
-                FVector TargetLocation = ((ActualPredictionTime > 0.f) && (Role == ROLE_Authority)) ? Target->GetRewindLocation(ActualPredictionTime) : Target->GetActorLocation();
-                if (Role == ROLE_Authority && ActualPredictionTime > 0.f)
+                else if (bRenderAuthoritativeTargeting)
                 {
-                    float RTTms = UTOwner && UTOwner->PlayerState ? Cast<APlayerState>(UTOwner->PlayerState)->ExactPing : 0.f;
-                    float RewindDistance = (Target->GetActorLocation() - TargetLocation).Size();
-
-      
+                    ExtraHitPadding = RenderAuthoritativeSlack;
                 }
+
+                // Stock-style modes sample raw validation history. Opted-in
+                // claimless modes substitute the one estimated render-time
+                // sample here, so there is no raw OR render acceptance union.
+                FVector TargetLocation = ((TargetSampleTime > 0.f) && (Role == ROLE_Authority))
+                    ? Target->GetRewindLocation(TargetSampleTime)
+                    : Target->GetActorLocation();
+
+                if (bRenderAuthoritativeTargeting)
+                {
+                    const FVector ValidationLocation = (ActualPredictionTime > 0.f)
+                        ? Target->GetRewindLocation(ActualPredictionTime)
+                        : Target->GetActorLocation();
+                    if (FVector::DistSquared(ValidationLocation, TargetLocation) >
+                        FMath::Square(600.f))
+                    {
+                        RecordUnverifiableBlocker(Target, Target->GetActorLocation(), 0.f);
+                        RecordUnverifiableBlocker(Target, TargetLocation,
+                            RenderAuthoritativeTime);
+                        continue;
+                    }
+                }
+
                 // now see if trace would hit the capsule
                 float CollisionHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
                 ApplySlidePostureForValidation(Target,
-                    ((ActualPredictionTime > 0.f) && (Role == ROLE_Authority)) ? ActualPredictionTime : 0.f,
+                    ((TargetSampleTime > 0.f) && (Role == ROLE_Authority)) ? TargetSampleTime : 0.f,
                     TargetLocation, CollisionHeight);
                 float CollisionRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
 
@@ -3492,19 +3816,72 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                     AttribClaimPad = ExtraHitPadding;
                 }
 
-                // If we hit, update best target
-                if (bHitTarget && (!BestTarget || ((ClosestPoint - StartLocation).SizeSquared() < (BestPoint - StartLocation).SizeSquared())))
+                const float TargetAxisHalfLength =
+                    FMath::Max(0.f, CollisionHeight - CollisionRadius);
+                const float TargetEffectiveRadius =
+                    FMath::Min(CollisionRadius, CollisionHeight);
+                const float TargetSelectionRadius = TargetEffectiveRadius +
+                    TraceRadius + ExtraHitPadding;
+                float CandidateEntryDistance = BIG_NUMBER;
+                const bool bHasCandidateEntry = bRenderAuthoritativeTargeting &&
+                    bHitTarget &&
+                    RayCapsuleEntryDistance(TargetLocation, TargetAxisHalfLength,
+                        TargetSelectionRadius, CandidateEntryDistance);
+
+                // Raw/claim-capable behavior retains its established closest-
+                // axis ordering. Render-authoritative mode uses true capsule
+                // entry ordering so different postures/radii cannot let a
+                // farther surface beat a nearer one.
+                const bool bShouldSelectTarget = bHitTarget &&
+                    (bRenderAuthoritativeTargeting
+                        ? (bHasCandidateEntry && CandidateEntryDistance < BestTargetEntryDistance)
+                        : (!BestTarget || ((ClosestPoint - StartLocation).SizeSquared() <
+                            (BestPoint - StartLocation).SizeSquared())));
+                if (bShouldSelectTarget)
                 {
                     BestTarget = Target;
                     BestPoint = ClosestPoint;
                     BestCapsulePoint = ClosestCapsulePoint;
                     BestCollisionRadius = CollisionRadius;
+                    BestTargetEntryDistance = CandidateEntryDistance;
                     // Cache the total padded radius for ServerShield hitplot normalization
                     LastHitscanPaddedRadius = CollisionRadius + TraceRadius + ExtraHitPadding;
                 }
             }
         }
         // --- FIX END ---
+    }
+
+    const float WorldHitDistance = (Hit.Location - StartLocation).Size();
+    if (bRenderAuthoritativeTargeting &&
+        UnverifiableBlockEntryDistance <= BestTargetEntryDistance &&
+        UnverifiableBlockEntryDistance < WorldHitDistance)
+    {
+        if (bRenderAuthorityDebug)
+        {
+            UE_LOG(LogUTWeaponFix, Verbose,
+                TEXT("[RenderAuthority] fail-closed at unverifiable pawn history; rejected=%s"),
+                BestTarget != nullptr ? *BestTarget->GetName() : TEXT("none"));
+        }
+
+        // Stop the full trace at this non-damageable endpoint. Merely clearing
+        // BestTarget would expose the original world/projectile hit behind the
+        // pawn, allowing damage or a beam visual to pass through history that
+        // the server has explicitly deemed unverifiable.
+        Hit = FHitResult(StartLocation, EndTrace);
+        Hit.Location = UnverifiableBlockHitLocation;
+        Hit.ImpactPoint = Hit.Location;
+        Hit.Normal = -PawnTraceDirection;
+        Hit.ImpactNormal = Hit.Normal;
+        Hit.bBlockingHit = true;
+        Hit.Time = (EndTrace - StartLocation).IsNearlyZero()
+            ? 0.f
+            : UnverifiableBlockEntryDistance / (EndTrace - StartLocation).Size();
+        BestTarget = nullptr;
+        BestPoint = FVector::ZeroVector;
+        BestCapsulePoint = FVector::ZeroVector;
+        BestCollisionRadius = 0.f;
+        LastHitscanPaddedRadius = 0.f;
     }
 
 	// ============================================================
@@ -3514,7 +3891,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 	// Mirror the main-loop team guard (~line 1896): never run the time-search for a CLIENT-NAMED teammate when
 	// teammates don't block hitscan. ReceivedHitScanHitChar is fully client-controlled, so without this a client
 	// could name a teammate to force a near-graze body hit (FF-gated at damage, but it shouldn't be considered).
-	if (Role == ROLE_Authority &&
+	if (bClaimCapableMode && Role == ROLE_Authority &&
 		ReceivedHitScanHitChar != nullptr &&
 		BestTarget != ReceivedHitScanHitChar &&
 		(bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, ReceivedHitScanHitChar)))
@@ -3693,90 +4070,20 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         }
     }
 
-    // ---- RENDER CREDIT (see cvar block at top of file) ----
-    // Claim-INCAPABLE modes only: they can never claim, so the raw rewind above
-    // was their one acceptance route, and it tests raw position history against
-    // aim taken at an interpolated, smoothed rendering. Re-test the same
-    // server-owned ray at the render-time estimate and credit what the
-    // shooter's screen showed. Mutually exclusive with the render gate by
-    // construction (the gate requires bClaimCapableMode) — a demoted hit can
-    // never be re-credited here.
-    if (BestTarget == nullptr && !bClaimCapableMode && SupportsRenderCredit() &&
-        CVarRenderCredit.GetValueOnGameThread() > 0 &&
-        Role == ROLE_Authority && GetNetMode() != NM_Standalone &&
-        ActualPredictionTime > 0.f &&
-        UTOwner != nullptr && UTOwner->PlayerState != nullptr)
+    // The primary pawn loop above already substituted the render-time sample,
+    // so no second pass is needed. Prevent a later raw-time head-sphere rescue
+    // from violating render authority when no rendered capsule was selected.
+    if (bRenderAuthoritativeTargeting)
     {
-        // Same applicability envelope as the render gate: remote human shooter
-        // (a listen host renders server truth; bots have no screen).
-        const AUTPlayerController* ShooterPC = Cast<AUTPlayerController>(UTOwner->Controller);
-        if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
+        bLastUnclaimedRenderDemoted = (BestTarget == nullptr);
+        if (bRenderAuthorityDebug && BestTarget != nullptr)
         {
-            const float CreditMs = UTOwner->PlayerState->ExactPing * 0.5f +
-                FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
-            const float CreditT = FMath::Clamp(CreditMs * 0.001f, 0.f, 0.25f);
-            const float CreditSlack = FMath::Max(0.f, CVarRenderCreditSlack.GetValueOnGameThread());
-
-            for (FConstPawnIterator Iterator = GetWorld()->GetPawnIterator(); Iterator; ++Iterator)
-            {
-                AUTCharacter* Target = Cast<AUTCharacter>(*Iterator);
-                if (Target == nullptr || Target == UTOwner)
-                {
-                    continue;
-                }
-                // Mirror the primary loop's team guard.
-                if (!bTeammatesBlockHitscan && GS && GS->OnSameTeam(UTOwner, Target))
-                {
-                    continue;
-                }
-
-                const FVector ValidationLoc = Target->GetRewindLocation(ActualPredictionTime);
-                const FVector RenderLoc = Target->GetRewindLocation(CreditT);
-                // Teleport guard: crediting is the widening direction. A render
-                // sample farther from the validation sample than any dodge can
-                // cover inside these few ms means discontinuous history — skip.
-                if (FVector::DistSquared(ValidationLoc, RenderLoc) > FMath::Square(600.f))
-                {
-                    continue;
-                }
-
-                float ColHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-                FVector CreditLoc = RenderLoc;
-                ApplySlidePostureForValidation(Target, CreditT, CreditLoc, ColHeight);
-                const float ColRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
-
-                bool bHitTarget = false;
-                FVector ClosestPoint(0.f);
-                FVector ClosestCapsulePoint = CreditLoc;
-                if (ColRadius >= ColHeight)
-                {
-                    ClosestPoint = FMath::ClosestPointOnSegment(CreditLoc, StartLocation, Hit.Location);
-                    bHitTarget = ((ClosestPoint - CreditLoc).SizeSquared() <
-                        FMath::Square(ColHeight + TraceRadius + CreditSlack));
-                }
-                else
-                {
-                    const FVector CapsuleSegment = FVector(0.f, 0.f, ColHeight - ColRadius);
-                    FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
-                        CreditLoc - CapsuleSegment, CreditLoc + CapsuleSegment,
-                        ClosestPoint, ClosestCapsulePoint);
-                    bHitTarget = ((ClosestPoint - ClosestCapsulePoint).SizeSquared() <
-                        FMath::Square(ColRadius + TraceRadius + CreditSlack));
-                }
-
-                if (bHitTarget && (BestTarget == nullptr ||
-                    (ClosestPoint - StartLocation).SizeSquared() < (BestPoint - StartLocation).SizeSquared()))
-                {
-                    BestTarget = Target;
-                    BestPoint = ClosestPoint;
-                    BestCapsulePoint = ClosestCapsulePoint;
-                    BestCollisionRadius = ColRadius;
-                    LastHitscanPaddedRadius = ColRadius + TraceRadius + CreditSlack;
-                    UE_LOG(LogUTWeaponFix, Verbose,
-                        TEXT("[RenderCredit] %s accepted at render-time capsule (ping %.0f, renderMs %.1f)"),
-                        *Target->GetName(), UTOwner->PlayerState->ExactPing, CreditMs);
-                }
-            }
+            UE_LOG(LogUTWeaponFix, Verbose,
+                TEXT("[RenderAuthority] selected=%s (serverRTT %.0f, clientPing %.0f, estimateMs %.1f, sampleMs %.1f, slack %.1f)"),
+                *BestTarget->GetName(), RenderAuthorityRTTMs,
+                UTOwner->PlayerState->ExactPing,
+                RenderAuthoritativeMs, RenderAuthoritativeTime * 1000.f,
+                RenderAuthoritativeSlack);
         }
     }
 

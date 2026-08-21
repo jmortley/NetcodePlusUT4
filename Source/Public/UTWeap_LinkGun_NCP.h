@@ -38,8 +38,10 @@ class NETCODEPLUS_API AUTWeap_LinkGun_NCP : public AUTWeaponFix
 
 public:
 	/**
-	 * Maximum one-way history queried by the authoritative Link beam, in ms.
+	 * Maximum raw-validation/rollback history queried by the Link beam, in ms.
 	 * Runtime-clamped to 50ms even if a cooked Blueprint contains a larger value.
+	 * With ncp.RenderCredit=1, remote-human target selection instead uses the
+	 * estimated render-time sample (half RTT + render extra, capped at 250ms).
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Link Beam",
 		meta = (ClampMin = "0.0", ClampMax = "50.0", UIMin = "0.0", UIMax = "50.0"))
@@ -155,9 +157,10 @@ public:
 	virtual float GetHitValidationPredictionTime() const override;
 	virtual float GetHitscanTimeSearchWindow() const override { return 0.f; }
 
-	/** Beam ticks are claim-incapable by design (claims cleared before every
-	 *  trace), so the render-credit pass is their only recovery for the
-	 *  aim-at-rendering vs raw-history mismatch. See ncp.RenderCredit. */
+	/** Beam ticks are claim-incapable by design (claims are cleared before each
+	 *  trace), so remote-human target selection uses the estimated render-time
+	 *  capsule instead of accepting raw OR render history. See
+	 *  ncp.RenderCredit (legacy name; 0 restores raw rewind). */
 	virtual bool SupportsRenderCredit() const override { return true; }
 
 	UPROPERTY(BlueprintReadWrite, Category = Mesh)

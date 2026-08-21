@@ -383,11 +383,12 @@ public:
      *  rungs {15,30,45}, so 45 is the last rung before the ±60 defender tradeoff). */
     virtual float GetHitscanTimeSearchWindow() const { return 0.045f; }
 
-    /** Opt-in for the render-CREDIT pass in HitScanTrace (cvar ncp.RenderCredit):
-     *  claim-incapable fire that misses the raw validation rewind is re-tested
-     *  against the target's render-time capsule, crediting hits the shooter's
-     *  screen genuinely showed. Server-owned ray and timing — no client input,
-     *  not CSHD. Off per weapon by default; continuous/beam modes opt in. */
+    /** Opt-in for render-authoritative target sampling in HitScanTrace (legacy
+     *  cvar name ncp.RenderCredit). For a remote human using claim-incapable
+     *  fire, the estimated render-time capsule replaces raw validation history
+     *  as the sole target-selection sample. Ray, world clipping, spread, and
+     *  timing estimate remain server-owned — no client hit result is trusted.
+     *  Off per weapon by default; continuous/spread modes opt in. */
     virtual bool SupportsRenderCredit() const { return false; }
 
     /** Slide-posture selection for hitscan capsule tests. A floor slide shrinks the
@@ -599,11 +600,11 @@ public:
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
 
-    /** Server-side only: set when THIS trace's pawn hit was demoted by the
-     *  unclaimed-hit render check (ncp.UnclaimedRenderGate). Head-sphere
-     *  fallbacks (base FireInstantHit and sniper subclasses) must not
-     *  resurrect the demoted target from the same ray. Reset at every
-     *  HitScanTrace entry. */
+    /** Server-side only: set when THIS trace's pawn result was rejected by the
+     *  unclaimed-hit render gate, or render-authoritative claimless targeting
+     *  selected no pawn. Head-sphere fallbacks (base FireInstantHit and sniper
+     *  subclasses) must not resurrect a raw-history target from the same ray.
+     *  Reset at every HitScanTrace entry. */
     bool bLastUnclaimedRenderDemoted = false;
 
     /** Server-side only (327 client-informed headshot): WHERE the client rendered the claimed target's

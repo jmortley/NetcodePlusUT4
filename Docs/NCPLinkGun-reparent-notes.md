@@ -17,9 +17,13 @@ Both inputs retain stock firing-state timing:
   client traces the cosmetic endpoint; the server performs the damage trace and
   accumulation; remote players and spectators consume the stock replicated
   flash endpoint/effects.
-- Beam rewind is server-selected and capped to 40ms one-way by default. The
-  `LinkBeamMaxRewindMs` Blueprint default may be tuned only from 0-50ms, and C++
-  hard-clamps it to 50ms even if stale cooked data contains a larger value.
+- The raw-validation/rollback rewind is server-selected and capped to 40ms
+  one-way by default. `LinkBeamMaxRewindMs` may be tuned only from 0-50ms, and
+  C++ hard-clamps it to 50ms even if stale cooked data contains a larger value.
+  With `ncp.RenderCredit=1`, remote-human damage target selection instead uses
+  one estimated render-time capsule (`half server-measured RTT +
+  ncp.HitAttribRenderExtraMs`, capped at 250ms). It replaces raw history rather
+  than being unioned with it.
   `bTrackHitScanReplication` is explicitly false and the Link class disables
   the claim-only bidirectional time-search fallback. Its `FireInstantHit`
   override also clears the inherited received-claim cache immediately before
@@ -102,7 +106,8 @@ module and restarts the UE4.15 editor.
 7. Compare the resulting CDO against the source child. At minimum preserve its
    current ammo, fire intervals, beam half-size, pull damage, bring-up/put-down
    timing, materials, effects, animations, and Blueprint-owned variables.
-   Confirm `LinkBeamMaxRewindMs=40` (never above 50) and
+   Confirm `LinkBeamMaxRewindMs=40` (never above 50; this is the raw rollback
+   cap, not the default render-authoritative sample) and
    `bTrackHitScanReplication=False`.
 8. Only after the new Blueprint compiles cleanly, replace Link index 4 in both
    `CustomWeaponClasses` and `WarmUpInv` of
