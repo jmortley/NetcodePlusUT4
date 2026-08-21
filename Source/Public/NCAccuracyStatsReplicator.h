@@ -78,6 +78,10 @@ public:
 	 *  etc.). Returns 0 if no entry yet or the stat isn't tracked. */
 	int32 GetHitsForPlayer (const FString& PlayerId, FName StatName) const;
 	int32 GetShotsForPlayer(const FString& PlayerId, FName StatName) const;
+	/** Combined lookup used by the HUD hot path. Returns false until the player's
+	 *  replicated entry arrives and resolves both values with one array scan. */
+	bool GetAccuracyForPlayer(const FString& PlayerId, FName HitsStat, FName ShotsStat,
+		int32& OutHits, int32& OutShots) const;
 
 	/** Idempotent server-only spawn helper. Each NCPlus gamemode calls this from
 	 *  InitGame or HandleMatchHasStarted; subsequent calls are no-ops thanks to

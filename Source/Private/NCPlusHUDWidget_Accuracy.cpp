@@ -23,6 +23,7 @@
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
+#include "CanvasItem.h"
 #include "Engine/Canvas.h"
 #include "EngineUtils.h"
 #include "StatNames.h"
@@ -31,6 +32,12 @@
 
 namespace
 {
+	static const FName NAME_Accuracy(TEXT("accuracy"));
+	static const FName NAME_Weapon(TEXT("weapon"));
+	static const FName NAME_Opacity(TEXT("opacity"));
+	static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
+	static const float StatsRefreshInterval = 0.05f; // 20 Hz local; replicated data remains 2 Hz.
+
 	struct FNCAccWeaponInfo
 	{
 		FName HitsStat;
@@ -76,6 +83,24 @@ namespace
 
 UNCPlusHUDWidget_Accuracy::UNCPlusHUDWidget_Accuracy(const FObjectInitializer& OI)
 	: Super(OI)
+	, CachedLayoutRevision(MAX_uint32)
+	, bCachedLayoutPresent(false)
+	, bCachedLayoutHidden(false)
+	, bCachedPinnedMode(false)
+	, CachedElementScale(1.f)
+	, CachedOpacity(1.f)
+	, CachedPinnedHitsStat(NAME_None)
+	, CachedPinnedShotsStat(NAME_None)
+	, CachedBigFont(nullptr)
+	, CachedSmallFont(nullptr)
+	, CachedHitsStat(NAME_None)
+	, CachedShotsStat(NAME_None)
+	, bCachedPlayerIdIsUnique(false)
+	, NextStatsRefreshTime(0.f)
+	, CachedHits(MIN_int32)
+	, CachedShots(MIN_int32)
+	, bCachedDisplayValid(false)
+	, CachedPercentColor(FLinearColor::White)
 {
 	// Stock position: bottom-right corner, flush with the bottom edge so live
 	// aim feedback sits in the same eye-region as HP/Armor/Ammo. Layout
@@ -87,6 +112,51 @@ UNCPlusHUDWidget_Accuracy::UNCPlusHUDWidget_Accuracy(const FObjectInitializer& O
 	Origin             = FVector2D(1.0f, 1.0f);    // pivot at widget's bottom-right
 	DesignedResolution = 1080.f;
 	bShouldKickBack    = false;
+}
+
+void UNCPlusHUDWidget_Accuracy::RefreshLayoutCache()
+{
+	const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+	if (CachedLayoutRevision == Revision) return;
+
+	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(NAME_Accuracy);
+	bCachedLayoutPresent = E != nullptr;
+	bCachedLayoutHidden = E && E->bHidden;
+	bCachedPinnedMode = false;
+	CachedPinnedHitsStat = NAME_None;
+	CachedPinnedShotsStat = NAME_None;
+	CachedSmallLabel = FText::GetEmpty();
+	CachedSmallLabelString.Reset();
+	CachedLabelMeasure.Font = nullptr;
+	CachedElementScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+	CachedOpacity = E ? FMath::Clamp(E->GetExtraFloat(NAME_Opacity, 1.f), 0.f, 1.f) : 1.f;
+
+	if (E)
+	{
+		if (const FNCAccWeaponInfo* Info = ResolveWeaponInfo(E->GetExtra(NAME_Weapon)))
+		{
+			bCachedPinnedMode = true;
+			CachedPinnedHitsStat = Info->HitsStat;
+			CachedPinnedShotsStat = Info->ShotsStat;
+			CachedSmallLabel = FText::FromString(Info->DisplayLabel);
+			CachedSmallLabelString = Info->DisplayLabel;
+		}
+	}
+
+	if (IsValid(UTHUDOwner))
+	{
+		UFont* BigFallback = UTHUDOwner->LargeFont ? UTHUDOwner->LargeFont : UTHUDOwner->MediumFont;
+		UFont* SmallFallback = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
+		CachedBigFont = NCPlusHUDFonts::Resolve(NAME_Accuracy, UTHUDOwner, BigFallback);
+		CachedSmallFont = NCPlusHUDFonts::Resolve(NAME_Accuracy, UTHUDOwner, SmallFallback);
+	}
+
+	CachedSourceWeapon.Reset();
+	CachedHitsStat = NAME_None;
+	CachedShotsStat = NAME_None;
+	NextStatsRefreshTime = 0.f;
+	bCachedDisplayValid = false;
+	CachedLayoutRevision = Revision;
 }
 
 bool UNCPlusHUDWidget_Accuracy::ShouldDraw_Implementation(bool bShowScores)
@@ -104,13 +174,12 @@ bool UNCPlusHUDWidget_Accuracy::ShouldDraw_Implementation(bool bShowScores)
 	// editor baked a visible accuracy entry into HUDLayout.json for EVERY mode.
 	// With no entry, Draw falls back to sane defaults (scale 1, Large font, ctor
 	// bottom-right position). bHidden in an entry honors the editor's eye toggle.
-	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("accuracy"));
-	if (!E)
+	RefreshLayoutCache();
+	if (!bCachedLayoutPresent)
 	{
 		return Cast<ANCShaftArenaHUD>(UTHUDOwner) != nullptr;
 	}
-	if (E->bHidden) return false;
-	return true;
+	return !bCachedLayoutHidden;
 }
 
 void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
@@ -125,6 +194,8 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 	AUTPlayerController* PC = UTHUDOwner->UTPlayerOwner;
 	AUTPlayerState* PS = PC->UTPlayerState;
 	if (!IsValid(PS)) return;
+	RefreshLayoutCache();
+	if (!CachedBigFont || !CachedSmallFont || CachedOpacity <= 0.001f) return;
 
 	// Resolve stat source. Two modes:
 	//   Pinned weapon (layout Extras["weapon"] = "linkgun" / "shockrifle" /
@@ -135,23 +206,11 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 	//     AUTWeapon. If there's no live character or weapon yet (just spawned,
 	//     mid-respawn, holding a weapon that doesn't track shots like the
 	//     translocator and we're being strict), bail — nothing useful to show.
-	FName HitsStat = NAME_None;
-	FName ShotsStat = NAME_None;
-	FString SmallLabel;
-	bool bPinnedMode = false;
-	if (const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("accuracy")))
-	{
-		const FString WeaponKey = E->GetExtra(TEXT("weapon"));
-		if (const FNCAccWeaponInfo* Info = ResolveWeaponInfo(WeaponKey))
-		{
-			HitsStat   = Info->HitsStat;
-			ShotsStat  = Info->ShotsStat;
-			SmallLabel = Info->DisplayLabel;
-			bPinnedMode = true;
-		}
-	}
+	FName HitsStat = CachedPinnedHitsStat;
+	FName ShotsStat = CachedPinnedShotsStat;
+	AUTWeapon* SourceWeapon = nullptr;
 
-	if (!bPinnedMode)
+	if (!bCachedPinnedMode)
 	{
 		// Use GetPawn() (UPROPERTY, GC-nulled on destroy) rather than
 		// GetUTCharacter() — the latter goes through a Cast that can chase a
@@ -161,10 +220,10 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 		if (!IsValid(Pawn)) return;
 		AUTCharacter* Char = Cast<AUTCharacter>(Pawn);
 		if (!IsValid(Char)) return;
-		AUTWeapon* Weapon = Char->GetWeapon();
-		if (!IsValid(Weapon)) return;
-		HitsStat  = Weapon->HitsStatsName;
-		ShotsStat = Weapon->ShotsStatsName;
+		SourceWeapon = Char->GetWeapon();
+		if (!IsValid(SourceWeapon)) return;
+		HitsStat  = SourceWeapon->HitsStatsName;
+		ShotsStat = SourceWeapon->ShotsStatsName;
 		if (HitsStat == NAME_None || ShotsStat == NAME_None) return;
 	}
 
@@ -176,75 +235,125 @@ void UNCPlusHUDWidget_Accuracy::Draw_Implementation(float DeltaTime)
 	// Swap whenever we're displaying link accuracy.
 	if (HitsStat == NAME_LinkHits)
 	{
-		static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 		ShotsStat = NAME_LinkBeamShots;
 	}
 
-	// AUTPlayerState::StatsData is server-only (UPROPERTY with no Replicated
-	// specifier). On dedicated-server clients PS->GetStatsValue returns 0 for
-	// every stat. Fall back to the per-weapon replicator (spawned by every
-	// NCPlus gamemode) which broadcasts the standard weapon hits/shots at 2Hz.
-	int32 Hits  = PS->GetStatsValue(HitsStat);
-	int32 Shots = PS->GetStatsValue(ShotsStat);
-	if (Hits == 0 && Shots == 0)
+	const bool bSourceChanged = CachedSourceWeapon.Get() != SourceWeapon
+		|| CachedHitsStat != HitsStat || CachedShotsStat != ShotsStat
+		|| CachedPlayerState.Get() != PS;
+	if (bSourceChanged)
 	{
-		if (ANCAccuracyStatsReplicator* Rep = GetAccuracyReplicator())
-		{
-			const FString PlayerId = PS->UniqueId.IsValid()
-				? PS->UniqueId.ToString()
-				: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
-			Hits  = Rep->GetHitsForPlayer (PlayerId, HitsStat);
-			Shots = Rep->GetShotsForPlayer(PlayerId, ShotsStat);
-		}
+		CachedSourceWeapon = SourceWeapon;
+		CachedHitsStat = HitsStat;
+		CachedShotsStat = ShotsStat;
+		NextStatsRefreshTime = 0.f;
 	}
-	// Clamp at 100% as a defensive backstop.
-	const float RawPct = (Shots > 0) ? float(Hits) / float(Shots) * 100.f : 0.f;
-	const float Pct    = FMath::Min(RawPct, 100.f);
 
-	// Color tier: green ≥ 50, yellow ≥ 30, red below.
-	const FLinearColor PctColor = (Shots == 0)   ? FLinearColor(1.f, 1.f, 1.f, 0.6f)
-	                            : (Pct >= 50.f) ? FLinearColor(0.30f, 1.0f, 0.40f, 1.f)
-	                            : (Pct >= 30.f) ? FLinearColor(1.0f, 0.95f, 0.35f, 1.f)
-	                            : FLinearColor(1.0f, 0.45f, 0.45f, 1.f);
-
-	UFont* BigFont  = UTHUDOwner->LargeFont ? UTHUDOwner->LargeFont : UTHUDOwner->MediumFont;
-	UFont* SmallFnt = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
-	// Per-element font override (Phase 3.8) — applied to both percentage
-	// number and the small label/sub-text.
-	BigFont  = NCPlusHUDFonts::Resolve(TEXT("accuracy"), UTHUDOwner, BigFont);
-	SmallFnt = NCPlusHUDFonts::Resolve(TEXT("accuracy"), UTHUDOwner, SmallFnt);
-	if (!BigFont || !SmallFnt) return;
-
-	// Honor the editor's Scale + Opacity rows. Layout Scale multiplies the text
-	// scale; opacity routes through DrawText's DrawOpacity arg. Both default to 1.0.
-	const FNCPlusHUDElement* AccElem = FNCPlusHUDLayout::GetLive().Find(TEXT("accuracy"));
-	const float ElemScale = AccElem ? AccElem->Scale : 1.f;
-	const float Op = AccElem ? AccElem->GetExtraFloat(TEXT("opacity"), 1.f) : 1.f;
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (!bCachedDisplayValid || Now >= NextStatsRefreshTime)
+	{
+		RefreshDisplayCache(PS, HitsStat, ShotsStat, Now);
+	}
+	if (!bCachedDisplayValid) return;
 
 	// Optional small label above the number — only when a specific weapon is
 	// pinned, so the user knows what they're looking at. Current-weapon mode
 	// shows just the number since the held weapon is obvious from the rest of
 	// the HUD.
 	float NumberY = 0.f;
-	if (!SmallLabel.IsEmpty())
+	if (!CachedSmallLabel.IsEmpty())
 	{
-		DrawText(FText::FromString(SmallLabel), Size.X * 0.5f, 0.f,
-			SmallFnt, RenderScale * ElemScale, Op, FLinearColor(1.f, 1.f, 1.f, 0.75f),
-			ETextHorzPos::Center, ETextVertPos::Top);
-		NumberY = 14.f * ElemScale;
+		DrawCachedText(CachedSmallLabel, CachedSmallLabelString, CachedLabelMeasure,
+			Size.X * 0.5f, 0.f, CachedSmallFont, RenderScale * CachedElementScale,
+			CachedOpacity, FLinearColor(1.f, 1.f, 1.f, 0.75f));
+		NumberY = 14.f * CachedElementScale;
 	}
 
-	const FString PctStr = (Shots > 0)
-		? FString::Printf(TEXT("%d%%"), FMath::RoundToInt(Pct))
-		: FString(TEXT("--"));
-	DrawText(FText::FromString(PctStr), Size.X * 0.5f, NumberY,
-		BigFont, RenderScale * ElemScale, Op, PctColor,
-		ETextHorzPos::Center, ETextVertPos::Top);
+	DrawCachedText(CachedPercentText, CachedPercentString, CachedPercentMeasure,
+		Size.X * 0.5f, NumberY, CachedBigFont, RenderScale * CachedElementScale,
+		CachedOpacity, CachedPercentColor);
 
-	const FString SubStr = FString::Printf(TEXT("%d / %d"), Hits, Shots);
-	DrawText(FText::FromString(SubStr), Size.X * 0.5f, NumberY + 48.f * ElemScale,
-		SmallFnt, RenderScale * ElemScale, Op, FLinearColor(1.f, 1.f, 1.f, 0.85f),
-		ETextHorzPos::Center, ETextVertPos::Top);
+	DrawCachedText(CachedSubText, CachedSubString, CachedSubMeasure,
+		Size.X * 0.5f, NumberY + 48.f * CachedElementScale, CachedSmallFont,
+		RenderScale * CachedElementScale, CachedOpacity, FLinearColor(1.f, 1.f, 1.f, 0.85f));
+}
+
+void UNCPlusHUDWidget_Accuracy::DrawCachedText(const FText& Text, const FString& String,
+	FTextMeasureCache& Measure, float X, float Y, UFont* Font, float TextScale,
+	float DrawOpacity, const FLinearColor& DrawColor)
+{
+	if (!Canvas || !Font || Text.IsEmpty()) return;
+	if (Measure.Font != Font)
+	{
+		float XL = 0.f;
+		float YL = 0.f;
+		Canvas->StrLen(Font, String, XL, YL);
+		Measure.Font = Font;
+		Measure.Size = FVector2D(XL, YL);
+	}
+	if (bScaleByDesignedResolution)
+	{
+		X *= RenderScale;
+		Y *= RenderScale;
+	}
+	const float FinalScale = bScaleByDesignedResolution ? RenderScale * TextScale : TextScale;
+	const FVector2D DrawPos(RenderPosition.X + X - Measure.Size.X * FinalScale * 0.5f,
+		RenderPosition.Y + Y);
+	FLinearColor Color = DrawColor;
+	Color.A = Opacity * DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
+	FCanvasTextItem TextItem(DrawPos, Text, Font, Color);
+	TextItem.Scale = FVector2D(FinalScale, FinalScale);
+	Canvas->DrawItem(TextItem);
+}
+
+void UNCPlusHUDWidget_Accuracy::RefreshDisplayCache(AUTPlayerState* PS,
+	FName HitsStat, FName ShotsStat, float Now)
+{
+	if (!IsValid(PS)) return;
+	const bool bHasUniqueId = PS->UniqueId.IsValid();
+	if (CachedPlayerState.Get() != PS || (bHasUniqueId && !bCachedPlayerIdIsUnique))
+	{
+		CachedPlayerState = PS;
+		bCachedPlayerIdIsUnique = bHasUniqueId;
+		CachedPlayerId = bHasUniqueId
+			? PS->UniqueId.ToString()
+			: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+	}
+
+	// AUTPlayerState::StatsData is server-only on dedicated clients. Query it
+	// first for listen/local play, then use one combined replicated-array lookup.
+	int32 Hits = PS->GetStatsValue(HitsStat);
+	int32 Shots = PS->GetStatsValue(ShotsStat);
+	if (Hits == 0 && Shots == 0)
+	{
+		if (ANCAccuracyStatsReplicator* Rep = GetAccuracyReplicator())
+		{
+			Rep->GetAccuracyForPlayer(CachedPlayerId, HitsStat, ShotsStat, Hits, Shots);
+		}
+	}
+
+	if (!bCachedDisplayValid || Hits != CachedHits || Shots != CachedShots)
+	{
+		CachedHits = Hits;
+		CachedShots = Shots;
+		const float RawPct = Shots > 0 ? float(Hits) / float(Shots) * 100.f : 0.f;
+		const float Pct = FMath::Min(RawPct, 100.f);
+		CachedPercentColor = Shots == 0 ? FLinearColor(1.f, 1.f, 1.f, 0.6f)
+			: Pct >= 50.f ? FLinearColor(0.30f, 1.0f, 0.40f, 1.f)
+			: Pct >= 30.f ? FLinearColor(1.0f, 0.95f, 0.35f, 1.f)
+			: FLinearColor(1.0f, 0.45f, 0.45f, 1.f);
+		CachedPercentText = Shots > 0
+			? FText::FromString(FString::Printf(TEXT("%d%%"), FMath::RoundToInt(Pct)))
+			: FText::FromString(TEXT("--"));
+		CachedSubText = FText::FromString(FString::Printf(TEXT("%d / %d"), Hits, Shots));
+		CachedPercentString = CachedPercentText.ToString();
+		CachedSubString = CachedSubText.ToString();
+		CachedPercentMeasure.Font = nullptr;
+		CachedSubMeasure.Font = nullptr;
+	}
+
+	bCachedDisplayValid = true;
+	NextStatsRefreshTime = Now + StatsRefreshInterval;
 }
 
 ANCAccuracyStatsReplicator* UNCPlusHUDWidget_Accuracy::GetAccuracyReplicator() const
