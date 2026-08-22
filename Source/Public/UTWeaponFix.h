@@ -498,6 +498,11 @@ public:
      */
     bool IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime);
     void OnRetryTimer(uint8 FireModeNum);
+    void OnBufferedClickRetryTimer(uint8 FireModeNum, FRotator ReleaseAim, float ReleaseTime);
+    /** State/game-driven stops must not masquerade as a physical mouse release. */
+    void StopFireInternal(uint8 FireModeNum);
+    /** Same guard, but route through AUTCharacter::StopFire for owner-side cleanup. */
+    void StopOwnerFireInternal(uint8 FireModeNum);
     bool bIsTransactionalFire;
     float LastMultiPressTime;
     UPROPERTY()
@@ -555,13 +560,12 @@ protected:
     // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
     bool bCrossModeRetryArmed[2];
 
-    // True while RetryFireHandle[mode] holds a BUFFERED CLICK: a queued
-    // (cooldown-blocked) press that was then RELEASED while its shot was due
-    // within ncp.ClickBufferMs. The release keeps the timer alive (StopFire)
-    // and OnRetryTimer fires exactly one shot then ends the sequence itself.
-    // Cleared by any fresh physical press, consumed in OnRetryTimer, killed on
-    // PutDown. Never graduated to pawn PendingFire — it is a spent click, not
-    // held intent.
+    // True while RetryFireHandle[mode] holds a BUFFERED CLICK. In 328 dogfood
+    // this is restricted to Shock-derived primary: a cooldown-blocked press
+    // RELEASED within ncp.ClickBufferMs keeps release-time aim in the timer
+    // payload. OnBufferedClickRetryTimer executes once at legal fire time.
+    // Cleared by replacement input and weapon lifecycle; never graduated to
+    // pawn PendingFire because it is spent click intent, not a held button.
     bool bBufferedClickPending[2];
 
     UPROPERTY(Transient)

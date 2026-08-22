@@ -14,6 +14,7 @@
 #include "UTTeamInfo.h"
 #include "UTInventory.h"
 #include "UTWeapon.h"
+#include "UTWeaponFix.h"
 #include "UTPickup.h"
 #include "UTGenericObjectivePoint.h"
 #include "UTCTFFlagBase.h"
@@ -2312,8 +2313,16 @@ void AClutchGameMode::FreezeRoundPawn(AController* Controller)
 	AUTCharacter* Character = Controller ? Cast<AUTCharacter>(Controller->GetPawn()) : nullptr;
 	if (Character && Character->GetCharacterMovement())
 	{
-		Character->StopFire(0);
-		Character->StopFire(1);
+		if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(Character->GetWeapon()))
+		{
+			FixWeapon->StopOwnerFireInternal(0);
+			FixWeapon->StopOwnerFireInternal(1);
+		}
+		else
+		{
+			Character->StopFire(0);
+			Character->StopFire(1);
+		}
 		Character->GetCharacterMovement()->DisableMovement();
 	}
 	if (AUTPlayerController* PlayerController = Cast<AUTPlayerController>(Controller))

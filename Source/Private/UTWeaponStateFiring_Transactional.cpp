@@ -290,7 +290,7 @@ void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 		AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
 		if (W)
 		{
-			W->StopFire(W->GetCurrentFireMode());
+			W->StopFireInternal(W->GetCurrentFireMode());
 		}
 	}
 
@@ -340,7 +340,7 @@ void UUTWeaponStateFiring_Transactional::TransactionalFire()
 		AUTWeaponFix* W = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
 		if (W && W->GetCurrentState() == this)
 		{
-			W->StopFire(W->GetCurrentFireMode());
+			W->StopFireInternal(W->GetCurrentFireMode());
 		}
 		//GetOuterAUTWeapon()->GotoActiveState();
 	}

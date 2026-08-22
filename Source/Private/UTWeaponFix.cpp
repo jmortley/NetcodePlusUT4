@@ -14,6 +14,7 @@
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
 #include "UTWeaponStateZooming.h"
 #include "UTWeaponStateFiringSpinUp.h"
+#include "UTPlusShockRifle.h"
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
 #include "UTPlusProj_FlakShell.h"
@@ -106,23 +107,42 @@ static FORCEINLINE const TCHAR* RocketPrimaryDiagPlayer(AUTWeaponFix* Weapon)
 // 0 = legacy retry-graduation + :1779-guarded server clear (today's behaviour).
 // Runtime-toggleable (rcon) so ONE hub can A/B it live. See StartFire / StopFire /
 // PutDown / ServerStopFireFixed. No replicated/RPC change; pairs with ncp.FireDebug.
-// Click buffer (ncp.ClickBufferMs): "if you clicked and ROF allowed it, the gun
-// fires." A press queued to the next legal fire time (cooldown/debounce retry)
-// whose RELEASE arrives while the shot is due within this many ms stays queued
-// and fires exactly once at the legal time, instead of the release cancelling
-// it. 0 = off (legacy stock-parity: an early tap fully inside cooldown fires
-// nothing).
-// DEFAULT 0 (2026-08-06 review): the buffered shot keeps only a bool — no aim
-// snapshot — so it fires with the view rotation AT EXPIRY, up to the window
-// after the release. A post-release flick sends the delayed shot at whatever
-// the crosshair is on NOW (wrong-target ghost shot). Do not enable above 0
-// until the buffer captures aim at press/release (CachedTransactionalRotation
-// is the likely vehicle) and that path is audited.
+// Click buffer (ncp.ClickBufferMs): Shock primary only. A same-mode press queued
+// to the next legal fire time whose RELEASE arrives inside the configured window
+// keeps that release-time view rotation and fires exactly once at the legal time.
+// The shot timestamp, muzzle, collision world, target claim, and server ROF remain
+// legal-execution-time values; this does not grant extra rewind. 0 = off. The
+// effective value is hard-clamped to 40ms even if the cvar is set higher; a
+// separate 50ms snapshot-age ceiling leaves 10ms of high-FPS timer slack.
 static TAutoConsoleVariable<float> CVarClickBufferMs(
     TEXT("ncp.ClickBufferMs"), 0.0f,
-    TEXT("Rapid-click reliability: a queued (cooldown-blocked) click released while its shot is due within this many ms still ")
-    TEXT("fires once at the legal time instead of being cancelled by the release. 0 = off (release cancels, stock-parity)."),
+    TEXT("Shock-primary rapid-click reliability: a queued click released while its shot is due within this many ms fires once ")
+    TEXT("at the legal time using RELEASE-time aim. Execution time/world/rewind are not backdated. Effective range 0-40ms; 0=off."),
     ECVF_Default);
+
+static constexpr float MaxClickBufferMs = 40.0f;
+static constexpr float ClickBufferDispatchSlackSeconds = 0.025f;
+static constexpr float MaxBufferedAimAgeSeconds = 0.050f;
+
+// Exact zero rotation is a legitimate aim. This synchronous scope is the
+// validity bit for CachedTransactionalRotation; it avoids changing the weapon
+// object layout or relying on FRotator::IsZero() as a sentinel.
+static TSet<const AUTWeaponFix*> ScopedTransactionalAimWeapons;
+
+static FORCEINLINE bool IsShockPrimaryClickBuffer(AUTWeaponFix* Weapon, uint8 FireModeNum)
+{
+    return FireModeNum == 0 && Cast<AUTPlusShockRifle>(Weapon) != nullptr;
+}
+
+static FORCEINLINE float GetClickBufferWindowSeconds()
+{
+    return FMath::Clamp(CVarClickBufferMs.GetValueOnGameThread(), 0.0f, MaxClickBufferMs) * 0.001f;
+}
+
+static FORCEINLINE bool HasScopedTransactionalAim(const AUTWeaponFix* Weapon)
+{
+    return ScopedTransactionalAimWeapons.Contains(Weapon);
+}
 
 static TAutoConsoleVariable<float> CVarMouseDebounceCap(
     TEXT("ncp.MouseDebounceCap"), 0.01f,
@@ -1220,16 +1240,157 @@ void AUTWeaponFix::OnRetryTimer(uint8 FireModeNum)
     if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] OnRetryTimer mode=%d -> StartFire"), FireModeNum);
     StartFire(FireModeNum);
     bHandlingRetry = false;
+}
 
-    // Buffered click (released before the shot was due): the dispatch above just
-    // fired the queued shot; end the sequence now — the physical button is up,
-    // so nothing else will ever send the stop. If StartFire got re-blocked by a
-    // float-boundary re-arm instead, StopFire's buffer check re-buffers the tiny
-    // remaining wait and this converges next frame.
-    if (FireModeNum < 2 && bBufferedClickPending[FireModeNum])
+
+void AUTWeaponFix::OnBufferedClickRetryTimer(uint8 FireModeNum, FRotator ReleaseAim, float ReleaseTime)
+{
+    UWorld* World = GetWorld();
+    const float BufferWindow = GetClickBufferWindowSeconds();
+    const float Now = World ? World->GetTimeSeconds() : -1.0f;
+    const float SnapshotAge = (Now >= 0.0f && ReleaseTime >= 0.0f) ? (Now - ReleaseTime) : BIG_NUMBER;
+
+    // A cancelled/replaced delegate must not clear the PendingFire belonging to
+    // newer input. Only the callback that still owns the buffered flag may
+    // mutate player or retry state.
+    if (FireModeNum >= 2 || !bBufferedClickPending[FireModeNum]
+        || !IsShockPrimaryClickBuffer(this, FireModeNum))
     {
-        bBufferedClickPending[FireModeNum] = false;
-        StopFire(FireModeNum);
+        if (FireDbg())
+        {
+            UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[FireDbg] BufferedShock IGNORE mode=%d reason=payload_no_longer_owned"),
+                FireModeNum);
+        }
+        return;
+    }
+
+    const bool bOwnerStillValid = UTOwner != nullptr
+        && !UTOwner->IsPendingKillPending()
+        && !UTOwner->IsDead()
+        && !UTOwner->IsFiringDisabled()
+        && UTOwner->GetWeapon() == this
+        && UTOwner->GetPendingWeapon() == nullptr;
+    const bool bSnapshotStillFresh = SnapshotAge >= 0.0f
+        && SnapshotAge <= FMath::Min(MaxBufferedAimAgeSeconds,
+            BufferWindow + ClickBufferDispatchSlackSeconds);
+
+    if (World == nullptr || BufferWindow <= 0.0f
+        || ReleaseAim.ContainsNaN() || !bOwnerStillValid || !bSnapshotStillFresh)
+    {
+        if (World != nullptr && FireModeNum < 2)
+        {
+            GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+        }
+        if (FireModeNum < 2)
+        {
+            bBufferedClickPending[FireModeNum] = false;
+        }
+        if (UTOwner != nullptr && UTOwner->GetWeapon() == this
+            && UTOwner->GetPendingWeapon() == nullptr && FireModeNum < 2)
+        {
+            UTOwner->SetPendingFire(FireModeNum, false);
+        }
+        if (FireDbg())
+        {
+            UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[FireDbg] BufferedShock CANCEL mode=%d ageMs=%.2f ownerValid=%d fresh=%d windowMs=%.2f"),
+                FireModeNum, SnapshotAge * 1000.0f, bOwnerStillValid ? 1 : 0,
+                bSnapshotStillFresh ? 1 : 0, BufferWindow * 1000.0f);
+        }
+        return;
+    }
+
+    ReleaseAim.Normalize();
+    const FRotator CurrentAim = UTOwner->GetViewRotation();
+    const float AimDot = FVector::DotProduct(ReleaseAim.Vector(), CurrentAim.Vector());
+    const float AimDeltaDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(AimDot, -1.0f, 1.0f)));
+    if (FireDbg())
+    {
+        UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[FireDbg] BufferedShock DISPATCH mode=%d ageMs=%.2f aimDeltaDeg=%.3f releaseAim=%s"),
+            FireModeNum, SnapshotAge * 1000.0f, AimDeltaDegrees, *ReleaseAim.ToString());
+    }
+
+    // Stage the release direction only for this synchronous logical shot. The
+    // timestamp, muzzle, target geometry, and hit claim are still computed now.
+    bHandlingRetry = true;
+    CachedTransactionalRotation = ReleaseAim;
+    ScopedTransactionalAimWeapons.Add(this);
+    StartFire(FireModeNum);
+    ScopedTransactionalAimWeapons.Remove(this);
+    CachedTransactionalRotation = FRotator::ZeroRotator;
+
+    if (!bBufferedClickPending[FireModeNum])
+    {
+        // FireShot marked the queued click committed. The physical button is
+        // already up, so end the sequence without turning this synthetic stop
+        // into a new release or another buffered click.
+        if (UTOwner != nullptr && UTOwner->GetWeapon() == this
+            && UTOwner->GetPendingWeapon() == nullptr)
+        {
+            StopFireInternal(FireModeNum);
+        }
+        bHandlingRetry = false;
+        if (FireDbg())
+        {
+            UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[FireDbg] BufferedShock COMMIT mode=%d ageMs=%.2f"),
+                FireModeNum, SnapshotAge * 1000.0f);
+        }
+        return;
+    }
+
+    if (GetWorldTimerManager().IsTimerActive(RetryFireHandle[FireModeNum]))
+    {
+        if (UTOwner == nullptr || UTOwner->IsPendingKillPending() || UTOwner->IsDead()
+            || UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon() != nullptr)
+        {
+            GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+            bBufferedClickPending[FireModeNum] = false;
+            bHandlingRetry = false;
+            if (FireDbg())
+            {
+                UE_LOG(LogUTWeaponFix, Warning,
+                    TEXT("[FireDbg] BufferedShock CANCEL mode=%d reason=owner_changed_during_dispatch"),
+                    FireModeNum);
+            }
+            return;
+        }
+
+        // A float-boundary check re-armed the generic retry. Preserve the
+        // original physical release payload instead of sampling newer aim.
+        const float Remaining = GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]);
+        FTimerDelegate BufferedRetry;
+        BufferedRetry.BindUObject(this, &AUTWeaponFix::OnBufferedClickRetryTimer,
+            FireModeNum, ReleaseAim, ReleaseTime);
+        GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+        GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], BufferedRetry,
+            (Remaining > 0.0f) ? Remaining : 0.001f, false);
+        UTOwner->SetPendingFire(FireModeNum, false);
+        bHandlingRetry = false;
+        if (FireDbg())
+        {
+            UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[FireDbg] BufferedShock REARM mode=%d remainingMs=%.2f originalAgeMs=%.2f"),
+                FireModeNum, Remaining * 1000.0f, SnapshotAge * 1000.0f);
+        }
+        return;
+    }
+
+    // StartFire returned without committing and without a legal retry path.
+    bBufferedClickPending[FireModeNum] = false;
+    if (UTOwner != nullptr && UTOwner->GetWeapon() == this
+        && UTOwner->GetPendingWeapon() == nullptr)
+    {
+        UTOwner->SetPendingFire(FireModeNum, false);
+    }
+    bHandlingRetry = false;
+    if (FireDbg())
+    {
+        UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[FireDbg] BufferedShock CANCEL mode=%d reason=no_commit_no_retry ageMs=%.2f"),
+            FireModeNum, SnapshotAge * 1000.0f);
     }
 }
 
@@ -1264,6 +1425,28 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] StartFire mode=%d curFiring=%d state=%s"),
             FireModeNum, CurrentlyFiringMode,
             GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
+    }
+
+    // Any fresh physical press supersedes a previously released buffered click,
+    // including a new secondary press while primary was queued. Do this before
+    // debounce: otherwise debounce can clear the flag but leave the old payload
+    // delegate alive, which later consumes the newly held intent.
+    if (!bHandlingRetry && UTOwner && UTOwner->IsLocallyControlled())
+    {
+        for (int32 BufferedMode = 0; BufferedMode < 2; ++BufferedMode)
+        {
+            if (bBufferedClickPending[BufferedMode])
+            {
+                GetWorldTimerManager().ClearTimer(RetryFireHandle[BufferedMode]);
+                bBufferedClickPending[BufferedMode] = false;
+                if (FireDbg())
+                {
+                    UE_LOG(LogUTWeaponFix, Warning,
+                        TEXT("[FireDbg] BufferedShock CANCEL mode=%d reason=fresh_press newMode=%d"),
+                        BufferedMode, FireModeNum);
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------
@@ -1631,7 +1814,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		if (!bIsChargedState)
 		{
 			UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StartFire] Mode %d: Cross-mode switch from Mode %d — stopping current mode first"), FireModeNum, CurrentlyFiringMode);
-			StopFire(CurrentlyFiringMode);
+			StopFireInternal(CurrentlyFiringMode);
 			// CurrentlyFiringMode is now 255, fall through to fire the new mode
 		}
 
@@ -1858,6 +2041,12 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
 void AUTWeaponFix::FireShot()
 {
+	const uint8 BufferedDispatchMode = CurrentFireMode;
+	const bool bBufferedShockDispatch = BufferedDispatchMode < 2
+		&& bBufferedClickPending[BufferedDispatchMode]
+		&& IsShockPrimaryClickBuffer(this, BufferedDispatchMode)
+		&& HasScopedTransactionalAim(this);
+
 	if (RocketPrimaryDiagFor(this, CurrentFireMode))
 	{
 		UE_LOG(LogUTWeaponFix, Warning,
@@ -1881,6 +2070,12 @@ void AUTWeaponFix::FireShot()
 	if (ReplayWorld && ReplayWorld->DemoNetDriver && ReplayWorld->DemoNetDriver->IsPlaying())
 	{
 		Super::FireShot();
+		if (bBufferedShockDispatch)
+		{
+			bBufferedClickPending[BufferedDispatchMode] = false;
+			ScopedTransactionalAimWeapons.Remove(this);
+			CachedTransactionalRotation = FRotator::ZeroRotator;
+		}
 		return;
 	}
 
@@ -1915,7 +2110,21 @@ void AUTWeaponFix::FireShot()
                 LastFireTime[CurrentFireMode] = CurrentTime;
             }
         }
-		FRotator ClientRot = GetUTOwner() ? GetUTOwner()->GetViewRotation() : FRotator::ZeroRotator;
+		FRotator ClientRot = bBufferedShockDispatch
+			? CachedTransactionalRotation
+			: (GetUTOwner() ? GetUTOwner()->GetViewRotation() : FRotator::ZeroRotator);
+		if (bBufferedShockDispatch)
+		{
+			ClientRot.Normalize();
+		}
+
+		// A buffered Shock shot was scoped by its payload callback before this
+		// pretrace. Normal shots retain their existing timing path.
+		if (bBufferedShockDispatch)
+		{
+			CachedTransactionalRotation = ClientRot;
+			ScopedTransactionalAimWeapons.Add(this);
+		}
 		//EarliestFireTime = 0.f;
 
 		uint8 ZOffset = 0;
@@ -2089,13 +2298,17 @@ void AUTWeaponFix::FireShot()
         QueueResendStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
             ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
 
-		// Cache the client's exact aim direction at fire-press time.
-		// GetBaseFireRotation() will use this for the fake projectile spawn,
-		// ensuring the fake fires exactly where the crosshair was — no curve from
-		// mouse movement between fire input and SpawnNetPredictedProjectile call.
+		// Existing fake-projectile/effect path for non-buffered shots. Buffered
+		// Shock already staged the same rotation before its pretrace.
 		CachedTransactionalRotation = ClientRot;
 		Super::FireShot();
-		CachedTransactionalRotation = FRotator::ZeroRotator; // Clear after spawn
+		if (bBufferedShockDispatch)
+		{
+			// Commit marker consumed by OnBufferedClickRetryTimer.
+			bBufferedClickPending[BufferedDispatchMode] = false;
+		}
+		ScopedTransactionalAimWeapons.Remove(this);
+		CachedTransactionalRotation = FRotator::ZeroRotator;
 	}
 	else
 		// --- SERVER SIDE ---
@@ -2173,9 +2386,43 @@ void AUTWeaponFix::FireShot()
 		// 3. SPAWN PROJECTILE
 		UE_LOG(LogUTWeaponFix, Verbose, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
 		Super::FireShot();
+		if (bBufferedShockDispatch)
+		{
+			// Listen-server local player: same commit contract as the client path.
+			bBufferedClickPending[BufferedDispatchMode] = false;
+			ScopedTransactionalAimWeapons.Remove(this);
+			CachedTransactionalRotation = FRotator::ZeroRotator;
+		}
 	}
 }
 
+
+
+void AUTWeaponFix::StopFireInternal(uint8 FireModeNum)
+{
+	const bool bWasHandlingRetry = bHandlingRetry;
+	bHandlingRetry = true;
+	StopFire(FireModeNum);
+	bHandlingRetry = bWasHandlingRetry;
+}
+
+
+void AUTWeaponFix::StopOwnerFireInternal(uint8 FireModeNum)
+{
+	const bool bWasHandlingRetry = bHandlingRetry;
+	bHandlingRetry = true;
+	if (UTOwner != nullptr && UTOwner->GetWeapon() == this)
+	{
+		// Preserve AUTCharacter's ghost-recording and input cleanup while making
+		// it explicit that this stop was game/state driven, not a mouse release.
+		UTOwner->StopFire(FireModeNum);
+	}
+	else
+	{
+		StopFire(FireModeNum);
+	}
+	bHandlingRetry = bWasHandlingRetry;
+}
 
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
@@ -2199,7 +2446,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 
     // Mouse-bounce debounce: stamp the release time so the next StartFire
     // within MouseDebounceWindow is recognised as a bounce, not a new click.
-    if (LastReleaseTime.IsValidIndex(FireModeNum))
+    if (!bHandlingRetry && LastReleaseTime.IsValidIndex(FireModeNum))
     {
         LastReleaseTime[FireModeNum] = GetWorld()->GetTimeSeconds();
     }
@@ -2221,24 +2468,50 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     }
     if (FireModeNum < 2)
     {
-        // Click buffer (ncp.ClickBufferMs): a queued same-mode click whose shot
-        // is due within the window survives its own release and fires once at
-        // the legal time — OnRetryTimer ends the sequence after the shot.
-        // Outside the window, buffer off, or a cross-mode stall-fix arm (not
-        // same-mode click intent): legacy behavior — release cancels the queued
-        // shot, stock-parity for early taps.
-        const float BufferWindow = CVarClickBufferMs.GetValueOnGameThread() * 0.001f;
-        if (BufferWindow > 0.f
+        // Shock primary dogfood buffer. Eligibility remains RELEASE-to-ready:
+        // preserve the raw release-time direction, then execute against the
+        // current legal-time world. Rebinding the timer carries the snapshot as
+        // delegate payload so the weapon-wide transactional cache stays empty
+        // while merely queued.
+        const float BufferWindow = GetClickBufferWindowSeconds();
+        const bool bReplayPlayback = GetWorld() && GetWorld()->DemoNetDriver
+            && GetWorld()->DemoNetDriver->IsPlaying();
+        const float Remaining = GetWorldTimerManager().IsTimerActive(RetryFireHandle[FireModeNum])
+            ? GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]) : -1.0f;
+        if (!bHandlingRetry
+            && IsShockPrimaryClickBuffer(this, FireModeNum)
+            && BufferWindow > 0.f
             && UTOwner && UTOwner->IsLocallyControlled()
+            && !UTOwner->IsFiringDisabled()
+            && UTOwner->GetPendingWeapon() == nullptr
+            && !bReplayPlayback
             && !bCrossModeRetryArmed[FireModeNum]
             && GetWorldTimerManager().IsTimerActive(RetryFireHandle[FireModeNum])
-            && GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]) <= BufferWindow)
+            && Remaining <= BufferWindow)
         {
-            bBufferedClickPending[FireModeNum] = true;
-            if (FireDbg())
+            FRotator ReleaseAim = UTOwner->GetViewRotation();
+            ReleaseAim.Normalize();
+            if (!ReleaseAim.ContainsNaN())
             {
-                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] StopFire BUFFERED queued click mode=%d remain=%.3f"),
-                    FireModeNum, GetWorldTimerManager().GetTimerRemaining(RetryFireHandle[FireModeNum]));
+                const float ReleaseTime = GetWorld()->GetTimeSeconds();
+                FTimerDelegate BufferedRetry;
+                BufferedRetry.BindUObject(this, &AUTWeaponFix::OnBufferedClickRetryTimer,
+                    FireModeNum, ReleaseAim, ReleaseTime);
+                GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+                GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], BufferedRetry,
+                    (Remaining > 0.0f) ? Remaining : 0.001f, false);
+                bBufferedClickPending[FireModeNum] = true;
+                if (FireDbg())
+                {
+                    UE_LOG(LogUTWeaponFix, Warning,
+                        TEXT("[FireDbg] StopFire BUFFERED ShockPrimary mode=%d remainMs=%.2f releaseAim=%s"),
+                        FireModeNum, Remaining * 1000.0f, *ReleaseAim.ToString());
+                }
+            }
+            else
+            {
+                GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+                bBufferedClickPending[FireModeNum] = false;
             }
         }
         else
@@ -2700,6 +2973,10 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         return;
     }
     CachedTransactionalRotation = ClientViewRot;
+    if (IsShockPrimaryClickBuffer(this, FireModeNum))
+    {
+        ScopedTransactionalAimWeapons.Add(this);
+    }
     if (ZOffset != 0)
     {
         // Decode byte back to float
@@ -2883,6 +3160,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     // CachedTransactionalRotation stays alive between shots and any future
     // read with a stale gate would pick up the wrong rotation.
     CachedTransactionalRotation = FRotator::ZeroRotator;
+	ScopedTransactionalAimWeapons.Remove(this);
 	ReceivedHitScanHitChar = nullptr;
 
     // 4. CONFIRM — always sent, including shock balls. Keeps event indices synced
@@ -2932,6 +3210,13 @@ void AUTWeaponFix::Removed()
 			Super::FireShot();
 		}
 	}
+	for (int32 Mode = 0; Mode < 2; ++Mode)
+	{
+		GetWorldTimerManager().ClearTimer(RetryFireHandle[Mode]);
+		bBufferedClickPending[Mode] = false;
+	}
+	ScopedTransactionalAimWeapons.Remove(this);
+	CachedTransactionalRotation = FRotator::ZeroRotator;
 	Super::Removed();
 }
 
@@ -2939,6 +3224,13 @@ void AUTWeaponFix::Destroyed()
 {
 	// Direct replay/admin destruction can bypass normal inventory removal. Break
 	// the master-pose relationship before the actor's component teardown starts.
+	for (int32 Mode = 0; Mode < 2; ++Mode)
+	{
+		GetWorldTimerManager().ClearTimer(RetryFireHandle[Mode]);
+		bBufferedClickPending[Mode] = false;
+	}
+	ScopedTransactionalAimWeapons.Remove(this);
+	CachedTransactionalRotation = FRotator::ZeroRotator;
 	DestroyFirstPersonHologramDepthMesh();
 	Super::Destroyed();
 }
@@ -3129,7 +3421,7 @@ void AUTWeaponFix::Tick(float DeltaTime)
                         *GetName(), CurrentFireMode,
                         GetWorld()->GetTimeSeconds() - LastFireTime[CurrentFireMode], TimeoutThreshold,
                         GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"));
-                    StopFire(CurrentFireMode);
+                    StopFireInternal(CurrentFireMode);
                 }
             }
         }
@@ -3230,6 +3522,7 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     // very next lines.)
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
+    ScopedTransactionalAimWeapons.Remove(this);
 
     // Server Stop honor (ncp.StopClearsPending, default ON — see the cvar comment for the
     // full rationale): a received Stop is authoritative notice that this fire mode is no
@@ -4215,14 +4508,13 @@ void AUTWeaponFix::OnServerHitScanResult(const FHitResult& Hit, float Prediction
 
 FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 {
-    // Server: only honor cache during the actual transactional fire RPC. The
-    // cache is set in ServerStartFireFixed_Implementation and lives only for
-    // that call. Outside that scope the cache holds stale values from prior
-    // shots (server has no per-shot clear), so reading it without the flag
-    // gate causes hits to land at where the player aimed many shots ago.
+    // Buffered Shock uses the explicit scope because exact ZeroRotator is a
+    // legitimate +X aim. Other weapons retain the pre-existing transaction
+    // gate and non-zero sentinel behavior.
     FRotator BaseAim;
 
-    if (Role == ROLE_Authority && bIsTransactionalFire && !CachedTransactionalRotation.IsZero())
+    if (HasScopedTransactionalAim(this)
+        || (Role == ROLE_Authority && bIsTransactionalFire && !CachedTransactionalRotation.IsZero()))
     {
         BaseAim = CachedTransactionalRotation;
     }
@@ -4261,16 +4553,11 @@ FRotator AUTWeaponFix::GetAdjustedAim_Implementation(FVector StartFireLoc)
 
 FRotator AUTWeaponFix::GetBaseFireRotation()
 {
-    // Server: only honor cache during the actual transactional fire RPC.
-    // The cache lives between ServerStartFireFixed calls and isn't cleared
-    // per-shot, so an ungated read returns stale rotation from prior shots
-    // (visible as damage landing at old aim points after weapon swap or
-    // RefireCheckTimer-driven held fire).
-    //
-    // Client: cache is set right before Super::FireShot and cleared right
-    // after, so non-zero already means "this one fake spawn we're in."
-    if ((Role == ROLE_Authority && bIsTransactionalFire && !CachedTransactionalRotation.IsZero()) ||
-        (Role < ROLE_Authority && !CachedTransactionalRotation.IsZero()))
+    // Buffered Shock uses scoped validity for exact ZeroRotator. Preserve the
+    // existing non-zero cache behavior for every other logical shot.
+    if (HasScopedTransactionalAim(this)
+        || (Role == ROLE_Authority && bIsTransactionalFire && !CachedTransactionalRotation.IsZero())
+        || (Role < ROLE_Authority && !CachedTransactionalRotation.IsZero()))
     {
         return CachedTransactionalRotation;
     }
@@ -4290,11 +4577,12 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
         // If ProjClass is NULL, it's likely a Hitscan mode (Sniper, Shock Beam), so we skip.
     bool bIsProjectile = (ProjClass.IsValidIndex(FireMode) && ProjClass[FireMode] != nullptr);
 
-    // Gated on bIsTransactionalFire — same reason as GetAdjustedAim: the cache
-    // isn't cleared per-shot on the server, so an ungated read applies
-    // parallax shift using stale data from the wrong shot.
-    if (bIsProjectile && Role == ROLE_Authority && bIsTransactionalFire &&
-        !CachedTransactionalRotation.IsZero() && UTOwner)
+    // Buffered Shock uses the explicit scope; other projectiles retain the
+    // existing transactional/non-zero gate.
+    if (bIsProjectile && Role == ROLE_Authority
+        && (HasScopedTransactionalAim(this)
+            || (bIsTransactionalFire && !CachedTransactionalRotation.IsZero()))
+        && UTOwner)
     {
         float PredictionTime = GetHitValidationPredictionTime();
 
@@ -5265,7 +5553,10 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
     for (int32 i = 0; i < 2; i++)
     {
         GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
+        bBufferedClickPending[i] = false;
     }
+    ScopedTransactionalAimWeapons.Remove(this);
+    CachedTransactionalRotation = FRotator::ZeroRotator;
     ClearPendingFakeProjectiles();
 	DestroyFirstPersonHologramDepthMesh();
     // Call the base class implementation (which does the unregistering/holstering logic you pasted)
@@ -5344,6 +5635,8 @@ bool AUTWeaponFix::PutDown()
             GetWorldTimerManager().ClearTimer(RetryFireHandle[i]);
             bBufferedClickPending[i] = false;
         }
+        ScopedTransactionalAimWeapons.Remove(this);
+        CachedTransactionalRotation = FRotator::ZeroRotator;
         // B) Reset the Gatekeeper Flags
         // This fixes the "Jam" bug where the weapon remembers it was firing Mode 1.
         CurrentlyFiringMode = 255;
