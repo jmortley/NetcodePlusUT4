@@ -43,7 +43,7 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "NetcodePlus")
 	float MaxRewindMs;
 
-	/** Ping jitter buffer (ms) subtracted from ExactPing before computing rewind. */
+	/** Ping jitter buffer (ms) subtracted from server-observed RTT before rewind. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "NetcodePlus")
 	float FudgeFactorMs;
 
@@ -57,7 +57,7 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "NetcodePlus")
 	float StationaryTargetPadding;
 
-	/** Returns one-way rewind time (seconds) based on owner's ExactPing. */
+	/** Returns one-way rewind time (seconds) from server-observed RTT for remote humans. */
 	virtual float GetRewindSeconds() const;
 
 	//~ Begin AUTWeapon Interface

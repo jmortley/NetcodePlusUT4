@@ -241,6 +241,31 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	// Critical: Use the Fix's Hit Validation time (120ms rewind limit)
 	float PredictionTime = GetHitValidationPredictionTime();
 
+	// A head-radius pad can touch the firing line around a wall even though the
+	// unpadded head sphere is not reachable. Match stock's padded-body safeguard:
+	// only padding-only rescues pay this extra query, and the endpoint is the
+	// surface of the unpadded validation sphere rather than the expanded one.
+	auto HasClearPathToHeadSphereSurface = [&](const FVector& LineEnd,
+		const FVector& HeadCentre, float UnpaddedHeadRadius)
+	{
+		const FVector ClosestPoint = FMath::ClosestPointOnSegment(
+			HeadCentre, SpawnLocation, LineEnd);
+		const FVector SurfaceDirection =
+			(ClosestPoint - HeadCentre).GetSafeNormal();
+		if (UnpaddedHeadRadius <= 0.f || SurfaceDirection.IsNearlyZero())
+		{
+			return false;
+		}
+
+		const FVector PointToCheck = HeadCentre +
+			UnpaddedHeadRadius * SurfaceDirection;
+		FCollisionQueryParams QueryParams(GetClass()->GetFName(), true, UTOwner);
+		FHitResult OutsideHeadHit;
+		return !GetWorld()->LineTraceSingleByChannel(OutsideHeadHit,
+			SpawnLocation, PointToCheck, COLLISION_TRACE_WEAPONNOCHARACTER,
+			QueryParams);
+	};
+
 	// This calls UTWeaponFix::HitScanTrace, which now handles the detailed rewinding
 	HitScanTrace(SpawnLocation, EndTrace, InstantHitInfo[CurrentFireMode].TraceHalfSize, Hit, PredictionTime);
 
@@ -273,10 +298,11 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 			GetUTOwner()->Controller, SpawnLocation, FireDir, 0.7f,
 			(Hit.Location - SpawnLocation).Size(), 150.0f, AUTCharacter::StaticClass()));
 
-		if (AltTarget != NULL)
+		if (IsLiveHitscanTarget(AltTarget))
 		{
 			// Calculate effective head scale
-			float EffectiveHeadScale = GetHeadshotScale(AltTarget);
+			const float UnpaddedHeadScale = GetHeadshotScale(AltTarget);
+			float EffectiveHeadScale = UnpaddedHeadScale;
 
 			// Apply padding for client-claimed targets
 			if (AltTarget == ReceivedHitScanHitChar)
@@ -300,12 +326,22 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 				}
 			}
 
-			// NOW IsHeadShot will properly rewind (with our TeamArenaCharacter fix)
-			if (AltTarget->IsHeadShot(SpawnLocation, FireDir, EffectiveHeadScale, UTOwner, PredictionTime))
+			// NOW IsHeadShot will properly rewind (with our TeamArenaCharacter fix).
+			// Preserve ordinary headshots exactly; only a hit introduced by the
+			// extra radius must have clear world LOS to the unpadded head surface.
+			const bool bEffectiveHeadHit = AltTarget->IsHeadShot(SpawnLocation,
+				FireDir, EffectiveHeadScale, UTOwner, PredictionTime);
+			const bool bUnpaddedHeadHit = bEffectiveHeadHit &&
+				AltTarget->IsHeadShot(SpawnLocation, FireDir, UnpaddedHeadScale,
+					UTOwner, PredictionTime);
+			const FVector RewoundHeadLoc = AltTarget->GetHeadLocation(PredictionTime);
+			const float UnpaddedHeadRadius = AltTarget->HeadRadius *
+				AltTarget->HeadScale * UnpaddedHeadScale;
+			if (bEffectiveHeadHit && (bUnpaddedHeadHit ||
+				HasClearPathToHeadSphereSurface(Hit.Location, RewoundHeadLoc,
+					UnpaddedHeadRadius)))
 			{
 				// Construct hit result using REWOUND head position
-				FVector RewoundHeadLoc = AltTarget->GetHeadLocation(PredictionTime);
-
 				float HitDist = (RewoundHeadLoc - SpawnLocation).Size()
 					- AltTarget->GetCapsuleComponent()->GetUnscaledCapsuleRadius();
 
@@ -385,18 +421,21 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	// ----------------------------------------------------------------------
 	// PART 5: DAMAGE CALCULATION (Sniper Specific Logic)
 	// ----------------------------------------------------------------------
-	if (Hit.Actor != NULL && Hit.Actor->bCanBeDamaged && bDealDamage)
+	AUTCharacter* DamageCharacter = Cast<AUTCharacter>(Hit.Actor.Get());
+	if (Hit.Actor != NULL && Hit.Actor->bCanBeDamaged && bDealDamage &&
+		(DamageCharacter == nullptr || IsLiveHitscanTarget(DamageCharacter)))
 	{
 		int32 Damage = GetHitScanDamage();
 		TSubclassOf<UDamageType> DamageType = InstantHitInfo[CurrentFireMode].DamageType;
 		bool bIsHeadShot = false;
 		bool bBlockedHeadshot = false;
-		AUTCharacter* C = Cast<AUTCharacter>(Hit.Actor.Get());
+		AUTCharacter* C = DamageCharacter;
 
 		if (C != NULL && CanHeadShot())
 		{
 			// Calculate effective head scale with padding (same as Part 3)
-			float EffectiveHeadScale = GetHeadshotScale(C);
+			const float UnpaddedHeadScale = GetHeadshotScale(C);
+			float EffectiveHeadScale = UnpaddedHeadScale;
 
 			if (C == ReceivedHitScanHitChar)
 			{
@@ -445,12 +484,32 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 					0.f, CVarHeadSlackMax.GetValueOnGameThread());
 				// EffectiveHeadScale already carries the moving-target padding; only the CENTRE moves
 				// to the client-rendered head, plus the bounded high-ping slack on the radius. No 2.5x.
-				bHead = FMath::PointDistToLine(HeadCentre, FireDir, Hit.Location)
-					< C->HeadRadius * C->HeadScale * EffectiveHeadScale + HeadSlack;
+				const float HeadDistance =
+					FMath::PointDistToLine(HeadCentre, FireDir, Hit.Location);
+				const float UnpaddedHeadRadius = C->HeadRadius * C->HeadScale *
+					UnpaddedHeadScale;
+				const float EffectiveHeadRadius = C->HeadRadius * C->HeadScale *
+					EffectiveHeadScale + HeadSlack;
+				const bool bEffectiveHeadHit = HeadDistance < EffectiveHeadRadius;
+				const bool bUnpaddedHeadHit = bEffectiveHeadHit &&
+					HeadDistance < UnpaddedHeadRadius;
+				bHead = bEffectiveHeadHit && (bUnpaddedHeadHit ||
+					HasClearPathToHeadSphereSurface(Hit.Location, HeadCentre,
+						UnpaddedHeadRadius));
 			}
 			else
 			{
-				bHead = C->IsHeadShot(Hit.Location, FireDir, EffectiveHeadScale, UTOwner, PredictionTime);
+				const bool bEffectiveHeadHit = C->IsHeadShot(Hit.Location,
+					FireDir, EffectiveHeadScale, UTOwner, PredictionTime);
+				const bool bUnpaddedHeadHit = bEffectiveHeadHit &&
+					C->IsHeadShot(Hit.Location, FireDir, UnpaddedHeadScale,
+						UTOwner, PredictionTime);
+				const FVector RewoundHeadLoc = C->GetHeadLocation(PredictionTime);
+				const float UnpaddedHeadRadius = C->HeadRadius * C->HeadScale *
+					UnpaddedHeadScale;
+				bHead = bEffectiveHeadHit && (bUnpaddedHeadHit ||
+					HasClearPathToHeadSphereSurface(Hit.Location, RewoundHeadLoc,
+						UnpaddedHeadRadius));
 			}
 
 			if (bHead)

@@ -287,14 +287,15 @@ static TAutoConsoleVariable<float> CVarRenderCreditSlack(
     TEXT("Extra radius (uu) around the render-authoritative capsule for opted-in claimless fire. Deliberately 0 by default; widen only with evidence."),
     ECVF_Default);
 
-static bool GetRenderAuthorityRTTMs(const AUTPlayerController* ShooterPC, float& OutRTTMs)
+bool AUTWeaponFix::GetServerObservedRTTMs(const AUTPlayerController* ShooterPC,
+    float& OutRTTMs)
 {
     OutRTTMs = 0.f;
     // UT's ExactPing is reported back through an RPC whose validation accepts
     // any float. Prefer the server connection's ACK-derived RTT so a modified
     // client cannot select its own target-history epoch. AvgLag initializes to
-    // 9999; fail closed until the server has a measurement instead of treating
-    // an unknown high-ping client as 0ms or trusting the client's fallback.
+    // 9999; report "unavailable" until the server has a measurement so each
+    // caller can reject or deliberately use a zero base epoch.
     if (ShooterPC != nullptr)
     {
         const UNetConnection* Connection = ShooterPC->GetNetConnection();
@@ -440,7 +441,8 @@ static bool ShotIntersectsRenderedCapsule(
             ClosestPoint, ClosestCapsulePoint);
     }
 
-    const float BaseRadius = CollisionRadius + TraceRadius;
+    const float BaseRadius = FMath::Min(CollisionRadius, CollisionHeight) +
+        TraceRadius;
     const float Distance = FVector::Dist(ClosestPoint, ClosestCapsulePoint);
     OutMissBy = Distance - BaseRadius;
     const float Tolerance = FMath::Max(0.0f, CVarVisualHitscanClaimTolerance.GetValueOnGameThread());
@@ -593,6 +595,24 @@ static TAutoConsoleVariable<float> CVarSlideGraceMs(
     TEXT("0 = off (always the slide capsule, the pre-grace behavior)."),
     ECVF_Default
 );
+
+bool AUTWeaponFix::IsLiveHitscanTarget(const AUTCharacter* Target)
+{
+    // bHidden is intentional: ping-compensated spawn uses it to mark a live
+    // pawn that must not be shootable until reveal. Feign death does not hide
+    // the character actor; it only disables the capsule's query collision.
+    if (Target == nullptr || Target->IsDead() || Target->IsPendingKillPending() ||
+        Target->bHidden)
+    {
+        return false;
+    }
+
+    // Manual hitscan uses capsule geometry directly, independent of the
+    // component's collision state. A live feigning player is ragdolled with a
+    // NoCollision capsule and must remain hittable; collision-state filtering
+    // here would turn the FeignDeath console command into hitscan immunity.
+    return Target->GetCapsuleComponent() != nullptr;
+}
 
 void AUTWeaponFix::ApplySlidePostureForValidation(const AUTCharacter* Target,
     float RewindTime, FVector& InOutTargetLocation, float& InOutCollisionHeight)
@@ -3724,11 +3744,27 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
         return 0.0f;
     }
 
-	float ExactPing = UTOwner->PlayerState->ExactPing;
+	const AUTPlayerController* ShooterPC =
+		Cast<AUTPlayerController>(UTOwner->Controller);
+	const bool bRemoteHuman =
+		ShooterPC != nullptr && !ShooterPC->IsLocalController();
+	float ObservedRTTMs = bRemoteHuman
+		? 0.f : UTOwner->PlayerState->ExactPing;
+	if (bRemoteHuman)
+	{
+		// ExactPing is written by ServerUpdatePing from a client-supplied float.
+		// Remote hit validation must use the server's ACK-derived RTT instead.
+		// AvgLag starts at 9999, so use a zero base rewind until measured.
+		// The separate fixed-rung claim time search may still probe +15/30/45ms.
+		if (!GetServerObservedRTTMs(ShooterPC, ObservedRTTMs))
+		{
+			return 0.0f;
+		}
+	}
 
 	// 2. Subtract Fudge Factor (Epic uses 20ms)
 	// This subtracts the "Processing/Jitter" time so we don't over-rewind.
-	float AdjustedPing = ExactPing - FudgeFactorMs;
+	float AdjustedPing = ObservedRTTMs - FudgeFactorMs;
 
 	// 3. Clamp (0 to Max Cap)
 	float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, MaxRewindMs);
@@ -3797,7 +3833,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         !RenderAuthorityShooterPC->IsLocalController();
     float RenderAuthorityRTTMs = 0.f;
     const bool bRenderAuthorityTimingValid = bRenderAuthoritativeTargeting &&
-        GetRenderAuthorityRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs);
+        GetServerObservedRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs);
     const float RenderAuthoritativeMs = bRenderAuthoritativeTargeting
         ? RenderAuthorityRTTMs * 0.5f +
             FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())
@@ -3955,7 +3991,31 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         return OutEntryDistance < BIG_NUMBER;
     };
 
-    // If a live/collidable pawn lacks trustworthy render history, it cannot be
+    // Stock UT does one extra visibility check only when client-claim padding,
+    // rather than the real capsule, rescued the hit. A padded envelope can
+    // overlap the shot ray around a wall corner even though no unobstructed
+    // segment reaches the target's physical capsule. Use a separate hit result
+    // here: stock writes this query into the main Hit, but retaining the
+    // original world endpoint keeps later pawn ordering deterministic when an
+    // outside-hit candidate is rejected.
+    auto HasClearPathToCapsuleSurface = [&](const FVector& ClosestPoint,
+        const FVector& ClosestCapsulePoint, float CapsuleRadius)
+    {
+        const FVector SurfaceDirection =
+            (ClosestPoint - ClosestCapsulePoint).GetSafeNormal();
+        if (CapsuleRadius <= 0.f || SurfaceDirection.IsNearlyZero())
+        {
+            return false;
+        }
+
+        const FVector PointToCheck = ClosestCapsulePoint +
+            CapsuleRadius * SurfaceDirection;
+        FHitResult OutsideHit;
+        return !GetWorld()->LineTraceSingleByChannel(OutsideHit,
+            StartLocation, PointToCheck, TraceChannel, QueryParams);
+    };
+
+    // If a live pawn lacks trustworthy render history, it cannot be
     // damaged in render-authoritative mode. Its known capsule positions must
     // still conservatively occlude the trace; otherwise "fail closed" for the
     // first target could become a hit on a pawn/projectile behind it.
@@ -3986,7 +4046,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     for (FConstPawnIterator Iterator = GetWorld()->GetPawnIterator(); Iterator; ++Iterator)
     {
         AUTCharacter* Target = Cast<AUTCharacter>(*Iterator);
-        if (Target && (Target != UTOwner))
+        if (Target != UTOwner && IsLiveHitscanTarget(Target))
         {
 
             // Standard logic: Teammate checks, etc.
@@ -3994,13 +4054,6 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             {
                 if (bRenderAuthoritativeTargeting)
                 {
-                    UCapsuleComponent* TargetCapsule = Target->GetCapsuleComponent();
-                    if (Target->IsDead() || Target->IsPendingKillPending() || Target->bHidden ||
-                        !Target->GetActorEnableCollision() || TargetCapsule == nullptr ||
-                        !TargetCapsule->IsQueryCollisionEnabled())
-                    {
-                        continue;
-                    }
                     int32 RenderOlderIndex = INDEX_NONE;
                     int32 RenderNewerIndex = INDEX_NONE;
                     const bool bHasContinuousRenderHistory = HasContinuousRenderHistory(
@@ -4043,8 +4096,6 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 					//ExtraHitPadding = bIsMoving ? HitScanPadding : HitScanPaddingStationary;
 					if (bIsMoving)
 					{
-						float OwnerPing = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->ExactPing : 0.0f;
-
 						// TIERED PADDING SYSTEM
 						// Running (940 u/s): 55 units = ~59ms jitter protection
 						// Dodging (1700 u/s): 55 units = ~32ms jitter protection
@@ -4090,6 +4141,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                     ((TargetSampleTime > 0.f) && (Role == ROLE_Authority)) ? TargetSampleTime : 0.f,
                     TargetLocation, CollisionHeight);
                 float CollisionRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+                const float TargetEffectiveRadius =
+                    FMath::Min(CollisionRadius, CollisionHeight);
 
                 bool bCheckOutsideHit = false;
                 bool bHitTarget = false;
@@ -4098,17 +4151,37 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 if (CollisionRadius >= CollisionHeight)
                 {
                     ClosestPoint = FMath::ClosestPointOnSegment(TargetLocation, StartLocation, Hit.Location);
-                    bHitTarget = ((ClosestPoint - TargetLocation).SizeSquared() < FMath::Square(CollisionHeight + TraceRadius + ExtraHitPadding));
-                    if (!bHitTarget && (ExtraHitPadding > 0.f))
+                    const float DistanceSq =
+                        (ClosestPoint - TargetLocation).SizeSquared();
+                    const float UnpaddedRadius = TargetEffectiveRadius + TraceRadius;
+                    bHitTarget = DistanceSq < FMath::Square(UnpaddedRadius);
+                    if (!bHitTarget && ExtraHitPadding > 0.f)
                     {
-                        bCheckOutsideHit = true;
+                        bHitTarget = DistanceSq <
+                            FMath::Square(UnpaddedRadius + ExtraHitPadding);
+                        bCheckOutsideHit = bHitTarget;
                     }
                 }
                 else
                 {
                     FVector CapsuleSegment = FVector(0.f, 0.f, CollisionHeight - CollisionRadius);
                     FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location, TargetLocation - CapsuleSegment, TargetLocation + CapsuleSegment, ClosestPoint, ClosestCapsulePoint);
-                    bHitTarget = ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CollisionRadius + TraceRadius + ExtraHitPadding));
+                    const float DistanceSq =
+                        (ClosestPoint - ClosestCapsulePoint).SizeSquared();
+                    const float UnpaddedRadius = TargetEffectiveRadius + TraceRadius;
+                    bHitTarget = DistanceSq < FMath::Square(UnpaddedRadius);
+                    if (!bHitTarget && ExtraHitPadding > 0.f)
+                    {
+                        bHitTarget = DistanceSq <
+                            FMath::Square(UnpaddedRadius + ExtraHitPadding);
+                        bCheckOutsideHit = bHitTarget;
+                    }
+                }
+
+                if (bCheckOutsideHit)
+                {
+                    bHitTarget = HasClearPathToCapsuleSurface(ClosestPoint,
+                        ClosestCapsulePoint, TargetEffectiveRadius);
                 }
 
                 // [HitAttrib] how far outside the bare rewound capsule the claimed
@@ -4127,8 +4200,6 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
                 const float TargetAxisHalfLength =
                     FMath::Max(0.f, CollisionHeight - CollisionRadius);
-                const float TargetEffectiveRadius =
-                    FMath::Min(CollisionRadius, CollisionHeight);
                 const float TargetSelectionRadius = TargetEffectiveRadius +
                     TraceRadius + ExtraHitPadding;
                 float CandidateEntryDistance = BIG_NUMBER;
@@ -4151,10 +4222,11 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                     BestTarget = Target;
                     BestPoint = ClosestPoint;
                     BestCapsulePoint = ClosestCapsulePoint;
-                    BestCollisionRadius = CollisionRadius;
+                    BestCollisionRadius = TargetEffectiveRadius;
                     BestTargetEntryDistance = CandidateEntryDistance;
                     // Cache the total padded radius for ServerShield hitplot normalization
-                    LastHitscanPaddedRadius = CollisionRadius + TraceRadius + ExtraHitPadding;
+                    LastHitscanPaddedRadius = TargetEffectiveRadius +
+                        TraceRadius + ExtraHitPadding;
                 }
             }
         }
@@ -4201,7 +4273,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 	// teammates don't block hitscan. ReceivedHitScanHitChar is fully client-controlled, so without this a client
 	// could name a teammate to force a near-graze body hit (FF-gated at damage, but it shouldn't be considered).
 	if (bClaimCapableMode && Role == ROLE_Authority &&
-		ReceivedHitScanHitChar != nullptr &&
+		IsLiveHitscanTarget(ReceivedHitScanHitChar) &&
 		BestTarget != ReceivedHitScanHitChar &&
 		(bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, ReceivedHitScanHitChar)))
 	{
@@ -4227,6 +4299,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 				// AltRewindTime is this rung's effective claim age).
 				float AltCapHeight = CapHeight;
 				ApplySlidePostureForValidation(ClaimedTarget, AltRewindTime, AltTargetLoc, AltCapHeight);
+				const float AltEffectiveRadius =
+					FMath::Min(CapRadius, AltCapHeight);
 
 				// Capsule-to-line distance check
 				FVector ClosestPoint, ClosestCapsulePoint;
@@ -4247,15 +4321,25 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
 				// Generous padding for fallback search
 				float SearchPadding = 45.0f;
-				float CombinedRadius = CapRadius + TraceRadius + SearchPadding;
+				float CombinedRadius = AltEffectiveRadius + TraceRadius + SearchPadding;
+				const float SearchDistanceSq =
+					(ClosestPoint - ClosestCapsulePoint).SizeSquared();
+				const bool bSearchHit = SearchDistanceSq <
+					FMath::Square(CombinedRadius);
+				const bool bSearchPaddingOnly = bSearchHit &&
+					SearchDistanceSq >=
+						FMath::Square(AltEffectiveRadius + TraceRadius);
+				const bool bSearchOutsideClear = !bSearchPaddingOnly ||
+					HasClearPathToCapsuleSurface(ClosestPoint,
+						ClosestCapsulePoint, AltEffectiveRadius);
 
-				if ((ClosestPoint - ClosestCapsulePoint).SizeSquared() < FMath::Square(CombinedRadius))
+				if (bSearchHit && bSearchOutsideClear)
 				{
 					// Found the hit at alternate time
 					BestTarget = ClaimedTarget;
 					BestPoint = ClosestPoint;
 					BestCapsulePoint = ClosestCapsulePoint;
-					BestCollisionRadius = CapRadius;
+					BestCollisionRadius = AltEffectiveRadius;
 
 					if (bHitAttrib)
 					{
@@ -4264,7 +4348,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 						// vs the UNPADDED radius at the accepted rung: <=0 is a genuine
 						// capsule hit at the alternate time, >0 rode the 45uu search pad.
 						AttribTimeSearchMissBy =
-							FVector::Dist(ClosestPoint, ClosestCapsulePoint) - (CapRadius + TraceRadius);
+							FVector::Dist(ClosestPoint, ClosestCapsulePoint) -
+							(AltEffectiveRadius + TraceRadius);
 					}
 
 					UE_LOG(LogUTWeaponFix, Verbose,
@@ -4307,51 +4392,65 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
         {
             bRenderChkApplicable = true;
-
-            const float RenderMs = UTOwner->PlayerState->ExactPing * 0.5f +
+            float ServerRTTMs = 0.f;
+            const bool bServerTimingValid =
+                GetServerObservedRTTMs(ShooterPC, ServerRTTMs);
+            const float RenderMs = ServerRTTMs * 0.5f +
                 FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
-            const float RenderT = FMath::Clamp(RenderMs * 0.001f, 0.f, 0.25f);
-            const FVector RenderLoc = BestTarget->GetRewindLocation(RenderT);
-            const float RenderColRadius = BestTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
-            const float RenderColHeight = BestTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
-            // Position history stores location only — not capsule posture. Test
-            // the ray against BOTH plausible postures and take the best: the
-            // full standing capsule always (it strictly contains the slide-
-            // adjusted capsule at the same anchor, so it also covers a target
-            // that WAS sliding at render time), plus the slide-adjusted capsule
-            // when the target is currently sliding (its recorded anchor may
-            // already reflect slide posture). A mandatory reject must not
-            // hinge on posture we cannot reconstruct.
-            auto RenderMissBy = [&](const FVector& CapsuleCentre, float HalfHeight) -> float
+            if (!bServerTimingValid)
             {
-                FVector ClosestOnRay(0.f);
-                FVector ClosestOnCapsule = CapsuleCentre;
-                float EffRadius;
-                if (RenderColRadius >= HalfHeight)
-                {
-                    ClosestOnRay = FMath::ClosestPointOnSegment(CapsuleCentre, StartLocation, Hit.Location);
-                    EffRadius = HalfHeight;
-                }
-                else
-                {
-                    const FVector Seg(0.f, 0.f, HalfHeight - RenderColRadius);
-                    FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
-                        CapsuleCentre - Seg, CapsuleCentre + Seg, ClosestOnRay, ClosestOnCapsule);
-                    EffRadius = RenderColRadius;
-                }
-                return FVector::Dist(ClosestOnRay, ClosestOnCapsule) - (EffRadius + TraceRadius);
-            };
-
-            RenderChkMissBy = RenderMissBy(RenderLoc, RenderColHeight);
-            if (BestTarget->UTCharacterMovement && BestTarget->UTCharacterMovement->bIsFloorSliding)
-            {
-                FVector SlideLoc = RenderLoc;
-                SlideLoc.Z = SlideLoc.Z - RenderColHeight + BestTarget->SlideTargetHeight;
-                RenderChkMissBy = FMath::Min(RenderChkMissBy,
-                    RenderMissBy(SlideLoc, BestTarget->SlideTargetHeight));
+                // No server measurement means no trustworthy render epoch.
+                // Fail closed rather than letting ExactPing select the sample.
+                bRenderChkPass = false;
+                RenderChkMissBy = BIG_NUMBER;
             }
-            bRenderChkPass = RenderChkMissBy <= FMath::Max(0.f, CVarUnclaimedRenderSlack.GetValueOnGameThread());
+            else
+            {
+                const float RenderT = FMath::Clamp(RenderMs * 0.001f, 0.f, 0.25f);
+                const FVector RenderLoc = BestTarget->GetRewindLocation(RenderT);
+                const float RenderColRadius = BestTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
+                const float RenderColHeight = BestTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+
+                // Position history stores location only — not capsule posture. Test
+                // the ray against BOTH plausible postures and take the best: the
+                // full standing capsule always (it strictly contains the slide-
+                // adjusted capsule at the same anchor, so it also covers a target
+                // that WAS sliding at render time), plus the slide-adjusted capsule
+                // when the target is currently sliding (its recorded anchor may
+                // already reflect slide posture). A mandatory reject must not
+                // hinge on posture we cannot reconstruct.
+                auto RenderMissBy = [&](const FVector& CapsuleCentre, float HalfHeight) -> float
+                {
+                    FVector ClosestOnRay(0.f);
+                    FVector ClosestOnCapsule = CapsuleCentre;
+                    float EffRadius;
+                    if (RenderColRadius >= HalfHeight)
+                    {
+                        ClosestOnRay = FMath::ClosestPointOnSegment(CapsuleCentre, StartLocation, Hit.Location);
+                        EffRadius = HalfHeight;
+                    }
+                    else
+                    {
+                        const FVector Seg(0.f, 0.f, HalfHeight - RenderColRadius);
+                        FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
+                            CapsuleCentre - Seg, CapsuleCentre + Seg, ClosestOnRay, ClosestOnCapsule);
+                        EffRadius = RenderColRadius;
+                    }
+                    return FVector::Dist(ClosestOnRay, ClosestOnCapsule) - (EffRadius + TraceRadius);
+                };
+
+                RenderChkMissBy = RenderMissBy(RenderLoc, RenderColHeight);
+                if (BestTarget->UTCharacterMovement && BestTarget->UTCharacterMovement->bIsFloorSliding)
+                {
+                    FVector SlideLoc = RenderLoc;
+                    SlideLoc.Z = SlideLoc.Z - RenderColHeight + BestTarget->SlideTargetHeight;
+                    RenderChkMissBy = FMath::Min(RenderChkMissBy,
+                        RenderMissBy(SlideLoc, BestTarget->SlideTargetHeight));
+                }
+                bRenderChkPass = RenderChkMissBy <=
+                    FMath::Max(0.f, CVarUnclaimedRenderSlack.GetValueOnGameThread());
+            }
 
             if (!bRenderChkPass && UnclaimedRenderGate > 0)
             {
@@ -4365,8 +4464,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 // verification pass re-enables it with `Log LogUTWeaponFix
                 // Verbose` at the server console — no rebuild needed.
                 UE_LOG(LogUTWeaponFix, Verbose,
-                    TEXT("[RenderGate] DEMOTED %s: missed render-time capsule by %.1fuu (ping %.0f, renderMs %.1f)"),
-                    *BestTarget->GetName(), RenderChkMissBy, UTOwner->PlayerState->ExactPing, RenderMs);
+                    TEXT("[RenderGate] DEMOTED %s: missed render-time capsule by %.1fuu (serverRTT %.0f, renderMs %.1f, timingValid=%d)"),
+                    *BestTarget->GetName(), RenderChkMissBy, ServerRTTMs,
+                    RenderMs, bServerTimingValid ? 1 : 0);
                 RenderChkDemotedTarget = BestTarget;
                 bRenderChkDemoted = true;
                 bLastUnclaimedRenderDemoted = true;
@@ -4429,7 +4529,23 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             return C->PlayerState ? C->PlayerState->PlayerName : C->GetName();
         };
 
-        const float ShooterPing = (UTOwner && UTOwner->PlayerState) ? UTOwner->PlayerState->ExactPing : 0.f;
+        const float ClientReportedPing = (UTOwner && UTOwner->PlayerState)
+            ? UTOwner->PlayerState->ExactPing : 0.f;
+        const AUTPlayerController* ShooterPC = UTOwner
+            ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
+        float ShooterRTTMs = 0.f;
+        bool bShooterTimingValid = false;
+        if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
+        {
+            bShooterTimingValid =
+                GetServerObservedRTTMs(ShooterPC, ShooterRTTMs);
+        }
+        else
+        {
+            // Listen host/bot timing is not supplied by a remote client.
+            ShooterRTTMs = ClientReportedPing;
+            bShooterTimingValid = true;
+        }
         const FString ClaimStr = (ReceivedHitScanHitChar == nullptr)
             ? TEXT("none")
             : (!ReceivedHeadOffset.IsZero() ? TEXT("head") : TEXT("body"));
@@ -4457,10 +4573,13 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
         AUTCharacter* AttribTarget = BestTarget ? BestTarget
             : (RenderChkDemotedTarget ? RenderChkDemotedTarget : ReceivedHitScanHitChar);
-        const float RenderEstMs = ShooterPing * 0.5f + FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
+        const float RenderEstMs = bShooterTimingValid
+            ? ShooterRTTMs * 0.5f +
+                FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())
+            : 0.f;
         FString LeadStr(TEXT("na"));
         FString DeltaMagStr(TEXT("na"));
-        if (AttribTarget != nullptr)
+        if (AttribTarget != nullptr && bShooterTimingValid)
         {
             const float RenderEstTime = FMath::Clamp(RenderEstMs * 0.001f, 0.f, 0.25f);
             const FVector ValPos = (ActualPredictionTime > 0.f)
@@ -4485,8 +4604,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             ? FString::Printf(TEXT("%.1f"), RenderChkMissBy) : TEXT("na");
 
         UE_LOG(LogUTWeaponFix, Log,
-            TEXT("[HitAttrib] shooter=%s ping=%.0f wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s renderChk=%s renderChkMissBy=%s"),
-            *AttribName(UTOwner), ShooterPing, *GetClass()->GetName(), CurrentFireMode,
+            TEXT("[HitAttrib] shooter=%s ping=%.0f clientPing=%.0f timingValid=%d wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s renderChk=%s renderChkMissBy=%s"),
+            *AttribName(UTOwner), ShooterRTTMs, ClientReportedPing,
+            bShooterTimingValid ? 1 : 0, *GetClass()->GetName(), CurrentFireMode,
             ActualPredictionTime * 1000.f, *ClaimStr, *AttribName(AttribTarget),
             AttribTarget ? AttribTarget->GetVelocity().Size() : 0.f,
             Route, *ClaimMissStr, AttribClaimPad, *TsRungStr, *TsMissStr,
@@ -5432,7 +5552,8 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
         AUTCharacter* AltTarget = Cast<AUTCharacter>(UUTGameplayStatics::ChooseBestAimTarget(
             UTPC, SpawnLocation, FireDir, 0.7f, (Hit.Location - SpawnLocation).Size(),
             150.f, AUTCharacter::StaticClass()));
-        if (AltTarget != nullptr && (AltTarget->GetVelocity().IsNearlyZero() || bCheckMovingHeadSphere) &&
+        if (IsLiveHitscanTarget(AltTarget) &&
+            (AltTarget->GetVelocity().IsNearlyZero() || bCheckMovingHeadSphere) &&
             AltTarget->IsHeadShot(SpawnLocation, FireDir, 1.1f, UTOwner, PredictionTime))
         {
             Hit = FHitResult(AltTarget, AltTarget->GetCapsuleComponent(),
@@ -5506,7 +5627,9 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
         }
     }
     // 5. Deal damage
-    if (Hit.Actor != nullptr && Hit.Actor->bCanBeDamaged && bDealDamage)
+    AUTCharacter* HitCharacter = Cast<AUTCharacter>(Hit.Actor.Get());
+    if (Hit.Actor != nullptr && Hit.Actor->bCanBeDamaged && bDealDamage &&
+        (HitCharacter == nullptr || IsLiveHitscanTarget(HitCharacter)))
     {
         // Detonating a damageable projectile (your own shock core for a combo, or
         // shooting down an enemy core/rocket) still deals the damage below, but it
@@ -5691,7 +5814,11 @@ void AUTWeaponFix::FireCone()
     GetWorld()->OverlapMultiByChannel(OverlapHits, SpawnLocation, FQuat::Identity, COLLISION_TRACE_WEAPONNOCHARACTER, FCollisionShape::MakeSphere(InstantHitInfo[CurrentFireMode].TraceRange));
     for (const FOverlapResult& Overlap : OverlapHits)
     {
-        if (Overlap.GetActor() != nullptr)
+        // Characters are validated exactly once by the rewind-aware pawn pass
+        // below. In particular, never let a retained corpse's mesh/component
+        // re-enter through this generic shootable-object overlap.
+        if (Overlap.GetActor() != nullptr &&
+            Cast<AUTCharacter>(Overlap.GetActor()) == nullptr)
         {
             FVector ObjectLoc = Overlap.GetComponent()->Bounds.Origin;
             if (((ObjectLoc - SpawnLocation).GetSafeNormal() | FireDir) >= InstantHitInfo[CurrentFireMode].ConeDotAngle)
@@ -5736,7 +5863,8 @@ void AUTWeaponFix::FireCone()
     for (FConstPawnIterator Iterator = GetWorld()->GetPawnIterator(); Iterator; ++Iterator)
     {
         AUTCharacter* Target = Cast<AUTCharacter>(*Iterator);
-        if (Target && (Target != UTOwner) && (bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target)))
+        if (Target != UTOwner && IsLiveHitscanTarget(Target) &&
+            (bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target)))
         {
             // find appropriate rewind position, and test against trace from StartLocation to Hit.Location
             // NOTE: This uses GetRewindLocation, which in your Character override respects 'PredictionTime' on the server
@@ -5751,6 +5879,8 @@ void AUTWeaponFix::FireCone()
                     ((PredictionTime > 0.f) && (Role == ROLE_Authority)) ? PredictionTime : 0.f,
                     TargetLocation, CollisionHeight);
                 float CollisionRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+                const float CapsuleSurfaceRadius =
+                    FMath::Min(CollisionRadius, CollisionHeight);
 
                 bool bHitTarget = false;
                 FVector ClosestPoint(0.f);
@@ -5766,7 +5896,8 @@ void AUTWeaponFix::FireCone()
                 }
                 // first find proper hit location on surface of capsule
                 float ClosestDistSq = (ClosestPoint - ClosestCapsulePoint).SizeSquared();
-                float BackDist = FMath::Sqrt(FMath::Max(0.f, CollisionRadius * CollisionRadius - ClosestDistSq));
+                float BackDist = FMath::Sqrt(FMath::Max(0.f,
+                    CapsuleSurfaceRadius * CapsuleSurfaceRadius - ClosestDistSq));
                 const FVector HitLocation = ClosestPoint + BackDist * (SpawnLocation - EndTrace).GetSafeNormal();
 
                 bool bClear;
@@ -5859,7 +5990,9 @@ void AUTWeaponFix::FireCone()
     }
     for (const FHitResult& Hit : RealHits)
     {
-        if (UTOwner && Hit.Actor != NULL && Hit.Actor->bCanBeDamaged)
+        AUTCharacter* HitCharacter = Cast<AUTCharacter>(Hit.Actor.Get());
+        if (UTOwner && Hit.Actor != NULL && Hit.Actor->bCanBeDamaged &&
+            (HitCharacter == nullptr || IsLiveHitscanTarget(HitCharacter)))
         {
             // No accuracy credit for detonating projectiles — see FireInstantHit.
             if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None)

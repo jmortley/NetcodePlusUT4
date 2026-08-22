@@ -29,6 +29,8 @@ class UMaterialInstanceDynamic;
 
  // --- Forward Declarations ---
 class AUTProjectile;
+class AUTCharacter;
+class AUTPlayerController;
 class AClientHitsounds;
 
 // --- Struct Definition (MUST BE BEFORE THE CLASS) ---
@@ -378,6 +380,12 @@ public:
      *  Public so ServerShield can use the same rewind for radial offset analysis. */
     virtual float GetHitValidationPredictionTime() const;
 
+    /** Read ACK-derived full RTT from the server's connection. False until a
+     *  usable measurement exists; callers must reject or use a zero base epoch
+     *  rather than fall back to the client's writable ExactPing. */
+    static bool GetServerObservedRTTMs(const AUTPlayerController* ShooterPC,
+        float& OutRTTMs);
+
     /** Half-width (seconds) of the server-side bidirectional time-search fallback in
      *  HitScanTrace, used when the client claimed a hit the primary rewind missed.
      *  Per-weapon overridable. Standard 45ms for ALL hitscan (2026-07-07: sniper/LG
@@ -392,6 +400,13 @@ public:
      *  timing estimate remain server-owned — no client hit result is trusted.
      *  Off per weapon by default; continuous/spread modes opt in. */
     virtual bool SupportsRenderCredit() const { return false; }
+
+    /** True only while a character is live, visible, and has capsule geometry.
+     *  Collision state is deliberately ignored because live feigning players
+     *  have a NoCollision capsule but manual hitscan must still hit them. Every
+     *  selector and final damage/stat gate uses this predicate so a retained
+     *  corpse cannot be rewound into a valid hit. */
+    static bool IsLiveHitscanTarget(const AUTCharacter* Target);
 
     /** Slide-posture selection for hitscan capsule tests. A floor slide shrinks the
      *  authoritative capsule the same frame it starts, but a remote shooter keeps

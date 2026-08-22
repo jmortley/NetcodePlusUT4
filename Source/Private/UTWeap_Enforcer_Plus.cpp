@@ -7,6 +7,7 @@
 #include "UTCharacter.h"
 #include "UTCharacterMovement.h"
 #include "UTGameState.h"
+#include "UTPlayerController.h"
 #include "UTPlayerState.h"
 #include "Components/CapsuleComponent.h"
 #include "Particles/ParticleSystem.h"
@@ -80,8 +81,20 @@ float AUTWeap_Enforcer_Plus::GetRewindSeconds() const
 		return 0.f;
 	}
 
-	// ExactPing is round-trip. Subtract jitter buffer, halve for one-way, clamp.
-	const float AdjustedRTTms = FMath::Max(0.f, PS->ExactPing - FudgeFactorMs);
+	const AUTPlayerController* ShooterPC =
+		Cast<AUTPlayerController>(UTOwner->Controller);
+	const bool bRemoteHuman =
+		ShooterPC != nullptr && !ShooterPC->IsLocalController();
+	float ObservedRTTMs = bRemoteHuman ? 0.f : PS->ExactPing;
+	if (bRemoteHuman &&
+		!AUTWeaponFix::GetServerObservedRTTMs(ShooterPC, ObservedRTTMs))
+	{
+		// Never fall back to client-writable ExactPing for a remote human.
+		return 0.f;
+	}
+
+	// Full RTT minus jitter buffer, then halve for one-way rewind.
+	const float AdjustedRTTms = FMath::Max(0.f, ObservedRTTMs - FudgeFactorMs);
 	const float OneWayMs = FMath::Min(AdjustedRTTms * 0.5f, MaxRewindMs);
 	return OneWayMs * 0.001f;
 }
@@ -139,11 +152,24 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 			Hit.Location += (EndTrace - StartLocation).GetSafeNormal() * TraceRadius;
 		}
 
-		if (RemainingIgnoredHits > 0 && Hit.Actor.IsValid() && ShouldTraceIgnore(Hit.GetActor()))
+		AUTCharacter* BlockingCharacter = Cast<AUTCharacter>(Hit.GetActor());
+		const bool bNonLiveCharacterHit = BlockingCharacter != nullptr &&
+			!AUTWeaponFix::IsLiveHitscanTarget(BlockingCharacter);
+		if (RemainingIgnoredHits > 0 && Hit.Actor.IsValid() &&
+			(ShouldTraceIgnore(Hit.GetActor()) || bNonLiveCharacterHit))
 		{
 			QueryParams.AddIgnoredActor(Hit.GetActor());
 			--RemainingIgnoredHits;
 			continue;
+		}
+		if (bNonLiveCharacterHit)
+		{
+			// Exhausting the bounded ignore budget must not hand a corpse back to
+			// stock FireInstantHit, whose final gate would award accuracy before
+			// the dead character's TakeDamage path discards the event. Keep the
+			// blocking location, but make the endpoint non-damageable.
+			Hit.Actor = nullptr;
+			Hit.Component = nullptr;
 		}
 
 		break;
@@ -159,11 +185,7 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 	for (FConstPawnIterator Iterator = GetWorld()->GetPawnIterator(); Iterator; ++Iterator)
 	{
 		AUTCharacter* Target = Cast<AUTCharacter>(*Iterator);
-		if (!Target || Target == UTOwner)
-		{
-			continue;
-		}
-		if (Target->IsDead())
+		if (Target == UTOwner || !AUTWeaponFix::IsLiveHitscanTarget(Target))
 		{
 			continue;
 		}
@@ -271,7 +293,7 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 	}
 
 	// 3) If we found a pawn closer than any world hit, update Hit.
-	if (BestTarget)
+	if (AUTWeaponFix::IsLiveHitscanTarget(BestTarget))
 	{
 		const float ClosestDistSq = (BestPoint - BestCapsulePoint).SizeSquared();
 		const float BackDist = FMath::Sqrt(FMath::Max(0.f, BestCollisionRadius * BestCollisionRadius - ClosestDistSq));
