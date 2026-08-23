@@ -1379,6 +1379,19 @@ void ATeamArenaCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Keep simulated proxies close to their latest replicated position. The Blueprint
+	// default (70ms, or 40ms for a listen host) leaves the rendered mesh trailing the
+	// actor/capsule long enough to make high-ping targets look artificially easy to
+	// track. This is presentation-only: it does not change movement replication,
+	// collision, rewind history, or any network payload, so mixed 328 peers remain
+	// wire-compatible. Apply it here, after Blueprint defaults have been loaded.
+	if (GetNetMode() != NM_DedicatedServer && UTCharacterMovement != nullptr)
+	{
+		constexpr float RemotePlayerSmoothLocationTime = 0.025f;
+		UTCharacterMovement->NetworkSimulatedSmoothLocationTime = RemotePlayerSmoothLocationTime;
+		UTCharacterMovement->ListenServerNetworkSimulatedSmoothLocationTime = RemotePlayerSmoothLocationTime;
+	}
+
 	if (Role == ROLE_Authority)
 	{
 		AUTGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AUTGameMode>() : nullptr;
