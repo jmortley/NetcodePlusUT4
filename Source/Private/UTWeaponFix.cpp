@@ -767,36 +767,33 @@ static int32 RefreshWeaponSkinCatalog()
 {
 	FAssetRegistryModule& AssetRegistryModule =
 		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	TArray<FAssetData> Assets;
-	AssetRegistryModule.Get().GetAssetsByPath(WEAPON_SKIN_CATALOG_ROOT, Assets, true);
-	TMap<FString, FAssetData> ManifestAssetData;
-	for (const FAssetData& Asset : Assets)
-	{
-		if (Asset.AssetClass != UUTWeaponSkin::StaticClass()->GetFName())
-		{
-			continue;
-		}
-		ManifestAssetData.Add(Asset.ObjectPath.ToString(), Asset);
-	}
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
 	TMap<FString, UUTWeaponSkin*> NewCatalog;
 	int32 LoadedRequiredCount = 0;
 	int32 LoadedOptionalCount = 0;
-	auto LoadManifestGroup = [&ManifestAssetData, &NewCatalog](
+	auto LoadManifestGroup = [&AssetRegistry, &NewCatalog](
 		const TCHAR* const* AssetNames, int32 AssetCount, int32& LoadedCount)
 	{
 		for (int32 Index = 0; Index < AssetCount; ++Index)
 		{
 			const FString ObjectPath = GetWeaponSkinObjectPath(AssetNames[Index]);
-			const FAssetData* AssetData = ManifestAssetData.Find(ObjectPath);
-			if (AssetData == nullptr)
+			// Query only the exact cooked manifest entry. GetAssetsByPath() defaults
+			// to including in-memory assets; in UE 4.15 that walks every live asset
+			// under the path and calls GetAssetRegistryTags(). Custom announcer waves
+			// share this mount, and their ResourceSize tag can trip SoundWave.cpp's
+			// DTYPE_Native shipping ensure during startup or map travel.
+			const FAssetData AssetData = AssetRegistry.GetAssetByObjectPath(
+				FName(*ObjectPath), true);
+			if (!AssetData.IsValid()
+				|| AssetData.AssetClass != UUTWeaponSkin::StaticClass()->GetFName())
 			{
 				continue;
 			}
 
 			// This is the only synchronous load in the feature, and it occurs during
 			// lifecycle preload. Unlisted folder assets are never loaded or approved.
-			UUTWeaponSkin* Skin = Cast<UUTWeaponSkin>(AssetData->GetAsset());
+			UUTWeaponSkin* Skin = Cast<UUTWeaponSkin>(AssetData.GetAsset());
 			if (Skin == nullptr || Skin->GetPathName() != ObjectPath ||
 				Skin->WeaponType.ToString().IsEmpty() ||
 				Skin->WeaponSkinCustomizationTag == NAME_None || Skin->bRequiresItem ||
