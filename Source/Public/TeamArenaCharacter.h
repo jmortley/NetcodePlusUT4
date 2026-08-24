@@ -97,6 +97,7 @@ public:
     virtual FVector GetRewindLocation(float PredictionTime, AUTPlayerController* DebugViewer = NULL) override;
 
     //virtual void PositionUpdated(bool bShotSpawned) override;
+	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
 
 	virtual FVector GetHeadLocation(float PredictionTime = 0.f)  override;

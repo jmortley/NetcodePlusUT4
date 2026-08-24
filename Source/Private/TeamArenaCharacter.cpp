@@ -1375,22 +1375,28 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 	return GetRewindLocation(PredictionTime) + FVector(0.f, 0.f, HalfHeight - kHeadCapsuleDrop);
 }
 
-void ATeamArenaCharacter::BeginPlay()
+void ATeamArenaCharacter::PostInitializeComponents()
 {
-	Super::BeginPlay();
+	Super::PostInitializeComponents();
 
 	// Keep simulated proxies close to their latest replicated position. The Blueprint
-	// default (70ms, or 40ms for a listen host) leaves the rendered mesh trailing the
+	// default (70ms) leaves the rendered mesh trailing the
 	// actor/capsule long enough to make high-ping targets look artificially easy to
 	// track. This is presentation-only: it does not change movement replication,
 	// collision, rewind history, or any network payload, so mixed 328 peers remain
-	// wire-compatible. Apply it here, after Blueprint defaults have been loaded.
-	if (GetNetMode() != NM_DedicatedServer && UTCharacterMovement != nullptr)
+	// wire-compatible. PostInitializeComponents runs after Blueprint defaults are
+	// loaded but before initial replication can allocate and cache client prediction
+	// data, so simulated proxies reliably use this value from their first update.
+	if (GetNetMode() == NM_Client && UTCharacterMovement != nullptr)
 	{
 		constexpr float RemotePlayerSmoothLocationTime = 0.025f;
 		UTCharacterMovement->NetworkSimulatedSmoothLocationTime = RemotePlayerSmoothLocationTime;
-		UTCharacterMovement->ListenServerNetworkSimulatedSmoothLocationTime = RemotePlayerSmoothLocationTime;
 	}
+}
+
+void ATeamArenaCharacter::BeginPlay()
+{
+	Super::BeginPlay();
 
 	if (Role == ROLE_Authority)
 	{
