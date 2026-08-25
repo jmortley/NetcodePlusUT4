@@ -22,7 +22,7 @@ Both inputs retain stock firing-state timing:
   C++ hard-clamps it to 50ms even if stale cooked data contains a larger value.
   With `ncp.RenderCredit=1`, remote-human damage target selection instead uses
   one estimated render-time capsule (`half server-measured RTT +
-  ncp.HitAttribRenderExtraMs`, capped at 250ms). It replaces raw history rather
+  ncp.RenderCreditExtraMs`, capped at 250ms). It replaces raw history rather
   than being unioned with it.
   `bTrackHitScanReplication` is explicitly false and the Link class disables
   the claim-only bidirectional time-search fallback. Its `FireInstantHit`

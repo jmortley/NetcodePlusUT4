@@ -41,7 +41,8 @@ public:
 	 * Maximum raw-validation/rollback history queried by the Link beam, in ms.
 	 * Runtime-clamped to 50ms even if a cooked Blueprint contains a larger value.
 	 * With ncp.RenderCredit=1, remote-human target selection instead uses the
-	 * estimated render-time sample (half RTT + render extra, capped at 250ms).
+	 * estimated render-time sample (half RTT + ncp.RenderCreditExtraMs, capped
+	 * at 250ms). ncp.HitAttribRenderExtraMs remains exclusive to exact hitscan.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Link Beam",
 		meta = (ClampMin = "0.0", ClampMax = "50.0", UIMin = "0.0", UIMax = "50.0"))

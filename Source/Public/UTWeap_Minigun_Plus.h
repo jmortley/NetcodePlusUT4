@@ -42,6 +42,7 @@ class NETCODEPLUS_API AUTWeap_Minigun_Plus : public AUTWeaponFix
 	/** Primary is spread hitscan and never claims. For a remote human, select
 	 *  targets only at the estimated render-time capsule instead of accepting
 	 *  raw OR render history. The spread-adjusted ray remains server-owned.
-	 *  See ncp.RenderCredit (legacy name; 0 restores raw rewind). */
+	 *  See ncp.RenderCredit (legacy name; 0 restores raw rewind) and
+	 *  ncp.RenderCreditExtraMs (presentation-delay estimate). */
 	virtual bool SupportsRenderCredit() const override { return true; }
 };

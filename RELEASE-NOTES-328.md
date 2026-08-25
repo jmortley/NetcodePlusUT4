@@ -556,6 +556,7 @@ Removed skin names:
 | `ncp.SkinTiming` | `0` | Weapon-skin diagnostics. |
 | `ncp.AnnouncerTrace` | `0` | Client announcer diagnostics. |
 | `ncp.RocketPrimaryDiag` | `0` | Rocket firing diagnostics. `1` traces M1/primary-fire lifecycle; `2` adds fake-delay, charged-state, and other-mode detail. |
+| `ncp.RenderCreditExtraMs` | `15` | Link-beam/Minigun-primary presentation-delay estimate beyond half the server-observed RTT. Independent of the exact-hitscan `ncp.HitAttribRenderExtraMs` estimate. |
 | `ncp.ClickBufferMs` | `0.0` | Experimental Shock-primary-only click buffer. A qualifying release preserves raw release-time aim and fires at legal cooldown expiry; world time, muzzle, target claim, collision, and rewind are not backdated. Effective value is clamped to `0-40ms`, with a separate `50ms` snapshot-age ceiling. Leave off outside controlled dogfood. |
 | `ncp.FlakShellPairDebug` | `0` | Flak fake/authority pairing diagnostics. |
 | `ncp.FlakShellMatchFakeMaxDist` | `1250.0` | Maximum candidate separation. |
@@ -563,6 +564,11 @@ Removed skin names:
 | `ncp.FlakShellMatchFakeMinHorizDot` | `0.98` | Minimum horizontal velocity-direction dot. |
 | `ncp.FlakShellMatchFakeMaxPosError` | `256.0` | Maximum phase-compensated position residual. |
 | `ncp.FlakShellMatchFakeMaxVelError` | `200.0` | Maximum velocity residual. |
+
+If a server previously used `ncp.HitAttribRenderExtraMs=15` to tune Link or
+Minigun, remove that override (restoring its `30` default) and set
+`ncp.RenderCreditExtraMs=15` instead. The old CVar now affects only exact-hitscan
+unclaimed-render validation and attribution telemetry.
 
 Current hit-attribution defaults remain:
 

@@ -232,15 +232,14 @@ static TAutoConsoleVariable<int32> CVarHitAttribDebug(
     ECVF_Default);
 
 // The server cannot see what the shooter's client actually rendered, so the
-// render gate, render-authoritative claimless modes, and leadUU telemetry all
-// approximate the rendered target position as GetRewindLocation(halfRTT + this
-// many ms). The extra term stands in for the server->client net update interval
-// plus client-side mesh smoothing delay. This is an ESTIMATE from server-side
-// history (it ignores client interp filtering); calibrate against render-
-// latency measurements.
+// exact-hitscan unclaimed render gate and leadUU telemetry approximate that
+// position as GetRewindLocation(halfRTT + this many ms). Keep this estimate
+// independent from Link/Minigun's claimless render-authority estimate below:
+// those modes use a different client proxy-prediction path and need to be
+// calibrated without moving the Shock/Sniper acceptance epoch.
 static TAutoConsoleVariable<float> CVarHitAttribRenderExtraMs(
     TEXT("ncp.HitAttribRenderExtraMs"), 30.0f,
-    TEXT("Estimated render latency beyond half-RTT (net update interval + client smoothing), ms. Used by the unclaimed render gate, render-authoritative claimless hitscan, and [HitAttrib]. Default: 30."),
+    TEXT("Estimated render latency beyond half-RTT for the unclaimed exact-hitscan render gate and [HitAttrib], ms. Does not affect Link/Minigun render authority. Default: 30."),
     ECVF_Default);
 
 // =========================================================================
@@ -280,6 +279,21 @@ static TAutoConsoleVariable<float> CVarUnclaimedRenderSlack(
 static TAutoConsoleVariable<int32> CVarRenderCredit(
     TEXT("ncp.RenderCredit"), 1,
     TEXT("Opted-in claim-incapable fire (Link beam, Minigun) selects targets only at the estimated render-time capsule: 1=render-authoritative (default), 0=raw rewind only (live rollback). Server-side only; flippable live."),
+    ECVF_Default);
+
+// Link beam and Minigun primary cannot attach a per-tick target claim, and the
+// client proxy path used while holding those weapons forward-simulates remote
+// characters. Its residual presentation delay is therefore not the same value
+// calibrated for unclaimed Shock/Sniper shots above. The current 25ms movement
+// smoothing setting is an exponential correction window, not a fixed 25ms
+// interpolation buffer; character proxies also extrapolate between replicated
+// updates. Start with 15ms as a conservative residual estimate and keep this
+// server-live CVar separate so Link/Minigun tuning cannot silently change exact
+// hitscan registration. The half-RTT term still represents the age of the
+// client aim state when it reaches the server.
+static TAutoConsoleVariable<float> CVarRenderCreditExtraMs(
+    TEXT("ncp.RenderCreditExtraMs"), 15.0f,
+    TEXT("Estimated presentation delay beyond half server-observed RTT for render-authoritative Link beam and Minigun primary targeting, ms. Independent of ncp.HitAttribRenderExtraMs. Default: 15."),
     ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarRenderCreditSlack(
@@ -3831,9 +3845,11 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     float RenderAuthorityRTTMs = 0.f;
     const bool bRenderAuthorityTimingValid = bRenderAuthoritativeTargeting &&
         GetServerObservedRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs);
+    const float RenderAuthorityExtraMs = bRenderAuthoritativeTargeting
+        ? FMath::Max(0.f, CVarRenderCreditExtraMs.GetValueOnGameThread())
+        : 0.f;
     const float RenderAuthoritativeMs = bRenderAuthoritativeTargeting
-        ? RenderAuthorityRTTMs * 0.5f +
-            FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())
+        ? RenderAuthorityRTTMs * 0.5f + RenderAuthorityExtraMs
         : 0.f;
     const float RenderAuthoritativeTime = bRenderAuthoritativeTargeting
         ? FMath::Clamp(RenderAuthoritativeMs * 0.001f, 0.f, 0.25f)
@@ -4485,10 +4501,11 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         if (bRenderAuthorityDebug && BestTarget != nullptr)
         {
             UE_LOG(LogUTWeaponFix, Verbose,
-                TEXT("[RenderAuthority] selected=%s (serverRTT %.0f, clientPing %.0f, estimateMs %.1f, sampleMs %.1f, slack %.1f)"),
+                TEXT("[RenderAuthority] selected=%s (serverRTT %.0f, clientPing %.0f, extraMs %.1f, estimateMs %.1f, sampleMs %.1f, slack %.1f)"),
                 *BestTarget->GetName(), RenderAuthorityRTTMs,
                 UTOwner->PlayerState->ExactPing,
-                RenderAuthoritativeMs, RenderAuthoritativeTime * 1000.f,
+                RenderAuthorityExtraMs, RenderAuthoritativeMs,
+                RenderAuthoritativeTime * 1000.f,
                 RenderAuthoritativeSlack);
         }
     }

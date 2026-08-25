@@ -515,8 +515,9 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.HeadSlackMax` | `25` | Hard cap (uu) on the high‑ping head slack. |
 | `ncp.UnclaimedRenderGate` | `1` | Server rejects a hitscan hit the shooter's own client never claimed, by reconstructing what that shooter actually had rendered. This is the "gifted shots at high ping" fix. Shipped to production **on 327** (backported), not new in 328. **Leave at `1`** — if honest aim is being demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate. |
 | `ncp.UnclaimedRenderSlack` | `20` | Extra tolerance (uu) the render check allows before demoting a hit. Raise if live logs show demotes clustered on honest body aim. |
-| `ncp.HitAttribRenderExtraMs` | `30` | Extra time (ms) added to the server's render-position estimate (`half RTT + extra`). Used by the unclaimed render gate, render-authoritative Link/Minigun targeting, and hit-attribution telemetry. Link/Minigun use server ACK-derived RTT rather than trusting client-reported `ExactPing`; pawn damage fails closed during the connection's brief RTT/history warm-up. This is still an estimate, not a client-supplied frame timestamp. |
-| `ncp.RenderCredit` | `1` | Legacy name for render-authoritative targeting on opted-in, claimless fire (NCP Link beam and Minigun primary). At `1`, the estimated **render-time capsule replaces raw rewind history as the sole target-selection sample**; it is not `raw OR render`. Ray, spread, world clipping, and timing estimate remain server-owned. `0` is the live rollback to raw-rewind-only behavior. With `ncp.HitAttribDebug=1`, `[RenderAuthority]` accepted-target lines appear under `Log LogUTWeaponFix Verbose`; this is high-volume for a held beam. |
+| `ncp.HitAttribRenderExtraMs` | `30` | Extra time (ms) added to the exact-hitscan render-position estimate (`half RTT + extra`). Used only by the unclaimed Shock/Sniper render gate and hit-attribution telemetry; it no longer tunes Link/Minigun. This remains an estimate, not a client-supplied frame timestamp. |
+| `ncp.RenderCredit` | `1` | Legacy name for render-authoritative targeting on opted-in, claimless fire (NCP Link beam and Minigun primary). At `1`, the estimated **render-time capsule replaces raw rewind history as the sole target-selection sample**; it is not `raw OR render`. Ray, spread, world clipping, and timing estimate remain server-owned. `0` is the live rollback to raw-rewind-only behavior. Link/Minigun use server ACK-derived RTT rather than trusting client-reported `ExactPing`; pawn damage fails closed during the connection's brief RTT/history warm-up. With `ncp.HitAttribDebug=1`, `[RenderAuthority]` accepted-target lines appear under `Log LogUTWeaponFix Verbose`; this is high-volume for a held beam. |
+| `ncp.RenderCreditExtraMs` | `15` | Link/Minigun-only presentation-delay estimate added beyond half the server-observed RTT. Kept separate from `ncp.HitAttribRenderExtraMs` because claimless continuous/spread fire uses the client proxy-prediction path. Lower values sample a newer target position; changing this does not move the Shock/Sniper unclaimed-render epoch. |
 | `ncp.RenderCreditSlack` | `0` | Extra radius (uu) around the render-authoritative capsule. Keep at `0` unless evidence shows the server-side render estimate needs spatial tolerance. |
 | `ncp.SlideGraceMs` | `250` | **New in 328.** Window after a floor slide starts during which validation accepts the standing capsule. A slide shrinks the server capsule instantly, but the shooter still sees a standing body for one replication interp plus the anim blend — without this, shots through the visible torso were server-side air. `0` = off (pre-328 behaviour). |
 | `ncp.HitAttribDebug` | `0` | Per‑shot hit‑attribution telemetry (`[HitAttrib]` log lines). Diagnostic only — **high volume on a populated server**, leave `0` unless investigating a specific report. |
@@ -524,6 +525,12 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.CTFReplayMinDemoSeconds` | `200` | Min server‑demo age before the end‑of‑match decisive‑cap replay fires (0 = always — not advised; can crash the killcam in an early match). Requires a replay server (§8). |
 | `ncp.CTFReplayBuildupSeconds` | `8` | Seconds of run‑up shown before the featured cap. |
 | `ncp.ShockDebug` | `0` | Shock‑core diagnostics logging (0 off, 1 events). |
+
+> **328 render-estimate migration:** if an existing server set
+> `ncp.HitAttribRenderExtraMs=15` specifically to tune Link/Minigun, restore that
+> key to `30` (or remove the override) and use `ncp.RenderCreditExtraMs=15`.
+> Leaving the old override at `15` now moves only the unclaimed Shock/Sniper
+> render check and its attribution telemetry.
 
 > The rocket trio `MaxWindowMs` / `GraceMs` / `MaxPingMs` are meant to be kept **matched** (defaults
 > 200/200/150). Bumping `ut.RocketLagCompMaxPingMs` to 150 is the live fix for high‑ping no‑reg.
