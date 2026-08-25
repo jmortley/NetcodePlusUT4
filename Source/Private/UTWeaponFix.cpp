@@ -75,11 +75,11 @@ static FORCEINLINE bool FireDbg()
 
 // Rocket primary diagnostics only. This intentionally changes no firing state, timers,
 // timestamps, or RPC payloads. Level 1 traces the M1 transaction/cadence lifecycle; level 2
-// also traces predicted projectile delay and charged-state contamination evidence.
+// also traces predicted-projectile delay, charged load/release ownership, and wedge transitions.
 // Default 0 for live (restored for the 2026-08-14 328 cut; was 2 during the 328-RC dogfood).
 static TAutoConsoleVariable<int32> CVarRocketPrimaryDiag(
     TEXT("ncp.RocketPrimaryDiag"), 0,
-    TEXT("Rocket M1 diagnostics: 0=off, 1=refire/event/server/ACK lifecycle, 2=also fake-delay and charged-state details. Logging only; no behavior change."),
+    TEXT("Rocket M1 diagnostics: 0=off, 1=refire/event/server/ACK lifecycle, 2=also fake-delay and charged load/release details. Set separately on clients and dedicated servers. Logging only; no behavior change."),
     ECVF_Default);
 
 static FORCEINLINE int32 RocketPrimaryDiagLevel()
@@ -2596,11 +2596,14 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         {
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Bypassing Transactional Stop for Charged State (Mode 1)"));
         }
-        // CLIENT: Execute locally AND send transactional packet with rotation
+        // CLIENT: execute locally and retain both 328 Stop transports.
         if (Role < ROLE_Authority && UTOwner && UTOwner->IsLocallyControlled())
         {
-            // 1. Local execution only (no Epic RPC)
-            //EndFiringSequence(FireModeNum);
+            // Keep the stock Stop RPC and its retries in 328. Charged Start still
+            // uses the stock unreliable/retry family; removing only stock Stop
+            // would let a delayed Start retry begin charging after release. The
+            // charged state's release latch makes this stock Stop and the fixed
+            // Stop below converge on one local/server release commit.
             Super::StopFire(FireModeNum);
             // 2. Increment index (charged weapons skip FireShot)
             int32 EventIndex = 0;
@@ -3083,32 +3086,33 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         if (IsChargedRocketStateWedged(WedgedChg))
         {
             AUTPlusWeap_RocketLauncher* WedgeRL = Cast<AUTPlusWeap_RocketLauncher>(this);
-            const int32 WedgeLoaded = WedgeRL ? FMath::Max(WedgeRL->NumLoadedRockets, WedgeRL->NumLoadedBarrels) : 0;
-            if (WedgeLoaded > 0)
+            const int32 WedgeLoadedRockets = WedgeRL ? FMath::Max(0, WedgeRL->NumLoadedRockets) : 0;
+            const int32 WedgeLoadedBarrels = WedgeRL ? FMath::Max(0, WedgeRL->NumLoadedBarrels) : 0;
+            if (WedgeLoadedRockets > 0)
             {
-                // LOADED wedge (believed unreachable): NEVER GotoActiveState here — charged
-                // EndState() zeroes NumLoadedRockets/Barrels, eating the volley. Force the
-                // release through the state's OWN burst path; the burst arms
+                // Only NumLoadedRockets is authoritative gameplay work owed to the
+                // player. NumLoadedBarrels tracks loading/visual state and can remain
+                // stale after a spread volley; it is not an unfired-projectile count.
+                // A real loaded wedge must preserve and release its logical rockets
+                // through the state's OWN burst path, which arms
                 // FireLoadedRocketHandle so the state is busy (un-wedged) immediately. This
                 // Start then proceeds to normal dispatch below, is recorded as the stock
                 // PendingFireSequence with pawn PendingFire latched (set above), and the
                 // charged RefireCheckTimer's post-burst primary handoff fires it AFTER the
                 // volley — never both in the same frame.
-                uint8 WedgeChargedMode = 1;
-                for (int32 i = 0; i < FiringState.Num(); i++) { if (FiringState[i] == WedgedChg) { WedgeChargedMode = (uint8)i; break; } }
-                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s (%s) LOADED wedged ChargedRocket (loaded=%d) — force-releasing volley; incoming Start mode=%d defers to post-burst"),
+                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s (%s) LOADED wedged ChargedRocket (loadedR=%d loadedB=%d) — force-releasing volley; incoming Start mode=%d defers to post-burst"),
                     *GetName(),
                     (UTOwner && UTOwner->PlayerState) ? *UTOwner->PlayerState->PlayerName : TEXT("?"),
-                    WedgeLoaded, FireModeNum);
+                    WedgeLoadedRockets, WedgeLoadedBarrels, FireModeNum);
                 ChargedWedgeFirstSeenTime = -1.f;
-                WedgedChg->EndFiringSequence(WedgeChargedMode);
+                WedgedChg->RecoverWedgedRelease();
             }
             else
             {
-                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s (%s) wedged ChargedRocket recovered by incoming Start mode=%d — firing it instead of swallowing"),
+                UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s (%s) EMPTY wedged ChargedRocket (loadedR=0 loadedB=%d) recovered by incoming Start mode=%d — firing it instead of swallowing"),
                     *GetName(),
                     (UTOwner && UTOwner->PlayerState) ? *UTOwner->PlayerState->PlayerName : TEXT("?"),
-                    FireModeNum);
+                    WedgeLoadedBarrels, FireModeNum);
                 ChargedWedgeFirstSeenTime = -1.f;
                 // Hide the pending flags around GotoActiveState so ActiveState::BeginState
                 // can't auto-enter a firing state and double-fire this Start (same
@@ -3268,7 +3272,7 @@ void AUTWeaponFix::Destroyed()
 
 bool AUTWeaponFix::IsChargedRocketStateWedged(UUTWeaponStateFiringChargedRocket_Transactional* Chg)
 {
-    if (Chg == nullptr || Chg->bCharging)
+    if (Chg == nullptr)
     {
         return false;
     }
@@ -3282,6 +3286,32 @@ bool AUTWeaponFix::IsChargedRocketStateWedged(UUTWeaponStateFiringChargedRocket_
 void AUTWeaponFix::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
+
+    // ChargedWedgeFirstSeenTime is a transition marker, not state that may leak
+    // into another weapon state or charge cycle. Clear it even when the normal
+    // watchdog body below is skipped because the weapon already left firing.
+    if (Role == ROLE_Authority && ChargedWedgeFirstSeenTime >= 0.f)
+    {
+        UUTWeaponStateFiringChargedRocket_Transactional* MarkerState =
+            Cast<UUTWeaponStateFiringChargedRocket_Transactional>(GetCurrentState());
+        const bool bLeftObservedState = !IsFiring() || MarkerState == nullptr;
+        if (bLeftObservedState)
+        {
+            if (RocketPrimaryDiagFor(this, 0, 2))
+            {
+                AUTPlusWeap_RocketLauncher* MarkerRL = Cast<AUTPlusWeap_RocketLauncher>(this);
+                UE_LOG(LogUTWeaponFix, Warning,
+                    TEXT("[RocketM1Diag] WEDGE_MARKER_RESET frame=%u t=%.4f reason=%s observedFor=%.4f state=%s loadedR=%d loadedB=%d"),
+                    (uint32)GFrameCounter, GetWorld()->GetTimeSeconds(),
+                    TEXT("state_exit"),
+                    GetWorld()->GetTimeSeconds() - ChargedWedgeFirstSeenTime,
+                    GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+                    MarkerRL ? MarkerRL->NumLoadedRockets : -1,
+                    MarkerRL ? MarkerRL->NumLoadedBarrels : -1);
+            }
+            ChargedWedgeFirstSeenTime = -1.f;
+        }
+    }
 
     // --- WATCHDOG UNLOCK ---
     // If the weapon is marked as firing a mode, but the state machine says we are "Active" (Idle),
@@ -3308,13 +3338,28 @@ void AUTWeaponFix::Tick(float DeltaTime)
         {
             // A legitimately-active charged state always has one of these in flight (loading, grace,
             // mid-burst, or the post-burst refire wait) and self-transitions — leave it alone. A charged
-            // state that is IsFiring() with NONE of them and not charging is WEDGED: it never self-
+            // state that is IsFiring() with NONE of them is WEDGED: it never self-
             // transitions, and an incoming primary routes through its inherited stock
             // UUTWeaponStateFiring::BeginFiringSequence which just sets PendingFireSequence and returns —
             // no projectile, no reject, no log. Only the rocket has this state, which is why the no-reg
             // is rocket-only.
             if (!IsChargedRocketStateWedged(Chg))
             {
+                if (ChargedWedgeFirstSeenTime >= 0.f && RocketPrimaryDiagFor(this, 0, 2))
+                {
+                    AUTPlusWeap_RocketLauncher* ClearedRL = Cast<AUTPlusWeap_RocketLauncher>(this);
+                    UE_LOG(LogUTWeaponFix, Warning,
+                        TEXT("[RocketM1Diag] WEDGE_CLEARED frame=%u t=%.4f observedFor=%.4f charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+                        (uint32)GFrameCounter, GetWorld()->GetTimeSeconds(),
+                        GetWorld()->GetTimeSeconds() - ChargedWedgeFirstSeenTime,
+                        Chg->bCharging ? 1 : 0,
+                        ClearedRL ? ClearedRL->NumLoadedRockets : -1,
+                        ClearedRL ? ClearedRL->NumLoadedBarrels : -1,
+                        GetWorldTimerManager().GetTimerRemaining(Chg->LoadTimerHandle),
+                        GetWorldTimerManager().GetTimerRemaining(Chg->GraceTimerHandle),
+                        GetWorldTimerManager().GetTimerRemaining(Chg->FireLoadedRocketHandle),
+                        GetWorldTimerManager().GetTimerRemaining(Chg->RefireCheckHandle));
+                }
                 ChargedWedgeFirstSeenTime = -1.f;
                 return;
             }
@@ -3325,7 +3370,8 @@ void AUTWeaponFix::Tick(float DeltaTime)
             // callbacks can't false-trigger. (sassin's 2026-07-24 wedge ate primary clicks
             // for the full 2.5s under the old shared 2.5x-refire gate.)
             AUTPlusWeap_RocketLauncher* RL = Cast<AUTPlusWeap_RocketLauncher>(this);
-            const int32 LoadedCount = RL ? FMath::Max(RL->NumLoadedRockets, RL->NumLoadedBarrels) : 0;
+            const int32 LoadedRockets = RL ? FMath::Max(0, RL->NumLoadedRockets) : 0;
+            const int32 LoadedBarrels = RL ? FMath::Max(0, RL->NumLoadedBarrels) : 0;
             const float Now = GetWorld()->GetTimeSeconds();
             if (ChargedWedgeFirstSeenTime < 0.f)
             {
@@ -3333,10 +3379,10 @@ void AUTWeaponFix::Tick(float DeltaTime)
 				if (RocketPrimaryDiagFor(this, 0, 2))
 				{
 					UE_LOG(LogUTWeaponFix, Warning,
-						TEXT("[RocketM1Diag] WEDGE_ARMED frame=%u t=%.4f role=%d net=%d state=%s currentMode=%d tracker=%d loaded=%d pending0=%d pending1=%d lft0=%.4f timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+						TEXT("[RocketM1Diag] WEDGE_ARMED frame=%u t=%.4f role=%d net=%d state=%s currentMode=%d tracker=%d loadedR=%d loadedB=%d pending0=%d pending1=%d lft0=%.4f timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
 						(uint32)GFrameCounter, Now, (int32)Role, (int32)GetNetMode(),
 						GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
-						CurrentFireMode, CurrentlyFiringMode, LoadedCount,
+						CurrentFireMode, CurrentlyFiringMode, LoadedRockets, LoadedBarrels,
 						(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
 						(UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
 						LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f,
@@ -3345,10 +3391,10 @@ void AUTWeaponFix::Tick(float DeltaTime)
 						GetWorldTimerManager().GetTimerRemaining(Chg->FireLoadedRocketHandle),
 						GetWorldTimerManager().GetTimerRemaining(Chg->RefireCheckHandle));
 				}
-                UE_LOG(LogUTWeaponFix, Warning, TEXT("[WedgeArmed] %s (%s) charged state idle without exit: mode=%d CurFiring=%d loaded=%d pend0=%d pend1=%d sinceFire0=%.2fs sinceFire1=%.2fs pendingWpn=%d"),
+                UE_LOG(LogUTWeaponFix, Warning, TEXT("[WedgeArmed] %s (%s) charged state idle without exit: mode=%d CurFiring=%d loadedR=%d loadedB=%d pend0=%d pend1=%d sinceFire0=%.2fs sinceFire1=%.2fs pendingWpn=%d"),
                     *GetName(),
                     (UTOwner && UTOwner->PlayerState) ? *UTOwner->PlayerState->PlayerName : TEXT("?"),
-                    CurrentFireMode, CurrentlyFiringMode, LoadedCount,
+                    CurrentFireMode, CurrentlyFiringMode, LoadedRockets, LoadedBarrels,
                     (UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
                     (UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
                     LastFireTime.IsValidIndex(0) ? Now - LastFireTime[0] : -1.f,
@@ -3360,42 +3406,35 @@ void AUTWeaponFix::Tick(float DeltaTime)
             {
                 return;
             }
-            if (LoadedCount > 0)
+            if (LoadedRockets > 0)
             {
-                // LOADED wedge (believed unreachable: loaded-and-waiting always has the grace
-                // timer active). NEVER GotoActiveState with rockets loaded — charged EndState()
-                // zeroes NumLoadedRockets/Barrels (UTWeaponStateFiringChargedRocket_
-                // Transactional.cpp:106-109), silently eating the volley the player is owed.
-                // Force the release through the state's OWN burst path instead: the burst arms
-                // FireLoadedRocketHandle, so the state reads busy (un-wedged) next tick and
-                // completes normally. Only if it is somehow STILL wedged+loaded after 1s of
-                // attempts do we abandon as the last resort — loudly.
+                // Preserve only real logical rockets. The loading/visual barrel count can
+                // remain nonzero after a normal spread burst and must never cause another
+                // projectile. A genuine loaded wedge is force-released through the charged
+                // state's own path.
                 if (Now - ChargedWedgeFirstSeenTime >= 1.0f)
                 {
-                    UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s abandoning a LOADED wedged ChargedRocket after failed force-release (loaded=%d) — volley lost"),
-                        *GetName(), LoadedCount);
+                    UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s abandoning a LOADED wedged ChargedRocket after failed force-release (loadedR=%d loadedB=%d) — volley lost"),
+                        *GetName(), LoadedRockets, LoadedBarrels);
                     ChargedWedgeFirstSeenTime = -1.f;
                     CurrentlyFiringMode = 255;
                     for (int32 i = 0; i < FireModeActiveState.Num(); i++) { FireModeActiveState[i] = 0; }
                     GotoActiveState();
                     return;
                 }
-                uint8 ChargedMode = 1;
-                for (int32 i = 0; i < FiringState.Num(); i++) { if (FiringState[i] == Chg) { ChargedMode = (uint8)i; break; } }
-                UE_LOG(LogUTWeaponFix, Verbose, TEXT("[WedgeArmed] %s force-releasing %d loaded rockets (mode=%d)"), *GetName(), LoadedCount, ChargedMode);
-                Chg->EndFiringSequence(ChargedMode);
+                Chg->RecoverWedgedRelease();
                 return;
             }
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s fast-recovered an empty WEDGED ChargedRocket state (mode=%d CurFiring=%d wedged=%.2fs)"),
-                *GetName(), CurrentFireMode, CurrentlyFiringMode, Now - ChargedWedgeFirstSeenTime);
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireBlock] %s fast-recovered an empty WEDGED ChargedRocket state (mode=%d CurFiring=%d loadedR=0 loadedB=%d wedged=%.2fs)"),
+                *GetName(), CurrentFireMode, CurrentlyFiringMode, LoadedBarrels, Now - ChargedWedgeFirstSeenTime);
 			if (RocketPrimaryDiagFor(this, 0, 2))
 			{
 				UE_LOG(LogUTWeaponFix, Warning,
-					TEXT("[RocketM1Diag] WEDGE_RECOVER frame=%u t=%.4f wedgedFor=%.4f state=%s currentMode=%d tracker=%d pending0=%d loaded=%d"),
+					TEXT("[RocketM1Diag] WEDGE_RECOVER frame=%u t=%.4f wedgedFor=%.4f state=%s currentMode=%d tracker=%d pending0=%d loadedR=%d loadedB=%d"),
 					(uint32)GFrameCounter, Now, Now - ChargedWedgeFirstSeenTime,
 					GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
 					CurrentFireMode, CurrentlyFiringMode,
-					(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, LoadedCount);
+					(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, LoadedRockets, LoadedBarrels);
 			}
             ChargedWedgeFirstSeenTime = -1.f;
             CurrentlyFiringMode = 255;
@@ -3492,19 +3531,6 @@ bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFire
 
 void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex)
 {
-	if (RocketPrimaryDiagFor(this, FireModeNum))
-	{
-		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("[RocketM1Diag] SERVER_STOP_RX frame=%u t=%.4f mode=%d event=%d authEvent=%d lastStop=%d state=%s tracker=%d active0=%d pending0=%d"),
-			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
-			FireModeNum, InFireEventIndex,
-			AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1,
-			LastProcessedStopEventIndex.IsValidIndex(FireModeNum) ? LastProcessedStopEventIndex[FireModeNum] : -1,
-			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
-			CurrentlyFiringMode, FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
-			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0);
-	}
-
     // Initial and retry RPCs carry the same stop. Process whichever arrives first,
     // then make later copies idempotent.
     if (LastProcessedStopEventIndex.IsValidIndex(FireModeNum)
@@ -3536,6 +3562,33 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     {
         LastProcessedStopEventIndex[FireModeNum] = InFireEventIndex;
     }
+
+	// Log only the accepted fixed Stop. Retry copies return at the idempotency gate
+	// above, keeping level-2 dogfood volume transition-oriented.
+	if (RocketPrimaryDiagFor(this, FireModeNum))
+	{
+		UUTWeaponStateFiringChargedRocket_Transactional* const ChargedState =
+			Cast<UUTWeaponStateFiringChargedRocket_Transactional>(GetCurrentState());
+		AUTPlusWeap_RocketLauncher* const RocketWeapon = Cast<AUTPlusWeap_RocketLauncher>(this);
+		UE_LOG(LogUTWeaponFix, Warning,
+			TEXT("[RocketM1Diag] SERVER_STOP_ACCEPT frame=%u t=%.4f player=%s mode=%d event=%d authEvent=%d state=%s tracker=%d active0=%d pending0=%d pending1=%d charged=%d charging=%d releaseReq=%d releaseCommit=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+			RocketPrimaryDiagPlayer(this), FireModeNum, InFireEventIndex,
+			AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1,
+			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
+			CurrentlyFiringMode, FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
+			(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
+			(UTOwner && UTOwner->IsPendingFire(1)) ? 1 : 0,
+			ChargedState ? 1 : 0, (ChargedState && ChargedState->bCharging) ? 1 : 0,
+			(ChargedState && ChargedState->bReleaseRequested) ? 1 : 0,
+			(ChargedState && ChargedState->bReleaseCommitted) ? 1 : 0,
+			RocketWeapon ? RocketWeapon->NumLoadedRockets : -1,
+			RocketWeapon ? RocketWeapon->NumLoadedBarrels : -1,
+			ChargedState ? GetWorldTimerManager().GetTimerRemaining(ChargedState->LoadTimerHandle) : -1.f,
+			ChargedState ? GetWorldTimerManager().GetTimerRemaining(ChargedState->GraceTimerHandle) : -1.f,
+			ChargedState ? GetWorldTimerManager().GetTimerRemaining(ChargedState->FireLoadedRocketHandle) : -1.f,
+			ChargedState ? GetWorldTimerManager().GetTimerRemaining(ChargedState->RefireCheckHandle) : -1.f);
+	}
     
     // 1. Clear authoritative state flags
     if (FireModeActiveState.IsValidIndex(FireModeNum))
@@ -3595,38 +3648,48 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     // so calling it when in the wrong state would land on the wrong state object.
     if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
     {
+        // Capture ownership before EndFiringSequence: an empty charged release can
+        // transition immediately. Charged rockets own their load, burst, and refire
+        // timers; the generic Stop cleanup below is only valid for ordinary firing
+        // states. The state-local release latch handles the parallel stock Stop.
+        UUTWeaponStateFiring* const FiringStateObj = Cast<UUTWeaponStateFiring>(FiringState[FireModeNum]);
+        const bool bChargedRocketOwnsCompletion =
+            Cast<UUTWeaponStateFiringChargedRocket_Transactional>(FiringStateObj) != nullptr;
+
         // Clean up firing effects and PendingFire immediately (not deferred).
         EndFiringSequence(FireModeNum);
 
-        // Kill RefireCheckTimer to prevent overlap with DeferredGotoActiveState
-        // (same reasoning as client-side StopFire — see comment there).
-        UUTWeaponStateFiring* FiringStateObj = Cast<UUTWeaponStateFiring>(FiringState[FireModeNum]);
-        if (FiringStateObj)
+        if (!bChargedRocketOwnsCompletion)
         {
-            GetWorldTimerManager().ClearTimer(FiringStateObj->RefireCheckHandle);
-        }
+            // Ordinary transactional states use the weapon-level deferred-active
+            // transition, so their state refire timer would be a competing owner.
+            if (FiringStateObj)
+            {
+                GetWorldTimerManager().ClearTimer(FiringStateObj->RefireCheckHandle);
+            }
 
-        // Only defer GotoActiveState — keeps weapon in FiringState during cooldown
-        // so PutDown() routes to the cooldown-aware override.
-        float CurrentTime = GetWorld()->GetTimeSeconds();
-        float ReadyTime = 0.f;
+            // Only defer GotoActiveState — keeps an ordinary weapon in FiringState
+            // during cooldown so PutDown() routes to its cooldown-aware override.
+            const float CurrentTime = GetWorld()->GetTimeSeconds();
+            float ReadyTime = 0.f;
 
-        if (LastFireTime.IsValidIndex(FireModeNum))
-        {
-            ReadyTime = LastFireTime[FireModeNum] + GetRefireTime(FireModeNum);
-        }
+            if (LastFireTime.IsValidIndex(FireModeNum))
+            {
+                ReadyTime = LastFireTime[FireModeNum] + GetRefireTime(FireModeNum);
+            }
 
-        float TimeRemaining = ReadyTime - CurrentTime;
+            const float TimeRemaining = ReadyTime - CurrentTime;
 
-        if (TimeRemaining > 0.01f)
-        {
-            FTimerDelegate Del;
-            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
-            GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
-        }
-        else
-        {
-            GotoActiveState();
+            if (TimeRemaining > 0.01f)
+            {
+                FTimerDelegate Del;
+                Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
+                GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
+            }
+            else
+            {
+                GotoActiveState();
+            }
         }
     }
 

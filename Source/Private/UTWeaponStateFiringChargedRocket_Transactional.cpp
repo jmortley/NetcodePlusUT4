@@ -3,6 +3,7 @@
 #include "UTWeaponFix.h"
 #include "UTGameState.h"
 #include "UTPlayerController.h"
+#include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTBot.h"
@@ -23,6 +24,10 @@ UUTWeaponStateFiringChargedRocket_Transactional::UUTWeaponStateFiringChargedRock
     bCharging = false;
     ChargeTime = 0.0f;
     RocketLauncher = nullptr;
+    bReleaseRequested = false;
+    bReleaseCommitted = false;
+    bCompletingLoadTimer = false;
+    bDuplicateReleaseLogged = false;
 }
 
 AUTWeaponFix* UUTWeaponStateFiringChargedRocket_Transactional::GetWeaponFix() const
@@ -38,11 +43,19 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ClearAllTimers()
         GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
         GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
         GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(FireLoadedRocketHandle);
+        GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(PutDownHandle);
     }
 }
 
 void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeaponState* PrevState)
 {
+	// State objects are reused. RefireCheckTimer can begin the next charge without
+	// EndState(), so release idempotency must be reset here, not only in EndState().
+	bReleaseRequested = false;
+	bReleaseCommitted = false;
+	bCompletingLoadTimer = false;
+	bDuplicateReleaseLogged = false;
+
 	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
 	{
 		AUTWeapon* W = GetOuterAUTWeapon();
@@ -110,6 +123,24 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
         false
     );
 
+	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* DiagWeapon = GetOuterAUTWeapon();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_ARM frame=%u t=%.4f role=%d net=%d player=%s loadedR=%d loadedB=%d maxR=%d firstLoad=%.4f nextLoad=%.4f grace=%.4f timerRate=%.4f timerRemain=%.4f"),
+			(uint32)GFrameCounter,
+			DiagWeapon->GetWorld() ? DiagWeapon->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)DiagWeapon->Role, (int32)DiagWeapon->GetNetMode(),
+			(DiagWeapon->GetUTOwner() && DiagWeapon->GetUTOwner()->PlayerState)
+				? *DiagWeapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+			RocketLauncher->NumLoadedRockets, RocketLauncher->NumLoadedBarrels,
+			RocketLauncher->MaxLoadedRockets,
+			RocketLauncher->FirstRocketLoadTime, RocketLauncher->RocketLoadTime,
+			RocketLauncher->GracePeriod,
+			DiagWeapon->GetWorldTimerManager().GetTimerRate(LoadTimerHandle),
+			DiagWeapon->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle));
+	}
+
     // NOTE: We do NOT call FireShot() here like the standard Transactional state does.
     // We wait for the player to release the button or for the grace timer to fire.
 
@@ -123,14 +154,16 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
 		AUTWeapon* W = GetOuterAUTWeapon();
 		AUTPlusWeap_RocketLauncher* RL = Cast<AUTPlusWeap_RocketLauncher>(W);
 		UE_LOG(LogTemp, Warning,
-			TEXT("[RocketM1Diag] CHARGED_END frame=%u t=%.4f role=%d net=%d local=%d state=%p fireMode=%d currentMode=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+			TEXT("[RocketM1Diag] CHARGED_END frame=%u t=%.4f role=%d net=%d local=%d state=%p fireMode=%d currentMode=%d pending0=%d pending1=%d charging=%d releaseReq=%d releaseCommit=%d completingLoad=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
 			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
 			(int32)W->Role, (int32)W->GetNetMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
 			GetFireMode(), W->GetCurrentFireMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
 			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
-			bCharging ? 1 : 0, RL ? RL->NumLoadedRockets : -1, RL ? RL->NumLoadedBarrels : -1,
+			bCharging ? 1 : 0, bReleaseRequested ? 1 : 0, bReleaseCommitted ? 1 : 0,
+			bCompletingLoadTimer ? 1 : 0,
+			RL ? RL->NumLoadedRockets : -1, RL ? RL->NumLoadedBarrels : -1,
 			W->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
 			W->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
 			W->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
@@ -143,6 +176,10 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
     // 2. Reset charging state
     ChargeTime = 0.0f;
     bCharging = false;
+    bReleaseRequested = false;
+    bReleaseCommitted = false;
+    bCompletingLoadTimer = false;
+    bDuplicateReleaseLogged = false;
 
     // 3. Clean up rocket launcher state (in case we exit early)
     if (RocketLauncher)
@@ -197,39 +234,102 @@ void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
 
 void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
 {
-    if (!RocketLauncher)
+    AUTWeapon* Weapon = GetOuterAUTWeapon();
+    if (!Weapon)
     {
         return;
     }
 
-    // 1. Complete the current rocket load
-    RocketLauncher->EndLoadRocket();
+    FTimerManager& TimerManager = Weapon->GetWorldTimerManager();
+    const float CallbackRemaining = TimerManager.GetTimerRemaining(LoadTimerHandle);
 
-    // 2. Check state
-    if (!bCharging)
+    // UE4.15 keeps a due timer discoverable as "active" while its delegate is
+    // executing and reports 0.0 seconds remaining. Consume and invalidate the
+    // handle before EndLoadRocket(): release code must never mistake this callback
+    // for a second pending load that it can complete again.
+    TimerManager.ClearTimer(LoadTimerHandle);
+
+    if (bCompletingLoadTimer)
     {
-        // Player already released during load - fire immediately
-        // This handles the case where they release mid-load
-        EndFiringSequence(GetFireMode());
+        UE_LOG(LogTemp, Warning, TEXT("[RocketLoadGuard] Ignored re-entrant LoadTimer for %s"),
+            *Weapon->GetName());
         return;
     }
 
-    // 3. Check if we're fully loaded
+    if (!RocketLauncher || RocketLauncher != Weapon || !GetUTOwner()
+        || Weapon->GetCurrentState() != this)
+    {
+        return;
+    }
+
+    const int32 LoadedRocketsBefore = RocketLauncher->NumLoadedRockets;
+    const int32 LoadedBarrelsBefore = RocketLauncher->NumLoadedBarrels;
+
+    if (RocketPrimaryChargedDiag(Weapon))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[RocketM1Diag] CHARGED_LOAD_CALLBACK frame=%u t=%.4f role=%d net=%d player=%s owns=%d charging=%d releaseReq=%d releaseCommit=%d loadedR=%d loadedB=%d callbackRemain=%.4f handleActiveAfterClear=%d"),
+            (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
+            (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
+            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
+                ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+            Weapon->GetCurrentState() == this ? 1 : 0, bCharging ? 1 : 0,
+            bReleaseRequested ? 1 : 0, bReleaseCommitted ? 1 : 0,
+            RocketLauncher->NumLoadedRockets, RocketLauncher->NumLoadedBarrels,
+            CallbackRemaining, TimerManager.IsTimerActive(LoadTimerHandle) ? 1 : 0);
+    }
+
+    // EndLoadRocket can synchronously call back into StopFire through last-ammo
+    // weapon switching or bot logic. During that narrow scope EndFiringSequence
+    // may latch release intent, but CommitRelease waits until this mutation ends.
+    {
+        TGuardValue<bool> CompletingLoadGuard(bCompletingLoadTimer, true);
+        RocketLauncher->EndLoadRocket();
+    }
+
+    if (RocketPrimaryChargedDiag(Weapon))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[RocketM1Diag] CHARGED_LOAD_COMMIT frame=%u t=%.4f role=%d net=%d player=%s owns=%d beforeR=%d afterR=%d beforeB=%d afterB=%d charging=%d releaseReq=%d releaseCommit=%d"),
+            (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
+            (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
+            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
+                ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+            Weapon->GetCurrentState() == this ? 1 : 0,
+            LoadedRocketsBefore, RocketLauncher->NumLoadedRockets,
+            LoadedBarrelsBefore, RocketLauncher->NumLoadedBarrels,
+            bCharging ? 1 : 0, bReleaseRequested ? 1 : 0,
+            bReleaseCommitted ? 1 : 0);
+    }
+
+    // EndLoadRocket may have switched/removed the weapon. Never schedule or fire
+    // from a state that no longer owns the weapon.
+    if (Weapon->GetCurrentState() != this || !RocketLauncher || !GetUTOwner())
+    {
+        return;
+    }
+
+    if (!bCharging || bReleaseRequested)
+    {
+        bCharging = false;
+        bReleaseRequested = true;
+        CommitRelease();
+        return;
+    }
+
+    // Check if we're fully loaded.
     if (RocketLauncher->NumLoadedBarrels >= RocketLauncher->MaxLoadedRockets)
     {
-        // Fully loaded - start grace timer
-        // After grace period, we auto-fire to prevent holding forever
-
-        // Tell non-local clients to stop loading animation
+        // Fully loaded - start grace timer. The grace timeout is the only
+        // intentional auto-release in this state.
         if (GetUTOwner() && !GetUTOwner()->IsLocallyControlled() && GetWorld()->GetNetMode() != NM_Client)
         {
             RocketLauncher->ClientAbortLoad();
         }
 
-        // Start grace timer if not already running
-        if (!GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(GraceTimerHandle))
+        if (!TimerManager.IsTimerActive(GraceTimerHandle))
         {
-            GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+            TimerManager.SetTimer(
                 GraceTimerHandle,
                 this,
                 &UUTWeaponStateFiringChargedRocket_Transactional::GraceTimer,
@@ -240,11 +340,12 @@ void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
     }
     else
     {
-        // Not full yet - start loading the next rocket
+        // Still held: begin exactly one next load and give its timer ownership
+        // to the next callback. Release never calls this callback directly.
         RocketLauncher->BeginLoadRocket();
 
-        float LoadTime = RocketLauncher->GetLoadTime(RocketLauncher->NumLoadedRockets);
-        GetOuterAUTWeapon()->GetWorldTimerManager().SetTimer(
+        const float LoadTime = RocketLauncher->GetLoadTime(RocketLauncher->NumLoadedRockets);
+        TimerManager.SetTimer(
             LoadTimerHandle,
             this,
             &UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer,
@@ -260,134 +361,132 @@ void UUTWeaponStateFiringChargedRocket_Transactional::GraceTimer()
     EndFiringSequence(GetFireMode());
 }
 
-
-
-void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
+void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBufferedPrimary()
 {
-	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
-	{
-		AUTWeapon* W = GetOuterAUTWeapon();
-		UE_LOG(LogTemp, Warning,
-			TEXT("[RocketM1Diag] CHARGED_END_SEQUENCE frame=%u t=%.4f role=%d net=%d requested=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
-			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(), FireModeNum, GetFireMode(), W->GetCurrentFireMode(),
-			W->GetCurrentState() == this ? 1 : 0,
-			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
-			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
-			bCharging ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
-			RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1,
-			W->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
-			W->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
-			W->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
-			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
-	}
-
-    if (FireModeNum != GetFireMode()) return;
-
-    // Re-entry guard: if a burst is already in progress (FireLoadedRocketHandle
-    // timer scheduled by a prior EndFiringSequence call this frame), drop this
-    // call. This closes the LoadTimer + ServerStopFire RPC race where two
-    // callers reach EndFiringSequence in the same server tick: each invocation
-    // would fire one rocket via FireLoadedRocket and schedule an overlapping
-    // timer, producing a same-frame double-spawn. The asymmetric timing
-    // (server: 2 instant + remainder timed; client: all timed at 150ms)
-    // caused server's end-of-burst CRFM=0 reset to replicate to the client
-    // mid-burst and corrupt the next client fake to spawn as a rocket
-    // (orphan). The OnRep_CurrentRocketFireMode guard on the client catches
-    // this defensively, but blocking the race here removes the source.
-    //
-    // The guard is correct because:
-    //  - First EndFiringSequence call passes (timer not yet active), starts
-    //    the burst, FireLoadedRocket schedules timer for the next shot.
-    //  - Same-frame re-entry sees active timer, returns; the just-loaded
-    //    extra rocket (if LoadTimer fired this same tick) is still picked
-    //    up because NumLoadedRockets is checked at each timer tick.
-    //  - Legitimate "load completes after release" path (LoadTimer fires
-    //    on a tick where no burst is in progress) is unaffected because
-    //    that scenario has the timer cleared between calls.
-    if (GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(FireLoadedRocketHandle))
+    AUTWeapon* Weapon = GetOuterAUTWeapon();
+    AUTCharacter* Owner = GetUTOwner();
+    if (!Weapon || !Owner)
     {
-        UE_LOG(LogTemp, Verbose, TEXT("[NCFire] EndFiringSequence re-entry blocked (LoadTimer + StopFire race) Loaded=%d"),
-            RocketLauncher ? RocketLauncher->NumLoadedRockets : -1);
         return;
     }
 
-    bCharging = false;
-
-
-    // --- HELPER LAMBDA FOR BUFFERED FIRE ---
-    // Fixes the "Dead End" where holding M1 after a cancelled load does nothing.
-    auto AttemptBufferedFire = [this]()
-        {
-            if (GetUTOwner() && GetUTOwner()->IsPendingFire(0))
-            {
-                TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
-
-                // Syntax Fix: [Capture List] (Params) { Body }
-                GetOuterAUTWeapon()->GetWorldTimerManager().SetTimerForNextTick(
-                    FTimerDelegate::CreateLambda([WeakWeapon]()
-                        {
-                            if (WeakWeapon.IsValid() && WeakWeapon->GetUTOwner() &&
-                                WeakWeapon->GetUTOwner()->IsPendingFire(0))
-                            {
-                                // Fix: Reset the lock flag so StartFire doesn't reject the input
-                                AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(WeakWeapon.Get());
-                                if (FixWeapon)
-                                {
-                                    // Use the public setter or direct access if you made it public
-                                    // FixWeapon->CurrentlyFiringMode = 255; 
-                                    FixWeapon->ResetFiringModeTracker();
-                                }
-
-                                WeakWeapon->StartFire(0);
-                            }
-                        })
-                );
-            }
-        };
-
-    // --- FIX START: DYNAMIC GHOST ROCKET COMPENSATION ---
-    if (RocketLauncher && RocketLauncher->NumLoadedRockets <= 0 && GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(LoadTimerHandle))
+    // ActiveState::BeginState checks PendingFire immediately. Hide primary across
+    // the transition so it cannot auto-dispatch once here and again in our retry.
+    const bool bWantsPrimary = Owner->IsPendingFire(0);
+    if (bWantsPrimary)
     {
-        float Remaining = GetOuterAUTWeapon()->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle);
-        float RTT_ms = (GetUTOwner() && GetUTOwner()->PlayerState) ? GetUTOwner()->PlayerState->ExactPing : 0.0f;
-
-        // Convert RTT to One-Way Seconds + Jitter Buffer
-        float Tolerance = FMath::Clamp((RTT_ms * 0.0005f) + 0.02f, 0.0f, 0.20f);
-
-        if (Remaining < Tolerance)
-        {
-            GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(LoadTimerHandle);
-            LoadTimer();
-            return;
-        }
-        else
-        {
-            // Legit early release. 
-            // DO NOT abort the state here! Let the LoadTimer finish naturally
-            // so the single rocket fires and triggers the global refire cooldown.
-            return;
-        }
+        Owner->SetPendingFire(0, false);
     }
-    // --- FIX END ---
+    Weapon->GotoActiveState();
+
+    Owner = Weapon->GetUTOwner();
+    if (!Owner || !bWantsPrimary)
+    {
+        return;
+    }
+
+    // Restore held intent even when a weapon switch is pending; only this weapon's
+    // explicit retry is suppressed in that case so the holstered weapon cannot fire.
+    // A different pending mode may also have re-entered firing synchronously from
+    // ActiveState; never inject primary on top of that state.
+    Owner->SetPendingFire(0, true);
+    if (Owner->GetWeapon() != Weapon || Owner->GetPendingWeapon() != nullptr
+        || Weapon->IsFiring())
+    {
+        return;
+    }
+
+    TWeakObjectPtr<AUTWeapon> WeakWeapon = Weapon;
+    Weapon->GetWorldTimerManager().SetTimerForNextTick(
+        FTimerDelegate::CreateLambda([WeakWeapon]()
+        {
+            AUTCharacter* CurrentOwner = WeakWeapon.IsValid() ? WeakWeapon->GetUTOwner() : nullptr;
+            if (!WeakWeapon.IsValid() || !CurrentOwner || !CurrentOwner->IsPendingFire(0)
+                || CurrentOwner->GetWeapon() != WeakWeapon.Get()
+                || CurrentOwner->GetPendingWeapon() != nullptr
+                || WeakWeapon->IsFiring())
+            {
+                return;
+            }
+
+            // The charged state is finished. Release the transactional mode
+            // tracker before handing a genuinely held primary back to StartFire.
+            if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(WeakWeapon.Get()))
+            {
+                FixWeapon->ResetFiringModeTracker();
+            }
+            WeakWeapon->StartFire(0);
+        }));
+}
+
+void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
+{
+    if (bReleaseCommitted || bCompletingLoadTimer)
+    {
+        return;
+    }
+
+    AUTWeapon* Weapon = GetOuterAUTWeapon();
+    if (!Weapon || Weapon->GetCurrentState() != this || !GetUTOwner())
+    {
+        return;
+    }
+
+    FTimerManager& TimerManager = Weapon->GetWorldTimerManager();
+    const int32 LoadedRockets = RocketLauncher ? RocketLauncher->NumLoadedRockets : 0;
+    const int32 LoadedBarrels = RocketLauncher ? RocketLauncher->NumLoadedBarrels : 0;
+
+    if (RocketLauncher && LoadedRockets <= 0 && TimerManager.IsTimerActive(LoadTimerHandle))
+    {
+        // A tap before rocket one completes is still guaranteed one rocket. The
+        // existing timer owns that completion; no ping estimate or direct callback
+        // is allowed to promote it. LoadTimer() will return here after completing it.
+        if (RocketPrimaryChargedDiag(Weapon))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[RocketM1Diag] CHARGED_RELEASE_WAIT_FIRST frame=%u t=%.4f role=%d net=%d player=%s loadedR=%d loadedB=%d loadRemain=%.4f"),
+                (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
+                (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
+                (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
+                    ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+                LoadedRockets, LoadedBarrels, TimerManager.GetTimerRemaining(LoadTimerHandle));
+        }
+        return;
+    }
+
+    // Commit before any call that can synchronously re-enter weapon/state logic.
+    // One or more completed rockets form the release snapshot. A partly loaded
+    // next rocket is cancelled, not promoted, regardless of ping.
+    bReleaseCommitted = true;
+    const float CancelledLoadRemaining = TimerManager.GetTimerRemaining(LoadTimerHandle);
+    TimerManager.ClearTimer(LoadTimerHandle);
+    TimerManager.ClearTimer(GraceTimerHandle);
+
+    if (RocketPrimaryChargedDiag(Weapon))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[RocketM1Diag] CHARGED_RELEASE_COMMIT frame=%u t=%.4f role=%d net=%d player=%s owns=%d loadedR=%d loadedB=%d cancelledLoadRemain=%.4f burstActive=%d refireActive=%d"),
+            (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
+            (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
+            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
+                ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+            Weapon->GetCurrentState() == this ? 1 : 0, LoadedRockets, LoadedBarrels,
+            CancelledLoadRemaining,
+            TimerManager.IsTimerActive(FireLoadedRocketHandle) ? 1 : 0,
+            TimerManager.IsTimerActive(RefireCheckHandle) ? 1 : 0);
+    }
 
     if (!RocketLauncher)
     {
-        GetOuterAUTWeapon()->GotoActiveState();
-        AttemptBufferedFire(); // <--- Check input
+        ExitToActiveAndAttemptBufferedPrimary();
         return;
     }
 
     if (RocketLauncher->NumLoadedRockets <= 0)
     {
-        // Nothing loaded, and LoadTimer is no longer active (the still-loading case is handled
-        // above at the IsTimerActive(LoadTimerHandle) branch). "Let LoadTimer finish" was a bug:
-        // no timer is armed, so the charged state WEDGES here — still IsFiring(), not charging, no
-        // timer — and then silently swallows every following primary via the inherited stock
-        // UUTWeaponStateFiring::BeginFiringSequence (the rocket-only secondary->primary no-reg).
-        // Go idle and pick up any buffered primary, exactly like the sibling exits above.
-        GetOuterAUTWeapon()->GotoActiveState();
-        AttemptBufferedFire();
+        // No load timer and no completed rocket is an invalid/abandoned charged
+        // state. Exit rather than waiting forever with IsFiring() still true.
+        ExitToActiveAndAttemptBufferedPrimary();
         return;
     }
 
@@ -395,14 +494,132 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
     if (GameState && (GameState->HasMatchEnded() || GameState->IsMatchIntermission()))
     {
         RocketLauncher->NumLoadedRockets = 0;
-        GetOuterAUTWeapon()->GotoActiveState();
-        AttemptBufferedFire(); // <--- Check input
+        // Grace auto-release can leave secondary marked pending. ActiveState scans
+        // every pending mode and can bypass StartFire's match gate, so suppress all
+        // fire intent while leaving the charged state at match end/intermission.
+        if (GetUTOwner())
+        {
+            GetUTOwner()->SetPendingFire(0, false);
+            GetUTOwner()->SetPendingFire(1, false);
+        }
+        Weapon->GotoActiveState();
         return;
     }
 
-    // Normal path: Fire the rockets.
-    // NOTE: The transition logic for a SUCCESSFUL fire happens in RefireCheckTimer().
+    // FireLoadedRocket owns the burst and then arms this charged state's refire
+    // timer. Generic Stop-RPC cleanup must not clear or race those timers.
     FireLoadedRocket();
+}
+
+
+
+void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 FireModeNum)
+{
+	if (FireModeNum != GetFireMode())
+	{
+		return;
+	}
+
+	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	{
+		AUTWeapon* W = GetOuterAUTWeapon();
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_RELEASE_RX frame=%u t=%.4f role=%d net=%d player=%s requestedMode=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d releaseReq=%d releaseCommit=%d completingLoad=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)W->Role, (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->PlayerState)
+				? *W->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+			FireModeNum, GetFireMode(), W->GetCurrentFireMode(),
+			W->GetCurrentState() == this ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
+			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
+			bCharging ? 1 : 0, bReleaseRequested ? 1 : 0, bReleaseCommitted ? 1 : 0,
+			bCompletingLoadTimer ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
+			RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1,
+			W->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
+			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+	}
+
+    // 328 intentionally receives the same physical release through the stock
+    // Stop RPC (needed to order against retried stock Start RPCs) and the fixed
+    // Stop RPC. The first notification latches intent; CommitRelease is separately
+    // idempotent so a later notification can only resume an uncommitted release.
+    if (bReleaseRequested)
+    {
+        if (!bDuplicateReleaseLogged && RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+        {
+            bDuplicateReleaseLogged = true;
+            UE_LOG(LogTemp, Warning,
+                TEXT("[RocketM1Diag] CHARGED_RELEASE_DUPLICATE frame=%u t=%.4f role=%d player=%s committed=%d loadedR=%d loadedB=%d"),
+                (uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+                GetOuterAUTWeapon() ? (int32)GetOuterAUTWeapon()->Role : -1,
+                (GetUTOwner() && GetUTOwner()->PlayerState)
+                    ? *GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+                bReleaseCommitted ? 1 : 0,
+                RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
+                RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1);
+        }
+        if (!bReleaseCommitted && !bCompletingLoadTimer)
+        {
+            CommitRelease();
+        }
+        return;
+    }
+
+    bReleaseRequested = true;
+    bCharging = false;
+
+    // EndLoadRocket is not re-entrant-safe. If its ammo/bot callbacks produced
+    // this Stop, record the intent now and let LoadTimer commit after it returns.
+    if (bCompletingLoadTimer)
+    {
+        if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[RocketM1Diag] CHARGED_RELEASE_DEFER_LOAD frame=%u t=%.4f role=%d loadedR=%d loadedB=%d"),
+                (uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
+                GetOuterAUTWeapon() ? (int32)GetOuterAUTWeapon()->Role : -1,
+                RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
+                RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1);
+        }
+        return;
+    }
+
+    CommitRelease();
+}
+
+void UUTWeaponStateFiringChargedRocket_Transactional::RecoverWedgedRelease()
+{
+    AUTWeapon* Weapon = GetOuterAUTWeapon();
+    if (!Weapon || Weapon->GetCurrentState() != this || !GetUTOwner()
+        || bCompletingLoadTimer)
+    {
+        return;
+    }
+
+    FTimerManager& TimerManager = Weapon->GetWorldTimerManager();
+    if (TimerManager.IsTimerActive(LoadTimerHandle)
+        || TimerManager.IsTimerActive(GraceTimerHandle)
+        || TimerManager.IsTimerActive(FireLoadedRocketHandle)
+        || TimerManager.IsTimerActive(RefireCheckHandle))
+    {
+        return;
+    }
+
+    bCharging = false;
+    bReleaseRequested = true;
+    if (!bReleaseCommitted)
+    {
+        CommitRelease();
+    }
+    else if (RocketLauncher && RocketLauncher->NumLoadedRockets > 0)
+    {
+        // A committed timed burst lost its continuation timer. Resume only the
+        // logical rockets that remain; never consult the stale barrel count.
+        FireLoadedRocket();
+    }
 }
 
 
@@ -704,6 +921,27 @@ void UUTWeaponStateFiringChargedRocket_Transactional::PutDown()
 	// Still charging: let them finish loading, switch will happen after firing
 	if (bCharging)
 	{
+		return;
+	}
+
+	// A release before rocket one completes is no longer "charging", but the
+	// load callback still owns the guaranteed first rocket. While EndLoadRocket
+	// executes its handle has already been consumed, so the synchronous guard is
+	// checked separately from the pending-timer case. A weapon switch must not
+	// tear down the state before that callback commits the release.
+	if (bCompletingLoadTimer)
+	{
+		return;
+	}
+	if (bReleaseRequested && !bReleaseCommitted)
+	{
+		if (GetOuterAUTWeapon()->GetWorldTimerManager().IsTimerActive(LoadTimerHandle))
+		{
+			return;
+		}
+		// Defensive recovery for an uncommitted release whose timer disappeared:
+		// use the same idempotent path, never PutDown's direct-volley shortcut.
+		CommitRelease();
 		return;
 	}
 

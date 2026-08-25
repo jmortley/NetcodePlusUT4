@@ -545,16 +545,16 @@ protected:
     bool bHandlingRetry;
     FTimerHandle RetryFireHandle[2];
 
-    /** True when the charged-rocket state can no longer self-transition: not charging and
-     *  none of its four timers (load / grace / burst / post-burst refire) active. A
+    /** True when the charged-rocket state can no longer self-transition: none of its four
+     *  timers (load / grace / burst / post-burst refire) are active. A
      *  legitimately active charged state ALWAYS has one of those in flight, so this is the
      *  wedge signature (the state that silently swallows primaries — see the Tick watchdog
-     *  and the ServerStartFireFixed fast recovery). Loaded-rocket handling is the CALLER's
-     *  job: the fast recovery paths only act when nothing is loaded, so a false positive
-     *  can never abandon a loaded volley. */
+     *  and the ServerStartFireFixed fast recovery). Callers must branch on logical
+     *  NumLoadedRockets only; NumLoadedBarrels tracks loading/visual state and can remain
+     *  stale after a completed spread volley, so it is not a count of unfired projectiles. */
     bool IsChargedRocketStateWedged(class UUTWeaponStateFiringChargedRocket_Transactional* Chg);
 
-    /** First watchdog tick an EMPTY wedge was observed; -1 = not currently observed.
+    /** First watchdog tick a wedge was observed; -1 = not currently observed.
      *  Debounces the fast recovery (~0.25s) so a transient no-timer instant between state
      *  callbacks can't false-trigger it. Reset on recovery, on busy, and on leaving the
      *  charged state. */
