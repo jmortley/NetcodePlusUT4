@@ -93,8 +93,10 @@ float AUTWeap_Enforcer_Plus::GetRewindSeconds() const
 		return 0.f;
 	}
 
-	// Full RTT minus jitter buffer, then halve for one-way rewind.
-	const float AdjustedRTTms = FMath::Max(0.f, ObservedRTTMs - FudgeFactorMs);
+	// Use the same server-live hitscan timing policy as AUTWeaponFix. Keep the
+	// legacy per-weapon FudgeFactorMs field isolated to non-hitscan timing.
+	const float AdjustedRTTms = FMath::Max(0.f,
+		ObservedRTTMs - AUTWeaponFix::GetConfiguredHitscanFudgeMs());
 	const float OneWayMs = FMath::Min(AdjustedRTTms * 0.5f, MaxRewindMs);
 	return OneWayMs * 0.001f;
 }

@@ -513,6 +513,9 @@ cvars.** Most are live‑toggleable; none are cheat‑gated.
 | `ncp.HeadBandXY` | `22` | Headshot validation: max head‑centre off‑axis offset (uu). |
 | `ncp.HeadSlackScale` | `1.0` | High‑ping head slack = `targetSpeed · rewindTime · scale` (velocity‑gated; 0 disables). |
 | `ncp.HeadSlackMax` | `25` | Hard cap (uu) on the high‑ping head slack. |
+| `ncp.HitscanFudgeMs` | `10` | Full‑RTT buffer subtracted before halving the server‑observed RTT for hitscan target rewind. `10` places the primary sample 5 ms newer than half RTT; set `20` for the previous behavior. Hitscan-only: projectile catch-up/delayed-fake timing still uses its existing weapon property. |
+| `ncp.HitscanPrimaryPadding` | `40` | Extra radius (uu) granted to the specifically client‑claimed **moving** target at the primary hitscan epoch. Stationary primary padding remains the weapon's `HitScanPaddingStationary` value. |
+| `ncp.HitscanSearchPadding` | `40` | Extra radius (uu) at every claimed-target ±15/30/45 ms time-search rung. Set `45` for the previous behavior. |
 | `ncp.UnclaimedRenderGate` | `1` | Server rejects a hitscan hit the shooter's own client never claimed, by reconstructing what that shooter actually had rendered. This is the "gifted shots at high ping" fix. Shipped to production **on 327** (backported), not new in 328. **Leave at `1`** — if honest aim is being demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate. |
 | `ncp.UnclaimedRenderSlack` | `20` | Extra tolerance (uu) the render check allows before demoting a hit. Raise if live logs show demotes clustered on honest body aim. |
 | `ncp.HitAttribRenderExtraMs` | `30` | Extra time (ms) added to the exact-hitscan render-position estimate (`half RTT + extra`). Used only by the unclaimed Shock/Sniper render gate and hit-attribution telemetry; it no longer tunes Link/Minigun. This remains an estimate, not a client-supplied frame timestamp. |

@@ -214,6 +214,28 @@ static TAutoConsoleVariable<int32> CVarVisualHitscanClaimDebug(
     TEXT("Client rendered-capsule claim diagnostics: 0=off, 1=rejections, 2=all actor-capsule candidates."),
     ECVF_Default);
 
+// Server-live exact-hitscan validation tuning. These are deliberately separate
+// from the legacy per-weapon FudgeFactorMs/HitScanPadding fields: the former is
+// also used by projectile presentation, while the latter was bypassed by the
+// hardcoded moving-target primary pad below. Client values have no authority.
+static TAutoConsoleVariable<float> CVarHitscanFudgeMs(
+    TEXT("ncp.HitscanFudgeMs"), 10.0f,
+    TEXT("Full-RTT buffer subtracted before halving server-observed RTT for hitscan target rewind, ms. ")
+    TEXT("10 means a 5ms-newer-than-half-RTT primary epoch. Server-authoritative; live rollback: 20."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarHitscanPrimaryPadding(
+    TEXT("ncp.HitscanPrimaryPadding"), 40.0f,
+    TEXT("Extra radius (uu) for the specifically client-claimed moving target at the primary hitscan epoch. ")
+    TEXT("Stationary targets continue to use HitScanPaddingStationary. Server-authoritative; live."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarHitscanSearchPadding(
+    TEXT("ncp.HitscanSearchPadding"), 40.0f,
+    TEXT("Extra radius (uu) at each claimed-target hitscan time-search fallback rung. ")
+    TEXT("Server-authoritative; live rollback: 45."),
+    ECVF_Default);
+
 // =========================================================================
 // HIT-ATTRIBUTION TELEMETRY (read-only, log-only).
 // Server: one [HitAttrib] line per validated hitscan, attributing the
@@ -320,6 +342,11 @@ bool AUTWeaponFix::GetServerObservedRTTMs(const AUTPlayerController* ShooterPC,
         }
     }
     return false;
+}
+
+float AUTWeaponFix::GetConfiguredHitscanFudgeMs()
+{
+    return FMath::Max(0.f, CVarHitscanFudgeMs.GetValueOnGameThread());
 }
 
 // GetRewindLocation() silently falls back to the oldest/current location when
@@ -3807,6 +3834,11 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
 float AUTWeaponFix::GetHitValidationPredictionTime() const
 {
+	return GetPredictionTimeWithFudgeMs(GetConfiguredHitscanFudgeMs());
+}
+
+float AUTWeaponFix::GetPredictionTimeWithFudgeMs(float InFudgeMs) const
+{
     if (Role != ROLE_Authority || !UTOwner || !UTOwner->PlayerState)
     {
         return 0.0f;
@@ -3836,9 +3868,9 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
 		}
 	}
 
-	// 2. Subtract Fudge Factor (Epic uses 20ms)
-	// This subtracts the "Processing/Jitter" time so we don't over-rewind.
-	float AdjustedPing = ObservedRTTMs - FudgeFactorMs;
+	// 2. Subtract the caller-selected full-RTT buffer before converting to
+	// one-way time. Clamp negative cvar/property values rather than over-rewind.
+	const float AdjustedPing = ObservedRTTMs - FMath::Max(0.f, InFudgeMs);
 
 	// 3. Clamp (0 to Max Cap)
 	float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, MaxRewindMs);
@@ -4172,10 +4204,11 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 					//ExtraHitPadding = bIsMoving ? HitScanPadding : HitScanPaddingStationary;
 					if (bIsMoving)
 					{
-						// TIERED PADDING SYSTEM
-						// Running (940 u/s): 55 units = ~59ms jitter protection
-						// Dodging (1700 u/s): 55 units = ~32ms jitter protection
-                        ExtraHitPadding = 40.0f;
+						// Server-live claimed-target primary allowance. Keep this
+						// independent from the fallback-rung allowance so each can
+						// be canaried and rolled back without rebuilding.
+						ExtraHitPadding = FMath::Clamp(
+							CVarHitscanPrimaryPadding.GetValueOnGameThread(), 0.0f, 100.0f);
 				
 					}
 					else
@@ -4395,8 +4428,10 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 						ClosestPoint, ClosestCapsulePoint);
 				}
 
-				// Generous padding for fallback search
-				float SearchPadding = 45.0f;
+				// Server-live padding for the alternate-time fallback. This is
+				// deliberately independent from primary moving-target padding.
+				const float SearchPadding = FMath::Clamp(
+					CVarHitscanSearchPadding.GetValueOnGameThread(), 0.0f, 100.0f);
 				float CombinedRadius = AltEffectiveRadius + TraceRadius + SearchPadding;
 				const float SearchDistanceSq =
 					(ClosestPoint - ClosestCapsulePoint).SizeSquared();
@@ -4781,7 +4816,9 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
             || (bIsTransactionalFire && !CachedTransactionalRotation.IsZero()))
         && UTOwner)
     {
-        float PredictionTime = GetHitValidationPredictionTime();
+        // Keep projectile-origin timing on the legacy per-weapon field. The
+        // server-live hitscan cvar must not alter projectile presentation.
+        float PredictionTime = GetPredictionTimeWithFudgeMs(FudgeFactorMs);
 
         // Rewind the shooter to where they were when they clicked
         FVector RewoundShooterLoc = UTOwner->GetRewindLocation(PredictionTime);

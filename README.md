@@ -256,9 +256,9 @@ Hubs use these tables as the local source of truth. A parallel push to ut4stats.
 | Property | Default | Purpose |
 |----------|---------|---------|
 | `MaxRewindMs` | 250 | Max one-way rewind cap |
-| `FudgeFactorMs` | 20 | Ping jitter buffer |
+| `FudgeFactorMs` | 20 | Legacy projectile catch-up / delayed-fake jitter buffer; server hitscan uses `ncp.HitscanFudgeMs` |
 | `ProjectilePredictionCapMs` | 120 | Max projectile fast-forward |
-| `HitScanPadding` | 40-45 | Capsule padding for claimed moving targets |
+| `HitScanPadding` | legacy | Server hitscan moving-primary and fallback padding use `ncp.HitscanPrimaryPadding` / `ncp.HitscanSearchPadding` |
 | `HitScanPaddingStationary` | 10 | Capsule padding for claimed stationary targets |
 | `bEnableProjectileRewind` | (BP per-weapon) | Master toggle for projectile hit-claim validation |
 | `ProjectileRewindMaxScale` | 1.0 | Full half-RTT rewind at low ping |

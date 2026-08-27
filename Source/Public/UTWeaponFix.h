@@ -386,6 +386,11 @@ public:
     static bool GetServerObservedRTTMs(const AUTPlayerController* ShooterPC,
         float& OutRTTMs);
 
+    /** Server-live full-RTT buffer used by hitscan target rewind. Kept separate
+     *  from FudgeFactorMs so hitscan tuning cannot change projectile catch-up
+     *  or delayed-fake timing. */
+    static float GetConfiguredHitscanFudgeMs();
+
     /** Half-width (seconds) of the server-side bidirectional time-search fallback in
      *  HitScanTrace, used when the client claimed a hit the primary rewind missed.
      *  Per-weapon overridable. Standard 45ms for ALL hitscan (2026-07-07: sniper/LG
@@ -540,6 +545,10 @@ public:
     }
 
 protected:
+
+    /** Common server RTT-to-rewind conversion. Hitscan passes the live cvar;
+     *  the legacy projectile-origin path passes its per-weapon field. */
+    float GetPredictionTimeWithFudgeMs(float InFudgeMs) const;
 
     FTimerHandle DelayedPutDownHandle;
     bool bHandlingRetry;
@@ -749,19 +758,17 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectiles")
 	float ProjectilePredictionCapMs = 120.0f;
 
-	/** * Safety buffer subtracted from Ping before calculating prediction.
-	 * Absorbs jitter to prevent overshooting the client's view.
+	/** Legacy projectile catch-up / delayed-fake safety buffer. Server hitscan
+	 * target rewind uses ncp.HitscanFudgeMs instead.
 	 * Default: 20.0ms.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectiles")
 	float FudgeFactorMs = 20.0f;
 
 
-    /** * Extra radius added to the target capsule during hit validation.
-     * Applied ONLY if:
-     * 1. The Client claimed a hit on this specific target.
-     * 2. The Target is moving (Velocity > 1.0).
-     * * Default UT4 value is 40.0f. 
+    /** Legacy asset field retained for serialized Blueprint compatibility.
+     * Moving claimed-target primary padding is controlled live by
+     * ncp.HitscanPrimaryPadding instead.
      */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
     float HitScanPadding = 45.0f;
