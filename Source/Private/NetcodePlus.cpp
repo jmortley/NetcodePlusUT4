@@ -585,9 +585,44 @@ static FDelegateHandle GNcpConnectTickerHandle;
 static FString         GNcpConnectURL;
 static float           GNcpConnectElapsed = 0.0f;
 
-/** Connect anyway after this long if the MCP profile/progression never finish
- *  loading (offline / slow login) — the deadlock backstop for the readiness gate. */
-static const float GNcpConnectLoginTimeout = 45.0f;
+/** Rising-edge latch for the MCP cloud reads. The ticker is registered in
+ *  StartupModule(), long before the local player signs in, so we always observe the
+ *  profile read GO pending before it goes not-pending. Without this latch,
+ *  "IsPendingMCPLoad() == false" is ambiguous: it is equally true BEFORE any read has
+ *  been issued. See the gate in TickNcpConnect for the full mechanism. */
+static bool GNcpConnectSawMcpRead = false;
+
+/** The profile object as it looked the first time we saw a local player, i.e. the
+ *  LOCAL default that LoadLocalProfileSettings() NewObject's before any cloud read
+ *  (stock's own comment there: "It will be overwritten upon login"). The cloud read
+ *  ALWAYS replaces the pointer - OnReadProfileComplete assigns a fresh
+ *  UUTProfileSettings on both the success and the new-player paths - so
+ *  "pointer still equals this one" means we are still holding default binds. Weak, so
+ *  a GC of the discarded default cannot leave us comparing a recycled address. */
+static TWeakObjectPtr<UUTProfileSettings> GNcpConnectFirstProfile;
+static bool GNcpConnectFirstProfileSampled = false;
+
+/** Two-tier deadlock backstop for the readiness gate. One budget cannot serve both
+ *  situations, because they look nothing alike:
+ *
+ *    - A cloud read IS in flight (the latch below is armed): login is working and the
+ *      profile is coming, so be patient. MEASURED 2026-08-27 on a fast box and a good
+ *      connection: login alone took 7.36s (frame-0 `Getting exchangecode` 16:23:26.078 ->
+ *      LoginStatusChanged(LoggedIn) 16:23:33.436), with the profile chain landing around
+ *      8-12s. 45s is ~4-5x that; anything near 15s would cut off a player only 1.5x
+ *      slower and re-create the very bug this gate exists to stop.
+ *    - NO read has EVER gone pending: nothing is coming (offline, or sign-in never got
+ *      far enough to issue one). Waiting the full budget buys nothing and just stalls
+ *      the join, so bail sooner.
+ *
+ *  Both are seconds and overridable from the client's Saved/Config/Mod.ini
+ *  (the launcher's Settings UI writes them):
+ *      [NetcodePlus]
+ *      ConnectProfileWaitSeconds=45
+ *      ConnectNoSignalWaitSeconds=25
+ */
+static float GNcpConnectReadyTimeout = 45.0f;
+static float GNcpConnectNoSignalTimeout = 25.0f;
 
 /** Drop the password option so it never reaches the log. */
 static FString RedactConnectURL(const FString& URL)
@@ -613,54 +648,129 @@ static bool TickNcpConnect(float DeltaTime)
 	// Find the live game-client world. PIE/editor worlds are EWorldType::PIE/Editor
 	// and never carry -ncpconnect, so this also keeps the hook inert in the editor.
 	UWorld* GameWorld = nullptr;
+	UUTLocalPlayer* UTLP = nullptr;
 	for (const FWorldContext& Context : GEngine->GetWorldContexts())
 	{
-		if (Context.WorldType == EWorldType::Game && Context.World())
+		if (Context.WorldType != EWorldType::Game)
+		{
+			continue;
+		}
+		if (!GameWorld && Context.World())
 		{
 			GameWorld = Context.World();
+		}
+		// Read the local player off the game INSTANCE, not the world: it is created (and
+		// starts signing in) before the front-end map finishes loading, and the !GameWorld
+		// early-out below would otherwise let the profile read go pending and complete
+		// unobserved, leaving the latch permanently unarmed.
+		if (!UTLP && Context.OwningGameInstance)
+		{
+			UTLP = Cast<UUTLocalPlayer>(Context.OwningGameInstance->GetFirstGamePlayer());
+		}
+		if (GameWorld && UTLP)
+		{
 			break;
 		}
 	}
+
+	// Observe the login lifecycle on EVERY tick, before the world gate. Sample the
+	// pre-login profile pointer once, on the first tick a local player exists: a null
+	// sample is fine and common (no .local profile yet), since any later non-null value
+	// then differs from it - which is exactly the signal we want.
+	if (UTLP && !GNcpConnectFirstProfileSampled)
+	{
+		GNcpConnectFirstProfile = UTLP->GetProfileSettings();
+		GNcpConnectFirstProfileSampled = true;
+	}
+	if (UTLP && UTLP->IsPendingMCPLoad())
+	{
+		GNcpConnectSawMcpRead = true; // a cloud read is genuinely in flight
+	}
+
 	if (!GameWorld)
 	{
 		return true; // front-end map not up yet
 	}
 
-	// Wait for MCP sign-in AND the cloud profile (keybinds) + progression (XP) to
-	// finish downloading before we travel. IsLoggedIn() alone only means OSS auth is
-	// done; the profile + progression cloud reads land asynchronously AFTER that, so
-	// travelling on login alone races them — a fast client joins with DEFAULT BINDS
-	// and 0 XP (and a later profile save-back can overwrite the cloud binds with those
-	// defaults: the "binds lost" report). We mirror stock UT4's own data-ready gate,
-	// IsPlayerCardDataLoaded() == IsLoggedIn() && !IsPendingMCPLoad() (SUTMenuBase.cpp),
-	// which stock defines but never applies to its own join/travel path. Falls back on
-	// the timeout below if MCP is slow/offline (same degraded outcome as before).
-	UUTLocalPlayer* UTLP = nullptr;
-	if (UGameInstance* GI = GameWorld->GetGameInstance())
-	{
-		UTLP = Cast<UUTLocalPlayer>(GI->GetFirstGamePlayer());
-	}
+	// Wait for MCP sign-in AND the cloud profile (keybinds) to finish downloading before
+	// we travel. IsLoggedIn() alone only means OSS auth is done; the profile cloud read
+	// lands asynchronously AFTER that, so travelling on login alone races it - a fast
+	// client joins with DEFAULT BINDS and no account data, and the next profile save-back
+	// writes those defaults over the cloud copy (the "binds lost" report).
+	//
+	// The ORIGINAL gate here mirrored stock's IsPlayerCardDataLoaded() -
+	// IsLoggedIn() && !IsPendingMCPLoad() (SUTMenuBase.cpp) - plus non-null profile and
+	// progression objects. That gate LEAKS, which is why the report outlived it:
+	//
+	//   * bIsPendingProfileLoadFromMCP / bIsPendingProgressionLoadFromMCP both start
+	//     FALSE (UTLocalPlayer.cpp ctor) and are only raised when LoadProfileSettings() /
+	//     LoadProgression() actually ISSUE the reads. In the window between OSS auth
+	//     completing (IsLoggedIn() true) and those calls, IsPendingMCPLoad() is false:
+	//     "no read issued yet" is indistinguishable from "read finished".
+	//   * GetProfileSettings() is non-null long before any cloud read -
+	//     LoadLocalProfileSettings() NewObject's a default UUTProfileSettings and reads the
+	//     .local file - and GetProgressionStorage() is likewise non-null from the
+	//     logout/offline reset NewObject.
+	//
+	// So all four conditions can hold at once in the pre-read window, holding a DEFAULT
+	// profile - precisely the failure being gated against.
+	//
+	// PROVEN LIVE 2026-08-27 (client log, seq-66 build): the travel fired on frame 2, 78 ms
+	// after login began, with bReady TRUE - in a session where LoginStatusChanged NEVER
+	// fired, i.e. the player was never signed in at all. The mechanism is stock:
+	//     bool UUTLocalPlayer::IsLoggedIn() const
+	//     { return OnlineIdentityInterface.IsValid() && OnlineIdentityInterface->GetLoginStatus(...); }
+	// GetLoginStatus() returns an ELoginStatus::Type, and it is used here as a BOOL with no
+	// `== ELoginStatus::LoggedIn`. UsingLocalProfile == 1 is therefore "logged in" - so
+	// IsLoggedIn() is true for the precise state we must reject: on a local profile, not
+	// signed in to MCP. It is kept below only because NotLoggedIn (0) still blocks; it is
+	// necessary but nowhere near sufficient, and must never again be trusted on its own.
+	//
+	// LoginPhase is NOT a usable substitute: it is a shared display/stall field that
+	// several independent chains stomp on. ReadMMRFromBackend() sets GettingMMR from
+	// OnReadProfileComplete (so GettingMMR precedes GettingProgression at runtime, the
+	// reverse of the enum order), and UTGameInstance's title-file completion calls
+	// FinalizeLogin() - setting LoginPhase to LoggedIn - on a path with no relationship
+	// to the profile read at all. LoginProcessComplete() is dead code in this build.
+	//
+	// What DOES hold is a rising-edge latch plus the profile pointer swap. This ticker is
+	// registered in StartupModule(), well before sign-in, so we are guaranteed to observe
+	// the read go pending first; and OnReadProfileComplete always REPLACES the profile
+	// object, so a changed pointer is positive proof the cloud copy landed.
 
-	// All four accessors are public + tick-safe; the two getters are only null-COMPARED
-	// (never dereferenced), so any not-yet-ready / early-null signal keeps bReady false
-	// and we keep waiting. IsPendingMCPLoad() is the OR of the profile + progression
-	// pending flags, so it is false only once BOTH cloud reads complete — exactly
-	// "keybinds loaded AND XP loaded" in one read (UTLocalPlayer.cpp).
+	// The two getters stay defensive null-COMPARES only (never dereferenced), and the
+	// weak pointer is only ever compared, never dereferenced either.
+	const bool bProfileSwapped = (UTLP
+		&& UTLP->GetProfileSettings() != nullptr
+		&& UTLP->GetProfileSettings() != GNcpConnectFirstProfile.Get());
 	const bool bReady = (UTLP
 		&& UTLP->IsLoggedIn()
+		&& GNcpConnectSawMcpRead
 		&& !UTLP->IsPendingMCPLoad()
-		&& UTLP->GetProfileSettings() != nullptr
+		&& bProfileSwapped
 		&& UTLP->GetProgressionStorage() != nullptr);
-	const bool bTimedOut = (GNcpConnectElapsed >= GNcpConnectLoginTimeout);
+	// Pick the budget by whether login ever got as far as issuing a read (see the
+	// two-tier note on the timeouts above). A read that arms the latch late simply
+	// promotes us to the longer budget from that moment on.
+	const float Budget = GNcpConnectSawMcpRead ? GNcpConnectReadyTimeout : GNcpConnectNoSignalTimeout;
+	const bool bTimedOut = (GNcpConnectElapsed >= Budget);
 	if (!bReady && !bTimedOut)
 	{
-		return true; // keep waiting for sign-in + profile/progression download
+		return true; // keep waiting for sign-in + the profile download
 	}
 
-	// Warning verbosity survives Shipping (Log/Verbose are stripped there).
-	UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpconnect -> ClientTravel to %s%s"),
+	// Warning verbosity survives Shipping (Log/Verbose are stripped there). The three
+	// flags are the one-grep answer to "why did this client join with default binds":
+	// sawRead=0 means no cloud read was ever issued (offline / login never completed),
+	// swapped=0 means the read never replaced the local default.
+	UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpconnect -> ClientTravel to %s (waited=%.1fs/%.0fs sawRead=%d pending=%d swapped=%d)%s"),
 		*RedactConnectURL(GNcpConnectURL),
-		bReady ? TEXT("") : TEXT(" (profile/progression not ready; connecting anyway after timeout)"));
+		GNcpConnectElapsed,
+		Budget,
+		GNcpConnectSawMcpRead ? 1 : 0,
+		(UTLP && UTLP->IsPendingMCPLoad()) ? 1 : 0,
+		bProfileSwapped ? 1 : 0,
+		bReady ? TEXT("") : TEXT(" (profile not ready; connecting anyway after timeout)"));
 
 	GEngine->SetClientTravel(GameWorld, *GNcpConnectURL, TRAVEL_Absolute);
 
@@ -1152,6 +1262,27 @@ void FNetcodePlus::StartupModule()
 		{
 			GNcpConnectURL = ConnectURL;
 			GNcpConnectElapsed = 0.0f;
+
+			// Mod.ini overrides for the two readiness budgets. [NetcodePlus] lives in
+			// Saved/Config/Mod.ini for every other knob in this plugin (ElimPlusGame,
+			// NCPlusHUDLayout, the NoAlias scrub below), and it is the file the launcher's
+			// Settings UI writes - so these two belong there too, not in Game.ini.
+			// Clamped rather than rejected: a 0 or a silly value must never wedge a join
+			// forever, and the floor stays above the 7-8s a healthy sign-in genuinely needs.
+			if (GConfig)
+			{
+				const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+				float Configured = 0.0f;
+				if (GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ConnectProfileWaitSeconds"), Configured, ModIni))
+				{
+					GNcpConnectReadyTimeout = FMath::Clamp(Configured, 10.0f, 180.0f);
+				}
+				if (GConfig->GetFloat(TEXT("NetcodePlus"), TEXT("ConnectNoSignalWaitSeconds"), Configured, ModIni))
+				{
+					GNcpConnectNoSignalTimeout = FMath::Clamp(Configured, 10.0f, 180.0f);
+				}
+			}
+
 			GNcpConnectTickerHandle = FTicker::GetCoreTicker().AddTicker(
 				FTickerDelegate::CreateStatic(&TickNcpConnect), 0.0f);
 		}
