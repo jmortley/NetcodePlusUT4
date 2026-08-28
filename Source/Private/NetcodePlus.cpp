@@ -30,6 +30,7 @@
 #include "NCPlusForceModels.h"
 #include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
 #include "NCConcedeVote.h"            // gg concede vote: client command routing + bind seeding
+#include "NCHighPollingMouseInput.h"  // optional captured-gameplay WM_INPUT coalescing
 #include "EngineUtils.h"              // TActorIterator (concede vote channel lookup)
 
 // -ncpconnect launcher direct-connect support
@@ -1079,6 +1080,7 @@ void FNetcodePlus::StartupModule()
 	if (!IsRunningDedicatedServer())
 	{
 		NCPlusAnnouncerPacks::Install();
+		RegisterNCHighPollingMouseInput();
 	}
 
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -1321,6 +1323,13 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
+	// This object is referenced by Slate rather than CoreUObject. Release it even
+	// during late process teardown so Slate never retains code from an unloaded DLL.
+	if (!IsRunningCommandlet())
+	{
+		UnregisterNCHighPollingMouseInput();
+	}
+
 	// UE4.15 unloads runtime modules after CoreUObject::StaticExit during final
 	// process teardown.  At that point GetMutableDefault(), StaticClass(), weak
 	// UObject lookups, and cache cleanup are no longer legal.  Dynamic/hot unloads
