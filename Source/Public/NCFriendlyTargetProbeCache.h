@@ -23,7 +23,10 @@ private:
 	mutable TWeakObjectPtr<APlayerController> CachedViewer;
 	mutable TWeakObjectPtr<AUTCharacter> CachedWeaponOwner;
 	mutable TWeakObjectPtr<AUTPlayerState> CachedHitPlayerState;
+	mutable FVector CachedViewLocation = FVector::ZeroVector;
+	mutable FRotator CachedViewRotation = FRotator::ZeroRotator;
 	mutable double NextProbeTimeSeconds = 0.0;
 	mutable bool bCachedDrawIndicator = false;
 	mutable bool bCachedHadHitPlayerState = false;
+	mutable bool bCachedViewPoseValid = false;
 };

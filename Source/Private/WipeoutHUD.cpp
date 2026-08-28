@@ -262,7 +262,9 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 	};
 
 	AUTPlayerState* HUDPS = GetScorerPlayerState();
-	const float Now = World->GetTimeSeconds();
+	// Keep the presentation budget independent of pause/time dilation. World
+	// time would turn 120 Hz into 12 Hz at 0.1x replay speed.
+	const float Now = World->GetRealTimeSeconds();
 	const bool bRosterInvalidated = bContextChanged
 		|| CachedPortraitScorer.Get() != HUDPS
 		|| CachedPortraitPlayerArrayNum != GS->PlayerArray.Num()
@@ -646,7 +648,7 @@ void AWipeoutHUD::DrawHUD()
 		GetPlayerListForIcons(PortraitRenderPlayers);
 		const TArray<AUTPlayerState*>& LivePlayers = PortraitRenderPlayers;
 		AUTPlayerState* LocalPortraitPS = Cast<AUTPlayerState>(UTPlayerOwner ? UTPlayerOwner->PlayerState : nullptr);
-		const float PortraitNow = GetWorld()->GetTimeSeconds();
+		const float PortraitNow = GetWorld()->GetRealTimeSeconds();
 		const bool bSampleRemotePresentation = PortraitNow >= NextRemotePortraitSampleTime;
 		if (bSampleRemotePresentation)
 		{
@@ -658,11 +660,25 @@ void AWipeoutHUD::DrawHUD()
 			if (!UTPS) continue;
 			FWipeoutPresentationSample* Existing = PresentationByPS.Find(UTPS);
 			if (UTPS != LocalPortraitPS && !bSampleRemotePresentation && Existing) continue;
+			const bool bHadExistingSample = Existing != nullptr;
 
 			FWipeoutPresentationSample& Sample = PresentationByPS.FindOrAdd(UTPS);
 			AController* Controller = Cast<AController>(UTPS->GetOwner());
 			AUTCharacter* Character = Controller
-				? Cast<AUTCharacter>(Controller->GetPawn()) : UTPS->GetUTCharacter();
+				? Cast<AUTCharacter>(Controller->GetPawn()) : nullptr;
+			if (!Character && (bSampleRemotePresentation || !bHadExistingSample))
+			{
+				// Preserve stock's cached-character/pawn-scan fallback during
+				// possession and replication gaps, but only at the scheduled rate.
+				Character = UTPS->GetUTCharacter();
+			}
+			else if (!Character && bHadExistingSample)
+			{
+				// Avoid a pawn-list scan every rendered frame while the local
+				// player is dead or between possessions. Retain the last coherent
+				// sample until the next 120 Hz presentation refresh.
+				continue;
+			}
 			Sample.Character = Character;
 			Sample.bAlive = Character != nullptr && !Character->IsDead();
 			Sample.Health = Character ? Character->Health : 0;

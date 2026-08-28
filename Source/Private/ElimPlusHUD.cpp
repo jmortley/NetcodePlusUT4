@@ -318,7 +318,10 @@ void AElimPlusHUD::BuildPlayerSnapshot(AUTGameState* GS, AUTPlayerState* ScorerP
 			? (CachedLocal == nullptr || CachedLocal->TeamNum != LocalPS->GetTeamNum())
 			: (CachedLocal != nullptr);
 	}
-	const float Now = World->GetTimeSeconds();
+	// Presentation sampling is a wall-clock budget. World time is paused and
+	// dilated, which would make a nominal 120 Hz HUD cache run slower during
+	// replay slow motion (and potentially stop while paused).
+	const float Now = World->GetRealTimeSeconds();
 	const bool bRefreshRemoteSnapshot = bContextChanged || bLocalRosterChanged
 		|| CachedSnapshotScorer.Get() != ScorerPS
 		|| CachedSnapshotPlayerArrayNum != GS->PlayerArray.Num()
@@ -334,7 +337,15 @@ void AElimPlusHUD::BuildPlayerSnapshot(AUTGameState* GS, AUTPlayerState* ScorerP
 				if (Player.PlayerState.Get() != LocalPS) continue;
 				AController* Controller = Cast<AController>(LocalPS->GetOwner());
 				AUTCharacter* Character = Controller
-					? Cast<AUTCharacter>(Controller->GetPawn()) : LocalPS->GetUTCharacter();
+					? Cast<AUTCharacter>(Controller->GetPawn()) : nullptr;
+				if (!Character)
+				{
+					// Keep the last coherent sample until the scheduled full refresh
+					// below runs stock's cached-character/pawn-scan fallback. Calling
+					// GetUTCharacter here could scan every pawn at render rate while
+					// the local player is dead or between possessions.
+					break;
+				}
 				Player.Character = Character;
 				Player.bAlive = Character != nullptr && !Character->IsDead();
 				Player.Health = Character ? Character->Health : 0;
@@ -382,8 +393,10 @@ void AElimPlusHUD::BuildPlayerSnapshot(AUTGameState* GS, AUTPlayerState* ScorerP
 		{
 			Character = Cast<AUTCharacter>(Controller->GetPawn());
 		}
-		else
+		if (!Character)
 		{
+			// GetUTCharacter() falls back to the cached character and a pawn
+			// scan when the owning controller temporarily has no UT pawn.
 			Character = PS->GetUTCharacter();
 		}
 
@@ -804,7 +817,7 @@ void AElimPlusHUD::DrawHUD()
 				{
 					FallbackPlayer.Character = Cast<AUTCharacter>(Controller->GetPawn());
 				}
-				else
+				if (!FallbackPlayer.Character.IsValid())
 				{
 					FallbackPlayer.Character = UTPS->GetUTCharacter();
 				}
@@ -1362,7 +1375,8 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 	else
 	{
 		State.CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
-		// A prepared snapshot is internally coherent for its <=8.3 ms lifetime.
+		// A prepared snapshot is internally coherent until the next nominal 120 Hz
+		// presentation sample (plus normal render-frame quantization).
 		// Do not mix a just-replicated live team number into cached placement,
 		// visibility and overlap decisions before the next snapshot refresh.
 		State.TeamNum = FramePlayer ? FramePlayer->TeamNum : PlayerState->GetTeamNum();
