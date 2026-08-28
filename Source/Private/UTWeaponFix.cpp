@@ -4949,16 +4949,25 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         const int32 RescueSame = (AttribTarget != nullptr &&
             AttribTarget == ReceivedHitScanHitChar) ? 1 : 0;
 
-        UE_LOG(LogUTWeaponFix, Log,
-            TEXT("[HitAttrib] shooter=%s ping=%.0f clientPing=%.0f timingValid=%d wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s renderChk=%s renderChkMissBy=%s rescueLead=%s rescueLeadUU=%s rescueRayAheadUU=%s rescueRenderMissUU=%s rescueDMag=%s rescueSkips=%d rescueSame=%d"),
+        // UE4.15's FMsg::Logf_Internal overload set has a fixed argument-count
+        // ceiling. Assemble the record in bounded chunks, then emit the exact
+        // same single searchable line through a one-argument UE_LOG call.
+        FString HitAttribLog = FString::Printf(
+            TEXT("[HitAttrib] shooter=%s ping=%.0f clientPing=%.0f timingValid=%d wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s"),
             *AttribName(UTOwner), ShooterRTTMs, ClientReportedPing,
             bShooterTimingValid ? 1 : 0, *GetClass()->GetName(), CurrentFireMode,
             ActualPredictionTime * 1000.f, *ClaimStr, *AttribName(AttribTarget),
             AttribTarget ? AttribTarget->GetVelocity().Size() : 0.f,
-            Route, *ClaimMissStr, AttribClaimPad, *TsRungStr, *TsMissStr,
-            RenderEstMs, *LeadStr, *DeltaMagStr, *RenderChkStr, *RenderChkMissStr,
+            Route);
+        HitAttribLog += FString::Printf(
+            TEXT(" claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s renderChk=%s renderChkMissBy=%s"),
+            *ClaimMissStr, AttribClaimPad, *TsRungStr, *TsMissStr,
+            RenderEstMs, *LeadStr, *DeltaMagStr, *RenderChkStr, *RenderChkMissStr);
+        HitAttribLog += FString::Printf(
+            TEXT(" rescueLead=%s rescueLeadUU=%s rescueRayAheadUU=%s rescueRenderMissUU=%s rescueDMag=%s rescueSkips=%d rescueSame=%d"),
             *RescueLeadStr, *RescueLeadUUStr, *RescueRayAheadStr,
             *RescueRenderMissStr, *RescueDMagStr, RescueLeadRungsSkipped, RescueSame);
+        UE_LOG(LogUTWeaponFix, Log, TEXT("%s"), *HitAttribLog);
     }
 
     if (Role == ROLE_Authority)
