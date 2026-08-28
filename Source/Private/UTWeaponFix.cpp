@@ -237,6 +237,44 @@ static TAutoConsoleVariable<float> CVarHitscanSearchPadding(
     ECVF_Default);
 
 // =========================================================================
+// RESCUE LEAD GATE (time search) — a CREDITED-POSITION displacement gate,
+// not an aim judge. Each accepted time-search rung credits a historical
+// capsule position; the gate bounds how far that position may sit ahead of
+// the render-epoch estimate (halfRTT + ncp.HitAttribRenderExtraMs), measured
+// along the target's HISTORICAL motion between the two epochs. It carries no
+// shot-ray term: two shots at the same target get the same verdict, and for
+// steady movement the quantity approximates target speed x epoch gap, so the
+// cap is also a de-facto speed threshold (~1150 uu/s at 40uu under default
+// epochs; dodges block, runs pass). Ray-relative telemetry (rescueRayAheadUU,
+// rescueRenderMissUU) is logged per shot so a shadow night can separate
+// rendered-body aim from leading aim BEFORE enforcement is trusted; the
+// 2026-08 pug corpus (386 rescues, 95% crediting positions ahead of render,
+// honest ping-spike recoveries near zero) is the motivating prior, not the
+// calibration — the shadow fields are. Above the 250ms rewind cap the
+// validation/render epoch gap grows with RTT and honest fast movement can
+// exceed the cap; that is a deliberate bound on extreme-latency rescues.
+// Primary and padding acceptance are untouched.
+// =========================================================================
+static TAutoConsoleVariable<int32> CVarHitscanRescueLeadGate(
+    TEXT("ncp.HitscanRescueLeadGate"), 0,
+    TEXT("Per-rung credited-position lead gate on the claimed-target time search: 0=shadow ")
+    TEXT("(default; verdicts appear as rescueLead= fields on [HitAttrib] lines, which ")
+    TEXT("require ncp.HitAttribDebug=1 — no behavior change), 1=enforce (a rung crediting ")
+    TEXT("a position more than ncp.HitscanMaxRescueLeadUU ahead of the render-epoch ")
+    TEXT("estimate is skipped; deeper rungs may still accept, otherwise the claimed-target ")
+    TEXT("search yields nothing and any primary/world result stands). No RTT measurement = ")
+    TEXT("fail closed. Server-side only; flippable live."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarHitscanMaxRescueLeadUU(
+    TEXT("ncp.HitscanMaxRescueLeadUU"), 40.0f,
+    TEXT("Maximum distance (uu) a time-search rung's credited capsule position may sit ")
+    TEXT("ahead of the render-epoch estimate, along the target's historical motion. Also ")
+    TEXT("acts as a speed threshold (~cap/epoch-gap uu/s) for steady movers. Calibrate ")
+    TEXT("from shadow-night rescueLeadUU data before enforcing. Default: 40."),
+    ECVF_Default);
+
+// =========================================================================
 // HIT-ATTRIBUTION TELEMETRY (read-only, log-only).
 // Server: one [HitAttrib] line per validated hitscan, attributing the
 // acceptance route: bare rewound-capsule hit vs claim-conditional forgiveness
@@ -4374,6 +4412,19 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         LastHitscanPaddedRadius = 0.f;
     }
 
+	// ---- RESCUE LEAD GATE state (see cvar block; emitted on [HitAttrib]) ----
+	bool bRescueLeadApplicable = false;          // remote-human claimed shot, gate or telemetry on
+	bool bRescueLeadTimingValid = false;         // ACK RTT measured; render epoch trustworthy
+	bool bRescueLeadSearchBlockedNoTiming = false; // enforce + no timing: whole search skipped
+	bool bRescueLeadAcceptedValid = false;       // an accepted rung was lead-evaluated
+	float RescueLeadAcceptedUU = 0.f;            // credited lead of the ACCEPTED rung
+	int32 RescueLeadRungsSkipped = 0;            // enforce: geometrically-hitting rungs denied on lead
+	bool bRescueLeadRayValid = false;            // ray-vs-render telemetry computed with a usable motion dir
+	float RescueLeadRayAheadUU = 0.f;            // signed: shot ray ahead of render capsule along historical motion
+	float RescueLeadRenderMissUU = 0.f;          // ray miss distance vs render-epoch capsule (unsigned-published)
+	float RescueLeadHistDMag = 0.f;              // |validation - render| sample displacement (motion window)
+	float RescueLeadCapApplied = 0.f;            // cap in force when evaluated (for the emit)
+
 	// ============================================================
 	// NEWNET-STYLE BIDIRECTIONAL TIME SEARCH
 	// If client claimed a hit but we didn't find it, search through time
@@ -4391,11 +4442,110 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 		float CapRadius = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
 		float CapHeight = ClaimedTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 
+		// RESCUE LEAD GATE (shadow/enforce — see cvar block). The gate judges
+		// the capsule position each ACCEPTED RUNG credits, measured from the
+		// render-epoch estimate along the target's HISTORICAL motion between
+		// the two epochs (render->validation displacement direction — never
+		// instantaneous velocity, which zeroes on stops/reversals and points
+		// the wrong way on curves). The render sample and motion direction are
+		// rung-independent and cached here; the per-rung credited lead differs
+		// by the rung offset and is evaluated inside the acceptance branch, so
+		// a deep positive rung (crediting a position CLOSER to what was
+		// rendered) can pass where a shallow/negative rung is denied. Only
+		// remote humans reach this block (ReceivedHitScanHitChar is set solely
+		// by the client fire RPC); a claimed shot whose controller cannot be
+		// resolved to a remote AUTPlayerController is treated as timing-
+		// unavailable, and enforce mode fails closed like the unclaimed render
+		// check. Ray-vs-render telemetry (signed along-motion offset + miss
+		// distance) is computed once for the [HitAttrib] line so the shadow
+		// corpus can separate rendered-body aim from leading aim before
+		// enforcement is trusted.
+		const int32 RescueLeadGate = CVarHitscanRescueLeadGate.GetValueOnGameThread();
+		AController* const RescueRawController = UTOwner ? UTOwner->Controller : nullptr;
+		const AUTPlayerController* RescueShooterPC = Cast<AUTPlayerController>(RescueRawController);
+		FVector RescueRenderPos = FVector::ZeroVector;
+		FVector RescueLeadHistDir = FVector::ZeroVector;
+		bool bRescueLeadHistDirValid = false;
+		bool bRescueLeadGateActive = false;   // enforce mode with usable timing
+		if ((bHitAttrib || RescueLeadGate > 0) &&
+			!(RescueRawController != nullptr && RescueRawController->IsLocalController()))
+		{
+			bRescueLeadApplicable = true;
+			RescueLeadCapApplied = FMath::Max(0.f, CVarHitscanMaxRescueLeadUU.GetValueOnGameThread());
+			float RescueRTTMs = 0.f;
+			if (RescueShooterPC != nullptr && GetServerObservedRTTMs(RescueShooterPC, RescueRTTMs))
+			{
+				bRescueLeadTimingValid = true;
+				const float RescueRenderT = FMath::Clamp(
+					(RescueRTTMs * 0.5f +
+						FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())) * 0.001f,
+					0.f, 0.25f);
+				const FVector RescueValPos = (ActualPredictionTime > 0.f)
+					? ClaimedTarget->GetRewindLocation(ActualPredictionTime)
+					: ClaimedTarget->GetActorLocation();
+				RescueRenderPos = (RescueRenderT > 0.f)
+					? ClaimedTarget->GetRewindLocation(RescueRenderT)
+					: ClaimedTarget->GetActorLocation();
+				const FVector HistDelta = RescueValPos - RescueRenderPos;
+				RescueLeadHistDMag = HistDelta.Size();
+				// Under ~2uu of window motion there is no meaningful direction;
+				// fall back to unsigned distance-from-render for the rung lead
+				// (conservative: a teleport-corrupted sample reads huge and is
+				// visible in the shadow corpus rather than silently passing).
+				bRescueLeadHistDirValid = RescueLeadHistDMag >= 2.0f;
+				if (bRescueLeadHistDirValid)
+				{
+					RescueLeadHistDir = HistDelta / RescueLeadHistDMag;
+				}
+				bRescueLeadGateActive = (RescueLeadGate > 0);
+
+				// Ray-vs-render telemetry (rung-independent): where did the shot
+				// ray actually pass relative to the capsule the shooter was
+				// estimated to have SEEN. Standing posture; the slide-adjusted
+				// posture at render time is not reconstructable from position
+				// history alone and this is telemetry, not the gate quantity.
+				FVector RenderRayPoint(0.f), RenderCapPoint(RescueRenderPos);
+				float RenderEffRadius;
+				if (CapRadius >= CapHeight)
+				{
+					RenderRayPoint = FMath::ClosestPointOnSegment(RescueRenderPos, StartLocation, Hit.Location);
+					RenderEffRadius = CapHeight;
+				}
+				else
+				{
+					const FVector RenderSeg(0.f, 0.f, CapHeight - CapRadius);
+					FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
+						RescueRenderPos - RenderSeg, RescueRenderPos + RenderSeg,
+						RenderRayPoint, RenderCapPoint);
+					RenderEffRadius = CapRadius;
+				}
+				RescueLeadRenderMissUU = FVector::Dist(RenderRayPoint, RenderCapPoint)
+					- (RenderEffRadius + TraceRadius);
+				if (bRescueLeadHistDirValid)
+				{
+					RescueLeadRayAheadUU = FVector::DotProduct(
+						RenderRayPoint - RenderCapPoint, RescueLeadHistDir);
+					bRescueLeadRayValid = true;
+				}
+			}
+			else if (RescueLeadGate > 0)
+			{
+				// No trustworthy render epoch (unmeasured RTT, or a claimed shot
+				// with a null/non-UT controller). Enforce fails closed; shadow
+				// runs untouched and the emit reports no-timing — NEVER counted
+				// as a measured over-cap rescue.
+				bRescueLeadSearchBlockedNoTiming = true;
+				UE_LOG(LogUTWeaponFix, Verbose,
+					TEXT("[RescueLeadGate] BLOCKED-NO-TIMING %s -> %s: no server RTT measurement — time search skipped"),
+					*GetName(), *ClaimedTarget->GetName());
+			}
+		}
+
 		const float SearchStep = 0.015f;      // 15ms steps
 		const float MaxSearchOffset = GetHitscanTimeSearchWindow(); // ±45ms max search (tries ±15, ±30, ±45 on fixed 15ms rungs; ±60 is the next rung but trades attacker recovery for "shot through my dodge" defender complaints — primary rewind still does the heavy lifting)
 		float SearchOffset = SearchStep;
 
-		while (FMath::Abs(SearchOffset) <= MaxSearchOffset)
+		while (!bRescueLeadSearchBlockedNoTiming && FMath::Abs(SearchOffset) <= MaxSearchOffset)
 		{
 			float AltRewindTime = ActualPredictionTime + SearchOffset;
 
@@ -4403,6 +4553,10 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 			if (AltRewindTime > 0.0f && AltRewindTime < 0.25f)
 			{
 				FVector AltTargetLoc = ClaimedTarget->GetRewindLocation(AltRewindTime);
+				// Raw (pre-posture) sample: the position this rung would CREDIT,
+				// judged by the lead gate below. Posture adjustment only moves Z
+				// for the collision test and must not perturb the lead metric.
+				const FVector AltTargetLocRaw = AltTargetLoc;
 
 				// Handle floor sliding at alternate time (grace-windowed posture:
 				// AltRewindTime is this rung's effective claim age).
@@ -4446,6 +4600,39 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
 				if (bSearchHit && bSearchOutsideClear)
 				{
+					// RESCUE LEAD GATE: judge the position THIS rung credits.
+					// Evaluated only for geometrically-accepted rungs, so an
+					// enforce-mode skip means precisely "this rung would have
+					// been the rescue but for its lead". The walk continues —
+					// a deeper rung crediting a position nearer the rendered
+					// image may still pass.
+					float RungLeadUU = 0.f;
+					bool bRungLeadKnown = false;
+					if (bRescueLeadApplicable && bRescueLeadTimingValid)
+					{
+						const FVector AltFromRender = AltTargetLocRaw - RescueRenderPos;
+						RungLeadUU = bRescueLeadHistDirValid
+							? FVector::DotProduct(AltFromRender, RescueLeadHistDir)
+							: AltFromRender.Size();
+						bRungLeadKnown = true;
+					}
+					if (bRungLeadKnown && bRescueLeadGateActive &&
+						RungLeadUU > RescueLeadCapApplied)
+					{
+						RescueLeadRungsSkipped++;
+						UE_LOG(LogUTWeaponFix, Verbose,
+							TEXT("[RescueLeadGate] SKIPPED RUNG %+.0fms %s -> %s: credited lead %.1f > cap %.1f"),
+							SearchOffset * 1000.f, *GetName(), *ClaimedTarget->GetName(),
+							RungLeadUU, RescueLeadCapApplied);
+						// fall through to the oscillator: do NOT accept this rung
+					}
+					else
+					{
+					if (bRungLeadKnown)
+					{
+						bRescueLeadAcceptedValid = true;
+						RescueLeadAcceptedUU = RungLeadUU;
+					}
 					// Found the hit at alternate time
 					BestTarget = ClaimedTarget;
 					BestPoint = ClosestPoint;
@@ -4467,6 +4654,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 						TEXT("TimeSearch: Found claimed hit at offset %.1fms (base %.1fms)"),
 						SearchOffset * 1000.f, ActualPredictionTime * 1000.f);
 					break;
+					}
 				}
 			}
 
@@ -4715,14 +4903,47 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         const FString RenderChkMissStr = bRenderChkApplicable
             ? FString::Printf(TEXT("%.1f"), RenderChkMissBy) : TEXT("na");
 
+        // Rescue lead gate verdict (appended fields — existing parsers anchor on
+        // earlier tokens and are unaffected). Taxonomy:
+        //   pass        accepted rescue, credited lead within cap
+        //   shadow-fail accepted rescue OVER the cap (shadow only — the
+        //               enforcement headline; enforce never accepts one)
+        //   blocked     enforce denied >=1 geometrically-hitting rung and no
+        //               rung was accepted (rescueSkips carries the count)
+        //   nohit       search found nothing on its own; gate irrelevant
+        //   no-timing / blocked-no-timing   RTT unmeasured (never counted as a
+        //               measured over-cap rescue; enforce fails closed)
+        // rescueLeadUU is the ACCEPTED rung's credited lead (vs the render-epoch
+        // estimate along historical motion) and describes the CLAIMED target —
+        // it equals the legacy leadUU field only on route=timesearch-rescue
+        // rows (rescueSame flags target identity for every other row).
+        const FString RescueLeadStr = !bRescueLeadApplicable ? TEXT("na")
+            : (!bRescueLeadTimingValid
+                ? (bRescueLeadSearchBlockedNoTiming ? TEXT("blocked-no-timing") : TEXT("no-timing"))
+                : (bRescueLeadAcceptedValid
+                    ? ((RescueLeadAcceptedUU <= RescueLeadCapApplied) ? TEXT("pass") : TEXT("shadow-fail"))
+                    : (RescueLeadRungsSkipped > 0 ? TEXT("blocked") : TEXT("nohit"))));
+        const FString RescueLeadUUStr = bRescueLeadAcceptedValid
+            ? FString::Printf(TEXT("%.1f"), RescueLeadAcceptedUU) : TEXT("na");
+        const FString RescueRayAheadStr = bRescueLeadRayValid
+            ? FString::Printf(TEXT("%.1f"), RescueLeadRayAheadUU) : TEXT("na");
+        const FString RescueRenderMissStr = (bRescueLeadApplicable && bRescueLeadTimingValid)
+            ? FString::Printf(TEXT("%.1f"), RescueLeadRenderMissUU) : TEXT("na");
+        const FString RescueDMagStr = (bRescueLeadApplicable && bRescueLeadTimingValid)
+            ? FString::Printf(TEXT("%.1f"), RescueLeadHistDMag) : TEXT("na");
+        const int32 RescueSame = (AttribTarget != nullptr &&
+            AttribTarget == ReceivedHitScanHitChar) ? 1 : 0;
+
         UE_LOG(LogUTWeaponFix, Log,
-            TEXT("[HitAttrib] shooter=%s ping=%.0f clientPing=%.0f timingValid=%d wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s renderChk=%s renderChkMissBy=%s"),
+            TEXT("[HitAttrib] shooter=%s ping=%.0f clientPing=%.0f timingValid=%d wep=%s mode=%d rewindMs=%.1f claim=%s target=%s speed=%.0f route=%s claimMissBy=%s pad=%.0f tsRungMs=%s tsMissBy=%s renderEstMs=%.1f leadUU=%s dMag=%s renderChk=%s renderChkMissBy=%s rescueLead=%s rescueLeadUU=%s rescueRayAheadUU=%s rescueRenderMissUU=%s rescueDMag=%s rescueSkips=%d rescueSame=%d"),
             *AttribName(UTOwner), ShooterRTTMs, ClientReportedPing,
             bShooterTimingValid ? 1 : 0, *GetClass()->GetName(), CurrentFireMode,
             ActualPredictionTime * 1000.f, *ClaimStr, *AttribName(AttribTarget),
             AttribTarget ? AttribTarget->GetVelocity().Size() : 0.f,
             Route, *ClaimMissStr, AttribClaimPad, *TsRungStr, *TsMissStr,
-            RenderEstMs, *LeadStr, *DeltaMagStr, *RenderChkStr, *RenderChkMissStr);
+            RenderEstMs, *LeadStr, *DeltaMagStr, *RenderChkStr, *RenderChkMissStr,
+            *RescueLeadStr, *RescueLeadUUStr, *RescueRayAheadStr,
+            *RescueRenderMissStr, *RescueDMagStr, RescueLeadRungsSkipped, RescueSame);
     }
 
     if (Role == ROLE_Authority)
