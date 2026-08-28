@@ -15,6 +15,7 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 
 	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
+	virtual bool ShouldDrawMinimap() override;
 	virtual FLinearColor GetBaseHUDColor() override;
 
 	// Portrait atlas icons — same UV coords as AUTFlagRunHUD
@@ -71,6 +72,11 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void NotifyMatchStateChange() override;
 
 private:
+	/** Non-virtual implementation used by the native strip's resource passes.
+	 *  The public virtual entry point remains a complete-card compatibility path. */
+	void DrawPlayerIconPass(AUTPlayerState* PlayerState, float LiveScaling,
+		float XOffset, float YOffset, float IconSize);
+
 	AWipeoutDamageReplicator* FindDamageReplicator(UWorld* World);
 	TWeakObjectPtr<UWorld> CachedDamageReplicatorWorld;
 	TWeakObjectPtr<AUTGameState> CachedDamageReplicatorGameState;
@@ -82,19 +88,61 @@ private:
 	float PostMatchScreenshotStable = -1.f;
 
 	/** Portrait ordering only changes with roster/scorer/spectating-order state.
-	 *  Keep that order between frames while the draw path still reads volatile
-	 *  pawn, health, armor, and respawn state every frame. */
+	 *  Sample the remote roster/pawn presentation at 120 Hz; local state and the
+	 *  respawn interpolation itself remain render-rate. */
 	struct FPortraitOrderSignature
 	{
 		TWeakObjectPtr<AUTPlayerState> PlayerState;
 		uint8 TeamNum = 255;
 		int32 SortKey = 0;
 	};
+	// Sorted roster persists weakly across the 120 Hz cache interval. The raw
+	// array below is rebuilt as render-frame scratch before any dereference.
+	TArray<TWeakObjectPtr<AUTPlayerState>> CachedPortraitRenderPlayers;
 	TArray<AUTPlayerState*> PortraitRenderPlayers;
 	TArray<FPortraitOrderSignature> CurrentPortraitSignature;
 	TArray<FPortraitOrderSignature> CachedPortraitSignature;
 	TWeakObjectPtr<UWorld> CachedPortraitWorld;
 	TWeakObjectPtr<AUTGameState> CachedPortraitGameState;
+	TWeakObjectPtr<AUTPlayerState> CachedPortraitScorer;
+	int32 CachedPortraitPlayerArrayNum = INDEX_NONE;
+	float NextPortraitRosterSampleTime = 0.f;
+	float NextRemotePortraitSampleTime = 0.f;
+	static constexpr float PortraitSampleInterval = 1.f / 120.f;
+
+	struct FWipeoutPresentationSample
+	{
+		TWeakObjectPtr<AUTCharacter> Character;
+		bool bAlive = false;
+		int32 Health = 0;
+		int32 Armor = 0;
+	};
+	TMap<TWeakObjectPtr<AUTPlayerState>, FWipeoutPresentationSample> PresentationByPS;
+
+	// -1 draws a complete card (the public/subclass-compatible path). The native
+	// strip sets 0..5 to submit like-resource layers across all cards before advancing.
+	int32 ActivePortraitDrawPass = -1;
+	TWeakObjectPtr<AUTPlayerState> PreparedPortraitPS;
+	FWipeoutPresentationSample PreparedPortraitSample;
+	bool bHasPreparedPortraitSample = false;
+	struct FWipeoutPortraitPassState
+	{
+		FCanvasIcon CharIcon;
+		FName Alias;
+		float Opacity = 1.f;
+		float X = 0.f;
+		float Y = 0.f;
+		float Width = 0.f;
+		float Height = 0.f;
+		FLinearColor TeamColor = FLinearColor::White;
+		FLinearColor PlateColor = FLinearColor::Black;
+		float TextScale = 1.f;
+		UFont* PipFont = nullptr;
+		float PipFontExtra = 1.f;
+		float CompactTextFactor = 1.f;
+		bool bRespawnQueued = false;
+	};
+	TMap<TWeakObjectPtr<AUTPlayerState>, FWipeoutPortraitPassState> PortraitPassStateByPS;
 
 	/** Per-PlayerState HP readout cache for the portrait strip: last-rendered FText +
 	 *  measured extents keyed on (HP, armor, font), so an unchanged value skips the
@@ -118,6 +166,10 @@ private:
 		FText CountdownText;
 		float CountdownWidth = 0.f;
 		float CountdownHeight = 0.f;
+		const UFont* DeadXFont = nullptr;
+		FText DeadXText;
+		float DeadXWidth = 0.f;
+		float DeadXHeight = 0.f;
 	};
 	TMap<TWeakObjectPtr<AUTPlayerState>, FWipeoutPipCache> PipCacheByPS;
 

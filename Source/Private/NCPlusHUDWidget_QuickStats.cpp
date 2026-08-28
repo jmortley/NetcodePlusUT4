@@ -346,83 +346,79 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 	// LabelScale (0.80f) still keeps the label visually smaller than the number;
 	// only the typeface changes. Falls back to TinyFont when the picker is on Default.
 	UFont* LabelFont  = CachedLabelFont;
-	if (!NumberFont || !LabelFont) return;
+	if (!NumberFont || !LabelFont || !Canvas) return;
 
 	const float CenterX = Size.X * 0.5f;
 
-	// --- HEALTH (right-aligned to center divider) ---
+	// Measure both dynamic numbers first, then group default-texture ink, number
+	// glyphs, and label glyphs. This preserves geometry while reducing render-state
+	// ping-pong from texture -> font -> texture -> font -> texture.
+	auto MeasureNumber = [&](int32 Value) -> FVector2D
 	{
-		const float TextX = CenterX - CenterGap;
-		const float TextY = NumberY;
-		const FVector2D NumSize = DrawCachedNumber(Health,
-			TextX, TextY, NumberFont,
-			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumberScale, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
-			ETextHorzPos::Right, ETextVertPos::Top);
+		FNumberTextCache& Entry = NumberText(Value);
+		if (FVector2D* Found = Entry.Sizes.Find(NumberFont)) return *Found;
+		float XL = 0.f;
+		float YL = 0.f;
+		Canvas->StrLen(NumberFont, Entry.String, XL, YL);
+		return Entry.Sizes.Add(NumberFont, FVector2D(XL, YL));
+	};
 
-		const float NumberW       = NumSize.X * NumberScale;
-		const float NumberBottomY = TextY + NumSize.Y * NumberScale;
-		const float AccentLineY   = NumberBottomY + AccentLineGap;
-		const float LabelY        = AccentLineY + LabelGap;
-		const float LineW         = FMath::Max(NumberW, AccentLineW);
-		const float LabelCenterX  = TextX - LineW * 0.5f;
+	const float HealthTextX = CenterX - CenterGap;
+	const FVector2D HealthSize = MeasureNumber(Health);
+	const float HealthLineW = FMath::Max(HealthSize.X * NumberScale, AccentLineW);
+	const float HealthLineY = NumberY + HealthSize.Y * NumberScale + AccentLineGap;
+	const float HealthLabelY = HealthLineY + LabelGap;
+	const float HealthLabelX = HealthTextX - HealthLineW * 0.5f;
 
-		if (Canvas && Canvas->DefaultTexture)
-		{
-			FLinearColor LineColor = C.HealthAccent;
-			const float LineAlpha = (0.85f + C.HealthPulse * 0.15f) * C.Opacity;
-			const float LineH = 1.5f + C.HealthPulse * 1.5f;
-			DrawTexture(Canvas->DefaultTexture, TextX - LineW, AccentLineY, LineW, LineH,
-				0.f, 0.f, 1.f, 1.f, LineAlpha, LineColor);
-		}
+	const float ArmorTextX = CenterX + CenterGap;
+	const FVector2D ArmorSize = bDrawArmor ? MeasureNumber(Armor) : FVector2D::ZeroVector;
+	const float ArmorLineW = FMath::Max(ArmorSize.X * NumberScale, AccentLineW);
+	const float ArmorLineY = NumberY + ArmorSize.Y * NumberScale + AccentLineGap;
+	const float ArmorLabelY = ArmorLineY + LabelGap;
+	const float ArmorLabelX = ArmorTextX + ArmorLineW * 0.5f;
 
-		DrawText(HealthLabel(),
-			LabelCenterX, LabelY, LabelFont,
-			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			LabelScale, C.HealthAccent.A * C.Opacity, C.HealthAccent,
-			ETextHorzPos::Center, ETextVertPos::Top);
-	}
-
-	// --- ARMOR (left-aligned to center divider) ---
-	if (bDrawArmor)
-	{
-		const float TextX = CenterX + CenterGap;
-		const float TextY = NumberY;
-		const FVector2D NumSize = DrawCachedNumber(Armor,
-			TextX, TextY, NumberFont,
-			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumberScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
-			ETextHorzPos::Left, ETextVertPos::Top);
-
-		const float NumberW       = NumSize.X * NumberScale;
-		const float NumberBottomY = TextY + NumSize.Y * NumberScale;
-		const float AccentLineY   = NumberBottomY + AccentLineGap;
-		const float LabelY        = AccentLineY + LabelGap;
-		const float LineW         = FMath::Max(NumberW, AccentLineW);
-		const float LabelCenterX  = TextX + LineW * 0.5f;
-
-		if (Canvas && Canvas->DefaultTexture)
-		{
-			FLinearColor LineColor = C.ArmorAccent;
-			const float LineAlpha = (0.85f + C.ArmorPulse * 0.15f) * C.Opacity;
-			const float LineH = 1.5f + C.ArmorPulse * 1.5f;
-			DrawTexture(Canvas->DefaultTexture, TextX, AccentLineY, LineW, LineH,
-				0.f, 0.f, 1.f, 1.f, LineAlpha, LineColor);
-		}
-
-		DrawText(ArmorLabel(),
-			LabelCenterX, LabelY, LabelFont,
-			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			LabelScale, C.ArmorAccent.A * C.Opacity, C.ArmorAccent,
-			ETextHorzPos::Center, ETextVertPos::Top);
-	}
-
-	// Vertical divider
 	if (Canvas && Canvas->DefaultTexture)
 	{
+		const float HealthLineAlpha = (0.85f + C.HealthPulse * 0.15f) * C.Opacity;
+		const float HealthLineH = 1.5f + C.HealthPulse * 1.5f;
+		DrawTexture(Canvas->DefaultTexture, HealthTextX - HealthLineW, HealthLineY,
+			HealthLineW, HealthLineH, 0.f, 0.f, 1.f, 1.f,
+			HealthLineAlpha, C.HealthAccent);
+		if (bDrawArmor)
+		{
+			const float ArmorLineAlpha = (0.85f + C.ArmorPulse * 0.15f) * C.Opacity;
+			const float ArmorLineH = 1.5f + C.ArmorPulse * 1.5f;
+			DrawTexture(Canvas->DefaultTexture, ArmorTextX, ArmorLineY,
+				ArmorLineW, ArmorLineH, 0.f, 0.f, 1.f, 1.f,
+				ArmorLineAlpha, C.ArmorAccent);
+		}
 		const FLinearColor DividerColor(0.7f, 0.55f, 0.30f, 0.45f);
 		DrawTexture(Canvas->DefaultTexture, CenterX - 0.5f, DividerY0,
 			1.f, DividerY1 - DividerY0, 0.f, 0.f, 1.f, 1.f, DividerColor.A * C.Opacity, DividerColor);
+	}
+
+	DrawCachedNumber(Health, HealthTextX, NumberY, NumberFont,
+		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
+		NumberScale, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
+		ETextHorzPos::Right, ETextVertPos::Top);
+	if (bDrawArmor)
+	{
+		DrawCachedNumber(Armor, ArmorTextX, NumberY, NumberFont,
+			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
+			NumberScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
+			ETextHorzPos::Left, ETextVertPos::Top);
+	}
+
+	DrawText(HealthLabel(), HealthLabelX, HealthLabelY, LabelFont,
+		FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
+		LabelScale, C.HealthAccent.A * C.Opacity, C.HealthAccent,
+		ETextHorzPos::Center, ETextVertPos::Top);
+	if (bDrawArmor)
+	{
+		DrawText(ArmorLabel(), ArmorLabelX, ArmorLabelY, LabelFont,
+			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
+			LabelScale, C.ArmorAccent.A * C.Opacity, C.ArmorAccent,
+			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 }
 
@@ -734,8 +730,8 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 	const float NumScale = 0.75f;   // small enough to fit inside ChevH visually
 	const float NumNudgeY = -4.f;   // compensate for font glyph-box asymmetry
 
-	TArray<FCanvasUVTri> Tris;
-	Tris.Reserve((HealthSegCount + ArmorSegCount) * 4);
+	CachedChevronTris.Reset((HealthSegCount + ArmorSegCount) * 4);
+	TArray<FCanvasUVTri>& Tris = CachedChevronTris;
 	auto AppendRow = [&](int32 Value, int32 SegCount, float Y,
 	                   const FLinearColor& FillColor, float Pulse)
 	{

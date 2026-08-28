@@ -1246,6 +1246,21 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     CurrentlyFiringMode = 255; // No mode currently firing
 }
 
+bool AUTWeaponFix::ShouldDrawFFIndicator(APlayerController* Viewer,
+    AUTPlayerState*& HitPlayerState) const
+{
+    bool bDrawIndicator = false;
+    if (FriendlyTargetProbeCache.TryReuse(Viewer, UTOwner, HitPlayerState,
+        bDrawIndicator))
+    {
+        return bDrawIndicator;
+    }
+
+    bDrawIndicator = Super::ShouldDrawFFIndicator(Viewer, HitPlayerState);
+    FriendlyTargetProbeCache.Store(Viewer, UTOwner, HitPlayerState, bDrawIndicator);
+    return bDrawIndicator;
+}
+
 
 
 void AUTWeaponFix::PostInitProperties()

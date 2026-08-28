@@ -13,6 +13,16 @@
 #include "Engine/Canvas.h"
 #include "NCPlusHUDLayout.h"
 
+namespace
+{
+	static const FText& SpeedUnitText()
+	{
+		static const FText Text = FText::FromString(TEXT("uu/s"));
+		return Text;
+	}
+
+}
+
 UNCPlusHUDWidget_Speedometer::UNCPlusHUDWidget_Speedometer(const FObjectInitializer& OI)
 	: Super(OI)
 {
@@ -25,6 +35,17 @@ UNCPlusHUDWidget_Speedometer::UNCPlusHUDWidget_Speedometer(const FObjectInitiali
 	Origin             = FVector2D(0.5f, 0.0f);   // pivot top-center
 	DesignedResolution = 1080.f;
 	bShouldKickBack    = false;
+	// Optional widgets must be hidden at the UTHUD render-loop gate, not merely
+	// return false from ShouldDraw. ApplyLayoutToWidgets live-unhides this when a
+	// speedometer entry exists and restores this default when the entry is removed.
+	bHidden            = true;
+
+	CachedLayoutRevision = MAX_uint32;
+	CachedElementScale = 1.f;
+	CachedElementOpacity = 1.f;
+	CachedBigFont = nullptr;
+	CachedSmallFont = nullptr;
+	CachedRoundedSpeed = MIN_int32;
 }
 
 bool UNCPlusHUDWidget_Speedometer::ShouldDraw_Implementation(bool bShowScores)
@@ -51,9 +72,21 @@ void UNCPlusHUDWidget_Speedometer::Draw_Implementation(float DeltaTime)
 	// Honor the editor's Scale + Opacity rows. Layout Scale multiplies the text
 	// scale; opacity routes through DrawText's DrawOpacity arg (the alpha-safe
 	// channel). Both default to 1.0 (no override) so untouched layouts are identical.
-	const FNCPlusHUDElement* SpeedElem = FNCPlusHUDLayout::GetLive().Find(TEXT("speedometer"));
-	const float ElemScale = SpeedElem ? SpeedElem->Scale : 1.f;
-	const float Op = SpeedElem ? SpeedElem->GetExtraFloat(TEXT("opacity"), 1.f) : 1.f;
+	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
+	if (CachedLayoutRevision != LayoutRevision)
+	{
+		const FNCPlusHUDElement* SpeedElem = FNCPlusHUDLayout::GetLive().Find(TEXT("speedometer"));
+		CachedElementScale = SpeedElem ? SpeedElem->Scale : 1.f;
+		CachedElementOpacity = SpeedElem ? SpeedElem->GetExtraFloat(TEXT("opacity"), 1.f) : 1.f;
+
+		UFont* BigFallback = UTHUDOwner->LargeFont ? UTHUDOwner->LargeFont : UTHUDOwner->MediumFont;
+		UFont* SmallFallback = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
+		CachedBigFont = NCPlusHUDFonts::Resolve(TEXT("speedometer"), UTHUDOwner, BigFallback);
+		CachedSmallFont = NCPlusHUDFonts::Resolve(TEXT("speedometer"), UTHUDOwner, SmallFallback);
+		CachedLayoutRevision = LayoutRevision;
+	}
+	const float ElemScale = CachedElementScale;
+	const float Op = CachedElementOpacity;
 
 	// Horizontal speed only — vertical drops out so falling/jumping doesn't
 	// inflate the readout. Matches what competitive players track.
@@ -69,25 +102,27 @@ void UNCPlusHUDWidget_Speedometer::Draw_Implementation(float DeltaTime)
 		(Speed >=  500.f) ? FLinearColor(1.f, 1.f, 1.f, 0.95f) :      // white: walking
 		                    FLinearColor(1.f, 1.f, 1.f, 0.55f);       // dim: idle
 
-	UFont* BigFont  = UTHUDOwner->LargeFont  ? UTHUDOwner->LargeFont  : UTHUDOwner->MediumFont;
-	UFont* SmallFnt = UTHUDOwner->SmallFont  ? UTHUDOwner->SmallFont  : UTHUDOwner->TinyFont;
-	// Honor per-element font override (Phase 3.8). Both number and unit-label
-	// route through the same alias so they stay typographically consistent.
-	BigFont  = NCPlusHUDFonts::Resolve(TEXT("speedometer"), UTHUDOwner, BigFont);
-	SmallFnt = NCPlusHUDFonts::Resolve(TEXT("speedometer"), UTHUDOwner, SmallFnt);
+	UFont* BigFont = CachedBigFont;
+	UFont* SmallFnt = CachedSmallFont;
 	if (!BigFont) return;
 
-	const FString SpeedStr = FString::Printf(TEXT("%d"), FMath::RoundToInt(Speed));
-	DrawText(FText::FromString(SpeedStr), Size.X * 0.5f, 0.f,
-		BigFont, RenderScale * ElemScale, Op, SpeedColor,
+	const int32 RoundedSpeed = FMath::RoundToInt(Speed);
+	if (CachedRoundedSpeed != RoundedSpeed)
+	{
+		CachedRoundedSpeed = RoundedSpeed;
+		CachedSpeedString = FString::FromInt(RoundedSpeed);
+		CachedSpeedText = FText::FromString(CachedSpeedString);
+	}
+	DrawText(CachedSpeedText, Size.X * 0.5f, 0.f, BigFont,
+		RenderScale * ElemScale, Op, SpeedColor,
 		ETextHorzPos::Center, ETextVertPos::Top);
 
 	// Optional unit label below the number — small, dim, easy to ignore once
 	// the user gets used to the value range.
 	if (SmallFnt)
 	{
-		DrawText(FText::FromString(TEXT("uu/s")), Size.X * 0.5f, 22.f * ElemScale,
-			SmallFnt, RenderScale * ElemScale, Op, FLinearColor(1.f, 1.f, 1.f, 0.6f),
+		DrawText(SpeedUnitText(), Size.X * 0.5f, 22.f * ElemScale, SmallFnt,
+			RenderScale * ElemScale, Op, FLinearColor(1.f, 1.f, 1.f, 0.6f),
 			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 }

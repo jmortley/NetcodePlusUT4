@@ -4,6 +4,7 @@
 #include "NetcodePlus.h"
 #include "UnrealTournament.h"
 #include "UTWeapon.h"
+#include "NCFriendlyTargetProbeCache.h"
 #include "UTWeaponFix.generated.h"
 
 class UUTWeaponSkin;
@@ -359,6 +360,8 @@ public:
     virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
+    virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
+        AUTPlayerState*& HitPlayerState) const override;
 
     /** Server-authoritative fire policy hook. Return false to hard-reject a fire mode
      *  at every server fire entry (ServerStartFireFixed and the resend funnel) BEFORE any
@@ -545,6 +548,9 @@ public:
     }
 
 protected:
+
+    /** Client-only crosshair presentation state; see FNCFriendlyTargetProbeCache. */
+    mutable FNCFriendlyTargetProbeCache FriendlyTargetProbeCache;
 
     /** Common server RTT-to-rewind conversion. Hitscan passes the live cvar;
      *  the legacy projectile-origin path passes its per-weapon field. */

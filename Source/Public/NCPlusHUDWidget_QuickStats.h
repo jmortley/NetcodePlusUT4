@@ -62,6 +62,9 @@ private:
 	// tessellated vertices and the allocation; only vertex colors are refreshed
 	// during pickup pulses. This removes render-rate trig without changing pixels.
 	TArray<FCanvasUVTri> CachedRadialTris;
+	// Reused frame scratch for HexChevrons. Geometry/color can pulse every frame,
+	// but its fixed maximum vertex count should never allocate at render rate.
+	TArray<FCanvasUVTri> CachedChevronTris;
 	FVector2D CachedRadialRenderPosition;
 	FVector2D CachedRadialSize;
 	float CachedRadialRenderScale;

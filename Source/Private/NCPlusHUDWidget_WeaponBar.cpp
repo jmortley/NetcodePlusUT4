@@ -75,6 +75,71 @@ namespace NCPlusWB
 
 	static FSharedInventoryCache GInventoryCache;
 
+	// Snapshot the render-rate state for one weapon before submitting any Canvas
+	// items. Slots are separated by SlotGap and their icon/text/bar bounds do not
+	// overlap, so drawing compatible resources in layers preserves the pixels and
+	// intra-slot ordering while avoiding a texture/font state cycle per weapon.
+	struct FSlotDrawRecord
+	{
+		float SlotX;
+		float SlotY;
+		FLinearColor BackgroundColor;
+		bool bDrawOutline;
+
+		bool bDrawIcon;
+		float IconX;
+		float IconY;
+		float IconW;
+		float IconH;
+		float IconU;
+		float IconV;
+		float IconUL;
+		float IconVL;
+		FLinearColor IconColor;
+
+		bool bDrawGroup;
+		int32 Group;
+		float GroupOpacity;
+
+		bool bDrawAmmo;
+		float AmmoBarX;
+		float AmmoBarY;
+		float AmmoBarW;
+		float AmmoFillW;
+		FLinearColor AmmoFillColor;
+		int32 Ammo;
+		float AmmoTextOpacity;
+
+		FSlotDrawRecord()
+			: SlotX(0.f)
+			, SlotY(0.f)
+			, BackgroundColor(0.f, 0.f, 0.f, 0.f)
+			, bDrawOutline(false)
+			, bDrawIcon(false)
+			, IconX(0.f)
+			, IconY(0.f)
+			, IconW(0.f)
+			, IconH(0.f)
+			, IconU(0.f)
+			, IconV(0.f)
+			, IconUL(0.f)
+			, IconVL(0.f)
+			, IconColor(0.f, 0.f, 0.f, 0.f)
+			, bDrawGroup(false)
+			, Group(0)
+			, GroupOpacity(0.f)
+			, bDrawAmmo(false)
+			, AmmoBarX(0.f)
+			, AmmoBarY(0.f)
+			, AmmoBarW(0.f)
+			, AmmoFillW(0.f)
+			, AmmoFillColor(0.f, 0.f, 0.f, 0.f)
+			, Ammo(0)
+			, AmmoTextOpacity(0.f)
+		{
+		}
+	};
+
 	static const TArray<TWeakObjectPtr<AUTWeapon>>& GetWeaponsForSide(
 		AUTCharacter* Character, const FNCPlusHUDLayout& Layout, uint32 LayoutRevision,
 		int32 SideIndex, float Now)
@@ -358,7 +423,10 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 	UFont* GroupFont = UTHUDOwner->TinyFont;
 	UFont* AmmoFont  = UTHUDOwner->SmallFont;
 
-	// Draw cells
+	// Gather all render-rate state before drawing. The inline allocator covers
+	// the normal UT inventory without adding a per-frame heap allocation.
+	TArray<FSlotDrawRecord, TInlineAllocator<16>> DrawRecords;
+	DrawRecords.Reserve(MyWeapons.Num());
 	for (int32 i = 0; i < MyWeapons.Num(); i++)
 	{
 		AUTWeapon* W = MyWeapons[i].Get();
@@ -369,20 +437,18 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		const bool  bActive = (W == CurrentWeapon);
 		const bool  bNeedsAmmo = W->NeedsAmmoDisplay();
 
-		// Background cell — alpha goes through DrawOpacity (10th arg).
-		const FLinearColor Bg = bActive ? SlotBgActiveCol : SlotBgInactiveCol;
-		DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, SlotH,
-			0.f, 0.f, 1.f, 1.f, Bg.A, Bg);
-
-		// Active outline (1px frame)
-		if (bActive)
-		{
-			const float OL = ActiveOutlineCol.A;
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, 1.5f,            0,0,1,1, OL, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY + SlotH - 1.5f, SlotW, 1.5f, 0,0,1,1, OL, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, 1.5f, SlotH,            0,0,1,1, OL, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX + SlotW - 1.5f, SlotY, 1.5f, SlotH, 0,0,1,1, OL, ActiveOutlineCol);
-		}
+		FSlotDrawRecord Record;
+		Record.SlotX = SlotX;
+		Record.SlotY = SlotY;
+		Record.BackgroundColor = bActive ? SlotBgActiveCol : SlotBgInactiveCol;
+		Record.bDrawOutline = bActive;
+		Record.bDrawIcon = false;
+		Record.bDrawGroup = GroupFont && W->Group > 0;
+		Record.Group = W->Group;
+		Record.GroupOpacity = (bActive ? 1.0f : 0.7f) * Opacity;
+		Record.bDrawAmmo = bNeedsAmmo && W->MaxAmmo > 0;
+		Record.Ammo = W->Ammo;
+		Record.AmmoTextOpacity = (bActive ? 1.0f : 0.75f) * Opacity;
 
 		// Weapon icon — UVs from WeaponBarSelectedUVs are pixel coords against
 		// WeaponIconAtlas. Note: UUTHUDWidget::DrawTexture normalizes the U/V/UL/VL
@@ -425,44 +491,99 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 
 			const float IconX = SlotX + (SlotW - IconW) * 0.5f;
 			const float IconY = SlotY + SlotPad;
-			DrawTexture(WeaponIconAtlas, IconX, IconY, IconW, IconH,
-				UV.U, UV.V, UV.UL, UV.VL,   // raw pixel coords
-				IconCol.A, IconCol);
+			Record.bDrawIcon = true;
+			Record.IconX = IconX;
+			Record.IconY = IconY;
+			Record.IconW = IconW;
+			Record.IconH = IconH;
+			Record.IconU = UV.U;
+			Record.IconV = UV.V;
+			Record.IconUL = UV.UL;
+			Record.IconVL = UV.VL;
+			Record.IconColor = IconCol;
 		}
 
-		// Group number top-left
-		if (GroupFont && W->Group > 0)
+		if (Record.bDrawAmmo)
 		{
-			DrawCachedNumber(W->Group, SlotX + GroupNumPad, SlotY + GroupNumPad,
-				GroupFont, 1.0f, (bActive ? 1.0f : 0.7f) * Opacity,
-				FLinearColor::White, false);
-		}
-
-		// Ammo bar + count (only for weapons that display ammo)
-		if (bNeedsAmmo && W->MaxAmmo > 0)
-		{
-			const float AmmoBarY = SlotY + SlotH - AmmoBarH - 2.f;
-			const float AmmoBarW = SlotW - SlotPad * 2.f;
-			const float AmmoBarX = SlotX + SlotPad;
-
-			// Track
-			DrawTexture(Canvas->DefaultTexture, AmmoBarX, AmmoBarY, AmmoBarW, AmmoBarH,
-				0,0,1,1, 0.8f * Opacity, AmmoTrack);
-
-			// Fill
+			Record.AmmoBarY = SlotY + SlotH - AmmoBarH - 2.f;
+			Record.AmmoBarW = SlotW - SlotPad * 2.f;
+			Record.AmmoBarX = SlotX + SlotPad;
 			const float AmmoFrac = FMath::Clamp(float(W->Ammo) / float(W->MaxAmmo), 0.f, 1.f);
 			FLinearColor FillCol = AmmoFillFullCol;
 			if (W->Ammo <= W->AmmoDangerAmount)       FillCol = AmmoFillDangerCol;
 			else if (W->Ammo <= W->AmmoWarningAmount) FillCol = AmmoFillWarnCol;
-			DrawTexture(Canvas->DefaultTexture, AmmoBarX, AmmoBarY, AmmoBarW * AmmoFrac, AmmoBarH,
-				0,0,1,1, FillCol.A, FillCol);
+			Record.AmmoFillW = Record.AmmoBarW * AmmoFrac;
+			Record.AmmoFillColor = FillCol;
+		}
 
-			// Ammo count text top-right
-			if (AmmoFont)
+		DrawRecords.Add(Record);
+	}
+
+	// Pass 1: every DefaultTexture primitive. Within a slot the background is
+	// still below its outline and ammo track/fill. Those regions do not overlap
+	// the padded icon or either top-corner number.
+	for (const FSlotDrawRecord& Record : DrawRecords)
+	{
+		const FLinearColor& Bg = Record.BackgroundColor;
+		DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY, SlotW, SlotH,
+			0.f, 0.f, 1.f, 1.f, Bg.A, Bg);
+
+		if (Record.bDrawOutline)
+		{
+			const float OL = ActiveOutlineCol.A;
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY, SlotW, 1.5f,
+				0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY + SlotH - 1.5f, SlotW, 1.5f,
+				0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY, 1.5f, SlotH,
+				0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX + SlotW - 1.5f, Record.SlotY, 1.5f, SlotH,
+				0,0,1,1, OL, ActiveOutlineCol);
+		}
+
+		if (Record.bDrawAmmo)
+		{
+			DrawTexture(Canvas->DefaultTexture, Record.AmmoBarX, Record.AmmoBarY,
+				Record.AmmoBarW, AmmoBarH, 0,0,1,1, 0.8f * Opacity, AmmoTrack);
+			DrawTexture(Canvas->DefaultTexture, Record.AmmoBarX, Record.AmmoBarY,
+				Record.AmmoFillW, AmmoBarH, 0,0,1,1,
+				Record.AmmoFillColor.A, Record.AmmoFillColor);
+		}
+	}
+
+	// Pass 2: atlas icons.
+	for (const FSlotDrawRecord& Record : DrawRecords)
+	{
+		if (Record.bDrawIcon)
+		{
+			DrawTexture(WeaponIconAtlas, Record.IconX, Record.IconY, Record.IconW, Record.IconH,
+				Record.IconU, Record.IconV, Record.IconUL, Record.IconVL,
+				Record.IconColor.A, Record.IconColor);
+		}
+	}
+
+	// Pass 3: TinyFont group numbers remain above the icons.
+	for (const FSlotDrawRecord& Record : DrawRecords)
+	{
+		if (Record.bDrawGroup)
+		{
+			DrawCachedNumber(Record.Group,
+				Record.SlotX + GroupNumPad, Record.SlotY + GroupNumPad,
+				GroupFont, 1.0f, Record.GroupOpacity, FLinearColor::White, false);
+		}
+	}
+
+	// Pass 4: SmallFont ammo counts remain above their track/fill.
+	if (AmmoFont)
+	{
+		for (const FSlotDrawRecord& Record : DrawRecords)
+		{
+			if (Record.bDrawAmmo)
 			{
-				DrawCachedNumber(W->Ammo, SlotX + SlotW - GroupNumPad, SlotY + GroupNumPad,
-					AmmoFont, 0.85f, (bActive ? 1.0f : 0.75f) * Opacity,
-					FillCol, true);
+				DrawCachedNumber(Record.Ammo,
+					Record.SlotX + SlotW - GroupNumPad, Record.SlotY + GroupNumPad,
+					AmmoFont, 0.85f, Record.AmmoTextOpacity,
+					Record.AmmoFillColor, true);
 			}
 		}
 	}

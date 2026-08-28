@@ -22,34 +22,50 @@ class ANCAutoPauseState;
 // lookup via FindField which always returns the correct offset.
 namespace NCPlusReflection
 {
+	template <typename PropertyType>
+	inline PropertyType* FindCachedProperty(UObject* Obj, const TCHAR* PropName)
+	{
+		if (!Obj) return nullptr;
+		// Shipping UClasses and their UProperty tables are stable for process life.
+		// Cache by runtime class + property name so render-rate HUD reads do not walk
+		// the reflection field chain every frame. Each PropertyType gets its own map.
+		static TMap<UClass*, TMap<FName, PropertyType*>> Cache;
+		TMap<FName, PropertyType*>& ClassCache = Cache.FindOrAdd(Obj->GetClass());
+		const FName Name(PropName);
+		if (PropertyType** Found = ClassCache.Find(Name)) return *Found;
+		PropertyType* Resolved = FindField<PropertyType>(Obj->GetClass(), PropName);
+		ClassCache.Add(Name, Resolved);
+		return Resolved;
+	}
+
 	inline bool GetBool(UObject* Obj, const TCHAR* PropName)
 	{
-		UBoolProperty* Prop = FindField<UBoolProperty>(Obj->GetClass(), PropName);
+		UBoolProperty* Prop = FindCachedProperty<UBoolProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : false;
 	}
 	inline void SetBool(UObject* Obj, const TCHAR* PropName, bool Value)
 	{
-		UBoolProperty* Prop = FindField<UBoolProperty>(Obj->GetClass(), PropName);
+		UBoolProperty* Prop = FindCachedProperty<UBoolProperty>(Obj, PropName);
 		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
 	}
 	inline uint8 GetByte(UObject* Obj, const TCHAR* PropName)
 	{
-		UByteProperty* Prop = FindField<UByteProperty>(Obj->GetClass(), PropName);
+		UByteProperty* Prop = FindCachedProperty<UByteProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
 	}
 	inline void SetByte(UObject* Obj, const TCHAR* PropName, uint8 Value)
 	{
-		UByteProperty* Prop = FindField<UByteProperty>(Obj->GetClass(), PropName);
+		UByteProperty* Prop = FindCachedProperty<UByteProperty>(Obj, PropName);
 		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
 	}
 	inline int32 GetInt(UObject* Obj, const TCHAR* PropName)
 	{
-		UIntProperty* Prop = FindField<UIntProperty>(Obj->GetClass(), PropName);
+		UIntProperty* Prop = FindCachedProperty<UIntProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
 	}
 	inline void SetObject(UObject* Obj, const TCHAR* PropName, UObject* Value)
 	{
-		UObjectPropertyBase* Prop = FindField<UObjectPropertyBase>(Obj->GetClass(), PropName);
+		UObjectPropertyBase* Prop = FindCachedProperty<UObjectPropertyBase>(Obj, PropName);
 		if (Prop) Prop->SetObjectPropertyValue_InContainer(Obj, Value);
 	}
 }

@@ -13,6 +13,7 @@
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 #include "UTHUDWidget_Spectator.h"
 #include "WipeoutDamageReplicator.h"
+#include "NCShaftArenaHUD.h"
 #include "EngineUtils.h"
 
 namespace
@@ -25,7 +26,22 @@ namespace
 	constexpr float WipeoutCompactPipWidth = WipeoutCompactPipHeight / WipeoutPortraitAspect;
 	constexpr float WipeoutCompactTextFactor = WipeoutCompactPipHeight
 		/ (WipeoutLegacyPipWidth * WipeoutPortraitAspect);
+
+	// Advance from the prior deadline instead of Now so a 144/165/500 Hz render
+	// cadence does not alias the nominal 120 Hz sampler down to 72/82.5/100 Hz.
+	// Long stalls and clock discontinuities reset the phase rather than catching up.
+	float AdvancePortraitSampleDeadline(float Now, float Deadline, float Interval)
+	{
+		if (Deadline <= 0.f || Deadline > Now || Now - Deadline > 4.f * Interval)
+		{
+			return Now + Interval;
+		}
+		const int32 PeriodsToSkip = FMath::FloorToInt((Now - Deadline) / Interval) + 1;
+		return Deadline + float(PeriodsToSkip) * Interval;
+	}
 }
+
+constexpr float AWipeoutHUD::PortraitSampleInterval;
 
 AWipeoutHUD::AWipeoutHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -141,6 +157,18 @@ void AWipeoutHUD::BeginPlay()
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 }
 
+bool AWipeoutHUD::ShouldDrawMinimap()
+{
+	// A live NCPlus entry owns minimap presentation even when layout-hidden.
+	// Suppress only AUTHUD's post-widget stock renderer; bDrawMinimap remains the
+	// real ToggleMinimap state for the custom widget and other stock HUD gates.
+	if (FNCPlusHUDLayout::GetLive().Find(TEXT("minimap")) != nullptr)
+	{
+		return false;
+	}
+	return Super::ShouldDrawMinimap();
+}
+
 EInputMode::Type AWipeoutHUD::GetInputMode_Implementation() const
 {
 	// FIX: Mouse focus loss on death.
@@ -199,6 +227,9 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 		{
 			PortraitRenderPlayers.Reset();
 		}
+		CachedPortraitGameState = nullptr;
+		CachedPortraitSignature.Reset();
+		CachedPortraitRenderPlayers.Reset();
 		return;
 	}
 
@@ -209,11 +240,54 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 		CachedPortraitWorld = World;
 		CachedPortraitGameState = GS;
 		CachedPortraitSignature.Reset();
+		CachedPortraitRenderPlayers.Reset();
 		PortraitRenderPlayers.Reset();
 		PipCacheByPS.Reset();
+		PresentationByPS.Reset();
+		CachedPortraitScorer = nullptr;
+		CachedPortraitPlayerArrayNum = INDEX_NONE;
+		NextPortraitRosterSampleTime = 0.f;
+		NextRemotePortraitSampleTime = 0.f;
 	}
+	auto RefreshRawPortraitPlayers = [this]()
+	{
+		PortraitRenderPlayers.Reset(CachedPortraitRenderPlayers.Num());
+		for (const TWeakObjectPtr<AUTPlayerState>& WeakPlayerState : CachedPortraitRenderPlayers)
+		{
+			if (AUTPlayerState* PlayerState = WeakPlayerState.Get())
+			{
+				PortraitRenderPlayers.Add(PlayerState);
+			}
+		}
+	};
 
 	AUTPlayerState* HUDPS = GetScorerPlayerState();
+	const float Now = World->GetTimeSeconds();
+	const bool bRosterInvalidated = bContextChanged
+		|| CachedPortraitScorer.Get() != HUDPS
+		|| CachedPortraitPlayerArrayNum != GS->PlayerArray.Num()
+		|| Now >= NextPortraitRosterSampleTime;
+	if (!bRosterInvalidated)
+	{
+		RefreshRawPortraitPlayers();
+		if (&SortedPlayers != &PortraitRenderPlayers)
+		{
+			const bool bWasEmpty = SortedPlayers.Num() == 0;
+			SortedPlayers.Append(PortraitRenderPlayers);
+			if (!bWasEmpty)
+			{
+				SortedPlayers.Sort([](AUTPlayerState& A, AUTPlayerState& B)
+				{
+					return A.SelectionOrder > B.SelectionOrder;
+				});
+			}
+		}
+		return;
+	}
+	CachedPortraitScorer = HUDPS;
+	CachedPortraitPlayerArrayNum = GS->PlayerArray.Num();
+	NextPortraitRosterSampleTime = AdvancePortraitSampleDeadline(
+		Now, NextPortraitRosterSampleTime, PortraitSampleInterval);
 	CurrentPortraitSignature.Reset(GS->PlayerArray.Num());
 	for (APlayerState* PS : GS->PlayerArray)
 	{
@@ -268,6 +342,11 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 		{
 			return A.SelectionOrder > B.SelectionOrder;
 		});
+		CachedPortraitRenderPlayers.Reset(PortraitRenderPlayers.Num());
+		for (AUTPlayerState* PlayerState : PortraitRenderPlayers)
+		{
+			CachedPortraitRenderPlayers.Add(PlayerState);
+		}
 
 		for (auto It = PipCacheByPS.CreateIterator(); It; ++It)
 		{
@@ -285,6 +364,26 @@ void AWipeoutHUD::GetPlayerListForIcons(TArray<AUTPlayerState*>& SortedPlayers)
 				It.RemoveCurrent();
 			}
 		}
+		for (auto It = PresentationByPS.CreateIterator(); It; ++It)
+		{
+			bool bStillPresent = false;
+			for (const FPortraitOrderSignature& Signature : CurrentPortraitSignature)
+			{
+				if (Signature.PlayerState.Get() == It.Key().Get())
+				{
+					bStillPresent = true;
+					break;
+				}
+			}
+			if (!bStillPresent)
+			{
+				It.RemoveCurrent();
+			}
+		}
+	}
+	else
+	{
+		RefreshRawPortraitPlayers();
 	}
 
 	if (&SortedPlayers != &PortraitRenderPlayers)
@@ -546,9 +645,32 @@ void AWipeoutHUD::DrawHUD()
 
 		GetPlayerListForIcons(PortraitRenderPlayers);
 		const TArray<AUTPlayerState*>& LivePlayers = PortraitRenderPlayers;
+		AUTPlayerState* LocalPortraitPS = Cast<AUTPlayerState>(UTPlayerOwner ? UTPlayerOwner->PlayerState : nullptr);
+		const float PortraitNow = GetWorld()->GetTimeSeconds();
+		const bool bSampleRemotePresentation = PortraitNow >= NextRemotePortraitSampleTime;
+		if (bSampleRemotePresentation)
+		{
+			NextRemotePortraitSampleTime = AdvancePortraitSampleDeadline(
+				PortraitNow, NextRemotePortraitSampleTime, PortraitSampleInterval);
+		}
+		for (AUTPlayerState* UTPS : LivePlayers)
+		{
+			if (!UTPS) continue;
+			FWipeoutPresentationSample* Existing = PresentationByPS.Find(UTPS);
+			if (UTPS != LocalPortraitPS && !bSampleRemotePresentation && Existing) continue;
+
+			FWipeoutPresentationSample& Sample = PresentationByPS.FindOrAdd(UTPS);
+			AController* Controller = Cast<AController>(UTPS->GetOwner());
+			AUTCharacter* Character = Controller
+				? Cast<AUTCharacter>(Controller->GetPawn()) : UTPS->GetUTCharacter();
+			Sample.Character = Character;
+			Sample.bAlive = Character != nullptr && !Character->IsDead();
+			Sample.Health = Character ? Character->Health : 0;
+			Sample.Armor = Character ? Character->GetArmorAmount() : 0;
+		}
 
 		// Pre-pass: find the next-to-spawn teammate (lowest RespawnTime > 0)
-		AUTPlayerState* MyPS_ForSpawn = Cast<AUTPlayerState>(UTPlayerOwner ? UTPlayerOwner->PlayerState : nullptr);
+		AUTPlayerState* MyPS_ForSpawn = LocalPortraitPS;
 		uint8 MyTeam = MyPS_ForSpawn ? MyPS_ForSpawn->GetTeamNum() : 255;
 		AUTPlayerState* NextToSpawn = nullptr;
 		float LowestRespawnTime = BIG_NUMBER;
@@ -558,8 +680,8 @@ void AWipeoutHUD::DrawHUD()
 				&& UTPS->RespawnWaitTime > 0.f && UTPS->RespawnTime > 0.f
 				&& UTPS->RespawnTime < LowestRespawnTime)
 			{
-				AUTCharacter* UTC = UTPS->GetUTCharacter();
-				bool bDead = !UTC || UTC->IsDead();
+				const FWipeoutPresentationSample* Sample = PresentationByPS.Find(UTPS);
+				const bool bDead = !Sample || !Sample->bAlive;
 				if (bDead)
 				{
 					LowestRespawnTime = UTPS->RespawnTime;
@@ -568,8 +690,30 @@ void AWipeoutHUD::DrawHUD()
 			}
 		}
 
+		struct FWipeoutStripDraw
+		{
+			AUTPlayerState* PlayerState = nullptr;
+			FWipeoutPresentationSample Sample;
+			float LiveScaling = 0.f;
+			float X = 0.f;
+			float Y = 0.f;
+			float PipSize = 0.f;
+			FName Alias;
+			UFont* NameFont = nullptr;
+			FText NameText;
+			float NameScale = 1.f;
+			float NameWidth = 0.f;
+			float NameHeight = 0.f;
+			bool bNextToSpawn = false;
+			bool bJoinAnimating = false;
+		};
+		// Avoid render-rate heap churn on servers larger than the usual 5v5 roster.
+		TArray<FWipeoutStripDraw, TInlineAllocator<32>> PortraitDraws;
+		PortraitDraws.Reserve(LivePlayers.Num());
+
 		for (AUTPlayerState* UTPS : LivePlayers)
 		{
+			if (!UTPS) continue;
 			// In Wipeout everyone respawns, so show all non-spectator players
 			// Keep every portrait the same size. The old scorer/view-target bump made
 			// the row jump and opened uneven gaps whenever spectating changed players.
@@ -578,25 +722,8 @@ void AWipeoutHUD::DrawHUD()
 			const float TeamPipBase = (PreTeamIdx == 1) ? WO_BluePipSize : WO_RedPipSize;
 			const float PipSize = TeamPipBase;
 
-			// Determine if player is alive.
-			// On the server, check the controller's current pawn directly
-			// (GetUTCharacter() intentionally caches dead characters).
-			// On clients, the controller (GetOwner) is null for remote players,
-			// so fall back to GetUTCharacter() + IsDead().
-			bool bPlayerAlive = false;
-			AController* C = Cast<AController>(UTPS->GetOwner());
-			if (C != nullptr)
-			{
-				// Server or local player — check controller's actual pawn
-				AUTCharacter* UTC = Cast<AUTCharacter>(C->GetPawn());
-				bPlayerAlive = (UTC != nullptr && !UTC->IsDead());
-			}
-			else
-			{
-				// Remote player on client — use GetUTCharacter + IsDead
-				AUTCharacter* UTC = UTPS->GetUTCharacter();
-				bPlayerAlive = (UTC != nullptr && !UTC->IsDead());
-			}
+			const FWipeoutPresentationSample* Sample = PresentationByPS.Find(UTPS);
+			const bool bPlayerAlive = Sample && Sample->bAlive;
 
 			// Respawn progress: 0 = fully dead/waiting, 1 = alive
 			float LiveScaling = 1.f;
@@ -618,65 +745,125 @@ void AWipeoutHUD::DrawHUD()
 			// Phase 3.5 hide gates — skip drawing the strip the user disabled.
 			if (TeamIdx == 0 && bHideRed)  continue;
 			if (TeamIdx == 1 && bHideBlue) continue;
+			float* TeamX = nullptr;
+			float TeamY = 0.f;
+			float GrowSign = 1.f;
+			FName Alias;
+			float TeamScale = 1.f;
 			if (TeamIdx == 0)
 			{
 				RedPlayerCount++;
-				DrawPlayerIcon(UTPS, LiveScaling, XOffsetRed, YOffsetRed, PipSize);
-				// Player name below icon — multiply by team scale so text shrinks with the pip.
-				{
-					/* Portraits (Red/My Team) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(RedAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(RedAlias, 1.f);
-					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_RedScale * NameFontExtra;
-					// Cached fit + one outlined item (was a per-frame StrLen loop + 5 DrawText).
-					FText NameText; float NW, NH;
-					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
-					float NameX = XOffsetRed + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
-					// Below the tile (mockup style) — the big HP/armor stack owns the tile face now.
-					float NameY = YOffsetRed + PipSize * WipeoutPortraitAspect + 2.f;
-					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
-				}
-				if (UTPS == NextToSpawn)
-				{
-					// Gold border highlight for next teammate to spawn
-					float PipHeight = PipSize * WipeoutPortraitAspect;
-					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
-					float BorderW = 2.f;
-					Canvas->SetLinearDrawColor(Gold);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffsetRed, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffsetRed + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed, YOffsetRed, BorderW, PipHeight, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetRed + PipSize - BorderW, YOffsetRed, BorderW, PipHeight, 0, 0, 1, 1);
-				}
-				XOffsetRed += RedGrowSign * 1.1f * PipSize;
+				TeamX = &XOffsetRed; TeamY = YOffsetRed; GrowSign = RedGrowSign;
+				Alias = RedAlias; TeamScale = WO_RedScale;
 			}
 			else if (TeamIdx == 1)
 			{
 				BluePlayerCount++;
-				DrawPlayerIcon(UTPS, LiveScaling, XOffsetBlue, YOffsetBlue, PipSize);
-				// Player name below icon — multiply by team scale so text shrinks with the pip.
-				{
-					/* Portraits (Blue/Enemy) Font + FontSz restyle the player name. */ UFont* NameFont = NCPlusHUDFonts::Resolve(BlueAlias, this, SmallFont); if (!NameFont) { NameFont = SmallFont; } const float NameFontExtra = NCPlusHUDFonts::ResolveScale(BlueAlias, 1.f);
-					const float NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * WO_BlueScale * NameFontExtra;
-					// Cached fit + one outlined item (was a per-frame StrLen loop + 5 DrawText).
-					FText NameText; float NW, NH;
-					NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, NameFont, UTPS->PlayerName, PipSize, NameScale, NameText, NW, NH);
-					float NameX = XOffsetBlue + (PipSize * 0.5f) - (NW * NameScale * 0.5f);
-					// Below the tile (mockup style) — the big HP/armor stack owns the tile face now.
-					float NameY = YOffsetBlue + PipSize * WipeoutPortraitAspect + 2.f;
-					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, NameFont, NameText, NameX, NameY, NameScale, FLinearColor::White);
-				}
-				if (UTPS == NextToSpawn)
-				{
-					float PipHeight = PipSize * WipeoutPortraitAspect;
-					FLinearColor Gold(1.f, 0.85f, 0.f, 0.9f);
-					float BorderW = 2.f;
-					Canvas->SetLinearDrawColor(Gold);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffsetBlue, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffsetBlue + PipHeight - BorderW, PipSize, BorderW, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue, YOffsetBlue, BorderW, PipHeight, 0, 0, 1, 1);
-					Canvas->DrawTile(Canvas->DefaultTexture, XOffsetBlue + PipSize - BorderW, YOffsetBlue, BorderW, PipHeight, 0, 0, 1, 1);
-				}
-				XOffsetBlue += BlueGrowSign * 1.1f * PipSize;
+				TeamX = &XOffsetBlue; TeamY = YOffsetBlue; GrowSign = BlueGrowSign;
+				Alias = BlueAlias; TeamScale = WO_BlueScale;
 			}
+			if (!TeamX) continue;
+
+			FWipeoutStripDraw& Draw = PortraitDraws[PortraitDraws.AddDefaulted()];
+			Draw.PlayerState = UTPS;
+			if (Sample) Draw.Sample = *Sample;
+			Draw.LiveScaling = LiveScaling;
+			Draw.X = *TeamX;
+			Draw.Y = TeamY;
+			Draw.PipSize = PipSize;
+			Draw.Alias = Alias;
+			Draw.bNextToSpawn = UTPS == NextToSpawn;
+			Draw.bJoinAnimating = PortraitNow - UTPS->CreationTime < 1.f;
+			Draw.NameFont = NCPlusHUDFonts::Resolve(Alias, this, SmallFont);
+			if (!Draw.NameFont) Draw.NameFont = SmallFont;
+			const float NameFontExtra = NCPlusHUDFonts::ResolveScale(Alias, 1.f);
+			Draw.NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
+			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->PlayerName,
+				PipSize, Draw.NameScale, Draw.NameText, Draw.NameWidth, Draw.NameHeight);
+			*TeamX += GrowSign * 1.1f * PipSize;
+		}
+
+		auto DrawPortraitFinish = [this](const FWipeoutStripDraw& Draw)
+		{
+			const float NameX = Draw.X + 0.5f * (Draw.PipSize - Draw.NameWidth * Draw.NameScale);
+			const float NameY = Draw.Y + Draw.PipSize * WipeoutPortraitAspect + 2.f;
+			NCPlusHUDDrawCall::DrawOutlinedText(Canvas, Draw.NameFont, Draw.NameText,
+				NameX, NameY, Draw.NameScale, FLinearColor::White);
+			if (Draw.bNextToSpawn)
+			{
+				const float PipHeight = Draw.PipSize * WipeoutPortraitAspect;
+				const float BorderW = 2.f;
+				Canvas->SetLinearDrawColor(FLinearColor(1.f, 0.85f, 0.f, 0.9f));
+				Canvas->DrawTile(Canvas->DefaultTexture, Draw.X, Draw.Y, Draw.PipSize, BorderW, 0, 0, 1, 1);
+				Canvas->DrawTile(Canvas->DefaultTexture, Draw.X, Draw.Y + PipHeight - BorderW, Draw.PipSize, BorderW, 0, 0, 1, 1);
+				Canvas->DrawTile(Canvas->DefaultTexture, Draw.X, Draw.Y, BorderW, PipHeight, 0, 0, 1, 1);
+				Canvas->DrawTile(Canvas->DefaultTexture, Draw.X + Draw.PipSize - BorderW, Draw.Y, BorderW, PipHeight, 0, 0, 1, 1);
+			}
+		};
+		// The multipass implementation is deliberately non-virtual. Restrict it to
+		// exact in-repo HUD classes known to use the base renderer so an external
+		// native subclass overriding DrawPlayerIcon always gets the complete-card path.
+		bool bCanBatch = GetClass() == AWipeoutHUD::StaticClass()
+			|| GetClass() == ANCShaftArenaHUD::StaticClass();
+		for (const FWipeoutStripDraw& Draw : PortraitDraws) bCanBatch &= !Draw.bJoinAnimating;
+		for (int32 A = 0; bCanBatch && A < PortraitDraws.Num(); ++A)
+		{
+			const FWipeoutStripDraw& DA = PortraitDraws[A];
+			for (int32 B = A + 1; B < PortraitDraws.Num(); ++B)
+			{
+				const FWipeoutStripDraw& DB = PortraitDraws[B];
+				const float DANameX = DA.X + 0.5f * (DA.PipSize - DA.NameWidth * DA.NameScale);
+				const float DBNameX = DB.X + 0.5f * (DB.PipSize - DB.NameWidth * DB.NameScale);
+				const float DANameY = DA.Y + DA.PipSize * WipeoutPortraitAspect + 2.f;
+				const float DBNameY = DB.Y + DB.PipSize * WipeoutPortraitAspect + 2.f;
+				const float TextPadding = 2.f;
+				const float DAMinX = FMath::Min(DA.X, DANameX - TextPadding);
+				const float DBMinX = FMath::Min(DB.X, DBNameX - TextPadding);
+				const float DAMaxX = FMath::Max(DA.X + DA.PipSize,
+					DANameX + DA.NameWidth * DA.NameScale + TextPadding);
+				const float DBMaxX = FMath::Max(DB.X + DB.PipSize,
+					DBNameX + DB.NameWidth * DB.NameScale + TextPadding);
+				const float DAMinY = FMath::Min(DA.Y, DANameY - TextPadding);
+				const float DBMinY = FMath::Min(DB.Y, DBNameY - TextPadding);
+				const float DAMaxY = FMath::Max(DA.Y + DA.PipSize * WipeoutPortraitAspect,
+					DANameY + DA.NameHeight * DA.NameScale + TextPadding);
+				const float DBMaxY = FMath::Max(DB.Y + DB.PipSize * WipeoutPortraitAspect,
+					DBNameY + DB.NameHeight * DB.NameScale + TextPadding);
+				const bool bOverlap = DAMinX < DBMaxX && DBMinX < DAMaxX
+					&& DAMinY < DBMaxY && DBMinY < DAMaxY;
+				if (bOverlap) { bCanBatch = false; break; }
+			}
+		}
+		if (bCanBatch)
+		{
+			PortraitPassStateByPS.Reset();
+			for (ActivePortraitDrawPass = 0; ActivePortraitDrawPass < 6; ++ActivePortraitDrawPass)
+			{
+				for (const FWipeoutStripDraw& Draw : PortraitDraws)
+				{
+					PreparedPortraitPS = Draw.PlayerState;
+					PreparedPortraitSample = Draw.Sample;
+					bHasPreparedPortraitSample = true;
+					DrawPlayerIconPass(Draw.PlayerState, Draw.LiveScaling,
+						Draw.X, Draw.Y, Draw.PipSize);
+				}
+			}
+			ActivePortraitDrawPass = -1;
+			PortraitPassStateByPS.Reset();
+			bHasPreparedPortraitSample = false;
+			for (const FWipeoutStripDraw& Draw : PortraitDraws) DrawPortraitFinish(Draw);
+		}
+		else
+		{
+			for (const FWipeoutStripDraw& Draw : PortraitDraws)
+			{
+				PreparedPortraitPS = Draw.PlayerState;
+				PreparedPortraitSample = Draw.Sample;
+				bHasPreparedPortraitSample = true;
+				DrawPlayerIcon(Draw.PlayerState, Draw.LiveScaling, Draw.X, Draw.Y, Draw.PipSize);
+				DrawPortraitFinish(Draw);
+			}
+			bHasPreparedPortraitSample = false;
 		}
 		// ─── Score / KDA mini widget (top right) ───
 		// Layout-aware via "score_kda" alias. Position, scale, and font are
@@ -1026,81 +1213,107 @@ FName AWipeoutHUD::PortraitAliasFor(uint8 TeamIdx) const
 
 void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling, float XOffset, float YOffset, float PipSize)
 {
-	const FCanvasIcon CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
-	if (CharIcon.Texture == nullptr)
+	DrawPlayerIconPass(PlayerState, LiveScaling, XOffset, YOffset, PipSize);
+}
+
+void AWipeoutHUD::DrawPlayerIconPass(AUTPlayerState* PlayerState, float LiveScaling,
+	float XOffset, float YOffset, float PipSize)
+{
+	FWipeoutPortraitPassState State;
+	const FWipeoutPortraitPassState* CachedState = ActivePortraitDrawPass > 0
+		? PortraitPassStateByPS.Find(PlayerState) : nullptr;
+	if (CachedState)
 	{
-		return;
-	}
-
-	// Per-portrait opacity (Phase 3.5+): scale every SetLinearDrawColor alpha
-	// by this so the editor's Op slider fades the entire portrait stack.
-	// Alias is red/blue — or team/enemy when ViewerRelativePortraits is on.
-	const FName PortraitAlias = PortraitAliasFor(PlayerState->GetTeamNum());
-	const float Op = NCPlusHUDDrawCall::GetOpacity(PortraitAlias);
-	auto Tinted = [Op](FLinearColor C) -> FLinearColor { C.A *= Op; return C; };
-
-	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
-
-	float PipHeight = PipSize * WipeoutPortraitAspect;
-
-	// Join animation — pop-in over 1 second (same as FlagRun)
-	const float TimeSinceJoin = GetWorld()->TimeSeconds - PlayerState->CreationTime;
-	if (TimeSinceJoin < 1.0f)
-	{
-		const float SizeScale = 3.0f - (2.0f * TimeSinceJoin);
-		PipSize *= SizeScale;
-		PipHeight *= SizeScale;
-		YOffset += FMath::InterpEaseIn(PipHeight, 0.0f, TimeSinceJoin, 3.0f);
-	}
-
-	// Layer 1: Team-colored background. Honors per-portrait use_team_color
-	// extra: false → lock to stock red/blue.
-	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(PortraitAlias);
-	FLinearColor TeamBGColor = (PlayerState->GetTeamNum() == 1)
-		? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)    // fallback blue
-		: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);     // fallback red
-	if (bUseTeamColor && GS && GS->Teams.IsValidIndex(PlayerState->GetTeamNum()) && GS->Teams[PlayerState->GetTeamNum()])
-	{
-		TeamBGColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
-	}
-	// Mockup pips use the team hue as an accent rather than a full saturated
-	// slab. Clutch reuses this renderer with bPortraitMockupRestyle=false, so
-	// its established raw team-color tile remains byte-for-byte on that path.
-	FLinearColor PortraitPlateColor = TeamBGColor;
-	if (bPortraitMockupRestyle)
-	{
-		PortraitPlateColor = FLinearColor(
-			FMath::Clamp(0.020f + 0.24f * TeamBGColor.R, 0.f, 1.f),
-			FMath::Clamp(0.028f + 0.24f * TeamBGColor.G, 0.f, 1.f),
-			FMath::Clamp(0.038f + 0.24f * TeamBGColor.B, 0.f, 1.f),
-			1.f);
-	}
-	Canvas->SetLinearDrawColor(Tinted(PortraitPlateColor));
-	Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight,
-		0, 0, 1, 1);
-	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
-
-	// Layer 2: Character portrait (dimmed if dead)
-	if (LiveScaling < 1.f)
-	{
-		Canvas->SetLinearDrawColor(Tinted(FLinearColor(0.2f, 0.2f, 0.2f, 1.f)));
-	}
-
-	if (PlayerState->GetTeamNum() == 1)
-	{
-		// Blue team: flip horizontally (same as FlagRun)
-		Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
-			CharIcon.U + CharIcon.UL, CharIcon.V, CharIcon.UL * -1.0f, CharIcon.VL);
+		State = *CachedState;
 	}
 	else
 	{
-		Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
-			CharIcon.U, CharIcon.V, CharIcon.UL, CharIcon.VL);
+		State.CharIcon = NCPlusHUDPortraits::Resolve(PlayerState);
+		State.Alias = PortraitAliasFor(PlayerState->GetTeamNum());
+		State.Opacity = NCPlusHUDDrawCall::GetOpacity(State.Alias);
+		State.X = XOffset;
+		State.Y = YOffset;
+		State.Width = PipSize;
+		State.Height = PipSize * WipeoutPortraitAspect;
+		const float TimeSinceJoin = GetWorld()->TimeSeconds - PlayerState->CreationTime;
+		if (TimeSinceJoin < 1.f)
+		{
+			const float SizeScale = 3.f - 2.f * TimeSinceJoin;
+			State.Width *= SizeScale;
+			State.Height *= SizeScale;
+			State.Y += FMath::InterpEaseIn(State.Height, 0.f, TimeSinceJoin, 3.f);
+		}
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+		State.TeamColor = (PlayerState->GetTeamNum() == 1)
+			? FLinearColor(0.1f, 0.2f, 0.8f, 1.f)
+			: FLinearColor(0.8f, 0.1f, 0.1f, 1.f);
+		if (NCPlusHUDDrawCall::GetUseTeamColor(State.Alias) && GS
+			&& GS->Teams.IsValidIndex(PlayerState->GetTeamNum())
+			&& GS->Teams[PlayerState->GetTeamNum()])
+		{
+			State.TeamColor = GS->Teams[PlayerState->GetTeamNum()]->TeamColor;
+		}
+		State.PlateColor = State.TeamColor;
+		if (bPortraitMockupRestyle)
+		{
+			State.PlateColor = FLinearColor(
+				FMath::Clamp(0.020f + 0.24f * State.TeamColor.R, 0.f, 1.f),
+				FMath::Clamp(0.028f + 0.24f * State.TeamColor.G, 0.f, 1.f),
+				FMath::Clamp(0.038f + 0.24f * State.TeamColor.B, 0.f, 1.f), 1.f);
+		}
+		State.TextScale = NCPlusHUDDrawCall::GetScale(State.Alias);
+		State.PipFont = NCPlusHUDFonts::Resolve(State.Alias, this, MediumFont);
+		if (!State.PipFont) State.PipFont = MediumFont;
+		State.PipFontExtra = NCPlusHUDFonts::ResolveScale(State.Alias, 1.f);
+		State.CompactTextFactor = bPortraitMockupRestyle ? WipeoutCompactTextFactor : 1.f;
+		State.bRespawnQueued = PlayerState->bOutOfLives && PlayerState->RespawnWaitTime > 0.f;
+		if (ActivePortraitDrawPass >= 0)
+		{
+			PortraitPassStateByPS.Add(PlayerState, State);
+		}
+	}
+	if (State.CharIcon.Texture == nullptr) return;
+	const FCanvasIcon& CharIcon = State.CharIcon;
+	const float Op = State.Opacity;
+	auto Tinted = [Op](FLinearColor C) -> FLinearColor { C.A *= Op; return C; };
+	XOffset = State.X;
+	YOffset = State.Y;
+	PipSize = State.Width;
+	const float PipHeight = State.Height;
+	const FLinearColor TeamBGColor = State.TeamColor;
+	const FLinearColor PortraitPlateColor = State.PlateColor;
+	const float PortraitTextScale = State.TextScale;
+	UFont* PipFont = State.PipFont;
+	const float PipFontExtra = State.PipFontExtra;
+	const float CompactTextFactor = State.CompactTextFactor;
+	const bool bRespawnQueued = State.bRespawnQueued;
+	if (ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 0)
+	{
+		Canvas->SetLinearDrawColor(Tinted(PortraitPlateColor));
+		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight,
+			0, 0, 1, 1);
+	}
+
+	// Layer 2: Character portrait (dimmed if dead)
+	if (ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 1)
+	{
+		Canvas->SetLinearDrawColor(Tinted(LiveScaling < 1.f
+			? FLinearColor(0.2f, 0.2f, 0.2f, 1.f) : FLinearColor::White));
+		if (PlayerState->GetTeamNum() == 1)
+		{
+			// Blue team: flip horizontally (same as FlagRun)
+			Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
+				CharIcon.U + CharIcon.UL, CharIcon.V, CharIcon.UL * -1.0f, CharIcon.VL);
+		}
+		else
+		{
+			Canvas->DrawTile(CharIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
+				CharIcon.U, CharIcon.V, CharIcon.UL, CharIcon.VL);
+		}
 	}
 
 	// Layer 3: Respawn dark overlay sweeping from right to left
-	if (LiveScaling < 1.f)
+	if ((ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 2) && LiveScaling < 1.f)
 	{
 		Canvas->SetLinearDrawColor(Tinted(FLinearColor(0.0f, 0.0f, 0.0f, 0.6f)));
 		Canvas->DrawTile(Canvas->DefaultTexture,
@@ -1110,11 +1323,14 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 	}
 
 	// Layer 4: Team-colored frame overlay
-	Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
-	const FCanvasIcon& OverlayIcon = PlayerState->GetTeamNum() == 1 ? BlueTeamOverlay : RedTeamOverlay;
-	Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
-		OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
-	if (bPortraitMockupRestyle)
+	if (ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 3)
+	{
+		Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
+		const FCanvasIcon& OverlayIcon = PlayerState->GetTeamNum() == 1 ? BlueTeamOverlay : RedTeamOverlay;
+		Canvas->DrawTile(OverlayIcon.Texture, XOffset, YOffset, PipSize, PipHeight,
+			OverlayIcon.U, OverlayIcon.V, OverlayIcon.UL, OverlayIcon.VL);
+	}
+	if ((ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 4) && bPortraitMockupRestyle)
 	{
 		FLinearColor PortraitAccent = TeamBGColor;
 		PortraitAccent.A = 0.82f;
@@ -1123,27 +1339,11 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize,
 			AccentHeight, 0, 0, 1, 1, BLEND_Translucent);
 	}
-
-	// Per-team scale for text inside the pip — keeps countdown / X / HP/Armor
-	// glyphs proportional when the strip is shrunk via the layout's Sc spinner.
-	const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
-	// Per-team font override + size multiplier (HP/Armor numbers are the loudest
-	// readability concern at 4K). Both default to SmallFont / 1.0 so behavior is
-	// identical when the user hasn't touched the picker.
-	UFont* PipFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, MediumFont);
-	if (!PipFont) PipFont = MediumFont;
-	const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
-	// Restyled cards lost 31.9% of their stock height (82.29 -> 56 design px),
-	// so their in-card glyphs start from the same proportional reduction. F5
-	// portrait Scale and FontSz remain independent multipliers around that base.
-	const float CompactTextFactor = bPortraitMockupRestyle
-		? WipeoutCompactTextFactor : 1.f;
+	if (ActivePortraitDrawPass >= 0 && ActivePortraitDrawPass != 5) return;
 
 	// RespawnWaitTime is stock UT's replicated queue marker; RespawnTime is only
 	// the locally ticking display value. A canceled queue must therefore become X
 	// even if that stale local countdown is still positive for a frame.
-	const bool bRespawnQueued = PlayerState->bOutOfLives
-		&& PlayerState->RespawnWaitTime > 0.f;
 
 	// Layer 5 (Wipeout-specific): Respawn countdown text on dead portraits
 	if (LiveScaling < 1.f && bRespawnQueued && PlayerState->RespawnTime > 0.f)
@@ -1196,25 +1396,32 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		FFontRenderInfo TextRenderInfo;
 		TextRenderInfo.bEnableShadow = true;
 
-		FString XStr = TEXT("X");
-		float XL, YL;
-		Canvas->StrLen(PipFont, XStr, XL, YL);
+		FWipeoutPipCache& PC = PipCacheByPS.FindOrAdd(PlayerState);
+		if (PC.DeadXFont != PipFont)
+		{
+			static const FString DeadXString(TEXT("X"));
+			Canvas->StrLen(PipFont, DeadXString, PC.DeadXWidth, PC.DeadXHeight);
+			PC.DeadXText = FText::FromString(DeadXString);
+			PC.DeadXFont = PipFont;
+		}
 		if (bPortraitMockupRestyle)
 		{
-			if (XL > 0.f)
+			if (PC.DeadXWidth > 0.f)
 			{
-				FontRenderScale = FMath::Min(FontRenderScale, 0.70f * PipSize / XL);
+				FontRenderScale = FMath::Min(FontRenderScale,
+					0.70f * PipSize / PC.DeadXWidth);
 			}
-			if (YL > 0.f)
+			if (PC.DeadXHeight > 0.f)
 			{
-				FontRenderScale = FMath::Min(FontRenderScale, 0.70f * PipHeight / YL);
+				FontRenderScale = FMath::Min(FontRenderScale,
+					0.70f * PipHeight / PC.DeadXHeight);
 			}
 		}
 
 		Canvas->SetLinearDrawColor(Tinted(FLinearColor(1.f, 0.2f, 0.2f, 0.9f)));
-		Canvas->DrawText(PipFont, FText::FromString(XStr),
-			XOffset + (PipSize * 0.5f) - (XL * FontRenderScale * 0.5f),
-			YOffset + (PipHeight * 0.5f) - (YL * FontRenderScale * 0.5f),
+		Canvas->DrawText(PipFont, PC.DeadXText,
+			XOffset + (PipSize * 0.5f) - (PC.DeadXWidth * FontRenderScale * 0.5f),
+			YOffset + (PipHeight * 0.5f) - (PC.DeadXHeight * FontRenderScale * 0.5f),
 			FontRenderScale, FontRenderScale, TextRenderInfo);
 	}
 
@@ -1237,11 +1444,13 @@ void AWipeoutHUD::DrawPlayerIcon(AUTPlayerState* PlayerState, float LiveScaling,
 		if (MyPS && (bPortraitMockupRestyle || MyPS != PlayerState)
 			&& (bSameTeam || bRoundOver || bTrueSpec))
 		{
-			AUTCharacter* UTC = PlayerState->GetUTCharacter();
+			AUTCharacter* UTC = (bHasPreparedPortraitSample && PreparedPortraitPS.Get() == PlayerState)
+				? PreparedPortraitSample.Character.Get() : PlayerState->GetUTCharacter();
 			if (UTC && !UTC->IsDead())
 			{
-				int32 HP = UTC->Health;
-				int32 Armor = UTC->GetArmorAmount();
+				const bool bPrepared = bHasPreparedPortraitSample && PreparedPortraitPS.Get() == PlayerState;
+				int32 HP = bPrepared ? PreparedPortraitSample.Health : UTC->Health;
+				int32 Armor = bPrepared ? PreparedPortraitSample.Armor : UTC->GetArmorAmount();
 				FWipeoutPipCache& PC = PipCacheByPS.FindOrAdd(PlayerState);
 
 				if (bPortraitMockupRestyle)

@@ -14,4 +14,16 @@ class NETCODEPLUS_API UNCPlusHUDWidget_Speedometer : public UUTHUDWidget
 
 	virtual void Draw_Implementation(float DeltaTime) override;
 	virtual bool ShouldDraw_Implementation(bool bShowScores) override;
+
+private:
+	uint32 CachedLayoutRevision;
+	float CachedElementScale;
+	float CachedElementOpacity;
+	UPROPERTY(Transient)
+	class UFont* CachedBigFont;
+	UPROPERTY(Transient)
+	class UFont* CachedSmallFont;
+	int32 CachedRoundedSpeed;
+	FText CachedSpeedText;
+	FString CachedSpeedString;
 };

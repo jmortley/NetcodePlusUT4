@@ -68,6 +68,21 @@ AUTWeap_Enforcer_Plus::AUTWeap_Enforcer_Plus(const FObjectInitializer& OI)
 	StationaryTargetPadding = 8.f;
 }
 
+bool AUTWeap_Enforcer_Plus::ShouldDrawFFIndicator(APlayerController* Viewer,
+	AUTPlayerState*& HitPlayerState) const
+{
+	bool bDrawIndicator = false;
+	if (FriendlyTargetProbeCache.TryReuse(Viewer, UTOwner, HitPlayerState,
+		bDrawIndicator))
+	{
+		return bDrawIndicator;
+	}
+
+	bDrawIndicator = Super::ShouldDrawFFIndicator(Viewer, HitPlayerState);
+	FriendlyTargetProbeCache.Store(Viewer, UTOwner, HitPlayerState, bDrawIndicator);
+	return bDrawIndicator;
+}
+
 float AUTWeap_Enforcer_Plus::GetRewindSeconds() const
 {
 	if (!UTOwner || !UTOwner->PlayerState)
