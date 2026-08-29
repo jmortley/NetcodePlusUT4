@@ -365,10 +365,15 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBuff
 {
     AUTWeapon* Weapon = GetOuterAUTWeapon();
     AUTCharacter* Owner = GetUTOwner();
-    if (!Weapon || !Owner)
+    if (!Weapon || Weapon->IsPendingKillPending()
+        || !Owner || Owner->IsPendingKillPending() || Owner->IsDead()
+        || Weapon->GetCurrentState() != this)
     {
         return;
     }
+
+    TWeakObjectPtr<AUTWeapon> WeakWeapon = Weapon;
+    TWeakObjectPtr<AUTCharacter> WeakOwner = Owner;
 
     // ActiveState::BeginState checks PendingFire immediately. Hide primary across
     // the transition so it cannot auto-dispatch once here and again in our retry.
@@ -379,8 +384,11 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBuff
     }
     Weapon->GotoActiveState();
 
-    Owner = Weapon->GetUTOwner();
-    if (!Owner || !bWantsPrimary)
+    // GotoActiveState can synchronously enter another firing state, switch the
+    // weapon, or destroy its owner. Never keep using the pre-transition pointers.
+    Weapon = WeakWeapon.Get();
+    Owner = WeakOwner.Get();
+    if (!Owner || Owner->IsPendingKillPending() || Owner->IsDead() || !bWantsPrimary)
     {
         return;
     }
@@ -390,32 +398,34 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBuff
     // A different pending mode may also have re-entered firing synchronously from
     // ActiveState; never inject primary on top of that state.
     Owner->SetPendingFire(0, true);
-    if (Owner->GetWeapon() != Weapon || Owner->GetPendingWeapon() != nullptr
+    if (!Weapon || Owner->GetWeapon() != Weapon || Owner->GetPendingWeapon() != nullptr
         || Weapon->IsFiring())
     {
         return;
     }
 
-    TWeakObjectPtr<AUTWeapon> WeakWeapon = Weapon;
     Weapon->GetWorldTimerManager().SetTimerForNextTick(
-        FTimerDelegate::CreateLambda([WeakWeapon]()
+        FTimerDelegate::CreateLambda([WeakWeapon, WeakOwner]()
         {
-            AUTCharacter* CurrentOwner = WeakWeapon.IsValid() ? WeakWeapon->GetUTOwner() : nullptr;
-            if (!WeakWeapon.IsValid() || !CurrentOwner || !CurrentOwner->IsPendingFire(0)
-                || CurrentOwner->GetWeapon() != WeakWeapon.Get()
+            AUTWeapon* CurrentWeapon = WeakWeapon.Get();
+            AUTCharacter* CurrentOwner = WeakOwner.Get();
+            if (!CurrentWeapon || !CurrentOwner || CurrentOwner->IsDead()
+                || CurrentWeapon->GetUTOwner() != CurrentOwner
+                || !CurrentOwner->IsPendingFire(0)
+                || CurrentOwner->GetWeapon() != CurrentWeapon
                 || CurrentOwner->GetPendingWeapon() != nullptr
-                || WeakWeapon->IsFiring())
+                || CurrentWeapon->IsFiring())
             {
                 return;
             }
 
             // The charged state is finished. Release the transactional mode
             // tracker before handing a genuinely held primary back to StartFire.
-            if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(WeakWeapon.Get()))
+            if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(CurrentWeapon))
             {
                 FixWeapon->ResetFiringModeTracker();
             }
-            WeakWeapon->StartFire(0);
+            CurrentWeapon->StartFire(0);
         }));
 }
 
@@ -765,83 +775,114 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
 {
-	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
+	AUTWeapon* Weapon = GetOuterAUTWeapon();
+	if (!Weapon || Weapon->IsPendingKillPending())
 	{
-		AUTWeapon* W = GetOuterAUTWeapon();
-		UE_LOG(LogTemp, Warning,
-			TEXT("[RocketM1Diag] CHARGED_REFIRE frame=%u t=%.4f role=%d net=%d local=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
-			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(),
-			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0,
-			GetFireMode(), W->GetCurrentFireMode(), W->GetCurrentState() == this ? 1 : 0,
-			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
-			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(1)) ? 1 : 0,
-			bCharging ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
-			RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1,
-			W->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
-			W->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
-			W->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
-			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
+		return;
 	}
 
-    // 1. Integrity Check
-    if (GetOuterAUTWeapon()->GetCurrentState() != this) return;
+	// This is a one-shot completion callback. Preserve the executing timer's
+	// diagnostic value before clearing its handle so the callback still reports
+	// refire=0 rather than looking like a missing timer.
+	FTimerManager& TimerManager = Weapon->GetWorldTimerManager();
+	const float RefireCallbackRemaining = TimerManager.GetTimerRemaining(RefireCheckHandle);
 
-    // 2. Switch Check
-    if (GetUTOwner() && GetUTOwner()->GetPendingWeapon() != nullptr)
+	// Clear its handle at entry so no
+	// transition below can leave stale ownership behind. Clearing an executing
+	// UE4.15 timer is safe, but it does not unwind this callback; every transition
+	// below must therefore be terminal.
+	TimerManager.ClearTimer(RefireCheckHandle);
+
+	AUTCharacter* Owner = Weapon->GetUTOwner();
+	if (!Owner || Owner->IsPendingKillPending() || Owner->IsDead()
+		|| Weapon->GetCurrentState() != this)
+	{
+		return;
+	}
+
+	TWeakObjectPtr<AUTWeapon> WeakWeapon = Weapon;
+	TWeakObjectPtr<AUTCharacter> WeakOwner = Owner;
+
+	if (RocketPrimaryChargedDiag(Weapon))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RocketM1Diag] CHARGED_REFIRE frame=%u t=%.4f role=%d net=%d local=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
+			(uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
+			(int32)Weapon->Role, (int32)Weapon->GetNetMode(),
+			Owner->IsLocallyControlled() ? 1 : 0,
+			GetFireMode(), Weapon->GetCurrentFireMode(), Weapon->GetCurrentState() == this ? 1 : 0,
+			Owner->IsPendingFire(0) ? 1 : 0,
+			Owner->IsPendingFire(1) ? 1 : 0,
+			bCharging ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
+			RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1,
+			Weapon->GetWorldTimerManager().GetTimerRemaining(LoadTimerHandle),
+			Weapon->GetWorldTimerManager().GetTimerRemaining(GraceTimerHandle),
+			Weapon->GetWorldTimerManager().GetTimerRemaining(FireLoadedRocketHandle),
+			RefireCallbackRemaining);
+	}
+
+    // A pending switch owns the next transition. The helper hides primary while
+    // ActiveState runs and suppresses this weapon's retry when a switch remains.
+    if (Owner->GetPendingWeapon() != nullptr)
     {
-        GetOuterAUTWeapon()->GotoActiveState();
+        ExitToActiveAndAttemptBufferedPrimary();
         return;
     }
 
-    // AI Check
-    AUTBot* B = Cast<AUTBot>(GetUTOwner() ? GetUTOwner()->Controller : nullptr);
-    if (B != nullptr) B->CheckWeaponFiring();
-
-    if (GetUTOwner() == nullptr) return;
-
-    // -----------------------------------------------------------
-    // LOGIC START
-    // -----------------------------------------------------------
-
-    // A. PRIORITY 1: CONTINUE CHARGING (Mode 1)
-    if (GetOuterAUTWeapon()->HandleContinuedFiring())
+    // Bot policy can synchronously change input, state, weapon, or owner.
+    if (AUTBot* B = Cast<AUTBot>(Owner->Controller))
     {
+        B->CheckWeaponFiring();
+    }
+
+    Weapon = WeakWeapon.Get();
+    Owner = WeakOwner.Get();
+    if (!Weapon || Weapon->IsPendingKillPending()
+        || !Owner || Owner->IsPendingKillPending() || Owner->IsDead()
+        || Weapon->GetUTOwner() != Owner || Weapon->GetCurrentState() != this)
+    {
+        return;
+    }
+
+    if (Owner->GetPendingWeapon() != nullptr)
+    {
+        ExitToActiveAndAttemptBufferedPrimary();
+        return;
+    }
+
+    // HandleContinuedFiring() transitions to ActiveState when it returns false.
+    // Only call it after proving that charged fire can continue, then revalidate
+    // after its Blueprint/event hooks before beginning the next charge cycle.
+    const int32 ChargedFireMode = Weapon->FiringState.Find(this);
+    if (ChargedFireMode != INDEX_NONE
+        && Weapon->GetCurrentFireMode() == ChargedFireMode
+        && Weapon->CanFireAgain()
+        && Owner->IsPendingFire(ChargedFireMode))
+    {
+        const bool bContinued = Weapon->HandleContinuedFiring();
+        Weapon = WeakWeapon.Get();
+        Owner = WeakOwner.Get();
+        if (!bContinued || !Weapon || Weapon->IsPendingKillPending()
+            || !Owner || Owner->IsPendingKillPending() || Owner->IsDead()
+            || Weapon->GetUTOwner() != Owner || Weapon->GetCurrentState() != this
+            || Weapon->GetCurrentFireMode() != ChargedFireMode)
+        {
+            return;
+        }
+
         bCharging = true;
         BeginState(this);
         return;
     }
 
-    // B. CLEANUP (Fixes the "Client 1: 1" stuck log)
-    // Force the Transactional Gatekeeper to reset so it accepts new input
-    AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(GetOuterAUTWeapon());
-    if (FixWeapon)
+    // Charged fire ended. Release the transactional gate before the helper makes
+    // the single guarded transition and, if M1 is genuinely held, retries it on
+    // the next tick through a weak weapon reference.
+    if (AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(Weapon))
     {
         FixWeapon->ResetFiringModeTracker();
-        // Uses the new public helper
     }
-
-    // C. PRIORITY 2: SWITCH TO PRIMARY (Mode 0)
-    // Critical Fix: prevent ActiveState from firing a "Ghost Shot" that ignores cooldowns
-    bool bWantsPrimary = GetUTOwner()->IsPendingFire(0);
-
-    if (bWantsPrimary)
-    {
-        // 1. Temporarily hide input so ActiveState doesn't auto-fire immediately
-        GetUTOwner()->SetPendingFire(0, false);
-
-        // 2. Transition to Active (safe now because input is hidden)
-        GetOuterAUTWeapon()->GotoActiveState();
-
-        // 3. Restore input and trigger Transactional Fire
-        GetUTOwner()->SetPendingFire(0, true);
-
-        GetOuterAUTWeapon()->StartFire(0);
-        return;
-    }
-
-    // D. NO INPUT - Return to Idle
-    GetOuterAUTWeapon()->GotoActiveState();
+    ExitToActiveAndAttemptBufferedPrimary();
 }
 
 
