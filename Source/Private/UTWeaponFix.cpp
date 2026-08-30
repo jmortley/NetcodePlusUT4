@@ -344,8 +344,8 @@ static TAutoConsoleVariable<int32> CVarRenderCredit(
 // Link beam and Minigun primary cannot attach a per-tick target claim, and the
 // client proxy path used while holding those weapons forward-simulates remote
 // characters. Its residual presentation delay is therefore not the same value
-// calibrated for unclaimed Shock/Sniper shots above. The current 25ms movement
-// smoothing setting is an exponential correction window, not a fixed 25ms
+// calibrated for unclaimed Shock/Sniper shots above. The current 50ms movement
+// smoothing setting is an exponential correction window, not a fixed 50ms
 // interpolation buffer; character proxies also extrapolate between replicated
 // updates. Start with 15ms as a conservative residual estimate and keep this
 // server-live CVar separate so Link/Minigun tuning cannot silently change exact
