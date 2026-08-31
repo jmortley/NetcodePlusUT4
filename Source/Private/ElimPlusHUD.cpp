@@ -1309,13 +1309,19 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		// DrawTeamScoreBar runs before the portrait pass. Prepare/reuse the same
 		// 120 Hz roster snapshot here so chassis slots and visible cards agree.
 		BuildPlayerSnapshot(GS, GetScorerPlayerState());
-		int32 TeamCardCounts[2] =
+		// The portrait pass below only draws during InProgress/RoundCooldown, so
+		// outside those states the wings must collapse rather than hold empty
+		// warmup backplates. Mirrors Wipeout's bPortraitRound gate.
+		const bool bPortraitRound = GS->GetMatchState() == MatchState::InProgress
+			|| GS->GetMatchState() == FName(TEXT("RoundCooldown"));
+		int32 TeamCardCounts[2] = { 0, 0 };
+		if (bPortraitRound)
 		{
-			PlayerSnapshot.AliveCountTeam[0],
-			PlayerSnapshot.AliveCountTeam[1]
-		};
-		if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"))) TeamCardCounts[0] = 0;
-		if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"))) TeamCardCounts[1] = 0;
+			TeamCardCounts[0] = PlayerSnapshot.AliveCountTeam[0];
+			TeamCardCounts[1] = PlayerSnapshot.AliveCountTeam[1];
+			if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"))) TeamCardCounts[0] = 0;
+			if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"))) TeamCardCounts[1] = 0;
+		}
 
 		FNCPlusBetaTopBarGeometry Geometry;
 		if (NCPlusBetaTopBar::BuildGeometry(this, Canvas,
