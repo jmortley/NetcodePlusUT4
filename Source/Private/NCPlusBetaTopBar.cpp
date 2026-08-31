@@ -16,10 +16,12 @@ namespace
 {
 	constexpr float BetaPortraitAspect = 320.f / 224.f;
 	constexpr float BetaCoreHeight = 56.f;
-	constexpr float BetaScoreWidth = 84.f;
-	constexpr float BetaClockWidth = 168.f;
-	constexpr float BetaPortraitGap = 4.f;
-	constexpr float BetaCorePortraitGap = 12.f;
+	constexpr float BetaScoreWidth = 95.f;
+	constexpr float BetaClockWidth = 190.f;
+	constexpr float BetaPortraitGap = 24.f;
+	constexpr float BetaCorePortraitGap = 15.f;
+	constexpr float BetaDefaultTopY = 22.f;
+	constexpr float BetaOuterWing = 53.f;
 	TMap<int32, FString> BetaPlainNumberStrings;
 	TMap<int32, FString> BetaClockStrings;
 
@@ -97,12 +99,21 @@ namespace
 		return Color;
 	}
 
-	FLinearColor MutedTeamPlate(const FLinearColor& TeamColor, float Alpha)
+	FLinearColor DarkTeamPanel(const FLinearColor& TeamColor, float Alpha)
 	{
 		return FLinearColor(
-			FMath::Clamp(0.018f + 0.24f * TeamColor.R, 0.f, 1.f),
-			FMath::Clamp(0.026f + 0.24f * TeamColor.G, 0.f, 1.f),
-			FMath::Clamp(0.036f + 0.24f * TeamColor.B, 0.f, 1.f),
+			FMath::Clamp(0.0025f + 0.018f * TeamColor.R, 0.f, 1.f),
+			FMath::Clamp(0.0040f + 0.018f * TeamColor.G, 0.f, 1.f),
+			FMath::Clamp(0.0060f + 0.018f * TeamColor.B, 0.f, 1.f),
+			Alpha);
+	}
+
+	FLinearColor TeamAccent(const FLinearColor& TeamColor, float Alpha)
+	{
+		return FLinearColor(
+			FMath::Clamp(0.015f + 0.58f * TeamColor.R, 0.f, 1.f),
+			FMath::Clamp(0.020f + 0.58f * TeamColor.G, 0.f, 1.f),
+			FMath::Clamp(0.025f + 0.58f * TeamColor.B, 0.f, 1.f),
 			Alpha);
 	}
 
@@ -176,9 +187,14 @@ bool NCPlusBetaTopBar::BuildGeometry(AUTHUD* HUD, UCanvas* Canvas,
 	const float LayoutScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
 	const float HUDScale = HUD->GetHUDWidgetScaleOverride();
 	const float UnitScale = FMath::Max(0.01f, ViewScale * LayoutScale * HUDScale);
-	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * ViewScale);
-	const FVector2D Center = NCPlusHUDDrawCall::ResolveScreenPos(
+	const FVector2D StockPos(Canvas->ClipX * 0.5f, 0.f);
+	const FVector2D ResolvedCenter = NCPlusHUDDrawCall::ResolveScreenPos(
 		TEXT("scorebar"), Canvas, StockPos);
+	// The shared scorebar layout resolves TopCenter/Y=0 even when the fallback has
+	// a margin, so make the mock's inset intrinsic to the Beta chassis. User drag
+	// offsets still apply; they now move a complete, unclipped frame.
+	const FVector2D Center(ResolvedCenter.X,
+		ResolvedCenter.Y + BetaDefaultTopY * ViewScale);
 
 	OutGeometry = FNCPlusBetaTopBarGeometry();
 	OutGeometry.Center = Center;
@@ -231,122 +247,258 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 	const float RightMost = RightCount > 0
 		? RightNearest + float(RightCount - 1) * G.PortraitPitch + G.PortraitWidth
 		: G.CoreRight + 18.f * U;
-	const float LeftOuter = LeftMost - 28.f * U;
-	const float RightOuter = RightMost + 28.f * U;
+	const float LeftOuter = LeftMost - BetaOuterWing * U;
+	const float RightOuter = RightMost + BetaOuterWing * U;
 	const float ShellTop = G.TopY - 5.f * U;
-	const float ShellBottom = G.TopY + G.CoreHeight + 17.f * U;
+	const float ShellBottom = G.TopY + G.CoreHeight + 18.f * U;
 	const float CoreBottom = G.TopY + G.CoreHeight;
 
-	const FLinearColor Shell = WithOpacity(FLinearColor(0.008f, 0.018f, 0.028f, 0.88f), Opacity);
-	const FLinearColor InnerShell = WithOpacity(FLinearColor(0.018f, 0.038f, 0.052f, 0.74f), Opacity);
-	const FLinearColor Steel = WithOpacity(FLinearColor(0.20f, 0.36f, 0.43f, 0.62f), Opacity);
-	const FLinearColor Cyan = WithOpacity(FLinearColor(0.04f, 0.70f, 0.82f, 0.58f), Opacity);
-	const FLinearColor LeftRail = WithOpacity(FLinearColor(
-		Core.LeftTeamColor.R, Core.LeftTeamColor.G, Core.LeftTeamColor.B, 0.72f), Opacity);
-	const FLinearColor RightRail = WithOpacity(FLinearColor(
-		Core.RightTeamColor.R, Core.RightTeamColor.G, Core.RightTeamColor.B, 0.72f), Opacity);
+	const FLinearColor Shadow = WithOpacity(FLinearColor(0.f, 0.f, 0.f, 0.56f), Opacity);
+	const FLinearColor Shell = WithOpacity(FLinearColor(0.0015f, 0.004f, 0.007f, 0.98f), Opacity);
+	const FLinearColor InnerShell = WithOpacity(FLinearColor(0.003f, 0.008f, 0.013f, 0.96f), Opacity);
+	const FLinearColor Panel = WithOpacity(FLinearColor(0.0015f, 0.003f, 0.006f, 0.99f), Opacity);
+	const FLinearColor Steel = WithOpacity(FLinearColor(0.025f, 0.105f, 0.145f, 0.82f), Opacity);
+	const FLinearColor CyanGlow = WithOpacity(FLinearColor(0.015f, 0.26f, 0.34f, 0.28f), Opacity);
+	const FLinearColor Cyan = WithOpacity(FLinearColor(0.025f, 0.52f, 0.66f, 0.72f), Opacity);
+	const FLinearColor LeftRail = WithOpacity(TeamAccent(Core.LeftTeamColor, 0.84f), Opacity);
+	const FLinearColor RightRail = WithOpacity(TeamAccent(Core.RightTeamColor, 0.84f), Opacity);
 
 	TArray<FCanvasUVTri> Tris;
-	Tris.Reserve(64 + 4 * (LeftCount + RightCount));
+	Tris.Reserve(192 + 12 * (LeftCount + RightCount));
 
-	// Three overlapping convex shells read as one connected chassis while keeping
-	// the triangle fan simple and robust on the UE4.15 Canvas path.
+	// Layer 1: a black extrusion beneath the whole chassis. Keeping it in the same
+	// triangle item gives the mock's depth without another Canvas submission.
+	const FVector2D CenterShadow[6] =
+	{
+		FVector2D(G.CoreLeft - 24.f * U, ShellTop + 3.f * U),
+		FVector2D(G.CoreRight + 24.f * U, ShellTop + 3.f * U),
+		FVector2D(G.CoreRight + 36.f * U, CoreBottom + 10.f * U),
+		FVector2D(G.CoreRight + 25.f * U, ShellBottom + 3.f * U),
+		FVector2D(G.CoreLeft - 25.f * U, ShellBottom + 3.f * U),
+		FVector2D(G.CoreLeft - 36.f * U, CoreBottom + 10.f * U),
+	};
+	AddConvexPolygon(Tris, CenterShadow, 6, Shadow);
+	const FVector2D LeftWingShadow[5] =
+	{
+		FVector2D(LeftOuter + 14.f * U, ShellTop + 5.f * U),
+		FVector2D(G.CoreLeft + 4.f * U, ShellTop + 5.f * U),
+		FVector2D(G.CoreLeft + 22.f * U, ShellBottom),
+		FVector2D(LeftOuter + 33.f * U, ShellBottom + 3.f * U),
+		FVector2D(LeftOuter - 2.f * U, ShellBottom - 14.f * U),
+	};
+	AddConvexPolygon(Tris, LeftWingShadow, 5, Shadow);
+	const FVector2D RightWingShadow[5] =
+	{
+		FVector2D(G.CoreRight - 4.f * U, ShellTop + 5.f * U),
+		FVector2D(RightOuter - 14.f * U, ShellTop + 5.f * U),
+		FVector2D(RightOuter + 2.f * U, ShellBottom - 14.f * U),
+		FVector2D(RightOuter - 33.f * U, ShellBottom + 3.f * U),
+		FVector2D(G.CoreRight - 22.f * U, ShellBottom),
+	};
+	AddConvexPolygon(Tris, RightWingShadow, 5, Shadow);
+
+	// Layer 2: cyan/steel outer bevel, then an almost-opaque neutral interior.
+	const FVector2D CenterBevel[6] =
+	{
+		FVector2D(G.CoreLeft - 22.f * U, ShellTop),
+		FVector2D(G.CoreRight + 22.f * U, ShellTop),
+		FVector2D(G.CoreRight + 34.f * U, CoreBottom + 8.f * U),
+		FVector2D(G.CoreRight + 23.f * U, ShellBottom),
+		FVector2D(G.CoreLeft - 23.f * U, ShellBottom),
+		FVector2D(G.CoreLeft - 34.f * U, CoreBottom + 8.f * U),
+	};
+	AddConvexPolygon(Tris, CenterBevel, 6, Steel);
 	const FVector2D CenterShell[6] =
 	{
-		FVector2D(G.CoreLeft - 20.f * U, ShellTop),
-		FVector2D(G.CoreRight + 20.f * U, ShellTop),
-		FVector2D(G.CoreRight + 32.f * U, CoreBottom + 7.f * U),
-		FVector2D(G.CoreRight + 22.f * U, ShellBottom),
-		FVector2D(G.CoreLeft - 22.f * U, ShellBottom),
-		FVector2D(G.CoreLeft - 32.f * U, CoreBottom + 7.f * U),
+		FVector2D(G.CoreLeft - 19.f * U, ShellTop + 2.f * U),
+		FVector2D(G.CoreRight + 19.f * U, ShellTop + 2.f * U),
+		FVector2D(G.CoreRight + 30.f * U, CoreBottom + 8.f * U),
+		FVector2D(G.CoreRight + 20.f * U, ShellBottom - 2.f * U),
+		FVector2D(G.CoreLeft - 20.f * U, ShellBottom - 2.f * U),
+		FVector2D(G.CoreLeft - 30.f * U, CoreBottom + 8.f * U),
 	};
 	AddConvexPolygon(Tris, CenterShell, 6, Shell);
-	const FVector2D LeftWing[5] =
+
+	const FVector2D LeftWingBevel[5] =
 	{
 		FVector2D(LeftOuter + 14.f * U, ShellTop + 2.f * U),
 		FVector2D(G.CoreLeft + 2.f * U, ShellTop + 2.f * U),
-		FVector2D(G.CoreLeft + 18.f * U, ShellBottom - 3.f * U),
+		FVector2D(G.CoreLeft + 19.f * U, ShellBottom - 3.f * U),
 		FVector2D(LeftOuter + 30.f * U, ShellBottom),
 		FVector2D(LeftOuter, ShellBottom - 17.f * U),
 	};
+	AddConvexPolygon(Tris, LeftWingBevel, 5, Steel);
+	const FVector2D LeftWing[5] =
+	{
+		FVector2D(LeftOuter + 17.f * U, ShellTop + 4.f * U),
+		FVector2D(G.CoreLeft - 1.f * U, ShellTop + 4.f * U),
+		FVector2D(G.CoreLeft + 15.f * U, ShellBottom - 5.f * U),
+		FVector2D(LeftOuter + 31.f * U, ShellBottom - 2.f * U),
+		FVector2D(LeftOuter + 5.f * U, ShellBottom - 18.f * U),
+	};
 	AddConvexPolygon(Tris, LeftWing, 5, InnerShell);
-	const FVector2D RightWing[5] =
+
+	const FVector2D RightWingBevel[5] =
 	{
 		FVector2D(G.CoreRight - 2.f * U, ShellTop + 2.f * U),
 		FVector2D(RightOuter - 14.f * U, ShellTop + 2.f * U),
 		FVector2D(RightOuter, ShellBottom - 17.f * U),
 		FVector2D(RightOuter - 30.f * U, ShellBottom),
-		FVector2D(G.CoreRight - 18.f * U, ShellBottom - 3.f * U),
+		FVector2D(G.CoreRight - 19.f * U, ShellBottom - 3.f * U),
+	};
+	AddConvexPolygon(Tris, RightWingBevel, 5, Steel);
+	const FVector2D RightWing[5] =
+	{
+		FVector2D(G.CoreRight + 1.f * U, ShellTop + 4.f * U),
+		FVector2D(RightOuter - 17.f * U, ShellTop + 4.f * U),
+		FVector2D(RightOuter - 5.f * U, ShellBottom - 18.f * U),
+		FVector2D(RightOuter - 31.f * U, ShellBottom - 2.f * U),
+		FVector2D(G.CoreRight - 15.f * U, ShellBottom - 5.f * U),
 	};
 	AddConvexPolygon(Tris, RightWing, 5, InnerShell);
 
-	// Portrait slot backplates bridge the rectangular atlas crops into the angled
-	// chassis. The actual portrait and gameplay ink are submitted later by the HUD.
+	// Layer 3: wide angular card frames around the unchanged portrait crop. The
+	// 6px side bleed plus the larger pitch produces the mock's airy player banks
+	// without stretching the 224:320 atlas image.
 	for (int32 Index = 0; Index < LeftCount; ++Index)
 	{
 		const FVector2D P = G.GetPortraitPosition(ENCPlusBetaTopBarSide::Left, Index);
-		AddChamferedRect(Tris, P.X - 1.5f * U, P.Y - 1.5f * U,
-			P.X + G.PortraitWidth + 1.5f * U,
-			P.Y + G.PortraitHeight + 11.f * U, 3.f * U,
-			WithOpacity(MutedTeamPlate(Core.LeftTeamColor, 0.76f), Opacity));
+		AddChamferedRect(Tris, P.X - 6.f * U, P.Y - 2.f * U,
+			P.X + G.PortraitWidth + 6.f * U,
+			P.Y + G.PortraitHeight + 15.f * U, 4.f * U, LeftRail);
+		AddChamferedRect(Tris, P.X - 4.f * U, P.Y,
+			P.X + G.PortraitWidth + 4.f * U,
+			P.Y + G.PortraitHeight + 13.f * U, 3.f * U,
+			WithOpacity(DarkTeamPanel(Core.LeftTeamColor, 0.99f), Opacity));
 	}
 	for (int32 Index = 0; Index < RightCount; ++Index)
 	{
 		const FVector2D P = G.GetPortraitPosition(ENCPlusBetaTopBarSide::Right, Index);
-		AddChamferedRect(Tris, P.X - 1.5f * U, P.Y - 1.5f * U,
-			P.X + G.PortraitWidth + 1.5f * U,
-			P.Y + G.PortraitHeight + 11.f * U, 3.f * U,
-			WithOpacity(MutedTeamPlate(Core.RightTeamColor, 0.76f), Opacity));
+		AddChamferedRect(Tris, P.X - 6.f * U, P.Y - 2.f * U,
+			P.X + G.PortraitWidth + 6.f * U,
+			P.Y + G.PortraitHeight + 15.f * U, 4.f * U, RightRail);
+		AddChamferedRect(Tris, P.X - 4.f * U, P.Y,
+			P.X + G.PortraitWidth + 4.f * U,
+			P.Y + G.PortraitHeight + 13.f * U, 3.f * U,
+			WithOpacity(DarkTeamPanel(Core.RightTeamColor, 0.99f), Opacity));
 	}
 
-	// Team identity lives in restrained upper rails; a shared cyan lower rail ties
-	// both wings to the neutral clock core.
+	// Layer 4: team identity is confined to thin rails. A broad low-alpha cyan
+	// pass under the 1px bright line fakes the mock's glow without a material.
 	AddQuad(Tris,
-		FVector2D(LeftOuter + 15.f * U, ShellTop + 2.f * U),
-		FVector2D(G.CoreLeft - 3.f * U, ShellTop + 2.f * U),
-		FVector2D(G.CoreLeft + 1.f * U, ShellTop + 4.f * U),
-		FVector2D(LeftOuter + 18.f * U, ShellTop + 4.f * U), LeftRail);
+		FVector2D(LeftOuter + 17.f * U, ShellTop + 3.f * U),
+		FVector2D(G.CoreLeft - 4.f * U, ShellTop + 3.f * U),
+		FVector2D(G.CoreLeft - 2.f * U, ShellTop + 4.5f * U),
+		FVector2D(LeftOuter + 19.f * U, ShellTop + 4.5f * U), LeftRail);
 	AddQuad(Tris,
-		FVector2D(G.CoreRight + 3.f * U, ShellTop + 2.f * U),
-		FVector2D(RightOuter - 15.f * U, ShellTop + 2.f * U),
-		FVector2D(RightOuter - 18.f * U, ShellTop + 4.f * U),
-		FVector2D(G.CoreRight - 1.f * U, ShellTop + 4.f * U), RightRail);
+		FVector2D(G.CoreRight + 4.f * U, ShellTop + 3.f * U),
+		FVector2D(RightOuter - 17.f * U, ShellTop + 3.f * U),
+		FVector2D(RightOuter - 19.f * U, ShellTop + 4.5f * U),
+		FVector2D(G.CoreRight + 2.f * U, ShellTop + 4.5f * U), RightRail);
 	AddQuad(Tris,
-		FVector2D(LeftOuter + 29.f * U, ShellBottom - 3.f * U),
-		FVector2D(G.CoreLeft - 17.f * U, ShellBottom - 3.f * U),
+		FVector2D(LeftOuter + 29.f * U, ShellBottom - 6.f * U),
+		FVector2D(G.CoreLeft - 16.f * U, ShellBottom - 6.f * U),
 		FVector2D(G.CoreLeft - 10.f * U, ShellBottom - 1.f * U),
-		FVector2D(LeftOuter + 33.f * U, ShellBottom - 1.f * U), Cyan);
+		FVector2D(LeftOuter + 34.f * U, ShellBottom - 1.f * U), CyanGlow);
 	AddQuad(Tris,
-		FVector2D(G.CoreRight + 17.f * U, ShellBottom - 3.f * U),
-		FVector2D(RightOuter - 29.f * U, ShellBottom - 3.f * U),
-		FVector2D(RightOuter - 33.f * U, ShellBottom - 1.f * U),
-		FVector2D(G.CoreRight + 10.f * U, ShellBottom - 1.f * U), Cyan);
+		FVector2D(G.CoreRight + 16.f * U, ShellBottom - 6.f * U),
+		FVector2D(RightOuter - 29.f * U, ShellBottom - 6.f * U),
+		FVector2D(RightOuter - 34.f * U, ShellBottom - 1.f * U),
+		FVector2D(G.CoreRight + 10.f * U, ShellBottom - 1.f * U), CyanGlow);
+	AddQuad(Tris,
+		FVector2D(LeftOuter + 32.f * U, ShellBottom - 3.f * U),
+		FVector2D(G.CoreLeft - 14.f * U, ShellBottom - 3.f * U),
+		FVector2D(G.CoreLeft - 11.f * U, ShellBottom - 1.5f * U),
+		FVector2D(LeftOuter + 35.f * U, ShellBottom - 1.5f * U), Cyan);
+	AddQuad(Tris,
+		FVector2D(G.CoreRight + 14.f * U, ShellBottom - 3.f * U),
+		FVector2D(RightOuter - 32.f * U, ShellBottom - 3.f * U),
+		FVector2D(RightOuter - 35.f * U, ShellBottom - 1.5f * U),
+		FVector2D(G.CoreRight + 11.f * U, ShellBottom - 1.5f * U), Cyan);
 
-	// Compact beveled score | clock | score core. An outer steel plate creates a
-	// fine technical outline without a noisy full-saturation perimeter.
-	AddChamferedRect(Tris, G.CoreLeft - 2.f * U, G.TopY - 2.f * U,
-		G.CoreRight + 2.f * U, CoreBottom + 2.f * U, 10.f * U, Steel);
+	// Layer 5: mirrored score trapezoids and a central clock hex. Each panel is
+	// drawn accent-first and inset-black second, so team color reads as an edge
+	// rather than the large pastel blocks in the first Beta pass.
 	const float ScoreWidth = BetaScoreWidth * U;
 	const float ClockWidth = BetaClockWidth * U;
 	const float ClockLeft = G.CoreLeft + ScoreWidth;
 	const float ClockRight = ClockLeft + ClockWidth;
-	AddChamferedRect(Tris, G.CoreLeft, G.TopY, ClockLeft + 2.f * U,
-		CoreBottom, 9.f * U,
-		WithOpacity(MutedTeamPlate(Core.LeftTeamColor, 0.95f), Opacity));
-	AddChamferedRect(Tris, ClockLeft - 2.f * U, G.TopY, ClockRight + 2.f * U,
-		CoreBottom, 8.f * U,
-		WithOpacity(FLinearColor(0.006f, 0.016f, 0.025f, 0.96f), Opacity));
-	AddChamferedRect(Tris, ClockRight - 2.f * U, G.TopY, G.CoreRight,
-		CoreBottom, 9.f * U,
-		WithOpacity(MutedTeamPlate(Core.RightTeamColor, 0.95f), Opacity));
-	AddQuad(Tris, FVector2D(G.CoreLeft + 9.f * U, G.TopY),
-		FVector2D(ClockLeft - 4.f * U, G.TopY),
-		FVector2D(ClockLeft - 2.f * U, G.TopY + 1.6f * U),
-		FVector2D(G.CoreLeft + 10.f * U, G.TopY + 1.6f * U), LeftRail);
-	AddQuad(Tris, FVector2D(ClockRight + 4.f * U, G.TopY),
-		FVector2D(G.CoreRight - 9.f * U, G.TopY),
-		FVector2D(G.CoreRight - 10.f * U, G.TopY + 1.6f * U),
-		FVector2D(ClockRight + 2.f * U, G.TopY + 1.6f * U), RightRail);
+	const FVector2D LeftScoreOuter[8] =
+	{
+		FVector2D(G.CoreLeft + 10.f * U, G.TopY),
+		FVector2D(ClockLeft - 5.f * U, G.TopY),
+		FVector2D(ClockLeft + 4.f * U, G.TopY + 9.f * U),
+		FVector2D(ClockLeft + 4.f * U, CoreBottom - 9.f * U),
+		FVector2D(ClockLeft - 5.f * U, CoreBottom),
+		FVector2D(G.CoreLeft + 16.f * U, CoreBottom),
+		FVector2D(G.CoreLeft, CoreBottom - 15.f * U),
+		FVector2D(G.CoreLeft, G.TopY + 13.f * U),
+	};
+	AddConvexPolygon(Tris, LeftScoreOuter, 8, LeftRail);
+	const FVector2D LeftScoreInner[8] =
+	{
+		FVector2D(G.CoreLeft + 11.f * U, G.TopY + 2.f * U),
+		FVector2D(ClockLeft - 6.f * U, G.TopY + 2.f * U),
+		FVector2D(ClockLeft + 1.f * U, G.TopY + 10.f * U),
+		FVector2D(ClockLeft + 1.f * U, CoreBottom - 10.f * U),
+		FVector2D(ClockLeft - 6.f * U, CoreBottom - 2.f * U),
+		FVector2D(G.CoreLeft + 17.f * U, CoreBottom - 2.f * U),
+		FVector2D(G.CoreLeft + 3.f * U, CoreBottom - 16.f * U),
+		FVector2D(G.CoreLeft + 3.f * U, G.TopY + 14.f * U),
+	};
+	AddConvexPolygon(Tris, LeftScoreInner, 8,
+		WithOpacity(DarkTeamPanel(Core.LeftTeamColor, 0.99f), Opacity));
+
+	const FVector2D RightScoreOuter[8] =
+	{
+		FVector2D(ClockRight + 5.f * U, G.TopY),
+		FVector2D(G.CoreRight - 10.f * U, G.TopY),
+		FVector2D(G.CoreRight, G.TopY + 13.f * U),
+		FVector2D(G.CoreRight, CoreBottom - 15.f * U),
+		FVector2D(G.CoreRight - 16.f * U, CoreBottom),
+		FVector2D(ClockRight + 5.f * U, CoreBottom),
+		FVector2D(ClockRight - 4.f * U, CoreBottom - 9.f * U),
+		FVector2D(ClockRight - 4.f * U, G.TopY + 9.f * U),
+	};
+	AddConvexPolygon(Tris, RightScoreOuter, 8, RightRail);
+	const FVector2D RightScoreInner[8] =
+	{
+		FVector2D(ClockRight + 6.f * U, G.TopY + 2.f * U),
+		FVector2D(G.CoreRight - 11.f * U, G.TopY + 2.f * U),
+		FVector2D(G.CoreRight - 3.f * U, G.TopY + 14.f * U),
+		FVector2D(G.CoreRight - 3.f * U, CoreBottom - 16.f * U),
+		FVector2D(G.CoreRight - 17.f * U, CoreBottom - 2.f * U),
+		FVector2D(ClockRight + 6.f * U, CoreBottom - 2.f * U),
+		FVector2D(ClockRight - 1.f * U, CoreBottom - 10.f * U),
+		FVector2D(ClockRight - 1.f * U, G.TopY + 10.f * U),
+	};
+	AddConvexPolygon(Tris, RightScoreInner, 8,
+		WithOpacity(DarkTeamPanel(Core.RightTeamColor, 0.99f), Opacity));
+
+	const FVector2D ClockOuter[8] =
+	{
+		FVector2D(ClockLeft + 8.f * U, G.TopY),
+		FVector2D(ClockRight - 8.f * U, G.TopY),
+		FVector2D(ClockRight + 3.f * U, G.TopY + 9.f * U),
+		FVector2D(ClockRight + 3.f * U, CoreBottom - 9.f * U),
+		FVector2D(ClockRight - 8.f * U, CoreBottom),
+		FVector2D(ClockLeft + 8.f * U, CoreBottom),
+		FVector2D(ClockLeft - 3.f * U, CoreBottom - 9.f * U),
+		FVector2D(ClockLeft - 3.f * U, G.TopY + 9.f * U),
+	};
+	AddConvexPolygon(Tris, ClockOuter, 8, Steel);
+	const FVector2D ClockInner[8] =
+	{
+		FVector2D(ClockLeft + 9.f * U, G.TopY + 2.f * U),
+		FVector2D(ClockRight - 9.f * U, G.TopY + 2.f * U),
+		FVector2D(ClockRight, G.TopY + 10.f * U),
+		FVector2D(ClockRight, CoreBottom - 10.f * U),
+		FVector2D(ClockRight - 9.f * U, CoreBottom - 2.f * U),
+		FVector2D(ClockLeft + 9.f * U, CoreBottom - 2.f * U),
+		FVector2D(ClockLeft, CoreBottom - 10.f * U),
+		FVector2D(ClockLeft, G.TopY + 10.f * U),
+	};
+	AddConvexPolygon(Tris, ClockInner, 8, Panel);
 
 	FTexture* WhiteTexture = Canvas->DefaultTexture->Resource;
 	if (WhiteTexture != nullptr && Tris.Num() > 0)
@@ -364,25 +516,24 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 	const float TextHeightLimit = FMath::Max(1.f, G.CoreHeight - 10.f * U);
 	const float ScoreWidthLimit = FMath::Max(1.f, ScoreWidth - 16.f * U);
 	const float ClockWidthLimit = FMath::Max(1.f, ClockWidth - 20.f * U);
-	const uint8 TextAlpha = uint8(FMath::Clamp(FMath::RoundToInt(Opacity * 255.f), 0, 255));
 
 	FText Text;
 	float XL = 0.f, YL = 0.f;
 	const FString& LeftScoreString = ResolveBetaNumber(Core.LeftScore, false);
 	const float LeftScale = ResolveFittedStableText(Canvas, ScoreFont, LeftScoreString,
 		ScoreDesiredScale, ScoreWidthLimit, TextHeightLimit, Text, XL, YL);
-	NCPlusHUDDrawCall::DrawResolvedText(Canvas, ScoreFont, Text,
+	NCPlusHUDDrawCall::DrawOutlinedText(Canvas, ScoreFont, Text,
 		G.CoreLeft + 0.5f * (ScoreWidth - XL),
-		G.TopY + 0.5f * (G.CoreHeight - YL), LeftScale, LeftScale,
-		FColor(255, 255, 255, TextAlpha));
+		G.TopY + 0.5f * (G.CoreHeight - YL), LeftScale,
+		FLinearColor::White, FLinearColor::Black, Opacity);
 
 	const FString& RightScoreString = ResolveBetaNumber(Core.RightScore, false);
 	const float RightScale = ResolveFittedStableText(Canvas, ScoreFont, RightScoreString,
 		ScoreDesiredScale, ScoreWidthLimit, TextHeightLimit, Text, XL, YL);
-	NCPlusHUDDrawCall::DrawResolvedText(Canvas, ScoreFont, Text,
+	NCPlusHUDDrawCall::DrawOutlinedText(Canvas, ScoreFont, Text,
 		ClockRight + 0.5f * (ScoreWidth - XL),
-		G.TopY + 0.5f * (G.CoreHeight - YL), RightScale, RightScale,
-		FColor(255, 255, 255, TextAlpha));
+		G.TopY + 0.5f * (G.CoreHeight - YL), RightScale,
+		FLinearColor::White, FLinearColor::Black, Opacity);
 
 	static const FString VersusString(TEXT("VS"));
 	const FString& CenterString = Core.ClockSeconds >= 0
@@ -390,13 +541,13 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		: (Core.CenterFallback.IsEmpty() ? VersusString : Core.CenterFallback);
 	const float CenterScale = ResolveFittedStableText(Canvas, ClockFont, CenterString,
 		CenterDesiredScale, ClockWidthLimit, TextHeightLimit, Text, XL, YL);
-	const FColor CenterColor = (Core.ClockSeconds >= 0 && Core.ClockSeconds <= 30)
-		? FColor(255, 48, 48, TextAlpha)
+	const FLinearColor CenterColor = (Core.ClockSeconds >= 0 && Core.ClockSeconds <= 30)
+		? FLinearColor(1.f, 0.0025f, 0.0025f, 1.f)
 		: (Core.ClockSeconds >= 0)
-			? FColor(255, 255, 255, TextAlpha)
-			: FColor(205, 218, 228, TextAlpha);
-	NCPlusHUDDrawCall::DrawResolvedText(Canvas, ClockFont, Text,
+			? FLinearColor::White
+			: FLinearColor(0.61f, 0.70f, 0.78f, 1.f);
+	NCPlusHUDDrawCall::DrawOutlinedText(Canvas, ClockFont, Text,
 		ClockLeft + 0.5f * (ClockWidth - XL),
-		G.TopY + 0.5f * (G.CoreHeight - YL), CenterScale, CenterScale,
-		CenterColor);
+		G.TopY + 0.5f * (G.CoreHeight - YL), CenterScale,
+		CenterColor, FLinearColor::Black, Opacity);
 }
