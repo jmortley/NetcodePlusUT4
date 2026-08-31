@@ -33,6 +33,7 @@ class AUTProjectile;
 class AUTCharacter;
 class AUTPlayerController;
 class AClientHitsounds;
+class UInputComponent;
 
 // --- Struct Definition (MUST BE BEFORE THE CLASS) ---
 USTRUCT(BlueprintType)
@@ -495,6 +496,35 @@ public:
      *  intent rather than treating them as separate clicks. */
     UPROPERTY()
     TArray<float> LastReleaseTime;
+
+    /** Opt-in client-only shock-primary input trace. The diagnostic input
+     *  component observes LeftMouseButton without consuming it; the two action
+     *  observers are appended after AUTPlayerController's stock OnFire / OnStopFire
+     *  bindings. Nothing here participates in firing or replication. */
+    UPROPERTY(Transient)
+    UInputComponent* ShockInputTraceInputComponent;
+
+    UPROPERTY(Transient)
+    AUTPlayerController* ShockInputTraceController;
+
+    /** Exact controller component that owns the two passive action observers.
+     *  Stored separately because UE4.15 may replace PlayerController::InputComponent
+     *  during travel/setup; cleanup must never guess using the replacement. */
+    UPROPERTY(Transient)
+    UInputComponent* ShockInputTraceActionComponent;
+
+    /** Snapshot taken by the higher-priority, non-consuming key observer before
+     *  the stock StartFire action runs. It lets the later passive action observer
+     *  distinguish "this click queued primary fire" from an older queued input. */
+    bool bShockInputTraceDeferredSnapshotValid;
+    bool bShockInputTraceHadDeferredStartBeforeDown;
+
+    void RefreshShockInputTrace();
+    void StopShockInputTrace();
+    void ShockInputTracePlayerDown();
+    void ShockInputTracePlayerUp();
+    void ShockInputTraceActionStart(FKey Key);
+    void ShockInputTraceActionStop(FKey Key);
 
     /** Mouse-bounce debounce window in seconds. A press event arriving
      *  within this many seconds of the prior release is treated as a bounce

@@ -1,11 +1,13 @@
 
 #include "UTWeaponFix.h"
+#include "NCShockInputTrace.h"
 #include "NCPClockSync.h"
 #include "UTGameState.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "UTWeaponAttachment.h"
 #include "Engine/World.h"
+#include "Components/InputComponent.h"
 #include "Engine/NetConnection.h"
 #include "Engine/DemoNetDriver.h"
 #include "TimerManager.h"
@@ -1232,6 +1234,11 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     bCapturedOriginalFPSMaterials = false;
     FirstPersonHologramDepthMesh = nullptr;
     bFirstPersonHologramSkinActive = false;
+    ShockInputTraceInputComponent = nullptr;
+    ShockInputTraceController = nullptr;
+    ShockInputTraceActionComponent = nullptr;
+	bShockInputTraceDeferredSnapshotValid = false;
+	bShockInputTraceHadDeferredStartBeforeDown = false;
 
     for (int32 i = 0; i < 2; i++)
     {
@@ -1244,6 +1251,194 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     }
 
     CurrentlyFiringMode = 255; // No mode currently firing
+}
+
+void AUTWeaponFix::RefreshShockInputTrace()
+{
+	// This diagnostic is deliberately client-local and shock-primary only. The
+	// cast includes Blueprint instagib-rifle children whose native parent is
+	// AUTPlusShockRifle. No server, RPC, or weapon-state path is touched.
+	const bool bShouldTrace = NCShockInputTrace::GetMode() > 0
+		&& GetNetMode() != NM_DedicatedServer
+		&& Cast<AUTPlusShockRifle>(this) != nullptr
+		&& UTOwner != nullptr
+		&& UTOwner->IsLocallyControlled()
+		&& UTOwner->GetWeapon() == this;
+	AUTPlayerController* PC = bShouldTrace
+		? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
+
+	if (!bShouldTrace || PC == nullptr || PC->InputComponent == nullptr)
+	{
+		StopShockInputTrace();
+		return;
+	}
+	if (ShockInputTraceInputComponent != nullptr
+		&& ShockInputTraceController == PC
+		&& ShockInputTraceActionComponent == PC->InputComponent)
+	{
+		return;
+	}
+
+	StopShockInputTrace();
+
+	// Refuse to install the post-action observers unless the stock PC bindings
+	// are already present. Appending is what guarantees OnFire/OnStopFire run
+	// first, letting the observer verify their deferred-queue result without
+	// wrapping or replacing gameplay input.
+	bool bHasStockStart = false;
+	bool bHasStockStop = false;
+	for (int32 Index = 0; Index < PC->InputComponent->GetNumActionBindings(); ++Index)
+	{
+		const FInputActionBinding& Binding = PC->InputComponent->GetActionBinding(Index);
+		if (Binding.ActionName == FName(TEXT("StartFire"))
+			&& Binding.KeyEvent == IE_Pressed && Binding.bPaired)
+		{
+			bHasStockStart = true;
+		}
+		else if (Binding.ActionName == FName(TEXT("StopFire"))
+			&& Binding.KeyEvent == IE_Released && Binding.bPaired)
+		{
+			bHasStockStop = true;
+		}
+	}
+	if (!bHasStockStart || !bHasStockStop)
+	{
+		return;
+	}
+
+	ShockInputTraceController = PC;
+	ShockInputTraceActionComponent = PC->InputComponent;
+	ShockInputTraceInputComponent = NewObject<UInputComponent>(
+		PC, UInputComponent::StaticClass(), NAME_None, RF_Transient);
+	if (ShockInputTraceInputComponent == nullptr)
+	{
+		ShockInputTraceController = nullptr;
+		ShockInputTraceActionComponent = nullptr;
+		return;
+	}
+	ShockInputTraceInputComponent->Priority = MAX_int32;
+	ShockInputTraceInputComponent->bBlockInput = false;
+	ShockInputTraceInputComponent->RegisterComponent();
+
+	FInputKeyBinding& DownBinding = ShockInputTraceInputComponent->BindKey(
+		EKeys::LeftMouseButton, IE_Pressed, this,
+		&AUTWeaponFix::ShockInputTracePlayerDown);
+	DownBinding.bConsumeInput = false;
+	DownBinding.bExecuteWhenPaused = false;
+	FInputKeyBinding& UpBinding = ShockInputTraceInputComponent->BindKey(
+		EKeys::LeftMouseButton, IE_Released, this,
+		&AUTWeaponFix::ShockInputTracePlayerUp);
+	UpBinding.bConsumeInput = false;
+	UpBinding.bExecuteWhenPaused = false;
+	PC->PushInputComponent(ShockInputTraceInputComponent);
+
+	FInputActionBinding& StartObserver = ShockInputTraceActionComponent->BindAction(
+		TEXT("StartFire"), IE_Pressed, this,
+		&AUTWeaponFix::ShockInputTraceActionStart);
+	StartObserver.bConsumeInput = false;
+	StartObserver.bExecuteWhenPaused = false;
+	FInputActionBinding& StopObserver = ShockInputTraceActionComponent->BindAction(
+		TEXT("StopFire"), IE_Released, this,
+		&AUTWeaponFix::ShockInputTraceActionStop);
+	StopObserver.bConsumeInput = false;
+	StopObserver.bExecuteWhenPaused = false;
+
+	NCShockInputTrace::Start(this);
+}
+
+void AUTWeaponFix::StopShockInputTrace()
+{
+	if (ShockInputTraceInputComponent == nullptr
+		&& ShockInputTraceController == nullptr
+		&& ShockInputTraceActionComponent == nullptr)
+	{
+		return;
+	}
+
+	NCShockInputTrace::Stop(this);
+	AUTPlayerController* PC = ShockInputTraceController;
+	UInputComponent* ActionComponent = ShockInputTraceActionComponent;
+	if (ActionComponent != nullptr)
+	{
+		// Remove only the two observers installed above. Reverse traversal keeps
+		// indices valid and UE4.15's paired-action bookkeeping intact.
+		for (int32 Index = ActionComponent->GetNumActionBindings() - 1;
+			Index >= 0; --Index)
+		{
+			const FInputActionBinding& Binding =
+				ActionComponent->GetActionBinding(Index);
+			const bool bOurAction = (Binding.ActionName == FName(TEXT("StartFire"))
+					&& Binding.KeyEvent == IE_Pressed)
+				|| (Binding.ActionName == FName(TEXT("StopFire"))
+					&& Binding.KeyEvent == IE_Released);
+			if (bOurAction && Binding.ActionDelegate.IsBoundToObject(this))
+			{
+				ActionComponent->RemoveActionBinding(Index);
+			}
+		}
+	}
+	if (PC != nullptr && ShockInputTraceInputComponent != nullptr)
+	{
+		PC->PopInputComponent(ShockInputTraceInputComponent);
+	}
+	if (ShockInputTraceInputComponent != nullptr)
+	{
+		ShockInputTraceInputComponent->DestroyComponent();
+	}
+	ShockInputTraceInputComponent = nullptr;
+	ShockInputTraceController = nullptr;
+	ShockInputTraceActionComponent = nullptr;
+	bShockInputTraceDeferredSnapshotValid = false;
+	bShockInputTraceHadDeferredStartBeforeDown = false;
+}
+
+void AUTWeaponFix::ShockInputTracePlayerDown()
+{
+	// This component has MAX_int32 priority and does not consume the key, so this
+	// snapshot runs before AUTPlayerController::OnFire appends its queue entry.
+	bShockInputTraceDeferredSnapshotValid = ShockInputTraceController != nullptr;
+	bShockInputTraceHadDeferredStartBeforeDown = ShockInputTraceController
+		&& ShockInputTraceController->HasDeferredFireInputs();
+	NCShockInputTrace::RecordPlayerInput(this, true);
+}
+
+void AUTWeaponFix::ShockInputTracePlayerUp()
+{
+	NCShockInputTrace::RecordPlayerInput(this, false);
+	bShockInputTraceDeferredSnapshotValid = false;
+}
+
+void AUTWeaponFix::ShockInputTraceActionStart(FKey Key)
+{
+	if (Key != EKeys::LeftMouseButton || ShockInputTraceController == nullptr)
+	{
+		return;
+	}
+	// The queue itself is protected in UE4.15. Comparing the public before/after
+	// predicate proves this click introduced a start only when the queue did not
+	// already contain one. A pre-existing start makes the evidence ambiguous; do
+	// not turn that ambiguity into either a match or a chain-gap accusation.
+	const bool bHasDeferredStartAfter =
+		ShockInputTraceController->HasDeferredFireInputs();
+	const bool bQueueEvidenceConclusive =
+		bShockInputTraceDeferredSnapshotValid
+		&& !bShockInputTraceHadDeferredStartBeforeDown;
+	const bool bMatched = bQueueEvidenceConclusive && bHasDeferredStartAfter;
+	NCShockInputTrace::RecordAction(this, true, bMatched,
+		bQueueEvidenceConclusive, -1);
+	bShockInputTraceDeferredSnapshotValid = false;
+}
+
+void AUTWeaponFix::ShockInputTraceActionStop(FKey Key)
+{
+	if (Key != EKeys::LeftMouseButton || ShockInputTraceController == nullptr)
+	{
+		return;
+	}
+	// There is no public UE4.15 query for a queued StopFire entry. Record the
+	// post-stock action boundary without pretending the protected tail was read;
+	// the diagnostic's loss classification is intentionally based on StartFire.
+	NCShockInputTrace::RecordAction(this, false, false, false, -1);
 }
 
 bool AUTWeaponFix::ShouldDrawFFIndicator(APlayerController* Viewer,
@@ -1515,6 +1710,55 @@ void AUTWeaponFix::OnBufferedClickRetryTimer(uint8 FireModeNum, FRotator Release
 
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
+	if (FireModeNum == 0 && ShockInputTraceInputComponent != nullptr
+		&& Cast<AUTPlusShockRifle>(this) != nullptr)
+	{
+		UWorld* TraceWorld = GetWorld();
+		const float Now = TraceWorld ? TraceWorld->GetTimeSeconds() : 0.f;
+		float ReadyAt = EarliestFireTime;
+		for (int32 Mode = 0; Mode < LastFireTime.Num(); ++Mode)
+		{
+			if (LastFireTime[Mode] > 0.f)
+			{
+				ReadyAt = FMath::Max(ReadyAt,
+					LastFireTime[Mode] + GetRefireTime(Mode));
+			}
+		}
+		const float ReadyInMs = FMath::Max(0.f, (ReadyAt - Now) * 1000.f);
+		float TraceDebounceWindow = MouseDebounceWindow;
+		const float TraceDebounceCap = CVarMouseDebounceCap.GetValueOnGameThread();
+		if (TraceDebounceCap >= 0.f)
+		{
+			TraceDebounceWindow = FMath::Min(TraceDebounceWindow,
+				TraceDebounceCap);
+		}
+		const float SinceRelease = LastReleaseTime.IsValidIndex(0)
+			&& LastReleaseTime[0] > 0.f ? Now - LastReleaseTime[0] : -1.f;
+		const bool bDebounceWillQueue = !bHandlingRetry
+			&& TraceDebounceWindow > 0.f && SinceRelease >= 0.f
+			&& SinceRelease < TraceDebounceWindow;
+		AUTGameState* TraceGS = TraceWorld
+			? TraceWorld->GetGameState<AUTGameState>() : nullptr;
+		const bool bMovementBlocks = UTOwner && bRootWhileFiring
+			&& UTOwner->GetCharacterMovement()
+			&& UTOwner->GetCharacterMovement()->MovementMode == MOVE_Falling;
+		const bool bExpectedImmediateShot = UTOwner != nullptr
+			&& !UTOwner->IsPendingKillPending()
+			&& UTOwner->GetWeapon() == this
+			&& UTOwner->GetPendingWeapon() == nullptr
+			&& HasAmmo(0)
+			&& FiringState.IsValidIndex(0) && FiringState[0] != nullptr
+			&& CurrentState == ActiveState
+			&& !UTOwner->IsFiringDisabled()
+			&& !bMovementBlocks
+			&& (TraceGS == nullptr || !TraceGS->PreventWeaponFire())
+			&& !bDebounceWillQueue
+			&& ReadyInMs <= 1.f;
+		NCShockInputTrace::RecordWeaponStart(this, bHandlingRetry,
+			bExpectedImmediateShot, ReadyInMs,
+			GetCurrentState() ? GetCurrentState()->GetFName() : NAME_None);
+	}
+
 	if (RocketPrimaryDiagFor(this, FireModeNum))
 	{
 		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
@@ -2191,6 +2435,13 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 
 void AUTWeaponFix::FireShot()
 {
+	if (CurrentFireMode == 0 && ShockInputTraceInputComponent != nullptr
+		&& Cast<AUTPlusShockRifle>(this) != nullptr)
+	{
+		NCShockInputTrace::RecordFireShot(this,
+			GetCurrentState() ? GetCurrentState()->GetFName() : NAME_None);
+	}
+
 	const uint8 BufferedDispatchMode = CurrentFireMode;
 	const bool bBufferedShockDispatch = BufferedDispatchMode < 2
 		&& bBufferedClickPending[BufferedDispatchMode]
@@ -2577,6 +2828,13 @@ void AUTWeaponFix::StopOwnerFireInternal(uint8 FireModeNum)
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
+	if (FireModeNum == 0 && ShockInputTraceInputComponent != nullptr
+		&& Cast<AUTPlusShockRifle>(this) != nullptr)
+	{
+		NCShockInputTrace::RecordWeaponStop(this, bHandlingRetry,
+			GetCurrentState() ? GetCurrentState()->GetFName() : NAME_None);
+	}
+
 	if (RocketPrimaryDiagFor(this, FireModeNum))
 	{
 		UE_LOG(LogUTWeaponFix, Warning,
@@ -3362,6 +3620,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
 void AUTWeaponFix::Removed()
 {
+	StopShockInputTrace();
 	// A delayed Flak prediction belongs to this weapon instance. Once it is removed,
 	// the authoritative replicated projectile (if any) is the only valid visual source.
 	ClearDelayedFlakFakeProjectiles();
@@ -3399,6 +3658,7 @@ void AUTWeaponFix::Removed()
 
 void AUTWeaponFix::Destroyed()
 {
+	StopShockInputTrace();
 	// Direct replay/admin destruction can bypass normal inventory removal. Break
 	// the master-pose relationship before the actor's component teardown starts.
 	for (int32 Mode = 0; Mode < 2; ++Mode)
@@ -3428,6 +3688,13 @@ bool AUTWeaponFix::IsChargedRocketStateWedged(UUTWeaponStateFiringChargedRocket_
 void AUTWeaponFix::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
+#if !UE_SERVER
+	RefreshShockInputTrace();
+	if (ShockInputTraceInputComponent != nullptr)
+	{
+		NCShockInputTrace::Tick(this);
+	}
+#endif
 
     // ChargedWedgeFirstSeenTime is a transition marker, not state that may leak
     // into another weapon state or charge cycle. Clear it even when the normal
@@ -6106,6 +6373,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
 void AUTWeaponFix::DetachFromOwner_Implementation()
 {
+	StopShockInputTrace();
     GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
 	ClearFireEventsFixed();
@@ -6142,6 +6410,7 @@ bool AUTWeaponFix::PutDown()
     // goes off 0.1s after you switched weapons.
     if (bPutDownResult)
     {
+		StopShockInputTrace();
 		// The original fixed fire RPCs are Reliable. Stop only NetcodePlus's
 		// application-level retry copies at the outgoing equip boundary.
 		ClearFireEventsFixed();
@@ -7116,6 +7385,9 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 	PrepareConfiguredWeaponSkin();
 	const double SuperStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
 	Super::BringUp(OverflowTime);
+#if !UE_SERVER
+	RefreshShockInputTrace();
+#endif
 	const double SuperEndTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
 
 	// Per-weapon hide (BP-parity, 2026-07-19): visibility-only — see
