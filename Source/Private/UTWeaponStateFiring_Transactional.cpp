@@ -106,18 +106,49 @@ void UUTWeaponStateFiring_Transactional::EndState()
 	{
 		TWeakObjectPtr<AUTCharacter> WeakOwner = Owner;
 		TWeakObjectPtr<AUTWeapon> WeakWeapon = GetOuterAUTWeapon();
+		TWeakObjectPtr<UUTWeaponStateFiring_Transactional> WeakExitedState = this;
+		const uint8 ExpectedFlashCount = Owner->FlashCount;
+		const uint8 ExpectedFlashLocationCount = Owner->FlashLocation.Count;
+		const FVector ExpectedFlashLocation = Owner->FlashLocation.Position;
+		const uint8 ExpectedFlashExtra = Owner->FlashExtra;
+		const uint8 ExpectedFireMode = Owner->FireMode;
+		const bool bExpectedLocalFlashLocation = Owner->bLocalFlashLoc;
 
 		Owner->GetWorldTimerManager().SetTimerForNextTick(
-			FTimerDelegate::CreateLambda([WeakOwner, WeakWeapon]()
+			FTimerDelegate::CreateLambda([WeakOwner, WeakWeapon, WeakExitedState,
+				ExpectedFlashCount, ExpectedFlashLocationCount, ExpectedFlashLocation,
+				ExpectedFlashExtra, ExpectedFireMode, bExpectedLocalFlashLocation]()
 				{
-					if (WeakOwner.IsValid())
+					AUTCharacter* CurrentOwner = WeakOwner.Get();
+					if (CurrentOwner == nullptr)
 					{
-						// Only clear if owner hasn't started firing a new weapon
-						if (WeakOwner->GetWeapon() != WeakWeapon.Get())
-						{
-							WeakOwner->ClearFiringInfo();
-						}
+						return;
 					}
+
+					// Pawn firing data is global across weapons. Clear only the tuple
+					// observed by the state that scheduled this callback; any change
+					// means a newer shot/state now owns it.
+					if (CurrentOwner->FlashCount != ExpectedFlashCount
+						|| CurrentOwner->FlashLocation.Count != ExpectedFlashLocationCount
+						|| CurrentOwner->FlashLocation.Position != ExpectedFlashLocation
+						|| CurrentOwner->FlashExtra != ExpectedFlashExtra
+						|| CurrentOwner->FireMode != ExpectedFireMode
+						|| CurrentOwner->bLocalFlashLoc != bExpectedLocalFlashLocation)
+					{
+						return;
+					}
+
+					// State objects are reused. A same-weapon re-entry before the next
+					// tick owns the unchanged tuple, so leave it intact as well.
+					AUTWeapon* OldWeapon = WeakWeapon.Get();
+					if (OldWeapon && CurrentOwner->GetWeapon() == OldWeapon
+						&& WeakExitedState.IsValid()
+						&& OldWeapon->GetCurrentState() == WeakExitedState.Get())
+					{
+						return;
+					}
+
+					CurrentOwner->ClearFiringInfo();
 				})
 		);
 	}

@@ -1560,8 +1560,58 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         }
     }
 
+	// Equip-lifetime ownership must be resolved before zoom, debounce, or charged
+	// weapon special cases. Those paths return early and previously let input
+	// mutate the outgoing sniper/rocket after a switch had already begun.
+	if (!UTOwner || UTOwner->IsPendingKillPending() || UTOwner->GetWeapon() != this
+		|| CurrentState == nullptr || CurrentState == InactiveState)
+	{
+		return;
+	}
+
+	AUTWeapon* PendingWeapon = UTOwner->GetPendingWeapon();
+	const bool bIsSwitchingAway = CurrentState == UnequippingState
+		|| (PendingWeapon != nullptr && PendingWeapon != this);
+	if (bIsSwitchingAway)
+	{
+		// A cooldown/buffer retry belongs to this weapon's old equip lifetime. It
+		// must not manufacture held input for the incoming weapon.
+		if (bHandlingRetry)
+		{
+			UE_LOG(LogUTWeaponFix, Verbose,
+				TEXT("Discarding stale fire retry during weapon swap (mode %d)"), FireModeNum);
+			return;
+		}
+
+		// This branch latches input without calling Super::StartFire, so retain
+		// stock's preflight restrictions before handing the physical press across.
+		if (UTOwner->IsFiringDisabled())
+		{
+			return;
+		}
+		if (bRootWhileFiring && UTOwner->GetCharacterMovement()
+			&& UTOwner->GetCharacterMovement()->MovementMode == MOVE_Falling)
+		{
+			return;
+		}
+		AUTGameState* SwitchGS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
+		if (SwitchGS && SwitchGS->PreventWeaponFire())
+		{
+			return;
+		}
+
+		if (GhostFix() && FireModeNum < 2 && UTOwner->IsLocallyControlled())
+		{
+			bFireHeldByPlayer[FireModeNum] = true;
+		}
+		UTOwner->SetPendingFire(FireModeNum, true);
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("Deferring physical fire input across weapon swap (mode %d)"), FireModeNum);
+		return;
+	}
+
     // ---------------------------------------------------------
-    // ZOOM BYPASS (MUST BE FIRST)
+	// ZOOM BYPASS (BEFORE COOLDOWN, AFTER EQUIP OWNERSHIP)
     // ---------------------------------------------------------
     // STOCK CODE CONFIRMATION: UTWeaponStateZooming.cpp shows that Zooming
     // does not fire a shot (BeginFiringSequence returns false).
@@ -1753,17 +1803,6 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		bFireHeldByPlayer[FireModeNum] = true;
 	}
 
-	bool bIsSwitching = (CurrentState == UnequippingState) || (UTOwner && UTOwner->GetPendingWeapon());
-
-	if (bIsSwitching)
-	{
-		if (UTOwner)
-		{
-			UTOwner->SetPendingFire(FireModeNum, true);
-			UE_LOG(LogUTWeaponFix, Verbose, TEXT("Setting pending fire on swap %d"), FireModeNum);
-		}
-		return;
-	}
     // ---------------------------------------------------------
     // 2. COOLDOWN VALIDATION (MOVED TO TOP)
     // ---------------------------------------------------------
@@ -2564,15 +2603,16 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 
     if (UTOwner)
     {
-        // Only clear pending fire if user actually released the button, not if switching weapons
-        // The new weapon needs to see this flag to auto-fire when it becomes active
-        bool bIsSwitchingWeapons = UTOwner->GetPendingWeapon() != nullptr;
-        if (!bIsSwitchingWeapons)
-        {
-            UTOwner->SetPendingFire(FireModeNum, false);
-            // GHOST FIX: a genuine (non-switch) release ends held intent. Mirrors the
-            // PendingFire clear so an internal stop DURING a switch (held swap) does
-            // not falsely clear it and break hold-through-switch.
+		// A genuine release must cancel input even during a switch; otherwise a
+		// press+release before equip leaves PendingFire latched and ghost-fires the
+		// incoming weapon. Internal state-driven stops use bHandlingRetry and retain
+		// the hold-through-switch latch.
+		const bool bIsSwitchingWeapons = UTOwner->GetPendingWeapon() != nullptr;
+		if (!bIsSwitchingWeapons || !bHandlingRetry)
+		{
+			UTOwner->SetPendingFire(FireModeNum, false);
+			// GHOST FIX prototype: a genuine release ends held intent. Internal stops
+			// during a held switch still take the preserving branch above.
             if (GhostFix() && FireModeNum < 2) { bFireHeldByPlayer[FireModeNum] = false; }
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Clearing PendingFire %d"), FireModeNum);
         }
@@ -3071,6 +3111,28 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
             (ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum]) ? 1 : 0);
         return;
     }
+
+	// Reliable fire RPCs and ServerSwitchWeapon travel on different actors, so
+	// their cross-actor arrival order is not guaranteed. Once this weapon no
+	// longer owns (or is already leaving) the server equip lifetime, an old Start
+	// must not latch pawn-global PendingFire or re-enter an outgoing charged state.
+	AUTWeapon* ServerPendingWeapon = UTOwner ? UTOwner->GetPendingWeapon() : nullptr;
+	const bool bOwnsServerEquipLifetime = UTOwner != nullptr
+		&& UTOwner->GetWeapon() == this
+		&& (ServerPendingWeapon == nullptr || ServerPendingWeapon == this)
+		&& CurrentState != nullptr
+		&& CurrentState != UnequippingState
+		&& CurrentState != InactiveState;
+	if (!bOwnsServerEquipLifetime)
+	{
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("[ServerStartFireFixed] Ignoring stale equip-lifetime Start mode=%d event=%d state=%s current=%d pending=%d"),
+			FireModeNum, InFireEventIndex,
+			GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"),
+			(UTOwner && UTOwner->GetWeapon() == this) ? 1 : 0,
+			ServerPendingWeapon ? 1 : 0);
+		return;
+	}
 
     if (!ValidateFireRequest(FireModeNum, InFireEventIndex, ClientTimestamp))
     {
@@ -3688,6 +3750,16 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     CachedTransactionalRotation = FRotator::ZeroRotator;
     ScopedTransactionalAimWeapons.Remove(this);
 
+	// A delayed Stop may arrive after another weapon becomes current because the
+	// weapon RPC and ServerSwitchWeapon use different actor channels. Preserve the
+	// pawn-global release contract below (ncp.StopClearsPending), but do not let the
+	// old weapon run a state transition or clear controller data owned by the new
+	// equip lifetime.
+	const bool bOwnsWeaponStateLifetime = UTOwner != nullptr
+		&& UTOwner->GetWeapon() == this
+		&& CurrentState != nullptr
+		&& CurrentState != InactiveState;
+
     // Server Stop honor (ncp.StopClearsPending, default ON — see the cvar comment for the
     // full rationale): a received Stop is authoritative notice that this fire mode is no
     // longer held, so clear the pawn flag REGARDLESS of weapon state. The state-gated
@@ -3722,6 +3794,16 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
         }
         UTOwner->SetPendingFire(FireModeNum, false);
     }
+
+	if (!bOwnsWeaponStateLifetime)
+	{
+		TargetedCharacter = nullptr;
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("[ServerStopFireFixed] Honored stale release; skipping old equip-lifetime state transition mode=%d event=%d state=%s"),
+			FireModeNum, InFireEventIndex,
+			GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
+		return;
+	}
 
     // 3. Guard: only call EndFiringSequence if we're actually in the firing state
     // for this mode. Stock EndFiringSequence dispatches to CurrentState->EndFiringSequence(),
@@ -3789,10 +3871,14 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
 void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
 {
+	const bool bOwnsExpectedState = UTOwner != nullptr
+		&& UTOwner->GetWeapon() == this
+		&& FiringState.IsValidIndex(FireModeNum)
+		&& FiringState[FireModeNum] != nullptr
+		&& GetCurrentState() == FiringState[FireModeNum];
+
 	if (RocketPrimaryDiagFor(this, FireModeNum))
 	{
-		const bool bOwnsExpectedState = FiringState.IsValidIndex(FireModeNum)
-			&& GetCurrentState() == FiringState[FireModeNum];
 		UE_LOG(LogUTWeaponFix, Warning,
 			TEXT("[RocketM1Diag] DEFERRED_ACTIVE_CALLBACK frame=%u t=%.4f role=%d net=%d mode=%d ownsExpected=%d state=%s expected=%s tracker=%d active0=%d pendingBefore0=%d retryRemain=%.4f lft0=%.4f"),
 			(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
@@ -3813,22 +3899,7 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
         FireModeNum, GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"),
         FireModeNum, (UTOwner && UTOwner->IsPendingFire(FireModeNum)) ? 1 : 0);
 
-    // CRITICAL: Clear PendingFire before GotoActiveState to prevent CheckAutoFire
-    // from ghost-firing. ActiveState::BeginState calls CheckAutoFire, which sees
-    // PendingFire=true and re-enters FiringState — firing a shot the player never
-    // intended. This ghost fire consumes the anti-dup guard window, causing the
-    // player's NEXT intentional shot to be blocked (animation plays, no projectile).
-    //
-    // If the player IS holding the button (tap-then-hold), StartFire already
-    // scheduled a retry timer which will fire the shot ~10ms after cooldown.
-    // Clearing PendingFire here only prevents the CheckAutoFire ghost path;
-    // the retry timer is unaffected and handles the real shot.
-    if (UTOwner)
-    {
-        UTOwner->SetPendingFire(FireModeNum, false);
-    }
-
-    // CRITICAL: Only transition if we're still in the firing state that SET this
+	// CRITICAL: Only transition if we're still in the firing state that SET this
     // timer. There is only ONE DeferredActiveStateHandle shared by both fire modes.
     // When alternating primary→secondary quickly, Mode 0's deferred can fire while
     // the weapon is in FiringState[1] (Mode 1), yanking it out mid-shot. This kills
@@ -3837,9 +3908,16 @@ void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
     //
     // By checking FiringState[FireModeNum], stale deferreds from the OTHER mode
     // are harmlessly ignored.
-    if (FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum])
-    {
-        GotoActiveState();
+	if (bOwnsExpectedState)
+	{
+		// Clear only while this callback still owns the current weapon/state. During
+		// a real switch, ActiveState::BeginState calls PutDown before its auto-fire
+		// check, so the physical held input belongs to the incoming weapon.
+		if (UTOwner->GetPendingWeapon() == nullptr)
+		{
+			UTOwner->SetPendingFire(FireModeNum, false);
+		}
+		GotoActiveState();
     }
     else
     {
@@ -6030,6 +6108,7 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
 {
     GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
+	ClearFireEventsFixed();
 	ClearDelayedFlakFakeProjectiles();
     // Safety: Kill timers if the weapon is destroyed or dropped
     for (int32 i = 0; i < 2; i++)
@@ -6063,6 +6142,10 @@ bool AUTWeaponFix::PutDown()
     // goes off 0.1s after you switched weapons.
     if (bPutDownResult)
     {
+		// The original fixed fire RPCs are Reliable. Stop only NetcodePlus's
+		// application-level retry copies at the outgoing equip boundary.
+		ClearFireEventsFixed();
+
         // If we have a Retry Timer running, it means the user is holding Fire 
         // waiting for cooldown. Since we are putting this gun away, we must 
         // tell the Pawn "User is holding fire" so the NEXT gun picks it up.
@@ -7472,6 +7555,14 @@ void AUTWeaponFix::QueueResendFireEventFixed(const FPendingFireEventFix& Event)
     // Only the owning client needs to queue retries
     if (Role == ROLE_Authority && GetNetMode() != NM_Standalone) return;
 
+	// Never let duplicate retries cross into another weapon's equip lifetime.
+	if (!UTOwner || UTOwner->IsPendingKillPending() || UTOwner->GetWeapon() != this
+		|| UTOwner->GetPendingWeapon() != nullptr
+		|| CurrentState == UnequippingState || CurrentState == InactiveState)
+	{
+		return;
+	}
+
     // Queue 2 copies. This gives us 2 retry attempts (spaced by the timer delay)
     // before we give up. This prevents infinite network flooding if the connection is dead.
     ResendFireEvents.Add(Event);
@@ -7489,7 +7580,9 @@ void AUTWeaponFix::QueueResendFireEventFixed(const FPendingFireEventFix& Event)
 void AUTWeaponFix::ResendNextFireEventFixed()
 {
     // Safety Check: If weapon is invalid or owner is dead, abort everything
-    if (!UTOwner || UTOwner->IsPendingKillPending() || UTOwner->GetWeapon() != this)
+	if (!UTOwner || UTOwner->IsPendingKillPending() || UTOwner->GetWeapon() != this
+		|| UTOwner->GetPendingWeapon() != nullptr
+		|| CurrentState == UnequippingState || CurrentState == InactiveState)
     {
         ClearFireEventsFixed();
         return;
