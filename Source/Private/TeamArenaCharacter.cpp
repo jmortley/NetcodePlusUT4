@@ -1389,7 +1389,7 @@ void ATeamArenaCharacter::PostInitializeComponents()
 	// data, so simulated proxies reliably use this value from their first update.
 	if (GetNetMode() == NM_Client && UTCharacterMovement != nullptr)
 	{
-		constexpr float RemotePlayerSmoothLocationTime = 0.025f;
+		constexpr float RemotePlayerSmoothLocationTime = 0.050f;
 		UTCharacterMovement->NetworkSimulatedSmoothLocationTime = RemotePlayerSmoothLocationTime;
 	}
 }
