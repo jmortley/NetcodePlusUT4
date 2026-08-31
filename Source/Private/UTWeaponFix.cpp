@@ -1291,12 +1291,14 @@ void AUTWeaponFix::RefreshShockInputTrace()
 	{
 		const FInputActionBinding& Binding = PC->InputComponent->GetActionBinding(Index);
 		if (Binding.ActionName == FName(TEXT("StartFire"))
-			&& Binding.KeyEvent == IE_Pressed && Binding.bPaired)
+			&& Binding.KeyEvent == IE_Pressed
+			&& Binding.ActionDelegate.IsBoundToObject(PC))
 		{
 			bHasStockStart = true;
 		}
 		else if (Binding.ActionName == FName(TEXT("StopFire"))
-			&& Binding.KeyEvent == IE_Released && Binding.bPaired)
+			&& Binding.KeyEvent == IE_Released
+			&& Binding.ActionDelegate.IsBoundToObject(PC))
 		{
 			bHasStockStop = true;
 		}

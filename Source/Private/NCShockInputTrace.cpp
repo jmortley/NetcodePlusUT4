@@ -12,8 +12,6 @@
 #include "Misc/ScopeLock.h"
 
 #if PLATFORM_WINDOWS && !UE_SERVER
-#include "Framework/Application/SlateApplication.h"
-#include "Windows/WindowsApplication.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <Windows.h>
 #include "Windows/HideWindowsPlatformTypes.h"
@@ -111,9 +109,11 @@ namespace
 		bool bNativeDown;
 		bool bPlayerDown;
 		bool bActionStart;
+		bool bActionStop;
 		bool bQueueStart;
 		bool bQueueEvidenceConclusive;
 		bool bWeaponStart;
+		bool bWeaponStop;
 		bool bShot;
 		bool bExpectedImmediateShot;
 
@@ -131,9 +131,11 @@ namespace
 			, bNativeDown(false)
 			, bPlayerDown(false)
 			, bActionStart(false)
+			, bActionStop(false)
 			, bQueueStart(false)
 			, bQueueEvidenceConclusive(false)
 			, bWeaponStart(false)
+			, bWeaponStop(false)
 			, bShot(false)
 			, bExpectedImmediateShot(false)
 		{
@@ -198,15 +200,13 @@ namespace
 	}
 
 	class FNCShockInputTraceManager
-#if PLATFORM_WINDOWS && !UE_SERVER
-		: public IWindowsMessageHandler
-#endif
 	{
 	public:
 		FNCShockInputTraceManager()
 			: RingHead(0)
 			, RingCount(0)
 			, ActivePressId(0)
+			, LastWeaponPressId(0)
 			, SyntheticPressCounter(0)
 			, NativeDownCount(0)
 			, PlayerDownCount(0)
@@ -221,6 +221,7 @@ namespace
 #if PLATFORM_WINDOWS && !UE_SERVER
 			, NextNativePressId(0)
 			, HeldNativePressId(0)
+			, NativeMessageHook(nullptr)
 			, bNativeHandlerRegistered(false)
 #endif
 		{
@@ -362,6 +363,10 @@ namespace
 					{
 						ActivePressId = 0;
 					}
+					if (LastWeaponPressId == Presses[Index].PressId)
+					{
+						LastWeaponPressId = 0;
+					}
 					Presses.RemoveAt(Index, 1, false);
 				}
 			}
@@ -474,6 +479,10 @@ namespace
 					Press->bQueueEvidenceConclusive = bQueueEvidenceConclusive;
 					++ActionStartCount;
 				}
+				else
+				{
+					Press->bActionStop = true;
+				}
 				if (bQueueTailMatched)
 				{
 					if (bPressed)
@@ -492,7 +501,8 @@ namespace
 				}
 			}
 
-			if (!bPressed)
+			if (!bPressed && Press != nullptr
+				&& ActivePressId == Press->PressId)
 			{
 				ActivePressId = 0;
 			}
@@ -508,15 +518,45 @@ namespace
 			DrainNativeEvents();
 			const uint32 Now = MonotonicMilliseconds();
 			FNCShockTracePress* Press = nullptr;
-			for (int32 Index = Presses.Num() - 1; Index >= 0; --Index)
+			if (bRetry)
 			{
-				FNCShockTracePress& Candidate = Presses[Index];
-				if (Candidate.bQueueStart && !Candidate.bShot
-					&& (!Candidate.bWeaponStart || bRetry)
-					&& ElapsedMilliseconds(Now, Candidate.QueueStartMs) <= PressLifetimeMs)
+				Press = FindPress(LastWeaponPressId);
+				if (Press != nullptr && (Press->bShot || !Press->bWeaponStart
+					|| ElapsedMilliseconds(Now, Press->WeaponStartMs)
+						> PressLifetimeMs))
 				{
-					Press = &Candidate;
-					break;
+					Press = nullptr;
+				}
+				// A retry belongs to the newest dispatched press that has not yet
+				// produced a shot. It must not consume a later queued action.
+				for (int32 Index = Presses.Num() - 1;
+					Press == nullptr && Index >= 0; --Index)
+				{
+					FNCShockTracePress& Candidate = Presses[Index];
+					if (Candidate.bWeaponStart && !Candidate.bShot
+						&& ElapsedMilliseconds(Now, Candidate.WeaponStartMs)
+							<= PressLifetimeMs)
+					{
+						Press = &Candidate;
+						break;
+					}
+				}
+			}
+			else
+			{
+				// AUTPlayerController applies DeferredFireInputs FIFO. Match the
+				// oldest undispatched action so rapid clicks in one frame retain
+				// distinct press IDs even when queue evidence is inconclusive.
+				for (int32 Index = 0; Index < Presses.Num(); ++Index)
+				{
+					FNCShockTracePress& Candidate = Presses[Index];
+					if (Candidate.bActionStart && !Candidate.bWeaponStart
+						&& ElapsedMilliseconds(Now, Candidate.ActionStartMs)
+							<= PressLifetimeMs)
+					{
+						Press = &Candidate;
+						break;
+					}
 				}
 			}
 			if (Press == nullptr)
@@ -540,6 +580,7 @@ namespace
 				Press->bWeaponStart = true;
 				Press->bExpectedImmediateShot = Press->bExpectedImmediateShot
 					|| bExpectedImmediateShot;
+				LastWeaponPressId = Press->PressId;
 			}
 		}
 
@@ -550,13 +591,61 @@ namespace
 				return;
 			}
 			uint16 Flags = bInternal ? TraceInternalStop : 0;
-			FNCShockTracePress* Press = FindPress(ActivePressId);
+			FNCShockTracePress* Press = nullptr;
+			if (bInternal)
+			{
+				// State-driven stops do not consume a queued physical release.
+				// Prefer the press dispatched into the weapon, then a still-held
+				// press, then the newest released one.
+				Press = FindPress(LastWeaponPressId);
+				if (Press == nullptr)
+				{
+					Press = FindPress(ActivePressId);
+				}
+				if (Press == nullptr)
+				{
+					for (int32 Index = Presses.Num() - 1; Index >= 0; --Index)
+					{
+						if (Presses[Index].bActionStop)
+						{
+							Press = &Presses[Index];
+							break;
+						}
+					}
+				}
+			}
+			else
+			{
+				// DeferredFireInputs is FIFO, so consume the oldest unmatched
+				// physical release. This remains correct for multiple clicks that
+				// arrive in one frame before ApplyDeferredFireInputs runs.
+				for (int32 Index = 0; Index < Presses.Num(); ++Index)
+				{
+					if (Presses[Index].bActionStop && !Presses[Index].bWeaponStop)
+					{
+						Press = &Presses[Index];
+						break;
+					}
+				}
+				if (Press == nullptr)
+				{
+					Press = FindPress(ActivePressId);
+				}
+			}
 			if (Press && Press->bEligible)
 			{
 				Flags |= TraceEligible;
 			}
 			AddRecord(Press ? Press->PressId : 0, ENCShockTraceStage::WeaponStop,
 				ENCShockTraceAnomaly::None, Flags, -1, 0.f, StateName);
+			if (Press != nullptr && !bInternal)
+			{
+				Press->bWeaponStop = true;
+			}
+			if (Press != nullptr)
+			{
+				LastWeaponPressId = Press->PressId;
+			}
 		}
 
 		void RecordFireShot(AUTWeaponFix* Weapon, FName StateName)
@@ -566,8 +655,13 @@ namespace
 				return;
 			}
 			const uint32 Now = MonotonicMilliseconds();
-			FNCShockTracePress* Press = nullptr;
-			for (int32 Index = Presses.Num() - 1; Index >= 0; --Index)
+			FNCShockTracePress* Press = FindPress(LastWeaponPressId);
+			if (Press != nullptr && (!Press->bWeaponStart || Press->bShot
+				|| ElapsedMilliseconds(Now, Press->WeaponStartMs) > PressLifetimeMs))
+			{
+				Press = nullptr;
+			}
+			for (int32 Index = 0; Press == nullptr && Index < Presses.Num(); ++Index)
 			{
 				if (Presses[Index].bWeaponStart && !Presses[Index].bShot
 					&& ElapsedMilliseconds(Now, Presses[Index].WeaponStartMs) <= PressLifetimeMs)
@@ -583,18 +677,18 @@ namespace
 			{
 				Press->bShot = true;
 				Press->ShotMs = Now;
+				LastWeaponPressId = Press->PressId;
 				++ShotCount;
 			}
 		}
 
 #if PLATFORM_WINDOWS && !UE_SERVER
-		virtual bool ProcessMessage(HWND Hwnd, uint32 Message, WPARAM WParam,
-			LPARAM LParam, int32& OutResult) override
+		void ObserveNativeMessage(HWND Hwnd, uint32 Message)
 		{
 			if (Message != WM_LBUTTONDOWN && Message != WM_LBUTTONDBLCLK
 				&& Message != WM_LBUTTONUP)
 			{
-				return false;
+				return;
 			}
 
 			FNCShockNativeEvent Event;
@@ -629,8 +723,22 @@ namespace
 				}
 			}
 
-			// This handler is a tap only. Slate and the game always receive the message.
-			return false;
+		}
+
+		static LRESULT CALLBACK NativeGetMessageHook(int Code, WPARAM WParam,
+			LPARAM LParam)
+		{
+			// A current-thread WH_GETMESSAGE hook observes a queued message just
+			// before DispatchMessage. PM_REMOVE prevents duplicate observations
+			// from PeekMessage probes. The chain is always forwarded unchanged.
+			if (Code >= 0 && WParam == PM_REMOVE && LParam != 0
+				&& NativeHookOwner != nullptr)
+			{
+				const MSG* Message = reinterpret_cast<const MSG*>(LParam);
+				NativeHookOwner->ObserveNativeMessage(Message->hwnd,
+					static_cast<uint32>(Message->message));
+			}
+			return ::CallNextHookEx(nullptr, Code, WParam, LParam);
 		}
 #endif
 
@@ -650,6 +758,7 @@ namespace
 		int32 RingHead;
 		int32 RingCount;
 		uint32 ActivePressId;
+		uint32 LastWeaponPressId;
 		uint32 SyntheticPressCounter;
 		uint32 NativeDownCount;
 		uint32 PlayerDownCount;
@@ -665,10 +774,11 @@ namespace
 #if PLATFORM_WINDOWS && !UE_SERVER
 		FCriticalSection NativeQueueLock;
 		TArray<FNCShockNativeEvent> NativeEvents;
-		TWeakPtr<GenericApplication> WeakPlatformApplication;
 		uint32 NextNativePressId;
 		uint32 HeldNativePressId;
+		HHOOK NativeMessageHook;
 		bool bNativeHandlerRegistered;
+		static FNCShockInputTraceManager* NativeHookOwner;
 #endif
 
 		void ResetSession()
@@ -677,6 +787,7 @@ namespace
 			RingCount = 0;
 			Presses.Reset();
 			ActivePressId = 0;
+			LastWeaponPressId = 0;
 			SyntheticPressCounter = 0;
 			NativeDownCount = 0;
 			PlayerDownCount = 0;
@@ -741,6 +852,10 @@ namespace
 				if (ActivePressId == Presses[0].PressId)
 				{
 					ActivePressId = 0;
+				}
+				if (LastWeaponPressId == Presses[0].PressId)
+				{
+					LastWeaponPressId = 0;
 				}
 				Presses.RemoveAt(0, 1, false);
 			}
@@ -901,19 +1016,20 @@ namespace
 			{
 				return true;
 			}
-			if (!FSlateApplication::IsInitialized())
+			if (!IsInGameThread() || NativeHookOwner != nullptr)
 			{
 				return false;
 			}
-			TSharedPtr<GenericApplication> PlatformApplication =
-				FSlateApplication::Get().GetPlatformApplication();
-			if (!PlatformApplication.IsValid())
+
+			NativeHookOwner = this;
+			NativeMessageHook = ::SetWindowsHookExW(WH_GETMESSAGE,
+				&FNCShockInputTraceManager::NativeGetMessageHook, nullptr,
+				::GetCurrentThreadId());
+			if (NativeMessageHook == nullptr)
 			{
+				NativeHookOwner = nullptr;
 				return false;
 			}
-			WeakPlatformApplication = PlatformApplication;
-			static_cast<FWindowsApplication*>(PlatformApplication.Get())
-				->AddMessageHandler(*this);
 			bNativeHandlerRegistered = true;
 			return true;
 #else
@@ -928,18 +1044,35 @@ namespace
 			{
 				return;
 			}
-			TSharedPtr<GenericApplication> PlatformApplication = WeakPlatformApplication.Pin();
-			if (PlatformApplication.IsValid())
+			if (!IsInGameThread())
 			{
-				static_cast<FWindowsApplication*>(PlatformApplication.Get())
-					->RemoveMessageHandler(*this);
+				UE_LOG(LogNCShockInputTrace, Warning,
+					TEXT("[ShockInputTrace] native hook removed off game thread"));
 			}
-			WeakPlatformApplication.Reset();
+			HHOOK Hook = NativeMessageHook;
+			NativeMessageHook = nullptr;
 			bNativeHandlerRegistered = false;
+			if (NativeHookOwner == this)
+			{
+				NativeHookOwner = nullptr;
+			}
+			if (Hook != nullptr)
+			{
+				if (::UnhookWindowsHookEx(Hook) == FALSE)
+				{
+					UE_LOG(LogNCShockInputTrace, Warning,
+						TEXT("[ShockInputTrace] UnhookWindowsHookEx failed error=%u"),
+						static_cast<uint32>(::GetLastError()));
+				}
+			}
 #endif
 			bNativeObserverAvailable = false;
 		}
 	};
+
+#if PLATFORM_WINDOWS && !UE_SERVER
+	FNCShockInputTraceManager* FNCShockInputTraceManager::NativeHookOwner = nullptr;
+#endif
 
 	static FNCShockInputTraceManager& TraceManager()
 	{
