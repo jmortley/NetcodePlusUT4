@@ -3,6 +3,12 @@
 #include "UnrealTournament.h"
 #include "NCPlusHUDLayout.h"
 #include "UTHUD.h"
+#include "ElimPlusHUD.h"
+#include "WipeoutHUD.h"
+#include "ClutchHUD.h"
+#include "NCLeagueDuelHUD.h"
+#include "NCShaftArenaHUD.h"
+#include "ShockDomHUD.h"
 #include "Engine/Canvas.h"
 #include "CanvasItem.h"
 
@@ -14,6 +20,27 @@ namespace
 	constexpr float BetaClockWidth = 168.f;
 	constexpr float BetaPortraitGap = 4.f;
 	constexpr float BetaCorePortraitGap = 12.f;
+	TMap<int32, FString> BetaPlainNumberStrings;
+	TMap<int32, FString> BetaClockStrings;
+
+	const FString& ResolveBetaNumber(int32 Value, bool bClock)
+	{
+		TMap<int32, FString>& Cache = bClock ? BetaClockStrings : BetaPlainNumberStrings;
+		if (const FString* Existing = Cache.Find(Value))
+		{
+			return *Existing;
+		}
+		if (Cache.Num() >= 256)
+		{
+			Cache.Reset();
+		}
+
+		FString& Result = Cache.FindOrAdd(Value);
+		Result = bClock
+			? FString::Printf(TEXT("%02d:%02d"), Value / 60, Value % 60)
+			: FString::FromInt(Value);
+		return Result;
+	}
 
 	void AddTriangle(TArray<FCanvasUVTri>& Tris, const FVector2D& A,
 		const FVector2D& B, const FVector2D& C, const FLinearColor& Color)
@@ -114,6 +141,25 @@ FVector2D FNCPlusBetaTopBarGeometry::GetPortraitPosition(
 		? LeftPortraitAnchorX - PortraitWidth - SafeOrdinal * PortraitPitch
 		: RightPortraitAnchorX + SafeOrdinal * PortraitPitch;
 	return FVector2D(X, PortraitY);
+}
+
+bool NCPlusBetaTopBar::IsActiveForHUD(const AUTHUD* HUD)
+{
+	if (HUD == nullptr || !FNCPlusHUDLayout::WantsBetaTopBar())
+	{
+		return false;
+	}
+
+	if (HUD->IsA(AElimPlusHUD::StaticClass()))
+	{
+		return true;
+	}
+
+	return HUD->IsA(AWipeoutHUD::StaticClass())
+		&& !HUD->IsA(AClutchHUD::StaticClass())
+		&& !HUD->IsA(ANCLeagueDuelHUD::StaticClass())
+		&& !HUD->IsA(ANCShaftArenaHUD::StaticClass())
+		&& !HUD->IsA(AShockDomHUD::StaticClass());
 }
 
 bool NCPlusBetaTopBar::BuildGeometry(AUTHUD* HUD, UCanvas* Canvas,
@@ -322,7 +368,7 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 
 	FText Text;
 	float XL = 0.f, YL = 0.f;
-	const FString LeftScoreString = FString::FromInt(Core.LeftScore);
+	const FString& LeftScoreString = ResolveBetaNumber(Core.LeftScore, false);
 	const float LeftScale = ResolveFittedStableText(Canvas, ScoreFont, LeftScoreString,
 		ScoreDesiredScale, ScoreWidthLimit, TextHeightLimit, Text, XL, YL);
 	NCPlusHUDDrawCall::DrawResolvedText(Canvas, ScoreFont, Text,
@@ -330,7 +376,7 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		G.TopY + 0.5f * (G.CoreHeight - YL), LeftScale, LeftScale,
 		FColor(255, 255, 255, TextAlpha));
 
-	const FString RightScoreString = FString::FromInt(Core.RightScore);
+	const FString& RightScoreString = ResolveBetaNumber(Core.RightScore, false);
 	const float RightScale = ResolveFittedStableText(Canvas, ScoreFont, RightScoreString,
 		ScoreDesiredScale, ScoreWidthLimit, TextHeightLimit, Text, XL, YL);
 	NCPlusHUDDrawCall::DrawResolvedText(Canvas, ScoreFont, Text,
@@ -338,12 +384,10 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		G.TopY + 0.5f * (G.CoreHeight - YL), RightScale, RightScale,
 		FColor(255, 255, 255, TextAlpha));
 
-	FString CenterString = Core.CenterFallback.IsEmpty() ? FString(TEXT("VS")) : Core.CenterFallback;
-	if (Core.ClockSeconds >= 0)
-	{
-		CenterString = FString::Printf(TEXT("%02d:%02d"),
-			Core.ClockSeconds / 60, Core.ClockSeconds % 60);
-	}
+	static const FString VersusString(TEXT("VS"));
+	const FString& CenterString = Core.ClockSeconds >= 0
+		? ResolveBetaNumber(Core.ClockSeconds, true)
+		: (Core.CenterFallback.IsEmpty() ? VersusString : Core.CenterFallback);
 	const float CenterScale = ResolveFittedStableText(Canvas, ClockFont, CenterString,
 		CenterDesiredScale, ClockWidthLimit, TextHeightLimit, Text, XL, YL);
 	const FColor CenterColor = (Core.ClockSeconds >= 0 && Core.ClockSeconds <= 30)

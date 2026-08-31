@@ -5,6 +5,7 @@
 #include "UTPlayerController.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
+#include "NCPlusBetaTopBar.h"
 #include "Engine/Canvas.h"
 #include "Engine/GameViewportClient.h"
 #include "Rendering/DrawElements.h"
@@ -166,7 +167,7 @@ namespace NCDragRects
 		FVector2D AnchorOffsetDesignPx;  // top-left of rect relative to ResolvedPos
 	};
 
-	static FInfo Get(FName Alias)
+	static FInfo Get(FName Alias, const AUTHUD* HUD)
 	{
 		// Portrait strips: each portrait pip is ~96 design px wide × ~134 tall;
 		// 5 pips per team. ResolvedPos is the strip's start anchor. The
@@ -183,7 +184,7 @@ namespace NCDragRects
 			// Beta composes portraits and score/clock into one connected ribbon
 			// driven by the scorebar alias. Use one full-width drag target instead
 			// of the legacy core-only approximation.
-			if (FNCPlusHUDLayout::WantsBetaTopBar())
+			if (NCPlusBetaTopBar::IsActiveForHUD(HUD))
 			{
 				return { FVector2D(860.f, 84.f), FVector2D(-430.f, 0.f) };
 			}
@@ -245,7 +246,7 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 						// Draw-call aliases have empty ClassPath in the alias table.
 						if (!NCPlusHUDAliases::GetClassPath(Alias).IsEmpty()) continue;
 						if (NCPlusHUDDrawCall::IsHidden(Alias)) continue;
-						if (FNCPlusHUDLayout::WantsBetaTopBar()
+						if (NCPlusBetaTopBar::IsActiveForHUD(HUD)
 							&& (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
 								|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")))
 						{
@@ -265,7 +266,7 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 							AnchorCoords.X * float(VS.X) + Offset.X * RenderScale,
 							AnchorCoords.Y * float(VS.Y) + Offset.Y * RenderScale);
 
-						const NCDragRects::FInfo Info = NCDragRects::Get(Alias);
+						const NCDragRects::FInfo Info = NCDragRects::Get(Alias, HUD);
 
 						FOverlayElement E;
 						E.Alias      = Alias;

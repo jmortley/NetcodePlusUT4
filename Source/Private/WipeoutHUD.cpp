@@ -52,15 +52,6 @@ namespace
 		}
 	}
 
-	bool IsWipeoutBetaTopBarSupported(const AWipeoutHUD* HUD)
-	{
-		return HUD != nullptr
-			&& !HUD->IsA(AClutchHUD::StaticClass())
-			&& !HUD->IsA(ANCLeagueDuelHUD::StaticClass())
-			&& !HUD->IsA(ANCShaftArenaHUD::StaticClass())
-			&& !HUD->IsA(AShockDomHUD::StaticClass());
-	}
-
 	// Advance from the prior deadline instead of Now so a 144/165/500 Hz render
 	// cadence does not alias the nominal 120 Hz sampler down to 72/82.5/100 Hz.
 	// Long stalls and clock discontinuities reset the phase rather than catching up.
@@ -644,7 +635,7 @@ void AWipeoutHUD::DrawHUD()
 		float BlueGrowSign = bRedLeft ? +1.f : -1.f;
 		FNCPlusBetaTopBarGeometry BetaGeometry;
 		bool bHasBetaGeometry = false;
-		if (IsWipeoutBetaTopBarSupported(this) && FNCPlusHUDLayout::WantsBetaTopBar())
+		if (NCPlusBetaTopBar::IsActiveForHUD(this))
 		{
 			int32 TeamCounts[2] = { 0, 0 };
 			CountWipeoutPortraitPlayers(GS, TeamCounts[0], TeamCounts[1]);
@@ -857,11 +848,14 @@ void AWipeoutHUD::DrawHUD()
 			Draw.PipSize = PipSize;
 			Draw.Alias = Alias;
 			Draw.bNextToSpawn = UTPS == NextToSpawn;
-			Draw.bJoinAnimating = PortraitNow - UTPS->CreationTime < 1.f;
+			Draw.bJoinAnimating = !bHasBetaGeometry
+				&& PortraitNow - UTPS->CreationTime < 1.f;
 			Draw.NameFont = NCPlusHUDFonts::Resolve(Alias, this, SmallFont);
 			if (!Draw.NameFont) Draw.NameFont = SmallFont;
 			const float NameFontExtra = NCPlusHUDFonts::ResolveScale(Alias, 1.f);
-			Draw.NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
+			Draw.NameScale = bHasBetaGeometry
+				? BetaGeometry.UnitScale * 0.55f * NameFontExtra
+				: float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
 			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->PlayerName,
 				PipSize, Draw.NameScale, Draw.NameText, Draw.NameWidth, Draw.NameHeight);
 			*TeamX += GrowSign * (bHasBetaGeometry
@@ -1109,7 +1103,7 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	// Blueprint children of Wipeout participate, while the four known native
 	// AWipeoutHUD-derived modes (and any Blueprint children of them) retain their
 	// existing score bars.
-	if (IsWipeoutBetaTopBarSupported(this) && FNCPlusHUDLayout::WantsBetaTopBar())
+	if (NCPlusBetaTopBar::IsActiveForHUD(this))
 	{
 		int32 TeamCounts[2] = { 0, 0 };
 		const bool bPortraitRound = bShouldDrawPortraits
@@ -1395,7 +1389,7 @@ void AWipeoutHUD::DrawPlayerIconPass(AUTPlayerState* PlayerState, float LiveScal
 		State.Width = PipSize;
 		State.Height = PipSize * WipeoutPortraitAspect;
 		const float TimeSinceJoin = GetWorld()->TimeSeconds - PlayerState->CreationTime;
-		if (TimeSinceJoin < 1.f)
+		if (TimeSinceJoin < 1.f && !NCPlusBetaTopBar::IsActiveForHUD(this))
 		{
 			const float SizeScale = 3.f - 2.f * TimeSinceJoin;
 			State.Width *= SizeScale;
@@ -1420,7 +1414,22 @@ void AWipeoutHUD::DrawPlayerIconPass(AUTPlayerState* PlayerState, float LiveScal
 				FMath::Clamp(0.028f + 0.24f * State.TeamColor.G, 0.f, 1.f),
 				FMath::Clamp(0.038f + 0.24f * State.TeamColor.B, 0.f, 1.f), 1.f);
 		}
-		State.TextScale = NCPlusHUDDrawCall::GetScale(State.Alias);
+		if (NCPlusBetaTopBar::IsActiveForHUD(this) && Canvas && Canvas->SizeY > 0)
+		{
+			// The connected ribbon owns card size through scorebar.Scale. Convert
+			// its unit scale into the multiplier consumed by the legacy text paths,
+			// so portrait Scale cannot enlarge only the ink while the card stays put.
+			const float HeightScale = float(Canvas->SizeY) / 1080.f;
+			const float ViewScale = FMath::Min(float(Canvas->SizeX) / 1920.f, HeightScale);
+			const float BetaUnitScale = FMath::Max(0.01f, ViewScale
+				* NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))
+				* GetHUDWidgetScaleOverride());
+			State.TextScale = BetaUnitScale / FMath::Max(0.01f, HeightScale);
+		}
+		else
+		{
+			State.TextScale = NCPlusHUDDrawCall::GetScale(State.Alias);
+		}
 		State.PipFont = NCPlusHUDFonts::Resolve(State.Alias, this, MediumFont);
 		if (!State.PipFont) State.PipFont = MediumFont;
 		State.PipFontExtra = NCPlusHUDFonts::ResolveScale(State.Alias, 1.f);

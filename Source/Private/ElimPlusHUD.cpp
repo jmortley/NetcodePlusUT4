@@ -197,7 +197,7 @@ void AElimPlusHUD::AddSpectatorWidgets()
 		{
 			SlideOut->WeaponListMode = ENCSlideOutWeaponMode::ElimLoadout;
 			SlideOut->bSuppressRosterDraw = FNCPlusHUDLayout::WantsStockTeamPanel()
-				|| FNCPlusHUDLayout::WantsBetaTopBar();
+				|| NCPlusBetaTopBar::IsActiveForHUD(this);
 		}
 	}
 }
@@ -636,7 +636,7 @@ void AElimPlusHUD::DrawHUD()
 
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	const bool bScoreboardIsUp = ScoreboardIsUp();
-	const bool bBetaTopBar = FNCPlusHUDLayout::WantsBetaTopBar();
+	const bool bBetaTopBar = NCPlusBetaTopBar::IsActiveForHUD(this);
 	if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(SpectatorSlideOutWidget))
 	{
 		// The editor applies Beta live. Keep the slide-out's independently drawn
@@ -725,10 +725,13 @@ void AElimPlusHUD::DrawHUD()
 		const float TeammateScale = 0.4f;
 
 		FNCPlusBetaTopBarGeometry BetaGeometry;
+		// Elim removes dead portraits and reflows survivors toward the center. Size
+		// the connected chassis from that same prepared frame so deaths do not leave
+		// empty outer slots or full-roster wings behind the compacted row.
 		const int32 BetaRedCardCount = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"))
-			? 0 : PlayerSnapshot.TeamPlayerIndices[0].Num();
+			? 0 : PlayerSnapshot.AliveCountTeam[0];
 		const int32 BetaBlueCardCount = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"))
-			? 0 : PlayerSnapshot.TeamPlayerIndices[1].Num();
+			? 0 : PlayerSnapshot.AliveCountTeam[1];
 		const bool bHasBetaGeometry = bBetaTopBar
 			&& NCPlusBetaTopBar::BuildGeometry(this, Canvas,
 				BetaRedCardCount, BetaBlueCardCount, BetaGeometry);
@@ -914,7 +917,8 @@ void AElimPlusHUD::DrawHUD()
 			Draw.Y = YForTeam;
 			Draw.PipSize = PipSize;
 			Draw.bSoleSurvivor = UTPS == PlayerSnapshot.SoleSurvivor[TeamIdx].Get();
-			Draw.bJoinAnimating = GetWorld()->TimeSeconds - UTPS->CreationTime < 1.f;
+			Draw.bJoinAnimating = !bHasBetaGeometry
+				&& GetWorld()->TimeSeconds - UTPS->CreationTime < 1.f;
 			const FName PortraitAlias = (TeamIdx == 1)
 				? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
 			Draw.NameFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, SmallFont);
@@ -944,8 +948,10 @@ void AElimPlusHUD::DrawHUD()
 				{
 					const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
 					const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
-					Draw.VitalsScale = float(Canvas->SizeY) / 1080.f * 0.7f
-						* PortraitTextScale * PipFontExtra;
+					Draw.VitalsScale = bHasBetaGeometry
+						? BetaGeometry.UnitScale * 0.7f * PipFontExtra
+						: float(Canvas->SizeY) / 1080.f * 0.7f
+							* PortraitTextScale * PipFontExtra;
 					FElimPipCache& PC = PipCacheByPS.FindOrAdd(UTPS);
 					if (PC.HpKeyHP != FramePlayer.Health || PC.HpKeyAR != FramePlayer.Armor
 						|| PC.HpFont != VitalsFont)
@@ -1298,16 +1304,16 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
 	const int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
 
-	if (FNCPlusHUDLayout::WantsBetaTopBar())
+	if (NCPlusBetaTopBar::IsActiveForHUD(this))
 	{
-		int32 TeamCardCounts[2] = { 0, 0 };
-		for (APlayerState* RawPS : GS->PlayerArray)
+		// DrawTeamScoreBar runs before the portrait pass. Prepare/reuse the same
+		// 120 Hz roster snapshot here so chassis slots and visible cards agree.
+		BuildPlayerSnapshot(GS, GetScorerPlayerState());
+		int32 TeamCardCounts[2] =
 		{
-			AUTPlayerState* PS = Cast<AUTPlayerState>(RawPS);
-			if (!PS || PS->bOnlySpectator || PS->bIsInactive) continue;
-			const uint8 TeamNum = PS->GetTeamNum();
-			if (TeamNum <= 1) ++TeamCardCounts[TeamNum];
-		}
+			PlayerSnapshot.AliveCountTeam[0],
+			PlayerSnapshot.AliveCountTeam[1]
+		};
 		if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"))) TeamCardCounts[0] = 0;
 		if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"))) TeamCardCounts[1] = 0;
 
@@ -1497,7 +1503,7 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 		State.Width = PipSize;
 		State.Height = PipSize * (320.f / 224.f);
 		const float TimeSinceJoin = GetWorld()->TimeSeconds - PlayerState->CreationTime;
-		if (TimeSinceJoin < 1.f)
+		if (TimeSinceJoin < 1.f && !NCPlusBetaTopBar::IsActiveForHUD(this))
 		{
 			const float SizeScale = 3.f - 2.f * TimeSinceJoin;
 			State.Width *= SizeScale;
@@ -1516,7 +1522,19 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 		{
 			State.TeamColor = StateGS->Teams[State.TeamNum]->TeamColor;
 		}
-		State.TextScale = NCPlusHUDDrawCall::GetScale(State.Alias);
+		if (NCPlusBetaTopBar::IsActiveForHUD(this) && Canvas && Canvas->SizeY > 0)
+		{
+			const float HeightScale = float(Canvas->SizeY) / 1080.f;
+			const float ViewScale = FMath::Min(float(Canvas->SizeX) / 1920.f, HeightScale);
+			const float BetaUnitScale = FMath::Max(0.01f, ViewScale
+				* NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))
+				* GetHUDWidgetScaleOverride());
+			State.TextScale = BetaUnitScale / FMath::Max(0.01f, HeightScale);
+		}
+		else
+		{
+			State.TextScale = NCPlusHUDDrawCall::GetScale(State.Alias);
+		}
 		State.PipFont = NCPlusHUDFonts::Resolve(State.Alias, this, MediumFont);
 		if (!State.PipFont) State.PipFont = MediumFont;
 		State.PipFontExtra = NCPlusHUDFonts::ResolveScale(State.Alias, 1.f);
@@ -1538,7 +1556,7 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 	const float PortraitTextScale = State.TextScale;
 	UFont* PipFont = State.PipFont;
 	const float PipFontExtra = State.PipFontExtra;
-	const bool bBetaPortrait = FNCPlusHUDLayout::WantsBetaTopBar();
+	const bool bBetaPortrait = NCPlusBetaTopBar::IsActiveForHUD(this);
 	if (ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 0)
 	{
 		FLinearColor PlateColor = TeamBGColor;
@@ -1655,28 +1673,46 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 				if (bBetaPortrait)
 				{
 					// Match the Wipeout Beta cards: health over armor, fitted as a
-					// compact two-line telemetry stack on the portrait face. Stable-text
-					// caching keeps the otherwise-static values allocation-free after the
-					// first frame for each value/font/scale tuple.
+					// compact two-line telemetry stack on the portrait face.
 					const float CompactFactor = 56.f / ((32.f + 64.f * 0.4f) * (320.f / 224.f));
 					const float BaseScale = float(Canvas->SizeY) / 1080.f
 						* PortraitTextScale * PipFontExtra * CompactFactor;
 					float HealthScale = BaseScale * 1.15f;
 					float ArmorScale = BaseScale * 0.95f;
 
-					FText HealthText, ArmorText;
-					float HealthW = 0.f, HealthH = 0.f, ArmorW = 0.f, ArmorH = 0.f;
-					NCPlusHUDDrawCall::ResolveStableText(Canvas, PipFont, FString::FromInt(HP),
-						HealthScale, HealthScale, HealthText, HealthW, HealthH);
-					NCPlusHUDDrawCall::ResolveStableText(Canvas, PipFont, FString::FromInt(Armor),
-						ArmorScale, ArmorScale, ArmorText, ArmorW, ArmorH);
+					FElimPipCache& PC = PipCacheByPS.FindOrAdd(PlayerState);
+					if (PC.BetaVitalsFont != PipFont)
+					{
+						PC.BetaVitalsFont = PipFont;
+						PC.BetaHpKey = MIN_int32;
+						PC.BetaArKey = MIN_int32;
+					}
+					if (PC.BetaHpKey != HP)
+					{
+						const FString HealthString = FString::FromInt(HP);
+						Canvas->StrLen(PipFont, HealthString, PC.BetaHpWidth, PC.BetaHpHeight);
+						PC.BetaHpText = FText::FromString(HealthString);
+						PC.BetaHpKey = HP;
+					}
+					if (PC.BetaArKey != Armor)
+					{
+						const FString ArmorString = FString::FromInt(Armor);
+						Canvas->StrLen(PipFont, ArmorString, PC.BetaArWidth, PC.BetaArHeight);
+						PC.BetaArText = FText::FromString(ArmorString);
+						PC.BetaArKey = Armor;
+					}
+
+					float HealthW = PC.BetaHpWidth * HealthScale;
+					float HealthH = PC.BetaHpHeight * HealthScale;
+					float ArmorW = PC.BetaArWidth * ArmorScale;
+					float ArmorH = PC.BetaArHeight * ArmorScale;
 
 					if (HealthW > 0.f) HealthScale *= FMath::Min(1.f, 0.88f * PipSize / HealthW);
 					if (ArmorW > 0.f) ArmorScale *= FMath::Min(1.f, 0.88f * PipSize / ArmorW);
-					NCPlusHUDDrawCall::ResolveStableText(Canvas, PipFont, FString::FromInt(HP),
-						HealthScale, HealthScale, HealthText, HealthW, HealthH);
-					NCPlusHUDDrawCall::ResolveStableText(Canvas, PipFont, FString::FromInt(Armor),
-						ArmorScale, ArmorScale, ArmorText, ArmorW, ArmorH);
+					HealthW = PC.BetaHpWidth * HealthScale;
+					HealthH = PC.BetaHpHeight * HealthScale;
+					ArmorW = PC.BetaArWidth * ArmorScale;
+					ArmorH = PC.BetaArHeight * ArmorScale;
 					const float Gap = FMath::Max(1.f, 0.04f * PipHeight);
 					float StackHeight = HealthH + ArmorH + Gap;
 					if (StackHeight > 0.76f * PipHeight && StackHeight > KINDA_SMALL_NUMBER)
@@ -1685,10 +1721,10 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 							/ FMath::Max(KINDA_SMALL_NUMBER, HealthH + ArmorH);
 						HealthScale *= Fit;
 						ArmorScale *= Fit;
-						NCPlusHUDDrawCall::ResolveStableText(Canvas, PipFont, FString::FromInt(HP),
-							HealthScale, HealthScale, HealthText, HealthW, HealthH);
-						NCPlusHUDDrawCall::ResolveStableText(Canvas, PipFont, FString::FromInt(Armor),
-							ArmorScale, ArmorScale, ArmorText, ArmorW, ArmorH);
+						HealthW = PC.BetaHpWidth * HealthScale;
+						HealthH = PC.BetaHpHeight * HealthScale;
+						ArmorW = PC.BetaArWidth * ArmorScale;
+						ArmorH = PC.BetaArHeight * ArmorScale;
 						StackHeight = HealthH + ArmorH + Gap;
 					}
 
@@ -1696,10 +1732,10 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 					const float HealthY = YOffset + 0.5f * (PipHeight - StackHeight);
 					const float ArmorX = XOffset + 0.5f * (PipSize - ArmorW);
 					const float ArmorY = HealthY + HealthH + Gap;
-					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, HealthText,
+					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.BetaHpText,
 						HealthX, HealthY, HealthScale,
 						FLinearColor(0.45f, 1.f, 0.35f, 1.f), FLinearColor::Black, Op);
-					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, ArmorText,
+					NCPlusHUDDrawCall::DrawOutlinedText(Canvas, PipFont, PC.BetaArText,
 						ArmorX, ArmorY, ArmorScale,
 						FLinearColor(0.30f, 0.80f, 1.f, 1.f), FLinearColor::Black, Op);
 				}

@@ -211,6 +211,18 @@ private:
 		FText  HpText;
 		float  HpWidth  = 0.f;
 		float  HpHeight = 0.f;
+
+		// Beta cards render health and armor as separately styled lines. Keep
+		// their unscaled extents so fitting is arithmetic-only on unchanged frames.
+		const UFont* BetaVitalsFont = nullptr;
+		int32 BetaHpKey = MIN_int32;
+		int32 BetaArKey = MIN_int32;
+		FText BetaHpText;
+		FText BetaArText;
+		float BetaHpWidth = 0.f;
+		float BetaHpHeight = 0.f;
+		float BetaArWidth = 0.f;
+		float BetaArHeight = 0.f;
 	};
 	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPipCache> PipCacheByPS;
 

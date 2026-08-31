@@ -52,6 +52,11 @@ struct NETCODEPLUS_API FNCPlusBetaTopBarGeometry
 
 namespace NCPlusBetaTopBar
 {
+	/** True only when the opt-in ribbon is enabled and the active HUD actually
+	 *  renders it. Keep editor/drag behavior on the same mode gate as DrawHUD so
+	 *  a Wipeout -> CTF/Duel travel cannot hide the legacy portrait handles. */
+	NETCODEPLUS_API bool IsActiveForHUD(const class AUTHUD* HUD);
+
 	/** Resolve the scorebar alias and derive a single connected 1080p-design-space
 	 *  composition. The scorebar Scale and global HUD scale resize core and cards
 	 *  together. Hidden is deliberately not consulted: portrait placement remains
