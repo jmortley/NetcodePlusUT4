@@ -1058,7 +1058,9 @@ namespace
 			}
 			if (Hook != nullptr)
 			{
-				if (::UnhookWindowsHookEx(Hook) == FALSE)
+				// HideWindowsPlatformTypes.h has undefined the Windows TRUE/FALSE
+				// macros by this point in the file; test the BOOL directly.
+				if (!::UnhookWindowsHookEx(Hook))
 				{
 					UE_LOG(LogNCShockInputTrace, Warning,
 						TEXT("[ShockInputTrace] UnhookWindowsHookEx failed error=%u"),
