@@ -72,6 +72,10 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 	virtual void NotifyMatchStateChange() override;
 
 private:
+	/** Resolve the Wipeout round clock for the optional shared Beta top bar.
+	 *  Kept separate from the legacy renderer so the non-Beta path stays intact. */
+	int32 ResolveBetaTopBarClockSeconds(AUTGameState* GS);
+
 	/** Non-virtual implementation used by the native strip's resource passes.
 	 *  The public virtual entry point remains a complete-card compatibility path. */
 	void DrawPlayerIconPass(AUTPlayerState* PlayerState, float LiveScaling,

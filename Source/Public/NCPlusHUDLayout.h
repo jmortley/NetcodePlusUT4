@@ -221,6 +221,16 @@ struct FNCPlusHUDLayout
 	 *  is not silently locked to stock (see WantsStockBottomBar). Owned by the HUD editor. */
 	static void SetStockBottomBar(bool bStock);
 
+	/** Experimental connected top-bar presentation for Wipeout and ElimPlus.
+	 *  [NetcodePlus] BetaTopBar in Mod.ini; default false. This is an override:
+	 *  disabling it restores the existing StockTeamPanel / AbsoluteElimTeamPanel
+	 *  choices without modifying either one. Cached; SetBetaTopBar refreshes it. */
+	static bool WantsBetaTopBar();
+
+	/** Persist + refresh-cache the experimental top-bar override
+	 *  ([NetcodePlus] BetaTopBar). */
+	static void SetBetaTopBar(bool bBeta);
+
 	/** Stock top-left team roster (slanted name + HP/armor plates) vs the NCPlus
 	 *  portrait strip. [NetcodePlus] StockTeamPanel in Mod.ini overrides; default =
 	 *  fresh install (no saved HUDLayout.json) so new players get the stock-style

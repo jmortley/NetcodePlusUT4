@@ -8,12 +8,16 @@
 #include "UTPlayerState.h"
 #include "UTCharacter.h"
 #include "UTTeamInfo.h"
+#include "NCPlusBetaTopBar.h"
 #include "NCPlusHUDLayout.h"
 #include "NCClutchOverlay.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 #include "UTHUDWidget_Spectator.h"
 #include "WipeoutDamageReplicator.h"
+#include "ClutchHUD.h"
+#include "NCLeagueDuelHUD.h"
 #include "NCShaftArenaHUD.h"
+#include "ShockDomHUD.h"
 #include "EngineUtils.h"
 
 namespace
@@ -26,6 +30,36 @@ namespace
 	constexpr float WipeoutCompactPipWidth = WipeoutCompactPipHeight / WipeoutPortraitAspect;
 	constexpr float WipeoutCompactTextFactor = WipeoutCompactPipHeight
 		/ (WipeoutLegacyPipWidth * WipeoutPortraitAspect);
+
+	void CountWipeoutPortraitPlayers(AUTGameState* GS,
+		int32& OutTeam0Count, int32& OutTeam1Count)
+	{
+		OutTeam0Count = 0;
+		OutTeam1Count = 0;
+		if (GS == nullptr) return;
+
+		for (APlayerState* PS : GS->PlayerArray)
+		{
+			AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
+			if (UTPS == nullptr || UTPS->bOnlySpectator || UTPS->bIsInactive
+				|| (UTPS->Team == nullptr && UTPS->GetTeamNum() == 255))
+			{
+				continue;
+			}
+
+			if (UTPS->GetTeamNum() == 0) ++OutTeam0Count;
+			else if (UTPS->GetTeamNum() == 1) ++OutTeam1Count;
+		}
+	}
+
+	bool IsWipeoutBetaTopBarSupported(const AWipeoutHUD* HUD)
+	{
+		return HUD != nullptr
+			&& !HUD->IsA(AClutchHUD::StaticClass())
+			&& !HUD->IsA(ANCLeagueDuelHUD::StaticClass())
+			&& !HUD->IsA(ANCShaftArenaHUD::StaticClass())
+			&& !HUD->IsA(AShockDomHUD::StaticClass());
+	}
 
 	// Advance from the prior deadline instead of Now so a 144/165/500 Hz render
 	// cadence does not alias the nominal 120 Hz sampler down to 72/82.5/100 Hz.
@@ -598,41 +632,75 @@ void AWipeoutHUD::DrawHUD()
 		// Phase 3.11: per-strip Scale override (independent resize).
 		const float WO_RedScale  = NCPlusHUDDrawCall::GetScale(RedAlias);
 		const float WO_BlueScale = NCPlusHUDDrawCall::GetScale(BlueAlias);
-		const float WO_RedPipSize  = BasePipSize * WO_RedScale;
-		const float WO_BluePipSize = BasePipSize * WO_BlueScale;
-		float XAdjust = BasePipSize * 1.1f;
-
-		// Stock positions used as fallbacks if the layout has no override. The
-		// LEFT slot belongs to red — or, viewer-relative, to MY team — so the
-		// enemy-keyed strip falls back right regardless of its color.
-		const float StockXLeft  = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
-		const float StockXRight = 0.6f * Canvas->ClipX + XAdjust;
-		const float StockY      = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+		float WO_RedPipSize  = BasePipSize * WO_RedScale;
+		float WO_BluePipSize = BasePipSize * WO_BlueScale;
 		const bool bRedLeft     = (RedAlias != NAME_PortraitEnemyStrip);
-		const float StockXRed   = bRedLeft ? StockXLeft  : StockXRight;
-		const float StockXBlue  = bRedLeft ? StockXRight : StockXLeft;
-
-		// Layout consult (Phase 3.5) — user can move each strip independently.
-		const FVector2D RedStart  = NCPlusHUDDrawCall::ResolveScreenPos(RedAlias,  Canvas, FVector2D(StockXRed,  StockY));
-		const FVector2D BlueStart = NCPlusHUDDrawCall::ResolveScreenPos(BlueAlias, Canvas, FVector2D(StockXBlue, StockY));
 		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(RedAlias);
 		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(BlueAlias);
 
-		// Per-strip grow direction — derived from RESOLVED screen position, not
-		// the anchor coordinate. Lets dragging the strip across screen-center
-		// (via nchud_drag) auto-flip growth so the visible strip stays on
-		// screen instead of extending off the now-far edge.
-		// Side-defaulted grow direction (the left-side strip grows leftward);
-		// flip only if the default would clip off-screen. See ElimPlusHUD for
-		// full rationale.
-		const float EstRedStripWidth = 5.f * 1.1f * WO_RedPipSize;
-		const float EstBlueStripWidth = 5.f * 1.1f * WO_BluePipSize;
+		FVector2D RedStart;
+		FVector2D BlueStart;
 		float RedGrowSign  = bRedLeft ? -1.f : +1.f;
 		float BlueGrowSign = bRedLeft ? +1.f : -1.f;
-		if (RedGrowSign  < 0.f && RedStart.X  - EstRedStripWidth < 0.f)            RedGrowSign  = +1.f;
-		else if (RedGrowSign  > 0.f && RedStart.X  + EstRedStripWidth > Canvas->ClipX) RedGrowSign  = -1.f;
-		if (BlueGrowSign < 0.f && BlueStart.X - EstBlueStripWidth < 0.f)            BlueGrowSign = +1.f;
-		else if (BlueGrowSign > 0.f && BlueStart.X + EstBlueStripWidth > Canvas->ClipX) BlueGrowSign = -1.f;
+		FNCPlusBetaTopBarGeometry BetaGeometry;
+		bool bHasBetaGeometry = false;
+		if (IsWipeoutBetaTopBarSupported(this) && FNCPlusHUDLayout::WantsBetaTopBar())
+		{
+			int32 TeamCounts[2] = { 0, 0 };
+			CountWipeoutPortraitPlayers(GS, TeamCounts[0], TeamCounts[1]);
+			if (bHideRed) TeamCounts[0] = 0;
+			if (bHideBlue) TeamCounts[1] = 0;
+			const int32 LeftTeamIndex = bRedLeft ? 0 : 1;
+			const int32 RightTeamIndex = bRedLeft ? 1 : 0;
+			bHasBetaGeometry = NCPlusBetaTopBar::BuildGeometry(this, Canvas,
+				TeamCounts[LeftTeamIndex], TeamCounts[RightTeamIndex], BetaGeometry);
+		}
+
+		if (bHasBetaGeometry)
+		{
+			// The shared anchors describe the inside edge of each row. Reusing the
+			// existing left-grow adjustment below keeps every portrait overlay,
+			// countdown, dead-X, next-spawn border, and join animation unchanged.
+			WO_RedPipSize = BetaGeometry.PortraitWidth;
+			WO_BluePipSize = BetaGeometry.PortraitWidth;
+			RedStart = FVector2D(
+				bRedLeft ? BetaGeometry.LeftPortraitAnchorX : BetaGeometry.RightPortraitAnchorX,
+				BetaGeometry.PortraitY);
+			BlueStart = FVector2D(
+				bRedLeft ? BetaGeometry.RightPortraitAnchorX : BetaGeometry.LeftPortraitAnchorX,
+				BetaGeometry.PortraitY);
+		}
+		else
+		{
+			const float XAdjust = BasePipSize * 1.1f;
+
+			// Stock positions used as fallbacks if the layout has no override. The
+			// LEFT slot belongs to red — or, viewer-relative, to MY team — so the
+			// enemy-keyed strip falls back right regardless of its color.
+			const float StockXLeft  = 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
+			const float StockXRight = 0.6f * Canvas->ClipX + XAdjust;
+			const float StockY      = 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+			const float StockXRed   = bRedLeft ? StockXLeft  : StockXRight;
+			const float StockXBlue  = bRedLeft ? StockXRight : StockXLeft;
+
+			// Layout consult (Phase 3.5) — user can move each strip independently.
+			RedStart = NCPlusHUDDrawCall::ResolveScreenPos(RedAlias, Canvas, FVector2D(StockXRed, StockY));
+			BlueStart = NCPlusHUDDrawCall::ResolveScreenPos(BlueAlias, Canvas, FVector2D(StockXBlue, StockY));
+
+			// Per-strip grow direction — derived from RESOLVED screen position, not
+			// the anchor coordinate. Lets dragging the strip across screen-center
+			// (via nchud_drag) auto-flip growth so the visible strip stays on
+			// screen instead of extending off the now-far edge.
+			// Side-defaulted grow direction (the left-side strip grows leftward);
+			// flip only if the default would clip off-screen. See ElimPlusHUD for
+			// full rationale.
+			const float EstRedStripWidth = 5.f * 1.1f * WO_RedPipSize;
+			const float EstBlueStripWidth = 5.f * 1.1f * WO_BluePipSize;
+			if (RedGrowSign < 0.f && RedStart.X - EstRedStripWidth < 0.f) RedGrowSign = +1.f;
+			else if (RedGrowSign > 0.f && RedStart.X + EstRedStripWidth > Canvas->ClipX) RedGrowSign = -1.f;
+			if (BlueGrowSign < 0.f && BlueStart.X - EstBlueStripWidth < 0.f) BlueGrowSign = +1.f;
+			else if (BlueGrowSign > 0.f && BlueStart.X + EstBlueStripWidth > Canvas->ClipX) BlueGrowSign = -1.f;
+		}
 
 		float XOffsetRed  = RedStart.X;
 		float XOffsetBlue = BlueStart.X;
@@ -796,7 +864,8 @@ void AWipeoutHUD::DrawHUD()
 			Draw.NameScale = float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
 			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->PlayerName,
 				PipSize, Draw.NameScale, Draw.NameText, Draw.NameWidth, Draw.NameHeight);
-			*TeamX += GrowSign * 1.1f * PipSize;
+			*TeamX += GrowSign * (bHasBetaGeometry
+				? BetaGeometry.PortraitPitch : 1.1f * PipSize);
 		}
 
 		auto DrawPortraitFinish = [this](const FWipeoutStripDraw& Draw)
@@ -949,6 +1018,49 @@ void AWipeoutHUD::DrawHUD()
 // Compact score/clock module shared by Wipeout, Duel, Shaft Arena and ShockDom.
 // It deliberately carries no mode label: the inherited HUDs do not all represent
 // Wipeout, while the scorebar alias and team-color semantics are shared by them.
+int32 AWipeoutHUD::ResolveBetaTopBarClockSeconds(AUTGameState* GS)
+{
+	if (GS == nullptr) return -1;
+
+	int32 ClockSeconds = -1;
+	if (AWipeoutDamageReplicator* DamageRep = FindDamageReplicator(GetWorld()))
+	{
+		ClockSeconds = DamageRep->GetRoundClockSecondsRemaining();
+	}
+	if (ClockSeconds < 0)
+	{
+		static UClass* CachedRoundCls = nullptr;
+		static UIntProperty* CachedRoundProp = nullptr;
+		UClass* GSCls = GS->GetClass();
+		if (CachedRoundCls != GSCls)
+		{
+			CachedRoundCls = GSCls;
+			CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+		}
+		if (CachedRoundProp)
+		{
+			ClockSeconds = CachedRoundProp->GetPropertyValue_InContainer(GS);
+		}
+	}
+	if (ClockSeconds < 0)
+	{
+		static UClass* CachedRemCls = nullptr;
+		static UIntProperty* CachedRemProp = nullptr;
+		UClass* GSCls = GS->GetClass();
+		if (CachedRemCls != GSCls)
+		{
+			CachedRemCls = GSCls;
+			CachedRemProp = FindField<UIntProperty>(GSCls, TEXT("RemainingTime"));
+		}
+		if (CachedRemProp)
+		{
+			const int32 RT = CachedRemProp->GetPropertyValue_InContainer(GS);
+			if (GS->TimeLimit > 0) ClockSeconds = FMath::Max(0, RT);
+		}
+	}
+	return ClockSeconds;
+}
+
 void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
 	if (!Canvas || !GS || !SmallFont || !MediumFont || !LargeFont) return;
@@ -993,6 +1105,37 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const int32 LeftTeamIndex = bTeam0OnRight ? 1 : 0;
 	const int32 RightTeamIndex = bTeam0OnRight ? 0 : 1;
 	const FLinearColor TeamColors[2] = { Team0Color, Team1Color };
+
+	// Blueprint children of Wipeout participate, while the four known native
+	// AWipeoutHUD-derived modes (and any Blueprint children of them) retain their
+	// existing score bars.
+	if (IsWipeoutBetaTopBarSupported(this) && FNCPlusHUDLayout::WantsBetaTopBar())
+	{
+		int32 TeamCounts[2] = { 0, 0 };
+		const bool bPortraitRound = bShouldDrawPortraits
+			&& (GS->GetMatchState() == MatchState::InProgress
+				|| GS->GetMatchState() == FName(TEXT("RoundCooldown")));
+		if (bPortraitRound)
+		{
+			CountWipeoutPortraitPlayers(GS, TeamCounts[0], TeamCounts[1]);
+			if (NCPlusHUDDrawCall::IsHidden(PortraitAliasFor(0))) TeamCounts[0] = 0;
+			if (NCPlusHUDDrawCall::IsHidden(PortraitAliasFor(1))) TeamCounts[1] = 0;
+		}
+
+		FNCPlusBetaTopBarGeometry Geometry;
+		if (NCPlusBetaTopBar::BuildGeometry(this, Canvas,
+			TeamCounts[LeftTeamIndex], TeamCounts[RightTeamIndex], Geometry))
+		{
+			FNCPlusBetaTopBarCore Core;
+			Core.LeftScore = (LeftTeamIndex == 0) ? Score0 : Score1;
+			Core.RightScore = (RightTeamIndex == 0) ? Score0 : Score1;
+			Core.ClockSeconds = ResolveBetaTopBarClockSeconds(GS);
+			Core.LeftTeamColor = TeamColors[LeftTeamIndex];
+			Core.RightTeamColor = TeamColors[RightTeamIndex];
+			NCPlusBetaTopBar::DrawChassisAndScoreCore(this, Canvas, Geometry, Core);
+			return;
+		}
+	}
 
 	// Three restrained segments replace the old 220px team-name slabs and tails:
 	// score | clock | score. All dimensions honor the existing scorebar Scale.

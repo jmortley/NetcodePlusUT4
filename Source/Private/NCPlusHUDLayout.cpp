@@ -632,16 +632,49 @@ void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
 }
 
 // -----------------------------------------------------------------------------
-// Stock team panel toggle + scoreboard opacity (mirror the StockBottomBar plumbing)
+// Beta top-bar override + stock team-panel toggles + scoreboard opacity
+// (mirror the StockBottomBar plumbing)
 // -----------------------------------------------------------------------------
 
 // Cached so the per-frame DrawHUD call never hits FileExists. -1 = unresolved.
+static int8 GBetaTopBarCache = -1;
 static int8 GStockTeamPanelCache = -1;
 static int8 GAbsoluteElimTeamPanelCache = -1;
 
 static bool NCPlusConfigBool(const FString& Value)
 {
 	return Value.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Value.Equals(TEXT("1"));
+}
+
+bool FNCPlusHUDLayout::WantsBetaTopBar()
+{
+	if (GBetaTopBarCache >= 0)
+	{
+		return GBetaTopBarCache != 0;
+	}
+
+	bool bResult = false;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("BetaTopBar"), Val, ModIni)
+		&& !Val.IsEmpty())
+	{
+		bResult = NCPlusConfigBool(Val);
+	}
+	GBetaTopBarCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetBetaTopBar(bool bBeta)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("BetaTopBar"),
+			bBeta ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GBetaTopBarCache = bBeta ? 1 : 0;
 }
 
 bool FNCPlusHUDLayout::WantsStockTeamPanel()

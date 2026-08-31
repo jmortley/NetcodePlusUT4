@@ -180,6 +180,13 @@ namespace NCDragRects
 		// ~60 tall (bar + tail + clock). ResolvedPos.X is the bar's center.
 		if (Alias == TEXT("scorebar"))
 		{
+			// Beta composes portraits and score/clock into one connected ribbon
+			// driven by the scorebar alias. Use one full-width drag target instead
+			// of the legacy core-only approximation.
+			if (FNCPlusHUDLayout::WantsBetaTopBar())
+			{
+				return { FVector2D(860.f, 84.f), FVector2D(-430.f, 0.f) };
+			}
 			return { FVector2D(600.f, 80.f), FVector2D(-300.f, 0.f) };
 		}
 		// ShockDom A/B/C indicators: 3 squares × ~40 design px + spacing ≈ 200 wide.
@@ -238,6 +245,14 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 						// Draw-call aliases have empty ClassPath in the alias table.
 						if (!NCPlusHUDAliases::GetClassPath(Alias).IsEmpty()) continue;
 						if (NCPlusHUDDrawCall::IsHidden(Alias)) continue;
+						if (FNCPlusHUDLayout::WantsBetaTopBar()
+							&& (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
+								|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")))
+						{
+							// Their placement is owned by the connected scorebar chassis in
+							// Beta; individual portrait aliases still control hide/font/color.
+							continue;
+						}
 
 						// Resolve the anchor's screen position. We can't reuse
 						// NCPlusHUDDrawCall::ResolveScreenPos because it takes a

@@ -170,6 +170,11 @@ private:
 	ECheckBoxState GetStockBottomBarState() const;
 	void OnStockBottomBarChanged(ECheckBoxState NewState);
 
+	// Experimental top-bar override. The legacy team-panel choices remain stored
+	// and become active again as soon as this is disabled.
+	ECheckBoxState GetBetaTopBarState() const;
+	void OnBetaTopBarChanged(ECheckBoxState NewState);
+
 	// Stock top-left team roster (slanted name + HP plates) vs the NCPlus portrait strip.
 	// Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
 	ECheckBoxState GetStockTeamPanelState() const;

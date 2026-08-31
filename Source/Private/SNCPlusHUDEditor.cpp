@@ -434,6 +434,30 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
 			]
 		]
+		// Opt-in experimental top bar. It supersedes the legacy portrait / stock /
+		// Absolute choice without changing it, so unchecking restores that choice.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight()
+			[
+				SNew(SCheckBox)
+				.IsChecked(this, &SNCPlusHUDEditor::GetBetaTopBarState)
+				.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnBetaTopBarChanged)
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Beta tactical ribbon (experimental)")))
+					.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				]
+			]
+			+ SVerticalBox::Slot().AutoHeight().Padding(22,2,0,0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Connected top bar for Wipeout and Elimination+; turn it off to restore the previous style.")))
+				.ColorAndOpacity(FLinearColor(0.62f, 0.62f, 0.62f, 1.f))
+			]
+		]
 		// Stock top-left team roster (slanted name + HP/armor plates) vs the NCPlus
 		// portrait strip. Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
 		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
@@ -1002,6 +1026,21 @@ void SNCPlusHUDEditor::OnStockBottomBarChanged(ECheckBoxState NewState)
 ECheckBoxState SNCPlusHUDEditor::GetStockTeamPanelState() const
 {
 	return FNCPlusHUDLayout::WantsStockTeamPanel() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetBetaTopBarState() const
+{
+	return FNCPlusHUDLayout::WantsBetaTopBar()
+		? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnBetaTopBarChanged(ECheckBoxState NewState)
+{
+	const bool bBeta = (NewState == ECheckBoxState::Checked);
+	FNCPlusHUDLayout::SetBetaTopBar(bBeta);
+	SetStatus(bBeta
+		? TEXT("Team display: Beta top bar enabled (experimental).")
+		: TEXT("Team display: Beta disabled; restored the previous style."));
 }
 
 ECheckBoxState SNCPlusHUDEditor::GetViewerRelativePortraitsState() const
