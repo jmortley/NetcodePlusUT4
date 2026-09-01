@@ -1073,6 +1073,12 @@ extern void UnregisterNCAmpRespawnFix();
 extern void RegisterNCBuffBannerFix();
 extern void UnregisterNCBuffBannerFix();
 
+// Client-only retained-killcam audio ownership. The core ticker remains alive
+// while the replay world is paused, so projectile/beam/ambient loops cannot leak
+// from a hidden instant-replay world. See NCKillcamAudioGuard.cpp.
+extern void RegisterNCKillcamAudioGuard();
+extern void UnregisterNCKillcamAudioGuard();
+
 // Concede vote (gg / F1 / F4): route the local player's action to the server. On a
 // listen host / standalone the local PC IS the authority, so call the vote handler
 // directly; on a net client find our per-player vote channel (owner-only-relevant,
@@ -1359,6 +1365,7 @@ void FNetcodePlus::StartupModule()
 		GSavedInstantReplay = -1;
 		GHudColourTickerHandle = FTicker::GetCoreTicker().AddTicker(
 			FTickerDelegate::CreateStatic(&TickHudTeamColours), 0.0f);
+		RegisterNCKillcamAudioGuard();
 	}
 
 	// Hub advisor: on dedicated servers, auto-spawn the version gate in ADVISOR
@@ -1416,6 +1423,7 @@ void FNetcodePlus::ShutdownModule()
 		FTicker::GetCoreTicker().RemoveTicker(GHudColourTickerHandle);
 		GHudColourTickerHandle.Reset();
 	}
+	UnregisterNCKillcamAudioGuard();
 	RestoreInstantReplayAfterJoinGuard();
 	GIRGuardWorld.Reset();
 	GIRGuardSawMatchInProgress = false;

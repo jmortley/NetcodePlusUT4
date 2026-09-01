@@ -4,7 +4,6 @@
 #include "UTProj_ShockBall.h"
 #include "UTPlusProj_ShockBall.generated.h"
 
-class UAudioComponent;
 class UParticleSystemComponent;
 
 /**
@@ -132,14 +131,6 @@ protected:
 	void SetRecoveryWorldStaticIgnored(bool bIgnore);
 	void RestartRecoveryProjectile(AUTProjectile* Projectile, const FVector& Location, const FVector& Velocity);
 	FVector GetAuthoritativeTarget() const;
-
-	// ---- Instant-replay audio ownership ----
-	/** The retained killcam world is loaded and then paused while hidden. Blueprint auto-activated
-	 *  travel loops spawned during that bootstrap otherwise remain active indefinitely. Remember only
-	 *  the components we stop so they can be restarted if this exact killcam world is shown later. */
-	bool bKillcamAudioSuppressed;
-	TArray<TWeakObjectPtr<UAudioComponent>> KillcamAudioComponentsToResume;
-	void UpdateKillcamAudioSuppression();
 
 	// ---- Curve diagnostics (ncp.ShockDebug) — logging state only, zero behaviour change ----
 	// The open-air mid-flight bend ("swoosh") has never been captured because every existing
