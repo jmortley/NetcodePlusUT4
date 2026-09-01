@@ -44,6 +44,30 @@
 #include "Misc/ConfigCacheIni.h"       // FConfigFile — Mod.ini perf knobs
 #include "Misc/Paths.h"                // FPaths::GameSavedDir
 #include "Containers/Ticker.h"
+#include "Engine/NetConnection.h"
+#include "Engine/NetDriver.h"
+
+namespace
+{
+	bool IsLockedPlayerReadyCountdown(const AUTGameMode* GameMode)
+	{
+		if (GameMode == nullptr || GameMode->GetWorld() == nullptr)
+		{
+			return false;
+		}
+
+		const ANCReadyUpState* ReadyState = ANCReadyUpState::Find(GameMode->GetWorld());
+		if (ReadyState == nullptr || !ReadyState->bCountdownLocked)
+		{
+			return false;
+		}
+
+		const FName State = GameMode->GetMatchState();
+		return State == MatchState::WaitingToStart
+			|| State == MatchState::PlayerIntro
+			|| State == MatchState::CountdownToBegin;
+	}
+}
 
 ANCPlusCTFGameMode::ANCPlusCTFGameMode(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -103,6 +127,10 @@ void ANCPlusCTFGameMode::InitGame(const FString& MapName, const FString& Options
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
 	NCReadyUp::Initialize(this);
+	// Auto-pause must be configured before a locked ready countdown can begin.
+	// The remaining perf values are harmless to load here and are consumed once
+	// live play starts; loading only in HandleMatchHasStarted was too late.
+	LoadCTFPerfConfig();
 
 	// Auto-add the warmup-roam mutator (all NCPlusCTF, incl. iCTF). `mutate warmup`
 	// lets players roam the map invulnerable + fire-disabled during warmup; it strips
@@ -235,11 +263,13 @@ void ANCPlusCTFGameMode::BeginPlay()
 	if (HasAuthority())
 	{
 		FNCPlusCTFRatingSystem::InitDatabase(GetWorld());
+		StartAutoPauseWatch();
 	}
 }
 
 void ANCPlusCTFGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	StopAutoPauseWatch();
 	NCPlusHostPause::CancelDeferredUnpause(this);
 	if (AutoPauseResumeTicker.IsValid())
 	{
@@ -287,8 +317,7 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 		// mid-match caster join — a synchronous DB read (plus a first-timer
 		// INSERT + fsync) on the game thread while everyone plays. A spectator
 		// who later enters play is loaded by EnsureRatingLoadedForPlayer via
-		// ChangeTeam instead. The auto-pause resume below stays ungated — an
-		// awaited drop must clear the pause even if they land as a spectator.
+		// ChangeTeam instead.
 		if (RatingSystem.IsValid() && !UTPS->bOnlySpectator)
 		{
 			RatingSystem->LoadPlayerFromDB(GetWorld(), Uid);
@@ -303,10 +332,19 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 
 		// Auto-pause: an awaited drop just rejoined — resume once everyone we're
 		// waiting on is back.
-		if (bAutoPaused && CTFGameState
-			&& (CTFGameState->IsMatchInProgress() || CTFGameState->IsMatchInOvertime()))
+		// Reconcile any logical/physical auto-pause, including one started during
+		// the locked F5 countdown. PostLogin still runs while the world is paused.
+		if (bAutoPaused && CTFGameState)
 		{
 			const bool bWasAwaited = AutoPauseAwaitIds.Contains(Uid);
+			const uint8* ExpectedTeam = AutoPauseReadyCountdownTeams.Find(Uid);
+			if (ExpectedTeam == nullptr)
+			{
+				ExpectedTeam = PugRosterTeam.Find(Uid.ToLower());
+			}
+			const bool bReturnedAsParticipant = !UTPS->bIsABot && !UTPS->bOnlySpectator
+				&& UTPS->GetTeamNum() <= 1
+				&& (ExpectedTeam == nullptr || *ExpectedTeam == UTPS->GetTeamNum());
 			bool bRestoredPhysicalPause = false;
 			if (AWorldSettings* WS = GetWorldSettings())
 			{
@@ -322,6 +360,23 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 
 			if (bWasAwaited)
 			{
+				// Merely reconnecting as a spectator must not resume into a 4v5/3v4.
+				// The pause-immune watcher will reconcile once ChangeTeam places this
+				// exact ID back into its active (and, when pinned, assigned) team slot.
+				if (!bReturnedAsParticipant)
+				{
+					const FString WaitingReason = FString::Printf(
+						TEXT("Waiting for %s to return to their team"), *UTPS->PlayerName);
+					if (bAutoPauseResumeCountdownActive)
+					{
+						CancelAutoPauseResumeCountdown(WaitingReason);
+					}
+					else
+					{
+						PublishAutoPausePaused(WaitingReason);
+					}
+					return;
+				}
 				AutoPauseAwaitIds.Remove(Uid);
 				UE_LOG(LogGameMode, Warning,
 					TEXT("NCPlusCTF auto-pause: %s rejoined (%d still out)"),
@@ -337,7 +392,7 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 						AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
 					if (bAutoPauseResumeCountdownActive)
 					{
-						BeginAutoPauseResumeCountdown(WaitingReason);
+						CancelAutoPauseResumeCountdown(WaitingReason);
 					}
 					else
 					{
@@ -357,7 +412,7 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 					AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
 				if (bAutoPauseResumeCountdownActive)
 				{
-					BeginAutoPauseResumeCountdown(WaitingReason);
+					CancelAutoPauseResumeCountdown(WaitingReason);
 				}
 				else
 				{
@@ -457,6 +512,8 @@ void ANCPlusCTFGameMode::HandleMatchHasEnded()
 			CompleteAutoPauseResume(TEXT("Match ended"));
 		}
 		AutoPauseTrackedIds.Reset();
+		AutoPauseReadyCountdownIds.Reset();
+		AutoPauseReadyCountdownTeams.Reset();
 	}
 	Super::HandleMatchHasEnded();
 
@@ -628,32 +685,97 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 	// rejoin (or a manual unpause is requested). Server-only; uses the engine world-pause
 	// (WorldSettings->Pauser) — the same primitive as the `pause` command.
 	// Runs BEFORE Super (the leaver's PlayerState is still intact here).
+	const bool bLivePausePhase = CTFGameState
+		&& (CTFGameState->IsMatchInProgress() || CTFGameState->IsMatchInOvertime());
+	ANCReadyUpState* LockedReadyState = IsLockedPlayerReadyCountdown(this)
+		? ANCReadyUpState::Find(GetWorld()) : nullptr;
+	CaptureLockedReadyParticipants(LockedReadyState);
+	const bool bPauseEligiblePhase = bLivePausePhase || LockedReadyState != nullptr;
 	if (HasAuthority() && bAutoPauseOnDrop && bIsPugMatch && Exiting && CTFGameState
-		&& (CTFGameState->IsMatchInProgress() || CTFGameState->IsMatchInOvertime()))
+		&& bPauseEligiblePhase)
 	{
 		AUTPlayerState* LeavePS = Cast<AUTPlayerState>(Exiting->PlayerState);
 		if (LeavePS && !LeavePS->bIsABot && LeavePS->UniqueId.IsValid())
 		{
+			// During the locked pre-match countdown, only the frozen ready roster is
+			// expected. A late roster addition cannot create a new awaited ID.
 			const FString LeaveId = LeavePS->UniqueId.ToString();
-			if (!LeavePS->bOnlySpectator && LeavePS->GetTeamNum() <= 1)
+			const bool bExpectedParticipant = bLivePausePhase
+				|| AutoPauseReadyCountdownIds.Contains(LeaveId);
+			if (bExpectedParticipant)
 			{
-				AutoPauseTrackedIds.Add(LeaveId);
-			}
-			bool bSameIdStillPresent = false;
-			for (APlayerState* OtherPS : CTFGameState->PlayerArray)
-			{
-				AUTPlayerState* OtherUTPS = Cast<AUTPlayerState>(OtherPS);
-				if (OtherUTPS != nullptr && OtherUTPS != LeavePS
-					&& !OtherUTPS->IsPendingKillPending() && OtherUTPS->UniqueId.IsValid()
-					&& OtherUTPS->UniqueId.ToString().Equals(LeaveId, ESearchCase::IgnoreCase))
+				if (!LeavePS->bOnlySpectator && LeavePS->GetTeamNum() <= 1)
 				{
-					bSameIdStillPresent = true;
-					break;
+					AutoPauseTrackedIds.Add(LeaveId);
 				}
-			}
-			if (AutoPauseTrackedIds.Contains(LeaveId) && !bSameIdStillPresent)
-			{
-				BeginOrHoldAutoPause(LeaveId, LeavePS->PlayerName, LeavePS);
+				const uint8* ExpectedReturnTeam = AutoPauseReadyCountdownTeams.Find(LeaveId);
+				if (ExpectedReturnTeam == nullptr)
+				{
+					ExpectedReturnTeam = PugRosterTeam.Find(LeaveId.ToLower());
+				}
+				bool bSameIdStillPresent = false;
+				for (APlayerState* OtherPS : CTFGameState->PlayerArray)
+				{
+					AUTPlayerState* OtherUTPS = Cast<AUTPlayerState>(OtherPS);
+					if (OtherUTPS != nullptr && OtherUTPS != LeavePS
+						&& !OtherUTPS->IsPendingKillPending() && !OtherUTPS->bIsInactive
+						&& !OtherUTPS->bIsABot && !OtherUTPS->bOnlySpectator
+						&& OtherUTPS->UniqueId.IsValid() && OtherUTPS->GetTeamNum() <= 1
+						&& (ExpectedReturnTeam == nullptr
+							|| *ExpectedReturnTeam == OtherUTPS->GetTeamNum())
+						&& OtherUTPS->UniqueId.ToString().Equals(LeaveId, ESearchCase::IgnoreCase))
+					{
+						bSameIdStillPresent = true;
+						break;
+					}
+				}
+				if (AutoPauseTrackedIds.Contains(LeaveId) && !bSameIdStillPresent)
+				{
+					bool bCancelEmptyReadyCountdown = false;
+					if (!bLivePausePhase && LockedReadyState != nullptr
+						&& GetMatchState() == MatchState::WaitingToStart)
+					{
+						int32 RemainingParticipants = 0;
+						for (APlayerState* OtherPS : CTFGameState->PlayerArray)
+						{
+							AUTPlayerState* OtherUTPS = Cast<AUTPlayerState>(OtherPS);
+							if (OtherUTPS != nullptr && OtherUTPS != LeavePS
+								&& !OtherUTPS->IsPendingKillPending() && !OtherUTPS->bIsInactive
+								&& !OtherUTPS->bIsABot && !OtherUTPS->bOnlySpectator
+								&& OtherUTPS->UniqueId.IsValid() && OtherUTPS->GetTeamNum() <= 1)
+							{
+								const FString OtherId = OtherUTPS->UniqueId.ToString();
+								const uint8* ExpectedTeam = AutoPauseReadyCountdownTeams.Find(OtherId);
+								if (AutoPauseReadyCountdownIds.Contains(OtherId)
+									&& !AutoPauseAwaitIds.Contains(OtherId)
+									&& (ExpectedTeam == nullptr
+										|| *ExpectedTeam == OtherUTPS->GetTeamNum()))
+								{
+									++RemainingParticipants;
+								}
+							}
+						}
+						bCancelEmptyReadyCountdown = RemainingParticipants == 0;
+					}
+
+					if (bCancelEmptyReadyCountdown)
+					{
+						LockedReadyState->CancelCountdown();
+						AutoPauseReadyCountdownIds.Reset();
+						AutoPauseReadyCountdownTeams.Reset();
+						CTFGameState->SetRemainingTime(0.f);
+						if (bAutoPaused)
+						{
+							CompleteAutoPauseResume(TEXT("Ready countdown emptied"));
+						}
+						UE_LOG(LogGameMode, Warning,
+							TEXT("NCPlusCTF auto-pause: final ready participant left - countdown cancelled"));
+					}
+					else
+					{
+						BeginOrHoldAutoPause(LeaveId, LeavePS->PlayerName, LeavePS);
+					}
+				}
 			}
 		}
 	}
@@ -719,20 +841,26 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 APlayerState* ANCPlusCTFGameMode::FindAutoPauseMarker(const APlayerState* Excluded) const
 {
 	// Prefer a present human participant who hasn't dropped. A spectator/bot is
-	// a safe physical fallback; Logout rehomes untracked fallback markers without
-	// adding them to the exact-ID participant wait.
+	// a safe physical fallback. As a final fallback, a hard-silent participant
+	// whose controller has not reached Logout yet can still hold Pauser; teardown
+	// will rehome it again. Logout never adds fallback markers to the exact-ID wait.
 	if (!CTFGameState) return nullptr;
 	APlayerState* Fallback = nullptr;
+	APlayerState* AwaitedFallback = nullptr;
 	for (APlayerState* PS : CTFGameState->PlayerArray)
 	{
 		AUTPlayerState* UTPS = Cast<AUTPlayerState>(PS);
-		if (!UTPS || UTPS == Excluded || UTPS->IsPendingKillPending())
+		if (!UTPS || UTPS == Excluded || UTPS->IsPendingKillPending() || UTPS->bIsInactive)
 		{
 			continue;
 		}
 		if (UTPS->UniqueId.IsValid()
 			&& AutoPauseAwaitIds.Contains(UTPS->UniqueId.ToString()))
 		{
+			if (AwaitedFallback == nullptr && !UTPS->bOnlySpectator && !UTPS->bIsABot)
+			{
+				AwaitedFallback = UTPS;
+			}
 			continue;
 		}
 		if (!UTPS->bOnlySpectator && !UTPS->bIsABot && UTPS->UniqueId.IsValid())
@@ -744,11 +872,12 @@ APlayerState* ANCPlusCTFGameMode::FindAutoPauseMarker(const APlayerState* Exclud
 			Fallback = UTPS;
 		}
 	}
-	return Fallback;
+	return Fallback != nullptr ? Fallback : AwaitedFallback;
 }
 
 void ANCPlusCTFGameMode::BeginOrHoldAutoPause(const FString& LeaverId,
-	const FString& LeaverName, const APlayerState* ExitingPlayerState)
+	const FString& LeaverName, const APlayerState* ExitingPlayerState,
+	APlayerState* PreferredPauseMarker)
 {
 	AWorldSettings* WS = GetWorldSettings();
 	if (!WS || LeaverId.IsEmpty()) return;
@@ -761,7 +890,13 @@ void ANCPlusCTFGameMode::BeginOrHoldAutoPause(const FString& LeaverId,
 	// (Re)point the pause marker at a still-present player — never a leaver (their
 	// PlayerState is torn down in Super::Logout). With no marker, retain the
 	// logical pause + exact IDs so the first reconnect can restore the freeze.
-	APlayerState* Marker = FindAutoPauseMarker(ExitingPlayerState);
+	APlayerState* Marker = PreferredPauseMarker;
+	AUTPlayerState* PreferredUTPS = Cast<AUTPlayerState>(PreferredPauseMarker);
+	if (Marker == nullptr || Marker == ExitingPlayerState || Marker->IsPendingKillPending()
+		|| (PreferredUTPS != nullptr && PreferredUTPS->bIsInactive))
+	{
+		Marker = FindAutoPauseMarker(ExitingPlayerState);
+	}
 	if (!Marker)
 	{
 		const bool bWasAutoPaused = bAutoPaused;
@@ -822,6 +957,279 @@ void ANCPlusCTFGameMode::BeginOrHoldAutoPause(const FString& LeaverId,
 			TEXT("NCPlusCTF auto-pause: %s also dropped while paused — awaiting=%d"),
 			*LeaverName, AutoPauseAwaitIds.Num());
 	}
+}
+
+void ANCPlusCTFGameMode::StartAutoPauseWatch()
+{
+	if (!HasAuthority() || !bAutoPauseOnDrop || !bIsPugMatch
+		|| AutoPauseDetectTicker.IsValid())
+	{
+		return;
+	}
+
+	AutoPauseDetectTicker = FTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateUObject(this, &ANCPlusCTFGameMode::TickAutoPauseDetect),
+		0.25f);
+	UE_LOG(LogGameMode, Log,
+		TEXT("NCPlusCTF auto-pause: connection watcher armed (detect %.1fs)"),
+		PauseDropDetectSeconds);
+}
+
+void ANCPlusCTFGameMode::CaptureLockedReadyParticipants(
+	const ANCReadyUpState* ReadyState)
+{
+	if (ReadyState == nullptr)
+	{
+		return;
+	}
+	for (AUTPlayerState* PS : ReadyState->ReadyPlayers)
+	{
+		if (PS != nullptr && !PS->IsPendingKillPending() && !PS->bIsInactive
+			&& !PS->bIsABot && !PS->bOnlySpectator
+			&& PS->UniqueId.IsValid() && PS->GetTeamNum() <= 1)
+		{
+			const FString Uid = PS->UniqueId.ToString();
+			AutoPauseReadyCountdownIds.Add(Uid);
+			// Follow an authoritative pre-live balance while the original ready
+			// PlayerState is still present, then freeze the expected team on drop.
+			if (!AutoPauseAwaitIds.Contains(Uid))
+			{
+				AutoPauseReadyCountdownTeams.Add(Uid, PS->GetTeamNum());
+			}
+		}
+	}
+}
+
+void ANCPlusCTFGameMode::RefreshReadyParticipantTeamsFromActivePlayers()
+{
+	if (CTFGameState == nullptr || AutoPauseReadyCountdownIds.Num() == 0)
+	{
+		return;
+	}
+
+	struct FReadyTeamCandidate
+	{
+		uint8 Team = 255;
+		int32 Count = 0;
+		bool bAmbiguous = false;
+	};
+	TMap<FString, FReadyTeamCandidate> Candidates;
+	for (APlayerState* BasePS : CTFGameState->PlayerArray)
+	{
+		AUTPlayerState* PS = Cast<AUTPlayerState>(BasePS);
+		if (PS == nullptr || PS->IsPendingKillPending() || PS->bIsInactive
+			|| PS->bIsABot || PS->bOnlySpectator || !PS->UniqueId.IsValid()
+			|| PS->GetTeamNum() > 1)
+		{
+			continue;
+		}
+		const FString Uid = PS->UniqueId.ToString();
+		if (!AutoPauseReadyCountdownIds.Contains(Uid) || AutoPauseAwaitIds.Contains(Uid))
+		{
+			continue;
+		}
+
+		FReadyTeamCandidate& Candidate = Candidates.FindOrAdd(Uid);
+		if (Candidate.Count == 0)
+		{
+			Candidate.Team = PS->GetTeamNum();
+		}
+		else if (Candidate.Team != PS->GetTeamNum())
+		{
+			Candidate.bAmbiguous = true;
+		}
+		++Candidate.Count;
+	}
+
+	for (const TPair<FString, FReadyTeamCandidate>& Pair : Candidates)
+	{
+		// Fast reconnects can briefly leave two PlayerStates. Only replace the
+		// frozen value when every active participant copy agrees on the side.
+		if (Pair.Value.Count > 0 && !Pair.Value.bAmbiguous)
+		{
+			AutoPauseReadyCountdownTeams.Add(Pair.Key, Pair.Value.Team);
+		}
+	}
+}
+
+void ANCPlusCTFGameMode::StopAutoPauseWatch()
+{
+	if (AutoPauseDetectTicker.IsValid())
+	{
+		FTicker::GetCoreTicker().RemoveTicker(AutoPauseDetectTicker);
+		AutoPauseDetectTicker.Reset();
+	}
+}
+
+bool ANCPlusCTFGameMode::TickAutoPauseDetect(float /*DeltaTime*/)
+{
+	if (!HasAuthority() || !bAutoPauseOnDrop || !bIsPugMatch || CTFGameState == nullptr)
+	{
+		return true;
+	}
+
+	const bool bLockedReadyCountdown = IsLockedPlayerReadyCountdown(this);
+	const bool bPauseEligiblePhase = CTFGameState->IsMatchInProgress()
+		|| CTFGameState->IsMatchInOvertime()
+		|| bLockedReadyCountdown;
+	if (!bPauseEligiblePhase)
+	{
+		// An unlocked warmup is either pre-countdown or a cancelled countdown, so
+		// discard its snapshot. Preserve it across halftime/intermission: a late
+		// second-half drop still needs the original team check. Match end performs
+		// terminal cleanup explicitly in HandleMatchHasEnded.
+		if (GetMatchState() == MatchState::WaitingToStart)
+		{
+			AutoPauseReadyCountdownIds.Reset();
+			AutoPauseReadyCountdownTeams.Reset();
+		}
+		return true;
+	}
+
+	UWorld* World = GetWorld();
+	UNetDriver* Driver = World ? World->GetNetDriver() : nullptr;
+	if (Driver == nullptr)
+	{
+		return true;
+	}
+
+	const double NetNow = Driver->Time;
+	ANCReadyUpState* LockedReadyState = bLockedReadyCountdown
+		? ANCReadyUpState::Find(World) : nullptr;
+	CaptureLockedReadyParticipants(LockedReadyState);
+
+	struct FObservedParticipantConnection
+	{
+		AUTPlayerState* Representative = nullptr;
+		FString PlayerName;
+		double BestSilenceSeconds = 0.0;
+		bool bHasSample = false;
+		bool bHealthy = false;
+	};
+	TMap<FString, FObservedParticipantConnection> ObservedConnections;
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = Cast<APlayerController>(It->Get());
+		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		if (PS == nullptr || PS->bIsInactive || PS->bIsABot || PS->bOnlySpectator
+			|| !PS->UniqueId.IsValid() || PS->GetTeamNum() > 1)
+		{
+			continue;
+		}
+
+		// Null for a listen host's local player; only remote connections need a
+		// silence check. NetDriver time continues while the game world is paused.
+		UNetConnection* Connection = Cast<UNetConnection>(PC->Player);
+		if (Connection == nullptr)
+		{
+			continue;
+		}
+
+		const FString Uid = PS->UniqueId.ToString();
+		if (LockedReadyState != nullptr && !AutoPauseReadyCountdownIds.Contains(Uid)
+			&& !AutoPauseAwaitIds.Contains(Uid))
+		{
+			continue;
+		}
+		const uint8* ExpectedTeam = AutoPauseReadyCountdownTeams.Find(Uid);
+		if (ExpectedTeam == nullptr)
+		{
+			ExpectedTeam = PugRosterTeam.Find(Uid.ToLower());
+		}
+		if (ExpectedTeam != nullptr && *ExpectedTeam != PS->GetTeamNum())
+		{
+			continue;
+		}
+
+		const double SilenceSeconds = NetNow - Connection->LastReceiveTime;
+		FObservedParticipantConnection& Observation = ObservedConnections.FindOrAdd(Uid);
+		if (!Observation.bHasSample || SilenceSeconds < Observation.BestSilenceSeconds)
+		{
+			Observation.Representative = PS;
+			Observation.PlayerName = PS->PlayerName;
+			Observation.BestSilenceSeconds = SilenceSeconds;
+			Observation.bHasSample = true;
+		}
+		// During a fast reconnect the old and new controllers can coexist. Treat the
+		// ID as healthy if any qualifying connection is receiving traffic.
+		Observation.bHealthy = Observation.bHealthy
+			|| SilenceSeconds <= PauseDropDetectSeconds;
+	}
+
+	TArray<FString> RecoveredIds;
+	TArray<FString> NewlySilentIds;
+	for (const TPair<FString, FObservedParticipantConnection>& Pair : ObservedConnections)
+	{
+		if (Pair.Value.bHealthy)
+		{
+			if (AutoPauseAwaitIds.Contains(Pair.Key))
+			{
+				RecoveredIds.Add(Pair.Key);
+			}
+		}
+		else if (!AutoPauseAwaitIds.Contains(Pair.Key))
+		{
+			NewlySilentIds.Add(Pair.Key);
+		}
+	}
+
+	for (const FString& Uid : RecoveredIds)
+	{
+		const FObservedParticipantConnection* Observation = ObservedConnections.Find(Uid);
+		AutoPauseAwaitIds.Remove(Uid);
+		if (Observation != nullptr)
+		{
+			UE_LOG(LogGameMode, Warning,
+				TEXT("NCPlusCTF auto-pause: %s connection recovered (%d still out)"),
+				*Observation->PlayerName, AutoPauseAwaitIds.Num());
+		}
+	}
+
+	// Add the full silent set first so marker selection cannot choose another
+	// connection that this same observation pass already knows is dead.
+	for (const FString& Uid : NewlySilentIds)
+	{
+		AutoPauseAwaitIds.Add(Uid);
+	}
+	for (const FString& Uid : NewlySilentIds)
+	{
+		const FObservedParticipantConnection* Observation = ObservedConnections.Find(Uid);
+		if (Observation == nullptr)
+		{
+			continue;
+		}
+		UE_LOG(LogGameMode, Warning,
+			TEXT("NCPlusCTF auto-pause: %s silent %.1fs - pausing before Logout"),
+			*Observation->PlayerName, Observation->BestSilenceSeconds);
+		// The silent controller is still alive here and can safely hold Pauser until
+		// Logout rehomes it. This guarantees world time freezes even if it is the
+		// last remaining marker.
+		BeginOrHoldAutoPause(Uid, Observation->PlayerName, nullptr,
+			Observation->Representative);
+	}
+
+	if (NewlySilentIds.Num() == 0 && RecoveredIds.Num() > 0 && bAutoPaused)
+	{
+		if (AutoPauseAwaitIds.Num() == 0)
+		{
+			BeginAutoPauseResumeCountdown(TEXT("All disconnected players returned"));
+		}
+		else
+		{
+			const FString WaitingReason = FString::Printf(
+				TEXT("Waiting for %d disconnected player%s"),
+				AutoPauseAwaitIds.Num(), AutoPauseAwaitIds.Num() == 1 ? TEXT("") : TEXT("s"));
+			if (bAutoPauseResumeCountdownActive)
+			{
+				CancelAutoPauseResumeCountdown(WaitingReason);
+			}
+			else
+			{
+				PublishAutoPausePaused(WaitingReason);
+			}
+		}
+	}
+	return true;
 }
 
 TArray<FString> ANCPlusCTFGameMode::GetSortedAutoPauseAwaitIds() const
@@ -1205,14 +1613,17 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 	ReadFloat(TEXT("CTFRespawnWaitSmall"),     CTFRespawnWaitSmall);
 	ReadInt(TEXT("CTFSmallGameMaxPlayers"),    CTFSmallGameMaxPlayers);
 	ReadBool(TEXT("AutoPauseOnDrop"),          bAutoPauseOnDrop);
+	ReadFloat(TEXT("PauseDropDetectSeconds"),  PauseDropDetectSeconds);
+	PauseDropDetectSeconds = FMath::Clamp(PauseDropDetectSeconds, 1.0f, 30.0f);
 
 	UE_LOG(LogGameMode, Warning,
-		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f respawn=%.2f autoPause=%s resumeCountdown=%ds"),
+		TEXT("NCPlusCTF perf config: enabled=%s shadow=%s objW=%.2f feeder=%.2f minPresence=%.2f roleAware=%s roleStr=%.2f combatW=%.1f respawn=%.2f autoPause=%s pauseDetect=%.1fs resumeCountdown=%ds"),
 		CTFPerfConfig.bEnabled ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.bShadow ? TEXT("true") : TEXT("false"),
 		CTFPerfConfig.ObjectiveWeight, CTFPerfConfig.FeederPenalty, CTFRatingMinPresenceFrac,
 		CTFPerfConfig.bRoleAware ? TEXT("true") : TEXT("false"), CTFPerfConfig.RoleWeightStrength, CTFRoleCombatWeight, CTFRespawnWait,
-		bAutoPauseOnDrop ? TEXT("true") : TEXT("false"), AutoPauseResumeCountdownSec);
+		bAutoPauseOnDrop ? TEXT("true") : TEXT("false"), PauseDropDetectSeconds,
+		AutoPauseResumeCountdownSec);
 }
 
 void ANCPlusCTFGameMode::LoadSpawnConfig()
@@ -3228,6 +3639,27 @@ void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolM
 
 void ANCPlusCTFGameMode::HandleMatchHasStarted()
 {
+	// Preserve the locked-ready identity/team snapshot into live play. A hard
+	// network loss in the final detection window may not cross the silence
+	// threshold until just after StartMatch; retaining this data still rejects a
+	// spectator or wrong-side reconnect (including an unlinked player). Read only
+	// the frozen ReadyPlayers pointers, not PlayerArray duplicates from reconnects.
+	const bool bSecondHalfStart = CTFGameState != nullptr
+		&& NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf"));
+	if (HasAuthority() && AutoPauseReadyCountdownIds.Num() > 0)
+	{
+		if (bSecondHalfStart)
+		{
+			// Side switching applies to current/replacement PlayerStates; the original
+			// ReadyPlayers pointer may have been destroyed by a first-half reconnect.
+			RefreshReadyParticipantTeamsFromActivePlayers();
+		}
+		else
+		{
+			CaptureLockedReadyParticipants(ANCReadyUpState::Find(GetWorld()));
+		}
+	}
+
 	// Epic restarts every player synchronously inside Super::HandleMatchHasStarted.
 	// Load spawn tuning and discard warmup queue/history before that happens so
 	// the opening live spawns use the configured algorithm and remain recorded.
@@ -3253,6 +3685,20 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 	if (!bHasHalftime || !NCPlusReflection::GetBool(CTFGameState, TEXT("bSecondHalf")))
 	{
 		Super::HandleMatchHasStarted();
+	}
+	if (HasAuthority() && AutoPauseReadyCountdownIds.Num() > 0)
+	{
+		// Super may perform the final stock balance. Initial start trusts the frozen
+		// pointers; later halves aggregate current active copies without accepting a
+		// spectator or an ambiguous duplicate for that ID.
+		if (bSecondHalfStart)
+		{
+			RefreshReadyParticipantTeamsFromActivePlayers();
+		}
+		else
+		{
+			CaptureLockedReadyParticipants(ANCReadyUpState::Find(GetWorld()));
+		}
 	}
 
 	// Spawn CTF stats replicator for scoreboard (grabs, accuracy).
@@ -3308,10 +3754,10 @@ void ANCPlusCTFGameMode::HandleMatchHasStarted()
 			bInstagib ? TEXT("iCTF") : TEXT("CTF"));
 
 		// Stamp the match-start clock + intended full length for the leaver
-		// presence threshold, and load the runtime perf knobs (once per map).
+		// presence threshold. Runtime perf knobs were loaded during InitGame so
+		// AutoPauseOnDrop is already authoritative during the ready countdown.
 		MatchStartWorldTime = GetWorld()->GetTimeSeconds();
 		MatchFullDurationSeconds = (bHasHalftime ? float(TimeLimit) * 2.f : float(TimeLimit)) * 60.f;
-		LoadCTFPerfConfig();
 
 		// Apply the regulation respawn wait, keyed on match size so bot-hosted AND
 		// hub-hosted (ruleset) games both get it automatically from MaxPlayers - no

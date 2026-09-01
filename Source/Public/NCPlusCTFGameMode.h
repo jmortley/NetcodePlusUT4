@@ -14,6 +14,7 @@
 #include "NCPlusCTFGameMode.generated.h"
 
 class ANCAutoPauseState;
+class ANCReadyUpState;
 
 // Safe property access across DLL boundary — uses runtime UProperty reflection
 // instead of direct member access which has wrong offsets due to layout mismatch.
@@ -359,7 +360,7 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	float MatchStartWorldTime = 0.f;
 	float MatchFullDurationSeconds = 0.f;
 
-	/** CTF perf knobs, loaded from Mod.ini [UTPUGS_STATS] in HandleMatchHasStarted. */
+	/** CTF perf knobs, loaded from Mod.ini [UTPUGS_STATS] during InitGame. */
 	FNCPlusCTFPerfConfig CTFPerfConfig;
 
 	/** Fraction of MatchFullDurationSeconds a leaver must have been present for
@@ -395,6 +396,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  Mod.ini [UTPUGS_STATS] AutoPauseOnDrop. */
 	bool bAutoPauseOnDrop = true;
 
+	/** Seconds a participant connection may remain silent before the pause-immune
+	 *  watcher treats it as a hard drop. This avoids waiting for engine Logout and
+	 *  also covers the locked F5 countdown. Mod.ini [UTPUGS_STATS]
+	 *  PauseDropDetectSeconds; default 4.0. */
+	float PauseDropDetectSeconds = 4.0f;
+
 	/** Pause-safe automatic resume countdown. Defaults to the shared host-pause
 	 *  value and reads [NetcodePlus] UnpauseCountdownSec from Mod.ini. */
 	int32 AutoPauseResumeCountdownSec = 7;
@@ -420,6 +427,16 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  transitions so returning-as-spectator cannot evade drop tracking. */
 	TSet<FString> AutoPauseTrackedIds;
 
+	/** Exact UniqueIds whose ready votes formed the current locked countdown.
+	 *  Unlike ReadyPlayers' actor pointers, these survive reconnects and ensure a
+	 *  second drop before live play is still caught. */
+	TSet<FString> AutoPauseReadyCountdownIds;
+
+	/** Last authoritative team for each present locked-ready ID, including unlinked
+	 *  players absent from PugRosterTeam. It follows legitimate pre-live balancing,
+	 *  then freezes while an ID is awaited so a wrong-side reconnect cannot resume. */
+	TMap<FString, uint8> AutoPauseReadyCountdownTeams;
+
 	/** Logical exact-ID wait is active but no live PlayerState can hold Pauser. */
 	bool bAutoPauseDormantNoMarker = false;
 
@@ -433,6 +450,10 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	float AutoPauseResumeEndRealTime = 0.0f;
 	bool bAutoPauseResumeCountdownActive = false;
 	bool bForceClearingPauseActor = false;
+
+	/** Pause-immune participant connection watcher. Polls at 4 Hz while this game
+	 *  mode exists and acts only during live play or a locked ready countdown. */
+	FDelegateHandle AutoPauseDetectTicker;
 
 	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
 	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
@@ -458,11 +479,17 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  resuming is an explicit clear after a pause-immune authoritative countdown.
 	 *  A new tracked drop cancels an active resume and republishes Paused state. */
 	void BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName,
-		const APlayerState* ExitingPlayerState);
+		const APlayerState* ExitingPlayerState,
+		APlayerState* PreferredPauseMarker = nullptr);
 	void BeginAutoPauseResumeCountdown(const FString& Reason);
 	void CancelAutoPauseResumeCountdown(const FString& Reason);
 	void CompleteAutoPauseResume(const FString& Reason);
 	bool TickAutoPauseResume(float DeltaTime);
+	void StartAutoPauseWatch();
+	void StopAutoPauseWatch();
+	bool TickAutoPauseDetect(float DeltaTime);
+	void CaptureLockedReadyParticipants(const ANCReadyUpState* ReadyState);
+	void RefreshReadyParticipantTeamsFromActivePlayers();
 	ANCAutoPauseState* GetOrCreateAutoPauseState();
 	void PublishAutoPausePaused(const FString& Reason);
 	TArray<FString> GetSortedAutoPauseAwaitIds() const;
