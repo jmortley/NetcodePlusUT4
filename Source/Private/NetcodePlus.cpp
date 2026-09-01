@@ -60,6 +60,11 @@ static TWeakPtr<SUTCosmeticSelector> ActiveCosmeticSelector;
 static TWeakPtr<SNCPlusHUDEditor>      ActiveHUDEditor;
 static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
 
+/** Ready aliases are tracked by pointer so shutdown never unregisters a command
+ *  owned by another plugin if the generic `ready` name was already occupied. */
+static IConsoleObject* GReadyConsoleCommand = nullptr;
+static IConsoleObject* GNCPReadyConsoleCommand = nullptr;
+
 /** PreLoadMap delegate handle — self-heals the menu input state across level loads. */
 static FDelegateHandle GNCPPreLoadMapHandle;
 static FDelegateHandle GNCPSkinPreLoadMapHandle;
@@ -1128,6 +1133,33 @@ static void HandleConcedeStart(const TArray<FString>& /*Args*/)   { ConcedeComma
 static void HandleConcedeConfirm(const TArray<FString>& /*Args*/) { ConcedeCommand(NCConcede::kActionConfirmOnly); }
 static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeCommand(NCConcede::kActionCancel); }
 
+// Same path as F5 -> Ready in SUTNCPlusMenu: AUTPlayerController::Mutate uses
+// UT4's existing reliable ServerMutate RPC, and ANCReadyUpMutator consumes
+// `nc_ready` authoritatively. No new RPC or replicated state is introduced.
+static void HandleReady(const TArray<FString>& /*Args*/)
+{
+	UWorld* World = nullptr;
+	if (GEngine)
+	{
+		for (const FWorldContext& Context : GEngine->GetWorldContexts())
+		{
+			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+			{
+				World = Context.World();
+				break;
+			}
+		}
+	}
+	AUTPlayerController* PC = World
+		? Cast<AUTPlayerController>(World->GetFirstPlayerController()) : nullptr;
+	// Dedicated console/RCON must never ready whichever remote PC happens to be first.
+	if (PC == nullptr || !PC->IsLocalController())
+	{
+		return;
+	}
+	PC->Mutate(TEXT("nc_ready"));
+}
+
 void FNetcodePlus::StartupModule()
 {
 	// This module's startup work is entirely runtime-facing.  Cook commandlets still
@@ -1210,6 +1242,27 @@ void FNetcodePlus::StartupModule()
 		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleConcedeStart),
 		ECVF_Default
 	);
+
+	GNCPReadyConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("ncpready"),
+		TEXT("Mark the local player ready (same action as F5 -> Ready)"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleReady),
+		ECVF_Default
+	);
+	if (IConsoleManager::Get().FindConsoleObject(TEXT("ready")) == nullptr)
+	{
+		GReadyConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
+			TEXT("ready"),
+			TEXT("Mark the local player ready (same action as F5 -> Ready)"),
+			FConsoleCommandWithArgsDelegate::CreateStatic(&HandleReady),
+			ECVF_Default
+		);
+	}
+	else
+	{
+		UE_LOG(LogLoad, Warning,
+			TEXT("netcodeplus: console command 'ready' already exists; use 'ncpready'"));
+	}
 
 	IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("concedeconfirm"),
@@ -1515,6 +1568,17 @@ void FNetcodePlus::ShutdownModule()
 
 	IConsoleObject* CmdGG = IConsoleManager::Get().FindConsoleObject(TEXT("gg"));
 	if (CmdGG) { IConsoleManager::Get().UnregisterConsoleObject(CmdGG, false); }
+
+	if (GReadyConsoleCommand)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(GReadyConsoleCommand, false);
+		GReadyConsoleCommand = nullptr;
+	}
+	if (GNCPReadyConsoleCommand)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(GNCPReadyConsoleCommand, false);
+		GNCPReadyConsoleCommand = nullptr;
+	}
 
 	IConsoleObject* CmdCC = IConsoleManager::Get().FindConsoleObject(TEXT("concedeconfirm"));
 	if (CmdCC) { IConsoleManager::Get().UnregisterConsoleObject(CmdCC, false); }
