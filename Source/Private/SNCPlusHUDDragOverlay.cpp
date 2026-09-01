@@ -6,6 +6,7 @@
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
 #include "NCPlusBetaTopBar.h"
+#include "ElimPlusHUD.h"
 #include "Engine/Canvas.h"
 #include "Engine/GameViewportClient.h"
 #include "Rendering/DrawElements.h"
@@ -175,18 +176,26 @@ namespace NCDragRects
 		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
 			|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy"))
 		{
+			if (NCPlusBetaTopBar::IsActiveForHUD(HUD))
+			{
+				const bool bLeftBank = Alias == TEXT("portrait_red")
+					|| Alias == TEXT("portrait_team");
+				// ResolvedPos is the bank's inside edge. Include a little overlap at
+				// that edge so the handle remains easy to grab around the chamfer.
+				return { FVector2D(320.f, 100.f),
+					bLeftBank ? FVector2D(-310.f, -10.f) : FVector2D(-10.f, -10.f) };
+			}
 			return { FVector2D(450.f, 130.f), FVector2D(0.f, 0.f) };
 		}
 		// Scorebar: BarWidth*2 + ScoreBoxWidth*2 + GapWidth*2 ≈ 600 design px wide,
 		// ~60 tall (bar + tail + clock). ResolvedPos.X is the bar's center.
 		if (Alias == TEXT("scorebar"))
 		{
-			// Beta composes portraits and score/clock into one connected ribbon
-			// driven by the scorebar alias. Use one full-width drag target instead
-			// of the legacy core-only approximation.
+			// Beta exposes separate portrait-bank handles; this one owns the compact
+			// score/clock core and remains the parent transform for the whole ribbon.
 			if (NCPlusBetaTopBar::IsActiveForHUD(HUD))
 			{
-				return { FVector2D(860.f, 84.f), FVector2D(-430.f, 0.f) };
+				return { FVector2D(440.f, 84.f), FVector2D(-220.f, 0.f) };
 			}
 			return { FVector2D(600.f, 80.f), FVector2D(-300.f, 0.f) };
 		}
@@ -240,21 +249,26 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 				if (VS.X > 0 && VS.Y > 0)
 				{
 					const float RenderScale = float(VS.Y) / 1080.f;
+					const float BetaViewScale = FMath::Min(float(VS.X) / 1920.f,
+						float(VS.Y) / 1080.f);
 
 					for (FName Alias : NCPlusHUDAliases::GetAllAliases())
 					{
 						// Draw-call aliases have empty ClassPath in the alias table.
 						if (!NCPlusHUDAliases::GetClassPath(Alias).IsEmpty()) continue;
 						if (NCPlusHUDDrawCall::IsHidden(Alias)) continue;
-						if (NCPlusBetaTopBar::IsActiveForHUD(HUD)
-							&& (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
-								|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")))
+						const bool bPortraitAlias = Alias == TEXT("portrait_red")
+							|| Alias == TEXT("portrait_blue") || Alias == TEXT("portrait_team")
+							|| Alias == TEXT("portrait_enemy");
+						const bool bBetaTopBarForHUD = NCPlusBetaTopBar::IsActiveForHUD(HUD);
+						if (bBetaTopBarForHUD && bPortraitAlias)
 						{
-							// Their placement is owned by the connected scorebar chassis in
-							// Beta; individual portrait aliases still control hide/font/color.
-							continue;
+							const bool bFixedColorPair = HUD->IsA(AElimPlusHUD::StaticClass())
+								|| !FNCPlusHUDLayout::WantsViewerRelativePortraits();
+							const bool bFixedAlias = Alias == TEXT("portrait_red")
+								|| Alias == TEXT("portrait_blue");
+							if (bFixedColorPair != bFixedAlias) continue;
 						}
-
 						// Resolve the anchor's screen position. We can't reuse
 						// NCPlusHUDDrawCall::ResolveScreenPos because it takes a
 						// UCanvas (which is protected on AHUD); inline the math.
@@ -262,17 +276,77 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 						const FVector2D AnchorCoords = FNCPlusHUDLayout::AnchorToScreenCoords(Anchor);
 						const FNCPlusHUDElement* LayoutElem = FNCPlusHUDLayout::GetLive().Find(Alias);
 						const FVector2D Offset = LayoutElem ? LayoutElem->Offset : NCPlusHUDAliases::GetStockOffset(Alias);
-						const FVector2D ResolvedPos(
+						FVector2D ResolvedPos(
 							AnchorCoords.X * float(VS.X) + Offset.X * RenderScale,
 							AnchorCoords.Y * float(VS.Y) + Offset.Y * RenderScale);
 
+						const bool bBetaTopBar = bBetaTopBarForHUD;
+						const bool bBetaPortrait = bBetaTopBar
+							&& (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
+								|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy"));
+						if (bBetaPortrait)
+						{
+							// Mirror NCPlusBetaTopBar's parent + relative-bank transform so
+							// drag handles stay on the cards after moving/scaling scorebar.
+							const ENCPlusHUDAnchor StockPortraitAnchor =
+								NCPlusHUDAliases::GetStockAnchor(Alias);
+							const FVector2D StockPortraitCoords =
+								FNCPlusHUDLayout::AnchorToScreenCoords(StockPortraitAnchor);
+							const FVector2D StockPortraitOffset =
+								NCPlusHUDAliases::GetStockOffset(Alias);
+							const FVector2D StockPortraitPos(
+								StockPortraitCoords.X * float(VS.X) + StockPortraitOffset.X * RenderScale,
+								StockPortraitCoords.Y * float(VS.Y) + StockPortraitOffset.Y * RenderScale);
+							const FVector2D PortraitDelta = ResolvedPos - StockPortraitPos;
+
+							const FName ScoreAlias(TEXT("scorebar"));
+							const ENCPlusHUDAnchor ScoreAnchor =
+								NCPlusHUDDrawCall::GetEffectiveAnchor(ScoreAlias);
+							const FVector2D ScoreCoords =
+								FNCPlusHUDLayout::AnchorToScreenCoords(ScoreAnchor);
+							const FNCPlusHUDElement* ScoreElem =
+								FNCPlusHUDLayout::GetLive().Find(ScoreAlias);
+							const FVector2D ScoreOffset = ScoreElem
+								? ScoreElem->Offset : NCPlusHUDAliases::GetStockOffset(ScoreAlias);
+							const FVector2D ScorePos(
+								ScoreCoords.X * float(VS.X) + ScoreOffset.X * RenderScale,
+								ScoreCoords.Y * float(VS.Y) + ScoreOffset.Y * RenderScale);
+							const float UnitScale = BetaViewScale
+								* NCPlusHUDDrawCall::GetScale(ScoreAlias)
+								* HUD->GetHUDWidgetScaleOverride();
+							const bool bLeftBank = Alias == TEXT("portrait_red")
+								|| Alias == TEXT("portrait_team");
+							ResolvedPos = FVector2D(
+								ScorePos.X + (bLeftBank ? -1.f : 1.f) * (190.f + 15.f) * UnitScale,
+								ScorePos.Y + 22.f * BetaViewScale + 1.f * UnitScale) + PortraitDelta;
+						}
+
 						const NCDragRects::FInfo Info = NCDragRects::Get(Alias, HUD);
+						float ElementScale = NCPlusHUDDrawCall::GetScale(Alias);
+						if (bBetaPortrait)
+						{
+							ElementScale *= NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))
+								* HUD->GetHUDWidgetScaleOverride();
+						}
+						else if (bBetaTopBar && Alias == TEXT("scorebar"))
+						{
+							ElementScale *= HUD->GetHUDWidgetScaleOverride();
+							// Match the Beta core's intrinsic top inset and outer bevel.
+							// At small scales the old handle could sit above the visible bar.
+							ResolvedPos.Y += 22.f * BetaViewScale
+								- 5.f * BetaViewScale * ElementScale;
+						}
+						const bool bBetaTopBarElement = bBetaTopBar
+							&& (bPortraitAlias || Alias == TEXT("scorebar"));
+						const float ElementResolutionScale = bBetaTopBarElement
+							? BetaViewScale : RenderScale;
 
 						FOverlayElement E;
 						E.Alias      = Alias;
 						E.Label      = NCPlusHUDAliases::GetDisplayName(Alias).ToString();
-						E.ScreenPos  = ResolvedPos + (Info.AnchorOffsetDesignPx * RenderScale);
-						E.ScreenSize = Info.SizeDesignPx * RenderScale;
+						E.ScreenPos  = ResolvedPos
+							+ (Info.AnchorOffsetDesignPx * ElementResolutionScale * ElementScale);
+						E.ScreenSize = Info.SizeDesignPx * ElementResolutionScale * ElementScale;
 						CachedElements.Add(E);
 					}
 				}

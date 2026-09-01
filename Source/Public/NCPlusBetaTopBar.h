@@ -24,11 +24,31 @@ struct NETCODEPLUS_API FNCPlusBetaTopBarCore
 	FString CenterFallback = TEXT("VS");
 	FLinearColor LeftTeamColor = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
 	FLinearColor RightTeamColor = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
+	// Portrait aliases can opt out of the scorebar's dynamic team palette. Keep
+	// their rails/card frames independent from the score/clock panels so every
+	// nchud Team Color toggle has one unambiguous owner.
+	FLinearColor LeftPortraitColor = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
+	FLinearColor RightPortraitColor = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
 };
 
-/** Resolved screen-space geometry for one complete Beta ribbon. The nearest
- *  left portrait ends at LeftPortraitAnchorX; the nearest right portrait starts
- *  at RightPortraitAnchorX. Portrait ordinals then grow away from the score core. */
+/** One independently configurable portrait bank. Scorebar position/scale remains
+ *  the parent transform; the portrait alias contributes a relative X/Y adjustment,
+ *  size multiplier, opacity, font and team-color choice. */
+struct NETCODEPLUS_API FNCPlusBetaTopBarPortraitGeometry
+{
+	FName Alias = NAME_None;
+	float UnitScale = 1.f;
+	float Width = 0.f;
+	float Height = 0.f;
+	float Pitch = 0.f;
+	float Y = 0.f;
+	float AnchorX = 0.f;
+	float Opacity = 1.f;
+	int32 Count = 0;
+};
+
+/** Resolved screen-space geometry for one complete Beta ribbon. Each bank stores
+ *  the inside-edge anchor nearest the score core; portrait ordinals grow outward. */
 struct NETCODEPLUS_API FNCPlusBetaTopBarGeometry
 {
 	FVector2D Center = FVector2D::ZeroVector;
@@ -39,15 +59,11 @@ struct NETCODEPLUS_API FNCPlusBetaTopBarGeometry
 	float CoreRight = 0.f;
 	float CoreHeight = 0.f;
 
-	float PortraitWidth = 0.f;
-	float PortraitHeight = 0.f;
-	float PortraitPitch = 0.f;
-	float PortraitY = 0.f;
-	float LeftPortraitAnchorX = 0.f;
-	float RightPortraitAnchorX = 0.f;
-	int32 PortraitCount[2] = { 0, 0 };
+	FNCPlusBetaTopBarPortraitGeometry Portrait[2];
 
 	FVector2D GetPortraitPosition(ENCPlusBetaTopBarSide Side, int32 Ordinal) const;
+	const FNCPlusBetaTopBarPortraitGeometry& GetPortraitGeometry(
+		ENCPlusBetaTopBarSide Side) const;
 };
 
 namespace NCPlusBetaTopBar
@@ -57,10 +73,16 @@ namespace NCPlusBetaTopBar
 	 *  a Wipeout -> CTF/Duel travel cannot hide the legacy portrait handles. */
 	NETCODEPLUS_API bool IsActiveForHUD(const class AUTHUD* HUD);
 
-	/** Resolve the scorebar alias and derive a single connected 1080p-design-space
-	 *  composition. The scorebar Scale and global HUD scale resize core and cards
-	 *  together. Hidden is deliberately not consulted: portrait placement remains
-	 *  stable when a user hides only the score/clock core. */
+	/** Resolve the scorebar parent transform plus per-side portrait alias controls
+	 *  into one connected 1080p-design-space composition. Hidden is deliberately
+	 *  not consulted: portrait placement remains stable when a user hides only the
+	 *  score/clock core. */
+	NETCODEPLUS_API bool BuildGeometry(class AUTHUD* HUD, class UCanvas* Canvas,
+		int32 LeftPortraitCount, int32 RightPortraitCount,
+		FName LeftPortraitAlias, FName RightPortraitAlias,
+		FNCPlusBetaTopBarGeometry& OutGeometry);
+
+	/** Compatibility overload for callers that use fixed red/blue presentation. */
 	NETCODEPLUS_API bool BuildGeometry(class AUTHUD* HUD, class UCanvas* Canvas,
 		int32 LeftPortraitCount, int32 RightPortraitCount,
 		FNCPlusBetaTopBarGeometry& OutGeometry);

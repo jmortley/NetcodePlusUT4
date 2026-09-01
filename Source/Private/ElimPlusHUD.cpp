@@ -34,6 +34,13 @@ namespace
 		const int32 PeriodsToSkip = FMath::FloorToInt((Now - Deadline) / Interval) + 1;
 		return Deadline + float(PeriodsToSkip) * Interval;
 	}
+
+	bool IsBetaRosterPreviewState(FName State)
+	{
+		return State == MatchState::WaitingToStart
+			|| State == MatchState::PlayerIntro
+			|| State == MatchState::CountdownToBegin;
+	}
 }
 
 constexpr float AElimPlusHUD::SnapshotSampleInterval;
@@ -637,6 +644,12 @@ void AElimPlusHUD::DrawHUD()
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	const bool bScoreboardIsUp = ScoreboardIsUp();
 	const bool bBetaTopBar = NCPlusBetaTopBar::IsActiveForHUD(this);
+	const FName CurrentMatchState = GS ? GS->GetMatchState() : NAME_None;
+	const bool bBetaRosterPreview = bBetaTopBar
+		&& IsBetaRosterPreviewState(CurrentMatchState);
+	const bool bPortraitMatchState = CurrentMatchState == MatchState::InProgress
+		|| CurrentMatchState == FName(TEXT("RoundCooldown"))
+		|| bBetaRosterPreview;
 	if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(SpectatorSlideOutWidget))
 	{
 		// The editor applies Beta live. Keep the slide-out's independently drawn
@@ -684,9 +697,7 @@ void AElimPlusHUD::DrawHUD()
 
 	// Keep portraits up through the round-win window ("RoundCooldown") so the
 	// enemy team's final health stays visible after they win — not just InProgress.
-	if (!bScoreboardIsUp && GS
-		&& (GS->GetMatchState() == MatchState::InProgress
-			|| GS->GetMatchState() == FName(TEXT("RoundCooldown"))))
+	if (!bScoreboardIsUp && GS && bPortraitMatchState)
 	{
 		RedPlayerCount = 0;
 		BluePlayerCount = 0;
@@ -729,48 +740,50 @@ void AElimPlusHUD::DrawHUD()
 		// the connected chassis from that same prepared frame so deaths do not leave
 		// empty outer slots or full-roster wings behind the compacted row.
 		const int32 BetaRedCardCount = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"))
-			? 0 : PlayerSnapshot.AliveCountTeam[0];
+			? 0 : (bBetaRosterPreview
+				? PlayerSnapshot.TeamPlayerIndices[0].Num() : PlayerSnapshot.AliveCountTeam[0]);
 		const int32 BetaBlueCardCount = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"))
-			? 0 : PlayerSnapshot.AliveCountTeam[1];
+			? 0 : (bBetaRosterPreview
+				? PlayerSnapshot.TeamPlayerIndices[1].Num() : PlayerSnapshot.AliveCountTeam[1]);
 		const bool bHasBetaGeometry = bBetaTopBar
 			&& NCPlusBetaTopBar::BuildGeometry(this, Canvas,
-				BetaRedCardCount, BetaBlueCardCount, BetaGeometry);
+				BetaRedCardCount, BetaBlueCardCount,
+				TEXT("portrait_red"), TEXT("portrait_blue"), BetaGeometry);
 		const float LegacyBasePipSize = (32 + (64 * TeammateScale))
 			* GetHUDWidgetScaleOverride() * RenderScale;
-		const float BasePipSize = bHasBetaGeometry
-			? BetaGeometry.PortraitWidth : LegacyBasePipSize;
 		// Phase 3.11: per-strip Scale override. Layout entries can independently
 		// resize red vs blue (e.g. user wants their team larger).
-		// Beta is a connected chassis, so its geometry uses one scorebar Scale;
-		// the portrait aliases still own font, opacity, color and visibility.
-		const float RedScale = bHasBetaGeometry
-			? 1.f : NCPlusHUDDrawCall::GetScale(TEXT("portrait_red"));
-		const float BlueScale = bHasBetaGeometry
-			? 1.f : NCPlusHUDDrawCall::GetScale(TEXT("portrait_blue"));
-		const float RedPipSize  = BasePipSize * RedScale;
-		const float BluePipSize = BasePipSize * BlueScale;
-		const float XAdjust = BasePipSize * 1.1f;
+		const float RedScale = NCPlusHUDDrawCall::GetScale(TEXT("portrait_red"));
+		const float BlueScale = NCPlusHUDDrawCall::GetScale(TEXT("portrait_blue"));
+		const FNCPlusBetaTopBarPortraitGeometry* BetaRedGeometry = bHasBetaGeometry
+			? &BetaGeometry.GetPortraitGeometry(ENCPlusBetaTopBarSide::Left) : nullptr;
+		const FNCPlusBetaTopBarPortraitGeometry* BetaBlueGeometry = bHasBetaGeometry
+			? &BetaGeometry.GetPortraitGeometry(ENCPlusBetaTopBarSide::Right) : nullptr;
+		const float RedPipSize = BetaRedGeometry
+			? BetaRedGeometry->Width : LegacyBasePipSize * RedScale;
+		const float BluePipSize = BetaBlueGeometry
+			? BetaBlueGeometry->Width : LegacyBasePipSize * BlueScale;
+		const float XAdjust = LegacyBasePipSize * 1.1f;
 
 		// Stock fallback positions.
 		const float StockXRed = bHasBetaGeometry
-			? BetaGeometry.LeftPortraitAnchorX
-			: 0.4f * Canvas->ClipX - XAdjust - BasePipSize;
+			? BetaRedGeometry->AnchorX
+			: 0.4f * Canvas->ClipX - XAdjust - LegacyBasePipSize;
 		const float StockXBlue = bHasBetaGeometry
-			? BetaGeometry.RightPortraitAnchorX
+			? BetaBlueGeometry->AnchorX
 			: 0.6f * Canvas->ClipX + XAdjust;
-		const float StockY = bHasBetaGeometry
-			? BetaGeometry.PortraitY
-			: 0.005f * Canvas->ClipY * GetHUDWidgetScaleOverride() * RenderScale;
+		const float LegacyStockY = 0.005f * Canvas->ClipY
+			* GetHUDWidgetScaleOverride() * RenderScale;
 
 		// Phase 3.5 layout consult.
 		const FVector2D RedStart = bHasBetaGeometry
-			? FVector2D(StockXRed, StockY)
+			? FVector2D(StockXRed, BetaRedGeometry->Y)
 			: NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_red"), Canvas,
-				FVector2D(StockXRed, StockY));
+				FVector2D(StockXRed, LegacyStockY));
 		const FVector2D BlueStart = bHasBetaGeometry
-			? FVector2D(StockXBlue, StockY)
+			? FVector2D(StockXBlue, BetaBlueGeometry->Y)
 			: NCPlusHUDDrawCall::ResolveScreenPos(TEXT("portrait_blue"), Canvas,
-				FVector2D(StockXBlue, StockY));
+				FVector2D(StockXBlue, LegacyStockY));
 		const bool bHideRed  = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"));
 		const bool bHideBlue = NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"));
 
@@ -778,15 +791,16 @@ void AElimPlusHUD::DrawHUD()
 		// grows rightward, matching conventional CTF/elim layouts). Only flip
 		// when the default direction would push the strip off-screen — handles
 		// edge-anchored placements (TopLeft / TopRight) and aggressive drags.
-		const float EstStripWidth = bHasBetaGeometry
-			? 5.f * BetaGeometry.PortraitPitch
-			: 5.f * XAdjust;  // 5 pips × spacing — worst-case team size
+		const float EstRedStripWidth = bHasBetaGeometry
+			? 5.f * BetaRedGeometry->Pitch : 5.f * XAdjust;
+		const float EstBlueStripWidth = bHasBetaGeometry
+			? 5.f * BetaBlueGeometry->Pitch : 5.f * XAdjust;
 		float RedGrowSign  = -1.f;  // red default: extend leftward from anchor
 		float BlueGrowSign = +1.f;  // blue default: extend rightward from anchor
 		if (!bHasBetaGeometry)
 		{
-			if (RedStart.X  - EstStripWidth < 0.f)           RedGrowSign  = +1.f;
-			if (BlueStart.X + EstStripWidth > Canvas->ClipX) BlueGrowSign = -1.f;
+			if (RedStart.X  - EstRedStripWidth < 0.f)           RedGrowSign  = +1.f;
+			if (BlueStart.X + EstBlueStripWidth > Canvas->ClipX) BlueGrowSign = -1.f;
 		}
 
 		float XOffsetRed  = RedStart.X;
@@ -814,6 +828,7 @@ void AElimPlusHUD::DrawHUD()
 			float NameScale = 1.f;
 			float NameWidth = 0.f;
 			float NameHeight = 0.f;
+			float Opacity = 1.f;
 			bool bDrawVitals = false;
 			float VitalsScale = 1.f;
 			float VitalsWidth = 0.f;
@@ -895,7 +910,7 @@ void AElimPlusHUD::DrawHUD()
 
 			// In elim, dead = stays dead until round end. Hide portrait entirely
 			// so the strip reflows toward the center as players die.
-			if (!bPlayerAlive)
+			if (!bPlayerAlive && !bBetaRosterPreview)
 			{
 				continue;
 			}
@@ -913,6 +928,12 @@ void AElimPlusHUD::DrawHUD()
 			const float XOffset = *XOffsetForTeam;
 			FElimStripDraw& Draw = PortraitDraws[PortraitDraws.AddDefaulted()];
 			Draw.Player = FramePlayer;
+			if (bBetaRosterPreview)
+			{
+				// A pre-round player may not possess a pawn yet; show the roster card
+				// as ready instead of stamping a misleading elimination X on it.
+				Draw.Player.bAlive = true;
+			}
 			Draw.X = XOffset;
 			Draw.Y = YForTeam;
 			Draw.PipSize = PipSize;
@@ -923,10 +944,11 @@ void AElimPlusHUD::DrawHUD()
 				? FName(TEXT("portrait_blue")) : FName(TEXT("portrait_red"));
 			Draw.NameFont = NCPlusHUDFonts::Resolve(PortraitAlias, this, SmallFont);
 			if (!Draw.NameFont) Draw.NameFont = SmallFont;
+			Draw.Opacity = NCPlusHUDDrawCall::GetOpacity(PortraitAlias);
 			const float NameFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
 			const float TeamScale = (PreTeamIdx == 1) ? BlueScale : RedScale;
 			Draw.NameScale = bHasBetaGeometry
-				? BetaGeometry.UnitScale * 0.44f * NameFontExtra
+				? BetaGeometry.UnitScale * TeamScale * 0.44f * NameFontExtra
 				: float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
 			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->PlayerName,
 				PipSize, Draw.NameScale, Draw.NameText, Draw.NameWidth, Draw.NameHeight);
@@ -949,7 +971,7 @@ void AElimPlusHUD::DrawHUD()
 					const float PortraitTextScale = NCPlusHUDDrawCall::GetScale(PortraitAlias);
 					const float PipFontExtra = NCPlusHUDFonts::ResolveScale(PortraitAlias, 1.f);
 					Draw.VitalsScale = bHasBetaGeometry
-						? BetaGeometry.UnitScale * 0.7f * PipFontExtra
+						? BetaGeometry.UnitScale * TeamScale * 0.7f * PipFontExtra
 						: float(Canvas->SizeY) / 1080.f * 0.7f
 							* PortraitTextScale * PipFontExtra;
 					FElimPipCache& PC = PipCacheByPS.FindOrAdd(UTPS);
@@ -1019,7 +1041,9 @@ void AElimPlusHUD::DrawHUD()
 					ColorBlend   = t;
 				}
 
-				const float ChipScale = float(Canvas->SizeY) / 1080.0f * 0.55f;
+				const float ChipScale = bHasBetaGeometry
+					? BetaGeometry.UnitScale * TeamScale * 0.55f
+					: float(Canvas->SizeY) / 1080.0f * 0.55f;
 
 				// Rebuild the chip FText + measured width only when the displayed value
 				// changes (stable mid-match; only the 4s match-end count-up churns it).
@@ -1054,7 +1078,8 @@ void AElimPlusHUD::DrawHUD()
 
 			// Advance the column offset for the next portrait
 			const float PipPitch = bHasBetaGeometry
-				? BetaGeometry.PortraitPitch : 1.1f * PipSize;
+				? (TeamIdx == 0 ? BetaRedGeometry->Pitch : BetaBlueGeometry->Pitch)
+				: 1.1f * PipSize;
 			if (TeamIdx == 0) XOffsetRed  += RedGrowSign  * PipPitch;
 			else              XOffsetBlue += BlueGrowSign * PipPitch;
 		}
@@ -1067,13 +1092,14 @@ void AElimPlusHUD::DrawHUD()
 				? Draw.Y + PipHeight + 1.f * BetaGeometry.UnitScale
 				: Draw.Y + 2.f;
 			NCPlusHUDDrawCall::DrawOutlinedText(Canvas, Draw.NameFont, Draw.NameText,
-				NameX, NameY, Draw.NameScale, FLinearColor::White);
+				NameX, NameY, Draw.NameScale, FLinearColor::White,
+				FLinearColor::Black, Draw.Opacity);
 			if (Draw.bSoleSurvivor)
 			{
 				const float Pulse = 0.5f + 0.5f * FMath::Sin(GetWorld()->TimeSeconds * 2.f * PI);
 				FLinearColor PulseColor = FMath::Lerp(FLinearColor::White,
 					FLinearColor(1.f, 1.f, 0.4f, 1.f), Pulse);
-				PulseColor.A = 0.9f;
+				PulseColor.A = 0.9f * Draw.Opacity;
 				const float BorderW = 2.f;
 				Canvas->SetLinearDrawColor(PulseColor);
 				Canvas->DrawTile(Canvas->DefaultTexture, Draw.X, Draw.Y, Draw.PipSize, BorderW, 0, 0, 1, 1);
@@ -1088,7 +1114,8 @@ void AElimPlusHUD::DrawHUD()
 					? NameY + Draw.NameHeight * Draw.NameScale + 1.f * BetaGeometry.UnitScale
 					: Draw.Y + PipHeight + 2.f;
 				NCPlusHUDDrawCall::DrawOutlinedText(Canvas, TinyFont, Draw.EloText, ChipX,
-					ChipY, Draw.EloScale, Draw.EloColor);
+					ChipY, Draw.EloScale, Draw.EloColor,
+					FLinearColor::Black, Draw.Opacity);
 			}
 		};
 		// Keep the public virtual complete-card contract for any future native
@@ -1264,7 +1291,8 @@ void AElimPlusHUD::DrawHUD()
 void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
 	if (!Canvas || !SmallFont || !MediumFont || !LargeFont) return;
-	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
+	const bool bBetaTopBar = NCPlusBetaTopBar::IsActiveForHUD(this);
+	if (!bBetaTopBar && NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 
@@ -1276,6 +1304,11 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 
 	FLinearColor Team0Color = FLinearColor(0.8f, 0.05f, 0.05f, 1.f);
 	FLinearColor Team1Color = FLinearColor(0.05f, 0.1f, 0.9f, 1.f);
+	FLinearColor PortraitTeamColors[2] =
+	{
+		FLinearColor(0.8f, 0.05f, 0.05f, 1.f),
+		FLinearColor(0.05f, 0.1f, 0.9f, 1.f),
+	};
 	bool bCustomColors = false;
 	const bool bUseTeamColor = NCPlusHUDDrawCall::GetUseTeamColor(TEXT("scorebar"));
 
@@ -1293,6 +1326,15 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 			bCustomColors = true;
 		Team1Color = TC;
 	}
+	const FName PortraitAliases[2] = { TEXT("portrait_red"), TEXT("portrait_blue") };
+	for (int32 TeamIndex = 0; TeamIndex < 2; ++TeamIndex)
+	{
+		if (NCPlusHUDDrawCall::GetUseTeamColor(PortraitAliases[TeamIndex])
+			&& GS->Teams.IsValidIndex(TeamIndex) && GS->Teams[TeamIndex])
+		{
+			PortraitTeamColors[TeamIndex] = GS->Teams[TeamIndex]->TeamColor;
+		}
+	}
 
 	static const FString CustomTeam0Name(TEXT("Phayder (R)"));
 	static const FString CustomTeam1Name(TEXT("Liandri (B)"));
@@ -1304,28 +1346,33 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 	const int32 Score0 = GS->Teams.IsValidIndex(0) && GS->Teams[0] ? GS->Teams[0]->Score : 0;
 	const int32 Score1 = GS->Teams.IsValidIndex(1) && GS->Teams[1] ? GS->Teams[1]->Score : 0;
 
-	if (NCPlusBetaTopBar::IsActiveForHUD(this))
+	if (bBetaTopBar)
 	{
 		// DrawTeamScoreBar runs before the portrait pass. Prepare/reuse the same
 		// 120 Hz roster snapshot here so chassis slots and visible cards agree.
 		BuildPlayerSnapshot(GS, GetScorerPlayerState());
-		// The portrait pass below only draws during InProgress/RoundCooldown, so
-		// outside those states the wings must collapse rather than hold empty
-		// warmup backplates. Mirrors Wipeout's bPortraitRound gate.
-		const bool bPortraitRound = GS->GetMatchState() == MatchState::InProgress
-			|| GS->GetMatchState() == FName(TEXT("RoundCooldown"));
 		int32 TeamCardCounts[2] = { 0, 0 };
-		if (bPortraitRound)
+		// Beta is the compact roster itself, so keep it populated in warmup and at
+		// 00:00 instead of drawing decorative empty wings around the score core.
+		const FName CurrentMatchState = GS->GetMatchState();
+		const bool bRosterPreview = IsBetaRosterPreviewState(CurrentMatchState);
+		const bool bRosterActive = bRosterPreview
+			|| CurrentMatchState == MatchState::InProgress
+			|| CurrentMatchState == FName(TEXT("RoundCooldown"));
+		if (bRosterActive)
 		{
-			TeamCardCounts[0] = PlayerSnapshot.AliveCountTeam[0];
-			TeamCardCounts[1] = PlayerSnapshot.AliveCountTeam[1];
-			if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"))) TeamCardCounts[0] = 0;
-			if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"))) TeamCardCounts[1] = 0;
+			TeamCardCounts[0] = bRosterPreview
+				? PlayerSnapshot.TeamPlayerIndices[0].Num() : PlayerSnapshot.AliveCountTeam[0];
+			TeamCardCounts[1] = bRosterPreview
+				? PlayerSnapshot.TeamPlayerIndices[1].Num() : PlayerSnapshot.AliveCountTeam[1];
 		}
+		if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_red"))) TeamCardCounts[0] = 0;
+		if (NCPlusHUDDrawCall::IsHidden(TEXT("portrait_blue"))) TeamCardCounts[1] = 0;
 
 		FNCPlusBetaTopBarGeometry Geometry;
 		if (NCPlusBetaTopBar::BuildGeometry(this, Canvas,
-			TeamCardCounts[0], TeamCardCounts[1], Geometry))
+			TeamCardCounts[0], TeamCardCounts[1],
+			PortraitAliases[0], PortraitAliases[1], Geometry))
 		{
 			int32 RoundTime = -1;
 			static UClass* BetaClockClass = nullptr;
@@ -1348,6 +1395,8 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 			Core.ClockSeconds = RoundTime;
 			Core.LeftTeamColor = Team0Color;
 			Core.RightTeamColor = Team1Color;
+			Core.LeftPortraitColor = PortraitTeamColors[0];
+			Core.RightPortraitColor = PortraitTeamColors[1];
 			NCPlusBetaTopBar::DrawChassisAndScoreCore(
 				this, Canvas, Geometry, Core);
 			return;
@@ -1535,7 +1584,8 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 			const float BetaUnitScale = FMath::Max(0.01f, ViewScale
 				* NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))
 				* GetHUDWidgetScaleOverride());
-			State.TextScale = BetaUnitScale / FMath::Max(0.01f, HeightScale);
+			State.TextScale = BetaUnitScale * NCPlusHUDDrawCall::GetScale(State.Alias)
+				/ FMath::Max(0.01f, HeightScale);
 		}
 		else
 		{
@@ -1568,13 +1618,10 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 		FLinearColor PlateColor = TeamBGColor;
 		if (bBetaPortrait)
 		{
-			// Keep the team identity in a restrained graphite blend so the
-			// portraits read as one continuous tactical ribbon instead of eight
-			// saturated blocks.
-			PlateColor = FLinearColor(
-				FMath::Clamp(0.020f + 0.24f * TeamBGColor.R, 0.f, 1.f),
-				FMath::Clamp(0.028f + 0.24f * TeamBGColor.G, 0.f, 1.f),
-				FMath::Clamp(0.038f + 0.24f * TeamBGColor.B, 0.f, 1.f), 1.f);
+			// The mock confines team hue to the hairline/frame. Keep the broad
+			// portrait backing neutral so HDR/custom team colors cannot become a
+			// pastel slab behind the character art.
+			PlateColor = FLinearColor(0.003f, 0.008f, 0.013f, 1.f);
 		}
 		Canvas->SetLinearDrawColor(Tinted(PlateColor));
 		Canvas->DrawTile(Canvas->DefaultTexture, XOffset, YOffset, PipSize, PipHeight, 0, 0, 1, 1);
@@ -1607,7 +1654,7 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 	}
 
 	// Layer 4: Team-colored frame overlay
-	if (ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 3)
+	if ((ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 3) && !bBetaPortrait)
 	{
 		Canvas->SetLinearDrawColor(Tinted(FLinearColor::White));
 		const FCanvasIcon& OverlayIcon = State.TeamNum == 1 ? BlueTeamOverlay : RedTeamOverlay;
@@ -1616,7 +1663,7 @@ void AElimPlusHUD::DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool 
 	}
 	if ((ActivePortraitDrawPass < 0 || ActivePortraitDrawPass == 4) && bBetaPortrait)
 	{
-		FLinearColor Accent = TeamBGColor;
+		FLinearColor Accent = TeamBGColor.GetClamped(0.f, 1.f);
 		Accent.A = 0.86f;
 		const float Border = FMath::Max(1.f, 0.022f * PipSize);
 		Canvas->SetLinearDrawColor(Tinted(Accent));

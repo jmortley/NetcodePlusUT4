@@ -99,22 +99,41 @@ namespace
 		return Color;
 	}
 
-	FLinearColor DarkTeamPanel(const FLinearColor& TeamColor, float Alpha)
+	FLinearColor NeutralTacticalPanel(float Alpha)
 	{
-		return FLinearColor(
-			FMath::Clamp(0.0025f + 0.018f * TeamColor.R, 0.f, 1.f),
-			FMath::Clamp(0.0040f + 0.018f * TeamColor.G, 0.f, 1.f),
-			FMath::Clamp(0.0060f + 0.018f * TeamColor.B, 0.f, 1.f),
-			Alpha);
+		return FLinearColor(0.0015f, 0.004f, 0.007f, Alpha);
 	}
 
 	FLinearColor TeamAccent(const FLinearColor& TeamColor, float Alpha)
 	{
+		const FLinearColor SafeColor = TeamColor.GetClamped(0.f, 1.f);
 		return FLinearColor(
-			FMath::Clamp(0.015f + 0.58f * TeamColor.R, 0.f, 1.f),
-			FMath::Clamp(0.020f + 0.58f * TeamColor.G, 0.f, 1.f),
-			FMath::Clamp(0.025f + 0.58f * TeamColor.B, 0.f, 1.f),
+			FMath::Clamp(0.015f + 0.58f * SafeColor.R, 0.f, 1.f),
+			FMath::Clamp(0.020f + 0.58f * SafeColor.G, 0.f, 1.f),
+			FMath::Clamp(0.025f + 0.58f * SafeColor.B, 0.f, 1.f),
 			Alpha);
+	}
+
+	FVector2D ResolvePortraitLayoutDelta(FName Alias, UCanvas* Canvas)
+	{
+		if (Alias == NAME_None || Canvas == nullptr)
+		{
+			return FVector2D::ZeroVector;
+		}
+
+		// Portrait X/Y remain useful in a connected ribbon as per-bank offsets.
+		// Subtract the alias's stock position so untouched/default portrait rows
+		// continue to follow a moved scorebar parent instead of pinning themselves
+		// to an unrelated absolute screen coordinate.
+		const ENCPlusHUDAnchor StockAnchor = NCPlusHUDAliases::GetStockAnchor(Alias);
+		const FVector2D StockAnchorCoords = FNCPlusHUDLayout::AnchorToScreenCoords(StockAnchor);
+		const float RenderScale = Canvas->ClipY / 1080.f;
+		const FVector2D StockOffset = NCPlusHUDAliases::GetStockOffset(Alias);
+		const FVector2D StockPosition(
+			StockAnchorCoords.X * Canvas->ClipX + StockOffset.X * RenderScale,
+			StockAnchorCoords.Y * Canvas->ClipY + StockOffset.Y * RenderScale);
+		return NCPlusHUDDrawCall::ResolveScreenPos(Alias, Canvas, StockPosition)
+			- StockPosition;
 	}
 
 	float ResolveFittedStableText(UCanvas* Canvas, UFont* Font,
@@ -147,11 +166,18 @@ namespace
 FVector2D FNCPlusBetaTopBarGeometry::GetPortraitPosition(
 	ENCPlusBetaTopBarSide Side, int32 Ordinal) const
 {
+	const FNCPlusBetaTopBarPortraitGeometry& SideGeometry = GetPortraitGeometry(Side);
 	const float SafeOrdinal = float(FMath::Max(0, Ordinal));
 	const float X = (Side == ENCPlusBetaTopBarSide::Left)
-		? LeftPortraitAnchorX - PortraitWidth - SafeOrdinal * PortraitPitch
-		: RightPortraitAnchorX + SafeOrdinal * PortraitPitch;
-	return FVector2D(X, PortraitY);
+		? SideGeometry.AnchorX - SideGeometry.Width - SafeOrdinal * SideGeometry.Pitch
+		: SideGeometry.AnchorX + SafeOrdinal * SideGeometry.Pitch;
+	return FVector2D(X, SideGeometry.Y);
+}
+
+const FNCPlusBetaTopBarPortraitGeometry&
+FNCPlusBetaTopBarGeometry::GetPortraitGeometry(ENCPlusBetaTopBarSide Side) const
+{
+	return Portrait[int32(Side)];
 }
 
 bool NCPlusBetaTopBar::IsActiveForHUD(const AUTHUD* HUD)
@@ -175,6 +201,7 @@ bool NCPlusBetaTopBar::IsActiveForHUD(const AUTHUD* HUD)
 
 bool NCPlusBetaTopBar::BuildGeometry(AUTHUD* HUD, UCanvas* Canvas,
 	int32 LeftPortraitCount, int32 RightPortraitCount,
+	FName LeftPortraitAlias, FName RightPortraitAlias,
 	FNCPlusBetaTopBarGeometry& OutGeometry)
 {
 	if (HUD == nullptr || Canvas == nullptr || Canvas->SizeX <= 0 || Canvas->SizeY <= 0)
@@ -205,63 +232,117 @@ bool NCPlusBetaTopBar::BuildGeometry(AUTHUD* HUD, UCanvas* Canvas,
 	OutGeometry.CoreLeft = Center.X - 0.5f * CoreWidth;
 	OutGeometry.CoreRight = Center.X + 0.5f * CoreWidth;
 
-	OutGeometry.PortraitHeight = BetaCoreHeight * UnitScale;
-	OutGeometry.PortraitWidth = (BetaCoreHeight / BetaPortraitAspect) * UnitScale;
-	OutGeometry.PortraitPitch = OutGeometry.PortraitWidth + BetaPortraitGap * UnitScale;
-	OutGeometry.PortraitY = OutGeometry.TopY + 1.f * UnitScale;
-	OutGeometry.LeftPortraitAnchorX = OutGeometry.CoreLeft
-		- BetaCorePortraitGap * UnitScale;
-	OutGeometry.RightPortraitAnchorX = OutGeometry.CoreRight
-		+ BetaCorePortraitGap * UnitScale;
-	OutGeometry.PortraitCount[int32(ENCPlusBetaTopBarSide::Left)] =
-		FMath::Clamp(LeftPortraitCount, 0, 32);
-	OutGeometry.PortraitCount[int32(ENCPlusBetaTopBarSide::Right)] =
-		FMath::Clamp(RightPortraitCount, 0, 32);
+	const FName PortraitAliases[2] = { LeftPortraitAlias, RightPortraitAlias };
+	const int32 PortraitCounts[2] = { LeftPortraitCount, RightPortraitCount };
+	const float ParentAnchors[2] =
+	{
+		OutGeometry.CoreLeft - BetaCorePortraitGap * UnitScale,
+		OutGeometry.CoreRight + BetaCorePortraitGap * UnitScale,
+	};
+	for (int32 SideIndex = 0; SideIndex < 2; ++SideIndex)
+	{
+		FNCPlusBetaTopBarPortraitGeometry& Side = OutGeometry.Portrait[SideIndex];
+		Side.Alias = PortraitAliases[SideIndex];
+		Side.UnitScale = UnitScale * NCPlusHUDDrawCall::GetScale(Side.Alias);
+		Side.Height = BetaCoreHeight * Side.UnitScale;
+		Side.Width = (BetaCoreHeight / BetaPortraitAspect) * Side.UnitScale;
+		Side.Pitch = Side.Width + BetaPortraitGap * Side.UnitScale;
+		const FVector2D LayoutDelta = ResolvePortraitLayoutDelta(Side.Alias, Canvas);
+		Side.AnchorX = ParentAnchors[SideIndex] + LayoutDelta.X;
+		Side.Y = OutGeometry.TopY + 1.f * UnitScale + LayoutDelta.Y;
+		// Position and scale inherit from the connected scorebar transform, while
+		// styling remains owned by the portrait row. This keeps the editor's two
+		// opacity controls independent.
+		Side.Opacity = NCPlusHUDDrawCall::GetOpacity(Side.Alias);
+		// Keep the chassis/card-frame count identical to the owning HUD's render
+		// loop. Large community servers can exceed 32 players on one side; clipping
+		// only the frame count leaves later portraits floating outside the ribbon.
+		Side.Count = FMath::Max(0, PortraitCounts[SideIndex]);
+	}
 	return true;
+}
+
+bool NCPlusBetaTopBar::BuildGeometry(AUTHUD* HUD, UCanvas* Canvas,
+	int32 LeftPortraitCount, int32 RightPortraitCount,
+	FNCPlusBetaTopBarGeometry& OutGeometry)
+{
+	return BuildGeometry(HUD, Canvas, LeftPortraitCount, RightPortraitCount,
+		TEXT("portrait_red"), TEXT("portrait_blue"), OutGeometry);
 }
 
 void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 	const FNCPlusBetaTopBarGeometry& G, const FNCPlusBetaTopBarCore& Core)
 {
-	if (HUD == nullptr || Canvas == nullptr || Canvas->DefaultTexture == nullptr
-		|| NCPlusHUDDrawCall::IsHidden(TEXT("scorebar")))
+	if (HUD == nullptr || Canvas == nullptr || Canvas->DefaultTexture == nullptr)
 	{
 		return;
 	}
 
-	UFont* ScoreFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), HUD, HUD->LargeFont);
-	UFont* ClockFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), HUD, HUD->MediumFont);
-	if (ScoreFont == nullptr) ScoreFont = HUD->LargeFont;
-	if (ClockFont == nullptr) ClockFont = HUD->MediumFont;
-	if (ScoreFont == nullptr || ClockFont == nullptr) return;
-
 	const float U = G.UnitScale;
+	const bool bDrawCore = !NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"));
 	const float Opacity = NCPlusHUDDrawCall::GetOpacity(TEXT("scorebar"));
-	const int32 LeftCount = G.PortraitCount[int32(ENCPlusBetaTopBarSide::Left)];
-	const int32 RightCount = G.PortraitCount[int32(ENCPlusBetaTopBarSide::Right)];
-	const float LeftNearest = G.LeftPortraitAnchorX - G.PortraitWidth;
-	const float RightNearest = G.RightPortraitAnchorX;
+	const FNCPlusBetaTopBarPortraitGeometry& LeftPortrait =
+		G.GetPortraitGeometry(ENCPlusBetaTopBarSide::Left);
+	const FNCPlusBetaTopBarPortraitGeometry& RightPortrait =
+		G.GetPortraitGeometry(ENCPlusBetaTopBarSide::Right);
+	const int32 LeftCount = LeftPortrait.Count;
+	const int32 RightCount = RightPortrait.Count;
+	const float LeftNearest = LeftPortrait.AnchorX - LeftPortrait.Width;
+	const float RightNearest = RightPortrait.AnchorX;
 	const float LeftMost = LeftCount > 0
-		? LeftNearest - float(LeftCount - 1) * G.PortraitPitch
+		? LeftNearest - float(LeftCount - 1) * LeftPortrait.Pitch
 		: G.CoreLeft - 18.f * U;
 	const float RightMost = RightCount > 0
-		? RightNearest + float(RightCount - 1) * G.PortraitPitch + G.PortraitWidth
+		? RightNearest + float(RightCount - 1) * RightPortrait.Pitch + RightPortrait.Width
 		: G.CoreRight + 18.f * U;
 	const float LeftOuter = LeftMost - BetaOuterWing * U;
 	const float RightOuter = RightMost + BetaOuterWing * U;
+	const float LeftCardTop = LeftCount > 0 ? LeftPortrait.Y - 5.f * LeftPortrait.UnitScale : G.TopY;
+	const float RightCardTop = RightCount > 0 ? RightPortrait.Y - 5.f * RightPortrait.UnitScale : G.TopY;
+	const float LeftCardBottom = LeftCount > 0
+		? LeftPortrait.Y + LeftPortrait.Height + 18.f * LeftPortrait.UnitScale : G.TopY;
+	const float RightCardBottom = RightCount > 0
+		? RightPortrait.Y + RightPortrait.Height + 18.f * RightPortrait.UnitScale : G.TopY;
 	const float ShellTop = G.TopY - 5.f * U;
 	const float ShellBottom = G.TopY + G.CoreHeight + 18.f * U;
+	const float LeftShellTop = LeftCount > 0 ? FMath::Min(ShellTop, LeftCardTop) : ShellTop;
+	const float LeftShellBottom = LeftCount > 0
+		? FMath::Max(ShellBottom, LeftCardBottom) : ShellBottom;
+	const float RightShellTop = RightCount > 0 ? FMath::Min(ShellTop, RightCardTop) : ShellTop;
+	const float RightShellBottom = RightCount > 0
+		? FMath::Max(ShellBottom, RightCardBottom) : ShellBottom;
 	const float CoreBottom = G.TopY + G.CoreHeight;
 
 	const FLinearColor Shadow = WithOpacity(FLinearColor(0.f, 0.f, 0.f, 0.56f), Opacity);
 	const FLinearColor Shell = WithOpacity(FLinearColor(0.0015f, 0.004f, 0.007f, 0.98f), Opacity);
-	const FLinearColor InnerShell = WithOpacity(FLinearColor(0.003f, 0.008f, 0.013f, 0.96f), Opacity);
 	const FLinearColor Panel = WithOpacity(FLinearColor(0.0015f, 0.003f, 0.006f, 0.99f), Opacity);
 	const FLinearColor Steel = WithOpacity(FLinearColor(0.025f, 0.105f, 0.145f, 0.82f), Opacity);
-	const FLinearColor CyanGlow = WithOpacity(FLinearColor(0.015f, 0.26f, 0.34f, 0.28f), Opacity);
-	const FLinearColor Cyan = WithOpacity(FLinearColor(0.025f, 0.52f, 0.66f, 0.72f), Opacity);
-	const FLinearColor LeftRail = WithOpacity(TeamAccent(Core.LeftTeamColor, 0.84f), Opacity);
-	const FLinearColor RightRail = WithOpacity(TeamAccent(Core.RightTeamColor, 0.84f), Opacity);
+	const FLinearColor LeftWingShadowColor = WithOpacity(
+		FLinearColor(0.f, 0.f, 0.f, 0.56f), LeftPortrait.Opacity);
+	const FLinearColor RightWingShadowColor = WithOpacity(
+		FLinearColor(0.f, 0.f, 0.f, 0.56f), RightPortrait.Opacity);
+	const FLinearColor LeftWingSteel = WithOpacity(
+		FLinearColor(0.025f, 0.105f, 0.145f, 0.82f), LeftPortrait.Opacity);
+	const FLinearColor RightWingSteel = WithOpacity(
+		FLinearColor(0.025f, 0.105f, 0.145f, 0.82f), RightPortrait.Opacity);
+	const FLinearColor LeftWingFill = WithOpacity(
+		FLinearColor(0.003f, 0.008f, 0.013f, 0.96f), LeftPortrait.Opacity);
+	const FLinearColor RightWingFill = WithOpacity(
+		FLinearColor(0.003f, 0.008f, 0.013f, 0.96f), RightPortrait.Opacity);
+	const FLinearColor LeftCyanGlow = WithOpacity(
+		FLinearColor(0.015f, 0.26f, 0.34f, 0.28f), LeftPortrait.Opacity);
+	const FLinearColor RightCyanGlow = WithOpacity(
+		FLinearColor(0.015f, 0.26f, 0.34f, 0.28f), RightPortrait.Opacity);
+	const FLinearColor LeftCyan = WithOpacity(
+		FLinearColor(0.025f, 0.52f, 0.66f, 0.72f), LeftPortrait.Opacity);
+	const FLinearColor RightCyan = WithOpacity(
+		FLinearColor(0.025f, 0.52f, 0.66f, 0.72f), RightPortrait.Opacity);
+	const FLinearColor LeftScoreRail = WithOpacity(TeamAccent(Core.LeftTeamColor, 0.84f), Opacity);
+	const FLinearColor RightScoreRail = WithOpacity(TeamAccent(Core.RightTeamColor, 0.84f), Opacity);
+	const FLinearColor LeftPortraitRail = WithOpacity(
+		TeamAccent(Core.LeftPortraitColor, 0.84f), LeftPortrait.Opacity);
+	const FLinearColor RightPortraitRail = WithOpacity(
+		TeamAccent(Core.RightPortraitColor, 0.84f), RightPortrait.Opacity);
 
 	TArray<FCanvasUVTri> Tris;
 	Tris.Reserve(192 + 12 * (LeftCount + RightCount));
@@ -277,25 +358,25 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(G.CoreLeft - 25.f * U, ShellBottom + 3.f * U),
 		FVector2D(G.CoreLeft - 36.f * U, CoreBottom + 10.f * U),
 	};
-	AddConvexPolygon(Tris, CenterShadow, 6, Shadow);
+	if (bDrawCore) AddConvexPolygon(Tris, CenterShadow, 6, Shadow);
 	const FVector2D LeftWingShadow[5] =
 	{
-		FVector2D(LeftOuter + 14.f * U, ShellTop + 5.f * U),
-		FVector2D(G.CoreLeft + 4.f * U, ShellTop + 5.f * U),
-		FVector2D(G.CoreLeft + 22.f * U, ShellBottom),
-		FVector2D(LeftOuter + 33.f * U, ShellBottom + 3.f * U),
-		FVector2D(LeftOuter - 2.f * U, ShellBottom - 14.f * U),
+		FVector2D(LeftOuter + 14.f * U, LeftShellTop + 5.f * U),
+		FVector2D(G.CoreLeft + 4.f * U, LeftShellTop + 5.f * U),
+		FVector2D(G.CoreLeft + 22.f * U, LeftShellBottom),
+		FVector2D(LeftOuter + 33.f * U, LeftShellBottom + 3.f * U),
+		FVector2D(LeftOuter - 2.f * U, LeftShellBottom - 14.f * U),
 	};
-	AddConvexPolygon(Tris, LeftWingShadow, 5, Shadow);
+	if (LeftCount > 0) AddConvexPolygon(Tris, LeftWingShadow, 5, LeftWingShadowColor);
 	const FVector2D RightWingShadow[5] =
 	{
-		FVector2D(G.CoreRight - 4.f * U, ShellTop + 5.f * U),
-		FVector2D(RightOuter - 14.f * U, ShellTop + 5.f * U),
-		FVector2D(RightOuter + 2.f * U, ShellBottom - 14.f * U),
-		FVector2D(RightOuter - 33.f * U, ShellBottom + 3.f * U),
-		FVector2D(G.CoreRight - 22.f * U, ShellBottom),
+		FVector2D(G.CoreRight - 4.f * U, RightShellTop + 5.f * U),
+		FVector2D(RightOuter - 14.f * U, RightShellTop + 5.f * U),
+		FVector2D(RightOuter + 2.f * U, RightShellBottom - 14.f * U),
+		FVector2D(RightOuter - 33.f * U, RightShellBottom + 3.f * U),
+		FVector2D(G.CoreRight - 22.f * U, RightShellBottom),
 	};
-	AddConvexPolygon(Tris, RightWingShadow, 5, Shadow);
+	if (RightCount > 0) AddConvexPolygon(Tris, RightWingShadow, 5, RightWingShadowColor);
 
 	// Layer 2: cyan/steel outer bevel, then an almost-opaque neutral interior.
 	const FVector2D CenterBevel[6] =
@@ -307,7 +388,7 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(G.CoreLeft - 23.f * U, ShellBottom),
 		FVector2D(G.CoreLeft - 34.f * U, CoreBottom + 8.f * U),
 	};
-	AddConvexPolygon(Tris, CenterBevel, 6, Steel);
+	if (bDrawCore) AddConvexPolygon(Tris, CenterBevel, 6, Steel);
 	const FVector2D CenterShell[6] =
 	{
 		FVector2D(G.CoreLeft - 19.f * U, ShellTop + 2.f * U),
@@ -317,45 +398,45 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(G.CoreLeft - 20.f * U, ShellBottom - 2.f * U),
 		FVector2D(G.CoreLeft - 30.f * U, CoreBottom + 8.f * U),
 	};
-	AddConvexPolygon(Tris, CenterShell, 6, Shell);
+	if (bDrawCore) AddConvexPolygon(Tris, CenterShell, 6, Shell);
 
 	const FVector2D LeftWingBevel[5] =
 	{
-		FVector2D(LeftOuter + 14.f * U, ShellTop + 2.f * U),
-		FVector2D(G.CoreLeft + 2.f * U, ShellTop + 2.f * U),
-		FVector2D(G.CoreLeft + 19.f * U, ShellBottom - 3.f * U),
-		FVector2D(LeftOuter + 30.f * U, ShellBottom),
-		FVector2D(LeftOuter, ShellBottom - 17.f * U),
+		FVector2D(LeftOuter + 14.f * U, LeftShellTop + 2.f * U),
+		FVector2D(G.CoreLeft + 2.f * U, LeftShellTop + 2.f * U),
+		FVector2D(G.CoreLeft + 19.f * U, LeftShellBottom - 3.f * U),
+		FVector2D(LeftOuter + 30.f * U, LeftShellBottom),
+		FVector2D(LeftOuter, LeftShellBottom - 17.f * U),
 	};
-	AddConvexPolygon(Tris, LeftWingBevel, 5, Steel);
+	if (LeftCount > 0) AddConvexPolygon(Tris, LeftWingBevel, 5, LeftWingSteel);
 	const FVector2D LeftWing[5] =
 	{
-		FVector2D(LeftOuter + 17.f * U, ShellTop + 4.f * U),
-		FVector2D(G.CoreLeft - 1.f * U, ShellTop + 4.f * U),
-		FVector2D(G.CoreLeft + 15.f * U, ShellBottom - 5.f * U),
-		FVector2D(LeftOuter + 31.f * U, ShellBottom - 2.f * U),
-		FVector2D(LeftOuter + 5.f * U, ShellBottom - 18.f * U),
+		FVector2D(LeftOuter + 17.f * U, LeftShellTop + 4.f * U),
+		FVector2D(G.CoreLeft - 1.f * U, LeftShellTop + 4.f * U),
+		FVector2D(G.CoreLeft + 15.f * U, LeftShellBottom - 5.f * U),
+		FVector2D(LeftOuter + 31.f * U, LeftShellBottom - 2.f * U),
+		FVector2D(LeftOuter + 5.f * U, LeftShellBottom - 18.f * U),
 	};
-	AddConvexPolygon(Tris, LeftWing, 5, InnerShell);
+	if (LeftCount > 0) AddConvexPolygon(Tris, LeftWing, 5, LeftWingFill);
 
 	const FVector2D RightWingBevel[5] =
 	{
-		FVector2D(G.CoreRight - 2.f * U, ShellTop + 2.f * U),
-		FVector2D(RightOuter - 14.f * U, ShellTop + 2.f * U),
-		FVector2D(RightOuter, ShellBottom - 17.f * U),
-		FVector2D(RightOuter - 30.f * U, ShellBottom),
-		FVector2D(G.CoreRight - 19.f * U, ShellBottom - 3.f * U),
+		FVector2D(G.CoreRight - 2.f * U, RightShellTop + 2.f * U),
+		FVector2D(RightOuter - 14.f * U, RightShellTop + 2.f * U),
+		FVector2D(RightOuter, RightShellBottom - 17.f * U),
+		FVector2D(RightOuter - 30.f * U, RightShellBottom),
+		FVector2D(G.CoreRight - 19.f * U, RightShellBottom - 3.f * U),
 	};
-	AddConvexPolygon(Tris, RightWingBevel, 5, Steel);
+	if (RightCount > 0) AddConvexPolygon(Tris, RightWingBevel, 5, RightWingSteel);
 	const FVector2D RightWing[5] =
 	{
-		FVector2D(G.CoreRight + 1.f * U, ShellTop + 4.f * U),
-		FVector2D(RightOuter - 17.f * U, ShellTop + 4.f * U),
-		FVector2D(RightOuter - 5.f * U, ShellBottom - 18.f * U),
-		FVector2D(RightOuter - 31.f * U, ShellBottom - 2.f * U),
-		FVector2D(G.CoreRight - 15.f * U, ShellBottom - 5.f * U),
+		FVector2D(G.CoreRight + 1.f * U, RightShellTop + 4.f * U),
+		FVector2D(RightOuter - 17.f * U, RightShellTop + 4.f * U),
+		FVector2D(RightOuter - 5.f * U, RightShellBottom - 18.f * U),
+		FVector2D(RightOuter - 31.f * U, RightShellBottom - 2.f * U),
+		FVector2D(G.CoreRight - 15.f * U, RightShellBottom - 5.f * U),
 	};
-	AddConvexPolygon(Tris, RightWing, 5, InnerShell);
+	if (RightCount > 0) AddConvexPolygon(Tris, RightWing, 5, RightWingFill);
 
 	// Layer 3: wide angular card frames around the unchanged portrait crop. The
 	// 6px side bleed plus the larger pitch produces the mock's airy player banks
@@ -363,58 +444,66 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 	for (int32 Index = 0; Index < LeftCount; ++Index)
 	{
 		const FVector2D P = G.GetPortraitPosition(ENCPlusBetaTopBarSide::Left, Index);
-		AddChamferedRect(Tris, P.X - 6.f * U, P.Y - 2.f * U,
-			P.X + G.PortraitWidth + 6.f * U,
-			P.Y + G.PortraitHeight + 15.f * U, 4.f * U, LeftRail);
-		AddChamferedRect(Tris, P.X - 4.f * U, P.Y,
-			P.X + G.PortraitWidth + 4.f * U,
-			P.Y + G.PortraitHeight + 13.f * U, 3.f * U,
-			WithOpacity(DarkTeamPanel(Core.LeftTeamColor, 0.99f), Opacity));
+		const float SideU = LeftPortrait.UnitScale;
+		AddChamferedRect(Tris, P.X - 6.f * SideU, P.Y - 2.f * SideU,
+			P.X + LeftPortrait.Width + 6.f * SideU,
+			P.Y + LeftPortrait.Height + 15.f * SideU, 4.f * SideU, LeftPortraitRail);
+		AddChamferedRect(Tris, P.X - 4.f * SideU, P.Y,
+			P.X + LeftPortrait.Width + 4.f * SideU,
+			P.Y + LeftPortrait.Height + 13.f * SideU, 3.f * SideU,
+			WithOpacity(NeutralTacticalPanel(0.99f), LeftPortrait.Opacity));
 	}
 	for (int32 Index = 0; Index < RightCount; ++Index)
 	{
 		const FVector2D P = G.GetPortraitPosition(ENCPlusBetaTopBarSide::Right, Index);
-		AddChamferedRect(Tris, P.X - 6.f * U, P.Y - 2.f * U,
-			P.X + G.PortraitWidth + 6.f * U,
-			P.Y + G.PortraitHeight + 15.f * U, 4.f * U, RightRail);
-		AddChamferedRect(Tris, P.X - 4.f * U, P.Y,
-			P.X + G.PortraitWidth + 4.f * U,
-			P.Y + G.PortraitHeight + 13.f * U, 3.f * U,
-			WithOpacity(DarkTeamPanel(Core.RightTeamColor, 0.99f), Opacity));
+		const float SideU = RightPortrait.UnitScale;
+		AddChamferedRect(Tris, P.X - 6.f * SideU, P.Y - 2.f * SideU,
+			P.X + RightPortrait.Width + 6.f * SideU,
+			P.Y + RightPortrait.Height + 15.f * SideU, 4.f * SideU, RightPortraitRail);
+		AddChamferedRect(Tris, P.X - 4.f * SideU, P.Y,
+			P.X + RightPortrait.Width + 4.f * SideU,
+			P.Y + RightPortrait.Height + 13.f * SideU, 3.f * SideU,
+			WithOpacity(NeutralTacticalPanel(0.99f), RightPortrait.Opacity));
 	}
 
 	// Layer 4: team identity is confined to thin rails. A broad low-alpha cyan
 	// pass under the 1px bright line fakes the mock's glow without a material.
-	AddQuad(Tris,
-		FVector2D(LeftOuter + 17.f * U, ShellTop + 3.f * U),
-		FVector2D(G.CoreLeft - 4.f * U, ShellTop + 3.f * U),
-		FVector2D(G.CoreLeft - 2.f * U, ShellTop + 4.5f * U),
-		FVector2D(LeftOuter + 19.f * U, ShellTop + 4.5f * U), LeftRail);
-	AddQuad(Tris,
-		FVector2D(G.CoreRight + 4.f * U, ShellTop + 3.f * U),
-		FVector2D(RightOuter - 17.f * U, ShellTop + 3.f * U),
-		FVector2D(RightOuter - 19.f * U, ShellTop + 4.5f * U),
-		FVector2D(G.CoreRight + 2.f * U, ShellTop + 4.5f * U), RightRail);
-	AddQuad(Tris,
-		FVector2D(LeftOuter + 29.f * U, ShellBottom - 6.f * U),
-		FVector2D(G.CoreLeft - 16.f * U, ShellBottom - 6.f * U),
-		FVector2D(G.CoreLeft - 10.f * U, ShellBottom - 1.f * U),
-		FVector2D(LeftOuter + 34.f * U, ShellBottom - 1.f * U), CyanGlow);
-	AddQuad(Tris,
-		FVector2D(G.CoreRight + 16.f * U, ShellBottom - 6.f * U),
-		FVector2D(RightOuter - 29.f * U, ShellBottom - 6.f * U),
-		FVector2D(RightOuter - 34.f * U, ShellBottom - 1.f * U),
-		FVector2D(G.CoreRight + 10.f * U, ShellBottom - 1.f * U), CyanGlow);
-	AddQuad(Tris,
-		FVector2D(LeftOuter + 32.f * U, ShellBottom - 3.f * U),
-		FVector2D(G.CoreLeft - 14.f * U, ShellBottom - 3.f * U),
-		FVector2D(G.CoreLeft - 11.f * U, ShellBottom - 1.5f * U),
-		FVector2D(LeftOuter + 35.f * U, ShellBottom - 1.5f * U), Cyan);
-	AddQuad(Tris,
-		FVector2D(G.CoreRight + 14.f * U, ShellBottom - 3.f * U),
-		FVector2D(RightOuter - 32.f * U, ShellBottom - 3.f * U),
-		FVector2D(RightOuter - 35.f * U, ShellBottom - 1.5f * U),
-		FVector2D(G.CoreRight + 11.f * U, ShellBottom - 1.5f * U), Cyan);
+	if (LeftCount > 0)
+	{
+		AddQuad(Tris,
+			FVector2D(LeftOuter + 17.f * U, LeftShellTop + 3.f * U),
+			FVector2D(G.CoreLeft - 4.f * U, LeftShellTop + 3.f * U),
+			FVector2D(G.CoreLeft - 2.f * U, LeftShellTop + 4.5f * U),
+			FVector2D(LeftOuter + 19.f * U, LeftShellTop + 4.5f * U), LeftPortraitRail);
+		AddQuad(Tris,
+			FVector2D(LeftOuter + 29.f * U, LeftShellBottom - 6.f * U),
+			FVector2D(G.CoreLeft - 16.f * U, LeftShellBottom - 6.f * U),
+			FVector2D(G.CoreLeft - 10.f * U, LeftShellBottom - 1.f * U),
+			FVector2D(LeftOuter + 34.f * U, LeftShellBottom - 1.f * U), LeftCyanGlow);
+		AddQuad(Tris,
+			FVector2D(LeftOuter + 32.f * U, LeftShellBottom - 3.f * U),
+			FVector2D(G.CoreLeft - 14.f * U, LeftShellBottom - 3.f * U),
+			FVector2D(G.CoreLeft - 11.f * U, LeftShellBottom - 1.5f * U),
+			FVector2D(LeftOuter + 35.f * U, LeftShellBottom - 1.5f * U), LeftCyan);
+	}
+	if (RightCount > 0)
+	{
+		AddQuad(Tris,
+			FVector2D(G.CoreRight + 4.f * U, RightShellTop + 3.f * U),
+			FVector2D(RightOuter - 17.f * U, RightShellTop + 3.f * U),
+			FVector2D(RightOuter - 19.f * U, RightShellTop + 4.5f * U),
+			FVector2D(G.CoreRight + 2.f * U, RightShellTop + 4.5f * U), RightPortraitRail);
+		AddQuad(Tris,
+			FVector2D(G.CoreRight + 16.f * U, RightShellBottom - 6.f * U),
+			FVector2D(RightOuter - 29.f * U, RightShellBottom - 6.f * U),
+			FVector2D(RightOuter - 34.f * U, RightShellBottom - 1.f * U),
+			FVector2D(G.CoreRight + 10.f * U, RightShellBottom - 1.f * U), RightCyanGlow);
+		AddQuad(Tris,
+			FVector2D(G.CoreRight + 14.f * U, RightShellBottom - 3.f * U),
+			FVector2D(RightOuter - 32.f * U, RightShellBottom - 3.f * U),
+			FVector2D(RightOuter - 35.f * U, RightShellBottom - 1.5f * U),
+			FVector2D(G.CoreRight + 11.f * U, RightShellBottom - 1.5f * U), RightCyan);
+	}
 
 	// Layer 5: mirrored score trapezoids and a central clock hex. Each panel is
 	// drawn accent-first and inset-black second, so team color reads as an edge
@@ -434,7 +523,7 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(G.CoreLeft, CoreBottom - 15.f * U),
 		FVector2D(G.CoreLeft, G.TopY + 13.f * U),
 	};
-	AddConvexPolygon(Tris, LeftScoreOuter, 8, LeftRail);
+	if (bDrawCore) AddConvexPolygon(Tris, LeftScoreOuter, 8, LeftScoreRail);
 	const FVector2D LeftScoreInner[8] =
 	{
 		FVector2D(G.CoreLeft + 11.f * U, G.TopY + 2.f * U),
@@ -446,8 +535,11 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(G.CoreLeft + 3.f * U, CoreBottom - 16.f * U),
 		FVector2D(G.CoreLeft + 3.f * U, G.TopY + 14.f * U),
 	};
-	AddConvexPolygon(Tris, LeftScoreInner, 8,
-		WithOpacity(DarkTeamPanel(Core.LeftTeamColor, 0.99f), Opacity));
+	if (bDrawCore)
+	{
+		AddConvexPolygon(Tris, LeftScoreInner, 8,
+			WithOpacity(NeutralTacticalPanel(0.99f), Opacity));
+	}
 
 	const FVector2D RightScoreOuter[8] =
 	{
@@ -460,7 +552,7 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(ClockRight - 4.f * U, CoreBottom - 9.f * U),
 		FVector2D(ClockRight - 4.f * U, G.TopY + 9.f * U),
 	};
-	AddConvexPolygon(Tris, RightScoreOuter, 8, RightRail);
+	if (bDrawCore) AddConvexPolygon(Tris, RightScoreOuter, 8, RightScoreRail);
 	const FVector2D RightScoreInner[8] =
 	{
 		FVector2D(ClockRight + 6.f * U, G.TopY + 2.f * U),
@@ -472,8 +564,11 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(ClockRight - 1.f * U, CoreBottom - 10.f * U),
 		FVector2D(ClockRight - 1.f * U, G.TopY + 10.f * U),
 	};
-	AddConvexPolygon(Tris, RightScoreInner, 8,
-		WithOpacity(DarkTeamPanel(Core.RightTeamColor, 0.99f), Opacity));
+	if (bDrawCore)
+	{
+		AddConvexPolygon(Tris, RightScoreInner, 8,
+			WithOpacity(NeutralTacticalPanel(0.99f), Opacity));
+	}
 
 	const FVector2D ClockOuter[8] =
 	{
@@ -486,7 +581,7 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(ClockLeft - 3.f * U, CoreBottom - 9.f * U),
 		FVector2D(ClockLeft - 3.f * U, G.TopY + 9.f * U),
 	};
-	AddConvexPolygon(Tris, ClockOuter, 8, Steel);
+	if (bDrawCore) AddConvexPolygon(Tris, ClockOuter, 8, Steel);
 	const FVector2D ClockInner[8] =
 	{
 		FVector2D(ClockLeft + 9.f * U, G.TopY + 2.f * U),
@@ -498,7 +593,7 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		FVector2D(ClockLeft, CoreBottom - 10.f * U),
 		FVector2D(ClockLeft, G.TopY + 10.f * U),
 	};
-	AddConvexPolygon(Tris, ClockInner, 8, Panel);
+	if (bDrawCore) AddConvexPolygon(Tris, ClockInner, 8, Panel);
 
 	FTexture* WhiteTexture = Canvas->DefaultTexture->Resource;
 	if (WhiteTexture != nullptr && Tris.Num() > 0)
@@ -507,6 +602,16 @@ void NCPlusBetaTopBar::DrawChassisAndScoreCore(AUTHUD* HUD, UCanvas* Canvas,
 		Item.BlendMode = ESimpleElementBlendMode::SE_BLEND_Translucent;
 		Canvas->DrawItem(Item);
 	}
+	if (!bDrawCore)
+	{
+		return;
+	}
+
+	UFont* ScoreFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), HUD, HUD->LargeFont);
+	UFont* ClockFont = NCPlusHUDFonts::Resolve(TEXT("scorebar"), HUD, HUD->MediumFont);
+	if (ScoreFont == nullptr) ScoreFont = HUD->LargeFont;
+	if (ClockFont == nullptr) ClockFont = HUD->MediumFont;
+	if (ScoreFont == nullptr || ClockFont == nullptr) return;
 
 	// Deferred text sits over the single geometry batch.
 	const float FontExtra = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
