@@ -20,6 +20,18 @@ class UUTWeaponSkin;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 
+/** Server-only companion to AUTCharacter::SavedPositions. Stock rewind history
+ *  records location but not capsule posture, so a slide that ends before hit
+ *  validation cannot otherwise be reconstructed safely. */
+struct FNCSavedCapsulePosture
+{
+	float Time = 0.f;
+	float HalfHeight = 0.f;
+	float SlideStartTime = 0.f;
+	bool bFloorSliding = false;
+	bool bTeleported = false;
+};
+
 /**
  * Enhanced character that uses split prediction for movement.
  * 
@@ -96,7 +108,13 @@ public:
     // Override to use custom prediction time for position rewinding
     virtual FVector GetRewindLocation(float PredictionTime, AUTPlayerController* DebugViewer = NULL) override;
 
-    //virtual void PositionUpdated(bool bShotSpawned) override;
+	/** Record capsule posture beside stock position history on authority. */
+	virtual void PositionUpdated(bool bShotSpawned) override;
+
+	/** Resolve a bracketed, non-teleport capsule posture at PredictionTime.
+	 *  Returns false when history cannot prove one posture across the sample. */
+	bool GetRewindCapsulePosture(float PredictionTime, float& OutHalfHeight,
+		bool& bOutFloorSliding, float& OutSlideElapsed) const;
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
 
@@ -118,6 +136,9 @@ public:
 
 
 protected:
+	/** Kept to the same age horizon as stock SavedPositions; authority only. */
+	TArray<FNCSavedCapsulePosture> SavedCapsulePostures;
+
     /**
      * Get the client's visual prediction time from the viewing controller.
      * Returns 0ms if using TeamArenaPredictionPC (no extrapolation).

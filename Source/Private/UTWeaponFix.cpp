@@ -5,6 +5,7 @@
 #include "UTGameState.h"
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
+#include "TeamArenaCharacter.h"
 #include "UTWeaponAttachment.h"
 #include "Engine/World.h"
 #include "Components/InputComponent.h"
@@ -236,6 +237,14 @@ static TAutoConsoleVariable<float> CVarHitscanSearchPadding(
     TEXT("ncp.HitscanSearchPadding"), 40.0f,
     TEXT("Extra radius (uu) at each claimed-target hitscan time-search fallback rung. ")
     TEXT("Server-authoritative; live rollback: 45."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarHitscanSlideSearchExtraMs(
+    TEXT("ncp.HitscanSlideSearchExtraMs"), 15.0f,
+    TEXT("Additional claimed-target older-history search budget (ms, clamped 0-15) "
+        "used only when server posture history proves that outer epoch was floor-sliding. "
+        "The outer rung requires ACK timing and continuous non-teleport history and gets "
+        "no search padding. 0 restores the standard +/-45ms search."),
     ECVF_Default);
 
 // =========================================================================
@@ -4523,6 +4532,66 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             StartLocation, PointToCheck, TraceChannel, QueryParams);
     };
 
+	// Hitscan-only posture reconstruction. Stock SavedPositions has no capsule
+	// shape, so use ATeamArenaCharacter's parallel server history when it has a
+	// real non-teleport bracket. Other validation families keep their established
+	// shared posture policy.
+	auto ApplyHitscanSlidePosture = [&](const AUTCharacter* Target,
+		float RewindTime, FVector& InOutLocation, float& InOutHalfHeight)
+	{
+		const ATeamArenaCharacter* const TeamTarget =
+			Cast<ATeamArenaCharacter>(Target);
+		if (TeamTarget != nullptr)
+		{
+			float HistoricalHalfHeight = InOutHalfHeight;
+			bool bHistoricalSlide = false;
+			float HistoricalSlideElapsed = 0.f;
+			if (TeamTarget->GetRewindCapsulePosture(RewindTime,
+				HistoricalHalfHeight, bHistoricalSlide,
+				HistoricalSlideElapsed))
+			{
+				const bool bLiveSlide = Target->UTCharacterMovement != nullptr &&
+					Target->UTCharacterMovement->bIsFloorSliding;
+				if (bHistoricalSlide || bLiveSlide)
+				{
+					// The historical centre and height now describe the same capsule.
+					InOutHalfHeight = HistoricalHalfHeight;
+				}
+				if (!bHistoricalSlide)
+				{
+					return;
+				}
+
+				const float GraceSeconds = FMath::Max(0.f,
+					CVarSlideGraceMs.GetValueOnGameThread() * 0.001f);
+				if (GraceSeconds > 0.f && HistoricalSlideElapsed < GraceSeconds)
+				{
+					const ACharacter* const DefaultChar =
+						Target->GetClass()->GetDefaultObject<ACharacter>();
+					const float StandingHalfHeight =
+						(DefaultChar != nullptr && DefaultChar->GetCapsuleComponent() != nullptr)
+						? DefaultChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()
+						: InOutHalfHeight;
+					if (StandingHalfHeight > InOutHalfHeight)
+					{
+						InOutLocation.Z += StandingHalfHeight - InOutHalfHeight;
+						InOutHalfHeight = StandingHalfHeight;
+					}
+				}
+				else
+				{
+					InOutLocation.Z = InOutLocation.Z - InOutHalfHeight +
+						Target->SlideTargetHeight;
+					InOutHalfHeight = Target->SlideTargetHeight;
+				}
+				return;
+			}
+		}
+
+		ApplySlidePostureForValidation(Target, RewindTime,
+			InOutLocation, InOutHalfHeight);
+	};
+
     // If a live pawn lacks trustworthy render history, it cannot be
     // damaged in render-authoritative mode. Its known capsule positions must
     // still conservatively occlude the trace; otherwise "fail closed" for the
@@ -4532,7 +4601,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     {
         FVector BlockerLocation = CandidateLocation;
         float BlockerHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-        ApplySlidePostureForValidation(Target, CandidateTime, BlockerLocation, BlockerHeight);
+        ApplyHitscanSlidePosture(Target, CandidateTime, BlockerLocation, BlockerHeight);
         const float BlockerRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
         const float AxisHalfLength = FMath::Max(0.f, BlockerHeight - BlockerRadius);
         const float EffectiveRadius = FMath::Min(BlockerRadius, BlockerHeight);
@@ -4646,7 +4715,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
                 // now see if trace would hit the capsule
                 float CollisionHeight = Target->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-                ApplySlidePostureForValidation(Target,
+                ApplyHitscanSlidePosture(Target,
                     ((TargetSampleTime > 0.f) && (Role == ROLE_Authority)) ? TargetSampleTime : 0.f,
                     TargetLocation, CollisionHeight);
                 float CollisionRadius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
@@ -4903,27 +4972,100 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 			}
 		}
 
-		const float SearchStep = 0.015f;      // 15ms steps
-		const float MaxSearchOffset = GetHitscanTimeSearchWindow(); // ±45ms max search (tries ±15, ±30, ±45 on fixed 15ms rungs; ±60 is the next rung but trades attacker recovery for "shot through my dodge" defender complaints — primary rewind still does the heavy lifting)
-		float SearchOffset = SearchStep;
-
-		while (!bRescueLeadSearchBlockedNoTiming && FMath::Abs(SearchOffset) <= MaxSearchOffset)
+		const float SearchStep = 0.015f;
+		const float BaseMaxSearchOffset =
+			FMath::Max(0.f, GetHitscanTimeSearchWindow());
+		TArray<float, TInlineAllocator<8>> SearchOffsets;
+		for (float Offset = SearchStep;
+			Offset <= BaseMaxSearchOffset + KINDA_SMALL_NUMBER;
+			Offset += SearchStep)
 		{
-			float AltRewindTime = ActualPredictionTime + SearchOffset;
+			SearchOffsets.Add(Offset);
+			SearchOffsets.Add(-Offset);
+		}
+
+		// The ordinary ±45ms search remains unchanged. One older-history outer
+		// sample is appended only when server-owned posture history proves that exact
+		// credited epoch was a floor slide. Requiring an ACK RTT keeps the extra
+		// allowance unavailable until the server has a trustworthy timing anchor.
+		const float SlideSearchExtra = FMath::Clamp(
+			CVarHitscanSlideSearchExtraMs.GetValueOnGameThread(), 0.f, 15.f) * 0.001f;
+		const ATeamArenaCharacter* const SlideHistoryTarget =
+			Cast<ATeamArenaCharacter>(ClaimedTarget);
+		float SlideSearchRTTMs = 0.f;
+		if (SlideSearchExtra > KINDA_SMALL_NUMBER && SlideHistoryTarget != nullptr &&
+			GetServerObservedRTTMs(RescueShooterPC, SlideSearchRTTMs))
+		{
+			const float OuterOffset = BaseMaxSearchOffset + SlideSearchExtra;
+			const float OuterRewindTime = ActualPredictionTime + OuterOffset;
+			float HistoricalHalfHeight = 0.f;
+			bool bHistoricalSlide = false;
+			float HistoricalSlideElapsed = 0.f;
+			if (OuterRewindTime > 0.f && OuterRewindTime < 0.25f &&
+				SlideHistoryTarget->GetRewindCapsulePosture(OuterRewindTime,
+					HistoricalHalfHeight, bHistoricalSlide,
+					HistoricalSlideElapsed) && bHistoricalSlide)
+			{
+				SearchOffsets.Add(OuterOffset);
+			}
+		}
+
+		for (int32 SearchIndex = 0;
+			!bRescueLeadSearchBlockedNoTiming && SearchIndex < SearchOffsets.Num();
+			++SearchIndex)
+		{
+			const float SearchOffset = SearchOffsets[SearchIndex];
+			const bool bSlideOuterRung =
+				FMath::Abs(SearchOffset) > BaseMaxSearchOffset + KINDA_SMALL_NUMBER;
+			const float AltRewindTime = ActualPredictionTime + SearchOffset;
 
 			// Sanity bounds
 			if (AltRewindTime > 0.0f && AltRewindTime < 0.25f)
 			{
+				if (bSlideOuterRung)
+				{
+					int32 OuterOlderIndex = INDEX_NONE;
+					int32 OuterNewerIndex = INDEX_NONE;
+					if (!HasContinuousRenderHistory(ClaimedTarget, AltRewindTime,
+						ActualPredictionTime, OuterOlderIndex, OuterNewerIndex))
+					{
+						continue;
+					}
+				}
+
 				FVector AltTargetLoc = ClaimedTarget->GetRewindLocation(AltRewindTime);
 				// Raw (pre-posture) sample: the position this rung would CREDIT,
 				// judged by the lead gate below. Posture adjustment only moves Z
 				// for the collision test and must not perturb the lead metric.
 				const FVector AltTargetLocRaw = AltTargetLoc;
 
-				// Handle floor sliding at alternate time (grace-windowed posture:
-				// AltRewindTime is this rung's effective claim age).
 				float AltCapHeight = CapHeight;
-				ApplySlidePostureForValidation(ClaimedTarget, AltRewindTime, AltTargetLoc, AltCapHeight);
+				if (bSlideOuterRung)
+				{
+					// The extra rung gets the recorded physical slide capsule, not
+					// SlideGrace's larger rendered-standing envelope.
+					bool bHistoricalSlide = false;
+					float HistoricalSlideElapsed = 0.f;
+					if (SlideHistoryTarget == nullptr ||
+						!SlideHistoryTarget->GetRewindCapsulePosture(AltRewindTime,
+							AltCapHeight, bHistoricalSlide,
+							HistoricalSlideElapsed) || !bHistoricalSlide)
+					{
+						continue;
+					}
+					// Stock's established-slide validation envelope is shorter than
+					// the physical crouch capsule. Bottom-align it exactly; the outer
+					// rung receives neither SlideGrace nor radial search padding.
+					AltTargetLoc.Z = AltTargetLoc.Z - AltCapHeight +
+						ClaimedTarget->SlideTargetHeight;
+					AltCapHeight = ClaimedTarget->SlideTargetHeight;
+				}
+				else
+				{
+					// Ordinary rungs retain the grace-windowed posture policy.
+					ApplyHitscanSlidePosture(ClaimedTarget, AltRewindTime,
+						AltTargetLoc, AltCapHeight);
+				}
 				const float AltEffectiveRadius =
 					FMath::Min(CapRadius, AltCapHeight);
 
@@ -4946,9 +5088,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
 				// Server-live padding for the alternate-time fallback. This is
 				// deliberately independent from primary moving-target padding.
-				const float SearchPadding = FMath::Clamp(
+				const float SearchPadding = bSlideOuterRung ? 0.f : FMath::Clamp(
 					CVarHitscanSearchPadding.GetValueOnGameThread(), 0.0f, 100.0f);
-				float CombinedRadius = AltEffectiveRadius + TraceRadius + SearchPadding;
+				const float CombinedRadius = AltEffectiveRadius + TraceRadius + SearchPadding;
 				const float SearchDistanceSq =
 					(ClosestPoint - ClosestCapsulePoint).SizeSquared();
 				const bool bSearchHit = SearchDistanceSq <
@@ -4986,45 +5128,41 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 							TEXT("[RescueLeadGate] SKIPPED RUNG %+.0fms %s -> %s: credited lead %.1f > cap %.1f"),
 							SearchOffset * 1000.f, *GetName(), *ClaimedTarget->GetName(),
 							RungLeadUU, RescueLeadCapApplied);
-						// fall through to the oscillator: do NOT accept this rung
+						// Do not accept this rung; continue to the next candidate.
 					}
 					else
 					{
-					if (bRungLeadKnown)
-					{
-						bRescueLeadAcceptedValid = true;
-						RescueLeadAcceptedUU = RungLeadUU;
-					}
-					// Found the hit at alternate time
-					BestTarget = ClaimedTarget;
-					BestPoint = ClosestPoint;
-					BestCapsulePoint = ClosestCapsulePoint;
-					BestCollisionRadius = AltEffectiveRadius;
+						if (bRungLeadKnown)
+						{
+							bRescueLeadAcceptedValid = true;
+							RescueLeadAcceptedUU = RungLeadUU;
+						}
+						// Found the hit at alternate time
+						BestTarget = ClaimedTarget;
+						BestPoint = ClosestPoint;
+						BestCapsulePoint = ClosestCapsulePoint;
+						BestCollisionRadius = AltEffectiveRadius;
 
-					if (bHitAttrib)
-					{
-						bAttribTimeSearchHit = true;
-						AttribTimeSearchRungMs = SearchOffset * 1000.f;
-						// vs the UNPADDED radius at the accepted rung: <=0 is a genuine
-						// capsule hit at the alternate time, >0 rode the 45uu search pad.
-						AttribTimeSearchMissBy =
-							FVector::Dist(ClosestPoint, ClosestCapsulePoint) -
-							(AltEffectiveRadius + TraceRadius);
-					}
+						if (bHitAttrib)
+						{
+							bAttribTimeSearchHit = true;
+							AttribTimeSearchRungMs = SearchOffset * 1000.f;
+							// vs the UNPADDED radius at the accepted rung: <=0 is a genuine
+							// capsule hit; >0 rode the configured ordinary-rung pad. The
+							// slide-only outer rung always has zero padding.
+							AttribTimeSearchMissBy =
+								FVector::Dist(ClosestPoint, ClosestCapsulePoint) -
+								(AltEffectiveRadius + TraceRadius);
+						}
 
-					UE_LOG(LogUTWeaponFix, Verbose,
-						TEXT("TimeSearch: Found claimed hit at offset %.1fms (base %.1fms)"),
-						SearchOffset * 1000.f, ActualPredictionTime * 1000.f);
-					break;
+						UE_LOG(LogUTWeaponFix, Verbose,
+							TEXT("TimeSearch: Found claimed hit at offset %.1fms (base %.1fms)"),
+							SearchOffset * 1000.f, ActualPredictionTime * 1000.f);
+						break;
 					}
 				}
 			}
 
-			// Oscillate: +15ms, -15ms, +30ms, -30ms, +45ms, -45ms
-			if (SearchOffset > 0.f)
-				SearchOffset = -SearchOffset;
-			else
-				SearchOffset = -SearchOffset + SearchStep;
 		}
 	}
 

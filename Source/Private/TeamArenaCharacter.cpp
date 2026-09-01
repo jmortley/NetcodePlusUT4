@@ -1280,8 +1280,113 @@ void ATeamArenaCharacter::FiringInfoUpdated()
     K2_FiringInfoUpdated();
 }
 
+void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
+{
+	Super::PositionUpdated(bShotSpawned);
 
+	// Position rewind is authoritative. Avoid duplicating this short history on
+	// simulated/autonomous clients, which never validate a server hitscan.
+	UWorld* const World = GetWorld();
+	if (Role != ROLE_Authority || World == nullptr || GetCapsuleComponent() == nullptr ||
+		UTCharacterMovement == nullptr)
+	{
+		return;
+	}
 
+	const float WorldTime = World->GetTimeSeconds();
+	FNCSavedCapsulePosture Posture;
+	Posture.Time = WorldTime;
+	Posture.HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	Posture.bFloorSliding = UTCharacterMovement->bIsFloorSliding;
+	Posture.bTeleported = UTCharacterMovement->bJustTeleported;
+	if (Posture.bFloorSliding)
+	{
+		// Convert the movement clock's authoritative slide start to world time so
+		// posture and SavedPositions share one query domain.
+		const float SlideAge = FMath::Max(0.f,
+			UTCharacterMovement->GetCurrentMovementTime() -
+			UTCharacterMovement->FloorSlideTapTime);
+		Posture.SlideStartTime = WorldTime - SlideAge;
+	}
+	SavedCapsulePostures.Add(Posture);
+
+	// Match AUTCharacter::PositionUpdated: retain one sample beyond the age
+	// horizon so interpolation at the oldest legal rewind still has a bracket.
+	while (SavedCapsulePostures.Num() > 1 &&
+		SavedCapsulePostures[1].Time < WorldTime - MaxSavedPositionAge)
+	{
+		SavedCapsulePostures.RemoveAt(0, 1, false);
+	}
+}
+
+bool ATeamArenaCharacter::GetRewindCapsulePosture(float PredictionTime,
+	float& OutHalfHeight, bool& bOutFloorSliding, float& OutSlideElapsed) const
+{
+	OutHalfHeight = GetCapsuleComponent() != nullptr
+		? GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 0.f;
+	bOutFloorSliding = false;
+	OutSlideElapsed = 0.f;
+
+	const UWorld* const World = GetWorld();
+	if (World == nullptr || GetCapsuleComponent() == nullptr ||
+		UTCharacterMovement == nullptr)
+	{
+		return false;
+	}
+
+	if (PredictionTime <= 0.f)
+	{
+		bOutFloorSliding = UTCharacterMovement->bIsFloorSliding;
+		if (bOutFloorSliding)
+		{
+			OutSlideElapsed = FMath::Max(0.f,
+				UTCharacterMovement->GetCurrentMovementTime() -
+				UTCharacterMovement->FloorSlideTapTime);
+		}
+		return true;
+	}
+
+	const float TargetTime = World->GetTimeSeconds() - PredictionTime;
+	for (int32 Index = SavedCapsulePostures.Num() - 1; Index >= 0; --Index)
+	{
+		const FNCSavedCapsulePosture& Older = SavedCapsulePostures[Index];
+		if (Older.Time >= TargetTime)
+		{
+			continue;
+		}
+		if (Index >= SavedCapsulePostures.Num() - 1)
+		{
+			// The requested time is newer than the newest recorded posture.
+			return false;
+		}
+
+		const FNCSavedCapsulePosture& Newer = SavedCapsulePostures[Index + 1];
+		if (Older.bTeleported || Newer.bTeleported ||
+			Older.bFloorSliding != Newer.bFloorSliding)
+		{
+			// A transition/teleport inside the interpolation bracket is not proof
+			// of either posture at the requested sub-frame epoch.
+			return false;
+		}
+
+		const float Alpha = Newer.Time > Older.Time
+			? FMath::Clamp((TargetTime - Older.Time) /
+				(Newer.Time - Older.Time), 0.f, 1.f)
+			: 1.f;
+		OutHalfHeight = FMath::Lerp(Older.HalfHeight, Newer.HalfHeight, Alpha);
+		bOutFloorSliding = Older.bFloorSliding;
+		if (bOutFloorSliding)
+		{
+			const float SlideStartTime = FMath::Lerp(
+				Older.SlideStartTime, Newer.SlideStartTime, Alpha);
+			OutSlideElapsed = FMath::Max(0.f, TargetTime - SlideStartTime);
+		}
+		return true;
+	}
+
+	// The requested epoch predates the retained posture history.
+	return false;
+}
 
 FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerController* DebugViewer)
 {
