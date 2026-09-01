@@ -7,6 +7,7 @@
 #include "UTCharacter.h"
 #include "Engine/World.h"
 #include "Components/CapsuleComponent.h"   // GetScaledCapsuleSize in ComputeSlideVectorUT
+#include "Misc/App.h"                       // cached monotonic frame time
 
 
 // This prevents visual jitter when the server sends small corrections
@@ -88,8 +89,24 @@ void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick Tick
     // Epic's code runs GetPawnIterator() + IgnoreActorWhenMoving() EVERY TICK
     // At 480 FPS with 8 players = 30,720 calls/sec. We reduce.
     
-    // Temporarily force team collision flag to skip Epic's per-tick iterator
+    // Refresh before movement so a new pawn/component/team state cannot move one
+    // frame with a stale ignore set. Keep the original bForceTeamCollision value
+    // visible to the reconciliation; Super is the only call that sees it forced.
     bool bOriginalForceTeamCollision = bForceTeamCollision;
+    const double Now = FApp::GetCurrentTime();
+    const bool bClockReset = Now < LastTeamCollisionUpdateTime;
+    const bool bRefreshDue = !bOriginalForceTeamCollision &&
+        (LastTeamCollisionUpdateTime < 0.0 || bClockReset ||
+         Now - LastTeamCollisionUpdateTime >= double(TeamCollisionUpdateInterval));
+    const bool bMustClearForcedCollision = bOriginalForceTeamCollision &&
+        TeamCollisionIgnoredActors.Num() > 0;
+    if (bRefreshDue || bMustClearForcedCollision)
+    {
+        LastTeamCollisionUpdateTime = Now;
+        UpdateTeamCollisionIgnores();
+    }
+
+    // Temporarily force team collision flag to skip Epic's per-tick iterator.
     bForceTeamCollision = true;
     
     // Call parent tick (which now skips the expensive iterator)
@@ -97,52 +114,132 @@ void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick Tick
     
     // Restore original value
     bForceTeamCollision = bOriginalForceTeamCollision;
-    
-    // Now do our throttled team collision update
-    if (!bForceTeamCollision)
+}
+
+void UTeamArenaCharacterMovement::OnUnregister()
+{
+    ClearTeamCollisionIgnores(TeamCollisionIgnoreComponent.Get());
+    TeamCollisionIgnoreComponent.Reset();
+    LastTeamCollisionUpdateTime = -1.0;
+    Super::OnUnregister();
+}
+
+void UTeamArenaCharacterMovement::SetUpdatedComponent(USceneComponent* NewUpdatedComponent)
+{
+    UPrimitiveComponent* PreviousComponent = TeamCollisionIgnoreComponent.Get();
+    UPrimitiveComponent* RequestedComponent = Cast<UPrimitiveComponent>(NewUpdatedComponent);
+    if (PreviousComponent != RequestedComponent)
     {
-        const float WorldTime = GetWorld()->GetTimeSeconds();
-        if (WorldTime - LastTeamCollisionUpdateTime >= TeamCollisionUpdateInterval)
+        ClearTeamCollisionIgnores(PreviousComponent);
+        TeamCollisionIgnoreComponent.Reset();
+        LastTeamCollisionUpdateTime = -1.0;
+    }
+
+    Super::SetUpdatedComponent(NewUpdatedComponent);
+    TeamCollisionIgnoreComponent = Cast<UPrimitiveComponent>(UpdatedComponent);
+}
+
+void UTeamArenaCharacterMovement::ClearTeamCollisionIgnores(UPrimitiveComponent* Component)
+{
+    if (Component)
+    {
+        for (const TWeakObjectPtr<AUTCharacter>& IgnoredActor : TeamCollisionIgnoredActors)
         {
-            LastTeamCollisionUpdateTime = WorldTime;
-            UpdateTeamCollisionIgnores();
+            // Pending-kill actors can still be present in the component's raw
+            // UPROPERTY array; Get(true) is safe here because the engine call only
+            // removes the pointer and does not invoke the actor.
+            if (AUTCharacter* Character = IgnoredActor.Get(true))
+            {
+                Component->IgnoreActorWhenMoving(Character, false);
+            }
         }
     }
+    TeamCollisionIgnoredActors.Reset();
 }
 
 void UTeamArenaCharacterMovement::UpdateTeamCollisionIgnores()
 {
-    AUTCharacter* UTOwner = Cast<AUTCharacter>(CharacterOwner);
-    if (!UTOwner)
-    {
-        return;
-    }
-
-    AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
-    if (!GS || GS->bTeamCollision)
-    {
-        return;
-    }
-
     UPrimitiveComponent* Capsule = Cast<UPrimitiveComponent>(UpdatedComponent);
-    if (!Capsule)
+    UPrimitiveComponent* PreviousComponent = TeamCollisionIgnoreComponent.Get();
+    if (PreviousComponent != Capsule)
     {
+        ClearTeamCollisionIgnores(PreviousComponent);
+        TeamCollisionIgnoreComponent = Capsule;
+    }
+
+    AUTCharacter* UTOwner = Cast<AUTCharacter>(CharacterOwner);
+    UWorld* World = GetWorld();
+    AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+    if (!Capsule || !UTOwner || !GS || GS->bTeamCollision || bForceTeamCollision)
+    {
+        ClearTeamCollisionIgnores(Capsule);
+        if (!Capsule)
+        {
+            TeamCollisionIgnoreComponent.Reset();
+        }
         return;
     }
 
-    // This is Epic's original logic, just not running 480 times per second
-    for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
+    // Preserve Epic's original decision logic and the existing 90 Hz detection
+    // cadence. Inline storage keeps even unusually large community matches off
+    // the allocator in the normal case.
+    TArray<AUTCharacter*, TInlineAllocator<128>> ObservedCharacters;
+    TArray<AUTCharacter*, TInlineAllocator<64>> DesiredIgnoredActors;
+    for (FConstPawnIterator It = World->GetPawnIterator(); It; ++It)
     {
         AUTCharacter* Char = It->IsValid() ? Cast<AUTCharacter>((*It).Get()) : nullptr;
         if (Char)
         {
-            bool bShouldIgnore = GS->OnSameTeam(UTOwner, Char) && 
-                                 (UTOwner != Char) && 
-                                 !Char->IsPendingKillPending() && 
-                                 !Char->IsDead() && 
-                                 !Char->IsRagdoll();
-            Capsule->IgnoreActorWhenMoving(Char, bShouldIgnore);
+            ObservedCharacters.Add(Char);
+            if (GS->OnSameTeam(UTOwner, Char) &&
+                UTOwner != Char &&
+                !Char->IsPendingKillPending() &&
+                !Char->IsDead() &&
+                !Char->IsRagdoll())
+            {
+                DesiredIgnoredActors.Add(Char);
+            }
         }
+    }
+
+    // Remove actors that changed team/state or left the world. Ask weak pointers
+    // for pending-kill objects too so their raw MoveIgnoreActors entry is removed
+    // before GC; fully stale pointers have already been nulled by GC.
+    for (auto It = TeamCollisionIgnoredActors.CreateIterator(); It; ++It)
+    {
+        AUTCharacter* PreviouslyIgnored = It->Get(true);
+        if (!PreviouslyIgnored || !DesiredIgnoredActors.Contains(PreviouslyIgnored))
+        {
+            if (PreviouslyIgnored && Capsule->GetMoveIgnoreActors().Contains(PreviouslyIgnored))
+            {
+                Capsule->IgnoreActorWhenMoving(PreviouslyIgnored, false);
+            }
+            It.RemoveCurrent();
+        }
+    }
+
+    // Reconcile pre-existing/raw-list state too. Stock wrote false for every
+    // ineligible UT character each pass, so remove one only when it is actually
+    // present rather than issuing an unconditional component mutation.
+    for (AUTCharacter* ObservedCharacter : ObservedCharacters)
+    {
+        if (!DesiredIgnoredActors.Contains(ObservedCharacter) &&
+            Capsule->GetMoveIgnoreActors().Contains(ObservedCharacter))
+        {
+            Capsule->IgnoreActorWhenMoving(ObservedCharacter, false);
+            TeamCollisionIgnoredActors.Remove(ObservedCharacter);
+        }
+    }
+
+    // Re-add a desired teammate if an external/Blueprint path cleared the raw
+    // component list, even when our logical cache still contains that teammate.
+    for (AUTCharacter* DesiredActor : DesiredIgnoredActors)
+    {
+        if (!Capsule->GetMoveIgnoreActors().Contains(DesiredActor))
+        {
+            Capsule->IgnoreActorWhenMoving(DesiredActor, true);
+        }
+        TeamCollisionIgnoredActors.Add(DesiredActor);
     }
 }
 

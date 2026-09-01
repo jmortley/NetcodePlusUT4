@@ -19,6 +19,7 @@ class AUTWeaponFix;
 class UUTWeaponSkin;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
+class USkeletalMeshComponent;
 
 /** Server-only companion to AUTCharacter::SavedPositions. Stock rewind history
  *  records location but not capsule posture, so a slide that ends before hit
@@ -171,6 +172,20 @@ protected:
 	// Timestamp of last OverlayMesh->MarkRenderStateDirty() allowed through Super::Tick.
 	// Time-based throttle at 60Hz — independent of render frame rate (480/720/etc).
 	float LastOverlayDirtyTime = 0.f;
+
+	// Overlay distance/render visibility is presentation-only. Evaluate it at 120 Hz, but
+	// invalidate immediately when the component/material/config or local camera identity changes.
+	double LastOverlayVisibilityEvalTime = -1.0;
+	uint32 LastOverlayViewerRevision = 0;
+	float LastOverlayVisibilityDistanceSquared = -1.f;
+	TWeakObjectPtr<USkeletalMeshComponent> LastOverlayVisibilityMesh;
+	TWeakObjectPtr<UMaterialInterface> LastOverlayVisibilityMaterial;
+	bool bOverlayVisibilityStateValid = false;
+	bool bLastOverlayVisibilityRegistered = false;
+	bool bLastOverlayVisibilityHadMaterial = false;
+	bool bLastOverlayMaterialIsShield = false;
+	bool bLastOverlayHideShield = false;
+	bool bLastOverlayShouldShow = true;
 
 	// --- Per-weapon hide tracking ---
 	// Tracks last equipped weapon to detect weapon switches and apply hide state

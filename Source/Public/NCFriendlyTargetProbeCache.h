@@ -3,6 +3,8 @@
 #include "NetcodePlus.h"
 
 class APlayerController;
+class APlayerCameraManager;
+class AActor;
 class AUTCharacter;
 class AUTPlayerState;
 
@@ -21,12 +23,17 @@ struct NETCODEPLUS_API FNCFriendlyTargetProbeCache
 
 private:
 	mutable TWeakObjectPtr<APlayerController> CachedViewer;
+	mutable TWeakObjectPtr<APlayerCameraManager> CachedCameraManager;
 	mutable TWeakObjectPtr<AUTCharacter> CachedWeaponOwner;
 	mutable TWeakObjectPtr<AUTPlayerState> CachedHitPlayerState;
+	mutable TWeakObjectPtr<AActor> CachedViewTarget;
 	mutable FVector CachedViewLocation = FVector::ZeroVector;
 	mutable FRotator CachedViewRotation = FRotator::ZeroRotator;
 	mutable double NextProbeTimeSeconds = 0.0;
+	mutable float CachedProbeIntervalSeconds = 0.0f;
+	mutable uint64 CachedProbeFrame = MAX_uint64;
 	mutable bool bCachedDrawIndicator = false;
 	mutable bool bCachedHadHitPlayerState = false;
+	mutable bool bCachedHadViewTarget = false;
 	mutable bool bCachedViewPoseValid = false;
 };

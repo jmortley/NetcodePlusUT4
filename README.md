@@ -34,8 +34,9 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 ### Performance / High-FPS Support
 
 - **Frame-rate-independent overlay throttle** — 60Hz time-based dirty-marking on character overlay meshes regardless of render rate (works at 480, 720, uncapped).
-- **Overlay visibility cull** — armor / UDamage / spawn-protection overlays skip rendering when target is off-screen, occluded, or beyond ~55m. Significant FPS gain in scrum-heavy modes (Wipeout).
-- **Per-team collision throttle** — 32/sec instead of every-tick for team collision iteration.
+- **Overlay visibility cull** — armor / UDamage / spawn-protection overlays skip rendering when target is off-screen, occluded, or beyond ~55m; local viewpoints are shared once per frame and visibility decisions are capped at 120 Hz. Significant FPS gain in scrum-heavy modes (Wipeout).
+- **Friendly-target probe cap** — the visual-only crosshair/name trace is capped at 240 Hz during normal aiming, with immediate refreshes for camera cuts, view-target changes, and large pose jumps.
+- **Per-team collision delta refresh** — detects changes at 90 Hz but mutates capsule ignore lists only when a teammate's collision eligibility changes.
 - **Spawn-protection material loop bypass** — cleared per-tick state-transition flag instead of every-frame BodyMI loop (~27K calls/sec saved at 480fps).
 - **Shock ball drift correction** — high-FPS floating-point velocity drift snapped back to original fire direction per-tick on zero-gravity projectiles.
 - **Spectator rotation smoothing** — separate interp speed for remote pawns to prevent jitter at high refresh rates.
