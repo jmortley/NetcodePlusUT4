@@ -39,6 +39,7 @@ AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 	, CachedLightningBeamMID(nullptr)
 	, CachedLightningBeamSourceMaterial(nullptr)
 	, CachedLightningBeamColorGeneration(0)
+	, bDispatchingZoomStart(false)
 {
 	// Standard Sniper Properties (From UTWeap_Sniper)
 	DefaultGroup = 9;
@@ -87,6 +88,45 @@ AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 	
 	LowMeshOffset = FVector(0.f, 0.f, -5.f);
 	VeryLowMeshOffset = FVector(0.f, 0.f, -11.f);
+}
+
+void AUTPlusSniper::StartFire(uint8 FireModeNum)
+{
+	UUTWeaponStateFiring* const RequestedState = FiringState.IsValidIndex(FireModeNum)
+		? FiringState[FireModeNum] : nullptr;
+	const bool bExplicitZoomStart = RequestedState != nullptr
+		&& RequestedState->IsA(UUTWeaponStateZooming::StaticClass());
+	const bool bWasDispatchingZoomStart = bDispatchingZoomStart;
+	bDispatchingZoomStart = bDispatchingZoomStart || bExplicitZoomStart;
+	Super::StartFire(FireModeNum);
+	bDispatchingZoomStart = bWasDispatchingZoomStart;
+}
+
+void AUTPlusSniper::StateChanged()
+{
+	Super::StateChanged();
+
+	if (bDispatchingZoomStart || UTOwner == nullptr
+		|| !UTOwner->IsLocallyControlled() || UTOwner->GetWeapon() != this)
+	{
+		return;
+	}
+
+	const uint8 FireModeNum = CurrentFireMode;
+	UUTWeaponStateFiring* const EnteredState = FiringState.IsValidIndex(FireModeNum)
+		? FiringState[FireModeNum] : nullptr;
+	if (EnteredState == nullptr || CurrentState != EnteredState
+		|| !EnteredState->IsA(UUTWeaponStateZooming::StaticClass())
+		|| !UTOwner->IsPendingFire(FireModeNum)
+		|| ZoomState != EZoomState::EZS_NotZoomed)
+	{
+		return;
+	}
+
+	// Stock ActiveState carries a held button across equip by entering the
+	// pending firing state directly. Ordinary firing states act in BeginState,
+	// but Zooming requires this edge callback and otherwise leaves the FOV alone.
+	EnteredState->PendingFireStarted();
 }
 
 void AUTPlusSniper::ApplyHitscanBeamColor(UParticleSystemComponent* Effect, ENCHitscanBeamColorProfile Profile)
