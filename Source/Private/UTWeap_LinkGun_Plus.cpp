@@ -227,6 +227,13 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 		// actor already dead or gone, nothing to do
 		return;
 	}
+	AUTCharacter* ClaimedCharacter = Cast<AUTCharacter>(HitActor);
+	if (ClaimedCharacter != nullptr && !IsLiveHitscanTarget(ClaimedCharacter))
+	{
+		// The client may still hold a NetGUID to the retained corpse. Do not let
+		// the reduced-damage fallback turn that stale claim into beam accuracy.
+		return;
+	}
 
 	int32 DamageCap = BeamDamagePerBatchCap;
 	if (UTOwner)
@@ -265,11 +272,23 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 	// Config: 80ms is a safe crossover point
 	//const float LowPingThreshold = 80.0f;
 	bool bHitValidated = false;
-	float CurrentPing = PS->ExactPing;
+	const AUTPlayerController* ShooterPC =
+		Cast<AUTPlayerController>(UTOwner->Controller);
+	const bool bRemoteHuman = ShooterPC != nullptr && !ShooterPC->IsLocalController();
+	float CurrentPing = bRemoteHuman ? 0.f : PS->ExactPing;
+	const bool bTimingValid = !bRemoteHuman ||
+		GetServerObservedRTTMs(ShooterPC, CurrentPing);
 	// HYSTERESIS LOGIC
 	// Define the buffer zone (e.g. +/- 5ms around your 80ms target)
 
-	if (CurrentPing > (LowPingThreshold + HysteresisBuffer))
+	if (!bTimingValid)
+	{
+		// Until the server has an ACK-derived RTT, use the path that requires a
+		// confirming server trace. Never expose the low-ping half-damage fallback
+		// based on client-writable ExactPing.
+		bHighPingMode = true;
+	}
+	else if (CurrentPing > (LowPingThreshold + HysteresisBuffer))
 	{
 		bHighPingMode = true;
 	}
@@ -345,6 +364,7 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 	}
 
 	if (!bHitValidated) return;
+	if (ClaimedCharacter != nullptr && !IsLiveHitscanTarget(ClaimedCharacter)) return;
 
 	// ---------------------------------------------------------
 	// STEP 3: APPLY DAMAGE
@@ -373,6 +393,8 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 	// Was previously +=1 per ServerProcessBeamHit batch (~10Hz), but
 	// LinkBeamShots ticks per ConsumeAmmo (~8.3Hz at FireInterval[1]=0.12s),
 	// so the rates didn't match and Hits/Shots clamped to 100% on any hold.
+	// A killing batch still counts: eligibility was checked immediately before
+	// damage, not after TakeDamage potentially transitioned the target to dead.
 	bHitDuringCurrentRefireInterval = true;
 }
 

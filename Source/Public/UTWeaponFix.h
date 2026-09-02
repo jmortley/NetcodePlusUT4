@@ -4,6 +4,7 @@
 #include "NetcodePlus.h"
 #include "UnrealTournament.h"
 #include "UTWeapon.h"
+#include "NCFriendlyTargetProbeCache.h"
 #include "UTWeaponFix.generated.h"
 
 class UUTWeaponSkin;
@@ -29,7 +30,10 @@ class UMaterialInstanceDynamic;
 
  // --- Forward Declarations ---
 class AUTProjectile;
+class AUTCharacter;
+class AUTPlayerController;
 class AClientHitsounds;
+class UInputComponent;
 
 // --- Struct Definition (MUST BE BEFORE THE CLASS) ---
 USTRUCT(BlueprintType)
@@ -327,14 +331,16 @@ public:
         bool bFirstPersonMesh);
 
     /** Resolve the final slot mask for one skin/view. Authentic invisibility
-     *  materials replace every live mesh slot; PinkLG uses both E0/E1 slots; other
-     *  authored skins retain the verified per-family mask above. */
+     *  materials replace every live mesh slot; the five Ghost skins replace all
+     *  1P slots but explicitly target zero 3P slots; PinkLG uses both E0/E1 slots;
+     *  other authored skins retain the verified per-family mask above. */
     static uint32 GetResolvedWeaponSkinTargetSlotMask(const UUTWeaponSkin* Skin,
         FName WeaponSkinCustomizationTag, bool bFirstPersonMesh,
         int32 MaterialSlotCount);
 
     /** Material for one targeted slot. Most skins return their one per-view material;
-     *  PinkLG loads its MutAnnouncers-cooked E1_1p / E0_3p supplement so both
+     *  Ghost skins resolve the stock pickup hologram only in 1P and restore stock in
+     *  3P; PinkLG loads its MutAnnouncers-cooked E1_1p / E0_3p supplement so both
      *  multipart LG sections receive the matching texture set. */
     UMaterialInterface* GetResolvedWeaponSkinMaterialForSlot(
         const UUTWeaponSkin* Skin, bool bFirstPersonMesh, int32 MaterialSlot);
@@ -355,6 +361,8 @@ public:
     virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
+    virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
+        AUTPlayerState*& HitPlayerState) const override;
 
     /** Server-authoritative fire policy hook. Return false to hard-reject a fire mode
      *  at every server fire entry (ServerStartFireFixed and the resend funnel) BEFORE any
@@ -376,12 +384,41 @@ public:
      *  Public so ServerShield can use the same rewind for radial offset analysis. */
     virtual float GetHitValidationPredictionTime() const;
 
+    /** Read ACK-derived full RTT from the server's connection. False until a
+     *  usable measurement exists; callers must reject or use a zero base epoch
+     *  rather than fall back to the client's writable ExactPing. */
+    static bool GetServerObservedRTTMs(const AUTPlayerController* ShooterPC,
+        float& OutRTTMs);
+
+    /** Server-live full-RTT buffer used by hitscan target rewind. Kept separate
+     *  from FudgeFactorMs so hitscan tuning cannot change projectile catch-up
+     *  or delayed-fake timing. */
+    static float GetConfiguredHitscanFudgeMs();
+
     /** Half-width (seconds) of the server-side bidirectional time-search fallback in
      *  HitScanTrace, used when the client claimed a hit the primary rewind missed.
-     *  Per-weapon overridable. Standard 45ms for ALL hitscan (2026-07-07: sniper/LG
-     *  raised from 30ms to match the shock family — the search probes fixed 15ms
-     *  rungs {15,30,45}, so 45 is the last rung before the ±60 defender tradeoff). */
+     *  Per-weapon overridable. Standard 45ms for ALL hitscan; sniper/LG were
+     *  raised from 30ms to match the shock family on 2026-07-07. The ordinary
+     *  search probes fixed 15ms rungs {15,30,45}. A server-proven floor-slide
+     *  may add one exact, no-padding outer rung through
+     *  ncp.HitscanSlideSearchExtraMs; the virtual value remains the ordinary
+     *  search budget for every target. */
     virtual float GetHitscanTimeSearchWindow() const { return 0.045f; }
+
+    /** Opt-in for render-authoritative target sampling in HitScanTrace (legacy
+     *  cvar name ncp.RenderCredit). For a remote human using claim-incapable
+     *  fire, the estimated render-time capsule replaces raw validation history
+     *  as the sole target-selection sample. Ray, world clipping, spread, and
+     *  timing estimate remain server-owned — no client hit result is trusted.
+     *  Off per weapon by default; continuous/spread modes opt in. */
+    virtual bool SupportsRenderCredit() const { return false; }
+
+    /** True only while a character is live, visible, and has capsule geometry.
+     *  Collision state is deliberately ignored because live feigning players
+     *  have a NoCollision capsule but manual hitscan must still hit them. Every
+     *  selector and final damage/stat gate uses this predicate so a retained
+     *  corpse cannot be rewound into a valid hit. */
+    static bool IsLiveHitscanTarget(const AUTCharacter* Target);
 
     /** Slide-posture selection for hitscan capsule tests. A floor slide shrinks the
      *  authoritative capsule the same frame it starts, but a remote shooter keeps
@@ -415,9 +452,12 @@ public:
     virtual FRotator GetBaseFireRotation() override;
     virtual void BringUp(float OverflowTime) override;
     virtual void SetSkin(UMaterialInterface* NewSkin) override;
+    virtual void UpdateOutline() override;
+    virtual TArray<UMeshComponent*> Get1PMeshes_Implementation() const override;
     void ClearPendingFakeProjectiles();
     void DeferredGotoActiveState(uint8 FireModeNum);
     virtual void Removed() override;
+    virtual void Destroyed() override;
     //~ End AUTWeapon Interface
 
     // =========================================================================
@@ -460,6 +500,35 @@ public:
     UPROPERTY()
     TArray<float> LastReleaseTime;
 
+    /** Opt-in client-only shock-primary input trace. The diagnostic input
+     *  component observes LeftMouseButton without consuming it; the two action
+     *  observers are appended after AUTPlayerController's stock OnFire / OnStopFire
+     *  bindings. Nothing here participates in firing or replication. */
+    UPROPERTY(Transient)
+    UInputComponent* ShockInputTraceInputComponent;
+
+    UPROPERTY(Transient)
+    AUTPlayerController* ShockInputTraceController;
+
+    /** Exact controller component that owns the two passive action observers.
+     *  Stored separately because UE4.15 may replace PlayerController::InputComponent
+     *  during travel/setup; cleanup must never guess using the replacement. */
+    UPROPERTY(Transient)
+    UInputComponent* ShockInputTraceActionComponent;
+
+    /** Snapshot taken by the higher-priority, non-consuming key observer before
+     *  the stock StartFire action runs. It lets the later passive action observer
+     *  distinguish "this click queued primary fire" from an older queued input. */
+    bool bShockInputTraceDeferredSnapshotValid;
+    bool bShockInputTraceHadDeferredStartBeforeDown;
+
+    void RefreshShockInputTrace();
+    void StopShockInputTrace();
+    void ShockInputTracePlayerDown();
+    void ShockInputTracePlayerUp();
+    void ShockInputTraceActionStart(FKey Key);
+    void ShockInputTraceActionStop(FKey Key);
+
     /** Mouse-bounce debounce window in seconds. A press event arriving
      *  within this many seconds of the prior release is treated as a bounce
      *  (or scroll-wheel rapid-fire) — PendingFire is kept true so any held
@@ -485,6 +554,11 @@ public:
      */
     bool IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime);
     void OnRetryTimer(uint8 FireModeNum);
+    void OnBufferedClickRetryTimer(uint8 FireModeNum, FRotator ReleaseAim, float ReleaseTime);
+    /** State/game-driven stops must not masquerade as a physical mouse release. */
+    void StopFireInternal(uint8 FireModeNum);
+    /** Same guard, but route through AUTCharacter::StopFire for owner-side cleanup. */
+    void StopOwnerFireInternal(uint8 FireModeNum);
     bool bIsTransactionalFire;
     float LastMultiPressTime;
     UPROPERTY()
@@ -508,20 +582,27 @@ public:
 
 protected:
 
+    /** Client-only crosshair presentation state; see FNCFriendlyTargetProbeCache. */
+    mutable FNCFriendlyTargetProbeCache FriendlyTargetProbeCache;
+
+    /** Common server RTT-to-rewind conversion. Hitscan passes the live cvar;
+     *  the legacy projectile-origin path passes its per-weapon field. */
+    float GetPredictionTimeWithFudgeMs(float InFudgeMs) const;
+
     FTimerHandle DelayedPutDownHandle;
     bool bHandlingRetry;
     FTimerHandle RetryFireHandle[2];
 
-    /** True when the charged-rocket state can no longer self-transition: not charging and
-     *  none of its four timers (load / grace / burst / post-burst refire) active. A
+    /** True when the charged-rocket state can no longer self-transition: none of its four
+     *  timers (load / grace / burst / post-burst refire) are active. A
      *  legitimately active charged state ALWAYS has one of those in flight, so this is the
      *  wedge signature (the state that silently swallows primaries — see the Tick watchdog
-     *  and the ServerStartFireFixed fast recovery). Loaded-rocket handling is the CALLER's
-     *  job: the fast recovery paths only act when nothing is loaded, so a false positive
-     *  can never abandon a loaded volley. */
+     *  and the ServerStartFireFixed fast recovery). Callers must branch on logical
+     *  NumLoadedRockets only; NumLoadedBarrels tracks loading/visual state and can remain
+     *  stale after a completed spread volley, so it is not a count of unfired projectiles. */
     bool IsChargedRocketStateWedged(class UUTWeaponStateFiringChargedRocket_Transactional* Chg);
 
-    /** First watchdog tick an EMPTY wedge was observed; -1 = not currently observed.
+    /** First watchdog tick a wedge was observed; -1 = not currently observed.
      *  Debounces the fast recovery (~0.25s) so a transient no-timer instant between state
      *  callbacks can't false-trigger it. Reset on recovery, on busy, and on leaving the
      *  charged state. */
@@ -542,13 +623,12 @@ protected:
     // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
     bool bCrossModeRetryArmed[2];
 
-    // True while RetryFireHandle[mode] holds a BUFFERED CLICK: a queued
-    // (cooldown-blocked) press that was then RELEASED while its shot was due
-    // within ncp.ClickBufferMs. The release keeps the timer alive (StopFire)
-    // and OnRetryTimer fires exactly one shot then ends the sequence itself.
-    // Cleared by any fresh physical press, consumed in OnRetryTimer, killed on
-    // PutDown. Never graduated to pawn PendingFire — it is a spent click, not
-    // held intent.
+    // True while RetryFireHandle[mode] holds a BUFFERED CLICK. In 328 dogfood
+    // this is restricted to Shock-derived primary: a cooldown-blocked press
+    // RELEASED within ncp.ClickBufferMs keeps release-time aim in the timer
+    // payload. OnBufferedClickRetryTimer executes once at legal fire time.
+    // Cleared by replacement input and weapon lifecycle; never graduated to
+    // pawn PendingFire because it is spent click intent, not a held button.
     bool bBufferedClickPending[2];
 
     UPROPERTY(Transient)
@@ -580,7 +660,18 @@ protected:
     uint32 AppliedFPSMaterialSlotMask;
     bool bCapturedOriginalFPSMaterials;
 
+    /** Custom-depth silhouette paired with a stock pickup-hologram FPS material.
+     *  The regular Mesh remains the visible, animated 1P weapon; this owner-only
+     *  master-pose slave supplies the depth sampled by M_HoloEffect. */
+    UPROPERTY(Transient)
+    USkeletalMeshComponent* FirstPersonHologramDepthMesh;
+
+    bool bFirstPersonHologramSkinActive;
+
     void PrepareConfiguredWeaponSkin();
+    void ApplyFirstPersonHologramProjectionParams();
+    void UpdateFirstPersonHologramDepthMesh(bool bEnable);
+    void DestroyFirstPersonHologramDepthMesh();
 
 public:
     /** Server-side only: impact point from the last FireInstantHit trace.
@@ -592,11 +683,11 @@ public:
      *  (CollisionRadius + TraceRadius + ExtraHitPadding). For hitplot normalization. */
     float LastHitscanPaddedRadius = 0.0f;
 
-    /** Server-side only: set when THIS trace's pawn hit was demoted by the
-     *  unclaimed-hit render check (ncp.UnclaimedRenderGate). Head-sphere
-     *  fallbacks (base FireInstantHit and sniper subclasses) must not
-     *  resurrect the demoted target from the same ray. Reset at every
-     *  HitScanTrace entry. */
+    /** Server-side only: set when THIS trace's pawn result was rejected by the
+     *  unclaimed-hit render gate, or render-authoritative claimless targeting
+     *  selected no pawn. Head-sphere fallbacks (base FireInstantHit and sniper
+     *  subclasses) must not resurrect a raw-history target from the same ray.
+     *  Reset at every HitScanTrace entry. */
     bool bLastUnclaimedRenderDemoted = false;
 
     /** Server-side only (327 client-informed headshot): WHERE the client rendered the claimed target's
@@ -706,19 +797,17 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectiles")
 	float ProjectilePredictionCapMs = 120.0f;
 
-	/** * Safety buffer subtracted from Ping before calculating prediction.
-	 * Absorbs jitter to prevent overshooting the client's view.
+	/** Legacy projectile catch-up / delayed-fake safety buffer. Server hitscan
+	 * target rewind uses ncp.HitscanFudgeMs instead.
 	 * Default: 20.0ms.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectiles")
 	float FudgeFactorMs = 20.0f;
 
 
-    /** * Extra radius added to the target capsule during hit validation.
-     * Applied ONLY if:
-     * 1. The Client claimed a hit on this specific target.
-     * 2. The Target is moving (Velocity > 1.0).
-     * * Default UT4 value is 40.0f. 
+    /** Legacy asset field retained for serialized Blueprint compatibility.
+     * Moving claimed-target primary padding is controlled live by
+     * ncp.HitscanPrimaryPadding instead.
      */
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
     float HitScanPadding = 45.0f;

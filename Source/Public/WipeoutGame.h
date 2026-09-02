@@ -254,6 +254,16 @@ public:
 	UPROPERTY(Transient)
 	TMap<TWeakObjectPtr<AUTPlayerState>, FPendingRespawn> PendingRespawns;
 
+	/** Players whose round is OVER — no respawn may ever be granted them again
+	 *  this round (their wave missed the cutoff at death, or their fired timer
+	 *  was blocked at the deadline). RestartPlayer consults this: both cutoff
+	 *  paths zero RespawnTime for the HUD's X display, which is exactly the
+	 *  field the stock fire-to-respawn gate checks, so without this set a
+	 *  dead-for-the-round player pressing fire was classified by bIsReconnect
+	 *  as a reconnecting player and spawned an orphaned, uncontrolled ghost
+	 *  pawn. Cleared at round start, before the opening mass-spawn. */
+	TSet<TWeakObjectPtr<AUTPlayerState>> RoundEliminatedPlayers;
+
 	/** Players currently under spawn protection */
 	UPROPERTY(Transient)
 	TMap<TWeakObjectPtr<AUTPlayerState>, float> SpawnProtectedUntil;

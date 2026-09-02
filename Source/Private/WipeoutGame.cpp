@@ -992,6 +992,11 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 		DeadPS->RespawnTime = 0.f;
 		DeadPS->ForceNetUpdate();
 
+		// Their round is over. Zeroing RespawnTime above is what the HUD's X
+		// needs, but it also opens the stock fire-to-respawn gate — this marker
+		// is what RestartPlayer's reconnect classification checks instead.
+		RoundEliminatedPlayers.Add(DeadPS);
+
 		// There is no pending-respawn entry for the normal spectate-delay block
 		// below to recognize. Preserve the death-cam handoff for a non-final
 		// player whose wave cannot beat the cutoff.
@@ -1087,6 +1092,9 @@ void AUWipeoutGame::OnRespawnTimerFired(AUTPlayerState* PS)
 		PS->RespawnWaitTime = 0.f;
 		PS->RespawnTime = 0.f;
 		PS->ForceNetUpdate();
+		// Same marker as the death-time cutoff branch: RespawnTime just went 0
+		// (HUD X), so only this keeps a later fire press from spawning a ghost.
+		RoundEliminatedPlayers.Add(PS);
 		ForceTeamSpectate(PS);
 		return;
 	}
@@ -1578,6 +1586,8 @@ void AUWipeoutGame::StartNextRound()
 
 	bAllowPlayerRespawns = false;
 	ClearHybridRoundSpawnState();
+	// Last round's eliminations end here — must precede the opening mass-spawn.
+	RoundEliminatedPlayers.Empty();
 
 	UE_LOG(LogGameMode, Warning, TEXT("Wipeout round starting: Team0=%d, Team1=%d"), Team0StartingSize, Team1StartingSize);
 
@@ -1929,8 +1939,15 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 
 	// Detect reconnecting players: they have stats (played before) but no pawn
 	// (crashed/disconnected). Allow them to respawn mid-round unless sudden death.
+	// A player the cutoff already eliminated matches every one of those tests
+	// (no pawn, round live, regulation time, stats) but is NOT a reconnect —
+	// both cutoff paths zeroed RespawnTime for the HUD X, which also opens the
+	// stock fire-to-respawn gate, so without this exclusion a fire press after
+	// elimination spawned an orphaned ghost pawn. (A true crash-rejoin gets a
+	// fresh PlayerState object, so the weak-ptr set cannot false-positive it.)
 	const bool bIsReconnect = (PS && !NewPlayer->GetPawn() && bRoundInProgress
-		&& !bInSuddenDeath && (PS->Deaths > 0 || PS->Kills > 0));
+		&& !bInSuddenDeath && (PS->Deaths > 0 || PS->Kills > 0)
+		&& !RoundEliminatedPlayers.Contains(PS));
 
 	// Allow spawn during: warmup, waiting to start, explicit respawn window
 	// (wave respawn), late joiners, or reconnecting players.

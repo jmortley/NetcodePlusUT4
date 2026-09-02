@@ -7,6 +7,7 @@
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
+#include "CanvasItem.h"
 #include "Engine/Texture2D.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -22,15 +23,24 @@ namespace NCPlusAC
 	static const FLinearColor AccentWarn    (1.00f, 0.85f, 0.30f, 1.f);
 	static const FLinearColor AccentDanger  (1.00f, 0.32f, 0.28f, 1.f);
 	static const FLinearColor PlateBg       (0.04f, 0.04f, 0.04f, 0.45f);
+	static const FLinearColor TextShadow    (0.f, 0.f, 0.f, 0.7f);
+	static const FLinearColor SmallShadow   (0.f, 0.f, 0.f, 0.5f);
+	static const FLinearColor GaugeTrack    (0.05f, 0.05f, 0.05f, 1.f);
+	static const FName NAME_Ammo(TEXT("ammo"));
+
 }
 
 UNCPlusHUDWidget_AmmoCounter::UNCPlusHUDWidget_AmmoCounter(const FObjectInitializer& OI)
 	: Super(OI)
 	, WeaponIconAtlas(nullptr)
+	, CachedScaleRevision(MAX_uint32)
+	, CachedUserScale(1.f)
+	, AmmoDisplaySampleFrame(MAX_uint64)
+	, bAmmoDisplaySample(false)
 	, LastAmmo(-1)
 	, PickupPulseEnd(0.f)
 	, SwapFlashEnd(0.f)
-	, CachedLayoutRevision(0)
+	, CachedLayoutRevision(MAX_uint32)
 	, CachedStyle(uint8(ENCPlusAmmoStyle::BigNumber))
 	, CachedOpacity(1.f)
 	, CachedNumColor(NCPlusAC::NumWhite)
@@ -39,6 +49,11 @@ UNCPlusHUDWidget_AmmoCounter::UNCPlusHUDWidget_AmmoCounter(const FObjectInitiali
 	, CachedWarnColor(NCPlusAC::AccentWarn)
 	, CachedDangerColor(NCPlusAC::AccentDanger)
 	, CachedBgColor(NCPlusAC::PlateBg)
+	, CachedTextAmmo(MIN_int32)
+	, CachedTextMaxAmmo(MIN_int32)
+	, CachedNumberFont(nullptr)
+	, CachedTinyFont(nullptr)
+	, CachedSmallFont(nullptr)
 {
 	// Anchored bottom-right by default. Origin matches anchor so content extends
 	// up-and-to-the-left from the corner — same idiom we use for the WeaponBar.
@@ -57,9 +72,14 @@ UNCPlusHUDWidget_AmmoCounter::UNCPlusHUDWidget_AmmoCounter(const FObjectInitiali
 
 float UNCPlusHUDWidget_AmmoCounter::GetDrawScaleOverride()
 {
-	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("ammo"));
-	const float UserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
-	return Super::GetDrawScaleOverride() * UserScale;
+	const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+	if (CachedScaleRevision != Revision)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(NCPlusAC::NAME_Ammo);
+		CachedUserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+		CachedScaleRevision = Revision;
+	}
+	return Super::GetDrawScaleOverride() * CachedUserScale;
 }
 
 bool UNCPlusHUDWidget_AmmoCounter::ShouldDraw_Implementation(bool bShowScores)
@@ -72,7 +92,19 @@ bool UNCPlusHUDWidget_AmmoCounter::ShouldDraw_Implementation(bool bShowScores)
 	if (!Char || Char->IsDead()) return false;
 
 	AUTWeapon* W = Char->GetWeapon();
-	return (W != nullptr) && W->NeedsAmmoDisplay();
+	return NeedsAmmoDisplayCached(W);
+}
+
+bool UNCPlusHUDWidget_AmmoCounter::NeedsAmmoDisplayCached(AUTWeapon* W)
+{
+	if (!W) return false;
+	if (AmmoDisplaySampleFrame != GFrameCounter || AmmoDisplaySampleWeapon.Get() != W)
+	{
+		AmmoDisplaySampleFrame = GFrameCounter;
+		AmmoDisplaySampleWeapon = W;
+		bAmmoDisplaySample = W->NeedsAmmoDisplay();
+	}
+	return bAmmoDisplaySample;
 }
 
 void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
@@ -89,7 +121,7 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 	if (!Char || Char->IsDead()) return;
 
 	AUTWeapon* W = Char->GetWeapon();
-	if (!W || W->IsPendingKill() || !W->NeedsAmmoDisplay()) return;
+	if (!W || W->IsPendingKill() || !NeedsAmmoDisplayCached(W)) return;
 
 	// Lazy-load atlas if CDO finder failed (consistent with WeaponBar).
 	if (!WeaponIconAtlas)
@@ -119,7 +151,7 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
 	if (CachedLayoutRevision != LayoutRevision)
 	{
-		const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(TEXT("ammo"));
+		const FNCPlusHUDElement* Elem = FNCPlusHUDLayout::GetLive().Find(NAME_Ammo);
 		auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
 		{
 			return Elem ? Elem->GetExtraColor(Key, Default) : Default;
@@ -134,8 +166,12 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 		CachedStyle      = uint8(Elem
 			? NCPlusAmmoStyle::Parse(Elem->GetExtra(TEXT("style")))
 			: ENCPlusAmmoStyle::BigNumber);
+		CachedNumberFont = NCPlusHUDFonts::Resolve(NAME_Ammo, UTHUDOwner, UTHUDOwner->LargeFont);
+		CachedTinyFont = UTHUDOwner->TinyFont;
+		CachedSmallFont = UTHUDOwner->SmallFont;
 		CachedLayoutRevision = LayoutRevision;
 	}
+	RefreshTextCache(W);
 
 	FAmmoColors C;
 	C.Opacity = CachedOpacity;
@@ -182,6 +218,70 @@ void UNCPlusHUDWidget_AmmoCounter::Draw_Implementation(float DeltaTime)
 	}
 }
 
+void UNCPlusHUDWidget_AmmoCounter::RefreshTextCache(AUTWeapon* W)
+{
+	if (!W) return;
+	if (CachedTextAmmo != W->Ammo)
+	{
+		CachedTextAmmo = W->Ammo;
+		CachedAmmoText = FText::AsNumber(W->Ammo);
+		CachedAmmoString = CachedAmmoText.ToString();
+		CachedAmmoMeasure.Font = nullptr;
+	}
+	if (CachedTextMaxAmmo != W->MaxAmmo)
+	{
+		CachedTextMaxAmmo = W->MaxAmmo;
+		CachedMaxAmmoText = W->MaxAmmo > 0
+			? FText::FromString(FString::Printf(TEXT("/ %d"), W->MaxAmmo))
+			: FText::GetEmpty();
+		CachedMaxAmmoString = CachedMaxAmmoText.ToString();
+		CachedMaxMeasure.Font = nullptr;
+	}
+}
+
+FVector2D UNCPlusHUDWidget_AmmoCounter::DrawCachedText(const FText& Text,
+	const FString& String, FTextMeasureCache& Measure, float X, float Y, UFont* Font,
+	const FVector2D& ShadowDirection, const FLinearColor& ShadowColor,
+	float TextScale, float DrawOpacity, const FLinearColor& DrawColor,
+	ETextHorzPos::Type HorizontalAlignment)
+{
+	if (!Canvas || !Font || Text.IsEmpty()) return FVector2D::ZeroVector;
+	if (Measure.Font != Font)
+	{
+		float XL = 0.f;
+		float YL = 0.f;
+		Canvas->StrLen(Font, String, XL, YL);
+		Measure.Font = Font;
+		Measure.Size = FVector2D(XL, YL);
+	}
+
+	if (bScaleByDesignedResolution)
+	{
+		X *= RenderScale;
+		Y *= RenderScale;
+	}
+	const float FinalScale = bScaleByDesignedResolution ? RenderScale * TextScale : TextScale;
+	FVector2D DrawPos(RenderPosition.X + X, RenderPosition.Y + Y);
+	if (HorizontalAlignment == ETextHorzPos::Right)
+	{
+		DrawPos.X -= Measure.Size.X * FinalScale;
+	}
+	else if (HorizontalAlignment == ETextHorzPos::Center)
+	{
+		DrawPos.X -= Measure.Size.X * FinalScale * 0.5f;
+	}
+
+	FLinearColor Color = DrawColor;
+	Color.A = Opacity * DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
+	FCanvasTextItem TextItem(DrawPos, Text, Font, Color);
+	FLinearColor Shadow = ShadowColor;
+	Shadow.A *= DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
+	TextItem.EnableShadow(Shadow, ShadowDirection);
+	TextItem.Scale = FVector2D(FinalScale, FinalScale);
+	Canvas->DrawItem(TextItem);
+	return Measure.Size;
+}
+
 // =============================================================================
 // Style 1 — BigNumber (default)
 //   Large ammo number, slim accent underline (pulses on pickup), "/Max" subtext.
@@ -192,8 +292,8 @@ void UNCPlusHUDWidget_AmmoCounter::DrawBigNumber(AUTWeapon* W, const FAmmoColors
 {
 	using namespace NCPlusAC;
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("ammo"), UTHUDOwner, UTHUDOwner->LargeFont);
-	UFont* MaxFont    = UTHUDOwner->TinyFont;
+	UFont* NumberFont = CachedNumberFont;
+	UFont* MaxFont    = CachedTinyFont;
 	if (!NumberFont || !MaxFont) return;
 
 	// Anchor to the right edge of the widget; layout offset places the whole
@@ -203,11 +303,10 @@ void UNCPlusHUDWidget_AmmoCounter::DrawBigNumber(AUTWeapon* W, const FAmmoColors
 
 	// Big number, right-aligned.
 	const float NumberScale = 1.60f;
-	const FVector2D NumSize = DrawText(FText::AsNumber(W->Ammo),
+	const FVector2D NumSize = DrawCachedText(CachedAmmoText, CachedAmmoString, CachedAmmoMeasure,
 		RightX, TopY, NumberFont,
-		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-		NumberScale, C.NumColor.A * C.Opacity, C.NumColor,
-		ETextHorzPos::Right, ETextVertPos::Top);
+		FVector2D(2.f, 2.f), TextShadow,
+		NumberScale, C.NumColor.A * C.Opacity, C.NumColor, ETextHorzPos::Right);
 
 	const float NumberW = NumSize.X * NumberScale;
 	const float NumberH = NumSize.Y * NumberScale;
@@ -226,12 +325,10 @@ void UNCPlusHUDWidget_AmmoCounter::DrawBigNumber(AUTWeapon* W, const FAmmoColors
 	// "/Max" below the underline, right-aligned.
 	if (W->MaxAmmo > 0)
 	{
-		const FString MaxStr = FString::Printf(TEXT("/ %d"), W->MaxAmmo);
-		DrawText(FText::FromString(MaxStr),
+		DrawCachedText(CachedMaxAmmoText, CachedMaxAmmoString, CachedMaxMeasure,
 			RightX, UnderlineY + 5.f, MaxFont,
-			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			0.95f, C.MaxColor.A * C.Opacity, C.MaxColor,
-			ETextHorzPos::Right, ETextVertPos::Top);
+			FVector2D(1.f, 1.f), SmallShadow,
+			0.95f, C.MaxColor.A * C.Opacity, C.MaxColor, ETextHorzPos::Right);
 	}
 }
 
@@ -245,8 +342,8 @@ void UNCPlusHUDWidget_AmmoCounter::DrawIconAndCount(AUTWeapon* W, const FAmmoCol
 {
 	using namespace NCPlusAC;
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("ammo"), UTHUDOwner, UTHUDOwner->LargeFont);
-	UFont* MaxFont    = UTHUDOwner->SmallFont;
+	UFont* NumberFont = CachedNumberFont;
+	UFont* MaxFont    = CachedSmallFont;
 	if (!NumberFont || !MaxFont || !Canvas || !Canvas->DefaultTexture) return;
 
 	const float PlateW = Size.X - 8.f;
@@ -293,21 +390,18 @@ void UNCPlusHUDWidget_AmmoCounter::DrawIconAndCount(AUTWeapon* W, const FAmmoCol
 	const float NumScale   = 1.30f;
 	const float NumY       = PlateY + Pad - 2.f;
 
-	const FVector2D NumSize = DrawText(FText::AsNumber(W->Ammo),
+	const FVector2D NumSize = DrawCachedText(CachedAmmoText, CachedAmmoString, CachedAmmoMeasure,
 		TextRightX, NumY, NumberFont,
-		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-		NumScale, C.NumColor.A * C.Opacity, C.NumColor,
-		ETextHorzPos::Right, ETextVertPos::Top);
+		FVector2D(2.f, 2.f), TextShadow,
+		NumScale, C.NumColor.A * C.Opacity, C.NumColor, ETextHorzPos::Right);
 
 	if (W->MaxAmmo > 0)
 	{
-		const FString MaxStr = FString::Printf(TEXT("/ %d"), W->MaxAmmo);
 		const float MaxY = NumY + NumSize.Y * NumScale - 6.f;
-		DrawText(FText::FromString(MaxStr),
+		DrawCachedText(CachedMaxAmmoText, CachedMaxAmmoString, CachedMaxMeasure,
 			TextRightX, MaxY, MaxFont,
-			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			0.65f, C.MaxColor.A * C.Opacity, C.MaxColor,
-			ETextHorzPos::Right, ETextVertPos::Top);
+			FVector2D(1.f, 1.f), SmallShadow,
+			0.65f, C.MaxColor.A * C.Opacity, C.MaxColor, ETextHorzPos::Right);
 	}
 
 	// Ammo bar at the bottom of the plate.
@@ -320,7 +414,7 @@ void UNCPlusHUDWidget_AmmoCounter::DrawIconAndCount(AUTWeapon* W, const FAmmoCol
 
 		// Track
 		DrawTexture(Canvas->DefaultTexture, BarX, BarY, BarW, BarH,
-			0, 0, 1, 1, 0.7f * C.Opacity, FLinearColor(0.05f, 0.05f, 0.05f, 1.f));
+			0, 0, 1, 1, 0.7f * C.Opacity, GaugeTrack);
 
 		// Fill
 		const float Frac = FMath::Clamp(float(W->Ammo) / float(W->MaxAmmo), 0.f, 1.f);
@@ -340,7 +434,7 @@ void UNCPlusHUDWidget_AmmoCounter::DrawVerticalGauge(AUTWeapon* W, const FAmmoCo
 {
 	using namespace NCPlusAC;
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("ammo"), UTHUDOwner, UTHUDOwner->LargeFont);
+	UFont* NumberFont = CachedNumberFont;
 	if (!NumberFont || !Canvas || !Canvas->DefaultTexture) return;
 
 	// Centered column.
@@ -394,9 +488,8 @@ void UNCPlusHUDWidget_AmmoCounter::DrawVerticalGauge(AUTWeapon* W, const FAmmoCo
 
 	// Number below
 	const float NumY = GaugeY + GaugeH + 4.f;
-	DrawText(FText::AsNumber(W->Ammo),
+	DrawCachedText(CachedAmmoText, CachedAmmoString, CachedAmmoMeasure,
 		CenterX, NumY, NumberFont,
-		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-		0.95f, C.NumColor.A * C.Opacity, C.NumColor,
-		ETextHorzPos::Center, ETextVertPos::Top);
+		FVector2D(2.f, 2.f), TextShadow,
+		0.95f, C.NumColor.A * C.Opacity, C.NumColor, ETextHorzPos::Center);
 }

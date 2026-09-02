@@ -38,4 +38,11 @@ class NETCODEPLUS_API AUTWeap_Minigun_Plus : public AUTWeaponFix
 	virtual bool CanAttack_Implementation(AActor* Target, const FVector& TargetLoc, bool bDirectOnly, bool bPreferCurrentMode, uint8& BestFireMode, FVector& OptimalTargetLoc) override;
 	virtual bool HasAmmo(uint8 FireModeNum) override;
 	//~ End AUTWeapon Interface
+
+	/** Primary is spread hitscan and never claims. For a remote human, select
+	 *  targets only at the estimated render-time capsule instead of accepting
+	 *  raw OR render history. The spread-adjusted ray remains server-owned.
+	 *  See ncp.RenderCredit (legacy name; 0 restores raw rewind) and
+	 *  ncp.RenderCreditExtraMs (presentation-delay estimate). */
+	virtual bool SupportsRenderCredit() const override { return true; }
 };

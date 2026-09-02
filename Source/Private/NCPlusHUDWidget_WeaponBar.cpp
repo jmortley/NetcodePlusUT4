@@ -8,6 +8,7 @@
 #include "UTCharacter.h"
 #include "UTWeapon.h"
 #include "UTInventory.h"
+#include "CanvasItem.h"
 #include "Engine/Texture2D.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -29,12 +30,42 @@ namespace NCPlusWB
 	static const FLinearColor AmmoFillFull  (0.4f,  0.95f, 0.48f, 1.f);
 	static const FLinearColor AmmoFillWarn  (1.0f,  0.85f, 0.30f, 1.f);
 	static const FLinearColor AmmoFillDanger(1.0f,  0.32f, 0.28f, 1.f);
+	static const FLinearColor TextShadow(0.f, 0.f, 0.f, 0.6f);
+	static const FLinearColor AmmoTrack(0.05f, 0.05f, 0.05f, 1.f);
+	static const FName NAME_Left(TEXT("left"));
+	static const FName NAME_WeaponBarLeft(TEXT("weapon_bar_left"));
+	static const FName NAME_WeaponBarRight(TEXT("weapon_bar_right"));
+	static const float InventorySampleInterval = 0.05f; // 20 Hz; pickups tolerate one HUD-frame bucket.
+
+	// FText::AsNumber allocates formatting state. Weapon groups and ammo values
+	// repeat for thousands of render frames, so retain one immutable FText per
+	// observed integer instead of rebuilding it at render rate.
+	struct FNumberTextCache
+	{
+		FText Text;
+		FString String;
+		TMap<UFont*, FVector2D> Sizes;
+	};
+
+	static FNumberTextCache& NumberText(int32 Value)
+	{
+		static TMap<int32, FNumberTextCache> Cache;
+		if (FNumberTextCache* Found = Cache.Find(Value))
+		{
+			return *Found;
+		}
+		FNumberTextCache Entry;
+		Entry.Text = FText::AsNumber(Value);
+		Entry.String = Entry.Text.ToString();
+		return Cache.Add(Value, MoveTemp(Entry));
+	}
 
 	struct FSharedInventoryCache
 	{
 		TWeakObjectPtr<AUTCharacter> Character;
 		uint32 LayoutRevision = 0;
 		uint64 SampledFrame = MAX_uint64;
+		float NextSampleTime = 0.f;
 		TArray<TWeakObjectPtr<AUTWeapon>> Observed;
 		TArray<TWeakObjectPtr<AUTWeapon>> ClassifiedObserved;
 		TArray<int32> ClassifiedGroups;
@@ -44,14 +75,82 @@ namespace NCPlusWB
 
 	static FSharedInventoryCache GInventoryCache;
 
+	// Snapshot the render-rate state for one weapon before submitting any Canvas
+	// items. Slots are separated by SlotGap and their icon/text/bar bounds do not
+	// overlap, so drawing compatible resources in layers preserves the pixels and
+	// intra-slot ordering while avoiding a texture/font state cycle per weapon.
+	struct FSlotDrawRecord
+	{
+		float SlotX;
+		float SlotY;
+		FLinearColor BackgroundColor;
+		bool bDrawOutline;
+
+		bool bDrawIcon;
+		float IconX;
+		float IconY;
+		float IconW;
+		float IconH;
+		float IconU;
+		float IconV;
+		float IconUL;
+		float IconVL;
+		FLinearColor IconColor;
+
+		bool bDrawGroup;
+		int32 Group;
+		float GroupOpacity;
+
+		bool bDrawAmmo;
+		float AmmoBarX;
+		float AmmoBarY;
+		float AmmoBarW;
+		float AmmoFillW;
+		FLinearColor AmmoFillColor;
+		int32 Ammo;
+		float AmmoTextOpacity;
+
+		FSlotDrawRecord()
+			: SlotX(0.f)
+			, SlotY(0.f)
+			, BackgroundColor(0.f, 0.f, 0.f, 0.f)
+			, bDrawOutline(false)
+			, bDrawIcon(false)
+			, IconX(0.f)
+			, IconY(0.f)
+			, IconW(0.f)
+			, IconH(0.f)
+			, IconU(0.f)
+			, IconV(0.f)
+			, IconUL(0.f)
+			, IconVL(0.f)
+			, IconColor(0.f, 0.f, 0.f, 0.f)
+			, bDrawGroup(false)
+			, Group(0)
+			, GroupOpacity(0.f)
+			, bDrawAmmo(false)
+			, AmmoBarX(0.f)
+			, AmmoBarY(0.f)
+			, AmmoBarW(0.f)
+			, AmmoFillW(0.f)
+			, AmmoFillColor(0.f, 0.f, 0.f, 0.f)
+			, Ammo(0)
+			, AmmoTextOpacity(0.f)
+		{
+		}
+	};
+
 	static const TArray<TWeakObjectPtr<AUTWeapon>>& GetWeaponsForSide(
-		AUTCharacter* Character, const FNCPlusHUDLayout& Layout, uint32 LayoutRevision, int32 SideIndex)
+		AUTCharacter* Character, const FNCPlusHUDLayout& Layout, uint32 LayoutRevision,
+		int32 SideIndex, float Now)
 	{
 		FSharedInventoryCache& Cache = GInventoryCache;
-		if (Cache.SampledFrame != GFrameCounter || Cache.Character.Get() != Character
-			|| Cache.LayoutRevision != LayoutRevision)
+		const bool bCacheIdentityChanged = Cache.Character.Get() != Character
+			|| Cache.LayoutRevision != LayoutRevision;
+		if (bCacheIdentityChanged || (Cache.SampledFrame != GFrameCounter && Now >= Cache.NextSampleTime))
 		{
 			Cache.SampledFrame = GFrameCounter;
+			Cache.NextSampleTime = Now + InventorySampleInterval;
 			Cache.Observed.Reset();
 			for (TInventoryIterator<AUTWeapon> It(Character); It; ++It)
 			{
@@ -80,7 +179,6 @@ namespace NCPlusWB
 				}
 				Cache.Left.Reset();
 				Cache.Right.Reset();
-				static const FName NAME_Left(TEXT("left"));
 				for (const TWeakObjectPtr<AUTWeapon>& WeakWeapon : Cache.Observed)
 				{
 					AUTWeapon* W = WeakWeapon.Get();
@@ -109,7 +207,9 @@ UNCPlusHUDWidget_WeaponBar::UNCPlusHUDWidget_WeaponBar(const FObjectInitializer&
 	: Super(OI)
 	, SideIndex(0)
 	, WeaponIconAtlas(nullptr)
-	, CachedStyleRevision(0)
+	, CachedScaleRevision(MAX_uint32)
+	, CachedUserScale(1.f)
+	, CachedStyleRevision(MAX_uint32)
 	, bCachedVertical(true)
 	, CachedOpacity(1.f)
 	, CachedSlotBgInactive(NCPlusWB::SlotBgInactive)
@@ -169,11 +269,15 @@ UNCPlusHUDWidget_WeaponBar_Right::UNCPlusHUDWidget_WeaponBar_Right(const FObject
 
 float UNCPlusHUDWidget_WeaponBar::GetDrawScaleOverride()
 {
-	// Per-side alias: weapon_bar_left for SideIndex 0, weapon_bar_right for 1.
-	const FName Alias = (SideIndex == 0) ? FName(TEXT("weapon_bar_left")) : FName(TEXT("weapon_bar_right"));
-	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
-	const float UserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
-	return Super::GetDrawScaleOverride() * UserScale;
+	const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+	if (CachedScaleRevision != Revision)
+	{
+		const FName Alias = (SideIndex == 0) ? NCPlusWB::NAME_WeaponBarLeft : NCPlusWB::NAME_WeaponBarRight;
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(Alias);
+		CachedUserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+		CachedScaleRevision = Revision;
+	}
+	return Super::GetDrawScaleOverride() * CachedUserScale;
 }
 
 bool UNCPlusHUDWidget_WeaponBar::ShouldDraw_Implementation(bool bShowScores)
@@ -188,6 +292,45 @@ bool UNCPlusHUDWidget_WeaponBar::ShouldDraw_Implementation(bool bShowScores)
 	if (UTGameState && UTGameState->IsLineUpActive()) return false;
 
 	return true;
+}
+
+void UNCPlusHUDWidget_WeaponBar::DrawCachedNumber(int32 Value, float X, float Y,
+	UFont* Font, float TextScale, float DrawOpacity, const FLinearColor& DrawColor,
+	bool bRightAligned)
+{
+	if (!Canvas || !Font) return;
+	NCPlusWB::FNumberTextCache& Entry = NCPlusWB::NumberText(Value);
+	FVector2D* Size = Entry.Sizes.Find(Font);
+	if (!Size)
+	{
+		float XL = 0.f;
+		float YL = 0.f;
+		Canvas->StrLen(Font, Entry.String, XL, YL);
+		Size = &Entry.Sizes.Add(Font, FVector2D(XL, YL));
+	}
+
+	if (bScaleByDesignedResolution)
+	{
+		X *= RenderScale;
+		Y *= RenderScale;
+	}
+	const float FinalScale = bScaleByDesignedResolution ? RenderScale * TextScale : TextScale;
+	FVector2D DrawPos(RenderPosition.X + X, RenderPosition.Y + Y);
+	if (bRightAligned)
+	{
+		DrawPos.X -= Size->X * FinalScale;
+	}
+
+	FLinearColor Color = DrawColor;
+	Color.A = Opacity * DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
+	// FUTCanvasTextItem is not exported by the UT module; plugins must use the
+	// engine canvas item or the client DLL fails to link on Linux/Windows.
+	FCanvasTextItem TextItem(DrawPos, Entry.Text, Font, Color);
+	FLinearColor Shadow = NCPlusWB::TextShadow;
+	Shadow.A *= DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
+	TextItem.EnableShadow(Shadow, FVector2D(1.f, 1.f));
+	TextItem.Scale = FVector2D(FinalScale, FinalScale);
+	Canvas->DrawItem(TextItem);
 }
 
 void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
@@ -232,7 +375,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 
 	if (CachedStyleRevision != LayoutRevision)
 	{
-		const FName MyAlias = (SideIndex == 0) ? FName(TEXT("weapon_bar_left")) : FName(TEXT("weapon_bar_right"));
+		const FName MyAlias = (SideIndex == 0) ? NAME_WeaponBarLeft : NAME_WeaponBarRight;
 		const FNCPlusHUDElement* Elem = Layout.Find(MyAlias);
 		CachedStyleRevision = LayoutRevision;
 		bCachedVertical = true;
@@ -268,18 +411,22 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 	// Active weapon — pending swap takes priority over current.
 	AUTWeapon* CurrentWeapon = Char->GetPendingWeapon();
 	if (!CurrentWeapon) CurrentWeapon = Char->GetWeapon();
+	const bool bUseWeaponColors = UTHUDOwner->GetUseWeaponColors();
 
-	// The two side widgets share one inventory sample per frame. Classification
-	// and sorting rebuild only when the pawn, inventory signature, or layout
-	// revision changes.
+	// The two side widgets share a 20 Hz inventory sample. Classification and
+	// sorting rebuild only when the pawn, inventory signature, or layout revision
+	// changes; active weapon/ammo values remain render-rate reads below.
 	const TArray<TWeakObjectPtr<AUTWeapon>>& MyWeapons =
-		GetWeaponsForSide(Char, Layout, LayoutRevision, SideIndex);
+		GetWeaponsForSide(Char, Layout, LayoutRevision, SideIndex, GetWorld()->GetTimeSeconds());
 	if (MyWeapons.Num() == 0) return;
 
 	UFont* GroupFont = UTHUDOwner->TinyFont;
 	UFont* AmmoFont  = UTHUDOwner->SmallFont;
 
-	// Draw cells
+	// Gather all render-rate state before drawing. The inline allocator covers
+	// the normal UT inventory without adding a per-frame heap allocation.
+	TArray<FSlotDrawRecord, TInlineAllocator<16>> DrawRecords;
+	DrawRecords.Reserve(MyWeapons.Num());
 	for (int32 i = 0; i < MyWeapons.Num(); i++)
 	{
 		AUTWeapon* W = MyWeapons[i].Get();
@@ -288,21 +435,20 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		const float SlotX = bVertical ? 0.f : i * (SlotW + SlotGap);
 		const float SlotY = bVertical ? i * (SlotH + SlotGap) : 0.f;
 		const bool  bActive = (W == CurrentWeapon);
+		const bool  bNeedsAmmo = W->NeedsAmmoDisplay();
 
-		// Background cell — alpha goes through DrawOpacity (10th arg).
-		const FLinearColor Bg = bActive ? SlotBgActiveCol : SlotBgInactiveCol;
-		DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, SlotH,
-			0.f, 0.f, 1.f, 1.f, Bg.A, Bg);
-
-		// Active outline (1px frame)
-		if (bActive)
-		{
-			const float OL = ActiveOutlineCol.A;
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, SlotW, 1.5f,            0,0,1,1, OL, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY + SlotH - 1.5f, SlotW, 1.5f, 0,0,1,1, OL, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX, SlotY, 1.5f, SlotH,            0,0,1,1, OL, ActiveOutlineCol);
-			DrawTexture(Canvas->DefaultTexture, SlotX + SlotW - 1.5f, SlotY, 1.5f, SlotH, 0,0,1,1, OL, ActiveOutlineCol);
-		}
+		FSlotDrawRecord Record;
+		Record.SlotX = SlotX;
+		Record.SlotY = SlotY;
+		Record.BackgroundColor = bActive ? SlotBgActiveCol : SlotBgInactiveCol;
+		Record.bDrawOutline = bActive;
+		Record.bDrawIcon = false;
+		Record.bDrawGroup = GroupFont && W->Group > 0;
+		Record.Group = W->Group;
+		Record.GroupOpacity = (bActive ? 1.0f : 0.7f) * Opacity;
+		Record.bDrawAmmo = bNeedsAmmo && W->MaxAmmo > 0;
+		Record.Ammo = W->Ammo;
+		Record.AmmoTextOpacity = (bActive ? 1.0f : 0.75f) * Opacity;
 
 		// Weapon icon — UVs from WeaponBarSelectedUVs are pixel coords against
 		// WeaponIconAtlas. Note: UUTHUDWidget::DrawTexture normalizes the U/V/UL/VL
@@ -312,13 +458,13 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		if (WeaponIconAtlas && !WeaponIconAtlas->IsPendingKill())
 		{
 			const FTextureUVs& UV = W->WeaponBarSelectedUVs;
-			FLinearColor IconCol = (UTHUDOwner->GetUseWeaponColors())
+			FLinearColor IconCol = bUseWeaponColors
 				? W->IconColor
 				: FLinearColor::White;
 
 			// Dim if not active and dim further if no ammo.
 			float Alpha = bActive ? 1.0f : 0.55f;
-			if (W->NeedsAmmoDisplay() && W->Ammo <= 0)
+			if (bNeedsAmmo && W->Ammo <= 0)
 			{
 				Alpha *= 0.45f;
 			}
@@ -345,46 +491,99 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 
 			const float IconX = SlotX + (SlotW - IconW) * 0.5f;
 			const float IconY = SlotY + SlotPad;
-			DrawTexture(WeaponIconAtlas, IconX, IconY, IconW, IconH,
-				UV.U, UV.V, UV.UL, UV.VL,   // raw pixel coords
-				IconCol.A, IconCol);
+			Record.bDrawIcon = true;
+			Record.IconX = IconX;
+			Record.IconY = IconY;
+			Record.IconW = IconW;
+			Record.IconH = IconH;
+			Record.IconU = UV.U;
+			Record.IconV = UV.V;
+			Record.IconUL = UV.UL;
+			Record.IconVL = UV.VL;
+			Record.IconColor = IconCol;
 		}
 
-		// Group number top-left
-		if (GroupFont && W->Group > 0)
+		if (Record.bDrawAmmo)
 		{
-			DrawText(FText::AsNumber(W->Group), SlotX + GroupNumPad, SlotY + GroupNumPad,
-				GroupFont, FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.6f),
-				1.0f, (bActive ? 1.0f : 0.7f) * Opacity, FLinearColor::White,
-				ETextHorzPos::Left, ETextVertPos::Top);
-		}
-
-		// Ammo bar + count (only for weapons that display ammo)
-		if (W->NeedsAmmoDisplay() && W->MaxAmmo > 0)
-		{
-			const float AmmoBarY = SlotY + SlotH - AmmoBarH - 2.f;
-			const float AmmoBarW = SlotW - SlotPad * 2.f;
-			const float AmmoBarX = SlotX + SlotPad;
-
-			// Track
-			DrawTexture(Canvas->DefaultTexture, AmmoBarX, AmmoBarY, AmmoBarW, AmmoBarH,
-				0,0,1,1, 0.8f * Opacity, FLinearColor(0.05f, 0.05f, 0.05f, 1.f));
-
-			// Fill
+			Record.AmmoBarY = SlotY + SlotH - AmmoBarH - 2.f;
+			Record.AmmoBarW = SlotW - SlotPad * 2.f;
+			Record.AmmoBarX = SlotX + SlotPad;
 			const float AmmoFrac = FMath::Clamp(float(W->Ammo) / float(W->MaxAmmo), 0.f, 1.f);
 			FLinearColor FillCol = AmmoFillFullCol;
 			if (W->Ammo <= W->AmmoDangerAmount)       FillCol = AmmoFillDangerCol;
 			else if (W->Ammo <= W->AmmoWarningAmount) FillCol = AmmoFillWarnCol;
-			DrawTexture(Canvas->DefaultTexture, AmmoBarX, AmmoBarY, AmmoBarW * AmmoFrac, AmmoBarH,
-				0,0,1,1, FillCol.A, FillCol);
+			Record.AmmoFillW = Record.AmmoBarW * AmmoFrac;
+			Record.AmmoFillColor = FillCol;
+		}
 
-			// Ammo count text top-right
-			if (AmmoFont)
+		DrawRecords.Add(Record);
+	}
+
+	// Pass 1: every DefaultTexture primitive. Within a slot the background is
+	// still below its outline and ammo track/fill. Those regions do not overlap
+	// the padded icon or either top-corner number.
+	for (const FSlotDrawRecord& Record : DrawRecords)
+	{
+		const FLinearColor& Bg = Record.BackgroundColor;
+		DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY, SlotW, SlotH,
+			0.f, 0.f, 1.f, 1.f, Bg.A, Bg);
+
+		if (Record.bDrawOutline)
+		{
+			const float OL = ActiveOutlineCol.A;
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY, SlotW, 1.5f,
+				0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY + SlotH - 1.5f, SlotW, 1.5f,
+				0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX, Record.SlotY, 1.5f, SlotH,
+				0,0,1,1, OL, ActiveOutlineCol);
+			DrawTexture(Canvas->DefaultTexture, Record.SlotX + SlotW - 1.5f, Record.SlotY, 1.5f, SlotH,
+				0,0,1,1, OL, ActiveOutlineCol);
+		}
+
+		if (Record.bDrawAmmo)
+		{
+			DrawTexture(Canvas->DefaultTexture, Record.AmmoBarX, Record.AmmoBarY,
+				Record.AmmoBarW, AmmoBarH, 0,0,1,1, 0.8f * Opacity, AmmoTrack);
+			DrawTexture(Canvas->DefaultTexture, Record.AmmoBarX, Record.AmmoBarY,
+				Record.AmmoFillW, AmmoBarH, 0,0,1,1,
+				Record.AmmoFillColor.A, Record.AmmoFillColor);
+		}
+	}
+
+	// Pass 2: atlas icons.
+	for (const FSlotDrawRecord& Record : DrawRecords)
+	{
+		if (Record.bDrawIcon)
+		{
+			DrawTexture(WeaponIconAtlas, Record.IconX, Record.IconY, Record.IconW, Record.IconH,
+				Record.IconU, Record.IconV, Record.IconUL, Record.IconVL,
+				Record.IconColor.A, Record.IconColor);
+		}
+	}
+
+	// Pass 3: TinyFont group numbers remain above the icons.
+	for (const FSlotDrawRecord& Record : DrawRecords)
+	{
+		if (Record.bDrawGroup)
+		{
+			DrawCachedNumber(Record.Group,
+				Record.SlotX + GroupNumPad, Record.SlotY + GroupNumPad,
+				GroupFont, 1.0f, Record.GroupOpacity, FLinearColor::White, false);
+		}
+	}
+
+	// Pass 4: SmallFont ammo counts remain above their track/fill.
+	if (AmmoFont)
+	{
+		for (const FSlotDrawRecord& Record : DrawRecords)
+		{
+			if (Record.bDrawAmmo)
 			{
-				DrawText(FText::AsNumber(W->Ammo), SlotX + SlotW - GroupNumPad, SlotY + GroupNumPad,
-					AmmoFont, FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.6f),
-					0.85f, (bActive ? 1.0f : 0.75f) * Opacity, FillCol,
-					ETextHorzPos::Right, ETextVertPos::Top);
+				DrawCachedNumber(Record.Ammo,
+					Record.SlotX + SlotW - GroupNumPad, Record.SlotY + GroupNumPad,
+					AmmoFont, 0.85f, Record.AmmoTextOpacity,
+					Record.AmmoFillColor, true);
 			}
 		}
 	}

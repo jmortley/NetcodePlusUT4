@@ -2,6 +2,7 @@
 #pragma once
 #include "NetcodePlus.h"
 #include "UTWeap_Enforcer.h"
+#include "NCFriendlyTargetProbeCache.h"
 #include "UTWeap_Enforcer_Plus.generated.h"
 
 class UParticleSystemComponent;
@@ -43,7 +44,7 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "NetcodePlus")
 	float MaxRewindMs;
 
-	/** Ping jitter buffer (ms) subtracted from ExactPing before computing rewind. */
+	/** Ping jitter buffer (ms) subtracted from server-observed RTT before rewind. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "NetcodePlus")
 	float FudgeFactorMs;
 
@@ -57,14 +58,21 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "NetcodePlus")
 	float StationaryTargetPadding;
 
-	/** Returns one-way rewind time (seconds) based on owner's ExactPing. */
+	/** Returns one-way rewind time (seconds) from server-observed RTT for remote humans. */
 	virtual float GetRewindSeconds() const;
 
 	//~ Begin AUTWeapon Interface
 	virtual void HitScanTrace(const FVector& StartLocation, const FVector& EndTrace, float TraceRadius, FHitResult& Hit, float PredictionTime) override;
+	virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
+		AUTPlayerState*& HitPlayerState) const override;
 	/** Guard against null UTOwner crash when a fire RPC arrives after the owner died.
 	 *  Mirrors AUTWeaponFix's guard — needed here because Enforcer_Plus inherits from
 	 *  stock AUTWeap_Enforcer (for AUTDualWeapon support), not AUTWeaponFix. */
 	virtual void ServerUpdateFiringStates_Implementation(uint8 FireSettings) override;
 	//~ End AUTWeapon Interface
+
+protected:
+	/** Enforcer cannot inherit AUTWeaponFix because it needs AUTDualWeapon, so it
+	 *  owns the same client-only visual probe cache directly. */
+	mutable FNCFriendlyTargetProbeCache FriendlyTargetProbeCache;
 };

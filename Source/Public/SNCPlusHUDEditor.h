@@ -170,6 +170,11 @@ private:
 	ECheckBoxState GetStockBottomBarState() const;
 	void OnStockBottomBarChanged(ECheckBoxState NewState);
 
+	// Experimental top-bar override. The legacy team-panel choices remain stored
+	// and become active again as soon as this is disabled.
+	ECheckBoxState GetBetaTopBarState() const;
+	void OnBetaTopBarChanged(ECheckBoxState NewState);
+
 	// Stock top-left team roster (slanted name + HP plates) vs the NCPlus portrait strip.
 	// Applies on the next HUD frame; persists [NetcodePlus] StockTeamPanel.
 	ECheckBoxState GetStockTeamPanelState() const;
@@ -178,6 +183,11 @@ private:
 	ECheckBoxState GetAbsoluteElimTeamPanelState() const;
 	void OnAbsoluteElimTeamPanelChanged(ECheckBoxState NewState);
 	bool IsTeamColorControlEnabled(FName Alias) const;
+
+	// Viewer-relative portrait slots: strips keyed My Team / Enemy instead of
+	// red/blue. Applies on the next HUD frame; persists [NetcodePlus] ViewerRelativePortraits.
+	ECheckBoxState GetViewerRelativePortraitsState() const;
+	void OnViewerRelativePortraitsChanged(ECheckBoxState NewState);
 
 	// Scoreboard background opacity (0.05..1.0). Global; persists [NetcodePlus] ScoreboardOpacity.
 	TOptional<float> GetScoreboardOpacityValue() const;

@@ -387,20 +387,57 @@ void AUTPlusWeap_RocketLauncher::FireShot()
     // we ABORT immediately to protect the Rhythm Logic.
     // ----------------------------------------------------------------
     AUTWeaponFix* FixWeapon = Cast<AUTWeaponFix>(this);
-	const bool bOnCooldown = FixWeapon && FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime);
+	// The owning client's transactional primary state already paces this call with
+	// its refire timer.  StartFire() gates the initial press and the server validates
+	// every fixed fire RPC, so applying the strict client cooldown check again here
+	// adds no authority.  Worse, the timer and LastFireTime cadence use different
+	// clocks/precision: a boundary callback can compare fractionally early, get
+	// silently discarded, and wait a whole extra looping interval.  Tap fire does
+	// not suffer the same loss because StartFire() arms an exact-boundary retry.
+	//
+	const float PrimaryRefireTime = GetRefireTime(0);
+	// Use no more boundary forgiveness than authority already grants a fixed fire
+	// RPC (15% of refire, 15-40 ms).  The additional quarter-refire cap keeps this
+	// safe for unusually fast custom rocket fire intervals: a TimerManager catch-up
+	// callback that is one whole cadence early can never qualify.  EarliestFireTime
+	// is checked separately below and is never bypassed.
+	const float ClientRefireBoundaryTolerance = FMath::Min(
+		FMath::Clamp(PrimaryRefireTime * 0.15f, 0.015f, 0.04f),
+		PrimaryRefireTime * 0.25f);
+	const float PrimaryReadyTime = PrevLFT0 > 0.f
+		? PrevLFT0 + PrimaryRefireTime : -1.f;
+	const float PrimaryBoundaryEarlyBy = PrimaryReadyTime - CurrentTime;
+	const bool bLocallyPacedPrimaryAtBoundary =
+		Role < ROLE_Authority
+		&& CurrentFireMode == 0
+		&& UTOwner != nullptr
+		&& UTOwner->IsLocallyControlled()
+		&& UTOwner->IsPendingFire(0)
+		&& EarliestFireTime <= CurrentTime
+		&& PrimaryBoundaryEarlyBy > 0.f
+		&& PrimaryBoundaryEarlyBy <= ClientRefireBoundaryTolerance
+		&& FiringState.IsValidIndex(0)
+		&& CurrentState != nullptr
+		&& CurrentState == FiringState[0]
+		&& CurrentState->IsA(UUTWeaponStateFiring_Transactional::StaticClass());
+	const bool bCooldownWouldBlock = FixWeapon
+		&& FixWeapon->IsFireModeOnCooldown(CurrentFireMode, CurrentTime);
+	const bool bOnCooldown = bCooldownWouldBlock && !bLocallyPacedPrimaryAtBoundary;
 	const int32 FireShotDiagLevel = RocketPrimaryDiagLevelLocal();
 	if (FireShotDiagLevel > 0 && (CurrentFireMode == 0 || FireShotDiagLevel >= 2))
 	{
-		const float Refire = GetRefireTime(0);
 		const float SinceLast = PrevLFT0 > 0.f ? CurrentTime - PrevLFT0 : -1.f;
 		UE_LOG(LogUTRocketLauncher, Warning,
 			TEXT("[RocketM1Diag] FIRE_SHOT_GATE %s frame=%u t=%.4f role=%d net=%d local=%d state=%s currentMode=%d tracker=%d pending0=%d active0=%d lft0=%.4f since=%.4f refire=%.4f earliest=%.4f earliestRemain=%.4f"),
-			bOnCooldown ? TEXT("BLOCK") : TEXT("PASS"), (uint32)GFrameCounter, CurrentTime,
+			bOnCooldown ? TEXT("BLOCK")
+				: (bCooldownWouldBlock ? TEXT("BYPASS_STATE_PACED") : TEXT("PASS")),
+			(uint32)GFrameCounter, CurrentTime,
 			(int32)Role, (int32)GetNetMode(), (UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
 			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
 			CurrentFireMode, CurrentlyFiringMode, (UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
 			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
-			PrevLFT0, SinceLast, Refire, EarliestFireTime, EarliestFireTime - CurrentTime);
+			PrevLFT0, SinceLast, PrimaryRefireTime, EarliestFireTime,
+			EarliestFireTime - CurrentTime);
 	}
     if (FixWeapon)
     {

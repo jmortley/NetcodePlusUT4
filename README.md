@@ -24,8 +24,10 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 - **HitScan padding for moving targets** — claimed targets get +45 units of capsule padding at fire time (10 units stationary), compensating for tight UT4 hitboxes vs. visible mesh silhouette.
 - **Unclaimed-hit render check (new in 328)** — the counterweight to all of the above. Rewind and padding are generous by design, and at high ping that generosity could hand a shooter a hit their own client never thought was a hit ("gifted shots"). The server now reconstructs what the shooter actually had *rendered* at fire time and rejects hits the client never claimed. On by default (`ncp.UnclaimedRenderGate`); if honest aim is ever demoted, widen `ncp.UnclaimedRenderSlack` rather than disabling the gate.
 - **Slide posture grace (new in 328)** — a floor slide shrinks the server capsule the same frame it starts, but a remote shooter keeps seeing a standing body for one replication interp plus the animation blend, so shots through the visible torso were server-side air. Validation now accepts the standing envelope for the first `ncp.SlideGraceMs` (250ms) of a slide. Rewind reconstructs *where* a target was, never *what shape* it was — this closes that gap for the one posture change fast enough to matter.
+- **Slide posture history (Hotfix 10)** — the server now records capsule *posture* (slide state + height) beside its position history, so rewound hitscan validation rebuilds the exact capsule at the shot's epoch in **both** directions: a target standing at your shot's time is no longer validated slide-shrunk because they slide *now*, and a proven mid-slide target earns one extra validation rung with **zero** search padding (`ncp.HitscanSlideSearchExtraMs`, ≤15ms, never beyond existing server tolerance). Fail-closed: no provable posture bracket → the established policy applies unchanged.
 - **Transactional fire events** — every shot has a unique event index for client/server agreement; resend queue protects against unreliable RPC loss.
 - **Strict tap-fire enforcement** — tap-mashing the fire button can no longer fire faster than holding it. Click queueing via retry timer means responsiveness is preserved.
+- **Held rocket refire integrity (Hotfix 10)** — holding rocket primary now fires at exactly click cadence. A strict client cooldown check was eating anchored refire-timer boundaries (each eaten boundary = a whole extra interval); the fix forgives only provable boundary jitter (≤40ms, bounded by what the server already tolerates) — server validation unchanged. Community report [#6](https://github.com/jmortley/NetcodePlusUT4/issues/6).
 - **Trade-kill grace period** (200ms) — fire RPCs in flight when the shooter dies still register, so reciprocal kills count.
 - **Held-fire retry across weapon modes** — holding primary right after a shock ball (or across a fast weapon switch) used to eat the input, because the press landed inside the other mode's firing cycle and was dropped with no retry; the request is now re-queued to fire at the cycle's end. Client-side, on by default (`ncp.CrossModeRetry`, kill-switch `0`).
 - **Client-side hit detection (CSHD) for link gun beam** — predictive damage with server sanity-trace validation. Less laggy at high ping without giving the client total authority.
@@ -34,8 +36,9 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 ### Performance / High-FPS Support
 
 - **Frame-rate-independent overlay throttle** — 60Hz time-based dirty-marking on character overlay meshes regardless of render rate (works at 480, 720, uncapped).
-- **Overlay visibility cull** — armor / UDamage / spawn-protection overlays skip rendering when target is off-screen, occluded, or beyond ~55m. Significant FPS gain in scrum-heavy modes (Wipeout).
-- **Per-team collision throttle** — 32/sec instead of every-tick for team collision iteration.
+- **Overlay visibility cull** — armor / UDamage / spawn-protection overlays skip rendering when target is off-screen, occluded, or beyond ~55m; local viewpoints are shared once per frame and visibility decisions are capped at 120 Hz. Significant FPS gain in scrum-heavy modes (Wipeout).
+- **Friendly-target probe cap** — the visual-only crosshair/name trace is capped at 240 Hz during normal aiming, with immediate refreshes for camera cuts, view-target changes, and large pose jumps.
+- **Per-team collision delta refresh** — detects changes at 90 Hz but mutates capsule ignore lists only when a teammate's collision eligibility changes.
 - **Spawn-protection material loop bypass** — cleared per-tick state-transition flag instead of every-frame BodyMI loop (~27K calls/sec saved at 480fps).
 - **Shock ball drift correction** — high-FPS floating-point velocity drift snapped back to original fire direction per-tick on zero-gravity projectiles.
 - **Spectator rotation smoothing** — separate interp speed for remote pawns to prevent jitter at high refresh rates.
@@ -124,6 +127,7 @@ NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-
 - **Five HP/Armor visual styles** (MinimalTypography / SegmentedBars / RadialArcs / HexChevrons / VerticalPills), per-element via the `style` extra. The font picker on `hp_armor` covers both the numbers and the HEALTH / ARMOR labels.
 - **Custom split WeaponBar** — left/right columns with per-weapon picker (decide which weapons live in which column; remaining weapons hide entirely).
 - **CTF flag-status indicators and banners** — legacy alias `ctf_carrier_indicator` is shown as "CTF World Indicators" and its Hide box controls both the carrier and missing-base icons (scale/offset/opacity remain carrier-only). `ctf_you_have_flag`, `ctf_enemy_has_flag`, and `ctf_flag_status` remain independent draw-call aliases.
+- **Beta tactical ribbon** — opt-in fourth team-display style for Wipeout and ElimPlus, with connected portrait cards and a compact score/clock core. It is stored as `[NetcodePlus] BetaTopBar`; disabling it restores the previously selected portrait, stock-roster, or Absolute Elim layout.
 - **Optional opt-in overlays** (default OFF; appear in the editor with the Hide box pre-checked):
   - `damage_flash` — full-screen tint when you take damage. Tunable color, intensity (via opacity), and `flash_duration` (default 0.30s, linear fade).
   - `server_info` — small server-name plate (font/size/color/opacity). Reads `GameState->ServerName`, falls through to `ServerDescription`, then a string literal. Supports an explicit `name_override` Extras key for hub setups where `ServerName` is overwritten with the ruleset/match label.
@@ -149,6 +153,7 @@ Open the editor in-game with the `nchud` console command. Layout persists to `Sa
 
 - **`weaponskins` console command** — opens Slate UI for per-weapon hide/show, skin selection, hitscan choice (Sniper / LG), **beam colors** (Sniper/LG via `LGColor`, Shock via `ShockBeam` — FSE-safe color picker, format matches the BP defaults' `Convert String to Linear Color` parser so the weapon BPs read the new color at spawn without parser changes), and **hidden-weapon beam origin** (`Back` / `Down` spinners — the tracer/beam spawn point relative to the camera when the weapon is hidden; defaults 10 / 35 reproduce stomach-height; try 10 / 20 for chest or 10 / 60 for hip-fire feel).
 - **`weaponhand [right|left|center|hidden]`** — direct console command (writes to ProfileSettings).
+- **`ready` / `ncpready` console commands (Hotfix 10)** — exactly the F5 → Ready action, bindable. `ready` yields gracefully if another plugin already owns that name; `ncpready` always works.
 - **Network-visible weapon skins (new in 328)** — skins picked at F5 are no longer local-only cosmetics: the choice is validated server-side against a **fixed manifest of approved skins**, replicated, and rendered for everyone — other players, spectators (including joining spectate mid-match), on respawn/re-equip, and on dropped weapons, which keep the skin they were dropped with. Entitlement-checked and rate-limited, with a dedicated-server visual short-circuit so servers do no rendering work. Weapons whose skin doesn't live on material slot 0 (Flak, and the Lightning Gun — which is asymmetric, slot 0 in first person and slot 1 in third) are handled per-family rather than assuming slot 0.
 - **Plugin-version gate (`ANCVersionGate`)** — server-spawned per-player `AInfo` in `PostLogin`, owner-only replication. Client's `PostNetInit` reports `NETCODE_PLUGIN_VERSION` immediately; the server `KickPlayer`s a **mismatched** build with a clear "server v328, you are vN — update via launcher" message, and the player can rejoin once the launcher updates them. Players with **no** plugin are not auto-kicked — the no-reply timeout kick is currently disabled, so the grace window (`[NetcodePlus] VersionReportTimeoutSec`, default 100s, clamped 1–120) is the mitigation, not a hard gate. Wired into every NCPlus mode's `PostLogin`. Bots + listen-host local PC exempt.
 - **Concede vote ("gg vote")** — the losing team can end a lost match instead of playing it out. Any player types **`gg`** (or presses **F1** to confirm / **F4** to cancel) and the vote passes at **>50% of that team's humans**; the leading team is notified that a vote is brewing rather than being surprised by a sudden end. Server-authoritative, bots excluded from the count.
@@ -184,6 +189,9 @@ cheat-gated.
 | `ncp.WarmupSpawns` | 1 | Warmup-only spawn-point learning markers (CTF / iCTF). |
 | `ncp.UnclaimedRenderGate` | 1 | Server-side. Reject hits the shooter's client never claimed (the "gifted shots" fix). Leave on; widen `ncp.UnclaimedRenderSlack` (default 40) instead of disabling. |
 | `ncp.SlideGraceMs` | 250 | Server-side. Grace window after a slide starts where validation accepts the standing capsule, covering the replication + anim-blend delay on the shooter's screen. 0 = pre-328 behaviour. |
+| `ncp.HitscanSlideSearchExtraMs` | 15 | Server-side. One extra hitscan time-search rung (ms, clamped 0-15, zero padding) granted only when server posture history proves the target was mid-slide at that epoch. 0 = standard ±45ms search only. |
+| `ncp.KillcamAudioGuard` | 1 | Client. Pause looping audio owned by the *hidden* killcam world (the phantom weapon/ambient loop fix). 0 = stock behavior. |
+| `ncp.FriendlyTargetProbeHz` | 240 | Client. Rate cap on the crosshair friendly/name trace (stock traced every rendered frame). Camera cuts / view-target changes / big pose jumps refresh instantly. 0 = stock every-frame probing; range 30-1000. |
 
 > ⚠️ **Don't enable `ncp.GhostFix`.** It's a parked experiment (0 by default) — the current version breaks
 > consecutive held weapon switches. A pawn-level v2 is pending; leave it at `0`.
@@ -212,6 +220,8 @@ Lives at `<Saved>/Config/Mod.ini`. Most plugin-side knobs go here; some are per-
 - `CTFRespawnWait=1.5` — regulation CTF respawn for normal-sized matches (`MaxPlayers > CTFSmallGameMaxPlayers`). Fractional values honored.
 - `CTFRespawnWaitSmall=1.0` — respawn for small games (1v1 / w00t).
 - `CTFSmallGameMaxPlayers=2` — `MaxPlayers <= this` uses `CTFRespawnWaitSmall`. Raise to 4 if you want 2v2 to also get the fast respawn.
+- `AutoPauseOnDrop=True` — bot-PUG auto-pause. **Hotfix 10:** hard drops are now detected by connection silence in seconds (not the engine's ~60s timeout), and coverage extends through the locked F5 ready countdown; a returning player must rejoin their team slot before the match resumes.
+- `PauseDropDetectSeconds=4.0` — seconds of connection silence before the pause-immune watcher freezes the match (clamped 1-30).
 - Other knobs in this section tune the live CTF perf scoring used for ELO + the live Glicko system; see `LoadCTFPerfConfig` in `NCPlusCTFGameMode.cpp` for the full list.
 
 **`[UTPUGS_SPAWN]`** (server-side — CTF spawn picker tuning): per-knob list in `LoadSpawnConfig` (penalties for flag-carrier proximity, enemy LOS, freshness window, etc.).
@@ -256,9 +266,9 @@ Hubs use these tables as the local source of truth. A parallel push to ut4stats.
 | Property | Default | Purpose |
 |----------|---------|---------|
 | `MaxRewindMs` | 250 | Max one-way rewind cap |
-| `FudgeFactorMs` | 20 | Ping jitter buffer |
+| `FudgeFactorMs` | 20 | Legacy projectile catch-up / delayed-fake jitter buffer; server hitscan uses `ncp.HitscanFudgeMs` |
 | `ProjectilePredictionCapMs` | 120 | Max projectile fast-forward |
-| `HitScanPadding` | 40-45 | Capsule padding for claimed moving targets |
+| `HitScanPadding` | legacy | Server hitscan moving-primary and fallback padding use `ncp.HitscanPrimaryPadding` / `ncp.HitscanSearchPadding` |
 | `HitScanPaddingStationary` | 10 | Capsule padding for claimed stationary targets |
 | `bEnableProjectileRewind` | (BP per-weapon) | Master toggle for projectile hit-claim validation |
 | `ProjectileRewindMaxScale` | 1.0 | Full half-RTT rewind at low ping |

@@ -221,6 +221,16 @@ struct FNCPlusHUDLayout
 	 *  is not silently locked to stock (see WantsStockBottomBar). Owned by the HUD editor. */
 	static void SetStockBottomBar(bool bStock);
 
+	/** Experimental connected top-bar presentation for Wipeout and ElimPlus.
+	 *  [NetcodePlus] BetaTopBar in Mod.ini; default false. This is an override:
+	 *  disabling it restores the existing StockTeamPanel / AbsoluteElimTeamPanel
+	 *  choices without modifying either one. Cached; SetBetaTopBar refreshes it. */
+	static bool WantsBetaTopBar();
+
+	/** Persist + refresh-cache the experimental top-bar override
+	 *  ([NetcodePlus] BetaTopBar). */
+	static void SetBetaTopBar(bool bBeta);
+
 	/** Stock top-left team roster (slanted name + HP/armor plates) vs the NCPlus
 	 *  portrait strip. [NetcodePlus] StockTeamPanel in Mod.ini overrides; default =
 	 *  fresh install (no saved HUDLayout.json) so new players get the stock-style
@@ -231,6 +241,20 @@ struct FNCPlusHUDLayout
 	/** Persist + refresh-cache the team-panel choice ([NetcodePlus] StockTeamPanel).
 	 *  Call ONLY from an explicit user toggle (see WantsStockTeamPanel). */
 	static void SetStockTeamPanel(bool bStock);
+
+	/** Viewer-relative portrait strips: when true, the portrait strips consult the
+	 *  "portrait_team" / "portrait_enemy" layout aliases (my team vs. the enemy)
+	 *  instead of "portrait_red" / "portrait_blue" — so a user's placement follows
+	 *  THEIR team across matches instead of a fixed color. A teamless viewer (true
+	 *  spectator) buckets red as "ours", matching NCPlusForceModels::GetViewerTeam.
+	 *  [NetcodePlus] ViewerRelativePortraits in Mod.ini; default false (red/blue).
+	 *  Cached; SetViewerRelativePortraits refreshes it. */
+	static bool WantsViewerRelativePortraits();
+
+	/** Persist + refresh-cache the viewer-relative portrait choice
+	 *  ([NetcodePlus] ViewerRelativePortraits). Call ONLY from an explicit user
+	 *  toggle (see WantsViewerRelativePortraits). */
+	static void SetViewerRelativePortraits(bool bViewerRelative);
 
 	/** Faithful Elimination 113 artwork/layout inside the stock top-left team panel.
 	 *  This is a nested presentation choice: it has no effect while StockTeamPanel is

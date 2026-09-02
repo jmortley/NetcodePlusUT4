@@ -19,6 +19,19 @@ class AUTWeaponFix;
 class UUTWeaponSkin;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
+class USkeletalMeshComponent;
+
+/** Server-only companion to AUTCharacter::SavedPositions. Stock rewind history
+ *  records location but not capsule posture, so a slide that ends before hit
+ *  validation cannot otherwise be reconstructed safely. */
+struct FNCSavedCapsulePosture
+{
+	float Time = 0.f;
+	float HalfHeight = 0.f;
+	float SlideStartTime = 0.f;
+	bool bFloorSliding = false;
+	bool bTeleported = false;
+};
 
 /**
  * Enhanced character that uses split prediction for movement.
@@ -96,7 +109,14 @@ public:
     // Override to use custom prediction time for position rewinding
     virtual FVector GetRewindLocation(float PredictionTime, AUTPlayerController* DebugViewer = NULL) override;
 
-    //virtual void PositionUpdated(bool bShotSpawned) override;
+	/** Record capsule posture beside stock position history on authority. */
+	virtual void PositionUpdated(bool bShotSpawned) override;
+
+	/** Resolve a bracketed, non-teleport capsule posture at PredictionTime.
+	 *  Returns false when history cannot prove one posture across the sample. */
+	bool GetRewindCapsulePosture(float PredictionTime, float& OutHalfHeight,
+		bool& bOutFloorSliding, float& OutSlideElapsed) const;
+	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
 
 	virtual FVector GetHeadLocation(float PredictionTime = 0.f)  override;
@@ -117,6 +137,9 @@ public:
 
 
 protected:
+	/** Kept to the same age horizon as stock SavedPositions; authority only. */
+	TArray<FNCSavedCapsulePosture> SavedCapsulePostures;
+
     /**
      * Get the client's visual prediction time from the viewing controller.
      * Returns 0ms if using TeamArenaPredictionPC (no extrapolation).
@@ -149,6 +172,20 @@ protected:
 	// Timestamp of last OverlayMesh->MarkRenderStateDirty() allowed through Super::Tick.
 	// Time-based throttle at 60Hz — independent of render frame rate (480/720/etc).
 	float LastOverlayDirtyTime = 0.f;
+
+	// Overlay distance/render visibility is presentation-only. Evaluate it at 120 Hz, but
+	// invalidate immediately when the component/material/config or local camera identity changes.
+	double LastOverlayVisibilityEvalTime = -1.0;
+	uint32 LastOverlayViewerRevision = 0;
+	float LastOverlayVisibilityDistanceSquared = -1.f;
+	TWeakObjectPtr<USkeletalMeshComponent> LastOverlayVisibilityMesh;
+	TWeakObjectPtr<UMaterialInterface> LastOverlayVisibilityMaterial;
+	bool bOverlayVisibilityStateValid = false;
+	bool bLastOverlayVisibilityRegistered = false;
+	bool bLastOverlayVisibilityHadMaterial = false;
+	bool bLastOverlayMaterialIsShield = false;
+	bool bLastOverlayHideShield = false;
+	bool bLastOverlayShouldShow = true;
 
 	// --- Per-weapon hide tracking ---
 	// Tracks last equipped weapon to detect weapon switches and apply hide state

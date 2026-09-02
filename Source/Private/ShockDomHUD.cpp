@@ -12,6 +12,11 @@
 AShockDomHUD::AShockDomHUD(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	// This HUD bypasses AWipeoutHUD::DrawHUD and never paints portrait strips.
+	// Keep the base score core on fixed red/blue sides even if the global
+	// Wipeout viewer-relative portrait option is enabled.
+	bShouldDrawPortraits = false;
+
 	// Replace WipeoutScoreboard with ShockDomScoreboard in widget list
 	HudWidgetClasses.Remove(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ShockDomScoreboard"));
@@ -98,44 +103,16 @@ void AShockDomHUD::DrawHUD()
 
 
 // ============================================================================
-// MATCH CLOCK (centered below team score bar — Wipeout/Blitz style)
+// COMPACT SCORE/CLOCK MODULE (owned by AWipeoutHUD)
 // ============================================================================
 
 void AShockDomHUD::DrawTeamScoreBar(AUTGameState* GS)
 {
-	// Draw parent's score bar (red/blue bars, scores, team names)
+	// The parent now owns the complete compact score/clock module. Its existing
+	// RemainingTime fallback covers ShockDom, so drawing a second child clock
+	// would overlap the integrated center segment. Keep this override symbol for
+	// RC/native-layout compatibility and delegate only.
 	Super::DrawTeamScoreBar(GS);
-
-	if (!Canvas || !MediumFont || !GS) return;
-	if (NCPlusHUDDrawCall::IsHidden(TEXT("scorebar"))) return;
-
-	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
-	// Phase 3.11: scorebar Scale override sizes clock + bar offset uniformly.
-	const float ScoreScale = NCPlusHUDDrawCall::GetScale(TEXT("scorebar"));
-
-	// Phase 3.5 layout consult — same anchor as Super so the clock stays put.
-	const FVector2D StockPos(Canvas->ClipX * 0.5f, 2.f * RenderScale);
-	const FVector2D ScoreBarPos = NCPlusHUDDrawCall::ResolveScreenPos(TEXT("scorebar"), Canvas, StockPos);
-	const float CenterX = ScoreBarPos.X;
-	const float TopY    = ScoreBarPos.Y;
-	const float BarHeight = 36.f * RenderScale * ScoreScale;
-	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
-
-	int32 RemainingTime = GS->GetRemainingTime();
-	if (RemainingTime < 0) return;
-
-	int32 Mins = RemainingTime / 60;
-	int32 Secs = RemainingTime % 60;
-	FString ClockStr = FString::Printf(TEXT("%02d:%02d"), Mins, Secs);
-
-	const float FontExtraScale = NCPlusHUDFonts::ResolveScale(TEXT("scorebar"), 1.f);
-	float ClockScale = RenderScale * 1.1f * ScoreScale * FontExtraScale;
-	float XL, YL;
-	Canvas->TextSize(MediumFont, ClockStr, XL, YL, ClockScale, ClockScale);
-
-	// Flash red under 30s
-	Canvas->DrawColor = (RemainingTime <= 30) ? FColor(255, 60, 60, 255) : FColor::White;
-	Canvas->DrawText(MediumFont, ClockStr, CenterX - XL * 0.5f, ClockY, ClockScale, ClockScale);
 }
 
 

@@ -30,6 +30,9 @@ class NETCODEPLUS_API UNCPlusHUDWidget_QuickStats : public UUTHUDWidget
 	virtual float GetDrawScaleOverride() override;
 
 private:
+	uint32 CachedScaleRevision;
+	float CachedUserScale;
+
 	// Damage / pickup tracking shared across all styles
 	int32 LastHealth;
 	int32 LastArmor;
@@ -50,11 +53,18 @@ private:
 	FLinearColor CachedArmorAccent;
 	FLinearColor CachedHealthNumBase;
 	FLinearColor CachedArmorNumBase;
+	UPROPERTY(Transient)
+	class UFont* CachedNumberFont;
+	UPROPERTY(Transient)
+	class UFont* CachedLabelFont;
 
 	// RadialArcs is static between vital/layout changes. Retain the exact
 	// tessellated vertices and the allocation; only vertex colors are refreshed
 	// during pickup pulses. This removes render-rate trig without changing pixels.
 	TArray<FCanvasUVTri> CachedRadialTris;
+	// Reused frame scratch for HexChevrons. Geometry/color can pulse every frame,
+	// but its fixed maximum vertex count should never allocate at render rate.
+	TArray<FCanvasUVTri> CachedChevronTris;
 	FVector2D CachedRadialRenderPosition;
 	FVector2D CachedRadialSize;
 	float CachedRadialRenderScale;
@@ -92,4 +102,8 @@ private:
 	void DrawRadialArcs      (int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C);
 	void DrawHexChevrons     (int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C);
 	void DrawVerticalPills   (int32 Health, int32 Armor, bool bDrawArmor, const FStatColors& C);
+	FVector2D DrawCachedNumber(int32 Value, float X, float Y, class UFont* Font,
+		const FVector2D& ShadowDirection, const FLinearColor& ShadowColor,
+		float TextScale, float DrawOpacity, const FLinearColor& DrawColor,
+		ETextHorzPos::Type HorizontalAlignment, ETextVertPos::Type VerticalAlignment);
 };

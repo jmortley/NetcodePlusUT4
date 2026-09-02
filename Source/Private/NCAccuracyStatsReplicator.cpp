@@ -28,6 +28,12 @@ void ANCAccuracyStatsReplicator::BeginPlay()
 {
 	Super::BeginPlay();
 	TimeSinceLastUpdate = 0.f;
+	// Replication does not require an actor tick on clients. Previously every
+	// client woke this actor at 2 Hz just to return at the top of Tick().
+	if (Role != ROLE_Authority)
+	{
+		SetActorTickEnabled(false);
+	}
 }
 
 void ANCAccuracyStatsReplicator::Tick(float DeltaTime)
@@ -157,6 +163,21 @@ int32 ANCAccuracyStatsReplicator::GetShotsForPlayer(const FString& PlayerId, FNa
 {
 	const FNCAccuracyStatsEntry* E = FindEntry(StatsEntries, PlayerId);
 	return E ? ShotsFieldOffset(StatName, *E) : 0;
+}
+
+bool ANCAccuracyStatsReplicator::GetAccuracyForPlayer(const FString& PlayerId,
+	FName HitsStat, FName ShotsStat, int32& OutHits, int32& OutShots) const
+{
+	const FNCAccuracyStatsEntry* E = FindEntry(StatsEntries, PlayerId);
+	if (!E)
+	{
+		OutHits = 0;
+		OutShots = 0;
+		return false;
+	}
+	OutHits = HitsFieldOffset(HitsStat, *E);
+	OutShots = ShotsFieldOffset(ShotsStat, *E);
+	return true;
 }
 
 ANCAccuracyStatsReplicator* ANCAccuracyStatsReplicator::EnsureSpawned(AActor* Owner)

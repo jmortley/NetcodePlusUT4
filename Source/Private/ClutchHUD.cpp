@@ -197,6 +197,9 @@ AClutchHUD::AClutchHUD(const FObjectInitializer& ObjectInitializer)
 	// Clutch draws a compact portrait strip immediately around the score boxes.
 	// Disable Wipeout's wide 40%/60% anchors and its unrelated KDA panel.
 	bShouldDrawPortraits = false;
+	// Clutch reuses DrawPlayerIcon for its small roster tiles: keep the legacy
+	// compact "HP/AR" line + fixed red/blue aliases (see bPortraitMockupRestyle).
+	bPortraitMockupRestyle = false;
 	HudWidgetClasses.Remove(TEXT("/Script/NetcodePlus.WipeoutScoreboard"));
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.ClutchScoreboard"));
 	HudWidgetClasses.AddUnique(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"));
