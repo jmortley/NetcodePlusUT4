@@ -1,7 +1,7 @@
 // NCShaftArenaScoreboard — FFA scoreboard for NCShaftArena. Built on
 // UWipeoutScoreboard purely to inherit its column-position fields and
 // portrait/atlas plumbing; DrawTeamPanel is overridden to render FFA-flat
-// (no team grouping). Columns: Kills, Accuracy %, Best Streak, Damage.
+// (no team grouping). Columns: Kills, Accuracy %, Best Streak, Damage, Ping.
 #pragma once
 
 #include "NetcodePlus.h"

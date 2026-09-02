@@ -33,6 +33,11 @@ public:
 	class UTexture2D* WeaponIconAtlas;
 
 private:
+	// GetDrawScaleOverride is called from the render path. Cache the resolved
+	// layout scale until live editing bumps the revision.
+	uint32 CachedScaleRevision;
+	float CachedUserScale;
+
 	// Parsed layout style. Extras are strings in the editable layout, but they
 	// only need parsing when the live revision changes.
 	uint32 CachedStyleRevision;
@@ -44,6 +49,12 @@ private:
 	FLinearColor CachedAmmoFillFull;
 	FLinearColor CachedAmmoFillWarn;
 	FLinearColor CachedAmmoFillDanger;
+
+	// Numeric HUD text has no wrapping/newlines. This fast path retains its
+	// string measurement and bypasses UUTHUDWidget::DrawText's per-call
+	// ToString/Contains/StrLen work while preserving the same canvas text item.
+	void DrawCachedNumber(int32 Value, float X, float Y, class UFont* Font,
+		float TextScale, float DrawOpacity, const FLinearColor& DrawColor, bool bRightAligned);
 };
 
 UCLASS()

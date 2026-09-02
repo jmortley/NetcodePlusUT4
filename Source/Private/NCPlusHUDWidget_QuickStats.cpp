@@ -45,6 +45,48 @@ namespace NCPlusQS
 	static const float AccentLineGap   = 4.f;
 	static const float LabelGap        = 5.f;
 	static const float AccentLineW     = 70.f;
+	static const FName NAME_HPArmor(TEXT("hp_armor"));
+
+	struct FNumberTextCache
+	{
+		FText Text;
+		FString String;
+		TMap<UFont*, FVector2D> Sizes;
+	};
+
+	static FNumberTextCache& NumberText(int32 Value)
+	{
+		static TMap<int32, FNumberTextCache> Cache;
+		if (FNumberTextCache* Found = Cache.Find(Value)) return *Found;
+		FNumberTextCache Entry;
+		Entry.Text = FText::AsNumber(Value);
+		Entry.String = Entry.Text.ToString();
+		return Cache.Add(Value, MoveTemp(Entry));
+	}
+
+	static const FText& HealthLabel()
+	{
+		static const FText Text = FText::FromString(TEXT("HEALTH"));
+		return Text;
+	}
+
+	static const FText& ArmorLabel()
+	{
+		static const FText Text = FText::FromString(TEXT("ARMOR"));
+		return Text;
+	}
+
+	static const FText& HPLabel()
+	{
+		static const FText Text = FText::FromString(TEXT("HP"));
+		return Text;
+	}
+
+	static const FText& ARLabel()
+	{
+		static const FText Text = FText::FromString(TEXT("AR"));
+		return Text;
+	}
 }
 
 UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitializer& OI)
@@ -65,13 +107,15 @@ UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitialize
 	// Opt out of HUDImpulse — see NCPlusHUDWidget_WeaponBar for the full rationale.
 	bShouldKickBack = false;
 
+	CachedScaleRevision     = MAX_uint32;
+	CachedUserScale         = 1.f;
 	LastHealth             = -1;
 	LastArmor              = -1;
 	HealthDamageFlashEnd   = 0.f;
 	ArmorDamageFlashEnd    = 0.f;
 	HealthPickupPulseEnd   = 0.f;
 	ArmorPickupPulseEnd    = 0.f;
-	CachedLayoutRevision   = 0;
+	CachedLayoutRevision   = MAX_uint32;
 	CachedStyle            = uint8(ENCPlusHPArmorStyle::MinimalTypography);
 	CachedOpacity          = 1.f;
 	CachedLowHpRed         = FLinearColor(1.f, 0.32f, 0.28f, 1.f);
@@ -81,6 +125,8 @@ UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitialize
 	CachedArmorAccent      = FLinearColor(0.95f, 0.83f, 0.34f, 1.f);
 	CachedHealthNumBase    = FLinearColor::White;
 	CachedArmorNumBase     = FLinearColor::White;
+	CachedNumberFont       = nullptr;
+	CachedLabelFont        = nullptr;
 	CachedRadialRenderPosition = FVector2D(BIG_NUMBER, BIG_NUMBER);
 	CachedRadialSize       = FVector2D(BIG_NUMBER, BIG_NUMBER);
 	CachedRadialRenderScale = -1.f;
@@ -95,9 +141,14 @@ UNCPlusHUDWidget_QuickStats::UNCPlusHUDWidget_QuickStats(const FObjectInitialize
 
 float UNCPlusHUDWidget_QuickStats::GetDrawScaleOverride()
 {
-	const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
-	const float UserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
-	return Super::GetDrawScaleOverride() * UserScale;
+	const uint32 Revision = FNCPlusHUDLayout::GetLiveRevision();
+	if (CachedScaleRevision != Revision)
+	{
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(NCPlusQS::NAME_HPArmor);
+		CachedUserScale = E ? FMath::Clamp(E->Scale, 0.25f, 4.f) : 1.f;
+		CachedScaleRevision = Revision;
+	}
+	return Super::GetDrawScaleOverride() * CachedUserScale;
 }
 
 bool UNCPlusHUDWidget_QuickStats::ShouldDraw_Implementation(bool bShowScores)
@@ -115,10 +166,49 @@ bool UNCPlusHUDWidget_QuickStats::ShouldDraw_Implementation(bool bShowScores)
 	// "Show in Instagib" checkbox in nchud (extras key "show_in_instagib").
 	if (NCPlusHUDDrawCall::IsInstagibMatch(UTHUDOwner->GetWorld()))
 	{
-		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
+		const FNCPlusHUDElement* E = FNCPlusHUDLayout::GetLive().Find(NCPlusQS::NAME_HPArmor);
 		return E && E->GetExtraBool(TEXT("show_in_instagib"), false);
 	}
 	return true;
+}
+
+FVector2D UNCPlusHUDWidget_QuickStats::DrawCachedNumber(int32 Value, float X, float Y,
+	UFont* Font, const FVector2D& ShadowDirection, const FLinearColor& ShadowColor,
+	float TextScale, float DrawOpacity, const FLinearColor& DrawColor,
+	ETextHorzPos::Type HorizontalAlignment, ETextVertPos::Type VerticalAlignment)
+{
+	if (!Canvas || !Font) return FVector2D::ZeroVector;
+	NCPlusQS::FNumberTextCache& Entry = NCPlusQS::NumberText(Value);
+	FVector2D* Size = Entry.Sizes.Find(Font);
+	if (!Size)
+	{
+		float XL = 0.f;
+		float YL = 0.f;
+		Canvas->StrLen(Font, Entry.String, XL, YL);
+		Size = &Entry.Sizes.Add(Font, FVector2D(XL, YL));
+	}
+
+	if (bScaleByDesignedResolution)
+	{
+		X *= RenderScale;
+		Y *= RenderScale;
+	}
+	const float FinalScale = bScaleByDesignedResolution ? RenderScale * TextScale : TextScale;
+	FVector2D DrawPos(RenderPosition.X + X, RenderPosition.Y + Y);
+	if (HorizontalAlignment == ETextHorzPos::Right) DrawPos.X -= Size->X * FinalScale;
+	else if (HorizontalAlignment == ETextHorzPos::Center) DrawPos.X -= Size->X * FinalScale * 0.5f;
+	if (VerticalAlignment == ETextVertPos::Bottom) DrawPos.Y -= Size->Y * FinalScale;
+	else if (VerticalAlignment == ETextVertPos::Center) DrawPos.Y -= Size->Y * FinalScale * 0.5f;
+
+	FLinearColor Color = DrawColor;
+	Color.A = Opacity * DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
+	FCanvasTextItem TextItem(DrawPos, Entry.Text, Font, Color);
+	FLinearColor Shadow = ShadowColor;
+	Shadow.A *= DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
+	TextItem.EnableShadow(Shadow, ShadowDirection);
+	TextItem.Scale = FVector2D(FinalScale, FinalScale);
+	Canvas->DrawItem(TextItem);
+	return *Size;
 }
 
 void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
@@ -161,7 +251,7 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
 	if (CachedLayoutRevision != LayoutRevision)
 	{
-		const FNCPlusHUDElement* ColorElem = FNCPlusHUDLayout::GetLive().Find(TEXT("hp_armor"));
+		const FNCPlusHUDElement* ColorElem = FNCPlusHUDLayout::GetLive().Find(NAME_HPArmor);
 		auto Col = [&](FName Key, const FLinearColor& Default) -> FLinearColor
 		{
 			return ColorElem ? ColorElem->GetExtraColor(Key, Default) : Default;
@@ -177,6 +267,8 @@ void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)
 		CachedStyle         = uint8(ColorElem
 			? NCPlusHPArmorStyle::Parse(ColorElem->GetExtra(TEXT("style")))
 			: ENCPlusHPArmorStyle::MinimalTypography);
+		CachedNumberFont = NCPlusHUDFonts::Resolve(NAME_HPArmor, UTHUDOwner, UTHUDOwner->LargeFont);
+		CachedLabelFont = NCPlusHUDFonts::Resolve(NAME_HPArmor, UTHUDOwner, UTHUDOwner->TinyFont);
 		CachedLayoutRevision = LayoutRevision;
 	}
 	// Two-tier low-HP coloring: warning (45-70) and critical (<=45). The
@@ -248,89 +340,85 @@ void UNCPlusHUDWidget_QuickStats::DrawMinimalTypography(int32 Health, int32 Armo
 	using namespace NCPlusQS;
 
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
+	UFont* NumberFont = CachedNumberFont;
 	// Also resolve the label font ("HEALTH" / "ARMOR" text) from the same alias
 	// so the picker affects the whole hp_armor typography, not just the numbers.
 	// LabelScale (0.80f) still keeps the label visually smaller than the number;
 	// only the typeface changes. Falls back to TinyFont when the picker is on Default.
-	UFont* LabelFont  = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->TinyFont);
-	if (!NumberFont || !LabelFont) return;
+	UFont* LabelFont  = CachedLabelFont;
+	if (!NumberFont || !LabelFont || !Canvas) return;
 
 	const float CenterX = Size.X * 0.5f;
 
-	// --- HEALTH (right-aligned to center divider) ---
+	// Measure both dynamic numbers first, then group default-texture ink, number
+	// glyphs, and label glyphs. This preserves geometry while reducing render-state
+	// ping-pong from texture -> font -> texture -> font -> texture.
+	auto MeasureNumber = [&](int32 Value) -> FVector2D
 	{
-		const float TextX = CenterX - CenterGap;
-		const float TextY = NumberY;
-		const FVector2D NumSize = DrawText(FText::AsNumber(Health),
-			TextX, TextY, NumberFont,
-			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumberScale, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
-			ETextHorzPos::Right, ETextVertPos::Top);
+		FNumberTextCache& Entry = NumberText(Value);
+		if (FVector2D* Found = Entry.Sizes.Find(NumberFont)) return *Found;
+		float XL = 0.f;
+		float YL = 0.f;
+		Canvas->StrLen(NumberFont, Entry.String, XL, YL);
+		return Entry.Sizes.Add(NumberFont, FVector2D(XL, YL));
+	};
 
-		const float NumberW       = NumSize.X * NumberScale;
-		const float NumberBottomY = TextY + NumSize.Y * NumberScale;
-		const float AccentLineY   = NumberBottomY + AccentLineGap;
-		const float LabelY        = AccentLineY + LabelGap;
-		const float LineW         = FMath::Max(NumberW, AccentLineW);
-		const float LabelCenterX  = TextX - LineW * 0.5f;
+	const float HealthTextX = CenterX - CenterGap;
+	const FVector2D HealthSize = MeasureNumber(Health);
+	const float HealthLineW = FMath::Max(HealthSize.X * NumberScale, AccentLineW);
+	const float HealthLineY = NumberY + HealthSize.Y * NumberScale + AccentLineGap;
+	const float HealthLabelY = HealthLineY + LabelGap;
+	const float HealthLabelX = HealthTextX - HealthLineW * 0.5f;
 
-		if (Canvas && Canvas->DefaultTexture)
-		{
-			FLinearColor LineColor = C.HealthAccent;
-			const float LineAlpha = (0.85f + C.HealthPulse * 0.15f) * C.Opacity;
-			const float LineH = 1.5f + C.HealthPulse * 1.5f;
-			DrawTexture(Canvas->DefaultTexture, TextX - LineW, AccentLineY, LineW, LineH,
-				0.f, 0.f, 1.f, 1.f, LineAlpha, LineColor);
-		}
+	const float ArmorTextX = CenterX + CenterGap;
+	const FVector2D ArmorSize = bDrawArmor ? MeasureNumber(Armor) : FVector2D::ZeroVector;
+	const float ArmorLineW = FMath::Max(ArmorSize.X * NumberScale, AccentLineW);
+	const float ArmorLineY = NumberY + ArmorSize.Y * NumberScale + AccentLineGap;
+	const float ArmorLabelY = ArmorLineY + LabelGap;
+	const float ArmorLabelX = ArmorTextX + ArmorLineW * 0.5f;
 
-		DrawText(FText::FromString(TEXT("HEALTH")),
-			LabelCenterX, LabelY, LabelFont,
-			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			LabelScale, C.HealthAccent.A * C.Opacity, C.HealthAccent,
-			ETextHorzPos::Center, ETextVertPos::Top);
-	}
-
-	// --- ARMOR (left-aligned to center divider) ---
-	if (bDrawArmor)
-	{
-		const float TextX = CenterX + CenterGap;
-		const float TextY = NumberY;
-		const FVector2D NumSize = DrawText(FText::AsNumber(Armor),
-			TextX, TextY, NumberFont,
-			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
-			NumberScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
-			ETextHorzPos::Left, ETextVertPos::Top);
-
-		const float NumberW       = NumSize.X * NumberScale;
-		const float NumberBottomY = TextY + NumSize.Y * NumberScale;
-		const float AccentLineY   = NumberBottomY + AccentLineGap;
-		const float LabelY        = AccentLineY + LabelGap;
-		const float LineW         = FMath::Max(NumberW, AccentLineW);
-		const float LabelCenterX  = TextX + LineW * 0.5f;
-
-		if (Canvas && Canvas->DefaultTexture)
-		{
-			FLinearColor LineColor = C.ArmorAccent;
-			const float LineAlpha = (0.85f + C.ArmorPulse * 0.15f) * C.Opacity;
-			const float LineH = 1.5f + C.ArmorPulse * 1.5f;
-			DrawTexture(Canvas->DefaultTexture, TextX, AccentLineY, LineW, LineH,
-				0.f, 0.f, 1.f, 1.f, LineAlpha, LineColor);
-		}
-
-		DrawText(FText::FromString(TEXT("ARMOR")),
-			LabelCenterX, LabelY, LabelFont,
-			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
-			LabelScale, C.ArmorAccent.A * C.Opacity, C.ArmorAccent,
-			ETextHorzPos::Center, ETextVertPos::Top);
-	}
-
-	// Vertical divider
 	if (Canvas && Canvas->DefaultTexture)
 	{
+		const float HealthLineAlpha = (0.85f + C.HealthPulse * 0.15f) * C.Opacity;
+		const float HealthLineH = 1.5f + C.HealthPulse * 1.5f;
+		DrawTexture(Canvas->DefaultTexture, HealthTextX - HealthLineW, HealthLineY,
+			HealthLineW, HealthLineH, 0.f, 0.f, 1.f, 1.f,
+			HealthLineAlpha, C.HealthAccent);
+		if (bDrawArmor)
+		{
+			const float ArmorLineAlpha = (0.85f + C.ArmorPulse * 0.15f) * C.Opacity;
+			const float ArmorLineH = 1.5f + C.ArmorPulse * 1.5f;
+			DrawTexture(Canvas->DefaultTexture, ArmorTextX, ArmorLineY,
+				ArmorLineW, ArmorLineH, 0.f, 0.f, 1.f, 1.f,
+				ArmorLineAlpha, C.ArmorAccent);
+		}
 		const FLinearColor DividerColor(0.7f, 0.55f, 0.30f, 0.45f);
 		DrawTexture(Canvas->DefaultTexture, CenterX - 0.5f, DividerY0,
 			1.f, DividerY1 - DividerY0, 0.f, 0.f, 1.f, 1.f, DividerColor.A * C.Opacity, DividerColor);
+	}
+
+	DrawCachedNumber(Health, HealthTextX, NumberY, NumberFont,
+		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
+		NumberScale, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
+		ETextHorzPos::Right, ETextVertPos::Top);
+	if (bDrawArmor)
+	{
+		DrawCachedNumber(Armor, ArmorTextX, NumberY, NumberFont,
+			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
+			NumberScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
+			ETextHorzPos::Left, ETextVertPos::Top);
+	}
+
+	DrawText(HealthLabel(), HealthLabelX, HealthLabelY, LabelFont,
+		FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
+		LabelScale, C.HealthAccent.A * C.Opacity, C.HealthAccent,
+		ETextHorzPos::Center, ETextVertPos::Top);
+	if (bDrawArmor)
+	{
+		DrawText(ArmorLabel(), ArmorLabelX, ArmorLabelY, LabelFont,
+			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
+			LabelScale, C.ArmorAccent.A * C.Opacity, C.ArmorAccent,
+			ETextHorzPos::Center, ETextVertPos::Top);
 	}
 }
 
@@ -343,7 +431,7 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 {
 	using namespace NCPlusQS;
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
+	UFont* NumberFont = CachedNumberFont;
 	if (!NumberFont || !Canvas || !Canvas->DefaultTexture) return;
 
 	// Segment math: each segment is SegmentSize (50) units. Full segments are
@@ -371,7 +459,7 @@ void UNCPlusHUDWidget_QuickStats::DrawSegmentedBars(int32 Health, int32 Armor, b
 		// Number on the left, visually centered on the segment row's midpoint. Uses the
 		// user's HP#/AR# number colors (incl. low-HP/flash tiers) — it used to draw with
 		// the row ACCENT, so the number-color settings did nothing here (2026-07-01).
-		DrawText(FText::AsNumber(Value), NumWidth, Y + SegH * 0.5f + NumNudgeY, NumberFont,
+		DrawCachedNumber(Value, NumWidth, Y + SegH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
 			NumScale, NumColor.A * C.Opacity, NumColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
@@ -494,7 +582,7 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 {
 	using namespace NCPlusQS;
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
+	UFont* NumberFont = CachedNumberFont;
 	if (!NumberFont || !Canvas) return;
 
 	const float CX = Size.X * 0.5f;
@@ -566,13 +654,13 @@ void UNCPlusHUDWidget_QuickStats::DrawRadialArcs(int32 Health, int32 Armor, bool
 	DrawTrisTranslucent(Canvas, CachedRadialTris);
 
 	// Numbers stacked in the center of the rings — DrawText needs DrawOpacity arg.
-	DrawText(FText::AsNumber(Health), CX, CY - 14.f, NumberFont,
+	DrawCachedNumber(Health, CX, CY - 14.f, NumberFont,
 		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
 		0.95f, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
 		ETextHorzPos::Center, ETextVertPos::Center);
 	if (bDrawArmor)
 	{
-		DrawText(FText::AsNumber(Armor), CX, CY + 14.f, NumberFont,
+		DrawCachedNumber(Armor, CX, CY + 14.f, NumberFont,
 			FVector2D(1.f, 1.f), FLinearColor(0.f, 0.f, 0.f, 0.5f),
 			0.6f, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
 			ETextHorzPos::Center, ETextVertPos::Center);
@@ -625,7 +713,7 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 {
 	using namespace NCPlusQS;
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
+	UFont* NumberFont = CachedNumberFont;
 	if (!NumberFont || !Canvas) return;
 
 	const float ChevW   = 44.f, ChevH = 22.f, ChevSlant = 10.f, ChevGap = 8.f;
@@ -642,8 +730,8 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 	const float NumScale = 0.75f;   // small enough to fit inside ChevH visually
 	const float NumNudgeY = -4.f;   // compensate for font glyph-box asymmetry
 
-	TArray<FCanvasUVTri> Tris;
-	Tris.Reserve((HealthSegCount + ArmorSegCount) * 4);
+	CachedChevronTris.Reset((HealthSegCount + ArmorSegCount) * 4);
+	TArray<FCanvasUVTri>& Tris = CachedChevronTris;
 	auto AppendRow = [&](int32 Value, int32 SegCount, float Y,
 	                   const FLinearColor& FillColor, float Pulse)
 	{
@@ -682,13 +770,13 @@ void UNCPlusHUDWidget_QuickStats::DrawHexChevrons(int32 Health, int32 Armor, boo
 	}
 	// Preserve the original ordering (text, then chevron ink) while collapsing all
 	// chevrons into one geometry submission.
-	DrawText(FText::AsNumber(Health), NumWidth, RowY[0] + ChevH * 0.5f + NumNudgeY, NumberFont,
+	DrawCachedNumber(Health, NumWidth, RowY[0] + ChevH * 0.5f + NumNudgeY, NumberFont,
 		FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
 		NumScale, C.HealthNumColor.A * C.Opacity, C.HealthNumColor,
 		ETextHorzPos::Right, ETextVertPos::Center);
 	if (bDrawArmor)
 	{
-		DrawText(FText::AsNumber(Armor), NumWidth, RowY[1] + ChevH * 0.5f + NumNudgeY, NumberFont,
+		DrawCachedNumber(Armor, NumWidth, RowY[1] + ChevH * 0.5f + NumNudgeY, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
 			NumScale, C.ArmorNumColor.A * C.Opacity, C.ArmorNumColor,
 			ETextHorzPos::Right, ETextVertPos::Center);
@@ -705,7 +793,7 @@ void UNCPlusHUDWidget_QuickStats::DrawVerticalPills(int32 Health, int32 Armor, b
 {
 	using namespace NCPlusQS;
 	// Per-element font override (Phase 3.8). Defaults to LargeFont when no override.
-	UFont* NumberFont = NCPlusHUDFonts::Resolve(TEXT("hp_armor"), UTHUDOwner, UTHUDOwner->LargeFont);
+	UFont* NumberFont = CachedNumberFont;
 	if (!NumberFont || !Canvas || !Canvas->DefaultTexture) return;
 
 	const float PillW       = 22.f;
@@ -734,15 +822,15 @@ void UNCPlusHUDWidget_QuickStats::DrawVerticalPills(int32 Health, int32 Armor, b
 			0, 0, 1, 1, FillAlpha, FillColor);
 
 		// Number BELOW the pill so it doesn't compete with the team-name strip above.
-		DrawText(FText::AsNumber(Value), X + PillW * 0.5f, Y + PillH + 4.f, NumberFont,
+		DrawCachedNumber(Value, X + PillW * 0.5f, Y + PillH + 4.f, NumberFont,
 			FVector2D(2.f, 2.f), FLinearColor(0.f, 0.f, 0.f, 0.7f),
 			0.85f, NumColor.A * C.Opacity, NumColor,
 			ETextHorzPos::Center, ETextVertPos::Top);
 	};
 
-	DrawPill(HPx, TopY, Health, MaxHealth, C.HealthAccent, C.HealthNumColor, C.HealthPulse, FText::FromString(TEXT("HP")));
+	DrawPill(HPx, TopY, Health, MaxHealth, C.HealthAccent, C.HealthNumColor, C.HealthPulse, HPLabel());
 	if (bDrawArmor)
 	{
-		DrawPill(ARx, TopY, Armor, MaxArmor, C.ArmorAccent, C.ArmorNumColor, C.ArmorPulse, FText::FromString(TEXT("AR")));
+		DrawPill(ARx, TopY, Armor, MaxArmor, C.ArmorAccent, C.ArmorNumColor, C.ArmorPulse, ARLabel());
 	}
 }

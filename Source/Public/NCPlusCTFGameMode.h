@@ -14,6 +14,7 @@
 #include "NCPlusCTFGameMode.generated.h"
 
 class ANCAutoPauseState;
+class ANCReadyUpState;
 
 // Safe property access across DLL boundary — uses runtime UProperty reflection
 // instead of direct member access which has wrong offsets due to layout mismatch.
@@ -22,30 +23,51 @@ class ANCAutoPauseState;
 // lookup via FindField which always returns the correct offset.
 namespace NCPlusReflection
 {
+	template <typename PropertyType>
+	inline PropertyType* FindCachedProperty(UObject* Obj, const TCHAR* PropName)
+	{
+		if (!Obj) return nullptr;
+		// Shipping UClasses and their UProperty tables are stable for process life.
+		// Cache by runtime class + property name so render-rate HUD reads do not walk
+		// the reflection field chain every frame. Each PropertyType gets its own map.
+		static TMap<UClass*, TMap<FName, PropertyType*>> Cache;
+		TMap<FName, PropertyType*>& ClassCache = Cache.FindOrAdd(Obj->GetClass());
+		const FName Name(PropName);
+		if (PropertyType** Found = ClassCache.Find(Name)) return *Found;
+		PropertyType* Resolved = FindField<PropertyType>(Obj->GetClass(), PropName);
+		ClassCache.Add(Name, Resolved);
+		return Resolved;
+	}
+
 	inline bool GetBool(UObject* Obj, const TCHAR* PropName)
 	{
-		UBoolProperty* Prop = FindField<UBoolProperty>(Obj->GetClass(), PropName);
+		UBoolProperty* Prop = FindCachedProperty<UBoolProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : false;
 	}
 	inline void SetBool(UObject* Obj, const TCHAR* PropName, bool Value)
 	{
-		UBoolProperty* Prop = FindField<UBoolProperty>(Obj->GetClass(), PropName);
+		UBoolProperty* Prop = FindCachedProperty<UBoolProperty>(Obj, PropName);
 		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
 	}
 	inline uint8 GetByte(UObject* Obj, const TCHAR* PropName)
 	{
-		UByteProperty* Prop = FindField<UByteProperty>(Obj->GetClass(), PropName);
+		UByteProperty* Prop = FindCachedProperty<UByteProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
 	}
 	inline void SetByte(UObject* Obj, const TCHAR* PropName, uint8 Value)
 	{
-		UByteProperty* Prop = FindField<UByteProperty>(Obj->GetClass(), PropName);
+		UByteProperty* Prop = FindCachedProperty<UByteProperty>(Obj, PropName);
 		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
 	}
 	inline int32 GetInt(UObject* Obj, const TCHAR* PropName)
 	{
-		UIntProperty* Prop = FindField<UIntProperty>(Obj->GetClass(), PropName);
+		UIntProperty* Prop = FindCachedProperty<UIntProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
+	}
+	inline void SetObject(UObject* Obj, const TCHAR* PropName, UObject* Value)
+	{
+		UObjectPropertyBase* Prop = FindCachedProperty<UObjectPropertyBase>(Obj, PropName);
+		if (Prop) Prop->SetObjectPropertyValue_InContainer(Obj, Value);
 	}
 }
 
@@ -252,6 +274,7 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	void EnsureRatingLoadedForPlayer(AController* Player);
 	virtual void HandleMatchHasEnded() override;
 	virtual void RestartPlayer(AController* NewPlayer) override;
+	virtual void RestartPlayerAtPlayerStart(AController* NewPlayer, AActor* StartSpot) override;
 	virtual float RatePlayerStart(APlayerStart* P, AController* Player) override;
 
 	// Unlock entitlement-gated cosmetics: force the player's chosen hat as an OverrideHatClass (which the
@@ -259,10 +282,9 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	// strip it. Server-side, never kicks. See impl.
 	virtual bool ValidateHat(AUTPlayerState* HatOwner, const FString& HatClass) override;
 
-	/** Own spawn selection (ElimPlus/Wipeout pattern) so the engine pipeline
-	 *  can't bypass RatePlayerStart. Curates an own-team pool from the map's
-	 *  AUTTeamPlayerStart TeamNum tags (trusted, not mutated) and scores it with
-	 *  RatePlayerStart. See NCPlusCTFGameMode.cpp. */
+	/** Own spawn selection from authored AUTTeamPlayerStart TeamNum pools.
+	 *  The default path is NewCTF's rotating primary/secondary system; the old
+	 *  RatePlayerStart weighted selector remains available as a rollback. */
 	virtual AActor* ChoosePlayerStart_Implementation(AController* Player) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn, AUTPlayerState* Holder, FName Reason) override;
 	virtual bool CheckScore_Implementation(AUTPlayerState* Scorer);
@@ -338,7 +360,7 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	float MatchStartWorldTime = 0.f;
 	float MatchFullDurationSeconds = 0.f;
 
-	/** CTF perf knobs, loaded from Mod.ini [UTPUGS_STATS] in HandleMatchHasStarted. */
+	/** CTF perf knobs, loaded from Mod.ini [UTPUGS_STATS] during InitGame. */
 	FNCPlusCTFPerfConfig CTFPerfConfig;
 
 	/** Fraction of MatchFullDurationSeconds a leaver must have been present for
@@ -374,6 +396,12 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  Mod.ini [UTPUGS_STATS] AutoPauseOnDrop. */
 	bool bAutoPauseOnDrop = true;
 
+	/** Seconds a participant connection may remain silent before the pause-immune
+	 *  watcher treats it as a hard drop. This avoids waiting for engine Logout and
+	 *  also covers the locked F5 countdown. Mod.ini [UTPUGS_STATS]
+	 *  PauseDropDetectSeconds; default 4.0. */
+	float PauseDropDetectSeconds = 4.0f;
+
 	/** Pause-safe automatic resume countdown. Defaults to the shared host-pause
 	 *  value and reads [NetcodePlus] UnpauseCountdownSec from Mod.ini. */
 	int32 AutoPauseResumeCountdownSec = 7;
@@ -399,6 +427,16 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  transitions so returning-as-spectator cannot evade drop tracking. */
 	TSet<FString> AutoPauseTrackedIds;
 
+	/** Exact UniqueIds whose ready votes formed the current locked countdown.
+	 *  Unlike ReadyPlayers' actor pointers, these survive reconnects and ensure a
+	 *  second drop before live play is still caught. */
+	TSet<FString> AutoPauseReadyCountdownIds;
+
+	/** Last authoritative team for each present locked-ready ID, including unlinked
+	 *  players absent from PugRosterTeam. It follows legitimate pre-live balancing,
+	 *  then freezes while an ID is awaited so a wrong-side reconnect cannot resume. */
+	TMap<FString, uint8> AutoPauseReadyCountdownTeams;
+
 	/** Logical exact-ID wait is active but no live PlayerState can hold Pauser. */
 	bool bAutoPauseDormantNoMarker = false;
 
@@ -412,6 +450,10 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	float AutoPauseResumeEndRealTime = 0.0f;
 	bool bAutoPauseResumeCountdownActive = false;
 	bool bForceClearingPauseActor = false;
+
+	/** Pause-immune participant connection watcher. Polls at 4 Hz while this game
+	 *  mode exists and acts only during live play or a locked ready countdown. */
+	FDelegateHandle AutoPauseDetectTicker;
 
 	/** Read the rating-relevant stats off a live AUTPlayerState into Out, then
 	 *  resolve its role (OffLean / fractions / label) from accumulated RoleDwell. */
@@ -437,11 +479,17 @@ class NETCODEPLUS_API ANCPlusCTFGameMode : public AUTCTFBaseGame
 	 *  resuming is an explicit clear after a pause-immune authoritative countdown.
 	 *  A new tracked drop cancels an active resume and republishes Paused state. */
 	void BeginOrHoldAutoPause(const FString& LeaverId, const FString& LeaverName,
-		const APlayerState* ExitingPlayerState);
+		const APlayerState* ExitingPlayerState,
+		APlayerState* PreferredPauseMarker = nullptr);
 	void BeginAutoPauseResumeCountdown(const FString& Reason);
 	void CancelAutoPauseResumeCountdown(const FString& Reason);
 	void CompleteAutoPauseResume(const FString& Reason);
 	bool TickAutoPauseResume(float DeltaTime);
+	void StartAutoPauseWatch();
+	void StopAutoPauseWatch();
+	bool TickAutoPauseDetect(float DeltaTime);
+	void CaptureLockedReadyParticipants(const ANCReadyUpState* ReadyState);
+	void RefreshReadyParticipantTeamsFromActivePlayers();
 	ANCAutoPauseState* GetOrCreateAutoPauseState();
 	void PublishAutoPausePaused(const FString& Reason);
 	TArray<FString> GetSortedAutoPauseAwaitIds() const;
@@ -516,9 +564,8 @@ protected:
 	bool bAdvantageFlagEligible[2] = { false, false };
 
 	// ── Recent Spawn Tracking (IG+ style) ───────────────────────────
-	// Penalize reusing the same spawn point. Tracks the last 3 spawns per player,
-	// matching IG+ (StartSpot hard-blocked, LastStartSpot2/3 score-penalised —
-	// NewTDM.uc FindPlayerStartAdvanced).
+	// The rollback selector tracks the last 3 successful spawns per player.
+	// NewCTF's default path instead prevents reuse with the team-wide queue tail.
 
 	struct FRecentSpawns
 	{
@@ -546,7 +593,7 @@ protected:
 	/** Penalty scale for near-last-spawn distance */
 	float SpawnNearLastPenalty = 6.f;
 
-	// ── IG+ weighted-random selection (Deaod's NewTDM.uc port) ───────
+	// ── Legacy rollback selector (IG+ weighted-random / tie-band) ────
 	// The tie-band picks deterministically whenever one start is more than
 	// SpawnTieBandWidth ahead — on many maps that is the SAME start every life,
 	// which is the "siempre en el mismo sitio" report. IG+ instead gives every
@@ -554,7 +601,7 @@ protected:
 	// the highest draw: a start half as good as the best still wins ~25% of the
 	// time, and equal starts are a true coin-flip. Never deterministic.
 
-	/** 1 = IG+ weighted-random draw (default), 0 = legacy tie-band coin-flip. */
+	/** Within the rollback path: 1 = IG+ weighted-random draw, 0 = tie-band coin-flip. */
 	bool bSpawnWeightedRandom = true;
 
 	/** Draw ceiling of the BEST eligible start. Larger = flatter (more random). */
@@ -567,9 +614,9 @@ protected:
 	 *  out. Larger = greedier; smaller = more variety AND more risk. */
 	float SpawnRandomSpread = 1.f;
 
-	/** IG+ MinSpawnDistance: a start with a live enemy inside this radius is
-	 *  REFUSED (own safety tier), not merely penalised. Waived if every start in
-	 *  the pool violates it. 0 = off. */
+	/** A start with a live enemy inside this radius fails the NewCTF primary pass.
+	 *  The secondary pass still guarantees a spawn when every start is blocked.
+	 *  Also used by the rollback/legacy selector's highest safety tier. 0 = off. */
 	float SpawnEnemyHardRadius = 1200.f;
 
 	/** IG+ MinSpawnZVariance: an enemy at least this far BELOW a start is treated
@@ -577,10 +624,44 @@ protected:
 	 *  and clears the hard radius above when he also has no sightline). 0 = off. */
 	float SpawnEnemyBelowZ = 190.f;
 
+	/** Master rollback switch. False restores the pre-port weighted selector. */
+	bool bSpawnUseNewCTFSelection = true;
+
+	/** Use Epic's selector at or below this many connected competitors. */
+	int32 SpawnSystemThreshold = 4;
+
+	/** A teammate inside this radius blocks a primary candidate. */
+	float SpawnFriendlyBlockRange = 150.f;
+
+	/** A teammate with line of sight inside this radius blocks a primary candidate. */
+	float SpawnFriendlyVisionBlockRange = 150.f;
+
+	/** An enemy flag carrier or any unheld flag inside this radius blocks primary. */
+	float SpawnFlagBlockRange = 750.f;
+
+	/** Number of most recently used team starts excluded from primary and secondary. */
+	int32 SpawnMinCycleDistance = 1;
+
+	/** Predict remote pawn movement by half RTT for spawn distance/vision checks. */
+	bool bSpawnExtrapolateMovement = true;
+
+	/** Use the weighted-distance secondary pass when every primary candidate fails. */
+	bool bSpawnSecondaryEnabled = true;
+
+	/** Per-player distance contribution cap in the secondary pass. */
+	float SpawnSecondaryMaxDistance = 2000.f;
+
+	/** Secondary distance weight for teammates. */
+	float SpawnSecondaryOwnTeamWeight = 0.2f;
+
+	/** Secondary distance weight for enemy flag carriers. */
+	float SpawnSecondaryCarrierWeight = 2.f;
+
 	// ── Team-aware spawn pools (curated from author TeamNum tags) ─────
 	// Built lazily on the first ChoosePlayerStart. Server-only; never replicated.
 
-	/** Own-team candidate starts, partitioned by authored TeamNum. */
+	/** Own-team candidate starts, partitioned by authored TeamNum and used as
+	 *  rotating queues by the NewCTF selector. */
 	TArray<TWeakObjectPtr<APlayerStart>> Team0Spawns;
 	TArray<TWeakObjectPtr<APlayerStart>> Team1Spawns;
 
@@ -592,8 +673,35 @@ protected:
 	bool bSpawnPoolsBuilt = false;
 
 	/** Bucket each AUTTeamPlayerStart into Team0Spawns / Team1Spawns by its
-	 *  authored TeamNum (trusted, not mutated). Plain APlayerStarts are excluded. */
+	 *  authored TeamNum (trusted, not mutated), then shuffle each queue once.
+	 *  Plain APlayerStarts are excluded. */
 	void BuildTeamSpawnPools();
+
+	/** Pre-NewCTF weighted/tie-band selector retained behind the rollback switch. */
+	AActor* ChooseLegacyPlayerStart(AController* Player);
+
+	/** Run Epic's picker without dispatching back into NCP's RatePlayerStart. */
+	AActor* ChooseEpicPlayerStart(AController* Player);
+
+	/** NewCTF primary/secondary selector. Selection is side-effect free; a start
+	 *  is moved to the queue tail only after RestartPlayerAtPlayerStart succeeds. */
+	APlayerStart* ChooseNewCTFPlayerStart(AController* Player);
+
+	/** Count connected, assigned competitors (alive or dead; spectators excluded). */
+	int32 CountSpawnSystemCompetitors() const;
+
+	/** Commit a successfully used team start to the queue/history. */
+	void CommitUsedSpawn(AController* Player, APlayerStart* UsedStart);
+
+	/** True only for gameplay spawns, plus second-half respawns performed while
+	 *  the state machine is exiting intermission; excludes lineup previews. */
+	bool IsLiveSpawnCommitState() const;
+
+	/** Discard intro/intermission preview choices before a serialized live restart. */
+	void ClearCachedRespawnChoices();
+
+	/** Synchronous guard used only while Epic's fallback picker rates starts. */
+	bool bForceEpicSpawnRating = false;
 
 	// ── Stats Replicator ────────────────────────────────────────────
 

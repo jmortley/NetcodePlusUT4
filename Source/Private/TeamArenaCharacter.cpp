@@ -6,6 +6,7 @@
 #include "UTWeaponFix.h"
 #include "UTWeaponSkin.h"
 #include "GameFramework/PlayerController.h"
+#include "Camera/PlayerCameraManager.h"
 #include "UTWorldSettings.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
@@ -28,12 +29,20 @@
 #include "NCPlusPerformanceSettings.h"
 #include "NCPlusICTFAudioSettings.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
+#include "CoreGlobals.h"             // GFrameCounter (per-world local-view cache)
+#include "HAL/PlatformTime.h"        // monotonic overlay-visibility deadline
 #include "TimerManager.h"           // DarkenBodies delayed corpse hide
 #include "UTCarriedObject.h"        // HideDeadBody: don't blank a carried flag still parented to the corpse
 #include "Kismet/GameplayStatics.h" // SpawnSound2D (own-footstep volume)
 #include "CTFStatsReplicator.h"     // iCTF gate (bIsInstagibMatch) for own-footstep volume
 #include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 #include "ClutchRoundState.h"       // Clutch defender footstep role/phase lookup
+#include "Engine/DemoNetDriver.h"   // deferred-outline warning: tag killcam/instant-replay worlds
+
+// Shipping clients report every ensure with a synchronous game-thread minidump, which hitches the
+// match and hard-crashes under AV hooks (328 Blitz/iCTF cap crash). Recoverable outline states must
+// log through this category instead of ensuring.
+DEFINE_LOG_CATEGORY_STATIC(LogTeamArenaOutline, Log, All);
 
 static TAutoConsoleVariable<int32> CVarEnableProjectilePrediction(
 	TEXT("ut.EnableProjectilePrediction"),
@@ -55,6 +64,137 @@ namespace
 	constexpr int32 ArmorPlusMaxTotal = 150;
 	constexpr int32 ArmorPlusSoftLimit = 100;
 	constexpr float ClutchDefenderFootstepVolume = 0.10f;
+	constexpr float OverlayVisibilityInterval = 1.f / 120.f;
+	constexpr float OverlayViewerCutDistanceSquared = 512.f * 512.f;
+
+	struct FOverlayViewerState
+	{
+		TWeakObjectPtr<APlayerController> Controller;
+		TWeakObjectPtr<APlayerCameraManager> CameraManager;
+		TWeakObjectPtr<AActor> ViewTarget;
+		FVector Location = FVector::ZeroVector;
+		bool bCameraCut = false;
+	};
+
+	struct FOverlayWorldViewCache
+	{
+		TWeakObjectPtr<UWorld> World;
+		uint64 FrameNumber = ~uint64(0);
+		uint32 Revision = 1;
+		double MonotonicTimeSeconds = 0.0;
+		TArray<FOverlayViewerState, TInlineAllocator<4>> Viewers;
+	};
+
+	double GetOverlayFrameTimeSeconds()
+	{
+		static uint64 CachedFrameNumber = ~uint64(0);
+		static double CachedTimeSeconds = 0.0;
+		if (CachedFrameNumber != GFrameCounter)
+		{
+			CachedFrameNumber = GFrameCounter;
+			CachedTimeSeconds = FPlatformTime::Seconds();
+		}
+		return CachedTimeSeconds;
+	}
+
+	/**
+	 * Cache local view origins once per rendered game frame and per UWorld. Character
+	 * components are shared by every split-screen view, so visibility is retained when
+	 * any local viewer is within range. A revision change denotes a real camera cut
+	 * (controller/view-target membership or a large location discontinuity), not normal
+	 * aiming/movement; callers use it to bypass their 120 Hz presentation throttle.
+	 */
+	const FOverlayWorldViewCache& GetOverlayWorldViewCache(UWorld* World)
+	{
+		static TArray<FOverlayWorldViewCache, TInlineAllocator<4>> WorldCaches;
+
+		for (int32 Index = WorldCaches.Num() - 1; Index >= 0; --Index)
+		{
+			if (!WorldCaches[Index].World.IsValid())
+			{
+				WorldCaches.RemoveAtSwap(Index, 1, false);
+			}
+		}
+
+		FOverlayWorldViewCache* Cache = nullptr;
+		for (FOverlayWorldViewCache& Candidate : WorldCaches)
+		{
+			if (Candidate.World.Get() == World)
+			{
+				Cache = &Candidate;
+				break;
+			}
+		}
+
+		if (Cache == nullptr)
+		{
+			const int32 NewCacheIndex = WorldCaches.AddDefaulted();
+			FOverlayWorldViewCache& NewCache = WorldCaches[NewCacheIndex];
+			NewCache.World = World;
+			Cache = &NewCache;
+		}
+
+		if (Cache->FrameNumber != GFrameCounter)
+		{
+			Cache->FrameNumber = GFrameCounter;
+			Cache->MonotonicTimeSeconds = GetOverlayFrameTimeSeconds();
+
+			TArray<FOverlayViewerState, TInlineAllocator<4>> NewViewers;
+			if (World != nullptr)
+			{
+				for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+				{
+					APlayerController* const PC = It->Get();
+					if (PC == nullptr || !PC->IsLocalPlayerController())
+					{
+						continue;
+					}
+
+					const int32 NewViewerIndex = NewViewers.AddDefaulted();
+					FOverlayViewerState& Viewer = NewViewers[NewViewerIndex];
+					Viewer.Controller = PC;
+					Viewer.CameraManager = PC->PlayerCameraManager;
+					Viewer.ViewTarget = PC->PlayerCameraManager != nullptr
+						? PC->PlayerCameraManager->GetViewTarget() : PC->GetViewTarget();
+					Viewer.bCameraCut = PC->PlayerCameraManager != nullptr &&
+						PC->PlayerCameraManager->bGameCameraCutThisFrame;
+					FRotator UnusedViewRotation;
+					PC->GetPlayerViewPoint(Viewer.Location, UnusedViewRotation);
+				}
+			}
+
+			bool bCameraCut = NewViewers.Num() != Cache->Viewers.Num();
+			if (!bCameraCut)
+			{
+				for (int32 Index = 0; Index < NewViewers.Num(); ++Index)
+				{
+					const FOverlayViewerState& Previous = Cache->Viewers[Index];
+					const FOverlayViewerState& Current = NewViewers[Index];
+					if (Current.bCameraCut ||
+						Previous.Controller.Get() != Current.Controller.Get() ||
+						Previous.CameraManager.Get() != Current.CameraManager.Get() ||
+						Previous.ViewTarget.Get() != Current.ViewTarget.Get() ||
+						FVector::DistSquared(Previous.Location, Current.Location) > OverlayViewerCutDistanceSquared)
+					{
+						bCameraCut = true;
+						break;
+					}
+				}
+			}
+
+			Cache->Viewers = MoveTemp(NewViewers);
+			if (bCameraCut)
+			{
+				++Cache->Revision;
+				if (Cache->Revision == 0)
+				{
+					++Cache->Revision;
+				}
+			}
+		}
+
+		return *Cache;
+	}
 
 	// Stock belt is the only armor grant above 100. Use the behavior-proven amount
 	// instead of relying on the descriptive ArmorType tag being populated in the BP.
@@ -233,10 +373,11 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 	if (IsOutlined() && CustomDepthMesh == nullptr)
 	{
 		CustomDepthMesh = DuplicateObject<USkeletalMeshComponent>(BodyMesh, this);
-		if (!ensureMsgf(CustomDepthMesh != nullptr,
-			TEXT("Failed to create deferred outline for %s; refusing to register it."),
-			*GetName()))
+		if (CustomDepthMesh == nullptr)
 		{
+			UE_LOG(LogTeamArenaOutline, Warning,
+				TEXT("Failed to create deferred outline for %s; refusing to register it."),
+				*GetName());
 			return;
 		}
 
@@ -268,9 +409,15 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 
 	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
 	{
-		ensureMsgf(false,
-			TEXT("Deferred outline for %s was detached before registration; repairing CharacterMesh0 attachment."),
-			*GetName());
+		// Routine in killcam/instant-replay worlds: demo seeks destroy/respawn actors while OnRep
+		// bursts (bServerOutline is ReplicatedUsing=UpdateOutline) land mid-registration. Log only —
+		// this state is repaired below, and an ensure here is what crashed 328 clients at caps.
+		UE_LOG(LogTeamArenaOutline, Warning,
+			TEXT("Deferred outline for %s was detached before registration; repairing %s attachment (outlined=%d registered=%d demo=%d)."),
+			*GetName(), *BodyMesh->GetName(),
+			IsOutlined() ? 1 : 0,
+			CustomDepthMesh->IsRegistered() ? 1 : 0,
+			(GetWorld() != nullptr && GetWorld()->DemoNetDriver != nullptr) ? 1 : 0);
 
 		// A different outline request may have registered the component between ApplyCharacterData
 		// and this tick. Retire that render state before repairing so no detached primitive survives.
@@ -285,11 +432,11 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 		CustomDepthMesh->RelativeScale3D = FVector(1.0f);
 	}
 
-	ensureMsgf(CustomDepthMesh == nullptr || CustomDepthMesh->GetAttachParent() == BodyMesh,
-		TEXT("Deferred outline for %s could not attach to CharacterMesh0; refusing to register it."),
-		*GetName());
 	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
 	{
+		UE_LOG(LogTeamArenaOutline, Warning,
+			TEXT("Deferred outline for %s could not attach to %s; discarding it."),
+			*GetName(), *BodyMesh->GetName());
 		CustomDepthMesh->DestroyComponent();
 		CustomDepthMesh = nullptr;
 		return;
@@ -1267,8 +1414,113 @@ void ATeamArenaCharacter::FiringInfoUpdated()
     K2_FiringInfoUpdated();
 }
 
+void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
+{
+	Super::PositionUpdated(bShotSpawned);
 
+	// Position rewind is authoritative. Avoid duplicating this short history on
+	// simulated/autonomous clients, which never validate a server hitscan.
+	UWorld* const World = GetWorld();
+	if (Role != ROLE_Authority || World == nullptr || GetCapsuleComponent() == nullptr ||
+		UTCharacterMovement == nullptr)
+	{
+		return;
+	}
 
+	const float WorldTime = World->GetTimeSeconds();
+	FNCSavedCapsulePosture Posture;
+	Posture.Time = WorldTime;
+	Posture.HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	Posture.bFloorSliding = UTCharacterMovement->bIsFloorSliding;
+	Posture.bTeleported = UTCharacterMovement->bJustTeleported;
+	if (Posture.bFloorSliding)
+	{
+		// Convert the movement clock's authoritative slide start to world time so
+		// posture and SavedPositions share one query domain.
+		const float SlideAge = FMath::Max(0.f,
+			UTCharacterMovement->GetCurrentMovementTime() -
+			UTCharacterMovement->FloorSlideTapTime);
+		Posture.SlideStartTime = WorldTime - SlideAge;
+	}
+	SavedCapsulePostures.Add(Posture);
+
+	// Match AUTCharacter::PositionUpdated: retain one sample beyond the age
+	// horizon so interpolation at the oldest legal rewind still has a bracket.
+	while (SavedCapsulePostures.Num() > 1 &&
+		SavedCapsulePostures[1].Time < WorldTime - MaxSavedPositionAge)
+	{
+		SavedCapsulePostures.RemoveAt(0, 1, false);
+	}
+}
+
+bool ATeamArenaCharacter::GetRewindCapsulePosture(float PredictionTime,
+	float& OutHalfHeight, bool& bOutFloorSliding, float& OutSlideElapsed) const
+{
+	OutHalfHeight = GetCapsuleComponent() != nullptr
+		? GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 0.f;
+	bOutFloorSliding = false;
+	OutSlideElapsed = 0.f;
+
+	const UWorld* const World = GetWorld();
+	if (World == nullptr || GetCapsuleComponent() == nullptr ||
+		UTCharacterMovement == nullptr)
+	{
+		return false;
+	}
+
+	if (PredictionTime <= 0.f)
+	{
+		bOutFloorSliding = UTCharacterMovement->bIsFloorSliding;
+		if (bOutFloorSliding)
+		{
+			OutSlideElapsed = FMath::Max(0.f,
+				UTCharacterMovement->GetCurrentMovementTime() -
+				UTCharacterMovement->FloorSlideTapTime);
+		}
+		return true;
+	}
+
+	const float TargetTime = World->GetTimeSeconds() - PredictionTime;
+	for (int32 Index = SavedCapsulePostures.Num() - 1; Index >= 0; --Index)
+	{
+		const FNCSavedCapsulePosture& Older = SavedCapsulePostures[Index];
+		if (Older.Time >= TargetTime)
+		{
+			continue;
+		}
+		if (Index >= SavedCapsulePostures.Num() - 1)
+		{
+			// The requested time is newer than the newest recorded posture.
+			return false;
+		}
+
+		const FNCSavedCapsulePosture& Newer = SavedCapsulePostures[Index + 1];
+		if (Older.bTeleported || Newer.bTeleported ||
+			Older.bFloorSliding != Newer.bFloorSliding)
+		{
+			// A transition/teleport inside the interpolation bracket is not proof
+			// of either posture at the requested sub-frame epoch.
+			return false;
+		}
+
+		const float Alpha = Newer.Time > Older.Time
+			? FMath::Clamp((TargetTime - Older.Time) /
+				(Newer.Time - Older.Time), 0.f, 1.f)
+			: 1.f;
+		OutHalfHeight = FMath::Lerp(Older.HalfHeight, Newer.HalfHeight, Alpha);
+		bOutFloorSliding = Older.bFloorSliding;
+		if (bOutFloorSliding)
+		{
+			const float SlideStartTime = FMath::Lerp(
+				Older.SlideStartTime, Newer.SlideStartTime, Alpha);
+			OutSlideElapsed = FMath::Max(0.f, TargetTime - SlideStartTime);
+		}
+		return true;
+	}
+
+	// The requested epoch predates the retained posture history.
+	return false;
+}
 
 FVector ATeamArenaCharacter::GetRewindLocation(float PredictionTime, AUTPlayerController* DebugViewer)
 {
@@ -1360,6 +1612,25 @@ FVector ATeamArenaCharacter::GetHeadLocation(float PredictionTime)
 	// GetRewindLocation rewinds the actor (capsule) position on the server and returns the current position
 	// on clients / for PredictionTime <= 0, so this one call covers both the rewound and live cases.
 	return GetRewindLocation(PredictionTime) + FVector(0.f, 0.f, HalfHeight - kHeadCapsuleDrop);
+}
+
+void ATeamArenaCharacter::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+
+	// Keep simulated proxies close to their latest replicated position. The Blueprint
+	// default (70ms) leaves the rendered mesh trailing the
+	// actor/capsule long enough to make high-ping targets look artificially easy to
+	// track. This is presentation-only: it does not change movement replication,
+	// collision, rewind history, or any network payload, so mixed 328 peers remain
+	// wire-compatible. PostInitializeComponents runs after Blueprint defaults are
+	// loaded but before initial replication can allocate and cache client prediction
+	// data, so simulated proxies reliably use this value from their first update.
+	if (GetNetMode() == NM_Client && UTCharacterMovement != nullptr)
+	{
+		constexpr float RemotePlayerSmoothLocationTime = 0.050f;
+		UTCharacterMovement->NetworkSimulatedSmoothLocationTime = RemotePlayerSmoothLocationTime;
+	}
 }
 
 void ATeamArenaCharacter::BeginPlay()
@@ -2175,38 +2446,38 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		return;
 	}
 
+	const bool bOverlayRegistered = OverlayMesh != nullptr && OverlayMesh->IsRegistered();
+	UMaterialInterface* const CurrentArmourOverlayMaterial =
+		bOverlayRegistered ? OverlayMesh->GetMaterial(0) : nullptr;
+
 	// --- PERF: Overlay visibility cull ---
 	// OverlayMesh has BoundsScale=15000 set by Epic in UTCharacter::UpdateCharOverlays,
-	// which disables engine frustum/HZB culling on it. We piggy-back on the main mesh
-	// (normal bounds) to cull overlays for characters that are off-screen, occluded,
-	// or beyond this client's cached CharacterOverlayDistance preference. SetVisibility
-	// only fires when state changes to avoid redundant MarkRenderStateDirty.
-	if (OverlayMesh && OverlayMesh->IsRegistered())
+	// which disables engine frustum/HZB culling on it. Piggy-back on the main mesh at
+	// 120 Hz, while sharing local view origins once per frame across every character.
+	// Component/material/config changes and real camera cuts bypass the throttle.
+	if (bOverlayRegistered)
 	{
-		bool bShouldShow = true;
+		UWorld* const World = GetWorld();
+		const FOverlayWorldViewCache& ViewCache = GetOverlayWorldViewCache(World);
+		const float OverlayDistanceSquared =
+			NCPlusPerformanceSettings::GetCharacterOverlayDistanceSquared();
 
-		if (USkeletalMeshComponent* MainMesh = GetMesh())
+		const bool bMeshChanged = LastOverlayVisibilityMesh.Get() != OverlayMesh;
+		const bool bMaterialChanged =
+			bLastOverlayVisibilityHadMaterial != (CurrentArmourOverlayMaterial != nullptr) ||
+			(CurrentArmourOverlayMaterial != nullptr &&
+				LastOverlayVisibilityMaterial.Get() != CurrentArmourOverlayMaterial);
+		const double ElapsedSinceEvaluation =
+			ViewCache.MonotonicTimeSeconds - LastOverlayVisibilityEvalTime;
+		const bool bEvaluationDue = !bOverlayVisibilityStateValid ||
+			ElapsedSinceEvaluation < 0.0 || ElapsedSinceEvaluation >= double(OverlayVisibilityInterval);
+		bool bMaterialIsShield = bLastOverlayMaterialIsShield;
+		if (!bOverlayVisibilityStateValid || bMaterialChanged || bEvaluationDue)
 		{
-			const float SinceRendered = GetWorld()->GetTimeSeconds() - MainMesh->LastRenderTime;
-			if (SinceRendered > 0.1f)
-			{
-				bShouldShow = false;
-			}
-		}
-
-		if (bShouldShow)
-		{
-			if (APlayerController* LocalPC = GetWorld()->GetFirstPlayerController())
-			{
-				FVector ViewLoc;
-				FRotator ViewRot;
-				LocalPC->GetPlayerViewPoint(ViewLoc, ViewRot);
-				if (FVector::DistSquared(GetActorLocation(), ViewLoc)
-					> NCPlusPerformanceSettings::GetCharacterOverlayDistanceSquared())
-				{
-					bShouldShow = false;
-				}
-			}
+			UMaterialInstanceDynamic* const ShieldMID =
+				Cast<UMaterialInstanceDynamic>(CurrentArmourOverlayMaterial);
+			bMaterialIsShield = ShieldMID != nullptr && ShieldMID->Parent != nullptr &&
+				ShieldMID->Parent->GetName().Contains(TEXT("Shield"));
 		}
 
 		// ── ForceModels: optional fallback — HIDE the shield-belt overlay (ncp.HideArmorShield 1) ──
@@ -2215,26 +2486,87 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 		// material bakes the gold and ignores that recolour. Gated on IsEnabled so it also catches
 		// transiently-unrecoloured pawns; other overlays (UDamage, etc.) are untouched, and vanilla
 		// play keeps the stock shield.
-		if (bShouldShow && NCPlusForceModels::IsEnabled() && CVarHideArmorShield.GetValueOnGameThread() != 0)
+		const bool bHideShield = bMaterialIsShield && NCPlusForceModels::IsEnabled() &&
+			CVarHideArmorShield.GetValueOnGameThread() != 0;
+		const bool bViewerChanged = LastOverlayViewerRevision != ViewCache.Revision;
+		const bool bDistanceChanged =
+			LastOverlayVisibilityDistanceSquared != OverlayDistanceSquared;
+		const bool bVisibilityOverridden = bOverlayVisibilityStateValid &&
+			OverlayMesh->IsVisible() != bLastOverlayShouldShow;
+		const bool bCriticalStateChanged = !bLastOverlayVisibilityRegistered || bMeshChanged ||
+			bMaterialChanged || bViewerChanged || bDistanceChanged ||
+			bLastOverlayHideShield != bHideShield || bVisibilityOverridden;
+
+		if (bEvaluationDue || bCriticalStateChanged)
 		{
-			UMaterialInstanceDynamic* ShieldMID = Cast<UMaterialInstanceDynamic>(OverlayMesh->GetMaterial(0));
-			if (ShieldMID && ShieldMID->Parent && ShieldMID->Parent->GetName().Contains(TEXT("Shield")))
+			bool bShouldShow = true;
+
+			if (USkeletalMeshComponent* MainMesh = GetMesh())
+			{
+				const float SinceRendered = World->GetTimeSeconds() - MainMesh->LastRenderTime;
+				if (SinceRendered > 0.1f)
+				{
+					bShouldShow = false;
+				}
+			}
+
+			if (bShouldShow && ViewCache.Viewers.Num() > 0)
+			{
+				bShouldShow = false;
+				const FVector CharacterLocation = GetActorLocation();
+				for (const FOverlayViewerState& Viewer : ViewCache.Viewers)
+				{
+					// Components are shared by split-screen views: keep the overlay when any
+					// local viewer is close enough. A non-finite engine camera origin fails
+					// open, matching the old single-view comparison behaviour.
+					if (Viewer.Location.ContainsNaN() ||
+						FVector::DistSquared(CharacterLocation, Viewer.Location) <= OverlayDistanceSquared)
+					{
+						bShouldShow = true;
+						break;
+					}
+				}
+			}
+
+			if (bShouldShow && bHideShield)
 			{
 				bShouldShow = false;
 			}
-		}
 
-		if (OverlayMesh->IsVisible() != bShouldShow)
-		{
-			OverlayMesh->SetVisibility(bShouldShow, true);
+			if (OverlayMesh->IsVisible() != bShouldShow)
+			{
+				OverlayMesh->SetVisibility(bShouldShow, true);
+			}
+
+			LastOverlayVisibilityEvalTime = ViewCache.MonotonicTimeSeconds;
+			LastOverlayViewerRevision = ViewCache.Revision;
+			LastOverlayVisibilityDistanceSquared = OverlayDistanceSquared;
+			LastOverlayVisibilityMesh = OverlayMesh;
+			LastOverlayVisibilityMaterial = CurrentArmourOverlayMaterial;
+			bOverlayVisibilityStateValid = true;
+			bLastOverlayVisibilityRegistered = true;
+			bLastOverlayVisibilityHadMaterial = CurrentArmourOverlayMaterial != nullptr;
+			bLastOverlayMaterialIsShield = bMaterialIsShield;
+			bLastOverlayHideShield = bHideShield;
+			bLastOverlayShouldShow = bShouldShow;
 		}
+	}
+	else
+	{
+		// Registration can change without replacing the component pointer. Reset the
+		// validity latch so the first registered frame always evaluates immediately.
+		bOverlayVisibilityStateValid = false;
+		bLastOverlayVisibilityRegistered = false;
+		LastOverlayVisibilityMesh = OverlayMesh;
+		LastOverlayVisibilityMaterial.Reset();
+		bLastOverlayVisibilityHadMaterial = false;
+		bLastOverlayMaterialIsShield = false;
+		bLastOverlayHideShield = false;
 	}
 
 	// Armour overlays are normally rebuilt through UpdateArmorOverlay(), where the Force Models tint
 	// is now applied once. Keep only a cheap material-identity guard here for third-party/Blueprint
 	// overlay replacement paths that bypass that virtual hook.
-	UMaterialInterface* const CurrentArmourOverlayMaterial =
-		(OverlayMesh && OverlayMesh->IsRegistered()) ? OverlayMesh->GetMaterial(0) : nullptr;
 	if (CurrentArmourOverlayMaterial != ObservedArmourOverlayMaterial.Get())
 	{
 		ObservedArmourOverlayMaterial = CurrentArmourOverlayMaterial;

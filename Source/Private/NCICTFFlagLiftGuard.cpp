@@ -36,6 +36,26 @@ namespace
 		USceneComponent* Parent = Flag->GetRootComponent()->GetAttachParent();
 		return Parent != nullptr ? Cast<AUTLift>(Parent->GetOwner()) : nullptr;
 	}
+
+	bool RepairHomeFlagLiftAttachment(AUTFlag* Flag)
+	{
+		AUTLift* AttachedLift = GetAttachedLift(Flag);
+		if (Flag == nullptr || Flag->ObjectState != CarriedObjectState::Home
+			|| AttachedLift == nullptr)
+		{
+			return false;
+		}
+
+		// AUTCarriedObject::OnStop attaches to any lift without checking state.
+		// A Home flag can therefore remain physically based on a lift even though
+		// the base/HUD already treat it as returned. MoveToHome detaches, restores
+		// the authoritative base transform, and forces the detachment to replicate.
+		Flag->MoveToHome();
+		UE_LOG(LogNCICTFFlagLiftGuard, Log,
+			TEXT("[ICTFFlagLiftGuard] repaired Home-state %s attached to %s"),
+			*Flag->GetName(), *AttachedLift->GetName());
+		return true;
+	}
 }
 
 ANCICTFFlagLiftGuard::ANCICTFFlagLiftGuard(const FObjectInitializer& ObjectInitializer)
@@ -126,6 +146,9 @@ void ANCICTFFlagLiftGuard::DeactivateGuard()
 	{
 		if (AUTFlag* Flag = FlagPtr.Get())
 		{
+			// A live CVar disable must not strand a Home-state flag in the
+			// guard-only attachment state before stock relationships are restored.
+			RepairHomeFlagLiftAttachment(Flag);
 			Flag->RemoveTickPrerequisiteActor(this);
 		}
 	}
@@ -610,11 +633,33 @@ void ANCICTFFlagLiftGuard::PlaceFlag(AUTFlag* Flag, const FVector& Location,
 	{
 		Flag->DetachRootComponentFromParent(true);
 	}
+	// Detachment also refreshes overlaps and can synchronously return or pick up
+	// the flag. Preserve that newer state and attachment before teleporting it.
+	if (Flag->ObjectState != CarriedObjectState::Dropped)
+	{
+		Flag->ForceNetUpdate();
+		return;
+	}
 	Flag->SetActorLocation(Location, false, nullptr, ETeleportType::TeleportPhysics);
+	// Teleporting can synchronously fire a pickup overlap. A teammate may return
+	// the flag or an enemy may take it before SetActorLocation() unwinds; never
+	// overwrite that newer Home/Held attachment with the stale lift decision.
+	if (Flag->ObjectState != CarriedObjectState::Dropped)
+	{
+		Flag->ForceNetUpdate();
+		return;
+	}
 	if (AttachToLift != nullptr && AttachToLift->GetEncroachComponent() != nullptr)
 	{
 		Flag->AttachToComponent(AttachToLift->GetEncroachComponent(),
 			FAttachmentTransformRules::KeepWorldTransform, NAME_None);
+	}
+	// Attachment can also refresh overlaps. If that changed state, keep the
+	// holder/home path's collision and physics-volume decisions intact.
+	if (Flag->ObjectState != CarriedObjectState::Dropped)
+	{
+		Flag->ForceNetUpdate();
+		return;
 	}
 	if (Flag->Collision != nullptr)
 	{
@@ -667,9 +712,14 @@ void ANCICTFFlagLiftGuard::RescueFlag(AUTFlag* Flag, AUTLift* Lift,
 
 void ANCICTFFlagLiftGuard::UpdateFlag(AUTFlag* Flag)
 {
-	if (Flag == nullptr || Flag->Collision == nullptr
-		|| Flag->ObjectState != CarriedObjectState::Dropped)
+	if (Flag == nullptr || Flag->Collision == nullptr)
 	{
+		FlagStates.Remove(Flag);
+		return;
+	}
+	if (Flag->ObjectState != CarriedObjectState::Dropped)
+	{
+		RepairHomeFlagLiftAttachment(Flag);
 		FlagStates.Remove(Flag);
 		return;
 	}

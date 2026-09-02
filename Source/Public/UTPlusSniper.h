@@ -92,6 +92,11 @@ public:
 	/** Handles Zoom visual toggling */
 	virtual void OnRep_ZoomState_Implementation() override;
 
+	/** Track explicit zoom edges so the held-through-equip repair cannot
+	 *  double-toggle an ordinary zoom-out press. */
+	virtual void StartFire(uint8 FireModeNum) override;
+	virtual void StateChanged() override;
+
 	/** AI Logic */
 	virtual float GetAISelectRating_Implementation() override;
 
@@ -121,4 +126,7 @@ protected:
 
 	UPROPERTY(Transient)
 	uint32 CachedLightningBeamColorGeneration;
+
+	/** Native-only scoped guard; no reflected or replicated state. */
+	bool bDispatchingZoomStart;
 };

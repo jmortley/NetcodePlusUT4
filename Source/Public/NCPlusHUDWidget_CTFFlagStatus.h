@@ -73,6 +73,13 @@ protected:
 	UPROPERTY()
 	float EnemyHasFlagAppearedAt;
 
+	// Constant "+999   A999" beacon reservation measured only when the font or
+	// resolution-derived scale changes, not once per visible flag per frame.
+	UPROPERTY(Transient)
+	class UFont* CachedBeaconMeasureFont;
+	float CachedBeaconMeasureScale;
+	float CachedBeaconTextHeight;
+
 	/** Compute the pop-in scale multiplier given the appeared-at timestamp.
 	 *  Returns 1.5 at t=AppearedAt, eases to 1.0 over 200ms (quad ease-out),
 	 *  stays at 1.0 thereafter. Returns 1.0 if AppearedAt < 0. */

@@ -51,7 +51,9 @@ namespace NCHUDEdit
 		{
 			return TEXT("Weapon Bars");
 		}
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("score_kda") || Alias == TEXT("team_panel"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
+			|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")
+			|| Alias == TEXT("scorebar") || Alias == TEXT("score_kda") || Alias == TEXT("team_panel"))
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
@@ -196,7 +198,9 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 			Row.Colors.Add({ TEXT("color_bg"),     FText::FromString(TEXT("Plate BG")), FLinearColor(0.04f, 0.04f, 0.04f, 0.45f) });
 		}
 		// Portraits + scorebar opt-in to the use_team_color checkbox.
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("scorebar") || Alias == TEXT("team_panel"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
+			|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")
+			|| Alias == TEXT("scorebar") || Alias == TEXT("team_panel"))
 		{
 			Row.bHasTeamColorToggle = true;
 		}
@@ -204,7 +208,9 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		// and a FontSz slider so 4K users can right-size the numbers without
 		// touching pip dimensions. DrawPlayerIcon (Wipeout + Elim) reads both
 		// from the same alias so each team's strip is independent.
-		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue") || Alias == TEXT("team_panel"))
+		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
+			|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")
+			|| Alias == TEXT("team_panel"))
 		{
 			Row.bHasFontPicker = true;
 			Row.bHasFontScale  = true;
@@ -439,6 +445,22 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("Stock team panel (top-left roster) instead of portraits")))
+				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+			]
+		]
+		// Viewer-relative portrait slots: the strips consult Portraits (My Team) /
+		// Portraits (Enemy) instead of the red/blue pair, so a user's placement
+		// follows their team across matches. Applies on the next HUD frame;
+		// persists [NetcodePlus] ViewerRelativePortraits.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SCheckBox)
+			.IsChecked(this, &SNCPlusHUDEditor::GetViewerRelativePortraitsState)
+			.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnViewerRelativePortraitsChanged)
+			.Content()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Team/Enemy portrait slots — Wipeout (follow my team, not red/blue)")))
 				.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
 			]
 		]
@@ -980,6 +1002,33 @@ void SNCPlusHUDEditor::OnStockBottomBarChanged(ECheckBoxState NewState)
 ECheckBoxState SNCPlusHUDEditor::GetStockTeamPanelState() const
 {
 	return FNCPlusHUDLayout::WantsStockTeamPanel() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetBetaTopBarState() const
+{
+	return FNCPlusHUDLayout::WantsBetaTopBar()
+		? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnBetaTopBarChanged(ECheckBoxState NewState)
+{
+	const bool bBeta = (NewState == ECheckBoxState::Checked);
+	FNCPlusHUDLayout::SetBetaTopBar(bBeta);
+	SetStatus(bBeta
+		? TEXT("Team display: Beta top bar enabled (experimental).")
+		: TEXT("Team display: Beta disabled; restored the previous style."));
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetViewerRelativePortraitsState() const
+{
+	return FNCPlusHUDLayout::WantsViewerRelativePortraits() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnViewerRelativePortraitsChanged(ECheckBoxState NewState)
+{
+	// The strips consult WantsViewerRelativePortraits() each DrawHUD frame, so the
+	// remap applies on the next frame with no widget swap.
+	FNCPlusHUDLayout::SetViewerRelativePortraits(NewState == ECheckBoxState::Checked);
 }
 
 void SNCPlusHUDEditor::OnStockTeamPanelChanged(ECheckBoxState NewState)

@@ -20,6 +20,7 @@ public:
 
 	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
+	virtual bool ShouldDrawMinimap() override;
 
 	/** Swap the stock spectator slide-out for UNCPlusSpectatorSlideOut so the
 	 *  weapon-stats panel shows only the instagib rifle (iCTF) with replicated

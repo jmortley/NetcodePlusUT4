@@ -7,6 +7,10 @@
 #include "UTCharacterMovement.h"
 #include "TeamArenaCharacterMovement.generated.h"
 
+class AUTCharacter;
+class UPrimitiveComponent;
+class USceneComponent;
+
 UCLASS()
 class NETCODEPLUS_API UTeamArenaCharacterMovement : public UUTCharacterMovement
 {
@@ -17,7 +21,12 @@ public:
 
     //~ Begin UActorComponent Interface
     virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+    virtual void OnUnregister() override;
     //~ End UActorComponent Interface
+
+    //~ Begin UMovementComponent Interface
+    virtual void SetUpdatedComponent(USceneComponent* NewUpdatedComponent) override;
+    //~ End UMovementComponent Interface
 
     //~ Begin UUTCharacterMovement Interface
     virtual bool CanDodge() override;
@@ -31,7 +40,7 @@ public:
     virtual FVector ComputeSlideVectorUT(const float DeltaTime, const FVector& Delta, const float Time, const FVector& Normal, const FHitResult& Hit) override;
     //~ End UUTCharacterMovement Interface
 
-    /** How often to update team collision ignores (seconds). Default 0.25s */
+    /** How often to detect team collision ignore changes (seconds). Default ~90 Hz. */
     UPROPERTY(EditAnywhere, Category = "Team Arena|Optimization")
     float TeamCollisionUpdateInterval;
 
@@ -44,8 +53,18 @@ public:
 
 protected:
     /** Last time we updated team collision ignores */
-    float LastTeamCollisionUpdateTime;
+    double LastTeamCollisionUpdateTime;
 
-    /** Performs the team collision ignore update (throttled) */
+    /** Actors currently written into the movement component's ignore set. The 90 Hz
+     *  detection pass diffs against this set instead of repeating unchanged writes. */
+    TSet<TWeakObjectPtr<AUTCharacter>> TeamCollisionIgnoredActors;
+
+    /** Component that owns TeamCollisionIgnoredActors; UpdatedComponent can change. */
+    TWeakObjectPtr<UPrimitiveComponent> TeamCollisionIgnoreComponent;
+
+    /** Remove every valid cached ignore from Component, then reset the cache. */
+    void ClearTeamCollisionIgnores(UPrimitiveComponent* Component);
+
+    /** Performs the team collision ignore detection/update (throttled) */
     void UpdateTeamCollisionIgnores();
 };

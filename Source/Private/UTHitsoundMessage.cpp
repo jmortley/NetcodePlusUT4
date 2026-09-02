@@ -34,9 +34,29 @@ void UUTHitsoundMessage::ClientReceive(const FClientReceiveData& ClientData) con
         return;
     }
     const UWorld* World = ClientData.LocalPC->GetWorld();
-    if (World && World->DemoNetDriver && World->DemoNetDriver->IsFastForwarding())
+    if (World && World->DemoNetDriver)
     {
-        return;
+        if (World->DemoNetDriver->IsFastForwarding())
+        {
+            return;
+        }
+
+        // POV gate for replay and live-watch playback. The recorded stream
+        // deliberately carries EVERY attacker's hits (NotifyDamage's
+        // demo-recorder leg) so any POV is watchable later; at playback a
+        // hitsound is the WATCHED player's feedback, so only the current view
+        // target's hits play. IsPlaying() keeps this off live clients, whose
+        // DemoNetDriver is the constantly-recording instant-replay driver;
+        // in-server spectators are already filtered server-side by view target.
+        if (World->DemoNetDriver->IsPlaying())
+        {
+            const APawn* ViewedPawn = Cast<APawn>(ClientData.LocalPC->GetViewTarget());
+            if (ViewedPawn == nullptr || ViewedPawn->PlayerState == nullptr
+                || ViewedPawn->PlayerState != ClientData.RelatedPlayerState_1)
+            {
+                return;
+            }
+        }
     }
 
     // OptionalObject resolves to THIS client's replicated copy of the mutator,

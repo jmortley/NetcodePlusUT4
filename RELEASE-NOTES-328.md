@@ -556,13 +556,19 @@ Removed skin names:
 | `ncp.SkinTiming` | `0` | Weapon-skin diagnostics. |
 | `ncp.AnnouncerTrace` | `0` | Client announcer diagnostics. |
 | `ncp.RocketPrimaryDiag` | `0` | Rocket firing diagnostics. `1` traces M1/primary-fire lifecycle; `2` adds fake-delay, charged-state, and other-mode detail. |
-| `ncp.ClickBufferMs` | `0.0` | Experimental click buffering. Keep at `0`; delayed shots do not yet preserve an aim snapshot. |
+| `ncp.RenderCreditExtraMs` | `15` | Link-beam/Minigun-primary presentation-delay estimate beyond half the server-observed RTT. Independent of the exact-hitscan `ncp.HitAttribRenderExtraMs` estimate. |
+| `ncp.ClickBufferMs` | `0.0` | Experimental Shock-primary-only click buffer. A qualifying release preserves raw release-time aim and fires at legal cooldown expiry; world time, muzzle, target claim, collision, and rewind are not backdated. Effective value is clamped to `0-40ms`, with a separate `50ms` snapshot-age ceiling. Leave off outside controlled dogfood. |
 | `ncp.FlakShellPairDebug` | `0` | Flak fake/authority pairing diagnostics. |
 | `ncp.FlakShellMatchFakeMaxDist` | `1250.0` | Maximum candidate separation. |
 | `ncp.FlakShellMatchFakeMaxPhase` | `0.60` | Maximum inferred ballistic phase separation. |
 | `ncp.FlakShellMatchFakeMinHorizDot` | `0.98` | Minimum horizontal velocity-direction dot. |
 | `ncp.FlakShellMatchFakeMaxPosError` | `256.0` | Maximum phase-compensated position residual. |
 | `ncp.FlakShellMatchFakeMaxVelError` | `200.0` | Maximum velocity residual. |
+
+If a server previously used `ncp.HitAttribRenderExtraMs=15` to tune Link or
+Minigun, remove that override (restoring its `30` default) and set
+`ncp.RenderCreditExtraMs=15` instead. The old CVar now affects only exact-hitscan
+unclaimed-render validation and attribution telemetry.
 
 Current hit-attribution defaults remain:
 
@@ -681,8 +687,9 @@ A server without the weapon-skin catalog rejects every selection even if clients
 4. **The Blueprint cook remains load-bearing.** Native Link, Minigun, Shaft, and local-color code does
    not prove that the shipped paks contain the required parents, state slots, swap arrays, and graph
    calls.
-5. Keep `ncp.ClickBufferMs=0`; buffered shots do not store an aim snapshot and can use a later view
-   rotation.
+5. `ncp.ClickBufferMs` remains off by default and is Shock-primary-only dogfood. It preserves release-time
+   direction but deliberately uses legal-execution-time world state; mixed 328 clients therefore differ
+   unless every participant runs the same dogfood build/configuration.
 6. `ncp.GhostFix` remains known-broken and should remain `0`.
 7. Force Models outline remains Mod.ini-only and is absent from F5.
 8. Authoritative hitsound correction can occasionally produce a double-blip when prediction selected a

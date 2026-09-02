@@ -632,16 +632,49 @@ void FNCPlusHUDLayout::SetStockBottomBar(bool bStock)
 }
 
 // -----------------------------------------------------------------------------
-// Stock team panel toggle + scoreboard opacity (mirror the StockBottomBar plumbing)
+// Beta top-bar override + stock team-panel toggles + scoreboard opacity
+// (mirror the StockBottomBar plumbing)
 // -----------------------------------------------------------------------------
 
 // Cached so the per-frame DrawHUD call never hits FileExists. -1 = unresolved.
+static int8 GBetaTopBarCache = -1;
 static int8 GStockTeamPanelCache = -1;
 static int8 GAbsoluteElimTeamPanelCache = -1;
 
 static bool NCPlusConfigBool(const FString& Value)
 {
 	return Value.Equals(TEXT("True"), ESearchCase::IgnoreCase) || Value.Equals(TEXT("1"));
+}
+
+bool FNCPlusHUDLayout::WantsBetaTopBar()
+{
+	if (GBetaTopBarCache >= 0)
+	{
+		return GBetaTopBarCache != 0;
+	}
+
+	bool bResult = false;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("BetaTopBar"), Val, ModIni)
+		&& !Val.IsEmpty())
+	{
+		bResult = NCPlusConfigBool(Val);
+	}
+	GBetaTopBarCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetBetaTopBar(bool bBeta)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("BetaTopBar"),
+			bBeta ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GBetaTopBarCache = bBeta ? 1 : 0;
 }
 
 bool FNCPlusHUDLayout::WantsStockTeamPanel()
@@ -687,6 +720,40 @@ void FNCPlusHUDLayout::SetStockTeamPanel(bool bStock)
 	// Refresh the cache so the change applies on the very next DrawHUD frame
 	// (the panel draws directly from this value — no widget swap needed).
 	GStockTeamPanelCache = bStock ? 1 : 0;
+}
+
+// Viewer-relative portrait strips (see header). Same cache discipline as
+// GStockTeamPanelCache: -1 = unresolved, resolved once from Mod.ini, refreshed
+// only by the explicit setter.
+static int8 GViewerRelativePortraitsCache = -1;
+
+bool FNCPlusHUDLayout::WantsViewerRelativePortraits()
+{
+	if (GViewerRelativePortraitsCache >= 0)
+	{
+		return GViewerRelativePortraitsCache != 0;
+	}
+	bool bResult = false;
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	FString Val;
+	if (GConfig && GConfig->GetString(TEXT("NetcodePlus"), TEXT("ViewerRelativePortraits"), Val, ModIni) && !Val.IsEmpty())
+	{
+		bResult = NCPlusConfigBool(Val);
+	}
+	GViewerRelativePortraitsCache = bResult ? 1 : 0;
+	return bResult;
+}
+
+void FNCPlusHUDLayout::SetViewerRelativePortraits(bool bViewerRelative)
+{
+	const FString ModIni = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+	if (GConfig)
+	{
+		GConfig->SetString(TEXT("NetcodePlus"), TEXT("ViewerRelativePortraits"),
+			bViewerRelative ? TEXT("True") : TEXT("False"), ModIni);
+		GConfig->Flush(false, ModIni);
+	}
+	GViewerRelativePortraitsCache = bViewerRelative ? 1 : 0;
 }
 
 bool FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
@@ -1049,6 +1116,13 @@ namespace NCPlusHUDAliases
 			// them apart in the visual editor.
 			T.Emplace(TEXT("portrait_red"),     FString(),                                                                       FText::FromString(TEXT("Portraits (Red)")),    true,  ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
 			T.Emplace(TEXT("portrait_blue"),    FString(),                                                                       FText::FromString(TEXT("Portraits (Blue)")),   true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
+			// Viewer-relative portrait slots — consulted INSTEAD of the red/blue pair
+			// when [NetcodePlus] ViewerRelativePortraits is on (HUD editor toggle):
+			// "team" is the local viewer's team, "enemy" the other. Defaults mirror
+			// red/blue (team left, enemy right) so flipping the toggle without ever
+			// dragging these keeps the familiar arrangement.
+			T.Emplace(TEXT("portrait_team"),    FString(),                                                                       FText::FromString(TEXT("Portraits (My Team)")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(-200.f, 30.f));
+			T.Emplace(TEXT("portrait_enemy"),   FString(),                                                                       FText::FromString(TEXT("Portraits (Enemy)")),  true,  ENCPlusHUDAnchor::TopCenter, FVector2D( 200.f, 30.f));
 			// Stock top-left team roster (alternative to the portrait strip; see
 			// NCPlusHUDDrawCall::DrawStockTeamPanel). Draw-call alias → movable, with
 			// Scale / Opacity / Hide honored. Default top-left with a small inset.
@@ -1219,6 +1293,28 @@ namespace NCPlusHUDDrawCall
 		TWeakObjectPtr<UWorld> GStableTextWorld;
 		uint32 GStableTextRevision = 0;
 		uint64 GStableTextUseSerial = 0;
+
+		struct FNCHeldPowerupItemCache
+		{
+			TWeakObjectPtr<AUTInventory> Inventory;
+			FCanvasIcon Icon;
+			FText HUDText;
+			FString HUDString;
+			TWeakObjectPtr<UFont> MeasuredFont;
+			int32 MeasuredScaleKey = MIN_int32;
+			float TextHeight = 0.f;
+		};
+
+		struct FNCHeldPowerupCache
+		{
+			TWeakObjectPtr<UWorld> World;
+			TWeakObjectPtr<AUTCharacter> Character;
+			TArray<FNCHeldPowerupItemCache, TInlineAllocator<4>> Items;
+			float NextInventoryRefreshTime = 0.f;
+			float NextTextRefreshTime = 0.f;
+		};
+
+		TMap<TWeakObjectPtr<AUTHUD>, FNCHeldPowerupCache> GHeldPowerupCaches;
 	}
 
 	void ResolveStableText(UCanvas* Canvas, UFont* Font, const FString& Source,
@@ -1914,7 +2010,7 @@ namespace NCPlusHUDDrawCall
 			{
 				if (!Snapshot.Players.IsValidIndex(PlayerIndex)) continue;
 				const FElimPlusHUDPlayerSnapshot& FramePlayer = Snapshot.Players[PlayerIndex];
-				AUTPlayerState* PS = FramePlayer.PlayerState;
+				AUTPlayerState* PS = FramePlayer.PlayerState.Get();
 				if (!PS || !FramePlayer.bAlive) continue;
 
 				const float BarY = RowY + BarYOffset;
@@ -2163,7 +2259,7 @@ namespace NCPlusHUDDrawCall
 			{
 				if (!Snapshot.Players.IsValidIndex(PlayerIndex)) continue;
 				const FElimPlusHUDPlayerSnapshot& FramePlayer = Snapshot.Players[PlayerIndex];
-				AUTPlayerState* PS = FramePlayer.PlayerState;
+				AUTPlayerState* PS = FramePlayer.PlayerState.Get();
 				if (!PS || !FramePlayer.bAlive) continue;
 
 				// Dead/unknown players were identified by the frame snapshot and are
@@ -2482,26 +2578,71 @@ namespace NCPlusHUDDrawCall
 			return;
 		}
 
-		// Gather held timed powerups (amp / berserk / siphon …) + jump boots. Each
-		// supplies its own HUD icon + remaining-time / charge text via GetHUDText —
-		// the same data the stock powerups widget reads.
-		TArray<AUTInventory*> Items;
-		for (TInventoryIterator<> It(C); It; ++It)
+		UWorld* World = HUD->GetWorld();
+		if (!World) return;
+		const float Now = World->GetRealTimeSeconds();
+		if (GHeldPowerupCaches.Num() > 8)
 		{
-			AUTInventory* Inv = *It;
-			if (Inv == nullptr || Inv->HUDIcon.Texture == nullptr)
+			for (auto It = GHeldPowerupCaches.CreateIterator(); It; ++It)
 			{
-				continue;
-			}
-			if (Cast<AUTTimedPowerup>(Inv) != nullptr || Cast<AUTJumpBoots>(Inv) != nullptr)
-			{
-				Items.Add(Inv);
+				if (!It.Key().IsValid()) It.RemoveCurrent();
 			}
 		}
-		if (Items.Num() == 0)
+		TWeakObjectPtr<AUTHUD> HUDKey(HUD);
+		FNCHeldPowerupCache& Cache = GHeldPowerupCaches.FindOrAdd(HUDKey);
+		if (Cache.World.Get() != World || Cache.Character.Get() != C)
 		{
-			return;
+			Cache = FNCHeldPowerupCache();
+			Cache.World = World;
+			Cache.Character = C;
 		}
+
+		// Inventory ownership changes rarely. Reconcile at 20 Hz instead of walking
+		// the linked inventory list at render rate (often 500+ Hz), preserving each
+		// item's independent text/measurement cache across reconciliations.
+		if (Now >= Cache.NextInventoryRefreshTime)
+		{
+			TArray<FNCHeldPowerupItemCache, TInlineAllocator<4>> Refreshed;
+			Refreshed.Reserve(Cache.Items.Num() + 1);
+			bool bAddedItem = false;
+			for (TInventoryIterator<> It(C); It; ++It)
+			{
+				AUTInventory* Inv = *It;
+				if (!IsValid(Inv) || Inv->HUDIcon.Texture == nullptr
+					|| (Cast<AUTTimedPowerup>(Inv) == nullptr && Cast<AUTJumpBoots>(Inv) == nullptr))
+				{
+					continue;
+				}
+
+				int32 OldIndex = INDEX_NONE;
+				for (int32 Index = 0; Index < Cache.Items.Num(); ++Index)
+				{
+					if (Cache.Items[Index].Inventory.Get() == Inv)
+					{
+						OldIndex = Index;
+						break;
+					}
+				}
+				if (OldIndex != INDEX_NONE)
+				{
+					FNCHeldPowerupItemCache Item = Cache.Items[OldIndex];
+					Item.Icon = Inv->HUDIcon;
+					Refreshed.Add(MoveTemp(Item));
+				}
+				else
+				{
+					FNCHeldPowerupItemCache Item;
+					Item.Inventory = Inv;
+					Item.Icon = Inv->HUDIcon;
+					Refreshed.Add(MoveTemp(Item));
+					bAddedItem = true;
+				}
+			}
+			Cache.Items = MoveTemp(Refreshed);
+			Cache.NextInventoryRefreshTime = Now + 0.05f;
+			if (bAddedItem) Cache.NextTextRefreshTime = 0.f;
+		}
+		if (Cache.Items.Num() == 0) return;
 
 		const float ResScale = FMath::Max(Canvas->ClipY, 1.f) / 1080.f;
 		const float Scale    = ResScale * GetScale(TEXT("powerups"));
@@ -2514,7 +2655,7 @@ namespace NCPlusHUDDrawCall
 		const float IconH  = 36.f * Scale;
 		const float Pad    = 8.f  * Scale;
 		const float RowH   = IconH + Pad;
-		const float BlockH = RowH * Items.Num();
+		const float BlockH = RowH * Cache.Items.Num();
 
 		// Default lower-left; the block grows UPWARD from the anchor so the stock
 		// BottomLeft default reads naturally and never runs off the bottom edge.
@@ -2528,22 +2669,69 @@ namespace NCPlusHUDDrawCall
 		RI.bEnableShadow = true;
 		const FColor TextColor(255, 255, 255, (uint8)FMath::Clamp(FMath::RoundToInt(Op * 255.f), 0, 255));
 
-		for (AUTInventory* Inv : Items)
+		// Remaining seconds / boot charges only need presentation-rate refreshes.
+		// Keep GetHUDText/ToString independent from inventory reconciliation and far
+		// below the render rate; a changed value invalidates just its measurement.
+		if (Now >= Cache.NextTextRefreshTime)
 		{
-			const FCanvasIcon& Ic = Inv->HUDIcon;
+			for (FNCHeldPowerupItemCache& Item : Cache.Items)
+			{
+				AUTInventory* Inv = Item.Inventory.Get();
+				if (!IsValid(Inv)) continue;
+				const FText NewText = Inv->GetHUDText();
+				const FString NewString = NewText.IsEmpty() ? FString() : NewText.ToString();
+				if (!Item.HUDString.Equals(NewString, ESearchCase::CaseSensitive))
+				{
+					Item.HUDText = NewText;
+					Item.HUDString = NewString;
+					Item.MeasuredFont.Reset();
+					Item.MeasuredScaleKey = MIN_int32;
+				}
+			}
+			Cache.NextTextRefreshTime = Now + 0.10f;
+		}
+
+		int32 ValidItemCount = 0;
+		for (const FNCHeldPowerupItemCache& Item : Cache.Items)
+		{
+			if (IsValid(Item.Inventory.Get()) && Item.Icon.Texture != nullptr) ++ValidItemCount;
+		}
+		if (ValidItemCount == 0)
+		{
+			Cache.NextInventoryRefreshTime = 0.f;
+			return;
+		}
+		const float ValidBlockH = RowH * ValidItemCount;
+		Y += BlockH - ValidBlockH;
+
+		const int32 ScaleKey = FMath::RoundToInt(Scale * 10000.f);
+		for (FNCHeldPowerupItemCache& Item : Cache.Items)
+		{
+			AUTInventory* Inv = Item.Inventory.Get();
+			if (!IsValid(Inv) || Item.Icon.Texture == nullptr)
+			{
+				Cache.NextInventoryRefreshTime = 0.f;
+				continue;
+			}
+			const FCanvasIcon& Ic = Item.Icon;
 			const float AspectW = (Ic.VL != 0.f) ? (Ic.UL / Ic.VL) : 1.f;
 			const float IconW = IconH * AspectW;
 
 			Canvas->SetLinearDrawColor(FLinearColor(1.f, 1.f, 1.f, Op));
 			Canvas->DrawTile(Ic.Texture, X, Y, IconW, IconH, Ic.U, Ic.V, Ic.UL, Ic.VL);
 
-			const FText HudText = Inv->GetHUDText();
-			if (Font != nullptr && !HudText.IsEmpty())
+			if (Font != nullptr && !Item.HUDText.IsEmpty())
 			{
-				float XL, YL;
-				Canvas->TextSize(Font, HudText.ToString(), XL, YL, Scale, Scale);
+				if (Item.MeasuredFont.Get() != Font || Item.MeasuredScaleKey != ScaleKey)
+				{
+					float XL = 0.f;
+					Canvas->TextSize(Font, Item.HUDString, XL, Item.TextHeight, Scale, Scale);
+					Item.MeasuredFont = Font;
+					Item.MeasuredScaleKey = ScaleKey;
+				}
 				Canvas->DrawColor = TextColor;
-				Canvas->DrawText(Font, HudText, X + IconW + Pad, Y + (IconH - YL) * 0.5f, Scale, Scale, RI);
+				Canvas->DrawText(Font, Item.HUDText, X + IconW + Pad,
+					Y + (IconH - Item.TextHeight) * 0.5f, Scale, Scale, RI);
 			}
 
 			Y += RowH;
@@ -2849,6 +3037,79 @@ uint32 FNCPlusHUDLayout::GetLiveRevision() { return GLayoutRevision; }
 // consulted by ApplyLayoutToWidgets when an element has no override.
 static TMap<FName, FNCPlusWidgetDefaults> GWidgetDefaults;
 
+namespace
+{
+	struct FNCPlusMinimapOwnership
+	{
+		bool bHasCustomWidget = false;
+		bool bOwnsMinimapState = false;
+		bool bSavedDrawMinimap = false;
+		bool bLastLayoutHidden = true;
+		uint32 LastLayoutRevision = MAX_uint32;
+	};
+
+	// The layout-owned widget uses bDrawMinimap as the user's live toggle, just as
+	// the stock renderer does. Its HUD class suppresses only AUTHUD's later stock
+	// DrawMinimap branch via ShouldDrawMinimap(), so unrelated stock widgets can
+	// continue to read the real flag. Keep ownership here solely to initialize a
+	// newly-added layout entry and restore the prior stock state when it is removed.
+	static TMap<TWeakObjectPtr<AUTHUD>, FNCPlusMinimapOwnership> GMinimapOwnership;
+
+	static void SyncMinimapOwnership(AUTHUD* HUD, const FNCPlusHUDLayout& Layout,
+		uint32 LayoutRevision)
+	{
+		TWeakObjectPtr<AUTHUD> HUDKey(HUD);
+		FNCPlusMinimapOwnership& State = GMinimapOwnership.FindOrAdd(HUDKey);
+		State.bHasCustomWidget = false;
+		for (UUTHUDWidget* Widget : HUD->HudWidgets)
+		{
+			if (Widget && !Widget->IsPendingKill()
+				&& NCPlusHUDAliases::GetAliasForClass(Widget->GetClass()) == TEXT("minimap"))
+			{
+				State.bHasCustomWidget = true;
+				break;
+			}
+		}
+
+		const FNCPlusHUDElement* MinimapElement = Layout.Find(TEXT("minimap"));
+		const bool bLayoutOwnsMinimap = State.bHasCustomWidget && MinimapElement != nullptr;
+		if (bLayoutOwnsMinimap)
+		{
+			if (!State.bOwnsMinimapState)
+			{
+				State.bSavedDrawMinimap = HUD->bDrawMinimap;
+				State.bOwnsMinimapState = true;
+				State.bLastLayoutHidden = MinimapElement->bHidden;
+				HUD->bDrawMinimap = !MinimapElement->bHidden;
+			}
+			else if (State.bLastLayoutHidden != MinimapElement->bHidden)
+			{
+				// A direct layout visibility edit is authoritative. Do not reassert this
+				// on unrelated dirty revisions: ToggleMinimap must remain effective.
+				State.bLastLayoutHidden = MinimapElement->bHidden;
+				HUD->bDrawMinimap = !MinimapElement->bHidden;
+			}
+		}
+		else if (State.bOwnsMinimapState)
+		{
+			HUD->bDrawMinimap = State.bSavedDrawMinimap;
+			State.bOwnsMinimapState = false;
+			State.bLastLayoutHidden = true;
+		}
+		State.LastLayoutRevision = LayoutRevision;
+
+		// A client normally sees one HUD at a time. Bound stale weak entries across
+		// repeated map travel without putting a cleanup walk on the steady-state path.
+		if (GMinimapOwnership.Num() > 8)
+		{
+			for (auto It = GMinimapOwnership.CreateIterator(); It; ++It)
+			{
+				if (!It.Key().IsValid()) It.RemoveCurrent();
+			}
+		}
+	}
+}
+
 // =============================================================================
 // Reflection helpers — UUTHUDWidget_WeaponBar's positioning fields are declared
 // `protected` in C++ even though they're UPROPERTYs. We can't access them via
@@ -2918,6 +3179,14 @@ void CaptureWidgetDefaults(AUTHUD* HUD)
 void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 {
 	if (!HUD) return;
+	const bool bLayoutDirty = FNCPlusHUDLayout::IsLiveDirty();
+	const TWeakObjectPtr<AUTHUD> HUDKey(HUD);
+	const uint32 LayoutRevision = FNCPlusHUDLayout::GetLiveRevision();
+	const FNCPlusMinimapOwnership* MinimapState = GMinimapOwnership.Find(HUDKey);
+	if (!MinimapState || MinimapState->LastLayoutRevision != LayoutRevision)
+	{
+		SyncMinimapOwnership(HUD, Layout, LayoutRevision);
+	}
 
 	// Fast path: layout unchanged since last apply → nothing to do.
 	// Old condition gated the fast path on `Layout.Elements.Num() == 0`,
@@ -2928,7 +3197,7 @@ void ApplyLayoutToWidgets(AUTHUD* HUD, const FNCPlusHUDLayout& Layout)
 	// true, so the first frame after a mutation re-applies. After that,
 	// widget state already reflects the layout — re-asserting the same
 	// values is wasted work.
-	if (!FNCPlusHUDLayout::IsLiveDirty()) return;
+	if (!bLayoutDirty) return;
 
 	int32 NumApplied = 0;
 	for (UUTHUDWidget* W : HUD->HudWidgets)

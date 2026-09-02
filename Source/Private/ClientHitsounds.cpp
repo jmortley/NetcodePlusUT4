@@ -16,6 +16,8 @@
 #include "TimerManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
+#include "ARFilter.h"
+#include "AssetData.h"
 #include "AssetRegistryModule.h"
 #include "IAssetRegistry.h"
 #include "HAL/IConsoleManager.h"
@@ -180,7 +182,14 @@ void AClientHitsounds::RefreshCatalog()
 		FAssetRegistryModule& AssetRegistryModule =
 			FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		TArray<FAssetData> PackAssets;
-		AssetRegistryModule.Get().GetAssetsByClass(UHitsoundPack::StaticClass()->GetFName(), PackAssets, true);
+		FARFilter PackFilter;
+		PackFilter.ClassNames.Add(UHitsoundPack::StaticClass()->GetFName());
+		PackFilter.bRecursiveClasses = true;
+		// UE 4.15's convenience class query also includes live UObjects and asks
+		// each one for asset-registry tags. Catalog discovery only needs cooked
+		// entries, so keep audio lookup off the live-object/resource-size path.
+		PackFilter.bIncludeOnlyOnDiskAssets = true;
+		AssetRegistryModule.Get().GetAssets(PackFilter, PackAssets);
 
 		for (const FAssetData& Asset : PackAssets)
 		{

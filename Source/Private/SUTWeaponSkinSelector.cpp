@@ -27,6 +27,43 @@
 /** Main-menu fallback populated from the last in-game inventory. */
 static TArray<FNetcodePlusWeaponInfo> CachedWeapons;
 
+static FString GetWeaponSkinDisplayName(const UUTWeaponSkin* Skin)
+{
+	if (Skin == nullptr)
+	{
+		return FString();
+	}
+
+	// The Ghost assets intentionally clone the Invisible assets so they inherit
+	// the proven weapon tag/type and stock third-person material. UUTWeaponSkin is
+	// a plain DataAsset and the editor bridge cannot safely rewrite its fields, so
+	// give those five exact public assets their intended F5 labels here.
+	const FName AssetName = Skin->GetFName();
+	if (AssetName == FName(TEXT("GhostBio")))
+	{
+		return TEXT("Ghost Bio Rifle");
+	}
+	if (AssetName == FName(TEXT("GhostFlak")))
+	{
+		return TEXT("Ghost Flak Cannon");
+	}
+	if (AssetName == FName(TEXT("GhostIGRifle")))
+	{
+		return TEXT("Ghost Instagib Rifle");
+	}
+	if (AssetName == FName(TEXT("GhostLG")))
+	{
+		return TEXT("Ghost Lightning Gun");
+	}
+	if (AssetName == FName(TEXT("GhostLinkElim")))
+	{
+		return TEXT("Ghost Link Gun");
+	}
+
+	const FString AuthoredName = Skin->DisplayName.ToString();
+	return AuthoredName.IsEmpty() ? Skin->GetName() : AuthoredName;
+}
+
 void SUTWeaponSkinSelector::Construct(const FArguments& InArgs)
 {
 	PlayerOwner = InArgs._PlayerOwner;
@@ -578,8 +615,8 @@ void SUTWeaponSkinSelector::GatherSkins()
 	{
 		Pair.Value.Sort([](UUTWeaponSkin& A, UUTWeaponSkin& B)
 		{
-			FString NameA = A.DisplayName.IsEmpty() ? A.GetName() : A.DisplayName.ToString();
-			FString NameB = B.DisplayName.IsEmpty() ? B.GetName() : B.DisplayName.ToString();
+			const FString NameA = GetWeaponSkinDisplayName(&A);
+			const FString NameB = GetWeaponSkinDisplayName(&B);
 			return NameA < NameB;
 		});
 	}
@@ -874,8 +911,7 @@ void SUTWeaponSkinSelector::RebuildSkinList()
 		const int32 SkinIdx = i + 1;
 		FLinearColor BgColor = (CurrentSkin == SkinIdx) ? FLinearColor(0.15f, 0.6f, 0.15f, 1.0f) : FLinearColor(0.08f, 0.08f, 0.08f, 1.0f);
 
-		FString DisplayStr = Skin->DisplayName.ToString();
-		if (DisplayStr.IsEmpty()) DisplayStr = Skin->GetName();
+		FString DisplayStr = GetWeaponSkinDisplayName(Skin);
 		if (!Skin->ItemAuthor.IsEmpty())
 		{
 			DisplayStr += FString::Printf(TEXT("  (by %s)"), *Skin->ItemAuthor);

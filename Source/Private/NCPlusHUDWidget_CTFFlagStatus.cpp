@@ -20,6 +20,9 @@ UNCPlusHUDWidget_CTFFlagStatus::UNCPlusHUDWidget_CTFFlagStatus(const FObjectInit
 	, EnemyAnimationAlpha(0.f)
 	, YouHaveFlagAppearedAt(-1.f)
 	, EnemyHasFlagAppearedAt(-1.f)
+	, CachedBeaconMeasureFont(nullptr)
+	, CachedBeaconMeasureScale(-1.f)
+	, CachedBeaconTextHeight(0.f)
 {
 }
 
@@ -155,9 +158,16 @@ void UNCPlusHUDWidget_CTFFlagStatus::DrawFlagWorld(AUTCTFGameState* GameState,
 
 		// don't overlap player beacon
 		UFont* TinyFont = AUTHUD::StaticClass()->GetDefaultObject<AUTHUD>()->TinyFont;
-		float X, Y;
 		const float Scale = Canvas->ClipX / 1920.f;
-		Canvas->TextSize(TinyFont, FString("+999   A999"), X, Y, Scale, Scale);
+		if (CachedBeaconMeasureFont != TinyFont || !FMath::IsNearlyEqual(CachedBeaconMeasureScale, Scale))
+		{
+			float X = 0.f;
+			Canvas->TextSize(TinyFont, FString(TEXT("+999   A999")), X,
+				CachedBeaconTextHeight, Scale, Scale);
+			CachedBeaconMeasureFont = TinyFont;
+			CachedBeaconMeasureScale = Scale;
+		}
+		const float Y = CachedBeaconTextHeight;
 		if (!bDrawEdgeArrow)
 		{
 			const float MinDistSq = FMath::Square(0.06f * GetCanvas()->ClipX);

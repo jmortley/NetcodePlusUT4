@@ -15,8 +15,9 @@ class AUTGameState;
  * This state handles the alt-fire "hold to load multiple rockets" behavior
  * using your transactional networking model:
  * - Client holds button -> loads rockets locally with animations
- * - Client releases (or grace timer fires) -> sends ONE RPC with all loaded rockets
- * - Server validates and fires
+ * - Client releases (or grace timer fires) -> commits the completed load once
+ * - The 328 client intentionally retains both the stock and fixed Stop RPC families;
+ *   this state makes their duplicate release notifications idempotent
  *
  * Key differences from stock:
  * - NO auto-release due to desyncing (only grace timer after full load)
@@ -47,6 +48,28 @@ public:
     UPROPERTY()
     AUTPlusWeap_RocketLauncher* RocketLauncher;
 
+    /**
+     * Set by the first release notification for the current charge cycle.
+     * This is local state-machine bookkeeping, not replicated authority data.
+     */
+    bool bReleaseRequested;
+
+    /**
+     * Set before release performs any firing or state-transition side effects.
+     * It prevents the stock and fixed Stop RPC families from committing twice.
+     */
+    bool bReleaseCommitted;
+
+    /**
+     * True only while EndLoadRocket() is executing from LoadTimer(). A Stop can
+     * arrive synchronously through ammo/bot callbacks during that call; it records
+     * release intent but defers the commit until EndLoadRocket() has returned.
+     */
+    bool bCompletingLoadTimer;
+
+    /** Suppresses repeated diagnostic lines from identical Stop retries. */
+    bool bDuplicateReleaseLogged;
+
     // === TIMER HANDLES ===
 
     /** Timer for loading each rocket */
@@ -73,6 +96,12 @@ public:
     /** Called by RefireCheckTimer to handle continued firing after burst completes */
     virtual void RefireCheckTimer() override;
 
+    /**
+     * Resume a release only after the weapon watchdog has proved that this state
+     * owns no load, grace, burst, or refire timer. This is not a normal Stop path.
+     */
+    void RecoverWedgedRelease();
+
     /** Override FireShot to route through transactional system */
     //virtual void FireShot() override;
 
@@ -96,6 +125,16 @@ public:
 protected:
     /** Helper to get the weapon as UTWeaponFix for transactional calls */
     AUTWeaponFix* GetWeaponFix() const;
+
+    /**
+     * Resolve a previously latched release. A release with no completed rocket
+     * waits for the already-armed first load callback; later incomplete loads
+     * are never promoted and are cancelled before the completed volley fires.
+     */
+    void CommitRelease();
+
+    /** Return idle without ActiveState auto-firing, then retry a still-held primary safely. */
+    void ExitToActiveAndAttemptBufferedPrimary();
 
     /** Clean up all timers */
     void ClearAllTimers();

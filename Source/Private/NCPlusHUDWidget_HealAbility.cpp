@@ -107,6 +107,9 @@ UNCPlusHUDWidget_HealAbility::UNCPlusHUDWidget_HealAbility(const FObjectInitiali
 	Origin             = FVector2D(0.5f, 1.0f);   // pivot bottom-center
 	DesignedResolution = 1080.f;
 	bShouldKickBack    = false;
+	// Keep absent optional widgets out of AUTHUD's PreDraw/PostDraw loop. A live
+	// layout entry overrides this through ApplyLayoutToWidgets.
+	bHidden            = true;
 	CachedBindingLayoutRevision = MAX_uint32;
 	NextBindingRefreshTime = 0.f;
 }

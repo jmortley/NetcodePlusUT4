@@ -53,6 +53,18 @@ ANCPlusCTFHUD::ANCPlusCTFHUD(const FObjectInitializer& ObjectInitializer)
 	HudWidgetClasses.Add(TEXT("/Script/NetcodePlus.NCPlusHUDWidget_CTFFlagStatus"));
 }
 
+bool ANCPlusCTFHUD::ShouldDrawMinimap()
+{
+	// A live NCPlus entry owns minimap presentation even when layout-hidden.
+	// Suppress only AUTHUD's post-widget stock renderer; bDrawMinimap remains the
+	// real ToggleMinimap state for the custom widget and other stock HUD gates.
+	if (FNCPlusHUDLayout::GetLive().Find(TEXT("minimap")) != nullptr)
+	{
+		return false;
+	}
+	return Super::ShouldDrawMinimap();
+}
+
 void ANCPlusCTFHUD::AddSpectatorWidgets()
 {
 	Super::AddSpectatorWidgets();

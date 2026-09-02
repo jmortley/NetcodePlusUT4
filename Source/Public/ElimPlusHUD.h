@@ -12,12 +12,12 @@
 
 class AElimPlusStatsReplicator;
 
-/** One player's render-frame state. Raw UObject pointers are consumed only by the
- * DrawHUD call that rebuilt the snapshot; nothing here is replicated or serialized. */
+/** One player's client-presentation state. UObject references are weak because
+ * remote state may now survive for one 120 Hz sample interval; nothing is replicated. */
 struct FElimPlusHUDPlayerSnapshot
 {
-	AUTPlayerState* PlayerState = nullptr;
-	AUTCharacter* Character = nullptr;
+	TWeakObjectPtr<AUTPlayerState> PlayerState;
+	TWeakObjectPtr<AUTCharacter> Character;
 	uint8 TeamNum = 255;
 	bool bAlive = false;
 	int32 Health = 0;
@@ -34,7 +34,7 @@ struct FElimPlusHUDSnapshot
 	AUTPlayerState* ScorerPS = nullptr;
 	AUTPlayerState* LocalPS = nullptr;
 	int32 AliveCountTeam[2] = { 0, 0 };
-	AUTPlayerState* SoleSurvivor[2] = { nullptr, nullptr };
+	TWeakObjectPtr<AUTPlayerState> SoleSurvivor[2];
 
 	void ResetFrame(int32 ExpectedPlayers)
 	{
@@ -45,7 +45,8 @@ struct FElimPlusHUDSnapshot
 		ScorerPS = nullptr;
 		LocalPS = nullptr;
 		AliveCountTeam[0] = AliveCountTeam[1] = 0;
-		SoleSurvivor[0] = SoleSurvivor[1] = nullptr;
+		SoleSurvivor[0] = nullptr;
+		SoleSurvivor[1] = nullptr;
 	}
 };
 
@@ -56,6 +57,7 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 
 	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
+	virtual bool ShouldDrawMinimap() override;
 	virtual FLinearColor GetBaseHUDColor() override;
 
 	/** Swap the stock spectator slide-out for UNCPlusSpectatorSlideOut so the
@@ -101,8 +103,8 @@ class NETCODEPLUS_API AElimPlusHUD : public AUTHUD
 	void DrawPreMatchTeamPreview();
 
 private:
-	/** Rebuild volatile pawn/vitals state every call, but retain portrait sorting while
-	 * the exact roster/team/spectator-order signature remains unchanged. */
+	/** Cache roster/order and remote presentation at 120 Hz. The local player is
+	 * refreshed every render frame, as are all Canvas animation/draw calculations. */
 	void BuildPlayerSnapshot(AUTGameState* GS, AUTPlayerState* ScorerPS);
 	AElimPlusStatsReplicator* FindStatsReplicator(UWorld* World);
 	void DrawPlayerIconFromSnapshot(AUTPlayerState* PlayerState, bool bPlayerAlive,
@@ -124,6 +126,31 @@ private:
 	TArray<int32> CachedPortraitOrder;
 	TWeakObjectPtr<UWorld> CachedSnapshotWorld;
 	TWeakObjectPtr<AUTGameState> CachedSnapshotGameState;
+	TWeakObjectPtr<AUTPlayerState> CachedSnapshotScorer;
+	int32 CachedSnapshotPlayerArrayNum = INDEX_NONE;
+	float NextSnapshotSampleTime = 0.f;
+	static constexpr float SnapshotSampleInterval = 1.f / 120.f;
+
+	// -1 preserves the complete-card public path. The portrait strip selects
+	// 0..4 to submit one resource/layer pass for every card.
+	int32 ActivePortraitDrawPass = -1;
+	struct FElimPortraitPassState
+	{
+		FCanvasIcon CharIcon;
+		FName Alias;
+		uint8 TeamNum = 255;
+		float Opacity = 1.f;
+		float X = 0.f;
+		float Y = 0.f;
+		float Width = 0.f;
+		float Height = 0.f;
+		TWeakObjectPtr<AUTGameState> GameState;
+		FLinearColor TeamColor = FLinearColor::White;
+		float TextScale = 1.f;
+		UFont* PipFont = nullptr;
+		float PipFontExtra = 1.f;
+	};
+	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPortraitPassState> PortraitPassStateByPS;
 
 	// Per-HUD lookup state avoids live/replay or split-screen worlds evicting one
 	// another from a translation-unit static replicator cache.
@@ -176,6 +203,7 @@ private:
 		int32 EloKeyDelta = MIN_int32;
 		FText  EloText;
 		float  EloWidth   = 0.f;
+		float  EloHeight  = 0.f;
 
 		const UFont* HpFont = nullptr;
 		int32 HpKeyHP = MIN_int32;
@@ -183,6 +211,18 @@ private:
 		FText  HpText;
 		float  HpWidth  = 0.f;
 		float  HpHeight = 0.f;
+
+		// Beta cards render health and armor as separately styled lines. Keep
+		// their unscaled extents so fitting is arithmetic-only on unchanged frames.
+		const UFont* BetaVitalsFont = nullptr;
+		int32 BetaHpKey = MIN_int32;
+		int32 BetaArKey = MIN_int32;
+		FText BetaHpText;
+		FText BetaArText;
+		float BetaHpWidth = 0.f;
+		float BetaHpHeight = 0.f;
+		float BetaArWidth = 0.f;
+		float BetaArHeight = 0.f;
 	};
 	TMap<TWeakObjectPtr<AUTPlayerState>, FElimPipCache> PipCacheByPS;
 
