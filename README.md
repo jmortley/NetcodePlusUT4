@@ -192,6 +192,7 @@ cheat-gated.
 | `ncp.HitscanSlideSearchExtraMs` | 15 | Server-side. One extra hitscan time-search rung (ms, clamped 0-15, zero padding) granted only when server posture history proves the target was mid-slide at that epoch. 0 = standard ±45ms search only. |
 | `ncp.KillcamAudioGuard` | 1 | Client. Pause looping audio owned by the *hidden* killcam world (the phantom weapon/ambient loop fix). 0 = stock behavior. |
 | `ncp.FriendlyTargetProbeHz` | 240 | Client. Rate cap on the crosshair friendly/name trace (stock traced every rendered frame). Camera cuts / view-target changes / big pose jumps refresh instantly. 0 = stock every-frame probing; range 30-1000. |
+| `ncp.HighPollingMouseCoalesce` | 0 | Client, opt-in (launcher → *Experimental: batch high-polling mouse input*). Sums captured gameplay mouse motion and delivers it once per rendered frame with identical integer deltas + sample count, skipping Slate's per-packet UI routing. A wash at 1 kHz; a real game-thread saving at 4-8 kHz. Menus/editor/cursor/focus-loss keep stock behavior. |
 
 > ⚠️ **Don't enable `ncp.GhostFix`.** It's a parked experiment (0 by default) — the current version breaks
 > consecutive held weapon switches. A pawn-level v2 is pending; leave it at `0`.
