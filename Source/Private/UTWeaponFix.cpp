@@ -40,6 +40,7 @@
 #include "ClientHitsounds.h"
 #include "EngineUtils.h"
 #include "UTPlayerState.h"
+#include "UTBot.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogUTWeaponFix, Log, All);
@@ -76,6 +77,17 @@ static FORCEINLINE bool FireDbg()
 {
     return CVarFireDebug.GetValueOnGameThread() > 0;
 }
+
+static TAutoConsoleVariable<int32> CVarFireProvenance(
+    TEXT("ncp.FireProvenance"), 0,
+    TEXT("328 firing diagnostics: stock sync, request ownership, dropped Stops and projectile spawn results. 0=off."),
+    ECVF_Default);
+
+static bool FireProvenance() { return CVarFireProvenance.GetValueOnGameThread() > 0; }
+static const TCHAR* const FireReconciliationBuild = TEXT("328-fire-auth-r2");
+// Actual RPC funnel markers; stock also sets bNetDelayedShot.
+static TSet<const AUTWeaponFix*> FixedRetryWeapons;
+static TSet<const AUTWeaponFix*> StockSyncWeapons;
 
 // Rocket primary diagnostics only. This intentionally changes no firing state, timers,
 // timestamps, or RPC payloads. Level 1 traces the M1 transaction/cadence lifecycle; level 2
@@ -133,7 +145,7 @@ static constexpr float MaxBufferedAimAgeSeconds = 0.050f;
 // object layout or relying on FRotator::IsZero() as a sentinel.
 static TSet<const AUTWeaponFix*> ScopedTransactionalAimWeapons;
 
-/** One server-only fire request accepted while this weapon is still equipping.
+/** One server-only accepted request, immediate or waiting for state completion.
  *  Kept outside AUTWeaponFix so the 328 native UObject layout does not change. */
 struct FDeferredEquipFireContext
 {
@@ -149,6 +161,12 @@ struct FDeferredEquipFireContext
 	TWeakObjectPtr<AUTCharacter> Owner;
 	TWeakObjectPtr<AUTCharacter> ClientHitChar;
 	FVector ClientHeadOffset = FVector::ZeroVector;
+    const TCHAR* Source = TEXT("FixedInitial");
+    bool bDeferredEquip = false;
+    bool bDeferredState = false;
+    bool bDispatchReady = false;
+    TWeakObjectPtr<UUTWeaponState> ExpectedFiringState;
+    TWeakObjectPtr<UUTWeaponState> WaitingState;
 };
 
 static TMap<TWeakObjectPtr<AUTWeaponFix>, FDeferredEquipFireContext> DeferredEquipFireContexts;
@@ -163,6 +181,71 @@ static uint32 AllocateDeferredEquipFireGeneration()
 		NextDeferredEquipFireGeneration = 1;
 	}
 	return Result;
+}
+
+// Synchronous observation only. A timestamp is not a spawn ledger; the spawn
+// hook below records actual SpawnActor results independently of FireShot.
+struct FNCFireObservation;
+static TMap<const AUTWeaponFix*, FNCFireObservation*> FireObservations;
+struct FNCFireObservation
+{
+    const AUTWeaponFix* Weapon;
+    const TCHAR* Source;
+    uint8 Mode;
+    int32 Event;
+    uint32 Generation;
+    int32 Attempts = 0;
+    int32 Spawns = 0;
+    FNCFireObservation* Previous = nullptr;
+    bool bEnabled;
+    FNCFireObservation(const AUTWeaponFix* InWeapon, const TCHAR* InSource,
+        uint8 InMode, int32 InEvent, uint32 InGeneration)
+        : Weapon(InWeapon), Source(InSource), Mode(InMode), Event(InEvent),
+          Generation(InGeneration), bEnabled(FireProvenance())
+    {
+        if (bEnabled)
+        {
+            FNCFireObservation** Existing = FireObservations.Find(Weapon);
+            Previous = Existing ? *Existing : nullptr;
+            FireObservations.Add(Weapon, this);
+        }
+    }
+    ~FNCFireObservation()
+    {
+        if (bEnabled)
+        {
+            if (Previous) FireObservations.Add(Weapon, Previous);
+            else FireObservations.Remove(Weapon);
+        }
+    }
+};
+
+static void ObserveFireProjectile(AUTWeaponFix* Weapon, uint8 Mode,
+    UClass* ProjectileClass, AUTProjectile* Projectile, const TCHAR* Result)
+{
+    if (!FireProvenance() || Weapon->Role != ROLE_Authority) return;
+    FNCFireObservation** Entry = FireObservations.Find(Weapon);
+    FNCFireObservation* Observation = Entry ? *Entry : nullptr;
+    if (Observation && Observation->Mode != Mode) Observation = nullptr;
+    if (Observation)
+    {
+        ++Observation->Attempts;
+        if (Projectile) ++Observation->Spawns;
+    }
+    // Charged direct fire intentionally bypasses AUTWeaponFix::FireShot. It is
+    // stock-managed, and has no numbered transactional-primary authorization.
+    const TCHAR* Source = Observation ? Observation->Source
+        : Cast<UUTWeaponStateFiringChargedRocket_Transactional>(Weapon->GetCurrentState())
+            ? TEXT("ChargedDirect") : TEXT("UnscopedProjectile");
+    UE_LOG(LogUTWeaponFix, Warning,
+        TEXT("[NCFireAuth] SPAWN source=%s weapon=%s mode=%d event=%d generation=%u result=%s class=%s projectile=%s pitch=%.3f yaw=%.3f roll=%.3f"),
+        Source, *Weapon->GetName(), Mode, Observation ? Observation->Event : INDEX_NONE,
+        Observation ? Observation->Generation : 0, Result,
+        ProjectileClass ? *ProjectileClass->GetName() : TEXT("null"),
+        Projectile ? *Projectile->GetName() : TEXT("null"),
+        Projectile ? Projectile->GetActorRotation().Pitch : 0.f,
+        Projectile ? Projectile->GetActorRotation().Yaw : 0.f,
+        Projectile ? Projectile->GetActorRotation().Roll : 0.f);
 }
 
 static FORCEINLINE bool IsShockPrimaryClickBuffer(AUTWeaponFix* Weapon, uint8 FireModeNum)
@@ -1582,7 +1665,8 @@ void AUTWeaponFix::BeginPlay()
                 Layout += FString::Printf(TEXT("%smode%d=%s"), (i > 0) ? TEXT(" ") : TEXT(""), i,
                     FiringState[i] ? *FiringState[i]->GetClass()->GetName() : TEXT("null"));
             }
-            UE_LOG(LogUTWeaponFix, Warning, TEXT("[StateLayout] %s: %s"), *LayoutClassName.ToString(), *Layout);
+            UE_LOG(LogUTWeaponFix, Warning, TEXT("[StateLayout] %s: %s firingBuild=%s compiled=%s %s"), *LayoutClassName.ToString(), *Layout,
+                FireReconciliationBuild, ANSI_TO_TCHAR(__DATE__), ANSI_TO_TCHAR(__TIME__));
         }
     }
 }
@@ -2491,18 +2575,237 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 }
 
 
-void AUTWeaponFix::ClearDeferredEquipFireContext(bool bInvalidateGeneration)
+bool AUTWeaponFix::RequiresTransactionalRequest() const
+{
+    const UWorld* World = GetWorld();
+    if (Role != ROLE_Authority || GetNetMode() == NM_Standalone
+        || (World && World->DemoNetDriver && World->DemoNetDriver->IsPlaying()))
+    {
+        return false;
+    }
+    // Remote human players are not bots. A temporarily unpossessed remote pawn
+    // also cannot manufacture requests from held bits.
+    return !UTOwner || (!UTOwner->IsLocallyControlled()
+        && Cast<AUTBot>(UTOwner->Controller) == nullptr);
+}
+
+bool AUTWeaponFix::HasAcceptedTransactionalRequest(uint8 FireModeNum) const
+{
+    const TWeakObjectPtr<AUTWeaponFix> Key(const_cast<AUTWeaponFix*>(this));
+    const FDeferredEquipFireContext* Context = DeferredEquipFireContexts.Find(Key);
+    const uint32* Generation = DeferredEquipFireGenerations.Find(Key);
+    return Context && Generation && Context->Generation == *Generation
+        && !Context->bShotDispatched && Context->FireMode == FireModeNum
+        && UTOwner && !UTOwner->IsDead() && !UTOwner->IsPendingKillPending()
+        && Context->Owner.Get() == UTOwner && UTOwner->GetWeapon() == this
+        && (!UTOwner->GetPendingWeapon() || UTOwner->GetPendingWeapon() == this)
+        && !IsPendingKillPending() && FiringState.IsValidIndex(FireModeNum)
+        && Context->ExpectedFiringState.Get() == FiringState[FireModeNum]
+        && (Context->bDispatchReady
+            || (Context->bDeferredEquip && EquippingState
+                && Context->WaitingState.Get() == EquippingState
+                && EquippingState->PendingFireSequence == FireModeNum));
+}
+
+void AUTWeaponFix::GotoState(UUTWeaponState* NewState)
+{
+    // Equip completion, stock spin-down and charged/watchdog exits use
+    // GotoActiveState. Commit the exact retained request before scanning held bits:
+    // another mode's latch must not steal an accepted shot after its release.
+    if (NewState == ActiveState && CompleteAcceptedDeferredFire(CurrentState)) return;
+    // Stock ActiveState enters FiringState directly, bypassing BeginFiringSequence.
+    // Denying entry here leaves ActiveState usable and never edits pawn input.
+    if (RequiresTransactionalRequest()
+        && Cast<UUTWeaponStateFiring_Transactional>(NewState)
+        && (!FiringState.IsValidIndex(CurrentFireMode)
+            || FiringState[CurrentFireMode] != NewState
+            || !HasAcceptedTransactionalRequest(CurrentFireMode)))
+    {
+        if (FireProvenance())
+        {
+            UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[NCFireAuth] BLOCK_ENTRY source=%s weapon=%s mode=%d state=%s pending0=%d pending1=%d"),
+                StockSyncWeapons.Contains(this) ? TEXT("StockSync") : TEXT("StateAutoNoContext"),
+                *GetName(), CurrentFireMode, *NewState->GetClass()->GetName(),
+                UTOwner && UTOwner->IsPendingFire(0), UTOwner && UTOwner->IsPendingFire(1));
+        }
+        // ActiveState returns after its first attempted transition. Continue its
+        // bounded pending-mode scan so a stale transactional bit cannot starve
+        // charged fire, zoom, spin-up or another legitimate accepted mode.
+        if (CurrentState == ActiveState && UTOwner && UTOwner->GetWeapon() == this)
+        {
+            const int32 NumModes = FMath::Min(int32(GetNumFireModes()), FiringState.Num());
+            for (int32 Mode = 0; Mode < NumModes; ++Mode)
+            {
+                UUTWeaponState* Candidate = FiringState[Mode];
+                if (Candidate && Candidate != NewState && UTOwner->IsPendingFire(Mode)
+                    && HasAmmo(Mode) && (!Cast<UUTWeaponStateFiring_Transactional>(Candidate)
+                        || HasAcceptedTransactionalRequest(Mode)))
+                {
+                    CurrentFireMode = Mode;
+                    Super::GotoState(Candidate);
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    const FDeferredEquipFireContext* Waiting = DeferredEquipFireContexts.Find(TWeakObjectPtr<AUTWeaponFix>(this));
+    const bool bLeavingReservation = Waiting && Waiting->bDeferredState
+        && !Waiting->bShotDispatched && CurrentState == Waiting->WaitingState.Get()
+        && NewState != CurrentState && NewState != Waiting->ExpectedFiringState.Get()
+        && !(NewState == ActiveState && Waiting->bDispatchReady);
+    if (NewState == InactiveState || NewState == UnequippingState || bLeavingReservation)
+    {
+        ClearDeferredEquipFireContext();
+    }
+    Super::GotoState(NewState);
+}
+
+void AUTWeaponFix::RecoverUnauthorizedTransactionalEntry()
+{
+    if (!UTOwner || !Cast<UUTWeaponStateFiring_Transactional>(CurrentState)) return;
+    const TWeakObjectPtr<AUTWeaponFix> Key(this);
+    // Allocate an ownership token even for a state entered without an RPC. A new
+    // accepted request or lifecycle cleanup invalidates this next-tick rollback.
+    uint32* ExistingGeneration = DeferredEquipFireGenerations.Find(Key);
+    const uint32 Generation = ExistingGeneration ? *ExistingGeneration : AllocateDeferredEquipFireGeneration();
+    DeferredEquipFireGenerations.Add(Key, Generation);
+    const TWeakObjectPtr<AUTCharacter> ExpectedOwner(UTOwner);
+    const TWeakObjectPtr<UUTWeaponState> ExpectedState(CurrentState);
+    const uint8 ExpectedMode = CurrentFireMode;
+    GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda(
+        [Key, ExpectedOwner, ExpectedState, ExpectedMode, Generation]()
+        {
+            AUTWeaponFix* Weapon = Key.Get();
+            AUTCharacter* Owner = ExpectedOwner.Get();
+            const uint32* LiveGeneration = DeferredEquipFireGenerations.Find(Key);
+            const FDeferredEquipFireContext* Context = DeferredEquipFireContexts.Find(Key);
+            if (!Weapon || !Owner || Owner->IsDead() || !LiveGeneration
+                || *LiveGeneration != Generation || Context
+                || Weapon->GetUTOwner() != Owner || Owner->GetWeapon() != Weapon
+                || Weapon->GetCurrentState() != ExpectedState.Get()
+                || Weapon->GetCurrentFireMode() != ExpectedMode) return;
+            Weapon->ForceResetTransactionalState(ExpectedMode);
+            // GotoState filters unauthorized auto-entry during ActiveState's scan.
+            // Do not clear a pending bit that might represent newer held input.
+            Weapon->GotoActiveState();
+        }));
+}
+
+bool AUTWeaponFix::CompleteAcceptedDeferredFire(UUTWeaponState* CompletingState)
+{
+    if (!RequiresTransactionalRequest() || CurrentState != CompletingState) return false;
+    const TWeakObjectPtr<AUTWeaponFix> Key(this);
+    FDeferredEquipFireContext* Context = DeferredEquipFireContexts.Find(Key);
+    const uint32* Generation = DeferredEquipFireGenerations.Find(Key);
+    UUTWeaponStateFiringChargedRocket_Transactional* Charged =
+        Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CompletingState);
+    AUTPlusWeap_RocketLauncher* Rocket = Cast<AUTPlusWeap_RocketLauncher>(this);
+    if (!Context || !Generation || Context->Generation != *Generation
+        || Context->bShotDispatched
+        || Context->WaitingState.Get() != CompletingState
+        || !UTOwner || Context->Owner.Get() != UTOwner || UTOwner->IsDead()
+        || UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon()) return false;
+    const bool bCompletingEquip = Context->bDeferredEquip
+        && CompletingState == EquippingState && EquippingState
+        && EquippingState->PendingFireSequence == Context->FireMode
+        && Cast<UUTWeaponStateFiring_Transactional>(Context->ExpectedFiringState.Get()) != nullptr;
+    if (!Context->bDeferredState && !bCompletingEquip) return false;
+    // BringUpFinished scans ActiveState before replaying its queued mode. A Stop
+    // can clear that mode's pawn bit while charged/zoom remains held, so commit
+    // the accepted transactional equip request here regardless of those bits.
+    // Clearing its context below also clears stock's queue to prevent a replay.
+    // Charged completion must not discard load/burst work. Other stock states
+    // reach this helper only when they themselves request ActiveState.
+    if (Charged && (!Rocket || Rocket->NumLoadedRockets > 0
+        || GetWorldTimerManager().IsTimerActive(Charged->GraceTimerHandle)
+        || GetWorldTimerManager().IsTimerActive(Charged->LoadTimerHandle)
+        || GetWorldTimerManager().IsTimerActive(Charged->FireLoadedRocketHandle)
+        || GetWorldTimerManager().IsTimerActive(Charged->RefireCheckHandle))) return false;
+
+    const uint8 Mode = Context->FireMode;
+    AUTGameState* GameState = GetWorld()->GetGameState<AUTGameState>();
+    if (!HasAmmo(Mode) || UTOwner->IsFiringDisabled() || !AllowServerFireMode(Mode)
+        || (GameState && GameState->PreventWeaponFire()))
+    {
+        ClearDeferredEquipFireContext(true, TEXT("commit_policy"));
+        return false;
+    }
+    Context->bDispatchReady = true;
+    if (!HasAcceptedTransactionalRequest(Mode)) return false;
+    // Synchronous recovery inside the accepting RPC must leave consumption and
+    // cleanup to that RPC. Mark the context ready for its ordinary dispatch.
+    if (HasScopedTransactionalAim(this)) return false;
+    const uint32 CommitGeneration = Context->Generation;
+    const int32 Event = Context->FireEventIndex;
+    const TWeakObjectPtr<AUTCharacter> Owner(Context->Owner);
+    UUTWeaponState* Target = Context->ExpectedFiringState.Get();
+    CurrentFireMode = Mode;
+    CurrentlyFiringMode = Mode;
+    if (FireModeActiveState.IsValidIndex(Mode)) FireModeActiveState[Mode] = 1;
+    // A false-pending equip request previously fired in stock's explicit replay,
+    // which uses delayed-shot position on dedicated servers. Preserve that
+    // timing input without treating it as authorization for this dispatch.
+    const bool bUseEquipReplayTiming = bCompletingEquip && !UTOwner->IsPendingFire(Mode);
+    const bool bPreviousNetDelayedShot = bNetDelayedShot;
+    if (bUseEquipReplayTiming) bNetDelayedShot = GetNetMode() == NM_DedicatedServer;
+    // Enter the accepted target after stock completion, even after its Stop.
+    // No generic StartFire, synthetic input, or new request/event is created.
+    GotoState(Target);
+
+    Context = DeferredEquipFireContexts.Find(Key);
+    Generation = DeferredEquipFireGenerations.Find(Key);
+    if (Context && Generation && *Generation == CommitGeneration
+        && Context->Generation == CommitGeneration && UTOwner == Owner.Get())
+    {
+        if (bUseEquipReplayTiming && UTOwner && UTOwner->GetWeapon() == this
+            && CurrentState == Target && !IsPendingKillPending())
+        {
+            bNetDelayedShot = bPreviousNetDelayedShot;
+        }
+        const bool bShot = Context->bShotDispatched;
+        const bool bReleased = Context->bReleaseSeen;
+        ClearDeferredEquipFireContext(false, TEXT("dispatch_failed"));
+        if (bReleased && UTOwner && UTOwner->GetWeapon() == this && CurrentState == Target)
+        {
+            UTOwner->SetPendingFire(Mode, false);
+            if (bShot)
+            {
+                FTimerDelegate Release;
+                Release.BindUObject(this, &AUTWeaponFix::ReconcileDeferredEquipRelease,
+                    Mode, Event, CommitGeneration, Owner);
+                GetWorldTimerManager().SetTimerForNextTick(Release);
+            }
+        }
+    }
+    return true;
+}
+
+void AUTWeaponFix::ClearDeferredEquipFireContext(bool bInvalidateGeneration, const TCHAR* Reason)
 {
 	// Clearing the stock one-slot queue is correct only when the matching
 	// NetcodePlus context is being superseded or its equip lifetime is ending.
 	// A physical Stop merely marks bReleaseSeen and deliberately does not call here.
 	const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
 	const FDeferredEquipFireContext* const Context = DeferredEquipFireContexts.Find(WeaponKey);
-	if (Context != nullptr && EquippingState != nullptr
+	if (Context != nullptr && Context->bDeferredEquip && EquippingState != nullptr
 		&& EquippingState->PendingFireSequence == Context->FireMode)
 	{
 		EquippingState->PendingFireSequence = INDEX_NONE;
 	}
+    if (Context && !Context->bShotDispatched && FireProvenance())
+    {
+        UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] CANCEL weapon=%s mode=%d event=%d generation=%u reason=%s"),
+            *GetName(), Context->FireMode, Context->FireEventIndex, Context->Generation, Reason);
+    }
+    if (Context && bInvalidateGeneration)
+    {
+        bIsTransactionalFire = false;
+        CachedTransactionalRotation = FRotator::ZeroRotator;
+        ScopedTransactionalAimWeapons.Remove(this);
+    }
 	DeferredEquipFireContexts.Remove(WeaponKey);
 	if (bInvalidateGeneration)
 	{
@@ -2570,9 +2873,12 @@ bool AUTWeaponFix::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
 		&& DeferredContext->Generation == *ActiveGeneration
 		&& DeferredContext->FireMode == FireModeNum
 		&& DeferredContext->Owner.Get() == UTOwner
+        && DeferredContext->bDeferredEquip
 		&& CurrentState != EquippingState
 		&& EquippingState != nullptr
 		&& EquippingState->PendingFireSequence == FireModeNum;
+
+    const uint32 ReplayGeneration = bDeferredReplayBoundary ? DeferredContext->Generation : 0;
 
 	const bool bResult = Super::BeginFiringSequence(FireModeNum, bClientFired);
 
@@ -2582,6 +2888,7 @@ bool AUTWeaponFix::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
 	ActiveGeneration = DeferredEquipFireGenerations.Find(WeaponKey);
 	if (bDeferredReplayBoundary
 		&& DeferredContext != nullptr
+        && DeferredContext->Generation == ReplayGeneration
 		&& ActiveGeneration != nullptr
 		&& DeferredContext->Generation == *ActiveGeneration
 		&& DeferredContext->FireMode == FireModeNum
@@ -2601,8 +2908,8 @@ bool AUTWeaponFix::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
 		// Super has completed the one synchronous replay attempt. Keep the generation
 		// alive for the guarded next-tick release, but make re-entry unable to consume
 		// this payload a second time.
-		ClearDeferredEquipFireContext(false);
-		if (bReleaseSeen && UTOwner != nullptr)
+		ClearDeferredEquipFireContext(false, TEXT("dispatch_failed"));
+		if (bReleaseSeen && UTOwner != nullptr && UTOwner->GetWeapon() == this)
 		{
 			// The stock replay re-latches PendingFire inside BeginFiringSequence.
 			// Honor the already-accepted Stop immediately so a weapon switch cannot
@@ -2909,55 +3216,46 @@ void AUTWeaponFix::FireShot()
 	else
 		// --- SERVER SIDE ---
 	{
-		// 1. GATEKEEPER LOGIC
-		bool bInChargedState = false;
-		if (CurrentState != nullptr)
-		{
-			if (CurrentState->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass()))
-			{
-				bInChargedState = true;
-			}
-		}
-
-		// Fix: Allow shots if State Machine is actively firing (handles "Queued from Equip" shots)
-		bool bIsStateFiring = (CurrentState && CurrentState->IsFiring());
-		bool bIsListenServerHost = (UTOwner && UTOwner->IsLocallyControlled());
-
-		if (!bIsTransactionalFire && !bNetDelayedShot && !bIsListenServerHost && !bInChargedState && !bIsStateFiring)
-		{
-			if (RocketPrimaryDiagFor(this, CurrentFireMode))
-			{
-				UE_LOG(LogUTWeaponFix, Warning,
-					TEXT("[RocketM1Diag] SERVER_FIRE_GATE_BLOCK frame=%u t=%.4f state=%s trans=%d delayed=%d listen=%d charged=%d stateFiring=%d pending0=%d tracker=%d"),
-					(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
-					GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
-					bIsTransactionalFire ? 1 : 0, bNetDelayedShot ? 1 : 0, bIsListenServerHost ? 1 : 0,
-					bInChargedState ? 1 : 0, bIsStateFiring ? 1 : 0,
-					(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0, CurrentlyFiringMode);
-			}
-			UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireShot] GATEKEEPER BLOCKED Mode %d. Trans=%d Delayed=%d Listen=%d Charged=%d StateFiring=%d"),
-				CurrentFireMode, bIsTransactionalFire, bNetDelayedShot, bIsListenServerHost, bInChargedState, bIsStateFiring);
-			return;
-		}
-
-		// ServerStartFireFixed may have accepted this shot while the weapon was
-		// still equipping. The stock queue remembers only its mode, so reinstall
-		// the exact request-scoped client aim/claim for this one synchronous
-		// FireShot. Consume before Super::FireShot() to make re-entry exactly-once.
-		const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
-		FDeferredEquipFireContext* const DeferredContext = DeferredEquipFireContexts.Find(WeaponKey);
-		const uint32* const ActiveGeneration = DeferredEquipFireGenerations.Find(WeaponKey);
-		const bool bDeferredEquipDispatch = DeferredContext != nullptr
-			&& ActiveGeneration != nullptr
-			&& !DeferredContext->bShotDispatched
-			&& DeferredContext->Generation == *ActiveGeneration
-			&& DeferredContext->Owner.Get() == UTOwner
-			&& DeferredContext->FireMode == CurrentFireMode
-			&& FiringState.IsValidIndex(CurrentFireMode)
-			&& FiringState[CurrentFireMode] != nullptr
-			&& CurrentState == FiringState[CurrentFireMode]
-			&& EquippingState != nullptr
-			&& EquippingState->PendingFireSequence == CurrentFireMode;
+        const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
+        FDeferredEquipFireContext* LiveContext = DeferredEquipFireContexts.Find(WeaponKey);
+        const bool bAcceptedRequestDispatch = HasAcceptedTransactionalRequest(CurrentFireMode)
+            && FiringState.IsValidIndex(CurrentFireMode) && CurrentState == FiringState[CurrentFireMode];
+        const bool bTransactionalMode = Cast<UUTWeaponStateFiring_Transactional>(CurrentState) != nullptr
+            || (FiringState.IsValidIndex(CurrentFireMode)
+                && Cast<UUTWeaponStateFiring_Transactional>(FiringState[CurrentFireMode]) != nullptr);
+        if (bTransactionalMode && RequiresTransactionalRequest() && !bAcceptedRequestDispatch)
+        {
+            if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[NCFireAuth] BLOCK_SHOT source=%s weapon=%s mode=%d event=%d generation=%u state=%s pending0=%d pending1=%d lftBefore=%.4f"),
+                StockSyncWeapons.Contains(this) ? TEXT("StockSync") : TEXT("StateAutoNoContext"),
+                *GetName(), CurrentFireMode, LiveContext ? LiveContext->FireEventIndex : INDEX_NONE,
+                LiveContext ? LiveContext->Generation : 0,
+                CurrentState ? *CurrentState->GetClass()->GetName() : TEXT("null"),
+                UTOwner && UTOwner->IsPendingFire(0), UTOwner && UTOwner->IsPendingFire(1),
+                LastFireTime.IsValidIndex(CurrentFireMode) ? LastFireTime[CurrentFireMode] : -1.f);
+            // A duplicate callback inside the same consumed request must not undo
+            // its valid firing state. Unowned entries receive a guarded rollback.
+            if (!LiveContext) RecoverUnauthorizedTransactionalEntry();
+            return;
+        }
+        if (!bTransactionalMode && !bIsTransactionalFire && !bNetDelayedShot
+            && !(UTOwner && UTOwner->IsLocallyControlled())
+            && !Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState)
+            && !(CurrentState && CurrentState->IsFiring()))
+        {
+            if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[NCFireAuth] BLOCK_SHOT source=StockInactive weapon=%s mode=%d"), *GetName(), CurrentFireMode);
+            return;
+        }
+        // Copy before invoking any Blueprint/weapon hook: map storage may move or
+        // disappear during firing, death, switch or nested request dispatch.
+        FDeferredEquipFireContext AcceptedContext;
+        if (bAcceptedRequestDispatch)
+        {
+            AcceptedContext = *LiveContext;
+            LiveContext->bShotDispatched = true;
+        }
+        const FDeferredEquipFireContext* DeferredContext = &AcceptedContext;
 
 		const bool bPreviousTransactionalFire = bIsTransactionalFire;
 		const bool bPreviousScopedAim = HasScopedTransactionalAim(this);
@@ -2969,9 +3267,8 @@ void AUTWeaponFix::FireShot()
 		const FVector PreviousHeadOffset = ReceivedHeadOffset;
 		const uint8 PreviousFireEventIndex = FireEventIndex;
 
-		if (bDeferredEquipDispatch)
+		if (bAcceptedRequestDispatch)
 		{
-			DeferredContext->bShotDispatched = true;
 			bIsTransactionalFire = true;
 			CachedTransactionalRotation = DeferredContext->ClientViewRot;
 			ScopedTransactionalAimWeapons.Add(this);
@@ -3003,6 +3300,23 @@ void AUTWeaponFix::FireShot()
 				DeferredContext->Generation, DeferredContext->bReleaseSeen ? 1 : 0,
 				*DeferredContext->ClientViewRot.ToString());
 		}
+
+        const TCHAR* ShotSource = bAcceptedRequestDispatch ? AcceptedContext.Source
+            : UTOwner && Cast<AUTBot>(UTOwner->Controller) ? TEXT("Bot")
+            : GetNetMode() == NM_Standalone ? TEXT("Standalone")
+            : UTOwner && UTOwner->IsLocallyControlled() ? TEXT("ListenHost")
+            : Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState) ? TEXT("ChargedDirect")
+            : TEXT("StockManaged");
+        FNCFireObservation Observation(this, ShotSource, CurrentFireMode,
+            bAcceptedRequestDispatch ? AcceptedContext.FireEventIndex : INDEX_NONE,
+            bAcceptedRequestDispatch ? AcceptedContext.Generation : 0);
+        if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] SHOT source=%s weapon=%s owner=%s mode=%d event=%d auth=%d generation=%u pending0=%d pending1=%d lftBefore=%.4f"),
+            ShotSource, *GetName(), UTOwner ? *UTOwner->GetName() : TEXT("null"),
+            Observation.Mode, Observation.Event,
+            AuthoritativeFireEventIndex.IsValidIndex(Observation.Mode) ? AuthoritativeFireEventIndex[Observation.Mode] : INDEX_NONE,
+            Observation.Generation, UTOwner && UTOwner->IsPendingFire(0), UTOwner && UTOwner->IsPendingFire(1),
+            LastFireTime.IsValidIndex(Observation.Mode) ? LastFireTime[Observation.Mode] : -1.f);
 
 		// 2. RHYTHM COMPENSATION & TIMESTAMP UPDATE
 		if (LastFireTime.IsValidIndex(CurrentFireMode))
@@ -3042,7 +3356,8 @@ void AUTWeaponFix::FireShot()
 				}
 			}
 		}
-		if (bDeferredEquipDispatch && LastFireTime.IsValidIndex(CurrentFireMode))
+		if (bAcceptedRequestDispatch && (AcceptedContext.bDeferredEquip || AcceptedContext.bDeferredState)
+            && LastFireTime.IsValidIndex(CurrentFireMode))
 		{
 			// The accepted click happened before the server finished equipping. Do
 			// not charge that server-only equip remainder against the client's next
@@ -3054,6 +3369,14 @@ void AUTWeaponFix::FireShot()
 		// 3. SPAWN PROJECTILE
 		UE_LOG(LogUTWeaponFix, Verbose, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
 		Super::FireShot();
+        if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] SHOT_END source=%s weapon=%s mode=%d event=%d generation=%u lftAfter=%.4f attempts=%d spawns=%d"),
+            Observation.Source, *GetName(), Observation.Mode, Observation.Event, Observation.Generation,
+            LastFireTime.IsValidIndex(Observation.Mode) ? LastFireTime[Observation.Mode] : -1.f,
+            Observation.Attempts, Observation.Spawns);
+        // Zero attempts means no NCP spawn was observed: hitscan, override,
+        // missing projectile/owner or a custom path. Do not label it a rocket.
+
 		if (bBufferedShockDispatch)
 		{
 			// Listen-server local player: same commit contract as the client path.
@@ -3062,7 +3385,11 @@ void AUTWeaponFix::FireShot()
 			CachedTransactionalRotation = FRotator::ZeroRotator;
 		}
 
-		if (bDeferredEquipDispatch)
+        const uint32* RestoreGeneration = DeferredEquipFireGenerations.Find(WeaponKey);
+		if (bAcceptedRequestDispatch && RestoreGeneration
+            && *RestoreGeneration == AcceptedContext.Generation
+            && UTOwner == AcceptedContext.Owner.Get() && UTOwner
+            && UTOwner->GetWeapon() == this && !IsPendingKillPending())
 		{
 			bIsTransactionalFire = bPreviousTransactionalFire;
 			CachedTransactionalRotation = PreviousTransactionalRotation;
@@ -3643,6 +3970,10 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
             Params.Owner = this;
             Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
             AUTProjectile* Proj = World->SpawnActor<AUTProjectile>(ProjClass[FireModeNum], SpawnLoc, SpawnRot, Params);
+            if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+                TEXT("[NCFireAuth] DIRECT_SPAWN source=TradeGraceDirect weapon=%s mode=%d receivedEvent=%d result=%s projectile=%s"),
+                *GetName(), FireModeNum, InFireEventIndex, Proj ? TEXT("ok") : TEXT("null"),
+                Proj ? *Proj->GetName() : TEXT("null"));
             if (Proj)
             {
                 UE_LOG(LogUTWeaponFix, Log, TEXT("[TradeKill] Spawned projectile %.0fms after death (Mode %d)"),
@@ -3679,8 +4010,37 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 		return;
 	}
 
+    // A previously ACKed reservation owns the one-slot queue until it commits.
+    // Reject before validation advances the shared authoritative watermark.
+    const TWeakObjectPtr<AUTWeaponFix> ReservationKey(this);
+    const FDeferredEquipFireContext* Reserved = DeferredEquipFireContexts.Find(ReservationKey);
+    const uint32* ReservationGeneration = DeferredEquipFireGenerations.Find(ReservationKey);
+    if (Reserved && (!ReservationGeneration || *ReservationGeneration != Reserved->Generation
+        || Reserved->Owner.Get() != UTOwner
+        || (!Reserved->bShotDispatched && (Reserved->bDeferredEquip || Reserved->bDeferredState)
+            && CurrentState != Reserved->WaitingState.Get())))
+    {
+        ClearDeferredEquipFireContext(true, TEXT("state_lost"));
+        Reserved = nullptr;
+    }
+    if (Reserved && !Reserved->bShotDispatched
+        && (Reserved->bDeferredEquip || Reserved->bDeferredState))
+    {
+        if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] RESERVATION_BUSY weapon=%s mode=%d event=%d retainedEvent=%d generation=%u"),
+            *GetName(), FireModeNum, InFireEventIndex, Reserved->FireEventIndex, Reserved->Generation);
+        ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum)
+            ? AuthoritativeFireEventIndex[FireModeNum] : 0);
+        return;
+    }
+
     if (!ValidateFireRequest(FireModeNum, InFireEventIndex, ClientTimestamp))
     {
+        if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] REJECT reason=validation weapon=%s mode=%d event=%d auth=%d lft=%.4f"),
+            *GetName(), FireModeNum, InFireEventIndex,
+            AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : 0,
+            LastFireTime.IsValidIndex(FireModeNum) ? LastFireTime[FireModeNum] : -1.f);
 		if (RocketPrimaryDiagFor(this, FireModeNum))
 		{
 			UE_LOG(LogUTWeaponFix, Warning,
@@ -3699,21 +4059,21 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 	const bool bCommitsImmediateFireShot = IsImmediateEquipFireState(RequestedFiringState);
 	const bool bQueuedDeferredEquip = CurrentState == EquippingState
 		&& bCommitsImmediateFireShot;
+    const bool bRequestedTransactional = Cast<UUTWeaponStateFiring_Transactional>(RequestedFiringState) != nullptr;
+    const bool bQueuedDeferredState = RequiresTransactionalRequest() && bRequestedTransactional
+        && Cast<UUTWeaponStateFiring>(CurrentState) != nullptr
+        && Cast<UUTWeaponStateFiring_Transactional>(CurrentState) == nullptr
+        && CurrentState != RequestedFiringState;
+    const bool bQueuedDeferredCharged = bQueuedDeferredState
+        && Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState) != nullptr;
 	const TWeakObjectPtr<AUTWeaponFix> DeferredWeaponKey(this);
+    const TWeakObjectPtr<AUTCharacter> AcceptedOwner(UTOwner);
+    uint32 AcceptedRequestGeneration = 0;
 
-	if (bQueuedDeferredEquip)
+	if (bQueuedDeferredEquip || bQueuedDeferredState || bRequestedTransactional)
 	{
-		// Stock EquippingState has one pending-mode slot. Mirror that bounded,
-		// latest-wins contract while retaining the payload that would otherwise be
-		// cleared at the end of this RPC and replaced by stale server aim at commit.
-		const FDeferredEquipFireContext* const PreviousContext = DeferredEquipFireContexts.Find(DeferredWeaponKey);
-		if (PreviousContext != nullptr)
-		{
-			UE_LOG(LogUTWeaponFix, Verbose,
-				TEXT("[DeferredEquipFire] SUPERSEDE oldMode=%d oldEvent=%d oldGeneration=%u newMode=%d newEvent=%d"),
-				PreviousContext->FireMode, PreviousContext->FireEventIndex,
-				PreviousContext->Generation, FireModeNum, InFireEventIndex);
-		}
+        // One accepted request owns this bounded slot. Immediate requests live
+        // only through this RPC; equip and stock-state tails retain the payload.
 		ClearDeferredEquipFireContext();
 		FDeferredEquipFireContext NewContext;
 		NewContext.FireMode = FireModeNum;
@@ -3723,13 +4083,28 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 		NewContext.ServerAcceptTime = GetWorld()->GetTimeSeconds();
 		NewContext.FireEventIndex = InFireEventIndex;
 		NewContext.Generation = AllocateDeferredEquipFireGeneration();
+        AcceptedRequestGeneration = NewContext.Generation;
 		NewContext.ClientTimestamp = ClientTimestamp;
 		NewContext.ClientViewRot = ClientViewRot;
 		NewContext.Owner = UTOwner;
 		NewContext.ClientHitChar = ClientHitChar;
 		NewContext.ClientHeadOffset = ClientHeadOffset;
+        NewContext.bDeferredEquip = bQueuedDeferredEquip;
+        NewContext.bDeferredState = bQueuedDeferredState;
+        NewContext.bDispatchReady = !bQueuedDeferredEquip && !bQueuedDeferredState;
+        NewContext.ExpectedFiringState = RequestedFiringState;
+        NewContext.WaitingState = CurrentState;
+        NewContext.Source = bQueuedDeferredEquip ? TEXT("DeferredEquip")
+            : bQueuedDeferredCharged ? TEXT("DeferredChargedTail")
+            : bQueuedDeferredState ? TEXT("DeferredStateTail")
+            : FixedRetryWeapons.Contains(this) ? TEXT("FixedRetry") : TEXT("FixedInitial");
 		DeferredEquipFireContexts.Add(DeferredWeaponKey, NewContext);
 		DeferredEquipFireGenerations.Add(DeferredWeaponKey, NewContext.Generation);
+        if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] ACCEPT source=%s weapon=%s mode=%d event=%d generation=%u deferred=%d pitch=%.3f yaw=%.3f roll=%.3f z=%.3f claim=%s"),
+            NewContext.Source, *GetName(), FireModeNum, InFireEventIndex, NewContext.Generation,
+            bQueuedDeferredEquip || bQueuedDeferredState, ClientViewRot.Pitch, ClientViewRot.Yaw,
+            ClientViewRot.Roll, NewContext.ResolvedZOffset, ClientHitChar ? *ClientHitChar->GetName() : TEXT("null"));
 		UE_LOG(LogUTWeaponFix, Verbose,
 			TEXT("[DeferredEquipFire] QUEUED mode=%d event=%d generation=%u clientT=%.4f aim=%s"),
 			FireModeNum, InFireEventIndex, NewContext.Generation,
@@ -3740,6 +4115,8 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 		// A newer accepted immediate/non-shot Start owns this weapon now. Invalidate
 		// any post-commit release callback from an older deferred equip event.
 		ClearDeferredEquipFireContext();
+        AcceptedRequestGeneration = AllocateDeferredEquipFireGeneration();
+        DeferredEquipFireGenerations.Add(DeferredWeaponKey, AcceptedRequestGeneration);
 	}
 
     CachedTransactionalRotation = ClientViewRot;
@@ -3893,6 +4270,14 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         }
     }
 
+    // Empty charged-wedge recovery above can have completed synchronously.
+    // The accepted payload still owns the ensuing direct dispatch.
+    if (bQueuedDeferredCharged && !Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState))
+    {
+        FDeferredEquipFireContext* Context = DeferredEquipFireContexts.Find(DeferredWeaponKey);
+        if (Context) Context->bDispatchReady = true;
+    }
+
     // 3. EXECUTE FIRE (The New Logic)
 
     // Check if we are ALREADY in the transactional state (i.e., holding the button)
@@ -3941,20 +4326,31 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         BeginFiringSequence(FireModeNum, true);
     }
 
-    bIsTransactionalFire = false;
-    // Mirror the client-side clean-up at FireShot (line 696). Without this,
-    // CachedTransactionalRotation stays alive between shots and any future
-    // read with a stale gate would pick up the wrong rotation.
-    CachedTransactionalRotation = FRotator::ZeroRotator;
-	ScopedTransactionalAimWeapons.Remove(this);
-	ReceivedHitScanHitChar = nullptr;
-	if (bQueuedDeferredEquip)
-	{
-		ReceivedHitScanIndex = 0;
-		ReceivedHeadOffset = FVector::ZeroVector;
-		FireZOffset = 0.f;
-		FireZOffsetTime = 0.f;
-	}
+    const uint32* CleanupGeneration = DeferredEquipFireGenerations.Find(DeferredWeaponKey);
+    if (CleanupGeneration && *CleanupGeneration == AcceptedRequestGeneration
+        && UTOwner == AcceptedOwner.Get())
+    {
+        bIsTransactionalFire = false;
+        // Mirror the client-side clean-up at FireShot (line 696). Without this,
+        // CachedTransactionalRotation stays alive between shots and any future
+        // read with a stale gate would pick up the wrong rotation.
+        CachedTransactionalRotation = FRotator::ZeroRotator;
+        ScopedTransactionalAimWeapons.Remove(this);
+        ReceivedHitScanHitChar = nullptr;
+        FDeferredEquipFireContext* RemainingRequest = DeferredEquipFireContexts.Find(DeferredWeaponKey);
+        if (RemainingRequest && RemainingRequest->Generation == AcceptedRequestGeneration && ((!bQueuedDeferredEquip && !bQueuedDeferredState)
+            || (bQueuedDeferredState && RemainingRequest->bShotDispatched)))
+        {
+            ClearDeferredEquipFireContext(false, TEXT("dispatch_failed"));
+        }
+        if (bQueuedDeferredEquip || bQueuedDeferredState)
+        {
+            ReceivedHitScanIndex = 0;
+            ReceivedHeadOffset = FVector::ZeroVector;
+            FireZOffset = 0.f;
+            FireZOffsetTime = 0.f;
+        }
+    }
 
     // 4. CONFIRM — always sent, including shock balls. Keeps event indices synced
     // and clears the resend queue. Shock ball fakes are preserved in
@@ -3972,6 +4368,9 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 				CurrentFireMode, CurrentlyFiringMode, UTOwner->IsPendingFire(0) ? 1 : 0,
 				LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f);
 		}
+        if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] ACK weapon=%s mode=%d event=%d generation=%u"),
+            *GetName(), FireModeNum, InFireEventIndex, AcceptedRequestGeneration);
         ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
     }
 }
@@ -4300,6 +4699,26 @@ bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFire
 
 void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex)
 {
+    // Diagnostic only: the existing wire carries a shot watermark, not a unique
+    // physical release generation. Do not infer ownership from PendingFire.
+    if (FireProvenance())
+    {
+        const FDeferredEquipFireContext* Context = DeferredEquipFireContexts.Find(TWeakObjectPtr<AUTWeaponFix>(this));
+        const int32 PriorStop = LastProcessedStopEventIndex.IsValidIndex(FireModeNum) ? LastProcessedStopEventIndex[FireModeNum] : INDEX_NONE;
+        const int32 Auth = AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : INDEX_NONE;
+        const TCHAR* Reason = InFireEventIndex <= PriorStop ? TEXT("RepeatedOrOlderStop")
+            : InFireEventIndex < Auth ? TEXT("OlderThanAuth")
+            : int64(InFireEventIndex) > int64(Auth) + 10 ? TEXT("Lookahead") : TEXT("Process");
+        UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] STOP reason=%s weapon=%s mode=%d received=%d priorStop=%d auth=%d pending0=%d pending1=%d currentWeapon=%s owner=%s retainedEvent=%d generation=%u released=%d consumed=%d ownerMatch=%d"),
+            Reason, *GetName(), FireModeNum, InFireEventIndex, PriorStop, Auth,
+            UTOwner && UTOwner->IsPendingFire(0), UTOwner && UTOwner->IsPendingFire(1),
+            UTOwner && UTOwner->GetWeapon() ? *UTOwner->GetWeapon()->GetName() : TEXT("null"),
+            UTOwner ? *UTOwner->GetName() : TEXT("null"), Context ? Context->FireEventIndex : INDEX_NONE,
+            Context ? Context->Generation : 0, Context && Context->bReleaseSeen,
+            Context && Context->bShotDispatched, Context && Context->Owner.Get() == UTOwner);
+    }
+
     // Initial and retry RPCs carry the same stop. Process whichever arrives first,
     // then make later copies idempotent.
     if (LastProcessedStopEventIndex.IsValidIndex(FireModeNum)
@@ -6049,6 +6468,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
         if (TimeSinceLast < 0.2f)
         {
             if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning, TEXT("ShockCore anti-dup guard BLOCKED spawn. TimeSinceLast=%.4f Role=%d"), TimeSinceLast, (int32)Role);
+            ObserveFireProjectile(this, CapturedFireMode, ProjectileClass.Get(), nullptr, TEXT("suppressed"));
             return nullptr;
         }
         LastShockCoreSpawnTime = CurrentTime;
@@ -6199,6 +6619,7 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 					TEXT("FlakShell anti-dup guard BLOCKED actual spawn. TimeSinceLast=%.4f Role=%d mode=%d event=%d"),
 					TimeSinceLast, (int32)Role, CapturedFireMode, CapturedEventIndex);
 			}
+            ObserveFireProjectile(this, CapturedFireMode, ProjectileClass.Get(), nullptr, TEXT("suppressed"));
 			return nullptr;
 		}
 	}
@@ -6242,6 +6663,9 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
         SpawnLocation,
         SpawnRotation,
         Params);
+
+    ObserveFireProjectile(this, CapturedFireMode, ProjectileClass.Get(), NewProjectile,
+        NewProjectile ? TEXT("ok") : TEXT("null"));
 
 	if (!NewProjectile)
 	{
@@ -8624,8 +9048,11 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
 
     // Execute the same implementation with the same logical payload. The retry-only
     // context still lets projectile spawning compensate for network delay.
+    const bool bWasRetry = FixedRetryWeapons.Contains(this);
+    FixedRetryWeapons.Add(this);
     ServerStartFireFixed_Implementation(FireModeNum, InFireEventIndex, ClientTimestamp,
         ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset);
+    if (!bWasRetry) FixedRetryWeapons.Remove(this);
 
     bNetDelayedShot = false;
 }
@@ -9145,7 +9572,28 @@ void AUTWeaponFix::ServerUpdateFiringStates_Implementation(uint8 FireSettings)
 	{
 		return;
 	}
-	Super::ServerUpdateFiringStates_Implementation(FireSettings);
+    const TWeakObjectPtr<AUTCharacter> ExpectedOwner(UTOwner);
+    const int32 NumModes = FMath::Min(8, FMath::Min(int32(GetNumFireModes()), FiringState.Num()));
+    for (int32 Mode = 0; Mode < NumModes; ++Mode)
+    {
+        // An earlier mode's stock callback can synchronously remove this weapon,
+        // kill the owner, or change another pending bit. Re-read each mode.
+        if (!ExpectedOwner.IsValid() || UTOwner != ExpectedOwner.Get()
+            || UTOwner->IsDead() || IsPendingKillPending()) return;
+        UUTWeaponState* State = FiringState.IsValidIndex(Mode) ? FiringState[Mode] : nullptr;
+        const bool bIncoming = (FireSettings & (1 << Mode)) != 0;
+        if (!State || UTOwner->IsPendingFire(Mode) == bIncoming) continue;
+        const bool bFiltered = Cast<UUTWeaponStateFiring_Transactional>(State) != nullptr;
+        if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
+            TEXT("[NCFireAuth] SYNC source=StockSync weapon=%s mode=%d incoming=%d pending=%d filtered=%d state=%s"),
+            *GetName(), Mode, bIncoming, UTOwner->IsPendingFire(Mode), bFiltered, *State->GetClass()->GetName());
+        if (bFiltered) continue; // Suppress both synthesized Start AND Stop.
+        const bool bWasSync = StockSyncWeapons.Contains(this);
+        StockSyncWeapons.Add(this);
+        if (bIncoming) ServerStartFire(Mode, uint8(255), true);
+        else ServerStopFire(Mode, uint8(255));
+        if (!bWasSync) StockSyncWeapons.Remove(this);
+    }
 }
 
 // =========================================================================

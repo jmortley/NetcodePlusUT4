@@ -362,6 +362,10 @@ public:
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
     virtual bool BeginFiringSequence(uint8 FireModeNum, bool bClientFired) override;
+    virtual void GotoState(UUTWeaponState* NewState) override;
+    // Native-only helpers: no reflected fields, RPCs, or UObject layout changes.
+    bool RequiresTransactionalRequest() const;
+    bool CompleteAcceptedDeferredFire(UUTWeaponState* CompletingState);
     virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
         AUTPlayerState*& HitPlayerState) const override;
 
@@ -634,7 +638,10 @@ protected:
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
 
-    void ClearDeferredEquipFireContext(bool bInvalidateGeneration = true);
+    void ClearDeferredEquipFireContext(bool bInvalidateGeneration = true,
+        const TCHAR* Reason = TEXT("equip_lifetime"));
+    bool HasAcceptedTransactionalRequest(uint8 FireModeNum) const;
+    void RecoverUnauthorizedTransactionalEntry();
     void ReconcileDeferredEquipRelease(uint8 FireModeNum, int32 InFireEventIndex,
         uint32 ContextGeneration, TWeakObjectPtr<AUTCharacter> ExpectedOwner);
 

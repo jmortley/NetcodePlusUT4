@@ -372,6 +372,18 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBuff
         return;
     }
 
+    if (AUTWeaponFix* Fix = Cast<AUTWeaponFix>(Weapon))
+    {
+        if (Fix->CompleteAcceptedDeferredFire(this)) return;
+        if (Fix->RequiresTransactionalRequest())
+        {
+            // Remote held bits cannot manufacture primary. GotoState filters
+            // transactional auto-entry and still permits stock-managed modes.
+            Weapon->GotoActiveState();
+            return;
+        }
+    }
+
     TWeakObjectPtr<AUTWeapon> WeakWeapon = Weapon;
     TWeakObjectPtr<AUTCharacter> WeakOwner = Owner;
 
@@ -848,6 +860,13 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
     {
         ExitToActiveAndAttemptBufferedPrimary();
         return;
+    }
+
+    // An accepted numbered primary owns completion before a held-alt restart.
+    // This also commits a released primary with its original aim and event.
+    if (AUTWeaponFix* Fix = Cast<AUTWeaponFix>(Weapon))
+    {
+        if (Fix->CompleteAcceptedDeferredFire(this)) return;
     }
 
     // HandleContinuedFiring() transitions to ActiveState when it returns false.
