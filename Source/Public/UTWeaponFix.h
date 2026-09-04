@@ -361,6 +361,7 @@ public:
     virtual void PlayFiringEffects() override;
     virtual void StartFire(uint8 FireModeNum) override;
     virtual void StopFire(uint8 FireModeNum) override;
+    virtual bool BeginFiringSequence(uint8 FireModeNum, bool bClientFired) override;
     virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
         AUTPlayerState*& HitPlayerState) const override;
 
@@ -616,11 +617,10 @@ protected:
     bool bFireHeldByPlayer[2];
 
     // True while RetryFireHandle[mode] is armed BY THE CROSS-MODE stall-fix block
-    // (ncp.CrossModeRetry) rather than the same-mode cooldown paths. The legacy
-    // (ncp.GhostFix=0) PutDown retry-graduation must NOT graduate these — a tapped
-    // cross-mode press followed by a fast weapon switch would become a ghost shot
-    // on the next weapon. Set only at the cross-mode arm site; every other arm site
-    // overwrites it false (the graduation's IsTimerActive guard covers cleared timers).
+    // (ncp.CrossModeRetry) rather than the same-mode cooldown paths. It is not
+    // promoted to Pawn PendingFire until PutDown actually starts, and only while
+    // the timer is still active; a genuine release clears the timer first. Set only
+    // at the cross-mode arm site; every other arm site overwrites it false.
     bool bCrossModeRetryArmed[2];
 
     // True while RetryFireHandle[mode] holds a BUFFERED CLICK. In 328 dogfood
@@ -633,6 +633,10 @@ protected:
 
     UPROPERTY(Transient)
     FRotator CachedTransactionalRotation;
+
+    void ClearDeferredEquipFireContext(bool bInvalidateGeneration = true);
+    void ReconcileDeferredEquipRelease(uint8 FireModeNum, int32 InFireEventIndex,
+        uint32 ContextGeneration, TWeakObjectPtr<AUTCharacter> ExpectedOwner);
 
     // --- Trade-kill grace period: cache owner state before Removed() nulls UTOwner ---
     /** World time when UTOwner was lost (weapon removed from dying player) */

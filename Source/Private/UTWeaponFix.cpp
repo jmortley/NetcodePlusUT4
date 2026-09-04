@@ -15,6 +15,7 @@
 #include "Net/UnrealNetwork.h"
 #include "UTWeaponStateFiring_Transactional.h"
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
+#include "UTWeaponStateEquipping.h"
 #include "UTWeaponStateZooming.h"
 #include "UTWeaponStateFiringSpinUp.h"
 #include "UTPlusShockRifle.h"
@@ -132,6 +133,38 @@ static constexpr float MaxBufferedAimAgeSeconds = 0.050f;
 // object layout or relying on FRotator::IsZero() as a sentinel.
 static TSet<const AUTWeaponFix*> ScopedTransactionalAimWeapons;
 
+/** One server-only fire request accepted while this weapon is still equipping.
+ *  Kept outside AUTWeaponFix so the 328 native UObject layout does not change. */
+struct FDeferredEquipFireContext
+{
+	bool bShotDispatched = false;
+	bool bReleaseSeen = false;
+	uint8 FireMode = 0;
+	float ResolvedZOffset = 0.f;
+	float ServerAcceptTime = 0.f;
+	int32 FireEventIndex = INDEX_NONE;
+	uint32 Generation = 0;
+	float ClientTimestamp = 0.f;
+	FRotator ClientViewRot = FRotator::ZeroRotator;
+	TWeakObjectPtr<AUTCharacter> Owner;
+	TWeakObjectPtr<AUTCharacter> ClientHitChar;
+	FVector ClientHeadOffset = FVector::ZeroVector;
+};
+
+static TMap<TWeakObjectPtr<AUTWeaponFix>, FDeferredEquipFireContext> DeferredEquipFireContexts;
+static TMap<TWeakObjectPtr<AUTWeaponFix>, uint32> DeferredEquipFireGenerations;
+static uint32 NextDeferredEquipFireGeneration = 1;
+
+static uint32 AllocateDeferredEquipFireGeneration()
+{
+	const uint32 Result = NextDeferredEquipFireGeneration++;
+	if (NextDeferredEquipFireGeneration == 0)
+	{
+		NextDeferredEquipFireGeneration = 1;
+	}
+	return Result;
+}
+
 static FORCEINLINE bool IsShockPrimaryClickBuffer(AUTWeaponFix* Weapon, uint8 FireModeNum)
 {
     return FireModeNum == 0 && Cast<AUTPlusShockRifle>(Weapon) != nullptr;
@@ -145,6 +178,14 @@ static FORCEINLINE float GetClickBufferWindowSeconds()
 static FORCEINLINE bool HasScopedTransactionalAim(const AUTWeaponFix* Weapon)
 {
     return ScopedTransactionalAimWeapons.Contains(Weapon);
+}
+
+static FORCEINLINE bool IsImmediateEquipFireState(const UUTWeaponState* State)
+{
+	return State != nullptr
+		&& !State->IsA(UUTWeaponStateZooming::StaticClass())
+		&& !State->IsA(UUTWeaponStateFiringChargedRocket_Transactional::StaticClass())
+		&& !State->GetName().Contains(TEXT("Charged"));
 }
 
 static TAutoConsoleVariable<float> CVarMouseDebounceCap(
@@ -199,7 +240,7 @@ static FORCEINLINE bool StopClearsPending()
 // unconditional retry-clear). 0 = legacy drop. Client-side, no replication, no bump.
 static TAutoConsoleVariable<int32> CVarCrossModeRetry(
     TEXT("ncp.CrossModeRetry"), 1,
-    TEXT("Cross-mode held-fire retry (fixes the held-M1 shock beam stall after a ball): 1=queue a retry at the current cycle's end (default), 0=restore the legacy drop (kill-switch). Standalone-safe with ncp.GhostFix 0: the PutDown graduation skips cross-mode-armed retries (bCrossModeRetryArmed), so no ghost shot on a fast weapon switch."),
+    TEXT("Cross-mode held-fire retry (fixes the held-M1 shock beam stall after a ball): 1=queue a retry at the current cycle's end (default), 0=restore the legacy drop (kill-switch). A still-active arm transfers to Pawn PendingFire only when PutDown begins; a release cancels the timer first."),
     ECVF_Default);
 
 static FORCEINLINE bool CrossModeRetry()
@@ -226,6 +267,14 @@ static TAutoConsoleVariable<float> CVarHitscanFudgeMs(
     TEXT("Full-RTT buffer subtracted before halving server-observed RTT for hitscan target rewind, ms. ")
     TEXT("10 means a 5ms-newer-than-half-RTT primary epoch. Server-authoritative; live rollback: 20."),
     ECVF_Default);
+
+// The old default-mode sentinel accidentally kept this experimental origin
+// shift dormant. Keep corrected mode resolution, but preserve shipped projectile
+// origins unless a server explicitly opts into testing the rewind.
+static TAutoConsoleVariable<int32> CVarProjectileOriginRewind(
+	TEXT("ncp.ProjectileOriginRewind"), 0,
+	TEXT("Server projectile shooter-origin rewind: 1=shift to historical shooter position, 0=stock origin (default)."),
+	ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarHitscanPrimaryPadding(
     TEXT("ncp.HitscanPrimaryPadding"), 40.0f,
@@ -1496,6 +1545,8 @@ void AUTWeaponFix::BeginPlay()
 {
     Super::BeginPlay();
 
+    ClearDeferredEquipFireContext();
+
     // Lazily ensure the world's clock-sync beacon (server only). Weapons exist
     // in every hub mode from warmup onward — including stock TDM, where no
     // NetcodePlus game-mode code ever runs — so this is the one hook that
@@ -2440,6 +2491,139 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 }
 
 
+void AUTWeaponFix::ClearDeferredEquipFireContext(bool bInvalidateGeneration)
+{
+	// Clearing the stock one-slot queue is correct only when the matching
+	// NetcodePlus context is being superseded or its equip lifetime is ending.
+	// A physical Stop merely marks bReleaseSeen and deliberately does not call here.
+	const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
+	const FDeferredEquipFireContext* const Context = DeferredEquipFireContexts.Find(WeaponKey);
+	if (Context != nullptr && EquippingState != nullptr
+		&& EquippingState->PendingFireSequence == Context->FireMode)
+	{
+		EquippingState->PendingFireSequence = INDEX_NONE;
+	}
+	DeferredEquipFireContexts.Remove(WeaponKey);
+	if (bInvalidateGeneration)
+	{
+		DeferredEquipFireGenerations.Remove(WeaponKey);
+	}
+}
+
+
+void AUTWeaponFix::ReconcileDeferredEquipRelease(uint8 FireModeNum,
+	int32 InFireEventIndex, uint32 ContextGeneration,
+	TWeakObjectPtr<AUTCharacter> ExpectedOwner)
+{
+	AUTCharacter* const Owner = ExpectedOwner.Get();
+	const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
+	const uint32* const ActiveGeneration = DeferredEquipFireGenerations.Find(WeaponKey);
+	const bool bStillOwnsCommittedShot = Role == ROLE_Authority
+		&& ActiveGeneration != nullptr
+		&& *ActiveGeneration == ContextGeneration
+		&& Owner != nullptr
+		&& UTOwner == Owner
+		&& Owner->GetWeapon() == this
+		&& FiringState.IsValidIndex(FireModeNum)
+		&& FiringState[FireModeNum] != nullptr
+		&& GetCurrentState() == FiringState[FireModeNum]
+		&& LastProcessedStopEventIndex.IsValidIndex(FireModeNum)
+		&& LastProcessedStopEventIndex[FireModeNum] >= InFireEventIndex;
+
+	if (!bStillOwnsCommittedShot)
+	{
+		// Do not leave the external generation table holding this weapon forever
+		// when the callback loses its firing-state/owner race. Never remove a newer
+		// generation that superseded this callback.
+		if (ActiveGeneration != nullptr && *ActiveGeneration == ContextGeneration)
+		{
+			DeferredEquipFireGenerations.Remove(WeaponKey);
+		}
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("[DeferredEquipFire] POST_COMMIT_STOP stale mode=%d event=%d generation=%u state=%s"),
+			FireModeNum, InFireEventIndex, ContextGeneration,
+			GetCurrentState() ? *GetCurrentState()->GetName() : TEXT("null"));
+		return;
+	}
+
+	DeferredEquipFireGenerations.Remove(WeaponKey);
+	UE_LOG(LogUTWeaponFix, Verbose,
+		TEXT("[DeferredEquipFire] POST_COMMIT_STOP mode=%d event=%d generation=%u"),
+		FireModeNum, InFireEventIndex, ContextGeneration);
+	StopFireInternal(FireModeNum);
+}
+
+
+bool AUTWeaponFix::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
+{
+	// BringUpFinished calls GotoActiveState() first, which can synchronously enter
+	// FiringState and call FireShot, then calls BeginFiringSequence while the stock
+	// EquippingState::PendingFireSequence is still live. That narrow window is the
+	// replay boundary for the payload accepted by ServerStartFireFixed.
+	const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
+	FDeferredEquipFireContext* DeferredContext = DeferredEquipFireContexts.Find(WeaponKey);
+	const uint32* ActiveGeneration = DeferredEquipFireGenerations.Find(WeaponKey);
+	const bool bDeferredReplayBoundary = Role == ROLE_Authority
+		&& bClientFired
+		&& DeferredContext != nullptr
+		&& ActiveGeneration != nullptr
+		&& DeferredContext->Generation == *ActiveGeneration
+		&& DeferredContext->FireMode == FireModeNum
+		&& DeferredContext->Owner.Get() == UTOwner
+		&& CurrentState != EquippingState
+		&& EquippingState != nullptr
+		&& EquippingState->PendingFireSequence == FireModeNum;
+
+	const bool bResult = Super::BeginFiringSequence(FireModeNum, bClientFired);
+
+	// Super can synchronously fire, remove, or destroy the weapon. Re-find the
+	// external context instead of retaining a pointer across that call.
+	DeferredContext = DeferredEquipFireContexts.Find(WeaponKey);
+	ActiveGeneration = DeferredEquipFireGenerations.Find(WeaponKey);
+	if (bDeferredReplayBoundary
+		&& DeferredContext != nullptr
+		&& ActiveGeneration != nullptr
+		&& DeferredContext->Generation == *ActiveGeneration
+		&& DeferredContext->FireMode == FireModeNum
+		&& DeferredContext->Owner.Get() == UTOwner)
+	{
+		const bool bShotDispatched = DeferredContext->bShotDispatched;
+		const bool bReleaseSeen = DeferredContext->bReleaseSeen;
+		const int32 FireEvent = DeferredContext->FireEventIndex;
+		const uint32 ContextGeneration = DeferredContext->Generation;
+		const TWeakObjectPtr<AUTCharacter> ExpectedOwner = DeferredContext->Owner;
+
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("[DeferredEquipFire] COMMIT mode=%d event=%d generation=%u shot=%d release=%d"),
+			FireModeNum, FireEvent, ContextGeneration,
+			bShotDispatched ? 1 : 0, bReleaseSeen ? 1 : 0);
+
+		// Super has completed the one synchronous replay attempt. Keep the generation
+		// alive for the guarded next-tick release, but make re-entry unable to consume
+		// this payload a second time.
+		ClearDeferredEquipFireContext(false);
+		if (bReleaseSeen && UTOwner != nullptr)
+		{
+			// The stock replay re-latches PendingFire inside BeginFiringSequence.
+			// Honor the already-accepted Stop immediately so a weapon switch cannot
+			// carry one frame of server-only held input into the next weapon.
+			UTOwner->SetPendingFire(FireModeNum, false);
+		}
+
+		if (bShotDispatched && bReleaseSeen)
+		{
+			FTimerDelegate ReleaseDelegate;
+			ReleaseDelegate.BindUObject(this,
+				&AUTWeaponFix::ReconcileDeferredEquipRelease,
+				FireModeNum, FireEvent, ContextGeneration, ExpectedOwner);
+			GetWorldTimerManager().SetTimerForNextTick(ReleaseDelegate);
+		}
+	}
+
+	return bResult;
+}
+
+
 
 
 
@@ -2756,6 +2940,70 @@ void AUTWeaponFix::FireShot()
 			return;
 		}
 
+		// ServerStartFireFixed may have accepted this shot while the weapon was
+		// still equipping. The stock queue remembers only its mode, so reinstall
+		// the exact request-scoped client aim/claim for this one synchronous
+		// FireShot. Consume before Super::FireShot() to make re-entry exactly-once.
+		const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
+		FDeferredEquipFireContext* const DeferredContext = DeferredEquipFireContexts.Find(WeaponKey);
+		const uint32* const ActiveGeneration = DeferredEquipFireGenerations.Find(WeaponKey);
+		const bool bDeferredEquipDispatch = DeferredContext != nullptr
+			&& ActiveGeneration != nullptr
+			&& !DeferredContext->bShotDispatched
+			&& DeferredContext->Generation == *ActiveGeneration
+			&& DeferredContext->Owner.Get() == UTOwner
+			&& DeferredContext->FireMode == CurrentFireMode
+			&& FiringState.IsValidIndex(CurrentFireMode)
+			&& FiringState[CurrentFireMode] != nullptr
+			&& CurrentState == FiringState[CurrentFireMode]
+			&& EquippingState != nullptr
+			&& EquippingState->PendingFireSequence == CurrentFireMode;
+
+		const bool bPreviousTransactionalFire = bIsTransactionalFire;
+		const bool bPreviousScopedAim = HasScopedTransactionalAim(this);
+		const FRotator PreviousTransactionalRotation = CachedTransactionalRotation;
+		const float PreviousFireZOffset = FireZOffset;
+		const float PreviousFireZOffsetTime = FireZOffsetTime;
+		AUTCharacter* const PreviousHitScanChar = ReceivedHitScanHitChar;
+		const uint8 PreviousHitScanIndex = ReceivedHitScanIndex;
+		const FVector PreviousHeadOffset = ReceivedHeadOffset;
+		const uint8 PreviousFireEventIndex = FireEventIndex;
+
+		if (bDeferredEquipDispatch)
+		{
+			DeferredContext->bShotDispatched = true;
+			bIsTransactionalFire = true;
+			CachedTransactionalRotation = DeferredContext->ClientViewRot;
+			ScopedTransactionalAimWeapons.Add(this);
+			FireEventIndex = (uint8)DeferredContext->FireEventIndex;
+
+			// Wire zero means the click occurred at BaseEyeHeight, not "no value".
+			// Always timestamp the resolved click-height so a stance change during
+			// equip cannot move the authoritative origin away from the fake.
+			FireZOffset = DeferredContext->ResolvedZOffset;
+			FireZOffsetTime = GetWorld()->GetTimeSeconds();
+
+			AUTCharacter* const DeferredHitChar = DeferredContext->ClientHitChar.Get();
+			if (DeferredHitChar != nullptr && bTrackHitScanReplication)
+			{
+				ReceivedHitScanHitChar = DeferredHitChar;
+				ReceivedHitScanIndex = (uint8)DeferredContext->FireEventIndex;
+				ReceivedHeadOffset = DeferredContext->ClientHeadOffset;
+			}
+			else
+			{
+				ReceivedHitScanHitChar = nullptr;
+				ReceivedHitScanIndex = 0;
+				ReceivedHeadOffset = FVector::ZeroVector;
+			}
+
+			UE_LOG(LogUTWeaponFix, Verbose,
+				TEXT("[DeferredEquipFire] DISPATCH mode=%d event=%d generation=%u release=%d aim=%s"),
+				DeferredContext->FireMode, DeferredContext->FireEventIndex,
+				DeferredContext->Generation, DeferredContext->bReleaseSeen ? 1 : 0,
+				*DeferredContext->ClientViewRot.ToString());
+		}
+
 		// 2. RHYTHM COMPENSATION & TIMESTAMP UPDATE
 		if (LastFireTime.IsValidIndex(CurrentFireMode))
 		{
@@ -2794,6 +3042,14 @@ void AUTWeaponFix::FireShot()
 				}
 			}
 		}
+		if (bDeferredEquipDispatch && LastFireTime.IsValidIndex(CurrentFireMode))
+		{
+			// The accepted click happened before the server finished equipping. Do
+			// not charge that server-only equip remainder against the client's next
+			// on-time same-mode shot.
+			LastFireTime[CurrentFireMode] = FMath::Min(
+				LastFireTime[CurrentFireMode], DeferredContext->ServerAcceptTime);
+		}
 
 		// 3. SPAWN PROJECTILE
 		UE_LOG(LogUTWeaponFix, Verbose, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
@@ -2804,6 +3060,26 @@ void AUTWeaponFix::FireShot()
 			bBufferedClickPending[BufferedDispatchMode] = false;
 			ScopedTransactionalAimWeapons.Remove(this);
 			CachedTransactionalRotation = FRotator::ZeroRotator;
+		}
+
+		if (bDeferredEquipDispatch)
+		{
+			bIsTransactionalFire = bPreviousTransactionalFire;
+			CachedTransactionalRotation = PreviousTransactionalRotation;
+			if (bPreviousScopedAim)
+			{
+				ScopedTransactionalAimWeapons.Add(this);
+			}
+			else
+			{
+				ScopedTransactionalAimWeapons.Remove(this);
+			}
+			FireZOffset = PreviousFireZOffset;
+			FireZOffsetTime = PreviousFireZOffsetTime;
+			ReceivedHitScanHitChar = PreviousHitScanChar;
+			ReceivedHitScanIndex = PreviousHitScanIndex;
+			ReceivedHeadOffset = PreviousHeadOffset;
+			FireEventIndex = PreviousFireEventIndex;
 		}
 	}
 }
@@ -3417,11 +3693,60 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : 0);
         return;
     }
+
+	UUTWeaponState* const RequestedFiringState = FiringState.IsValidIndex(FireModeNum)
+		? FiringState[FireModeNum] : nullptr;
+	const bool bCommitsImmediateFireShot = IsImmediateEquipFireState(RequestedFiringState);
+	const bool bQueuedDeferredEquip = CurrentState == EquippingState
+		&& bCommitsImmediateFireShot;
+	const TWeakObjectPtr<AUTWeaponFix> DeferredWeaponKey(this);
+
+	if (bQueuedDeferredEquip)
+	{
+		// Stock EquippingState has one pending-mode slot. Mirror that bounded,
+		// latest-wins contract while retaining the payload that would otherwise be
+		// cleared at the end of this RPC and replaced by stale server aim at commit.
+		const FDeferredEquipFireContext* const PreviousContext = DeferredEquipFireContexts.Find(DeferredWeaponKey);
+		if (PreviousContext != nullptr)
+		{
+			UE_LOG(LogUTWeaponFix, Verbose,
+				TEXT("[DeferredEquipFire] SUPERSEDE oldMode=%d oldEvent=%d oldGeneration=%u newMode=%d newEvent=%d"),
+				PreviousContext->FireMode, PreviousContext->FireEventIndex,
+				PreviousContext->Generation, FireModeNum, InFireEventIndex);
+		}
+		ClearDeferredEquipFireContext();
+		FDeferredEquipFireContext NewContext;
+		NewContext.FireMode = FireModeNum;
+		NewContext.ResolvedZOffset = (ZOffset != 0)
+			? (float)(ZOffset - 127)
+			: (UTOwner ? UTOwner->BaseEyeHeight : 0.f);
+		NewContext.ServerAcceptTime = GetWorld()->GetTimeSeconds();
+		NewContext.FireEventIndex = InFireEventIndex;
+		NewContext.Generation = AllocateDeferredEquipFireGeneration();
+		NewContext.ClientTimestamp = ClientTimestamp;
+		NewContext.ClientViewRot = ClientViewRot;
+		NewContext.Owner = UTOwner;
+		NewContext.ClientHitChar = ClientHitChar;
+		NewContext.ClientHeadOffset = ClientHeadOffset;
+		DeferredEquipFireContexts.Add(DeferredWeaponKey, NewContext);
+		DeferredEquipFireGenerations.Add(DeferredWeaponKey, NewContext.Generation);
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("[DeferredEquipFire] QUEUED mode=%d event=%d generation=%u clientT=%.4f aim=%s"),
+			FireModeNum, InFireEventIndex, NewContext.Generation,
+			ClientTimestamp, *ClientViewRot.ToString());
+	}
+	else
+	{
+		// A newer accepted immediate/non-shot Start owns this weapon now. Invalidate
+		// any post-commit release callback from an older deferred equip event.
+		ClearDeferredEquipFireContext();
+	}
+
     CachedTransactionalRotation = ClientViewRot;
-    if (IsShockPrimaryClickBuffer(this, FireModeNum))
-    {
-        ScopedTransactionalAimWeapons.Add(this);
-    }
+	// Exact ZeroRotator is a valid client direction. Scope every accepted fixed
+	// request synchronously; the old Shock-only scope made other projectiles fall
+	// back to the server's current rotation when the client aimed at +X.
+	ScopedTransactionalAimWeapons.Add(this);
     if (ZOffset != 0)
     {
         // Decode byte back to float
@@ -3475,6 +3800,21 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     if (UTOwner)
     {
         UTOwner->SetPendingFire(FireModeNum, true);
+		if (bQueuedDeferredEquip)
+		{
+			// ActiveState checks modes in numeric order. Make the exact accepted
+			// equip-queued event win instead of letting an older other-mode latch
+			// enter a different firing state before BringUpFinished replays this one.
+			for (uint8 Mode = 0; Mode < GetNumFireModes(); ++Mode)
+			{
+				const UUTWeaponState* const OtherState = FiringState.IsValidIndex(Mode)
+					? FiringState[Mode] : nullptr;
+				if (Mode != FireModeNum && IsImmediateEquipFireState(OtherState))
+				{
+					UTOwner->SetPendingFire(Mode, false);
+				}
+			}
+		}
     }
     // FIX: Cancel any deferred ActiveState transition from a previous stop.
     // Without this, the old timer fires mid-sequence and triggers a ghost shot
@@ -3608,6 +3948,13 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     CachedTransactionalRotation = FRotator::ZeroRotator;
 	ScopedTransactionalAimWeapons.Remove(this);
 	ReceivedHitScanHitChar = nullptr;
+	if (bQueuedDeferredEquip)
+	{
+		ReceivedHitScanIndex = 0;
+		ReceivedHeadOffset = FVector::ZeroVector;
+		FireZOffset = 0.f;
+		FireZOffsetTime = 0.f;
+	}
 
     // 4. CONFIRM — always sent, including shock balls. Keeps event indices synced
     // and clears the resend queue. Shock ball fakes are preserved in
@@ -3632,6 +3979,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 void AUTWeaponFix::Removed()
 {
 	StopShockInputTrace();
+	ClearDeferredEquipFireContext();
 	// A delayed Flak prediction belongs to this weapon instance. Once it is removed,
 	// the authoritative replicated projectile (if any) is the only valid visual source.
 	ClearDelayedFlakFakeProjectiles();
@@ -3670,6 +4018,7 @@ void AUTWeaponFix::Removed()
 void AUTWeaponFix::Destroyed()
 {
 	StopShockInputTrace();
+	ClearDeferredEquipFireContext();
 	// Direct replay/admin destruction can bypass normal inventory removal. Break
 	// the master-pose relationship before the actor's component teardown starts.
 	for (int32 Mode = 0; Mode < 2; ++Mode)
@@ -3982,6 +4331,27 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     {
         LastProcessedStopEventIndex[FireModeNum] = InFireEventIndex;
     }
+
+	// Do not cancel an already accepted equip-queued shot: the owning client has
+	// predicted it and the server has ACKed its reservation. Remember that the
+	// physical button is up, commit that one shot with its saved payload, then
+	// leave the firing state on the guarded next tick.
+	const TWeakObjectPtr<AUTWeaponFix> DeferredWeaponKey(this);
+	FDeferredEquipFireContext* const DeferredContext = DeferredEquipFireContexts.Find(DeferredWeaponKey);
+	const uint32* const DeferredGeneration = DeferredEquipFireGenerations.Find(DeferredWeaponKey);
+	if (DeferredContext != nullptr
+		&& DeferredGeneration != nullptr
+		&& DeferredContext->Generation == *DeferredGeneration
+		&& DeferredContext->Owner.Get() == UTOwner
+		&& DeferredContext->FireMode == FireModeNum
+		&& InFireEventIndex >= DeferredContext->FireEventIndex)
+	{
+		DeferredContext->bReleaseSeen = true;
+		UE_LOG(LogUTWeaponFix, Verbose,
+			TEXT("[DeferredEquipFire] RELEASE_SEEN mode=%d event=%d stop=%d generation=%u"),
+			FireModeNum, DeferredContext->FireEventIndex,
+			InFireEventIndex, DeferredContext->Generation);
+	}
 
 	// Log only the accepted fixed Stop. Retry copies return at the idempotency gate
 	// above, keeping level-2 dogfood volume transition-oriented.
@@ -5531,17 +5901,24 @@ FRotator AUTWeaponFix::GetBaseFireRotation()
 
 FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 {
+	// AUTWeapon's default argument is the 255 sentinel for CurrentFireMode. Resolve
+	// it for the stock origin calculation and for the opt-in projectile-origin
+	// experiment below; the experiment remains disabled by default.
+	const uint8 ResolvedFireMode = (FireMode == 255) ? CurrentFireMode : FireMode;
+
     // 1. Get the standard start location (Muzzle offset, etc applied to CURRENT Actor Location)
-    FVector StartLoc = Super::GetFireStartLoc(FireMode);
+    FVector StartLoc = Super::GetFireStartLoc(ResolvedFireMode);
 
     // 2. PARALLAX FIX (PROJECTILES ONLY)
         // We check if a Projectile Class is assigned to this mode. 
         // If ProjClass is NULL, it's likely a Hitscan mode (Sniper, Shock Beam), so we skip.
-    bool bIsProjectile = (ProjClass.IsValidIndex(FireMode) && ProjClass[FireMode] != nullptr);
+    bool bIsProjectile = (ProjClass.IsValidIndex(ResolvedFireMode) && ProjClass[ResolvedFireMode] != nullptr);
 
-    // Buffered Shock uses the explicit scope; other projectiles retain the
-    // existing transactional/non-zero gate.
-    if (bIsProjectile && Role == ROLE_Authority
+    // Buffered/deferred requests use the explicit scope; other projectiles retain
+    // the existing transactional/non-zero gate. Stock already applies
+    // GetDelayedShotPosition() when bNetDelayedShot is set, so never rewind twice.
+    if (bIsProjectile && Role == ROLE_Authority && !bNetDelayedShot
+		&& CVarProjectileOriginRewind.GetValueOnGameThread() > 0
         && (HasScopedTransactionalAim(this)
             || (bIsTransactionalFire && !CachedTransactionalRotation.IsZero()))
         && UTOwner)
@@ -6514,6 +6891,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 void AUTWeaponFix::DetachFromOwner_Implementation()
 {
 	StopShockInputTrace();
+	ClearDeferredEquipFireContext();
     GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
 	ClearFireEventsFixed();
@@ -6551,6 +6929,7 @@ bool AUTWeaponFix::PutDown()
     if (bPutDownResult)
     {
 		StopShockInputTrace();
+		ClearDeferredEquipFireContext();
 		// The original fixed fire RPCs are Reliable. Stop only NetcodePlus's
 		// application-level retry copies at the outgoing equip boundary.
 		ClearFireEventsFixed();
@@ -6585,20 +6964,22 @@ bool AUTWeaponFix::PutDown()
                 else if (GetWorldTimerManager().IsTimerActive(RetryFireHandle[i]))
                 {
                     // LEGACY (ncp.GhostFix=0): graduate the local retry timer to a Pawn flag.
-                    // NEVER graduate a cross-mode stall-fix retry (ncp.CrossModeRetry): that
-                    // arm covers a press landing in another mode's firing tail — the classic
-                    // tap-then-switch motion — and graduating it makes the next weapon fire a
-                    // shot the player never pressed (the exact ghost class GhostFix targets).
-                    // Buffered clicks are spent input, not held intent — graduating
-                    // one would fire a ghost shot on the next weapon.
-                    if (!bCrossModeRetryArmed[i] && !bBufferedClickPending[i])
+                    // A cross-mode retry reaches PutDown only while its physical press is
+                    // still live: genuine StopFire clears this timer unconditionally. Transfer
+                    // it HERE, at the actual switch boundary, instead of at retry-arm time;
+                    // that prevents ActiveState from bypassing the target mode's cooldown when
+                    // no weapon switch occurs. Buffered clicks are spent input and never carry.
+                    if (!bBufferedClickPending[i])
                     {
                         UTOwner->SetPendingFire(i, true);
-                        UE_LOG(LogUTWeaponFix, Verbose, TEXT("PutDown: Transferring Retry %d to Pawn PendingFire"), i);
+                        UE_LOG(LogUTWeaponFix, Verbose,
+                            TEXT("PutDown: Transferring %s Retry %d to Pawn PendingFire"),
+                            bCrossModeRetryArmed[i] ? TEXT("cross-mode") : TEXT("cooldown"), i);
                     }
                     else if (FireDbg())
                     {
-                        UE_LOG(LogUTWeaponFix, Warning, TEXT("[FireDbg] PutDown SKIP graduation of cross-mode retry mode=%d (stall-fix arm, not held intent)"), i);
+                        UE_LOG(LogUTWeaponFix, Warning,
+                            TEXT("[FireDbg] PutDown SKIP graduation of buffered click mode=%d"), i);
                     }
                 }
             }
@@ -7425,6 +7806,9 @@ TArray<UMeshComponent*> AUTWeaponFix::Get1PMeshes_Implementation() const
 
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
+	// New equip lifetime: neither a queued payload nor a pending release callback
+	// from an older owner/switch may be allowed to commit here.
+	ClearDeferredEquipFireContext();
 	const bool bLogSkinTiming = SkinTiming();
 	const double BringUpStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
  
