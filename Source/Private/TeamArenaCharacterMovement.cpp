@@ -85,6 +85,13 @@ FNetworkPredictionData_Client* UTeamArenaCharacterMovement::GetPredictionData_Cl
 
 void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	// The body already depends on movement. Choose its animation rate before Super,
+	// which can itself request a pose for root motion; do not change tick ordering.
+	if (ATeamArenaCharacter* Character = Cast<ATeamArenaCharacter>(CharacterOwner))
+	{
+		Character->UpdateRemoteAnimationUROBeforeMovement();
+	}
+
     // --- HIGH-FPS FIX #3: Throttle team collision updates ---
     // Epic's code runs GetPawnIterator() + IgnoreActorWhenMoving() EVERY TICK
     // At 480 FPS with 8 players = 30,720 calls/sec. We reduce.
@@ -118,6 +125,10 @@ void UTeamArenaCharacterMovement::TickComponent(float DeltaTime, ELevelTick Tick
 
 void UTeamArenaCharacterMovement::OnUnregister()
 {
+	if (ATeamArenaCharacter* Character = Cast<ATeamArenaCharacter>(CharacterOwner))
+	{
+		Character->ReleaseRemoteAnimationURO();
+	}
     ClearTeamCollisionIgnores(TeamCollisionIgnoreComponent.Get());
     TeamCollisionIgnoreComponent.Reset();
     LastTeamCollisionUpdateTime = -1.0;

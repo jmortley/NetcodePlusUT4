@@ -38,6 +38,20 @@
 #include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 #include "ClutchRoundState.h"       // Clutch defender footstep role/phase lookup
 #include "Engine/DemoNetDriver.h"   // deferred-outline warning: tag killcam/instant-replay worlds
+#include "Engine/LocalPlayer.h"
+#include "NCRemoteAnimationPolicy.h"
+#include "NCRemoteAnimationURO.h"
+
+DECLARE_STATS_GROUP_VERBOSE(TEXT("NCP URO"), STATGROUP_NCPURO, STATCAT_Advanced);
+DECLARE_CYCLE_STAT(TEXT("Policy total"), STAT_NCPUROPolicy, STATGROUP_NCPURO);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Managed characters"), STAT_NCPUROManaged, STATGROUP_NCPURO);
+DECLARE_DWORD_COUNTER_STAT(TEXT("Characters assigned half rate"), STAT_NCPUROThrottled, STATGROUP_NCPURO);
+
+static TAutoConsoleVariable<int32> CVarRemoteAnimationURO(
+	TEXT("ncp.RemoteAnimationURO"), 0,
+	TEXT("Experimental remote third-person animation optimization on online clients. ")
+	TEXT("1 = distant peripheral bodies may update every other frame above 240 FPS; 0 = restore authored settings. ")
+	TEXT("No Blueprint opt-in required. Requires a.URO.Enable 1. Default 0."), ECVF_Default);
 
 // Shipping clients report every ensure with a synchronous game-thread minidump, which hitches the
 // match and hard-crashes under AV hooks (328 Blitz/iCTF cap crash). Recoverable outline states must
@@ -73,6 +87,7 @@ namespace
 		TWeakObjectPtr<APlayerCameraManager> CameraManager;
 		TWeakObjectPtr<AActor> ViewTarget;
 		FVector Location = FVector::ZeroVector;
+		NCRemoteAnimationPolicy::FView AnimationView;
 		bool bCameraCut = false;
 	};
 
@@ -82,8 +97,56 @@ namespace
 		uint64 FrameNumber = ~uint64(0);
 		uint32 Revision = 1;
 		double MonotonicTimeSeconds = 0.0;
+		double SmoothedFrameSeconds = 0.0;
+		bool bAnimationFrameRateSafe = false;
 		TArray<FOverlayViewerState, TInlineAllocator<4>> Viewers;
 	};
+
+	NCRemoteAnimationPolicy::FView MakeRemoteAnimationView(APlayerController& PC,
+		const FVector& Location, const FRotator& Rotation)
+	{
+		NCRemoteAnimationPolicy::FView View;
+		View.Location = Location;
+		View.Forward = Rotation.Vector();
+		View.bProtectAll = true;
+		const APlayerCameraManager* Camera = PC.PlayerCameraManager;
+		const ULocalPlayer* LocalPlayer = Cast<ULocalPlayer>(PC.Player);
+		if (Camera == nullptr || LocalPlayer == nullptr)
+		{
+			return View;
+		}
+		const FMinimalViewInfo& POV = Camera->CameraCache.POV;
+		const float FOV = Camera->GetFOVAngle();
+		int32 Width = 0, Height = 0;
+		PC.GetViewportSize(Width, Height);
+		const float ViewWidth = Width * LocalPlayer->Size.X;
+		const float ViewHeight = Height * LocalPlayer->Size.Y;
+		if (POV.ProjectionMode != ECameraProjectionMode::Perspective
+			|| !FMath::IsFinite(FOV) || FOV <= 0.f || FOV >= 179.f
+			|| !FMath::IsFinite(ViewWidth) || !FMath::IsFinite(ViewHeight)
+			|| ViewWidth <= 0.f || ViewHeight <= 0.f)
+		{
+			return View;
+		}
+		const float Aspect = POV.bConstrainAspectRatio ? POV.AspectRatio : ViewWidth / ViewHeight;
+		if (!FMath::IsFinite(Aspect) || Aspect <= 0.f)
+		{
+			return View;
+		}
+		const bool bMaintainX = POV.bConstrainAspectRatio
+			|| LocalPlayer->AspectRatioAxisConstraint == AspectRatio_MaintainXFOV
+			|| (LocalPlayer->AspectRatioAxisConstraint == AspectRatio_MajorAxisFOV && ViewWidth > ViewHeight);
+		View.TanHalfVerticalFOV = FMath::Tan(FMath::DegreesToRadians(FOV * 0.5f)) / (bMaintainX ? Aspect : 1.f);
+		const AUTCharacter* ViewedCharacter = Cast<AUTCharacter>(PC.GetViewTarget());
+		const AUTWeapon* ViewedWeapon = ViewedCharacter != nullptr ? ViewedCharacter->GetWeapon() : nullptr;
+		// Protect all during zoom, cuts and an unresolved large camera/aim change.
+		// Camera data can precede this frame's camera update at the movement hook.
+		View.bProtectAll = Camera->bGameCameraCutThisFrame
+			|| (ViewedWeapon != nullptr && ViewedWeapon->ZoomState != EZoomState::EZS_NotZoomed)
+			|| FOV < Camera->DefaultFOV - 1.f
+			|| FVector::DotProduct(View.Forward, PC.GetControlRotation().Vector()) < 0.9659258f;
+		return View;
+	}
 
 	double GetOverlayFrameTimeSeconds()
 	{
@@ -136,8 +199,37 @@ namespace
 
 		if (Cache->FrameNumber != GFrameCounter)
 		{
+			const double PreviousFrameTime = Cache->MonotonicTimeSeconds;
+			const bool bConsecutiveFrame = Cache->FrameNumber != ~uint64(0)
+				&& Cache->FrameNumber + 1 == GFrameCounter;
 			Cache->FrameNumber = GFrameCounter;
 			Cache->MonotonicTimeSeconds = GetOverlayFrameTimeSeconds();
+			const bool bAnimationEnabled = CVarRemoteAnimationURO.GetValueOnGameThread() > 0;
+			Cache->bAnimationFrameRateSafe = false;
+			if (bAnimationEnabled)
+			{
+				// Wall time keeps time dilation and fixed simulation steps from admitting
+				// low-FPS clients. Missing samples retain full rate until sampling resumes.
+				const double FrameSeconds = Cache->MonotonicTimeSeconds - PreviousFrameTime;
+				if (bConsecutiveFrame && NCRemoteAnimationPolicy::IsFiniteTime(FrameSeconds) && FrameSeconds > 0.0)
+				{
+					const double Alpha = FMath::Clamp(FrameSeconds / 0.25, 0.0, 1.0);
+					Cache->SmoothedFrameSeconds = Cache->SmoothedFrameSeconds > 0.0
+						? Cache->SmoothedFrameSeconds + Alpha * (FrameSeconds - Cache->SmoothedFrameSeconds)
+						: FrameSeconds;
+					const double MaxFrameSeconds = 1.0 / NCRemoteAnimationPolicy::FSettings().MinFPS;
+					Cache->bAnimationFrameRateSafe = FrameSeconds <= MaxFrameSeconds
+						&& Cache->SmoothedFrameSeconds <= MaxFrameSeconds;
+				}
+				else
+				{
+					Cache->SmoothedFrameSeconds = 0.0;
+				}
+			}
+			else
+			{
+				Cache->SmoothedFrameSeconds = 0.0;
+			}
 
 			TArray<FOverlayViewerState, TInlineAllocator<4>> NewViewers;
 			if (World != nullptr)
@@ -158,8 +250,13 @@ namespace
 						? PC->PlayerCameraManager->GetViewTarget() : PC->GetViewTarget();
 					Viewer.bCameraCut = PC->PlayerCameraManager != nullptr &&
 						PC->PlayerCameraManager->bGameCameraCutThisFrame;
-					FRotator UnusedViewRotation;
-					PC->GetPlayerViewPoint(Viewer.Location, UnusedViewRotation);
+					FRotator ViewRotation;
+					PC->GetPlayerViewPoint(Viewer.Location, ViewRotation);
+					Viewer.AnimationView.bProtectAll = true;
+					if (bAnimationEnabled)
+					{
+						Viewer.AnimationView = MakeRemoteAnimationView(*PC, Viewer.Location, ViewRotation);
+					}
 				}
 			}
 
@@ -276,6 +373,93 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
     //LastPositionSaveTime = 0.0f;
 }
 
+ATeamArenaCharacter::~ATeamArenaCharacter() = default;
+
+void ATeamArenaCharacter::UpdateRemoteAnimationUROBeforeMovement()
+{
+	const bool bRequested = CVarRemoteAnimationURO.GetValueOnGameThread() > 0;
+	if (!bRequested && !RemoteAnimationUROState)
+	{
+		return;
+	}
+	SCOPE_CYCLE_COUNTER(STAT_NCPUROPolicy);
+	if (LastRemoteAnimationUROFrame == GFrameCounter)
+	{
+		return;
+	}
+	LastRemoteAnimationUROFrame = GFrameCounter;
+	UWorld* World = GetWorld();
+	const bool bEnabled = bRequested && World != nullptr && GetNetMode() == NM_Client
+		&& World->DemoNetDriver == nullptr && Role == ROLE_SimulatedProxy && !IsLocallyControlled();
+	if (!bEnabled && !RemoteAnimationUROState)
+	{
+		return;
+	}
+	if (!RemoteAnimationUROState)
+	{
+		RemoteAnimationUROState.Reset(new FNCRemoteAnimationUROState());
+	}
+	const NCRemoteAnimationPolicy::FSettings Settings;
+	bool bCandidate = false;
+	uint32 ViewRevision = 0;
+	double Now = GetOverlayFrameTimeSeconds();
+	if (bEnabled)
+	{
+		const FOverlayWorldViewCache& Views = GetOverlayWorldViewCache(World);
+		Now = Views.MonotonicTimeSeconds;
+		ViewRevision = Views.Revision;
+		const USkeletalMeshComponent* Body = GetMesh();
+		bCandidate = Body != nullptr && Views.bAnimationFrameRateSafe && Views.Viewers.Num() > 0;
+		if (bCandidate)
+		{
+			for (const FOverlayViewerState& Viewer : Views.Viewers)
+			{
+				if (Viewer.ViewTarget.Get() == this
+					|| (Viewer.Controller.IsValid() && Viewer.Controller->GetPawn() == this)
+					|| NCRemoteAnimationPolicy::IsHighPriorityForView(
+						Body->Bounds.Origin, Body->Bounds.SphereRadius, Viewer.AnimationView, Settings))
+				{
+					bCandidate = false;
+					break;
+				}
+			}
+		}
+	}
+	RemoteAnimationUROState->Update(*this, bEnabled, bCandidate, Now, ViewRevision, Settings.DemotionDelay);
+	if (RemoteAnimationUROState->IsManaged())
+	{
+		INC_DWORD_STAT(STAT_NCPUROManaged);
+		if (RemoteAnimationUROState->IsThrottled())
+		{
+			INC_DWORD_STAT(STAT_NCPUROThrottled);
+		}
+	}
+	else if (!bRequested)
+	{
+		RemoteAnimationUROState.Reset();
+	}
+}
+
+void ATeamArenaCharacter::ReleaseRemoteAnimationURO(bool bTeardown)
+{
+	if (RemoteAnimationUROState)
+	{
+		SCOPE_CYCLE_COUNTER(STAT_NCPUROPolicy);
+		RemoteAnimationUROState->Release(*this, bTeardown);
+		if (bTeardown || (!RemoteAnimationUROState->IsManaged()
+			&& CVarRemoteAnimationURO.GetValueOnGameThread() <= 0))
+		{
+			RemoteAnimationUROState.Reset();
+		}
+	}
+}
+
+void ATeamArenaCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	ReleaseRemoteAnimationURO(true);
+	Super::EndPlay(EndPlayReason);
+}
+
 // ── Force Models (MutForceModels port, phase 1) ─────────────────────────────
 // One override covers every apply trigger — spawn (PossessedBy) and team-change
 // (OnRep_PlayerState / Team / SelectedCharacter OnRep) all route through the base
@@ -317,6 +501,8 @@ void ATeamArenaCharacter::NotifyTeamChanged()
 
 void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data)
 {
+	// A new animation instance must not inherit time owed by the previous pose.
+	ReleaseRemoteAnimationURO(true);
 	if (GetNetMode() == NM_DedicatedServer)
 	{
 		Super::ApplyCharacterData(Data);
@@ -346,6 +532,10 @@ void ATeamArenaCharacter::UpdateOutline()
 	// body duplicate during the unsafe window; the flush reads the latest outline state.
 	if (!bDeferredOutlineUpdatePending)
 	{
+		if (IsOutlined() && (CustomDepthMesh == nullptr || !CustomDepthMesh->IsRegistered()))
+		{
+			ReleaseRemoteAnimationURO(true);
+		}
 		Super::UpdateOutline();
 	}
 }
@@ -372,6 +562,8 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 	// critical parent invariant before stock gets the opportunity to call RegisterComponent().
 	if (IsOutlined() && CustomDepthMesh == nullptr)
 	{
+		// DuplicateObject must not copy our temporary body opt-in to the outline.
+		ReleaseRemoteAnimationURO(true);
 		CustomDepthMesh = DuplicateObject<USkeletalMeshComponent>(BodyMesh, this);
 		if (CustomDepthMesh == nullptr)
 		{
@@ -442,6 +634,10 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 		return;
 	}
 
+	if (IsOutlined() && (CustomDepthMesh == nullptr || !CustomDepthMesh->IsRegistered()))
+	{
+		ReleaseRemoteAnimationURO(true);
+	}
 	Super::UpdateOutline();
 }
 
@@ -1007,6 +1203,16 @@ void ATeamArenaCharacter::RefreshOtherForcedModels()
 		// any armour replication on the pawn itself. Re-run stock overlay setup, then our tint once.
 		Other->UpdateArmorOverlay();
 	}
+}
+
+void ATeamArenaCharacter::UpdateCharOverlays()
+{
+	if (CharOverlayFlags != 0 && (OverlayMesh == nullptr || !OverlayMesh->IsRegistered()))
+	{
+		// Creation copies the body flag; re-registration can wake a second pose consumer.
+		ReleaseRemoteAnimationURO(true);
+	}
+	Super::UpdateCharOverlays();
 }
 
 void ATeamArenaCharacter::UpdateArmorOverlay()
@@ -2254,6 +2460,15 @@ void ATeamArenaCharacter::UpdateSkin()
 
 void ATeamArenaCharacter::Tick(float DeltaTime)
 {
+	// Movement normally services the drain before the next body pose. If movement
+	// stops, keep servicing restoration from the actor without acquiring a policy.
+	const UCharacterMovementComponent* AnimationMovement = GetCharacterMovement();
+	if (RemoteAnimationUROState && (AnimationMovement == nullptr
+		|| !AnimationMovement->IsRegistered() || !AnimationMovement->IsActive()
+		|| !AnimationMovement->IsComponentTickEnabled()))
+	{
+		ReleaseRemoteAnimationURO();
+	}
 	// Flush work queued by an earlier ApplyCharacterData before any forced-model apply below can
 	// queue another rebuild. This ordering guarantees an ApplyCharacterData reached from this Tick
 	// cannot recreate its outline until the following character tick.
@@ -2683,6 +2898,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
 {
+	// Stock may enable the previously sleeping first-person animation consumer.
+	ReleaseRemoteAnimationURO(true);
 	Super::BecomeViewTarget(PC);
 
 
@@ -2706,6 +2923,13 @@ void ATeamArenaCharacter::BecomeViewTarget(APlayerController* PC)
 	// OnRepWeaponSkin may have run before a remote first-person weapon existed.
 	// Re-resolve now so a newly spectated player shows the same skin as third person.
 	UpdateWeaponSkin();
+}
+
+void ATeamArenaCharacter::BehindViewChange(APlayerController* PC, bool bNowBehindView)
+{
+	// BehindViewChange can also run without BecomeViewTarget when toggling the camera.
+	ReleaseRemoteAnimationURO(true);
+	Super::BehindViewChange(PC, bNowBehindView);
 }
 
 

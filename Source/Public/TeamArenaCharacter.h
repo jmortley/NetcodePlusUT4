@@ -20,7 +20,7 @@ class UUTWeaponSkin;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class USkeletalMeshComponent;
-
+struct FNCRemoteAnimationUROState;
 /** Server-only companion to AUTCharacter::SavedPositions. Stock rewind history
  *  records location but not capsule posture, so a slide that ends before hit
  *  validation cannot otherwise be reconstructed safely. */
@@ -52,8 +52,14 @@ class NETCODEPLUS_API ATeamArenaCharacter : public AUTCharacter
 
 public:
     ATeamArenaCharacter(const FObjectInitializer& ObjectInitializer);
+    virtual ~ATeamArenaCharacter();
+
+	/** Client presentation only; called before movement can tick the body pose. */
+	void UpdateRemoteAnimationUROBeforeMovement();
+	void ReleaseRemoteAnimationURO(bool bTeardown = false);
 
     virtual void BecomeViewTarget(APlayerController* PC) override;
+	virtual void BehindViewChange(APlayerController* PC, bool bNowBehindView) override;
 	// The material to use for the overlay (Assign M_ShieldBelt_Overlay here in BP)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawn Protection")
 	UMaterialInterface* SpawnProtectionMaterial;
@@ -80,6 +86,7 @@ public:
 	virtual void UpdateHolsteredWeaponAttachment() override;
 	virtual void UpdateWeaponSkin() override;
 	virtual void UpdateSkin() override;
+	virtual void UpdateCharOverlays() override;
 	void SubmitConfiguredWeaponSkin(AUTWeaponFix* Weapon, bool bForce);
 
 	/** Submit the local F5 choice for an owned weapon. Empty SkinPath is Default. */
@@ -118,6 +125,7 @@ public:
 		bool& bOutFloorSliding, float& OutSlideElapsed) const;
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	virtual FVector GetHeadLocation(float PredictionTime = 0.f)  override;
 
@@ -137,6 +145,10 @@ public:
 
 
 protected:
+	// Allocated only when the experimental client animation policy is enabled.
+	TUniquePtr<FNCRemoteAnimationUROState> RemoteAnimationUROState;
+	uint64 LastRemoteAnimationUROFrame = ~uint64(0);
+
 	/** Kept to the same age horizon as stock SavedPositions; authority only. */
 	TArray<FNCSavedCapsulePosture> SavedCapsulePostures;
 
