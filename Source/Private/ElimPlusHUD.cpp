@@ -817,6 +817,13 @@ void AElimPlusHUD::DrawHUD()
 
 		AElimPlusStatsReplicator* Stats = FindStatsReplicator(GetWorld());
 
+		struct FElimPortraitInkBounds
+		{
+			float MinX;
+			float MinY;
+			float MaxX;
+			float MaxY;
+		};
 		struct FElimStripDraw
 		{
 			FElimPlusHUDPlayerSnapshot Player;
@@ -841,6 +848,7 @@ void AElimPlusHUD::DrawHUD()
 			float EloHeight = 0.f;
 			float EloScale = 1.f;
 			FLinearColor EloColor = FLinearColor::White;
+			FElimPortraitInkBounds InkBounds = { 0.f, 0.f, 0.f, 0.f };
 		};
 		// Elim servers can exceed the usual 5v5 roster. Keep the render-frame
 		// scratch storage inline through a full 32-player server so an oversized
@@ -1122,13 +1130,6 @@ void AElimPlusHUD::DrawHUD()
 		// subclass. Only this exact HUD class is known to use the private pass helper.
 		bool bCanBatch = GetClass() == AElimPlusHUD::StaticClass();
 		for (const FElimStripDraw& Draw : PortraitDraws) bCanBatch &= !Draw.bJoinAnimating;
-		struct FElimPortraitInkBounds
-		{
-			float MinX;
-			float MinY;
-			float MaxX;
-			float MaxY;
-		};
 		auto GetPortraitInkBounds = [bHasBetaGeometry, &BetaGeometry](const FElimStripDraw& Draw)
 		{
 			const float PipHeight = Draw.PipSize * (320.f / 224.f);
@@ -1177,15 +1178,23 @@ void AElimPlusHUD::DrawHUD()
 			}
 			return Bounds;
 		};
-		for (int32 A = 0; bCanBatch && A < PortraitDraws.Num(); ++A)
+		// Bounds depend only on this frame's prepared card data, not its pair.
+		if (bCanBatch && PortraitDraws.Num() > 1)
 		{
-			const FElimPortraitInkBounds DA = GetPortraitInkBounds(PortraitDraws[A]);
-			for (int32 B = A + 1; B < PortraitDraws.Num(); ++B)
+			for (FElimStripDraw& Draw : PortraitDraws)
 			{
-				const FElimPortraitInkBounds DB = GetPortraitInkBounds(PortraitDraws[B]);
-				const bool bOverlap = DA.MinX < DB.MaxX && DB.MinX < DA.MaxX
-					&& DA.MinY < DB.MaxY && DB.MinY < DA.MaxY;
-				if (bOverlap) { bCanBatch = false; break; }
+				Draw.InkBounds = GetPortraitInkBounds(Draw);
+			}
+			for (int32 A = 0; bCanBatch && A < PortraitDraws.Num() - 1; ++A)
+			{
+				const FElimPortraitInkBounds& DA = PortraitDraws[A].InkBounds;
+				for (int32 B = A + 1; B < PortraitDraws.Num(); ++B)
+				{
+					const FElimPortraitInkBounds& DB = PortraitDraws[B].InkBounds;
+					const bool bOverlap = DA.MinX < DB.MaxX && DB.MinX < DA.MaxX
+						&& DA.MinY < DB.MaxY && DB.MinY < DA.MaxY;
+					if (bOverlap) { bCanBatch = false; break; }
+				}
 			}
 		}
 		if (bCanBatch)
