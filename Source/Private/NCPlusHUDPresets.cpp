@@ -259,6 +259,30 @@ namespace NCPlusHUDPresetsImpl
 			"offset_x": 0,
 			"offset_y": 0,
 			"scale": 1,
+			"hidden": false
+		},
+		"ctf_carrier_indicator":
+		{
+			"anchor": "Center",
+			"offset_x": 0,
+			"offset_y": 0,
+			"scale": 1,
+			"hidden": false
+		},
+		"ctf_enemy_has_flag":
+		{
+			"anchor": "TopCenter",
+			"offset_x": 0,
+			"offset_y": 110,
+			"scale": 1,
+			"hidden": false
+		},
+		"crosshair_flag_grab":
+		{
+			"anchor": "Center",
+			"offset_x": 0,
+			"offset_y": 0,
+			"scale": 1,
 			"hidden": true
 		},
 		"weapon_bar_right":
