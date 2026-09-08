@@ -153,12 +153,11 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	// bTeamSharedDeathCounter=false (the C++ default below is team-shared=true).
 	// NOTE: if the BP CDO ALSO overrides RespawnDelays, this array is shadowed —
 	// change it in the BP (or clear that override) for these values to take effect.
-	RespawnDelays.Add(5.0f);   // 1st death
-	RespawnDelays.Add(9.0f);   // 2nd death
-	RespawnDelays.Add(13.0f);  // 3rd death
-	RespawnDelays.Add(20.0f);  // 4th death
-	RespawnDelays.Add(30.0f);  // 5th death
-	RespawnDelays.Add(40.0f);  // 6th+ deaths (cap)
+	RespawnDelays.Add(6.0f);   // 1st death
+	RespawnDelays.Add(12.0f);  // 2nd death
+	RespawnDelays.Add(18.0f);  // 3rd death
+	RespawnDelays.Add(24.0f);  // 4th death
+	RespawnDelays.Add(36.0f);  // 5th+ deaths (cap)
 
 	RespawnProtectionTime = 1.5f;
 	WipeoutGracePeriod = 0.15f;
@@ -834,7 +833,7 @@ float AUWipeoutGame::GetRespawnDelayForDeathIndex(int32 DeathIndex) const
 {
 	if (RespawnDelays.Num() == 0)
 	{
-		return 5.0f; // Fallback
+		return 6.0f; // Fallback: first-death delay
 	}
 
 	// Clamp to last element (the cap)
@@ -960,8 +959,8 @@ void AUWipeoutGame::StartRespawnTimer(AUTPlayerState* DeadPS)
 
 	const int32 TeamIndex = DeadPS->Team->TeamIndex;
 
-	// Compute delay BEFORE incrementing so first death uses index 0 (4s),
-	// second death uses index 1 (7s), etc.
+	// Compute delay BEFORE incrementing so the first death uses index 0,
+	// the second death uses index 1, etc.
 	float RespawnDelay = ComputeRespawnDelay(TeamIndex, DeadPS);
 
 	// Now increment counters
