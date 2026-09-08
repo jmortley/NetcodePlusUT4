@@ -11,6 +11,53 @@
 #include "EngineUtils.h"
 #include "NCAccuracyStatsReplicator.h"
 #include "CTFStatsReplicator.h"
+#include "WipeoutDamageReplicator.h"
+#include "WipeoutGame.h"
+#include "UTCTFGameState.h"
+#include "UTCarriedObject.h"
+#include "UTTeamInfo.h"
+#include "Engine/Canvas.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
+
+namespace
+{
+	int32 GMatchOverlayEnabled = -1;
+	bool ContainsPoint(const FVector4& Bounds, const FVector2D& Point)
+	{
+		return Point.X >= Bounds.X && Point.X <= Bounds.Z && Point.Y >= Bounds.Y && Point.Y <= Bounds.W;
+	}
+	bool IsWipeoutMatch(const AUTGameState* GS)
+	{
+		return GS && GS->GameModeClass && GS->GameModeClass->IsChildOf(AUWipeoutGame::StaticClass());
+	}
+}
+
+bool UNCPlusSpectatorSlideOut::IsMatchOverlayEnabled()
+{
+	if (GMatchOverlayEnabled < 0)
+	{
+		bool bEnabled = true;
+		if (GConfig)
+		{
+			GConfig->GetBool(TEXT("NetcodePlus"), TEXT("ExpandedSpectatorSlideout"), bEnabled,
+				FPaths::GeneratedConfigDir() + TEXT("Mod.ini"));
+		}
+		GMatchOverlayEnabled = bEnabled ? 1 : 0;
+	}
+	return GMatchOverlayEnabled != 0;
+}
+
+void UNCPlusSpectatorSlideOut::SetMatchOverlayEnabled(bool bEnabled)
+{
+	GMatchOverlayEnabled = bEnabled ? 1 : 0;
+	if (GConfig)
+	{
+		const FString Path = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
+		GConfig->SetBool(TEXT("NetcodePlus"), TEXT("ExpandedSpectatorSlideout"), bEnabled, Path);
+		GConfig->Flush(false, Path);
+	}
+}
 
 UNCPlusSpectatorSlideOut::UNCPlusSpectatorSlideOut(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -24,6 +71,34 @@ UNCPlusSpectatorSlideOut::UNCPlusSpectatorSlideOut(const FObjectInitializer& Obj
 
 void UNCPlusSpectatorSlideOut::Draw_Implementation(float DeltaTime)
 {
+	MatchHitRows.Reset();
+	bDrawingMatchOverlay = CanDrawMatchOverlay();
+	if (bDrawingMatchOverlay)
+	{
+		UWorld* World = GetWorld();
+		if (MatchWorld.Get() != World)
+		{
+			MatchWorld = World;
+			MatchRows.Reset();
+			MatchDamageReplicator.Reset();
+			NextMatchReplicatorRetryTime = 0.f;
+		}
+		for (auto It = MatchRows.CreateIterator(); It; ++It)
+		{
+			if (!It.Key().IsValid() || It.Key()->bIsInactive) { It.RemoveCurrent(); }
+		}
+		bMatchInstagib = MatchOverlayMode == ENCSlideOutMatchMode::CTF && IsInstagibMatch();
+		if (MatchOverlayMode == ENCSlideOutMatchMode::Wipeout && !MatchDamageReplicator.IsValid()
+			&& (World->TimeSeconds >= NextMatchReplicatorRetryTime || NextMatchReplicatorRetryTime - World->TimeSeconds > 1.f))
+		{
+			NextMatchReplicatorRetryTime = World->TimeSeconds + 1.f;
+			for (TActorIterator<AWipeoutDamageReplicator> It(World); It; ++It)
+			{
+				MatchDamageReplicator = *It;
+				break;
+			}
+		}
+	}
 	// A TRUE spectator (bOnlySpectator — a caster/observer, not an eliminated player)
 	// must ALWAYS get the slide-out: it's their primary tool (camera switching +
 	// per-player weapons), exactly as stock Elim shows it. Only suppress the roster
@@ -45,6 +120,236 @@ void UNCPlusSpectatorSlideOut::Draw_Implementation(float DeltaTime)
 	Super::Draw_Implementation(DeltaTime);
 }
 
+bool UNCPlusSpectatorSlideOut::CanDrawMatchOverlay() const
+{
+	const AUTPlayerState* OwnerPS = UTPlayerOwner ? UTPlayerOwner->UTPlayerState : nullptr;
+	// Dead Wipeout players retain the stock roster and its visibility restrictions.
+	return IsMatchOverlayEnabled() && OwnerPS && OwnerPS->bOnlySpectator && IsValid(UTGameState)
+		&& UTHUDOwner && UTHUDOwner->TinyFont && Canvas
+		&& ((MatchOverlayMode == ENCSlideOutMatchMode::CTF && Cast<AUTCTFGameState>(UTGameState))
+			|| (MatchOverlayMode == ENCSlideOutMatchMode::Wipeout && IsWipeoutMatch(UTGameState)));
+}
+
+float UNCPlusSpectatorSlideOut::MatchOverlayWidth() const
+{
+	return Size.X + 364.f;
+}
+
+float UNCPlusSpectatorSlideOut::MatchOverlayX(float StockX) const
+{
+	// Keep stock camera/flag/powerup controls at their authored size. Only the
+	// roster travels its wider distance, so its columns slide fully off screen.
+	return StockX * MatchOverlayWidth() / FMath::Max(Size.X, 1.f);
+}
+
+void UNCPlusSpectatorSlideOut::DrawMatchCell(const FText& Text, float CenterX, float Y,
+	float Width, const FLinearColor& Color)
+{
+	float XL, YL;
+	Canvas->TextSize(UTHUDOwner->TinyFont, Text.ToString(), XL, YL);
+	const float Scale = FMath::Min(0.82f, (Width - 6.f) / FMath::Max(XL, 1.f));
+	DrawText(Text, CenterX, Y, UTHUDOwner->TinyFont, Scale, 1.f, Color, ETextHorzPos::Center, ETextVertPos::Center);
+}
+
+void UNCPlusSpectatorSlideOut::DrawPlayerHeader(float RenderDelta, float XOffset, float YOffset)
+{
+	if (!bDrawingMatchOverlay)
+	{
+		Super::DrawPlayerHeader(RenderDelta, XOffset, YOffset);
+		return;
+	}
+	const float X = MatchOverlayX(XOffset);
+	// Super retains interactive 1P/3P, X-Ray and Auto Cam buttons and HP/AR icons.
+	Super::DrawPlayerHeader(RenderDelta, X, YOffset);
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, X + Size.X, YOffset, 364.f, 0.95f * CellHeight,
+		149, 138, 32, 32, 0.65f, FLinearColor::Black);
+	static const FText CTFHeaders[] = { FText::FromString(TEXT("CAP")), FText::FromString(TEXT("GRAB")), FText::FromString(TEXT("RET")), FText::FromString(TEXT("K/D")), FText::FromString(TEXT("EFF")), FText::FromString(TEXT("LG%")), FText::FromString(TEXT("SCORE")) };
+	static const FText WipeHeaders[] = { FText::FromString(TEXT("K/D")), FText::FromString(TEXT("DMG")), FText::FromString(TEXT("HEAL")), FText::FromString(TEXT("DMG/L")), FText::FromString(TEXT("LG%")), FText::FromString(TEXT("B/A")), FText::FromString(TEXT("SCORE")) };
+	static const FText InstagibHeader = FText::FromString(TEXT("IG%"));
+	if (!bMatchInteractive)
+	{
+		static const FText PlayerHeader = NSLOCTEXT("NCSlideOut", "Player", "Player");
+		DrawText(PlayerHeader, X + 34.f, YOffset + ColumnY, UTHUDOwner->TinyFont, 0.82f, 1.f,
+			FLinearColor::White, ETextHorzPos::Left, ETextVertPos::Center);
+	}
+	for (int32 Col = 0; Col < 7; ++Col)
+	{
+		const FText& Header = MatchOverlayMode == ENCSlideOutMatchMode::CTF
+			? ((Col == 5 && bMatchInstagib) ? InstagibHeader : CTFHeaders[Col]) : WipeHeaders[Col];
+		DrawMatchCell(Header,
+			X + Size.X + (Col + 0.5f) * 52.f, YOffset + ColumnY, 52.f);
+	}
+}
+
+const UNCPlusSpectatorSlideOut::FMatchRow& UNCPlusSpectatorSlideOut::GetMatchRow(AUTPlayerState* PS)
+{
+	FMatchRow& Row = MatchRows.FindOrAdd(TWeakObjectPtr<AUTPlayerState>(PS));
+	const float Now = GetWorld()->TimeSeconds;
+	if (Now < Row.NextUpdateTime && Row.NextUpdateTime - Now <= 0.2f) { return Row; }
+	Row.NextUpdateTime = Now + 0.2f;
+	const FString Id = PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+	const FText Missing = FText::FromString(TEXT("-"));
+	const FText KD = FText::FromString(FString::Printf(TEXT("%d/%d"), PS->Kills, PS->Deaths));
+	int32 Hits = 0, Shots = 0;
+	if (MatchOverlayMode == ENCSlideOutMatchMode::CTF)
+	{
+		ACTFStatsReplicator* Rep = GetCTFStatsReplicator();
+		const FCTFReplicatedStatsEntry* Entry = Rep ? Rep->FindEntry(Id) : nullptr;
+		Row.Cells[0] = FText::AsNumber(PS->FlagCaptures);
+		Row.Cells[1] = Entry ? FText::AsNumber(Entry->FlagGrabs)
+			: (PS->HasAuthority() ? FText::AsNumber(PS->GetStatsValue(NAME_FlagGrabs)) : Missing);
+		Row.Cells[2] = FText::AsNumber(PS->FlagReturns);
+		Row.Cells[3] = KD;
+		Row.Cells[4] = FText::FromString(FString::Printf(TEXT("%.0f%%"), 100.f * PS->Kills / FMath::Max(PS->Kills + PS->Deaths, 1)));
+		if (Entry) { Hits = Entry->HitscanHits; Shots = Entry->HitscanShots; }
+		else if (PS->HasAuthority())
+		{
+			const bool bIG = bMatchInstagib || PS->GetStatsValue(NAME_InstagibShots) > 0;
+			Hits = bIG ? PS->GetStatsValue(NAME_InstagibHits) : PS->GetStatsValue(NAME_SniperHits) + PS->GetStatsValue(NAME_LightningRifleHits);
+			Shots = bIG ? PS->GetStatsValue(NAME_InstagibShots) : PS->GetStatsValue(NAME_SniperShots) + PS->GetStatsValue(NAME_LightningRifleShots);
+		}
+		Row.Cells[5] = Shots > 0 ? FText::FromString(FString::Printf(TEXT("%.0f%%"), FMath::Clamp(100.f * Hits / Shots, 0.f, 100.f))) : Missing;
+	}
+	else
+	{
+		const FReplicatedDamageEntry* Entry = MatchDamageReplicator.IsValid() ? MatchDamageReplicator->FindEntry(Id) : nullptr;
+		const bool bHasDamage = Entry || PS->HasAuthority();
+		const int32 Damage = Entry ? Entry->DamageDone : int32(PS->DamageDone);
+		Row.Cells[0] = KD;
+		Row.Cells[1] = bHasDamage ? FText::AsNumber(Damage) : Missing;
+		Row.Cells[2] = Entry ? FText::AsNumber(Entry->HealingDone) : Missing;
+		Row.Cells[3] = bHasDamage ? FText::AsNumber(Damage / FMath::Max(PS->Deaths + 1, 1)) : Missing;
+		int32 OtherHits = 0, OtherShots = 0;
+		ResolveAccuracy(PS, Id, NAME_SniperHits, NAME_SniperShots, Hits, Shots);
+		ResolveAccuracy(PS, Id, NAME_LightningRifleHits, NAME_LightningRifleShots, OtherHits, OtherShots);
+		Hits += OtherHits; Shots += OtherShots;
+		Row.Cells[4] = Shots > 0 ? FText::FromString(FString::Printf(TEXT("%.0f%%"), FMath::Clamp(100.f * Hits / Shots, 0.f, 100.f))) : Missing;
+		Row.Cells[5] = Entry ? FText::FromString(FString::Printf(TEXT("%d/%d"), Entry->BeltPickups, Entry->AmpPickups)) : Missing;
+	}
+	Row.Cells[6] = FText::AsNumber(int32(PS->Score));
+	// Numeric formatting, replicated-array lookups and stat-cell font measurement
+	// run at 5 Hz; live vitals and mouse feedback still follow the render frame.
+	for (int32 Col = 0; Col < 7; ++Col)
+	{
+		float XL, YL; Canvas->TextSize(UTHUDOwner->TinyFont, Row.Cells[Col].ToString(), XL, YL);
+		Row.TextScales[Col] = FMath::Min(0.82f, 46.f / FMath::Max(XL, 1.f));
+	}
+	return Row;
+}
+
+void UNCPlusSpectatorSlideOut::DrawPlayer(int32 Index, AUTPlayerState* PS, float RenderDelta, float XOffset, float YOffset)
+{
+	if (!bDrawingMatchOverlay)
+	{
+		Super::DrawPlayer(Index, PS, RenderDelta, XOffset, YOffset);
+		return;
+	}
+	if (!IsValid(PS) || PS->bIsInactive) { return; }
+	const float X = MatchOverlayX(XOffset);
+	const float Width = MatchOverlayWidth();
+	const FVector4 Bounds(RenderPosition.X + X * RenderScale, RenderPosition.Y + YOffset * RenderScale,
+		RenderPosition.X + (X + Width) * RenderScale, RenderPosition.Y + (YOffset + CellHeight) * RenderScale);
+	if (bMatchInteractive)
+	{
+		FMatchHitRow Hit; Hit.Player = PS; Hit.Bounds = Bounds; MatchHitRows.Add(Hit);
+	}
+	const bool bSelected = UTPlayerOwner->LastSpectatedPlayerId == PS->SpectatingID;
+	const bool bHovered = bMatchInteractive && UTPlayerOwner->bShowMouseCursor && ContainsPoint(Bounds, MatchMousePosition);
+	FLinearColor TeamColor = PS->Team ? PS->Team->TeamColor : FLinearColor(0.3f, 0.3f, 0.3f);
+	TeamColor.R *= 0.5f; TeamColor.G *= 0.5f; TeamColor.B *= 0.5f;
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, X, YOffset, Width, 0.95f * CellHeight, 149, 138, 32, 32,
+		bSelected ? 0.8f : (bHovered ? 0.65f : 0.48f), TeamColor);
+	if (bSelected)
+	{
+		DrawTexture(UTHUDOwner->ScoreboardAtlas, X, YOffset, 3.f, 0.95f * CellHeight, 149, 138, 32, 32, 1.f, FLinearColor::White);
+	}
+	const float Y = YOffset + ColumnY;
+	AUTCharacter* Character = PS->GetUTCharacter();
+	const bool bAlive = IsValid(Character) && Character->Health > 0;
+	const FLinearColor TextColor = bAlive ? FLinearColor::White : FLinearColor(0.65f, 0.65f, 0.65f);
+	DrawMatchCell(FText::AsNumber(UTGameState->bTeamGame ? PS->SpectatingIDTeam : PS->SpectatingID), X + 17.f, Y, 28.f, TextColor);
+	const FString Name = PS->ClanName.IsEmpty() ? PS->PlayerName : TEXT("[") + PS->ClanName + TEXT("]") + PS->PlayerName;
+	float XL, YL; Canvas->TextSize(SlideOutFont, Name, XL, YL);
+	DrawText(FText::FromString(Name), X + 34.f, Y, SlideOutFont, FMath::Min(0.9f, 150.f / FMath::Max(XL, 1.f)),
+		1.f, TextColor, ETextHorzPos::Left, ETextVertPos::Center);
+	if (IsValid(PS->CarriedObject))
+	{
+		const FLinearColor FlagColor = PS->CarriedObject->Team ? PS->CarriedObject->Team->TeamColor : FLinearColor::White;
+		DrawTexture(FlagIcon.Texture, X + 190.f, YOffset + 2.f, 22.f, 22.f,
+			FlagIcon.U, FlagIcon.V, FlagIcon.UL, FlagIcon.VL, 1.f, FlagColor);
+	}
+	else if (bAlive && Character->GetWeaponClass())
+	{
+		const AUTWeapon* Weapon = Character->GetWeaponClass()->GetDefaultObject<AUTWeapon>();
+		if (Weapon && Weapon->WeaponBarSelectedUVs.UL > 0.f && Weapon->WeaponBarSelectedUVs.VL > 0.f)
+		{
+			const FTextureUVs& UV = Weapon->WeaponBarSelectedUVs;
+			const float IconScale = FMath::Min(28.f / UV.UL, 20.f / UV.VL);
+			DrawTexture(WeaponAtlas, X + 188.f, Y - 0.5f * IconScale * UV.VL,
+				IconScale * UV.UL, IconScale * UV.VL, UV.U + UV.UL, UV.V, -UV.UL, UV.VL, 1.f, FLinearColor::White);
+		}
+	}
+	if (bAlive)
+	{
+		if (Character->GetWeaponOverlayFlags() != 0)
+		{
+			DrawTexture(UDamageHUDIcon.Texture, X + 216.f, Y - 6.f, 12.f, 12.f,
+				UDamageHUDIcon.U, UDamageHUDIcon.V, UDamageHUDIcon.UL, UDamageHUDIcon.VL, 1.f, FLinearColor::White);
+		}
+		DrawMatchCell(FText::AsNumber(Character->Health), X + Size.X * ColumnHeaderScoreX, Y, 46.f, FLinearColor(0.5f, 1.f, 0.5f));
+		DrawMatchCell(FText::AsNumber(Character->GetArmorAmount()), X + Size.X * ColumnHeaderArmor, Y, 46.f, FLinearColor(1.f, 1.f, 0.5f));
+	}
+	else
+	{
+		const bool bRespawning = MatchOverlayMode == ENCSlideOutMatchMode::Wipeout && PS->bOutOfLives
+			&& PS->RespawnWaitTime > 0.f && PS->RespawnTime > 0.f;
+		const FString State = bRespawning ? FString::Printf(TEXT("%ds"), FMath::CeilToInt(PS->RespawnTime)) : (PS->bOutOfLives ? TEXT("OUT") : TEXT("DEAD"));
+		DrawMatchCell(FText::FromString(State), X + Size.X * 0.85f, Y, 86.f, TextColor);
+	}
+	const FMatchRow& Row = GetMatchRow(PS);
+	for (int32 Col = 0; Col < 7; ++Col)
+	{
+		DrawText(Row.Cells[Col], X + Size.X + (Col + 0.5f) * 52.f, Y, UTHUDOwner->TinyFont,
+			Row.TextScales[Col], 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+	}
+	if (bShowingStats && bSelected)
+	{
+		ShowSelectedPlayerStats(PS, RenderDelta, X + Width + 16.f, YOffset);
+	}
+}
+
+void UNCPlusSpectatorSlideOut::TrackMouseMovement(FVector2D Position)
+{
+	MatchMousePosition = Position;
+	Super::TrackMouseMovement(Position);
+}
+
+void UNCPlusSpectatorSlideOut::SetMouseInteractive(bool bNewInteractive)
+{
+	bMatchInteractive = bNewInteractive;
+	if (!bNewInteractive) { MatchHitRows.Reset(); }
+	Super::SetMouseInteractive(bNewInteractive);
+}
+
+bool UNCPlusSpectatorSlideOut::MouseClick(FVector2D Position)
+{
+	if (Super::MouseClick(Position)) { return true; }
+	if (!bMatchInteractive || !CanDrawMatchOverlay() || !UTPlayerOwner->bShowMouseCursor
+		|| MatchWorld.Get() != GetWorld()) { return false; }
+	for (const FMatchHitRow& Row : MatchHitRows)
+	{
+		AUTPlayerState* PS = Row.Player.Get();
+		if (PS && !PS->bIsInactive && UTGameState->PlayerArray.Contains(PS)
+			&& ContainsPoint(Row.Bounds, Position) && UTGameState->CanSpectate(UTPlayerOwner, PS))
+		{
+			if (UTPlayerOwner->LastSpectatedPlayerId == PS->SpectatingID) { ToggleStats(); }
+			else { UTPlayerOwner->ViewPlayerNum(UTGameState->bTeamGame ? PS->SpectatingIDTeam : PS->SpectatingID, PS->GetTeamNum()); }
+			return true;
+		}
+	}
+	return false;
+}
+
 void UNCPlusSpectatorSlideOut::DrawWeaponStats(AUTPlayerState* PS, float DeltaTime, float& YPos, float XOffset, float ScoreWidth, float MaxHeight, const FStatsFontInfo& StatsFontInfo)
 {
 	// Defer to stock behaviour when we have nothing better to show:
@@ -53,6 +358,7 @@ void UNCPlusSpectatorSlideOut::DrawWeaponStats(AUTPlayerState* PS, float DeltaTi
 	//     pickups, so the stock map enumeration is correct there.
 	// (&& short-circuits so IsInstagibMatch's actor walk only runs for CTFAuto.)
 	if (WeaponListMode == ENCSlideOutWeaponMode::Passthrough ||
+		(MatchOverlayMode == ENCSlideOutMatchMode::Wipeout && !IsWipeoutMatch(UTGameState)) ||
 	    (WeaponListMode == ENCSlideOutWeaponMode::CTFAuto && !IsInstagibMatch()))
 	{
 		Super::DrawWeaponStats(PS, DeltaTime, YPos, XOffset, ScoreWidth, MaxHeight, StatsFontInfo);
@@ -221,7 +527,7 @@ ANCAccuracyStatsReplicator* UNCPlusSpectatorSlideOut::GetAccuracyReplicator() co
 		return CachedAccuracyReplicator.Get();
 	}
 	const float Now = World->GetTimeSeconds();
-	if (Now < NextAccuracyReplicatorRetryTime)
+	if (Now < NextAccuracyReplicatorRetryTime && NextAccuracyReplicatorRetryTime - Now <= 1.f)
 	{
 		return nullptr;
 	}
@@ -236,14 +542,20 @@ ANCAccuracyStatsReplicator* UNCPlusSpectatorSlideOut::GetAccuracyReplicator() co
 
 bool UNCPlusSpectatorSlideOut::IsInstagibMatch() const
 {
+	ACTFStatsReplicator* Rep = GetCTFStatsReplicator();
+	return Rep && Rep->bIsInstagibMatch;
+}
+
+ACTFStatsReplicator* UNCPlusSpectatorSlideOut::GetCTFStatsReplicator() const
+{
 	if (!IsValid(UTHUDOwner))
 	{
-		return false;
+		return nullptr;
 	}
 	UWorld* World = UTHUDOwner->GetWorld();
 	if (!World)
 	{
-		return false;
+		return nullptr;
 	}
 	if (CachedInstagibWorld.Get() != World)
 	{
@@ -253,18 +565,18 @@ bool UNCPlusSpectatorSlideOut::IsInstagibMatch() const
 	}
 	if (CachedCTFStatsReplicator.IsValid())
 	{
-		return CachedCTFStatsReplicator->bIsInstagibMatch;
+		return CachedCTFStatsReplicator.Get();
 	}
 	const float Now = World->GetTimeSeconds();
-	if (Now < NextInstagibReplicatorRetryTime)
+	if (Now < NextInstagibReplicatorRetryTime && NextInstagibReplicatorRetryTime - Now <= 1.f)
 	{
-		return false;
+		return nullptr;
 	}
 	NextInstagibReplicatorRetryTime = Now + 1.f;
 	for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It)
 	{
 		CachedCTFStatsReplicator = *It;
-		return It->bIsInstagibMatch;
+		return *It;
 	}
-	return false;
+	return nullptr;
 }

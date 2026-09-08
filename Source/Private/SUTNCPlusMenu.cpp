@@ -5,6 +5,7 @@
 #include "NCPlusPerformanceSettings.h"
 #include "NCPlusICTFAudioSettings.h"
 #include "NCClutchOverlay.h"
+#include "NCPlusSpectatorSlideOut.h"
 #include "NCReadyUp.h"
 #include "UnrealTournament.h"
 #include "UTGameState.h"
@@ -517,6 +518,18 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 					.Text(FText::FromString(TEXT("Show clutch / last-alive overlay")))
 					.Font(RegularFont(14))
 					.ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 8).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bExpandedSpectatorSlideout ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bExpandedSpectatorSlideout = State == ECheckBoxState::Checked; })
+				.ToolTipText(FText::FromString(TEXT("Add CTF or Wipeout match statistics to the spectator slideout. True spectators only; camera controls stay available.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Expanded spectator slideout")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
 				]
 			]
 
@@ -1171,6 +1184,26 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildForceModelsTab()
 				+ SHorizontalBox::Slot().AutoWidth()                      [ MakeFlagCheck(TEXT("Remove Cosmetics"), &FMConfig.bCosmetics) ]
 			]
 
+			+ SVerticalBox::Slot().AutoHeight().Padding(20, 2, 20, 8).HAlign(HAlign_Center)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 12, 0)
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Flag brightness")))
+					.Font(RegularFont(13)).ColorAndOpacity(FLinearColor::White)
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					SNew(SBox).WidthOverride(100.f)
+					[
+						SNew(SSpinBox<float>).MinValue(1.f).MaxValue(5.f).Delta(0.1f)
+						.Value_Lambda([this]() { return FMConfig.FlagBrightness; })
+						.OnValueChanged_Lambda([this](float Value) { FMConfig.FlagBrightness = FMath::Clamp(Value, 1.f, 5.f); })
+						.ToolTipText(FText::FromString(TEXT("Brightness of recoloured CTF flags. 1 = original intensity; 2 = brighter default. Requires Force Models and Flags. Save applies live.")))
+					]
+				]
+			]
+
 			// Style selector
 			+ SVerticalBox::Slot()
 			.AutoHeight()
@@ -1452,6 +1485,7 @@ void SUTNCPlusMenu::LoadSettings()
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Balanced (4500)"))));
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Full (6500)"))));
 	bShowClutchOverlay = NCClutchOverlay::IsEnabled();
+	bExpandedSpectatorSlideout = UNCPlusSpectatorSlideOut::IsMatchOverlayEnabled();
 
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
@@ -1572,6 +1606,7 @@ void SUTNCPlusMenu::SaveSettings()
 	// cached squared distance used by character ticks immediately.
 	NCPlusPerformanceSettings::SetCharacterOverlayDistance(CharacterOverlayDistance);
 	NCClutchOverlay::SetEnabled(bShowClutchOverlay);
+	UNCPlusSpectatorSlideOut::SetMatchOverlayEnabled(bExpandedSpectatorSlideout);
 
 	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.

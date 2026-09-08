@@ -15,6 +15,7 @@ class NETCODEPLUS_API AWipeoutHUD : public AUTHUD
 
 	virtual void BeginPlay() override;
 	virtual void DrawHUD() override;
+	virtual void AddSpectatorWidgets() override;
 	virtual bool ShouldDrawMinimap() override;
 	virtual FLinearColor GetBaseHUDColor() override;
 

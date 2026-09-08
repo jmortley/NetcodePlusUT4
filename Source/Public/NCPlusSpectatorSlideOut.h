@@ -32,6 +32,14 @@
 
 class ANCAccuracyStatsReplicator;
 class ACTFStatsReplicator;
+class AWipeoutDamageReplicator;
+
+enum class ENCSlideOutMatchMode : uint8
+{
+	None,
+	CTF,
+	Wipeout
+};
 
 UENUM()
 enum class ENCSlideOutWeaponMode : uint8
@@ -39,7 +47,7 @@ enum class ENCSlideOutWeaponMode : uint8
 	/** Behave exactly like the stock slide-out. Safe default until the owning
 	 *  HUD assigns a real mode in AddSpectatorWidgets. */
 	Passthrough,
-	/** Always show the fixed Elim ranged loadout. */
+	/** Show the player's actual Elim/Wipeout carried loadout. */
 	ElimLoadout,
 	/** Instagib match -> instagib rifle only; otherwise stock behaviour. */
 	CTFAuto
@@ -61,6 +69,17 @@ class NETCODEPLUS_API UNCPlusSpectatorSlideOut : public UUTHUDWidget_SpectatorSl
 	UPROPERTY(Transient)
 	bool bSuppressRosterDraw;
 
+	/** Client-only presentation; the owning HUD selects the mode. */
+	ENCSlideOutMatchMode MatchOverlayMode = ENCSlideOutMatchMode::None;
+	static bool IsMatchOverlayEnabled();
+	static void SetMatchOverlayEnabled(bool bEnabled);
+
+	virtual void DrawPlayerHeader(float RenderDelta, float XOffset, float YOffset) override;
+	virtual void DrawPlayer(int32 Index, AUTPlayerState* PlayerState, float RenderDelta, float XOffset, float YOffset) override;
+	virtual void TrackMouseMovement(FVector2D InMousePosition) override;
+	virtual void SetMouseInteractive(bool bNewInteractive) override;
+	virtual bool MouseClick(FVector2D InMousePosition) override;
+
 protected:
 	/** Suppress only the roster VISUAL when bSuppressRosterDraw — ShouldDraw (the sole
 	 *  bootstrap for SUTSpectatorWindow's cursor/ESC/camera input) keeps running. */
@@ -69,6 +88,32 @@ protected:
 	virtual void DrawWeaponStats(AUTPlayerState* PS, float DeltaTime, float& YPos, float XOffset, float ScoreWidth, float MaxHeight, const FStatsFontInfo& StatsFontInfo) override;
 
 private:
+	bool CanDrawMatchOverlay() const;
+	float MatchOverlayWidth() const;
+	float MatchOverlayX(float StockX) const;
+	void DrawMatchCell(const FText& Text, float CenterX, float Y, float Width,
+		const FLinearColor& Color = FLinearColor::White);
+	struct FMatchRow
+	{
+		FText Cells[7];
+		float TextScales[7];
+		float NextUpdateTime = -1.f;
+	};
+	const FMatchRow& GetMatchRow(AUTPlayerState* PS);
+	struct FMatchHitRow
+	{
+		TWeakObjectPtr<AUTPlayerState> Player;
+		FVector4 Bounds;
+	};
+	TArray<FMatchHitRow> MatchHitRows;
+	TMap<TWeakObjectPtr<AUTPlayerState>, FMatchRow> MatchRows;
+	TWeakObjectPtr<UWorld> MatchWorld;
+	TWeakObjectPtr<AWipeoutDamageReplicator> MatchDamageReplicator;
+	float NextMatchReplicatorRetryTime = 0.f;
+	FVector2D MatchMousePosition = FVector2D::ZeroVector;
+	bool bMatchInteractive = false;
+	bool bDrawingMatchOverlay = false;
+	bool bMatchInstagib = false;
 	/** Draw the Shots / Accuracy column headers (Kills/Deaths are intentionally
 	 *  dropped — those per-weapon stats are not replicated to spectators, only
 	 *  hits/shots are). Advances YPos by one line. */
@@ -119,4 +164,5 @@ private:
 	mutable TWeakObjectPtr<ACTFStatsReplicator> CachedCTFStatsReplicator;
 	mutable float NextInstagibReplicatorRetryTime = 0.f;
 	bool IsInstagibMatch() const;
+	ACTFStatsReplicator* GetCTFStatsReplicator() const;
 };

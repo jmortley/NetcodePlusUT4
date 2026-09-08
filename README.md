@@ -121,6 +121,9 @@ Both team-elimination modes share the same spawn picker:
 
 NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-preview JSON layout system that's not present in any official UT release.
 
+- **Expanded spectator slideout for CTF/iCTF and Wipeout** — mode-specific match-stat columns alongside live health/armor and Wipeout respawn status. Uses the normal slideout controls; true spectators only. Toggle in F5 → Home → Spectator & Caster.
+- **Independent flag brightness** — F5 → Force Models → Flag brightness, 1–5 (default 2; 1 is the original intensity). Adjusts recoloured CTF flags without changing player-model glow or flag meshes. [Details and verification checklist](docs/spectator-slideout-and-flag-brightness.md).
+
 - **9-anchor grid** (TopLeft / TopCenter / TopRight / CenterLeft / Center / CenterRight / BottomLeft / BottomCenter / BottomRight) plus per-element offset, scale, opacity, color overrides.
 - **In-viewport repositioning** — `nchud_drag` preview overlay lets you see element bounds in-place rather than picking through text fields blind.
 - **Per-element font picker + FontSz slider** — Tier A (engine built-ins: Tiny / Small / Medium / Large / Huge / Number / Chat) and Tier B (lazy-loaded UT4 fonts: Exo2 Bold, Lato, Ambex, Positec, Extreme) on every text-rendering alias. `FontSz` is a separate multiplier (0.5–2.0 slider, 0.25–4.0 hard cap) so you can dial in apparent text size at 4K without re-importing the UFont at a different `LegacyFontSize`. Lives on scorebar / score_kda today; portraits get it for HP/Armor numbers + respawn timers; the CTF banners get it too.

@@ -68,6 +68,8 @@ bool ANCPlusCTFHUD::ShouldDrawMinimap()
 void ANCPlusCTFHUD::AddSpectatorWidgets()
 {
 	Super::AddSpectatorWidgets();
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() != UUTHUDWidget_SpectatorSlideOut::StaticClass()
+		&& !Cast<UNCPlusSpectatorSlideOut>(SpectatorSlideOutWidget)) { return; }
 
 	// Replace the stock spectator slide-out with our subclass. In instagib (iCTF)
 	// the weapon-stats panel then shows only the instagib rifle with accuracy from
@@ -81,12 +83,16 @@ void ANCPlusCTFHUD::AddSpectatorWidgets()
 		HudWidgets.Remove(SpectatorSlideOutWidget);
 		SpectatorSlideOutWidget = nullptr;
 	}
-	if (UUTHUDWidget* W = AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()))
+	UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(FindHudWidgetByClass(UNCPlusSpectatorSlideOut::StaticClass()));
+	if (!SlideOut)
 	{
-		if (UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(W))
-		{
-			SlideOut->WeaponListMode = ENCSlideOutWeaponMode::CTFAuto;
-		}
+		SlideOut = Cast<UNCPlusSpectatorSlideOut>(AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()));
+	}
+	if (SlideOut)
+	{
+		SpectatorSlideOutWidget = SlideOut;
+		SlideOut->WeaponListMode = ENCSlideOutWeaponMode::CTFAuto;
+		SlideOut->MatchOverlayMode = ENCSlideOutMatchMode::CTF;
 	}
 }
 

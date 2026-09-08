@@ -40,6 +40,13 @@ namespace
 	// restored when HUD recolour is turned off. Weak keys so teams from a previous map drop out.
 	TMap<TWeakObjectPtr<AUTTeamInfo>, FLinearColor> GHudOrigColours;
 
+	struct FFlagColourOverride
+	{
+		FLinearColor Original;
+		FLinearColor Applied;
+	};
+	TMap<TWeakObjectPtr<UMaterialInstanceDynamic>, FFlagColourOverride> GFlagColourOverrides;
+
 	// Flag carriers we've forced bForceNoOutline on, so we can restore them when they drop the flag
 	// (or the suppression is turned off). Weak keys so GC'd pawns drop out.
 	TSet<TWeakObjectPtr<AUTCharacter>> GOutlineSuppressed;
@@ -200,6 +207,8 @@ void NCPlusForceModels::Reload()
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("HUD"),          C.bHUD,          Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Armour"),       C.bArmour,       Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Flags"),        C.bFlags,        Path);
+	GConfig->GetFloat(TEXT("ForceModels"), TEXT("FlagBrightness"), C.FlagBrightness, Path);
+	C.FlagBrightness = FMath::IsFinite(C.FlagBrightness) ? FMath::Clamp(C.FlagBrightness, 1.f, 5.f) : 2.f;
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), C.bDarkenBodies, Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    C.bCosmetics,    Path);
 	GConfig->GetBool(TEXT("ForceModels"), TEXT("Outline"),      C.bOutline,      Path);
@@ -296,6 +305,8 @@ void NCPlusForceModels::Save()
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("HUD"),          C.bHUD,          Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Armour"),       C.bArmour,       Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Flags"),        C.bFlags,        Path);
+	GConfig->SetFloat(TEXT("ForceModels"), TEXT("FlagBrightness"),
+		FMath::IsFinite(C.FlagBrightness) ? FMath::Clamp(C.FlagBrightness, 1.f, 5.f) : 2.f, Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("DarkenBodies"), C.bDarkenBodies, Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Cosmetics"),    C.bCosmetics,    Path);
 	GConfig->SetBool(TEXT("ForceModels"), TEXT("Outline"),      C.bOutline,      Path);
@@ -451,6 +462,21 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 	const bool bWant = C.bEnabled && C.bFlags;
 	const int32 ViewerTeam = GetViewerTeam(World);   // spectator -> red is "ours"
 	static const FName NAME_FlagColor(TEXT("FlagColor"));
+	for (auto It = GFlagColourOverrides.CreateIterator(); It; ++It)
+	{
+		UMaterialInstanceDynamic* MID = It.Key().Get();
+		if (!MID) { It.RemoveCurrent(); }
+		else if (!bWant)
+		{
+			// Yield if another renderer changed this parameter since our last write.
+			FLinearColor Current;
+			if (MID->GetVectorParameterValue(NAME_FlagColor, Current) && Current.Equals(It.Value().Applied))
+			{
+				MID->SetVectorParameterValue(NAME_FlagColor, It.Value().Original);
+			}
+			It.RemoveCurrent();
+		}
+	}
 
 	// Flag-visibility debug (ncp.FlagDebug): dump per-base flag state ~every 1.5s. Logs even when a
 	// base/flag/mesh is missing — exactly the "map maker did something funny" case (a map with no
@@ -503,12 +529,30 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 			// collapses. Element 0 is already a stock MID (Flag->MeshMID) so we just retint it; any slot
 			// without a FlagColor param no-ops harmlessly. Re-asserted each slow tick (viewer-relative).
 			const bool bFriendly = ((int32)Team == ViewerTeam);
-			const FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
+			FLinearColor Colour = GetSkinColour(GetModelSettings(Team, bFriendly));
+			// The stock master connects FlagColor to both albedo and emissive.
+			// Its EmissiveNear/Far parameters are on a disconnected graph branch.
+			const float Brightness = FMath::IsFinite(C.FlagBrightness) ? FMath::Clamp(C.FlagBrightness, 1.f, 5.f) : 2.f;
+			Colour.R *= Brightness; Colour.G *= Brightness; Colour.B *= Brightness;
 			for (int32 i = 0; i < Mesh->GetNumMaterials(); ++i)
 			{
-				UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(i));
+				UMaterialInterface* Material = Mesh->GetMaterial(i);
+				FLinearColor Original;
+				// Skip non-flag slots instead of creating inert MIDs for the pole.
+				if (!Material || !Material->GetVectorParameterValue(NAME_FlagColor, Original)) { continue; }
+				UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Material);
 				if (!MID) { MID = Mesh->CreateAndSetMaterialInstanceDynamic(i); }
-				if (MID) { MID->SetVectorParameterValue(NAME_FlagColor, Colour); }
+				if (MID)
+				{
+					const TWeakObjectPtr<UMaterialInstanceDynamic> Key(MID);
+					if (!GFlagColourOverrides.Contains(Key))
+					{
+						FFlagColourOverride Saved; Saved.Original = Original; Saved.Applied = Colour;
+						GFlagColourOverrides.Add(Key, Saved);
+					}
+					GFlagColourOverrides.FindChecked(Key).Applied = Colour;
+					MID->SetVectorParameterValue(NAME_FlagColor, Colour);
+				}
 			}
 		}
 	}

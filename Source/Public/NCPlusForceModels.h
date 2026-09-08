@@ -46,6 +46,7 @@ struct FNCPlusForceModelsConfig
 	bool             bHUD          = true;
 	bool             bArmour       = true;
 	bool             bFlags        = true;
+	float            FlagBrightness = 2.f; // independent flag tint/emissive multiplier; 1 = original intensity, 1-5
 	bool             bDarkenBodies = false;
 	bool             bCosmetics    = true;
 	bool             bOutline      = false;   // team-coloured LOS outline instead of the body/armour super-tint (keeps the forced model)

@@ -13,12 +13,37 @@
 #include "NCClutchOverlay.h"
 #include "NCPlusForceModels.h"   // DrawHeadDebug (ncp.DebugHeads)
 #include "UTHUDWidget_Spectator.h"
+#include "NCPlusSpectatorSlideOut.h"
 #include "WipeoutDamageReplicator.h"
 #include "ClutchHUD.h"
 #include "NCLeagueDuelHUD.h"
 #include "NCShaftArenaHUD.h"
 #include "ShockDomHUD.h"
 #include "EngineUtils.h"
+
+void AWipeoutHUD::AddSpectatorWidgets()
+{
+	Super::AddSpectatorWidgets();
+	// Respect an explicitly configured third-party slideout.
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() != UUTHUDWidget_SpectatorSlideOut::StaticClass()
+		&& !Cast<UNCPlusSpectatorSlideOut>(SpectatorSlideOutWidget)) { return; }
+	if (SpectatorSlideOutWidget && SpectatorSlideOutWidget->GetClass() == UUTHUDWidget_SpectatorSlideOut::StaticClass())
+	{
+		HudWidgets.Remove(SpectatorSlideOutWidget);
+		SpectatorSlideOutWidget = nullptr;
+	}
+	UNCPlusSpectatorSlideOut* SlideOut = Cast<UNCPlusSpectatorSlideOut>(FindHudWidgetByClass(UNCPlusSpectatorSlideOut::StaticClass()));
+	if (!SlideOut)
+	{
+		SlideOut = Cast<UNCPlusSpectatorSlideOut>(AddHudWidget(UNCPlusSpectatorSlideOut::StaticClass()));
+	}
+	if (SlideOut)
+	{
+		SpectatorSlideOutWidget = SlideOut;
+		SlideOut->WeaponListMode = ENCSlideOutWeaponMode::ElimLoadout;
+		SlideOut->MatchOverlayMode = ENCSlideOutMatchMode::Wipeout;
+	}
+}
 
 namespace
 {
