@@ -130,9 +130,14 @@ bool UNCPlusSpectatorSlideOut::CanDrawMatchOverlay() const
 			|| (MatchOverlayMode == ENCSlideOutMatchMode::Wipeout && IsWipeoutMatch(UTGameState)));
 }
 
+int32 UNCPlusSpectatorSlideOut::MatchOverlayColumnCount() const
+{
+	return MatchOverlayMode == ENCSlideOutMatchMode::Wipeout ? 4 : 7;
+}
+
 float UNCPlusSpectatorSlideOut::MatchOverlayWidth() const
 {
-	return Size.X + 364.f;
+	return Size.X + MatchOverlayColumnCount() * 52.f;
 }
 
 float UNCPlusSpectatorSlideOut::MatchOverlayX(float StockX) const
@@ -161,10 +166,10 @@ void UNCPlusSpectatorSlideOut::DrawPlayerHeader(float RenderDelta, float XOffset
 	const float X = MatchOverlayX(XOffset);
 	// Super retains interactive 1P/3P, X-Ray and Auto Cam buttons and HP/AR icons.
 	Super::DrawPlayerHeader(RenderDelta, X, YOffset);
-	DrawTexture(UTHUDOwner->ScoreboardAtlas, X + Size.X, YOffset, 364.f, 0.95f * CellHeight,
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, X + Size.X, YOffset, MatchOverlayWidth() - Size.X, 0.95f * CellHeight,
 		149, 138, 32, 32, 0.65f, FLinearColor::Black);
 	static const FText CTFHeaders[] = { FText::FromString(TEXT("CAP")), FText::FromString(TEXT("GRAB")), FText::FromString(TEXT("RET")), FText::FromString(TEXT("K/D")), FText::FromString(TEXT("EFF")), FText::FromString(TEXT("LG%")), FText::FromString(TEXT("SCORE")) };
-	static const FText WipeHeaders[] = { FText::FromString(TEXT("K/D")), FText::FromString(TEXT("DMG")), FText::FromString(TEXT("HEAL")), FText::FromString(TEXT("DMG/L")), FText::FromString(TEXT("LG%")), FText::FromString(TEXT("B/A")), FText::FromString(TEXT("SCORE")) };
+	static const FText WipeHeaders[] = { FText::FromString(TEXT("K/D")), FText::FromString(TEXT("DMG")), FText::FromString(TEXT("DMG/L")), FText::FromString(TEXT("SCORE")) };
 	static const FText InstagibHeader = FText::FromString(TEXT("IG%"));
 	if (!bMatchInteractive)
 	{
@@ -172,7 +177,7 @@ void UNCPlusSpectatorSlideOut::DrawPlayerHeader(float RenderDelta, float XOffset
 		DrawText(PlayerHeader, X + 34.f, YOffset + ColumnY, UTHUDOwner->TinyFont, 0.82f, 1.f,
 			FLinearColor::White, ETextHorzPos::Left, ETextVertPos::Center);
 	}
-	for (int32 Col = 0; Col < 7; ++Col)
+	for (int32 Col = 0; Col < MatchOverlayColumnCount(); ++Col)
 	{
 		const FText& Header = MatchOverlayMode == ENCSlideOutMatchMode::CTF
 			? ((Col == 5 && bMatchInstagib) ? InstagibHeader : CTFHeaders[Col]) : WipeHeaders[Col];
@@ -190,9 +195,9 @@ const UNCPlusSpectatorSlideOut::FMatchRow& UNCPlusSpectatorSlideOut::GetMatchRow
 	const FString Id = PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
 	const FText Missing = FText::FromString(TEXT("-"));
 	const FText KD = FText::FromString(FString::Printf(TEXT("%d/%d"), PS->Kills, PS->Deaths));
-	int32 Hits = 0, Shots = 0;
 	if (MatchOverlayMode == ENCSlideOutMatchMode::CTF)
 	{
+		int32 Hits = 0, Shots = 0;
 		ACTFStatsReplicator* Rep = GetCTFStatsReplicator();
 		const FCTFReplicatedStatsEntry* Entry = Rep ? Rep->FindEntry(Id) : nullptr;
 		Row.Cells[0] = FText::AsNumber(PS->FlagCaptures);
@@ -217,19 +222,12 @@ const UNCPlusSpectatorSlideOut::FMatchRow& UNCPlusSpectatorSlideOut::GetMatchRow
 		const int32 Damage = Entry ? Entry->DamageDone : int32(PS->DamageDone);
 		Row.Cells[0] = KD;
 		Row.Cells[1] = bHasDamage ? FText::AsNumber(Damage) : Missing;
-		Row.Cells[2] = Entry ? FText::AsNumber(Entry->HealingDone) : Missing;
-		Row.Cells[3] = bHasDamage ? FText::AsNumber(Damage / FMath::Max(PS->Deaths + 1, 1)) : Missing;
-		int32 OtherHits = 0, OtherShots = 0;
-		ResolveAccuracy(PS, Id, NAME_SniperHits, NAME_SniperShots, Hits, Shots);
-		ResolveAccuracy(PS, Id, NAME_LightningRifleHits, NAME_LightningRifleShots, OtherHits, OtherShots);
-		Hits += OtherHits; Shots += OtherShots;
-		Row.Cells[4] = Shots > 0 ? FText::FromString(FString::Printf(TEXT("%.0f%%"), FMath::Clamp(100.f * Hits / Shots, 0.f, 100.f))) : Missing;
-		Row.Cells[5] = Entry ? FText::FromString(FString::Printf(TEXT("%d/%d"), Entry->BeltPickups, Entry->AmpPickups)) : Missing;
+		Row.Cells[2] = bHasDamage ? FText::AsNumber(Damage / FMath::Max(PS->Deaths + 1, 1)) : Missing;
 	}
-	Row.Cells[6] = FText::AsNumber(int32(PS->Score));
+	Row.Cells[MatchOverlayColumnCount() - 1] = FText::AsNumber(int32(PS->Score));
 	// Numeric formatting, replicated-array lookups and stat-cell font measurement
 	// run at 5 Hz; live vitals and mouse feedback still follow the render frame.
-	for (int32 Col = 0; Col < 7; ++Col)
+	for (int32 Col = 0; Col < MatchOverlayColumnCount(); ++Col)
 	{
 		float XL, YL; Canvas->TextSize(UTHUDOwner->TinyFont, Row.Cells[Col].ToString(), XL, YL);
 		Row.TextScales[Col] = FMath::Min(0.82f, 46.f / FMath::Max(XL, 1.f));
@@ -307,7 +305,7 @@ void UNCPlusSpectatorSlideOut::DrawPlayer(int32 Index, AUTPlayerState* PS, float
 		DrawMatchCell(FText::FromString(State), X + Size.X * 0.85f, Y, 86.f, TextColor);
 	}
 	const FMatchRow& Row = GetMatchRow(PS);
-	for (int32 Col = 0; Col < 7; ++Col)
+	for (int32 Col = 0; Col < MatchOverlayColumnCount(); ++Col)
 	{
 		DrawText(Row.Cells[Col], X + Size.X + (Col + 0.5f) * 52.f, Y, UTHUDOwner->TinyFont,
 			Row.TextScales[Col], 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);

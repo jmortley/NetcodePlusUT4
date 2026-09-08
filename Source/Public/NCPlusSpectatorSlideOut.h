@@ -89,6 +89,7 @@ protected:
 
 private:
 	bool CanDrawMatchOverlay() const;
+	int32 MatchOverlayColumnCount() const;
 	float MatchOverlayWidth() const;
 	float MatchOverlayX(float StockX) const;
 	void DrawMatchCell(const FText& Text, float CenterX, float Y, float Width,

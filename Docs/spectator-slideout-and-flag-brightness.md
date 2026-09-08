@@ -6,7 +6,7 @@ Source implementation, September 8, 2026. C++ compilation and in-game verificati
 
 F5 → Home → Spectator & Caster → **Expanded spectator slideout** (enabled by default). Save applies the preference immediately. It is stored as `[NetcodePlus] ExpandedSpectatorSlideout=True` in the client's `Mod.ini`.
 
-Open and close the normal spectator slideout as before. Its roster is extended from 320 to 684 design pixels, with seven additional columns. The camera, flag-view and powerup controls keep their original size. Click anywhere in a player row to follow that player; clicking the selected player opens the existing weapon-stat detail panel. Stock keyboard bindings, camera controls and spectator-window lifecycle remain in use.
+Open and close the normal spectator slideout as before. Its roster is extended from 320 to 684 design pixels in CTF (seven additional columns), or 528 in Wipeout (four additional columns). The camera, flag-view and powerup controls keep their original size. Click anywhere in a player row to follow that player; clicking the selected player opens the existing weapon-stat detail panel. Stock keyboard bindings, camera controls and spectator-window lifecycle remain in use.
 
 The wider presentation requires a **true spectator** (`bOnlySpectator`) in CTF/iCTF or Wipeout. Eliminated players keep the original roster and team visibility rules. Other game modes and HUD subclasses use the stock presentation. An explicitly configured third-party slideout is respected.
 
@@ -24,10 +24,7 @@ The wider presentation requires a **true spectator** (`bOnlySpectator`) in CTF/i
 |---|---|
 | K/D | Match kills / deaths; kills exclude assists |
 | DMG | Match damage, existing WipeoutDamageReplicator |
-| HEAL | Teammate healing, existing WipeoutDamageReplicator |
 | DMG/L | Match damage / (deaths + 1), integer-truncated |
-| LG% | Combined Sniper + Lightning Rifle accuracy, existing NCAccuracyStatsReplicator |
-| B/A | Belt / damage-amp pickup counts, existing WipeoutDamageReplicator |
 | SCORE | Replicated PlayerState score |
 
 The original health/armor area remains live. Wipeout's queued respawn is shown in seconds; other dead/out-of-lives states are labelled. The player row includes a flag-carrier marker or current-weapon icon. Team colours and the selected-player highlight remain visible.
