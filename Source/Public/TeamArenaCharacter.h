@@ -145,8 +145,15 @@ public:
 
 
 protected:
+	// Generated constructors can instantiate member cleanup without seeing the
+	// private state definition. Keep the actual delete in the implementation file.
+	struct NETCODEPLUS_API FRemoteAnimationURODeleter
+	{
+		void operator()(FNCRemoteAnimationUROState* State) const;
+	};
+
 	// Allocated only when the experimental client animation policy is enabled.
-	TUniquePtr<FNCRemoteAnimationUROState> RemoteAnimationUROState;
+	TUniquePtr<FNCRemoteAnimationUROState, FRemoteAnimationURODeleter> RemoteAnimationUROState;
 	uint64 LastRemoteAnimationUROFrame = ~uint64(0);
 
 	/** Kept to the same age horizon as stock SavedPositions; authority only. */

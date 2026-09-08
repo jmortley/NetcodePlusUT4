@@ -375,6 +375,11 @@ ATeamArenaCharacter::ATeamArenaCharacter(const FObjectInitializer& ObjectInitial
 
 ATeamArenaCharacter::~ATeamArenaCharacter() = default;
 
+void ATeamArenaCharacter::FRemoteAnimationURODeleter::operator()(FNCRemoteAnimationUROState* State) const
+{
+	delete State;
+}
+
 void ATeamArenaCharacter::UpdateRemoteAnimationUROBeforeMovement()
 {
 	const bool bRequested = CVarRemoteAnimationURO.GetValueOnGameThread() > 0;
