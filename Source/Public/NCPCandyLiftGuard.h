@@ -1,6 +1,6 @@
 // NCPCandyLiftGuard — server-side keeper for the candy orbs that ElimPlus and
-// Wipeout drop on PreventDeath (BP CandyPlaceholder, a physics-simulated
-// AUTPickupHealth).
+// Wipeout drop on PreventDeath (BPs CandyPlaceholder and WipeCandyPlaceholder,
+// physics-simulated AUTPickupHealth pickups).
 //
 // THE BUG (2026-08-06): someone dies mid-lift, the candy spawns in the shaft,
 // and the lift JAMS — AUTLift::MoveLiftTo sweeps the platform, the sweep
@@ -29,7 +29,7 @@
 //      pass makes the orb non-shootable per Jeremy 2026-08-06: ignore
 //      COLLISION_PROJECTILE + both weapon trace channels, and ignore radial
 //      impulse/force so splash can't shove it either. Applied at TWO levels:
-//      the CandyPlaceholder class archetypes are fixed once at match start
+//      both candy classes' archetypes are fixed once at match start
 //      (every later orb is born hardened — no first-sweep window in which a
 //      moving lift could still wedge on a fresh corpse-drop), and a synchronous
 //      world-spawn callback hardens each live instance before SpawnActor returns.
