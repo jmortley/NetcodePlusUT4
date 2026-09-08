@@ -221,9 +221,8 @@ void NCPlusForceModels::Reload()
 	ReadSide(TEXT("Blue"),  C.Blue);
 
 	// NB: no Red/Blue colour seeding here — the Red/Blue style forces its colours wholesale at
-	// resolve time (GetModelSettings), so those sides' H/S/V in config are inert by design (the F5
-	// rows only expose Glow + Armour for them). This replaced a short-lived Reload() seeding pass
-	// (2026-07-01): user decision = Red/Blue is zero-config, nobody picks colours.
+	// resolve time (GetModelSettings), so those sides' H/S/V in config are inert by design. F5 hides
+	// those colour controls but exposes each side's model, tint, glow and armour settings.
 
 	// Optional recolour-param override (comma-separated; names may contain spaces).
 	// Lets you tune which params get team-coloured (e.g. armour-only, leave body/face).
@@ -930,20 +929,19 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 	{
 	case ENCPlusSkinStyle::RedBlue:
 	{
-		// Red/Blue is ABSOLUTE + ZERO-CONFIG (user decision 2026-07-01): team 0 renders red and
-		// team 1 blue whichever side the viewer is on, with the COLOUR fully plugin-fixed — no user
-		// colour input; the F5 Red/Blue rows expose only Glow + Armour mode. Blue runs S=0.9
-		// (≈ stock BLUEHUDCOLOR) so both sides read at comparable luminance. Glow/armour honour the
-		// side config; the model falls back to Team-then-Enemy so a style switch keeps a model.
+		// Red/Blue uses absolute team colours: team 0 renders red and team 1 blue whichever side
+		// the viewer is on. F5 exposes a model picker for each side while keeping H/S/V fixed.
+		// Blue runs S=0.9 (≈ stock BLUEHUDCOLOR) so both sides read at comparable luminance.
+		// Glow/armour honour the side config; the model falls back to Team-then-Enemy so a style
+		// switch keeps a model.
 		FNCPlusModelSettings Out = (TheirTeamIndex == 0) ? C.Red : C.Blue;
 		Out.H = (TheirTeamIndex == 0) ? 0.f : 240.f;
 		Out.S = (TheirTeamIndex == 0) ? 1.f : 0.9f;
 		Out.V = 1.f;
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
-		// UNLESS the side opted into tint-only ("Tint skin"): that checkbox promises real models tinted
-		// red/blue, and the Red/Blue rows have no model picker — with the silent borrow, the checkbox
-		// was a no-op for anyone who had a Team/Enemy model configured.
+		// UNLESS the side opted into tint-only ("Tint skin"): with no explicit model selected,
+		// that checkbox keeps players' real models tinted red/blue instead of borrowing another model.
 		if (Out.ContentPath.IsEmpty() && !Out.bTint)
 		{
 			Out.ContentPath = !C.Team.ContentPath.IsEmpty() ? C.Team.ContentPath : C.Enemy.ContentPath;

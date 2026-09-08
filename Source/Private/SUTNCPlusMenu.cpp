@@ -1019,13 +1019,12 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 			.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
 		]
 
-		// Model picker (collapsed on fixed-colour rows — Red/Blue borrows the Team/Enemy model)
+		// Every side can choose a model independently, including the fixed-colour Red/Blue rows.
 		+ SVerticalBox::Slot()
 		.AutoHeight()
 		.Padding(0, 2, 0, 4)
 		[
 			SNew(SHorizontalBox)
-			.Visibility(bFixedColour ? EVisibility::Collapsed : EVisibility::Visible)
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
 			.VAlign(VAlign_Center)
@@ -1034,9 +1033,8 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("Model")))
 				.Font(RegularFont(12))
-				// Live colour preview: tint the "Model" label with this side's current skin colour
-				// (from its H/S/V), re-evaluated each paint so it tracks the sliders as you drag them.
-				.ColorAndOpacity_Lambda([Side] { return FSlateColor(NCPlusForceModels::GetSkinColour(*Side)); })
+				// Preview editable colours only; Red/Blue ignores the side's stored H/S/V.
+				.ColorAndOpacity_Lambda([Side, bFixedColour] { return FSlateColor(bFixedColour ? FLinearColor::White : NCPlusForceModels::GetSkinColour(*Side)); })
 			]
 			+ SHorizontalBox::Slot()
 			.FillWidth(1.f)
@@ -1045,6 +1043,9 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildSideRow(const FString& Label, FNCPlusMod
 				SNew(STextComboBox)
 				.OptionsSource(&FMModelOptions)
 				.InitiallySelectedItem(InitialModel)
+				.ToolTipText(bFixedColour
+					? FText::FromString(TEXT("Choose a model for this team. With (none), Tint skin keeps players' own models; otherwise the Team model is used, then Enemy."))
+					: FText::GetEmpty())
 				.OnSelectionChanged_Lambda([this, Side](TSharedPtr<FString> NewSel, ESelectInfo::Type)
 				{
 					if (!NewSel.IsValid()) { return; }

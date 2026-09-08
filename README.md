@@ -123,6 +123,7 @@ NetcodePlus ships an in-game HUD layout editor (`SNCPlusHUDEditor`) with a live-
 
 - **Expanded spectator slideout for CTF/iCTF and Wipeout** — mode-specific match-stat columns alongside live health/armor and Wipeout respawn status. Uses the normal slideout controls; true spectators only. Toggle in F5 → Home → Spectator & Caster.
 - **Independent flag brightness** — F5 → Force Models → Flag brightness, 1–5 (default 2; 1 is the original intensity). Adjusts recoloured CTF flags without changing player-model glow or flag meshes. [Details and verification checklist](docs/spectator-slideout-and-flag-brightness.md).
+- **Red/Blue forced models** — F5 → Force Models exposes separate Model pickers under Red team and Blue team. With Red / Blue style selected, each team's chosen model keeps its fixed team colour. Selecting `(none)` retains the Team-then-Enemy model fallback; enable Tint skin to keep players' own models instead. Save applies the choices live; this menu change needs only a client DLL update.
 
 - **9-anchor grid** (TopLeft / TopCenter / TopRight / CenterLeft / Center / CenterRight / BottomLeft / BottomCenter / BottomRight) plus per-element offset, scale, opacity, color overrides.
 - **In-viewport repositioning** — `nchud_drag` preview overlay lets you see element bounds in-place rather than picking through text fields blind.
