@@ -6,7 +6,7 @@ Source implementation, September 8, 2026. C++ compilation and in-game verificati
 
 F5 → Home → Spectator & Caster → **Expanded spectator slideout** (enabled by default). Save applies the preference immediately. It is stored as `[NetcodePlus] ExpandedSpectatorSlideout=True` in the client's `Mod.ini`.
 
-Open and close the normal spectator slideout as before. Its roster is extended from 320 to 684 design pixels in CTF (seven additional columns), or 528 in Wipeout (four additional columns). The camera, flag-view and powerup controls keep their original size. Click anywhere in a player row to follow that player; clicking the selected player opens the existing weapon-stat detail panel. Stock keyboard bindings, camera controls and spectator-window lifecycle remain in use.
+Open and close the normal spectator slideout as before. Its roster uses 684 design pixels in regular CTF, 596 in iCTF (seven additional columns), or 528 in Wipeout (four additional columns). The expanded slideout renders at 90% of its previous scale, including text, icons, controls and click targets. Camera, flag-view and powerup controls retain their stock layout at that scale. Click anywhere in a player row to follow that player; clicking the selected player opens the existing weapon-stat detail panel. Stock keyboard bindings, camera controls and spectator-window lifecycle remain in use.
 
 The wider presentation requires a **true spectator** (`bOnlySpectator`) in CTF/iCTF or Wipeout. Eliminated players keep the original roster and team visibility rules. Other game modes and HUD subclasses use the stock presentation. An explicitly configured third-party slideout is respected.
 
@@ -27,11 +27,13 @@ The wider presentation requires a **true spectator** (`bOnlySpectator`) in CTF/i
 | DMG/L | Match damage / (deaths + 1), integer-truncated |
 | SCORE | Replicated PlayerState score |
 
-The original health/armor area remains live. Wipeout's queued respawn is shown in seconds; other dead/out-of-lives states are labelled. The player row includes a flag-carrier marker or current-weapon icon. Team colours and the selected-player highlight remain visible.
+Health/armor remain live in regular CTF and Wipeout. iCTF omits both values and their header icons and closes the space; its dead/out label uses the weapon-icon area. Wipeout's queued respawn is shown in seconds; other dead/out-of-lives states are labelled. The player row includes a flag-carrier marker or current-weapon icon. Team colours and the selected-player highlight remain visible.
 
 Unavailable replicated values display `-`, and accuracy displays `-` until there are shots. Authority-side PlayerState values provide the supported listen/standalone fallbacks. Existing damage/CTF replicators omit players without a UniqueNetId; remote bot values can therefore be unavailable. No new stats are fabricated and no replicated field, RPC or serialization format is added. UT99's flag-carrier-kill/cover columns are not reproduced: they are not in these existing client snapshots.
 
 Match totals, string formatting and stat-cell font measurement are cached at 5 Hz; their underlying server snapshots retain their existing cadence. Live vitals, respawn interpolation and pointer feedback render each frame. Replicator discovery is throttled, cached actors/players are weak references, and world changes clear the match caches. Clicks recheck current roster membership and `CanSpectate` before using the stock `ViewPlayerNum` path.
+
+The input eligibility check does not require `Canvas`: stock `PostDraw` clears that pointer before Slate dispatches mouse clicks. Drawing checks it separately. The initial extension shared that check and rejected row clicks after drawing; this corrects that lifecycle error. `GetDrawScaleOverride` applies the 10% reduction during stock `PreDraw`, so stock camera hitboxes and expanded row hitboxes share the rendered scale.
 
 Wipeout now registers the existing NCPlus slideout subclass, including its carried-loadout weapon panel and replicated accuracy. Stock `ShouldDraw` still opens/closes the interactive spectator window; the extension never bypasses that input bootstrap.
 
@@ -52,7 +54,7 @@ Completed: source review against the local UT4/UE4.15 method signatures, stock s
 After compiling the client:
 
 1. Join regular CTF, iCTF and Wipeout as a true spectator. Open/close the slideout, click the name and last column, click the selected row for weapon details, and exercise 1P/3P, X-Ray, Auto Cam, flag views, powerup views, keyboard selection and ESC.
-2. Compare totals against the scoreboard; verify no-shot/missing snapshots, a late join, a disconnect, map travel and replay seeking. Check 1080p, 1440p and 720p with long names and a full roster.
+2. Compare totals against the scoreboard; verify no-shot/missing snapshots, a late join, a disconnect, map travel and replay seeking. Check 1080p, 1440p and 720p with long names and a full roster. Confirm iCTF has no HP/armor header or values, dead labels fit, and row/camera clicks follow the reduced scale.
 3. Toggle the F5 preference off/on and save. Join as an active player and die in Wipeout; confirm the expanded opponent table never appears. Check a non-Wipeout mode that inherits WipeoutHUD and a configured custom slideout.
 4. Set a magenta flag on a dark/brown map. Compare brightness 1, 2 and 5 near/far, carried/dropped, and after capture/return. Toggle Flags and the master switch off/on, change team/style, and travel maps. Confirm original colour restoration and unchanged cloth/pole/collision.
 

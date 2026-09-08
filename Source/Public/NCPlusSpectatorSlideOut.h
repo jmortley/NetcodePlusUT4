@@ -84,12 +84,14 @@ protected:
 	/** Suppress only the roster VISUAL when bSuppressRosterDraw — ShouldDraw (the sole
 	 *  bootstrap for SUTSpectatorWindow's cursor/ESC/camera input) keeps running. */
 	virtual void Draw_Implementation(float DeltaTime) override;
+	virtual float GetDrawScaleOverride() override;
 
 	virtual void DrawWeaponStats(AUTPlayerState* PS, float DeltaTime, float& YPos, float XOffset, float ScoreWidth, float MaxHeight, const FStatsFontInfo& StatsFontInfo) override;
 
 private:
-	bool CanDrawMatchOverlay() const;
+	bool CanUseMatchOverlay() const;
 	int32 MatchOverlayColumnCount() const;
+	float MatchOverlayPlayerWidth() const;
 	float MatchOverlayWidth() const;
 	float MatchOverlayX(float StockX) const;
 	void DrawMatchCell(const FText& Text, float CenterX, float Y, float Width,

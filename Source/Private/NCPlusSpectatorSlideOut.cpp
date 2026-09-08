@@ -72,7 +72,7 @@ UNCPlusSpectatorSlideOut::UNCPlusSpectatorSlideOut(const FObjectInitializer& Obj
 void UNCPlusSpectatorSlideOut::Draw_Implementation(float DeltaTime)
 {
 	MatchHitRows.Reset();
-	bDrawingMatchOverlay = CanDrawMatchOverlay();
+	bDrawingMatchOverlay = CanUseMatchOverlay() && UTHUDOwner->TinyFont && Canvas;
 	if (bDrawingMatchOverlay)
 	{
 		UWorld* World = GetWorld();
@@ -120,12 +120,21 @@ void UNCPlusSpectatorSlideOut::Draw_Implementation(float DeltaTime)
 	Super::Draw_Implementation(DeltaTime);
 }
 
-bool UNCPlusSpectatorSlideOut::CanDrawMatchOverlay() const
+float UNCPlusSpectatorSlideOut::GetDrawScaleOverride()
+{
+	// PreDraw applies this scale to text, icons, positions and both stock/custom
+	// hit bounds. Keep it out of Draw so scaling never accumulates across frames.
+	return Super::GetDrawScaleOverride() * (CanUseMatchOverlay() ? 0.9f : 1.f);
+}
+
+bool UNCPlusSpectatorSlideOut::CanUseMatchOverlay() const
 {
 	const AUTPlayerState* OwnerPS = UTPlayerOwner ? UTPlayerOwner->UTPlayerState : nullptr;
+	// Input arrives after PostDraw, which clears Canvas. Only drawing requires
+	// that transient pointer; viewer/mode eligibility must also work between frames.
 	// Dead Wipeout players retain the stock roster and its visibility restrictions.
 	return IsMatchOverlayEnabled() && OwnerPS && OwnerPS->bOnlySpectator && IsValid(UTGameState)
-		&& UTHUDOwner && UTHUDOwner->TinyFont && Canvas
+		&& UTHUDOwner
 		&& ((MatchOverlayMode == ENCSlideOutMatchMode::CTF && Cast<AUTCTFGameState>(UTGameState))
 			|| (MatchOverlayMode == ENCSlideOutMatchMode::Wipeout && IsWipeoutMatch(UTGameState)));
 }
@@ -135,9 +144,16 @@ int32 UNCPlusSpectatorSlideOut::MatchOverlayColumnCount() const
 	return MatchOverlayMode == ENCSlideOutMatchMode::Wipeout ? 4 : 7;
 }
 
+float UNCPlusSpectatorSlideOut::MatchOverlayPlayerWidth() const
+{
+	// iCTF has no useful HP/armor totals. Close those columns while retaining
+	// the name, weapon/carrier icon and the stock camera-button footprint.
+	return bMatchInstagib ? Size.X - 88.f : Size.X;
+}
+
 float UNCPlusSpectatorSlideOut::MatchOverlayWidth() const
 {
-	return Size.X + MatchOverlayColumnCount() * 52.f;
+	return MatchOverlayPlayerWidth() + MatchOverlayColumnCount() * 52.f;
 }
 
 float UNCPlusSpectatorSlideOut::MatchOverlayX(float StockX) const
@@ -164,9 +180,28 @@ void UNCPlusSpectatorSlideOut::DrawPlayerHeader(float RenderDelta, float XOffset
 		return;
 	}
 	const float X = MatchOverlayX(XOffset);
-	// Super retains interactive 1P/3P, X-Ray and Auto Cam buttons and HP/AR icons.
-	Super::DrawPlayerHeader(RenderDelta, X, YOffset);
-	DrawTexture(UTHUDOwner->ScoreboardAtlas, X + Size.X, YOffset, MatchOverlayWidth() - Size.X, 0.95f * CellHeight,
+	if (!bMatchInstagib)
+	{
+		Super::DrawPlayerHeader(RenderDelta, X, YOffset);
+	}
+	else if (bMatchInteractive)
+	{
+		// Stock DrawPlayerHeader always draws HP/AR. Reuse its camera commands,
+		// layout and DrawCamBind hit registration without those two header icons.
+		const FText CamLabel = UTPlayerOwner->bSpectateBehindView
+			? NSLOCTEXT("UTSlideout", "CamType3P", "3P") : NSLOCTEXT("UTSlideout", "CamType1P", "1P");
+		const float Spacing = 0.333f * (ColumnHeaderScoreX - 0.05f - CamTypeButtonStart - 2.7f * CamTypeButtonWidth - 0.3f);
+		DrawCamBind(TEXT("ToggleBehindView"), CamLabel.ToString(), RenderDelta,
+			X + CamTypeButtonStart * Size.X, YOffset, CamTypeButtonWidth * Size.X, false);
+		DrawCamBind(TEXT("ToggleTacCom"), TEXT("X-Ray"), RenderDelta,
+			X + (CamTypeButtonStart + CamTypeButtonWidth + Spacing) * Size.X, YOffset,
+			1.7f * CamTypeButtonWidth * Size.X, UTPlayerOwner->bTacComView);
+		DrawCamBind(TEXT("EnableAutoCam"), TEXT("Auto Cam"), RenderDelta,
+			X + (CamTypeButtonStart + 2.7f * CamTypeButtonWidth + 2.f * Spacing) * Size.X, YOffset,
+			0.3f * Size.X, UTPlayerOwner->bAutoCam);
+	}
+	const float PlayerWidth = MatchOverlayPlayerWidth();
+	DrawTexture(UTHUDOwner->ScoreboardAtlas, X + PlayerWidth, YOffset, MatchOverlayWidth() - PlayerWidth, 0.95f * CellHeight,
 		149, 138, 32, 32, 0.65f, FLinearColor::Black);
 	static const FText CTFHeaders[] = { FText::FromString(TEXT("CAP")), FText::FromString(TEXT("GRAB")), FText::FromString(TEXT("RET")), FText::FromString(TEXT("K/D")), FText::FromString(TEXT("EFF")), FText::FromString(TEXT("LG%")), FText::FromString(TEXT("SCORE")) };
 	static const FText WipeHeaders[] = { FText::FromString(TEXT("K/D")), FText::FromString(TEXT("DMG")), FText::FromString(TEXT("DMG/L")), FText::FromString(TEXT("SCORE")) };
@@ -182,7 +217,7 @@ void UNCPlusSpectatorSlideOut::DrawPlayerHeader(float RenderDelta, float XOffset
 		const FText& Header = MatchOverlayMode == ENCSlideOutMatchMode::CTF
 			? ((Col == 5 && bMatchInstagib) ? InstagibHeader : CTFHeaders[Col]) : WipeHeaders[Col];
 		DrawMatchCell(Header,
-			X + Size.X + (Col + 0.5f) * 52.f, YOffset + ColumnY, 52.f);
+			X + PlayerWidth + (Col + 0.5f) * 52.f, YOffset + ColumnY, 52.f);
 	}
 }
 
@@ -270,7 +305,7 @@ void UNCPlusSpectatorSlideOut::DrawPlayer(int32 Index, AUTPlayerState* PS, float
 	float XL, YL; Canvas->TextSize(SlideOutFont, Name, XL, YL);
 	DrawText(FText::FromString(Name), X + 34.f, Y, SlideOutFont, FMath::Min(0.9f, 150.f / FMath::Max(XL, 1.f)),
 		1.f, TextColor, ETextHorzPos::Left, ETextVertPos::Center);
-	if (IsValid(PS->CarriedObject))
+	if (IsValid(PS->CarriedObject) && (!bMatchInstagib || bAlive))
 	{
 		const FLinearColor FlagColor = PS->CarriedObject->Team ? PS->CarriedObject->Team->TeamColor : FLinearColor::White;
 		DrawTexture(FlagIcon.Texture, X + 190.f, YOffset + 2.f, 22.f, 22.f,
@@ -294,20 +329,24 @@ void UNCPlusSpectatorSlideOut::DrawPlayer(int32 Index, AUTPlayerState* PS, float
 			DrawTexture(UDamageHUDIcon.Texture, X + 216.f, Y - 6.f, 12.f, 12.f,
 				UDamageHUDIcon.U, UDamageHUDIcon.V, UDamageHUDIcon.UL, UDamageHUDIcon.VL, 1.f, FLinearColor::White);
 		}
-		DrawMatchCell(FText::AsNumber(Character->Health), X + Size.X * ColumnHeaderScoreX, Y, 46.f, FLinearColor(0.5f, 1.f, 0.5f));
-		DrawMatchCell(FText::AsNumber(Character->GetArmorAmount()), X + Size.X * ColumnHeaderArmor, Y, 46.f, FLinearColor(1.f, 1.f, 0.5f));
+		if (!bMatchInstagib)
+		{
+			DrawMatchCell(FText::AsNumber(Character->Health), X + Size.X * ColumnHeaderScoreX, Y, 46.f, FLinearColor(0.5f, 1.f, 0.5f));
+			DrawMatchCell(FText::AsNumber(Character->GetArmorAmount()), X + Size.X * ColumnHeaderArmor, Y, 46.f, FLinearColor(1.f, 1.f, 0.5f));
+		}
 	}
 	else
 	{
 		const bool bRespawning = MatchOverlayMode == ENCSlideOutMatchMode::Wipeout && PS->bOutOfLives
 			&& PS->RespawnWaitTime > 0.f && PS->RespawnTime > 0.f;
 		const FString State = bRespawning ? FString::Printf(TEXT("%ds"), FMath::CeilToInt(PS->RespawnTime)) : (PS->bOutOfLives ? TEXT("OUT") : TEXT("DEAD"));
-		DrawMatchCell(FText::FromString(State), X + Size.X * 0.85f, Y, 86.f, TextColor);
+		DrawMatchCell(FText::FromString(State), X + (bMatchInstagib ? 208.f : Size.X * 0.85f), Y,
+			bMatchInstagib ? 40.f : 86.f, TextColor);
 	}
 	const FMatchRow& Row = GetMatchRow(PS);
 	for (int32 Col = 0; Col < MatchOverlayColumnCount(); ++Col)
 	{
-		DrawText(Row.Cells[Col], X + Size.X + (Col + 0.5f) * 52.f, Y, UTHUDOwner->TinyFont,
+		DrawText(Row.Cells[Col], X + MatchOverlayPlayerWidth() + (Col + 0.5f) * 52.f, Y, UTHUDOwner->TinyFont,
 			Row.TextScales[Col], 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 	if (bShowingStats && bSelected)
@@ -332,7 +371,7 @@ void UNCPlusSpectatorSlideOut::SetMouseInteractive(bool bNewInteractive)
 bool UNCPlusSpectatorSlideOut::MouseClick(FVector2D Position)
 {
 	if (Super::MouseClick(Position)) { return true; }
-	if (!bMatchInteractive || !CanDrawMatchOverlay() || !UTPlayerOwner->bShowMouseCursor
+	if (!bMatchInteractive || !CanUseMatchOverlay() || !UTPlayerOwner->bShowMouseCursor
 		|| MatchWorld.Get() != GetWorld()) { return false; }
 	for (const FMatchHitRow& Row : MatchHitRows)
 	{
