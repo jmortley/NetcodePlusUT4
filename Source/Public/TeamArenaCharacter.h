@@ -427,6 +427,16 @@ protected:
 	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
 	void HideDeadBody();
 
+	/** Client-local AMP hum, driven by the stock replicated weapon-overlay bits. */
+	void UpdateAmpAmbientSound();
+	void StopAmpAmbientSound();
+	UPROPERTY(Transient)
+	UAudioComponent* AmpAmbientSoundComp = nullptr;
+	UPROPERTY(Transient)
+	USoundBase* AmpAmbientLoopSound = nullptr;
+	TWeakObjectPtr<UMaterialInterface> CachedAmpOverlayMaterial;
+	float NextAmpAmbientRetryTime = 0.f;
+
 	// ── Own footstep volume (iCTF) ──
 	/** Reimplemented own-footstep play honouring OwnFootstepVolumeScale (UTPlaySound has no volume arg). */
 	void PlayOwnFootstepScaled(uint8 FootNum);

@@ -41,6 +41,8 @@
 #include "Engine/LocalPlayer.h"
 #include "NCRemoteAnimationPolicy.h"
 #include "NCRemoteAnimationURO.h"
+#include "Components/AudioComponent.h"
+#include "Sound/SoundBase.h"
 
 DECLARE_STATS_GROUP_VERBOSE(TEXT("NCP URO"), STATGROUP_NCPURO, STATCAT_Advanced);
 DECLARE_CYCLE_STAT(TEXT("Policy total"), STAT_NCPUROPolicy, STATGROUP_NCPURO);
@@ -461,6 +463,7 @@ void ATeamArenaCharacter::ReleaseRemoteAnimationURO(bool bTeardown)
 
 void ATeamArenaCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	StopAmpAmbientSound();
 	ReleaseRemoteAnimationURO(true);
 	Super::EndPlay(EndPlayReason);
 }
@@ -1021,6 +1024,7 @@ void ATeamArenaCharacter::LeaderHatStatusChanged_Implementation()
 
 void ATeamArenaCharacter::PlayDying()
 {
+	StopAmpAmbientSound();
 	Super::PlayDying();
 	ClearLocalOutlineRenderState();
 	SpawnSkeletonDissolve();
@@ -1028,6 +1032,7 @@ void ATeamArenaCharacter::PlayDying()
 
 void ATeamArenaCharacter::Destroyed()
 {
+	StopAmpAmbientSound();
 	// AUTLineUpHelper destroys its prematch preview pawns while they are still alive. That
 	// bypasses PlayDying(), and stock AUTCharacter::Destroyed() destroys WeaponAttachment
 	// without first unregistering either duplicated CustomDepth mesh. Retire both while all
@@ -1886,6 +1891,99 @@ void ATeamArenaCharacter::BeginPlay()
 
 
 
+void ATeamArenaCharacter::StopAmpAmbientSound()
+{
+	NextAmpAmbientRetryTime = 0.f;
+	if (AmpAmbientSoundComp && AmpAmbientSoundComp->IsPlaying())
+	{
+		AmpAmbientSoundComp->Stop();
+	}
+}
+
+void ATeamArenaCharacter::UpdateAmpAmbientSound()
+{
+	// Inventory is owner-only. The stock weapon-overlay bits already publish AMP
+	// acquisition/removal to every relevant client, including spectators/replays.
+	// Match the AMP material specifically: Siphon/Berserk also set overlay bits.
+	bool bHasAmp = false;
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	const uint16 Flags = uint16(GetWeaponOverlayFlags());
+	if (!IsDead() && !IsPendingKillPending() && GS && Flags != 0)
+	{
+		static const FName AmpMaterialName(TEXT("M_UDamageSkin_3P"));
+		static const FName LegacyAmpMaterialName(TEXT("M_UDamage_Overlay"));
+		for (int32 Index = 0; Index < int32(sizeof(Flags) * 8); ++Index)
+		{
+			if ((Flags & (uint16(1) << Index)) == 0) { continue; }
+			UMaterialInterface* Material = GS->GetOverlayMaterial(Index, false).Material;
+			if (!Material) { continue; }
+			if (Material == CachedAmpOverlayMaterial.Get())
+			{
+				bHasAmp = true;
+				break;
+			}
+			if (Material->GetFName() == AmpMaterialName || Material->GetFName() == LegacyAmpMaterialName)
+			{
+				const FString Path = Material->GetPathName();
+				if (Path == TEXT("/Game/RestrictedAssets/Effects/Pickups/UDamage/Materials/M_UDamageSkin_3P.M_UDamageSkin_3P")
+					|| Path == TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/M_UDamage_Overlay.M_UDamage_Overlay"))
+				{
+					CachedAmpOverlayMaterial = Material;
+					bHasAmp = true;
+					break;
+				}
+			}
+		}
+	}
+	if (!bHasAmp)
+	{
+		StopAmpAmbientSound();
+		return;
+	}
+	if (!AmpAmbientLoopSound)
+	{
+		// This stock cue contains the looping node and spatial attenuation. The raw
+		// wave is a one-shot; using it directly would periodically restart playback.
+		static bool bMissingSoundLogged = false;
+		if (bMissingSoundLogged) { return; }
+		AmpAmbientLoopSound = LoadObject<USoundBase>(nullptr,
+			TEXT("/Game/RestrictedAssets/Pickups/Powerups/Assets/A_Powerup_UDamage_PowerLoop_Cue.A_Powerup_UDamage_PowerLoop_Cue"));
+		if (!AmpAmbientLoopSound)
+		{
+			bMissingSoundLogged = true;
+			UE_LOG(UT, Warning, TEXT("NCP: stock AMP ambient cue is missing; carried AMP loop unavailable."));
+			return;
+		}
+	}
+	// Avoid doubling the same cue if a custom powerup already uses stock ambient.
+	if (AmbientSound == AmpAmbientLoopSound || StatusAmbientSound == AmpAmbientLoopSound)
+	{
+		StopAmpAmbientSound();
+		return;
+	}
+	if (!AmpAmbientSoundComp)
+	{
+		AmpAmbientSoundComp = NewObject<UAudioComponent>(this);
+		AmpAmbientSoundComp->bAutoDestroy = false;
+		AmpAmbientSoundComp->bAutoActivate = false;
+		AmpAmbientSoundComp->bStopWhenOwnerDestroyed = true;
+		AmpAmbientSoundComp->SetupAttachment(GetRootComponent());
+		AmpAmbientSoundComp->RegisterComponent();
+		AmpAmbientSoundComp->SetSound(AmpAmbientLoopSound);
+	}
+	// A separate local component preserves weapon/flag/Siphon loops. No RPC or
+	// replicated property is added; clients running this DLL restore the audio.
+	if (!AmpAmbientSoundComp->IsPlaying())
+	{
+		// Distance/voice culling can reject a loop. Retry at 4 Hz instead of
+		// submitting a new sound on every high-FPS render tick. Allow replay rewinds.
+		const float Now = GetWorld()->GetTimeSeconds();
+		if (Now < NextAmpAmbientRetryTime && NextAmpAmbientRetryTime - Now <= 0.25f) { return; }
+		NextAmpAmbientRetryTime = Now + 0.25f;
+		AmpAmbientSoundComp->Play();
+	}
+}
+
 void ATeamArenaCharacter::SetAmbientSound(USoundBase* NewAmbientSound, bool bClear)
 {
 	// Stock AUTWeap_LinkGun::Tick() applies its overheat sound to the owner while
@@ -2665,6 +2763,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	{
 		return;
 	}
+	UpdateAmpAmbientSound();
 
 	const bool bOverlayRegistered = OverlayMesh != nullptr && OverlayMesh->IsRegistered();
 	UMaterialInterface* const CurrentArmourOverlayMaterial =
