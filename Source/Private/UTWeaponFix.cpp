@@ -452,21 +452,29 @@ static TAutoConsoleVariable<float> CVarHitAttribRenderExtraMs(
 // NOTHING (claimSent=none) yet the server's under-rewound capsule was hit.
 // Rather than hard-requiring claim presence (the reverted 2026-07-18 gate —
 // it starved shooters whose claims are lost or unproduceable), the server
-// reconstructs the claim: an UNCLAIMED exact-hitscan pawn hit must also cross
-// the target's RENDER-TIME rewound capsule (halfRTT + ncp.HitAttribRenderExtraMs,
-// plus slack). Shots aimed at the rendered body pass even with a lost claim,
-// at any ping; shots at the invisible leading edge fail. Claimed routes
-// (primary/padding/time-search) are untouched. Applies only to remote human
-// shooters on claim-capable modes (bots and spread weapons never claim).
+// checks an estimate: an UNCLAIMED exact-hitscan pawn hit must also cross the
+// capsule at halfRTT + ncp.HitAttribRenderExtraMs, plus slack. Require bracketed
+// position and posture history; a fallback location/current posture is not
+// evidence. This cannot prove the client's actual mesh/smoothing state.
+// Claimed routes (primary/padding/time-search) are untouched. Applies only to
+// remote human shooters on claim-capable modes (bots/spread never claim).
 // =========================================================================
 static TAutoConsoleVariable<int32> CVarUnclaimedRenderGate(
     TEXT("ncp.UnclaimedRenderGate"), 1,
-    TEXT("Unclaimed exact-hitscan pawn hits must also cross the target's render-time rewound capsule: 1=enforce (default; failing hits demote to world impact), 0=shadow kill switch (verdict still logged via ncp.HitAttribDebug, no behavior change). Server-side only; flippable live on the server console. Claimed routes unaffected."),
+    TEXT("Unclaimed exact-hitscan pawn hits require continuous position history, known historical posture, and intersection with the estimated render-time capsule: 1=enforce (default; failures demote to world impact), 0=shadow kill switch (verdict logged via ncp.HitAttribDebug). Server-side only; claimed routes unaffected."),
     ECVF_Default);
 
 static TAutoConsoleVariable<float> CVarUnclaimedRenderSlack(
     TEXT("ncp.UnclaimedRenderSlack"), 20.0f,
     TEXT("Extra radius (uu) forgiven by the unclaimed render-time check, absorbing render-lag estimate error and ping jitter. Default: 20."),
+    ECVF_Default);
+
+// Exploratory timing uncertainty probe, not an acceptance window. Only runs
+// with HitAttribDebug, and only after the central unclaimed check passes.
+// There is deliberately no enforcement setting for neighboring-time verdicts.
+static TAutoConsoleVariable<float> CVarUnclaimedRenderProbeMs(
+    TEXT("ncp.UnclaimedRenderProbeMs"), 10.0f,
+    TEXT("Diagnostic ONLY: with ncp.HitAttribDebug=1, test the same unclaimed target this many ms younger and older than the passing central render sample. 0=off; clamped to 0..50, default 10 per side. Logs agreement/unknown evidence; NEVER changes hit acceptance."),
     ECVF_Default);
 
 // Render-authoritative targeting for opted-in claim-INCAPABLE fire (the Link
@@ -610,6 +618,109 @@ static bool HasContinuousRenderHistory(AUTCharacter* Target, float RenderTime,
     }
 
     return true;
+}
+
+// All state here is local to a server trace. Keep this separate from the
+// permissive shared posture helpers used by other validation families.
+struct FUnclaimedRenderSample
+{
+    const TCHAR* Reason = TEXT("na");
+    bool bMeasured = false;
+    bool bPass = false;
+    bool bFloorSliding = false;
+    float MissBy = BIG_NUMBER;
+    float HalfHeight = 0.f;
+    float Radius = 0.f;
+};
+
+static FUnclaimedRenderSample EvaluateUnclaimedRenderSample(
+    AUTCharacter* Target, float RenderTime, float ValidationTime,
+    const FVector& RayStart, const FVector& RayEnd, float TraceRadius, float Slack)
+{
+    FUnclaimedRenderSample Result;
+    // Retain the existing 250ms ceiling without silently substituting another
+    // epoch. Neighbor probes also report out-of-range times, never clamp them.
+    if (!FMath::IsFinite(RenderTime) || RenderTime < 0.f || RenderTime > 0.25f ||
+        !FMath::IsFinite(ValidationTime) || ValidationTime < 0.f)
+    {
+        Result.Reason = TEXT("invalid-age");
+        return Result;
+    }
+
+    int32 OlderIndex = INDEX_NONE;
+    int32 NewerIndex = INDEX_NONE;
+    if (!HasContinuousRenderHistory(Target, RenderTime, ValidationTime,
+            OlderIndex, NewerIndex) ||
+        (RenderTime > 0.f && (OlderIndex == INDEX_NONE || NewerIndex == INDEX_NONE)))
+    {
+        // The shared helper allows a stationary newest endpoint for other
+        // callers. This gate requires a real bracket for every historical age.
+        Result.Reason = TEXT("no-history");
+        return Result;
+    }
+
+    const ATeamArenaCharacter* const TeamTarget = Cast<ATeamArenaCharacter>(Target);
+    float SlideElapsed = 0.f;
+    if (TeamTarget == nullptr || !TeamTarget->GetRewindCapsulePosture(RenderTime,
+            Result.HalfHeight, Result.bFloorSliding, SlideElapsed))
+    {
+        // Includes missing posture samples, teleports, and slide transitions.
+        // A non-NCP character has no posture history and cannot prove this hit.
+        Result.Reason = TEXT("no-posture");
+        return Result;
+    }
+
+    Result.Radius = Target->GetCapsuleComponent()->GetScaledCapsuleRadius();
+    if (!FMath::IsFinite(Result.Radius) || Result.Radius <= 0.f ||
+        !FMath::IsFinite(Result.HalfHeight) || Result.HalfHeight <= 0.f ||
+        (Result.bFloorSliding &&
+            (!FMath::IsFinite(Target->SlideTargetHeight) || Target->SlideTargetHeight <= 0.f)))
+    {
+        Result.Reason = TEXT("invalid-capsule");
+        return Result;
+    }
+
+    FVector CapsuleCentre = Target->GetRewindLocation(RenderTime);
+    if (Result.bFloorSliding)
+    {
+        // Match the client rendered-capsule slide shape, bottom-aligned to the
+        // RECORDED physical capsule. No live slide state, standing alternative,
+        // or SlideGrace expansion. Non-sliding crouch uses recorded half-height.
+        CapsuleCentre.Z += Target->SlideTargetHeight - Result.HalfHeight;
+        Result.HalfHeight = Target->SlideTargetHeight;
+    }
+    if (CapsuleCentre.ContainsNaN())
+    {
+        Result.Reason = TEXT("invalid-capsule");
+        return Result;
+    }
+
+    FVector ClosestOnRay(0.f);
+    FVector ClosestOnCapsule = CapsuleCentre;
+    const float EffectiveRadius = FMath::Min(Result.Radius, Result.HalfHeight);
+    if (Result.Radius >= Result.HalfHeight)
+    {
+        ClosestOnRay = FMath::ClosestPointOnSegment(CapsuleCentre, RayStart, RayEnd);
+    }
+    else
+    {
+        const FVector Axis(0.f, 0.f, Result.HalfHeight - Result.Radius);
+        FMath::SegmentDistToSegmentSafe(RayStart, RayEnd,
+            CapsuleCentre - Axis, CapsuleCentre + Axis, ClosestOnRay, ClosestOnCapsule);
+    }
+    Result.MissBy = FVector::Dist(ClosestOnRay, ClosestOnCapsule) -
+        (EffectiveRadius + TraceRadius);
+    Result.bMeasured = FMath::IsFinite(Result.MissBy);
+    if (!Result.bMeasured)
+    {
+        Result.Reason = TEXT("invalid-capsule");
+        return Result;
+    }
+    // Radius and SlideTargetHeight are class/current values: only position,
+    // physical half-height and slide state are recorded in existing 328 history.
+    Result.bPass = Result.MissBy <= Slack;
+    Result.Reason = Result.bPass ? TEXT("pass") : TEXT("miss");
+    return Result;
 }
 
 static bool ShotIntersectsRenderedCapsule(
@@ -5964,7 +6075,12 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     bool bRenderChkApplicable = false;
     bool bRenderChkPass = true;
     bool bRenderChkDemoted = false;
-    float RenderChkMissBy = 0.f;
+    FUnclaimedRenderSample RenderSample;
+    FUnclaimedRenderSample RenderYoungerSample;
+    FUnclaimedRenderSample RenderOlderSample;
+    const TCHAR* RenderProbeVerdict = TEXT("na");
+    float RenderProbeMs = 0.f;
+    float RenderChkSlack = 0.f;
     AUTCharacter* RenderChkDemotedTarget = nullptr;
     const int32 UnclaimedRenderGate = CVarUnclaimedRenderGate.GetValueOnGameThread();
     if (BestTarget != nullptr && ReceivedHitScanHitChar == nullptr &&
@@ -5986,58 +6102,46 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             const float RenderMs = ServerRTTMs * 0.5f +
                 FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
 
+            const float RenderT = RenderMs * 0.001f;
+            RenderChkSlack = FMath::Max(0.f,
+                CVarUnclaimedRenderSlack.GetValueOnGameThread());
             if (!bServerTimingValid)
             {
                 // No server measurement means no trustworthy render epoch.
                 // Fail closed rather than letting ExactPing select the sample.
-                bRenderChkPass = false;
-                RenderChkMissBy = BIG_NUMBER;
+                RenderSample.Reason = TEXT("no-timing");
             }
             else
             {
-                const float RenderT = FMath::Clamp(RenderMs * 0.001f, 0.f, 0.25f);
-                const FVector RenderLoc = BestTarget->GetRewindLocation(RenderT);
-                const float RenderColRadius = BestTarget->GetCapsuleComponent()->GetScaledCapsuleRadius();
-                const float RenderColHeight = BestTarget->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+                RenderSample = EvaluateUnclaimedRenderSample(BestTarget, RenderT,
+                    ActualPredictionTime, StartLocation, Hit.Location, TraceRadius, RenderChkSlack);
+            }
+            bRenderChkPass = RenderSample.bPass;
 
-                // Position history stores location only — not capsule posture. Test
-                // the ray against BOTH plausible postures and take the best: the
-                // full standing capsule always (it strictly contains the slide-
-                // adjusted capsule at the same anchor, so it also covers a target
-                // that WAS sliding at render time), plus the slide-adjusted capsule
-                // when the target is currently sliding (its recorded anchor may
-                // already reflect slide posture). A mandatory reject must not
-                // hinge on posture we cannot reconstruct.
-                auto RenderMissBy = [&](const FVector& CapsuleCentre, float HalfHeight) -> float
+            if (bHitAttrib)
+            {
+                const float ConfiguredProbeMs = CVarUnclaimedRenderProbeMs.GetValueOnGameThread();
+                RenderProbeMs = FMath::IsFinite(ConfiguredProbeMs)
+                    ? FMath::Clamp(ConfiguredProbeMs, 0.f, 50.f) : 0.f;
+                RenderProbeVerdict = RenderProbeMs > 0.f ? TEXT("base-fail") : TEXT("off");
+                if (RenderProbeMs > 0.f && bRenderChkPass)
                 {
-                    FVector ClosestOnRay(0.f);
-                    FVector ClosestOnCapsule = CapsuleCentre;
-                    float EffRadius;
-                    if (RenderColRadius >= HalfHeight)
-                    {
-                        ClosestOnRay = FMath::ClosestPointOnSegment(CapsuleCentre, StartLocation, Hit.Location);
-                        EffRadius = HalfHeight;
-                    }
-                    else
-                    {
-                        const FVector Seg(0.f, 0.f, HalfHeight - RenderColRadius);
-                        FMath::SegmentDistToSegmentSafe(StartLocation, Hit.Location,
-                            CapsuleCentre - Seg, CapsuleCentre + Seg, ClosestOnRay, ClosestOnCapsule);
-                        EffRadius = RenderColRadius;
-                    }
-                    return FVector::Dist(ClosestOnRay, ClosestOnCapsule) - (EffRadius + TraceRadius);
-                };
-
-                RenderChkMissBy = RenderMissBy(RenderLoc, RenderColHeight);
-                if (BestTarget->UTCharacterMovement && BestTarget->UTCharacterMovement->bIsFloorSliding)
-                {
-                    FVector SlideLoc = RenderLoc;
-                    SlideLoc.Z = SlideLoc.Z - RenderColHeight + BestTarget->SlideTargetHeight;
-                    RenderChkMissBy = FMath::Min(RenderChkMissBy,
-                        RenderMissBy(SlideLoc, BestTarget->SlideTargetHeight));
+                    // Diagnostic ONLY. Both probes use the original finite,
+                    // world-clipped ray and the same selected target/slack. Do
+                    // not combine any probe result with bRenderChkPass.
+                    const float ProbeSeconds = RenderProbeMs * 0.001f;
+                    RenderYoungerSample = EvaluateUnclaimedRenderSample(BestTarget,
+                        RenderT - ProbeSeconds, ActualPredictionTime,
+                        StartLocation, Hit.Location, TraceRadius, RenderChkSlack);
+                    RenderOlderSample = EvaluateUnclaimedRenderSample(BestTarget,
+                        RenderT + ProbeSeconds, ActualPredictionTime,
+                        StartLocation, Hit.Location, TraceRadius, RenderChkSlack);
+                    RenderProbeVerdict =
+                        (!RenderYoungerSample.bMeasured || !RenderOlderSample.bMeasured)
+                        ? TEXT("unknown")
+                        : ((RenderYoungerSample.bPass && RenderOlderSample.bPass)
+                            ? TEXT("pass") : TEXT("shadow-fail"));
                 }
-                bRenderChkPass = RenderChkMissBy <=
-                    FMath::Max(0.f, CVarUnclaimedRenderSlack.GetValueOnGameThread());
             }
 
             if (!bRenderChkPass && UnclaimedRenderGate > 0)
@@ -6052,8 +6156,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 // verification pass re-enables it with `Log LogUTWeaponFix
                 // Verbose` at the server console — no rebuild needed.
                 UE_LOG(LogUTWeaponFix, Verbose,
-                    TEXT("[RenderGate] DEMOTED %s: missed render-time capsule by %.1fuu (serverRTT %.0f, renderMs %.1f, timingValid=%d)"),
-                    *BestTarget->GetName(), RenderChkMissBy, ServerRTTMs,
+                    TEXT("[RenderGate] DEMOTED %s: reason=%s missBy=%.1fuu (serverRTT %.0f, renderMs %.1f, timingValid=%d)"),
+                    *BestTarget->GetName(), RenderSample.Reason,
+                    RenderSample.bMeasured ? RenderSample.MissBy : -1.f, ServerRTTMs,
                     RenderMs, bServerTimingValid ? 1 : 0);
                 RenderChkDemotedTarget = BestTarget;
                 bRenderChkDemoted = true;
@@ -6189,8 +6294,19 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             ? FString::Printf(TEXT("%.1f"), AttribTimeSearchMissBy) : TEXT("na");
         const FString RenderChkStr = !bRenderChkApplicable ? TEXT("na")
             : (bRenderChkPass ? TEXT("pass") : (bRenderChkDemoted ? TEXT("fail-demoted") : TEXT("fail")));
-        const FString RenderChkMissStr = bRenderChkApplicable
-            ? FString::Printf(TEXT("%.1f"), RenderChkMissBy) : TEXT("na");
+        auto RenderSampleMissString = [](const FUnclaimedRenderSample& Sample) -> FString
+        {
+            return Sample.bMeasured ? FString::Printf(TEXT("%.1f"), Sample.MissBy) : TEXT("na");
+        };
+        const FString RenderChkMissStr = RenderSampleMissString(RenderSample);
+        const FString RenderChkHalfHeightStr = RenderSample.bMeasured
+            ? FString::Printf(TEXT("%.1f"), RenderSample.HalfHeight) : TEXT("na");
+        const FString RenderChkRadiusStr = RenderSample.bMeasured
+            ? FString::Printf(TEXT("%.1f"), RenderSample.Radius) : TEXT("na");
+        const FString RenderChkSlackStr = bRenderChkApplicable
+            ? FString::Printf(TEXT("%.1f"), RenderChkSlack) : TEXT("na");
+        const TCHAR* RenderChkPosture = !RenderSample.bMeasured ? TEXT("na")
+            : (RenderSample.bFloorSliding ? TEXT("slide") : TEXT("non-slide"));
 
         // Rescue lead gate verdict (appended fields — existing parsers anchor on
         // earlier tokens and are unaffected). Taxonomy:
@@ -6241,6 +6357,15 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             TEXT(" rescueLead=%s rescueLeadUU=%s rescueRayAheadUU=%s rescueRenderMissUU=%s rescueDMag=%s rescueSkips=%d rescueSame=%d"),
             *RescueLeadStr, *RescueLeadUUStr, *RescueRayAheadStr,
             *RescueRenderMissStr, *RescueDMagStr, RescueLeadRungsSkipped, RescueSame);
+        HitAttribLog += FString::Printf(
+            TEXT(" renderChkReason=%s renderChkPosture=%s renderChkHalfHeight=%s renderChkRadius=%s renderChkSlack=%s"),
+            RenderSample.Reason, RenderChkPosture, *RenderChkHalfHeightStr,
+            *RenderChkRadiusStr, *RenderChkSlackStr);
+        HitAttribLog += FString::Printf(
+            TEXT(" renderProbeMs=%.1f renderProbe=%s renderYounger=%s renderYoungerMissBy=%s renderOlder=%s renderOlderMissBy=%s"),
+            RenderProbeMs, RenderProbeVerdict,
+            RenderYoungerSample.Reason, *RenderSampleMissString(RenderYoungerSample),
+            RenderOlderSample.Reason, *RenderSampleMissString(RenderOlderSample));
         UE_LOG(LogUTWeaponFix, Log, TEXT("%s"), *HitAttribLog);
     }
 
