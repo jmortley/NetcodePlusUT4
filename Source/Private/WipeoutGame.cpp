@@ -2617,7 +2617,7 @@ APawn* AUWipeoutGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 // ---------------------------------------------------------------------------
 // CheckRelevance — Strip pickups not appropriate for Wipeout:
 //   - Remove Redeemer weapon base (and its weapon)
-//   - Remove ALL health pickups and vials
+//   - Keep super-health pickups (vials and keg) and custom candy; remove normal health packs
 //   - Keep ShieldBelt and ThighPads; stash the first Chest/Vest so it can stay
 //     on authored Belt maps or become the belt location on Belt-less maps
 //   - Preserve UDamage/Amp and Berserk; record non-Amp timed-powerup spots for
@@ -2646,12 +2646,14 @@ bool AUWipeoutGame::CheckRelevance_Implementation(AActor* Other)
 		return Super::CheckRelevance_Implementation(Other);
 	}
 
-	// --- Health pickups: remove all EXCEPT CandyPlaceholder (custom pickup) ---
-	if (Other->IsA(AUTPickupHealth::StaticClass()))
+	// --- Health pickups: keep vials/keg (super heal), remove normal health packs ---
+	AUTPickupHealth* HealthPickup = Cast<AUTPickupHealth>(Other);
+	if (HealthPickup)
 	{
-		// Whitelist CandyPlaceholder — BP subclass of UTPickupHealth used for custom mechanics
-		FString ClassName = Other->GetClass()->GetName();
-		if (!ClassName.Contains(TEXT("Candy")))
+		// Use pickup behavior so renamed/tuned vial and keg BPs are preserved.
+		// Keep the existing CandyPlaceholder exception for custom mechanics.
+		const FString ClassName = Other->GetClass()->GetName();
+		if (!HealthPickup->bSuperHeal && !ClassName.Contains(TEXT("Candy")))
 		{
 			return false;
 		}

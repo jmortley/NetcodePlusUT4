@@ -814,6 +814,9 @@ CTF respawn + small‑game tuning is in Mod.ini `[UTPUGS_STATS]` (`CTFRespawnWai
 
 ### 11.3 Wipeout — 4v4
 
+Wipeout keeps super-health pickups (health vials and the keg of health) and its
+custom candy pickups. Ordinary health packs are still removed by the gamemode.
+
 ```json
 {
   "uniqueTag": "4v4WipeNCP",
