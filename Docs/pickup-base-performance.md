@@ -155,6 +155,21 @@ unmodified newly placed base as well as an existing map base. Establish actual
 swaps before the server/client and lighting checks above. Recook the six
 configured/copied assets only after runtime acceptance.
 
+### Owner PIE follow-up
+
+The owner reports that Wipeout worked in PIE without visible errors. The live
+editor log confirms Example_Map/WipeoutPlus PIE sessions at 15:49 and 15:51 UTC
+on 2026-09-09, round start, and normal PIE shutdown. The headless failure has
+not reproduced in this reported Wipeout play test. The log does contain
+WipeoutPlus `GS`-reference Blueprint runtime errors during startup; their
+relationship to pickup replacement is unverified.
+
+There are no `[PickupBase]` rows in those sessions, so actual substitution is
+still unverified. LogGameMode VeryVerbose was enabled through the connector
+afterward for the next PIE run. This console setting lasts for the current
+editor process; reapply it after restarting. The on-disk editor DLL still has
+its 10:14 local timestamp, preceding the diagnostic follow-up.
+
 ## Further candidates, not applied
 
 The loaded connector edits native CDO component pointers but cannot edit the

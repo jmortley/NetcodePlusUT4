@@ -51,7 +51,16 @@
       "NCWepMut": "Headless startup access violation before pickup-hook rows; cause unverified.",
       "NCStockWeapons_fresh": "Startup timeout; owned test process terminated."
     },
-    "next_step": "Owner build of detailed guard logging, then rendered play with LogGameMode VeryVerbose; prove swaps before release acceptance."
+    "rendered_pie_followup": {
+      "date": "2026-09-09",
+      "user_report": "Wipeout worked in PIE without visible errors.",
+      "observed_log": "Wipeout round start and normal PIE shutdown; startup GS-reference Blueprint runtime errors also present.",
+      "pickup_base_rows": 0,
+      "replacement_verified": false,
+      "logging_enabled_after_test": true,
+      "diagnostic_dll_rebuild_confirmed": false
+    },
+    "next_step": "Run PIE with pickup logging enabled to prove swaps. The detailed guard diagnostics still require an owner DLL build; reapply LogGameMode VeryVerbose after restarting the editor."
   },
   "checks": [
     "Back up each mutator package and export all graphs before changing its parent.",
