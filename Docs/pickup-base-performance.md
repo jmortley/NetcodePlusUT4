@@ -12,19 +12,22 @@ The owner-built native class is loaded. `NCWepMut`, `NCStockWeapons` and
 and are compiled and saved in the active editor content tree. Existing CDO
 settings and all 18 exported graphs' connections were preserved.
 
-**Runtime acceptance has not passed.** The owner's 16:32:04 UTC Wipeout PIE
-rerun loaded the rebuilt `3a8808d` DLL. The replay/timer/default checks passed;
-all 10 weapon and 2 powerup bases were then kept solely for
-`Capsule.bShouldUpdatePhysicsVolume`. No replacement was observed.
+**Replacement now works in Wipeout PIE; full runtime acceptance is pending.**
+The owner's 16:56:43 and 16:58:47 UTC sessions each logged **10 weapon and
+2 powerup bases successfully copied**, with no keep/rejection rows and normal
+PIE shutdown. The loaded editor DLL was written at 16:53:32 UTC. These runs
+confirm that the copy-capsule comparison has been built and exercised.
 
 The existing map saves this flag as true, while a fresh stock actor and its
 class defaults have it false. The three copies now save true in their capsule
 templates. The source compares this setting against the **copy's actual
 template**, preserving volume behavior on servers and clients. A source with a
 different flag stays original. All three copied assets compile and read back
-correctly; the native comparison change still needs an owner build/deploy and
-runtime verification. Ordinary Wipeout play does not establish replacement or
-FPS savings.
+correctly. The new runs expose eight `CustomWeaponClasses` out-of-bounds reads
+per session when Wipeout checks the copied weapons. This is traced to an Init
+graph append without matching replacement entries; the Blueprint correction
+described below is **not applied**. Pickup behavior, remote clients, lighting,
+replay behavior and FPS savings still need verification.
 
 ## Saved content
 
@@ -125,9 +128,9 @@ Vitals and mouse/camera behavior keep their existing paths.
   They need a content pak cook after activation and acceptance.
 - Native APIs/signatures were checked against the local UT4/4.15 source.
   The owner supplied the native build containing the new parent and detailed
-  diagnostics, then built the replay/timer/default guard correction. No native
-  build or cook was run by this audit; the subsequent copy-capsule comparison
-  change is uncompiled.
+  diagnostics, then built the replay/timer/default guard correction and the
+  copy-capsule comparison. No native build or cook was run by this audit.
+  Successful copied-base rows now verify replacement dispatch in Wipeout PIE.
 - Test pickup identity/count, collection, weapon stay, delayed spawn, respawn
   indicators, rotation, spectator pickup buttons, Wipeout Siphon/AMP selection
   and other mutator rejection paths on a server and client. Check bases under
@@ -174,12 +177,12 @@ comparison output, six saved-package hashes, and isolated runtime logs.
   map startup and only that owned process was terminated. Neither supplies a
   valid fresh-instance result. The live editor remained responsive.
 
-Next: rebuild/deploy the copy-capsule comparison change, use a rendered play test with
-`-LogCmds="LogGameMode VeryVerbose"` (or console `log LogGameMode VeryVerbose`),
-and capture swap/keep decisions for an unmodified newly placed base as well as
-an existing map base. Reapply console logging after an editor restart. Establish
-actual swaps before the server/client and lighting checks above. Recook the six
-configured/copied assets only after runtime acceptance.
+Next: correct the Wipeout Init append described below, compile/save that BP and
+rerun PIE. Keep `LogGameMode VeryVerbose` enabled; reapply it after an editor
+restart. Also verify that a fresh false-volume-flag base stays original, then
+complete the server/client, gameplay and lighting checks above. Recook the six
+configured/copied assets after runtime acceptance. This Blueprint correction
+does not require another native DLL build.
 
 ### Owner PIE follow-up
 
@@ -235,9 +238,9 @@ component dumps in `guard-editor-snapshots.json`.
 Initial validation for this correction was source/API review against the local fork,
 read-only editor comparison, log receipts, JSON parsing and `git diff --check`.
 The owner subsequently built it and the next PIE run advanced to the volume
-flag check. Actual replacement and replay/server-client behavior remain
-unverified. The earlier PIE log proves only that the delegate guard was the
-first blocker.
+flag check, and the later copy-capsule build produced actual replacements.
+Replay/server-client behavior remains unverified. The earlier PIE log proves
+only that the delegate guard was the first blocker.
 
 ### Capsule-volume follow-up at 16:32 UTC
 
@@ -273,10 +276,59 @@ path: the saved copy template supplies the matching value on both peers.
 
 Evidence is in `physics-volume-20260909T164100858Z` under the external activation
 folder: package backups and hashes, PIE log/count receipt, full CDO comparisons,
-compiler receipts and the fresh-instance dumps. The C++ follow-up is uncompiled.
-Next PIE acceptance should show actual copied-base rows for otherwise eligible
-true-source bases and a copy-setting mismatch for a fresh false-source base.
-The three updated copied packages must be included in the next content cook.
+compiler receipts and the fresh-instance dumps. The owner subsequently built
+the C++ follow-up and the 16:56/16:58 UTC runs produced copied-base rows for
+eligible true-source bases. A rendered fresh false-source preservation check
+remains pending. Include the three updated copied packages in the next cook.
+
+### Successful swaps and Wipeout array warning at 16:56/16:58 UTC
+
+Each run produced 10 `NCWeaponBase` and 2 `NCPowerupBase` `(copied base)` rows,
+zero `keeping` rows and zero `removed by relevance` rows. Siphon selection still
+reported two powerup candidates, one AMP, and selected Berserk for replacement.
+That verifies the selection log, not collection or later respawn behavior.
+Both sessions shut down normally. Existing WipeoutPlus startup `GS` errors
+remain; they were present before successful base replacement.
+
+Each session also produced eight warnings reading `CustomWeaponClasses` at
+indices `12, 14, 15, 11, 17, 13, 17, 16`, while its length is 10. The live editor
+graph and CDO trace identifies the cause:
+
+- WipeoutMutator's saved `DefaultWeaponClasses` and `CustomWeaponClasses` each
+  contain the original ten stock-to-custom mappings.
+- In `EventGraph`, Init reads WipeoutPlus `DefaultInventory`, casts each class
+  to UTWeapon, then `K2Node_CallArrayFunction_53` (`Array_AddUnique`) appends it
+  to `DefaultWeaponClasses` only. The current starting inventory adds nine
+  custom weapon classes, producing unpaired indices 10 through 18.
+- Native base replacement copies the already-converted weapon configuration.
+  The new actor runs ordinary relevance again. Wipeout's weapon loop matches
+  those appended classes and uses their index in the ten-entry replacement
+  array (`CheckRelevance`, `K2Node_CallArrayFunction_327`).
+- An invalid read returns no class. The following IsValidClass branch breaks
+  the loop without calling SetInventoryType, then forwards to the parent.
+  The traced warning path therefore leaves the converted weapon intact.
+
+**Pending BP correction:** in WipeoutMutator's Init flow, disconnect the white
+execution wire into `AddUnique(DefaultWeaponClasses)` after the UTWeapon class
+cast. It is node `K2Node_CallArrayFunction_53`, GUID
+`DAAB8FC6448196C8C05196A3148C6F20`, at graph coordinates `(-2160, -1456)`.
+Its outgoing execution and return-value pins are unused. Leave the ForEach
+Completed connection and the ten configured mapping entries intact. This
+removes the unpaired append; starting inventory still comes from WipeoutPlus.
+Compile/save, then verify the twelve swaps with no array warnings in PIE.
+
+The connector can export this graph and compile/save the BP, but its graph
+import adds nodes and cannot rewire existing ones. An attempt to set the
+existing node's EnabledState was rejected by UnrealEd (`Set commands not
+allowed in the editor`). No fix was applied. A subsequent compile succeeded
+with the same five informational messages; full CDO comparison and normalized
+comparisons of all six graphs confirm no semantic change.
+
+Evidence is in `successful-swaps-20260909T1715` under the external activation
+folder: isolated logs and count/hash receipts, the current WipeoutMutator
+package backup, graph exports/comparison and the editor receipt. Successful
+spawn logs do not establish surviving actor counts, client replication,
+pickup/respawn behavior, replay correctness, baked lighting or frame-time gains.
 
 ### Init-time Blueprint scan alternative
 

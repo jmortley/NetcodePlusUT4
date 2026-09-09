@@ -43,7 +43,7 @@
     "copy_tick_interval_seconds": 0.05,
     "diagnostic_native_rebuild_required": false,
     "guard_correction_native_rebuild_required": false,
-    "copy_capsule_match_native_rebuild_required": true,
+    "copy_capsule_match_native_rebuild_required": false,
     "copy_capsule_update_physics_volume": true
   },
   "runtime_acceptance": {
@@ -106,8 +106,9 @@
       "exit": "normal PIE shutdown"
     },
     "copy_capsule_match_followup": {
-      "compiled": false,
-      "runtime_verified": false,
+      "compiled": true,
+      "runtime_verified": true,
+      "runtime_verification_scope": "Successful replacement of eligible existing map bases in Wipeout PIE; fresh false-source preservation and server/client gameplay checks remain pending.",
       "comparison_reference": "replacement capsule template",
       "copy_templates_compiled_saved_and_verified": true,
       "copy_capsule_update_physics_volume": true,
@@ -118,7 +119,33 @@
       "temporary_probes_removed": true,
       "evidence_folder": "physics-volume-20260909T164100858Z"
     },
-    "next_step": "Owner rebuild/deploy the copy-capsule comparison change, re-enable LogGameMode VeryVerbose after restarting, and run PIE. Existing true-source bases should swap if otherwise eligible; a fresh false-source base must stay original. Recook the updated copies with the mutators after runtime acceptance."
+    "successful_swap_pie_followup": {
+      "date": "2026-09-09",
+      "session_starts_utc": ["16:56:43", "16:58:47"],
+      "source_revision_at_check": "4336551",
+      "dll_last_write_utc": "2026-09-09T16:53:32.1275529Z",
+      "copied_weapon_bases_per_session": 10,
+      "copied_powerup_bases_per_session": 2,
+      "kept_per_session": 0,
+      "removed_by_relevance_per_session": 0,
+      "custom_weapon_array_warnings_per_session": 8,
+      "warning_indices": [12, 14, 15, 11, 17, 13, 17, 16],
+      "siphon_selection": "Two powerup candidates, one AMP; Berserk selected.",
+      "exit": "Both sessions ended normally.",
+      "evidence_folder": "successful-swaps-20260909T1715"
+    },
+    "wipeout_mapping_correction": {
+      "applied": false,
+      "asset": "/Game/Blueprints/ElimPlusStuff/WipeoutMutator",
+      "graph": "EventGraph",
+      "node": "K2Node_CallArrayFunction_53",
+      "node_guid": "DAAB8FC6448196C8C05196A3148C6F20",
+      "cause": "Init appends nine starting weapon classes to DefaultWeaponClasses without paired CustomWeaponClasses entries. Copied pickups reenter this lookup.",
+      "correction": "Disconnect execution into Array_AddUnique(DefaultWeaponClasses) after the UTWeapon class cast. Keep the ForEach Completed wire and the ten existing stock-to-custom mappings. Compile/save and rerun PIE.",
+      "native_rebuild_required": false,
+      "editor_limit": "Graph import adds nodes; existing-node SET was rejected by UnrealEd. No semantic graph/CDO change was applied."
+    },
+    "next_step": "Apply the Wipeout Init mapping correction and rerun PIE with LogGameMode VeryVerbose. Confirm twelve swaps with no CustomWeaponClasses warnings, then test fresh false-source preservation, gameplay, remote clients, replay and lighting. Recook the updated copies with the mutators after runtime acceptance."
   },
   "checks": [
     "Back up each mutator package and export all graphs before changing its parent.",
