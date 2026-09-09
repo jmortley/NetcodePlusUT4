@@ -1,7 +1,9 @@
 #include "NCPickupBaseMutator.h"
 #include "UTGameMode.h"
 #include "UTPickupWeapon.h"
+#include "UTWorldSettings.h"
 #include "Components/ActorComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
 #include "Engine/Level.h"
 #include "Engine/LevelScriptActor.h"
@@ -47,11 +49,53 @@ namespace
 			const FMulticastScriptDelegate* Delegate = It->ContainerPtrToValuePtr<FMulticastScriptDelegate>(Actor);
 			if (Delegate->IsBound())
 			{
+				if (Actor->bNetStartup && It->GetOwnerClass() == AActor::StaticClass()
+					&& It->GetFName() == GET_MEMBER_NAME_CHECKED(AActor, OnDestroyed))
+				{
+					const AUTWorldSettings* WorldSettings = Actor->GetWorld() != nullptr
+						? Cast<AUTWorldSettings>(Actor->GetWorld()->GetWorldSettings()) : nullptr;
+					if (WorldSettings != nullptr)
+					{
+						// UT installs this listener before each level actor's BeginPlay.
+						// Exclude only that binding from the preservation check, using a
+						// copy: the real callback must record the original's destruction
+						// for replays. Any additional map listener still keeps the actor.
+						FMulticastScriptDelegate MapBindings = *Delegate;
+						MapBindings.Remove(WorldSettings, FName(TEXT("LevelActorDestroyed")));
+						if (!MapBindings.IsBound())
+						{
+							continue;
+						}
+					}
+				}
 				Reason = FString::Printf(TEXT("bound actor delegate %s"), *It->GetName());
 				return true;
 			}
 		}
 		return false;
+	}
+
+	bool HasMatchingBodySettings(const FBodyInstance& Body, const FBodyInstance& Defaults)
+	{
+		// Old map packages can retain the former angular-velocity default. When
+		// neither body overrides it, GetMaxAngularVelocity() uses PhysicsSettings.
+		// Compare the other reflected fields without copying a live physics body.
+		for (TFieldIterator<UProperty> It(FBodyInstance::StaticStruct()); It; ++It)
+		{
+			if (!Body.bOverrideMaxAngularVelocity && !Defaults.bOverrideMaxAngularVelocity
+				&& It->GetFName() == GET_MEMBER_NAME_CHECKED(FBodyInstance, MaxAngularVelocity))
+			{
+				continue;
+			}
+			for (int32 Index = 0; Index < It->ArrayDim; ++Index)
+			{
+				if (!It->Identical_InContainer(&Body, &Defaults, Index))
+				{
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	bool HasCustomPresentation(AUTPickupInventory* Pickup, FString& Reason)
@@ -60,6 +104,8 @@ namespace
 		// Keep those authored actors. InventoryType/RespawnTime replicate; WeaponType
 		// is synchronized by UTPickupWeapon::InventoryTypeUpdated on clients.
 		const AUTPickupInventory* Defaults = Pickup->GetClass()->GetDefaultObject<AUTPickupInventory>();
+		const bool bLogDetails = UE_LOG_ACTIVE(LogGameMode, VeryVerbose);
+		bool bHasOverrides = false;
 		if (Pickup->FloatHeight != Defaults->FloatHeight
 			|| Pickup->RotationOffset != Defaults->RotationOffset
 			|| Pickup->bAllowRotatingPickup != Defaults->bAllowRotatingPickup
@@ -78,7 +124,12 @@ namespace
 			|| Pickup->GetActorEnableCollision() != Defaults->GetActorEnableCollision())
 		{
 			Reason = TEXT("pickup presentation settings differ from class defaults");
-			return true;
+			if (!bLogDetails)
+			{
+				return true;
+			}
+			bHasOverrides = true;
+			UE_LOG(LogGameMode, VeryVerbose, TEXT("[PickupBase] %s: %s"), *Pickup->GetPathName(), *Reason);
 		}
 
 		TInlineComponentArray<UActorComponent*> Components(Pickup);
@@ -108,6 +159,13 @@ namespace
 				{
 					continue; // stock WeaponBase construction sets this; its CDO template is null
 				}
+				if (Component == Pickup->TimerEffect && Pickup->IsA(AUTPickupWeapon::StaticClass())
+					&& Name == GET_MEMBER_NAME_CHECKED(USceneComponent, bVisible))
+				{
+					// Stock editor preview hides ordinary weapon timers. BeginPlay
+					// sets visibility true after relevance; HiddenInGame controls play.
+					continue;
+				}
 				if (Component == Pickup->GetRootComponent()
 					&& (Name == FName(TEXT("RelativeLocation")) || Name == FName(TEXT("RelativeRotation"))
 						|| Name == FName(TEXT("RelativeScale3D"))))
@@ -116,20 +174,39 @@ namespace
 				}
 				if (!Property->Identical_InContainer(Component, Archetype))
 				{
-					Reason = FString::Printf(TEXT("component override %s.%s"), *Component->GetName(), *Property->GetName());
-					if (UE_LOG_ACTIVE(LogGameMode, VeryVerbose))
+					if (Property->GetOwnerClass() == UPrimitiveComponent::StaticClass()
+						&& Name == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, BodyInstance))
+					{
+						const UPrimitiveComponent* Primitive = Cast<UPrimitiveComponent>(Component);
+						const UPrimitiveComponent* DefaultPrimitive = Cast<UPrimitiveComponent>(Archetype);
+						if (Primitive != nullptr && DefaultPrimitive != nullptr
+							&& HasMatchingBodySettings(Primitive->BodyInstance, DefaultPrimitive->BodyInstance))
+						{
+							continue;
+						}
+					}
+					const FString Difference = FString::Printf(TEXT("component override %s.%s"), *Component->GetName(), *Property->GetName());
+					if (!bHasOverrides)
+					{
+						Reason = Difference;
+						bHasOverrides = true;
+					}
+					if (bLogDetails)
 					{
 						FString InstanceValue, DefaultValue;
 						Property->ExportText_InContainer(0, InstanceValue, Component, nullptr, Component, PPF_None);
 						Property->ExportText_InContainer(0, DefaultValue, Archetype, nullptr, Component, PPF_None);
 						UE_LOG(LogGameMode, VeryVerbose, TEXT("[PickupBase] %s %s: instance=%s; archetype=%s"),
-							*Pickup->GetPathName(), *Reason, *InstanceValue, *DefaultValue);
+							*Pickup->GetPathName(), *Difference, *InstanceValue, *DefaultValue);
 					}
-					return true;
+					else
+					{
+						return true;
+					}
 				}
 			}
 		}
-		return false;
+		return bHasOverrides;
 	}
 
 	bool HasLevelScriptReference(AActor* Actor)

@@ -35,7 +35,8 @@
     "graph_count": 18,
     "graph_connections_preserved": true,
     "copy_tick_interval_seconds": 0.05,
-    "diagnostic_native_rebuild_required": true
+    "diagnostic_native_rebuild_required": false,
+    "guard_correction_native_rebuild_required": true
   },
   "runtime_acceptance": {
     "passed": false,
@@ -60,7 +61,31 @@
       "logging_enabled_after_test": true,
       "diagnostic_dll_rebuild_confirmed": false
     },
-    "next_step": "Run PIE with pickup logging enabled to prove swaps. The detailed guard diagnostics still require an owner DLL build; reapply LogGameMode VeryVerbose after restarting the editor."
+    "diagnostic_pie_followup": {
+      "date": "2026-09-09",
+      "session_start_utc": "16:11:31",
+      "diagnostic_dll_rebuild_confirmed": true,
+      "dll_last_write_utc": "2026-09-09T16:04:53.3147898Z",
+      "kept_weapon_bases": 10,
+      "kept_powerup_bases": 2,
+      "replacements": 0,
+      "keep_reason": "bound actor delegate OnDestroyed",
+      "stock_binding_source": "AUTWorldSettings::NotifyBeginPlay -> LevelActorDestroyed; replay destruction bookkeeping",
+      "exit": "normal PIE shutdown",
+      "replacement_verified": false,
+      "evidence_log": "wipeout-pie-161131.log"
+    },
+    "guard_correction": {
+      "compiled": false,
+      "runtime_verified": false,
+      "stock_replay_binding_excluded_from_classification_only": true,
+      "actual_delegate_preserved": true,
+      "weapon_timer_preview_visibility_normalized": true,
+      "inactive_legacy_angular_velocity_normalized": true,
+      "all_component_differences_logged_at_very_verbose": true,
+      "physics_volume_override_guard_retained": true
+    },
+    "next_step": "Owner rebuild/deploy the guard correction, re-enable LogGameMode VeryVerbose after restarting the editor, and run PIE to verify swap/keep decisions. Include an unmodified newly placed base and an existing map base; actual replacements remain unverified."
   },
   "checks": [
     "Back up each mutator package and export all graphs before changing its parent.",

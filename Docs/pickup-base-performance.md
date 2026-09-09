@@ -12,12 +12,17 @@ The owner-built native class is loaded. `NCWepMut`, `NCStockWeapons` and
 and are compiled and saved in the active editor content tree. Existing CDO
 settings and all 18 exported graphs' connections were preserved.
 
-**Runtime acceptance has not passed.** A standalone NCStockWeapons test reached
-the new hook, but all 16 exact-source bases on Example_Map were kept by the
-preservation guard; no optimized replacement was observed. Further headless
-tests crashed before the hook or stalled during startup. More specific guard
-diagnostics are now in source and need another owner build before retesting.
-Do not treat the editor activation as release acceptance or measured FPS savings.
+**Runtime acceptance has not passed.** The owner's 16:11:31 UTC Wipeout PIE
+rerun loaded the diagnostic DLL and reached the hook for 10 weapon bases and
+2 powerup bases. All 12 were kept because `OnDestroyed` was bound; no replacement
+was observed. Stock UT installs its replay bookkeeping callback there before
+BeginPlay, so the original delegate guard was too broad.
+
+The source now excludes that exact stock binding from the preservation check,
+while leaving the actual callback attached. It also handles two confirmed
+stock/default component differences described below. This guard correction
+needs an owner build/deploy and runtime verification. Editor activation and
+ordinary Wipeout play do not establish successful replacement or FPS savings.
 
 ## Saved content
 
@@ -60,6 +65,11 @@ The hook:
   reference from their level script, or detected presentation/component
   overrides. This includes WeaponBase's bound PickedUpWeapon events. This is a
   conservative gate, not a general rewrite of every possible external reference.
+  The stock current-world `LevelActorDestroyed` callback on a startup actor's
+  native `OnDestroyed` delegate is excluded from classification using a local
+  delegate copy. The real callback and any additional map listeners are retained.
+  The component comparison also accounts for stock weapon timer preview
+  visibility and an inactive legacy MaxAngularVelocity value.
 - Copies native editable pickup configuration, including InventoryType,
   WeaponType, respawn/spawn settings and pickup metadata, before construction
   and BeginPlay. Engine inventory initialization still applies its usual
@@ -71,8 +81,9 @@ The hook:
 - Logs swap/keep decisions at LogGameMode Verbose with the `[PickupBase]` prefix.
   The diagnostic follow-up distinguishes AlwaysKeep, owner, attachment, actor
   delegate, level-script reference, pickup settings, and the exact component
-  property that differs. VeryVerbose additionally prints that property's
-  instance/archetype values. The checks and their order are unchanged.
+  property that differs. After reaching the presentation check, VeryVerbose
+  prints all mismatching component properties and their instance/archetype
+  values in the same run. Normal logging still stops at the first mismatch.
 
 The three class references belong on the mutator BPs so their cooked dependencies
 include the copied assets. See [the setup manifest](pickup-base-editor-setup.json)
@@ -102,8 +113,9 @@ Vitals and mouse/camera behavior keep their existing paths.
 - The assets are in the active LAEditorUT4 Content tree, outside this Git repo.
   They need a content pak cook after activation and acceptance.
 - Native APIs/signatures were checked against the local UT4/4.15 source.
-  The owner supplied the native build containing the new parent. No native
-  build or cook was run by this audit; the diagnostic follow-up is uncompiled.
+  The owner supplied the native build containing the new parent and detailed
+  diagnostics. No native build or cook was run by this audit; the subsequent
+  guard correction is uncompiled.
 - Test pickup identity/count, collection, weapon stay, delayed spawn, respawn
   indicators, rotation, spectator pickup buttons, Wipeout Siphon/AMP selection
   and other mutator rejection paths on a server and client. Check bases under
@@ -133,7 +145,8 @@ comparison output, six saved-package hashes, and isolated runtime logs.
   UTMutator as their declaring class. Connected pin IDs, links, node counts,
   graph defaults and logic are unchanged. The generated native CheckRelevance
   thunk calls the virtual implementation on the new parent.
-- The active Example_Map remains clean with 518 actors; it was not saved.
+- Example_Map had 518 actors and was clean at activation. Following owner PIE
+  tests it still has 518 actors and is marked dirty; this audit did not save it.
 - NCStockWeapons standalone, using the existing editor executable with `-game
   -nullrhi`: 11 WeaponBase and 5 PowerupBase actors reached the preservation
   guard, all were kept, and their actor tick intervals remained zero. The
@@ -149,10 +162,11 @@ comparison output, six saved-package hashes, and isolated runtime logs.
   map startup and only that owned process was terminated. Neither supplies a
   valid fresh-instance result. The live editor remained responsive.
 
-Next: rebuild/deploy the diagnostic DLL, use a normal rendered play test with
-`-LogCmds="LogGameMode VeryVerbose"`, and capture the first keep reason for an
-unmodified newly placed base as well as an existing map base. Establish actual
-swaps before the server/client and lighting checks above. Recook the six
+Next: rebuild/deploy the guard correction, use a normal rendered play test with
+`-LogCmds="LogGameMode VeryVerbose"` (or console `log LogGameMode VeryVerbose`),
+and capture swap/keep decisions for an unmodified newly placed base as well as
+an existing map base. Reapply console logging after an editor restart. Establish
+actual swaps before the server/client and lighting checks above. Recook the six
 configured/copied assets only after runtime acceptance.
 
 ### Owner PIE follow-up
@@ -164,11 +178,69 @@ not reproduced in this reported Wipeout play test. The log does contain
 WipeoutPlus `GS`-reference Blueprint runtime errors during startup; their
 relationship to pickup replacement is unverified.
 
-There are no `[PickupBase]` rows in those sessions, so actual substitution is
-still unverified. LogGameMode VeryVerbose was enabled through the connector
-afterward for the next PIE run. This console setting lasts for the current
-editor process; reapply it after restarting. The on-disk editor DLL still has
-its 10:14 local timestamp, preceding the diagnostic follow-up.
+Those early sessions have no `[PickupBase]` rows. A 15:57:42 UTC run with logging
+enabled reported 10 weapon and 2 powerup bases kept with the old coarse reason.
+After the owner rebuilt and restarted, the 16:06:22 UTC session again had no
+pickup rows because console verbosity had reset. The loaded firing build and
+the editor DLL's 16:04:53 UTC write time confirm the new native build was present.
+
+Logging was re-enabled through the connector at 16:08:39 UTC. The owner's next
+run, 16:11:31 UTC, reported all 12 bases kept with `bound actor delegate
+OnDestroyed`, zero swaps, and normal PIE shutdown. The existing startup
+`GS`-reference Blueprint errors were also present. The external evidence folder
+contains `wipeout-pie-161131.log`, its count/hash receipt, and read-only editor
+component dumps in `guard-editor-snapshots.json`.
+
+### Guard correction and source trace
+
+- `UTWorldSettings.cpp`, `NotifyBeginPlay`: stock adds
+  `OnDestroyed -> LevelActorDestroyed` to every net-startup actor immediately
+  before calling its BeginPlay. The callback records destroyed map actors.
+  `UTGameInstance.cpp` consumes that list when initializing replay recording.
+  The correction removes only this target/function pair from a **local copy**
+  while deciding whether bindings require retaining the actor. Stock-only
+  binding passes this check; an additional listener or a different target still
+  keeps the actor. No actual delegate is removed or transferred.
+- `UTPickupWeapon.cpp`, `OnConstruction`/`PostEditChangeProperty` hide ordinary
+  weapon timers in the editor. `BeginPlay` unconditionally sets their visibility
+  true after the relevance hook. The guard therefore ignores only weapon
+  TimerEffect `bVisible`; it still checks `bHiddenInGame`, custom templates and
+  the timer's other properties.
+- The editor capsule dump differs from its archetype at MaxAngularVelocity
+  (399.999939 versus 3600) with `bOverrideMaxAngularVelocity=false` on both.
+  `FBodyInstance::GetMaxAngularVelocity` uses global PhysicsSettings in that
+  case. The correction compares every other reflected body field, including
+  fixed-array entries, and skips that inactive value only when neither body
+  overrides it. Active angular limits and collision settings still block a
+  mismatched actor. No live body is copied or modified.
+- The editor capsule also has `bShouldUpdatePhysicsVolume=true` versus false
+  on its archetype. MovementComponent can set this field, but the inspected
+  editor rotating component has no UpdatedComponent and auto-registration is
+  disabled. Its origin and the exact PIE value are not established, so this
+  guard remains. VeryVerbose now collects all component differences once the
+  presentation check is reached, avoiding a separate rebuild per property.
+
+Validation for this correction is source/API review against the local fork,
+read-only editor comparison, log receipts, JSON parsing and `git diff --check`.
+Native compilation, actual replacement and replay/server-client behavior remain
+unverified. The timer/default comparisons are separate findings; the PIE log
+proves only that the earlier delegate guard was the first blocker.
+
+### Init-time Blueprint scan alternative
+
+A one-time `Event Init -> GetAllActorsOfClass -> spawn copy -> destroy original`
+flow can handle actors already loaded with the map without per-frame scan cost.
+However, `AUTGameMode::AddMutatorClass` calls the new mutator's Init **before**
+adding it to the mutator chain. Startup Init also precedes WorldSettings'
+per-actor replay listener installation. Destroying map actors there can bypass
+that destruction bookkeeping and changes the classes later mutators encounter.
+
+Such an implementation needs authority and exact-class checks (the scan includes
+subclasses), configuration/transform transfer, map-reference preservation,
+spawn-failure handling, and a separate path for later or streamed actors. Merely
+calling the current helper from Init would not work: it requires BeginPlay.
+Keep the current CheckRelevance path and correct the proven false positives
+rather than changing lifecycle phase to bypass the guard.
 
 ## Further candidates, not applied
 
