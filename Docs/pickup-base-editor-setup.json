@@ -13,6 +13,12 @@
     "NCPowerupBaseClass": "BlueprintGeneratedClass'/Game/Blueprints/Netcode/Performance/NCPowerupBase.NCPowerupBase_C'",
     "NCPowerupTimerBaseClass": "BlueprintGeneratedClass'/Game/Blueprints/Netcode/Performance/NCPowerupBaseTimer.NCPowerupBaseTimer_C'"
   },
+  "copy_component_defaults": {
+    "component": "Collision",
+    "defaults": {
+      "bShouldUpdatePhysicsVolume": true
+    }
+  },
   "copies": [
     {
       "source": "/Game/RestrictedAssets/Weapons/WeaponBase",
@@ -36,7 +42,9 @@
     "graph_connections_preserved": true,
     "copy_tick_interval_seconds": 0.05,
     "diagnostic_native_rebuild_required": false,
-    "guard_correction_native_rebuild_required": true
+    "guard_correction_native_rebuild_required": false,
+    "copy_capsule_match_native_rebuild_required": true,
+    "copy_capsule_update_physics_volume": true
   },
   "runtime_acceptance": {
     "passed": false,
@@ -76,8 +84,9 @@
       "evidence_log": "wipeout-pie-161131.log"
     },
     "guard_correction": {
-      "compiled": false,
+      "compiled": true,
       "runtime_verified": false,
+      "observed_advance_to_physics_volume_guard": true,
       "stock_replay_binding_excluded_from_classification_only": true,
       "actual_delegate_preserved": true,
       "weapon_timer_preview_visibility_normalized": true,
@@ -85,7 +94,31 @@
       "all_component_differences_logged_at_very_verbose": true,
       "physics_volume_override_guard_retained": true
     },
-    "next_step": "Owner rebuild/deploy the guard correction, re-enable LogGameMode VeryVerbose after restarting the editor, and run PIE to verify swap/keep decisions. Include an unmodified newly placed base and an existing map base; actual replacements remain unverified."
+    "capsule_volume_pie_followup": {
+      "date": "2026-09-09",
+      "session_start_utc": "16:32:04",
+      "built_source_commit": "3a8808d",
+      "dll_last_write_utc": "2026-09-09T16:29:38.1967123Z",
+      "kept_weapon_bases": 10,
+      "kept_powerup_bases": 2,
+      "replacements": 0,
+      "only_component_mismatch": "Capsule.bShouldUpdatePhysicsVolume",
+      "exit": "normal PIE shutdown"
+    },
+    "copy_capsule_match_followup": {
+      "compiled": false,
+      "runtime_verified": false,
+      "comparison_reference": "replacement capsule template",
+      "copy_templates_compiled_saved_and_verified": true,
+      "copy_capsule_update_physics_volume": true,
+      "original_capsule_defaults_still_false": true,
+      "false_source_bases_kept_with_configured_true_copies": true,
+      "full_default_comparison_only_intended_flag_changed": true,
+      "fresh_weapon_copy_inherits_flag_and_tick_interval": true,
+      "temporary_probes_removed": true,
+      "evidence_folder": "physics-volume-20260909T164100858Z"
+    },
+    "next_step": "Owner rebuild/deploy the copy-capsule comparison change, re-enable LogGameMode VeryVerbose after restarting, and run PIE. Existing true-source bases should swap if otherwise eligible; a fresh false-source base must stay original. Recook the updated copies with the mutators after runtime acceptance."
   },
   "checks": [
     "Back up each mutator package and export all graphs before changing its parent.",

@@ -3,6 +3,7 @@
 #include "UTPickupWeapon.h"
 #include "UTWorldSettings.h"
 #include "Components/ActorComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
 #include "Engine/Level.h"
@@ -98,11 +99,16 @@ namespace
 		return true;
 	}
 
-	bool HasCustomPresentation(AUTPickupInventory* Pickup, FString& Reason)
+	bool HasCustomPresentation(AUTPickupInventory* Pickup, const AUTPickupInventory* CopyDefaults, FString& Reason)
 	{
 		// Nonreplicated map overrides would be lost on clients of a newly spawned actor.
 		// Keep those authored actors. InventoryType/RespawnTime replicate; WeaponType
 		// is synchronized by UTPickupWeapon::InventoryTypeUpdated on clients.
+		if (CopyDefaults->Collision == nullptr)
+		{
+			Reason = TEXT("copy has no pickup capsule template");
+			return true;
+		}
 		const AUTPickupInventory* Defaults = Pickup->GetClass()->GetDefaultObject<AUTPickupInventory>();
 		const bool bLogDetails = UE_LOG_ACTIVE(LogGameMode, VeryVerbose);
 		bool bHasOverrides = false;
@@ -172,7 +178,14 @@ namespace
 				{
 					continue; // preserved by the spawn transform
 				}
-				if (!Property->Identical_InContainer(Component, Archetype))
+				// Map instances can save this flag differently from the source
+				// CDO. It controls volume callbacks, so require the copy's actual
+				// capsule default to match, on both server and newly spawned clients.
+				const bool bCompareCopyCapsule = Component == Pickup->Collision
+					&& Property->GetOwnerClass() == USceneComponent::StaticClass()
+					&& Name == GET_MEMBER_NAME_CHECKED(USceneComponent, bShouldUpdatePhysicsVolume);
+				const UObject* ComparisonTemplate = bCompareCopyCapsule ? CopyDefaults->Collision : Archetype;
+				if (!Property->Identical_InContainer(Component, ComparisonTemplate))
 				{
 					if (Property->GetOwnerClass() == UPrimitiveComponent::StaticClass()
 						&& Name == GET_MEMBER_NAME_CHECKED(UPrimitiveComponent, BodyInstance))
@@ -185,7 +198,9 @@ namespace
 							continue;
 						}
 					}
-					const FString Difference = FString::Printf(TEXT("component override %s.%s"), *Component->GetName(), *Property->GetName());
+					const FString Difference = FString::Printf(TEXT("%s %s.%s"),
+						bCompareCopyCapsule ? TEXT("copy setting mismatch") : TEXT("component override"),
+						*Component->GetName(), *Property->GetName());
 					if (!bHasOverrides)
 					{
 						Reason = Difference;
@@ -194,10 +209,11 @@ namespace
 					if (bLogDetails)
 					{
 						FString InstanceValue, DefaultValue;
-						Property->ExportText_InContainer(0, InstanceValue, Component, nullptr, Component, PPF_None);
-						Property->ExportText_InContainer(0, DefaultValue, Archetype, nullptr, Component, PPF_None);
-						UE_LOG(LogGameMode, VeryVerbose, TEXT("[PickupBase] %s %s: instance=%s; archetype=%s"),
-							*Pickup->GetPathName(), *Difference, *InstanceValue, *DefaultValue);
+						Property->ExportTextItem(InstanceValue, Property->ContainerPtrToValuePtr<void>(Component), nullptr, Component, PPF_None);
+						Property->ExportTextItem(DefaultValue, Property->ContainerPtrToValuePtr<void>(ComparisonTemplate), nullptr, Component, PPF_None);
+						UE_LOG(LogGameMode, VeryVerbose, TEXT("[PickupBase] %s %s: instance=%s; %s=%s"),
+							*Pickup->GetPathName(), *Difference, *InstanceValue,
+							bCompareCopyCapsule ? TEXT("copy") : TEXT("archetype"), *DefaultValue);
 					}
 					else
 					{
@@ -222,7 +238,7 @@ namespace
 		return References.Contains(Actor);
 	}
 
-	bool ShouldPreservePickup(AUTPickupInventory* Source, AUTGameMode* Game, FString& Reason)
+	bool ShouldPreservePickup(AUTPickupInventory* Source, const AUTPickupInventory* CopyDefaults, AUTGameMode* Game, FString& Reason)
 	{
 		bool bPreventModify = false;
 		if (Game && Game->BaseMutator && Game->BaseMutator->AlwaysKeep(Source, bPreventModify))
@@ -249,7 +265,7 @@ namespace
 			Reason = TEXT("level script references actor");
 			return true;
 		}
-		return HasCustomPresentation(Source, Reason);
+		return HasCustomPresentation(Source, CopyDefaults, Reason);
 	}
 
 	void CopyPickupSettings(AUTPickupInventory* Source, AUTPickupInventory* Target)
@@ -310,7 +326,7 @@ bool ANCPickupBaseMutator::CheckRelevance_Implementation(AActor* Other)
 
 	AUTGameMode* Game = GetWorld()->GetAuthGameMode<AUTGameMode>();
 	FString KeepReason;
-	if (ShouldPreservePickup(Source, Game, KeepReason))
+	if (ShouldPreservePickup(Source, ReplacementClass->GetDefaultObject<AUTPickupInventory>(), Game, KeepReason))
 	{
 		UE_LOG(LogGameMode, Verbose, TEXT("[PickupBase] keeping %s: %s"), *Source->GetPathName(), *KeepReason);
 		return true; // retain explicit keep rules, bound callbacks and map overrides

@@ -12,17 +12,19 @@ The owner-built native class is loaded. `NCWepMut`, `NCStockWeapons` and
 and are compiled and saved in the active editor content tree. Existing CDO
 settings and all 18 exported graphs' connections were preserved.
 
-**Runtime acceptance has not passed.** The owner's 16:11:31 UTC Wipeout PIE
-rerun loaded the diagnostic DLL and reached the hook for 10 weapon bases and
-2 powerup bases. All 12 were kept because `OnDestroyed` was bound; no replacement
-was observed. Stock UT installs its replay bookkeeping callback there before
-BeginPlay, so the original delegate guard was too broad.
+**Runtime acceptance has not passed.** The owner's 16:32:04 UTC Wipeout PIE
+rerun loaded the rebuilt `3a8808d` DLL. The replay/timer/default checks passed;
+all 10 weapon and 2 powerup bases were then kept solely for
+`Capsule.bShouldUpdatePhysicsVolume`. No replacement was observed.
 
-The source now excludes that exact stock binding from the preservation check,
-while leaving the actual callback attached. It also handles two confirmed
-stock/default component differences described below. This guard correction
-needs an owner build/deploy and runtime verification. Editor activation and
-ordinary Wipeout play do not establish successful replacement or FPS savings.
+The existing map saves this flag as true, while a fresh stock actor and its
+class defaults have it false. The three copies now save true in their capsule
+templates. The source compares this setting against the **copy's actual
+template**, preserving volume behavior on servers and clients. A source with a
+different flag stays original. All three copied assets compile and read back
+correctly; the native comparison change still needs an owner build/deploy and
+runtime verification. Ordinary Wipeout play does not establish replacement or
+FPS savings.
 
 ## Saved content
 
@@ -33,7 +35,11 @@ ordinary Wipeout play do not establish successful replacement or FPS savings.
 | `/Game/Blueprints/Netcode/NCPowerupBase_test` | `/Game/Blueprints/Netcode/Performance/NCPowerupBaseTimer` |
 
 After normalizing each copy's package/class name, its complete actor CDO dump
-matches the original except for the tick interval. The Event Graph node counts
+matches the original except for the tick interval. The copies' native capsule
+templates now additionally enable `bShouldUpdatePhysicsVolume` to match the
+existing map bases; the originals' capsule templates remain false. This changes
+which physics volume is tracked and notified, not pickup collision settings.
+The Event Graph node counts
 remain 3 / 0 / 0; construction graph counts remain 3 / 1 / 2. WeaponBase's
 GiveTo/parent/delegate flow and timer-template construction remain intact.
 
@@ -69,7 +75,10 @@ The hook:
   native `OnDestroyed` delegate is excluded from classification using a local
   delegate copy. The real callback and any additional map listeners are retained.
   The component comparison also accounts for stock weapon timer preview
-  visibility and an inactive legacy MaxAngularVelocity value.
+  visibility and an inactive legacy MaxAngularVelocity value. The capsule's
+  `bShouldUpdatePhysicsVolume` must match the replacement CDO even if it matches
+  the original CDO; a mismatch keeps the original. Other component properties
+  still compare against the source archetype.
 - Copies native editable pickup configuration, including InventoryType,
   WeaponType, respawn/spawn settings and pickup metadata, before construction
   and BeginPlay. Engine inventory initialization still applies its usual
@@ -84,6 +93,8 @@ The hook:
   property that differs. After reaching the presentation check, VeryVerbose
   prints all mismatching component properties and their instance/archetype
   values in the same run. Normal logging still stops at the first mismatch.
+  Capsule-volume mismatches identify the reference as `copy`. Value export is
+  unconditional so false/zero defaults are printed instead of a blank value.
 
 The three class references belong on the mutator BPs so their cooked dependencies
 include the copied assets. See [the setup manifest](pickup-base-editor-setup.json)
@@ -114,8 +125,9 @@ Vitals and mouse/camera behavior keep their existing paths.
   They need a content pak cook after activation and acceptance.
 - Native APIs/signatures were checked against the local UT4/4.15 source.
   The owner supplied the native build containing the new parent and detailed
-  diagnostics. No native build or cook was run by this audit; the subsequent
-  guard correction is uncompiled.
+  diagnostics, then built the replay/timer/default guard correction. No native
+  build or cook was run by this audit; the subsequent copy-capsule comparison
+  change is uncompiled.
 - Test pickup identity/count, collection, weapon stay, delayed spawn, respawn
   indicators, rotation, spectator pickup buttons, Wipeout Siphon/AMP selection
   and other mutator rejection paths on a server and client. Check bases under
@@ -162,7 +174,7 @@ comparison output, six saved-package hashes, and isolated runtime logs.
   map startup and only that owned process was terminated. Neither supplies a
   valid fresh-instance result. The live editor remained responsive.
 
-Next: rebuild/deploy the guard correction, use a normal rendered play test with
+Next: rebuild/deploy the copy-capsule comparison change, use a rendered play test with
 `-LogCmds="LogGameMode VeryVerbose"` (or console `log LogGameMode VeryVerbose`),
 and capture swap/keep decisions for an unmodified newly placed base as well as
 an existing map base. Reapply console logging after an editor restart. Establish
@@ -216,15 +228,55 @@ component dumps in `guard-editor-snapshots.json`.
 - The editor capsule also has `bShouldUpdatePhysicsVolume=true` versus false
   on its archetype. MovementComponent can set this field, but the inspected
   editor rotating component has no UpdatedComponent and auto-registration is
-  disabled. Its origin and the exact PIE value are not established, so this
-  guard remains. VeryVerbose now collects all component differences once the
+  disabled. At that stage its origin and exact PIE value were not established,
+  so the guard remained. VeryVerbose collects all component differences once the
   presentation check is reached, avoiding a separate rebuild per property.
 
-Validation for this correction is source/API review against the local fork,
+Initial validation for this correction was source/API review against the local fork,
 read-only editor comparison, log receipts, JSON parsing and `git diff --check`.
-Native compilation, actual replacement and replay/server-client behavior remain
-unverified. The timer/default comparisons are separate findings; the PIE log
-proves only that the earlier delegate guard was the first blocker.
+The owner subsequently built it and the next PIE run advanced to the volume
+flag check. Actual replacement and replay/server-client behavior remain
+unverified. The earlier PIE log proves only that the delegate guard was the
+first blocker.
+
+### Capsule-volume follow-up at 16:32 UTC
+
+The loaded DLL was written at 16:29:38 UTC. Logging was enabled before the
+16:32:04 UTC PIE session. There are 12 keep rows and 12 detailed mismatch rows,
+all for Capsule.bShouldUpdatePhysicsVolume, zero swaps, and normal PIE shutdown.
+The log's blank archetype value represented false: delta-based property export
+omitted the zero/default value. Direct value export now prints it explicitly.
+
+A temporary fresh stock WeaponBase read back false, while the existing map
+capsules read true. `USceneComponent::SetPhysicsVolume` calls volume entry/exit
+callbacks as well as its component delegate. UT water/pain volumes can play
+entry sounds even for non-character actors, so ignoring this flag globally
+would change observable behavior. It is treated as a real saved instance
+setting, not presumed harmless initialization.
+
+The three copied Blueprints were backed up, then their native Collision
+component defaults were set to true, compiled and saved. Complete before/after
+actor CDO dumps are identical; complete capsule dumps differ only at this flag.
+All three original capsule CDOs still read false. A fresh NCWeaponBase instance
+inherits true and TickInterval=0.05. Both temporary actors were deleted and
+their absence verified; the existing 11 weapon actors remain. The map was not
+saved. Connector status counts Level->Actors slots, including holes left by
+deleted temporary actors; its slot count is not a count of surviving actors.
+
+The native guard uses the replacement capsule template as the reference for
+this one property. With the configured copies, true-source bases pass this
+comparison and false-source bases stay original. It performs the comparison
+even when the source matches its original archetype, preventing a fresh false
+base from being replaced by a true copy. Missing capsule templates also keep
+the source. There is no per-instance runtime flag mutation or new replication
+path: the saved copy template supplies the matching value on both peers.
+
+Evidence is in `physics-volume-20260909T164100858Z` under the external activation
+folder: package backups and hashes, PIE log/count receipt, full CDO comparisons,
+compiler receipts and the fresh-instance dumps. The C++ follow-up is uncompiled.
+Next PIE acceptance should show actual copied-base rows for otherwise eligible
+true-source bases and a copy-setting mismatch for a fresh false-source base.
+The three updated copied packages must be included in the next content cook.
 
 ### Init-time Blueprint scan alternative
 
