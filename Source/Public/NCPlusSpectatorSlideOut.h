@@ -101,6 +101,15 @@ private:
 		FText Cells[7];
 		float TextScales[7];
 		float NextUpdateTime = -1.f;
+		FString PlayerName;
+		FString ClanName;
+		FText DisplayName;
+		float NameScale = 0.9f;
+		TWeakObjectPtr<UFont> NameFont;
+		int32 SpectatingID = INDEX_NONE;
+		FText SpectatingLabel;
+		float SpectatingScale = 0.82f;
+		TWeakObjectPtr<UFont> NumberFont;
 	};
 	const FMatchRow& GetMatchRow(AUTPlayerState* PS);
 	struct FMatchHitRow

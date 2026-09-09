@@ -224,8 +224,31 @@ void UNCPlusSpectatorSlideOut::DrawPlayerHeader(float RenderDelta, float XOffset
 const UNCPlusSpectatorSlideOut::FMatchRow& UNCPlusSpectatorSlideOut::GetMatchRow(AUTPlayerState* PS)
 {
 	FMatchRow& Row = MatchRows.FindOrAdd(TWeakObjectPtr<AUTPlayerState>(PS));
+	// Names and slot numbers usually stay unchanged for the entire match. Rebuild
+	// their text/measurements only on an actual change, before the 5 Hz stat gate
+	// so renames, team-slot changes and font changes remain visible immediately.
+	if (Row.PlayerName != PS->PlayerName || Row.ClanName != PS->ClanName || Row.NameFont.Get() != SlideOutFont)
+	{
+		Row.PlayerName = PS->PlayerName;
+		Row.ClanName = PS->ClanName;
+		Row.NameFont = SlideOutFont;
+		const FString Name = Row.ClanName.IsEmpty() ? Row.PlayerName : TEXT("[") + Row.ClanName + TEXT("]") + Row.PlayerName;
+		Row.DisplayName = FText::FromString(Name);
+		float XL, YL; Canvas->TextSize(SlideOutFont, Name, XL, YL);
+		Row.NameScale = FMath::Min(0.9f, 150.f / FMath::Max(XL, 1.f));
+	}
+	const int32 SpectatingID = UTGameState->bTeamGame ? PS->SpectatingIDTeam : PS->SpectatingID;
+	const bool bNumberFontChanged = Row.NumberFont.Get() != UTHUDOwner->TinyFont;
+	if (Row.SpectatingID != SpectatingID || bNumberFontChanged)
+	{
+		Row.SpectatingID = SpectatingID;
+		Row.NumberFont = UTHUDOwner->TinyFont;
+		Row.SpectatingLabel = FText::AsNumber(SpectatingID);
+		float XL, YL; Canvas->TextSize(UTHUDOwner->TinyFont, Row.SpectatingLabel.ToString(), XL, YL);
+		Row.SpectatingScale = FMath::Min(0.82f, 22.f / FMath::Max(XL, 1.f));
+	}
 	const float Now = GetWorld()->TimeSeconds;
-	if (Now < Row.NextUpdateTime && Row.NextUpdateTime - Now <= 0.2f) { return Row; }
+	if (!bNumberFontChanged && Now < Row.NextUpdateTime && Row.NextUpdateTime - Now <= 0.2f) { return Row; }
 	Row.NextUpdateTime = Now + 0.2f;
 	const FString Id = PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
 	const FText Missing = FText::FromString(TEXT("-"));
@@ -300,10 +323,10 @@ void UNCPlusSpectatorSlideOut::DrawPlayer(int32 Index, AUTPlayerState* PS, float
 	AUTCharacter* Character = PS->GetUTCharacter();
 	const bool bAlive = IsValid(Character) && Character->Health > 0;
 	const FLinearColor TextColor = bAlive ? FLinearColor::White : FLinearColor(0.65f, 0.65f, 0.65f);
-	DrawMatchCell(FText::AsNumber(UTGameState->bTeamGame ? PS->SpectatingIDTeam : PS->SpectatingID), X + 17.f, Y, 28.f, TextColor);
-	const FString Name = PS->ClanName.IsEmpty() ? PS->PlayerName : TEXT("[") + PS->ClanName + TEXT("]") + PS->PlayerName;
-	float XL, YL; Canvas->TextSize(SlideOutFont, Name, XL, YL);
-	DrawText(FText::FromString(Name), X + 34.f, Y, SlideOutFont, FMath::Min(0.9f, 150.f / FMath::Max(XL, 1.f)),
+	const FMatchRow& Row = GetMatchRow(PS);
+	DrawText(Row.SpectatingLabel, X + 17.f, Y, UTHUDOwner->TinyFont, Row.SpectatingScale,
+		1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+	DrawText(Row.DisplayName, X + 34.f, Y, SlideOutFont, Row.NameScale,
 		1.f, TextColor, ETextHorzPos::Left, ETextVertPos::Center);
 	if (IsValid(PS->CarriedObject) && (!bMatchInstagib || bAlive))
 	{
@@ -343,7 +366,6 @@ void UNCPlusSpectatorSlideOut::DrawPlayer(int32 Index, AUTPlayerState* PS, float
 		DrawMatchCell(FText::FromString(State), X + (bMatchInstagib ? 208.f : Size.X * 0.85f), Y,
 			bMatchInstagib ? 40.f : 86.f, TextColor);
 	}
-	const FMatchRow& Row = GetMatchRow(PS);
 	for (int32 Col = 0; Col < MatchOverlayColumnCount(); ++Col)
 	{
 		DrawText(Row.Cells[Col], X + MatchOverlayPlayerWidth() + (Col + 0.5f) * 52.f, Y, UTHUDOwner->TinyFont,
