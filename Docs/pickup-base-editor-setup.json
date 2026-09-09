@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "status": "pending_native_editor_build_and_activation",
+  "version": 2,
+  "status": "editor_activated_runtime_acceptance_pending",
   "native_parent": "/Script/NetcodePlus.NCPickupBaseMutator",
   "expected_original_parent": "/Script/UnrealTournament.UTMutator",
   "mutators": [
@@ -27,11 +27,38 @@
       "target": "/Game/Blueprints/Netcode/Performance/NCPowerupBaseTimer"
     }
   ],
+  "activation": {
+    "date": "2026-09-09",
+    "native_parent_loaded": true,
+    "mutators_compiled_and_saved": true,
+    "existing_defaults_preserved": true,
+    "graph_count": 18,
+    "graph_connections_preserved": true,
+    "copy_tick_interval_seconds": 0.05,
+    "diagnostic_native_rebuild_required": true
+  },
+  "runtime_acceptance": {
+    "passed": false,
+    "stock_smoke": {
+      "map": "/Game/RestrictedAssets/Maps/Example_Map",
+      "mutator": "NCStockWeapons",
+      "kept_weapon_bases": 11,
+      "kept_powerup_bases": 5,
+      "replacements": 0,
+      "exit": "normal"
+    },
+    "additional_smokes": {
+      "NCWepMut": "Headless startup access violation before pickup-hook rows; cause unverified.",
+      "NCStockWeapons_fresh": "Startup timeout; owned test process terminated."
+    },
+    "next_step": "Owner build of detailed guard logging, then rendered play with LogGameMode VeryVerbose; prove swaps before release acceptance."
+  },
   "checks": [
     "Back up each mutator package and export all graphs before changing its parent.",
     "Confirm the new native parent is loaded in this editor and all copies compile.",
     "For each listed mutator, reparent to native_parent, apply defaults, then compile and inspect every diagnostic.",
     "Read back ParentClass and the three class references. Confirm original settings and graph connections survived.",
-    "Test standalone and server/client pickup replacement, Wipeout Siphon/AMP and baked base lighting before cooking a release."
+    "Test standalone and server/client pickup replacement, Wipeout Siphon/AMP and baked base lighting before cooking a release.",
+    "Editor activation completed on 2026-09-09; runtime checks remain pending. Successful Blueprint compilation is not runtime acceptance."
   ]
 }

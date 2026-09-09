@@ -39,7 +39,7 @@ namespace
 		return INDEX_NONE;
 	}
 
-	bool HasBoundActorDelegates(AActor* Actor)
+	bool HasBoundActorDelegates(AActor* Actor, FString& Reason)
 	{
 		// In particular, preserve WeaponBase's map-authored PickedUpWeapon bindings.
 		for (TFieldIterator<UMulticastDelegateProperty> It(Actor->GetClass()); It; ++It)
@@ -47,13 +47,14 @@ namespace
 			const FMulticastScriptDelegate* Delegate = It->ContainerPtrToValuePtr<FMulticastScriptDelegate>(Actor);
 			if (Delegate->IsBound())
 			{
+				Reason = FString::Printf(TEXT("bound actor delegate %s"), *It->GetName());
 				return true;
 			}
 		}
 		return false;
 	}
 
-	bool HasCustomPresentation(AUTPickupInventory* Pickup)
+	bool HasCustomPresentation(AUTPickupInventory* Pickup, FString& Reason)
 	{
 		// Nonreplicated map overrides would be lost on clients of a newly spawned actor.
 		// Keep those authored actors. InventoryType/RespawnTime replicate; WeaponType
@@ -76,6 +77,7 @@ namespace
 			|| Pickup->bHidden != Defaults->bHidden
 			|| Pickup->GetActorEnableCollision() != Defaults->GetActorEnableCollision())
 		{
+			Reason = TEXT("pickup presentation settings differ from class defaults");
 			return true;
 		}
 
@@ -114,6 +116,15 @@ namespace
 				}
 				if (!Property->Identical_InContainer(Component, Archetype))
 				{
+					Reason = FString::Printf(TEXT("component override %s.%s"), *Component->GetName(), *Property->GetName());
+					if (UE_LOG_ACTIVE(LogGameMode, VeryVerbose))
+					{
+						FString InstanceValue, DefaultValue;
+						Property->ExportText_InContainer(0, InstanceValue, Component, nullptr, Component, PPF_None);
+						Property->ExportText_InContainer(0, DefaultValue, Archetype, nullptr, Component, PPF_None);
+						UE_LOG(LogGameMode, VeryVerbose, TEXT("[PickupBase] %s %s: instance=%s; archetype=%s"),
+							*Pickup->GetPathName(), *Reason, *InstanceValue, *DefaultValue);
+					}
 					return true;
 				}
 			}
@@ -132,6 +143,36 @@ namespace
 		FReferenceFinder Finder(References, nullptr, false, true, false, true);
 		Finder.FindReferences(Script);
 		return References.Contains(Actor);
+	}
+
+	bool ShouldPreservePickup(AUTPickupInventory* Source, AUTGameMode* Game, FString& Reason)
+	{
+		bool bPreventModify = false;
+		if (Game && Game->BaseMutator && Game->BaseMutator->AlwaysKeep(Source, bPreventModify))
+		{
+			Reason = TEXT("AlwaysKeep rule");
+			return true;
+		}
+		if (Source->GetOwner() != nullptr)
+		{
+			Reason = TEXT("actor has an owner");
+			return true;
+		}
+		if (Source->GetAttachParentActor() != nullptr)
+		{
+			Reason = TEXT("actor is attached");
+			return true;
+		}
+		if (HasBoundActorDelegates(Source, Reason))
+		{
+			return true;
+		}
+		if (HasLevelScriptReference(Source))
+		{
+			Reason = TEXT("level script references actor");
+			return true;
+		}
+		return HasCustomPresentation(Source, Reason);
 	}
 
 	void CopyPickupSettings(AUTPickupInventory* Source, AUTPickupInventory* Target)
@@ -191,12 +232,10 @@ bool ANCPickupBaseMutator::CheckRelevance_Implementation(AActor* Other)
 	}
 
 	AUTGameMode* Game = GetWorld()->GetAuthGameMode<AUTGameMode>();
-	bool bPreventModify = false;
-	if ((Game && Game->BaseMutator && Game->BaseMutator->AlwaysKeep(Source, bPreventModify))
-		|| Source->GetOwner() != nullptr || Source->GetAttachParentActor() != nullptr
-		|| HasBoundActorDelegates(Source) || HasLevelScriptReference(Source) || HasCustomPresentation(Source))
+	FString KeepReason;
+	if (ShouldPreservePickup(Source, Game, KeepReason))
 	{
-		UE_LOG(LogGameMode, Verbose, TEXT("[PickupBase] keeping %s: keep rule, binding or map override"), *Source->GetPathName());
+		UE_LOG(LogGameMode, Verbose, TEXT("[PickupBase] keeping %s: %s"), *Source->GetPathName(), *KeepReason);
 		return true; // retain explicit keep rules, bound callbacks and map overrides
 	}
 

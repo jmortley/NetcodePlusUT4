@@ -7,12 +7,17 @@ original class-default dumps match their captured baselines. All three copies
 compile without messages and newly created instances inherit a 0.05-second
 actor tick interval.
 
-The shared native `ANCPickupBaseMutator::CheckRelevance_Implementation` is
-prepared in source. **Replacement is not activated yet.** The running editor
-does not have this new native class. `NCWepMut`, `NCStockWeapons` and
-`WipeoutMutator` still inherit stock `UTMutator`; their graphs were only read.
-Native compilation, the parent/class-reference assignment and runtime acceptance
-remain pending.
+The owner-built native class is loaded. `NCWepMut`, `NCStockWeapons` and
+`WipeoutMutator` now inherit `NCPickupBaseMutator`, reference all three copies,
+and are compiled and saved in the active editor content tree. Existing CDO
+settings and all 18 exported graphs' connections were preserved.
+
+**Runtime acceptance has not passed.** A standalone NCStockWeapons test reached
+the new hook, but all 16 exact-source bases on Example_Map were kept by the
+preservation guard; no optimized replacement was observed. Further headless
+tests crashed before the hook or stalled during startup. More specific guard
+diagnostics are now in source and need another owner build before retesting.
+Do not treat the editor activation as release acceptance or measured FPS savings.
 
 ## Saved content
 
@@ -37,9 +42,9 @@ servers as well.
 At a 144 Hz actor tick rate, eligible instances have at most 20 progress-update
 opportunities per second instead of 144. This is **not an FPS measurement**.
 
-## Relevance integration prepared
+## Relevance integration activated in editor
 
-Use the shared native class as the parent of all three existing mutator BPs.
+The shared native class is the parent of all three existing mutator BPs.
 Their current CheckRelevance graphs already call the parent after their inventory
 substitutions; the new parent forwards to the next mutator before considering
 replacement. No new graph nodes or native-function rebinding is needed.
@@ -64,6 +69,10 @@ The hook:
   failure keeps the original. Successful creation returns false for the original;
   the replacement goes through the engine's normal relevance scheduling.
 - Logs swap/keep decisions at LogGameMode Verbose with the `[PickupBase]` prefix.
+  The diagnostic follow-up distinguishes AlwaysKeep, owner, attachment, actor
+  delegate, level-script reference, pickup settings, and the exact component
+  property that differs. VeryVerbose additionally prints that property's
+  instance/archetype values. The checks and their order are unchanged.
 
 The three class references belong on the mutator BPs so their cooked dependencies
 include the copied assets. See [the setup manifest](pickup-base-editor-setup.json)
@@ -93,8 +102,8 @@ Vitals and mouse/camera behavior keep their existing paths.
 - The assets are in the active LAEditorUT4 Content tree, outside this Git repo.
   They need a content pak cook after activation and acceptance.
 - Native APIs/signatures were checked against the local UT4/4.15 source.
-  No native C++ build or runtime replacement test was performed. The new parent
-  must be built/deployed to the editor before assigning it to the mutators.
+  The owner supplied the native build containing the new parent. No native
+  build or cook was run by this audit; the diagnostic follow-up is uncompiled.
 - Test pickup identity/count, collection, weapon stay, delayed spawn, respawn
   indicators, rotation, spectator pickup buttons, Wipeout Siphon/AMP selection
   and other mutator rejection paths on a server and client. Check bases under
@@ -106,6 +115,45 @@ Vitals and mouse/camera behavior keep their existing paths.
   supplies only the spectator label-cache change.
 - The loaded `BP_BaseSiphon` child still has its original zero interval.
   It was not reparented or substituted.
+
+## Activation and runtime evidence
+
+The external `pickup-base-activation-20260909T151830069Z` folder contains the
+three original mutator packages and backup hashes, full before/after Blueprint
+and CDO dumps, all 18 before/after graph exports, compiler results, graph
+comparison output, six saved-package hashes, and isolated runtime logs.
+
+- Parent and class references read back correctly for all three mutators.
+  Complete CDO comparisons add only the three inherited copy references.
+- All three copies compile without diagnostics. NCStockWeapons compiles without
+  diagnostics. NCWepMut and WipeoutMutator have five informational messages
+  each for pre-existing unconnected paths; neither has compiler errors/warnings.
+- Graph comparison accounts for refreshed localized labels, unconnected pin
+  IDs, compiler-message display flags, and inherited callbacks now naming
+  UTMutator as their declaring class. Connected pin IDs, links, node counts,
+  graph defaults and logic are unchanged. The generated native CheckRelevance
+  thunk calls the virtual implementation on the new parent.
+- The active Example_Map remains clean with 518 actors; it was not saved.
+- NCStockWeapons standalone, using the existing editor executable with `-game
+  -nullrhi`: 11 WeaponBase and 5 PowerupBase actors reached the preservation
+  guard, all were kept, and their actor tick intervals remained zero. The
+  process exited normally. This verifies dispatch, not successful replacement.
+- Editor object dumps show differences from base templates in capsule physics
+  values and timer visibility. Those observations are possible contributors,
+  not proof of the first runtime rejection condition. The original coarse log
+  cannot distinguish the individual checks. Do not remove a preservation rule
+  until the new diagnostics identify the rejection and its cause.
+- NCWepMut headless startup raised an UnrealTournament DLL access violation
+  before any pickup-hook rows. Its cause and relationship to reparenting are
+  unverified. A subsequent NCStockWeapons fresh-instance attempt stalled before
+  map startup and only that owned process was terminated. Neither supplies a
+  valid fresh-instance result. The live editor remained responsive.
+
+Next: rebuild/deploy the diagnostic DLL, use a normal rendered play test with
+`-LogCmds="LogGameMode VeryVerbose"`, and capture the first keep reason for an
+unmodified newly placed base as well as an existing map base. Establish actual
+swaps before the server/client and lighting checks above. Recook the six
+configured/copied assets only after runtime acceptance.
 
 ## Further candidates, not applied
 
