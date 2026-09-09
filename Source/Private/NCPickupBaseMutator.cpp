@@ -73,7 +73,7 @@ namespace
 			|| Pickup->TeamSide != Defaults->TeamSide
 			|| Pickup->Tags != Defaults->Tags
 			|| Pickup->GetIsReplicated() != Defaults->GetIsReplicated()
-			|| Pickup->IsHidden() != Defaults->IsHidden()
+			|| Pickup->bHidden != Defaults->bHidden
 			|| Pickup->GetActorEnableCollision() != Defaults->GetActorEnableCollision())
 		{
 			return true;
