@@ -28,6 +28,7 @@
 #include "ElimPlusScoreboard.h"
 #include "WipeoutHUD.h"
 #include "NCPlusCTFHUD.h"
+#include "NCPlusXTDMHUD.h"
 #include "ShockDomHUD.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
@@ -486,6 +487,7 @@ static void HandleHUDDragOverlay(const TArray<FString>& Args)
 		Cast<AElimPlusHUD>(RawHUD) != nullptr ||
 		Cast<AWipeoutHUD>(RawHUD)  != nullptr ||
 		Cast<ANCPlusCTFHUD>(RawHUD)!= nullptr ||
+		Cast<ANCPlusXTDMHUD>(RawHUD)!= nullptr ||
 		Cast<AShockDomHUD>(RawHUD) != nullptr;
 	if (!bIsNCPHUD)
 	{

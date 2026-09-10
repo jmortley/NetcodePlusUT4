@@ -29,6 +29,31 @@ struct FCoverCarryWindow
 	FCoverCarryWindow() : bOpen(false) {}
 };
 
+/** Bounded, cumulative arrival evidence. Losing an identity makes absence unknown
+ * for this server instance; reconnecting never moves a player's first arrival. */
+struct FBotArrivalLedger
+{
+	static const int32 MaxPlayers = 128;
+	TMap<FString, double> Joined;
+	bool bComplete;
+	bool bWarmupSeen;
+
+	FBotArrivalLedger() : bComplete(true), bWarmupSeen(false) {}
+	static FString CanonicalId(const FString& Value);
+	void RecordJoin(const FString& Id, double FirstSeenSeconds);
+	bool QualifyState(FName State);
+};
+
+struct FBotArrivalConnection
+{
+	TWeakObjectPtr<APlayerController> Controller;
+	double FirstSeenSeconds;
+	FString Id;
+
+	FBotArrivalConnection(APlayerController* InController, double InSeconds)
+		: Controller(InController), FirstSeenSeconds(InSeconds) {}
+};
+
 UCLASS()
 class NETCODEPLUS_API AMutBotEvents : public AUTMutator
 {
@@ -41,6 +66,9 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	// ── Mutator Hooks ────────────────────────────────────────────────
+	virtual void Init_Implementation(const FString& Options) override;
+	virtual void PostPlayerInit_Implementation(AController* C) override;
+	virtual void NotifyLogout_Implementation(AController* C) override;
 	virtual void NotifyMatchStateChange_Implementation(FName NewState) override;
 	virtual void ScoreObject_Implementation(AUTCarriedObject* GameObject, AUTCharacter* HolderPawn,
 		AUTPlayerState* Holder, FName Reason) override;
@@ -78,6 +106,23 @@ private:
 	FTimerHandle ReadyCheckTimer;
 	void PollPlayerReadiness();
 	void StopReadyPolling();
+
+	// Optional warning-trial telemetry. Separate from legacy readiness events.
+	FString ArrivalLaunchId;
+	FString ArrivalInstanceId;
+	double ArrivalStartedAt;
+	double ArrivalRequestStartedAt;
+	int32 ArrivalSequence;
+	bool bArrivalStopped;
+	FBotArrivalLedger ArrivalLedger;
+	TArray<FBotArrivalConnection> ArrivalConnections;
+	FTimerHandle ArrivalTimer;
+	FHttpRequestPtr ArrivalRequest;
+	void ObserveArrival(APlayerController* PC, bool bFromLogin);
+	void ResolveArrival(FBotArrivalConnection& Connection);
+	void PollArrivals();
+	void PostArrivals(bool bFinal, bool bImmediate = false);
+	void StopArrivalPolling();
 
 	// ── Cover-Kill Tracking ───────────────────────────────────────────
 	FCoverCarryWindow CarryWindows[2]; // indexed by carrier team (0=Red, 1=Blue)

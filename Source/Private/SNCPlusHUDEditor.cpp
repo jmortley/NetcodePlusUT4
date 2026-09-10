@@ -2,6 +2,7 @@
 #include "SNCPlusHUDEditor.h"
 #include "NCPlusHUDLayout.h"
 #include "ElimPlusScoreboard.h"
+#include "NCPlusXTDMHUD.h"
 #include "SNCPlusHUDPresetGallery.h"
 #include "UnrealTournament.h"
 #include "UTLocalPlayer.h"
@@ -57,7 +58,8 @@ namespace NCHUDEdit
 		{
 			return TEXT("Top Bar (Portraits + Scorebar)");
 		}
-		if (Alias == TEXT("shockdom_controls") || Alias == TEXT("accuracy") || Alias == TEXT("heal_ability") || Alias == TEXT("candy_marker"))
+		if (Alias == TEXT("shockdom_controls") || Alias == TEXT("accuracy") || Alias == TEXT("heal_ability") || Alias == TEXT("candy_marker")
+			|| Alias == TEXT("xtdm_scorebar") || Alias == TEXT("xtdm_teammates"))
 		{
 			return TEXT("Game Mode");
 		}
@@ -159,8 +161,11 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 	BackgroundBrush.TintColor = FLinearColor(0.05f, 0.05f, 0.05f, 0.92f);
 
 	// Build per-row state
+	const bool bXTDM = PlayerOwner.IsValid() && PlayerOwner->PlayerController
+		&& Cast<ANCPlusXTDMHUD>(PlayerOwner->PlayerController->MyHUD) != nullptr;
 	for (FName Alias : NCPlusHUDAliases::GetAllAliases())
 	{
+		if (!bXTDM && (Alias == TEXT("xtdm_scorebar") || Alias == TEXT("xtdm_teammates"))) continue;
 		FNCHUDEditorRow Row;
 		Row.Alias         = Alias;
 		Row.DisplayName   = NCPlusHUDAliases::GetDisplayName(Alias);
@@ -210,7 +215,7 @@ void SNCPlusHUDEditor::Construct(const FArguments& InArgs)
 		// from the same alias so each team's strip is independent.
 		if (Alias == TEXT("portrait_red") || Alias == TEXT("portrait_blue")
 			|| Alias == TEXT("portrait_team") || Alias == TEXT("portrait_enemy")
-			|| Alias == TEXT("team_panel"))
+			|| Alias == TEXT("team_panel") || Alias == TEXT("xtdm_scorebar") || Alias == TEXT("xtdm_teammates"))
 		{
 			Row.bHasFontPicker = true;
 			Row.bHasFontScale  = true;

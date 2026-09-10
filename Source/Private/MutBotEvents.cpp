@@ -22,8 +22,50 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
+#include "Engine/NetConnection.h"
+#include "UTDemoRecSpectator.h"
 
 DEFINE_LOG_CATEGORY(LogBotEvents);
+
+FString FBotArrivalLedger::CanonicalId(const FString& Value)
+{
+	if (Value.Len() != 32) return FString();
+	FString Id = Value.ToLower();
+	for (int32 Index = 0; Index < Id.Len(); ++Index)
+	{
+		const TCHAR Ch = Id[Index];
+		if (!((Ch >= TEXT('0') && Ch <= TEXT('9')) || (Ch >= TEXT('a') && Ch <= TEXT('f'))))
+		{
+			return FString();
+		}
+	}
+	// A nil ID is not an authenticated account identity or a launch nonce.
+	return Id == TEXT("00000000000000000000000000000000") ? FString() : Id;
+}
+
+void FBotArrivalLedger::RecordJoin(const FString& Value, double FirstSeenSeconds)
+{
+	const FString Id = CanonicalId(Value);
+	if (Id.IsEmpty() || !FMath::IsFinite(FirstSeenSeconds) || FirstSeenSeconds < 0.0)
+	{
+		bComplete = false;
+		return;
+	}
+	if (Joined.Contains(Id)) return;
+	if (Joined.Num() >= MaxPlayers)
+	{
+		bComplete = false;
+		return;
+	}
+	Joined.Add(Id, FirstSeenSeconds);
+}
+
+bool FBotArrivalLedger::QualifyState(FName State)
+{
+	if (State == MatchState::WaitingToStart) bWarmupSeen = true;
+	return bWarmupSeen;
+}
 
 AMutBotEvents::AMutBotEvents(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -32,6 +74,24 @@ AMutBotEvents::AMutBotEvents(const FObjectInitializer& ObjectInitializer)
 	bAlwaysRelevant = true;
 	PugId = -1;
 	bFlagEventsBound = false;
+	ArrivalStartedAt = 0.0;
+	ArrivalRequestStartedAt = 0.0;
+	ArrivalSequence = 0;
+	bArrivalStopped = false;
+}
+
+void AMutBotEvents::Init_Implementation(const FString& Options)
+{
+	Super::Init_Implementation(Options);
+	if (GetNetMode() == NM_Client) return;
+	// Init precedes player creation, unlike BeginPlay. Never enable this halfway
+	// through a match: missed logins could otherwise look like late arrivals.
+	ArrivalLaunchId = FBotArrivalLedger::CanonicalId(ParseOption(Options, TEXT("ArrivalId")));
+	if (!ArrivalLaunchId.IsEmpty())
+	{
+		ArrivalInstanceId = FGuid::NewGuid().ToString(EGuidFormats::Digits).ToLower();
+		ArrivalStartedAt = FPlatformTime::Seconds();
+	}
 }
 
 void AMutBotEvents::BeginPlay()
@@ -72,12 +132,54 @@ void AMutBotEvents::BeginPlay()
 	}
 
 	UE_LOG(LogBotEvents, Log, TEXT("MutBotEvents initialized: URL=%s PugId=%d"), *BotApiUrl, PugId);
+	if (!ArrivalLaunchId.IsEmpty())
+	{
+		GetWorldTimerManager().SetTimer(ArrivalTimer, this,
+			&AMutBotEvents::PollArrivals, 5.0f, true);
+		PollArrivals();
+	}
 }
 
 void AMutBotEvents::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	StopReadyPolling();
+	StopArrivalPolling();
+	if (ArrivalRequest.IsValid())
+	{
+		ArrivalRequest->OnProcessRequestComplete().Unbind();
+		ArrivalRequest->CancelRequest();
+		ArrivalRequest.Reset();
+	}
 	Super::EndPlay(EndPlayReason);
+}
+
+void AMutBotEvents::PostPlayerInit_Implementation(AController* C)
+{
+	Super::PostPlayerInit_Implementation(C);
+	if (GetNetMode() != NM_Client && !ArrivalLaunchId.IsEmpty() && !bArrivalStopped)
+	{
+		ObserveArrival(Cast<APlayerController>(C), true);
+	}
+}
+
+void AMutBotEvents::NotifyLogout_Implementation(AController* C)
+{
+	// Capture before downstream mutators can discard PlayerState/UniqueId.
+	if (GetNetMode() != NM_Client && !ArrivalLaunchId.IsEmpty() && !bArrivalStopped)
+	{
+		APlayerController* PC = Cast<APlayerController>(C);
+		ObserveArrival(PC, false);
+		for (int32 Index = ArrivalConnections.Num() - 1; Index >= 0; --Index)
+		{
+			if (ArrivalConnections[Index].Controller.Get() == PC)
+			{
+				ResolveArrival(ArrivalConnections[Index]);
+				if (ArrivalConnections[Index].Id.IsEmpty()) ArrivalLedger.bComplete = false;
+				ArrivalConnections.RemoveAtSwap(Index);
+			}
+		}
+	}
+	Super::NotifyLogout_Implementation(C);
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -94,6 +196,16 @@ void AMutBotEvents::NotifyMatchStateChange_Implementation(FName NewState)
 
 	FString StateStr = NewState.ToString();
 	UE_LOG(LogBotEvents, Log, TEXT("Match state changed: %s (PugId=%d)"), *StateStr, PugId);
+	if (!ArrivalLaunchId.IsEmpty() && !bArrivalStopped)
+	{
+		const bool bFinal = NewState == MatchState::WaitingPostMatch ||
+			NewState == MatchState::MapVoteHappening || NewState == MatchState::LeavingMap ||
+			NewState == MatchState::Aborted;
+		// WaitingToStart can immediately follow BeginPlay's first heartbeat.
+		// Preserve that in-flight request instead of creating a sequence gap.
+		PostArrivals(bFinal, NewState != MatchState::WaitingToStart);
+		if (bFinal) StopArrivalPolling();
+	}
 
 	// Map UT4 match states to bot event names
 	if (NewState == MatchState::WaitingToStart)
@@ -540,6 +652,192 @@ void AMutBotEvents::StopReadyPolling()
 	GetWorldTimerManager().ClearTimer(ReadyCheckTimer);
 }
 
+// Arrival observation deliberately has no dependency on passwords, teams, or
+// readiness. PostPlayerInit + NotifyLogout preserve visits shorter than a poll.
+void AMutBotEvents::ObserveArrival(APlayerController* PC, bool bFromLogin)
+{
+	if (!PC || Cast<AUTDemoRecSpectator>(PC)) return;
+	AUTPlayerState* PS = Cast<AUTPlayerState>(PC->PlayerState);
+	if (PS && (PS->bIsABot || PS->bIsDemoRecording)) return;
+	for (FBotArrivalConnection& Connection : ArrivalConnections)
+	{
+		if (Connection.Controller.Get() == PC)
+		{
+			ResolveArrival(Connection);
+			return;
+		}
+	}
+	// Enumeration/logout discovering an unrecorded connection means a login was
+	// missed. Its positive identity is useful, but absence is no longer provable.
+	if (!bFromLogin) ArrivalLedger.bComplete = false;
+	if (ArrivalConnections.Num() >= FBotArrivalLedger::MaxPlayers)
+	{
+		ArrivalLedger.bComplete = false;
+		return;
+	}
+	const int32 Index = ArrivalConnections.Emplace(PC, FPlatformTime::Seconds() - ArrivalStartedAt);
+	ResolveArrival(ArrivalConnections[Index]);
+}
+
+void AMutBotEvents::ResolveArrival(FBotArrivalConnection& Connection)
+{
+	APlayerController* PC = Connection.Controller.Get();
+	AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+	if (!PS || !PS->UniqueId.IsValid()) return;
+	const FString Id = FBotArrivalLedger::CanonicalId(PS->UniqueId.GetUniqueNetId()->ToString());
+	if (Id.IsEmpty()) return; // Deferred identity; stays incomplete until resolved.
+	if (!Connection.Id.IsEmpty() && Connection.Id != Id)
+	{
+		ArrivalLedger.bComplete = false;
+		return;
+	}
+	Connection.Id = Id;
+	ArrivalLedger.RecordJoin(Id, Connection.FirstSeenSeconds);
+}
+
+void AMutBotEvents::PollArrivals()
+{
+	PostArrivals(false);
+}
+
+void AMutBotEvents::StopArrivalPolling()
+{
+	bArrivalStopped = true;
+	GetWorldTimerManager().ClearTimer(ArrivalTimer);
+}
+
+void AMutBotEvents::PostArrivals(bool bFinal, bool bImmediate)
+{
+	if (ArrivalLaunchId.IsEmpty() || bArrivalStopped || BotApiUrl.IsEmpty() || GetNetMode() == NM_Client) return;
+	UWorld* World = GetWorld();
+	AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+	// BeginPlay can run in EnteringMap, before the server is ready for players.
+	// Keep all login evidence from Init, but don't emit a first frame or consume
+	// sequence numbers until actual warmup. UTGameMode::SetMatchState updates the
+	// GameState before calling NotifyMatchStateChange, so this reads the new phase.
+	if (!ArrivalLedger.QualifyState(GS ? GS->GetMatchState() : NAME_None)) return;
+	const double Now = FPlatformTime::Seconds();
+	// At most one request, no retry queue. Every next heartbeat contains the
+	// cumulative ledger. Lifecycle/final snapshots replace an outstanding request.
+	if (ArrivalRequest.IsValid())
+	{
+		if (!bFinal && !bImmediate && Now - ArrivalRequestStartedAt < 10.0) return;
+		ArrivalRequest->OnProcessRequestComplete().Unbind();
+		ArrivalRequest->CancelRequest();
+		ArrivalRequest.Reset();
+	}
+	if (ArrivalSequence == MAX_int32)
+	{
+		StopArrivalPolling();
+		return;
+	}
+
+	const bool bHealthy = World && GS && World->GetAuthGameMode() && !World->bIsTearingDown;
+	bool bComplete = bHealthy && ArrivalLedger.bComplete;
+	for (int32 Index = ArrivalConnections.Num() - 1; Index >= 0; --Index)
+	{
+		FBotArrivalConnection& Connection = ArrivalConnections[Index];
+		if (!Connection.Controller.IsValid())
+		{
+			// Even a resolved controller disappearing without Logout indicates that
+			// the lifecycle observation chain was interrupted.
+			ArrivalLedger.bComplete = false;
+			ArrivalConnections.RemoveAtSwap(Index);
+			continue;
+		}
+		ResolveArrival(Connection);
+		if (Connection.Id.IsEmpty()) bComplete = false;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Players;
+	TSet<FString> CurrentIds;
+	ANCReadyUpState* ReadyState = World ? ANCReadyUpState::Find(World) : nullptr;
+	if (World)
+	{
+		int32 ControllerCount = 0;
+		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+		{
+			if (++ControllerCount > FBotArrivalLedger::MaxPlayers)
+			{
+				ArrivalLedger.bComplete = false;
+				break;
+			}
+			APlayerController* PC = It->Get();
+			if (!PC || Cast<AUTDemoRecSpectator>(PC)) continue;
+			AUTPlayerState* PS = Cast<AUTPlayerState>(PC->PlayerState);
+			if (PS && (PS->bIsABot || PS->bIsDemoRecording)) continue;
+			ObserveArrival(PC, false);
+			if (!PS || !PS->UniqueId.IsValid())
+			{
+				bComplete = false;
+				continue;
+			}
+			const FString Id = FBotArrivalLedger::CanonicalId(PS->UniqueId.GetUniqueNetId()->ToString());
+			if (Id.IsEmpty() || CurrentIds.Contains(Id))
+			{
+				bComplete = false;
+				continue;
+			}
+			CurrentIds.Add(Id);
+			UNetConnection* NetConnection = PC->GetNetConnection();
+			const bool bConnected = !PC->IsPendingKillPending() && PC->Player &&
+				(NetConnection ? NetConnection->State == USOCK_Open && !NetConnection->bPendingDestroy
+				               : PC->IsLocalController());
+			TSharedRef<FJsonObject> Player = MakeShareable(new FJsonObject());
+			Player->SetStringField(TEXT("ut4_id"), Id);
+			Player->SetBoolField(TEXT("spectator"), PS->bOnlySpectator);
+			Player->SetBoolField(TEXT("bot"), false);
+			Player->SetBoolField(TEXT("ready"), ReadyState ? ReadyState->IsPlayerReady(PS) : PS->GetTeamNum() < 2);
+			Player->SetBoolField(TEXT("connected"), bConnected);
+			Players.Add(MakeShareable(new FJsonValueObject(Player)));
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Joined;
+	for (const auto& Pair : ArrivalLedger.Joined)
+	{
+		TSharedRef<FJsonObject> Join = MakeShareable(new FJsonObject());
+		Join->SetStringField(TEXT("ut4_id"), Pair.Key);
+		Join->SetNumberField(TEXT("first_seen_seconds"), Pair.Value);
+		Joined.Add(MakeShareable(new FJsonValueObject(Join)));
+	}
+	TSharedRef<FJsonObject> Json = MakeShareable(new FJsonObject());
+	Json->SetNumberField(TEXT("pug_id"), PugId);
+	Json->SetNumberField(TEXT("version"), 1);
+	Json->SetStringField(TEXT("launch_id"), ArrivalLaunchId);
+	Json->SetStringField(TEXT("instance_id"), ArrivalInstanceId);
+	Json->SetNumberField(TEXT("sequence"), ++ArrivalSequence);
+	// ResolveArrival may discover an account during this snapshot; stamp elapsed
+	// after enumeration so its first-seen time cannot exceed the envelope time.
+	Json->SetNumberField(TEXT("elapsed_seconds"), FPlatformTime::Seconds() - ArrivalStartedAt);
+	Json->SetStringField(TEXT("state"), GS ? GS->GetMatchState().ToString() : TEXT("Unknown"));
+	Json->SetBoolField(TEXT("complete"), bComplete && ArrivalLedger.bComplete);
+	Json->SetBoolField(TEXT("healthy"), bHealthy);
+	Json->SetArrayField(TEXT("players"), Players);
+	Json->SetArrayField(TEXT("joined"), Joined);
+	FString Output;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Output);
+	FJsonSerializer::Serialize(Json, Writer);
+
+	ArrivalRequest = FHttpModule::Get().CreateRequest();
+	ArrivalRequestStartedAt = Now;
+	ArrivalRequest->SetURL(BotApiUrl + TEXT("/arrival"));
+	ArrivalRequest->SetVerb(TEXT("POST"));
+	ArrivalRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+	if (!BotApiToken.IsEmpty()) ArrivalRequest->SetHeader(TEXT("api-token"), BotApiToken);
+	ArrivalRequest->SetContentAsString(Output);
+	TWeakObjectPtr<AMutBotEvents> WeakThis(this);
+	ArrivalRequest->OnProcessRequestComplete().BindLambda(
+		[WeakThis](FHttpRequestPtr Request, FHttpResponsePtr Response, bool bConnected)
+	{
+		if (WeakThis.IsValid() && WeakThis->ArrivalRequest == Request)
+		{
+			WeakThis->ArrivalRequest.Reset();
+		}
+	});
+	if (!ArrivalRequest->ProcessRequest()) ArrivalRequest.Reset();
+}
+
 // ────────────────────────────────────────────────────────────────────
 // HTTP Sending (StatSQL pattern)
 // ────────────────────────────────────────────────────────────────────
@@ -636,6 +934,10 @@ FString AMutBotEvents::BuildPlayerListJson() const
 		PlayerObj->SetStringField(TEXT("Name"), UTPS->PlayerName);
 		PlayerObj->SetNumberField(TEXT("Index"), UTPS->PlayerId);
 		PlayerObj->SetNumberField(TEXT("Id"), UTPS->PlayerId);
+		// StatSQL/Django identity is a string, distinct from the legacy numeric
+		// PlayerId above. This snapshot is diagnostic; /arrival retains the
+		// server connection's UniqueId and cumulative first-login evidence.
+		PlayerObj->SetStringField(TEXT("StatsID"), UTPS->StatsID);
 		PlayerObj->SetBoolField(TEXT("Ready"), bReady);
 		PlayerObj->SetStringField(TEXT("Password"), TEXT("")); // Not available server-side
 		PlayerObj->SetNumberField(TEXT("Team"), UTPS->GetTeamNum());

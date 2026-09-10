@@ -7,6 +7,7 @@
 #include "UTHUDWidget.h"
 #include "NCPlusBetaTopBar.h"
 #include "ElimPlusHUD.h"
+#include "NCPlusXTDMHUD.h"
 #include "Engine/Canvas.h"
 #include "Engine/GameViewportClient.h"
 #include "Rendering/DrawElements.h"
@@ -170,6 +171,8 @@ namespace NCDragRects
 
 	static FInfo Get(FName Alias, const AUTHUD* HUD)
 	{
+		if (Alias == TEXT("xtdm_scorebar")) return { FVector2D(466.f, 125.f), FVector2D(-233.f, 0.f) };
+		if (Alias == TEXT("xtdm_teammates")) return { FVector2D(292.f, 153.f), FVector2D::ZeroVector };
 		// Portrait strips: each portrait pip is ~96 design px wide × ~134 tall;
 		// 5 pips per team. ResolvedPos is the strip's start anchor. The
 		// viewer-relative team/enemy slots share the exact geometry.
@@ -256,6 +259,10 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 					{
 						// Draw-call aliases have empty ClassPath in the alias table.
 						if (!NCPlusHUDAliases::GetClassPath(Alias).IsEmpty()) continue;
+						const bool bXTDM = HUD->IsA(ANCPlusXTDMHUD::StaticClass());
+						const bool bXTDMElement = Alias == TEXT("xtdm_scorebar") || Alias == TEXT("xtdm_teammates");
+						if (bXTDMElement && !bXTDM) continue;
+						if (bXTDM && !bXTDMElement && Alias != TEXT("server_info") && Alias != TEXT("damage_flash")) continue;
 						if (NCPlusHUDDrawCall::IsHidden(Alias)) continue;
 						const bool bPortraitAlias = Alias == TEXT("portrait_red")
 							|| Alias == TEXT("portrait_blue") || Alias == TEXT("portrait_team")
@@ -323,6 +330,7 @@ void SNCPlusHUDDragOverlay::RefreshCachedElements() const
 
 						const NCDragRects::FInfo Info = NCDragRects::Get(Alias, HUD);
 						float ElementScale = NCPlusHUDDrawCall::GetScale(Alias);
+						if (bXTDMElement) ElementScale *= HUD->GetHUDWidgetScaleOverride();
 						if (bBetaPortrait)
 						{
 							ElementScale *= NCPlusHUDDrawCall::GetScale(TEXT("scorebar"))

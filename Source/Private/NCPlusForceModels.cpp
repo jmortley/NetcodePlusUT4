@@ -417,12 +417,23 @@ void NCPlusForceModels::SyncHudTeamColours(UWorld* World)
 	if (!GS) { return; }
 
 	const FNCPlusForceModelsConfig& C = Get();
-	const bool bWant = C.bEnabled && C.bHUD;
+	// Four-team matches keep the authoritative palette. Personal friend/enemy HUD colours would
+	// merge three opponents into one colour, and a listen host must not replicate that preference.
+	const bool bFourTeamGame = IsFourTeamGame(World);
+	const bool bWant = C.bEnabled && C.bHUD && !bFourTeamGame;
 	const int32 ViewerTeam = GetViewerTeam(World);   // spectator -> red is "ours"
 
 	for (AUTTeamInfo* Team : GS->Teams)
 	{
 		if (!Team) { continue; }
+		if (bFourTeamGame)
+		{
+			// A client may have briefly seen only the first two replicated teams and saved a personal
+			// override before the other two arrived. Repair that here without retaining a stale palette.
+			Team->TeamColor = GetFourTeamColour(Team->GetTeamNum());
+			GHudOrigColours.Remove(Team);
+			continue;
+		}
 		const bool bFriendly = ((int32)Team->GetTeamNum() == ViewerTeam);
 		// Enemy-Only leaves teammates untouched; every other style recolours both teams.
 		const bool bApply = bWant && !(C.Style == ENCPlusSkinStyle::EnemyOnly && bFriendly);
@@ -661,7 +672,7 @@ bool NCPlusForceModels::OutlineModeActive(UWorld* World)
 	// push the host's occlusion state to every connected client and clobber their own outline flags.
 	// Also keys the TeamArenaCharacter tint-gating, so a host with the flag on keeps the normal
 	// super-tint (neutral bodies with no outline would be strictly worse).
-	if (!World) { return false; }
+	if (!World || IsFourTeamGame(World)) { return false; }
 	const FNCPlusForceModelsConfig& C = Get();
 	if (!C.bEnabled || !C.bOutline) { return false; }
 	const ENetMode NM = World->GetNetMode();
@@ -908,6 +919,24 @@ void NCPlusForceModels::OutlinePlayers(UWorld* World, bool bSlowTick)
 	GOutlined = MoveTemp(Current);
 }
 
+bool NCPlusForceModels::IsFourTeamGame(UWorld* World)
+{
+	const AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+	return GS && GS->Teams.Num() == 4;
+}
+
+FLinearColor NCPlusForceModels::GetFourTeamColour(int32 TeamIndex)
+{
+	switch (TeamIndex)
+	{
+	case 0: return FLinearColor::Red;
+	case 1: return FLinearColor::Blue;
+	case 2: return FLinearColor::Green;
+	case 3: return FLinearColor::Yellow;
+	default: return FLinearColor::White;
+	}
+}
+
 int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
 {
 	if (World)
@@ -915,7 +944,7 @@ int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
 		if (AUTPlayerController* PC = Cast<AUTPlayerController>(World->GetFirstPlayerController()))
 		{
 			const uint8 T = PC->GetTeamNum();
-			if (T == 0 || T == 1) { return (int32)T; }
+			if (T != 255) { return (int32)T; }
 		}
 	}
 	return 0;   // spectator / no team -> red is "our" team, blue is enemy
@@ -923,8 +952,14 @@ int32 NCPlusForceModels::GetViewerTeam(UWorld* World)
 
 FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly)
 {
+	return GetModelSettings(TheirTeamIndex, bIsFriendly, nullptr);
+}
+
+FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly, UWorld* World)
+{
 	static const FNCPlusModelSettings EmptySide;   // empty ContentPath -> applier skips this pawn
 	const FNCPlusForceModelsConfig& C = Get();
+	FNCPlusModelSettings Out;
 	switch (C.Style)
 	{
 	case ENCPlusSkinStyle::RedBlue:
@@ -934,9 +969,11 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 		// Blue runs S=0.9 (≈ stock BLUEHUDCOLOR) so both sides read at comparable luminance.
 		// Glow/armour honour the side config; the model falls back to Team-then-Enemy so a style
 		// switch keeps a model.
-		FNCPlusModelSettings Out = (TheirTeamIndex == 0) ? C.Red : C.Blue;
-		Out.H = (TheirTeamIndex == 0) ? 0.f : 240.f;
-		Out.S = (TheirTeamIndex == 0) ? 1.f : 0.9f;
+		Out = (TheirTeamIndex == 0) ? C.Red : (TheirTeamIndex == 1) ? C.Blue
+			: bIsFriendly ? C.Team : C.Enemy;
+		const FLinearColor HSV = GetFourTeamColour(TheirTeamIndex).LinearRGBToHSV();
+		Out.H = HSV.R;
+		Out.S = (TheirTeamIndex == 1) ? 0.9f : 1.f;
 		Out.V = 1.f;
 		// Model fallback: a Red/Blue side with no model of its own borrows the Team (then Enemy) model,
 		// so switching to Red/Blue from a Team/Enemy-only setup still forces a model instead of nothing.
@@ -946,12 +983,25 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 		{
 			Out.ContentPath = !C.Team.ContentPath.IsEmpty() ? C.Team.ContentPath : C.Enemy.ContentPath;
 		}
-		return Out;
+		break;
 	}
-	case ENCPlusSkinStyle::EnemyOnly: return bIsFriendly ? EmptySide : C.Enemy;
+	case ENCPlusSkinStyle::EnemyOnly: Out = bIsFriendly ? EmptySide : C.Enemy; break;
 	case ENCPlusSkinStyle::TeamEnemy:
-	default:                          return bIsFriendly ? C.Team : C.Enemy;
+	default: Out = bIsFriendly ? C.Team : C.Enemy; break;
 	}
+	if (IsFourTeamGame(World) && TheirTeamIndex >= 0 && TheirTeamIndex < 4)
+	{
+		// Keep model, brightness and cosmetic preferences, but never collapse the three enemy teams
+		// into one personal hue. EnemyOnly still leaves the friendly model unchanged.
+		const FLinearColor HSV = GetFourTeamColour(TheirTeamIndex).LinearRGBToHSV();
+		Out.H = HSV.R;
+		Out.S = 1.f;
+		Out.V = 1.f;
+		Out.bTint = true;
+		Out.bComplimentary = false;
+		Out.ArmourMode = ENCPlusArmourMode::MatchSkin;
+	}
+	return Out;
 }
 
 FLinearColor NCPlusForceModels::GetSkinColour(const FNCPlusModelSettings& Side)
@@ -1420,9 +1470,14 @@ bool NCPlusForceModels::IsBakedMaterial(const FString& MaterialName)
 
 const TArray<FName>& NCPlusForceModels::TeamColourParamNames()
 {
+	return TeamColourParamNames(true);
+}
+
+const TArray<FName>& NCPlusForceModels::TeamColourParamNames(bool bUseConfiguredOverrides)
+{
 	// Mod.ini override wins if set ([ForceModels] RecolorParams=Name1,Name2,...).
 	const FNCPlusForceModelsConfig& C = Get();
-	if (C.RecolorParams.Num() > 0) { return C.RecolorParams; }
+	if (bUseConfiguredOverrides && C.RecolorParams.Num() > 0) { return C.RecolorParams; }
 
 	// Default: known UT character team-colour params MINUS the head/face params
 	// (so faces stay natural). NOTE: the broad "...Team Color" / "TeamColor" params

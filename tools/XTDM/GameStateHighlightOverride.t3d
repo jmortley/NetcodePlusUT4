@@ -1,0 +1,18 @@
+Begin Object Class=K2Node_Event Name="K2Node_Event_XTDMUpdateHighlights"
+   EventReference=(MemberParent=Class'/Script/UnrealTournament.UTGameState',MemberName="UpdateHighlights")
+   bOverrideFunction=True
+   NodePosX=0
+   NodePosY=500
+   NodeGuid=C64122074035F534D73917AD9F43A9E4
+   CustomProperties Pin (PinId=1EA88376499EB1FDE98E44900C5A50B0,PinName="OutputDelegate",Direction="EGPD_Output",PinType.PinCategory="delegate",PinType.PinSubCategory="",PinType.PinSubCategoryObject=None,PinType.PinSubCategoryMemberReference=(MemberParent=Class'/Script/UnrealTournament.UTGameState',MemberName="UpdateHighlights"),PinType.PinValueType=(),PinType.bIsMap=False,PinType.bIsSet=False,PinType.bIsArray=False,PinType.bIsReference=False,PinType.bIsConst=False,PinType.bIsWeakPointer=False,PersistentGuid=00000000000000000000000000000000,bHidden=False,bNotConnectable=False,bDefaultValueIsReadOnly=False,bDefaultValueIsIgnored=False,bAdvancedView=False,)
+   CustomProperties Pin (PinId=2024205B40820A4308F4C1A4F6B5B2B7,PinName="then",Direction="EGPD_Output",PinType.PinCategory="exec",PinType.PinSubCategory="",PinType.PinSubCategoryObject=None,PinType.PinSubCategoryMemberReference=(),PinType.PinValueType=(),PinType.bIsMap=False,PinType.bIsSet=False,PinType.bIsArray=False,PinType.bIsReference=False,PinType.bIsConst=False,PinType.bIsWeakPointer=False,LinkedTo=(K2Node_CallFunction_XTDMClearHighlights 327669424BFDC7F0931CBD84DBB239CA,),PersistentGuid=00000000000000000000000000000000,bHidden=False,bNotConnectable=False,bDefaultValueIsReadOnly=False,bDefaultValueIsIgnored=False,bAdvancedView=False,)
+End Object
+Begin Object Class=K2Node_CallFunction Name="K2Node_CallFunction_XTDMClearHighlights"
+   FunctionReference=(MemberParent=Class'/Script/UnrealTournament.UTGameState',MemberName="ClearHighlights")
+   NodePosX=320
+   NodePosY=500
+   NodeGuid=4E9DEB4A48213B9E6A3F709E7FC6813C
+   CustomProperties Pin (PinId=327669424BFDC7F0931CBD84DBB239CA,PinName="execute",PinType.PinCategory="exec",PinType.PinSubCategory="",PinType.PinSubCategoryObject=None,PinType.PinSubCategoryMemberReference=(),PinType.PinValueType=(),PinType.bIsMap=False,PinType.bIsSet=False,PinType.bIsArray=False,PinType.bIsReference=False,PinType.bIsConst=False,PinType.bIsWeakPointer=False,LinkedTo=(K2Node_Event_XTDMUpdateHighlights 2024205B40820A4308F4C1A4F6B5B2B7,),PersistentGuid=00000000000000000000000000000000,bHidden=False,bNotConnectable=False,bDefaultValueIsReadOnly=False,bDefaultValueIsIgnored=False,bAdvancedView=False,)
+   CustomProperties Pin (PinId=9EB0ABBA4EF543153CF7DA8343B17310,PinName="then",Direction="EGPD_Output",PinType.PinCategory="exec",PinType.PinSubCategory="",PinType.PinSubCategoryObject=None,PinType.PinSubCategoryMemberReference=(),PinType.PinValueType=(),PinType.bIsMap=False,PinType.bIsSet=False,PinType.bIsArray=False,PinType.bIsReference=False,PinType.bIsConst=False,PinType.bIsWeakPointer=False,PersistentGuid=00000000000000000000000000000000,bHidden=False,bNotConnectable=False,bDefaultValueIsReadOnly=False,bDefaultValueIsIgnored=False,bAdvancedView=False,)
+   CustomProperties Pin (PinId=74F479AB49B868C24D34519D1429C605,PinName="self",PinFriendlyName=NSLOCTEXT("K2Node", "Target", "Target"),PinType.PinCategory="object",PinType.PinSubCategory="",PinType.PinSubCategoryObject=Class'/Script/UnrealTournament.UTGameState',PinType.PinSubCategoryMemberReference=(),PinType.PinValueType=(),PinType.bIsMap=False,PinType.bIsSet=False,PinType.bIsArray=False,PinType.bIsReference=False,PinType.bIsConst=False,PinType.bIsWeakPointer=False,PersistentGuid=00000000000000000000000000000000,bHidden=True,bNotConnectable=False,bDefaultValueIsReadOnly=False,bDefaultValueIsIgnored=False,bAdvancedView=False,)
+End Object

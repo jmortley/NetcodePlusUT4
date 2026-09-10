@@ -307,6 +307,7 @@ public:
 	// Client-side render override: force every OTHER player to a chosen AUTCharacterContent
 	// + team-recolour, driven by the local NCPlusForceModels config. Fires on spawn /
 	// team-change (both route through NotifyTeamChanged) and is a no-op on a dedicated server.
+	// Four-team matches also tint the natural model with the absolute team palette when forcing is off.
 	virtual void NotifyTeamChanged() override;
 	/** Keep stock outline recreation out of ApplyCharacterData's body-mesh reregister window. */
 	virtual void ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data) override;

@@ -2,6 +2,7 @@
 #include "NCPlusHUDLayout.h"
 #include "NCPlusHUDPresets.h"
 #include "ElimPlusHUD.h"
+#include "NCPlusXTDMReplicator.h"
 #include "UnrealTournament.h"
 #include "UTHUD.h"
 #include "UTHUDWidget.h"
@@ -1148,6 +1149,8 @@ namespace NCPlusHUDAliases
 			// approximates the original hard-coded (ClipX*0.98, ClipY*0.015).
 			T.Emplace(TEXT("score_kda"),        FString(),                                                                       FText::FromString(TEXT("Score / KDA Mini")),   true,  ENCPlusHUDAnchor::TopRight,    FVector2D(-40.f, 16.f));
 			// Game-mode-specific draw calls.
+			T.Emplace(TEXT("xtdm_scorebar"), FString(), FText::FromString(TEXT("xTDM Four-Team Scores / Clock")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 16.f));
+			T.Emplace(TEXT("xtdm_teammates"), FString(), FText::FromString(TEXT("xTDM Teammate Status")), true, ENCPlusHUDAnchor::CenterLeft, FVector2D(22.f, 194.4f));
 			T.Emplace(TEXT("shockdom_controls"),FString(),                                                                       FText::FromString(TEXT("ShockDom A/B/C Indicators")), true, ENCPlusHUDAnchor::TopCenter, FVector2D(0.f, 78.f));
 			// Live-accuracy widget for NCShaftArena (and any other mode that opts
 			// in by listing the class in its HudWidgetClasses). Default sits at
@@ -1573,6 +1576,11 @@ namespace NCPlusHUDDrawCall
 		const float Now = World->GetTimeSeconds();
 		if (Now < GInstagibNextCheck) return false;
 		GInstagibNextCheck = Now + 1.f;
+		if (ANCPlusXTDMReplicator::Find(World))
+		{
+			GInstagibFound = true;
+			return true;
+		}
 
 		// Contains() catches MutInstagibNCP, BP "_C" suffixes, and stock instagib
 		// in standalone/listen where mutators exist locally.

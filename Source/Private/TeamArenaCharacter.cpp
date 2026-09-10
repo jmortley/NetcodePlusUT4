@@ -552,6 +552,13 @@ void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Da
 	{
 		bDeferredOutlineUpdatePending = true;
 	}
+	// A model change can rebuild MIDs without NotifyTeamChanged. Reuse the existing one-shot
+	// dirty flush, but do not recursively dirty a forced-model apply that is already painting them.
+	if (!bApplyingForcedModel && NCPlusForceModels::IsFourTeamGame(GetWorld()))
+	{
+		bForcedModelDirty = true;
+		bForcedArmourOverlayDirty = true;
+	}
 }
 
 void ATeamArenaCharacter::UpdateOutline()
@@ -719,6 +726,8 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	UWorld* const World = GetWorld();
 
 	// ── Resolve desired state: the model class + colour to force, or "none" = leave natural. ──
+	const int32 MyTeam = (int32)GetTeamNum();
+	const bool bFourTeamPalette = NCPlusForceModels::IsFourTeamGame(World) && MyTeam >= 0 && MyTeam < 4;
 	TSubclassOf<AUTCharacterContent> Content = nullptr;
 	FLinearColor Colour = FLinearColor::White;
 	float        GlowIntensity = 0.f;          // subtle-highlight emissive strength, from Brightness
@@ -727,7 +736,6 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 
 	if (NCPlusForceModels::IsEnabled())
 	{
-		const int32 MyTeam = (int32)GetTeamNum();
 		if (MyTeam != 255)                                // FFA / no team: deferred (see ForceModels plan)
 		{
 			// Resolve friend/enemy against THE LOCAL VIEWER's team. NCPlusForceModels::GetViewerTeam
@@ -736,7 +744,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			// false for a spectator, which made everyone read as an enemy).
 			const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));
 
-			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+			const FNCPlusModelSettings& Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly, World);
 			Content = NCPlusForceModels::GetModelClass(Side);
 			const bool bModelOK = Content && NCPlusForceModels::IsModelAllowed(Content);
 			// A side is active when it forces a model OR opts into tint-only (the F5
@@ -773,6 +781,13 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 				Content = nullptr;   // tint-only: never a mesh-swap target (also keeps the dirty latch honest)
 			}
 		}
+	}
+	if (bFourTeamPalette && !bWantTint)
+	{
+		// Stock body materials generally select only red/blue/neutral. Four-team identity must remain
+		// visible with Force Models disabled too; this is colour-only and never changes the pawn class.
+		Colour = NCPlusForceModels::GetFourTeamColour(MyTeam);
+		bWantTint = true;
 	}
 
 	// ── Natural: feature off, FFA, or friendly under Enemy-Only → this pawn keeps its real model. ──
@@ -839,7 +854,8 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	static const FName NAME_EmissionPower(TEXT("Emission Power"));
 	static const FName NAME_GenghisBrightMesh(TEXT("ghengis_3p_bright"));
 	static const FName NAME_LiandriRobotBrightMesh(TEXT("robot_3p_bright"));
-	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames();
+	// A personal narrow parameter list must not accidentally erase green/yellow team identity.
+	const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames(!bFourTeamPalette);
 	// These two curated content classes use dedicated *_bright meshes whose static material instances
 	// deliberately author HDR team-colour values (2.5). The generic recolour pass used to replace those
 	// values with the raw F5 colour and silently throw away the very compensation the bright variants
@@ -849,6 +865,18 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	const bool bPreserveBrightVariantTint = ActiveBodyMesh
 		&& (ActiveBodyMesh->GetFName() == NAME_GenghisBrightMesh
 			|| ActiveBodyMesh->GetFName() == NAME_LiandriRobotBrightMesh);
+	// First-person arms have their own MIDs. Include them only for four-team palette compatibility;
+	// ordinary force-model behavior continues to use exactly the existing body material list.
+	TArray<UMaterialInstanceDynamic*> FourTeamMaterials;
+	if (bFourTeamPalette)
+	{
+		FourTeamMaterials = GetBodyMIs();
+		for (UMaterialInstanceDynamic* MID : FirstPersonMeshMIDs)
+		{
+			if (MID) { FourTeamMaterials.AddUnique(MID); }
+		}
+	}
+	const TArray<UMaterialInstanceDynamic*>& TintMaterials = bFourTeamPalette ? FourTeamMaterials : GetBodyMIs();
 
 	// Decide ONCE whether this model can be recoloured. It can't if either (a) no non-skipped body
 	// material exposes any of our team-colour params (param-less models, e.g. Garog — auto-detected),
@@ -856,7 +884,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// indistinguishable at runtime, e.g. the community Robot). Non-recolourable models fall back to
 	// their baked red/blue team skin below, so they stay team-readable instead of a flat default colour.
 	bool bHasParam = false, bDenylisted = false;
-	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	for (UMaterialInstanceDynamic* MID : TintMaterials)
 	{
 		if (!MID) { continue; }
 		const UMaterialInterface* Src = MID->Parent;
@@ -888,7 +916,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// UT character materials are three-way (TeamSelect 0=Red, 1=Blue, 255=NoTeam). Recolour forces the
 	// neutral NoTeam path then tints it (the Red/Blue paths are the model's baked team skins, which a
 	// colour param only accents); the fallback instead selects a baked team skin directly.
-	for (UMaterialInstanceDynamic* MID : GetBodyMIs())
+	for (UMaterialInstanceDynamic* MID : TintMaterials)
 	{
 		if (!MID) { continue; }
 		const UMaterialInterface* Src = MID->Parent;
@@ -897,6 +925,18 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		{
 			// Face/eyes/hair: leave UNTOUCHED so they keep the model's own team tint.
 			continue;
+		}
+		bool bCanRecolourMaterial = bRecolour;
+		if (bFourTeamPalette && !bDenylisted)
+		{
+			// First-person and third-person meshes can have different material capabilities. A tintable
+			// arm material must not make a parameterless body take the red branch accidentally.
+			bCanRecolourMaterial = false;
+			FLinearColor UnusedColour;
+			for (const FName& P : Params)
+			{
+				if (MID->GetVectorParameterValue(P, UnusedColour)) { bCanRecolourMaterial = true; break; }
+			}
 		}
 
 		if (bOutlineMode)
@@ -914,9 +954,9 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			continue;
 		}
 
-		if (!bRecolour)
+		if (!bCanRecolourMaterial)
 		{
-			if (bWantForce)
+			if (bWantForce && !bFourTeamPalette)
 			{
 				// Non-recolourable model: route to its baked red/blue skin rather than the futile NoTeam
 				// recolour (which would leave it a flat default). The baked textures carry the team look.
@@ -928,7 +968,10 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 			continue;
 		}
 
-		MID->SetScalarParameterValue(NAME_TeamSelect, 255.f);
+		// Stock Malcolm's team material exposes red/blue parameters but no green/yellow branch.
+		// Paint every supported branch identically, then select a valid branch instead of passing
+		// TeamIndex 2/3 into a two-team shader. Keep the existing neutral-path behavior in other modes.
+		MID->SetScalarParameterValue(NAME_TeamSelect, bFourTeamPalette ? 0.f : 255.f);
 		// Some masters bake the team skin into TEXTURES and only blend the colour params over them at a
 		// strength gated by this scalar; crank it so the colour actually paints. No-op where absent.
 		MID->SetScalarParameterValue(NAME_TeamBlendMax, 1.f);
@@ -1278,24 +1321,25 @@ void ATeamArenaCharacter::RefreshForcedArmourOverlay()
 	ObservedArmourOverlayMaterial = OverlayMaterial;
 	bForcedArmourOverlayDirty = false;
 
-	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
-	if (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(GetWorld())) { return; }   // Outline mode: leave stock armour (no super-tint)
-
 	const int32 MyTeam = (int32)GetTeamNum();
 	if (MyTeam == 255) { return; }                                  // FFA: deferred
 
 	UWorld* const World = GetWorld();
+	const bool bFourTeamPalette = NCPlusForceModels::IsFourTeamGame(World) && MyTeam >= 0 && MyTeam < 4;
+	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
+	if (!bFourTeamPalette && (!C.bEnabled || !C.bArmour || NCPlusForceModels::OutlineModeActive(World))) { return; }
+
 	const bool bIsFriendly = (MyTeam == NCPlusForceModels::GetViewerTeam(World));   // spectator -> red is "ours"
-	if (C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }   // Enemy-Only leaves teammates stock
+	if (!bFourTeamPalette && C.Style == ENCPlusSkinStyle::EnemyOnly && bIsFriendly) { return; }
 
 	UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(OverlayMaterial);
 	if (!MID) { return; }
 
-	const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly);
+	const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(MyTeam, bIsFriendly, World);
 	// Same model-or-tint gate as ApplyForcedModel and the spawn-protection glow. A side with neither
 	// a forced model nor "Tint skin" leaves the stock overlay untouched.
 	TSubclassOf<AUTCharacterContent> GateContent = NCPlusForceModels::GetModelClass(Side);
-	if (!((GateContent && NCPlusForceModels::IsModelAllowed(GateContent)) || Side.bTint)) { return; }
+	if (!bFourTeamPalette && !((GateContent && NCPlusForceModels::IsModelAllowed(GateContent)) || Side.bTint)) { return; }
 	const FLinearColor ArmourColour = NCPlusForceModels::GetArmourColour(Side);
 
 	// Stock "Color" is a BRIGHT ~(1,1,0) yellow that drives the armour's emissive glow; our configured
@@ -2945,7 +2989,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			if (GlowTeam != 255)
 			{
 				const bool bGlowFriendly = (GlowTeam == NCPlusForceModels::GetViewerTeam(GetWorld()));
-				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly);
+				const FNCPlusModelSettings& GlowSide = NCPlusForceModels::GetModelSettings(GlowTeam, bGlowFriendly, GetWorld());
 				TSubclassOf<AUTCharacterContent> GlowContent = NCPlusForceModels::GetModelClass(GlowSide);
 				// Model-or-tint, matching ApplyForcedModel and the overlay recolour above.
 				if ((GlowContent && NCPlusForceModels::IsModelAllowed(GlowContent)) || GlowSide.bTint)

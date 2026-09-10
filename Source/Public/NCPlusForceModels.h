@@ -147,7 +147,12 @@ namespace NCPlusForceModels
 	 *  At most one frame stale; false before the first OutlinePlayers tick of a world. */
 	NETCODEPLUS_API bool OutlineModeActiveCached();
 
-	/** The local viewer's effective team (0/1) for friend/enemy bucketing under the Team-vs-Enemy and
+	/** Four-team palette compatibility, using the stock GameState's replicated team array. */
+	NETCODEPLUS_API bool IsFourTeamGame(class UWorld* World);
+	/** Absolute team palette; invalid/teamless indices return white. */
+	NETCODEPLUS_API FLinearColor GetFourTeamColour(int32 TeamIndex);
+
+	/** The local viewer's effective team for friend/enemy bucketing under the Team-vs-Enemy and
 	 *  Enemy-Only styles. Returns the local PC's real team when playing; for a teamless spectator it
 	 *  defaults to red (team 0) so Team = red and Enemy = blue. Use TheirTeam == GetViewerTeam(World)
 	 *  as the "friendly" test instead of OnSameTeam(), which returns false for a spectator. */
@@ -157,6 +162,8 @@ namespace NCPlusForceModels
 	 *  Red/Blue style forces the hue (red/blue) and may borrow the Team/Enemy model, so it can't
 	 *  always hand back a reference straight into the config. */
 	NETCODEPLUS_API FNCPlusModelSettings GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly);
+	/** World-aware resolver: four teams retain model/brightness preferences but use absolute hues. */
+	NETCODEPLUS_API FNCPlusModelSettings GetModelSettings(int32 TheirTeamIndex, bool bIsFriendly, class UWorld* World);
 
 	/** HSV(degrees) -> FLinearColor for a side (base albedo tint; V is the normal 0-1 brightness). */
 	NETCODEPLUS_API FLinearColor GetSkinColour(const FNCPlusModelSettings& Side);
@@ -211,6 +218,8 @@ namespace NCPlusForceModels
 	 *  SetVectorParameterValue no-ops names a material lacks, so this colours any UT-framework
 	 *  model and harmlessly skips the rest. */
 	NETCODEPLUS_API const TArray<FName>& TeamColourParamNames();
+	/** False selects the complete known parameter set for mandatory four-team identity. */
+	NETCODEPLUS_API const TArray<FName>& TeamColourParamNames(bool bUseConfiguredOverrides);
 
 	/** True if a material's name matches the skip list (face/eyes/hair) — don't recolour it. */
 	NETCODEPLUS_API bool IsRecolorSkippedMaterial(const FString& MaterialName);
