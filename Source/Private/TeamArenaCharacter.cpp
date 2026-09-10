@@ -42,6 +42,7 @@
 #include "NCRemoteAnimationPolicy.h"
 #include "NCRemoteAnimationURO.h"
 #include "Components/AudioComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Sound/SoundBase.h"
 
 DECLARE_STATS_GROUP_VERBOSE(TEXT("NCP URO"), STATGROUP_NCPURO, STATCAT_Advanced);
@@ -77,6 +78,26 @@ static TAutoConsoleVariable<int32> CVarHelmetBlocksHeadshot(
 
 namespace
 {
+	void DisableWeaponOutlineShadows(AUTWeaponAttachment* Attachment)
+	{
+		if (Attachment == nullptr || Attachment->GetNetMode() == NM_DedicatedServer)
+		{
+			return;
+		}
+
+		const USkeletalMeshComponent* const DepthMesh = Attachment->GetCustomDepthMesh();
+		if (DepthMesh != nullptr && DepthMesh != Attachment->Mesh
+			&& DepthMesh->bRenderCustomDepth && !DepthMesh->bRenderInMainPass
+			&& DepthMesh->CastShadow)
+		{
+			// Unlike UT's shared outline helper, AUTWeaponAttachment duplicates Mesh3P
+			// without disabling shadows. Main-pass visibility does not gate shadow passes.
+			// UT exposes only a const getter for this mutable, actor-owned runtime copy.
+			// Keep the source mesh's shadow and the duplicate's stencil/pose untouched.
+			const_cast<USkeletalMeshComponent*>(DepthMesh)->SetCastShadow(false);
+		}
+	}
+
 	constexpr int32 ArmorPlusMaxTotal = 150;
 	constexpr int32 ArmorPlusSoftLimit = 100;
 	constexpr float ClutchDefenderFootstepVolume = 0.10f;
@@ -545,6 +566,7 @@ void ATeamArenaCharacter::UpdateOutline()
 			ReleaseRemoteAnimationURO(true);
 		}
 		Super::UpdateOutline();
+		DisableWeaponOutlineShadows(WeaponAttachment);
 	}
 }
 
@@ -647,6 +669,7 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 		ReleaseRemoteAnimationURO(true);
 	}
 	Super::UpdateOutline();
+	DisableWeaponOutlineShadows(WeaponAttachment);
 }
 
 // Apply the coalesced forced-model work, at most once per frame. Called from the top of Tick on clients,
