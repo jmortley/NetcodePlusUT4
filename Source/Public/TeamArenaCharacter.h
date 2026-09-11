@@ -255,6 +255,10 @@ public:
 	virtual void SetArmorAmount(class AUTArmor* InArmorType, int32 Amount) override;
 	virtual void RemoveArmor(int32 Amount) override;
 	virtual void ServerDropArmor_Implementation() override;
+	/** Restore regular armor only while a live authority pawn already has armor.
+	 *  Total is capped at min(MaxArmor, 100); existing belt points and helmet
+	 *  charge are preserved. Returns actual points restored, never a pickup grant. */
+	int32 RestoreRegularArmor(int32 Amount, int32 MaxArmor);
 
 	// Helmet: an Armor_Small pickup grants exactly ONE headshot block (UT3-style
 	// ding + BlockedHeadshotDamage), consumed on use. Config-gated by

@@ -301,9 +301,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
 	void CreditHealing(AUTPlayerState* HealerPS, int32 Amount);
 
-	/** Apply a heal clamped to the legacy banner's 100 HP ceiling and credit the
-	 *  HP ACTUALLY restored.
-	 *  Returns that amount (0 if nothing was healed).
+	/** Apply a heal clamped to the legacy banner's 100 HP ceiling and restore up
+	 *  to 5 regular armor if the target has at least 1 armor, capped at 100 total.
+	 *  Armor restoration runs alongside HP healing, including at full HP, without
+	 *  replacing belt protection or granting/consuming a helmet charge.
+	 *  Credits and returns only HP ACTUALLY restored (0 for an armor-only tick).
 	 *
 	 *  This exists so heal-over-time Blueprints (the buff banner) stop doing
 	 *  their own Health arithmetic. Doing it in BP means computing the credit
@@ -319,8 +321,8 @@ public:
 	 *  not score. The link beam never had to make this choice because it
 	 *  cannot target its own owner.
 	 *
-	 *  A target already over 100 is left unchanged; healing never removes
-	 *  overhealth. Server-authority only. No-op on a null, dead, or full target. */
+	 *  Neither pool is reduced when already over its cap. Server-authority only;
+	 *  no-op on a null/dead target or HealAmount <= 0. No armor is created from 0. */
 	UFUNCTION(BlueprintCallable, Category = "Wipeout|Heal")
 	int32 HealCharacterAndCredit(class AUTCharacter* Target, int32 HealAmount,
 		AUTPlayerState* HealerPS);

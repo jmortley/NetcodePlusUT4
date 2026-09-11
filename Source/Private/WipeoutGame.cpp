@@ -2871,6 +2871,23 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 		return 0;
 	}
 
+	// The banner restores existing armor alongside health, including at full HP.
+	// Never seed an empty armor pool or reduce an already overcharged stack.
+	// NCP owns the belt/regular split and helmet charge: its ordinary armor setter
+	// would reset those, so use the restoration path instead of a new pickup.
+	if (ATeamArenaCharacter* ArenaTarget = Cast<ATeamArenaCharacter>(Target))
+	{
+		ArenaTarget->RestoreRegularArmor(5, 100);
+	}
+	else
+	{
+		const int32 OldArmor = Target->GetArmorAmount();
+		if (OldArmor > 0 && OldArmor < 100)
+		{
+			Target->SetArmorAmount(Target->ArmorType, FMath::Min(OldArmor + 5, 100));
+		}
+	}
+
 	const int32 OldHealth = Target->Health;
 	// The legacy banner stops at the normal 100 HP stack. HealthMax is not that
 	// gameplay cap and may be raised by a pawn or mode, so using it alone lets
@@ -2882,7 +2899,7 @@ int32 AUWipeoutGame::HealCharacterAndCredit(AUTCharacter* Target, int32 HealAmou
 	const int32 Actual = NewHealth - OldHealth;
 	if (Actual <= 0)
 	{
-		return 0;   // already full (or overcharged): nothing applied, nothing credited
+		return 0;   // no HP restored; armor may have recovered above, but is not HP credit
 	}
 
 	Target->Health = NewHealth;

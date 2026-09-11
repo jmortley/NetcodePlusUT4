@@ -3201,6 +3201,44 @@ void ATeamArenaCharacter::GiveArmor(AUTArmor* InArmorType)
 	Super::SetArmorAmount(DisplayArmorType, NewTotal);
 }
 
+int32 ATeamArenaCharacter::RestoreRegularArmor(int32 Amount, int32 MaxArmor)
+{
+	if (!HasAuthority() || IsDead() || IsPendingKillPending() || Health <= 0 || Amount <= 0)
+	{
+		return 0;
+	}
+	const int32 CurrentTotal = GetArmorAmount();
+	const int32 Cap = FMath::Min(MaxArmor, ArmorPlusSoftLimit);
+	if (CurrentTotal <= 0 || CurrentTotal >= Cap)
+	{
+		return 0;
+	}
+	const int32 Restored = FMath::Min(Amount, Cap - CurrentTotal);
+	BeltArmorRemaining = FMath::Clamp(BeltArmorRemaining, 0, CurrentTotal);
+	if (LastRegularArmorType == nullptr)
+	{
+		// A pure belt can gain regular points here. Retain a rooted regular CDO
+		// so consuming its last belt point later restores the correct effects.
+		AUTArmor* RegularType = ArmorType;
+		if (RegularType == nullptr || IsArmorPlusBelt(RegularType))
+		{
+			RegularType = AUTGameMode::StaticClass()->GetDefaultObject<AUTGameMode>()
+				->StartingArmorClass.GetDefaultObject();
+			if (RegularType == nullptr || IsArmorPlusBelt(RegularType))
+			{
+				RegularType = AUTArmor::StaticClass()->GetDefaultObject<AUTArmor>();
+			}
+		}
+		LastRegularArmorType = RegularType;
+	}
+	AUTArmor* DisplayArmorType = BeltArmorRemaining > 0 && ArmorType != nullptr
+		? ArmorType : LastRegularArmorType;
+	// Bypass the full re-spec override: restoration neither grants new belt
+	// points nor consumes/re-arms the existing one-shot helmet protection.
+	Super::SetArmorAmount(DisplayArmorType, CurrentTotal + Restored);
+	return Restored;
+}
+
 void ATeamArenaCharacter::SetArmorAmount(AUTArmor* InArmorType, int32 Amount)
 {
 	// A direct set is a full re-spec of the armour state; any helmet charge
