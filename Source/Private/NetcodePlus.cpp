@@ -1138,22 +1138,15 @@ static void HandleConcedeCancel(const TArray<FString>& /*Args*/)  { ConcedeComma
 // Same path as F5 -> Ready in SUTNCPlusMenu: AUTPlayerController::Mutate uses
 // UT4's existing reliable ServerMutate RPC, and ANCReadyUpMutator consumes
 // `nc_ready` authoritatively. No new RPC or replicated state is introduced.
-static void HandleReady(const TArray<FString>& /*Args*/)
+static void HandleReady(const TArray<FString>& /*Args*/, UWorld* World)
 {
-	UWorld* World = nullptr;
-	if (GEngine)
+	// Use the invoking client's world: the first PIE world may be a dedicated
+	// server, or a different local player's world in single-process PIE.
+	if (World == nullptr || (World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
 	{
-		for (const FWorldContext& Context : GEngine->GetWorldContexts())
-		{
-			if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
-			{
-				World = Context.World();
-				break;
-			}
-		}
+		return;
 	}
-	AUTPlayerController* PC = World
-		? Cast<AUTPlayerController>(World->GetFirstPlayerController()) : nullptr;
+	AUTPlayerController* PC = Cast<AUTPlayerController>(World->GetFirstPlayerController());
 	// Dedicated console/RCON must never ready whichever remote PC happens to be first.
 	if (PC == nullptr || !PC->IsLocalController())
 	{
@@ -1248,7 +1241,7 @@ void FNetcodePlus::StartupModule()
 	GNCPReadyConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("ncpready"),
 		TEXT("Mark the local player ready (same action as F5 -> Ready)"),
-		FConsoleCommandWithArgsDelegate::CreateStatic(&HandleReady),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleReady),
 		ECVF_Default
 	);
 	if (IConsoleManager::Get().FindConsoleObject(TEXT("ready")) == nullptr)
@@ -1256,7 +1249,7 @@ void FNetcodePlus::StartupModule()
 		GReadyConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
 			TEXT("ready"),
 			TEXT("Mark the local player ready (same action as F5 -> Ready)"),
-			FConsoleCommandWithArgsDelegate::CreateStatic(&HandleReady),
+			FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleReady),
 			ECVF_Default
 		);
 	}
