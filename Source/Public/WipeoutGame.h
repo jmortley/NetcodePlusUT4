@@ -161,7 +161,7 @@ public:
 	/**
 	 * Escalating respawn delays indexed by prior team or player deaths,
 	 * depending on bTeamSharedDeathCounter. The first death uses index 0.
-	 * Defaults: 6, 12, 18, 24, then 36 seconds for the fifth and later deaths.
+	 * Defaults: 6, 12, 18, 22, then 32 seconds for the fifth and later deaths.
 	 * Deaths beyond the array length use the last element (cap).
 	 * Blueprint-configurable so designers can tune the curve.
 	 */

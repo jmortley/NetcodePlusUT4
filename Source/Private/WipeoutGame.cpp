@@ -156,8 +156,8 @@ AUWipeoutGame::AUWipeoutGame(const FObjectInitializer& ObjectInitializer)
 	RespawnDelays.Add(6.0f);   // 1st death
 	RespawnDelays.Add(12.0f);  // 2nd death
 	RespawnDelays.Add(18.0f);  // 3rd death
-	RespawnDelays.Add(24.0f);  // 4th death
-	RespawnDelays.Add(36.0f);  // 5th+ deaths (cap)
+	RespawnDelays.Add(22.0f);  // 4th death
+	RespawnDelays.Add(32.0f);  // 5th+ deaths (cap)
 
 	RespawnProtectionTime = 1.5f;
 	WipeoutGracePeriod = 0.15f;
