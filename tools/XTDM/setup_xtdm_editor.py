@@ -150,9 +150,15 @@ def main():
         "TeamSize": 2, "DefaultMaxPlayers": 8,
         "TimeLimit": 15, "GoalScore": 0, "MercyScore": 0,
         "RespawnWaitTime": 1, "XTDMSpawnProtectionTime": 0,
-        "bAllowIncompleteTeams": False, "bRecordReplays": False,
+        "bRequireFull": False, "bAllowIncompleteTeams": True,
+        "bForceNoBots": False, "bRecordReplays": False,
     })
     compile_blueprint(bridge, MODE)
+    # UTGameMode::PostInitProperties replaces a title equal to the parent's with
+    # the generated class name. Keep a distinct Blueprint title and save it.
+    defaults(bridge, MODE, {
+        "DisplayName": 'NSLOCTEXT("NCPlus", "XTDMBlueprintName", "NetcodePlus xTDM")',
+    })
     verify_mode_references(bridge)
     verify_highlights(bridge)
     print("Saved:", GS, "and", MODE)

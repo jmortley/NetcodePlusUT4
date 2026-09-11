@@ -19,8 +19,10 @@ The native mode is `NetcodePlus.NCPlusXTDMGameMode`; the content entry point is
 | Spawn protection | Off by default |
 | Loadout | Existing IGCharacterFootsteps and N+InstagibRifle, granted once |
 | Pickups | Removed; inventory drops and pickups disabled |
-| Ready-up | Full four-team roster and every player ready; F5 or `mutate nc_ready` |
-| Bots / ranked | Disabled for this mode |
+| Ready-up | Incomplete teams allowed; at least one human and every active human ready; F5 or `mutate nc_ready` |
+| Require Full | Off by default |
+| Bots | Allowed; stock `BotFill`/`Bots` options, capped at the four-team capacity |
+| Ranked / VSAI | Stock two-team matchmaking and Humans-vs-AI sessions unsupported |
 | Replays | Instant replay unsupported; automatic server recording disabled |
 
 The gameplay HUD has one clock, four fixed team score cards, and the local player's
@@ -49,11 +51,29 @@ uses `?PugTeams=authenticated-id:0,authenticated-id:1,...`, with indices 0–3.
 Draft entries reserve seats, reject duplicates/over-capacity drafts, and make
 unlisted arrivals spectators. Use the actual authenticated player IDs, not names.
 
-The ready countdown locks teams. A cancelled pre-match countdown unlocks them.
-Once play starts, reconnects retain their authenticated reserved team; unreserved
-arrivals spectate. Reconnect matching does not use the stock Windows IP/name fallback.
-For a manual smoke test with fewer players, add `?XTDMAllowIncompleteTeams=1` and
-ready the connected player(s). Leave that option off for pugs.
+The ready countdown locks existing players' team choices. A cancelled pre-match
+countdown unlocks them. In the default incomplete-team mode without a draft, new
+players may join available seats after start and can replace bots when necessary;
+departed players do not reserve empty seats indefinitely. Reconnects recheck capacity.
+With a full-roster policy or an explicit draft, authenticated reconnect reservations
+remain protected and unreserved late arrivals spectate. Reconnect matching does not
+use the stock Windows IP/name fallback. Bots never acquire authenticated reservations.
+
+For a strict human-only pug, use
+`?XTDMAllowIncompleteTeams=0?RequireFull=1?ForceNoBots=1`. Turning off Require Full
+alone does not bypass xTDM's own full-roster check when incomplete teams are disabled.
+
+For a bot game, use `?BotFill=8` to fill to eight total participants including humans,
+or `?Bots=7` for the stock seven-bots-plus-one-player alias. Targets are capped at
+four times TeamSize and used during warmup too. Bots occupy team seats but never
+need to ready up. At least one active human is still required to start. An explicit
+`PugTeams` draft disables bot additions so its reserved human slots stay protected.
+
+In single-process PIE, use `mutate nc_ready` in each client's console (or F5 Ready).
+The September 11 source fix makes the `ready` and `ncpready` aliases use the invoking
+client's world; an older editor DLL can silently select the dedicated-server world.
+This alias fix needs a native rebuild. Reaching READY and having a full roster are
+separate gates. Remove WipeoutMutator from the xTDM PIE mutator list.
 
 Spawn scoring runs on spawn requests. It considers proximity to all three enemy
 teams, recent spawn use and teammates, then checks line of sight for up to 16
@@ -79,12 +99,12 @@ The source implementation requires a matching updated NetcodePlus binary on the
 server and clients. A content pak alone cannot add these native classes to an older
 client. This is not a server-only change for existing 328 clients.
 
-The prepared GameState asset is tracked at
-`ProjectContent/Blueprints/XTDM/BP_NCP_XTDMGameState.uasset`. Its destination is the
-project's **Content/Blueprints/XTDM**, because the runtime path is `/Game/...`, not
-the plugin's `/NetcodePlus/...` mount. The live editor project already contains it.
-The final native-parent mode Blueprint must be created after the editor loads the
-new DLL.
+The completed GameState and mode assets are retained at
+`ProjectContent/Blueprints/XTDM/BP_NCP_XTDMGameState.uasset` and
+`ProjectContent/Blueprints/XTDM/NCP_XTDM.uasset`. Their destination is the project's
+**Content/Blueprints/XTDM**, because the runtime path is `/Game/...`, not the plugin's
+`/NetcodePlus/...` mount. Both are saved in the connected editor project. The editor
+must load the updated native DLL before creating or opening the mode Blueprint.
 
 With that editor open and MapForge connected, run from the NetcodePlus repository
 using Python 3.9+:
@@ -111,6 +131,16 @@ new duplicate weapon/material assets are required by this implementation. Shared
 instagib assets still need one deliberate pak owner; inspect the final cooked
 dependency list for stale Wipeout/UTNP references before distributing it.
 
+From the editor installation, cook the saved mode without rebuilding native code:
+
+```powershell
+& ./Engine/Build/BatchFiles/RunUAT.bat makeUTDLC -DLCName=NCP_XTDM -platform=Win64 -version=3525360 -ReleaseVersion=UTVersion0 -nocompile
+```
+
+The staged result is
+`UnrealTournament/Saved/StagedBuilds/NCP_XTDM/WindowsNoEditor/UnrealTournament/Content/Paks/NCP_XTDM-WindowsNoEditor.pak`.
+UAT does not automatically deploy it into the user's MyContent directory.
+
 Example travel options after cooking the mode Blueprint:
 
 ```text
@@ -124,21 +154,59 @@ packages have been included in the cook separately.
 
 ## Validation status and first playtest
 
-The prepared Blueprint GameState compiled and saved without messages in the live
-UE4.15 editor; read-back verified its native parent and connected highlight event.
-The setup script's read-only path verified that asset and correctly reported the
-new native mode was not loaded. Native compilation, cooking and online gameplay
-tests have **not** been run as part of this implementation.
+On September 11, 2026, the live UE4.15 editor had the new native classes loaded.
+The setup script created `NCP_XTDM`, applied the documented defaults, and compiled
+and saved both Blueprints without compiler messages. Read-back verified their
+native parents, exact GameState/character/rifle references, and the defaults.
+The GameState's only active graph path is `UpdateHighlights -> ClearHighlights(Self)`;
+the default BeginPlay/Tick nodes are disabled and disconnected, with no parent call.
+The setup script's read-only check passed again after saving.
 
-Two native automation groups are provided: `NetcodePlus.XTDM.SeatPolicy` and
-`NetcodePlus.XTDM.TeamWinner`. Run these after building, then test on a dedicated
-server with matching clients:
+The original `NetcodePlus.XTDM.SeatPolicy` and `NetcodePlus.XTDM.TeamWinner`
+automation groups passed in that editor on September 11. The bot/incomplete-team
+update adds `HumanSeatPolicy`, `ReadyRoster`, and `BotPolicy`. All five groups
+(52 assertions) passed through `python -B -m unittest tools.tests.test_xtdm_rules -v`,
+which compiles and runs the actual rule header and automation cases with a small
+standalone adapter. This does not compile the Unreal game mode or exercise actor
+lifecycles. Next, test on a dedicated server with matching clients:
 
-1. Fill/readied starts at 8 and 16 players; full teams reject extra players.
+1. Start with one ready human, with and without bots; fill/readied starts at 8 and
+   16 participants, with capacity enforced. Explicit full-roster games still wait
+   for every configured seat and every human ready.
 2. Cancel a pre-match countdown by disconnecting; reconnect before and during play.
 3. Confirm Green and Yellow colors, team announcements, scoreboard selection and wins.
 4. Tie first place at the time limit, finish overtime, and test a disconnected winner.
 5. Check one rifle per spawn, unlimited ammo, no pickups/drops, and crowded spawn behavior.
 6. Check F5 layout, spectator mouse/keys, return to another mode, and absence of replay/line-up paths.
+7. Join a bot-filled match, replace a bot without overfilling or changing scores, disconnect/reconnect,
+   and add/remove bots after start. Confirm bot creation failure cannot stall the server.
 
-Native build, cook and dedicated-client validation remain pending at this implementation handoff.
+The user subsequently reported working PIE gameplay. That four-client test had
+no incomplete-team URL option, and its two `ready` attempts selected the wrong
+PIE world with the older DLL. The console-alias source fix above is not yet built
+or runtime-tested. Dedicated-client validation remains pending.
+
+The September 11 WindowsNoEditor content cook completed through `makeUTDLC` with
+exit code 0, zero errors and 299 warnings. UnrealPak's integrity test passed all
+477 files; both xTDM Blueprints, the existing instagib character/rifle, registry
+and build-version marker are present. The pak is 123,191,158 bytes; SHA-256:
+`B761495CB9592D46038340EFD4624EC38D19A8834240C0C4070E44CAA80D5113`.
+Extraction of the final pak verified explicit cooked overrides:
+`bRequireFull=False`, `bAllowIncompleteTeams=True`, and `bForceNoBots=False`.
+The serialized cooked CDO title was verified as `NetcodePlus xTDM`. Its distinct
+title avoids UTGameMode replacing a title equal to the parent's with the generated
+Blueprint class name during initialization.
+
+This standard UT cook also captures other loaded packages, including shared
+NetcodePlus, Elim HUD and UTNP weapon content. Those extra packages are not proof
+of xTDM runtime dependencies. It is not a two-Blueprint-only pak; review shared
+package ownership when combining it with other custom paks. Successful cooking
+does not establish runtime compatibility for those overlapping packages.
+
+The current source and saved Blueprint defaults are `bRequireFull=False`,
+`bAllowIncompleteTeams=True`, and `bForceNoBots=False`. No native build was launched.
+The bot lifecycle changes require a rebuilt server/editor DLL: the earlier native
+implementation forcibly disabled bots during InitGame, regardless of Blueprint
+settings. Full bot gameplay and the updated console aliases need runtime validation
+after that rebuild. Incomplete human-only games can use the updated pak immediately
+with an already xTDM-capable binary, and ready up with `mutate nc_ready`.

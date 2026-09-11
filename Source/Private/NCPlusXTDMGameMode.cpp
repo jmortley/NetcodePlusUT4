@@ -14,6 +14,7 @@
 #include "UTGameSession.h"
 #include "UTPlayerState.h"
 #include "UTPlayerController.h"
+#include "UTBotPlayer.h"
 #include "UTTeamInfo.h"
 #include "UTTeamPlayerStart.h"
 #include "UTPickup.h"
@@ -25,7 +26,7 @@
 #include "Kismet/GameplayStatics.h"
 
 ANCPlusXTDMGameMode::ANCPlusXTDMGameMode(const FObjectInitializer& OI)
-	: Super(OI), TeamSize(2), bAllowIncompleteTeams(false), XTDMSpawnProtectionTime(0.f),
+	: Super(OI), TeamSize(2), bAllowIncompleteTeams(true), XTDMSpawnProtectionTime(0.f),
 	  XTDMState(nullptr), FinalWinningTeam(255), bRosterLocked(false),
 	  bConfigurationValid(false), bStartsCached(false)
 {
@@ -56,9 +57,10 @@ ANCPlusXTDMGameMode::ANCPlusXTDMGameMode(const FObjectInitializer& OI)
 	bUseProtoTeams = false;
 	bAllowPickupAnnouncements = false;
 	bDelayedStart = true;
-	bRequireFull = true;
+	bRequireFull = false;
 	bRequireReady = true;
-	bForceNoBots = true;
+	bForceNoBots = false;
+	bIsVSAI = false;
 	BotFillCount = 0;
 	bRankedSession = false;
 	bUseMatchmakingSession = false;
@@ -80,6 +82,11 @@ void ANCPlusXTDMGameMode::InitGame(const FString& MapName, const FString& Option
 		UGameplayStatics::GetIntOption(Options, TEXT("MatchmakingSession"), 0) != 0)
 	{
 		ErrorMessage = TEXT("xTDM does not support stock two-team ranked or matchmaking sessions.");
+		return;
+	}
+	if (UGameplayStatics::GetIntOption(Options, TEXT("VSAI"), bIsVSAI ? 1 : 0) != 0)
+	{
+		ErrorMessage = TEXT("xTDM does not support stock two-team VSAI; use BotFill or Bots for four-team bots.");
 		return;
 	}
 	TeamSize = FMath::Clamp(UGameplayStatics::GetIntOption(Options, TEXT("XTDMTeamSize"), TeamSize), 2, 4);
@@ -138,8 +145,18 @@ void ANCPlusXTDMGameMode::InitGame(const FString& MapName, const FString& Option
 	bUseTeamStarts = false;
 	bAnnounceTeam = false;
 	bHasRespawnChoices = false;
-	bForceNoBots = true;
-	BotFillCount = 0;
+	// Stock standalone auto-fill may replace an explicit zero. Keep the requested
+	// target, then cap both warmup and match populations to this mode's seats.
+	if (UGameplayStatics::HasOption(Options, TEXT("Bots")))
+	{
+		BotFillCount = FMath::Clamp(UGameplayStatics::GetIntOption(Options, TEXT("Bots"), 0), -1, DefaultMaxPlayers - 1) + 1;
+	}
+	else if (UGameplayStatics::HasOption(Options, TEXT("BotFill")))
+	{
+		BotFillCount = UGameplayStatics::GetIntOption(Options, TEXT("BotFill"), BotFillCount);
+	}
+	BotFillCount = NCPlusXTDMRules::ClampBotFillTarget(BotFillCount, TeamSize, bForceNoBots);
+	WarmupFillCount = BotFillCount;
 	bRankedSession = false;
 	bUseMatchmakingSession = false;
 	bSkipReportingMatchResults = true;
@@ -212,7 +229,7 @@ void ANCPlusXTDMGameMode::EnsureStatusActors()
 FString ANCPlusXTDMGameMode::PlayerIdentity(const AUTPlayerState* PS)
 {
 	// Names and per-session PlayerId values are not authenticated reconnect identities.
-	return PS && PS->UniqueId.IsValid() ? PS->UniqueId.ToString().ToLower() : FString();
+	return PS && !PS->bIsABot && PS->UniqueId.IsValid() ? PS->UniqueId.ToString().ToLower() : FString();
 }
 
 bool ANCPlusXTDMGameMode::ParseDraft(const FString& Options, FString& ErrorMessage)
@@ -285,6 +302,38 @@ bool ANCPlusXTDMGameMode::IsTeamLocked() const
 		(ReadyState.IsValid() && ReadyState->bCountdownLocked);
 }
 
+bool ANCPlusXTDMGameMode::IsOpenRoster() const
+{
+	return bAllowIncompleteTeams && DraftTeams.Num() == 0;
+}
+
+AUTBotPlayer* ANCPlusXTDMGameMode::FindBotOnTeam(uint8 Team) const
+{
+	if (!GetWorld()) return nullptr;
+	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
+	{
+		AUTBotPlayer* Bot = Cast<AUTBotPlayer>(It->Get());
+		const AUTPlayerState* PS = Bot ? Cast<AUTPlayerState>(Bot->PlayerState) : nullptr;
+		if (IsValid(Bot) && PS && !PS->bOnlySpectator && !PS->bIsInactive && PS->GetTeamNum() == Team)
+		{
+			return Bot;
+		}
+	}
+	return nullptr;
+}
+
+uint8 ANCPlusXTDMGameMode::PickHumanJoinTeam(AUTPlayerState* PS, uint8 RequestedTeam) const
+{
+	int32 Seats[4];
+	int32 RemovableBots[4];
+	for (uint8 Team = 0; Team < 4; ++Team)
+	{
+		Seats[Team] = OccupiedOrReservedSeats(Team, PS);
+		RemovableBots[Team] = FindBotOnTeam(Team) ? 1 : 0;
+	}
+	return NCPlusXTDMRules::PickHumanTeam(Seats, RemovableBots, TeamSize, RequestedTeam);
+}
+
 uint8 ANCPlusXTDMGameMode::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 {
 	int32 Seats[4];
@@ -295,6 +344,44 @@ uint8 ANCPlusXTDMGameMode::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedT
 	return NCPlusXTDMRules::PickSmallestTeam(Seats, TeamSize, RequestedTeam);
 }
 
+AUTBotPlayer* ANCPlusXTDMGameMode::AddBot(uint8 TeamNum)
+{
+	if (!HasAuthority() || !bConfigurationValid || !UTGameState || bForceNoBots ||
+		!NCPlusXTDMRules::CanAddBot(IsTeamLocked(), bAllowIncompleteTeams, DraftTeams.Num() > 0))
+	{
+		return nullptr;
+	}
+	const uint8 Team = PickBalancedTeam(nullptr, TeamNum);
+	if (Team >= 4) return nullptr;
+	AUTBotPlayer* Bot = Super::AddBot(Team);
+	const AUTPlayerState* PS = IsValid(Bot) ? Cast<AUTPlayerState>(Bot->PlayerState) : nullptr;
+	if (!PS || PS->bOnlySpectator || !Teams.Contains(PS->Team))
+	{
+		if (IsValid(Bot)) Bot->Destroy();
+		return nullptr;
+	}
+	return Bot;
+}
+
+void ANCPlusXTDMGameMode::CheckBotCount()
+{
+	if (!HasAuthority() || !bConfigurationValid || !UTGameState || HasMatchEnded()) return;
+	BotFillCount = NCPlusXTDMRules::ClampBotFillTarget(BotFillCount, TeamSize, bForceNoBots || DraftTeams.Num() > 0);
+	WarmupFillCount = BotFillCount;
+	if (NumPlayers + NumBots > BotFillCount)
+	{
+		// Only use stock's removal branch, which removes at most one bot and
+		// respects its combat/score-leader policy. Its add loop has no failure bound.
+		Super::CheckBotCount();
+		return;
+	}
+	for (int32 Attempt = 0; Attempt < 4 * TeamSize && NumPlayers + NumBots < BotFillCount; ++Attempt)
+	{
+		const int32 PreviousBots = NumBots;
+		if (!AddBot() || NumBots <= PreviousBots) break;
+	}
+}
+
 bool ANCPlusXTDMGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroadcast)
 {
 	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
@@ -303,6 +390,9 @@ bool ANCPlusXTDMGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bB
 		return false;
 	}
 	const FString Id = PlayerIdentity(PS);
+	const bool bBot = PS->bIsABot || Cast<AUTBotPlayer>(Player) != nullptr;
+	const bool bOpenRoster = IsOpenRoster();
+	const bool bCanReplaceBot = !bBot && DraftTeams.Num() == 0 && (bOpenRoster || !IsTeamLocked());
 	const uint8* DraftTeam = DraftTeams.Find(Id);
 	const FTeamReservation* Reservation = Reservations.Find(Id);
 	if (Reservation && Reservation->Player.IsValid() && Reservation->Player.Get() != PS &&
@@ -313,32 +403,52 @@ bool ANCPlusXTDMGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bB
 	if (IsTeamLocked() && PS->Team)
 	{
 		if (NewTeam != 255 && NewTeam != PS->GetTeamNum()) return false;
-		if (!Id.IsEmpty())
+		NewTeam = PS->GetTeamNum();
+		// An inactive reconnect PS can bring back an old team after its casual
+		// seat was filled. Existing membership is not proof that it still fits.
+		if (OccupiedOrReservedSeats(NewTeam, PS) >= TeamSize)
 		{
-			FTeamReservation& Entry = Reservations.FindOrAdd(Id);
-			Entry.Team = PS->GetTeamNum();
-			Entry.Player = PS;
+			if (!bOpenRoster || bBot) return false;
+			NewTeam = PickHumanJoinTeam(PS, NewTeam);
 		}
-		return true;
-	}
-	if (IsTeamLocked() && !Reservation && !DraftTeam) return false;
-	if (DraftTeam)
-	{
-		NewTeam = *DraftTeam;
-	}
-	else if (IsTeamLocked() && Reservation)
-	{
-		NewTeam = Reservation->Team;
-	}
-	else if (DraftTeams.Num() > 0)
-	{
-		return false; // An explicit draft reserves the roster; unlisted arrivals spectate.
 	}
 	else
 	{
-		NewTeam = PickBalancedTeam(PS, NewTeam);
+		if (bBot && (bForceNoBots || !NCPlusXTDMRules::CanAddBot(IsTeamLocked(), bAllowIncompleteTeams, DraftTeams.Num() > 0))) return false;
+		if (IsTeamLocked() && !Reservation && !DraftTeam && !bOpenRoster) return false;
+		if (DraftTeam)
+		{
+			NewTeam = *DraftTeam;
+		}
+		else if (IsTeamLocked() && Reservation && !bOpenRoster)
+		{
+			NewTeam = Reservation->Team;
+		}
+		else if (DraftTeams.Num() > 0)
+		{
+			return false; // An explicit draft reserves the roster; unlisted arrivals spectate.
+		}
+		else
+		{
+			NewTeam = bCanReplaceBot ? PickHumanJoinTeam(PS, NewTeam) : PickBalancedTeam(PS, NewTeam);
+		}
 	}
-	if (NewTeam >= 4 || !Teams[NewTeam] || OccupiedOrReservedSeats(NewTeam, PS) >= TeamSize)
+	if (NewTeam >= 4 || !Teams[NewTeam]) return false;
+	if (OccupiedOrReservedSeats(NewTeam, PS) == TeamSize && bCanReplaceBot)
+	{
+		// Login assigns a team before stock PostLogin trims bots. Make the seat
+		// available here so a human is not turned into a spectator first.
+		if (AUTBotPlayer* Bot = FindBotOnTeam(NewTeam))
+		{
+			// AUTBot::Destroyed suicides a possessed character. Administrative
+			// replacement must not deduct team score or decide sudden death.
+			APawn* BotPawn = Bot->GetPawn();
+			Bot->UnPossess(); // SetPawn(nullptr) also clears AUTBot::UTChar.
+			if (IsValid(BotPawn)) BotPawn->Destroy();
+			Bot->Destroy();
+		}
+	}
+	if (OccupiedOrReservedSeats(NewTeam, PS) >= TeamSize)
 	{
 		return false;
 	}
@@ -387,11 +497,26 @@ void ANCPlusXTDMGameMode::GenericPlayerInitialization(AController* Player)
 	// PostLogin may replace the newly assigned PS with its inactive reconnect PS.
 	// Seamless travel also creates a new PS without going through Login.
 	AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
+	if (AUTBotPlayer* Bot = Cast<AUTBotPlayer>(Player))
+	{
+		if (!PS || PS->bOnlySpectator)
+		{
+			Bot->Destroy();
+			return;
+		}
+	}
 	if (PS && !PS->bOnlySpectator)
 	{
 		if (!Teams.Contains(PS->Team)) PS->Team = nullptr;
 		if (!ChangeTeam(Player, PS->GetTeamNum(), false))
 		{
+			if (AUTBotPlayer* Bot = Cast<AUTBotPlayer>(Player))
+			{
+				// Named/asset bots bypass AddBot's preflight. Stock has already
+				// counted them, so Destroy must run its normal Logout bookkeeping.
+				Bot->Destroy();
+				return;
+			}
 			if (APlayerController* PC = Cast<APlayerController>(Player))
 			{
 				PlayerSwitchedToSpectatorOnly(PC);
@@ -442,7 +567,7 @@ void ANCPlusXTDMGameMode::Logout(AController* Exiting)
 	if (PS)
 	{
 		const FString Id = PlayerIdentity(PS);
-		if (!IsTeamLocked()) Reservations.Remove(Id);
+		if (!IsTeamLocked() || IsOpenRoster()) Reservations.Remove(Id);
 		else if (FTeamReservation* Entry = Reservations.Find(Id)) Entry->Player.Reset();
 		if (XTDMState) XTDMState->RemovePlayer(PS);
 	}
@@ -487,19 +612,23 @@ bool ANCPlusXTDMGameMode::ReadyToStartMatch_Implementation()
 	}
 	State->RefreshEligibility();
 	int32 Humans = 0;
+	int32 Occupants = 0;
 	bool bEveryHumanReady = true;
 	for (APlayerState* BasePS : UTGameState->PlayerArray)
 	{
 		AUTPlayerState* PS = Cast<AUTPlayerState>(BasePS);
-		if (PS && !PS->bOnlySpectator && !PS->bIsInactive && !PS->bIsABot)
+		if (PS && !PS->bOnlySpectator && !PS->bIsInactive)
 		{
-			++Humans;
-			bEveryHumanReady &= State->IsPlayerReady(PS);
+			if (PS->GetTeamNum() < 4) ++Occupants;
+			if (!PS->bIsABot)
+			{
+				++Humans;
+				bEveryHumanReady &= State->IsPlayerReady(PS);
+			}
 		}
 	}
-	const bool bEnoughPlayers = bAllowIncompleteTeams ? Humans > 0 : IsRosterComplete();
-	UTGameState->PlayersNeeded = bAllowIncompleteTeams ? 0 : FMath::Max(0, 4 * TeamSize - Humans);
-	if (!bEnoughPlayers || Humans == 0 || !bEveryHumanReady)
+	UTGameState->PlayersNeeded = bAllowIncompleteTeams ? 0 : FMath::Max(0, 4 * TeamSize - Occupants);
+	if (!NCPlusXTDMRules::CanStartRoster(bAllowIncompleteTeams, IsRosterComplete(), Humans, bEveryHumanReady))
 	{
 		if (State->bCountdownLocked) State->CancelCountdown();
 		bRosterLocked = false;
@@ -562,8 +691,8 @@ void ANCPlusXTDMGameMode::HandleMatchHasEnded()
 void ANCPlusXTDMGameMode::CheckCountDown()
 {
 	if (GetMatchState() != MatchState::CountdownToBegin) return;
-	bool bCanStart = UTGameState && ReadyState.IsValid() && (bAllowIncompleteTeams || IsRosterComplete());
-	bool bHasHuman = false;
+	bool bEveryHumanReady = true;
+	int32 Humans = 0;
 	if (UTGameState && ReadyState.IsValid())
 	{
 		for (APlayerState* BasePS : UTGameState->PlayerArray)
@@ -571,12 +700,13 @@ void ANCPlusXTDMGameMode::CheckCountDown()
 			AUTPlayerState* PS = Cast<AUTPlayerState>(BasePS);
 			if (PS && !PS->bOnlySpectator && !PS->bIsInactive && !PS->bIsABot)
 			{
-				bHasHuman = true;
-				bCanStart &= ReadyState->IsPlayerReady(PS);
+				++Humans;
+				bEveryHumanReady &= ReadyState->IsPlayerReady(PS);
 			}
 		}
 	}
-	if (!bCanStart || !bHasHuman)
+	if (!UTGameState || !ReadyState.IsValid() ||
+		!NCPlusXTDMRules::CanStartRoster(bAllowIncompleteTeams, IsRosterComplete(), Humans, bEveryHumanReady))
 	{
 		if (ReadyState.IsValid()) ReadyState->CancelCountdown();
 		bRosterLocked = false;

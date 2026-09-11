@@ -19,7 +19,7 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Config, Category = "XTDM", meta = (ClampMin = "2", ClampMax = "4"))
 	int32 TeamSize;
-	/** Explicit server testing override; normal matches require every configured seat and every human ready. */
+	/** Allow fewer than the configured seats; humans still ready up. Draft identities remain protected. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Config, Category = "XTDM")
 	bool bAllowIncompleteTeams;
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Config, Category = "XTDM")
@@ -43,6 +43,8 @@ public:
 	virtual bool ChangeTeam(AController* Player, uint8 NewTeam = 255, bool bBroadcast = true) override;
 	virtual bool ShouldBalanceTeams(bool bInitialTeam) const override { return false; }
 	virtual uint8 PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam) override;
+	virtual AUTBotPlayer* AddBot(uint8 TeamNum = 255) override;
+	virtual void CheckBotCount() override;
 	virtual bool ReadyToStartMatch_Implementation() override;
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandlePlayerIntro() override;
@@ -90,6 +92,9 @@ private:
 	static FString PlayerIdentity(const AUTPlayerState* PS);
 	bool ParseDraft(const FString& Options, FString& ErrorMessage);
 	int32 OccupiedOrReservedSeats(uint8 Team, const AUTPlayerState* Requester) const;
+	bool IsOpenRoster() const;
+	AUTBotPlayer* FindBotOnTeam(uint8 Team) const;
+	uint8 PickHumanJoinTeam(AUTPlayerState* PS, uint8 RequestedTeam) const;
 	bool IsRosterComplete() const;
 	bool IsTeamLocked() const;
 	void EnsureStatusActors();
