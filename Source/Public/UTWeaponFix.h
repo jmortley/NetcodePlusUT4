@@ -587,6 +587,9 @@ public:
 
 protected:
 
+    /** Keep an identical Instagib mode held without interrupting the other held mode. */
+    bool TryPreserveInstagibHeldFire(uint8 FireModeNum);
+
     /** Client-only crosshair presentation state; see FNCFriendlyTargetProbeCache. */
     mutable FNCFriendlyTargetProbeCache FriendlyTargetProbeCache;
 

@@ -39,6 +39,9 @@ class NETCODEPLUS_API AUTPlusShockRifle : public AUTWeaponFix
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Cosmetics")
 	void ApplyConfiguredShockBeamColor(UParticleSystemComponent* Effect);
 
+	/** Identical two-beam Instagib modes only; excludes normal Shock/core and custom modes. */
+	bool HasSharedInstagibFireModes() const;
+
 	/** shock ball bot is waiting to combo */
 	UPROPERTY()
 	class AUTProj_ShockBall* ComboTarget;

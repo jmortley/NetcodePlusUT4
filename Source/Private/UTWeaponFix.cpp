@@ -331,6 +331,12 @@ static FORCEINLINE bool CrossModeRetry()
     return CVarCrossModeRetry.GetValueOnGameThread() > 0;
 }
 
+static TAutoConsoleVariable<int32> CVarInstagibSharedHold(
+    TEXT("ncp.InstagibSharedHold"), 1,
+    TEXT("Preserve held fire when the other identical Instagib beam mode is pressed. "
+         "1=enabled, 0=legacy cross-mode behavior. Normal Shock/core modes are unaffected."),
+    ECVF_Default);
+
 static TAutoConsoleVariable<float> CVarVisualHitscanClaimTolerance(
     TEXT("ncp.VisualHitscanClaimTolerance"), 4.0f,
     TEXT("Client-only extra radius (units) when confirming an actor-capsule hit against the rendered-position capsule. Default: 4."),
@@ -1965,6 +1971,45 @@ void AUTWeaponFix::OnBufferedClickRetryTimer(uint8 FireModeNum, FRotator Release
 
 
 
+bool AUTWeaponFix::TryPreserveInstagibHeldFire(uint8 FireModeNum)
+{
+    if (CVarInstagibSharedHold.GetValueOnGameThread() <= 0 || FireModeNum >= 2
+        || UTOwner == nullptr || !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
+        || UTOwner->IsDead() || UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon() != nullptr
+        || bBufferedClickPending[FireModeNum])
+    {
+        return false;
+    }
+    UWorld* World = GetWorld();
+    if (World == nullptr || (World->DemoNetDriver && World->DemoNetDriver->IsPlaying()))
+    {
+        return false;
+    }
+    const uint8 OtherMode = FireModeNum ^ 1;
+    if (GetCurrentFireMode() != OtherMode || !FiringState.IsValidIndex(OtherMode)
+        || CurrentState != FiringState[OtherMode] || !UTOwner->IsPendingFire(OtherMode))
+    {
+        return false;
+    }
+    AUTPlusShockRifle* Shock = Cast<AUTPlusShockRifle>(this);
+    if (Shock == nullptr || !Shock->HasSharedInstagibFireModes())
+    {
+        return false;
+    }
+
+    // One beam is already held. Retain this button independently, without
+    // StopFireInternal(other) or a competing retry timer. The current mode's
+    // refire timer keeps the existing cadence. If it is released first, the
+    // normal deferred Active transition sees this still-held pending mode.
+    GetWorldTimerManager().ClearTimer(RetryFireHandle[FireModeNum]);
+    bCrossModeRetryArmed[FireModeNum] = false;
+    UTOwner->SetPendingFire(FireModeNum, true);
+    if (FireDbg()) UE_LOG(LogUTWeaponFix, Warning,
+        TEXT("[FireDbg] InstagibSharedHold mode=%d retained currentMode=%d; existing refire owns cadence"),
+        FireModeNum, OtherMode);
+    return true;
+}
+
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
 	if (FireModeNum == 0 && ShockInputTraceInputComponent != nullptr
@@ -2303,6 +2348,14 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 	{
 		bFireHeldByPlayer[FireModeNum] = true;
 	}
+
+    // Handle equivalent Instagib holds before either cooldown path can arm a
+    // competing mode retry. Input/ownership and gameplay preflight above still
+    // apply. Normal Shock retains the core -> primary combo path below.
+    if (TryPreserveInstagibHeldFire(FireModeNum))
+    {
+        return;
+    }
 
     // ---------------------------------------------------------
     // 2. COOLDOWN VALIDATION (MOVED TO TOP)
@@ -3765,7 +3818,20 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 
         float TimeRemaining = ReadyTime - CurrentTime;
 
-        if (TimeRemaining > 0.01f)
+        // An identical Instagib mode can now remain independently held. The existing
+        // <=10ms immediate Active transition would fire that mode slightly early,
+        // even when both release inputs are queued in this frame. Wait out the
+        // positive remainder for this handoff; preserve ordinary Shock timing.
+        const AUTPlusShockRifle* Shock = Cast<AUTPlusShockRifle>(this);
+        const bool bHeldInstagibHandoff = CVarInstagibSharedHold.GetValueOnGameThread() > 0
+            && FireModeNum < 2 && UTOwner && UTOwner->IsLocallyControlled()
+            && UTOwner->IsPlayerControlled() && UTOwner->GetWeapon() == this
+            && UTOwner->GetPendingWeapon() == nullptr
+            && !(GetWorld()->DemoNetDriver && GetWorld()->DemoNetDriver->IsPlaying())
+            && UTOwner->IsPendingFire(FireModeNum ^ 1)
+            && Shock && Shock->HasSharedInstagibFireModes();
+
+        if (TimeRemaining > 0.01f || (bHeldInstagibHandoff && TimeRemaining > 0.f))
         {
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d: Deferring GotoActiveState by %.3fs"), FireModeNum, TimeRemaining);
             FTimerDelegate Del;

@@ -3,6 +3,7 @@
 #include "NCWeaponColorSettings.h"
 #include "UTWeaponAttachment.h"
 #include "UTProj_ShockBall.h"
+#include "UTWeaponStateFiring_Transactional.h"
 #include "UTCanvasRenderTarget2D.h"
 #include "StatNames.h"
 #include "Core.h"
@@ -346,6 +347,38 @@ bool AUTPlusShockRifle::IsInstagibBeamWeapon() const
 			(bInstagibName || bInstagibStats || bInstagibDamageType || bInstagibAttachment) ? 1 : 0;
 	}
 	return CachedIsInstagibBeamWeapon != 0;
+}
+
+bool AUTPlusShockRifle::HasSharedInstagibFireModes() const
+{
+	// Cosmetic identity alone is insufficient for a gameplay exception: an
+	// Instagib-themed Shock variant may still have a core, zoom, or custom mode.
+	if (!IsInstagibBeamWeapon() || GetNumFireModes() != 2
+		|| !FiringState.IsValidIndex(1) || !FireInterval.IsValidIndex(1)
+		|| !InstantHitInfo.IsValidIndex(1) || !AmmoCost.IsValidIndex(1)
+		|| FiringState[0] == FiringState[1]
+		|| FireInterval[0] <= 0.f || FireInterval[0] != FireInterval[1]
+		|| AmmoCost[0] != AmmoCost[1])
+	{
+		return false;
+	}
+	for (int32 Mode = 0; Mode < 2; ++Mode)
+	{
+		if ((ProjClass.IsValidIndex(Mode) && ProjClass[Mode] != nullptr)
+			|| FiringState[Mode] == nullptr
+			|| FiringState[Mode]->GetClass() != UUTWeaponStateFiring_Transactional::StaticClass())
+		{
+			return false;
+		}
+	}
+	const FInstantHitDamageInfo& Primary = InstantHitInfo[0];
+	const FInstantHitDamageInfo& Alternate = InstantHitInfo[1];
+	return Primary.Damage > 0 && Primary.Damage == Alternate.Damage
+		&& Primary.DamageType != nullptr && Primary.DamageType == Alternate.DamageType
+		&& Primary.Momentum == Alternate.Momentum
+		&& Primary.TraceRange == Alternate.TraceRange
+		&& Primary.TraceHalfSize == Alternate.TraceHalfSize
+		&& Primary.ConeDotAngle <= 0.f && Alternate.ConeDotAngle <= 0.f;
 }
 
 bool AUTPlusShockRifle::ShouldShowOwnInstagibBeam() const
