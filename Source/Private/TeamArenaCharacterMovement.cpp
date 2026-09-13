@@ -51,10 +51,12 @@ UTeamArenaCharacterMovement::UTeamArenaCharacterMovement(const FObjectInitialize
     : Super(ObjectInitializer)
 {
     // --- HIGH-FPS FIX #1: Increase position error tolerance ---
-    // 14 units. At ~700fps with moderate ping, knockback replay divergence
-    // can land just beyond the previous 12u threshold. This is the conservative
-    // next rung: the server remains authoritative and corrects errors above 14u.
-    MaxPositionErrorSquared = 196.f;
+    // 18 units (was 14): widen the server correction deadband for the reported
+    // high-FPS prediction jitter. Sub-threshold errors only receive a good-move
+    // ACK; the server does not adopt the client's position. Larger position
+    // errors and incompatible movement modes still use stock corrections.
+    // This is tolerance tuning, not a fix for lost moves or replay divergence.
+    MaxPositionErrorSquared = 324.f;
 
     // --- Throttle settings ---
 	TeamCollisionUpdateInterval = 0.01111f;  // instead of fps dependent
@@ -268,14 +270,17 @@ void UTeamArenaCharacterMovement::UTCallServerMove()
     const FSavedMovePtr& NewMove = ClientData->SavedMoves.Last();
     if (CanDelaySendingMove(NewMove))
     {
-        // --- HIGH-FPS FIX #5: Adaptive move send rate ---
-        // Stock UT4: 60Hz important, 30Hz normal. At 400+ FPS the 30Hz floor
-        // leaves 66u gaps at sprint speed — too much room for float drift.
+        // --- HIGH-FPS FIX #5: Adaptive move batch cadence ---
+        // Stock UT4 batches at roughly 60Hz important, 30Hz normal. Shorter
+        // intervals reduce the time saved movement waits before submission.
         //
-        // New rates (matches UT2004 UTComp's 0.011 NetMoveDelta):
+        // Batch cadence:
         //   90Hz (11ms) — airborne, high-speed (>1500 u/s), or important moves
         //   40Hz (25ms) — normal ground movement
         //
+        // These are flush rates, not a cap on movement RPCs: the loop below
+        // sends each unsent saved frame. At 700 FPS that can approach 700 move
+        // RPCs/sec before resends. Reducing this cadence does not combine moves.
         // Dodges and shots still bypass this entirely via CanDelaySendingMove.
         bool bNeedsHighRate = NewMove->IsImportantMove(ClientData->LastAckedMove)
                            || IsFalling()
