@@ -57,6 +57,7 @@ private:
 
 	// ── iCTF settings ([NetcodePlus]/[InstagibCTF] in Mod.ini) ──
 	bool bAllowGib;
+	bool bShowDeathBlood;
 	bool bShowRagdoll;
 	float RagdollTime;
 	bool bShowOwnBeam;
@@ -124,6 +125,7 @@ private:
 
 	// iCTF handlers
 	void OnAllowGibChanged(ECheckBoxState NewState);
+	void OnShowDeathBloodChanged(ECheckBoxState NewState);
 	void OnShowRagdollChanged(ECheckBoxState NewState);
 	void OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType);
 	void OnShowOwnBeamChanged(ECheckBoxState NewState);

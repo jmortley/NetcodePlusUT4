@@ -38,6 +38,7 @@
 #include "UTMutator.h"              // iCTF WARMUP gate: find the replicated MutInstagibNCP mutator
 #include "ClutchRoundState.h"       // Clutch defender footstep role/phase lookup
 #include "Engine/DemoNetDriver.h"   // deferred-outline warning: tag killcam/instant-replay worlds
+#include "Engine/NetConnection.h"   // wait for recorded corpse tear-off before local cleanup
 #include "Engine/LocalPlayer.h"
 #include "NCRemoteAnimationPolicy.h"
 #include "NCRemoteAnimationURO.h"
@@ -55,6 +56,17 @@ static TAutoConsoleVariable<int32> CVarRemoteAnimationURO(
 	TEXT("Experimental remote third-person animation optimization on online clients. ")
 	TEXT("1 = distant peripheral bodies may update every other frame above 240 FPS; 0 = restore authored settings. ")
 	TEXT("No Blueprint opt-in required. Requires a.URO.Enable 1. Default 0."), ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarHiddenCorpseCleanup(
+	TEXT("ncp.HiddenCorpseCleanup"), 1,
+	TEXT("Clean up hidden, torn-off corpses on online clients after the existing ragdoll hide delay. ")
+	TEXT("Waits for local cameras, carried objects, the queued death sound and replay recording. ")
+	TEXT("0 = retain stock corpse lifetime. Does not affect servers or replay playback. Default 1."), ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarDeathBloodDecals(
+	TEXT("ncp.DeathBloodDecals"), -1,
+	TEXT("Diagnostic override: -1 = follow F5 Show Death Blood; 0 = suppress new death/corpse blood decals; 1 = force them on. ")
+	TEXT("Does not affect living-character hit effects or existing decals. Default -1."), ECVF_Default);
 
 // Shipping clients report every ensure with a synchronous game-thread minidump, which hitches the
 // match and hard-crashes under AV hooks (328 Blitz/iCTF cap crash). Recoverable outline states must
@@ -1096,6 +1108,21 @@ void ATeamArenaCharacter::PlayDying()
 	SpawnSkeletonDissolve();
 }
 
+void ATeamArenaCharacter::SpawnBloodDecal(const FVector& TraceStart, const FVector& TraceDir)
+{
+	// Stock death and ragdoll-collision decals bypass the damage type's bCausesBlood flag.
+	if (IsDead())
+	{
+		const int32 Override = CVarDeathBloodDecals.GetValueOnGameThread();
+		const bool bShowBlood = Override < 0 ? NCPlusPerformanceSettings::GetShowDeathBlood() : Override != 0;
+		if (!bShowBlood)
+		{
+			return;
+		}
+	}
+	Super::SpawnBloodDecal(TraceStart, TraceDir);
+}
+
 void ATeamArenaCharacter::Destroyed()
 {
 	StopAmpAmbientSound();
@@ -1154,11 +1181,11 @@ void ATeamArenaCharacter::SetOutlineLocal(bool bNowOutlined, bool bWhenUnocclude
 //  (2) iCTF safety net (regardless of DarkenBodies): the body is supposed to be removed by the BP CleanUpRagdoll
 //      at [InstagibCTF] RagdollTime, but if that doesn't happen (e.g. DarkenBodies off and the BP cleanup never
 //      fires) the corpse would linger. So in iCTF we ALSO hide it at the ragdoll lifespan, so a low Ragdoll Time
-//      reliably makes the body vanish. Hide-only (SetVisibility) — never destroys the actor, so it can't fight
-//      the BP destroy or the engine corpse cleanup. Client-side, per pawn; no-op on a dedicated server.
+//      reliably makes the body vanish. Online clients then retire hidden corpses when cameras, carried
+//      objects and the queued death sound no longer need them. Dedicated servers retain stock cleanup.
 void ATeamArenaCharacter::SpawnSkeletonDissolve()
 {
-	if (GetNetMode() == NM_DedicatedServer) { return; }
+	if (GetNetMode() == NM_DedicatedServer || IsPendingKillPending()) { return; }
 
 	const FNCPlusForceModelsConfig& C = NCPlusForceModels::Get();
 	const bool bDarken = (C.bEnabled && C.bDarkenBodies);
@@ -1173,9 +1200,8 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	// "ragdoll setting overridden by force models"). This C++ read is the MODE-AGNOSTIC stand-in:
 	// when the key exists (any F5 save writes it) it is AUTHORITATIVE over the Darken fade in both
 	// directions — unticked hides corpses in every mode with FM off, ticked shows them even with
-	// Darken on. Hide-only, so it composes with the BP in iCTF (ShowRagdoll-on defers to the
-	// RagdollTime safety net below = the BP's own cleanup time). Key ABSENT (never saved F5 — e.g. a
-	// dc-TeamSkins migrant) -> Darken keeps its old dc-parity hide role.
+	// Darken on. ShowRagdoll-on defers to the RagdollTime safety net below in iCTF. Key ABSENT
+	// (never saved F5 — e.g. a dc-TeamSkins migrant) -> Darken keeps its old dc-parity hide role.
 	bool bShowRagdoll = true;
 	bool bShowRagdollExplicit = false;
 	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowRagdoll"), Val, ConfigPath))
@@ -1224,7 +1250,7 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 void ATeamArenaCharacter::HideDeadBody()
 {
 	USkeletalMeshComponent* BodyMesh = GetMesh();
-	if (!BodyMesh) { return; }
+	if (!BodyMesh || !IsDead() || IsPendingKillPending()) { return; }
 
 	BodyMesh->SetVisibility(false, /*bPropagateToChildren=*/true);
 
@@ -1249,6 +1275,85 @@ void ATeamArenaCharacter::HideDeadBody()
 			Child->SetVisibility(true, /*bPropagateToChildren=*/false);
 		}
 	}
+
+	// Retire on a later timer tick, after all death/Blueprint callbacks have unwound.
+	if (GetNetMode() == NM_Client && CVarHiddenCorpseCleanup.GetValueOnGameThread() != 0)
+	{
+		GetWorldTimerManager().SetTimer(HiddenCorpseCleanupHandle, this,
+			&ATeamArenaCharacter::CleanupHiddenCorpse, 0.01f, false);
+	}
+}
+
+void ATeamArenaCharacter::CleanupHiddenCorpse()
+{
+	UWorld* World = GetWorld();
+	USkeletalMeshComponent* BodyMesh = GetMesh();
+	// Torn-off client pawns become ROLE_Authority. Use net mode, not role, so local settings
+	// cannot destroy a listen server's gameplay actors. Keep replay playback on stock cleanup.
+	if (World == nullptr || GetNetMode() != NM_Client || !IsDead() || IsPendingKillPending()
+		|| BodyMesh == nullptr || BodyMesh->IsVisible() || CVarHiddenCorpseCleanup.GetValueOnGameThread() == 0
+		|| (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsPlaying()))
+	{
+		return;
+	}
+
+	// Destroyed() clears actor timers, including stock's death sound queued at 0.25 seconds.
+	bool bMustWait = GetWorldTimerManager().IsTimerActive(DeathSoundHandle);
+	if (World->DemoNetDriver != nullptr && World->DemoNetDriver->IsRecording())
+	{
+		// A client recorder must serialize the final tear-off before we destroy this pawn.
+		// DemoReplicateActor closes that channel after replication; closing removes it from
+		// ActorChannels. A torn-off actor cannot open a new recording channel afterwards.
+		for (UNetConnection* Connection : World->DemoNetDriver->ClientConnections)
+		{
+			if (Connection != nullptr && Connection->ActorChannels.FindRef(this) != nullptr)
+			{
+				bMustWait = true;
+				break;
+			}
+		}
+	}
+	for (FLocalPlayerIterator It(GEngine, World); It; ++It)
+	{
+		const APlayerController* PC = It->PlayerController;
+		const APlayerCameraManager* Camera = PC != nullptr ? PC->PlayerCameraManager : nullptr;
+		// GetViewTarget() reports the incoming target during a blend; protect the outgoing
+		// target too. Preserve a still-possessed local pawn while death replication catches up.
+		if (PC != nullptr && (PC->GetPawn() == this || PC->GetViewTarget() == this
+			|| (Camera != nullptr && (Camera->ViewTarget.Target == this || Camera->PendingViewTarget.Target == this))))
+		{
+			bMustWait = true;
+			break;
+		}
+	}
+
+	if (!bMustWait)
+	{
+		// Let the flag's own replicated detach run. Destroying the parent first can interfere
+		// with attachment and trail cleanup even though the flag actor itself is not owned by us.
+		TArray<USceneComponent*> Descendants;
+		BodyMesh->GetChildrenComponents(/*bIncludeAllDescendants=*/true, Descendants);
+		for (USceneComponent* Child : Descendants)
+		{
+			if (Child != nullptr && Child->GetOwner() != nullptr && Child->GetOwner()->IsA(AUTCarriedObject::StaticClass()))
+			{
+				bMustWait = true;
+				break;
+			}
+		}
+	}
+
+	if (bMustWait)
+	{
+		// An actor-bound timer also works after actor ticking stops; stock Destroyed() clears it.
+		GetWorldTimerManager().SetTimer(HiddenCorpseCleanupHandle, this,
+			&ATeamArenaCharacter::CleanupHiddenCorpse, 0.1f, false);
+		return;
+	}
+
+	// Use normal teardown to retire physics, components, weapon attachments and BP timers.
+	// Merely hiding or sleeping the rigid bodies leaves skeletal/component work registered.
+	Destroy();
 }
 
 // When the local player's team changes, every other pawn's friend/enemy bucket can flip without

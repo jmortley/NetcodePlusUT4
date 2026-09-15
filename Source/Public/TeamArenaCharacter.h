@@ -329,10 +329,10 @@ public:
 	virtual void SetEyewearClass(TSubclassOf<AUTEyewear> EyewearClass) override;
 	virtual void LeaderHatStatusChanged_Implementation() override;
 
-	// Force Models "DarkenBodies": on death, hide the corpse after a short delay (so the death/ragdoll
-	// effects are still visible briefly). Client-side (PlayDying runs per-client), gated by bEnabled +
-	// bDarkenBodies.
+	/** Apply the local ragdoll visibility settings and schedule safe hidden-corpse cleanup. */
 	virtual void PlayDying() override;
+	/** Optional local suppression of death and corpse-collision blood decals. */
+	virtual void SpawnBloodDecal(const FVector& TraceStart, const FVector& TraceDir) override;
 	/** Clear client-local outline duplicates before stock teardown destroys the weapon attachment.
 	 *  Prematch lineup pawns are destroyed alive, so they never pass through PlayDying(). */
 	virtual void Destroyed() override;
@@ -424,13 +424,15 @@ protected:
 	 *  when transitioning back to false. Called from ApplyForcedModel. */
 	void UpdateCosmeticStrip(bool bShouldStrip);
 
-	/** DarkenBodies: on death, schedule the corpse to hide after a short delay (lets death/ragdoll effects
-	 *  play first). Gated by bEnabled + bDarkenBodies. Called from PlayDying (client-side). */
+	/** Schedule corpse hiding from Show Ragdoll, Darken Bodies and the iCTF Ragdoll Time settings. */
 	void SpawnSkeletonDissolve();
 	/** Permanently retire this pawn's client-local body and weapon CustomDepth render state. */
 	void ClearLocalOutlineRenderState();
 	/** Timer callback for SpawnSkeletonDissolve — hides the corpse mesh once the delay elapses. */
 	void HideDeadBody();
+	/** Retire hidden online-client corpses once local cameras, carried objects and death audio allow it. */
+	void CleanupHiddenCorpse();
+	FTimerHandle HiddenCorpseCleanupHandle;
 
 	/** Client-local AMP hum, driven by the stock replicated weapon-overlay bits. */
 	void UpdateAmpAmbientSound();

@@ -18,16 +18,14 @@
 
 // Mod.ini section (iCTF tab)
 static const TCHAR* NCPSection = TEXT("NetcodePlus");
-// Gib/ragdoll death settings live under [InstagibCTF] — that's the section the iCTF damage type
-// (NCPlusUTDmg_Instagib: ShouldGib reads bAllowGib, PlayDeathEffects reads RagdollTime) actually reads.
+// Gore settings share the legacy [InstagibCTF] section with the damage Blueprint's RagdollTime.
 static const TCHAR* IGCTFSection = TEXT("InstagibCTF");
 
 // Ragdoll-time semantics (the iCTF damage-type BP NCPlusUTDmg_Instagib::PlayDeathEffects passes RagdollTime
 // straight into a "Set Timer by Function Name" / CleanUpRagdoll node). Engine rule, FTimerManager::SetTimer:
-// rate <= 0 NEVER schedules the timer, so a literal 0 would KEEP the ragdoll forever — counter-intuitive
-// (players read "0 time" as "no ragdoll"). So the slider's 0 is remapped to 0.01 on SAVE: the BP then fires
-// the cleanup almost instantly = ragdoll removed. The user sees 0..10 (0 = remove instantly, N = N-sec
-// despawn, max 10); the stored config value is never a keep-forever 0.
+// rate <= 0 never schedules that timer, so retain the legacy 0.01 sentinel when saving slider 0.
+// C++ also honors this visibility delay and safely retires hidden online-client corpses after
+// camera, carried-object and audio dependencies clear, even if the BP cleanup is disconnected.
 
 // Shared fonts
 static FSlateFontInfo BoldFont(int32 Size)   { return FSlateFontInfo(FPaths::EngineContentDir() / TEXT("Slate/Fonts/Roboto-Bold.ttf"), Size); }
@@ -690,6 +688,7 @@ FReply SUTNCPlusMenu::OnGitHubClicked()
 
 TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 {
+	const FText DeathBloodTooltip = FText::FromString(TEXT("Show new blood stains when players die or their bodies hit surfaces. Existing stains are unaffected."));
 	return SNew(SVerticalBox)
 
 		// ── Gore Settings ──
@@ -728,6 +727,35 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 				.Text(FText::FromString(TEXT("Allow Gib")))
 				.Font(RegularFont(14))
 				.ColorAndOpacity(FLinearColor::White)
+			]
+		]
+
+		// Show Death Blood
+		+ SVerticalBox::Slot()
+		.AutoHeight()
+		.Padding(40, 4, 40, 4)
+		.HAlign(HAlign_Center)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked(bShowDeathBlood ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
+				.OnCheckStateChanged(this, &SUTNCPlusMenu::OnShowDeathBloodChanged)
+				.ToolTipText(DeathBloodTooltip)
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.VAlign(VAlign_Center)
+			.Padding(8, 0, 0, 0)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("Show Death Blood")))
+				.Font(RegularFont(14))
+				.ColorAndOpacity(FLinearColor::White)
+				.ToolTipText(DeathBloodTooltip)
 			]
 		]
 
@@ -785,7 +813,7 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildICTFTab()
 				.Value(RagdollTime)
 				.OnValueCommitted(this, &SUTNCPlusMenu::OnRagdollTimeChanged)
 				.MinDesiredWidth(80.f)
-				.ToolTipText(FText::FromString(TEXT("Seconds a ragdoll stays before despawning. 0 = remove instantly (no ragdoll); e.g. 3 = despawn after 3s. Max 10.")))
+				.ToolTipText(FText::FromString(TEXT("Seconds before the body hides in iCTF. 0 = hide as soon as possible. Hidden bodies are cleaned up when death cameras, sounds and carried flags no longer need them. Max 10.")))
 			]
 		]
 
@@ -1497,6 +1525,8 @@ void SUTNCPlusMenu::LoadSettings()
 	else
 		bAllowGib = false;
 
+	bShowDeathBlood = NCPlusPerformanceSettings::GetShowDeathBlood();
+
 	if (GConfig->GetString(IGCTFSection, TEXT("bShowRagdoll"), Val, ConfigPath))
 		bShowRagdoll = Val.Equals(TEXT("True"), ESearchCase::IgnoreCase);
 	else
@@ -1612,9 +1642,9 @@ void SUTNCPlusMenu::SaveSettings()
 	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.
 	GConfig->SetString(IGCTFSection, TEXT("bAllowGib"), bAllowGib ? TEXT("True") : TEXT("False"), ConfigPath);
+	GConfig->SetBool(IGCTFSection, TEXT("bShowDeathBlood"), bShowDeathBlood, ConfigPath);
 	GConfig->SetString(IGCTFSection, TEXT("bShowRagdoll"), bShowRagdoll ? TEXT("True") : TEXT("False"), ConfigPath);
-	// Slider 0 -> store 0.01 so the BP's SetTimer fires (rate>0) and removes the ragdoll instantly, rather
-	// than a literal 0 (rate<=0) which never fires = keep forever. Non-zero values pass through unchanged.
+	// Slider 0 -> retain the positive timer sentinel used by the legacy BP and C++ hide path.
 	GConfig->SetString(IGCTFSection, TEXT("RagdollTime"),
 		*FString::SanitizeFloat(RagdollTime <= 0.f ? 0.01f : RagdollTime), ConfigPath);
 	GConfig->SetString(IGCTFSection, TEXT("bShowOwnBeam"), bShowOwnBeam ? TEXT("True") : TEXT("False"), ConfigPath);
@@ -1623,6 +1653,7 @@ void SUTNCPlusMenu::SaveSettings()
 	GConfig->SetString(NCPSection, TEXT("HighResScreenshotPostMatch"), bHighResScreenshotPostMatch ? TEXT("True") : TEXT("False"), ConfigPath);
 
 	GConfig->Flush(false, ConfigPath);
+	NCPlusPerformanceSettings::Reload();
 	// Publish the newly saved value to the character's lazy cache so muting or
 	// restoring the loop takes effect on the next stock character tick.
 	NCPlusICTFAudioSettings::Reload();
@@ -1708,6 +1739,11 @@ void SUTNCPlusMenu::OnAllowGibChanged(ECheckBoxState NewState)
 	bAllowGib = (NewState == ECheckBoxState::Checked);
 }
 
+void SUTNCPlusMenu::OnShowDeathBloodChanged(ECheckBoxState NewState)
+{
+	bShowDeathBlood = (NewState == ECheckBoxState::Checked);
+}
+
 void SUTNCPlusMenu::OnShowRagdollChanged(ECheckBoxState NewState)
 {
 	bShowRagdoll = (NewState == ECheckBoxState::Checked);
@@ -1715,8 +1751,7 @@ void SUTNCPlusMenu::OnShowRagdollChanged(ECheckBoxState NewState)
 
 void SUTNCPlusMenu::OnRagdollTimeChanged(float NewValue, ETextCommit::Type CommitType)
 {
-	// Slider value the user sees (0..10). 0 = remove instantly (remapped to 0.01 on save, since a literal 0
-	// would keep ragdolls forever); N = despawn after N seconds. See the semantics note at the top of the file.
+	// Slider value is the body visibility duration; zero is saved as the legacy 0.01 timer sentinel.
 	RagdollTime = FMath::Clamp(NewValue, 0.f, 10.f);
 }
 
