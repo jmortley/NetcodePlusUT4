@@ -892,6 +892,100 @@ static void TickInstantReplayJoinGuard()
 	}
 }
 
+// ---------------------------------------------------------------------------
+// View-bob / weapon-bob: make Game.ini the single source of truth.
+//
+// Stock keeps these in two places that can silently disagree: the Settings→Player
+// sliders read/write Game.ini (AUTPlayerController GlobalConfig EyeOffsetGlobalScaling /
+// WeaponBobGlobalScaling), but every new PlayerController is re-stamped from the CLOUD
+// PROFILE's ViewBob/WeaponBob (UTProfileSettings::ApplyInputSettings, on every map join
+// and every profile reload). A profile that never received the value (missing tag =
+// class default 1.0) puts the player at FULL view bob while the slider shows zero —
+// observed 2026-09-19: ini 0 / profile absent, months of play at 1.0, and two dialog OK
+// clicks that still left the profile without a tag. View bob is not cosmetic: EyeOffset
+// is part of the hitscan fire origin (AUTCharacter::GetPawnViewLocation), so this drift
+// moves the ray the player aims from.
+//
+// Client-only, ~4 Hz: whenever the live local PC or the in-memory profile disagrees with
+// the Game.ini value, overwrite them and persist the profile (rate-limited; the local
+// player's own cooldown throttles the cloud write). Only keys that exist in Game.ini are
+// enforced, so a fresh install with no ini line keeps stock behaviour. Logged as
+// [BobSync] so the outcome is visible in the client log.
+// ---------------------------------------------------------------------------
+static double GBobSyncLastProfileSave = 0.0;
+
+static void ReconcileBobFromGameIni(UWorld* W)
+{
+	if (W == nullptr || GConfig == nullptr || W->GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+	static const TCHAR* Section = TEXT("/Script/UnrealTournament.UTPlayerController");
+	float IniViewBob = 0.f, IniWeaponBob = 0.f;
+	const bool bHasViewBob = GConfig->GetFloat(Section, TEXT("EyeOffsetGlobalScaling"), IniViewBob, GGameIni);
+	const bool bHasWeaponBob = GConfig->GetFloat(Section, TEXT("WeaponBobGlobalScaling"), IniWeaponBob, GGameIni);
+	if (!bHasViewBob && !bHasWeaponBob)
+	{
+		return;
+	}
+
+	for (FLocalPlayerIterator It(GEngine, W); It; ++It)
+	{
+		UUTLocalPlayer* const LP = Cast<UUTLocalPlayer>(*It);
+		if (LP == nullptr)
+		{
+			continue;
+		}
+		AUTPlayerController* const PC = Cast<AUTPlayerController>(LP->PlayerController);
+		UUTProfileSettings* const Profile = LP->GetProfileSettings();
+		bool bProfileDirty = false;
+
+		if (bHasViewBob)
+		{
+			if (PC != nullptr && !FMath::IsNearlyEqual(PC->EyeOffsetGlobalScaling, IniViewBob))
+			{
+				UE_LOG(LogLoad, Warning, TEXT("[BobSync] PC EyeOffsetGlobalScaling %.3f -> %.3f (Game.ini)"),
+					PC->EyeOffsetGlobalScaling, IniViewBob);
+				PC->EyeOffsetGlobalScaling = IniViewBob;
+			}
+			if (Profile != nullptr && !FMath::IsNearlyEqual(Profile->ViewBob, IniViewBob))
+			{
+				UE_LOG(LogLoad, Warning, TEXT("[BobSync] profile ViewBob %.3f -> %.3f (Game.ini)"),
+					Profile->ViewBob, IniViewBob);
+				Profile->ViewBob = IniViewBob;
+				bProfileDirty = true;
+			}
+		}
+		if (bHasWeaponBob)
+		{
+			if (PC != nullptr && !FMath::IsNearlyEqual(PC->WeaponBobGlobalScaling, IniWeaponBob))
+			{
+				UE_LOG(LogLoad, Warning, TEXT("[BobSync] PC WeaponBobGlobalScaling %.3f -> %.3f (Game.ini)"),
+					PC->WeaponBobGlobalScaling, IniWeaponBob);
+				PC->WeaponBobGlobalScaling = IniWeaponBob;
+			}
+			if (Profile != nullptr && !FMath::IsNearlyEqual(Profile->WeaponBob, IniWeaponBob))
+			{
+				UE_LOG(LogLoad, Warning, TEXT("[BobSync] profile WeaponBob %.3f -> %.3f (Game.ini)"),
+					Profile->WeaponBob, IniWeaponBob);
+				Profile->WeaponBob = IniWeaponBob;
+				bProfileDirty = true;
+			}
+		}
+
+		// Persist so the next profile reload does not undo this. A serialized 0.0 differs
+		// from the class default (1.0), so it lands as a real tag. Rate-limited: the cloud
+		// round-trip re-applies the profile, and a failed upload must not spin.
+		const double Now = FPlatformTime::Seconds();
+		if (bProfileDirty && Now - GBobSyncLastProfileSave > 30.0)
+		{
+			GBobSyncLastProfileSave = Now;
+			LP->SaveProfileSettings();
+			UE_LOG(LogLoad, Warning, TEXT("[BobSync] profile saved"));
+		}
+	}
+}
+
 static bool TickHudTeamColours(float DeltaTime)
 {
 	// Flag-cloth wind needs a per-frame update (smooth gusting/direction); the colour/outline work is
@@ -915,6 +1009,7 @@ static bool TickHudTeamColours(float DeltaTime)
 					NCPlusForceModels::SyncHudTeamColours(W);
 					NCPlusForceModels::SyncFlagColours(W);
 					NCPlusForceModels::SuppressFlagCarrierOutlines(W);
+					ReconcileBobFromGameIni(W);
 				}
 				// Per-frame: LOS traces gate the ForceModels outline (visible -> outlined, occluded ->
 				// none — the stock stencil has no visible-only mode, see OutlinePlayers). bSlowTick
