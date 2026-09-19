@@ -104,6 +104,10 @@ struct FPendingFireEventFix
     uint8 ZOffset;
     TWeakObjectPtr<AUTCharacter> HitChar;
     FVector ClientHeadOffset;
+    /** Click-frame move timestamp (GetCurrentSynchTime) — the shooter's anchor in SavedPositions. */
+    float ClientMoveTime;
+    /** Exact ray origin the client traced from (its GetFireStartLoc at the click). */
+    FVector ClientFireLoc;
 
     FPendingFireEventFix(uint8 Mode, int32 EventIdx)
         : bIsStartFire(false)
@@ -114,11 +118,13 @@ struct FPendingFireEventFix
         , ZOffset(0)
         , HitChar(nullptr)
         , ClientHeadOffset(FVector::ZeroVector)
+        , ClientMoveTime(0.0f)
+        , ClientFireLoc(FVector::ZeroVector)
     {
     }
 
     FPendingFireEventFix(uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot,
-        AUTCharacter* InChar, uint8 Z, FVector HeadOffset)
+        AUTCharacter* InChar, uint8 Z, FVector HeadOffset, float MoveTime, FVector FireLoc)
         : bIsStartFire(true)
         , FireModeNum(Mode)
         , FireEventIndex(EventIdx)
@@ -127,6 +133,8 @@ struct FPendingFireEventFix
         , ZOffset(Z)
         , HitChar(InChar)
         , ClientHeadOffset(HeadOffset)
+        , ClientMoveTime(MoveTime)
+        , ClientFireLoc(FireLoc)
     {
     }
 };
@@ -648,6 +656,30 @@ protected:
     void ReconcileDeferredEquipRelease(uint8 FireModeNum, int32 InFireEventIndex,
         uint32 ContextGeneration, TWeakObjectPtr<AUTCharacter> ExpectedOwner);
 
+    // --- Click-anchored shot (ncp.ClientFireOrigin / ncp.FireAnchorRewind) ---
+    // Server-only per-RPC latch, same lifecycle as CachedTransactionalRotation: set in
+    // ServerStartFireFixed before the PendingFire latch / state entry, cleared with it.
+    // Never replicated.
+    /** The exact ray origin the owning client traced this shot from, once it validated
+     *  against the shooter's own SavedPositions (XY within ncp.ClientFireOriginToleranceXY
+     *  of the click-frame move, Z inside the capsule column). Consumed by GetFireStartLoc
+     *  for hitscan modes only. */
+    FVector PendingClientFireOrigin;
+    bool bHasPendingClientFireOrigin;
+    /** Seconds between the server PROCESSING the shooter's click-frame move and EXECUTING
+     *  this fire RPC (unreliable resend at +40/+80 ms, reliable retransmit after loss,
+     *  weapon-channel head-of-line blocking). Added to the hitscan rewind so a late shot
+     *  still samples targets at the click epoch instead of "now − ½RTT". Zero on the
+     *  normal path, where the fire lands in the packet right behind its move. */
+    float PendingFireAnchorLateSeconds;
+
+    /** Server: find the shooter's click-frame SavedPositions entry for an incoming fire RPC
+     *  and latch the validated client origin + lateness. Rejections fall back to the stock
+     *  server-side origin and a zero lateness (today's behaviour), logged under
+     *  ncp.FireAnchorDebug. */
+    void ResolveClientFireAnchor(float ClientMoveTime, const FVector& ClientFireLoc);
+    void ClearClientFireAnchor();
+
     // --- Trade-kill grace period: cache owner state before Removed() nulls UTOwner ---
     /** World time when UTOwner was lost (weapon removed from dying player) */
     float OwnerLostTime = 0.f;
@@ -757,11 +789,15 @@ protected:
      *
      * @param FireModeNum - Which fire mode to activate
      * @param InFireEventIndex - Unique sequence number for this fire event
-     * @param ClientTimestamp - Client's GetWorld()->GetTimeSeconds() when fire was initiated
+     * @param ClientTimestamp - Client's GetServerWorldTimeSeconds() when fire was initiated (validation only)
+     * @param ClientMoveTime - Client movement timestamp of the click frame (UTCharacterMovement
+     *        GetCurrentSynchTime); matches FSavedPosition::TimeStamp of that move on the server
+     * @param ClientFireLoc - The client's GetFireStartLoc() at the click, 0.1 uu quantized
      */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc);
 
     /**
      * Server RPC to stop firing.
@@ -795,7 +831,8 @@ protected:
 
     /** Shared RPC-edge validation so initial and retry start payloads use identical checks. */
     bool ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFireEventIndex,
-        float ClientTimestamp, FRotator ClientViewRot, FVector ClientHeadOffset);
+        float ClientTimestamp, FRotator ClientViewRot, FVector ClientHeadOffset,
+        float ClientMoveTime, const FVector& ClientFireLoc);
 
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation")
     float SmoothingMs = 20.0f;
@@ -894,7 +931,8 @@ protected:
     FTimerHandle ResendFireHandle;
 
     void QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, const FVector& ClientFireLoc);
     void QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
     void QueueResendFireEventFixed(const FPendingFireEventFix& Event);
     void ResendNextFireEventFixed();
@@ -902,7 +940,8 @@ protected:
 
     UFUNCTION(Server, Unreliable, WithValidation)
     void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc);
 
     UFUNCTION(Server, Unreliable, WithValidation)
     void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);

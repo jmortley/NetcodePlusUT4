@@ -140,6 +140,40 @@ static constexpr float MaxClickBufferMs = 40.0f;
 static constexpr float ClickBufferDispatchSlackSeconds = 0.025f;
 static constexpr float MaxBufferedAimAgeSeconds = 0.050f;
 
+// Click-anchored shot. The fire RPC carries the click-frame MOVE timestamp and the
+// exact ray origin the client traced from. On the server the timestamp locates the
+// shooter's own click move in SavedPositions (FSavedPosition::TimeStamp is that same
+// float, stored when the move was processed), which gives two things stock never had:
+//   1. the ORIGIN the client actually fired from (validated against that entry), so a
+//      moving shooter's ray is not re-rooted at the server's re-simulated / independently
+//      view-bobbed pawn, and a resent or late RPC does not fire from a position 40-80 ms
+//      after the click;
+//   2. the LATENESS of this RPC relative to its move (server time now minus the time the
+//      move was processed), added to the hitscan rewind so targets are sampled at the
+//      click epoch instead of at "now − ½RTT" regardless of how late the RPC landed.
+// Both are off-switchable live for A/B; rejections fall back to today's behaviour.
+static TAutoConsoleVariable<int32> CVarClientFireOrigin(
+    TEXT("ncp.ClientFireOrigin"), 1,
+    TEXT("Hitscan ray origin = the client's own fire-start location when it validates against the shooter's ")
+    TEXT("click-frame SavedPositions entry (XY within ncp.ClientFireOriginToleranceXY, Z inside the capsule). ")
+    TEXT("0 = stock server-pawn origin."),
+    ECVF_Default);
+static TAutoConsoleVariable<float> CVarClientFireOriginToleranceXY(
+    TEXT("ncp.ClientFireOriginToleranceXY"), 28.0f,
+    TEXT("Max horizontal distance (uu) between the client's reported fire origin and the server's click-frame ")
+    TEXT("pawn position before the claim is rejected. Covers the uncorrected prediction band ")
+    TEXT("(TeamArena MaxPositionErrorSquared 324 = 18 uu) + 1 uu ClientLoc quantization + slack."),
+    ECVF_Default);
+static TAutoConsoleVariable<int32> CVarFireAnchorRewind(
+    TEXT("ncp.FireAnchorRewind"), 1,
+    TEXT("Add (server now - time the shooter's click-frame move was processed) to the hitscan target rewind, ")
+    TEXT("so resent / late fire RPCs sample targets at the click epoch. 0 = rewind by ping average only."),
+    ECVF_Default);
+static TAutoConsoleVariable<int32> CVarFireAnchorDebug(
+    TEXT("ncp.FireAnchorDebug"), 0,
+    TEXT("1 = log every fire anchor resolution ([FireAnchor]): anchor found, lateness, origin delta, verdict."),
+    ECVF_Default);
+
 // Exact zero rotation is a legitimate aim. This synchronous scope is the
 // validity bit for CachedTransactionalRotation; it avoids changing the weapon
 // object layout or relying on FRotator::IsZero() as a sentinel.
@@ -161,6 +195,9 @@ struct FDeferredEquipFireContext
 	TWeakObjectPtr<AUTCharacter> Owner;
 	TWeakObjectPtr<AUTCharacter> ClientHitChar;
 	FVector ClientHeadOffset = FVector::ZeroVector;
+	/** Click-frame move timestamp + client ray origin (see ResolveClientFireAnchor). */
+	float ClientMoveTime = 0.f;
+	FVector ClientFireLoc = FVector::ZeroVector;
     const TCHAR* Source = TEXT("FixedInitial");
     bool bDeferredEquip = false;
     bool bDeferredState = false;
@@ -1472,6 +1509,9 @@ AUTWeaponFix::AUTWeaponFix(const FObjectInitializer& ObjectInitializer)
     LastReleaseTime.SetNum(2);
     FireModeActiveState.SetNum(2);
     bIsTransactionalFire = false;
+    bHasPendingClientFireOrigin = false;
+    PendingClientFireOrigin = FVector::ZeroVector;
+    PendingFireAnchorLateSeconds = 0.f;
     bHandlingRetry = false;
     bFireHeldByPlayer[0] = false;
     bFireHeldByPlayer[1] = false;
@@ -3194,15 +3234,19 @@ void AUTWeaponFix::FireShot()
 		}
 		//EarliestFireTime = 0.f;
 
+		// Eye-height byte, ALWAYS sent. Stock (and this code until now) only sent it when the
+		// client eye deviated from BaseEyeHeight by >1 uu, and the server then fell back to
+		// its OWN GetPawnViewLocation() — which integrates its own landing/jump EyeOffset at
+		// the server PC's default view-bob scale of 1.0 (EyeOffsetGlobalScaling is GlobalConfig,
+		// never replicated). A client with view bob OFF therefore got a server origin that
+		// dipped after every landing while its own did not. Sending the byte unconditionally
+		// pins the server Z to the client's eye for projectiles and for the hitscan fallback
+		// path; the hitscan primary path uses ClientFireLoc below.
 		uint8 ZOffset = 0;
 		if (UTOwner)
 		{
 			float RawOffset = UTOwner->GetPawnViewLocation().Z - UTOwner->GetActorLocation().Z;
-			float DefaultOffset = UTOwner->BaseEyeHeight;
-			if (!FMath::IsNearlyEqual(RawOffset, DefaultOffset, 1.0f))
-			{
-				ZOffset = (uint8)FMath::Clamp(RawOffset + 127.5f, 0.f, 255.f);
-			}
+			ZOffset = (uint8)FMath::Clamp(RawOffset + 127.5f, 0.f, 255.f);
 		}
 
 		AUTCharacter* ClientHitChar = nullptr;
@@ -3351,6 +3395,14 @@ void AUTWeaponFix::FireShot()
 		}
 
 		const float ClientTimestamp = GetWorld()->GetGameState()->GetServerWorldTimeSeconds();
+		// Click anchor: the movement timestamp of the move built THIS frame (fire input is
+		// deferred until after ReplicateMoveToServer, so this is the move that carries the
+		// click position + rotation and went out unthrottled — UTCharacterMovement.cpp:605/658,
+		// UTCharMovementReplication.cpp:607-625). The same value seeds stock spread RNG on
+		// both sides, so client and server already agree on it. Plus the exact origin this
+		// client traced from (same call the pretrace above used).
+		const float ClientMoveTime = UTOwner ? UTOwner->GetCurrentSynchTime(false) : 0.f;
+		const FVector ClientFireLoc = GetFireStartLoc();
 		if (RocketPrimaryDiagFor(this, CurrentFireMode))
 		{
 			UE_LOG(LogUTWeaponFix, Warning,
@@ -3361,9 +3413,9 @@ void AUTWeaponFix::FireShot()
 				LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f, GetRefireTime(0));
 		}
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
-			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
+			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
         QueueResendStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
-            ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
+            ClientRot, ClientHitChar, ZOffset, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
 
 		// Existing fake-projectile/effect path for non-buffered shots. Buffered
 		// Shock already staged the same rotation before its pretrace.
@@ -3430,6 +3482,9 @@ void AUTWeaponFix::FireShot()
 		const uint8 PreviousHitScanIndex = ReceivedHitScanIndex;
 		const FVector PreviousHeadOffset = ReceivedHeadOffset;
 		const uint8 PreviousFireEventIndex = FireEventIndex;
+		const FVector PreviousClientFireOrigin = PendingClientFireOrigin;
+		const bool bPreviousHasClientFireOrigin = bHasPendingClientFireOrigin;
+		const float PreviousFireAnchorLateSeconds = PendingFireAnchorLateSeconds;
 
 		if (bAcceptedRequestDispatch)
 		{
@@ -3457,6 +3512,11 @@ void AUTWeaponFix::FireShot()
 				ReceivedHitScanIndex = 0;
 				ReceivedHeadOffset = FVector::ZeroVector;
 			}
+
+			// Click anchor travels with the accepted request like the rotation and the
+			// Z byte do: a deferred-equip / state-tail dispatch still fires from the
+			// click position and rewinds targets to the click epoch.
+			ResolveClientFireAnchor(DeferredContext->ClientMoveTime, DeferredContext->ClientFireLoc);
 
 			UE_LOG(LogUTWeaponFix, Verbose,
 				TEXT("[DeferredEquipFire] DISPATCH mode=%d event=%d generation=%u release=%d aim=%s"),
@@ -3571,6 +3631,9 @@ void AUTWeaponFix::FireShot()
 			ReceivedHitScanIndex = PreviousHitScanIndex;
 			ReceivedHeadOffset = PreviousHeadOffset;
 			FireEventIndex = PreviousFireEventIndex;
+			PendingClientFireOrigin = PreviousClientFireOrigin;
+			bHasPendingClientFireOrigin = bPreviousHasClientFireOrigin;
+			PendingFireAnchorLateSeconds = PreviousFireAnchorLateSeconds;
 		}
 	}
 }
@@ -4095,7 +4158,8 @@ bool AUTWeaponFix::IsFireEventSequenceValid(uint8 FireModeNum, int32 InEventInde
 
 
 void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-    FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+    FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+    float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
     // 1. VALIDATION (Your existing transactional checks)
     UWorld* World = GetWorld();
@@ -4263,6 +4327,8 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         AcceptedRequestGeneration = NewContext.Generation;
 		NewContext.ClientTimestamp = ClientTimestamp;
 		NewContext.ClientViewRot = ClientViewRot;
+		NewContext.ClientMoveTime = ClientMoveTime;
+		NewContext.ClientFireLoc = ClientFireLoc;
 		NewContext.Owner = UTOwner;
 		NewContext.ClientHitChar = ClientHitChar;
 		NewContext.ClientHeadOffset = ClientHeadOffset;
@@ -4326,6 +4392,10 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         ReceivedHitScanIndex = 0;
         ReceivedHeadOffset = FVector::ZeroVector;
     }
+
+    // Click anchor (origin + lateness) for this shot — BEFORE the PendingFire latch and state
+    // entry, because BeginState fires synchronously from inside this call.
+    ResolveClientFireAnchor(ClientMoveTime, ClientFireLoc);
 
     // 2. UPDATE STATE
     if (AuthoritativeFireEventIndex.IsValidIndex(FireModeNum)) {
@@ -4514,6 +4584,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         CachedTransactionalRotation = FRotator::ZeroRotator;
         ScopedTransactionalAimWeapons.Remove(this);
         ReceivedHitScanHitChar = nullptr;
+        ClearClientFireAnchor();
         FDeferredEquipFireContext* RemainingRequest = DeferredEquipFireContexts.Find(DeferredWeaponKey);
         if (RemainingRequest && RemainingRequest->Generation == AcceptedRequestGeneration && ((!bQueuedDeferredEquip && !bQueuedDeferredState)
             || (bQueuedDeferredState && RemainingRequest->bShotDispatched)))
@@ -4588,6 +4659,7 @@ void AUTWeaponFix::Removed()
 	}
 	ScopedTransactionalAimWeapons.Remove(this);
 	CachedTransactionalRotation = FRotator::ZeroRotator;
+	ClearClientFireAnchor();
 	Super::Removed();
 }
 
@@ -4604,6 +4676,7 @@ void AUTWeaponFix::Destroyed()
 	}
 	ScopedTransactionalAimWeapons.Remove(this);
 	CachedTransactionalRotation = FRotator::ZeroRotator;
+	ClearClientFireAnchor();
 	DestroyFirstPersonHologramDepthMesh();
 	Super::Destroyed();
 }
@@ -4845,15 +4918,20 @@ void AUTWeaponFix::Tick(float DeltaTime)
 
 
 bool AUTWeaponFix::ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFireEventIndex,
-    float ClientTimestamp, FRotator ClientViewRot, FVector ClientHeadOffset)
+    float ClientTimestamp, FRotator ClientViewRot, FVector ClientHeadOffset,
+    float ClientMoveTime, const FVector& ClientFireLoc)
 {
     // Sanity-bound the client head offset at the RPC edge. The headshot gate clamps it downstream, but a NaN
     // defeats FMath::Clamp (NaN fails every comparison) and that clamp is currently the sole defense, so reject
     // NaN/Inf or an absurd magnitude here. A legit offset is the rendered head relative to the body (~110u up),
     // so the 1000u bound is hugely generous — no honest client is ever caught; only a tampered one is dropped.
+    // Same NaN/Inf hygiene for the click anchor; its plausibility (distance to the shooter's own
+    // history) is judged in ResolveClientFireAnchor, where a bad value only loses the anchor.
     if (ClientHeadOffset.ContainsNaN()
         || ClientHeadOffset.SizeSquared() > FMath::Square(1000.0f)
-        || ClientViewRot.ContainsNaN())
+        || ClientViewRot.ContainsNaN()
+        || ClientFireLoc.ContainsNaN()
+        || !FMath::IsFinite(ClientMoveTime))
     {
         return false;
     }
@@ -4865,10 +4943,10 @@ bool AUTWeaponFix::ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFire
 
 bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex,
     float ClientTimestamp, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset,
-    FVector ClientHeadOffset)
+    FVector ClientHeadOffset, float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
     return ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
-        ClientViewRot, ClientHeadOffset);
+        ClientViewRot, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
 }
 
 
@@ -4993,6 +5071,7 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     bIsTransactionalFire = false;
     CachedTransactionalRotation = FRotator::ZeroRotator;
     ScopedTransactionalAimWeapons.Remove(this);
+    ClearClientFireAnchor();
 
 	// A delayed Stop may arrive after another weapon becomes current because the
 	// weapon RPC and ServerSwitchWeapon use different actor channels. Preserve the
@@ -5209,7 +5288,151 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
 float AUTWeaponFix::GetHitValidationPredictionTime() const
 {
-	return GetPredictionTimeWithFudgeMs(GetConfiguredHitscanFudgeMs());
+	float PredictionTime = GetPredictionTimeWithFudgeMs(GetConfiguredHitscanFudgeMs());
+
+	// Click anchor: if this fire RPC executed LATER than the move it belongs to (unreliable
+	// resend at +40/+80 ms, reliable retransmit after loss, weapon-channel head-of-line
+	// blocking), "now − ½RTT" is that much past the click. Add the measured lateness so the
+	// target epoch stays the click epoch. Zero on the normal path (fire lands right behind
+	// its move in the same packet), so the common case is byte-identical to before.
+	if (Role == ROLE_Authority && PendingFireAnchorLateSeconds > 0.f
+		&& CVarFireAnchorRewind.GetValueOnGameThread() > 0)
+	{
+		PredictionTime = FMath::Min(PredictionTime + PendingFireAnchorLateSeconds, MaxRewindMs * 0.001f);
+	}
+	return PredictionTime;
+}
+
+void AUTWeaponFix::ResolveClientFireAnchor(float ClientMoveTime, const FVector& ClientFireLoc)
+{
+	ClearClientFireAnchor();
+	if (Role != ROLE_Authority || UTOwner == nullptr || GetWorld() == nullptr)
+	{
+		return;
+	}
+	// Only remote humans have a move stream to anchor to. Bots and the listen host fire
+	// with Role == Authority locally and never enter this RPC.
+	const AUTPlayerController* ShooterPC = Cast<AUTPlayerController>(UTOwner->Controller);
+	if (ShooterPC == nullptr || ShooterPC->IsLocalController())
+	{
+		return;
+	}
+
+	const float Now = GetWorld()->GetTimeSeconds();
+	const TArray<FSavedPosition>& History = UTOwner->SavedPositions;
+	const bool bDebug = CVarFireAnchorDebug.GetValueOnGameThread() > 0;
+
+	// 1. TIME ANCHOR. FSavedPosition::TimeStamp is the client's move timestamp, written when
+	//    the server processed that move (UTCharacter.cpp:430 via GetCurrentSynchTime, i.e.
+	//    CurrentServerMoveTime = the RPC's TimeStamp). The client sent the same float from
+	//    ClientData->CurrentTimeStamp, so an exact match exists whenever the click move has
+	//    been processed. Scan newest→oldest; the click move is normally the newest entry.
+	//    A small tolerance covers timestamp resets / float travel; anything looser risks
+	//    anchoring to the wrong frame at 400+ fps (2.5 ms between moves).
+	constexpr float AnchorTimeTolerance = 0.0005f;
+	int32 AnchorIndex = INDEX_NONE;
+	for (int32 i = History.Num() - 1; i >= 0; --i)
+	{
+		if (FMath::Abs(History[i].TimeStamp - ClientMoveTime) <= AnchorTimeTolerance)
+		{
+			AnchorIndex = i;
+			break;
+		}
+		if (History[i].TimeStamp < ClientMoveTime - AnchorTimeTolerance)
+		{
+			break; // older than the click; the click move has not been processed (yet)
+		}
+	}
+
+	float LateSeconds = 0.f;
+	if (AnchorIndex != INDEX_NONE)
+	{
+		// Lateness is measured against SERVER wall time (when the move was applied), never
+		// the client clock, so a skewed client cannot buy extra rewind.
+		LateSeconds = FMath::Clamp(Now - History[AnchorIndex].Time, 0.f, MaxRewindMs * 0.001f);
+	}
+
+	// 2. ORIGIN. Validate the client's ray origin against the pawn position the server holds
+	//    for that click frame. With no time anchor (click move still in flight / lost — e.g. a
+	//    click that did not get the bShotSpawned flag and sat in the ≤25 ms move burst), fall
+	//    back IGPlus-xxCloseEnough style to the nearest of: recent history, current location,
+	//    and the server's own short extrapolation of the pawn (where an honest client that is
+	//    ahead of its last processed move would be). Bounded by MaxRewindMs of history and
+	//    50 ms of extrapolation, so the claimable window stays a few dozen uu.
+	FVector Base = UTOwner->GetActorLocation();
+	if (AnchorIndex != INDEX_NONE)
+	{
+		Base = History[AnchorIndex].Position;
+	}
+	else
+	{
+		float BestDistSq = FVector::DistSquaredXY(ClientFireLoc, Base);
+		if (History.Num() > 0)
+		{
+			const float ExtrapSeconds = FMath::Clamp(Now - History.Last().Time, 0.f, 0.05f);
+			const FVector Extrapolated = UTOwner->GetActorLocation() + UTOwner->GetVelocity() * ExtrapSeconds;
+			const float ExtrapDistSq = FVector::DistSquaredXY(ClientFireLoc, Extrapolated);
+			if (ExtrapDistSq < BestDistSq)
+			{
+				BestDistSq = ExtrapDistSq;
+				Base = Extrapolated;
+			}
+		}
+		for (int32 i = History.Num() - 1; i >= 0; --i)
+		{
+			if (Now - History[i].Time > MaxRewindMs * 0.001f)
+			{
+				break;
+			}
+			const float DistSq = FVector::DistSquaredXY(ClientFireLoc, History[i].Position);
+			if (DistSq < BestDistSq)
+			{
+				BestDistSq = DistSq;
+				Base = History[i].Position;
+			}
+		}
+	}
+
+	const float ToleranceXY = FMath::Max(0.f, CVarClientFireOriginToleranceXY.GetValueOnGameThread());
+	const float DeltaXY = FMath::Sqrt(FVector::DistSquaredXY(ClientFireLoc, Base));
+	const float DeltaZ = ClientFireLoc.Z - Base.Z;
+	// The eye can never leave the capsule column: stock clamps EyeOffset to ±(HalfHeight−12)
+	// (UTCharacter.cpp:4823-4845). Allow the whole column plus a little slack so a crouch
+	// transition (server capsule already shrunk, client eye still interpolating) passes.
+	const float HalfHeight = UTOwner->GetCapsuleComponent()
+		? UTOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 108.f;
+	const float MaxAbsZ = FMath::Max(HalfHeight, 108.f) + 8.f;
+	const bool bOriginValid = !ClientFireLoc.ContainsNaN()
+		&& DeltaXY <= ToleranceXY
+		&& FMath::Abs(DeltaZ) <= MaxAbsZ;
+
+	if (bOriginValid)
+	{
+		PendingClientFireOrigin = ClientFireLoc;
+		bHasPendingClientFireOrigin = true;
+	}
+	PendingFireAnchorLateSeconds = LateSeconds;
+
+	if (bDebug)
+	{
+		const FString ShooterName = (UTOwner->PlayerState != nullptr) ? UTOwner->PlayerState->PlayerName : UTOwner->GetName();
+		UE_LOG(LogUTWeaponFix, Log,
+			TEXT("[FireAnchor] shooter=%s wep=%s anchor=%s lateMs=%.1f histN=%d moveT=%.4f newestT=%.4f dXY=%.1f dZ=%.1f tolXY=%.0f origin=%s speed=%.0f delayed=%d"),
+			*ShooterName, *GetClass()->GetName(),
+			AnchorIndex != INDEX_NONE ? TEXT("move") : TEXT("nearest"),
+			LateSeconds * 1000.f, History.Num(), ClientMoveTime,
+			History.Num() > 0 ? History.Last().TimeStamp : -1.f,
+			DeltaXY, DeltaZ, ToleranceXY,
+			bOriginValid ? TEXT("client") : TEXT("REJECT->server"),
+			UTOwner->GetVelocity().Size(), bNetDelayedShot ? 1 : 0);
+	}
+}
+
+void AUTWeaponFix::ClearClientFireAnchor()
+{
+	bHasPendingClientFireOrigin = false;
+	PendingClientFireOrigin = FVector::ZeroVector;
+	PendingFireAnchorLateSeconds = 0.f;
 }
 
 float AUTWeaponFix::GetPredictionTimeWithFudgeMs(float InFudgeMs) const
@@ -5318,8 +5541,12 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     const float RenderAuthorityExtraMs = bRenderAuthoritativeTargeting
         ? FMath::Max(0.f, CVarRenderCreditExtraMs.GetValueOnGameThread())
         : 0.f;
+    // Late fire RPCs (resend / retransmit) shift the render epoch by the same lateness the
+    // ping-based epoch gets in GetHitValidationPredictionTime, so both families agree.
+    const float RenderAuthorityLateMs = (CVarFireAnchorRewind.GetValueOnGameThread() > 0)
+        ? FMath::Max(0.f, PendingFireAnchorLateSeconds) * 1000.f : 0.f;
     const float RenderAuthoritativeMs = bRenderAuthoritativeTargeting
-        ? RenderAuthorityRTTMs * 0.5f + RenderAuthorityExtraMs
+        ? RenderAuthorityRTTMs * 0.5f + RenderAuthorityExtraMs + RenderAuthorityLateMs
         : 0.f;
     const float RenderAuthoritativeTime = bRenderAuthoritativeTargeting
         ? FMath::Clamp(RenderAuthoritativeMs * 0.001f, 0.f, 0.25f)
@@ -6516,6 +6743,19 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 	// experiment below; the experiment remains disabled by default.
 	const uint8 ResolvedFireMode = (FireMode == 255) ? CurrentFireMode : FireMode;
 
+    // 0. CLICK-ANCHORED HITSCAN ORIGIN. The owning client sent the exact location it traced
+    // from and it validated against the shooter's click-frame SavedPositions entry
+    // (ResolveClientFireAnchor). Return it verbatim: it already contains the client's eye
+    // height, crouch offset and its OWN view-bob term, so the ray the server tests is the
+    // ray the player saw. Projectiles keep the parallax path below (spawn-inside-geometry
+    // rules for a rewound spawn are a separate problem). Bots / listen host never latch.
+    const bool bHitscanMode = !(ProjClass.IsValidIndex(ResolvedFireMode) && ProjClass[ResolvedFireMode] != nullptr);
+    if (Role == ROLE_Authority && bHasPendingClientFireOrigin && bHitscanMode
+        && CVarClientFireOrigin.GetValueOnGameThread() > 0)
+    {
+        return PendingClientFireOrigin;
+    }
+
     // 1. Get the standard start location (Muzzle offset, etc applied to CURRENT Actor Location)
     FVector StartLoc = Super::GetFireStartLoc(ResolvedFireMode);
 
@@ -7519,6 +7759,7 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
     }
     ScopedTransactionalAimWeapons.Remove(this);
     CachedTransactionalRotation = FRotator::ZeroRotator;
+    ClearClientFireAnchor();
     ClearPendingFakeProjectiles();
 	DestroyFirstPersonHologramDepthMesh();
     // Call the base class implementation (which does the unregistering/holstering logic you pasted)
@@ -7607,6 +7848,7 @@ bool AUTWeaponFix::PutDown()
         }
         ScopedTransactionalAimWeapons.Remove(this);
         CachedTransactionalRotation = FRotator::ZeroRotator;
+        ClearClientFireAnchor();
         // B) Reset the Gatekeeper Flags
         // This fixes the "Jam" bug where the weapon remembers it was firing Mode 1.
         CurrentlyFiringMode = 255;
@@ -8950,10 +9192,11 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 // 1. QUEUE LOGIC (Client Side)
 void AUTWeaponFix::QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex,
     float ClientTimestamp, FRotator ClientViewRot, AUTCharacter* ClientHitChar,
-    uint8 ZOffset, FVector ClientHeadOffset)
+    uint8 ZOffset, FVector ClientHeadOffset, float ClientMoveTime, const FVector& ClientFireLoc)
 {
     QueueResendFireEventFixed(FPendingFireEventFix(FireModeNum, InFireEventIndex,
-        ClientTimestamp, ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset));
+        ClientTimestamp, ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset,
+        ClientMoveTime, ClientFireLoc));
 }
 
 void AUTWeaponFix::QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex)
@@ -9012,7 +9255,7 @@ void AUTWeaponFix::ResendNextFireEventFixed()
         {
             ResendServerStartFireFixed(Event.FireModeNum, Event.FireEventIndex,
                 Event.ClientTimestamp, Event.ClientViewRot, Event.HitChar.Get(),
-                Event.ZOffset, Event.ClientHeadOffset);
+                Event.ZOffset, Event.ClientHeadOffset, Event.ClientMoveTime, Event.ClientFireLoc);
         }
         else
         {
@@ -9219,7 +9462,8 @@ void AUTWeaponFix::ClearPendingFakeProjectiles()
 // This receives the retry packet
 void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
     int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot,
-    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+    float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
     // DUPLICATE CHECK
     // If the server already processed this index (or a newer one), ignore this packet.
@@ -9238,11 +9482,14 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
     bNetDelayedShot = true;
 
     // Execute the same implementation with the same logical payload. The retry-only
-    // context still lets projectile spawning compensate for network delay.
+    // context still lets projectile spawning compensate for network delay. The click
+    // anchor (ClientMoveTime / ClientFireLoc) is what makes a retry fire from the CLICK
+    // position and rewind targets to the CLICK epoch — before it, a +40/+80 ms retry fired
+    // the old rotation from wherever the pawn had moved to, rewound by "now − ½RTT".
     const bool bWasRetry = FixedRetryWeapons.Contains(this);
     FixedRetryWeapons.Add(this);
     ServerStartFireFixed_Implementation(FireModeNum, InFireEventIndex, ClientTimestamp,
-        ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset);
+        ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
     if (!bWasRetry) FixedRetryWeapons.Remove(this);
 
     bNetDelayedShot = false;
@@ -9259,10 +9506,11 @@ void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum,
 
 bool AUTWeaponFix::ResendServerStartFireFixed_Validate(uint8 FireModeNum,
     int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot,
-    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+    float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
     return ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
-        ClientViewRot, ClientHeadOffset);
+        ClientViewRot, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
 }
 
 bool AUTWeaponFix::ResendServerStopFireFixed_Validate(uint8 FireModeNum,
