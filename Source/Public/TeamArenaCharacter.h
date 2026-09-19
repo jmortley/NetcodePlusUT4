@@ -119,6 +119,9 @@ public:
 	/** Record capsule posture beside stock position history on authority. */
 	virtual void PositionUpdated(bool bShotSpawned) override;
 
+	/** Observe stock delayed-origin selection without changing its result. */
+	virtual FVector GetDelayedShotPosition() override;
+
 	/** Resolve a bracketed, non-teleport capsule posture at PredictionTime.
 	 *  Returns false when history cannot prove one posture across the sample. */
 	bool GetRewindCapsulePosture(float PredictionTime, float& OutHalfHeight,

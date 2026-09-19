@@ -1,6 +1,7 @@
 
 #include "UTWeaponFix.h"
 #include "NCShockInputTrace.h"
+#include "NCShotOriginDiagnostics.h"
 #include "NCPClockSync.h"
 #include "UTGameState.h"
 #include "UTPlayerController.h"
@@ -86,6 +87,11 @@ static TAutoConsoleVariable<int32> CVarFireProvenance(
     ECVF_Default);
 
 static bool FireProvenance() { return CVarFireProvenance.GetValueOnGameThread() > 0; }
+static TAutoConsoleVariable<int32> CVarShotOriginDebug(
+    TEXT("ncp.ShotOriginDebug"), 0,
+    TEXT("Server precision-shot origin diagnostics. 1=log actual origin queries and stock delayed movement-marker selection during FireShot. Marker age is not packet latency. 0=off; no gameplay or protocol change."),
+    ECVF_Default);
+static bool ShotOriginDebug() { return CVarShotOriginDebug.GetValueOnGameThread() > 0; }
 static const TCHAR* const FireReconciliationBuild = TEXT("328-fire-auth-r2");
 // Actual RPC funnel markers; stock also sets bNetDelayedShot.
 static TSet<const AUTWeaponFix*> FixedRetryWeapons;
@@ -164,6 +170,9 @@ struct FDeferredEquipFireContext
 	TWeakObjectPtr<AUTCharacter> ClientHitChar;
 	FVector ClientHeadOffset = FVector::ZeroVector;
     const TCHAR* Source = TEXT("FixedInitial");
+    // Preserve the accepted RPC route even when Source becomes DeferredEquip
+    // or DeferredStateTail. Diagnostic metadata only; not a client timestamp.
+    bool bAcceptedViaRetry = false;
     bool bDeferredEquip = false;
     bool bDeferredState = false;
     bool bDispatchReady = false;
@@ -198,12 +207,15 @@ struct FNCFireObservation
     uint32 Generation;
     int32 Attempts = 0;
     int32 Spawns = 0;
+    int32 OriginQueries = 0;
+    const TCHAR* AcceptedRoute = TEXT("untracked");
+    float AcceptTime = -1.f;
     FNCFireObservation* Previous = nullptr;
     bool bEnabled;
     FNCFireObservation(const AUTWeaponFix* InWeapon, const TCHAR* InSource,
         uint8 InMode, int32 InEvent, uint32 InGeneration)
         : Weapon(InWeapon), Source(InSource), Mode(InMode), Event(InEvent),
-          Generation(InGeneration), bEnabled(FireProvenance())
+          Generation(InGeneration), bEnabled(FireProvenance() || ShotOriginDebug())
     {
         if (bEnabled)
         {
@@ -3516,6 +3528,11 @@ void AUTWeaponFix::FireShot()
         FNCFireObservation Observation(this, ShotSource, CurrentFireMode,
             bAcceptedRequestDispatch ? AcceptedContext.FireEventIndex : INDEX_NONE,
             bAcceptedRequestDispatch ? AcceptedContext.Generation : 0);
+        if (bAcceptedRequestDispatch)
+        {
+            Observation.AcceptedRoute = AcceptedContext.bAcceptedViaRetry ? TEXT("retry") : TEXT("initial");
+            Observation.AcceptTime = AcceptedContext.ServerAcceptTime;
+        }
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
             TEXT("[NCFireAuth] SHOT source=%s weapon=%s owner=%s mode=%d event=%d auth=%d generation=%u pending0=%d pending1=%d lftBefore=%.4f"),
             ShotSource, *GetName(), UTOwner ? *UTOwner->GetName() : TEXT("null"),
@@ -4313,6 +4330,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         NewContext.bDispatchReady = !bQueuedDeferredEquip && !bQueuedDeferredState;
         NewContext.ExpectedFiringState = RequestedFiringState;
         NewContext.WaitingState = CurrentState;
+        NewContext.bAcceptedViaRetry = FixedRetryWeapons.Contains(this);
         NewContext.Source = bQueuedDeferredEquip ? TEXT("DeferredEquip")
             : bQueuedDeferredCharged ? TEXT("DeferredChargedTail")
             : bQueuedDeferredState ? TEXT("DeferredStateTail")
@@ -6558,6 +6576,32 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 	// experiment below; the experiment remains disabled by default.
 	const uint8 ResolvedFireMode = (FireMode == 255) ? CurrentFireMode : FireMode;
 
+    // Only label queries made inside a real precision FireShot. Removed() also
+    // queries this method, and projectile/zoom modes are outside this probe.
+    FNCFireObservation* OriginObservation = nullptr;
+    if (ShotOriginDebug() && Role == ROLE_Authority && UTOwner
+        && (Cast<AUTPlusShockRifle>(this) || Cast<AUTPlusSniper>(this))
+        && bTrackHitScanReplication && InstantHitInfo.IsValidIndex(ResolvedFireMode)
+        && InstantHitInfo[ResolvedFireMode].DamageType != nullptr
+        && InstantHitInfo[ResolvedFireMode].ConeDotAngle <= 0.f
+        && (!ProjClass.IsValidIndex(ResolvedFireMode) || ProjClass[ResolvedFireMode] == nullptr))
+    {
+        FNCFireObservation** Entry = FireObservations.Find(this);
+        if (Entry && (*Entry)->Mode == ResolvedFireMode)
+        {
+            FNCFireObservation* Candidate = *Entry;
+            if (++Candidate->OriginQueries <= 8) OriginObservation = Candidate;
+            else if (Candidate->OriginQueries == 9)
+            {
+                UE_LOG(LogUTWeaponFix, Warning,
+                    TEXT("[NCShotOrigin] LIMIT weapon=%s event=%d generation=%u maxQueries=8"),
+                    *GetName(), Candidate->Event, Candidate->Generation);
+            }
+        }
+    }
+    FNCShotOriginScope OriginScope(OriginObservation ? UTOwner : nullptr);
+    const FVector CurrentBody = OriginObservation ? UTOwner->GetActorLocation() : FVector::ZeroVector;
+
     // 1. Get the standard start location (Muzzle offset, etc applied to CURRENT Actor Location)
     FVector StartLoc = Super::GetFireStartLoc(ResolvedFireMode);
 
@@ -6587,6 +6631,40 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 
         // Shift the muzzle origin back to that spot
         StartLoc += MovementDelta;
+    }
+    if (OriginObservation)
+    {
+        const bool bObservedOnce = OriginScope.LookupCount == 1;
+        const TCHAR* Lookup = !bNetDelayedShot && OriginScope.LookupCount == 0 ? TEXT("current_pawn")
+            : !bObservedOnce ? TEXT("unobserved_or_multiple")
+            : !OriginScope.bResultMatches ? TEXT("stock_result_mismatch")
+            : OriginScope.MarkerIndex != INDEX_NONE ? TEXT("stock_marker") : TEXT("current_fallback");
+        const FVector BodyShift = bObservedOnce ? OriginScope.LookupPosition - CurrentBody : FVector::ZeroVector;
+        const float Now = GetWorld()->GetTimeSeconds();
+        // UE4.15 Windows vararg wrappers support at most 26 format arguments.
+        // Build bounded chunks, then write one row for this origin query.
+        FString OriginLog = FString::Printf(
+            TEXT("[NCShotOrigin] ORIGIN t=%.6f player=\"%s\" owner=%s weapon=%s mode=%d event=%d generation=%u query=%d source=%s acceptedRoute=%s acceptT=%.6f queueMs=%.3f delayed=%d"),
+            Now, UTOwner->PlayerState ? *UTOwner->PlayerState->PlayerName : TEXT("?"),
+            *UTOwner->GetName(), *GetName(), ResolvedFireMode, OriginObservation->Event,
+            OriginObservation->Generation, OriginObservation->OriginQueries, OriginObservation->Source,
+            OriginObservation->AcceptedRoute, OriginObservation->AcceptTime,
+            OriginObservation->AcceptTime >= 0.f ? 1000.f * (Now - OriginObservation->AcceptTime) : -1.f,
+            bNetDelayedShot ? 1 : 0);
+        OriginLog += FString::Printf(
+            TEXT(" lookup=%s lookupCount=%d saved=%d marker=%d markerT=%.6f moveStamp=%.6f markerAgeMs=%.3f maxAgeMs=%.3f overAge=%d ageCutoff=%d newerTeleport=%d markerTeleport=%d"),
+            Lookup, OriginScope.LookupCount, OriginScope.SavedCount,
+            OriginScope.MarkerIndex, OriginScope.MarkerServerTime, OriginScope.MarkerMoveStamp,
+            OriginScope.MarkerAgeMs, 1000.f * UTOwner->MaxShotSynchDelay,
+            OriginScope.bMarkerOverAge ? 1 : 0, OriginScope.bReachedAgeCutoff ? 1 : 0,
+            OriginScope.bNewerTeleport ? 1 : 0, OriginScope.bMarkerTeleported ? 1 : 0);
+        OriginLog += FString::Printf(
+            TEXT(" body=(%.3f,%.3f,%.3f) lookupPos=(%.3f,%.3f,%.3f) bodyShift=(%.3f,%.3f,%.3f) origin=(%.3f,%.3f,%.3f) fireZ=%.3f zFresh=%d"),
+            CurrentBody.X, CurrentBody.Y, CurrentBody.Z,
+            OriginScope.LookupPosition.X, OriginScope.LookupPosition.Y, OriginScope.LookupPosition.Z,
+            BodyShift.X, BodyShift.Y, BodyShift.Z, StartLoc.X, StartLoc.Y, StartLoc.Z,
+            FireZOffset, Now - FireZOffsetTime < 0.06f ? 1 : 0);
+        UE_LOG(LogUTWeaponFix, Warning, TEXT("%s"), *OriginLog);
     }
     return StartLoc;
 }

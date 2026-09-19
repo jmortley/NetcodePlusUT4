@@ -1,5 +1,6 @@
 // TeamArenaCharacter.cpp
 #include "TeamArenaCharacter.h"
+#include "NCShotOriginDiagnostics.h"
 #include "UTCharacterMovement.h"
 #include "TeamArenaCharacterMovement.h"
 #include "UTWeaponAttachment.h"
@@ -1800,6 +1801,13 @@ void ATeamArenaCharacter::FiringInfoUpdated()
     }
 
     K2_FiringInfoUpdated();
+}
+
+FVector ATeamArenaCharacter::GetDelayedShotPosition()
+{
+	const FVector Result = Super::GetDelayedShotPosition();
+	FNCShotOriginScope::ObserveStockLookup(this, Result);
+	return Result;
 }
 
 void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
