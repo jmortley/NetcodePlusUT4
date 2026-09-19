@@ -2931,7 +2931,7 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 {
 	Super::ScoreDamage_Implementation(DamageAmount, Victim, Attacker);
 
-	if (!Victim || !Attacker || !UTGameState) return;
+	if (!Victim || !Attacker || Victim == Attacker || !UTGameState) return;
 	if (UTGameState->OnSameTeam(Victim, Attacker)) return;
 	if (!bRoundInProgress || !Attacker->Team || DamageAmount <= 0) return;
 
@@ -2960,15 +2960,22 @@ void AUWipeoutGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 	int32& PairDmg = LifeDamageMap.FindOrAdd(Key);
 	PairDmg += ActualDamage;
 
-	// Siphon: heal attacker for a percentage of raw damage dealt
+	// Siphon: heal attacker for a percentage of credited damage dealt.
 	AUTCharacter* AttackerChar = Attacker->GetUTCharacter();
-	if (AttackerChar && !AttackerChar->IsDead() && !AttackerChar->IsPendingKillPending())
+	if (AttackerChar && AttackerChar->Health > 0 && !AttackerChar->IsDead() && !AttackerChar->IsPendingKillPending())
 	{
 		AUTSiphonPowerup* Siphon = AttackerChar->FindInventoryType<AUTSiphonPowerup>(
 			AUTSiphonPowerup::StaticClass(), false);
 		if (Siphon)
 		{
-			int32 HealAmount = FMath::CeilToInt(DamageAmount * Siphon->SiphonPercent);
+			// Existing cooked BP_SiphonPowerup assets store 75, although the native
+			// property is a fraction. Accept both 75 and 0.75 as 75% so the fix also
+			// works with those paks, then bound invalid values before integer conversion.
+			const float ConfiguredPercent = Siphon->SiphonPercent;
+			const float SiphonFraction = FMath::IsFinite(ConfiguredPercent)
+				? FMath::Clamp(ConfiguredPercent > 1.f ? ConfiguredPercent * 0.01f : ConfiguredPercent, 0.f, 1.f)
+				: 0.f;
+			int32 HealAmount = FMath::CeilToInt(ActualDamage * SiphonFraction);
 			int32 NewHealth = FMath::Min<int32>(AttackerChar->Health + HealAmount, Siphon->HealCap);
 			if (NewHealth > AttackerChar->Health)
 			{

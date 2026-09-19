@@ -15,8 +15,8 @@ class NETCODEPLUS_API AUTSiphonPowerup : public AUTTimedPowerup
 {
 	GENERATED_UCLASS_BODY()
 
-	/** Fraction of damage dealt that heals the attacker (0.5 = 50%) */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Siphon")
+	/** Fraction of damage dealt that heals the attacker (0.75 = 75%). Legacy saved values above 1 are interpreted as percentages. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Siphon", meta = (ClampMin = "0.0", ClampMax = "1.0", UIMin = "0.0", UIMax = "1.0"))
 	float SiphonPercent;
 
 	/** Maximum health the siphon can heal up to (199 = overheal like vials) */

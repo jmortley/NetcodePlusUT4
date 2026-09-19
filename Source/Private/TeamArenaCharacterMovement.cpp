@@ -256,6 +256,47 @@ void UTeamArenaCharacterMovement::UpdateTeamCollisionIgnores()
     }
 }
 
+bool UTeamArenaCharacterMovement::FlushPendingMoveForShot()
+{
+    AUTCharacter* UTCharacterOwner = Cast<AUTCharacter>(CharacterOwner);
+    if (!UTCharacterOwner || GetNetMode() != NM_Client
+        || UTCharacterOwner->Role != ROLE_AutonomousProxy
+        || !UTCharacterOwner->IsLocallyControlled() || UTCharacterOwner->IsDead()
+        || UTCharacterOwner->bClientUpdating || bJustTeleported
+        || LastPreparedMoveFrame != GFrameCounter)
+    {
+        return false;
+    }
+
+    FNetworkPredictionData_Client_Character* ClientData = GetPredictionData_Client_Character();
+    if (!ClientData || ClientData->bUpdatePosition || ClientData->SavedMoves.Num() == 0)
+    {
+        return false;
+    }
+    const FSavedMovePtr& Move = ClientData->SavedMoves.Last();
+    if (!Move.IsValid() || Move->bOldTimeStampBeforeReset
+        || !FMath::IsFinite(Move->TimeStamp) || !FMath::IsFinite(ClientData->ClientUpdateTime)
+        || Move->TimeStamp <= ClientData->ClientUpdateTime
+        || Move->TimeStamp != ClientData->CurrentTimeStamp
+        || Move->TimeStamp != LastPreparedMoveTimeStamp
+        || !Move->SavedLocation.Equals(UTCharacterOwner->GetActorLocation(), KINDA_SMALL_NUMBER)
+        || Move->MovementMode != PackNetworkMovementMode()
+        || Move->EndBase.Get() != UTCharacterOwner->GetMovementBase()
+        || Move->EndBoneName != UTCharacterOwner->GetBasedMovement().BoneName
+        || (MovementBaseUtility::UseRelativeLocation(Move->EndBase.Get())
+            && !Move->SavedRelativeLocation.Equals(UTCharacterOwner->GetBasedMovement().Location, KINDA_SMALL_NUMBER)))
+    {
+        return false;
+    }
+
+    // The move already contains simulated movement. Only add UT's existing shot
+    // marker, which bypasses batching and makes its saved rotation travel too.
+    // Never alter its timestamp/position or resend a move already submitted.
+    static_cast<FSavedMove_UTCharacter*>(Move.Get())->bShotSpawned = true;
+    UTCallServerMove();
+    return true;
+}
+
 void UTeamArenaCharacterMovement::UTCallServerMove()
 {
     AUTCharacter* UTCharacterOwner = Cast<AUTCharacter>(CharacterOwner);
@@ -268,6 +309,17 @@ void UTeamArenaCharacterMovement::UTCallServerMove()
 
     // Decide whether to hold off on move
     const FSavedMovePtr& NewMove = ClientData->SavedMoves.Last();
+    if (!NewMove.IsValid())
+    {
+        return;
+    }
+    // Stock ReplicateMoveToServer calls here after recording each new move.
+    // Re-entering for a flush must not make an older frame appear fresh again.
+    if (NewMove->TimeStamp != LastPreparedMoveTimeStamp)
+    {
+        LastPreparedMoveTimeStamp = NewMove->TimeStamp;
+        LastPreparedMoveFrame = GFrameCounter;
+    }
     if (CanDelaySendingMove(NewMove))
     {
         // --- HIGH-FPS FIX #5: Adaptive move batch cadence ---

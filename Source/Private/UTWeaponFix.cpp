@@ -6,6 +6,7 @@
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "TeamArenaCharacter.h"
+#include "TeamArenaCharacterMovement.h"
 #include "UTWeaponAttachment.h"
 #include "Engine/World.h"
 #include "Components/InputComponent.h"
@@ -19,6 +20,7 @@
 #include "UTWeaponStateZooming.h"
 #include "UTWeaponStateFiringSpinUp.h"
 #include "UTPlusShockRifle.h"
+#include "UTPlusSniper.h"
 #include "UTPlusProj_ShockBall.h"
 #include "UTPlusProj_Rocket.h"
 #include "UTPlusProj_FlakShell.h"
@@ -336,6 +338,28 @@ static TAutoConsoleVariable<int32> CVarInstagibSharedHold(
     TEXT("Preserve held fire when the other identical Instagib beam mode is pressed. "
          "1=enabled, 0=legacy cross-mode behavior. Normal Shock/core modes are unaffected."),
     ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarFlushMoveBeforePrecisionFire(
+    TEXT("ncp.FlushMoveBeforePrecisionFire"), 1,
+    TEXT("Submit fresh queued movement before Shock/Instagib/Sniper hitscan fire. Client-only, existing 328 messages. 0 disables."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarAlwaysSendFireZ(
+    TEXT("ncp.AlwaysSendFireZ"), 1,
+    TEXT("Always encode client eye height in the existing 328 fire Z byte. Client-only. 0 restores omission near BaseEyeHeight."),
+    ECVF_Default);
+
+static uint8 EncodeClientFireZOffset(float RawOffset, float DefaultOffset, bool bAlwaysSend)
+{
+    // Zero is the legacy 'use server default' sentinel, not an explicit height.
+    // Retain the existing one-unit codec; invalid view data falls back safely.
+    if (!FMath::IsFinite(RawOffset)
+        || (!bAlwaysSend && FMath::IsNearlyEqual(RawOffset, DefaultOffset, 1.f)))
+    {
+        return 0;
+    }
+    return (uint8)FMath::Clamp(RawOffset + 127.5f, bAlwaysSend ? 1.f : 0.f, 255.f);
+}
 
 static TAutoConsoleVariable<float> CVarVisualHitscanClaimTolerance(
     TEXT("ncp.VisualHitscanClaimTolerance"), 4.0f,
@@ -3197,12 +3221,9 @@ void AUTWeaponFix::FireShot()
 		uint8 ZOffset = 0;
 		if (UTOwner)
 		{
-			float RawOffset = UTOwner->GetPawnViewLocation().Z - UTOwner->GetActorLocation().Z;
-			float DefaultOffset = UTOwner->BaseEyeHeight;
-			if (!FMath::IsNearlyEqual(RawOffset, DefaultOffset, 1.0f))
-			{
-				ZOffset = (uint8)FMath::Clamp(RawOffset + 127.5f, 0.f, 255.f);
-			}
+			const float RawOffset = UTOwner->GetPawnViewLocation().Z - UTOwner->GetActorLocation().Z;
+			ZOffset = EncodeClientFireZOffset(RawOffset, UTOwner->BaseEyeHeight,
+				CVarAlwaysSendFireZ.GetValueOnGameThread() != 0);
 		}
 
 		AUTCharacter* ClientHitChar = nullptr;
@@ -3359,6 +3380,27 @@ void AUTWeaponFix::FireShot()
 				CurrentFireMode, GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
 				(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
 				LastFireTime.IsValidIndex(0) ? LastFireTime[0] : -1.f, GetRefireTime(0));
+		}
+		// Ordinary input-driven shots already sent their marked move. This only
+		// catches a fresh unsent frame when a timer/buffer dispatch bypassed that
+		// prediction; projectile modes and retries retain their existing path.
+		if (CVarFlushMoveBeforePrecisionFire.GetValueOnGameThread() != 0
+			&& (Cast<AUTPlusShockRifle>(this) || Cast<AUTPlusSniper>(this))
+			&& bTrackHitScanReplication && InstantHitInfo.IsValidIndex(CurrentFireMode)
+			&& InstantHitInfo[CurrentFireMode].DamageType != nullptr
+			&& InstantHitInfo[CurrentFireMode].ConeDotAngle <= 0.f
+			&& (!ProjClass.IsValidIndex(CurrentFireMode) || ProjClass[CurrentFireMode] == nullptr)
+			&& UTOwner && UTOwner->GetWeapon() == this)
+		{
+			if (UTeamArenaCharacterMovement* Movement = Cast<UTeamArenaCharacterMovement>(UTOwner->GetCharacterMovement()))
+			{
+				const bool bFlushed = Movement->FlushPendingMoveForShot();
+				if (bFlushed && FireDbg())
+				{
+					UE_LOG(LogUTWeaponFix, Warning, TEXT("[NCFireMoveFlush] frame=%u event=%d mode=%d weapon=%s"),
+						(uint32)GFrameCounter, NextEventIndex, CurrentFireMode, *GetName());
+				}
+			}
 		}
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
 			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);

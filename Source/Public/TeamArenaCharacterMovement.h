@@ -31,6 +31,8 @@ public:
     //~ Begin UUTCharacterMovement Interface
     virtual bool CanDodge() override;
     virtual void UTCallServerMove() override;
+    /** Submit a fresh unsent movement frame using the existing shot flag. No resimulation. */
+    bool FlushPendingMoveForShot();
     virtual void SmoothClientPosition(float DeltaTime) override;
     /** BSP slope-edge stick fix: stock reduces only Result.Z in the slope-dodge-boost
      *  branch, tilting the slide vector into the surface it just left; we apply the same
@@ -52,6 +54,10 @@ public:
 
 
 protected:
+    /** Local bookkeeping only: reject a saved frame left over from an earlier tick. */
+    uint64 LastPreparedMoveFrame = MAX_uint64;
+    float LastPreparedMoveTimeStamp = -1.f;
+
     /** Last time we updated team collision ignores */
     double LastTeamCollisionUpdateTime;
 

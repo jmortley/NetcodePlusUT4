@@ -892,6 +892,57 @@ static void TickInstantReplayJoinGuard()
 	}
 }
 
+// The stock sliders read the Game.ini-backed controller defaults, but profile
+// application overwrites the live controller's bob values. Restore the saved
+// local settings during play. Read the config cache (no disk I/O), so a
+// settings-dialog OK is picked up through its normal SaveConfig path.
+//
+// Deliberately do not mutate or save the profile here: it may still be the
+// provisional local profile while an asynchronous cloud read is pending. Saving
+// it would upload unrelated defaults/binds too. Game.ini already persists these
+// values; the stock dialog remains responsible for explicit profile saves.
+// Do not modify the base controller CDO: inherited SaveConfig can then elide
+// matching INI keys. Repairing that stock Blueprint-dialog behavior is separate.
+static void ReconcileLocalBobFromGameIni(UWorld* World)
+{
+	if (World == nullptr || GEngine == nullptr || GConfig == nullptr
+		|| World->GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	const TCHAR* const Section = TEXT("/Script/UnrealTournament.UTPlayerController");
+	float ViewBob = 0.f;
+	float WeaponBob = 0.f;
+	const bool bHasViewBob = GConfig->GetFloat(Section, TEXT("EyeOffsetGlobalScaling"), ViewBob, GGameIni)
+		&& FMath::IsFinite(ViewBob);
+	const bool bHasWeaponBob = GConfig->GetFloat(Section, TEXT("WeaponBobGlobalScaling"), WeaponBob, GGameIni)
+		&& FMath::IsFinite(WeaponBob);
+	if (!bHasViewBob && !bHasWeaponBob)
+	{
+		return;
+	}
+
+	for (FLocalPlayerIterator It(GEngine, World); It; ++It)
+	{
+		AUTPlayerController* const PC = Cast<AUTPlayerController>(It->PlayerController);
+		if (PC == nullptr || !PC->IsLocalController() || PC->GetWorld() != World)
+		{
+			continue;
+		}
+		// Exact comparison preserves a configured zero even for very small stale
+		// profile values; fractional settings and custom weapon scaling are retained.
+		if (bHasViewBob && PC->EyeOffsetGlobalScaling != ViewBob)
+		{
+			PC->EyeOffsetGlobalScaling = ViewBob;
+		}
+		if (bHasWeaponBob && PC->WeaponBobGlobalScaling != WeaponBob)
+		{
+			PC->WeaponBobGlobalScaling = WeaponBob;
+		}
+	}
+}
+
 static bool TickHudTeamColours(float DeltaTime)
 {
 	// Flag-cloth wind needs a per-frame update (smooth gusting/direction); the colour/outline work is
@@ -903,6 +954,18 @@ static bool TickHudTeamColours(float DeltaTime)
 
 	if (GEngine)
 	{
+		// Visit every playable world for bob (including PIE). The HUD work below
+		// intentionally stops at the first game world.
+		if (bSlowTick)
+		{
+			for (const FWorldContext& Context : GEngine->GetWorldContexts())
+			{
+				if (Context.WorldType == EWorldType::Game || Context.WorldType == EWorldType::PIE)
+				{
+					ReconcileLocalBobFromGameIni(Context.World());
+				}
+			}
+		}
 		for (const FWorldContext& Context : GEngine->GetWorldContexts())
 		{
 			if (Context.WorldType == EWorldType::Game && Context.World())
