@@ -1890,6 +1890,50 @@ bool AUWipeoutGame::CheckScore_Implementation(AUTPlayerState* Scorer)
 // RESTART PLAYER — Allows mid-round spawns when timer fires
 // ============================================================================
 
+bool AUWipeoutGame::RestoreLivePlayerState(AController* Controller)
+{
+	if (!Controller || GetNetMode() == NM_Client || Controller->IsPendingKillPending()) return false;
+
+	AUTPlayerState* PS = Cast<AUTPlayerState>(Controller->PlayerState);
+	AUTCharacter* Character = Cast<AUTCharacter>(Controller->GetPawn());
+	if (!PS || PS->IsPendingKill() || PS->bOnlySpectator || PS->bIsInactive || !PS->Team
+		|| PS->GetOwner() != Controller || PendingRespawns.Contains(PS)
+		|| RoundEliminatedPlayers.Contains(PS)
+		|| !Character || Character->Health <= 0 || Character->IsDead()
+		|| Character->IsPendingKillPending() || Character->bTearOff
+		|| Character->GetController() != Controller || Character->PlayerState != PS)
+	{
+		return false;
+	}
+
+	AUTPlayerController* PC = Cast<AUTPlayerController>(Controller);
+	const bool bStaleLifeState = PS->bOutOfLives || PS->RespawnWaitTime != 0.f || PS->RespawnTime != 0.f;
+	const bool bStaleControllerState = PC && !PC->IsInState(NAME_Playing);
+	if (!bStaleLifeState && !bStaleControllerState) return false;
+
+	// Reconnects can restore an eliminated PlayerState before an allowed spawn.
+	// Repair only the state contradicting this verified live possession; never
+	// send another RestartPlayer through the inventory/spawn path.
+	UE_LOG(LogGameMode, Warning,
+		TEXT("Wipeout: restoring live player state for %s (outOfLives=%d wait=%.3f remaining=%.3f controllerStateStale=%d)"),
+		*PS->PlayerName, PS->bOutOfLives ? 1 : 0, PS->RespawnWaitTime, PS->RespawnTime,
+		bStaleControllerState ? 1 : 0);
+	PS->bOutOfLives = false;
+	PS->RespawnWaitTime = 0.f;
+	PS->RespawnTime = 0.f;
+	if (bStaleLifeState) PS->ForceNetUpdate();
+	if (PC)
+	{
+		PC->ChangeState(NAME_Playing);
+		PC->SetViewTarget(Character);
+		// Existing RPC restores client possession, input flags and the pawn camera.
+		PC->ClientRestart(Character);
+		// Blueprint controllers may disable automatic camera management.
+		PC->ClientSetViewTarget(Character);
+	}
+	return true;
+}
+
 void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 {
 	if (!NewPlayer) return;
@@ -1915,16 +1959,25 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 	// stock AddInventory dedupes only by instance (not class), so the whole arsenal is
 	// granted twice = the doubled weapon bar. First spawn (no pawn) is unaffected; the
 	// live/lineup paths below already relied on this guard.
-	if (NewPlayer->GetPawn()) return;
+	AUTGameState* GS = GetGameState<AUTGameState>();
+	const bool bLineupIsActive = (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers);
+	if (NewPlayer->GetPawn())
+	{
+		if (!bLineupIsActive && (GetMatchState() == MatchState::WaitingToStart
+			|| (bRoundInProgress && GetMatchState() == MatchState::InProgress)))
+		{
+			RestoreLivePlayerState(NewPlayer);
+		}
+		return;
+	}
 
 	if (GetMatchState() == MatchState::WaitingToStart)
 	{
 		Super::RestartPlayer(NewPlayer);
+		if (!bLineupIsActive) RestoreLivePlayerState(NewPlayer);
 		return;
 	}
 
-	AUTGameState* GS = GetGameState<AUTGameState>();
-	bool bLineupIsActive = (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers);
 	if (bLineupIsActive)
 	{
 		Super::RestartPlayer(NewPlayer);
@@ -2031,6 +2084,7 @@ void AUWipeoutGame::RestartPlayer(AController* NewPlayer)
 		Super::RestartPlayer(NewPlayer);
 		OverriddenPlayerStart = nullptr;
 		bHasPendingHybridSpawnTransform = false;
+		RestoreLivePlayerState(NewPlayer);
 
 		if (bUsedHybridTransform && NewPlayer->GetPawn())
 		{
@@ -3237,7 +3291,8 @@ void AUWipeoutGame::DelayedInitialWinCheck()
 
 void AUWipeoutGame::EnforceRoundSpectatorLock()
 {
-	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client)
+	if (!bRoundInProgress || bWarmupMode || GetNetMode() == NM_Client
+		|| GetMatchState() != MatchState::InProgress)
 	{
 		return;
 	}
@@ -3247,11 +3302,22 @@ void AUWipeoutGame::EnforceRoundSpectatorLock()
 	{
 		return;
 	}
+	const AUTGameState* GS = GetGameState<AUTGameState>();
+	if (GS && GS->ActiveLineUpHelper && GS->ActiveLineUpHelper->bIsPlacingPlayers)
+	{
+		return;
+	}
 
 	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
 	{
 		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
 		AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
+		// Recover a stale reconnect life flag without polling healthy players with
+		// restart RPCs. The helper excludes queued/eliminated and unowned pawns.
+		if (PS && PS->bOutOfLives)
+		{
+			RestoreLivePlayerState(PC);
+		}
 		if (!NCPlusRoundSpectate::ShouldLock(PC, PS))
 		{
 			continue;
@@ -3262,7 +3328,17 @@ void AUWipeoutGame::EnforceRoundSpectatorLock()
 
 void AUWipeoutGame::ForceTeamSpectate(AUTPlayerState* DeadPS)
 {
-	if (!DeadPS) return;
+	if (!DeadPS || DeadPS->IsPendingKill() || !DeadPS->bOutOfLives) return;
+
+	AController* Controller = Cast<AController>(DeadPS->GetOwner());
+	AUTCharacter* Character = Controller ? Cast<AUTCharacter>(Controller->GetPawn()) : nullptr;
+	// A delayed death-camera callback must not unpossess a pawn that has since
+	// respawned. Check before the Blueprint hook as well as the native path.
+	if (Character && Character->Health > 0 && !Character->IsDead()
+		&& !Character->IsPendingKillPending() && !Character->bTearOff)
+	{
+		return;
+	}
 
 	if (useBPSpecFunction)
 	{
@@ -3270,7 +3346,7 @@ void AUWipeoutGame::ForceTeamSpectate(AUTPlayerState* DeadPS)
 		return;
 	}
 
-	AUTPlayerController* PC = Cast<AUTPlayerController>(DeadPS->GetOwner());
+	AUTPlayerController* PC = Cast<AUTPlayerController>(Controller);
 	if (!PC) return;
 
 	PC->ChangeState(NAME_Spectating);

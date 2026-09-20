@@ -106,6 +106,7 @@ All weapons inherit lag-compensated hit detection by default. Subclasses provide
   - Hidden-while-respawning portrait visuals + last-man-standing pulse.
   - Optional **anti-camp** watch (server-tunable, default on) — flags a player who holds a tight box too long; detection is C++, the warn/response is Blueprint. Retune or disable via `[NetcodePlus] ElimEnableAntiCamp` / `ElimCampThreshold` / `ElimCampCheckInterval` / `ElimCampWarnCooldown` (SERVER-ADMINS §5).
 - **Wipeout** — Team elimination with respawn waves, portrait-strip HUD, side-by-side scoreboard with player portraits, K/D + B/A tracking, sudden death OT, alternating-team-first round spawning. Same carry-aware Glicko blend as ElimPlus.
+  - **Reconnect life-state repair:** after an allowed spawn, verify live possession before clearing stale eliminated/respawn flags and restoring the player's input and camera through existing controller RPCs. This prevents a restored PlayerState from leaving an alive crash-rejoining player in spectator UI. A bounded check in the existing one-second spectator sweep recovers the same contradiction, and delayed spectate callbacks cannot take a live pawn away. Actual spectators, queued respawns, eliminated players and end-of-round cameras keep their existing handling. Server plugin update only; no Blueprint controller replacement or 328 protocol change.
 - **ShockDom** — 4v4 Shock-Domination (3 control points). Includes match clock HUD, opposing-side cluster spawning at match start, configurable scoring tick.
 
 ### Spawn System (Wipeout + ElimPlus)

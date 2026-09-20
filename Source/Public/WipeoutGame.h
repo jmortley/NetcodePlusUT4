@@ -831,6 +831,9 @@ protected:
 	// SPECTATING
 	// =======================================================================
 
+	/** Repair stale life/controller state on an already possessed live gameplay pawn. Never spawns or grants inventory. */
+	bool RestoreLivePlayerState(AController* Controller);
+
 	void ForceTeamSpectate(AUTPlayerState* DeadPS);
 
 	/**
