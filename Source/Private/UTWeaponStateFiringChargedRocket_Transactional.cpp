@@ -210,6 +210,8 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
         GetOuterAUTWeapon()->GetUTOwner()->ClearFiringInfo();
     }
 
+    NCFireDiagnostics::ChargeEnded(GetOuterAUTWeapon(), 1);
+
 }
 
 void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
@@ -485,6 +487,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
     // One or more completed rockets form the release snapshot. A partly loaded
     // next rocket is cancelled, not promoted, regardless of ping.
     bReleaseCommitted = true;
+    NCFireDiagnostics::ChargeCommitted(Weapon, 1, LoadedRockets);
     const float CancelledLoadRemaining = TimerManager.GetTimerRemaining(LoadTimerHandle);
     TimerManager.ClearTimer(LoadTimerHandle);
     TimerManager.ClearTimer(GraceTimerHandle);

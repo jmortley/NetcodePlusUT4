@@ -2050,6 +2050,7 @@ bool AUTWeaponFix::TryPreserveInstagibHeldFire(uint8 FireModeNum)
 
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
     NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum);
 	if (FireModeNum == 0 && ShockInputTraceInputComponent != nullptr
 		&& Cast<AUTPlusShockRifle>(this) != nullptr)
@@ -3089,7 +3090,9 @@ bool AUTWeaponFix::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
 
     const uint32 ReplayGeneration = bDeferredReplayBoundary ? DeferredContext->Generation : 0;
 
+    NCFireDiagnostics::SequenceBegin(this, FireModeNum, true);
 	const bool bResult = Super::BeginFiringSequence(FireModeNum, bClientFired);
+    NCFireDiagnostics::SequenceEnd(this, FireModeNum, true, bResult);
 
 	// Super can synchronously fire, remove, or destroy the weapon. Re-find the
 	// external context instead of retaining a pointer across that call.
@@ -3424,7 +3427,7 @@ void AUTWeaponFix::FireShot()
 			}
 		}
         if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("SEND"), CurrentFireMode, NextEventIndex, 0,
-            FString::Printf(TEXT("clientT=%.6f"), ClientTimestamp));
+            NCFireDiagnostics::WireTimestamp(ClientTimestamp));
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
 			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
         QueueResendStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
@@ -3475,6 +3478,8 @@ void AUTWeaponFix::FireShot()
             && !Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState)
             && !(CurrentState && CurrentState->IsFiring()))
         {
+            NCFireDiagnostics::Record(this, TEXT("BLOCK_DISPATCH"), CurrentFireMode, INDEX_NONE, 0,
+                TEXT("reason=stock_inactive"), TEXT("stream"));
             if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
                 TEXT("[NCFireAuth] BLOCK_SHOT source=StockInactive weapon=%s mode=%d"), *GetName(), CurrentFireMode);
             return;
@@ -3682,6 +3687,7 @@ void AUTWeaponFix::StopOwnerFireInternal(uint8 FireModeNum)
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, false);
     NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum);
 	if (FireModeNum == 0 && ShockInputTraceInputComponent != nullptr
 		&& Cast<AUTPlusShockRifle>(this) != nullptr)
@@ -3847,6 +3853,8 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
             }
 
             // 3. Send the transactional stop and queue identical retries.
+            NCFireDiagnostics::Record(this, TEXT("STOP_SEND"), FireModeNum, EventIndex, 0,
+                TEXT("charged=1"), TEXT("fixed_stop"));
             ServerStopFireFixed(FireModeNum, EventIndex);
             QueueResendStopFireFixed(FireModeNum, EventIndex);
         }
@@ -3945,6 +3953,8 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
 				UTOwner->IsPendingFire(0) ? 1 : 0,
 				GetWorldTimerManager().GetTimerRemaining(DeferredActiveStateHandle));
 		}
+        NCFireDiagnostics::Record(this, TEXT("STOP_SEND"), FireModeNum, EventIndex, 0,
+            TEXT("charged=0"), TEXT("fixed_stop"));
         ServerStopFireFixed(FireModeNum, EventIndex);
         QueueResendStopFireFixed(FireModeNum, EventIndex);
     }
@@ -4179,7 +4189,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
     if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("RECEIVE"), FireModeNum, InFireEventIndex, 0,
-        FString::Printf(TEXT("clientT=%.6f retry=%d"), ClientTimestamp, FixedRetryWeapons.Contains(this)));
+        NCFireDiagnostics::WireTimestamp(ClientTimestamp) + FString::Printf(TEXT(" retry=%d"), FixedRetryWeapons.Contains(this)));
     // 1. VALIDATION (Your existing transactional checks)
     UWorld* World = GetWorld();
     if (!World) return;
@@ -4387,7 +4397,11 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 		ClearDeferredEquipFireContext();
         AcceptedRequestGeneration = AllocateDeferredEquipFireGeneration();
         DeferredEquipFireGenerations.Add(DeferredWeaponKey, AcceptedRequestGeneration);
+        NCFireDiagnostics::Record(this, TEXT("ACCEPT"), FireModeNum, InFireEventIndex, AcceptedRequestGeneration,
+            TEXT("source=FixedSynchronous deferredEquip=0 deferredState=0"));
 	}
+
+    NCFireDiagnostics::FRequestScope TraceRequest(this, FireModeNum, InFireEventIndex, AcceptedRequestGeneration);
 
     CachedTransactionalRotation = ClientViewRot;
 	// Exact ZeroRotator is a valid client direction. Scope every accepted fixed
@@ -4970,7 +4984,7 @@ bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFire
 
 void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex)
 {
-    NCFireDiagnostics::Record(this, TEXT("STOP_RECEIVE"), FireModeNum, InFireEventIndex);
+    NCFireDiagnostics::Record(this, TEXT("STOP_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT(""), TEXT("fixed_stop"));
     // Diagnostic only: the existing wire carries a shot watermark, not a unique
     // physical release generation. Do not infer ownership from PendingFire.
     if (FireProvenance())
@@ -4996,6 +5010,8 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
     if (LastProcessedStopEventIndex.IsValidIndex(FireModeNum)
         && InFireEventIndex <= LastProcessedStopEventIndex[FireModeNum])
     {
+        NCFireDiagnostics::Record(this, TEXT("STOP_RESULT"), FireModeNum, InFireEventIndex, 0,
+            TEXT("accepted=0 reason=repeated_or_older"), TEXT("fixed_stop"));
         return;
     }
 
@@ -5007,10 +5023,14 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
         const int32 LastAuthoritativeIndex = AuthoritativeFireEventIndex[FireModeNum];
         if (InFireEventIndex < LastAuthoritativeIndex)
         {
+            NCFireDiagnostics::Record(this, TEXT("STOP_RESULT"), FireModeNum, InFireEventIndex, 0,
+                TEXT("accepted=0 reason=older_than_auth"), TEXT("fixed_stop"));
             return;
         }
         if (int64(InFireEventIndex) > int64(LastAuthoritativeIndex) + 10)
         {
+            NCFireDiagnostics::Record(this, TEXT("STOP_RESULT"), FireModeNum, InFireEventIndex, 0,
+                TEXT("accepted=0 reason=lookahead"), TEXT("fixed_stop"));
             UE_LOG(LogUTWeaponFix, Warning,
                 TEXT("[ServerStopFireFixed] Rejected sequence jump. Mode %d EventIndex %d vs LastProcessed %d"),
                 FireModeNum, InFireEventIndex, LastAuthoritativeIndex);
@@ -5023,6 +5043,8 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
         LastProcessedStopEventIndex[FireModeNum] = InFireEventIndex;
     }
 
+    NCFireDiagnostics::Record(this, TEXT("STOP_RESULT"), FireModeNum, InFireEventIndex, 0,
+        TEXT("accepted=1 reason=process"), TEXT("fixed_stop"));
 	// Do not cancel an already accepted equip-queued shot: the owning client has
 	// predicted it and the server has ACKed its reservation. Remember that the
 	// physical button is up, commit that one shot with its saved payload, then
@@ -5134,6 +5156,9 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
         UTOwner->SetPendingFire(FireModeNum, false);
     }
 
+    if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("STOP_APPLY"), FireModeNum, InFireEventIndex, 0,
+        FString::Printf(TEXT("ownsLifetime=%d matchingState=%d"), bOwnsWeaponStateLifetime,
+            FiringState.IsValidIndex(FireModeNum) && GetCurrentState() == FiringState[FireModeNum]), TEXT("fixed_stop"));
 	if (!bOwnsWeaponStateLifetime)
 	{
 		TargetedCharacter = nullptr;
@@ -6707,6 +6732,8 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 
 void AUTWeaponFix::SpawnDelayedFakeProjectile()
 {
+    NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), CurrentFireMode, INDEX_NONE, 0,
+        TEXT("reason=legacy_timer_callback identityKnown=0"), TEXT("local"));
 	// Legacy non-Flak path. Kept unchanged while ncp.RocketPrimaryDiag establishes
 	// whether the M1 symptom is cosmetic prediction delay or authoritative cadence loss.
 	if (RocketPrimaryDiagFor(this, 0, 2))
@@ -6741,27 +6768,35 @@ void AUTWeaponFix::SpawnDelayedFlakFakeProjectile(uint32 ReservationId)
 
     if (RequestIndex == INDEX_NONE)
     {
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), CurrentFireMode, INDEX_NONE, 0,
+            FString::Printf(TEXT("reason=reservation_missing reservation=%u"), ReservationId), TEXT("local"));
         return; // ACK/cleanup won the race and cancelled this request.
     }
 
     // Copy before RemoveAtSwap: timer delegates carry only the stable ID, never an array
     // element reference that could have been invalidated by another shard reservation.
     const FNetcodeDelayedFlakProjectile Request = DelayedFlakProjectiles[RequestIndex];
+    if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), Request.FireMode, Request.EventIndex, 0,
+        FString::Printf(TEXT("reason=reservation_callback reservation=%u"), Request.ReservationId), TEXT("local"));
     DelayedFlakProjectiles.RemoveAtSwap(RequestIndex, 1, false);
 
-    SpawnNetPredictedProjectileInternal(
+    AUTProjectile* const Result = SpawnNetPredictedProjectileInternal(
         Request.ProjectileClass,
         Request.SpawnLocation,
         Request.SpawnRotation,
         Request.FireMode,
         Request.EventIndex,
         false); // direct spawn: the callback never re-enters the excess-ping decision
+    if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), Request.FireMode, Request.EventIndex, 0,
+        FString::Printf(TEXT("reason=callback_result reservation=%u result=%s"), Request.ReservationId, Result ? TEXT("ok") : TEXT("null")), TEXT("local"));
 }
 
 void AUTWeaponFix::ClearDelayedFlakFakeProjectiles()
 {
     for (FNetcodeDelayedFlakProjectile& Request : DelayedFlakProjectiles)
     {
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), Request.FireMode, Request.EventIndex, 0,
+            FString::Printf(TEXT("reason=cleanup_cancel reservation=%u"), Request.ReservationId), TEXT("local"));
         GetWorldTimerManager().ClearTimer(Request.TimerHandle);
     }
     DelayedFlakProjectiles.Empty();
@@ -6877,6 +6912,8 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 							&& Existing.EventIndex == CapturedEventIndex
 							&& Existing.ProjectileClass == ProjectileClass)
 						{
+                        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), CapturedFireMode, CapturedEventIndex, 0,
+                            FString::Printf(TEXT("reason=duplicate_reservation reservation=%u"), Existing.ReservationId), TEXT("local"));
 							return nullptr;
 						}
 					}
@@ -6917,11 +6954,15 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 					&AUTWeaponFix::SpawnDelayedFlakFakeProjectile,
 					Request.ReservationId);
 				GetWorldTimerManager().SetTimer(Request.TimerHandle, DelayedDelegate, SleepTime, false);
+                if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), CapturedFireMode, CapturedEventIndex, 0,
+                    FString::Printf(TEXT("reason=scheduled reservation=%u delay=%.6f"), Request.ReservationId, SleepTime), TEXT("local"));
 				return nullptr;
 			}
 
 			// Legacy non-Flak behavior remains available for the rocket diagnostic run.
 			const bool bLegacyTimerAlreadyActive = GetWorldTimerManager().IsTimerActive(SpawnDelayedFakeProjHandle);
+            NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), CapturedFireMode, CapturedEventIndex, 0,
+                bLegacyTimerAlreadyActive ? TEXT("reason=suppress_shared_timer_busy") : TEXT("reason=arm_shared_timer"), TEXT("local"));
 			if (RocketPrimaryDiagFor(this, CapturedFireMode, 2))
 			{
 				UE_LOG(LogUTWeaponFix, Warning,
@@ -8009,6 +8050,8 @@ void AUTWeaponFix::FireCone()
             Hit.Actor->TakeDamage(InstantHitInfo[CurrentFireMode].Damage, FUTPointDamageEvent(InstantHitInfo[CurrentFireMode].Damage, Hit, FireDir, InstantHitInfo[CurrentFireMode].DamageType, FireDir * GetImpartedMomentumMag(Hit.Actor.Get())), UTOwner->Controller, this);
         }
     }
+    NCFireDiagnostics::Hitscan(this, CurrentFireMode, FHitResult(), Role == ROLE_Authority);
+
 }
 
 
@@ -9165,8 +9208,10 @@ void AUTWeaponFix::ResendNextFireEventFixed()
         // Get the next event in the queue
         FPendingFireEventFix Event = ResendFireEvents[0];
         ResendFireEvents.RemoveAt(0);
-        NCFireDiagnostics::Record(this, Event.bIsStartFire ? TEXT("SEND_RETRY") : TEXT("SEND_STOP_RETRY"),
-            Event.FireModeNum, Event.FireEventIndex);
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, Event.bIsStartFire ? TEXT("SEND_RETRY") : TEXT("SEND_STOP_RETRY"),
+            Event.FireModeNum, Event.FireEventIndex, 0,
+            Event.bIsStartFire ? NCFireDiagnostics::WireTimestamp(Event.ClientTimestamp) : FString(),
+            Event.bIsStartFire ? TEXT("fixed") : TEXT("fixed_stop"));
 
         // SEND THE PACKET
         // NOTE: calling this Server function from the Client ONLY sends a packet.
@@ -9308,6 +9353,8 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 		FNetcodeDelayedFlakProjectile& Request = DelayedFlakProjectiles[i];
 		if (Request.FireMode == FireModeNum && Request.EventIndex <= InAuthorizedEventIndex)
 		{
+            if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("LOCAL_PROJECTILE"), Request.FireMode, Request.EventIndex, 0,
+                FString::Printf(TEXT("reason=ack_cancel reservation=%u watermark=%d"), Request.ReservationId, InAuthorizedEventIndex), TEXT("local"));
 			GetWorldTimerManager().ClearTimer(Request.TimerHandle);
 			DelayedFlakProjectiles.RemoveAtSwap(i, 1, false);
 		}
@@ -9397,7 +9444,7 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
         // Wrap-around safe check: if the index is <= last seen, it's old.
         if (InFireEventIndex <= LastIdx && (LastIdx - InFireEventIndex) < 100)
         {
-            NCFireDiagnostics::Record(this, TEXT("RETRY_IGNORED"), FireModeNum, InFireEventIndex, 0, TEXT("reason=already_processed"));
+            NCFireDiagnostics::Record(this, TEXT("RETRY_IGNORED"), FireModeNum, InFireEventIndex, 0, TEXT("reason=watermark_not_newer"));
             return; // Already processed; this watermark is not proof that a shot spawned.
         }
     }
@@ -9941,6 +9988,9 @@ void AUTWeaponFix::ServerUpdateFiringStates_Implementation(uint8 FireSettings)
             || UTOwner->IsDead() || IsPendingKillPending()) return;
         UUTWeaponState* State = FiringState.IsValidIndex(Mode) ? FiringState[Mode] : nullptr;
         const bool bIncoming = (FireSettings & (1 << Mode)) != 0;
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("SYNC_DECISION"), Mode, 255, 0,
+            FString::Printf(TEXT("incoming=%d pendingBit=%d filtered=%d hasState=%d"), bIncoming,
+                UTOwner->IsPendingFire(Mode), Cast<UUTWeaponStateFiring_Transactional>(State) != nullptr, State != nullptr), TEXT("stock"));
         if (!State || UTOwner->IsPendingFire(Mode) == bIncoming) continue;
         const bool bFiltered = Cast<UUTWeaponStateFiring_Transactional>(State) != nullptr;
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
@@ -10017,36 +10067,66 @@ int32 AUTWeaponFix::GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshot
 
 void AUTWeaponFix::ServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired)
 {
-    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStartFire"), TEXT("stock"));
+    NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, true,
+        StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStartFire"));
     Super::ServerStartFire_Implementation(FireModeNum, InFireEventIndex, bClientFired);
 }
 
 void AUTWeaponFix::ServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired)
 {
-    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStartFireOffset"), TEXT("stock"));
+    NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, true,
+        StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStartFireOffset"));
     Super::ServerStartFireOffset_Implementation(FireModeNum, InFireEventIndex, ZOffset, bClientFired);
 }
 
 void AUTWeaponFix::ResendServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired)
 {
-    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFire"), TEXT("stock"));
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RETRY"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFire"), TEXT("stock"));
     Super::ResendServerStartFire_Implementation(FireModeNum, InFireEventIndex, bClientFired);
 }
 
 void AUTWeaponFix::ResendServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired)
 {
-    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFireOffset"), TEXT("stock"));
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RETRY"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFireOffset"), TEXT("stock"));
     Super::ResendServerStartFireOffset_Implementation(FireModeNum, InFireEventIndex, ZOffset, bClientFired);
 }
 
 void AUTWeaponFix::ServerStopFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex)
 {
-    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStopFire"), TEXT("stock"));
+    NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, false,
+        StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStopFire"));
     Super::ServerStopFire_Implementation(FireModeNum, InFireEventIndex);
 }
 
 void AUTWeaponFix::ServerStopFireRecent_Implementation(uint8 FireModeNum, uint8 InFireEventIndex)
 {
-    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStopFireRecent"), TEXT("stock"));
+    NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, false,
+        StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStopFireRecent"));
     Super::ServerStopFireRecent_Implementation(FireModeNum, InFireEventIndex);
+}
+
+// Observe stock validation exactly once; no inference from PendingFire or shared counters.
+bool AUTWeaponFix::ValidateFireEventIndex(uint8 FireModeNum, uint8 InFireEventIndex)
+{
+    const uint8 Before = FireEventIndex;
+    const bool Accepted = Super::ValidateFireEventIndex(FireModeNum, InFireEventIndex);
+    NCFireDiagnostics::StockValidated(this, FireModeNum, InFireEventIndex, Before, FireEventIndex, Accepted);
+    return Accepted;
+}
+void AUTWeaponFix::QueueResendFire(bool bIsStartFire, uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired)
+{
+    NCFireDiagnostics::StockSent(this, FireModeNum, InFireEventIndex, bIsStartFire, bClientFired);
+    Super::QueueResendFire(bIsStartFire, FireModeNum, InFireEventIndex, ZOffset, bClientFired);
+}
+void AUTWeaponFix::EndFiringSequence(uint8 FireModeNum)
+{
+    NCFireDiagnostics::SequenceBegin(this, FireModeNum, false);
+    Super::EndFiringSequence(FireModeNum);
+    NCFireDiagnostics::SequenceEnd(this, FireModeNum, false, true);
+}
+void AUTWeaponFix::DescribeFireTraceLayout()
+{
+    if (!NCFireDiagnostics::Enabled()) return;
+    for (int32 Mode = 0; Mode < FiringState.Num(); ++Mode)
+        NCFireDiagnostics::Layout(this, uint8(Mode), FiringState[Mode]);
 }

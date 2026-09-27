@@ -28,6 +28,7 @@ PERMITTED_SOURCES = NUMBERED_SOURCES | {
 LIFECYCLE_REASONS = frozenset({
     "switch", "death", "drop", "destroyed", "destroy", "travel", "removed",
     "detach", "owner_changed", "equip_lifetime", "bringup",
+    "switch_before_commit", "inactive", "waiting_state_left",
 })
 MARKER = re.compile(r"\[NCFireAuth\]\s+([A-Z_]+)\b(.*)")
 FIELDS = re.compile(r'''(\w+)=("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)''')
@@ -250,6 +251,9 @@ def analyze(records: Iterable[Record], rocket_primary: bool = False) -> Report:
             pending.add(record.context_key)
         else:
             canceled[record.context_key].append(record)
+            if record.values.get("reason", "").lower() in {"switch_before_commit", "inactive", "waiting_state_left"}:
+                report.add("info", "CLIENT_VISIBLE_CANCEL",
+                           f"Accepted reservation cancelled before dispatch: {describe(record)}", record)
             if record.values.get("reason", "").lower() not in LIFECYCLE_REASONS:
                 report.add("unresolved", "UNCLASSIFIED_CANCEL",
                            f"Cancellation needs an explicit lifecycle reason: {describe(record)}", record)

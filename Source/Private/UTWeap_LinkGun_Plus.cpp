@@ -496,6 +496,7 @@ void AUTWeap_LinkGun_Plus::ClientRemoved()
 
 void AUTWeap_LinkGun_Plus::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	if (FireModeNum == 1)
 	{
 		// BYPASS: For the Beam, skip the "Fix" logic (Transactions/Retry Timers).
@@ -682,6 +683,7 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 
 void AUTWeap_LinkGun_Plus::StopFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, false);
 	if (FireModeNum == 1)
 	{
 		// Beam mode - use standard UT logic, skip transactional stuff

@@ -185,6 +185,7 @@ void AUTWeap_LinkGun_NCP::StopFiringEffects_Implementation()
 
 void AUTWeap_LinkGun_NCP::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	// Link primary's 7+ shots/sec cadence is intentionally not transactional.
 	// The beam likewise keeps its stock continuous-state lifecycle.
 	NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
@@ -193,6 +194,7 @@ void AUTWeap_LinkGun_NCP::StartFire(uint8 FireModeNum)
 
 void AUTWeap_LinkGun_NCP::StopFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, false);
 	NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StopFire(FireModeNum);
 }

@@ -448,6 +448,10 @@ public:
     // Guard against race condition: replicated fire RPC arrives after owner dies
     // and weapon is being destroyed. The base class dereferences owner without null check.
     virtual void ServerUpdateFiringStates_Implementation(uint8 FireSettings) override;
+    virtual bool ValidateFireEventIndex(uint8 FireModeNum, uint8 InFireEventIndex) override;
+    virtual void QueueResendFire(bool bIsStartFire, uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired) override;
+    virtual void EndFiringSequence(uint8 FireModeNum) override;
+    void DescribeFireTraceLayout();
     // Diagnostic wrappers for inherited RPCs; no new reflected functions.
     virtual void ServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired) override;
     virtual void ServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired) override;

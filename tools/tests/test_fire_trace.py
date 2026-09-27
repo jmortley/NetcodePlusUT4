@@ -9,23 +9,33 @@ import unittest
 analyze = runpy.run_path(str(Path(__file__).parents[1] / 'check-fire-trace.py'))['analyze']
 
 
+SESSION = '0123456789abcdef0123456789abcdef'
+
+
 def log(side, events, *, end=True, overrides=None):
-    rows = []
-    for seq, (kind, extra) in enumerate(events, 1):
-        values = dict(schema=1, run='test', capture=side, seq=seq, side=side,
+    rows = [f'[NCFireTrace] BEGIN schema=2 run=test session={SESSION} capture={side} seq=1 explicit=1']
+    for seq, (kind, extra) in enumerate(events, 2):
+        values = dict(schema=2, run='test', session=SESSION, capture=side, seq=seq, side=side,
                       world=1 if side == 'client' else 12, driver=2 if side == 'client' else 25,
-                      weapon=111, player=33, owner=77, mode=0, event=42,
-                      generation=0 if side == 'client' else 7, protocol='fixed',
-                      engine='4.27', build='fire-trace-v1', scope=20 if side == 'client' else 40,
-                      actor='local_' + side, **(overrides or {}))
+                      connection=3 if side == 'client' else 26, weaponLocal=101 if side == 'client' else 102,
+                      weapon=111, player=33, owner=77, mode=0, event=42, generation=0, protocol='fixed',
+                      engine='4.27', build='fire-trace-v2', local=1 if side == 'client' else 0,
+                      identity='live', actor='local_' + side)
+        if kind in {'PREDICT', 'DISPATCH', 'DISPATCH_END', 'PROJECTILE', 'HITSCAN'}:
+            values['scope'] = 20 if side == 'client' else 40
+        if side == 'server' and kind in {'ACCEPT', 'DISPATCH', 'DISPATCH_END', 'PROJECTILE', 'HITSCAN', 'CANCEL'}:
+            values['generation'] = 7
+        if kind in {'SEND', 'SEND_RETRY', 'RECEIVE'}:
+            values.update(clientT='1', clientBits='3f800000')
+        values.update(overrides or {})
         values.update(extra)
         rows.append('[NCFireTrace] ' + kind + ' ' + ' '.join(f'{k}={v}' for k, v in values.items()))
     if end:
-        rows.append(f'[NCFireTrace] END schema=1 run=test capture={side} seq={len(rows)+1} limited=0')
+        rows.append(f'[NCFireTrace] END schema=2 run=test session={SESSION} capture={side} seq={len(rows)+1} limited=0')
     return rows
 
 
-CLIENT = [('PREDICT', {}), ('DISPATCH_END', dict(traces=1, damagingTraces=1, projectiles=0))]
+CLIENT = [('SEND', {}), ('PREDICT', {}), ('DISPATCH_END', dict(traces=1, damagingTraces=1, projectiles=0))]
 FIRED = [('RECEIVE', {}), ('ACCEPT', {}), ('DISPATCH', {}),
          ('HITSCAN', dict(damagePath=1, blocking=0)),
          ('DISPATCH_END', dict(traces=1, damagingTraces=1, projectiles=0)), ('ACK_SENT', {})]
@@ -163,7 +173,7 @@ class PairedFireTests(unittest.TestCase):
 
     def test_malformed_row_requires_review(self):
         server = log('server', FIRED)
-        server[0] += ' event=42'
+        server[0] += ' seq=2'
         result = analyze(log('client', CLIENT), server, 'test')
         self.assertFalse(result['capture_complete'])
 

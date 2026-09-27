@@ -93,6 +93,7 @@ AUTPlusSniper::AUTPlusSniper(const FObjectInitializer& ObjectInitializer)
 
 void AUTPlusSniper::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	UUTWeaponStateFiring* const RequestedState = FiringState.IsValidIndex(FireModeNum)
 		? FiringState[FireModeNum] : nullptr;
 	const bool bExplicitZoomStart = RequestedState != nullptr

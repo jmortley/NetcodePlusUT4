@@ -43,6 +43,7 @@ AUTWeap_Minigun_Plus::AUTWeap_Minigun_Plus(const FObjectInitializer& OI)
 
 void AUTWeap_Minigun_Plus::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, true);
 	// MODE SPLIT (2026-07-21):
 	//  - Mode 0 (spin-up hitscan): bypass the transactional RPC path — the stock
 	//    spin-up firing state owns refire timing server-side and there is no
@@ -70,6 +71,7 @@ void AUTWeap_Minigun_Plus::StartFire(uint8 FireModeNum)
 
 void AUTWeap_Minigun_Plus::StopFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::FInputScope TraceInput(this, FireModeNum, false);
 	if (FireModeNum == 1)
 	{
 		AUTWeaponFix::StopFire(FireModeNum);
