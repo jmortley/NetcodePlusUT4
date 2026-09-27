@@ -1,4 +1,5 @@
 #include "UTWeap_LinkGun_Plus.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeaponStateFiringLinkBeamPlus.h"
 #include "UTPlayerController.h"
@@ -105,12 +106,14 @@ void AUTWeap_LinkGun_Plus::FireShot()
 		// BYPASS: Skip AUTWeaponFix's gatekeeper logic.
 		// Call the base engine version directly to handle Visuals/Ammo/Inventory events.
 		// Note: We scope it to AUTWeapon (Grandparent) explicitly.
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 	else if (!bIsInCoolDown)
 	{
 		// Mode 0 is Plasma (Projectile).
 		// Use the standard Fix logic (Transactional) for this.
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 }
@@ -497,11 +500,13 @@ void AUTWeap_LinkGun_Plus::StartFire(uint8 FireModeNum)
 	{
 		// BYPASS: For the Beam, skip the "Fix" logic (Transactions/Retry Timers).
 		// Go straight to the Grandparent (Standard UT logic).
+		NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StartFire(FireModeNum);
 	}
 	else
 	{
 		// KEEP: For Plasma (Mode 0), use the "Fix" logic (Rewind/Lag Comp).
+		NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StartFire(FireModeNum);
 	}
 }
@@ -680,11 +685,13 @@ void AUTWeap_LinkGun_Plus::StopFire(uint8 FireModeNum)
 	if (FireModeNum == 1)
 	{
 		// Beam mode - use standard UT logic, skip transactional stuff
+		NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StopFire(FireModeNum);
 	}
 	else
 	{
 		// Plasma - use Fix logic
+		NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StopFire(FireModeNum);
 	}
 }

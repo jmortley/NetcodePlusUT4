@@ -1,5 +1,6 @@
 
 #include "UTWeaponFix.h"
+#include "NCFireDiagnostics.h"
 #include "NCShockInputTrace.h"
 #include "NCShotOriginDiagnostics.h"
 #include "NCPClockSync.h"
@@ -237,6 +238,7 @@ struct FNCFireObservation
 static void ObserveFireProjectile(AUTWeaponFix* Weapon, uint8 Mode,
     UClass* ProjectileClass, AUTProjectile* Projectile, const TCHAR* Result)
 {
+    NCFireDiagnostics::Projectile(Weapon, Mode, Projectile, Result);
     if (!FireProvenance() || Weapon->Role != ROLE_Authority) return;
     FNCFireObservation** Entry = FireObservations.Find(Weapon);
     FNCFireObservation* Observation = Entry ? *Entry : nullptr;
@@ -2048,6 +2050,7 @@ bool AUTWeaponFix::TryPreserveInstagibHeldFire(uint8 FireModeNum)
 
 void AUTWeaponFix::StartFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum);
 	if (FireModeNum == 0 && ShockInputTraceInputComponent != nullptr
 		&& Cast<AUTPlusShockRifle>(this) != nullptr)
 	{
@@ -2809,6 +2812,7 @@ bool AUTWeaponFix::HasAcceptedTransactionalRequest(uint8 FireModeNum) const
 
 void AUTWeaponFix::GotoState(UUTWeaponState* NewState)
 {
+    NCFireDiagnostics::FStateScope TraceState(this, NewState);
     // Equip completion, stock spin-down and charged/watchdog exits use
     // GotoActiveState. Commit the exact retained request before scanning held bits:
     // another mode's latch must not steal an accepted shot after its release.
@@ -2857,7 +2861,8 @@ void AUTWeaponFix::GotoState(UUTWeaponState* NewState)
         && !(NewState == ActiveState && Waiting->bDispatchReady);
     if (NewState == InactiveState || NewState == UnequippingState || bLeavingReservation)
     {
-        ClearDeferredEquipFireContext();
+        ClearDeferredEquipFireContext(true, NewState == UnequippingState ? TEXT("switch_before_commit")
+            : NewState == InactiveState ? TEXT("inactive") : TEXT("waiting_state_left"));
     }
     Super::GotoState(NewState);
 }
@@ -2994,6 +2999,10 @@ void AUTWeaponFix::ClearDeferredEquipFireContext(bool bInvalidateGeneration, con
 	{
 		EquippingState->PendingFireSequence = INDEX_NONE;
 	}
+    if (Context && !Context->bShotDispatched && NCFireDiagnostics::Enabled())
+        NCFireDiagnostics::Record(this, TEXT("CANCEL"), Context->FireMode, Context->FireEventIndex, Context->Generation,
+            FString::Printf(TEXT("reason=%s ageMs=%.3f deferredEquip=%d deferredState=%d"), Reason,
+                (GetWorld()->GetTimeSeconds() - Context->ServerAcceptTime) * 1000.f, Context->bDeferredEquip, Context->bDeferredState));
     if (Context && !Context->bShotDispatched && FireProvenance())
     {
         UE_LOG(LogUTWeaponFix, Warning,
@@ -3414,6 +3423,8 @@ void AUTWeaponFix::FireShot()
 				}
 			}
 		}
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("SEND"), CurrentFireMode, NextEventIndex, 0,
+            FString::Printf(TEXT("clientT=%.6f"), ClientTimestamp));
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
 			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
         QueueResendStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
@@ -3422,6 +3433,7 @@ void AUTWeaponFix::FireShot()
 		// Existing fake-projectile/effect path for non-buffered shots. Buffered
 		// Shock already staged the same rotation before its pretrace.
 		CachedTransactionalRotation = ClientRot;
+        NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode, NextEventIndex, 0, TEXT("fixed"));
 		Super::FireShot();
 		if (bBufferedShockDispatch)
 		{
@@ -3443,6 +3455,8 @@ void AUTWeaponFix::FireShot()
                 && Cast<UUTWeaponStateFiring_Transactional>(FiringState[CurrentFireMode]) != nullptr);
         if (bTransactionalMode && RequiresTransactionalRequest() && !bAcceptedRequestDispatch)
         {
+            NCFireDiagnostics::Record(this, TEXT("BLOCK_DISPATCH"), CurrentFireMode,
+                LiveContext ? LiveContext->FireEventIndex : INDEX_NONE, LiveContext ? LiveContext->Generation : 0, TEXT("reason=no_live_authorization"));
             if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
                 TEXT("[NCFireAuth] BLOCK_SHOT source=%s weapon=%s mode=%d event=%d generation=%u state=%s pending0=%d pending1=%d lftBefore=%.4f"),
                 StockSyncWeapons.Contains(this) ? TEXT("StockSync") : TEXT("StateAutoNoContext"),
@@ -3525,6 +3539,9 @@ void AUTWeaponFix::FireShot()
             : UTOwner && UTOwner->IsLocallyControlled() ? TEXT("ListenHost")
             : Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState) ? TEXT("ChargedDirect")
             : TEXT("StockManaged");
+        NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode,
+            bAcceptedRequestDispatch ? AcceptedContext.FireEventIndex : INDEX_NONE,
+            bAcceptedRequestDispatch ? AcceptedContext.Generation : 0, bAcceptedRequestDispatch ? TEXT("fixed") : TEXT("stream"));
         FNCFireObservation Observation(this, ShotSource, CurrentFireMode,
             bAcceptedRequestDispatch ? AcceptedContext.FireEventIndex : INDEX_NONE,
             bAcceptedRequestDispatch ? AcceptedContext.Generation : 0);
@@ -3665,6 +3682,7 @@ void AUTWeaponFix::StopOwnerFireInternal(uint8 FireModeNum)
 
 void AUTWeaponFix::StopFire(uint8 FireModeNum)
 {
+    NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum);
 	if (FireModeNum == 0 && ShockInputTraceInputComponent != nullptr
 		&& Cast<AUTPlusShockRifle>(this) != nullptr)
 	{
@@ -3949,6 +3967,7 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     // Validate fire mode
     if (!FireModeActiveState.IsValidIndex(FireModeNum))
     {
+        NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InEventIndex, 0, TEXT("reason=bad_mode"));
 		if (RocketPrimaryDiagFor(this, FireModeNum))
 		{
 			UE_LOG(LogUTWeaponFix, Warning,
@@ -3962,6 +3981,7 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
     // Validate event sequence
     if (!IsFireEventSequenceValid(FireModeNum, InEventIndex))
     {
+        NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InEventIndex, 0, TEXT("reason=sequence"));
         int32 LastProcessed = AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : -1;
 		if (RocketPrimaryDiagFor(this, FireModeNum))
 		{
@@ -4043,6 +4063,8 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
         // rhythm compensation snaps Delta to exactly MinInterval (e.g., 0.550 < 0.550).
         if (TimeSinceLastFire < MinInterval - SMALL_NUMBER)
         {
+            if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InEventIndex, 0,
+                FString::Printf(TEXT("reason=rate delta=%.6f min=%.6f tolerance=%.6f"), TimeSinceLastFire, MinInterval, JitterTolerance));
 			if (RocketPrimaryDiagFor(this, FireModeNum))
 			{
 				UE_LOG(LogUTWeaponFix, Warning,
@@ -4156,6 +4178,8 @@ bool AUTWeaponFix::IsFireEventSequenceValid(uint8 FireModeNum, int32 InEventInde
 void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
     FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
 {
+    if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("RECEIVE"), FireModeNum, InFireEventIndex, 0,
+        FString::Printf(TEXT("clientT=%.6f retry=%d"), ClientTimestamp, FixedRetryWeapons.Contains(this)));
     // 1. VALIDATION (Your existing transactional checks)
     UWorld* World = GetWorld();
     if (!World) return;
@@ -4180,6 +4204,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     // back through this function, so this covers that path too.
     if (!AllowServerFireMode(FireModeNum))
     {
+        NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InFireEventIndex, 0, TEXT("reason=mode_policy"));
 		if (RocketPrimaryDiagFor(this, FireModeNum))
 		{
 			UE_LOG(LogUTWeaponFix, Warning,
@@ -4206,6 +4231,8 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
             Params.Owner = this;
             Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
             AUTProjectile* Proj = World->SpawnActor<AUTProjectile>(ProjClass[FireModeNum], SpawnLoc, SpawnRot, Params);
+            NCFireDiagnostics::Record(this, TEXT("DIRECT_SPAWN"), FireModeNum, InFireEventIndex, 0,
+                Proj ? TEXT("source=trade_grace result=ok") : TEXT("source=trade_grace result=null"));
             if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
                 TEXT("[NCFireAuth] DIRECT_SPAWN source=TradeGraceDirect weapon=%s mode=%d receivedEvent=%d result=%s projectile=%s"),
                 *GetName(), FireModeNum, InFireEventIndex, Proj ? TEXT("ok") : TEXT("null"),
@@ -4218,6 +4245,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
             OwnerLostTime = 0.f; // only one grace shot
             return;
         }
+        NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InFireEventIndex, 0, TEXT("reason=owner_lost_grace"));
         UE_LOG(LogUTWeaponFix, Log, TEXT("[TradeKill] REJECTED: %.0fms after death exceeds %.0fms grace (Mode %d, HasProj=%d)"),
             TimeSinceDeath * 1000.f, TradeKillGracePeriod * 1000.f, FireModeNum,
             (ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum]) ? 1 : 0);
@@ -4237,6 +4265,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 		&& CurrentState != InactiveState;
 	if (!bOwnsServerEquipLifetime)
 	{
+        NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InFireEventIndex, 0, TEXT("reason=stale_lifetime"));
 		UE_LOG(LogUTWeaponFix, Verbose,
 			TEXT("[ServerStartFireFixed] Ignoring stale equip-lifetime Start mode=%d event=%d state=%s current=%d pending=%d"),
 			FireModeNum, InFireEventIndex,
@@ -4262,6 +4291,8 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     if (Reserved && !Reserved->bShotDispatched
         && (Reserved->bDeferredEquip || Reserved->bDeferredState))
     {
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InFireEventIndex, 0,
+            FString::Printf(TEXT("reason=reservation_busy retained=%d"), Reserved->FireEventIndex));
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
             TEXT("[NCFireAuth] RESERVATION_BUSY weapon=%s mode=%d event=%d retainedEvent=%d generation=%u"),
             *GetName(), FireModeNum, InFireEventIndex, Reserved->FireEventIndex, Reserved->Generation);
@@ -4337,6 +4368,8 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
             : FixedRetryWeapons.Contains(this) ? TEXT("FixedRetry") : TEXT("FixedInitial");
 		DeferredEquipFireContexts.Add(DeferredWeaponKey, NewContext);
 		DeferredEquipFireGenerations.Add(DeferredWeaponKey, NewContext.Generation);
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("ACCEPT"), FireModeNum, InFireEventIndex, NewContext.Generation,
+            FString::Printf(TEXT("source=%s deferredEquip=%d deferredState=%d"), NewContext.Source, bQueuedDeferredEquip, bQueuedDeferredState));
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
             TEXT("[NCFireAuth] ACCEPT source=%s weapon=%s mode=%d event=%d generation=%u deferred=%d pitch=%.3f yaw=%.3f roll=%.3f z=%.3f claim=%s"),
             NewContext.Source, *GetName(), FireModeNum, InFireEventIndex, NewContext.Generation,
@@ -4608,6 +4641,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
             TEXT("[NCFireAuth] ACK weapon=%s mode=%d event=%d generation=%u"),
             *GetName(), FireModeNum, InFireEventIndex, AcceptedRequestGeneration);
+        NCFireDiagnostics::Record(this, TEXT("ACK_SENT"), FireModeNum, InFireEventIndex, AcceptedRequestGeneration);
         ClientConfirmFireEvent(FireModeNum, InFireEventIndex);
     }
 }
@@ -4615,7 +4649,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 void AUTWeaponFix::Removed()
 {
 	StopShockInputTrace();
-	ClearDeferredEquipFireContext();
+	ClearDeferredEquipFireContext(true, TEXT("removed"));
 	// A delayed Flak prediction belongs to this weapon instance. Once it is removed,
 	// the authoritative replicated projectile (if any) is the only valid visual source.
 	ClearDelayedFlakFakeProjectiles();
@@ -4654,7 +4688,7 @@ void AUTWeaponFix::Removed()
 void AUTWeaponFix::Destroyed()
 {
 	StopShockInputTrace();
-	ClearDeferredEquipFireContext();
+	ClearDeferredEquipFireContext(true, TEXT("destroyed"));
 	// Direct replay/admin destruction can bypass normal inventory removal. Break
 	// the master-pose relationship before the actor's component teardown starts.
 	for (int32 Mode = 0; Mode < 2; ++Mode)
@@ -4936,6 +4970,7 @@ bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFire
 
 void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex)
 {
+    NCFireDiagnostics::Record(this, TEXT("STOP_RECEIVE"), FireModeNum, InFireEventIndex);
     // Diagnostic only: the existing wire carries a shot watermark, not a unique
     // physical release generation. Do not infer ownership from PendingFire.
     if (FireProvenance())
@@ -7606,6 +7641,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
             UTOwner->Controller, this);
     }
 
+    NCFireDiagnostics::Hitscan(this, CurrentFireMode, Hit, bDealDamage);
     if (OutHit != nullptr)
     {
         *OutHit = Hit;
@@ -7626,7 +7662,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 void AUTWeaponFix::DetachFromOwner_Implementation()
 {
 	StopShockInputTrace();
-	ClearDeferredEquipFireContext();
+	ClearDeferredEquipFireContext(true, TEXT("detach"));
     GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
     GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
 	ClearFireEventsFixed();
@@ -7650,6 +7686,7 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
 
 bool AUTWeaponFix::PutDown()
 {
+    NCFireDiagnostics::Record(this, TEXT("SWITCH_ATTEMPT"), CurrentFireMode, INDEX_NONE, 0, FString(), TEXT("state"));
     // NOTE: Do NOT clear DeferredActiveStateHandle here.
     // The deferred timer keeps us in FiringState so Super::PutDown() routes to
     // UUTWeaponStateFiring_Transactional::PutDown(), which has cooldown-aware
@@ -7658,13 +7695,15 @@ bool AUTWeaponFix::PutDown()
     // running in wrong states (UnequippingState, InactiveState, ActiveState).
     // 1. Try to put the weapon down via the base class
     bool bPutDownResult = Super::PutDown();
+    NCFireDiagnostics::Record(this, TEXT("SWITCH_RESULT"), CurrentFireMode, INDEX_NONE, 0,
+        bPutDownResult ? TEXT("accepted=1") : TEXT("accepted=0"), TEXT("state"));
     // 2. If it succeeded, kill the timers immediately.
     // This prevents the "Backpack Fire" bug where a buffered shot 
     // goes off 0.1s after you switched weapons.
     if (bPutDownResult)
     {
 		StopShockInputTrace();
-		ClearDeferredEquipFireContext();
+		ClearDeferredEquipFireContext(true, TEXT("switch_before_commit"));
 		// The original fixed fire RPCs are Reliable. Stop only NetcodePlus's
 		// application-level retry copies at the outgoing equip boundary.
 		ClearFireEventsFixed();
@@ -8541,9 +8580,11 @@ TArray<UMeshComponent*> AUTWeaponFix::Get1PMeshes_Implementation() const
 
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
+    if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("EQUIP_BEGIN"), CurrentFireMode, INDEX_NONE, 0,
+        FString::Printf(TEXT("overflow=%.6f"), OverflowTime), TEXT("state"));
 	// New equip lifetime: neither a queued payload nor a pending release callback
 	// from an older owner/switch may be allowed to commit here.
-	ClearDeferredEquipFireContext();
+	ClearDeferredEquipFireContext(true, TEXT("bringup"));
 	const bool bLogSkinTiming = SkinTiming();
 	const double BringUpStartTime = bLogSkinTiming ? FPlatformTime::Seconds() : 0.0;
  
@@ -9124,6 +9165,8 @@ void AUTWeaponFix::ResendNextFireEventFixed()
         // Get the next event in the queue
         FPendingFireEventFix Event = ResendFireEvents[0];
         ResendFireEvents.RemoveAt(0);
+        NCFireDiagnostics::Record(this, Event.bIsStartFire ? TEXT("SEND_RETRY") : TEXT("SEND_STOP_RETRY"),
+            Event.FireModeNum, Event.FireEventIndex);
 
         // SEND THE PACKET
         // NOTE: calling this Server function from the Client ONLY sends a packet.
@@ -9151,6 +9194,9 @@ void AUTWeaponFix::ResendNextFireEventFixed()
 // Call this in DetachFromOwner or PutDown
 void AUTWeaponFix::ClearFireEventsFixed()
 {
+    if (NCFireDiagnostics::Enabled() && ResendFireEvents.Num())
+        NCFireDiagnostics::Record(this, TEXT("RETRY_QUEUE_CLEAR"), CurrentFireMode, INDEX_NONE, 0,
+            FString::Printf(TEXT("count=%d"), ResendFireEvents.Num()));
     ResendFireEvents.Empty();
     GetWorldTimerManager().ClearTimer(ResendFireHandle);
 }
@@ -9229,6 +9275,7 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
 void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
 {
+    NCFireDiagnostics::Record(this, TEXT("ACK_RECEIVED"), FireModeNum, InAuthorizedEventIndex);
 	if (RocketPrimaryDiagFor(this, FireModeNum))
 	{
 		UE_LOG(LogUTWeaponFix, Warning,
@@ -9350,7 +9397,8 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
         // Wrap-around safe check: if the index is <= last seen, it's old.
         if (InFireEventIndex <= LastIdx && (LastIdx - InFireEventIndex) < 100)
         {
-            return; // SILENT REJECT - Already fired this shot
+            NCFireDiagnostics::Record(this, TEXT("RETRY_IGNORED"), FireModeNum, InFireEventIndex, 0, TEXT("reason=already_processed"));
+            return; // Already processed; this watermark is not proof that a shot spawned.
         }
     }
 
@@ -9965,4 +10013,40 @@ int32 AUTWeaponFix::GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshot
 	// Base weapons have no headshot mechanic: a head claim from this weapon is
 	// positional data for the server, not a damage upgrade.
 	return InstantHitInfo.IsValidIndex(FireModeNum) ? InstantHitInfo[FireModeNum].Damage : 0;
+}
+
+void AUTWeaponFix::ServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired)
+{
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStartFire"), TEXT("stock"));
+    Super::ServerStartFire_Implementation(FireModeNum, InFireEventIndex, bClientFired);
+}
+
+void AUTWeaponFix::ServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired)
+{
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStartFireOffset"), TEXT("stock"));
+    Super::ServerStartFireOffset_Implementation(FireModeNum, InFireEventIndex, ZOffset, bClientFired);
+}
+
+void AUTWeaponFix::ResendServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired)
+{
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFire"), TEXT("stock"));
+    Super::ResendServerStartFire_Implementation(FireModeNum, InFireEventIndex, bClientFired);
+}
+
+void AUTWeaponFix::ResendServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired)
+{
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFireOffset"), TEXT("stock"));
+    Super::ResendServerStartFireOffset_Implementation(FireModeNum, InFireEventIndex, ZOffset, bClientFired);
+}
+
+void AUTWeaponFix::ServerStopFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex)
+{
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStopFire"), TEXT("stock"));
+    Super::ServerStopFire_Implementation(FireModeNum, InFireEventIndex);
+}
+
+void AUTWeaponFix::ServerStopFireRecent_Implementation(uint8 FireModeNum, uint8 InFireEventIndex)
+{
+    NCFireDiagnostics::Record(this, TEXT("STOCK_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT("route=ServerStopFireRecent"), TEXT("stock"));
+    Super::ServerStopFireRecent_Implementation(FireModeNum, InFireEventIndex);
 }

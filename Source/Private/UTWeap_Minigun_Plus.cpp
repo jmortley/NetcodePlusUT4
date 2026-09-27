@@ -1,5 +1,6 @@
 // UTWeap_Minigun_Plus.cpp
 #include "UTWeap_Minigun_Plus.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeaponState.h"
 #include "UTWeaponStateFiring.h"
@@ -62,6 +63,7 @@ void AUTWeap_Minigun_Plus::StartFire(uint8 FireModeNum)
 	}
 	else
 	{
+		NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StartFire(FireModeNum);
 	}
 }
@@ -74,6 +76,7 @@ void AUTWeap_Minigun_Plus::StopFire(uint8 FireModeNum)
 	}
 	else
 	{
+		NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
 		AUTWeapon::StopFire(FireModeNum);
 	}
 }
@@ -98,6 +101,7 @@ void AUTWeap_Minigun_Plus::FireShot()
 		{
 			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
 		}
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 }

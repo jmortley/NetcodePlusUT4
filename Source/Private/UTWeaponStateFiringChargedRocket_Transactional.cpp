@@ -1,4 +1,5 @@
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
+#include "NCFireDiagnostics.h"
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponFix.h"
 #include "UTGameState.h"
@@ -49,6 +50,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ClearAllTimers()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeaponState* PrevState)
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=BeginState"), TEXT("stream"));
 	// State objects are reused. RefireCheckTimer can begin the next charge without
 	// EndState(), so release idempotency must be reset here, not only in EndState().
 	bReleaseRequested = false;
@@ -149,6 +151,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
 
 void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=EndState"), TEXT("stream"));
 	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
 	{
 		AUTWeapon* W = GetOuterAUTWeapon();
@@ -234,6 +237,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::Tick(float DeltaTime)
 
 void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=LoadTimer"), TEXT("stream"));
     AUTWeapon* Weapon = GetOuterAUTWeapon();
     if (!Weapon)
     {
@@ -443,6 +447,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::ExitToActiveAndAttemptBuff
 
 void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=CommitRelease"), TEXT("stream"));
     if (bReleaseCommitted || bCompletingLoadTimer)
     {
         return;
@@ -614,6 +619,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 
 void UUTWeaponStateFiringChargedRocket_Transactional::RecoverWedgedRelease()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=RecoverWedgedRelease"), TEXT("stream"));
     AUTWeapon* Weapon = GetOuterAUTWeapon();
     if (!Weapon || Weapon->GetCurrentState() != this || !GetUTOwner()
         || bCompletingLoadTimer)
@@ -649,6 +655,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RecoverWedgedRelease()
 
 void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("CHARGE_EVENT"), 1, INDEX_NONE, 0, TEXT("route=FireLoadedRocket"), TEXT("stream"));
 	if (RocketPrimaryChargedDiag(GetOuterAUTWeapon()))
 	{
 		AUTWeapon* W = GetOuterAUTWeapon();

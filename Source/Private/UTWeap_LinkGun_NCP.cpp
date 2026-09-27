@@ -1,4 +1,5 @@
 #include "UTWeap_LinkGun_NCP.h"
+#include "NCFireDiagnostics.h"
 #include "NCWeaponColorSettings.h"
 #include "NetcodePlus.h"
 #include "UTWeaponStateFiringLinkBeam_NCP.h"
@@ -186,18 +187,21 @@ void AUTWeap_LinkGun_NCP::StartFire(uint8 FireModeNum)
 {
 	// Link primary's 7+ shots/sec cadence is intentionally not transactional.
 	// The beam likewise keeps its stock continuous-state lifecycle.
-	AUTWeapon::StartFire(FireModeNum);
+	NCFireDiagnostics::Record(this, TEXT("INPUT_PRESS"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
+		AUTWeapon::StartFire(FireModeNum);
 }
 
 void AUTWeap_LinkGun_NCP::StopFire(uint8 FireModeNum)
 {
-	AUTWeapon::StopFire(FireModeNum);
+	NCFireDiagnostics::Record(this, TEXT("INPUT_RELEASE"), FireModeNum, INDEX_NONE, 0, FString(), TEXT("stock"));
+		AUTWeapon::StopFire(FireModeNum);
 }
 
 bool AUTWeap_LinkGun_NCP::PutDown()
 {
 	// StartFire bypasses AUTWeaponFix, so its private held-input bookkeeping is
 	// intentionally unset. Use stock PutDown to preserve stock hold-through-swap.
+	NCFireDiagnostics::Record(this, TEXT("SWITCH_ATTEMPT"), CurrentFireMode, INDEX_NONE, 0, FString(), TEXT("state"));
 	return AUTWeapon::PutDown();
 }
 
@@ -205,6 +209,7 @@ void AUTWeap_LinkGun_NCP::FireShot()
 {
 	if (!bIsInCoolDown)
 	{
+		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();
 	}
 }
@@ -234,7 +239,9 @@ AUTProjectile* AUTWeap_LinkGun_NCP::FireProjectile()
 
 AUTProjectile* AUTWeap_LinkGun_NCP::SpawnNetPredictedProjectile(TSubclassOf<AUTProjectile> ProjectileClass, FVector SpawnLocation, FRotator SpawnRotation)
 {
-	return AUTWeapon::SpawnNetPredictedProjectile(ProjectileClass, SpawnLocation, SpawnRotation);
+	AUTProjectile* Result = AUTWeapon::SpawnNetPredictedProjectile(ProjectileClass, SpawnLocation, SpawnRotation);
+    NCFireDiagnostics::Projectile(this, CurrentFireMode, Result, Result ? TEXT("ok") : TEXT("null"));
+	return Result;
 }
 
 float AUTWeap_LinkGun_NCP::GetHitValidationPredictionTime() const

@@ -2,6 +2,7 @@
 """Check default-off NCFireAuth server telemetry without inferring shots from time.
 
 Usage: python tools/check-fire-provenance.py server.log [--rocket-primary] [--json]
+Paired capture: --client client.log --server server.log --run UNIQUE_LABEL [--json]
 Exit codes: 0 = observed records reconcile; 1 = violation; 2 = incomplete evidence.
 Files are separate captures; event identities are never joined across files.
 """
@@ -349,6 +350,11 @@ def read_log(path: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if "--client" in argv or "--server" in argv:
+        # Preserve the existing server-only audit and its exit-code contract.
+        import runpy
+        return runpy.run_path(str(Path(__file__).with_name("check-fire-trace.py")))["main"](argv)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("logs", nargs="+", type=Path, help="Server log files (each is a separate capture).")
     scope = parser.add_mutually_exclusive_group()

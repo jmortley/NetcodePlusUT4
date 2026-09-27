@@ -2,6 +2,7 @@
 // Full integration with spiral rockets and new standalone transactional charged state
 
 #include "UTPlusWeap_RocketLauncher.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeaponStateFiring_Transactional.h"
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
@@ -465,6 +466,7 @@ void AUTPlusWeap_RocketLauncher::FireShot()
 
 void AUTPlusWeap_RocketLauncher::FireShotDirect()
 {
+    NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
     if (UTOwner)
     {
         UTOwner->DeactivateSpawnProtection();

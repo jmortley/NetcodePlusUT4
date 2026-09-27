@@ -1,4 +1,5 @@
 #include "UTWeaponStateFiringLinkBeam_NCP.h"
+#include "NCFireDiagnostics.h"
 #include "NetcodePlus.h"
 #include "UTWeap_LinkGun_NCP.h"
 #include "Animation/AnimInstance.h"
@@ -22,6 +23,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::BeginState(const UUTWeaponState* PrevStat
 
 void UUTWeaponStateFiringLinkBeam_NCP::FireShot()
 {
+    NCFireDiagnostics::FShotScope TraceShot(GetOuterAUTWeapon(), GetOuterAUTWeapon()->GetCurrentFireMode(), INDEX_NONE, 0, TEXT("beam"));
 	// Beam damage is accumulated in Tick(); the refire pulse only drives stock
 	// effects, ammo consumption, and inventory notification.
 	AUTWeap_LinkGun_NCP* LinkGun = Cast<AUTWeap_LinkGun_NCP>(GetOuterAUTWeapon());
@@ -142,6 +144,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 		const FName RealHitsStatsName = LinkGun->HitsStatsName;
 		LinkGun->HitsStatsName = NAME_None;
 		LinkGun->FireInstantHit(false, &Hit);
+        NCFireDiagnostics::BeamSample(LinkGun, LinkGun->GetCurrentFireMode(), Hit);
 		LinkGun->ShotsStatsName = RealShotsStatsName;
 		LinkGun->HitsStatsName = RealHitsStatsName;
 

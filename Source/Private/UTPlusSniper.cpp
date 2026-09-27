@@ -1,4 +1,5 @@
 #include "UTPlusSniper.h"
+#include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTProj_Sniper.h"
 #include "UTWeaponStateZooming.h"
@@ -595,6 +596,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		}
 	}
 
+	NCFireDiagnostics::Hitscan(this, CurrentFireMode, Hit, bDealDamage);
 	if (OutHit != NULL)
 	{
 		*OutHit = Hit;

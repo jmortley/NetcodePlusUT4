@@ -1,4 +1,5 @@
 #include "UTWeaponStateFiring_Transactional.h"
+#include "NCFireDiagnostics.h"
 #include "UTWeaponFix.h"
 #include "UTGameState.h"
 #include "UTPlayerController.h"
@@ -160,6 +161,7 @@ void UUTWeaponStateFiring_Transactional::EndState()
 
 void UUTWeaponStateFiring_Transactional::PutDown()
 {
+    NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("PUTDOWN_CALLBACK"), GetOuterAUTWeapon()->GetCurrentFireMode(), INDEX_NONE, 0, FString(), TEXT("state"));
 	// Ensure any delayed logic (like pending replicated shots) is processed first
 	HandleDelayedShot();
 
@@ -184,6 +186,8 @@ void UUTWeaponStateFiring_Transactional::PutDown()
 	// 2. Calculate the penalty overlap
 	// (If the cooldown is longer than the PutDown animation, we must wait)
 	float TimeTillPutDown = TimeRemaining * GetOuterAUTWeapon()->RefirePutDownTimePercent;
+    if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(GetOuterAUTWeapon(), TEXT("PUTDOWN_TIMING"), GetOuterAUTWeapon()->GetCurrentFireMode(), INDEX_NONE, 0,
+        FString::Printf(TEXT("cooldown=%.6f tillPutDown=%.6f animation=%.6f"), TimeRemaining, TimeTillPutDown, GetOuterAUTWeapon()->GetPutDownTime()), TEXT("state"));
 
 	if (TimeTillPutDown <= GetOuterAUTWeapon()->GetPutDownTime())
 	{
