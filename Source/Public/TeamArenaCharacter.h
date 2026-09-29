@@ -60,6 +60,8 @@ public:
 
     virtual void BecomeViewTarget(APlayerController* PC) override;
 	virtual void BehindViewChange(APlayerController* PC, bool bNowBehindView) override;
+	/** Client HUD only: opt-in hiding of the teammate overhead beacon (see NCPlusDisplaySettings). */
+	virtual void PostRenderFor(APlayerController* PC, UCanvas* Canvas, FVector CameraPosition, FVector CameraDir) override;
 	// The material to use for the overlay (Assign M_ShieldBelt_Overlay here in BP)
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawn Protection")
 	UMaterialInterface* SpawnProtectionMaterial;

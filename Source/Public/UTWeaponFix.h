@@ -368,6 +368,9 @@ public:
     bool CompleteAcceptedDeferredFire(UUTWeaponState* CompletingState);
     virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
         AUTPlayerState*& HitPlayerState) const override;
+    /** Client HUD only: stock crosshair, minus the teammate sign when the opt-in
+     *  F5/nchud "hide friendly crosshair sign" toggle is on. */
+    virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta) override;
 
     /** Server-authoritative fire policy hook. Return false to hard-reject a fire mode
      *  at every server fire entry (ServerStartFireFixed and the resend funnel) BEFORE any

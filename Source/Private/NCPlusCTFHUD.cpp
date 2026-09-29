@@ -103,6 +103,16 @@ void ANCPlusCTFHUD::BeginPlay()
 	// Stock bottom-bar widgets are stripped ONLY when we're drawing the NCPlus ones;
 	// in stock-bottom-bar mode we keep the parent's stock weapon/ammo/health widgets.
 	const bool bStockBottom = FNCPlusHUDLayout::WantsStockBottomBar();
+	// Stock announcements -> our subclass (stock behaviour + the opt-in kill-name
+	// collapse). Swapped in place so it builds at the same point in the list and
+	// the HUD never holds two announcement widgets.
+	for (FString& Entry : RequiredHudWidgetClasses)
+	{
+		if (Entry.Equals(TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"), ESearchCase::IgnoreCase))
+		{
+			Entry = TEXT("/Script/NetcodePlus.NCPlusHUDWidgetAnnouncements");
+		}
+	}
 	RequiredHudWidgetClasses.RemoveAll([bStockBottom](const FString& Entry)
 	{
 		// Always replaced — our scorebar / scoreboard / flag-status supersede these

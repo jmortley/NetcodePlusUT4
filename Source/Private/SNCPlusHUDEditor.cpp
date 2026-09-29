@@ -1,6 +1,7 @@
 // SNCPlusHUDEditor.cpp - implementation of the live HUD layout editor.
 #include "SNCPlusHUDEditor.h"
 #include "NCPlusHUDLayout.h"
+#include "NCPlusDisplaySettings.h"
 #include "ElimPlusScoreboard.h"
 #include "NCPlusXTDMHUD.h"
 #include "SNCPlusHUDPresetGallery.h"
@@ -492,6 +493,51 @@ TSharedRef<SWidget> SNCPlusHUDEditor::BuildHeader()
 				SNew(STextBlock)
 				.Text(FText::FromString(TEXT("Uses the original fixed red/blue plates; custom Team Color is unavailable.")))
 				.ColorAndOpacity(FLinearColor(0.62f, 0.62f, 0.62f, 1.f))
+			]
+		]
+		// Opt-in display toggles (same settings as the F5 Home tab's HUD Display section).
+		// Each applies on the next frame / next kill message and persists to Mod.ini.
+		+ SVerticalBox::Slot().AutoHeight().Padding(0,8,0,0)
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0,0,16,0)
+			[
+				SNew(SCheckBox)
+				.IsChecked(this, &SNCPlusHUDEditor::GetHideFriendlyCrosshairSignState)
+				.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnHideFriendlyCrosshairSignChanged)
+				.ToolTipText(FText::FromString(TEXT("Don't draw the green 'forbidden' sign on your crosshair when aiming at a teammate (NetcodePlus weapons).")))
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Hide teammate crosshair sign")))
+					.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth().Padding(0,0,16,0)
+			[
+				SNew(SCheckBox)
+				.IsChecked(this, &SNCPlusHUDEditor::GetHideTeammateOverheadTagsState)
+				.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnHideTeammateOverheadTagsChanged)
+				.ToolTipText(FText::FromString(TEXT("Hide the name and health/armor bars above teammates while you play. Line-ups, match end and spectating are unchanged.")))
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Hide teammate overhead tags")))
+					.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				]
+			]
+			+ SHorizontalBox::Slot().AutoWidth()
+			[
+				SNew(SCheckBox)
+				.IsChecked(this, &SNCPlusHUDEditor::GetCollapseRepeatedKillNamesState)
+				.OnCheckStateChanged(this, &SNCPlusHUDEditor::OnCollapseRepeatedKillNamesChanged)
+				.ToolTipText(FText::FromString(TEXT("'You killed ToX' instead of 'You killed ToX & ToX' when you kill the same player again within a few seconds.")))
+				.Content()
+				[
+					SNew(STextBlock)
+					.Text(FText::FromString(TEXT("Show each victim once in kill messages")))
+					.ColorAndOpacity(FLinearColor(0.85f, 0.85f, 0.85f, 1.f))
+				]
 			]
 		]
 		// Scoreboard background opacity (0.05..1.0). Global across the NCPlus scoreboards.
@@ -1034,6 +1080,42 @@ void SNCPlusHUDEditor::OnViewerRelativePortraitsChanged(ECheckBoxState NewState)
 	// The strips consult WantsViewerRelativePortraits() each DrawHUD frame, so the
 	// remap applies on the next frame with no widget swap.
 	FNCPlusHUDLayout::SetViewerRelativePortraits(NewState == ECheckBoxState::Checked);
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetHideFriendlyCrosshairSignState() const
+{
+	return NCPlusDisplaySettings::GetHideFriendlyCrosshairSign() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnHideFriendlyCrosshairSignChanged(ECheckBoxState NewState)
+{
+	const bool bHide = (NewState == ECheckBoxState::Checked);
+	NCPlusDisplaySettings::SetHideFriendlyCrosshairSign(bHide);
+	SetStatus(bHide ? TEXT("Teammate crosshair sign: hidden (applies now).") : TEXT("Teammate crosshair sign: shown (applies now)."));
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetHideTeammateOverheadTagsState() const
+{
+	return NCPlusDisplaySettings::GetHideTeammateOverheadTags() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnHideTeammateOverheadTagsChanged(ECheckBoxState NewState)
+{
+	const bool bHide = (NewState == ECheckBoxState::Checked);
+	NCPlusDisplaySettings::SetHideTeammateOverheadTags(bHide);
+	SetStatus(bHide ? TEXT("Teammate overhead tags: hidden (applies now).") : TEXT("Teammate overhead tags: shown (applies now)."));
+}
+
+ECheckBoxState SNCPlusHUDEditor::GetCollapseRepeatedKillNamesState() const
+{
+	return NCPlusDisplaySettings::GetCollapseRepeatedKillNames() ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+void SNCPlusHUDEditor::OnCollapseRepeatedKillNamesChanged(ECheckBoxState NewState)
+{
+	const bool bCollapse = (NewState == ECheckBoxState::Checked);
+	NCPlusDisplaySettings::SetCollapseRepeatedKillNames(bCollapse);
+	SetStatus(bCollapse ? TEXT("Kill messages: each victim once (from the next kill).") : TEXT("Kill messages: stock (from the next kill)."));
 }
 
 void SNCPlusHUDEditor::OnStockTeamPanelChanged(ECheckBoxState NewState)

@@ -32,6 +32,7 @@
 #include "ShockDomHUD.h"
 #include "NCPlusHUDLayout.h"
 #include "NCPlusForceModels.h"
+#include "NCPlusDisplaySettings.h"
 #include "NCPlusVersionGate.h"        // hub advisor registration (whisper-mode version gate)
 #include "NCConcedeVote.h"            // gg concede vote: client command routing + bind seeding
 #include "NCHighPollingMouseInput.h"  // optional captured-gameplay WM_INPUT coalescing
@@ -1236,6 +1237,8 @@ void FNetcodePlus::StartupModule()
 	{
 		NCPlusAnnouncerPacks::Install();
 		RegisterNCHighPollingMouseInput();
+		// Opt-in HUD display toggles: read once here so render paths only see cached bools.
+		NCPlusDisplaySettings::Reload();
 	}
 
 	IConsoleManager::Get().RegisterConsoleCommand(

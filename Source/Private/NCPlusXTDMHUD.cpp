@@ -23,7 +23,7 @@ ANCPlusXTDMHUD::ANCPlusXTDMHUD(const FObjectInitializer& OI) : Super(OI)
 		TEXT("/Script/UnrealTournament.UTHUDWidget_WeaponCrosshair"),
 		TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_ConsoleMessages"),
 		TEXT("/Script/UnrealTournament.UTHUDWidgetMessage_VoiceChatStatus"),
-		TEXT("/Script/UnrealTournament.UTHUDWidgetAnnouncements"),
+		TEXT("/Script/NetcodePlus.NCPlusHUDWidgetAnnouncements"),   // stock + opt-in kill-name collapse
 		TEXT("/Game/RestrictedAssets/UI/HUDWidgets/bpWH_KillIconMessages.bpWH_KillIconMessages_C"),
 		TEXT("/Script/NetcodePlus.NCPlusHUDWidget_Spectator"),
 		TEXT("/Script/NetcodePlus.NCPlusHUDWidget_ReadyUp"),

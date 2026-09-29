@@ -65,6 +65,8 @@ public:
 	virtual void HitScanTrace(const FVector& StartLocation, const FVector& EndTrace, float TraceRadius, FHitResult& Hit, float PredictionTime) override;
 	virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
 		AUTPlayerState*& HitPlayerState) const override;
+	/** Client HUD only: same opt-in teammate-sign removal as AUTWeaponFix. */
+	virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta) override;
 	/** Guard against null UTOwner crash when a fire RPC arrives after the owner died.
 	 *  Mirrors AUTWeaponFix's guard — needed here because Enforcer_Plus inherits from
 	 *  stock AUTWeap_Enforcer (for AUTDualWeapon support), not AUTWeaponFix. */

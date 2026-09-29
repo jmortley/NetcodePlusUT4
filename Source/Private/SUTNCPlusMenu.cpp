@@ -4,6 +4,7 @@
 #include "NCPlusForceModels.h"
 #include "NCPlusPerformanceSettings.h"
 #include "NCPlusICTFAudioSettings.h"
+#include "NCPlusDisplaySettings.h"
 #include "NCClutchOverlay.h"
 #include "NCPlusSpectatorSlideOut.h"
 #include "NCReadyUp.h"
@@ -79,7 +80,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			.Padding(0, 20, 0, 10)
 			.HAlign(HAlign_Center)
 			[
-				SNew(STextBlock)
+				SAssignNew(TitleRow, STextBlock)
 				.Text(FText::FromString(TEXT("NETCODEPLUS SETTINGS")))
 				.Font(BoldFont(28))
 				.ColorAndOpacity(FLinearColor(1.f, 0.6f, 0.f, 1.f))
@@ -91,7 +92,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			.Padding(0, 0, 0, 12)
 			.HAlign(HAlign_Center)
 			[
-				SNew(SHorizontalBox)
+				SAssignNew(TabRow, SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.Padding(0, 0, 8, 0)
@@ -137,14 +138,24 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 				]
 			]
 
-			// Active tab content
+			// Active tab content. Capped to the space the viewport leaves after the
+			// title/tabs/buttons and scrolled beyond that; a tab that fits is unchanged
+			// (the scroll bar collapses when not needed).
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.HAlign(HAlign_Center)
 			[
-				SAssignNew(ContentArea, SBox)
+				SNew(SBox)
+				.MaxDesiredHeight(this, &SUTNCPlusMenu::GetTabContentMaxHeight)
 				[
-					BuildTabContent(ActiveTab)
+					SNew(SScrollBox)
+					+ SScrollBox::Slot()
+					[
+						SAssignNew(ContentArea, SBox)
+						[
+							BuildTabContent(ActiveTab)
+						]
+					]
 				]
 			]
 
@@ -154,7 +165,7 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			.Padding(0, 25, 0, 20)
 			.HAlign(HAlign_Center)
 			[
-				SNew(SHorizontalBox)
+				SAssignNew(ButtonRow, SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.Padding(0, 0, 10, 0)
@@ -176,6 +187,25 @@ void SUTNCPlusMenu::Construct(const FArguments& InArgs)
 			]
 		]
 	];
+}
+
+void SUTNCPlusMenu::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
+{
+	SCompoundWidget::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);
+	CachedViewHeight = AllottedGeometry.GetLocalSize().Y;
+}
+
+FOptionalSize SUTNCPlusMenu::GetTabContentMaxHeight() const
+{
+	// Before the first tick there is no allotted height yet: leave the tab uncapped.
+	if (CachedViewHeight <= 1.f || !TitleRow.IsValid() || !TabRow.IsValid() || !ButtonRow.IsValid())
+	{
+		return FOptionalSize();
+	}
+	// Slot paddings in Construct: title 20+10, tab strip 12, buttons 25+20; plus a small margin.
+	const float ChromeHeight = TitleRow->GetDesiredSize().Y + TabRow->GetDesiredSize().Y
+		+ ButtonRow->GetDesiredSize().Y + 87.f + 16.f;
+	return FOptionalSize(FMath::Max(200.f, CachedViewHeight - ChromeHeight));
 }
 
 TSharedRef<SWidget> SUTNCPlusMenu::MakeTabButton(const FString& Label, ENCPMenuTab Tab)
@@ -527,6 +557,55 @@ TSharedRef<SWidget> SUTNCPlusMenu::BuildHomeTab()
 				.ToolTipText(FText::FromString(TEXT("Add CTF or Wipeout match statistics to the spectator slideout. True spectators only; camera controls stay available.")))
 				[
 					SNew(STextBlock).Text(FText::FromString(TEXT("Expanded spectator slideout")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			// Opt-in HUD display toggles (client-only, default off). The same three
+			// checkboxes live in the nchud HUD editor, which applies them immediately.
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0, 4, 0, 3)
+			.HAlign(HAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("HUD Display")))
+				.Font(BoldFont(18))
+				.ColorAndOpacity(FLinearColor::White)
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 4).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bHideFriendlyCrosshairSign ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bHideFriendlyCrosshairSign = State == ECheckBoxState::Checked; bHideFriendlyCrosshairSignEdited = true; })
+				.ToolTipText(FText::FromString(TEXT("Don't draw the green 'forbidden' sign on your crosshair when aiming at a teammate. Teammate names still don't show under the crosshair; enemy names are unchanged. NetcodePlus weapons only.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Hide teammate crosshair sign")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 4).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bHideTeammateOverheadTags ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bHideTeammateOverheadTags = State == ECheckBoxState::Checked; bHideTeammateOverheadTagsEdited = true; })
+				.ToolTipText(FText::FromString(TEXT("Hide the name and health/armor bars above teammates while you play. Line-ups, match end, spectating and out-of-lives views are unchanged. Enemy names under the crosshair still show.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Hide teammate overhead tags (name and health bars)")))
+					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
+				]
+			]
+
+			+ SVerticalBox::Slot().AutoHeight().Padding(40, 0, 40, 8).HAlign(HAlign_Center)
+			[
+				SNew(SCheckBox)
+				.IsChecked_Lambda([this]() { return bCollapseRepeatedKillNames ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+				.OnCheckStateChanged_Lambda([this](ECheckBoxState State) { bCollapseRepeatedKillNames = State == ECheckBoxState::Checked; bCollapseRepeatedKillNamesEdited = true; })
+				.ToolTipText(FText::FromString(TEXT("When you kill the same player again within a few seconds, show 'You killed ToX' instead of 'You killed ToX & ToX'. Different victims are still listed.")))
+				[
+					SNew(STextBlock).Text(FText::FromString(TEXT("Show each victim once in kill messages")))
 					.Font(RegularFont(14)).ColorAndOpacity(FLinearColor::White)
 				]
 			]
@@ -1515,6 +1594,10 @@ void SUTNCPlusMenu::LoadSettings()
 	CharacterOverlayDistanceOptions.Add(MakeShareable(new FString(TEXT("Full (6500)"))));
 	bShowClutchOverlay = NCClutchOverlay::IsEnabled();
 	bExpandedSpectatorSlideout = UNCPlusSpectatorSlideOut::IsMatchOverlayEnabled();
+	bHideFriendlyCrosshairSign = NCPlusDisplaySettings::GetHideFriendlyCrosshairSign();
+	bHideTeammateOverheadTags = NCPlusDisplaySettings::GetHideTeammateOverheadTags();
+	bCollapseRepeatedKillNames = NCPlusDisplaySettings::GetCollapseRepeatedKillNames();
+	bHideFriendlyCrosshairSignEdited = bHideTeammateOverheadTagsEdited = bCollapseRepeatedKillNamesEdited = false;
 
 	FString Val;
 	// Death gib/ragdoll settings: [InstagibCTF] with the iCTF damage type's exact keys (bAllowGib /
@@ -1638,6 +1721,22 @@ void SUTNCPlusMenu::SaveSettings()
 	NCPlusPerformanceSettings::SetCharacterOverlayDistance(CharacterOverlayDistance);
 	NCClutchOverlay::SetEnabled(bShowClutchOverlay);
 	UNCPlusSpectatorSlideOut::SetMatchOverlayEnabled(bExpandedSpectatorSlideout);
+	// Client-local HUD display toggles; the setters persist and update the cached
+	// values the crosshair, teammate beacon and kill-message paths read. Only toggles
+	// clicked in this panel are written: nchud applies the same settings immediately
+	// and can be opened from the console while F5 is still up.
+	if (bHideFriendlyCrosshairSignEdited)
+	{
+		NCPlusDisplaySettings::SetHideFriendlyCrosshairSign(bHideFriendlyCrosshairSign);
+	}
+	if (bHideTeammateOverheadTagsEdited)
+	{
+		NCPlusDisplaySettings::SetHideTeammateOverheadTags(bHideTeammateOverheadTags);
+	}
+	if (bCollapseRepeatedKillNamesEdited)
+	{
+		NCPlusDisplaySettings::SetCollapseRepeatedKillNames(bCollapseRepeatedKillNames);
+	}
 
 	// [InstagibCTF] so the iCTF damage type (NCPlusUTDmg_Instagib) actually reads them — was wrongly under
 	// [NetcodePlus] with key "AllowGib" (vs the BP's "bAllowGib"), so the menu never drove the damage type.

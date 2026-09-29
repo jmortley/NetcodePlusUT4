@@ -29,6 +29,7 @@
 #include "NCPlusForceModels.h"
 #include "NCPlusPerformanceSettings.h"
 #include "NCPlusICTFAudioSettings.h"
+#include "NCPlusDisplaySettings.h"
 #include "EngineUtils.h"             // TActorIterator (refresh every other pawn on local team change)
 #include "CoreGlobals.h"             // GFrameCounter (per-world local-view cache)
 #include "HAL/PlatformTime.h"        // monotonic overlay-visibility deadline
@@ -3214,6 +3215,40 @@ void ATeamArenaCharacter::BehindViewChange(APlayerController* PC, bool bNowBehin
 	// BehindViewChange can also run without BecomeViewTarget when toggling the camera.
 	ReleaseRemoteAnimationURO(true);
 	Super::BehindViewChange(PC, bNowBehindView);
+}
+
+void ATeamArenaCharacter::PostRenderFor(APlayerController* PC, UCanvas* Canvas, FVector CameraPosition, FVector CameraDir)
+{
+	// Opt-in F5/nchud toggle: hide the overhead beacon (name, health/armor bars,
+	// combat indicator) that stock draws above teammates while this client plays.
+	// Toggle off, line-ups, match end, intermission, spectators, out-of-lives
+	// viewers, enemies and the viewed pawn all take the stock path unchanged.
+	if (!NCPlusDisplaySettings::GetHideTeammateOverheadTags())
+	{
+		Super::PostRenderFor(PC, Canvas, CameraPosition, CameraDir);
+		return;
+	}
+	AUTPlayerState* UTPS = Cast<AUTPlayerState>(PlayerState);
+	if (UTPS != nullptr && PC != nullptr && PC->PlayerState != nullptr && !PC->PlayerState->bOnlySpectator
+		&& PC->GetViewTarget() != this)
+	{
+		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+		AUTPlayerController* UTPC = Cast<AUTPlayerController>(PC);
+		const bool bViewerOutOfLives = UTPC && UTPC->UTPlayerState && UTPC->UTPlayerState->bOutOfLives;
+		if (GS != nullptr && !GS->IsLineUpActive() && !GS->HasMatchEnded() && !GS->IsMatchIntermission()
+			&& !bViewerOutOfLives && GS->OnSameTeam(PC, this))
+		{
+			// Skip the draw but keep stock's bookkeeping (AUTCharacter::PostRenderFor):
+			// AUTHUD draws the death marker for any player whose pawn was not
+			// post-rendered this frame yet was within the last 5 s, and the minimap
+			// reads the same flag. Without this, live teammates would get markers.
+			UTPS->LastPostRenderedLocation = GetMesh()->GetComponentLocation() + FVector(0.f, 0.f, GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() * 2.25f);
+			UTPS->bPawnWasPostRendered = true;
+			UTPS->PawnPostRenderedTime = GetWorld()->GetTimeSeconds();
+			return;
+		}
+	}
+	Super::PostRenderFor(PC, Canvas, CameraPosition, CameraDir);
 }
 
 

@@ -42,6 +42,8 @@
 #include "HAL/PlatformTime.h"
 #include "UObject/GCObject.h"
 #include "ClientHitsounds.h"
+#include "NCPlusDisplaySettings.h"
+#include "NCPlusWeaponPresentation.h"
 #include "EngineUtils.h"
 #include "UTPlayerState.h"
 #include "UTBot.h"
@@ -1752,6 +1754,16 @@ bool AUTWeaponFix::ShouldDrawFFIndicator(APlayerController* Viewer,
     bDrawIndicator = Super::ShouldDrawFFIndicator(Viewer, HitPlayerState);
     FriendlyTargetProbeCache.Store(Viewer, UTOwner, HitPlayerState, bDrawIndicator);
     return bDrawIndicator;
+}
+
+void AUTWeaponFix::DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta)
+{
+    if (NCPlusDisplaySettings::GetHideFriendlyCrosshairSign())
+    {
+        NCPlusWeaponPresentation::DrawWeaponCrosshairWithoutFriendlySign(this, WeaponHudWidget, RenderDelta);
+        return;
+    }
+    Super::DrawWeaponCrosshair_Implementation(WeaponHudWidget, RenderDelta);
 }
 
 

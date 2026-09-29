@@ -1191,6 +1191,13 @@ namespace NCPlusHUDAliases
 		{
 			if (E.ClassPath.Equals(ClassPath, ESearchCase::IgnoreCase)) return E.Alias;
 		}
+		// NetcodePlus drop-in replacements that must keep a stock widget's alias (and
+		// so any saved layout for it) without adding a second editor row. Exact paths
+		// only: a superclass walk would also capture unrelated widget subclasses.
+		if (ClassPath.Equals(TEXT("/Script/NetcodePlus.NCPlusHUDWidgetAnnouncements"), ESearchCase::IgnoreCase))
+		{
+			return FName(TEXT("announcements"));
+		}
 		return NAME_None;
 	}
 
