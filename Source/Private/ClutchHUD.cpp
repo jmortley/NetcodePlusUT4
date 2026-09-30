@@ -16,8 +16,8 @@
 #include "Sound/SoundBase.h"
 #include "UObject/ConstructorHelpers.h"
 #if !UE_SERVER
-#include "Interfaces/IImageWrapper.h"
-#include "Interfaces/IImageWrapperModule.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
 #endif
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -83,19 +83,18 @@ namespace
 
 		IImageWrapperModule& ImageWrapperModule =
 			FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
-		IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
-		const TArray<uint8>* RawData = nullptr;
+		TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+		TArray<uint8> RawData;
 		if (!ImageWrapper.IsValid()
 			|| !ImageWrapper->SetCompressed(CompressedData.GetData(), CompressedData.Num())
-			|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData)
-			|| !RawData)
+			|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData))
 		{
 			return nullptr;
 		}
 
 		const int32 Width = ImageWrapper->GetWidth();
 		const int32 Height = ImageWrapper->GetHeight();
-		if (Width <= 0 || Height <= 0 || RawData->Num() != Width * Height * 4)
+		if (Width <= 0 || Height <= 0 || RawData.Num() != Width * Height * 4)
 		{
 			return nullptr;
 		}
@@ -111,7 +110,7 @@ namespace
 		Texture->NeverStream = true;
 		FTexture2DMipMap& Mip = Texture->PlatformData->Mips[0];
 		void* TextureData = Mip.BulkData.Lock(LOCK_READ_WRITE);
-		FMemory::Memcpy(TextureData, RawData->GetData(), RawData->Num());
+		FMemory::Memcpy(TextureData, RawData.GetData(), RawData.Num());
 		Mip.BulkData.Unlock();
 		Texture->UpdateResource();
 		return Texture;
@@ -300,7 +299,7 @@ void AClutchHUD::DrawHUD()
 	// our virtual DrawTeamScoreBar. Its wide portraits are disabled above.
 	Super::DrawHUD();
 
-	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
+	const bool bRenderCustomHUD = UTPlayerOwner
 		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
 	UpdateEliminatedCameraRestriction(State);
 	const bool bScoreboardUp = ScoreboardIsUp();
@@ -774,7 +773,7 @@ void AClutchHUD::DrawAttackOrderPanel(AClutchRoundState* State)
 				if (Entry.TeamIndex == TeamIndex && Entry.bAttackOrderSelector)
 				{
 					SelectorName = Entry.PlayerState
-						? Entry.PlayerState->PlayerName
+						? Entry.PlayerState->GetPlayerName()
 						: Entry.PlayerNameFallback;
 					break;
 				}
@@ -800,7 +799,7 @@ void AClutchHUD::DrawAttackOrderPanel(AClutchRoundState* State)
 				FString::FromInt(Index + 1), X + RowWidth * 0.5f,
 				RowY + 10.0f * Scale, 0.75f * Scale, TeamColor.ToFColor(true));
 			DrawCenteredCanvasText(Canvas, SmallFont,
-				Entry && Entry->PlayerState ? Entry->PlayerState->PlayerName
+				Entry && Entry->PlayerState ? Entry->PlayerState->GetPlayerName()
 					: Entry ? Entry->PlayerNameFallback : TEXT("PLAYER"),
 				X + RowWidth * 0.5f, RowY + 58.0f * Scale,
 				0.56f * Scale, FColor::White);
@@ -842,7 +841,7 @@ void AClutchHUD::DrawAttackOrderPanel(AClutchRoundState* State)
 			X + CardWidth * 0.5f, CardsY + 8.0f * Scale,
 			0.66f * Scale, TeamColor.ToFColor(true));
 		DrawCenteredCanvasText(Canvas, SmallFont,
-			Entry && Entry->PlayerState ? Entry->PlayerState->PlayerName
+			Entry && Entry->PlayerState ? Entry->PlayerState->GetPlayerName()
 				: Entry ? Entry->PlayerNameFallback : TEXT("PLAYER"),
 			X + CardWidth * 0.5f, CardsY + 60.0f * Scale,
 			0.54f * Scale, FColor::White);
@@ -1065,7 +1064,7 @@ AUTPlayerState* AClutchHUD::ResolveDisplayedPlayerState(AClutchRoundState* State
 	APawn* ViewedPawn = UTPlayerOwner
 		? Cast<APawn>(UTPlayerOwner->GetViewTarget())
 		: nullptr;
-	return ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->PlayerState) : OwnState;
+	return ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->GetPlayerState()) : OwnState;
 }
 
 
@@ -1242,12 +1241,12 @@ void AClutchHUD::DrawDefenderAttackerPanel(AClutchRoundState* State)
 			: FLinearColor(0.008f, 0.018f, 0.035f, 0.88f));
 	DrawSolidTile(Canvas, PanelX, PanelY, 4.0f * Scale, PanelHeight, TeamAccent);
 
-	const FString AttackerName = State->ActiveAttacker->PlayerName.IsEmpty()
+	const FString AttackerName = State->ActiveAttacker->GetPlayerName().IsEmpty()
 		? AttackerEntry->PlayerNameFallback
-		: State->ActiveAttacker->PlayerName;
+		: State->ActiveAttacker->GetPlayerName();
 	DrawCenteredCanvasText(Canvas, SmallFont,
-		FString::Printf(bHitFlash ? TEXT("ATTACKER HIT  %s") : TEXT("ATTACKER  %s"),
-			*AttackerName),
+		FString::Printf(TEXT("%s%s"),
+			bHitFlash ? TEXT("ATTACKER HIT  ") : TEXT("ATTACKER  "), *AttackerName),
 		Canvas->ClipX * 0.5f, PanelY + 4.0f * Scale,
 		0.58f * Scale, FColor::White);
 

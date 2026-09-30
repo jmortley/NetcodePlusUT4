@@ -373,7 +373,7 @@ void AElimPlusGame::HandleMatchHasStarted()
 				{
 					// Bot — synthetic key. GetOrAssignBotElo is sticky-random
 					// when randomization is on, else returns 1400.
-					const FString BotKey = FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+					const FString BotKey = FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 					const int32 BotElo = RatingSystem->GetOrAssignBotElo(BotKey);
 					StatsReplicator->SetPlayerEloAndDelta(BotKey, BotElo, 0);
 				}
@@ -440,7 +440,7 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 	if (UTPS && UTPS->UniqueId.IsValid())
 	{
 		const FString UidStr = UTPS->UniqueId.ToString();
-		RatingSystem->LoadPlayerFromDB(GetWorld(), UidStr, UTPS->PlayerName);
+		RatingSystem->LoadPlayerFromDB(GetWorld(), UidStr, UTPS->GetPlayerName());
 
 		// Mid-match joiner: baseline them as of NOW so the end-of-match scoreboard
 		// shows their +/- (their rating already moves for the rounds they play;
@@ -472,7 +472,7 @@ void AElimPlusGame::PostLogin(APlayerController* NewPlayer)
 				AUTPlayerState* OtherPS = Cast<AUTPlayerState>(PS);
 				if (!OtherPS || OtherPS->bOnlySpectator) continue;
 				if (OtherPS->UniqueId.IsValid()) continue;  // human, handled by their own PostLogin
-				const FString BotKey = FString::Printf(TEXT("BOT:%s"), *OtherPS->PlayerName);
+				const FString BotKey = FString::Printf(TEXT("BOT:%s"), *OtherPS->GetPlayerName());
 				const int32 BotElo = RatingSystem->GetOrAssignBotElo(BotKey);
 				StatsReplicator->SetPlayerEloAndDelta(BotKey, BotElo, 0);
 			}
@@ -536,7 +536,7 @@ void AElimPlusGame::HandleMatchHasEnded()
 				// at LoadPlayerFromDB call). Must match exactly or the cache lookup
 				// in BuildResultPayload misses.
 				P.UniqueId   = UTPS->UniqueId.ToString();
-				P.PlayerName = UTPS->PlayerName;
+				P.PlayerName = UTPS->GetPlayerName();
 				P.TeamIndex  = UTPS->GetTeamNum();
 				P.Kills      = UTPS->Kills;
 				P.Deaths     = UTPS->Deaths;
@@ -1263,7 +1263,7 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 				// PostLogin (bots have no cache entry, so RecordRoundPPR is a no-op).
 				if (RatingSystem.IsValid())
 				{
-					RatingSystem->RecordRoundPPR(UidStr, RoundPPR, RoundDamage, UTPS->PlayerName);
+					RatingSystem->RecordRoundPPR(UidStr, RoundPPR, RoundDamage, UTPS->GetPlayerName());
 				}
 			}
 		}
@@ -1305,7 +1305,7 @@ void AElimPlusGame::EndRoundForTeam(int32 WinnerTeamIndex, FName Reason)
 					// and is filtered out at write-back time so bot ratings never persist.
 					P.UniqueId = UTPS->UniqueId.IsValid()
 						? UTPS->UniqueId.ToString()
-						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+						: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 					P.TeamIndex = TeamIdx;   // 0/1 — labels the per-round upload record
 					P.Kills    = UTPS->RoundKills;
 					P.Deaths   = UTPS->bOutOfLives ? 1 : 0; // exactly one death per round in elim
@@ -1540,14 +1540,14 @@ void AElimPlusGame::BroadcastKillReplay()
 
 	// Rewind enough to start ~5s before the kill so the build-up plays.
 	const float TimeToRewind = (GetWorld()->GetTimeSeconds() - RoundWinningKillTime) + 5.0f;
-	const float StartDelay   = 0.5f; // brief pause for the kill cam to settle
+	const float ReplayStartDelay = 0.5f; // brief pause for the kill cam to settle
 
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
 		AUTPlayerController* PC = Cast<AUTPlayerController>(It->Get());
 		if (PC)
 		{
-			PC->ClientPlayInstantReplay(WinningKillerPawn, TimeToRewind, StartDelay);
+			PC->ClientPlayInstantReplay(WinningKillerPawn, TimeToRewind, ReplayStartDelay);
 		}
 	}
 }
@@ -1773,7 +1773,7 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 			{
 				UE_LOG(LogGameMode, Warning,
 					TEXT("ElimPlus hybrid queue exhausted for %s (team %d); using PlayerStart fallback"),
-					SpawnPS ? *SpawnPS->PlayerName : TEXT("Unknown"), TeamIndex);
+					SpawnPS ? *SpawnPS->GetPlayerName() : TEXT("Unknown"), TeamIndex);
 			}
 		}
 
@@ -1806,7 +1806,7 @@ void AElimPlusGame::RestartPlayer(AController* NewPlayer)
 		if (!NewPlayer->GetPawn())
 		{
 			UE_LOG(LogGameMode, Warning, TEXT("RestartPlayer: FAILED to spawn pawn for %s"),
-				NewPlayer->PlayerState ? *NewPlayer->PlayerState->PlayerName : TEXT("Unknown"));
+				NewPlayer->PlayerState ? *NewPlayer->PlayerState->GetPlayerName() : TEXT("Unknown"));
 		}
 		else
 		{
@@ -1966,7 +1966,7 @@ APawn* AElimPlusGame::SpawnDefaultPawnFor_Implementation(AController* NewPlayer,
 
 	// --- ATTEMPT 1: Strict spawn at exact PlayerStart ---
 	FActorSpawnParameters SpawnInfo;
-	SpawnInfo.Instigator = Instigator;
+	SpawnInfo.Instigator = GetInstigator();
 	SpawnInfo.ObjectFlags |= RF_Transient;
 	SpawnInfo.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding;
 
@@ -2130,7 +2130,7 @@ void AElimPlusGame::ScoreKill_Implementation(AController* Killer, AController* O
 			{
 				RoundWinningKiller = OtherPS;
 				WinningKillerPawn  = OtherPS->GetUTCharacter();
-				UE_LOG(LogGameMode, Warning, TEXT("ScoreKill: Killer invalid, focusing replay on Victim: %s"), *OtherPS->PlayerName);
+				UE_LOG(LogGameMode, Warning, TEXT("ScoreKill: Killer invalid, focusing replay on Victim: %s"), *OtherPS->GetPlayerName());
 			}
 			// CHECK FOR DARK HORSE REPLAY CONDITION
 			// If the killer was a tracked Dark Horse candidate, flag this for replay
@@ -2175,7 +2175,7 @@ void AElimPlusGame::DelayedForceSpectate(AUTPlayerState* DeadPS)
 	AUTPlayerController* PC = Cast<AUTPlayerController>(DeadPS->GetOwner());
 	if (PC == nullptr)
 	{
-		UE_LOG(LogGameMode, Log, TEXT("DelayedForceSpectate: PlayerController for %s is null. Aborting."), *DeadPS->PlayerName);
+		UE_LOG(LogGameMode, Log, TEXT("DelayedForceSpectate: PlayerController for %s is null. Aborting."), *DeadPS->GetPlayerName());
 		return;
 	}
 
@@ -2229,8 +2229,8 @@ AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
-			if (!Pawn || !Pawn->PlayerState) continue;
-			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
+			if (!Pawn || !Pawn->GetPlayerState()) continue;
+			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->GetPlayerState());
 			if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
 
 			const float Dist = (Pawn->GetActorLocation() - SpawnLoc).Size2D();
@@ -2283,7 +2283,7 @@ AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 		{
 			UE_LOG(LogGameMode, Warning,
 				TEXT("ElimPlus: %s curated spawns failed %.0fu floor — using full-map spawn (passed floor)"),
-				*PS->PlayerName, MinimumEnemySpawnDistance);
+				*PS->GetPlayerName(), MinimumEnemySpawnDistance);
 		}
 	}
 
@@ -2296,8 +2296,8 @@ AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 		for (FConstPawnIterator It = GetWorld()->GetPawnIterator(); It; ++It)
 		{
 			APawn* Pawn = It->Get();
-			if (!Pawn || !Pawn->PlayerState) continue;
-			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->PlayerState);
+			if (!Pawn || !Pawn->GetPlayerState()) continue;
+			AUTPlayerState* OtherPS = Cast<AUTPlayerState>(Pawn->GetPlayerState());
 			if (!OtherPS || OtherPS == PS || !OtherPS->Team) continue;
 			if (OtherPS->Team->TeamIndex == TeamIndex)
 			{
@@ -2327,7 +2327,7 @@ AActor* AElimPlusGame::ChoosePlayerStart_Implementation(AController* Player)
 			{
 				UE_LOG(LogGameMode, Warning,
 					TEXT("ElimPlus: %s — no spawn passes %.0fu floor; teammate-stacking at %.0fu from teammate"),
-					*PS->PlayerName, MinimumEnemySpawnDistance, BestTeammateDist);
+					*PS->GetPlayerName(), MinimumEnemySpawnDistance, BestTeammateDist);
 			}
 		}
 	}
@@ -3124,7 +3124,7 @@ void AElimPlusGame::CheckLastManStanding(
 		{	// Broadcast the "clutch attempt" event
 			// Pass the player and the number of enemies they are facing (Alive1)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive1);
-			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 0) vs %d enemies."), *ClutchPlayer->PlayerName, Alive1);
+			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 0) vs %d enemies."), *ClutchPlayer->GetPlayerName(), Alive1);
 			if (StatsReplicator)
 			{
 				StatsReplicator->BeginClutchOverlay(0, ClutchPlayer, Alive1);
@@ -3153,7 +3153,7 @@ void AElimPlusGame::CheckLastManStanding(
 			// Broadcast the "clutch attempt" event
 			// Pass the player and the number of enemies they are facing (Alive0)
 			OnClutchSituationStarted.Broadcast(ClutchPlayer, Alive0);
-			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 1) vs %d enemies."), *ClutchPlayer->PlayerName, Alive0);
+			UE_LOG(LogGameMode, Log, TEXT("Clutch Situation Started: %s (Team 1) vs %d enemies."), *ClutchPlayer->GetPlayerName(), Alive0);
 			if (StatsReplicator)
 			{
 				StatsReplicator->BeginClutchOverlay(1, ClutchPlayer, Alive0);
@@ -3212,7 +3212,7 @@ void AElimPlusGame::OpenClutchAttempt(int32 TeamIndex, AUTPlayerState* Candidate
 	A.StartEventIndex = FMath::Max(0, StartEventIndex);
 	A.StartTime       = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 	UE_LOG(LogGameMode, Log, TEXT("Clutch attempt open: team %d, %s 1v%d (round %d, event %d)"),
-		TeamIndex, *Candidate->PlayerName, A.EnemiesAtStart, A.RoundIndex, A.StartEventIndex);
+		TeamIndex, *Candidate->GetPlayerName(), A.EnemiesAtStart, A.RoundIndex, A.StartEventIndex);
 }
 
 void AElimPlusGame::CreditClutchDirectKill(AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
@@ -3549,7 +3549,7 @@ void AElimPlusGame::RecordDarkHorse(AUTPlayerState* PlayerState, int32 EnemiesKi
 void AElimPlusGame::RecordHighDamageCarry(AUTPlayerState* PlayerState, float DamagePercentage)
 {
 	if (!PlayerState) return;
-	UE_LOG(LogGameMode, Log, TEXT("High Damage Carry Achievement: %s (%.1f%%)"), *PlayerState->PlayerName, DamagePercentage);
+	UE_LOG(LogGameMode, Log, TEXT("High Damage Carry Achievement: %s (%.1f%%)"), *PlayerState->GetPlayerName(), DamagePercentage);
 	OnPlayerHighDamageCarry.Broadcast(PlayerState, DamagePercentage);
 }
 
@@ -3630,9 +3630,9 @@ void AElimPlusGame::ScoreDamage_Implementation(int32 DamageAmount, AUTPlayerStat
 bool AElimPlusGame::ModifyDamage_Implementation(int32& Damage, FVector& Momentum, APawn* Injured, AController* InstigatedBy, const FHitResult& HitInfo, AActor* DamageCauser, TSubclassOf<UDamageType> DamageType)
 {
 	// Check for invulnerability during intermission
-	if (GetMatchState() == FName(TEXT("RoundCooldown")) && Injured && Injured->PlayerState)
+	if (GetMatchState() == FName(TEXT("RoundCooldown")) && Injured && Injured->GetPlayerState())
 	{
-		AUTPlayerState* InjuredPS = Cast<AUTPlayerState>(Injured->PlayerState);
+		AUTPlayerState* InjuredPS = Cast<AUTPlayerState>(Injured->GetPlayerState());
 		if (InjuredPS && InjuredPS->Team && InjuredPS->Team->TeamIndex == LastRoundWinningTeamIndex)
 		{
 			Damage = 0;
@@ -3650,7 +3650,7 @@ int32 AElimPlusGame::GetTiebreakWinnerByTeamHealth() const
 	{
 		AUTCharacter* C = *It;
 		if (!C || C->IsDead()) continue;
-		if (AUTPlayerState* PS = Cast<AUTPlayerState>(C->PlayerState))
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(C->GetPlayerState()))
 		{
 			if (PS->Team)
 			{
@@ -3998,7 +3998,7 @@ void AElimPlusGame::Logout(AController* Exiting)
 			// Only pause for actual human players (ignore bots and spectators)
 			if (ExitingPS && !ExitingPS->bIsABot && !ExitingPS->bOnlySpectator)
 			{
-				UE_LOG(LogGameMode, Warning, TEXT("Competitive Auto-Pause: Player %s disconnected. Pausing match."), *ExitingPS->PlayerName);
+				UE_LOG(LogGameMode, Warning, TEXT("Competitive Auto-Pause: Player %s disconnected. Pausing match."), *ExitingPS->GetPlayerName());
 
 				// Passing nullptr to SetPause acts as a "System/Admin" pause
 				SetPause(nullptr);
@@ -4059,6 +4059,7 @@ void AElimPlusGame::Logout(AController* Exiting)
 void AElimPlusGame::InitGameState()
 {
 	Super::InitGameState();
+    BP_OnGameStateInitialized(UTGameState);
 	// GameModeClass is left as-is — clients have NetcodePlus installed,
 	// so the base class sets it correctly and the scoreboard reads
 	// DisplayName from the actual game mode class (or BP subclass).
@@ -4136,7 +4137,7 @@ void AElimPlusGame::CheckForCampers()
 					// TRIGGER BLUEPRINT EVENT
 					BP_OnCamperDetected(PS, Data.ConsecutiveCampCount);
 
-					UE_LOG(LogGameMode, Log, TEXT("Camper Detected: %s (Dim: %.2f, Count: %d)"), *PS->PlayerName, MaxDim, Data.ConsecutiveCampCount);
+					UE_LOG(LogGameMode, Log, TEXT("Camper Detected: %s (Dim: %.2f, Count: %d)"), *PS->GetPlayerName(), MaxDim, Data.ConsecutiveCampCount);
 				}
 			}
 			else
@@ -4208,7 +4209,7 @@ uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 				// Bot or unrated. Same synthetic key shape as EndRoundForTeam's
 				// BuildPerf path so the random-bot-ELO testing path is consistent
 				// across balancer and Glicko math.
-				const FString BotKey = FString::Printf(TEXT("BOT:%s"), *MemberPS->PlayerName);
+				const FString BotKey = FString::Printf(TEXT("BOT:%s"), *MemberPS->GetPlayerName());
 				TeamStrength += RatingSystem->GetOrAssignBotElo(BotKey);
 			}
 		}
@@ -4222,7 +4223,7 @@ uint8 AElimPlusGame::PickBalancedTeam(AUTPlayerState* PS, uint8 RequestedTeam)
 	if (BestTeamIdx == INDEX_NONE) return Super::PickBalancedTeam(PS, RequestedTeam);
 
 	UE_LOG(LogGameMode, Verbose, TEXT("ElimPlus PickBalancedTeam: %s -> team %d (lowest cached-Elo sum %lld)"),
-		*PS->PlayerName, BestTeamIdx, BestStrength);
+		*PS->GetPlayerName(), BestTeamIdx, BestStrength);
 	return static_cast<uint8>(BestTeamIdx);
 }
 
@@ -4273,7 +4274,7 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 		FElimPlusBalanceInput In;
 		In.UniqueId = UTPS->UniqueId.IsValid()
 			? UTPS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 		Inputs.Add(In);
 		ControllersByIndex.Add(C);
 	}
@@ -4338,10 +4339,10 @@ void AElimPlusGame::RebalanceTeamsForMatchStart()
 			}
 			else
 			{
-				Elo = RatingSystem->GetOrAssignBotElo(FString::Printf(TEXT("BOT:%s"), *PS->PlayerName));
+				Elo = RatingSystem->GetOrAssignBotElo(FString::Printf(TEXT("BOT:%s"), *PS->GetPlayerName()));
 			}
 			if (!Names.IsEmpty()) Names += TEXT(", ");
-			Names += FString::Printf(TEXT("%s(%d)"), *PS->PlayerName, Elo);
+			Names += FString::Printf(TEXT("%s(%d)"), *PS->GetPlayerName(), Elo);
 		}
 		return FString::Printf(TEXT("%s (str=%.0f): %s"), Prefix, Strength, *Names);
 	};
@@ -4406,7 +4407,7 @@ void AElimPlusGame::MidGameShufflePPR()
 		FElimPlusBalanceInput In;
 		In.UniqueId = UTPS->UniqueId.IsValid()
 			? UTPS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 
 		const int32* Rounds = PerPlayerMatchPPRRoundCount.Find(UTPS);
 		const float* Sum    = PerPlayerMatchPPRSum.Find(UTPS);
@@ -4513,7 +4514,7 @@ void AElimPlusGame::MidGameShufflePPR()
 	{
 		AController* C = ControllersByIndex.IsValidIndex(SlotIdx) ? ControllersByIndex[SlotIdx] : nullptr;
 		AUTPlayerState* PS = C ? Cast<AUTPlayerState>(C->PlayerState) : nullptr;
-		return PS ? FString::Printf(TEXT("%s(%.1f)"), *PS->PlayerName, Inputs[SlotIdx].StrengthOverride / 100.f) : FString(TEXT("?"));
+		return PS ? FString::Printf(TEXT("%s(%.1f)"), *PS->GetPlayerName(), Inputs[SlotIdx].StrengthOverride / 100.f) : FString(TEXT("?"));
 	};
 	auto MoveSlot = [this, &ControllersByIndex](int32 SlotIdx, uint8 TargetTeam)
 	{

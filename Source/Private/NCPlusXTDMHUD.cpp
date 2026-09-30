@@ -180,7 +180,7 @@ void ANCPlusXTDMHUD::DrawTeammates(AUTGameState* GS)
 		Tile(Canvas, P.X, Y, 292.f * S, 47.f * S, FLinearColor(.02f, .025f, .035f, .75f * Opacity));
 		Tile(Canvas, P.X, Y, 3.f * S, 47.f * S, Col);
 		FText Fitted; float W, H;
-		NCPlusHUDDrawCall::ResolveFittedName(Canvas, PS, Font, PS->PlayerName, 265.f * S, .62f * FontScale, Fitted, W, H);
+		NCPlusHUDDrawCall::ResolveFittedName(Canvas, PS, Font, PS->GetPlayerName(), 265.f * S, .62f * FontScale, Fitted, W, H);
 		NCPlusHUDDrawCall::DrawResolvedText(Canvas, Font, Fitted, P.X + 12.f * S, Y + 3.f * S, .62f * FontScale, .62f * FontScale, Col.ToFColor(true), true);
 		Text(Canvas, Font, PlayerStatus(PS, Rep), P.X + 12.f * S, Y + 26.f * S, .45f * FontScale, FLinearColor(1, 1, 1, Opacity));
 		Y += 51.f * S;
@@ -192,7 +192,7 @@ void ANCPlusXTDMHUD::DrawHUD()
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
 	UpdateSpectatorInput();
 	Super::DrawHUD();
-	if (!Canvas || !SmallFont || !bShowUTHUD || !UTPlayerOwner
+	if (!Canvas || !SmallFont || !UTPlayerOwner
 		|| (!bShowHUD && UTPlayerOwner->bCinematicMode)) return;
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	if (GS && !ScoreboardIsUp()) { DrawScoreStrip(GS); DrawTeammates(GS); }

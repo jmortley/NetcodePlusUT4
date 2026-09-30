@@ -5,7 +5,7 @@
 #include "UTPlayerController.h"
 #include "UTProj_LinkPlasma.h"
 #include "UTTeamGameMode.h"
-#include "UnrealNetwork.h"
+#include "Net/UnrealNetwork.h"
 #include "StatNames.h"
 #include "UTSquadAI.h"
 #include "UTWeaponStateFiring.h"
@@ -582,7 +582,7 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 		}
 	}
 
-	if (ScreenTexture != NULL && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->LastRenderTime < 0.1f)
+	if (ScreenTexture != NULL && Mesh->IsRegistered() && GetWorld()->TimeSeconds - Mesh->GetLastRenderTime() < 0.1f)
 	{
 		ScreenTexture->FastUpdateResource();
 	}
@@ -596,7 +596,7 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 
 	if (UTOwner && IsFiring())
 	{
-		if ((Role == ROLE_Authority) && FireLoopingSound.IsValidIndex(CurrentFireMode) && FireLoopingSound[CurrentFireMode] != NULL && !IsLinkPulsing())
+		if ((GetLocalRole() == ROLE_Authority) && FireLoopingSound.IsValidIndex(CurrentFireMode) && FireLoopingSound[CurrentFireMode] != NULL && !IsLinkPulsing())
 		{
 			if (!bLinkBeamImpacting)
 			{
@@ -657,7 +657,7 @@ void AUTWeap_LinkGun_Plus::Tick(float DeltaTime)
 			LoopingState->ExitCooldown();
 		}
 	}
-	if (Role == ROLE_Authority && CurrentFireMode == 1 && CurrentState != ActiveState)
+	if (GetLocalRole() == ROLE_Authority && CurrentFireMode == 1 && CurrentState != ActiveState)
 	{
 		// Only check if we're handling a remote client (not listen server host)
 		if (UTOwner && !UTOwner->IsLocallyControlled())
@@ -705,9 +705,9 @@ void AUTWeap_LinkGun_Plus::ConsumeAmmo(uint8 FireModeNum)
 	// Quake-style beam accuracy: each refire tick is one "shot", and counts
 	// as a "hit" iff the beam connected at least once since the last tick.
 	// Server-only — clients see the values via the existing stats replicator.
-	if (FireModeNum == 1 && Role == ROLE_Authority && UTOwner)
+	if (FireModeNum == 1 && GetLocalRole() == ROLE_Authority && UTOwner)
 	{
-		if (AUTPlayerState* PS = Cast<AUTPlayerState>(UTOwner->PlayerState))
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(UTOwner->GetPlayerState()))
 		{
 			static const FName NAME_LinkBeamShots(TEXT("LinkBeamShots"));
 			PS->ModifyStatsValue(NAME_LinkBeamShots, 1);
@@ -774,7 +774,7 @@ void AUTWeap_LinkGun_Plus::StartLinkPull()
 
 bool AUTWeap_LinkGun_Plus::IsValidLinkTarget(AActor* InTarget)
 {
-	return (InTarget && Cast<AUTCharacter>(InTarget) && !InTarget->bTearOff && InTarget != GetUTOwner());
+	return (InTarget && Cast<AUTCharacter>(InTarget) && !InTarget->GetTearOff() && InTarget != GetUTOwner());
 }
 
 bool AUTWeap_LinkGun_Plus::ServerSetPulseTarget_Validate(AActor* InTarget)
@@ -816,7 +816,7 @@ void AUTWeap_LinkGun_Plus::ServerSetPulseTarget_Implementation(AActor* InTarget)
 		UUTGameplayStatics::UTPlaySound(GetWorld(), PullSucceeded, UTOwner, SRT_All, false, FVector::ZeroVector, Cast<AUTPlayerController>(PulseTarget->GetInstigatorController()), UTOwner, true, SAT_WeaponFire);
 
 		UTOwner->SetFlashExtra(UTOwner->FlashExtra + 1, CurrentFireMode);
-		if (Role == ROLE_Authority)
+		if (GetLocalRole() == ROLE_Authority)
 		{
 			AUTCharacter* PulledChar = Cast<AUTCharacter>(PulseTarget);
 			if (PulledChar && !PulledChar->IsDead() && BeamPulseDamageType && Cast<AUTPlayerController>(UTOwner->GetController()))
@@ -931,7 +931,7 @@ void AUTWeap_LinkGun_Plus::FiringExtraUpdated_Implementation(uint8 NewFlashExtra
 		if (MuzzleFlash.IsValidIndex(FiringState.Num()) && MuzzleFlash[FiringState.Num()] != NULL)
 		{
 			AActor* GuessTarget = PulseTarget;
-			if (GuessTarget == NULL && UTOwner != NULL && Role < ROLE_Authority)
+			if (GuessTarget == NULL && UTOwner != NULL && GetLocalRole() < ROLE_Authority)
 			{
 				TArray<FOverlapResult> Hits;
 				GetWorld()->OverlapMultiByChannel(Hits, UTOwner->FlashLocation.Position, FQuat::Identity, COLLISION_TRACE_WEAPON, FCollisionShape::MakeSphere(10.0f), FCollisionQueryParams(NAME_None, true, UTOwner));

@@ -188,8 +188,11 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Arena|Bridge")
 	void BP_OnSetIntermission(bool bInIntermission, int32 IntermissionRemain);
 
+	// Keep the original Blueprint pin names while avoiding C++ member shadowing.
 	UFUNCTION(BlueprintImplementableEvent, Category = "Arena|Bridge")
-	void BP_OnSetRound(bool bInProgress, int32 RoundRemain, int32 LastWinnerTeamIndex, const TArray<AUTPlayerState*>& Team0AlivePlayers, const TArray<AUTPlayerState*>& Team1AlivePlayers);
+	void BP_OnSetRound(bool bInProgress, int32 RoundRemain, int32 LastWinnerTeamIndex,
+		UPARAM(meta = (OverrideNativeName = "Team0AlivePlayers")) const TArray<AUTPlayerState*>& InTeam0AlivePlayers,
+		UPARAM(meta = (OverrideNativeName = "Team1AlivePlayers")) const TArray<AUTPlayerState*>& InTeam1AlivePlayers);
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Arena|Bridge")
 	TArray<AUTPlayerState*> Team0AlivePlayers;
@@ -258,8 +261,6 @@ public:
 	// -------- Replay opt-in (FlagRun does this) --------
 	virtual bool SupportsInstantReplay() const override;
 
-	UFUNCTION(BlueprintNativeEvent)
-	bool CanSpectate(APlayerController* Viewer, APlayerState* ViewTarget);
 	virtual bool CanSpectate_Implementation(APlayerController* Viewer, APlayerState* ViewTarget) override;
 
 	/** Optional HUD to use while replay is active (can be left null). */
@@ -326,6 +327,11 @@ public:
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void BeginPlay() override;
 	virtual void InitGameState() override;
+
+    /** GameState is ready before login, BeginPlay and round bridge notifications. */
+    UFUNCTION(BlueprintImplementableEvent, Category="NetcodePlus|Initialization")
+    void BP_OnGameStateInitialized(AUTGameState* InitializedGameState);
+
 	//virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandlePlayerIntro() override;

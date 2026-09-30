@@ -67,7 +67,7 @@ static FORCEINLINE const TCHAR* RocketDbgSide(const AUTProjectile* Rocket)
 	{
 		// SpawnNetPredictedProjectile assigns bFakeClientProjectile after SpawnActor returns, which is
 		// after BeginPlay. ROLE_Authority in a client process is nevertheless unambiguously the local fake.
-		return (Rocket->bFakeClientProjectile || Rocket->Role == ROLE_Authority) ? TEXT("FAKE") : TEXT("CLI");
+		return (Rocket->bFakeClientProjectile || Rocket->GetLocalRole() == ROLE_Authority) ? TEXT("FAKE") : TEXT("CLI");
 	}
 	return TEXT("SRV");
 }
@@ -111,7 +111,7 @@ bool AUTPlusProj_Rocket::CanMatchFake(AUTProjectile* InFakeProjectile, const FVe
 	// Same-instigator equality is the theft fix; unresolved/null ownership fails closed.
 	const bool bInstGateOn = CVarRocketMatchFakeInstigator.GetValueOnGameThread() != 0;
 	const bool bInstigatorOK = !bInstGateOn
-		|| (Instigator != nullptr && InFakeProjectile->Instigator == Instigator);
+		|| (GetInstigator() != nullptr && InFakeProjectile->GetInstigator() == GetInstigator());
 
 	const float MaxDist = CVarRocketMatchFakeMaxDist.GetValueOnGameThread();
 	const float Dist = FVector::Dist(GetActorLocation(), InFakeProjectile->GetActorLocation());
@@ -126,8 +126,8 @@ bool AUTPlusProj_Rocket::CanMatchFake(AUTProjectile* InFakeProjectile, const FVe
 			bLiveFake ? 1 : 0, Dot, bDirectionOK ? TEXT("ok") : TEXT("FAIL"),
 			Dist, MaxDist, bDistanceOK ? TEXT("ok") : TEXT("FAIL"),
 			!bInstGateOn ? TEXT("off") : (bInstigatorOK ? TEXT("ok") : TEXT("FAIL")),
-			Instigator ? *Instigator->GetName() : TEXT("null"),
-			InFakeProjectile->Instigator ? *InFakeProjectile->Instigator->GetName() : TEXT("null"),
+			GetInstigator() ? *GetInstigator()->GetName() : TEXT("null"),
+			InFakeProjectile->GetInstigator() ? *InFakeProjectile->GetInstigator()->GetName() : TEXT("null"),
 			GetWorld() ? GetWorld()->GetTimeSeconds() - InFakeProjectile->CreationTime : -1.f);
 	}
 
@@ -185,8 +185,8 @@ void AUTPlusProj_Rocket::BeginFakeProjectileSynch(AUTProjectile* InFakeProjectil
 			TEXT("[RocketDbg/%s] PAIR %s real=%s fake=%s realInst=%s fakeInst=%s preDist=%.1f stockDist=%.1f finalDist=%.1f softSync=%d window=%.1f"),
 			RocketDbgSide(this), bPaired ? TEXT("selected") : TEXT("FAILED"), *GetName(),
 			InFakeProjectile ? *InFakeProjectile->GetName() : TEXT("null"),
-			Instigator ? *Instigator->GetName() : TEXT("null"),
-			(InFakeProjectile && InFakeProjectile->Instigator) ? *InFakeProjectile->Instigator->GetName() : TEXT("null"),
+			GetInstigator() ? *GetInstigator()->GetName() : TEXT("null"),
+			(InFakeProjectile && InFakeProjectile->GetInstigator()) ? *InFakeProjectile->GetInstigator()->GetName() : TEXT("null"),
 			PrePairDistance, StockPostPairDistance,
 			bPaired ? FVector::Dist(GetActorLocation(), InFakeProjectile->GetActorLocation()) : -1.f,
 			bPrimarySoftSyncActive ? 1 : 0, SoftSyncWindow);
@@ -298,7 +298,7 @@ void AUTPlusProj_Rocket::ShutDown()
 			RocketDbgSide(this), *GetName(), bFakeClientProjectile ? 1 : 0, bExploded ? 1 : 0,
 			MasterProjectile ? *MasterProjectile->GetName() : TEXT("null"),
 			MyFakeProjectile ? *MyFakeProjectile->GetName() : TEXT("null"),
-			bHidden ? 1 : 0, *GetActorLocation().ToString(),
+			IsHidden() ? 1 : 0, *GetActorLocation().ToString(),
 			GetWorld() ? GetWorld()->GetTimeSeconds() - CreationTime : -1.f);
 	}
 
@@ -349,7 +349,7 @@ void AUTPlusProj_Rocket::Destroyed()
 			RocketDbgSide(this), *GetName(), bFakeClientProjectile ? 1 : 0, bExploded ? 1 : 0,
 			MasterProjectile ? *MasterProjectile->GetName() : TEXT("null"),
 			MyFakeProjectile ? *MyFakeProjectile->GetName() : TEXT("null"),
-			bHidden ? 1 : 0, *GetActorLocation().ToString(),
+			IsHidden() ? 1 : 0, *GetActorLocation().ToString(),
 			GetWorld() ? GetWorld()->GetTimeSeconds() - CreationTime : -1.f);
 	}
 	Super::Destroyed();
@@ -361,11 +361,11 @@ void AUTPlusProj_Rocket::BeginPlay()
 	// DIAGNOSTIC: ROLE_Authority means a true server rocket in a server process, but it also means
 	// a locally-spawned fake in a client process. Label the side explicitly so client logs never claim
 	// that their own fake was a server actor.
-	if (Role == ROLE_Authority && RocketPairDbg())
+	if (GetLocalRole() == ROLE_Authority && RocketPairDbg())
 	{
 		AUTCharacter* OwnerChar = Cast<AUTCharacter>(GetInstigator());
 		UE_LOG(LogRocketDbg, Warning, TEXT("[RocketDbg/%s] SPAWN rocket=%s fake=%d owner=%s at=%s"),
-			RocketDbgSide(this), *GetName(), (bFakeClientProjectile || (GetNetMode() == NM_Client && Role == ROLE_Authority)) ? 1 : 0,
+			RocketDbgSide(this), *GetName(), (bFakeClientProjectile || (GetNetMode() == NM_Client && GetLocalRole() == ROLE_Authority)) ? 1 : 0,
 			OwnerChar ? *OwnerChar->GetName() : TEXT("?"),
 			*GetActorLocation().ToString());
 	}
@@ -379,7 +379,7 @@ void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiv
 	// on the client's local pawn positions. The server may disagree because its
 	// capsule positions are different — the RPC gives it a second chance with rewind.
 	// Role != ROLE_Authority means we're on the client viewing the replicated rocket.
-	if (Role != ROLE_Authority && OtherActor && !bFakeClientProjectile)
+	if (GetLocalRole() != ROLE_Authority && OtherActor && !bFakeClientProjectile)
 	{
 		AUTCharacter* HitChar = Cast<AUTCharacter>(OtherActor);
 		if (HitChar)
@@ -407,7 +407,7 @@ void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiv
 	// destroys this projectile, so a claim arriving after the rocket is gone (close-range timing
 	// race) can still rewind-rescue. The pawn we directly hit (or null = geometry/whiff) is passed
 	// so the grace path won't double-damage a target that already took the present-time hit.
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		// DIAGNOSTIC: what this authority-role rocket hit. RocketDbgSide distinguishes a real server
 		// projectile from the owning client's local-authority fake, and the actor ID joins the event
@@ -437,7 +437,7 @@ void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiv
 	// rocket detonating against a wall inflates RocketHits. Zero the credit for non-pawn impacts so
 	// only player hits count. Pawn hits keep the default credit; the radial/splash path in Explode
 	// resets StatsHitCredit itself, so this affects only the buggy direct-impact line.
-	if (Role == ROLE_Authority && Cast<APawn>(OtherActor) == nullptr)
+	if (GetLocalRole() == ROLE_Authority && Cast<APawn>(OtherActor) == nullptr)
 	{
 		StatsHitCredit = 0.f;
 	}

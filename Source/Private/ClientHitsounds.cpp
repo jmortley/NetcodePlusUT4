@@ -415,10 +415,9 @@ void AClientHitsounds::Mutate_Implementation(const FString& MutateString, APlaye
 	{
 		return;
 	}
-	// 4.15 API: TrimStartAndEnd does not exist yet; Trim()/TrimTrailing() are
-	// non-const, so work on a copy (multi-word mutate commands can arrive with
-	// a leading space — see the setname/ss_detail precedent).
-	const FString Command = FString(MutateString).Trim().TrimTrailing();
+	// Multi-word mutate commands can arrive with a leading space.
+	// Trim a copy so the incoming command remains unchanged.
+	const FString Command = MutateString.TrimStartAndEnd();
 	if (!Command.Equals(TEXT("hitsounds"), ESearchCase::IgnoreCase))
 	{
 		return;

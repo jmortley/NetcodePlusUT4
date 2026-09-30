@@ -196,7 +196,7 @@ void NCClutchOverlay::Draw(AUTHUD* HUD, UCanvas* Canvas,
 		const FString Header = GetOutcomeLabel(State);
 		const FString CandidateName = !State.CandidateName.IsEmpty()
 			? State.CandidateName
-			: (State.Candidate ? State.Candidate->PlayerName : TEXT("PLAYER"));
+			: (State.Candidate ? State.Candidate->GetPlayerName() : TEXT("PLAYER"));
 		const int32 VersusCount = State.bActive
 			? FMath::Max(1, State.EnemiesRemaining)
 			: FMath::Max(1, State.EnemiesAtStart);

@@ -100,7 +100,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::EndState()
 void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 {
 	AUTWeap_LinkGun_NCP* LinkGun = Cast<AUTWeap_LinkGun_NCP>(GetOuterAUTWeapon());
-	if (LinkGun != nullptr && LinkGun->Role == ROLE_Authority)
+	if (LinkGun != nullptr && LinkGun->GetLocalRole() == ROLE_Authority)
 	{
 		LinkGun->bLinkCausingDamage = false;
 	}
@@ -150,7 +150,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 
 		AccumulatedFiringTime += DeltaTime;
 		const float RefireTime = LinkGun->GetRefireTime(LinkGun->GetCurrentFireMode());
-		AUTPlayerState* PS = (LinkGun->Role == ROLE_Authority && LinkGun->GetUTOwner() != nullptr && LinkGun->GetUTOwner()->Controller != nullptr)
+		AUTPlayerState* PS = (LinkGun->GetLocalRole() == ROLE_Authority && LinkGun->GetUTOwner() != nullptr && LinkGun->GetUTOwner()->Controller != nullptr)
 			? Cast<AUTPlayerState>(LinkGun->GetUTOwner()->Controller->PlayerState)
 			: nullptr;
 
@@ -174,13 +174,13 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 		AActor* OldLinkedTarget = LinkGun->CurrentLinkedTarget;
 		LinkGun->CurrentLinkedTarget = nullptr;
 
-		if (Hit.Actor.IsValid() && Hit.Actor.Get()->bCanBeDamaged)
+		if (Hit.Actor.IsValid() && Hit.Actor.Get()->CanBeDamaged())
 		{
 			if (LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
 			{
 				LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
 			}
-			if (LinkGun->Role == ROLE_Authority)
+			if (LinkGun->GetLocalRole() == ROLE_Authority)
 			{
 				LinkGun->bLinkCausingDamage = true;
 			}
@@ -221,7 +221,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 
 		// The owning client traces only its beam endpoint. Damage above remains
 		// authoritative because Role < ROLE_Authority cannot apply it.
-		if (LinkGun->Role < ROLE_Authority && LinkGun->GetUTOwner() != nullptr)
+		if (LinkGun->GetLocalRole() < ROLE_Authority && LinkGun->GetUTOwner() != nullptr)
 		{
 			LinkGun->GetUTOwner()->SetFlashLocation(Hit.Location, LinkGun->GetCurrentFireMode());
 		}

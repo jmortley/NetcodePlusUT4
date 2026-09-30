@@ -403,7 +403,7 @@ void UWipeoutScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, fl
 	bool bIsDead = (UTC_Name == nullptr || UTC_Name->IsDead()) && !PlayerState->bOutOfLives;
 	if (bIsDead) DrawColor *= 0.6f;
 
-	FString DisplayName = PlayerState->PlayerName;
+	FString DisplayName = PlayerState->GetPlayerName();
 	float NameXL, NameYL;
 	Canvas->TextSize(UTHUDOwner->SmallFont, DisplayName, NameXL, NameYL, 1.f, 1.f);
 	float MaxNameWidth = 0.40f * ScaledCellWidth;
@@ -639,7 +639,7 @@ void UWipeoutScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 				}
 				else if (Team == 0 && !PlayerState->bIsDemoRecording)
 				{
-					SpectatorNames.Add(PlayerState->PlayerName);
+					SpectatorNames.Add(PlayerState->GetPlayerName());
 				}
 			}
 		}

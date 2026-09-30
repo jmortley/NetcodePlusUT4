@@ -58,7 +58,7 @@ void UUTWeaponStateFiring_Transactional::BeginState(const UUTWeaponState* PrevSt
 			? Cast<AUTWeaponFix>(W)->LastFireTime[0] : -1.f;
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] TX_BEGIN_STATE frame=%u t=%.4f role=%d net=%d local=%d state=%p prev=%s currentMode=%d pending0=%d lft0=%.4f refire=%.4f timerRate=%.4f timerRemain=%.4f"),
-			(uint32)GFrameCounter, Now, (int32)W->Role, (int32)W->GetNetMode(),
+			(uint32)GFrameCounter, Now, (int32)W->GetLocalRole(), (int32)W->GetNetMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
 			PrevState ? *PrevState->GetClass()->GetName() : TEXT("null"), W->GetCurrentFireMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
@@ -85,7 +85,7 @@ void UUTWeaponStateFiring_Transactional::EndState()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] TX_END_STATE frame=%u t=%.4f role=%d net=%d local=%d state=%p currentMode=%d pending0=%d timerRemain=%.4f"),
 			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(),
+			(int32)W->GetLocalRole(), (int32)W->GetNetMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
 			W->GetCurrentFireMode(), (W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
 			W->GetWorldTimerManager().GetTimerRemaining(RefireCheckHandle));
@@ -278,8 +278,8 @@ void UUTWeaponStateFiring_Transactional::RefireCheckTimer()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] TX_REFIRE frame=%u t=%.4f wep=%p player=%s role=%d net=%d local=%d continued=%d preMode=%d preState=%s postState=%s prePending0=%d prePendingCurrent=%d prePendingWpn=%d preAmmoOK=%d preRootBlocked=%d postPending0=%d lft0=%.4f ready=%.4f lateBy=%.4f timerRate=%.4f timerRemain=%.4f"),
 			(uint32)GFrameCounter, Now, W,
-			(PreOwner && PreOwner->PlayerState) ? *PreOwner->PlayerState->PlayerName : TEXT("?"),
-			(int32)W->Role, (int32)W->GetNetMode(), (PreOwner && PreOwner->IsLocallyControlled()) ? 1 : 0,
+			(PreOwner && PreOwner->GetPlayerState()) ? *PreOwner->GetPlayerState()->GetPlayerName() : TEXT("?"),
+			(int32)W->GetLocalRole(), (int32)W->GetNetMode(), (PreOwner && PreOwner->IsLocallyControlled()) ? 1 : 0,
 			bContinued ? 1 : 0, PreMode,
 			PreState ? *PreState->GetClass()->GetName() : TEXT("null"),
 			W->GetCurrentState() ? *W->GetCurrentState()->GetClass()->GetName() : TEXT("null"),
@@ -360,7 +360,7 @@ void UUTWeaponStateFiring_Transactional::TransactionalFire()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] TX_SERVER_DISPATCH frame=%u t=%.4f role=%d net=%d local=%d continued=%d pending0=%d currentMode=%d state=%p wasNetDelayed=%d"),
 			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(),
+			(int32)W->GetLocalRole(), (int32)W->GetNetMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0,
 			bContinued ? 1 : 0, (W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
 			W->GetCurrentFireMode(), this, bWasNetDelayedShot ? 1 : 0);

@@ -432,7 +432,7 @@ void ATeamArenaCharacter::UpdateRemoteAnimationUROBeforeMovement()
 	LastRemoteAnimationUROFrame = GFrameCounter;
 	UWorld* World = GetWorld();
 	const bool bEnabled = bRequested && World != nullptr && GetNetMode() == NM_Client
-		&& World->DemoNetDriver == nullptr && Role == ROLE_SimulatedProxy && !IsLocallyControlled();
+		&& World->DemoNetDriver == nullptr && GetLocalRole() == ROLE_SimulatedProxy && !IsLocallyControlled();
 	if (!bEnabled && !RemoteAnimationUROState)
 	{
 		return;
@@ -629,8 +629,8 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 		CustomDepthMesh->DetachFromComponent(FDetachmentTransformRules::KeepRelativeTransform);
 		USkeletalMeshComponent* const DefaultMesh =
 			CustomDepthMesh->GetClass()->GetDefaultObject<USkeletalMeshComponent>();
-		CustomDepthMesh->PrimaryComponentTick = DefaultMesh->PrimaryComponentTick;
-		CustomDepthMesh->PostPhysicsComponentTick = DefaultMesh->PostPhysicsComponentTick;
+		// Match the 4.25 UT outline helper; tick functions are no longer copyable.
+		CustomDepthMesh->PrimaryComponentTick.Target = DefaultMesh->PrimaryComponentTick.Target;
 		CustomDepthMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		CustomDepthMesh->SetSimulatePhysics(false);
 		CustomDepthMesh->SetCastShadow(false);
@@ -640,14 +640,14 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 			CustomDepthMesh->SetMaterial(MaterialIndex, UMaterial::GetDefaultMaterial(MD_Surface));
 		}
 		CustomDepthMesh->BoundsScale = 15000.f;
-		CustomDepthMesh->bVisible = true;
+		CustomDepthMesh->SetVisibleFlag(true);
 		CustomDepthMesh->bHiddenInGame = false;
 		CustomDepthMesh->bRenderInMainPass = false;
 		CustomDepthMesh->bRenderCustomDepth = true;
 		CustomDepthMesh->AttachToComponent(BodyMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-		CustomDepthMesh->RelativeLocation = FVector::ZeroVector;
-		CustomDepthMesh->RelativeRotation = FRotator::ZeroRotator;
-		CustomDepthMesh->RelativeScale3D = FVector(1.0f);
+		CustomDepthMesh->SetRelativeLocation(FVector::ZeroVector);
+		CustomDepthMesh->SetRelativeRotation(FRotator::ZeroRotator);
+		CustomDepthMesh->SetRelativeScale3D(FVector(1.0f));
 	}
 
 	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
@@ -670,9 +670,9 @@ void ATeamArenaCharacter::FlushDeferredOutlineUpdate()
 		}
 		CustomDepthMesh->SetMasterPoseComponent(BodyMesh);
 		CustomDepthMesh->AttachToComponent(BodyMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
-		CustomDepthMesh->RelativeLocation = FVector::ZeroVector;
-		CustomDepthMesh->RelativeRotation = FRotator::ZeroRotator;
-		CustomDepthMesh->RelativeScale3D = FVector(1.0f);
+		CustomDepthMesh->SetRelativeLocation(FVector::ZeroVector);
+		CustomDepthMesh->SetRelativeRotation(FRotator::ZeroRotator);
+		CustomDepthMesh->SetRelativeScale3D(FVector(1.0f));
 	}
 
 	if (CustomDepthMesh != nullptr && CustomDepthMesh->GetAttachParent() != BodyMesh)
@@ -1308,7 +1308,7 @@ void ATeamArenaCharacter::CleanupHiddenCorpse()
 		// ActorChannels. A torn-off actor cannot open a new recording channel afterwards.
 		for (UNetConnection* Connection : World->DemoNetDriver->ClientConnections)
 		{
-			if (Connection != nullptr && Connection->ActorChannels.FindRef(this) != nullptr)
+			if (Connection != nullptr && Connection->FindActorChannelRef(this) != nullptr)
 			{
 				bMustWait = true;
 				break;
@@ -1477,7 +1477,7 @@ int32 ATeamArenaCharacter::GetNetcodeVersion()
 
 float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 {
-	if (PlayerState && GetNetMode() == NM_Client)
+	if (GetPlayerState() && GetNetMode() == NM_Client)
 	{
 		// 1. Opt-Out Check
 		if (CVarEnableProjectilePrediction.GetValueOnGameThread() == 0)
@@ -1497,7 +1497,7 @@ float ATeamArenaCharacter::GetClientVisualPredictionTime() const
 
 			// Projectile weapons: Apply visual prediction
 			float Fudge = 20.0f;
-			float AdjustedPing = FMath::Max(0.0f, PlayerState->ExactPing - Fudge);
+			float AdjustedPing = FMath::Max(0.0f, GetPlayerState()->ExactPing - Fudge);
 			float OneWayLatency = AdjustedPing * 0.0005f;
 			return FMath::Min(OneWayLatency, 0.10f);
 		}
@@ -1788,7 +1788,7 @@ void ATeamArenaCharacter::FiringInfoUpdated()
                     static FName NAME_LocalHitLocation(TEXT("LocalHitLocation"));
 
                     PSC->SetVectorParameter(NAME_HitLocation, FlashLocation.Position);
-                    PSC->SetVectorParameter(NAME_LocalHitLocation, PSC->ComponentToWorld.InverseTransformPosition(FlashLocation.Position));
+                    PSC->SetVectorParameter(NAME_LocalHitLocation, PSC->GetComponentTransform().InverseTransformPosition(FlashLocation.Position));
 
                     // CRITICAL: Ensure visual parameters (Colors, Lightning Arcs) are applied
                     WeaponAttachment->ModifyFireEffect(PSC);
@@ -1818,7 +1818,7 @@ void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
 	// Position rewind is authoritative. Avoid duplicating this short history on
 	// simulated/autonomous clients, which never validate a server hitscan.
 	UWorld* const World = GetWorld();
-	if (Role != ROLE_Authority || World == nullptr || GetCapsuleComponent() == nullptr ||
+	if (GetLocalRole() != ROLE_Authority || World == nullptr || GetCapsuleComponent() == nullptr ||
 		UTCharacterMovement == nullptr)
 	{
 		return;
@@ -2034,7 +2034,7 @@ void ATeamArenaCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		AUTGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AUTGameMode>() : nullptr;
 		const bool bIsICTF = GM && GM->bIsInstagib && GM->IsA(AUTCTFBaseGame::StaticClass());
@@ -2276,9 +2276,9 @@ void ATeamArenaCharacter::PossessedBy(AController* NewController)
 {
 	Super::PossessedBy(NewController);
 
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
-		if (AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState))
+		if (AUTPlayerState* PS = Cast<AUTPlayerState>(GetPlayerState()))
 		{
 			bool bRemovedNullEntry = false;
 			for (int32 Index = PS->WeaponSkins.Num() - 1; Index >= 0; --Index)
@@ -2305,7 +2305,7 @@ void ATeamArenaCharacter::PossessedBy(AController* NewController)
 bool ATeamArenaCharacter::AddInventory(AUTInventory* InvToAdd, bool bAutoActivate)
 {
 	const bool bAdded = Super::AddInventory(InvToAdd, bAutoActivate);
-	if (bAdded && Role == ROLE_Authority)
+	if (bAdded && GetLocalRole() == ROLE_Authority)
 	{
 		AUTWeapon* AddedWeapon = Cast<AUTWeapon>(InvToAdd);
 		// A dropped weapon keeps the physical skin already copied into it. Fresh
@@ -2363,7 +2363,7 @@ void ATeamArenaCharacter::SetSkinForWeapon(UUTWeaponSkin* Skin)
 		Super::SetSkinForWeapon(Skin);
 		return;
 	}
-	if (Role != ROLE_Authority || Skin->WeaponSkinCustomizationTag == NAME_None)
+	if (GetLocalRole() != ROLE_Authority || Skin->WeaponSkinCustomizationTag == NAME_None)
 	{
 		return;
 	}
@@ -2399,7 +2399,7 @@ void ATeamArenaCharacter::SetSkinForWeapon(UUTWeaponSkin* Skin)
 	}
 
 	UpdateWeaponSkin();
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		ForceNetUpdate();
 	}
@@ -2418,7 +2418,7 @@ bool ATeamArenaCharacter::ServerSetNCPWeaponSkin_Validate(
 void ATeamArenaCharacter::ServerSetNCPWeaponSkin_Implementation(
 	AUTWeapon* InWeapon, const FString& SkinPath)
 {
-	if (Role != ROLE_Authority || InWeapon == nullptr || InWeapon->IsPendingKillPending() ||
+	if (GetLocalRole() != ROLE_Authority || InWeapon == nullptr || InWeapon->IsPendingKillPending() ||
 		!InWeapon->IsA(AUTWeaponFix::StaticClass()) || InWeapon->GetUTOwner() != this)
 	{
 		return;
@@ -2433,7 +2433,7 @@ void ATeamArenaCharacter::ServerSetNCPWeaponSkin_Implementation(
 			break;
 		}
 	}
-	AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+	AUTPlayerState* PS = Cast<AUTPlayerState>(GetPlayerState());
 	if (!bOwnedWeapon || PS == nullptr || PS->bOnlySpectator)
 	{
 		return;
@@ -2486,8 +2486,8 @@ void ATeamArenaCharacter::ServerSetNCPWeaponSkin_Implementation(
 void ATeamArenaCharacter::ApplyServerWeaponSkinSelection(
 	AUTWeapon* InWeapon, UUTWeaponSkin* Skin)
 {
-	AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
-	if (Role != ROLE_Authority || InWeapon == nullptr || PS == nullptr)
+	AUTPlayerState* PS = Cast<AUTPlayerState>(GetPlayerState());
+	if (GetLocalRole() != ROLE_Authority || InWeapon == nullptr || PS == nullptr)
 	{
 		return;
 	}
@@ -2549,7 +2549,7 @@ void ATeamArenaCharacter::SubmitConfiguredWeaponSkin(AUTWeaponFix* FixWeapon, bo
 	const FString DesiredPath = DesiredSkin != nullptr
 		? DesiredSkin->GetPathName()
 		: FString();
-	AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+	AUTPlayerState* PS = Cast<AUTPlayerState>(GetPlayerState());
 	UUTWeaponSkin* AuthoritativeSkin = PS != nullptr
 		? AUTWeaponFix::FindWeaponSkinForClass(PS->WeaponSkins, FixWeapon->GetClass())
 		: nullptr;
@@ -2778,7 +2778,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			bPingCompensatedSpawnPending = false;
 			ServerConfirmSpawnReady();
 		}
-		else if (Role == ROLE_Authority)
+		else if (GetLocalRole() == ROLE_Authority)
 		{
 			// Final safety: force-reveal after 500ms if the RevealRttPct timer somehow
 			// didn't fire (belt-and-suspenders; normally the timer reveals first).
@@ -2807,8 +2807,8 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			FName HideKey = FName(*CurrentWeapon->GetClass()->GetName());
 			bool bShouldHide = false;
 			{
-				bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(HideKey);
-				bShouldHide = bHidden && *bHidden;
+				bool* bHiddenByCustomization = AUTWeaponFix::HiddenWeaponsByTag.Find(HideKey);
+				bShouldHide = bHiddenByCustomization && *bHiddenByCustomization;
 			}
 
 			// BP-parity apply (visibility-only; also restores when not hidden).
@@ -2829,7 +2829,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 	// authority may validate weapon state here: simulated spectator weapon state is
 	// reconstructed from separately replicated firing fields and can lag the ambient
 	// sound update, misclassifying a legitimate secondary-fire loop as stale.
-	if (Role == ROLE_Authority && AmbientSound != nullptr)
+	if (GetLocalRole() == ROLE_Authority && AmbientSound != nullptr)
 	{
 		AUTWeapon* ActiveWeapon = GetWeapon();
 		USoundBase* CurrentAmbientSound = AmbientSound;
@@ -2844,14 +2844,14 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 				continue;
 			}
 
-			for (int32 FireMode = 0; FireMode < InventoryWeapon->FireLoopingSound.Num(); ++FireMode)
+			for (int32 SoundFireMode = 0; SoundFireMode < InventoryWeapon->FireLoopingSound.Num(); ++SoundFireMode)
 			{
-				if (InventoryWeapon->FireLoopingSound[FireMode] == CurrentAmbientSound)
+				if (InventoryWeapon->FireLoopingSound[SoundFireMode] == CurrentAmbientSound)
 				{
 					bMatchesWeaponFireLoop = true;
 					bIsLegitimateActiveLoop = bIsLegitimateActiveLoop ||
 						(InventoryWeapon == ActiveWeapon && InventoryWeapon->IsFiring() &&
-						 InventoryWeapon->GetCurrentFireMode() == FireMode);
+						 InventoryWeapon->GetCurrentFireMode() == SoundFireMode);
 				}
 			}
 		}
@@ -3003,7 +3003,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 
 			if (USkeletalMeshComponent* MainMesh = GetMesh())
 			{
-				const float SinceRendered = World->GetTimeSeconds() - MainMesh->LastRenderTime;
+				const float SinceRendered = World->GetTimeSeconds() - MainMesh->GetLastRenderTime();
 				if (SinceRendered > 0.1f)
 				{
 					bShouldShow = false;
@@ -3228,8 +3228,9 @@ void ATeamArenaCharacter::PostRenderFor(APlayerController* PC, UCanvas* Canvas, 
 		Super::PostRenderFor(PC, Canvas, CameraPosition, CameraDir);
 		return;
 	}
-	AUTPlayerState* UTPS = Cast<AUTPlayerState>(PlayerState);
-	if (UTPS != nullptr && PC != nullptr && PC->PlayerState != nullptr && !PC->PlayerState->bOnlySpectator
+	AUTPlayerState* UTPS = GetPlayerState<AUTPlayerState>();
+	const APlayerState* ViewerPS = (PC != nullptr) ? PC->GetPlayerState<APlayerState>() : nullptr;
+	if (UTPS != nullptr && ViewerPS != nullptr && !ViewerPS->IsOnlyASpectator()
 		&& PC->GetViewTarget() != this)
 	{
 		AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
@@ -3455,7 +3456,7 @@ bool ATeamArenaCharacter::BlockedHeadShot(FVector HitLocation, FVector ShotDirec
 	// calls this unguarded. The charge is server-only state, so a client must
 	// neither decide nor consume (its copy is always false anyway — this is
 	// belt and braces).
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return false;
 	}
@@ -3731,7 +3732,7 @@ float ATeamArenaCharacter::GetClutchFootstepVolumeScale()
 	}
 
 	AClutchRoundState* State = CachedClutchFootstepState.Get();
-	AUTPlayerState* SourceState = Cast<AUTPlayerState>(PlayerState);
+	AUTPlayerState* SourceState = Cast<AUTPlayerState>(GetPlayerState());
 	const FClutchRosterEntry* Entry = State && SourceState
 		? State->FindEntry(SourceState)
 		: nullptr;
@@ -3788,7 +3789,6 @@ void ATeamArenaCharacter::PlayFootstepScaled(
 			static const FName FootstepTraceName(TEXT("ClutchFootstepSurface"));
 			FCollisionQueryParams QueryParams(FootstepTraceName, false, this);
 			QueryParams.bReturnPhysicalMaterial = true;
-			QueryParams.bTraceAsyncScene = true;
 			float PawnRadius = 0.0f;
 			float PawnHalfHeight = 0.0f;
 			GetCapsuleComponent()->GetScaledCapsuleSize(PawnRadius, PawnHalfHeight);
@@ -3898,7 +3898,7 @@ void ATeamArenaCharacter::PlayFootstepScaled(
 	}
 
 	if (FootstepEffect && GetMesh()
-		&& GetWorld()->GetTimeSeconds() - GetMesh()->LastRenderTime < 0.05f
+		&& GetWorld()->GetTimeSeconds() - GetMesh()->GetLastRenderTime() < 0.05f
 		&& (GetLocalViewer() || GetCachedScalabilityCVars().DetailMode != 0))
 	{
 		AUTWorldSettings* WorldSettings = Cast<AUTWorldSettings>(GetWorld()->GetWorldSettings());

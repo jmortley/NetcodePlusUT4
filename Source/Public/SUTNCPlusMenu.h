@@ -49,8 +49,9 @@ class SUTNCPlusMenu : public SCompoundWidget
 
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 	virtual bool SupportsKeyboardFocus() const override { return true; }
-	/** Caches the viewport height this full-screen panel is allotted (4.15 has no
-	 *  SWidget::GetCachedGeometry) for GetTabContentMaxHeight. */
+	/** Caches the viewport height this full-screen panel is allotted for
+	 *  GetTabContentMaxHeight. Kept identical to the 4.15 tree, whose SWidget has no
+	 *  cached-geometry accessor (GetTickSpaceGeometry would also work here). */
 	virtual void Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime) override;
 
 private:

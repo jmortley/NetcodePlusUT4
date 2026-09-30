@@ -488,7 +488,7 @@ namespace NCPlusHUDPresets
 	FString GetCustomPresetsDir()
 	{
 		// UE 4.15 uses GameSavedDir(); ProjectSavedDir was renamed later (UE 4.18+).
-		const FString Dir = FPaths::Combine(FPaths::GameSavedDir(), TEXT("NetcodePlus"), TEXT("Presets"));
+		const FString Dir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("NetcodePlus"), TEXT("Presets"));
 		IFileManager::Get().MakeDirectory(*Dir, /*Tree=*/true);
 		return Dir;
 	}

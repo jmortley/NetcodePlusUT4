@@ -1,6 +1,7 @@
 // ElimPlusStatsReplicator.cpp
 
 #include "ElimPlusStatsReplicator.h"
+#include "UObject/UnrealType.h"
 #include "ElimPlusGame.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
@@ -29,7 +30,7 @@ void AElimPlusStatsReplicator::GetLifetimeReplicatedProps(TArray<FLifetimeProper
 
 void AElimPlusStatsReplicator::SetBalanceTeamsActive(bool bActive)
 {
-	if (Role != ROLE_Authority) return;
+	if (GetLocalRole() != ROLE_Authority) return;
 	bBalanceTeamsActive = bActive;
 }
 
@@ -55,7 +56,7 @@ float AElimPlusStatsReplicator::GetClutchOverlayServerTime() const
 void AElimPlusStatsReplicator::BeginClutchOverlay(int32 TeamIndex,
 	AUTPlayerState* Candidate, int32 EnemiesAlive)
 {
-	if (Role != ROLE_Authority || !Candidate || EnemiesAlive < 1)
+	if (GetLocalRole() != ROLE_Authority || !Candidate || EnemiesAlive < 1)
 	{
 		return;
 	}
@@ -72,10 +73,10 @@ void AElimPlusStatsReplicator::BeginClutchOverlay(int32 TeamIndex,
 	State->bActive = true;
 	State->TeamIndex = static_cast<uint8>(TeamIndex);
 	State->Candidate = Candidate;
-	State->CandidateName = Candidate->PlayerName;
+	State->CandidateName = Candidate->GetPlayerName();
 	State->CandidateId = Candidate->UniqueId.IsValid()
 		? Candidate->UniqueId.ToString()
-		: FString::Printf(TEXT("BOT:%s"), *Candidate->PlayerName);
+		: FString::Printf(TEXT("BOT:%s"), *Candidate->GetPlayerName());
 	State->EnemiesAtStart = EnemiesAlive;
 	State->EnemiesRemaining = EnemiesAlive;
 	State->StartServerTime = GetClutchOverlayServerTime();
@@ -85,7 +86,7 @@ void AElimPlusStatsReplicator::BeginClutchOverlay(int32 TeamIndex,
 void AElimPlusStatsReplicator::CreditClutchOverlayKill(
 	AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
 {
-	if (Role != ROLE_Authority || !KillerPS || !VictimPS)
+	if (GetLocalRole() != ROLE_Authority || !KillerPS || !VictimPS)
 	{
 		return;
 	}
@@ -106,7 +107,7 @@ void AElimPlusStatsReplicator::CreditClutchOverlayKill(
 void AElimPlusStatsReplicator::UpdateClutchOverlayRemaining(
 	int32 AliveTeam0, int32 AliveTeam1)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -135,7 +136,7 @@ void AElimPlusStatsReplicator::UpdateClutchOverlayRemaining(
 void AElimPlusStatsReplicator::EndClutchOverlayForCandidate(
 	AUTPlayerState* Candidate, ENCClutchOverlayOutcome Outcome)
 {
-	if (Role != ROLE_Authority || !Candidate)
+	if (GetLocalRole() != ROLE_Authority || !Candidate)
 	{
 		return;
 	}
@@ -157,7 +158,7 @@ void AElimPlusStatsReplicator::EndClutchOverlayForCandidate(
 
 void AElimPlusStatsReplicator::FinalizeClutchOverlays(int32 WinnerTeamIndex)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -191,7 +192,7 @@ void AElimPlusStatsReplicator::FinalizeClutchOverlays(int32 WinnerTeamIndex)
 
 void AElimPlusStatsReplicator::ClearClutchOverlays()
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -216,7 +217,7 @@ void AElimPlusStatsReplicator::BeginPlay()
 void AElimPlusStatsReplicator::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -252,7 +253,7 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		FElimPlusStatsEntry Entry;
 		Entry.PlayerId = UTPS->UniqueId.IsValid()
 			? UTPS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 
 		// PPR(Current) — pulled from server-only side cache populated by gamemode
 		// at end-of-round via SetPlayerPPRCurrent.
@@ -276,7 +277,7 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		if (!bGotOverkillDamage)
 		{
 			// Fallback: engine DamageDone via reflection (server-side, not replicated).
-			UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
+			FIntProperty* DmgProp = FindFProperty<FIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
 			if (DmgProp)
 			{
 				Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
@@ -313,8 +314,8 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		// LightningRifleHits/LightningRifleShots (NOT SniperHits/Shots) — so we must read BOTH
 		// weapons and sum them. A player runs one or the other, so the unused weapon's stats are
 		// 0 and the sum is the right per-shot ratio. Auto-detect instagib via NAME_InstagibShots.
-		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
-		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
+		static const FName NCP_NAME_LightningRifleHits(TEXT("LightningRifleHits"));
+		static const FName NCP_NAME_LightningRifleShots(TEXT("LightningRifleShots"));
 		float HitscanShots = 0.f;
 		float HitscanHits  = 0.f;
 		const float InstagibShots = UTPS->GetStatsValue(NAME_InstagibShots);
@@ -326,8 +327,8 @@ void AElimPlusStatsReplicator::UpdateFromPlayerStates()
 		else
 		{
 			// Sniper + Lightning Gun (the LG writes LightningRifle* stats, the Sniper writes Sniper*).
-			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NAME_LightningRifleHits);
-			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NAME_LightningRifleShots);
+			HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NCP_NAME_LightningRifleHits);
+			HitscanShots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NCP_NAME_LightningRifleShots);
 		}
 		if (HitscanShots > 0.f)
 		{
@@ -411,19 +412,19 @@ float AElimPlusStatsReplicator::GetLinkGunAccuracyForPlayer(const FString& Uniqu
 
 void AElimPlusStatsReplicator::SetPlayerPPRCurrent(const FString& UniqueIdStr, float Value)
 {
-	if (Role != ROLE_Authority) return;
+	if (GetLocalRole() != ROLE_Authority) return;
 	PPRCurrentCache.FindOrAdd(UniqueIdStr) = Value;
 }
 
 void AElimPlusStatsReplicator::SetPlayerEloAndDelta(const FString& UniqueIdStr, int32 NewElo, int32 DeltaThisMatch)
 {
-	if (Role != ROLE_Authority) return;
+	if (GetLocalRole() != ROLE_Authority) return;
 	EloCache.FindOrAdd(UniqueIdStr) = NewElo;
 	EloDeltaCache.FindOrAdd(UniqueIdStr) = DeltaThisMatch;
 }
 
 void AElimPlusStatsReplicator::SetPlayerGlobalRank(const FString& UniqueIdStr, int32 Rank)
 {
-	if (Role != ROLE_Authority) return;
+	if (GetLocalRole() != ROLE_Authority) return;
 	GlobalRankCache.FindOrAdd(UniqueIdStr) = Rank;
 }

@@ -412,7 +412,7 @@ void AUTWeap_LinkGun_NCP::Tick(float DeltaTime)
 	}
 
 	const float Now = GetWorld()->TimeSeconds;
-	if (ScreenTexture != nullptr && Mesh->IsRegistered() && Now - Mesh->LastRenderTime < 0.1f
+	if (ScreenTexture != nullptr && Mesh->IsRegistered() && Now - Mesh->GetLastRenderTime() < 0.1f
 		&& Now - LastScreenUpdateTime >= 1.f / 30.f)
 	{
 		LastScreenUpdateTime = Now;
@@ -435,7 +435,7 @@ void AUTWeap_LinkGun_NCP::Tick(float DeltaTime)
 		}
 	}
 
-	if (UTOwner != nullptr && IsFiring() && Role == ROLE_Authority &&
+	if (UTOwner != nullptr && IsFiring() && GetLocalRole() == ROLE_Authority &&
 		FireLoopingSound.IsValidIndex(CurrentFireMode) && FireLoopingSound[CurrentFireMode] != nullptr && !IsLinkPulsing())
 	{
 		if (!bLinkBeamImpacting)
@@ -520,7 +520,7 @@ bool AUTWeap_LinkGun_NCP::IsValidLinkTarget(AActor* InTarget)
 	AUTCharacter* TargetCharacter = Cast<AUTCharacter>(InTarget);
 	AUTCharacter* OwnerCharacter = GetUTOwner();
 	if (TargetCharacter == nullptr || OwnerCharacter == nullptr || TargetCharacter == OwnerCharacter ||
-		TargetCharacter->bTearOff || TargetCharacter->IsDead())
+		TargetCharacter->GetTearOff() || TargetCharacter->IsDead())
 	{
 		return false;
 	}
@@ -590,7 +590,7 @@ void AUTWeap_LinkGun_NCP::ServerSetPulseTarget_Implementation(AActor* InTarget)
 			Cast<AUTPlayerController>(PulseTarget->GetInstigatorController()), UTOwner, true, SAT_WeaponFire);
 
 		UTOwner->SetFlashExtra(UTOwner->FlashExtra + 1, CurrentFireMode);
-		if (Role == ROLE_Authority)
+		if (GetLocalRole() == ROLE_Authority)
 		{
 			AUTCharacter* PulledChar = Cast<AUTCharacter>(PulseTarget);
 			AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->GetController());
@@ -684,7 +684,7 @@ void AUTWeap_LinkGun_NCP::FiringExtraUpdated_Implementation(uint8 NewFlashExtra,
 		if (MuzzleFlash.IsValidIndex(FiringState.Num()) && MuzzleFlash[FiringState.Num()] != nullptr)
 		{
 			AActor* GuessTarget = PulseTarget;
-			if (GuessTarget == nullptr && UTOwner != nullptr && Role < ROLE_Authority)
+			if (GuessTarget == nullptr && UTOwner != nullptr && GetLocalRole() < ROLE_Authority)
 			{
 				TArray<FOverlapResult> Hits;
 				GetWorld()->OverlapMultiByChannel(Hits, UTOwner->FlashLocation.Position, FQuat::Identity,

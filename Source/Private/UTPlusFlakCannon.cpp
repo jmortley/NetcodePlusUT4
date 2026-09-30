@@ -152,7 +152,7 @@ AUTProjectile* AUTPlusFlakCannon::FireProjectile()
 		checkSlow(ProjClass.IsValidIndex(CurrentFireMode) && ProjClass[CurrentFireMode] != NULL);
 
 		// increment 3rd person muzzle flash count (Server only usually, but handled by weapon state)
-		if (Role == ROLE_Authority)
+		if (GetLocalRole() == ROLE_Authority)
 		{
 			UTOwner->IncrementFlashCount(CurrentFireMode);
 			AUTPlayerState* PS = UTOwner->Controller ? Cast<AUTPlayerState>(UTOwner->Controller->PlayerState) : NULL;

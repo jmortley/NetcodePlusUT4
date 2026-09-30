@@ -1,6 +1,7 @@
 // NCLeagueDuelStatsReplicator.cpp
 
 #include "NCLeagueDuelStatsReplicator.h"
+#include "UObject/UnrealType.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
@@ -32,7 +33,7 @@ void ANCLeagueDuelStatsReplicator::BeginPlay()
 void ANCLeagueDuelStatsReplicator::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -61,7 +62,7 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 		// so future bot-accuracy displays line up.
 		Entry.PlayerId = UTPS->UniqueId.IsValid()
 			? UTPS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 
 		// Hitscan accuracy = Sniper + Lightning Gun. The duel weapon set is the Pro+
 		// hitscan pair (UTNPSniper writes Sniper*; the LG BP is an AUTPlusSniper reskin
@@ -71,12 +72,12 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 		// Gun BEAM — a shaft-arena weapon nothing in duel fires), so the Acc column sat
 		// at 0% in every duel: the exact defect ElimPlus fixed in e3823f5/575d579, never
 		// ported here (community report 2026-07-01). Mirrors ElimPlusStatsReplicator.
-		static const FName NAME_SniperHits(TEXT("SniperHits"));
-		static const FName NAME_SniperShots(TEXT("SniperShots"));
-		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
-		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
-		const float Hits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NAME_LightningRifleHits);
-		const float Shots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NAME_LightningRifleShots);
+		static const FName NCLeagueSniperHitsStat(TEXT("SniperHits"));
+		static const FName NCLeagueSniperShotsStat(TEXT("SniperShots"));
+		static const FName NCLeagueLightningRifleHitsStat(TEXT("LightningRifleHits"));
+		static const FName NCLeagueLightningRifleShotsStat(TEXT("LightningRifleShots"));
+		const float Hits  = UTPS->GetStatsValue(NCLeagueSniperHitsStat)  + UTPS->GetStatsValue(NCLeagueLightningRifleHitsStat);
+		const float Shots = UTPS->GetStatsValue(NCLeagueSniperShotsStat) + UTPS->GetStatsValue(NCLeagueLightningRifleShotsStat);
 
 		if (Shots > 0.f)
 		{
@@ -102,7 +103,7 @@ void ANCLeagueDuelStatsReplicator::UpdateFromPlayerStates()
 		// (WipeoutDamageReplicator.cpp:71, ElimPlusStatsReplicator.cpp:88).
 		// Direct member access also works in this codebase (ShockDom does it),
 		// but reflection is the established pattern for stats replicators here.
-		if (UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone")))
+		if (FIntProperty* DmgProp = FindFProperty<FIntProperty>(UTPS->GetClass(), TEXT("DamageDone")))
 		{
 			Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);
 		}

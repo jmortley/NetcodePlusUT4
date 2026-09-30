@@ -98,14 +98,14 @@ void UNCPlusXTDMScoreboard::Draw_Implementation(float DeltaTime)
 			if (Now >= Cached.RefreshAt || Cached.RefreshAt - Now > .25f)
 			{
 				Cached.RefreshAt = Now + .25f;
-				Cached.Name = PS->PlayerName;
+				Cached.Name = PS->GetPlayerName();
 				Cached.Frags = FString::FromInt(FMath::RoundToInt(PS->Score));
 				Cached.Deaths = FString::FromInt(PS->Deaths);
 				Cached.Ping = FString::FromInt(UTPlayerOwner && UTPlayerOwner->UTPlayerState == PS ? FMath::RoundToInt(PS->ExactPing) : PS->Ping * 4);
 				int32 Hits = PS->GetStatsValue(NAME_InstagibHits), Shots = PS->GetStatsValue(NAME_InstagibShots);
 				if (GetWorld()->GetNetMode() == NM_Client && AccuracyReplicator.IsValid())
 				{
-					const FString Id = PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+					const FString Id = PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *PS->GetPlayerName());
 					AccuracyReplicator->GetAccuracyForPlayer(Id, NAME_InstagibHits, NAME_InstagibShots, Hits, Shots);
 				}
 				Cached.Accuracy = Shots > 0 ? FString::Printf(TEXT("%.0f%%"), FMath::Min(100.f, 100.f * Hits / Shots)) : TEXT("--");

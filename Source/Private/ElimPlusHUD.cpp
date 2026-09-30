@@ -3,6 +3,7 @@
 // elim has no mid-round respawns. Adds an ELO chip per portrait.
 
 #include "ElimPlusHUD.h"
+#include "UObject/UnrealType.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
 #include "UTGameState.h"
@@ -551,15 +552,15 @@ void AElimPlusHUD::DrawSpectatorTarget()
 	if (!ViewPawn) return;
 	if (ViewPawn == UTPlayerOwner->GetPawn()) return;   // own pawn = playing
 
-	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->PlayerState);
-	if (!PS || PS->PlayerName.IsEmpty()) return;
+	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->GetPlayerState());
+	if (!PS || PS->GetPlayerName().IsEmpty()) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 	const float HeaderScale = RenderScale * 0.75f;
 	const float NameScale   = RenderScale * 1.30f;
 
 	static const FString HeaderText(TEXT("NOW WATCHING"));
-	const FString& NameText = PS->PlayerName;
+	const FString& NameText = PS->GetPlayerName();
 
 	FText HeaderDrawText, NameDrawText;
 	float HeaderW, HeaderH, NameW, NameH;
@@ -602,7 +603,7 @@ void AElimPlusHUD::DrawHUD()
 	// immediately (Phase 2 live preview). Cheap — just a few field assignments
 	// per registered widget, gated by a class-name lookup.
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
-	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
+	const bool bRenderCustomHUD = UTPlayerOwner
 		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
 
 	// True spectators normally get UUTHUDWidget_Spectator's bottom-right "Now viewing"
@@ -617,9 +618,9 @@ void AElimPlusHUD::DrawHUD()
 	{
 		AUTGameState* PreDrawGS = GetWorld()->GetGameState<AUTGameState>();
 		APawn* ViewedPawn = Cast<APawn>(UTPlayerOwner->GetViewTarget());
-		AUTPlayerState* ViewedPS = ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->PlayerState) : nullptr;
+		AUTPlayerState* ViewedPS = ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->GetPlayerState()) : nullptr;
 		if (PreDrawGS && PreDrawGS->GetMatchState() == MatchState::InProgress
-			&& ViewedPawn != UTPlayerOwner->GetPawn() && ViewedPS && !ViewedPS->PlayerName.IsEmpty())
+			&& ViewedPawn != UTPlayerOwner->GetPawn() && ViewedPS && !ViewedPS->GetPlayerName().IsEmpty())
 		{
 			bRestoreStockSpectator = true;
 			bStockSpectatorWasHidden = SpectatorMessageWidget->IsHidden();
@@ -958,7 +959,7 @@ void AElimPlusHUD::DrawHUD()
 			Draw.NameScale = bHasBetaGeometry
 				? BetaGeometry.UnitScale * TeamScale * 0.44f * NameFontExtra
 				: float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
-			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->PlayerName,
+			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->GetPlayerName(),
 				PipSize, Draw.NameScale, Draw.NameText, Draw.NameWidth, Draw.NameHeight);
 
 			// Prepare the HP/armor extent before deciding whether resource-layer
@@ -1009,14 +1010,14 @@ void AElimPlusHUD::DrawHUD()
 				FElimPipCache& PC = PipCacheByPS.FindOrAdd(UTPS);
 				const bool bHasOnlineId = UTPS->UniqueId.IsValid();
 				const bool bBotNameChanged = !bHasOnlineId
-					&& !PC.UidSourceName.Equals(UTPS->PlayerName, ESearchCase::CaseSensitive);
+					&& !PC.UidSourceName.Equals(UTPS->GetPlayerName(), ESearchCase::CaseSensitive);
 				if (!PC.bUidValid || PC.bUidFromOnlineId != bHasOnlineId || bBotNameChanged)
 				{
 					// Refresh when a delayed human UniqueId replaces the provisional bot key.
 					PC.UidStr = bHasOnlineId
 						? UTPS->UniqueId.ToString()
-						: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
-					PC.UidSourceName = bHasOnlineId ? FString() : UTPS->PlayerName;
+						: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
+					PC.UidSourceName = bHasOnlineId ? FString() : UTPS->GetPlayerName();
 					PC.bUidValid = true;
 					PC.bUidFromOnlineId = bHasOnlineId;
 				}
@@ -1385,12 +1386,12 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		{
 			int32 RoundTime = -1;
 			static UClass* BetaClockClass = nullptr;
-			static UIntProperty* BetaClockProperty = nullptr;
+			static FIntProperty* BetaClockProperty = nullptr;
 			UClass* GSClass = GS->GetClass();
 			if (BetaClockClass != GSClass)
 			{
 				BetaClockClass = GSClass;
-				BetaClockProperty = FindField<UIntProperty>(
+				BetaClockProperty = FindFProperty<FIntProperty>(
 					GSClass, TEXT("RoundSecondsRemaining"));
 			}
 			if (BetaClockProperty)
@@ -1498,18 +1499,18 @@ void AElimPlusHUD::DrawTeamScoreBar(AUTGameState* GS)
 		TopY + (BarHeight - YL) * 0.5f, FontScale, FontScale, Canvas->DrawColor);
 
 	// Round Clock — read RoundSecondsRemaining from BP GameState via reflection.
-	// Static cache: FindField walks the class hierarchy and was running every
+	// Static cache: FindFProperty walks the class hierarchy and was running every
 	// frame; (GameState class, property name) is immutable so a one-shot
 	// resolution is enough.
 	const float ClockY = TopY + BarHeight + 2.f * RenderScale;
 	int32 RoundTime = -1;
 	static UClass* CachedRoundCls = nullptr;
-	static UIntProperty* CachedRoundProp = nullptr;
+	static FIntProperty* CachedRoundProp = nullptr;
 	UClass* GSCls = GS->GetClass();
 	if (CachedRoundCls != GSCls)
 	{
 		CachedRoundCls  = GSCls;
-		CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+		CachedRoundProp = FindFProperty<FIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
 	}
 	if (CachedRoundProp)
 	{
@@ -1841,7 +1842,7 @@ FLinearColor AElimPlusHUD::GetBaseHUDColor()
 	APawn* HUDPawn = Cast<APawn>(UTPlayerOwner->GetViewTarget());
 	if (HUDPawn)
 	{
-		AUTPlayerState* PS = Cast<AUTPlayerState>(HUDPawn->PlayerState);
+		AUTPlayerState* PS = Cast<AUTPlayerState>(HUDPawn->GetPlayerState());
 		if (PS != nullptr && PS->Team != nullptr)
 		{
 			TeamColor = PS->Team->TeamColor;
@@ -1978,13 +1979,13 @@ void AElimPlusHUD::DrawPreMatchTeamPreview()
 
 			const FString Key = UTPS->UniqueId.IsValid()
 				? UTPS->UniqueId.ToString()
-				: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+				: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 			const int32 Elo = Stats ? Stats->GetEloForPlayer(Key) : 1400;
 			TeamStrength += Elo;
 
 			// Player name (left) + ELO (right of column)
 			Canvas->SetLinearDrawColor(Faded(FLinearColor::White));
-			Canvas->DrawText(SmallFont, FText::FromString(UTPS->PlayerName),
+			Canvas->DrawText(SmallFont, FText::FromString(UTPS->GetPlayerName()),
 				ColX + 24.f * TextScale, Y, TextScale, TextScale, RI);
 
 			const FString EloStr = FString::Printf(TEXT("%d"), Elo);

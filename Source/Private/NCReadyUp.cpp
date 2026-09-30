@@ -177,7 +177,7 @@ bool ANCReadyUpState::IsPlayerReady(const AUTPlayerState* PlayerState) const
 
 bool ANCReadyUpState::SetPlayerReady(APlayerController* Sender, bool bReady)
 {
-	if (Role != ROLE_Authority || Sender == nullptr)
+	if (GetLocalRole() != ROLE_Authority || Sender == nullptr)
 	{
 		return false;
 	}
@@ -218,7 +218,7 @@ bool ANCReadyUpState::SetPlayerReady(APlayerController* Sender, bool bReady)
 
 void ANCReadyUpState::RefreshEligibility()
 {
-	if (Role != ROLE_Authority || bCountdownLocked)
+	if (GetLocalRole() != ROLE_Authority || bCountdownLocked)
 	{
 		return;
 	}
@@ -278,7 +278,7 @@ void ANCReadyUpState::RefreshEligibility()
 
 void ANCReadyUpState::LockCountdown(float StartDelay)
 {
-	if (Role != ROLE_Authority || bCountdownLocked)
+	if (GetLocalRole() != ROLE_Authority || bCountdownLocked)
 	{
 		return;
 	}
@@ -291,7 +291,7 @@ void ANCReadyUpState::LockCountdown(float StartDelay)
 
 void ANCReadyUpState::CancelCountdown()
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}

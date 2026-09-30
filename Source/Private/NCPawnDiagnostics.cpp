@@ -37,7 +37,7 @@ namespace
 		AActor* const Owner = AudioComponent->GetOwner();
 		AUTCharacter* const CharacterOwner = Cast<AUTCharacter>(Owner);
 		AUTPlayerState* const OwnerPS = CharacterOwner != nullptr
-			? Cast<AUTPlayerState>(CharacterOwner->PlayerState)
+			? Cast<AUTPlayerState>(CharacterOwner->GetPlayerState())
 			: nullptr;
 		USceneComponent* const AttachParent = AudioComponent->GetAttachParent();
 		UObject* const Outer = AudioComponent->GetOuter();
@@ -77,9 +77,9 @@ namespace
 			TEXT(" owner=%s ownerClass=%s player=%s ownerPending=%d ownerDestroying=%d ownerHidden=%d ownerLoc=%s"),
 			Owner ? *Owner->GetPathName() : TEXT("none"),
 			Owner ? *Owner->GetClass()->GetName() : TEXT("none"),
-			OwnerPS ? *OwnerPS->PlayerName : TEXT("none"),
+			OwnerPS ? *OwnerPS->GetPlayerName() : TEXT("none"),
 			bOwnerPending ? 1 : 0, bOwnerDestroying ? 1 : 0,
-			(Owner && Owner->bHidden) ? 1 : 0,
+			(Owner && Owner->IsHidden()) ? 1 : 0,
 			Owner ? *Owner->GetActorLocation().ToString() : TEXT("none"));
 		AudioLog += FString::Printf(
 			TEXT(" ownerCharacter=%d ownerHealth=%d ownerDead=%d ownerAge=%.3f ownerLife=%.3f deathAge=%.3f componentPending=%d registered=%d paused=%d loc=%s attachParent=%s"),
@@ -151,7 +151,7 @@ namespace
 				const USkeletalMeshComponent* BodyMesh = Character->GetMesh();
 				const USkeletalMeshComponent* DepthMesh = Character->GetCustomDepthMesh();
 				AController* Controller = Character->GetController();
-				AUTPlayerState* PS = Cast<AUTPlayerState>(Character->PlayerState);
+				AUTPlayerState* PS = Cast<AUTPlayerState>(Character->GetPlayerState());
 				ATeamArenaCharacter* TeamCharacter = Cast<ATeamArenaCharacter>(Character);
 
 				const bool bBodyVisible = BodyMesh != nullptr && BodyMesh->IsVisible();
@@ -167,7 +167,7 @@ namespace
 				if (Character->Health <= 0 && !bDead) { AddReason(Reasons, TEXT("health/dead-mismatch")); }
 				if (PS != nullptr && PS->bOutOfLives && !bDead) { AddReason(Reasons, TEXT("out-of-lives/live-actor")); }
 				if (Controller == nullptr && PS == nullptr && !bDead) { AddReason(Reasons, TEXT("unowned-live-pawn")); }
-				if (Character->bHidden && bDepthRegistered) { AddReason(Reasons, TEXT("hidden-actor+depth")); }
+				if (Character->IsHidden() && bDepthRegistered) { AddReason(Reasons, TEXT("hidden-actor+depth")); }
 
 				const bool bSuspect = !Reasons.IsEmpty();
 				if (bSuspect)
@@ -182,18 +182,18 @@ namespace
 					TEXT("[PawnDbg]%s pawn=%s class=%s player=%s controller=%s owner=%s"),
 					bSuspect ? TEXT("[SUSPECT]") : TEXT(""),
 					*Character->GetName(), *Character->GetClass()->GetName(),
-					PS ? *PS->PlayerName : TEXT("none"),
+					PS ? *PS->GetPlayerName() : TEXT("none"),
 					Controller ? *Controller->GetName() : TEXT("none"),
 					Character->GetOwner() ? *Character->GetOwner()->GetName() : TEXT("none"));
 				PawnLog += FString::Printf(
 					TEXT(" role=%d remoteRole=%d age=%.3f life=%.3f health=%d dead=%d tearOff=%d pendingKill=%d ragdoll=%d"),
-					(int32)Character->Role, (int32)Character->GetRemoteRole(),
+					(int32)Character->GetLocalRole(), (int32)Character->GetRemoteRole(),
 					Character->GetGameTimeSinceCreation(), Character->GetLifeSpan(), Character->Health,
-					bDead ? 1 : 0, Character->bTearOff ? 1 : 0,
+					bDead ? 1 : 0, Character->GetTearOff() ? 1 : 0,
 					Character->IsPendingKillPending() ? 1 : 0, Character->IsRagdoll() ? 1 : 0);
 				PawnLog += FString::Printf(
 					TEXT(" actorHidden=%d collision=%d loc=%s vel=%s"),
-					Character->bHidden ? 1 : 0, Character->GetActorEnableCollision() ? 1 : 0,
+					Character->IsHidden() ? 1 : 0, Character->GetActorEnableCollision() ? 1 : 0,
 					*Character->GetActorLocation().ToString(), *Character->GetVelocity().ToString());
 				PawnLog += FString::Printf(
 					TEXT(" body={registered=%d visible=%d hiddenInGame=%d} depth={exists=%d registered=%d visible=%d hiddenInGame=%d renderCustomDepth=%d stencil=%u}"),

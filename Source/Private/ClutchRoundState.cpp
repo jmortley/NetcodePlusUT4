@@ -29,7 +29,7 @@ AClutchRoundState::AClutchRoundState(const FObjectInitializer& ObjectInitializer
 	bReplicates = true;
 	bAlwaysRelevant = true;
 	bNetLoadOnClient = true;
-	bReplicateMovement = false;
+	SetReplicateMovement(false);
 	NetUpdateFrequency = 10.0f;
 	PrimaryActorTick.bCanEverTick = false;
 
@@ -86,9 +86,9 @@ FString AClutchRoundState::BuildStablePlayerId(const AUTPlayerState* PlayerState
 		return FString::Printf(TEXT("uid:%s"), *PlayerState->UniqueId.ToString());
 	}
 
-	if (!PlayerState->PlayerName.IsEmpty())
+	if (!PlayerState->GetPlayerName().IsEmpty())
 	{
-		return FString::Printf(TEXT("name:%s"), *PlayerState->PlayerName.ToLower());
+		return FString::Printf(TEXT("name:%s"), *PlayerState->GetPlayerName().ToLower());
 	}
 
 	if (PlayerState->PlayerId >= 0)
@@ -638,7 +638,7 @@ bool AClutchRoundState::UpsertPlayer(AUTPlayerState* PlayerState, uint8 TeamInde
 		Entry->StablePlayerId = StableId;
 	}
 	Entry->PlayerIdFallback = PlayerState->PlayerId;
-	Entry->PlayerNameFallback = PlayerState->PlayerName;
+	Entry->PlayerNameFallback = PlayerState->GetPlayerName();
 	Entry->TeamIndex = TeamIndex;
 	Entry->RosterSlot = RosterSlot;
 	if (PreviousTeamIndex != TeamIndex)

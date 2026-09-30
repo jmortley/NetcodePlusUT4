@@ -14,7 +14,7 @@ class NETCODEPLUS_API UNCPlusXTDMSpectator : public UUTHUDWidget_SpectatorSlideO
 public:
 	virtual void Draw_Implementation(float DeltaTime) override;
 	virtual bool MouseClick(FVector2D Position) override;
-	virtual void TrackMouseMovement(FVector2D Position) override { PointerPosition = Position; }
+	virtual void TrackMouseMovement(FVector2D InMousePosition) override { PointerPosition = InMousePosition; }
 	virtual void SetMouseInteractive(bool bInteractive) override { bPointerInteractive = bInteractive; }
 private:
 	TArray<FSelectionObject> PlayerHits;

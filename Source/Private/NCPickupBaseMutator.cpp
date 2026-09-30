@@ -45,10 +45,11 @@ namespace
 	bool HasBoundActorDelegates(AActor* Actor, FString& Reason)
 	{
 		// In particular, preserve WeaponBase's map-authored PickedUpWeapon bindings.
-		for (TFieldIterator<UMulticastDelegateProperty> It(Actor->GetClass()); It; ++It)
+		for (TFieldIterator<FMulticastDelegateProperty> It(Actor->GetClass()); It; ++It)
 		{
-			const FMulticastScriptDelegate* Delegate = It->ContainerPtrToValuePtr<FMulticastScriptDelegate>(Actor);
-			if (Delegate->IsBound())
+			// UE4.25 stores actor delegates sparsely; resolve either storage kind through reflection.
+			const FMulticastScriptDelegate* Delegate = It->GetMulticastDelegate(It->ContainerPtrToValuePtr<void>(Actor));
+			if (Delegate != nullptr && Delegate->IsBound())
 			{
 				if (Actor->bNetStartup && It->GetOwnerClass() == AActor::StaticClass()
 					&& It->GetFName() == GET_MEMBER_NAME_CHECKED(AActor, OnDestroyed))
@@ -79,9 +80,9 @@ namespace
 	bool HasMatchingBodySettings(const FBodyInstance& Body, const FBodyInstance& Defaults)
 	{
 		// Old map packages can retain the former angular-velocity default. When
-		// neither body overrides it, GetMaxAngularVelocity() uses PhysicsSettings.
+		// neither body overrides it, GetMaxAngularVelocityInRadians() uses PhysicsSettings.
 		// Compare the other reflected fields without copying a live physics body.
-		for (TFieldIterator<UProperty> It(FBodyInstance::StaticStruct()); It; ++It)
+		for (TFieldIterator<FProperty> It(FBodyInstance::StaticStruct()); It; ++It)
 		{
 			if (!Body.bOverrideMaxAngularVelocity && !Defaults.bOverrideMaxAngularVelocity
 				&& It->GetFName() == GET_MEMBER_NAME_CHECKED(FBodyInstance, MaxAngularVelocity))
@@ -126,7 +127,7 @@ namespace
 			|| Pickup->TeamSide != Defaults->TeamSide
 			|| Pickup->Tags != Defaults->Tags
 			|| Pickup->GetIsReplicated() != Defaults->GetIsReplicated()
-			|| Pickup->bHidden != Defaults->bHidden
+			|| Pickup->IsHidden() != Defaults->IsHidden()
 			|| Pickup->GetActorEnableCollision() != Defaults->GetActorEnableCollision())
 		{
 			Reason = TEXT("pickup presentation settings differ from class defaults");
@@ -149,9 +150,9 @@ namespace
 			{
 				continue;
 			}
-			for (TFieldIterator<UProperty> It(Component->GetClass()); It; ++It)
+			for (TFieldIterator<FProperty> It(Component->GetClass()); It; ++It)
 			{
-				UProperty* Property = *It;
+				FProperty* Property = *It;
 				if (!Property->HasAnyPropertyFlags(CPF_Edit)
 					|| Property->HasAnyPropertyFlags(CPF_Transient | CPF_EditConst
 						| CPF_InstancedReference | CPF_ContainsInstancedReference))
@@ -166,7 +167,7 @@ namespace
 					continue; // stock WeaponBase construction sets this; its CDO template is null
 				}
 				if (Component == Pickup->TimerEffect && Pickup->IsA(AUTPickupWeapon::StaticClass())
-					&& Name == GET_MEMBER_NAME_CHECKED(USceneComponent, bVisible))
+					&& Name == FName(TEXT("bVisible")))
 				{
 					// Stock editor preview hides ordinary weapon timers. BeginPlay
 					// sets visibility true after relevance; HiddenInGame controls play.
@@ -183,7 +184,7 @@ namespace
 				// capsule default to match, on both server and newly spawned clients.
 				const bool bCompareCopyCapsule = Component == Pickup->Collision
 					&& Property->GetOwnerClass() == USceneComponent::StaticClass()
-					&& Name == GET_MEMBER_NAME_CHECKED(USceneComponent, bShouldUpdatePhysicsVolume);
+					&& Name == FName(TEXT("bShouldUpdatePhysicsVolume"));
 				const UObject* ComparisonTemplate = bCompareCopyCapsule ? CopyDefaults->Collision : Archetype;
 				if (!Property->Identical_InContainer(Component, ComparisonTemplate))
 				{
@@ -275,9 +276,9 @@ namespace
 		// customers or Blueprint instance storage into an unrelated generated class.
 		UClass* NativeClass = Source->IsA(AUTPickupWeapon::StaticClass())
 			? AUTPickupWeapon::StaticClass() : AUTPickupInventory::StaticClass();
-		for (TFieldIterator<UProperty> It(NativeClass); It; ++It)
+		for (TFieldIterator<FProperty> It(NativeClass); It; ++It)
 		{
-			UProperty* Property = *It;
+			FProperty* Property = *It;
 			const UClass* Owner = Property->GetOwnerClass();
 			if (Owner != nullptr && Owner->IsChildOf(AUTPickup::StaticClass())
 				&& Property->HasAnyPropertyFlags(CPF_Edit)
@@ -335,7 +336,7 @@ bool ANCPickupBaseMutator::CheckRelevance_Implementation(AActor* Other)
 	const FTransform Transform = Source->GetActorTransform();
 	FActorSpawnParameters Params;
 	Params.OverrideLevel = Source->GetLevel();
-	Params.Instigator = Source->Instigator;
+	Params.Instigator = Source->GetInstigator();
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	Params.bDeferConstruction = true;
 	AUTPickupInventory* Replacement = GetWorld()->SpawnActor<AUTPickupInventory>(ReplacementClass, Transform, Params);

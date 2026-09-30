@@ -146,7 +146,7 @@ void ANCPCandyLiftGuard::MakeLiftIgnoreCandy(AUTLift* Lift, AActor* Candy)
 
 void ANCPCandyLiftGuard::OnActorSpawned(AActor* Actor)
 {
-	if (Role != ROLE_Authority || Actor == nullptr)
+	if (GetLocalRole() != ROLE_Authority || Actor == nullptr)
 	{
 		return;
 	}
@@ -187,7 +187,7 @@ void ANCPCandyLiftGuard::OnActorSpawned(AActor* Actor)
 void ANCPCandyLiftGuard::BeginPlay()
 {
 	Super::BeginPlay();
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		// Archetype hardening at match start, before later death drops:
 		// ElimPlus and Wipeout use separate candy Blueprints. Instance hardening

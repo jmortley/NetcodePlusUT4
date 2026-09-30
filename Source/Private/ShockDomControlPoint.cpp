@@ -25,7 +25,7 @@ AShockDomControlPoint::AShockDomControlPoint(const FObjectInitializer& OI)
 	CaptureVolume = CreateDefaultSubobject<USphereComponent>(TEXT("CaptureVolume"));
 	CaptureVolume->InitSphereRadius(CaptureRadius);
 	CaptureVolume->SetCollisionProfileName(TEXT("Trigger"));
-	CaptureVolume->bGenerateOverlapEvents = true;
+	CaptureVolume->SetGenerateOverlapEvents(true);
 	RootComponent = CaptureVolume;
 
 	// Visual marker mesh — mesh assigned by BP subclass
@@ -74,7 +74,7 @@ void AShockDomControlPoint::OnCaptureVolumeOverlap(UPrimitiveComponent* Overlapp
 	AUTCharacter* UTChar = Cast<AUTCharacter>(OtherActor);
 	if (!UTChar || UTChar->IsDead()) return;
 
-	AUTPlayerState* PS = Cast<AUTPlayerState>(UTChar->PlayerState);
+	AUTPlayerState* PS = Cast<AUTPlayerState>(UTChar->GetPlayerState());
 	if (!PS || !PS->Team) return;
 
 	uint8 NewTeam = PS->Team->TeamIndex;

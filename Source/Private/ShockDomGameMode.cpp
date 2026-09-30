@@ -407,7 +407,7 @@ void AShockDomGameMode::OnPointCaptured(AShockDomControlPoint* Point, uint8 NewT
 	if (!Point || !Capturer) return;
 
 	// Track capture count (replicated via DOM replicator)
-	AUTPlayerState* PS = Cast<AUTPlayerState>(Capturer->PlayerState);
+	AUTPlayerState* PS = Cast<AUTPlayerState>(Capturer->GetPlayerState());
 	if (PS)
 	{
 		FString UniqueId = PS->UniqueId.ToString();

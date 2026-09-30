@@ -65,7 +65,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] CHARGED_BEGIN frame=%u t=%.4f role=%d net=%d local=%d state=%p prev=%s fireMode=%d currentMode=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d"),
 			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(),
+			(int32)W->GetLocalRole(), (int32)W->GetNetMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
 			PrevState ? *PrevState->GetClass()->GetName() : TEXT("null"), GetFireMode(), W->GetCurrentFireMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
@@ -132,9 +132,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
 			TEXT("[RocketM1Diag] CHARGED_ARM frame=%u t=%.4f role=%d net=%d player=%s loadedR=%d loadedB=%d maxR=%d firstLoad=%.4f nextLoad=%.4f grace=%.4f timerRate=%.4f timerRemain=%.4f"),
 			(uint32)GFrameCounter,
 			DiagWeapon->GetWorld() ? DiagWeapon->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)DiagWeapon->Role, (int32)DiagWeapon->GetNetMode(),
-			(DiagWeapon->GetUTOwner() && DiagWeapon->GetUTOwner()->PlayerState)
-				? *DiagWeapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+			(int32)DiagWeapon->GetLocalRole(), (int32)DiagWeapon->GetNetMode(),
+			(DiagWeapon->GetUTOwner() && DiagWeapon->GetUTOwner()->GetPlayerState())
+				? *DiagWeapon->GetUTOwner()->GetPlayerState()->GetPlayerName() : TEXT("?"),
 			RocketLauncher->NumLoadedRockets, RocketLauncher->NumLoadedBarrels,
 			RocketLauncher->MaxLoadedRockets,
 			RocketLauncher->FirstRocketLoadTime, RocketLauncher->RocketLoadTime,
@@ -159,7 +159,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] CHARGED_END frame=%u t=%.4f role=%d net=%d local=%d state=%p fireMode=%d currentMode=%d pending0=%d pending1=%d charging=%d releaseReq=%d releaseCommit=%d completingLoad=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
 			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(),
+			(int32)W->GetLocalRole(), (int32)W->GetNetMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsLocallyControlled()) ? 1 : 0, this,
 			GetFireMode(), W->GetCurrentFireMode(),
 			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
@@ -193,7 +193,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndState()
         RocketLauncher->CurrentRocketFireMode = 0;
         RocketLauncher->bDrawRocketModeString = false;
         
-        if (RocketLauncher->Role == ROLE_Authority)
+        if (RocketLauncher->GetLocalRole() == ROLE_Authority)
         {
             RocketLauncher->SetRocketFlashExtra(
                 RocketLauncher->GetCurrentFireMode(), 0, 0, false);
@@ -276,9 +276,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
         UE_LOG(LogTemp, Warning,
             TEXT("[RocketM1Diag] CHARGED_LOAD_CALLBACK frame=%u t=%.4f role=%d net=%d player=%s owns=%d charging=%d releaseReq=%d releaseCommit=%d loadedR=%d loadedB=%d callbackRemain=%.4f handleActiveAfterClear=%d"),
             (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
-            (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
-            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
-                ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+            (int32)Weapon->GetLocalRole(), (int32)Weapon->GetNetMode(),
+            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->GetPlayerState())
+                ? *Weapon->GetUTOwner()->GetPlayerState()->GetPlayerName() : TEXT("?"),
             Weapon->GetCurrentState() == this ? 1 : 0, bCharging ? 1 : 0,
             bReleaseRequested ? 1 : 0, bReleaseCommitted ? 1 : 0,
             RocketLauncher->NumLoadedRockets, RocketLauncher->NumLoadedBarrels,
@@ -298,9 +298,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::LoadTimer()
         UE_LOG(LogTemp, Warning,
             TEXT("[RocketM1Diag] CHARGED_LOAD_COMMIT frame=%u t=%.4f role=%d net=%d player=%s owns=%d beforeR=%d afterR=%d beforeB=%d afterB=%d charging=%d releaseReq=%d releaseCommit=%d"),
             (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
-            (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
-            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
-                ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+            (int32)Weapon->GetLocalRole(), (int32)Weapon->GetNetMode(),
+            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->GetPlayerState())
+                ? *Weapon->GetUTOwner()->GetPlayerState()->GetPlayerName() : TEXT("?"),
             Weapon->GetCurrentState() == this ? 1 : 0,
             LoadedRocketsBefore, RocketLauncher->NumLoadedRockets,
             LoadedBarrelsBefore, RocketLauncher->NumLoadedBarrels,
@@ -475,9 +475,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
             UE_LOG(LogTemp, Warning,
                 TEXT("[RocketM1Diag] CHARGED_RELEASE_WAIT_FIRST frame=%u t=%.4f role=%d net=%d player=%s loadedR=%d loadedB=%d loadRemain=%.4f"),
                 (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
-                (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
-                (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
-                    ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+                (int32)Weapon->GetLocalRole(), (int32)Weapon->GetNetMode(),
+                (Weapon->GetUTOwner() && Weapon->GetUTOwner()->GetPlayerState())
+                    ? *Weapon->GetUTOwner()->GetPlayerState()->GetPlayerName() : TEXT("?"),
                 LoadedRockets, LoadedBarrels, TimerManager.GetTimerRemaining(LoadTimerHandle));
         }
         return;
@@ -497,9 +497,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::CommitRelease()
         UE_LOG(LogTemp, Warning,
             TEXT("[RocketM1Diag] CHARGED_RELEASE_COMMIT frame=%u t=%.4f role=%d net=%d player=%s owns=%d loadedR=%d loadedB=%d cancelledLoadRemain=%.4f burstActive=%d refireActive=%d"),
             (uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
-            (int32)Weapon->Role, (int32)Weapon->GetNetMode(),
-            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->PlayerState)
-                ? *Weapon->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+            (int32)Weapon->GetLocalRole(), (int32)Weapon->GetNetMode(),
+            (Weapon->GetUTOwner() && Weapon->GetUTOwner()->GetPlayerState())
+                ? *Weapon->GetUTOwner()->GetPlayerState()->GetPlayerName() : TEXT("?"),
             Weapon->GetCurrentState() == this ? 1 : 0, LoadedRockets, LoadedBarrels,
             CancelledLoadRemaining,
             TimerManager.IsTimerActive(FireLoadedRocketHandle) ? 1 : 0,
@@ -556,9 +556,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] CHARGED_RELEASE_RX frame=%u t=%.4f role=%d net=%d player=%s requestedMode=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d releaseReq=%d releaseCommit=%d completingLoad=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
 			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(),
-			(W->GetUTOwner() && W->GetUTOwner()->PlayerState)
-				? *W->GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+			(int32)W->GetLocalRole(), (int32)W->GetNetMode(),
+			(W->GetUTOwner() && W->GetUTOwner()->GetPlayerState())
+				? *W->GetUTOwner()->GetPlayerState()->GetPlayerName() : TEXT("?"),
 			FireModeNum, GetFireMode(), W->GetCurrentFireMode(),
 			W->GetCurrentState() == this ? 1 : 0,
 			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
@@ -584,9 +584,9 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
             UE_LOG(LogTemp, Warning,
                 TEXT("[RocketM1Diag] CHARGED_RELEASE_DUPLICATE frame=%u t=%.4f role=%d player=%s committed=%d loadedR=%d loadedB=%d"),
                 (uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
-                GetOuterAUTWeapon() ? (int32)GetOuterAUTWeapon()->Role : -1,
-                (GetUTOwner() && GetUTOwner()->PlayerState)
-                    ? *GetUTOwner()->PlayerState->PlayerName : TEXT("?"),
+                GetOuterAUTWeapon() ? (int32)GetOuterAUTWeapon()->GetLocalRole() : -1,
+                (GetUTOwner() && GetUTOwner()->GetPlayerState())
+                    ? *GetUTOwner()->GetPlayerState()->GetPlayerName() : TEXT("?"),
                 bReleaseCommitted ? 1 : 0,
                 RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
                 RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1);
@@ -610,7 +610,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::EndFiringSequence(uint8 Fi
             UE_LOG(LogTemp, Warning,
                 TEXT("[RocketM1Diag] CHARGED_RELEASE_DEFER_LOAD frame=%u t=%.4f role=%d loadedR=%d loadedB=%d"),
                 (uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
-                GetOuterAUTWeapon() ? (int32)GetOuterAUTWeapon()->Role : -1,
+                GetOuterAUTWeapon() ? (int32)GetOuterAUTWeapon()->GetLocalRole() : -1,
                 RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
                 RocketLauncher ? RocketLauncher->NumLoadedBarrels : -1);
         }
@@ -665,7 +665,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] CHARGED_FIRE_LOADED frame=%u t=%.4f role=%d net=%d fireMode=%d currentMode=%d owns=%d pending0=%d charging=%d loadedR=%d loadedB=%d"),
 			(uint32)GFrameCounter, W->GetWorld() ? W->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)W->Role, (int32)W->GetNetMode(), GetFireMode(), W->GetCurrentFireMode(),
+			(int32)W->GetLocalRole(), (int32)W->GetNetMode(), GetFireMode(), W->GetCurrentFireMode(),
 			W->GetCurrentState() == this ? 1 : 0,
 			(W->GetUTOwner() && W->GetUTOwner()->IsPendingFire(0)) ? 1 : 0,
 			bCharging ? 1 : 0, RocketLauncher ? RocketLauncher->NumLoadedRockets : -1,
@@ -830,7 +830,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::RefireCheckTimer()
 		UE_LOG(LogTemp, Warning,
 			TEXT("[RocketM1Diag] CHARGED_REFIRE frame=%u t=%.4f role=%d net=%d local=%d fireMode=%d currentMode=%d owns=%d pending0=%d pending1=%d charging=%d loadedR=%d loadedB=%d timers(load=%.4f grace=%.4f burst=%.4f refire=%.4f)"),
 			(uint32)GFrameCounter, Weapon->GetWorld() ? Weapon->GetWorld()->GetTimeSeconds() : -1.f,
-			(int32)Weapon->Role, (int32)Weapon->GetNetMode(),
+			(int32)Weapon->GetLocalRole(), (int32)Weapon->GetNetMode(),
 			Owner->IsLocallyControlled() ? 1 : 0,
 			GetFireMode(), Weapon->GetCurrentFireMode(), Weapon->GetCurrentState() == this ? 1 : 0,
 			Owner->IsPendingFire(0) ? 1 : 0,

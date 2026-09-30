@@ -1,23 +1,25 @@
 // Copyright 1998-2015 Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
+
 namespace UnrealBuildTool.Rules
 {
 	public class NetcodePlus : ModuleRules
 	{
-		public NetcodePlus(TargetInfo Target)
+		public NetcodePlus(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PrivateIncludePaths.Add("NetcodePlus/Private");
+			PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "Private"));
 			PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 			PublicIncludePaths.AddRange(new string[] {
-				"NetcodePlus/Public",
+				Path.Combine(ModuleDirectory, "Public"),
 				// Vendored Glicko2 (github.com/tronunator/Glicko2). Cross-includes
 				// like #include "TeamGlickoRating.h" resolve here without editing
 				// the vendored files. Used by ElimPlus rating system.
-				"NetcodePlus/Public/Glicko2"
+				Path.Combine(ModuleDirectory, "Public/Glicko2")
             });
 			PrivateIncludePaths.AddRange(new string[] {
-				"UnrealTournament/Private",
-				"UnrealTournament/Classes"
+				Path.GetFullPath(Path.Combine(ModuleDirectory, "../../../Source/UnrealTournament/Private")),
+				Path.GetFullPath(Path.Combine(ModuleDirectory, "../../../Source/UnrealTournament/Public"))
 			});
 
 			PublicDependencyModuleNames.AddRange(new string[]
@@ -33,6 +35,7 @@ namespace UnrealBuildTool.Rules
 
 			PrivateDependencyModuleNames.AddRange(new string[] {
 				"AssetRegistry",
+				"PhysicsCore",   // 4.27 UPhysicalMaterial::DetermineSurfaceType
 				"AppFramework",   // SColorPicker (used by SNCPlusHUDEditor color swatches)
 				"Http",
 				"Json",

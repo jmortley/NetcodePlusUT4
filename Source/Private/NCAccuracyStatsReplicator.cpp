@@ -30,7 +30,7 @@ void ANCAccuracyStatsReplicator::BeginPlay()
 	TimeSinceLastUpdate = 0.f;
 	// Replication does not require an actor tick on clients. Previously every
 	// client woke this actor at 2 Hz just to return at the top of Tick().
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		SetActorTickEnabled(false);
 	}
@@ -39,7 +39,7 @@ void ANCAccuracyStatsReplicator::BeginPlay()
 void ANCAccuracyStatsReplicator::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	if (Role != ROLE_Authority) return;
+	if (GetLocalRole() != ROLE_Authority) return;
 	TimeSinceLastUpdate += DeltaTime;
 	if (TimeSinceLastUpdate >= UpdateInterval)
 	{
@@ -69,7 +69,7 @@ void ANCAccuracyStatsReplicator::UpdateFromPlayerStates()
 		FNCAccuracyStatsEntry E;
 		E.PlayerId = UTPS->UniqueId.IsValid()
 			? UTPS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *UTPS->PlayerName);
+			: FString::Printf(TEXT("BOT:%s"), *UTPS->GetPlayerName());
 
 		E.LinkHits          = UTPS->GetStatsValue(NAME_LinkHits);
 		E.LinkShots         = UTPS->GetStatsValue(NAME_LinkBeamShots);

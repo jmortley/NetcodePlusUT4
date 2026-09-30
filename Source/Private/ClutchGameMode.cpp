@@ -77,7 +77,7 @@ namespace
 
 		// Original cooked CL maps use ClutchSpawn_C, whose only role field is
 		// a Blueprint BoolProperty named "Attacker".
-		if (UBoolProperty* AttackerProperty = FindField<UBoolProperty>(
+		if (FBoolProperty* AttackerProperty = FindFProperty<FBoolProperty>(
 			Start->GetClass(), TEXT("Attacker")))
 		{
 			OutRole = AttackerProperty->GetPropertyValue_InContainer(Start)
@@ -145,7 +145,7 @@ namespace
 			Flag->GetWorldTimerManager().ClearAllTimersForObject(Flag);
 			if (Flag->Collision)
 			{
-				Flag->Collision->bGenerateOverlapEvents = false;
+				Flag->Collision->SetGenerateOverlapEvents(false);
 				Flag->Collision->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 			}
 			if (Flag->ObjectState != CarriedObjectState::Home)
@@ -545,7 +545,7 @@ void AClutchGameMode::EnforceRoundMembership()
 			{
 				UE_LOG(LogClutch, Log,
 					TEXT("Mid-round joiner %s entered outside PostLogin/ChangeTeam - adding to roster as queued"),
-					*PlayerState->PlayerName);
+					*PlayerState->GetPlayerName());
 				RefreshRoster();
 				break;
 			}
@@ -553,7 +553,7 @@ void AClutchGameMode::EnforceRoundMembership()
 			{
 				UE_LOG(LogClutch, Warning,
 					TEXT("Roster/live team mismatch for %s (roster %d, live %d) - re-syncing; they re-queue for next round"),
-					*PlayerState->PlayerName, Entry->TeamIndex, LiveTeam);
+					*PlayerState->GetPlayerName(), Entry->TeamIndex, LiveTeam);
 				RefreshRoster();
 				break;
 			}
@@ -570,7 +570,7 @@ void AClutchGameMode::EnforceRoundMembership()
 		{
 			continue;
 		}
-		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(Character->PlayerState);
+		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(Character->GetPlayerState());
 		if (!PlayerState || IsActiveRoundPlayer(PlayerState))
 		{
 			continue;
@@ -578,7 +578,7 @@ void AClutchGameMode::EnforceRoundMembership()
 
 		UE_LOG(LogClutch, Warning,
 			TEXT("Benching out-of-round pawn %s (no active roster slot this round)"),
-			*PlayerState->PlayerName);
+			*PlayerState->GetPlayerName());
 		AController* Controller = Character->GetController();
 		if (Controller)
 		{
@@ -831,12 +831,12 @@ void AClutchGameMode::RefreshRoster()
 			UsedSlots[TeamIndex].Add(Slot);
 		}
 
-		EClutchRole Role = EClutchRole::None;
+		EClutchRole PlayerClutchRole = EClutchRole::None;
 		EClutchStatus Status = EClutchStatus::Queued;
 		if (Existing && Existing->TeamIndex == TeamIndex
 			&& Existing->PlayerStatus != EClutchStatus::Disconnected)
 		{
-			Role = Existing->PlayerRole;
+			PlayerClutchRole = Existing->PlayerRole;
 			Status = Existing->PlayerStatus;
 		}
 
@@ -845,16 +845,16 @@ void AClutchGameMode::RefreshRoster()
 		if (!Existing)
 		{
 			UE_LOG(LogClutch, Log, TEXT("Rostered %s on team %d slot %d"),
-				*PlayerState->PlayerName, TeamIndex, Slot);
+				*PlayerState->GetPlayerName(), TeamIndex, Slot);
 		}
 		else if (Existing->TeamIndex != TeamIndex)
 		{
 			UE_LOG(LogClutch, Log,
 				TEXT("Roster team change for %s: %d -> %d (re-queued for next round)"),
-				*PlayerState->PlayerName, Existing->TeamIndex, TeamIndex);
+				*PlayerState->GetPlayerName(), Existing->TeamIndex, TeamIndex);
 		}
 
-		ClutchState->UpsertPlayer(PlayerState, TeamIndex, Slot, Role, Status);
+		ClutchState->UpsertPlayer(PlayerState, TeamIndex, Slot, PlayerClutchRole, Status);
 	}
 }
 
@@ -898,9 +898,9 @@ void AClutchGameMode::AssignAttackOrderSelectors()
 		CaptainsOption.ParseIntoArray(CaptainIds, TEXT(","), true);
 		for (FString& CaptainId : CaptainIds)
 		{
-			// UE4.15 exposes the mutating Trim/TrimTrailing pair.
-			CaptainId.Trim();
-			CaptainId.TrimTrailing();
+			// Preserve in-place trimming of each captain identifier.
+			CaptainId.TrimStartInline();
+			CaptainId.TrimEndInline();
 		}
 	}
 
@@ -1125,7 +1125,7 @@ bool AClutchGameMode::SubmitAttackOrder(
 		{
 			UE_LOG(LogClutch, Log,
 				TEXT("Attack order rejected for %s: outside the selection window (entry=%d phase=%d)"),
-				PlayerState ? *PlayerState->PlayerName : TEXT("unknown"),
+				PlayerState ? *PlayerState->GetPlayerName() : TEXT("unknown"),
 				Entry != nullptr,
 				ClutchState ? static_cast<int32>(ClutchState->Phase) : -1);
 			Sender->ClientMessage(TEXT("Attack order can only be selected before round one."));
@@ -1137,14 +1137,14 @@ bool AClutchGameMode::SubmitAttackOrder(
 	if (!Entry->bAttackOrderSelector)
 	{
 		UE_LOG(LogClutch, Log, TEXT("Attack order rejected for %s: not team %d's selector"),
-			*PlayerState->PlayerName, TeamIndex);
+			*PlayerState->GetPlayerName(), TeamIndex);
 		Sender->ClientMessage(TEXT("Only your team's order selector can confirm the attack order."));
 		return false;
 	}
 	if (ClutchState->IsAttackOrderLocked(TeamIndex))
 	{
 		UE_LOG(LogClutch, Log, TEXT("Attack order rejected for %s: team %d already locked"),
-			*PlayerState->PlayerName, TeamIndex);
+			*PlayerState->GetPlayerName(), TeamIndex);
 		Sender->ClientMessage(TEXT("Your team's attack order is already locked."));
 		return false;
 	}
@@ -1155,21 +1155,21 @@ bool AClutchGameMode::SubmitAttackOrder(
 	{
 		UE_LOG(LogClutch, Log,
 			TEXT("Attack order rejected for %s: not a permutation of team %d's %d slot(s)"),
-			*PlayerState->PlayerName, TeamIndex, EligibleSlots.Num());
+			*PlayerState->GetPlayerName(), TeamIndex, EligibleSlots.Num());
 		Sender->ClientMessage(TEXT("Attack order rejected: select every teammate exactly once."));
 		return false;
 	}
 	if (!ClutchState->SetTeamAttackOrder(TeamIndex, OrderedRosterSlots, true))
 	{
 		UE_LOG(LogClutch, Warning, TEXT("Attack order save failed for %s (team %d)"),
-			*PlayerState->PlayerName, TeamIndex);
+			*PlayerState->GetPlayerName(), TeamIndex);
 		Sender->ClientMessage(TEXT("Attack order could not be saved."));
 		return false;
 	}
 
 	Sender->ClientMessage(TEXT("Attack order locked."));
 	UE_LOG(LogClutch, Log, TEXT("Team %d attack order submitted by %s"),
-		TeamIndex, *PlayerState->PlayerName);
+		TeamIndex, *PlayerState->GetPlayerName());
 	if (ClutchState->AreAttackOrdersLocked())
 	{
 		GetWorldTimerManager().SetTimerForNextTick(
@@ -1450,14 +1450,14 @@ bool AClutchGameMode::SelectRoundRoles()
 			&& Entry.PlayerRole == EClutchRole::Defender) { ++DefenderCount; }
 		else if (Entry.PlayerStatus == EClutchStatus::Benched) { ++BenchedCount; }
 		UE_LOG(LogClutch, Log, TEXT("  roster %s: team=%d role=%d status=%d slot=%d"),
-			*Entry.PlayerState->PlayerName, Entry.TeamIndex,
+			*Entry.PlayerState->GetPlayerName(), Entry.TeamIndex,
 			static_cast<int32>(Entry.PlayerRole), static_cast<int32>(Entry.PlayerStatus),
 			static_cast<int32>(Entry.RosterSlot));
 	}
 	UE_LOG(LogClutch, Log,
 		TEXT("Round %d roles: team %d attacks (%s) - attackers=%d defenders=%d benched=%d"),
 		ClutchState->RoundNumber, AttackingTeam,
-		SelectedAttacker ? *SelectedAttacker->PlayerName : TEXT("none"),
+		SelectedAttacker ? *SelectedAttacker->GetPlayerName() : TEXT("none"),
 		AttackerCount, DefenderCount, BenchedCount);
 
 	// Inventory and health are assigned during this short spawn phase. Combat
@@ -1539,7 +1539,7 @@ void AClutchGameMode::ProcessNextRoundSpawn()
 		{
 			FreezeRoundPawn(Controller);
 			UE_LOG(LogClutch, Verbose, TEXT("  spawned %s at %s"),
-				*PlayerState->PlayerName,
+				*PlayerState->GetPlayerName(),
 				*Controller->GetPawn()->GetActorLocation().ToString());
 		}
 		else
@@ -1560,7 +1560,7 @@ void AClutchGameMode::ProcessNextRoundSpawn()
 				}
 				EnterSpectating(Controller, FindActiveTeammate(PlayerState));
 				UE_LOG(LogClutch, Error, TEXT("Failed to spawn active round player %s after %d attempts"),
-					*PlayerState->PlayerName, Attempts);
+					*PlayerState->GetPlayerName(), Attempts);
 			}
 		}
 		break;
@@ -1648,7 +1648,7 @@ void AClutchGameMode::FinalizeRoundStart()
 	UE_LOG(LogClutch, Log, TEXT("Round %d started: team %d attacks with %s vs %d defender(s)"),
 		ClutchState->RoundNumber,
 		ClutchState->AttackingTeamIndex,
-		ClutchState->ActiveAttacker ? *ClutchState->ActiveAttacker->PlayerName : TEXT("none"),
+		ClutchState->ActiveAttacker ? *ClutchState->ActiveAttacker->GetPlayerName() : TEXT("none"),
 		SpawnedDefenders);
 	if (SpawnedDefenders <= 0)
 	{
@@ -1964,7 +1964,7 @@ bool AClutchGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bBroad
 void AClutchGameMode::SetPlayerDefaults(APawn* PlayerPawn)
 {
 	AUTCharacter* Character = Cast<AUTCharacter>(PlayerPawn);
-	AUTPlayerState* PlayerState = Character ? Cast<AUTPlayerState>(Character->PlayerState) : nullptr;
+	AUTPlayerState* PlayerState = Character ? Cast<AUTPlayerState>(Character->GetPlayerState()) : nullptr;
 	const bool bAttacker = Character && IsActiveRole(PlayerState, EClutchRole::Attacker);
 
 	if (bAttacker)
@@ -1996,7 +1996,7 @@ void AClutchGameMode::SetPlayerDefaults(APawn* PlayerPawn)
 void AClutchGameMode::GiveDefaultInventory(APawn* PlayerPawn)
 {
 	AUTCharacter* Character = Cast<AUTCharacter>(PlayerPawn);
-	AUTPlayerState* PlayerState = Character ? Cast<AUTPlayerState>(Character->PlayerState) : nullptr;
+	AUTPlayerState* PlayerState = Character ? Cast<AUTPlayerState>(Character->GetPlayerState()) : nullptr;
 	if (!Character || !PlayerState)
 	{
 		Super::GiveDefaultInventory(PlayerPawn);
@@ -2115,7 +2115,7 @@ bool AClutchGameMode::ModifyDamage_Implementation(int32& Damage, FVector& Moment
 		return true;
 	}
 
-	AUTPlayerState* VictimState = Injured ? Cast<AUTPlayerState>(Injured->PlayerState) : nullptr;
+	AUTPlayerState* VictimState = Injured ? Cast<AUTPlayerState>(Injured->GetPlayerState()) : nullptr;
 	AUTPlayerState* AttackerState = InstigatedBy
 		? Cast<AUTPlayerState>(InstigatedBy->PlayerState)
 		: nullptr;
@@ -2673,7 +2673,7 @@ void AClutchGameMode::UpdatePole(float DeltaSeconds)
 			continue;
 		}
 
-		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(Character->PlayerState);
+		AUTPlayerState* PlayerState = Cast<AUTPlayerState>(Character->GetPlayerState());
 		const FClutchRosterEntry* Entry = PlayerState
 			? ClutchState->FindEntry(PlayerState)
 			: nullptr;
@@ -2842,7 +2842,7 @@ bool AClutchGameMode::IsActiveRoundPlayer(const AUTPlayerState* PlayerState) con
 
 
 bool AClutchGameMode::IsActiveRole(
-	const AUTPlayerState* PlayerState, EClutchRole Role) const
+	const AUTPlayerState* PlayerState, EClutchRole RequestedRole) const
 {
 	if (!ClutchState || !PlayerState)
 	{
@@ -2850,7 +2850,7 @@ bool AClutchGameMode::IsActiveRole(
 	}
 	const FClutchRosterEntry* Entry = ClutchState->FindEntry(PlayerState);
 	return Entry && Entry->PlayerStatus == EClutchStatus::Active
-		&& Entry->PlayerRole == Role;
+		&& Entry->PlayerRole == RequestedRole;
 }
 
 

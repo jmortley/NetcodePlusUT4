@@ -200,7 +200,7 @@ void UTeamArenaCharacterMovement::UpdateTeamCollisionIgnores()
     TArray<AUTCharacter*, TInlineAllocator<64>> DesiredIgnoredActors;
     for (FConstPawnIterator It = World->GetPawnIterator(); It; ++It)
     {
-        AUTCharacter* Char = It->IsValid() ? Cast<AUTCharacter>((*It).Get()) : nullptr;
+        AUTCharacter* Char = Cast<AUTCharacter>(It->Get());
         if (Char)
         {
             ObservedCharacters.Add(Char);
@@ -260,7 +260,7 @@ bool UTeamArenaCharacterMovement::FlushPendingMoveForShot()
 {
     AUTCharacter* UTCharacterOwner = Cast<AUTCharacter>(CharacterOwner);
     if (!UTCharacterOwner || GetNetMode() != NM_Client
-        || UTCharacterOwner->Role != ROLE_AutonomousProxy
+        || UTCharacterOwner->GetLocalRole() != ROLE_AutonomousProxy
         || !UTCharacterOwner->IsLocallyControlled() || UTCharacterOwner->IsDead()
         || UTCharacterOwner->bClientUpdating || bJustTeleported
         || LastPreparedMoveFrame != GFrameCounter)

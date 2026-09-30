@@ -1,5 +1,6 @@
 // NCPlusHUDLayout — implementation. JSON I/O + alias map + apply-to-widgets pass.
 #include "NCPlusHUDLayout.h"
+#include "UObject/UnrealType.h"
 #include "NCPlusHUDPresets.h"
 #include "ElimPlusHUD.h"
 #include "NCPlusXTDMReplicator.h"
@@ -38,8 +39,8 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Interfaces/IPluginManager.h"
 #if !UE_SERVER
-#include "Interfaces/IImageWrapper.h"
-#include "Interfaces/IImageWrapperModule.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
 #endif
 #include "Modules/ModuleManager.h"
 
@@ -66,9 +67,9 @@ FVector2D FNCPlusHUDLayout::AnchorToScreenCoords(ENCPlusHUDAnchor Anchor)
 
 ENCPlusHUDAnchor FNCPlusHUDLayout::ParseAnchor(const FString& Name)
 {
-	// .Trim() mutates in place (UE4 4.15) — need a non-const copy.
+	// .TrimStartInline() mutates in place (UE4 4.15) — need a non-const copy.
 	FString N = Name;
-	N.Trim();
+	N.TrimStartInline();
 	N = N.ToLower();
 	if (N == TEXT("topleft"))      return ENCPlusHUDAnchor::TopLeft;
 	if (N == TEXT("topcenter"))    return ENCPlusHUDAnchor::TopCenter;
@@ -91,7 +92,7 @@ namespace NCPlusHPArmorStyle
 	ENCPlusHPArmorStyle Parse(const FString& Name)
 	{
 		FString N = Name;
-		N.Trim();
+		N.TrimStartInline();
 		N = N.ToLower();
 		if (N == TEXT("segmentedbars"))     return ENCPlusHPArmorStyle::SegmentedBars;
 		if (N == TEXT("radialarcs"))        return ENCPlusHPArmorStyle::RadialArcs;
@@ -348,7 +349,7 @@ namespace NCPlusAmmoStyle
 	ENCPlusAmmoStyle Parse(const FString& Name)
 	{
 		FString N = Name;
-		N.Trim();
+		N.TrimStartInline();
 		N = N.ToLower();
 		if (N == TEXT("iconandcount"))  return ENCPlusAmmoStyle::IconAndCount;
 		if (N == TEXT("verticalgauge")) return ENCPlusAmmoStyle::VerticalGauge;
@@ -409,7 +410,7 @@ namespace NCPlusHUDColor
 	bool TryParse(const FString& Hex, FLinearColor& Out)
 	{
 		FString S = Hex;
-		S.Trim();
+		S.TrimStartInline();
 		if (S.StartsWith(TEXT("#"))) S = S.RightChop(1);
 		if (S.Len() != 6 && S.Len() != 8) return false;
 
@@ -523,7 +524,7 @@ bool FNCPlusHUDElement::GetExtraBool(FName Key, bool Fallback) const
 	const FString* V = Extras.Find(Key);
 	if (!V || V->IsEmpty()) return Fallback;
 	FString S = *V;
-	S.Trim();
+	S.TrimStartInline();
 	S = S.ToLower();
 	if (S == TEXT("true")  || S == TEXT("1")) return ExtraBoolCache.Add(Key, true);
 	if (S == TEXT("false") || S == TEXT("0")) return ExtraBoolCache.Add(Key, false);
@@ -573,7 +574,7 @@ FName FNCPlusHUDLayout::GetWeaponSide(UClass* WeaponClass) const
 
 FString FNCPlusHUDLayout::GetDefaultLayoutPath()
 {
-	return FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
+	return FPaths::ProjectSavedDir() / TEXT("NetcodePlus") / TEXT("HUDLayout.json");
 }
 
 FString FNCPlusHUDLayout::PluginResourcesDir()
@@ -586,7 +587,7 @@ FString FNCPlusHUDLayout::PluginResourcesDir()
 	{
 		return FPaths::Combine(*Plugin->GetBaseDir(), TEXT("Resources"));
 	}
-	return FPaths::Combine(*FPaths::GamePluginsDir(), TEXT("NetcodePlus/Resources"));
+	return FPaths::Combine(*FPaths::ProjectPluginsDir(), TEXT("NetcodePlus/Resources"));
 }
 
 // Cached so the per-frame DrawHeldPowerups call never hits GConfig/FileExists (mirror
@@ -782,7 +783,7 @@ bool FNCPlusHUDLayout::WantsAbsoluteElimTeamPanel()
 		const bool bHasLegacyStockChoice = GConfig
 			&& GConfig->GetString(TEXT("NetcodePlus"), TEXT("StockTeamPanel"), LegacyStockVal, ModIni)
 			&& !LegacyStockVal.IsEmpty();
-		const FString LegacyLayoutPath = FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
+		const FString LegacyLayoutPath = FPaths::ProjectSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
 		bResult = !bHasLegacyStockChoice
 			&& !FPaths::FileExists(GetDefaultLayoutPath())
 			&& !FPaths::FileExists(LegacyLayoutPath);
@@ -1807,24 +1808,23 @@ namespace NCPlusHUDDrawCall
 
 			IImageWrapperModule& ImageWrapperModule =
 				FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
-			IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
-			const TArray<uint8>* RawData = nullptr;
+			TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+			TArray<uint8> RawData;
 			if (!ImageWrapper.IsValid()
 				|| !ImageWrapper->SetCompressed(CompressedData.GetData(), CompressedData.Num())
-				|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData)
-				|| !RawData)
+				|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData))
 			{
 				return nullptr;
 			}
 
 			const int32 Width = ImageWrapper->GetWidth();
 			const int32 Height = ImageWrapper->GetHeight();
-			if (Width <= 0 || Height <= 0 || RawData->Num() != Width * Height * 4)
+			if (Width <= 0 || Height <= 0 || RawData.Num() != Width * Height * 4)
 			{
 				return nullptr;
 			}
 
-			TArray<uint8> Pixels = *RawData;
+			TArray<uint8> Pixels = RawData;
 			if (bBlueVariant)
 			{
 				// BGRA: exchanging B and R reproduces the original fixed red -> blue
@@ -2037,7 +2037,7 @@ namespace NCPlusHUDDrawCall
 				const bool bShowVitals = (TeamIdx == MyTeam) || bRevealAllVitals;
 				FText NameText;
 				float NameXL = 0.f, NameYL = 0.f;
-				ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName,
+				ResolveFittedName(Canvas, PS, NameFont, PS->GetPlayerName(),
 					BarW - 14.f * S, NameScale, NameText, NameXL, NameYL);
 				// Center by the measured glyph height instead of using a fixed top edge.
 				// The recovered plate has distinct upper-name and lower-vitals lanes.
@@ -2089,12 +2089,12 @@ namespace NCPlusHUDDrawCall
 		// retain its round clock beneath the recovered score plates.
 		int32 RoundTime = -1;
 		static UClass* CachedClockClass = nullptr;
-		static UIntProperty* CachedClockProperty = nullptr;
+		static FIntProperty* CachedClockProperty = nullptr;
 		UClass* GSClass = GS->GetClass();
 		if (CachedClockClass != GSClass)
 		{
 			CachedClockClass = GSClass;
-			CachedClockProperty = FindField<UIntProperty>(GSClass, TEXT("RoundSecondsRemaining"));
+			CachedClockProperty = FindFProperty<FIntProperty>(GSClass, TEXT("RoundSecondsRemaining"));
 		}
 		if (CachedClockProperty)
 		{
@@ -2293,7 +2293,7 @@ namespace NCPlusHUDDrawCall
 				{
 					// Name on top (cached fit), HP/armor below.
 					FText NameText; float NW, NH;
-					ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale, NameText, NW, NH);
+					ResolveFittedName(Canvas, PS, NameFont, PS->GetPlayerName(), PlateW - 8.f * S, NameScale, NameText, NW, NH);
 					Labels.Add(FPanelLabel{ NameFont, NameText,
 						CenterX - NW * NameScale * 0.5f, (RowY + PlateH * 0.30f) - NH * NameScale * 0.5f,
 						NameScale, FLinearColor(0.90f, 0.90f, 0.92f, 1.f) });
@@ -2328,7 +2328,7 @@ namespace NCPlusHUDDrawCall
 				{
 					// Enemy: name only, vertically centered (no live enemy HP).
 					FText NameText; float NW, NH;
-					ResolveFittedName(Canvas, PS, NameFont, PS->PlayerName, PlateW - 8.f * S, NameScale, NameText, NW, NH);
+					ResolveFittedName(Canvas, PS, NameFont, PS->GetPlayerName(), PlateW - 8.f * S, NameScale, NameText, NW, NH);
 					Labels.Add(FPanelLabel{ NameFont, NameText,
 						CenterX - NW * NameScale * 0.5f, (RowY + PlateH * 0.5f) - NH * NameScale * 0.5f,
 						NameScale, FLinearColor(0.92f, 0.92f, 0.95f, 1.f) });
@@ -2344,12 +2344,12 @@ namespace NCPlusHUDDrawCall
 		{
 			int32 RoundTime = -1;
 			static UClass* CachedClockCls = nullptr;
-			static UIntProperty* CachedClockProp = nullptr;
+			static FIntProperty* CachedClockProp = nullptr;
 			UClass* GSCls = GS->GetClass();
 			if (CachedClockCls != GSCls)
 			{
 				CachedClockCls  = GSCls;
-				CachedClockProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+				CachedClockProp = FindFProperty<FIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
 			}
 			if (CachedClockProp)
 			{
@@ -2972,7 +2972,7 @@ void FNCPlusHUDLayout::ReloadLive()
 
 	// Legacy fallback: use the pre-3.4 per-mode file if the unified one is absent.
 	// On next Save, we'll write to NewPath, effectively migrating.
-	const FString LegacyPath = FPaths::GameSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
+	const FString LegacyPath = FPaths::ProjectSavedDir() / TEXT("NetcodePlus") / TEXT("ElimPlusHUDLayout.json");
 	if (FPaths::FileExists(LegacyPath))
 	{
 		GetLive() = LoadFromFile(LegacyPath);
@@ -3134,7 +3134,7 @@ namespace
 static FVector2D GetVec2Prop(UObject* Obj, FName PropName, const FVector2D& Fallback)
 {
 	if (!Obj) return Fallback;
-	UStructProperty* SP = FindField<UStructProperty>(Obj->GetClass(), PropName);
+	FStructProperty* SP = FindFProperty<FStructProperty>(Obj->GetClass(), PropName);
 	if (SP && SP->Struct == TBaseStructure<FVector2D>::Get())
 	{
 		if (FVector2D* Ptr = SP->ContainerPtrToValuePtr<FVector2D>(Obj))
@@ -3148,7 +3148,7 @@ static FVector2D GetVec2Prop(UObject* Obj, FName PropName, const FVector2D& Fall
 static void SetVec2Prop(UObject* Obj, FName PropName, const FVector2D& Val)
 {
 	if (!Obj) return;
-	UStructProperty* SP = FindField<UStructProperty>(Obj->GetClass(), PropName);
+	FStructProperty* SP = FindFProperty<FStructProperty>(Obj->GetClass(), PropName);
 	if (SP && SP->Struct == TBaseStructure<FVector2D>::Get())
 	{
 		if (FVector2D* Ptr = SP->ContainerPtrToValuePtr<FVector2D>(Obj))

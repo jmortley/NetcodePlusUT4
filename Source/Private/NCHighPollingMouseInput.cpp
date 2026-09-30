@@ -257,7 +257,7 @@ namespace
 		GHighPollingMouseInput->DiscardPending();
 		if (FSlateApplication::IsInitialized())
 		{
-			FSlateApplication::Get().SetInputPreProcessor(false);
+			FSlateApplication::Get().UnregisterInputPreProcessor(GHighPollingMouseInput);
 		}
 		GHighPollingMouseInput.Reset();
 	}
@@ -285,7 +285,7 @@ void RegisterNCHighPollingMouseInput()
 	}
 
 	GHighPollingMouseInput = MakeShareable(new FNCHighPollingMouseInput());
-	FSlateApplication::Get().SetInputPreProcessor(true, GHighPollingMouseInput);
+	FSlateApplication::Get().RegisterInputPreProcessor(GHighPollingMouseInput, 0);
 	GHighPollingMousePreExitHandle = FCoreDelegates::OnPreExit.AddStatic(
 		&HandleHighPollingMousePreExit);
 #endif

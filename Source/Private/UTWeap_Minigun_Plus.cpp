@@ -99,7 +99,7 @@ void AUTWeap_Minigun_Plus::FireShot()
 		// authoritative tick. Stamp it here so the watchdog sees a live stream.
 		// Authority-only on purpose: the client's cross-mode ready checks keep
 		// seeing the sentinel, exactly as before the mode split.
-		if (Role == ROLE_Authority && LastFireTime.IsValidIndex(CurrentFireMode))
+		if (GetLocalRole() == ROLE_Authority && LastFireTime.IsValidIndex(CurrentFireMode))
 		{
 			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
 		}

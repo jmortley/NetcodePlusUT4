@@ -34,6 +34,11 @@ static FORCEINLINE int32 RocketPrimaryDiagLevelLocal()
 AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
+    // Cooked child Blueprints refer to these exact native CDO templates.
+    // Default subobjects exist before async export construction, independent of load order.
+    FiringState[0] = CreateDefaultSubobject<UUTWeaponStateFiring_Transactional>(TEXT("UTWeaponStateFiring_Transactional_0"));
+    FiringState[1] = CreateDefaultSubobject<UUTWeaponStateFiringChargedRocket_Transactional>(TEXT("UTWeaponStateFiringChargedRocket_Transactional_0"));
+
     DefaultGroup = 8;
     BringUpTime = 0.41f;
 
@@ -112,23 +117,6 @@ AUTPlusWeap_RocketLauncher::AUTPlusWeap_RocketLauncher(const FObjectInitializer&
     bAttackSkillCheckResult = false;
 }
 
-void AUTPlusWeap_RocketLauncher::PostInitProperties()
-{
-    Super::PostInitProperties();
-
-    // Fire Mode 0: Primary - Single Rocket (Transactional)
-    if (FiringState.Num() > 0)
-    {
-        FiringState[0] = NewObject<UUTWeaponStateFiring_Transactional>(this, UUTWeaponStateFiring_Transactional::StaticClass());
-    }
-
-    // Fire Mode 1: Alt - Load Multiple Rockets (NEW Standalone Charged Transactional)
-    if (FiringState.Num() > 1)
-    {
-        FiringState[1] = NewObject<UUTWeaponStateFiringChargedRocket_Transactional>(this, UUTWeaponStateFiringChargedRocket_Transactional::StaticClass());
-    }
-}
-
 bool AUTPlusWeap_RocketLauncher::BeginFiringSequence(uint8 FireModeNum, bool bClientFired)
 {
 	const int32 BeginDiagLevel = RocketPrimaryDiagLevelLocal();
@@ -137,7 +125,7 @@ bool AUTPlusWeap_RocketLauncher::BeginFiringSequence(uint8 FireModeNum, bool bCl
 		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
 		UE_LOG(LogUTRocketLauncher, Warning,
 			TEXT("[RocketM1Diag] BEGIN_SEQUENCE frame=%u t=%.4f role=%d net=%d local=%d requested=%d clientFired=%d currentMode=%d tracker=%d active0=%d pending0=%d pending1=%d state=%s lft0=%.4f earliest=%.4f"),
-			(uint32)GFrameCounter, Now, (int32)Role, (int32)GetNetMode(),
+			(uint32)GFrameCounter, Now, (int32)GetLocalRole(), (int32)GetNetMode(),
 			(UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0, FireModeNum, bClientFired ? 1 : 0,
 			CurrentFireMode, CurrentlyFiringMode,
 			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
@@ -305,7 +293,7 @@ void AUTPlusWeap_RocketLauncher::ClearLoadedRockets()
     NumLoadedBarrels = 0;
     NumLoadedRockets = 0;
 
-    if (Role == ROLE_Authority)
+    if (GetLocalRole() == ROLE_Authority)
     {
         SetLockTarget(nullptr);
         PendingLockedTarget = nullptr;
@@ -350,9 +338,9 @@ void AUTPlusWeap_RocketLauncher::ClientAbortLoad_Implementation()
 
         // Set grace timer with ping compensation
         float AdjustedGraceTime = GracePeriod;
-        if (UTOwner != nullptr && UTOwner->PlayerState != nullptr)
+        if (UTOwner != nullptr && UTOwner->GetPlayerState() != nullptr)
         {
-            AdjustedGraceTime = FMath::Max<float>(0.01f, AdjustedGraceTime - UTOwner->PlayerState->ExactPing * 0.0005f);
+            AdjustedGraceTime = FMath::Max<float>(0.01f, AdjustedGraceTime - UTOwner->GetPlayerState()->ExactPing * 0.0005f);
         }
 
         GetWorldTimerManager().SetTimer(
@@ -409,7 +397,7 @@ void AUTPlusWeap_RocketLauncher::FireShot()
 		? PrevLFT0 + PrimaryRefireTime : -1.f;
 	const float PrimaryBoundaryEarlyBy = PrimaryReadyTime - CurrentTime;
 	const bool bLocallyPacedPrimaryAtBoundary =
-		Role < ROLE_Authority
+		GetLocalRole() < ROLE_Authority
 		&& CurrentFireMode == 0
 		&& UTOwner != nullptr
 		&& UTOwner->IsLocallyControlled()
@@ -433,7 +421,7 @@ void AUTPlusWeap_RocketLauncher::FireShot()
 			bOnCooldown ? TEXT("BLOCK")
 				: (bCooldownWouldBlock ? TEXT("BYPASS_STATE_PACED") : TEXT("PASS")),
 			(uint32)GFrameCounter, CurrentTime,
-			(int32)Role, (int32)GetNetMode(), (UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
+			(int32)GetLocalRole(), (int32)GetNetMode(), (UTOwner && UTOwner->IsLocallyControlled()) ? 1 : 0,
 			GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
 			CurrentFireMode, CurrentlyFiringMode, (UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0,
 			FireModeActiveState.IsValidIndex(0) ? FireModeActiveState[0] : 255,
@@ -448,7 +436,7 @@ void AUTPlusWeap_RocketLauncher::FireShot()
             // DIAGNOSTIC (net-safe, survives Shipping): this silent abort is a rocket no-reg suspect.
             // Surface an ABNORMAL (>1s) block server-side so a repro names the values that caused it.
             const float Lft = LastFireTime.IsValidIndex(CurrentFireMode) ? LastFireTime[CurrentFireMode] : -1.f;
-            if (Role == ROLE_Authority &&
+            if (GetLocalRole() == ROLE_Authority &&
                 ((EarliestFireTime - CurrentTime) > 1.0f || (Lft > 0.f && (Lft - CurrentTime) > 1.0f)))
             {
                 UE_LOG(LogTemp, Warning, TEXT("[FireBlock] RocketLauncher FireShot mode %d abort: EarliestFireTime=%.2f LastFireTime=%.2f now=%.2f"),
@@ -592,7 +580,7 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
         // primary-class fake rocket on the client. Pass CurrentFireMode (1
         // for alt) so the encoding is correct, matching the primary path
         // below.
-        if (Role == ROLE_Authority)
+        if (GetLocalRole() == ROLE_Authority)
         {
             UTOwner->IncrementFlashCount(CurrentFireMode);
             if (PS && (ShotsStatsName != NAME_None))
@@ -608,7 +596,7 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
         // Primary fire: Single rocket
         checkSlow(ProjClass.IsValidIndex(CurrentFireMode) && ProjClass[CurrentFireMode] != nullptr);
 
-        if (Role == ROLE_Authority)
+        if (GetLocalRole() == ROLE_Authority)
         {
             UTOwner->IncrementFlashCount(CurrentFireMode);
             if (PS && (ShotsStatsName != NAME_None))
@@ -639,7 +627,7 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
 			UE_LOG(LogUTRocketLauncher, Warning,
 				TEXT("[RocketM1Diag] FIRE_PROJECTILE_RESULT frame=%u t=%.4f role=%d net=%d local=%d result=%s class=%s currentMode=%d pending0=%d"),
 				(uint32)GFrameCounter, GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f,
-				(int32)Role, (int32)GetNetMode(), UTOwner->IsLocallyControlled() ? 1 : 0,
+				(int32)GetLocalRole(), (int32)GetNetMode(), UTOwner->IsLocallyControlled() ? 1 : 0,
 				SpawnedProjectile ? *SpawnedProjectile->GetName() : TEXT("null/deferred"),
 				RocketFireModes[0].ProjClass ? *RocketFireModes[0].ProjClass->GetName() : TEXT("null"),
 				CurrentFireMode, UTOwner->IsPendingFire(0) ? 1 : 0);
@@ -721,7 +709,7 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 		}
 
 		// Server-only: sync random seed for deterministic barrel offset
-		if (Role == ROLE_Authority)
+		if (GetLocalRole() == ROLE_Authority)
 		{
 			NetSynchRandomSeed();
 		}
@@ -755,7 +743,7 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 				SpawnedRocket->TargetActor = LockedTarget;
 
 				// Server tracks for HUD indicators
-				if (Role == ROLE_Authority)
+				if (GetLocalRole() == ROLE_Authority)
 				{
 					TrackingRockets.AddUnique(SpawnedRocket);
 				}
@@ -855,7 +843,7 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
     {
         CurrentRocketFireMode = 0;
         bDrawRocketModeString = false;
-        if (Role == ROLE_Authority)
+        if (GetLocalRole() == ROLE_Authority)
         {
             SetRocketFlashExtra(CurrentFireMode, 0, 0, false);
         }
@@ -868,16 +856,16 @@ void AUTPlusWeap_RocketLauncher::PlayDelayedFireSound()
 {
     if (UTOwner && RocketFireModes.IsValidIndex(CurrentRocketFireMode))
     {
-        USoundBase* FireSound = RocketFireModes[CurrentRocketFireMode].FireSound;
-        USoundBase* FPFireSound = RocketFireModes[CurrentRocketFireMode].FPFireSound;
+        USoundBase* DelayedFireSound = RocketFireModes[CurrentRocketFireMode].FireSound;
+        USoundBase* DelayedFPFireSound = RocketFireModes[CurrentRocketFireMode].FPFireSound;
 
-        if (FPFireSound != nullptr && Cast<APlayerController>(UTOwner->Controller) != nullptr && UTOwner->IsLocallyControlled())
+        if (DelayedFPFireSound != nullptr && Cast<APlayerController>(UTOwner->Controller) != nullptr && UTOwner->IsLocallyControlled())
         {
-            UUTGameplayStatics::UTPlaySound(GetWorld(), FPFireSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, GetCurrentTargetPC(), NULL, true, SAT_WeaponFire);
+            UUTGameplayStatics::UTPlaySound(GetWorld(), DelayedFPFireSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, GetCurrentTargetPC(), NULL, true, SAT_WeaponFire);
         }
-        else if (FireSound != nullptr)
+        else if (DelayedFireSound != nullptr)
         {
-            UUTGameplayStatics::UTPlaySound(GetWorld(), FireSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, GetCurrentTargetPC(), NULL, true, SAT_WeaponFire);
+            UUTGameplayStatics::UTPlaySound(GetWorld(), DelayedFireSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, GetCurrentTargetPC(), NULL, true, SAT_WeaponFire);
         }
     }
 }
@@ -1003,7 +991,7 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
             // If we are a client, tell the server we pushed the button.
             //
             
-            if (Role < ROLE_Authority)
+            if (GetLocalRole() < ROLE_Authority)
             {
                ServerCycleRocketMode();
             }
@@ -1029,7 +1017,7 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
             UUTGameplayStatics::UTPlaySound(GetWorld(), AltFireModeChangeSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, NULL, NULL, true, SAT_WeaponFoley);
 
             // 5. Update Server-Side Flash (so other clients see the text change)
-            if (Role == ROLE_Authority)
+            if (GetLocalRole() == ROLE_Authority)
             {
                 SetRocketFlashExtra(CurrentFireMode, NumLoadedRockets + 1, CurrentRocketFireMode, bDrawRocketModeString);
             }
@@ -1049,7 +1037,7 @@ float AUTPlusWeap_RocketLauncher::GetSpread(int32 ModeIndex)
 
 void AUTPlusWeap_RocketLauncher::SetRocketFlashExtra(uint8 InFireMode, int32 InNumLoadedRockets, int32 InCurrentRocketFireMode, bool bInDrawRocketModeString)
 {
-    if (UTOwner != nullptr && Role == ROLE_Authority)
+    if (UTOwner != nullptr && GetLocalRole() == ROLE_Authority)
     {
         if (InFireMode == 0)
         {
@@ -1139,7 +1127,7 @@ void AUTPlusWeap_RocketLauncher::StateChanged()
     // Lock acquisition is pointless with alt loading disabled — only loaded
     // (seeking) rockets consume a lock — so skip the timer entirely: no phantom
     // lock reticle/sound for the shooter, no periodic lock traces on the server.
-    if (Role == ROLE_Authority && !bDisableAltLoading && CurrentState != InactiveState && CurrentState != EquippingState && CurrentState != UnequippingState)
+    if (GetLocalRole() == ROLE_Authority && !bDisableAltLoading && CurrentState != InactiveState && CurrentState != EquippingState && CurrentState != UnequippingState)
     {
         GetWorldTimerManager().SetTimer(UpdateLockHandle, this, &AUTPlusWeap_RocketLauncher::UpdateLock, LockCheckTime, true);
     }
@@ -1156,7 +1144,7 @@ void AUTPlusWeap_RocketLauncher::StateChanged()
 
 bool AUTPlusWeap_RocketLauncher::CanLockTarget(AActor* Target)
 {
-    if (Target != nullptr && !Target->bTearOff && !IsPendingKillPending())
+    if (Target != nullptr && !Target->GetTearOff() && !IsPendingKillPending())
     {
         AUTCharacter* UTP = Cast<AUTCharacter>(Target);
         return (UTP != nullptr && (UTP->GetTeamNum() == 255 || UTP->GetTeamNum() != UTOwner->GetTeamNum()));
@@ -1181,7 +1169,7 @@ bool AUTPlusWeap_RocketLauncher::WithinLockAim(AActor* Target)
 void AUTPlusWeap_RocketLauncher::UpdateLock()
 {
 	// 1. AUTHORITY CHECK - Only server manages lock state
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}

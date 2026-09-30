@@ -525,7 +525,7 @@ void NCPlusForceModels::SyncFlagColours(UWorld* World)
 					*GetNameSafe(Flag->GetClass()), *GetNameSafe(Base->GetClass()),
 					*GetNameSafe(Mesh->SkeletalMesh), Mesh->GetNumMaterials(), Mesh->Bounds.SphereRadius,
 					Mesh->bHiddenInGame ? 1 : 0, Mesh->IsVisible() ? 1 : 0,
-					*Mesh->GetComponentLocation().ToCompactString(), Mesh->RelativeLocation.Z, Mesh->RelativeScale3D.X,
+					*Mesh->GetComponentLocation().ToCompactString(), Mesh->GetRelativeLocation().Z, Mesh->GetRelativeScale3D().X,
 					*Base->GetActorLocation().ToCompactString());
 			}
 		}
@@ -1524,7 +1524,7 @@ void NCPlusForceModels::DumpAllCharacterMaterials(UWorld* World)
 	{
 		AUTCharacter* Char = *It;
 		if (!Char) { continue; }
-		const FString PawnName = Char->PlayerState ? Char->PlayerState->PlayerName : Char->GetName();
+		const FString PawnName = Char->GetPlayerState() ? Char->GetPlayerState()->GetPlayerName() : Char->GetName();
 		const TArray<UMaterialInstanceDynamic*>& MIDs = Char->GetBodyMIs();
 		UE_LOG(LogTemp, Warning, TEXT("[ForceModels] '%s' — %d body material(s), LIVE values:"), *PawnName, MIDs.Num());
 		static const FName NAME_TeamSelect(TEXT("TeamSelect"));

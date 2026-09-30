@@ -300,13 +300,13 @@ void UNCPlusHUDWidget_WeaponBar::DrawCachedNumber(int32 Value, float X, float Y,
 {
 	if (!Canvas || !Font) return;
 	NCPlusWB::FNumberTextCache& Entry = NCPlusWB::NumberText(Value);
-	FVector2D* Size = Entry.Sizes.Find(Font);
-	if (!Size)
+	FVector2D* CachedNumberSize = Entry.Sizes.Find(Font);
+	if (!CachedNumberSize)
 	{
 		float XL = 0.f;
 		float YL = 0.f;
 		Canvas->StrLen(Font, Entry.String, XL, YL);
-		Size = &Entry.Sizes.Add(Font, FVector2D(XL, YL));
+		CachedNumberSize = &Entry.Sizes.Add(Font, FVector2D(XL, YL));
 	}
 
 	if (bScaleByDesignedResolution)
@@ -318,7 +318,7 @@ void UNCPlusHUDWidget_WeaponBar::DrawCachedNumber(int32 Value, float X, float Y,
 	FVector2D DrawPos(RenderPosition.X + X, RenderPosition.Y + Y);
 	if (bRightAligned)
 	{
-		DrawPos.X -= Size->X * FinalScale;
+		DrawPos.X -= CachedNumberSize->X * FinalScale;
 	}
 
 	FLinearColor Color = DrawColor;
@@ -399,14 +399,14 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		CachedAmmoFillDanger = ResolveColor(TEXT("color_ammo_danger"), AmmoFillDanger);
 	}
 	const bool bVertical = bCachedVertical;
-	const float Opacity = CachedOpacity;
+	const float ElementOpacity = CachedOpacity;
 	const FLinearColor SlotBgInactiveCol = CachedSlotBgInactive;
 	const FLinearColor SlotBgActiveCol   = CachedSlotBgActive;
 	const FLinearColor ActiveOutlineCol  = CachedActiveOutline;
 	const FLinearColor AmmoFillFullCol   = CachedAmmoFillFull;
 	const FLinearColor AmmoFillWarnCol   = CachedAmmoFillWarn;
 	const FLinearColor AmmoFillDangerCol = CachedAmmoFillDanger;
-	if (Opacity <= 0.001f) return;
+	if (ElementOpacity <= 0.001f) return;
 
 	// Active weapon — pending swap takes priority over current.
 	AUTWeapon* CurrentWeapon = Char->GetPendingWeapon();
@@ -445,10 +445,10 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		Record.bDrawIcon = false;
 		Record.bDrawGroup = GroupFont && W->Group > 0;
 		Record.Group = W->Group;
-		Record.GroupOpacity = (bActive ? 1.0f : 0.7f) * Opacity;
+		Record.GroupOpacity = (bActive ? 1.0f : 0.7f) * ElementOpacity;
 		Record.bDrawAmmo = bNeedsAmmo && W->MaxAmmo > 0;
 		Record.Ammo = W->Ammo;
-		Record.AmmoTextOpacity = (bActive ? 1.0f : 0.75f) * Opacity;
+		Record.AmmoTextOpacity = (bActive ? 1.0f : 0.75f) * ElementOpacity;
 
 		// Weapon icon — UVs from WeaponBarSelectedUVs are pixel coords against
 		// WeaponIconAtlas. Note: UUTHUDWidget::DrawTexture normalizes the U/V/UL/VL
@@ -468,7 +468,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 			{
 				Alpha *= 0.45f;
 			}
-			IconCol.A = Alpha * Opacity;
+			IconCol.A = Alpha * ElementOpacity;
 
 			// Fit icon into slot (preserve aspect ratio, leave room for ammo bar).
 			const float MaxIconW = SlotW - SlotPad * 2.f;
@@ -544,7 +544,7 @@ void UNCPlusHUDWidget_WeaponBar::Draw_Implementation(float DeltaTime)
 		if (Record.bDrawAmmo)
 		{
 			DrawTexture(Canvas->DefaultTexture, Record.AmmoBarX, Record.AmmoBarY,
-				Record.AmmoBarW, AmmoBarH, 0,0,1,1, 0.8f * Opacity, AmmoTrack);
+				Record.AmmoBarW, AmmoBarH, 0,0,1,1, 0.8f * ElementOpacity, AmmoTrack);
 			DrawTexture(Canvas->DefaultTexture, Record.AmmoBarX, Record.AmmoBarY,
 				Record.AmmoFillW, AmmoBarH, 0,0,1,1,
 				Record.AmmoFillColor.A, Record.AmmoFillColor);

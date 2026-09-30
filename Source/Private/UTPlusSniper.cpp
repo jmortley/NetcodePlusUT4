@@ -391,7 +391,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 					SpawnLocation + FireDir * FMath::Max(0.f, HitDist), -FireDir);
 
 #if !UE_BUILD_SHIPPING
-				if (Role == ROLE_Authority)
+				if (GetLocalRole() == ROLE_Authority)
 				{
 					UE_LOG(LogTemp, Verbose, TEXT("[Sniper] Secondary head hit on %s, Scale=%.2f (base %.2f + padding)"),
 						*AltTarget->GetName(), EffectiveHeadScale, GetHeadshotScale(AltTarget));
@@ -404,7 +404,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	// ----------------------------------------------------------------------
 	// PART 4: SERVER SIDE VISUALS & WARNINGS
 	// ----------------------------------------------------------------------
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		if (PS && (ShotsStatsName != NAME_None))
 		{
@@ -464,7 +464,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 	// PART 5: DAMAGE CALCULATION (Sniper Specific Logic)
 	// ----------------------------------------------------------------------
 	AUTCharacter* DamageCharacter = Cast<AUTCharacter>(Hit.Actor.Get());
-	if (Hit.Actor != NULL && Hit.Actor->bCanBeDamaged && bDealDamage &&
+	if (Hit.Actor != NULL && Hit.Actor->CanBeDamaged() && bDealDamage &&
 		(DamageCharacter == nullptr || IsLiveHitscanTarget(DamageCharacter)))
 	{
 		int32 Damage = GetHitScanDamage();
@@ -580,18 +580,18 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		OnHitScanDamage(Hit, FireDir);
 		Hit.Actor->TakeDamage(Damage, FUTPointDamageEvent(Damage, Hit, FireDir, DamageType, FireDir * InstantHitInfo[CurrentFireMode].Momentum), (UTOwner ? UTOwner->Controller : nullptr), this);
 
-		if ((Role == ROLE_Authority) && bIsHeadShot && C && (C->Health > 0) && (bBlockedHeadshot || (Damage >= 100)))
+		if ((GetLocalRole() == ROLE_Authority) && bIsHeadShot && C && (C->Health > 0) && (bBlockedHeadshot || (Damage >= 100)))
 		{
 			C->NotifyBlockedHeadShot(UTOwner);
 		}
 		// No accuracy credit for detonating projectiles (shooting a core/rocket
 		// out of the air) — same rule as UTWeaponFix::FireInstantHit (2026-08-10).
-		if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None)
+		if ((GetLocalRole() == ROLE_Authority) && PS && (HitsStatsName != NAME_None)
 			&& Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
 		{
 			PS->ModifyStatsValue(HitsStatsName, 1);
 		}
-		if (Role == ROLE_Authority && C && C != UTOwner)
+		if (GetLocalRole() == ROLE_Authority && C && C != UTOwner)
 		{
 			bHitEnemyPawn = true;
 		}
@@ -603,7 +603,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 		*OutHit = Hit;
 	}
 
-	if (Role == ROLE_Authority && bTrackImpressive)
+	if (GetLocalRole() == ROLE_Authority && bTrackImpressive)
 	{
 		if (bHitEnemyPawn)
 		{
@@ -631,7 +631,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
 void AUTPlusSniper::OnServerHitScanResult(const FHitResult& Hit, float PredictionTime)
 {
-	if (!bTrackImpressive || Role != ROLE_Authority)
+	if (!bTrackImpressive || GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}

@@ -72,8 +72,8 @@ void AmpFixReadConfig(int32& bOutEnabled, float& OutTarget, TArray<FString>& Out
 	TokensCsv.ParseIntoArray(OutTokens, TEXT(","), true);
 	for (FString& Token : OutTokens)
 	{
-		Token.Trim();          // UE4.15: mutates in place (no TrimStartAndEnd here)
-		Token.TrimTrailing();
+		Token.TrimStartInline();
+		Token.TrimEndInline();
 	}
 }
 

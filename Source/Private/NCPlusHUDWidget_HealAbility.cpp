@@ -178,7 +178,7 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	// UUTHUDWidget::DrawTexture's color.A path is the right one to feed into:
 	// passing alpha pre-multiplied via the FLinearColor's .A is the canonical
 	// way to dim a draw call. Same approach AmmoCounter / QuickStats use.
-	const float Opacity = E ? FMath::Clamp(E->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
+	const float ElementOpacity = E ? FMath::Clamp(E->GetExtraFloat(TEXT("opacity"), 1.f), 0.f, 1.f) : 1.f;
 
 	// Resolve the keybind. If the user pinned a specific command via the
 	// layout's "bind_command" extra, look up only that. Otherwise walk the
@@ -244,7 +244,7 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
 		: FLinearColor(0.35f, 0.35f, 0.35f, 1.f);
 	const float ConsumedDim = bAvailable ? 1.f : 0.85f;
-	const float DrawOpacity = Opacity * ConsumedDim;
+	const float DrawOpacity = ElementOpacity * ConsumedDim;
 
 	// Centered icon in widget-relative space — DrawTexture transforms by
 	// the widget's origin/screen position automatically (unlike raw
@@ -267,7 +267,7 @@ void UNCPlusHUDWidget_HealAbility::Draw_Implementation(float DeltaTime)
 	FLinearColor LabelColor = bAvailable
 		? FLinearColor(1.f, 1.f, 1.f, 1.f)
 		: FLinearColor(0.6f, 0.6f, 0.6f, 0.85f);
-	LabelColor.A *= Opacity;
+	LabelColor.A *= ElementOpacity;
 
 	// Prefix the keybind with "Heal:" so the label is self-explanatory at a
 	// glance instead of reading as a stray letter under the icon. Even with

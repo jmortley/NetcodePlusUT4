@@ -46,10 +46,10 @@ float ATeamArenaPredictionPC::GetVisualPredictionTime() const
     if (HasAuthority())
     {
         // Safe Cast
-        AUTPlayerState* SafePS = Cast<AUTPlayerState>(PlayerState);
+        AUTPlayerState* AuthorityPS = Cast<AUTPlayerState>(PlayerState);
 
         // 1. Get the player's actual exact ping
-        float ActualPingMs = (SafePS) ? SafePS->ExactPing : 0.0f;
+        float ActualPingMs = (AuthorityPS) ? AuthorityPS->ExactPing : 0.0f;
 
         // 2. Add fudge factor (Matches your Linear Smoothing settings)
         //float CalculatedRewind = ActualPingMs + (PredictionFudgeFactor * 0.001f);

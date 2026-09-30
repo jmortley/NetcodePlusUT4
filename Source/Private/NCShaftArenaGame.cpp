@@ -179,7 +179,7 @@ void ANCShaftArenaGame::InitGame(const FString& MapName, const FString& Options,
 	// Stats replicator - server-only StatsData (LinkHits/LinkShots) + DamageDone
 	// don't reach clients without this. Spawn here so clients see it before
 	// the first scoreboard render.
-	if (Role == ROLE_Authority && !StatsReplicator)
+	if (GetLocalRole() == ROLE_Authority && !StatsReplicator)
 	{
 		FActorSpawnParameters SpawnParams;
 		SpawnParams.Owner = this;
@@ -194,7 +194,7 @@ void ANCShaftArenaGame::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (Role != ROLE_Authority) return;
+	if (GetLocalRole() != ROLE_Authority) return;
 
 	RatingSystem = MakeUnique<FNCShaftArenaRatingSystem>();
 	FNCShaftArenaRatingSystem::InitDatabase(GetWorld());
@@ -239,10 +239,10 @@ void ANCShaftArenaGame::PostLogin(APlayerController* NewPlayer)
 	NCPlusVersionGate::SpawnFor(NewPlayer);
 	// Concede-vote RPC channel (gg / F1 / F4) — skips bots + the listen host.
 	NCConcede::SpawnFor(NewPlayer);
-	if (Role != ROLE_Authority || !RatingSystem || !NewPlayer) return;
+	if (GetLocalRole() != ROLE_Authority || !RatingSystem || !NewPlayer) return;
 	AUTPlayerState* PS = Cast<AUTPlayerState>(NewPlayer->PlayerState);
 	if (!PS) return;
-	const FString UniqueId = PS->StatsID.IsEmpty() ? PS->PlayerName : PS->StatsID;
+	const FString UniqueId = PS->StatsID.IsEmpty() ? PS->GetPlayerName() : PS->StatsID;
 	RatingSystem->LoadPlayerFromDB(GetWorld(), UniqueId);
 }
 
@@ -256,7 +256,7 @@ bool ANCShaftArenaGame::ReadyToStartMatch_Implementation()
 void ANCShaftArenaGame::HandleMatchHasStarted()
 {
 	Super::HandleMatchHasStarted();
-	if (Role == ROLE_Authority && RatingSystem)
+	if (GetLocalRole() == ROLE_Authority && RatingSystem)
 	{
 		RatingSystem->SnapshotMatchStart();
 	}
@@ -265,7 +265,7 @@ void ANCShaftArenaGame::HandleMatchHasStarted()
 void ANCShaftArenaGame::HandleMatchHasEnded()
 {
 	Super::HandleMatchHasEnded();
-	if (Role != ROLE_Authority || !RatingSystem || !UTGameState) return;
+	if (GetLocalRole() != ROLE_Authority || !RatingSystem || !UTGameState) return;
 
 	// Engine routes HandleMatchHasEnded twice in some paths. Without this guard
 	// rating math, DB write, AND upload would fire twice — corrupting counters
@@ -285,8 +285,8 @@ void ANCShaftArenaGame::HandleMatchHasEnded()
 
 	if (Winner && Loser)
 	{
-		const FString WinnerId = Winner->StatsID.IsEmpty() ? Winner->PlayerName : Winner->StatsID;
-		const FString LoserId  = Loser->StatsID.IsEmpty()  ? Loser->PlayerName  : Loser->StatsID;
+		const FString WinnerId = Winner->StatsID.IsEmpty() ? Winner->GetPlayerName() : Winner->StatsID;
+		const FString LoserId  = Loser->StatsID.IsEmpty()  ? Loser->GetPlayerName()  : Loser->StatsID;
 		const float WinnerAcc = ComputeLinkAccuracyPct(Winner);
 		const float LoserAcc  = ComputeLinkAccuracyPct(Loser);
 		const int32 WinnerStreak = BestStreakThisMatch.FindRef(Winner);
@@ -302,12 +302,12 @@ void ANCShaftArenaGame::HandleMatchHasEnded()
 		// Push the global-ELO update to ut4stats.com.
 		FNCShaftArenaMatchInput UploadIn;
 		UploadIn.WinnerId       = WinnerId;
-		UploadIn.WinnerName     = Winner->PlayerName;
+		UploadIn.WinnerName     = Winner->GetPlayerName();
 		UploadIn.WinnerScore    = Winner->Score;
 		UploadIn.WinnerStreak   = WinnerStreak;
 		UploadIn.WinnerAccuracy = WinnerAcc;
 		UploadIn.LoserId        = LoserId;
-		UploadIn.LoserName      = Loser->PlayerName;
+		UploadIn.LoserName      = Loser->GetPlayerName();
 		UploadIn.LoserScore     = Loser->Score;
 		UploadIn.LoserStreak    = LoserStreak;
 		UploadIn.LoserAccuracy  = LoserAcc;
@@ -428,7 +428,7 @@ void ANCShaftArenaGame::ScoreKill_Implementation(AController* Killer, AControlle
 		KillerChar->SetArmorAmount(nullptr, 0);
 
 		const FString HPMsg = FString::Printf(TEXT("%s: I had %d HP remaining"),
-			*KillerPS->PlayerName, RemainingHealth);
+			*KillerPS->GetPlayerName(), RemainingHealth);
 		if (VictimPC)
 		{
 			VictimPC->ClientSay(nullptr, HPMsg, ChatDestinations::System);
@@ -477,7 +477,7 @@ bool ANCShaftArenaGame::CheckScore_Implementation(AUTPlayerState* Scorer)
 	{
 		UE_LOG(LogNCShaftArena, Log,
 			TEXT("CheckScore: ending match — %s reached %d (margin %d)"),
-			*Leader->PlayerName, LeaderScore, LeaderScore - RunnerScore);
+			*Leader->GetPlayerName(), LeaderScore, LeaderScore - RunnerScore);
 		EndGame(Leader, FName(TEXT("fraglimit")));
 		return true;
 	}
@@ -523,8 +523,8 @@ void ANCShaftArenaGame::BuildMatchSummary(FNCMatchSummary& Out) const
 		if (!UTPS || UTPS->bOnlySpectator) continue;
 
 		FNCPlayerSummary P;
-		P.UniqueId   = UTPS->StatsID.IsEmpty() ? UTPS->PlayerName : UTPS->StatsID;
-		P.PlayerName = UTPS->PlayerName;
+		P.UniqueId   = UTPS->StatsID.IsEmpty() ? UTPS->GetPlayerName() : UTPS->StatsID;
+		P.PlayerName = UTPS->GetPlayerName();
 		P.Score      = UTPS->Score;
 		P.Kills      = UTPS->Kills;
 		P.Deaths     = UTPS->Deaths;

@@ -62,7 +62,7 @@ int32 ANCPClockSync::ScheduledRemaining(const AUTGameState* GS) const
 void ANCPClockSync::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		ServerTick();
 	}

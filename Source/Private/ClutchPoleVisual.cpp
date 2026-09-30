@@ -13,8 +13,8 @@ AClutchPoleVisual::AClutchPoleVisual(const FObjectInitializer& ObjectInitializer
 	bReplicates = true;
 	bAlwaysRelevant = true;
 	bNetLoadOnClient = true;
-	bReplicateMovement = true;
-	bCanBeDamaged = false;
+	SetReplicateMovement(true);
+	SetCanBeDamaged(false);
 	PrimaryActorTick.bCanEverTick = false;
 
 	PoleMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PoleMesh"));
@@ -22,7 +22,7 @@ AClutchPoleVisual::AClutchPoleVisual(const FObjectInitializer& ObjectInitializer
 	PoleMesh->SetMobility(EComponentMobility::Movable);
 	PoleMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	PoleMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
-	PoleMesh->bGenerateOverlapEvents = false;
+	PoleMesh->SetGenerateOverlapEvents(false);
 	PoleMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -3.0f));
 	PoleMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 0.7724762f));
 

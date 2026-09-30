@@ -22,7 +22,7 @@ void AUTPlusProj_StingerShard::TrySendShardHitClaim(AUTCharacter* HitChar, const
 	// projectile — the server consumes a single tracking entry and applies the
 	// shard's full damage once. NotifyFakeProjectileHit self-gates on the weapon's
 	// bEnableProjectileRewind, so nothing is sent when the feature is off.
-	if (bSentShardHitClaim || Role == ROLE_Authority || bFakeClientProjectile || HitChar == nullptr)
+	if (bSentShardHitClaim || GetLocalRole() == ROLE_Authority || bFakeClientProjectile || HitChar == nullptr)
 	{
 		return;
 	}
@@ -66,7 +66,7 @@ void AUTPlusProj_StingerShard::Tick(float DeltaTime)
 	// Super::Tick detonates. Cheap: PotentialTargets is empty unless an enemy is
 	// inside the (growing) overlap sphere, and it is already team/instigator
 	// filtered by the parent's OnPawnSphereOverlapBegin, so these are enemies.
-	if (!bSentShardHitClaim && Role != ROLE_Authority && !bFakeClientProjectile
+	if (!bSentShardHitClaim && GetLocalRole() != ROLE_Authority && !bFakeClientProjectile
 		&& PotentialTargets.Num() > 0 && ProjectileMovement != nullptr
 		&& !ProjectileMovement->Velocity.IsZero())
 	{
@@ -77,7 +77,7 @@ void AUTPlusProj_StingerShard::Tick(float DeltaTime)
 			const FVector MyLoc = GetActorLocation();
 			for (APawn* P : PotentialTargets)
 			{
-				if (P == nullptr || P->bTearOff)
+				if (P == nullptr || P->GetTearOff())
 				{
 					continue;
 				}

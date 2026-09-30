@@ -257,7 +257,7 @@ void ANCPlusCTFHUD::DrawHUD()
 	// Auto post-match high-res screenshot (shared; fires after the replay ends + the scoreboard settles).
 	// Before the Canvas guard so it polls consistently with ElimPlus/Wipeout (it doesn't touch Canvas).
 	NCPlusHUDDrawCall::ServicePostMatchScreenshot(this, PostMatchScreenshotStable, bPostMatchScreenshotTaken);
-	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
+	const bool bRenderCustomHUD = UTPlayerOwner
 		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
 
 	if (!Canvas || !SmallFont) return;
@@ -324,15 +324,15 @@ void ANCPlusCTFHUD::DrawSpectatorTarget()
 	// Viewing our own pawn = playing, not spectating.
 	if (ViewPawn == UTPlayerOwner->GetPawn()) return;
 
-	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->PlayerState);
-	if (!PS || PS->PlayerName.IsEmpty()) return;
+	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->GetPlayerState());
+	if (!PS || PS->GetPlayerName().IsEmpty()) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 	const float HeaderScale = RenderScale * 0.75f;
 	const float NameScale   = RenderScale * 1.30f;
 
 	static const FString HeaderText(TEXT("NOW WATCHING"));
-	const FString& NameText = PS->PlayerName;
+	const FString& NameText = PS->GetPlayerName();
 
 	FText HeaderDrawText, NameDrawText;
 	float HeaderW, HeaderH, NameW, NameH;

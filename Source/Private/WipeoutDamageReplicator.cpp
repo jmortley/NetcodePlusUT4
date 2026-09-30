@@ -1,5 +1,6 @@
 // WipeoutDamageReplicator.cpp
 #include "WipeoutDamageReplicator.h"
+#include "UObject/UnrealType.h"
 #include "UnrealTournament.h"
 #include "UTPlayerState.h"
 #include "UTGameState.h"
@@ -83,7 +84,7 @@ float AWipeoutDamageReplicator::GetClutchOverlayServerTime() const
 void AWipeoutDamageReplicator::BeginClutchOverlay(int32 TeamIndex,
 	AUTPlayerState* Candidate, int32 EnemiesAlive, bool bSuddenDeath)
 {
-	if (Role != ROLE_Authority || !Candidate || EnemiesAlive < 1)
+	if (GetLocalRole() != ROLE_Authority || !Candidate || EnemiesAlive < 1)
 	{
 		return;
 	}
@@ -102,10 +103,10 @@ void AWipeoutDamageReplicator::BeginClutchOverlay(int32 TeamIndex,
 	State->bSuddenDeath = bSuddenDeath;
 	State->TeamIndex = static_cast<uint8>(TeamIndex);
 	State->Candidate = Candidate;
-	State->CandidateName = Candidate->PlayerName;
+	State->CandidateName = Candidate->GetPlayerName();
 	State->CandidateId = Candidate->UniqueId.IsValid()
 		? Candidate->UniqueId.ToString()
-		: FString::Printf(TEXT("BOT:%s"), *Candidate->PlayerName);
+		: FString::Printf(TEXT("BOT:%s"), *Candidate->GetPlayerName());
 	State->EnemiesAtStart = EnemiesAlive;
 	State->EnemiesRemaining = EnemiesAlive;
 	State->StartServerTime = GetClutchOverlayServerTime();
@@ -115,7 +116,7 @@ void AWipeoutDamageReplicator::BeginClutchOverlay(int32 TeamIndex,
 void AWipeoutDamageReplicator::CreditClutchOverlayKill(
 	AUTPlayerState* KillerPS, AUTPlayerState* VictimPS)
 {
-	if (Role != ROLE_Authority || !KillerPS || !VictimPS)
+	if (GetLocalRole() != ROLE_Authority || !KillerPS || !VictimPS)
 	{
 		return;
 	}
@@ -136,7 +137,7 @@ void AWipeoutDamageReplicator::CreditClutchOverlayKill(
 void AWipeoutDamageReplicator::UpdateClutchOverlayRemaining(
 	int32 AliveTeam0, int32 AliveTeam1)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -164,7 +165,7 @@ void AWipeoutDamageReplicator::UpdateClutchOverlayRemaining(
 
 void AWipeoutDamageReplicator::PromoteClutchOverlayToSuddenDeath(int32 TeamIndex)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -179,7 +180,7 @@ void AWipeoutDamageReplicator::PromoteClutchOverlayToSuddenDeath(int32 TeamIndex
 void AWipeoutDamageReplicator::EndClutchOverlay(int32 TeamIndex,
 	ENCClutchOverlayOutcome Outcome, int32 TeammatesRespawned)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -199,7 +200,7 @@ void AWipeoutDamageReplicator::EndClutchOverlay(int32 TeamIndex,
 
 void AWipeoutDamageReplicator::ClearClutchOverlays()
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -218,7 +219,7 @@ void AWipeoutDamageReplicator::ClearClutchOverlays()
 
 void AWipeoutDamageReplicator::SetRoundClockDeadline(float EndServerTime)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -248,7 +249,7 @@ void AWipeoutDamageReplicator::SetRoundClockDeadline(float EndServerTime)
 
 void AWipeoutDamageReplicator::ClearRoundClockDeadline()
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -306,7 +307,7 @@ void AWipeoutDamageReplicator::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 
 	// Server only: periodically snapshot damage from PlayerStates
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -361,7 +362,7 @@ void AWipeoutDamageReplicator::UpdateFromPlayerStates()
 		Entry.PlayerId = UTPS->UniqueId.ToString();
 
 		// DamageDone is tracked server-side on AUTPlayerState but not replicated
-		UIntProperty* DmgProp = FindField<UIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
+		FIntProperty* DmgProp = FindFProperty<FIntProperty>(UTPS->GetClass(), TEXT("DamageDone"));
 		if (DmgProp)
 		{
 			Entry.DamageDone = DmgProp->GetPropertyValue_InContainer(UTPS);

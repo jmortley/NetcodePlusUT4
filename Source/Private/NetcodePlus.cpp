@@ -356,7 +356,7 @@ static void OnNCPSkinWorldInitialized(UWorld* World, const UWorld::Initializatio
 	}
 }
 
-static void OnNCPPostLoadMap()
+static void OnNCPPostLoadMap(UWorld* LoadedWorld)
 {
 	GNCPSkinRetryArmed = false;
 }
@@ -547,8 +547,8 @@ static void ApplyLauncherAuthHandoff()
 	// environment block this process would hand to anything it later spawns.
 	FPlatformMisc::SetEnvironmentVar(TEXT("NCP_AUTH_PASSWORD"), TEXT(""));
 
-	Code.Trim();
-	Code.TrimTrailing();
+	Code.TrimStartInline();
+	Code.TrimEndInline();
 	if (Code.IsEmpty())
 	{
 		return;
@@ -1219,8 +1219,16 @@ static void HandleReady(const TArray<FString>& /*Args*/, UWorld* World)
 	PC->Mutate(TEXT("nc_ready"));
 }
 
+#if WITH_EDITOR
+extern void RegisterNCMigrationMovementProbe();
+extern void UnregisterNCMigrationMovementProbe();
+#endif
+
 void FNetcodePlus::StartupModule()
 {
+#if WITH_EDITOR
+	RegisterNCMigrationMovementProbe();
+#endif
 	// This module's startup work is entirely runtime-facing.  Cook commandlets still
 	// load the module so native classes are registered, but must not install UI,
 	// mutate gameplay CDOs, or register world/ticker hooks.
@@ -1418,7 +1426,7 @@ void FNetcodePlus::StartupModule()
 		GNCPPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPPreLoadMap);
 	}
 	GNCPSkinPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddStatic(&OnNCPSkinPreLoadMap);
-	GNCPPostLoadMapHandle = FCoreUObjectDelegates::PostLoadMap.AddStatic(&OnNCPPostLoadMap);
+	GNCPPostLoadMapHandle = FCoreUObjectDelegates::PostLoadMapWithWorld.AddStatic(&OnNCPPostLoadMap);
 	GNCPSkinWorldInitHandle = FWorldDelegates::OnPostWorldInitialization.AddStatic(
 		&OnNCPSkinWorldInitialized);
 
@@ -1506,6 +1514,9 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
+#if WITH_EDITOR
+	UnregisterNCMigrationMovementProbe();
+#endif
 	// This object is referenced by Slate rather than CoreUObject. Release it even
 	// during late process teardown so Slate never retains code from an unloaded DLL.
 	if (!IsRunningCommandlet())
@@ -1575,7 +1586,7 @@ void FNetcodePlus::ShutdownModule()
 	}
 	if (GNCPPostLoadMapHandle.IsValid())
 	{
-		FCoreUObjectDelegates::PostLoadMap.Remove(GNCPPostLoadMapHandle);
+		FCoreUObjectDelegates::PostLoadMapWithWorld.Remove(GNCPPostLoadMapHandle);
 		GNCPPostLoadMapHandle.Reset();
 	}
 	if (GNCPSkinWorldInitHandle.IsValid())

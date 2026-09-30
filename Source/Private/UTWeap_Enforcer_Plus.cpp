@@ -97,12 +97,12 @@ void AUTWeap_Enforcer_Plus::DrawWeaponCrosshair_Implementation(UUTHUDWidget* Wea
 
 float AUTWeap_Enforcer_Plus::GetRewindSeconds() const
 {
-	if (!UTOwner || !UTOwner->PlayerState)
+	if (!UTOwner || !UTOwner->GetPlayerState())
 	{
 		return 0.f;
 	}
 
-	const AUTPlayerState* PS = Cast<AUTPlayerState>(UTOwner->PlayerState);
+	const AUTPlayerState* PS = Cast<AUTPlayerState>(UTOwner->GetPlayerState());
 	if (!PS)
 	{
 		return 0.f;
@@ -231,7 +231,7 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 		}
 
 		// Rewind target to its position at fire time (server only; client uses current).
-		FVector TargetLocation = (ActualPredictionTime > 0.f && Role == ROLE_Authority)
+		FVector TargetLocation = (ActualPredictionTime > 0.f && GetLocalRole() == ROLE_Authority)
 			? Target->GetRewindLocation(ActualPredictionTime)
 			: Target->GetActorLocation();
 
@@ -243,7 +243,7 @@ void AUTWeap_Enforcer_Plus::HitScanTrace(const FVector& StartLocation, const FVe
 		// see AUTWeaponFix::ApplySlidePostureForValidation).
 		// Qualified: this class extends AUTWeap_Enforcer, not AUTWeaponFix.
 		AUTWeaponFix::ApplySlidePostureForValidation(Target,
-			(ActualPredictionTime > 0.f && Role == ROLE_Authority) ? ActualPredictionTime : 0.f,
+			(ActualPredictionTime > 0.f && GetLocalRole() == ROLE_Authority) ? ActualPredictionTime : 0.f,
 			TargetLocation, CollisionHeight);
 
 		// Padding based on target movement state.

@@ -25,7 +25,7 @@ bool UUTWeaponStateZoomingFix::DrawHUD(UUTHUDWidget* WeaponHudWidget)
         {
             OverlayMI = UMaterialInstanceDynamic::Create(OverlayMat, this);
         }
-        FCanvasTileItem Item(FVector2D(0.0f, 0.0f), OverlayMI->GetRenderProxy(false), FVector2D(C->ClipX, C->ClipY));
+        FCanvasTileItem Item(FVector2D(0.0f, 0.0f), OverlayMI->GetRenderProxy(), FVector2D(C->ClipX, C->ClipY));
         float OrigSizeX = Item.Size.X;
         Item.Size.X = FMath::Max<float>(Item.Size.X, Item.Size.Y * 16.0f / 9.0f);
         Item.Position.X -= (Item.Size.X - OrigSizeX) * 0.5f;
@@ -50,7 +50,7 @@ bool UUTWeaponStateZoomingFix::DrawHUD(UUTHUDWidget* WeaponHudWidget)
                     // Filter targets (Alive, Visible, Enemy)
                     if (EnemyChar != NULL && !EnemyChar->IsDead() && !EnemyChar->IsInvisible() &&
                         !EnemyChar->IsFeigningDeath() &&
-                        (EnemyChar->GetMesh()->LastRenderTime > WorldTime - 0.25f) &&
+                        (EnemyChar->GetMesh()->GetLastRenderTime() > WorldTime - 0.25f) &&
                         EnemyChar != GetUTOwner() &&
                         (GS == NULL || !GS->OnSameTeam(EnemyChar, GetUTOwner())))
                     {

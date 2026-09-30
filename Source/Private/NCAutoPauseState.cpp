@@ -40,7 +40,7 @@ ANCAutoPauseState::ANCAutoPauseState(const FObjectInitializer& ObjectInitializer
 	bReplicates = true;
 	bAlwaysRelevant = true;
 	bNetLoadOnClient = false;
-	bReplicateMovement = false;
+	SetReplicateMovement(false);
 	NetUpdateFrequency = 10.0f;
 	PrimaryActorTick.bCanEverTick = false;
 }
@@ -109,7 +109,7 @@ ANCAutoPauseState* ANCAutoPauseState::Find(UWorld* World)
 void ANCAutoPauseState::SetPaused(const FString& Reason,
 	const TArray<FString>& AwaitedIds)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -127,7 +127,7 @@ void ANCAutoPauseState::SetPaused(const FString& Reason,
 void ANCAutoPauseState::BeginResumeCountdown(const FString& Reason,
 	int32 DurationSeconds, const TArray<FString>& AwaitedIds)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -148,7 +148,7 @@ void ANCAutoPauseState::BeginResumeCountdown(const FString& Reason,
 void ANCAutoPauseState::UpdateResumeCountdown(int32 SecondsRemaining,
 	const TArray<FString>& AwaitedIds)
 {
-	if (Role != ROLE_Authority || Snapshot.Phase != ENCAutoPausePhase::Resuming)
+	if (GetLocalRole() != ROLE_Authority || Snapshot.Phase != ENCAutoPausePhase::Resuming)
 	{
 		return;
 	}
@@ -162,7 +162,7 @@ void ANCAutoPauseState::UpdateResumeCountdown(int32 SecondsRemaining,
 
 void ANCAutoPauseState::SetInactive(const FString& Reason)
 {
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -185,7 +185,7 @@ void ANCAutoPauseState::OnRep_Snapshot()
 
 void ANCAutoPauseState::ApplySnapshot(const FNCAutoPauseSnapshot& NewSnapshot)
 {
-	if (Role != ROLE_Authority || SnapshotsHaveSameState(Snapshot, NewSnapshot))
+	if (GetLocalRole() != ROLE_Authority || SnapshotsHaveSameState(Snapshot, NewSnapshot))
 	{
 		return;
 	}

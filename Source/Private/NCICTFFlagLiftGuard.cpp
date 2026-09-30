@@ -87,7 +87,7 @@ ANCICTFFlagLiftGuard* ANCICTFFlagLiftGuard::EnsureSpawned(UWorld* World)
 void ANCICTFFlagLiftGuard::BeginPlay()
 {
 	Super::BeginPlay();
-	if (Role == ROLE_Authority && CVarICTFFlagLiftGuard.GetValueOnGameThread() != 0)
+	if (GetLocalRole() == ROLE_Authority && CVarICTFFlagLiftGuard.GetValueOnGameThread() != 0)
 	{
 		ActivateGuard();
 	}
@@ -101,7 +101,7 @@ void ANCICTFFlagLiftGuard::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void ANCICTFFlagLiftGuard::ActivateGuard()
 {
-	if (bGuardActive || Role != ROLE_Authority)
+	if (bGuardActive || GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -663,7 +663,7 @@ void ANCICTFFlagLiftGuard::PlaceFlag(AUTFlag* Flag, const FVector& Location,
 	}
 	if (Flag->Collision != nullptr)
 	{
-		Flag->Collision->bShouldUpdatePhysicsVolume = true;
+		Flag->Collision->SetShouldUpdatePhysicsVolume(true);
 		Flag->Collision->UpdateOverlaps();
 	}
 	Flag->ForceNetUpdate();
@@ -781,7 +781,7 @@ void ANCICTFFlagLiftGuard::UpdateFlag(AUTFlag* Flag)
 void ANCICTFFlagLiftGuard::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}

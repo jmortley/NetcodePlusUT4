@@ -59,7 +59,7 @@ static const float kAdvisorRepeatSec     = 180.f;
 // joiner reads fresh; no actor change needed mid-match) and survives restarts.
 static float ResolveVersionReportTimeoutSec()
 {
-	const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+	const FString ModIniPath = FPaths::ProjectSavedDir() / TEXT("Config") / TEXT("Mod.ini");
 	if (!FPaths::FileExists(ModIniPath))
 	{
 		return kVersionReportTimeoutDefault;
@@ -89,7 +89,7 @@ static float ResolveVersionReportTimeoutSec()
 static FString ResolveOwnerName(AActor* Gate)
 {
 	APlayerController* PC = Gate ? Cast<APlayerController>(Gate->GetOwner()) : nullptr;
-	return (PC && PC->PlayerState) ? PC->PlayerState->PlayerName : FString(TEXT("<unknown>"));
+	return (PC && PC->PlayerState) ? PC->PlayerState->GetPlayerName() : FString(TEXT("<unknown>"));
 }
 
 // Corroborating "this client is really here and functional" signal for the no-report
@@ -149,7 +149,7 @@ void ANCVersionGate::BeginPlay()
 
 	// Server side: start the timeout. Client side's PostNetInit hits the RPC
 	// as soon as the actor is fully replicated + owner-resolved.
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		// ADVISOR MODE (hubs): whisper, never kick. No MoveWatch — hub players are
 		// pawnless, and with no kick at stake the movement corroboration is moot.
@@ -203,7 +203,7 @@ void ANCVersionGate::PostNetInit()
 	// Client side, owner-only replication means we only fire on the actual
 	// owning player. NETCODE_PLUGIN_VERSION is compiled into the client's
 	// plugin DLL — if they're outdated, the value won't match the server's.
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		ServerReportVersion(NETCODE_PLUGIN_VERSION);
 	}
@@ -216,7 +216,7 @@ bool ANCVersionGate::ServerReportVersion_Validate(int32 /*ClientVersion*/)
 
 void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 {
-	if (Role != ROLE_Authority || bConfirmed)
+	if (GetLocalRole() != ROLE_Authority || bConfirmed)
 	{
 		return;
 	}
@@ -264,7 +264,7 @@ void ANCVersionGate::ServerReportVersion_Implementation(int32 ClientVersion)
 
 void ANCVersionGate::OnTimeout()
 {
-	if (Role != ROLE_Authority || bConfirmed)
+	if (GetLocalRole() != ROLE_Authority || bConfirmed)
 	{
 		return;
 	}
@@ -321,7 +321,7 @@ void ANCVersionGate::OnTimeout()
 
 void ANCVersionGate::OnKickDeadline()
 {
-	if (Role != ROLE_Authority || bConfirmed)
+	if (GetLocalRole() != ROLE_Authority || bConfirmed)
 	{
 		return;
 	}
@@ -370,7 +370,7 @@ void ANCVersionGate::OnKickDeadline()
 // ~kMoveWatchIntervalSec of its first move and can never be re-judged while pawnless.
 void ANCVersionGate::OnMoveWatch()
 {
-	if (Role != ROLE_Authority || bConfirmed)
+	if (GetLocalRole() != ROLE_Authority || bConfirmed)
 	{
 		return;
 	}
@@ -391,7 +391,7 @@ void ANCVersionGate::OnMoveWatch()
 // HUD renders chat — unlike NCPlus instances, where they're deaf).
 void ANCVersionGate::OnAdvisorCheck()
 {
-	if (Role != ROLE_Authority || bConfirmed)
+	if (GetLocalRole() != ROLE_Authority || bConfirmed)
 	{
 		return;
 	}

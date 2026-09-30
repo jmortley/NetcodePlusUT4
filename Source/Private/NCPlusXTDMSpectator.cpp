@@ -47,7 +47,7 @@ void UNCPlusXTDMSpectator::Draw_Implementation(float DeltaTime)
 			const TCHAR* Keys[] = { TEXT("Q"), TEXT("W"), TEXT("E"), TEXT("R") };
 			HUD->Text(Canvas, HUD->SmallFont, Keys[Slot], X + 7.f * S, RowY + 2.f * S, .5f * S, Col);
 			FText Fitted; float W, H;
-			NCPlusHUDDrawCall::ResolveFittedName(Canvas, PS, HUD->SmallFont, PS->PlayerName, Width - 42.f * S, .52f * S, Fitted, W, H);
+			NCPlusHUDDrawCall::ResolveFittedName(Canvas, PS, HUD->SmallFont, PS->GetPlayerName(), Width - 42.f * S, .52f * S, Fitted, W, H);
 			NCPlusHUDDrawCall::DrawResolvedText(Canvas, HUD->SmallFont, Fitted, X + 30.f * S, RowY + 2.f * S, .52f * S, .52f * S, FColor::White, true);
 			RowY += 30.f * S;
 		}

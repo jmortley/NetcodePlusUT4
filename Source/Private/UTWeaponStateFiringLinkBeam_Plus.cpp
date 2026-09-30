@@ -246,7 +246,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
     }
 
     // Server: clear damage flag each tick
-    if (LinkGun->Role == ROLE_Authority)
+    if (LinkGun->GetLocalRole() == ROLE_Authority)
     {
         LinkGun->bLinkCausingDamage = false;
     }
@@ -286,7 +286,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
     // --------------------------------------------------------
     // 1) SERVER: dedicated / remote simulation for visuals only
     // --------------------------------------------------------
-    if (LinkGun->Role == ROLE_Authority && !LinkGun->GetUTOwner()->IsLocallyControlled())
+    if (LinkGun->GetLocalRole() == ROLE_Authority && !LinkGun->GetUTOwner()->IsLocallyControlled())
     {
         // We DO NOT consume ammo here � the owning server context
         // already handled ammo and damage. This branch is purely
@@ -314,13 +314,13 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
         AActor* OldLinked = LinkGun->CurrentLinkedTarget;
         LinkGun->CurrentLinkedTarget = nullptr;
 
-        if (Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged && LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
+        if (Hit.Actor.IsValid() && Hit.Actor->CanBeDamaged() && LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
         {
             LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
         }
 
         // For other clients� audio/HUD we still want to know if beam is hitting something
-        LinkGun->bLinkCausingDamage = Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged;
+        LinkGun->bLinkCausingDamage = Hit.Actor.IsValid() && Hit.Actor->CanBeDamaged();
 
         // OPTIONAL: you can mirror the warmup timer here if you ever
         // need server-auth decisions about pull readiness for spectators.
@@ -366,7 +366,7 @@ void UUTWeaponStateFiringLinkBeamPlus::Tick(float DeltaTime)
         AActor* OldLinkedTarget = LinkGun->CurrentLinkedTarget;
         LinkGun->CurrentLinkedTarget = nullptr;
 
-        if (Hit.Actor.IsValid() && Hit.Actor->bCanBeDamaged)
+        if (Hit.Actor.IsValid() && Hit.Actor->CanBeDamaged())
         {
             // Check if valid link target (for pull + reward)
             if (LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
@@ -501,12 +501,12 @@ void UUTWeaponStateFiringLinkBeamPlus::EndState()
         // --- FIX: Force kill effects immediately ---
         // This ensures MuzzleFlash[1] (Beam) and MuzzleFlash[2] (Pulse) both die.
         LinkGun->StopFiringEffects();
-        if (LinkGun->Role < ROLE_Authority && LinkGun->GetUTOwner() && LinkGun->GetUTOwner()->IsLocallyControlled())
+        if (LinkGun->GetLocalRole() < ROLE_Authority && LinkGun->GetUTOwner() && LinkGun->GetUTOwner()->IsLocallyControlled())
         {
             LinkGun->ServerStopBeamFiring();
         }
         // 2. Clear Replication Data on the Pawn
-        else if (LinkGun->Role == ROLE_Authority && LinkGun->GetUTOwner())
+        else if (LinkGun->GetLocalRole() == ROLE_Authority && LinkGun->GetUTOwner())
         {
             // FIX: Call ClearFiringInfo on the Character (Owner), not the Weapon
             LinkGun->GetUTOwner()->ClearFiringInfo();

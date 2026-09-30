@@ -51,8 +51,8 @@ void UUTHitsoundMessage::ClientReceive(const FClientReceiveData& ClientData) con
         if (World->DemoNetDriver->IsPlaying())
         {
             const APawn* ViewedPawn = Cast<APawn>(ClientData.LocalPC->GetViewTarget());
-            if (ViewedPawn == nullptr || ViewedPawn->PlayerState == nullptr
-                || ViewedPawn->PlayerState != ClientData.RelatedPlayerState_1)
+            if (ViewedPawn == nullptr || ViewedPawn->GetPlayerState() == nullptr
+                || ViewedPawn->GetPlayerState() != ClientData.RelatedPlayerState_1)
             {
                 return;
             }

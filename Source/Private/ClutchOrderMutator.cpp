@@ -14,16 +14,16 @@ void AClutchOrderMutator::Mutate_Implementation(
 	const FString& MutateString, APlayerController* Sender)
 {
 	FString Command = MutateString;
-	Command.Trim();
-	Command.TrimTrailing();
+	Command.TrimStartInline();
+	Command.TrimEndInline();
 	const FString Prefix(TEXT("ClutchOrder"));
 	const bool bIsOrderCommand = Command.Equals(Prefix, ESearchCase::IgnoreCase)
 		|| Command.StartsWith(Prefix + TEXT(" "), ESearchCase::IgnoreCase);
 	if (bIsOrderCommand && Sender)
 	{
 		FString Arguments = Command.RightChop(Prefix.Len());
-		Arguments.Trim();
-		Arguments.TrimTrailing();
+		Arguments.TrimStartInline();
+		Arguments.TrimEndInline();
 		FString NormalizedArguments = Arguments.Replace(TEXT(","), TEXT(" "));
 		TArray<FString> Tokens;
 		NormalizedArguments.ParseIntoArray(Tokens, TEXT(" "), true);

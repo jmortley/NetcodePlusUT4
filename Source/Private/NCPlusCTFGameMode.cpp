@@ -366,7 +366,7 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 				if (!bReturnedAsParticipant)
 				{
 					const FString WaitingReason = FString::Printf(
-						TEXT("Waiting for %s to return to their team"), *UTPS->PlayerName);
+						TEXT("Waiting for %s to return to their team"), *UTPS->GetPlayerName());
 					if (bAutoPauseResumeCountdownActive)
 					{
 						CancelAutoPauseResumeCountdown(WaitingReason);
@@ -380,7 +380,7 @@ void ANCPlusCTFGameMode::PostLogin(APlayerController* NewPlayer)
 				AutoPauseAwaitIds.Remove(Uid);
 				UE_LOG(LogGameMode, Warning,
 					TEXT("NCPlusCTF auto-pause: %s rejoined (%d still out)"),
-					*UTPS->PlayerName, AutoPauseAwaitIds.Num());
+					*UTPS->GetPlayerName(), AutoPauseAwaitIds.Num());
 				if (AutoPauseAwaitIds.Num() == 0)
 				{
 					BeginAutoPauseResumeCountdown(TEXT("All disconnected players returned"));
@@ -667,7 +667,7 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 				MatchStatCache.Add(Uid, MoveTemp(P));
 				UE_LOG(LogGameMode, Log,
 					TEXT("NCPlusCTF: rated leaver %s (presence %.0f%%, takes match result)"),
-					*UTPS->PlayerName, Frac * 100.f);
+					*UTPS->GetPlayerName(), Frac * 100.f);
 			}
 			else
 			{
@@ -676,7 +676,7 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 				MatchStatCache.Remove(Uid);
 				UE_LOG(LogGameMode, Log,
 					TEXT("NCPlusCTF: dropped early leaver %s (presence %.0f%% < %.0f%%)"),
-					*UTPS->PlayerName, Frac * 100.f, CTFRatingMinPresenceFrac * 100.f);
+					*UTPS->GetPlayerName(), Frac * 100.f, CTFRatingMinPresenceFrac * 100.f);
 			}
 		}
 	}
@@ -773,7 +773,7 @@ void ANCPlusCTFGameMode::Logout(AController* Exiting)
 					}
 					else
 					{
-						BeginOrHoldAutoPause(LeaveId, LeavePS->PlayerName, LeavePS);
+						BeginOrHoldAutoPause(LeaveId, LeavePS->GetPlayerName(), LeavePS);
 					}
 				}
 			}
@@ -1146,7 +1146,7 @@ bool ANCPlusCTFGameMode::TickAutoPauseDetect(float /*DeltaTime*/)
 		if (!Observation.bHasSample || SilenceSeconds < Observation.BestSilenceSeconds)
 		{
 			Observation.Representative = PS;
-			Observation.PlayerName = PS->PlayerName;
+			Observation.PlayerName = PS->GetPlayerName();
 			Observation.BestSilenceSeconds = SilenceSeconds;
 			Observation.bHasSample = true;
 		}
@@ -1401,7 +1401,7 @@ void ANCPlusCTFGameMode::CompleteAutoPauseResume(const FString& Reason)
 void ANCPlusCTFGameMode::CapturePlayerStats(AUTPlayerState* UTPS, FNCPlusCTFPlayerInput& Out) const
 {
 	Out.UniqueId   = UTPS->UniqueId.ToString();
-	Out.PlayerName = UTPS->PlayerName;
+	Out.PlayerName = UTPS->GetPlayerName();
 	Out.TeamIndex  = UTPS->GetTeamNum();
 	Out.Kills      = UTPS->Kills;
 	Out.Deaths     = UTPS->Deaths;
@@ -1569,7 +1569,7 @@ void ANCPlusCTFGameMode::LoadCTFPerfConfig()
 
 	// Members already hold defaults; only override what Mod.ini [UTPUGS_STATS]
 	// specifies (same section + load pattern as NCEloUploader).
-	const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+	const FString ModIniPath = FPaths::ProjectSavedDir() / TEXT("Config") / TEXT("Mod.ini");
 	if (!FPaths::FileExists(ModIniPath))
 	{
 		UE_LOG(LogGameMode, Log, TEXT("NCPlusCTF perf: Mod.ini not found, using defaults"));
@@ -1630,7 +1630,7 @@ void ANCPlusCTFGameMode::LoadSpawnConfig()
 {
 	// Same Mod.ini load pattern as LoadCTFPerfConfig, section [UTPUGS_SPAWN].
 	// Members already hold ctor defaults; only override what the ini specifies.
-	const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+	const FString ModIniPath = FPaths::ProjectSavedDir() / TEXT("Config") / TEXT("Mod.ini");
 	if (!FPaths::FileExists(ModIniPath))
 	{
 		return;
@@ -1945,7 +1945,7 @@ void ANCPlusCTFGameMode::RestartPlayer(AController* NewPlayer)
 		APlayerStart* SS = Cast<APlayerStart>(NewPlayer->StartSpot.Get());
 		UE_LOG(LogGameMode, Warning,
 			TEXT("NCPlusCTF spawn: %s(T%d) pawn=(%.0f,%.0f) recent=%s dist_from_last=%d | StartSpot=%s | own_flag=%s enemy_flag=%s"),
-			PS ? *PS->PlayerName : TEXT("?"), TeamIdx,
+			PS ? *PS->GetPlayerName() : TEXT("?"), TeamIdx,
 			SpawnLoc.X, SpawnLoc.Y, RecentTag, DistFromLast,
 			SS ? *SS->GetName() : TEXT("(none)"),
 			*OwnFlag, *EnemyFlag);
@@ -2269,7 +2269,7 @@ AActor* ANCPlusCTFGameMode::ChoosePlayerStart_Implementation(AController* Player
 	{
 		const AUTPlayerState* PS = Player ? Cast<AUTPlayerState>(Player->PlayerState) : nullptr;
 		UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF pick: %s -> stock | system=newctf primary=none secondary=none"),
-			PS ? *PS->PlayerName : TEXT("?"));
+			PS ? *PS->GetPlayerName() : TEXT("?"));
 	}
 	return ChooseEpicPlayerStart(Player);
 }
@@ -2535,7 +2535,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 		{
 			UE_LOG(LogGameMode, Warning,
 				TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=primary cycle=%d/%d blocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d"),
-				*SpawnPS->PlayerName, TeamIndex, *Primary->GetName(), CycleExcluded, Pool.Num(),
+				*SpawnPS->GetPlayerName(), TeamIndex, *Primary->GetName(), CycleExcluded, Pool.Num(),
 				EnemyVisionBlocked, EnemyRangeBlocked, FriendlyVisionBlocked, FriendlyRangeBlocked,
 				CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked);
 		}
@@ -2585,7 +2585,7 @@ APlayerStart* ANCPlusCTFGameMode::ChooseNewCTFPlayerStart(AController* Player)
 	{
 		UE_LOG(LogGameMode, Warning,
 			TEXT("NCPlusCTF pick: %s(T%d) -> %s | system=secondary weight=%.0f cycle=%d/%d primaryBlocked=evis:%d enemy:%d fvis:%d friend:%d carrier:%d flag:%d killer:%d robbed:%d"),
-			*SpawnPS->PlayerName, TeamIndex, *Secondary->GetName(), BestDistanceSum, CycleExcluded, Pool.Num(),
+			*SpawnPS->GetPlayerName(), TeamIndex, *Secondary->GetName(), BestDistanceSum, CycleExcluded, Pool.Num(),
 			EnemyVisionBlocked, EnemyRangeBlocked, FriendlyVisionBlocked, FriendlyRangeBlocked,
 			CarrierBlocked, FlagBlocked, KillerBlocked, RobbedBlocked);
 	}
@@ -2914,7 +2914,7 @@ AActor* ANCPlusCTFGameMode::ChooseLegacyPlayerStart(AController* Player)
 		}
 		UE_LOG(LogGameMode, Warning,
 			TEXT("NCPlusCTF pick: %s(T%d) -> %s | tier=%u band=%d fresh=%d kblk=%d efcblk=%d rbblk=%d (pool=%d)"),
-			*PS->PlayerName, TeamIndex, *Best->GetName(), (uint32)BestSafetyTier, ContentionCount, bForceFresh ? 1 : 0,
+			*PS->GetPlayerName(), TeamIndex, *Best->GetName(), (uint32)BestSafetyTier, ContentionCount, bForceFresh ? 1 : 0,
 			KillerBlocked, EFCLOSBlocked, RobbedBlocked, Pool.Num());
 	}
 
@@ -3631,7 +3631,7 @@ void ANCPlusCTFGameMode::PickMostCoolMoments(bool bClearCoolMoments, int32 CoolM
 		}
 	}
 	UE_LOG(LogGameMode, Warning, TEXT("NCPlusCTF replay: featured decisive cap by %s (rewind %.1fs, demo %.1fs)"),
-		*FeaturePS->PlayerName, Rewind,
+		*FeaturePS->GetPlayerName(), Rewind,
 		(GetWorld()->DemoNetDriver != nullptr) ? GetWorld()->DemoNetDriver->DemoCurrentTime : 0.f);
 }
 

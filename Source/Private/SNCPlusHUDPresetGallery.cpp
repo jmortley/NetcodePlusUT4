@@ -517,11 +517,9 @@ FReply SNCPlusHUDPresetGallery::OnSaveDialogConfirmClicked()
 	const FString Desc = SaveDialogDescBox.IsValid()
 		? SaveDialogDescBox->GetText().ToString() : FString();
 
-	// UE 4.15 has no FString::TrimStartAndEnd. Copy + use the in-place
-	// Trim() / TrimTrailing() pair instead. Both mutate the string in place.
+	// Trim the copied name in place before validating or saving it.
 	FString TrimmedName = Name;
-	TrimmedName.Trim();
-	TrimmedName.TrimTrailing();
+	TrimmedName.TrimStartAndEndInline();
 	if (TrimmedName.IsEmpty())
 	{
 		FMessageDialog::Open(EAppMsgType::Ok,

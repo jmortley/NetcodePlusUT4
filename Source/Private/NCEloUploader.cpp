@@ -52,7 +52,7 @@ namespace
 		Config.bLoaded = true;
 
 		// --- Mod.ini ---
-		const FString ModIniPath = FPaths::GameSavedDir() / TEXT("Config") / TEXT("Mod.ini");
+		const FString ModIniPath = FPaths::ProjectSavedDir() / TEXT("Config") / TEXT("Mod.ini");
 		if (FPaths::FileExists(ModIniPath))
 		{
 			FConfigFile ModIni;
@@ -137,7 +137,7 @@ namespace
 			return;
 		}
 
-		TSharedRef<IHttpRequest> Request = FHttpModule::Get().CreateRequest();
+		auto Request = FHttpModule::Get().CreateRequest();
 		Request->SetURL(Config.ApiBaseUrl + Endpoint);
 		Request->SetVerb(TEXT("POST"));
 		Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));

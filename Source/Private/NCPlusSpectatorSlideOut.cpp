@@ -227,9 +227,9 @@ const UNCPlusSpectatorSlideOut::FMatchRow& UNCPlusSpectatorSlideOut::GetMatchRow
 	// Names and slot numbers usually stay unchanged for the entire match. Rebuild
 	// their text/measurements only on an actual change, before the 5 Hz stat gate
 	// so renames, team-slot changes and font changes remain visible immediately.
-	if (Row.PlayerName != PS->PlayerName || Row.ClanName != PS->ClanName || Row.NameFont.Get() != SlideOutFont)
+	if (Row.PlayerName != PS->GetPlayerName() || Row.ClanName != PS->ClanName || Row.NameFont.Get() != SlideOutFont)
 	{
-		Row.PlayerName = PS->PlayerName;
+		Row.PlayerName = PS->GetPlayerName();
 		Row.ClanName = PS->ClanName;
 		Row.NameFont = SlideOutFont;
 		const FString Name = Row.ClanName.IsEmpty() ? Row.PlayerName : TEXT("[") + Row.ClanName + TEXT("]") + Row.PlayerName;
@@ -250,7 +250,7 @@ const UNCPlusSpectatorSlideOut::FMatchRow& UNCPlusSpectatorSlideOut::GetMatchRow
 	const float Now = GetWorld()->TimeSeconds;
 	if (!bNumberFontChanged && Now < Row.NextUpdateTime && Row.NextUpdateTime - Now <= 0.2f) { return Row; }
 	Row.NextUpdateTime = Now + 0.2f;
-	const FString Id = PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+	const FString Id = PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : FString::Printf(TEXT("BOT:%s"), *PS->GetPlayerName());
 	const FText Missing = FText::FromString(TEXT("-"));
 	const FText KD = FText::FromString(FString::Printf(TEXT("%d/%d"), PS->Kills, PS->Deaths));
 	if (MatchOverlayMode == ENCSlideOutMatchMode::CTF)
@@ -377,10 +377,10 @@ void UNCPlusSpectatorSlideOut::DrawPlayer(int32 Index, AUTPlayerState* PS, float
 	}
 }
 
-void UNCPlusSpectatorSlideOut::TrackMouseMovement(FVector2D Position)
+void UNCPlusSpectatorSlideOut::TrackMouseMovement(FVector2D InMousePosition)
 {
-	MatchMousePosition = Position;
-	Super::TrackMouseMovement(Position);
+	MatchMousePosition = InMousePosition;
+	Super::TrackMouseMovement(InMousePosition);
 }
 
 void UNCPlusSpectatorSlideOut::SetMouseInteractive(bool bNewInteractive)
@@ -390,16 +390,16 @@ void UNCPlusSpectatorSlideOut::SetMouseInteractive(bool bNewInteractive)
 	Super::SetMouseInteractive(bNewInteractive);
 }
 
-bool UNCPlusSpectatorSlideOut::MouseClick(FVector2D Position)
+bool UNCPlusSpectatorSlideOut::MouseClick(FVector2D InMousePosition)
 {
-	if (Super::MouseClick(Position)) { return true; }
+	if (Super::MouseClick(InMousePosition)) { return true; }
 	if (!bMatchInteractive || !CanUseMatchOverlay() || !UTPlayerOwner->bShowMouseCursor
 		|| MatchWorld.Get() != GetWorld()) { return false; }
 	for (const FMatchHitRow& Row : MatchHitRows)
 	{
 		AUTPlayerState* PS = Row.Player.Get();
 		if (PS && !PS->bIsInactive && UTGameState->PlayerArray.Contains(PS)
-			&& ContainsPoint(Row.Bounds, Position) && UTGameState->CanSpectate(UTPlayerOwner, PS))
+			&& ContainsPoint(Row.Bounds, InMousePosition) && UTGameState->CanSpectate(UTPlayerOwner, PS))
 		{
 			if (UTPlayerOwner->LastSpectatedPlayerId == PS->SpectatingID) { ToggleStats(); }
 			else { UTPlayerOwner->ViewPlayerNum(UTGameState->bTeamGame ? PS->SpectatingIDTeam : PS->SpectatingID, PS->GetTeamNum()); }
@@ -431,7 +431,7 @@ void UNCPlusSpectatorSlideOut::DrawWeaponStats(AUTPlayerState* PS, float DeltaTi
 
 	const FString PlayerId = PS->UniqueId.IsValid()
 		? PS->UniqueId.ToString()
-		: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+		: FString::Printf(TEXT("BOT:%s"), *PS->GetPlayerName());
 	const TArray<FNCSlideRow>* Rows = GetLoadoutRows(PS, PlayerId);
 	const bool bUseInstagibFallback = (!Rows || Rows->Num() == 0)
 		&& WeaponListMode == ENCSlideOutWeaponMode::CTFAuto;

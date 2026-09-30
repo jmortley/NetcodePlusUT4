@@ -82,7 +82,7 @@ static bool NCStabilizeBannerComponents(AActor* Banner, float& OutBottomZ)
 		if (bSimulatingChild)
 		{
 			Primitive->SetAllPhysicsLinearVelocity(FVector::ZeroVector, false);
-			Primitive->SetAllPhysicsAngularVelocity(FVector::ZeroVector, false);
+			Primitive->SetAllPhysicsAngularVelocityInDegrees(FVector::ZeroVector, false);
 		}
 		Primitive->SetEnableGravity(false);
 		Primitive->SetSimulatePhysics(false);

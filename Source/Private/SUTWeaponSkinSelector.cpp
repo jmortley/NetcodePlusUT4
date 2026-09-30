@@ -432,11 +432,11 @@ void SUTWeaponSkinSelector::GatherWeapons()
 			{
 				AUTWeapon* Weapon = *It;
 				if (!Weapon) continue;
-				FName Tag = Weapon->WeaponSkinCustomizationTag;
-				if (Tag == NAME_None) continue;
+				FName SkinTag = Weapon->WeaponSkinCustomizationTag;
+				if (SkinTag == NAME_None) continue;
 
 				FNetcodePlusWeaponInfo Info;
-				Info.Tag = Tag;
+				Info.Tag = SkinTag;
 				Info.HideKey = FName(*Weapon->GetClass()->GetName());
 				Info.WeaponClass = Weapon->GetClass();
 				Info.bHasSkins = false;

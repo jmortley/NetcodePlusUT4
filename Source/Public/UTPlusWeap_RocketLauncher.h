@@ -61,7 +61,6 @@ class AUTPlusWeap_RocketLauncher : public AUTWeaponFix
 public:
     AUTPlusWeap_RocketLauncher(const FObjectInitializer& ObjectInitializer);
 
-    virtual void PostInitProperties() override;
     virtual void Destroyed() override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     // === ROCKET LOADING ===

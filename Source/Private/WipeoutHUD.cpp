@@ -1,5 +1,6 @@
 // WipeoutHUD — FlagRun-style portrait strip for Wipeout game mode
 #include "WipeoutHUD.h"
+#include "UObject/UnrealType.h"
 #include "NCPlusCTFGameMode.h"
 #include "UnrealTournament.h"
 #include "UTTeamGameMode.h"
@@ -510,15 +511,15 @@ void AWipeoutHUD::DrawSpectatorTarget()
 	if (!ViewPawn) return;
 	if (ViewPawn == UTPlayerOwner->GetPawn()) return;   // own pawn = playing
 
-	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->PlayerState);
-	if (!PS || PS->PlayerName.IsEmpty()) return;
+	AUTPlayerState* PS = Cast<AUTPlayerState>(ViewPawn->GetPlayerState());
+	if (!PS || PS->GetPlayerName().IsEmpty()) return;
 
 	const float RenderScale = float(Canvas->SizeX) / 1920.0f;
 	const float HeaderScale = RenderScale * 0.75f;
 	const float NameScale   = RenderScale * 1.30f;
 
 	static const FString HeaderText(TEXT("NOW WATCHING"));
-	const FString& NameText = PS->PlayerName;
+	const FString& NameText = PS->GetPlayerName();
 
 	FText HeaderDrawText, NameDrawText;
 	float HeaderW, HeaderH, NameW, NameH;
@@ -560,7 +561,7 @@ void AWipeoutHUD::DrawHUD()
 	// Re-apply the live layout each frame so Slate editor edits show up immediately.
 	// Cheap when clean (dirty-flag gated).
 	ApplyLayoutToWidgets(this, FNCPlusHUDLayout::GetLive());
-	const bool bRenderCustomHUD = bShowUTHUD && UTPlayerOwner
+	const bool bRenderCustomHUD = UTPlayerOwner
 		&& (bShowHUD || !UTPlayerOwner->bCinematicMode);
 
 	// True spectators normally get UUTHUDWidget_Spectator's bottom-right "Now viewing"
@@ -575,9 +576,9 @@ void AWipeoutHUD::DrawHUD()
 	{
 		AUTGameState* PreDrawGS = GetWorld()->GetGameState<AUTGameState>();
 		APawn* ViewedPawn = Cast<APawn>(UTPlayerOwner->GetViewTarget());
-		AUTPlayerState* ViewedPS = ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->PlayerState) : nullptr;
+		AUTPlayerState* ViewedPS = ViewedPawn ? Cast<AUTPlayerState>(ViewedPawn->GetPlayerState()) : nullptr;
 		if (PreDrawGS && PreDrawGS->GetMatchState() == MatchState::InProgress
-			&& ViewedPawn != UTPlayerOwner->GetPawn() && ViewedPS && !ViewedPS->PlayerName.IsEmpty())
+			&& ViewedPawn != UTPlayerOwner->GetPawn() && ViewedPS && !ViewedPS->GetPlayerName().IsEmpty())
 		{
 			bRestoreStockSpectator = true;
 			bStockSpectatorWasHidden = SpectatorMessageWidget->IsHidden();
@@ -911,7 +912,7 @@ void AWipeoutHUD::DrawHUD()
 			Draw.NameScale = bHasBetaGeometry
 				? BetaGeometry.UnitScale * TeamScale * 0.55f * NameFontExtra
 				: float(Canvas->SizeY) / 1080.0f * 0.55f * TeamScale * NameFontExtra;
-			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->PlayerName,
+			NCPlusHUDDrawCall::ResolveFittedName(Canvas, UTPS, Draw.NameFont, UTPS->GetPlayerName(),
 				PipSize, Draw.NameScale, Draw.NameText, Draw.NameWidth, Draw.NameHeight);
 			const ENCPlusBetaTopBarSide BetaSide = bRedLeft == (TeamIdx == 0)
 				? ENCPlusBetaTopBarSide::Left : ENCPlusBetaTopBarSide::Right;
@@ -1082,12 +1083,12 @@ int32 AWipeoutHUD::ResolveBetaTopBarClockSeconds(AUTGameState* GS)
 	if (ClockSeconds < 0)
 	{
 		static UClass* CachedRoundCls = nullptr;
-		static UIntProperty* CachedRoundProp = nullptr;
+		static FIntProperty* CachedRoundProp = nullptr;
 		UClass* GSCls = GS->GetClass();
 		if (CachedRoundCls != GSCls)
 		{
 			CachedRoundCls = GSCls;
-			CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+			CachedRoundProp = FindFProperty<FIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
 		}
 		if (CachedRoundProp)
 		{
@@ -1097,12 +1098,12 @@ int32 AWipeoutHUD::ResolveBetaTopBarClockSeconds(AUTGameState* GS)
 	if (ClockSeconds < 0)
 	{
 		static UClass* CachedRemCls = nullptr;
-		static UIntProperty* CachedRemProp = nullptr;
+		static FIntProperty* CachedRemProp = nullptr;
 		UClass* GSCls = GS->GetClass();
 		if (CachedRemCls != GSCls)
 		{
 			CachedRemCls = GSCls;
-			CachedRemProp = FindField<UIntProperty>(GSCls, TEXT("RemainingTime"));
+			CachedRemProp = FindFProperty<FIntProperty>(GSCls, TEXT("RemainingTime"));
 		}
 		if (CachedRemProp)
 		{
@@ -1335,8 +1336,8 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	// modes (Duel, CTF, etc.) finally fall back to stock RemainingTime.
 	//
 	// Static caches: UClass field tables don't change at runtime, so a single
-	// FindField per (GameState class, property name) is enough. Stock
-	// FindField walks the class hierarchy on every call; this is the cheap
+	// FindFProperty per (GameState class, property name) is enough. Stock
+	// FindFProperty walks the class hierarchy on every call; this is the cheap
 	// trick for hot HUD paths that read replicated ints by name.
 	int32 ClockSeconds = -1;
 	if (AWipeoutDamageReplicator* DamageRep = FindDamageReplicator(GetWorld()))
@@ -1346,12 +1347,12 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 	if (ClockSeconds < 0)
 	{
 		static UClass* CachedRoundCls = nullptr;
-		static UIntProperty* CachedRoundProp = nullptr;
+		static FIntProperty* CachedRoundProp = nullptr;
 		UClass* GSCls = GS->GetClass();
 		if (CachedRoundCls != GSCls)
 		{
 			CachedRoundCls  = GSCls;
-			CachedRoundProp = FindField<UIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
+			CachedRoundProp = FindFProperty<FIntProperty>(GSCls, TEXT("RoundSecondsRemaining"));
 		}
 		if (CachedRoundProp)
 		{
@@ -1367,12 +1368,12 @@ void AWipeoutHUD::DrawTeamScoreBar(AUTGameState* GS)
 		// zero for untimed modes. TimeLimit below disambiguates terminal 00:00
 		// from the neutral untimed center marker.
 		static UClass* CachedRemCls = nullptr;
-		static UIntProperty* CachedRemProp = nullptr;
+		static FIntProperty* CachedRemProp = nullptr;
 		UClass* GSCls = GS->GetClass();
 		if (CachedRemCls != GSCls)
 		{
 			CachedRemCls  = GSCls;
-			CachedRemProp = FindField<UIntProperty>(GSCls, TEXT("RemainingTime"));
+			CachedRemProp = FindFProperty<FIntProperty>(GSCls, TEXT("RemainingTime"));
 		}
 		if (CachedRemProp)
 		{
@@ -1809,7 +1810,7 @@ FLinearColor AWipeoutHUD::GetBaseHUDColor()
 	APawn* HUDPawn = Cast<APawn>(UTPlayerOwner->GetViewTarget());
 	if (HUDPawn)
 	{
-		AUTPlayerState* PS = Cast<AUTPlayerState>(HUDPawn->PlayerState);
+		AUTPlayerState* PS = Cast<AUTPlayerState>(HUDPawn->GetPlayerState());
 		if (PS != nullptr && PS->Team != nullptr)
 		{
 			TeamColor = PS->Team->TeamColor;

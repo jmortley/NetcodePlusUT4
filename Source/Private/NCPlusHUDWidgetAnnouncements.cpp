@@ -66,7 +66,7 @@ void UNCPlusHUDWidgetAnnouncements::AddMessage(int32 QueueIndex, TSubclassOf<cla
 	{
 		FNCPlusKillVictim& Victim = KillChain.Victims[KillChain.Victims.AddDefaulted()];
 		Victim.PlayerState = RelatedPlayerState_2;
-		Victim.PlayerName = RelatedPlayerState_2->PlayerName;
+		Victim.PlayerName = RelatedPlayerState_2->GetPlayerName();
 	}
 
 	FLocalizedMessageData& Entry = MessageQueue[QueueIndex];

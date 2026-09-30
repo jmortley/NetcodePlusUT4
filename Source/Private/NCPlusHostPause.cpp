@@ -1,5 +1,6 @@
 // NCPlusHostPause.cpp — see header.
 #include "NCPlusHostPause.h"
+#include "UObject/UnrealType.h"
 #include "UnrealTournament.h"
 #include "UTBaseGameMode.h"
 #include "UTPlayerState.h"
@@ -198,10 +199,10 @@ namespace NCPlusHostPause
 		bool bIsCaptain = false;
 		for (const FString& Id : Ids)
 		{
-			// UE 4.15 has no FString::TrimStartAndEnd; .Trim()/.TrimTrailing() mutate in place.
+			// UE 4.15 has no FString::TrimStartAndEnd; .TrimStartInline()/.TrimEndInline() mutate in place.
 			FString Trimmed = Id;
-			Trimmed.Trim();
-			Trimmed.TrimTrailing();
+			Trimmed.TrimStartInline();
+			Trimmed.TrimEndInline();
 			if (Trimmed.Equals(MyId, ESearchCase::IgnoreCase))
 			{
 				bIsCaptain = true;
@@ -233,7 +234,7 @@ namespace NCPlusHostPause
 				return false;   // too soon after the last captain pause
 			}
 			GLastCaptainPauseTime = Now;
-			UE_LOG(LogNCHostPause, Warning, TEXT("[CaptainPause] %s paused the match"), *PS->PlayerName);
+			UE_LOG(LogNCHostPause, Warning, TEXT("[CaptainPause] %s paused the match"), *PS->GetPlayerName());
 		}
 		return true;
 	}
@@ -329,12 +330,12 @@ namespace NCPlusHostPause
 		// arrival.
 		AGameStateBase* GS = GM ? GM->GameState : nullptr;
 		UWorld* World = GS ? GS->GetWorld() : nullptr;
-		if (World == nullptr || GS->Role != ROLE_Authority)
+		if (World == nullptr || GS->GetLocalRole() != ROLE_Authority)
 		{
 			return;
 		}
-		static UFloatProperty* RepTimeProp =
-			FindField<UFloatProperty>(AGameStateBase::StaticClass(), TEXT("ReplicatedWorldTimeSeconds"));
+		static FFloatProperty* RepTimeProp =
+			FindFProperty<FFloatProperty>(AGameStateBase::StaticClass(), TEXT("ReplicatedWorldTimeSeconds"));
 		if (RepTimeProp != nullptr)
 		{
 			RepTimeProp->SetPropertyValue_InContainer(GS, World->GetTimeSeconds());

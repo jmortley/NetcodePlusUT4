@@ -335,12 +335,10 @@ public:
     void UpdateScreenTexture(UCanvas* C, int32 Width, int32 Height);
 
     /** Called when flash extra is replicated (for pulse effects) */
-    UFUNCTION(BlueprintNativeEvent)
-    void FiringExtraUpdated(uint8 NewFlashExtra, uint8 InFireMode);
+    virtual void FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode) override;
 
     /** Draw weapon crosshair with overheat/pull indicators */
-    UFUNCTION(BlueprintNativeEvent)
-    void DrawWeaponCrosshair(UUTHUDWidget* WeaponHudWidget, float RenderDelta);
+    virtual void DrawWeaponCrosshair_Implementation(UUTHUDWidget* WeaponHudWidget, float RenderDelta) override;
 
 
 

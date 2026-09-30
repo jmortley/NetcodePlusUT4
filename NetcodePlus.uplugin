@@ -5,6 +5,7 @@
   "FriendlyName": "NetcodePlus",
   "Description": "Custom netcode enhancements for UT4.",
   "CanContainContent": true,
+  "EnabledByDefault": false,
   "Category": "Gameplay",
   "CreatedBy": "phantaci",
   "CreatedByURL": "",

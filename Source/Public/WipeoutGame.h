@@ -658,8 +658,6 @@ public:
 
 	virtual bool SupportsInstantReplay() const override;
 
-	UFUNCTION(BlueprintNativeEvent)
-	bool CanSpectate(APlayerController* Viewer, APlayerState* ViewTarget);
 	virtual bool CanSpectate_Implementation(APlayerController* Viewer, APlayerState* ViewTarget) override;
 
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
@@ -669,6 +667,11 @@ public:
 	UPROPERTY(Transient)
 	class AWipeoutDamageReplicator* DamageReplicator;
 	virtual void InitGameState() override;
+
+    /** GameState is ready before login, BeginPlay and round bridge notifications. */
+    UFUNCTION(BlueprintImplementableEvent, Category="NetcodePlus|Initialization")
+    void BP_OnGameStateInitialized(AUTGameState* InitializedGameState);
+
 	virtual void HandleMatchHasStarted() override;
 	virtual void HandleMatchHasEnded() override;
 	virtual void PostLogin(APlayerController* NewPlayer) override;

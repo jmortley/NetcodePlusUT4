@@ -36,7 +36,7 @@ void ACTFStatsReplicator::BeginPlay()
 	// the entire warmup period because Tick / UpdateFromPlayerStates didn't
 	// fire on dedicated servers until the match transitioned to InProgress
 	// in the old spawn-at-HandleMatchHasStarted code path.
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		if (AUTGameMode* GM = GetWorld()->GetAuthGameMode<AUTGameMode>())
 		{
@@ -49,7 +49,7 @@ void ACTFStatsReplicator::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (Role != ROLE_Authority)
+	if (GetLocalRole() != ROLE_Authority)
 	{
 		return;
 	}
@@ -97,8 +97,8 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 		// AUTPlusSniper but OVERRIDES its stat names to LightningRifleHits/Shots (NOT SniperHits/Shots),
 		// so read BOTH and sum (a player runs one or the other; the unused weapon's stats are 0).
 		// Shock/rifles are excluded — their accuracy isn't representative of the fights that decide picks.
-		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
-		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
+		static const FName NCP_NAME_LightningRifleHits(TEXT("LightningRifleHits"));
+		static const FName NCP_NAME_LightningRifleShots(TEXT("LightningRifleShots"));
 		if (bIsInstagibMatch)
 		{
 			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_InstagibHits);
@@ -106,8 +106,8 @@ void ACTFStatsReplicator::UpdateFromPlayerStates()
 		}
 		else
 		{
-			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NAME_LightningRifleHits);
-			Entry.HitscanShots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NAME_LightningRifleShots);
+			Entry.HitscanHits  = UTPS->GetStatsValue(NAME_SniperHits)  + UTPS->GetStatsValue(NCP_NAME_LightningRifleHits);
+			Entry.HitscanShots = UTPS->GetStatsValue(NAME_SniperShots) + UTPS->GetStatsValue(NCP_NAME_LightningRifleShots);
 		}
 
 		// Armor pickup counts — clamp to uint8 (255 max). CTF matches don't

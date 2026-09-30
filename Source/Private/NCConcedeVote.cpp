@@ -36,7 +36,7 @@ namespace
 
 	FString UidOf(const AUTPlayerState* PS)
 	{
-		return PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : PS->PlayerName;
+		return PS->UniqueId.IsValid() ? PS->UniqueId.ToString() : PS->GetPlayerName();
 	}
 
 	bool IsVotingHuman(const AUTPlayerState* PS)
@@ -130,7 +130,7 @@ ANCConcedeVote::ANCConcedeVote(const FObjectInitializer& OI)
 bool ANCConcedeVote::ServerConcede_Validate(uint8 /*Action*/) { return true; }
 void ANCConcedeVote::ServerConcede_Implementation(uint8 Action)
 {
-	if (Role != ROLE_Authority) { return; }
+	if (GetLocalRole() != ROLE_Authority) { return; }
 	NCConcede::HandleVote(Cast<APlayerController>(GetOwner()), Action);
 }
 

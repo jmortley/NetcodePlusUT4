@@ -127,7 +127,7 @@ const FNCPlusXTDMPlayerStatus* ANCPlusXTDMReplicator::FindPlayer(const AUTPlayer
 
 void ANCPlusXTDMReplicator::SetPlayerStatus(AUTPlayerState* PS, bool bAlive, float ReadyTime)
 {
-	if (Role != ROLE_Authority || !PS || PS->bOnlySpectator)
+	if (GetLocalRole() != ROLE_Authority || !PS || PS->bOnlySpectator)
 	{
 		return;
 	}
@@ -154,7 +154,7 @@ void ANCPlusXTDMReplicator::SetPlayerStatus(AUTPlayerState* PS, bool bAlive, flo
 
 void ANCPlusXTDMReplicator::RemovePlayer(AUTPlayerState* PS)
 {
-	if (Role == ROLE_Authority && Players.RemoveAll([PS](const FNCPlusXTDMPlayerStatus& Entry)
+	if (GetLocalRole() == ROLE_Authority && Players.RemoveAll([PS](const FNCPlusXTDMPlayerStatus& Entry)
 		{ return Entry.PlayerState == PS || !IsValid(Entry.PlayerState); }) > 0)
 	{
 		ForceNetUpdate();
@@ -163,7 +163,7 @@ void ANCPlusXTDMReplicator::RemovePlayer(AUTPlayerState* PS)
 
 void ANCPlusXTDMReplicator::SetMatchResult(uint8 TeamIndex)
 {
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		bMatchEnded = true;
 		WinningTeamIndex = TeamIndex < 4 ? TeamIndex : NoTeam;

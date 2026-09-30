@@ -58,8 +58,8 @@ void SUTCosmeticSelector::GatherAllCosmetics()
 		for (const FAssetData& Asset : AssetList)
 		{
 			// Skip abstract classes
-			const FString* bIsAbstract = Asset.TagsAndValues.Find(FName(TEXT("BlueprintType")));
-			if (bIsAbstract && *bIsAbstract == TEXT("true"))
+			FString BlueprintType;
+			if (Asset.GetTagValue(FName(TEXT("BlueprintType")), BlueprintType) && BlueprintType == TEXT("true"))
 			{
 				// Check if it's actually abstract via the GeneratedClass tag
 			}

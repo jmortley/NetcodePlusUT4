@@ -469,10 +469,10 @@ bool ANCPlusXTDMGameMode::ChangeTeam(AController* Player, uint8 NewTeam, bool bB
 	return true;
 }
 
-APlayerController* ANCPlusXTDMGameMode::Login(UPlayer* NewPlayer, ENetRole Role, const FString& Portal,
+APlayerController* ANCPlusXTDMGameMode::Login(UPlayer* NewPlayer, ENetRole InRemoteRole, const FString& Portal,
 	const FString& Options, const FUniqueNetIdRepl& UniqueId, FString& ErrorMessage)
 {
-	APlayerController* PC = Super::Login(NewPlayer, Role, Portal, Options, UniqueId, ErrorMessage);
+	APlayerController* PC = Super::Login(NewPlayer, InRemoteRole, Portal, Options, UniqueId, ErrorMessage);
 	AUTPlayerState* PS = PC ? Cast<AUTPlayerState>(PC->PlayerState) : nullptr;
 	if (PS && !PS->bOnlySpectator && !PS->Team)
 	{
@@ -829,7 +829,7 @@ AActor* ANCPlusXTDMGameMode::ChoosePlayerStart_Implementation(AController* Playe
 	for (FConstControllerIterator It = GetWorld()->GetControllerIterator(); It; ++It)
 	{
 		AUTCharacter* Character = Cast<AUTCharacter>(It->Get()->GetPawn());
-		AUTPlayerState* OtherPS = Character ? Cast<AUTPlayerState>(Character->PlayerState) : nullptr;
+		AUTPlayerState* OtherPS = Character ? Cast<AUTPlayerState>(Character->GetPlayerState()) : nullptr;
 		if (!Character || Character->IsDead() || !OtherPS || OtherPS->bOnlySpectator || OtherPS->GetTeamNum() >= 4) continue;
 		TraceParams.AddIgnoredActor(Character);
 		if (OtherPS->GetTeamNum() != PS->GetTeamNum()) Enemies.Add(Character);
@@ -887,7 +887,7 @@ AActor* ANCPlusXTDMGameMode::ChoosePlayerStart_Implementation(AController* Playe
 			{
 				bHiddenFromAll = false;
 				Candidate.Score -= 2500.f;
-				if (Enemy->PlayerState == PS->LastKillerPlayerState) Candidate.Score -= 500.f;
+				if (Enemy->GetPlayerState() == PS->LastKillerPlayerState) Candidate.Score -= 500.f;
 			}
 		}
 		if (!Best || (bHiddenFromAll && !bBestHidden) || (bHiddenFromAll == bBestHidden && Candidate.Score > BestScore))

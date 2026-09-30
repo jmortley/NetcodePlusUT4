@@ -1,6 +1,7 @@
 // NCPlusCTFGameMode.h - NetcodePlus CTF with improved advantage time and instant replay
 #pragma once
 #include "NetcodePlus.h"
+#include "UObject/UnrealType.h"
 #include "UTCTFGameState.h"
 #include "UTCTFScoring.h"
 #include "UTCTFBaseGame.h"
@@ -16,57 +17,57 @@
 class ANCAutoPauseState;
 class ANCReadyUpState;
 
-// Safe property access across DLL boundary — uses runtime UProperty reflection
+// Safe property access across DLL boundary — uses runtime FProperty reflection
 // instead of direct member access which has wrong offsets due to layout mismatch.
 // The plugin DLL's compiled class layout differs from the engine DLL's, so
 // CTFGameState->bPlayingAdvantage reads garbage. These helpers do runtime name
-// lookup via FindField which always returns the correct offset.
+// lookup via FindFProperty which always returns the correct offset.
 namespace NCPlusReflection
 {
 	template <typename PropertyType>
 	inline PropertyType* FindCachedProperty(UObject* Obj, const TCHAR* PropName)
 	{
 		if (!Obj) return nullptr;
-		// Shipping UClasses and their UProperty tables are stable for process life.
+		// Shipping UClasses and their FProperty tables are stable for process life.
 		// Cache by runtime class + property name so render-rate HUD reads do not walk
 		// the reflection field chain every frame. Each PropertyType gets its own map.
 		static TMap<UClass*, TMap<FName, PropertyType*>> Cache;
 		TMap<FName, PropertyType*>& ClassCache = Cache.FindOrAdd(Obj->GetClass());
 		const FName Name(PropName);
 		if (PropertyType** Found = ClassCache.Find(Name)) return *Found;
-		PropertyType* Resolved = FindField<PropertyType>(Obj->GetClass(), PropName);
+		PropertyType* Resolved = FindFProperty<PropertyType>(Obj->GetClass(), PropName);
 		ClassCache.Add(Name, Resolved);
 		return Resolved;
 	}
 
 	inline bool GetBool(UObject* Obj, const TCHAR* PropName)
 	{
-		UBoolProperty* Prop = FindCachedProperty<UBoolProperty>(Obj, PropName);
+		FBoolProperty* Prop = FindCachedProperty<FBoolProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : false;
 	}
 	inline void SetBool(UObject* Obj, const TCHAR* PropName, bool Value)
 	{
-		UBoolProperty* Prop = FindCachedProperty<UBoolProperty>(Obj, PropName);
+		FBoolProperty* Prop = FindCachedProperty<FBoolProperty>(Obj, PropName);
 		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
 	}
 	inline uint8 GetByte(UObject* Obj, const TCHAR* PropName)
 	{
-		UByteProperty* Prop = FindCachedProperty<UByteProperty>(Obj, PropName);
+		FByteProperty* Prop = FindCachedProperty<FByteProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
 	}
 	inline void SetByte(UObject* Obj, const TCHAR* PropName, uint8 Value)
 	{
-		UByteProperty* Prop = FindCachedProperty<UByteProperty>(Obj, PropName);
+		FByteProperty* Prop = FindCachedProperty<FByteProperty>(Obj, PropName);
 		if (Prop) Prop->SetPropertyValue_InContainer(Obj, Value);
 	}
 	inline int32 GetInt(UObject* Obj, const TCHAR* PropName)
 	{
-		UIntProperty* Prop = FindCachedProperty<UIntProperty>(Obj, PropName);
+		FIntProperty* Prop = FindCachedProperty<FIntProperty>(Obj, PropName);
 		return Prop ? Prop->GetPropertyValue_InContainer(Obj) : 0;
 	}
 	inline void SetObject(UObject* Obj, const TCHAR* PropName, UObject* Value)
 	{
-		UObjectPropertyBase* Prop = FindCachedProperty<UObjectPropertyBase>(Obj, PropName);
+		FObjectPropertyBase* Prop = FindCachedProperty<FObjectPropertyBase>(Obj, PropName);
 		if (Prop) Prop->SetObjectPropertyValue_InContainer(Obj, Value);
 	}
 }

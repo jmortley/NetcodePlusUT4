@@ -179,13 +179,13 @@ FVector2D UNCPlusHUDWidget_QuickStats::DrawCachedNumber(int32 Value, float X, fl
 {
 	if (!Canvas || !Font) return FVector2D::ZeroVector;
 	NCPlusQS::FNumberTextCache& Entry = NCPlusQS::NumberText(Value);
-	FVector2D* Size = Entry.Sizes.Find(Font);
-	if (!Size)
+	FVector2D* CachedNumberSize = Entry.Sizes.Find(Font);
+	if (!CachedNumberSize)
 	{
 		float XL = 0.f;
 		float YL = 0.f;
 		Canvas->StrLen(Font, Entry.String, XL, YL);
-		Size = &Entry.Sizes.Add(Font, FVector2D(XL, YL));
+		CachedNumberSize = &Entry.Sizes.Add(Font, FVector2D(XL, YL));
 	}
 
 	if (bScaleByDesignedResolution)
@@ -195,10 +195,10 @@ FVector2D UNCPlusHUDWidget_QuickStats::DrawCachedNumber(int32 Value, float X, fl
 	}
 	const float FinalScale = bScaleByDesignedResolution ? RenderScale * TextScale : TextScale;
 	FVector2D DrawPos(RenderPosition.X + X, RenderPosition.Y + Y);
-	if (HorizontalAlignment == ETextHorzPos::Right) DrawPos.X -= Size->X * FinalScale;
-	else if (HorizontalAlignment == ETextHorzPos::Center) DrawPos.X -= Size->X * FinalScale * 0.5f;
-	if (VerticalAlignment == ETextVertPos::Bottom) DrawPos.Y -= Size->Y * FinalScale;
-	else if (VerticalAlignment == ETextVertPos::Center) DrawPos.Y -= Size->Y * FinalScale * 0.5f;
+	if (HorizontalAlignment == ETextHorzPos::Right) DrawPos.X -= CachedNumberSize->X * FinalScale;
+	else if (HorizontalAlignment == ETextHorzPos::Center) DrawPos.X -= CachedNumberSize->X * FinalScale * 0.5f;
+	if (VerticalAlignment == ETextVertPos::Bottom) DrawPos.Y -= CachedNumberSize->Y * FinalScale;
+	else if (VerticalAlignment == ETextVertPos::Center) DrawPos.Y -= CachedNumberSize->Y * FinalScale * 0.5f;
 
 	FLinearColor Color = DrawColor;
 	Color.A = Opacity * DrawOpacity * (bIgnoreHUDOpacity ? 1.f : UTHUDOwner->WidgetOpacity);
@@ -208,7 +208,7 @@ FVector2D UNCPlusHUDWidget_QuickStats::DrawCachedNumber(int32 Value, float X, fl
 	TextItem.EnableShadow(Shadow, ShadowDirection);
 	TextItem.Scale = FVector2D(FinalScale, FinalScale);
 	Canvas->DrawItem(TextItem);
-	return *Size;
+	return *CachedNumberSize;
 }
 
 void UNCPlusHUDWidget_QuickStats::Draw_Implementation(float DeltaTime)

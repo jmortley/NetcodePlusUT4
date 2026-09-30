@@ -317,7 +317,7 @@ void UNCPlusHUDWidget_Accuracy::RefreshDisplayCache(AUTPlayerState* PS,
 		bCachedPlayerIdIsUnique = bHasUniqueId;
 		CachedPlayerId = bHasUniqueId
 			? PS->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+			: FString::Printf(TEXT("BOT:%s"), *PS->GetPlayerName());
 	}
 
 	// AUTPlayerState::StatsData is server-only on dedicated clients. Query it

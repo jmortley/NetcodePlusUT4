@@ -13,10 +13,20 @@ namespace
 {
 	bool IsEngineSchedulingAvailable()
 	{
+#if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION >= 25
+        static bool bReportedUnavailable = false;
+        if (!bReportedUnavailable)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("ncp.RemoteAnimationURO is unavailable in this 4.27 port: pose-time draining still requires adaptation. Stock animation scheduling remains active."));
+            bReportedUnavailable = true;
+        }
+        return false;
+#else
 		static IConsoleVariable* Enable = IConsoleManager::Get().FindConsoleVariable(TEXT("a.URO.Enable"));
 		static IConsoleVariable* ForceRate = IConsoleManager::Get().FindConsoleVariable(TEXT("a.URO.ForceAnimRate"));
 		return Enable != nullptr && Enable->GetInt() > 0
 			&& ForceRate != nullptr && ForceRate->GetInt() == 0;
+#endif
 	}
 
 	bool HasDefaultInputs(const FAnimUpdateRateParameters& Params)
@@ -46,10 +56,14 @@ namespace
 		UWorld* World = Owner.GetWorld();
 		if (&Mesh != Owner.FirstPersonMesh || Mesh.GetClass() != USkeletalMeshComponent::StaticClass()
 			|| World == nullptr || Owner.IsLocallyControlled()
-			|| !FMath::IsFinite(World->TimeSeconds) || !FMath::IsFinite(Mesh.LastRenderTime)
+			|| !FMath::IsFinite(World->TimeSeconds) || !FMath::IsFinite(Mesh.GetLastRenderTime())
 			|| !Mesh.bOnlyOwnerSee
+#if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION >= 21
+			|| Mesh.VisibilityBasedAnimTickOption != EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered
+#else
 			|| Mesh.MeshComponentUpdateFlag != EMeshComponentUpdateFlag::OnlyTickPoseWhenRendered
-			|| Mesh.bRecentlyRendered || Mesh.LastRenderTime > World->TimeSeconds - 1.f
+#endif
+			|| Mesh.bRecentlyRendered || Mesh.GetLastRenderTime() > World->TimeSeconds - 1.f
 			|| Mesh.bIsAutonomousTickPose || Mesh.bOnlyAllowAutonomousTickPose
 			|| Mesh.PrimaryComponentTick.bTickEvenWhenPaused
 			|| Mesh.IsPlayingRootMotion() || Mesh.IsPlayingRootMotionFromEverything())
@@ -105,7 +119,7 @@ namespace
 	bool IsSupportedBody(ATeamArenaCharacter& Owner, USkeletalMeshComponent* Body)
 	{
 		UTeamArenaCharacterMovement* Movement = Cast<UTeamArenaCharacterMovement>(Owner.GetCharacterMovement());
-		return Body != nullptr && Owner.GetNetMode() == NM_Client && Owner.Role == ROLE_SimulatedProxy
+		return Body != nullptr && Owner.GetNetMode() == NM_Client && Owner.GetLocalRole() == ROLE_SimulatedProxy
 			&& !Owner.IsLocallyControlled() && !Owner.IsDead() && !Owner.IsRagdoll()
 			&& Movement != nullptr && Movement->IsRegistered() && Movement->IsActive()
 			&& Movement->IsComponentTickEnabled()
@@ -295,6 +309,12 @@ void FNCRemoteAnimationUROState::Update(ATeamArenaCharacter& Owner, bool bEnable
 
 void FNCRemoteAnimationUROState::Release(ATeamArenaCharacter& Owner, bool bTeardown)
 {
+#if ENGINE_MAJOR_VERSION > 4 || ENGINE_MINOR_VERSION >= 25
+    // Acquisition is disabled above. Do not touch another scheduler's flags or
+    // shared timing parameters while the 4.15 drain contract is unavailable.
+    Forget();
+#else
+
 	if (!bManaged)
 	{
 		return;
@@ -349,7 +369,7 @@ void FNCRemoteAnimationUROState::Release(ATeamArenaCharacter& Owner, bool bTeard
 	const bool bClockReset = ManagedWorld.Get() != World
 		|| (bDraining && World != nullptr && World->TimeSeconds < DrainWorldTime);
 	const bool bNewSimulation = Owner.GetNetMode() != NM_Client
-		|| Owner.Role != ROLE_SimulatedProxy || Owner.IsLocallyControlled()
+		|| Owner.GetLocalRole() != ROLE_SimulatedProxy || Owner.IsLocallyControlled()
 		|| Owner.IsDead() || Owner.GetMesh() == nullptr || Owner.IsRagdoll() || Body->IsSimulatingPhysics()
 		|| Body->IsPlayingRootMotion() || Body->IsPlayingRootMotionFromEverything();
 	if (bTeardown || !Body->IsRegistered() || bPoseReplaced || bClockReset
@@ -388,4 +408,5 @@ void FNCRemoteAnimationUROState::Release(ATeamArenaCharacter& Owner, bool bTeard
 	DrainWorldTime = World != nullptr ? World->TimeSeconds : 0.f;
 	bDraining = true;
 	Priority.Reset();
+#endif
 }

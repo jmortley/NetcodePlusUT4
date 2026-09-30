@@ -391,6 +391,9 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 	const FSlateBrush* WhiteBrush = FCoreStyle::Get().GetBrush(TEXT("WhiteBrush"));
 	if (!WhiteBrush) return LayerId;
 
+	// Preserve the old per-element clipping rectangle with the 4.25 clip stack.
+	OutDrawElements.PushClip(FSlateClippingZone(MyClippingRect));
+
 	// Use the body font for labels — small but readable.
 	const FSlateFontInfo Font = FCoreStyle::Get().GetFontStyle(TEXT("NormalText"));
 
@@ -414,40 +417,37 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 		const FVector2D LocalSize = AbsToLocal(E.ScreenSize);
 
 		// Fill rect (translucent so user can still see what's underneath).
-		// NOTE: UE 4.15's MakeBox/MakeText require an FSlateRect ClippingRect
-		// arg before the draw-effect bitmask (the 4.17+ overload that omits it
-		// doesn't exist here). Pass MyClippingRect at every call site.
 		FSlateDrawElement::MakeBox(
 			OutDrawElements, LayerId,
 			AllottedGeometry.ToPaintGeometry(LocalPos, LocalSize),
-			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Fill);
+			WhiteBrush, ESlateDrawEffect::None, Fill);
 
 		// Outline — 4 thin rects (top, bottom, left, right). MakeBox doesn't
 		// have a stroke-only mode in 4.15, so we composite manually.
 		const float T = OutlineThickness / DPIScale;  // keep visual thickness uniform across DPI
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(LocalPos, FVector2D(LocalSize.X, T)),
-			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
+			WhiteBrush, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(LocalPos + FVector2D(0.f, LocalSize.Y - T), FVector2D(LocalSize.X, T)),
-			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
+			WhiteBrush, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(LocalPos, FVector2D(T, LocalSize.Y)),
-			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
+			WhiteBrush, ESlateDrawEffect::None, Outline);
 		FSlateDrawElement::MakeBox(OutDrawElements, LayerId + 1,
 			AllottedGeometry.ToPaintGeometry(LocalPos + FVector2D(LocalSize.X - T, 0.f), FVector2D(T, LocalSize.Y)),
-			WhiteBrush, MyClippingRect, ESlateDrawEffect::None, Outline);
+			WhiteBrush, ESlateDrawEffect::None, Outline);
 
 		// Label with shadow — anchored top-left of the frame.
 		const FVector2D LabelPos = LocalPos + FVector2D(6.f, 4.f);
 		FSlateDrawElement::MakeText(
 			OutDrawElements, LayerId + 2,
 			AllottedGeometry.ToPaintGeometry(LabelPos + FVector2D(1.f, 1.f), FVector2D(400.f, 24.f)),
-			E.Label, Font, MyClippingRect, ESlateDrawEffect::None, LabelShadowColor);
+			E.Label, Font, ESlateDrawEffect::None, LabelShadowColor);
 		FSlateDrawElement::MakeText(
 			OutDrawElements, LayerId + 3,
 			AllottedGeometry.ToPaintGeometry(LabelPos, FVector2D(400.f, 24.f)),
-			E.Label, Font, MyClippingRect, ESlateDrawEffect::None, LabelColor);
+			E.Label, Font, ESlateDrawEffect::None, LabelColor);
 	}
 
 	// Footer hint — tells the user what to do. AllottedGeometry.GetLocalSize()
@@ -457,12 +457,13 @@ int32 SNCPlusHUDDragOverlay::OnPaint(const FPaintArgs& Args, const FGeometry& Al
 	FSlateDrawElement::MakeText(
 		OutDrawElements, LayerId + 4,
 		AllottedGeometry.ToPaintGeometry(HintPos + FVector2D(1.f, 1.f), FVector2D(900.f, 24.f)),
-		Hint, Font, MyClippingRect, ESlateDrawEffect::None, LabelShadowColor);
+		Hint, Font, ESlateDrawEffect::None, LabelShadowColor);
 	FSlateDrawElement::MakeText(
 		OutDrawElements, LayerId + 5,
 		AllottedGeometry.ToPaintGeometry(HintPos, FVector2D(900.f, 24.f)),
-		Hint, Font, MyClippingRect, ESlateDrawEffect::None, LabelColor);
+		Hint, Font, ESlateDrawEffect::None, LabelColor);
 
+	OutDrawElements.PopClip();
 	return LayerId + 6;
 }
 

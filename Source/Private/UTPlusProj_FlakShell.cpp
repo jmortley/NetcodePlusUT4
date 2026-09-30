@@ -88,9 +88,9 @@ bool AUTPlusProj_FlakShell::CanMatchFake(AUTProjectile* InFakeProjectile, const 
 	const bool bLiveFake = !InFakeProjectile->IsPendingKillPending()
 		&& InFakeProjectile->bFakeClientProjectile && InFakeProjectile->bHasSpawnedFully
 		&& !InFakeProjectile->bExploded && InFakeProjectile->MasterProjectile == nullptr;
-	const bool bSameInstigator = Instigator != nullptr
-		&& InFakeProjectile->Instigator != nullptr
-		&& InFakeProjectile->Instigator == Instigator;
+	const bool bSameInstigator = GetInstigator() != nullptr
+		&& InFakeProjectile->GetInstigator() != nullptr
+		&& InFakeProjectile->GetInstigator() == GetInstigator();
 	const bool bHasMovement = ProjectileMovement != nullptr
 		&& InFakeProjectile->ProjectileMovement != nullptr;
 
@@ -203,8 +203,8 @@ bool AUTPlusProj_FlakShell::CanMatchFake(AUTProjectile* InFakeProjectile, const 
 			bSameInstigator ? 1 : 0, bHasMovement ? 1 : 0, Distance, MaxDistance,
 			HorizontalDot, bDirectionOK ? 1 : 0, PhaseTime, bPhaseOK ? 1 : 0,
 			PositionError, VelocityError, bTrajectoryOK ? 1 : 0,
-			Instigator ? *Instigator->GetName() : TEXT("null"),
-			InFakeProjectile->Instigator ? *InFakeProjectile->Instigator->GetName() : TEXT("null"),
+			GetInstigator() ? *GetInstigator()->GetName() : TEXT("null"),
+			InFakeProjectile->GetInstigator() ? *InFakeProjectile->GetInstigator()->GetName() : TEXT("null"),
 			GetWorld() ? GetWorld()->GetTimeSeconds() - InFakeProjectile->CreationTime : -1.f);
 	}
 
@@ -284,7 +284,7 @@ void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 	// This fires on the CLIENT when the replicated (real) flak shell overlaps an enemy
 	// on the client's local pawn positions. The server may disagree because its
 	// capsule positions are different — the RPC gives it a second chance with rewind.
-	if (Role != ROLE_Authority && OtherActor && !bFakeClientProjectile)
+	if (GetLocalRole() != ROLE_Authority && OtherActor && !bFakeClientProjectile)
 	{
 		AUTCharacter* HitChar = Cast<AUTCharacter>(OtherActor);
 		if (HitChar)
@@ -310,7 +310,7 @@ void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 	// destroys this shell, so a claim arriving after the shell is gone (close-range timing race)
 	// can still rewind-rescue. The pawn we directly hit (or null = geometry/whiff) is passed so
 	// the grace path won't double-damage a target that already took the present-time hit.
-	if (Role == ROLE_Authority)
+	if (GetLocalRole() == ROLE_Authority)
 	{
 		AUTCharacter* OwnerChar = Cast<AUTCharacter>(GetInstigator());
 		// Resolve the cannon that fired this shell, not the weapon held when it explodes.
@@ -330,7 +330,7 @@ void AUTPlusProj_FlakShell::ProcessHit_Implementation(AActor* OtherActor, UPrimi
 	// resets StatsHitCredit itself, so this affects only the buggy direct-impact line. NOTE: the
 	// flak-PRIMARY shards (stock AUTProj_FlakShard) are a separate, unsubclassed projectile and are
 	// not covered by this fix.
-	if (Role == ROLE_Authority && Cast<APawn>(OtherActor) == nullptr)
+	if (GetLocalRole() == ROLE_Authority && Cast<APawn>(OtherActor) == nullptr)
 	{
 		StatsHitCredit = 0.f;
 	}

@@ -253,8 +253,8 @@ namespace
 		FStringClassReference& OutAnnouncerPath)
 	{
 		FString TrimmedCandidate = Candidate;
-		TrimmedCandidate.Trim();
-		TrimmedCandidate.TrimTrailing();
+		TrimmedCandidate.TrimStartInline();
+		TrimmedCandidate.TrimEndInline();
 		if (TrimmedCandidate.IsEmpty())
 		{
 			return false;
@@ -410,11 +410,11 @@ namespace
 
 	FString ResolveAvailablePackId(const FString& RequestedId)
 	{
-		// 4.15 API: TrimStartAndEnd/TrimStartAndEndInline do not exist yet —
-		// Trim() (leading) + TrimTrailing() are the in-place equivalents.
+		// UE4.25 exposes explicit in-place start/end trimming.
+		// Preserve the former leading/trailing whitespace normalization.
 		FString TrimmedId = RequestedId;
-		TrimmedId.Trim();
-		TrimmedId.TrimTrailing();
+		TrimmedId.TrimStartInline();
+		TrimmedId.TrimEndInline();
 		if (TrimmedId.IsEmpty() || TrimmedId.Equals(StockPackId, ESearchCase::IgnoreCase))
 		{
 			return StockPackId;

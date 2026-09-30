@@ -21,8 +21,8 @@
 #include "ElimPlusStatsReplicator.h"
 #include "EngineUtils.h"
 #if !UE_SERVER
-#include "Interfaces/IImageWrapper.h"
-#include "Interfaces/IImageWrapperModule.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
 #endif
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -69,12 +69,11 @@ namespace
 
 		IImageWrapperModule& ImageWrapperModule =
 			FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
-		IImageWrapperPtr ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
-		const TArray<uint8>* RawData = nullptr;
+		TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+		TArray<uint8> RawData;
 		if (!ImageWrapper.IsValid()
 			|| !ImageWrapper->SetCompressed(CompressedData.GetData(), CompressedData.Num())
-			|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData)
-			|| !RawData)
+			|| !ImageWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData))
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[AbsoluteElimScoreboard] Could not decode: %s"), *FilePath);
 			return nullptr;
@@ -82,12 +81,12 @@ namespace
 
 		const int32 Width = ImageWrapper->GetWidth();
 		const int32 Height = ImageWrapper->GetHeight();
-		if (Width <= 0 || Height <= 0 || RawData->Num() != Width * Height * 4)
+		if (Width <= 0 || Height <= 0 || RawData.Num() != Width * Height * 4)
 		{
 			return nullptr;
 		}
 
-		TArray<uint8> Pixels = *RawData;
+		TArray<uint8> Pixels = MoveTemp(RawData);
 		if (!FMath::IsNearlyEqual(Saturation, 1.f) || !FMath::IsNearlyEqual(Multiply, 1.f))
 		{
 			for (int32 Pixel = 0; Pixel < Pixels.Num(); Pixel += 4)
@@ -379,7 +378,7 @@ void UElimPlusScoreboard::DrawScoreHeaders(float RenderDelta, float& YOffset)
 }
 
 void UElimPlusScoreboard::DrawPlayerFlag(AUTPlayerState* PlayerState, float XOffset, float YOffset,
-	float FlagWidth, float FlagHeight, float Opacity)
+	float FlagWidth, float FlagHeight, float FlagOpacity)
 {
 	if (!UTHUDOwner || !Canvas || !PlayerState) return;
 
@@ -388,7 +387,7 @@ void UElimPlusScoreboard::DrawPlayerFlag(AUTPlayerState* PlayerState, float XOff
 	if (!FlagTexture) return;
 
 	const float Border = FMath::Max(1.f, 2.f * RenderScale);
-	Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.85f * Opacity));
+	Canvas->SetLinearDrawColor(FLinearColor(0.f, 0.f, 0.f, 0.85f * FlagOpacity));
 	Canvas->DrawTile(Canvas->DefaultTexture, XOffset - Border, YOffset - Border,
 		FlagWidth + 2.f * Border, FlagHeight + 2.f * Border, 0.f, 0.f, 1.f, 1.f,
 		BLEND_Translucent);
@@ -396,7 +395,7 @@ void UElimPlusScoreboard::DrawPlayerFlag(AUTPlayerState* PlayerState, float XOff
 	AUTCharacter* Character = PlayerState->GetUTCharacter();
 	const bool bIsDead = !Character || Character->IsDead();
 	const float Luminance = bIsDead ? 0.35f : 1.f;
-	Canvas->SetLinearDrawColor(FLinearColor(Luminance, Luminance, Luminance, Opacity));
+	Canvas->SetLinearDrawColor(FLinearColor(Luminance, Luminance, Luminance, FlagOpacity));
 	Canvas->DrawTile(FlagTexture, XOffset, YOffset, FlagWidth, FlagHeight,
 		FlagUV.U, FlagUV.V, FlagUV.UL, FlagUV.VL, BLEND_Translucent);
 	Canvas->SetLinearDrawColor(FLinearColor::White);
@@ -472,7 +471,7 @@ void UElimPlusScoreboard::UpdateCachedRoster(AElimPlusStatsReplicator* StatsRepl
 		{
 			if (!PlayerState->bIsDemoRecording)
 			{
-				CachedSpectatorNames.Add(PlayerState->PlayerName);
+				CachedSpectatorNames.Add(PlayerState->GetPlayerName());
 			}
 			continue;
 		}
@@ -491,7 +490,7 @@ void UElimPlusScoreboard::UpdateCachedRoster(AElimPlusStatsReplicator* StatsRepl
 
 		const FString PlayerId = PlayerState->UniqueId.IsValid()
 			? PlayerState->UniqueId.ToString()
-			: FString::Printf(TEXT("BOT:%s"), *PlayerState->PlayerName);
+			: FString::Printf(TEXT("BOT:%s"), *PlayerState->GetPlayerName());
 		const FElimPlusStatsEntry* Entry = StatsReplicator
 			? StatsReplicator->FindEntry(PlayerId)
 			: nullptr;
@@ -695,8 +694,8 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 
 	const float FlagW = 36.f * S;
 	const float FlagH = 26.f * S;
-	const float FlagX = XOffset + 30.f * S;
-	DrawPlayerFlag(PlayerState, FlagX, YOffset + 13.f * S, FlagW, FlagH,
+	const float PlayerFlagX = XOffset + 30.f * S;
+	DrawPlayerFlag(PlayerState, PlayerFlagX, YOffset + 13.f * S, FlagW, FlagH,
 		bIsDead ? 0.6f : 1.f);
 
 	UFont* RowFont = UTHUDOwner->SmallFont ? UTHUDOwner->SmallFont : UTHUDOwner->TinyFont;
@@ -713,10 +712,10 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 	}
 
 	float NameXL = 0.f, NameYL = 0.f;
-	Canvas->StrLen(RowFont, PlayerState->PlayerName, NameXL, NameYL);
+	Canvas->StrLen(RowFont, PlayerState->GetPlayerName(), NameXL, NameYL);
 	const float NameScale = FMath::Min(RowTextScale, 285.f * S / FMath::Max(NameXL, 1.f));
 	const float NameX = XOffset + 80.f * S;
-	DrawText(FText::FromString(PlayerState->PlayerName), NameX, TextY,
+	DrawText(FText::FromString(PlayerState->GetPlayerName()), NameX, TextY,
 		RowFont, NameScale, 1.f, TextColor,
 		ETextHorzPos::Left,
 		ETextVertPos::Center);
@@ -938,9 +937,9 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 	// 36:26 aspect and center it in the row's icon lane.
 	const float FlagWidth = 54.f * RenderScale;
 	const float FlagHeight = 39.f * RenderScale;
-	const float FlagX = XOffset + 11.f * RenderScale;
+	const float PlayerFlagX = XOffset + 11.f * RenderScale;
 	const float FlagY = YOffset + (0.95f * CellHeight * RenderScale - FlagHeight) * 0.5f;
-	DrawPlayerFlag(PlayerState, FlagX, FlagY, FlagWidth, FlagHeight);
+	DrawPlayerFlag(PlayerState, PlayerFlagX, FlagY, FlagWidth, FlagHeight);
 
 	// Player name
 	FLinearColor DrawColor = GetPlayerColorFor(PlayerState);
@@ -948,7 +947,7 @@ void UElimPlusScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerState, f
 	const bool bIsDead = (UTC_Name == nullptr || UTC_Name->IsDead());
 	if (bIsDead) DrawColor *= 0.6f;
 
-	FString DisplayName = PlayerState->PlayerName;
+	FString DisplayName = PlayerState->GetPlayerName();
 	float NameXL, NameYL;
 	Canvas->TextSize(UTHUDOwner->SmallFont, DisplayName, NameXL, NameYL, 1.f, 1.f);
 	const float MaxNameWidth = 0.22f * ScaledCellWidth; // tighter — 9 stat columns to fit

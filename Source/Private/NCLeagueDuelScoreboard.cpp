@@ -191,7 +191,7 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 	// the values server-side at 1Hz and replicates the percentage.
 	const FString PlayerId = PS->UniqueId.IsValid()
 		? PS->UniqueId.ToString()
-		: FString::Printf(TEXT("BOT:%s"), *PS->PlayerName);
+		: FString::Printf(TEXT("BOT:%s"), *PS->GetPlayerName());
 	float Pct = 0.f;
 	if (ANCLeagueDuelStatsReplicator* Rep = FindNCLeagueDuelStatsReplicator(GetWorld()))
 	{
@@ -206,12 +206,12 @@ void UNCLeagueDuelScoreboard::DrawPlayerScore(AUTPlayerState* PS, float XOffset,
 		// stats, the sniper writes Sniper*; the unused one is 0 so the sum is right).
 		// Must match the replicator's read — was the Link-BEAM pair, which nothing in
 		// the duel weapon set fires (the e3823f5 ElimPlus fix, ported 2026-07-01).
-		static const FName NAME_SniperHits(TEXT("SniperHits"));
-		static const FName NAME_SniperShots(TEXT("SniperShots"));
-		static const FName NAME_LightningRifleHits(TEXT("LightningRifleHits"));
-		static const FName NAME_LightningRifleShots(TEXT("LightningRifleShots"));
-		const int32 Hits  = PS->GetStatsValue(NAME_SniperHits)  + PS->GetStatsValue(NAME_LightningRifleHits);
-		const int32 Shots = PS->GetStatsValue(NAME_SniperShots) + PS->GetStatsValue(NAME_LightningRifleShots);
+		static const FName NCLeagueSniperHitsStat(TEXT("SniperHits"));
+		static const FName NCLeagueSniperShotsStat(TEXT("SniperShots"));
+		static const FName NCLeagueLightningRifleHitsStat(TEXT("LightningRifleHits"));
+		static const FName NCLeagueLightningRifleShotsStat(TEXT("LightningRifleShots"));
+		const int32 Hits  = PS->GetStatsValue(NCLeagueSniperHitsStat)  + PS->GetStatsValue(NCLeagueLightningRifleHitsStat);
+		const int32 Shots = PS->GetStatsValue(NCLeagueSniperShotsStat) + PS->GetStatsValue(NCLeagueLightningRifleShotsStat);
 		Pct = (Shots > 0) ? FMath::Min(float(Hits) / float(Shots) * 100.f, 100.f) : 0.f;
 	}
 	const FLinearColor AccColor = (Pct >= 35.f) ? FLinearColor(0.25f, 1.f, 0.25f, 1.f)
@@ -357,7 +357,7 @@ void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 
 	float NameXL, NameYL;
 	float ClanXL = 0.f;
-	FString DisplayName = PlayerState->PlayerName;
+	FString DisplayName = PlayerState->GetPlayerName();
 	FString ClanName = PlayerState->ClanName;
 	if (!PlayerState->ClanName.IsEmpty())
 	{
@@ -518,7 +518,7 @@ void UNCLeagueDuelScoreboard::DrawPlayer(int32 Index, AUTPlayerState* PlayerStat
 		float Height = 8.0f;
 		float XL, YL;
 		Canvas->TextSize(UTHUDOwner->SmallFont,
-			(PlayerState->PlayerName + PlayerState->ClanName), XL, YL, RenderScale, RenderScale);
+			(PlayerState->GetPlayerName() + PlayerState->ClanName), XL, YL, RenderScale, RenderScale);
 		float StrikeWidth = FMath::Min(0.475f*ScaledCellWidth, XL);
 		DrawTexture(UTHUDOwner->HUDAtlas, XOffset + (ScaledCellWidth * ColumnHeaderPlayerX),
 			YOffset + ColumnY, StrikeWidth, Height, 185.f, 400.f, 4.f, 4.f, 1.0f, FLinearColor::Red);
