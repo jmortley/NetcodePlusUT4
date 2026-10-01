@@ -14,6 +14,26 @@
 using uint8 = uint8_t;
 using int32 = int32_t;
 using uint32 = uint32_t;
+using uint64 = uint64_t;
+template<class T> struct TWeakObjectPtr {
+    T* Value = nullptr;
+    TWeakObjectPtr() = default;
+    TWeakObjectPtr(T* value) : Value(value) {}
+    T* Get() const { return Value; }
+    bool IsValid() const { return Value != nullptr; }
+    bool operator<(const TWeakObjectPtr& other) const { return std::less<T*>()(Value, other.Value); }
+};
+template<class K, class V> struct TMap {
+    std::map<K,V> Values;
+    V* Find(const K& key) { auto it=Values.find(key); return it == Values.end() ? nullptr : &it->second; }
+    V& FindChecked(const K& key) { return Values.at(key); }
+    void Add(const K& key, const V& value) { Values[key]=value; }
+};
+constexpr int INDEX_NONE = -1;
+namespace NCFireDiagnostics {
+    struct FInputScope { template<class... T> FInputScope(T...) {} };
+    template<class... T> void Record(T...) {}
+}
 #define TEXT(x) x
 #define UE_LOG(...) ((void)0)
 constexpr float SMALL_NUMBER = 1.e-8f;
@@ -39,6 +59,7 @@ struct FMath {
 struct FRotator { void Normalize() {} bool ContainsNaN() const { return false; } };
 struct FTimerHandle { int Id = 0; };
 struct FTimerDelegate {
+    template<class F> static FTimerDelegate CreateLambda(F f) { FTimerDelegate d; d.Call = f; return d; }
     std::function<void()> Call;
     template<class T, class... Args> void BindUObject(T* obj, void(T::*method)(Args...), Args... args) {
         Call = [=]() { (obj->*method)(args...); };
@@ -89,7 +110,8 @@ struct UWorld {
     FTimerManager Timers;
     UDemoNetDriver* DemoNetDriver = nullptr;
     AUTGameState GameState;
-    float GetTimeSeconds() const { return Timers.Now; }
+    float InputWorldTime = -1.f;
+    float GetTimeSeconds() const { return InputWorldTime >= 0 ? InputWorldTime : Timers.Now; }
     template<class T> T* GetGameState() { return &GameState; }
 };
 struct AUTWeapon;
@@ -114,6 +136,7 @@ struct AUTCharacter {
     void SetPendingFire(uint8 mode, bool value) { if (mode < 2) Pending[mode] = value; }
     Movement* GetCharacterMovement() { return &Move; }
     FRotator GetViewRotation() { return {}; }
+    template<class T=AUTPlayerState> T* GetPlayerState() { return static_cast<T*>(PlayerState); }
     float GetFireRateMultiplier() const { return FireRateMultiplier; }
     bool IsInInventory(AUTWeapon*) { return true; }
     void SwitchWeapon(AUTWeapon* weapon) { PendingWeapon = weapon; }
@@ -191,6 +214,7 @@ struct AUTWeapon {
     uint8 GetCurrentFireMode() const { return CurrentFireMode; }
     UUTWeaponState* GetCurrentState() const { return CurrentState; }
     int GetNetMode() const { return NetMode; }
+    int GetLocalRole() const { return Role; }
     uint8 GetNumFireModes() const {
         return static_cast<uint8>(std::min(255, std::min(FiringState.Num(), FireInterval.Num())));
     }
@@ -237,6 +261,8 @@ struct AUTWeaponFix : AUTWeapon {
     void StopFireInternal(uint8);
     void OnRetryTimer(uint8);
     void DeferredGotoActiveState(uint8);
+    void ClearDeferredActiveState();
+    void ScheduleDeferredActiveState(uint8, float);
     bool IsFireModeOnCooldown(uint8, float);
     void OnBufferedClickRetryTimer(uint8, FRotator, float) { std::abort(); }
     void ServerStopFireFixed(uint8 mode, int32 event) { Stops.emplace_back(mode, event); }
@@ -276,6 +302,26 @@ namespace NCShockInputTrace {
 #pragma warning(push)
 #pragma warning(disable: 4244)
 #endif
+// This input-state harness deliberately adapts the clock; the separate native
+// NCClientFireTiming test executes the real clock helper with phased timers.
+namespace NCClientFireTiming {
+    bool IsLocal(AUTWeaponFix* w) {
+        return w && w->GetWorld() && w->UTOwner && w->UTOwner->Local &&
+            !(w->GetWorld()->DemoNetDriver && w->GetWorld()->DemoNetDriver->IsPlaying());
+    }
+    float Remaining(AUTWeaponFix* w, uint8 mode) {
+        return w->LastFireTime.IsValidIndex(mode) && w->LastFireTime[mode] > 0
+            ? w->LastFireTime[mode] + w->GetRefireTime(mode) - w->GetWorld()->GetTimeSeconds() : 0;
+    }
+    float MaxRemaining(AUTWeaponFix* w) {
+        float remaining = FMath::Max(0.f, w->EarliestFireTime - w->GetWorld()->GetTimeSeconds());
+        for (int32 mode = 0; mode < w->LastFireTime.Num(); ++mode)
+            remaining=FMath::Max(remaining, Remaining(w, uint8(mode)));
+        return remaining;
+    }
+}
+static TMap<TWeakObjectPtr<AUTWeaponFix>, uint64> DeferredActiveGenerations;
+static uint64 NextDeferredActiveGeneration = 1;
 // NATIVE_METHODS
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -417,7 +463,7 @@ void Debounce() {
     for (bool reverse : {false, true}) for (bool releaseOriginal : {false, true}) {
         Fixture f; f.World.Timers.ReverseTies = reverse;
         f.Down(0); f.At(.026f); f.Down(1); f.At(.08f); f.Up(1); f.At(.085f); f.Down(1);
-        Require(f.World.Timers.IsTimerActive(f.W.RetryFireHandle[1]), "test did not exercise debounce retry");
+        Require(!f.World.Timers.IsTimerActive(f.W.RetryFireHandle[1]), "ready shared-mode press needlessly deferred");
         if (releaseOriginal) { f.At(.3f); f.Up(0); }
         f.At(2.1f); f.Count(3); f.Cadence();
         Require(!f.World.Timers.IsTimerActive(f.W.RetryFireHandle[1]), "debounce retry survived handoff");
@@ -483,9 +529,55 @@ void Boundary() {
         f.Up(firstRelease); f.Up(firstRelease ^ 1); f.At(3.f); f.Count(count); f.Cadence();
     }
 }
+void StaleRelease() {
+    for (float newPress : {11.005f, 11.040f}) {
+        Fixture f;
+        f.Down(0); f.At(.1f); f.Up(0);
+        const auto expiredCallback = f.World.Timers.Entries.at(f.W.DeferredActiveStateHandle.Id).Call;
+        f.At(.2f); f.Down(0); f.At(.991f); f.Up(0);
+        Require(f.W.CurrentState == &f.Active, "early release did not enter Active");
+        Require(!f.World.Timers.IsTimerActive(f.W.DeferredActiveStateHandle), "old release timer survived");
+        f.World.InputWorldTime = newPress;
+        f.Down(0); f.Count(2);
+        // Also exercise a callback already captured by a dispatcher: generation
+        // validation must reject it even if the same state object was reused.
+        expiredCallback();
+        Require(f.Pawn.Pending[0], "old callback cleared new held intent");
+        f.World.Timers.Advance(newPress);
+        f.World.InputWorldTime = -1.f;
+        f.At(2.2f); f.Count(3);
+        Require(f.Pawn.Pending[0], "new firing cycle was cancelled");
+        f.Up(0); f.At(4.f); f.Count(3);
+    }
+}
+void ReadyDebounce() {
+    for (uint8 mode : {uint8(0),uint8(1)}) {
+        Fixture f; f.Down(mode); f.At(.995f); f.Up(mode); f.At(1.001f);
+        f.Down(mode); f.Count(2);
+        Require(!f.World.Timers.IsTimerActive(f.W.RetryFireHandle[mode]), "ready press was deferred");
+        f.Up(mode); f.At(3.f); f.Count(2);
+        Require(!f.Pawn.Pending[mode], "released ready click became a hold");
+        // A real early press still obeys cooldown and still cancels on release.
+        Fixture early; early.Down(mode); early.At(.90f); early.Up(mode);
+        early.At(.906f); early.Down(mode);
+        Require(early.World.Timers.IsTimerActive(early.W.RetryFireHandle[mode]), "early press lost retry");
+        early.Up(mode); early.At(3.f); early.Count(1);
+    }
+}
+void ReleaseOwnership() {
+    Fixture f; f.Down(0); f.At(.1f); f.Up(0);
+    const auto old = f.World.Timers.Entries.at(f.W.DeferredActiveStateHandle.Id).Call;
+    AUTCharacter other; other.Weapon=&f.W; other.Pending[0]=true;
+    f.W.UTOwner=&other;
+    old();
+    Require(other.Pending[0] && f.W.CurrentState == &f.Mode[0], "old owner callback altered replacement owner");
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "one case required"); const std::string name(argv[1]);
-    if (name == "classifier") Classifier();
+    if (name == "stale_release") StaleRelease();
+    else if (name == "ready_debounce") ReadyDebounce();
+    else if (name == "release_ownership") ReleaseOwnership();
+    else if (name == "classifier") Classifier();
     else if (name == "guards") Guards();
     else if (name == "overlap") Overlap();
     else if (name == "handoff") Handoff();

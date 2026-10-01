@@ -1,5 +1,6 @@
 // UTWeaponStateFiringLinkBeam_Plus.cpp
 #include "UTWeaponStateFiringLinkBeamPlus.h"
+#include "NCClientFireTiming.h"
 #include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeap_LinkGun_Plus.h"
@@ -65,6 +66,7 @@ void UUTWeaponStateFiringLinkBeamPlus::RefireCheckTimer()
     if (WeaponFix && WeaponFix->LastFireTime.IsValidIndex(WeaponFix->GetCurrentFireMode()))
     {
         WeaponFix->LastFireTime[WeaponFix->GetCurrentFireMode()] = GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(WeaponFix, WeaponFix->GetCurrentFireMode());
     }
     //UE_LOG(LogUTWeaponState, Warning, TEXT("=== RefireCheckTimer END ==="));
 }
@@ -115,6 +117,7 @@ void UUTWeaponStateFiringLinkBeamPlus::BeginState(const UUTWeaponState* Prev)
     if (WeaponFix && WeaponFix->LastFireTime.IsValidIndex(GetOuterAUTWeapon()->GetCurrentFireMode()))
     {
         WeaponFix->LastFireTime[GetOuterAUTWeapon()->GetCurrentFireMode()] = GetOuterAUTWeapon()->GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(WeaponFix, GetOuterAUTWeapon()->GetCurrentFireMode());
     }
 
     GetOuterAUTWeapon()->bNetDelayedShot = false;

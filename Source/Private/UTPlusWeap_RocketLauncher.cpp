@@ -2,6 +2,7 @@
 // Full integration with spiral rockets and new standalone transactional charged state
 
 #include "UTPlusWeap_RocketLauncher.h"
+#include "NCClientFireTiming.h"
 #include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeaponStateFiring_Transactional.h"
@@ -498,12 +499,14 @@ void AUTPlusWeap_RocketLauncher::FireShotDirect()
         // Add 0.2s padding. This defeats the 0.06s network tolerance 
         // in UTWeaponFix and ensures the cooldown math always results in a block.
         LastFireTime[0] = CurrentTime;
+        NCClientFireTiming::Record(this, 0);
 
     }
 
     if (LastFireTime.IsValidIndex(CurrentFireMode))
     {
         LastFireTime[CurrentFireMode] = CurrentTime;
+        NCClientFireTiming::Record(this, CurrentFireMode);
 
         // LOGGING ADDED HERE
         //UE_LOG(LogUTRocketLauncher, Log, TEXT("[FireShotDirect] Forcing LastFireTime Update. Mode: %d | Time: %f | LastFireTime: %f"),

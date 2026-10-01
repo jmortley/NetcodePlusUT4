@@ -1,4 +1,5 @@
 #include "UTWeaponStateFiringChargedRocket_Transactional.h"
+#include "NCClientFireTiming.h"
 #include "NCFireDiagnostics.h"
 #include "UTPlusWeap_RocketLauncher.h"
 #include "UTWeaponFix.h"
@@ -83,6 +84,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::BeginState(const UUTWeapon
     if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
     {
         W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(W, GetFireMode());
     }
     // 2. Safety checks
     if (GetUTOwner() == nullptr || GetOuterAUTWeapon()->GetCurrentState() != this)
@@ -680,6 +682,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
         if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
         {
             W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+            NCClientFireTiming::Record(W, GetFireMode());
         }
 
         GetOuterAUTWeapon()->GetWorldTimerManager().ClearTimer(GraceTimerHandle);
@@ -775,6 +778,7 @@ void UUTWeaponStateFiringChargedRocket_Transactional::FireLoadedRocket()
     if (W && W->LastFireTime.IsValidIndex(GetFireMode()))
     {
         W->LastFireTime[GetFireMode()] = GetWorld()->GetTimeSeconds();
+        NCClientFireTiming::Record(W, GetFireMode());
     }
 
     if (GetOuterAUTWeapon()->GetCurrentState() == this)

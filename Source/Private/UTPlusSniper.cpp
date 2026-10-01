@@ -340,7 +340,7 @@ void AUTPlusSniper::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 			GetUTOwner()->Controller, SpawnLocation, FireDir, 0.7f,
 			(Hit.Location - SpawnLocation).Size(), 150.0f, AUTCharacter::StaticClass()));
 
-		if (IsLiveHitscanTarget(AltTarget))
+		if (IsLiveHitscanTarget(AltTarget) && IsServerRateTargetHistoryValid(AltTarget, PredictionTime))
 		{
 			// Calculate effective head scale
 			const float UnpaddedHeadScale = GetHeadshotScale(AltTarget);

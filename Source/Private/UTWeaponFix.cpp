@@ -1,6 +1,7 @@
 
 #include "UTWeaponFix.h"
 #include "NCFireDiagnostics.h"
+#include "NCClientFireTiming.h"
 #include "NCShockInputTrace.h"
 #include "NCShotOriginDiagnostics.h"
 #include "NCPClockSync.h"
@@ -178,6 +179,15 @@ struct FDeferredEquipFireContext
     bool bAcceptedViaRetry = false;
     bool bDeferredEquip = false;
     bool bDeferredState = false;
+    // Separate from equip/state-tail replay: no backdated fire-rate credit.
+    bool bDeferredRate = false;
+    float RateDueTime = 0.f;
+    float RateMaxAge = 0.f;
+    float RatePredictionTime = 0.f;
+    float RateObservedRTTMs = 0.f;
+    bool bRateObservedRTTValid = false;
+    FVector RateFireOrigin = FVector::ZeroVector;
+    FTimerHandle RateTimer;
     bool bDispatchReady = false;
     TWeakObjectPtr<UUTWeaponState> ExpectedFiringState;
     TWeakObjectPtr<UUTWeaponState> WaitingState;
@@ -185,7 +195,67 @@ struct FDeferredEquipFireContext
 
 static TMap<TWeakObjectPtr<AUTWeaponFix>, FDeferredEquipFireContext> DeferredEquipFireContexts;
 static TMap<TWeakObjectPtr<AUTWeaponFix>, uint32> DeferredEquipFireGenerations;
+// Release cleanup is owned by a cycle, independently of server reservations.
+static TMap<TWeakObjectPtr<AUTWeaponFix>, uint64> DeferredActiveGenerations;
+static uint64 NextDeferredActiveGeneration = 1;
+static TMap<TWeakObjectPtr<AUTWeaponFix>, FDeferredEquipFireContext> FollowingRateFireContexts;
 static uint32 NextDeferredEquipFireGeneration = 1;
+
+static TAutoConsoleVariable<float> CVarServerRateQueueMs(
+    TEXT("ncp.ServerRateQueueMs"), 100.f,
+    TEXT("Server-only ordinary transactional shot reservation for arrival compression. 0=legacy rejection. Hard maximum 100ms, further limited to half refire; no catch-up burst."),
+    ECVF_Default);
+static constexpr float ServerRateMaxAgeSeconds = 0.250f;
+// Actual dispatch, not the rhythm-compensated logical LastFireTime.
+static TMap<TWeakObjectPtr<AUTWeaponFix>, TArray<float>> ServerActualFireTimes;
+
+static float ServerRateReservationDelay(float Now, float LogicalLast, float ActualLast,
+    float Refire, float ConfiguredMs)
+{
+    if (!FMath::IsFinite(Now) || !FMath::IsFinite(LogicalLast)
+        || !FMath::IsFinite(ActualLast) || !FMath::IsFinite(Refire)
+        || !FMath::IsFinite(ConfiguredMs) || Refire <= 0.f || LogicalLast <= 0.f)
+        return 0.f;
+    const float Limit = FMath::Min(FMath::Clamp(ConfiguredMs, 0.f, 100.f) * 0.001f, Refire * 0.5f);
+    const float Delay = FMath::Max(LogicalLast, ActualLast) + Refire - Now;
+    return Delay > 0.f && Delay <= Limit + SMALL_NUMBER ? Delay : 0.f;
+}
+
+// Stack-scoped payload only while the accepted shot executes. No later stream
+// tick or unrelated weapon can inherit a saved origin or extra rewind.
+struct FServerRateDispatchScope;
+static TMap<const AUTWeaponFix*, const FServerRateDispatchScope*> ServerRateDispatchScopes;
+struct FServerRateDispatchScope
+{
+    const AUTWeaponFix* Weapon;
+    const FDeferredEquipFireContext* Context;
+    const FServerRateDispatchScope* Previous = nullptr;
+    float QueueAge = 0.f;
+    FServerRateDispatchScope(const AUTWeaponFix* InWeapon, const FDeferredEquipFireContext* InContext, float Now)
+        : Weapon(InWeapon), Context(InContext)
+    {
+        if (Context && Context->bDeferredRate)
+        {
+            QueueAge = FMath::Max(0.f, Now - Context->ServerAcceptTime);
+            const FServerRateDispatchScope* const* Old = ServerRateDispatchScopes.Find(Weapon);
+            Previous = Old ? *Old : nullptr;
+            ServerRateDispatchScopes.Add(Weapon, this);
+        }
+    }
+    ~FServerRateDispatchScope()
+    {
+        if (Context && Context->bDeferredRate)
+        {
+            if (Previous) ServerRateDispatchScopes.Add(Weapon, Previous);
+            else ServerRateDispatchScopes.Remove(Weapon);
+        }
+    }
+};
+static const FServerRateDispatchScope* FindServerRateDispatch(const AUTWeaponFix* Weapon)
+{
+    const FServerRateDispatchScope* const* Entry = ServerRateDispatchScopes.Find(Weapon);
+    return Entry ? *Entry : nullptr;
+}
 
 static uint32 AllocateDeferredEquipFireGeneration()
 {
@@ -2074,8 +2144,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		{
 			if (LastFireTime[Mode] > 0.f)
 			{
-				ReadyAt = FMath::Max(ReadyAt,
-					LastFireTime[Mode] + GetRefireTime(Mode));
+                ReadyAt = FMath::Max(ReadyAt, Now + NCClientFireTiming::Remaining(this, uint8(Mode)));
 			}
 		}
 		const float ReadyInMs = FMath::Max(0.f, (ReadyAt - Now) * 1000.f);
@@ -2089,7 +2158,8 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 		const float SinceRelease = LastReleaseTime.IsValidIndex(0)
 			&& LastReleaseTime[0] > 0.f ? Now - LastReleaseTime[0] : -1.f;
 		const bool bDebounceWillQueue = !bHandlingRetry
-			&& TraceDebounceWindow > 0.f && SinceRelease >= 0.f
+            && FMath::Max(EarliestFireTime - Now, NCClientFireTiming::Remaining(this, FireModeNum)) > SMALL_NUMBER
+            && TraceDebounceWindow > 0.f && SinceRelease >= 0.f
 			&& SinceRelease < TraceDebounceWindow;
 		AUTGameState* TraceGS = TraceWorld
 			? TraceWorld->GetGameState<AUTGameState>() : nullptr;
@@ -2253,8 +2323,12 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
             EffectiveDebounce = FMath::Min(MouseDebounceWindow, Cap);
         }
     }
+    // Ready presses must reach normal preflight immediately. Deferring one to
+    // a generic retry lets a following release erase it before the timer tick.
+    const float DebounceReadyDelay = FMath::Max(EarliestFireTime - GetWorld()->GetTimeSeconds(),
+        NCClientFireTiming::Remaining(this, FireModeNum));
     if (!bHandlingRetry && UTOwner && UTOwner->IsLocallyControlled() &&
-        EffectiveDebounce > 0.f &&
+        DebounceReadyDelay > SMALL_NUMBER && EffectiveDebounce > 0.f &&
         LastReleaseTime.IsValidIndex(FireModeNum) &&
         LastReleaseTime[FireModeNum] > 0.0f)
     {
@@ -2286,16 +2360,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
                 bBufferedClickPending[FireModeNum] = false;   // this press owns the timer now
                 if (!GetWorldTimerManager().IsTimerActive(RetryFireHandle[FireModeNum]))
                 {
-                    float MaxReadyTime = 0.f;
-                    for (int32 i = 0; i < LastFireTime.Num(); i++)
-                    {
-                        if (LastFireTime[i] > 0.0f)
-                        {
-                            MaxReadyTime = FMath::Max(MaxReadyTime, LastFireTime[i] + GetRefireTime(i));
-                        }
-                    }
-                    MaxReadyTime = FMath::Max(MaxReadyTime, EarliestFireTime);
-                    const float Delay = MaxReadyTime - GetWorld()->GetTimeSeconds();
+                    const float Delay = DebounceReadyDelay;
                     FTimerDelegate RetryDel;
                     RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
                     // Exact delay, no slack — timers never fire early; a tiny
@@ -2501,24 +2566,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         // pawns aren't locally controlled so this still skips correctly there.
         if (UTOwner && UTOwner->IsLocallyControlled())
         {
-            // Find when the cooldown actually ends
-            float MaxReadyTime = 0.f;
-            for (int32 i = 0; i < LastFireTime.Num(); i++)
-            {
-                if (LastFireTime[i] > 0.0f)
-                {
-                    float ModeReadyTime = LastFireTime[i] + GetRefireTime(i);
-                    if (ModeReadyTime > MaxReadyTime)
-                    {
-                        MaxReadyTime = ModeReadyTime;
-                    }
-                }
-            }
-			if (EarliestFireTime > MaxReadyTime)
-			{
-				MaxReadyTime = EarliestFireTime;
-			}
-            float Delay = MaxReadyTime - CurrentTime;
+            const float Delay = NCClientFireTiming::MaxRemaining(this);
 
             // Exact-delay arm (2026-08-06): timers never fire early, so the old
             // +10ms slack only made every rescued click land 1-2 frames late at
@@ -2617,23 +2665,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
 			// (StopFire clears RetryFireHandle unconditionally) — tap behaves like stock too.
 			if (CrossModeRetry() && FireModeNum < 2 && UTOwner && UTOwner->IsLocallyControlled())
 			{
-				float MaxReadyTime = 0.f;
-				for (int32 i = 0; i < LastFireTime.Num(); i++)
-				{
-					if (LastFireTime[i] > 0.0f)
-					{
-						float ModeReadyTime = LastFireTime[i] + GetRefireTime(i);
-						if (ModeReadyTime > MaxReadyTime)
-						{
-							MaxReadyTime = ModeReadyTime;
-						}
-					}
-				}
-				if (EarliestFireTime > MaxReadyTime)
-				{
-					MaxReadyTime = EarliestFireTime;
-				}
-				const float Delay = FMath::Max(MaxReadyTime - GetWorld()->GetTimeSeconds(), 0.f) + 0.01f;
+                const float Delay = NCClientFireTiming::MaxRemaining(this) + 0.01f;
 				FTimerDelegate RetryDel;
 				RetryDel.BindUObject(this, &AUTWeaponFix::OnRetryTimer, FireModeNum);
 				GetWorldTimerManager().SetTimer(RetryFireHandle[FireModeNum], RetryDel, Delay, false);
@@ -2724,6 +2756,9 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         }
     }
 
+    // An accepted fresh cycle from Active supersedes all previous release cleanup.
+    if (GetCurrentState() == ActiveState) ClearDeferredActiveState();
+
     // Prevent re-entry if already firing this mode.
     // BUT: if we're in FiringState with a deferred GotoActiveState timer running,
     // the player tapped and is now re-pressing. Cancel the deferred timer,
@@ -2733,7 +2768,7 @@ void AUTWeaponFix::StartFire(uint8 FireModeNum)
         if (GetWorldTimerManager().IsTimerActive(DeferredActiveStateHandle))
         {
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StartFire] Mode %d: Re-fire during deferred cooldown — cancelling timer, transitioning to ActiveState"), FireModeNum);
-            GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
+            ClearDeferredActiveState();
             GotoActiveState();
             // Fall through — ActiveState will now allow BeginFiringSequence below
         }
@@ -2860,6 +2895,7 @@ void AUTWeaponFix::GotoState(UUTWeaponState* NewState)
                         || HasAcceptedTransactionalRequest(Mode)))
                 {
                     CurrentFireMode = Mode;
+                    ClearDeferredActiveState();
                     Super::GotoState(Candidate);
                     break;
                 }
@@ -2872,11 +2908,15 @@ void AUTWeaponFix::GotoState(UUTWeaponState* NewState)
         && !Waiting->bShotDispatched && CurrentState == Waiting->WaitingState.Get()
         && NewState != CurrentState && NewState != Waiting->ExpectedFiringState.Get()
         && !(NewState == ActiveState && Waiting->bDispatchReady);
-    if (NewState == InactiveState || NewState == UnequippingState || bLeavingReservation)
+    const bool bLeavingRateReservation = Waiting && Waiting->bDeferredRate && !Waiting->bShotDispatched
+        && NewState != CurrentState && NewState != ActiveState
+        && NewState != Waiting->ExpectedFiringState.Get();
+    if (NewState == InactiveState || NewState == UnequippingState || bLeavingReservation || bLeavingRateReservation)
     {
         ClearDeferredEquipFireContext(true, NewState == UnequippingState ? TEXT("switch_before_commit")
             : NewState == InactiveState ? TEXT("inactive") : TEXT("waiting_state_left"));
     }
+    if (NewState != CurrentState) ClearDeferredActiveState();
     Super::GotoState(NewState);
 }
 
@@ -3000,13 +3040,136 @@ bool AUTWeaponFix::CompleteAcceptedDeferredFire(UUTWeaponState* CompletingState)
     return true;
 }
 
+
+void AUTWeaponFix::CompleteAcceptedRateFire(uint8 FireModeNum, uint32 ContextGeneration)
+{
+    const TWeakObjectPtr<AUTWeaponFix> Key(this);
+    FDeferredEquipFireContext* Context = DeferredEquipFireContexts.Find(Key);
+    const uint32* Generation = DeferredEquipFireGenerations.Find(Key);
+    if (!Context || !Generation || *Generation != ContextGeneration
+        || Context->Generation != ContextGeneration || !Context->bDeferredRate
+        || Context->bShotDispatched || Context->FireMode != FireModeNum) return;
+    UWorld* World = GetWorld();
+    AUTGameState* GS = World ? World->GetGameState<AUTGameState>() : nullptr;
+    UUTWeaponState* Target = Context->ExpectedFiringState.Get();
+    const float Now = World ? World->GetTimeSeconds() : -1.f;
+    const bool bStateAllowed = CurrentState == ActiveState
+        || Cast<UUTWeaponStateFiring_Transactional>(CurrentState) != nullptr;
+    if (!World || !RequiresTransactionalRequest() || !UTOwner || UTOwner->IsDead()
+        || UTOwner->IsPendingKillPending() || IsPendingKillPending()
+        || Context->Owner.Get() != UTOwner || UTOwner->GetWeapon() != this
+        || UTOwner->GetPendingWeapon() || !FiringState.IsValidIndex(FireModeNum)
+        || FiringState[FireModeNum] != Target || !Cast<UUTWeaponStateFiring_Transactional>(Target)
+        || !bStateAllowed || !HasAmmo(FireModeNum) || UTOwner->IsFiringDisabled()
+        || !AllowServerFireMode(FireModeNum) || (GS && GS->PreventWeaponFire())
+        || Context->RateFireOrigin.ContainsNaN()
+        || Now < Context->ServerAcceptTime || Now - Context->ServerAcceptTime > Context->RateMaxAge)
+    {
+        ClearDeferredEquipFireContext(true, TEXT("rate_commit_lifetime_policy_or_age"));
+        return;
+    }
+    const bool bProjectile = ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum] != nullptr;
+    const float Age = Now - Context->ServerAcceptTime;
+    const float RequiredRewind = bProjectile
+        ? Context->RateObservedRTTMs * 0.0005f + Age : Context->RatePredictionTime + Age;
+    const float RewindCap = FMath::Max(0.f, bProjectile ? ProjectilePredictionCapMs : MaxRewindMs) * 0.0005f;
+    if (RequiredRewind > RewindCap + SMALL_NUMBER)
+    {
+        ClearDeferredEquipFireContext(true, TEXT("rate_history_budget_exceeded"));
+        return;
+    }
+    for (const FSavedPosition& Position : UTOwner->SavedPositions)
+    {
+        if (Position.bTeleported && Position.Time >= Context->ServerAcceptTime)
+        {
+            ClearDeferredEquipFireContext(true, TEXT("rate_owner_teleported"));
+            return;
+        }
+    }
+    const TArray<float>* ActualTimes = ServerActualFireTimes.Find(Key);
+    const float LastActual = ActualTimes && ActualTimes->IsValidIndex(FireModeNum)
+        ? (*ActualTimes)[FireModeNum] : 0.f;
+    const float Refire = GetRefireTime(FireModeNum);
+    const float LegalTime = FMath::Max(Context->RateDueTime, LastActual + Refire);
+    if (!FMath::IsFinite(Refire) || Refire <= 0.f || LegalTime > Context->ServerAcceptTime + Context->RateMaxAge)
+    {
+        ClearDeferredEquipFireContext(true, TEXT("rate_cadence_changed"));
+        return;
+    }
+    if (Now + SMALL_NUMBER < LegalTime)
+    {
+        FTimerDelegate Retry;
+        Retry.BindUObject(this, &AUTWeaponFix::CompleteAcceptedRateFire, FireModeNum, ContextGeneration);
+        GetWorldTimerManager().SetTimer(Context->RateTimer, Retry, FMath::Max(0.001f, LegalTime - Now), false);
+        return;
+    }
+    Context->bDispatchReady = true;
+    const bool bReleased = Context->bReleaseSeen || !UTOwner->IsPendingFire(FireModeNum);
+    const TWeakObjectPtr<AUTCharacter> ExpectedOwner(UTOwner);
+    const int32 Event = Context->FireEventIndex;
+    ClearDeferredActiveState();
+    if (CurrentState != ActiveState && CurrentState != Target)
+        UTOwner->SetPendingFire(CurrentFireMode, false);
+    CurrentFireMode = FireModeNum;
+    CurrentlyFiringMode = FireModeNum;
+    for (int32 Mode = 0; Mode < FireModeActiveState.Num(); ++Mode)
+        FireModeActiveState[Mode] = Mode == FireModeNum ? 1 : 0;
+    // The reservation owns exactly one dispatch even after release. Re-latch
+    // only synchronously for the stock continuation gate, then restore release.
+    UTOwner->SetPendingFire(FireModeNum, true);
+    NCFireDiagnostics::FRequestScope Trace(this, FireModeNum, Event, ContextGeneration);
+    if (CurrentState == Target)
+        Cast<UUTWeaponStateFiring_Transactional>(Target)->TransactionalFire();
+    else
+        GotoState(Target);
+    Context = DeferredEquipFireContexts.Find(Key);
+    Generation = DeferredEquipFireGenerations.Find(Key);
+    if (!Context || !Generation || *Generation != ContextGeneration
+        || Context->Generation != ContextGeneration || UTOwner != ExpectedOwner.Get()) return;
+    const bool bShot = Context->bShotDispatched;
+    ClearDeferredEquipFireContext(false, TEXT("rate_dispatch_failed"));
+    if (bShot && UTOwner)
+    {
+        NCFireDiagnostics::Record(this, TEXT("ACK_SENT"), FireModeNum, Event, ContextGeneration);
+        ClientConfirmFireEvent(FireModeNum, Event);
+    }
+    if (bReleased && UTOwner && UTOwner->GetWeapon() == this && CurrentState == Target)
+    {
+        UTOwner->SetPendingFire(FireModeNum, false);
+        if (bShot)
+        {
+            FTimerDelegate Release;
+            Release.BindUObject(this, &AUTWeaponFix::ReconcileDeferredEquipRelease,
+                FireModeNum, Event, ContextGeneration, ExpectedOwner);
+            GetWorldTimerManager().SetTimerForNextTick(Release);
+        }
+    }
+    PromoteFollowingRateFire();
+}
+
+void AUTWeaponFix::PromoteFollowingRateFire()
+{
+    const TWeakObjectPtr<AUTWeaponFix> Key(this);
+    const FDeferredEquipFireContext* Following = FollowingRateFireContexts.Find(Key);
+    if (!Following || DeferredEquipFireContexts.Contains(Key)) return;
+    const FDeferredEquipFireContext Copy = *Following;
+    FollowingRateFireContexts.Remove(Key);
+    DeferredEquipFireContexts.Add(Key, Copy);
+    DeferredEquipFireGenerations.Add(Key, Copy.Generation);
+    FDeferredEquipFireContext* Live = DeferredEquipFireContexts.Find(Key);
+    FTimerDelegate Commit;
+    Commit.BindUObject(this, &AUTWeaponFix::CompleteAcceptedRateFire, Copy.FireMode, Copy.Generation);
+    const float Delay = FMath::Max(0.001f, Copy.RateDueTime - GetWorld()->GetTimeSeconds());
+    GetWorldTimerManager().SetTimer(Live->RateTimer, Commit, Delay, false);
+}
+
 void AUTWeaponFix::ClearDeferredEquipFireContext(bool bInvalidateGeneration, const TCHAR* Reason)
 {
 	// Clearing the stock one-slot queue is correct only when the matching
 	// NetcodePlus context is being superseded or its equip lifetime is ending.
 	// A physical Stop merely marks bReleaseSeen and deliberately does not call here.
 	const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
-	const FDeferredEquipFireContext* const Context = DeferredEquipFireContexts.Find(WeaponKey);
+	FDeferredEquipFireContext* const Context = DeferredEquipFireContexts.Find(WeaponKey);
 	if (Context != nullptr && Context->bDeferredEquip && EquippingState != nullptr
 		&& EquippingState->PendingFireSequence == Context->FireMode)
 	{
@@ -3027,6 +3190,17 @@ void AUTWeaponFix::ClearDeferredEquipFireContext(bool bInvalidateGeneration, con
         bIsTransactionalFire = false;
         CachedTransactionalRotation = FRotator::ZeroRotator;
         ScopedTransactionalAimWeapons.Remove(this);
+    }
+    if (Context && Context->bDeferredRate)
+        GetWorldTimerManager().ClearTimer(Context->RateTimer);
+    if (bInvalidateGeneration)
+    {
+        const FDeferredEquipFireContext* Following = FollowingRateFireContexts.Find(WeaponKey);
+        if (Following && NCFireDiagnostics::Enabled())
+            NCFireDiagnostics::Record(this, TEXT("CANCEL"), Following->FireMode,
+                Following->FireEventIndex, Following->Generation,
+                FString::Printf(TEXT("reason=rate_following_%s"), Reason));
+        FollowingRateFireContexts.Remove(WeaponKey);
     }
 	DeferredEquipFireContexts.Remove(WeaponKey);
 	if (bInvalidateGeneration)
@@ -3206,6 +3380,11 @@ void AUTWeaponFix::FireShot()
 		return;
 	}
 
+    if (Role == ROLE_Authority && NCClientFireTiming::IsLocal(this))
+    {
+        NCClientFireTiming::Record(this, CurrentFireMode, true);
+    }
+
 	// --- CLIENT SIDE ---
 	if (Role < ROLE_Authority)
 	{
@@ -3217,25 +3396,12 @@ void AUTWeaponFix::FireShot()
 		if (ClientFireEventIndex.IsValidIndex(CurrentFireMode))
 			ClientFireEventIndex[CurrentFireMode] = NextEventIndex;
 
+        // Local cooldowns use the TimerManager clock. This legacy timestamp
+        // remains a world-time observation and cannot accumulate future debt.
+        NCClientFireTiming::Record(this, CurrentFireMode, true);
         if (LastFireTime.IsValidIndex(CurrentFireMode))
         {
-            float CurrentTime = World->GetTimeSeconds();
-            float Refire = GetRefireTime(CurrentFireMode);
-            float OldTime = LastFireTime[CurrentFireMode];
-
-            // If this isn't the first shot, and we haven't paused firing for a long time...
-            if (OldTime > 0.0f && (CurrentTime - OldTime) < (Refire + 0.06f))
-            {
-                // Snap the timer to the Theoretical Time.
-                // Even if we fired 0.08s early, the clock is set as if we fired on time.
-                // The NEXT shot will be calculated relative to this Theoretical Time.
-                LastFireTime[CurrentFireMode] = OldTime + Refire;
-            }
-            else
-            {
-                // First shot or resuming after a pause, reset clock to Now.
-                LastFireTime[CurrentFireMode] = CurrentTime;
-            }
+            LastFireTime[CurrentFireMode] = World->GetTimeSeconds();
         }
 		FRotator ClientRot = bBufferedShockDispatch
 			? CachedTransactionalRotation
@@ -3623,6 +3789,13 @@ void AUTWeaponFix::FireShot()
 				LastFireTime[CurrentFireMode], DeferredContext->ServerAcceptTime);
 		}
 
+        if (bAcceptedRequestDispatch && AcceptedContext.bDeferredRate && LastFireTime.IsValidIndex(CurrentFireMode))
+            LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+        TArray<float>& ActualTimes = ServerActualFireTimes.FindOrAdd(WeaponKey);
+        if (!ActualTimes.IsValidIndex(CurrentFireMode)) ActualTimes.SetNumZeroed(CurrentFireMode + 1);
+        ActualTimes[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+        FServerRateDispatchScope RateScope(this, bAcceptedRequestDispatch ? &AcceptedContext : nullptr,
+            GetWorld()->GetTimeSeconds());
 		// 3. SPAWN PROJECTILE
 		UE_LOG(LogUTWeaponFix, Verbose, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
 		Super::FireShot();
@@ -3905,15 +4078,7 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         // Only defer the STATE TRANSITION (GotoActiveState). This keeps the weapon
         // in FiringState during cooldown so PutDown() routes to the cooldown-aware
         // override in UUTWeaponStateFiring_Transactional.
-        float CurrentTime = GetWorld()->GetTimeSeconds();
-        float ReadyTime = 0.f;
-
-        if (LastFireTime.IsValidIndex(FireModeNum))
-        {
-            ReadyTime = LastFireTime[FireModeNum] + GetRefireTime(FireModeNum);
-        }
-
-        float TimeRemaining = ReadyTime - CurrentTime;
+        const float TimeRemaining = NCClientFireTiming::Remaining(this, FireModeNum);
 
         // An identical Instagib mode can now remain independently held. The existing
         // <=10ms immediate Active transition would fire that mode slightly early,
@@ -3931,13 +4096,12 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
         if (TimeRemaining > 0.01f || (bHeldInstagibHandoff && TimeRemaining > 0.f))
         {
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d: Deferring GotoActiveState by %.3fs"), FireModeNum, TimeRemaining);
-            FTimerDelegate Del;
-            Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
-            GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
+            ScheduleDeferredActiveState(FireModeNum, TimeRemaining);
         }
         else
         {
             UE_LOG(LogUTWeaponFix, Verbose, TEXT("[StopFire] Mode %d: Cooldown elapsed — immediate GotoActiveState"), FireModeNum);
+            ClearDeferredActiveState();
             GotoActiveState();
         }
     }
@@ -3973,8 +4137,32 @@ void AUTWeaponFix::StopFire(uint8 FireModeNum)
     
 }
 
-bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime)
+
+bool AUTWeaponFix::CanReserveServerRateFire(uint8 FireModeNum, float Delay)
 {
+    if (!FMath::IsFinite(Delay) || Delay <= 0.f || Delay > 0.100f + SMALL_NUMBER
+        || !RequiresTransactionalRequest() || !UTOwner || UTOwner->IsDead()
+        || UTOwner->IsPendingKillPending() || IsPendingKillPending()
+        || UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon()
+        || !FiringState.IsValidIndex(FireModeNum)
+        || !Cast<UUTWeaponStateFiring_Transactional>(FiringState[FireModeNum])
+        || (CurrentState != ActiveState && !Cast<UUTWeaponStateFiring_Transactional>(CurrentState))
+        || !HasAmmo(FireModeNum) || UTOwner->IsFiringDisabled() || !AllowServerFireMode(FireModeNum)) return false;
+    AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+    if (GS && GS->PreventWeaponFire()) return false;
+    float ObservedRTT = 0.f;
+    GetServerObservedRTTMs(Cast<AUTPlayerController>(UTOwner->Controller), ObservedRTT);
+    const bool bProjectile = ProjClass.IsValidIndex(FireModeNum) && ProjClass[FireModeNum] != nullptr;
+    const float BaseRewind = bProjectile ? ObservedRTT * 0.0005f : GetHitValidationPredictionTime();
+    const float Cap = FMath::Max(0.f, bProjectile ? ProjectilePredictionCapMs : MaxRewindMs) * 0.0005f;
+    // Reject before sequence consumption if the planned wait cannot fit the
+    // existing history/catchup budget. The original resend remains eligible.
+    return FMath::IsFinite(BaseRewind) && FMath::IsFinite(Cap) && BaseRewind + Delay + 0.034f < Cap;
+}
+
+bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime, float* OutRateDelay, float MinimumRateDelay)
+{
+    if (OutRateDelay) *OutRateDelay = 0.f;
     // Critical Fix #5: Multi-layer validation
     // Get player name for logging (do this once at the top)
 	FString PlayerName = TEXT("Unknown");
@@ -4085,6 +4273,18 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
         // rhythm compensation snaps Delta to exactly MinInterval (e.g., 0.550 < 0.550).
         if (TimeSinceLastFire < MinInterval - SMALL_NUMBER)
         {
+            const TArray<float>* ActualTimes = ServerActualFireTimes.Find(TWeakObjectPtr<AUTWeaponFix>(this));
+            const float ActualLast = ActualTimes && ActualTimes->IsValidIndex(FireModeNum)
+                ? (*ActualTimes)[FireModeNum] : LastFireTime[FireModeNum];
+            const float Delay = ServerRateReservationDelay(ServerTime, LastFireTime[FireModeNum],
+                ActualLast, RefireTime, CVarServerRateQueueMs.GetValueOnGameThread());
+            const bool bCanReserve = OutRateDelay && CanReserveServerRateFire(FireModeNum, Delay);
+            if (bCanReserve)
+            {
+                *OutRateDelay = Delay;
+            }
+            else
+            {
             if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InEventIndex, 0,
                 FString::Printf(TEXT("reason=rate delta=%.6f min=%.6f tolerance=%.6f"), TimeSinceLastFire, MinInterval, JitterTolerance));
 			if (RocketPrimaryDiagFor(this, FireModeNum))
@@ -4098,9 +4298,21 @@ bool AUTWeaponFix::ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, fl
             UE_LOG(LogUTWeaponFix, Warning, TEXT("Shot rejected for %s: [Server] REJECTED Rapid Fire. Mode %d. Delta: %.3f < Min: %.3f"),
                 *PlayerName, FireModeNum, TimeSinceLastFire, MinInterval);
             return false;
+            }
         }
     }
 
+    if (MinimumRateDelay > 0.f)
+    {
+        const float Delay = FMath::Max(MinimumRateDelay, OutRateDelay ? *OutRateDelay : 0.f);
+        if (!OutRateDelay || !CanReserveServerRateFire(FireModeNum, Delay))
+        {
+            NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InEventIndex, 0,
+                TEXT("reason=rate_following_policy_or_history_budget"));
+            return false;
+        }
+        *OutRateDelay = Delay;
+    }
     // CRITICAL: Update AuthoritativeFireEventIndex HERE, atomically with the check.
     // UE4 processes all queued RPCs in a batch within one server frame. If the
     // original fire + a resend both arrive on the same frame, they both pass
@@ -4134,6 +4346,11 @@ bool AUTWeaponFix::IsFireModeOnCooldown(uint8 FireModeNum, float CurrentTime)
     if (EarliestFireTime > CurrentTime)
     {
         return true;
+    }
+
+    if (NCClientFireTiming::IsLocal(this))
+    {
+        return NCClientFireTiming::Remaining(this, FireModeNum) > SMALL_NUMBER;
     }
 
     // Client: essentially strict — prevents tap-fire from beating hold-fire.
@@ -4192,7 +4409,7 @@ bool AUTWeaponFix::IsFireEventSequenceValid(uint8 FireModeNum, int32 InEventInde
 
     // Event must be newer than last processed, but not too far ahead
     int32 LastProcessed = AuthoritativeFireEventIndex[FireModeNum];
-    return (InEventIndex > LastProcessed) && (InEventIndex <= LastProcessed + 10);
+    return (InEventIndex > LastProcessed) && (int64(InEventIndex) <= int64(LastProcessed) + 10);
 }
 
 
@@ -4310,20 +4527,32 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         ClearDeferredEquipFireContext(true, TEXT("state_lost"));
         Reserved = nullptr;
     }
-    if (Reserved && !Reserved->bShotDispatched
-        && (Reserved->bDeferredEquip || Reserved->bDeferredState))
+    const bool bQueueBehindRate = Reserved && Reserved->bDeferredRate && !Reserved->bShotDispatched
+        && Reserved->FireMode != FireModeNum && !FollowingRateFireContexts.Contains(ReservationKey)
+        && FiringState.IsValidIndex(FireModeNum)
+        && Cast<UUTWeaponStateFiring_Transactional>(FiringState[FireModeNum]) != nullptr;
+    const float PreviousRateDue = bQueueBehindRate ? Reserved->RateDueTime : 0.f;
+    if (Reserved && !Reserved->bShotDispatched && !bQueueBehindRate
+        && (Reserved->bDeferredEquip || Reserved->bDeferredState || Reserved->bDeferredRate))
     {
         if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InFireEventIndex, 0,
             FString::Printf(TEXT("reason=reservation_busy retained=%d"), Reserved->FireEventIndex));
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
             TEXT("[NCFireAuth] RESERVATION_BUSY weapon=%s mode=%d event=%d retainedEvent=%d generation=%u"),
             *GetName(), FireModeNum, InFireEventIndex, Reserved->FireEventIndex, Reserved->Generation);
-        ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum)
-            ? AuthoritativeFireEventIndex[FireModeNum] : 0);
+        // A rate reservation is not a spawned projectile. Do not send the
+        // accepted watermark until commit; duplicates keep their fake visuals.
+        if (!Reserved->bDeferredRate)
+            ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum)
+                ? AuthoritativeFireEventIndex[FireModeNum] : 0);
         return;
     }
 
-    if (!ValidateFireRequest(FireModeNum, InFireEventIndex, ClientTimestamp))
+    float RateDelay = 0.f;
+    const bool bFinitePayload = FMath::IsFinite(ClientTimestamp) && !ClientViewRot.ContainsNaN()
+        && !ClientHeadOffset.ContainsNaN();
+    if (!ValidateFireRequest(FireModeNum, InFireEventIndex, ClientTimestamp, bFinitePayload ? &RateDelay : nullptr,
+        bQueueBehindRate ? FMath::Max(0.001f, PreviousRateDue - World->GetTimeSeconds()) : 0.f))
     {
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
             TEXT("[NCFireAuth] REJECT reason=validation weapon=%s mode=%d event=%d auth=%d lft=%.4f"),
@@ -4339,12 +4568,14 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 				GetCurrentState() ? *GetCurrentState()->GetClass()->GetName() : TEXT("null"),
 				(UTOwner && UTOwner->IsPendingFire(0)) ? 1 : 0);
 		}
-        ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : 0);
+        if (!Reserved || !Reserved->bDeferredRate)
+            ClientConfirmFireEvent(FireModeNum, AuthoritativeFireEventIndex.IsValidIndex(FireModeNum) ? AuthoritativeFireEventIndex[FireModeNum] : 0);
         return;
     }
 
 	UUTWeaponState* const RequestedFiringState = FiringState.IsValidIndex(FireModeNum)
 		? FiringState[FireModeNum] : nullptr;
+    const bool bQueuedDeferredRate = RateDelay > 0.f || bQueueBehindRate;
 	const bool bCommitsImmediateFireShot = IsImmediateEquipFireState(RequestedFiringState);
 	const bool bQueuedDeferredEquip = CurrentState == EquippingState
 		&& bCommitsImmediateFireShot;
@@ -4363,7 +4594,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 	{
         // One accepted request owns this bounded slot. Immediate requests live
         // only through this RPC; equip and stock-state tails retain the payload.
-		ClearDeferredEquipFireContext();
+        if (!bQueueBehindRate) ClearDeferredEquipFireContext();
 		FDeferredEquipFireContext NewContext;
 		NewContext.FireMode = FireModeNum;
 		NewContext.ResolvedZOffset = (ZOffset != 0)
@@ -4380,16 +4611,40 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 		NewContext.ClientHeadOffset = ClientHeadOffset;
         NewContext.bDeferredEquip = bQueuedDeferredEquip;
         NewContext.bDeferredState = bQueuedDeferredState;
-        NewContext.bDispatchReady = !bQueuedDeferredEquip && !bQueuedDeferredState;
+        NewContext.bDeferredRate = bQueuedDeferredRate;
+        NewContext.bDispatchReady = !bQueuedDeferredEquip && !bQueuedDeferredState && !bQueuedDeferredRate;
         NewContext.ExpectedFiringState = RequestedFiringState;
         NewContext.WaitingState = CurrentState;
         NewContext.bAcceptedViaRetry = FixedRetryWeapons.Contains(this);
-        NewContext.Source = bQueuedDeferredEquip ? TEXT("DeferredEquip")
+        NewContext.Source = bQueuedDeferredRate ? TEXT("DeferredRate")
+            : bQueuedDeferredEquip ? TEXT("DeferredEquip")
             : bQueuedDeferredCharged ? TEXT("DeferredChargedTail")
             : bQueuedDeferredState ? TEXT("DeferredStateTail")
             : FixedRetryWeapons.Contains(this) ? TEXT("FixedRetry") : TEXT("FixedInitial");
-		DeferredEquipFireContexts.Add(DeferredWeaponKey, NewContext);
-		DeferredEquipFireGenerations.Add(DeferredWeaponKey, NewContext.Generation);
+        if (bQueuedDeferredRate)
+        {
+            NewContext.RateDueTime = FMath::Max(NewContext.ServerAcceptTime + RateDelay, PreviousRateDue);
+            NewContext.RateMaxAge = ServerRateMaxAgeSeconds;
+            NewContext.RatePredictionTime = GetHitValidationPredictionTime();
+            NewContext.bRateObservedRTTValid = GetServerObservedRTTMs(
+                Cast<AUTPlayerController>(UTOwner->Controller), NewContext.RateObservedRTTMs);
+            TGuardValue<float> SavedZ(FireZOffset, NewContext.ResolvedZOffset);
+            TGuardValue<float> SavedZTime(FireZOffsetTime, NewContext.ServerAcceptTime);
+            TGuardValue<FRotator> SavedAim(CachedTransactionalRotation, ClientViewRot);
+            TGuardValue<uint8> SavedMode(CurrentFireMode, FireModeNum);
+            TGuardValue<bool> SavedDelayed(bNetDelayedShot, false);
+            const bool bPreviousAimScope = HasScopedTransactionalAim(this);
+            ScopedTransactionalAimWeapons.Add(this);
+            NewContext.RateFireOrigin = GetFireStartLoc(FireModeNum);
+            if (!bPreviousAimScope) ScopedTransactionalAimWeapons.Remove(this);
+        }
+        if (bQueueBehindRate)
+            FollowingRateFireContexts.Add(DeferredWeaponKey, NewContext);
+        else
+        {
+            DeferredEquipFireContexts.Add(DeferredWeaponKey, NewContext);
+            DeferredEquipFireGenerations.Add(DeferredWeaponKey, NewContext.Generation);
+        }
         if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("ACCEPT"), FireModeNum, InFireEventIndex, NewContext.Generation,
             FString::Printf(TEXT("source=%s deferredEquip=%d deferredState=%d"), NewContext.Source, bQueuedDeferredEquip, bQueuedDeferredState));
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
@@ -4412,6 +4667,24 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         NCFireDiagnostics::Record(this, TEXT("ACCEPT"), FireModeNum, InFireEventIndex, AcceptedRequestGeneration,
             TEXT("source=FixedSynchronous deferredEquip=0 deferredState=0"));
 	}
+
+    if (bQueuedDeferredRate)
+    {
+        FDeferredEquipFireContext* Context = bQueueBehindRate
+            ? FollowingRateFireContexts.Find(DeferredWeaponKey) : DeferredEquipFireContexts.Find(DeferredWeaponKey);
+        if (!Context) return;
+        if (!bQueueBehindRate)
+        {
+            FTimerDelegate Commit;
+            Commit.BindUObject(this, &AUTWeaponFix::CompleteAcceptedRateFire, FireModeNum, AcceptedRequestGeneration);
+            GetWorldTimerManager().SetTimer(Context->RateTimer, Commit, RateDelay, false);
+        }
+        if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("RESERVE_RATE"), FireModeNum,
+            InFireEventIndex, AcceptedRequestGeneration,
+            FString::Printf(TEXT("waitMs=%.3f maxAgeMs=%.3f"), RateDelay * 1000.f, Context->RateMaxAge * 1000.f));
+        // ACK is deliberately deferred until a real dispatch.
+        return;
+    }
 
     NCFireDiagnostics::FRequestScope TraceRequest(this, FireModeNum, InFireEventIndex, AcceptedRequestGeneration);
 
@@ -4492,7 +4765,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
     // FIX: Cancel any deferred ActiveState transition from a previous stop.
     // Without this, the old timer fires mid-sequence and triggers a ghost shot
     // via ActiveState::BeginState's PendingFire auto-fire check.
-    GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
+    ClearDeferredActiveState();
     bIsTransactionalFire = true;
 
     // WEDGE FAST-RECOVERY (event-driven half; the Tick watchdog covers the no-input case):
@@ -4674,6 +4947,9 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
 void AUTWeaponFix::Removed()
 {
+    ClearDeferredActiveState();
+    NCClientFireTiming::Forget(this);
+    DeferredActiveGenerations.Remove(TWeakObjectPtr<AUTWeaponFix>(this));
 	StopShockInputTrace();
 	ClearDeferredEquipFireContext(true, TEXT("removed"));
 	// A delayed Flak prediction belongs to this weapon instance. Once it is removed,
@@ -4713,8 +4989,12 @@ void AUTWeaponFix::Removed()
 
 void AUTWeaponFix::Destroyed()
 {
+    ClearDeferredActiveState();
+    NCClientFireTiming::Forget(this);
+    DeferredActiveGenerations.Remove(TWeakObjectPtr<AUTWeaponFix>(this));
 	StopShockInputTrace();
 	ClearDeferredEquipFireContext(true, TEXT("destroyed"));
+    ServerActualFireTimes.Remove(TWeakObjectPtr<AUTWeaponFix>(this));
 	// Direct replay/admin destruction can bypass normal inventory removal. Break
 	// the master-pose relationship before the actor's component teardown starts.
 	for (int32 Mode = 0; Mode < 2; ++Mode)
@@ -5078,6 +5358,10 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 			InFireEventIndex, DeferredContext->Generation);
 	}
 
+    FDeferredEquipFireContext* Following = FollowingRateFireContexts.Find(DeferredWeaponKey);
+    if (Following && Following->Owner.Get() == UTOwner && Following->FireMode == FireModeNum
+        && InFireEventIndex >= Following->FireEventIndex) Following->bReleaseSeen = true;
+
 	// Log only the accepted fixed Stop. Retry copies return at the idempotency gate
 	// above, keeping level-2 dogfood volume transition-oriented.
 	if (RocketPrimaryDiagFor(this, FireModeNum))
@@ -5208,21 +5492,11 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 
             // Only defer GotoActiveState — keeps an ordinary weapon in FiringState
             // during cooldown so PutDown() routes to its cooldown-aware override.
-            const float CurrentTime = GetWorld()->GetTimeSeconds();
-            float ReadyTime = 0.f;
-
-            if (LastFireTime.IsValidIndex(FireModeNum))
-            {
-                ReadyTime = LastFireTime[FireModeNum] + GetRefireTime(FireModeNum);
-            }
-
-            const float TimeRemaining = ReadyTime - CurrentTime;
+            const float TimeRemaining = NCClientFireTiming::Remaining(this, FireModeNum);
 
             if (TimeRemaining > 0.01f)
             {
-                FTimerDelegate Del;
-                Del.BindUObject(this, &AUTWeaponFix::DeferredGotoActiveState, FireModeNum);
-                GetWorldTimerManager().SetTimer(DeferredActiveStateHandle, Del, TimeRemaining, false);
+                ScheduleDeferredActiveState(FireModeNum, TimeRemaining);
             }
             else
             {
@@ -5244,6 +5518,32 @@ void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 I
 }
 
 
+
+void AUTWeaponFix::ClearDeferredActiveState()
+{
+    GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
+    DeferredActiveGenerations.Add(TWeakObjectPtr<AUTWeaponFix>(this), NextDeferredActiveGeneration++);
+    if (NextDeferredActiveGeneration == 0) NextDeferredActiveGeneration = 1;
+}
+
+void AUTWeaponFix::ScheduleDeferredActiveState(uint8 FireModeNum, float Delay)
+{
+    ClearDeferredActiveState();
+    const TWeakObjectPtr<AUTWeaponFix> WeakWeapon(this);
+    const TWeakObjectPtr<AUTCharacter> ExpectedOwner(UTOwner);
+    const TWeakObjectPtr<UUTWeaponState> ExpectedState(CurrentState);
+    const uint64 Generation = DeferredActiveGenerations.FindChecked(WeakWeapon);
+    GetWorldTimerManager().SetTimer(DeferredActiveStateHandle,
+        FTimerDelegate::CreateLambda([WeakWeapon, ExpectedOwner, ExpectedState, Generation, FireModeNum]()
+        {
+            AUTWeaponFix* Weapon = WeakWeapon.Get();
+            const uint64* CurrentGeneration = DeferredActiveGenerations.Find(WeakWeapon);
+            if (!Weapon || !CurrentGeneration || *CurrentGeneration != Generation
+                || Weapon->GetUTOwner() != ExpectedOwner.Get()
+                || !ExpectedOwner.IsValid() || Weapon->GetCurrentState() != ExpectedState.Get()) return;
+            Weapon->DeferredGotoActiveState(FireModeNum);
+        }), Delay, false);
+}
 
 void AUTWeaponFix::DeferredGotoActiveState(uint8 FireModeNum)
 {
@@ -5339,6 +5639,13 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
 
 
+bool AUTWeaponFix::IsServerRateTargetHistoryValid(AUTCharacter* Target, float PredictionTime) const
+{
+    if (!FindServerRateDispatch(this)) return true;
+    int32 Older = INDEX_NONE, Newer = INDEX_NONE;
+    return HasContinuousRenderHistory(Target, PredictionTime, PredictionTime, Older, Newer);
+}
+
 float AUTWeaponFix::GetHitValidationPredictionTime() const
 {
 	return GetPredictionTimeWithFudgeMs(GetConfiguredHitscanFudgeMs());
@@ -5346,6 +5653,13 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
 
 float AUTWeaponFix::GetPredictionTimeWithFudgeMs(float InFudgeMs) const
 {
+    if (const FServerRateDispatchScope* Rate = FindServerRateDispatch(this))
+    {
+        // Compensate only server-measured queue residence; the client cannot
+        // choose this epoch. Keep the existing total one-way rewind ceiling.
+        return FMath::Clamp(Rate->Context->RatePredictionTime + Rate->QueueAge,
+            0.f, FMath::Max(0.f, MaxRewindMs) * 0.0005f);
+    }
     if (Role != ROLE_Authority || !UTOwner || !UTOwner->PlayerState)
     {
         return 0.0f;
@@ -5445,16 +5759,21 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         RenderAuthorityShooterPC != nullptr &&
         !RenderAuthorityShooterPC->IsLocalController();
     float RenderAuthorityRTTMs = 0.f;
+    const FServerRateDispatchScope* RateDispatch = FindServerRateDispatch(this);
     const bool bRenderAuthorityTimingValid = bRenderAuthoritativeTargeting &&
-        GetServerObservedRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs);
+        (RateDispatch ? RateDispatch->Context->bRateObservedRTTValid
+            : GetServerObservedRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs));
     const float RenderAuthorityExtraMs = bRenderAuthoritativeTargeting
         ? FMath::Max(0.f, CVarRenderCreditExtraMs.GetValueOnGameThread())
         : 0.f;
     const float RenderAuthoritativeMs = bRenderAuthoritativeTargeting
         ? RenderAuthorityRTTMs * 0.5f + RenderAuthorityExtraMs
         : 0.f;
+    const float QueuedRenderTime = RateDispatch
+        ? RateDispatch->Context->RateObservedRTTMs * 0.0005f + RenderAuthorityExtraMs * 0.001f + RateDispatch->QueueAge
+        : RenderAuthoritativeMs * 0.001f;
     const float RenderAuthoritativeTime = bRenderAuthoritativeTargeting
-        ? FMath::Clamp(RenderAuthoritativeMs * 0.001f, 0.f, 0.25f)
+        ? FMath::Clamp(QueuedRenderTime, 0.f, 0.25f)
         : 0.f;
     const float RenderAuthoritativeSlack = bRenderAuthoritativeTargeting
         ? FMath::Max(0.f, CVarRenderCreditSlack.GetValueOnGameThread())
@@ -5727,14 +6046,14 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             // Standard logic: Teammate checks, etc.
             if (bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target))
             {
-                if (bRenderAuthoritativeTargeting)
+                if (bRenderAuthoritativeTargeting || RateDispatch)
                 {
                     int32 RenderOlderIndex = INDEX_NONE;
                     int32 RenderNewerIndex = INDEX_NONE;
                     const bool bHasContinuousRenderHistory = HasContinuousRenderHistory(
-                        Target, RenderAuthoritativeTime, ActualPredictionTime,
+                        Target, TargetSampleTime, ActualPredictionTime,
                         RenderOlderIndex, RenderNewerIndex);
-                    if (!bRenderAuthorityTimingValid || !bHasContinuousRenderHistory)
+                    if ((bRenderAuthoritativeTargeting && !bRenderAuthorityTimingValid) || !bHasContinuousRenderHistory)
                     {
                         RecordUnverifiableBlocker(Target, Target->GetActorLocation(), 0.f);
 
@@ -5879,7 +6198,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 const float TargetSelectionRadius = TargetEffectiveRadius +
                     TraceRadius + ExtraHitPadding;
                 float CandidateEntryDistance = BIG_NUMBER;
-                const bool bHasCandidateEntry = bRenderAuthoritativeTargeting &&
+                const bool bHasCandidateEntry = (bRenderAuthoritativeTargeting || RateDispatch) &&
                     bHitTarget &&
                     RayCapsuleEntryDistance(TargetLocation, TargetAxisHalfLength,
                         TargetSelectionRadius, CandidateEntryDistance);
@@ -5889,7 +6208,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 // entry ordering so different postures/radii cannot let a
                 // farther surface beat a nearer one.
                 const bool bShouldSelectTarget = bHitTarget &&
-                    (bRenderAuthoritativeTargeting
+                    ((bRenderAuthoritativeTargeting || RateDispatch)
                         ? (bHasCandidateEntry && CandidateEntryDistance < BestTargetEntryDistance)
                         : (!BestTarget || ((ClosestPoint - StartLocation).SizeSquared() <
                             (BestPoint - StartLocation).SizeSquared())));
@@ -5910,7 +6229,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     }
 
     const float WorldHitDistance = (Hit.Location - StartLocation).Size();
-    if (bRenderAuthoritativeTargeting &&
+    if ((bRenderAuthoritativeTargeting || RateDispatch) &&
         UnverifiableBlockEntryDistance <= BestTargetEntryDistance &&
         UnverifiableBlockEntryDistance < WorldHitDistance)
     {
@@ -5959,9 +6278,12 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 	// If client claimed a hit but we didn't find it, search through time
 	// ============================================================
 	// Mirror the main-loop team guard (~line 1896): never run the time-search for a CLIENT-NAMED teammate when
+    int32 RateClaimOlder = INDEX_NONE, RateClaimNewer = INDEX_NONE;
 	// teammates don't block hitscan. ReceivedHitScanHitChar is fully client-controlled, so without this a client
 	// could name a teammate to force a near-graze body hit (FF-gated at damage, but it shouldn't be considered).
 	if (bClaimCapableMode && Role == ROLE_Authority &&
+        (!RateDispatch || HasContinuousRenderHistory(ReceivedHitScanHitChar,
+            ActualPredictionTime + 0.045f, ActualPredictionTime, RateClaimOlder, RateClaimNewer)) &&
 		IsLiveHitscanTarget(ReceivedHitScanHitChar) &&
 		BestTarget != ReceivedHitScanHitChar &&
 		(bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, ReceivedHitScanHitChar)))
@@ -6002,12 +6324,14 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 			bRescueLeadApplicable = true;
 			RescueLeadCapApplied = FMath::Max(0.f, CVarHitscanMaxRescueLeadUU.GetValueOnGameThread());
 			float RescueRTTMs = 0.f;
-			if (RescueShooterPC != nullptr && GetServerObservedRTTMs(RescueShooterPC, RescueRTTMs))
+			if (RescueShooterPC != nullptr && (RateDispatch ? RateDispatch->Context->bRateObservedRTTValid
+                : GetServerObservedRTTMs(RescueShooterPC, RescueRTTMs)))
 			{
 				bRescueLeadTimingValid = true;
 				const float RescueRenderT = FMath::Clamp(
-					(RescueRTTMs * 0.5f +
-						FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())) * 0.001f,
+                    ((RateDispatch ? RateDispatch->Context->RateObservedRTTMs : RescueRTTMs) * 0.5f +
+                        FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())) * 0.001f
+                        + (RateDispatch ? RateDispatch->QueueAge : 0.f),
 					0.f, 0.25f);
 				const FVector RescueValPos = (ActualPredictionTime > 0.f)
 					? ClaimedTarget->GetRewindLocation(ActualPredictionTime)
@@ -6116,6 +6440,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 			const bool bSlideOuterRung =
 				FMath::Abs(SearchOffset) > BaseMaxSearchOffset + KINDA_SMALL_NUMBER;
 			const float AltRewindTime = ActualPredictionTime + SearchOffset;
+            int32 RateRungOlder = INDEX_NONE, RateRungNewer = INDEX_NONE;
+            if (RateDispatch && !HasContinuousRenderHistory(ClaimedTarget, AltRewindTime,
+                ActualPredictionTime, RateRungOlder, RateRungNewer)) continue;
 
 			// Sanity bounds
 			if (AltRewindTime > 0.0f && AltRewindTime < 0.25f)
@@ -6295,12 +6622,12 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         {
             bRenderChkApplicable = true;
             float ServerRTTMs = 0.f;
-            const bool bServerTimingValid =
-                GetServerObservedRTTMs(ShooterPC, ServerRTTMs);
-            const float RenderMs = ServerRTTMs * 0.5f +
+            const bool bServerTimingValid = RateDispatch ? RateDispatch->Context->bRateObservedRTTValid
+                : GetServerObservedRTTMs(ShooterPC, ServerRTTMs);
+            const float RenderMs = (RateDispatch ? RateDispatch->Context->RateObservedRTTMs : ServerRTTMs) * 0.5f +
                 FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
 
-            const float RenderT = RenderMs * 0.001f;
+            const float RenderT = RenderMs * 0.001f + (RateDispatch ? RateDispatch->QueueAge : 0.f);
             RenderChkSlack = FMath::Max(0.f,
                 CVarUnclaimedRenderSlack.GetValueOnGameThread());
             if (!bServerTimingValid)
@@ -6647,6 +6974,10 @@ FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 	// it for the stock origin calculation and for the opt-in projectile-origin
 	// experiment below; the experiment remains disabled by default.
 	const uint8 ResolvedFireMode = (FireMode == 255) ? CurrentFireMode : FireMode;
+    if (const FServerRateDispatchScope* Rate = FindServerRateDispatch(this))
+    {
+        if (Rate->Context->FireMode == ResolvedFireMode) return Rate->Context->RateFireOrigin;
+    }
 
     // Only label queries made inside a real precision FireShot. Removed() also
     // queries this method, and projectile/zoom modes are outside this probe.
@@ -6898,6 +7229,12 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 		float CappedPing = FMath::Clamp(AdjustedPing, 0.0f, ProjectilePredictionCapMs);
 		CatchupTickDelta = CappedPing * 0.0005f;  // Half RTT in seconds
 	}
+
+    if (const FServerRateDispatchScope* Rate = FindServerRateDispatch(this))
+    {
+        CatchupTickDelta = FMath::Clamp(Rate->Context->RateObservedRTTMs * 0.0005f + Rate->QueueAge,
+            0.f, FMath::Max(0.f, ProjectilePredictionCapMs) * 0.0005f);
+    }
 
 	// ----------------------------------------
 	// 3) Client: Check if we should delay spawn for extreme ping
@@ -7596,7 +7933,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
         AUTCharacter* AltTarget = Cast<AUTCharacter>(UUTGameplayStatics::ChooseBestAimTarget(
             UTPC, SpawnLocation, FireDir, 0.7f, (Hit.Location - SpawnLocation).Size(),
             150.f, AUTCharacter::StaticClass()));
-        if (IsLiveHitscanTarget(AltTarget) &&
+        if (IsLiveHitscanTarget(AltTarget) && IsServerRateTargetHistoryValid(AltTarget, PredictionTime) &&
             (AltTarget->GetVelocity().IsNearlyZero() || bCheckMovingHeadSphere) &&
             AltTarget->IsHeadShot(SpawnLocation, FireDir, 1.1f, UTOwner, PredictionTime))
         {
@@ -7716,7 +8053,7 @@ void AUTWeaponFix::DetachFromOwner_Implementation()
 {
 	StopShockInputTrace();
 	ClearDeferredEquipFireContext(true, TEXT("detach"));
-    GetWorldTimerManager().ClearTimer(DeferredActiveStateHandle);
+    ClearDeferredActiveState();
     GetWorldTimerManager().ClearTimer(DelayedPutDownHandle);
 	ClearFireEventsFixed();
 	ClearDelayedFlakFakeProjectiles();
@@ -8635,6 +8972,7 @@ TArray<UMeshComponent*> AUTWeaponFix::Get1PMeshes_Implementation() const
 
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
+    ClearDeferredActiveState();
     if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("EQUIP_BEGIN"), CurrentFireMode, INDEX_NONE, 0,
         FString::Printf(TEXT("overflow=%.6f"), OverflowTime), TEXT("state"));
 	// New equip lifetime: neither a queued payload nor a pending release callback
@@ -8658,7 +8996,7 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 	{
 		if (LastFireTime[i] > 0.f)
 		{
-			float RefireEnd = LastFireTime[i] + GetRefireTime(i);
+			float RefireEnd = CurrentTime + NCClientFireTiming::Remaining(this, uint8(i));
 
 			// If cooldown hasn't expired yet, we must wait
 			if (RefireEnd > CurrentTime && RefireEnd > MaxBlockTime)
@@ -8693,7 +9031,7 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 					{
 						if (FixWeapon->LastFireTime[i] > 0.f)
 						{
-							float RefireEnd = FixWeapon->LastFireTime[i] + FixWeapon->GetRefireTime(i);
+							float RefireEnd = CurrentTime + NCClientFireTiming::Remaining(FixWeapon, uint8(i));
 							float RemainingAtSwitch = RefireEnd - SwitchStartTime;
 
 							// Only penalize if there was actual debt at moment of switch

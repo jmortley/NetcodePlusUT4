@@ -1,5 +1,6 @@
 #include "UTWeaponStateFiring_Transactional.h"
 #include "NCFireDiagnostics.h"
+#include "NCClientFireTiming.h"
 #include "UTWeaponFix.h"
 #include "UTGameState.h"
 #include "UTPlayerController.h"
@@ -172,16 +173,10 @@ void UUTWeaponStateFiring_Transactional::PutDown()
 		return;
 	}
 
-	// 1. Calculate cooldown using timestamps (Works on Server & Client)
-	float TimeRemaining = 0.f;
-	uint8 Mode = GetOuterAUTWeapon()->GetCurrentFireMode();
-
-	// Check LastFireTime to determine when the weapon is actually ready
-	if (W->LastFireTime.IsValidIndex(Mode) && W->LastFireTime[Mode] > 0.f)
-	{
-		float ReadyTime = W->LastFireTime[Mode] + GetOuterAUTWeapon()->GetRefireTime(Mode);
-		TimeRemaining = FMath::Max(0.f, ReadyTime - GetWorld()->GetTimeSeconds());
-	}
+    // Use the same client clock as refire/re-click readiness; authority falls back
+    // to its original world timestamp rate validation.
+    const uint8 Mode = GetOuterAUTWeapon()->GetCurrentFireMode();
+    const float TimeRemaining = FMath::Max(0.f, NCClientFireTiming::Remaining(W, Mode));
 
 	// 2. Calculate the penalty overlap
 	// (If the cooldown is longer than the PutDown animation, we must wait)

@@ -1,5 +1,6 @@
 // UTWeap_Minigun_Plus.cpp
 #include "UTWeap_Minigun_Plus.h"
+#include "NCClientFireTiming.h"
 #include "NCFireDiagnostics.h"
 #include "UnrealTournament.h"
 #include "UTWeaponState.h"
@@ -102,6 +103,7 @@ void AUTWeap_Minigun_Plus::FireShot()
 		if (Role == ROLE_Authority && LastFireTime.IsValidIndex(CurrentFireMode))
 		{
 			LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
+            NCClientFireTiming::Record(this, CurrentFireMode);
 		}
 		NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
 		AUTWeapon::FireShot();

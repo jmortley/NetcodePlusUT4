@@ -18,7 +18,8 @@ except ImportError:
     from test_wipeout_healing import find_compiler, native_function
 
 
-PLUGIN = Path(__file__).resolve().parents[2]
+PLUGIN = Path(os.environ.get("NCP_TEST_PLUGIN", Path(__file__).resolve().parents[2]))
+SOURCE_OVERRIDE = Path(os.environ["NCP_TEST_SOURCE"]) if "NCP_TEST_SOURCE" in os.environ else None
 STOCK = PLUGIN.parents[1] / "Source/UnrealTournament/Private"
 
 
@@ -39,6 +40,8 @@ class InstagibSharedHoldTests(unittest.TestCase):
                 "void AUTWeaponFix::StartFire", "void AUTWeaponFix::StopFire(uint8",
                 "void AUTWeaponFix::StopFireInternal", "void AUTWeaponFix::OnRetryTimer",
                 "void AUTWeaponFix::DeferredGotoActiveState",
+                "void AUTWeaponFix::ClearDeferredActiveState",
+                "void AUTWeaponFix::ScheduleDeferredActiveState",
                 "bool AUTWeaponFix::IsFireModeOnCooldown",
             )),
             (STOCK / "UTWeapon.cpp", (
@@ -55,6 +58,10 @@ class InstagibSharedHoldTests(unittest.TestCase):
                 "void UUTWeaponStateFiring_Transactional::RefireCheckTimer",
             )),
         ):
+            if SOURCE_OVERRIDE and path.is_relative_to(PLUGIN):
+                candidate = SOURCE_OVERRIDE / path.relative_to(PLUGIN)
+                if candidate.exists():
+                    path = candidate
             source = path.read_text(encoding="utf-8-sig")
             definitions.extend(native_function(source, signature) for signature in signatures)
         adapter = (Path(__file__).with_name("instagib_shared_hold_adapter.cpp")).read_text(
@@ -97,7 +104,7 @@ class InstagibSharedHoldTests(unittest.TestCase):
     def test_three_recorded_short_overlap_sequences_do_not_gain_extra_shots(self):
         self.run_case("recorded")
 
-    def test_debounce_retry_and_refire_at_same_time_in_both_callback_orders(self):
+    def test_ready_shared_mode_repress_preserves_hold_without_debounce(self):
         self.run_case("debounce")
 
     def test_repress_during_deferred_stop_does_not_duplicate_or_lose_hold(self):
@@ -114,6 +121,15 @@ class InstagibSharedHoldTests(unittest.TestCase):
 
     def test_release_before_or_after_refire_boundary(self):
         self.run_case("boundary")
+
+    def test_old_release_cannot_cancel_new_cycle_with_input_before_timers(self):
+        self.run_case("stale_release")
+
+    def test_ready_short_press_fires_and_release_does_not_create_a_hold(self):
+        self.run_case("ready_debounce")
+
+    def test_release_callback_cannot_affect_replacement_owner(self):
+        self.run_case("release_ownership")
 
 
 if __name__ == "__main__":

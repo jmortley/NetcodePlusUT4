@@ -366,6 +366,8 @@ public:
     // Native-only helpers: no reflected fields, RPCs, or UObject layout changes.
     bool RequiresTransactionalRequest() const;
     bool CompleteAcceptedDeferredFire(UUTWeaponState* CompletingState);
+    void CompleteAcceptedRateFire(uint8 FireModeNum, uint32 ContextGeneration);
+    void PromoteFollowingRateFire();
     virtual bool ShouldDrawFFIndicator(APlayerController* Viewer,
         AUTPlayerState*& HitPlayerState) const override;
     /** Client HUD only: stock crosshair, minus the teammate sign when the opt-in
@@ -730,6 +732,8 @@ public:
 
 protected:
 
+    void ClearDeferredActiveState();
+    void ScheduleDeferredActiveState(uint8 FireModeNum, float Delay);
     FTimerHandle DeferredActiveStateHandle;
     /** Server-side ground truth for the last accepted fire event in each mode.
      *  Owning clients are corrected explicitly through ClientConfirmFireEvent. */
@@ -806,7 +810,9 @@ protected:
      *
      * @return true if request is valid and should be processed
      */
-    bool ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime);
+    bool ValidateFireRequest(uint8 FireModeNum, int32 InEventIndex, float ClientTime, float* OutRateDelay = nullptr, float MinimumRateDelay = 0.f);
+    bool CanReserveServerRateFire(uint8 FireModeNum, float Delay);
+    bool IsServerRateTargetHistoryValid(AUTCharacter* Target, float PredictionTime) const;
 
     /** Shared RPC-edge validation so initial and retry start payloads use identical checks. */
     bool ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFireEventIndex,
