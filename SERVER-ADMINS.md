@@ -451,14 +451,28 @@ Fallbacks for the launch‑URL options of the same name (see §7). Leave empty u
 CTF/iCTF uses a two-stage, NewCTF-style server-side selector above `SpawnSystemThreshold`.
 Each team's authored starts are shuffled once. Primary scans that rotating queue and takes
 the first start clear of enemy proximity/vision, teammate proximity/vision, nearby flags,
-the recent-use tail, the last killer, and NCP's flag-carrier/robbed-base protections. A start
-is moved to the queue tail only after a pawn successfully spawns there; preview choices do
-not consume it.
+the recent-use tail, the last killer, and NCP's flag-carrier/robbed-base protections. Both
+primary and secondary also exclude that player's last successfully used start and any
+start within **100 Unreal units (1 metre), measured in 3D**, of its saved location. A
+teammate spawning elsewhere does not lift this per-player exclusion. A start is moved
+to the queue tail and the player's history is updated only after a pawn successfully
+spawns there; preview choices and failed spawns do not consume it.
 
 If every primary candidate is blocked, secondary chooses the non-cycle start with the
 greatest capped weighted distance from all living players. Teammates contribute less and
-enemy flag carriers contribute more. If secondary is disabled or no tagged team start is
-available, Epic's selector is used.
+enemy flag carriers contribute more. If secondary is disabled, stock spawn ratings choose
+among the same filtered candidates, so cached stock choices cannot bypass the exclusion.
+
+If the per-player exclusion removes every non-cycle candidate, the selector first admits
+distinct starts from the team queue's recent-use tail. Only when **every valid own-team
+start** is the player's previous start or within that 100-unit radius may it repeat that
+location. These exceptional selections emit an unconditional `NCPlusCTF spawn emergency`
+Warning, even with `LogSpawnChoices=false`: `reason=team-cycle-exhausted` relaxes only
+team rotation; `reason=no-distinct-team-start` permits the previous spot as a last resort.
+The warning includes the selected pass, previous/chosen starts and positions, and which
+exclusion was relaxed. No tagged team pool falls back to Epic's selector with an explicit
+`reason=no-usable-team-pool` warning. The small-game threshold and legacy selector remain
+unchanged.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -469,9 +483,9 @@ available, Epic's selector is used.
 | `SpawnFriendlyBlockRange` | float | `150` | A teammate this close blocks primary. |
 | `SpawnFriendlyVisionBlockRange` | float | `150` | A teammate with clear LOS inside this range blocks primary. |
 | `SpawnFlagBlockRange` | float | `750` | An enemy flag carrier or an unheld home/dropped flag this close blocks primary. |
-| `SpawnMinCycleDistance` | int | `1` | Number of most recently used team starts excluded from both primary and secondary. |
+| `SpawnMinCycleDistance` | int | `1` | Number of most recently used team starts normally excluded from both passes. Relaxed before the per-player previous-spawn exclusion if necessary; see emergency policy above. |
 | `SpawnExtrapolateMovement` | bool | `true` | Project remote players by half RTT (capped at 250 ms RTT) for distance/LOS checks. |
-| `SpawnSecondaryEnabled` | bool | `true` | Use the weighted-distance fallback when primary finds no safe start. |
+| `SpawnSecondaryEnabled` | bool | `true` | Use the weighted-distance fallback when primary finds no safe start. `false` uses stock ratings within the filtered team candidates. |
 | `SpawnSecondaryMaxDistance` | float | `2000` | Cap each player's distance contribution to a secondary candidate. |
 | `SpawnSecondaryOwnTeamWeight` | float | `0.2` | Secondary distance multiplier for teammates. |
 | `SpawnSecondaryCarrierWeight` | float | `2.0` | Secondary distance multiplier for enemy flag carriers. |
@@ -479,7 +493,7 @@ available, Epic's selector is used.
 | `SpawnKillerAvoidRadius` | float | `2500` | Last killer inside this range blocks primary. `0` = off. |
 | `SpawnFlagCarrierLOSAvoidRadius` | float | `3500` | Extends the primary LOS exclusion specifically for the enemy carrying your flag. `0` = off. |
 | `SpawnRobbedBaseAvoidCount` | float | `2` | Size of the nearest-own-base set whose one rotating member is blocked while your flag is out. Kept as a float for compatibility; fractional values are truncated. |
-| `LogSpawnChoices` | bool | `false` | Log primary/secondary route, block counts, selected start, and actual spawned location. |
+| `LogSpawnChoices` | bool | `false` | Log selection route, block counts (including `previousExcluded`), selected start, and actual spawned location. Emergency selection warnings are always emitted. |
 
 Legacy-only controls used when `SpawnUseNewCTFSelection=false` remain supported:
 `SpawnWeightedRandom`, `SpawnRandomBase`, `SpawnRandomSpread`, `SpawnTieBandWidth`,
