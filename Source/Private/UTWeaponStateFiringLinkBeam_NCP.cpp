@@ -176,6 +176,7 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 
 		if (Hit.Actor.IsValid() && Hit.Actor.Get()->bCanBeDamaged)
 		{
+			const bool bHitPawn = Cast<APawn>(Hit.Actor.Get()) != nullptr; // before TakeDamage can kill it
 			if (LinkGun->IsValidLinkTarget(Hit.Actor.Get()))
 			{
 				LinkGun->CurrentLinkedTarget = Hit.Actor.Get();
@@ -199,10 +200,8 @@ void UUTWeaponStateFiringLinkBeam_NCP::Tick(float DeltaTime)
 						FireDir * (LinkGun->GetImpartedMomentumMag(Hit.Actor.Get()) * float(AppliedDamage) / float(DamageInfo.Damage))),
 					LinkDamageInstigator,
 					LinkGun);
-				// No accuracy credit for melting projectiles (cores/rockets) —
-				// same rule as UTWeaponFix::FireInstantHit (2026-08-10).
-				if (PS != nullptr && LinkGun->HitsStatsName != NAME_None
-					&& Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
+				// Pawns only — same rule as UTWeaponFix::FireInstantHit.
+				if (PS != nullptr && LinkGun->HitsStatsName != NAME_None && bHitPawn)
 				{
 					PS->ModifyStatsValue(LinkGun->HitsStatsName, AppliedDamage / FMath::Max(LinkedDamage, 1.f));
 				}

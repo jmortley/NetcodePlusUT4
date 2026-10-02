@@ -8012,13 +8012,13 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
     if (Hit.Actor != nullptr && Hit.Actor->bCanBeDamaged && bDealDamage &&
         (HitCharacter == nullptr || IsLiveHitscanTarget(HitCharacter)))
     {
-        // Detonating a damageable projectile (your own shock core for a combo, or
-        // shooting down an enemy core/rocket) still deals the damage below, but it
-        // is NOT a landed hit on a player — counting it inflated shock beam
-        // accuracy (2026-08-10). The same rule runs in every hitscan credit site
-        // (cone sweep below, UTPlusSniper, link beam). Pawns keep counting.
+        // Only a pawn is a landed hit. Anything else damageable (a shock core
+        // detonated for a combo, a rocket shot down, forcefields, glass,
+        // destructibles) still takes the damage below but earns no accuracy
+        // credit. Same rule in every hitscan credit site (cone sweep below,
+        // UTPlusSniper, link beam, UTWeap_LinkGun_Plus).
         if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None)
-            && Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
+            && Cast<APawn>(Hit.Actor.Get()) != nullptr)
         {
             PS->ModifyStatsValue(HitsStatsName, 1);
         }
@@ -8390,9 +8390,9 @@ void AUTWeaponFix::FireCone()
         if (UTOwner && Hit.Actor != NULL && Hit.Actor->bCanBeDamaged &&
             (HitCharacter == nullptr || IsLiveHitscanTarget(HitCharacter)))
         {
-            // No accuracy credit for detonating projectiles — see FireInstantHit.
+            // Pawns only — see FireInstantHit.
             if ((Role == ROLE_Authority) && PS && (HitsStatsName != NAME_None)
-                && Cast<AUTProjectile>(Hit.Actor.Get()) == nullptr)
+                && Cast<APawn>(Hit.Actor.Get()) != nullptr)
             {
                 PS->ModifyStatsValue(HitsStatsName, 1);
             }

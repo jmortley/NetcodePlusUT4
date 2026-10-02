@@ -382,6 +382,7 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 		LinkStartTime = GetWorld()->GetTimeSeconds();
 	}
 
+	const bool bHitPawn = Cast<APawn>(HitActor) != nullptr; // before TakeDamage can kill it
 	FVector FireDir = (HitLocation - FireStart).GetSafeNormal();
 	HitActor->TakeDamage(DamageAmount,
 		FUTPointDamageEvent(DamageAmount, FHitResult(HitActor, nullptr, HitLocation, -FireDir), FireDir, InstantHitInfo[1].DamageType, FireDir * 1000.f),
@@ -398,7 +399,11 @@ void AUTWeap_LinkGun_Plus::ServerProcessBeamHit_Implementation(AActor* HitActor,
 	// so the rates didn't match and Hits/Shots clamped to 100% on any hold.
 	// A killing batch still counts: eligibility was checked immediately before
 	// damage, not after TakeDamage potentially transitioned the target to dead.
-	bHitDuringCurrentRefireInterval = true;
+	// Only a pawn connection counts — same rule as UTWeaponFix::FireInstantHit.
+	if (bHitPawn)
+	{
+		bHitDuringCurrentRefireInterval = true;
+	}
 }
 
 
