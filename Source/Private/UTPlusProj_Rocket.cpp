@@ -3,8 +3,10 @@
 
 #include "UTPlusProj_Rocket.h"
 #include "UTWeaponFix.h"
+#include "UTPlusWeap_RocketLauncher.h"
 #include "UTCharacter.h"
 #include "HAL/IConsoleManager.h"
+#include "Net/UnrealNetwork.h"
 
 // Diagnostic category (Warning survives Shipping). Side labels distinguish the owning client's
 // local-authority fake from a real server projectile; actor IDs connect pairing and lifecycle events.
@@ -91,10 +93,26 @@ AUTPlusProj_Rocket::AUTPlusProj_Rocket(const FObjectInitializer& ObjectInitializ
 	PrimarySyncEstimateVelocity = FVector::ZeroVector;
 	PrimarySyncCorrectionSpeed = 0.f;
 	bForcingShutdownExplosion = false;
+    LoadedOwnershipEpoch = 0;
+    LoadedVolleyId = 0;
+    LoadedRocketOrdinal = 0;
+    LoadedVolleyWeapon = nullptr;
+}
+
+void AUTPlusProj_Rocket::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME_CONDITION(AUTPlusProj_Rocket, LoadedOwnershipEpoch, COND_InitialOnly);
+    DOREPLIFETIME_CONDITION(AUTPlusProj_Rocket, LoadedVolleyId, COND_InitialOnly);
+    DOREPLIFETIME_CONDITION(AUTPlusProj_Rocket, LoadedRocketOrdinal, COND_InitialOnly);
+    DOREPLIFETIME_CONDITION(AUTPlusProj_Rocket, LoadedVolleyWeapon, COND_InitialOnly);
 }
 
 bool AUTPlusProj_Rocket::CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const
 {
+    const AUTPlusProj_Rocket* FakeRocket = Cast<AUTPlusProj_Rocket>(InFakeProjectile);
+    if (LoadedVolleyId != 0 || (FakeRocket && FakeRocket->LoadedVolleyId != 0))
+        return false; // 329 charged siblings match by exact owner-RPC identity only.
 	if (InFakeProjectile == nullptr)
 	{
 		return false;
@@ -196,6 +214,10 @@ void AUTPlusProj_Rocket::BeginFakeProjectileSynch(AUTProjectile* InFakeProjectil
 void AUTPlusProj_Rocket::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+    if (!bLoadedIdentityDelivered && LoadedVolleyWeapon && LoadedVolleyId != 0
+        && GetNetMode() == NM_Client && Role < ROLE_Authority && !bExploded)
+        bLoadedIdentityDelivered = LoadedVolleyWeapon->ObserveLoadedRocketActor(
+            LoadedOwnershipEpoch, LoadedVolleyId, LoadedRocketOrdinal, this);
 
 	if (!bPrimarySoftSyncActive || GetNetMode() != NM_Client || bFakeClientProjectile
 		|| MyFakeProjectile == nullptr || MyFakeProjectile->IsPendingKillPending()

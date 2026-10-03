@@ -161,7 +161,7 @@ bool AUTPlusWeap_RocketLauncher::BeginFiringSequence(uint8 FireModeNum, bool bCl
     // here), so stock UUTWeaponStateActive::BeginState could auto-enter the load from the
     // latched flag. The authoritative rejection therefore lives in AllowServerFireMode(),
     // which ServerStartFireFixed consults at its RPC entry before any latch.
-    if (bDisableAltLoading && FireModeNum == 1)
+    if (FireModeNum == 1 && (bDisableAltLoading || !HasLoadedVolley()))
     {
         return false;
     }
@@ -173,7 +173,7 @@ bool AUTPlusWeap_RocketLauncher::AllowServerFireMode(uint8 FireModeNum) const
     // Authoritative single-rocket restriction. Refused at the ServerStartFireFixed RPC
     // entry (before the trade-kill spawn, the PendingFire latch, and any state entry), so
     // a modified client cannot smuggle a mode-1 load past the BeginFiringSequence gate.
-    if (bDisableAltLoading && FireModeNum == 1)
+    if (FireModeNum == 1)
     {
         return false;
     }
@@ -191,10 +191,14 @@ void AUTPlusWeap_RocketLauncher::GetLifetimeReplicatedProps(TArray<FLifetimeProp
     DOREPLIFETIME(AUTPlusWeap_RocketLauncher, LockedTarget);
     DOREPLIFETIME(AUTPlusWeap_RocketLauncher, PendingLockedTarget);
     DOREPLIFETIME(AUTPlusWeap_RocketLauncher, CurrentRocketFireMode);
+    DOREPLIFETIME_CONDITION(AUTPlusWeap_RocketLauncher, LoadedOwnershipEpoch, COND_OwnerOnly);
 }
 
 void AUTPlusWeap_RocketLauncher::Destroyed()
 {
+    CompleteLoadedVolley(true);
+    GetWorldTimerManager().ClearTimer(LoadedRocketReconcileHandle);
+    GetWorldTimerManager().ClearTimer(LoadedVolleyBeginHandle);
     Super::Destroyed();
     GetWorldTimerManager().ClearAllTimersForObject(this);
 }
@@ -328,8 +332,10 @@ float AUTPlusWeap_RocketLauncher::GetLoadTime(int32 InNumLoadedRockets)
     return BaseTime / ((UTOwner != nullptr) ? UTOwner->GetFireRateMultiplier() : 1.0f);
 }
 
-void AUTPlusWeap_RocketLauncher::ClientAbortLoad_Implementation()
+void AUTPlusWeap_RocketLauncher::ClientAbortLoad_Implementation(uint32 OwnershipEpoch, uint32 VolleyId)
 {
+    if (OwnershipEpoch != LoadedOwnershipEpoch || OwnershipEpoch != GetLoadedVolleyEpoch()
+        || VolleyId != GetLoadedVolleyId() || !HasLoadedVolley()) return;
     // Check for NEW transactional state first
     UUTWeaponStateFiringChargedRocket_Transactional* TransactionalLoadState =
         Cast<UUTWeaponStateFiringChargedRocket_Transactional>(CurrentState);
@@ -467,6 +473,14 @@ void AUTPlusWeap_RocketLauncher::FireShot()
 
 void AUTPlusWeap_RocketLauncher::FireShotDirect()
 {
+    if (CurrentFireMode == 1 && (!HasLoadedVolley() || !IsLoadedVolleyCommitted()
+        || GetLoadedVolleyEpoch() != LoadedOwnershipEpoch)) return;
+    if (Role == ROLE_Authority && !Is329FireProtocolReady())
+    {
+        CompleteLoadedVolley(true);
+        NumLoadedRockets = NumLoadedBarrels = 0;
+        return;
+    }
     NCFireDiagnostics::FShotScope TraceShot(this, CurrentFireMode);
     if (UTOwner)
     {
@@ -655,6 +669,8 @@ AUTProjectile* AUTPlusWeap_RocketLauncher::FireProjectile()
 
 AUTProjectile* AUTPlusWeap_RocketLauncher::FireRocketProjectile()
 {
+    if (HasLoadedVolley() && IsLoadedVolleyCommitted())
+        CurrentRocketFireMode = LoadedVolleySelectedMode;
     // --- FIX: The Guard Clause ---
     // This stops the client from drawing that one "ghost" spread rocket
     // that happens right after the ammo counter hits 0.
@@ -961,21 +977,15 @@ void AUTPlusWeap_RocketLauncher::PlayFiringEffects()
 
 
 
-bool AUTPlusWeap_RocketLauncher::ServerCycleRocketMode_Validate()
-{
-    return true;
-}
-
-void AUTPlusWeap_RocketLauncher::ServerCycleRocketMode_Implementation()
-{
-    OnMultiPress_Implementation(0);
-}
-
 // ---------------------------------------------------------
 // UPDATED OnMultiPress
 // ---------------------------------------------------------
 void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode)
 {
+    // Remote 329 owners select an absolute mode through the numbered RPC.
+    // Legacy primary Start/Sync notifications must not cycle it a second time.
+    if (Role == ROLE_Authority && HasLoadedVolley() && UTOwner
+        && !UTOwner->IsLocallyControlled() && Cast<APlayerController>(UTOwner->Controller)) return;
     // Only allow mode switch if currently in Alt-Fire (Mode 1)
     if ((bAllowAltModes || bAllowGrenades) && (CurrentFireMode == 1))
     {
@@ -1006,10 +1016,6 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
             // If we are a client, tell the server we pushed the button.
             //
             
-            if (Role < ROLE_Authority)
-            {
-               ServerCycleRocketMode();
-            }
             // --- FIX END ---
 
             // 3. Cycle Mode Locally
@@ -1027,6 +1033,11 @@ void AUTPlusWeap_RocketLauncher::OnMultiPress_Implementation(uint8 OtherFireMode
             {
                 CurrentRocketFireMode = 0;
             }
+
+            // 329 mode updates are absolute and tied to a load identity. A
+            // delayed mode RPC can never cycle a subsequent volley's mode.
+            if (Role < ROLE_Authority && HasLoadedVolley())
+                ServerSetLoadedRocketMode(GetLoadedVolleyEpoch(), GetLoadedVolleyId(), UTOwner, uint8(CurrentRocketFireMode));
 
             // 4. Feedback
             UUTGameplayStatics::UTPlaySound(GetWorld(), AltFireModeChangeSound, UTOwner, SRT_AllButOwner, false, FVector::ZeroVector, NULL, NULL, true, SAT_WeaponFoley);
@@ -1086,6 +1097,9 @@ void AUTPlusWeap_RocketLauncher::GetRocketFlashExtra(uint8 InFlashExtra, uint8 I
 
 void AUTPlusWeap_RocketLauncher::FiringExtraUpdated_Implementation(uint8 NewFlashExtra, uint8 InFireMode)
 {
+    // FlashExtra is an unnumbered presentation stream for remote viewers. It
+    // must never overwrite this machine's authoritative/predicted load ledger.
+    if (Role == ROLE_Authority || (UTOwner && UTOwner->IsLocallyControlled())) return;
     if (InFireMode == 1)
     {
         int32 NewNumLoadedRockets;
@@ -1115,7 +1129,17 @@ void AUTPlusWeap_RocketLauncher::FiringExtraUpdated_Implementation(uint8 NewFlas
 
 void AUTPlusWeap_RocketLauncher::FiringInfoUpdated_Implementation(uint8 InFireMode, uint8 FlashCount, FVector InFlashLocation)
 {
+    const bool bOwnsLedger = Role == ROLE_Authority || (UTOwner && UTOwner->IsLocallyControlled());
+    if (bOwnsLedger && HasLoadedVolley())
+    {
+        // Preserve stock effects, but its presentation assignment must not
+        // change the logical fire mode of the current numbered load/burst.
+        TGuardValue<uint8> ModeGuard(CurrentFireMode, CurrentFireMode);
+        Super::FiringInfoUpdated_Implementation(InFireMode, FlashCount, InFlashLocation);
+        return;
+    }
     Super::FiringInfoUpdated_Implementation(InFireMode, FlashCount, InFlashLocation);
+    if (bOwnsLedger) return; // Primary effects above are unchanged.
 
     // Shield the client's local burst from server replication race conditions.
     // If we are still firing our burst (grenades or spiral), do not reset the
@@ -1457,6 +1481,11 @@ void AUTPlusWeap_RocketLauncher::OnRep_PendingLockedTarget()
 // immediately visible in logs.
 void AUTPlusWeap_RocketLauncher::OnRep_CurrentRocketFireMode(int32 OldValue)
 {
+    if (UTOwner && UTOwner->IsLocallyControlled() && HasLoadedVolley())
+    {
+        CurrentRocketFireMode = IsLoadedVolleyCommitted() ? LoadedVolleySelectedMode : OldValue;
+        return;
+    }
     if (NumLoadedRockets > 0 && CurrentRocketFireMode == 0 && OldValue != 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[NCFire] OnRep_CurrentRocketFireMode rejected mid-burst CRFM stomp from server (OldValue=%d Loaded=%d)"),
@@ -1673,5 +1702,3 @@ void AUTPlusWeap_RocketLauncher::DrawWeaponCrosshair_Implementation(UUTHUDWidget
         }
     }
 }
-
-

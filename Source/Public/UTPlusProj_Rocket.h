@@ -23,6 +23,18 @@ class NETCODEPLUS_API AUTPlusProj_Rocket : public AUTProj_Rocket
 public:
 	AUTPlusProj_Rocket(const FObjectInitializer& ObjectInitializer);
 
+    // Initial identity prevents a loaded rocket from stealing a primary fake
+    // before the exact per-ordinal owner RPC performs its visual handoff.
+    UPROPERTY(Replicated)
+    uint32 LoadedOwnershipEpoch;
+    UPROPERTY(Replicated)
+    uint32 LoadedVolleyId;
+    UPROPERTY(Replicated)
+    uint8 LoadedRocketOrdinal;
+    UPROPERTY(Replicated)
+    class AUTPlusWeap_RocketLauncher* LoadedVolleyWeapon;
+    virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 	virtual void ProcessHit_Implementation(AActor* OtherActor, UPrimitiveComponent* OtherComp,
 		const FVector& HitLocation, const FVector& HitNormal) override;
 	virtual bool CanMatchFake(AUTProjectile* InFakeProjectile, const FVector& VelDir) const override;
@@ -44,4 +56,5 @@ private:
 	FVector PrimarySyncEstimateVelocity;
 	float PrimarySyncCorrectionSpeed;
 	bool bForcingShutdownExplosion;
+    bool bLoadedIdentityDelivered = false;
 };

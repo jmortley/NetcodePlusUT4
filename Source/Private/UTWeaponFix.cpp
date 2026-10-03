@@ -1,5 +1,7 @@
 
 #include "UTWeaponFix.h"
+#include "NCFireAnchor.h"
+#include "NCPlusVersionGate.h"
 #include "NCFireDiagnostics.h"
 #include "NCClientFireTiming.h"
 #include "NCShockInputTrace.h"
@@ -173,6 +175,7 @@ struct FDeferredEquipFireContext
 	TWeakObjectPtr<AUTCharacter> Owner;
 	TWeakObjectPtr<AUTCharacter> ClientHitChar;
 	FVector ClientHeadOffset = FVector::ZeroVector;
+    FNCFireAnchor Anchor;
     const TCHAR* Source = TEXT("FixedInitial");
     // Preserve the accepted RPC route even when Source becomes DeferredEquip
     // or DeferredStateTail. Diagnostic metadata only; not a client timestamp.
@@ -237,24 +240,53 @@ struct FServerRateDispatchScope
         if (Context && Context->bDeferredRate)
         {
             QueueAge = FMath::Max(0.f, Now - Context->ServerAcceptTime);
-            const FServerRateDispatchScope* const* Old = ServerRateDispatchScopes.Find(Weapon);
-            Previous = Old ? *Old : nullptr;
-            ServerRateDispatchScopes.Add(Weapon, this);
         }
+        const FServerRateDispatchScope* const* Old = ServerRateDispatchScopes.Find(Weapon);
+        Previous = Old ? *Old : nullptr;
+        ServerRateDispatchScopes.Add(Weapon, this);
     }
     ~FServerRateDispatchScope()
     {
-        if (Context && Context->bDeferredRate)
-        {
-            if (Previous) ServerRateDispatchScopes.Add(Weapon, Previous);
-            else ServerRateDispatchScopes.Remove(Weapon);
-        }
+        if (Previous) ServerRateDispatchScopes.Add(Weapon, Previous);
+        else ServerRateDispatchScopes.Remove(Weapon);
     }
 };
 static const FServerRateDispatchScope* FindServerRateDispatch(const AUTWeaponFix* Weapon)
 {
     const FServerRateDispatchScope* const* Entry = ServerRateDispatchScopes.Find(Weapon);
-    return Entry ? *Entry : nullptr;
+    return Entry && (*Entry)->Context && (*Entry)->Context->bDeferredRate ? *Entry : nullptr;
+}
+
+// A stack-only snapshot keeps origin, raw rewind and all render checks on one
+// accepted shot. Anchor age already includes any server reservation wait.
+struct FFireAnchorScope;
+static TMap<const AUTWeaponFix*, const FFireAnchorScope*> FireAnchorScopes;
+struct FFireAnchorScope
+{
+    const AUTWeaponFix* Weapon;
+    const FNCFireAnchor* Anchor;
+    const FFireAnchorScope* Previous = nullptr;
+    float Extra = 0.f;
+    bool bApplied = false;
+    FFireAnchorScope(const AUTWeaponFix* InWeapon, const FNCFireAnchor& InAnchor, float Now)
+        : Weapon(InWeapon), Anchor(&InAnchor)
+    {
+        bApplied = InAnchor.bEnforce && NCFireAnchor::Mode() == 2 && NCFireAnchor::Dispatch(InAnchor, Now, Extra);
+        const FFireAnchorScope* const* Old = FireAnchorScopes.Find(Weapon);
+        Previous = Old ? *Old : nullptr;
+        // Even an unanchored nested shot masks its parent's epoch and origin.
+        FireAnchorScopes.Add(Weapon, this);
+    }
+    ~FFireAnchorScope()
+    {
+        if (Previous) FireAnchorScopes.Add(Weapon, Previous);
+        else FireAnchorScopes.Remove(Weapon);
+    }
+};
+static const FFireAnchorScope* FindFireAnchor(const AUTWeaponFix* Weapon)
+{
+    const FFireAnchorScope* const* Found = FireAnchorScopes.Find(Weapon);
+    return Found && (*Found)->bApplied ? *Found : nullptr;
 }
 
 static uint32 AllocateDeferredEquipFireGeneration()
@@ -3604,12 +3636,14 @@ void AUTWeaponFix::FireShot()
 				}
 			}
 		}
+        const float ClientMoveTime = UTOwner ? UTOwner->GetCurrentSynchTime(false) : -1.f;
+        const FVector ClientFireLoc = GetFireStartLoc();
         if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("SEND"), CurrentFireMode, NextEventIndex, 0,
             NCFireDiagnostics::WireTimestamp(ClientTimestamp));
 		ServerStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
-			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
+			ClientRot, ClientHitChar, ZOffset, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
         QueueResendStartFireFixed(CurrentFireMode, NextEventIndex, ClientTimestamp,
-            ClientRot, ClientHitChar, ZOffset, ClientHeadOffset);
+            ClientRot, ClientHitChar, ZOffset, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
 
 		// Existing fake-projectile/effect path for non-buffered shots. Buffered
 		// Shock already staged the same rotation before its pretrace.
@@ -3627,6 +3661,11 @@ void AUTWeaponFix::FireShot()
 	else
 		// --- SERVER SIDE ---
 	{
+        if (!Is329FireProtocolReady())
+        {
+            ClearDeferredEquipFireContext(true, TEXT("329_protocol_not_confirmed_at_dispatch"));
+            return;
+        }
         const TWeakObjectPtr<AUTWeaponFix> WeaponKey(this);
         FDeferredEquipFireContext* LiveContext = DeferredEquipFireContexts.Find(WeaponKey);
         const bool bAcceptedRequestDispatch = HasAcceptedTransactionalRequest(CurrentFireMode)
@@ -3668,8 +3707,23 @@ void AUTWeaponFix::FireShot()
         if (bAcceptedRequestDispatch)
         {
             AcceptedContext = *LiveContext;
+            float AnchorAge = 0.f;
+            const bool bAnchorDispatchValid = NCFireAnchor::Dispatch(AcceptedContext.Anchor, GetWorld()->GetTimeSeconds(), AnchorAge);
+            if (AcceptedContext.Anchor.bValid && NCFireAnchor::LogEnabled())
+                UE_LOG(LogUTWeaponFix, Log, TEXT("[FireAnchor329] dispatch event=%d weapon=%s mode=%d policy=%d valid=%d extraMs=%.3f source=%s"),
+                    AcceptedContext.FireEventIndex, *GetName(), CurrentFireMode, NCFireAnchor::Mode(),
+                    bAnchorDispatchValid, AnchorAge * 1000.f, AcceptedContext.Source);
+            if (AcceptedContext.Anchor.bValid && AcceptedContext.Anchor.bEnforce && NCFireAnchor::Mode() == 2 && !bAnchorDispatchValid)
+            {
+                // An enforced original epoch must never silently become a newer shot.
+                ClearDeferredEquipFireContext(true, TEXT("anchor_expired_before_dispatch"));
+                return;
+            }
             LiveContext->bShotDispatched = true;
         }
+        FServerRateDispatchScope RateScope(this, bAcceptedRequestDispatch ? &AcceptedContext : nullptr,
+            GetWorld()->GetTimeSeconds());
+        FFireAnchorScope AnchorScope(this, AcceptedContext.Anchor, GetWorld()->GetTimeSeconds());
         const FDeferredEquipFireContext* DeferredContext = &AcceptedContext;
 
 		const bool bPreviousTransactionalFire = bIsTransactionalFire;
@@ -3794,8 +3848,6 @@ void AUTWeaponFix::FireShot()
         TArray<float>& ActualTimes = ServerActualFireTimes.FindOrAdd(WeaponKey);
         if (!ActualTimes.IsValidIndex(CurrentFireMode)) ActualTimes.SetNumZeroed(CurrentFireMode + 1);
         ActualTimes[CurrentFireMode] = GetWorld()->GetTimeSeconds();
-        FServerRateDispatchScope RateScope(this, bAcceptedRequestDispatch ? &AcceptedContext : nullptr,
-            GetWorld()->GetTimeSeconds());
 		// 3. SPAWN PROJECTILE
 		UE_LOG(LogUTWeaponFix, Verbose, TEXT("[FireShot] Server spawning Mode %d projectile"), CurrentFireMode);
 		Super::FireShot();
@@ -4415,8 +4467,15 @@ bool AUTWeaponFix::IsFireEventSequenceValid(uint8 FireModeNum, int32 InEventInde
 
 
 void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-    FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+    FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+    float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this)))
+    {
+        NCFireDiagnostics::Record(this, TEXT("REJECT"), FireModeNum, InFireEventIndex, 0,
+            TEXT("reason=329_protocol_or_loaded_rocket_transport"));
+        return;
+    }
     if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("RECEIVE"), FireModeNum, InFireEventIndex, 0,
         NCFireDiagnostics::WireTimestamp(ClientTimestamp) + FString::Printf(TEXT(" retry=%d"), FixedRetryWeapons.Contains(this)));
     // 1. VALIDATION (Your existing transactional checks)
@@ -4616,6 +4675,23 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
         NewContext.ExpectedFiringState = RequestedFiringState;
         NewContext.WaitingState = CurrentState;
         NewContext.bAcceptedViaRetry = FixedRetryWeapons.Contains(this);
+        const AUTPlayerController* AnchorPC = UTOwner ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
+        float AnchorRTT = 0.f;
+        if (bRequestedTransactional && AnchorPC && !AnchorPC->IsLocalController()
+            && (Cast<AUTPlusShockRifle>(this) || Cast<AUTPlusSniper>(this))
+            && bTrackHitScanReplication && InstantHitInfo.IsValidIndex(FireModeNum)
+            && InstantHitInfo[FireModeNum].ConeDotAngle <= 0.f
+            && (!ProjClass.IsValidIndex(FireModeNum) || ProjClass[FireModeNum] == nullptr)
+            && GetServerObservedRTTMs(AnchorPC, AnchorRTT))
+        {
+            // Admission uses this request's measured baseline, not a dispatch
+            // scope which may be active during a re-entrant weapon callback.
+            const float AnchorBase = FMath::Clamp(AnchorRTT - FMath::Max(0.f, GetConfiguredHitscanFudgeMs()),
+                0.f, FMath::Max(0.f, MaxRewindMs)) * 0.0005f;
+            NewContext.Anchor = NCFireAnchor::Resolve(this, UTOwner, FireModeNum, InFireEventIndex,
+                ClientMoveTime, ClientFireLoc, ClientViewRot, AnchorBase,
+                AnchorRTT, FMath::Max(0.f, MaxRewindMs) * 0.0005f);
+        }
         NewContext.Source = bQueuedDeferredRate ? TEXT("DeferredRate")
             : bQueuedDeferredEquip ? TEXT("DeferredEquip")
             : bQueuedDeferredCharged ? TEXT("DeferredChargedTail")
@@ -4947,6 +5023,8 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
 void AUTWeaponFix::Removed()
 {
+    NCFireAnchor::InvalidateWeapon(this);
+    FireProtocolController = UTOwner ? UTOwner->Controller : nullptr;
     ClearDeferredActiveState();
     NCClientFireTiming::Forget(this);
     DeferredActiveGenerations.Remove(TWeakObjectPtr<AUTWeaponFix>(this));
@@ -4989,6 +5067,7 @@ void AUTWeaponFix::Removed()
 
 void AUTWeaponFix::Destroyed()
 {
+    NCFireAnchor::InvalidateWeapon(this);
     ClearDeferredActiveState();
     NCClientFireTiming::Forget(this);
     DeferredActiveGenerations.Remove(TWeakObjectPtr<AUTWeaponFix>(this));
@@ -5265,9 +5344,9 @@ bool AUTWeaponFix::ValidateStartFireFixedPayload(uint8 FireModeNum, int32 InFire
 
 bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFireEventIndex,
     float ClientTimestamp, FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset,
-    FVector ClientHeadOffset)
+    FVector ClientHeadOffset, float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
-    return ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
+    return FMath::IsFinite(ClientMoveTime) && !ClientFireLoc.ContainsNaN() && ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
         ClientViewRot, ClientHeadOffset);
 }
 
@@ -5276,6 +5355,7 @@ bool AUTWeaponFix::ServerStartFireFixed_Validate(uint8 FireModeNum, int32 InFire
 
 void AUTWeaponFix::ServerStopFireFixed_Implementation(uint8 FireModeNum, int32 InFireEventIndex)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this))) return;
     NCFireDiagnostics::Record(this, TEXT("STOP_RECEIVE"), FireModeNum, InFireEventIndex, 0, TEXT(""), TEXT("fixed_stop"));
     // Diagnostic only: the existing wire carries a shot watermark, not a unique
     // physical release generation. Do not infer ownership from PendingFire.
@@ -5641,7 +5721,7 @@ void AUTWeaponFix::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 
 bool AUTWeaponFix::IsServerRateTargetHistoryValid(AUTCharacter* Target, float PredictionTime) const
 {
-    if (!FindServerRateDispatch(this)) return true;
+    if (!FindServerRateDispatch(this) && !FindFireAnchor(this)) return true;
     int32 Older = INDEX_NONE, Newer = INDEX_NONE;
     return HasContinuousRenderHistory(Target, PredictionTime, PredictionTime, Older, Newer);
 }
@@ -5651,8 +5731,40 @@ float AUTWeaponFix::GetHitValidationPredictionTime() const
 	return GetPredictionTimeWithFudgeMs(GetConfiguredHitscanFudgeMs());
 }
 
+bool AUTWeaponFix::Is329FireProtocolReady() const
+{
+    if (Role != ROLE_Authority) return false;
+    AController* Controller = UTOwner ? UTOwner->Controller : FireProtocolController.Get();
+    if (Cast<AUTBot>(Controller)) return true;
+    APlayerController* PC = Cast<APlayerController>(Controller);
+    return PC && (PC->IsLocalController() || NCPlusVersionGate::IsProtocolConfirmed(PC));
+}
+
+float AUTWeaponFix::GetHitValidationRenderTime(float PresentationMs, bool& bTimingValid) const
+{
+    const float Presentation = FMath::Max(0.f, PresentationMs) * 0.001f;
+    if (const FFireAnchorScope* Anchor = FindFireAnchor(this))
+    {
+        bTimingValid = true;
+        return Anchor->Anchor->ObservedRTTMs * 0.0005f + Presentation + Anchor->Extra;
+    }
+    if (const FServerRateDispatchScope* Rate = FindServerRateDispatch(this))
+    {
+        bTimingValid = Rate->Context->bRateObservedRTTValid;
+        return bTimingValid ? Rate->Context->RateObservedRTTMs * 0.0005f + Presentation + Rate->QueueAge : 0.f;
+    }
+    float RTT = 0.f;
+    bTimingValid = GetServerObservedRTTMs(UTOwner ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr, RTT);
+    return bTimingValid ? RTT * 0.0005f + Presentation : 0.f;
+}
+
 float AUTWeaponFix::GetPredictionTimeWithFudgeMs(float InFudgeMs) const
 {
+    if (const FFireAnchorScope* Anchor = FindFireAnchor(this))
+    {
+        // Frozen at admission. Extra includes queue residence exactly once.
+        return Anchor->Anchor->BaseRewind + Anchor->Extra;
+    }
     if (const FServerRateDispatchScope* Rate = FindServerRateDispatch(this))
     {
         // Compensate only server-measured queue residence; the client cannot
@@ -5760,18 +5872,18 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         !RenderAuthorityShooterPC->IsLocalController();
     float RenderAuthorityRTTMs = 0.f;
     const FServerRateDispatchScope* RateDispatch = FindServerRateDispatch(this);
-    const bool bRenderAuthorityTimingValid = bRenderAuthoritativeTargeting &&
-        (RateDispatch ? RateDispatch->Context->bRateObservedRTTValid
-            : GetServerObservedRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs));
+    const FFireAnchorScope* AnchorDispatch = FindFireAnchor(this);
+    const bool bBoundedHistoricalShot = RateDispatch || AnchorDispatch;
+    bool bRenderAuthorityTimingValid = false;
     const float RenderAuthorityExtraMs = bRenderAuthoritativeTargeting
         ? FMath::Max(0.f, CVarRenderCreditExtraMs.GetValueOnGameThread())
         : 0.f;
-    const float RenderAuthoritativeMs = bRenderAuthoritativeTargeting
-        ? RenderAuthorityRTTMs * 0.5f + RenderAuthorityExtraMs
-        : 0.f;
-    const float QueuedRenderTime = RateDispatch
-        ? RateDispatch->Context->RateObservedRTTMs * 0.0005f + RenderAuthorityExtraMs * 0.001f + RateDispatch->QueueAge
-        : RenderAuthoritativeMs * 0.001f;
+    const float QueuedRenderTime = bRenderAuthoritativeTargeting
+        ? GetHitValidationRenderTime(RenderAuthorityExtraMs, bRenderAuthorityTimingValid) : 0.f;
+    const float RenderAuthoritativeMs = QueuedRenderTime * 1000.f;
+    if (AnchorDispatch) RenderAuthorityRTTMs = AnchorDispatch->Anchor->ObservedRTTMs;
+    else if (RateDispatch) RenderAuthorityRTTMs = RateDispatch->Context->RateObservedRTTMs;
+    else GetServerObservedRTTMs(RenderAuthorityShooterPC, RenderAuthorityRTTMs);
     const float RenderAuthoritativeTime = bRenderAuthoritativeTargeting
         ? FMath::Clamp(QueuedRenderTime, 0.f, 0.25f)
         : 0.f;
@@ -6046,7 +6158,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             // Standard logic: Teammate checks, etc.
             if (bTeammatesBlockHitscan || !GS || !GS->OnSameTeam(UTOwner, Target))
             {
-                if (bRenderAuthoritativeTargeting || RateDispatch)
+                if (bRenderAuthoritativeTargeting || bBoundedHistoricalShot)
                 {
                     int32 RenderOlderIndex = INDEX_NONE;
                     int32 RenderNewerIndex = INDEX_NONE;
@@ -6198,7 +6310,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 const float TargetSelectionRadius = TargetEffectiveRadius +
                     TraceRadius + ExtraHitPadding;
                 float CandidateEntryDistance = BIG_NUMBER;
-                const bool bHasCandidateEntry = (bRenderAuthoritativeTargeting || RateDispatch) &&
+                const bool bHasCandidateEntry = (bRenderAuthoritativeTargeting || bBoundedHistoricalShot) &&
                     bHitTarget &&
                     RayCapsuleEntryDistance(TargetLocation, TargetAxisHalfLength,
                         TargetSelectionRadius, CandidateEntryDistance);
@@ -6208,7 +6320,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 // entry ordering so different postures/radii cannot let a
                 // farther surface beat a nearer one.
                 const bool bShouldSelectTarget = bHitTarget &&
-                    ((bRenderAuthoritativeTargeting || RateDispatch)
+                    ((bRenderAuthoritativeTargeting || bBoundedHistoricalShot)
                         ? (bHasCandidateEntry && CandidateEntryDistance < BestTargetEntryDistance)
                         : (!BestTarget || ((ClosestPoint - StartLocation).SizeSquared() <
                             (BestPoint - StartLocation).SizeSquared())));
@@ -6229,7 +6341,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
     }
 
     const float WorldHitDistance = (Hit.Location - StartLocation).Size();
-    if ((bRenderAuthoritativeTargeting || RateDispatch) &&
+    if ((bRenderAuthoritativeTargeting || bBoundedHistoricalShot) &&
         UnverifiableBlockEntryDistance <= BestTargetEntryDistance &&
         UnverifiableBlockEntryDistance < WorldHitDistance)
     {
@@ -6282,7 +6394,7 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 	// teammates don't block hitscan. ReceivedHitScanHitChar is fully client-controlled, so without this a client
 	// could name a teammate to force a near-graze body hit (FF-gated at damage, but it shouldn't be considered).
 	if (bClaimCapableMode && Role == ROLE_Authority &&
-        (!RateDispatch || HasContinuousRenderHistory(ReceivedHitScanHitChar,
+        (!bBoundedHistoricalShot || HasContinuousRenderHistory(ReceivedHitScanHitChar,
             ActualPredictionTime + 0.045f, ActualPredictionTime, RateClaimOlder, RateClaimNewer)) &&
 		IsLiveHitscanTarget(ReceivedHitScanHitChar) &&
 		BestTarget != ReceivedHitScanHitChar &&
@@ -6323,16 +6435,12 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 		{
 			bRescueLeadApplicable = true;
 			RescueLeadCapApplied = FMath::Max(0.f, CVarHitscanMaxRescueLeadUU.GetValueOnGameThread());
-			float RescueRTTMs = 0.f;
-			if (RescueShooterPC != nullptr && (RateDispatch ? RateDispatch->Context->bRateObservedRTTValid
-                : GetServerObservedRTTMs(RescueShooterPC, RescueRTTMs)))
+            bool bRescueTiming = false;
+            const float RescueTime = GetHitValidationRenderTime(CVarHitAttribRenderExtraMs.GetValueOnGameThread(), bRescueTiming);
+			if (RescueShooterPC != nullptr && bRescueTiming)
 			{
 				bRescueLeadTimingValid = true;
-				const float RescueRenderT = FMath::Clamp(
-                    ((RateDispatch ? RateDispatch->Context->RateObservedRTTMs : RescueRTTMs) * 0.5f +
-                        FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())) * 0.001f
-                        + (RateDispatch ? RateDispatch->QueueAge : 0.f),
-					0.f, 0.25f);
+                const float RescueRenderT = FMath::Clamp(RescueTime, 0.f, 0.25f);
 				const FVector RescueValPos = (ActualPredictionTime > 0.f)
 					? ClaimedTarget->GetRewindLocation(ActualPredictionTime)
 					: ClaimedTarget->GetActorLocation();
@@ -6440,8 +6548,9 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 			const bool bSlideOuterRung =
 				FMath::Abs(SearchOffset) > BaseMaxSearchOffset + KINDA_SMALL_NUMBER;
 			const float AltRewindTime = ActualPredictionTime + SearchOffset;
+            if (AnchorDispatch && AltRewindTime > AnchorDispatch->Anchor->Cap) continue;
             int32 RateRungOlder = INDEX_NONE, RateRungNewer = INDEX_NONE;
-            if (RateDispatch && !HasContinuousRenderHistory(ClaimedTarget, AltRewindTime,
+            if (bBoundedHistoricalShot && !HasContinuousRenderHistory(ClaimedTarget, AltRewindTime,
                 ActualPredictionTime, RateRungOlder, RateRungNewer)) continue;
 
 			// Sanity bounds
@@ -6621,13 +6730,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
         if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
         {
             bRenderChkApplicable = true;
-            float ServerRTTMs = 0.f;
-            const bool bServerTimingValid = RateDispatch ? RateDispatch->Context->bRateObservedRTTValid
-                : GetServerObservedRTTMs(ShooterPC, ServerRTTMs);
-            const float RenderMs = (RateDispatch ? RateDispatch->Context->RateObservedRTTMs : ServerRTTMs) * 0.5f +
-                FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread());
-
-            const float RenderT = RenderMs * 0.001f + (RateDispatch ? RateDispatch->QueueAge : 0.f);
+            bool bServerTimingValid = false;
+            const float RenderT = GetHitValidationRenderTime(CVarHitAttribRenderExtraMs.GetValueOnGameThread(), bServerTimingValid);
             RenderChkSlack = FMath::Max(0.f,
                 CVarUnclaimedRenderSlack.GetValueOnGameThread());
             if (!bServerTimingValid)
@@ -6683,8 +6787,8 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
                 UE_LOG(LogUTWeaponFix, Verbose,
                     TEXT("[RenderGate] DEMOTED %s: reason=%s missBy=%.1fuu (serverRTT %.0f, renderMs %.1f, timingValid=%d)"),
                     *BestTarget->GetName(), RenderSample.Reason,
-                    RenderSample.bMeasured ? RenderSample.MissBy : -1.f, ServerRTTMs,
-                    RenderMs, bServerTimingValid ? 1 : 0);
+                    RenderSample.bMeasured ? RenderSample.MissBy : -1.f, RenderAuthorityRTTMs,
+                    RenderT * 1000.f, bServerTimingValid ? 1 : 0);
                 RenderChkDemotedTarget = BestTarget;
                 bRenderChkDemoted = true;
                 bLastUnclaimedRenderDemoted = true;
@@ -6754,7 +6858,17 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
             ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
         float ShooterRTTMs = 0.f;
         bool bShooterTimingValid = false;
-        if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
+        if (AnchorDispatch)
+        {
+            ShooterRTTMs = AnchorDispatch->Anchor->ObservedRTTMs;
+            bShooterTimingValid = true;
+        }
+        else if (RateDispatch)
+        {
+            ShooterRTTMs = RateDispatch->Context->RateObservedRTTMs;
+            bShooterTimingValid = RateDispatch->Context->bRateObservedRTTValid;
+        }
+        else if (ShooterPC != nullptr && !ShooterPC->IsLocalController())
         {
             bShooterTimingValid =
                 GetServerObservedRTTMs(ShooterPC, ShooterRTTMs);
@@ -6792,10 +6906,10 @@ void AUTWeaponFix::HitScanTrace(const FVector& StartLocation, const FVector& End
 
         AUTCharacter* AttribTarget = BestTarget ? BestTarget
             : (RenderChkDemotedTarget ? RenderChkDemotedTarget : ReceivedHitScanHitChar);
-        const float RenderEstMs = bShooterTimingValid
-            ? ShooterRTTMs * 0.5f +
-                FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread())
-            : 0.f;
+        bool bRenderEstimateValid = bShooterTimingValid;
+        const float RenderEstMs = (AnchorDispatch || RateDispatch)
+            ? GetHitValidationRenderTime(CVarHitAttribRenderExtraMs.GetValueOnGameThread(), bRenderEstimateValid) * 1000.f
+            : (bShooterTimingValid ? ShooterRTTMs * 0.5f + FMath::Max(0.f, CVarHitAttribRenderExtraMs.GetValueOnGameThread()) : 0.f);
         FString LeadStr(TEXT("na"));
         FString DeltaMagStr(TEXT("na"));
         if (AttribTarget != nullptr && bShooterTimingValid)
@@ -6970,6 +7084,7 @@ FRotator AUTWeaponFix::GetBaseFireRotation()
 
 FVector AUTWeaponFix::GetFireStartLoc(uint8 FireMode)
 {
+    if (const FFireAnchorScope* Anchor = FindFireAnchor(this)) return Anchor->Anchor->Origin;
 	// AUTWeapon's default argument is the 255 sentinel for CurrentFireMode. Resolve
 	// it for the stock origin calculation and for the opt-in projectile-origin
 	// experiment below; the experiment remains disabled by default.
@@ -7402,6 +7517,9 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 
     ObserveFireProjectile(this, CapturedFireMode, ProjectileClass.Get(), NewProjectile,
         NewProjectile ? TEXT("ok") : TEXT("null"));
+    if (NewProjectile)
+        if (AUTPlusWeap_RocketLauncher* Launcher = Cast<AUTPlusWeap_RocketLauncher>(this))
+            Launcher->CaptureLoadedRocketSpawn(NewProjectile);
 
 	if (!NewProjectile)
 	{
@@ -8051,6 +8169,7 @@ void AUTWeaponFix::FireInstantHit(bool bDealDamage, FHitResult* OutHit)
 
 void AUTWeaponFix::DetachFromOwner_Implementation()
 {
+    NCFireAnchor::InvalidateWeapon(this);
 	StopShockInputTrace();
 	ClearDeferredEquipFireContext(true, TEXT("detach"));
     ClearDeferredActiveState();
@@ -8092,6 +8211,7 @@ bool AUTWeaponFix::PutDown()
     // goes off 0.1s after you switched weapons.
     if (bPutDownResult)
     {
+        NCFireAnchor::InvalidateWeapon(this);
 		StopShockInputTrace();
 		ClearDeferredEquipFireContext(true, TEXT("switch_before_commit"));
 		// The original fixed fire RPCs are Reliable. Stop only NetcodePlus's
@@ -8972,6 +9092,8 @@ TArray<UMeshComponent*> AUTWeaponFix::Get1PMeshes_Implementation() const
 
 void AUTWeaponFix::BringUp(float OverflowTime)
 {
+    NCFireAnchor::InvalidateWeapon(this);
+    FireProtocolController.Reset();
     ClearDeferredActiveState();
     if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("EQUIP_BEGIN"), CurrentFireMode, INDEX_NONE, 0,
         FString::Printf(TEXT("overflow=%.6f"), OverflowTime), TEXT("state"));
@@ -9504,10 +9626,10 @@ void AUTWeaponFix::SetSkin(UMaterialInterface* NewSkin)
 // 1. QUEUE LOGIC (Client Side)
 void AUTWeaponFix::QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex,
     float ClientTimestamp, FRotator ClientViewRot, AUTCharacter* ClientHitChar,
-    uint8 ZOffset, FVector ClientHeadOffset)
+    uint8 ZOffset, FVector ClientHeadOffset, float ClientMoveTime, const FVector& ClientFireLoc)
 {
     QueueResendFireEventFixed(FPendingFireEventFix(FireModeNum, InFireEventIndex,
-        ClientTimestamp, ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset));
+        ClientTimestamp, ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset, ClientMoveTime, ClientFireLoc));
 }
 
 void AUTWeaponFix::QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex)
@@ -9570,7 +9692,7 @@ void AUTWeaponFix::ResendNextFireEventFixed()
         {
             ResendServerStartFireFixed(Event.FireModeNum, Event.FireEventIndex,
                 Event.ClientTimestamp, Event.ClientViewRot, Event.HitChar.Get(),
-                Event.ZOffset, Event.ClientHeadOffset);
+                Event.ZOffset, Event.ClientHeadOffset, Event.ClientMoveTime, Event.ClientFireLoc);
         }
         else
         {
@@ -9670,6 +9792,7 @@ void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int3
 
 void AUTWeaponFix::ClientConfirmFireEvent_Implementation(uint8 FireModeNum, int32 InAuthorizedEventIndex)
 {
+    if (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this)) return; // 329 volley receipts own charged rockets.
     NCFireDiagnostics::Record(this, TEXT("ACK_RECEIVED"), FireModeNum, InAuthorizedEventIndex);
 	if (RocketPrimaryDiagFor(this, FireModeNum))
 	{
@@ -9783,7 +9906,8 @@ void AUTWeaponFix::ClearPendingFakeProjectiles()
 // This receives the retry packet
 void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
     int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot,
-    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+    float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
     // DUPLICATE CHECK
     // If the server already processed this index (or a newer one), ignore this packet.
@@ -9807,7 +9931,7 @@ void AUTWeaponFix::ResendServerStartFireFixed_Implementation(uint8 FireModeNum,
     const bool bWasRetry = FixedRetryWeapons.Contains(this);
     FixedRetryWeapons.Add(this);
     ServerStartFireFixed_Implementation(FireModeNum, InFireEventIndex, ClientTimestamp,
-        ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset);
+        ClientViewRot, ClientHitChar, ZOffset, ClientHeadOffset, ClientMoveTime, ClientFireLoc);
     if (!bWasRetry) FixedRetryWeapons.Remove(this);
 
     bNetDelayedShot = false;
@@ -9824,9 +9948,10 @@ void AUTWeaponFix::ResendServerStopFireFixed_Implementation(uint8 FireModeNum,
 
 bool AUTWeaponFix::ResendServerStartFireFixed_Validate(uint8 FireModeNum,
     int32 InFireEventIndex, float ClientTimestamp, FRotator ClientViewRot,
-    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset)
+    AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+    float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc)
 {
-    return ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
+    return FMath::IsFinite(ClientMoveTime) && !ClientFireLoc.ContainsNaN() && ValidateStartFireFixedPayload(FireModeNum, InFireEventIndex, ClientTimestamp,
         ClientViewRot, ClientHeadOffset);
 }
 
@@ -10320,6 +10445,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 
 void AUTWeaponFix::ServerUpdateFiringStates_Implementation(uint8 FireSettings)
 {
+    if (!Is329FireProtocolReady()) return;
 	// Guard: if owner is dead/destroyed, discard the RPC.
 	// Race condition: player dies, weapon is being torn down, but a replicated
 	// ServerUpdateFiringStates was already in flight and arrives this frame.
@@ -10341,6 +10467,7 @@ void AUTWeaponFix::ServerUpdateFiringStates_Implementation(uint8 FireSettings)
         if (NCFireDiagnostics::Enabled()) NCFireDiagnostics::Record(this, TEXT("SYNC_DECISION"), Mode, 255, 0,
             FString::Printf(TEXT("incoming=%d pendingBit=%d filtered=%d hasState=%d"), bIncoming,
                 UTOwner->IsPendingFire(Mode), Cast<UUTWeaponStateFiring_Transactional>(State) != nullptr, State != nullptr), TEXT("stock"));
+        if (Mode == 1 && Cast<AUTPlusWeap_RocketLauncher>(this)) continue;
         if (!State || UTOwner->IsPendingFire(Mode) == bIncoming) continue;
         const bool bFiltered = Cast<UUTWeaponStateFiring_Transactional>(State) != nullptr;
         if (FireProvenance()) UE_LOG(LogUTWeaponFix, Warning,
@@ -10417,6 +10544,7 @@ int32 AUTWeaponFix::GetPredictedHitsoundDamage(uint8 FireModeNum, bool bHeadshot
 
 void AUTWeaponFix::ServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this))) return;
     NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, true,
         StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStartFire"));
     Super::ServerStartFire_Implementation(FireModeNum, InFireEventIndex, bClientFired);
@@ -10424,6 +10552,7 @@ void AUTWeaponFix::ServerStartFire_Implementation(uint8 FireModeNum, uint8 InFir
 
 void AUTWeaponFix::ServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this))) return;
     NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, true,
         StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStartFireOffset"));
     Super::ServerStartFireOffset_Implementation(FireModeNum, InFireEventIndex, ZOffset, bClientFired);
@@ -10431,18 +10560,21 @@ void AUTWeaponFix::ServerStartFireOffset_Implementation(uint8 FireModeNum, uint8
 
 void AUTWeaponFix::ResendServerStartFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, bool bClientFired)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this))) return;
     NCFireDiagnostics::Record(this, TEXT("STOCK_RETRY"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFire"), TEXT("stock"));
     Super::ResendServerStartFire_Implementation(FireModeNum, InFireEventIndex, bClientFired);
 }
 
 void AUTWeaponFix::ResendServerStartFireOffset_Implementation(uint8 FireModeNum, uint8 InFireEventIndex, uint8 ZOffset, bool bClientFired)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this))) return;
     NCFireDiagnostics::Record(this, TEXT("STOCK_RETRY"), FireModeNum, InFireEventIndex, 0, TEXT("route=ResendServerStartFireOffset"), TEXT("stock"));
     Super::ResendServerStartFireOffset_Implementation(FireModeNum, InFireEventIndex, ZOffset, bClientFired);
 }
 
 void AUTWeaponFix::ServerStopFire_Implementation(uint8 FireModeNum, uint8 InFireEventIndex)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this))) return;
     NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, false,
         StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStopFire"));
     Super::ServerStopFire_Implementation(FireModeNum, InFireEventIndex);
@@ -10450,6 +10582,7 @@ void AUTWeaponFix::ServerStopFire_Implementation(uint8 FireModeNum, uint8 InFire
 
 void AUTWeaponFix::ServerStopFireRecent_Implementation(uint8 FireModeNum, uint8 InFireEventIndex)
 {
+    if (!Is329FireProtocolReady() || (FireModeNum == 1 && Cast<AUTPlusWeap_RocketLauncher>(this))) return;
     NCFireDiagnostics::FStockScope TraceRpc(this, FireModeNum, InFireEventIndex, false,
         StockSyncWeapons.Contains(this) || InFireEventIndex == 255, TEXT("ServerStopFireRecent"));
     Super::ServerStopFireRecent_Implementation(FireModeNum, InFireEventIndex);

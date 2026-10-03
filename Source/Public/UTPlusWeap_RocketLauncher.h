@@ -2,6 +2,7 @@
 #include "NetcodePlus.h"
 #include "UTWeaponFix.h" // Inherit from fixed class
 #include "UTProj_Rocket.h"
+#include "NCRocketVolley.h"
 #include "UTPlusWeap_RocketLauncher.generated.h"
 
 
@@ -9,6 +10,26 @@
 // Forward declarations
 class UUTWeaponStateFiringChargedRocket_Transactional;
 class AUTProj_RocketSpiral;
+
+struct FNCLoadedRocketPrediction
+{
+    uint32 OwnershipEpoch = 0;
+    uint32 VolleyId = 0;
+    uint32 ProjectileNetGUID = 0;
+    uint8 Ordinal = 0;
+    uint8 Outcome = 255;
+    float CreatedAt = 0.f;
+    TWeakObjectPtr<AUTProjectile> Fake;
+    TWeakObjectPtr<AUTProjectile> Real;
+};
+
+struct FNCLoadedVolleyReceipt
+{
+    uint32 VolleyId = 0;
+    uint8 Result = 0;
+    uint8 Count = 0;
+    uint8 SpawnedMask = 0;
+};
 
 /**
  * Rocket Fire Mode Configuration
@@ -63,6 +84,8 @@ public:
 
     virtual void PostInitProperties() override;
     virtual void Destroyed() override;
+    virtual void Removed() override;
+    virtual void GivenTo(AUTCharacter* NewOwner, bool bAutoActivate) override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     // === ROCKET LOADING ===
     /** Font used to draw the firemode text (Grenades/Spiral) */
@@ -298,7 +321,45 @@ public:
     virtual float GetLoadTime(int32 InNumLoadedRockets);
 
     UFUNCTION(Client, Reliable)
-    void ClientAbortLoad();
+    void ClientAbortLoad(uint32 OwnershipEpoch, uint32 VolleyId);
+
+    // 329 charged-fire protocol. The reliable transport is deliberately separate
+    // from both the stock byte-event and fixed-fire watermark RPC families.
+    virtual void StartFire(uint8 FireModeNum) override;
+    virtual void StopFire(uint8 FireModeNum) override;
+    virtual AUTProjectile* SpawnNetPredictedProjectile(TSubclassOf<AUTProjectile> ProjectileClass,
+        FVector SpawnLocation, FRotator SpawnRotation) override;
+
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerBeginLoadedVolley(uint32 OwnershipEpoch, uint32 VolleyId, AUTCharacter* ExpectedPawn);
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerReleaseLoadedVolley(uint32 OwnershipEpoch, uint32 VolleyId, AUTCharacter* ExpectedPawn, uint8 SelectedMode, uint8 RequestedCount);
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerSetLoadedRocketMode(uint32 OwnershipEpoch, uint32 VolleyId, AUTCharacter* ExpectedPawn, uint8 SelectedMode);
+    UFUNCTION(Client, Reliable)
+    void ClientLoadedVolleyResult(uint32 OwnershipEpoch, uint32 VolleyId, AUTCharacter* ExpectedPawn, uint8 Result, uint8 Count, uint8 SpawnedMask);
+    UFUNCTION(Client, Reliable)
+    void ClientLoadedRocketResult(uint32 OwnershipEpoch, uint32 VolleyId, AUTCharacter* ExpectedPawn, uint8 Ordinal, uint8 Result, AUTProjectile* Projectile, uint32 ProjectileNetGUID);
+
+    UPROPERTY(ReplicatedUsing=OnRep_LoadedOwnershipEpoch)
+    uint32 LoadedOwnershipEpoch = 0;
+    UFUNCTION()
+    void OnRep_LoadedOwnershipEpoch();
+
+    uint32 GetLoadedVolleyId() const { return LoadedVolley.Id; }
+    uint32 GetLoadedVolleyEpoch() const { return LoadedVolleyEpoch; }
+    bool HasLoadedVolley() const { return LoadedVolley.Id != 0 && !LoadedVolley.Terminal; }
+    bool IsLoadedVolleyCommitted() const { return LoadedVolley.Released; }
+    bool IsLoadedVolleyReleasePending() const { return bLoadedVolleyReleaseReceived || bLoadedVolleyReleaseSent; }
+    bool BeginLoadedVolleyState();
+    void NotifyLoadedVolleyRelease();
+    bool CommitLoadedVolley();
+    void CompleteLoadedVolley(bool bCancelled);
+    void ContinueLoadedVolley();
+    void TryBeginLoadedVolley();
+    void CaptureLoadedRocketSpawn(AUTProjectile* Projectile);
+    bool ObserveLoadedRocketActor(uint32 OwnershipEpoch, uint32 VolleyId, uint8 Ordinal, AUTProjectile* Projectile);
+    void NoteLoadedRocketAmmoSpent(int32 Amount);
 
     // Firing
     virtual bool BeginFiringSequence(uint8 FireModeNum, bool bClientFired) override;
@@ -314,9 +375,6 @@ public:
     virtual bool ShouldFireLoad();
 
     // Fire Mode
-    UFUNCTION(Server, Reliable, WithValidation)
-    void ServerCycleRocketMode();
-
     virtual void OnMultiPress_Implementation(uint8 OtherFireMode) override;
     virtual void SetRocketFlashExtra(uint8 InFireMode, int32 InNumLoadedRockets, int32 InCurrentRocketFireMode, bool bInDrawRocketModeString);
     virtual void GetRocketFlashExtra(uint8 InFlashExtra, uint8 InFireMode, int32& OutNumLoadedRockets, int32& OutCurrentRocketFireMode, bool& bOutDrawRocketModeString);
@@ -352,6 +410,35 @@ public:
     virtual bool IsPreparingAttack_Implementation() override;
 
 protected:
+    NCRocketVolley::FProgress LoadedVolley;
+    uint32 LoadedVolleyEpoch = 0;
+    uint32 LastClientLoadedVolleyId = 0;
+    uint32 LastServerLoadedVolleyId = 0;
+    uint8 LoadedVolleyRequestedCount = 0;
+    uint8 LoadedVolleySelectedMode = 0;
+    uint8 LoadedVolleyNextOrdinal = 0;
+    int32 LoadedVolleyAmmoSpent = 0;
+    bool bLoadedVolleyEnteredState = false;
+    float LoadedVolleyBeginRequestedAt = 0.f;
+    bool bLoadedVolleyReleaseSent = false;
+    bool bLoadedVolleyReleaseReceived = false;
+    bool bLoadedVolleySpawnInProgress = false;
+    bool bLoadedVolleySpawnSucceeded = false;
+    bool bLoadedVolleyApplyingResult = false;
+    TWeakObjectPtr<AUTCharacter> LoadedVolleyPawn;
+    TWeakObjectPtr<AUTProjectile> LoadedVolleySpawnedProjectile;
+    TArray<FNCLoadedRocketPrediction> LoadedRocketPredictions;
+    TArray<FNCLoadedVolleyReceipt> LoadedVolleyReceipts;
+    FTimerHandle LoadedRocketReconcileHandle;
+    FTimerHandle LoadedVolleyBeginHandle;
+    bool CanBeginLoadedVolley();
+    bool IsLoadedVolleyModeValid(uint8 Mode) const;
+    void ResetLoadedVolley(uint32 Id);
+    void SendLoadedVolleyReceipt(NCRocketVolley::EResult Result);
+    void ReconcileLoadedRockets();
+    FNCLoadedRocketPrediction& FindOrAddLoadedRocket(uint32 OwnershipEpoch, uint32 Id, uint8 Ordinal);
+    void ResetLoadedOwnershipState();
+
     // AI helpers
     UPROPERTY()
     FVector PredicitiveTargetLoc;

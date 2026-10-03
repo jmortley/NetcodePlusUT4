@@ -1,5 +1,6 @@
 // TeamArenaCharacter.cpp
 #include "TeamArenaCharacter.h"
+#include "NCFireAnchor.h"
 #include "NCShotOriginDiagnostics.h"
 #include "UTCharacterMovement.h"
 #include "TeamArenaCharacterMovement.h"
@@ -1814,6 +1815,7 @@ FVector ATeamArenaCharacter::GetDelayedShotPosition()
 void ATeamArenaCharacter::PositionUpdated(bool bShotSpawned)
 {
 	Super::PositionUpdated(bShotSpawned);
+    NCFireAnchor::RecordMove(this, bShotSpawned);
 
 	// Position rewind is authoritative. Avoid duplicating this short history on
 	// simulated/autonomous clients, which never validate a server hitscan.

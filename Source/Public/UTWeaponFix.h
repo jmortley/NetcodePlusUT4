@@ -104,6 +104,8 @@ struct FPendingFireEventFix
     uint8 ZOffset;
     TWeakObjectPtr<AUTCharacter> HitChar;
     FVector ClientHeadOffset;
+    float ClientMoveTime;
+    FVector ClientFireLoc;
 
     FPendingFireEventFix(uint8 Mode, int32 EventIdx)
         : bIsStartFire(false)
@@ -114,11 +116,13 @@ struct FPendingFireEventFix
         , ZOffset(0)
         , HitChar(nullptr)
         , ClientHeadOffset(FVector::ZeroVector)
+        , ClientMoveTime(-1.f)
+        , ClientFireLoc(FVector::ZeroVector)
     {
     }
 
     FPendingFireEventFix(uint8 Mode, int32 EventIdx, float Timestamp, FRotator ViewRot,
-        AUTCharacter* InChar, uint8 Z, FVector HeadOffset)
+        AUTCharacter* InChar, uint8 Z, FVector HeadOffset, float MoveTime, FVector FireLoc)
         : bIsStartFire(true)
         , FireModeNum(Mode)
         , FireEventIndex(EventIdx)
@@ -127,6 +131,8 @@ struct FPendingFireEventFix
         , ZOffset(Z)
         , HitChar(InChar)
         , ClientHeadOffset(HeadOffset)
+        , ClientMoveTime(MoveTime)
+        , ClientFireLoc(FireLoc)
     {
     }
 };
@@ -613,6 +619,8 @@ protected:
     /** Common server RTT-to-rewind conversion. Hitscan passes the live cvar;
      *  the legacy projectile-origin path passes its per-weapon field. */
     float GetPredictionTimeWithFudgeMs(float InFudgeMs) const;
+    float GetHitValidationRenderTime(float PresentationMs, bool& bTimingValid) const;
+    bool Is329FireProtocolReady() const;
 
     FTimerHandle DelayedPutDownHandle;
     bool bHandlingRetry;
@@ -668,6 +676,7 @@ protected:
     // --- Trade-kill grace period: cache owner state before Removed() nulls UTOwner ---
     /** World time when UTOwner was lost (weapon removed from dying player) */
     float OwnerLostTime = 0.f;
+    TWeakObjectPtr<AController> FireProtocolController;
     /** Last known fire start location when owner was alive */
     FVector CachedFireStartLoc = FVector::ZeroVector;
     /** Last known fire rotation when owner was alive */
@@ -776,11 +785,14 @@ protected:
      *
      * @param FireModeNum - Which fire mode to activate
      * @param InFireEventIndex - Unique sequence number for this fire event
-     * @param ClientTimestamp - Client's GetWorld()->GetTimeSeconds() when fire was initiated
+     * @param ClientTimestamp - Estimated server world time; validation only, never a rewind selector.
+     * @param ClientMoveTime - Original movement timestamp, matched to one server-observed marker in 329.
+     * @param ClientFireLoc - Quantized original eye origin, usable only after tight server validation.
      */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc);
 
     /**
      * Server RPC to stop firing.
@@ -915,7 +927,8 @@ protected:
     FTimerHandle ResendFireHandle;
 
     void QueueResendStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, const FVector& ClientFireLoc);
     void QueueResendStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);
     void QueueResendFireEventFixed(const FPendingFireEventFix& Event);
     void ResendNextFireEventFixed();
@@ -923,7 +936,8 @@ protected:
 
     UFUNCTION(Server, Unreliable, WithValidation)
     void ResendServerStartFireFixed(uint8 FireModeNum, int32 InFireEventIndex, float ClientTimestamp,
-        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset);
+        FRotator ClientViewRot, AUTCharacter* ClientHitChar, uint8 ZOffset, FVector ClientHeadOffset,
+        float ClientMoveTime, FVector_NetQuantize10 ClientFireLoc);
 
     UFUNCTION(Server, Unreliable, WithValidation)
     void ResendServerStopFireFixed(uint8 FireModeNum, int32 InFireEventIndex);

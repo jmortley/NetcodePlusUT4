@@ -1,6 +1,8 @@
 # Charged Rocket Release Transaction Plan
 
-Status: Deferred for later implementation. No implementation changes have been made.
+Status: The 329 implementation is now in `Source/Private/NCRocketVolley.cpp`.
+See `329RocketVolleyProtocol.md` for the actual contract, validation and outstanding
+engine/network tests. The proposal below is retained as historical design context.
 
 ## Problem
 

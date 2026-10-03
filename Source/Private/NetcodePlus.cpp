@@ -1,6 +1,7 @@
 // NetcodePlus.cpp
 #include "NetcodePlus.h"
 #include "NCClientFireTiming.h"
+#include "NCFireAnchor.h"
 #include "Modules/ModuleManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/DemoNetDriver.h"
@@ -1230,6 +1231,7 @@ void FNetcodePlus::StartupModule()
 		return;
 	}
     NCClientFireTiming::Startup();
+    NCFireAnchor::Startup();
 
 	// First: hand the launcher's login credential from the environment back onto
 	// the command line, before any consumer reads it (see ApplyLauncherAuthHandoff).
@@ -1509,6 +1511,7 @@ void FNetcodePlus::StartupModule()
 void FNetcodePlus::ShutdownModule()
 {
     NCClientFireTiming::Shutdown();
+    NCFireAnchor::Shutdown();
 	// This object is referenced by Slate rather than CoreUObject. Release it even
 	// during late process teardown so Slate never retains code from an unloaded DLL.
 	if (!IsRunningCommandlet())
