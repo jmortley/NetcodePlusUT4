@@ -24,6 +24,21 @@ struct Point { float X, Y, Z; };
 void Require(bool value, const char* message) {
     if (!value) { std::cerr << message << '\n'; std::exit(1); }
 }
+float SliderMaximumTravel() {
+    // Native UT flat-ground slide from a 220-speed wiggle starts at900, lasts
+    // 0.7s, and exits at40% speed. Allow two30Hz frames beyond the timer and a
+    // full exit frame before applying direction friction. With lateral-only
+    // input, X decays through GroundFriction10.5, not the7000 Y acceleration.
+    // Ignoring the native220 walking-speed clamp further overestimates travel.
+    const float slideSpeed=900.f, duration=.7f, exitFactor=.4f, groundFriction=10.5f;
+    const float exitSpeed=slideSpeed*exitFactor;
+    return slideSpeed*(duration+2.f/30.f)+exitSpeed/30.f+exitSpeed/groundFriction;
+}
+FSeat PopupMovementSeat(int index) {
+    FSeat seat=PopupSeat(index);
+    if (index==PopupSliderSlot) seat.MinX-=SliderMaximumTravel();
+    return seat;
+}
 std::vector<Point> Endpoints(const FSeat& seat) {
     const float reach = seat.SpawnJitterY + seat.WiggleRange + WiggleSafetyMargin;
     std::vector<Point> points;
@@ -60,13 +75,13 @@ bool HitsBlock(Point end, FBlock block) {
         block.CenterY-block.SizeY*.5f,block.CenterY+block.SizeY*.5f,0.f,block.Height);
 }
 void PlatformSupport() {
-    Require(TargetCount==6 && PopupSlotCount==5 && PopupDodgerSlot==5
+    Require(TargetCount==6 && PopupSlotCount==5 && PopupSliderSlot==2 && PopupDodgerSlot==5
             && PopupDodgerSlot+1==TargetCount && HeadSlotCount==5 && PopupPlatformCount==3,
             "pool and layout counts disagree");
     const float stopDistance = WiggleSpeed*WiggleSpeed/(2.f*WiggleAcceleration);
     Require(stopDistance+WiggleSpeed/30.f < WiggleSafetyMargin, "wiggle reserve does not cover stopping plus a30Hz frame");
     for (int slot=0;slot<PopupSlotCount;++slot) {
-        const FSeat seat=PopupSeat(slot);
+        const FSeat seat=PopupMovementSeat(slot);
         for (Point point:Endpoints(seat)) {
             Require(point.X-CapsuleRadius>-3200.f && point.X+CapsuleRadius<3200.f
                     && point.Y-CapsuleRadius>-1800.f && point.Y+CapsuleRadius<1800.f,
@@ -95,7 +110,7 @@ void PlatformSupport() {
 }
 void PopupSightlines() {
     for (int slot=0;slot<PopupSlotCount;++slot) {
-        for (Point point:Endpoints(PopupSeat(slot))) {
+        for (Point point:Endpoints(PopupMovementSeat(slot))) {
             for (float headHeight:{184.f,198.f,212.f}) {
                 const Point head={point.X,point.Y,point.Z+headHeight};
                 for (int p=0;p<PopupPlatformCount;++p) {
@@ -129,10 +144,10 @@ void OtherTargetOcclusion() {
     // Boxes conservatively enclose full target capsules. Boundary/interior
     // pairs protect the center peek lane and the near-left angular separation.
     for (int slot=0;slot<PopupSlotCount;++slot) {
-        for (Point point:Endpoints(PopupSeat(slot))) {
+        for (Point point:Endpoints(PopupMovementSeat(slot))) {
             for (int other=0;other<PopupSlotCount;++other) {
                 if (other==slot) continue;
-                for (Point obstacle:Endpoints(PopupSeat(other))) {
+                for (Point obstacle:Endpoints(PopupMovementSeat(other))) {
                     for (float headHeight:{184.f,212.f}) {
                         Require(!SegmentHitsBox({point.X,point.Y,point.Z+headHeight},
                             obstacle.X-CapsuleRadius,obstacle.X+CapsuleRadius,
@@ -142,6 +157,31 @@ void OtherTargetOcclusion() {
                     }
                 }
             }
+        }
+    }
+}
+void SliderRunway() {
+    Require(PopupSliderSlot==2, "slide lane must use the elevated right platform");
+    const FSeat seat=PopupSeat(PopupSliderSlot);
+    const FBlock platform=PopupPlatform(PopupSliderSlot);
+    Require(seat.MinX==1000.f && seat.MaxX==2200.f && seat.FloorZ==320.f,
+        "upper-right spawn runway no longer matches the native slide preset");
+    Require(seat.FloorZ==platform.Height && seat.CenterY==platform.CenterY,
+        "slide lane is not centered on its supporting platform");
+    const float minX=platform.CenterX-platform.SizeX*.5f;
+    const float maxX=platform.CenterX+platform.SizeX*.5f;
+    const float minY=platform.CenterY-platform.SizeY*.5f;
+    const float maxY=platform.CenterY+platform.SizeY*.5f;
+    for (Point spawn:Endpoints(seat)) {
+        for (float fraction:{0.f,.25f,.5f,.75f,1.f}) {
+            const Point slid={spawn.X-SliderMaximumTravel()*fraction,spawn.Y,spawn.Z};
+            Require(slid.X-CapsuleRadius>minX && slid.X+CapsuleRadius<maxX,
+                "native forward slide can carry its capsule off the platform");
+            Require(slid.Y-CapsuleRadius>minY && slid.Y+CapsuleRadius<maxY,
+                "wiggle envelope around the slide can leave a lateral edge");
+            Require(slid.X-CapsuleRadius>-3200.f && slid.X+CapsuleRadius<3200.f
+                && slid.Y-CapsuleRadius>-1800.f && slid.Y+CapsuleRadius<1800.f,
+                "sliding capsule can leave the arena bounds");
         }
     }
 }
@@ -184,7 +224,7 @@ void DodgerLaneSupport() {
             "dodger capsule intersects a popup platform");
     }
     for (int index=0;index<PopupSlotCount;++index) {
-        Require(seat.MaxX+CapsuleRadius<PopupSeat(index).MinX-CapsuleRadius,
+        Require(seat.MaxX+CapsuleRadius<PopupMovementSeat(index).MinX-CapsuleRadius,
             "foreground dodger can collide with a popup target");
     }
     Require(seat.MinX-CapsuleRadius>-1800.f+CapsuleRadius,
@@ -204,7 +244,7 @@ void DodgerSightlines() {
                         "platform blocks the foreground dodger");
                 }
                 for (int index=0;index<PopupSlotCount;++index) {
-                    for (Point other:Endpoints(PopupSeat(index))) {
+                    for (Point other:Endpoints(PopupMovementSeat(index))) {
                         Require(!SegmentHitsBox(point,other.X-CapsuleRadius,other.X+CapsuleRadius,
                             other.Y-CapsuleRadius,other.Y+CapsuleRadius,other.Z,other.Z+2.f*CapsuleHalfHeight),
                             "background target blocks the foreground dodger");
@@ -220,6 +260,7 @@ int main(int argc,char**argv) {
     else if(name=="popup") PopupSightlines();
     else if(name=="heads") HeadCoverSightlines();
     else if(name=="occlusion") OtherTargetOcclusion();
+    else if(name=="slider_runway") SliderRunway();
     else if(name=="dodger_support") DodgerLaneSupport();
     else if(name=="dodger_sightlines") DodgerSightlines();
     else Require(false,"unknown case");
@@ -257,6 +298,7 @@ class AimTrainerLayoutTests(unittest.TestCase):
     def test_popup_heads_clear_platforms_and_rear_body_is_covered(self): self.run_case("popup")
     def test_five_head_stations_keep_heads_clear_and_shoulders_covered(self): self.run_case("heads")
     def test_popup_target_capsules_do_not_obscure_other_heads(self): self.run_case("occlusion")
+    def test_right_platform_supports_native_slide_and_lateral_wiggle(self): self.run_case("slider_runway")
     def test_permanent_dodger_lane_supports_native_dodge_overshoot(self): self.run_case("dodger_support")
     def test_permanent_dodger_remains_visible_across_its_lane(self): self.run_case("dodger_sightlines")
 

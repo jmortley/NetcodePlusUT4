@@ -89,13 +89,13 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 6)
+## Scenarios and scoring (revision 7)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
 | Link tracking | Hold either fire button to track a strafing/dodging character with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
 | Headshots | Hit wiggling character heads at five cover stations with the sniper rifle. Body hits do not count. | 100 per confirmed headshot. Misses affect accuracy; expired targets do not deduct points. |
-| Instagib pop-up | Shoot five wiggling pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
+| Instagib pop-up | Shoot five moving pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block and a forward slide on the high right platform. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
 
 Tracking observes the real authoritative NCP Link beam's selected target, with
 a maximum 30 Hz observation rate. It only credits intervals with beam contact
@@ -146,6 +146,16 @@ This target has no expiry penalty and respawns on the next game tick after a
 hit, independently of the pop-up schedule. It does not crouch. Its lane stays
 clear of the platforms; it can briefly cross a background target's sightline.
 
+Revision 7 makes the high right-hand platform target attempt one native UT
+floor slide toward the trainee, 0.8–1.4 seconds after appearing. It spawns
+farther back on the platform to leave room for the slide and capsule. The
+slide uses normal UT crouch, collision, animation and replicated movement;
+after its 0.7-second duration it resumes lateral wiggles at its new position.
+It has no separate random crouch. A late attempt is skipped unless enough
+time remains for the slide, posture transition and a full rifle refire
+interval before target expiry or the run's end. Hits, hiding and reuse clear
+the slide state, so a replacement starts standing with a fresh deadline.
+
 Both shooting scenarios use brief 0.12–0.28-second A/D reversals at 220 units
 per second. Each seat has a bounded movement range, with room for the capsule
 and stopping distance on its platform or behind cover. Headshot targets remain
@@ -161,25 +171,25 @@ exposure remains for the crouch plus a full rifle refire interval and 0.1 second
 Targets behind cover can briefly disappear while crouched. Reappearing targets
 start standing; headshot targets and Link tracking do not gain these crouches.
 
-All three use the fixed target model/preset in revision 6. Custom models,
+All three use the fixed target model/preset in revision 7. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=6&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=7&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
 it does not stream aiming samples to Django. Revised scenarios submit revision
-6; Django retains revision-1/2/3/4/5 submissions and explicit older boards without
+7; Django retains revision-1/2/3/4/5/6 submissions and explicit older boards without
 mixing their scores with the new difficulty or accuracy definition. Revision 4 onward
 includes `fired_ms` in every result: measured firing time for tracking and zero
 for precision scenarios. Older submissions retain their original payloads and
 full-run tracking denominator. Apply migration `0066_nc_aimtrainer_fired_ms`
 before restarting the updated Django web workers and enabling current hosts.
-Revisions 5 and 6 need no additional migration; deploy revision-6 API support
-before enabling revision-6 hosts.
+Revisions 5 through 7 need no additional migration; deploy revision-7 API support
+before enabling revision-7 hosts.
 
 Score submission is an asynchronous server request to `/aimtrainer_entry/`.
 The identity comes from the server's player state. Run IDs make retries
@@ -427,3 +437,18 @@ Django retains the old scoring rules on revision-1 through revision-5 boards.
 Deploy revision-6 API support and rebuild Shipping; no additional database
 migration is required. Packaged hit registration and HUD rendering remain
 runtime checks rather than conclusions of the scoring tests.
+
+### Upper-platform forward slide (2026-10-06)
+
+Revision 7 adds one native forward floor slide to the elevated right instagib
+target. It resumes its short strafes afterward. The target spawns farther
+back so the slide has a clear runway, and the other popup positions, persistent
+dodger, Link and headshot movement rules remain unchanged. Headshot scoring
+continues to award 100 points per confirmed headshot.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 122 trainer tests and 24 Django tests passed. Tests cover the real native
+floor-slide impulse/timing, controllerless expiry and replication flags, target
+reuse, scenario isolation, rifle timing and platform clearance. Rebuild Shipping
+for the packaged visual playtest. Deploy revision-7 API support for shared
+scores; no additional database migration is required.

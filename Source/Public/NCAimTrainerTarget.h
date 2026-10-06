@@ -22,7 +22,7 @@ public:
 
     void ActivateTarget(const FVector& Location, bool bStrafe);
     void StartWiggle(float HalfWidth);
-    /** Uses normal UT posture/collision; false always requests standing again. */
+    /** Uses normal UT posture/collision; an active floor slide owns its posture. */
     bool SetTrainerCrouched(bool bCrouch);
     void HideTarget();
     bool IsAvailable() const { return bTrainerVisible; }
@@ -30,6 +30,9 @@ public:
     bool HasCharacterAssets() const;
     void ReverseStrafe();
     bool TryTrainerDodge(float DirectionRoll);
+    /** Uses UT's floor-slide physics toward the trainee, along world -X. */
+    bool TryTrainerSlideForward();
+    bool IsTrainerSliding() const;
 
 private:
     UPROPERTY(ReplicatedUsing=OnRep_TrainerVisible)

@@ -421,6 +421,7 @@ void ANCAimTrainerGame::BeginActiveRun()
     NextDirectionTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
     NextDodgeTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
     NextPopupTime = PhaseStartedAt;
+    NextPopupSlideTime = 0.f;
     NextTrackingHitSoundTime = PhaseStartedAt;
     const float Refire = Progress.Scenario == 2 && RunWeapon ? RunWeapon->GetRefireTime(0) : 1.f;
     PopupRefireSeconds = FMath::IsFinite(Refire) ? FMath::Max(1.f, Refire) : 1.f;
@@ -444,6 +445,7 @@ void ANCAimTrainerGame::BeginActiveRun()
 
 void ANCAimTrainerGame::HideAllTargets()
 {
+    NextPopupSlideTime = 0.f;
     for (ANCAimTrainerTarget* Target : Targets)
     {
         if (Target && !Target->IsPendingKillPending()) { Target->HideTarget(); }
@@ -493,7 +495,13 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
             ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index);
         Targets[Index]->StartWiggle(Seat.WiggleRange);
         NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
-        if (Progress.Scenario == 2 && NCAimTrainerScenarioPolicy::ShouldCrouch(Schedule.FRand()))
+        if (Progress.Scenario == 2 && Index == NCAimTrainerLayout::PopupSliderSlot)
+        {
+            // The high platform target slides toward the trainee once per
+            // appearance, with no separate crouch competing for its posture.
+            NextPopupSlideTime = Now + NCAimTrainerScenarioPolicy::PopupSlideDelaySeconds(Schedule.FRand());
+        }
+        else if (Progress.Scenario == 2 && NCAimTrainerScenarioPolicy::ShouldCrouch(Schedule.FRand()))
         {
             NextCrouchTime[Index] = Now + NCAimTrainerScenarioPolicy::CrouchDelaySeconds(Schedule.FRand());
         }
@@ -651,6 +659,17 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
         }
         if (Progress.Scenario == 2 && Targets[Index]->IsAvailable())
         {
+            if (Index == NCAimTrainerLayout::PopupSliderSlot && NextPopupSlideTime > 0.f && Now >= NextPopupSlideTime)
+            {
+                NextPopupSlideTime = 0.f; // One attempt per appearance, never a catch-up burst.
+                // Allow the native 0.7-second slide, a posture transition, and
+                // a full rifle refire interval before either expiry or run end.
+                const float RequiredTime = 1.f + PopupRefireSeconds;
+                if (TargetExpiry[Index] - Now >= RequiredTime && PhaseStartedAt + 60.f - Now >= RequiredTime)
+                {
+                    Targets[Index]->TryTrainerSlideForward();
+                }
+            }
             if (CrouchEndTime[Index] > 0.f && Now >= CrouchEndTime[Index])
             {
                 // Native clearance can temporarily prevent standing. Retry

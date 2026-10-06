@@ -68,9 +68,10 @@ template<class T, class U> T* Cast(U* value) { return dynamic_cast<T*>(value); }
 struct FDamageEvent { int DamageTypeClass = 5; };
 struct ANCAimTrainerTarget : AActor {
     bool Visible = false, Strafing = false, Crouched = false;
-    bool CanStand = true, CanCrouch = true, CanDodge = true;
+    bool CanStand = true, CanCrouch = true, CanDodge = true, CanSlide = true;
     int Activations = 0, Hides = 0, Wiggles = 0, Reversals = 0;
     int CrouchRequests = 0, StandRequests = 0, DodgeAttempts = 0, Dodges = 0;
+    int SlideAttempts = 0, Slides = 0;
     float WiggleRange = 0.f;
     FVector Position;
     void ActivateTarget(const FVector& position, bool strafe) {
@@ -82,6 +83,7 @@ struct ANCAimTrainerTarget : AActor {
     void StartWiggle(float range) { WiggleRange = range; ++Wiggles; }
     void ReverseStrafe() { ++Reversals; }
     bool TryTrainerDodge(float) { ++DodgeAttempts; if (!CanDodge) return false; ++Dodges; return true; }
+    bool TryTrainerSlideForward() { ++SlideAttempts; if (!CanSlide) return false; ++Slides; return true; }
     bool SetTrainerCrouched(bool crouch) {
         if (crouch) { ++CrouchRequests; if (!CanCrouch) return false; }
         else { ++StandRequests; if (!CanStand) return false; }
@@ -107,6 +109,7 @@ struct ANCAimTrainerGame {
     FVector ArenaOrigin;
     float PhaseStartedAt = 0.f, LastTraceTime = 0.f, NextDirectionTime = 0.f, NextDodgeTime = 0.f;
     float NextPopupTime = 0.f, PopupRefireSeconds = 1.f, ShotStatBaseline = 0.f;
+    float NextPopupSlideTime = 0.f;
     float NextTargetTime[NCAimTrainerLayout::TargetCount] = {}, TargetExpiry[NCAimTrainerLayout::TargetCount] = {};
     float NextWiggleTime[NCAimTrainerLayout::TargetCount] = {}, NextCrouchTime[NCAimTrainerLayout::TargetCount] = {};
     float CrouchEndTime[NCAimTrainerLayout::TargetCount] = {};
@@ -300,7 +303,7 @@ void InitializeRefire() {
     for (float refire : {.5f, 1.f, 1.5f, std::numeric_limits<float>::quiet_NaN(),
                         std::numeric_limits<float>::infinity()}) {
         Fixture f; f.Gun.Refire = refire;
-        f.Game.NextPopupTime = 900.f; f.Game.PopupRefireSeconds = 99.f;
+        f.Game.NextPopupTime = 900.f; f.Game.PopupRefireSeconds = 99.f; f.Game.NextPopupSlideTime = 850.f;
         for (int i = 0; i < NCAimTrainerLayout::TargetCount; ++i) {
             f.Game.NextTargetTime[i] = 900.f; f.Game.TargetExpiry[i] = 800.f; f.Game.NextWiggleTime[i] = 700.f;
             f.Game.NextCrouchTime[i] = 600.f; f.Game.CrouchEndTime[i] = 500.f;
@@ -309,6 +312,7 @@ void InitializeRefire() {
         const float expected = std::isfinite(refire) && refire > 1.f ? refire : 1.f;
         Require(f.Game.PopupRefireSeconds == expected && f.Game.NextPopupTime == 10.f,
                 "restart retained previous cadence or unsafe refire");
+        Require(f.Game.NextPopupSlideTime == 0.f, "restart retained a prior slide deadline");
         Require(f.Game.bRankedRun == (refire == 1.f), "altered or invalid weapon cadence remained ranked");
         for (int i = 0; i < 5; ++i) {
             Require(f.Game.NextTargetTime[i] == 10.f && f.Game.TargetExpiry[i] == 0.f && f.Game.NextWiggleTime[i] == 10.f
@@ -585,6 +589,79 @@ void PersistentDodgerCannotLeakIntoOtherPhasesOrScenarios() {
     Require(!ended.Targets[PopupDodgerSlot].Visible && ended.Targets[PopupDodgerSlot].Activations==1,
             "round deadline admitted an extra permanent target appearance");
 }
+void UpperPlatformSlideScope() {
+    using namespace NCAimTrainerLayout;
+    for (int scenario : {0, 1, 2}) {
+        for (int slot = 0; slot < TargetCount; ++slot) {
+            for (float roll : {0.f, .5f, 1.f}) {
+                Fixture f; f.Game.Progress.Scenario = scenario; f.Game.Schedule.Roll = roll;
+                f.Start(); f.Game.NextPopupTime = 10000.f;
+                f.Game.ActivateSlot(slot, 10.f);
+                const bool selected = scenario == 2 && slot == PopupSliderSlot;
+                Require((f.Game.NextPopupSlideTime > 0.f) == selected,
+                        "forward slide escaped the upper-right instagib seat");
+                if (selected) {
+                    Require(f.Game.NextPopupSlideTime >= 10.8f && f.Game.NextPopupSlideTime <= 11.41f,
+                            "slide delay lacks expected variation");
+                    Require(f.Game.NextCrouchTime[slot] == 0.f && f.Game.CrouchEndTime[slot] == 0.f,
+                            "independent crouch competes with slide posture");
+                    Require(f.Targets[slot].Position.X >= 1000.f && f.Targets[slot].Position.Z == 428.f,
+                            "slider lost its elevated runway");
+                }
+                f.At(11.5f);
+                for (int index = 0; index < TargetCount; ++index) {
+                    Require(f.Targets[index].SlideAttempts == int(selected && index == slot),
+                            "unselected target attempted a slide");
+                }
+            }
+        }
+    }
+}
+void UpperPlatformSlideOnceAndReuse() {
+    using namespace NCAimTrainerLayout;
+    for (bool accepted : {false, true}) {
+        Fixture f; f.Start(); f.Game.NextPopupTime = 10000.f;
+        f.Game.ActivateSlot(PopupSliderSlot, 10.f); f.Targets[PopupSliderSlot].CanSlide = accepted;
+        const float due = f.Game.NextPopupSlideTime;
+        f.At(due - .001f);
+        Require(f.Targets[PopupSliderSlot].SlideAttempts == 0, "slide started before its deadline");
+        f.At(due); f.At(due + .1f); f.At(due + .8f);
+        Require(f.Targets[PopupSliderSlot].SlideAttempts == 1 && f.Targets[PopupSliderSlot].Slides == int(accepted)
+                && f.Game.NextPopupSlideTime == 0.f, "slide retried or started more than once per appearance");
+        Require(f.Hit(PopupSliderSlot) > 0.f && !f.Targets[PopupSliderSlot].Visible,
+                "slider stopped accepting normal instagib hits");
+        f.Game.ActivateSlot(PopupSliderSlot, due + 1.f);
+        const float next = f.Game.NextPopupSlideTime;
+        Require(next > due + 1.f, "reused target retained previous slide deadline");
+        f.At(next);
+        Require(f.Targets[PopupSliderSlot].SlideAttempts == 2, "new appearance did not regain its slide");
+    }
+    Fixture hidden; hidden.Start(); hidden.Game.NextPopupTime = 10000.f;
+    hidden.Game.ActivateSlot(PopupSliderSlot, 10.f);
+    const float due = hidden.Game.NextPopupSlideTime;
+    hidden.Hit(PopupSliderSlot); hidden.At(due);
+    Require(hidden.Targets[PopupSliderSlot].SlideAttempts == 0, "hidden target attempted a queued slide");
+}
+void UpperPlatformSlideExpiryAndRoundGuard() {
+    using namespace NCAimTrainerLayout;
+    for (float refire : {1.f, 1.5f}) {
+        for (bool roundLimit : {false, true}) {
+            for (float remaining : {refire + .99f, refire + 1.01f}) {
+                Fixture f; f.Gun.Refire = refire; f.Start(); f.Game.NextPopupTime = 10000.f;
+                f.Game.ActivateSlot(PopupSliderSlot, 10.f);
+                const float due = f.Game.NextPopupSlideTime;
+                if (roundLimit) f.Game.PhaseStartedAt = due + remaining - 60.f;
+                else f.Game.TargetExpiry[PopupSliderSlot] = due + remaining;
+                const float expiry = f.Game.TargetExpiry[PopupSliderSlot];
+                f.At(due); f.At(due + .1f);
+                Require(f.Targets[PopupSliderSlot].SlideAttempts == int(remaining > refire + 1.f),
+                        "slide failed to preserve native duration and next rifle shot before deadline");
+                Require(f.Game.NextPopupSlideTime == 0.f && f.Game.TargetExpiry[PopupSliderSlot] == expiry,
+                        "slide extended exposure or left a retry queued");
+            }
+        }
+    }
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
     const std::string name(argv[1]);
@@ -607,6 +684,9 @@ int main(int argc, char** argv) {
     else if (name == "persistent_refill") PersistentDodgerRefillsWithoutConsumingPopupCadence();
     else if (name == "persistent_cadence") PersistentDodgerCadenceAndNativeRejection();
     else if (name == "persistent_scope") PersistentDodgerCannotLeakIntoOtherPhasesOrScenarios();
+    else if (name == "slide_scope") UpperPlatformSlideScope();
+    else if (name == "slide_once") UpperPlatformSlideOnceAndReuse();
+    else if (name == "slide_expiry") UpperPlatformSlideExpiryAndRoundGuard();
     else Require(false, "unknown case");
 }
 '''
@@ -666,6 +746,9 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_permanent_dodger_refills_without_consuming_popup_deadline(self): self.run_case("persistent_refill")
     def test_permanent_dodger_respects_native_rejection_and_bounded_random_cadence(self): self.run_case("persistent_cadence")
     def test_permanent_dodger_is_excluded_from_headshots_tracking_and_inactive_phases(self): self.run_case("persistent_scope")
+    def test_forward_slide_is_only_scheduled_on_upper_right_instagib_platform(self): self.run_case("slide_scope")
+    def test_slider_attempts_once_per_appearance_and_resets_after_hit(self): self.run_case("slide_once")
+    def test_slider_preserves_refire_opportunity_before_expiry_or_round_end(self): self.run_case("slide_expiry")
 
 
 if __name__ == "__main__":

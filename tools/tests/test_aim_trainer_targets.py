@@ -23,12 +23,18 @@ constexpr int ROLE_Authority = 3;
 struct FMath {
     static bool IsFinite(float value) { return std::isfinite(value); }
     static float Clamp(float value,float low,float high) { return value<low?low:value>high?high:value; }
+    static float Min(float a,float b) { return a<b?a:b; }
+    static float Max(float a,float b) { return a>b?a:b; }
 };
 enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling, MOVE_Flying };
 struct FVector {
     float X, Y, Z;
     FVector(float x=0.f, float y=0.f, float z=0.f) : X(x), Y(y), Z(z) {}
+    float Size2D() const { return std::sqrt(X*X+Y*Y); }
+    FVector operator*(float scale) const { return FVector(X*scale,Y*scale,Z*scale); }
+    float operator|(const FVector& other) const { return X*other.X+Y*other.Y+Z*other.Z; }
 };
+FVector operator*(float scale,const FVector& vector) { return vector*scale; }
 struct FRotator { float Pitch,Yaw,Roll; FRotator(float p,float y,float r):Pitch(p),Yaw(y),Roll(r){} };
 enum class ETeleportType { TeleportPhysics };
 struct UCharacterMovementComponent {
@@ -42,24 +48,49 @@ struct UCharacterMovementComponent {
     void DisableMovement() { Mode = MOVE_None; }
 };
 struct ATeamArenaCharacter;
+struct AUTCharacter;
 struct UUTCharacterMovement : UCharacterMovementComponent {
     ATeamArenaCharacter* Owner = nullptr;
+    AUTCharacter* CharacterOwner = nullptr;
     bool bIsDodging = false, DodgeInput = false, bIsDodgeLanding = false, FallingFlags = false;
     bool bWantsToCrouch = false, CrouchAllowed = true, StandAllowed = true;
     int Crouches = 0, Uncrouches = 0;
     float HalfHeight = 108.f;
     float DodgeResetTime = 0.f, DodgeLandingTimeAdjust = -.25f, MovementTime = 0.f;
-    void ClearDodgeInput() { DodgeInput = false; }
-    void ClearFallingStateFlags() { bIsDodging = false; FallingFlags = false; }
+    bool bIsFloorSliding=false,bWasFloorSliding=false,bWantsFloorSlide=false,bPressedSlide=false,DodgeAllowed=true;
+    float FloorSlideTapTime=0.f,FloorSlideEndTime=0.f,FloorSlideDuration=.7f,FloorSlideAcceleration=400.f;
+    float MaxFloorSlideSpeed=900.f,MaxInitialFloorSlideSpeed=1350.f,FloorSlideSlopeBraking=2.7f,DodgeResetInterval=.35f;
+    int TimerResets=0;
+    FVector Velocity,Acceleration;
+    struct {
+        bool Walkable=true;
+        struct { FVector ImpactNormal=FVector(0.f,0.f,1.f); } HitResult;
+        bool IsWalkableFloor() const { return Walkable; }
+    } CurrentFloor;
+    void ClearDodgeInput() { DodgeInput = false; bPressedSlide=false; }
+    void ClearFloorSlideTap() { bWantsFloorSlide=false; }
+    void ResetTimers() { DodgeResetTime=FloorSlideTapTime=FloorSlideEndTime=0.f; ++TimerResets; }
+    void ClearFallingStateFlags() { bIsDodging = false; FallingFlags = false; bIsFloorSliding=false; }
     float GetCurrentMovementTime() const { return MovementTime; }
+    bool CanDodge() const { return DodgeAllowed&&!bIsFloorSliding&&MovementTime>=DodgeResetTime; }
+    void PerformFloorSlide(const FVector&,const FVector&);
     void Crouch(bool);
     void UnCrouch(bool);
 };
-template<class T> T* Cast(UCharacterMovementComponent* value) { return dynamic_cast<T*>(value); }
+template<class T,class U> T* Cast(U* value) { return dynamic_cast<T*>(value); }
 struct World { float Time = 42.f; float GetTimeSeconds() const { return Time; } };
+enum { EME_Slide=1,NAME_NumFloorSlides=2 };
+struct AUTPlayerState { virtual ~AUTPlayerState()=default; void ModifyStatsValue(int,float) {} };
 struct AUTCharacter {
+    int Role=ROLE_Authority,SlideEvents=0,EyeUpdates=0;
+    bool bRepFloorSliding=false,bPressedJump=false,SlideAllowed=true;
+    FVector SlideDirection;
+    AUTPlayerState* PlayerState=nullptr;
     bool bIsCrouched = false, Dead = false;
     bool IsDead() const { return Dead; }
+    bool CanSlide() const { return SlideAllowed&&!bIsCrouched; }
+    void MovementEventUpdated(int type,FVector direction) { if(type==EME_Slide) {++SlideEvents;SlideDirection=direction;} }
+    void UpdateCrouchedEyeHeight() { ++EyeUpdates; }
     int PoseQueries = 0, HelmetNotifications = 0;
     float LastPosePrediction = -1.f;
     virtual FVector GetHeadLocation(float prediction) {
@@ -73,7 +104,8 @@ struct ATeamArenaCharacter : AUTCharacter {
     FVector Position, LastDodgeDirection, LastDodgeCross, LastInput;
     UUTCharacterMovement Move;
     World TheWorld;
-    UCharacterMovementComponent* GetCharacterMovement() { Move.Owner=this; return &Move; }
+    UCharacterMovementComponent* GetCharacterMovement() { Move.Owner=this; Move.CharacterOwner=this; return &Move; }
+    UCharacterMovementComponent* GetCharacterMovement() const { return const_cast<UUTCharacterMovement*>(&Move); }
     FVector GetActorLocation() const { return Position; }
     World* GetWorld() { return &TheWorld; }
     FVector GetHeadLocation(float) override { ++CapsuleHeadQueries; return FVector(0,0,188); }
@@ -107,7 +139,6 @@ void UUTCharacterMovement::UnCrouch(bool) {
 }
 struct ANCAimTrainerTarget : ATeamArenaCharacter {
     using Super = ATeamArenaCharacter;
-    int Role=ROLE_Authority;
     bool bTrainerVisible=false, bTrainerStrafe=false, bTrainerWiggle=false;
     float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
     FVector StrafeCenter;
@@ -120,6 +151,8 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     void ResetTargetMovement();
     void ReverseStrafe();
     bool TryTrainerDodge(float);
+    bool TryTrainerSlideForward();
+    bool IsTrainerSliding() const;
     void Tick(float);
     FVector GetHeadLocation(float) override;
     void NotifyBlockedHeadShot(AUTCharacter*) override;
@@ -295,6 +328,93 @@ int main(int argc,char**argv) {
         target.Move.bIsDodgeLanding=true; target.Role=1; target.Move.MovementTime=11.f;
         target.Tick(.016f);
         Require(target.Move.bIsDodgeLanding,"client overwrote authoritative landing state");
+    } else if(name=="slide_guards") {
+        for(int guard=0;guard<10;++guard) {
+            auto target=Active(); target.bTrainerWiggle=true;
+            if(guard==0) target.Role=1;
+            if(guard==1) target.bTrainerVisible=false;
+            if(guard==2) target.bTrainerWiggle=false;
+            if(guard==3) target.Dead=true;
+            if(guard==4) target.Move.Mode=MOVE_Falling;
+            if(guard==5) target.Move.CurrentFloor.Walkable=false;
+            if(guard==6) target.SlideAllowed=false;
+            if(guard==7) target.Move.DodgeAllowed=false;
+            if(guard==8) target.bIsCrouched=true;
+            if(guard==9) target.Move.bIsFloorSliding=true;
+            Require(!target.TryTrainerSlideForward()&&target.SlideEvents==0&&target.NetUpdates==0&&target.Teleports==0,
+                    "ineligible target invoked native floor slide");
+        }
+    } else if(name=="slide_native") {
+        auto target=Active(); target.bTrainerWiggle=true; target.Move.MovementTime=10.f;
+        target.HasPendingInput=true; target.Move.bWantsToCrouch=true;
+        target.Move.Velocity=FVector(0.f,220.f,0.f); target.Position=FVector(1000.f,850.f,50428.f);
+        Require(target.TryTrainerSlideForward()&&target.IsTrainerSliding()&&target.bRepFloorSliding,
+                "valid controllerless slide did not start or replicate");
+        Require(target.SlideEvents==1&&target.SlideDirection.X==-1.f&&target.SlideDirection.Y==0.f
+                &&target.Move.Velocity.X==-900.f&&target.Move.Velocity.Y==0.f
+                &&target.Move.Acceleration.X==-400.f&&target.Move.FloorSlideEndTime==10.7f,
+                "slide bypassed actual UT impulse, forward direction or duration");
+        Require(target.bIsCrouched&&target.Move.Crouches==1&&!target.Move.bWantsToCrouch
+                &&target.Position.Z==50360.f&&target.Position.X==1000.f&&target.Teleports==0,
+                "native slide capsule failed or forward movement was faked by teleport");
+        Require(!target.HasPendingInput&&target.LastInput.X==-1.f&&target.LastInput.Y==0.f,
+                "lateral input contaminated initial forward slide");
+        const int crouches=target.Move.Crouches,uncrouches=target.Move.Uncrouches;
+        const float direction=target.StrafeDirection;
+        Require(!target.SetTrainerCrouched(true)&&!target.SetTrainerCrouched(false),
+                "scheduled crouch/stand interrupted native slide posture");
+        target.ReverseStrafe();
+        Require(target.StrafeDirection==direction&&target.Move.Crouches==crouches&&target.Move.Uncrouches==uncrouches,
+                "wiggle reversal or crouch changed an active slide");
+        Require(!target.TryTrainerSlideForward()&&target.SlideEvents==1,"active slide restarted its lifetime");
+        target.Tick(.016f);
+        Require(target.LastInput.X==-1.f&&target.LastInput.Y==0.f&&target.SuperTicks==1&&target.Teleports==0,
+                "active slide countersteered or bypassed real actor/movement ticking");
+    } else if(name=="slide_end") {
+        auto target=Active(); target.bTrainerWiggle=true; target.Move.MovementTime=10.f;
+        target.Position=FVector(1000.f,860.f,50428.f); target.StrafeCenter=FVector(1000.f,850.f,50428.f);
+        Require(target.TryTrainerSlideForward(),"fixture slide failed");
+        target.Move.bWasFloorSliding=true; target.Move.bWantsFloorSlide=true;
+        target.Position.X=370.f; // Native physics moved the capsule; the trainer must retain this X.
+        target.Move.MovementTime=target.Move.FloorSlideEndTime-.001f; target.Tick(.016f);
+        Require(target.IsTrainerSliding()&&target.bIsCrouched,"slide retired before its native deadline");
+        target.Move.MovementTime=target.Move.FloorSlideEndTime; target.Tick(.016f);
+        Require(!target.IsTrainerSliding()&&!target.bRepFloorSliding&&!target.bIsCrouched
+                &&!target.Move.bWantsFloorSlide&&!target.Move.bWantsToCrouch,
+                "controllerless slide never restored standing replicated posture");
+        Require(target.Move.bWasFloorSliding&&target.EyeUpdates==1&&target.Move.Uncrouches==1,
+                "ending skipped UT slowdown history or repeated native posture changes");
+        Require(target.Position.X==370.f&&target.Position.Z==50428.f&&target.StrafeCenter.Y==850.f
+                &&target.LastInput.X==0.f&&target.LastInput.Y==1.f&&target.Teleports==0,
+                "slide ending snapped target back or did not resume original lateral lane");
+        target.Tick(.016f);
+        Require(target.Move.Uncrouches==1&&target.EyeUpdates==1,"ended slide repeated restoration");
+        auto client=Active(); client.Role=1; client.Move.bIsFloorSliding=true;
+        client.bRepFloorSliding=true; client.Move.FloorSlideEndTime=1.f; client.Move.MovementTime=10.f;
+        client.Tick(.016f);
+        Require(client.IsTrainerSliding()&&client.bRepFloorSliding&&client.InputCalls==0,
+                "simulated client locally retired authoritative slide");
+    } else if(name=="slide_reset") {
+        for(bool activate:{false,true}) {
+            auto target=Active(); target.bTrainerWiggle=true; target.Move.MovementTime=10.f;
+            Require(target.TryTrainerSlideForward(),"fixture slide failed");
+            target.Move.bWasFloorSliding=true; target.Move.bWantsFloorSlide=true;
+            target.Move.bPressedSlide=true; target.bPressedJump=true;
+            target.Move.FloorSlideTapTime=10.f;
+            if(activate) target.ActivateTarget(FVector(1200.f,900.f,50428.f),false);
+            else target.HideTarget();
+            Require(!target.IsTrainerSliding()&&!target.bRepFloorSliding&&!target.bIsCrouched
+                    &&!target.Move.bWasFloorSliding&&!target.Move.bWantsFloorSlide
+                    &&!target.Move.bPressedSlide&&!target.bPressedJump&&!target.Move.bWantsToCrouch,
+                    "appearance reset retained slide flags/posture/input");
+            Require(target.Move.DodgeResetTime==0.f&&target.Move.FloorSlideTapTime==0.f
+                    &&target.Move.FloorSlideEndTime==0.f&&target.Move.TimerResets==1,
+                    "appearance reset retained native slide timing or pending tap timer");
+            if(activate) Require(target.Position.X==1200.f&&target.Position.Z==50428.f&&target.bTrainerVisible,
+                                 "new appearance did not restore its authored standing seat");
+            else Require(!target.bTrainerVisible&&!target.Collision&&target.Move.Mode==MOVE_None,
+                         "hidden slide remained in physics/collision");
+        }
     } else if(name=="head_feedback") {
         ANCAimTrainerTarget target; AUTCharacter shooter;
         const FVector head=target.GetHeadLocation(.125f);
@@ -316,6 +436,7 @@ class AimTrainerTargetTests(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         directory = Path(cls.temporary.name)
         native = (PLUGIN / "Source/Private/NCAimTrainerTarget.cpp").read_text(encoding="utf-8-sig")
+        movement = (PLUGIN.parents[1] / "Source/UnrealTournament/Private/UTCharacterMovement.cpp").read_text(encoding="utf-8-sig")
         policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
         signatures = (
@@ -327,12 +448,15 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::ResetTargetMovement",
             "void ANCAimTrainerTarget::ReverseStrafe",
             "bool ANCAimTrainerTarget::TryTrainerDodge",
+            "bool ANCAimTrainerTarget::TryTrainerSlideForward",
+            "bool ANCAimTrainerTarget::IsTrainerSliding",
             "void ANCAimTrainerTarget::Tick",
             "FVector ANCAimTrainerTarget::GetHeadLocation",
             "void ANCAimTrainerTarget::NotifyBlockedHeadShot",
         )
         source = directory / "trainer_targets.cpp"
         source.write_text("\n".join([ADAPTER, f'#include "{policy}"', f'#include "{layout}"']
+            + [native_function(movement,"void UUTCharacterMovement::PerformFloorSlide")]
             + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_targets.exe" if os.name == "nt" else "trainer_targets")
         if msvc:
@@ -360,6 +484,10 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_crouch_uses_real_posture_once_without_teleports(self): self.run_case("crouch_posture")
     def test_crouch_reset_handles_hidden_airborne_and_blocked_postures(self): self.run_case("crouch_reset")
     def test_visible_head_pose_and_no_false_helmet_feedback(self): self.run_case("head_feedback")
+    def test_slide_requires_authoritative_standing_grounded_wiggle_target_and_native_guards(self): self.run_case("slide_guards")
+    def test_forward_slide_invokes_real_ut_physics_and_preserves_its_input_and_posture(self): self.run_case("slide_native")
+    def test_controllerless_slide_retires_at_native_deadline_and_resumes_wiggle(self): self.run_case("slide_end")
+    def test_slide_lifecycle_clears_posture_native_timing_and_queued_inputs(self): self.run_case("slide_reset")
 
 
 if __name__ == "__main__":

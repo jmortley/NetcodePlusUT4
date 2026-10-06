@@ -147,10 +147,14 @@ void ANCAimTrainerTarget::ResetTargetMovement()
     if (UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement()))
     {
         Movement->ClearDodgeInput();
+        Movement->ClearFloorSlideTap();
+        Movement->ResetTimers();
         Movement->ClearFallingStateFlags();
+        Movement->bWasFloorSliding = false;
         Movement->bIsDodgeLanding = false;
-        Movement->DodgeResetTime = 0.f;
     }
+    bPressedJump = false;
+    bRepFloorSliding = false;
     SetTrainerCrouched(false);
 }
 
@@ -158,7 +162,8 @@ bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
 {
     if (Role != ROLE_Authority) { return false; }
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
-    if (!Movement || (bCrouch && (!bTrainerVisible || !bTrainerWiggle || IsDead() || !Movement->IsMovingOnGround())))
+    if (!Movement || Movement->bIsFloorSliding
+        || (bCrouch && (!bTrainerVisible || !bTrainerWiggle || IsDead() || !Movement->IsMovingOnGround())))
     {
         return false;
     }
@@ -175,7 +180,8 @@ bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
 
 void ANCAimTrainerTarget::ReverseStrafe()
 {
-    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || !GetCharacterMovement()->IsMovingOnGround()) { return; }
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || IsTrainerSliding()
+        || !GetCharacterMovement()->IsMovingOnGround()) { return; }
     const float Offset = GetActorLocation().Y - StrafeCenter.Y;
     StrafeDirection = Offset >= StrafeRange ? -1.f : Offset <= -StrafeRange ? 1.f : -StrafeDirection;
 }
@@ -191,6 +197,31 @@ bool ANCAimTrainerTarget::TryTrainerDodge(float DirectionRoll)
     return true;
 }
 
+bool ANCAimTrainerTarget::IsTrainerSliding() const
+{
+    const UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+    return Movement && Movement->bIsFloorSliding;
+}
+
+bool ANCAimTrainerTarget::TryTrainerSlideForward()
+{
+    UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerWiggle || IsDead()
+        || !Movement || !Movement->IsMovingOnGround() || !Movement->CurrentFloor.IsWalkableFloor()
+        || !CanSlide() || !Movement->CanDodge()) { return false; }
+    ConsumeMovementInputVector();
+    Movement->bWantsToCrouch = false;
+    // This invokes UT's real impulse, movement event, timing and slide posture.
+    // A controllerless target has no saved-move flags to replicate the state.
+    Movement->PerformFloorSlide(FVector(-1.f, 0.f, 0.f), Movement->CurrentFloor.HitResult.ImpactNormal);
+    if (!Movement->bIsFloorSliding) { return false; }
+    bRepFloorSliding = true;
+    Movement->Crouch(false);
+    AddMovementInput(FVector(-1.f, 0.f, 0.f), 1.f, true);
+    ForceNetUpdate();
+    return true;
+}
+
 void ANCAimTrainerTarget::Tick(float DeltaSeconds)
 {
     if (Role == ROLE_Authority)
@@ -198,6 +229,19 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
         // Stock CheckJumpInput retires this flag only on locally controlled
         // pawns. These targets have no controller or client saved moves.
         UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+        if (Movement && Movement->bIsFloorSliding
+            && Movement->GetCurrentMovementTime() >= Movement->FloorSlideEndTime)
+        {
+            // CheckJumpInput normally retires slides on the owning client.
+            // Retain bWasFloorSliding so UT applies its normal ending slowdown.
+            Movement->bIsFloorSliding = false;
+            Movement->ClearFloorSlideTap();
+            bRepFloorSliding = false;
+            ConsumeMovementInputVector();
+            SetTrainerCrouched(false);
+            UpdateCrouchedEyeHeight();
+            ForceNetUpdate();
+        }
         if (Movement && Movement->bIsDodgeLanding
             && Movement->GetCurrentMovementTime() >= Movement->DodgeResetTime + Movement->DodgeLandingTimeAdjust)
         {
@@ -206,10 +250,18 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
     }
     if (Role == ROLE_Authority && bTrainerVisible && bTrainerStrafe && GetCharacterMovement()->IsMovingOnGround())
     {
-        const float Offset = GetActorLocation().Y - StrafeCenter.Y;
-        if (Offset >= StrafeRange) { StrafeDirection = -1.f; }
-        else if (Offset <= -StrafeRange) { StrafeDirection = 1.f; }
-        AddMovementInput(FVector(0.f, StrafeDirection, 0.f), 1.f, true);
+        if (IsTrainerSliding())
+        {
+            // Lateral wiggle input would bend or brake a forward slide.
+            AddMovementInput(FVector(-1.f, 0.f, 0.f), 1.f, true);
+        }
+        else
+        {
+            const float Offset = GetActorLocation().Y - StrafeCenter.Y;
+            if (Offset >= StrafeRange) { StrafeDirection = -1.f; }
+            else if (Offset <= -StrafeRange) { StrafeDirection = 1.f; }
+            AddMovementInput(FVector(0.f, StrafeDirection, 0.f), 1.f, true);
+        }
     }
     Super::Tick(DeltaSeconds);
 }

@@ -4,7 +4,7 @@
 // are relative to ArenaOrigin. Keep movement limits and platform support paired.
 namespace NCAimTrainerLayout
 {
-    enum { TargetCount = 6, PopupSlotCount = 5, PopupDodgerSlot = 5, HeadSlotCount = 5, PopupPlatformCount = 3 };
+    enum { TargetCount = 6, PopupSlotCount = 5, PopupSliderSlot = 2, PopupDodgerSlot = 5, HeadSlotCount = 5, PopupPlatformCount = 3 };
     constexpr float CapsuleRadius = 40.f;
     constexpr float CapsuleHalfHeight = 108.f;
     constexpr float WiggleSpeed = 220.f;
@@ -41,7 +41,9 @@ namespace NCAimTrainerLayout
             // block; its head would otherwise be obscured by the elevated pawn.
             return { 100.f, 2200.f, -175.f, 0.f, 44.f, PopupPlatform(1).Height };
         case 2:
-            return { 100.f, 2200.f, 850.f, 85.f, 99.f, PopupPlatform(2).Height };
+            // Keep a runway toward the trainee for one native forward slide,
+            // including its ending slowdown, before this appearance retires.
+            return { 1000.f, 2200.f, 850.f, 85.f, 99.f, PopupPlatform(2).Height };
         case 3:
             // A standing head peeks over the central block. The capsule stays
             // behind the block's X=2400 rear face and moves along the floor.
