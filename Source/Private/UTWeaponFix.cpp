@@ -11,6 +11,7 @@
 #include "UTPlayerController.h"
 #include "UTCharacter.h"
 #include "TeamArenaCharacter.h"
+#include "NCAimTrainerCharacter.h"
 #include "TeamArenaCharacterMovement.h"
 #include "UTWeaponAttachment.h"
 #include "Engine/World.h"
@@ -9212,8 +9213,7 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 	// render state; hiding bones server-side would be wasted work.
 	if (UTOwner && GetNetMode() != NM_DedicatedServer && UTOwner->IsLocallyControlled())
 	{
-		bool* bHidden = HiddenWeaponsByTag.Find(FName(*GetClass()->GetName()));
-		ApplyWeaponHideState(this, UTOwner, bHidden && *bHidden);
+		ApplyWeaponHideState(this, UTOwner, IsWeaponHiddenBySettings(this, UTOwner));
 	}
 	// Super::BringUp/AttachToOwner writes WeaponRenderScale after material setup.
 	// Restore the identity projection required by the non-Panini Holo material.
@@ -9240,6 +9240,24 @@ void AUTWeaponFix::BringUp(float OverflowTime)
 
 
 
+bool AUTWeaponFix::IsWeaponHiddenBySettings(const AUTWeapon* Weapon, const AUTCharacter* Char)
+{
+	if (Weapon == nullptr) { return false; }
+	const FName WeaponKey(*Weapon->GetClass()->GetName());
+	if (const bool* Exact = HiddenWeaponsByTag.Find(WeaponKey)) { return *Exact; }
+
+	// The trainer uses the instagib rifle rather than the usual shock class.
+	// Reuse that player's shock preference without creating/saving an override,
+	// changing other game modes, or overriding an explicit instagib show choice.
+	if (Char != nullptr && Char->IsA(ANCAimTrainerCharacter::StaticClass())
+		&& WeaponKey == FName(TEXT("N+InstagibRifle_C")))
+	{
+		const bool* Shock = HiddenWeaponsByTag.Find(FName(TEXT("UTNPShockRifle_C")));
+		return Shock != nullptr && *Shock;
+	}
+	return false;
+}
+
 void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& SpawnLocation, FRotator& SpawnRotation)
 {
 	// CLASSIC hide only: spawn beam effects from camera center instead of the
@@ -9250,8 +9268,7 @@ void AUTWeaponFix::GetImpactSpawnPosition(const FVector& TargetLoc, FVector& Spa
 	// the centergun seat, so Super's socket origin is correct.
 	if (bClassicWeaponHide)
 	{
-		const bool* bHidden = HiddenWeaponsByTag.Find(FName(*GetClass()->GetName()));
-		if (bHidden && *bHidden && UTOwner && UTOwner->CharacterCameraComponent)
+		if (IsWeaponHiddenBySettings(this, UTOwner) && UTOwner && UTOwner->CharacterCameraComponent)
 		{
 			SpawnRotation = UTOwner->CharacterCameraComponent->GetComponentRotation();
 			// Offset back+down from camera so the beam is visible (spawning at exact
@@ -9284,8 +9301,7 @@ void AUTWeaponFix::PlayFiringEffects()
 	int32 SavedIndex = INDEX_NONE;
 	if (bClassicWeaponHide && UTOwner)
 	{
-		const bool* bHidden = HiddenWeaponsByTag.Find(FName(*GetClass()->GetName()));
-		if (bHidden && *bHidden)
+		if (IsWeaponHiddenBySettings(this, UTOwner))
 		{
 			const uint8 EffectFiringMode = (Role == ROLE_Authority || UTOwner->Controller != nullptr) ? CurrentFireMode : UTOwner->FireMode;
 			if (MuzzleFlash.IsValidIndex(EffectFiringMode))

@@ -2805,13 +2805,7 @@ void ATeamArenaCharacter::Tick(float DeltaTime)
 			&& CurrentWeapon->GetMesh() && CurrentWeapon->GetMesh()->IsRegistered())
 		{
 			LastEquippedWeapon = CurrentWeapon;
-			// Check hide by class name (allows Lightning Gun and Sniper to hide independently)
-			FName HideKey = FName(*CurrentWeapon->GetClass()->GetName());
-			bool bShouldHide = false;
-			{
-				bool* bHidden = AUTWeaponFix::HiddenWeaponsByTag.Find(HideKey);
-				bShouldHide = bHidden && *bHidden;
-			}
+			const bool bShouldHide = AUTWeaponFix::IsWeaponHiddenBySettings(CurrentWeapon, this);
 
 			// BP-parity apply (visibility-only; also restores when not hidden).
 			// See AUTWeaponFix::ApplyWeaponHideState for why not SetHiddenInGame.

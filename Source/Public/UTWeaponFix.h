@@ -231,6 +231,10 @@ public:
      *  BringUp() checks this to hide 1P mesh on weapon switch. */
     static TMap<FName, bool> HiddenWeaponsByTag;
 
+    /** Resolve the saved hide choice. Trainer instagib inherits the normal shock
+     *  choice only when it has no explicit class entry; ordinary play is unchanged. */
+    static bool IsWeaponHiddenBySettings(const AUTWeapon* Weapon, const AUTCharacter* Char);
+
     /** Apply or restore the hidden-weapon state. Two selectable styles:
      *  DEFAULT (bClassicWeaponHide=false) = BP-parity, rendering-only —
      *  SetVisibility(propagate) on the gun mesh + arm-bone hiding on the shared

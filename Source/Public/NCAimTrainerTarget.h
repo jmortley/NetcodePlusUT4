@@ -17,13 +17,16 @@ public:
     virtual void Tick(float DeltaSeconds) override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     virtual float TakeDamage(float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer) override;
+    virtual FVector GetHeadLocation(float PredictionTime = 0.f) override;
+    virtual void NotifyBlockedHeadShot(AUTCharacter* ShotInstigator) override;
 
     void ActivateTarget(const FVector& Location, bool bStrafe);
     void HideTarget();
     bool IsAvailable() const { return bTrainerVisible; }
     float GetAppearanceTime() const { return AppearanceTime; }
     bool HasCharacterAssets() const;
-    void SetStrafeDirection(float Direction);
+    void ReverseStrafe();
+    bool TryTrainerDodge(float DirectionRoll);
 
 private:
     UPROPERTY(ReplicatedUsing=OnRep_TrainerVisible)
@@ -33,6 +36,7 @@ private:
     float StrafeDirection = 1.0f;
     FVector StrafeCenter = FVector::ZeroVector;
     float AppearanceTime = 0.f;
+    void ResetTargetMovement();
 };
 
 /** Runtime room: hard references keep the stock cube/material in the cook.

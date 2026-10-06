@@ -113,7 +113,7 @@ namespace
 			&& FGuid::Parse(Expected.RunId, ExpectedId) && ReturnedId == ExpectedId
 			&& Ack->TryGetStringField(TEXT("scenario"), Scenario)
 			&& Scenario == FNCAimTrainerOnline::ScenarioSlug(Expected.Scenario)
-			&& Ack->TryGetNumberField(TEXT("revision"), Revision) && Revision == 1.0
+			&& Ack->TryGetNumberField(TEXT("revision"), Revision) && Revision == FNCAimTrainerOnline::PresetRevision
 			&& Ack->TryGetNumberField(TEXT("score"), Score) && Score == Expected.Score;
 	}
 
@@ -183,7 +183,7 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 	Json->SetStringField(TEXT("player_id"), Result.PlayerId);
 	Json->SetStringField(TEXT("display_name"), Result.DisplayName.Left(64));
 	Json->SetStringField(TEXT("scenario"), ScenarioSlug(Result.Scenario));
-	Json->SetNumberField(TEXT("revision"), 1);
+	Json->SetNumberField(TEXT("revision"), PresetRevision);
 	Json->SetNumberField(TEXT("score"), Result.Score);
 	Json->SetNumberField(TEXT("shots"), Result.Shots);
 	Json->SetNumberField(TEXT("hits"), Result.Hits);
@@ -208,7 +208,7 @@ void FNCAimTrainerOnline::Fetch(UWorld* World, int32 Scenario,
 		return;
 	}
 	const FString Url = Config.BaseUrl + FString::Printf(
-		TEXT("/aimtrainer_leaderboard/?scenario=%s&revision=1&limit=10"), ScenarioSlug(Scenario));
+		TEXT("/aimtrainer_leaderboard/?scenario=%s&revision=%d&limit=10"), ScenarioSlug(Scenario), int32(PresetRevision));
 	Send(World, Url, FString(), FString(),
 		[Scenario, Completion](int32 Code, const FString& Body)
 	{
@@ -220,7 +220,7 @@ void FNCAimTrainerOnline::Fetch(UWorld* World, int32 Scenario,
 		if (Code != 200 || !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Body), Json)
 			|| !Json.IsValid() || !Json->TryGetStringField(TEXT("scenario"), ReturnedScenario)
 			|| ReturnedScenario != ScenarioSlug(Scenario)
-			|| !ReadBoundedNumber(Json, TEXT("revision"), 1, 1, Revision)
+			|| !ReadBoundedNumber(Json, TEXT("revision"), PresetRevision, PresetRevision, Revision)
 			|| !Json->TryGetArrayField(TEXT("rows"), JsonRows) || JsonRows->Num() > 10)
 		{
 			Completion(false, Rows);

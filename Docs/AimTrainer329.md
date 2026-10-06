@@ -89,11 +89,11 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 1)
+## Scenarios and scoring (revision 2)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
-| Strafe tracking | Keep the crosshair on a full-size strafing character as it changes direction. Firing is not required. | Milliseconds on target, up to 60,000. |
+| Strafe tracking | Track a full-size character with frequent short reversals, occasional longer holds and native UT dodges. Firing is not required. | Milliseconds on target, up to 60,000. |
 | Headshots | Hit real character heads above cover with the sniper rifle. Body hits do not count. | 100 per headshot, minus 25 per miss and expired target, floored at zero. |
 | Instagib pop-up | Hit full-size characters before they disappear. Positions, distance, height and exposure timing vary. | 100 per hit, minus 25 per miss and expired target, floored at zero. |
 
@@ -103,23 +103,38 @@ at both endpoints, and discards observation gaps longer than 100 ms. Accuracy
 means time on target for tracking, and successful hits divided by fired shots
 for the two shooting scenarios. Weapons retain their normal firing rhythm.
 
-Tracking revision 1 measures the server's current target against received
+Tracking measures the server's current target against received
 view rotation. It does not reconstruct the client's rendered frame or
 normalize network latency. Use low-ping hosts when comparing tracking runs;
 equal skill at different latencies can produce different scores. The shooting
 scenarios use the normal NCP weapon hit-validation path.
 
-All three use the fixed target model/preset in revision 1. Custom models,
+Revision 2 uses 75% short strafe holds (0.14–0.34 seconds) and 25% longer holds
+(0.45–0.80 seconds), with grounded dodge attempts every 1.8–3.8 seconds. Native
+UT dodge cooldowns and landing physics still apply. Ground reversals pause
+during a dodge. This is randomized target movement, not a replay of a fixed path.
+
+Instagib introduces at most one target every 1.10–1.35 seconds, with a maximum
+of three present. Each stays for 3.5–4.8 seconds, allowing three one-second
+refire intervals plus aiming time. Initial spawns, hit replacements and expired
+targets share that schedule; a hitch cannot create a catch-up burst. Slower
+custom refire values scale the timings and make the run unranked.
+
+All three use the fixed target model/preset in revision 2. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=1&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=2&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
-it does not stream aiming samples to Django.
+it does not stream aiming samples to Django. Revised scenarios submit revision
+2; Django retains revision-1 submissions and explicit revision-1 boards without
+mixing their scores with the new difficulty. Deploy the accompanying revision-2
+API support before expecting new scores to be accepted. This update needs no
+additional database migration beyond the original trainer table.
 
 Score submission is an asynchronous server request to `/aimtrainer_entry/`.
 The identity comes from the server's player state. Run IDs make retries
@@ -254,3 +269,38 @@ standalone/network startup. Rebuild Shipping to pick up this repair.
 Verification: all 44 trainer native tests passed and the UE4.15 Win64
 Development Editor module compiled and linked. Packaged offline/network
 play and the equipped first-person animations still require a visual retest.
+
+### Weapon presentation, feedback and scenario revision 2 (2026-10-06)
+
+The native trainee now copies `DefaultCharacter`'s completed first-person
+defaults. `BaseUTCharacter` has no first-person animation class and a different
+arm transform; it is insufficient for the weapon's animated hand attachment.
+The trainer's movement component and the player's selected skin are preserved.
+
+Saved NCP weapon hide choices apply to the trainer. An exact instagib preference
+wins, including an explicit show choice. If none exists, only the trainer's
+`N+InstagibRifle_C` inherits the normal `UTNPShockRifle_C` hide choice. Equipping,
+weapon swaps, menu reapplication, beam origin and muzzle flashes use the same
+decision. Classic hide uses the saved beam back/down offsets; the other hide
+style retains its normal socket origin. No preferences are rewritten and
+ordinary matches do not gain this fallback.
+
+Accepted hits explicitly use the NCP hitsound preset, style, pitch and volume,
+including mute. The catalog prepares in the picker; no hitsounds mutator is
+required. Rejected body hits in the headshot scenario do not play success
+feedback. The immortal practice targets no longer emit a false helmet-block
+notification after a successful headshot.
+
+Trainer head centers now follow the stock visible head socket and head height
+instead of the generic NCP capsule-based fallback. Existing NCP sniper radius,
+world obstruction and appearance-time validation stay in place. Headshot
+targets are stationary and use the same fixed model on client/server. The
+changed geometry and scenario timing use revision 2 on all shared boards.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 73 trainer native tests and 16 Django tests passed. Tests cover hidden/show
+overrides, beam offsets, accepted-hit feedback, head-center dispatch, target
+movement lifecycle, controllerless dodge landing recovery, popup cadence and
+separate revision boards. Rebuild Shipping and check actual first-person
+attachment/beam rendering, hitsound playback and head alignment in standalone;
+the build and native adapters do not establish a packaged visual pass.

@@ -1,5 +1,6 @@
 #include "NCAimTrainerTarget.h"
 #include "NCAimTrainerGame.h"
+#include "NCAimTrainerScenarioPolicy.h"
 #include "UTCharacterMovement.h"
 #include "UTCharacterContent.h"
 #include "Components/CapsuleComponent.h"
@@ -38,7 +39,7 @@ ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitial
     GetCharacterMovement()->bOrientRotationToMovement = false;
     GetCharacterMovement()->bUseControllerDesiredRotation = false;
     GetCharacterMovement()->MaxWalkSpeed = 500.f;
-    GetCharacterMovement()->MaxAcceleration = 3000.f;
+    GetCharacterMovement()->MaxAcceleration = 7000.f;
     // Head position and animation must update even on a dedicated server.
     GetMesh()->MeshComponentUpdateFlag = EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones;
     GetMesh()->bEnableUpdateRateOptimizations = false;
@@ -88,7 +89,7 @@ void ANCAimTrainerTarget::ActivateTarget(const FVector& Location, bool bStrafe)
     bTrainerStrafe = bStrafe;
     StrafeCenter = Location;
     StrafeDirection = 1.f;
-    GetCharacterMovement()->StopMovementImmediately();
+    ResetTargetMovement();
     SetActorLocationAndRotation(Location, FRotator(0.f, 180.f, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
     // Reappearing targets are a new opportunity, not a rewindable old body.
     SavedPositions.Reset();
@@ -106,7 +107,7 @@ void ANCAimTrainerTarget::HideTarget()
     if (Role != ROLE_Authority) { return; }
     bTrainerVisible = false;
     bTrainerStrafe = false;
-    GetCharacterMovement()->StopMovementImmediately();
+    ResetTargetMovement();
     GetCharacterMovement()->DisableMovement();
     SavedPositions.Reset();
     SavedCapsulePostures.Reset();
@@ -114,14 +115,51 @@ void ANCAimTrainerTarget::HideTarget()
     ForceNetUpdate();
 }
 
-void ANCAimTrainerTarget::SetStrafeDirection(float Direction)
+void ANCAimTrainerTarget::ResetTargetMovement()
 {
-    StrafeDirection = Direction < 0.f ? -1.f : 1.f;
+    GetCharacterMovement()->StopMovementImmediately();
+    ConsumeMovementInputVector();
+    if (UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement()))
+    {
+        Movement->ClearDodgeInput();
+        Movement->ClearFallingStateFlags();
+        Movement->bIsDodgeLanding = false;
+        Movement->DodgeResetTime = 0.f;
+    }
+}
+
+void ANCAimTrainerTarget::ReverseStrafe()
+{
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || !GetCharacterMovement()->IsMovingOnGround()) { return; }
+    const float Offset = GetActorLocation().Y - StrafeCenter.Y;
+    StrafeDirection = Offset >= 800.f ? -1.f : Offset <= -800.f ? 1.f : -StrafeDirection;
+}
+
+bool ANCAimTrainerTarget::TryTrainerDodge(float DirectionRoll)
+{
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || !GetCharacterMovement()->IsMovingOnGround()) { return false; }
+    const float Direction = NCAimTrainerScenarioPolicy::DodgeDirection(GetActorLocation().Y - StrafeCenter.Y, DirectionRoll);
+    // Use UT's normal impulse, cooldown, landing and replicated movement event.
+    // Never simulate a dodge by teleporting or assigning horizontal velocity.
+    if (!Dodge(FVector(0.f, Direction, 0.f), FVector(1.f, 0.f, 0.f))) { return false; }
+    StrafeDirection = Direction;
+    return true;
 }
 
 void ANCAimTrainerTarget::Tick(float DeltaSeconds)
 {
-    if (Role == ROLE_Authority && bTrainerVisible && bTrainerStrafe)
+    if (Role == ROLE_Authority)
+    {
+        // Stock CheckJumpInput retires this flag only on locally controlled
+        // pawns. These targets have no controller or client saved moves.
+        UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+        if (Movement && Movement->bIsDodgeLanding
+            && Movement->GetCurrentMovementTime() >= Movement->DodgeResetTime + Movement->DodgeLandingTimeAdjust)
+        {
+            Movement->bIsDodgeLanding = false;
+        }
+    }
+    if (Role == ROLE_Authority && bTrainerVisible && bTrainerStrafe && GetCharacterMovement()->IsMovingOnGround())
     {
         const float Offset = GetActorLocation().Y - StrafeCenter.Y;
         if (Offset >= 800.f) { StrafeDirection = -1.f; }
@@ -129,6 +167,21 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
         AddMovementInput(FVector(0.f, StrafeDirection, 0.f), 1.f, true);
     }
     Super::Tick(DeltaSeconds);
+}
+
+FVector ANCAimTrainerTarget::GetHeadLocation(float PredictionTime)
+{
+    // These fixed-model targets use their visible head pose, including offline
+    // where there is no client head-offset claim. Keep NCP's normal sniper
+    // radius and obstruction tests; only the trainer's head center changes.
+    return AUTCharacter::GetHeadLocation(PredictionTime);
+}
+
+void ANCAimTrainerTarget::NotifyBlockedHeadShot(AUTCharacter* /*ShotInstigator*/)
+{
+    // Training targets stay alive after scoring. That must not be interpreted
+    // by the sniper as a helmet surviving a headshot. Accepted hits have their
+    // own configured NCP confirmation; these targets never have head armor.
 }
 
 float ANCAimTrainerTarget::TakeDamage(float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer)

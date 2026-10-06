@@ -49,6 +49,9 @@ private:
     float LastTraceTime = 0.f;
     float NextStatusTime = 0.f;
     float NextDirectionTime = 0.f;
+    float NextDodgeTime = 0.f;
+    float NextPopupTime = 0.f;
+    float PopupRefireSeconds = 1.f;
     float ShotStatBaseline = 0.f;
     double TrackedSeconds = 0.0;
     bool bPreviousContact = false;
@@ -72,6 +75,7 @@ private:
     void RefreshLeaderboard(bool bAfterSubmit = false);
     void HideAllTargets();
     void ActivateSlot(int32 Index, float Now);
+    void UpdateTargets(float Now);
     void UpdateShotCount();
     bool IsTrainee(const ANCAimTrainerPlayerController* PC) const;
 };

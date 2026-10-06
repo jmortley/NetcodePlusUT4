@@ -32,6 +32,8 @@ using EKeys = FKey;
 enum EInputEvent { IE_Pressed, IE_Released, IE_Repeat };
 struct FPlatformTime { static double Now; static double Seconds() { return Now; } };
 double FPlatformTime::Now = 100.;
+struct AClientHitsounds { static int Warmups; static void EnsureCatalog() { ++Warmups; } };
+int AClientHitsounds::Warmups = 0;
 struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; int Score = 0; bool bMovementPractice = false; };
 struct FVector { float X, Y, Z; FVector(float x=0, float y=0, float z=0): X(x), Y(y), Z(z) {} };
 enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling };
@@ -383,6 +385,18 @@ void MovementRetryPosture() {
                 "repeated countdown updates cancelled new movement input");
     }
 }
+void HitsoundWarmup() {
+    ANCAimTrainerPlayerController pc;
+    pc.TrainerProgress.Phase = 0;
+    pc.OnRep_TrainerProgress();
+    Require(AClientHitsounds::Warmups == 1, "picker did not prepare hitsound assets");
+    for (int i = 0; i < 20; ++i) pc.OnRep_TrainerProgress();
+    Require(AClientHitsounds::Warmups == 1, "progress samples repeated catalog preparation");
+    ANCAimTrainerPlayerController remote;
+    remote.Local = false;
+    remote.OnRep_TrainerProgress();
+    Require(AClientHitsounds::Warmups == 1, "nonlocal controller prepared audio assets");
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required"); const std::string name(argv[1]);
     if (name == "menu") MenuControls();
@@ -395,6 +409,7 @@ int main(int argc, char** argv) {
     else if (name == "possession") PossessionLock();
     else if (name == "movement") MovementPractice();
     else if (name == "retry_posture") MovementRetryPosture();
+    else if (name == "hitsound_warmup") HitsoundWarmup();
     else Require(false, "unknown case");
 }
 '''
@@ -464,6 +479,7 @@ class AimTrainerControllerTests(unittest.TestCase):
     def test_possession_keeps_movement_locked_and_mouse_look_live(self): self.run_case("possession")
     def test_movement_practice_stays_lateral_and_score_updates_preserve_jumps(self): self.run_case("movement")
     def test_new_countdown_resets_crouched_or_airborne_owner_without_repeated_resets(self): self.run_case("retry_posture")
+    def test_first_local_picker_prepares_hitsounds_once(self): self.run_case("hitsound_warmup")
 
 
 if __name__ == "__main__":

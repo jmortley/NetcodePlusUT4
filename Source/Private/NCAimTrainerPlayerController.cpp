@@ -7,6 +7,8 @@
 #include "Engine/Console.h"
 #include "Engine/GameViewportClient.h"
 #include "HAL/PlatformTime.h"
+#include "ClientHitsounds.h"
+#include "EngineUtils.h"
 
 ANCAimTrainerPlayerController::ANCAimTrainerPlayerController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -210,6 +212,11 @@ void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 		bLastPresentedMovementPractice = TrainerProgress.bMovementPractice;
 	}
 #if !UE_SERVER
+	if (IsLocalController() && LastPresentedPhase == 255 && TrainerProgress.Phase == 0)
+	{
+		// Prepare cue assets in the picker, not on the first successful shot.
+		AClientHitsounds::EnsureCatalog();
+	}
 	// UT owns input-mode and cursor transitions; do not mutate profile/bindings.
 	UpdateInputMode();
 #endif
@@ -241,4 +248,28 @@ void ANCAimTrainerPlayerController::ClientTrainerLeaderboard_Implementation(cons
 void ANCAimTrainerPlayerController::ClientTrainerOnlineStatus_Implementation(const FString& Status)
 {
 	OnlineStatus = Status.Left(160);
+}
+
+void ANCAimTrainerPlayerController::NotifyTrainerHit(float Damage)
+{
+	if (Role != ROLE_Authority || !FMath::IsFinite(Damage) || Damage <= 0.f) { return; }
+	ClientTrainerConfirmedHit(FMath::RoundToInt(FMath::Clamp(Damage, 1.f, 10000.f)));
+}
+
+void ANCAimTrainerPlayerController::ClientTrainerConfirmedHit_Implementation(int32 Damage)
+{
+#if !UE_SERVER
+	if (!IsLocalController() || !GetWorld() || Damage <= 0 || Damage > 10000) { return; }
+	// Targets bypass normal character damage to stay alive between appearances.
+	// Reuse the existing NCP playback and preference path after score acceptance.
+	TActorIterator<AClientHitsounds> It(GetWorld());
+	if (It)
+	{
+		if (!It->ShouldSuppressServerHitsound(Damage, false)) { It->PlayHitsound(Damage, false); }
+		return;
+	}
+	// No hitsounds mutator is needed in the trainer. This static playback entry
+	// uses the same cue, style, pitch and volume as the player's NCP menu preset.
+	AClientHitsounds::PlayPreview(this, AClientHitsounds::LoadConfigFromIni(), false, Damage);
+#endif
 }

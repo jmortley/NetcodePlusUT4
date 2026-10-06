@@ -3,6 +3,7 @@
 #include "NCAimTrainerHUD.h"
 #include "NCAimTrainerOnline.h"
 #include "NCAimTrainerScoring.h"
+#include "NCAimTrainerScenarioPolicy.h"
 #include "NCAimTrainerCharacter.h"
 #include "TeamArenaCharacter.h"
 #include "UTPlusSniper.h"
@@ -385,12 +386,21 @@ void ANCAimTrainerGame::BeginActiveRun()
     Progress.Phase = 2;
     Progress.RemainingSeconds = 60.f;
     PhaseStartedAt = LastTraceTime = GetWorld()->GetTimeSeconds();
-    NextDirectionTime = PhaseStartedAt + 0.8f;
+    NextDirectionTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
+    NextDodgeTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
+    NextPopupTime = PhaseStartedAt;
+    const float Refire = Progress.Scenario == 2 && RunWeapon ? RunWeapon->GetRefireTime(0) : 1.f;
+    PopupRefireSeconds = FMath::IsFinite(Refire) ? FMath::Max(1.f, Refire) : 1.f;
+    if (Progress.Scenario == 2 && (!FMath::IsFinite(Refire) || !FMath::IsNearlyEqual(Refire, 1.f)))
+    {
+        bRankedRun = false;
+        UnrankedReason = TEXT("Practice only: the instagib rifle's refire interval differs from the one-second preset.");
+    }
     AUTPlayerState* PS = Trainee ? Cast<AUTPlayerState>(Trainee->PlayerState) : nullptr;
     ShotStatBaseline = RunWeapon ? RunWeapon->GetWeaponShotsStats(PS) : 0.f;
     for (int32 Index = 0; Index < Targets.Num(); ++Index)
     {
-        NextTargetTime[Index] = PhaseStartedAt + Index * 0.25f;
+        NextTargetTime[Index] = PhaseStartedAt + (Progress.Scenario == 2 ? 0.f : Index * 0.25f);
         TargetExpiry[Index] = 0.f;
     }
     PublishProgress();
@@ -425,7 +435,7 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
         // lifetime and cadence vary, unlike a fixed flat grid of dots.
         Position = FVector(Schedule.FRandRange(-100.f, 2300.f),
             (Index - 1) * 850.f + Schedule.FRandRange(-240.f, 240.f), 108.f + FMath::Max(1.f, Index * 160.f));
-        TargetExpiry[Index] = Now + Schedule.FRandRange(2.0f, 4.0f);
+        TargetExpiry[Index] = Now + NCAimTrainerScenarioPolicy::PopupExposure(PopupRefireSeconds, Schedule.FRand());
     }
     Targets[Index]->ActivateTarget(ArenaOrigin + Position, Progress.Scenario == 0);
 }
@@ -467,7 +477,8 @@ float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Dama
     }
     ++Progress.Hits;
     Target->HideTarget();
-    NextTargetTime[Slot] = Now + (Progress.Scenario == 2 ? Schedule.FRandRange(0.20f, 0.65f) : 0.35f);
+    NextTargetTime[Slot] = Now + (Progress.Scenario == 2 ? 0.f : 0.35f);
+    Trainee->NotifyTrainerHit(Damage);
     // Keep the pawn alive and bypass ordinary frag/drop/scoring paths. One
     // appearance can score exactly once, even if a repeated RPC reaches it.
     return Damage;
@@ -500,35 +511,33 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
         Progress.RemainingSeconds = FMath::Max(0.f, 60.f - (Now - PhaseStartedAt));
         UpdateShotCount();
         if (Progress.RemainingSeconds <= 0.f) { FinishRun(); return; }
-        const int32 ActiveSlots = Progress.Scenario == 0 ? 1 : 3;
         if (Targets.Num() != 3 || !Arena || Arena->IsPendingKillPending())
         {
             AbortTraining(Trainee);
             Trainee->SetTrainerOnlineStatus(TEXT("Run stopped because the practice arena was removed."));
             return;
         }
-        for (int32 Index = 0; Index < ActiveSlots; ++Index)
+        for (ANCAimTrainerTarget* Target : Targets)
         {
-            if (!Targets[Index] || Targets[Index]->IsPendingKillPending())
+            if (!Target || Target->IsPendingKillPending())
             {
                 AbortTraining(Trainee);
                 Trainee->SetTrainerOnlineStatus(TEXT("Run stopped because a practice target was removed."));
                 return;
             }
-            if (Targets[Index]->IsAvailable() && Now >= TargetExpiry[Index])
-            {
-                Targets[Index]->HideTarget();
-                ++Progress.TargetsExpired;
-                NextTargetTime[Index] = Now + Schedule.FRandRange(0.25f, 0.65f);
-            }
-            else if (!Targets[Index]->IsAvailable() && Now >= NextTargetTime[Index]) { ActivateSlot(Index, Now); }
         }
+        UpdateTargets(Now);
         if (Progress.Scenario == 0)
         {
+            if (Now >= NextDodgeTime)
+            {
+                Targets[0]->TryTrainerDodge(Schedule.FRand());
+                NextDodgeTime = Now + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
+            }
             if (Now >= NextDirectionTime)
             {
-                Targets[0]->SetStrafeDirection(Schedule.RandRange(0, 1) == 0 ? -1.f : 1.f);
-                NextDirectionTime = Now + Schedule.FRandRange(0.45f, 1.15f);
+                Targets[0]->ReverseStrafe();
+                NextDirectionTime = Now + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
             }
             if (Now - LastTraceTime >= 1.f / 30.f)
             {
@@ -552,6 +561,34 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
         if (RunWeapon) { RunWeapon->Ammo = RunWeapon->MaxAmmo; }
     }
     if (Now >= NextStatusTime) { PublishProgress(); NextStatusTime = Now + 0.1f; }
+}
+
+void ANCAimTrainerGame::UpdateTargets(float Now)
+{
+    const int32 ActiveSlots = Progress.Scenario == 0 ? 1 : NCAimTrainerScenarioPolicy::InstagibMaxActiveTargets;
+    TArray<int32> EligibleSlots;
+    for (int32 Index = 0; Index < ActiveSlots; ++Index)
+    {
+        if (Targets[Index]->IsAvailable() && Now >= TargetExpiry[Index])
+        {
+            Targets[Index]->HideTarget();
+            ++Progress.TargetsExpired;
+            NextTargetTime[Index] = Now + (Progress.Scenario == 2 ? 0.f : Schedule.FRandRange(0.25f, 0.65f));
+        }
+        if (!Targets[Index]->IsAvailable() && Now >= NextTargetTime[Index])
+        {
+            if (Progress.Scenario == 2) { EligibleSlots.Add(Index); }
+            else { ActivateSlot(Index, Now); }
+        }
+    }
+    // Initial targets, hits and expiries all share this deadline. Never replace
+    // several targets at once or catch up after a stall: one rifle, one second
+    // per shot. Randomize which available height/lane gets the next appearance.
+    if (Progress.Scenario == 2 && Now >= NextPopupTime && EligibleSlots.Num() > 0)
+    {
+        ActivateSlot(EligibleSlots[Schedule.RandRange(0, EligibleSlots.Num() - 1)], Now);
+        NextPopupTime = Now + NCAimTrainerScenarioPolicy::PopupSpawnDelay(PopupRefireSeconds, Schedule.FRand());
+    }
 }
 
 void ANCAimTrainerGame::PublishProgress()

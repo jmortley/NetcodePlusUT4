@@ -32,7 +32,7 @@ struct UClass {
     AUTCharacter* Object = nullptr;
     template<class T> const T* GetDefaultObject() const { return static_cast<const T*>(Object); }
 };
-struct Transform { float Z = 0.f, Yaw = 0.f, Scale = 1.f; };
+struct Transform { float Z = 0.f, Yaw = 0.f, Scale = 1.f, X = 0.f; };
 enum class EMeshComponentUpdateFlag { OnlyTickPoseWhenRendered, AlwaysTickPoseAndRefreshBones };
 struct Mesh {
     Transform Relative;
@@ -79,11 +79,16 @@ struct AUTCharacter {
         Body.AnimClass = nullptr;
     }
 };
-UClass* AvailableTemplate = nullptr;
+UClass* AvailableBaseTemplate = nullptr;
+UClass* AvailablePlayerTemplate = nullptr;
 namespace ConstructorHelpers {
 template<class T> struct FClassFinder {
     UClass* Class;
-    explicit FClassFinder(const char*) : Class(AvailableTemplate) {}
+    explicit FClassFinder(const char* path) : Class(nullptr) {
+        const std::string asset = path;
+        if (asset == "/Game/RestrictedAssets/Blueprints/BaseUTCharacter") Class = AvailableBaseTemplate;
+        else if (asset == "/Game/RestrictedAssets/Blueprints/DefaultCharacter") Class = AvailablePlayerTemplate;
+    }
 };
 }
 struct ANCAimTrainerTarget : AUTCharacter {
@@ -114,12 +119,22 @@ int main(int argc, char** argv) {
     AUTCharacter stock;
     stock.Body.AnimClass = &animation;
     stock.Body.Relative = {-108.f, -90.f, 1.25f};
-    stock.Hands.AnimClass = &handsAnimation;
-    stock.Hands.Relative = {-15.f, 12.f, 0.75f};
-    if (name == "trainee_missing_arms") stock.FirstPersonMesh = nullptr;
+    // Actual authored distinction: BaseUTCharacter has no first-person
+    // AnimClass and parks arms at (-30,0,10), yaw 0. DefaultCharacter supplies
+    // Base_1p_AnimBP and (-15,0,0), yaw -90. A generic template stub hid this bug.
+    stock.Hands.Relative = {10.f, 0.f, 1.f, -30.f};
     UClass templateClass;
     templateClass.Object = &stock;
-    AvailableTemplate = (name == "missing_template" || name == "trainee_missing_template") ? nullptr : &templateClass;
+    AvailableBaseTemplate = (name == "missing_template") ? nullptr : &templateClass;
+    AUTCharacter playable;
+    playable.Body.AnimClass = &animation;
+    playable.Body.Relative = {-110.f, -90.f, 1.f};
+    playable.Hands.AnimClass = &handsAnimation;
+    playable.Hands.Relative = {0.f, -90.f, 1.f, -15.f};
+    if (name == "trainee_missing_arms") playable.FirstPersonMesh = nullptr;
+    UClass playerTemplateClass;
+    playerTemplateClass.Object = &playable;
+    AvailablePlayerTemplate = (name == "trainee_missing_template") ? nullptr : &playerTemplateClass;
     if (name.find("trainee_") == 0) {
         ANCAimTrainerCharacter trainee(initializer);
         Require(trainee.MovementType == UNCAimTrainerMovement::Type,
@@ -129,13 +144,14 @@ int main(int argc, char** argv) {
             Require(!trainee.Body.AnimClass && !trainee.Hands.AnimClass,
                     "missing template manufactured animation defaults");
         } else {
-            Require(trainee.Body.AnimClass == &animation && trainee.Body.Relative.Z == -108.f
-                    && trainee.Body.Relative.Yaw == -90.f && trainee.Body.Relative.Scale == 1.25f,
+            Require(trainee.Body.AnimClass == &animation && trainee.Body.Relative.Z == -110.f
+                    && trainee.Body.Relative.Yaw == -90.f && trainee.Body.Relative.Scale == 1.f,
                     "native trainee lost body animation or capsule-relative placement");
             if (name == "trainee_defaults") {
-                Require(trainee.Hands.AnimClass == &handsAnimation && trainee.Hands.Relative.Z == -15.f
-                        && trainee.Hands.Relative.Yaw == 12.f && trainee.Hands.Relative.Scale == 0.75f,
-                        "native trainee lost authored first-person arms defaults");
+                Require(trainee.Hands.AnimClass == &handsAnimation && trainee.Hands.Relative.Z == 0.f
+                        && trainee.Hands.Relative.Yaw == -90.f && trainee.Hands.Relative.Scale == 1.f
+                        && trainee.Hands.Relative.X == -15.f,
+                        "native trainee copied incomplete base arms instead of playable weapon socket pose");
             } else {
                 Require(name == "trainee_missing_arms" && !trainee.Hands.AnimClass,
                         "missing optional template arms were dereferenced or invented");

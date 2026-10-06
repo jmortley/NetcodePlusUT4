@@ -59,6 +59,8 @@ public:
 	void SetTrainerProgress(const FNCAimTrainerProgress& Progress);
 	void SetTrainerLeaderboard(const TArray<FNCAimTrainerLeaderboardRow>& Rows);
 	void SetTrainerOnlineStatus(const FString& Status);
+	/** Called only after the authority accepts a scoring hit on a practice target. */
+	void NotifyTrainerHit(float Damage);
 
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerTrainerSelectScenario(uint8 Scenario);
@@ -72,6 +74,8 @@ public:
 	void ClientTrainerLeaderboard(const TArray<FNCAimTrainerLeaderboardRow>& Rows);
 	UFUNCTION(Client, Reliable)
 	void ClientTrainerOnlineStatus(const FString& Status);
+	UFUNCTION(Client, Reliable)
+	void ClientTrainerConfirmedHit(int32 Damage);
 
 private:
 	UPROPERTY(ReplicatedUsing=OnRep_TrainerProgress)

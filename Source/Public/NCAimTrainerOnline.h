@@ -9,6 +9,8 @@ class UWorld;
 class NETCODEPLUS_API FNCAimTrainerOnline
 {
 public:
+	// Revised movement/head geometry and popup timing must not share v1 ranks.
+	enum { PresetRevision = 2 };
 	static const TCHAR* ScenarioSlug(int32 Scenario);
 	static void Submit(UWorld* World, const FNCAimTrainerResult& Result,
 		TFunction<void(bool, const FString&)> Completion);

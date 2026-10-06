@@ -1,0 +1,249 @@
+"""Compile trainer target actions against a small actor/movement adapter.
+
+Native target functions and the real scenario direction policy are exercised.
+The adapter records calls to UT Dodge and head-pose lookup; actual animation,
+collision, physics and networking still require a packaged playtest.
+"""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from test_wipeout_healing import PLUGIN, find_compiler, native_function
+
+
+ADAPTER = r'''
+#include <cstdlib>
+#include <iostream>
+#include <string>
+constexpr int ROLE_Authority = 3;
+enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling, MOVE_Flying };
+struct FVector {
+    float X, Y, Z;
+    FVector(float x=0.f, float y=0.f, float z=0.f) : X(x), Y(y), Z(z) {}
+};
+struct FRotator { float Pitch,Yaw,Roll; FRotator(float p,float y,float r):Pitch(p),Yaw(y),Roll(r){} };
+enum class ETeleportType { TeleportPhysics };
+struct UCharacterMovementComponent {
+    virtual ~UCharacterMovementComponent() = default;
+    MovementMode Mode = MOVE_Walking;
+    float Speed = 0.f;
+    int Stops = 0;
+    bool IsMovingOnGround() const { return Mode == MOVE_Walking; }
+    void StopMovementImmediately() { Speed = 0.f; ++Stops; }
+    void SetMovementMode(MovementMode mode) { Mode = mode; }
+    void DisableMovement() { Mode = MOVE_None; }
+};
+struct UUTCharacterMovement : UCharacterMovementComponent {
+    bool bIsDodging = false, DodgeInput = false, bIsDodgeLanding = false, FallingFlags = false;
+    float DodgeResetTime = 0.f, DodgeLandingTimeAdjust = -.25f, MovementTime = 0.f;
+    void ClearDodgeInput() { DodgeInput = false; }
+    void ClearFallingStateFlags() { bIsDodging = false; FallingFlags = false; }
+    float GetCurrentMovementTime() const { return MovementTime; }
+};
+template<class T> T* Cast(UCharacterMovementComponent* value) { return dynamic_cast<T*>(value); }
+struct World { float Time = 42.f; float GetTimeSeconds() const { return Time; } };
+struct AUTCharacter {
+    int PoseQueries = 0, HelmetNotifications = 0;
+    float LastPosePrediction = -1.f;
+    virtual FVector GetHeadLocation(float prediction) {
+        ++PoseQueries; LastPosePrediction = prediction; return FVector(100.f - prediction, 2.f, 200.f);
+    }
+    virtual void NotifyBlockedHeadShot(AUTCharacter*) { ++HelmetNotifications; }
+};
+struct ATeamArenaCharacter : AUTCharacter {
+    int CapsuleHeadQueries = 0, SuperTicks = 0, DodgeCalls = 0, Teleports = 0, NetUpdates = 0, InputCalls = 0;
+    bool DodgeAllowed = true, Hidden = false, Collision = true, HasPendingInput = false;
+    FVector Position, LastDodgeDirection, LastDodgeCross, LastInput;
+    UUTCharacterMovement Move;
+    World TheWorld;
+    UCharacterMovementComponent* GetCharacterMovement() { return &Move; }
+    FVector GetActorLocation() const { return Position; }
+    World* GetWorld() { return &TheWorld; }
+    FVector GetHeadLocation(float) override { ++CapsuleHeadQueries; return FVector(0,0,188); }
+    void Tick(float) { ++SuperTicks; }
+    bool Dodge(FVector direction, FVector cross) {
+        ++DodgeCalls; LastDodgeDirection=direction; LastDodgeCross=cross; return DodgeAllowed;
+    }
+    FVector ConsumeMovementInputVector() { HasPendingInput=false; return FVector(); }
+    void SetActorLocationAndRotation(FVector position, FRotator, bool, void*, ETeleportType) {
+        ++Teleports; Position=position;
+    }
+    void SetActorHiddenInGame(bool hidden) { Hidden=hidden; }
+    void SetActorEnableCollision(bool enabled) { Collision=enabled; }
+    void ForceNetUpdate() { ++NetUpdates; }
+    void AddMovementInput(FVector direction, float, bool) { ++InputCalls; LastInput=direction; }
+};
+struct ANCAimTrainerTarget : ATeamArenaCharacter {
+    using Super = ATeamArenaCharacter;
+    int Role=ROLE_Authority;
+    bool bTrainerVisible=false, bTrainerStrafe=false;
+    float StrafeDirection=1.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
+    FVector StrafeCenter;
+    struct History { int Count=7; void Reset() { Count=0; } } SavedPositions, SavedCapsulePostures;
+    void OnRep_TrainerVisible();
+    void ActivateTarget(const FVector&,bool);
+    void HideTarget();
+    void ResetTargetMovement();
+    void ReverseStrafe();
+    bool TryTrainerDodge(float);
+    void Tick(float);
+    FVector GetHeadLocation(float) override;
+    void NotifyBlockedHeadShot(AUTCharacter*) override;
+};
+void Require(bool condition,const char* why) { if(!condition) { std::cerr<<why<<'\n'; std::exit(1); } }
+ANCAimTrainerTarget Active() {
+    ANCAimTrainerTarget target; target.bTrainerVisible=true; target.bTrainerStrafe=true; return target;
+}
+'''
+
+CASES = r'''
+int main(int argc,char**argv) {
+    Require(argc==2,"case required"); const std::string name(argv[1]);
+    if(name=="reverse") {
+        for(int guard=0;guard<4;++guard) {
+            auto target=Active();
+            if(guard==0) target.Role=1;
+            if(guard==1) target.bTrainerVisible=false;
+            if(guard==2) target.bTrainerStrafe=false;
+            if(guard==3) target.Move.Mode=MOVE_Falling;
+            target.ReverseStrafe();
+            Require(target.StrafeDirection==1.f,"reverse escaped authority/visibility/ground guard");
+        }
+        auto target=Active(); target.StrafeCenter.Y=100.f;
+        target.Position.Y=100.f; target.ReverseStrafe();
+        Require(target.StrafeDirection==-1.f,"center reversal did not alternate");
+        target.Position.Y=-700.f; target.ReverseStrafe();
+        Require(target.StrafeDirection==1.f,"left edge did not turn inward");
+        target.Position.Y=900.f; target.ReverseStrafe();
+        Require(target.StrafeDirection==-1.f,"right edge did not turn inward");
+    } else if(name=="dodge") {
+        for(int guard=0;guard<4;++guard) {
+            auto target=Active();
+            if(guard==0) target.Role=1;
+            if(guard==1) target.bTrainerVisible=false;
+            if(guard==2) target.bTrainerStrafe=false;
+            if(guard==3) target.Move.Mode=MOVE_Falling;
+            Require(!target.TryTrainerDodge(0.f)&&target.DodgeCalls==0,"invalid target invoked native dodge");
+        }
+        auto target=Active(); target.DodgeAllowed=false;
+        Require(!target.TryTrainerDodge(0.f)&&target.StrafeDirection==1.f,"failed native dodge changed direction");
+        target.DodgeAllowed=true;
+        for(float side : {-1.f,1.f}) {
+            target.Position.Y=side*600.f;
+            Require(target.TryTrainerDodge(side<0.f?0.f:1.f),"valid native dodge rejected");
+            Require(target.StrafeDirection==-side&&target.LastDodgeDirection.Y==-side
+                    &&target.LastDodgeDirection.X==0.f&&target.LastDodgeDirection.Z==0.f,
+                    "edge dodge did not invoke native inward lateral impulse");
+            Require(target.LastDodgeCross.X==1.f&&target.LastDodgeCross.Y==0.f&&target.Teleports==0,
+                    "dodge teleported or used wrong cross axis");
+        }
+    } else if(name=="lifecycle") {
+        ANCAimTrainerTarget target;
+        target.Move.Speed=500; target.Move.bIsDodging=true;
+        target.Move.bIsDodgeLanding=true; target.Move.FallingFlags=true;
+        target.Move.DodgeInput=true; target.Move.DodgeResetTime=999; target.HasPendingInput=true;
+        const FVector location(900,650,50108);
+        target.ActivateTarget(location,true);
+        Require(target.bTrainerVisible&&target.bTrainerStrafe&&!target.Hidden&&target.Collision
+                &&target.Move.Mode==MOVE_Walking&&target.Position.Y==650.f,"activation did not expose correct target");
+        Require(target.AppearanceTime==42.f&&target.SavedPositions.Count==0&&target.SavedCapsulePostures.Count==0,
+                "activation retained a previous appearance's history/epoch");
+        Require(target.Move.Speed==0&&!target.Move.bIsDodging&&!target.Move.DodgeInput
+                &&!target.Move.bIsDodgeLanding&&!target.Move.FallingFlags
+                &&target.Move.DodgeResetTime==0&&!target.HasPendingInput,"activation retained dodge/input momentum");
+        target.Move.Speed=500; target.Move.bIsDodging=true; target.HasPendingInput=true;
+        target.Move.bIsDodgeLanding=true; target.Move.FallingFlags=true;
+        target.SavedPositions.Count=4; target.SavedCapsulePostures.Count=4;
+        target.HideTarget();
+        Require(!target.bTrainerVisible&&!target.bTrainerStrafe&&target.Hidden&&!target.Collision
+                &&target.Move.Mode==MOVE_None,"hidden target remained active or collidable");
+        Require(target.Move.Speed==0&&!target.Move.bIsDodging&&!target.HasPendingInput
+                &&!target.Move.bIsDodgeLanding&&!target.Move.FallingFlags
+                &&target.SavedPositions.Count==0&&target.SavedCapsulePostures.Count==0,"hide retained motion/history");
+        target.ActivateTarget(location,false);
+        Require(target.Move.Mode==MOVE_Flying&&!target.bTrainerStrafe&&target.StrafeDirection==1.f,
+                "static popup inherited moving target behavior");
+    } else if(name=="client_lifecycle") {
+        auto target=Active(); target.Role=1; target.HasPendingInput=true; target.Move.Speed=300;
+        target.ActivateTarget(FVector(99,88,77),false); target.HideTarget();
+        Require(target.bTrainerVisible&&target.bTrainerStrafe&&target.Teleports==0&&target.NetUpdates==0
+                &&target.Move.Speed==300&&target.HasPendingInput,"client changed authoritative lifecycle");
+    } else if(name=="airborne_tick") {
+        auto target=Active(); target.Move.Mode=MOVE_Falling;
+        target.Tick(.016f);
+        Require(target.InputCalls==0&&target.SuperTicks==1,"airborne target countersteered a native dodge");
+        target.Move.Mode=MOVE_Walking; target.Position.Y=850;
+        target.Tick(.016f);
+        Require(target.InputCalls==1&&target.LastInput.Y==-1.f&&target.SuperTicks==2,"grounded target stopped strafing");
+    } else if(name=="landing_recovery") {
+        auto target=Active(); target.Move.bIsDodgeLanding=true; target.Move.DodgeResetTime=10.f;
+        target.Move.MovementTime=9.749f; target.Tick(.001f);
+        Require(target.Move.bIsDodgeLanding,"landing acceleration retired before stock deadline");
+        target.Move.MovementTime=9.75f; target.Tick(.001f);
+        Require(!target.Move.bIsDodgeLanding,"controllerless target retained landing slowdown past deadline");
+        target.Move.bIsDodgeLanding=true; target.Role=1; target.Move.MovementTime=11.f;
+        target.Tick(.016f);
+        Require(target.Move.bIsDodgeLanding,"client overwrote authoritative landing state");
+    } else if(name=="head_feedback") {
+        ANCAimTrainerTarget target; AUTCharacter shooter;
+        const FVector head=target.GetHeadLocation(.125f);
+        Require(target.PoseQueries==1&&target.CapsuleHeadQueries==0&&target.LastPosePrediction==.125f
+                &&head.X==99.875f&&head.Z==200.f,"trainer did not delegate exact epoch to visible head pose");
+        target.NotifyBlockedHeadShot(&shooter);
+        Require(target.HelmetNotifications==0&&shooter.HelmetNotifications==0,
+                "immortal target still announced a helmet block");
+    } else Require(false,"unknown case");
+}
+'''
+
+
+class AimTrainerTargetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        compiler, cls.environment, msvc = find_compiler()
+        cls.temporary = tempfile.TemporaryDirectory(prefix="ncp-aim-trainer-targets-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        directory = Path(cls.temporary.name)
+        native = (PLUGIN / "Source/Private/NCAimTrainerTarget.cpp").read_text(encoding="utf-8-sig")
+        policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
+        signatures = (
+            "void ANCAimTrainerTarget::OnRep_TrainerVisible",
+            "void ANCAimTrainerTarget::ActivateTarget",
+            "void ANCAimTrainerTarget::HideTarget",
+            "void ANCAimTrainerTarget::ResetTargetMovement",
+            "void ANCAimTrainerTarget::ReverseStrafe",
+            "bool ANCAimTrainerTarget::TryTrainerDodge",
+            "void ANCAimTrainerTarget::Tick",
+            "FVector ANCAimTrainerTarget::GetHeadLocation",
+            "void ANCAimTrainerTarget::NotifyBlockedHeadShot",
+        )
+        source = directory / "trainer_targets.cpp"
+        source.write_text("\n".join([ADAPTER, f'#include "{policy}"']
+            + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+        cls.executable = directory / ("trainer_targets.exe" if os.name == "nt" else "trainer_targets")
+        if msvc:
+            command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
+                       f"/Fe{cls.executable}", f"/Fo{directory / 'trainer_targets.obj'}"]
+        else:
+            command = [compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic", str(source), "-o", str(cls.executable)]
+        result = subprocess.run(command, cwd=directory, env=cls.environment, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise AssertionError(f"Target adapter compilation failed:\n{result.stdout}\n{result.stderr}")
+
+    def run_case(self, name):
+        result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_reversals_require_authority_visible_grounded_strafe_target(self): self.run_case("reverse")
+    def test_dodge_uses_native_action_and_inward_direction_policy(self): self.run_case("dodge")
+    def test_appearance_lifecycle_clears_motion_and_prior_history(self): self.run_case("lifecycle")
+    def test_client_cannot_change_target_lifecycle(self): self.run_case("client_lifecycle")
+    def test_airborne_dodges_are_not_countersteered_by_tracking_input(self): self.run_case("airborne_tick")
+    def test_controllerless_landing_acceleration_expires_at_stock_deadline(self): self.run_case("landing_recovery")
+    def test_visible_head_pose_and_no_false_helmet_feedback(self): self.run_case("head_feedback")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -5,11 +5,13 @@
 ANCAimTrainerCharacter::ANCAimTrainerCharacter(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer.SetDefaultSubobjectClass<UNCAimTrainerMovement>(ACharacter::CharacterMovementComponentName))
 {
-    // CharacterContent supplies the chosen skin on possession, but animation
-    // classes and capsule-relative body/arms placement belong to the pawn BP.
-    // Keep those authored defaults while retaining our native movement class.
+    // CharacterContent supplies the chosen skin on possession. The complete
+    // player pawn supplies the hand animation and attachment basis: BaseUTCharacter
+    // has no first-person AnimClass and uses an unfinished (-30,0,10) arms seat.
+    // DefaultCharacter supplies the live hand pose and (-15,0,0), yaw -90 seat
+    // expected by UTWeapon::AttachToOwner and its muzzle socket effects.
     static ConstructorHelpers::FClassFinder<AUTCharacter> CharacterTemplate(
-        TEXT("/Game/RestrictedAssets/Blueprints/BaseUTCharacter"));
+        TEXT("/Game/RestrictedAssets/Blueprints/DefaultCharacter"));
     if (CharacterTemplate.Class)
     {
         const AUTCharacter* Template = CharacterTemplate.Class->GetDefaultObject<AUTCharacter>();

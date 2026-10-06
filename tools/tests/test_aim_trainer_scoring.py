@@ -23,6 +23,10 @@ constexpr int INDEX_NONE = -1;
 struct FMath { static bool IsFinite(float n) { return std::isfinite(n); } };
 struct AActor { virtual ~AActor() = default; };
 struct AController : AActor {};
+struct ANCAimTrainerPlayerController : AController {
+    int Confirmations = 0;
+    void NotifyTrainerHit(float) { ++Confirmations; }
+};
 struct AUTWeapon : AActor {};
 struct AUTWeaponFix : AUTWeapon { float Rewind = 0; float GetHitValidationPredictionTime() const { return Rewind; } };
 struct AUTPlusSniper : AUTWeaponFix { int HeadshotDamageType = 5; };
@@ -46,7 +50,7 @@ struct ANCAimTrainerGame {
     struct { int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0; } Progress;
     struct World { float Now = 1.f; float GetTimeSeconds() { return Now; } } TheWorld;
     struct { float FRandRange(float a, float b) { return (a + b) * .5f; } } Schedule;
-    AController* Trainee = nullptr;
+    ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
     TargetsAdapter Targets;
     float PhaseStartedAt = 0.f;
@@ -60,7 +64,7 @@ struct ANCAimTrainerGame {
 void Require(bool okay, const char* why) { if (!okay) { std::cerr << why; std::exit(1); } }
 struct Fixture {
     ANCAimTrainerGame Game;
-    AController Player;
+    ANCAimTrainerPlayerController Player;
     AUTPlusSniper Gun;
     ANCAimTrainerTarget Target;
     FDamageEvent Event;
@@ -96,10 +100,12 @@ int main(int argc, char** argv) {
         Require(f.Hit() == 100.f && f.Game.Progress.Hits == 1 && f.Game.Progress.Headshots == 1, "head not awarded");
         Require(!f.Target.Visible && f.Target.Hidden == 1, "scored target still shootable");
         Require(f.Hit() == 0.f && f.Game.Progress.Hits == 1, "duplicate appearance awarded");
+        Require(f.Player.Confirmations == 1, "confirmation must occur once per accepted appearance");
         Require(f.Game.NextTargetTime[0] > f.Game.TheWorld.Now, "no hide interval");
     } else if (name == "body") {
         Fixture f; f.Event.DamageTypeClass = 1;
         Require(f.Hit() == 0 && f.Game.Progress.Hits == 0 && f.Target.Visible, "body hit counted as headshot");
+        Require(f.Player.Confirmations == 0, "rejected body hit played a success sound");
         f.Event.DamageTypeClass = f.Gun.HeadshotDamageType;
         Require(f.Hit() > 0 && f.Game.Progress.Headshots == 1, "legitimate head rejected");
     } else if (name == "identity") {
@@ -109,6 +115,7 @@ int main(int argc, char** argv) {
         Require(f.Game.RecordTargetHit(&OtherTarget, 100, f.Event, &f.Player, &f.Gun) == 0, "outside target scored");
         f.Game.ValidTrainee = false;
         Require(f.Hit() == 0, "invalid trainee scored");
+        Require(f.Player.Confirmations == 0, "unauthorized damage played a success sound");
     } else if (name == "deadline") {
         Fixture expired; expired.Game.TheWorld.Now = 4.f;
         Require(expired.Hit() == 0, "expired target scored before tick retired it");
