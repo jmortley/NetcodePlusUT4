@@ -548,6 +548,10 @@ public:
     UPROPERTY(Transient)
     UInputComponent* ShockInputTraceActionComponent;
 
+    /** Exact observer identities; other weapon-owned action bindings are independent. */
+    FDelegateHandle ShockInputTraceStartBindingHandle;
+    FDelegateHandle ShockInputTraceStopBindingHandle;
+
     /** Snapshot taken by the higher-priority, non-consuming key observer before
      *  the stock StartFire action runs. It lets the later passive action observer
      *  distinguish "this click queued primary fire" from an older queued input. */

@@ -1740,11 +1740,13 @@ void AUTWeaponFix::RefreshShockInputTrace()
 		&AUTWeaponFix::ShockInputTraceActionStart);
 	StartObserver.bConsumeInput = false;
 	StartObserver.bExecuteWhenPaused = false;
+	ShockInputTraceStartBindingHandle = StartObserver.ActionDelegate.GetDelegateWithKeyForManualSet().GetHandle();
 	FInputActionBinding& StopObserver = ShockInputTraceActionComponent->BindAction(
 		TEXT("StopFire"), IE_Released, this,
 		&AUTWeaponFix::ShockInputTraceActionStop);
 	StopObserver.bConsumeInput = false;
 	StopObserver.bExecuteWhenPaused = false;
+	ShockInputTraceStopBindingHandle = StopObserver.ActionDelegate.GetDelegateWithKeyForManualSet().GetHandle();
 
 	NCShockInputTrace::Start(this);
 }
@@ -1770,10 +1772,16 @@ void AUTWeaponFix::StopShockInputTrace()
 		{
 			const FInputActionBinding& Binding =
 				ActionComponent->GetActionBinding(Index);
+			// UE4.15 exposes only a mutable delegate accessor. Inspect a copy so
+			// we never unbind another weapon-owned action while identifying ours.
+			FInputActionUnifiedDelegate DelegateCopy = Binding.ActionDelegate;
+			const FDelegateHandle Handle = DelegateCopy.GetDelegateWithKeyForManualSet().GetHandle();
 			const bool bOurAction = (Binding.ActionName == FName(TEXT("StartFire"))
-					&& Binding.KeyEvent == IE_Pressed)
+					&& Binding.KeyEvent == IE_Pressed
+					&& ShockInputTraceStartBindingHandle.IsValid() && Handle == ShockInputTraceStartBindingHandle)
 				|| (Binding.ActionName == FName(TEXT("StopFire"))
-					&& Binding.KeyEvent == IE_Released);
+					&& Binding.KeyEvent == IE_Released
+					&& ShockInputTraceStopBindingHandle.IsValid() && Handle == ShockInputTraceStopBindingHandle);
 			if (bOurAction && Binding.ActionDelegate.IsBoundToObject(this))
 			{
 				ActionComponent->RemoveActionBinding(Index);
@@ -1791,6 +1799,8 @@ void AUTWeaponFix::StopShockInputTrace()
 	ShockInputTraceInputComponent = nullptr;
 	ShockInputTraceController = nullptr;
 	ShockInputTraceActionComponent = nullptr;
+	ShockInputTraceStartBindingHandle.Reset();
+	ShockInputTraceStopBindingHandle.Reset();
 	bShockInputTraceDeferredSnapshotValid = false;
 	bShockInputTraceHadDeferredStartBeforeDown = false;
 }

@@ -4,6 +4,10 @@
 #include "UTWeaponAttachment.h"
 #include "UTProj_ShockBall.h"
 #include "UTWeaponStateFiring_Transactional.h"
+#include "UTWeaponStateEquipping.h"
+#include "UTWeaponStateActive.h"
+#include "UTGameState.h"
+#include "HAL/IConsoleManager.h"
 #include "UTCanvasRenderTarget2D.h"
 #include "StatNames.h"
 #include "Core.h"
@@ -20,6 +24,12 @@
 
 const FName NAME_ShockPrimaryShots(TEXT("ShockPrimaryShots"));
 const FName NAME_ShockPrimaryHits(TEXT("ShockPrimaryHits"));
+
+static TAutoConsoleVariable<int32> CVarInstagibEquipTap(
+	TEXT("ncp.InstagibEquipTap"), 1,
+	TEXT("Retain one real Instagib fire press during weapon raise, even if released. ")
+	TEXT("Fires at legal readiness using current aim; no cooldown-tap buffering. 0=off."),
+	ECVF_Default);
 
 namespace
 {
@@ -280,7 +290,9 @@ void AUTPlusShockRifle::UpdateScreenTexture(UCanvas* C, int32 Width, int32 Heigh
 
 void AUTPlusShockRifle::Tick(float DeltaTime)
 {
+	RefreshInstagibEquipInput();
 	Super::Tick(DeltaTime);
+	PumpInstagibEquipTap();
 
 	// Weapon actors continue ticking while holstered, so only poll the material for
 	// the current, locally visible first-person weapon. Steady state is pointer/int
@@ -381,6 +393,190 @@ bool AUTPlusShockRifle::HasSharedInstagibFireModes() const
 		&& Primary.ConeDotAngle <= 0.f && Alternate.ConeDotAngle <= 0.f;
 }
 
+bool AUTPlusShockRifle::IsInstagibBeamFireMode(uint8 FireMode) const
+{
+	// Both buttons on the standard Instagib rifle fire the same beam. Keep their
+	// local feedback identical, without treating a themed rifle's core/zoom/custom
+	// alternate mode as an Instagib beam just because of its weapon name.
+	return IsInstagibBeamWeapon()
+		&& (FireMode == 0 || (FireMode == 1 && HasSharedInstagibFireModes()));
+}
+
+bool AUTPlusShockRifle::CanRetainInstagibEquipTap(uint8 FireMode)
+{
+	if (CVarInstagibEquipTap.GetValueOnGameThread() <= 0 || FireMode >= 2
+		|| IsPendingKillPending() || GetWorld() == nullptr
+		|| GetNetMode() == NM_DedicatedServer || UTOwner == nullptr
+		|| UTOwner->IsDead() || UTOwner->IsPendingKillPending()
+		|| !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
+		|| UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon() != nullptr
+		|| UTOwner->IsFiringDisabled() || !HasSharedInstagibFireModes()
+		|| !HasAmmo(FireMode)
+		|| (GetWorld()->DemoNetDriver && GetWorld()->DemoNetDriver->IsPlaying()))
+	{
+		return false;
+	}
+	AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->Controller);
+	if (PC == nullptr || PC->GetPawn() != UTOwner || !PC->IsInState(NAME_Playing)
+		|| PC->IsMoveInputIgnored()
+		|| (bRootWhileFiring && UTOwner->GetCharacterMovement()
+			&& UTOwner->GetCharacterMovement()->MovementMode == MOVE_Falling))
+	{
+		return false;
+	}
+	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
+	return GS == nullptr || !GS->PreventWeaponFire();
+}
+
+void AUTPlusShockRifle::ClearInstagibEquipTap()
+{
+	PendingInstagibEquipTapMode = 255;
+	PendingInstagibEquipTapOwner.Reset();
+	PendingInstagibEquipTapController.Reset();
+}
+
+void AUTPlusShockRifle::StartFire(uint8 FireModeNum)
+{
+	// StartFire also receives synthetic held-input verification and timer retries.
+	// Only an action observed on this same living pawn in this equip can latch.
+	const bool bEquipPress = !bHandlingRetry && ConsumeInstagibEquipPress(FireModeNum);
+	const TWeakObjectPtr<AUTCharacter> PressOwner = UTOwner;
+	const TWeakObjectPtr<AUTPlayerController> PressController =
+		UTOwner ? Cast<AUTPlayerController>(UTOwner->Controller) : nullptr;
+	const uint32 InputSerial = InstagibEquipInputSerial;
+	const bool bWasProcessingEquipStart = bProcessingInstagibEquipStart;
+	bProcessingInstagibEquipStart = CurrentState == EquippingState;
+	Super::StartFire(FireModeNum);
+	bProcessingInstagibEquipStart = bWasProcessingEquipStart;
+	// Cross-mode handling may internally stop an older equip press. Retain the
+	// new action only after that cleanup, and only if this equip still owns it.
+	if (bEquipPress && InstagibEquipInputSerial == InputSerial
+		&& CanRetainInstagibEquipTap(FireModeNum) && CurrentState == EquippingState
+		&& UTOwner == PressOwner.Get() && UTOwner->Controller == PressController.Get())
+	{
+		PendingInstagibEquipTapMode = FireModeNum;
+		PendingInstagibEquipTapOwner = UTOwner;
+		PendingInstagibEquipTapController = Cast<AUTPlayerController>(UTOwner->Controller);
+	}
+}
+
+void AUTPlusShockRifle::StopFire(uint8 FireModeNum)
+{
+	// Actual releases still clear held bits, retry timers and send the usual Stop.
+	// A game/state-driven stop cancels the separate equip intent as well.
+	if (bHandlingRetry)
+	{
+		ClearInstagibEquipTap();
+		// An external game-driven stop also cancels actions not yet drained by
+		// the controller. Cross-mode cleanup inside StartFire must leave later
+		// same-frame physical actions in that queue available for consumption.
+		if (!bProcessingInstagibEquipStart)
+		{
+			bInstagibEquipPress[0] = bInstagibEquipPress[1] = false;
+			InstagibEquipPressFrame[0] = InstagibEquipPressFrame[1] = 0;
+			InstagibEquipPressOwner.Reset();
+		}
+	}
+	Super::StopFire(FireModeNum);
+}
+
+void AUTPlusShockRifle::GotoState(UUTWeaponState* NewState)
+{
+	const bool bCompletingEquip = CurrentState == EquippingState && NewState == ActiveState;
+	if (NewState != CurrentState && !bCompletingEquip)
+	{
+		ClearInstagibEquipTap();
+		bInstagibEquipPress[0] = bInstagibEquipPress[1] = false;
+		if (NewState == InactiveState || NewState == UnequippingState || NewState == EquippingState)
+		{
+			++InstagibEquipInputSerial;
+		}
+	}
+	// Active::BeginState can synchronously fire an already held button. That
+	// nested transition consumes our intent, so a held press cannot add a shot.
+	Super::GotoState(NewState);
+	if (bCompletingEquip)
+	{
+		PumpInstagibEquipTap();
+	}
+}
+
+void AUTPlusShockRifle::PumpInstagibEquipTap()
+{
+	const uint8 Mode = PendingInstagibEquipTapMode;
+	if (Mode >= 2)
+	{
+		return;
+	}
+	if (!CanRetainInstagibEquipTap(Mode) || PendingInstagibEquipTapOwner.Get() != UTOwner
+		|| PendingInstagibEquipTapController.Get() != UTOwner->Controller
+		|| (CurrentState != EquippingState && CurrentState != ActiveState))
+	{
+		ClearInstagibEquipTap();
+		return;
+	}
+	if (CurrentState == EquippingState)
+	{
+		return;
+	}
+	if (UTOwner->IsPendingFire(0) || UTOwner->IsPendingFire(1))
+	{
+		// Physical holds use the existing cadence and state machine exclusively.
+		ClearInstagibEquipTap();
+		return;
+	}
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (EarliestFireTime > Now || IsFireModeOnCooldown(Mode, Now))
+	{
+		// Equip and cadence clocks can straddle a frame boundary. Retry from Tick
+		// only for this equip-origin intent, without weakening the legal ROF gate.
+		return;
+	}
+	const TWeakObjectPtr<AUTCharacter> ShotOwner = PendingInstagibEquipTapOwner;
+	const TWeakObjectPtr<AUTPlayerController> ShotController = PendingInstagibEquipTapController;
+	ClearInstagibEquipTap();
+	// A reentrant physical action or equip-lifetime change owns its own cleanup.
+	const uint32 InputSerial = InstagibEquipInputSerial;
+	const bool bWasHandlingRetry = bHandlingRetry;
+	bHandlingRetry = true;
+	Super::StartFire(Mode);
+	if (InstagibEquipInputSerial == InputSerial && !IsPendingKillPending()
+		&& ShotOwner.IsValid() && ShotController.IsValid()
+		&& UTOwner == ShotOwner.Get() && UTOwner->Controller == ShotController.Get()
+		&& !UTOwner->IsDead() && !UTOwner->IsPendingKillPending()
+		&& UTOwner->GetWeapon() == this && UTOwner->GetPendingWeapon() == nullptr
+		&& FiringState.IsValidIndex(Mode) && CurrentState == FiringState[Mode])
+	{
+		StopFireInternal(Mode);
+	}
+	bHandlingRetry = bWasHandlingRetry;
+}
+
+void AUTPlusShockRifle::BringUp(float OverflowTime)
+{
+	StopInstagibEquipInput();
+	Super::BringUp(OverflowTime);
+	RefreshInstagibEquipInput();
+}
+
+void AUTPlusShockRifle::DetachFromOwner_Implementation()
+{
+	StopInstagibEquipInput();
+	Super::DetachFromOwner_Implementation();
+}
+
+void AUTPlusShockRifle::Removed()
+{
+	StopInstagibEquipInput();
+	Super::Removed();
+}
+
+void AUTPlusShockRifle::Destroyed()
+{
+	StopInstagibEquipInput();
+	Super::Destroyed();
+}
+
 bool AUTPlusShockRifle::ShouldShowOwnInstagibBeam() const
 {
 	if (CachedShowOwnBeam < 0)
@@ -400,9 +596,9 @@ bool AUTPlusShockRifle::ShouldShowOwnInstagibBeam() const
 	return CachedShowOwnBeam != 0;
 }
 
-bool AUTPlusShockRifle::NeedsLegacyInstagibBeamLayer() const
+bool AUTPlusShockRifle::NeedsLegacyInstagibBeamLayer(uint8 FireMode) const
 {
-	if (!IsInstagibBeamWeapon() || CurrentFireMode != 0 || UTOwner == nullptr
+	if (!IsInstagibBeamFireMode(FireMode) || UTOwner == nullptr
 		|| !UTOwner->IsLocallyControlled() || !ShouldPlay1PVisuals())
 	{
 		return false;
@@ -416,7 +612,7 @@ bool AUTPlusShockRifle::NeedsLegacyInstagibBeamLayer() const
 
 void AUTPlusShockRifle::PlayPredictedImpactEffects(FVector ImpactLoc)
 {
-	if (IsInstagibBeamWeapon() && CurrentFireMode == 0 && UTOwner != nullptr
+	if (IsInstagibBeamFireMode(CurrentFireMode) && UTOwner != nullptr
 		&& UTOwner->IsLocallyControlled())
 	{
 		// A hitscan beam is immediate feedback. Damage still waits for the server's
@@ -480,7 +676,7 @@ void AUTPlusShockRifle::SpawnLegacyInstagibBeamLayer(const FVector& TargetLoc, u
 void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLoc, uint8 FireMode,
 	const FVector& SpawnLocation, const FRotator& SpawnRotation)
 {
-	const bool bInstagibBeam = IsInstagibBeamWeapon() && FireMode == 0;
+	const bool bInstagibBeam = IsInstagibBeamFireMode(FireMode);
 	const bool bShowOwnBeam = !bInstagibBeam || ShouldShowOwnInstagibBeam();
 
 	if (bShowOwnBeam || !FireEffect.IsValidIndex(FireMode) || FireEffect[FireMode] == nullptr)
@@ -492,7 +688,7 @@ void AUTPlusShockRifle::PlayImpactEffects_Implementation(const FVector& TargetLo
 		// the normal thick iCTF beam. Recreate only that second beam layer now, on the
 		// same frame as the prediction, instead of waiting for network replication.
 		// Do not replay the impact effect, sound, muzzle flash, or any gameplay logic.
-		if (bInstagibBeam && bShowOwnBeam && NeedsLegacyInstagibBeamLayer()
+		if (bInstagibBeam && bShowOwnBeam && NeedsLegacyInstagibBeamLayer(FireMode)
 			&& FireEffectCount == 0)
 		{
 			SpawnLegacyInstagibBeamLayer(TargetLoc, FireMode, SpawnLocation, SpawnRotation);

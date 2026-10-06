@@ -274,3 +274,63 @@ python -B -m unittest tools.tests.test_instagib_shared_hold tools.tests.test_sto
 For another unexplained instance, a video timestamp plus the existing client
 trace and server `ncp.FireProvenance 1` would separate a pre-shot equip/cooldown
 case from a predicted shot rejected or lost at the death boundary.
+
+## 329 follow-up: identical Instagib beam feedback (2026-10-06)
+
+The primary-only cosmetic guards left the standard rifle's identical alternate
+beam on a different path. When the stock projectile sleep time was positive,
+alternate fire could delay its local beam; it also ignored Show Own Beam and
+did not receive the existing cosmetic thickness layer.
+
+`IsInstagibBeamFireMode` now shares those three decisions. Primary keeps its
+existing behavior; alternate qualifies only when `HasSharedInstagibFireModes`
+verifies both modes are identical plain transactional hitscan beams. Normal
+Shock and custom alternate modes retain their existing effects. The thickness
+check uses the effect's fire mode rather than the weapon's mutable current mode.
+
+This changes local cosmetics, not shot admission, cadence, damage, hitboxes,
+rewind or RPCs. The native beam regression exercises the production decision
+and effect-dispatch methods against engine adapters. Rendered particle lifetime,
+short-click appearance, hidden-weapon origins and actual owner replication still
+need a matching-build multiplayer check using both fire buttons. In particular,
+an effect callback or an allocated particle component alone is not evidence that
+the beam reached the screen.
+
+## 329 follow-up: one Instagib tap during weapon raise (2026-10-06)
+
+`ncp.InstagibEquipTap` defaults to `1`. A real primary or alternate press received
+while the current, living player's identical-mode Instagib rifle is equipping
+retains one shot even if released before the raise completes. Several taps
+coalesce into one intent. In ordinary one-weapon Instagib this applies to spawn
+and respawn weapon raise, not the one-second refire cycle.
+
+Non-consuming observers of the existing controller's fire actions provide
+same-frame owner-bound input tokens. A held-input verification, timer retry,
+dead/unpossessed respawn click, or deferred input crossing possession cannot
+create the intent by itself. The normal release still clears physical held fire.
+Existing diagnostic observers and the equip observers remove only their exact
+delegate handles, so toggling the trace cannot remove gameplay observers.
+
+On equip completion, ordinary held fire takes precedence. A released intent
+dispatches once through the normal local StartFire/transactional path when both
+equip and cadence gates permit, followed by a guarded internal stop. A residual
+cadence-clock boundary waits for a weapon tick rather than firing early. The shot
+uses current aim, origin and time at execution; no click-time rewind is added.
+
+The intent is discarded on a new equip, switch/state interruption, internal stop,
+removal/detach/destruction, changed owner/controller, or blocked gameplay. Normal
+Shock/core, custom alternate modes, cooldown taps and the server's accepted-shot
+policy are unchanged. `ncp.InstagibEquipTap 0` disables retention. No new RPC or
+custom PlayerController is required; the new native build must still be rebuilt.
+
+Validation includes native extracted-method tests for eligible taps in both
+modes, held-fire cadence, coalescing, input provenance, lifecycle invalidation,
+local client/standalone/listen roles, current aim/time and readiness boundaries.
+These adapters do not establish rendered beam visibility or live network timing.
+
+Verification: UnrealTournamentEditor Win64 Development module build passed with
+UE4.15; 57 tests passed across `test_instagib_shared_hold`, `test_instagib_beam`,
+`test_stop_ownership_model` and `test_stop_identity_model`. This includes input
+actions collected before FIFO dispatch and cancellation before token consumption.
+The first build required `-gather` to include the newly added source file in UBT's
+cached source list. Shipping/cooked and live multiplayer checks remain outstanding.

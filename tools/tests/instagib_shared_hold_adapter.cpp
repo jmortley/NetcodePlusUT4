@@ -21,6 +21,7 @@ template<class T> struct TWeakObjectPtr {
     TWeakObjectPtr(T* value) : Value(value) {}
     T* Get() const { return Value; }
     bool IsValid() const { return Value != nullptr; }
+    void Reset() { Value = nullptr; }
     bool operator<(const TWeakObjectPtr& other) const { return std::less<T*>()(Value, other.Value); }
 };
 template<class K, class V> struct TMap {
@@ -38,7 +39,10 @@ namespace NCFireDiagnostics {
 #define UE_LOG(...) ((void)0)
 constexpr float SMALL_NUMBER = 1.e-8f;
 constexpr int ROLE_Authority = 3, NM_DedicatedServer = 1, MOVE_Falling = 3;
+constexpr int NM_Standalone = 0, NM_ListenServer = 2, NM_Client = 3;
+uint64 GFrameCounter = 1;
 const char* NAME_None = "None";
+const char* NAME_Playing = "Playing";
 struct FString : std::string {
     using std::string::string;
     bool Contains(const char* text) const { return find(text) != npos; }
@@ -56,7 +60,7 @@ struct FMath {
     template<class T> static T Max(T a, T b) { return std::max(a, b); }
     template<class T> static T Clamp(T a, T lo, T hi) { return Max(lo, Min(a, hi)); }
 };
-struct FRotator { void Normalize() {} bool ContainsNaN() const { return false; } };
+struct FRotator { float Yaw = 0.f; void Normalize() {} bool ContainsNaN() const { return false; } };
 struct FTimerHandle { int Id = 0; };
 struct FTimerDelegate {
     template<class F> static FTimerDelegate CreateLambda(F f) { FTimerDelegate d; d.Call = f; return d; }
@@ -115,6 +119,17 @@ struct UWorld {
     template<class T> T* GetGameState() { return &GameState; }
 };
 struct AUTWeapon;
+struct AUTCharacter;
+struct UInputComponent {};
+struct AController { virtual ~AController() = default; };
+struct AUTPlayerController : AController {
+    AUTCharacter* Pawn = nullptr;
+    UInputComponent* InputComponent = nullptr;
+    bool Playing = true, IgnoreMove = false;
+    AUTCharacter* GetPawn() const { return Pawn; }
+    bool IsInState(const char*) const { return Playing; }
+    bool IsMoveInputIgnored() const { return IgnoreMove; }
+};
 struct AUTPlayerState { virtual ~AUTPlayerState() = default; void NotIdle() {} };
 struct AUTCharacter {
     bool Local = true, Player = true, Dead = false, PendingKill = false, Disabled = false;
@@ -124,6 +139,8 @@ struct AUTCharacter {
     AUTWeapon* PendingWeapon = nullptr;
     AUTWeapon* PendingAutoSwitchWeapon = nullptr;
     AUTPlayerState* PlayerState = nullptr;
+    AController* Controller = nullptr;
+    FRotator Aim;
     struct Movement { int MovementMode = 0; } Move;
     bool IsLocallyControlled() const { return Local; }
     bool IsPlayerControlled() const { return Player; }
@@ -135,7 +152,8 @@ struct AUTCharacter {
     bool IsPendingFire(uint8 mode) const { return mode < 2 && Pending[mode]; }
     void SetPendingFire(uint8 mode, bool value) { if (mode < 2) Pending[mode] = value; }
     Movement* GetCharacterMovement() { return &Move; }
-    FRotator GetViewRotation() { return {}; }
+    FRotator GetViewRotation() { return Aim; }
+    void NotifyPendingServerFire() {}
     template<class T=AUTPlayerState> T* GetPlayerState() { return static_cast<T*>(PlayerState); }
     float GetFireRateMultiplier() const { return FireRateMultiplier; }
     bool IsInInventory(AUTWeapon*) { return true; }
@@ -149,6 +167,7 @@ struct UUTWeaponState {
     FString GetName() const { return GetClass()->GetName(); }
     const char* GetFName() const { return "State"; }
     AUTWeapon* GetOuterAUTWeapon() const { return Weapon; }
+    AUTCharacter* GetUTOwner() const;
     virtual bool IsFiring() const { return false; }
     virtual void BeginState(const UUTWeaponState*) {}
     virtual void EndState() {}
@@ -159,6 +178,11 @@ struct UUTWeaponState {
 };
 struct UUTWeaponStateActive : UUTWeaponState {
     void BeginState(const UUTWeaponState*) override;
+    bool BeginFiringSequence(uint8, bool) override;
+};
+struct UUTWeaponStateEquipping : UUTWeaponState {
+    int PendingFireSequence = -1;
+    void BringUpFinished();
     bool BeginFiringSequence(uint8, bool) override;
 };
 struct UUTWeaponStateFiring : UUTWeaponState {
@@ -195,7 +219,7 @@ struct AUTWeapon {
     AUTCharacter* UTOwner = nullptr;
     UWorld* TestWorld = nullptr;
     int Role = 2, NetMode = 0, Ammo = 100, MultiPressCount = 0;
-    bool bRootWhileFiring = false, bNetDelayedShot = false;
+    bool bRootWhileFiring = false, bNetDelayedShot = false, PendingKill = false;
     float LastContinuedFiring = 0.f;
     uint8 CurrentFireMode = 0;
     TArray<UUTWeaponStateFiring*> FiringState;
@@ -221,15 +245,18 @@ struct AUTWeapon {
     UClass* GetClass() const { static UClass c{"Shock"}; return &c; }
     bool HasAmmo(uint8 mode) const { return AmmoCost.IsValidIndex(mode) && Ammo >= FMath::Min(1, AmmoCost[mode]); }
     bool HasAnyAmmo() const { return true; }
-    bool IsPendingKillPending() const { return false; }
+    bool IsPendingKillPending() const { return PendingKill; }
     bool PutDown() { GotoState(UnequippingState); return true; }
-    void GotoState(UUTWeaponState* state) {
+    virtual void GotoState(UUTWeaponState* state) {
         UUTWeaponState* previous = CurrentState;
         if (previous) previous->EndState();
         CurrentState = state;
         state->BeginState(previous);
     }
     void GotoActiveState() { GotoState(ActiveState); }
+    // Base bring-up cosmetics and RPC bookkeeping are outside this input test.
+    // Preserve its state transition so the actual subclass lifetime hooks run.
+    virtual void BringUp(float) { GotoState(EquippingState); }
     bool BeginFiringSequence(uint8, bool);
     void EndFiringSequence(uint8);
     float GetRefireTime(uint8);
@@ -254,6 +281,8 @@ struct AUTWeaponFix : AUTWeapon {
     float EarliestFireTime = 0.f, MouseDebounceWindow = 0.03f;
     FTimerHandle RetryFireHandle[2], DeferredActiveStateHandle;
     std::vector<std::pair<float, uint8>> Shots;
+    std::vector<FRotator> ShotAims;
+    std::function<void()> OnShot;
     std::vector<std::pair<uint8, int32>> Stops;
     bool TryPreserveInstagibHeldFire(uint8);
     void StartFire(uint8) override;
@@ -269,20 +298,57 @@ struct AUTWeaponFix : AUTWeapon {
     void QueueResendStopFireFixed(uint8, int32) {}
     void FireShot() override {
         Shots.emplace_back(GetWorld()->GetTimeSeconds(), CurrentFireMode);
+        ShotAims.push_back(UTOwner->GetViewRotation());
         LastFireTime[CurrentFireMode] = GetWorld()->GetTimeSeconds();
         ++ClientFireEventIndex[CurrentFireMode];
+        if (OnShot) OnShot();
     }
 };
 struct AUTPlusShockRifle : AUTWeaponFix {
+    using Super = AUTWeaponFix;
     bool InstagibIdentity = true;
+    uint8 PendingInstagibEquipTapMode = 255;
+    TWeakObjectPtr<AUTCharacter> PendingInstagibEquipTapOwner, InstagibEquipPressOwner;
+    TWeakObjectPtr<AUTPlayerController> PendingInstagibEquipTapController, InstagibEquipInputController;
+    TWeakObjectPtr<UInputComponent> InstagibEquipInputComponent;
+    bool bInstagibEquipPress[2] = {false, false};
+    bool bProcessingInstagibEquipStart = false;
+    uint64 InstagibEquipPressFrame[2] = {0, 0};
+    uint32 InstagibEquipInputSerial = 0;
     bool IsInstagibBeamWeapon() const { return InstagibIdentity; }
     bool HasSharedInstagibFireModes() const;
+    bool CanRetainInstagibEquipTap(uint8);
+    void ClearInstagibEquipTap();
+    void PumpInstagibEquipTap();
+    void NoteInstagibEquipPress(uint8);
+    bool ConsumeInstagibEquipPress(uint8);
+    void StartFire(uint8) override;
+    void StopFire(uint8) override;
+    void GotoState(UUTWeaponState*) override;
+    void BringUp(float) override;
+    // Real binding installation/removal is covered by the provenance suite;
+    // this harness models its lifetime reset but executes Note/Consume above.
+    void StopInstagibEquipInput() {
+        InstagibEquipInputController.Reset(); InstagibEquipInputComponent.Reset();
+        InstagibEquipPressOwner.Reset();
+        for (int mode = 0; mode < 2; ++mode) {
+            bInstagibEquipPress[mode] = false; InstagibEquipPressFrame[mode] = 0;
+        }
+        ++InstagibEquipInputSerial; ClearInstagibEquipTap();
+    }
+    void RefreshInstagibEquipInput() {
+        auto* pc = UTOwner ? dynamic_cast<AUTPlayerController*>(UTOwner->Controller) : nullptr;
+        InstagibEquipInputController = pc;
+        InstagibEquipInputComponent = pc ? pc->InputComponent : nullptr;
+    }
 };
+AUTCharacter* UUTWeaponState::GetUTOwner() const { return Weapon->UTOwner; }
 void UUTWeaponStateFiring::FireShot() { Weapon->FireShot(); }
 void UUTWeaponStateFiring::EndState() { Weapon->GetWorldTimerManager().ClearTimer(RefireCheckHandle); }
 template<class T, class U> T* Cast(U* p) { return dynamic_cast<T*>(p); }
 template<class T> struct CVar { T Value; T GetValueOnGameThread() const { return Value; } };
 CVar<int32> CVarInstagibSharedHold{1};
+CVar<int32> CVarInstagibEquipTap{1};
 CVar<float> CVarMouseDebounceCap{0.01f};
 bool GhostEnabled = false;
 bool GhostFix() { return GhostEnabled; }
@@ -334,13 +400,18 @@ void Near(float actual, float expected, const char* message) { Require(std::abs(
 struct Fixture {
     AUTPlusShockRifle W;
     AUTCharacter Pawn;
+    AUTPlayerController Controller;
+    UInputComponent Input;
     UWorld World;
     UUTWeaponStateActive Active;
-    UUTWeaponState Equip, Unequip, Inactive;
+    UUTWeaponStateEquipping Equip;
+    UUTWeaponState Unequip, Inactive;
     UUTWeaponStateFiring_Transactional Mode[2];
     UClass DamageType{"Instagib"}, CoreType{"ShockBall"};
     Fixture() {
         Pawn.Weapon = &W; W.UTOwner = &Pawn; W.TestWorld = &World;
+        Pawn.Controller = &Controller; Controller.Pawn = &Pawn; Controller.InputComponent = &Input;
+        W.RefreshInstagibEquipInput();
         W.ActiveState = &Active; W.EquippingState = &Equip;
         W.UnequippingState = &Unequip; W.InactiveState = &Inactive;
         W.CurrentState = &Active; W.FiringState = {&Mode[0], &Mode[1]};
@@ -348,8 +419,11 @@ struct Fixture {
                                 &Inactive, &Mode[0], &Mode[1]}) s->Weapon = &W;
         W.InstantHitInfo[0].DamageType = &DamageType; W.InstantHitInfo[1].DamageType = &DamageType;
     }
-    void At(float offset) { World.Timers.Advance(10.f + offset); }
+    void At(float offset) { ++GFrameCounter; World.Timers.Advance(10.f + offset); W.PumpInstagibEquipTap(); }
     void Down(uint8 mode) { W.StartFire(mode); }
+    void PhysicalDown(uint8 mode) { W.NoteInstagibEquipPress(mode); Down(mode); }
+    void BeginEquip() { W.BringUp(0.f); }
+    void FinishEquip() { Equip.BringUpFinished(); }
     void Up(uint8 mode) { W.StopFire(mode); }
     void Count(size_t count) const { Require(W.Shots.size() == count, "unexpected shot count"); }
     void Cadence(float interval = 1.f) const {
@@ -572,9 +646,235 @@ void ReleaseOwnership() {
     old();
     Require(other.Pending[0] && f.W.CurrentState == &f.Mode[0], "old owner callback altered replacement owner");
 }
+void EquipTap() {
+    for (int netMode : {NM_Client, NM_Standalone, NM_ListenServer}) {
+        for (uint8 mode : {uint8(0), uint8(1)}) {
+            Fixture f; f.W.NetMode = netMode; f.W.Role = netMode == NM_Client ? 2 : ROLE_Authority;
+            f.BeginEquip(); f.PhysicalDown(mode); f.At(.05f); f.Up(mode);
+            Require(!f.Pawn.Pending[mode], "physical release retained a held bit");
+            Require(f.W.PendingInstagibEquipTapMode == mode, "eligible equip action was not retained");
+            f.At(.399f); f.Count(0); f.At(.4f); f.FinishEquip(); f.Count(1);
+            Near(f.W.Shots[0].first, 10.4f, "equip tap fired before legal completion");
+            Require(f.W.Shots[0].second == mode, "equip tap changed fire mode");
+            Require(!f.Pawn.Pending[0] && !f.Pawn.Pending[1], "retained tap became a hold");
+            f.At(4.f); f.Count(1);
+        }
+    }
+}
+void EquipHold() {
+    for (uint8 mode : {uint8(0), uint8(1)}) for (bool overlap : {false, true}) {
+        Fixture f; f.BeginEquip(); f.PhysicalDown(mode);
+        if (overlap) { f.At(.1f); f.PhysicalDown(mode ^ 1); }
+        f.At(.4f); f.FinishEquip(); f.Count(1);
+        Require(f.W.PendingInstagibEquipTapMode == 255, "normal held firing left equip intent");
+        f.At(2.401f); f.Count(3); f.Cadence();
+        f.Up(0); f.Up(1); f.At(4.f); f.Count(3);
+    }
+}
+void EquipProvenance() {
+    for (uint8 mode : {uint8(0), uint8(1)}) {
+        // A prior frame already established a held mode. Cross-mode cleanup
+        // for the first queued action must not invalidate a later real action.
+        for (bool overlapping : {false, true}) {
+            Fixture f; f.BeginEquip(); f.PhysicalDown(mode); f.At(.02f);
+            f.W.NoteInstagibEquipPress(mode ^ 1); f.W.NoteInstagibEquipPress(mode);
+            f.Down(mode ^ 1);
+            if (overlapping) { f.Down(mode); f.Up(mode ^ 1); f.Up(mode); }
+            else { f.Up(mode ^ 1); f.Down(mode); f.Up(mode); }
+            Require(f.W.PendingInstagibEquipTapMode == mode,
+                    "cross-mode equip cleanup erased a later queued physical action");
+            f.At(.4f); f.FinishEquip(); f.Count(1);
+            Require(f.W.Shots[0].second == mode, "queued return to held mode was not retained");
+            f.At(3.f); f.Count(1);
+        }
+        // UE collects action observers before draining the controller's queued
+        // fire inputs. Stamp all actions first, then replay their FIFO dispatch.
+        for (bool overlapping : {false, true}) for (bool sameMode : {false, true}) {
+            Fixture f; f.BeginEquip();
+            const uint8 secondMode = sameMode ? mode : uint8(mode ^ 1);
+            f.W.NoteInstagibEquipPress(mode);
+            f.W.NoteInstagibEquipPress(secondMode);
+            f.Down(mode);
+            if (overlapping) { f.Down(secondMode); f.Up(mode); f.Up(secondMode); }
+            else { f.Up(mode); f.Down(secondMode); f.Up(secondMode); }
+            Require(f.W.PendingInstagibEquipTapMode == secondMode,
+                    "queued same-frame actions lost the latest equip intent");
+            f.At(.4f); f.FinishEquip(); f.Count(1);
+            Require(f.W.Shots[0].second == secondMode, "queued action order changed retained mode");
+            f.At(3.f); f.Count(1);
+        }
+        for (uint8 releasedFirst : {uint8(0), uint8(1)}) {
+            Fixture f; f.BeginEquip(); f.PhysicalDown(mode);
+            f.At(.03f); f.PhysicalDown(mode ^ 1);
+            f.At(.06f); f.Up(releasedFirst); f.At(.08f); f.Up(releasedFirst ^ 1);
+            f.At(.4f); f.FinishEquip(); f.Count(1);
+            Require(f.W.Shots[0].second == uint8(mode ^ 1), "overlapping equip taps lost latest action");
+            f.At(3.f); f.Count(1);
+        }
+        for (bool switchMode : {false, true}) {
+            Fixture f; f.BeginEquip(); f.PhysicalDown(mode); f.At(.05f); f.Up(mode);
+            const uint8 lastMode = switchMode ? uint8(mode ^ 1) : mode;
+            f.At(.12f); f.PhysicalDown(lastMode); f.At(.16f); f.Up(lastMode);
+            f.At(.4f); f.FinishEquip(); f.Count(1);
+            Require(f.W.Shots[0].second == lastMode, "equip taps did not coalesce into latest mode");
+            f.At(3.f); f.Count(1);
+        }
+        for (int synthetic = 0; synthetic < 4; ++synthetic) {
+            Fixture f; f.BeginEquip();
+            if (synthetic == 1) { f.Down(mode); f.Up(mode); }
+            if (synthetic == 2) { f.W.NoteInstagibEquipPress(mode); ++GFrameCounter; f.Down(mode); f.Up(mode); }
+            if (synthetic == 3) {
+                f.W.NoteInstagibEquipPress(mode);
+                Require(f.W.ConsumeInstagibEquipPress(mode), "valid token was rejected");
+                Require(!f.W.ConsumeInstagibEquipPress(mode), "token was reusable");
+                f.Down(mode); f.Up(mode);
+            }
+            f.At(.4f); f.FinishEquip(); f.At(2.f); f.Count(0);
+        }
+        // A respawn/repossess cannot inherit an old pawn's same-frame action.
+        Fixture f; f.BeginEquip(); f.W.NoteInstagibEquipPress(mode);
+        AUTCharacter replacement; replacement.Controller = &f.Controller; replacement.Weapon = &f.W;
+        f.Controller.Pawn = &replacement; f.W.UTOwner = &replacement;
+        f.Down(mode); f.Up(mode); f.At(.4f); f.FinishEquip(); f.At(2.f); f.Count(0);
+    }
+}
+void EquipGuards() {
+    for (uint8 mode : {uint8(0), uint8(1)}) for (int change = 0; change < 20; ++change) {
+        Fixture f; UDemoNetDriver demo; AUTPlayerController other; UInputComponent otherInput;
+        f.BeginEquip();
+        switch (change) {
+        case 0: CVarInstagibEquipTap.Value = 0; break;
+        case 1: f.Pawn.Dead = true; break;
+        case 2: f.Pawn.PendingKill = true; break;
+        case 3: f.W.PendingKill = true; break;
+        case 4: f.Pawn.Local = false; break;
+        case 5: f.Pawn.Player = false; break;
+        case 6: f.Pawn.Weapon = nullptr; break;
+        case 7: f.Pawn.PendingWeapon = &f.W; break;
+        case 8: f.Pawn.Disabled = true; break;
+        case 9: f.World.GameState.Prevent = true; break;
+        case 10: f.W.Ammo = 0; f.W.AmmoCost = {1, 1}; break;
+        case 11: f.W.InstagibIdentity = false; break;
+        case 12: demo.Playing = true; f.World.DemoNetDriver = &demo; break;
+        case 13: f.Controller.Playing = false; break;
+        case 14: f.Controller.IgnoreMove = true; break;
+        case 15: f.W.bRootWhileFiring = true; f.Pawn.Move.MovementMode = MOVE_Falling; break;
+        case 16: f.Controller.Pawn = nullptr; break;
+        case 17: f.Pawn.Controller = &other; other.Pawn = &f.Pawn; other.InputComponent = &otherInput; break;
+        case 18: f.Controller.InputComponent = &otherInput; break;
+        case 19: f.W.NetMode = NM_DedicatedServer; break;
+        }
+        f.W.NoteInstagibEquipPress(mode);
+        Require(!f.W.ConsumeInstagibEquipPress(mode), "ineligible state accepted equip action provenance");
+        Require(f.W.PendingInstagibEquipTapMode == 255, "ineligible action queued a shot");
+        CVarInstagibEquipTap.Value = 1;
+    }
+}
+void EquipLifecycle() {
+    for (uint8 mode : {uint8(0), uint8(1)}) for (int change = 0; change < 11; ++change) {
+        Fixture f; AUTPlayerController other; AUTCharacter replacement;
+        f.BeginEquip(); f.PhysicalDown(mode); f.Up(mode);
+        switch (change) {
+        case 0: f.W.StopFireInternal(mode); break;
+        case 1: f.BeginEquip(); break; // Re-bring-up while the same state object is current.
+        case 2: f.W.GotoState(&f.Unequip); f.W.GotoState(&f.Equip); break;
+        case 3: f.W.GotoState(&f.Inactive); f.W.GotoState(&f.Equip); break;
+        case 4: f.Pawn.Dead = true; f.W.PumpInstagibEquipTap(); f.Pawn.Dead = false; break;
+        case 5: f.Pawn.PendingWeapon = &f.W; f.W.PumpInstagibEquipTap(); f.Pawn.PendingWeapon = nullptr; break;
+        case 6: f.World.GameState.Prevent = true; f.W.PumpInstagibEquipTap(); f.World.GameState.Prevent = false; break;
+        case 7: f.W.Ammo = 0; f.W.AmmoCost = {1,1}; f.W.PumpInstagibEquipTap(); f.W.Ammo = 100; break;
+        case 8:
+            other.Pawn = &f.Pawn; other.InputComponent = &f.Input; f.Pawn.Controller = &other;
+            f.W.PumpInstagibEquipTap(); f.Pawn.Controller = &f.Controller; break;
+        case 9:
+            replacement.Controller = &f.Controller; replacement.Weapon = &f.W;
+            f.Controller.Pawn = &replacement; f.W.UTOwner = &replacement;
+            f.W.PumpInstagibEquipTap(); f.W.UTOwner = &f.Pawn; f.Controller.Pawn = &f.Pawn; break;
+        case 10: f.Pawn.Disabled = true; f.W.PumpInstagibEquipTap(); f.Pawn.Disabled = false; break;
+        }
+        Require(f.W.PendingInstagibEquipTapMode == 255, "invalidated lifecycle retained equip intent");
+        f.At(.4f); f.FinishEquip(); f.At(3.f); f.Count(0);
+    }
+    // A new bring-up invalidates even an action stamped in this same frame.
+    Fixture f; f.BeginEquip(); f.W.NoteInstagibEquipPress(0); f.BeginEquip();
+    f.Down(0); f.Up(0); f.At(.4f); f.FinishEquip(); f.At(2.f); f.Count(0);
+}
+void EquipDispatch() {
+    for (uint8 mode : {uint8(0), uint8(1)}) for (bool earliest : {false, true}) {
+        Fixture f; f.BeginEquip(); f.Pawn.Aim.Yaw = 20.f;
+        f.PhysicalDown(mode); f.At(.05f); f.Up(mode);
+        if (earliest) f.W.EarliestFireTime = 10.40002f;
+        else f.W.LastFireTime[mode] = 9.40002f;
+        f.At(.4f); f.FinishEquip(); f.Count(0);
+        Require(f.W.PendingInstagibEquipTapMode == mode, "tiny positive readiness residue discarded intent");
+        f.Pawn.Aim.Yaw = 75.f; f.At(.401f); f.Count(1);
+        Near(f.W.Shots[0].first, 10.401f, "retained shot reused input time");
+        Near(f.W.ShotAims[0].Yaw, 75.f, "retained shot reused input aim");
+        Require(!f.Pawn.Pending[0] && !f.Pawn.Pending[1], "dispatch failed one-shot cleanup");
+        f.At(3.f); f.Count(1);
+    }
+    // A later ordinary cooldown tap still cancels when released.
+    Fixture f; f.BeginEquip(); f.PhysicalDown(0); f.Up(0); f.At(.4f); f.FinishEquip();
+    f.At(.6f); f.PhysicalDown(0); f.At(.7f); f.Up(0); f.At(3.f); f.Count(1);
+}
+void EquipFreshInput() {
+    Fixture f; f.BeginEquip(); f.PhysicalDown(0); f.Up(0);
+    f.W.EarliestFireTime = 10.8f; f.At(.4f); f.FinishEquip(); f.Count(0);
+    f.At(.5f); f.PhysicalDown(1); f.At(.6f); f.Up(1); f.At(2.f); f.Count(0);
+    Require(f.W.PendingInstagibEquipTapMode == 255, "fresh active action left stale equip intent");
+}
+void EquipReentrantCleanup() {
+    for (int change = 0; change < 4; ++change) {
+        Fixture f; AUTCharacter replacement; AUTPlayerController other;
+        f.BeginEquip(); f.PhysicalDown(0); f.Up(0);
+        const auto priorStops = f.W.Stops.size();
+        bool changed = false;
+        f.W.OnShot = [&]() {
+            if (changed) return;
+            changed = true;
+            if (change == 0) {
+                // The actual action observer changes the serial before deferred
+                // controller processing. A new held action owns its own release.
+                f.PhysicalDown(0);
+            } else if (change == 1) {
+                replacement.Controller = &f.Controller; replacement.Weapon = &f.W;
+                replacement.Pending[0] = true;
+                f.Controller.Pawn = &replacement; f.W.UTOwner = &replacement;
+            } else if (change == 2) {
+                other.Pawn = &f.Pawn; other.InputComponent = &f.Input;
+                f.Pawn.Controller = &other;
+            } else {
+                f.W.BringUp(0.f); f.Pawn.Pending[0] = true;
+            }
+        };
+        f.At(.4f); f.FinishEquip(); f.Count(1);
+        Require(changed, "reentrant shot hook did not run");
+        Require(f.W.Stops.size() == priorStops, "old dispatch sent a stop for a replacement input or lifecycle");
+        Require(f.W.UTOwner->Pending[0], "old dispatch cleared a replacement hold");
+        Require(!f.W.bHandlingRetry, "dispatch failed to restore retry guard");
+    }
+}
+void EquipTokenStop() {
+    for (uint8 mode : {uint8(0), uint8(1)}) {
+        Fixture f; f.BeginEquip(); f.W.NoteInstagibEquipPress(mode);
+        f.W.StopFireInternal(mode); f.Down(mode); f.Up(mode);
+        Require(f.W.PendingInstagibEquipTapMode == 255,
+                "internal stop did not invalidate an observed action awaiting dispatch");
+        f.At(.4f); f.FinishEquip(); f.At(2.f); f.Count(0);
+    }
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "one case required"); const std::string name(argv[1]);
-    if (name == "stale_release") StaleRelease();
+    if (name == "equip_tap") EquipTap();
+    else if (name == "equip_hold") EquipHold();
+    else if (name == "equip_provenance") EquipProvenance();
+    else if (name == "equip_guards") EquipGuards();
+    else if (name == "equip_lifecycle") EquipLifecycle();
+    else if (name == "equip_dispatch") EquipDispatch();
+    else if (name == "equip_fresh_input") EquipFreshInput();
+    else if (name == "equip_reentrant") EquipReentrantCleanup();
+    else if (name == "equip_token_stop") EquipTokenStop();
+    else if (name == "stale_release") StaleRelease();
     else if (name == "ready_debounce") ReadyDebounce();
     else if (name == "release_ownership") ReleaseOwnership();
     else if (name == "classifier") Classifier();

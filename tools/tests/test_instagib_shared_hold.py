@@ -1,8 +1,9 @@
 """Exercise the actual firing input methods with a small native engine adapter.
 
-Compiles StartFire, StopFire, the new Instagib guard/classifier, and the existing
-deferred/active/refire methods. The adapter supplies deterministic timers and a
-shot recorder; it does not simulate replication, hit traces, or engine frames.
+Compiles StartFire, StopFire, Instagib equip retention and action provenance,
+and the existing deferred/active/equip/refire methods. The adapter supplies
+deterministic timers, explicit frame boundaries, and a shot recorder. It does
+not simulate replication, hit traces, or the engine input binding dispatcher.
 Run the documented client/server playtest after the normal Unreal build too.
 """
 
@@ -34,6 +35,17 @@ class InstagibSharedHoldTests(unittest.TestCase):
         for path, signatures in (
             (PLUGIN / "Source/Private/UTPlusShockRifle.cpp", (
                 "bool AUTPlusShockRifle::HasSharedInstagibFireModes",
+                "bool AUTPlusShockRifle::CanRetainInstagibEquipTap",
+                "void AUTPlusShockRifle::ClearInstagibEquipTap",
+                "void AUTPlusShockRifle::PumpInstagibEquipTap",
+                "void AUTPlusShockRifle::StartFire",
+                "void AUTPlusShockRifle::StopFire",
+                "void AUTPlusShockRifle::GotoState",
+                "void AUTPlusShockRifle::BringUp",
+            )),
+            (PLUGIN / "Source/Private/NCInstagibEquipInput.cpp", (
+                "void AUTPlusShockRifle::NoteInstagibEquipPress",
+                "bool AUTPlusShockRifle::ConsumeInstagibEquipPress",
             )),
             (PLUGIN / "Source/Private/UTWeaponFix.cpp", (
                 "bool AUTWeaponFix::TryPreserveInstagibHeldFire",
@@ -52,6 +64,10 @@ class InstagibSharedHoldTests(unittest.TestCase):
             (STOCK / "UTWeaponStateActive.cpp", (
                 "void UUTWeaponStateActive::BeginState",
                 "bool UUTWeaponStateActive::BeginFiringSequence",
+            )),
+            (STOCK / "UTWeaponStateEquipping.cpp", (
+                "void UUTWeaponStateEquipping::BringUpFinished",
+                "bool UUTWeaponStateEquipping::BeginFiringSequence",
             )),
             (PLUGIN / "Source/Private/UTWeaponStateFiring_Transactional.cpp", (
                 "void UUTWeaponStateFiring_Transactional::BeginState",
@@ -130,6 +146,33 @@ class InstagibSharedHoldTests(unittest.TestCase):
 
     def test_release_callback_cannot_affect_replacement_owner(self):
         self.run_case("release_ownership")
+
+    def test_physical_equip_tap_fires_once_when_ready_in_each_local_net_mode(self):
+        self.run_case("equip_tap")
+
+    def test_equip_hold_keeps_normal_cadence_without_extra_shot(self):
+        self.run_case("equip_hold")
+
+    def test_multiple_equip_actions_coalesce_and_unprovenanced_calls_do_not_queue(self):
+        self.run_case("equip_provenance")
+
+    def test_ineligible_pawn_weapon_or_gameplay_state_cannot_retain_tap(self):
+        self.run_case("equip_guards")
+
+    def test_equip_queue_does_not_survive_lifecycle_or_internal_stop(self):
+        self.run_case("equip_lifecycle")
+
+    def test_retained_shot_uses_dispatch_aim_and_time_and_waits_for_legal_cadence(self):
+        self.run_case("equip_dispatch")
+
+    def test_fresh_active_input_supersedes_waiting_equip_intent(self):
+        self.run_case("equip_fresh_input")
+
+    def test_retained_dispatch_cleanup_cannot_cancel_reentrant_action_or_owner(self):
+        self.run_case("equip_reentrant")
+
+    def test_internal_stop_cancels_observed_equip_action_before_dispatch(self):
+        self.run_case("equip_token_stop")
 
 
 if __name__ == "__main__":
