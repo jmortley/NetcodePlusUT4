@@ -1,5 +1,6 @@
 #include "NCAimTrainerPlayerController.h"
 #include "NCAimTrainerGame.h"
+#include "NCAimTrainerCharacter.h"
 #include "UTPlayerCameraManager.h"
 #include "UTLocalPlayer.h"
 #include "Net/UnrealNetwork.h"
@@ -14,27 +15,57 @@ ANCAimTrainerPlayerController::ANCAimTrainerPlayerController(const FObjectInitia
 	OnlineStatus = TEXT("Waiting for UT4Stats leaderboard...");
 }
 
-void ANCAimTrainerPlayerController::BeginPlay()
-{
-	Super::BeginPlay();
-	if (IsLocalController() && !IsMoveInputIgnored()) { SetIgnoreMoveInput(true); }
-}
-
 void ANCAimTrainerPlayerController::ClientRestart_Implementation(APawn* NewPawn)
 {
 	Super::ClientRestart_Implementation(NewPawn);
-	// The stock restart resets ignore-input flags after this controller's
-	// BeginPlay, and PawnClientRestart restores Walking. Mirror the authority's
-	// fixed lane locally without disabling movement replication or mouse-look.
-	if (IsLocalController())
+	// PawnClientRestart restores Walking. Mirror the authority's selected lane
+	// locally while leaving the movement component ticking.
+	// Do not use SetIgnoreMoveInput: stock ApplyDeferredFireInputs also treats
+	// that flag as a firing lock, including for the standalone local player.
+	ApplyTrainerMovementMode();
+}
+
+void ANCAimTrainerPlayerController::ApplyTrainerMovementMode()
+{
+	if (!IsLocalController()) { return; }
+	AUTCharacter* TraineePawn = Cast<AUTCharacter>(GetPawn());
+	UNCAimTrainerMovement* Movement = TraineePawn ? Cast<UNCAimTrainerMovement>(TraineePawn->GetCharacterMovement()) : nullptr;
+	if (!Movement) { return; }
+	bIsHoldingFloorSlide = false;
+	// bIsCrouched only replicates to simulated proxies, so the owning client
+	// must restore its capsule too when the server starts another fixed preset.
+	Movement->ResetTrainerMovement(TrainerProgress.bMovementPractice);
+}
+
+void ANCAimTrainerPlayerController::MoveForward(float /*Value*/)
+{
+	// Keep target distances fixed, including when the player turns their view.
+	MovementForwardAxis = 0.f;
+}
+
+void ANCAimTrainerPlayerController::MoveRight(float Value)
+{
+	MovementStrafeAxis = Value;
+	AUTCharacter* TraineePawn = Cast<AUTCharacter>(GetPawn());
+	if (TrainerProgress.bMovementPractice && TraineePawn && Value != 0.f)
 	{
-		if (!IsMoveInputIgnored()) { SetIgnoreMoveInput(true); }
-		AUTCharacter* Character = Cast<AUTCharacter>(GetPawn());
-		if (Character && Character->GetCharacterMovement())
-		{
-			Character->GetCharacterMovement()->DisableMovement();
-		}
+		TraineePawn->AddMovementInput(FVector(0.f, 1.f, 0.f), Value);
 	}
+}
+
+void ANCAimTrainerPlayerController::Jump()
+{
+	if (TrainerProgress.bMovementPractice) { Super::Jump(); }
+}
+
+void ANCAimTrainerPlayerController::Crouch()
+{
+	if (TrainerProgress.bMovementPractice) { Super::Crouch(); }
+}
+
+void ANCAimTrainerPlayerController::ToggleCrouch()
+{
+	if (TrainerProgress.bMovementPractice) { Super::ToggleCrouch(); }
 }
 
 void ANCAimTrainerPlayerController::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -70,6 +101,11 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 		}
 		if (IsTrainerMenuVisible())
 		{
+			if (Key == EKeys::M)
+			{
+				if (EventType == IE_Pressed) { ToggleTrainerMovementPractice(); }
+				return true;
+			}
 			int32 Scenario = INDEX_NONE;
 			if (Key == EKeys::One || Key == EKeys::NumPadOne) { Scenario = 0; }
 			if (Key == EKeys::Two || Key == EKeys::NumPadTwo) { Scenario = 1; }
@@ -114,10 +150,15 @@ void ANCAimTrainerPlayerController::ReturnToTrainerMenu()
 	ServerTrainerAbort();
 }
 
+void ANCAimTrainerPlayerController::ToggleTrainerMovementPractice()
+{
+	if (IsTrainerMenuVisible()) { ServerTrainerSetMovementPractice(!TrainerProgress.bMovementPractice); }
+}
+
 bool ANCAimTrainerPlayerController::AdmitTrainerRequest(uint8 Action)
 {
 	const double Now = FPlatformTime::Seconds();
-	if (Action >= 3 || Now < NextTrainerRequestTime[Action]) { return false; }
+	if (Action >= 4 || Now < NextTrainerRequestTime[Action]) { return false; }
 	NextTrainerRequestTime[Action] = Now + 0.15;
 	return true;
 }
@@ -143,6 +184,13 @@ void ANCAimTrainerPlayerController::ServerTrainerAbort_Implementation()
 	if (Game && AdmitTrainerRequest(2)) { Game->AbortTraining(this); }
 }
 
+bool ANCAimTrainerPlayerController::ServerTrainerSetMovementPractice_Validate(bool bEnabled) { return true; }
+void ANCAimTrainerPlayerController::ServerTrainerSetMovementPractice_Implementation(bool bEnabled)
+{
+	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
+	if (Game && AdmitTrainerRequest(3)) { Game->SetMovementPractice(this, bEnabled); }
+}
+
 void ANCAimTrainerPlayerController::SetTrainerProgress(const FNCAimTrainerProgress& Progress)
 {
 	if (Role != ROLE_Authority) { return; }
@@ -154,6 +202,13 @@ void ANCAimTrainerPlayerController::SetTrainerProgress(const FNCAimTrainerProgre
 
 void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 {
+	if (bLastPresentedMovementPractice != TrainerProgress.bMovementPractice
+		|| (TrainerProgress.Phase == 1 && LastPresentedPhase != 1))
+	{
+		// A regular score update must never turn an ongoing jump back into Walking.
+		ApplyTrainerMovementMode();
+		bLastPresentedMovementPractice = TrainerProgress.bMovementPractice;
+	}
 #if !UE_SERVER
 	// UT owns input-mode and cursor transitions; do not mutate profile/bindings.
 	UpdateInputMode();

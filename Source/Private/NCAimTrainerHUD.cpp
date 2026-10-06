@@ -116,6 +116,10 @@ void ANCAimTrainerHUD::DrawSessionHeader(const FNCAimTrainerProgress& Progress)
 {
 	Label(TEXT("NETCODE+ / AIM TRAINER"), 42.f, 25.f, 18.f, TrainerAccent);
 	Label(ScenarioName(Progress.Scenario), 42.f, 51.f, 14.f, TrainerMuted);
+	if (Progress.bMovementPractice)
+	{
+		Label(TEXT("MOVEMENT PRACTICE / UNRANKED"), 42.f, 73.f, 13.f, TrainerAccent);
+	}
 	const float ColumnX[] = { 626.f, 830.f, 1034.f };
 	const TCHAR* Labels[] = { TEXT("POINTS"), TEXT("TIME"), TEXT("ACCURACY") };
 	const int32 Seconds = FMath::Max(0, FMath::CeilToInt(Progress.RemainingSeconds));
@@ -135,7 +139,9 @@ void ANCAimTrainerHUD::DrawSessionHeader(const FNCAimTrainerProgress& Progress)
 void ANCAimTrainerHUD::DrawLeaderboard(ANCAimTrainerPlayerController* PC, float Y)
 {
 	Label(TEXT("UT4STATS / GLOBAL TOP 10"), 120.f, Y, 15.f, TrainerAccent);
-	Label(TEXT("BEST RUN PER PLAYER / THIS SCENARIO"), 790.f, Y, 12.f, TrainerMuted, 370.f);
+	Label(PC->GetTrainerProgress().bMovementPractice
+		? TEXT("FIXED-POSITION SCORES / PRACTICE IS UNRANKED")
+		: TEXT("BEST RUN PER PLAYER / THIS SCENARIO"), 750.f, Y, 12.f, TrainerMuted, 410.f);
 	const TArray<FNCAimTrainerLeaderboardRow>& Rows = PC->GetTrainerLeaderboard();
 	if (Rows.Num() == 0)
 	{
@@ -170,8 +176,10 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 		Label(Line1[Mode], X + 12.f, 294.f, 15.f, TrainerInk, 310.f);
 		Label(Line2[Mode], X + 12.f, 318.f, 13.f, TrainerMuted, 310.f);
 	}
-	Panel(120.f, 358.f, 1040.f, 1.f, FLinearColor(0.10f, 0.16f, 0.19f, 1.f));
-	DrawLeaderboard(PC, 378.f);
+	Button(12, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON / UNRANKED") : TEXT("[M] MOVEMENT: OFF / FIXED POSITION"),
+		120.f, 346.f, 475.f, 34.f, Progress.bMovementPractice);
+	Label(TEXT("Strafe left/right, dodge, jump and crouch. No forward/back."), 615.f, 357.f, 13.f, TrainerMuted, 545.f);
+	DrawLeaderboard(PC, 398.f);
 	Button(10, TEXT("ENTER  /  START RUN"), 799.f, 610.f, 361.f, 43.f, true);
 	Label(TEXT("Click a scenario or use 1 / 2 / 3.  ESC opens the game menu."), 120.f, 625.f, 14.f, TrainerMuted, 650.f);
 }
@@ -193,6 +201,7 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 	Panel(120.f, 340.f, 1040.f, 1.f, FLinearColor(0.10f, 0.16f, 0.19f, 1.f));
 	DrawLeaderboard(PC, 362.f);
 	Button(11, TEXT("F6  /  CHOOSE SCENARIO"), 120.f, 610.f, 361.f, 43.f, false);
+	Button(12, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON") : TEXT("[M] MOVEMENT: OFF"), 506.f, 610.f, 267.f, 43.f, Progress.bMovementPractice);
 	Button(10, TEXT("ENTER  /  PLAY AGAIN"), 799.f, 610.f, 361.f, 43.f, true);
 }
 
@@ -245,6 +254,7 @@ bool ANCAimTrainerHUD::OverrideMouseClick(FKey Key, EInputEvent EventType)
 			{
 				if (Hit.Action < 3) { PC->SelectTrainerScenario(uint8(Hit.Action)); }
 				else if (Hit.Action == 10) { PC->StartTrainerRun(); }
+				else if (Hit.Action == 12) { PC->ToggleTrainerMovementPractice(); }
 				else { PC->ReturnToTrainerMenu(); }
 				break;
 			}

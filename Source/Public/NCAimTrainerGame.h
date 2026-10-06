@@ -29,6 +29,7 @@ public:
     virtual bool AllowPausing(APlayerController* PC) override;
 
     void SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario);
+    void SetMovementPractice(ANCAimTrainerPlayerController* PC, bool bEnabled);
     void StartTraining(ANCAimTrainerPlayerController* PC);
     void AbortTraining(ANCAimTrainerPlayerController* PC);
     float RecordTargetHit(ANCAimTrainerTarget* Target, float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer);
@@ -62,6 +63,7 @@ private:
 
     bool EnsureArena();
     bool ConfigurePawn();
+    bool IsInsidePracticeLane(const AUTCharacter* Pawn) const;
     bool FailSetup(const TCHAR* Message);
     void BeginActiveRun();
     void FinishRun();

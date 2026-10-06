@@ -14,6 +14,8 @@ struct FNCAimTrainerProgress
 	UPROPERTY() uint8 Scenario = 0;
 	/** 0 picker, 1 countdown, 2 running, 3 results. */
 	UPROPERTY() uint8 Phase = 0;
+	/** Optional lateral/jump/dodge practice. These runs never enter ranked boards. */
+	UPROPERTY() bool bMovementPractice = false;
 	UPROPERTY() int32 Score = 0;
 	UPROPERTY() int32 Shots = 0;
 	UPROPERTY() int32 Hits = 0;
@@ -32,12 +34,16 @@ class NETCODEPLUS_API ANCAimTrainerPlayerController : public AUTPlayerController
 
 public:
 	ANCAimTrainerPlayerController(const FObjectInitializer& ObjectInitializer);
-	virtual void BeginPlay() override;
 	virtual void ClientRestart_Implementation(APawn* NewPawn) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual bool InputKey(FKey Key, EInputEvent EventType, float AmountDepressed, bool bGamepad) override;
 	virtual void OnFire() override;
 	virtual void OnAltFire() override;
+	virtual void MoveForward(float Value) override;
+	virtual void MoveRight(float Value) override;
+	virtual void Jump() override;
+	virtual void Crouch() override;
+	virtual void ToggleCrouch() override;
 
 	const FNCAimTrainerProgress& GetTrainerProgress() const { return TrainerProgress; }
 	const TArray<FNCAimTrainerLeaderboardRow>& GetTrainerLeaderboard() const { return Leaderboard; }
@@ -47,6 +53,7 @@ public:
 	void SelectTrainerScenario(uint8 Scenario);
 	void StartTrainerRun();
 	void ReturnToTrainerMenu();
+	void ToggleTrainerMovementPractice();
 
 	/** Authority-side publishers used by ANCAimTrainerGame and its leaderboard service. */
 	void SetTrainerProgress(const FNCAimTrainerProgress& Progress);
@@ -59,6 +66,8 @@ public:
 	void ServerTrainerStart();
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerTrainerAbort();
+	UFUNCTION(Server, Reliable, WithValidation)
+	void ServerTrainerSetMovementPractice(bool bEnabled);
 	UFUNCTION(Client, Reliable)
 	void ClientTrainerLeaderboard(const TArray<FNCAimTrainerLeaderboardRow>& Rows);
 	UFUNCTION(Client, Reliable)
@@ -74,8 +83,10 @@ private:
 
 	UFUNCTION()
 	void OnRep_TrainerProgress();
+	void ApplyTrainerMovementMode();
 	/** Bound repeated requests without dropping a quick select-then-start sequence. */
 	bool AdmitTrainerRequest(uint8 Action);
-	double NextTrainerRequestTime[3] = { 0.0, 0.0, 0.0 };
+	double NextTrainerRequestTime[4] = { 0.0, 0.0, 0.0, 0.0 };
 	uint8 LastPresentedPhase = 255;
+	bool bLastPresentedMovementPractice = false;
 };

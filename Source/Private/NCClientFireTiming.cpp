@@ -26,9 +26,9 @@ namespace
     };
     TMap<TWeakObjectPtr<UWorld>, TSharedPtr<FWorldCadenceClock>> Clocks;
     TMap<TWeakObjectPtr<AUTWeaponFix>, FWeaponCadence> Weapons;
-    FDelegateHandle CleanupHandle;
+    FDelegateHandle CadenceCleanupHandle;
 
-    void CleanupWorld(UWorld* World, bool, bool)
+    void CleanupCadenceWorld(UWorld* World, bool, bool)
     {
         const TWeakObjectPtr<UWorld> Key(World);
         const TSharedPtr<FWorldCadenceClock>* Clock = Clocks.Find(Key);
@@ -80,14 +80,14 @@ namespace
 
 void NCClientFireTiming::Startup()
 {
-    if (!CleanupHandle.IsValid())
-        CleanupHandle = FWorldDelegates::OnWorldCleanup.AddStatic(&CleanupWorld);
+    if (!CadenceCleanupHandle.IsValid())
+        CadenceCleanupHandle = FWorldDelegates::OnWorldCleanup.AddStatic(&CleanupCadenceWorld);
 }
 
 void NCClientFireTiming::Shutdown()
 {
-    FWorldDelegates::OnWorldCleanup.Remove(CleanupHandle);
-    CleanupHandle.Reset();
+    FWorldDelegates::OnWorldCleanup.Remove(CadenceCleanupHandle);
+    CadenceCleanupHandle.Reset();
     if (UObjectInitialized())
     {
         for (auto It = Clocks.CreateIterator(); It; ++It)

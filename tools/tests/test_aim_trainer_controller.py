@@ -1,7 +1,8 @@
 """Exercise the real trainer input/state functions with a small native adapter.
 
-This verifies phase gates, focus handoff and request admission. It does not stand
-in for a UE client/server playtest of cursor capture or replicated presentation.
+This verifies phase gates, focus handoff, request admission and the stock UT
+deferred-fire drain after possession. It does not stand in for a UE client/server
+playtest of cursor capture or replicated presentation.
 """
 
 import os
@@ -18,57 +19,150 @@ ADAPTER = r'''
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
+#include <new>
 using uint8 = uint8_t;
 using int32 = int32_t;
 constexpr int32 INDEX_NONE = -1;
 constexpr int ROLE_Authority = 3;
+constexpr int NAME_Playing = 1, NAME_Spectating = 2;
 #define UE_SERVER 0
-enum class FKey { Other, F6, One, Two, Three, NumPadOne, NumPadTwo, NumPadThree, Enter };
+enum class FKey { Other, F6, M, One, Two, Three, NumPadOne, NumPadTwo, NumPadThree, Enter };
 using EKeys = FKey;
 enum EInputEvent { IE_Pressed, IE_Released, IE_Repeat };
 struct FPlatformTime { static double Now; static double Seconds() { return Now; } };
 double FPlatformTime::Now = 100.;
-struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; int Score = 0; };
-struct APawn { virtual ~APawn() = default; };
-struct Movement { bool Enabled = true; void DisableMovement() { Enabled = false; } };
-struct AUTCharacter : APawn { Movement Move; Movement* GetCharacterMovement() { return &Move; } };
+struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; int Score = 0; bool bMovementPractice = false; };
+struct FVector { float X, Y, Z; FVector(float x=0, float y=0, float z=0): X(x), Y(y), Z(z) {} };
+enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling };
+struct APawn { virtual ~APawn() = default; virtual void PawnStartFire(uint8) {} };
+struct UCharacterMovementComponent {
+    virtual ~UCharacterMovementComponent() = default;
+    bool Enabled = true, Constrained = false;
+    bool bWantsToCrouch = false, Crouched = false;
+    float Speed = 0.f;
+    MovementMode Mode = MOVE_Walking;
+    FVector Normal, Origin;
+    void DisableMovement() { Enabled = false; Mode = MOVE_None; }
+    void SetMovementMode(MovementMode mode) { Mode = mode; Enabled = mode != MOVE_None; }
+    void SetPlaneConstraintNormal(FVector v) { Normal = v; }
+    void SetPlaneConstraintOrigin(FVector v) { Origin = v; }
+    void SetPlaneConstraintEnabled(bool enabled) { Constrained = enabled; }
+    void StopMovementImmediately() { Speed = 0.f; }
+    void UnCrouch(bool) { Crouched = false; }
+};
+struct AUTCharacter;
+struct UNCAimTrainerMovement : UCharacterMovementComponent {
+    AUTCharacter* Owner = nullptr;
+    void ResetTrainerMovement(bool practice);
+};
+struct AUTCharacter : APawn {
+    UNCAimTrainerMovement Move;
+    int Fires[2] = {0, 0}, Stops[2] = {0, 0};
+    FVector MovementInput;
+    bool bPressedJump = false;
+    AUTCharacter() { Move.Owner = this; }
+    UCharacterMovementComponent* GetCharacterMovement() { return &Move; }
+    FVector GetActorLocation() const { return FVector(100, 200, 300); }
+    void AddMovementInput(FVector direction, float value) {
+        MovementInput = FVector(direction.X * value, direction.Y * value, direction.Z * value);
+    }
+    void StartFire(uint8 mode) { ++Fires[mode]; }
+    void StopFire(uint8 mode) { ++Stops[mode]; }
+};
+// The actual shared reset helper is covered in test_aim_trainer_movement.py.
+// Here its effects let us test when the real controller invokes it.
+void UNCAimTrainerMovement::ResetTrainerMovement(bool practice) {
+    StopMovementImmediately(); bWantsToCrouch = false; Owner->bPressedJump = false;
+    UnCrouch(false); SetPlaneConstraintNormal(FVector(1, 0, 0));
+    SetPlaneConstraintOrigin(FVector(-1800, 0, 50108)); SetPlaneConstraintEnabled(practice);
+    if (practice) SetMovementMode(MOVE_Walking); else DisableMovement();
+}
+struct FDeferredFireInput {
+    uint8 FireMode = 0; bool bStartFire = false;
+    FDeferredFireInput() = default;
+    FDeferredFireInput(uint8 mode, bool start) : FireMode(mode), bStartFire(start) {}
+};
+struct FDeferredInputs : std::vector<FDeferredFireInput> { void Empty() { clear(); } };
+void* operator new(std::size_t size, FDeferredInputs& inputs) {
+    (void)size; inputs.emplace_back(); return &inputs.back();
+}
+void operator delete(void* pointer, FDeferredInputs& inputs) noexcept {
+    (void)pointer; inputs.pop_back();
+}
+struct MockPlayerState { bool bOnlySpectator = false; };
+struct MockGameState { bool HasMatchStarted() const { return true; } };
+struct MockWorld { MockGameState State; MockGameState* GetGameState() { return &State; } };
 template<class T> T* Cast(APawn* pawn) { return dynamic_cast<T*>(pawn); }
-struct BaseController {
-    int BaseKeys = 0, Fires = 0, AltFires = 0, Stops = 0, AltStops = 0;
+template<class T> T* Cast(UCharacterMovementComponent* movement) { return dynamic_cast<T*>(movement); }
+struct AUTPlayerController {
+    int BaseKeys = 0;
+    int Jumps = 0, Crouches = 0, CrouchToggles = 0;
     int MoveInputLocks = 0, Restarts = 0;
-    bool IgnoreLook = false;
+    bool IgnoreLook = false, bFirePressed = false, bAltFirePressed = false;
+    bool bPlayerIsWaiting = false, bAutoCam = false;
+    bool bIsHoldingFloorSlide = false;
+    int StateName = NAME_Playing;
+    float MovementForwardAxis = 0.f, MovementStrafeAxis = 0.f;
     APawn* Pawn = nullptr;
+private:
+    // Match stock access: subclasses must use GetPawn()/GetUTCharacter().
+    AUTCharacter* UTCharacter = nullptr;
+public:
+    MockPlayerState* PlayerState = nullptr;
+    MockWorld World;
+    FDeferredInputs DeferredFireInputs;
     APawn* GetPawn() const { return Pawn; }
+    MockWorld* GetWorld() { return &World; }
+    bool IsInState(int state) const { return StateName == state; }
+    void PlayMenuSelectSound() {}
+    void ServerRestartPlayer() {}
+    void ServerRestartPlayerAltFire() {}
+    void ViewSelf() {}
     void BeginPlay() {}
     void ClientRestart_Implementation(APawn* pawn) {
         Pawn = pawn; MoveInputLocks = 0; ++Restarts;
-        if (auto character = Cast<AUTCharacter>(pawn)) character->Move.Enabled = true;
+        UTCharacter = Cast<AUTCharacter>(pawn);
+        if (auto character = Cast<AUTCharacter>(pawn)) character->Move.SetMovementMode(MOVE_Walking);
     }
     bool IsMoveInputIgnored() const { return MoveInputLocks > 0; }
     void SetIgnoreMoveInput(bool value) { MoveInputLocks += value ? 1 : -1; }
     bool InputKey(FKey, EInputEvent, float, bool) { ++BaseKeys; return false; }
-    void OnFire() { ++Fires; }
-    void OnAltFire() { ++AltFires; }
-    void OnStopFire() { ++Stops; }
-    void OnStopAltFire() { ++AltStops; }
+    void OnFire();
+    void OnAltFire();
+    void OnStopFire();
+    void OnStopAltFire();
+    void ApplyDeferredFireInputs();
+    void Jump() { ++Jumps; }
+    void Crouch() { ++Crouches; }
+    void ToggleCrouch() { ++CrouchToggles; }
 };
-struct ANCAimTrainerPlayerController : BaseController {
-    using Super = BaseController;
+struct ANCAimTrainerPlayerController : AUTPlayerController {
+    using Super = AUTPlayerController;
     FNCAimTrainerProgress TrainerProgress;
-    double NextTrainerRequestTime[3] = { 0., 0., 0. };
+    double NextTrainerRequestTime[4] = { 0., 0., 0., 0. };
     uint8 LastPresentedPhase = 255;
+    bool bLastPresentedMovementPractice = false;
     bool InputFocus = true, Local = true;
     int Role = ROLE_Authority, Selects = 0, Starts = 0, Aborts = 0, NetUpdates = 0, InputUpdates = 0;
     uint8 LastSelection = 255;
+    int MovementSelections = 0;
+    bool LastMovementSelection = false;
     bool HasTrainerInputFocus() const { return InputFocus; }
     bool IsLocalController() const { return Local; }
     void ServerTrainerSelectScenario(uint8 value) { ++Selects; LastSelection = value; }
     void ServerTrainerStart() { ++Starts; }
     void ServerTrainerAbort() { ++Aborts; }
+    void ServerTrainerSetMovementPractice(bool enabled) { ++MovementSelections; LastMovementSelection = enabled; }
     void ForceNetUpdate() { ++NetUpdates; }
     void UpdateInputMode() { ++InputUpdates; }
-    void BeginPlay();
     void ClientRestart_Implementation(APawn*);
+    void ApplyTrainerMovementMode();
+    void MoveForward(float);
+    void MoveRight(float);
+    void Jump();
+    void Crouch();
+    void ToggleCrouch();
     bool IsTrainerMenuVisible() const;
     bool InputKey(FKey, EInputEvent, float, bool);
     void OnFire();
@@ -76,6 +170,7 @@ struct ANCAimTrainerPlayerController : BaseController {
     void SelectTrainerScenario(uint8);
     void StartTrainerRun();
     void ReturnToTrainerMenu();
+    void ToggleTrainerMovementPractice();
     bool AdmitTrainerRequest(uint8);
     void SetTrainerProgress(const FNCAimTrainerProgress&);
     void OnRep_TrainerProgress();
@@ -100,6 +195,12 @@ void MenuControls() {
         const int starts = pc.Starts;
         pc.InputKey(EKeys::Enter, IE_Released, 0.f, false);
         Require(pc.Starts == starts, "key release started another run");
+        Require(pc.InputKey(EKeys::M, IE_Pressed, 1.f, false), "movement key escaped menu");
+        const int movementSelections = pc.MovementSelections;
+        pc.InputKey(EKeys::M, IE_Repeat, 1.f, false);
+        pc.InputKey(EKeys::M, IE_Released, 0.f, false);
+        Require(pc.MovementSelections == movementSelections && pc.LastMovementSelection,
+                "movement toggle repeated or requested wrong option");
     }
     const int selects = pc.Selects;
     pc.SelectTrainerScenario(255);
@@ -108,9 +209,9 @@ void MenuControls() {
 void Focus() {
     ANCAimTrainerPlayerController pc;
     pc.InputFocus = false;
-    for (FKey key : {EKeys::One, EKeys::Enter, EKeys::F6})
+    for (FKey key : {EKeys::One, EKeys::Enter, EKeys::F6, EKeys::M})
         Require(!pc.InputKey(key, IE_Pressed, 1.f, false), "stock menu/chat key intercepted");
-    Require(pc.BaseKeys == 3 && pc.Selects == 0 && pc.Starts == 0 && pc.Aborts == 0,
+    Require(pc.BaseKeys == 4 && pc.Selects == 0 && pc.Starts == 0 && pc.Aborts == 0 && pc.MovementSelections == 0,
             "focus handoff changed trainer state");
 }
 void ActiveControls() {
@@ -121,24 +222,55 @@ void ActiveControls() {
         pc.InputKey(EKeys::Enter, IE_Pressed, 1.f, false);
         pc.SelectTrainerScenario(1);
         pc.StartTrainerRun();
-        Require(pc.Selects == 0 && pc.Starts == 0, "active/countdown run replaced locally");
+        pc.InputKey(EKeys::M, IE_Pressed, 1.f, false);
+        pc.ToggleTrainerMovementPractice();
+        Require(pc.Selects == 0 && pc.Starts == 0 && pc.MovementSelections == 0,
+                "active/countdown run replaced or movement option changed locally");
         Require(pc.InputKey(EKeys::F6, IE_Pressed, 1.f, false), "abort key not consumed");
     }
     Require(pc.Aborts == 2, "abort unavailable during countdown/run");
 }
 void FireGates() {
-    ANCAimTrainerPlayerController pc;
-    for (uint8 scenario = 0; scenario < 3; ++scenario) {
-        pc.TrainerProgress.Scenario = scenario;
-        for (uint8 phase = 0; phase < 4; ++phase) {
-            pc.TrainerProgress.Phase = phase;
-            int before = pc.Fires;
-            pc.OnFire(); pc.OnAltFire();
-            const int expected = phase == 2 && scenario != 0 ? 1 : 0;
-            Require(pc.Fires == before + expected && pc.AltFires == pc.Fires,
-                    "firing allowed outside shooting scenario active phase");
+    // Standalone and an owning network client both drain through the same stock
+    // method; assert arrival at the pawn, not merely entry into Super::OnFire.
+    for (int role : {ROLE_Authority, 1}) {
+        ANCAimTrainerPlayerController pc;
+        AUTCharacter pawn;
+        pc.Role = role;
+        pc.BeginPlay();
+        pc.ClientRestart_Implementation(&pawn);
+        for (uint8 scenario = 0; scenario < 3; ++scenario) {
+            pc.TrainerProgress.Scenario = scenario;
+            for (uint8 phase = 0; phase < 4; ++phase) {
+                pc.TrainerProgress.Phase = phase;
+                int before = pawn.Fires[0];
+                pc.OnFire(); pc.OnAltFire();
+                Require(pawn.Fires[0] == before, "stock fire did not remain deferred");
+                pc.ApplyDeferredFireInputs();
+                const int expected = phase == 2 && scenario != 0 ? 1 : 0;
+                Require(pawn.Fires[0] == before + expected && pawn.Fires[1] == pawn.Fires[0],
+                        "trainer fire never reached pawn or escaped its phase/scenario gate");
+                Require(pc.DeferredFireInputs.empty(), "deferred fire queue did not drain");
+                Require(!pawn.Move.Enabled && !pc.IgnoreLook, "shooting unlocked translation or locked view");
+            }
         }
     }
+}
+void ExternalFireLock() {
+    ANCAimTrainerPlayerController pc;
+    AUTCharacter pawn;
+    pc.ClientRestart_Implementation(&pawn);
+    pc.TrainerProgress.Phase = 2;
+    pc.TrainerProgress.Scenario = 2;
+    pc.SetIgnoreMoveInput(true);
+    pc.OnFire(); pc.OnAltFire();
+    pc.ApplyDeferredFireInputs();
+    Require(pawn.Fires[0] == 0 && pawn.Fires[1] == 0 && pc.MoveInputLocks == 1,
+            "trainer bypassed or erased an external input lock");
+    pc.SetIgnoreMoveInput(false);
+    pc.OnFire(); pc.OnAltFire();
+    pc.ApplyDeferredFireInputs();
+    Require(pawn.Fires[0] == 1 && pawn.Fires[1] == 1, "firing did not resume after external unlock");
 }
 void Admission() {
     ANCAimTrainerPlayerController pc;
@@ -146,12 +278,17 @@ void Admission() {
     Require(!pc.AdmitTrainerRequest(0), "selection flood not bounded");
     Require(pc.AdmitTrainerRequest(1), "quick select/start dropped");
     Require(pc.AdmitTrainerRequest(2), "abort blocked by start");
+    Require(pc.AdmitTrainerRequest(3), "movement choice blocked by another action");
+    Require(!pc.AdmitTrainerRequest(3), "movement option spam not bounded");
+    Require(!pc.AdmitTrainerRequest(4), "next invalid action accepted");
     Require(!pc.AdmitTrainerRequest(255), "out-of-bounds action accepted");
     FPlatformTime::Now += .16;
     Require(pc.AdmitTrainerRequest(0), "throttle never recovered");
 }
 void StatePublish() {
     ANCAimTrainerPlayerController pc;
+    AUTCharacter pawn;
+    pc.ClientRestart_Implementation(&pawn);
     FNCAimTrainerProgress next;
     next.Phase = 2; next.Score = 123;
     pc.Role = 1;
@@ -159,13 +296,15 @@ void StatePublish() {
     Require(pc.TrainerProgress.Score == 0 && pc.NetUpdates == 0, "client set authoritative score");
     pc.Role = ROLE_Authority;
     pc.SetTrainerProgress(next);
-    Require(pc.TrainerProgress.Score == 123 && pc.NetUpdates == 1 && pc.Stops == 0,
+    Require(pc.TrainerProgress.Score == 123 && pc.NetUpdates == 1 && pawn.Stops[0] == 0,
             "run start presentation incorrect");
     next.Phase = 3;
     pc.SetTrainerProgress(next);
-    Require(pc.Stops == 1 && pc.AltStops == 1, "held fire not released at run end");
+    pc.ApplyDeferredFireInputs();
+    Require(pawn.Stops[0] == 1 && pawn.Stops[1] == 1, "held fire not released at run end");
     for (int i = 0; i < 20; ++i) pc.SetTrainerProgress(next);
-    Require(pc.Stops == 1 && pc.AltStops == 1 && pc.NetUpdates == 2,
+    pc.ApplyDeferredFireInputs();
+    Require(pawn.Stops[0] == 1 && pawn.Stops[1] == 1 && pc.NetUpdates == 2,
             "repeated presentation samples spammed fire releases or forced replication");
 }
 void PossessionLock() {
@@ -173,16 +312,76 @@ void PossessionLock() {
     AUTCharacter pawn;
     pc.BeginPlay();
     pc.BeginPlay();
-    Require(pc.MoveInputLocks == 1 && !pc.IgnoreLook, "initial movement-only lock stacks or blocks view");
+    Require(pc.MoveInputLocks == 0 && !pc.IgnoreLook, "initial trainer input lock blocks stock fire or view");
     for (int i = 0; i < 3; ++i) {
         pc.ClientRestart_Implementation(&pawn);
-        Require(pc.MoveInputLocks == 1 && !pc.IgnoreLook && !pawn.Move.Enabled,
-                "possession erased translation lock, restored gravity, or blocked mouse-look");
+        Require(pc.MoveInputLocks == 0 && !pc.IgnoreLook && !pawn.Move.Enabled,
+                "possession blocked stock firing/view or restored translation/gravity");
     }
     ANCAimTrainerPlayerController remote;
     remote.Local = false;
     remote.BeginPlay(); remote.ClientRestart_Implementation(&pawn);
     Require(remote.MoveInputLocks == 0, "nonlocal controller acquired a client input lock");
+}
+void MovementPractice() {
+    for (int role : {ROLE_Authority, 1}) {
+        ANCAimTrainerPlayerController pc;
+        AUTCharacter pawn;
+        pc.Role = role;
+        pc.ClientRestart_Implementation(&pawn);
+        Require(!pawn.Move.Enabled && !pawn.Move.Constrained && pawn.Move.Normal.X == 1.f
+                && pawn.Move.Origin.X == -1800.f, "fixed lane not initialized on possession");
+        pc.Jump(); pc.Crouch(); pc.ToggleCrouch();
+        Require(pc.Jumps == 0 && pc.Crouches == 0 && pc.CrouchToggles == 0, "fixed mode queued mobility actions");
+        pc.TrainerProgress.bMovementPractice = true;
+        pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Mode == MOVE_Walking && pawn.Move.Constrained && !pc.IsMoveInputIgnored(),
+                "movement practice did not unlock walking or blocked firing");
+        pc.Jump(); pc.Crouch(); pc.ToggleCrouch();
+        Require(pc.Jumps == 1 && pc.Crouches == 1 && pc.CrouchToggles == 1, "practice blocked mobility actions");
+        pc.MoveRight(-.7f);
+        Require(pawn.MovementInput.X == 0.f && pawn.MovementInput.Y == -.7f && pawn.MovementInput.Z == 0.f
+                && pc.MovementStrafeAxis == -.7f, "strafe input not world-Y or stock dodge axis lost");
+        pc.MovementForwardAxis = 1.f;
+        pc.MoveForward(1.f);
+        Require(pc.MovementForwardAxis == 0.f && pawn.MovementInput.X == 0.f,
+                "forward input changed distance or left a dodge axis");
+        pawn.Move.SetMovementMode(MOVE_Falling);
+        for (int i = 0; i < 10; ++i) pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Mode == MOVE_Falling, "score replication cancelled a jump/dodge");
+        pc.ClientRestart_Implementation(&pawn);
+        Require(pawn.Move.Mode == MOVE_Walking, "practice possession lost its movement option");
+        pc.TrainerProgress.bMovementPractice = false;
+        pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Mode == MOVE_None && !pc.IsMoveInputIgnored(), "fixed mode used global input gate");
+        pawn.MovementInput = FVector();
+        pc.MoveRight(1.f);
+        Require(pawn.MovementInput.Y == 0.f, "fixed mode added movement input");
+    }
+}
+void MovementRetryPosture() {
+    for (int role : {ROLE_Authority, 1}) {
+        ANCAimTrainerPlayerController pc;
+        AUTCharacter pawn;
+        pc.Role = role;
+        pc.TrainerProgress.bMovementPractice = true;
+        pc.ClientRestart_Implementation(&pawn);
+        pc.TrainerProgress.Phase = 3;
+        pc.OnRep_TrainerProgress();
+        pawn.Move.Crouched = pawn.Move.bWantsToCrouch = pawn.bPressedJump = pc.bIsHoldingFloorSlide = true;
+        pawn.Move.SetMovementMode(MOVE_Falling);
+        pawn.Move.Speed = 1500.f;
+        pc.TrainerProgress.Phase = 1;
+        pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Mode == MOVE_Walking && !pawn.Move.Crouched && !pawn.Move.bWantsToCrouch
+                && !pawn.bPressedJump && !pc.bIsHoldingFloorSlide && pawn.Move.Speed == 0.f,
+                "retry retained crouched capsule, airborne velocity or held mobility state");
+        pawn.Move.SetMovementMode(MOVE_Falling);
+        pawn.Move.Speed = 400.f;
+        for (int i = 0; i < 10; ++i) pc.OnRep_TrainerProgress();
+        Require(pawn.Move.Mode == MOVE_Falling && pawn.Move.Speed == 400.f,
+                "repeated countdown updates cancelled new movement input");
+    }
 }
 int main(int argc, char** argv) {
     Require(argc == 2, "case required"); const std::string name(argv[1]);
@@ -190,9 +389,12 @@ int main(int argc, char** argv) {
     else if (name == "focus") Focus();
     else if (name == "active") ActiveControls();
     else if (name == "fire") FireGates();
+    else if (name == "external_lock") ExternalFireLock();
     else if (name == "admission") Admission();
     else if (name == "state") StatePublish();
     else if (name == "possession") PossessionLock();
+    else if (name == "movement") MovementPractice();
+    else if (name == "retry_posture") MovementRetryPosture();
     else Require(false, "unknown case");
 }
 '''
@@ -206,9 +408,22 @@ class AimTrainerControllerTests(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         directory = Path(cls.temporary.name)
         native = (PLUGIN / "Source/Private/NCAimTrainerPlayerController.cpp").read_text(encoding="utf-8-sig")
+        stock = (PLUGIN.parents[1] / "Source/UnrealTournament/Private/UTPlayerController.cpp").read_text(encoding="utf-8-sig")
+        stock_signatures = (
+            "void AUTPlayerController::OnFire",
+            "void AUTPlayerController::OnAltFire",
+            "void AUTPlayerController::OnStopFire",
+            "void AUTPlayerController::OnStopAltFire",
+            "void AUTPlayerController::ApplyDeferredFireInputs",
+        )
         signatures = (
-            "void ANCAimTrainerPlayerController::BeginPlay",
             "void ANCAimTrainerPlayerController::ClientRestart_Implementation",
+            "void ANCAimTrainerPlayerController::ApplyTrainerMovementMode",
+            "void ANCAimTrainerPlayerController::MoveForward",
+            "void ANCAimTrainerPlayerController::MoveRight",
+            "void ANCAimTrainerPlayerController::Jump",
+            "void ANCAimTrainerPlayerController::Crouch",
+            "void ANCAimTrainerPlayerController::ToggleCrouch",
             "bool ANCAimTrainerPlayerController::IsTrainerMenuVisible",
             "bool ANCAimTrainerPlayerController::InputKey",
             "void ANCAimTrainerPlayerController::OnFire",
@@ -216,12 +431,15 @@ class AimTrainerControllerTests(unittest.TestCase):
             "void ANCAimTrainerPlayerController::SelectTrainerScenario",
             "void ANCAimTrainerPlayerController::StartTrainerRun",
             "void ANCAimTrainerPlayerController::ReturnToTrainerMenu",
+            "void ANCAimTrainerPlayerController::ToggleTrainerMovementPractice",
             "bool ANCAimTrainerPlayerController::AdmitTrainerRequest",
             "void ANCAimTrainerPlayerController::SetTrainerProgress",
             "void ANCAimTrainerPlayerController::OnRep_TrainerProgress",
         )
         source = directory / "trainer_controller.cpp"
-        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+        source.write_text("\n".join(
+            [ADAPTER] + [native_function(stock, s) for s in stock_signatures]
+            + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_controller.exe" if os.name == "nt" else "trainer_controller")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -240,9 +458,12 @@ class AimTrainerControllerTests(unittest.TestCase):
     def test_stock_menu_and_chat_keep_input_focus(self): self.run_case("focus")
     def test_cannot_replace_active_run_and_can_abort(self): self.run_case("active")
     def test_only_shooting_scenarios_can_fire_during_run(self): self.run_case("fire")
+    def test_external_ignore_input_still_blocks_stock_firing(self): self.run_case("external_lock")
     def test_request_throttle_allows_quick_select_then_start(self): self.run_case("admission")
     def test_authority_and_one_time_held_fire_release(self): self.run_case("state")
     def test_possession_keeps_movement_locked_and_mouse_look_live(self): self.run_case("possession")
+    def test_movement_practice_stays_lateral_and_score_updates_preserve_jumps(self): self.run_case("movement")
+    def test_new_countdown_resets_crouched_or_airborne_owner_without_repeated_resets(self): self.run_case("retry_posture")
 
 
 if __name__ == "__main__":

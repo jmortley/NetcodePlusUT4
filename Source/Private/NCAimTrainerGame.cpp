@@ -3,6 +3,7 @@
 #include "NCAimTrainerHUD.h"
 #include "NCAimTrainerOnline.h"
 #include "NCAimTrainerScoring.h"
+#include "NCAimTrainerCharacter.h"
 #include "TeamArenaCharacter.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
@@ -14,6 +15,7 @@
 #include "UTGameSession.h"
 #include "GameFramework/WorldSettings.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Animation/AnimInstance.h"
 #include "EngineUtils.h"
@@ -25,7 +27,7 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     DisplayName = NSLOCTEXT("UTGameMode", "NCAimTrainer", "NetcodePlus Aim Trainer");
     PlayerControllerClass = ANCAimTrainerPlayerController::StaticClass();
     HUDClass = ANCAimTrainerHUD::StaticClass();
-    DefaultPawnClass = ATeamArenaCharacter::StaticClass();
+    DefaultPawnClass = ANCAimTrainerCharacter::StaticClass();
     PrimaryActorTick.bCanEverTick = true;
     DefaultMaxPlayers = 1;
     BotFillCount = 0;
@@ -206,8 +208,12 @@ bool ANCAimTrainerGame::ConfigurePawn()
     if (!Pawn || Pawn->IsDead()) { return FailSetup(TEXT("Cannot start: your practice character is not ready.")); }
     Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), FRotator::ZeroRotator,
         false, nullptr, ETeleportType::TeleportPhysics);
-    Pawn->GetCharacterMovement()->StopMovementImmediately();
-    Pawn->GetCharacterMovement()->DisableMovement();
+    UNCAimTrainerMovement* Movement = Cast<UNCAimTrainerMovement>(Pawn->GetCharacterMovement());
+    if (!Movement) { return FailSetup(TEXT("Cannot start: the trainee does not have the required practice movement component.")); }
+    Movement->ResetTrainerMovement(Progress.bMovementPractice);
+    // Uncrouching can raise the capsule center. Reset after restoring posture
+    // so a fixed run always starts from the original standing anchor.
+    Pawn->SetActorLocation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), false, nullptr, ETeleportType::TeleportPhysics);
     Pawn->bCanBeDamaged = false;
     Pawn->DiscardAllInventory();
     RunWeapon = nullptr;
@@ -256,17 +262,51 @@ bool ANCAimTrainerGame::ConfigurePawn()
     return true;
 }
 
+bool ANCAimTrainerGame::IsInsidePracticeLane(const AUTCharacter* Pawn) const
+{
+    if (!Pawn || Pawn->IsDead()) { return false; }
+    const FVector Position = Pawn->GetActorLocation() - ArenaOrigin;
+    if (!FMath::IsFinite(Position.X) || !FMath::IsFinite(Position.Y) || !FMath::IsFinite(Position.Z)) { return false; }
+    if (!Progress.bMovementPractice) { return (Position - FVector(-1800.f, 0.f, 108.f)).SizeSquared() <= 4.f; }
+    // Capsule bounds accommodate standing, crouching, jumps and wall dodges.
+    // The room walls stop lateral travel; the plane fixes target distance.
+    const float HalfHeight = Pawn->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    return FMath::IsFinite(HalfHeight) && HalfHeight > 0.f
+        && FMath::Abs(Position.X + 1800.f) <= 5.f && FMath::Abs(Position.Y) <= 1800.f
+        && Position.Z - HalfHeight >= -10.f && Position.Z + HalfHeight <= 2010.f;
+}
+
 void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario)
 {
     if (!IsTrainee(PC) || Scenario > 2 || Progress.Phase == 1 || Progress.Phase == 2) { return; }
     SetupError.Empty();
+    const bool bMovementPractice = Progress.bMovementPractice;
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
+    Progress.bMovementPractice = bMovementPractice;
     HideAllTargets();
     if (Arena) { Arena->SetScenario(Scenario); }
     if (!ConfigurePawn()) { PC->SetTrainerOnlineStatus(SetupError); }
     PublishProgress();
     RefreshLeaderboard();
+}
+
+void ANCAimTrainerGame::SetMovementPractice(ANCAimTrainerPlayerController* PC, bool bEnabled)
+{
+    if (!IsTrainee(PC) || Progress.Phase == 1 || Progress.Phase == 2 || Progress.bMovementPractice == bEnabled) { return; }
+    const uint8 Scenario = Progress.Scenario;
+    Progress = FNCAimTrainerProgress();
+    Progress.Scenario = Scenario;
+    Progress.bMovementPractice = bEnabled;
+    bRankedRun = false;
+    RunId.Empty();
+    SetupError.Empty();
+    HideAllTargets();
+    const bool bReady = ConfigurePawn();
+    PublishProgress();
+    PC->SetTrainerOnlineStatus(!bReady ? SetupError : (bEnabled
+        ? TEXT("Movement practice: strafe, dodge, jump and crouch. Results stay local and are not submitted.")
+        : TEXT("Fixed-position practice selected. Choose a scenario and start a run.")));
 }
 
 void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
@@ -279,8 +319,10 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
         return;
     }
     const uint8 Scenario = Progress.Scenario;
+    const bool bMovementPractice = Progress.bMovementPractice;
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
+    Progress.bMovementPractice = bMovementPractice;
     Progress.Phase = 1;
     Progress.RemainingSeconds = 3.f;
     PhaseStartedAt = GetWorld()->GetTimeSeconds();
@@ -288,11 +330,13 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
     bPreviousContact = false;
     RunId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
     Schedule.Initialize(int32(GetTypeHash(RunId)));
-    bRankedRun = GetNetMode() != NM_Standalone && BaseMutator == nullptr && FMath::IsNearlyEqual(GetWorldSettings()->GetEffectiveTimeDilation(), 1.f)
+    bRankedRun = !Progress.bMovementPractice && GetNetMode() != NM_Standalone && BaseMutator == nullptr && FMath::IsNearlyEqual(GetWorldSettings()->GetEffectiveTimeDilation(), 1.f)
         && GetClass() == StaticClass();
-    UnrankedReason = bRankedRun ? FString() : (GetNetMode() == NM_Standalone
+    UnrankedReason = bRankedRun ? FString() : (Progress.bMovementPractice
+        ? TEXT("Movement practice: scores are shown here but are not submitted to the shared leaderboard.")
+        : (GetNetMode() == NM_Standalone
         ? TEXT("Offline practice: scores are shown here but are not submitted to the shared leaderboard.")
-        : TEXT("Practice only: mutators or altered game speed change the preset."));
+        : TEXT("Practice only: mutators or altered game speed change the preset.")));
     HideAllTargets();
     Arena->SetScenario(Scenario);
     PublishProgress();
@@ -304,8 +348,10 @@ void ANCAimTrainerGame::AbortTraining(ANCAimTrainerPlayerController* PC)
     if (!IsTrainee(PC)) { return; }
     HideAllTargets();
     const uint8 Scenario = Progress.Scenario;
+    const bool bMovementPractice = Progress.bMovementPractice;
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
+    Progress.bMovementPractice = bMovementPractice;
     bRankedRun = false;
     RunId.Empty();
     if (RunWeapon) { RunWeapon->StopFire(0); RunWeapon->StopFire(1); }
@@ -419,10 +465,10 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
     else if (Progress.Phase == 2)
     {
         AUTCharacter* Pawn = Cast<AUTCharacter>(Trainee->GetPawn());
-        if (!Pawn || Pawn->IsDead() || (Pawn->GetActorLocation() - (ArenaOrigin + FVector(-1800, 0, 108))).SizeSquared() > 4.f)
+        if (!IsInsidePracticeLane(Pawn))
         {
             AbortTraining(Trainee);
-            Trainee->SetTrainerOnlineStatus(TEXT("Run stopped because the trainee left the fixed practice lane."));
+            Trainee->SetTrainerOnlineStatus(TEXT("Run stopped because the trainee left the practice lane."));
             return;
         }
         if (!FMath::IsNearlyEqual(GetWorldSettings()->GetEffectiveTimeDilation(), 1.f) || DeltaSeconds > 0.25f)
@@ -501,7 +547,7 @@ void ANCAimTrainerGame::FinishRun()
     if (Progress.Scenario == 0) { Progress.Accuracy = 100.f * Progress.Score / 60000.f; }
     if (RunWeapon) { RunWeapon->StopFire(0); RunWeapon->StopFire(1); }
     PublishProgress();
-    if (!bRankedRun || Progress.Hits > Progress.Shots)
+    if (!bRankedRun || Progress.bMovementPractice || Progress.Hits > Progress.Shots)
     {
         Trainee->SetTrainerOnlineStatus(UnrankedReason.IsEmpty() ? TEXT("Practice only: incomplete shot accounting.") : UnrankedReason);
         return;

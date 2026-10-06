@@ -71,6 +71,19 @@ Start for the countdown. **F6** cancels an incomplete run and returns to the
 picker. **Enter** retries from the results screen. **Escape** retains the normal
 UT menu. Cancelled runs and disconnects do not submit partial scores.
 
+Press **M** or click the movement button in the picker/results screen to enable
+optional **movement practice**. Strafe along the room's left/right lane with
+normal UT side dodges, jumping and crouching. Forward/backward movement and
+forward/back dodges are disabled; side dodges stay aligned with the lane as
+you turn your view. Room walls bound the lane. The option applies to all three
+scenarios, survives retries and scenario changes, and cannot change mid-run.
+Fixed-position aiming remains the default.
+
+Movement-practice runs show local results but never submit to the existing
+shared boards, including on an approved network host. Those boards compare
+fixed-position runs; jumping/crouching changes the headshot cover challenge.
+The HUD labels movement practice and the fixed-position leaderboard separately.
+
 All three scenarios support offline standalone practice. A hub is not required.
 Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
@@ -192,3 +205,28 @@ The UE4.15 editor module rebuilt successfully. Five target-asset regression
 tests cover the native initialization, missing assets, stable scale and server
 bone-update settings; the full trainer suite has 25 passing tests. Rebuild the
 Shipping plugin and verify visible, animated targets in all three scenarios.
+
+### Fire input and movement practice repair (2026-10-06)
+
+The trainer used `SetIgnoreMoveInput(true)` to hold the trainee in place. Stock
+UT's `ApplyDeferredFireInputs()` also checks that flag before starting weapon
+fire, so the rifle could not fire even in standalone once targets appeared.
+Fixed practice now disables movement physics while keeping the movement
+component's deferred-fire drain active. It does not set the shared input lock.
+
+Optional movement practice uses a trainer-only character/movement subclass,
+with the same lateral plane and dodge basis on authority and owning client.
+Pawn setup restores standing posture at the anchor; the owner also resets
+posture/velocity at a fresh countdown. Ordinary progress updates leave jumps
+and falling physics alone. Crouching and jumps are accepted by the practice
+area guard; fixed-position runs retain their original position check.
+
+Native regression tests exercise the real stock fire queuing/drain functions,
+movement option transitions, run eligibility, crouch/jump bounds and trainer
+dodge rules. A packaged standalone and dedicated-server playtest is still
+required after rebuilding Shipping; these tests do not establish a runtime pass.
+
+Verification: all 36 trainer tests passed and the UE4.15 Win64 Development
+Editor module compiled and linked. Adding the movement source exposed a unity
+build collision between two existing fire-timing cleanup symbols; the cadence
+symbols were given distinct names without changing their behavior.
