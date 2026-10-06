@@ -1,9 +1,29 @@
 #include "NCAimTrainerCharacter.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "TimerManager.h"
 
 ANCAimTrainerCharacter::ANCAimTrainerCharacter(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer.SetDefaultSubobjectClass<UNCAimTrainerMovement>(ACharacter::CharacterMovementComponentName))
 {
+    // CharacterContent supplies the chosen skin on possession, but animation
+    // classes and capsule-relative body/arms placement belong to the pawn BP.
+    // Keep those authored defaults while retaining our native movement class.
+    static ConstructorHelpers::FClassFinder<AUTCharacter> CharacterTemplate(
+        TEXT("/Game/RestrictedAssets/Blueprints/BaseUTCharacter"));
+    if (CharacterTemplate.Class)
+    {
+        const AUTCharacter* Template = CharacterTemplate.Class->GetDefaultObject<AUTCharacter>();
+        if (Template && Template->GetMesh())
+        {
+            GetMesh()->SetRelativeTransform(Template->GetMesh()->GetRelativeTransform());
+            GetMesh()->SetAnimInstanceClass(Template->GetMesh()->AnimClass);
+        }
+        if (Template && Template->FirstPersonMesh && FirstPersonMesh)
+        {
+            FirstPersonMesh->SetRelativeTransform(Template->FirstPersonMesh->GetRelativeTransform());
+            FirstPersonMesh->SetAnimInstanceClass(Template->FirstPersonMesh->AnimClass);
+        }
+    }
 }
 
 UNCAimTrainerMovement::UNCAimTrainerMovement(const FObjectInitializer& ObjectInitializer)

@@ -21,6 +21,7 @@ ADAPTER = r'''
 #include <limits>
 #include <cstdint>
 #define TEXT(x) x
+#define UE_LOG(...) do {} while (0)
 using uint8 = uint8_t;
 using int32 = int32_t;
 using FString = std::string;

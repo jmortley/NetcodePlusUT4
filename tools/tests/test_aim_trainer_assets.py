@@ -1,4 +1,4 @@
-"""Compile actual target initialization against UT's content/pawn separation.
+"""Compile target and trainee initialization against UT's content/pawn separation.
 
 CharacterContent intentionally has a mesh with no animation Blueprint. The
 stock pawn Blueprint supplies that class and capsule-relative mesh transform.
@@ -19,7 +19,14 @@ ADAPTER = r'''
 #include <iostream>
 #include <string>
 #define TEXT(x) x
-struct FObjectInitializer {};
+struct FObjectInitializer {
+    mutable int MovementType = 0;
+    template<class T> const FObjectInitializer& SetDefaultSubobjectClass(int) const {
+        MovementType = T::Type; return *this;
+    }
+};
+struct ACharacter { static constexpr int CharacterMovementComponentName = 1; };
+struct UNCAimTrainerMovement { static constexpr int Type = 23; };
 struct AUTCharacter;
 struct UClass {
     AUTCharacter* Object = nullptr;
@@ -45,8 +52,10 @@ struct Movement {
 };
 enum class EAutoPossessAI { Disabled, Enabled };
 struct AUTCharacter {
-    Mesh Body;
+    Mesh Body, Hands;
+    Mesh* FirstPersonMesh = &Hands;
     Movement Move;
+    int MovementType = 0;
     AUTCharacterContent* CharacterData = nullptr;
     int PostInitCalls = 0, BeginCalls = 0, Applies = 0;
     float ClassDefaultMeshScale = 1.f;
@@ -55,7 +64,7 @@ struct AUTCharacter {
     int Health = 0, HealthMax = 0, ArmorAmount = 0;
     EAutoPossessAI AutoPossessAI = EAutoPossessAI::Enabled;
     AUTCharacter() = default;
-    explicit AUTCharacter(const FObjectInitializer&) {}
+    explicit AUTCharacter(const FObjectInitializer& init) : MovementType(init.MovementType) {}
     Mesh* GetMesh() const { return const_cast<Mesh*>(&Body); }
     Movement* GetCharacterMovement() { return &Move; }
     void PostInitializeComponents() { ++PostInitCalls; }
@@ -86,6 +95,10 @@ struct ANCAimTrainerTarget : AUTCharacter {
     bool HasCharacterAssets() const;
     void OnRep_TrainerVisible() { ++VisibilityUpdates; }
 };
+struct ANCAimTrainerCharacter : AUTCharacter {
+    using Super = AUTCharacter;
+    explicit ANCAimTrainerCharacter(const FObjectInitializer&);
+};
 '''
 
 CASES = r'''
@@ -97,12 +110,39 @@ int main(int argc, char** argv) {
     const std::string name = argv[1];
     FObjectInitializer initializer;
     UClass animation;
+    UClass handsAnimation;
     AUTCharacter stock;
     stock.Body.AnimClass = &animation;
     stock.Body.Relative = {-108.f, -90.f, 1.25f};
+    stock.Hands.AnimClass = &handsAnimation;
+    stock.Hands.Relative = {-15.f, 12.f, 0.75f};
+    if (name == "trainee_missing_arms") stock.FirstPersonMesh = nullptr;
     UClass templateClass;
     templateClass.Object = &stock;
-    AvailableTemplate = name == "missing_template" ? nullptr : &templateClass;
+    AvailableTemplate = (name == "missing_template" || name == "trainee_missing_template") ? nullptr : &templateClass;
+    if (name.find("trainee_") == 0) {
+        ANCAimTrainerCharacter trainee(initializer);
+        Require(trainee.MovementType == UNCAimTrainerMovement::Type,
+                "authored asset setup replaced the trainer movement selection");
+        Require(trainee.Applies == 0, "constructor prematurely applied skin before possession");
+        if (name == "trainee_missing_template") {
+            Require(!trainee.Body.AnimClass && !trainee.Hands.AnimClass,
+                    "missing template manufactured animation defaults");
+        } else {
+            Require(trainee.Body.AnimClass == &animation && trainee.Body.Relative.Z == -108.f
+                    && trainee.Body.Relative.Yaw == -90.f && trainee.Body.Relative.Scale == 1.25f,
+                    "native trainee lost body animation or capsule-relative placement");
+            if (name == "trainee_defaults") {
+                Require(trainee.Hands.AnimClass == &handsAnimation && trainee.Hands.Relative.Z == -15.f
+                        && trainee.Hands.Relative.Yaw == 12.f && trainee.Hands.Relative.Scale == 0.75f,
+                        "native trainee lost authored first-person arms defaults");
+            } else {
+                Require(name == "trainee_missing_arms" && !trainee.Hands.AnimClass,
+                        "missing optional template arms were dereferenced or invented");
+            }
+        }
+        return 0;
+    }
     AUTCharacterContent skin;
     int meshResource = 1;
     skin.Body.SkeletalMesh = name == "missing_mesh" ? nullptr : &meshResource;
@@ -148,6 +188,7 @@ class AimTrainerAssetTests(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         directory = Path(cls.temporary.name)
         native = (PLUGIN / "Source/Private/NCAimTrainerTarget.cpp").read_text(encoding="utf-8-sig")
+        trainee = (PLUGIN / "Source/Private/NCAimTrainerCharacter.cpp").read_text(encoding="utf-8-sig")
         signatures = (
             "ANCAimTrainerTarget::ANCAimTrainerTarget",
             "void ANCAimTrainerTarget::PostInitializeComponents",
@@ -155,7 +196,8 @@ class AimTrainerAssetTests(unittest.TestCase):
             "bool ANCAimTrainerTarget::HasCharacterAssets",
         )
         source = directory / "trainer_assets.cpp"
-        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures]
+                                   + [native_function(trainee, "ANCAimTrainerCharacter::ANCAimTrainerCharacter"), CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_assets.exe" if os.name == "nt" else "trainer_assets")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -175,6 +217,9 @@ class AimTrainerAssetTests(unittest.TestCase):
     def test_dedicated_server_pose_refresh_is_preserved(self): self.run_case("dedicated_pose")
     def test_missing_pawn_template_fails_closed(self): self.run_case("missing_template")
     def test_missing_skin_mesh_fails_closed(self): self.run_case("missing_mesh")
+    def test_trainee_inherits_body_and_first_person_defaults_with_native_movement(self): self.run_case("trainee_defaults")
+    def test_trainee_missing_template_does_not_crash(self): self.run_case("trainee_missing_template")
+    def test_trainee_missing_first_person_template_does_not_crash(self): self.run_case("trainee_missing_arms")
 
 
 if __name__ == "__main__":

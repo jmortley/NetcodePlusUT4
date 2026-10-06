@@ -28,6 +28,7 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     PlayerControllerClass = ANCAimTrainerPlayerController::StaticClass();
     HUDClass = ANCAimTrainerHUD::StaticClass();
     DefaultPawnClass = ANCAimTrainerCharacter::StaticClass();
+    PlayerPawnObject = ANCAimTrainerCharacter::StaticClass();
     PrimaryActorTick.bCanEverTick = true;
     DefaultMaxPlayers = 1;
     BotFillCount = 0;
@@ -49,7 +50,14 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
 
 void ANCAimTrainerGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
+    // UTBaseGameMode reloads DefaultPawnClass from PlayerPawnObject during
+    // InitGame. A constructor-only DefaultPawnClass assignment is overwritten
+    // by UT's inherited DefaultCharacter asset, including in standalone.
+    PlayerPawnObject = ANCAimTrainerCharacter::StaticClass();
     Super::InitGame(MapName, Options, ErrorMessage);
+    // Preserve the user's global PawnClassOverride setting. UT may save config
+    // during initialization; enforce this mode's pawn without editing that setting.
+    DefaultPawnClass = ANCAimTrainerCharacter::StaticClass();
     // URL/ruleset options cannot turn a ranked preset into a different test.
     DefaultMaxPlayers = 1;
     if (GameSession) { GameSession->MaxPlayers = 1; }
@@ -59,6 +67,13 @@ void ANCAimTrainerGame::InitGame(const FString& MapName, const FString& Options,
     bRemovePawnsAtStart = false;
     bPlayersStartWithArmor = false;
     DefaultInventory.Empty();
+}
+
+UClass* ANCAimTrainerGame::GetDefaultPawnClassForController_Implementation(AController* /*InController*/)
+{
+    // The opt-in trainer requires this pawn's movement component on every
+    // spawn/restart. Ruleset or mutator pawn defaults cannot substitute it.
+    return ANCAimTrainerCharacter::StaticClass();
 }
 
 bool ANCAimTrainerGame::ReadyToStartMatch_Implementation()
@@ -209,7 +224,13 @@ bool ANCAimTrainerGame::ConfigurePawn()
     Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), FRotator::ZeroRotator,
         false, nullptr, ETeleportType::TeleportPhysics);
     UNCAimTrainerMovement* Movement = Cast<UNCAimTrainerMovement>(Pawn->GetCharacterMovement());
-    if (!Movement) { return FailSetup(TEXT("Cannot start: the trainee does not have the required practice movement component.")); }
+    if (!Movement)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("NCP Aim Trainer pawn mismatch: pawn=%s movement=%s expected=%s"),
+            *GetNameSafe(Pawn->GetClass()), *GetNameSafe(Pawn->GetCharacterMovement() ? Pawn->GetCharacterMovement()->GetClass() : nullptr),
+            *GetNameSafe(UNCAimTrainerMovement::StaticClass()));
+        return FailSetup(TEXT("Cannot start: the trainee does not have the required practice movement component."));
+    }
     Movement->ResetTrainerMovement(Progress.bMovementPractice);
     // Uncrouching can raise the capsule center. Reset after restoring posture
     // so a fixed run always starts from the original standing anchor.

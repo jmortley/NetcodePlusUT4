@@ -22,6 +22,7 @@ public:
     virtual void PostLogin(APlayerController* NewPlayer) override;
     virtual void Logout(AController* Exiting) override;
     virtual void RestartPlayer(AController* Player) override;
+    virtual UClass* GetDefaultPawnClassForController_Implementation(AController* InController) override;
     virtual bool ReadyToStartMatch_Implementation() override;
     virtual bool CheckScore_Implementation(AUTPlayerState* Scorer) override;
     virtual void SetPlayerDefaults(APawn* Pawn) override;

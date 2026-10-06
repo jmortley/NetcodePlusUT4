@@ -230,3 +230,27 @@ Verification: all 36 trainer tests passed and the UE4.15 Win64 Development
 Editor module compiled and linked. Adding the movement source exposed a unity
 build collision between two existing fire-timing cleanup symbols; the cadence
 symbols were given distinct names without changing their behavior.
+
+### Trainee pawn selection repair (2026-10-06)
+
+The next packaged test exposed UT's second pawn-class setting: the trainer set
+`DefaultPawnClass`, but `AUTBaseGameMode::InitGame()` then loaded the inherited
+`PlayerPawnObject` and replaced it with stock `DefaultCharacter`. That pawn
+does not contain `UNCAimTrainerMovement`, so the new startup guard correctly
+refused the run. This affects standalone as well as network hosts.
+
+The trainer now sets `PlayerPawnObject` to its native trainee, restores its
+`DefaultPawnClass` after base initialization, and returns the trainer class
+from the spawn-class selector on every restart. Global `PawnClassOverride`
+configuration is preserved. The native trainee also copies
+the stock pawn's authored body/first-person animation and mesh placement;
+normal possession still applies the player's selected skin. A mismatch logs
+the actual pawn and movement classes for diagnosis.
+
+Regression coverage runs the real stock InitGame pawn-selection block before
+checking the trainer's final class choice, including configured overrides and
+standalone/network startup. Rebuild Shipping to pick up this repair.
+
+Verification: all 44 trainer native tests passed and the UE4.15 Win64
+Development Editor module compiled and linked. Packaged offline/network
+play and the equipped first-person animations still require a visual retest.
