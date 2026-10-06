@@ -15,6 +15,14 @@ NetcodePlus replaces stock UT4's hit registration and projectile prediction with
 
 ## Features
 
+### Aim Trainer (329 development)
+
+An optional game mode with real UT character targets: strafe tracking, covered
+headshots, and varied instagib pop-ups. Includes 60-second runs, an in-game
+scenario picker/results HUD, and a UT4Stats top 10 per scenario. See
+[Aim Trainer setup and scoring](Docs/AimTrainer329.md) for the NCWepMut content
+requirement, server approval, launch command and validation limits.
+
 ### Netcode
 
 - **Server-side capsule rewind for hit validation** — every shot is validated against rewound target capsules at the time of fire, scaled by ping. Players at 100ms ping get the same shot effectiveness as players at 20ms.
