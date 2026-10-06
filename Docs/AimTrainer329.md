@@ -4,6 +4,30 @@ An opt-in game mode with real animated UT character targets, three fixed
 60-second scenarios, an in-game picker/results HUD and a shared UT4Stats top 10.
 It does not enable aim assistance or replace the controller in other modes.
 
+## Planned standalone map
+
+Owner direction, 2026-10-06: expand
+[Chatouille's DM-ChatoPractice1](https://utcustomcontent.com/map/759) for the
+standalone trainer. UTCC lists version 1.1, released 2019-03-10. This is the
+intended base for the future map pass; the current runtime room remains the
+prototype while the scenarios are tested.
+
+- Preserve the existing practice areas and credit Chatouille.
+- Add dedicated areas for animated-character strafe tracking, headshots behind
+  cover, and varied disappearing instagib targets.
+- Reuse the scenario picker, timed rounds, results and shared UT4Stats boards.
+  Offline practice must continue to work without a hub or website connection.
+- Replace the arbitrary-map room placement with authored trainer locations and
+  sightlines. Keep free practice separate from the fixed scored presets.
+- If distances, cover, target motion or other scoring conditions change, use a
+  new preset revision rather than mixing those scores with the prototype board.
+
+Before map authoring, inspect the actual map and determine whether its editable
+`.umap` and Blueprint assets are available. The listing and preview have been
+reviewed; source assets and the map's internal practice logic have not. A cooked
+download is not evidence that editable source is included. No map modification
+or redistribution has been performed as part of recording this direction.
+
 ## Start practice
 
 Build NetcodePlus for the UE 4.15 client and server. The native game class is:
