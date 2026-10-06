@@ -29,9 +29,9 @@ public:
     virtual bool CheckRelevance_Implementation(AActor* Other) override;
     virtual bool AllowPausing(APlayerController* PC) override;
 
-    void SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario);
+    void SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario, bool bUseLightningGun);
     void SetMovementPractice(ANCAimTrainerPlayerController* PC, bool bEnabled);
-    void StartTraining(ANCAimTrainerPlayerController* PC);
+    void StartTraining(ANCAimTrainerPlayerController* PC, bool bUseLightningGun);
     void AbortTraining(ANCAimTrainerPlayerController* PC);
     float RecordTargetHit(ANCAimTrainerTarget* Target, float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer);
 
@@ -40,6 +40,7 @@ private:
     UPROPERTY() ANCAimTrainerArena* Arena = nullptr;
     UPROPERTY() TArray<ANCAimTrainerTarget*> Targets;
     UPROPERTY() TSubclassOf<AUTWeapon> SniperClass;
+    UPROPERTY() TSubclassOf<AUTWeapon> LightningClass;
     UPROPERTY() TSubclassOf<AUTWeapon> InstagibClass;
     UPROPERTY() TSubclassOf<AUTWeapon> LinkClass;
     UPROPERTY() AUTWeapon* RunWeapon = nullptr;
@@ -51,6 +52,7 @@ private:
     float NextStatusTime = 0.f;
     float NextDirectionTime = 0.f;
     float NextDodgeTime = 0.f;
+    float NextTrackingSlideTime = 0.f;
     float NextPopupTime = 0.f;
     float NextPopupSlideTime = 0.f;
     float PopupRefireSeconds = 1.f;
@@ -85,6 +87,7 @@ private:
     void ActivateSlot(int32 Index, float Now);
     void UpdateTargets(float Now);
     void UpdatePopupDodger(float Now);
+    void UpdateTrackingMovement(float Now);
     void UpdateShotCount();
     bool HasTrackingContact() const;
     bool IsTrackingBeamFiring() const;

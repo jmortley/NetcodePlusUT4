@@ -29,7 +29,8 @@ struct FMath {
 struct AActor { virtual ~AActor() = default; };
 struct AUTPlayerState : AActor {
     float StoredShots = 0.f;
-    float GetStatsValue(int) const { return StoredShots; }
+    float LightningShots = 0.f;
+    float GetStatsValue(int name) const { return name == 2 ? LightningShots : StoredShots; }
 };
 struct AController : AActor { AActor* PlayerState = nullptr; };
 struct ANCAimTrainerPlayerController : AController {
@@ -160,6 +161,20 @@ int main(int argc, char** argv) {
         Require(next.Game.Progress.Shots==1 && next.Game.Progress.Hits==1
                 && next.Game.Progress.Score==100 && next.Game.Progress.Accuracy==100.f && next.Game.bRankedRun,
                 "fresh baseline retained old misses or rejected valid first headshot");
+    } else if (name == "lightning_scoring") {
+        Fixture f;
+        f.Gun.ShotsStatsName = 2; f.Gun.HeadshotDamageType = 9;
+        f.PlayerState.StoredShots = 150.f; f.PlayerState.LightningShots = 20.f;
+        f.Game.ShotStatBaseline = f.Gun.GetWeaponShotsStats(&f.PlayerState);
+        f.PlayerState.LightningShots = 23.f; f.Game.Progress.TargetsExpired = 10;
+        Require(f.Hit() == 0.f && f.Target.Visible,
+                "Lightning practice accepted the sniper's damage type");
+        f.Event.DamageTypeClass = 9;
+        Require(f.Hit() > 0.f && !f.Target.Visible, "Lightning headshot damage type did not score");
+        f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Shots == 3 && f.Game.Progress.Hits == 1 && f.Game.Progress.Headshots == 1
+                && f.Game.Progress.Score == 100 && std::fabs(f.Game.Progress.Accuracy - 100.f/3.f) < .01f,
+                "Lightning shot stat or headshot score was mixed with sniper history");
     } else if (name == "headshot_points") {
         Fixture f; f.Game.ShotStatBaseline=100.f; f.PlayerState.StoredShots=105.f;
         f.Game.Progress.TargetsExpired=20; f.Game.UpdateShotCount();
@@ -393,6 +408,7 @@ class AimTrainerScoringTests(unittest.TestCase):
     def test_tracking_requires_continuity_and_rejects_long_stalls(self): self.run_case("tracking")
     def test_each_appearance_scores_once(self): self.run_case("one_hit")
     def test_headshots_use_actual_sniper_damage_type(self): self.run_case("body")
+    def test_lightning_uses_its_own_headshot_damage_type_and_shot_counter(self): self.run_case("lightning_scoring")
     def test_authorized_trainee_weapon_and_target_only(self): self.run_case("identity")
     def test_expiry_and_finish_deadlines_apply_before_tick(self): self.run_case("deadline")
     def test_instagib_accepts_body_while_tracking_rejects_nonbeam_damage(self): self.run_case("instagib")

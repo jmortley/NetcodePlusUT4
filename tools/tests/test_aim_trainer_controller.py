@@ -21,6 +21,31 @@ ADAPTER = r'''
 #include <string>
 #include <vector>
 #include <new>
+#include <algorithm>
+#include <cctype>
+#define TEXT(value) value
+enum class ESearchCase { IgnoreCase };
+struct FString : std::string {
+    using std::string::string;
+    using std::string::operator=;
+    bool Equals(const char* other, ESearchCase) const {
+        std::string normalized = *this;
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+            [](unsigned char c) { return char(std::toupper(c)); });
+        return normalized == other;
+    }
+};
+struct FPaths { static std::string GeneratedConfigDir() { return "Client/Config/"; } };
+struct Config {
+    std::string Choice;
+    int Reads = 0;
+    void GetString(const char* section, const char* key, FString& out, const std::string& path) {
+        if (std::string(section) != "WeaponSkinsPlus" || std::string(key) != "HitscanChoice"
+            || path != "Client/Config/Mod.ini") std::abort();
+        ++Reads; out = Choice;
+    }
+} TestConfig;
+Config* GConfig = &TestConfig;
 using uint8 = uint8_t;
 using int32 = int32_t;
 constexpr int32 INDEX_NONE = -1;
@@ -153,8 +178,9 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     bool LastMovementSelection = false;
     bool HasTrainerInputFocus() const { return InputFocus; }
     bool IsLocalController() const { return Local; }
-    void ServerTrainerSelectScenario(uint8 value) { ++Selects; LastSelection = value; }
-    void ServerTrainerStart() { ++Starts; }
+    bool LastLightningChoice = false;
+    void ServerTrainerSelectScenario(uint8 value, bool lightning) { ++Selects; LastSelection = value; LastLightningChoice = lightning; }
+    void ServerTrainerStart(bool lightning) { ++Starts; LastLightningChoice = lightning; }
     void ServerTrainerAbort() { ++Aborts; }
     void ServerTrainerSetMovementPractice(bool enabled) { ++MovementSelections; LastMovementSelection = enabled; }
     void ForceNetUpdate() { ++NetUpdates; }
@@ -175,6 +201,7 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     void SetTrackingFireHeld(bool, bool);
     void SelectTrainerScenario(uint8);
     void StartTrainerRun();
+    bool PrefersTrainerLightningGun() const;
     void ReturnToTrainerMenu();
     void ToggleTrainerMovementPractice();
     bool AdmitTrainerRequest(uint8);
@@ -427,6 +454,33 @@ void HitsoundWarmup() {
     remote.OnRep_TrainerProgress();
     Require(AClientHitsounds::Warmups == 1, "nonlocal controller prepared audio assets");
 }
+void HitscanPreference() {
+    ANCAimTrainerPlayerController pc;
+    for (const char* choice : {"", "Sniper", "LG", "lg", "lG", "invalid"}) {
+        TestConfig.Choice = choice;
+        const bool expected = std::string(choice) == "LG" || std::string(choice) == "lg" || std::string(choice) == "lG";
+        pc.SelectTrainerScenario(1);
+        Require(pc.LastLightningChoice == expected, "menu did not forward the owning player's saved hitscan preference");
+        pc.StartTrainerRun();
+        Require(pc.LastLightningChoice == expected, "start did not resample and send the hitscan preference");
+    }
+    TestConfig.Choice = "LG";
+    pc.Local = false;
+    const int reads = TestConfig.Reads;
+    Require(!pc.PrefersTrainerLightningGun() && TestConfig.Reads == reads,
+            "nonlocal controller read the server's config as a client preference");
+    pc.Local = true;
+    for (uint8 phase : {uint8(1), uint8(2)}) {
+        pc.TrainerProgress.Phase = phase;
+        const int selects = pc.Selects, starts = pc.Starts;
+        pc.SelectTrainerScenario(1); pc.StartTrainerRun();
+        Require(pc.Selects == selects && pc.Starts == starts && TestConfig.Reads == reads,
+                "active run admitted a hitscan preference change");
+    }
+    GConfig = nullptr;
+    Require(!pc.PrefersTrainerLightningGun(), "unavailable settings did not fall back to sniper");
+    GConfig = &TestConfig;
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required"); const std::string name(argv[1]);
     if (name == "menu") MenuControls();
@@ -441,6 +495,7 @@ int main(int argc, char** argv) {
     else if (name == "movement") MovementPractice();
     else if (name == "retry_posture") MovementRetryPosture();
     else if (name == "hitsound_warmup") HitsoundWarmup();
+    else if (name == "hitscan_preference") HitscanPreference();
     else Require(false, "unknown case");
 }
 '''
@@ -479,6 +534,7 @@ class AimTrainerControllerTests(unittest.TestCase):
             "void ANCAimTrainerPlayerController::SetTrackingFireHeld",
             "void ANCAimTrainerPlayerController::SelectTrainerScenario",
             "void ANCAimTrainerPlayerController::StartTrainerRun",
+            "bool ANCAimTrainerPlayerController::PrefersTrainerLightningGun",
             "void ANCAimTrainerPlayerController::ReturnToTrainerMenu",
             "void ANCAimTrainerPlayerController::ToggleTrainerMovementPractice",
             "bool ANCAimTrainerPlayerController::AdmitTrainerRequest",
@@ -515,6 +571,7 @@ class AimTrainerControllerTests(unittest.TestCase):
     def test_movement_practice_stays_lateral_and_score_updates_preserve_jumps(self): self.run_case("movement")
     def test_new_countdown_resets_crouched_or_airborne_owner_without_repeated_resets(self): self.run_case("retry_posture")
     def test_first_local_picker_prepares_hitsounds_once(self): self.run_case("hitsound_warmup")
+    def test_saved_local_hitscan_choice_is_sent_only_with_menu_and_start_requests(self): self.run_case("hitscan_preference")
 
 
 if __name__ == "__main__":

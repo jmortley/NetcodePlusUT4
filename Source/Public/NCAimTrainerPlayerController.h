@@ -16,6 +16,8 @@ struct FNCAimTrainerProgress
 	UPROPERTY() uint8 Phase = 0;
 	/** Optional lateral/jump/dodge practice. These runs never enter ranked boards. */
 	UPROPERTY() bool bMovementPractice = false;
+	/** Selected from the owning player's existing NCP hitscan preference. */
+	UPROPERTY() bool bUseLightningGun = false;
 	UPROPERTY() int32 Score = 0;
 	UPROPERTY() int32 Shots = 0;
 	UPROPERTY() int32 Hits = 0;
@@ -66,9 +68,9 @@ public:
 	void NotifyTrainerHit(float Damage);
 
 	UFUNCTION(Server, Reliable, WithValidation)
-	void ServerTrainerSelectScenario(uint8 Scenario);
+	void ServerTrainerSelectScenario(uint8 Scenario, bool bUseLightningGun);
 	UFUNCTION(Server, Reliable, WithValidation)
-	void ServerTrainerStart();
+	void ServerTrainerStart(bool bUseLightningGun);
 	UFUNCTION(Server, Reliable, WithValidation)
 	void ServerTrainerAbort();
 	UFUNCTION(Server, Reliable, WithValidation)
@@ -95,6 +97,7 @@ private:
 	void SetTrackingFireHeld(bool bPrimary, bool bHeld);
 	/** Bound repeated requests without dropping a quick select-then-start sequence. */
 	bool AdmitTrainerRequest(uint8 Action);
+	bool PrefersTrainerLightningGun() const;
 	double NextTrainerRequestTime[4] = { 0.0, 0.0, 0.0, 0.0 };
 	uint8 LastPresentedPhase = 255;
 	bool bLastPresentedMovementPractice = false;

@@ -254,6 +254,52 @@ void DodgerSightlines() {
         }
     }
 }
+void TrackingSlideLane() {
+    const FSeat seat=PopupDodgerSeat(); // Link uses the same unobstructed X=-800 lane.
+    const float travel=SliderMaximumTravel();
+    const float walkingSpeed=500.f;
+    const float walkReach=seat.WiggleRange+walkingSpeed/30.f
+        +walkingSpeed*walkingSpeed/(2.f*WiggleAcceleration);
+    const float slideReach=std::max(500.f+travel,walkReach);
+    Require(slideReach+CapsuleRadius<1800.f,
+        "lateral native slide or resumed strafe can leave the room");
+    Require(slideReach<DodgerMaximumReach(),
+        "slide widened the existing conservative movement envelope");
+    for (float offset:{-500.f,-499.99f,0.f,499.99f,500.f}) {
+        for (float roll:{0.f,.49f,.5f,1.f}) {
+            const float direction=NCAimTrainerScenarioPolicy::TrackingSlideDirection(offset,roll);
+            for (float fraction:{0.f,.25f,.5f,.75f,1.f}) {
+                const float y=seat.CenterY+offset+direction*travel*fraction;
+                Require(std::abs(y)<=slideReach,
+                    "direction guard does not bound outward slide travel");
+                // Center of both standing and conservatively low slide capsules
+                // remains within the minimum accepted1600-unit Link range.
+                // This is the fixed trainee position; movement practice may move
+                // the player farther away and deliberately changes difficulty.
+                for (float centerHeight:{40.f,69.f,108.f}) {
+                    const float dx=seat.MinX+1800.f, dz=seat.FloorZ+centerHeight-191.f;
+                    Require(dx*dx+y*y+dz*dz<1600.f*1600.f,
+                        "outward tracking slide puts the target beyond minimum beam range");
+                }
+            }
+        }
+    }
+    // A prior dodge can place the pawn past the walking threshold. A subsequent
+    // slide must head inward and never enlarge that already-established bound.
+    for (float side:{-1.f,1.f}) {
+        for (float offset:{800.f,DodgerMaximumReach()}) {
+            for (float roll:{0.f,1.f}) {
+                const float start=side*offset;
+                const float direction=NCAimTrainerScenarioPolicy::TrackingSlideDirection(start,roll);
+                Require(direction==-side,"post-dodge slide travels farther outward");
+                const float finish=start+direction*travel;
+                Require(std::abs(finish)<=std::abs(start),"post-dodge slide increases its outer excursion");
+                Require(std::max(std::abs(start),std::abs(finish))+CapsuleRadius<1800.f,
+                    "combined native dodge/slide envelope reaches the wall");
+            }
+        }
+    }
+}
 int main(int argc,char**argv) {
     Require(argc==2,"choose a case"); const std::string name=argv[1];
     if(name=="support") PlatformSupport();
@@ -263,6 +309,7 @@ int main(int argc,char**argv) {
     else if(name=="slider_runway") SliderRunway();
     else if(name=="dodger_support") DodgerLaneSupport();
     else if(name=="dodger_sightlines") DodgerSightlines();
+    else if(name=="tracking_slide") TrackingSlideLane();
     else Require(false,"unknown case");
 }
 '''
@@ -301,6 +348,7 @@ class AimTrainerLayoutTests(unittest.TestCase):
     def test_right_platform_supports_native_slide_and_lateral_wiggle(self): self.run_case("slider_runway")
     def test_permanent_dodger_lane_supports_native_dodge_overshoot(self): self.run_case("dodger_support")
     def test_permanent_dodger_remains_visible_across_its_lane(self): self.run_case("dodger_sightlines")
+    def test_tracking_slide_stays_in_lane_and_within_fixed_player_beam_range(self): self.run_case("tracking_slide")
 
 
 if __name__ == "__main__":

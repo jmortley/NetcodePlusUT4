@@ -17,6 +17,7 @@ public:
     virtual void Tick(float DeltaSeconds) override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     virtual float TakeDamage(float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer) override;
+    virtual void PlayTakeHitEffects_Implementation() override;
     virtual FVector GetHeadLocation(float PredictionTime = 0.f) override;
     virtual void NotifyBlockedHeadShot(AUTCharacter* ShotInstigator) override;
 
@@ -32,6 +33,8 @@ public:
     bool TryTrainerDodge(float DirectionRoll);
     /** Uses UT's floor-slide physics toward the trainee, along world -X. */
     bool TryTrainerSlideForward();
+    /** Native lateral slide for the tracking target; turns inward near lane edges. */
+    bool TryTrainerTrackingSlide(float DirectionRoll);
     bool IsTrainerSliding() const;
 
 private:
@@ -43,8 +46,10 @@ private:
     float StrafeDirection = 1.0f;
     float StrafeRange = 800.f;
     FVector StrafeCenter = FVector::ZeroVector;
+    FVector TrainerSlideDirection = FVector::ZeroVector;
     float AppearanceTime = 0.f;
     void ResetTargetMovement();
+    bool StartTrainerSlide(const FVector& Direction);
 };
 
 /** Runtime room: hard references keep the stock cube/material in the cook.

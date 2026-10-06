@@ -56,7 +56,8 @@ The mode creates its own enclosed practice room above the map. There is no new
 map or Blueprint package to create. Its constructor references the required
 stock arena and character content for cooking. **All scenarios require the
 current NCWepMut weapon content pak on both client and server**, including
-`/Game/Blueprints/Netcode/UTNPShaftLink`, `/Game/Blueprints/Netcode/UTNPSniper` and
+`/Game/Blueprints/Netcode/UTNPShaftLink`, `/Game/Blueprints/Netcode/UTNPSniper`,
+`/Game/Blueprints/Netcode/UTNPLightningGun` and
 `/Game/Blueprints/Netcode/N+InstagibRifle`. The trainer resolves these classes
 after paks mount. Missing or incompatible weapon content blocks the selected
 scenario with an explanation; tracking requires the real NCP beam-only Link
@@ -89,12 +90,12 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 7)
+## Scenarios and scoring (revision 8)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
-| Link tracking | Hold either fire button to track a strafing/dodging character with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
-| Headshots | Hit wiggling character heads at five cover stations with the sniper rifle. Body hits do not count. | 100 per confirmed headshot. Misses affect accuracy; expired targets do not deduct points. |
+| Link tracking | Hold either fire button to track a strafing, dodging and occasionally sliding character with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
+| Headshots | Hit wiggling character heads at five cover stations with the NCP Sniper or Lightning Gun. Body hits do not count. | 100 per confirmed headshot. Misses affect accuracy; expired targets do not deduct points. |
 | Instagib pop-up | Shoot five moving pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block and a forward slide on the high right platform. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
 
 Tracking observes the real authoritative NCP Link beam's selected target, with
@@ -112,6 +113,18 @@ from subsequent successful hits. Every confirmed headshot now adds 100 points;
 the HUD shows live headshots, shots and expiries. Completed runs also log these
 counts in standalone, allowing scoring complaints to be checked against actual
 accepted hits. Instagib retains its existing miss/expiry point deductions.
+
+Headshot practice honors the owning player's saved NCP hitscan choice:
+`[WeaponSkinsPlus] HitscanChoice=LG` or `Sniper` in `Mod.ini`, selected through
+the existing `weaponskins` menu. Selecting a scenario or starting/replaying a
+run reads the preference again. The choice travels with that request to the
+authority, including when joining a dedicated server. It cannot swap weapons
+during countdown or an active run. The HUD identifies the equipped rifle.
+Both shipped rifles have the same 1.3-second primary fire interval and 0.95
+headshot scales, so they share this board. Scoring reads the equipped weapon's
+own shot counter and headshot damage type, including LightningRifleShots and
+the Lightning Gun headshot type. Missing LG content blocks the run rather than
+silently substituting the sniper.
 
 Tracking uses the existing beam's range, obstruction and server validation.
 It does not normalize network latency; use low-ping hosts when comparing runs.
@@ -131,6 +144,18 @@ Link tracking uses 75% short strafe holds (0.14–0.34 seconds) and 25% longer h
 (0.45–0.80 seconds), with grounded dodge attempts every 1.8–3.8 seconds. Native
 UT dodge cooldowns and landing physics still apply. Ground reversals pause
 during a dodge. This is randomized target movement, not a replay of a fixed path.
+
+Revision 8 adds occasional lateral floor slides, scheduled 4–7 seconds apart.
+Attempts blocked by grounding or the shared native dodge/slide cooldown retry
+after 0.2 seconds. Slides turn inward near the lane edges, retain their direction
+through the native 0.7-second duration, then return to normal strafing. They do
+not start in the final second of a run. Instagib's forward slide is unchanged.
+
+Accepted Link contact also uses UT's damage-type hit effects on the target,
+including its body flash. The trainer's immortal TakeDamage override previously
+skipped that native path. LastTakeHitInfo replicates the effects to remote
+clients and plays them immediately in standalone, without health loss, armor
+effects or knockback. Hiding a pooled target clears its old flash material.
 
 Instagib introduces at most one pop-up every 1.00–1.10 seconds, with a maximum
 of five timed pop-ups present. Each stays for 5.5–6.8 seconds, allowing five one-second
@@ -171,25 +196,27 @@ exposure remains for the crouch plus a full rifle refire interval and 0.1 second
 Targets behind cover can briefly disappear while crouched. Reappearing targets
 start standing; headshot targets and Link tracking do not gain these crouches.
 
-All three use the fixed target model/preset in revision 7. Custom models,
+All three use the fixed target model/preset in revision 8. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=7&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=8&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
 it does not stream aiming samples to Django. Revised scenarios submit revision
-7; Django retains revision-1/2/3/4/5/6 submissions and explicit older boards without
+8; Django retains revision-1/2/3/4/5/6/7 submissions and explicit older boards without
 mixing their scores with the new difficulty or accuracy definition. Revision 4 onward
 includes `fired_ms` in every result: measured firing time for tracking and zero
 for precision scenarios. Older submissions retain their original payloads and
 full-run tracking denominator. Apply migration `0066_nc_aimtrainer_fired_ms`
 before restarting the updated Django web workers and enabling current hosts.
-Revisions 5 through 7 need no additional migration; deploy revision-7 API support
-before enabling revision-7 hosts.
+Revisions 5 through 8 need no additional migration; deploy revision-8 API support
+before enabling revision-8 hosts. Rebuild trainer clients and servers together:
+revision 8 adds the rifle choice to the trainer's menu/start RPCs and progress
+snapshot. These classes are used only by the trainer game mode.
 
 Score submission is an asynchronous server request to `/aimtrainer_entry/`.
 The identity comes from the server's player state. Run IDs make retries
@@ -452,3 +479,20 @@ floor-slide impulse/timing, controllerless expiry and replication flags, target
 reuse, scenario isolation, rifle timing and platform clearance. Rebuild Shipping
 for the packaged visual playtest. Deploy revision-7 API support for shared
 scores; no additional database migration is required.
+
+### Link slides, contact feedback and Lightning headshots (2026-10-06)
+
+Revision 8 adds occasional native lateral slides to Link tracking and restores
+UT's Link damage-type hit flash on the immortal target. Headshot practice now
+uses the owning player's saved NCP Sniper/Lightning preference when selecting
+or starting a run. The shared native headshot path and equipped weapon's stat
+and damage-type identifiers keep Lightning scoring consistent with Sniper.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 145 trainer tests and 25 Django tests passed. Coverage includes slide timing,
+cooldown recovery and lane bounds; native hit-info creation and replication
+notification; clearing pooled target flashes; client preference and authority
+phase gates; missing Lightning content; and Lightning-specific hit/stat scoring.
+GPU effects and the packaged client/server experience still need a playtest.
+Rebuild trainer clients and servers together, and deploy revision-8 API support
+for shared scores. No additional database migration is required.

@@ -115,7 +115,9 @@ void ANCAimTrainerHUD::Button(int32 Action, const FString& Text, float X, float 
 void ANCAimTrainerHUD::DrawSessionHeader(const FNCAimTrainerProgress& Progress)
 {
 	Label(TEXT("NETCODE+ / AIM TRAINER"), 42.f, 25.f, 18.f, TrainerAccent);
-	Label(ScenarioName(Progress.Scenario), 42.f, 51.f, 14.f, TrainerMuted);
+	Label(Progress.Scenario == 1
+		? (Progress.bUseLightningGun ? TEXT("HEADSHOTS / LIGHTNING GUN") : TEXT("HEADSHOTS / SNIPER RIFLE"))
+		: ScenarioName(Progress.Scenario), 42.f, 51.f, 14.f, TrainerMuted);
 	if (Progress.bMovementPractice)
 	{
 		Label(TEXT("MOVEMENT PRACTICE / UNRANKED"), 42.f, 73.f, 13.f, TrainerAccent);
@@ -167,7 +169,7 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 	Panel(90.f, 126.f, 1100.f, 551.f, TrainerPanel);
 	Label(TEXT("CHOOSE YOUR PRACTICE"), 120.f, 151.f, 27.f, TrainerInk);
 	Label(TEXT("REAL UT CHARACTERS. THREE 60-SECOND CHALLENGES."), 120.f, 188.f, 14.f, TrainerMuted);
-	const TCHAR* Line1[] = { TEXT("Follow strafes with the Link beam."), TEXT("Sniper precision on real heads."), TEXT("Shoot before targets disappear.") };
+	const TCHAR* Line1[] = { TEXT("Track strafes, dodges and slides."), TEXT("Uses your NCP Sniper / Lightning choice."), TEXT("Shoot before targets disappear.") };
 	const TCHAR* Line2[] = { TEXT("Hold either fire button. Beam hits score."), TEXT("100 per headshot. Misses affect accuracy."), TEXT("Faster pop-ups plus a constant dodger.") };
 	for (int32 Mode = 0; Mode < 3; ++Mode)
 	{

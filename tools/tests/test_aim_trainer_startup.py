@@ -54,10 +54,15 @@ enum class ETeleportType { TeleportPhysics };
 struct UClass {
     int Kind;
     bool HasAnyClassFlags(int) const { return false; }
-    bool IsChildOf(UClass* other) const { return other && (other->Kind == Kind || (Kind == 3 && other->Kind == 4)); }
+    bool IsChildOf(UClass* other) const {
+        return other && (other->Kind == Kind || (Kind == 3 && other->Kind == 4)
+                        || (Kind == 6 && other->Kind == 1));
+    }
 };
-UClass SniperType{1}, InstagibType{2}, LinkType{3}, LinkBaseType{4}, BeamStateType{5};
+UClass SniperType{1}, InstagibType{2}, LinkType{3}, LinkBaseType{4}, BeamStateType{5}, LightningType{6};
 bool MissingLinkAsset = false, WrongLinkAsset = false;
+bool MissingLightningAsset = false, WrongLightningAsset = false;
+int LightningLoads = 0;
 std::string LastLoadedPath;
 template<class T> struct TSubclassOf {
     UClass* Value = nullptr;
@@ -72,6 +77,10 @@ template<class T> UClass* LoadClass(void*, const char* path, void*, int) {
     if (LastLoadedPath.find("Link") != std::string::npos) {
         return MissingLinkAsset ? nullptr : WrongLinkAsset ? &SniperType : &LinkType;
     }
+    if (LastLoadedPath == "/Game/Blueprints/Netcode/UTNPLightningGun.UTNPLightningGun_C") {
+        ++LightningLoads;
+        return MissingLightningAsset ? nullptr : WrongLightningAsset ? &InstagibType : &LightningType;
+    }
     return std::string(path).find("Instagib") != std::string::npos ? &InstagibType : &SniperType;
 }
 struct AUTWeapon {
@@ -81,7 +90,13 @@ struct AUTWeapon {
     float GetRefireTime(int) const { return BeamRefire; }
     void StopFire(int) {}
 };
-struct AUTPlusSniper : AUTWeapon { static UClass* StaticClass() { return &SniperType; } };
+struct AUTPlusSniper : AUTWeapon {
+    int HeadshotDamageType = 11;
+    static UClass* StaticClass() { return &SniperType; }
+};
+struct LightningGun : AUTPlusSniper {
+    LightningGun() { ShotsStatsName = 2; HeadshotDamageType = 22; }
+};
 struct AUTPlusShockRifle : AUTWeapon {
     static UClass* StaticClass() { return &InstagibType; }
     bool HasSharedInstagibFireModes() const { return true; }
@@ -139,6 +154,7 @@ struct AUTCharacter : APawn {
     struct Capsule { float HalfHeight=108.f; float GetScaledCapsuleHalfHeight() const { return HalfHeight; } } Shape;
     Movement Move;
     AUTPlusSniper Sniper;
+    LightningGun Lightning;
     AUTPlusShockRifle Instagib;
     AUTWeap_LinkGun_Shaft_NCP Link;
     bool bCanBeDamaged = true, Dead = false;
@@ -149,6 +165,7 @@ struct AUTCharacter : APawn {
     void DiscardAllInventory() { ++Discards; }
     AUTWeapon* CreateInventory(TSubclassOf<AUTWeapon> type) {
         ++Creates;
+        if (type->Kind == 6) return &Lightning;
         if (type->Kind == 3) return &Link;
         return type->Kind == 2 ? static_cast<AUTWeapon*>(&Instagib) : static_cast<AUTWeapon*>(&Sniper);
     }
@@ -194,14 +211,14 @@ struct BaseGame {
 };
 struct FNCAimTrainerProgress {
     uint8 Scenario = 0, Phase = 0;
-    bool bMovementPractice = false;
+    bool bMovementPractice = false, bUseLightningGun = false;
     float RemainingSeconds = 60;
 };
 struct ANCAimTrainerGame : BaseGame {
     using Super = BaseGame;
     ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
-    TSubclassOf<AUTWeapon> SniperClass, InstagibClass, LinkClass;
+    TSubclassOf<AUTWeapon> SniperClass, LightningClass, InstagibClass, LinkClass;
     FVector ArenaOrigin{0.f, 0.f, 50000.f};
     FNCAimTrainerProgress Progress;
     int Publishes = 0, Fetches = 0;
@@ -231,9 +248,9 @@ struct ANCAimTrainerGame : BaseGame {
     void RestartPlayer(AController*) override;
     bool ConfigurePawn();
     bool IsInsidePracticeLane(const AUTCharacter*) const;
-    void SelectScenario(ANCAimTrainerPlayerController*,uint8);
+    void SelectScenario(ANCAimTrainerPlayerController*,uint8,bool=false);
     void SetMovementPractice(ANCAimTrainerPlayerController*,bool);
-    void StartTraining(ANCAimTrainerPlayerController*);
+    void StartTraining(ANCAimTrainerPlayerController*,bool=false);
     void AbortTraining(ANCAimTrainerPlayerController*);
 };
 void Require(bool value, const char* why) {
@@ -367,6 +384,111 @@ int main(int argc, char** argv) {
         Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Instagib, "popup selection lost instagib");
         f.Game.SelectScenario(&f.Player,0);
         Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Link, "returning to tracking retained precision weapon");
+    } else if (name == "lightning_select") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        f.Game.SelectScenario(&f.Player,1,true);
+        Require(f.Game.Progress.bUseLightningGun && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning,
+                "headshot selection ignored Lightning preference");
+        Require(LastLoadedPath == "/Game/Blueprints/Netcode/UTNPLightningGun.UTNPLightningGun_C",
+                "Lightning selection resolved an invented or stock asset");
+        const auto* rifle = Cast<AUTPlusSniper>(f.Game.RunWeapon);
+        Require(rifle && rifle->ShotsStatsName == 2 && rifle->HeadshotDamageType == 22,
+                "Lightning lost its own shot counter or headshot damage type");
+        Require(f.Game.ConfigurePawn() && LightningLoads == 1,
+                "valid Lightning class was not cached for re-equipping");
+        f.Game.SelectScenario(&f.Player,2,true);
+        Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Instagib,
+                "Lightning preference replaced the instagib scenario weapon");
+        f.Game.SelectScenario(&f.Player,0,true);
+        Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Link,
+                "Lightning preference replaced the tracking scenario weapon");
+        f.Game.SelectScenario(&f.Player,1,false);
+        Require(!f.Game.Progress.bUseLightningGun && f.Game.RunWeapon == &f.Game.SpawnedPawn.Sniper,
+                "selecting Sniper retained the cached Lightning weapon");
+        Require(f.Game.RunWeapon->ShotsStatsName == 1, "Sniper inherited Lightning's shot counter");
+        f.Game.SelectScenario(&f.Player,1,true);
+        Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning && LightningLoads == 1,
+                "switching back to Lightning used the Sniper cache");
+    } else if (name == "lightning_start") {
+        f.BeginWorld(); f.Game.NetMode=1; f.Game.PostLogin(&f.Player);
+        f.Game.SelectScenario(&f.Player,1,false);
+        f.Game.StartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase == 1 && f.Game.Progress.bUseLightningGun
+                && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning && f.Game.bRankedRun,
+                "start did not use the current Lightning preference in the ranked headshot preset");
+        f.Game.Progress.Phase = 3;
+        f.Game.StartTraining(&f.Player,false);
+        Require(f.Game.Progress.Phase == 1 && !f.Game.Progress.bUseLightningGun
+                && f.Game.RunWeapon == &f.Game.SpawnedPawn.Sniper && f.Game.bRankedRun,
+                "retry did not use the updated Sniper preference");
+    } else if (name == "lightning_lifecycle") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.SelectScenario(&f.Player,1,true);
+        for (bool movement : {true, false}) {
+            f.Game.SetMovementPractice(&f.Player,movement);
+            Require(f.Game.Progress.bUseLightningGun && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning,
+                    "movement option reset the chosen headshot weapon");
+        }
+        f.Game.StartTraining(&f.Player,true);
+        for (uint8 phase : {uint8(1), uint8(2)}) {
+            f.Game.Progress.Phase=phase;
+            const int creates = f.Game.SpawnedPawn.Creates, publishes = f.Game.Publishes;
+            f.Game.SelectScenario(&f.Player,1,false);
+            f.Game.StartTraining(&f.Player,false);
+            Require(f.Game.Progress.Phase == phase && f.Game.Progress.bUseLightningGun
+                    && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning
+                    && f.Game.SpawnedPawn.Creates == creates && f.Game.Publishes == publishes,
+                    "countdown or active-run request changed the selected weapon");
+        }
+        f.Game.AbortTraining(&f.Player);
+        Require(f.Game.Progress.Phase == 0 && f.Game.Progress.Scenario == 1
+                && f.Game.Progress.bUseLightningGun && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning,
+                "abort forgot the selected Lightning weapon");
+    } else if (name == "lightning_authority") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.SelectScenario(&f.Player,1,true);
+        ANCAimTrainerPlayerController stranger;
+        const int creates = f.Game.SpawnedPawn.Creates, publishes = f.Game.Publishes;
+        for (auto* requestor : {&stranger, static_cast<ANCAimTrainerPlayerController*>(nullptr)}) {
+            f.Game.SelectScenario(requestor,1,false);
+            f.Game.StartTraining(requestor,false);
+            f.Game.SetMovementPractice(requestor,true);
+            f.Game.AbortTraining(requestor);
+        }
+        f.Game.SelectScenario(&f.Player,3,false);
+        Require(f.Game.Progress.Phase == 0 && f.Game.Progress.Scenario == 1
+                && f.Game.Progress.bUseLightningGun && !f.Game.Progress.bMovementPractice
+                && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning
+                && f.Game.SpawnedPawn.Creates == creates && f.Game.Publishes == publishes,
+                "unauthorized or invalid-scenario request changed the trainee's choice");
+    } else if (name == "lightning_assets") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player); f.Game.SelectScenario(&f.Player,1,false);
+        MissingLightningAsset = true;
+        f.Game.SelectScenario(&f.Player,1,true);
+        Require(!f.Game.RunWeapon && f.Game.Progress.bUseLightningGun && LightningLoads == 1,
+                "missing Lightning content fell back to a cached Sniper");
+        f.Game.StartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase == 0 && !f.Game.RunWeapon && LightningLoads == 2,
+                "missing Lightning started a run or stopped retrying the asset lookup");
+        MissingLightningAsset = false;
+        f.Game.StartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase == 1 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning
+                && LightningLoads == 3, "later Lightning pak mount did not recover startup");
+    } else if (name == "lightning_content") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        WrongLightningAsset = true;
+        const int creates = f.Game.SpawnedPawn.Creates;
+        f.Game.SelectScenario(&f.Player,1,true);
+        f.Game.StartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase == 0 && !f.Game.RunWeapon && f.Game.SpawnedPawn.Creates == creates,
+                "wrong native base class was accepted as Lightning content");
+        WrongLightningAsset = false; f.Game.LightningClass = nullptr;
+        f.Game.SpawnedPawn.Lightning.ShotsStatsName = NAME_None;
+        f.Game.StartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase == 0 && !f.Game.SetupError.empty(),
+                "Lightning without its own shot counter entered countdown");
+        f.Game.SpawnedPawn.Lightning.ShotsStatsName = 2;
+        f.Game.StartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase == 1 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning,
+                "valid Lightning content could not recover startup");
     } else if (name == "tracking_assets") {
         f.BeginWorld(); MissingLinkAsset = true; f.Game.PostLogin(&f.Player);
         Require(!f.Game.RunWeapon && !f.Game.ConfigurePawn(), "missing Link silently started tracking");
@@ -460,6 +582,12 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_restart_clears_firing_and_contact_clocks(self): self.run_case("run_clock_reset")
     def test_lane_accepts_crouching_jumping_but_rejects_escapes(self): self.run_case("lane_bounds")
     def test_each_scenario_equips_its_real_weapon(self): self.run_case("tracking_weapon")
+    def test_headshot_selection_uses_exact_lightning_asset_and_independent_cache(self): self.run_case("lightning_select")
+    def test_start_and_retry_apply_current_headshot_weapon_choice(self): self.run_case("lightning_start")
+    def test_lightning_choice_survives_movement_and_abort_but_cannot_change_midrun(self): self.run_case("lightning_lifecycle")
+    def test_other_players_and_invalid_scenarios_cannot_change_headshot_choice(self): self.run_case("lightning_authority")
+    def test_missing_lightning_fails_closed_and_recovers_after_mount(self): self.run_case("lightning_assets")
+    def test_lightning_requires_sniper_base_and_its_own_shot_counter(self): self.run_case("lightning_content")
     def test_tracking_requires_link_assets_and_recovers_after_mount(self): self.run_case("tracking_assets")
     def test_tracking_requires_real_beam_state_damage_and_range(self): self.run_case("tracking_beam_content")
     def test_tracking_refire_must_be_finite_and_positive(self): self.run_case("tracking_refire")

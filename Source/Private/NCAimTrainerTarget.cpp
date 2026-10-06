@@ -10,6 +10,7 @@
 #include "Components/PointLightComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Net/UnrealNetwork.h"
 
 ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitializer)
@@ -84,6 +85,16 @@ void ANCAimTrainerTarget::OnRep_TrainerVisible()
 {
     SetActorHiddenInGame(!bTrainerVisible);
     SetActorEnableCollision(bTrainerVisible);
+    if (!bTrainerVisible)
+    {
+        // These pawns are reused. Stopping the curve alone leaves its previous
+        // shader value behind, so clear both before the next appearance.
+        SetBodyColorFlash(nullptr, true);
+        for (UMaterialInstanceDynamic* Material : BodyMIs)
+        {
+            if (Material) { Material->SetVectorParameterValue(TEXT("HitFlashColor"), FLinearColor::Transparent); }
+        }
+    }
 }
 
 void ANCAimTrainerTarget::ActivateTarget(const FVector& Location, bool bStrafe)
@@ -155,6 +166,7 @@ void ANCAimTrainerTarget::ResetTargetMovement()
     }
     bPressedJump = false;
     bRepFloorSliding = false;
+    TrainerSlideDirection = FVector::ZeroVector;
     SetTrainerCrouched(false);
 }
 
@@ -205,19 +217,36 @@ bool ANCAimTrainerTarget::IsTrainerSliding() const
 
 bool ANCAimTrainerTarget::TryTrainerSlideForward()
 {
+    if (!bTrainerWiggle) { return false; }
+    return StartTrainerSlide(FVector(-1.f, 0.f, 0.f));
+}
+
+bool ANCAimTrainerTarget::TryTrainerTrackingSlide(float DirectionRoll)
+{
+    if (!bTrainerStrafe || bTrainerWiggle) { return false; }
+    const float Direction = NCAimTrainerScenarioPolicy::TrackingSlideDirection(
+        GetActorLocation().Y - StrafeCenter.Y, DirectionRoll);
+    if (!StartTrainerSlide(FVector(0.f, Direction, 0.f))) { return false; }
+    StrafeDirection = Direction;
+    return true;
+}
+
+bool ANCAimTrainerTarget::StartTrainerSlide(const FVector& Direction)
+{
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
-    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerWiggle || IsDead()
+    if (Role != ROLE_Authority || !bTrainerVisible || IsDead()
         || !Movement || !Movement->IsMovingOnGround() || !Movement->CurrentFloor.IsWalkableFloor()
         || !CanSlide() || !Movement->CanDodge()) { return false; }
     ConsumeMovementInputVector();
     Movement->bWantsToCrouch = false;
     // This invokes UT's real impulse, movement event, timing and slide posture.
     // A controllerless target has no saved-move flags to replicate the state.
-    Movement->PerformFloorSlide(FVector(-1.f, 0.f, 0.f), Movement->CurrentFloor.HitResult.ImpactNormal);
+    Movement->PerformFloorSlide(Direction, Movement->CurrentFloor.HitResult.ImpactNormal);
     if (!Movement->bIsFloorSliding) { return false; }
+    TrainerSlideDirection = Direction;
     bRepFloorSliding = true;
     Movement->Crouch(false);
-    AddMovementInput(FVector(-1.f, 0.f, 0.f), 1.f, true);
+    AddMovementInput(TrainerSlideDirection, 1.f, true);
     ForceNetUpdate();
     return true;
 }
@@ -237,6 +266,7 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
             Movement->bIsFloorSliding = false;
             Movement->ClearFloorSlideTap();
             bRepFloorSliding = false;
+            TrainerSlideDirection = FVector::ZeroVector;
             ConsumeMovementInputVector();
             SetTrainerCrouched(false);
             UpdateCrouchedEyeHeight();
@@ -252,8 +282,9 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
     {
         if (IsTrainerSliding())
         {
-            // Lateral wiggle input would bend or brake a forward slide.
-            AddMovementInput(FVector(-1.f, 0.f, 0.f), 1.f, true);
+            // Preserve the direction chosen at slide start. Ordinary strafe
+            // input must not countersteer either a forward or a lateral slide.
+            AddMovementInput(TrainerSlideDirection, 1.f, true);
         }
         else
         {
@@ -284,7 +315,29 @@ void ANCAimTrainerTarget::NotifyBlockedHeadShot(AUTCharacter* /*ShotInstigator*/
 float ANCAimTrainerTarget::TakeDamage(float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer)
 {
     ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
-    return Game && bTrainerVisible ? Game->RecordTargetHit(this, Damage, Event, Instigator, Causer) : 0.f;
+    const float AcceptedDamage = Game && bTrainerVisible ? Game->RecordTargetHit(this, Damage, Event, Instigator, Causer) : 0.f;
+    if (AcceptedDamage > 0.f && bTrainerVisible)
+    {
+        // Tracking targets survive beam contact. Keep UT's damage-type body
+        // flash and native LastTakeHitInfo replication without taking health,
+        // applying knockback, or entering ordinary frag/scoring paths.
+        const int32 HitDamage = FMath::RoundToInt(FMath::Clamp(AcceptedDamage, 1.f, 255.f));
+        SetLastTakeHitInfo(HitDamage, HitDamage, FVector::ZeroVector, nullptr, Event);
+        // The stock helper infers overhealth from post-damage Health. Ours was
+        // never reduced. Its cosmetic event is skipped on dedicated servers,
+        // so also clear that inferred armor marker before replication here.
+        LastTakeHitInfo.HitArmor = nullptr;
+        ForceNetUpdate();
+    }
+    return AcceptedDamage;
+}
+
+void ANCAimTrainerTarget::PlayTakeHitEffects_Implementation()
+{
+    // Training targets never have armor or overhealth. Use the actual weapon
+    // damage type's body effect on standalone and replicated remote hits.
+    LastTakeHitInfo.HitArmor = nullptr;
+    if (bTrainerVisible) { Super::PlayTakeHitEffects_Implementation(); }
 }
 
 ANCAimTrainerArena::ANCAimTrainerArena(const FObjectInitializer& ObjectInitializer)

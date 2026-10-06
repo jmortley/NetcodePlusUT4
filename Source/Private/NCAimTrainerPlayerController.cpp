@@ -9,6 +9,8 @@
 #include "HAL/PlatformTime.h"
 #include "ClientHitsounds.h"
 #include "EngineUtils.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Paths.h"
 
 ANCAimTrainerPlayerController::ANCAimTrainerPlayerController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -169,12 +171,23 @@ void ANCAimTrainerPlayerController::SetTrackingFireHeld(bool bPrimary, bool bHel
 
 void ANCAimTrainerPlayerController::SelectTrainerScenario(uint8 Scenario)
 {
-	if (Scenario < 3 && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario); }
+	if (Scenario < 3 && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario, PrefersTrainerLightningGun()); }
 }
 
 void ANCAimTrainerPlayerController::StartTrainerRun()
 {
-	if (IsTrainerMenuVisible()) { ServerTrainerStart(); }
+	if (IsTrainerMenuVisible()) { ServerTrainerStart(PrefersTrainerLightningGun()); }
+}
+
+bool ANCAimTrainerPlayerController::PrefersTrainerLightningGun() const
+{
+	// Read only on the owning player. Dedicated servers must receive this
+	// preference with the menu/start request, never use their own Mod.ini.
+	if (!IsLocalController() || !GConfig) { return false; }
+	FString Choice;
+	GConfig->GetString(TEXT("WeaponSkinsPlus"), TEXT("HitscanChoice"), Choice,
+		FPaths::GeneratedConfigDir() + TEXT("Mod.ini"));
+	return Choice.Equals(TEXT("LG"), ESearchCase::IgnoreCase);
 }
 
 void ANCAimTrainerPlayerController::ReturnToTrainerMenu()
@@ -195,18 +208,18 @@ bool ANCAimTrainerPlayerController::AdmitTrainerRequest(uint8 Action)
 	return true;
 }
 
-bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario) { return Scenario < 3; }
-void ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Implementation(uint8 Scenario)
+bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario, bool bUseLightningGun) { return Scenario < 3; }
+void ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Implementation(uint8 Scenario, bool bUseLightningGun)
 {
 	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
-	if (Game && AdmitTrainerRequest(0)) { Game->SelectScenario(this, Scenario); }
+	if (Game && AdmitTrainerRequest(0)) { Game->SelectScenario(this, Scenario, bUseLightningGun); }
 }
 
-bool ANCAimTrainerPlayerController::ServerTrainerStart_Validate() { return true; }
-void ANCAimTrainerPlayerController::ServerTrainerStart_Implementation()
+bool ANCAimTrainerPlayerController::ServerTrainerStart_Validate(bool bUseLightningGun) { return true; }
+void ANCAimTrainerPlayerController::ServerTrainerStart_Implementation(bool bUseLightningGun)
 {
 	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
-	if (Game && AdmitTrainerRequest(1)) { Game->StartTraining(this); }
+	if (Game && AdmitTrainerRequest(1)) { Game->StartTraining(this, bUseLightningGun); }
 }
 
 bool ANCAimTrainerPlayerController::ServerTrainerAbort_Validate() { return true; }

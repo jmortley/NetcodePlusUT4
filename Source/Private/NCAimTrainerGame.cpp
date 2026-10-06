@@ -49,6 +49,7 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     // are created. Resolve only when this opt-in mode configures a trainee.
     // No asset lookup or warning is emitted while loading other game modes.
     SniperClass = nullptr;
+    LightningClass = nullptr;
     InstagibClass = nullptr;
     LinkClass = nullptr;
     NextTargetTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
@@ -263,12 +264,18 @@ bool ANCAimTrainerGame::ConfigurePawn()
         InstagibClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/N+InstagibRifle.N+InstagibRifle_C"), nullptr, LOAD_NoWarn);
     }
-    else if (Progress.Scenario == 1 && !SniperClass)
+    else if (Progress.Scenario == 1 && Progress.bUseLightningGun && !LightningClass)
+    {
+        LightningClass = LoadClass<AUTWeapon>(nullptr,
+            TEXT("/Game/Blueprints/Netcode/UTNPLightningGun.UTNPLightningGun_C"), nullptr, LOAD_NoWarn);
+    }
+    else if (Progress.Scenario == 1 && !Progress.bUseLightningGun && !SniperClass)
     {
         SniperClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/UTNPSniper.UTNPSniper_C"), nullptr, LOAD_NoWarn);
     }
-    TSubclassOf<AUTWeapon> DesiredClass = Progress.Scenario == 0 ? LinkClass : Progress.Scenario == 2 ? InstagibClass : SniperClass;
+    TSubclassOf<AUTWeapon> DesiredClass = Progress.Scenario == 0 ? LinkClass : Progress.Scenario == 2 ? InstagibClass
+        : Progress.bUseLightningGun ? LightningClass : SniperClass;
     if (!DesiredClass || DesiredClass->HasAnyClassFlags(CLASS_Abstract))
     {
         return FailSetup(Progress.Scenario == 0
@@ -328,7 +335,7 @@ bool ANCAimTrainerGame::IsInsidePracticeLane(const AUTCharacter* Pawn) const
         && Position.Z - HalfHeight >= -10.f && Position.Z + HalfHeight <= 2010.f;
 }
 
-void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario)
+void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario, bool bUseLightningGun)
 {
     if (!IsTrainee(PC) || Scenario > 2 || Progress.Phase == 1 || Progress.Phase == 2) { return; }
     SetupError.Empty();
@@ -336,6 +343,7 @@ void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bMovementPractice;
+    Progress.bUseLightningGun = bUseLightningGun;
     HideAllTargets();
     if (Arena) { Arena->SetScenario(Scenario); }
     if (!ConfigurePawn()) { PC->SetTrainerOnlineStatus(SetupError); }
@@ -347,9 +355,11 @@ void ANCAimTrainerGame::SetMovementPractice(ANCAimTrainerPlayerController* PC, b
 {
     if (!IsTrainee(PC) || Progress.Phase == 1 || Progress.Phase == 2 || Progress.bMovementPractice == bEnabled) { return; }
     const uint8 Scenario = Progress.Scenario;
+    const bool bUseLightningGun = Progress.bUseLightningGun;
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bEnabled;
+    Progress.bUseLightningGun = bUseLightningGun;
     bRankedRun = false;
     RunId.Empty();
     SetupError.Empty();
@@ -361,9 +371,10 @@ void ANCAimTrainerGame::SetMovementPractice(ANCAimTrainerPlayerController* PC, b
         : TEXT("Fixed-position practice selected. Choose a scenario and start a run.")));
 }
 
-void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
+void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC, bool bUseLightningGun)
 {
     if (!IsTrainee(PC) || Progress.Phase == 1 || Progress.Phase == 2) { return; }
+    Progress.bUseLightningGun = bUseLightningGun;
     SetupError.Empty();
     if (!EnsureArena() || !ConfigurePawn())
     {
@@ -376,6 +387,7 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bMovementPractice;
     Progress.Phase = 1;
+    Progress.bUseLightningGun = bUseLightningGun;
     Progress.RemainingSeconds = 3.f;
     PhaseStartedAt = GetWorld()->GetTimeSeconds();
     TrackedSeconds = 0.0;
@@ -403,9 +415,11 @@ void ANCAimTrainerGame::AbortTraining(ANCAimTrainerPlayerController* PC)
     HideAllTargets();
     const uint8 Scenario = Progress.Scenario;
     const bool bMovementPractice = Progress.bMovementPractice;
+    const bool bUseLightningGun = Progress.bUseLightningGun;
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bMovementPractice;
+    Progress.bUseLightningGun = bUseLightningGun;
     bRankedRun = false;
     RunId.Empty();
     if (RunWeapon) { RunWeapon->StopFire(0); RunWeapon->StopFire(1); }
@@ -420,6 +434,7 @@ void ANCAimTrainerGame::BeginActiveRun()
     PhaseStartedAt = LastTraceTime = GetWorld()->GetTimeSeconds();
     NextDirectionTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
     NextDodgeTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
+    NextTrackingSlideTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(Schedule.FRand());
     NextPopupTime = PhaseStartedAt;
     NextPopupSlideTime = 0.f;
     NextTrackingHitSoundTime = PhaseStartedAt;
@@ -446,6 +461,7 @@ void ANCAimTrainerGame::BeginActiveRun()
 void ANCAimTrainerGame::HideAllTargets()
 {
     NextPopupSlideTime = 0.f;
+    NextTrackingSlideTime = 0.f;
     for (ANCAimTrainerTarget* Target : Targets)
     {
         if (Target && !Target->IsPendingKillPending()) { Target->HideTarget(); }
@@ -613,16 +629,7 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
         UpdateTargets(Now);
         if (Progress.Scenario == 0)
         {
-            if (Now >= NextDodgeTime)
-            {
-                Targets[0]->TryTrainerDodge(Schedule.FRand());
-                NextDodgeTime = Now + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
-            }
-            if (Now >= NextDirectionTime)
-            {
-                Targets[0]->ReverseStrafe();
-                NextDirectionTime = Now + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
-            }
+            UpdateTrackingMovement(Now);
             if (Now - LastTraceTime >= 1.f / 30.f)
             {
                 UpdateTrackingSample(Now);
@@ -631,6 +638,33 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
         if (RunWeapon) { RunWeapon->Ammo = RunWeapon->MaxAmmo; }
     }
     if (Now >= NextStatusTime) { PublishProgress(); NextStatusTime = Now + 0.1f; }
+}
+
+void ANCAimTrainerGame::UpdateTrackingMovement(float Now)
+{
+    if (Progress.Phase != 2 || Progress.Scenario != 0 || Now >= PhaseStartedAt + 60.f
+        || !Targets.IsValidIndex(0) || !Targets[0] || !Targets[0]->IsAvailable()) { return; }
+    if (Now >= NextTrackingSlideTime)
+    {
+        // Let the native slide finish before the run ends. Grounding and UT's
+        // shared dodge/slide cooldown decide when an occasional slide can start.
+        if (PhaseStartedAt + 60.f - Now >= 1.f)
+        {
+            const bool bSlid = Targets[0]->TryTrainerTrackingSlide(Schedule.FRand());
+            NextTrackingSlideTime = Now + (bSlid ? NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(Schedule.FRand()) : 0.2f);
+        }
+        else { NextTrackingSlideTime = PhaseStartedAt + 60.f; }
+    }
+    if (Now >= NextDodgeTime)
+    {
+        Targets[0]->TryTrainerDodge(Schedule.FRand());
+        NextDodgeTime = Now + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
+    }
+    if (Now >= NextDirectionTime)
+    {
+        Targets[0]->ReverseStrafe();
+        NextDirectionTime = Now + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
+    }
 }
 
 void ANCAimTrainerGame::UpdateTargets(float Now)

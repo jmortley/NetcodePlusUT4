@@ -72,6 +72,7 @@ struct ANCAimTrainerTarget : AActor {
     int Activations = 0, Hides = 0, Wiggles = 0, Reversals = 0;
     int CrouchRequests = 0, StandRequests = 0, DodgeAttempts = 0, Dodges = 0;
     int SlideAttempts = 0, Slides = 0;
+    int TrackingSlideAttempts = 0, TrackingSlides = 0;
     float WiggleRange = 0.f;
     FVector Position;
     void ActivateTarget(const FVector& position, bool strafe) {
@@ -84,6 +85,7 @@ struct ANCAimTrainerTarget : AActor {
     void ReverseStrafe() { ++Reversals; }
     bool TryTrainerDodge(float) { ++DodgeAttempts; if (!CanDodge) return false; ++Dodges; return true; }
     bool TryTrainerSlideForward() { ++SlideAttempts; if (!CanSlide) return false; ++Slides; return true; }
+    bool TryTrainerTrackingSlide(float) { ++TrackingSlideAttempts; if (!CanSlide) return false; ++TrackingSlides; return true; }
     bool SetTrainerCrouched(bool crouch) {
         if (crouch) { ++CrouchRequests; if (!CanCrouch) return false; }
         else { ++StandRequests; if (!CanStand) return false; }
@@ -110,6 +112,7 @@ struct ANCAimTrainerGame {
     float PhaseStartedAt = 0.f, LastTraceTime = 0.f, NextDirectionTime = 0.f, NextDodgeTime = 0.f;
     float NextPopupTime = 0.f, PopupRefireSeconds = 1.f, ShotStatBaseline = 0.f;
     float NextPopupSlideTime = 0.f;
+    float NextTrackingSlideTime = 0.f;
     float NextTargetTime[NCAimTrainerLayout::TargetCount] = {}, TargetExpiry[NCAimTrainerLayout::TargetCount] = {};
     float NextWiggleTime[NCAimTrainerLayout::TargetCount] = {}, NextCrouchTime[NCAimTrainerLayout::TargetCount] = {};
     float CrouchEndTime[NCAimTrainerLayout::TargetCount] = {};
@@ -123,6 +126,7 @@ struct ANCAimTrainerGame {
     void ActivateSlot(int32, float);
     void UpdateTargets(float);
     void UpdatePopupDodger(float);
+    void UpdateTrackingMovement(float);
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
 struct Fixture {
@@ -662,6 +666,48 @@ void UpperPlatformSlideExpiryAndRoundGuard() {
         }
     }
 }
+void TrackingSlideCadenceAndScope() {
+    for (float roll : {0.f, .5f, 1.f}) {
+        Fixture f; f.Game.Progress.Scenario = 0; f.Game.Schedule.Roll = roll;
+        f.Game.NextTrackingSlideTime = 900.f;
+        f.Start(); f.At(10.f);
+        const float due = f.Game.NextTrackingSlideTime;
+        Require(due >= 14.f && due <= 17.f, "tracking slide did not receive a fresh varied deadline");
+        f.Game.UpdateTrackingMovement(due - .001f);
+        Require(f.Targets[0].TrackingSlideAttempts == 0, "tracking slide started early");
+        f.Targets[0].CanSlide = false;
+        f.Game.UpdateTrackingMovement(due);
+        Require(f.Targets[0].TrackingSlideAttempts == 1 && f.Targets[0].TrackingSlides == 0
+                && std::fabs(f.Game.NextTrackingSlideTime - due - .2f) < .001f,
+                "airborne/cooldown slide rejection bypassed native gate or lost bounded retry");
+        f.Game.UpdateTrackingMovement(due + .1f);
+        Require(f.Targets[0].TrackingSlideAttempts == 1, "rejected slide retried every tick");
+        f.Targets[0].CanSlide = true;
+        f.Game.UpdateTrackingMovement(f.Game.NextTrackingSlideTime);
+        const float next = f.Game.NextTrackingSlideTime;
+        Require(f.Targets[0].TrackingSlides == 1 && next >= due + 4.19f && next <= due + 7.21f,
+                "successful slide did not restore occasional cadence");
+        f.Game.UpdateTrackingMovement(next + 10.f);
+        Require(f.Targets[0].TrackingSlides == 2 && f.Game.NextTrackingSlideTime >= next + 14.f,
+                "tracking slide caught up in a burst after a stall");
+        Require(f.Targets[0].DodgeAttempts > 0 && f.Targets[0].Reversals > 0,
+                "slide scheduling removed existing dodges or strafes");
+        f.Game.NextTrackingSlideTime = 69.5f;
+        f.Game.UpdateTrackingMovement(69.5f);
+        Require(f.Targets[0].TrackingSlides == 2 && f.Game.NextTrackingSlideTime == 70.f,
+                "slide started too close to the run end");
+    }
+    for (int scenario : {0,1,2}) for (int phase : {0,1,2,3}) {
+        Fixture f; f.Game.Progress.Scenario = scenario; f.Start(); f.Game.ActivateSlot(0,10.f);
+        f.Game.Progress.Phase = phase; f.Game.NextTrackingSlideTime = 10.f;
+        f.Game.UpdateTrackingMovement(10.f);
+        Require(f.Targets[0].TrackingSlideAttempts == int(scenario == 0 && phase == 2),
+                "tracking slide escaped active Link practice");
+    }
+    Fixture hidden; hidden.Game.Progress.Scenario = 0; hidden.Start(); hidden.Game.NextTrackingSlideTime = 10.f;
+    hidden.Game.UpdateTrackingMovement(10.f);
+    Require(hidden.Targets[0].TrackingSlideAttempts == 0, "hidden tracking target tried to slide");
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
     const std::string name(argv[1]);
@@ -687,6 +733,7 @@ int main(int argc, char** argv) {
     else if (name == "slide_scope") UpperPlatformSlideScope();
     else if (name == "slide_once") UpperPlatformSlideOnceAndReuse();
     else if (name == "slide_expiry") UpperPlatformSlideExpiryAndRoundGuard();
+    else if (name == "tracking_slide") TrackingSlideCadenceAndScope();
     else Require(false, "unknown case");
 }
 '''
@@ -708,6 +755,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
             "float ANCAimTrainerGame::RecordTargetHit",
             "void ANCAimTrainerGame::UpdateTargets",
             "void ANCAimTrainerGame::UpdatePopupDodger",
+            "void ANCAimTrainerGame::UpdateTrackingMovement",
         )
         source = directory / "trainer_scenarios.cpp"
         source.write_text("\n".join([policy.replace("#pragma once", ""), layout.replace("#pragma once", ""), ADAPTER]
@@ -749,6 +797,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_forward_slide_is_only_scheduled_on_upper_right_instagib_platform(self): self.run_case("slide_scope")
     def test_slider_attempts_once_per_appearance_and_resets_after_hit(self): self.run_case("slide_once")
     def test_slider_preserves_refire_opportunity_before_expiry_or_round_end(self): self.run_case("slide_expiry")
+    def test_tracking_slide_cadence_retries_and_scope_preserve_native_movement_gates(self): self.run_case("tracking_slide")
 
 
 if __name__ == "__main__":

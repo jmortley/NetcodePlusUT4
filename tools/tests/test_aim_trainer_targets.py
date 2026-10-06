@@ -19,6 +19,11 @@ ADAPTER = r'''
 #include <limits>
 #include <iostream>
 #include <string>
+#include <vector>
+#define TEXT(value) value
+struct FLinearColor { static const FLinearColor Transparent; };
+const FLinearColor FLinearColor::Transparent;
+struct UMaterialInstanceDynamic { void SetVectorParameterValue(const char*, FLinearColor) {} };
 constexpr int ROLE_Authority = 3;
 struct FMath {
     static bool IsFinite(float value) { return std::isfinite(value); }
@@ -33,7 +38,9 @@ struct FVector {
     float Size2D() const { return std::sqrt(X*X+Y*Y); }
     FVector operator*(float scale) const { return FVector(X*scale,Y*scale,Z*scale); }
     float operator|(const FVector& other) const { return X*other.X+Y*other.Y+Z*other.Z; }
+    static const FVector ZeroVector;
 };
+const FVector FVector::ZeroVector;
 FVector operator*(float scale,const FVector& vector) { return vector*scale; }
 struct FRotator { float Pitch,Yaw,Roll; FRotator(float p,float y,float r):Pitch(p),Yaw(y),Roll(r){} };
 enum class ETeleportType { TeleportPhysics };
@@ -82,6 +89,8 @@ struct World { float Time = 42.f; float GetTimeSeconds() const { return Time; } 
 enum { EME_Slide=1,NAME_NumFloorSlides=2 };
 struct AUTPlayerState { virtual ~AUTPlayerState()=default; void ModifyStatsValue(int,float) {} };
 struct AUTCharacter {
+    std::vector<UMaterialInstanceDynamic*> BodyMIs;
+    void SetBodyColorFlash(const void*, bool) {}
     int Role=ROLE_Authority,SlideEvents=0,EyeUpdates=0;
     bool bRepFloorSliding=false,bPressedJump=false,SlideAllowed=true;
     FVector SlideDirection;
@@ -111,7 +120,8 @@ struct ATeamArenaCharacter : AUTCharacter {
     FVector GetHeadLocation(float) override { ++CapsuleHeadQueries; return FVector(0,0,188); }
     void Tick(float) { ++SuperTicks; }
     bool Dodge(FVector direction, FVector cross) {
-        ++DodgeCalls; LastDodgeDirection=direction; LastDodgeCross=cross; return DodgeAllowed;
+        ++DodgeCalls; LastDodgeDirection=direction; LastDodgeCross=cross;
+        return DodgeAllowed&&!bIsCrouched&&Move.CanDodge();
     }
     FVector ConsumeMovementInputVector() { HasPendingInput=false; return FVector(); }
     void SetActorLocationAndRotation(FVector position, FRotator, bool, void*, ETeleportType) {
@@ -141,7 +151,7 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     using Super = ATeamArenaCharacter;
     bool bTrainerVisible=false, bTrainerStrafe=false, bTrainerWiggle=false;
     float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
-    FVector StrafeCenter;
+    FVector StrafeCenter,TrainerSlideDirection;
     struct History { int Count=7; void Reset() { Count=0; } } SavedPositions, SavedCapsulePostures;
     void OnRep_TrainerVisible();
     void ActivateTarget(const FVector&,bool);
@@ -152,6 +162,8 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     void ReverseStrafe();
     bool TryTrainerDodge(float);
     bool TryTrainerSlideForward();
+    bool TryTrainerTrackingSlide(float);
+    bool StartTrainerSlide(const FVector&);
     bool IsTrainerSliding() const;
     void Tick(float);
     FVector GetHeadLocation(float) override;
@@ -415,6 +427,88 @@ int main(int argc,char**argv) {
             else Require(!target.bTrainerVisible&&!target.Collision&&target.Move.Mode==MOVE_None,
                          "hidden slide remained in physics/collision");
         }
+    } else if(name=="tracking_slide_guards") {
+        for(int guard=0;guard<12;++guard) {
+            auto target=Active(); target.Move.MovementTime=10.f;
+            if(guard==0) target.Role=1;
+            if(guard==1) target.bTrainerVisible=false;
+            if(guard==2) target.bTrainerStrafe=false;
+            if(guard==3) target.bTrainerWiggle=true;
+            if(guard==4) target.Dead=true;
+            if(guard==5) target.Move.Mode=MOVE_Falling;
+            if(guard==6) target.Move.CurrentFloor.Walkable=false;
+            if(guard==7) target.SlideAllowed=false;
+            if(guard==8) target.Move.DodgeAllowed=false;
+            if(guard==9) target.bIsCrouched=true;
+            if(guard==10) target.Move.bIsFloorSliding=true;
+            if(guard==11) target.Move.DodgeResetTime=11.f;
+            Require(!target.TryTrainerTrackingSlide(0.f)&&target.SlideEvents==0&&target.NetUpdates==0
+                &&target.Teleports==0&&target.StrafeDirection==1.f,
+                "tracking slide escaped native posture, cooldown, authority or target scope");
+        }
+    } else if(name=="tracking_slide_direction") {
+        for(float offset:{-1600.f,-800.f,-500.f,-499.f,0.f,499.f,500.f,800.f,1600.f}) {
+            for(float roll:{0.f,.49f,.5f,1.f}) {
+                auto target=Active(); target.Move.MovementTime=10.f;
+                target.StrafeCenter=FVector(-800.f,100.f,50108.f);
+                target.Position=FVector(-800.f,100.f+offset,50108.f);
+                target.Move.Velocity=FVector(0.f,500.f,0.f);
+                target.HasPendingInput=true;
+                const float expected=offset>=500.f?-1.f:offset<=-500.f?1.f:roll<.5f?-1.f:1.f;
+                Require(target.TryTrainerTrackingSlide(roll),"eligible native tracking slide rejected");
+                Require(target.Move.Velocity.X==0.f&&target.Move.Velocity.Y==900.f*expected
+                    &&target.SlideDirection.X==0.f&&target.SlideDirection.Y==expected
+                    &&target.TrainerSlideDirection.X==0.f&&target.TrainerSlideDirection.Y==expected
+                    &&target.StrafeDirection==expected&&target.bRepFloorSliding&&target.bIsCrouched,
+                    "tracking slide changed X or bypassed native lateral impulse and posture");
+                Require(target.Move.FloorSlideEndTime==10.7f&&target.Move.DodgeResetTime==11.05f
+                    &&target.Position.X==-800.f&&target.Teleports==0&&!target.HasPendingInput,
+                    "tracking slide changed native timing, teleported or retained pending input");
+                target.Position.Y=100.f+expected*900.f;
+                target.ReverseStrafe(); target.Tick(.016f);
+                Require(target.LastInput.X==0.f&&target.LastInput.Y==expected&&target.StrafeDirection==expected,
+                    "scheduled reversal countersteered an in-progress native slide");
+            }
+        }
+    } else if(name=="tracking_slide_end_and_reset") {
+        for(float direction:{-1.f,1.f}) {
+            auto target=Active(); target.Move.MovementTime=10.f;
+            target.Position=FVector(-800.f,0.f,50108.f);
+            target.StrafeCenter=target.Position;
+            Require(target.TryTrainerTrackingSlide(direction<0.f?0.f:1.f),"tracking slide fixture failed");
+            Require(!target.TryTrainerDodge(0.f)&&!target.TryTrainerTrackingSlide(0.f),
+                "dodge or second slide interrupted the active slide");
+            target.Move.bWasFloorSliding=true; target.Move.MovementTime=target.Move.FloorSlideEndTime;
+            target.Position.Y=direction*950.f;
+            target.Tick(.016f);
+            Require(!target.IsTrainerSliding()&&!target.bRepFloorSliding&&!target.bIsCrouched
+                &&target.Move.bWasFloorSliding&&target.TrainerSlideDirection.Size2D()==0.f
+                &&target.LastInput.Y==-direction&&target.LastInput.X==0.f,
+                "slide exit lost native slowdown or failed to resume inward strafe");
+            Require(!target.TryTrainerDodge(.5f)&&!target.TryTrainerTrackingSlide(.5f),
+                "native post-slide cooldown was bypassed");
+            target.Move.MovementTime=target.Move.DodgeResetTime+.001f;
+            auto slideAgain=target;
+            Require(target.TryTrainerDodge(.5f),"dodge did not recover after native slide cooldown");
+            Require(slideAgain.TryTrainerTrackingSlide(.5f),"tracking slide did not recover after cooldown");
+            target=slideAgain;
+            target.HideTarget();
+            Require(target.TrainerSlideDirection.Size2D()==0.f&&!target.IsTrainerSliding()
+                &&!target.bRepFloorSliding&&!target.bIsCrouched,"hidden target retained a lateral slide");
+            target.ActivateTarget(FVector(1000.f,850.f,50428.f),false); target.StartWiggle(99.f);
+            Require(target.TryTrainerSlideForward()&&target.TrainerSlideDirection.X==-1.f
+                &&target.TrainerSlideDirection.Y==0.f&&target.Move.Velocity.X==-900.f,
+                "reusing a tracking target changed the instagib forward slide");
+        }
+    } else if(name=="tracking_slide_policy") {
+        for(float roll:{-1.f,0.f,.25f,.5f,1.f,2.f}) {
+            const float delay=NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(roll);
+            Require(delay>=4.f&&delay<=7.f,"tracking slide delay escaped intended frequency");
+        }
+        Require(NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(0.f)==4.f
+            &&NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(1.f)==7.f
+            &&NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(.5f)==5.5f,
+            "tracking slide policy lost its independent random delay");
     } else if(name=="head_feedback") {
         ANCAimTrainerTarget target; AUTCharacter shooter;
         const FVector head=target.GetHeadLocation(.125f);
@@ -449,6 +543,8 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::ReverseStrafe",
             "bool ANCAimTrainerTarget::TryTrainerDodge",
             "bool ANCAimTrainerTarget::TryTrainerSlideForward",
+            "bool ANCAimTrainerTarget::TryTrainerTrackingSlide",
+            "bool ANCAimTrainerTarget::StartTrainerSlide",
             "bool ANCAimTrainerTarget::IsTrainerSliding",
             "void ANCAimTrainerTarget::Tick",
             "FVector ANCAimTrainerTarget::GetHeadLocation",
@@ -488,6 +584,10 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_forward_slide_invokes_real_ut_physics_and_preserves_its_input_and_posture(self): self.run_case("slide_native")
     def test_controllerless_slide_retires_at_native_deadline_and_resumes_wiggle(self): self.run_case("slide_end")
     def test_slide_lifecycle_clears_posture_native_timing_and_queued_inputs(self): self.run_case("slide_reset")
+    def test_tracking_slide_respects_target_scope_and_native_guards(self): self.run_case("tracking_slide_guards")
+    def test_tracking_slide_uses_guarded_lateral_native_impulse_and_keeps_direction(self): self.run_case("tracking_slide_direction")
+    def test_tracking_slide_cooldown_exit_and_reuse_preserve_normal_movement(self): self.run_case("tracking_slide_end_and_reset")
+    def test_tracking_slide_has_random_four_to_seven_second_delay(self): self.run_case("tracking_slide_policy")
 
 
 if __name__ == "__main__":

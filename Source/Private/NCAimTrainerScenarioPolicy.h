@@ -1,6 +1,6 @@
 #pragma once
 
-// Timing and direction rules for the revision-7 trainer preset. The authority
+// Timing and direction rules for the revision-8 trainer preset. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
@@ -21,6 +21,7 @@ namespace NCAimTrainerScenarioPolicy
     inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
     inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
     inline float PopupSlideDelaySeconds(float Roll) { return 0.8f + 0.6f * UnitRoll(Roll); }
+    inline float TrackingSlideDelaySeconds(float Roll) { return 4.f + 3.f * UnitRoll(Roll); }
 
     inline float StrafeHoldSeconds(float PatternRoll, float JitterRoll)
     {
@@ -53,6 +54,13 @@ namespace NCAimTrainerScenarioPolicy
         if (Offset >= 500.f) { return -1.f; }
         if (Offset <= -500.f) { return 1.f; }
         return UnitRoll(Roll) < 0.5f ? -1.f : 1.f;
+    }
+
+    inline float TrackingSlideDirection(float Offset, float Roll)
+    {
+        // A lateral native slide needs the same early inward turn as a dodge.
+        // Use the shared guard even when a preceding dodge overshot the walk lane.
+        return DodgeDirection(Offset, Roll);
     }
 
     inline float PopupRefireSeconds(float RefireSeconds)
