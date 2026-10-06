@@ -89,7 +89,7 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 3)
+## Scenarios and scoring (revision 4)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
@@ -99,9 +99,12 @@ network testing without a hub.
 
 Tracking observes the real authoritative NCP Link beam's selected target, with
 a maximum 30 Hz observation rate. It only credits intervals with beam contact
-at both endpoints, and discards observation gaps longer than 100 ms. Accuracy
-means beam time on target divided by the full run duration for tracking, and successful hits divided by fired shots
-for the two shooting scenarios. Weapons retain their normal firing rhythm.
+at both endpoints, and discards observation gaps longer than 100 ms. Tracking
+accuracy divides beam-contact time by time firing, using the same sampling and
+continuity rules for both clocks. Idle time changes neither accuracy nor score;
+firing off-target lowers accuracy. Score remains total contact milliseconds
+over the 60-second run. The two shooting scenarios use successful hits divided
+by fired shots. Weapons retain their normal firing rhythm.
 
 Tracking uses the existing beam's range, obstruction and server validation.
 It does not normalize network latency; use low-ping hosts when comparing runs.
@@ -136,21 +139,30 @@ position behind the central block. That block is 176 units high, and the target
 on top is offset laterally to keep the rear head peek visible from the fixed
 anchor. Movement practice naturally changes those sightlines.
 
-All three use the fixed target model/preset in revision 3. Custom models,
+Revision 4 widens only the instagib movement ranges by 10%. Each instagib
+appearance has a 65% chance of one short native crouch, scheduled 1.5–3.5 seconds
+after spawning and held for 0.25–0.45 seconds. It is skipped if too little
+exposure remains for the crouch plus a full rifle refire interval and 0.1 seconds.
+Targets behind cover can briefly disappear while crouched. Reappearing targets
+start standing; headshot targets and Link tracking do not gain these crouches.
+
+All three use the fixed target model/preset in revision 4. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=3&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=4&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
 it does not stream aiming samples to Django. Revised scenarios submit revision
-3; Django retains revision-1/2 submissions and explicit older boards without
-mixing their scores with the new difficulty. Deploy the accompanying revision-3
-API support before expecting new scores to be accepted. This update needs no
-additional database migration beyond the original trainer table.
+4; Django retains revision-1/2/3 submissions and explicit older boards without
+mixing their scores with the new difficulty or accuracy definition. Revision 4
+includes `fired_ms` in every result: measured firing time for tracking and zero
+for precision scenarios. Older submissions retain their original payloads and
+full-run tracking denominator. Apply migration `0066_nc_aimtrainer_fired_ms`
+before restarting the updated Django web workers and enabling revision-4 hosts.
 
 Score submission is an asynchronous server request to `/aimtrainer_entry/`.
 The identity comes from the server's player state. Run IDs make retries
@@ -342,3 +354,23 @@ all 93 trainer tests and 16 Django tests passed. The changed preset submits
 revision 3, with older boards retained separately. Rebuild Shipping and test
 the beam, wiggles and rear head peek in the packaged standalone game. Visual
 animation alignment and multiplayer play remain runtime checks.
+
+### Firing accuracy and instagib crouches (2026-10-06)
+
+Revision 4 separates firing time from total run time. The Link accuracy display
+now stays unchanged while idle and falls when firing off target. Points still
+measure total contact time, so firing accuracy does not replace the score.
+Results show both tracked and fired durations. The new `fired_ms` payload and
+Django migration preserve older submissions and their original denominator.
+
+Instagib strafes are 10% wider with occasional short crouches through the native
+movement component. Crouches retain normal capsule, animation and replication
+behavior, reset between appearances, and avoid the final refire window before
+expiry. Headshot and Link target movement remains unchanged.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 105 trainer tests and 21 Django tests passed, including idle/firing accuracy,
+native crouch lifecycle, expiry timing, and migration preservation. Rebuild
+Shipping for the packaged standalone playtest. Apply Django migration 0066
+before restarting updated web workers. Packaged animation and network behavior
+have not been exercised by these checks.

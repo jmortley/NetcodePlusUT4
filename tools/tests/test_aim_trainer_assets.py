@@ -48,7 +48,9 @@ struct AUTCharacterContent { Mesh Body; };
 struct Movement {
     bool bRunPhysicsWithNoController = false, bOrientRotationToMovement = true;
     bool bUseControllerDesiredRotation = true;
-    float MaxWalkSpeed = 0.f, MaxAcceleration = 0.f;
+    float MaxWalkSpeed = 0.f, MaxWalkSpeedCrouched = 0.f, MaxAcceleration = 0.f;
+    struct NavProperties { bool bCanCrouch = false; } Nav;
+    NavProperties& GetNavAgentPropertiesRef() { return Nav; }
 };
 enum class EAutoPossessAI { Disabled, Enabled };
 struct AUTCharacter {
@@ -189,6 +191,8 @@ int main(int argc, char** argv) {
                 "unrendered head bones stop updating on the dedicated server");
         Require(!target.Body.bEnableUpdateRateOptimizations && target.Move.bRunPhysicsWithNoController,
                 "target cannot animate/move independently of a bot controller");
+        Require(target.Move.Nav.bCanCrouch && target.Move.MaxWalkSpeedCrouched == NCAimTrainerLayout::WiggleSpeed,
+                "controllerless target lacks crouch capability or crouches faster than its wiggle");
     } else if (name == "missing_template" || name == "missing_mesh") {
         Require(!target.HasCharacterAssets(), "unusable target incorrectly accepted");
     } else { Require(false, "unknown case"); }

@@ -28,5 +28,6 @@ struct FNCAimTrainerResult
 	int32 Headshots = 0;
 	int32 TargetsExpired = 0;
 	int32 TrackedMilliseconds = 0;
+	int32 FiredMilliseconds = 0;
 	int32 DurationMilliseconds = 60000;
 };

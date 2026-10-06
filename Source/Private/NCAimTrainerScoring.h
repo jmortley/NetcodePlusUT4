@@ -26,4 +26,11 @@ namespace NCAimTrainerScoring
         if (Seconds >= 60.0) { return 60000; }
         return static_cast<int>(Seconds * 1000.0);
     }
+
+    inline float TrackingAccuracy(int TrackedMilliseconds, int FiredMilliseconds)
+    {
+        if (FiredMilliseconds <= 0 || FiredMilliseconds > 60000
+            || TrackedMilliseconds < 0 || TrackedMilliseconds > FiredMilliseconds) { return 0.f; }
+        return 100.f * float(TrackedMilliseconds) / float(FiredMilliseconds);
+    }
 }

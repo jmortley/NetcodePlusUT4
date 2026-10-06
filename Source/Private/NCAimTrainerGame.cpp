@@ -54,6 +54,8 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     NextTargetTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     TargetExpiry.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextWiggleTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    NextCrouchTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    CrouchEndTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
 }
 
 void ANCAimTrainerGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -375,7 +377,9 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
     Progress.RemainingSeconds = 3.f;
     PhaseStartedAt = GetWorld()->GetTimeSeconds();
     TrackedSeconds = 0.0;
+    FiredSeconds = 0.0;
     bPreviousContact = false;
+    bPreviousFiring = false;
     RunId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
     Schedule.Initialize(int32(GetTypeHash(RunId)));
     bRankedRun = !Progress.bMovementPractice && GetNetMode() != NM_Standalone && BaseMutator == nullptr && FMath::IsNearlyEqual(GetWorldSettings()->GetEffectiveTimeDilation(), 1.f)
@@ -430,6 +434,7 @@ void ANCAimTrainerGame::BeginActiveRun()
         NextTargetTime[Index] = PhaseStartedAt + (Progress.Scenario == 2 ? 0.f : Index * 0.25f);
         TargetExpiry[Index] = 0.f;
         NextWiggleTime[Index] = PhaseStartedAt;
+        NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
     }
     PublishProgress();
 }
@@ -468,12 +473,17 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
         TargetExpiry[Index] = Now + NCAimTrainerScenarioPolicy::PopupExposure(PopupRefireSeconds, Schedule.FRand());
     }
     Targets[Index]->ActivateTarget(ArenaOrigin + Position, Progress.Scenario == 0);
+    NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
     if (Progress.Scenario != 0)
     {
         const NCAimTrainerLayout::FSeat Seat = Progress.Scenario == 1
             ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index);
         Targets[Index]->StartWiggle(Seat.WiggleRange);
         NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
+        if (Progress.Scenario == 2 && NCAimTrainerScenarioPolicy::ShouldCrouch(Schedule.FRand()))
+        {
+            NextCrouchTime[Index] = Now + NCAimTrainerScenarioPolicy::CrouchDelaySeconds(Schedule.FRand());
+        }
     }
 }
 
@@ -592,16 +602,7 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
             }
             if (Now - LastTraceTime >= 1.f / 30.f)
             {
-                // Use the real authoritative NCP beam result, including its
-                // range and world obstruction. Pointing without firing earns
-                // nothing, and no second wider trainer trace can grant credit.
-                const bool bContact = HasTrackingContact();
-                TrackedSeconds += NCAimTrainerScoring::TrackingCredit(Now - LastTraceTime, bPreviousContact, bContact);
-                bPreviousContact = bContact;
-                LastTraceTime = Now;
-                Progress.Score = NCAimTrainerScoring::TrackingMilliseconds(TrackedSeconds);
-                Progress.TrackingSeconds = float(TrackedSeconds);
-                Progress.Accuracy = Now > PhaseStartedAt ? 100.f * float(TrackedSeconds) / (Now - PhaseStartedAt) : 0.f;
+                UpdateTrackingSample(Now);
             }
         }
         if (RunWeapon) { RunWeapon->Ammo = RunWeapon->MaxAmmo; }
@@ -631,6 +632,27 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
             Targets[Index]->ReverseStrafe();
             NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
         }
+        if (Progress.Scenario == 2 && Targets[Index]->IsAvailable())
+        {
+            if (CrouchEndTime[Index] > 0.f && Now >= CrouchEndTime[Index])
+            {
+                // Native clearance can temporarily prevent standing. Retry
+                // without leaving a queued crouch request behind.
+                if (Targets[Index]->SetTrainerCrouched(false)) { CrouchEndTime[Index] = 0.f; }
+            }
+            else if (NextCrouchTime[Index] > 0.f && Now >= NextCrouchTime[Index])
+            {
+                NextCrouchTime[Index] = 0.f; // At most one brief dip per appearance.
+                const float Hold = NCAimTrainerScenarioPolicy::CrouchHoldSeconds(Schedule.FRand());
+                // Keep a full rifle refire interval to shoot after it stands,
+                // especially where the rear target dips completely behind cover.
+                if (TargetExpiry[Index] - Now >= Hold + PopupRefireSeconds + 0.1f
+                    && Targets[Index]->SetTrainerCrouched(true))
+                {
+                    CrouchEndTime[Index] = Now + Hold;
+                }
+            }
+        }
     }
     // Initial targets, hits and expiries all share this deadline. Never replace
     // several targets at once or catch up after a stall: one rifle, one second
@@ -645,10 +667,36 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
 bool ANCAimTrainerGame::HasTrackingContact() const
 {
     AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
-    return Progress.Phase == 2 && Progress.Scenario == 0 && Targets.IsValidIndex(0)
-        && Targets[0] && Targets[0]->IsAvailable() && Link && Link->IsFiring()
-        && Link->GetCurrentFireMode() == 1 && !Link->IsLinkPulsing()
+    return IsTrackingBeamFiring() && Targets.IsValidIndex(0)
+        && Targets[0] && Targets[0]->IsAvailable() && Link
         && Link->CurrentLinkedTarget == Targets[0];
+}
+
+bool ANCAimTrainerGame::IsTrackingBeamFiring() const
+{
+    AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+    return Progress.Phase == 2 && Progress.Scenario == 0 && Link && Link->IsFiring()
+        && Link->GetCurrentFireMode() == 1 && !Link->IsLinkPulsing();
+}
+
+void ANCAimTrainerGame::UpdateTrackingSample(float Now)
+{
+    if (!FMath::IsFinite(Now) || Now <= LastTraceTime) { return; }
+    const bool bFiring = IsTrackingBeamFiring();
+    const bool bContact = bFiring && HasTrackingContact();
+    const double Elapsed = double(Now) - double(LastTraceTime);
+    // Apply the same continuity and stall rules to both clocks. Idle time
+    // changes neither accuracy nor score; firing off-target lowers accuracy.
+    FiredSeconds += NCAimTrainerScoring::TrackingCredit(Elapsed, bPreviousFiring, bFiring);
+    TrackedSeconds += NCAimTrainerScoring::TrackingCredit(Elapsed, bPreviousFiring && bPreviousContact, bContact);
+    bPreviousFiring = bFiring;
+    bPreviousContact = bContact;
+    LastTraceTime = Now;
+    Progress.Score = NCAimTrainerScoring::TrackingMilliseconds(TrackedSeconds);
+    Progress.TrackingSeconds = float(TrackedSeconds);
+    Progress.FiringSeconds = float(FiredSeconds);
+    Progress.Accuracy = NCAimTrainerScoring::TrackingAccuracy(Progress.Score,
+        NCAimTrainerScoring::TrackingMilliseconds(FiredSeconds));
 }
 
 void ANCAimTrainerGame::PublishProgress()
@@ -662,7 +710,11 @@ void ANCAimTrainerGame::FinishRun()
     HideAllTargets();
     Progress.Phase = 3;
     Progress.RemainingSeconds = 0.f;
-    if (Progress.Scenario == 0) { Progress.Accuracy = 100.f * Progress.Score / 60000.f; }
+    if (Progress.Scenario == 0)
+    {
+        Progress.Accuracy = NCAimTrainerScoring::TrackingAccuracy(Progress.Score,
+            NCAimTrainerScoring::TrackingMilliseconds(FiredSeconds));
+    }
     if (RunWeapon) { RunWeapon->StopFire(0); RunWeapon->StopFire(1); }
     PublishProgress();
     if (!bRankedRun || Progress.bMovementPractice || Progress.Hits > Progress.Shots)
@@ -682,6 +734,7 @@ void ANCAimTrainerGame::FinishRun()
     Result.Headshots = Progress.Headshots;
     Result.TargetsExpired = Progress.TargetsExpired;
     Result.TrackedMilliseconds = Progress.Scenario == 0 ? Progress.Score : 0;
+    Result.FiredMilliseconds = Progress.Scenario == 0 ? NCAimTrainerScoring::TrackingMilliseconds(FiredSeconds) : 0;
     Trainee->SetTrainerOnlineStatus(TEXT("Submitting completed run to UT4Stats..."));
     TWeakObjectPtr<ANCAimTrainerGame> WeakGame(this);
     TWeakObjectPtr<ANCAimTrainerPlayerController> WeakPC(Trainee);

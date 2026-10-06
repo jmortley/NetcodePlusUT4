@@ -62,13 +62,19 @@ struct TargetsAdapter : std::vector<ANCAimTrainerTarget*> {
     }
 };
 struct ANCAimTrainerGame {
-    struct { int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0; } Progress;
+    struct {
+        int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0, Score = 0;
+        float TrackingSeconds = 0.f, FiringSeconds = 0.f, Accuracy = 0.f;
+    } Progress;
     struct World { float Now = 1.f; float GetTimeSeconds() { return Now; } } TheWorld;
     struct { float FRandRange(float a, float b) { return (a + b) * .5f; } } Schedule;
     ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
     TargetsAdapter Targets;
     float PhaseStartedAt = 0.f;
+    float LastTraceTime = 0.f;
+    double TrackedSeconds = 0.0, FiredSeconds = 0.0;
+    bool bPreviousContact = false, bPreviousFiring = false;
     float TargetExpiry[5] = { 4.f, 4.f, 4.f, 4.f, 4.f };
     float NextTargetTime[5] = {};
     float NextTrackingHitSoundTime = 0.f;
@@ -76,6 +82,8 @@ struct ANCAimTrainerGame {
     bool IsTrainee(AController* PC) { return PC && ValidTrainee; }
     World* GetWorld() { return &TheWorld; }
     bool HasTrackingContact() const;
+    bool IsTrackingBeamFiring() const;
+    void UpdateTrackingSample(float);
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
 void Require(bool okay, const char* why) { if (!okay) { std::cerr << why; std::exit(1); } }
@@ -172,6 +180,54 @@ int main(int argc, char** argv) {
         f.Game.TheWorld.Now = 60.f; f.Game.TargetExpiry[0] = 65.f;
         Require(beamHit() == 0.f, "beam damage accepted after run end");
         Require(f.Player.Confirmations == 2, "rejected beam damage emitted success sound");
+    } else if (name == "tracking_accuracy") {
+        Require(TrackingAccuracy(0, 0) == 0.f, "no-fire run has nonzero accuracy");
+        Require(TrackingAccuracy(1000, 2000) == 50.f, "accuracy denominator is not beam firing time");
+        Require(TrackingAccuracy(60000, 60000) == 100.f, "perfect minute failed");
+        Require(TrackingAccuracy(1, 0) == 0.f && TrackingAccuracy(2001, 2000) == 0.f,
+                "more contact than firing was accepted");
+        Require(TrackingAccuracy(-1, 100) == 0.f && TrackingAccuracy(0, -1) == 0.f
+                && TrackingAccuracy(60001, 60001) == 0.f, "invalid duration bounds accepted");
+    } else if (name == "tracking_sample") {
+        Fixture f; AUTWeap_LinkGun_Shaft_NCP link;
+        f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &link; link.CurrentLinkedTarget = &f.Target;
+        f.Game.UpdateTrackingSample(.03125f);
+        Require(f.Game.FiredSeconds == 0 && f.Game.TrackedSeconds == 0, "press onset received unsampled time");
+        f.Game.UpdateTrackingSample(.0625f);
+        Require(f.Game.FiredSeconds == .03125 && f.Game.TrackedSeconds == .03125
+                && f.Game.Progress.Score == 31 && f.Game.Progress.Accuracy == 100.f,
+                "continuous real beam contact did not accrue score/accuracy");
+        link.Firing = false;
+        f.Game.UpdateTrackingSample(.09375f); f.Game.UpdateTrackingSample(.125f);
+        Require(f.Game.FiredSeconds == .03125 && f.Game.TrackedSeconds == .03125
+                && f.Game.Progress.Accuracy == 100.f, "idle time changed tracking accuracy");
+        link.Firing = true; link.CurrentLinkedTarget = nullptr;
+        f.Game.UpdateTrackingSample(.15625f); f.Game.UpdateTrackingSample(.1875f);
+        Require(f.Game.FiredSeconds == .0625 && f.Game.TrackedSeconds == .03125
+                && f.Game.Progress.Accuracy == 50.f, "off-target firing did not lower accuracy");
+        link.CurrentLinkedTarget = &f.Target;
+        f.Game.UpdateTrackingSample(.21875f);
+        Require(f.Game.TrackedSeconds == .03125, "approach interval credited target contact");
+        f.Game.UpdateTrackingSample(.25f);
+        Require(f.Game.FiredSeconds == .125 && f.Game.TrackedSeconds == .0625
+                && f.Game.Progress.Score == 62 && std::fabs(f.Game.Progress.Accuracy - 49.6f) < .001f,
+                "new continuous contact failed to accrue matching fire/contact clocks");
+        Require(f.Game.Progress.FiringSeconds == .125f && f.Game.Progress.TrackingSeconds == .0625f,
+                "owner snapshot omitted firing or tracking duration");
+    } else if (name == "tracking_clock") {
+        Fixture f; AUTWeap_LinkGun_Shaft_NCP link;
+        f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &link; link.CurrentLinkedTarget = &f.Target;
+        f.Game.UpdateTrackingSample(.03125f); f.Game.UpdateTrackingSample(.0625f);
+        f.Game.UpdateTrackingSample(.3125f);
+        Require(f.Game.FiredSeconds == .03125 && f.Game.TrackedSeconds == .03125,
+                "server stall inflated firing or target-contact duration");
+        for(float time : {.3f, .3125f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()})
+            f.Game.UpdateTrackingSample(time);
+        Require(f.Game.LastTraceTime == .3125f && f.Game.FiredSeconds == .03125
+                && f.Game.TrackedSeconds == .03125, "invalid sample corrupted time/accounting");
+        f.Game.Progress.Phase = 3; f.Game.UpdateTrackingSample(.34375f);
+        Require(f.Game.FiredSeconds == .03125 && f.Game.TrackedSeconds == .03125,
+                "ended run retained live beam accounting");
     } else if (name == "beam_contact") {
         Fixture f; AUTWeap_LinkGun_Shaft_NCP link; AActor obstruction;
         f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &link;
@@ -212,7 +268,9 @@ class AimTrainerScoringTests(unittest.TestCase):
         source = directory / "trainer.cpp"
         source.write_text("\n".join((ADAPTER, scoring,
                                     native_function(game, "float ANCAimTrainerGame::RecordTargetHit"),
-                                    native_function(game, "bool ANCAimTrainerGame::HasTrackingContact"), CASES)), encoding="utf-8")
+                                    native_function(game, "bool ANCAimTrainerGame::HasTrackingContact"),
+                                    native_function(game, "bool ANCAimTrainerGame::IsTrackingBeamFiring"),
+                                    native_function(game, "void ANCAimTrainerGame::UpdateTrackingSample"), CASES)), encoding="utf-8")
         cls.executable = directory / ("trainer.exe" if os.name == "nt" else "trainer")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -236,6 +294,9 @@ class AimTrainerScoringTests(unittest.TestCase):
     def test_instagib_accepts_body_while_tracking_rejects_nonbeam_damage(self): self.run_case("instagib")
     def test_real_beam_damage_keeps_target_alive_and_bounds_feedback(self): self.run_case("beam_damage")
     def test_tracking_contact_requires_actual_active_unobstructed_beam_target(self): self.run_case("beam_contact")
+    def test_tracking_accuracy_uses_firing_duration_and_rejects_impossible_counts(self): self.run_case("tracking_accuracy")
+    def test_tracking_sampler_distinguishes_idle_off_target_and_real_beam_contact(self): self.run_case("tracking_sample")
+    def test_tracking_sampler_rejects_stalls_invalid_clocks_and_ended_runs(self): self.run_case("tracking_clock")
 
 
 if __name__ == "__main__":

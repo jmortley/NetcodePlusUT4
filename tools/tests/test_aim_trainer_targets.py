@@ -41,16 +41,25 @@ struct UCharacterMovementComponent {
     void SetMovementMode(MovementMode mode) { Mode = mode; }
     void DisableMovement() { Mode = MOVE_None; }
 };
+struct ATeamArenaCharacter;
 struct UUTCharacterMovement : UCharacterMovementComponent {
+    ATeamArenaCharacter* Owner = nullptr;
     bool bIsDodging = false, DodgeInput = false, bIsDodgeLanding = false, FallingFlags = false;
+    bool bWantsToCrouch = false, CrouchAllowed = true, StandAllowed = true;
+    int Crouches = 0, Uncrouches = 0;
+    float HalfHeight = 108.f;
     float DodgeResetTime = 0.f, DodgeLandingTimeAdjust = -.25f, MovementTime = 0.f;
     void ClearDodgeInput() { DodgeInput = false; }
     void ClearFallingStateFlags() { bIsDodging = false; FallingFlags = false; }
     float GetCurrentMovementTime() const { return MovementTime; }
+    void Crouch(bool);
+    void UnCrouch(bool);
 };
 template<class T> T* Cast(UCharacterMovementComponent* value) { return dynamic_cast<T*>(value); }
 struct World { float Time = 42.f; float GetTimeSeconds() const { return Time; } };
 struct AUTCharacter {
+    bool bIsCrouched = false, Dead = false;
+    bool IsDead() const { return Dead; }
     int PoseQueries = 0, HelmetNotifications = 0;
     float LastPosePrediction = -1.f;
     virtual FVector GetHeadLocation(float prediction) {
@@ -64,7 +73,7 @@ struct ATeamArenaCharacter : AUTCharacter {
     FVector Position, LastDodgeDirection, LastDodgeCross, LastInput;
     UUTCharacterMovement Move;
     World TheWorld;
-    UCharacterMovementComponent* GetCharacterMovement() { return &Move; }
+    UCharacterMovementComponent* GetCharacterMovement() { Move.Owner=this; return &Move; }
     FVector GetActorLocation() const { return Position; }
     World* GetWorld() { return &TheWorld; }
     FVector GetHeadLocation(float) override { ++CapsuleHeadQueries; return FVector(0,0,188); }
@@ -81,6 +90,21 @@ struct ATeamArenaCharacter : AUTCharacter {
     void ForceNetUpdate() { ++NetUpdates; }
     void AddMovementInput(FVector direction, float, bool) { ++InputCalls; LastInput=direction; }
 };
+// Engine posture calls are observed here; real collision/animation is verified
+// separately in a packaged run. Mirror grounded capsule-base preservation so
+// the native activation method cannot accidentally accumulate vertical drift.
+void UUTCharacterMovement::Crouch(bool) {
+    ++Crouches;
+    if (!Owner || !CrouchAllowed) return;
+    if (!Owner->bIsCrouched && IsMovingOnGround()) Owner->Position.Z -= 68.f;
+    Owner->bIsCrouched=true; HalfHeight=40.f;
+}
+void UUTCharacterMovement::UnCrouch(bool) {
+    ++Uncrouches;
+    if (!Owner || !StandAllowed) return;
+    if (Owner->bIsCrouched && IsMovingOnGround()) Owner->Position.Z += 68.f;
+    Owner->bIsCrouched=false; HalfHeight=108.f;
+}
 struct ANCAimTrainerTarget : ATeamArenaCharacter {
     using Super = ATeamArenaCharacter;
     int Role=ROLE_Authority;
@@ -91,6 +115,7 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     void OnRep_TrainerVisible();
     void ActivateTarget(const FVector&,bool);
     void StartWiggle(float);
+    bool SetTrainerCrouched(bool);
     void HideTarget();
     void ResetTargetMovement();
     void ReverseStrafe();
@@ -212,6 +237,55 @@ int main(int argc,char**argv) {
         target.ActivateTarget(FVector(0,0,108),true);
         Require(!target.bTrainerWiggle&&target.StrafeRange==800.f&&target.Move.MaxWalkSpeed==500.f,
                 "new tracking appearance retained narrow wiggle speed/range");
+    } else if(name=="crouch_guards") {
+        for(int guard=0;guard<5;++guard) {
+            auto target=Active(); target.bTrainerWiggle=true;
+            if(guard==0) target.Role=1;
+            if(guard==1) target.bTrainerVisible=false;
+            if(guard==2) target.bTrainerWiggle=false;
+            if(guard==3) target.Dead=true;
+            if(guard==4) target.Move.Mode=MOVE_Falling;
+            Require(!target.SetTrainerCrouched(true)&&target.Move.Crouches==0&&!target.Move.bWantsToCrouch,
+                    "invalid target entered crouch");
+        }
+        auto target=Active(); target.bTrainerWiggle=true; target.Move.CrouchAllowed=false;
+        Require(!target.SetTrainerCrouched(true)&&!target.Move.bWantsToCrouch,
+                "failed crouch left a deferred request outside its scheduled hold");
+        target.Role=1; target.bIsCrouched=true; target.Move.bWantsToCrouch=true;
+        Require(!target.SetTrainerCrouched(false)&&target.Move.bWantsToCrouch&&target.Move.Uncrouches==0,
+                "client uncrouched authoritative target");
+    } else if(name=="crouch_posture") {
+        ANCAimTrainerTarget target; target.ActivateTarget(FVector(100,300,284),false); target.StartWiggle(60.f);
+        const int teleports=target.Teleports, updates=target.NetUpdates;
+        target.Move.Speed=150.f;
+        Require(target.SetTrainerCrouched(true)&&target.bIsCrouched&&target.Move.bWantsToCrouch
+                &&target.Move.HalfHeight==40.f&&target.Position.Z==216.f,"crouch did not use native capsule posture");
+        target.SetTrainerCrouched(true); target.Tick(.016f);
+        Require(target.Move.Crouches==1&&target.NetUpdates==updates+1&&target.Teleports==teleports,
+                "held crouch teleported or repeated native transitions");
+        Require(target.Move.MaxWalkSpeed==220.f&&target.Move.Speed==150.f&&target.InputCalls==1,
+                "crouch changed standing wiggle speed or stopped normal strafe input");
+        Require(target.SetTrainerCrouched(false)&&!target.bIsCrouched&&!target.Move.bWantsToCrouch
+                &&target.Move.HalfHeight==108.f&&target.Position.Z==284.f&&target.Teleports==teleports,
+                "standing did not restore native base-preserving posture");
+    } else if(name=="crouch_reset") {
+        ANCAimTrainerTarget target; target.ActivateTarget(FVector(100,300,284),false); target.StartWiggle(60.f);
+        target.SetTrainerCrouched(true); target.Move.Mode=MOVE_Falling;
+        target.HideTarget();
+        Require(!target.bIsCrouched&&!target.Move.bWantsToCrouch&&target.Move.HalfHeight==108.f,
+                "hidden airborne target retained crouch");
+        target.ActivateTarget(FVector(100,300,428),false); target.StartWiggle(60.f); target.SetTrainerCrouched(true);
+        target.Move.StandAllowed=false;
+        Require(!target.SetTrainerCrouched(false)&&target.bIsCrouched&&!target.Move.bWantsToCrouch,
+                "blocked native standing was falsely reported successful");
+        target.Move.StandAllowed=true;
+        target.ActivateTarget(FVector(200,-500,108),false);
+        Require(!target.bIsCrouched&&!target.Move.bWantsToCrouch&&target.Position.Z==108.f,
+                "new seat inherited crouched height or uncrouch shifted its standing anchor");
+        target.StartWiggle(60.f); target.SetTrainerCrouched(true); target.Move.StandAllowed=false;
+        target.ActivateTarget(FVector(200,-500,108),false);
+        Require(!target.bTrainerVisible&&!target.Collision,
+                "a blocked standing reset exposed an invalid new appearance");
     } else if(name=="landing_recovery") {
         auto target=Active(); target.Move.bIsDodgeLanding=true; target.Move.DodgeResetTime=10.f;
         target.Move.MovementTime=9.749f; target.Tick(.001f);
@@ -248,6 +322,7 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::OnRep_TrainerVisible",
             "void ANCAimTrainerTarget::ActivateTarget",
             "void ANCAimTrainerTarget::StartWiggle",
+            "bool ANCAimTrainerTarget::SetTrainerCrouched",
             "void ANCAimTrainerTarget::HideTarget",
             "void ANCAimTrainerTarget::ResetTargetMovement",
             "void ANCAimTrainerTarget::ReverseStrafe",
@@ -281,6 +356,9 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_controllerless_landing_acceleration_expires_at_stock_deadline(self): self.run_case("landing_recovery")
     def test_wiggle_rejects_invalid_width_hidden_target_and_client_requests(self): self.run_case("wiggle_guards")
     def test_wiggle_boundaries_speed_and_no_dodge_reset_on_next_appearance(self): self.run_case("wiggle_boundaries")
+    def test_crouch_guards_and_failed_request_rollback(self): self.run_case("crouch_guards")
+    def test_crouch_uses_real_posture_once_without_teleports(self): self.run_case("crouch_posture")
+    def test_crouch_reset_handles_hidden_airborne_and_blocked_postures(self): self.run_case("crouch_reset")
     def test_visible_head_pose_and_no_false_helmet_feedback(self): self.run_case("head_feedback")
 
 

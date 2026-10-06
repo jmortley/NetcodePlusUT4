@@ -56,7 +56,9 @@ private:
     float NextTrackingHitSoundTime = 0.f;
     float ShotStatBaseline = 0.f;
     double TrackedSeconds = 0.0;
+    double FiredSeconds = 0.0;
     bool bPreviousContact = false;
+    bool bPreviousFiring = false;
     bool bRankedRun = false;
     FString UnrankedReason;
     FString SetupError;
@@ -64,6 +66,8 @@ private:
     TArray<float> NextTargetTime;
     TArray<float> TargetExpiry;
     TArray<float> NextWiggleTime;
+    TArray<float> NextCrouchTime;
+    TArray<float> CrouchEndTime;
     double NextLeaderboardFetch[3] = { 0.0, 0.0, 0.0 };
     bool LeaderboardInFlight[3] = { false, false, false };
     TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[3];
@@ -81,5 +85,7 @@ private:
     void UpdateTargets(float Now);
     void UpdateShotCount();
     bool HasTrackingContact() const;
+    bool IsTrackingBeamFiring() const;
+    void UpdateTrackingSample(float Now);
     bool IsTrainee(const ANCAimTrainerPlayerController* PC) const;
 };

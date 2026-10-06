@@ -22,6 +22,8 @@ public:
 
     void ActivateTarget(const FVector& Location, bool bStrafe);
     void StartWiggle(float HalfWidth);
+    /** Uses normal UT posture/collision; false always requests standing again. */
+    bool SetTrainerCrouched(bool bCrouch);
     void HideTarget();
     bool IsAvailable() const { return bTrainerVisible; }
     float GetAppearanceTime() const { return AppearanceTime; }

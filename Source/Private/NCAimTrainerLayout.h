@@ -39,19 +39,19 @@ namespace NCAimTrainerLayout
         case 1:
             // Leave the middle sightline open to the floor target behind this
             // block; its head would otherwise be obscured by the elevated pawn.
-            return { 100.f, 2200.f, -175.f, 0.f, 40.f, PopupPlatform(1).Height };
+            return { 100.f, 2200.f, -175.f, 0.f, 44.f, PopupPlatform(1).Height };
         case 2:
-            return { 100.f, 2200.f, 850.f, 85.f, 90.f, PopupPlatform(2).Height };
+            return { 100.f, 2200.f, 850.f, 85.f, 99.f, PopupPlatform(2).Height };
         case 3:
             // A standing head peeks over the central block. The capsule stays
             // behind the block's X=2400 rear face and moves along the floor.
-            return { 2650.f, 2850.f, 0.f, 0.f, 55.f, 0.f };
+            return { 2650.f, 2850.f, 0.f, 0.f, 60.5f, 0.f };
         case 4:
             // This near-left lane sits outside the platform footprints and in
             // a different angular band from the low-platform character.
-            return { -300.f, 100.f, -1450.f, 35.f, 75.f, 0.f };
+            return { -300.f, 100.f, -1450.f, 35.f, 82.5f, 0.f };
         default:
-            return { 100.f, 2200.f, -850.f, 85.f, 90.f, PopupPlatform(0).Height };
+            return { 100.f, 2200.f, -850.f, 85.f, 99.f, PopupPlatform(0).Height };
         }
     }
 

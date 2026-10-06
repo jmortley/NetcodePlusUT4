@@ -24,6 +24,7 @@ struct FNCAimTrainerProgress
 	UPROPERTY() float RemainingSeconds = 60.f;
 	UPROPERTY() float Accuracy = 0.f;
 	UPROPERTY() float TrackingSeconds = 0.f;
+	UPROPERTY() float FiringSeconds = 0.f;
 };
 
 /** Assigned only by the opt-in trainer game mode. Does not replace any existing mode's PC. */

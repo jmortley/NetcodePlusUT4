@@ -209,9 +209,9 @@ struct ANCAimTrainerGame : BaseGame {
     FString UnrankedReason;
     int NetMode=NM_Standalone;
     void* BaseMutator=nullptr;
-    bool bRankedRun=false, bPreviousContact=false;
+    bool bRankedRun=false, bPreviousContact=false, bPreviousFiring=false;
     float PhaseStartedAt=0;
-    double TrackedSeconds=0;
+    double TrackedSeconds=0, FiredSeconds=0;
     struct { void Initialize(int) {} } Schedule;
     struct Room { void SetScenario(uint8) {} } TheRoom;
     Room* Arena=&TheRoom;
@@ -321,6 +321,18 @@ int main(int argc, char** argv) {
             "fixed mode left physics enabled");
         f.Game.StartTraining(&f.Player);
         Require(f.Game.bRankedRun,"unchanged fixed network preset cannot rank");
+    } else if (name == "run_clock_reset") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        for(int run=0;run<2;++run) {
+            f.Game.TrackedSeconds=12.0; f.Game.FiredSeconds=25.0;
+            f.Game.bPreviousContact=true; f.Game.bPreviousFiring=true;
+            f.Game.StartTraining(&f.Player);
+            Require(f.Game.Progress.Phase==1 && f.Game.TrackedSeconds==0.0 && f.Game.FiredSeconds==0.0
+                    && !f.Game.bPreviousContact && !f.Game.bPreviousFiring,
+                    "new run carried previous contact/firing clocks into score or accuracy");
+            f.Game.Progress.Phase=2;
+            f.Game.AbortTraining(&f.Player);
+        }
     } else if (name == "lane_bounds") {
         f.BeginWorld(); f.Game.PostLogin(&f.Player);
         AUTCharacter& pawn=f.Game.SpawnedPawn;
@@ -445,6 +457,7 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_postlogin_manual_restart_equips_once(self): self.run_case("late_manual_restart")
     def test_spectator_never_receives_trainee_pawn(self): self.run_case("spectator")
     def test_movement_choice_survives_run_lifecycle_and_cannot_rank(self): self.run_case("movement_lifecycle")
+    def test_restart_clears_firing_and_contact_clocks(self): self.run_case("run_clock_reset")
     def test_lane_accepts_crouching_jumping_but_rejects_escapes(self): self.run_case("lane_bounds")
     def test_each_scenario_equips_its_real_weapon(self): self.run_case("tracking_weapon")
     def test_tracking_requires_link_assets_and_recovers_after_mount(self): self.run_case("tracking_assets")

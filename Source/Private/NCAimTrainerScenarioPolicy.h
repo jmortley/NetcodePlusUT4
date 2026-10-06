@@ -1,6 +1,6 @@
 #pragma once
 
-// Timing and direction rules for the revision-3 trainer presets. The authority
+// Timing and direction rules for the revision-4 trainer presets. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
@@ -16,6 +16,10 @@ namespace NCAimTrainerScenarioPolicy
     {
         return 0.12f + 0.16f * UnitRoll(Roll);
     }
+
+    inline bool ShouldCrouch(float Roll) { return UnitRoll(Roll) < 0.65f; }
+    inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
+    inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
 
     inline float StrafeHoldSeconds(float PatternRoll, float JitterRoll)
     {

@@ -190,6 +190,7 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 	Json->SetNumberField(TEXT("headshots"), Result.Headshots);
 	Json->SetNumberField(TEXT("targets_expired"), Result.TargetsExpired);
 	Json->SetNumberField(TEXT("tracked_ms"), Result.TrackedMilliseconds);
+	Json->SetNumberField(TEXT("fired_ms"), Result.FiredMilliseconds);
 	Json->SetNumberField(TEXT("duration_ms"), Result.DurationMilliseconds);
 	FString Body;
 	FJsonSerializer::Serialize(Json, TJsonWriterFactory<>::Create(&Body));

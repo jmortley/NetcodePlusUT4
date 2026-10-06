@@ -191,7 +191,7 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 	Label(TEXT("RUN COMPLETE"), 640.f, 149.f, 18.f, TrainerAccent, 0.f, true);
 	Label(FString::FromInt(Progress.Score), 640.f, 181.f, 63.f, TrainerInk, 700.f, true);
 	const FString Detail = Progress.Scenario == 0
-		? FString::Printf(TEXT("%.2f s BEAM ON TARGET     %.1f%% ACCURACY"), Progress.TrackingSeconds, Progress.Accuracy)
+		? FString::Printf(TEXT("%.2f s ON TARGET / %.2f s FIRED     %.1f%% ACCURACY"), Progress.TrackingSeconds, Progress.FiringSeconds, Progress.Accuracy)
 		: FString::Printf(TEXT("%d / %d HITS     %.1f%% ACCURACY     %d EXPIRED"), Progress.Hits, Progress.Shots, Progress.Accuracy, Progress.TargetsExpired);
 	Label(Detail, 640.f, 269.f, 17.f, TrainerMuted, 1010.f, true);
 	if (Progress.Scenario == 1)

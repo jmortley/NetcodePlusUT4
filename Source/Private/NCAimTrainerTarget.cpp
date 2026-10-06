@@ -40,6 +40,8 @@ ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitial
     GetCharacterMovement()->bOrientRotationToMovement = false;
     GetCharacterMovement()->bUseControllerDesiredRotation = false;
     GetCharacterMovement()->MaxWalkSpeed = 500.f;
+    GetCharacterMovement()->MaxWalkSpeedCrouched = NCAimTrainerLayout::WiggleSpeed;
+    GetCharacterMovement()->GetNavAgentPropertiesRef().bCanCrouch = true;
     GetCharacterMovement()->MaxAcceleration = NCAimTrainerLayout::WiggleAcceleration;
     // Head position and animation must update even on a dedicated server.
     GetMesh()->MeshComponentUpdateFlag = EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones;
@@ -93,8 +95,16 @@ void ANCAimTrainerTarget::ActivateTarget(const FVector& Location, bool bStrafe)
     GetCharacterMovement()->MaxWalkSpeed = 500.f;
     StrafeCenter = Location;
     StrafeDirection = 1.f;
+    // Restore posture at the new clear seat, not under a previous station's
+    // cover. Uncrouch can move the capsule center; the final placement below
+    // restores the exact standing anchor after that native collision change.
+    if (bIsCrouched)
+    {
+        SetActorLocationAndRotation(Location, FRotator(0.f, 180.f, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
+    }
     ResetTargetMovement();
     SetActorLocationAndRotation(Location, FRotator(0.f, 180.f, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
+    if (bIsCrouched) { HideTarget(); return; }
     // Reappearing targets are a new opportunity, not a rewindable old body.
     SavedPositions.Reset();
     SavedCapsulePostures.Reset();
@@ -141,6 +151,26 @@ void ANCAimTrainerTarget::ResetTargetMovement()
         Movement->bIsDodgeLanding = false;
         Movement->DodgeResetTime = 0.f;
     }
+    SetTrainerCrouched(false);
+}
+
+bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
+{
+    if (Role != ROLE_Authority) { return false; }
+    UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+    if (!Movement || (bCrouch && (!bTrainerVisible || !bTrainerWiggle || IsDead() || !Movement->IsMovingOnGround())))
+    {
+        return false;
+    }
+    const bool bWasCrouched = bIsCrouched;
+    Movement->bWantsToCrouch = bCrouch;
+    // Direct movement posture skips the player crouch-to-slide gesture while
+    // retaining native capsule adjustment, animation callbacks and replication.
+    if (bCrouch && !bIsCrouched) { Movement->Crouch(false); }
+    else if (!bCrouch && bIsCrouched) { Movement->UnCrouch(false); }
+    if (bCrouch && !bIsCrouched) { Movement->bWantsToCrouch = false; }
+    if (bWasCrouched != bIsCrouched) { ForceNetUpdate(); }
+    return bIsCrouched == bCrouch;
 }
 
 void ANCAimTrainerTarget::ReverseStrafe()

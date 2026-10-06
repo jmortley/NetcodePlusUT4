@@ -67,18 +67,25 @@ struct AUTWeap_LinkGun_Shaft_NCP : AUTWeaponFix {
 template<class T, class U> T* Cast(U* value) { return dynamic_cast<T*>(value); }
 struct FDamageEvent { int DamageTypeClass = 5; };
 struct ANCAimTrainerTarget : AActor {
-    bool Visible = false, Strafing = false;
+    bool Visible = false, Strafing = false, Crouched = false;
+    bool CanStand = true, CanCrouch = true;
     int Activations = 0, Hides = 0, Wiggles = 0, Reversals = 0;
+    int CrouchRequests = 0, StandRequests = 0;
     float WiggleRange = 0.f;
     FVector Position;
     void ActivateTarget(const FVector& position, bool strafe) {
-        Visible = true; Strafing = strafe; Position = position; ++Activations;
+        Visible = true; Strafing = strafe; Crouched = false; Position = position; ++Activations;
     }
     bool IsAvailable() const { return Visible; }
     float GetAppearanceTime() const { return 0.f; }
-    void HideTarget() { Visible = false; ++Hides; }
+    void HideTarget() { Visible = false; Crouched = false; ++Hides; }
     void StartWiggle(float range) { WiggleRange = range; ++Wiggles; }
     void ReverseStrafe() { ++Reversals; }
+    bool SetTrainerCrouched(bool crouch) {
+        if (crouch) { ++CrouchRequests; if (!CanCrouch) return false; }
+        else { ++StandRequests; if (!CanStand) return false; }
+        Crouched = crouch; return true;
+    }
 };
 struct ANCAimTrainerGame {
     struct {
@@ -100,6 +107,7 @@ struct ANCAimTrainerGame {
     float PhaseStartedAt = 0.f, LastTraceTime = 0.f, NextDirectionTime = 0.f, NextDodgeTime = 0.f;
     float NextPopupTime = 0.f, PopupRefireSeconds = 1.f, ShotStatBaseline = 0.f;
     float NextTargetTime[5] = {}, TargetExpiry[5] = {}, NextWiggleTime[5] = {};
+    float NextCrouchTime[5] = {}, CrouchEndTime[5] = {};
     float NextTrackingHitSoundTime = 0.f;
     bool bRankedRun = true;
     std::string UnrankedReason;
@@ -290,6 +298,7 @@ void InitializeRefire() {
         f.Game.NextPopupTime = 900.f; f.Game.PopupRefireSeconds = 99.f;
         for (int i = 0; i < 5; ++i) {
             f.Game.NextTargetTime[i] = 900.f; f.Game.TargetExpiry[i] = 800.f; f.Game.NextWiggleTime[i] = 700.f;
+            f.Game.NextCrouchTime[i] = 600.f; f.Game.CrouchEndTime[i] = 500.f;
         }
         f.Start();
         const float expected = std::isfinite(refire) && refire > 1.f ? refire : 1.f;
@@ -297,7 +306,8 @@ void InitializeRefire() {
                 "restart retained previous cadence or unsafe refire");
         Require(f.Game.bRankedRun == (refire == 1.f), "altered or invalid weapon cadence remained ranked");
         for (int i = 0; i < 5; ++i) {
-            Require(f.Game.NextTargetTime[i] == 10.f && f.Game.TargetExpiry[i] == 0.f && f.Game.NextWiggleTime[i] == 10.f,
+            Require(f.Game.NextTargetTime[i] == 10.f && f.Game.TargetExpiry[i] == 0.f && f.Game.NextWiggleTime[i] == 10.f
+                    && f.Game.NextCrouchTime[i] == 0.f && f.Game.CrouchEndTime[i] == 0.f,
                     "restart retained prior slot schedule");
         }
         f.At(10.f);
@@ -367,6 +377,97 @@ void LayoutAndWiggles() {
         }
     }
 }
+void CrouchScenarioScope() {
+    for (int scenario : {0,1}) {
+        Fixture f; f.Game.Progress.Scenario = scenario; f.Start(); f.At(10.f);
+        for (int slot=0; slot<5; ++slot) {
+            Require(f.Game.NextCrouchTime[slot]==0.f, "non-instagib scenario scheduled a crouch");
+            // Even a stale deadline must not leak a crouch into other modes.
+            f.Game.NextCrouchTime[slot]=10.1f;
+        }
+        f.At(10.2f);
+        for (const auto& target:f.Targets) Require(target.CrouchRequests==0, "other scenario executed instagib crouch");
+    }
+    for (float roll:{0.f,.649f,.65f,1.f}) {
+        Fixture f; f.Game.Schedule.Roll=roll; f.Start(); f.At(10.f);
+        const bool selected=roll<.65f;
+        Require((f.Game.NextCrouchTime[0]>10.f)==selected, "instagib crouch selection boundary drifted");
+        if(selected) Require(f.Game.NextCrouchTime[0]>=11.5f && f.Game.NextCrouchTime[0]<=13.5f,
+                             "crouch does not leave an initial standing opportunity");
+    }
+}
+void CrouchOncePerAppearance() {
+    Fixture f; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+    const float due=f.Game.NextCrouchTime[0];
+    f.At(due-.001f);
+    Require(!f.Targets[0].Crouched && f.Targets[0].CrouchRequests==0,"target crouched before deadline");
+    f.At(due);
+    Require(f.Targets[0].Crouched && f.Targets[0].CrouchRequests==1 && f.Game.NextCrouchTime[0]==0.f,
+            "due crouch was missed or left a repeating request");
+    const float end=f.Game.CrouchEndTime[0];
+    Require(end>=due+.25f && end<=due+.45f,"crouch hold outside its brief exposure interruption");
+    f.At(end-.001f); Require(f.Targets[0].Crouched,"target stood before hold ended");
+    f.At(end);
+    Require(!f.Targets[0].Crouched && f.Game.CrouchEndTime[0]==0.f && f.Targets[0].StandRequests==1,
+            "completed crouch left the target hidden or standing request active");
+    f.At(end+.1f); f.At(end+.3f); f.At(end+.7f);
+    Require(f.Targets[0].CrouchRequests==1 && f.Targets[0].StandRequests==1,"appearance repeated its crouch/stand");
+    Fixture failed; failed.Start(); failed.At(10.f); failed.Game.NextPopupTime=10000.f;
+    failed.Targets[0].CanCrouch=false;
+    const float failAt=failed.Game.NextCrouchTime[0]; failed.At(failAt); failed.At(failAt+.1f);
+    Require(failed.Targets[0].CrouchRequests==1 && failed.Game.CrouchEndTime[0]==0.f,
+            "failed crouch was retried or created a bogus standing deadline");
+}
+void CrouchExpiryGuard() {
+    for (float refire:{1.f,1.5f,2.f}) {
+        for (float margin:{-.001f,.001f}) {
+            Fixture f; f.Gun.Refire=refire; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+            const float due=f.Game.NextCrouchTime[0];
+            const float hold=NCAimTrainerScenarioPolicy::CrouchHoldSeconds(f.Game.Schedule.Roll);
+            f.Game.TargetExpiry[0]=due+hold+refire+.1f+margin;
+            const float expiry=f.Game.TargetExpiry[0];
+            f.At(due);
+            const bool allowed=margin>0.f;
+            Require(f.Targets[0].Crouched==allowed && f.Targets[0].CrouchRequests==(allowed?1:0),
+                    "near-expiry crouch did not preserve one real refire interval plus reaction margin");
+            Require(f.Game.TargetExpiry[0]==expiry && f.Game.NextCrouchTime[0]==0.f,
+                    "guard changed lifetime or left a doomed crouch queued");
+            if(allowed) {
+                f.At(f.Game.CrouchEndTime[0]);
+                Require(!f.Targets[0].Crouched && expiry-f.Game.TheWorld.Now>refire,
+                        "target stood with less than a rifle interval remaining");
+            }
+        }
+    }
+}
+void BlockedStandingRetry() {
+    Fixture f; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+    f.At(f.Game.NextCrouchTime[0]);
+    const float end=f.Game.CrouchEndTime[0]; f.Targets[0].CanStand=false;
+    f.At(end); f.At(end+.02f);
+    Require(f.Targets[0].Crouched && f.Game.CrouchEndTime[0]==end && f.Targets[0].StandRequests==2,
+            "blocked native uncrouch lost its retry deadline");
+    f.Targets[0].CanStand=true; f.At(end+.04f);
+    Require(!f.Targets[0].Crouched && f.Game.CrouchEndTime[0]==0.f && f.Targets[0].StandRequests==3,
+            "target did not stand after clearance recovered");
+    f.At(end+.06f);
+    Require(f.Targets[0].StandRequests==3 && f.Targets[0].CrouchRequests==1,
+            "standing recovery left repeated state transitions");
+}
+void CrouchReuseReset() {
+    Fixture f; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+    f.At(f.Game.NextCrouchTime[0]); Require(f.Targets[0].Crouched,"fixture did not crouch");
+    Require(f.Hit(0)>0.f && !f.Targets[0].Visible,"crouched target hit was not accepted");
+    f.Game.Schedule.Roll=1.f; // Replacement appearance deliberately skips crouch.
+    f.Game.NextPopupTime=f.Game.TheWorld.Now+.1f; f.At(f.Game.NextPopupTime);
+    Require(f.Targets[0].Visible && f.Targets[0].Activations==2 && !f.Targets[0].Crouched
+            && f.Game.NextCrouchTime[0]==0.f && f.Game.CrouchEndTime[0]==0.f,
+            "reused target inherited old crouch posture or deadlines");
+    f.Game.Schedule.Roll=.1f;
+    f.Game.ActivateSlot(0,f.Game.TheWorld.Now+.1f);
+    Require(f.Game.NextCrouchTime[0]>f.Game.TheWorld.Now+1.5f && f.Game.CrouchEndTime[0]==0.f,
+            "new appearance cannot schedule a fresh crouch after previous one");
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
     const std::string name(argv[1]);
@@ -380,6 +481,11 @@ int main(int argc, char** argv) {
     else if (name == "heads") HeadshotSlots();
     else if (name == "initialize") InitializeRefire();
     else if (name == "layout") LayoutAndWiggles();
+    else if (name == "crouch_scope") CrouchScenarioScope();
+    else if (name == "crouch_once") CrouchOncePerAppearance();
+    else if (name == "crouch_expiry") CrouchExpiryGuard();
+    else if (name == "crouch_blocked") BlockedStandingRetry();
+    else if (name == "crouch_reuse") CrouchReuseReset();
     else Require(false, "unknown case");
 }
 '''
@@ -429,6 +535,11 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_headshot_slots_keep_existing_initial_hit_and_expiry_delays(self): self.run_case("heads")
     def test_run_resets_cadence_and_rejects_altered_weapon_from_rankings(self): self.run_case("initialize")
     def test_five_slot_geometry_and_wiggle_stay_within_cover_and_platforms(self): self.run_case("layout")
+    def test_only_selected_instagib_appearances_schedule_crouch(self): self.run_case("crouch_scope")
+    def test_crouch_runs_once_per_appearance_and_failed_requests_do_not_repeat(self): self.run_case("crouch_once")
+    def test_crouch_guard_preserves_full_rifle_refire_before_expiry(self): self.run_case("crouch_expiry")
+    def test_blocked_uncrouch_retries_until_native_clearance_recovers(self): self.run_case("crouch_blocked")
+    def test_reused_target_drops_previous_crouch_deadlines(self): self.run_case("crouch_reuse")
 
 
 if __name__ == "__main__":
