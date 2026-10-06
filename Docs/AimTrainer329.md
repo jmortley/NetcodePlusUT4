@@ -47,6 +47,11 @@ Start for the countdown. **F6** cancels an incomplete run and returns to the
 picker. **Enter** retries from the results screen. **Escape** retains the normal
 UT menu. Cancelled runs and disconnects do not submit partial scores.
 
+All three scenarios support offline standalone practice. A hub is not required.
+Offline results remain on the results screen; only an approved network host
+submits ranked scores. A directly connected dedicated server can be used for
+network testing without a hub.
+
 ## Scenarios and scoring (revision 1)
 
 | Scenario | Exercise | Score |
@@ -146,3 +151,20 @@ packaged client after rebuilding the plugin.
 Repair checks: the UE4.15 Win64 Development Editor module rebuilt successfully;
 all 20 trainer native tests passed, including six startup regression cases.
 These checks do not establish a packaged runtime pass.
+
+### Target initialization repair (2026-10-06)
+
+The first packaged offline test then reached the picker but could not start:
+the native target was copying its animation class from CharacterContent, where
+Malcolm's skin deliberately has none. The trainer now copies animation and body
+mesh placement from stock BaseUTCharacter, then applies the skin during
+PostInitializeComponents so validation succeeds before BeginPlay. Dedicated
+server bone updates remain enabled. Startup failures now distinguish missing
+target data, room content and weapon/preset problems in the HUD and log instead
+of suggesting that offline users need a server cook. Offline runs identify
+themselves as practice-only before scoring begins.
+
+The UE4.15 editor module rebuilt successfully. Five target-asset regression
+tests cover the native initialization, missing assets, stable scale and server
+bone-update settings; the full trainer suite has 25 passing tests. Rebuild the
+Shipping plugin and verify visible, animated targets in all three scenarios.

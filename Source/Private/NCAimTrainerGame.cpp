@@ -7,11 +7,15 @@
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
 #include "UTCharacterMovement.h"
+#include "UTCharacterContent.h"
 #include "UTPlayerState.h"
 #include "UTPickup.h"
 #include "UTDroppedPickup.h"
 #include "UTGameSession.h"
 #include "GameFramework/WorldSettings.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
+#include "Animation/AnimInstance.h"
 #include "EngineUtils.h"
 #include "HAL/PlatformTime.h"
 
@@ -79,6 +83,13 @@ void ANCAimTrainerGame::BeginPlay()
     for (TActorIterator<AUTPickup> It(GetWorld()); It; ++It) { It->Destroy(); }
 }
 
+bool ANCAimTrainerGame::FailSetup(const TCHAR* Message)
+{
+    SetupError = Message;
+    UE_LOG(LogTemp, Warning, TEXT("NCP Aim Trainer setup: %s"), Message);
+    return false;
+}
+
 bool ANCAimTrainerGame::EnsureArena()
 {
     if (Arena && Arena->IsPendingKillPending()) { Arena = nullptr; }
@@ -89,15 +100,21 @@ bool ANCAimTrainerGame::EnsureArena()
     {
         Arena = GetWorld()->SpawnActor<ANCAimTrainerArena>(ArenaOrigin, FRotator::ZeroRotator, Params);
     }
-    if (!Arena || !Arena->HasArenaAssets()) { return false; }
+    if (!Arena) { return FailSetup(TEXT("Cannot start: the practice room could not spawn.")); }
+    if (!Arena->HasArenaAssets()) { return FailSetup(TEXT("Cannot start: the practice room mesh or material is missing from this installation.")); }
     while (Targets.Num() < 3)
     {
         ANCAimTrainerTarget* Target = GetWorld()->SpawnActor<ANCAimTrainerTarget>(
             ArenaOrigin + FVector(900.f, (Targets.Num() - 1) * 650.f, 108.f), FRotator(0, 180, 0), Params);
-        if (!Target || !Target->HasCharacterAssets())
+        if (!Target) { return FailSetup(TEXT("Cannot start: a practice character could not spawn.")); }
+        if (!Target->HasCharacterAssets())
         {
-            if (Target) { Target->Destroy(); }
-            return false;
+            const USkeletalMeshComponent* Mesh = Target->GetMesh();
+            UE_LOG(LogTemp, Warning, TEXT("NCP Aim Trainer target assets: character=%s mesh=%s animation=%s"),
+                *GetNameSafe(*Target->CharacterData), *GetNameSafe(Mesh ? Mesh->SkeletalMesh : nullptr),
+                *GetNameSafe(Mesh ? *Mesh->AnimClass : nullptr));
+            Target->Destroy();
+            return FailSetup(TEXT("Cannot start: the practice character mesh or animation is unavailable. See the game log for the missing asset."));
         }
         Target->HideTarget();
         Targets.Add(Target);
@@ -184,9 +201,9 @@ void ANCAimTrainerGame::SetPlayerDefaults(APawn* Pawn)
 bool ANCAimTrainerGame::ConfigurePawn()
 {
     // This also protects scenario selection and existing-pawn login paths.
-    if (!GetWorld()->HasBegunPlay()) { return false; }
+    if (!GetWorld()->HasBegunPlay()) { return FailSetup(TEXT("Practice is still initializing. Try starting again in a moment.")); }
     AUTCharacter* Pawn = Trainee ? Cast<AUTCharacter>(Trainee->GetPawn()) : nullptr;
-    if (!Pawn || Pawn->IsDead()) { return false; }
+    if (!Pawn || Pawn->IsDead()) { return FailSetup(TEXT("Cannot start: your practice character is not ready.")); }
     Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), FRotator::ZeroRotator,
         false, nullptr, ETeleportType::TeleportPhysics);
     Pawn->GetCharacterMovement()->StopMovementImmediately();
@@ -212,10 +229,13 @@ bool ANCAimTrainerGame::ConfigurePawn()
     {
         // Unarmed tracking remains usable; precision modes require the actual
         // shipped NCP weapon and never quietly fall back to different hit tests.
-        return Progress.Scenario == 0;
+        return Progress.Scenario == 0 || FailSetup(TEXT("Cannot start: the selected NCP rifle is unavailable. Install the NCWepMut content pak."));
     }
     if ((Progress.Scenario == 2 && !DesiredClass->IsChildOf(AUTPlusShockRifle::StaticClass()))
-        || (Progress.Scenario != 2 && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass()))) { return false; }
+        || (Progress.Scenario != 2 && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass())))
+    {
+        return FailSetup(TEXT("Cannot start: the selected rifle does not use the required NetcodePlus weapon class."));
+    }
     RunWeapon = Cast<AUTWeapon>(Pawn->CreateInventory(DesiredClass));
     if (RunWeapon)
     {
@@ -224,20 +244,27 @@ bool ANCAimTrainerGame::ConfigurePawn()
         if (Progress.Scenario == 2)
         {
             const AUTPlusShockRifle* Rifle = Cast<AUTPlusShockRifle>(RunWeapon);
-            if (!Rifle || !Rifle->HasSharedInstagibFireModes()) { return false; }
+            if (!Rifle || !Rifle->HasSharedInstagibFireModes())
+            {
+                return FailSetup(TEXT("Cannot start: the instagib rifle's two fire modes do not match the training preset."));
+            }
         }
     }
-    return Progress.Scenario == 0 || (RunWeapon && RunWeapon->ShotsStatsName != NAME_None);
+    if (Progress.Scenario == 0) { return true; }
+    if (!RunWeapon) { return FailSetup(TEXT("Cannot start: the selected NCP rifle could not be equipped.")); }
+    if (RunWeapon->ShotsStatsName == NAME_None) { return FailSetup(TEXT("Cannot start: the selected rifle has no shot counter for scoring.")); }
+    return true;
 }
 
 void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario)
 {
     if (!IsTrainee(PC) || Scenario > 2 || Progress.Phase == 1 || Progress.Phase == 2) { return; }
+    SetupError.Empty();
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
     HideAllTargets();
     if (Arena) { Arena->SetScenario(Scenario); }
-    ConfigurePawn();
+    if (!ConfigurePawn()) { PC->SetTrainerOnlineStatus(SetupError); }
     PublishProgress();
     RefreshLeaderboard();
 }
@@ -245,9 +272,10 @@ void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 
 void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
 {
     if (!IsTrainee(PC) || Progress.Phase == 1 || Progress.Phase == 2) { return; }
+    SetupError.Empty();
     if (!EnsureArena() || !ConfigurePawn())
     {
-        PC->SetTrainerOnlineStatus(TEXT("Cannot start: trainer character/arena or NCP weapon assets are missing. Check the server cook."));
+        PC->SetTrainerOnlineStatus(SetupError);
         return;
     }
     const uint8 Scenario = Progress.Scenario;
@@ -260,9 +288,11 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC)
     bPreviousContact = false;
     RunId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
     Schedule.Initialize(int32(GetTypeHash(RunId)));
-    bRankedRun = BaseMutator == nullptr && FMath::IsNearlyEqual(GetWorldSettings()->GetEffectiveTimeDilation(), 1.f)
+    bRankedRun = GetNetMode() != NM_Standalone && BaseMutator == nullptr && FMath::IsNearlyEqual(GetWorldSettings()->GetEffectiveTimeDilation(), 1.f)
         && GetClass() == StaticClass();
-    UnrankedReason = bRankedRun ? FString() : TEXT("Practice only: mutators or altered game speed change the preset.");
+    UnrankedReason = bRankedRun ? FString() : (GetNetMode() == NM_Standalone
+        ? TEXT("Offline practice: scores are shown here but are not submitted to the shared leaderboard.")
+        : TEXT("Practice only: mutators or altered game speed change the preset."));
     HideAllTargets();
     Arena->SetScenario(Scenario);
     PublishProgress();
@@ -522,6 +552,9 @@ void ANCAimTrainerGame::RefreshLeaderboard(bool bAfterSubmit)
         }
         if (!Game || !WeakPC.IsValid() || Game->Trainee != WeakPC.Get() || Game->Progress.Scenario != Scenario) { return; }
         if (bSuccess) { WeakPC->SetTrainerLeaderboard(Rows); }
-        else if (Game->Progress.Phase == 0) { WeakPC->SetTrainerOnlineStatus(TEXT("UT4Stats leaderboard unavailable. Practice is still available.")); }
+        else if (Game->Progress.Phase == 0 && Game->SetupError.IsEmpty())
+        {
+            WeakPC->SetTrainerOnlineStatus(TEXT("UT4Stats leaderboard unavailable. Practice is still available."));
+        }
     });
 }

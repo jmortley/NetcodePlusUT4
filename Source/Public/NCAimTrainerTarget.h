@@ -12,6 +12,7 @@ class NETCODEPLUS_API ANCAimTrainerTarget : public ATeamArenaCharacter
     GENERATED_BODY()
 public:
     ANCAimTrainerTarget(const FObjectInitializer& ObjectInitializer);
+    virtual void PostInitializeComponents() override;
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaSeconds) override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;

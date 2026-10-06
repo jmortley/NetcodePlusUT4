@@ -52,6 +52,7 @@ private:
     bool bPreviousContact = false;
     bool bRankedRun = false;
     FString UnrankedReason;
+    FString SetupError;
     FString RunId;
     float NextTargetTime[3] = { 0.f, 0.f, 0.f };
     float TargetExpiry[3] = { 0.f, 0.f, 0.f };
@@ -61,6 +62,7 @@ private:
 
     bool EnsureArena();
     bool ConfigurePawn();
+    bool FailSetup(const TCHAR* Message);
     void BeginActiveRun();
     void FinishRun();
     void PublishProgress();

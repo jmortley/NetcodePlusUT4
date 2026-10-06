@@ -13,6 +13,21 @@
 ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
+    // CharacterContent supplies a skin, not the pawn animation Blueprint. Native
+    // UTCharacter subclasses also lack BaseUTCharacter's capsule-relative mesh
+    // placement. Keep those authored defaults on our CDO so ApplyCharacterData's
+    // class-default scale calculation remains correct on every application.
+    static ConstructorHelpers::FClassFinder<AUTCharacter> CharacterTemplate(
+        TEXT("/Game/RestrictedAssets/Blueprints/BaseUTCharacter"));
+    if (CharacterTemplate.Class)
+    {
+        const AUTCharacter* Template = CharacterTemplate.Class->GetDefaultObject<AUTCharacter>();
+        if (Template && Template->GetMesh())
+        {
+            GetMesh()->SetRelativeTransform(Template->GetMesh()->GetRelativeTransform());
+            GetMesh()->SetAnimInstanceClass(Template->GetMesh()->AnimClass);
+        }
+    }
     bAlwaysRelevant = true;
     NetUpdateFrequency = 60.f;
     MinNetUpdateFrequency = 30.f;
@@ -29,18 +44,24 @@ ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitial
     GetMesh()->bEnableUpdateRateOptimizations = false;
 }
 
+void ANCAimTrainerTarget::PostInitializeComponents()
+{
+    Super::PostInitializeComponents();
+    // EnsureArena validates immediately after SpawnActor, including while the
+    // world is beginning play. PostInitializeComponents precedes that return;
+    // BeginPlay need not have run yet. Preserve the pawn animation class because
+    // Malcolm's CharacterContent mesh deliberately has no AnimClass of its own.
+    if (CharacterData)
+    {
+        UClass* PawnAnimClass = GetMesh()->AnimClass;
+        ApplyCharacterData(CharacterData);
+        GetMesh()->SetAnimInstanceClass(PawnAnimClass);
+    }
+}
+
 void ANCAimTrainerTarget::BeginPlay()
 {
     Super::BeginPlay();
-    if (CharacterData)
-    {
-        ApplyCharacterData(CharacterData);
-        const AUTCharacterContent* Data = CharacterData.GetDefaultObject();
-        if (Data && Data->GetMesh())
-        {
-            GetMesh()->SetAnimInstanceClass(Data->GetMesh()->AnimClass);
-        }
-    }
     OnRep_TrainerVisible();
 }
 

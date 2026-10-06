@@ -117,6 +117,8 @@ struct ANCAimTrainerGame : BaseGame {
     FVector ArenaOrigin{0.f, 0.f, 50000.f};
     struct { int Scenario = 0; } Progress;
     int Publishes = 0, Fetches = 0;
+    std::string SetupError;
+    bool FailSetup(const char* message) { SetupError = message; return false; }
     void PublishProgress() { ++Publishes; }
     void RefreshLeaderboard() { ++Fetches; }
     bool ReadyToStartMatch_Implementation();
