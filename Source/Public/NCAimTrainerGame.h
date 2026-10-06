@@ -83,6 +83,7 @@ private:
     void HideAllTargets();
     void ActivateSlot(int32 Index, float Now);
     void UpdateTargets(float Now);
+    void UpdatePopupDodger(float Now);
     void UpdateShotCount();
     bool HasTrackingContact() const;
     bool IsTrackingBeamFiring() const;

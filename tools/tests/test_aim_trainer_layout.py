@@ -60,7 +60,8 @@ bool HitsBlock(Point end, FBlock block) {
         block.CenterY-block.SizeY*.5f,block.CenterY+block.SizeY*.5f,0.f,block.Height);
 }
 void PlatformSupport() {
-    Require(TargetCount==5 && PopupSlotCount==5 && HeadSlotCount==5 && PopupPlatformCount==3,
+    Require(TargetCount==6 && PopupSlotCount==5 && PopupDodgerSlot==5
+            && PopupDodgerSlot+1==TargetCount && HeadSlotCount==5 && PopupPlatformCount==3,
             "pool and layout counts disagree");
     const float stopDistance = WiggleSpeed*WiggleSpeed/(2.f*WiggleAcceleration);
     Require(stopDistance+WiggleSpeed/30.f < WiggleSafetyMargin, "wiggle reserve does not cover stopping plus a30Hz frame");
@@ -144,12 +145,83 @@ void OtherTargetOcclusion() {
         }
     }
 }
+float DodgerMaximumReach() {
+    // Stock UT ground dodge on the flat trainer floor: horizontal impulse1500,
+    // vertical impulse500, project gravity2154. The target cannot jump again
+    // in air. Ignore friction and reserve its full speed through the0.1s dodge
+    // landing period plus two30Hz frames, then brake using target acceleration.
+    // This conservative design check is not a replacement for engine physics.
+    const float speed=1500.f, upwardSpeed=500.f, gravity=2154.f;
+    const float flightSeconds=2.f*upwardSpeed/gravity;
+    const float landingAndTickReserve=.1f+2.f/30.f;
+    const float dodgeReach=500.f+speed*(flightSeconds+landingAndTickReserve)
+        +speed*speed/(2.f*WiggleAcceleration);
+    const float walkingSpeed=500.f;
+    const float walkReach=PopupDodgerSeat().WiggleRange+walkingSpeed/30.f
+        +walkingSpeed*walkingSpeed/(2.f*WiggleAcceleration);
+    return std::max(dodgeReach,walkReach);
+}
+void DodgerLaneSupport() {
+    const FSeat seat=PopupDodgerSeat();
+    Require(seat.MinX==seat.MaxX && seat.MinX==-800.f && seat.CenterY==0.f
+        && seat.SpawnJitterY==0.f && seat.FloorZ==0.f,
+        "permanent dodger must use the clear foreground floor lane");
+    Require(seat.WiggleRange==800.f, "dodger walking reversal threshold changed");
+    for (float roll:{0.f,.49f,.5f,1.f}) {
+        for (float offset:{500.f,800.f,DodgerMaximumReach()}) {
+            Require(NCAimTrainerScenarioPolicy::DodgeDirection(offset,roll)==-1.f
+                && NCAimTrainerScenarioPolicy::DodgeDirection(-offset,roll)==1.f,
+                "outward dodge guard no longer protects the room boundary");
+        }
+    }
+    Require(DodgerMaximumReach()+CapsuleRadius<1800.f,
+        "native dodge plus conservative landing reserve can reach the side wall");
+    Require(seat.MinX-CapsuleRadius>-3200.f && seat.MaxX+CapsuleRadius<3200.f,
+        "dodger capsule leaves the floor on X");
+    for (int index=0;index<PopupPlatformCount;++index) {
+        const FBlock platform=PopupPlatform(index);
+        Require(seat.MaxX+CapsuleRadius<platform.CenterX-platform.SizeX*.5f,
+            "dodger capsule intersects a popup platform");
+    }
+    for (int index=0;index<PopupSlotCount;++index) {
+        Require(seat.MaxX+CapsuleRadius<PopupSeat(index).MinX-CapsuleRadius,
+            "foreground dodger can collide with a popup target");
+    }
+    Require(seat.MinX-CapsuleRadius>-1800.f+CapsuleRadius,
+        "dodger can collide with the trainee's movement plane");
+}
+void DodgerSightlines() {
+    // Foreground movement can intentionally cross the sightline to another
+    // target. The dodger itself must remain exposed, including at its widest
+    // conservative landing overshoot, without touching platform geometry.
+    const FSeat seat=PopupDodgerSeat();
+    for (float fraction:{-1.f,-.5f,0.f,.5f,1.f}) {
+        for (float lift:{0.f,500.f*500.f/(2.f*2154.f)}) {
+            for (float bodyHeight:{40.f,108.f,184.f,212.f}) {
+                const Point point={seat.MinX,seat.CenterY+fraction*DodgerMaximumReach(),lift+bodyHeight};
+                for (int index=0;index<PopupPlatformCount;++index) {
+                    Require(!HitsBlock(point,PopupPlatform(index)),
+                        "platform blocks the foreground dodger");
+                }
+                for (int index=0;index<PopupSlotCount;++index) {
+                    for (Point other:Endpoints(PopupSeat(index))) {
+                        Require(!SegmentHitsBox(point,other.X-CapsuleRadius,other.X+CapsuleRadius,
+                            other.Y-CapsuleRadius,other.Y+CapsuleRadius,other.Z,other.Z+2.f*CapsuleHalfHeight),
+                            "background target blocks the foreground dodger");
+                    }
+                }
+            }
+        }
+    }
+}
 int main(int argc,char**argv) {
     Require(argc==2,"choose a case"); const std::string name=argv[1];
     if(name=="support") PlatformSupport();
     else if(name=="popup") PopupSightlines();
     else if(name=="heads") HeadCoverSightlines();
     else if(name=="occlusion") OtherTargetOcclusion();
+    else if(name=="dodger_support") DodgerLaneSupport();
+    else if(name=="dodger_sightlines") DodgerSightlines();
     else Require(false,"unknown case");
 }
 '''
@@ -163,8 +235,10 @@ class AimTrainerLayoutTests(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         directory = Path(cls.temporary.name)
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").read_text(encoding="utf-8-sig")
+        policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").read_text(encoding="utf-8-sig")
         source = directory / "trainer_layout.cpp"
-        source.write_text(layout.replace("#pragma once", "") + "\n" + CASES, encoding="utf-8")
+        source.write_text(layout.replace("#pragma once", "") + "\n" + policy.replace("#pragma once", "")
+                          + "\n" + CASES, encoding="utf-8")
         cls.executable = directory / ("trainer_layout.exe" if os.name == "nt" else "trainer_layout")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -183,6 +257,8 @@ class AimTrainerLayoutTests(unittest.TestCase):
     def test_popup_heads_clear_platforms_and_rear_body_is_covered(self): self.run_case("popup")
     def test_five_head_stations_keep_heads_clear_and_shoulders_covered(self): self.run_case("heads")
     def test_popup_target_capsules_do_not_obscure_other_heads(self): self.run_case("occlusion")
+    def test_permanent_dodger_lane_supports_native_dodge_overshoot(self): self.run_case("dodger_support")
+    def test_permanent_dodger_remains_visible_across_its_lane(self): self.run_case("dodger_sightlines")
 
 
 if __name__ == "__main__":

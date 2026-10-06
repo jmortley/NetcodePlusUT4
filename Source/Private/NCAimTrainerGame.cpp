@@ -131,8 +131,10 @@ bool ANCAimTrainerGame::EnsureArena()
     if (!Arena->HasArenaAssets()) { return FailSetup(TEXT("Cannot start: the practice room mesh or material is missing from this installation.")); }
     while (Targets.Num() < NCAimTrainerLayout::TargetCount)
     {
+        const NCAimTrainerLayout::FSeat Seat = Targets.Num() < NCAimTrainerLayout::HeadSlotCount
+            ? NCAimTrainerLayout::HeadSeat(Targets.Num()) : NCAimTrainerLayout::PopupDodgerSeat();
         ANCAimTrainerTarget* Target = GetWorld()->SpawnActor<ANCAimTrainerTarget>(
-            ArenaOrigin + FVector(900.f, NCAimTrainerLayout::HeadSeat(Targets.Num()).CenterY, 108.f), FRotator(0, 180, 0), Params);
+            ArenaOrigin + FVector(Seat.MinX, Seat.CenterY, 108.f + Seat.FloorZ), FRotator(0, 180, 0), Params);
         if (!Target) { return FailSetup(TEXT("Cannot start: a practice character could not spawn.")); }
         if (!Target->HasCharacterAssets())
         {
@@ -436,6 +438,7 @@ void ANCAimTrainerGame::BeginActiveRun()
         NextWiggleTime[Index] = PhaseStartedAt;
         NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
     }
+    if (Progress.Scenario == 2) { UpdatePopupDodger(PhaseStartedAt); }
     PublishProgress();
 }
 
@@ -450,6 +453,7 @@ void ANCAimTrainerGame::HideAllTargets()
 void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
 {
     if (!Targets.IsValidIndex(Index)) { return; }
+    const bool bPopupDodger = Progress.Scenario == 2 && Index == NCAimTrainerLayout::PopupDodgerSlot;
     FVector Position;
     if (Progress.Scenario == 0)
     {
@@ -461,9 +465,18 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     }
     else if (Progress.Scenario == 1)
     {
+        if (Index >= NCAimTrainerLayout::HeadSlotCount) { return; }
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::HeadSeat(Index);
         Position = FVector(Seat.MinX, Seat.CenterY, 108.f + Seat.FloorZ);
         TargetExpiry[Index] = Now + 6.5f;
+    }
+    else if (bPopupDodger)
+    {
+        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupDodgerSeat();
+        Position = FVector(Seat.MinX, Seat.CenterY, 108.f + Seat.FloorZ);
+        TargetExpiry[Index] = PhaseStartedAt + 60.f;
+        NextDodgeTime = Now + NCAimTrainerScenarioPolicy::PopupFirstDodgeDelaySeconds(Schedule.FRand());
+        NextDirectionTime = Now + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
     }
     else
     {
@@ -472,9 +485,9 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
             Seat.CenterY + Schedule.FRandRange(-Seat.SpawnJitterY, Seat.SpawnJitterY), 108.f + Seat.FloorZ);
         TargetExpiry[Index] = Now + NCAimTrainerScenarioPolicy::PopupExposure(PopupRefireSeconds, Schedule.FRand());
     }
-    Targets[Index]->ActivateTarget(ArenaOrigin + Position, Progress.Scenario == 0);
+    Targets[Index]->ActivateTarget(ArenaOrigin + Position, Progress.Scenario == 0 || bPopupDodger);
     NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
-    if (Progress.Scenario != 0)
+    if (Progress.Scenario != 0 && !bPopupDodger)
     {
         const NCAimTrainerLayout::FSeat Seat = Progress.Scenario == 1
             ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index);
@@ -612,7 +625,9 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
 
 void ANCAimTrainerGame::UpdateTargets(float Now)
 {
-    const int32 ActiveSlots = Progress.Scenario == 0 ? 1 : NCAimTrainerScenarioPolicy::InstagibMaxActiveTargets;
+    if (Progress.Scenario == 2) { UpdatePopupDodger(Now); }
+    const int32 ActiveSlots = Progress.Scenario == 0 ? 1 : Progress.Scenario == 1
+        ? NCAimTrainerLayout::HeadSlotCount : NCAimTrainerLayout::PopupSlotCount;
     TArray<int32> EligibleSlots;
     for (int32 Index = 0; Index < ActiveSlots; ++Index)
     {
@@ -661,6 +676,29 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
     {
         ActivateSlot(EligibleSlots[Schedule.RandRange(0, EligibleSlots.Num() - 1)], Now);
         NextPopupTime = Now + NCAimTrainerScenarioPolicy::PopupSpawnDelay(PopupRefireSeconds, Schedule.FRand());
+    }
+}
+
+void ANCAimTrainerGame::UpdatePopupDodger(float Now)
+{
+    if (Progress.Phase != 2 || Progress.Scenario != 2 || Now >= PhaseStartedAt + 60.f) { return; }
+    const int32 Slot = NCAimTrainerLayout::PopupDodgerSlot;
+    if (!Targets.IsValidIndex(Slot) || !Targets[Slot]) { return; }
+    // This sixth target has a clear floor lane and never times out. Refill on
+    // the next game tick after a hit, independently of the five popup seats.
+    if (!Targets[Slot]->IsAvailable()) { ActivateSlot(Slot, Now); }
+    if (!Targets[Slot]->IsAvailable()) { return; }
+    if (Now >= NextDodgeTime)
+    {
+        const bool bDodged = Targets[Slot]->TryTrainerDodge(Schedule.FRand());
+        // A landing or native cooldown can reject an attempt. Retry shortly;
+        // never bypass UT's grounded/cooldown checks or queue several dodges.
+        NextDodgeTime = Now + (bDodged ? NCAimTrainerScenarioPolicy::PopupDodgeDelaySeconds(Schedule.FRand()) : 0.2f);
+    }
+    if (Now >= NextDirectionTime)
+    {
+        Targets[Slot]->ReverseStrafe();
+        NextDirectionTime = Now + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
     }
 }
 

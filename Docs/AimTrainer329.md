@@ -89,13 +89,13 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 4)
+## Scenarios and scoring (revision 5)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
 | Link tracking | Hold either fire button to track a strafing/dodging character with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
 | Headshots | Hit wiggling character heads at five cover stations with the sniper rifle. Body hits do not count. | 100 per headshot, minus 25 per miss and expired target, floored at zero. |
-| Instagib pop-up | Shoot wiggling characters across five varied positions, including a head peek behind the low block. | 100 per hit, minus 25 per miss and expired target, floored at zero. |
+| Instagib pop-up | Shoot five wiggling pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
 
 Tracking observes the real authoritative NCP Link beam's selected target, with
 a maximum 30 Hz observation rate. It only credits intervals with beam contact
@@ -125,11 +125,19 @@ Link tracking uses 75% short strafe holds (0.14–0.34 seconds) and 25% longer h
 UT dodge cooldowns and landing physics still apply. Ground reversals pause
 during a dodge. This is randomized target movement, not a replay of a fixed path.
 
-Instagib introduces at most one target every 1.10–1.35 seconds, with a maximum
-of five present. Each stays for 5.5–6.8 seconds, allowing five one-second
+Instagib introduces at most one pop-up every 1.00–1.10 seconds, with a maximum
+of five timed pop-ups present. Each stays for 5.5–6.8 seconds, allowing five one-second
 refire intervals plus aiming time. Initial spawns, hit replacements and expired
 targets share that schedule; a hitch cannot create a catch-up burst. Slower
 custom refire values scale the timings and make the run unranked.
+
+A sixth target stays in the open foreground floor lane, making random short
+strafes. Its first native dodge attempt is 0.20–0.55 seconds after spawning,
+then every 1.15–2.10 seconds. UT's grounding and
+dodge cooldown rules still apply; rejected attempts retry after 0.2 seconds.
+This target has no expiry penalty and respawns on the next game tick after a
+hit, independently of the pop-up schedule. It does not crouch. Its lane stays
+clear of the platforms; it can briefly cross a background target's sightline.
 
 Both shooting scenarios use brief 0.12–0.28-second A/D reversals at 220 units
 per second. Each seat has a bounded movement range, with room for the capsule
@@ -146,23 +154,25 @@ exposure remains for the crouch plus a full rifle refire interval and 0.1 second
 Targets behind cover can briefly disappear while crouched. Reappearing targets
 start standing; headshot targets and Link tracking do not gain these crouches.
 
-All three use the fixed target model/preset in revision 4. Custom models,
+All three use the fixed target model/preset in revision 5. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=4&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=5&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
 it does not stream aiming samples to Django. Revised scenarios submit revision
-4; Django retains revision-1/2/3 submissions and explicit older boards without
-mixing their scores with the new difficulty or accuracy definition. Revision 4
+5; Django retains revision-1/2/3/4 submissions and explicit older boards without
+mixing their scores with the new difficulty or accuracy definition. Revision 4 onward
 includes `fired_ms` in every result: measured firing time for tracking and zero
 for precision scenarios. Older submissions retain their original payloads and
 full-run tracking denominator. Apply migration `0066_nc_aimtrainer_fired_ms`
-before restarting the updated Django web workers and enabling revision-4 hosts.
+before restarting the updated Django web workers and enabling revision-4/5 hosts.
+Revision 5 needs no additional migration; deploy its API support before enabling
+revision-5 hosts.
 
 Score submission is an asynchronous server request to `/aimtrainer_entry/`.
 The identity comes from the server's player state. Run IDs make retries
@@ -374,3 +384,20 @@ native crouch lifecycle, expiry timing, and migration preservation. Rebuild
 Shipping for the packaged standalone playtest. Apply Django migration 0066
 before restarting updated web workers. Packaged animation and network behavior
 have not been exercised by these checks.
+
+### Faster pop-ups and a persistent dodger (2026-10-06)
+
+Revision 5 reduces the pop-up interval to 1.00–1.10 seconds and adds a sixth
+target in the clear foreground lane. It stays available throughout instagib,
+respawning on the next game tick after a hit with fresh movement/history state.
+Native random dodges begin 0.20–0.55 seconds after each appearance and repeat
+at 1.15–2.10-second intervals, respecting native grounding and cooldowns.
+The dodger never earns an expiry penalty and cannot consume a pop-up spawn
+deadline. Headshot and Link scenarios keep their existing target counts.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 111 trainer tests and 21 Django tests passed. Checks include independent
+respawning, no timeout, scenario isolation, native dodge retry timing, lane
+clearance and revision isolation. Rebuild Shipping to playtest the target's
+rendered movement and density. The website needs revision-5 API support but no
+new migration beyond revision 4's existing migration 0066.

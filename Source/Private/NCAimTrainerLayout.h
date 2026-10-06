@@ -4,7 +4,7 @@
 // are relative to ArenaOrigin. Keep movement limits and platform support paired.
 namespace NCAimTrainerLayout
 {
-    enum { TargetCount = 5, PopupSlotCount = 5, HeadSlotCount = 5, PopupPlatformCount = 3 };
+    enum { TargetCount = 6, PopupSlotCount = 5, PopupDodgerSlot = 5, HeadSlotCount = 5, PopupPlatformCount = 3 };
     constexpr float CapsuleRadius = 40.f;
     constexpr float CapsuleHalfHeight = 108.f;
     constexpr float WiggleSpeed = 220.f;
@@ -53,6 +53,14 @@ namespace NCAimTrainerLayout
         default:
             return { 100.f, 2200.f, -850.f, 85.f, 99.f, PopupPlatform(0).Height };
         }
+    }
+
+    inline FSeat PopupDodgerSeat()
+    {
+        // The open foreground lane stays clear of every platform. Its 800-unit
+        // walking reversal threshold leaves additional room for native dodges;
+        // the scenario policy turns outward dodges inward beyond 500 units.
+        return { -800.f, -800.f, 0.f, 0.f, 800.f, 0.f };
     }
 
     inline FSeat HeadSeat(int Index)

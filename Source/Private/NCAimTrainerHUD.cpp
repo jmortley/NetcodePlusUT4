@@ -168,7 +168,7 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 	Label(TEXT("CHOOSE YOUR PRACTICE"), 120.f, 151.f, 27.f, TrainerInk);
 	Label(TEXT("REAL UT CHARACTERS. THREE 60-SECOND CHALLENGES."), 120.f, 188.f, 14.f, TrainerMuted);
 	const TCHAR* Line1[] = { TEXT("Follow strafes with the Link beam."), TEXT("Sniper precision on real heads."), TEXT("Shoot before targets disappear.") };
-	const TCHAR* Line2[] = { TEXT("Hold either fire button. Beam hits score."), TEXT("Body shots do not score."), TEXT("Varied height, distance and timing.") };
+	const TCHAR* Line2[] = { TEXT("Hold either fire button. Beam hits score."), TEXT("Body shots do not score."), TEXT("Faster pop-ups plus a constant dodger.") };
 	for (int32 Mode = 0; Mode < 3; ++Mode)
 	{
 		const float X = 120.f + float(Mode) * 353.f;

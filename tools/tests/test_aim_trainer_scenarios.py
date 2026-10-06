@@ -68,9 +68,9 @@ template<class T, class U> T* Cast(U* value) { return dynamic_cast<T*>(value); }
 struct FDamageEvent { int DamageTypeClass = 5; };
 struct ANCAimTrainerTarget : AActor {
     bool Visible = false, Strafing = false, Crouched = false;
-    bool CanStand = true, CanCrouch = true;
+    bool CanStand = true, CanCrouch = true, CanDodge = true;
     int Activations = 0, Hides = 0, Wiggles = 0, Reversals = 0;
-    int CrouchRequests = 0, StandRequests = 0;
+    int CrouchRequests = 0, StandRequests = 0, DodgeAttempts = 0, Dodges = 0;
     float WiggleRange = 0.f;
     FVector Position;
     void ActivateTarget(const FVector& position, bool strafe) {
@@ -81,6 +81,7 @@ struct ANCAimTrainerTarget : AActor {
     void HideTarget() { Visible = false; Crouched = false; ++Hides; }
     void StartWiggle(float range) { WiggleRange = range; ++Wiggles; }
     void ReverseStrafe() { ++Reversals; }
+    bool TryTrainerDodge(float) { ++DodgeAttempts; if (!CanDodge) return false; ++Dodges; return true; }
     bool SetTrainerCrouched(bool crouch) {
         if (crouch) { ++CrouchRequests; if (!CanCrouch) return false; }
         else { ++StandRequests; if (!CanStand) return false; }
@@ -106,8 +107,9 @@ struct ANCAimTrainerGame {
     FVector ArenaOrigin;
     float PhaseStartedAt = 0.f, LastTraceTime = 0.f, NextDirectionTime = 0.f, NextDodgeTime = 0.f;
     float NextPopupTime = 0.f, PopupRefireSeconds = 1.f, ShotStatBaseline = 0.f;
-    float NextTargetTime[5] = {}, TargetExpiry[5] = {}, NextWiggleTime[5] = {};
-    float NextCrouchTime[5] = {}, CrouchEndTime[5] = {};
+    float NextTargetTime[NCAimTrainerLayout::TargetCount] = {}, TargetExpiry[NCAimTrainerLayout::TargetCount] = {};
+    float NextWiggleTime[NCAimTrainerLayout::TargetCount] = {}, NextCrouchTime[NCAimTrainerLayout::TargetCount] = {};
+    float CrouchEndTime[NCAimTrainerLayout::TargetCount] = {};
     float NextTrackingHitSoundTime = 0.f;
     bool bRankedRun = true;
     std::string UnrankedReason;
@@ -117,6 +119,7 @@ struct ANCAimTrainerGame {
     void BeginActiveRun();
     void ActivateSlot(int32, float);
     void UpdateTargets(float);
+    void UpdatePopupDodger(float);
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
 struct Fixture {
@@ -124,7 +127,7 @@ struct Fixture {
     ANCAimTrainerPlayerController Player;
     AUTPlayerState PlayerState;
     AUTPlusSniper Gun;
-    ANCAimTrainerTarget Targets[5];
+    ANCAimTrainerTarget Targets[NCAimTrainerLayout::TargetCount];
     Fixture() {
         Player.PlayerState = &PlayerState; Game.Trainee = &Player; Game.RunWeapon = &Gun;
         for (auto& target : Targets) Game.Targets.Add(&target);
@@ -132,11 +135,13 @@ struct Fixture {
     void Start() { Game.BeginActiveRun(); }
     void At(float now) { Game.TheWorld.Now = now; Game.UpdateTargets(now); }
     float Hit(int slot) { return Game.RecordTargetHit(&Targets[slot], 100.f, FDamageEvent(), &Player, &Gun); }
+    // Existing opportunity/cadence assertions count the five timed seats only.
+    // The permanent dodger has separate lifecycle checks below.
     int Activations() const {
-        int total = 0; for (const auto& target : Targets) total += target.Activations; return total;
+        int total = 0; for (int i=0; i<NCAimTrainerLayout::PopupSlotCount; ++i) total += Targets[i].Activations; return total;
     }
     int Visible() const {
-        int total = 0; for (const auto& target : Targets) total += int(target.Visible); return total;
+        int total = 0; for (int i=0; i<NCAimTrainerLayout::PopupSlotCount; ++i) total += int(Targets[i].Visible); return total;
     }
 };
 '''
@@ -182,18 +187,18 @@ void Dodges() {
 }
 void RefireAndBacklog() {
     using namespace NCAimTrainerScenarioPolicy;
-    Require(InstagibMaxActiveTargets == 5, "expanded target capacity lost");
+    Require(InstagibMaxActiveTargets == 6, "popup plus permanent dodger capacity lost");
     for (float actualRefire : {0.f, .4f, 1.f, 1.5f, 2.f}) {
         const float refire = actualRefire < 1.f ? 1.f : actualRefire;
         for (float roll : {0.f, .01f, .5f, .99f, 1.f}) {
             const float delay = PopupSpawnDelay(actualRefire, roll);
             const float exposure = PopupExposure(actualRefire, roll);
-            Require(delay > refire && delay <= 1.36f * refire, "spawn outruns weapon or adds excessive downtime");
+            Require(delay >= refire && delay <= 1.101f * refire, "spawn outruns weapon or adds excessive downtime");
             Require(exposure >= 5.5f * refire && exposure <= 6.81f * refire, "exposure drift");
             // A shot just preceded a full backlog. Clear the older four, then
             // the new target, with .35 refire intervals of reaction time.
             const float lastBacklogShot = .99f * refire
-                + (InstagibMaxActiveTargets - 1) * refire + .35f * refire;
+                + (NCAimTrainerLayout::PopupSlotCount - 1) * refire + .35f * refire;
             Require(lastBacklogShot < exposure, "five-target backlog expires before its fifth legal shot");
         }
         // Under the fastest arrival rate, a ready player who waits .25s to
@@ -213,10 +218,10 @@ void RollBoundaries() {
     for (float roll : {-10.f, 10.f, nan}) {
         Require(std::isfinite(StrafeHoldSeconds(roll, roll)), "invalid roll poisoned strafe deadline");
         Require(DodgeDelaySeconds(roll) >= 1.8f && DodgeDelaySeconds(roll) <= 3.8f, "invalid roll poisoned dodge deadline");
-        Require(PopupSpawnDelay(1.f, roll) > 1.f, "invalid roll bypassed weapon cadence");
+        Require(PopupSpawnDelay(1.f, roll) >= 1.f, "invalid roll bypassed weapon cadence");
         Require(PopupExposure(1.f, roll) >= 5.5f, "invalid roll shortened exposure");
     }
-    Require(PopupSpawnDelay(nan, 0.f) > 1.f, "invalid weapon interval bypassed minimum");
+    Require(PopupSpawnDelay(nan, 0.f) == 1.f, "invalid weapon interval bypassed minimum");
 }
 void InitialSpawn() {
     Fixture f; f.Game.Schedule.SlotChoice = 2; f.Start();
@@ -225,7 +230,7 @@ void InitialSpawn() {
     Require(f.Visible() == 1 && f.Activations() == 1 && f.Targets[2].Visible,
             "initial popup burst or random eligible slot selection lost");
     const float next = f.Game.NextPopupTime;
-    Require(next > 11.f && next < 11.36f, "first spawn deadline ignores one-second refire");
+    Require(next > 11.f && next < 11.11f, "first spawn deadline ignores one-second refire");
     f.At(10.25f); f.At(10.5f); f.At(11.f); f.At(next - .001f);
     Require(f.Activations() == 1, "initial slots retain quarter-second burst");
     f.At(next);
@@ -296,7 +301,7 @@ void InitializeRefire() {
                         std::numeric_limits<float>::infinity()}) {
         Fixture f; f.Gun.Refire = refire;
         f.Game.NextPopupTime = 900.f; f.Game.PopupRefireSeconds = 99.f;
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < NCAimTrainerLayout::TargetCount; ++i) {
             f.Game.NextTargetTime[i] = 900.f; f.Game.TargetExpiry[i] = 800.f; f.Game.NextWiggleTime[i] = 700.f;
             f.Game.NextCrouchTime[i] = 600.f; f.Game.CrouchEndTime[i] = 500.f;
         }
@@ -310,6 +315,11 @@ void InitializeRefire() {
                     && f.Game.NextCrouchTime[i] == 0.f && f.Game.CrouchEndTime[i] == 0.f,
                     "restart retained prior slot schedule");
         }
+        Require(f.Game.NextTargetTime[NCAimTrainerLayout::PopupDodgerSlot] == 10.f
+                && f.Game.TargetExpiry[NCAimTrainerLayout::PopupDodgerSlot] == 70.f
+                && f.Game.NextCrouchTime[NCAimTrainerLayout::PopupDodgerSlot] == 0.f
+                && f.Game.CrouchEndTime[NCAimTrainerLayout::PopupDodgerSlot] == 0.f,
+                "initial persistent dodger retained prior appearance state");
         f.At(10.f);
         Require(f.Game.NextPopupTime > 10.f + expected && f.Game.TargetExpiry[0] >= 10.f + 5.5f * expected,
                 "actual refire did not reach production spawn or exposure method");
@@ -322,7 +332,8 @@ void InitializeRefire() {
 }
 void LayoutAndWiggles() {
     using namespace NCAimTrainerLayout;
-    Require(TargetCount == 5 && PopupSlotCount == 5 && HeadSlotCount == 5, "five-slot layout lost");
+    Require(TargetCount == 6 && PopupSlotCount == 5 && HeadSlotCount == 5 && PopupDodgerSlot == 5,
+            "separate popup, headshot and persistent dodger slots lost");
     for (int scenario : {1, 2}) {
         for (float roll : {0.f, .5f, 1.f}) {
             Fixture f; f.Game.Progress.Scenario = scenario; f.Game.Schedule.Roll = roll; f.Start();
@@ -468,6 +479,112 @@ void CrouchReuseReset() {
     Require(f.Game.NextCrouchTime[0]>f.Game.TheWorld.Now+1.5f && f.Game.CrouchEndTime[0]==0.f,
             "new appearance cannot schedule a fresh crouch after previous one");
 }
+void PersistentDodgerStartsAndDoesNotExpire() {
+    using namespace NCAimTrainerLayout;
+    Fixture f; f.Game.ArenaOrigin=FVector(50.f,-80.f,50000.f); f.Start();
+    auto& target=f.Targets[PopupDodgerSlot];
+    const FSeat seat=PopupDodgerSeat();
+    Require(target.Visible && target.Strafing && target.Activations==1 && f.Activations()==0,
+            "instagib does not begin with exactly one permanent dodger");
+    Require(target.Position.X==f.Game.ArenaOrigin.X+seat.MinX
+            && target.Position.Y==f.Game.ArenaOrigin.Y+seat.CenterY
+            && target.Position.Z==f.Game.ArenaOrigin.Z+seat.FloorZ+CapsuleHalfHeight,
+            "persistent dodger ignored its supported open floor lane");
+    Require(target.Wiggles==0 && f.Game.TargetExpiry[PopupDodgerSlot]==70.f
+            && f.Game.NextCrouchTime[PopupDodgerSlot]==0.f && f.Game.CrouchEndTime[PopupDodgerSlot]==0.f,
+            "permanent dodger acquired popup lifetime, wiggle or crouch");
+    for(int i=0;i<PopupSlotCount;++i) f.At(f.Game.NextPopupTime);
+    Require(f.Visible()==PopupSlotCount && target.Visible, "six simultaneous instagib targets cannot be displayed");
+    // Isolate the persistent slot from timed target expiry and stale requests.
+    const float popupDeadline=f.Game.NextPopupTime;
+    f.Game.NextCrouchTime[PopupDodgerSlot]=10.1f; f.Game.CrouchEndTime[PopupDodgerSlot]=10.2f;
+    f.Game.UpdatePopupDodger(69.99f);
+    Require(target.Visible && target.Activations==1 && target.Hides==0 && f.Game.Progress.TargetsExpired==0,
+            "persistent dodger timed out or accrued an expiry penalty");
+    Require(target.CrouchRequests==0 && target.StandRequests==0 && target.Wiggles==0
+            && f.Game.NextPopupTime==popupDeadline, "persistent lane mutated popup schedule or posture");
+}
+void PersistentDodgerRefillsWithoutConsumingPopupCadence() {
+    using namespace NCAimTrainerLayout;
+    Fixture f; f.Start(); f.At(10.f);
+    const float deadline=f.Game.NextPopupTime;
+    auto& target=f.Targets[PopupDodgerSlot];
+    f.Game.TheWorld.Now=10.1f;
+    Require(f.Hit(PopupDodgerSlot)>0.f && f.Game.Progress.Hits==1 && !target.Visible,
+            "permanent dodger cannot be scored and retired normally");
+    Require(f.Hit(PopupDodgerSlot)==0.f, "hidden dodger accepted duplicate damage");
+    f.Game.NextTargetTime[PopupDodgerSlot]=900.f; // Timed seats cannot starve this slot.
+    f.Game.NextCrouchTime[PopupDodgerSlot]=10.2f; f.Game.CrouchEndTime[PopupDodgerSlot]=10.3f;
+    f.At(10.101f);
+    Require(target.Visible && target.Activations==2 && target.Strafing && target.Wiggles==0,
+            "hit permanent target was not restored on the next update");
+    Require(f.Activations()==1 && f.Game.NextPopupTime==deadline && f.Game.Progress.TargetsExpired==0,
+            "dodger replacement consumed popup deadline or created expiry penalty");
+    Require(f.Game.NextCrouchTime[PopupDodgerSlot]==0.f && f.Game.CrouchEndTime[PopupDodgerSlot]==0.f
+            && f.Game.TargetExpiry[PopupDodgerSlot]==70.f,
+            "permanent target reuse inherited posture or a popup lifetime");
+    const float nextDodge=f.Game.NextDodgeTime;
+    Require(nextDodge>=10.300f && nextDodge<=10.652f && nextDodge<11.1f,
+            "replacement's first dodge no longer starts before the next rifle shot");
+    f.At(deadline);
+    Require(f.Activations()==2 && target.Activations==2, "popup deadline stopped after independent dodger refill");
+}
+void PersistentDodgerCadenceAndNativeRejection() {
+    using namespace NCAimTrainerScenarioPolicy;
+    for(float roll:{0.f,.5f,1.f,-1.f,10.f,std::numeric_limits<float>::quiet_NaN()}) {
+        const float delay=PopupDodgeDelaySeconds(roll);
+        Require(std::isfinite(delay) && delay>=1.15f && delay<=2.101f,
+                "persistent dodge cadence left the frequent bounded range");
+        const float initial=PopupFirstDodgeDelaySeconds(roll);
+        Require(std::isfinite(initial) && initial>=.2f && initial<=.551f,
+                "first dodge cannot happen before the next one-second rifle shot");
+    }
+    Fixture f; f.Start(); auto& target=f.Targets[NCAimTrainerLayout::PopupDodgerSlot];
+    const float first=f.Game.NextDodgeTime;
+    Require(first>=10.2f && first<=10.551f,"initial permanent dodger waits through the first rifle interval");
+    f.Game.UpdatePopupDodger(first-.001f); Require(target.DodgeAttempts==0,"dodger attempted before deadline");
+    target.CanDodge=false; f.Game.UpdatePopupDodger(first);
+    Require(target.DodgeAttempts==1 && target.Dodges==0 && FMath::IsNearlyEqual(f.Game.NextDodgeTime,first+.2f),
+            "native dodge rejection was bypassed or delayed for a complete interval");
+    f.Game.UpdatePopupDodger(first+.199f); Require(target.DodgeAttempts==1,"native dodge retry busy-looped");
+    target.CanDodge=true; f.Game.UpdatePopupDodger(first+.2f);
+    Require(target.DodgeAttempts==2 && target.Dodges==1
+            && f.Game.NextDodgeTime>=first+.2f+1.15f && f.Game.NextDodgeTime<=first+.2f+2.101f,
+            "recovered native dodge did not establish a fresh bounded interval");
+    const int before=target.DodgeAttempts;
+    f.Game.UpdatePopupDodger(60.f); f.Game.UpdatePopupDodger(60.f);
+    Require(target.DodgeAttempts==before+1 && f.Game.NextDodgeTime>61.14f,
+            "stalled persistent lane replayed multiple missed dodges");
+    const float directionAt=f.Game.NextDirectionTime;
+    const int reversals=target.Reversals;
+    f.Game.UpdatePopupDodger(directionAt-.001f);
+    Require(target.Reversals==reversals,"persistent strafe reversed before scheduled decision");
+    f.Game.UpdatePopupDodger(directionAt);
+    Require(target.Reversals==reversals+1 && f.Game.NextDirectionTime>directionAt,
+            "persistent dodger lost random short strafe decisions");
+}
+void PersistentDodgerCannotLeakIntoOtherPhasesOrScenarios() {
+    using namespace NCAimTrainerLayout;
+    for(int scenario:{0,1}) {
+        Fixture f; f.Game.Progress.Scenario=scenario; f.Start(); f.At(11.5f);
+        f.Game.ActivateSlot(PopupDodgerSlot,11.5f);
+        f.Game.UpdatePopupDodger(11.5f);
+        Require(!f.Targets[PopupDodgerSlot].Visible && f.Targets[PopupDodgerSlot].Activations==0,
+                "sixth instagib pawn appeared in tracking or headshots");
+        if(scenario==1) Require(f.Visible()==HeadSlotCount,"headshot station count changed");
+        else Require(f.Visible()==1,"tracking gained extra targets");
+    }
+    for(int phase:{0,1,3}) {
+        Fixture f; f.Start(); f.Targets[PopupDodgerSlot].HideTarget(); f.Game.Progress.Phase=phase;
+        f.Game.UpdatePopupDodger(11.f);
+        Require(!f.Targets[PopupDodgerSlot].Visible && f.Targets[PopupDodgerSlot].Activations==1,
+                "inactive trainer phase respawned the permanent target");
+    }
+    Fixture ended; ended.Start(); ended.Targets[PopupDodgerSlot].HideTarget();
+    ended.Game.UpdatePopupDodger(70.f);
+    Require(!ended.Targets[PopupDodgerSlot].Visible && ended.Targets[PopupDodgerSlot].Activations==1,
+            "round deadline admitted an extra permanent target appearance");
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
     const std::string name(argv[1]);
@@ -486,6 +603,10 @@ int main(int argc, char** argv) {
     else if (name == "crouch_expiry") CrouchExpiryGuard();
     else if (name == "crouch_blocked") BlockedStandingRetry();
     else if (name == "crouch_reuse") CrouchReuseReset();
+    else if (name == "persistent_start") PersistentDodgerStartsAndDoesNotExpire();
+    else if (name == "persistent_refill") PersistentDodgerRefillsWithoutConsumingPopupCadence();
+    else if (name == "persistent_cadence") PersistentDodgerCadenceAndNativeRejection();
+    else if (name == "persistent_scope") PersistentDodgerCannotLeakIntoOtherPhasesOrScenarios();
     else Require(false, "unknown case");
 }
 '''
@@ -506,6 +627,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
             "void ANCAimTrainerGame::ActivateSlot",
             "float ANCAimTrainerGame::RecordTargetHit",
             "void ANCAimTrainerGame::UpdateTargets",
+            "void ANCAimTrainerGame::UpdatePopupDodger",
         )
         source = directory / "trainer_scenarios.cpp"
         source.write_text("\n".join([policy.replace("#pragma once", ""), layout.replace("#pragma once", ""), ADAPTER]
@@ -540,6 +662,10 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_crouch_guard_preserves_full_rifle_refire_before_expiry(self): self.run_case("crouch_expiry")
     def test_blocked_uncrouch_retries_until_native_clearance_recovers(self): self.run_case("crouch_blocked")
     def test_reused_target_drops_previous_crouch_deadlines(self): self.run_case("crouch_reuse")
+    def test_permanent_dodger_starts_immediately_and_never_times_out(self): self.run_case("persistent_start")
+    def test_permanent_dodger_refills_without_consuming_popup_deadline(self): self.run_case("persistent_refill")
+    def test_permanent_dodger_respects_native_rejection_and_bounded_random_cadence(self): self.run_case("persistent_cadence")
+    def test_permanent_dodger_is_excluded_from_headshots_tracking_and_inactive_phases(self): self.run_case("persistent_scope")
 
 
 if __name__ == "__main__":

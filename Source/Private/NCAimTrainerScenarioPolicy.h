@@ -1,10 +1,10 @@
 #pragma once
 
-// Timing and direction rules for the revision-4 trainer presets. The authority
+// Timing and direction rules for the revision-5 trainer presets. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
-    enum { InstagibMaxActiveTargets = 5 };
+    enum { InstagibMaxActiveTargets = 6 };
 
     inline float UnitRoll(float Roll)
     {
@@ -34,6 +34,17 @@ namespace NCAimTrainerScenarioPolicy
         return 1.8f + 2.f * UnitRoll(Roll);
     }
 
+    inline float PopupDodgeDelaySeconds(float Roll)
+    {
+        return 1.15f + 0.95f * UnitRoll(Roll);
+    }
+
+    inline float PopupFirstDodgeDelaySeconds(float Roll)
+    {
+        // Get moving before the next rifle shot after a replacement appears.
+        return 0.2f + 0.35f * UnitRoll(Roll);
+    }
+
     inline float DodgeDirection(float Offset, float Roll)
     {
         // A native UT dodge covers much more ground than a short strafe.
@@ -53,7 +64,7 @@ namespace NCAimTrainerScenarioPolicy
     {
         // Applied to one global spawn deadline, including replacements. Missed
         // deadlines start from the current time; never catch up in a burst.
-        return PopupRefireSeconds(RefireSeconds) * (1.10f + 0.25f * UnitRoll(Roll));
+        return PopupRefireSeconds(RefireSeconds) * (1.f + 0.10f * UnitRoll(Roll));
     }
 
     inline float PopupExposure(float RefireSeconds, float Roll)
