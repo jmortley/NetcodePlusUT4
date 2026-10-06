@@ -55,7 +55,13 @@ void ANCAimTrainerGame::InitGame(const FString& MapName, const FString& Options,
     DefaultInventory.Empty();
 }
 
-bool ANCAimTrainerGame::ReadyToStartMatch_Implementation() { return NumPlayers > 0; }
+bool ANCAimTrainerGame::ReadyToStartMatch_Implementation()
+{
+    // UT defers a first-frame start until the next tick. Keep that guard:
+    // starting synchronously can equip a weapon before its attachment's
+    // BeginPlay has initialized UTOwner, which AttachToOwner requires.
+    return NumPlayers > 0 && Super::ReadyToStartMatch_Implementation() && GetWorld()->HasBegunPlay();
+}
 bool ANCAimTrainerGame::CheckScore_Implementation(AUTPlayerState*) { return false; }
 bool ANCAimTrainerGame::AllowPausing(APlayerController*) { return false; }
 
@@ -119,7 +125,7 @@ void ANCAimTrainerGame::PostLogin(APlayerController* NewPlayer)
     }
     Trainee = PC;
     if (!PC->GetPawn()) { RestartPlayer(PC); }
-    ConfigurePawn();
+    else { ConfigurePawn(); }
     PublishProgress();
     RefreshLeaderboard();
 }
@@ -139,6 +145,9 @@ void ANCAimTrainerGame::Logout(AController* Exiting)
 
 void ANCAimTrainerGame::RestartPlayer(AController* Player)
 {
+    // PostLogin also reaches this path while a standalone map is initializing.
+    // The normal match-start restart will retry after world BeginPlay.
+    if (!GetWorld()->HasBegunPlay()) { return; }
     if (!Player || !Player->PlayerState || Player->PlayerState->bOnlySpectator) { return; }
     if (Trainee && Player != Trainee) { return; }
     // Stock restart establishes possession, PlayerState and inventory setup.
@@ -150,6 +159,13 @@ void ANCAimTrainerGame::RestartPlayer(AController* Player)
             false, nullptr, ETeleportType::TeleportPhysics);
         Player->SetControlRotation(FRotator::ZeroRotator);
         Player->ClientSetRotation(FRotator::ZeroRotator, true);
+        if (Player == Trainee)
+        {
+            // Deferred starts no longer have a pawn during PostLogin. Equip
+            // the scenario here once possession and attachment setup are safe.
+            ConfigurePawn();
+            PublishProgress();
+        }
     }
 }
 
@@ -167,6 +183,8 @@ void ANCAimTrainerGame::SetPlayerDefaults(APawn* Pawn)
 
 bool ANCAimTrainerGame::ConfigurePawn()
 {
+    // This also protects scenario selection and existing-pawn login paths.
+    if (!GetWorld()->HasBegunPlay()) { return false; }
     AUTCharacter* Pawn = Trainee ? Cast<AUTCharacter>(Trainee->GetPawn()) : nullptr;
     if (!Pawn || Pawn->IsDead()) { return false; }
     Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), FRotator::ZeroRotator,

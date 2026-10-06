@@ -18,6 +18,15 @@ Open a cooked stock DM map with this game mode, for example from the console:
 open DM-DeckTest?game=/Script/NetcodePlus.NCAimTrainerGame?Bots=0
 ```
 
+When opening from another local game, clear inherited URL mutators explicitly:
+
+```
+open DM-DeckTest?game=/Script/NetcodePlus.NCAimTrainerGame?Bots=0?mutator=
+```
+
+The NCWepMut **content pak** is required for the weapons, but the NCWepMut
+**mutator** is not needed. This mode chooses its own pawn and inventory.
+
 Use a map that is installed on your client/server; `DM-DeckTest` is an example.
 The mode creates its own enclosed practice room above the map. There is no new
 map or Blueprint package to create. Its constructor references the required
@@ -120,3 +129,20 @@ miss/expiry handling, cancellation, disconnect/rejoin, and a repeated completed
 run appearing only once online. Verify normal game modes are unaffected.
 Editor compilation and algorithm/API tests do not replace this multiplayer
 playtest or a cooked asset check.
+
+### Startup crash repair (2026-10-06)
+
+A packaged standalone launch reached weapon attachment creation before world
+BeginPlay. The supplied minidump resolves to
+`AUTWeaponAttachment::AttachToOwnerNative`, reading address `0x3e8`; stock UT
+initializes the attachment's `UTOwner` in BeginPlay. The trainer's immediate
+match-ready override and manual PostLogin restart bypassed the stock startup
+deferral. The repair preserves UT's first-frame readiness guard and delays
+trainer pawn spawning/equipping until the world has begun play. Deferred pawn
+creation now performs scenario setup from RestartPlayer. This is a game-mode
+lifecycle repair; changing the map alone does not resolve it. Retest the
+packaged client after rebuilding the plugin.
+
+Repair checks: the UE4.15 Win64 Development Editor module rebuilt successfully;
+all 20 trainer native tests passed, including six startup regression cases.
+These checks do not establish a packaged runtime pass.
