@@ -168,7 +168,7 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 	Label(TEXT("CHOOSE YOUR PRACTICE"), 120.f, 151.f, 27.f, TrainerInk);
 	Label(TEXT("REAL UT CHARACTERS. THREE 60-SECOND CHALLENGES."), 120.f, 188.f, 14.f, TrainerMuted);
 	const TCHAR* Line1[] = { TEXT("Follow strafes with the Link beam."), TEXT("Sniper precision on real heads."), TEXT("Shoot before targets disappear.") };
-	const TCHAR* Line2[] = { TEXT("Hold either fire button. Beam hits score."), TEXT("Body shots do not score."), TEXT("Faster pop-ups plus a constant dodger.") };
+	const TCHAR* Line2[] = { TEXT("Hold either fire button. Beam hits score."), TEXT("100 per headshot. Misses affect accuracy."), TEXT("Faster pop-ups plus a constant dodger.") };
 	for (int32 Mode = 0; Mode < 3; ++Mode)
 	{
 		const float X = 120.f + float(Mode) * 353.f;
@@ -237,6 +237,13 @@ void ANCAimTrainerHUD::DrawHUD()
 		if (Progress.Scenario == 0)
 		{
 			Label(FString::Printf(TEXT("HOLD EITHER FIRE BUTTON  /  BEAM ON TARGET  %.2f s"), Progress.TrackingSeconds), 640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
+		}
+		else
+		{
+			const TCHAR* HitLabel = Progress.Scenario == 1 ? TEXT("HEADSHOTS") : TEXT("HITS");
+			Label(FString::Printf(TEXT("%d %s / %d SHOTS     %d EXPIRED"),
+				Progress.Hits, HitLabel, Progress.Shots, Progress.TargetsExpired),
+				640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
 		}
 	}
 }

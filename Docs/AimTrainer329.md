@@ -89,12 +89,12 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 5)
+## Scenarios and scoring (revision 6)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
 | Link tracking | Hold either fire button to track a strafing/dodging character with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
-| Headshots | Hit wiggling character heads at five cover stations with the sniper rifle. Body hits do not count. | 100 per headshot, minus 25 per miss and expired target, floored at zero. |
+| Headshots | Hit wiggling character heads at five cover stations with the sniper rifle. Body hits do not count. | 100 per confirmed headshot. Misses affect accuracy; expired targets do not deduct points. |
 | Instagib pop-up | Shoot five wiggling pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
 
 Tracking observes the real authoritative NCP Link beam's selected target, with
@@ -105,6 +105,13 @@ continuity rules for both clocks. Idle time changes neither accuracy nor score;
 firing off-target lowers accuracy. Score remains total contact milliseconds
 over the 60-second run. The two shooting scenarios use successful hits divided
 by fired shots. Weapons retain their normal firing rhythm.
+
+Revision 6 removes point deductions from headshot practice. Earlier revisions
+could accumulate miss/expiry deductions while displaying zero, hiding points
+from subsequent successful hits. Every confirmed headshot now adds 100 points;
+the HUD shows live headshots, shots and expiries. Completed runs also log these
+counts in standalone, allowing scoring complaints to be checked against actual
+accepted hits. Instagib retains its existing miss/expiry point deductions.
 
 Tracking uses the existing beam's range, obstruction and server validation.
 It does not normalize network latency; use low-ping hosts when comparing runs.
@@ -154,25 +161,25 @@ exposure remains for the crouch plus a full rifle refire interval and 0.1 second
 Targets behind cover can briefly disappear while crouched. Reappearing targets
 start standing; headshot targets and Link tracking do not gain these crouches.
 
-All three use the fixed target model/preset in revision 5. Custom models,
+All three use the fixed target model/preset in revision 6. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=5&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=6&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
 it does not stream aiming samples to Django. Revised scenarios submit revision
-5; Django retains revision-1/2/3/4 submissions and explicit older boards without
+6; Django retains revision-1/2/3/4/5 submissions and explicit older boards without
 mixing their scores with the new difficulty or accuracy definition. Revision 4 onward
 includes `fired_ms` in every result: measured firing time for tracking and zero
 for precision scenarios. Older submissions retain their original payloads and
 full-run tracking denominator. Apply migration `0066_nc_aimtrainer_fired_ms`
-before restarting the updated Django web workers and enabling revision-4/5 hosts.
-Revision 5 needs no additional migration; deploy its API support before enabling
-revision-5 hosts.
+before restarting the updated Django web workers and enabling current hosts.
+Revisions 5 and 6 need no additional migration; deploy revision-6 API support
+before enabling revision-6 hosts.
 
 Score submission is an asynchronous server request to `/aimtrainer_entry/`.
 The identity comes from the server's player state. Run IDs make retries
@@ -401,3 +408,22 @@ respawning, no timeout, scenario isolation, native dodge retry timing, lane
 clearance and revision isolation. Rebuild Shipping to playtest the target's
 rendered movement and density. The website needs revision-5 API support but no
 new migration beyond revision 4's existing migration 0066.
+
+### Headshot scoring feedback (2026-10-06)
+
+The previous aggregate formula retained all miss and expiry deductions even
+when the displayed score was floored at zero. Five expired targets cost 125
+points, so the next accepted headshot could still leave the display at zero.
+Revision 6 follows the owner's revised rule: every confirmed headshot earns
+100 points, with misses reflected only in accuracy and expiries informational.
+Instagib scoring remains unchanged. Live precision counts and completed-run
+log summaries help separate scoring problems from rejected headshots.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 114 trainer tests and 24 Django tests passed. The scoring regression uses
+the real weapon shot-stat reader, authoritative hit handler and score update
+to verify that earlier misses/expiries cannot hide the first headshot's points.
+Django retains the old scoring rules on revision-1 through revision-5 boards.
+Deploy revision-6 API support and rebuild Shipping; no additional database
+migration is required. Packaged hit registration and HUD rendering remain
+runtime checks rather than conclusions of the scoring tests.

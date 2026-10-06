@@ -3,6 +3,12 @@
 // Pure server scoring rules. All supported preset revisions are checked by UT4Stats.
 namespace NCAimTrainerScoring
 {
+    inline int HeadshotScore(int Hits, int Shots)
+    {
+        if (Hits < 0 || Shots < Hits || Shots > 200) { return 0; }
+        return 100 * Hits;
+    }
+
     inline int PrecisionScore(int Hits, int Shots, int Expired)
     {
         if (Hits < 0 || Shots < Hits || Expired < 0 || Shots > 200 || Expired > 200)

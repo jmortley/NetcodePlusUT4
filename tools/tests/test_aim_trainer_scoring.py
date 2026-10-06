@@ -18,16 +18,28 @@ ADAPTER = r'''
 #include <limits>
 #include <string>
 #include <vector>
+#define TEXT(value) value
 using int32 = int;
 constexpr int INDEX_NONE = -1;
-struct FMath { static bool IsFinite(float n) { return std::isfinite(n); } };
+constexpr int NAME_None = 0;
+struct FMath {
+    static bool IsFinite(float n) { return std::isfinite(n); }
+    static int RoundToInt(float n) { return int(std::lround(n)); }
+};
 struct AActor { virtual ~AActor() = default; };
-struct AController : AActor {};
+struct AUTPlayerState : AActor {
+    float StoredShots = 0.f;
+    float GetStatsValue(int) const { return StoredShots; }
+};
+struct AController : AActor { AActor* PlayerState = nullptr; };
 struct ANCAimTrainerPlayerController : AController {
     int Confirmations = 0;
     void NotifyTrainerHit(float) { ++Confirmations; }
 };
-struct AUTWeapon : AActor {};
+struct AUTWeapon : AActor {
+    int ShotsStatsName = 1;
+    float GetWeaponShotsStats(AUTPlayerState*) const;
+};
 struct AUTWeaponFix : AUTWeapon { float Rewind = 0; float GetHitValidationPredictionTime() const { return Rewind; } };
 struct AUTPlusSniper : AUTWeaponFix { int HeadshotDamageType = 5; };
 struct AUTWeap_LinkGun_Shaft_NCP : AUTWeaponFix {
@@ -63,7 +75,7 @@ struct TargetsAdapter : std::vector<ANCAimTrainerTarget*> {
 };
 struct ANCAimTrainerGame {
     struct {
-        int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0, Score = 0;
+        int Phase = 2, Scenario = 1, Hits = 0, Headshots = 0, Score = 0, Shots = 0, TargetsExpired = 0;
         float TrackingSeconds = 0.f, FiringSeconds = 0.f, Accuracy = 0.f;
     } Progress;
     struct World { float Now = 1.f; float GetTimeSeconds() { return Now; } } TheWorld;
@@ -78,22 +90,30 @@ struct ANCAimTrainerGame {
     float TargetExpiry[5] = { 4.f, 4.f, 4.f, 4.f, 4.f };
     float NextTargetTime[5] = {};
     float NextTrackingHitSoundTime = 0.f;
+    float ShotStatBaseline = 0.f;
+    bool bRankedRun = true;
+    std::string UnrankedReason;
     bool ValidTrainee = true;
     bool IsTrainee(AController* PC) { return PC && ValidTrainee; }
     World* GetWorld() { return &TheWorld; }
     bool HasTrackingContact() const;
     bool IsTrackingBeamFiring() const;
     void UpdateTrackingSample(float);
+    void UpdateShotCount();
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
 void Require(bool okay, const char* why) { if (!okay) { std::cerr << why; std::exit(1); } }
 struct Fixture {
     ANCAimTrainerGame Game;
     ANCAimTrainerPlayerController Player;
+    AUTPlayerState PlayerState;
     AUTPlusSniper Gun;
     ANCAimTrainerTarget Target;
     FDamageEvent Event;
-    Fixture() { Game.Trainee = &Player; Game.RunWeapon = &Gun; Game.Targets.push_back(&Target); }
+    Fixture() {
+        Player.PlayerState = &PlayerState;
+        Game.Trainee = &Player; Game.RunWeapon = &Gun; Game.Targets.push_back(&Target);
+    }
     float Hit() { return Game.RecordTargetHit(&Target, 100.f, Event, &Player, &Gun); }
 };
 '''
@@ -104,12 +124,90 @@ int main(int argc, char** argv) {
     const std::string name(argv[1]);
     using namespace NCAimTrainerScoring;
     if (name == "precision") {
+        Require(HeadshotScore(6, 10) == 600, "headshot points still subtract misses");
+        Require(HeadshotScore(0, 8) == 0 && HeadshotScore(200, 200) == 20000,
+                "headshot score zero or maximum drifted");
+        Require(HeadshotScore(2, 1) == 0 && HeadshotScore(-1, 1) == 0
+                && HeadshotScore(1, -1) == 0 && HeadshotScore(201, 201) == 0
+                && HeadshotScore(2147483647, 2147483647) == 0,
+                "headshot score accepted impossible counts or overflow");
         Require(PrecisionScore(6, 10, 2) == 450, "hit/miss/expiry score drift");
         Require(PrecisionScore(0, 8, 3) == 0, "negative score must clamp");
         Require(PrecisionScore(200, 200, 0) == 20000, "valid maximum lost");
         Require(PrecisionScore(2, 1, 0) == 0, "hits exceed shots");
         Require(PrecisionScore(2147483647, 2147483647, 0) == 0, "overflow input accepted");
         Require(PrecisionScore(1, 1, -1) == 0, "negative expiry accepted");
+    } else if (name == "shot_baseline") {
+        Fixture f;
+        f.PlayerState.StoredShots=123.f;
+        f.Game.ShotStatBaseline=f.Gun.GetWeaponShotsStats(&f.PlayerState);
+        f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Shots==0 && f.Game.Progress.Score==0 && f.Game.Progress.Accuracy==0.f,
+                "new run counted shots from previous sessions");
+        f.PlayerState.StoredShots=128.f; f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Shots==5 && f.Game.bRankedRun,
+                "authoritative stats delta did not reach trainer shot count");
+        // A server stats reset mid-run is invalid, not five new phantom shots.
+        f.PlayerState.StoredShots=0.f; f.Game.UpdateShotCount();
+        Require(!f.Game.bRankedRun && !f.Game.UnrankedReason.empty() && f.Game.Progress.Shots==5,
+                "counter reset was accepted as a new valid shot stream");
+        // A fresh run may intentionally establish that new zero baseline.
+        Fixture next; next.PlayerState.StoredShots=0.f;
+        next.Game.ShotStatBaseline=next.Gun.GetWeaponShotsStats(&next.PlayerState);
+        next.PlayerState.StoredShots=1.f;
+        Require(next.Hit()>0.f,"fresh run headshot not accepted");
+        next.Game.UpdateShotCount();
+        Require(next.Game.Progress.Shots==1 && next.Game.Progress.Hits==1
+                && next.Game.Progress.Score==100 && next.Game.Progress.Accuracy==100.f && next.Game.bRankedRun,
+                "fresh baseline retained old misses or rejected valid first headshot");
+    } else if (name == "headshot_points") {
+        Fixture f; f.Game.ShotStatBaseline=100.f; f.PlayerState.StoredShots=105.f;
+        f.Game.Progress.TargetsExpired=20; f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Shots==5 && f.Game.Progress.Score==0, "initial miss/expiry floor drifted");
+        for(int head=1;head<=7;++head) {
+            f.Target.Visible=true; ++f.PlayerState.StoredShots;
+            Require(f.Hit()>0.f && !f.Target.Visible && f.Player.Confirmations==head,
+                    "real accepted headshot failed before score calculation");
+            f.Game.UpdateShotCount();
+            Require(f.Game.Progress.Headshots==head && f.Game.Progress.Hits==head
+                    && f.Game.Progress.Shots==5+head && f.Game.Progress.Accuracy>0.f,
+                    "accepted headshot disappeared from counters/accuracy");
+            Require(f.Game.Progress.Score==head*100,
+                    "accepted headshot was hidden by earlier miss or expiry penalties");
+            Require(std::fabs(f.Game.Progress.Accuracy-100.f*head/(5+head))<.001f,
+                    "headshot points erased misses from accuracy");
+        }
+        Require(f.Game.bRankedRun, "legitimate low-scoring headshots were treated as corrupt stats");
+        Fixture instagib; instagib.Game.Progress.Scenario=2; instagib.Event.DamageTypeClass=1;
+        instagib.Game.ShotStatBaseline=100.f; instagib.PlayerState.StoredShots=105.f;
+        instagib.Game.Progress.TargetsExpired=20;
+        for(int hit=1;hit<=7;++hit) {
+            instagib.Target.Visible=true; ++instagib.PlayerState.StoredShots;
+            Require(instagib.Hit()>0.f,"instagib body shot was rejected");
+            instagib.Game.UpdateShotCount();
+            Require(instagib.Game.Progress.Score==(hit<7?0:75) && instagib.Game.Progress.Headshots==0,
+                    "headshot-only score change removed instagib miss/expiry penalties");
+        }
+    } else if (name == "shot_invalid") {
+        Fixture inconsistent; inconsistent.PlayerState.StoredShots=1.f;
+        inconsistent.Game.Progress.Hits=2; inconsistent.Game.Progress.Headshots=2;
+        inconsistent.Game.UpdateShotCount();
+        Require(inconsistent.Game.Progress.Shots==1 && inconsistent.Game.Progress.Score==0,
+                "more hits than shots awarded an impossible precision score");
+        for(float invalid:{-1.f,201.f,std::numeric_limits<float>::quiet_NaN(),
+                          std::numeric_limits<float>::infinity(),-std::numeric_limits<float>::infinity()}) {
+            Fixture f; f.Game.Progress.Shots=3; f.Game.Progress.Score=100; f.Game.Progress.Accuracy=25.f;
+            f.PlayerState.StoredShots=invalid; f.Game.UpdateShotCount();
+            Require(!f.Game.bRankedRun && !f.Game.UnrankedReason.empty() && f.Game.Progress.Shots==3
+                    && f.Game.Progress.Score==100 && f.Game.Progress.Accuracy==25.f,
+                    "invalid server counter overwrote last valid display or remained eligible");
+        }
+        Fixture track; track.Game.Progress.Scenario=0;
+        track.Game.Progress.Score=900; track.Game.Progress.Accuracy=60.f;
+        track.PlayerState.StoredShots=std::numeric_limits<float>::quiet_NaN();
+        track.Game.UpdateShotCount();
+        Require(track.Game.bRankedRun && track.Game.Progress.Score==900 && track.Game.Progress.Accuracy==60.f,
+                "precision counter validation changed beam tracking results");
     } else if (name == "tracking") {
         Require(TrackingCredit(.04, true, true) == .04, "sustained contact lost");
         Require(TrackingCredit(.04, false, true) == 0, "approach interval overcredited");
@@ -264,10 +362,13 @@ class AimTrainerScoringTests(unittest.TestCase):
         cls.addClassCleanup(cls.temporary.cleanup)
         directory = Path(cls.temporary.name)
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
+        weapon = (PLUGIN.parents[1] / "Source/UnrealTournament/Private/UTWeapon.cpp").read_text(encoding="utf-8-sig")
         scoring = (PLUGIN / "Source/Private/NCAimTrainerScoring.h").read_text(encoding="utf-8-sig").replace("#pragma once", "")
         source = directory / "trainer.cpp"
         source.write_text("\n".join((ADAPTER, scoring,
+                                    native_function(weapon, "float AUTWeapon::GetWeaponShotsStats"),
                                     native_function(game, "float ANCAimTrainerGame::RecordTargetHit"),
+                                    native_function(game, "void ANCAimTrainerGame::UpdateShotCount"),
                                     native_function(game, "bool ANCAimTrainerGame::HasTrackingContact"),
                                     native_function(game, "bool ANCAimTrainerGame::IsTrackingBeamFiring"),
                                     native_function(game, "void ANCAimTrainerGame::UpdateTrackingSample"), CASES)), encoding="utf-8")
@@ -286,6 +387,9 @@ class AimTrainerScoringTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_precision_formula_and_untrusted_bounds(self): self.run_case("precision")
+    def test_shot_counter_subtracts_run_baseline_and_rejects_midrun_counter_reset(self): self.run_case("shot_baseline")
+    def test_accepted_headshots_award_immediate_points_despite_misses_and_expiry_while_instagib_keeps_penalties(self): self.run_case("headshot_points")
+    def test_shot_counter_rejects_impossible_and_nonfinite_stats_without_touching_tracking(self): self.run_case("shot_invalid")
     def test_tracking_requires_continuity_and_rejects_long_stalls(self): self.run_case("tracking")
     def test_each_appearance_scores_once(self): self.run_case("one_hit")
     def test_headshots_use_actual_sniper_damage_type(self): self.run_case("body")

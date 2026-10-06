@@ -1,6 +1,6 @@
 #pragma once
 
-// Timing and direction rules for the revision-5 trainer presets. The authority
+// Timing and direction rules shared by the revision-5/6 trainer presets. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {

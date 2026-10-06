@@ -512,7 +512,9 @@ void ANCAimTrainerGame::UpdateShotCount()
         return;
     }
     Progress.Shots = FMath::RoundToInt(RawShots);
-    Progress.Score = NCAimTrainerScoring::PrecisionScore(Progress.Hits, Progress.Shots, Progress.TargetsExpired);
+    Progress.Score = Progress.Scenario == 1
+        ? NCAimTrainerScoring::HeadshotScore(Progress.Hits, Progress.Shots)
+        : NCAimTrainerScoring::PrecisionScore(Progress.Hits, Progress.Shots, Progress.TargetsExpired);
     Progress.Accuracy = Progress.Shots > 0 ? 100.f * Progress.Hits / Progress.Shots : 0.f;
 }
 
@@ -755,6 +757,13 @@ void ANCAimTrainerGame::FinishRun()
     }
     if (RunWeapon) { RunWeapon->StopFire(0); RunWeapon->StopFire(1); }
     PublishProgress();
+    // Include standalone results so a score complaint can be distinguished
+    // from a rejected hit or a weapon shot-counter problem in the game log.
+    UE_LOG(LogTemp, Log, TEXT("NCP Aim Trainer result: scenario=%d revision=%d score=%d hits=%d shots=%d headshots=%d expired=%d tracked_ms=%d fired_ms=%d ranked=%d"),
+        int32(Progress.Scenario), int32(FNCAimTrainerOnline::PresetRevision), Progress.Score,
+        Progress.Hits, Progress.Shots, Progress.Headshots, Progress.TargetsExpired,
+        NCAimTrainerScoring::TrackingMilliseconds(TrackedSeconds), NCAimTrainerScoring::TrackingMilliseconds(FiredSeconds),
+        int32(bRankedRun && !Progress.bMovementPractice && Progress.Hits <= Progress.Shots));
     if (!bRankedRun || Progress.bMovementPractice || Progress.Hits > Progress.Shots)
     {
         Trainee->SetTrainerOnlineStatus(UnrankedReason.IsEmpty() ? TEXT("Practice only: incomplete shot accounting.") : UnrankedReason);
