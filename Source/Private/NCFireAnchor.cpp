@@ -205,7 +205,7 @@ FNCFireAnchor NCFireAnchor::Resolve(AUTWeapon* Weapon, AUTCharacter* Pawn,
         M->bConsumed = true;
         if (bFinitePayload)
         {
-            I.OriginXY = FVector::Dist2D(Origin, M->Eye);
+            I.OriginXY = (Origin - M->Eye).Size2D();
             I.OriginZ = Origin.Z - M->Eye.Z;
             I.AimDelta = FMath::Max(FMath::Abs(FMath::FindDeltaAngleDegrees(Aim.Pitch, M->Aim.Pitch)),
                 FMath::Abs(FMath::FindDeltaAngleDegrees(Aim.Yaw, M->Aim.Yaw)));

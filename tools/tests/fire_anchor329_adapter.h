@@ -69,7 +69,8 @@ struct FVector {
     FVector(float x,float y,float z) : X(x),Y(y),Z(z) {}
     static const FVector ZeroVector;
     bool ContainsNaN() const { return !std::isfinite(X)||!std::isfinite(Y)||!std::isfinite(Z); }
-    static float Dist2D(const FVector& a,const FVector& b) { const float x=a.X-b.X,y=a.Y-b.Y;return std::sqrt(x*x+y*y); }
+    FVector operator-(const FVector& b) const { return FVector(X-b.X,Y-b.Y,Z-b.Z); }
+    float Size2D() const { return std::sqrt(X*X+Y*Y); }
 };
 const FVector FVector::ZeroVector;
 struct FRotator {
