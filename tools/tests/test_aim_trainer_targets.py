@@ -15,9 +15,15 @@ from test_wipeout_healing import PLUGIN, find_compiler, native_function
 
 ADAPTER = r'''
 #include <cstdlib>
+#include <cmath>
+#include <limits>
 #include <iostream>
 #include <string>
 constexpr int ROLE_Authority = 3;
+struct FMath {
+    static bool IsFinite(float value) { return std::isfinite(value); }
+    static float Clamp(float value,float low,float high) { return value<low?low:value>high?high:value; }
+};
 enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling, MOVE_Flying };
 struct FVector {
     float X, Y, Z;
@@ -28,7 +34,7 @@ enum class ETeleportType { TeleportPhysics };
 struct UCharacterMovementComponent {
     virtual ~UCharacterMovementComponent() = default;
     MovementMode Mode = MOVE_Walking;
-    float Speed = 0.f;
+    float Speed = 0.f, MaxWalkSpeed = 500.f;
     int Stops = 0;
     bool IsMovingOnGround() const { return Mode == MOVE_Walking; }
     void StopMovementImmediately() { Speed = 0.f; ++Stops; }
@@ -78,12 +84,13 @@ struct ATeamArenaCharacter : AUTCharacter {
 struct ANCAimTrainerTarget : ATeamArenaCharacter {
     using Super = ATeamArenaCharacter;
     int Role=ROLE_Authority;
-    bool bTrainerVisible=false, bTrainerStrafe=false;
-    float StrafeDirection=1.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
+    bool bTrainerVisible=false, bTrainerStrafe=false, bTrainerWiggle=false;
+    float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
     FVector StrafeCenter;
     struct History { int Count=7; void Reset() { Count=0; } } SavedPositions, SavedCapsulePostures;
     void OnRep_TrainerVisible();
     void ActivateTarget(const FVector&,bool);
+    void StartWiggle(float);
     void HideTarget();
     void ResetTargetMovement();
     void ReverseStrafe();
@@ -119,12 +126,13 @@ int main(int argc,char**argv) {
         target.Position.Y=900.f; target.ReverseStrafe();
         Require(target.StrafeDirection==-1.f,"right edge did not turn inward");
     } else if(name=="dodge") {
-        for(int guard=0;guard<4;++guard) {
+        for(int guard=0;guard<5;++guard) {
             auto target=Active();
             if(guard==0) target.Role=1;
             if(guard==1) target.bTrainerVisible=false;
             if(guard==2) target.bTrainerStrafe=false;
             if(guard==3) target.Move.Mode=MOVE_Falling;
+            if(guard==4) target.bTrainerWiggle=true;
             Require(!target.TryTrainerDodge(0.f)&&target.DodgeCalls==0,"invalid target invoked native dodge");
         }
         auto target=Active(); target.DodgeAllowed=false;
@@ -177,6 +185,33 @@ int main(int argc,char**argv) {
         target.Move.Mode=MOVE_Walking; target.Position.Y=850;
         target.Tick(.016f);
         Require(target.InputCalls==1&&target.LastInput.Y==-1.f&&target.SuperTicks==2,"grounded target stopped strafing");
+    } else if(name=="wiggle_guards") {
+        for(float width : {0.f,-1.f,std::numeric_limits<float>::infinity(),std::numeric_limits<float>::quiet_NaN()}) {
+            auto target=Active(); target.StartWiggle(width);
+            Require(!target.bTrainerWiggle&&target.StrafeRange==800.f&&target.Move.MaxWalkSpeed==500.f,
+                    "invalid wiggle width mutated target");
+        }
+        auto target=Active(); target.Role=1; target.StartWiggle(80.f);
+        Require(!target.bTrainerWiggle,"client activated wiggle");
+        target.Role=ROLE_Authority; target.bTrainerVisible=false; target.StartWiggle(80.f);
+        Require(!target.bTrainerWiggle,"hidden target activated wiggle");
+    } else if(name=="wiggle_boundaries") {
+        ANCAimTrainerTarget target; target.ActivateTarget(FVector(0,300,108),false);
+        target.StartWiggle(5.f);
+        Require(target.bTrainerWiggle&&target.bTrainerStrafe&&target.StrafeRange==20.f
+                &&target.Move.MaxWalkSpeed==220.f&&target.Move.Mode==MOVE_Walking,"wiggle floor/speed incorrect");
+        target.StartWiggle(1000.f);
+        Require(target.StrafeRange==110.f,"wiggle exceeded maximum range");
+        target.Position.Y=410.f; target.Tick(.016f);
+        Require(target.LastInput.Y==-1.f,"wiggle did not reverse at right edge");
+        target.Position.Y=190.f; target.ReverseStrafe();
+        Require(target.StrafeDirection==1.f,"wiggle reverse ignored local left edge");
+        target.Tick(.016f); Require(target.LastInput.Y==1.f,"wiggle tick escaped local left edge");
+        Require(!target.TryTrainerDodge(.8f)&&target.DodgeCalls==0,"headshot wiggle performed a dodge");
+        target.HideTarget(); Require(!target.bTrainerWiggle,"hidden target retained wiggle");
+        target.ActivateTarget(FVector(0,0,108),true);
+        Require(!target.bTrainerWiggle&&target.StrafeRange==800.f&&target.Move.MaxWalkSpeed==500.f,
+                "new tracking appearance retained narrow wiggle speed/range");
     } else if(name=="landing_recovery") {
         auto target=Active(); target.Move.bIsDodgeLanding=true; target.Move.DodgeResetTime=10.f;
         target.Move.MovementTime=9.749f; target.Tick(.001f);
@@ -208,9 +243,11 @@ class AimTrainerTargetTests(unittest.TestCase):
         directory = Path(cls.temporary.name)
         native = (PLUGIN / "Source/Private/NCAimTrainerTarget.cpp").read_text(encoding="utf-8-sig")
         policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
+        layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
         signatures = (
             "void ANCAimTrainerTarget::OnRep_TrainerVisible",
             "void ANCAimTrainerTarget::ActivateTarget",
+            "void ANCAimTrainerTarget::StartWiggle",
             "void ANCAimTrainerTarget::HideTarget",
             "void ANCAimTrainerTarget::ResetTargetMovement",
             "void ANCAimTrainerTarget::ReverseStrafe",
@@ -220,7 +257,7 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::NotifyBlockedHeadShot",
         )
         source = directory / "trainer_targets.cpp"
-        source.write_text("\n".join([ADAPTER, f'#include "{policy}"']
+        source.write_text("\n".join([ADAPTER, f'#include "{policy}"', f'#include "{layout}"']
             + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_targets.exe" if os.name == "nt" else "trainer_targets")
         if msvc:
@@ -242,6 +279,8 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_client_cannot_change_target_lifecycle(self): self.run_case("client_lifecycle")
     def test_airborne_dodges_are_not_countersteered_by_tracking_input(self): self.run_case("airborne_tick")
     def test_controllerless_landing_acceleration_expires_at_stock_deadline(self): self.run_case("landing_recovery")
+    def test_wiggle_rejects_invalid_width_hidden_target_and_client_requests(self): self.run_case("wiggle_guards")
+    def test_wiggle_boundaries_speed_and_no_dodge_reset_on_next_appearance(self): self.run_case("wiggle_boundaries")
     def test_visible_head_pose_and_no_false_helmet_feedback(self): self.run_case("head_feedback")
 
 

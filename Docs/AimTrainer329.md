@@ -54,13 +54,13 @@ The NCWepMut **content pak** is required for the weapons, but the NCWepMut
 Use a map that is installed on your client/server; `DM-DeckTest` is an example.
 The mode creates its own enclosed practice room above the map. There is no new
 map or Blueprint package to create. Its constructor references the required
-stock arena and character content for cooking. **The shooting scenarios also
-require the existing NCWepMut weapon content pak on both client and server**,
-including `/Game/Blueprints/Netcode/UTNPSniper` and
+stock arena and character content for cooking. **All scenarios require the
+current NCWepMut weapon content pak on both client and server**, including
+`/Game/Blueprints/Netcode/UTNPShaftLink`, `/Game/Blueprints/Netcode/UTNPSniper` and
 `/Game/Blueprints/Netcode/N+InstagibRifle`. The trainer resolves these classes
-after paks mount. A source editor without those weapon assets can exercise
-unarmed tracking; shooting scenarios report the missing content and refuse to
-start instead of substituting a different weapon.
+after paks mount. Missing or incompatible weapon content blocks the selected
+scenario with an explanation; tracking requires the real NCP beam-only Link
+class and its firing state rather than substituting a sniper or empty weapon.
 
 The first version supports **one trainee per server instance**. Use separate
 instances for simultaneous players. Scores from approved instances share the
@@ -89,50 +89,66 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 2)
+## Scenarios and scoring (revision 3)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
-| Strafe tracking | Track a full-size character with frequent short reversals, occasional longer holds and native UT dodges. Firing is not required. | Milliseconds on target, up to 60,000. |
-| Headshots | Hit real character heads above cover with the sniper rifle. Body hits do not count. | 100 per headshot, minus 25 per miss and expired target, floored at zero. |
-| Instagib pop-up | Hit full-size characters before they disappear. Positions, distance, height and exposure timing vary. | 100 per hit, minus 25 per miss and expired target, floored at zero. |
+| Link tracking | Hold either fire button to track a strafing/dodging character with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
+| Headshots | Hit wiggling character heads at five cover stations with the sniper rifle. Body hits do not count. | 100 per headshot, minus 25 per miss and expired target, floored at zero. |
+| Instagib pop-up | Shoot wiggling characters across five varied positions, including a head peek behind the low block. | 100 per hit, minus 25 per miss and expired target, floored at zero. |
 
-Tracking uses a server line trace and the actual target collision, with a
-maximum 30 Hz observation rate. It only credits intervals with target contact
+Tracking observes the real authoritative NCP Link beam's selected target, with
+a maximum 30 Hz observation rate. It only credits intervals with beam contact
 at both endpoints, and discards observation gaps longer than 100 ms. Accuracy
-means time on target for tracking, and successful hits divided by fired shots
+means beam time on target divided by the full run duration for tracking, and successful hits divided by fired shots
 for the two shooting scenarios. Weapons retain their normal firing rhythm.
 
-Tracking measures the server's current target against received
-view rotation. It does not reconstruct the client's rendered frame or
-normalize network latency. Use low-ping hosts when comparing tracking runs;
-equal skill at different latencies can produce different scores. The shooting
-scenarios use the normal NCP weapon hit-validation path.
+Tracking uses the existing beam's range, obstruction and server validation.
+It does not normalize network latency; use low-ping hosts when comparing runs.
+The target now starts 1000 units from the trainee, within the beam's range as
+it strafes. Either fire button starts the same beam; releasing one button
+while holding the other keeps it active. Plasma and link-pull are disabled by
+the existing NCP Shaft weapon class. Targets remain alive and precision shot
+counters stay zero in tracking submissions. Accepted damage plays the selected
+NCP hitsound at most once per 0.12 seconds. Optional movement practice can still
+move out of beam range, where normal misses earn no tracking credit.
 
-Revision 2 uses 75% short strafe holds (0.14–0.34 seconds) and 25% longer holds
+The trainer Shaft honors its explicit saved show/hide choice. When absent, it
+inherits the current `NCPLinkGun_C` choice, including classic beam offsets. The
+separate legacy CSHD Link choice is not used as an alias.
+
+Link tracking uses 75% short strafe holds (0.14–0.34 seconds) and 25% longer holds
 (0.45–0.80 seconds), with grounded dodge attempts every 1.8–3.8 seconds. Native
 UT dodge cooldowns and landing physics still apply. Ground reversals pause
 during a dodge. This is randomized target movement, not a replay of a fixed path.
 
 Instagib introduces at most one target every 1.10–1.35 seconds, with a maximum
-of three present. Each stays for 3.5–4.8 seconds, allowing three one-second
+of five present. Each stays for 5.5–6.8 seconds, allowing five one-second
 refire intervals plus aiming time. Initial spawns, hit replacements and expired
 targets share that schedule; a hitch cannot create a catch-up burst. Slower
 custom refire values scale the timings and make the run unranked.
 
-All three use the fixed target model/preset in revision 2. Custom models,
+Both shooting scenarios use brief 0.12–0.28-second A/D reversals at 220 units
+per second. Each seat has a bounded movement range, with room for the capsule
+and stopping distance on its platform or behind cover. Headshot targets remain
+for 6.5 seconds. The popup layout adds a near-left floor position and a floor
+position behind the central block. That block is 176 units high, and the target
+on top is offset laterally to keep the rear head peek visible from the fixed
+anchor. Movement practice naturally changes those sightlines.
+
+All three use the fixed target model/preset in revision 3. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=2&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=3&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
 it does not stream aiming samples to Django. Revised scenarios submit revision
-2; Django retains revision-1 submissions and explicit revision-1 boards without
-mixing their scores with the new difficulty. Deploy the accompanying revision-2
+3; Django retains revision-1/2 submissions and explicit older boards without
+mixing their scores with the new difficulty. Deploy the accompanying revision-3
 API support before expecting new scores to be accepted. This update needs no
 additional database migration beyond the original trainer table.
 
@@ -304,3 +320,25 @@ movement lifecycle, controllerless dodge landing recovery, popup cadence and
 separate revision boards. Rebuild Shipping and check actual first-person
 attachment/beam rendering, hitsound playback and head alignment in standalone;
 the build and native adapters do not establish a packaged visual pass.
+
+### Link firing and five moving target stations (2026-10-06)
+
+Revision 3 replaces the tracking scenario's sniper display weapon with the
+existing NCP Shaft Link Gun. Its installed cooked asset was checked for the
+native NCP parent, beam state and 1800-unit range. Both fire buttons hold mode
+1, with combined input release handling. Tracking now requires the actual
+authoritative beam to be hitting the target. Its closer lane fits the beam's
+range without changing normal weapon reach.
+
+The shooting scenarios expand to five stations and add bounded A/D wiggles.
+Instagib includes a floor target behind the low central block and another near
+the left side. Shared geometry defines the platform/cover sizes and spawn
+seats together; geometry regressions check capsule support, sightlines and
+head/shoulder exposure throughout their lateral limits. Popup timing still
+respects the one-second refire, with longer exposure for the larger group.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 93 trainer tests and 16 Django tests passed. The changed preset submits
+revision 3, with older boards retained separately. Rebuild Shipping and test
+the beam, wiggles and rear head peek in the packaged standalone game. Visual
+animation alignment and multiplayer play remain runtime checks.

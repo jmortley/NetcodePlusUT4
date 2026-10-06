@@ -4,10 +4,13 @@
 #include "NCAimTrainerOnline.h"
 #include "NCAimTrainerScoring.h"
 #include "NCAimTrainerScenarioPolicy.h"
+#include "NCAimTrainerLayout.h"
 #include "NCAimTrainerCharacter.h"
 #include "TeamArenaCharacter.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
+#include "UTWeap_LinkGun_Shaft_NCP.h"
+#include "UTWeaponStateFiringLinkBeam_NCP.h"
 #include "UTCharacterMovement.h"
 #include "UTCharacterContent.h"
 #include "UTPlayerState.h"
@@ -47,6 +50,10 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     // No asset lookup or warning is emitted while loading other game modes.
     SniperClass = nullptr;
     InstagibClass = nullptr;
+    LinkClass = nullptr;
+    NextTargetTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    TargetExpiry.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    NextWiggleTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
 }
 
 void ANCAimTrainerGame::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -120,10 +127,10 @@ bool ANCAimTrainerGame::EnsureArena()
     }
     if (!Arena) { return FailSetup(TEXT("Cannot start: the practice room could not spawn.")); }
     if (!Arena->HasArenaAssets()) { return FailSetup(TEXT("Cannot start: the practice room mesh or material is missing from this installation.")); }
-    while (Targets.Num() < 3)
+    while (Targets.Num() < NCAimTrainerLayout::TargetCount)
     {
         ANCAimTrainerTarget* Target = GetWorld()->SpawnActor<ANCAimTrainerTarget>(
-            ArenaOrigin + FVector(900.f, (Targets.Num() - 1) * 650.f, 108.f), FRotator(0, 180, 0), Params);
+            ArenaOrigin + FVector(900.f, NCAimTrainerLayout::HeadSeat(Targets.Num()).CenterY, 108.f), FRotator(0, 180, 0), Params);
         if (!Target) { return FailSetup(TEXT("Cannot start: a practice character could not spawn.")); }
         if (!Target->HasCharacterAssets())
         {
@@ -242,25 +249,31 @@ bool ANCAimTrainerGame::ConfigurePawn()
     // Exact shipped NCP classes only. Missing precision content blocks the
     // run instead of quietly switching to stock hit registration. A failed
     // lookup is retried on the next start, so a later pak mount can recover.
-    if (Progress.Scenario == 2 && !InstagibClass)
+    if (Progress.Scenario == 0 && !LinkClass)
+    {
+        LinkClass = LoadClass<AUTWeapon>(nullptr,
+            TEXT("/Game/Blueprints/Netcode/UTNPShaftLink.UTNPShaftLink_C"), nullptr, LOAD_NoWarn);
+    }
+    else if (Progress.Scenario == 2 && !InstagibClass)
     {
         InstagibClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/N+InstagibRifle.N+InstagibRifle_C"), nullptr, LOAD_NoWarn);
     }
-    else if (Progress.Scenario != 2 && !SniperClass)
+    else if (Progress.Scenario == 1 && !SniperClass)
     {
         SniperClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/UTNPSniper.UTNPSniper_C"), nullptr, LOAD_NoWarn);
     }
-    TSubclassOf<AUTWeapon> DesiredClass = Progress.Scenario == 2 ? InstagibClass : SniperClass;
+    TSubclassOf<AUTWeapon> DesiredClass = Progress.Scenario == 0 ? LinkClass : Progress.Scenario == 2 ? InstagibClass : SniperClass;
     if (!DesiredClass || DesiredClass->HasAnyClassFlags(CLASS_Abstract))
     {
-        // Unarmed tracking remains usable; precision modes require the actual
-        // shipped NCP weapon and never quietly fall back to different hit tests.
-        return Progress.Scenario == 0 || FailSetup(TEXT("Cannot start: the selected NCP rifle is unavailable. Install the NCWepMut content pak."));
+        return FailSetup(Progress.Scenario == 0
+            ? TEXT("Cannot start: the NCP Shaft Link Gun is unavailable. Install the current NCWepMut content pak.")
+            : TEXT("Cannot start: the selected NCP rifle is unavailable. Install the NCWepMut content pak."));
     }
-    if ((Progress.Scenario == 2 && !DesiredClass->IsChildOf(AUTPlusShockRifle::StaticClass()))
-        || (Progress.Scenario != 2 && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass())))
+    if ((Progress.Scenario == 0 && !DesiredClass->IsChildOf(AUTWeap_LinkGun_Shaft_NCP::StaticClass()))
+        || (Progress.Scenario == 2 && !DesiredClass->IsChildOf(AUTPlusShockRifle::StaticClass()))
+        || (Progress.Scenario == 1 && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass())))
     {
         return FailSetup(TEXT("Cannot start: the selected rifle does not use the required NetcodePlus weapon class."));
     }
@@ -278,8 +291,21 @@ bool ANCAimTrainerGame::ConfigurePawn()
             }
         }
     }
-    if (Progress.Scenario == 0) { return true; }
     if (!RunWeapon) { return FailSetup(TEXT("Cannot start: the selected NCP rifle could not be equipped.")); }
+    if (Progress.Scenario == 0)
+    {
+        const AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+        const float BeamRefire = RunWeapon->GetRefireTime(1);
+        if (!Link || !Link->InstantHitInfo.IsValidIndex(1) || !Link->FiringState.IsValidIndex(1)
+            || !Link->FiringState[1] || !Link->FiringState[1]->IsA(UUTWeaponStateFiringLinkBeam_NCP::StaticClass())
+            || Link->InstantHitInfo[1].Damage <= 0 || !Link->InstantHitInfo[1].DamageType
+            || !FMath::IsFinite(BeamRefire) || BeamRefire <= 0.f
+            || !FMath::IsFinite(Link->InstantHitInfo[1].TraceRange) || Link->InstantHitInfo[1].TraceRange < 1600.f)
+        {
+            return FailSetup(TEXT("Cannot start: the Link Gun content lacks the required NCP beam state or range. Update the NCWepMut content pak."));
+        }
+        return true;
+    }
     if (RunWeapon->ShotsStatsName == NAME_None) { return FailSetup(TEXT("Cannot start: the selected rifle has no shot counter for scoring.")); }
     return true;
 }
@@ -389,6 +415,7 @@ void ANCAimTrainerGame::BeginActiveRun()
     NextDirectionTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
     NextDodgeTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
     NextPopupTime = PhaseStartedAt;
+    NextTrackingHitSoundTime = PhaseStartedAt;
     const float Refire = Progress.Scenario == 2 && RunWeapon ? RunWeapon->GetRefireTime(0) : 1.f;
     PopupRefireSeconds = FMath::IsFinite(Refire) ? FMath::Max(1.f, Refire) : 1.f;
     if (Progress.Scenario == 2 && (!FMath::IsFinite(Refire) || !FMath::IsNearlyEqual(Refire, 1.f)))
@@ -402,6 +429,7 @@ void ANCAimTrainerGame::BeginActiveRun()
     {
         NextTargetTime[Index] = PhaseStartedAt + (Progress.Scenario == 2 ? 0.f : Index * 0.25f);
         TargetExpiry[Index] = 0.f;
+        NextWiggleTime[Index] = PhaseStartedAt;
     }
     PublishProgress();
 }
@@ -421,23 +449,32 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     if (Progress.Scenario == 0)
     {
         if (Index != 0) { return; }
-        Position = FVector(700.f, 0.f, 108.f);
+        // Stay inside the actual Link beam range across the target's strafe
+        // and dodge lane. The old sniper display target was 2500 units away.
+        Position = FVector(-800.f, 0.f, 108.f);
         TargetExpiry[Index] = PhaseStartedAt + 60.f;
     }
     else if (Progress.Scenario == 1)
     {
-        Position = FVector(900.f, (Index - 1) * 650.f, 108.f);
-        TargetExpiry[Index] = Now + 4.5f;
+        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::HeadSeat(Index);
+        Position = FVector(Seat.MinX, Seat.CenterY, 108.f + Seat.FloorZ);
+        TargetExpiry[Index] = Now + 6.5f;
     }
     else
     {
-        // Disjoint lateral lanes avoid overlapping targets. Distance, side,
-        // lifetime and cadence vary, unlike a fixed flat grid of dots.
-        Position = FVector(Schedule.FRandRange(-100.f, 2300.f),
-            (Index - 1) * 850.f + Schedule.FRandRange(-240.f, 240.f), 108.f + FMath::Max(1.f, Index * 160.f));
+        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupSeat(Index);
+        Position = FVector(Schedule.FRandRange(Seat.MinX, Seat.MaxX),
+            Seat.CenterY + Schedule.FRandRange(-Seat.SpawnJitterY, Seat.SpawnJitterY), 108.f + Seat.FloorZ);
         TargetExpiry[Index] = Now + NCAimTrainerScenarioPolicy::PopupExposure(PopupRefireSeconds, Schedule.FRand());
     }
     Targets[Index]->ActivateTarget(ArenaOrigin + Position, Progress.Scenario == 0);
+    if (Progress.Scenario != 0)
+    {
+        const NCAimTrainerLayout::FSeat Seat = Progress.Scenario == 1
+            ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index);
+        Targets[Index]->StartWiggle(Seat.WiggleRange);
+        NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
+    }
 }
 
 void ANCAimTrainerGame::UpdateShotCount()
@@ -459,7 +496,7 @@ void ANCAimTrainerGame::UpdateShotCount()
 float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Damage,
     const FDamageEvent& Event, AController* Instigator, AActor* Causer)
 {
-    if (Progress.Phase != 2 || Progress.Scenario == 0 || !IsTrainee(Trainee) || Instigator != Trainee
+    if (Progress.Phase != 2 || !IsTrainee(Trainee) || Instigator != Trainee
         || !RunWeapon || Causer != RunWeapon || !FMath::IsFinite(Damage) || Damage <= 0.f) { return 0.f; }
     const int32 Slot = Targets.IndexOfByKey(Target);
     const float Now = GetWorld()->GetTimeSeconds();
@@ -467,6 +504,20 @@ float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Dama
     const AUTWeaponFix* FixedWeapon = Cast<AUTWeaponFix>(RunWeapon);
     const float Rewind = FixedWeapon ? FixedWeapon->GetHitValidationPredictionTime() : 0.f;
     if (!FMath::IsFinite(Rewind) || Rewind < 0.f || Now - Rewind < Target->GetAppearanceTime()) { return 0.f; }
+    if (Progress.Scenario == 0)
+    {
+        AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+        if (Slot != 0 || !Link || !Link->IsFiring() || Link->GetCurrentFireMode() != 1
+            || !Link->InstantHitInfo.IsValidIndex(1) || Event.DamageTypeClass != Link->InstantHitInfo[1].DamageType) { return 0.f; }
+        // Beam contact supplies time-based credit in Tick. Keep the target
+        // alive, avoid precision counters, and bound continuous sound traffic.
+        if (Now >= NextTrackingHitSoundTime)
+        {
+            Trainee->NotifyTrainerHit(Damage);
+            NextTrackingHitSoundTime = Now + 0.12f;
+        }
+        return Damage;
+    }
     // A late request from a previous appearance must not score the reused pawn,
     // even when the next headshot target occupies the same physical station.
     if (Progress.Scenario == 1)
@@ -511,7 +562,7 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
         Progress.RemainingSeconds = FMath::Max(0.f, 60.f - (Now - PhaseStartedAt));
         UpdateShotCount();
         if (Progress.RemainingSeconds <= 0.f) { FinishRun(); return; }
-        if (Targets.Num() != 3 || !Arena || Arena->IsPendingKillPending())
+        if (Targets.Num() != NCAimTrainerLayout::TargetCount || !Arena || Arena->IsPendingKillPending())
         {
             AbortTraining(Trainee);
             Trainee->SetTrainerOnlineStatus(TEXT("Run stopped because the practice arena was removed."));
@@ -541,15 +592,10 @@ void ANCAimTrainerGame::Tick(float DeltaSeconds)
             }
             if (Now - LastTraceTime >= 1.f / 30.f)
             {
-                // PlayerCameraManager updates after actor ticks, so its cached
-                // viewpoint would introduce a frame of unrelated aim delay.
-                const FVector ViewLocation = Pawn->GetPawnViewLocation();
-                const FRotator ViewRotation = Trainee->GetControlRotation();
-                FHitResult Hit;
-                FCollisionQueryParams Params(FName(TEXT("TrainerTracking")), false, Pawn);
-                const bool bContact = GetWorld()->LineTraceSingleByChannel(Hit, ViewLocation,
-                    ViewLocation + ViewRotation.Vector() * 10000.f, COLLISION_TRACE_WEAPON, Params)
-                    && Hit.GetActor() == Targets[0] && Targets[0]->IsAvailable();
+                // Use the real authoritative NCP beam result, including its
+                // range and world obstruction. Pointing without firing earns
+                // nothing, and no second wider trainer trace can grant credit.
+                const bool bContact = HasTrackingContact();
                 TrackedSeconds += NCAimTrainerScoring::TrackingCredit(Now - LastTraceTime, bPreviousContact, bContact);
                 bPreviousContact = bContact;
                 LastTraceTime = Now;
@@ -580,6 +626,11 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
             if (Progress.Scenario == 2) { EligibleSlots.Add(Index); }
             else { ActivateSlot(Index, Now); }
         }
+        if (Progress.Scenario != 0 && Targets[Index]->IsAvailable() && Now >= NextWiggleTime[Index])
+        {
+            Targets[Index]->ReverseStrafe();
+            NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
+        }
     }
     // Initial targets, hits and expiries all share this deadline. Never replace
     // several targets at once or catch up after a stall: one rifle, one second
@@ -589,6 +640,15 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
         ActivateSlot(EligibleSlots[Schedule.RandRange(0, EligibleSlots.Num() - 1)], Now);
         NextPopupTime = Now + NCAimTrainerScenarioPolicy::PopupSpawnDelay(PopupRefireSeconds, Schedule.FRand());
     }
+}
+
+bool ANCAimTrainerGame::HasTrackingContact() const
+{
+    AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+    return Progress.Phase == 2 && Progress.Scenario == 0 && Targets.IsValidIndex(0)
+        && Targets[0] && Targets[0]->IsAvailable() && Link && Link->IsFiring()
+        && Link->GetCurrentFireMode() == 1 && !Link->IsLinkPulsing()
+        && Link->CurrentLinkedTarget == Targets[0];
 }
 
 void ANCAimTrainerGame::PublishProgress()

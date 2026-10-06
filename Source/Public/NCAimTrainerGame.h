@@ -41,6 +41,7 @@ private:
     UPROPERTY() TArray<ANCAimTrainerTarget*> Targets;
     UPROPERTY() TSubclassOf<AUTWeapon> SniperClass;
     UPROPERTY() TSubclassOf<AUTWeapon> InstagibClass;
+    UPROPERTY() TSubclassOf<AUTWeapon> LinkClass;
     UPROPERTY() AUTWeapon* RunWeapon = nullptr;
     FNCAimTrainerProgress Progress;
     FRandomStream Schedule;
@@ -52,6 +53,7 @@ private:
     float NextDodgeTime = 0.f;
     float NextPopupTime = 0.f;
     float PopupRefireSeconds = 1.f;
+    float NextTrackingHitSoundTime = 0.f;
     float ShotStatBaseline = 0.f;
     double TrackedSeconds = 0.0;
     bool bPreviousContact = false;
@@ -59,8 +61,9 @@ private:
     FString UnrankedReason;
     FString SetupError;
     FString RunId;
-    float NextTargetTime[3] = { 0.f, 0.f, 0.f };
-    float TargetExpiry[3] = { 0.f, 0.f, 0.f };
+    TArray<float> NextTargetTime;
+    TArray<float> TargetExpiry;
+    TArray<float> NextWiggleTime;
     double NextLeaderboardFetch[3] = { 0.0, 0.0, 0.0 };
     bool LeaderboardInFlight[3] = { false, false, false };
     TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[3];
@@ -77,5 +80,6 @@ private:
     void ActivateSlot(int32 Index, float Now);
     void UpdateTargets(float Now);
     void UpdateShotCount();
+    bool HasTrackingContact() const;
     bool IsTrainee(const ANCAimTrainerPlayerController* PC) const;
 };

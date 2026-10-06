@@ -1,15 +1,20 @@
 #pragma once
 
-// Timing and direction rules for the revision-2 trainer presets. The authority
+// Timing and direction rules for the revision-3 trainer presets. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
-    enum { InstagibMaxActiveTargets = 3 };
+    enum { InstagibMaxActiveTargets = 5 };
 
     inline float UnitRoll(float Roll)
     {
         if (!(Roll > 0.f)) { return 0.f; }
         return Roll < 1.f ? Roll : 1.f;
+    }
+
+    inline float WiggleHoldSeconds(float Roll)
+    {
+        return 0.12f + 0.16f * UnitRoll(Roll);
     }
 
     inline float StrafeHoldSeconds(float PatternRoll, float JitterRoll)
@@ -49,8 +54,8 @@ namespace NCAimTrainerScenarioPolicy
 
     inline float PopupExposure(float RefireSeconds, float Roll)
     {
-        // Three targets can overlap. Even a new target at the back of a full
-        // queue gets three refire intervals plus at least half an interval to aim.
-        return PopupRefireSeconds(RefireSeconds) * (3.5f + 1.3f * UnitRoll(Roll));
+        // Five targets can overlap. A new target at the back of a full queue
+        // gets five refire intervals plus at least half an interval to aim.
+        return PopupRefireSeconds(RefireSeconds) * (5.5f + 1.3f * UnitRoll(Roll));
     }
 }

@@ -212,7 +212,8 @@ class AimTrainerAssetTests(unittest.TestCase):
             "bool ANCAimTrainerTarget::HasCharacterAssets",
         )
         source = directory / "trainer_assets.cpp"
-        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures]
+        layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
+        source.write_text("\n".join([ADAPTER, f'#include "{layout}"'] + [native_function(native, s) for s in signatures]
                                    + [native_function(trainee, "ANCAimTrainerCharacter::ANCAimTrainerCharacter"), CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_assets.exe" if os.name == "nt" else "trainer_assets")
         if msvc:

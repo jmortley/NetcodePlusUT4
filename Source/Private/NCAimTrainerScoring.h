@@ -1,6 +1,6 @@
 #pragma once
 
-// Pure server scoring rules. Revision 1 is also checked by UT4Stats.
+// Pure server scoring rules. All supported preset revisions are checked by UT4Stats.
 namespace NCAimTrainerScoring
 {
     inline int PrecisionScore(int Hits, int Shots, int Expired)

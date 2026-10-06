@@ -18,7 +18,7 @@ namespace
 		{
 		case 1: return TEXT("HEADSHOTS");
 		case 2: return TEXT("INSTAGIB POP-UP");
-		default: return TEXT("STRAFE TRACKING");
+		default: return TEXT("LINK TRACKING");
 		}
 	}
 
@@ -167,8 +167,8 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 	Panel(90.f, 126.f, 1100.f, 551.f, TrainerPanel);
 	Label(TEXT("CHOOSE YOUR PRACTICE"), 120.f, 151.f, 27.f, TrainerInk);
 	Label(TEXT("REAL UT CHARACTERS. THREE 60-SECOND CHALLENGES."), 120.f, 188.f, 14.f, TrainerMuted);
-	const TCHAR* Line1[] = { TEXT("Stay on a strafing character."), TEXT("Sniper precision on real heads."), TEXT("Shoot before targets disappear.") };
-	const TCHAR* Line2[] = { TEXT("Keep your crosshair on target. No firing."), TEXT("Body shots do not score."), TEXT("Varied height, distance and timing.") };
+	const TCHAR* Line1[] = { TEXT("Follow strafes with the Link beam."), TEXT("Sniper precision on real heads."), TEXT("Shoot before targets disappear.") };
+	const TCHAR* Line2[] = { TEXT("Hold either fire button. Beam hits score."), TEXT("Body shots do not score."), TEXT("Varied height, distance and timing.") };
 	for (int32 Mode = 0; Mode < 3; ++Mode)
 	{
 		const float X = 120.f + float(Mode) * 353.f;
@@ -191,7 +191,7 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 	Label(TEXT("RUN COMPLETE"), 640.f, 149.f, 18.f, TrainerAccent, 0.f, true);
 	Label(FString::FromInt(Progress.Score), 640.f, 181.f, 63.f, TrainerInk, 700.f, true);
 	const FString Detail = Progress.Scenario == 0
-		? FString::Printf(TEXT("%.2f s ON TARGET     %.1f%% ACCURACY"), Progress.TrackingSeconds, Progress.Accuracy)
+		? FString::Printf(TEXT("%.2f s BEAM ON TARGET     %.1f%% ACCURACY"), Progress.TrackingSeconds, Progress.Accuracy)
 		: FString::Printf(TEXT("%d / %d HITS     %.1f%% ACCURACY     %d EXPIRED"), Progress.Hits, Progress.Shots, Progress.Accuracy, Progress.TargetsExpired);
 	Label(Detail, 640.f, 269.f, 17.f, TrainerMuted, 1010.f, true);
 	if (Progress.Scenario == 1)
@@ -216,8 +216,7 @@ void ANCAimTrainerHUD::DrawHUD()
 	TrainerScale = FMath::Min(Canvas->ClipX / 1280.f, Canvas->ClipY / 720.f);
 	TrainerOrigin = FVector2D((Canvas->ClipX - 1280.f * TrainerScale) * 0.5f, (Canvas->ClipY - 720.f * TrainerScale) * 0.5f);
 	DrawSessionHeader(Progress);
-	// Stock UT only draws a weapon crosshair when a weapon exists. Tracking can
-	// still run if its optional display weapon asset is absent from a test cook.
+	// Keep a crosshair through the brief possession/weapon replication interval.
 	const AUTCharacter* Trainee = Cast<AUTCharacter>(PC->GetPawn());
 	if (!PC->IsTrainerMenuVisible() && Trainee && !Trainee->GetWeapon())
 	{
@@ -237,7 +236,7 @@ void ANCAimTrainerHUD::DrawHUD()
 		Label(TEXT("F6  /  END RUN AND RETURN TO PRACTICE MENU"), 640.f, 677.f, 13.f, TrainerMuted, 0.f, true);
 		if (Progress.Scenario == 0)
 		{
-			Label(FString::Printf(TEXT("ON TARGET  %.2f s"), Progress.TrackingSeconds), 640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
+			Label(FString::Printf(TEXT("HOLD EITHER FIRE BUTTON  /  BEAM ON TARGET  %.2f s"), Progress.TrackingSeconds), 640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
 		}
 	}
 }

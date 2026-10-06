@@ -9246,14 +9246,20 @@ bool AUTWeaponFix::IsWeaponHiddenBySettings(const AUTWeapon* Weapon, const AUTCh
 	const FName WeaponKey(*Weapon->GetClass()->GetName());
 	if (const bool* Exact = HiddenWeaponsByTag.Find(WeaponKey)) { return *Exact; }
 
-	// The trainer uses the instagib rifle rather than the usual shock class.
-	// Reuse that player's shock preference without creating/saving an override,
-	// changing other game modes, or overriding an explicit instagib show choice.
-	if (Char != nullptr && Char->IsA(ANCAimTrainerCharacter::StaticClass())
-		&& WeaponKey == FName(TEXT("N+InstagibRifle_C")))
+	// Trainer variants reuse the normal weapon's preference without creating
+	// an override, changing ordinary play, or overriding an explicit show choice.
+	if (Char != nullptr && Char->IsA(ANCAimTrainerCharacter::StaticClass()))
 	{
-		const bool* Shock = HiddenWeaponsByTag.Find(FName(TEXT("UTNPShockRifle_C")));
-		return Shock != nullptr && *Shock;
+		if (WeaponKey == FName(TEXT("N+InstagibRifle_C")))
+		{
+			const bool* Shock = HiddenWeaponsByTag.Find(FName(TEXT("UTNPShockRifle_C")));
+			return Shock != nullptr && *Shock;
+		}
+		if (WeaponKey == FName(TEXT("UTNPShaftLink_C")))
+		{
+			const bool* Link = HiddenWeaponsByTag.Find(FName(TEXT("NCPLinkGun_C")));
+			return Link != nullptr && *Link;
+		}
 	}
 	return false;
 }

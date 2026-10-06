@@ -20,6 +20,7 @@ ANCAimTrainerPlayerController::ANCAimTrainerPlayerController(const FObjectInitia
 void ANCAimTrainerPlayerController::ClientRestart_Implementation(APawn* NewPawn)
 {
 	Super::ClientRestart_Implementation(NewPawn);
+	bTrackingPrimaryHeld = bTrackingAltHeld = false;
 	// PawnClientRestart restores Walking. Mirror the authority's selected lane
 	// locally while leaving the movement component ticking.
 	// Do not use SetIgnoreMoveInput: stock ApplyDeferredFireInputs also treats
@@ -129,12 +130,41 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 
 void ANCAimTrainerPlayerController::OnFire()
 {
-	if (TrainerProgress.Phase == 2 && TrainerProgress.Scenario != 0) { Super::OnFire(); }
+	if (TrainerProgress.Phase != 2) { return; }
+	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(true, true); }
+	else { Super::OnFire(); }
 }
 
 void ANCAimTrainerPlayerController::OnAltFire()
 {
-	if (TrainerProgress.Phase == 2 && TrainerProgress.Scenario != 0) { Super::OnAltFire(); }
+	if (TrainerProgress.Phase != 2) { return; }
+	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(false, true); }
+	else { Super::OnAltFire(); }
+}
+
+void ANCAimTrainerPlayerController::OnStopFire()
+{
+	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(true, false); }
+	else { Super::OnStopFire(); }
+}
+
+void ANCAimTrainerPlayerController::OnStopAltFire()
+{
+	if (TrainerProgress.Scenario == 0) { SetTrackingFireHeld(false, false); }
+	else { Super::OnStopAltFire(); }
+}
+
+void ANCAimTrainerPlayerController::SetTrackingFireHeld(bool bPrimary, bool bHeld)
+{
+	const bool bWasHeld = bTrackingPrimaryHeld || bTrackingAltHeld;
+	if (bPrimary) { bTrackingPrimaryHeld = bHeld; }
+	else { bTrackingAltHeld = bHeld; }
+	const bool bNowHeld = bTrackingPrimaryHeld || bTrackingAltHeld;
+	if (bNowHeld == bWasHeld) { return; }
+	// Keep UT's deferred input and real Link beam state. Primary never reaches
+	// the plasma/pull path, and a second held button cannot stop or restart it.
+	if (bNowHeld) { Super::OnAltFire(); }
+	else { Super::OnStopAltFire(); }
 }
 
 void ANCAimTrainerPlayerController::SelectTrainerScenario(uint8 Scenario)
@@ -223,6 +253,7 @@ void ANCAimTrainerPlayerController::OnRep_TrainerProgress()
 	if (TrainerProgress.Phase != 2 && LastPresentedPhase != TrainerProgress.Phase)
 	{
 		// A run ending while fire is held must not carry that hold into a retry.
+		bTrackingPrimaryHeld = bTrackingAltHeld = false;
 		Super::OnStopFire();
 		Super::OnStopAltFire();
 	}

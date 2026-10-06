@@ -30,6 +30,19 @@ struct ANCAimTrainerPlayerController : AController {
 struct AUTWeapon : AActor {};
 struct AUTWeaponFix : AUTWeapon { float Rewind = 0; float GetHitValidationPredictionTime() const { return Rewind; } };
 struct AUTPlusSniper : AUTWeaponFix { int HeadshotDamageType = 5; };
+struct AUTWeap_LinkGun_Shaft_NCP : AUTWeaponFix {
+    bool Firing = true, Pulsing = false;
+    int Mode = 1;
+    AActor* CurrentLinkedTarget = nullptr;
+    struct BeamInfo { int DamageType = 7; };
+    struct : std::vector<BeamInfo> {
+        bool IsValidIndex(int index) const { return index >= 0 && index < int(size()); }
+    } InstantHitInfo;
+    AUTWeap_LinkGun_Shaft_NCP() { InstantHitInfo.resize(2); }
+    bool IsFiring() const { return Firing; }
+    int GetCurrentFireMode() const { return Mode; }
+    bool IsLinkPulsing() const { return Pulsing; }
+};
 template<class T, class U> T* Cast(U* p) { return dynamic_cast<T*>(p); }
 struct FDamageEvent { int DamageTypeClass = 5; };
 struct ANCAimTrainerTarget : AActor {
@@ -41,6 +54,8 @@ struct ANCAimTrainerTarget : AActor {
     void HideTarget() { Visible = false; ++Hidden; }
 };
 struct TargetsAdapter : std::vector<ANCAimTrainerTarget*> {
+    int Num() const { return int(size()); }
+    bool IsValidIndex(int index) const { return index >= 0 && index < Num(); }
     int IndexOfByKey(ANCAimTrainerTarget* Target) const {
         for (unsigned i = 0; i < size(); ++i) if ((*this)[i] == Target) return int(i);
         return INDEX_NONE;
@@ -54,11 +69,13 @@ struct ANCAimTrainerGame {
     AUTWeapon* RunWeapon = nullptr;
     TargetsAdapter Targets;
     float PhaseStartedAt = 0.f;
-    float TargetExpiry[3] = { 4.f, 4.f, 4.f };
-    float NextTargetTime[3] = {};
+    float TargetExpiry[5] = { 4.f, 4.f, 4.f, 4.f, 4.f };
+    float NextTargetTime[5] = {};
+    float NextTrackingHitSoundTime = 0.f;
     bool ValidTrainee = true;
     bool IsTrainee(AController* PC) { return PC && ValidTrainee; }
     World* GetWorld() { return &TheWorld; }
+    bool HasTrackingContact() const;
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
 void Require(bool okay, const char* why) { if (!okay) { std::cerr << why; std::exit(1); } }
@@ -132,6 +149,52 @@ int main(int argc, char** argv) {
         Require(f.Hit() > 0 && f.Game.Progress.Hits == 1 && f.Game.Progress.Headshots == 0, "IG body not scored");
         Fixture track; track.Game.Progress.Scenario = 0;
         Require(track.Hit() == 0 && track.Game.Progress.Hits == 0, "weapon damage inflated tracking");
+    } else if (name == "beam_damage") {
+        Fixture f; AUTWeap_LinkGun_Shaft_NCP link;
+        f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &link; f.Event.DamageTypeClass = 7;
+        auto beamHit = [&]() { return f.Game.RecordTargetHit(&f.Target, 3.f, f.Event, &f.Player, &link); };
+        Require(beamHit() == 3.f && f.Player.Confirmations == 1, "real beam hit not accepted or confirmed");
+        Require(f.Target.Visible && f.Target.Hidden == 0 && f.Game.Progress.Hits == 0
+                && f.Game.Progress.Headshots == 0 && f.Game.NextTargetTime[0] == 0.f,
+                "beam damage retired target or changed precision counts");
+        const float nextSound = f.Game.NextTrackingHitSoundTime;
+        f.Game.TheWorld.Now = nextSound - .001f;
+        Require(beamHit() == 3.f && f.Player.Confirmations == 1, "continuous beam flooded hit sounds");
+        f.Game.TheWorld.Now = nextSound;
+        Require(beamHit() == 3.f && f.Player.Confirmations == 2, "beam confirmation never resumed");
+        link.Firing = false; Require(beamHit() == 0.f, "idle Link accepted beam damage");
+        link.Firing = true; link.Mode = 0; Require(beamHit() == 0.f, "wrong fire mode accepted beam damage");
+        link.Mode = 1; f.Event.DamageTypeClass = 5; Require(beamHit() == 0.f, "non-beam damage type accepted");
+        f.Event.DamageTypeClass = 7;
+        ANCAimTrainerTarget other; f.Game.Targets.push_back(&other);
+        Require(f.Game.RecordTargetHit(&other, 3.f, f.Event, &f.Player, &link) == 0.f,
+                "tracking accepted a precision target slot");
+        f.Game.TheWorld.Now = 60.f; f.Game.TargetExpiry[0] = 65.f;
+        Require(beamHit() == 0.f, "beam damage accepted after run end");
+        Require(f.Player.Confirmations == 2, "rejected beam damage emitted success sound");
+    } else if (name == "beam_contact") {
+        Fixture f; AUTWeap_LinkGun_Shaft_NCP link; AActor obstruction;
+        f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &link;
+        Require(!f.Game.HasTrackingContact(), "pointing without actual beam target earned contact");
+        link.CurrentLinkedTarget = &f.Target;
+        Require(f.Game.HasTrackingContact(), "actual firing beam contact rejected");
+        Require(TrackingCredit(.04, true, f.Game.HasTrackingContact()) == .04, "valid beam interval lost");
+        link.Firing = false; Require(!f.Game.HasTrackingContact(), "idle gun retained stale target credit");
+        link.Firing = true; link.Mode = 0; Require(!f.Game.HasTrackingContact(), "wrong fire mode earned tracking credit");
+        link.Mode = 1; link.Pulsing = true; Require(!f.Game.HasTrackingContact(), "link pull earned beam credit");
+        link.Pulsing = false; link.CurrentLinkedTarget = &obstruction;
+        Require(!f.Game.HasTrackingContact(), "world obstruction or other actor earned target contact");
+        link.CurrentLinkedTarget = &f.Target; f.Target.Visible = false;
+        Require(!f.Game.HasTrackingContact(), "hidden target earned contact");
+        f.Target.Visible = true; f.Game.Progress.Phase = 3;
+        Require(!f.Game.HasTrackingContact(), "results phase earned contact");
+        f.Game.Progress.Phase = 2; f.Game.Progress.Scenario = 1;
+        Require(!f.Game.HasTrackingContact(), "precision scenario earned tracking contact");
+        f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &f.Gun;
+        Require(!f.Game.HasTrackingContact(), "precision weapon earned tracking contact");
+        f.Game.RunWeapon = &link; f.Game.Targets[0] = nullptr;
+        Require(!f.Game.HasTrackingContact(), "missing target accepted");
+        f.Game.Targets.clear(); Require(!f.Game.HasTrackingContact(), "empty target list accepted");
     } else Require(false, "unknown case");
 }
 '''
@@ -147,7 +210,9 @@ class AimTrainerScoringTests(unittest.TestCase):
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
         scoring = (PLUGIN / "Source/Private/NCAimTrainerScoring.h").read_text(encoding="utf-8-sig").replace("#pragma once", "")
         source = directory / "trainer.cpp"
-        source.write_text("\n".join((ADAPTER, scoring, native_function(game, "float ANCAimTrainerGame::RecordTargetHit"), CASES)), encoding="utf-8")
+        source.write_text("\n".join((ADAPTER, scoring,
+                                    native_function(game, "float ANCAimTrainerGame::RecordTargetHit"),
+                                    native_function(game, "bool ANCAimTrainerGame::HasTrackingContact"), CASES)), encoding="utf-8")
         cls.executable = directory / ("trainer.exe" if os.name == "nt" else "trainer")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -168,7 +233,9 @@ class AimTrainerScoringTests(unittest.TestCase):
     def test_headshots_use_actual_sniper_damage_type(self): self.run_case("body")
     def test_authorized_trainee_weapon_and_target_only(self): self.run_case("identity")
     def test_expiry_and_finish_deadlines_apply_before_tick(self): self.run_case("deadline")
-    def test_instigib_accepts_body_while_tracking_ignores_damage(self): self.run_case("instagib")
+    def test_instagib_accepts_body_while_tracking_rejects_nonbeam_damage(self): self.run_case("instagib")
+    def test_real_beam_damage_keeps_target_alive_and_bounds_feedback(self): self.run_case("beam_damage")
+    def test_tracking_contact_requires_actual_active_unobstructed_beam_target(self): self.run_case("beam_contact")
 
 
 if __name__ == "__main__":

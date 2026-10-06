@@ -39,6 +39,8 @@ public:
 	virtual bool InputKey(FKey Key, EInputEvent EventType, float AmountDepressed, bool bGamepad) override;
 	virtual void OnFire() override;
 	virtual void OnAltFire() override;
+	virtual void OnStopFire() override;
+	virtual void OnStopAltFire() override;
 	virtual void MoveForward(float Value) override;
 	virtual void MoveRight(float Value) override;
 	virtual void Jump() override;
@@ -88,9 +90,13 @@ private:
 	UFUNCTION()
 	void OnRep_TrainerProgress();
 	void ApplyTrainerMovementMode();
+	/** Both tracking buttons hold one secondary beam; release after the final button. */
+	void SetTrackingFireHeld(bool bPrimary, bool bHeld);
 	/** Bound repeated requests without dropping a quick select-then-start sequence. */
 	bool AdmitTrainerRequest(uint8 Action);
 	double NextTrainerRequestTime[4] = { 0.0, 0.0, 0.0, 0.0 };
 	uint8 LastPresentedPhase = 255;
 	bool bLastPresentedMovementPractice = false;
+	bool bTrackingPrimaryHeld = false;
+	bool bTrackingAltHeld = false;
 };

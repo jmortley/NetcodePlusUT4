@@ -20,6 +20,7 @@ ADAPTER = r'''
 #include <cmath>
 #include <limits>
 #include <cstdint>
+#include <vector>
 #define TEXT(x) x
 #define UE_LOG(...) do {} while (0)
 using uint8 = uint8_t;
@@ -53,9 +54,11 @@ enum class ETeleportType { TeleportPhysics };
 struct UClass {
     int Kind;
     bool HasAnyClassFlags(int) const { return false; }
-    bool IsChildOf(UClass* other) const { return other && other->Kind == Kind; }
+    bool IsChildOf(UClass* other) const { return other && (other->Kind == Kind || (Kind == 3 && other->Kind == 4)); }
 };
-UClass SniperType{1}, InstagibType{2};
+UClass SniperType{1}, InstagibType{2}, LinkType{3}, LinkBaseType{4}, BeamStateType{5};
+bool MissingLinkAsset = false, WrongLinkAsset = false;
+std::string LastLoadedPath;
 template<class T> struct TSubclassOf {
     UClass* Value = nullptr;
     TSubclassOf() = default;
@@ -65,13 +68,41 @@ template<class T> struct TSubclassOf {
     UClass* operator->() const { return Value; }
 };
 template<class T> UClass* LoadClass(void*, const char* path, void*, int) {
+    LastLoadedPath = path;
+    if (LastLoadedPath.find("Link") != std::string::npos) {
+        return MissingLinkAsset ? nullptr : WrongLinkAsset ? &SniperType : &LinkType;
+    }
     return std::string(path).find("Instagib") != std::string::npos ? &InstagibType : &SniperType;
 }
-struct AUTWeapon { virtual ~AUTWeapon() = default; int Ammo = 0, MaxAmmo = 100, ShotsStatsName = 1; void StopFire(int) {} };
+struct AUTWeapon {
+    virtual ~AUTWeapon() = default;
+    int Ammo = 0, MaxAmmo = 100, ShotsStatsName = 1;
+    float BeamRefire = .12f;
+    float GetRefireTime(int) const { return BeamRefire; }
+    void StopFire(int) {}
+};
 struct AUTPlusSniper : AUTWeapon { static UClass* StaticClass() { return &SniperType; } };
 struct AUTPlusShockRifle : AUTWeapon {
     static UClass* StaticClass() { return &InstagibType; }
     bool HasSharedInstagibFireModes() const { return true; }
+};
+struct AUTWeap_LinkGun_NCP : AUTWeapon { static UClass* StaticClass() { return &LinkBaseType; } };
+template<class T> struct BeamArray : std::vector<T> {
+    BeamArray() : std::vector<T>(2) {}
+    bool IsValidIndex(int index) const { return index >= 0 && index < int(this->size()); }
+};
+struct UUTWeaponStateFiringLinkBeam_NCP {
+    bool CorrectType = true;
+    static UClass* StaticClass() { return &BeamStateType; }
+    bool IsA(UClass* type) const { return CorrectType && type == &BeamStateType; }
+};
+struct AUTWeap_LinkGun_Shaft_NCP : AUTWeap_LinkGun_NCP {
+    static UClass* StaticClass() { return &LinkType; }
+    struct BeamInfo { int Damage = 10, DamageType = 7; float TraceRange = 1800.f; };
+    BeamArray<BeamInfo> InstantHitInfo;
+    BeamArray<UUTWeaponStateFiringLinkBeam_NCP*> FiringState;
+    UUTWeaponStateFiringLinkBeam_NCP BeamState;
+    AUTWeap_LinkGun_Shaft_NCP() { FiringState[0] = FiringState[1] = &BeamState; }
 };
 struct Movement {
     int Stops = 0, Disables = 0;
@@ -109,6 +140,7 @@ struct AUTCharacter : APawn {
     Movement Move;
     AUTPlusSniper Sniper;
     AUTPlusShockRifle Instagib;
+    AUTWeap_LinkGun_Shaft_NCP Link;
     bool bCanBeDamaged = true, Dead = false;
     int Discards = 0, Creates = 0, Switches = 0;
     bool IsDead() const { return Dead; }
@@ -117,6 +149,7 @@ struct AUTCharacter : APawn {
     void DiscardAllInventory() { ++Discards; }
     AUTWeapon* CreateInventory(TSubclassOf<AUTWeapon> type) {
         ++Creates;
+        if (type->Kind == 3) return &Link;
         return type->Kind == 2 ? static_cast<AUTWeapon*>(&Instagib) : static_cast<AUTWeapon*>(&Sniper);
     }
     void SwitchWeapon(AUTWeapon*) { ++Switches; }
@@ -168,7 +201,7 @@ struct ANCAimTrainerGame : BaseGame {
     using Super = BaseGame;
     ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
-    TSubclassOf<AUTWeapon> SniperClass, InstagibClass;
+    TSubclassOf<AUTWeapon> SniperClass, InstagibClass, LinkClass;
     FVector ArenaOrigin{0.f, 0.f, 50000.f};
     FNCAimTrainerProgress Progress;
     int Publishes = 0, Fetches = 0;
@@ -310,6 +343,61 @@ int main(int argc, char** argv) {
         Require(!f.Game.IsInsidePracticeLane(&pawn),"ceiling penetration accepted");
         pawn.Position.Z=50108; pawn.Position.X=std::numeric_limits<float>::quiet_NaN();
         Require(!f.Game.IsInsidePracticeLane(&pawn),"nonfinite position accepted");
+    } else if (name == "tracking_weapon") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        Require(f.Game.Progress.Scenario == 0 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Link,
+                "tracking did not equip the actual Shaft Link class");
+        Require(LastLoadedPath == "/Game/Blueprints/Netcode/UTNPShaftLink.UTNPShaftLink_C",
+                "tracking resolved a different weapon content asset");
+        f.Game.SelectScenario(&f.Player,1);
+        Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Sniper, "headshot selection lost sniper");
+        f.Game.SelectScenario(&f.Player,2);
+        Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Instagib, "popup selection lost instagib");
+        f.Game.SelectScenario(&f.Player,0);
+        Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Link, "returning to tracking retained precision weapon");
+    } else if (name == "tracking_assets") {
+        f.BeginWorld(); MissingLinkAsset = true; f.Game.PostLogin(&f.Player);
+        Require(!f.Game.RunWeapon && !f.Game.ConfigurePawn(), "missing Link silently started tracking");
+        f.Game.StartTraining(&f.Player);
+        Require(f.Game.Progress.Phase == 0, "missing Link admitted countdown");
+        MissingLinkAsset = false; WrongLinkAsset = true;
+        Require(!f.Game.ConfigurePawn() && !f.Game.RunWeapon, "non-Link class accepted for tracking");
+        WrongLinkAsset = false; f.Game.LinkClass = nullptr;
+        Require(f.Game.ConfigurePawn() && f.Game.RunWeapon == &f.Game.SpawnedPawn.Link,
+                "later Link pak availability did not recover tracking");
+    } else if (name == "tracking_beam_content") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        auto& link = f.Game.SpawnedPawn.Link;
+        link.InstantHitInfo[1].TraceRange = 1599.f;
+        Require(!f.Game.ConfigurePawn(), "short-range beam admitted standard target distance");
+        link.InstantHitInfo[1].TraceRange = std::numeric_limits<float>::quiet_NaN();
+        Require(!f.Game.ConfigurePawn(), "nonfinite beam range accepted");
+        link.InstantHitInfo[1].TraceRange = 1800.f; link.BeamState.CorrectType = false;
+        Require(!f.Game.ConfigurePawn(), "non-NCP beam state accepted");
+        link.BeamState.CorrectType = true; link.FiringState[1] = nullptr;
+        Require(!f.Game.ConfigurePawn(), "missing beam state accepted");
+        link.FiringState[1] = &link.BeamState; link.InstantHitInfo[1].Damage = 0;
+        Require(!f.Game.ConfigurePawn(), "zero-damage beam accepted");
+        link.InstantHitInfo[1].Damage = 10; link.InstantHitInfo[1].DamageType = 0;
+        Require(!f.Game.ConfigurePawn(), "beam without damage type accepted");
+        link.InstantHitInfo[1].DamageType = 7;
+        Require(f.Game.ConfigurePawn(), "valid restored beam content rejected");
+        link.InstantHitInfo.clear();
+        Require(!f.Game.ConfigurePawn(), "missing beam hit-info slot accepted");
+    } else if (name == "tracking_refire") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        auto& link = f.Game.SpawnedPawn.Link;
+        for (float interval : {0.f, -.1f, std::numeric_limits<float>::quiet_NaN(),
+                               std::numeric_limits<float>::infinity()}) {
+            link.BeamRefire = interval;
+            Require(!f.Game.ConfigurePawn(), "invalid beam refire admitted damage division");
+            f.Game.StartTraining(&f.Player);
+            Require(f.Game.Progress.Phase == 0, "invalid beam refire admitted countdown");
+        }
+        link.BeamRefire = .12f;
+        Require(f.Game.ConfigurePawn(), "valid positive beam refire did not recover");
+        f.Game.StartTraining(&f.Player);
+        Require(f.Game.Progress.Phase == 1, "valid beam could not start after correcting refire");
     } else { Require(false, "unknown case"); }
 }
 '''
@@ -358,6 +446,10 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_spectator_never_receives_trainee_pawn(self): self.run_case("spectator")
     def test_movement_choice_survives_run_lifecycle_and_cannot_rank(self): self.run_case("movement_lifecycle")
     def test_lane_accepts_crouching_jumping_but_rejects_escapes(self): self.run_case("lane_bounds")
+    def test_each_scenario_equips_its_real_weapon(self): self.run_case("tracking_weapon")
+    def test_tracking_requires_link_assets_and_recovers_after_mount(self): self.run_case("tracking_assets")
+    def test_tracking_requires_real_beam_state_damage_and_range(self): self.run_case("tracking_beam_content")
+    def test_tracking_refire_must_be_finite_and_positive(self): self.run_case("tracking_refire")
 
 
 if __name__ == "__main__":

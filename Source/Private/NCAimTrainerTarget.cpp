@@ -1,6 +1,7 @@
 #include "NCAimTrainerTarget.h"
 #include "NCAimTrainerGame.h"
 #include "NCAimTrainerScenarioPolicy.h"
+#include "NCAimTrainerLayout.h"
 #include "UTCharacterMovement.h"
 #include "UTCharacterContent.h"
 #include "Components/CapsuleComponent.h"
@@ -39,7 +40,7 @@ ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitial
     GetCharacterMovement()->bOrientRotationToMovement = false;
     GetCharacterMovement()->bUseControllerDesiredRotation = false;
     GetCharacterMovement()->MaxWalkSpeed = 500.f;
-    GetCharacterMovement()->MaxAcceleration = 7000.f;
+    GetCharacterMovement()->MaxAcceleration = NCAimTrainerLayout::WiggleAcceleration;
     // Head position and animation must update even on a dedicated server.
     GetMesh()->MeshComponentUpdateFlag = EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones;
     GetMesh()->bEnableUpdateRateOptimizations = false;
@@ -87,6 +88,9 @@ void ANCAimTrainerTarget::ActivateTarget(const FVector& Location, bool bStrafe)
 {
     if (Role != ROLE_Authority) { return; }
     bTrainerStrafe = bStrafe;
+    bTrainerWiggle = false;
+    StrafeRange = 800.f;
+    GetCharacterMovement()->MaxWalkSpeed = 500.f;
     StrafeCenter = Location;
     StrafeDirection = 1.f;
     ResetTargetMovement();
@@ -107,12 +111,23 @@ void ANCAimTrainerTarget::HideTarget()
     if (Role != ROLE_Authority) { return; }
     bTrainerVisible = false;
     bTrainerStrafe = false;
+    bTrainerWiggle = false;
     ResetTargetMovement();
     GetCharacterMovement()->DisableMovement();
     SavedPositions.Reset();
     SavedCapsulePostures.Reset();
     OnRep_TrainerVisible();
     ForceNetUpdate();
+}
+
+void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
+{
+    if (Role != ROLE_Authority || !bTrainerVisible || !FMath::IsFinite(HalfWidth) || HalfWidth <= 0.f) { return; }
+    bTrainerStrafe = true;
+    bTrainerWiggle = true;
+    StrafeRange = FMath::Clamp(HalfWidth, 20.f, 110.f);
+    GetCharacterMovement()->MaxWalkSpeed = NCAimTrainerLayout::WiggleSpeed;
+    GetCharacterMovement()->SetMovementMode(MOVE_Walking);
 }
 
 void ANCAimTrainerTarget::ResetTargetMovement()
@@ -132,12 +147,12 @@ void ANCAimTrainerTarget::ReverseStrafe()
 {
     if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || !GetCharacterMovement()->IsMovingOnGround()) { return; }
     const float Offset = GetActorLocation().Y - StrafeCenter.Y;
-    StrafeDirection = Offset >= 800.f ? -1.f : Offset <= -800.f ? 1.f : -StrafeDirection;
+    StrafeDirection = Offset >= StrafeRange ? -1.f : Offset <= -StrafeRange ? 1.f : -StrafeDirection;
 }
 
 bool ANCAimTrainerTarget::TryTrainerDodge(float DirectionRoll)
 {
-    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || !GetCharacterMovement()->IsMovingOnGround()) { return false; }
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || bTrainerWiggle || !GetCharacterMovement()->IsMovingOnGround()) { return false; }
     const float Direction = NCAimTrainerScenarioPolicy::DodgeDirection(GetActorLocation().Y - StrafeCenter.Y, DirectionRoll);
     // Use UT's normal impulse, cooldown, landing and replicated movement event.
     // Never simulate a dodge by teleporting or assigning horizontal velocity.
@@ -162,8 +177,8 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
     if (Role == ROLE_Authority && bTrainerVisible && bTrainerStrafe && GetCharacterMovement()->IsMovingOnGround())
     {
         const float Offset = GetActorLocation().Y - StrafeCenter.Y;
-        if (Offset >= 800.f) { StrafeDirection = -1.f; }
-        else if (Offset <= -800.f) { StrafeDirection = 1.f; }
+        if (Offset >= StrafeRange) { StrafeDirection = -1.f; }
+        else if (Offset <= -StrafeRange) { StrafeDirection = 1.f; }
         AddMovementInput(FVector(0.f, StrafeDirection, 0.f), 1.f, true);
     }
     Super::Tick(DeltaSeconds);
@@ -208,16 +223,17 @@ ANCAimTrainerArena::ANCAimTrainerArena(const FObjectInitializer& ObjectInitializ
     AddBlock(TEXT("RightWall"), FVector(0, 1850, 1000), FVector(6400, 100, 2000));
     // Cover is in front of a real full-size pawn; the normal weapon trace must
     // clear it before the native sniper head test can award a point.
-    for (int32 Index = 0; Index < 3; ++Index)
+    for (int32 Index = 0; Index < NCAimTrainerLayout::HeadSlotCount; ++Index)
     {
+        const NCAimTrainerLayout::FBlock Block = NCAimTrainerLayout::HeadCover(Index);
         Cover.Add(AddBlock(FName(*FString::Printf(TEXT("HeadCover%d"), Index)),
-            FVector(600.f, (Index - 1) * 650.f, 88.f), FVector(180.f, 460.f, 176.f)));
+            FVector(Block.CenterX, Block.CenterY, Block.Height * 0.5f), FVector(Block.SizeX, Block.SizeY, Block.Height)));
     }
-    for (int32 Index = 0; Index < 3; ++Index)
+    for (int32 Index = 0; Index < NCAimTrainerLayout::PopupPlatformCount; ++Index)
     {
-        const float Height = FMath::Max(1.f, Index * 160.f);
+        const NCAimTrainerLayout::FBlock Block = NCAimTrainerLayout::PopupPlatform(Index);
         Cover.Add(AddBlock(FName(*FString::Printf(TEXT("PopupPlatform%d"), Index)),
-            FVector(1100.f, (Index - 1) * 850.f, Height * 0.5f), FVector(2600.f, 580.f, Height)));
+            FVector(Block.CenterX, Block.CenterY, Block.Height * 0.5f), FVector(Block.SizeX, Block.SizeY, Block.Height)));
     }
     for (int32 Index = 0; Index < 3; ++Index)
     {
@@ -270,7 +286,7 @@ void ANCAimTrainerArena::OnRep_Scenario()
     for (int32 Index = 0; Index < Cover.Num(); ++Index)
     {
         UStaticMeshComponent* Block = Cover[Index];
-        const bool bEnabled = Index < 3 ? Scenario == 1 : Scenario == 2;
+        const bool bEnabled = Index < NCAimTrainerLayout::HeadSlotCount ? Scenario == 1 : Scenario == 2;
         Block->SetHiddenInGame(!bEnabled);
         Block->SetCollisionEnabled(bEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
     }

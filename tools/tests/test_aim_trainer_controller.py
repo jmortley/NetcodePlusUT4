@@ -145,6 +145,7 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     double NextTrainerRequestTime[4] = { 0., 0., 0., 0. };
     uint8 LastPresentedPhase = 255;
     bool bLastPresentedMovementPractice = false;
+    bool bTrackingPrimaryHeld = false, bTrackingAltHeld = false;
     bool InputFocus = true, Local = true;
     int Role = ROLE_Authority, Selects = 0, Starts = 0, Aborts = 0, NetUpdates = 0, InputUpdates = 0;
     uint8 LastSelection = 255;
@@ -169,6 +170,9 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     bool InputKey(FKey, EInputEvent, float, bool);
     void OnFire();
     void OnAltFire();
+    void OnStopFire();
+    void OnStopAltFire();
+    void SetTrackingFireHeld(bool, bool);
     void SelectTrainerScenario(uint8);
     void StartTrainerRun();
     void ReturnToTrainerMenu();
@@ -245,17 +249,43 @@ void FireGates() {
             pc.TrainerProgress.Scenario = scenario;
             for (uint8 phase = 0; phase < 4; ++phase) {
                 pc.TrainerProgress.Phase = phase;
-                int before = pawn.Fires[0];
+                const int before = pawn.Fires[0], beforeAlt = pawn.Fires[1];
                 pc.OnFire(); pc.OnAltFire();
                 Require(pawn.Fires[0] == before, "stock fire did not remain deferred");
                 pc.ApplyDeferredFireInputs();
-                const int expected = phase == 2 && scenario != 0 ? 1 : 0;
-                Require(pawn.Fires[0] == before + expected && pawn.Fires[1] == pawn.Fires[0],
+                const int expectedPrimary = phase == 2 && scenario != 0 ? 1 : 0;
+                const int expectedAlt = phase == 2 ? 1 : 0;
+                Require(pawn.Fires[0] == before + expectedPrimary && pawn.Fires[1] == beforeAlt + expectedAlt,
                         "trainer fire never reached pawn or escaped its phase/scenario gate");
                 Require(pc.DeferredFireInputs.empty(), "deferred fire queue did not drain");
                 Require(!pawn.Move.Enabled && !pc.IgnoreLook, "shooting unlocked translation or locked view");
+                pc.OnStopFire(); pc.OnStopAltFire(); pc.ApplyDeferredFireInputs();
             }
         }
+    }
+}
+void TrackingBeamHold() {
+    for (int role : {ROLE_Authority, 1}) {
+        ANCAimTrainerPlayerController pc; AUTCharacter pawn;
+        pc.Role = role; pc.ClientRestart_Implementation(&pawn);
+        pc.TrainerProgress.Phase = 2; pc.TrainerProgress.Scenario = 0;
+        pc.OnFire(); pc.OnFire(); pc.OnAltFire(); pc.ApplyDeferredFireInputs();
+        Require(pawn.Fires[0] == 0 && pawn.Fires[1] == 1,
+                "tracking plasma fired or two buttons restarted the real beam");
+        pc.OnStopFire(); pc.ApplyDeferredFireInputs();
+        Require(pawn.Stops[1] == 0, "primary release stopped still-held secondary beam");
+        pc.OnStopAltFire(); pc.ApplyDeferredFireInputs();
+        Require(pawn.Stops[1] == 1, "final tracking button did not stop beam");
+        pc.OnAltFire(); pc.OnFire(); pc.OnStopAltFire(); pc.ApplyDeferredFireInputs();
+        Require(pawn.Fires[1] == 2 && pawn.Stops[1] == 1, "reverse order broke held-beam aggregation");
+        pc.LastPresentedPhase = 2; pc.TrainerProgress.Phase = 3; pc.OnRep_TrainerProgress();
+        pc.ApplyDeferredFireInputs();
+        Require(!pc.bTrackingPrimaryHeld && !pc.bTrackingAltHeld && pawn.Stops[1] == 2,
+                "results did not clear held beam");
+        pc.TrainerProgress.Phase = 2; pc.OnFire(); pc.ApplyDeferredFireInputs();
+        Require(pawn.Fires[1] == 3, "retry inherited stuck held-input state");
+        pc.ClientRestart_Implementation(&pawn);
+        Require(!pc.bTrackingPrimaryHeld && !pc.bTrackingAltHeld, "possession retained old beam inputs");
     }
 }
 void ExternalFireLock() {
@@ -403,6 +433,7 @@ int main(int argc, char** argv) {
     else if (name == "focus") Focus();
     else if (name == "active") ActiveControls();
     else if (name == "fire") FireGates();
+    else if (name == "tracking_beam") TrackingBeamHold();
     else if (name == "external_lock") ExternalFireLock();
     else if (name == "admission") Admission();
     else if (name == "state") StatePublish();
@@ -443,6 +474,9 @@ class AimTrainerControllerTests(unittest.TestCase):
             "bool ANCAimTrainerPlayerController::InputKey",
             "void ANCAimTrainerPlayerController::OnFire",
             "void ANCAimTrainerPlayerController::OnAltFire",
+            "void ANCAimTrainerPlayerController::OnStopFire",
+            "void ANCAimTrainerPlayerController::OnStopAltFire",
+            "void ANCAimTrainerPlayerController::SetTrackingFireHeld",
             "void ANCAimTrainerPlayerController::SelectTrainerScenario",
             "void ANCAimTrainerPlayerController::StartTrainerRun",
             "void ANCAimTrainerPlayerController::ReturnToTrainerMenu",
@@ -472,7 +506,8 @@ class AimTrainerControllerTests(unittest.TestCase):
     def test_menu_controls_and_repeat_suppression(self): self.run_case("menu")
     def test_stock_menu_and_chat_keep_input_focus(self): self.run_case("focus")
     def test_cannot_replace_active_run_and_can_abort(self): self.run_case("active")
-    def test_only_shooting_scenarios_can_fire_during_run(self): self.run_case("fire")
+    def test_each_scenario_uses_real_fire_only_during_run(self): self.run_case("fire")
+    def test_tracking_buttons_hold_one_real_secondary_beam_until_both_release(self): self.run_case("tracking_beam")
     def test_external_ignore_input_still_blocks_stock_firing(self): self.run_case("external_lock")
     def test_request_throttle_allows_quick_select_then_start(self): self.run_case("admission")
     def test_authority_and_one_time_held_fire_release(self): self.run_case("state")

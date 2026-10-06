@@ -21,6 +21,7 @@ public:
     virtual void NotifyBlockedHeadShot(AUTCharacter* ShotInstigator) override;
 
     void ActivateTarget(const FVector& Location, bool bStrafe);
+    void StartWiggle(float HalfWidth);
     void HideTarget();
     bool IsAvailable() const { return bTrainerVisible; }
     float GetAppearanceTime() const { return AppearanceTime; }
@@ -33,7 +34,9 @@ private:
     bool bTrainerVisible = false;
     UFUNCTION() void OnRep_TrainerVisible();
     bool bTrainerStrafe = false;
+    bool bTrainerWiggle = false;
     float StrafeDirection = 1.0f;
+    float StrafeRange = 800.f;
     FVector StrafeCenter = FVector::ZeroVector;
     float AppearanceTime = 0.f;
     void ResetTargetMovement();

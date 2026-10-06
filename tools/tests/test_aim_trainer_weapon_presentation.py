@@ -119,7 +119,28 @@ int main(int argc, char** argv) {
     AUTWeaponFix::HiddenWeaponsByTag.Add(FName("UTNPShockRifle_C"), true);
     bool expectedHidden = true;
     bool expectedCamera = true;
-    if (name == "explicit_show") {
+    if (name.find("shaft_") == 0) {
+        weapon.Class.Name.Value = "UTNPShaftLink_C";
+        AUTWeaponFix::HiddenWeaponsByTag.Add(FName("NCPLinkGun_C"), true);
+        if (name == "shaft_explicit_show") {
+            AUTWeaponFix::HiddenWeaponsByTag.Add(FName("UTNPShaftLink_C"), false);
+            expectedHidden = expectedCamera = false;
+        } else if (name == "shaft_explicit_hide") {
+            AUTWeaponFix::HiddenWeaponsByTag.Add(FName("NCPLinkGun_C"), false);
+            AUTWeaponFix::HiddenWeaponsByTag.Add(FName("UTNPShaftLink_C"), true);
+        } else if (name == "shaft_link_show") {
+            AUTWeaponFix::HiddenWeaponsByTag.Add(FName("NCPLinkGun_C"), false);
+            expectedHidden = expectedCamera = false;
+        } else if (name == "shaft_ordinary_game") {
+            owner.Trainer = false; expectedHidden = expectedCamera = false;
+        } else if (name == "shaft_legacy_only") {
+            AUTWeaponFix::HiddenWeaponsByTag.Values.clear();
+            // UTNPLinkGun is a separate legacy CSHD weapon, not an alias for
+            // the player's current NCPLinkGun preference.
+            AUTWeaponFix::HiddenWeaponsByTag.Add(FName("UTNPLinkGun_C"), true);
+            expectedHidden = expectedCamera = false;
+        } else { Require(name == "shaft_inherited_hide", "unknown shaft case"); }
+    } else if (name == "explicit_show") {
         AUTWeaponFix::HiddenWeaponsByTag.Add(FName("N+InstagibRifle_C"), false);
         expectedHidden = expectedCamera = false;
     } else if (name == "explicit_hide") {
@@ -198,6 +219,12 @@ class AimTrainerWeaponPresentationTests(unittest.TestCase):
     def test_bp_parity_hide_keeps_socket_beam_origin(self): self.run_case("bp_parity")
     def test_no_saved_shock_choice_remains_visible(self): self.run_case("no_shock_preference")
     def test_missing_owner_does_not_use_trainer_fallback(self): self.run_case("no_owner")
+    def test_shaft_inherits_current_link_hide(self): self.run_case("shaft_inherited_hide")
+    def test_shaft_exact_show_overrides_link_hide(self): self.run_case("shaft_explicit_show")
+    def test_shaft_exact_hide_overrides_link_show(self): self.run_case("shaft_explicit_hide")
+    def test_shaft_inherits_current_link_show(self): self.run_case("shaft_link_show")
+    def test_shaft_ordinary_game_has_no_new_fallback(self): self.run_case("shaft_ordinary_game")
+    def test_legacy_cshd_link_choice_is_not_current_link_choice(self): self.run_case("shaft_legacy_only")
 
 
 if __name__ == "__main__":
