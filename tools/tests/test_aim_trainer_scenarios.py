@@ -36,6 +36,7 @@ struct FVector {
     FVector operator+(const FVector& other) const { return FVector(X + other.X, Y + other.Y, Z + other.Z); }
 };
 template<class T> struct TArray : std::vector<T> {
+    using std::vector<T>::vector;
     int Num() const { return int(this->size()); }
     bool IsValidIndex(int index) const { return index >= 0 && index < Num(); }
     void Add(T value) { this->push_back(value); }
@@ -58,7 +59,7 @@ struct AUTWeapon : AActor {
 };
 struct AUTWeaponFix : AUTWeapon { float GetHitValidationPredictionTime() const { return 0.f; } };
 struct AUTPlusSniper : AUTWeaponFix { int HeadshotDamageType = 5; };
-struct AUTWeap_LinkGun_Shaft_NCP : AUTWeaponFix {
+struct AUTWeap_LinkGun_NCP : AUTWeaponFix {
     struct BeamInfo { int DamageType = 7; };
     TArray<BeamInfo> InstantHitInfo;
     bool IsFiring() const { return true; }
@@ -66,7 +67,13 @@ struct AUTWeap_LinkGun_Shaft_NCP : AUTWeaponFix {
 };
 template<class T, class U> T* Cast(U* value) { return dynamic_cast<T*>(value); }
 struct FDamageEvent { int DamageTypeClass = 5; };
+struct UClass { bool Instagib; template<class T> const T* GetDefaultObject() const; };
+UClass TeamTargetClass{false}, InstagibTargetClass{true};
 struct ANCAimTrainerTarget : AActor {
+    bool InstagibProfile = true;
+    struct Capsule { float HalfHeight = 108.f; float GetScaledCapsuleHalfHeight() const { return HalfHeight; } } Shape;
+    const Capsule* GetCapsuleComponent() const { return &Shape; }
+    UClass* GetClass() const { return InstagibProfile ? &InstagibTargetClass : &TeamTargetClass; }
     bool Visible = false, Strafing = false, Crouched = false;
     bool CanStand = true, CanCrouch = true, CanDodge = true, CanSlide = true;
     int Activations = 0, Hides = 0, Wiggles = 0, Reversals = 0;
@@ -79,6 +86,7 @@ struct ANCAimTrainerTarget : AActor {
         Visible = true; Strafing = strafe; Crouched = false; Position = position; ++Activations;
     }
     bool IsAvailable() const { return Visible; }
+    bool IsPendingKillPending() const { return false; }
     float GetAppearanceTime() const { return 0.f; }
     void HideTarget() { Visible = false; Crouched = false; ++Hides; }
     void StartWiggle(float range) { WiggleRange = range; ++Wiggles; }
@@ -92,6 +100,11 @@ struct ANCAimTrainerTarget : AActor {
         Crouched = crouch; return true;
     }
 };
+template<class T> const T* UClass::GetDefaultObject() const {
+    static ANCAimTrainerTarget team, instagib;
+    team.Shape.HalfHeight = 108.f; instagib.Shape.HalfHeight = 103.f;
+    return static_cast<const T*>(Instagib ? &instagib : &team);
+}
 struct ANCAimTrainerGame {
     struct {
         int Phase = 1, Scenario = 2, TargetsExpired = 0, Hits = 0, Headshots = 0;
@@ -114,15 +127,16 @@ struct ANCAimTrainerGame {
     float NextPopupSlideTime = 0.f;
     float NextTrackingSlideTime = 0.f;
     float NextTargetTime[NCAimTrainerLayout::TargetCount] = {}, TargetExpiry[NCAimTrainerLayout::TargetCount] = {};
-    float NextWiggleTime[NCAimTrainerLayout::TargetCount] = {}, NextCrouchTime[NCAimTrainerLayout::TargetCount] = {};
-    float CrouchEndTime[NCAimTrainerLayout::TargetCount] = {};
-    float NextTrackingHitSoundTime = 0.f;
+    float NextWiggleTime[NCAimTrainerLayout::TargetCount] = {};
+    TArray<float> NextCrouchTime = TArray<float>(NCAimTrainerLayout::TargetCount, 0.f);
+    TArray<float> CrouchEndTime = TArray<float>(NCAimTrainerLayout::TargetCount, 0.f);
     bool bRankedRun = true;
     std::string UnrankedReason;
     World* GetWorld() { return &TheWorld; }
     bool IsTrainee(AController* player) const { return player && player == Trainee; }
     void PublishProgress() {}
     void BeginActiveRun();
+    void HideAllTargets();
     void ActivateSlot(int32, float);
     void UpdateTargets(float);
     void UpdatePopupDodger(float);
@@ -139,7 +153,10 @@ struct Fixture {
         Player.PlayerState = &PlayerState; Game.Trainee = &Player; Game.RunWeapon = &Gun;
         for (auto& target : Targets) Game.Targets.Add(&target);
     }
-    void Start() { Game.BeginActiveRun(); }
+    void Start() {
+        for (auto& target : Targets) target.InstagibProfile = Game.Progress.Scenario == 2;
+        Game.BeginActiveRun();
+    }
     void At(float now) { Game.TheWorld.Now = now; Game.UpdateTargets(now); }
     float Hit(int slot) { return Game.RecordTargetHit(&Targets[slot], 100.f, FDamageEvent(), &Player, &Gun); }
     // Existing opportunity/cadence assertions count the five timed seats only.
@@ -343,6 +360,8 @@ void LayoutAndWiggles() {
     Require(TargetCount == 6 && PopupSlotCount == 5 && HeadSlotCount == 5 && PopupDodgerSlot == 5,
             "separate popup, headshot and persistent dodger slots lost");
     for (int scenario : {1, 2}) {
+        const float standing = scenario == 2 ? 103.f : 108.f;
+        const float radius = scenario == 2 ? 38.f : 40.f;
         for (float roll : {0.f, .5f, 1.f}) {
             Fixture f; f.Game.Progress.Scenario = scenario; f.Game.Schedule.Roll = roll; f.Start();
             f.Game.ArenaOrigin = FVector(50.f, -80.f, 50000.f);
@@ -354,23 +373,23 @@ void LayoutAndWiggles() {
                 const float y = target.Position.Y - f.Game.ArenaOrigin.Y;
                 const float z = target.Position.Z - f.Game.ArenaOrigin.Z;
                 Require(x >= seat.MinX && x <= seat.MaxX && std::fabs(y - seat.CenterY) <= seat.SpawnJitterY + .01f
-                        && z == seat.FloorZ + CapsuleHalfHeight, "activation ignored authored layout bounds");
+                        && z == seat.FloorZ + standing, "activation ignored authored layout bounds or profile height");
                 Require(target.Wiggles == 1 && target.WiggleRange == seat.WiggleRange && !target.Strafing,
                         "precision target did not start its authored wiggle");
                 Require(f.Game.NextWiggleTime[slot] >= 10.12f && f.Game.NextWiggleTime[slot] <= 10.29f,
                         "initial wiggle decision deadline lost");
                 if (scenario == 2 && slot < 3) {
                     const FBlock platform = PopupPlatform(slot);
-                    Require(std::fabs(y - platform.CenterY) + seat.WiggleRange + CapsuleRadius + WiggleSafetyMargin <= platform.SizeY * .5f,
+                    Require(std::fabs(y - platform.CenterY) + seat.WiggleRange + radius + WiggleSafetyMargin <= platform.SizeY * .5f,
                             "popup motion would leave its supporting platform");
-                    Require(std::fabs(x - platform.CenterX) + CapsuleRadius <= platform.SizeX * .5f,
+                    Require(std::fabs(x - platform.CenterX) + radius <= platform.SizeX * .5f,
                             "popup spawn has no support beneath its capsule");
                 }
                 if (scenario == 1) {
                     const FBlock cover = HeadCover(slot);
-                    Require(seat.WiggleRange + CapsuleRadius < cover.SizeY * .5f && x - CapsuleRadius > cover.CenterX + cover.SizeX * .5f,
+                    Require(seat.WiggleRange + radius < cover.SizeY * .5f && x - radius > cover.CenterX + cover.SizeX * .5f,
                             "headshot wiggle exposes body around or inside cover");
-                    Require(z + CapsuleHalfHeight > cover.Height && z - CapsuleHalfHeight < cover.Height,
+                    Require(z + standing > cover.Height && z - standing < cover.Height,
                             "headshot body/head do not straddle cover height");
                     Require(f.Game.TargetExpiry[slot] == 16.5f, "five-head exposure reverted to short preset");
                 }
@@ -378,8 +397,8 @@ void LayoutAndWiggles() {
             if (scenario == 2) {
                 const FBlock cover = PopupPlatform(1);
                 const auto& peek = f.Targets[3];
-                Require(peek.Position.X - f.Game.ArenaOrigin.X - CapsuleRadius > cover.CenterX + cover.SizeX * .5f
-                        && peek.Position.Z - f.Game.ArenaOrigin.Z == CapsuleHalfHeight,
+                Require(peek.Position.X - f.Game.ArenaOrigin.X - radius > cover.CenterX + cover.SizeX * .5f
+                        && peek.Position.Z - f.Game.ArenaOrigin.Z == standing,
                         "head-peek seat is not behind the low central platform on the floor");
                 Require(f.Targets[4].Position.Y - f.Game.ArenaOrigin.Y < -1300.f, "additional side lane lost");
             }
@@ -400,8 +419,11 @@ void CrouchScenarioScope() {
     for (int scenario : {0,1}) {
         Fixture f; f.Game.Progress.Scenario = scenario; f.Start(); f.At(10.f);
         for (int slot=0; slot<5; ++slot) {
-            Require(f.Game.NextCrouchTime[slot]==0.f, "non-instagib scenario scheduled a crouch");
-            // Even a stale deadline must not leak a crouch into other modes.
+            const bool tracking = scenario == 0 && slot == 0;
+            Require(tracking ? f.Game.NextCrouchTime[slot] >= 16.f && f.Game.NextCrouchTime[slot] <= 20.f
+                             : f.Game.NextCrouchTime[slot] == 0.f,
+                    "crouch was not limited to the active Link target or selected instagib appearance");
+            // The instagib UpdateTargets path must not process Link deadlines.
             f.Game.NextCrouchTime[slot]=10.1f;
         }
         f.At(10.2f);
@@ -496,7 +518,7 @@ void PersistentDodgerStartsAndDoesNotExpire() {
             "instagib does not begin with exactly one permanent dodger");
     Require(target.Position.X==f.Game.ArenaOrigin.X+seat.MinX
             && target.Position.Y==f.Game.ArenaOrigin.Y+seat.CenterY
-            && target.Position.Z==f.Game.ArenaOrigin.Z+seat.FloorZ+CapsuleHalfHeight,
+            && target.Position.Z==f.Game.ArenaOrigin.Z+seat.FloorZ+103.f,
             "persistent dodger ignored its supported open floor lane");
     Require(target.Wiggles==0 && f.Game.TargetExpiry[PopupDodgerSlot]==70.f
             && f.Game.NextCrouchTime[PopupDodgerSlot]==0.f && f.Game.CrouchEndTime[PopupDodgerSlot]==0.f,
@@ -609,7 +631,7 @@ void UpperPlatformSlideScope() {
                             "slide delay lacks expected variation");
                     Require(f.Game.NextCrouchTime[slot] == 0.f && f.Game.CrouchEndTime[slot] == 0.f,
                             "independent crouch competes with slide posture");
-                    Require(f.Targets[slot].Position.X >= 1000.f && f.Targets[slot].Position.Z == 428.f,
+                    Require(f.Targets[slot].Position.X >= 1000.f && f.Targets[slot].Position.Z == 423.f,
                             "slider lost its elevated runway");
                 }
                 f.At(11.5f);
@@ -671,6 +693,7 @@ void TrackingSlideCadenceAndScope() {
         Fixture f; f.Game.Progress.Scenario = 0; f.Game.Schedule.Roll = roll;
         f.Game.NextTrackingSlideTime = 900.f;
         f.Start(); f.At(10.f);
+        f.Game.NextCrouchTime[0] = 10000.f; // Isolate slide cadence from the independent crouch scheduler.
         const float due = f.Game.NextTrackingSlideTime;
         Require(due >= 14.f && due <= 17.f, "tracking slide did not receive a fresh varied deadline");
         f.Game.UpdateTrackingMovement(due - .001f);
@@ -708,10 +731,160 @@ void TrackingSlideCadenceAndScope() {
     hidden.Game.UpdateTrackingMovement(10.f);
     Require(hidden.Targets[0].TrackingSlideAttempts == 0, "hidden tracking target tried to slide");
 }
+void TrackingCrouchPolicyAndCadence() {
+    using namespace NCAimTrainerScenarioPolicy;
+    for (float roll : {-std::numeric_limits<float>::infinity(), -1.f, 0.f, .25f, .5f, 1.f, 2.f,
+                       std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        const float delay = TrackingCrouchDelaySeconds(roll), hold = TrackingCrouchHoldSeconds(roll);
+        Require(std::isfinite(delay) && delay >= 6.f && delay <= 10.f
+                && std::isfinite(hold) && hold >= .2f && hold <= .45f,
+                "invalid random roll escaped bounded tracking crouch timing");
+    }
+    for (float roll : {0.f, .5f, 1.f}) {
+        Fixture f; f.Game.Progress.Scenario = 0; f.Game.Schedule.Roll = roll; f.Start(); f.At(10.f);
+        f.Game.NextTrackingSlideTime = f.Game.NextDodgeTime = 10000.f;
+        const float delay = 6.f + 4.f * roll, hold = .2f + .25f * roll;
+        const float due = f.Game.NextCrouchTime[0];
+        Require(std::fabs(due - 10.f - delay) < .001f && f.Game.CrouchEndTime[0] == 0.f,
+                "first tracking crouch was not scheduled from activation with varied delay");
+        f.Game.UpdateTrackingMovement(due - .001f);
+        Require(f.Targets[0].CrouchRequests == 0, "tracking target crouched early");
+        f.Game.UpdateTrackingMovement(due);
+        const float end = f.Game.CrouchEndTime[0];
+        Require(f.Targets[0].Crouched && f.Targets[0].CrouchRequests == 1
+                && f.Game.NextCrouchTime[0] == 0.f && std::fabs(end - due - hold) < .001f,
+                "tracking crouch missed its brief hold or repeated its start request");
+        f.Game.UpdateTrackingMovement(end - .001f);
+        Require(f.Targets[0].Crouched && f.Targets[0].StandRequests == 0, "tracking target stood early");
+        f.Game.UpdateTrackingMovement(end);
+        Require(!f.Targets[0].Crouched && f.Game.CrouchEndTime[0] == 0.f
+                && std::fabs(f.Game.NextCrouchTime[0] - end - delay) < .001f,
+                "successful standing did not schedule another independently delayed crouch");
+        const float next = f.Game.NextCrouchTime[0];
+        f.Game.UpdateTrackingMovement(next + 10.f);
+        Require(f.Targets[0].CrouchRequests == 2 && f.Targets[0].StandRequests == 1
+                && std::fabs(f.Game.CrouchEndTime[0] - next - 10.f - hold) < .001f,
+                "scheduler caught up in a burst or shortened a crouch after a stalled tick");
+    }
+}
+void TrackingCrouchRetryAndConflicts() {
+    Fixture f; f.Game.Progress.Scenario = 0; f.Start(); f.At(10.f);
+    f.Game.NextTrackingSlideTime = f.Game.NextDodgeTime = 10000.f;
+    const float due = f.Game.NextCrouchTime[0];
+    f.Targets[0].CanCrouch = false;
+    f.Game.UpdateTrackingMovement(due);
+    Require(f.Targets[0].CrouchRequests == 1 && !f.Targets[0].Crouched && f.Game.CrouchEndTime[0] == 0.f
+            && std::fabs(f.Game.NextCrouchTime[0] - due - .2f) < .001f,
+            "native airborne/slide rejection lost the bounded crouch retry");
+    f.Game.UpdateTrackingMovement(due + .1f);
+    Require(f.Targets[0].CrouchRequests == 1, "blocked crouch retried every tick");
+    const float retry = f.Game.NextCrouchTime[0];
+    f.Targets[0].CanCrouch = true;
+    f.Game.NextTrackingSlideTime = f.Game.NextDodgeTime = f.Game.NextDirectionTime = retry;
+    f.Game.UpdateTrackingMovement(retry);
+    Require(f.Targets[0].Crouched && f.Targets[0].CrouchRequests == 2
+            && f.Targets[0].TrackingSlideAttempts == 0 && f.Targets[0].DodgeAttempts == 0,
+            "due dodge or slide replaced a successfully started tracking crouch");
+    const int reversals = f.Targets[0].Reversals;
+    f.Game.NextDirectionTime = retry + .1f;
+    f.Game.UpdateTrackingMovement(retry + .1f);
+    Require(f.Targets[0].Reversals == reversals + 1 && f.Targets[0].TrackingSlideAttempts == 0
+            && f.Targets[0].DodgeAttempts == 0,
+            "holding crouch stopped A/D reversals or allowed another movement action");
+    const float end = f.Game.CrouchEndTime[0];
+    f.Targets[0].CanStand = false;
+    f.Game.UpdateTrackingMovement(end); f.Game.UpdateTrackingMovement(end + .02f);
+    Require(f.Targets[0].Crouched && f.Targets[0].StandRequests == 2 && f.Game.CrouchEndTime[0] == end
+            && f.Game.NextCrouchTime[0] == 0.f && f.Targets[0].TrackingSlideAttempts == 0
+            && f.Targets[0].DodgeAttempts == 0,
+            "blocked standing lost its retry or allowed a conflicting dodge/slide");
+    f.Targets[0].CanStand = true;
+    f.Game.UpdateTrackingMovement(end + .04f);
+    Require(!f.Targets[0].Crouched && f.Targets[0].StandRequests == 3 && f.Game.CrouchEndTime[0] == 0.f
+            && std::fabs(f.Game.NextCrouchTime[0] - end - .04f - 8.f) < .001f
+            && f.Targets[0].TrackingSlideAttempts == 1 && f.Targets[0].DodgeAttempts == 1,
+            "standing recovery did not resume movement and restart crouch spacing from actual recovery");
+}
+void TrackingCrouchScopeAndEndGuard() {
+    for (int scenario : {0,1,2}) for (int phase : {0,1,2,3}) {
+        Fixture f; f.Game.Progress.Scenario = scenario; f.Start(); f.Game.ActivateSlot(0,10.f);
+        f.Game.Progress.Phase = phase; f.Game.NextCrouchTime[0] = 10.f;
+        f.Game.UpdateTrackingMovement(10.f);
+        Require(f.Targets[0].CrouchRequests == int(scenario == 0 && phase == 2),
+                "tracking crouch escaped active Link practice");
+    }
+    for (int invalid : {0,1,2}) {
+        Fixture f; f.Game.Progress.Scenario = 0; f.Start(); f.At(10.f); f.Game.NextCrouchTime[0] = 10.f;
+        if (invalid == 0) f.Targets[0].Visible = false;
+        if (invalid == 1) f.Game.Targets[0] = nullptr;
+        if (invalid == 2) f.Game.Targets.clear();
+        f.Game.UpdateTrackingMovement(10.f);
+        Require(f.Targets[0].CrouchRequests == 0, "missing or hidden target acquired a crouch");
+    }
+    for (float margin : {-.001f,.001f}) {
+        Fixture f; f.Game.Progress.Scenario = 0; f.Start(); f.At(10.f);
+        const float hold = NCAimTrainerScenarioPolicy::TrackingCrouchHoldSeconds(f.Game.Schedule.Roll);
+        const float due = 70.f - hold - .1f - margin;
+        f.Game.NextCrouchTime[0] = due; f.Game.UpdateTrackingMovement(due);
+        Require(f.Targets[0].Crouched == (margin > 0.f) && f.Game.NextCrouchTime[0] == 0.f
+                && f.Game.TargetExpiry[0] == 70.f,
+                "late tracking crouch did not preserve its complete hold plus ending margin");
+        if (margin > 0.f) {
+            f.Game.UpdateTrackingMovement(f.Game.CrouchEndTime[0]);
+            Require(!f.Targets[0].Crouched && f.Targets[0].StandRequests == 1,
+                    "permitted late crouch did not finish before the run ended");
+        }
+        f.Game.NextCrouchTime[0] = 70.f;
+        const int requests = f.Targets[0].CrouchRequests;
+        f.Game.UpdateTrackingMovement(70.f); f.Game.UpdateTrackingMovement(70.1f);
+        Require(f.Targets[0].CrouchRequests == requests, "round-end guard allowed a new crouch");
+    }
+}
+void TrackingCrouchCleanupAndReuse() {
+    for (int phase : {0,3}) {
+        Fixture f; f.Game.Progress.Scenario = 0; f.Start(); f.At(10.f);
+        f.Game.UpdateTrackingMovement(f.Game.NextCrouchTime[0]);
+        Require(f.Targets[0].Crouched, "cleanup fixture did not crouch");
+        for (int slot = 1; slot < NCAimTrainerLayout::TargetCount; ++slot) {
+            f.Game.NextCrouchTime[slot] = 17.f; f.Game.CrouchEndTime[slot] = 18.f;
+        }
+        f.Game.Progress.Phase = phase; f.Game.HideAllTargets();
+        for (int slot = 0; slot < NCAimTrainerLayout::TargetCount; ++slot)
+            Require(!f.Targets[slot].Visible && !f.Targets[slot].Crouched
+                    && f.Game.NextCrouchTime[slot] == 0.f && f.Game.CrouchEndTime[slot] == 0.f,
+                    "abort/results cleanup retained crouch posture or stale scheduled actions");
+        Require(f.Game.NextTrackingSlideTime == 0.f && f.Game.NextPopupSlideTime == 0.f,
+                "crouch cleanup left a slide queued");
+        f.Game.UpdateTrackingMovement(20.f);
+        Require(f.Targets[0].CrouchRequests == 1, "hidden completed run executed another crouch");
+        f.Game.Progress.Phase = 2; f.Game.Schedule.Roll = 0.f;
+        f.Game.NextCrouchTime[0] = 14.f; f.Game.CrouchEndTime[0] = 15.f;
+        f.Game.ActivateSlot(0,25.f);
+        Require(f.Targets[0].Visible && !f.Targets[0].Crouched && f.Game.NextCrouchTime[0] == 31.f
+                && f.Game.CrouchEndTime[0] == 0.f,
+                "reused tracking target inherited an old crouch instead of fresh activation timing");
+    }
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
     const std::string name(argv[1]);
-    if (name == "strafe") StrafeMix();
+    if (name == "standing_profile") {
+        for (int scenario : {0,1,2}) {
+            Fixture f; f.Game.Progress.Scenario=scenario; f.Start();
+            f.Game.ArenaOrigin=FVector(40.f,90.f,50000.f);
+            const int count=scenario==0 ? 1 : scenario==1 ? NCAimTrainerLayout::HeadSlotCount : NCAimTrainerLayout::TargetCount;
+            for (int slot=0; slot<count; ++slot) {
+                f.Targets[slot].Shape.HalfHeight=72.f; f.Targets[slot].Crouched=true;
+                f.Game.ActivateSlot(slot,10.f);
+                const float floor=scenario==0 ? 0.f : scenario==1 ? NCAimTrainerLayout::HeadSeat(slot).FloorZ
+                    : slot==NCAimTrainerLayout::PopupDodgerSlot ? NCAimTrainerLayout::PopupDodgerSeat().FloorZ
+                    : NCAimTrainerLayout::PopupSeat(slot).FloorZ;
+                Require(f.Targets[slot].Position.Z==50000.f+floor+(scenario==2 ? 103.f : 108.f),
+                        "reappearing crouched target used live height instead of native class standing height");
+            }
+        }
+    }
+    else if (name == "strafe") StrafeMix();
     else if (name == "dodges") Dodges();
     else if (name == "refire") RefireAndBacklog();
     else if (name == "bounds") RollBoundaries();
@@ -734,6 +907,10 @@ int main(int argc, char** argv) {
     else if (name == "slide_once") UpperPlatformSlideOnceAndReuse();
     else if (name == "slide_expiry") UpperPlatformSlideExpiryAndRoundGuard();
     else if (name == "tracking_slide") TrackingSlideCadenceAndScope();
+    else if (name == "tracking_crouch_cadence") TrackingCrouchPolicyAndCadence();
+    else if (name == "tracking_crouch_retry") TrackingCrouchRetryAndConflicts();
+    else if (name == "tracking_crouch_scope") TrackingCrouchScopeAndEndGuard();
+    else if (name == "tracking_crouch_cleanup") TrackingCrouchCleanupAndReuse();
     else Require(false, "unknown case");
 }
 '''
@@ -751,6 +928,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
         signatures = (
             "void ANCAimTrainerGame::BeginActiveRun",
+            "void ANCAimTrainerGame::HideAllTargets",
             "void ANCAimTrainerGame::ActivateSlot",
             "float ANCAimTrainerGame::RecordTargetHit",
             "void ANCAimTrainerGame::UpdateTargets",
@@ -775,6 +953,8 @@ class AimTrainerScenarioTests(unittest.TestCase):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_crouched_target_reappearance_uses_selected_class_standing_height(self): self.run_case("standing_profile")
+
     def test_short_reversals_dominate_but_keep_timing_variation(self): self.run_case("strafe")
     def test_dodges_choose_both_sides_and_turn_inward_near_edges(self): self.run_case("dodges")
     def test_popup_capacity_and_exposure_allow_one_second_refire(self): self.run_case("refire")
@@ -785,7 +965,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_headshot_slots_keep_existing_initial_hit_and_expiry_delays(self): self.run_case("heads")
     def test_run_resets_cadence_and_rejects_altered_weapon_from_rankings(self): self.run_case("initialize")
     def test_five_slot_geometry_and_wiggle_stay_within_cover_and_platforms(self): self.run_case("layout")
-    def test_only_selected_instagib_appearances_schedule_crouch(self): self.run_case("crouch_scope")
+    def test_link_and_instagib_use_separate_crouch_schedulers(self): self.run_case("crouch_scope")
     def test_crouch_runs_once_per_appearance_and_failed_requests_do_not_repeat(self): self.run_case("crouch_once")
     def test_crouch_guard_preserves_full_rifle_refire_before_expiry(self): self.run_case("crouch_expiry")
     def test_blocked_uncrouch_retries_until_native_clearance_recovers(self): self.run_case("crouch_blocked")
@@ -798,6 +978,10 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_slider_attempts_once_per_appearance_and_resets_after_hit(self): self.run_case("slide_once")
     def test_slider_preserves_refire_opportunity_before_expiry_or_round_end(self): self.run_case("slide_expiry")
     def test_tracking_slide_cadence_retries_and_scope_preserve_native_movement_gates(self): self.run_case("tracking_slide")
+    def test_tracking_crouch_random_bounds_holds_and_repeat_spacing(self): self.run_case("tracking_crouch_cadence")
+    def test_tracking_crouch_retries_native_rejection_and_excludes_dodge_slide_while_strafing(self): self.run_case("tracking_crouch_retry")
+    def test_tracking_crouch_scope_and_end_margin(self): self.run_case("tracking_crouch_scope")
+    def test_tracking_crouch_cleanup_on_abort_results_and_target_reuse(self): self.run_case("tracking_crouch_cleanup")
 
 
 if __name__ == "__main__":

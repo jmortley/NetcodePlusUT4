@@ -27,6 +27,11 @@ struct FObjectInitializer {
 };
 struct ACharacter { static constexpr int CharacterMovementComponentName = 1; };
 struct UNCAimTrainerMovement { static constexpr int Type = 23; };
+struct FVector {
+    float X, Y, Z;
+    explicit FVector(float value) : X(value), Y(value), Z(value) {}
+    FVector(float x, float y, float z) : X(x), Y(y), Z(z) {}
+};
 struct AUTCharacter;
 struct UClass {
     AUTCharacter* Object = nullptr;
@@ -43,12 +48,19 @@ struct Mesh {
     void SetRelativeTransform(Transform value) { Relative = value; }
     Transform GetRelativeTransform() const { return Relative; }
     void SetAnimInstanceClass(UClass* value) { AnimClass = value; }
+    void SetRelativeLocation(FVector value) { Relative.Z = value.Z; Relative.X = value.X; }
+    void SetRelativeScale3D(FVector value) { Relative.Scale = value.X; }
 };
 struct AUTCharacterContent { Mesh Body; };
 struct Movement {
     bool bRunPhysicsWithNoController = false, bOrientRotationToMovement = true;
     bool bUseControllerDesiredRotation = true;
     float MaxWalkSpeed = 0.f, MaxWalkSpeedCrouched = 0.f, MaxAcceleration = 0.f;
+    float DefaultBrakingDecelerationWalking = 0.f, BrakingDecelerationWalking = 0.f, GroundFriction = 0.f;
+    float DodgeAirControl = 0.f, CrouchedHalfHeight = 0.f, NetworkSimulatedSmoothLocationTime = 0.f;
+    float EasyImpactImpulse = 0.f, EasyImpactDamage = 0.f, FullImpactImpulse = 0.f, FullImpactDamage = 0.f;
+    float ImpactMaxHorizontalVelocity = 0.f, MaxInitialFloorSlideSpeed = 0.f, MaxFloorSlideSpeed = 0.f;
+    float MaxFastAccelSpeed = 0.f, MaxStepHeight = 0.f, NetworkMaxSmoothUpdateDistance = 0.f;
     struct NavProperties { bool bCanCrouch = false; } Nav;
     NavProperties& GetNavAgentPropertiesRef() { return Nav; }
 };
@@ -57,6 +69,13 @@ struct AUTCharacter {
     Mesh Body, Hands;
     Mesh* FirstPersonMesh = &Hands;
     Movement Move;
+    Movement* UTCharacterMovement = &Move;
+    struct Capsule {
+        float Radius = 0.f, HalfHeight = 0.f;
+        void InitCapsuleSize(float radius, float halfHeight) { Radius=radius; HalfHeight=halfHeight; }
+    } Shape;
+    float BaseEyeHeight = 0.f, DefaultBaseEyeHeight = 0.f, CrouchedEyeHeight = 0.f;
+    float DefaultCrouchedEyeHeight = 0.f, FloorSlideEyeHeight = 0.f, SlideTargetHeight = 0.f;
     int MovementType = 0;
     AUTCharacterContent* CharacterData = nullptr;
     int PostInitCalls = 0, BeginCalls = 0, Applies = 0;
@@ -69,6 +88,8 @@ struct AUTCharacter {
     explicit AUTCharacter(const FObjectInitializer& init) : MovementType(init.MovementType) {}
     Mesh* GetMesh() const { return const_cast<Mesh*>(&Body); }
     Movement* GetCharacterMovement() { return &Move; }
+    Movement* GetUTCharacterMovement() { return &Move; }
+    Capsule* GetCapsuleComponent() { return &Shape; }
     void PostInitializeComponents() { ++PostInitCalls; }
     void BeginPlay() { ++BeginCalls; }
     void ApplyCharacterData(AUTCharacterContent* data) {
@@ -105,6 +126,14 @@ struct ANCAimTrainerTarget : AUTCharacter {
 struct ANCAimTrainerCharacter : AUTCharacter {
     using Super = AUTCharacter;
     explicit ANCAimTrainerCharacter(const FObjectInitializer&);
+};
+struct ANCAimTrainerInstagibCharacter : ANCAimTrainerCharacter {
+    using Super = ANCAimTrainerCharacter;
+    explicit ANCAimTrainerInstagibCharacter(const FObjectInitializer&);
+};
+struct ANCAimTrainerInstagibTarget : ANCAimTrainerTarget {
+    using Super = ANCAimTrainerTarget;
+    explicit ANCAimTrainerInstagibTarget(const FObjectInitializer&);
 };
 '''
 
@@ -175,15 +204,15 @@ int main(int argc, char** argv) {
         Require(target.HasCharacterAssets(), "native target rejected the valid stock skin");
         Require(target.Body.AnimClass == &animation, "lost pawn animation class to skin's null AnimClass");
         Require(target.PostInitCalls == 1 && target.BeginCalls == 0, "assets depend on BeginPlay");
-        Require(target.Body.Relative.Z == -108.f && target.Body.Relative.Yaw == -90.f,
+        Require(target.Body.Relative.Z == -110.f && target.Body.Relative.Yaw == -90.f,
                 "mesh did not inherit stock capsule-relative placement");
-        Require(target.Body.Relative.Scale == 1.f, "skin scale did not use pawn class defaults");
+        Require(target.Body.Relative.Scale == .8f, "skin scale did not use pawn class defaults");
         target.BeginPlay();
         Require(target.Applies == 1 && target.BeginCalls == 1 && target.VisibilityUpdates == 1,
                 "BeginPlay reapplied assets or lost visibility initialization");
     } else if (name == "scale_stable") {
         target.PostInitializeComponents();
-        Require(target.Body.Relative.Scale == 1.f && target.Body.Relative.Z == -108.f,
+        Require(target.Body.Relative.Scale == .8f && target.Body.Relative.Z == -110.f,
                 "reapplication compounded skin scale or lost authored offset");
         Require(target.Body.AnimClass == &animation, "reapplication lost pawn animation");
     } else if (name == "dedicated_pose") {
@@ -191,10 +220,29 @@ int main(int argc, char** argv) {
                 "unrendered head bones stop updating on the dedicated server");
         Require(!target.Body.bEnableUpdateRateOptimizations && target.Move.bRunPhysicsWithNoController,
                 "target cannot animate/move independently of a bot controller");
-        Require(target.Move.Nav.bCanCrouch && target.Move.MaxWalkSpeedCrouched == NCAimTrainerLayout::WiggleSpeed,
-                "controllerless target lacks crouch capability or crouches faster than its wiggle");
+        Require(target.Move.Nav.bCanCrouch && target.Move.MaxWalkSpeedCrouched == 315.f,
+                "controllerless target lacks authored crouch capability or speed");
     } else if (name == "missing_template" || name == "missing_mesh") {
         Require(!target.HasCharacterAssets(), "unusable target incorrectly accepted");
+    } else if (name == "instagib_defaults") {
+        ANCAimTrainerInstagibCharacter trainee(initializer);
+        ANCAimTrainerInstagibTarget igTarget(initializer);
+        Require(trainee.MovementType == UNCAimTrainerMovement::Type && trainee.Hands.AnimClass == &handsAnimation,
+                "instagib subclass lost native movement or playable hand animation");
+        Require(trainee.Shape.Radius == 38.f && trainee.Shape.HalfHeight == 103.f
+                && igTarget.Shape.Radius == 38.f && igTarget.Shape.HalfHeight == 103.f,
+                "instagib pawn and target class defaults disagree on capsule");
+        Require(trainee.Body.Relative.Scale == .95f && igTarget.Body.Relative.Scale == .95f
+                && trainee.Body.Relative.Z == -110.f && igTarget.Body.Relative.Z == -110.f,
+                "instagib constructors did not apply their own mesh defaults");
+        igTarget.ClassDefaultMeshScale = igTarget.Body.Relative.Scale;
+        igTarget.CharacterData = &skin;
+        igTarget.PostInitializeComponents(); igTarget.PostInitializeComponents();
+        Require(igTarget.Body.Relative.Scale == .95f*.8f && igTarget.Body.AnimClass == &animation,
+                "instagib skin reapplication lost class-default scale or animation");
+        Require(trainee.Move.MaxWalkSpeed == 940.f && igTarget.Move.MaxWalkSpeed == 940.f
+                && trainee.Move.DodgeAirControl == .6f && igTarget.Move.DodgeAirControl == .6f,
+                "instagib pawn and target did not receive the same movement profile");
     } else { Require(false, "unknown case"); }
 }
 '''
@@ -211,14 +259,18 @@ class AimTrainerAssetTests(unittest.TestCase):
         trainee = (PLUGIN / "Source/Private/NCAimTrainerCharacter.cpp").read_text(encoding="utf-8-sig")
         signatures = (
             "ANCAimTrainerTarget::ANCAimTrainerTarget",
+            "ANCAimTrainerInstagibTarget::ANCAimTrainerInstagibTarget",
             "void ANCAimTrainerTarget::PostInitializeComponents",
             "void ANCAimTrainerTarget::BeginPlay",
             "bool ANCAimTrainerTarget::HasCharacterAssets",
         )
         source = directory / "trainer_assets.cpp"
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
-        source.write_text("\n".join([ADAPTER, f'#include "{layout}"'] + [native_function(native, s) for s in signatures]
-                                   + [native_function(trainee, "ANCAimTrainerCharacter::ANCAimTrainerCharacter"), CASES]), encoding="utf-8")
+        profile = (PLUGIN / "Source/Private/NCAimTrainerCharacterProfile.h").as_posix()
+        source.write_text("\n".join([ADAPTER, f'#include "{layout}"', f'#include "{profile}"']
+                                   + [native_function(native, s) for s in signatures]
+                                   + [native_function(trainee, "ANCAimTrainerCharacter::ANCAimTrainerCharacter"),
+                                      native_function(trainee, "ANCAimTrainerInstagibCharacter::ANCAimTrainerInstagibCharacter"), CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_assets.exe" if os.name == "nt" else "trainer_assets")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -241,6 +293,7 @@ class AimTrainerAssetTests(unittest.TestCase):
     def test_trainee_inherits_body_and_first_person_defaults_with_native_movement(self): self.run_case("trainee_defaults")
     def test_trainee_missing_template_does_not_crash(self): self.run_case("trainee_missing_template")
     def test_trainee_missing_first_person_template_does_not_crash(self): self.run_case("trainee_missing_arms")
+    def test_instagib_native_class_defaults_survive_skin_reapplication(self): self.run_case("instagib_defaults")
 
 
 if __name__ == "__main__":

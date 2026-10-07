@@ -169,7 +169,7 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 	Panel(90.f, 126.f, 1100.f, 551.f, TrainerPanel);
 	Label(TEXT("CHOOSE YOUR PRACTICE"), 120.f, 151.f, 27.f, TrainerInk);
 	Label(TEXT("REAL UT CHARACTERS. THREE 60-SECOND CHALLENGES."), 120.f, 188.f, 14.f, TrainerMuted);
-	const TCHAR* Line1[] = { TEXT("Track strafes, dodges and slides."), TEXT("Uses your NCP Sniper / Lightning choice."), TEXT("Shoot before targets disappear.") };
+	const TCHAR* Line1[] = { TEXT("Track strafes, dodges, slides and crouches."), TEXT("Uses your NCP Sniper / Lightning choice."), TEXT("Shoot before targets disappear.") };
 	const TCHAR* Line2[] = { TEXT("Hold either fire button. Beam hits score."), TEXT("100 per headshot. Misses affect accuracy."), TEXT("Faster pop-ups plus a constant dodger.") };
 	for (int32 Mode = 0; Mode < 3; ++Mode)
 	{

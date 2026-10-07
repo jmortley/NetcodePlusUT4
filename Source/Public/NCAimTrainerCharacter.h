@@ -30,3 +30,12 @@ class NETCODEPLUS_API ANCAimTrainerCharacter : public ATeamArenaCharacter
 public:
     ANCAimTrainerCharacter(const FObjectInitializer& ObjectInitializer);
 };
+
+/** Separate CDO: native crouch/skin restoration must retain the IG dimensions. */
+UCLASS(NotBlueprintable)
+class NETCODEPLUS_API ANCAimTrainerInstagibCharacter : public ANCAimTrainerCharacter
+{
+    GENERATED_BODY()
+public:
+    ANCAimTrainerInstagibCharacter(const FObjectInitializer& ObjectInitializer);
+};

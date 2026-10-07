@@ -56,7 +56,6 @@ private:
     float NextPopupTime = 0.f;
     float NextPopupSlideTime = 0.f;
     float PopupRefireSeconds = 1.f;
-    float NextTrackingHitSoundTime = 0.f;
     float ShotStatBaseline = 0.f;
     double TrackedSeconds = 0.0;
     double FiredSeconds = 0.0;

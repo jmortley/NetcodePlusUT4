@@ -21,8 +21,13 @@ ADAPTER = r'''
 #include <limits>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
+#include <memory>
 #define TEXT(x) x
-#define UE_LOG(...) do {} while (0)
+#define UE_LOG(Category, Level, ...) IgnoreLog(__VA_ARGS__)
+template<class... Args> void IgnoreLog(Args...) {}
+struct LogName { const char* operator*() const { return "fixture"; } };
+template<class T> LogName GetNameSafe(T) { return LogName(); }
 using uint8 = uint8_t;
 using int32 = int32_t;
 using FString = std::string;
@@ -48,11 +53,19 @@ struct Text : std::string {
 enum class EGuidFormats { DigitsWithHyphens };
 struct FGuid { static FGuid NewGuid() { return FGuid(); } Text ToString(EGuidFormats) { return Text("unique-run"); } };
 int GetTypeHash(const Text&) { return 123; }
-struct FRotator { static FRotator ZeroRotator; };
+struct FRotator {
+    float Pitch=0.f, Yaw=0.f, Roll=0.f;
+    FRotator() = default;
+    FRotator(float pitch,float yaw,float roll) : Pitch(pitch),Yaw(yaw),Roll(roll) {}
+    bool IsZero() const { return Pitch==0.f && Yaw==0.f && Roll==0.f; }
+    static FRotator ZeroRotator;
+};
 FRotator FRotator::ZeroRotator;
 enum class ETeleportType { TeleportPhysics };
+struct AUTCharacter;
 struct UClass {
     int Kind;
+    template<class T> const T* GetDefaultObject() const;
     bool HasAnyClassFlags(int) const { return false; }
     bool IsChildOf(UClass* other) const {
         return other && (other->Kind == Kind || (Kind == 3 && other->Kind == 4)
@@ -60,6 +73,9 @@ struct UClass {
     }
 };
 UClass SniperType{1}, InstagibType{2}, LinkType{3}, LinkBaseType{4}, BeamStateType{5}, LightningType{6};
+UClass TrainerType{7}, InstagibTrainerType{8}, TargetType{9}, InstagibTargetType{10};
+struct ANCAimTrainerCharacter { static UClass* StaticClass() { return &TrainerType; } };
+struct ANCAimTrainerInstagibCharacter { static UClass* StaticClass() { return &InstagibTrainerType; } };
 bool MissingLinkAsset = false, WrongLinkAsset = false;
 bool MissingLightningAsset = false, WrongLightningAsset = false;
 int LightningLoads = 0;
@@ -71,6 +87,7 @@ template<class T> struct TSubclassOf {
     TSubclassOf& operator=(UClass* value) { Value = value; return *this; }
     explicit operator bool() const { return Value != nullptr; }
     UClass* operator->() const { return Value; }
+    UClass* operator*() const { return Value; }
 };
 template<class T> UClass* LoadClass(void*, const char* path, void*, int) {
     LastLoadedPath = path;
@@ -101,7 +118,6 @@ struct AUTPlusShockRifle : AUTWeapon {
     static UClass* StaticClass() { return &InstagibType; }
     bool HasSharedInstagibFireModes() const { return true; }
 };
-struct AUTWeap_LinkGun_NCP : AUTWeapon { static UClass* StaticClass() { return &LinkBaseType; } };
 template<class T> struct BeamArray : std::vector<T> {
     BeamArray() : std::vector<T>(2) {}
     bool IsValidIndex(int index) const { return index >= 0 && index < int(this->size()); }
@@ -111,15 +127,17 @@ struct UUTWeaponStateFiringLinkBeam_NCP {
     static UClass* StaticClass() { return &BeamStateType; }
     bool IsA(UClass* type) const { return CorrectType && type == &BeamStateType; }
 };
-struct AUTWeap_LinkGun_Shaft_NCP : AUTWeap_LinkGun_NCP {
-    static UClass* StaticClass() { return &LinkType; }
+struct AUTWeap_LinkGun_NCP : AUTWeapon {
+    static UClass* StaticClass() { return &LinkBaseType; }
     struct BeamInfo { int Damage = 10, DamageType = 7; float TraceRange = 1800.f; };
     BeamArray<BeamInfo> InstantHitInfo;
     BeamArray<UUTWeaponStateFiringLinkBeam_NCP*> FiringState;
     UUTWeaponStateFiringLinkBeam_NCP BeamState;
-    AUTWeap_LinkGun_Shaft_NCP() { FiringState[0] = FiringState[1] = &BeamState; }
+    AUTWeap_LinkGun_NCP() { FiringState[0] = FiringState[1] = &BeamState; }
 };
 struct Movement {
+    static UClass* StaticClass() { return &TrainerType; }
+    UClass* GetClass() const { return StaticClass(); }
     int Stops = 0, Disables = 0;
     int Mode = MOVE_None, UnCrouches = 0;
     bool bWantsToCrouch = false, Constrained = false;
@@ -145,10 +163,14 @@ struct APawn {
     virtual ~APawn() = default;
     int Teleports = 0, Destroys = 0;
     FVector Position{0,0,0};
+    UClass* ClassType = &TrainerType;
+    UClass* GetClass() const { return ClassType; }
+    virtual float GetSimpleCollisionHalfHeight() const { return 108.f; }
     void SetActorLocationAndRotation(FVector p, FRotator, bool, void*, ETeleportType) { ++Teleports; Position=p; }
     void SetActorLocation(FVector p, bool, void*, ETeleportType) { ++Teleports; Position=p; }
     FVector GetActorLocation() const { return Position; }
     void Destroy() { ++Destroys; }
+    bool IsPendingKillPending() const { return Destroys > 0; }
 };
 struct AUTCharacter : APawn {
     struct Capsule { float HalfHeight=108.f; float GetScaledCapsuleHalfHeight() const { return HalfHeight; } } Shape;
@@ -156,12 +178,13 @@ struct AUTCharacter : APawn {
     AUTPlusSniper Sniper;
     LightningGun Lightning;
     AUTPlusShockRifle Instagib;
-    AUTWeap_LinkGun_Shaft_NCP Link;
+    AUTWeap_LinkGun_NCP Link;
     bool bCanBeDamaged = true, Dead = false;
     int Discards = 0, Creates = 0, Switches = 0;
     bool IsDead() const { return Dead; }
     Movement* GetCharacterMovement() { return &Move; }
     const Capsule* GetCapsuleComponent() const { return &Shape; }
+    float GetSimpleCollisionHalfHeight() const override { return Shape.HalfHeight; }
     void DiscardAllInventory() { ++Discards; }
     AUTWeapon* CreateInventory(TSubclassOf<AUTWeapon> type) {
         ++Creates;
@@ -171,15 +194,57 @@ struct AUTCharacter : APawn {
     }
     void SwitchWeapon(AUTWeapon*) { ++Switches; }
 };
+template<class T> const T* UClass::GetDefaultObject() const {
+    static AUTCharacter team, instagib;
+    team.ClassType = &TrainerType; team.Shape.HalfHeight = 108.f;
+    instagib.ClassType = &InstagibTrainerType; instagib.Shape.HalfHeight = 103.f;
+    return static_cast<const T*>(Kind == 8 ? &instagib : &team);
+}
+struct USkeletalMeshComponent { void* SkeletalMesh=nullptr; TSubclassOf<APawn> AnimClass; };
+struct ANCAimTrainerTarget : AUTCharacter {
+    int Hides = 0;
+    int* CharacterData = nullptr;
+    static UClass* StaticClass() { return &TargetType; }
+    bool HasCharacterAssets() const { return true; }
+    const USkeletalMeshComponent* GetMesh() const { return nullptr; }
+    void HideTarget() { ++Hides; }
+};
+struct ANCAimTrainerInstagibTarget : ANCAimTrainerTarget {
+    static UClass* StaticClass() { return &InstagibTargetType; }
+};
+template<> const ANCAimTrainerTarget* UClass::GetDefaultObject<ANCAimTrainerTarget>() const {
+    static ANCAimTrainerTarget team, instagib;
+    team.Shape.HalfHeight = 108.f; instagib.Shape.HalfHeight = 103.f;
+    return Kind == 10 ? &instagib : &team;
+}
+struct ANCAimTrainerArena {
+    bool IsPendingKillPending() const { return false; }
+    bool HasArenaAssets() const { return true; }
+    void SetScenario(uint8) {}
+};
+enum class ESpawnActorCollisionHandlingMethod { AlwaysSpawn };
+struct FActorSpawnParameters { ESpawnActorCollisionHandlingMethod SpawnCollisionHandlingOverride; };
+template<class T> struct TArray : std::vector<T> {
+    int Num() const { return int(this->size()); }
+    void Add(T value) { this->push_back(value); }
+    template<class Predicate> void RemoveAll(Predicate predicate) {
+        this->erase(std::remove_if(this->begin(), this->end(), predicate), this->end());
+    }
+};
 struct State { bool bOnlySpectator = false; };
 struct AController {
     virtual ~AController() = default;
     State* PlayerState = nullptr;
     APawn* Pawn = nullptr;
     int Rotations = 0;
+    FRotator ControlRotation, ClientRotation;
+    bool ClientResetCamera = false;
     APawn* GetPawn() const { return Pawn; }
-    void SetControlRotation(FRotator) { ++Rotations; }
-    void ClientSetRotation(FRotator, bool) { ++Rotations; }
+    void UnPossess() { Pawn = nullptr; }
+    void SetControlRotation(FRotator rotation) { ++Rotations; ControlRotation=rotation; }
+    void ClientSetRotation(FRotator rotation, bool resetCamera) {
+        ++Rotations; ClientRotation=rotation; ClientResetCamera=resetCamera;
+    }
 };
 struct APlayerController : AController {};
 struct ANCAimTrainerPlayerController : APlayerController {
@@ -193,15 +258,35 @@ struct World {
     float TimeSeconds = 0.f;
     bool HasBegunPlay() const { return Begun; }
     float GetTimeSeconds() const { return TimeSeconds; }
+    ANCAimTrainerArena Room;
+    std::vector<std::unique_ptr<ANCAimTrainerTarget>> SpawnedTargets;
+    template<class T> T* SpawnActor(FVector, FRotator, FActorSpawnParameters) { return static_cast<T*>(&Room); }
+    template<class T> T* SpawnActor(UClass* type, FVector position, FRotator, FActorSpawnParameters) {
+        auto target = std::unique_ptr<ANCAimTrainerTarget>(new ANCAimTrainerTarget);
+        target->ClassType = type; target->Position = position;
+        target->Shape.HalfHeight = type->GetDefaultObject<ANCAimTrainerTarget>()->Shape.HalfHeight;
+        T* result = static_cast<T*>(target.get()); SpawnedTargets.push_back(std::move(target)); return result;
+    }
 };
 struct BaseGame {
     World TheWorld;
     AUTCharacter SpawnedPawn;
     int NumPlayers = 1, ReadyCalls = 0, NextTickStarts = 0, Restarts = 0;
-    bool AutoRestartOnLogin = false;
+    bool AutoRestartOnLogin = false, FailNextRestart = false;
     World* GetWorld() { return &TheWorld; }
     virtual ~BaseGame() = default;
-    virtual void RestartPlayer(AController* player) { ++Restarts; player->Pawn = &SpawnedPawn; }
+    virtual UClass* GetDefaultPawnClassForController_Implementation(AController*) { return &TrainerType; }
+    virtual void RestartPlayer(AController* player) {
+        ++Restarts;
+        if (FailNextRestart) { FailNextRestart = false; return; }
+        SpawnedPawn.ClassType = GetDefaultPawnClassForController_Implementation(player);
+        SpawnedPawn.Shape.HalfHeight = SpawnedPawn.ClassType->GetDefaultObject<AUTCharacter>()->Shape.HalfHeight;
+        player->Pawn = &SpawnedPawn;
+        // Stock spawning inherits the map start orientation. Moving the pawn
+        // into the trainer room alone does not update either controller view.
+        player->SetControlRotation(FRotator(19.f,137.f,0.f));
+        player->ClientSetRotation(FRotator(19.f,137.f,0.f),false);
+    }
     void PostLogin(APlayerController* player) { if (AutoRestartOnLogin) RestartPlayer(player); }
     bool ReadyToStartMatch_Implementation() {
         ++ReadyCalls;
@@ -230,8 +315,10 @@ struct ANCAimTrainerGame : BaseGame {
     float PhaseStartedAt=0;
     double TrackedSeconds=0, FiredSeconds=0;
     struct { void Initialize(int) {} } Schedule;
-    struct Room { void SetScenario(uint8) {} } TheRoom;
+    using Room = ANCAimTrainerArena;
+    Room TheRoom;
     Room* Arena=&TheRoom;
+    TArray<ANCAimTrainerTarget*> Targets;
     struct Settings { float Dilation=1.f; float GetEffectiveTimeDilation() { return Dilation; } } Options;
     Settings* GetWorldSettings() { return &Options; }
     int GetNetMode() { return NetMode; }
@@ -239,13 +326,14 @@ struct ANCAimTrainerGame : BaseGame {
     int GetClass() { return StaticClass(); }
     bool IsTrainee(const ANCAimTrainerPlayerController* pc) const { return pc && pc==Trainee; }
     void HideAllTargets() {}
-    bool EnsureArena() { return true; }
+    bool EnsureArena();
     bool FailSetup(const char* message) { SetupError = message; return false; }
     void PublishProgress() { ++Publishes; }
     void RefreshLeaderboard() { ++Fetches; }
     bool ReadyToStartMatch_Implementation();
     void PostLogin(APlayerController*);
     void RestartPlayer(AController*) override;
+    UClass* GetDefaultPawnClassForController_Implementation(AController*) override;
     bool ConfigurePawn();
     bool IsInsidePracticeLane(const AUTCharacter*) const;
     void SelectScenario(ANCAimTrainerPlayerController*,uint8,bool=false);
@@ -375,8 +463,8 @@ int main(int argc, char** argv) {
     } else if (name == "tracking_weapon") {
         f.BeginWorld(); f.Game.PostLogin(&f.Player);
         Require(f.Game.Progress.Scenario == 0 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Link,
-                "tracking did not equip the actual Shaft Link class");
-        Require(LastLoadedPath == "/Game/Blueprints/Netcode/UTNPShaftLink.UTNPShaftLink_C",
+                "tracking did not equip the normal NCP Link class");
+        Require(LastLoadedPath == "/Game/Blueprints/Netcode/NCPLinkGun.NCPLinkGun_C",
                 "tracking resolved a different weapon content asset");
         f.Game.SelectScenario(&f.Player,1);
         Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Sniper, "headshot selection lost sniper");
@@ -502,10 +590,16 @@ int main(int argc, char** argv) {
     } else if (name == "tracking_beam_content") {
         f.BeginWorld(); f.Game.PostLogin(&f.Player);
         auto& link = f.Game.SpawnedPawn.Link;
-        link.InstantHitInfo[1].TraceRange = 1599.f;
-        Require(!f.Game.ConfigurePawn(), "short-range beam admitted standard target distance");
-        link.InstantHitInfo[1].TraceRange = std::numeric_limits<float>::quiet_NaN();
-        Require(!f.Game.ConfigurePawn(), "nonfinite beam range accepted");
+        for (float range : {1600.f, 1799.f, 1799.999f, 0.f, -1.f,
+                            std::numeric_limits<float>::quiet_NaN(),
+                            std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity()}) {
+            link.InstantHitInfo[1].TraceRange = range;
+            Require(!f.Game.ConfigurePawn(), "beam below 1800 or nonfinite range admitted standard targets");
+            f.Game.StartTraining(&f.Player);
+            Require(f.Game.Progress.Phase == 0 && !f.Game.SetupError.empty(),
+                    "invalid beam range entered a run despite failed content validation");
+        }
         link.InstantHitInfo[1].TraceRange = 1800.f; link.BeamState.CorrectType = false;
         Require(!f.Game.ConfigurePawn(), "non-NCP beam state accepted");
         link.BeamState.CorrectType = true; link.FiringState[1] = nullptr;
@@ -515,7 +609,7 @@ int main(int argc, char** argv) {
         link.InstantHitInfo[1].Damage = 10; link.InstantHitInfo[1].DamageType = 0;
         Require(!f.Game.ConfigurePawn(), "beam without damage type accepted");
         link.InstantHitInfo[1].DamageType = 7;
-        Require(f.Game.ConfigurePawn(), "valid restored beam content rejected");
+        Require(f.Game.ConfigurePawn(), "valid normal NCP Link at exactly 1800 range rejected");
         link.InstantHitInfo.clear();
         Require(!f.Game.ConfigurePawn(), "missing beam hit-info slot accepted");
     } else if (name == "tracking_refire") {
@@ -532,6 +626,94 @@ int main(int argc, char** argv) {
         Require(f.Game.ConfigurePawn(), "valid positive beam refire did not recover");
         f.Game.StartTraining(&f.Player);
         Require(f.Game.Progress.Phase == 1, "valid beam could not start after correcting refire");
+    } else if (name == "profile_replacement") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        const int initialRestarts = f.Game.Restarts;
+        f.Game.SelectScenario(&f.Player, 1);
+        Require(f.Game.Restarts == initialRestarts, "same Team profile needlessly respawned trainee");
+        f.Game.SelectScenario(&f.Player, 2);
+        Require(f.Game.Restarts == initialRestarts+1 && f.Game.SpawnedPawn.Destroys == 1
+                && f.Player.GetPawn()->GetClass() == &InstagibTrainerType
+                && f.Game.SpawnedPawn.Position.Z == 50103.f,
+                "Instagib scenario did not replace the pawn with its own class/standing seat");
+        f.Game.SpawnedPawn.Shape.HalfHeight = 72.f;
+        Require(f.Game.ConfigurePawn() && f.Game.SpawnedPawn.Position.Z == 50103.f
+                && f.Game.IsInsidePracticeLane(&f.Game.SpawnedPawn),
+                "crouched live capsule replaced the Instagib class standing height");
+        for (int phase : {1,2}) {
+            f.Game.Progress.Phase = uint8(phase);
+            f.Game.SelectScenario(&f.Player, 0);
+            Require(f.Game.Progress.Scenario == 2 && f.Game.Restarts == initialRestarts+1,
+                    "countdown or active run changed the pawn profile");
+        }
+        f.Game.Progress.Phase = 0;
+        f.Game.SelectScenario(&f.Player, 0);
+        Require(f.Game.Restarts == initialRestarts+2 && f.Game.SpawnedPawn.Destroys == 2
+                && f.Player.GetPawn()->GetClass() == &TrainerType && f.Game.SpawnedPawn.Position.Z == 50108.f,
+                "leaving Instagib retained the smaller native pawn");
+    } else if (name == "profile_spawn_recovery") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        f.Game.FailNextRestart = true;
+        f.Game.SelectScenario(&f.Player, 2);
+        Require(!f.Player.GetPawn() && !f.Game.RunWeapon && !f.Game.SetupError.empty()
+                && f.Game.Progress.Phase == 0, "failed replacement did not fail closed");
+        const int failedRestarts = f.Game.Restarts;
+        f.Game.SelectScenario(&f.Player, 2);
+        Require(f.Game.Restarts == failedRestarts+1 && f.Player.GetPawn()
+                && f.Player.GetPawn()->GetClass() == &InstagibTrainerType
+                && f.Game.SpawnedPawn.Position.Z == 50103.f && f.Game.RunWeapon == &f.Game.SpawnedPawn.Instagib
+                && f.Game.SetupError.empty(), "retry did not recover missing pawn with selected profile");
+    } else if (name == "profile_view_to_instagib" || name == "profile_view_from_instagib"
+               || name == "profile_view_retry") {
+        // Exercise ConfigurePawn's Super::RestartPlayer paths, which bypass
+        // the trainer RestartPlayer override that otherwise resets the view.
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        uint8 scenario=2;
+        if (name == "profile_view_from_instagib") {
+            f.Game.SelectScenario(&f.Player,2);
+            scenario=0;
+        } else if (name == "profile_view_retry") {
+            f.Game.FailNextRestart=true;
+            f.Game.SelectScenario(&f.Player,2);
+            Require(!f.Player.GetPawn(),"fixture did not enter missing-pawn recovery");
+        }
+        f.Player.SetControlRotation(FRotator(-31.f,-77.f,0.f));
+        f.Player.ClientSetRotation(FRotator(-31.f,-77.f,0.f),false);
+        const int previousRestarts=f.Game.Restarts;
+        f.Game.SelectScenario(&f.Player,scenario);
+        Require(f.Game.Restarts==previousRestarts+1 && f.Player.GetPawn()
+                && f.Player.GetPawn()->GetClass()==(scenario==2 ? &InstagibTrainerType : &TrainerType),
+                "fixture did not respawn the requested native profile");
+        Require(f.Player.ControlRotation.IsZero(),"profile respawn retained map-start server aim");
+        Require(f.Player.ClientRotation.IsZero() && f.Player.ClientResetCamera,
+                "profile respawn retained map-start owning-client camera");
+    } else if (name == "target_pool_profiles") {
+        Require(f.Game.EnsureArena() && f.Game.Targets.Num() == NCAimTrainerLayout::TargetCount,
+                "initial target pool was incomplete");
+        for (int scenario : {0,1,2,2,1,0}) {
+            const auto oldTargets = f.Game.Targets;
+            const size_t before = f.Game.TheWorld.SpawnedTargets.size();
+            UClass* expectedClass = scenario == 2 ? &InstagibTargetType : &TargetType;
+            const bool replace = oldTargets[0]->GetClass() != expectedClass;
+            f.Game.Progress.Scenario = uint8(scenario);
+            Require(f.Game.EnsureArena() && f.Game.Targets.Num() == NCAimTrainerLayout::TargetCount,
+                    "profile change left an incomplete target pool");
+            Require(f.Game.TheWorld.SpawnedTargets.size() == before + (replace ? NCAimTrainerLayout::TargetCount : 0),
+                    "pool replaced unchanged profiles or reused wrong native classes");
+            for (int slot=0; slot<f.Game.Targets.Num(); ++slot) {
+                const auto* target = f.Game.Targets[slot];
+                const auto seat = slot < NCAimTrainerLayout::HeadSlotCount
+                    ? NCAimTrainerLayout::HeadSeat(slot) : NCAimTrainerLayout::PopupDodgerSeat();
+                Require(target->GetClass() == expectedClass && !target->IsPendingKillPending()
+                        && target->Position.Z == 50000.f+seat.FloorZ+(scenario==2 ? 103.f : 108.f),
+                        "target spawned with wrong profile or standing capsule support");
+                Require(oldTargets[slot]->Destroys == (replace ? 1 : 0),
+                        "replacement left old targets alive or destroyed retained ones");
+            }
+        }
+        f.Game.Targets[1]->Destroy(); f.Game.Targets[3] = nullptr;
+        Require(f.Game.EnsureArena() && f.Game.Targets.Num() == NCAimTrainerLayout::TargetCount,
+                "destroyed/null target entries did not recover within selected profile");
     } else { Require(false, "unknown case"); }
 }
 '''
@@ -540,15 +722,16 @@ int main(int argc, char** argv) {
 class AimTrainerStartupTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        compiler, cls.environment, msvc = find_compiler()
+        cls.compiler, cls.environment, cls.msvc = find_compiler()
         cls.temporary = tempfile.TemporaryDirectory(prefix="ncp-aim-trainer-startup-")
         cls.addClassCleanup(cls.temporary.cleanup)
-        directory = Path(cls.temporary.name)
         native = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
         signatures = (
+            "bool ANCAimTrainerGame::EnsureArena",
             "bool ANCAimTrainerGame::ReadyToStartMatch_Implementation",
             "void ANCAimTrainerGame::PostLogin",
             "void ANCAimTrainerGame::RestartPlayer",
+            "UClass* ANCAimTrainerGame::GetDefaultPawnClassForController_Implementation",
             "bool ANCAimTrainerGame::ConfigurePawn",
             "bool ANCAimTrainerGame::IsInsidePracticeLane",
             "void ANCAimTrainerGame::SelectScenario",
@@ -556,17 +739,27 @@ class AimTrainerStartupTests(unittest.TestCase):
             "void ANCAimTrainerGame::StartTraining",
             "void ANCAimTrainerGame::AbortTraining",
         )
-        source = directory / "trainer_startup.cpp"
-        source.write_text("\n".join([ADAPTER] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
-        cls.executable = directory / ("trainer_startup.exe" if os.name == "nt" else "trainer_startup")
-        if msvc:
-            command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
-                       f"/Fe{cls.executable}", f"/Fo{directory / 'trainer_startup.obj'}"]
+        layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
+        cls.translation = "\n".join([ADAPTER, f'#include "{layout}"']
+                                    + [native_function(native, s) for s in signatures] + [CASES])
+        cls.configure_function = native_function(native, "bool ANCAimTrainerGame::ConfigurePawn")
+        cls.executable = cls.compile_fixture("trainer_startup", cls.translation)
+
+    @classmethod
+    def compile_fixture(cls, name, translation):
+        directory = Path(cls.temporary.name)
+        source = directory / (name + ".cpp")
+        source.write_text(translation, encoding="utf-8")
+        executable = directory / (name + (".exe" if os.name == "nt" else ""))
+        if cls.msvc:
+            command = [cls.compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
+                       f"/Fe{executable}", f"/Fo{directory / (name + '.obj')}"]
         else:
-            command = [compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic", str(source), "-o", str(cls.executable)]
+            command = [cls.compiler, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic", str(source), "-o", str(executable)]
         result = subprocess.run(command, cwd=directory, env=cls.environment, capture_output=True, text=True, timeout=60)
         if result.returncode:
             raise AssertionError(f"Startup adapter compilation failed:\n{result.stdout}\n{result.stderr}")
+        return executable
 
     def run_case(self, name):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
@@ -591,6 +784,30 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_tracking_requires_link_assets_and_recovers_after_mount(self): self.run_case("tracking_assets")
     def test_tracking_requires_real_beam_state_damage_and_range(self): self.run_case("tracking_beam_content")
     def test_tracking_refire_must_be_finite_and_positive(self): self.run_case("tracking_refire")
+    def test_scenario_changes_replace_native_pawn_only_outside_run_and_use_class_height(self): self.run_case("profile_replacement")
+    def test_failed_profile_replacement_recovers_on_next_selection(self): self.run_case("profile_spawn_recovery")
+    def test_instagib_profile_respawn_resets_server_aim_and_client_camera(self): self.run_case("profile_view_to_instagib")
+    def test_team_profile_respawn_resets_server_aim_and_client_camera(self): self.run_case("profile_view_from_instagib")
+    def test_missing_pawn_retry_resets_server_aim_and_client_camera(self): self.run_case("profile_view_retry")
+    def test_target_pool_replaces_profiles_and_uses_each_class_standing_height(self): self.run_case("target_pool_profiles")
+
+    def test_camera_regression_catches_missing_authority_or_client_reset(self):
+        # Mutate only temporary translation units. Each side is necessary:
+        # resetting authority aim must not mask an uncorrected remote camera.
+        for name, reset in (
+            ("authority", "Trainee->SetControlRotation(FRotator::ZeroRotator);"),
+            ("client", "Trainee->ClientSetRotation(FRotator::ZeroRotator, true);"),
+        ):
+            with self.subTest(reset=name):
+                self.assertEqual(self.configure_function.count(reset), 1)
+                broken = self.configure_function.replace(reset, "", 1)
+                translation = self.translation.replace(self.configure_function, broken, 1)
+                executable = self.compile_fixture("missing_camera_reset_" + name, translation)
+                for case in ("profile_view_to_instagib", "profile_view_from_instagib", "profile_view_retry"):
+                    result = subprocess.run([str(executable), case], env=self.environment,
+                                            capture_output=True, text=True, timeout=15)
+                    self.assertNotEqual(result.returncode, 0, f"{case} missed absent {name} reset")
+                    self.assertIn("profile respawn retained map-start", result.stderr)
 
 
 if __name__ == "__main__":

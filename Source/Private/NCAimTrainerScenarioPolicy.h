@@ -1,6 +1,6 @@
 #pragma once
 
-// Timing and direction rules for the revision-8 trainer preset. The authority
+// Timing and direction rules for the revision-9 trainer preset. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
@@ -17,11 +17,27 @@ namespace NCAimTrainerScenarioPolicy
         return 0.12f + 0.16f * UnitRoll(Roll);
     }
 
+    inline float BoundedStrafeDirection(float Offset, float Velocity, float Acceleration,
+        float Range, float RequestedDirection, float DeltaSeconds)
+    {
+        // Conservative stopping distance ignores the additional ground friction.
+        // Include a frame of travel so reversal does not wait for the edge.
+        const float Step = DeltaSeconds > 0.f ? DeltaSeconds : 0.f;
+        const float Brake = Acceleration > 1.f ? Acceleration : 1.f;
+        const float Speed = Velocity < 0.f ? -Velocity : Velocity;
+        const float Stop = Offset + Velocity * (Speed / (2.f * Brake) + Step);
+        if (Offset >= Range || Stop >= Range) { return -1.f; }
+        if (Offset <= -Range || Stop <= -Range) { return 1.f; }
+        return RequestedDirection;
+    }
+
     inline bool ShouldCrouch(float Roll) { return UnitRoll(Roll) < 0.65f; }
     inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
     inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
     inline float PopupSlideDelaySeconds(float Roll) { return 0.8f + 0.6f * UnitRoll(Roll); }
     inline float TrackingSlideDelaySeconds(float Roll) { return 4.f + 3.f * UnitRoll(Roll); }
+    inline float TrackingCrouchDelaySeconds(float Roll) { return 6.f + 4.f * UnitRoll(Roll); }
+    inline float TrackingCrouchHoldSeconds(float Roll) { return 0.20f + 0.25f * UnitRoll(Roll); }
 
     inline float StrafeHoldSeconds(float PatternRoll, float JitterRoll)
     {

@@ -1,4 +1,6 @@
 #include "NCAimTrainerCharacter.h"
+#include "NCAimTrainerCharacterProfile.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "TimerManager.h"
 
@@ -26,6 +28,15 @@ ANCAimTrainerCharacter::ANCAimTrainerCharacter(const FObjectInitializer& ObjectI
             FirstPersonMesh->SetAnimInstanceClass(Template->FirstPersonMesh->AnimClass);
         }
     }
+    NCAimTrainerCharacterProfile::ApplyCharacter(*this, NCAimTrainerCharacterProfile::TeamArena());
+    NCAimTrainerCharacterProfile::ApplyTeamArenaMovement(*UTCharacterMovement);
+}
+
+ANCAimTrainerInstagibCharacter::ANCAimTrainerInstagibCharacter(const FObjectInitializer& ObjectInitializer)
+    : Super(ObjectInitializer)
+{
+    NCAimTrainerCharacterProfile::ApplyCharacter(*this, NCAimTrainerCharacterProfile::Instagib());
+    NCAimTrainerCharacterProfile::ApplyInstagibMovement(*UTCharacterMovement);
 }
 
 UNCAimTrainerMovement::UNCAimTrainerMovement(const FObjectInitializer& ObjectInitializer)

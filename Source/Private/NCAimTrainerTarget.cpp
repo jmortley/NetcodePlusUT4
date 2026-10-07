@@ -2,6 +2,7 @@
 #include "NCAimTrainerGame.h"
 #include "NCAimTrainerScenarioPolicy.h"
 #include "NCAimTrainerLayout.h"
+#include "NCAimTrainerCharacterProfile.h"
 #include "UTCharacterMovement.h"
 #include "UTCharacterContent.h"
 #include "Components/CapsuleComponent.h"
@@ -40,13 +41,19 @@ ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitial
     GetCharacterMovement()->bRunPhysicsWithNoController = true;
     GetCharacterMovement()->bOrientRotationToMovement = false;
     GetCharacterMovement()->bUseControllerDesiredRotation = false;
-    GetCharacterMovement()->MaxWalkSpeed = 500.f;
-    GetCharacterMovement()->MaxWalkSpeedCrouched = NCAimTrainerLayout::WiggleSpeed;
+    NCAimTrainerCharacterProfile::ApplyCharacter(*this, NCAimTrainerCharacterProfile::TeamArena());
+    NCAimTrainerCharacterProfile::ApplyTeamArenaMovement(*UTCharacterMovement);
     GetCharacterMovement()->GetNavAgentPropertiesRef().bCanCrouch = true;
-    GetCharacterMovement()->MaxAcceleration = NCAimTrainerLayout::WiggleAcceleration;
     // Head position and animation must update even on a dedicated server.
     GetMesh()->MeshComponentUpdateFlag = EMeshComponentUpdateFlag::AlwaysTickPoseAndRefreshBones;
     GetMesh()->bEnableUpdateRateOptimizations = false;
+}
+
+ANCAimTrainerInstagibTarget::ANCAimTrainerInstagibTarget(const FObjectInitializer& ObjectInitializer)
+    : Super(ObjectInitializer)
+{
+    NCAimTrainerCharacterProfile::ApplyCharacter(*this, NCAimTrainerCharacterProfile::Instagib());
+    NCAimTrainerCharacterProfile::ApplyInstagibMovement(*UTCharacterMovement);
 }
 
 void ANCAimTrainerTarget::PostInitializeComponents()
@@ -103,7 +110,6 @@ void ANCAimTrainerTarget::ActivateTarget(const FVector& Location, bool bStrafe)
     bTrainerStrafe = bStrafe;
     bTrainerWiggle = false;
     StrafeRange = 800.f;
-    GetCharacterMovement()->MaxWalkSpeed = 500.f;
     StrafeCenter = Location;
     StrafeDirection = 1.f;
     // Restore posture at the new clear seat, not under a previous station's
@@ -147,7 +153,6 @@ void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
     bTrainerStrafe = true;
     bTrainerWiggle = true;
     StrafeRange = FMath::Clamp(HalfWidth, 20.f, 110.f);
-    GetCharacterMovement()->MaxWalkSpeed = NCAimTrainerLayout::WiggleSpeed;
     GetCharacterMovement()->SetMovementMode(MOVE_Walking);
 }
 
@@ -175,7 +180,7 @@ bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
     if (Role != ROLE_Authority) { return false; }
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
     if (!Movement || Movement->bIsFloorSliding
-        || (bCrouch && (!bTrainerVisible || !bTrainerWiggle || IsDead() || !Movement->IsMovingOnGround())))
+        || (bCrouch && (!bTrainerVisible || !bTrainerStrafe || IsDead() || !Movement->IsMovingOnGround())))
     {
         return false;
     }
@@ -289,8 +294,11 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
         else
         {
             const float Offset = GetActorLocation().Y - StrafeCenter.Y;
-            if (Offset >= StrafeRange) { StrafeDirection = -1.f; }
-            else if (Offset <= -StrafeRange) { StrafeDirection = 1.f; }
+            // Drive A/D input with the real gameplay acceleration/speed. Turn
+            // early enough to brake inside the seat instead of slowing the pawn.
+            StrafeDirection = NCAimTrainerScenarioPolicy::BoundedStrafeDirection(Offset,
+                GetVelocity().Y, GetCharacterMovement()->MaxAcceleration,
+                StrafeRange, StrafeDirection, DeltaSeconds);
             AddMovementInput(FVector(0.f, StrafeDirection, 0.f), 1.f, true);
         }
     }

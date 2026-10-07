@@ -5,11 +5,9 @@
 namespace NCAimTrainerLayout
 {
     enum { TargetCount = 6, PopupSlotCount = 5, PopupSliderSlot = 2, PopupDodgerSlot = 5, HeadSlotCount = 5, PopupPlatformCount = 3 };
-    constexpr float CapsuleRadius = 40.f;
-    constexpr float CapsuleHalfHeight = 108.f;
-    constexpr float WiggleSpeed = 220.f;
-    constexpr float WiggleAcceleration = 7000.f;
-    // Extra room beyond the reversal threshold for deceleration and one tick.
+    // Gameplay movement profiles supply speed and acceleration. The input
+    // driver anticipates stopping distance instead of limiting pawn speed.
+    // Extra room beyond the predictive reversal threshold for tick integration.
     constexpr float WiggleSafetyMargin = 15.f;
     constexpr float HeadWiggleRange = 80.f;
 
@@ -28,7 +26,9 @@ namespace NCAimTrainerLayout
 
     inline FBlock PopupPlatform(int Index)
     {
-        const float Height = Index == 0 ? 1.f : Index == 1 ? 176.f : 320.f;
+        // IGCharacterFootsteps is shorter than TeamArena. Keep the rear head
+        // peek open with its actual 103-half-height, 95%-scale body.
+        const float Height = Index == 0 ? 1.f : Index == 1 ? 160.f : 320.f;
         return { 1100.f, float(Index - 1) * 850.f, 2600.f, 580.f, Height };
     }
 
@@ -45,7 +45,7 @@ namespace NCAimTrainerLayout
             // including its ending slowdown, before this appearance retires.
             return { 1000.f, 2200.f, 850.f, 85.f, 99.f, PopupPlatform(2).Height };
         case 3:
-            // A standing head peeks over the central block. The capsule stays
+            // An IG-sized standing head peeks over the central block. The capsule stays
             // behind the block's X=2400 rear face and moves along the floor.
             return { 2650.f, 2850.f, 0.f, 0.f, 60.5f, 0.f };
         case 4:

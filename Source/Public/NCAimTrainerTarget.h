@@ -52,6 +52,15 @@ private:
     bool StartTrainerSlide(const FVector& Direction);
 };
 
+/** IGCharacterFootsteps-sized target; the CDO also governs native uncrouching. */
+UCLASS(NotBlueprintable)
+class NETCODEPLUS_API ANCAimTrainerInstagibTarget : public ANCAimTrainerTarget
+{
+    GENERATED_BODY()
+public:
+    ANCAimTrainerInstagibTarget(const FObjectInitializer& ObjectInitializer);
+};
+
 /** Runtime room: hard references keep the stock cube/material in the cook.
  * Every client constructs the same fixed geometry, so no map asset is needed. */
 UCLASS(NotBlueprintable)

@@ -56,12 +56,12 @@ The mode creates its own enclosed practice room above the map. There is no new
 map or Blueprint package to create. Its constructor references the required
 stock arena and character content for cooking. **All scenarios require the
 current NCWepMut weapon content pak on both client and server**, including
-`/Game/Blueprints/Netcode/UTNPShaftLink`, `/Game/Blueprints/Netcode/UTNPSniper`,
+`/Game/Blueprints/Netcode/NCPLinkGun`, `/Game/Blueprints/Netcode/UTNPSniper`,
 `/Game/Blueprints/Netcode/UTNPLightningGun` and
 `/Game/Blueprints/Netcode/N+InstagibRifle`. The trainer resolves these classes
 after paks mount. Missing or incompatible weapon content blocks the selected
-scenario with an explanation; tracking requires the real NCP beam-only Link
-class and its firing state rather than substituting a sniper or empty weapon.
+scenario with an explanation; tracking requires the real NCP Link Gun and its
+secondary beam state rather than substituting a sniper or empty weapon.
 
 The first version supports **one trainee per server instance**. Use separate
 instances for simultaneous players. Scores from approved instances share the
@@ -90,11 +90,11 @@ Offline results remain on the results screen; only an approved network host
 submits ranked scores. A directly connected dedicated server can be used for
 network testing without a hub.
 
-## Scenarios and scoring (revision 8)
+## Scenarios and scoring (revision 9)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
-| Link tracking | Hold either fire button to track a strafing, dodging and occasionally sliding character with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
+| Link tracking | Hold either fire button to track a character mixing strafes, dodges, slides and brief crouches with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
 | Headshots | Hit wiggling character heads at five cover stations with the NCP Sniper or Lightning Gun. Body hits do not count. | 100 per confirmed headshot. Misses affect accuracy; expired targets do not deduct points. |
 | Instagib pop-up | Shoot five moving pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block and a forward slide on the high right platform. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
 
@@ -130,20 +130,32 @@ Tracking uses the existing beam's range, obstruction and server validation.
 It does not normalize network latency; use low-ping hosts when comparing runs.
 The target now starts 1000 units from the trainee, within the beam's range as
 it strafes. Either fire button starts the same beam; releasing one button
-while holding the other keeps it active. Plasma and link-pull are disabled by
-the existing NCP Shaft weapon class. Targets remain alive and precision shot
-counters stay zero in tracking submissions. Accepted damage plays the selected
-NCP hitsound at most once per 0.12 seconds. Optional movement practice can still
-move out of beam range, where normal misses earn no tracking credit.
+while holding the other keeps it active. Both buttons select secondary fire;
+Link pull is disabled for trainer pawn owners on both client and authority.
+Targets remain alive and precision shot counters stay zero in tracking
+submissions. Every accepted native damage batch plays the selected NCP
+hitsound, without an additional trainer timer suppressing confirmations.
+Optional movement practice can still move out of the normal 1800-unit beam
+range, where normal misses earn no tracking credit.
 
-The trainer Shaft honors its explicit saved show/hide choice. When absent, it
-inherits the current `NCPLinkGun_C` choice, including classic beam offsets. The
-separate legacy CSHD Link choice is not used as an alias.
+The trainer uses the regular `NCPLinkGun_C` saved show/hide choice, including
+classic beam offsets. The separate Shaft and legacy CSHD Link choices do not
+override it.
 
 Link tracking uses 75% short strafe holds (0.14–0.34 seconds) and 25% longer holds
 (0.45–0.80 seconds), with grounded dodge attempts every 1.8–3.8 seconds. Native
 UT dodge cooldowns and landing physics still apply. Ground reversals pause
 during a dodge. This is randomized target movement, not a replay of a fixed path.
+
+Each run seeds its pseudorandom stream from a new run ID. Hold durations and
+dodge/slide choices vary, while ordinary strafes alternate direction and lane
+boundaries force inward turns. The target does not react to the trainee's aim.
+Revision 9 adds brief 0.20–0.45-second native crouches to Link tracking, with a
+random 6–10-second standing interval before each one. Blocked attempts wait
+for grounding or an active slide to finish. A/D strafing continues at native
+crouched speed; dodges and slides wait until the target can stand again.
+Crouches do not start without time to finish before the run ends, and hiding
+targets clears their pending crouch schedule.
 
 Revision 8 adds occasional lateral floor slides, scheduled 4–7 seconds apart.
 Attempts blocked by grounding or the shared native dodge/slide cooldown retry
@@ -181,11 +193,13 @@ time remains for the slide, posture transition and a full rifle refire
 interval before target expiry or the run's end. Hits, hiding and reuse clear
 the slide state, so a replacement starts standing with a fresh deadline.
 
-Both shooting scenarios use brief 0.12–0.28-second A/D reversals at 220 units
-per second. Each seat has a bounded movement range, with room for the capsule
-and stopping distance on its platform or behind cover. Headshot targets remain
+Both shooting scenarios use brief 0.12–0.28-second A/D reversals with the
+character profile's normal 940-unit walking limit and 5000 acceleration. Short
+holds and early turns limit the distance traveled, rather than a custom speed
+cap. Each seat has a bounded movement range, with room for the capsule and
+stopping distance on its platform or behind cover. Headshot targets remain
 for 6.5 seconds. The popup layout adds a near-left floor position and a floor
-position behind the central block. That block is 176 units high, and the target
+position behind the central block. That block is 160 units high, and the target
 on top is offset laterally to keep the rear head peek visible from the fixed
 anchor. Movement practice naturally changes those sightlines.
 
@@ -194,27 +208,28 @@ appearance has a 65% chance of one short native crouch, scheduled 1.5–3.5 seco
 after spawning and held for 0.25–0.45 seconds. It is skipped if too little
 exposure remains for the crouch plus a full rifle refire interval and 0.1 seconds.
 Targets behind cover can briefly disappear while crouched. Reappearing targets
-start standing; headshot targets and Link tracking do not gain these crouches.
+start standing; headshot targets do not gain these crouches. Link tracking uses
+the separate, less frequent schedule described above.
 
-All three use the fixed target model/preset in revision 8. Custom models,
+All three use the fixed target model/preset in revision 9. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=8&limit=10` (also
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=9&limit=10` (also
 `headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
 best run per player. The game fetches a compact board outside active scoring;
 it does not stream aiming samples to Django. Revised scenarios submit revision
-8; Django retains revision-1/2/3/4/5/6/7 submissions and explicit older boards without
+9; Django retains revision-1/2/3/4/5/6/7/8 submissions and explicit older boards without
 mixing their scores with the new difficulty or accuracy definition. Revision 4 onward
 includes `fired_ms` in every result: measured firing time for tracking and zero
 for precision scenarios. Older submissions retain their original payloads and
 full-run tracking denominator. Apply migration `0066_nc_aimtrainer_fired_ms`
 before restarting the updated Django web workers and enabling current hosts.
-Revisions 5 through 8 need no additional migration; deploy revision-8 API support
-before enabling revision-8 hosts. Rebuild trainer clients and servers together:
+Revisions 5 through 9 need no additional migration; deploy revision-9 API support
+before enabling revision-9 hosts. Rebuild trainer clients and servers together:
 revision 8 adds the rifle choice to the trainer's menu/start RPCs and progress
 snapshot. These classes are used only by the trainer game mode.
 
@@ -496,3 +511,99 @@ phase gates; missing Lightning content; and Lightning-specific hit/stat scoring.
 GPU effects and the packaged client/server experience still need a playtest.
 Rebuild trainer clients and servers together, and deploy revision-8 API support
 for shared scores. No additional database migration is required.
+
+### Gameplay character profiles (2026-10-06)
+
+Revision 9 copies the inspected movement/size values from the owner's cooked
+`IGCharacterFootsteps` and `TeamArenaCharacter` Blueprints into the trainer's
+native classes. `NCP-IGCTF` in the supplied `MutInstagibNCP-WindowsNoEditor.pak`
+selects `IGCharacterFootsteps`. The native profile is a frozen snapshot of this
+content, not a live Blueprint dependency or execution of its event graph.
+Future gameplay Blueprint tuning needs a corresponding profile/preset update.
+
+| Setting | Instagib | Sniper, Lightning and Link |
+| --- | --- | --- |
+| Capsule radius / half-height | 38 / 103 | 40 / 108 |
+| Pawn body mesh scale / Z | 0.95 / -110 | 1.0 / -110 |
+| Standing eye offset | 80 | 83 |
+| Maximum walk / crouched speed | 940 / 315 | 940 / 315 |
+| Ground acceleration / friction | 5000 / 14 | 5000 / 14 |
+| Crouched capsule half-height | 72 | 72 |
+| Dodge air control | 0.60 | 0.55 |
+| Initial maximum / sustained slide speed | 1350 / 1100 | 1350 / 1100 |
+
+Both the trainee and targets use the selected profile. The instagib classes
+have distinct class defaults because native uncrouching restores the capsule
+from the class default, and applying a skin restores the default mesh scale.
+Scenario changes replace the affected pawns outside a run; they do not patch
+live capsule sizes or change other NCP game modes. Respawn heights and the
+fixed-position guard use the selected class's standing height, including when
+a pooled target was crouching during its previous appearance.
+
+The slide speeds include each Blueprint's BeginPlay assignments, not only its
+serialized defaults. The profile also preserves the distinct initial crouched
+eye heights and inherited runtime crouched eye height. It keeps the trainer's
+working first-person animations, attachments and weapon visibility preferences.
+
+Targets no longer override movement with 500-unit tracking speed, 220-unit
+wiggle/crouch speed or 7000 acceleration. The bounded A/D driver reverses before
+its stopping distance reaches the seat edge. The central instagib block is
+lowered to 160 units to preserve the rear head peek for the smaller model. The
+Link setup requires the shipped 1800-unit beam range for the faster slide lane.
+Existing input restrictions and movement-practice ranking rules remain intact.
+
+The matching Django change adds revision 9 support without a migration and
+retains explicit revision 1–8 boards. Deploy the updated backend and rebuild
+trainer clients/servers together. Shipping and an in-game posture/skin/weapon
+check are still required; native tests and an Editor module build do not prove
+rendered alignment or network play.
+
+Verification: the UE4.15 Win64 Development Editor module compiled and linked;
+all 158 trainer native tests and 25 Django tests passed. Coverage includes
+scenario class replacement, failed-spawn recovery, pooled target standing
+heights, skin scale, posture callbacks, full-speed braking at 30–700 Hz, and
+profile-aware cover/platform clearance. Shipping and packaged offline/network
+verification remain outstanding.
+
+### Regular NCP Link beam and damage confirmations (2026-10-06)
+
+Revision 9 also replaces the narrower Shaft asset with the shipped
+`NCPLinkGun` asset. Its secondary beam has a 12.5-unit trace half-width,
+28 damage per 0.25-second interval and 1800-unit range, compared with Shaft's
+5-unit half-width and 25 damage. These values come from the actual weapon
+content; the trainer does not override the trace or rewind rules.
+
+The existing two-button hold handling still selects only secondary fire.
+`SupportsLinkPull()` rejects trainer character owners on both roles, including
+the server RPC admission path, while normal matches and Shaft retain their
+existing behavior. The native beam's minimum damage batch remains intact.
+The extra 120 ms trainer confirmation timer is removed, so accepted batches
+use the normal NCP damage-confirmation playback and saved settings. Offline
+practice follows the same authoritative acceptance path without needing a hub.
+
+Fixed-position target paths fit within the regular range. Movement practice
+can put the trainee and target at opposite lateral edges beyond that range;
+those are genuine out-of-range misses, with no added reach or scoring credit.
+
+Verification: the updated UE4.15 Win64 Development Editor module compiled and
+linked, and all 168 trainer native tests passed. The added coverage checks
+trainer-only pull admission and release behavior, normal-owner pull behavior,
+consecutive damage confirmations, startup range validation and tracking crouch
+timing, posture, conflicts, cleanup and recovery. Packaged
+standalone contact, rendering and audio still need an in-game check.
+
+### Revision 9 profile-switch camera correction (2026-10-06)
+
+Switching into or out of Instagib replaces the trainee pawn to select the
+correct capsule and movement defaults. Stock respawning initially points the
+camera in the map PlayerStart's direction. ConfigurePawn now resets both the
+authority control rotation and the owning client's camera toward the practice
+lane after placing the pawn. The same correction covers a retry after a failed
+replacement spawn.
+
+The startup regression suite passes all 26 tests. It models a nonzero map spawn
+rotation, checks both profile-switch directions and failed-spawn recovery, and
+verifies that removing either camera reset makes those tests fail. The preceding
+revision-9 review passed all 168 trainer tests and 25 Django tests. Final UE4.15
+module builds pass for Win64 Development Editor, Win64 Shipping client and Linux
+Shipping server. Packaged standalone and multiplayer checks remain necessary.

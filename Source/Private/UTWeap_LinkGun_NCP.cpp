@@ -1,4 +1,5 @@
 #include "UTWeap_LinkGun_NCP.h"
+#include "NCAimTrainerCharacter.h"
 #include "NCFireDiagnostics.h"
 #include "NCWeaponColorSettings.h"
 #include "NetcodePlus.h"
@@ -181,6 +182,15 @@ void AUTWeap_LinkGun_NCP::StopFiringEffects_Implementation()
 {
 	StopLinkBeamWatchdog();
 	Super::StopFiringEffects_Implementation();
+}
+
+bool AUTWeap_LinkGun_NCP::SupportsLinkPull() const
+{
+	// Practice uses the regular Link's authored beam width, damage and effects,
+	// but releasing either held beam input must not pull the immortal target.
+	// The native owner class is available on both client and authority, without
+	// a server-only game mode query or a separately replicated practice flag.
+	return !Cast<ANCAimTrainerCharacter>(UTOwner);
 }
 
 void AUTWeap_LinkGun_NCP::StartFire(uint8 FireModeNum)

@@ -38,10 +38,12 @@ struct UClass {
 };
 UClass DefaultType("/Game/RestrictedAssets/Blueprints/DefaultCharacter.DefaultCharacter_C");
 UClass TrainerType("/Script/NetcodePlus.NCAimTrainerCharacter");
+UClass InstagibTrainerType("/Script/NetcodePlus.NCAimTrainerInstagibCharacter");
 UClass OverrideType("/Script/OtherMode.CustomPawn");
 struct APawn {};
 struct AController { bool Remote = false; };
 struct ANCAimTrainerCharacter { static UClass* StaticClass() { return &TrainerType; } };
+struct ANCAimTrainerInstagibCharacter { static UClass* StaticClass() { return &InstagibTrainerType; } };
 struct FStringAssetReference {
     FString Path;
     FStringAssetReference() = default;
@@ -88,6 +90,7 @@ struct AUTBaseGameMode {
 };
 struct ANCAimTrainerGame : AUTBaseGameMode {
     using Super = AUTBaseGameMode;
+    struct { int Scenario = 0; } Progress;
     struct Session { int MaxPlayers = 99; } HostedSession;
     Session* GameSession = &HostedSession;
     int DefaultMaxPlayers = 99, BotFillCount = 10, GoalScore = 30, TimeLimit = 20;
@@ -160,6 +163,19 @@ int main(int argc, char** argv) {
             Require(game.GetDefaultPawnClassForController_Implementation(&player) == &TrainerType,
                     "late default-class assignment bypassed trainer spawn selector");
         }
+    } else if (name == "scenario_profile") {
+        for (bool remote : {false, true}) {
+            ANCAimTrainerGame game;
+            AController player; player.Remote = remote;
+            FString error; game.InitGame("DM-DeckTest", "", error);
+            for (int scenario : {0,1,2,1,2,0}) {
+                game.Progress.Scenario = scenario;
+                game.DefaultPawnClass = &OverrideType;
+                Require(game.GetDefaultPawnClassForController_Implementation(&player)
+                        == (scenario == 2 ? &InstagibTrainerType : &TrainerType),
+                        "scenario selector reused the wrong native character CDO");
+            }
+        }
     } else {
         Require(false, "unknown case");
     }
@@ -209,6 +225,7 @@ class AimTrainerPawnClassTests(unittest.TestCase):
     def test_network_startup_selects_trainer_pawn(self): self.run_case("network")
     def test_global_override_is_preserved_but_cannot_replace_trainer_pawn(self): self.run_case("configured_override")
     def test_late_default_class_change_cannot_replace_spawn_selector(self): self.run_case("late_default_change")
+    def test_scenario_selects_native_team_or_instagib_class_on_every_restart(self): self.run_case("scenario_profile")
 
 
 if __name__ == "__main__":

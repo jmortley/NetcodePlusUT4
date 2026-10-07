@@ -9,7 +9,7 @@
 #include "TeamArenaCharacter.h"
 #include "UTPlusSniper.h"
 #include "UTPlusShockRifle.h"
-#include "UTWeap_LinkGun_Shaft_NCP.h"
+#include "UTWeap_LinkGun_NCP.h"
 #include "UTWeaponStateFiringLinkBeam_NCP.h"
 #include "UTCharacterMovement.h"
 #include "UTCharacterContent.h"
@@ -84,7 +84,7 @@ UClass* ANCAimTrainerGame::GetDefaultPawnClassForController_Implementation(ACont
 {
     // The opt-in trainer requires this pawn's movement component on every
     // spawn/restart. Ruleset or mutator pawn defaults cannot substitute it.
-    return ANCAimTrainerCharacter::StaticClass();
+    return Progress.Scenario == 2 ? ANCAimTrainerInstagibCharacter::StaticClass() : ANCAimTrainerCharacter::StaticClass();
 }
 
 bool ANCAimTrainerGame::ReadyToStartMatch_Implementation()
@@ -121,6 +121,14 @@ bool ANCAimTrainerGame::FailSetup(const TCHAR* Message)
 bool ANCAimTrainerGame::EnsureArena()
 {
     if (Arena && Arena->IsPendingKillPending()) { Arena = nullptr; }
+    UClass* TargetClass = Progress.Scenario == 2
+        ? ANCAimTrainerInstagibTarget::StaticClass() : ANCAimTrainerTarget::StaticClass();
+    // Replace pooled actors outside a run so native crouch and skin restoration
+    // always use the correct class default, including on remote clients.
+    for (ANCAimTrainerTarget* Target : Targets)
+    {
+        if (Target && !Target->IsPendingKillPending() && Target->GetClass() != TargetClass) { Target->Destroy(); }
+    }
     Targets.RemoveAll([](ANCAimTrainerTarget* Target) { return !Target || Target->IsPendingKillPending(); });
     FActorSpawnParameters Params;
     Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -135,7 +143,9 @@ bool ANCAimTrainerGame::EnsureArena()
         const NCAimTrainerLayout::FSeat Seat = Targets.Num() < NCAimTrainerLayout::HeadSlotCount
             ? NCAimTrainerLayout::HeadSeat(Targets.Num()) : NCAimTrainerLayout::PopupDodgerSeat();
         ANCAimTrainerTarget* Target = GetWorld()->SpawnActor<ANCAimTrainerTarget>(
-            ArenaOrigin + FVector(Seat.MinX, Seat.CenterY, 108.f + Seat.FloorZ), FRotator(0, 180, 0), Params);
+            TargetClass, ArenaOrigin + FVector(Seat.MinX, Seat.CenterY,
+                TargetClass->GetDefaultObject<ANCAimTrainerTarget>()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() + Seat.FloorZ),
+            FRotator(0, 180, 0), Params);
         if (!Target) { return FailSetup(TEXT("Cannot start: a practice character could not spawn.")); }
         if (!Target->HasCharacterAssets())
         {
@@ -202,7 +212,7 @@ void ANCAimTrainerGame::RestartPlayer(AController* Player)
     Super::RestartPlayer(Player);
     if (APawn* Pawn = Player->GetPawn())
     {
-        Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), FRotator::ZeroRotator,
+        Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, Pawn->GetSimpleCollisionHalfHeight()), FRotator::ZeroRotator,
             false, nullptr, ETeleportType::TeleportPhysics);
         Player->SetControlRotation(FRotator::ZeroRotator);
         Player->ClientSetRotation(FRotator::ZeroRotator, true);
@@ -233,8 +243,28 @@ bool ANCAimTrainerGame::ConfigurePawn()
     // This also protects scenario selection and existing-pawn login paths.
     if (!GetWorld()->HasBegunPlay()) { return FailSetup(TEXT("Practice is still initializing. Try starting again in a moment.")); }
     AUTCharacter* Pawn = Trainee ? Cast<AUTCharacter>(Trainee->GetPawn()) : nullptr;
+    if (!Pawn && Trainee)
+    {
+        // A failed profile replacement must remain retryable from the menu.
+        Super::RestartPlayer(Trainee);
+        Pawn = Cast<AUTCharacter>(Trainee->GetPawn());
+    }
     if (!Pawn || Pawn->IsDead()) { return FailSetup(TEXT("Cannot start: your practice character is not ready.")); }
-    Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), FRotator::ZeroRotator,
+    UClass* PawnClass = GetDefaultPawnClassForController_Implementation(Trainee);
+    if (Pawn->GetClass() != PawnClass)
+    {
+        // Scenario changes are admitted only outside active/countdown phases.
+        // A new class is replicated normally instead of patching live capsule
+        // defaults that UnCrouch would later undo on either side.
+        Trainee->UnPossess();
+        Pawn->Destroy();
+        RunWeapon = nullptr;
+        Super::RestartPlayer(Trainee);
+        Pawn = Cast<AUTCharacter>(Trainee->GetPawn());
+        if (!Pawn || Pawn->GetClass() != PawnClass) { return FailSetup(TEXT("Cannot start: the selected practice character could not spawn.")); }
+    }
+    const float StandingHeight = PawnClass->GetDefaultObject<AUTCharacter>()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    Pawn->SetActorLocationAndRotation(ArenaOrigin + FVector(-1800.f, 0.f, StandingHeight), FRotator::ZeroRotator,
         false, nullptr, ETeleportType::TeleportPhysics);
     UNCAimTrainerMovement* Movement = Cast<UNCAimTrainerMovement>(Pawn->GetCharacterMovement());
     if (!Movement)
@@ -247,7 +277,12 @@ bool ANCAimTrainerGame::ConfigurePawn()
     Movement->ResetTrainerMovement(Progress.bMovementPractice);
     // Uncrouching can raise the capsule center. Reset after restoring posture
     // so a fixed run always starts from the original standing anchor.
-    Pawn->SetActorLocation(ArenaOrigin + FVector(-1800.f, 0.f, 108.f), false, nullptr, ETeleportType::TeleportPhysics);
+    Pawn->SetActorLocation(ArenaOrigin + FVector(-1800.f, 0.f, StandingHeight), false, nullptr, ETeleportType::TeleportPhysics);
+    // Stock restart uses the map PlayerStart's view direction when replacing
+    // the scenario's pawn. Rotating the pawn alone does not reset mouse-look.
+    // Anchor both authority and the owning client's camera to the practice lane.
+    Trainee->SetControlRotation(FRotator::ZeroRotator);
+    Trainee->ClientSetRotation(FRotator::ZeroRotator, true);
     Pawn->bCanBeDamaged = false;
     Pawn->DiscardAllInventory();
     RunWeapon = nullptr;
@@ -257,7 +292,7 @@ bool ANCAimTrainerGame::ConfigurePawn()
     if (Progress.Scenario == 0 && !LinkClass)
     {
         LinkClass = LoadClass<AUTWeapon>(nullptr,
-            TEXT("/Game/Blueprints/Netcode/UTNPShaftLink.UTNPShaftLink_C"), nullptr, LOAD_NoWarn);
+            TEXT("/Game/Blueprints/Netcode/NCPLinkGun.NCPLinkGun_C"), nullptr, LOAD_NoWarn);
     }
     else if (Progress.Scenario == 2 && !InstagibClass)
     {
@@ -279,10 +314,10 @@ bool ANCAimTrainerGame::ConfigurePawn()
     if (!DesiredClass || DesiredClass->HasAnyClassFlags(CLASS_Abstract))
     {
         return FailSetup(Progress.Scenario == 0
-            ? TEXT("Cannot start: the NCP Shaft Link Gun is unavailable. Install the current NCWepMut content pak.")
+            ? TEXT("Cannot start: the NCP Link Gun is unavailable. Install the current NCWepMut content pak.")
             : TEXT("Cannot start: the selected NCP rifle is unavailable. Install the NCWepMut content pak."));
     }
-    if ((Progress.Scenario == 0 && !DesiredClass->IsChildOf(AUTWeap_LinkGun_Shaft_NCP::StaticClass()))
+    if ((Progress.Scenario == 0 && !DesiredClass->IsChildOf(AUTWeap_LinkGun_NCP::StaticClass()))
         || (Progress.Scenario == 2 && !DesiredClass->IsChildOf(AUTPlusShockRifle::StaticClass()))
         || (Progress.Scenario == 1 && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass())))
     {
@@ -305,13 +340,13 @@ bool ANCAimTrainerGame::ConfigurePawn()
     if (!RunWeapon) { return FailSetup(TEXT("Cannot start: the selected NCP rifle could not be equipped.")); }
     if (Progress.Scenario == 0)
     {
-        const AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+        const AUTWeap_LinkGun_NCP* Link = Cast<AUTWeap_LinkGun_NCP>(RunWeapon);
         const float BeamRefire = RunWeapon->GetRefireTime(1);
         if (!Link || !Link->InstantHitInfo.IsValidIndex(1) || !Link->FiringState.IsValidIndex(1)
             || !Link->FiringState[1] || !Link->FiringState[1]->IsA(UUTWeaponStateFiringLinkBeam_NCP::StaticClass())
             || Link->InstantHitInfo[1].Damage <= 0 || !Link->InstantHitInfo[1].DamageType
             || !FMath::IsFinite(BeamRefire) || BeamRefire <= 0.f
-            || !FMath::IsFinite(Link->InstantHitInfo[1].TraceRange) || Link->InstantHitInfo[1].TraceRange < 1600.f)
+            || !FMath::IsFinite(Link->InstantHitInfo[1].TraceRange) || Link->InstantHitInfo[1].TraceRange < 1800.f)
         {
             return FailSetup(TEXT("Cannot start: the Link Gun content lacks the required NCP beam state or range. Update the NCWepMut content pak."));
         }
@@ -326,7 +361,8 @@ bool ANCAimTrainerGame::IsInsidePracticeLane(const AUTCharacter* Pawn) const
     if (!Pawn || Pawn->IsDead()) { return false; }
     const FVector Position = Pawn->GetActorLocation() - ArenaOrigin;
     if (!FMath::IsFinite(Position.X) || !FMath::IsFinite(Position.Y) || !FMath::IsFinite(Position.Z)) { return false; }
-    if (!Progress.bMovementPractice) { return (Position - FVector(-1800.f, 0.f, 108.f)).SizeSquared() <= 4.f; }
+    const float StandingHeight = Pawn->GetClass()->GetDefaultObject<AUTCharacter>()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+    if (!Progress.bMovementPractice) { return (Position - FVector(-1800.f, 0.f, StandingHeight)).SizeSquared() <= 4.f; }
     // Capsule bounds accommodate standing, crouching, jumps and wall dodges.
     // The room walls stop lateral travel; the plane fixes target distance.
     const float HalfHeight = Pawn->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
@@ -346,7 +382,7 @@ void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 
     Progress.bUseLightningGun = bUseLightningGun;
     HideAllTargets();
     if (Arena) { Arena->SetScenario(Scenario); }
-    if (!ConfigurePawn()) { PC->SetTrainerOnlineStatus(SetupError); }
+    if (!EnsureArena() || !ConfigurePawn()) { PC->SetTrainerOnlineStatus(SetupError); }
     PublishProgress();
     RefreshLeaderboard();
 }
@@ -437,7 +473,6 @@ void ANCAimTrainerGame::BeginActiveRun()
     NextTrackingSlideTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(Schedule.FRand());
     NextPopupTime = PhaseStartedAt;
     NextPopupSlideTime = 0.f;
-    NextTrackingHitSoundTime = PhaseStartedAt;
     const float Refire = Progress.Scenario == 2 && RunWeapon ? RunWeapon->GetRefireTime(0) : 1.f;
     PopupRefireSeconds = FMath::IsFinite(Refire) ? FMath::Max(1.f, Refire) : 1.f;
     if (Progress.Scenario == 2 && (!FMath::IsFinite(Refire) || !FMath::IsNearlyEqual(Refire, 1.f)))
@@ -462,6 +497,10 @@ void ANCAimTrainerGame::HideAllTargets()
 {
     NextPopupSlideTime = 0.f;
     NextTrackingSlideTime = 0.f;
+    for (int32 Index = 0; Index < NextCrouchTime.Num(); ++Index)
+    {
+        NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
+    }
     for (ANCAimTrainerTarget* Target : Targets)
     {
         if (Target && !Target->IsPendingKillPending()) { Target->HideTarget(); }
@@ -471,6 +510,10 @@ void ANCAimTrainerGame::HideAllTargets()
 void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
 {
     if (!Targets.IsValidIndex(Index)) { return; }
+    // Current capsules may still be crouched from an earlier appearance. The
+    // class default gives the standing seat before ActivateTarget resets it.
+    const float StandingHeight = Targets[Index]->GetClass()->GetDefaultObject<ANCAimTrainerTarget>()
+        ->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
     const bool bPopupDodger = Progress.Scenario == 2 && Index == NCAimTrainerLayout::PopupDodgerSlot;
     FVector Position;
     if (Progress.Scenario == 0)
@@ -478,20 +521,20 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
         if (Index != 0) { return; }
         // Stay inside the actual Link beam range across the target's strafe
         // and dodge lane. The old sniper display target was 2500 units away.
-        Position = FVector(-800.f, 0.f, 108.f);
+        Position = FVector(-800.f, 0.f, StandingHeight);
         TargetExpiry[Index] = PhaseStartedAt + 60.f;
     }
     else if (Progress.Scenario == 1)
     {
         if (Index >= NCAimTrainerLayout::HeadSlotCount) { return; }
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::HeadSeat(Index);
-        Position = FVector(Seat.MinX, Seat.CenterY, 108.f + Seat.FloorZ);
+        Position = FVector(Seat.MinX, Seat.CenterY, StandingHeight + Seat.FloorZ);
         TargetExpiry[Index] = Now + 6.5f;
     }
     else if (bPopupDodger)
     {
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupDodgerSeat();
-        Position = FVector(Seat.MinX, Seat.CenterY, 108.f + Seat.FloorZ);
+        Position = FVector(Seat.MinX, Seat.CenterY, StandingHeight + Seat.FloorZ);
         TargetExpiry[Index] = PhaseStartedAt + 60.f;
         NextDodgeTime = Now + NCAimTrainerScenarioPolicy::PopupFirstDodgeDelaySeconds(Schedule.FRand());
         NextDirectionTime = Now + NCAimTrainerScenarioPolicy::StrafeHoldSeconds(Schedule.FRand(), Schedule.FRand());
@@ -500,11 +543,15 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     {
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupSeat(Index);
         Position = FVector(Schedule.FRandRange(Seat.MinX, Seat.MaxX),
-            Seat.CenterY + Schedule.FRandRange(-Seat.SpawnJitterY, Seat.SpawnJitterY), 108.f + Seat.FloorZ);
+            Seat.CenterY + Schedule.FRandRange(-Seat.SpawnJitterY, Seat.SpawnJitterY), StandingHeight + Seat.FloorZ);
         TargetExpiry[Index] = Now + NCAimTrainerScenarioPolicy::PopupExposure(PopupRefireSeconds, Schedule.FRand());
     }
     Targets[Index]->ActivateTarget(ArenaOrigin + Position, Progress.Scenario == 0 || bPopupDodger);
     NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
+    if (Progress.Scenario == 0)
+    {
+        NextCrouchTime[Index] = Now + NCAimTrainerScenarioPolicy::TrackingCrouchDelaySeconds(Schedule.FRand());
+    }
     if (Progress.Scenario != 0 && !bPopupDodger)
     {
         const NCAimTrainerLayout::FSeat Seat = Progress.Scenario == 1
@@ -555,16 +602,13 @@ float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Dama
     if (!FMath::IsFinite(Rewind) || Rewind < 0.f || Now - Rewind < Target->GetAppearanceTime()) { return 0.f; }
     if (Progress.Scenario == 0)
     {
-        AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+        AUTWeap_LinkGun_NCP* Link = Cast<AUTWeap_LinkGun_NCP>(RunWeapon);
         if (Slot != 0 || !Link || !Link->IsFiring() || Link->GetCurrentFireMode() != 1
             || !Link->InstantHitInfo.IsValidIndex(1) || Event.DamageTypeClass != Link->InstantHitInfo[1].DamageType) { return 0.f; }
         // Beam contact supplies time-based credit in Tick. Keep the target
-        // alive, avoid precision counters, and bound continuous sound traffic.
-        if (Now >= NextTrackingHitSoundTime)
-        {
-            Trainee->NotifyTrainerHit(Damage);
-            NextTrackingHitSoundTime = Now + 0.12f;
-        }
+        // alive and avoid precision counters. The native beam already batches
+        // damage; confirm every accepted batch just like ordinary NCP combat.
+        Trainee->NotifyTrainerHit(Damage);
         return Damage;
     }
     // A late request from a previous appearance must not score the reused pawn,
@@ -644,7 +688,29 @@ void ANCAimTrainerGame::UpdateTrackingMovement(float Now)
 {
     if (Progress.Phase != 2 || Progress.Scenario != 0 || Now >= PhaseStartedAt + 60.f
         || !Targets.IsValidIndex(0) || !Targets[0] || !Targets[0]->IsAvailable()) { return; }
-    if (Now >= NextTrackingSlideTime)
+    if (CrouchEndTime[0] > 0.f && Now >= CrouchEndTime[0])
+    {
+        // Clearance may defer standing. Keep the crouch active until native
+        // uncrouching succeeds, then wait a fresh interval before the next dip.
+        if (Targets[0]->SetTrainerCrouched(false))
+        {
+            CrouchEndTime[0] = 0.f;
+            NextCrouchTime[0] = Now + NCAimTrainerScenarioPolicy::TrackingCrouchDelaySeconds(Schedule.FRand());
+        }
+    }
+    else if (CrouchEndTime[0] == 0.f && NextCrouchTime[0] > 0.f && Now >= NextCrouchTime[0])
+    {
+        NextCrouchTime[0] = 0.f;
+        const float Hold = NCAimTrainerScenarioPolicy::TrackingCrouchHoldSeconds(Schedule.FRand());
+        if (PhaseStartedAt + 60.f - Now >= Hold + 0.1f)
+        {
+            if (Targets[0]->SetTrainerCrouched(true)) { CrouchEndTime[0] = Now + Hold; }
+            else { NextCrouchTime[0] = Now + 0.2f; } // Wait for a dodge/slide to finish.
+        }
+    }
+    // A/D input continues at native crouched speed; don't replace this brief
+    // posture change with a simultaneous slide or dodge.
+    if (CrouchEndTime[0] == 0.f && Now >= NextTrackingSlideTime)
     {
         // Let the native slide finish before the run ends. Grounding and UT's
         // shared dodge/slide cooldown decide when an occasional slide can start.
@@ -655,7 +721,7 @@ void ANCAimTrainerGame::UpdateTrackingMovement(float Now)
         }
         else { NextTrackingSlideTime = PhaseStartedAt + 60.f; }
     }
-    if (Now >= NextDodgeTime)
+    if (CrouchEndTime[0] == 0.f && Now >= NextDodgeTime)
     {
         Targets[0]->TryTrainerDodge(Schedule.FRand());
         NextDodgeTime = Now + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
@@ -759,7 +825,7 @@ void ANCAimTrainerGame::UpdatePopupDodger(float Now)
 
 bool ANCAimTrainerGame::HasTrackingContact() const
 {
-    AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+    AUTWeap_LinkGun_NCP* Link = Cast<AUTWeap_LinkGun_NCP>(RunWeapon);
     return IsTrackingBeamFiring() && Targets.IsValidIndex(0)
         && Targets[0] && Targets[0]->IsAvailable() && Link
         && Link->CurrentLinkedTarget == Targets[0];
@@ -767,7 +833,7 @@ bool ANCAimTrainerGame::HasTrackingContact() const
 
 bool ANCAimTrainerGame::IsTrackingBeamFiring() const
 {
-    AUTWeap_LinkGun_Shaft_NCP* Link = Cast<AUTWeap_LinkGun_Shaft_NCP>(RunWeapon);
+    AUTWeap_LinkGun_NCP* Link = Cast<AUTWeap_LinkGun_NCP>(RunWeapon);
     return Progress.Phase == 2 && Progress.Scenario == 0 && Link && Link->IsFiring()
         && Link->GetCurrentFireMode() == 1 && !Link->IsLinkPulsing();
 }

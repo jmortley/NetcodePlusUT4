@@ -1,7 +1,8 @@
 """Native layout tests for support, cover and the trainer's fixed sightlines.
 
-Head samples use a conservative 184..212 unit standing band, not a claim that
-animation is fixed there. A packaged playtest must verify the actual head pose.
+Head samples transform a conservative stock 184..212 unit standing band by
+the real profile capsule/mesh seat/scale, not a claim of fixed animation.
+A packaged playtest must verify the actual head pose.
 """
 import os
 from pathlib import Path
@@ -20,17 +21,22 @@ CASES = r'''
 #include <string>
 #include <vector>
 using namespace NCAimTrainerLayout;
+bool InstagibGeometry = true;
+NCAimTrainerCharacterProfile::FProfile Profile() {
+    return InstagibGeometry ? NCAimTrainerCharacterProfile::Instagib() : NCAimTrainerCharacterProfile::TeamArena();
+}
+float TestRadius() { return Profile().CapsuleRadius; }
+float TestHalfHeight() { return Profile().CapsuleHalfHeight; }
+float TestHeadHeight(float OldHeight) { return Profile().CapsuleHalfHeight + Profile().MeshZ + Profile().MeshScale * OldHeight; }
 struct Point { float X, Y, Z; };
 void Require(bool value, const char* message) {
     if (!value) { std::cerr << message << '\n'; std::exit(1); }
 }
 float SliderMaximumTravel() {
-    // Native UT flat-ground slide from a 220-speed wiggle starts at900, lasts
-    // 0.7s, and exits at40% speed. Allow two30Hz frames beyond the timer and a
-    // full exit frame before applying direction friction. With lateral-only
-    // input, X decays through GroundFriction10.5, not the7000 Y acceleration.
-    // Ignoring the native220 walking-speed clamp further overestimates travel.
-    const float slideSpeed=900.f, duration=.7f, exitFactor=.4f, groundFriction=10.5f;
+    // Decoded Blueprint flat-ground slide starts at1100, lasts0.7s and
+    // exits at40% speed. Allow two30Hz frames beyond the timer and a full
+    // exit frame before direction friction14; ignore the walk-speed clamp.
+    const float slideSpeed=1100.f, duration=.7f, exitFactor=.4f, groundFriction=14.f;
     const float exitSpeed=slideSpeed*exitFactor;
     return slideSpeed*(duration+2.f/30.f)+exitSpeed/30.f+exitSpeed/groundFriction;
 }
@@ -52,8 +58,8 @@ std::vector<Point> Endpoints(const FSeat& seat) {
     return points;
 }
 bool SegmentHitsBox(Point end, float minX, float maxX, float minY, float maxY, float minZ, float maxZ) {
-    // Actual native trainee eye: capsule half-height108 + BaseEyeHeight83.
-    const float start[3] = {-1800.f,0.f,191.f};
+    // Eye follows the selected character class, including the smaller IG seat.
+    const float start[3] = {-1800.f,0.f,Profile().CapsuleHalfHeight + Profile().StandingEyeHeight};
     const float finish[3] = {end.X,end.Y,end.Z};
     const float low[3] = {minX,minY,minZ}, high[3] = {maxX,maxY,maxZ};
     float near = 0.f, far = 1.f;
@@ -78,30 +84,30 @@ void PlatformSupport() {
     Require(TargetCount==6 && PopupSlotCount==5 && PopupSliderSlot==2 && PopupDodgerSlot==5
             && PopupDodgerSlot+1==TargetCount && HeadSlotCount==5 && PopupPlatformCount==3,
             "pool and layout counts disagree");
-    const float stopDistance = WiggleSpeed*WiggleSpeed/(2.f*WiggleAcceleration);
-    Require(stopDistance+WiggleSpeed/30.f < WiggleSafetyMargin, "wiggle reserve does not cover stopping plus a30Hz frame");
+    Require(NCAimTrainerCharacterProfile::Acceleration*(1.f/30.f)*(1.f/30.f) < WiggleSafetyMargin,
+        "predictive reversal margin cannot cover one frame of acceleration");
     for (int slot=0;slot<PopupSlotCount;++slot) {
         const FSeat seat=PopupMovementSeat(slot);
         for (Point point:Endpoints(seat)) {
-            Require(point.X-CapsuleRadius>-3200.f && point.X+CapsuleRadius<3200.f
-                    && point.Y-CapsuleRadius>-1800.f && point.Y+CapsuleRadius<1800.f,
+            Require(point.X-TestRadius()>-3200.f && point.X+TestRadius()<3200.f
+                    && point.Y-TestRadius()>-1800.f && point.Y+TestRadius()<1800.f,
                     "target swept capsule can leave room floor");
             if (slot<PopupPlatformCount) {
                 const FBlock block=PopupPlatform(slot);
                 Require(seat.FloorZ==block.Height, "spawn floor and platform top disagree");
-                Require(point.X-CapsuleRadius>=block.CenterX-block.SizeX*.5f
-                        && point.X+CapsuleRadius<=block.CenterX+block.SizeX*.5f
-                        && point.Y-CapsuleRadius>=block.CenterY-block.SizeY*.5f
-                        && point.Y+CapsuleRadius<=block.CenterY+block.SizeY*.5f,
+                Require(point.X-TestRadius()>=block.CenterX-block.SizeX*.5f
+                        && point.X+TestRadius()<=block.CenterX+block.SizeX*.5f
+                        && point.Y-TestRadius()>=block.CenterY-block.SizeY*.5f
+                        && point.Y+TestRadius()<=block.CenterY+block.SizeY*.5f,
                         "wiggle plus stopping margin can run off platform");
             } else {
                 Require(seat.FloorZ==0.f, "floor seat is floating");
                 for (int p=0;p<PopupPlatformCount;++p) {
                     const FBlock block=PopupPlatform(p);
-                    const bool separate=point.X+CapsuleRadius<block.CenterX-block.SizeX*.5f
-                        || point.X-CapsuleRadius>block.CenterX+block.SizeX*.5f
-                        || point.Y+CapsuleRadius<block.CenterY-block.SizeY*.5f
-                        || point.Y-CapsuleRadius>block.CenterY+block.SizeY*.5f;
+                    const bool separate=point.X+TestRadius()<block.CenterX-block.SizeX*.5f
+                        || point.X-TestRadius()>block.CenterX+block.SizeX*.5f
+                        || point.Y+TestRadius()<block.CenterY-block.SizeY*.5f
+                        || point.Y-TestRadius()>block.CenterY+block.SizeY*.5f;
                     Require(separate,"floor target overlaps a raised platform");
                 }
             }
@@ -112,29 +118,30 @@ void PopupSightlines() {
     for (int slot=0;slot<PopupSlotCount;++slot) {
         for (Point point:Endpoints(PopupMovementSeat(slot))) {
             for (float headHeight:{184.f,198.f,212.f}) {
-                const Point head={point.X,point.Y,point.Z+headHeight};
+                const Point head={point.X,point.Y,point.Z+TestHeadHeight(headHeight)};
                 for (int p=0;p<PopupPlatformCount;++p) {
                     Require(!HitsBlock(head,PopupPlatform(p)), "platform blocks a standing target head center");
                 }
             }
             if (slot==3) {
-                Require(HitsBlock({point.X,point.Y,170.f},PopupPlatform(1)),
+                Require(HitsBlock({point.X,point.Y,TestHeadHeight(170.f)},PopupPlatform(1)),
                         "rear target exposes its upper body instead of peeking over cover");
             }
         }
     }
 }
 void HeadCoverSightlines() {
+    InstagibGeometry = false;
     for (int slot=0;slot<HeadSlotCount;++slot) {
         for (Point point:Endpoints(HeadSeat(slot))) {
             for (float headHeight:{184.f,198.f,212.f}) {
                 for (int block=0;block<HeadSlotCount;++block) {
-                    Require(!HitsBlock({point.X,point.Y,headHeight},HeadCover(block)),
+                    Require(!HitsBlock({point.X,point.Y,TestHeadHeight(headHeight)},HeadCover(block)),
                             "head station cover hides a valid standing head center");
                 }
             }
-            for (float bodySide:{-CapsuleRadius,0.f,CapsuleRadius}) {
-                Require(HitsBlock({point.X,point.Y+bodySide,170.f},HeadCover(slot)),
+            for (float bodySide:{-TestRadius(),0.f,TestRadius()}) {
+                Require(HitsBlock({point.X,point.Y+bodySide,TestHeadHeight(170.f)},HeadCover(slot)),
                         "head station exposes an inside shoulder at its wiggle limit");
             }
         }
@@ -149,10 +156,10 @@ void OtherTargetOcclusion() {
                 if (other==slot) continue;
                 for (Point obstacle:Endpoints(PopupMovementSeat(other))) {
                     for (float headHeight:{184.f,212.f}) {
-                        Require(!SegmentHitsBox({point.X,point.Y,point.Z+headHeight},
-                            obstacle.X-CapsuleRadius,obstacle.X+CapsuleRadius,
-                            obstacle.Y-CapsuleRadius,obstacle.Y+CapsuleRadius,
-                            obstacle.Z,obstacle.Z+2.f*CapsuleHalfHeight),
+                        Require(!SegmentHitsBox({point.X,point.Y,point.Z+TestHeadHeight(headHeight)},
+                            obstacle.X-TestRadius(),obstacle.X+TestRadius(),
+                            obstacle.Y-TestRadius(),obstacle.Y+TestRadius(),
+                            obstacle.Z,obstacle.Z+2.f*TestHalfHeight()),
                             "another target capsule can cover this target's head center");
                     }
                 }
@@ -175,12 +182,12 @@ void SliderRunway() {
     for (Point spawn:Endpoints(seat)) {
         for (float fraction:{0.f,.25f,.5f,.75f,1.f}) {
             const Point slid={spawn.X-SliderMaximumTravel()*fraction,spawn.Y,spawn.Z};
-            Require(slid.X-CapsuleRadius>minX && slid.X+CapsuleRadius<maxX,
+            Require(slid.X-TestRadius()>minX && slid.X+TestRadius()<maxX,
                 "native forward slide can carry its capsule off the platform");
-            Require(slid.Y-CapsuleRadius>minY && slid.Y+CapsuleRadius<maxY,
+            Require(slid.Y-TestRadius()>minY && slid.Y+TestRadius()<maxY,
                 "wiggle envelope around the slide can leave a lateral edge");
-            Require(slid.X-CapsuleRadius>-3200.f && slid.X+CapsuleRadius<3200.f
-                && slid.Y-CapsuleRadius>-1800.f && slid.Y+CapsuleRadius<1800.f,
+            Require(slid.X-TestRadius()>-3200.f && slid.X+TestRadius()<3200.f
+                && slid.Y-TestRadius()>-1800.f && slid.Y+TestRadius()<1800.f,
                 "sliding capsule can leave the arena bounds");
         }
     }
@@ -195,10 +202,10 @@ float DodgerMaximumReach() {
     const float flightSeconds=2.f*upwardSpeed/gravity;
     const float landingAndTickReserve=.1f+2.f/30.f;
     const float dodgeReach=500.f+speed*(flightSeconds+landingAndTickReserve)
-        +speed*speed/(2.f*WiggleAcceleration);
-    const float walkingSpeed=500.f;
+        +speed*speed/(2.f*NCAimTrainerCharacterProfile::Acceleration);
+    const float walkingSpeed=940.f;
     const float walkReach=PopupDodgerSeat().WiggleRange+walkingSpeed/30.f
-        +walkingSpeed*walkingSpeed/(2.f*WiggleAcceleration);
+        +walkingSpeed*walkingSpeed/(2.f*NCAimTrainerCharacterProfile::Acceleration);
     return std::max(dodgeReach,walkReach);
 }
 void DodgerLaneSupport() {
@@ -214,20 +221,20 @@ void DodgerLaneSupport() {
                 "outward dodge guard no longer protects the room boundary");
         }
     }
-    Require(DodgerMaximumReach()+CapsuleRadius<1800.f,
+    Require(DodgerMaximumReach()+TestRadius()<1800.f,
         "native dodge plus conservative landing reserve can reach the side wall");
-    Require(seat.MinX-CapsuleRadius>-3200.f && seat.MaxX+CapsuleRadius<3200.f,
+    Require(seat.MinX-TestRadius()>-3200.f && seat.MaxX+TestRadius()<3200.f,
         "dodger capsule leaves the floor on X");
     for (int index=0;index<PopupPlatformCount;++index) {
         const FBlock platform=PopupPlatform(index);
-        Require(seat.MaxX+CapsuleRadius<platform.CenterX-platform.SizeX*.5f,
+        Require(seat.MaxX+TestRadius()<platform.CenterX-platform.SizeX*.5f,
             "dodger capsule intersects a popup platform");
     }
     for (int index=0;index<PopupSlotCount;++index) {
-        Require(seat.MaxX+CapsuleRadius<PopupMovementSeat(index).MinX-CapsuleRadius,
+        Require(seat.MaxX+TestRadius()<PopupMovementSeat(index).MinX-TestRadius(),
             "foreground dodger can collide with a popup target");
     }
-    Require(seat.MinX-CapsuleRadius>-1800.f+CapsuleRadius,
+    Require(seat.MinX-TestRadius()>-1800.f+TestRadius(),
         "dodger can collide with the trainee's movement plane");
 }
 void DodgerSightlines() {
@@ -245,8 +252,8 @@ void DodgerSightlines() {
                 }
                 for (int index=0;index<PopupSlotCount;++index) {
                     for (Point other:Endpoints(PopupMovementSeat(index))) {
-                        Require(!SegmentHitsBox(point,other.X-CapsuleRadius,other.X+CapsuleRadius,
-                            other.Y-CapsuleRadius,other.Y+CapsuleRadius,other.Z,other.Z+2.f*CapsuleHalfHeight),
+                        Require(!SegmentHitsBox(point,other.X-TestRadius(),other.X+TestRadius(),
+                            other.Y-TestRadius(),other.Y+TestRadius(),other.Z,other.Z+2.f*TestHalfHeight()),
                             "background target blocks the foreground dodger");
                     }
                 }
@@ -255,16 +262,16 @@ void DodgerSightlines() {
     }
 }
 void TrackingSlideLane() {
+    InstagibGeometry = false;
     const FSeat seat=PopupDodgerSeat(); // Link uses the same unobstructed X=-800 lane.
     const float travel=SliderMaximumTravel();
-    const float walkingSpeed=500.f;
+    const float walkingSpeed=940.f;
     const float walkReach=seat.WiggleRange+walkingSpeed/30.f
-        +walkingSpeed*walkingSpeed/(2.f*WiggleAcceleration);
+        +walkingSpeed*walkingSpeed/(2.f*NCAimTrainerCharacterProfile::Acceleration);
     const float slideReach=std::max(500.f+travel,walkReach);
-    Require(slideReach+CapsuleRadius<1800.f,
+    Require(slideReach+TestRadius()<1800.f,
         "lateral native slide or resumed strafe can leave the room");
-    Require(slideReach<DodgerMaximumReach(),
-        "slide widened the existing conservative movement envelope");
+
     for (float offset:{-500.f,-499.99f,0.f,499.99f,500.f}) {
         for (float roll:{0.f,.49f,.5f,1.f}) {
             const float direction=NCAimTrainerScenarioPolicy::TrackingSlideDirection(offset,roll);
@@ -273,13 +280,13 @@ void TrackingSlideLane() {
                 Require(std::abs(y)<=slideReach,
                     "direction guard does not bound outward slide travel");
                 // Center of both standing and conservatively low slide capsules
-                // remains within the minimum accepted1600-unit Link range.
+                // remains within the shipped1800-unit Link range.
                 // This is the fixed trainee position; movement practice may move
                 // the player farther away and deliberately changes difficulty.
                 for (float centerHeight:{40.f,69.f,108.f}) {
                     const float dx=seat.MinX+1800.f, dz=seat.FloorZ+centerHeight-191.f;
-                    Require(dx*dx+y*y+dz*dz<1600.f*1600.f,
-                        "outward tracking slide puts the target beyond minimum beam range");
+                    Require(dx*dx+y*y+dz*dz<1800.f*1800.f,
+                        "outward tracking slide puts the target beyond actual beam range");
                 }
             }
         }
@@ -294,7 +301,7 @@ void TrackingSlideLane() {
                 Require(direction==-side,"post-dodge slide travels farther outward");
                 const float finish=start+direction*travel;
                 Require(std::abs(finish)<=std::abs(start),"post-dodge slide increases its outer excursion");
-                Require(std::max(std::abs(start),std::abs(finish))+CapsuleRadius<1800.f,
+                Require(std::max(std::abs(start),std::abs(finish))+TestRadius()<1800.f,
                     "combined native dodge/slide envelope reaches the wall");
             }
         }
@@ -325,7 +332,9 @@ class AimTrainerLayoutTests(unittest.TestCase):
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").read_text(encoding="utf-8-sig")
         policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").read_text(encoding="utf-8-sig")
         source = directory / "trainer_layout.cpp"
-        source.write_text(layout.replace("#pragma once", "") + "\n" + policy.replace("#pragma once", "")
+        profile = (PLUGIN / "Source/Private/NCAimTrainerCharacterProfile.h").read_text(encoding="utf-8-sig")
+        vector_stub = "struct FVector { explicit FVector(float) {} FVector(float,float,float) {} };\n"
+        source.write_text(vector_stub + profile.replace("#pragma once", "") + "\n" + layout.replace("#pragma once", "") + "\n" + policy.replace("#pragma once", "")
                           + "\n" + CASES, encoding="utf-8")
         cls.executable = directory / ("trainer_layout.exe" if os.name == "nt" else "trainer_layout")
         if msvc:

@@ -47,7 +47,7 @@ enum class ETeleportType { TeleportPhysics };
 struct UCharacterMovementComponent {
     virtual ~UCharacterMovementComponent() = default;
     MovementMode Mode = MOVE_Walking;
-    float Speed = 0.f, MaxWalkSpeed = 500.f;
+    float Speed = 0.f, MaxWalkSpeed = 500.f, MaxWalkSpeedCrouched = 240.f, MaxAcceleration = 6000.f;
     int Stops = 0;
     bool IsMovingOnGround() const { return Mode == MOVE_Walking; }
     void StopMovementImmediately() { Speed = 0.f; ++Stops; }
@@ -62,7 +62,7 @@ struct UUTCharacterMovement : UCharacterMovementComponent {
     bool bIsDodging = false, DodgeInput = false, bIsDodgeLanding = false, FallingFlags = false;
     bool bWantsToCrouch = false, CrouchAllowed = true, StandAllowed = true;
     int Crouches = 0, Uncrouches = 0;
-    float HalfHeight = 108.f;
+    float HalfHeight = 108.f, StandingHalfHeight = 108.f, CrouchedHalfHeight = 40.f;
     float DodgeResetTime = 0.f, DodgeLandingTimeAdjust = -.25f, MovementTime = 0.f;
     bool bIsFloorSliding=false,bWasFloorSliding=false,bWantsFloorSlide=false,bPressedSlide=false,DodgeAllowed=true;
     float FloorSlideTapTime=0.f,FloorSlideEndTime=0.f,FloorSlideDuration=.7f,FloorSlideAcceleration=400.f;
@@ -116,6 +116,7 @@ struct ATeamArenaCharacter : AUTCharacter {
     UCharacterMovementComponent* GetCharacterMovement() { Move.Owner=this; Move.CharacterOwner=this; return &Move; }
     UCharacterMovementComponent* GetCharacterMovement() const { return const_cast<UUTCharacterMovement*>(&Move); }
     FVector GetActorLocation() const { return Position; }
+    FVector GetVelocity() const { return Move.Velocity; }
     World* GetWorld() { return &TheWorld; }
     FVector GetHeadLocation(float) override { ++CapsuleHeadQueries; return FVector(0,0,188); }
     void Tick(float) { ++SuperTicks; }
@@ -138,14 +139,14 @@ struct ATeamArenaCharacter : AUTCharacter {
 void UUTCharacterMovement::Crouch(bool) {
     ++Crouches;
     if (!Owner || !CrouchAllowed) return;
-    if (!Owner->bIsCrouched && IsMovingOnGround()) Owner->Position.Z -= 68.f;
-    Owner->bIsCrouched=true; HalfHeight=40.f;
+    if (!Owner->bIsCrouched && IsMovingOnGround()) Owner->Position.Z -= StandingHalfHeight-CrouchedHalfHeight;
+    Owner->bIsCrouched=true; HalfHeight=CrouchedHalfHeight;
 }
 void UUTCharacterMovement::UnCrouch(bool) {
     ++Uncrouches;
     if (!Owner || !StandAllowed) return;
-    if (Owner->bIsCrouched && IsMovingOnGround()) Owner->Position.Z += 68.f;
-    Owner->bIsCrouched=false; HalfHeight=108.f;
+    if (Owner->bIsCrouched && IsMovingOnGround()) Owner->Position.Z += StandingHalfHeight-CrouchedHalfHeight;
+    Owner->bIsCrouched=false; HalfHeight=StandingHalfHeight;
 }
 struct ANCAimTrainerTarget : ATeamArenaCharacter {
     using Super = ATeamArenaCharacter;
@@ -269,7 +270,7 @@ int main(int argc,char**argv) {
         ANCAimTrainerTarget target; target.ActivateTarget(FVector(0,300,108),false);
         target.StartWiggle(5.f);
         Require(target.bTrainerWiggle&&target.bTrainerStrafe&&target.StrafeRange==20.f
-                &&target.Move.MaxWalkSpeed==220.f&&target.Move.Mode==MOVE_Walking,"wiggle floor/speed incorrect");
+                &&target.Move.MaxWalkSpeed==500.f&&target.Move.Mode==MOVE_Walking,"wiggle changed profile speed or movement mode");
         target.StartWiggle(1000.f);
         Require(target.StrafeRange==110.f,"wiggle exceeded maximum range");
         target.Position.Y=410.f; target.Tick(.016f);
@@ -281,15 +282,59 @@ int main(int argc,char**argv) {
         target.HideTarget(); Require(!target.bTrainerWiggle,"hidden target retained wiggle");
         target.ActivateTarget(FVector(0,0,108),true);
         Require(!target.bTrainerWiggle&&target.StrafeRange==800.f&&target.Move.MaxWalkSpeed==500.f,
-                "new tracking appearance retained narrow wiggle speed/range");
+                "new tracking appearance changed profile speed or retained narrow range");
+    } else if(name=="profile_lifecycle") {
+        for(bool instagib:{false,true}) {
+            ANCAimTrainerTarget target;
+            auto& move=target.Move;
+            // Distinct sentinels prove lifecycle methods preserve the selected
+            // class defaults; profile constructors are checked independently.
+            const float speed=instagib?940.f:930.f, crouch=instagib?245.f:235.f;
+            const float acceleration=instagib?4900.f:4800.f;
+            const float standing=instagib?103.f:108.f, crouched=instagib?38.f:40.f;
+            move.MaxWalkSpeed=speed; move.MaxWalkSpeedCrouched=crouch; move.MaxAcceleration=acceleration;
+            move.HalfHeight=move.StandingHalfHeight=standing; move.CrouchedHalfHeight=crouched;
+            for(bool strafe:{false,true}) {
+                target.ActivateTarget(FVector(100,300,standing),strafe);
+                target.StartWiggle(60.f);
+                Require(target.SetTrainerCrouched(true)&&move.HalfHeight==crouched&&target.Position.Z==crouched,
+                        "selected profile did not use its native crouched capsule");
+                Require(target.SetTrainerCrouched(false)&&move.HalfHeight==standing&&target.Position.Z==standing,
+                        "standing failed to restore selected class height");
+                target.HideTarget();
+                target.ActivateTarget(FVector(200,400,standing),strafe);
+                Require(move.MaxWalkSpeed==speed&&move.MaxWalkSpeedCrouched==crouch&&move.MaxAcceleration==acceleration,
+                        "target appearance or wiggle replaced profile movement defaults");
+                Require(move.HalfHeight==standing&&target.Position.Z==standing,
+                        "new appearance changed selected profile standing height");
+            }
+        }
+    } else if(name=="braking_lane") {
+        for(float sign:{-1.f,1.f}) {
+            auto target=Active();
+            target.Move.MaxWalkSpeed=940.f; target.Move.MaxAcceleration=5000.f;
+            target.StartWiggle(80.f); target.StrafeDirection=sign;
+            target.Move.Velocity=FVector(0.f,sign*940.f,0.f);
+            target.Position=target.StrafeCenter;
+            const int teleports=target.Teleports;
+            target.Tick(.016f);
+            Require(target.LastInput.Y==-sign&&target.Move.MaxWalkSpeed==940.f&&target.Teleports==teleports,
+                    "narrow lane failed to brake before edge or replaced native motion with a speed cap/teleport");
+            target.bTrainerWiggle=false; target.StrafeRange=800.f; target.StrafeDirection=sign;
+            target.Position.Y=target.StrafeCenter.Y+sign*100.f; target.Tick(.016f);
+            Require(target.LastInput.Y==sign,"wide lane reversed while stopping room remained");
+            target.Position.Y=target.StrafeCenter.Y+sign*710.f; target.Tick(.016f);
+            Require(target.LastInput.Y==-sign,"wide lane waited until boundary to brake native speed");
+        }
     } else if(name=="crouch_guards") {
-        for(int guard=0;guard<5;++guard) {
-            auto target=Active(); target.bTrainerWiggle=true;
+        for(bool wiggle:{false,true}) for(int guard=0;guard<6;++guard) {
+            auto target=Active(); target.bTrainerWiggle=wiggle;
             if(guard==0) target.Role=1;
             if(guard==1) target.bTrainerVisible=false;
-            if(guard==2) target.bTrainerWiggle=false;
+            if(guard==2) target.bTrainerStrafe=false;
             if(guard==3) target.Dead=true;
             if(guard==4) target.Move.Mode=MOVE_Falling;
+            if(guard==5) target.Move.bIsFloorSliding=true;
             Require(!target.SetTrainerCrouched(true)&&target.Move.Crouches==0&&!target.Move.bWantsToCrouch,
                     "invalid target entered crouch");
         }
@@ -299,6 +344,42 @@ int main(int argc,char**argv) {
         target.Role=1; target.bIsCrouched=true; target.Move.bWantsToCrouch=true;
         Require(!target.SetTrainerCrouched(false)&&target.Move.bWantsToCrouch&&target.Move.Uncrouches==0,
                 "client uncrouched authoritative target");
+    } else if(name=="tracking_crouch") {
+        for(float standing:{108.f,103.f}) {
+            ANCAimTrainerTarget target;
+            target.Move.HalfHeight=target.Move.StandingHalfHeight=standing;
+            target.Move.CrouchedHalfHeight=72.f;
+            target.Move.MaxWalkSpeed=940.f; target.Move.MaxWalkSpeedCrouched=315.f;
+            target.Move.MaxAcceleration=5000.f;
+            target.ActivateTarget(FVector(-800.f,0.f,50000.f+standing),true);
+            const int teleports=target.Teleports,updates=target.NetUpdates;
+            Require(!target.bTrainerWiggle&&target.SetTrainerCrouched(true)
+                    &&target.bIsCrouched&&target.Move.bWantsToCrouch
+                    &&target.Move.HalfHeight==72.f&&target.Position.Z==50072.f,
+                    "full tracking target could not crouch with its actual capsule profile");
+            target.SetTrainerCrouched(true); target.ReverseStrafe(); target.Tick(.016f);
+            Require(target.Move.Crouches==1&&target.NetUpdates==updates+1&&target.Teleports==teleports
+                    &&target.LastInput.Y==-1.f&&target.LastInput.X==0.f,
+                    "tracking crouch repeated posture changes, teleported or stopped native A/D input");
+            Require(target.Move.MaxWalkSpeed==940.f&&target.Move.MaxWalkSpeedCrouched==315.f
+                    &&target.Move.MaxAcceleration==5000.f,
+                    "tracking crouch changed the selected movement profile");
+            Require(!target.TryTrainerDodge(.5f)&&!target.TryTrainerTrackingSlide(.5f)&&target.SlideEvents==0,
+                    "dodge or slide interrupted a crouched tracking target");
+            target.Move.StandAllowed=false;
+            Require(!target.SetTrainerCrouched(false)&&target.bIsCrouched,
+                    "blocked tracking uncrouch falsely reported clearance");
+            target.Move.StandAllowed=true;
+            Require(target.SetTrainerCrouched(false)&&!target.bIsCrouched&&!target.Move.bWantsToCrouch
+                    &&target.Move.HalfHeight==standing&&target.Position.Z==50000.f+standing,
+                    "tracking recovery failed to restore the selected standing capsule");
+            Require(target.TryTrainerDodge(.5f),"native dodge did not resume after tracking crouch");
+            Require(target.SetTrainerCrouched(true),"tracking target could not crouch again");
+            target.HideTarget();
+            Require(!target.bTrainerVisible&&!target.bIsCrouched&&!target.Move.bWantsToCrouch
+                    &&target.Move.HalfHeight==standing&&target.Move.Mode==MOVE_None,
+                    "hiding a tracking crouch retained posture or active physics");
+        }
     } else if(name=="crouch_posture") {
         ANCAimTrainerTarget target; target.ActivateTarget(FVector(100,300,284),false); target.StartWiggle(60.f);
         const int teleports=target.Teleports, updates=target.NetUpdates;
@@ -308,7 +389,7 @@ int main(int argc,char**argv) {
         target.SetTrainerCrouched(true); target.Tick(.016f);
         Require(target.Move.Crouches==1&&target.NetUpdates==updates+1&&target.Teleports==teleports,
                 "held crouch teleported or repeated native transitions");
-        Require(target.Move.MaxWalkSpeed==220.f&&target.Move.Speed==150.f&&target.InputCalls==1,
+        Require(target.Move.MaxWalkSpeed==500.f&&target.Move.Speed==150.f&&target.InputCalls==1,
                 "crouch changed standing wiggle speed or stopped normal strafe input");
         Require(target.SetTrainerCrouched(false)&&!target.bIsCrouched&&!target.Move.bWantsToCrouch
                 &&target.Move.HalfHeight==108.f&&target.Position.Z==284.f&&target.Teleports==teleports,
@@ -576,7 +657,10 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_controllerless_landing_acceleration_expires_at_stock_deadline(self): self.run_case("landing_recovery")
     def test_wiggle_rejects_invalid_width_hidden_target_and_client_requests(self): self.run_case("wiggle_guards")
     def test_wiggle_boundaries_speed_and_no_dodge_reset_on_next_appearance(self): self.run_case("wiggle_boundaries")
+    def test_target_lifecycle_preserves_selected_movement_and_capsule_profile(self): self.run_case("profile_lifecycle")
+    def test_strafe_brakes_with_native_speed_without_teleporting_or_speed_caps(self): self.run_case("braking_lane")
     def test_crouch_guards_and_failed_request_rollback(self): self.run_case("crouch_guards")
+    def test_tracking_crouch_preserves_profile_strafing_and_native_movement_conflicts(self): self.run_case("tracking_crouch")
     def test_crouch_uses_real_posture_once_without_teleports(self): self.run_case("crouch_posture")
     def test_crouch_reset_handles_hidden_airborne_and_blocked_postures(self): self.run_case("crouch_reset")
     def test_visible_head_pose_and_no_false_helmet_feedback(self): self.run_case("head_feedback")
