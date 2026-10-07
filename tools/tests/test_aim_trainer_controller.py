@@ -52,7 +52,7 @@ constexpr int32 INDEX_NONE = -1;
 constexpr int ROLE_Authority = 3;
 constexpr int NAME_Playing = 1, NAME_Spectating = 2;
 #define UE_SERVER 0
-enum class FKey { Other, F6, M, One, Two, Three, Four, NumPadOne, NumPadTwo, NumPadThree, NumPadFour, Enter };
+enum class FKey { Other, F6, M, One, Two, Three, Four, Five, Six, NumPadOne, NumPadTwo, NumPadThree, NumPadFour, NumPadFive, NumPadSix, Enter };
 using EKeys = FKey;
 enum EInputEvent { IE_Pressed, IE_Released, IE_Repeat };
 struct FPlatformTime { static double Now; static double Seconds() { return Now; } };
@@ -239,8 +239,20 @@ void MenuControls() {
     Require(pc.LastSelection == 3, "fourth scenario key was not selected");
     pc.InputKey(EKeys::NumPadFour, IE_Pressed, 1.f, false);
     Require(pc.LastSelection == 3, "fourth scenario keypad key was not selected");
+    for (FKey key : {EKeys::Five, EKeys::NumPadFive}) {
+        Require(pc.InputKey(key, IE_Pressed, 1.f, false), "SACTF headshots key escaped");
+        Require(pc.LastSelection == 4, "SACTF headshots scenario key mismatch");
+    }
+    for (FKey key : {EKeys::Six, EKeys::NumPadSix}) {
+        Require(pc.InputKey(key, IE_Pressed, 1.f, false), "SACTF popup key escaped");
+        Require(pc.LastSelection == 5, "SACTF popup scenario key mismatch");
+        const int count = pc.Selects;
+        pc.InputKey(key, IE_Repeat, 1.f, false);
+        pc.InputKey(key, IE_Released, 0.f, false);
+        Require(pc.Selects == count, "SACTF repeated key generated another request");
+    }
     const int selects = pc.Selects;
-    pc.SelectTrainerScenario(4);
+    pc.SelectTrainerScenario(6);
     pc.SelectTrainerScenario(255);
     Require(pc.Selects == selects, "invalid scenario sent");
 }
@@ -277,7 +289,7 @@ void FireGates() {
         pc.Role = role;
         pc.BeginPlay();
         pc.ClientRestart_Implementation(&pawn);
-        for (uint8 scenario = 0; scenario < 4; ++scenario) {
+        for (uint8 scenario = 0; scenario < 6; ++scenario) {
             pc.TrainerProgress.Scenario = scenario;
             for (uint8 phase = 0; phase < 4; ++phase) {
                 pc.TrainerProgress.Phase = phase;

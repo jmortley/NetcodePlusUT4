@@ -1,10 +1,17 @@
 #pragma once
 
-// Timing and direction rules for the revision-10 trainer preset. The authority
+// Timing and direction rules for the revision-11 trainer preset. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
     enum { InstagibMaxActiveTargets = 6 };
+
+    inline bool IsHeadshotScenario(int Scenario) { return Scenario == 1 || Scenario == 4; }
+    inline bool IsPopupScenario(int Scenario) { return Scenario == 2 || Scenario == 3 || Scenario == 5; }
+    inline bool IsSACTFScenario(int Scenario) { return Scenario == 4 || Scenario == 5; }
+    inline bool IsSniperScenario(int Scenario) { return Scenario == 1 || Scenario == 3 || IsSACTFScenario(Scenario); }
+    inline bool HasHeadshotBonus(int Scenario) { return Scenario == 3 || Scenario == 5; }
+    inline int ArenaScenario(int Scenario) { return Scenario == 0 ? 0 : IsHeadshotScenario(Scenario) ? 1 : 2; }
 
     inline float UnitRoll(float Roll)
     {
@@ -97,8 +104,9 @@ namespace NCAimTrainerScenarioPolicy
 
     inline float PopupRefireSeconds(float RefireSeconds)
     {
-        // Faster custom weapons cannot turn the standard preset into bursts.
-        return RefireSeconds >= 1.f ? RefireSeconds : 1.f;
+        // SACTF is the fastest supported rifle. Game initialization separately
+        // validates each preset's exact refire and clamps other pop-ups to 1s.
+        return RefireSeconds >= 0.7f ? RefireSeconds : 0.7f;
     }
 
     inline float PopupSpawnDelay(float RefireSeconds, float Roll)

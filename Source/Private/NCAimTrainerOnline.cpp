@@ -161,7 +161,16 @@ namespace
 
 const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)
 {
-	return Scenario == 0 ? TEXT("strafe") : Scenario == 1 ? TEXT("headshots") : Scenario == 2 ? TEXT("instagib") : Scenario == 3 ? TEXT("precision_popup") : TEXT("");
+	switch (Scenario)
+	{
+	case 0: return TEXT("strafe");
+	case 1: return TEXT("headshots");
+	case 2: return TEXT("instagib");
+	case 3: return TEXT("precision_popup");
+	case 4: return TEXT("sactf_headshots");
+	case 5: return TEXT("sactf_popup");
+	default: return TEXT("");
+	}
 }
 
 void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Result,
@@ -174,7 +183,7 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 		Completion(false, TEXT("Practice result: shared scores require an approved online server"));
 		return;
 	}
-	if (Result.Scenario < 0 || Result.Scenario > 3 || Result.PlayerId.IsEmpty())
+	if (Result.Scenario < 0 || Result.Scenario > 5 || Result.PlayerId.IsEmpty())
 	{
 		Completion(false, TEXT("Practice result: no authenticated player identity"));
 		return;
@@ -207,7 +216,7 @@ void FNCAimTrainerOnline::Fetch(UWorld* World, int32 Scenario,
 	// Submission stays authority-only and uses its separate credential path.
 	if (!World) { Completion(false, TArray<FNCAimTrainerLeaderboardRow>()); return; }
 	const FTrainerOnlineConfig Config = ReadConfig();
-	if (!Config.bEnabled || Scenario < 0 || Scenario > 3)
+	if (!Config.bEnabled || Scenario < 0 || Scenario > 5)
 	{
 		Completion(false, TArray<FNCAimTrainerLeaderboardRow>());
 		return;

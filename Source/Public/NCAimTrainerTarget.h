@@ -69,6 +69,15 @@ public:
     ANCAimTrainerInstagibTarget(const FObjectInitializer& ObjectInitializer);
 };
 
+/** SACTF dimensions and native movement for the matching rifle presets. */
+UCLASS(NotBlueprintable)
+class NETCODEPLUS_API ANCAimTrainerSACTFTarget : public ANCAimTrainerTarget
+{
+    GENERATED_BODY()
+public:
+    ANCAimTrainerSACTFTarget(const FObjectInitializer& ObjectInitializer);
+};
+
 /** Runtime room: hard references keep the stock cube/material in the cook.
  * Every client constructs the same fixed geometry, so no map asset is needed. */
 UCLASS(NotBlueprintable)

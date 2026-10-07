@@ -39,6 +39,12 @@ ANCAimTrainerInstagibCharacter::ANCAimTrainerInstagibCharacter(const FObjectInit
     NCAimTrainerCharacterProfile::ApplyInstagibMovement(*UTCharacterMovement);
 }
 
+ANCAimTrainerSACTFCharacter::ANCAimTrainerSACTFCharacter(const FObjectInitializer& ObjectInitializer)
+    : Super(ObjectInitializer)
+{
+    NCAimTrainerCharacterProfile::ApplySACTFMovement(*UTCharacterMovement);
+}
+
 UNCAimTrainerMovement::UNCAimTrainerMovement(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {

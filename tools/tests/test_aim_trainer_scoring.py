@@ -30,7 +30,8 @@ struct AActor { virtual ~AActor() = default; };
 struct AUTPlayerState : AActor {
     float StoredShots = 0.f;
     float LightningShots = 0.f;
-    float GetStatsValue(int name) const { return name == 2 ? LightningShots : StoredShots; }
+    float SACTFShots = 0.f;
+    float GetStatsValue(int name) const { return name == 3 ? SACTFShots : name == 2 ? LightningShots : StoredShots; }
 };
 struct AController : AActor { AActor* PlayerState = nullptr; };
 struct ANCAimTrainerPlayerController : AController {
@@ -44,6 +45,9 @@ struct AUTWeapon : AActor {
 };
 struct AUTWeaponFix : AUTWeapon { float Rewind = 0; float GetHitValidationPredictionTime() const { return Rewind; } };
 struct AUTPlusSniper : AUTWeaponFix { int HeadshotDamageType = 5; };
+struct SACTFSniper : AUTPlusSniper {
+    SACTFSniper() { ShotsStatsName=3; HeadshotDamageType=33; }
+};
 struct AUTWeap_LinkGun_NCP : AUTWeaponFix {
     bool Firing = true, Pulsing = false;
     int Mode = 1;
@@ -164,6 +168,54 @@ int main(int argc, char** argv) {
             f.Game.Progress.TargetsExpired=1; f.Game.UpdateShotCount();
             Require(f.Game.Progress.Score==200,"popup expiry stopped costing25");
         }
+    } else if (name == "sactf_headshots") {
+        Fixture f; SACTFSniper rifle;
+        f.Game.Progress.Scenario=4; f.Game.RunWeapon=&rifle;
+        f.PlayerState.StoredShots=150.f; f.PlayerState.LightningShots=180.f;
+        f.PlayerState.SACTFShots=20.f;
+        f.Game.ShotStatBaseline=rifle.GetWeaponShotsStats(&f.PlayerState);
+        f.PlayerState.SACTFShots=21.f; f.Game.Progress.TargetsExpired=20;
+        // A large damage number and another rifle's headshot type are not a SACTF headshot.
+        for(int wrongType : {1,5,9}) {
+            f.Event.DamageTypeClass=wrongType;
+            Require(f.Game.RecordTargetHit(&f.Target,1000.f,f.Event,&f.Player,&rifle)==0.f
+                    && f.Target.Visible && f.Game.Progress.Hits==0 && f.Game.Progress.Headshots==0
+                    && f.Player.Confirmations==0,
+                    "SACTF headshot-only mode accepted damage amount or another rifle's head type");
+        }
+        f.PlayerState.SACTFShots=22.f; f.Event.DamageTypeClass=rifle.HeadshotDamageType;
+        Require(f.Game.RecordTargetHit(&f.Target,1.f,f.Event,&f.Player,&rifle)>0.f
+                && !f.Target.Visible && f.Game.Progress.Shots==2 && f.Game.Progress.Hits==1
+                && f.Game.Progress.Headshots==1 && f.Game.Progress.Score==100
+                && f.Game.Progress.Accuracy==50.f && f.Game.LastLocalHead,
+                "SACTF confirmed headshot lost own shot history, immediate100 or checkpoint head flag");
+        Require(f.Game.RecordTargetHit(&f.Target,1000.f,f.Event,&f.Player,&rifle)==0.f
+                && f.Player.Confirmations==1, "SACTF headshot appearance scored twice");
+    } else if (name == "sactf_popup") {
+        Fixture f; SACTFSniper rifle;
+        f.Game.Progress.Scenario=5; f.Game.RunWeapon=&rifle;
+        f.PlayerState.StoredShots=140.f; f.PlayerState.LightningShots=160.f;
+        f.PlayerState.SACTFShots=1.f; f.Event.DamageTypeClass=1;
+        Require(f.Game.RecordTargetHit(&f.Target,1000.f,f.Event,&f.Player,&rifle)>0.f
+                && !f.Target.Visible && f.Game.Progress.Score==100 && f.Game.Progress.Headshots==0
+                && !f.Game.LastLocalHead && f.Game.NextTargetTime[0]==f.Game.TheWorld.Now,
+                "first SACTF body hit failed to retire popup and score100 without a head bonus");
+        Require(f.Game.RecordTargetHit(&f.Target,1000.f,f.Event,&f.Player,&rifle)==0.f,
+                "SACTF popup body hit scored duplicate appearance");
+        f.Target.Visible=true; f.PlayerState.SACTFShots=2.f; f.Event.DamageTypeClass=5;
+        Require(f.Game.RecordTargetHit(&f.Target,1000.f,f.Event,&f.Player,&rifle)>0.f
+                && f.Game.Progress.Score==200 && f.Game.Progress.Headshots==0 && !f.Game.LastLocalHead,
+                "normal sniper headshot type incorrectly received SACTF head bonus");
+        f.Target.Visible=true; f.PlayerState.SACTFShots=3.f; f.Event.DamageTypeClass=rifle.HeadshotDamageType;
+        Require(f.Game.RecordTargetHit(&f.Target,1.f,f.Event,&f.Player,&rifle)>0.f
+                && f.Game.Progress.Score==350 && f.Game.Progress.Headshots==1 && f.Game.LastLocalHead
+                && f.Game.Progress.Shots==3 && f.Game.Progress.Hits==3,
+                "SACTF popup true headshot did not score150 or used another rifle's shot counter");
+        f.PlayerState.SACTFShots=4.f; f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Score==325 && f.Game.Progress.Accuracy==75.f,
+                "SACTF popup miss stopped affecting points and accuracy");
+        f.Game.Progress.TargetsExpired=1; f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Score==300, "SACTF popup expiry penalty changed");
     } else if (name == "shot_baseline") {
         Fixture f;
         f.PlayerState.StoredShots=123.f;
@@ -415,7 +467,8 @@ class AimTrainerScoringTests(unittest.TestCase):
         weapon = (PLUGIN.parents[1] / "Source/UnrealTournament/Private/UTWeapon.cpp").read_text(encoding="utf-8-sig")
         scoring = (PLUGIN / "Source/Private/NCAimTrainerScoring.h").read_text(encoding="utf-8-sig").replace("#pragma once", "")
         source = directory / "trainer.cpp"
-        source.write_text("\n".join((ADAPTER, scoring,
+        policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").read_text(encoding="utf-8-sig").replace("#pragma once", "")
+        source.write_text("\n".join((ADAPTER, scoring, policy,
                                     native_function(weapon, "float AUTWeapon::GetWeaponShotsStats"),
                                     native_function(game, "float ANCAimTrainerGame::RecordTargetHit"),
                                     native_function(game, "void ANCAimTrainerGame::UpdateShotCount"),
@@ -438,6 +491,8 @@ class AimTrainerScoringTests(unittest.TestCase):
 
     def test_precision_formula_and_untrusted_bounds(self): self.run_case("precision")
     def test_precision_popup_first_body_hit_and_sniper_lightning_head_bonus(self): self.run_case("precision_popup")
+    def test_sactf_headshots_require_actual_rifle_head_type_and_award100(self): self.run_case("sactf_headshots")
+    def test_sactf_popup_retires_body_hits_and_awards150_only_for_real_heads(self): self.run_case("sactf_popup")
     def test_shot_counter_subtracts_run_baseline_and_rejects_midrun_counter_reset(self): self.run_case("shot_baseline")
     def test_accepted_headshots_award_immediate_points_despite_misses_and_expiry_while_instagib_keeps_penalties(self): self.run_case("headshot_points")
     def test_shot_counter_rejects_impossible_and_nonfinite_stats_without_touching_tracking(self): self.run_case("shot_invalid")

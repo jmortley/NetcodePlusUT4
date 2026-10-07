@@ -43,6 +43,7 @@ private:
     UPROPERTY() TArray<ANCAimTrainerTarget*> Targets;
     UPROPERTY() TSubclassOf<AUTWeapon> SniperClass;
     UPROPERTY() TSubclassOf<AUTWeapon> LightningClass;
+    UPROPERTY() TSubclassOf<AUTWeapon> SACTFSniperClass;
     UPROPERTY() TSubclassOf<AUTWeapon> InstagibClass;
     UPROPERTY() TSubclassOf<AUTWeapon> LinkClass;
     UPROPERTY() AUTWeapon* RunWeapon = nullptr;

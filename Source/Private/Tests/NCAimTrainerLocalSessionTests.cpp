@@ -129,7 +129,7 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 		};
 		return Session;
 	};
-	// Exercise the actual v10 start encoder and decoder without an online
+	// Exercise the actual v11 start encoder and decoder without an online
 	// account or live provider, including the movement-board identity.
 	TSharedPtr<FNCAimTrainerLocalSession> StartSession = NewSession();
 	StartSession->bStarting = true;
@@ -141,8 +141,21 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 	if (StartJson.IsValid())
 	{
 		TestEqual(TEXT("Precision popup has an independent scenario"), StartJson->GetStringField(TEXT("scenario")), FString(TEXT("precision_popup")));
-		TestEqual(TEXT("New runs use preset revision 10"), StartJson->GetNumberField(TEXT("revision")), 10.0);
+		TestEqual(TEXT("New runs use preset revision 11"), StartJson->GetNumberField(TEXT("revision")), 11.0);
 		TestTrue(TEXT("Start payload includes movement mode"), StartJson->GetBoolField(TEXT("movement")));
+	}
+	const TCHAR* SactfSlugs[] = { TEXT("sactf_headshots"), TEXT("sactf_popup") };
+	for (int32 Scenario = 4; Scenario < 6; ++Scenario)
+	{
+		StartSession->BuildStartBody(Scenario);
+		TSharedPtr<FJsonObject> SactfJson;
+		TestTrue(TEXT("SACTF start payload is JSON"), FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(StartSession->StartBody), SactfJson));
+		if (SactfJson.IsValid())
+		{
+			TestEqual(TEXT("SACTF scenarios submit independent slugs"), SactfJson->GetStringField(TEXT("scenario")), FString(SactfSlugs[Scenario - 4]));
+			TestEqual(TEXT("SACTF uses revision 11"), SactfJson->GetNumberField(TEXT("revision")), 11.0);
+			TestTrue(TEXT("SACTF preserves movement board identity"), SactfJson->GetBoolField(TEXT("movement")));
+		}
 	}
 	const FString StartAck = FString::Printf(TEXT("{\"run_id\":\"%s\",\"player_id\":\"0123456789abcdef0123456789abcdef\",\"display_name\":\"Fixture\",\"run_token\":\"fixture-run-token\",\"checkpoint_ms\":5000,\"expires_in\":180,\"movement\":true}"), *Id);
 	StartSession->HandleResponse(StartSession->RequestSerial, 201, StartAck);

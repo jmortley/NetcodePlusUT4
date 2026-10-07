@@ -39,11 +39,13 @@ struct UClass {
 UClass DefaultType("/Game/RestrictedAssets/Blueprints/DefaultCharacter.DefaultCharacter_C");
 UClass TrainerType("/Script/NetcodePlus.NCAimTrainerCharacter");
 UClass InstagibTrainerType("/Script/NetcodePlus.NCAimTrainerInstagibCharacter");
+UClass SACTFTrainerType("/Script/NetcodePlus.NCAimTrainerSACTFCharacter");
 UClass OverrideType("/Script/OtherMode.CustomPawn");
 struct APawn {};
 struct AController { bool Remote = false; };
 struct ANCAimTrainerCharacter { static UClass* StaticClass() { return &TrainerType; } };
 struct ANCAimTrainerInstagibCharacter { static UClass* StaticClass() { return &InstagibTrainerType; } };
+struct ANCAimTrainerSACTFCharacter { static UClass* StaticClass() { return &SACTFTrainerType; } };
 struct FStringAssetReference {
     FString Path;
     FStringAssetReference() = default;
@@ -168,11 +170,11 @@ int main(int argc, char** argv) {
             ANCAimTrainerGame game;
             AController player; player.Remote = remote;
             FString error; game.InitGame("DM-DeckTest", "", error);
-            for (int scenario : {0,1,2,1,2,0}) {
+            for (int scenario : {0,1,2,3,4,5,1,5,2,4,0}) {
                 game.Progress.Scenario = scenario;
                 game.DefaultPawnClass = &OverrideType;
                 Require(game.GetDefaultPawnClassForController_Implementation(&player)
-                        == (scenario == 2 ? &InstagibTrainerType : &TrainerType),
+                        == (scenario == 2 ? &InstagibTrainerType : scenario >= 4 ? &SACTFTrainerType : &TrainerType),
                         "scenario selector reused the wrong native character CDO");
             }
         }
@@ -204,8 +206,9 @@ class AimTrainerPawnClassTests(unittest.TestCase):
             "UClass* ANCAimTrainerGame::GetDefaultPawnClassForController_Implementation",
         )
         source = directory / "trainer_pawn_class.cpp"
+        policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
         source.write_text("\n".join(
-            [ADAPTER, stock_selection] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+            [ADAPTER, f'#include "{policy}"', stock_selection] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_pawn_class.exe" if os.name == "nt" else "trainer_pawn_class")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),

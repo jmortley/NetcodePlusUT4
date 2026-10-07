@@ -80,6 +80,27 @@ struct AUTCharacter : ACharacter {
     MeshComponent* GetMesh() { return Mesh; }
     void RecalculateBaseEyeHeight() override;
 };
+struct FObjectInitializer {};
+// Model only the existing base constructors' profile setup. The two new
+// derived constructors below are extracted verbatim from production code.
+struct ANCAimTrainerCharacter : AUTCharacter {
+    explicit ANCAimTrainerCharacter(const FObjectInitializer&) {
+        NCAimTrainerCharacterProfile::ApplyCharacter(*this, NCAimTrainerCharacterProfile::TeamArena());
+        NCAimTrainerCharacterProfile::ApplyTeamArenaMovement(*UTCharacterMovement);
+    }
+};
+struct ANCAimTrainerTarget : ANCAimTrainerCharacter {
+    explicit ANCAimTrainerTarget(const FObjectInitializer& init) : ANCAimTrainerCharacter(init) {}
+};
+struct ANCAimTrainerSACTFCharacter : ANCAimTrainerCharacter {
+    using Super=ANCAimTrainerCharacter;
+    explicit ANCAimTrainerSACTFCharacter(const FObjectInitializer&);
+};
+struct ANCAimTrainerSACTFTarget : ANCAimTrainerTarget {
+    using Super=ANCAimTrainerTarget;
+    explicit ANCAimTrainerSACTFTarget(const FObjectInitializer&);
+};
+// SACTF_CONSTRUCTORS
 // ENGINE_CALLBACKS
 void Require(bool value, const char* message) {
     if (!value) { std::cerr << message << '\n'; std::exit(1); }
@@ -108,10 +129,13 @@ void CharacterDefaults() {
 }
 void MovementDefaults() {
     using namespace NCAimTrainerCharacterProfile;
-    for (bool instagib : {false,true}) {
+    for (int profile : {0,1,2}) {
+        const bool instagib=profile==1, sactf=profile==2;
         Movement move; move.MaxWalkSpeed=500.f; move.MaxWalkSpeedCrouched=220.f;
         move.MaxAcceleration=7000.f;
-        if (instagib) ApplyInstagibMovement(move); else ApplyTeamArenaMovement(move);
+        if (instagib) ApplyInstagibMovement(move);
+        else if (sactf) ApplySACTFMovement(move);
+        else ApplyTeamArenaMovement(move);
         Near(move.MaxWalkSpeed,940.f,"exercise speed limit survived");
         Near(move.MaxWalkSpeedCrouched,315.f,"exercise crouch limit survived");
         Near(move.MaxAcceleration,5000.f,"authored acceleration missing");
@@ -130,7 +154,7 @@ void MovementDefaults() {
         Near(move.FullImpactDamage,25.f,"authored full impact damage missing");
         Near(move.ImpactMaxHorizontalVelocity,2300.f,"authored impact speed missing");
         Near(move.MaxInitialFloorSlideSpeed,1350.f,"BeginPlay initial slide speed missing");
-        Near(move.MaxFloorSlideSpeed,1100.f,"BeginPlay sustained slide speed missing");
+        Near(move.MaxFloorSlideSpeed,sactf?900.f:1100.f,"sustained slide speed differs from the selected Blueprint");
         Near(move.JumpZVelocity,730.f,"profile changed inherited jump");
         Near(move.DodgeImpulseHorizontal,1500.f,"profile changed inherited horizontal dodge");
         Near(move.DodgeImpulseVertical,500.f,"profile changed inherited vertical dodge");
@@ -138,6 +162,45 @@ void MovementDefaults() {
         Near(move.Velocity,67.f,"profile changed live velocity");
         Near(move.SavedMoveTimestamp,10.5f,"profile changed prediction history");
     }
+}
+template<class Pawn>
+void SACTFClassDefaults() {
+    const FObjectInitializer init;
+    Pawn cdo(init), first(init), second(init);
+    UClass type; type.CDO=&cdo; cdo.Class=&type; first.Class=&type; second.Class=&type;
+    // A fresh instance and the class default must have the SACTF profile
+    // before any run starts. Runtime-only mutation would fail these checks.
+    for (Pawn* pawn : {&cdo,&first,&second}) {
+        Near(pawn->Move.MaxFloorSlideSpeed,900.f,"SACTF constructor did not establish native slide defaults");
+        Near(pawn->Move.MaxInitialFloorSlideSpeed,1350.f,"SACTF initial slide differs from gameplay");
+        Near(pawn->BodyCapsule.Radius,40.f,"SACTF capsule radius differs from gameplay");
+        Near(pawn->BodyCapsule.HalfHeight,108.f,"SACTF capsule height differs from gameplay");
+        Near(pawn->Body.RelativeScale3D.Z,1.f,"SACTF inherited TeamArena scale was lost");
+        Near(pawn->Body.RelativeLocation.Z,-110.f,"SACTF mesh seat differs from gameplay");
+        Near(pawn->BaseEyeHeight,83.f,"SACTF standing eye differs from gameplay");
+        Near(pawn->CrouchedEyeHeight,45.f,"SACTF initial crouch eye differs from gameplay");
+        Near(pawn->DefaultCrouchedEyeHeight,40.f,"SACTF inherited crouch eye differs from gameplay");
+        Near(pawn->FloorSlideEyeHeight,1.f,"SACTF slide eye differs from gameplay");
+        Near(pawn->SlideTargetHeight,69.f,"SACTF slide height differs from gameplay");
+        Require(pawn->Body.AnimClass==47,"SACTF profile changed animation setup");
+    }
+    const float heightAdjust=108.f-72.f;
+    for (int cycle=0;cycle<20;++cycle) {
+        first.bIsCrouched=true; first.OnStartCrouch(heightAdjust,heightAdjust);
+        Near(first.BaseEyeHeight,40.f,"SACTF crouch eye incorrect");
+        first.bIsCrouched=false; first.OnEndCrouch(heightAdjust,heightAdjust);
+        Near(first.BaseEyeHeight,83.f,"SACTF uncrouch lost class eye height");
+        Near(first.Body.RelativeLocation.Z,-110.f,"SACTF posture drifted from class mesh seat");
+        first.Move.bIsFloorSliding=true; first.RecalculateBaseEyeHeight();
+        Near(first.BaseEyeHeight,1.f,"SACTF slide eye incorrect");
+        first.Move.bIsFloorSliding=false; first.RecalculateBaseEyeHeight();
+    }
+    first.Move.MaxFloorSlideSpeed=1.f;
+    first.Body.RelativeLocation.Z=0.f;
+    Near(cdo.Move.MaxFloorSlideSpeed,900.f,"live SACTF movement changed class default");
+    Near(second.Move.MaxFloorSlideSpeed,900.f,"live SACTF movement changed another actor");
+    Near(cdo.Body.RelativeLocation.Z,-110.f,"live SACTF posture changed class default");
+    Near(second.Body.RelativeLocation.Z,-110.f,"live SACTF posture changed another actor");
 }
 void Posture() {
     using namespace NCAimTrainerCharacterProfile;
@@ -211,6 +274,8 @@ int main(int argc,char** argv) {
     else if(name=="posture") Posture();
     else if(name=="repeat") Repeat();
     else if(name=="strafe") StrafeBraking();
+    else if(name=="sactf_character") SACTFClassDefaults<ANCAimTrainerSACTFCharacter>();
+    else if(name=="sactf_target") SACTFClassDefaults<ANCAimTrainerSACTFTarget>();
     else Require(false,"unknown test case");
 }
 '''
@@ -229,8 +294,13 @@ class AimTrainerProfileTests(unittest.TestCase):
                        for signature in ("void ACharacter::OnStartCrouch", "void ACharacter::OnEndCrouch")]
         definitions.append(native_function(character.read_text(encoding="utf-8-sig"),
                                            "void AUTCharacter::RecalculateBaseEyeHeight"))
+        constructors = [native_function((PLUGIN / "Source/Private" / filename).read_text(encoding="utf-8-sig"),
+                                        f"{classname}::{classname}")
+                        for filename, classname in (("NCAimTrainerCharacter.cpp", "ANCAimTrainerSACTFCharacter"),
+                                                    ("NCAimTrainerTarget.cpp", "ANCAimTrainerSACTFTarget"))]
         source = directory / "profiles.cpp"
-        source.write_text(ADAPTER.replace("// ENGINE_CALLBACKS", "\n".join(definitions)), encoding="utf-8")
+        source.write_text(ADAPTER.replace("// ENGINE_CALLBACKS", "\n".join(definitions))
+                          .replace("// SACTF_CONSTRUCTORS", "\n".join(constructors)), encoding="utf-8")
         cls.executable = directory / ("profiles.exe" if os.name == "nt" else "profiles")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14",
@@ -263,6 +333,12 @@ class AimTrainerProfileTests(unittest.TestCase):
 
     def test_full_speed_strafe_brakes_inside_short_lanes_at_multiple_frame_rates(self):
         self.run_case("strafe")
+
+    def test_sactf_trainee_constructor_sets_class_defaults_and_preserves_posture(self):
+        self.run_case("sactf_character")
+
+    def test_sactf_target_constructor_sets_class_defaults_and_preserves_posture(self):
+        self.run_case("sactf_target")
 
 
 if __name__ == "__main__":

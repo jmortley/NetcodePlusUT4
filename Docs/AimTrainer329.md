@@ -1,6 +1,6 @@
 # NetcodePlus Aim Trainer (UE 4.15 / 329)
 
-An opt-in game mode with real animated UT character targets, four 60-second
+An opt-in game mode with real animated UT character targets, six 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
@@ -88,7 +88,7 @@ The first version supports **one trainee per server instance**. Use separate
 instances for simultaneous players. Scores from approved instances share the
 same UT4Stats leaderboard.
 
-Click a scenario card or press **1**, **2**, **3**, or **4**. Press **Enter** or click
+Click a scenario card or press **1** through **6**. Press **Enter** or click
 Start for the countdown. **F6** cancels an incomplete run and returns to the
 picker. **Enter** retries from the results screen. **Escape** retains the normal
 UT menu. Cancelled runs and disconnects do not submit partial scores.
@@ -119,7 +119,7 @@ Press **M** or click the movement button in the picker/results screen to enable
 optional **movement practice**. Strafe along the room's left/right lane with
 normal UT side dodges, jumping and crouching. Forward/backward movement and
 forward/back dodges are disabled; side dodges stay aligned with the lane as
-you turn your view. Room walls bound the lane. The option applies to all four
+you turn your view. Room walls bound the lane. The option applies to all six
 scenarios, survives retries and scenario changes, and cannot change mid-run.
 Fixed-position aiming remains the default.
 
@@ -129,12 +129,12 @@ Fixed-position and movement results never compete on the same board;
 jumping/crouching changes the headshot cover challenge. Movement runs follow
 the same eligibility and submission checks as fixed-position runs.
 
-All four scenarios support offline standalone practice. A hub is not required.
+All six scenarios support offline standalone practice. A hub is not required.
 Eligible local results use the separate account-authenticated checkpoint board.
 An approved network host submits to the approved-server board. A directly
 connected dedicated server can be used for network testing without a hub.
 
-## Scenarios and scoring (revision 10)
+## Scenarios and scoring (revision 11)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
@@ -142,6 +142,8 @@ connected dedicated server can be used for network testing without a hub.
 | Headshots | Hit wiggling character heads at five cover stations with the NCP Sniper or Lightning Gun. Body hits do not count. | 100 per confirmed headshot. Misses affect accuracy; expired targets do not deduct points. |
 | Instagib pop-up | Shoot five moving pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block and a forward slide on the high right platform. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
 | Sniper/LG pop-up | The pop-up layout with the selected NCP Sniper or Lightning Gun, TeamArena character dimensions and rifle-paced appearances. The first accepted body hit or headshot retires that appearance. | 100 per hit, plus 50 per confirmed headshot, minus 25 per miss and expired pop-up, floored at zero. |
+| SACTF headshots | The head-peek exercise using the actual SACTF sniper and SACTF movement profile. Body hits do not count. | 100 per confirmed headshot; misses affect accuracy only. |
+| SACTF pop-up | The moving pop-up exercise using the actual SACTF sniper. First accepted hit retires the target. | 100 per hit, plus 50 per confirmed headshot, minus 25 per miss and expired pop-up, floored at zero. |
 
 Tracking observes the real authoritative NCP Link beam's selected target, with
 a maximum 30 Hz observation rate. It only credits intervals with beam contact
@@ -149,7 +151,7 @@ at both endpoints, and discards observation gaps longer than 100 ms. Tracking
 accuracy divides beam-contact time by time firing, using the same sampling and
 continuity rules for both clocks. Idle time changes neither accuracy nor score;
 firing off-target lowers accuracy. Score remains total contact milliseconds
-over the 60-second run. The three shooting scenarios use successful hits divided
+over the 60-second run. The five shooting scenarios use successful hits divided
 by fired shots. Weapons retain their normal firing rhythm.
 
 Revision 6 removes point deductions from headshot practice. Earlier revisions
@@ -170,6 +172,29 @@ headshot scales, so they share each scenario's board. Scoring reads the equipped
 own shot counter and headshot damage type, including LightningRifleShots and
 the Lightning Gun headshot type. Missing LG content blocks the run rather than
 silently substituting the sniper.
+
+**[5] SACTF Headshots** and **[6] SACTF Pop-up** load
+`/Game/Blueprints/Netcode/SACTFSniper.SACTFSniper_C` from the installed
+**MutSaCTF content pak**. NCWepMut alone does not contain that weapon. Missing
+content blocks these two modes with an explicit message; the trainer does not
+substitute the normal sniper or apply the player's Lightning preference.
+
+The audited SACTF asset fires every **0.7 seconds**, with 70 body damage,
+140 headshot damage, 1.75 headshot scales, and head sphere padding of 6 while
+moving / 2 while stationary. These are the weapon's real native NCP hit rules;
+practice points are separate from damage. The trainer leaves the asset's
+firing, zoom, hit validation and cosmetic behavior intact. Pop-up appearances
+are spaced 0.70–0.77 seconds apart and last 3.85–4.76 seconds. An altered firing
+interval makes either SACTF preset practice-only.
+
+Both SACTF presets use native trainer pawns matching the audited
+`SaCTFCharacter`: TeamArena-sized 40-by-108 capsule, 940 walk speed and 5000
+acceleration, but **900 sustained slide speed**, with 1350 initial slide speed.
+Separate class defaults preserve those settings through crouch restoration and
+network possession. Fixed-position and movement runs have separate SACTF
+leaderboards under each existing local/approved-server source. Revision 11
+adds these boards while preserving revision-10 results and APIs.
+
 
 Tracking uses the existing beam's range, obstruction and server validation.
 It does not normalize network latency; use low-ping hosts when comparing runs.
@@ -244,7 +269,7 @@ time remains for the slide, posture transition and a full rifle refire
 interval before target expiry or the run's end. Hits, hiding and reuse clear
 the slide state, so a replacement starts standing with a fresh deadline.
 
-All three shooting scenarios use brief 0.12–0.28-second A/D reversals with the
+All five shooting scenarios use brief 0.12–0.28-second A/D reversals with the
 character profile's normal 940-unit walking limit and 5000 acceleration. Short
 holds and early turns limit the distance traveled, rather than a custom speed
 cap. Each seat has a bounded movement range, with room for the capsule and
@@ -274,28 +299,29 @@ Targets behind cover can briefly disappear while crouched. Reappearing targets
 start standing; headshot targets do not gain these crouches. Link tracking uses
 the separate, less frequent schedule described above.
 
-All four use the fixed target model/preset in revision 10. Custom models,
+All six use the fixed target model/preset in revision 11. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=10&movement=0&limit=10`
-(also `headshots`, `instagib` and `precision_popup`). Add `scope=local_checkpoints`
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=11&movement=0&limit=10`
+(also `headshots`, `instagib`, `precision_popup`, `sactf_headshots` and
+`sactf_popup`). Add `scope=local_checkpoints`
 for local results; the default source is `approved_servers`. Use `movement=1`
 for movement practice. The web page is `/aimtrainer/`. Each board shows one best
 run per player, isolated by scenario, revision, source and movement setting.
 Successful menu reads are cached for one minute. Approved hosts send aggregate
 results; authenticated local runs send the checkpoints described below.
 
-Revision 10 submissions require a Boolean `movement` field. Django retains
+Revision 10 and 11 submissions require a Boolean `movement` field. Django retains
 revision-1 through revision-9 submissions and explicit older boards, treating
 them as fixed-position results. Older payload digests remain unchanged.
 Revision 4 onward includes `fired_ms`: measured firing time for tracking and
 zero for precision scenarios. Apply migrations through
-`0068_nc_aimtrainer_movement` and deploy revision-10 API support before enabling
-revision-10 hosts. Rebuild trainer clients and servers together for the new
+`0068_nc_aimtrainer_movement` and deploy revision-11 API support before enabling
+revision-11 hosts. Revision 11 needs no additional migration. Rebuild trainer clients and servers together for the new
 scenario and movement-scoped submission notification. These classes are used
 only by the trainer game mode.
 
@@ -765,3 +791,25 @@ trainer clients and hosts together. No production deployment or packaged
 playtest was performed here. Slide visuals/collision, both rifle choices,
 dedicated-server play and real authenticated score publication still need
 in-game validation.
+
+### Revision 11 SACTF practice (2026-10-07)
+
+The picker adds SACTF Headshots and SACTF Pop-up, using the actual MutSaCTF
+rifle asset and a dedicated native SACTF character/target profile. The normal
+Sniper/LG preference does not replace this weapon. Target opportunities match
+its 0.7-second refire. Headshot-only scoring is 100 per confirmed headshot;
+SACTF pop-up uses 100 per hit with a 50-point headshot bonus and the existing
+miss/expiry penalties. Both modes support separate fixed/movement boards in
+each score source. Existing scenarios and old revision APIs remain available.
+
+Verification: 207 native trainer tests pass, including the updated pawn-class
+adapter for the new subclasses. The Django suite passed 81 tests with two
+PostgreSQL-only tests skipped. Win64 Development Editor, Win64 Shipping client
+and Linux Shipping server modules built with the aim-assist fixture disabled.
+The engine's LocalSession.Transport automation passed both new scenario
+payloads under revision 11. Read-only review found no scoring, scenario-routing
+or leaderboard-scope mismatch between the game and Django.
+
+Deployment requires revision-11 game and Django code plus the MutSaCTF content
+pak on the trainer host/client. No new migration beyond 0068 is needed. This
+verification did not include a cooked playtest or real authenticated upload.

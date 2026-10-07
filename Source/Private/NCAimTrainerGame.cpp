@@ -50,6 +50,7 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     // No asset lookup or warning is emitted while loading other game modes.
     SniperClass = nullptr;
     LightningClass = nullptr;
+    SACTFSniperClass = nullptr;
     InstagibClass = nullptr;
     LinkClass = nullptr;
     NextTargetTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
@@ -86,7 +87,9 @@ UClass* ANCAimTrainerGame::GetDefaultPawnClassForController_Implementation(ACont
 {
     // The opt-in trainer requires this pawn's movement component on every
     // spawn/restart. Ruleset or mutator pawn defaults cannot substitute it.
-    return Progress.Scenario == 2 ? ANCAimTrainerInstagibCharacter::StaticClass() : ANCAimTrainerCharacter::StaticClass();
+    return Progress.Scenario == 2 ? ANCAimTrainerInstagibCharacter::StaticClass()
+        : NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario) ? ANCAimTrainerSACTFCharacter::StaticClass()
+        : ANCAimTrainerCharacter::StaticClass();
 }
 
 bool ANCAimTrainerGame::ReadyToStartMatch_Implementation()
@@ -123,8 +126,9 @@ bool ANCAimTrainerGame::FailSetup(const TCHAR* Message)
 bool ANCAimTrainerGame::EnsureArena()
 {
     if (Arena && Arena->IsPendingKillPending()) { Arena = nullptr; }
-    UClass* TargetClass = Progress.Scenario == 2
-        ? ANCAimTrainerInstagibTarget::StaticClass() : ANCAimTrainerTarget::StaticClass();
+    UClass* TargetClass = Progress.Scenario == 2 ? ANCAimTrainerInstagibTarget::StaticClass()
+        : NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario) ? ANCAimTrainerSACTFTarget::StaticClass()
+        : ANCAimTrainerTarget::StaticClass();
     // Replace pooled actors outside a run so native crouch and skin restoration
     // always use the correct class default, including on remote clients.
     for (ANCAimTrainerTarget* Target : Targets)
@@ -303,27 +307,37 @@ bool ANCAimTrainerGame::ConfigurePawn()
         InstagibClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/N+InstagibRifle.N+InstagibRifle_C"), nullptr, LOAD_NoWarn);
     }
-    else if ((Progress.Scenario == 1 || Progress.Scenario == 3) && Progress.bUseLightningGun && !LightningClass)
+    else if (NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario) && !SACTFSniperClass)
+    {
+        SACTFSniperClass = LoadClass<AUTWeapon>(nullptr,
+            TEXT("/Game/Blueprints/Netcode/SACTFSniper.SACTFSniper_C"), nullptr, LOAD_NoWarn);
+    }
+    else if (!NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario)
+        && NCAimTrainerScenarioPolicy::IsSniperScenario(Progress.Scenario) && Progress.bUseLightningGun && !LightningClass)
     {
         LightningClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/UTNPLightningGun.UTNPLightningGun_C"), nullptr, LOAD_NoWarn);
     }
-    else if ((Progress.Scenario == 1 || Progress.Scenario == 3) && !Progress.bUseLightningGun && !SniperClass)
+    else if (!NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario)
+        && NCAimTrainerScenarioPolicy::IsSniperScenario(Progress.Scenario) && !Progress.bUseLightningGun && !SniperClass)
     {
         SniperClass = LoadClass<AUTWeapon>(nullptr,
             TEXT("/Game/Blueprints/Netcode/UTNPSniper.UTNPSniper_C"), nullptr, LOAD_NoWarn);
     }
     TSubclassOf<AUTWeapon> DesiredClass = Progress.Scenario == 0 ? LinkClass : Progress.Scenario == 2 ? InstagibClass
+        : NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario) ? SACTFSniperClass
         : Progress.bUseLightningGun ? LightningClass : SniperClass;
     if (!DesiredClass || DesiredClass->HasAnyClassFlags(CLASS_Abstract))
     {
         return FailSetup(Progress.Scenario == 0
             ? TEXT("Cannot start: the NCP Link Gun is unavailable. Install the current NCWepMut content pak.")
+            : NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario)
+            ? TEXT("Cannot start: the SACTF sniper is unavailable. Install the MutSaCTF content pak.")
             : TEXT("Cannot start: the selected NCP rifle is unavailable. Install the NCWepMut content pak."));
     }
     if ((Progress.Scenario == 0 && !DesiredClass->IsChildOf(AUTWeap_LinkGun_NCP::StaticClass()))
         || (Progress.Scenario == 2 && !DesiredClass->IsChildOf(AUTPlusShockRifle::StaticClass()))
-        || ((Progress.Scenario == 1 || Progress.Scenario == 3) && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass())))
+        || ((NCAimTrainerScenarioPolicy::IsSniperScenario(Progress.Scenario)) && !DesiredClass->IsChildOf(AUTPlusSniper::StaticClass())))
     {
         return FailSetup(TEXT("Cannot start: the selected rifle does not use the required NetcodePlus weapon class."));
     }
@@ -377,7 +391,7 @@ bool ANCAimTrainerGame::IsInsidePracticeLane(const AUTCharacter* Pawn) const
 
 void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 Scenario, bool bUseLightningGun)
 {
-    if (!IsTrainee(PC) || Scenario > 3 || Progress.Phase == 1 || Progress.Phase == 2) { return; }
+    if (!IsTrainee(PC) || Scenario > 5 || Progress.Phase == 1 || Progress.Phase == 2) { return; }
     ResetLocalSession();
     RunId.Empty();
     SetupError.Empty();
@@ -385,9 +399,9 @@ void ANCAimTrainerGame::SelectScenario(ANCAimTrainerPlayerController* PC, uint8 
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bMovementPractice;
-    Progress.bUseLightningGun = bUseLightningGun;
+    Progress.bUseLightningGun = bUseLightningGun && !NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario);
     HideAllTargets();
-    if (Arena) { Arena->SetScenario(Scenario >= 2 ? 2 : Scenario); }
+    if (Arena) { Arena->SetScenario(uint8(NCAimTrainerScenarioPolicy::ArenaScenario(Scenario))); }
     if (!EnsureArena() || !ConfigurePawn()) { PC->SetTrainerOnlineStatus(SetupError); }
     PublishProgress();
     RefreshLeaderboard();
@@ -402,7 +416,7 @@ void ANCAimTrainerGame::SetMovementPractice(ANCAimTrainerPlayerController* PC, b
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bEnabled;
-    Progress.bUseLightningGun = bUseLightningGun;
+    Progress.bUseLightningGun = bUseLightningGun && !NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario);
     bRankedRun = false;
     RunId.Empty();
     SetupError.Empty();
@@ -418,7 +432,7 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC, bool bU
 {
     if (!IsTrainee(PC) || Progress.Phase == 1 || Progress.Phase == 2) { return; }
     ResetLocalSession();
-    Progress.bUseLightningGun = bUseLightningGun;
+    Progress.bUseLightningGun = bUseLightningGun && !NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario);
     SetupError.Empty();
     if (!EnsureArena() || !ConfigurePawn())
     {
@@ -431,7 +445,7 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC, bool bU
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bMovementPractice;
     Progress.Phase = 1;
-    Progress.bUseLightningGun = bUseLightningGun;
+    Progress.bUseLightningGun = bUseLightningGun && !NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario);
     Progress.RemainingSeconds = 3.f;
     PhaseStartedAt = GetWorld()->GetTimeSeconds();
     TrackedSeconds = 0.0;
@@ -446,7 +460,7 @@ void ANCAimTrainerGame::StartTraining(ANCAimTrainerPlayerController* PC, bool bU
         ? TEXT("Offline practice: scores are shown here but are not submitted to the shared leaderboard.")
         : TEXT("Practice only: mutators or altered game speed change the preset."));
     HideAllTargets();
-    Arena->SetScenario(Scenario >= 2 ? 2 : Scenario);
+    Arena->SetScenario(uint8(NCAimTrainerScenarioPolicy::ArenaScenario(Scenario)));
     PublishProgress();
     PC->SetTrainerOnlineStatus(bRankedRun ? TEXT("Complete all 60 seconds to submit to UT4Stats.") : UnrankedReason);
     StartLocalSession();
@@ -463,7 +477,7 @@ void ANCAimTrainerGame::AbortTraining(ANCAimTrainerPlayerController* PC)
     Progress = FNCAimTrainerProgress();
     Progress.Scenario = Scenario;
     Progress.bMovementPractice = bMovementPractice;
-    Progress.bUseLightningGun = bUseLightningGun;
+    Progress.bUseLightningGun = bUseLightningGun && !NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario);
     bRankedRun = false;
     RunId.Empty();
     if (RunWeapon) { RunWeapon->StopFire(0); RunWeapon->StopFire(1); }
@@ -481,8 +495,9 @@ void ANCAimTrainerGame::BeginActiveRun()
     NextDodgeTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::DodgeDelaySeconds(Schedule.FRand());
     NextTrackingSlideTime = PhaseStartedAt + NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(Schedule.FRand());
     NextPopupTime = PhaseStartedAt;
-    const float Refire = Progress.Scenario >= 2 && RunWeapon ? RunWeapon->GetRefireTime(0) : 1.f;
-    PopupRefireSeconds = FMath::IsFinite(Refire) ? FMath::Max(1.f, Refire) : 1.f;
+    const float Refire = RunWeapon ? RunWeapon->GetRefireTime(0) : 1.f;
+    const float MinimumRefire = Progress.Scenario == 5 ? 0.7f : 1.f;
+    PopupRefireSeconds = FMath::IsFinite(Refire) ? FMath::Max(MinimumRefire, Refire) : MinimumRefire;
     if (Progress.Scenario == 2 && (!FMath::IsFinite(Refire) || !FMath::IsNearlyEqual(Refire, 1.f)))
     {
         bRankedRun = false;
@@ -495,17 +510,24 @@ void ANCAimTrainerGame::BeginActiveRun()
         UnrankedReason = TEXT("Practice only: the Sniper/Lightning refire interval differs from the 1.3-second preset.");
         InvalidateLocalRun();
     }
+    if (NCAimTrainerScenarioPolicy::IsSACTFScenario(Progress.Scenario)
+        && (!FMath::IsFinite(Refire) || !FMath::IsNearlyEqual(Refire, 0.7f)))
+    {
+        bRankedRun = false;
+        UnrankedReason = TEXT("Practice only: the SACTF sniper's refire interval differs from the 0.7-second preset.");
+        InvalidateLocalRun();
+    }
     AUTPlayerState* PS = Trainee ? Cast<AUTPlayerState>(Trainee->PlayerState) : nullptr;
     ShotStatBaseline = RunWeapon ? RunWeapon->GetWeaponShotsStats(PS) : 0.f;
     for (int32 Index = 0; Index < Targets.Num(); ++Index)
     {
-        NextTargetTime[Index] = PhaseStartedAt + (Progress.Scenario >= 2 ? 0.f : Index * 0.25f);
+        NextTargetTime[Index] = PhaseStartedAt + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) ? 0.f : Index * 0.25f);
         TargetExpiry[Index] = 0.f;
         NextWiggleTime[Index] = PhaseStartedAt;
         NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = 0.f;
         NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
     }
-    if (Progress.Scenario >= 2) { UpdatePopupDodger(PhaseStartedAt); }
+    if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)) { UpdatePopupDodger(PhaseStartedAt); }
     PublishProgress();
 }
 
@@ -530,7 +552,7 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     // class default gives the standing seat before ActivateTarget resets it.
     const float StandingHeight = Targets[Index]->GetClass()->GetDefaultObject<ANCAimTrainerTarget>()
         ->GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-    const bool bPopupDodger = Progress.Scenario >= 2 && Index == NCAimTrainerLayout::PopupDodgerSlot;
+    const bool bPopupDodger = NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Index == NCAimTrainerLayout::PopupDodgerSlot;
     FVector Position;
     if (Progress.Scenario == 0)
     {
@@ -540,7 +562,7 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
         Position = FVector(-800.f, 0.f, StandingHeight);
         TargetExpiry[Index] = PhaseStartedAt + 60.f;
     }
-    else if (Progress.Scenario == 1)
+    else if (NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario))
     {
         if (Index >= NCAimTrainerLayout::HeadSlotCount) { return; }
         const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::HeadSeat(Index);
@@ -572,11 +594,11 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     }
     if (Progress.Scenario != 0 && !bPopupDodger)
     {
-        const NCAimTrainerLayout::FSeat Seat = Progress.Scenario == 1
+        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario)
             ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index);
         Targets[Index]->StartWiggle(Seat.WiggleRange);
         NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
-        if (Progress.Scenario >= 2)
+        if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario))
         {
             // Left seats mix occasional slides and wider strafes with ordinary
             // wiggles. The existing high-right slide remains guaranteed.
@@ -611,10 +633,10 @@ void ANCAimTrainerGame::UpdateShotCount()
     }
     Progress.Shots = FMath::RoundToInt(RawShots);
     RecordLocalShotCount();
-    Progress.Score = Progress.Scenario == 1
+    Progress.Score = NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario)
         ? NCAimTrainerScoring::HeadshotScore(Progress.Hits, Progress.Shots)
         : NCAimTrainerScoring::PrecisionScore(Progress.Hits, Progress.Shots, Progress.TargetsExpired,
-            Progress.Scenario == 3 ? Progress.Headshots : 0);
+            NCAimTrainerScenarioPolicy::HasHeadshotBonus(Progress.Scenario) ? Progress.Headshots : 0);
     Progress.Accuracy = Progress.Shots > 0 ? 100.f * Progress.Hits / Progress.Shots : 0.f;
 }
 
@@ -643,12 +665,12 @@ float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Dama
     // A late request from a previous appearance must not score the reused pawn,
     // even when the next headshot target occupies the same physical station.
     bool bHeadshot = false;
-    if (Progress.Scenario == 1 || Progress.Scenario == 3)
+    if (NCAimTrainerScenarioPolicy::IsSniperScenario(Progress.Scenario))
     {
         const AUTPlusSniper* Sniper = Cast<AUTPlusSniper>(RunWeapon);
         if (!Sniper || !Sniper->HeadshotDamageType) { return 0.f; }
         bHeadshot = Event.DamageTypeClass == Sniper->HeadshotDamageType;
-        if (Progress.Scenario == 1 && !bHeadshot) { return 0.f; }
+        if (NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario) && !bHeadshot) { return 0.f; }
         if (bHeadshot) { ++Progress.Headshots; }
     }
     ++Progress.Hits;
@@ -657,7 +679,7 @@ float ANCAimTrainerGame::RecordTargetHit(ANCAimTrainerTarget* Target, float Dama
     UpdateShotCount();
     RecordLocalTarget(Slot, true, bHeadshot);
     Target->HideTarget();
-    NextTargetTime[Slot] = Now + (Progress.Scenario >= 2 ? 0.f : 0.35f);
+    NextTargetTime[Slot] = Now + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) ? 0.f : 0.35f);
     Trainee->NotifyTrainerHit(Damage);
     // Keep the pawn alive and bypass ordinary frag/drop/scoring paths. One
     // appearance can score exactly once, even if a repeated RPC reaches it.
@@ -774,8 +796,8 @@ void ANCAimTrainerGame::UpdateTrackingMovement(float Now)
 
 void ANCAimTrainerGame::UpdateTargets(float Now)
 {
-    if (Progress.Scenario >= 2) { UpdatePopupDodger(Now); }
-    const int32 ActiveSlots = Progress.Scenario == 0 ? 1 : Progress.Scenario == 1
+    if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)) { UpdatePopupDodger(Now); }
+    const int32 ActiveSlots = Progress.Scenario == 0 ? 1 : NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario)
         ? NCAimTrainerLayout::HeadSlotCount : NCAimTrainerLayout::PopupSlotCount;
     TArray<int32> EligibleSlots;
     for (int32 Index = 0; Index < ActiveSlots; ++Index)
@@ -785,11 +807,11 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
             RecordLocalTarget(Index, false);
             Targets[Index]->HideTarget();
             ++Progress.TargetsExpired;
-            NextTargetTime[Index] = Now + (Progress.Scenario >= 2 ? 0.f : Schedule.FRandRange(0.25f, 0.65f));
+            NextTargetTime[Index] = Now + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) ? 0.f : Schedule.FRandRange(0.25f, 0.65f));
         }
         if (!Targets[Index]->IsAvailable() && Now >= NextTargetTime[Index])
         {
-            if (Progress.Scenario >= 2) { EligibleSlots.Add(Index); }
+            if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)) { EligibleSlots.Add(Index); }
             else { ActivateSlot(Index, Now); }
         }
         if (Progress.Scenario != 0 && Targets[Index]->IsAvailable() && Now >= NextWiggleTime[Index])
@@ -797,7 +819,7 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
             Targets[Index]->ReverseStrafe();
             NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
         }
-        if (Progress.Scenario >= 2 && Targets[Index]->IsAvailable())
+        if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Targets[Index]->IsAvailable())
         {
             if (NextPopupSlideTime[Index] > 0.f && Now >= NextPopupSlideTime[Index])
             {
@@ -847,7 +869,7 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
     // Initial targets, hits and expiries all share this deadline. Never replace
     // several targets at once or catch up after a stall: respect the selected
     // rifle's refire interval. Randomize the next available height/lane.
-    if (Progress.Scenario >= 2 && Now >= NextPopupTime && EligibleSlots.Num() > 0)
+    if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && Now >= NextPopupTime && EligibleSlots.Num() > 0)
     {
         ActivateSlot(EligibleSlots[Schedule.RandRange(0, EligibleSlots.Num() - 1)], Now);
         NextPopupTime = Now + NCAimTrainerScenarioPolicy::PopupSpawnDelay(PopupRefireSeconds, Schedule.FRand());
@@ -856,7 +878,7 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
 
 void ANCAimTrainerGame::UpdatePopupDodger(float Now)
 {
-    if (Progress.Phase != 2 || Progress.Scenario < 2 || Now >= PhaseStartedAt + 60.f) { return; }
+    if (Progress.Phase != 2 || !NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) || Now >= PhaseStartedAt + 60.f) { return; }
     const int32 Slot = NCAimTrainerLayout::PopupDodgerSlot;
     if (!Targets.IsValidIndex(Slot) || !Targets[Slot]) { return; }
     // This sixth target has a clear floor lane and never times out. Refill on

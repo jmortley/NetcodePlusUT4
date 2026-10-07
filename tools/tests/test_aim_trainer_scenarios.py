@@ -224,8 +224,8 @@ void Dodges() {
 void RefireAndBacklog() {
     using namespace NCAimTrainerScenarioPolicy;
     Require(InstagibMaxActiveTargets == 6, "popup plus permanent dodger capacity lost");
-    for (float actualRefire : {0.f, .4f, 1.f, 1.5f, 2.f}) {
-        const float refire = actualRefire < 1.f ? 1.f : actualRefire;
+    for (float actualRefire : {0.f, .4f, .7f, 1.f, 1.5f, 2.f}) {
+        const float refire = actualRefire < .7f ? .7f : actualRefire;
         for (float roll : {0.f, .01f, .5f, .99f, 1.f}) {
             const float delay = PopupSpawnDelay(actualRefire, roll);
             const float exposure = PopupExposure(actualRefire, roll);
@@ -257,7 +257,7 @@ void RollBoundaries() {
         Require(PopupSpawnDelay(1.f, roll) >= 1.f, "invalid roll bypassed weapon cadence");
         Require(PopupExposure(1.f, roll) >= 5.5f, "invalid roll shortened exposure");
     }
-    Require(PopupSpawnDelay(nan, 0.f) == 1.f, "invalid weapon interval bypassed minimum");
+    Require(PopupSpawnDelay(nan, 0.f) == .7f, "invalid weapon interval bypassed minimum");
 }
 void InitialSpawn() {
     Fixture f; f.Game.Schedule.SlotChoice = 2; f.Start();
@@ -629,13 +629,13 @@ void PersistentDodgerCannotLeakIntoOtherPhasesOrScenarios() {
 }
 void UpperPlatformSlideScope() {
     using namespace NCAimTrainerLayout;
-    for (int scenario : {0, 1, 2, 3}) {
+    for (int scenario : {0, 1, 2, 3, 4, 5}) {
         for (int slot = 0; slot < TargetCount; ++slot) {
             for (float roll : {0.f, .5f, 1.f}) {
                 Fixture f; f.Game.Progress.Scenario = scenario; f.Game.Schedule.Roll = roll;
-                if(scenario==3) f.Gun.Refire=1.3f; f.Start(); f.Game.NextPopupTime = 10000.f;
+                if(scenario==3) f.Gun.Refire=1.3f; if(scenario>=4) f.Gun.Refire=.7f; f.Start(); f.Game.NextPopupTime = 10000.f;
                 f.Game.ActivateSlot(slot, 10.f);
-                const bool selected = scenario >= 2 && (slot == PopupSliderSlot || ((slot==0 || slot==4) && roll<.45f));
+                const bool selected = NCAimTrainerScenarioPolicy::IsPopupScenario(scenario) && (slot == PopupSliderSlot || ((slot==0 || slot==4) && roll<.45f));
                 Require((f.Game.NextPopupSlideTime[slot] > 0.f) == selected,
                         "forward slide escaped the upper-right instagib seat");
                 if (selected) {
@@ -656,9 +656,9 @@ void UpperPlatformSlideScope() {
     }
 }
 void PopupLongStrafeLifecycle() {
-    for (int scenario : {2,3}) {
+    for (int scenario : {2,3,5}) {
         for (float roll : {.1f,.5f,.9f}) {
-            Fixture f; f.Game.Progress.Scenario=scenario; f.Gun.Refire=scenario==2?1.f:1.3f;
+            Fixture f; f.Game.Progress.Scenario=scenario; f.Gun.Refire=scenario==2?1.f:scenario==5?.7f:1.3f;
             f.Game.Schedule.Roll=roll; f.Start(); f.Game.NextPopupTime=10000.f;
             for(int slot=0;slot<5;++slot) {
                 f.Game.ActivateSlot(slot,10.f);
@@ -928,6 +928,42 @@ void TrackingCrouchCleanupAndReuse() {
                 "reused tracking target inherited an old crouch instead of fresh activation timing");
     }
 }
+void SACTFPresets() {
+    using namespace NCAimTrainerScenarioPolicy;
+    for (int scenario : {4,5}) {
+        Fixture f; f.Game.Progress.Scenario=scenario; f.Gun.Refire=.7f; f.Start(); f.At(10.f);
+        Require(f.Game.bRankedRun,"unmodified SACTF rifle lost ranking");
+        if (scenario==4) {
+            f.At(11.f);
+            Require(f.Visible()==5 && !f.Targets[5].Visible,"SACTF heads inherited popup dodger or lost head seats");
+            for(int slot=0;slot<5;++slot) {
+                Require(f.Game.TargetExpiry[slot] >= 16.5f && f.Game.NextPopupSlideTime[slot]==0.f
+                        && f.Game.NextPopupLongStrafeTime[slot]==0.f && f.Game.NextCrouchTime[slot]==0.f,
+                        "SACTF head seats inherited popup lifetime or motion");
+                Require(f.Targets[slot].Position.Z==108.f+NCAimTrainerLayout::HeadSeat(slot).FloorZ,
+                        "SACTF head target used incorrect profile or cover seat");
+            }
+        } else {
+            Require(FMath::IsNearlyEqual(f.Game.PopupRefireSeconds,.7f)
+                    && f.Game.NextPopupTime>10.7f && f.Game.NextPopupTime<10.771f,
+                    "SACTF popup retained slower IG or sniper cadence");
+            Require(f.Game.TargetExpiry[0]>=13.85f && f.Game.TargetExpiry[0]<=14.761f
+                    && f.Targets[5].Visible && f.Game.TargetExpiry[5]==70.f,
+                    "SACTF popup exposure or persistent dodger is wrong");
+            f.At(10.699f); Require(f.Activations()==1,"SACTF replacement outran rifle cooldown");
+            f.At(f.Game.NextPopupTime); Require(f.Activations()==2,"SACTF popup failed to schedule next appearance");
+            f.At(30.f); Require(f.Activations()==3,"SACTF hitch caused catchup burst");
+        }
+        for(float invalid : {.5f,1.f,1.3f,std::numeric_limits<float>::quiet_NaN()}) {
+            Fixture altered; altered.Game.Progress.Scenario=scenario; altered.Gun.Refire=invalid; altered.Start();
+            Require(!altered.Game.bRankedRun,"modified SACTF cadence entered ranked preset");
+        }
+    }
+    Require(IsHeadshotScenario(4) && !IsPopupScenario(4) && ArenaScenario(4)==1,
+            "SACTF headshot scenario classification is wrong");
+    Require(IsPopupScenario(5) && !IsHeadshotScenario(5) && ArenaScenario(5)==2,
+            "SACTF popup scenario classification is wrong");
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
     const std::string name(argv[1]);
@@ -947,6 +983,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+    else if (name == "sactf") SACTFPresets();
     else if (name == "strafe") StrafeMix();
     else if (name == "dodges") Dodges();
     else if (name == "refire") RefireAndBacklog();
@@ -1041,6 +1078,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_permanent_dodger_is_excluded_from_headshots_tracking_and_inactive_phases(self): self.run_case("persistent_scope")
     def test_popup_slides_select_only_eligible_seats_in_both_weapon_variants(self): self.run_case("slide_scope")
     def test_rear_popup_long_strafe_scope_slide_conflicts_cleanup_and_exposure_guards(self): self.run_case("popup_long")
+    def test_sactf_heads_and_popup_use_correct_geometry_cadence_and_ranked_guards(self): self.run_case("sactf")
     def test_precision_popup_uses_real_rifle_cadence_and_teamarena_targets(self): self.run_case("precision_popup")
     def test_slider_attempts_once_per_appearance_and_resets_after_hit(self): self.run_case("slide_once")
     def test_slider_preserves_refire_opportunity_before_expiry_or_round_end(self): self.run_case("slide_expiry")

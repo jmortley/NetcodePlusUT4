@@ -70,16 +70,19 @@ struct UClass {
     bool HasAnyClassFlags(int) const { return false; }
     bool IsChildOf(UClass* other) const {
         return other && (other->Kind == Kind || (Kind == 3 && other->Kind == 4)
-                        || (Kind == 6 && other->Kind == 1));
+                        || ((Kind == 6 || Kind == 11) && other->Kind == 1));
     }
 };
 UClass SniperType{1}, InstagibType{2}, LinkType{3}, LinkBaseType{4}, BeamStateType{5}, LightningType{6};
 UClass TrainerType{7}, InstagibTrainerType{8}, TargetType{9}, InstagibTargetType{10};
+UClass SACTFSniperType{11}, SACTFTrainerType{12}, SACTFTargetType{13};
 struct ANCAimTrainerCharacter { static UClass* StaticClass() { return &TrainerType; } };
 struct ANCAimTrainerInstagibCharacter { static UClass* StaticClass() { return &InstagibTrainerType; } };
+struct ANCAimTrainerSACTFCharacter { static UClass* StaticClass() { return &SACTFTrainerType; } };
 bool MissingLinkAsset = false, WrongLinkAsset = false;
 bool MissingLightningAsset = false, WrongLightningAsset = false;
-int LightningLoads = 0;
+int LightningLoads = 0, SACTFLoads = 0;
+bool MissingSACTFAsset = false, WrongSACTFAsset = false;
 std::string LastLoadedPath;
 template<class T> struct TSubclassOf {
     UClass* Value = nullptr;
@@ -99,6 +102,10 @@ template<class T> UClass* LoadClass(void*, const char* path, void*, int) {
         ++LightningLoads;
         return MissingLightningAsset ? nullptr : WrongLightningAsset ? &InstagibType : &LightningType;
     }
+    if (LastLoadedPath == "/Game/Blueprints/Netcode/SACTFSniper.SACTFSniper_C") {
+        ++SACTFLoads;
+        return MissingSACTFAsset ? nullptr : WrongSACTFAsset ? &InstagibType : &SACTFSniperType;
+    }
     return std::string(path).find("Instagib") != std::string::npos ? &InstagibType : &SniperType;
 }
 struct AUTWeapon {
@@ -114,6 +121,9 @@ struct AUTPlusSniper : AUTWeapon {
 };
 struct LightningGun : AUTPlusSniper {
     LightningGun() { ShotsStatsName = 2; HeadshotDamageType = 22; }
+};
+struct SACTFSniper : AUTPlusSniper {
+    SACTFSniper() { ShotsStatsName = 3; HeadshotDamageType = 33; BeamRefire = .7f; }
 };
 struct AUTPlusShockRifle : AUTWeapon {
     static UClass* StaticClass() { return &InstagibType; }
@@ -178,6 +188,7 @@ struct AUTCharacter : APawn {
     Movement Move;
     AUTPlusSniper Sniper;
     LightningGun Lightning;
+    SACTFSniper SACTF;
     AUTPlusShockRifle Instagib;
     AUTWeap_LinkGun_NCP Link;
     bool bCanBeDamaged = true, Dead = false;
@@ -189,6 +200,7 @@ struct AUTCharacter : APawn {
     void DiscardAllInventory() { ++Discards; }
     AUTWeapon* CreateInventory(TSubclassOf<AUTWeapon> type) {
         ++Creates;
+        if (type->Kind == 11) return &SACTF;
         if (type->Kind == 6) return &Lightning;
         if (type->Kind == 3) return &Link;
         return type->Kind == 2 ? static_cast<AUTWeapon*>(&Instagib) : static_cast<AUTWeapon*>(&Sniper);
@@ -212,6 +224,9 @@ struct ANCAimTrainerTarget : AUTCharacter {
 };
 struct ANCAimTrainerInstagibTarget : ANCAimTrainerTarget {
     static UClass* StaticClass() { return &InstagibTargetType; }
+};
+struct ANCAimTrainerSACTFTarget : ANCAimTrainerTarget {
+    static UClass* StaticClass() { return &SACTFTargetType; }
 };
 template<> const ANCAimTrainerTarget* UClass::GetDefaultObject<ANCAimTrainerTarget>() const {
     static ANCAimTrainerTarget team, instagib;
@@ -305,7 +320,7 @@ struct ANCAimTrainerGame : BaseGame {
     using Super = BaseGame;
     ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
-    TSubclassOf<AUTWeapon> SniperClass, LightningClass, InstagibClass, LinkClass;
+    TSubclassOf<AUTWeapon> SniperClass, LightningClass, SACTFSniperClass, InstagibClass, LinkClass;
     FVector ArenaOrigin{0.f, 0.f, 50000.f};
     FNCAimTrainerProgress Progress;
     int Publishes = 0, Fetches = 0;
@@ -491,6 +506,72 @@ int main(int argc, char** argv) {
                     "precision movement preset not eligible for its own board");
             f.Game.AbortTraining(&f.Player);
         }
+    } else if (name == "sactf_select") {
+        f.BeginWorld(); f.Game.NetMode=1; f.Game.PostLogin(&f.Player);
+        f.Game.SelectScenario(&f.Player,1,true); // Prime the unrelated Lightning cache.
+        for (uint8 scenario : {uint8(4), uint8(5)}) {
+            for (bool lightning : {false,true}) {
+                f.Game.SelectScenario(&f.Player,scenario,lightning);
+                Require(f.Game.Progress.Scenario==scenario && !f.Game.Progress.bUseLightningGun
+                        && f.Game.RunWeapon==&f.Game.SpawnedPawn.SACTF,
+                        "SACTF selection fell back to Sniper/Lightning or kept Lightning preference");
+                Require(f.Game.SpawnedPawn.ClassType==&SACTFTrainerType
+                        && f.Game.Arena->AssignedScenario==(scenario==4 ? 1 : 2),
+                        "SACTF mode selected wrong native profile or headshot/popup arena");
+                for(auto* target : f.Game.Targets)
+                    Require(target->GetClass()==&SACTFTargetType, "SACTF target pool retained another movement profile");
+                Require(LastLoadedPath=="/Game/Blueprints/Netcode/SACTFSniper.SACTFSniper_C"
+                        && SACTFLoads==1 && f.Game.RunWeapon->GetRefireTime(0)==.7f,
+                        "SACTF asset path/cache or weapon refire was lost");
+                f.Game.SetMovementPractice(&f.Player,true);
+                f.Game.StartTraining(&f.Player,lightning);
+                Require(f.Game.Progress.Phase==1 && f.Game.bRankedRun && f.Game.Progress.bMovementPractice
+                        && !f.Game.Progress.bUseLightningGun && f.Game.RunWeapon==&f.Game.SpawnedPawn.SACTF,
+                        "SACTF start lost its weapon or separately ranked movement preset");
+                f.Game.AbortTraining(&f.Player);
+            }
+        }
+        f.Game.SelectScenario(&f.Player,1,true);
+        Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Lightning && LightningLoads==1,
+                "SACTF cache replaced the normal Lightning scenario");
+        f.Game.SelectScenario(&f.Player,5,true);
+        Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.SACTF && SACTFLoads==1,
+                "returning to SACTF reused the wrong cached rifle");
+    } else if (name == "sactf_assets") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        MissingSACTFAsset=true;
+        for(uint8 scenario : {uint8(4),uint8(5)}) {
+            f.Game.SelectScenario(&f.Player,scenario,true);
+            Require(!f.Game.RunWeapon && f.Game.Progress.Phase==0
+                    && f.Game.SetupError.find("MutSaCTF")!=std::string::npos,
+                    "missing SACTF pak silently equipped another weapon or hid recovery instruction");
+            f.Game.StartTraining(&f.Player,true);
+            Require(f.Game.Progress.Phase==0 && !f.Game.RunWeapon,
+                    "missing SACTF rifle was allowed to start");
+        }
+        const int failedLoads=SACTFLoads;
+        MissingSACTFAsset=false;
+        f.Game.StartTraining(&f.Player,true);
+        Require(f.Game.Progress.Phase==1 && f.Game.RunWeapon==&f.Game.SpawnedPawn.SACTF
+                && SACTFLoads==failedLoads+1 && f.Game.SetupError.empty(),
+                "SACTF lookup failure was cached permanently after content became available");
+    } else if (name == "sactf_content") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        WrongSACTFAsset=true;
+        const int creates=f.Game.SpawnedPawn.Creates;
+        f.Game.SelectScenario(&f.Player,4,true);
+        Require(!f.Game.RunWeapon && !f.Game.SetupError.empty() && f.Game.SpawnedPawn.Creates==creates,
+                "SACTF asset with wrong native base was equipped");
+        WrongSACTFAsset=false; f.Game.SACTFSniperClass=nullptr;
+        f.Game.SelectScenario(&f.Player,5,false);
+        Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.SACTF,
+                "corrected SACTF native class did not recover");
+        const auto* rifle=Cast<AUTPlusSniper>(f.Game.RunWeapon);
+        Require(rifle && rifle->HeadshotDamageType==33 && rifle->ShotsStatsName==3,
+                "SACTF rifle lost its own damage type or shot counter");
+        f.Game.SpawnedPawn.SACTF.ShotsStatsName=NAME_None;
+        Require(!f.Game.ConfigurePawn() && f.Game.SetupError.find("shot counter")!=std::string::npos,
+                "SACTF rifle without authoritative shot counter was accepted");
     } else if (name == "lightning_select") {
         f.BeginWorld(); f.Game.PostLogin(&f.Player);
         f.Game.SelectScenario(&f.Player,1,true);
@@ -560,7 +641,7 @@ int main(int argc, char** argv) {
             f.Game.SetMovementPractice(requestor,true);
             f.Game.AbortTraining(requestor);
         }
-        f.Game.SelectScenario(&f.Player,4,false);
+        f.Game.SelectScenario(&f.Player,6,false);
         Require(f.Game.Progress.Phase == 0 && f.Game.Progress.Scenario == 1
                 && f.Game.Progress.bUseLightningGun && !f.Game.Progress.bMovementPractice
                 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning
@@ -759,7 +840,8 @@ class AimTrainerStartupTests(unittest.TestCase):
             "void ANCAimTrainerGame::AbortTraining",
         )
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").as_posix()
-        cls.translation = "\n".join([ADAPTER, f'#include "{layout}"']
+        policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()
+        cls.translation = "\n".join([ADAPTER, f'#include "{layout}"', f'#include "{policy}"']
                                     + [native_function(native, s) for s in signatures] + [CASES])
         cls.configure_function = native_function(native, "bool ANCAimTrainerGame::ConfigurePawn")
         cls.executable = cls.compile_fixture("trainer_startup", cls.translation)
@@ -792,6 +874,9 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_spectator_never_receives_trainee_pawn(self): self.run_case("spectator")
     def test_movement_choice_survives_run_lifecycle_and_can_rank_separately(self): self.run_case("movement_lifecycle")
     def test_precision_popup_equips_saved_rifle_and_teamarena_pawn_with_movement_board(self): self.run_case("precision_popup")
+    def test_sactf_modes_use_exact_cached_rifle_profile_and_arena_independent_of_lightning(self): self.run_case("sactf_select")
+    def test_missing_sactf_content_fails_closed_and_recovers_after_mount(self): self.run_case("sactf_assets")
+    def test_sactf_requires_sniper_native_base_and_own_shot_counter(self): self.run_case("sactf_content")
     def test_restart_clears_firing_and_contact_clocks(self): self.run_case("run_clock_reset")
     def test_lane_accepts_crouching_jumping_but_rejects_escapes(self): self.run_case("lane_bounds")
     def test_each_scenario_equips_its_real_weapon(self): self.run_case("tracking_weapon")

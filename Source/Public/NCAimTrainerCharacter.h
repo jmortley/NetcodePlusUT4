@@ -39,3 +39,12 @@ class NETCODEPLUS_API ANCAimTrainerInstagibCharacter : public ANCAimTrainerChara
 public:
     ANCAimTrainerInstagibCharacter(const FObjectInitializer& ObjectInitializer);
 };
+
+/** SaCTFCharacter movement defaults, including its stock sustained slide speed. */
+UCLASS(NotBlueprintable)
+class NETCODEPLUS_API ANCAimTrainerSACTFCharacter : public ANCAimTrainerCharacter
+{
+    GENERATED_BODY()
+public:
+    ANCAimTrainerSACTFCharacter(const FObjectInitializer& ObjectInitializer);
+};

@@ -122,6 +122,8 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 			if (Key == EKeys::Two || Key == EKeys::NumPadTwo) { Scenario = 1; }
 			if (Key == EKeys::Three || Key == EKeys::NumPadThree) { Scenario = 2; }
 			if (Key == EKeys::Four || Key == EKeys::NumPadFour) { Scenario = 3; }
+			if (Key == EKeys::Five || Key == EKeys::NumPadFive) { Scenario = 4; }
+			if (Key == EKeys::Six || Key == EKeys::NumPadSix) { Scenario = 5; }
 			if (Scenario != INDEX_NONE)
 			{
 				if (EventType == IE_Pressed) { SelectTrainerScenario(uint8(Scenario)); }
@@ -178,7 +180,7 @@ void ANCAimTrainerPlayerController::SetTrackingFireHeld(bool bPrimary, bool bHel
 
 void ANCAimTrainerPlayerController::SelectTrainerScenario(uint8 Scenario)
 {
-	if (Scenario < 4 && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario, PrefersTrainerLightningGun()); }
+	if (Scenario < 6 && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario, PrefersTrainerLightningGun()); }
 }
 
 void ANCAimTrainerPlayerController::StartTrainerRun()
@@ -215,7 +217,7 @@ bool ANCAimTrainerPlayerController::AdmitTrainerRequest(uint8 Action)
 	return true;
 }
 
-bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario, bool bUseLightningGun) { return Scenario < 4; }
+bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario, bool bUseLightningGun) { return Scenario < 6; }
 void ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Implementation(uint8 Scenario, bool bUseLightningGun)
 {
 	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
@@ -304,8 +306,8 @@ bool ANCAimTrainerPlayerController::IsTrainerLeaderboardLocal() const
 
 int32 ANCAimTrainerPlayerController::SelectedLeaderboardKey() const
 {
-	return FMath::Clamp(int32(TrainerProgress.Scenario), 0, 3) + (IsTrainerLeaderboardLocal() ? 4 : 0)
-		+ (TrainerProgress.bMovementPractice ? 8 : 0);
+	return FMath::Clamp(int32(TrainerProgress.Scenario), 0, 5) + (IsTrainerLeaderboardLocal() ? 6 : 0)
+		+ (TrainerProgress.bMovementPractice ? 12 : 0);
 }
 
 const TArray<FNCAimTrainerLeaderboardRow>& ANCAimTrainerPlayerController::GetTrainerLeaderboard() const
@@ -348,7 +350,7 @@ void ANCAimTrainerPlayerController::RefreshTrainerLeaderboard()
 	const uint32 Generation = LeaderboardGeneration[Key];
 	TWeakObjectPtr<ANCAimTrainerPlayerController> WeakPC(this);
 	TWeakObjectPtr<UWorld> WeakWorld(GetWorld());
-	FNCAimTrainerOnline::Fetch(GetWorld(), Key % 4,
+	FNCAimTrainerOnline::Fetch(GetWorld(), Key % 6,
 		[WeakPC, WeakWorld, Key, Generation](bool bSuccess, const TArray<FNCAimTrainerLeaderboardRow>& Rows)
 	{
 		ANCAimTrainerPlayerController* PC = WeakPC.Get();
@@ -365,18 +367,18 @@ void ANCAimTrainerPlayerController::RefreshTrainerLeaderboard()
 			if (PC->LeaderboardCache[Key].Num() > 10) { PC->LeaderboardCache[Key].SetNum(10); }
 			PC->LeaderboardLoaded[Key] = true;
 		}
-	}, (Key % 8) >= 4, Key >= 8);
+	}, (Key % 12) >= 6, Key >= 12);
 }
 
 void ANCAimTrainerPlayerController::NotifyTrainerLeaderboardSubmission(uint8 Scenario, bool bLocal, bool bMovementPractice)
 {
-	if (Role == ROLE_Authority && Scenario < 4) { ClientTrainerLeaderboardSubmitted(Scenario, bLocal, bMovementPractice); }
+	if (Role == ROLE_Authority && Scenario < 6) { ClientTrainerLeaderboardSubmitted(Scenario, bLocal, bMovementPractice); }
 }
 
 void ANCAimTrainerPlayerController::ClientTrainerLeaderboardSubmitted_Implementation(uint8 Scenario, bool bLocal, bool bMovementPractice)
 {
-	if (!IsLocalController() || Scenario >= 4 || bLeaderboardEnded) { return; }
-	const int32 Key = int32(Scenario) + (bLocal ? 4 : 0) + (bMovementPractice ? 8 : 0);
+	if (!IsLocalController() || Scenario >= 6 || bLeaderboardEnded) { return; }
+	const int32 Key = int32(Scenario) + (bLocal ? 6 : 0) + (bMovementPractice ? 12 : 0);
 	++LeaderboardGeneration[Key];
 	NextLeaderboardFetch[Key] = 0.0;
 	LeaderboardFailed[Key] = false;

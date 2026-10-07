@@ -66,7 +66,7 @@ TSharedPtr<FNCAimTrainerLocalSession> FNCAimTrainerLocalSession::Start(UWorld* I
 {
 	using namespace NCAimTrainerLocal;
 	FGuid ParsedId;
-	if (!InWorld || InWorld->GetNetMode() != NM_Standalone || Scenario < 0 || Scenario > 3
+	if (!InWorld || InWorld->GetNetMode() != NM_Standalone || Scenario < 0 || Scenario > 5
 		|| !FGuid::Parse(RequestId, ParsedId) || !ParsedId.IsValid()
 		|| RequestId != ParsedId.ToString(EGuidFormats::DigitsWithHyphens).ToLower())
 	{

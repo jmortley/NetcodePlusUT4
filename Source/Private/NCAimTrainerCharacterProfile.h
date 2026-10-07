@@ -8,6 +8,10 @@
 // fbfbb9bff5eb1627a30db2e34c430bf49a9dde47149b4ea052e789da330ef394.
 // Both cooked CDOs and BeginPlay bytecode were
 // inspected: BeginPlay sets slide speeds to 1350 initial / 1100 sustained.
+// /Game/Blueprints/Netcode/SaCTFCharacter from MutSaCTF-WindowsNoEditor.pak,
+// uasset SHA256 a2a923321656eeaf800af6e420cd9f53cb98459e56de6a906c193d5032c36ed7,
+// has the same TeamArena geometry/movement defaults but no BeginPlay slide
+// override: its native sustained slide speed remains 900 (initial 1350).
 // Do not apply capsule/mesh profiles only to a live actor: stock UnCrouch and
 // ApplyCharacterData restore their respective values from the native class CDO.
 namespace NCAimTrainerCharacterProfile
@@ -85,5 +89,14 @@ namespace NCAimTrainerCharacterProfile
         Move.MaxStepHeight = 53.f;
         Move.NetworkSimulatedSmoothLocationTime = .05f;
         Move.NetworkMaxSmoothUpdateDistance = 284.f;
+    }
+
+    template<class Movement>
+    void ApplySACTFMovement(Movement& Move)
+    {
+        ApplyTeamArenaMovement(Move);
+        // SaCTFCharacter has no BeginPlay override for sustained slide speed.
+        // It retains UT's 900, unlike TeamArenaCharacter's authored 1100.
+        Move.MaxFloorSlideSpeed = 900.f;
     }
 }

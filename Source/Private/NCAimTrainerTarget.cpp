@@ -56,6 +56,12 @@ ANCAimTrainerInstagibTarget::ANCAimTrainerInstagibTarget(const FObjectInitialize
     NCAimTrainerCharacterProfile::ApplyInstagibMovement(*UTCharacterMovement);
 }
 
+ANCAimTrainerSACTFTarget::ANCAimTrainerSACTFTarget(const FObjectInitializer& ObjectInitializer)
+    : Super(ObjectInitializer)
+{
+    NCAimTrainerCharacterProfile::ApplySACTFMovement(*UTCharacterMovement);
+}
+
 void ANCAimTrainerTarget::PostInitializeComponents()
 {
     Super::PostInitializeComponents();

@@ -19,6 +19,8 @@ namespace
 		case 1: return TEXT("HEADSHOTS");
 		case 2: return TEXT("IG POP-UP");
 		case 3: return TEXT("SNIPER/LG POP-UP");
+		case 4: return TEXT("SACTF HEADSHOTS");
+		case 5: return TEXT("SACTF POP-UP");
 		default: return TEXT("LINK TRACKING");
 		}
 	}
@@ -193,22 +195,28 @@ void ANCAimTrainerHUD::DrawModePicker(ANCAimTrainerPlayerController* PC)
 	const FNCAimTrainerProgress& Progress = PC->GetTrainerProgress();
 	Panel(90.f, 126.f, 1100.f, 551.f, TrainerPanel);
 	Label(TEXT("CHOOSE YOUR PRACTICE"), 120.f, 151.f, 27.f, TrainerInk);
-	Label(TEXT("REAL UT CHARACTERS. FOUR 60-SECOND CHALLENGES."), 120.f, 188.f, 14.f, TrainerMuted);
-	const TCHAR* Line1[] = { TEXT("Strafes, dodges, slides and crouches."), TEXT("Your NCP Sniper / Lightning choice."), TEXT("Instagib pop-ups and a constant dodger."), TEXT("Pop-ups with Sniper or Lightning.") };
-	const TCHAR* Line2[] = { TEXT("Hold either fire button. Track the beam."), TEXT("100 per headshot. Accuracy tracks misses."), TEXT("100 per hit. Shoot before they disappear."), TEXT("100 per hit. +50 for a headshot.") };
-	for (int32 Mode = 0; Mode < 4; ++Mode)
+	Label(TEXT("REAL UT CHARACTERS. SIX 60-SECOND CHALLENGES."), 120.f, 188.f, 14.f, TrainerMuted);
+	const TCHAR* Descriptions[] = {
+		TEXT("Hold fire. Track strafes and dodges."),
+		TEXT("Sniper/LG. 100 per headshot."),
+		TEXT("Instagib. 100 per hit, before expiry."),
+		TEXT("Sniper/LG. 100 per hit, +50 headshot."),
+		TEXT("SACTF sniper. 100 per headshot."),
+		TEXT("SACTF sniper. 100 per hit, +50 headshot.")
+	};
+	for (int32 Mode = 0; Mode < 6; ++Mode)
 	{
-		const float X = 120.f + float(Mode) * 264.f;
-		Button(Mode, FString::Printf(TEXT("[%d] %s"), Mode + 1, ScenarioName(uint8(Mode))), X, 224.f, 248.f, 53.f, Progress.Scenario == Mode);
-		Label(Line1[Mode], X + 12.f, 294.f, 13.f, TrainerInk, 224.f);
-		Label(Line2[Mode], X + 12.f, 318.f, 12.f, TrainerMuted, 224.f);
+		const float X = 120.f + float(Mode % 3) * 353.f;
+		const float Y = 207.f + float(Mode / 3) * 72.f;
+		Button(Mode, FString::Printf(TEXT("[%d] %s"), Mode + 1, ScenarioName(uint8(Mode))), X, Y, 334.f, 38.f, Progress.Scenario == Mode);
+		Label(Descriptions[Mode], X + 12.f, Y + 46.f, 13.f, TrainerMuted, 310.f);
 	}
 	Button(12, Progress.bMovementPractice ? TEXT("[M] MOVEMENT: ON / SEPARATE BOARD") : TEXT("[M] MOVEMENT: OFF / FIXED POSITION"),
-		120.f, 346.f, 475.f, 34.f, Progress.bMovementPractice);
+		120.f, 350.f, 475.f, 30.f, Progress.bMovementPractice);
 	Label(TEXT("Strafe left/right, dodge, jump and crouch. No forward/back."), 615.f, 357.f, 13.f, TrainerMuted, 545.f);
 	DrawLeaderboard(PC, 392.f);
 	Button(10, TEXT("ENTER  /  START RUN"), 799.f, 610.f, 361.f, 43.f, true);
-	Label(TEXT("Click a scenario or use 1 / 2 / 3 / 4.  ESC opens the game menu."), 120.f, 625.f, 14.f, TrainerMuted, 650.f);
+	Label(TEXT("Click a scenario or use keys 1 - 6.  ESC opens the game menu."), 120.f, 625.f, 14.f, TrainerMuted, 650.f);
 }
 
 void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
@@ -221,7 +229,7 @@ void ANCAimTrainerHUD::DrawResults(ANCAimTrainerPlayerController* PC)
 		? FString::Printf(TEXT("%.2f s ON TARGET / %.2f s FIRED     %.1f%% ACCURACY"), Progress.TrackingSeconds, Progress.FiringSeconds, Progress.Accuracy)
 		: FString::Printf(TEXT("%d / %d HITS     %.1f%% ACCURACY     %d EXPIRED"), Progress.Hits, Progress.Shots, Progress.Accuracy, Progress.TargetsExpired);
 	Label(Detail, 640.f, 269.f, 17.f, TrainerMuted, 1010.f, true);
-	if (Progress.Scenario == 1 || Progress.Scenario == 3)
+	if (Progress.Scenario == 1 || Progress.Scenario == 3 || Progress.Scenario == 4 || Progress.Scenario == 5)
 	{
 		Label(FString::Printf(TEXT("%d HEADSHOTS"), Progress.Headshots), 640.f, 301.f, 16.f, TrainerAccent, 0.f, true);
 	}
@@ -267,10 +275,10 @@ void ANCAimTrainerHUD::DrawHUD()
 		}
 		else
 		{
-			const TCHAR* HitLabel = Progress.Scenario == 1 ? TEXT("HEADSHOTS") : TEXT("HITS");
+			const TCHAR* HitLabel = (Progress.Scenario == 1 || Progress.Scenario == 4) ? TEXT("HEADSHOTS") : TEXT("HITS");
 			FString HitDetail = FString::Printf(TEXT("%d %s / %d SHOTS     %d EXPIRED"),
 				Progress.Hits, HitLabel, Progress.Shots, Progress.TargetsExpired);
-			if (Progress.Scenario == 3) { HitDetail += FString::Printf(TEXT("     %d HEADSHOTS"), Progress.Headshots); }
+			if (Progress.Scenario == 3 || Progress.Scenario == 5) { HitDetail += FString::Printf(TEXT("     %d HEADSHOTS"), Progress.Headshots); }
 			Label(HitDetail,
 				640.f, 103.f, 16.f, TrainerAccent, 0.f, true);
 		}
@@ -287,7 +295,7 @@ bool ANCAimTrainerHUD::OverrideMouseClick(FKey Key, EInputEvent EventType)
 		{
 			if (IsHovered(Hit.Min.X, Hit.Min.Y, Hit.Max.X - Hit.Min.X, Hit.Max.Y - Hit.Min.Y))
 			{
-				if (Hit.Action < 4) { PC->SelectTrainerScenario(uint8(Hit.Action)); }
+				if (Hit.Action < 6) { PC->SelectTrainerScenario(uint8(Hit.Action)); }
 				else if (Hit.Action == 10) { PC->StartTrainerRun(); }
 				else if (Hit.Action == 12) { PC->ToggleTrainerMovementPractice(); }
 				else if (Hit.Action == 20) { PC->SelectTrainerLeaderboardSource(true); }
