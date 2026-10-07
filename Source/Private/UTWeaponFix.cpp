@@ -5034,6 +5034,7 @@ void AUTWeaponFix::ServerStartFireFixed_Implementation(uint8 FireModeNum, int32 
 
 void AUTWeaponFix::Removed()
 {
+    ClearFlakShellClaims();
     NCFireAnchor::InvalidateWeapon(this);
     FireProtocolController = UTOwner ? UTOwner->Controller : nullptr;
     ClearDeferredActiveState();
@@ -7531,6 +7532,8 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
     if (NewProjectile)
         if (AUTPlusWeap_RocketLauncher* Launcher = Cast<AUTPlusWeap_RocketLauncher>(this))
             Launcher->CaptureLoadedRocketSpawn(NewProjectile);
+    if (CapturedFireMode == 1)
+        CaptureFlakShellSpawn(Cast<AUTPlusProj_FlakShell>(NewProjectile));
 
 	if (!NewProjectile)
 	{
@@ -7673,6 +7676,8 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 				Entry.LoadedVolleyId = Rocket->LoadedVolleyId;
 				Entry.LoadedRocketOrdinal = Rocket->LoadedRocketOrdinal;
 			}
+			if (const AUTPlusProj_FlakShell* Shell = Cast<AUTPlusProj_FlakShell>(NewProjectile))
+				Entry.FlakShotId = Shell->ShotId;
 			ActiveServerProjectiles.Add(Entry);
 			PruneTrackedProjectiles(GetWorld()->GetTimeSeconds());
 		}
@@ -10010,6 +10015,15 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 	}
 
 	const AUTPlusProj_Rocket* LoadedRocket = Cast<AUTPlusProj_Rocket>(SourceProj);
+	const AUTPlusProj_FlakShell* FlakShell = Cast<AUTPlusProj_FlakShell>(SourceProj);
+	if (FlakShell)
+	{
+		// Missing initial replication must never become an ambiguous FIFO claim.
+		if (FlakShell->bFakeClientProjectile || FlakShell->ShotId == 0
+			|| FlakShell->FiringWeapon != this || FlakShell->GetInstigator() != UTOwner)
+			return;
+		FireModeNum = 1;
+	}
 	if (LoadedRocket && LoadedRocket->LoadedVolleyId != 0)
 	{
 		// Never downgrade an unavailable/stale loaded identity into a primary/FIFO claim.
@@ -10068,7 +10082,11 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 		}
 	}
 
-	if (LoadedRocket)
+	if (FlakShell)
+	{
+		ServerFlakShellHitClaim(HitTarget, HitLocation, FlakShell->ShotId);
+	}
+	else if (LoadedRocket)
 	{
 		ServerLoadedRocketHitClaim(HitTarget, HitLocation, LoadedRocket->LoadedOwnershipEpoch,
 			LoadedRocket->LoadedVolleyId, LoadedRocket->LoadedRocketOrdinal);
@@ -10077,6 +10095,27 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 	{
 		ServerProjectileHitClaim(HitTarget, HitLocation, FireModeNum);
 	}
+}
+
+void AUTWeaponFix::ClearFlakShellClaims()
+{
+	// Old identities cannot follow a dropped cannon to a new ownership lifetime,
+	// even when the same pawn picks it back up. Do not reset NextFlakShotId.
+	// Ordinary weapon switching does not call Removed and keeps live claims valid.
+	for (int32 i = ActiveServerProjectiles.Num() - 1; i >= 0; --i)
+		if (ActiveServerProjectiles[i].FlakShotId != 0) ActiveServerProjectiles.RemoveAt(i);
+}
+
+void AUTWeaponFix::CaptureFlakShellSpawn(AUTPlusProj_FlakShell* Proj)
+{
+	if (Role != ROLE_Authority || !UTOwner || !Proj || Proj->bFakeClientProjectile
+		|| Proj->ShotId != 0 || Proj->GetInstigator() != UTOwner)
+		return;
+	// Do not wrap and alias a previous identity. Four billion shells exceeds a
+	// weapon actor's practical lifetime; exhaustion fails closed for hit claims.
+	if (NextFlakShotId == MAX_uint32) return;
+	Proj->ShotId = ++NextFlakShotId;
+	Proj->FiringWeapon = this;
 }
 
 void AUTWeaponFix::PruneTrackedProjectiles(float Now)
@@ -10165,6 +10204,61 @@ void AUTWeaponFix::OnTrackedRocketExploding(AUTPlusProj_Rocket* Proj, const FVec
 	}
 }
 
+void AUTWeaponFix::OnTrackedFlakExploding(AUTPlusProj_FlakShell* Proj, const FVector& HitLocation,
+	const FVector& HitNormal)
+{
+	if (Role != ROLE_Authority || !Proj || Proj->bFakeClientProjectile || Proj->bExploded
+		|| Proj->ShotId == 0 || Proj->FiringWeapon != this)
+		return;
+	for (FActiveServerProjectile& Entry : ActiveServerProjectiles)
+	{
+		if (Entry.Projectile.Get() != Proj) continue;
+		if (Entry.ExpireTime >= 0.f) return;
+		OnTrackedProjectileResolved(Proj, Cast<AUTCharacter>(Proj->ImpactedActor));
+		Entry.FinalLoc = HitLocation;
+		Entry.bFlakExplosionObserved = true;
+		// A direct pawn impact has already committed this shell's direct damage.
+		// A world explosion with shards can deal damage after this snapshot, well
+		// outside its splash radius. Neither can safely receive a later top-up.
+		if (Cast<APawn>(Proj->ImpactedActor) || (Proj->ShardClass && Proj->ShardSpawnCount > 0))
+			return;
+		const FVector Origin = HitLocation + HitNormal;
+		float AdjustedMomentum = Proj->Momentum;
+		const FRadialDamageParams Params = Proj->GetDamageParams(nullptr, HitLocation, AdjustedMomentum);
+		if (Origin.ContainsNaN() || !FMath::IsFinite(Params.OuterRadius) || Params.OuterRadius < 0.f
+			|| !FMath::IsFinite(Params.BaseDamage) || Params.BaseDamage < 0.f
+			|| !FMath::IsFinite(AdjustedMomentum))
+			return;
+		Entry.BaseDamage = Params.BaseDamage;
+		Entry.Momentum = AdjustedMomentum;
+		if (Params.OuterRadius > 0.f)
+		{
+			TArray<FOverlapResult> Overlaps;
+			FCollisionQueryParams Query(TEXT("FlakShellSplashGuard"), true, Proj);
+			GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity,
+				COLLISION_TRACE_WEAPON, FCollisionShape::MakeSphere(Params.OuterRadius), Query);
+			for (const FOverlapResult& Overlap : Overlaps)
+				if (AUTCharacter* Character = Cast<AUTCharacter>(Overlap.GetActor()))
+					Entry.PossibleSplashTargets.AddUnique(Character);
+		}
+		Entry.bFlakGraceEligible = true;
+		return;
+	}
+}
+
+bool AUTWeaponFix::ServerFlakShellHitClaim_Validate(AUTCharacter* ClaimedTarget,
+	FVector ClaimedHitLocation, uint32 ShotId)
+{
+	return true;
+}
+
+void AUTWeaponFix::ServerFlakShellHitClaim_Implementation(AUTCharacter* ClaimedTarget,
+	FVector ClaimedHitLocation, uint32 ShotId)
+{
+	if (!Is329FireProtocolReady() || !UTOwner || ShotId == 0) return;
+	ProcessProjectileHitClaim(ClaimedTarget, ClaimedHitLocation, 1, 0, 0, 0, ShotId);
+}
+
 bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget,
 	FVector ClaimedHitLocation, uint8 ClaimedFireMode)
 {
@@ -10196,7 +10290,8 @@ void AUTWeaponFix::ServerLoadedRocketHitClaim_Implementation(AUTCharacter* Claim
 }
 
 void AUTWeaponFix::ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
-	uint8 ClaimedFireMode, uint32 ClaimedEpoch, uint32 ClaimedVolleyId, uint8 ClaimedOrdinal)
+	uint8 ClaimedFireMode, uint32 ClaimedEpoch, uint32 ClaimedVolleyId, uint8 ClaimedOrdinal,
+	uint32 ClaimedFlakShotId)
 {
 	// Master gates: per-weapon feature flag (also gates the client send) AND server kill-switch.
 	if (!bEnableProjectileRewind || CVarRocketLagComp.GetValueOnGameThread() == 0)
@@ -10235,9 +10330,9 @@ void AUTWeaponFix::ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVecto
 	if (RocketLagCompDbg())
 	{
 		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind CLAIM: tgt=%s fm=%d ping=%.0f tracked=%d epoch=%u volley=%u ordinal=%u"),
+			TEXT("ProjRewind CLAIM: tgt=%s fm=%d ping=%.0f tracked=%d epoch=%u volley=%u ordinal=%u flakShot=%u"),
 			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TrackedAtClaim,
-			ClaimedEpoch, ClaimedVolleyId, (uint32)ClaimedOrdinal);
+			ClaimedEpoch, ClaimedVolleyId, (uint32)ClaimedOrdinal, ClaimedFlakShotId);
 	}
 
 	if (PingMs > CVarRocketLagCompMaxPingMs.GetValueOnGameThread())
@@ -10258,7 +10353,7 @@ void AUTWeaponFix::ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVecto
 
 	// 3. Find the real (authoritative) projectile
 	// Loaded rockets match the exact spawn snapshot, even after their actor is gone.
-	// Other projectiles retain FIFO by fire mode, but can NEVER consume a loaded entry.
+	// Other projectiles retain FIFO by fire mode, but cannot consume identified entries.
 	// Prefer a LIVE projectile; if none, fall back to the GRACE BUFFER — a matching projectile
 	// that resolved (exploded) within ut.RocketLagCompGraceMs, for the close-range timing race
 	// where the server projectile detonated before this ~RTT-late claim arrived.
@@ -10280,10 +10375,14 @@ void AUTWeaponFix::ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVecto
 	{
 		FActiveServerProjectile& Entry = ActiveServerProjectiles[i];
 		const bool bMatchesClaim = Entry.FireMode == ClaimedFireMode &&
-			(ClaimedVolleyId != 0
-				? Entry.LoadedVolleyId == ClaimedVolleyId && Entry.LoadedOwnershipEpoch == ClaimedEpoch
+			(ClaimedFlakShotId != 0
+				? Entry.FlakShotId == ClaimedFlakShotId && Entry.LoadedVolleyId == 0
+					&& Entry.FiringPawn.Get() == UTOwner
+				: ClaimedVolleyId != 0
+				? Entry.FlakShotId == 0 && Entry.LoadedVolleyId == ClaimedVolleyId && Entry.LoadedOwnershipEpoch == ClaimedEpoch
 					&& Entry.LoadedRocketOrdinal == ClaimedOrdinal && Entry.FiringPawn.Get() == UTOwner
-				: Entry.LoadedVolleyId == 0);
+				: Entry.LoadedVolleyId == 0 && Entry.FlakShotId == 0
+					&& !Cast<AUTPlusProj_FlakShell>(Entry.Projectile.Get()));
 		const bool bLive = Entry.Projectile.IsValid()
 			&& !Entry.Projectile.Get()->bExploded
 			&& !Entry.Projectile.Get()->IsPendingKillPending();
@@ -10360,6 +10459,13 @@ void AUTWeaponFix::ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVecto
 		{
 			if (RocketLagCompDbg())
 				UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: loaded grace has possible prior splash or no explosion snapshot"));
+			return;
+		}
+		if (ClaimedFlakShotId != 0 && (!E.bFlakExplosionObserved || !E.bFlakGraceEligible
+			|| E.PossibleSplashTargets.Contains(ClaimedTarget)))
+		{
+			if (RocketLagCompDbg())
+				UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: flak grace has prior damage, possible shards/splash or no trusted explosion snapshot"));
 			return;
 		}
 		bFromGrace = true;
@@ -10628,6 +10734,14 @@ AUTWeaponFix* AUTWeaponFix::FindFiringWeaponForProjectile(AUTCharacter* OwnerCha
 	if (OwnerChar == nullptr || Proj == nullptr)
 	{
 		return nullptr;
+	}
+	if (const AUTPlusProj_FlakShell* Shell = Cast<AUTPlusProj_FlakShell>(Proj))
+	{
+		// No class lookup fallback: multiple cannons or a weapon switch must not
+		// route a shell to a different tracking buffer. Unmapped identity fails closed.
+		AUTWeaponFix* Weapon = Shell->FiringWeapon;
+		return Shell->ShotId != 0 && Weapon && !Weapon->IsPendingKillPending()
+			&& Weapon->GetUTOwner() == OwnerChar && Proj->GetInstigator() == OwnerChar ? Weapon : nullptr;
 	}
 
 	if (const AUTPlusProj_Rocket* Rocket = Cast<AUTPlusProj_Rocket>(Proj))

@@ -30,8 +30,292 @@ struct Fixture {
     }
     int Hits() const { int hits=0;for(const auto& rocket:Rockets)hits+=rocket.ProcessHits;return hits; }
 };
+struct FlakFixture {
+    AUTWeaponFix Gun;
+    AUTCharacter Shooter,Target,OtherPawn;
+    AUTPlusProj_FlakShell Shells[8];
+    FlakFixture() {
+        Gun.UTOwner=&Shooter;Shooter.Weapon=&Gun;
+        CVarRocketLagComp.Value=1.f;CVarRocketLagCompGraceMs.Value=200.f;
+        CVarRocketLagCompMaxPingMs.Value=150.f;CVarRocketLagCompMaxWindowMs.Value=200.f;
+        Gun.NextFlakShotId=100;
+        for(int i=0;i<3;++i) Add(i);
+    }
+    void Add(int index) {
+        auto& shell=Shells[index];shell.Instigator=&Shooter;
+        Gun.CaptureFlakShellSpawn(&shell);
+        FActiveServerProjectile entry(&shell,1);
+        entry.FiringPawn=&Shooter;entry.FlakShotId=shell.ShotId;
+        Gun.ActiveServerProjectiles.Add(entry);
+    }
+    void Claim(uint32 id) { Gun.ServerFlakShellHitClaim_Implementation(&Target,Target.History,id); }
+    void Resolve(int index,UObject* impacted=nullptr,bool trusted=true) {
+        auto& shell=Shells[index];shell.ImpactedActor=impacted;
+        if(trusted) Gun.OnTrackedFlakExploding(&shell,shell.Position,FVector(0.f,0.f,1.f));
+        else Gun.OnTrackedProjectileResolved(&shell,Cast<AUTCharacter>(impacted));
+        shell.bExploded=true;shell.PendingKill=true;
+        for(auto& entry:Gun.ActiveServerProjectiles)
+            if(entry.Projectile.Get()==&shell) entry.Projectile.Reset();
+    }
+    int Hits() const { int count=0;for(const auto& shell:Shells)count+=shell.ProcessHits;return count; }
+};
+void FlakCases(const std::string& name) {
+    if(name=="flak_exact") {
+        FlakFixture f;
+        // Authored child shards are still handled by the live native hit path.
+        f.Shells[2].ShardClass=UDamageType::StaticClass();f.Shells[2].ShardSpawnCount=9;
+        f.Claim(103);
+        Require(f.Shells[2].ProcessHits==1&&f.Shells[0].ProcessHits==0&&f.Shells[1].ProcessHits==0,
+                "exact Flak ID selected the older overlapping shell");
+        Require(f.Target.DamageCalls==0&&f.Gun.ActiveServerProjectiles.Num()==2,
+                "live Flak claim bypassed native ProcessHit or removed another shell");
+        f.Claim(103);f.Claim(101);f.Claim(101);f.Claim(102);f.Claim(102);
+        Require(f.Hits()==3&&f.Gun.ActiveServerProjectiles.Num()==0&&f.Target.DamageCalls==0,
+                "out-of-order or duplicate Flak claim selected another shell or applied damage twice");
+    } else if(name=="flak_guards") {
+        for(int guard=0;guard<12;++guard) {
+            FlakFixture f;uint32 id=103;
+            if(guard==0) id=0;
+            if(guard==1) id=99;
+            if(guard==2) f.Gun.Role=1;
+            if(guard==3) f.Shooter.OwnController.Confirmed=false;
+            if(guard==4) f.Gun.UTOwner=nullptr;
+            if(guard==5) f.Gun.UTOwner=&f.OtherPawn;
+            if(guard==6) f.Gun.ActiveServerProjectiles[2].FiringPawn=&f.OtherPawn;
+            if(guard==7) f.Gun.ActiveServerProjectiles[2].FiringPawn.Reset();
+            if(guard==8) f.Gun.ActiveServerProjectiles[2].FireMode=0;
+            if(guard==9) f.Gun.ActiveServerProjectiles[2].LoadedVolleyId=41;
+            if(guard==10) f.Target.Dead=true;
+            if(guard==11) {
+                AUTWeaponFix wrongWeapon;wrongWeapon.UTOwner=&f.Shooter;
+                wrongWeapon.ServerFlakShellHitClaim_Implementation(&f.Target,f.Target.History,id);
+            } else f.Claim(id);
+            Require(f.Hits()==0&&f.Target.DamageCalls==0&&f.Gun.ActiveServerProjectiles.Num()==3,
+                    "invalid/stale Flak ID, weapon, owner, protocol or fire mode accepted a claim");
+        }
+        FlakFixture switched;AUTWeaponFix otherGun;switched.Shooter.Weapon=&otherGun;switched.Claim(103);
+        Require(switched.Shells[2].ProcessHits==1,"ordinary weapon switch invalidated in-flight Flak claim");
+    } else if(name=="flak_isolation") {
+        FlakFixture f;
+        f.Gun.ServerProjectileHitClaim_Implementation(&f.Target,f.Target.History,0);
+        f.Gun.ServerProjectileHitClaim_Implementation(&f.Target,f.Target.History,1);
+        Require(f.Hits()==0,"legacy claim consumed identified Flak shell");
+        f.Gun.ActiveServerProjectiles[2].FlakShotId=0;
+        f.Gun.ServerProjectileHitClaim_Implementation(&f.Target,f.Target.History,1);
+        Require(f.Hits()==0,"missing Flak identity fell back to legacy FIFO matching");
+        f.Gun.ActiveServerProjectiles[2].FlakShotId=103;
+        f.Gun.ActiveServerProjectiles[2].LoadedVolleyId=41;
+        f.Gun.ActiveServerProjectiles[2].LoadedOwnershipEpoch=7;
+        f.Gun.ActiveServerProjectiles[2].LoadedRocketOrdinal=2;
+        f.Gun.ProcessProjectileHitClaim(&f.Target,f.Target.History,1,7,41,2);
+        f.Claim(103);
+        Require(f.Hits()==0,"dual-tagged tracking entry matched Flak or loaded rocket claim");
+        Fixture rockets;rockets.Gun.ServerFlakShellHitClaim_Implementation(&rockets.Target,rockets.Target.History,41);
+        Require(rockets.Hits()==0,"Flak claim consumed loaded rocket sharing a numeric ID");
+        AUTProjectile legacy;
+        FActiveServerProjectile legacyEntry(&legacy,1);legacyEntry.FiringPawn=&f.Shooter;
+        f.Gun.ActiveServerProjectiles.Add(legacyEntry);
+        f.Gun.ServerProjectileHitClaim_Implementation(&f.Target,f.Target.History,1);
+        Require(legacy.ProcessHits==1&&f.Hits()==0,"tag isolation broke ordinary non-Flak legacy projectile");
+    } else if(name=="flak_grace") {
+        FlakFixture f;f.Shells[2].UseAdjustedDamage=true;
+        f.Shells[2].AdjustedDamageParams.BaseDamage=125.f;
+        f.Resolve(2);f.Gun.TheWorld.Now+=.05f;f.Add(3);f.Gun.PruneTrackedProjectiles(f.Gun.TheWorld.Now);
+        Require(f.Gun.ActiveServerProjectiles.Num()==4,"Flak grace snapshot was discarded by a new spawn");
+        f.Claim(103);
+        Require(f.Target.DamageCalls==1&&f.Target.DamageTotal==125.f&&f.Hits()==0
+                &&f.Gun.ActiveServerProjectiles.Num()==3,
+                "exact Flak grace consumed unrelated live shell or ignored adjusted damage snapshot");
+        f.Claim(103);Require(f.Target.DamageCalls==1&&f.Hits()==0,"Flak grace duplicate consumed live shell");
+        f.Claim(104);Require(f.Shells[3].ProcessHits==1,"Flak grace damaged the replacement shell identity");
+    } else if(name=="flak_terminal_guards") {
+        for(int risk=0;risk<4;++risk) {
+            FlakFixture f;APawn genericPawn;UObject* impacted=nullptr;
+            if(risk==0) {f.Shells[2].ShardClass=UDamageType::StaticClass();f.Shells[2].ShardSpawnCount=9;}
+            if(risk==1) impacted=&f.Target;
+            if(risk==2) impacted=&f.OtherPawn;
+            if(risk==3) impacted=&genericPawn;
+            f.Resolve(2,impacted);f.Claim(103);f.Claim(103);
+            Require(f.Gun.ActiveServerProjectiles[2].bFlakExplosionObserved
+                    &&!f.Gun.ActiveServerProjectiles[2].bFlakGraceEligible
+                    &&f.Target.DamageCalls==0&&f.Hits()==0&&f.Gun.TheWorld.OverlapQueries==0,
+                    "Flak terminal with authored shards or pawn impact accepted a top-up");
+        }
+        for(bool hasClass:{false,true}) {
+            FlakFixture f;
+            if(hasClass) f.Shells[2].ShardClass=UDamageType::StaticClass();
+            f.Shells[2].ShardSpawnCount=hasClass?0:9;
+            f.Resolve(2);f.Claim(103);
+            Require(f.Target.DamageCalls==1,"inactive shard configuration prevented otherwise valid shardless grace");
+        }
+    } else if(name=="flak_splash") {
+        for(bool wall:{false,true}) {
+            FlakFixture f;UObject scenery;
+            f.Gun.TheWorld.Wall=wall;f.Gun.TheWorld.OverlapBlocking=false;
+            f.Gun.TheWorld.OverlapResults={&f.Target,&f.Target,&scenery};
+            f.Shells[2].UseAdjustedDamage=true;f.Shells[2].AdjustedDamageParams.OuterRadius=321.f;
+            f.Resolve(2);
+            const auto& entry=f.Gun.ActiveServerProjectiles[2];
+            Require(entry.bFlakExplosionObserved&&entry.bFlakGraceEligible
+                    &&entry.PossibleSplashTargets.Num()==1&&entry.PossibleSplashTargets.Contains(&f.Target)
+                    &&entry.BaseDamage==125.f&&entry.Momentum==222.f
+                    &&f.Gun.TheWorld.LastOverlapRadius==321.f
+                    &&f.Gun.TheWorld.LastOverlapOrigin.Z==1.f,
+                    "Flak explosion query lost adjusted parameters or nonblocking duplicate candidate handling");
+            f.Claim(103);
+            Require(f.Target.DamageCalls==0&&f.Hits()==0&&f.Gun.TheWorld.WallQueries==0,
+                    "possible Flak splash victim received a grace top-up or depended on LOS");
+        }
+        FlakFixture unknown;unknown.Resolve(2,nullptr,false);unknown.Claim(103);
+        Require(unknown.Target.DamageCalls==0&&unknown.Hits()==0,"generic untrusted Flak snapshot accepted grace");
+        for(int invalid=0;invalid<7;++invalid) {
+            FlakFixture f;auto& shell=f.Shells[2];shell.UseAdjustedDamage=true;
+            if(invalid==0) shell.AdjustedDamageParams.OuterRadius=-1.f;
+            if(invalid==1) shell.AdjustedDamageParams.OuterRadius=std::numeric_limits<float>::quiet_NaN();
+            if(invalid==2) shell.Position.Z=std::numeric_limits<float>::infinity();
+            if(invalid==3) shell.AdjustedDamageParams.BaseDamage=-1.f;
+            if(invalid==4) shell.AdjustedDamageParams.BaseDamage=std::numeric_limits<float>::quiet_NaN();
+            if(invalid==5) shell.AdjustedMomentum=std::numeric_limits<float>::infinity();
+            if(invalid==6) shell.AdjustedMomentum=std::numeric_limits<float>::quiet_NaN();
+            f.Resolve(2);f.Claim(103);
+            Require(f.Target.DamageCalls==0&&!f.Gun.ActiveServerProjectiles[2].bFlakGraceEligible,
+                    "invalid Flak explosion geometry or damage snapshot allowed grace");
+        }
+    } else if(name=="flak_low_ping") {
+        for(float ping:{0.f,10.f,20.f,40.f}) for(bool grace:{false,true}) for(bool miss:{false,true}) {
+            FlakFixture f;f.Shooter.State.ExactPing=ping;
+            const float window=std::max(.016f,ping*.0011f),step=1.f/240.f;
+            const float delta=std::floor(window/step)*step,age=grace?ping*.0005f:0.f;
+            const float back=delta-age;
+            f.Target.HistoryVelocity=FVector(0.f,1000.f,0.f);
+            const FVector anchor=f.Target.History-f.Target.HistoryVelocity*delta;
+            auto& shell=f.Shells[2];shell.Velocity=FVector(2000.f,0.f,300.f);shell.Movement.Gravity=-980.f;
+            shell.Position=anchor+shell.Velocity*back-FVector(0.f,0.f,.5f*shell.Movement.Gravity*back*back);
+            if(miss) shell.Position.X+=200.f;
+            shell.DamageParams.OuterRadius=0.f; // Exercise contact reconstruction without possible native splash.
+            if(grace) { f.Gun.TheWorld.Now=10.f-age;f.Resolve(2);f.Gun.TheWorld.Now=10.f; }
+            f.Gun.ServerFlakShellHitClaim_Implementation(&f.Target,anchor,103);
+            Require(miss ? f.Hits()==0&&f.Target.DamageCalls==0
+                         : grace ? f.Target.DamageCalls==1&&f.Hits()==0 : shell.ProcessHits==1&&f.Target.DamageCalls==0,
+                    "low-ping Flak moving-history/gravity contact decision was incorrect");
+            Require(f.Target.MaxRewind<=window+.0001f&&f.Target.MaxRewind>=window-step-.0001f,
+                    "Flak exact claims changed bounded low-ping history window");
+        }
+        for(bool grace:{false,true}) for(int guard=0;guard<3;++guard) {
+            FlakFixture f;if(grace)f.Resolve(2);
+            if(guard==0) f.Gun.TheWorld.Wall=true;
+            if(guard==1) f.Shooter.State.ExactPing=151.f;
+            if(guard==2) f.Target.History.Y=1000.f;
+            f.Gun.ServerFlakShellHitClaim_Implementation(&f.Target,FVector(100.f,0.f,0.f),103);
+            Require(f.Hits()==0&&f.Target.DamageCalls==0,"Flak exact identity bypassed LOS/ping/history rejection");
+        }
+    } else if(name=="flak_explosion_guards") {
+        for(int guard=0;guard<7;++guard) {
+            FlakFixture f;auto& shell=f.Shells[2];
+            if(guard==0) f.Gun.Role=1;
+            if(guard==1) shell.bFakeClientProjectile=true;
+            if(guard==2) shell.bExploded=true;
+            if(guard==3) shell.ShotId=0;
+            if(guard==4) shell.FiringWeapon=nullptr;
+            if(guard==5) f.Gun.ActiveServerProjectiles[2].Projectile.Reset();
+            f.Gun.OnTrackedFlakExploding(guard==6?nullptr:&shell,f.Target.History,FVector());
+            const auto& entry=f.Gun.ActiveServerProjectiles[2];
+            Require(entry.ExpireTime==-1.f&&!entry.bFlakExplosionObserved&&!entry.bFlakGraceEligible
+                    &&f.Gun.TheWorld.OverlapQueries==0,
+                    "invalid Flak terminal callback created trusted grace state");
+        }
+        FlakFixture f;f.Shells[2].Position=FVector(999.f,999.f,999.f);
+        f.Gun.OnTrackedFlakExploding(&f.Shells[2],FVector(100.f,0.f,0.f),FVector(0.f,0.f,1.f));
+        const auto& entry=f.Gun.ActiveServerProjectiles[2];
+        Require(entry.FinalLoc.X==100.f&&entry.FinalLoc.Y==0.f&&entry.bFlakGraceEligible,
+                "Flak terminal used actor position instead of the explosion hit location");
+        f.Gun.TheWorld.Now=11.f;f.Gun.TheWorld.OverlapResults={&f.Target};
+        f.Gun.OnTrackedFlakExploding(&f.Shells[2],FVector(888.f,888.f,888.f),FVector());
+        Require(entry.ExpireTime==10.f&&entry.FinalLoc.X==100.f&&entry.PossibleSplashTargets.Num()==0
+                &&f.Gun.TheWorld.OverlapQueries==1,
+                "repeated Flak terminal callback rewrote its original snapshot");
+    } else if(name=="flak_drop_repick") {
+        for(bool samePawn:{false,true}) {
+            FlakFixture f;f.Resolve(2);
+            AUTProjectile legacy;AUTPlusProj_Rocket rocket;
+            FActiveServerProjectile legacyEntry(&legacy,0),rocketEntry(&rocket,1);
+            rocketEntry.LoadedVolleyId=41;rocketEntry.LoadedOwnershipEpoch=7;
+            f.Gun.ActiveServerProjectiles.Add(legacyEntry);f.Gun.ActiveServerProjectiles.Add(rocketEntry);
+            f.Gun.ClearFlakShellClaims();
+            Require(f.Gun.ActiveServerProjectiles.Num()==2&&f.Gun.NextFlakShotId==103
+                    &&f.Gun.ActiveServerProjectiles[0].Projectile.Get()==&legacy
+                    &&f.Gun.ActiveServerProjectiles[1].Projectile.Get()==&rocket,
+                    "drop cleanup removed unrelated entries or reset the Flak identity counter");
+            f.Gun.UTOwner=nullptr;f.Claim(103);
+            f.Gun.UTOwner=samePawn?&f.Shooter:&f.OtherPawn;f.Claim(103);
+            auto& replacement=f.Shells[3];replacement.Instigator=f.Gun.UTOwner;
+            f.Gun.CaptureFlakShellSpawn(&replacement);
+            FActiveServerProjectile fresh(&replacement,1);fresh.FiringPawn=f.Gun.UTOwner;fresh.FlakShotId=replacement.ShotId;
+            f.Gun.ActiveServerProjectiles.Add(fresh);f.Claim(103);
+            Require(replacement.ShotId==104&&f.Gun.NextFlakShotId==104&&f.Hits()==0&&f.Target.DamageCalls==0,
+                    "old dropped Flak claim followed the cannon into a new ownership lifetime");
+            f.Claim(104);
+            Require(replacement.ProcessHits==1&&f.Gun.ActiveServerProjectiles.Num()==2,
+                    "repicked cannon could not accept its fresh Flak identity");
+        }
+    } else if(name=="flak_client_route") {
+        FlakFixture f;AUTWeaponFix held;held.UTOwner=&f.Shooter;
+        f.Shooter.Weapon=&held;f.Shooter.Inventory.Add(&held);
+        held.NCPFiredProjClasses.Add(TSubclassOf<AUTProjectile>(f.Shells[2].GetClass()));
+        Require(AUTWeaponFix::FindFiringWeaponForProjectile(&f.Shooter,&f.Shells[2])==&f.Gun,
+                "Flak route used held/inventory class fallback after an ordinary weapon switch");
+        f.Gun.Role=1;f.Shooter.DamageScaling=2.f;
+        f.Gun.NotifyFakeProjectileHit(&f.Target,f.Target.History,0,&f.Shells[2]);
+        Require(f.Gun.FlakRPCs==1&&f.Gun.LastClaimId==103&&f.Gun.LoadedRPCs==0&&f.Gun.LegacyRPCs==0
+                &&f.Gun.ClientSounds.Predictions==1&&f.Gun.ClientSounds.LastDamage==200,
+                "valid client Flak report did not use exact RPC and source projectile predicted damage");
+        for(int guard=0;guard<10;++guard) {
+            FlakFixture bad;bad.Gun.Role=1;AUTWeaponFix wrong;wrong.UTOwner=&bad.OtherPawn;
+            DemoDriver replay;replay.Playing=true;
+            auto& shell=bad.Shells[2];
+            if(guard==0) shell.ShotId=0;
+            if(guard==1) shell.FiringWeapon=nullptr;
+            if(guard==2) shell.FiringWeapon=&wrong;
+            if(guard==3) shell.Instigator=&bad.OtherPawn;
+            if(guard==4) bad.Gun.UTOwner=&bad.OtherPawn;
+            if(guard==5) bad.Gun.PendingKill=true;
+            if(guard==6) shell.bFakeClientProjectile=true;
+            if(guard==7) bad.Gun.bEnableProjectileRewind=false;
+            if(guard==8) bad.Gun.TheWorld.DemoNetDriver=&replay;
+            if(guard<=5)
+                Require(AUTWeaponFix::FindFiringWeaponForProjectile(&bad.Shooter,&shell)==nullptr,
+                        "unmapped/invalid Flak source found another weapon by class or held fallback");
+            // A pending-kill source is stopped by FindFiringWeapon before Notify.
+            if(guard!=5) bad.Gun.NotifyFakeProjectileHit(guard==9?nullptr:&bad.Target,bad.Target.History,0,&shell);
+            Require(bad.Gun.FlakRPCs==0&&bad.Gun.LoadedRPCs==0&&bad.Gun.LegacyRPCs==0
+                    &&bad.Gun.ClientSounds.Predictions==0,
+                    "rejected Flak report downgraded to FIFO or played a predicted hitsound");
+        }
+    } else if(name=="flak_capture") {
+        FlakFixture f;
+        Require(f.Shells[0].ShotId==101&&f.Shells[1].ShotId==102&&f.Shells[2].ShotId==103
+                &&f.Shells[2].FiringWeapon==&f.Gun&&f.Gun.NextFlakShotId==103,
+                "authority did not assign distinct per-weapon Flak IDs and exact firing weapon");
+        f.Gun.CaptureFlakShellSpawn(&f.Shells[2]);
+        Require(f.Shells[2].ShotId==103&&f.Gun.NextFlakShotId==103,"repeated spawn capture changed Flak identity");
+        for(int guard=0;guard<5;++guard) {
+            FlakFixture rejected;auto& shell=rejected.Shells[3];shell.Instigator=&rejected.Shooter;
+            if(guard==0) rejected.Gun.Role=1;
+            if(guard==1) rejected.Gun.UTOwner=nullptr;
+            if(guard==2) shell.bFakeClientProjectile=true;
+            if(guard==3) shell.Instigator=&rejected.OtherPawn;
+            rejected.Gun.CaptureFlakShellSpawn(guard==4?nullptr:&shell);
+            Require(shell.ShotId==0&&shell.FiringWeapon==nullptr&&rejected.Gun.NextFlakShotId==103,
+                    "invalid/fake/wrong-owner spawn received an authoritative Flak identity");
+        }
+        f.Gun.NextFlakShotId=MAX_uint32-1;f.Add(3);f.Add(4);
+        Require(f.Shells[3].ShotId==MAX_uint32&&f.Shells[4].ShotId==0&&f.Shells[4].FiringWeapon==nullptr
+                &&f.Gun.NextFlakShotId==MAX_uint32,"Flak identity counter wrapped and aliased an earlier shell");
+    } else Require(false,"unknown Flak case");
+}
 int main(int argc,char** argv) {
     Require(argc==2,"case required");const std::string name(argv[1]);
+    if(name.find("flak_")==0) { FlakCases(name);return 0; }
     if(name=="exact_sibling") {
         Fixture f;f.Claim(2);
         Require(f.Rockets[2].ProcessHits==1&&f.Rockets[0].ProcessHits==0&&f.Rockets[1].ProcessHits==0,

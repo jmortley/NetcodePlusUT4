@@ -18,6 +18,7 @@ using int32 = int32_t;
 template<class... T> void TraceLog(const char*, const T&...) {}
 #define UE_LOG(category, level, ...) TraceLog(__VA_ARGS__)
 constexpr int ROLE_Authority = 3, COLLISION_TRACE_WEAPON = 1;
+constexpr uint32 MAX_uint32=UINT32_MAX;
 constexpr float BIG_NUMBER = 1.e30f, KINDA_SMALL_NUMBER = .0001f;
 struct FVector {
     float X, Y, Z;
@@ -39,6 +40,7 @@ struct FMath {
     static float Square(float a) { return a*a; }
     static float Sqrt(float a) { return std::sqrt(a); }
     static bool IsFinite(float a) { return std::isfinite(a); }
+    static int32 TruncToInt(float a) { return static_cast<int32>(a); }
     static FVector ClosestPointOnSegment(FVector point,FVector a,FVector b) {
         const FVector span=b-a, offset=point-a;
         const float t=span.SizeSquared()>0.f ? Clamp((offset.X*span.X+offset.Y*span.Y+offset.Z*span.Z)/span.SizeSquared(),0.f,1.f) : 0.f;
@@ -68,14 +70,22 @@ template<class T> struct TWeakObjectPtr {
     void Reset() { Value=nullptr; }
 };
 struct UObject { virtual ~UObject()=default; };
+struct APawn : UObject {};
 template<class T,class U> T* Cast(U* value) { return dynamic_cast<T*>(value); }
 struct UDamageType { static void* StaticClass() { static int type;return &type; } };
+struct AUTProjectile;
+struct TestUClass {
+    AUTProjectile* Default=nullptr;
+    template<class T> T* GetDefaultObject() const { return static_cast<T*>(Default); }
+};
 template<class T> struct TSubclassOf {
     void* Value=nullptr;
     TSubclassOf()=default;
     TSubclassOf(std::nullptr_t){}
     TSubclassOf(void* value):Value(value){}
     explicit operator bool() const { return Value!=nullptr; }
+    bool operator==(const TSubclassOf& other) const { return Value==other.Value; }
+    TestUClass* operator->() const { return static_cast<TestUClass*>(Value); }
 };
 struct AController : UObject {};
 struct AUTBot : AController {};
@@ -111,7 +121,9 @@ struct FUTRadialDamageEvent {
     TArray<FHitResult> ComponentHits;
 };
 struct AUTWeaponFix;
-class AUTCharacter : public UObject {
+struct AUTWeapon : UObject {};
+struct AUTPlusWeap_RocketLauncher;
+class AUTCharacter : public APawn {
 public:
     bool Dead=false;
     AUTPlayerState State;
@@ -119,7 +131,9 @@ public:
     APlayerController OwnController;
     AController* Controller=&OwnController;
     AUTWeaponFix* Weapon=nullptr;
-    FVector Position=FVector(100.f,0.f,0.f),History=Position;
+    TArray<AUTWeapon*> Inventory;
+    float DamageScaling=1.f;
+    FVector Position=FVector(100.f,0.f,0.f),History=Position,HistoryVelocity;
     UCapsuleComponent Capsule;
     int DamageCalls=0,HistoryQueries=0;
     float DamageTotal=0.f,MaxRewind=0.f;
@@ -128,7 +142,9 @@ public:
     bool IsDead() const { return Dead; }
     UCapsuleComponent* GetCapsuleComponent() { return &Capsule; }
     FVector GetActorLocation() const { return Position; }
-    FVector GetRewindLocation(float delta) { ++HistoryQueries;MaxRewind=std::max(MaxRewind,delta);return History; }
+    FVector GetRewindLocation(float delta) {
+        ++HistoryQueries;MaxRewind=std::max(MaxRewind,delta);return History-HistoryVelocity*delta;
+    }
     const char* GetName() const { return "target"; }
     AController* GetController() { return Controller; }
     AUTWeaponFix* GetWeapon() { return Weapon; }
@@ -138,12 +154,20 @@ public:
         return damage;
     }
 };
+template<class T> struct TInventoryIterator {
+    AUTCharacter* Owner;
+    int32 Index=0;
+    explicit TInventoryIterator(AUTCharacter* owner):Owner(owner){}
+    explicit operator bool() const { return Owner&&Index<Owner->Inventory.Num(); }
+    void operator++() { ++Index; }
+    T* operator*() const { return static_cast<T*>(Owner->Inventory[Index]); }
+};
 struct USphereComponent { float Radius=10.f;float GetScaledSphereRadius() const { return Radius; } };
 struct UProjectileMovement { float Gravity=0.f;float GetGravityZ() const { return Gravity; } };
 struct AUTProjectile : UObject {
     bool bExploded=false,PendingKill=false;
     int ProcessHits=0;
-    FVector Position=FVector(100.f,0.f,0.f),Velocity;
+    FVector Position=FVector(100.f,0.f,0.f),Velocity,HitLocation;
     AUTCharacter* HitTarget=nullptr;
     std::function<void()> OnHit;
     UProjectileMovement Movement;
@@ -152,8 +176,14 @@ struct AUTProjectile : UObject {
     USphereComponent* CollisionComp=&Collision;
     USphereComponent* PawnOverlapSphere=&Overlap;
     FRadialDamageParams DamageParams=FRadialDamageParams(100.f,1.f);
+    bool UseAdjustedDamage=false;
+    FRadialDamageParams AdjustedDamageParams=FRadialDamageParams(125.f,1.f);
+    float AdjustedMomentum=222.f;
     AUTProjectile* MasterProjectile=nullptr;
     UObject* ImpactedActor=nullptr;
+    APawn* Instigator=nullptr;
+    APawn* GetInstigator() const { return Instigator; }
+    void* GetClass() const { return UDamageType::StaticClass(); }
     int DamageParamQueries=0;
     FVector LastDamageParamLocation;
     float Momentum=1000.f;
@@ -161,11 +191,13 @@ struct AUTProjectile : UObject {
     bool IsPendingKillPending() const { return PendingKill; }
     FVector GetActorLocation() const { return Position; }
     FVector GetVelocity() const { return Velocity; }
-    FRadialDamageParams GetDamageParams(UObject*,FVector location,float&) {
-        ++DamageParamQueries;LastDamageParamLocation=location;return DamageParams;
+    FRadialDamageParams GetDamageParams(UObject*,FVector location,float& momentum) {
+        ++DamageParamQueries;LastDamageParamLocation=location;
+        if(UseAdjustedDamage) { momentum=AdjustedMomentum;return AdjustedDamageParams; }
+        return DamageParams;
     }
-    void ProcessHit(AUTCharacter* target,UCapsuleComponent*,FVector,FVector) {
-        ++ProcessHits;HitTarget=target;
+    void ProcessHit(AUTCharacter* target,UCapsuleComponent*,FVector location,FVector) {
+        ++ProcessHits;HitTarget=target;HitLocation=location;
         if(OnHit) { auto callback=OnHit;OnHit=nullptr;callback(); }
         bExploded=true;
     }
@@ -174,6 +206,17 @@ class AUTPlusProj_Rocket : public AUTProjectile {
 public:
     bool bFakeClientProjectile=false;
     uint32 LoadedVolleyId=41;
+    uint32 LoadedOwnershipEpoch=7;
+    uint8 LoadedRocketOrdinal=0;
+    AUTPlusWeap_RocketLauncher* LoadedVolleyWeapon=nullptr;
+};
+class AUTPlusProj_FlakShell : public AUTProjectile {
+public:
+    bool bFakeClientProjectile=false;
+    uint32 ShotId=0;
+    AUTWeaponFix* FiringWeapon=nullptr;
+    TSubclassOf<AUTProjectile> ShardClass;
+    int32 ShardSpawnCount=0;
 };
 // TRACKED_ENTRY
 struct AUTGameState {
@@ -195,6 +238,7 @@ struct FOverlapResult {
     FOverlapResult(UObject* actor=nullptr):Actor(actor){}
     UObject* GetActor() const { return Actor; }
 };
+struct DemoDriver { bool Playing=false;bool IsPlaying() const { return Playing; } };
 struct World {
     float Now=10.f;
     bool Wall=false;
@@ -205,6 +249,7 @@ struct World {
     FVector LastOverlapOrigin;
     TArray<FOverlapResult> OverlapResults;
     AUTGameState GS;
+    DemoDriver* DemoNetDriver=nullptr;
     float GetTimeSeconds() const { return Now; }
     template<class T> T* GetGameState() { return &GS; }
     bool LineTraceTestByChannel(FVector,FVector,int,const FCollisionQueryParams&) { ++WallQueries;return Wall; }
@@ -214,14 +259,25 @@ struct World {
         LastOverlapChannel=channel;results=OverlapResults;return OverlapBlocking;
     }
 };
+using UWorld=World;
+struct AClientHitsounds {
+    int Predictions=0,LastDamage=0;
+    void PlayClientPredictedHitsound(int32 damage,bool) { ++Predictions;LastDamage=damage; }
+};
 struct TestCVar { float Value;float GetValueOnGameThread() const { return Value; } };
 TestCVar CVarRocketLagComp{1.f},CVarRocketLagCompMaxPingMs{150.f};
 TestCVar CVarRocketLagCompMaxWindowMs{200.f},CVarRocketLagCompGraceMs{200.f};
 bool RocketLagCompDbg() { return false; }
 void ApplySlidePostureForValidation(AUTCharacter*,float,FVector&,float&) {}
-struct AUTWeaponFix : UObject {
+struct AUTWeaponFix : AUTWeapon {
     int Role=ROLE_Authority;
     bool bEnableProjectileRewind=true,PendingKill=false;
+    uint32 NextFlakShotId=0;
+    int FlakRPCs=0,LoadedRPCs=0,LegacyRPCs=0;
+    uint32 LastClaimId=0;
+    uint8 LastClaimMode=255;
+    TArray<TSubclassOf<AUTProjectile>> ProjClass,NCPFiredProjClasses;
+    AClientHitsounds ClientSounds;
     AUTCharacter* UTOwner=nullptr;
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
     World TheWorld;
@@ -230,12 +286,23 @@ struct AUTWeaponFix : UObject {
     TWeakObjectPtr<AController> FireProtocolController;
     bool Is329FireProtocolReady() const;
     bool IsPendingKillPending() const { return PendingKill; }
+    bool IsHighConfidencePredictedHitsoundTarget(AUTCharacter*) const { return true; }
+    AClientHitsounds* FindClientHitsoundsMutator() { return &ClientSounds; }
+    void ServerFlakShellHitClaim(AUTCharacter*,FVector,uint32 id) { ++FlakRPCs;LastClaimId=id; }
+    void ServerLoadedRocketHitClaim(AUTCharacter*,FVector,uint32,uint32 id,uint8) { ++LoadedRPCs;LastClaimId=id; }
+    void ServerProjectileHitClaim(AUTCharacter*,FVector,uint8 mode) { ++LegacyRPCs;LastClaimMode=mode; }
+    void NotifyFakeProjectileHit(AUTCharacter*,const FVector&,uint8,AUTProjectile*);
+    static AUTWeaponFix* FindFiringWeaponForProjectile(AUTCharacter*,AUTProjectile*);
     void OnTrackedProjectileResolved(AUTProjectile*,AUTCharacter*);
     void OnTrackedRocketExploding(AUTPlusProj_Rocket*,const FVector&,const FVector&);
+    void OnTrackedFlakExploding(AUTPlusProj_FlakShell*,const FVector&,const FVector&);
+    void CaptureFlakShellSpawn(AUTPlusProj_FlakShell*);
+    void ClearFlakShellClaims();
     void PruneTrackedProjectiles(float);
     void ServerProjectileHitClaim_Implementation(AUTCharacter*,FVector,uint8);
     void ServerLoadedRocketHitClaim_Implementation(AUTCharacter*,FVector,uint32,uint32,uint8);
-    void ProcessProjectileHitClaim(AUTCharacter*,FVector,uint8,uint32,uint32,uint8);
+    void ServerFlakShellHitClaim_Implementation(AUTCharacter*,FVector,uint32);
+    void ProcessProjectileHitClaim(AUTCharacter*,FVector,uint8,uint32,uint32,uint8,uint32=0);
 };
 struct AUTPlusWeap_RocketLauncher : AUTWeaponFix {
     uint32 LoadedOwnershipEpoch=7;

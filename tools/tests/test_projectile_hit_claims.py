@@ -36,13 +36,29 @@ class ProjectileHitClaimTests(unittest.TestCase):
             "bool AUTWeaponFix::Is329FireProtocolReady",
             "void AUTWeaponFix::OnTrackedProjectileResolved",
             "void AUTWeaponFix::OnTrackedRocketExploding",
+            "void AUTWeaponFix::OnTrackedFlakExploding",
+            "void AUTWeaponFix::CaptureFlakShellSpawn",
+            "void AUTWeaponFix::ClearFlakShellClaims",
+            "void AUTWeaponFix::NotifyFakeProjectileHit",
+            "AUTWeaponFix* AUTWeaponFix::FindFiringWeaponForProjectile",
             "void AUTWeaponFix::PruneTrackedProjectiles",
             "void AUTWeaponFix::ServerProjectileHitClaim_Implementation",
             "void AUTWeaponFix::ServerLoadedRocketHitClaim_Implementation",
+            "void AUTWeaponFix::ServerFlakShellHitClaim_Implementation",
             "void AUTWeaponFix::ProcessProjectileHitClaim",
         )
+        native_methods = []
+        for signature in methods:
+            body = native_function(source, signature)
+            if signature == "void AUTWeaponFix::NotifyFakeProjectileHit":
+                # Existing hitsound estimation assigns float radial damage to
+                # an integer. UE's compiler settings permit that narrowing;
+                # scope the matching diagnostic policy to this actual method.
+                body = ("#ifdef _MSC_VER\n#pragma warning(push)\n#pragma warning(disable:4244)\n#endif\n"
+                        + body + "\n#ifdef _MSC_VER\n#pragma warning(pop)\n#endif\n")
+            native_methods.append(body)
         cls.unit_source = (adapter.replace("// TRACKED_ENTRY", entry)
-                           + "\n".join(native_function(source, signature) for signature in methods)
+                           + "\n".join(native_methods)
                            + (tests / "projectile_hit_claims_cases.cpp").read_text(encoding="utf-8"))
         cls.executable = cls.compile_unit(cls.unit_source, "claims")
 
@@ -86,6 +102,17 @@ class ProjectileHitClaimTests(unittest.TestCase):
     def test_possible_splash_victim_cannot_receive_grace_damage_even_behind_wall(self): self.run_case("splash_guard")
     def test_unknown_explosion_snapshot_fails_closed_without_changing_legacy_grace(self): self.run_case("unknown_snapshot")
     def test_low_ping_exact_live_and_grace_claims_keep_bounded_rewind(self): self.run_case("low_ping")
+    def test_flak_exact_overlapping_shells_and_duplicates_keep_native_hit_dispatch(self): self.run_case("flak_exact")
+    def test_flak_unknown_stale_owner_fire_mode_and_protocol_fail_closed(self): self.run_case("flak_guards")
+    def test_flak_loaded_rocket_and_legacy_claims_cannot_consume_each_other(self): self.run_case("flak_isolation")
+    def test_flak_exact_grace_does_not_consume_unrelated_live_shell(self): self.run_case("flak_grace")
+    def test_flak_grace_denies_shards_and_any_pawn_impact(self): self.run_case("flak_terminal_guards")
+    def test_flak_splash_query_and_untrusted_snapshot_guard(self): self.run_case("flak_splash")
+    def test_flak_low_ping_live_and_grace_rewind_gravity_and_physics_gates(self): self.run_case("flak_low_ping")
+    def test_flak_spawn_capture_requires_ownership_and_never_reuses_ids(self): self.run_case("flak_capture")
+    def test_flak_explosion_snapshot_requires_first_authoritative_terminal(self): self.run_case("flak_explosion_guards")
+    def test_flak_drop_repick_clears_claims_without_resetting_identity_counter(self): self.run_case("flak_drop_repick")
+    def test_flak_client_exact_route_has_no_wrong_weapon_or_legacy_fallback(self): self.run_case("flak_client_route")
 
     def test_identity_and_splash_regressions_detect_broken_guards(self):
         # Mutate only the assembled temporary translation unit. Repository
@@ -93,8 +120,13 @@ class ProjectileHitClaimTests(unittest.TestCase):
         mutants = (
             ("ordinal", "&& Entry.LoadedRocketOrdinal == ClaimedOrdinal", "&& true",
              "exact_sibling", "third loaded rocket claim consumed oldest sibling"),
-            ("splash", "E.PossibleSplashTargets.Contains(ClaimedTarget)", "false",
+            ("splash", "!E.bLoadedExplosionObserved\n\t\t\t|| E.PossibleSplashTargets.Contains(ClaimedTarget)",
+             "!E.bLoadedExplosionObserved || false",
              "splash_guard", "possible splash victim received full-damage top-up"),
+            ("flak_id", "Entry.FlakShotId == ClaimedFlakShotId", "true",
+             "flak_exact", "exact Flak ID selected the older overlapping shell"),
+            ("flak_shards", "!E.bFlakExplosionObserved || !E.bFlakGraceEligible", "!E.bFlakExplosionObserved",
+             "flak_terminal_guards", "Flak terminal with authored shards or pawn impact accepted a top-up"),
         )
         for name, original, replacement, case, expected in mutants:
             with self.subTest(guard=name):

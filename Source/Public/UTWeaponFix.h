@@ -188,6 +188,9 @@ struct FActiveServerProjectile
     UPROPERTY()
     uint8 LoadedRocketOrdinal = 0;
 
+    UPROPERTY()
+    uint32 FlakShotId = 0;
+
     // --- Grace buffer (populated when the projectile RESOLVES / explodes) ---
     // Retain a resolved projectile's final state briefly so a claim arriving after the server
     // projectile is gone (close-range timing race) can still rewind-rescue. ExpireTime < 0 means
@@ -214,6 +217,10 @@ struct FActiveServerProjectile
     // An exact grace claim must not add full direct damage after possible splash.
     UPROPERTY()
     bool bLoadedExplosionObserved = false;
+    UPROPERTY()
+    bool bFlakExplosionObserved = false;
+    UPROPERTY()
+    bool bFlakGraceEligible = false;
     UPROPERTY()
     TArray<TWeakObjectPtr<class AUTCharacter>> PossibleSplashTargets;
 
@@ -531,6 +538,9 @@ public:
      *  hit this frame, or null (geometry/whiff) — prevents double-damaging a target that already took the
      *  present-time hit. PUBLIC: called from the UTPlusProj_* classes, which are not AUTWeaponFix subclasses. */
     void OnTrackedProjectileResolved(class AUTProjectile* Proj, class AUTCharacter* DamagedChar);
+    void CaptureFlakShellSpawn(class AUTPlusProj_FlakShell* Proj);
+    void OnTrackedFlakExploding(class AUTPlusProj_FlakShell* Proj, const FVector& HitLocation,
+        const FVector& HitNormal);
     void OnTrackedRocketExploding(class AUTPlusProj_Rocket* Proj, const FVector& HitLocation,
         const FVector& HitNormal);
     UPROPERTY()
@@ -993,7 +1003,7 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
     float ProjectileRewindMinScale = 0.5f;
 
-    /** Legacy projectile claim. Identified loaded rockets cannot use this FIFO path. */
+    /** Legacy projectile claim. Identified loaded rockets and flak cannot use this FIFO path. */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
         uint8 ClaimedFireMode);
@@ -1003,9 +1013,19 @@ protected:
     void ServerLoadedRocketHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
         uint32 Epoch, uint32 VolleyId, uint8 Ordinal);
 
+    /** 329 flak-secondary claim. ShotId is unique for this firing weapon's lifetime. */
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerFlakShellHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+        uint32 ShotId);
+
     void ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
-        uint8 ClaimedFireMode, uint32 ClaimedEpoch, uint32 ClaimedVolleyId, uint8 ClaimedOrdinal);
+        uint8 ClaimedFireMode, uint32 ClaimedEpoch, uint32 ClaimedVolleyId, uint8 ClaimedOrdinal,
+        uint32 ClaimedFlakShotId = 0);
     void PruneTrackedProjectiles(float Now);
+    void ClearFlakShellClaims();
+
+    // Authority only. Never reset on weapon switching, removal or re-acquisition.
+    uint32 NextFlakShotId = 0;
 
     /** Server-side authoritative tracking, including exact loaded identities and resolved grace. */
     UPROPERTY()
