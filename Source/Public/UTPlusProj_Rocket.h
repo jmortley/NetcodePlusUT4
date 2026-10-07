@@ -7,8 +7,9 @@
 /**
  * Enhanced rocket projectile for NetcodePlus.
  *
- * Adds client-notify projectile rewind: when the client's fake rocket
- * hits an enemy, sends an RPC so the server can validate with rewind.
+ * Adds client-notify projectile rewind: when the shooter's replicated real
+ * rocket hits an enemy, sends an RPC so the server can validate with rewind.
+ * Loaded rockets use their exact weapon/epoch/volley/ordinal identity.
  * Also prevents replicated primary rockets from adopting another player's
  * client fake by requiring matching instigators and bounded separation.
  *

@@ -4,8 +4,40 @@
 
 using namespace NCRocketVolley;
 
+static void TestIndependentOrdinalOutcomes()
+{
+    const uint8_t Orders[6][3] = {
+        {0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+        {1, 2, 0}, {2, 0, 1}, {2, 1, 0}
+    };
+    for (uint8_t SpawnedMask = 0; SpawnedMask < 8; ++SpawnedMask)
+    {
+        for (const auto& Order : Orders)
+        {
+            FProgress Volley;
+            assert(Volley.Begin(1) && Volley.Release(1, 3));
+            for (uint8_t Ordinal : Order)
+            {
+                const bool Spawned = (SpawnedMask & (1u << Ordinal)) != 0;
+                assert(Volley.Resolve(1, Ordinal, Spawned));
+                // A conflicting retry cannot reverse an individual outcome.
+                assert(!Volley.Resolve(1, Ordinal, !Spawned));
+            }
+            assert(Volley.ResolvedMask == 7 && Volley.SpawnedMask == SpawnedMask);
+            assert(Volley.Finish(1));
+            for (uint8_t Ordinal = 0; Ordinal < 3; ++Ordinal)
+            {
+                const bool Survives = (SpawnedMask & (1u << Ordinal)) != 0;
+                assert(CancelOrdinal(EResult::Completed, 3, SpawnedMask, Ordinal) == !Survives);
+                assert(CancelOrdinal(EResult::Cancelled, 3, SpawnedMask, Ordinal) == !Survives);
+            }
+        }
+    }
+}
+
 int main()
 {
+    TestIndependentOrdinalOutcomes();
     assert(Next(0) == 1 && Next(0xffffffffu) == 1);
     assert(!IsNewer(0, 0) && !IsNewer(42, 42));
     assert(IsNewer(1, 0xffffffffu) && !IsNewer(0xffffffffu, 1));

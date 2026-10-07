@@ -284,6 +284,11 @@ void AUTPlusProj_Rocket::Explode_Implementation(const FVector& HitLocation, cons
 	UPrimitiveComponent* HitComp)
 {
 	bPrimarySoftSyncActive = false;
+	if (Role == ROLE_Authority && !bFakeClientProjectile && !bExploded && LoadedVolleyId != 0)
+	{
+		if (AUTWeaponFix* Weapon = AUTWeaponFix::FindFiringWeaponForProjectile(Cast<AUTCharacter>(GetInstigator()), this))
+			Weapon->OnTrackedRocketExploding(this, HitLocation, HitNormal);
+	}
 	if (CVarRocketServerFirstExplosionVisual.GetValueOnGameThread() > 0
 		&& GetNetMode() == NM_Client && !bFakeClientProjectile
 		&& MyFakeProjectile != nullptr && !MyFakeProjectile->IsPendingKillPending()
@@ -419,17 +424,19 @@ void AUTPlusProj_Rocket::ProcessHit_Implementation(AActor* OtherActor, UPrimitiv
 				AUTWeaponFix* Weapon = AUTWeaponFix::FindFiringWeaponForProjectile(OwnerChar, this);
 				if (Weapon)
 				{
-					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, 0, this); // FireMode 0 = primary (rockets)
+					// Loading uses alt-fire channel 1, including spread/spiral rockets.
+					Weapon->NotifyFakeProjectileHit(HitChar, HitLocation, LoadedVolleyId != 0 ? 1 : 0, this);
 				}
 			}
 		}
 	}
 
-	// SERVER-SIDE: snapshot final state into the weapon's grace buffer BEFORE Super explodes/
+	// LEGACY PRIMARY: snapshot final state into the weapon's grace buffer BEFORE Super explodes/
 	// destroys this projectile, so a claim arriving after the rocket is gone (close-range timing
 	// race) can still rewind-rescue. The pawn we directly hit (or null = geometry/whiff) is passed
 	// so the grace path won't double-damage a target that already took the present-time hit.
-	if (Role == ROLE_Authority)
+	// Loaded rockets snapshot in Explode instead, after stock accepts this overlap as terminal.
+	if (Role == ROLE_Authority && LoadedVolleyId == 0)
 	{
 		// DIAGNOSTIC: what this authority-role rocket hit. RocketDbgSide distinguishes a real server
 		// projectile from the owning client's local-authority fake, and the actor ID joins the event

@@ -177,6 +177,17 @@ struct FActiveServerProjectile
     UPROPERTY()
     uint8 FireMode;
 
+    // Captured on authority before projectile catchup; survives actor destruction.
+    // Loaded claims use this exact key, never the oldest fire-mode sibling.
+    UPROPERTY()
+    TWeakObjectPtr<class AUTCharacter> FiringPawn;
+    UPROPERTY()
+    uint32 LoadedOwnershipEpoch = 0;
+    UPROPERTY()
+    uint32 LoadedVolleyId = 0;
+    UPROPERTY()
+    uint8 LoadedRocketOrdinal = 0;
+
     // --- Grace buffer (populated when the projectile RESOLVES / explodes) ---
     // Retain a resolved projectile's final state briefly so a claim arriving after the server
     // projectile is gone (close-range timing race) can still rewind-rescue. ExpireTime < 0 means
@@ -199,6 +210,12 @@ struct FActiveServerProjectile
     float ExpireTime = -1.f;
     UPROPERTY()
     TWeakObjectPtr<class AUTCharacter> DamagedTarget;
+    // Conservative splash candidates captured at the real loaded explosion.
+    // An exact grace claim must not add full direct damage after possible splash.
+    UPROPERTY()
+    bool bLoadedExplosionObserved = false;
+    UPROPERTY()
+    TArray<TWeakObjectPtr<class AUTCharacter>> PossibleSplashTargets;
 
     FActiveServerProjectile()
         : FireMode(0)
@@ -494,26 +511,18 @@ public:
 
     // =========================================================================
     // PROJECTILE REWIND SYSTEM
-    // Called by UTPlusProj_Rocket / UTPlusProj_FlakShell when fake hits a pawn.
-    // Sends ServerProjectileHitClaim RPC if bEnableProjectileRewind is true.
+    // Called by the shooter's replicated real projectile when it hits a pawn.
+    // Loaded rockets send their exact identity; other projectiles retain the legacy claim.
     // =========================================================================
-    /** @param SourceProj  The projectile reporting the hit. Callers resolve `this` weapon from
-     *                     UTCharacter::GetWeapon() at IMPACT time, which is the weapon currently
-     *                     HELD — not necessarily the one that fired. Fire a rocket, switch to flak,
-     *                     rocket lands: `this` is the flak cannon. Passing the projectile lets the
-     *                     hitsound prediction read damage off the instance that actually hit,
-     *                     instead of ProjClass[FireModeNum] on the wrong weapon. Optional: a null
-     *                     SourceProj keeps the legacy CDO lookup. */
+    /** SourceProj supplies the reporting projectile's damage and exact loaded identity.
+     *  Callers resolve the original weapon with FindFiringWeaponForProjectile, even after a
+     *  weapon switch. A null SourceProj retains the legacy damage CDO/fire-mode lookup. */
     void NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVector& HitLocation, uint8 FireModeNum,
         AUTProjectile* SourceProj = nullptr);
 
-    /** Resolve the weapon that FIRED Proj, rather than the one OwnerChar happens to be holding.
-     *  AUTCharacter::GetWeapon() is evaluated at IMPACT: fire a rocket, switch to flak, and the
-     *  rocket's claim routes to the flak cannon, whose ActiveServerProjectiles never held it, so
-     *  the server drops the claim and that shot silently loses lag compensation. Matching on the
-     *  projectile's exact class is unambiguous — each claim-capable class comes from exactly one
-     *  weapon. Falls back to the held weapon when nothing was recorded, so the worst case is the
-     *  behaviour that shipped. Call this instead of GetWeapon() from projectile impact handlers. */
+    /** Resolve the original firing weapon. Identified loaded rockets use their exact launcher
+     *  and ownership epoch and never fall back. Other projectiles retain the recorded-class
+     *  inventory lookup and, if unavailable, the legacy held-weapon fallback. */
     static AUTWeaponFix* FindFiringWeaponForProjectile(AUTCharacter* OwnerChar, AUTProjectile* Proj);
 
     /** Server-side: a tracked projectile (rocket/flak shell) calls this when it resolves (explodes) to
@@ -522,6 +531,8 @@ public:
      *  hit this frame, or null (geometry/whiff) — prevents double-damaging a target that already took the
      *  present-time hit. PUBLIC: called from the UTPlusProj_* classes, which are not AUTWeaponFix subclasses. */
     void OnTrackedProjectileResolved(class AUTProjectile* Proj, class AUTCharacter* DamagedChar);
+    void OnTrackedRocketExploding(class AUTPlusProj_Rocket* Proj, const FVector& HitLocation,
+        const FVector& HitNormal);
     UPROPERTY()
     TArray<float> LastFireTime;
 
@@ -982,12 +993,21 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Lag Compensation|Projectile Rewind")
     float ProjectileRewindMinScale = 0.5f;
 
-    /** Server RPC: Client's fake projectile hit a target, validate with rewind */
+    /** Legacy projectile claim. Identified loaded rockets cannot use this FIFO path. */
     UFUNCTION(Server, Reliable, WithValidation)
     void ServerProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
         uint8 ClaimedFireMode);
 
-    /** Server-side tracking of authoritative projectiles, matched oldest-first by fire mode. */
+    /** 329 loaded-rocket claim, scoped to this weapon and its ownership lifetime. */
+    UFUNCTION(Server, Reliable, WithValidation)
+    void ServerLoadedRocketHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+        uint32 Epoch, uint32 VolleyId, uint8 Ordinal);
+
+    void ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+        uint8 ClaimedFireMode, uint32 ClaimedEpoch, uint32 ClaimedVolleyId, uint8 ClaimedOrdinal);
+    void PruneTrackedProjectiles(float Now);
+
+    /** Server-side authoritative tracking, including exact loaded identities and resolved grace. */
     UPROPERTY()
     TArray<FActiveServerProjectile> ActiveServerProjectiles;
 

@@ -1,5 +1,140 @@
+static void TestThirdLoadReleaseCounts()
+{
+    // These are completed-load snapshots on either side of the third callback,
+    // not a simulated network/timer scheduler. Exercise the actual release,
+    // count commit, spawn, receipt and reconciliation methods for every pairing.
+    for (uint8 ClientCount = 2; ClientCount <= 3; ++ClientCount)
+    {
+        for (uint8 ServerCount = 2; ServerCount <= 3; ++ServerCount)
+        {
+            APlayerController PC;
+            AUTCharacter Pawn;
+            Pawn.Controller = &PC;
+            AUTPlusWeap_RocketLauncher Server, Client;
+            Server.UTOwner = Client.UTOwner = &Pawn;
+            Client.Role = 1;
+            Server.CurrentState = &Server.Charge;
+            Client.CurrentState = &Client.Charge;
+            Server.ResetLoadedVolley(10);
+            Client.ResetLoadedVolley(10);
+            Server.NumLoadedRockets = ServerCount;
+            Client.NumLoadedRockets = ClientCount;
+            Server.Ammo = 9 - ServerCount;
+            Server.LoadedVolleyAmmoSpent = ServerCount;
+            Pawn.Weapon = &Server;
+            Server.ServerReleaseLoadedVolley_Implementation(1, 10, &Pawn, 0, ClientCount);
+            assert(Server.CommitLoadedVolley());
+            const uint8 ExpectedCount = std::min(ClientCount, ServerCount);
+            assert(Server.LoadedVolley.Count == ExpectedCount);
+            assert(Server.NumLoadedRockets == ExpectedCount);
+            assert(Server.Refund == ServerCount - ExpectedCount);
+            assert(Server.Ammo == 9 - ExpectedCount);
+            const FNCLoadedVolleyReceipt Accepted = Server.SentVolleys.Last();
+            assert(Accepted.Result == uint8(NCRocketVolley::EResult::Accepted));
+            assert(Accepted.Count == ExpectedCount && Accepted.SpawnedMask == 0);
+
+            Pawn.Weapon = &Client;
+            assert(Client.CommitLoadedVolley());
+            AUTPlusProj_Rocket Fakes[3], Reals[3];
+            for (uint8 Ordinal = 0; Ordinal < ClientCount; ++Ordinal)
+            {
+                Fakes[Ordinal].Instigator = &Pawn;
+                Client.TestNextProjectile = &Fakes[Ordinal];
+                assert(Client.SpawnNetPredictedProjectile({}, {}, {}) == &Fakes[Ordinal]);
+                assert(Fakes[Ordinal].LoadedRocketOrdinal == Ordinal);
+                assert(!Client.TestAllowDelay && !Fakes[Ordinal].Dead);
+            }
+            Client.ClientLoadedVolleyResult_Implementation(1, 10, &Pawn,
+                Accepted.Result, Accepted.Count, Accepted.SpawnedMask);
+            for (uint8 Ordinal = 0; Ordinal < ClientCount; ++Ordinal)
+                assert(Fakes[Ordinal].Dead == (Ordinal >= ExpectedCount));
+
+            Pawn.Weapon = &Server;
+            for (uint8 Ordinal = 0; Ordinal < ExpectedCount; ++Ordinal)
+            {
+                Reals[Ordinal].Instigator = &Pawn;
+                Server.TestNextProjectile = &Reals[Ordinal];
+                assert(Server.SpawnNetPredictedProjectile({}, {}, {}) == &Reals[Ordinal]);
+                assert(Server.SentRockets[Ordinal] == Ordinal);
+                assert(Server.SentRocketResults[Ordinal] == uint8(NCRocketVolley::ERocketResult::Spawned));
+            }
+            assert(Server.SpawnNetPredictedProjectile({}, {}, {}) == nullptr);
+            assert(Server.TestSpawnCalls == ExpectedCount);
+            Server.CompleteLoadedVolley(false);
+            const FNCLoadedVolleyReceipt Completed = Server.SentVolleys.Last();
+            assert(Completed.Count == ExpectedCount);
+            assert(Completed.SpawnedMask == NCRocketVolley::CountMask(ExpectedCount));
+
+            // Completion can arrive before any of the actor references map.
+            Client.ClientLoadedVolleyResult_Implementation(1, 10, &Pawn,
+                Completed.Result, Completed.Count, Completed.SpawnedMask);
+            for (int Ordinal = ExpectedCount - 1; Ordinal >= 0; --Ordinal)
+            {
+                assert(!Fakes[Ordinal].Dead && !Fakes[Ordinal].MasterProjectile);
+                Client.ClientLoadedRocketResult_Implementation(1, 10, &Pawn, uint8(Ordinal),
+                    uint8(NCRocketVolley::ERocketResult::Spawned), &Reals[Ordinal], 0);
+                assert(Fakes[Ordinal].MasterProjectile == &Reals[Ordinal]);
+                assert(Reals[Ordinal].MyFakeProjectile == &Fakes[Ordinal]);
+                assert(Reals[Ordinal].PairCalls == 1 && Fakes[Ordinal].DestroyCalls == 0);
+            }
+            if (ClientCount > ExpectedCount)
+                assert(Fakes[2].DestroyCalls == 1); // Only the unauthorized third retires.
+        }
+    }
+}
+
+static void TestMixedCloseRangeOutcomes()
+{
+    const uint8 Orders[6][3] = {
+        {0, 1, 2}, {0, 2, 1}, {1, 0, 2},
+        {1, 2, 0}, {2, 0, 1}, {2, 1, 0}
+    };
+    for (const auto& Order : Orders)
+    {
+        APlayerController PC;
+        AUTCharacter Pawn;
+        Pawn.Controller = &PC;
+        AUTPlusWeap_RocketLauncher Client;
+        Client.Role = 1;
+        Client.UTOwner = &Pawn;
+        Pawn.Weapon = &Client;
+        Client.ResetLoadedVolley(20);
+        assert(Client.LoadedVolley.Release(20, 3));
+        AUTPlusProj_Rocket Fakes[3], Real;
+        Real.Instigator = &Pawn;
+        for (uint8 Ordinal = 0; Ordinal < 3; ++Ordinal)
+        {
+            Fakes[Ordinal].Instigator = &Pawn;
+            Client.TestNextProjectile = &Fakes[Ordinal];
+            assert(Client.SpawnNetPredictedProjectile({}, {}, {}) == &Fakes[Ordinal]);
+        }
+        // Rocket 0 already impacted, 1 failed to spawn, and 2 is still flying.
+        // A resolved close-range shot was spawned, so it remains in mask 0b101.
+        Client.ClientLoadedVolleyResult_Implementation(1, 20, &Pawn,
+            uint8(NCRocketVolley::EResult::Completed), 3, 5);
+        assert(!Fakes[0].Dead && Fakes[1].Dead && !Fakes[2].Dead);
+        const NCRocketVolley::ERocketResult Outcomes[3] = {
+            NCRocketVolley::ERocketResult::Resolved,
+            NCRocketVolley::ERocketResult::Rejected,
+            NCRocketVolley::ERocketResult::Spawned
+        };
+        for (uint8 Ordinal : Order)
+        {
+            for (int Duplicate = 0; Duplicate < 2; ++Duplicate)
+                Client.ClientLoadedRocketResult_Implementation(1, 20, &Pawn, Ordinal,
+                    uint8(Outcomes[Ordinal]), Ordinal == 2 ? &Real : nullptr, 0);
+            assert(!Fakes[2].Dead); // Another ordinal's impact cannot retire this visual.
+        }
+        assert(Fakes[0].DestroyCalls == 1 && Fakes[1].DestroyCalls == 1);
+        assert(Fakes[2].DestroyCalls == 0 && Real.PairCalls == 1);
+        assert(Fakes[2].MasterProjectile == &Real && Real.MyFakeProjectile == &Fakes[2]);
+    }
+}
+
 int main()
 {
+    TestThirdLoadReleaseCounts();
+    TestMixedCloseRangeOutcomes();
     APlayerController PC;AUTCharacter Pawn;Pawn.Controller=&PC;
     AUTPlusWeap_RocketLauncher Server;Server.UTOwner=&Pawn;Pawn.Weapon=&Server;
     Server.LoadedOwnershipEpoch=0;

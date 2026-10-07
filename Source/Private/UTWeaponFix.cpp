@@ -7665,20 +7665,16 @@ AUTProjectile* AUTWeaponFix::SpawnNetPredictedProjectileInternal(
 			 || NewProjectile->IsA(AUTPlusProj_StingerShard::StaticClass()));
 		if (bTrackForRewind)
 		{
-			ActiveServerProjectiles.Add(FActiveServerProjectile(NewProjectile, CapturedFireMode));
-
-			// Cleanup stale entries
-			for (int32 i = ActiveServerProjectiles.Num() - 1; i >= 0; i--)
+			FActiveServerProjectile Entry(NewProjectile, CapturedFireMode);
+			Entry.FiringPawn = UTOwner;
+			if (const AUTPlusProj_Rocket* Rocket = Cast<AUTPlusProj_Rocket>(NewProjectile))
 			{
-				if (!ActiveServerProjectiles[i].Projectile.IsValid())
-				{
-					ActiveServerProjectiles.RemoveAt(i);
-				}
+				Entry.LoadedOwnershipEpoch = Rocket->LoadedOwnershipEpoch;
+				Entry.LoadedVolleyId = Rocket->LoadedVolleyId;
+				Entry.LoadedRocketOrdinal = Rocket->LoadedRocketOrdinal;
 			}
-			while (ActiveServerProjectiles.Num() > 10)
-			{
-				ActiveServerProjectiles.RemoveAt(0);
-			}
+			ActiveServerProjectiles.Add(Entry);
+			PruneTrackedProjectiles(GetWorld()->GetTimeSeconds());
 		}
 
 		// GUARD RAIL: Minimum Threshold (prevents 0-ping PIE physics bugs)
@@ -10013,6 +10009,21 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 		return;
 	}
 
+	const AUTPlusProj_Rocket* LoadedRocket = Cast<AUTPlusProj_Rocket>(SourceProj);
+	if (LoadedRocket && LoadedRocket->LoadedVolleyId != 0)
+	{
+		// Never downgrade an unavailable/stale loaded identity into a primary/FIFO claim.
+		if (LoadedRocket->LoadedVolleyWeapon != this || LoadedRocket->LoadedOwnershipEpoch == 0
+			|| LoadedRocket->LoadedRocketOrdinal >= NCRocketVolley::MaxRockets
+			|| LoadedRocket->GetInstigator() != UTOwner)
+			return;
+		FireModeNum = 1;
+	}
+	else
+	{
+		LoadedRocket = nullptr;
+	}
+
 	// Client-side hitsound prediction for projectile weapons.
 	// Deliberately AFTER the bEnableProjectileRewind gate: this is the claim
 	// path, so a weapon with rewind disabled must not produce a predicted
@@ -10057,10 +10068,30 @@ void AUTWeaponFix::NotifyFakeProjectileHit(AUTCharacter* HitTarget, const FVecto
 		}
 	}
 
-	// Send the claim with FireMode only — server matches against ActiveServerProjectiles
-	// by fire mode (oldest first). No EventIndex needed from the client since we're
-	// using the replicated real projectile, not the fake (which is already destroyed).
-	ServerProjectileHitClaim(HitTarget, HitLocation, FireModeNum);
+	if (LoadedRocket)
+	{
+		ServerLoadedRocketHitClaim(HitTarget, HitLocation, LoadedRocket->LoadedOwnershipEpoch,
+			LoadedRocket->LoadedVolleyId, LoadedRocket->LoadedRocketOrdinal);
+	}
+	else
+	{
+		ServerProjectileHitClaim(HitTarget, HitLocation, FireModeNum);
+	}
+}
+
+void AUTWeaponFix::PruneTrackedProjectiles(float Now)
+{
+	const float GraceSec = FMath::Max(0.f, CVarRocketLagCompGraceMs.GetValueOnGameThread() * 0.001f);
+	for (int32 i = ActiveServerProjectiles.Num() - 1; i >= 0; --i)
+	{
+		const FActiveServerProjectile& Entry = ActiveServerProjectiles[i];
+		const bool bLive = Entry.Projectile.IsValid() && !Entry.Projectile.Get()->bExploded
+			&& !Entry.Projectile.Get()->IsPendingKillPending();
+		const bool bWithinGrace = GraceSec > 0.f && Entry.ExpireTime >= 0.f
+			&& Now >= Entry.ExpireTime && Now - Entry.ExpireTime <= GraceSec;
+		if (!bLive && !bWithinGrace) ActiveServerProjectiles.RemoveAt(i);
+	}
+	while (ActiveServerProjectiles.Num() > 10) ActiveServerProjectiles.RemoveAt(0);
 }
 
 void AUTWeaponFix::OnTrackedProjectileResolved(AUTProjectile* Proj, AUTCharacter* DamagedChar)
@@ -10097,6 +10128,43 @@ void AUTWeaponFix::OnTrackedProjectileResolved(AUTProjectile* Proj, AUTCharacter
 	}
 }
 
+void AUTWeaponFix::OnTrackedRocketExploding(AUTPlusProj_Rocket* Proj, const FVector& HitLocation,
+	const FVector& HitNormal)
+{
+	if (Role != ROLE_Authority || !Proj || Proj->bFakeClientProjectile || Proj->bExploded
+		|| Proj->LoadedVolleyId == 0)
+		return;
+	for (FActiveServerProjectile& Entry : ActiveServerProjectiles)
+	{
+		if (Entry.Projectile.Get() != Proj) continue;
+		if (Entry.ExpireTime >= 0.f) return; // Snapshot only the first actual terminal transition.
+		OnTrackedProjectileResolved(Proj, Cast<AUTCharacter>(Proj->ImpactedActor));
+		Entry.FinalLoc = HitLocation;
+		const FVector Origin = HitLocation + HitNormal;
+		float AdjustedMomentum = Proj->Momentum;
+		const FRadialDamageParams Params = (Proj->MasterProjectile ? Proj->MasterProjectile : Proj)
+			->GetDamageParams(nullptr, HitLocation, AdjustedMomentum);
+		if (Origin.ContainsNaN() || !FMath::IsFinite(Params.OuterRadius) || Params.OuterRadius < 0.f)
+			return; // No trusted damage snapshot: deny exact grace, retain normal explosion.
+		if (Params.OuterRadius > 0.f)
+		{
+			// Same candidate query as stock UTHurtRadius. Deliberately omit its LOS filter:
+			// a possible splash victim is denied a later full-damage top-up, even if blocked.
+			TArray<FOverlapResult> Overlaps;
+			FCollisionQueryParams Query(TEXT("LoadedRocketSplashGuard"), true, Proj);
+			GetWorld()->OverlapMultiByChannel(Overlaps, Origin, FQuat::Identity,
+				COLLISION_TRACE_WEAPON, FCollisionShape::MakeSphere(Params.OuterRadius), Query);
+			for (const FOverlapResult& Overlap : Overlaps)
+			{
+				if (AUTCharacter* Character = Cast<AUTCharacter>(Overlap.GetActor()))
+					Entry.PossibleSplashTargets.AddUnique(Character);
+			}
+		}
+		Entry.bLoadedExplosionObserved = true;
+		return;
+	}
+}
+
 bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget,
 	FVector ClaimedHitLocation, uint8 ClaimedFireMode)
 {
@@ -10106,6 +10174,30 @@ bool AUTWeaponFix::ServerProjectileHitClaim_Validate(AUTCharacter* ClaimedTarget
 void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* ClaimedTarget,
 	FVector ClaimedHitLocation, uint8 ClaimedFireMode)
 {
+	ProcessProjectileHitClaim(ClaimedTarget, ClaimedHitLocation, ClaimedFireMode, 0, 0, 0);
+}
+
+bool AUTWeaponFix::ServerLoadedRocketHitClaim_Validate(AUTCharacter* ClaimedTarget,
+	FVector ClaimedHitLocation, uint32 Epoch, uint32 VolleyId, uint8 Ordinal)
+{
+	return true;
+}
+
+void AUTWeaponFix::ServerLoadedRocketHitClaim_Implementation(AUTCharacter* ClaimedTarget,
+	FVector ClaimedHitLocation, uint32 Epoch, uint32 VolleyId, uint8 Ordinal)
+{
+	const AUTPlusWeap_RocketLauncher* Launcher = Cast<AUTPlusWeap_RocketLauncher>(this);
+	if (!Is329FireProtocolReady() || !Launcher || !UTOwner || Epoch == 0 || VolleyId == 0
+		|| Ordinal >= NCRocketVolley::MaxRockets || Epoch != Launcher->LoadedOwnershipEpoch)
+		return;
+	// A completed volley or an ordinary weapon switch does not invalidate an in-flight rocket.
+	// The server's spawn snapshot below must still belong to this pawn and exact ownership epoch.
+	ProcessProjectileHitClaim(ClaimedTarget, ClaimedHitLocation, 1, Epoch, VolleyId, Ordinal);
+}
+
+void AUTWeaponFix::ProcessProjectileHitClaim(AUTCharacter* ClaimedTarget, FVector ClaimedHitLocation,
+	uint8 ClaimedFireMode, uint32 ClaimedEpoch, uint32 ClaimedVolleyId, uint8 ClaimedOrdinal)
+{
 	// Master gates: per-weapon feature flag (also gates the client send) AND server kill-switch.
 	if (!bEnableProjectileRewind || CVarRocketLagComp.GetValueOnGameThread() == 0)
 	{
@@ -10113,7 +10205,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	}
 
 	// 1. Validate target
-	if (!ClaimedTarget || ClaimedTarget->IsDead())
+	if (!ClaimedTarget || ClaimedTarget->IsDead() || ClaimedHitLocation.ContainsNaN())
 	{
 		return;
 	}
@@ -10143,8 +10235,9 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	if (RocketLagCompDbg())
 	{
 		UE_LOG(LogUTWeaponFix, Warning,
-			TEXT("ProjRewind CLAIM: tgt=%s fm=%d ping=%.0f tracked=%d"),
-			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TrackedAtClaim);
+			TEXT("ProjRewind CLAIM: tgt=%s fm=%d ping=%.0f tracked=%d epoch=%u volley=%u ordinal=%u"),
+			*ClaimedTarget->GetName(), (int32)ClaimedFireMode, PingMs, TrackedAtClaim,
+			ClaimedEpoch, ClaimedVolleyId, (uint32)ClaimedOrdinal);
 	}
 
 	if (PingMs > CVarRocketLagCompMaxPingMs.GetValueOnGameThread())
@@ -10164,7 +10257,8 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	WindowSec = FMath::Clamp(WindowSec, 0.016f, MaxWindowMs * 0.001f);
 
 	// 3. Find the real (authoritative) projectile
-	// Match by FireMode, oldest first (FIFO).
+	// Loaded rockets match the exact spawn snapshot, even after their actor is gone.
+	// Other projectiles retain FIFO by fire mode, but can NEVER consume a loaded entry.
 	// Prefer a LIVE projectile; if none, fall back to the GRACE BUFFER — a matching projectile
 	// that resolved (exploded) within ut.RocketLagCompGraceMs, for the close-range timing race
 	// where the server projectile detonated before this ~RTT-late claim arrived.
@@ -10185,6 +10279,11 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 	for (int32 i = 0; i < ActiveServerProjectiles.Num(); i++)
 	{
 		FActiveServerProjectile& Entry = ActiveServerProjectiles[i];
+		const bool bMatchesClaim = Entry.FireMode == ClaimedFireMode &&
+			(ClaimedVolleyId != 0
+				? Entry.LoadedVolleyId == ClaimedVolleyId && Entry.LoadedOwnershipEpoch == ClaimedEpoch
+					&& Entry.LoadedRocketOrdinal == ClaimedOrdinal && Entry.FiringPawn.Get() == UTOwner
+				: Entry.LoadedVolleyId == 0);
 		const bool bLive = Entry.Projectile.IsValid()
 			&& !Entry.Projectile.Get()->bExploded
 			&& !Entry.Projectile.Get()->IsPendingKillPending();
@@ -10200,7 +10299,7 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 			if (!bWithinGrace)
 			{
 				// DIAGNOSTIC: record fm-matching entries we're about to drop, to explain a later no-op.
-				if (Entry.FireMode == ClaimedFireMode)
+				if (bMatchesClaim)
 				{
 					if (Entry.ExpireTime >= 0.f)
 					{
@@ -10221,14 +10320,14 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 				continue;
 			}
 			// Eligible grace fallback if it matches; remember the first (oldest) one.
-			if (GraceIndex == -1 && Entry.FireMode == ClaimedFireMode)
+			if (GraceIndex == -1 && bMatchesClaim)
 			{
 				GraceIndex = i;
 			}
 			continue;
 		}
 
-		if (Entry.FireMode != ClaimedFireMode)
+		if (!bMatchesClaim)
 		{
 			continue;
 		}
@@ -10254,6 +10353,13 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		// present-time, the damage was applied by its natural collision — do NOT rescue.
 		if (E.DamagedTarget.Get() == ClaimedTarget)
 		{
+			return;
+		}
+		if (ClaimedVolleyId != 0 && (!E.bLoadedExplosionObserved
+			|| E.PossibleSplashTargets.Contains(ClaimedTarget)))
+		{
+			if (RocketLagCompDbg())
+				UE_LOG(LogUTWeaponFix, Warning, TEXT("ProjRewind REJECTED: loaded grace has possible prior splash or no explosion snapshot"));
 			return;
 		}
 		bFromGrace = true;
@@ -10411,6 +10517,10 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		return;
 	}
 
+	// Consume before damage callbacks, which can re-enter or mutate the tracking array.
+	// Repeated exact claims then have no entry and cannot award damage to another sibling.
+	ActiveServerProjectiles.RemoveAt(FoundIndex);
+
 	// 9. Confirmed direct hit at the rewound contact point.
 	const FVector HitNormal = (ProjPast - OnCap).GetSafeNormal();
 	// targetMoved = how far the target's authoritative capsule advanced past where the shooter
@@ -10464,11 +10574,6 @@ void AUTWeaponFix::ServerProjectileHitClaim_Implementation(AUTCharacter* Claimed
 		RealProjectile->ProcessHit(ClaimedTarget, ClaimedTarget->GetCapsuleComponent(), OnCap, HitNormal);
 	}
 
-	// 10. Consume the tracking entry.
-	if (FoundIndex >= 0 && FoundIndex < ActiveServerProjectiles.Num())
-	{
-		ActiveServerProjectiles.RemoveAt(FoundIndex);
-	}
 }
 
 // =========================================================================
@@ -10523,6 +10628,18 @@ AUTWeaponFix* AUTWeaponFix::FindFiringWeaponForProjectile(AUTCharacter* OwnerCha
 	if (OwnerChar == nullptr || Proj == nullptr)
 	{
 		return nullptr;
+	}
+
+	if (const AUTPlusProj_Rocket* Rocket = Cast<AUTPlusProj_Rocket>(Proj))
+	{
+		if (Rocket->LoadedVolleyId != 0)
+		{
+			// Exact source weapon, including after an ordinary switch. An unmapped weapon
+			// or a dropped/re-owned launcher must not fall back to another inventory actor.
+			AUTPlusWeap_RocketLauncher* Launcher = Rocket->LoadedVolleyWeapon;
+			return Launcher && Launcher->GetUTOwner() == OwnerChar && Proj->GetInstigator() == OwnerChar
+				&& Rocket->LoadedOwnershipEpoch == Launcher->LoadedOwnershipEpoch ? Launcher : nullptr;
+		}
 	}
 
 	const TSubclassOf<AUTProjectile> ProjectileClass = Proj->GetClass();

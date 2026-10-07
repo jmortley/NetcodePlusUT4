@@ -1,8 +1,9 @@
 # 329 charged rocket identities
 
 This is a coordinated client/server protocol change. Do not mix these RPCs or
-projectile replication layouts with 328. No Blueprint reparenting, UBT build,
-cook, deployment or multiplayer validation was performed for this source pass.
+projectile replication layouts with 328. The exact hit-claim addition also needs
+matching updated 329 client/server builds. Native regressions and the local UE4.15
+module build are separate from the cooked multiplayer release checks below.
 
 ## Identity and authority
 
@@ -72,6 +73,57 @@ pickup/equip canary. The change does not promise to fix that separate input-latc
 edge case, and it should be checked before widening the rollout.
 
 ## Diagnostics and validation
+
+### Exact loaded-rocket hit claims
+
+The shooter's replicated real `AUTPlusProj_Rocket` reports contact on the original
+launcher using ownership epoch, volley ID and ordinal. Loaded rockets are always
+fire channel 1, including ordinary spread rockets. The old hard-coded primary
+channel 0 could not match their server tracking entries.
+
+Authority snapshots the firing pawn and identity before catchup. Selection uses
+that exact entry, live or recently resolved, without falling back to another
+rocket or another launcher. The current ownership epoch and firing pawn must
+match; a normal weapon switch or a newer volley does not invalidate a rocket in
+flight. Dropping/reassigning the launcher does. Legacy fire-mode-only claims
+cannot select identified loaded rockets. Missing or malformed identities fail
+closed. Client fakes still do not send claims; this does not add pre-spawn claims
+or recover a rocket that resolved before its real actor ever reached the client.
+
+The existing target-history, capsule contact, projectile-path, LOS, ping/window
+and direct-damage checks still decide the hit. An accepted tracking entry is
+consumed before callbacks so duplicate or reentrant claims cannot damage again
+or select another sibling. New spawns retain recently resolved records for the
+existing grace period, within the existing ten-entry tracking bound.
+
+For loaded rockets, resolution is recorded at actual explosion rather than an
+overlap that stock might ignore. Before stock applies splash, a candidate overlap
+query uses its adjusted blast radius, origin and collision channel. An exact
+grace claim is rejected if its target could already have received splash, or if
+the explosion snapshot is unavailable. This is deliberately conservative: a
+candidate blocked from splash by geometry is also rejected. Normal authoritative
+direct/splash damage is unchanged. The guard prevents a late full direct-hit
+award on top of possible prior splash; it does not increase hitboxes or damage.
+
+`python -m unittest tools.tests.test_projectile_hit_claims -v` compiles the actual
+RPC gates, validator, resolution and pruning methods against a native adapter.
+It exercises sibling isolation, duplicate/reordered claims, ownership changes,
+close-range grace, preserved validation failures and damage callback re-entry.
+It also covers 0/10/20/40 ms live/grace claims, the unchanged rewind bounds,
+conservative splash rejection and mutations that deliberately break ordinal or
+splash checks. The 18 claim tests pass, alongside the volley, fire-anchor and
+client-cadence native suites. UE4.15 Editor, Windows Shipping client and Linux
+Shipping server module builds pass. These checks do not simulate actor replication
+or player input.
+
+Before Friday's release, test matching cooked builds on a dedicated server at
+0/10/20/40 ms RTT: release immediately before/after the third load; hit with each
+of three spread rockets in varying orders; explode near a wall or another pawn;
+switch weapons while rockets travel; start another volley before the previous
+one resolves. Record server/client logs together. A possible-splash grace denial
+must not add damage; a valid exact rescue must consume only its own ordinal.
+
+### Volley lifecycle
 
 `ncp.RocketVolleyDebug 1` on the actual client and match-server processes logs
 weapon, ownership epoch, volley, mode/count, load completion, per-ordinal server spawn result/NetGUID,
