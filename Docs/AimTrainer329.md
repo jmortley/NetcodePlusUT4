@@ -1,7 +1,7 @@
 # NetcodePlus Aim Trainer (UE 4.15 / 329)
 
-An opt-in game mode with real animated UT character targets, three fixed
-60-second scenarios, an in-game picker/results HUD and a shared UT4Stats top 10.
+An opt-in game mode with real animated UT character targets, four 60-second
+scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
 ## Planned standalone map
@@ -29,6 +29,27 @@ download is not evidence that editable source is included. No map modification
 or redistribution has been performed as part of recording this direction.
 
 ## Start practice
+
+From the **main menu**, open the console and enter:
+
+```
+aimtrain
+```
+
+This client command opens standalone practice on the installed stock
+`/Game/RestrictedAssets/Maps/WIP/DM-DeckTest` map and shows the trainer's scenario
+picker. It requires no hub, login or server credential. The mode constructs the
+practice room above the map. The current NCWepMut content pak is still required.
+Signed-in players can publish complete standard runs to the separate local-run
+leaderboard when UT4Stats has enabled local checkpoint publishing. Signed-out
+or disconnected players can still practise without submitting.
+
+The command only runs in the standalone main-menu world. In a match or connected
+hub, return to the main menu first. It refuses an already pending map/server
+travel, checks the map is installed, closes the front-end UI and uses absolute
+travel so previous URL options (including listen, spectator and mutators) are
+not inherited. It does not change saved configuration or disable configured
+global mutators. Dedicated servers do not register the command.
 
 Build NetcodePlus for the UE 4.15 client and server. The native game class is:
 
@@ -67,36 +88,60 @@ The first version supports **one trainee per server instance**. Use separate
 instances for simultaneous players. Scores from approved instances share the
 same UT4Stats leaderboard.
 
-Click a scenario card or press **1**, **2**, or **3**. Press **Enter** or click
+Click a scenario card or press **1**, **2**, **3**, or **4**. Press **Enter** or click
 Start for the countdown. **F6** cancels an incomplete run and returns to the
 picker. **Enter** retries from the results screen. **Escape** retains the normal
 UT menu. Cancelled runs and disconnects do not submit partial scores.
+
+The picker and results screen show the selected scenario's UT4Stats top 10,
+including player names, points and accuracy. Click **Local runs** or
+**Approved servers** to browse either source without leaving the trainer.
+Standalone defaults to local runs; network sessions default to approved servers.
+The source selection persists when changing scenarios. Browsing a board never
+changes where the current run is eligible to submit.
+
+Viewing scores does not require signing in. The menu distinguishes loading,
+an empty board and a service failure, and keeps these messages separate from
+run authentication, setup and submission status. Requests are cached and
+throttled per scenario/source/movement setting; drawing the menu every frame
+does not send an HTTP request every frame. A confirmed submission refreshes
+its own board.
+
+Menu verification on 2026-10-07: 55 controller, startup, leaderboard and local
+recording tests passed, including late responses after changing scenario/source,
+submission invalidation during an in-flight read, cached failures and teardown.
+Win64 Development Editor, Win64 Shipping client and Linux Shipping server module
+builds passed. Rebuild the 329 trainer client and host together for the scoped
+submission-refresh notification. The packaged menu layout still needs an in-game
+visual check; scores depend on deploying the accompanying Django endpoints.
 
 Press **M** or click the movement button in the picker/results screen to enable
 optional **movement practice**. Strafe along the room's left/right lane with
 normal UT side dodges, jumping and crouching. Forward/backward movement and
 forward/back dodges are disabled; side dodges stay aligned with the lane as
-you turn your view. Room walls bound the lane. The option applies to all three
+you turn your view. Room walls bound the lane. The option applies to all four
 scenarios, survives retries and scenario changes, and cannot change mid-run.
 Fixed-position aiming remains the default.
 
-Movement-practice runs show local results but never submit to the existing
-shared boards, including on an approved network host. Those boards compare
-fixed-position runs; jumping/crouching changes the headshot cover challenge.
-The HUD labels movement practice and the fixed-position leaderboard separately.
+Revision 10 gives movement practice its own leaderboard for each scenario and
+score source. The movement button also selects which board the menu displays.
+Fixed-position and movement results never compete on the same board;
+jumping/crouching changes the headshot cover challenge. Movement runs follow
+the same eligibility and submission checks as fixed-position runs.
 
-All three scenarios support offline standalone practice. A hub is not required.
-Offline results remain on the results screen; only an approved network host
-submits ranked scores. A directly connected dedicated server can be used for
-network testing without a hub.
+All four scenarios support offline standalone practice. A hub is not required.
+Eligible local results use the separate account-authenticated checkpoint board.
+An approved network host submits to the approved-server board. A directly
+connected dedicated server can be used for network testing without a hub.
 
-## Scenarios and scoring (revision 9)
+## Scenarios and scoring (revision 10)
 
 | Scenario | Exercise | Score |
 | --- | --- | --- |
 | Link tracking | Hold either fire button to track a character mixing strafes, dodges, slides and brief crouches with the NCP Link beam. | Milliseconds of beam contact, up to 60,000. |
 | Headshots | Hit wiggling character heads at five cover stations with the NCP Sniper or Lightning Gun. Body hits do not count. | 100 per confirmed headshot. Misses affect accuracy; expired targets do not deduct points. |
 | Instagib pop-up | Shoot five moving pop-up characters and a persistent randomly dodging character in the open floor lane. Includes a head peek behind the low block and a forward slide on the high right platform. | 100 per hit, minus 25 per miss and expired pop-up, floored at zero. |
+| Sniper/LG pop-up | The pop-up layout with the selected NCP Sniper or Lightning Gun, TeamArena character dimensions and rifle-paced appearances. The first accepted body hit or headshot retires that appearance. | 100 per hit, plus 50 per confirmed headshot, minus 25 per miss and expired pop-up, floored at zero. |
 
 Tracking observes the real authoritative NCP Link beam's selected target, with
 a maximum 30 Hz observation rate. It only credits intervals with beam contact
@@ -104,7 +149,7 @@ at both endpoints, and discards observation gaps longer than 100 ms. Tracking
 accuracy divides beam-contact time by time firing, using the same sampling and
 continuity rules for both clocks. Idle time changes neither accuracy nor score;
 firing off-target lowers accuracy. Score remains total contact milliseconds
-over the 60-second run. The two shooting scenarios use successful hits divided
+over the 60-second run. The three shooting scenarios use successful hits divided
 by fired shots. Weapons retain their normal firing rhythm.
 
 Revision 6 removes point deductions from headshot practice. Earlier revisions
@@ -114,14 +159,14 @@ the HUD shows live headshots, shots and expiries. Completed runs also log these
 counts in standalone, allowing scoring complaints to be checked against actual
 accepted hits. Instagib retains its existing miss/expiry point deductions.
 
-Headshot practice honors the owning player's saved NCP hitscan choice:
+Headshot practice and Sniper/LG pop-up honor the player's saved NCP hitscan choice:
 `[WeaponSkinsPlus] HitscanChoice=LG` or `Sniper` in `Mod.ini`, selected through
 the existing `weaponskins` menu. Selecting a scenario or starting/replaying a
 run reads the preference again. The choice travels with that request to the
 authority, including when joining a dedicated server. It cannot swap weapons
 during countdown or an active run. The HUD identifies the equipped rifle.
 Both shipped rifles have the same 1.3-second primary fire interval and 0.95
-headshot scales, so they share this board. Scoring reads the equipped weapon's
+headshot scales, so they share each scenario's board. Scoring reads the equipped weapon's
 own shot counter and headshot damage type, including LightningRifleShots and
 the Lightning Gun headshot type. Missing LG content blocks the run rather than
 silently substituting the sniper.
@@ -175,6 +220,12 @@ refire intervals plus aiming time. Initial spawns, hit replacements and expired
 targets share that schedule; a hitch cannot create a catch-up burst. Slower
 custom refire values scale the timings and make the run unranked.
 
+Sniper/LG pop-up uses the same scheduling policy with its normal 1.3-second
+refire interval: appearances every 1.30–1.43 seconds, lasting 7.15–8.84 seconds.
+It uses TeamArena movement and capsule values instead of the instagib profile.
+Only a headshot confirmed by the equipped rifle's damage type earns the extra
+50 points; there is no separate, more generous trainer head trace.
+
 A sixth target stays in the open foreground floor lane, making random short
 strafes. Its first native dodge attempt is 0.20–0.55 seconds after spawning,
 then every 1.15–2.10 seconds. UT's grounding and
@@ -193,7 +244,7 @@ time remains for the slide, posture transition and a full rifle refire
 interval before target expiry or the run's end. Hits, hiding and reuse clear
 the slide state, so a replacement starts standing with a fresh deadline.
 
-Both shooting scenarios use brief 0.12–0.28-second A/D reversals with the
+All three shooting scenarios use brief 0.12–0.28-second A/D reversals with the
 character profile's normal 940-unit walking limit and 5000 acceleration. Short
 holds and early turns limit the distance traveled, rather than a custom speed
 cap. Each seat has a bounded movement range, with room for the capsule and
@@ -203,35 +254,50 @@ position behind the central block. That block is 160 units high, and the target
 on top is offset laterally to keep the rear head peek visible from the fixed
 anchor. Movement practice naturally changes those sightlines.
 
-Revision 4 widens only the instagib movement ranges by 10%. Each instagib
-appearance has a 65% chance of one short native crouch, scheduled 1.5–3.5 seconds
+Revision 10 adds random slides to both left floor pop-ups in both pop-up
+scenarios, with a 45% chance per appearance. The rear-left target slides
+forward; the near-left target slides inward along the lane to avoid the
+persistent dodger. The rear-left target also has an independent 65% chance
+of a long strafe: its half-width grows from 99 to 180 units for 0.50–0.75 seconds,
+starting 2.3–2.9 seconds after appearing. It uses normal movement rather than
+teleporting, then returns to short strafes. Long strafes wait for an active
+slide to finish. Both actions require enough remaining exposure for a full
+rifle refire interval afterward. The high right-hand slide remains guaranteed
+when the target lives long enough and grounding permits it.
+
+Revision 4 widened instagib movement ranges by 10%; both pop-up scenarios now
+use those ranges. Appearances without a scheduled slide or long strafe have a
+65% chance of one short native crouch, scheduled 1.5–3.5 seconds
 after spawning and held for 0.25–0.45 seconds. It is skipped if too little
 exposure remains for the crouch plus a full rifle refire interval and 0.1 seconds.
 Targets behind cover can briefly disappear while crouched. Reappearing targets
 start standing; headshot targets do not gain these crouches. Link tracking uses
 the separate, less frequent schedule described above.
 
-All three use the fixed target model/preset in revision 9. Custom models,
+All four use the fixed target model/preset in revision 10. Custom models,
 durations or difficulty settings need separate revisions before their scores
 can be compared fairly. A server-accepted score is a practice result, not proof
 that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=9&limit=10` (also
-`headshots` and `instagib`). The web page is `/aimtrainer/`. Each board shows one
-best run per player. The game fetches a compact board outside active scoring;
-it does not stream aiming samples to Django. Revised scenarios submit revision
-9; Django retains revision-1/2/3/4/5/6/7/8 submissions and explicit older boards without
-mixing their scores with the new difficulty or accuracy definition. Revision 4 onward
-includes `fired_ms` in every result: measured firing time for tracking and zero
-for precision scenarios. Older submissions retain their original payloads and
-full-run tracking denominator. Apply migration `0066_nc_aimtrainer_fired_ms`
-before restarting the updated Django web workers and enabling current hosts.
-Revisions 5 through 9 need no additional migration; deploy revision-9 API support
-before enabling revision-9 hosts. Rebuild trainer clients and servers together:
-revision 8 adds the rifle choice to the trainer's menu/start RPCs and progress
-snapshot. These classes are used only by the trainer game mode.
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=10&movement=0&limit=10`
+(also `headshots`, `instagib` and `precision_popup`). Add `scope=local_checkpoints`
+for local results; the default source is `approved_servers`. Use `movement=1`
+for movement practice. The web page is `/aimtrainer/`. Each board shows one best
+run per player, isolated by scenario, revision, source and movement setting.
+Successful menu reads are cached for one minute. Approved hosts send aggregate
+results; authenticated local runs send the checkpoints described below.
+
+Revision 10 submissions require a Boolean `movement` field. Django retains
+revision-1 through revision-9 submissions and explicit older boards, treating
+them as fixed-position results. Older payload digests remain unchanged.
+Revision 4 onward includes `fired_ms`: measured firing time for tracking and
+zero for precision scenarios. Apply migrations through
+`0068_nc_aimtrainer_movement` and deploy revision-10 API support before enabling
+revision-10 hosts. Rebuild trainer clients and servers together for the new
+scenario and movement-scoped submission notification. These classes are used
+only by the trainer game mode.
 
 Score submission is an asynchronous server request to `/aimtrainer_entry/`.
 The identity comes from the server's player state. Run IDs make retries
@@ -252,8 +318,8 @@ ApiBaseUrl=https://ut4stats.com
 ```
 
 Keep this token on the host. It is never replicated or included in a client
-configuration shipped through the launcher. Standalone practice does not
-submit ranked scores. The website must also approve the token owner's account
+configuration shipped through the launcher. Standalone practice never uses
+this token or submits to the approved-server board. The website must approve the token owner's account
 through its `AIMTRAINER_SERVER_USERS` setting. An ordinary valid API token alone
 does not grant score-submission permission.
 
@@ -261,6 +327,76 @@ The accompanying Django change adds an isolated table and migration. Deploy
 that code, run its migration, configure the allowed server account usernames,
 and restart the web workers before expecting shared scores. Until then the
 trainer reports that the online service is unavailable.
+
+## Account-authenticated local scores (2026-10-07)
+
+Windows standalone runs can publish to a **separate local-run leaderboard**.
+There is no new password prompt and no server upload key in the client. The
+trainer reads the existing signed-in UT account through OnlineSubsystem. The
+start endpoint verifies that account with the UT community master server and
+returns a short-lived, account-bound run ticket. It takes the account ID and
+display name from that verification, never from score payload fields.
+
+The game waits for verification before its three-second countdown. Signed-out
+players, disabled publishing, unsupported client platforms or service failures
+fall back to ordinary local practice. Standard fixed-position and movement runs
+are eligible for their respective boards; modified presets are not.
+`[NCAimTrainer] OnlineEnabled=False` disables online scores.
+
+Only the fixed `https://ut4stats.com/aimtrainer_local/start/` endpoint receives
+the game account bearer. Subsequent requests to `/aimtrainer_local/checkpoint/`
+use only the run ticket. The local credential path ignores `ApiBaseUrl` and the
+server's `[UTPUGS_STATS] Key`. The Windows transport verifies certificates using
+the OS trust store, requires TLS, disables redirects, and does not use UE4's
+permissive Curl settings or its HTTP header debug logging. No global engine
+networking configuration is changed. Other platforms remain local practice
+until an equivalently verified transport is implemented.
+
+Checkpoint zero establishes the receiving server's clock; the timed challenge
+waits for its acknowledgement so a lost initial request cannot put the client
+ahead of the server's clock. Every five seconds,
+the client sends ordered shot/hit/expiry events or approximately 30 Hz Link
+firing/contact samples. UT4Stats accepts sequential, immutable batches and
+computes the result itself. Checkpoint 12 closes exactly 60 seconds. The service
+checks elapsed time against its own receipt clock, firing cadence, one hit per
+shot and appearance, event bounds and complete coverage. It rejects edited
+retries, another run's ticket and partial completion. Identical retries are
+idempotent, including a lost final response.
+
+Uploads are asynchronous, with at most four queued/in-flight batches, four-second
+request timeouts and three attempts using one/two-second backoff. Leaving the
+map, cancelling, starting another run or changing the scenario cancels pending
+work. A missed schedule, queue overflow or failed upload makes the result
+practice-only; there is no late offline score upload. A new authenticated start
+revokes the account's previous unfinished ticket so restarting does not require
+waiting for its three-minute expiry.
+
+The board scope is `local_checkpoints`; historical and approved host scores
+stay in `approved_servers`. The standalone HUD and website identify these
+sources explicitly. These checks bind identity and make accepted history
+immutable, but **cannot prove that a player-controlled client honestly produced
+its observations**. Local results must not be promoted to the approved-server
+board based only on these checks.
+
+Deploy Django migrations through `0068_nc_aimtrainer_movement` (including
+`0067_nc_aimtrainer_local`), configure
+an acknowledged shared rate-limit cache, and enable
+the environment variable `AIMTRAINER_LOCAL_ENABLED=1` after staging verification. Publishing defaults
+off on the website. See the backend's `docs/aimtrainer.md` for rate limits,
+database routing and deployment checks. A real signed-in Windows run and the
+PostgreSQL concurrency checks remain release gates, separate from native and
+SQLite regression tests. Do not add ordinary players to `AIMTRAINER_SERVER_USERS`.
+
+Verification on 2026-10-07: all 172 existing trainer regression tests and the
+11 new local-recording tests passed. The real UE automation test
+`NetcodePlus.AimTrainer.LocalSession.Transport` passed, including initial
+checkpoint acknowledgement, bounded retries, cancellation, final responses
+and credential URL/header restrictions. Final module builds compiled and
+linked for Win64 Development Editor, Win64 Shipping client and Linux Shipping
+server with `NCP_AIM_ASSIST_TEST_BUILD=0`. Django passed 67 tests; two tests
+requiring PostgreSQL were skipped on SQLite. Migration state and forward/reverse
+preservation checks passed. No live account credentials were used in these
+tests, and no production deployment was performed.
 
 ## Release verification
 
@@ -278,7 +414,7 @@ NCWepMut pak contains them. Shipping builds, cooked content and a rendered
 client/server playtest remain unverified.
 
 Before enabling ranked hosts, test a packaged 329 client against a 329 dedicated
-server. Confirm visible animated targets and cover, all three scoring rules,
+server. Confirm visible animated targets and cover, all four scoring rules,
 miss/expiry handling, cancellation, disconnect/rejoin, and a repeated completed
 run appearing only once online. Verify normal game modes are unaffected.
 Editor compilation and algorithm/API tests do not replace this multiplayer
@@ -607,3 +743,25 @@ verifies that removing either camera reset makes those tests fail. The preceding
 revision-9 review passed all 168 trainer tests and 25 Django tests. Final UE4.15
 module builds pass for Win64 Development Editor, Win64 Shipping client and Linux
 Shipping server. Packaged standalone and multiplayer checks remain necessary.
+
+### Revision 10 pop-up rifles and movement boards (2026-10-07)
+
+Both left pop-ups can slide and the rear-left target can make an occasional
+long strafe. The fourth menu option uses Sniper/LG on the pop-up layout, with
+100-point body hits and 150-point headshots. Normal rifle cadence sets its
+appearance and exposure schedule. All four scenarios now have separate
+fixed-position and movement boards in both score sources.
+
+Verification: all 198 native trainer regression tests passed. The Django suite
+passed 74 tests, with two PostgreSQL-only tests skipped on SQLite; migration
+preservation checks also passed. UE4.15 module builds passed for Win64
+Development Editor, Win64 Shipping client and Linux Shipping server with
+`NCP_AIM_ASSIST_TEST_BUILD=0`. The engine automation test
+`NetcodePlus.AimTrainer.LocalSession.Transport` passed, including revision-10
+start encoding and rejecting movement-mismatched acknowledgements.
+
+Deploy the accompanying Django code and migrations through 0068, then rebuild
+trainer clients and hosts together. No production deployment or packaged
+playtest was performed here. Slide visuals/collision, both rifle choices,
+dedicated-server play and real authenticated score publication still need
+in-game validation.

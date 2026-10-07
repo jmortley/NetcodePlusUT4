@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/ObjectMacros.h"
 #include "NCAimTrainerTypes.generated.h"
 
 /** Small public scoreboard row. Server credentials never enter replicated data. */
@@ -15,10 +16,11 @@ struct NETCODEPLUS_API FNCAimTrainerLeaderboardRow
 	UPROPERTY() float AccuracyPercent = 0.0f;
 };
 
-/** Constructed only by the trainer authority after a complete fixed-preset run. */
+/** Constructed by the trainer authority after a complete preset run. */
 struct FNCAimTrainerResult
 {
 	int32 Scenario = 0;
+	bool bMovementPractice = false;
 	FString RunId;
 	FString PlayerId;
 	FString DisplayName;

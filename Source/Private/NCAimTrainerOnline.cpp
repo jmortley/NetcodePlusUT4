@@ -103,12 +103,13 @@ namespace
 	bool IsMatchingAcknowledgement(const FString& Response, const FNCAimTrainerResult& Expected)
 	{
 		TSharedPtr<FJsonObject> Ack;
-		bool bAccepted = false;
+		bool bAccepted = false, bMovementPractice = false;
 		FString Id, Scenario;
 		double Revision = 0, Score = 0;
 		FGuid ReturnedId, ExpectedId;
 		return FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Response), Ack)
 			&& Ack.IsValid() && Ack->TryGetBoolField(TEXT("accepted"), bAccepted) && bAccepted
+			&& Ack->TryGetBoolField(TEXT("movement"), bMovementPractice) && bMovementPractice == Expected.bMovementPractice
 			&& Ack->TryGetStringField(TEXT("run_id"), Id) && FGuid::Parse(Id, ReturnedId)
 			&& FGuid::Parse(Expected.RunId, ExpectedId) && ReturnedId == ExpectedId
 			&& Ack->TryGetStringField(TEXT("scenario"), Scenario)
@@ -160,7 +161,7 @@ namespace
 
 const TCHAR* FNCAimTrainerOnline::ScenarioSlug(int32 Scenario)
 {
-	return Scenario == 0 ? TEXT("strafe") : Scenario == 1 ? TEXT("headshots") : Scenario == 2 ? TEXT("instagib") : TEXT("");
+	return Scenario == 0 ? TEXT("strafe") : Scenario == 1 ? TEXT("headshots") : Scenario == 2 ? TEXT("instagib") : Scenario == 3 ? TEXT("precision_popup") : TEXT("");
 }
 
 void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Result,
@@ -173,7 +174,7 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 		Completion(false, TEXT("Practice result: shared scores require an approved online server"));
 		return;
 	}
-	if (Result.Scenario < 0 || Result.Scenario > 2 || Result.PlayerId.IsEmpty())
+	if (Result.Scenario < 0 || Result.Scenario > 3 || Result.PlayerId.IsEmpty())
 	{
 		Completion(false, TEXT("Practice result: no authenticated player identity"));
 		return;
@@ -184,6 +185,7 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 	Json->SetStringField(TEXT("display_name"), Result.DisplayName.Left(64));
 	Json->SetStringField(TEXT("scenario"), ScenarioSlug(Result.Scenario));
 	Json->SetNumberField(TEXT("revision"), PresetRevision);
+	Json->SetBoolField(TEXT("movement"), Result.bMovementPractice);
 	Json->SetNumberField(TEXT("score"), Result.Score);
 	Json->SetNumberField(TEXT("shots"), Result.Shots);
 	Json->SetNumberField(TEXT("hits"), Result.Hits);
@@ -199,28 +201,35 @@ void FNCAimTrainerOnline::Submit(UWorld* World, const FNCAimTrainerResult& Resul
 }
 
 void FNCAimTrainerOnline::Fetch(UWorld* World, int32 Scenario,
-	TFunction<void(bool, const TArray<FNCAimTrainerLeaderboardRow>&)> Completion)
+	TFunction<void(bool, const TArray<FNCAimTrainerLeaderboardRow>&)> Completion, bool bLocal, bool bMovementPractice)
 {
-	if (!World || World->GetNetMode() == NM_Client) return;
+	// Public, unauthenticated reads are performed by the owning menu client.
+	// Submission stays authority-only and uses its separate credential path.
+	if (!World) { Completion(false, TArray<FNCAimTrainerLeaderboardRow>()); return; }
 	const FTrainerOnlineConfig Config = ReadConfig();
-	if (!Config.bEnabled || Scenario < 0 || Scenario > 2)
+	if (!Config.bEnabled || Scenario < 0 || Scenario > 3)
 	{
 		Completion(false, TArray<FNCAimTrainerLeaderboardRow>());
 		return;
 	}
-	const FString Url = Config.BaseUrl + FString::Printf(
-		TEXT("/aimtrainer_leaderboard/?scenario=%s&revision=%d&limit=10"), ScenarioSlug(Scenario), int32(PresetRevision));
+	FString Url = Config.BaseUrl + FString::Printf(
+		TEXT("/aimtrainer_leaderboard/?scenario=%s&revision=%d&limit=10&movement=%d"), ScenarioSlug(Scenario), int32(PresetRevision), int32(bMovementPractice));
+	if (bLocal) Url += TEXT("&scope=local_checkpoints");
 	Send(World, Url, FString(), FString(),
-		[Scenario, Completion](int32 Code, const FString& Body)
+		[Scenario, Completion, bLocal, bMovementPractice](int32 Code, const FString& Body)
 	{
 		TArray<FNCAimTrainerLeaderboardRow> Rows;
 		TSharedPtr<FJsonObject> Json;
 		const TArray<TSharedPtr<FJsonValue>>* JsonRows = nullptr;
-		FString ReturnedScenario;
+		FString ReturnedScenario, Scope;
+		bool bReturnedMovement = false;
 		double Revision = 0;
 		if (Code != 200 || !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Body), Json)
 			|| !Json.IsValid() || !Json->TryGetStringField(TEXT("scenario"), ReturnedScenario)
 			|| ReturnedScenario != ScenarioSlug(Scenario)
+			|| !Json->TryGetStringField(TEXT("scope"), Scope)
+			|| Scope != (bLocal ? TEXT("local_checkpoints") : TEXT("approved_servers"))
+			|| !Json->TryGetBoolField(TEXT("movement"), bReturnedMovement) || bReturnedMovement != bMovementPractice
 			|| !ReadBoundedNumber(Json, TEXT("revision"), PresetRevision, PresetRevision, Revision)
 			|| !Json->TryGetArrayField(TEXT("rows"), JsonRows) || JsonRows->Num() > 10)
 		{

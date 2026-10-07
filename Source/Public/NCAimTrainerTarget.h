@@ -23,6 +23,9 @@ public:
 
     void ActivateTarget(const FVector& Location, bool bStrafe);
     void StartWiggle(float HalfWidth);
+    /** Temporarily replaces short A/D decisions with a longer native strafe. */
+    bool StartPopupLongStrafe(float HalfWidth, float HoldSeconds, float DirectionRoll);
+    bool IsTrainerLongStrafing() const { return PopupLongStrafeEndTime > 0.f; }
     /** Uses normal UT posture/collision; an active floor slide owns its posture. */
     bool SetTrainerCrouched(bool bCrouch);
     void HideTarget();
@@ -33,6 +36,8 @@ public:
     bool TryTrainerDodge(float DirectionRoll);
     /** Uses UT's floor-slide physics toward the trainee, along world -X. */
     bool TryTrainerSlideForward();
+    /** Platform targets slide forward; the near-left floor lane slides inward. */
+    bool TryTrainerPopupSlide(int32 Slot);
     /** Native lateral slide for the tracking target; turns inward near lane edges. */
     bool TryTrainerTrackingSlide(float DirectionRoll);
     bool IsTrainerSliding() const;
@@ -45,6 +50,9 @@ private:
     bool bTrainerWiggle = false;
     float StrafeDirection = 1.0f;
     float StrafeRange = 800.f;
+    float WiggleRange = 0.f;
+    float PopupLongStrafeEndTime = 0.f;
+    bool bRecenterWiggleAfterSlide = false;
     FVector StrafeCenter = FVector::ZeroVector;
     FVector TrainerSlideDirection = FVector::ZeroVector;
     float AppearanceTime = 0.f;

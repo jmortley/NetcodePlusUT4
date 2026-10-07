@@ -9,13 +9,14 @@ namespace NCAimTrainerScoring
         return 100 * Hits;
     }
 
-    inline int PrecisionScore(int Hits, int Shots, int Expired)
+    inline int PrecisionScore(int Hits, int Shots, int Expired, int Headshots = 0)
     {
-        if (Hits < 0 || Shots < Hits || Expired < 0 || Shots > 200 || Expired > 200)
+        if (Hits < 0 || Shots < Hits || Expired < 0 || Shots > 200 || Expired > 200
+            || Headshots < 0 || Headshots > Hits)
         {
             return 0;
         }
-        const int Value = 100 * Hits - 25 * (Shots - Hits) - 25 * Expired;
+        const int Value = 100 * Hits + 50 * Headshots - 25 * (Shots - Hits) - 25 * Expired;
         return Value > 0 ? Value : 0;
     }
 

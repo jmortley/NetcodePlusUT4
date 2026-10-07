@@ -42,8 +42,20 @@ float SliderMaximumTravel() {
 }
 FSeat PopupMovementSeat(int index) {
     FSeat seat=PopupSeat(index);
-    if (index==PopupSliderSlot) seat.MinX-=SliderMaximumTravel();
+    if (index==PopupSliderSlot || index==0) seat.MinX-=SliderMaximumTravel();
+    if (index==0) seat.WiggleRange=PopupLongStrafeRange;
+    if (index==4) {
+        // A slide starts anywhere inside the initial wiggle, then preserves
+        // that Y endpoint as the new wiggle center. Bound both appearances.
+        const float extra=SliderMaximumTravel()+seat.WiggleRange+WiggleSafetyMargin;
+        seat.CenterY+=extra*.5f; seat.WiggleRange+=extra*.5f;
+    }
     return seat;
+}
+FSeat PopupOcclusionSeat(int index) {
+    // The inward-sliding near target may deliberately cross rear sightlines.
+    // Its initial seat and the stationary/platform seats remain separated.
+    return index==4 ? PopupSeat(index) : PopupMovementSeat(index);
 }
 std::vector<Point> Endpoints(const FSeat& seat) {
     const float reach = seat.SpawnJitterY + seat.WiggleRange + WiggleSafetyMargin;
@@ -154,7 +166,7 @@ void OtherTargetOcclusion() {
         for (Point point:Endpoints(PopupMovementSeat(slot))) {
             for (int other=0;other<PopupSlotCount;++other) {
                 if (other==slot) continue;
-                for (Point obstacle:Endpoints(PopupMovementSeat(other))) {
+                for (Point obstacle:Endpoints(PopupOcclusionSeat(other))) {
                     for (float headHeight:{184.f,212.f}) {
                         Require(!SegmentHitsBox({point.X,point.Y,point.Z+TestHeadHeight(headHeight)},
                             obstacle.X-TestRadius(),obstacle.X+TestRadius(),
@@ -189,6 +201,31 @@ void SliderRunway() {
             Require(slid.X-TestRadius()>-3200.f && slid.X+TestRadius()<3200.f
                 && slid.Y-TestRadius()>-1800.f && slid.Y+TestRadius()<1800.f,
                 "sliding capsule can leave the arena bounds");
+        }
+    }
+}
+void LeftMotionLanes() {
+    for (bool ig:{false,true}) {
+        InstagibGeometry=ig;
+        PlatformSupport();
+        const FSeat rear=PopupMovementSeat(0),near=PopupMovementSeat(4);
+        const FBlock support=PopupPlatform(0);
+        Require(PopupSeat(0).MinX>=1000.f&&PopupSeat(0).SpawnJitterY<=35.f
+            &&rear.WiggleRange==180.f,"rear-left long strafe lost its required runway or safe lateral extent");
+        for(Point point:Endpoints(rear)) {
+            Require(point.Y-TestRadius()>support.CenterY-support.SizeY*.5f
+                &&point.Y+TestRadius()<support.CenterY+support.SizeY*.5f,
+                "rear-left long strafe leaves platform support");
+        }
+        for(Point point:Endpoints(near)) {
+            Require(point.X-TestRadius()>PopupDodgerSeat().MaxX+TestRadius(),
+                "near-left slide overlaps persistent dodger's X plane");
+            Require(point.X+TestRadius()<PopupPlatform(0).CenterX-PopupPlatform(0).SizeX*.5f,
+                "near-left inward slide clips the front of a platform");
+            Require(point.X-TestRadius()>-1800.f+TestRadius(),
+                "near-left slide can cross trainee's movement plane");
+            Require(point.Y-TestRadius()>-1800.f&&point.Y+TestRadius()<1800.f,
+                "near-left slide and subsequent wiggle can leave the room");
         }
     }
 }
@@ -317,6 +354,7 @@ int main(int argc,char**argv) {
     else if(name=="dodger_support") DodgerLaneSupport();
     else if(name=="dodger_sightlines") DodgerSightlines();
     else if(name=="tracking_slide") TrackingSlideLane();
+    else if(name=="left_motion") LeftMotionLanes();
     else Require(false,"unknown case");
 }
 '''
@@ -358,6 +396,7 @@ class AimTrainerLayoutTests(unittest.TestCase):
     def test_permanent_dodger_lane_supports_native_dodge_overshoot(self): self.run_case("dodger_support")
     def test_permanent_dodger_remains_visible_across_its_lane(self): self.run_case("dodger_sightlines")
     def test_tracking_slide_stays_in_lane_and_within_fixed_player_beam_range(self): self.run_case("tracking_slide")
+    def test_both_left_slide_lanes_and_long_strafe_remain_clear_with_both_capsule_profiles(self): self.run_case("left_motion")
 
 
 if __name__ == "__main__":

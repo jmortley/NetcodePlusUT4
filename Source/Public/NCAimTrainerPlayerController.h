@@ -14,7 +14,7 @@ struct FNCAimTrainerProgress
 	UPROPERTY() uint8 Scenario = 0;
 	/** 0 picker, 1 countdown, 2 running, 3 results. */
 	UPROPERTY() uint8 Phase = 0;
-	/** Optional lateral/jump/dodge practice. These runs never enter ranked boards. */
+	/** Optional lateral/jump/dodge practice, ranked separately from fixed position. */
 	UPROPERTY() bool bMovementPractice = false;
 	/** Selected from the owning player's existing NCP hitscan preference. */
 	UPROPERTY() bool bUseLightningGun = false;
@@ -38,6 +38,7 @@ class NETCODEPLUS_API ANCAimTrainerPlayerController : public AUTPlayerController
 public:
 	ANCAimTrainerPlayerController(const FObjectInitializer& ObjectInitializer);
 	virtual void ClientRestart_Implementation(APawn* NewPawn) override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual bool InputKey(FKey Key, EInputEvent EventType, float AmountDepressed, bool bGamepad) override;
 	virtual void OnFire() override;
@@ -51,7 +52,12 @@ public:
 	virtual void ToggleCrouch() override;
 
 	const FNCAimTrainerProgress& GetTrainerProgress() const { return TrainerProgress; }
-	const TArray<FNCAimTrainerLeaderboardRow>& GetTrainerLeaderboard() const { return Leaderboard; }
+	const TArray<FNCAimTrainerLeaderboardRow>& GetTrainerLeaderboard() const;
+	FString GetTrainerLeaderboardStatus() const;
+	bool IsTrainerLeaderboardLocal() const;
+	void SelectTrainerLeaderboardSource(bool bLocal);
+	/** Cheap menu polling: cached for 60 seconds, failed requests for 10 seconds. */
+	void RefreshTrainerLeaderboard();
 	const FString& GetTrainerOnlineStatus() const { return OnlineStatus; }
 	bool IsTrainerMenuVisible() const;
 	bool HasTrainerInputFocus() const;
@@ -63,6 +69,7 @@ public:
 	/** Authority-side publishers used by ANCAimTrainerGame and its leaderboard service. */
 	void SetTrainerProgress(const FNCAimTrainerProgress& Progress);
 	void SetTrainerLeaderboard(const TArray<FNCAimTrainerLeaderboardRow>& Rows);
+	void NotifyTrainerLeaderboardSubmission(uint8 Scenario, bool bLocal, bool bMovementPractice);
 	void SetTrainerOnlineStatus(const FString& Status);
 	/** Called only after the authority accepts a scoring hit on a practice target. */
 	void NotifyTrainerHit(float Damage);
@@ -78,6 +85,8 @@ public:
 	UFUNCTION(Client, Reliable)
 	void ClientTrainerLeaderboard(const TArray<FNCAimTrainerLeaderboardRow>& Rows);
 	UFUNCTION(Client, Reliable)
+	void ClientTrainerLeaderboardSubmitted(uint8 Scenario, bool bLocal, bool bMovementPractice);
+	UFUNCTION(Client, Reliable)
 	void ClientTrainerOnlineStatus(const FString& Status);
 	UFUNCTION(Client, Reliable)
 	void ClientTrainerConfirmedHit(int32 Damage);
@@ -86,9 +95,19 @@ private:
 	UPROPERTY(ReplicatedUsing=OnRep_TrainerProgress)
 	FNCAimTrainerProgress TrainerProgress;
 	UPROPERTY(Transient)
-	TArray<FNCAimTrainerLeaderboardRow> Leaderboard;
-	UPROPERTY(Transient)
 	FString OnlineStatus;
+	// Public boards are read by the owning client. No credentials or browser
+	// selection cross the gameplay connection. Keys are scenario + 4 * local + 8 * movement.
+	TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[16];
+	double NextLeaderboardFetch[16] = {};
+	uint32 LeaderboardGeneration[16] = {};
+	bool LeaderboardInFlight[16] = {};
+	bool LeaderboardLoaded[16] = {};
+	bool LeaderboardFailed[16] = {};
+	bool bLeaderboardSourceSelected = false;
+	bool bLeaderboardLocal = false;
+	bool bLeaderboardEnded = false;
+	int32 SelectedLeaderboardKey() const;
 
 	UFUNCTION()
 	void OnRep_TrainerProgress();

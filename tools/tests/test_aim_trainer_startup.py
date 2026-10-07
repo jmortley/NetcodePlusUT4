@@ -49,6 +49,7 @@ struct Text : std::string {
     using std::string::string;
     using std::string::operator=;
     void Empty() { clear(); }
+    Text ToLower() const { Text result(*this); std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return char(std::tolower(c)); }); return result; }
 };
 enum class EGuidFormats { DigitsWithHyphens };
 struct FGuid { static FGuid NewGuid() { return FGuid(); } Text ToString(EGuidFormats) { return Text("unique-run"); } };
@@ -220,7 +221,8 @@ template<> const ANCAimTrainerTarget* UClass::GetDefaultObject<ANCAimTrainerTarg
 struct ANCAimTrainerArena {
     bool IsPendingKillPending() const { return false; }
     bool HasArenaAssets() const { return true; }
-    void SetScenario(uint8) {}
+    uint8 AssignedScenario=0;
+    void SetScenario(uint8 scenario) { AssignedScenario=scenario; }
 };
 enum class ESpawnActorCollisionHandlingMethod { AlwaysSpawn };
 struct FActorSpawnParameters { ESpawnActorCollisionHandlingMethod SpawnCollisionHandlingOverride; };
@@ -330,6 +332,8 @@ struct ANCAimTrainerGame : BaseGame {
     bool FailSetup(const char* message) { SetupError = message; return false; }
     void PublishProgress() { ++Publishes; }
     void RefreshLeaderboard() { ++Fetches; }
+    void ResetLocalSession() {}
+    void StartLocalSession() {}
     bool ReadyToStartMatch_Implementation();
     void PostLogin(APlayerController*);
     void RestartPlayer(AController*) override;
@@ -412,8 +416,8 @@ int main(int argc, char** argv) {
         f.Game.SelectScenario(&f.Player,2);
         Require(f.Game.Progress.bMovementPractice,"scenario selection forgot practice");
         f.Game.StartTraining(&f.Player);
-        Require(f.Game.Progress.Phase==1 && !f.Game.bRankedRun && f.Game.Progress.bMovementPractice,
-            "movement practice entered ranked pool or lost option");
+        Require(f.Game.Progress.Phase==1 && f.Game.bRankedRun && f.Game.Progress.bMovementPractice,
+            "standard movement run cannot enter its own ranked board or lost option");
         f.Game.SetMovementPractice(&f.Player,false);
         Require(f.Game.Progress.bMovementPractice,"countdown allowed option switch");
         f.Game.Progress.Phase=2;
@@ -472,6 +476,21 @@ int main(int argc, char** argv) {
         Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Instagib, "popup selection lost instagib");
         f.Game.SelectScenario(&f.Player,0);
         Require(f.Game.RunWeapon == &f.Game.SpawnedPawn.Link, "returning to tracking retained precision weapon");
+    } else if (name == "precision_popup") {
+        f.BeginWorld(); f.Game.NetMode=1; f.Game.PostLogin(&f.Player);
+        for (bool lightning : {false,true}) {
+            f.Game.SelectScenario(&f.Player,2); // Deliberately start on IG pawn/weapon.
+            f.Game.SelectScenario(&f.Player,3,lightning);
+            Require(f.Game.Progress.Scenario==3 && f.Game.Progress.bUseLightningGun==lightning
+                    && f.Game.RunWeapon==(lightning ? static_cast<AUTWeapon*>(&f.Game.SpawnedPawn.Lightning)
+                        : static_cast<AUTWeapon*>(&f.Game.SpawnedPawn.Sniper)),"precision popup did not equip selected NCP rifle");
+            Require(f.Game.SpawnedPawn.ClassType==&TrainerType && f.Game.Arena->AssignedScenario==2,
+                    "precision popup lost TeamArena pawn or popup cover geometry");
+            f.Game.SetMovementPractice(&f.Player,true); f.Game.StartTraining(&f.Player,lightning);
+            Require(f.Game.bRankedRun && f.Game.Progress.bMovementPractice && f.Game.Progress.Scenario==3,
+                    "precision movement preset not eligible for its own board");
+            f.Game.AbortTraining(&f.Player);
+        }
     } else if (name == "lightning_select") {
         f.BeginWorld(); f.Game.PostLogin(&f.Player);
         f.Game.SelectScenario(&f.Player,1,true);
@@ -541,7 +560,7 @@ int main(int argc, char** argv) {
             f.Game.SetMovementPractice(requestor,true);
             f.Game.AbortTraining(requestor);
         }
-        f.Game.SelectScenario(&f.Player,3,false);
+        f.Game.SelectScenario(&f.Player,4,false);
         Require(f.Game.Progress.Phase == 0 && f.Game.Progress.Scenario == 1
                 && f.Game.Progress.bUseLightningGun && !f.Game.Progress.bMovementPractice
                 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning
@@ -771,7 +790,8 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_in_progress_login_equips_existing_pawn_once(self): self.run_case("existing_pawn_login")
     def test_postlogin_manual_restart_equips_once(self): self.run_case("late_manual_restart")
     def test_spectator_never_receives_trainee_pawn(self): self.run_case("spectator")
-    def test_movement_choice_survives_run_lifecycle_and_cannot_rank(self): self.run_case("movement_lifecycle")
+    def test_movement_choice_survives_run_lifecycle_and_can_rank_separately(self): self.run_case("movement_lifecycle")
+    def test_precision_popup_equips_saved_rifle_and_teamarena_pawn_with_movement_board(self): self.run_case("precision_popup")
     def test_restart_clears_firing_and_contact_clocks(self): self.run_case("run_clock_reset")
     def test_lane_accepts_crouching_jumping_but_rejects_escapes(self): self.run_case("lane_bounds")
     def test_each_scenario_equips_its_real_weapon(self): self.run_case("tracking_weapon")

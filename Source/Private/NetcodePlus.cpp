@@ -2,6 +2,7 @@
 #include "NetcodePlus.h"
 #include "NCClientFireTiming.h"
 #include "NCFireAnchor.h"
+#include "NCAimTrainerLocalHttp.h"
 #include "Modules/ModuleManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Engine/DemoNetDriver.h"
@@ -15,6 +16,7 @@
 #include "UTPlayerInput.h"
 #include "UTProfileSettings.h"
 #include "UTLocalPlayer.h"
+#include "UTMenuGameMode.h"
 #include "UTGameState.h"
 #include "UTCharacter.h"
 #include "UTWeapon.h"
@@ -68,6 +70,7 @@ static TWeakPtr<SNCPlusHUDDragOverlay> ActiveDragOverlay;
  *  owned by another plugin if the generic `ready` name was already occupied. */
 static IConsoleObject* GReadyConsoleCommand = nullptr;
 static IConsoleObject* GNCPReadyConsoleCommand = nullptr;
+static IConsoleObject* GAimTrainConsoleCommand = nullptr;
 
 /** PreLoadMap delegate handle — self-heals the menu input state across level loads. */
 static FDelegateHandle GNCPPreLoadMapHandle;
@@ -1221,6 +1224,49 @@ static void HandleReady(const TArray<FString>& /*Args*/, UWorld* World)
 	PC->Mutate(TEXT("nc_ready"));
 }
 
+/** Open the local practice picker from the invoking client's front end. */
+static void HandleAimTrain(const TArray<FString>& Args, UWorld* World)
+{
+	if (!GEngine || !World || IsRunningDedicatedServer() ||
+		(World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
+	{
+		return;
+	}
+	// Never select a different PIE world or act on a dedicated server's remote PC.
+	APlayerController* PC = GEngine->GetFirstLocalPlayerController(World);
+	UUTLocalPlayer* LocalPlayer = PC ? Cast<UUTLocalPlayer>(PC->GetLocalPlayer()) : nullptr;
+	if (!LocalPlayer) { return; }
+	if (Args.Num() != 0)
+	{
+		PC->ClientMessage(TEXT("Usage: aimtrain (from the main menu)"));
+		return;
+	}
+	// IsMenuGame() also returns true for bNoMidGameMenu during some gameplay.
+	// Require the actual standalone front end so this never leaves a live match.
+	if (World->GetNetMode() != NM_Standalone || World->GetAuthGameMode<AUTMenuGameMode>() == nullptr)
+	{
+		PC->ClientMessage(TEXT("Return to the main menu, then enter aimtrain to open local practice."));
+		return;
+	}
+	const FWorldContext* Context = GEngine->GetWorldContextFromWorld(World);
+	if (!Context || Context->PendingNetGame || !Context->TravelURL.IsEmpty() || !World->NextURL.IsEmpty())
+	{
+		PC->ClientMessage(TEXT("A map or server is already loading. Try aimtrain when you are back at the main menu."));
+		return;
+	}
+	FString Map = TEXT("/Game/RestrictedAssets/Maps/WIP/DM-DeckTest");
+	if (!GEngine->MakeSureMapNameIsValid(Map))
+	{
+		PC->ClientMessage(TEXT("Cannot open aim training: the stock DM-DeckTest map is not installed."));
+		return;
+	}
+	const FString URL = Map + TEXT("?game=/Script/NetcodePlus.NCAimTrainerGame?Bots=0?ForceNoBots=1?SpectatorOnly=0?mutator=");
+	// UT's `open` command uses partial travel. Absolute travel deliberately drops
+	// old listen/spectator/game options without changing the player's saved config.
+	LocalPlayer->CloseAllUI();
+	GEngine->SetClientTravel(World, *URL, TRAVEL_Absolute);
+}
+
 void FNetcodePlus::StartupModule()
 {
 	// This module's startup work is entirely runtime-facing.  Cook commandlets still
@@ -1243,6 +1289,18 @@ void FNetcodePlus::StartupModule()
 		RegisterNCHighPollingMouseInput();
 		// Opt-in HUD display toggles: read once here so render paths only see cached bools.
 		NCPlusDisplaySettings::Reload();
+		if (IConsoleManager::Get().FindConsoleObject(TEXT("aimtrain")) == nullptr)
+		{
+			GAimTrainConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
+				TEXT("aimtrain"),
+				TEXT("Open local NetcodePlus aim practice from the main menu."),
+				FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&HandleAimTrain),
+				ECVF_Default);
+		}
+		else
+		{
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: console command 'aimtrain' already exists; leaving it unchanged"));
+		}
 	}
 
 	IConsoleManager::Get().RegisterConsoleCommand(
@@ -1510,8 +1568,18 @@ void FNetcodePlus::StartupModule()
 
 void FNetcodePlus::ShutdownModule()
 {
+    // Stop private credential-bearing requests before the module/UObjects go away.
+    if (!ShutdownNCAimTrainerLocalHttp())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("Aim trainer HTTP shutdown is still draining native callbacks."));
+    }
     NCClientFireTiming::Shutdown();
     NCFireAnchor::Shutdown();
+	if (GAimTrainConsoleCommand)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(GAimTrainConsoleCommand, false);
+		GAimTrainConsoleCommand = nullptr;
+	}
 	// This object is referenced by Slate rather than CoreUObject. Release it even
 	// during late process teardown so Slate never retains code from an unloaded DLL.
 	if (!IsRunningCommandlet())

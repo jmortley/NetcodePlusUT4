@@ -3,6 +3,7 @@
 #include "NetcodePlus.h"
 #include "UTDMGameMode.h"
 #include "NCAimTrainerPlayerController.h"
+#include "NCAimTrainerLocalSession.h"
 #include "NCAimTrainerGame.generated.h"
 
 class ANCAimTrainerTarget;
@@ -18,6 +19,7 @@ public:
     ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer);
     virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Tick(float DeltaSeconds) override;
     virtual void PostLogin(APlayerController* NewPlayer) override;
     virtual void Logout(AController* Exiting) override;
@@ -54,7 +56,6 @@ private:
     float NextDodgeTime = 0.f;
     float NextTrackingSlideTime = 0.f;
     float NextPopupTime = 0.f;
-    float NextPopupSlideTime = 0.f;
     float PopupRefireSeconds = 1.f;
     float ShotStatBaseline = 0.f;
     double TrackedSeconds = 0.0;
@@ -65,14 +66,20 @@ private:
     FString UnrankedReason;
     FString SetupError;
     FString RunId;
+    TSharedPtr<FNCAimTrainerLocalSession> LocalSession;
+    TArray<FNCAimTrainerLocalEvent> LocalEvents;
+    int32 LocalAppearances[6] = {};
+    int32 LocalNextCheckpoint = 1;
+    int32 LocalLastShotCount = 0;
+    bool bLocalAuthPending = false;
+    bool bLocalRecording = false;
     TArray<float> NextTargetTime;
     TArray<float> TargetExpiry;
     TArray<float> NextWiggleTime;
+    TArray<float> NextPopupSlideTime;
+    TArray<float> NextPopupLongStrafeTime;
     TArray<float> NextCrouchTime;
     TArray<float> CrouchEndTime;
-    double NextLeaderboardFetch[3] = { 0.0, 0.0, 0.0 };
-    bool LeaderboardInFlight[3] = { false, false, false };
-    TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[3];
 
     bool EnsureArena();
     bool ConfigurePawn();
@@ -92,4 +99,15 @@ private:
     bool IsTrackingBeamFiring() const;
     void UpdateTrackingSample(float Now);
     bool IsTrainee(const ANCAimTrainerPlayerController* PC) const;
+    bool IsStandardPreset() const;
+    void ResetLocalSession();
+    void StartLocalSession();
+    bool PrepareLocalRecording();
+    void BeginLocalRecording();
+    void InvalidateLocalRun();
+    void RecordLocalShotCount();
+    void RecordLocalTarget(int32 Slot, bool bHit, bool bHeadshot = false);
+    void RecordLocalSample(bool bFiring, bool bContact);
+    void AddLocalEvent(FNCAimTrainerLocalEvent Event);
+    void FlushLocalCheckpoint(bool bFinal = false);
 };

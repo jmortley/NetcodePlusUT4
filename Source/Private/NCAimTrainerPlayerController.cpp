@@ -1,5 +1,6 @@
 #include "NCAimTrainerPlayerController.h"
 #include "NCAimTrainerGame.h"
+#include "NCAimTrainerOnline.h"
 #include "NCAimTrainerCharacter.h"
 #include "UTPlayerCameraManager.h"
 #include "UTLocalPlayer.h"
@@ -16,7 +17,12 @@ ANCAimTrainerPlayerController::ANCAimTrainerPlayerController(const FObjectInitia
 	: Super(ObjectInitializer)
 {
 	PlayerCameraManagerClass = AUTPlayerCameraManager::StaticClass();
-	OnlineStatus = TEXT("Waiting for UT4Stats leaderboard...");
+}
+
+void ANCAimTrainerPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	bLeaderboardEnded = true;
+	Super::EndPlay(EndPlayReason);
 }
 
 void ANCAimTrainerPlayerController::ClientRestart_Implementation(APawn* NewPawn)
@@ -115,6 +121,7 @@ bool ANCAimTrainerPlayerController::InputKey(FKey Key, EInputEvent EventType, fl
 			if (Key == EKeys::One || Key == EKeys::NumPadOne) { Scenario = 0; }
 			if (Key == EKeys::Two || Key == EKeys::NumPadTwo) { Scenario = 1; }
 			if (Key == EKeys::Three || Key == EKeys::NumPadThree) { Scenario = 2; }
+			if (Key == EKeys::Four || Key == EKeys::NumPadFour) { Scenario = 3; }
 			if (Scenario != INDEX_NONE)
 			{
 				if (EventType == IE_Pressed) { SelectTrainerScenario(uint8(Scenario)); }
@@ -171,7 +178,7 @@ void ANCAimTrainerPlayerController::SetTrackingFireHeld(bool bPrimary, bool bHel
 
 void ANCAimTrainerPlayerController::SelectTrainerScenario(uint8 Scenario)
 {
-	if (Scenario < 3 && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario, PrefersTrainerLightningGun()); }
+	if (Scenario < 4 && IsTrainerMenuVisible()) { ServerTrainerSelectScenario(Scenario, PrefersTrainerLightningGun()); }
 }
 
 void ANCAimTrainerPlayerController::StartTrainerRun()
@@ -208,7 +215,7 @@ bool ANCAimTrainerPlayerController::AdmitTrainerRequest(uint8 Action)
 	return true;
 }
 
-bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario, bool bUseLightningGun) { return Scenario < 3; }
+bool ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Validate(uint8 Scenario, bool bUseLightningGun) { return Scenario < 4; }
 void ANCAimTrainerPlayerController::ServerTrainerSelectScenario_Implementation(uint8 Scenario, bool bUseLightningGun)
 {
 	ANCAimTrainerGame* Game = GetWorld() ? Cast<ANCAimTrainerGame>(GetWorld()->GetAuthGameMode()) : nullptr;
@@ -285,8 +292,95 @@ void ANCAimTrainerPlayerController::SetTrainerOnlineStatus(const FString& Status
 
 void ANCAimTrainerPlayerController::ClientTrainerLeaderboard_Implementation(const TArray<FNCAimTrainerLeaderboardRow>& Rows)
 {
-	Leaderboard = Rows;
-	if (Leaderboard.Num() > 10) { Leaderboard.SetNum(10); }
+	// Legacy rows-only entry point; the menu now owns public reads. Rows without
+	// a scenario/source cannot safely replace an asynchronous browser selection.
+	(void)Rows;
+}
+
+bool ANCAimTrainerPlayerController::IsTrainerLeaderboardLocal() const
+{
+	return bLeaderboardSourceSelected ? bLeaderboardLocal : GetNetMode() == NM_Standalone;
+}
+
+int32 ANCAimTrainerPlayerController::SelectedLeaderboardKey() const
+{
+	return FMath::Clamp(int32(TrainerProgress.Scenario), 0, 3) + (IsTrainerLeaderboardLocal() ? 4 : 0)
+		+ (TrainerProgress.bMovementPractice ? 8 : 0);
+}
+
+const TArray<FNCAimTrainerLeaderboardRow>& ANCAimTrainerPlayerController::GetTrainerLeaderboard() const
+{
+	return LeaderboardCache[SelectedLeaderboardKey()];
+}
+
+FString ANCAimTrainerPlayerController::GetTrainerLeaderboardStatus() const
+{
+	const int32 Key = SelectedLeaderboardKey();
+	if (LeaderboardInFlight[Key])
+	{
+		return LeaderboardLoaded[Key] ? TEXT("Refreshing UT4Stats scores...") : TEXT("Loading UT4Stats scores...");
+	}
+	if (LeaderboardFailed[Key])
+	{
+		return LeaderboardLoaded[Key] ? TEXT("UT4Stats unavailable. Showing previously loaded scores.")
+			: TEXT("UT4Stats leaderboard unavailable. Practice is still available.");
+	}
+	if (!LeaderboardLoaded[Key]) { return TEXT("Loading UT4Stats scores..."); }
+	return LeaderboardCache[Key].Num() == 0 ? TEXT("No scores for this scenario yet.")
+		: TEXT("Best run per player for this scenario and movement setting.");
+}
+
+void ANCAimTrainerPlayerController::SelectTrainerLeaderboardSource(bool bLocal)
+{
+	if (!IsLocalController() || !IsTrainerMenuVisible() || bLeaderboardEnded) { return; }
+	bLeaderboardLocal = bLocal;
+	bLeaderboardSourceSelected = true;
+	RefreshTrainerLeaderboard();
+}
+
+void ANCAimTrainerPlayerController::RefreshTrainerLeaderboard()
+{
+	if (!IsLocalController() || !GetWorld() || !IsTrainerMenuVisible() || bLeaderboardEnded) { return; }
+	const int32 Key = SelectedLeaderboardKey();
+	const double Now = FPlatformTime::Seconds();
+	if (LeaderboardInFlight[Key] || Now < NextLeaderboardFetch[Key]) { return; }
+	LeaderboardInFlight[Key] = true;
+	const uint32 Generation = LeaderboardGeneration[Key];
+	TWeakObjectPtr<ANCAimTrainerPlayerController> WeakPC(this);
+	TWeakObjectPtr<UWorld> WeakWorld(GetWorld());
+	FNCAimTrainerOnline::Fetch(GetWorld(), Key % 4,
+		[WeakPC, WeakWorld, Key, Generation](bool bSuccess, const TArray<FNCAimTrainerLeaderboardRow>& Rows)
+	{
+		ANCAimTrainerPlayerController* PC = WeakPC.Get();
+		if (!PC || !WeakWorld.IsValid() || PC->GetWorld() != WeakWorld.Get() || PC->bLeaderboardEnded) { return; }
+		PC->LeaderboardInFlight[Key] = false;
+		// A score accepted during this request invalidates its response. The next
+		// menu poll refetches, including when the user later returns to this source.
+		if (PC->LeaderboardGeneration[Key] != Generation) { return; }
+		PC->NextLeaderboardFetch[Key] = FPlatformTime::Seconds() + (bSuccess ? 60.0 : 10.0);
+		PC->LeaderboardFailed[Key] = !bSuccess;
+		if (bSuccess)
+		{
+			PC->LeaderboardCache[Key] = Rows;
+			if (PC->LeaderboardCache[Key].Num() > 10) { PC->LeaderboardCache[Key].SetNum(10); }
+			PC->LeaderboardLoaded[Key] = true;
+		}
+	}, (Key % 8) >= 4, Key >= 8);
+}
+
+void ANCAimTrainerPlayerController::NotifyTrainerLeaderboardSubmission(uint8 Scenario, bool bLocal, bool bMovementPractice)
+{
+	if (Role == ROLE_Authority && Scenario < 4) { ClientTrainerLeaderboardSubmitted(Scenario, bLocal, bMovementPractice); }
+}
+
+void ANCAimTrainerPlayerController::ClientTrainerLeaderboardSubmitted_Implementation(uint8 Scenario, bool bLocal, bool bMovementPractice)
+{
+	if (!IsLocalController() || Scenario >= 4 || bLeaderboardEnded) { return; }
+	const int32 Key = int32(Scenario) + (bLocal ? 4 : 0) + (bMovementPractice ? 8 : 0);
+	++LeaderboardGeneration[Key];
+	NextLeaderboardFetch[Key] = 0.0;
+	LeaderboardFailed[Key] = false;
+	if (Key == SelectedLeaderboardKey()) { RefreshTrainerLeaderboard(); }
 }
 
 void ANCAimTrainerPlayerController::ClientTrainerOnlineStatus_Implementation(const FString& Status)

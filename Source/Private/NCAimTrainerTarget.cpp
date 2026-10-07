@@ -153,7 +153,26 @@ void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
     bTrainerStrafe = true;
     bTrainerWiggle = true;
     StrafeRange = FMath::Clamp(HalfWidth, 20.f, 110.f);
+    WiggleRange = StrafeRange;
+    PopupLongStrafeEndTime = 0.f;
     GetCharacterMovement()->SetMovementMode(MOVE_Walking);
+}
+
+bool ANCAimTrainerTarget::StartPopupLongStrafe(float HalfWidth, float HoldSeconds, float DirectionRoll)
+{
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerWiggle || IsDead()
+        || bIsCrouched || IsTrainerSliding() || IsTrainerLongStrafing()
+        || !GetCharacterMovement()->IsMovingOnGround()
+        || !FMath::IsFinite(HalfWidth) || !FMath::IsFinite(HoldSeconds)
+        || HalfWidth <= WiggleRange || HoldSeconds <= 0.f) { return false; }
+    StrafeRange = FMath::Clamp(HalfWidth, WiggleRange, NCAimTrainerLayout::PopupLongStrafeRange);
+    if (StrafeRange <= WiggleRange) { return false; }
+    // Cross the lane from whichever side the wiggle reached. Near the center,
+    // use a fresh random direction. Native acceleration and braking still apply.
+    StrafeDirection = NCAimTrainerScenarioPolicy::PopupLongStrafeDirection(
+        GetActorLocation().Y - StrafeCenter.Y, DirectionRoll);
+    PopupLongStrafeEndTime = GetWorld()->GetTimeSeconds() + FMath::Clamp(HoldSeconds, 0.4f, 0.8f);
+    return true;
 }
 
 void ANCAimTrainerTarget::ResetTargetMovement()
@@ -172,6 +191,9 @@ void ANCAimTrainerTarget::ResetTargetMovement()
     bPressedJump = false;
     bRepFloorSliding = false;
     TrainerSlideDirection = FVector::ZeroVector;
+    PopupLongStrafeEndTime = 0.f;
+    WiggleRange = 0.f;
+    bRecenterWiggleAfterSlide = false;
     SetTrainerCrouched(false);
 }
 
@@ -180,7 +202,8 @@ bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
     if (Role != ROLE_Authority) { return false; }
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
     if (!Movement || Movement->bIsFloorSliding
-        || (bCrouch && (!bTrainerVisible || !bTrainerStrafe || IsDead() || !Movement->IsMovingOnGround())))
+        || (bCrouch && (!bTrainerVisible || !bTrainerStrafe || IsDead() || IsTrainerLongStrafing()
+            || !Movement->IsMovingOnGround())))
     {
         return false;
     }
@@ -197,7 +220,7 @@ bool ANCAimTrainerTarget::SetTrainerCrouched(bool bCrouch)
 
 void ANCAimTrainerTarget::ReverseStrafe()
 {
-    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || IsTrainerSliding()
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerStrafe || IsTrainerSliding() || IsTrainerLongStrafing()
         || !GetCharacterMovement()->IsMovingOnGround()) { return; }
     const float Offset = GetActorLocation().Y - StrafeCenter.Y;
     StrafeDirection = Offset >= StrafeRange ? -1.f : Offset <= -StrafeRange ? 1.f : -StrafeDirection;
@@ -226,6 +249,17 @@ bool ANCAimTrainerTarget::TryTrainerSlideForward()
     return StartTrainerSlide(FVector(-1.f, 0.f, 0.f));
 }
 
+bool ANCAimTrainerTarget::TryTrainerPopupSlide(int32 Slot)
+{
+    if (!bTrainerWiggle) { return false; }
+    if (Slot == 0 || Slot == NCAimTrainerLayout::PopupSliderSlot) { return TryTrainerSlideForward(); }
+    if (Slot != 4 || !StartTrainerSlide(FVector(0.f, 1.f, 0.f))) { return false; }
+    // The near-left target slides into its open lateral lane. Retain the new
+    // endpoint instead of walking all the way back to its original appearance.
+    bRecenterWiggleAfterSlide = true;
+    return true;
+}
+
 bool ANCAimTrainerTarget::TryTrainerTrackingSlide(float DirectionRoll)
 {
     if (!bTrainerStrafe || bTrainerWiggle) { return false; }
@@ -241,7 +275,7 @@ bool ANCAimTrainerTarget::StartTrainerSlide(const FVector& Direction)
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
     if (Role != ROLE_Authority || !bTrainerVisible || IsDead()
         || !Movement || !Movement->IsMovingOnGround() || !Movement->CurrentFloor.IsWalkableFloor()
-        || !CanSlide() || !Movement->CanDodge()) { return false; }
+        || IsTrainerLongStrafing() || !CanSlide() || !Movement->CanDodge()) { return false; }
     ConsumeMovementInputVector();
     Movement->bWantsToCrouch = false;
     // This invokes UT's real impulse, movement event, timing and slide posture.
@@ -260,6 +294,13 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
 {
     if (Role == ROLE_Authority)
     {
+        if (IsTrainerLongStrafing() && GetWorld()->GetTimeSeconds() >= PopupLongStrafeEndTime)
+        {
+            // Return with normal movement if the long hold reached outside the
+            // short wiggle band. Never move the center or teleport back to it.
+            PopupLongStrafeEndTime = 0.f;
+            StrafeRange = WiggleRange;
+        }
         // Stock CheckJumpInput retires this flag only on locally controlled
         // pawns. These targets have no controller or client saved moves.
         UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
@@ -271,6 +312,9 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
             Movement->bIsFloorSliding = false;
             Movement->ClearFloorSlideTap();
             bRepFloorSliding = false;
+            StrafeCenter.X = GetActorLocation().X;
+            if (bRecenterWiggleAfterSlide) { StrafeCenter.Y = GetActorLocation().Y; }
+            bRecenterWiggleAfterSlide = false;
             TrainerSlideDirection = FVector::ZeroVector;
             ConsumeMovementInputVector();
             SetTrainerCrouched(false);
@@ -429,7 +473,7 @@ void ANCAimTrainerArena::OnRep_Scenario()
     for (int32 Index = 0; Index < Cover.Num(); ++Index)
     {
         UStaticMeshComponent* Block = Cover[Index];
-        const bool bEnabled = Index < NCAimTrainerLayout::HeadSlotCount ? Scenario == 1 : Scenario == 2;
+        const bool bEnabled = Index < NCAimTrainerLayout::HeadSlotCount ? Scenario == 1 : (Scenario == 2 || Scenario == 3);
         Block->SetHiddenInGame(!bEnabled);
         Block->SetCollisionEnabled(bEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
     }

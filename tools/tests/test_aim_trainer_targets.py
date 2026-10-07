@@ -21,6 +21,7 @@ ADAPTER = r'''
 #include <string>
 #include <vector>
 #define TEXT(value) value
+using int32 = int;
 struct FLinearColor { static const FLinearColor Transparent; };
 const FLinearColor FLinearColor::Transparent;
 struct UMaterialInstanceDynamic { void SetVectorParameterValue(const char*, FLinearColor) {} };
@@ -152,17 +153,22 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     using Super = ATeamArenaCharacter;
     bool bTrainerVisible=false, bTrainerStrafe=false, bTrainerWiggle=false;
     float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
+    float WiggleRange=0.f, PopupLongStrafeEndTime=0.f;
+    bool bRecenterWiggleAfterSlide=false;
     FVector StrafeCenter,TrainerSlideDirection;
     struct History { int Count=7; void Reset() { Count=0; } } SavedPositions, SavedCapsulePostures;
     void OnRep_TrainerVisible();
     void ActivateTarget(const FVector&,bool);
     void StartWiggle(float);
+    bool StartPopupLongStrafe(float,float,float);
+    bool IsTrainerLongStrafing() const { return PopupLongStrafeEndTime>0.f; }
     bool SetTrainerCrouched(bool);
     void HideTarget();
     void ResetTargetMovement();
     void ReverseStrafe();
     bool TryTrainerDodge(float);
     bool TryTrainerSlideForward();
+    bool TryTrainerPopupSlide(int32);
     bool TryTrainerTrackingSlide(float);
     bool StartTrainerSlide(const FVector&);
     bool IsTrainerSliding() const;
@@ -590,6 +596,93 @@ int main(int argc,char**argv) {
             &&NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(1.f)==7.f
             &&NCAimTrainerScenarioPolicy::TrackingSlideDelaySeconds(.5f)==5.5f,
             "tracking slide policy lost its independent random delay");
+    } else if(name=="popup_slide_slots") {
+        for(int slot:{0,2,4}) {
+            ANCAimTrainerTarget target;
+            target.ActivateTarget(FVector(1000.f,-850.f,103.f),false); target.StartWiggle(99.f);
+            const auto original=target.StrafeCenter;
+            Require(target.TryTrainerPopupSlide(slot),"eligible popup slide was rejected");
+            Require(target.SlideDirection.X==(slot==4?0.f:-1.f)
+                &&target.SlideDirection.Y==(slot==4?1.f:0.f),"popup slide used wrong safe lane");
+            target.Position.X=slot==4?1000.f:370.f;
+            target.Position.Y=slot==4?-220.f:-835.f;
+            target.Move.MovementTime=target.Move.FloorSlideEndTime; target.Tick(.016f);
+            Require(target.StrafeCenter.X==target.Position.X
+                &&target.StrafeCenter.Y==(slot==4?target.Position.Y:original.Y)
+                &&!target.bRecenterWiggleAfterSlide,"slide endpoint did not retain its intended wiggle center");
+            Require(target.Teleports==1,"slide exit teleported to a new center");
+        }
+        for(int slot:{-1,1,3,5,6}) {
+            auto target=Active();target.bTrainerWiggle=true;
+            Require(!target.TryTrainerPopupSlide(slot)&&target.SlideEvents==0,"non-slide slot accepted a popup slide");
+        }
+        auto target=Active();target.bTrainerWiggle=true;
+        Require(target.TryTrainerPopupSlide(4),"slide reset fixture failed");
+        target.HideTarget();
+        Require(!target.bRecenterWiggleAfterSlide,"hidden target retained a deferred slide recenter");
+    } else if(name=="popup_long_guards") {
+        for(int guard=0;guard<11;++guard) {
+            ANCAimTrainerTarget target;
+            target.ActivateTarget(FVector(1000.f,-850.f,103.f),false); target.StartWiggle(99.f);
+            float width=180.f,hold=.6f;
+            if(guard==0)target.Role=1;
+            if(guard==1)target.bTrainerVisible=false;
+            if(guard==2)target.bTrainerWiggle=false;
+            if(guard==3)target.Dead=true;
+            if(guard==4)target.bIsCrouched=true;
+            if(guard==5)target.Move.bIsFloorSliding=true;
+            if(guard==6)target.Move.Mode=MOVE_Falling;
+            if(guard==7)width=99.f;
+            if(guard==8)width=std::numeric_limits<float>::quiet_NaN();
+            if(guard==9)hold=0.f;
+            if(guard==10)hold=std::numeric_limits<float>::infinity();
+            Require(!target.StartPopupLongStrafe(width,hold,0.f)&&!target.IsTrainerLongStrafing()
+                &&target.StrafeRange==99.f,"invalid long strafe mutated target motion");
+        }
+    } else if(name=="popup_long_motion") {
+        for(float side:{-1.f,1.f}) {
+            ANCAimTrainerTarget target;
+            target.ActivateTarget(FVector(1000.f,-850.f,103.f),false);target.StartWiggle(99.f);
+            target.Position.Y+=side*70.f;
+            Require(target.StartPopupLongStrafe(180.f,.6f,side<0.f?0.f:1.f),"valid long strafe rejected");
+            Require(target.StrafeDirection==-side&&target.StrafeRange==180.f
+                &&target.PopupLongStrafeEndTime==42.6f,"long strafe did not sweep across its current lane");
+            target.ReverseStrafe();target.Tick(.016f);
+            Require(target.LastInput.Y==-side&&target.Teleports==1&&target.Move.MaxWalkSpeed==500.f,
+                "short wiggle interrupted long hold or motion was replaced with a speed cap/teleport");
+            Require(!target.StartPopupLongStrafe(180.f,.8f,0.f)&&!target.TryTrainerPopupSlide(0)
+                &&!target.SetTrainerCrouched(true),"another scheduled action interrupted long native strafe");
+            target.Position.Y=target.StrafeCenter.Y-side*170.f;
+            target.TheWorld.Time=target.PopupLongStrafeEndTime-.001f;target.Tick(.001f);
+            Require(target.IsTrainerLongStrafing(),"long hold ended before deadline");
+            target.TheWorld.Time=target.PopupLongStrafeEndTime;target.Tick(.001f);
+            Require(!target.IsTrainerLongStrafing()&&target.StrafeRange==99.f&&target.LastInput.Y==side
+                &&target.Position.Y==target.StrafeCenter.Y-side*170.f&&target.Teleports==1,
+                "long strafe did not return inside original wiggle range with native motion");
+            Require(target.StartPopupLongStrafe(999.f,999.f,0.f)&&target.StrafeRange==180.f
+                &&target.PopupLongStrafeEndTime<=target.TheWorld.Time+.801f,"long move exceeded safe range or hold");
+            target.HideTarget();
+            Require(!target.IsTrainerLongStrafing()&&target.WiggleRange==0.f,"hidden appearance retained long hold");
+            target.ActivateTarget(FVector(1200.f,-850.f,103.f),false);target.StartWiggle(99.f);
+            Require(!target.IsTrainerLongStrafing()&&target.StrafeRange==99.f,"new appearance inherited long strafe");
+        }
+    } else if(name=="popup_motion_policy") {
+        int slides[6]={},longs[6]={};
+        for(int slot=0;slot<6;++slot)for(int roll=0;roll<100;++roll) {
+            slides[slot]+=NCAimTrainerScenarioPolicy::ShouldPopupSlide(slot,roll/100.f)?1:0;
+            longs[slot]+=NCAimTrainerScenarioPolicy::ShouldPopupLongStrafe(slot,roll/100.f)?1:0;
+        }
+        Require(slides[0]==45&&slides[4]==45&&slides[2]==100&&slides[1]==0&&slides[3]==0&&slides[5]==0,
+            "random slide frequency or eligible lanes changed");
+        Require(longs[0]==65&&longs[1]+longs[2]+longs[3]+longs[4]+longs[5]==0,
+            "long strafe probability leaked outside rear-left target");
+        for(float roll:{-1.f,0.f,.5f,1.f,2.f}) {
+            const float slide=NCAimTrainerScenarioPolicy::PopupSlideDelaySeconds(roll);
+            const float delay=NCAimTrainerScenarioPolicy::PopupLongStrafeDelaySeconds(roll);
+            const float hold=NCAimTrainerScenarioPolicy::PopupLongStrafeHoldSeconds(roll);
+            Require(delay>slide+.8f&&hold>=.5f&&hold<=.75f,
+                "long strafe can coincide with initial slide or is not a perceptible long hold");
+        }
     } else if(name=="head_feedback") {
         ANCAimTrainerTarget target; AUTCharacter shooter;
         const FVector head=target.GetHeadLocation(.125f);
@@ -618,12 +711,14 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::OnRep_TrainerVisible",
             "void ANCAimTrainerTarget::ActivateTarget",
             "void ANCAimTrainerTarget::StartWiggle",
+            "bool ANCAimTrainerTarget::StartPopupLongStrafe",
             "bool ANCAimTrainerTarget::SetTrainerCrouched",
             "void ANCAimTrainerTarget::HideTarget",
             "void ANCAimTrainerTarget::ResetTargetMovement",
             "void ANCAimTrainerTarget::ReverseStrafe",
             "bool ANCAimTrainerTarget::TryTrainerDodge",
             "bool ANCAimTrainerTarget::TryTrainerSlideForward",
+            "bool ANCAimTrainerTarget::TryTrainerPopupSlide",
             "bool ANCAimTrainerTarget::TryTrainerTrackingSlide",
             "bool ANCAimTrainerTarget::StartTrainerSlide",
             "bool ANCAimTrainerTarget::IsTrainerSliding",
@@ -672,6 +767,10 @@ class AimTrainerTargetTests(unittest.TestCase):
     def test_tracking_slide_uses_guarded_lateral_native_impulse_and_keeps_direction(self): self.run_case("tracking_slide_direction")
     def test_tracking_slide_cooldown_exit_and_reuse_preserve_normal_movement(self): self.run_case("tracking_slide_end_and_reset")
     def test_tracking_slide_has_random_four_to_seven_second_delay(self): self.run_case("tracking_slide_policy")
+    def test_popup_slide_lanes_and_post_slide_center_are_native_and_reset(self): self.run_case("popup_slide_slots")
+    def test_long_strafe_requires_valid_visible_standing_wiggle_target(self): self.run_case("popup_long_guards")
+    def test_long_strafe_holds_direction_then_returns_to_wiggle_without_teleporting(self): self.run_case("popup_long_motion")
+    def test_popup_slide_and_long_strafe_frequency_and_sequencing(self): self.run_case("popup_motion_policy")
 
 
 if __name__ == "__main__":

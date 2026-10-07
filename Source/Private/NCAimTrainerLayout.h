@@ -10,6 +10,7 @@ namespace NCAimTrainerLayout
     // Extra room beyond the predictive reversal threshold for tick integration.
     constexpr float WiggleSafetyMargin = 15.f;
     constexpr float HeadWiggleRange = 80.f;
+    constexpr float PopupLongStrafeRange = 180.f;
 
     struct FSeat
     {
@@ -49,11 +50,13 @@ namespace NCAimTrainerLayout
             // behind the block's X=2400 rear face and moves along the floor.
             return { 2650.f, 2850.f, 0.f, 0.f, 60.5f, 0.f };
         case 4:
-            // This near-left lane sits outside the platform footprints and in
-            // a different angular band from the low-platform character.
-            return { -300.f, 100.f, -1450.f, 35.f, 82.5f, 0.f };
+            // Slide inward along +Y, ahead of the permanent dodger and wholly
+            // in front of platform X=-200, even with TeamArena's wider capsule.
+            return { -450.f, -300.f, -1450.f, 35.f, 82.5f, 0.f };
         default:
-            return { 100.f, 2200.f, -850.f, 85.f, 99.f, PopupPlatform(0).Height };
+            // Forward slide runway and a wider occasional strafe share this
+            // low platform. Tighter spawn jitter leaves room for the full capsule.
+            return { 1000.f, 2200.f, -850.f, 35.f, 99.f, PopupPlatform(0).Height };
         }
     }
 

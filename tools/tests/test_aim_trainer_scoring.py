@@ -101,6 +101,11 @@ struct ANCAimTrainerGame {
     bool IsTrackingBeamFiring() const;
     void UpdateTrackingSample(float);
     void UpdateShotCount();
+    void InvalidateLocalRun() {}
+    void RecordLocalShotCount() {}
+    bool LastLocalHead = false;
+    void RecordLocalTarget(int, bool, bool head=false) { LastLocalHead=head; }
+    void RecordLocalSample(bool, bool) {}
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
 void Require(bool okay, const char* why) { if (!okay) { std::cerr << why; std::exit(1); } }
@@ -138,6 +143,27 @@ int main(int argc, char** argv) {
         Require(PrecisionScore(2, 1, 0) == 0, "hits exceed shots");
         Require(PrecisionScore(2147483647, 2147483647, 0) == 0, "overflow input accepted");
         Require(PrecisionScore(1, 1, -1) == 0, "negative expiry accepted");
+        Require(PrecisionScore(1, 1, 0, 1) == 150, "popup head bonus missing");
+        Require(PrecisionScore(1, 6, 0, 1) == 25, "head bonus added after score flooring");
+        Require(PrecisionScore(1, 1, 0, 2) == 0 && PrecisionScore(1, 1, 0, -1) == 0,
+                "impossible popup head count accepted");
+    } else if (name == "precision_popup") {
+        for (int headType : {5,9}) {
+            Fixture f; f.Game.Progress.Scenario=3; f.Gun.HeadshotDamageType=headType;
+            f.PlayerState.StoredShots=1; f.Event.DamageTypeClass=1;
+            Require(f.Hit()>0 && !f.Target.Visible && f.Game.Progress.Score==100
+                    && f.Game.Progress.Headshots==0 && !f.Game.LastLocalHead,
+                    "popup body shot did not retire target and score100");
+            Require(f.Hit()==0 && f.Game.Progress.Hits==1,"popup appearance scored twice");
+            f.Target.Visible=true; f.PlayerState.StoredShots=2; f.Event.DamageTypeClass=headType;
+            Require(f.Hit()>0 && f.Game.Progress.Score==250 && f.Game.Progress.Headshots==1
+                    && f.Game.LastLocalHead,"Sniper/Lightning popup head bonus or checkpoint head flag lost");
+            f.PlayerState.StoredShots=3; f.Game.UpdateShotCount();
+            Require(f.Game.Progress.Score==225 && std::fabs(f.Game.Progress.Accuracy-200.f/3.f)<.001f,
+                    "popup miss stopped affecting points/accuracy");
+            f.Game.Progress.TargetsExpired=1; f.Game.UpdateShotCount();
+            Require(f.Game.Progress.Score==200,"popup expiry stopped costing25");
+        }
     } else if (name == "shot_baseline") {
         Fixture f;
         f.PlayerState.StoredShots=123.f;
@@ -411,6 +437,7 @@ class AimTrainerScoringTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_precision_formula_and_untrusted_bounds(self): self.run_case("precision")
+    def test_precision_popup_first_body_hit_and_sniper_lightning_head_bonus(self): self.run_case("precision_popup")
     def test_shot_counter_subtracts_run_baseline_and_rejects_midrun_counter_reset(self): self.run_case("shot_baseline")
     def test_accepted_headshots_award_immediate_points_despite_misses_and_expiry_while_instagib_keeps_penalties(self): self.run_case("headshot_points")
     def test_shot_counter_rejects_impossible_and_nonfinite_stats_without_touching_tracking(self): self.run_case("shot_invalid")

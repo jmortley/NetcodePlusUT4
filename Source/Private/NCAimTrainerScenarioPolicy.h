@@ -1,6 +1,6 @@
 #pragma once
 
-// Timing and direction rules for the revision-9 trainer preset. The authority
+// Timing and direction rules for the revision-10 trainer preset. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
@@ -35,6 +35,22 @@ namespace NCAimTrainerScenarioPolicy
     inline float CrouchDelaySeconds(float Roll) { return 1.5f + 2.f * UnitRoll(Roll); }
     inline float CrouchHoldSeconds(float Roll) { return 0.25f + 0.20f * UnitRoll(Roll); }
     inline float PopupSlideDelaySeconds(float Roll) { return 0.8f + 0.6f * UnitRoll(Roll); }
+    inline bool ShouldPopupSlide(int Slot, float Roll)
+    {
+        return Slot == 2 || ((Slot == 0 || Slot == 4) && UnitRoll(Roll) < 0.45f);
+    }
+    inline bool ShouldPopupLongStrafe(int Slot, float Roll)
+    {
+        return Slot == 0 && UnitRoll(Roll) < 0.65f;
+    }
+    inline float PopupLongStrafeDelaySeconds(float Roll) { return 2.3f + 0.6f * UnitRoll(Roll); }
+    inline float PopupLongStrafeHoldSeconds(float Roll) { return 0.50f + 0.25f * UnitRoll(Roll); }
+    inline float PopupLongStrafeDirection(float Offset, float Roll)
+    {
+        if (Offset > 20.f) { return -1.f; }
+        if (Offset < -20.f) { return 1.f; }
+        return UnitRoll(Roll) < 0.5f ? -1.f : 1.f;
+    }
     inline float TrackingSlideDelaySeconds(float Roll) { return 4.f + 3.f * UnitRoll(Roll); }
     inline float TrackingCrouchDelaySeconds(float Roll) { return 6.f + 4.f * UnitRoll(Roll); }
     inline float TrackingCrouchHoldSeconds(float Roll) { return 0.20f + 0.25f * UnitRoll(Roll); }
