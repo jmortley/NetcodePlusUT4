@@ -602,6 +602,18 @@ static FDelegateHandle GNcpConnectTickerHandle;
 static FString         GNcpConnectURL;
 static float           GNcpConnectElapsed = 0.0f;
 
+/** -ncpaimtrain, the launcher's Aim trainer button, rides this same ticker and wait.
+ *  GNcpConnectURL stays empty; when the gate opens, TickNcpConnect runs the `aimtrain`
+ *  console command's travel instead of joining a server. */
+static bool GNcpAimTrainPending = false;
+
+/** Extra seconds past the readiness budget to wait for the front-end menu itself: the
+ *  gate only needs *a* game world, but aimtrain needs UT-Entry's AUTMenuGameMode and its
+ *  local PlayerController. Caps the wait on a front end that never finishes loading. */
+static const float GNcpAimTrainMenuGraceSeconds = 60.0f;
+
+static bool OpenAimTrainFromMenu(UWorld* World, const TArray<FString>& Args);
+
 /** Rising-edge latch for the MCP cloud reads. The ticker is registered in
  *  StartupModule(), long before the local player signs in, so we always observe the
  *  profile read GO pending before it goes not-pending. Without this latch,
@@ -652,7 +664,8 @@ static FString RedactConnectURL(const FString& URL)
 	return URL;
 }
 
-/** Core-ticker callback: wait for the menu + sign-in, then ClientTravel once. */
+/** Core-ticker callback: wait for the menu + sign-in, then ClientTravel once - or, for
+ *  -ncpaimtrain, open aim practice once. */
 static bool TickNcpConnect(float DeltaTime)
 {
 	GNcpConnectElapsed += DeltaTime;
@@ -774,6 +787,48 @@ static bool TickNcpConnect(float DeltaTime)
 	if (!bReady && !bTimedOut)
 	{
 		return true; // keep waiting for sign-in + the profile download
+	}
+
+	if (GNcpAimTrainPending)
+	{
+		// aimtrain runs only from the standalone front end, and the gate above waited for
+		// *a* game world, not the menu. Three cases: the menu is up (open practice); the
+		// front end is still loading - no game mode yet, or the menu's PlayerController not
+		// spawned yet (keep waiting, capped); or the player already moved on - a match, a
+		// server, a pending travel - and stays where they are instead of being yanked away.
+		const FWorldContext* Context = GEngine->GetWorldContextFromWorld(GameWorld);
+		const bool bTravelPending = !Context || Context->PendingNetGame
+			|| !Context->TravelURL.IsEmpty() || !GameWorld->NextURL.IsEmpty();
+		const bool bStandalone = (GameWorld->GetNetMode() == NM_Standalone);
+		const bool bMenuGame = bStandalone && GameWorld->GetAuthGameMode<AUTMenuGameMode>() != nullptr;
+		const bool bHasLocalPC = (GEngine->GetFirstLocalPlayerController(GameWorld) != nullptr);
+		const bool bFrontEndLoading = !bTravelPending && bStandalone
+			&& (GameWorld->GetAuthGameMode() == nullptr || (bMenuGame && !bHasLocalPC));
+		if (bFrontEndLoading && GNcpConnectElapsed < Budget + GNcpAimTrainMenuGraceSeconds)
+		{
+			return true; // front end still loading
+		}
+
+		// OpenAimTrainFromMenu re-checks the menu and pending travel and also needs the stock
+		// DM-DeckTest map; when it refuses, it tells the player why in the console.
+		const bool bAtMenu = bMenuGame && bHasLocalPC && !bTravelPending;
+		const bool bOpened = bAtMenu && OpenAimTrainFromMenu(GameWorld, TArray<FString>());
+		const TCHAR* Outcome = bOpened ? TEXT("opening aim practice")
+			: bAtMenu ? TEXT("aimtrain refused; staying on the main menu")
+			: bFrontEndLoading ? TEXT("front end never finished loading; skipped")
+			: TEXT("player already left the main menu; skipped");
+		UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpaimtrain -> %s (waited=%.1fs/%.0fs sawRead=%d pending=%d swapped=%d)%s"),
+			Outcome,
+			GNcpConnectElapsed,
+			Budget,
+			GNcpConnectSawMcpRead ? 1 : 0,
+			(UTLP && UTLP->IsPendingMCPLoad()) ? 1 : 0,
+			bProfileSwapped ? 1 : 0,
+			bReady ? TEXT("") : TEXT(" (profile not ready; timed out)"));
+
+		GNcpAimTrainPending = false;
+		GNcpConnectTickerHandle.Reset();
+		return false; // single shot — unregister
 	}
 
 	// Warning verbosity survives Shipping (Log/Verbose are stripped there). The three
@@ -1224,47 +1279,57 @@ static void HandleReady(const TArray<FString>& /*Args*/, UWorld* World)
 	PC->Mutate(TEXT("nc_ready"));
 }
 
-/** Open the local practice picker from the invoking client's front end. */
-static void HandleAimTrain(const TArray<FString>& Args, UWorld* World)
+/** Travel the local player from the standalone front end into aim practice. Shared by the
+ *  `aimtrain` console command and the launcher's -ncpaimtrain switch (TickNcpConnect).
+ *  Returns true once the travel is queued; once a local player exists, every refusal
+ *  tells the player why in the console. */
+static bool OpenAimTrainFromMenu(UWorld* World, const TArray<FString>& Args)
 {
 	if (!GEngine || !World || IsRunningDedicatedServer() ||
 		(World->WorldType != EWorldType::Game && World->WorldType != EWorldType::PIE))
 	{
-		return;
+		return false;
 	}
 	// Never select a different PIE world or act on a dedicated server's remote PC.
 	APlayerController* PC = GEngine->GetFirstLocalPlayerController(World);
 	UUTLocalPlayer* LocalPlayer = PC ? Cast<UUTLocalPlayer>(PC->GetLocalPlayer()) : nullptr;
-	if (!LocalPlayer) { return; }
+	if (!LocalPlayer) { return false; }
 	if (Args.Num() != 0)
 	{
 		PC->ClientMessage(TEXT("Usage: aimtrain (from the main menu)"));
-		return;
+		return false;
 	}
 	// IsMenuGame() also returns true for bNoMidGameMenu during some gameplay.
 	// Require the actual standalone front end so this never leaves a live match.
 	if (World->GetNetMode() != NM_Standalone || World->GetAuthGameMode<AUTMenuGameMode>() == nullptr)
 	{
 		PC->ClientMessage(TEXT("Return to the main menu, then enter aimtrain to open local practice."));
-		return;
+		return false;
 	}
 	const FWorldContext* Context = GEngine->GetWorldContextFromWorld(World);
 	if (!Context || Context->PendingNetGame || !Context->TravelURL.IsEmpty() || !World->NextURL.IsEmpty())
 	{
 		PC->ClientMessage(TEXT("A map or server is already loading. Try aimtrain when you are back at the main menu."));
-		return;
+		return false;
 	}
 	FString Map = TEXT("/Game/RestrictedAssets/Maps/WIP/DM-DeckTest");
 	if (!GEngine->MakeSureMapNameIsValid(Map))
 	{
 		PC->ClientMessage(TEXT("Cannot open aim training: the stock DM-DeckTest map is not installed."));
-		return;
+		return false;
 	}
 	const FString URL = Map + TEXT("?game=/Script/NetcodePlus.NCAimTrainerGame?Bots=0?ForceNoBots=1?SpectatorOnly=0?mutator=");
 	// UT's `open` command uses partial travel. Absolute travel deliberately drops
 	// old listen/spectator/game options without changing the player's saved config.
 	LocalPlayer->CloseAllUI();
 	GEngine->SetClientTravel(World, *URL, TRAVEL_Absolute);
+	return true;
+}
+
+/** Open the local practice picker from the invoking client's front end. */
+static void HandleAimTrain(const TArray<FString>& Args, UWorld* World)
+{
+	OpenAimTrainFromMenu(World, Args);
 }
 
 void FNetcodePlus::StartupModule()
@@ -1495,15 +1560,20 @@ void FNetcodePlus::StartupModule()
 	}
 
 	// -ncpconnect=IP:port?Password=pw — launcher direct-connect (real clients only).
-	// Register the ticker ONLY when the arg is present, so there is zero overhead
+	// -ncpaimtrain — the launcher's Aim trainer button: the same sign-in/profile wait,
+	// then the `aimtrain` travel (see TickNcpConnect). A join wins if both are passed.
+	// Register the ticker ONLY when one is present, so there is zero overhead
 	// on normal launches. bShouldStopOnComma=false keeps a comma in the password.
 	if (!IsRunningDedicatedServer() && !GIsEditor)
 	{
 		FString ConnectURL;
-		if (FParse::Value(FCommandLine::Get(), TEXT("ncpconnect="), ConnectURL, /*bShouldStopOnComma=*/ false)
-			&& !ConnectURL.IsEmpty())
+		const bool bConnect = FParse::Value(FCommandLine::Get(), TEXT("ncpconnect="), ConnectURL, /*bShouldStopOnComma=*/ false)
+			&& !ConnectURL.IsEmpty();
+		const bool bAimTrain = !bConnect && FParse::Param(FCommandLine::Get(), TEXT("ncpaimtrain"));
+		if (bConnect || bAimTrain)
 		{
 			GNcpConnectURL = ConnectURL;
+			GNcpAimTrainPending = bAimTrain;
 			GNcpConnectElapsed = 0.0f;
 
 			// Mod.ini overrides for the two readiness budgets. [NetcodePlus] lives in
@@ -1598,7 +1668,7 @@ void FNetcodePlus::ShutdownModule()
 
 	NCPlusAnnouncerPacks::Uninstall();
 
-	// Stop the -ncpconnect ticker if it never fired.
+	// Stop the -ncpconnect / -ncpaimtrain ticker if it never fired.
 	if (GNcpConnectTickerHandle.IsValid())
 	{
 		FTicker::GetCoreTicker().RemoveTicker(GNcpConnectTickerHandle);
