@@ -722,6 +722,28 @@ static bool TickNcpConnect(float DeltaTime)
 		return true; // front-end map not up yet
 	}
 
+	// -ncpaimtrain belongs to the front end the game started on. Watch for the player
+	// leaving it on EVERY tick, not only when the readiness gate below opens: a player who
+	// joins a server or starts a match during sign-in and is back at the menu before the
+	// gate opens must not be dropped into practice afterwards. A world with no game mode
+	// yet is the front end still loading, not a departure.
+	if (GNcpAimTrainPending)
+	{
+		const FWorldContext* LeaveContext = GEngine->GetWorldContextFromWorld(GameWorld);
+		const bool bTravelling = (LeaveContext && (LeaveContext->PendingNetGame || !LeaveContext->TravelURL.IsEmpty()))
+			|| !GameWorld->NextURL.IsEmpty();
+		const bool bOtherGame = GameWorld->GetAuthGameMode() != nullptr
+			&& GameWorld->GetAuthGameMode<AUTMenuGameMode>() == nullptr;
+		if (GameWorld->GetNetMode() != NM_Standalone || bTravelling || bOtherGame)
+		{
+			UE_LOG(LogLoad, Warning, TEXT("netcodeplus: -ncpaimtrain cancelled after %.1fs; the player left the main menu"),
+				GNcpConnectElapsed);
+			GNcpAimTrainPending = false;
+			GNcpConnectTickerHandle.Reset();
+			return false; // single shot — unregister
+		}
+	}
+
 	// Wait for MCP sign-in AND the cloud profile (keybinds) to finish downloading before
 	// we travel. IsLoggedIn() alone only means OSS auth is done; the profile cloud read
 	// lands asynchronously AFTER that, so travelling on login alone races it - a fast
@@ -1567,12 +1589,17 @@ void FNetcodePlus::StartupModule()
 	if (!IsRunningDedicatedServer() && !GIsEditor)
 	{
 		FString ConnectURL;
+		// UE 4.15's FParse::Value skips whitespace after '=', so a bare "-ncpconnect=" reads
+		// the NEXT switch (-ncpaimtrain, an -AUTH_ argument) as the address. A server address
+		// never starts with '-' or '/'.
 		const bool bConnect = FParse::Value(FCommandLine::Get(), TEXT("ncpconnect="), ConnectURL, /*bShouldStopOnComma=*/ false)
-			&& !ConnectURL.IsEmpty();
+			&& !ConnectURL.IsEmpty()
+			&& !ConnectURL.StartsWith(TEXT("-"))
+			&& !ConnectURL.StartsWith(TEXT("/"));
 		const bool bAimTrain = !bConnect && FParse::Param(FCommandLine::Get(), TEXT("ncpaimtrain"));
 		if (bConnect || bAimTrain)
 		{
-			GNcpConnectURL = ConnectURL;
+			GNcpConnectURL = bConnect ? ConnectURL : FString();
 			GNcpAimTrainPending = bAimTrain;
 			GNcpConnectElapsed = 0.0f;
 
