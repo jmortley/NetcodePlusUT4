@@ -12,6 +12,7 @@
 #include "Engine/World.h"
 #include "UObject/UObjectBase.h"      // UObjectInitialized (late module-shutdown guard)
 #include "UObject/UObjectGlobals.h"   // FCoreUObjectDelegates::PreLoadMap
+#include "UObject/UnrealType.h"      // runtime property offsets for retail UT compatibility
 #include "UTPlayerController.h"
 #include "UTPlayerInput.h"
 #include "UTProfileSettings.h"
@@ -664,6 +665,15 @@ static FString RedactConnectURL(const FString& URL)
 	return URL;
 }
 
+static bool HasNcpProgressionStorage(UUTLocalPlayer* LocalPlayer)
+{
+	if (!LocalPlayer) { return false; }
+	// Retail UT's GetProgressionStorage vtable slot and inline field offset differ
+	// from these headers. Read the reflected property using the loaded class layout.
+	const UObjectProperty* Property = FindField<UObjectProperty>(LocalPlayer->GetClass(), TEXT("CurrentProgression"));
+	return Property && *Property->ContainerPtrToValuePtr<UObject*>(LocalPlayer) != nullptr;
+}
+
 /** Core-ticker callback: wait for the menu + sign-in, then ClientTravel once - or, for
  *  -ncpaimtrain, open aim practice once. */
 static bool TickNcpConnect(float DeltaTime)
@@ -790,8 +800,8 @@ static bool TickNcpConnect(float DeltaTime)
 	// the read go pending first; and OnReadProfileComplete always REPLACES the profile
 	// object, so a changed pointer is positive proof the cloud copy landed.
 
-	// The two getters stay defensive null-COMPARES only (never dereferenced), and the
-	// weak pointer is only ever compared, never dereferenced either.
+	// Profile and progression objects are only null-checked, never dereferenced;
+	// the weak profile pointer is only compared with the current profile pointer.
 	const bool bProfileSwapped = (UTLP
 		&& UTLP->GetProfileSettings() != nullptr
 		&& UTLP->GetProfileSettings() != GNcpConnectFirstProfile.Get());
@@ -800,7 +810,7 @@ static bool TickNcpConnect(float DeltaTime)
 		&& GNcpConnectSawMcpRead
 		&& !UTLP->IsPendingMCPLoad()
 		&& bProfileSwapped
-		&& UTLP->GetProgressionStorage() != nullptr);
+		&& HasNcpProgressionStorage(UTLP));
 	// Pick the budget by whether login ever got as far as issuing a read (see the
 	// two-tier note on the timeouts above). A read that arms the latch late simply
 	// promotes us to the longer budget from that moment on.
@@ -1343,7 +1353,10 @@ static bool OpenAimTrainFromMenu(UWorld* World, const TArray<FString>& Args)
 	const FString URL = Map + TEXT("?game=/Script/NetcodePlus.NCAimTrainerGame?Bots=0?ForceNoBots=1?SpectatorOnly=0?mutator=");
 	// UT's `open` command uses partial travel. Absolute travel deliberately drops
 	// old listen/spectator/game options without changing the player's saved config.
-	LocalPlayer->CloseAllUI();
+	// Retail UT4's local-player vtable differs from these source headers: virtual
+	// dispatch here reaches VerifyGameSession instead. Call the exported base
+	// implementation directly so both console and launcher travel use safe cleanup.
+	LocalPlayer->UUTLocalPlayer::CloseAllUI(false);
 	GEngine->SetClientTravel(World, *URL, TRAVEL_Absolute);
 	return true;
 }

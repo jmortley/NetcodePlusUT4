@@ -1,4 +1,6 @@
 #include "NCAimTrainerLocalSession.h"
+// Stock UT headers require the full engine types, even when this file starts a unity batch.
+#include "UnrealTournament.h"
 #include "NCAimTrainerOnline.h"
 #include "NCAimTrainerLocalHttp.h"
 #include "Engine/World.h"
