@@ -42,18 +42,27 @@ rules — just add `NCWepMut` and the gunplay is NetcodePlus.
   Duel, Shaft Arena, Shock Domination — §4) layer ELO, fair‑spawn logic, the custom HUD, end‑of‑match
   cap replays, host/captain pause and the version gate **on top of** those same weapons.
 
-**Two weapon‑balance flavors — pick one.** There are two weapon‑replacement paks; both run on the *same*
-NetcodePlus netcode and differ only in weapon **balance**:
+**Two weapon‑balance flavors — pick one.** There are two weapon-replacement paks.
+Their replacement lists and weapon tuning differ:
 
 - **`NCWepMut`** — the **NA‑style** competitive balance (the tuning the UTPugs / North‑American scene
   plays). The default choice for a NetcodePlus hub.
-- **`NCStockWeapons`** — **stock UT4 weapon balance** on the NetcodePlus netcode, for admins / leagues
-  that want Epic's stock feel with the better hit registration. Primary fire and the normal charged shots
-  are **100% stock values**, just lag‑compensated. *Caveat:* the Rocket Launcher keeps the NetcodePlus
-  behaviour (spiraling rockets + grenades), so RL is not bit‑for‑bit stock — everything else is.
+- **`NCStockWeapons`** uses stock-oriented Shock, Flak, Rocket and Sniper replacements
+  with NetcodePlus hit registration. The inspected 4.15 replacement table retains stock
+  Link, Minigun, Bio, Enforcer, Grenade Launcher and Hammer classes. This is not exact stock
+  behavior: switching times are adjusted, and Rockets retain NCP spiral/grenade modes
+  and an ammo maximum of 22 rather than 21.
 
 Pick exactly one and add it like any other token (**don't run both**) — e.g. `?mutator=...,NCStockWeapons`
 in place of `NCWepMut`.
+
+For **ElimPlus**, also select `?WeaponSet=Stock`. Its built-in ElimPlusMutator uses
+that URL option to choose the stock loadout and character. NCStockWeapons alone
+does not convert the competitive NCP classes already in ElimPlus's default inventory.
+ElimPlus still supplies its own round rules, custom hammer and ammo policy; it does
+not reproduce Absolute Elimination's defaults. See the
+[Absolute 1.13 comparison](Docs/absolute-elim113-comparison.md) for verified differences
+and the asset versions inspected.
 
 Requires clients to run the NetcodePlus plugin (via the launcher) and to have the matching weapon pak —
 `NCWepMut` **or** `NCStockWeapons` (both are launcher‑maintained; §2). Neither is auto‑added by anything —

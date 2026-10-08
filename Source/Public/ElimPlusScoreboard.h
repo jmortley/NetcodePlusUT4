@@ -1,6 +1,6 @@
 // ElimPlusScoreboard — flag-row scoreboard for ElimPlus (TeamArena).
 // Mirrors UWipeoutScoreboard structure but with the ElimPlus column set:
-//   Name | Kills | Deaths | Damage | PPR(Cur) | PPR(Ovr) | ELO | LG_Acc | BestWpn | Ping
+//   Name | Kills | Deaths | Damage | PPR(Cur) | ELO | LG_Acc | Ping
 // Reads stats from AElimPlusStatsReplicator (replicated AInfo).
 #pragma once
 #include "NetcodePlus.h"

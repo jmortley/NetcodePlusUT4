@@ -2,7 +2,7 @@
 // optional recovered Elimination 1.13 visual skin.
 // Reads stats from AElimPlusStatsReplicator (Damage, PPRCurrent, Elo, LGAcc).
 // Falls back to PlayerState->DamageDone when the replicator isn't available
-// (listen-server / standalone). 7 columns: Name | K | D | DMG | PPR | ELO | LG_Acc | Ping.
+// (listen-server / standalone). The Absolute skin omits the standard board's LG_Acc column.
 
 #include "ElimPlusScoreboard.h"
 #include "NCPlusScoreboardHost.h"
@@ -30,6 +30,43 @@
 
 namespace
 {
+	namespace AbsoluteElimColumns
+	{
+		constexpr float Kills = 0.40f;
+		constexpr float Deaths = 0.48f;
+		constexpr float Damage = 0.58f;
+		constexpr float PPR = 0.69f;
+		constexpr float Elo = 0.82f;
+		constexpr float Ping = 0.94f;
+	}
+
+	FString FormatElimEloDetails(int32 Rank, int32 Delta)
+	{
+		FString Details;
+		if (Rank > 0)
+		{
+			const int32 M100 = Rank % 100;
+			const int32 M10 = Rank % 10;
+			const TCHAR* Suffix = (M100 >= 11 && M100 <= 13) ? TEXT("th")
+				: (M10 == 1) ? TEXT("st") : (M10 == 2) ? TEXT("nd") : (M10 == 3) ? TEXT("rd") : TEXT("th");
+			Details = FString::Printf(TEXT("(%d%s)"), Rank, Suffix);
+		}
+		if (Delta != 0)
+		{
+			if (!Details.IsEmpty()) Details += TEXT(" ");
+			Details += FString::Printf(TEXT("%+d"), Delta);
+		}
+		return Details;
+	}
+
+	float FitAbsoluteStatText(UCanvas* Canvas, UFont* Font, const FString& Text,
+		float DesiredScale, float MaxWidth)
+	{
+		float TextWidth = 0.f, TextHeight = 0.f;
+		Canvas->StrLen(Font, Text, TextWidth, TextHeight);
+		return FMath::Min(DesiredScale, MaxWidth / FMath::Max(TextWidth, 1.f));
+	}
+
 	enum class EAbsoluteElimRowStyle : uint8
 	{
 		Normal = 0,
@@ -638,22 +675,24 @@ void UElimPlusScoreboard::DrawAbsoluteScoreHeaders(float RenderDelta, float& YOf
 	const float TextY = YOffset + 11.f * S;
 	const float TextScale = 0.8f * S;
 	const FLinearColor TextColor(0.75f, 0.75f, 0.75f, 1.f);
-	// Column order mirrors the standard ElimPlus board (K | D | DMG | ELO, ping
-	// last) so both scoreboard skins read the same left-to-right. Header, player
-	// row, and totals row all share these slots — keep the three in sync.
-	const TCHAR* Labels[] = { TEXT("K"), TEXT("D"), TEXT("DMG"), TEXT("ELO"), TEXT("PING") };
-	const float Offsets[] = { 400.f, 470.f, 549.f, 640.f, 740.f };
+	// The Absolute skin keeps its compact stat set, without an accuracy column.
+	const FText Labels[] = { CH_Kills, CH_Deaths, CH_Damage, CH_PPRCur, CH_Elo,
+		(GetWorld()->GetNetMode() == NM_Standalone) ? CH_Skill : CH_Ping };
+	const float Columns[] = { AbsoluteElimColumns::Kills, AbsoluteElimColumns::Deaths,
+		AbsoluteElimColumns::Damage, AbsoluteElimColumns::PPR, AbsoluteElimColumns::Elo,
+		AbsoluteElimColumns::Ping };
 
 	DrawText(FText::FromString(TEXT("PLAYER")), LeftRowX + 80.f * S, TextY,
 		Font, TextScale, 1.f, TextColor, ETextHorzPos::Left, ETextVertPos::Center);
 	DrawText(FText::FromString(TEXT("PLAYER")), RightRowX + 80.f * S, TextY,
 		Font, TextScale, 1.f, TextColor, ETextHorzPos::Left, ETextVertPos::Center);
-	for (int32 Column = 0; Column < 5; ++Column)
+	for (int32 Column = 0; Column < ARRAY_COUNT(Labels); ++Column)
 	{
-		const FText Label = FText::FromString(Labels[Column]);
-		DrawText(Label, LeftRowX + Offsets[Column] * S, TextY,
+		if (Column < ARRAY_COUNT(Labels) - 1 && (!UTGameState || !UTGameState->HasMatchStarted())) continue;
+		const FText& Label = Labels[Column];
+		DrawText(Label, LeftRowX + RowW * Columns[Column], TextY,
 			Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(Label, RightRowX + Offsets[Column] * S, TextY,
+		DrawText(Label, RightRowX + RowW * Columns[Column], TextY,
 			Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 
@@ -663,7 +702,7 @@ void UElimPlusScoreboard::DrawAbsoluteScoreHeaders(float RenderDelta, float& YOf
 void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 TeamIndex,
 	float XOffset, float YOffset, float AbsoluteScale)
 {
-	if (!Canvas || !UTHUDOwner || !PlayerState) return;
+	if (!Canvas || !UTHUDOwner || !UTGameState || !PlayerState) return;
 
 	const float S = AbsoluteScale;
 	const float RowW = 830.f * S;
@@ -714,8 +753,9 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 
 	float NameXL = 0.f, NameYL = 0.f;
 	Canvas->StrLen(RowFont, PlayerState->PlayerName, NameXL, NameYL);
-	const float NameScale = FMath::Min(RowTextScale, 285.f * S / FMath::Max(NameXL, 1.f));
 	const float NameX = XOffset + 80.f * S;
+	const float NameWidth = RowW * (AbsoluteElimColumns::Kills - 0.045f) - 80.f * S;
+	const float NameScale = FMath::Min(RowTextScale, NameWidth / FMath::Max(NameXL, 1.f));
 	DrawText(FText::FromString(PlayerState->PlayerName), NameX, TextY,
 		RowFont, NameScale, 1.f, TextColor,
 		ETextHorzPos::Left,
@@ -724,6 +764,9 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 	const FCachedRosterEntry* CachedEntry = FindCachedRosterEntry(PlayerState);
 	const int32 Damage = CachedEntry ? CachedEntry->DamageDone : int32(PlayerState->DamageDone);
 	const int32 Elo = CachedEntry ? CachedEntry->Elo : 1400;
+	const int32 EloDelta = CachedEntry ? CachedEntry->EloDeltaThisMatch : 0;
+	const int32 Rank = CachedEntry ? CachedEntry->GlobalRank : 0;
+	const float PPR = CachedEntry ? CachedEntry->PPRCurrent : 0.f;
 	const int32 Kills = PlayerState->Kills + PlayerState->KillAssists;
 
 	FString PingString;
@@ -737,12 +780,12 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 		PingString = FString::Printf(TEXT("%d"), Ping);
 	}
 
-	auto ColumnX = [XOffset, S](float Offset)
+	auto ColumnX = [XOffset, RowW](float Fraction)
 	{
-		return XOffset + Offset * S;
+		return XOffset + RowW * Fraction;
 	};
 	const float StatScale = 0.92f * S;
-	if (!UTGameState->HasMatchStarted())
+	if (!UTGameState->HasMatchStarted() || (PlayerState->bPendingTeamSwitch && !PlayerState->bIsABot))
 	{
 		FText PlayerReady;
 		if (!NCPlusScoreboardReady::TryGetText(GetWorld(), PlayerState,
@@ -754,22 +797,41 @@ void UElimPlusScoreboard::DrawAbsolutePlayer(AUTPlayerState* PlayerState, int32 
 					? NSLOCTEXT("ElimPlusScoreboard", "Warmup", "WARMUP")
 					: NSLOCTEXT("ElimPlusScoreboard", "NotReady", "NOT READY"));
 		}
-		DrawText(PlayerReady, ColumnX(640.f), TextY,
+		DrawText(PlayerReady, ColumnX(AbsoluteElimColumns::Elo), TextY,
 			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 	}
 	else
 	{
-		DrawText(FText::AsNumber(Kills), ColumnX(400.f), TextY,
+		DrawText(FText::AsNumber(Kills), ColumnX(AbsoluteElimColumns::Kills), TextY,
 			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(FText::AsNumber(PlayerState->Deaths), ColumnX(470.f), TextY,
+		DrawText(FText::AsNumber(PlayerState->Deaths), ColumnX(AbsoluteElimColumns::Deaths), TextY,
 			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(FText::AsNumber(Damage), ColumnX(549.f), TextY,
-			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(FText::AsNumber(Elo), ColumnX(640.f), TextY,
-			RowFont, StatScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-		DrawText(FText::FromString(PingString), ColumnX(740.f), TextY,
-			RowFont, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		const FText DamageText = FText::AsNumber(Damage);
+		DrawText(DamageText, ColumnX(AbsoluteElimColumns::Damage), TextY,
+			RowFont, FitAbsoluteStatText(Canvas, RowFont, DamageText.ToString(), StatScale, 0.085f * RowW),
+			1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+		const FString PPRText = FString::Printf(TEXT("%.1f"), PPR);
+		DrawText(FText::FromString(PPRText), ColumnX(AbsoluteElimColumns::PPR), TextY,
+			RowFont, FitAbsoluteStatText(Canvas, RowFont, PPRText, StatScale, 0.085f * RowW),
+			1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+
+		// Keep the rating legible; rank and match delta fit below it in the same cell.
+		const FString EloDetails = FormatElimEloDetails(Rank, EloDelta);
+		const float EloY = EloDetails.IsEmpty() ? TextY : TextY - 9.f * S;
+		const FLinearColor EloColor = EloDelta > 0 ? FLinearColor(0.4f, 1.f, 0.4f, 1.f)
+			: EloDelta < 0 ? FLinearColor(1.f, 0.4f, 0.4f, 1.f) : TextColor;
+		DrawText(FText::AsNumber(Elo), ColumnX(AbsoluteElimColumns::Elo), EloY,
+			RowFont, StatScale, 1.f, EloColor, ETextHorzPos::Center, ETextVertPos::Center);
+		if (!EloDetails.IsEmpty())
+		{
+			DrawText(FText::FromString(EloDetails), ColumnX(AbsoluteElimColumns::Elo), TextY + 14.f * S,
+				RowFont, FitAbsoluteStatText(Canvas, RowFont, EloDetails, 0.6f * S, 0.12f * RowW),
+				1.f, EloColor, ETextHorzPos::Center, ETextVertPos::Center);
+		}
 	}
+	// Ping is useful during ready-up too, just as on the normal ElimPlus board.
+	DrawText(FText::FromString(PingString), ColumnX(AbsoluteElimColumns::Ping), TextY,
+		RowFont, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 }
 
 void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOffset)
@@ -804,6 +866,7 @@ void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOf
 		if (PlayerIndices.Num() > 0)
 		{
 			int32 TotalKills = 0, TotalDeaths = 0, TotalDamage = 0;
+			float TotalPPR = 0.f;
 			int64 TotalElo = 0, TotalPing = 0;
 			int32 EloCount = 0, PingCount = 0;
 			for (int32 RosterIndex : PlayerIndices)
@@ -814,6 +877,7 @@ void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOf
 				TotalKills += PlayerState->Kills + PlayerState->KillAssists;
 				TotalDeaths += PlayerState->Deaths;
 				TotalDamage += Entry.DamageDone;
+				TotalPPR += Entry.PPRCurrent;
 				TotalElo += Entry.Elo;
 				++EloCount;
 				if (!Cast<AUTBot>(PlayerState->GetOwner()) && GetWorld()->GetNetMode() != NM_Standalone)
@@ -832,24 +896,30 @@ void UElimPlusScoreboard::DrawAbsolutePlayerScores(float RenderDelta, float& YOf
 			const float TextY = DrawY + RowH * 0.5f + 2.f * S;
 			const float TextScale = 0.92f * S;
 			const FLinearColor TextColor(0.75f, 0.75f, 0.75f, 1.f);
-			auto ColumnX = [RowX, S](float Offset)
+			auto ColumnX = [RowX, RowW](float Fraction)
 			{
-				return RowX + Offset * S;
+				return RowX + RowW * Fraction;
 			};
-			DrawText(FText::FromString(TEXT("TOTAL")), ColumnX(80.f), TextY,
+			DrawText(FText::FromString(TEXT("TOTAL")), RowX + 80.f * S, TextY,
 				Font, 1.2f * S, 1.f, TextColor,
 				ETextHorzPos::Left, ETextVertPos::Center);
-			DrawText(FText::AsNumber(TotalKills), ColumnX(400.f), TextY,
+			DrawText(FText::AsNumber(TotalKills), ColumnX(AbsoluteElimColumns::Kills), TextY,
 				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(FText::AsNumber(TotalDeaths), ColumnX(470.f), TextY,
+			DrawText(FText::AsNumber(TotalDeaths), ColumnX(AbsoluteElimColumns::Deaths), TextY,
 				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(FText::AsNumber(TotalDamage), ColumnX(549.f), TextY,
-				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
-			DrawText(FText::AsNumber(EloCount > 0 ? int32(TotalElo / EloCount) : 1400), ColumnX(640.f), TextY,
+			const FText DamageText = FText::AsNumber(TotalDamage);
+			DrawText(DamageText, ColumnX(AbsoluteElimColumns::Damage), TextY,
+				Font, FitAbsoluteStatText(Canvas, Font, DamageText.ToString(), TextScale, 0.085f * RowW),
+				1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			const FString PPRText = FString::Printf(TEXT("%.1f"), TotalPPR);
+			DrawText(FText::FromString(PPRText), ColumnX(AbsoluteElimColumns::PPR), TextY,
+				Font, FitAbsoluteStatText(Canvas, Font, PPRText, TextScale, 0.085f * RowW),
+				1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
+			DrawText(FText::AsNumber(EloCount > 0 ? int32(TotalElo / EloCount) : 1400), ColumnX(AbsoluteElimColumns::Elo), TextY,
 				Font, TextScale, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 			if (PingCount > 0)
 			{
-				DrawText(FText::AsNumber(int32(TotalPing / PingCount)), ColumnX(740.f), TextY,
+				DrawText(FText::AsNumber(int32(TotalPing / PingCount)), ColumnX(AbsoluteElimColumns::Ping), TextY,
 					Font, 0.67f * S, 1.f, TextColor, ETextHorzPos::Center, ETextVertPos::Center);
 			}
 			DrawY += RowH;
@@ -1098,21 +1168,10 @@ void UElimPlusScoreboard::DrawPlayerScore(AUTPlayerState* PlayerState, float XOf
 	// Mods.db). Don't fall back to PlayerState rank fields — TDMRank etc. are
 	// defunct in this fork (see feedback_no_epic_mcp_or_tdmrank memory).
 	FString EloStr = FString::Printf(TEXT("%d"), Elo);
-	if (Rank > 0)
+	const FString EloDetails = FormatElimEloDetails(Rank, EloDelta);
+	if (!EloDetails.IsEmpty())
 	{
-		// Global leaderboard rank in parens, with English ordinal suffix:
-		// 1st, 2nd, 3rd, 4th ... 11th-13th, 21st, 200th.
-		const int32 M100 = Rank % 100;
-		const int32 M10  = Rank % 10;
-		const TCHAR* Suf = (M100 >= 11 && M100 <= 13) ? TEXT("th")
-			: (M10 == 1) ? TEXT("st") : (M10 == 2) ? TEXT("nd") : (M10 == 3) ? TEXT("rd") : TEXT("th");
-		EloStr += FString::Printf(TEXT(" (%d%s)"), Rank, Suf);
-	}
-	if (EloDelta != 0)
-	{
-		EloStr += (EloDelta > 0)
-			? FString::Printf(TEXT(" +%d"), EloDelta)
-			: FString::Printf(TEXT(" %d"), EloDelta);
+		EloStr += TEXT(" ") + EloDetails;
 	}
 	FLinearColor EloColor = DimColor;
 	if (EloDelta > 0)      EloColor = FLinearColor(0.4f, 1.f, 0.4f, 1.f);
@@ -1185,9 +1244,7 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 			if (Place > NumPlayersToShow) break;
 		}
 
-		// Team totals row under this team's rows — sums of the columns above, aligned
-		// under each column. K / D / DMG / PPR are additive; ELO / LG_Acc / Ping aren't,
-		// so they're left blank. (Replaced the per-team MVP banner.)
+		// Totals sum K / D / DMG / PPR; ELO / LG_Acc / human Ping are averages.
 		if (TeamPlayers.Num() > 0)
 		{
 			int32 SumK = 0, SumD = 0, SumDMG = 0;
@@ -1201,7 +1258,7 @@ void UElimPlusScoreboard::DrawPlayerScores(float RenderDelta, float& YOffset)
 				const FCachedRosterEntry& Entry = CachedRoster[RosterIndex];
 				AUTPlayerState* TP = Entry.PlayerState.Get();
 				if (!TP) continue;
-				SumK += TP->Kills;
+				SumK += TP->Kills + TP->KillAssists;
 				SumD += TP->Deaths;
 				SumPPR += Entry.PPRCurrent;
 				SumDMG += Entry.DamageDone;
