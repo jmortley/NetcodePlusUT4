@@ -223,6 +223,10 @@ namespace NCPlusForceModels
 
 	/** True if a material's name matches the skip list (face/eyes/hair) — don't recolour it. */
 	NETCODEPLUS_API bool IsRecolorSkippedMaterial(const FString& MaterialName);
+	/** Four-team identity ignores personal skip lists, while still preserving faces/eyes/hair. */
+	NETCODEPLUS_API bool IsRecolorSkippedMaterial(const FString& MaterialName, bool bUseConfiguredOverrides);
+	/** Checks third-person team materials only; tintable arms cannot qualify an untintable body. */
+	NETCODEPLUS_API bool CanTintBodyContent(TSubclassOf<AUTCharacterContent> Content);
 
 	/** True if a material's name matches the [ForceModels] BakedMaterials denylist — its model can't be
 	 *  recoloured (inert params) and should fall back to its baked red/blue skin. Empty list -> false. */

@@ -38,10 +38,54 @@ selection. F5 includes movable xTDM score/clock and teammate elements.
 
 Four-team body/arm colors use absolute red/blue/green/yellow even with ForceModels
 disabled. Model choices remain available; personal team hue overrides and two-color
-ForceModels outlines are bypassed in four-team games. The existing Malcolm material
-parameters were checked in the editor. Arbitrary custom skins with baked colors or
-no tint parameters are not guaranteed to display all four colors; validate those
-skins before competitive use. Stock spectator X-ray outlines are still two-color.
+ForceModels outlines are bypassed in four-team games. Blue uses the brighter HUD
+palette. Remote body skins with no usable color parameters or listed as baked
+fall back to stock Malcolm, whose materials support tinting. The local player's
+own model and first-person arms are preserved. Custom materials with inert color
+parameters still need visual validation or inclusion in the baked-material list.
+Stock spectator X-ray outlines are still two-color.
+
+xTDM honors the existing F5 ragdoll preferences, including the timed cleanup backup
+using `[InstagibCTF] RagdollTime`, even though it has no CTF stats replicator.
+
+## Four-team reporting and October 8 corrections
+
+The bot's native `state_change` callback now includes each actual team's ID and
+score, including Green and Yellow. Missing teams are omitted instead of receiving
+an invented zero score. Its player-ready fallback recognizes all assigned teams.
+This corrects the producer; deployed bot consumers must also retain IDs 2 and 3.
+
+The accompanying StatSQL update preserves Green/Yellow player and event labels and
+sends an additive `team_scores` list with IDs, names, scores and player totals.
+Legacy red/blue fields remain available for existing consumers. Apply the matching
+Django migration and code update to store and display all four teams. Existing
+matches already stored with incorrect Blue labels cannot be repaired from those
+labels alone; recovery requires the original roster and score data.
+
+These corrections need updated NetcodePlus client/server binaries and an updated
+StatSQL server binary. The Django changes need their normal deployment and database
+migration. No native builds or cooks were run for this source update.
+
+Before serving the updated Django model, run from its project root using the
+production environment: `python manage.py migrate utstats 0071_match_team_scores --database utstats`.
+Deploy its static assets too (`match_teams.js`), then roll out the rebuilt StatSQL
+server binary. Existing two-team score fields are retained for compatibility.
+
+Four-team tint refreshes no longer rebuild an unchanged character model. To
+investigate the reported animation twitching after rebuilding, enable
+`ncp.AppearanceDiagnostics 1` on an affected client, reproduce briefly, then turn
+it off with `ncp.AppearanceDiagnostics 0`. The log distinguishes team notifications
+from content rebuild requests. This diagnostic does not establish that appearance
+refreshes caused the reported movement-linked twitching. Map-cone collision and
+the reports of old movement also remain unverified.
+
+The local installed xTDM pak was compared with the current editable assets. The
+character, instagib rifle, native-parent character Blueprints and xTDM mode/state
+had matching normalized runtime defaults and function behavior. Duplicate installed
+instagib character and animation packages also matched. This does not establish
+which native binary or content the affected players/server used. The character's
+`CleanUpRagdoll` Blueprint override was empty, reinforcing the need for the native
+timed cleanup backup.
 
 ## Team assignment and reconnects
 

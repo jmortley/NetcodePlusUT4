@@ -22,11 +22,13 @@
 #include "Engine/SkeletalMesh.h"      // SyncFlagColours: swap to dc's FlagMesh
 #include "Engine/WindDirectionalSource.h"            // TickFlagWind: cloth wind (ports dc's FlagWind)
 #include "Components/WindDirectionalSourceComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "UnrealEngine.h"                             // GetCachedScalabilityCVars().DetailMode (flag cloth)
 #include "GameFramework/PlayerState.h" // GetPlayerName
 #include "EngineUtils.h"              // TActorIterator
 #include "Engine/Canvas.h"            // DrawHeadDebug: Canvas->Project / K2_DrawLine
 #include "UObject/UObjectIterator.h" // reap registered outline duplicates whose owning lineup actor is gone
+#include "UObject/UnrealType.h"     // read protected character-content team materials without engine changes
 
 namespace
 {
@@ -930,7 +932,7 @@ FLinearColor NCPlusForceModels::GetFourTeamColour(int32 TeamIndex)
 	switch (TeamIndex)
 	{
 	case 0: return FLinearColor::Red;
-	case 1: return FLinearColor::Blue;
+	case 1: return FLinearColor(.2f, .5f, 1.f);
 	case 2: return FLinearColor::Green;
 	case 3: return FLinearColor::Yellow;
 	default: return FLinearColor::White;
@@ -971,7 +973,8 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 		// switch keeps a model.
 		Out = (TheirTeamIndex == 0) ? C.Red : (TheirTeamIndex == 1) ? C.Blue
 			: bIsFriendly ? C.Team : C.Enemy;
-		const FLinearColor HSV = GetFourTeamColour(TheirTeamIndex).LinearRGBToHSV();
+		// Preserve the existing two-team Red/Blue hue; the four-team override below owns its palette.
+		const FLinearColor HSV = (TheirTeamIndex == 1 ? FLinearColor::Blue : GetFourTeamColour(TheirTeamIndex)).LinearRGBToHSV();
 		Out.H = HSV.R;
 		Out.S = (TheirTeamIndex == 1) ? 0.9f : 1.f;
 		Out.V = 1.f;
@@ -995,8 +998,8 @@ FNCPlusModelSettings NCPlusForceModels::GetModelSettings(int32 TheirTeamIndex, b
 		// into one personal hue. EnemyOnly still leaves the friendly model unchanged.
 		const FLinearColor HSV = GetFourTeamColour(TheirTeamIndex).LinearRGBToHSV();
 		Out.H = HSV.R;
-		Out.S = 1.f;
-		Out.V = 1.f;
+		Out.S = HSV.G;
+		Out.V = HSV.B;
 		Out.bTint = true;
 		Out.bComplimentary = false;
 		Out.ArmourMode = ENCPlusArmourMode::MatchSkin;
@@ -1443,17 +1446,56 @@ void NCPlusForceModels::EnumerateContent(TArray<FContentEntry>& Out, bool bInclu
 
 bool NCPlusForceModels::IsRecolorSkippedMaterial(const FString& MaterialName)
 {
+	return IsRecolorSkippedMaterial(MaterialName, true);
+}
+
+bool NCPlusForceModels::IsRecolorSkippedMaterial(const FString& MaterialName, bool bUseConfiguredOverrides)
+{
 	static const TArray<FString> DefaultSkip = {
 		TEXT("head"), TEXT("face"), TEXT("eye"), TEXT("hair"),
 		TEXT("teeth"), TEXT("tongue"), TEXT("mouth"), TEXT("brow"),
 	};
 	const FNCPlusForceModelsConfig& C = Get();
-	const TArray<FString>& Skip = (C.SkipMaterialSubstrings.Num() > 0) ? C.SkipMaterialSubstrings : DefaultSkip;
+	const TArray<FString>& Skip = (bUseConfiguredOverrides && C.SkipMaterialSubstrings.Num() > 0)
+		? C.SkipMaterialSubstrings : DefaultSkip;
 	for (const FString& Sub : Skip)
 	{
 		if (MaterialName.Contains(Sub, ESearchCase::IgnoreCase)) { return true; }
 	}
 	return false;
+}
+
+bool NCPlusForceModels::CanTintBodyContent(TSubclassOf<AUTCharacterContent> Content)
+{
+	const AUTCharacterContent* Data = Content.GetDefaultObject();
+	const USkeletalMeshComponent* Mesh = Data ? Data->GetMesh() : nullptr;
+	if (!Mesh || !Mesh->SkeletalMesh) { return false; }
+	// TeamMaterials is protected in UT4; only AUTCharacter is a friend. Read its existing reflected
+	// object array, validating the schema before touching storage. No CDO or material is modified.
+	UArrayProperty* TeamMaterialsProperty = FindField<UArrayProperty>(Data->GetClass(), TEXT("TeamMaterials"));
+	UObjectProperty* MaterialProperty = TeamMaterialsProperty ? Cast<UObjectProperty>(TeamMaterialsProperty->Inner) : nullptr;
+	if (!MaterialProperty || !MaterialProperty->PropertyClass
+		|| !MaterialProperty->PropertyClass->IsChildOf(UMaterialInterface::StaticClass())) { return false; }
+	FScriptArrayHelper TeamMaterials(TeamMaterialsProperty, TeamMaterialsProperty->ContainerPtrToValuePtr<void>(Data));
+	bool bHasBodyColour = false;
+	for (int32 Index = 0; Index < Mesh->GetNumMaterials(); ++Index)
+	{
+		UMaterialInterface* Material = Index < TeamMaterials.Num()
+			? Cast<UMaterialInterface>(MaterialProperty->GetObjectPropertyValue(TeamMaterials.GetRawPtr(Index))) : nullptr;
+		if (!Material) { Material = Mesh->GetMaterial(Index); }
+		if (!Material || IsRecolorSkippedMaterial(Material->GetName(), false)) { continue; }
+		if (IsBakedMaterial(Material->GetName())) { return false; }
+		FLinearColor UnusedColour;
+		for (const FName& Param : TeamColourParamNames(false))
+		{
+			if (Material->GetVectorParameterValue(Param, UnusedColour))
+			{
+				bHasBodyColour = true;
+				break;
+			}
+		}
+	}
+	return bHasBodyColour;
 }
 
 bool NCPlusForceModels::IsBakedMaterial(const FString& MaterialName)

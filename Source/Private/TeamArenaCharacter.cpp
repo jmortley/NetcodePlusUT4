@@ -15,6 +15,7 @@
 #include "UTGameState.h"
 #include "UTGameMode.h"
 #include "UTCTFBaseGame.h"
+#include "NCPlusXTDMGameMode.h"
 #include "UTWeap_LinkGun.h"
 #include "UTWeap_LightningRifle.h"
 #include "UTArmor.h"
@@ -59,6 +60,10 @@ static TAutoConsoleVariable<int32> CVarRemoteAnimationURO(
 	TEXT("Experimental remote third-person animation optimization on online clients. ")
 	TEXT("1 = distant peripheral bodies may update every other frame above 240 FPS; 0 = restore authored settings. ")
 	TEXT("No Blueprint opt-in required. Requires a.URO.Enable 1. Default 0."), ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarAppearanceDiagnostics(
+	TEXT("ncp.AppearanceDiagnostics"), 0,
+	TEXT("Log client character/team appearance refreshes and actual content rebuilds. Default 0."), ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarHiddenCorpseCleanup(
 	TEXT("ncp.HiddenCorpseCleanup"), 1,
@@ -512,6 +517,11 @@ void ATeamArenaCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 // the pawn dirty and re-assert the forced model once on the next Tick (FlushForcedModelUpdate).
 void ATeamArenaCharacter::NotifyTeamChanged()
 {
+	if (CVarAppearanceDiagnostics.GetValueOnGameThread() != 0 && GetNetMode() != NM_DedicatedServer)
+	{
+		UE_LOG(LogTemp, Log, TEXT("NCP appearance team: frame=%llu pawn=%s team=%d dirty=%d"),
+			(uint64)GFrameCounter, *GetName(), int32(GetTeamNum()), bForcedModelDirty ? 1 : 0);
+	}
 	if (GetNetMode() != NM_DedicatedServer)
 	{
 		// Super may rebuild the armour overlay through our UpdateArmorOverlay override.
@@ -545,6 +555,12 @@ void ATeamArenaCharacter::NotifyTeamChanged()
 
 void ATeamArenaCharacter::ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data)
 {
+	if (CVarAppearanceDiagnostics.GetValueOnGameThread() != 0 && GetNetMode() != NM_DedicatedServer)
+	{
+		UE_LOG(LogTemp, Log, TEXT("NCP appearance content: frame=%llu pawn=%s from=%s to=%s rebuild=%d forced=%d"),
+			(uint64)GFrameCounter, *GetName(), *GetNameSafe(CharacterData.Get()), *GetNameSafe(Data.Get()),
+			bAllowCharacterDataOverride ? 1 : 0, bApplyingForcedModel ? 1 : 0);
+	}
 	// A new animation instance must not inherit time owed by the previous pose.
 	ReleaseRemoteAnimationURO(true);
 	if (GetNetMode() == NM_DedicatedServer)
@@ -804,6 +820,32 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		Colour = NCPlusForceModels::GetFourTeamColour(MyTeam);
 		bWantTint = true;
 	}
+	if (bFourTeamPalette && !bColourOnly)
+	{
+		// Resolve against the desired content before the latch. Checking the currently forced mesh
+		// would alternate between an unsupported selection and its fallback on every refresh.
+		const AUTPlayerState* PS = Cast<AUTPlayerState>(PlayerState);
+		const TSubclassOf<AUTCharacterContent> NaturalContent = PS && PS->GetSelectedCharacter()
+			? PS->GetSelectedCharacter() : GetClass()->GetDefaultObject<AUTCharacter>()->CharacterData;
+		const TSubclassOf<AUTCharacterContent> DesiredContent = bWantForce ? Content : NaturalContent;
+		if (!NCPlusForceModels::CanTintBodyContent(DesiredContent))
+		{
+			// AUTCharacter hard-references stock Malcolm_New in its constructor. Reuse that already
+			// required cooked content, with no new package dependency. Leave the local player's model
+			// and first-person arms intact; every other viewer resolves this body independently.
+			const TSubclassOf<AUTCharacterContent> Fallback = GetDefault<AUTCharacter>()->CharacterData;
+			if (NCPlusForceModels::CanTintBodyContent(Fallback))
+			{
+				Content = Fallback;
+				bWantForce = true;
+			}
+			else if (CVarAppearanceDiagnostics.GetValueOnGameThread() != 0)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("NCP appearance: no tintable four-team fallback for %s (%s)."),
+					*GetName(), *GetNameSafe(DesiredContent.Get()));
+			}
+		}
+	}
 
 	// ── Natural: feature off, FFA, or friendly under Enemy-Only → this pawn keeps its real model. ──
 	if (!bWantTint)
@@ -857,7 +899,9 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 	// stock ApplyCharacterData early-returns unless bAllowCharacterDataOverride is true.
 	// Own pawn (bColourOnly) and tint-only sides (no model picked): skip the mesh swap —
 	// keep the real model and its existing BodyMIs, tint only.
-	if (bWantForce && !bColourOnly)
+	// In four-team mode an unchanged content class needs only material writes. Rebuilding it here
+	// would restart its animation when brightness changes or a tint-only dirty flush repeats.
+	if (bWantForce && !bColourOnly && (!bFourTeamPalette || CharacterData.Get() != Content.Get()))
 	{
 		bAllowCharacterDataOverride = true;
 		ApplyCharacterData(Content);
@@ -904,7 +948,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		if (!MID) { continue; }
 		const UMaterialInterface* Src = MID->Parent;
 		const FString MatName = Src ? Src->GetName() : MID->GetName();
-		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName)) { continue; }
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName, !bFourTeamPalette)) { continue; }
 		if (NCPlusForceModels::IsBakedMaterial(MatName)) { bDenylisted = true; }
 		if (!bHasParam)
 		{
@@ -936,7 +980,7 @@ void ATeamArenaCharacter::ApplyForcedModel(bool bForceReapply)
 		if (!MID) { continue; }
 		const UMaterialInterface* Src = MID->Parent;
 		const FString MatName = Src ? Src->GetName() : MID->GetName();
-		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName))
+		if (NCPlusForceModels::IsRecolorSkippedMaterial(MatName, !bFourTeamPalette))
 		{
 			// Face/eyes/hair: leave UNTOUCHED so they keep the model's own team tint.
 			continue;
@@ -1181,9 +1225,8 @@ void ATeamArenaCharacter::SetOutlineLocal(bool bNowOutlined, bool bWhenUnocclude
 //  (1) "Darken Bodies" toggle (any mode): hide after the ~1s death-effects fade (instant hide looked abrupt).
 //      Replaces dc's ModelDissolveEffect (exec-chain dissolve that didn't run reliably across models); this
 //      clean hide works on any model with zero asset dependency.
-//  (2) iCTF safety net (regardless of DarkenBodies): the body is supposed to be removed by the BP CleanUpRagdoll
-//      at [InstagibCTF] RagdollTime, but if that doesn't happen (e.g. DarkenBodies off and the BP cleanup never
-//      fires) the corpse would linger. So in iCTF we ALSO hide it at the ragdoll lifespan, so a low Ragdoll Time
+//  (2) Instagib safety net (iCTF and xTDM, regardless of DarkenBodies): remove the body after
+//      [InstagibCTF] RagdollTime even when the BP CleanUpRagdoll event never fires. A low Ragdoll Time
 //      reliably makes the body vanish. Online clients then retire hidden corpses when cameras, carried
 //      objects and the queued death sound no longer need them. Dedicated servers retain stock cleanup.
 void ATeamArenaCharacter::SpawnSkeletonDissolve()
@@ -1196,15 +1239,11 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	FString Val;
 	const FString ConfigPath = FPaths::GeneratedConfigDir() + TEXT("Mod.ini");
 
-	// F5 "Show Ragdoll" ([InstagibCTF] bShowRagdoll). INTENDED consumer = the BP instagib DAMAGE TYPE
-	// (it reads these keys and drives ragdoll time for instagib kills) — which by construction only
-	// ever fires in iCTF, so in every other mode the setting did nothing and the only hide path was
-	// ForceModels' DarkenBodies (community: "uncheck force models and you can see dead bodys" /
-	// "ragdoll setting overridden by force models"). This C++ read is the MODE-AGNOSTIC stand-in:
-	// when the key exists (any F5 save writes it) it is AUTHORITATIVE over the Darken fade in both
-	// directions — unticked hides corpses in every mode with FM off, ticked shows them even with
-	// Darken on. ShowRagdoll-on defers to the RagdollTime safety net below in iCTF. Key ABSENT
-	// (never saved F5 — e.g. a dc-TeamSkins migrant) -> Darken keeps its old dc-parity hide role.
+	// F5 "Show Ragdoll" retains its legacy [InstagibCTF] config section. The BP damage type
+	// consumes it for instagib kills; this native path also handles other modes. An explicit
+	// preference takes precedence over ForceModels' DarkenBodies in both directions. With
+	// Show Ragdoll enabled, iCTF/xTDM still honor RagdollTime below. If the key has never
+	// been saved, preserve the old DarkenBodies fade behavior.
 	bool bShowRagdoll = true;
 	bool bShowRagdollExplicit = false;
 	if (GConfig && GConfig->GetString(TEXT("InstagibCTF"), TEXT("bShowRagdoll"), Val, ConfigPath))
@@ -1213,16 +1252,22 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 		bShowRagdollExplicit = true;
 	}
 
-	// iCTF detection: RagdollTime is an iCTF setting (the BP CleanUpRagdoll only runs for the instagib damage
-	// type). ACTFStatsReplicator is present only in NCPlusCTF instagib; absent in ElimPlus etc.
+	// xTDM uses the same instagib pawn/rifle and ragdoll preferences, but has no CTF
+	// stats replicator. Its replicated game-mode class is available on clients too.
 	bool bIsInstagib = false;
 	if (UWorld* World = GetWorld())
 	{
-		for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
+		const AUTGameState* GS = World->GetGameState<AUTGameState>();
+		bIsInstagib = GS && GS->GameModeClass
+			&& GS->GameModeClass->IsChildOf(ANCPlusXTDMGameMode::StaticClass());
+		if (!bIsInstagib)
+		{
+			for (TActorIterator<ACTFStatsReplicator> It(World); It; ++It) { bIsInstagib = It->bIsInstagibMatch; break; }
+		}
 	}
 
-	// Fade-hide when: Show Ragdoll explicitly unticked (any mode), or — with the key never written —
-	// the legacy DarkenBodies fade. iCTF keeps its ragdoll-cleanup backup regardless. Outside all of
+	// Fade-hide when: Show Ragdoll explicitly unticked (any mode), or with the key never written,
+	// the legacy DarkenBodies fade. iCTF/xTDM keep their ragdoll-cleanup backup regardless. Outside all of
 	// that, leave corpses to the stock/engine cleanup — no change to ElimPlus and friends.
 	const bool bFadeHide = bShowRagdollExplicit ? !bShowRagdoll : bDarken;
 	if (!bFadeHide && !bIsInstagib) { return; }
@@ -1232,16 +1277,16 @@ void ATeamArenaCharacter::SpawnSkeletonDissolve()
 	{
 		RagdollTime = FCString::Atof(*Val);
 	}
-	// The menu stores iCTF "Ragdoll Time = 0" (remove instantly) as 0.01 so the BP SetTimer fires.
-	// That sentinel must not leak into the OTHER modes' fade cap — an iCTF "instant" choice would
-	// make bodies vanish frame-one in ElimPlus/Wipeout. Outside iCTF, treat it as the normal fade.
+	// The menu stores "Ragdoll Time = 0" (remove instantly) as 0.01 so the BP SetTimer fires.
+	// That sentinel must not leak into other modes' fade cap and make bodies vanish frame-one
+	// in ElimPlus/Wipeout. Outside iCTF/xTDM, treat it as the normal fade.
 	if (!bIsInstagib && RagdollTime <= 0.011f)
 	{
 		RagdollTime = 1.0f;
 	}
 
 	// The fade paths (Show-Ragdoll-off / legacy DarkenBodies) hide early (~1s death-effects fade, but never
-	// longer than the ragdoll lives); otherwise (iCTF, no fade) hide exactly at the ragdoll lifespan so the
+	// longer than the ragdoll lives); otherwise (iCTF/xTDM, no fade) hide exactly at the ragdoll lifespan so the
 	// body still vanishes when the BP CleanUpRagdoll doesn't. Floor 0.01s (SetTimer never schedules
 	// rate<=0). Timer is bound to this actor, so it auto-clears if the corpse is destroyed/cleaned up
 	// sooner (gib, respawn, DeathCleanupTimer).

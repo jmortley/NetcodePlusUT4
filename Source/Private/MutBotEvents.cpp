@@ -12,6 +12,7 @@
 #include "UnrealTournament.h"
 #include "UTGameState.h"
 #include "UTPlayerState.h"
+#include "UTTeamInfo.h"
 #include "UTCarriedObject.h"
 #include "UTCTFFlag.h"
 #include "UTCTFFlagBase.h"
@@ -27,6 +28,14 @@
 #include "UTDemoRecSpectator.h"
 
 DEFINE_LOG_CATEGORY(LogBotEvents);
+
+namespace
+{
+	bool IsAssignedToGameTeam(const AUTPlayerState* Player, const AUTGameState* GameState)
+	{
+		return Player && GameState && Player->Team && GameState->Teams.Contains(Player->Team);
+	}
+}
 
 FString FBotArrivalLedger::CanonicalId(const FString& Value)
 {
@@ -752,6 +761,7 @@ void AMutBotEvents::PostArrivals(bool bFinal, bool bImmediate)
 	TArray<TSharedPtr<FJsonValue>> Players;
 	TSet<FString> CurrentIds;
 	ANCReadyUpState* ReadyState = World ? ANCReadyUpState::Find(World) : nullptr;
+	const AUTGameState* GameState = World ? World->GetGameState<AUTGameState>() : nullptr;
 	if (World)
 	{
 		int32 ControllerCount = 0;
@@ -787,7 +797,7 @@ void AMutBotEvents::PostArrivals(bool bFinal, bool bImmediate)
 			Player->SetStringField(TEXT("ut4_id"), Id);
 			Player->SetBoolField(TEXT("spectator"), PS->bOnlySpectator);
 			Player->SetBoolField(TEXT("bot"), false);
-			Player->SetBoolField(TEXT("ready"), ReadyState ? ReadyState->IsPlayerReady(PS) : PS->GetTeamNum() < 2);
+			Player->SetBoolField(TEXT("ready"), ReadyState ? ReadyState->IsPlayerReady(PS) : IsAssignedToGameTeam(PS, GameState));
 			Player->SetBoolField(TEXT("connected"), bConnected);
 			Players.Add(MakeShareable(new FJsonValueObject(Player)));
 		}
@@ -928,7 +938,7 @@ FString AMutBotEvents::BuildPlayerListJson() const
 		// matches retain the old connected-and-on-a-team meaning for compatibility.
 		const bool bReady = ReadyState != nullptr
 			? (UTPS->bIsABot || ReadyState->IsPlayerReady(UTPS))
-			: (UTPS->GetTeamNum() < 2);
+			: IsAssignedToGameTeam(UTPS, GS);
 
 		TSharedRef<FJsonObject> PlayerObj = MakeShareable(new FJsonObject());
 		PlayerObj->SetStringField(TEXT("Name"), UTPS->PlayerName);
@@ -959,17 +969,15 @@ FString AMutBotEvents::BuildTeamScoresJson() const
 	AUTGameState* GS = GetWorld() ? GetWorld()->GetGameState<AUTGameState>() : nullptr;
 	if (!GS) return TEXT("[]");
 
-	for (int32 i = 0; i < 2; i++)
+	// Preserve actual team IDs and scores, including Green/Yellow in xTDM.
+	// A missing team is unknown, not an invented zero-score team.
+	for (const AUTTeamInfo* Team : GS->Teams)
 	{
-		int32 Score = 0;
-		if (GS->Teams.IsValidIndex(i) && GS->Teams[i])
-		{
-			Score = GS->Teams[i]->Score;
-		}
+		if (!IsValid(Team)) continue;
 
 		TSharedRef<FJsonObject> TeamObj = MakeShareable(new FJsonObject());
-		TeamObj->SetNumberField(TEXT("id"), i);
-		TeamObj->SetNumberField(TEXT("score"), Score);
+		TeamObj->SetNumberField(TEXT("id"), Team->TeamIndex);
+		TeamObj->SetNumberField(TEXT("score"), Team->Score);
 		TeamsArray.Add(MakeShareable(new FJsonValueObject(TeamObj)));
 	}
 
