@@ -559,6 +559,7 @@ static void TestMixedCloseRangeOutcomes()
 
 int main()
 {
+    TestHeldAltSwitchRecovery();
     TestFirstInputWaitsForOwnership();
     TestReleaseBeforeOwnershipIsRetained();
     TestOwnershipInputWindowDoesNotRefresh();

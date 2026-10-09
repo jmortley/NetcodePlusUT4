@@ -23,6 +23,37 @@ EarliestFireTime, rather than setting a generic pending-fire bit that could bypa
 the cooldown. Queued begins expire after five seconds or owner/state/match failure.
 A release during that wait is retained and releases after the first legal load.
 
+Held alt-fire carried across a weapon switch re-enters through `StartFire(1)` on
+the owning client only. Stock ActiveState can enter the charged state directly
+from the pawn's held bit before a numbered volley exists. That failed entry uses
+`ContinueLoadedVolley()` to clear the bit before returning to Active, then start
+one numbered volley through the normal ownership/cooldown gates. Its caller
+returns immediately because recovery can synchronously re-enter the same state
+object; the second entry has an identity and does not repeat recovery. An outgoing
+weapon's tap released before handoff stays dropped. Direct launcher presses keep
+their existing queued-load/release behavior. Remote authority still clears an
+unnumbered held bit and waits for the version-gated Begin RPC. This recovery adds
+no RPCs, replicated properties or class members and is a client-DLL-only fix
+compatible with the existing 329 server protocol.
+
+This also handles alt already held on an outgoing NCP weapon before the switch
+key (the existing GhostFix handoff carries it), and held input that reaches the
+launcher at spawn. The spawn verifier can alternatively replay a held button
+directly through `StartFire`, which already uses this protocol. A cancelled switch
+back to a lowering launcher uses the same recovery **if a held bit survives**.
+It does not capture a fresh alt press during the launcher's own put-down:
+`CanBeginLoadedVolleyInput()` still rejects Unequipping/pending-weapon input before
+it can reach this state. Do not claim that separate input-latching case is fixed.
+
+Native switch regressions execute the production charged `BeginState`, `EndState`
+and volley methods with stock-style synchronous state dispatch. They check one
+Begin/identity, clear-before-Active, nested re-entry, released input, remote
+authority/version gates, weapon changes, cooldowns, ownership arrival/expiry,
+reused-state timer cleanup and existing authority-local/bot entry. Substituting
+the pre-fix charged `BeginState` fails the held-switch test. Engine input delivery,
+equip animation and actual RPC transport still require a built remote-client
+test; these native tests are not a UE build or a multiplayer run.
+
 Release contains selected mode and requested count. The server
 never promotes an incomplete load. It caps the volley to completed server loads
 and the request, refunds only ammunition actually consumed for excess server-only
