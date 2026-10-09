@@ -36,7 +36,9 @@ void AUTPlusShockRifle::RefreshInstagibEquipInput()
 	if (InstagibEquipInputController.Get() == PC
 		&& InstagibEquipInputComponent.Get() == Component
 		&& InstagibEquipPrimaryBindingHandle.IsValid()
-		&& InstagibEquipAlternateBindingHandle.IsValid())
+		&& InstagibEquipAlternateBindingHandle.IsValid()
+		&& InstagibEquipPrimaryReleaseHandle.IsValid()
+		&& InstagibEquipAlternateReleaseHandle.IsValid())
 	{
 		return;
 	}
@@ -44,17 +46,21 @@ void AUTPlusShockRifle::RefreshInstagibEquipInput()
 	StopInstagibEquipInput();
 	bool bHasPrimary = false;
 	bool bHasAlternate = false;
+	bool bHasPrimaryRelease = false;
+	bool bHasAlternateRelease = false;
 	for (int32 Index = 0; Index < Component->GetNumActionBindings(); ++Index)
 	{
 		const FInputActionBinding& Binding = Component->GetActionBinding(Index);
-		if (Binding.KeyEvent != IE_Pressed || !Binding.ActionDelegate.IsBoundToObject(PC))
+		if (!Binding.ActionDelegate.IsBoundToObject(PC))
 		{
 			continue;
 		}
-		bHasPrimary |= Binding.ActionName == FName(TEXT("StartFire"));
-		bHasAlternate |= Binding.ActionName == FName(TEXT("StartAltFire"));
+		bHasPrimary |= Binding.KeyEvent == IE_Pressed && Binding.ActionName == FName(TEXT("StartFire"));
+		bHasAlternate |= Binding.KeyEvent == IE_Pressed && Binding.ActionName == FName(TEXT("StartAltFire"));
+		bHasPrimaryRelease |= Binding.KeyEvent == IE_Released && Binding.ActionName == FName(TEXT("StopFire"));
+		bHasAlternateRelease |= Binding.KeyEvent == IE_Released && Binding.ActionName == FName(TEXT("StopAltFire"));
 	}
-	if (!bHasPrimary || !bHasAlternate)
+	if (!bHasPrimary || !bHasAlternate || !bHasPrimaryRelease || !bHasAlternateRelease)
 	{
 		return;
 	}
@@ -73,6 +79,16 @@ void AUTPlusShockRifle::RefreshInstagibEquipInput()
 	Alternate.bConsumeInput = false;
 	Alternate.bExecuteWhenPaused = false;
 	InstagibEquipAlternateBindingHandle = Alternate.ActionDelegate.GetDelegateForManualSet().GetHandle();
+	FInputActionBinding& PrimaryRelease = Component->BindAction(TEXT("StopFire"), IE_Released,
+		this, &AUTPlusShockRifle::InstagibEquipPrimaryReleased);
+	PrimaryRelease.bConsumeInput = false;
+	PrimaryRelease.bExecuteWhenPaused = false;
+	InstagibEquipPrimaryReleaseHandle = PrimaryRelease.ActionDelegate.GetDelegateForManualSet().GetHandle();
+	FInputActionBinding& AlternateRelease = Component->BindAction(TEXT("StopAltFire"), IE_Released,
+		this, &AUTPlusShockRifle::InstagibEquipAlternateReleased);
+	AlternateRelease.bConsumeInput = false;
+	AlternateRelease.bExecuteWhenPaused = false;
+	InstagibEquipAlternateReleaseHandle = AlternateRelease.ActionDelegate.GetDelegateForManualSet().GetHandle();
 }
 
 void AUTPlusShockRifle::StopInstagibEquipInput()
@@ -83,16 +99,20 @@ void AUTPlusShockRifle::StopInstagibEquipInput()
 		for (int32 Index = Component->GetNumActionBindings() - 1; Index >= 0; --Index)
 		{
 			const FInputActionBinding& Binding = Component->GetActionBinding(Index);
-			if (Binding.KeyEvent != IE_Pressed || !Binding.ActionDelegate.IsBoundToObject(this))
+			if (!Binding.ActionDelegate.IsBoundToObject(this))
 			{
 				continue;
 			}
 			const FDelegateHandle Handle = GetInstagibEquipActionHandle(Binding);
-			const bool bOurPrimary = Binding.ActionName == FName(TEXT("StartFire"))
+			const bool bOurPrimary = Binding.KeyEvent == IE_Pressed && Binding.ActionName == FName(TEXT("StartFire"))
 				&& InstagibEquipPrimaryBindingHandle.IsValid() && Handle == InstagibEquipPrimaryBindingHandle;
-			const bool bOurAlternate = Binding.ActionName == FName(TEXT("StartAltFire"))
+			const bool bOurAlternate = Binding.KeyEvent == IE_Pressed && Binding.ActionName == FName(TEXT("StartAltFire"))
 				&& InstagibEquipAlternateBindingHandle.IsValid() && Handle == InstagibEquipAlternateBindingHandle;
-			if (bOurPrimary || bOurAlternate)
+			const bool bOurPrimaryRelease = Binding.KeyEvent == IE_Released && Binding.ActionName == FName(TEXT("StopFire"))
+				&& InstagibEquipPrimaryReleaseHandle.IsValid() && Handle == InstagibEquipPrimaryReleaseHandle;
+			const bool bOurAlternateRelease = Binding.KeyEvent == IE_Released && Binding.ActionName == FName(TEXT("StopAltFire"))
+				&& InstagibEquipAlternateReleaseHandle.IsValid() && Handle == InstagibEquipAlternateReleaseHandle;
+			if (bOurPrimary || bOurAlternate || bOurPrimaryRelease || bOurAlternateRelease)
 			{
 				Component->RemoveActionBinding(Index);
 			}
@@ -102,6 +122,8 @@ void AUTPlusShockRifle::StopInstagibEquipInput()
 	InstagibEquipInputComponent.Reset();
 	InstagibEquipPrimaryBindingHandle.Reset();
 	InstagibEquipAlternateBindingHandle.Reset();
+	InstagibEquipPrimaryReleaseHandle.Reset();
+	InstagibEquipAlternateReleaseHandle.Reset();
 	InstagibEquipPressOwner.Reset();
 	for (int32 Mode = 0; Mode < 2; ++Mode)
 	{
@@ -122,6 +144,26 @@ void AUTPlusShockRifle::InstagibEquipAlternatePressed()
 	NoteInstagibEquipPress(1);
 }
 
+void AUTPlusShockRifle::InstagibEquipPrimaryReleased()
+{
+	NoteInstagibEquipRelease(0);
+}
+
+void AUTPlusShockRifle::InstagibEquipAlternateReleased()
+{
+	NoteInstagibEquipRelease(1);
+}
+
+void AUTPlusShockRifle::NoteInstagibEquipRelease(uint8 FireMode)
+{
+	// Observe action order, not deferred StopFire order: an older release in
+	// the same batch must not turn a later repress-and-hold into a released tap.
+	if (bInstagibTapAwaitingPossession && PendingInstagibEquipTapMode == FireMode)
+	{
+		bInstagibPossessionTapReleased = true;
+	}
+}
+
 void AUTPlusShockRifle::NoteInstagibEquipPress(uint8 FireMode)
 {
 	// A fresh action supersedes a released tap even outside Equipping. Never
@@ -134,7 +176,7 @@ void AUTPlusShockRifle::NoteInstagibEquipPress(uint8 FireMode)
 		bInstagibEquipPress[Mode] = false;
 		InstagibEquipPressFrame[Mode] = 0;
 	}
-	if (FireMode >= 2 || !CanRetainInstagibEquipTap(FireMode) || CurrentState != EquippingState)
+	if (FireMode >= 2 || !CanRetainInstagibEquipTap(FireMode, true) || CurrentState != EquippingState)
 	{
 		return;
 	}
@@ -143,6 +185,21 @@ void AUTPlusShockRifle::NoteInstagibEquipPress(uint8 FireMode)
 		|| InstagibEquipInputComponent.Get() == nullptr
 		|| InstagibEquipInputComponent.Get() != PC->InputComponent)
 	{
+		return;
+	}
+	if (PC->IsInState(NAME_Inactive))
+	{
+		// OnRep_Controller can expose the new living pawn and its rifle before
+		// ClientRestart completes. Stock drops StartFire in this state, so a
+		// same-frame provenance token alone cannot retain this physical press.
+		if (PC->AcknowledgedPawn != UTOwner)
+		{
+			PendingInstagibEquipTapMode = FireMode;
+			PendingInstagibEquipTapOwner = UTOwner;
+			PendingInstagibEquipTapController = PC;
+			bInstagibTapAwaitingPossession = true;
+			InstagibPossessionTapDeadline = GetWorld()->GetRealTimeSeconds() + 0.5f;
+		}
 		return;
 	}
 	bInstagibEquipPress[FireMode] = true;

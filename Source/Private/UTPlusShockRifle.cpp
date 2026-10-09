@@ -17,6 +17,9 @@
 #include "UTGameViewportClient.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/DemoNetDriver.h"
+#include "Engine/Console.h"
+#include "UTLocalPlayer.h"
+#include "UnrealClient.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "Particles/ParticleSystemComponent.h"
@@ -402,28 +405,42 @@ bool AUTPlusShockRifle::IsInstagibBeamFireMode(uint8 FireMode) const
 		&& (FireMode == 0 || (FireMode == 1 && HasSharedInstagibFireModes()));
 }
 
-bool AUTPlusShockRifle::CanRetainInstagibEquipTap(uint8 FireMode)
+bool AUTPlusShockRifle::CanRetainInstagibEquipTap(uint8 FireMode, bool bAllowInactive)
 {
 	if (CVarInstagibEquipTap.GetValueOnGameThread() <= 0 || FireMode >= 2
-		|| IsPendingKillPending() || GetWorld() == nullptr
+		|| IsPendingKillPending() || GetWorld() == nullptr || GetWorld()->IsPaused()
 		|| GetNetMode() == NM_DedicatedServer || UTOwner == nullptr
 		|| UTOwner->IsDead() || UTOwner->IsPendingKillPending()
 		|| !UTOwner->IsLocallyControlled() || !UTOwner->IsPlayerControlled()
 		|| UTOwner->GetWeapon() != this || UTOwner->GetPendingWeapon() != nullptr
-		|| UTOwner->IsFiringDisabled() || !HasSharedInstagibFireModes()
+		|| UTOwner->IsFiringDisabled() || UTOwner->TauntCount != 0 || UTOwner->IsFeigningDeath()
+		|| !HasSharedInstagibFireModes()
 		|| !HasAmmo(FireMode)
 		|| (GetWorld()->DemoNetDriver && GetWorld()->DemoNetDriver->IsPlaying()))
 	{
 		return false;
 	}
 	AUTPlayerController* PC = Cast<AUTPlayerController>(UTOwner->Controller);
-	if (PC == nullptr || PC->GetPawn() != UTOwner || !PC->IsInState(NAME_Playing)
-		|| PC->IsMoveInputIgnored()
+	if (PC == nullptr || PC->GetPawn() != UTOwner
+		|| (!PC->IsInState(NAME_Playing)
+			&& !(bAllowInactive && GetNetMode() == NM_Client && PC->IsInState(NAME_Inactive)))
+		|| PC->IsMoveInputIgnored() || PC->ShouldShowMouseCursor()
 		|| (bRootWhileFiring && UTOwner->GetCharacterMovement()
 			&& UTOwner->GetCharacterMovement()->MovementMode == MOVE_Falling))
 	{
 		return false;
 	}
+#if !UE_SERVER
+	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(PC->Player);
+	UGameViewportClient* Viewport = LP ? LP->ViewportClient : nullptr;
+	if (LP == nullptr || LP->AreMenusOpen() || LP->IsQuickChatOpen()
+		|| Viewport == nullptr || Viewport->IgnoreInput() || Viewport->Viewport == nullptr
+		|| !Viewport->Viewport->HasFocus()
+		|| (Viewport->ViewportConsole && Viewport->ViewportConsole->ConsoleActive()))
+	{
+		return false;
+	}
+#endif
 	AUTGameState* GS = GetWorld()->GetGameState<AUTGameState>();
 	return GS == nullptr || !GS->PreventWeaponFire();
 }
@@ -433,6 +450,9 @@ void AUTPlusShockRifle::ClearInstagibEquipTap()
 	PendingInstagibEquipTapMode = 255;
 	PendingInstagibEquipTapOwner.Reset();
 	PendingInstagibEquipTapController.Reset();
+	bInstagibTapAwaitingPossession = false;
+	bInstagibPossessionTapReleased = false;
+	InstagibPossessionTapDeadline = 0.f;
 }
 
 void AUTPlusShockRifle::StartFire(uint8 FireModeNum)
@@ -508,12 +528,41 @@ void AUTPlusShockRifle::PumpInstagibEquipTap()
 	{
 		return;
 	}
-	if (!CanRetainInstagibEquipTap(Mode) || PendingInstagibEquipTapOwner.Get() != UTOwner
+	if (!CanRetainInstagibEquipTap(Mode, bInstagibTapAwaitingPossession) || PendingInstagibEquipTapOwner.Get() != UTOwner
 		|| PendingInstagibEquipTapController.Get() != UTOwner->Controller
+		|| InstagibEquipInputController.Get() != PendingInstagibEquipTapController.Get()
+		|| !InstagibEquipInputComponent.IsValid()
+		|| InstagibEquipInputComponent.Get() != PendingInstagibEquipTapController.Get()->InputComponent
 		|| (CurrentState != EquippingState && CurrentState != ActiveState))
 	{
 		ClearInstagibEquipTap();
 		return;
+	}
+	if (bInstagibTapAwaitingPossession)
+	{
+		if (GetWorld()->GetRealTimeSeconds() >= InstagibPossessionTapDeadline)
+		{
+			ClearInstagibEquipTap();
+			return;
+		}
+		AUTPlayerController* PC = PendingInstagibEquipTapController.Get();
+		if (!PC->IsInState(NAME_Playing) || PC->AcknowledgedPawn != UTOwner)
+		{
+			return;
+		}
+		// A missing PendingFire bit may mean stock discarded a still-held
+		// press. Wait for restart's held-input recovery in that case. Firing a
+		// synthetic tap here first would stop that real hold after one shot.
+		if (!bInstagibPossessionTapReleased)
+		{
+			return;
+		}
+		// Do not overtake normal or restart-recovered held input still queued
+		// for stock's post-movement dispatch. It owns the ordinary fire cadence.
+		if (PC->HasDeferredFireInputs())
+		{
+			return;
+		}
 	}
 	if (CurrentState == EquippingState)
 	{

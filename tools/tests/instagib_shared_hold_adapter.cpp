@@ -43,6 +43,8 @@ constexpr int NM_Standalone = 0, NM_ListenServer = 2, NM_Client = 3;
 uint64 GFrameCounter = 1;
 const char* NAME_None = "None";
 const char* NAME_Playing = "Playing";
+const char* NAME_Inactive = "Inactive";
+const char* NAME_Spectating = "Spectating";
 struct FString : std::string {
     using std::string::string;
     bool Contains(const char* text) const { return find(text) != npos; }
@@ -52,6 +54,7 @@ template<class T> struct TArray : std::vector<T> {
     using std::vector<T>::vector;
     bool IsValidIndex(int32 i) const { return i >= 0 && i < Num(); }
     int32 Num() const { return static_cast<int32>(this->size()); }
+    void Empty() { this->clear(); }
     T& operator[](int32 i) { return this->at(i); }
     const T& operator[](int32 i) const { return this->at(i); }
 };
@@ -115,24 +118,58 @@ struct UWorld {
     UDemoNetDriver* DemoNetDriver = nullptr;
     AUTGameState GameState;
     float InputWorldTime = -1.f;
+    float RealTimeOffset = 0.f;
+    bool Paused = false;
     float GetTimeSeconds() const { return InputWorldTime >= 0 ? InputWorldTime : Timers.Now; }
+    float GetRealTimeSeconds() const { return Timers.Now + RealTimeOffset; }
+    bool IsPaused() const { return Paused; }
     template<class T> T* GetGameState() { return &GameState; }
 };
 struct AUTWeapon;
 struct AUTCharacter;
 struct UInputComponent {};
+struct FViewport { bool Focused = true; bool HasFocus() const { return Focused; } };
+struct UConsole { bool Active = false; bool ConsoleActive() const { return Active; } };
+struct UGameViewportClient {
+    bool Ignore = false;
+    FViewport TestViewport;
+    UConsole TestConsole;
+    FViewport* Viewport = &TestViewport;
+    UConsole* ViewportConsole = &TestConsole;
+    bool IgnoreInput() const { return Ignore; }
+};
+struct UPlayer { virtual ~UPlayer() = default; };
+struct UUTLocalPlayer : UPlayer {
+    UGameViewportClient* ViewportClient = nullptr;
+    bool MenusOpen = false, QuickChatOpen = false;
+    bool AreMenusOpen() const { return MenusOpen; }
+    bool IsQuickChatOpen() const { return QuickChatOpen; }
+};
+struct FDeferredFireInput { uint8 FireMode; bool bStartFire; };
 struct AController { virtual ~AController() = default; };
 struct AUTPlayerController : AController {
     AUTCharacter* Pawn = nullptr;
+    AUTCharacter* UTCharacter = nullptr;
+    AUTCharacter* AcknowledgedPawn = nullptr;
     UInputComponent* InputComponent = nullptr;
-    bool Playing = true, IgnoreMove = false;
+    UPlayer* Player = nullptr;
+    bool Playing = true, IgnoreMove = false, Spectating = false, Cursor = false;
+    const char* StateName = NAME_Playing;
+    TArray<FDeferredFireInput> DeferredFireInputs;
     AUTCharacter* GetPawn() const { return Pawn; }
-    bool IsInState(const char*) const { return Playing; }
+    bool IsInState(const char* state) const {
+        return state == NAME_Playing ? Playing : state == NAME_Inactive && !Playing && !Spectating;
+    }
     bool IsMoveInputIgnored() const { return IgnoreMove; }
+    bool ShouldShowMouseCursor() const { return Cursor; }
+    bool HasDeferredFireInputs();
+    void ApplyDeferredFireInputs();
 };
 struct AUTPlayerState { virtual ~AUTPlayerState() = default; void NotIdle() {} };
 struct AUTCharacter {
     bool Local = true, Player = true, Dead = false, PendingKill = false, Disabled = false;
+    bool Feigning = false;
+    int TauntCount = 0;
     bool Pending[2] = {false, false};
     float FireRateMultiplier = 1.f;
     AUTWeapon* Weapon = nullptr;
@@ -147,6 +184,10 @@ struct AUTCharacter {
     bool IsDead() const { return Dead; }
     bool IsPendingKillPending() const { return PendingKill; }
     bool IsFiringDisabled() const { return Disabled; }
+    bool IsFeigningDeath() const { return Feigning; }
+    void StartFire(uint8 mode);
+    void StopFire(uint8 mode);
+    void PawnStartFire(uint8 mode) { StartFire(mode); }
     AUTWeapon* GetWeapon() const { return Weapon; }
     AUTWeapon* GetPendingWeapon() const { return PendingWeapon; }
     bool IsPendingFire(uint8 mode) const { return mode < 2 && Pending[mode]; }
@@ -308,6 +349,9 @@ struct AUTPlusShockRifle : AUTWeaponFix {
     using Super = AUTWeaponFix;
     bool InstagibIdentity = true;
     uint8 PendingInstagibEquipTapMode = 255;
+    bool bInstagibTapAwaitingPossession = false;
+    bool bInstagibPossessionTapReleased = false;
+    float InstagibPossessionTapDeadline = 0.f;
     TWeakObjectPtr<AUTCharacter> PendingInstagibEquipTapOwner, InstagibEquipPressOwner;
     TWeakObjectPtr<AUTPlayerController> PendingInstagibEquipTapController, InstagibEquipInputController;
     TWeakObjectPtr<UInputComponent> InstagibEquipInputComponent;
@@ -317,10 +361,11 @@ struct AUTPlusShockRifle : AUTWeaponFix {
     uint32 InstagibEquipInputSerial = 0;
     bool IsInstagibBeamWeapon() const { return InstagibIdentity; }
     bool HasSharedInstagibFireModes() const;
-    bool CanRetainInstagibEquipTap(uint8);
+    bool CanRetainInstagibEquipTap(uint8, bool = false);
     void ClearInstagibEquipTap();
     void PumpInstagibEquipTap();
     void NoteInstagibEquipPress(uint8);
+    void NoteInstagibEquipRelease(uint8);
     bool ConsumeInstagibEquipPress(uint8);
     void StartFire(uint8) override;
     void StopFire(uint8) override;
@@ -343,6 +388,8 @@ struct AUTPlusShockRifle : AUTWeaponFix {
     }
 };
 AUTCharacter* UUTWeaponState::GetUTOwner() const { return Weapon->UTOwner; }
+void AUTCharacter::StartFire(uint8 mode) { if (Weapon) Weapon->StartFire(mode); }
+void AUTCharacter::StopFire(uint8 mode) { if (Weapon) Weapon->StopFire(mode); }
 void UUTWeaponStateFiring::FireShot() { Weapon->FireShot(); }
 void UUTWeaponStateFiring::EndState() { Weapon->GetWorldTimerManager().ClearTimer(RefireCheckHandle); }
 template<class T, class U> T* Cast(U* p) { return dynamic_cast<T*>(p); }
@@ -402,6 +449,8 @@ struct Fixture {
     AUTCharacter Pawn;
     AUTPlayerController Controller;
     UInputComponent Input;
+    UGameViewportClient Viewport;
+    UUTLocalPlayer LocalPlayer;
     UWorld World;
     UUTWeaponStateActive Active;
     UUTWeaponStateEquipping Equip;
@@ -411,6 +460,8 @@ struct Fixture {
     Fixture() {
         Pawn.Weapon = &W; W.UTOwner = &Pawn; W.TestWorld = &World;
         Pawn.Controller = &Controller; Controller.Pawn = &Pawn; Controller.InputComponent = &Input;
+        Controller.UTCharacter = &Pawn; Controller.AcknowledgedPawn = &Pawn;
+        LocalPlayer.ViewportClient = &Viewport; Controller.Player = &LocalPlayer;
         W.RefreshInstagibEquipInput();
         W.ActiveState = &Active; W.EquippingState = &Equip;
         W.UnequippingState = &Unequip; W.InactiveState = &Inactive;
@@ -423,6 +474,20 @@ struct Fixture {
     void Down(uint8 mode) { W.StartFire(mode); }
     void PhysicalDown(uint8 mode) { W.NoteInstagibEquipPress(mode); Down(mode); }
     void BeginEquip() { W.BringUp(0.f); }
+    void BeforePossession() {
+        W.NetMode = NM_Client; Controller.Playing = false;
+        Controller.StateName = NAME_Inactive; Controller.AcknowledgedPawn = nullptr;
+    }
+    void Acknowledge() {
+        Controller.Playing = true; Controller.StateName = NAME_Playing;
+        Controller.AcknowledgedPawn = &Pawn;
+    }
+    void QueuePress(uint8 mode) {
+        Controller.DeferredFireInputs.push_back({mode, true}); W.NoteInstagibEquipPress(mode);
+    }
+    void QueueRelease(uint8 mode) {
+        Controller.DeferredFireInputs.push_back({mode, false}); W.NoteInstagibEquipRelease(mode);
+    }
     void FinishEquip() { Equip.BringUpFinished(); }
     void Up(uint8 mode) { W.StopFire(mode); }
     void Count(size_t count) const { Require(W.Shots.size() == count, "unexpected shot count"); }
@@ -863,9 +928,181 @@ void EquipTokenStop() {
         f.At(.4f); f.FinishEquip(); f.At(2.f); f.Count(0);
     }
 }
+void PossessionTap() {
+    for (uint8 mode : {uint8(0), uint8(1)}) for (bool enabled : {false, true})
+    for (bool equipFirst : {false, true}) {
+        Fixture f; f.BeginEquip(); f.BeforePossession();
+        CVarInstagibEquipTap.Value = enabled ? 1 : 0;
+        f.Pawn.Aim.Yaw = 10.f;
+        f.QueuePress(mode); f.Controller.ApplyDeferredFireInputs();
+        Require(!f.Pawn.Pending[mode], "stock did not discard the pre-Playing start");
+        f.At(.12f); f.QueueRelease(mode); f.Controller.ApplyDeferredFireInputs();
+        Require(f.W.Stops.size() == 1, "stock dropped the release with the start");
+        f.Count(0);
+        if (equipFirst) {
+            f.At(.2f); f.FinishEquip(); f.Count(0);
+            f.At(.3f); f.Acknowledge();
+        } else {
+            f.At(.2f); f.Acknowledge(); f.W.PumpInstagibEquipTap(); f.Count(0);
+            f.At(.3f); f.FinishEquip();
+        }
+        // Use execution-time aim, not the earlier click. No backdated fire.
+        if (equipFirst) { f.Pawn.Aim.Yaw = 80.f; f.W.PumpInstagibEquipTap(); }
+        f.Count(enabled ? 1 : 0);
+        if (enabled) {
+            Near(f.W.Shots[0].first, 10.3f, "handoff fired before both gates opened");
+            if (equipFirst) Near(f.W.ShotAims[0].Yaw, 80.f, "handoff retained old aim");
+            Require(!f.Pawn.Pending[0] && !f.Pawn.Pending[1], "released handoff became a hold");
+        }
+        f.At(3.f); f.Count(enabled ? 1 : 0);
+        CVarInstagibEquipTap.Value = 1;
+    }
+}
+void PossessionGuards() {
+    for (uint8 mode : {uint8(0), uint8(1)}) for (int change = 0; change < 19; ++change) {
+        Fixture f; UDemoNetDriver demo; f.BeginEquip(); f.BeforePossession();
+        switch (change) {
+        case 0: f.Controller.Spectating = true; break;
+        case 1: f.W.NetMode = NM_Standalone; break;
+        case 2: f.Controller.AcknowledgedPawn = &f.Pawn; break;
+        case 3: f.Controller.Cursor = true; break;
+        case 4: f.World.Paused = true; break;
+        case 5: f.Viewport.TestViewport.Focused = false; break;
+        case 6: f.Viewport.Ignore = true; break;
+        case 7: f.Viewport.TestConsole.Active = true; break;
+        case 8: f.Pawn.Feigning = true; break;
+        case 9: f.Pawn.TauntCount = 1; break;
+        case 10: f.Controller.IgnoreMove = true; break;
+        case 11: f.Pawn.Dead = true; break;
+        case 12: f.Pawn.Weapon = nullptr; break;
+        case 13: f.W.InstagibIdentity = false; break;
+        case 14: demo.Playing = true; f.World.DemoNetDriver = &demo; break;
+        case 15: f.World.GameState.Prevent = true; break;
+        case 16: f.LocalPlayer.MenusOpen = true; break;
+        case 17: f.LocalPlayer.QuickChatOpen = true; break;
+        case 18: f.Controller.Player = nullptr; break;
+        }
+        f.W.NoteInstagibEquipPress(mode);
+        Require(f.W.PendingInstagibEquipTapMode == 255, "blocked action retained a possession tap");
+        Require(!f.W.bInstagibTapAwaitingPossession, "blocked action armed recovery");
+    }
+    // Neither an old synthetic start nor a press after weapon raise can invent a tap.
+    for (bool active : {false, true}) {
+        Fixture f; f.BeginEquip(); f.BeforePossession();
+        if (active) { f.FinishEquip(); f.W.NoteInstagibEquipPress(0); }
+        else { f.Down(0); f.Up(0); }
+        f.Acknowledge(); f.FinishEquip(); f.At(2.f); f.Count(0);
+    }
+}
+void PossessionInvalidation() {
+    for (int change = 0; change < 14; ++change) {
+        Fixture f; UInputComponent otherInput; AUTCharacter replacement; AUTPlayerController other;
+        f.BeginEquip(); f.BeforePossession(); f.QueuePress(0);
+        f.Controller.ApplyDeferredFireInputs(); f.QueueRelease(0); f.Controller.ApplyDeferredFireInputs();
+        switch (change) {
+        case 0: f.Controller.Cursor = true; break;
+        case 1: f.World.Paused = true; break;
+        case 2: f.Viewport.TestViewport.Focused = false; break;
+        case 3: f.Viewport.TestConsole.Active = true; break;
+        case 4: f.Controller.InputComponent = &otherInput; break;
+        case 5: f.Controller.Spectating = true; break;
+        case 6: f.Pawn.Dead = true; break;
+        case 7: f.Pawn.PendingWeapon = &f.W; break;
+        case 8: f.BeginEquip(); break;
+        case 9: f.W.StopFireInternal(0); break;
+        case 10: f.W.GotoState(&f.Unequip); break;
+        case 11: f.Pawn.Controller = &other; break;
+        case 12: f.W.UTOwner = &replacement; break;
+        case 13: f.W.StopInstagibEquipInput(); break;
+        }
+        f.W.PumpInstagibEquipTap();
+        Require(f.W.PendingInstagibEquipTapMode == 255, "invalid lifecycle retained pre-Playing tap");
+        f.Controller.Cursor = false; f.World.Paused = false; f.Viewport.TestViewport.Focused = true;
+        f.Viewport.TestConsole.Active = false; f.Controller.InputComponent = &f.Input;
+        f.Controller.Spectating = false; f.Pawn.Dead = false; f.Pawn.PendingWeapon = nullptr;
+        f.Pawn.Controller = &f.Controller; f.W.UTOwner = &f.Pawn;
+        f.W.RefreshInstagibEquipInput(); f.Acknowledge(); f.BeginEquip(); f.FinishEquip(); f.At(2.f); f.Count(0);
+    }
+}
+void PossessionDeadline() {
+    for (bool playing : {false, true}) {
+        Fixture f; f.BeginEquip(); f.BeforePossession(); f.QueuePress(0);
+        f.Controller.ApplyDeferredFireInputs(); f.QueueRelease(0); f.Controller.ApplyDeferredFireInputs();
+        if (playing) f.Acknowledge();
+        // A frozen/dilated game clock must not preserve input through a stall.
+        f.World.InputWorldTime = 10.f; f.World.RealTimeOffset = .501f;
+        f.W.PumpInstagibEquipTap();
+        Require(f.W.PendingInstagibEquipTapMode == 255, "handoff ignored real-time expiry");
+        f.Acknowledge(); f.FinishEquip(); f.At(2.f); f.Count(0);
+    }
+    Fixture f; f.BeginEquip(); f.BeforePossession(); f.QueuePress(0);
+    f.Controller.ApplyDeferredFireInputs(); f.QueueRelease(0); f.Controller.ApplyDeferredFireInputs();
+    f.At(.15f); f.Controller.Playing = true; f.Controller.StateName = NAME_Playing;
+    f.FinishEquip(); f.Count(0); // A Playing state without acknowledgment is not ready.
+    f.At(.2f); f.Controller.AcknowledgedPawn = &f.Pawn; f.W.PumpInstagibEquipTap(); f.Count(1);
+}
+void PossessionCoalescing() {
+    for (uint8 last : {uint8(0), uint8(1)}) {
+        Fixture f; f.BeginEquip(); f.BeforePossession();
+        f.QueuePress(0); f.QueueRelease(0); f.QueuePress(last); f.QueueRelease(last);
+        f.Controller.ApplyDeferredFireInputs();
+        Require(f.W.PendingInstagibEquipTapMode == last, "handoff did not retain only latest action");
+        f.At(.2f); f.Acknowledge(); f.FinishEquip(); f.Count(1);
+        Require(f.W.Shots[0].second == last, "handoff fired wrong mode");
+        f.At(3.f); f.Count(1);
+    }
+    Fixture f; f.BeginEquip(); f.BeforePossession(); f.QueuePress(0); f.QueueRelease(0);
+    f.Controller.ApplyDeferredFireInputs(); f.At(.1f); f.Acknowledge();
+    f.QueuePress(1); f.QueueRelease(1); f.Controller.ApplyDeferredFireInputs();
+    f.At(.3f); f.FinishEquip(); f.Count(1);
+    Require(f.W.Shots[0].second == 1, "fresh Playing action failed to supersede possession tap");
+    f.At(3.f); f.Count(1);
+}
+void PossessionHeldRecovery() {
+    for (uint8 mode : {uint8(0), uint8(1)}) for (bool equipFirst : {false, true})
+    for (bool releaseBeforeEquip : {false, true}) {
+        Fixture f; f.BeginEquip(); f.BeforePossession(); f.QueuePress(mode);
+        f.Controller.ApplyDeferredFireInputs(); f.At(.1f);
+        if (equipFirst) f.FinishEquip();
+        f.Acknowledge();
+        f.W.PumpInstagibEquipTap(); f.Count(0); // Weapon tick can precede held recovery.
+        // Model the legitimate verifier's synthetic held start, without an action observer.
+        f.Controller.DeferredFireInputs.push_back({mode, true});
+        f.W.PumpInstagibEquipTap(); f.Count(0); // Must not overtake queued normal input.
+        f.Controller.ApplyDeferredFireInputs();
+        if (releaseBeforeEquip) {
+            f.QueueRelease(mode); f.Controller.ApplyDeferredFireInputs();
+        }
+        if (!equipFirst) { f.At(.3f); f.FinishEquip(); }
+        f.Count(1);
+        if (!releaseBeforeEquip) { f.At(2.31f); f.Count(3); f.Cadence(); }
+        f.QueueRelease(mode); f.Controller.ApplyDeferredFireInputs();
+        const size_t shots = f.W.Shots.size(); f.At(4.f); f.Count(shots);
+        Require(f.W.PendingInstagibEquipTapMode == 255, "held recovery left duplicate tap intent");
+    }
+    for (uint8 mode : {uint8(0), uint8(1)}) {
+        Fixture f; f.BeginEquip(); f.BeforePossession();
+        // All real action observers run before the deferred queue is drained.
+        // The old release must not release the latest same-mode held press.
+        f.QueuePress(mode); f.QueueRelease(mode); f.QueuePress(mode);
+        f.Controller.ApplyDeferredFireInputs();
+        Require(!f.W.bInstagibPossessionTapReleased, "old deferred stop released a newer held action");
+        f.At(.2f); f.Acknowledge(); f.FinishEquip(); f.W.PumpInstagibEquipTap(); f.Count(0);
+        f.Controller.DeferredFireInputs.push_back({mode, true});
+        f.Controller.ApplyDeferredFireInputs(); f.Count(1);
+        f.At(2.21f); f.Count(3); f.Cadence();
+        f.QueueRelease(mode); f.Controller.ApplyDeferredFireInputs(); f.At(4.f); f.Count(3);
+    }
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "one case required"); const std::string name(argv[1]);
-    if (name == "equip_tap") EquipTap();
+    if (name == "possession_tap") PossessionTap();
+    else if (name == "possession_guards") PossessionGuards();
+    else if (name == "possession_invalidation") PossessionInvalidation();
+    else if (name == "possession_deadline") PossessionDeadline();
+    else if (name == "possession_coalescing") PossessionCoalescing();
+    else if (name == "possession_held") PossessionHeldRecovery();
+    else if (name == "equip_tap") EquipTap();
     else if (name == "equip_hold") EquipHold();
     else if (name == "equip_provenance") EquipProvenance();
     else if (name == "equip_guards") EquipGuards();

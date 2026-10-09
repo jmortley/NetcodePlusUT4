@@ -170,23 +170,33 @@ private:
 	uint8 PendingInstagibEquipTapMode = 255;
 	TWeakObjectPtr<AUTCharacter> PendingInstagibEquipTapOwner;
 	TWeakObjectPtr<AUTPlayerController> PendingInstagibEquipTapController;
+	// Only a real press on the new pawn before ClientRestart may wait for
+	// possession. The deadline uses real time, never the shot/cadence clock.
+	bool bInstagibTapAwaitingPossession = false;
+	bool bInstagibPossessionTapReleased = false;
+	float InstagibPossessionTapDeadline = 0.f;
 	TWeakObjectPtr<AUTPlayerController> InstagibEquipInputController;
 	TWeakObjectPtr<UInputComponent> InstagibEquipInputComponent;
 	TWeakObjectPtr<AUTCharacter> InstagibEquipPressOwner;
 	FDelegateHandle InstagibEquipPrimaryBindingHandle;
 	FDelegateHandle InstagibEquipAlternateBindingHandle;
+	FDelegateHandle InstagibEquipPrimaryReleaseHandle;
+	FDelegateHandle InstagibEquipAlternateReleaseHandle;
 	bool bInstagibEquipPress[2] = { false, false };
 	uint64 InstagibEquipPressFrame[2] = { 0, 0 };
 	uint32 InstagibEquipInputSerial = 0;
 	bool bProcessingInstagibEquipStart = false;
-	bool CanRetainInstagibEquipTap(uint8 FireMode);
+	bool CanRetainInstagibEquipTap(uint8 FireMode, bool bAllowInactive = false);
 	void ClearInstagibEquipTap();
 	void PumpInstagibEquipTap();
 	void RefreshInstagibEquipInput();
 	void StopInstagibEquipInput();
 	void InstagibEquipPrimaryPressed();
 	void InstagibEquipAlternatePressed();
+	void InstagibEquipPrimaryReleased();
+	void InstagibEquipAlternateReleased();
 	void NoteInstagibEquipPress(uint8 FireMode);
+	void NoteInstagibEquipRelease(uint8 FireMode);
 	bool ConsumeInstagibEquipPress(uint8 FireMode);
 	/** One weapon-owned material instance is shared by its short-lived beam PSCs. */
 	UPROPERTY(Transient)

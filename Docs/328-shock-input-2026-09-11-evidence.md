@@ -306,8 +306,10 @@ and respawn weapon raise, not the one-second refire cycle.
 
 Non-consuming observers of the existing controller's fire actions provide
 same-frame owner-bound input tokens. A held-input verification, timer retry,
-dead/unpossessed respawn click, or deferred input crossing possession cannot
-create the intent by itself. The normal release still clears physical held fire.
+or dead/unpossessed respawn click cannot create the intent by itself. The
+2026-10-08 follow-up below separately covers a real click on the already
+replicated living pawn before possession acknowledgment. The normal release
+still clears physical held fire.
 Existing diagnostic observers and the equip observers remove only their exact
 delegate handles, so toggling the trace cannot remove gameplay observers.
 
@@ -334,3 +336,54 @@ UE4.15; 57 tests passed across `test_instagib_shared_hold`, `test_instagib_beam`
 actions collected before FIFO dispatch and cancellation before token consumption.
 The first build required `-gather` to include the newly added source file in UBT's
 cached source list. Shipping/cooked and live multiplayer checks remain outstanding.
+
+## 329 follow-up: recover input during respawn possession (2026-10-08)
+
+The earlier equip fix needed stock to deliver `StartFire` first. Stock
+`ApplyDeferredFireInputs` instead empties queued starts while the controller is
+Inactive, even when pawn/controller replication already exposes the new living
+pawn and its equipping rifle. Releases still reach `StopFire`. UE4.15 explicitly
+allows `ClientRestart` to arrive before the pawn parameter is mapped; the retry
+can leave these two readiness states temporarily out of step. The original
+capture has 25 pre-weapon dropped starts, distinct from its seven eligible equip
+taps. It does not record enough possession state to prove the cause of every drop.
+
+`ncp.InstagibEquipTap` now also retains one real action on that current living
+pawn's equipping, identical-mode Instagib rifle while a network client is Inactive
+and has not acknowledged the pawn. It expires 500 ms after the physical press
+using real time. That is a maximum age, not an added firing delay. Dispatch waits
+for Playing, acknowledgment of the same pawn, equip completion and legal cadence.
+The shot uses current aim and the normal firing protocol. No RPC, rewind, shot
+identity or server admission policy changes.
+
+Both fire-action presses and releases are observed without consuming input.
+Release is tracked at action time so an old deferred release cannot turn a later
+same-frame repress-and-hold into a released tap. A genuine hold is left to normal
+input or the restart recovery below. Multiple released taps coalesce; a fresh
+action supersedes the old one. Menu/chat/console, lost focus, paused/blocked play,
+death, changed pawn/controller/input component, weapon switching and the existing
+equip lifetime invalidations cancel the intent. A normal same-weapon restart does
+not re-equip the rifle and therefore does not erase the valid pending click.
+
+`ATeamArenaCharacter::PawnClientRestart` also schedules one bounded local held-input
+recovery for all weapons. It starts next tick, after ClientRestart can enter
+Playing, and waits at most 500 ms of monotonic time for acknowledgment and the
+weapon to arrive and initialize. It uses stock `ClientVerifyFiringInputs` to read
+the controller's current held buttons. Released buttons do not create starts.
+If either mode is already pending, any start is queued, or the weapon is firing,
+normal input keeps control and recovery ends. Repeated restarts cannot extend the
+deadline or rearm completed recovery. A changed weapon, owner or blocked gameplay
+cancels it; there is no permanent polling or global held-button replay.
+
+Native regression adapters execute the actual stock deferred dispatcher and held
+verifier, the production tap/restart methods and existing firing state machine.
+They cover both fire modes, equip/acknowledgment order, released taps, continuous
+holds, same-frame release/repress, duplicate starts, timeout and lifecycle guards.
+Separate binding tests exercise the actual installation/removal methods, including
+preserving other observers. These are not a UE build or a multiplayer playtest.
+
+After rebuilding, test repeated respawns with both taps and holds before the rifle
+finishes raising, including simulated latency. Check menu/focus cancellation,
+release/repress, and ordinary Shock, Link and rocket held fire. In particular,
+verify one legal shot for a released Instagib tap and sustained normal cadence for
+a held button. No content recook is required for these native-only changes.

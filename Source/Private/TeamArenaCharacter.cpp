@@ -504,6 +504,7 @@ void ATeamArenaCharacter::ReleaseRemoteAnimationURO(bool bTeardown)
 
 void ATeamArenaCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	CancelSpawnHeldFire();
 	StopAmpAmbientSound();
 	ReleaseRemoteAnimationURO(true);
 	Super::EndPlay(EndPlayReason);
@@ -1149,6 +1150,7 @@ void ATeamArenaCharacter::LeaderHatStatusChanged_Implementation()
 
 void ATeamArenaCharacter::PlayDying()
 {
+	CancelSpawnHeldFire();
 	StopAmpAmbientSound();
 	Super::PlayDying();
 	ClearLocalOutlineRenderState();
@@ -1172,6 +1174,7 @@ void ATeamArenaCharacter::SpawnBloodDecal(const FVector& TraceStart, const FVect
 
 void ATeamArenaCharacter::Destroyed()
 {
+	CancelSpawnHeldFire();
 	StopAmpAmbientSound();
 	// AUTLineUpHelper destroys its prematch preview pawns while they are still alive. That
 	// bypasses PlayDying(), and stock AUTCharacter::Destroyed() destroys WeaponAttachment

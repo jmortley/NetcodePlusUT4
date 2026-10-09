@@ -16,6 +16,7 @@ class UTeamArenaCharacterMovement;
 class ACTFStatsReplicator;
 class AClutchRoundState;
 class AUTWeaponFix;
+class AUTPlayerController;
 class UUTWeaponSkin;
 class UMaterialInstanceDynamic;
 class UMaterialInterface;
@@ -79,6 +80,7 @@ public:
 
 	virtual void Tick(float DeltaTime) override;
 	virtual void PossessedBy(AController* NewController) override;
+	virtual void PawnClientRestart() override;
 	virtual bool AddInventory(AUTInventory* InvToAdd, bool bAutoActivate) override;
 	virtual void SetSkinForWeapon(UUTWeaponSkin* WeaponSkin) override;
 	virtual void UpdateWeaponSkinPrefFromProfile(AUTWeapon* Weapon) override;
@@ -150,6 +152,16 @@ public:
 
 
 protected:
+	/** One bounded recovery after local possession, using stock's current held-input flags. */
+	void RetrySpawnHeldFire();
+	void CancelSpawnHeldFire();
+	TWeakObjectPtr<AUTPlayerController> SpawnHeldFireController;
+	TWeakObjectPtr<UWorld> SpawnHeldFireWorld;
+	TWeakObjectPtr<AUTWeapon> SpawnHeldFireWeapon;
+	bool bSpawnHeldFireWeaponBound = false;
+	FTimerHandle SpawnHeldFireHandle;
+	double SpawnHeldFireDeadline = 0.0;
+
 	// Generated constructors can instantiate member cleanup without seeing the
 	// private state definition. Keep the actual delete in the implementation file.
 	struct NETCODEPLUS_API FRemoteAnimationURODeleter

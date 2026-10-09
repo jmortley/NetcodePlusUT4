@@ -45,6 +45,7 @@ class InstagibSharedHoldTests(unittest.TestCase):
             )),
             (PLUGIN / "Source/Private/NCInstagibEquipInput.cpp", (
                 "void AUTPlusShockRifle::NoteInstagibEquipPress",
+                "void AUTPlusShockRifle::NoteInstagibEquipRelease",
                 "bool AUTPlusShockRifle::ConsumeInstagibEquipPress",
             )),
             (PLUGIN / "Source/Private/UTWeaponFix.cpp", (
@@ -60,6 +61,10 @@ class InstagibSharedHoldTests(unittest.TestCase):
                 "bool AUTWeapon::BeginFiringSequence", "void AUTWeapon::EndFiringSequence",
                 "float AUTWeapon::GetRefireTime", "bool AUTWeapon::CanFireAgain",
                 "bool AUTWeapon::HandleContinuedFiring",
+            )),
+            (STOCK / "UTPlayerController.cpp", (
+                "void AUTPlayerController::ApplyDeferredFireInputs",
+                "bool AUTPlayerController::HasDeferredFireInputs",
             )),
             (STOCK / "UTWeaponStateActive.cpp", (
                 "void UUTWeaponStateActive::BeginState",
@@ -173,6 +178,24 @@ class InstagibSharedHoldTests(unittest.TestCase):
 
     def test_internal_stop_cancels_observed_equip_action_before_dispatch(self):
         self.run_case("equip_token_stop")
+
+    def test_stock_dropped_start_forwarded_release_recovers_once_after_possession_and_equip(self):
+        self.run_case("possession_tap")
+
+    def test_possession_capture_excludes_blocked_spectator_acknowledged_and_synthetic_inputs(self):
+        self.run_case("possession_guards")
+
+    def test_possession_tap_cancels_on_focus_menu_input_and_weapon_lifecycle_changes(self):
+        self.run_case("possession_invalidation")
+
+    def test_possession_tap_requires_acknowledgment_and_expires_on_real_time(self):
+        self.run_case("possession_deadline")
+
+    def test_possession_taps_coalesce_and_yield_to_fresh_playing_actions(self):
+        self.run_case("possession_coalescing")
+
+    def test_possession_tap_cannot_duplicate_restart_recovered_held_input(self):
+        self.run_case("possession_held")
 
 
 if __name__ == "__main__":
