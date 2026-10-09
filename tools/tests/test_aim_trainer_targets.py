@@ -26,16 +26,20 @@ struct FLinearColor { static const FLinearColor Transparent; };
 const FLinearColor FLinearColor::Transparent;
 struct UMaterialInstanceDynamic { void SetVectorParameterValue(const char*, FLinearColor) {} };
 constexpr int ROLE_Authority = 3;
+constexpr int NM_DedicatedServer = 1;
 struct FMath {
     static bool IsFinite(float value) { return std::isfinite(value); }
     static float Clamp(float value,float low,float high) { return value<low?low:value>high?high:value; }
     static float Min(float a,float b) { return a<b?a:b; }
     static float Max(float a,float b) { return a>b?a:b; }
 };
-enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling, MOVE_Flying };
+enum MovementMode { MOVE_None, MOVE_Walking, MOVE_Falling, MOVE_Flying, MOVE_Swimming };
 struct FVector {
     float X, Y, Z;
     FVector(float x=0.f, float y=0.f, float z=0.f) : X(x), Y(y), Z(z) {}
+    bool ContainsNaN() const { return !std::isfinite(X)||!std::isfinite(Y)||!std::isfinite(Z); }
+    float SizeSquared() const { return X*X+Y*Y+Z*Z; }
+    float Size() const { return std::sqrt(SizeSquared()); }
     float Size2D() const { return std::sqrt(X*X+Y*Y); }
     FVector GetSafeNormal2D() const { const float size=Size2D(); return size>0.f?FVector(X/size,Y/size,0.f):FVector(); }
     FVector operator*(float scale) const { return FVector(X*scale,Y*scale,Z*scale); }
@@ -57,6 +61,9 @@ struct UCharacterMovementComponent {
     virtual ~UCharacterMovementComponent() = default;
     MovementMode Mode = MOVE_Walking;
     float Speed = 0.f, MaxWalkSpeed = 500.f, MaxWalkSpeedCrouched = 240.f, MaxAcceleration = 6000.f;
+    float GravityScale = 1.f;
+    FVector PendingLaunchVelocity;
+    float GetMaxAcceleration() const { return MaxAcceleration; }
     int Stops = 0;
     bool IsMovingOnGround() const { return Mode == MOVE_Walking; }
     bool IsFalling() const { return Mode == MOVE_Falling; }
@@ -68,6 +75,7 @@ struct ATeamArenaCharacter;
 struct AUTCharacter;
 struct FHitResult { FVector ImpactNormal=FVector(0,0,1); };
 struct UUTCharacterMovement : UCharacterMovementComponent {
+    using Super=UCharacterMovementComponent;
     ATeamArenaCharacter* Owner = nullptr;
     AUTCharacter* CharacterOwner = nullptr;
     bool bIsDodging = false, DodgeInput = false, bIsDodgeLanding = false, FallingFlags = false;
@@ -81,6 +89,10 @@ struct UUTCharacterMovement : UCharacterMovementComponent {
     float DodgeImpulseHorizontal=1500.f,DodgeImpulseVertical=500.f,DodgeMaxHorizontalVelocity=1700.f;
     float DodgeLandingSpeedFactor=1.f,FloorSlideEndingSpeedFactor=.4f,Gravity=-2154.f;
     float DodgeJumpResetInterval=.35f,DodgeJumpLandingSpeedFactor=1.f;
+    float DefaultBrakingDecelerationWalking=2000.f,BrakingDecelerationWalking=2000.f;
+    float FastInitialAcceleration=12000.f,MaxFastAccelSpeed=200.f,DodgeLandingAcceleration=1000.f;
+    float MaxFallingAcceleration=3200.f,MaxSwimmingAcceleration=1000.f;
+    float MaxRelativeSwimmingAccelNumerator=1.f,MaxRelativeSwimmingAccelDenominator=1.f;
     bool bIsAgainstWall=false,bFallingInWater=false,bCountWallSlides=false,bHasPlayedWallHitSound=false;
     bool bJumpAssisted=false,bExplicitJump=false;
     int CurrentMultiJumpCount=0,CurrentWallDodgeCount=0;
@@ -94,8 +106,8 @@ struct UUTCharacterMovement : UCharacterMovementComponent {
     void ClearDodgeInput() { DodgeInput = false; bPressedSlide=false; }
     void ClearFloorSlideTap() { bWantsFloorSlide=false; }
     void UpdateFloorSlide(bool wants) { bWantsFloorSlide=wants; }
-    float GetGravityZ() const { return Gravity; }
-    float GetMaxAcceleration() const { return MaxAcceleration; }
+    float GetGravityZ() const { return Gravity * GravityScale; }
+    float GetMaxAcceleration() const;
     void ClearRestrictedJump() {}
     void SetPostLandedPhysics(const FHitResult&) { Mode=MOVE_Walking; }
     void StartNewPhysics(float,int32) {}
@@ -124,6 +136,7 @@ struct AUTCharacter {
     AUTPlayerState* PlayerState=nullptr;
     bool bIsCrouched = false, Dead = false;
     bool IsDead() const { return Dead; }
+    float GetWalkMovementReductionPct() const { return 0.f; }
     bool CanSlide() const { return SlideAllowed&&!bIsCrouched; }
     void MovementEventUpdated(int type,FVector direction) { if(type==EME_Slide) {++SlideEvents;SlideDirection=direction;} }
     void UpdateCrouchedEyeHeight() { ++EyeUpdates; }
@@ -135,9 +148,22 @@ struct AUTCharacter {
     virtual void NotifyBlockedHeadShot(AUTCharacter*) { ++HelmetNotifications; }
 };
 struct ATeamArenaCharacter : AUTCharacter {
+    struct Attachment { void SetActorHiddenInGame(bool) {} };
+    Attachment* WeaponAttachment = nullptr;
     int CapsuleHeadQueries = 0, SuperTicks = 0, DodgeCalls = 0, Teleports = 0, NetUpdates = 0, InputCalls = 0;
+    int Launches = 0;
+    bool LaunchXYOverride = false, LaunchZOverride = false;
+    void LaunchCharacter(FVector velocity, bool xyOverride, bool zOverride) {
+        ++Launches; Move.PendingLaunchVelocity=velocity; LaunchXYOverride=xyOverride; LaunchZOverride=zOverride;
+    }
     bool DodgeAllowed = true, Hidden = false, Collision = true, HasPendingInput = false;
     bool SimulateNativeDodge=false;
+    int GetNetMode() const { return NM_DedicatedServer; }
+    float HeadRadius=18.f,HeadScale=1.f;
+    float HeadScaleUsed=0.f,HeadPrediction=-1.f;
+    bool IsHeadShot(FVector,FVector,float scale,AUTCharacter*,float prediction) {
+        HeadScaleUsed=scale;HeadPrediction=prediction;return HeadRadius*HeadScale*scale>20.5f;
+    }
     float MaxSpeedPctModifier=1.f;
     struct Capsule { float Radius=38.f;float GetScaledCapsuleRadius() const { return Radius; } } CapsuleComponent;
     Capsule* GetCapsuleComponent() { return &CapsuleComponent; }
@@ -188,14 +214,27 @@ void UUTCharacterMovement::UnCrouch(bool) {
 }
 struct ANCAimTrainerTarget : ATeamArenaCharacter {
     using Super = ATeamArenaCharacter;
-    bool bTrainerVisible=false, bTrainerStrafe=false, bTrainerWiggle=false;
+    bool bTrainerVisible=false, bTrainerStrafe=false, bTrainerWiggle=false, bTrainerAirborne=false;
+    struct ActorClass {
+        ANCAimTrainerTarget* Defaults=nullptr;
+        template<class T> const T* GetDefaultObject() const { return static_cast<const T*>(Defaults); }
+    } Class;
+    ActorClass* GetClass() { return &Class; }
     float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
     float WiggleRange=0.f, PopupLongStrafeEndTime=0.f;
     bool bRecenterWiggleAfterSlide=false,bRecenterWiggleAfterDodge=false,bTrainerDodgeSlidePending=false;
     FVector StrafeCenter,TrainerSlideDirection;
+    float TrainerHeadshotScale=1.f,NextTrainerTintTime=0.f,TrainerFlightRate=1.f;
+    void UpdateTrainerTint() {}
+    void SetTrainerHeadshotScale(float);
+    void OnRep_TrainerHeadshotScale();
     struct History { int Count=7; void Reset() { Count=0; } } SavedPositions, SavedCapsulePostures;
     void OnRep_TrainerVisible();
     void ActivateTarget(const FVector&,bool);
+    void ActivateAirborneTarget(const FVector&,const FVector&,float=1.f);
+    void OnRep_TrainerFlightRate();
+    bool LaunchAirborneTarget(const FVector&);
+    void SetTrainerSpeedScale(float);
     void StartWiggle(float);
     bool StartPopupLongStrafe(float,float,float);
     bool IsTrainerLongStrafing() const { return PopupLongStrafeEndTime>0.f; }
@@ -906,6 +945,204 @@ int main(int argc,char**argv) {
                 &&target.TrainerSlideDirection.X==0.f,"far-right slide did not turn inward away from arena wall");
             else Require(target.SlideEvents==0,"deep-left or invalid variant crossed a raised platform");
         }
+    } else if(name=="airborne_launch") {
+        auto target=Active();
+        target.Move.PendingLaunchVelocity=FVector(1,2,3);
+        target.ActivateAirborneTarget(FVector(100,-1400,288),FVector(500,1300,2300));
+        Require(target.bTrainerAirborne&&target.bTrainerVisible&&!target.bTrainerStrafe&&!target.bTrainerWiggle
+            &&target.Move.Mode==MOVE_Falling&&target.Launches==1&&target.LaunchXYOverride&&target.LaunchZOverride
+            &&target.Move.PendingLaunchVelocity.X==500.f&&target.Move.PendingLaunchVelocity.Y==1300.f
+            &&target.Move.PendingLaunchVelocity.Z==2300.f,
+            "airborne activation did not invoke native launch with full override");
+        const int teleports=target.Teleports;
+        target.SavedPositions.Count=4;
+        target.TheWorld.Time+=2.f;
+        target.Move.Mode=MOVE_Walking;
+        Require(target.LaunchAirborneTarget(FVector(-500,-1300,2300))&&target.Teleports==teleports
+            &&target.SavedPositions.Count==4&&target.AppearanceTime==42.f,
+            "repeat jumppad launch recycled identity or teleported instead of native launching");
+        target.Tick(.016f);
+        Require(target.InputCalls==0,"airborne flight was countersteered by A/D movement");
+        target.HideTarget();
+        Require(!target.bTrainerAirborne&&target.Move.PendingLaunchVelocity.IsNearlyZero(),
+            "hidden target retained a queued native launch");
+        target.ActivateAirborneTarget(FVector(2000,0,1700),FVector::ZeroVector);
+        Require(target.Move.Mode==MOVE_Falling&&target.Move.PendingLaunchVelocity.IsNearlyZero(),
+            "zero-impulse falling target did not enter gravity physics");
+        target.ActivateTarget(FVector(900,0,108),true);
+        Require(!target.bTrainerAirborne&&target.bTrainerStrafe&&target.Move.Mode==MOVE_Walking,
+            "pooled target carried airborne state into normal training");
+    } else if(name=="airborne_flight_rate") {
+        for(float baseGravityScale:{.8f,1.f,1.25f}) for(float rate:{.93f,.95f,1.f}) {
+            ANCAimTrainerTarget defaults;defaults.Move.GravityScale=baseGravityScale;
+            for(float initialZ:{-300.f,0.f,900.f}) {
+                auto target=Active();target.Class.Defaults=&defaults;
+                const FVector initialVelocity(350.f,-220.f,initialZ);
+                target.ActivateAirborneTarget(FVector(2000,0,1700),initialVelocity,rate);
+                const FVector actualVelocity=target.Move.PendingLaunchVelocity;
+                Require(target.TrainerFlightRate==rate&&target.Move.Mode==MOVE_Falling&&target.Launches==1
+                    &&actualVelocity.X==initialVelocity.X&&actualVelocity.Y==initialVelocity.Y,
+                    "fall-rate control changed horizontal launch or bypassed native falling");
+                for(float normalTime:{.125f,.5f,1.2f}) {
+                    const float slowedTime=normalTime/rate;
+                    const float normalHeight=1700.f+initialZ*normalTime+.5f*defaults.Move.GetGravityZ()*normalTime*normalTime;
+                    const float slowedHeight=target.Position.Z+actualVelocity.Z*slowedTime
+                        +.5f*target.Move.GetGravityZ()*slowedTime*slowedTime;
+                    const float normalSpeed=initialZ+defaults.Move.GetGravityZ()*normalTime;
+                    const float slowedSpeed=actualVelocity.Z+target.Move.GetGravityZ()*slowedTime;
+                    Require(std::abs(normalHeight-slowedHeight)<.002f&&std::abs(slowedSpeed-normalSpeed*rate)<.002f,
+                        "vertical rate does not preserve matched height with the requested7%/5% speed reduction");
+                }
+                // A replicated pawn extrapolates with the same gravity and its
+                // normal movement-replicated velocity, including late joining.
+                auto client=Active();client.Class.Defaults=&defaults;client.Role=1;
+                client.TrainerFlightRate=target.TrainerFlightRate;client.OnRep_TrainerFlightRate();
+                Require(client.Move.GetGravityZ()==target.Move.GetGravityZ()&&client.Launches==0&&client.Teleports==0,
+                    "replicated rate disagrees with authority or relaunches the client pawn");
+            }
+        }
+    } else if(name=="airborne_flight_rate_reset") {
+        ANCAimTrainerTarget defaults;defaults.Move.GravityScale=1.25f;
+        auto target=Active();target.Class.Defaults=&defaults;
+        const FVector location(2000,0,1700),velocity(150,200,-300);
+        for(float rate:{.93f,.95f,.93f}) {
+            target.ActivateAirborneTarget(location,velocity,rate);
+            target.ActivateAirborneTarget(location,velocity,rate);
+            Require(std::abs(target.Move.GravityScale-1.25f*rate*rate)<.00001f,
+                "reactivation compounded a previous fall's gravity scale");
+            target.HideTarget();
+            Require(target.TrainerFlightRate==1.f&&target.Move.GravityScale==1.25f
+                &&target.Move.Mode==MOVE_None&&target.Move.PendingLaunchVelocity.IsNearlyZero(),
+                "hidden pooled target retained reduced gravity or a queued launch");
+            target.ActivateAirborneTarget(location,velocity,rate);
+            target.ActivateTarget(FVector(900,0,108),true);
+            Require(target.TrainerFlightRate==1.f&&target.Move.GravityScale==1.25f&&target.Move.Mode==MOVE_Walking,
+                "grounded target inherited the airborne drop's reduced gravity");
+            target.ActivateAirborneTarget(location,velocity,rate);
+            target.ActivateAirborneTarget(FVector(100,-1400,288),FVector(500,1300,2300));
+            Require(target.TrainerFlightRate==1.f&&target.Move.GravityScale==1.25f
+                &&target.Move.PendingLaunchVelocity.Z==2300.f,
+                "jump-pad appearance inherited a falling target's vertical rate");
+            Require(target.LaunchAirborneTarget(FVector(-500,-1300,2100))
+                &&target.Move.PendingLaunchVelocity.Z==2100.f&&target.Move.PendingLaunchVelocity.Y==-1300.f,
+                "repeat pad launch changed its explicitly calculated ballistic velocity");
+        }
+        auto client=Active();client.Class.Defaults=&defaults;client.Role=1;
+        for(float rate:{.93f,1.f,.95f,1.f}) {
+            client.TrainerFlightRate=rate;client.OnRep_TrainerFlightRate();
+            Require(std::abs(client.Move.GravityScale-defaults.Move.GravityScale*rate*rate)<.00001f,
+                "client retained or compounded gravity after a replicated appearance change");
+        }
+    } else if(name=="airborne_flight_rate_guards") {
+        ANCAimTrainerTarget defaults;defaults.Move.GravityScale=1.25f;
+        for(float rate:{0.f,-.1f,1.01f,std::numeric_limits<float>::infinity(),std::numeric_limits<float>::quiet_NaN()}) {
+            auto target=Active();target.Class.Defaults=&defaults;target.Move.GravityScale=1.25f;
+            target.ActivateAirborneTarget(FVector(2000,0,1700),FVector(100,200,300),rate);
+            Require(target.Teleports==0&&target.Launches==0&&target.TrainerFlightRate==1.f&&target.Move.GravityScale==1.25f,
+                "invalid fall rate mutated native target state");
+        }
+        auto target=Active();target.Class.Defaults=&defaults;target.Role=1;
+        target.ActivateAirborneTarget(FVector(2000,0,1700),FVector(100,200,300),.93f);
+        Require(target.Teleports==0&&target.Launches==0&&target.TrainerFlightRate==1.f,
+            "client changed the authoritative fall rate or appearance");
+    } else if(name=="airborne_guards") {
+        for(int condition=0;condition<4;++condition) {
+            auto target=Active();target.bTrainerAirborne=true;
+            FVector velocity(0,1000,2000);
+            if(condition==0)target.Role=1;
+            if(condition==1)target.bTrainerVisible=false;
+            if(condition==2)target.bTrainerAirborne=false;
+            if(condition==3)velocity.Y=std::numeric_limits<float>::infinity();
+            Require(!target.LaunchAirborneTarget(velocity)&&target.Launches==0,
+                "native launch accepted invalid authority, lifecycle, or velocity");
+        }
+        auto target=Active();target.ActivateAirborneTarget(FVector(0,0,1700),FVector::ZeroVector);
+        target.StartWiggle(50.f);
+        Require(!target.bTrainerWiggle&&!target.bTrainerStrafe&&target.Move.Mode==MOVE_Falling,
+            "popup movement took over airborne target");
+        const int teleports=target.Teleports;
+        target.ActivateAirborneTarget(FVector(std::numeric_limits<float>::quiet_NaN(),0,0),FVector::ZeroVector);
+        Require(target.Teleports==teleports,"nonfinite airborne spawn teleported target");
+    } else if(name=="speed_scale") {
+        ANCAimTrainerTarget defaults;defaults.Move.MaxWalkSpeed=940.f;defaults.Move.MaxWalkSpeedCrouched=315.f;
+        defaults.Move.MaxFloorSlideSpeed=900.f;
+        auto target=Active();target.Class.Defaults=&defaults;
+        target.SetTrainerSpeedScale(1.3f);target.SetTrainerSpeedScale(1.3f);
+        Require(std::abs(target.Move.MaxWalkSpeed-1222.f)<.01f&&std::abs(target.Move.MaxWalkSpeedCrouched-409.5f)<.01f
+            &&std::abs(target.Move.DodgeImpulseHorizontal-1950.f)<.01f
+            &&std::abs(target.Move.DodgeMaxHorizontalVelocity-2210.f)<.01f
+            &&std::abs(target.Move.MaxInitialFloorSlideSpeed-1755.f)<.01f
+            &&std::abs(target.Move.MaxFloorSlideSpeed-1170.f)<.01f,
+            "hard tracking speeds compounded or ignored the target variant defaults");
+        Require(target.Move.DodgeImpulseVertical==defaults.Move.DodgeImpulseVertical
+            &&target.Move.Gravity==defaults.Move.Gravity,
+            "horizontal speed boost changed gravity or jump impulse");
+        Require(std::abs(target.Move.MaxAcceleration-defaults.Move.MaxAcceleration*1.3f)<.01f
+            &&std::abs(target.Move.FastInitialAcceleration-15600.f)<.01f
+            &&std::abs(target.Move.MaxFastAccelSpeed-260.f)<.01f
+            &&std::abs(target.Move.DodgeLandingAcceleration-1300.f)<.01f
+            &&std::abs(target.Move.FloorSlideAcceleration-520.f)<.01f
+            &&std::abs(target.Move.DefaultBrakingDecelerationWalking-2600.f)<.01f
+            &&std::abs(target.Move.BrakingDecelerationWalking-2600.f)<.01f,
+            "short reversals, landing, or slide acceleration did not receive the speed scale");
+        for(float speed:{0.f,100.f,199.f,250.f,900.f}) {
+            defaults.Move.Velocity=FVector(0,speed,0);target.Move.Velocity=FVector(0,speed*1.3f,0);
+            Require(std::abs(target.Move.GetMaxAcceleration()-defaults.Move.GetMaxAcceleration()*1.3f)<.01f,
+                "UT's initial acceleration blend breaks30% normalized short-strafe speed");
+        }
+        target.SetTrainerSpeedScale(std::numeric_limits<float>::quiet_NaN());
+        target.SetTrainerSpeedScale(0.f);
+        Require(std::abs(target.Move.MaxWalkSpeed-1222.f)<.01f,"invalid scale mutated movement");
+        target.HideTarget();
+        Require(target.Move.MaxWalkSpeed==940.f&&target.Move.MaxFloorSlideSpeed==900.f
+            &&target.Move.MaxAcceleration==defaults.Move.MaxAcceleration&&target.Move.FastInitialAcceleration==12000.f
+            &&target.Move.BrakingDecelerationWalking==2000.f&&target.Move.FloorSlideAcceleration==400.f,
+            "target reuse leaked hard tracking speed into a different preset");
+        target.Role=1;target.SetTrainerSpeedScale(1.3f);
+        Require(target.Move.MaxWalkSpeed==940.f,"client changed target movement speed");
+    } else if(name=="hard_slide_range") {
+        ANCAimTrainerTarget defaults;defaults.Move.MaxFloorSlideSpeed=1100.f;
+        for(float scale:{1.f,1.3f}) {
+            const float threshold=scale>1.f?300.f:500.f;
+            for(float offset:{-500.f,-300.f,-299.99f,0.f,299.99f,300.f,500.f}) {
+                for(float roll:{0.f,1.f}) {
+                    auto target=Active();target.Class.Defaults=&defaults;target.SetTrainerSpeedScale(scale);
+                    target.Position.Y=offset;
+                    Require(target.TryTrainerTrackingSlide(roll),"valid hard/normal tracking slide failed");
+                    const float direction=offset>=threshold?-1.f:offset<=-threshold?1.f:roll<.5f?-1.f:1.f;
+                    Require(target.LastInput.Y==direction&&target.TrainerSlideDirection.Y==direction,
+                        "tracking slide did not use the speed-specific inward threshold");
+                    const float travel=target.Move.MaxFloorSlideSpeed*(.7f+2.f/30.f)
+                        +target.Move.MaxFloorSlideSpeed*.4f/30.f+target.Move.MaxFloorSlideSpeed*.4f/14.f;
+                    const float endpoint=offset+direction*travel;
+                    Require(1000.f*1000.f+endpoint*endpoint+151.f*151.f<1800.f*1800.f,
+                        "faster lateral slide leaves the fixed trainee's Link beam range");
+                }
+            }
+        }
+    } else if(name=="headshot_scale") {
+        ANCAimTrainerTarget defaults;
+        auto target=Active();target.Class.Defaults=&defaults;
+        Require(!target.IsHeadShot(FVector(),FVector(),1.f,nullptr,.125f)
+            &&target.HeadScaleUsed==1.f&&target.HeadPrediction==.125f,
+            "default popup target received HS-only enlargement or lost rewind prediction");
+        target.SetTrainerHeadshotScale(1.15f);
+        Require(target.IsHeadShot(FVector(),FVector(),1.f,nullptr,.2f)&&target.HeadScaleUsed==1.f
+            &&std::abs(target.HeadRadius-20.7f)<.001f&&target.HeadScale==1.f
+            &&target.HeadPrediction==.2f,"HS target did not enlarge native radius without changing visible head scale");
+        auto client=Active();client.Class.Defaults=&defaults;client.Role=1;
+        client.TrainerHeadshotScale=target.TrainerHeadshotScale;client.OnRep_TrainerHeadshotScale();
+        const float inlineClaimRadius=client.HeadRadius*client.HeadScale*1.f;
+        Require(std::abs(inlineClaimRadius-20.7f)<.001f
+            &&client.IsHeadShot(FVector(),FVector(),1.f,nullptr,0.f),
+            "client-claimed inline head geometry and normal headshot validation disagree");
+        target.SetTrainerHeadshotScale(1.15f);
+        Require(std::abs(target.HeadRadius-20.7f)<.001f,"headshot radius compounded across appearances");
+        target.SetTrainerHeadshotScale(2.f);target.SetTrainerHeadshotScale(std::numeric_limits<float>::quiet_NaN());
+        Require(target.TrainerHeadshotScale==1.15f,"unbounded headshot multiplier accepted");
+        target.SetTrainerHeadshotScale(1.f);target.Role=1;target.SetTrainerHeadshotScale(1.15f);
+        Require(target.TrainerHeadshotScale==1.f&&target.HeadRadius==18.f&&target.HeadScale==1.f,
+            "client expanded authoritative geometry or next normal preset kept enlarged radius");
     } else if(name=="head_feedback") {
         ANCAimTrainerTarget target; AUTCharacter shooter;
         const FVector head=target.GetHeadLocation(.125f);
@@ -933,6 +1170,10 @@ class AimTrainerTargetTests(unittest.TestCase):
         signatures = (
             "void ANCAimTrainerTarget::OnRep_TrainerVisible",
             "void ANCAimTrainerTarget::ActivateTarget",
+            "void ANCAimTrainerTarget::ActivateAirborneTarget",
+            "void ANCAimTrainerTarget::OnRep_TrainerFlightRate",
+            "bool ANCAimTrainerTarget::LaunchAirborneTarget",
+            "void ANCAimTrainerTarget::SetTrainerSpeedScale",
             "void ANCAimTrainerTarget::StartWiggle",
             "bool ANCAimTrainerTarget::StartPopupLongStrafe",
             "bool ANCAimTrainerTarget::SetTrainerCrouched",
@@ -948,11 +1189,14 @@ class AimTrainerTargetTests(unittest.TestCase):
             "bool ANCAimTrainerTarget::IsTrainerSliding",
             "void ANCAimTrainerTarget::Tick",
             "FVector ANCAimTrainerTarget::GetHeadLocation",
+            "void ANCAimTrainerTarget::SetTrainerHeadshotScale",
+            "void ANCAimTrainerTarget::OnRep_TrainerHeadshotScale",
             "void ANCAimTrainerTarget::NotifyBlockedHeadShot",
         )
         source = directory / "trainer_targets.cpp"
         source.write_text("\n".join([ADAPTER, f'#include "{policy}"', f'#include "{layout}"']
-            + [native_function(movement,"void UUTCharacterMovement::PerformFloorSlide"),
+            + [native_function(movement,"float UUTCharacterMovement::GetMaxAcceleration").replace("MovementMode", "Mode"),
+               native_function(movement,"void UUTCharacterMovement::PerformFloorSlide"),
                native_function(movement,"void UUTCharacterMovement::ProcessLanded")]
             + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_targets.exe" if os.name == "nt" else "trainer_targets")
@@ -968,6 +1212,15 @@ class AimTrainerTargetTests(unittest.TestCase):
     def run_case(self, name):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_hard_tracking_slide_turns_early_enough_to_stay_within_beam_range(self): self.run_case("hard_slide_range")
+    def test_headshot_only_scale_preserves_native_weapon_scale_and_prediction(self): self.run_case("headshot_scale")
+    def test_native_airborne_launch_fall_relaunch_and_pooled_identity(self): self.run_case("airborne_launch")
+    def test_airborne_rate_scales_vertical_time_and_client_gravity(self): self.run_case("airborne_flight_rate")
+    def test_airborne_rate_resets_on_hide_grounded_and_jumppad_reuse(self): self.run_case("airborne_flight_rate_reset")
+    def test_airborne_rate_rejects_invalid_values_and_client_activation(self): self.run_case("airborne_flight_rate_guards")
+    def test_airborne_authority_input_and_nonfinite_guards(self): self.run_case("airborne_guards")
+    def test_hard_tracking_speed_uses_variant_defaults_and_resets_on_reuse(self): self.run_case("speed_scale")
 
     def test_reversals_require_authority_visible_grounded_strafe_target(self): self.run_case("reverse")
     def test_dodge_uses_native_action_and_inward_direction_policy(self): self.run_case("dodge")

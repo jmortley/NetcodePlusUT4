@@ -25,6 +25,76 @@ namespace NCAimTrainerLayout
         float SizeX, SizeY, Height;
     };
 
+    constexpr float AirborneHazardZ = 20.f;
+    constexpr float AirborneDropMinZ = 1350.f;
+    constexpr float AirborneDropMaxZ = 1750.f;
+    constexpr float AirborneJumpApexZ = 1550.f;
+    // Fixed rocket view: ledge320 + TeamArena capsule108 + eye83. Keep target
+    // capsules full-size while halving their center displacement from this eye.
+    constexpr float AirborneRocketEyeZ = 511.f;
+    constexpr float AirborneRocketHalfHeight = 108.f;
+
+    inline float AirborneTargetHeight(float Height, bool bRockets)
+    {
+        return bRockets ? AirborneRocketEyeZ + 0.5f * (Height - AirborneRocketEyeZ) : Height;
+    }
+
+    inline float AirborneHazardHeight(bool bRockets)
+    {
+        return bRockets ? AirborneTargetHeight(AirborneHazardZ + AirborneRocketHalfHeight, true)
+            - AirborneRocketHalfHeight : AirborneHazardZ;
+    }
+
+    inline float AirborneJumpApex(bool bRockets) { return AirborneTargetHeight(AirborneJumpApexZ, bRockets); }
+
+    // With native gravity, a half-size ballistic curve takes sqrt(0.5) as
+    // long and uses sqrt(0.5) launch velocities in every spatial direction.
+    inline float AirborneLaunchScale(bool bRockets) { return bRockets ? 0.70710678118f : 1.f; }
+
+    inline FBlock AirborneFiringLedge(bool bRockets = false)
+    {
+        return { bRockets ? -800.f : -1800.f, 0.f, bRockets ? 400.f : 1000.f, 3600.f, 320.f };
+    }
+
+    inline float PracticeLaneX(int Scenario) { return AirborneFiringLedge(Scenario == 10).CenterX; }
+
+    inline FBlock AirborneJumpPad(int Index, bool bRockets = false)
+    {
+        if (bRockets)
+        {
+            const float Height = AirborneTargetHeight(180.f + AirborneRocketHalfHeight + 2.f, true)
+                - AirborneRocketHalfHeight - 2.f;
+            return { Index == 0 ? -350.f : 150.f, Index == 0 ? -700.f : 700.f, 320.f, 220.f, Height };
+        }
+        return { Index == 0 ? 100.f : 1100.f, Index == 0 ? -1400.f : 1400.f, 700.f, 440.f, 180.f };
+    }
+
+    inline FSeat AirborneDropSeat(int Index, bool bSideWall = false, bool bRockets = false)
+    {
+        if (bRockets)
+        {
+            const FSeat Original = AirborneDropSeat(Index, bSideWall, false);
+            const float LaneX = AirborneFiringLedge(true).CenterX;
+            // Bring rear drops forward without moving the jumper or side lanes.
+            // The nearer band still leaves 25 units beyond a full 40-radius
+            // capsule at the right pad's rear edge (X=310).
+            const float RearOffset = bSideWall && (Index == 0 || Index == 4) ? 0.f : Index % 2 == 0 ? 75.f : 200.f;
+            return { LaneX + 0.5f * (Original.MinX - LaneX) - RearOffset, LaneX + 0.5f * (Original.MaxX - LaneX) - RearOffset,
+                0.5f * Original.CenterY, 0.5f * Original.SpawnJitterY, 0.f, AirborneHazardHeight(true) };
+        }
+        // Only the outer pooled slots can choose their own side-wall lane:
+        // one left and one right maximum. This X gap clears both pad platforms
+        // even after the inward drift, so each drop reaches the goo normally.
+        if (bSideWall && (Index == 0 || Index == 4))
+        {
+            return { 550.f, 650.f, Index == 0 ? -1660.f : 1660.f, 25.f, 0.f, AirborneHazardZ };
+        }
+        // Distinct rear X planes avoid the jumper's diagonal X=100..1100 crossing. Even at
+        // the extremes every full target capsule clears the room and pads.
+        return { Index % 2 == 0 ? 1700.f : 2250.f, Index % 2 == 0 ? 1900.f : 2500.f,
+            float(Index - 2) * 600.f, 100.f, 0.f, AirborneHazardZ };
+    }
+
     inline FBlock PopupPlatform(int Index)
     {
         // IGCharacterFootsteps is shorter than TeamArena. Keep the rear head

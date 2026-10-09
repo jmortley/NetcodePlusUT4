@@ -76,7 +76,7 @@ struct UTeamArenaCharacterMovement {
 };
 struct UNCAimTrainerMovement : UTeamArenaCharacterMovement {
     using Super = UTeamArenaCharacterMovement;
-    void ResetTrainerMovement(bool);
+    void ResetTrainerMovement(bool, float = -1800.f);
     void CheckJumpInput(float) override;
     void GetDodgeDirection(FVector&, FVector&) const override;
     bool CanDodge() override;
@@ -183,6 +183,18 @@ void ResetPosture() {
                 "fresh run plane was based on a possibly displaced pawn");
     }
 }
+void ScenarioLane() {
+    ACharacter pawn;
+    UNCAimTrainerMovement move; move.CharacterOwner = &pawn;
+    for (bool practice : {false, true}) {
+        move.ResetTrainerMovement(practice, -800.f);
+        Require(move.PlaneOrigin.X == -800.f && move.PlaneNormal.X == 1.f
+                && move.bConstrainToPlane == practice, "rocket lane reset retained the distant firing plane");
+        move.ResetTrainerMovement(practice);
+        Require(move.PlaneOrigin.X == -1800.f && move.bConstrainToPlane == practice,
+                "normal preset retained the closer rocket firing plane");
+    }
+}
 int main(int argc, char** argv) {
     Require(argc == 2, "case required"); const std::string name(argv[1]);
     if (name == "fixed") FixedInput();
@@ -191,6 +203,7 @@ int main(int argc, char** argv) {
     else if (name == "actions") PracticeActions();
     else if (name == "stock") StockRules();
     else if (name == "reset") ResetPosture();
+    else if (name == "scenario_lane") ScenarioLane();
     else Require(false, "unknown case");
 }
 '''
@@ -234,6 +247,7 @@ class AimTrainerMovementTests(unittest.TestCase):
     def test_practice_retains_jump_crouch_slide_and_airborne_mode(self): self.run_case("actions")
     def test_practice_respects_stock_movement_rules(self): self.run_case("stock")
     def test_fresh_run_resets_slide_jump_and_crouched_owner_state(self): self.run_case("reset")
+    def test_explicit_rocket_lane_and_default_lane_are_restored(self): self.run_case("scenario_lane")
 
 
 if __name__ == "__main__":

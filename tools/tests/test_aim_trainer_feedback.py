@@ -133,6 +133,8 @@ struct AUTCharacter : AActor {
 };
 struct ANCAimTrainerTarget : AUTCharacter {
     using Super=AUTCharacter;
+    struct Attachment { void SetActorHiddenInGame(bool) {} };
+    Attachment* WeaponAttachment=nullptr;
     bool bTrainerVisible=true,Hidden=false,Collision=true;
     int NetUpdates=0;
     void SetActorHiddenInGame(bool hidden) { Hidden=hidden; }

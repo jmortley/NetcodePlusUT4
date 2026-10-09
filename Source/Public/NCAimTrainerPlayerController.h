@@ -3,6 +3,7 @@
 #include "NetcodePlus.h"
 #include "UTPlayerController.h"
 #include "NCAimTrainerTypes.h"
+#include "NCAimTrainerScenarioId.h"
 #include "NCAimTrainerPlayerController.generated.h"
 
 /** Small, owner-only presentation snapshot. Scores are calculated by the game mode. */
@@ -97,13 +98,13 @@ private:
 	UPROPERTY(Transient)
 	FString OnlineStatus;
 	// Public boards are read by the owning client. No credentials or browser
-	// selection cross the gameplay connection. Keys are scenario + 6 * local + 12 * movement.
-	TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[24];
-	double NextLeaderboardFetch[24] = {};
-	uint32 LeaderboardGeneration[24] = {};
-	bool LeaderboardInFlight[24] = {};
-	bool LeaderboardLoaded[24] = {};
-	bool LeaderboardFailed[24] = {};
+	// selection cross gameplay. Each preset has local/server and fixed/movement boards.
+	TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[NCAimTrainerScenarioId::LeaderboardCount];
+	double NextLeaderboardFetch[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	uint32 LeaderboardGeneration[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	bool LeaderboardInFlight[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	bool LeaderboardLoaded[NCAimTrainerScenarioId::LeaderboardCount] = {};
+	bool LeaderboardFailed[NCAimTrainerScenarioId::LeaderboardCount] = {};
 	bool bLeaderboardSourceSelected = false;
 	bool bLeaderboardLocal = false;
 	bool bLeaderboardEnded = false;
@@ -120,6 +121,7 @@ private:
 	bool PrefersTrainerLightningGun() const;
 	double NextTrainerRequestTime[4] = { 0.0, 0.0, 0.0, 0.0 };
 	uint8 LastPresentedPhase = 255;
+	uint8 LastPresentedScenario = 255;
 	int32 LastAnnouncedCountdown = 4;
 	bool bLastPresentedMovementPractice = false;
 	bool bTrackingPrimaryHeld = false;

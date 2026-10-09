@@ -13,8 +13,8 @@ class NETCODEPLUS_API UNCAimTrainerMovement : public UTeamArenaCharacterMovement
     GENERATED_BODY()
 public:
     UNCAimTrainerMovement(const FObjectInitializer& ObjectInitializer);
-    /** Setup boundaries only. Calling this during progress updates cancels jumps. */
-    void ResetTrainerMovement(bool bPractice);
+    /** Setup boundaries only. LaneX comes from the preset, never a displaced pawn. */
+    void ResetTrainerMovement(bool bPractice, float LaneX = -1800.f);
     virtual void CheckJumpInput(float DeltaTime) override;
     virtual void GetDodgeDirection(FVector& OutDodgeDir, FVector& OutDodgeCross) const override;
     virtual bool CanDodge() override;

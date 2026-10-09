@@ -43,8 +43,9 @@ struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; bool bMovementPrac
 using Completion = std::function<void(bool, const TArray<FNCAimTrainerLeaderboardRow>&)>;
 struct Request { UWorld* World; int Scenario; bool Local, Movement; Completion Callback; };
 struct FNCAimTrainerOnline {
-    enum { PresetRevision = 11 };
+    enum { PresetRevision = 14, AirbornePresetRevision = 15 };
     static int32 PresetRevisionForScenario(int32 scenario);
+    static const char* ScenarioSlug(int32 scenario);
     static std::vector<Request> Requests;
     static void Fetch(UWorld* world, int32 scenario, Completion callback, bool local, bool movement) {
         Requests.push_back({world, scenario, local, movement, callback});
@@ -58,12 +59,12 @@ struct ANCAimTrainerPlayerController {
     int NetMode = NM_Standalone;
     FNCAimTrainerProgress TrainerProgress;
     FString OnlineStatus = "Score submission status";
-    TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[24];
-    double NextLeaderboardFetch[24] = {};
-    uint32 LeaderboardGeneration[24] = {};
-    bool LeaderboardInFlight[24] = {};
-    bool LeaderboardLoaded[24] = {};
-    bool LeaderboardFailed[24] = {};
+    TArray<FNCAimTrainerLeaderboardRow> LeaderboardCache[NCAimTrainerScenarioId::LeaderboardCount];
+    double NextLeaderboardFetch[NCAimTrainerScenarioId::LeaderboardCount] = {};
+    uint32 LeaderboardGeneration[NCAimTrainerScenarioId::LeaderboardCount] = {};
+    bool LeaderboardInFlight[NCAimTrainerScenarioId::LeaderboardCount] = {};
+    bool LeaderboardLoaded[NCAimTrainerScenarioId::LeaderboardCount] = {};
+    bool LeaderboardFailed[NCAimTrainerScenarioId::LeaderboardCount] = {};
     bool bLeaderboardSourceSelected = false, bLeaderboardLocal = false, bLeaderboardEnded = false;
     bool IsLocalController() const { return Local; }
     bool IsTrainerMenuVisible() const { return TrainerProgress.Phase == 0 || TrainerProgress.Phase == 3; }
@@ -201,43 +202,46 @@ void MovementBoards() {
 }
 void AllScenarioBoards() {
     ANCAimTrainerPlayerController pc;
-    const int revisions[] = {11, 11, 12, 12, 11, 12};
+    const char* slugs[] = {"strafe", "headshots", "instagib", "precision_popup", "sactf_headshots", "sactf_popup",
+                          "strafe_hard", "airborne_ig", "airborne_sniper", "airborne_sactf", "airborne_rockets"};
     for (int movement = 0; movement < 2; ++movement) {
         pc.TrainerProgress.bMovementPractice = movement != 0;
         for (int local = 0; local < 2; ++local) {
-            for (uint8 scenario = 0; scenario < 6; ++scenario) {
+            for (uint8 scenario = 0; scenario < NCAimTrainerScenarioId::ScenarioCount; ++scenario) {
                 pc.TrainerProgress.Scenario = scenario;
                 pc.SelectTrainerLeaderboardSource(local != 0);
-                const int key = scenario + 6 * local + 12 * movement;
+                const int key = scenario + 11 * local + 22 * movement;
                 Require(Requests() == key + 1, "scenario/source/movement cache keys collide");
                 const auto& req = FNCAimTrainerOnline::Requests[key];
                 Require(req.Scenario == scenario && req.Local == (local != 0)
                         && req.Movement == (movement != 0), "cache key decoded wrong request");
-                Require(FNCAimTrainerOnline::PresetRevisionForScenario(req.Scenario) == revisions[scenario],
-                        "pop-up reset changed an unrelated scenario or retained its old board");
+                Require(FNCAimTrainerOnline::PresetRevisionForScenario(req.Scenario) == (scenario >= 7 ? 15 : 14),
+                        "airborne score reset selected the wrong scenario/source/movement board");
+                Require(std::string(FNCAimTrainerOnline::ScenarioSlug(req.Scenario)) == slugs[scenario],
+                        "scenario ID selected the wrong backend slug");
             }
         }
     }
-    // Arrive in reverse order, with the current view on the final SACTF board.
-    for (int key = 23; key >= 0; --key) Reply(key, true, 1000 + key);
-    Require(pc.GetTrainerLeaderboard()[0].Score == 1023, "late callbacks replaced selected SACTF board");
+    // Arrive in reverse order, with the current view on the airborne rocket board.
+    for (int key = 43; key >= 0; --key) Reply(key, true, 1000 + key);
+    Require(pc.GetTrainerLeaderboard()[0].Score == 1043, "late callbacks replaced selected rocket board");
     for (int movement = 0; movement < 2; ++movement) {
         pc.TrainerProgress.bMovementPractice = movement != 0;
         for (int local = 0; local < 2; ++local) {
-            for (uint8 scenario = 0; scenario < 6; ++scenario) {
+            for (uint8 scenario = 0; scenario < NCAimTrainerScenarioId::ScenarioCount; ++scenario) {
                 pc.TrainerProgress.Scenario = scenario;
                 pc.SelectTrainerLeaderboardSource(local != 0);
-                Require(pc.GetTrainerLeaderboard()[0].Score == 1000 + scenario + 6 * local + 12 * movement,
-                        "one of 24 boards lost its own score");
+                Require(pc.GetTrainerLeaderboard()[0].Score == 1000 + scenario + 11 * local + 22 * movement,
+                        "one of 44 boards lost its own score");
             }
         }
     }
-    Require(Requests() == 24, "browsing cached scenarios generated extra requests");
+    Require(Requests() == 44, "browsing cached scenarios generated extra requests");
     pc.ClientTrainerLeaderboardSubmitted_Implementation(4, true, true);
-    Require(Requests() == 24, "inactive SACTF headshot invalidation fetched eagerly");
+    Require(Requests() == 44, "inactive SACTF headshot invalidation fetched eagerly");
     pc.TrainerProgress.Scenario = 4;
     pc.RefreshTrainerLeaderboard();
-    Require(Requests() == 25 && FNCAimTrainerOnline::Requests[24].Scenario == 4,
+    Require(Requests() == 45 && FNCAimTrainerOnline::Requests[44].Scenario == 4,
             "SACTF headshot submission did not invalidate exact board");
 }
 void Lifecycle() {
@@ -300,7 +304,8 @@ class AimTrainerLeaderboardTests(unittest.TestCase):
         source = directory / "trainer_leaderboard.cpp"
         online = (PLUGIN / "Source/Private/NCAimTrainerOnline.cpp").read_text(encoding="utf-8-sig")
         revision = native_function(online, "int32 FNCAimTrainerOnline::PresetRevisionForScenario")
-        source.write_text("\n".join([ADAPTER, revision] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
+        slugs = native_function(online, "const TCHAR* FNCAimTrainerOnline::ScenarioSlug").replace("const TCHAR*", "const char*")
+        source.write_text("\n".join([f'#include "{(PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()}"', ADAPTER, revision, slugs] + [native_function(native, s) for s in signatures] + [CASES]), encoding="utf-8")
         cls.executable = directory / ("trainer_leaderboard.exe" if os.name == "nt" else "trainer_leaderboard")
         if msvc:
             command = [compiler, "/nologo", "/EHsc", "/W4", "/WX", "/std:c++14", str(source),
@@ -321,4 +326,4 @@ class AimTrainerLeaderboardTests(unittest.TestCase):
     def test_submission_invalidates_exact_source_and_inflight_generation(self): self.run_case("invalidation")
     def test_world_controller_and_active_run_guards(self): self.run_case("lifecycle")
     def test_fourth_scenario_and_movement_boards_are_isolated(self): self.run_case("movement")
-    def test_all_six_scenarios_keep_24_scoped_boards_separate(self): self.run_case("all_boards")
+    def test_all_eleven_scenarios_keep_44_scoped_boards_separate(self): self.run_case("all_boards")

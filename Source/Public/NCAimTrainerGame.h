@@ -46,6 +46,7 @@ private:
     UPROPERTY() TSubclassOf<AUTWeapon> SACTFSniperClass;
     UPROPERTY() TSubclassOf<AUTWeapon> InstagibClass;
     UPROPERTY() TSubclassOf<AUTWeapon> LinkClass;
+    UPROPERTY() TSubclassOf<AUTWeapon> RocketClass;
     UPROPERTY() AUTWeapon* RunWeapon = nullptr;
     FNCAimTrainerProgress Progress;
     FRandomStream Schedule;
@@ -95,6 +96,14 @@ private:
     void RefreshLeaderboard(bool bAfterSubmit = false);
     void HideAllTargets();
     void ActivateSlot(int32 Index, float Now);
+    void ActivateAirborneSlot(int32 Index, float Now);
+    void UpdateAirborneTargets(float Now);
+    bool LaunchAirborneJumper();
+    bool IsAtAirborneHazard(const ANCAimTrainerTarget* Target) const;
+    bool IsCurrentRocketDamage(const ANCAimTrainerTarget* Target, const FDamageEvent& Event, AActor* Causer) const;
+    void ClearTrainerProjectiles();
+    float PracticeLaneX() const;
+    float PracticeFloorZ() const;
     void UpdateTargets(float Now);
     void UpdatePopupDodger(float Now);
     void UpdateTrackingMovement(float Now);

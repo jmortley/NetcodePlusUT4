@@ -1,17 +1,24 @@
 #pragma once
 
+#include "../Public/NCAimTrainerScenarioId.h"
+
 // Timing and direction rules for the trainer presets. The authority
 // supplies independent FRandomStream rolls; this helper never owns random state.
 namespace NCAimTrainerScenarioPolicy
 {
-    enum { InstagibMaxActiveTargets = 6 };
+    enum { InstagibMaxActiveTargets = 6, ScenarioCount = NCAimTrainerScenarioId::ScenarioCount };
 
+    inline bool IsValidScenario(int Scenario) { return Scenario >= 0 && Scenario < ScenarioCount; }
+    inline bool IsTrackingScenario(int Scenario) { return Scenario == 0 || Scenario == 6; }
+    inline bool IsInstagibScenario(int Scenario) { return Scenario == 2 || Scenario == 7; }
+    inline bool IsAirborneScenario(int Scenario) { return Scenario >= 7 && Scenario <= 10; }
+    inline bool IsRocketScenario(int Scenario) { return Scenario == 10; }
     inline bool IsHeadshotScenario(int Scenario) { return Scenario == 1 || Scenario == 4; }
     inline bool IsPopupScenario(int Scenario) { return Scenario == 2 || Scenario == 3 || Scenario == 5; }
-    inline bool IsSACTFScenario(int Scenario) { return Scenario == 4 || Scenario == 5; }
-    inline bool IsSniperScenario(int Scenario) { return Scenario == 1 || Scenario == 3 || IsSACTFScenario(Scenario); }
-    inline bool HasHeadshotBonus(int Scenario) { return Scenario == 3 || Scenario == 5; }
-    inline int ArenaScenario(int Scenario) { return Scenario == 0 ? 0 : IsHeadshotScenario(Scenario) ? 1 : 2; }
+    inline bool IsSACTFScenario(int Scenario) { return Scenario == 4 || Scenario == 5 || Scenario == 9; }
+    inline bool IsSniperScenario(int Scenario) { return Scenario == 1 || Scenario == 3 || Scenario == 8 || IsSACTFScenario(Scenario); }
+    inline bool HasHeadshotBonus(int Scenario) { return Scenario == 3 || Scenario == 5 || Scenario == 8 || Scenario == 9; }
+    inline int ArenaScenario(int Scenario) { return IsRocketScenario(Scenario) ? 4 : IsAirborneScenario(Scenario) ? 3 : IsTrackingScenario(Scenario) ? 0 : IsHeadshotScenario(Scenario) ? 1 : 2; }
 
     inline float UnitRoll(float Roll)
     {

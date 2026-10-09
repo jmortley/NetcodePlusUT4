@@ -141,22 +141,26 @@ bool FNCAimTrainerLocalSessionTest::RunTest(const FString& Parameters)
 	if (StartJson.IsValid())
 	{
 		TestEqual(TEXT("Precision popup has an independent scenario"), StartJson->GetStringField(TEXT("scenario")), FString(TEXT("precision_popup")));
-		TestEqual(TEXT("Retuned pop-ups use preset revision 12"), StartJson->GetNumberField(TEXT("revision")), 12.0);
+		TestEqual(TEXT("UT3 animations start fresh pop-up boards"), StartJson->GetNumberField(TEXT("revision")), 14.0);
 		TestTrue(TEXT("Start payload includes movement mode"), StartJson->GetBoolField(TEXT("movement")));
 	}
-	const TCHAR* SactfSlugs[] = { TEXT("sactf_headshots"), TEXT("sactf_popup") };
-	for (int32 Scenario = 4; Scenario < 6; ++Scenario)
-	{
-		StartSession->BuildStartBody(Scenario);
-		TSharedPtr<FJsonObject> SactfJson;
-		TestTrue(TEXT("SACTF start payload is JSON"), FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(StartSession->StartBody), SactfJson));
-		if (SactfJson.IsValid())
-		{
-			TestEqual(TEXT("SACTF scenarios submit independent slugs"), SactfJson->GetStringField(TEXT("scenario")), FString(SactfSlugs[Scenario - 4]));
-			TestEqual(TEXT("Only SACTF pop-ups start a fresh board"), SactfJson->GetNumberField(TEXT("revision")), Scenario == 5 ? 12.0 : 11.0);
-			TestTrue(TEXT("SACTF preserves movement board identity"), SactfJson->GetBoolField(TEXT("movement")));
-		}
-	}
+	const TCHAR* ScenarioSlugs[] = {
+        TEXT("strafe"), TEXT("headshots"), TEXT("instagib"), TEXT("precision_popup"), TEXT("sactf_headshots"), TEXT("sactf_popup"),
+        TEXT("strafe_hard"), TEXT("airborne_ig"), TEXT("airborne_sniper"), TEXT("airborne_sactf"), TEXT("airborne_rockets")
+    };
+    for (int32 Scenario = 0; Scenario < ARRAY_COUNT(ScenarioSlugs); ++Scenario)
+    {
+        StartSession->BuildStartBody(Scenario);
+        TSharedPtr<FJsonObject> ScenarioJson;
+        TestTrue(TEXT("Preset start payload is JSON"), FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(StartSession->StartBody), ScenarioJson));
+        if (ScenarioJson.IsValid())
+        {
+            TestEqual(TEXT("Presets have independent slugs"), ScenarioJson->GetStringField(TEXT("scenario")), FString(ScenarioSlugs[Scenario]));
+            TestEqual(TEXT("Airborne uses reward-only boards; other presets retain UT3 boards"),
+                ScenarioJson->GetNumberField(TEXT("revision")), Scenario >= 7 ? 15.0 : 14.0);
+            TestTrue(TEXT("Presets preserve movement board identity"), ScenarioJson->GetBoolField(TEXT("movement")));
+        }
+    }
 	const FString StartAck = FString::Printf(TEXT("{\"run_id\":\"%s\",\"player_id\":\"0123456789abcdef0123456789abcdef\",\"display_name\":\"Fixture\",\"run_token\":\"fixture-run-token\",\"checkpoint_ms\":5000,\"expires_in\":180,\"movement\":true}"), *Id);
 	StartSession->HandleResponse(StartSession->RequestSerial, 201, StartAck);
 	TestTrue(TEXT("Matching movement start acknowledgement is accepted"), StartSession->IsHealthy() && !StartSession->bStarting);

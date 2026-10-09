@@ -77,6 +77,9 @@ struct ANCAimTrainerTarget : AActor {
     struct Capsule { float HalfHeight = 108.f; float GetScaledCapsuleHalfHeight() const { return HalfHeight; } } Shape;
     const Capsule* GetCapsuleComponent() const { return &Shape; }
     UClass* GetClass() const { return InstagibProfile ? &InstagibTargetClass : &TeamTargetClass; }
+    float SpeedScale=1.f, HeadScale=1.f;
+    void SetTrainerSpeedScale(float scale) { SpeedScale=scale; }
+    void SetTrainerHeadshotScale(float scale) { HeadScale=scale; }
     bool Visible = false, Strafing = false, Crouched = false;
     bool CanStand = true, CanCrouch = true, CanDodge = true, CanSlide = true;
     int Activations = 0, Hides = 0, Wiggles = 0, Reversals = 0;
@@ -161,6 +164,10 @@ struct ANCAimTrainerGame {
     void UpdateShotCount() {}
     void RecordLocalTarget(int, bool, bool=false) {}
     void BeginActiveRun();
+    void ClearTrainerProjectiles() {}
+    bool IsAtAirborneHazard(const ANCAimTrainerTarget*) const { return false; }
+    bool IsCurrentRocketDamage(const ANCAimTrainerTarget*,const FDamageEvent&,AActor*) const { return false; }
+    void UpdateAirborneTargets(float) {}
     void HideAllTargets();
     void ActivateSlot(int32, float);
     void UpdateTargets(float);
@@ -1102,6 +1109,22 @@ int main(int argc, char** argv) {
     else if (name == "popup_dodge") PopupDodgeScheduling();
     else if (name == "popup_dodge_expiry") PopupDodgeDeadlineAndReuse();
     else if (name == "sactf") SACTFPresets();
+    else if (name == "new_profile_scope") {
+        Fixture f; f.Game.Progress.Scenario=6; f.Start(); f.At(10.f);
+        Require(f.Targets[0].Strafing && std::abs(f.Targets[0].SpeedScale-1.3f)<.0001f,
+            "hard Link missing native speed profile");
+        Require(f.Visible()==1 && f.Targets[0].HeadScale==1.f,"hard tracking has wrong target count or head radius");
+        f.Game.HideAllTargets(); f.Game.Progress.Scenario=0; f.Start(); f.At(10.f);
+        Require(f.Targets[0].SpeedScale==1.f,"hard movement leaked into normal Link");
+        for (int scenario : {1,4,2,3,5}) {
+            f.Game.HideAllTargets(); f.Game.Progress.Scenario=scenario;
+            f.Gun.Refire=scenario==4||scenario==5?.7f:scenario==3?1.3f:1.f;
+            f.Start(); f.Game.ActivateSlot(0,10.f);
+            const float expected=(scenario==1||scenario==4)?1.15f:1.f;
+            Require(std::abs(f.Targets[0].HeadScale-expected)<.0001f,"headshot boost leaked or missing");
+            Require(f.Targets[0].SpeedScale==1.f,"hard Link speed leaked into precision mode");
+        }
+    }
     else if (name == "strafe") StrafeMix();
     else if (name == "dodges") Dodges();
     else if (name == "refire") RefireAndBacklog();
@@ -1143,7 +1166,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory(prefix="ncp-aim-trainer-scenarios-")
         cls.addClassCleanup(cls.temporary.cleanup)
         directory = Path(cls.temporary.name)
-        policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").read_text(encoding="utf-8-sig")
+        policy = f'#include "{(PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix()}"'
         layout = (PLUGIN / "Source/Private/NCAimTrainerLayout.h").read_text(encoding="utf-8-sig")
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
         signatures = (
@@ -1177,6 +1200,8 @@ class AimTrainerScenarioTests(unittest.TestCase):
     def test_popup_variation_preserves_special_targets_and_excludes_conflicting_actions(self): self.run_case("popup_variety")
     def test_popup_dodges_draw_forward_backward_or_landing_slide_once_per_appearance(self): self.run_case("popup_dodge")
     def test_popup_dodge_deadlines_and_reuse_cannot_extend_exposure_or_fire_stale_intents(self): self.run_case("popup_dodge_expiry")
+
+    def test_hard_link_speed_and_headshot_size_are_scoped_and_reset(self): self.run_case("new_profile_scope")
 
     def test_short_reversals_dominate_but_keep_timing_variation(self): self.run_case("strafe")
     def test_dodges_choose_both_sides_and_turn_inward_near_edges(self): self.run_case("dodges")

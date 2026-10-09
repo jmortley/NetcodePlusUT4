@@ -3,8 +3,11 @@
 #include "NCAimTrainerScenarioPolicy.h"
 #include "NCAimTrainerLayout.h"
 #include "NCAimTrainerCharacterProfile.h"
+#include "NCPlusForceModels.h"
 #include "UTCharacterMovement.h"
 #include "UTCharacterContent.h"
+#include "UTWeaponAttachment.h"
+#include "Animation/AnimInstance.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -32,6 +35,16 @@ ANCAimTrainerTarget::ANCAimTrainerTarget(const FObjectInitializer& ObjectInitial
             GetMesh()->SetAnimInstanceClass(Template->GetMesh()->AnimClass);
         }
     }
+    // Use the requested UT3 third-person animation set on every target variant.
+    // Missing UT3 content fails HasCharacterAssets instead of changing the preset.
+    static ConstructorHelpers::FClassFinder<UAnimInstance> TrainerAnimation(
+        TEXT("/Game/RestrictedAssets/Character/Base/Blueprints/Base_3p_AnimBP_UT3"));
+    GetMesh()->SetAnimInstanceClass(TrainerAnimation.Class);
+    // Third-person attachment supplies the rifle stance and hand placement.
+    // Targets need no firing weapon, inventory, or combat controller.
+    static ConstructorHelpers::FClassFinder<AUTWeaponAttachment> TrainerRifle(
+        TEXT("/Game/RestrictedAssets/Weapons/ShockRifle/ShockAttachment"));
+    WeaponAttachmentClass = TrainerRifle.Class;
     bAlwaysRelevant = true;
     NetUpdateFrequency = 60.f;
     MinNetUpdateFrequency = 30.f;
@@ -77,10 +90,95 @@ void ANCAimTrainerTarget::PostInitializeComponents()
     }
 }
 
+void ANCAimTrainerTarget::ApplyCharacterData(TSubclassOf<AUTCharacterContent> /*Data*/)
+{
+    // Training geometry must match the same Malcolm skeleton for every viewer.
+    // F5 can recolor that mesh, but must never replace it with another model.
+    const ANCAimTrainerTarget* Defaults = GetClass()->GetDefaultObject<ANCAimTrainerTarget>();
+    if (!Defaults || !Defaults->CharacterData) { return; }
+    UClass* PawnAnimClass = GetMesh()->AnimClass;
+    Super::ApplyCharacterData(Defaults->CharacterData);
+    GetMesh()->SetAnimInstanceClass(PawnAnimClass);
+    TrainerTintMaterials.Reset();
+    NextTrainerTintTime = 0.f;
+}
+
+void ANCAimTrainerTarget::UpdateTrainerTint()
+{
+    if (GetNetMode() == NM_DedicatedServer) { return; }
+    // Restore only parameters this trainer changed. Neither toggling colors
+    // nor changing a palette rebuilds the mesh or restarts its animation.
+    for (const FTrainerMaterialTint& Saved : TrainerTintMaterials)
+    {
+        UMaterialInstanceDynamic* Material = Saved.Material.Get();
+        if (!Material) { continue; }
+        for (const auto& Pair : Saved.Vectors) { Material->SetVectorParameterValue(Pair.Key, Pair.Value); }
+        for (const auto& Pair : Saved.Scalars) { Material->SetScalarParameterValue(Pair.Key, Pair.Value); }
+    }
+    TrainerTintMaterials.Reset();
+    if (!NCPlusForceModels::IsEnabled()) { return; }
+    // Targets have no team/player state; resolve the existing enemy palette
+    // against the local viewer without inventing a replicated gameplay team.
+    const int32 EnemyTeam = NCPlusForceModels::GetViewerTeam(GetWorld()) == 1 ? 0 : 1;
+    const FNCPlusModelSettings Side = NCPlusForceModels::GetModelSettings(EnemyTeam, false, GetWorld());
+    const TSubclassOf<AUTCharacterContent> SelectedModel = NCPlusForceModels::GetModelClass(Side);
+    if (!Side.bTint && !(SelectedModel && NCPlusForceModels::IsModelAllowed(SelectedModel))) { return; }
+    const float Glow = FMath::Clamp(Side.Brightness, 1.f, 3.5f);
+    FLinearColor Colour = NCPlusForceModels::GetSkinColour(Side) * Glow;
+    Colour.A = 1.f;
+    const float Emissive = FMath::Min((Glow - 1.f) * 1.25f, 2.5f);
+    const TArray<FName>& Params = NCPlusForceModels::TeamColourParamNames();
+    for (UMaterialInstanceDynamic* Material : GetBodyMIs())
+    {
+        if (!Material) { continue; }
+        const FString Name = Material->Parent ? Material->Parent->GetName() : Material->GetName();
+        if (NCPlusForceModels::IsRecolorSkippedMaterial(Name) || NCPlusForceModels::IsBakedMaterial(Name)) { continue; }
+        FTrainerMaterialTint Saved;
+        Saved.Material = Material;
+        for (const FName& Param : Params)
+        {
+            FLinearColor Original;
+            if (Material->GetVectorParameterValue(Param, Original))
+            {
+                Saved.Vectors.Add(Param, Original);
+                Material->SetVectorParameterValue(Param, Colour);
+            }
+        }
+        if (Saved.Vectors.Num() == 0) { continue; }
+        const FName ScalarNames[] = { TEXT("TeamSelect"), TEXT("Team Color Blend Max"), TEXT("Emissive Max"), TEXT("Emission Power") };
+        const float ScalarValues[] = { 255.f, 1.f, Emissive, Emissive };
+        for (int32 Index = 0; Index < 4; ++Index)
+        {
+            float Original = 0.f;
+            if (Material->GetScalarParameterValue(ScalarNames[Index], Original))
+            {
+                Saved.Scalars.Add(ScalarNames[Index], Original);
+                Material->SetScalarParameterValue(ScalarNames[Index], ScalarValues[Index]);
+            }
+        }
+        TrainerTintMaterials.Add(Saved);
+    }
+}
+
 void ANCAimTrainerTarget::BeginPlay()
 {
     Super::BeginPlay();
+    // No weapon switch occurs on these unpossessed pawns. Create the normal
+    // third-person attachment explicitly, including offline/listen-server play.
+    UpdateWeaponAttachment();
     OnRep_TrainerVisible();
+}
+
+void ANCAimTrainerTarget::UpdateWeaponAttachment()
+{
+    Super::UpdateWeaponAttachment();
+    if (WeaponAttachment)
+    {
+        // Cosmetic only: the held rifle must never intercept practice shots.
+        WeaponAttachment->SetActorEnableCollision(false);
+        WeaponAttachment->SetActorHiddenInGame(!bTrainerVisible);
+        if (WeaponAttachment->Mesh) { WeaponAttachment->Mesh->bCastHiddenShadow = false; }
+    }
 }
 
 bool ANCAimTrainerTarget::HasCharacterAssets() const
@@ -92,11 +190,15 @@ void ANCAimTrainerTarget::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
     DOREPLIFETIME(ANCAimTrainerTarget, bTrainerVisible);
+    DOREPLIFETIME(ANCAimTrainerTarget, TrainerHeadshotScale);
+    DOREPLIFETIME(ANCAimTrainerTarget, TrainerFlightRate);
 }
 
 void ANCAimTrainerTarget::OnRep_TrainerVisible()
 {
     SetActorHiddenInGame(!bTrainerVisible);
+    // Attachments are separate actors and do not inherit the pawn's hidden flag.
+    if (WeaponAttachment) { WeaponAttachment->SetActorHiddenInGame(!bTrainerVisible); }
     SetActorEnableCollision(bTrainerVisible);
     if (!bTrainerVisible)
     {
@@ -113,6 +215,7 @@ void ANCAimTrainerTarget::OnRep_TrainerVisible()
 void ANCAimTrainerTarget::ActivateTarget(const FVector& Location, bool bStrafe)
 {
     if (Role != ROLE_Authority) { return; }
+    bTrainerAirborne = false;
     bTrainerStrafe = bStrafe;
     bTrainerWiggle = false;
     StrafeRange = 800.f;
@@ -143,6 +246,7 @@ void ANCAimTrainerTarget::HideTarget()
 {
     if (Role != ROLE_Authority) { return; }
     bTrainerVisible = false;
+    bTrainerAirborne = false;
     bTrainerStrafe = false;
     bTrainerWiggle = false;
     ResetTargetMovement();
@@ -153,9 +257,79 @@ void ANCAimTrainerTarget::HideTarget()
     ForceNetUpdate();
 }
 
+void ANCAimTrainerTarget::ActivateAirborneTarget(const FVector& Location, const FVector& LaunchVelocity, float FlightRate)
+{
+    if (Role != ROLE_Authority || Location.ContainsNaN() || LaunchVelocity.ContainsNaN()
+        || !FMath::IsFinite(FlightRate) || FlightRate <= 0.f || FlightRate > 1.f) { return; }
+    ActivateTarget(Location, false);
+    if (!bTrainerVisible) { return; }
+    bTrainerAirborne = true;
+    TrainerFlightRate = FlightRate;
+    OnRep_TrainerFlightRate();
+    // z_s(t) = z_1(s*t): scale the initial vertical speed by s and gravity by
+    // s squared. The native arc reaches each height at exactly the chosen rate.
+    FVector ScaledVelocity = LaunchVelocity;
+    ScaledVelocity.Z *= TrainerFlightRate;
+    LaunchAirborneTarget(ScaledVelocity);
+}
+
+void ANCAimTrainerTarget::OnRep_TrainerFlightRate()
+{
+    // GravityScale itself is not replicated by CharacterMovement. Simulated
+    // proxies need this same scale while extrapolating replicated velocity.
+    const ANCAimTrainerTarget* Defaults = GetClass()->GetDefaultObject<ANCAimTrainerTarget>();
+    if (Defaults && Defaults->GetCharacterMovement())
+    {
+        GetCharacterMovement()->GravityScale = Defaults->GetCharacterMovement()->GravityScale
+            * TrainerFlightRate * TrainerFlightRate;
+    }
+}
+
+bool ANCAimTrainerTarget::LaunchAirborneTarget(const FVector& LaunchVelocity)
+{
+    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerAirborne || IsDead()
+        || LaunchVelocity.ContainsNaN()) { return false; }
+    // CharacterMovement owns the full ballistic arc and replicated landing.
+    // Clear input and deferred impulses because these actors are pooled.
+    GetCharacterMovement()->StopMovementImmediately();
+    GetCharacterMovement()->PendingLaunchVelocity = FVector::ZeroVector;
+    ConsumeMovementInputVector();
+    GetCharacterMovement()->SetMovementMode(MOVE_Falling);
+    LaunchCharacter(LaunchVelocity, true, true);
+    ForceNetUpdate();
+    return true;
+}
+
+void ANCAimTrainerTarget::SetTrainerSpeedScale(float Scale)
+{
+    if (Role != ROLE_Authority || !FMath::IsFinite(Scale) || Scale <= 0.f) { return; }
+    const ANCAimTrainerTarget* Defaults = GetClass()->GetDefaultObject<ANCAimTrainerTarget>();
+    const UUTCharacterMovement* DefaultMove = Defaults ? Cast<UUTCharacterMovement>(Defaults->GetCharacterMovement()) : nullptr;
+    UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+    if (!DefaultMove || !Movement) { return; }
+    Scale = FMath::Clamp(Scale, 0.1f, 2.f);
+    // Keep short A/D reversals as fast as the top-speed increase. UT blends
+    // its initial acceleration below MaxFastAccelSpeed and restores walking
+    // braking from DefaultBrakingDecelerationWalking after each movement tick.
+    Movement->MaxAcceleration = DefaultMove->MaxAcceleration * Scale;
+    Movement->FastInitialAcceleration = DefaultMove->FastInitialAcceleration * Scale;
+    Movement->MaxFastAccelSpeed = DefaultMove->MaxFastAccelSpeed * Scale;
+    Movement->DodgeLandingAcceleration = DefaultMove->DodgeLandingAcceleration * Scale;
+    Movement->MaxFallingAcceleration = DefaultMove->MaxFallingAcceleration * Scale;
+    Movement->FloorSlideAcceleration = DefaultMove->FloorSlideAcceleration * Scale;
+    Movement->DefaultBrakingDecelerationWalking = DefaultMove->DefaultBrakingDecelerationWalking * Scale;
+    Movement->BrakingDecelerationWalking = DefaultMove->BrakingDecelerationWalking * Scale;
+    Movement->MaxWalkSpeed = DefaultMove->MaxWalkSpeed * Scale;
+    Movement->MaxWalkSpeedCrouched = DefaultMove->MaxWalkSpeedCrouched * Scale;
+    Movement->DodgeImpulseHorizontal = DefaultMove->DodgeImpulseHorizontal * Scale;
+    Movement->DodgeMaxHorizontalVelocity = DefaultMove->DodgeMaxHorizontalVelocity * Scale;
+    Movement->MaxInitialFloorSlideSpeed = DefaultMove->MaxInitialFloorSlideSpeed * Scale;
+    Movement->MaxFloorSlideSpeed = DefaultMove->MaxFloorSlideSpeed * Scale;
+}
+
 void ANCAimTrainerTarget::StartWiggle(float HalfWidth)
 {
-    if (Role != ROLE_Authority || !bTrainerVisible || !FMath::IsFinite(HalfWidth) || HalfWidth <= 0.f) { return; }
+    if (Role != ROLE_Authority || !bTrainerVisible || bTrainerAirborne || !FMath::IsFinite(HalfWidth) || HalfWidth <= 0.f) { return; }
     bTrainerStrafe = true;
     bTrainerWiggle = true;
     StrafeRange = FMath::Clamp(HalfWidth, 20.f, 140.f);
@@ -184,6 +358,10 @@ bool ANCAimTrainerTarget::StartPopupLongStrafe(float HalfWidth, float HoldSecond
 void ANCAimTrainerTarget::ResetTargetMovement()
 {
     GetCharacterMovement()->StopMovementImmediately();
+    GetCharacterMovement()->PendingLaunchVelocity = FVector::ZeroVector;
+    SetTrainerSpeedScale(1.f);
+    TrainerFlightRate = 1.f;
+    OnRep_TrainerFlightRate();
     ConsumeMovementInputVector();
     if (UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement()))
     {
@@ -339,8 +517,15 @@ bool ANCAimTrainerTarget::TryTrainerPopupSlide(int32 Slot, int32 Variant)
 bool ANCAimTrainerTarget::TryTrainerTrackingSlide(float DirectionRoll)
 {
     if (!bTrainerStrafe || bTrainerWiggle) { return false; }
-    const float Direction = NCAimTrainerScenarioPolicy::TrackingSlideDirection(
-        GetActorLocation().Y - StrafeCenter.Y, DirectionRoll);
+    const ANCAimTrainerTarget* Defaults = GetClass()->GetDefaultObject<ANCAimTrainerTarget>();
+    const UUTCharacterMovement* DefaultMove = Defaults ? Cast<UUTCharacterMovement>(Defaults->GetCharacterMovement()) : nullptr;
+    const UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
+    // A 30% faster slide needs an earlier inward turn to remain inside the
+    // fixed trainee's 1800-unit beam range, including native slide exit drift.
+    const float TurnThreshold = DefaultMove && Movement && Movement->MaxFloorSlideSpeed > DefaultMove->MaxFloorSlideSpeed ? 300.f : 500.f;
+    const float Offset = GetActorLocation().Y - StrafeCenter.Y;
+    const float Direction = Offset >= TurnThreshold ? -1.f : Offset <= -TurnThreshold ? 1.f
+        : NCAimTrainerScenarioPolicy::TrackingSlideDirection(Offset, DirectionRoll);
     if (!StartTrainerSlide(FVector(0.f, Direction, 0.f))) { return false; }
     StrafeDirection = Direction;
     return true;
@@ -462,14 +647,36 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
         }
     }
     Super::Tick(DeltaSeconds);
+    if (GetNetMode() != NM_DedicatedServer && GetWorld()->GetTimeSeconds() >= NextTrainerTintTime)
+    {
+        UpdateTrainerTint();
+        NextTrainerTintTime = GetWorld()->GetTimeSeconds() + 0.25f;
+    }
 }
 
 FVector ANCAimTrainerTarget::GetHeadLocation(float PredictionTime)
 {
     // These fixed-model targets use their visible head pose, including offline
-    // where there is no client head-offset claim. Keep NCP's normal sniper
-    // radius and obstruction tests; only the trainer's head center changes.
+    // where there is no client head-offset claim. Native sniper validation
+    // reads the shared HeadRadius, including the HS-only preset adjustment.
     return AUTCharacter::GetHeadLocation(PredictionTime);
+}
+
+void ANCAimTrainerTarget::SetTrainerHeadshotScale(float Scale)
+{
+    if (Role != ROLE_Authority || !FMath::IsFinite(Scale) || Scale < 1.f || Scale > 1.15f) { return; }
+    TrainerHeadshotScale = Scale;
+    OnRep_TrainerHeadshotScale();
+    ForceNetUpdate();
+}
+
+void ANCAimTrainerTarget::OnRep_TrainerHeadshotScale()
+{
+    // NCP's client-claimed head validation reads HeadRadius directly, while
+    // unclaimed hits use IsHeadShot. Set their common native geometry on both
+    // ends; HeadScale remains untouched so the visible head never grows.
+    const ANCAimTrainerTarget* Defaults = GetClass()->GetDefaultObject<ANCAimTrainerTarget>();
+    if (Defaults) { HeadRadius = Defaults->HeadRadius * TrainerHeadshotScale; }
 }
 
 void ANCAimTrainerTarget::NotifyBlockedHeadShot(AUTCharacter* /*ShotInstigator*/)
@@ -537,6 +744,28 @@ ANCAimTrainerArena::ANCAimTrainerArena(const FObjectInitializer& ObjectInitializ
         Cover.Add(AddBlock(FName(*FString::Printf(TEXT("PopupPlatform%d"), Index)),
             FVector(Block.CenterX, Block.CenterY, Block.Height * 0.5f), FVector(Block.SizeX, Block.SizeY, Block.Height)));
     }
+    const NCAimTrainerLayout::FBlock Ledge = NCAimTrainerLayout::AirborneFiringLedge();
+    AirbornePlatforms.Add(AddBlock(TEXT("AirborneFiringLedge"),
+        FVector(Ledge.CenterX, Ledge.CenterY, Ledge.Height * 0.5f), FVector(Ledge.SizeX, Ledge.SizeY, Ledge.Height)));
+    static ConstructorHelpers::FObjectFinder<UStaticMesh> JumpPadMesh(
+        TEXT("/Game/RestrictedAssets/Blueprints/JumpPad/JumpPadMesh.JumpPadMesh"));
+    for (int32 Index = 0; Index < 2; ++Index)
+    {
+        const NCAimTrainerLayout::FBlock Pad = NCAimTrainerLayout::AirborneJumpPad(Index);
+        AirbornePlatforms.Add(AddBlock(FName(*FString::Printf(TEXT("AirbornePadPlatform%d"), Index)),
+            FVector(Pad.CenterX, Pad.CenterY, Pad.Height * 0.5f), FVector(Pad.SizeX, Pad.SizeY, Pad.Height)));
+        UStaticMeshComponent* PadVisual = CreateDefaultSubobject<UStaticMeshComponent>(
+            FName(*FString::Printf(TEXT("AirborneJumpPad%d"), Index)));
+        PadVisual->SetupAttachment(RootComponent);
+        PadVisual->SetRelativeLocation(FVector(Pad.CenterX, Pad.CenterY, Pad.Height + 2.f));
+        PadVisual->SetStaticMesh(JumpPadMesh.Object);
+        PadVisual->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        AirbornePadVisuals.Add(PadVisual);
+    }
+    GooSurface = AddBlock(TEXT("AirborneGooSurface"), FVector(0.f, 0.f, NCAimTrainerLayout::AirborneHazardZ - 5.f), FVector(6400.f, 3600.f, 10.f));
+    // The game retires airborne targets at this shared height without routing
+    // expiry through combat damage. Cosmetic material loading waits for play.
+    GooSurface->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     for (int32 Index = 0; Index < 3; ++Index)
     {
         UPointLightComponent* Light = CreateDefaultSubobject<UPointLightComponent>(FName(*FString::Printf(TEXT("TrainingLight%d"), Index)));
@@ -564,6 +793,33 @@ UStaticMeshComponent* ANCAimTrainerArena::AddBlock(FName Name, const FVector& Ce
 void ANCAimTrainerArena::BeginPlay()
 {
     Super::BeginPlay();
+    if (GetNetMode() != NM_DedicatedServer)
+    {
+        // DM-DeckTest's goo, verified in the retail cook. Keep it optional and
+        // out of CDO initialization: a stripped cosmetic asset must not open
+        // a default-property error dialog during game startup.
+        UMaterialInterface* GooMaterial = LoadObject<UMaterialInterface>(nullptr,
+            TEXT("/Game/RestrictedAssets/Environments/Materials/SlimePit.SlimePit"),
+            nullptr, LOAD_NoWarn | LOAD_Quiet);
+        UStaticMesh* GooMesh = LoadObject<UStaticMesh>(nullptr,
+            TEXT("/Game/RestrictedAssets/Environments/ShellResources/Meshes/Generic/SM_Sheet_500.SM_Sheet_500"),
+            nullptr, LOAD_NoWarn | LOAD_Quiet);
+        if (GooMaterial && GooMesh)
+        {
+            // SlimePit is translucent/two-sided. Use DeckTest's single sheet
+            // instead of overlapping top/bottom cube faces through the goo.
+            const FBoxSphereBounds Bounds = GooMesh->GetBounds();
+            if (Bounds.BoxExtent.X > 0.f && Bounds.BoxExtent.Y > 0.f)
+            {
+                const FVector Scale(6400.f / (2.f * Bounds.BoxExtent.X), 3600.f / (2.f * Bounds.BoxExtent.Y), 1.f);
+                GooSurface->SetStaticMesh(GooMesh);
+                GooSurface->SetRelativeScale3D(Scale);
+                GooSurface->SetRelativeLocation(FVector(-Bounds.Origin.X * Scale.X, -Bounds.Origin.Y * Scale.Y,
+                    NCAimTrainerLayout::AirborneHazardZ - Bounds.Origin.Z));
+                GooSurface->SetMaterial(0, GooMaterial);
+            }
+        }
+    }
     OnRep_Scenario();
 }
 
@@ -588,8 +844,42 @@ void ANCAimTrainerArena::OnRep_Scenario()
     for (int32 Index = 0; Index < Cover.Num(); ++Index)
     {
         UStaticMeshComponent* Block = Cover[Index];
-        const bool bEnabled = Index < NCAimTrainerLayout::HeadSlotCount ? Scenario == 1 : (Scenario == 2 || Scenario == 3);
+        const bool bEnabled = Index < NCAimTrainerLayout::HeadSlotCount ? Scenario == 1 : Scenario == 2;
         Block->SetHiddenInGame(!bEnabled);
         Block->SetCollisionEnabled(bEnabled ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
     }
+    const bool bAirborne = Scenario == 3 || Scenario == 4;
+    const bool bRockets = Scenario == 4;
+    for (int32 Index = 0; Index < AirbornePlatforms.Num(); ++Index)
+    {
+        const NCAimTrainerLayout::FBlock Geometry = Index == 0
+            ? NCAimTrainerLayout::AirborneFiringLedge(bRockets)
+            : NCAimTrainerLayout::AirborneJumpPad(Index - 1, bRockets);
+        UStaticMeshComponent* Block = AirbornePlatforms[Index];
+        Block->SetRelativeLocation(FVector(Geometry.CenterX, Geometry.CenterY, Geometry.Height * 0.5f));
+        Block->SetRelativeScale3D(FVector(Geometry.SizeX, Geometry.SizeY, Geometry.Height) / 100.f);
+        Block->SetHiddenInGame(!bAirborne);
+        Block->SetCollisionEnabled(bAirborne ? ECollisionEnabled::QueryAndPhysics : ECollisionEnabled::NoCollision);
+    }
+    for (int32 Index = 0; Index < AirbornePadVisuals.Num(); ++Index)
+    {
+        const NCAimTrainerLayout::FBlock Pad = NCAimTrainerLayout::AirborneJumpPad(Index, bRockets);
+        UStaticMeshComponent* Visual = AirbornePadVisuals[Index];
+        Visual->SetRelativeLocation(FVector(Pad.CenterX, Pad.CenterY, Pad.Height + 2.f));
+        Visual->SetRelativeScale3D(FVector(bRockets ? 0.5f : 1.f, bRockets ? 0.5f : 1.f, 1.f));
+        Visual->SetHiddenInGame(!bAirborne);
+    }
+    if (UStaticMesh* GooMesh = GooSurface->GetStaticMesh())
+    {
+        // Anchor the actual top of either the fallback cube or DeckTest sheet.
+        // Deriving it from the mesh also works when replication precedes play,
+        // and switching scenarios never accumulates a previous height offset.
+        const FBoxSphereBounds Bounds = GooMesh->GetBounds();
+        const FTransform Transform = GooSurface->GetRelativeTransform();
+        FVector Location = Transform.GetLocation();
+        Location.Z = NCAimTrainerLayout::AirborneHazardHeight(bRockets)
+            - (Bounds.Origin.Z + Bounds.BoxExtent.Z) * Transform.GetScale3D().Z;
+        GooSurface->SetRelativeLocation(Location);
+    }
+    GooSurface->SetHiddenInGame(!bAirborne);
 }

@@ -93,12 +93,17 @@ struct ANCAimTrainerGame {
     float LastTraceTime = 0.f;
     double TrackedSeconds = 0.0, FiredSeconds = 0.0;
     bool bPreviousContact = false, bPreviousFiring = false;
-    float TargetExpiry[5] = { 4.f, 4.f, 4.f, 4.f, 4.f };
-    float NextTargetTime[5] = {};
+    float TargetExpiry[6] = { 4.f, 4.f, 4.f, 4.f, 4.f, 4.f };
+    float NextTargetTime[6] = {};
     float ShotStatBaseline = 0.f;
     bool bRankedRun = true;
     std::string UnrankedReason;
     bool ValidTrainee = true;
+    // Native projectile identity and world geometry are covered by the arena
+    // adapter. Keep their return values controlled here to exercise hit gating.
+    bool RocketDamageAccepted = false, AtAirborneHazard = false;
+    bool IsCurrentRocketDamage(const ANCAimTrainerTarget*, const FDamageEvent&, AActor*) const { return RocketDamageAccepted; }
+    bool IsAtAirborneHazard(const ANCAimTrainerTarget*) const { return AtAirborneHazard; }
     bool IsTrainee(AController* PC) { return PC && ValidTrainee; }
     World* GetWorld() { return &TheWorld; }
     bool HasTrackingContact() const;
@@ -151,6 +156,74 @@ int main(int argc, char** argv) {
         Require(PrecisionScore(1, 6, 0, 1) == 25, "head bonus added after score flooring");
         Require(PrecisionScore(1, 1, 0, 2) == 0 && PrecisionScore(1, 1, 0, -1) == 0,
                 "impossible popup head count accepted");
+    } else if (name == "rocket_scoring") {
+        Require(RocketScore(3, 2) == 300 && RocketScore(1, 10) == 100 && RocketScore(0, 200) == 0,
+                "rocket scoring deducted expired targets or lost hit rewards");
+        Require(RocketScore(-1, 0) == 0 && RocketScore(201, 0) == 0
+                && RocketScore(1, -1) == 0 && RocketScore(1, 201) == 0,
+                "rocket score accepted impossible counts");
+        Require(RocketAccuracy(3, 1) == 75.f && RocketAccuracy(0, 0) == 0.f
+                && RocketAccuracy(6, 0) == 100.f, "rocket accuracy is not cleared/finished targets");
+        Require(RocketAccuracy(-1, 1) == 0.f && RocketAccuracy(1, -1) == 0.f
+                && RocketAccuracy(201, 0) == 0.f && RocketAccuracy(1, 201) == 0.f
+                && RocketAccuracy(2147483647, 2147483647) == 0.f,
+                "rocket accuracy accepted unbounded counts or overflow");
+    } else if (name == "rocket_damage") {
+        Fixture f; AActor projectile; ANCAimTrainerTarget second;
+        f.Game.Progress.Scenario=10; f.PlayerState.StoredShots=1.f;
+        f.Game.Targets.push_back(&second);
+        auto hitTarget = [&](ANCAimTrainerTarget* target) {
+            return f.Game.RecordTargetHit(target, 40.f, f.Event, &f.Player, &projectile);
+        };
+        Require(hitTarget(&f.Target)==0.f && f.Target.Visible && f.Player.Confirmations==0,
+                "unverified rocket damage scored");
+        f.Game.RocketDamageAccepted=true; f.Game.AtAirborneHazard=true;
+        Require(hitTarget(&f.Target)==0.f && f.Target.Visible, "hazard contact scored before expiry tick");
+        f.Game.AtAirborneHazard=false;
+        f.Gun.Rewind=std::numeric_limits<float>::infinity();
+        Require(hitTarget(&f.Target)>0.f && hitTarget(&second)>0.f,
+                "verified projectile splash did not score multiple live targets");
+        Require(f.Game.Progress.Hits==2 && f.Game.Progress.Shots==1 && f.Game.Progress.Score==200
+                && f.Game.Progress.Accuracy==100.f && f.Game.Progress.Headshots==0 && !f.Game.LastLocalHead,
+                "rocket splash incorrectly used hitscan one-hit-per-shot or headshot accounting");
+        Require(hitTarget(&f.Target)==0.f && f.Player.Confirmations==2,
+                "rocket duplicate appearance played another hit confirmation");
+        f.Game.Progress.TargetsExpired=2; f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Score==200 && f.Game.Progress.Accuracy==50.f,
+                "rocket expiry reduced points or failed to update target-clear accuracy");
+        f.PlayerState.StoredShots=3.f; f.Game.UpdateShotCount();
+        Require(f.Game.Progress.Score==200 && f.Game.Progress.Accuracy==50.f,
+                "missed rockets reduced target-clear score or accuracy");
+        f.PlayerState.StoredShots=151.f; f.Game.UpdateShotCount();
+        Require(!f.Game.bRankedRun, "rocket accounting exceeded backend projectile cap");
+    } else if (name == "airborne_scoring") {
+        Require(AirborneScore(6, 10) == 600 && AirborneScore(6, 10, 2) == 700
+                && AirborneScore(0, 200) == 0 && AirborneScore(200, 200, 200) == 30000,
+                "airborne hit/headshot rewards or bounds drifted");
+        Require(AirborneScore(-1, 1) == 0 && AirborneScore(2, 1) == 0
+                && AirborneScore(1, -1) == 0 && AirborneScore(201, 201) == 0
+                && AirborneScore(1, 1, -1) == 0 && AirborneScore(1, 1, 2) == 0
+                && AirborneScore(2147483647, 2147483647) == 0,
+                "airborne score accepted impossible counts or overflow");
+        for (int scenario : {7, 8, 9}) {
+            Fixture f; f.Game.Progress.Scenario=scenario;
+            f.PlayerState.StoredShots=10.f; f.Game.Progress.TargetsExpired=20;
+            f.Game.UpdateShotCount();
+            Require(f.Game.Progress.Score==0 && f.Game.Progress.Accuracy==0.f,
+                    "empty airborne run scored without hits");
+            // Use a body, then a genuine sniper headshot. IG never gets a head bonus.
+            f.Target.Visible=true; ++f.PlayerState.StoredShots; f.Event.DamageTypeClass=1;
+            Require(f.Hit()>0.f && f.Game.Progress.Score==100 && !f.Game.LastLocalHead,
+                    "airborne misses or expiry erased the first body hit");
+            f.Target.Visible=true; ++f.PlayerState.StoredShots; f.Event.DamageTypeClass=f.Gun.HeadshotDamageType;
+            Require(f.Hit()>0.f && f.Game.Progress.Score==(scenario==7?200:250)
+                    && f.Game.Progress.Headshots==(scenario==7?0:1),
+                    "airborne precision head bonus leaked into IG or was lost");
+            f.Game.Progress.TargetsExpired=50; f.PlayerState.StoredShots=20.f;
+            f.Game.UpdateShotCount();
+            Require(f.Game.Progress.Score==(scenario==7?200:250) && f.Game.Progress.Accuracy==10.f,
+                    "airborne expiry/misses deducted points or stopped affecting shot accuracy");
+        }
     } else if (name == "precision_popup") {
         for (int headType : {5,9}) {
             Fixture f; f.Game.Progress.Scenario=3; f.Gun.HeadshotDamageType=headType;
@@ -388,9 +461,10 @@ int main(int argc, char** argv) {
                 "more contact than firing was accepted");
         Require(TrackingAccuracy(-1, 100) == 0.f && TrackingAccuracy(0, -1) == 0.f
                 && TrackingAccuracy(60001, 60001) == 0.f, "invalid duration bounds accepted");
-    } else if (name == "tracking_sample") {
+    } else if (name == "tracking_sample" || name == "hard_tracking_sample") {
         Fixture f; AUTWeap_LinkGun_NCP link;
-        f.Game.Progress.Scenario = 0; f.Game.RunWeapon = &link; link.CurrentLinkedTarget = &f.Target;
+        f.Game.Progress.Scenario = name == "hard_tracking_sample" ? 6 : 0;
+        f.Game.RunWeapon = &link; link.CurrentLinkedTarget = &f.Target;
         f.Game.UpdateTrackingSample(.03125f);
         Require(f.Game.FiredSeconds == 0 && f.Game.TrackedSeconds == 0, "press onset received unsampled time");
         f.Game.UpdateTrackingSample(.0625f);
@@ -465,9 +539,9 @@ class AimTrainerScoringTests(unittest.TestCase):
         directory = Path(cls.temporary.name)
         game = (PLUGIN / "Source/Private/NCAimTrainerGame.cpp").read_text(encoding="utf-8-sig")
         weapon = (PLUGIN.parents[1] / "Source/UnrealTournament/Private/UTWeapon.cpp").read_text(encoding="utf-8-sig")
-        scoring = (PLUGIN / "Source/Private/NCAimTrainerScoring.h").read_text(encoding="utf-8-sig").replace("#pragma once", "")
+        scoring = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScoring.h").as_posix() + '"'
         source = directory / "trainer.cpp"
-        policy = (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").read_text(encoding="utf-8-sig").replace("#pragma once", "")
+        policy = '#include "' + (PLUGIN / "Source/Private/NCAimTrainerScenarioPolicy.h").as_posix() + '"'
         source.write_text("\n".join((ADAPTER, scoring, policy,
                                     native_function(weapon, "float AUTWeapon::GetWeaponShotsStats"),
                                     native_function(game, "float ANCAimTrainerGame::RecordTargetHit"),
@@ -490,6 +564,9 @@ class AimTrainerScoringTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_precision_formula_and_untrusted_bounds(self): self.run_case("precision")
+    def test_rocket_formula_accuracy_and_untrusted_bounds(self): self.run_case("rocket_scoring")
+    def test_rocket_splash_multiple_targets_identity_gate_and_hazard_retirement(self): self.run_case("rocket_damage")
+    def test_airborne_rewards_ignore_misses_and_expiry_but_keep_accuracy_and_precision_head_bonus(self): self.run_case("airborne_scoring")
     def test_precision_popup_first_body_hit_and_sniper_lightning_head_bonus(self): self.run_case("precision_popup")
     def test_sactf_headshots_require_actual_rifle_head_type_and_award100(self): self.run_case("sactf_headshots")
     def test_sactf_popup_retires_body_hits_and_awards150_only_for_real_heads(self): self.run_case("sactf_popup")
@@ -507,6 +584,7 @@ class AimTrainerScoringTests(unittest.TestCase):
     def test_tracking_contact_requires_actual_active_unobstructed_beam_target(self): self.run_case("beam_contact")
     def test_tracking_accuracy_uses_firing_duration_and_rejects_impossible_counts(self): self.run_case("tracking_accuracy")
     def test_tracking_sampler_distinguishes_idle_off_target_and_real_beam_contact(self): self.run_case("tracking_sample")
+    def test_hard_tracking_excludes_idle_time_and_counts_only_real_beam_contact(self): self.run_case("hard_tracking_sample")
     def test_tracking_sampler_rejects_stalls_invalid_clocks_and_ended_runs(self): self.run_case("tracking_clock")
 
 

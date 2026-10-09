@@ -75,7 +75,7 @@ struct UClass {
 };
 UClass SniperType{1}, InstagibType{2}, LinkType{3}, LinkBaseType{4}, BeamStateType{5}, LightningType{6};
 UClass TrainerType{7}, InstagibTrainerType{8}, TargetType{9}, InstagibTargetType{10};
-UClass SACTFSniperType{11}, SACTFTrainerType{12}, SACTFTargetType{13};
+UClass SACTFSniperType{11}, SACTFTrainerType{12}, SACTFTargetType{13}, RocketType{14};
 struct ANCAimTrainerCharacter { static UClass* StaticClass() { return &TrainerType; } };
 struct ANCAimTrainerInstagibCharacter { static UClass* StaticClass() { return &InstagibTrainerType; } };
 struct ANCAimTrainerSACTFCharacter { static UClass* StaticClass() { return &SACTFTrainerType; } };
@@ -106,6 +106,7 @@ template<class T> UClass* LoadClass(void*, const char* path, void*, int) {
         ++SACTFLoads;
         return MissingSACTFAsset ? nullptr : WrongSACTFAsset ? &InstagibType : &SACTFSniperType;
     }
+    if (LastLoadedPath == "/Game/Blueprints/Netcode/UTNPRocketLauncher.UTNPRocketLauncher_C") return &RocketType;
     return std::string(path).find("Instagib") != std::string::npos ? &InstagibType : &SniperType;
 }
 struct AUTWeapon {
@@ -115,6 +116,7 @@ struct AUTWeapon {
     float GetRefireTime(int) const { return BeamRefire; }
     void StopFire(int) {}
 };
+struct AUTPlusWeap_RocketLauncher : AUTWeapon { static UClass* StaticClass() { return &RocketType; } };
 struct AUTPlusSniper : AUTWeapon {
     bool bTrackImpressive = true;
     int HeadshotDamageType = 11;
@@ -162,10 +164,10 @@ struct Movement {
     void SetPlaneConstraintOrigin(FVector n) { PlaneOrigin = n; }
     void SetPlaneConstraintEnabled(bool v) { Constrained = v; }
     void SetMovementMode(int v) { Mode = v; }
-    void ResetTrainerMovement(bool practice) {
+    void ResetTrainerMovement(bool practice,float laneX=-1800.f) {
         StopMovementImmediately(); bWantsToCrouch=false; UnCrouch(false);
         SetPlaneConstraintNormal(FVector(1,0,0));
-        SetPlaneConstraintOrigin(FVector(-1800,0,50108));
+        SetPlaneConstraintOrigin(FVector(laneX,0,50108));
         SetPlaneConstraintEnabled(practice);
         if(practice) SetMovementMode(MOVE_Walking); else DisableMovement();
     }
@@ -193,6 +195,7 @@ struct AUTCharacter : APawn {
     SACTFSniper SACTF;
     AUTPlusShockRifle Instagib;
     AUTWeap_LinkGun_NCP Link;
+    AUTPlusWeap_RocketLauncher Rocket;
     bool bCanBeDamaged = true, Dead = false;
     int Discards = 0, Creates = 0, Switches = 0;
     bool IsDead() const { return Dead; }
@@ -202,6 +205,7 @@ struct AUTCharacter : APawn {
     void DiscardAllInventory() { ++Discards; }
     AUTWeapon* CreateInventory(TSubclassOf<AUTWeapon> type) {
         ++Creates;
+        if (type->Kind == 14) return &Rocket;
         if (type->Kind == 11) return &SACTF;
         if (type->Kind == 6) return &Lightning;
         if (type->Kind == 3) return &Link;
@@ -322,7 +326,7 @@ struct ANCAimTrainerGame : BaseGame {
     using Super = BaseGame;
     ANCAimTrainerPlayerController* Trainee = nullptr;
     AUTWeapon* RunWeapon = nullptr;
-    TSubclassOf<AUTWeapon> SniperClass, LightningClass, SACTFSniperClass, InstagibClass, LinkClass;
+    TSubclassOf<AUTWeapon> SniperClass, LightningClass, SACTFSniperClass, InstagibClass, LinkClass, RocketClass;
     FVector ArenaOrigin{0.f, 0.f, 50000.f};
     FNCAimTrainerProgress Progress;
     int Publishes = 0, Fetches = 0;
@@ -355,6 +359,10 @@ struct ANCAimTrainerGame : BaseGame {
     void PostLogin(APlayerController*);
     void RestartPlayer(AController*) override;
     UClass* GetDefaultPawnClassForController_Implementation(AController*) override;
+    int ProjectileClears = 0;
+    void ClearTrainerProjectiles() { ++ProjectileClears; }
+    float PracticeFloorZ() const;
+    float PracticeLaneX() const;
     bool ConfigurePawn();
     bool IsInsidePracticeLane(const AUTCharacter*) const;
     void SelectScenario(ANCAimTrainerPlayerController*,uint8,bool=false);
@@ -378,7 +386,56 @@ CASES = r'''
 int main(int argc, char** argv) {
     Require(argc == 2, "case required"); const std::string name(argv[1]);
     Fixture f;
-    if (name == "first_frame") {
+    if (name == "new_presets") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        f.Game.SelectScenario(&f.Player,6);
+        Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Link,"hard tracking equipped wrong gun");
+        for (int scenario : {7,8,9,10}) {
+            f.Game.SelectScenario(&f.Player,uint8(scenario),scenario==8);
+            Require(f.Game.IsInsidePracticeLane(&f.Game.SpawnedPawn),"airborne spawn outside lane");
+            const float expectedX=scenario==10?-800.f:-1800.f;
+            Require(f.Game.SpawnedPawn.Position.Z > 50400.f && f.Game.TheRoom.AssignedScenario==(scenario==10?4:3)
+                && f.Game.SpawnedPawn.Position.X==expectedX && f.Game.SpawnedPawn.Move.PlaneOrigin.X==expectedX,
+                "airborne trainee not on safe ledge or wrong arena");
+            if(scenario==7) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Instagib,"airborne IG wrong weapon");
+            if(scenario==8) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Lightning,"airborne LG wrong weapon");
+            if(scenario==9) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.SACTF,"airborne SACTF wrong weapon");
+            if(scenario==10) Require(f.Game.RunWeapon==&f.Game.SpawnedPawn.Rocket,"airborne rocket wrong weapon");
+        }
+        f.Game.SetMovementPractice(&f.Player,true);
+        f.Game.SpawnedPawn.Position.Y=1400.f;
+        Require(f.Game.IsInsidePracticeLane(&f.Game.SpawnedPawn),"airborne movement lane rejected");
+        f.Game.SpawnedPawn.Position.Z=50108.f;
+        Require(!f.Game.IsInsidePracticeLane(&f.Game.SpawnedPawn),"under-ledge pawn admitted");
+        f.Game.SelectScenario(&f.Player,1);
+        Require(f.Game.SpawnedPawn.Position.Z==50108.f && f.Game.SpawnedPawn.Position.X==-1800.f
+                && f.Game.SpawnedPawn.Move.PlaneOrigin.X==-1800.f,"previous ledge offset leaked into headshots");
+        Require(f.Game.ProjectileClears>=6,"scenario changes left old projectiles alive");
+    } else if (name == "rocket_lane") {
+        f.BeginWorld(); f.Game.PostLogin(&f.Player);
+        for(bool movement:{false,true}) {
+            f.Game.SelectScenario(&f.Player,10);
+            f.Game.SetMovementPractice(&f.Player,movement);
+            auto& pawn=f.Game.SpawnedPawn;
+            Require(pawn.Position.X==-800.f && pawn.Move.PlaneOrigin.X==-800.f
+                    && pawn.Move.Constrained==movement && f.Game.IsInsidePracticeLane(&pawn),
+                    "rocket setup did not anchor trainee and movement plane on closer ledge");
+            pawn.Position.X=-1800.f;
+            Require(!f.Game.IsInsidePracticeLane(&pawn),"rocket practice accepted old distant firing lane");
+            pawn.Position.X=-794.f;
+            Require(!f.Game.IsInsidePracticeLane(&pawn),"rocket practice accepted displacement beyond lane tolerance");
+            f.Game.SelectScenario(&f.Player,8);
+            Require(pawn.Position.X==-1800.f && pawn.Move.PlaneOrigin.X==-1800.f
+                    && f.Game.TheRoom.AssignedScenario==3 && f.Game.IsInsidePracticeLane(&pawn),
+                    "returning to hitscan airborne retained rocket distance or arena variant");
+            pawn.Position.X=-800.f;
+            Require(!f.Game.IsInsidePracticeLane(&pawn),"normal airborne accepted closer rocket firing lane");
+            f.Game.SelectScenario(&f.Player,0);
+            Require(pawn.Position.X==-1800.f && pawn.Position.Z==50108.f
+                    && pawn.Move.PlaneOrigin.X==-1800.f && f.Game.TheRoom.AssignedScenario==0
+                    && f.Game.IsInsidePracticeLane(&pawn),"normal Link failed to restore original ground lane");
+        }
+    } else if (name == "first_frame") {
         Require(!f.Game.ReadyToStartMatch_Implementation(), "started on first frame");
         Require(f.Game.ReadyCalls == 1 && f.Game.NextTickStarts == 1,
                 "stock next-tick deferral was bypassed");
@@ -643,7 +700,7 @@ int main(int argc, char** argv) {
             f.Game.SetMovementPractice(requestor,true);
             f.Game.AbortTraining(requestor);
         }
-        f.Game.SelectScenario(&f.Player,6,false);
+        f.Game.SelectScenario(&f.Player,11,false);
         Require(f.Game.Progress.Phase == 0 && f.Game.Progress.Scenario == 1
                 && f.Game.Progress.bUseLightningGun && !f.Game.Progress.bMovementPractice
                 && f.Game.RunWeapon == &f.Game.SpawnedPawn.Lightning
@@ -836,6 +893,8 @@ class AimTrainerStartupTests(unittest.TestCase):
             "UClass* ANCAimTrainerGame::GetDefaultPawnClassForController_Implementation",
             "bool ANCAimTrainerGame::ConfigurePawn",
             "bool ANCAimTrainerGame::IsInsidePracticeLane",
+            "float ANCAimTrainerGame::PracticeFloorZ",
+            "float ANCAimTrainerGame::PracticeLaneX",
             "void ANCAimTrainerGame::SelectScenario",
             "void ANCAimTrainerGame::SetMovementPractice",
             "void ANCAimTrainerGame::StartTraining",
@@ -889,6 +948,9 @@ class AimTrainerStartupTests(unittest.TestCase):
     def test_missing_lightning_fails_closed_and_recovers_after_mount(self): self.run_case("lightning_assets")
     def test_lightning_requires_sniper_base_and_its_own_shot_counter(self): self.run_case("lightning_content")
     def test_tracking_requires_link_assets_and_recovers_after_mount(self): self.run_case("tracking_assets")
+    def test_new_presets_equip_matching_weapons_and_use_safe_airborne_ledge(self): self.run_case("new_presets")
+    def test_rocket_lane_moves_player_and_plane_and_restores_normal_scenarios(self): self.run_case("rocket_lane")
+
     def test_tracking_requires_real_beam_state_damage_and_range(self): self.run_case("tracking_beam_content")
     def test_tracking_refire_must_be_finite_and_positive(self): self.run_case("tracking_refire")
     def test_scenario_changes_replace_native_pawn_only_outside_run_and_use_class_height(self): self.run_case("profile_replacement")

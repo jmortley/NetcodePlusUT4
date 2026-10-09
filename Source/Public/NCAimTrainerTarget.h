@@ -13,15 +13,24 @@ class NETCODEPLUS_API ANCAimTrainerTarget : public ATeamArenaCharacter
 public:
     ANCAimTrainerTarget(const FObjectInitializer& ObjectInitializer);
     virtual void PostInitializeComponents() override;
+    virtual void ApplyCharacterData(TSubclassOf<AUTCharacterContent> Data) override;
     virtual void BeginPlay() override;
+    virtual void UpdateWeaponAttachment() override;
     virtual void Tick(float DeltaSeconds) override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     virtual float TakeDamage(float Damage, const FDamageEvent& Event, AController* Instigator, AActor* Causer) override;
     virtual void PlayTakeHitEffects_Implementation() override;
     virtual FVector GetHeadLocation(float PredictionTime = 0.f) override;
+    void SetTrainerHeadshotScale(float Scale);
     virtual void NotifyBlockedHeadShot(AUTCharacter* ShotInstigator) override;
 
     void ActivateTarget(const FVector& Location, bool bStrafe);
+    /** Native fall/launch; FlightRate slows vertical time while preserving horizontal velocity. */
+    void ActivateAirborneTarget(const FVector& Location, const FVector& LaunchVelocity, float FlightRate = 1.f);
+    bool LaunchAirborneTarget(const FVector& LaunchVelocity);
+    bool IsAirborneTarget() const { return bTrainerAirborne; }
+    /** Derive horizontal speeds from this variant's CDO; never multiply a previous run. */
+    void SetTrainerSpeedScale(float Scale);
     void StartWiggle(float HalfWidth);
     /** Temporarily replaces short A/D decisions with a longer native strafe. */
     bool StartPopupLongStrafe(float HalfWidth, float HoldSeconds, float DirectionRoll);
@@ -48,6 +57,11 @@ private:
     UPROPERTY(ReplicatedUsing=OnRep_TrainerVisible)
     bool bTrainerVisible = false;
     UFUNCTION() void OnRep_TrainerVisible();
+    UPROPERTY(ReplicatedUsing=OnRep_TrainerHeadshotScale) float TrainerHeadshotScale = 1.f;
+    UFUNCTION() void OnRep_TrainerHeadshotScale();
+    UPROPERTY(ReplicatedUsing=OnRep_TrainerFlightRate) float TrainerFlightRate = 1.f;
+    UFUNCTION() void OnRep_TrainerFlightRate();
+    bool bTrainerAirborne = false;
     bool bTrainerStrafe = false;
     bool bTrainerWiggle = false;
     float StrafeDirection = 1.0f;
@@ -60,6 +74,15 @@ private:
     FVector StrafeCenter = FVector::ZeroVector;
     FVector TrainerSlideDirection = FVector::ZeroVector;
     float AppearanceTime = 0.f;
+    struct FTrainerMaterialTint
+    {
+        TWeakObjectPtr<UMaterialInstanceDynamic> Material;
+        TMap<FName, FLinearColor> Vectors;
+        TMap<FName, float> Scalars;
+    };
+    TArray<FTrainerMaterialTint> TrainerTintMaterials;
+    float NextTrainerTintTime = 0.f;
+    void UpdateTrainerTint();
     void ResetTargetMovement();
     bool StartTrainerSlide(const FVector& Direction);
 };
@@ -99,6 +122,9 @@ private:
     UPROPERTY() UStaticMesh* BlockMesh;
     UPROPERTY() UMaterialInterface* BlockMaterial;
     UPROPERTY() TArray<class UStaticMeshComponent*> Cover;
+    UPROPERTY() TArray<class UStaticMeshComponent*> AirbornePlatforms;
+    UPROPERTY() TArray<class UStaticMeshComponent*> AirbornePadVisuals;
+    UPROPERTY() class UStaticMeshComponent* GooSurface;
     UPROPERTY(ReplicatedUsing=OnRep_Scenario) uint8 Scenario = 0;
     UFUNCTION() void OnRep_Scenario();
     class UStaticMeshComponent* AddBlock(FName Name, const FVector& Center, const FVector& Size);

@@ -2,6 +2,7 @@
 // Stock UT headers require the full engine types, even when this file starts a unity batch.
 #include "UnrealTournament.h"
 #include "NCAimTrainerOnline.h"
+#include "NCAimTrainerScenarioPolicy.h"
 #include "NCAimTrainerLocalHttp.h"
 #include "Engine/World.h"
 #include "UTLocalPlayer.h"
@@ -68,7 +69,7 @@ TSharedPtr<FNCAimTrainerLocalSession> FNCAimTrainerLocalSession::Start(UWorld* I
 {
 	using namespace NCAimTrainerLocal;
 	FGuid ParsedId;
-	if (!InWorld || InWorld->GetNetMode() != NM_Standalone || Scenario < 0 || Scenario > 5
+	if (!InWorld || InWorld->GetNetMode() != NM_Standalone || !NCAimTrainerScenarioPolicy::IsValidScenario(Scenario)
 		|| !FGuid::Parse(RequestId, ParsedId) || !ParsedId.IsValid()
 		|| RequestId != ParsedId.ToString(EGuidFormats::DigitsWithHyphens).ToLower())
 	{

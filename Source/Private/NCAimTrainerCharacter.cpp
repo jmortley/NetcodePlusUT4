@@ -50,7 +50,7 @@ UNCAimTrainerMovement::UNCAimTrainerMovement(const FObjectInitializer& ObjectIni
 {
 }
 
-void UNCAimTrainerMovement::ResetTrainerMovement(bool bPractice)
+void UNCAimTrainerMovement::ResetTrainerMovement(bool bPractice, float LaneX)
 {
     StopMovementImmediately();
     ClearDodgeInput();
@@ -66,7 +66,7 @@ void UNCAimTrainerMovement::ResetTrainerMovement(bool bPractice)
     // locally controlled pawn must expand their own capsule on a fresh run.
     UnCrouch(false);
     SetPlaneConstraintNormal(FVector(1.f, 0.f, 0.f));
-    SetPlaneConstraintOrigin(FVector(-1800.f, 0.f, 50108.f));
+    SetPlaneConstraintOrigin(FVector(LaneX, 0.f, 50108.f));
     SetPlaneConstraintEnabled(bPractice);
     if (bPractice) { SetMovementMode(MOVE_Walking); }
     else { DisableMovement(); }

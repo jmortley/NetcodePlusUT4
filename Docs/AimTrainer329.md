@@ -1,14 +1,99 @@
 # NetcodePlus Aim Trainer (UE 4.15 / 329)
 
-An opt-in game mode with real animated UT character targets, six 60-second
+An opt-in game mode with real animated UT character targets, eleven 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
+
+## Airborne, hard tracking and target presentation (2026-10-09)
+
+- **Link tracking / hard** uses the NCP Link Gun and a target with 30% higher
+  horizontal speeds and acceleration. Gravity and jump height stay unchanged.
+  Faster slides turn inward sooner to remain inside the normal Link beam range.
+  Its board is separate from normal Link tracking.
+- **Hitscan Airborne** supports Instagib, Sniper/LG, and SACTF presets. A fourth
+  **Airborne / Rockets** preset uses
+  `/Game/Blueprints/Netcode/UTNPRocketLauncher.UTNPRocketLauncher_C`.
+  Every weapon preset has independent fixed-position/movement and local/server boards.
+- The room has DeckTest's goo and a raised firing ledge. A target launches between
+  offset pads at `(100,-1400)` and `(1100,1400)`, creating a diagonal crossing
+  in both directions. Launch velocity is calculated from native gravity and
+  the destination pad. Five other pooled slots spawn falling targets in varied
+  rear lanes, staggered by 0.45–0.70 seconds. Touching goo retires a target;
+  there is no requirement to clear the entire room before replacements appear.
+- The two outer falling slots each have a 45% chance per appearance to use a
+  side-wall lane instead of their rear lane: one on the left and one on the
+  right maximum, within the same six-target pool. These spawn at X550–650,
+  Y±1660 (±25 jitter) and drift inward, clearing both jump-pad platforms.
+- Falling targets now use 88.35% of the original vertical rate for Sniper/LG
+  and 90.25% for Instagib: another 5% reduction from their earlier 93%/95%
+  rates. Native gravity and launch Z are scaled together to preserve
+  arc height, with matching gravity replicated to clients. The diagonal
+  jump-pad target retains its existing rifle launch timing; SACTF stays at
+  its original fall rate.
+- Airborne Rockets retains the closer X−800 firing position and uses a compact
+  layout based on halving each target center's 3D displacement from the fixed eye position
+  `(-800,0,511)`, compared with the previous rocket layout. Its pads move to
+  `(-350,-700)` / `(150,700)`, with smaller supports and a narrower ledge;
+  falling centers spawn at Z930.5–1130.5 and the jumper apex is Z1030.5.
+  Goo rises to Z211.5 and pads to Z290.5 to preserve safe retirement/landing
+  for full-size capsules. Native gravity is retained; launch velocities and
+  flight times scale by sqrt(0.5). The two alternate side lanes move inward
+  with the rest of this compact layout. Movement practice uses the same
+  geometry; its changing viewpoint naturally changes individual shot ranges.
+  A subsequent rear-target adjustment moves the nearer falling band another
+  75 units forward to X375–475, and the deeper band 200 units forward to
+  X525–650. Jump-pad targets, alternate side lanes, heights and fall timing
+  retain their compact-layout settings.
+  Switching back to a rifle restores the original supports, goo and lane.
+- All Airborne presets award 100 per hit with **no miss or expiry deductions**.
+  Sniper/LG and SACTF retain the 50-point headshot bonus. Rifle accuracy still
+  reflects missed shots. Rockets award 100 per destroyed target; their displayed
+  rate is hits divided by hits plus expiries; splash can hit several targets
+  with one projectile. Native rocket/grenade collision, LOS, damage types and
+  NCP validation remain in charge of damage. Old-run or pre-appearance
+  projectiles cannot score against a newly reused target.
+- Headshot-only presets increase native head radius by 15%, replicated to
+  clients. Visible head size and body capsule do not change. This includes
+  NCP's inline claimed-head validation, not just the ordinary `IsHeadShot` call.
+  Pop-up and airborne headshot bonuses retain their normal radius.
+- Every trainer target now requires
+  `/Game/RestrictedAssets/Character/Base/Blueprints/Base_3p_AnimBP_UT3` and holds
+  a cosmetic stock shock-rifle attachment. It has no weapon collision or
+  firing inventory. Forced-model enemy colors/brightness apply to the trainer
+  mesh; model selection cannot replace its skeleton, size or animation class.
+
+The shared UT3 animation change reset all eleven presets at revision 14.
+The four Airborne presets now advance to revision 15 for positive-only scoring
+and the compact rocket layout; the other seven remain at 14. This applies to
+both movement settings and score sources. Previous results stay archived under
+their original versions and never mix
+with these boards. Deploy matching Django code before testing
+uploads; no new database migration is required. Existing authentication,
+five-second local checkpoints, and approved-server allowlists still apply.
+New slugs are `strafe_hard`, `airborne_ig`, `airborne_sniper`, `airborne_sactf`,
+and `airborne_rockets`. The menu accepts keys 1–9, 0, and minus, or mouse selection.
+
+The goo uses DM-DeckTest's
+`/Game/RestrictedAssets/Environments/Materials/SlimePit.SlimePit` on its
+`SM_Sheet_500` mesh, both verified in the retail client and server paks. The
+single sheet avoids overlapping faces beneath this translucent material.
+Their optional cosmetic load happens in `BeginPlay` on rendering clients,
+with the existing grid as a fallback if either asset is absent. The
+previous lava reference was absent from retail and produced a CDO
+default-property error on startup. Scenario changes keep the rendered goo top
+aligned with the corresponding target-retirement height.
+
+Rebuild the plugin and verify that the UT3 animation and stock goo,
+jump-pad, shock-attachment and NCP weapon assets are available in the cooked
+installation. No new map asset was authored. Portable tests exercise native
+trainer methods and the backend protocol; they do not replace an actual
+4.15 build and standalone/remote-client playtest.
 
 ## Pop-up movement refresh (2026-10-09)
 
 The IG, Sniper/LG and SACTF pop-up presets now use fresh revision-12 boards.
-Link tracking, ordinary headshots and SACTF headshots continue to use their
-revision-11 boards. Old pop-up scores remain archived; they are not deleted or
+At that refresh, Link tracking and headshots retained revision 11; the later
+UT3 animation reset above moves every preset to 14. Old scores remain archived; they are not deleted or
 mixed into the tuned preset. Fixed/movement and local/approved-server results
 remain separate. Deploy the matching Django update before the new game build;
 this board change needs no database migration and adds no revision labels to
@@ -127,7 +212,7 @@ The first version supports **one trainee per server instance**. Use separate
 instances for simultaneous players. Scores from approved instances share the
 same UT4Stats leaderboard.
 
-Click a scenario card or press **1** through **6**. Press **Enter** or click
+Click a scenario card or press **1–9**, **0**, or **minus**. Press **Enter** or click
 Start for the countdown. **F6** cancels an incomplete run and returns to the
 picker. **Enter** retries from the results screen. **Escape** retains the normal
 UT menu. Cancelled runs and disconnects do not submit partial scores.
@@ -177,7 +262,7 @@ Fixed-position and movement results never compete on the same board;
 jumping/crouching changes the headshot cover challenge. Movement runs follow
 the same eligibility and submission checks as fixed-position runs.
 
-All six scenarios support offline standalone practice. A hub is not required.
+All eleven scenarios support offline standalone practice. A hub is not required.
 Eligible local results use the separate account-authenticated checkpoint board.
 An approved network host submits to the approved-server board. A directly
 connected dedicated server can be used for network testing without a hub.
@@ -354,22 +439,21 @@ that the player used no automation.
 
 ## Shared UT4Stats leaderboard
 
-Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=11&movement=0&limit=10`
-(also `headshots`, `instagib`, `precision_popup`, `sactf_headshots` and
-`sactf_popup`). Add `scope=local_checkpoints`
+Reads use `/aimtrainer_leaderboard/?scenario=strafe&revision=14&movement=0&limit=10`
+(substitute any of the eleven scenario slugs). Add `scope=local_checkpoints`
 for local results; the default source is `approved_servers`. Use `movement=1`
 for movement practice. The web page is `/aimtrainer/`. Each board shows one best
 run per player, isolated by scenario, revision, source and movement setting.
 Successful menu reads are cached for one minute. Approved hosts send aggregate
 results; authenticated local runs send the checkpoints described below.
 
-Revision 10 and 11 submissions require a Boolean `movement` field. Django retains
+Revision 10 and later submissions require a Boolean `movement` field. Django retains
 revision-1 through revision-9 submissions and explicit older boards, treating
 them as fixed-position results. Older payload digests remain unchanged.
 Revision 4 onward includes `fired_ms`: measured firing time for tracking and
 zero for precision scenarios. Apply migrations through
-`0068_nc_aimtrainer_movement` and deploy revision-11 API support before enabling
-revision-11 hosts. Revision 11 needs no additional migration. Rebuild trainer clients and servers together for the new
+`0068_nc_aimtrainer_movement` and deploy revision-14 API support before enabling
+updated hosts. This board reset needs no additional migration. Rebuild trainer clients and servers together for the new
 scenario and movement-scoped submission notification. These classes are used
 only by the trainer game mode.
 
