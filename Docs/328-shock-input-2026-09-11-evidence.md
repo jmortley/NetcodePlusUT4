@@ -349,10 +349,12 @@ capture has 25 pre-weapon dropped starts, distinct from its seven eligible equip
 taps. It does not record enough possession state to prove the cause of every drop.
 
 `ncp.InstagibEquipTap` now also retains one real action on that current living
-pawn's equipping, identical-mode Instagib rifle while a network client is Inactive
-and has not acknowledged the pawn. It expires 500 ms after the physical press
+pawn's equipping, identical-mode Instagib rifle while a network client is Inactive.
+It expires 500 ms after the physical press
 using real time. That is a maximum age, not an added firing delay. Dispatch waits
-for Playing, acknowledgment of the same pawn, equip completion and legal cadence.
+for Playing on that same current pawn, equip completion and legal cadence.
+`ClientRestart` acknowledges possession before entering Playing; the plugin uses
+the public controller state and `GetPawn()` without reading `AcknowledgedPawn`.
 The shot uses current aim and the normal firing protocol. No RPC, rewind, shot
 identity or server admission policy changes.
 
@@ -367,7 +369,7 @@ not re-equip the rifle and therefore does not erase the valid pending click.
 
 `ATeamArenaCharacter::PawnClientRestart` also schedules one bounded local held-input
 recovery for all weapons. It starts next tick, after ClientRestart can enter
-Playing, and waits at most 500 ms of monotonic time for acknowledgment and the
+Playing, and waits at most 500 ms of monotonic time for that state and the
 weapon to arrive and initialize. It uses stock `ClientVerifyFiringInputs` to read
 the controller's current held buttons. Released buttons do not create starts.
 If either mode is already pending, any start is queued, or the weapon is firing,
@@ -375,9 +377,19 @@ normal input keeps control and recovery ends. Repeated restarts cannot extend th
 deadline or rearm completed recovery. A changed weapon, owner or blocked gameplay
 cancels it; there is no permanent polling or global held-button replay.
 
+Player-facing patch note: Holding fire through respawn now fires when your weapon
+is ready, without needing to release and click again. Instagib also remembers one
+tap during weapon raise, including the brief possession handoff. Normal fire rate
+and server shot validation still apply.
+
+The fire guards and trainer input-focus check use the qualified exported
+`UUTLocalPlayer::AreMenusOpen` and non-inline `GetQuickChatWidget().IsValid()`.
+This avoids relying on retail UTLocalPlayer virtual-slot or member-offset parity
+with the public headers, as required by the earlier trainer launcher fix.
+
 Native regression adapters execute the actual stock deferred dispatcher and held
 verifier, the production tap/restart methods and existing firing state machine.
-They cover both fire modes, equip/acknowledgment order, released taps, continuous
+They cover both fire modes, equip/Playing transition order, released taps, continuous
 holds, same-frame release/repress, duplicate starts, timeout and lifecycle guards.
 Separate binding tests exercise the actual installation/removal methods, including
 preserving other observers. These are not a UE build or a multiplayer playtest.

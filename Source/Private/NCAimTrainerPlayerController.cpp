@@ -96,7 +96,8 @@ bool ANCAimTrainerPlayerController::HasTrainerInputFocus() const
 {
 #if !UE_SERVER
 	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(Player);
-	if (LP && (LP->AreMenusOpen() || LP->IsQuickChatOpen())) { return false; }
+	// Use retail exports rather than UTLocalPlayer virtual slots/member offsets.
+	if (LP && (LP->UUTLocalPlayer::AreMenusOpen() || LP->GetQuickChatWidget().IsValid())) { return false; }
 	if (LP && LP->ViewportClient && LP->ViewportClient->ViewportConsole
 		&& LP->ViewportClient->ViewportConsole->ConsoleActive()) { return false; }
 #endif

@@ -192,14 +192,13 @@ void AUTPlusShockRifle::NoteInstagibEquipPress(uint8 FireMode)
 		// OnRep_Controller can expose the new living pawn and its rifle before
 		// ClientRestart completes. Stock drops StartFire in this state, so a
 		// same-frame provenance token alone cannot retain this physical press.
-		if (PC->AcknowledgedPawn != UTOwner)
-		{
-			PendingInstagibEquipTapMode = FireMode;
-			PendingInstagibEquipTapOwner = UTOwner;
-			PendingInstagibEquipTapController = PC;
-			bInstagibTapAwaitingPossession = true;
-			InstagibPossessionTapDeadline = GetWorld()->GetRealTimeSeconds() + 0.5f;
-		}
+		// CanRetainInstagibEquipTap already requires this controller's current
+		// pawn. Dispatch waits for Playing without reading acknowledgment state.
+		PendingInstagibEquipTapMode = FireMode;
+		PendingInstagibEquipTapOwner = UTOwner;
+		PendingInstagibEquipTapController = PC;
+		bInstagibTapAwaitingPossession = true;
+		InstagibPossessionTapDeadline = GetWorld()->GetRealTimeSeconds() + 0.5f;
 		return;
 	}
 	bInstagibEquipPress[FireMode] = true;

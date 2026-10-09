@@ -78,7 +78,9 @@ void ATeamArenaCharacter::RetrySpawnHeldFire()
 	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(PC->Player);
 	UGameViewportClient* Viewport = LP ? LP->ViewportClient : nullptr;
 	AUTGameState* GS = World->GetGameState<AUTGameState>();
-	if (LP == nullptr || LP->AreMenusOpen() || LP->IsQuickChatOpen()
+	// Match the retail exports instead of relying on public-header virtual
+	// slots or the inline QuickChatWindow member offset.
+	if (LP == nullptr || LP->UUTLocalPlayer::AreMenusOpen() || LP->GetQuickChatWidget().IsValid()
 		|| Viewport == nullptr || Viewport->IgnoreInput()
 		|| Viewport->Viewport == nullptr || !Viewport->Viewport->HasFocus()
 		|| (Viewport->ViewportConsole && Viewport->ViewportConsole->ConsoleActive())
@@ -107,7 +109,9 @@ void ATeamArenaCharacter::RetrySpawnHeldFire()
 		SpawnHeldFireWeapon = CurrentWeapon;
 		bSpawnHeldFireWeaponBound = true;
 	}
-	if (!PC->IsInState(NAME_Playing) || PC->AcknowledgedPawn != this || PC->GetUTCharacter() != this
+	// ClientRestart acknowledges before entering Playing; GetPawn() was
+	// checked above, without directly reading acknowledgment state.
+	if (!PC->IsInState(NAME_Playing) || PC->GetUTCharacter() != this
 		|| CurrentWeapon == nullptr || CurrentWeapon->GetUTOwner() != this
 		|| CurrentWeapon->IsPendingKillPending() || CurrentWeapon->GetCurrentState() == nullptr
 		|| CurrentWeapon->GetCurrentState()->IsA(UUTWeaponStateInactive::StaticClass()))

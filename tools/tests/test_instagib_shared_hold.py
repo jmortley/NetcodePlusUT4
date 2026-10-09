@@ -182,14 +182,17 @@ class InstagibSharedHoldTests(unittest.TestCase):
     def test_stock_dropped_start_forwarded_release_recovers_once_after_possession_and_equip(self):
         self.run_case("possession_tap")
 
-    def test_possession_capture_excludes_blocked_spectator_acknowledged_and_synthetic_inputs(self):
+    def test_possession_capture_excludes_blocked_spectator_wrong_pawn_and_synthetic_inputs(self):
         self.run_case("possession_guards")
 
     def test_possession_tap_cancels_on_focus_menu_input_and_weapon_lifecycle_changes(self):
         self.run_case("possession_invalidation")
 
-    def test_possession_tap_requires_acknowledgment_and_expires_on_real_time(self):
+    def test_possession_tap_waits_for_playing_and_expires_on_real_time(self):
         self.run_case("possession_deadline")
+
+    def test_localplayer_menu_guard_bypasses_virtual_override(self):
+        self.run_case("qualified_localplayer")
 
     def test_possession_taps_coalesce_and_yield_to_fresh_playing_actions(self):
         self.run_case("possession_coalescing")

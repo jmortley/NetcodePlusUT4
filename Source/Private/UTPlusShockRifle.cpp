@@ -433,7 +433,9 @@ bool AUTPlusShockRifle::CanRetainInstagibEquipTap(uint8 FireMode, bool bAllowIna
 #if !UE_SERVER
 	UUTLocalPlayer* LP = Cast<UUTLocalPlayer>(PC->Player);
 	UGameViewportClient* Viewport = LP ? LP->ViewportClient : nullptr;
-	if (LP == nullptr || LP->AreMenusOpen() || LP->IsQuickChatOpen()
+	// Retail UTLocalPlayer layout can differ from public headers. Use exports,
+	// bypassing its virtual slots and inline access to QuickChatWindow.
+	if (LP == nullptr || LP->UUTLocalPlayer::AreMenusOpen() || LP->GetQuickChatWidget().IsValid()
 		|| Viewport == nullptr || Viewport->IgnoreInput() || Viewport->Viewport == nullptr
 		|| !Viewport->Viewport->HasFocus()
 		|| (Viewport->ViewportConsole && Viewport->ViewportConsole->ConsoleActive()))
@@ -546,7 +548,9 @@ void AUTPlusShockRifle::PumpInstagibEquipTap()
 			return;
 		}
 		AUTPlayerController* PC = PendingInstagibEquipTapController.Get();
-		if (!PC->IsInState(NAME_Playing) || PC->AcknowledgedPawn != UTOwner)
+		// ClientRestart acknowledges before entering Playing. The current-pawn
+		// identity was checked above by CanRetainInstagibEquipTap.
+		if (!PC->IsInState(NAME_Playing))
 		{
 			return;
 		}

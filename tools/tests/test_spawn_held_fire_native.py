@@ -67,11 +67,17 @@ struct UWorld : UObject {
 struct Console { bool Open = false; bool ConsoleActive() const { return Open; } };
 struct FViewport { bool Focus = true; bool HasFocus() const { return Focus; } };
 struct UGameViewportClient { bool Ignored = false; Console* ViewportConsole = nullptr; FViewport* Viewport = nullptr; bool IgnoreInput() const { return Ignored; } };
+struct FQuickChatWidget { bool Open; bool IsValid() const { return Open; } };
 struct UUTLocalPlayer : UObject {
     bool Menus = false, Chat = false;
     UGameViewportClient* ViewportClient = nullptr;
-    bool AreMenusOpen() const { return Menus; }
-    bool IsQuickChatOpen() const { return Chat; }
+    virtual bool AreMenusOpen() { return Menus; }
+    FQuickChatWidget GetQuickChatWidget();
+};
+FQuickChatWidget UUTLocalPlayer::GetQuickChatWidget() { return {Chat}; }
+struct FVirtualMenuTrapLocalPlayer : UUTLocalPlayer {
+    int VirtualMenuCalls = 0;
+    bool AreMenusOpen() override { ++VirtualMenuCalls; return true; }
 };
 struct AController : UObject {};
 struct AUTCharacter;
@@ -118,9 +124,13 @@ void* operator new(std::size_t, Inputs& inputs) {
     inputs.Values.emplace_back(); return &inputs.Values.back();
 }
 void operator delete(void*, Inputs&) {}
-struct AUTPlayerController : AController {
-    AUTCharacter* Pawn = nullptr;
+struct APlayerController : AController {
+protected:
+    // Deliberately restrict engine internals so pawn/weapon code cannot depend on them.
     AUTCharacter* AcknowledgedPawn = nullptr;
+};
+struct AUTPlayerController : APlayerController {
+    AUTCharacter* Pawn = nullptr;
     AUTCharacter* UTCharacter = nullptr;
     UObject* Player = nullptr;
     bool Local = true, PendingKill = false, Ignored = false, Cursor = false;
@@ -129,6 +139,7 @@ struct AUTPlayerController : AController {
 private:
     bool bFirePressed = false, bAltFirePressed = false;
 public:
+    void FixtureAcknowledgePawn(AUTCharacter* pawn) { AcknowledgedPawn = pawn; }
     void SetHeld(bool primary, bool alternate) { bFirePressed = primary; bAltFirePressed = alternate; }
     bool IsLocalController() const { return Local; }
     bool IsPendingKillPending() const { return PendingKill; }
@@ -176,12 +187,17 @@ struct Fixture {
         Viewport.ViewportConsole = &TheConsole;
         Viewport.Viewport = &SceneViewport;
         LP.ViewportClient = &Viewport;
-        PC.Player = &LP; PC.Pawn = &Pawn; PC.UTCharacter = &Pawn; PC.AcknowledgedPawn = &Pawn;
+        PC.Player = &LP; PC.Pawn = &Pawn; PC.UTCharacter = &Pawn; PC.FixtureAcknowledgePawn(&Pawn);
         Pawn.WorldValue = &World; Pawn.Controller = &PC; Pawn.Weapon = &Weapon;
         Weapon.Owner = &Pawn;
         PC.SetHeld(true, false);
     }
     void Start() { Pawn.PawnClientRestart(); }
+    void BeginClientRestart() { PC.State = NAME_Inactive; PC.FixtureAcknowledgePawn(nullptr); }
+    void CompleteClientRestart() {
+        // The engine acknowledges first, then enters Playing before the next tick.
+        PC.FixtureAcknowledgePawn(&Pawn); PC.State = NAME_Playing;
+    }
     void Tick() { World.Timers.Tick(); }
     int Starts(int mode) const {
         int result = 0;
@@ -199,10 +215,10 @@ int main(int argc, char** argv) {
     const std::string name(argv[1]);
     Fixture f;
     if (name == "held") {
-        f.PC.State = NAME_Inactive;
+        f.BeginClientRestart();
         f.Start();
         Require(f.Pawn.Restarts == 1 && f.PC.Verified == 0, "recovery ran inside PawnClientRestart");
-        f.PC.State = NAME_Playing; f.Tick();
+        f.CompleteClientRestart(); f.Tick();
         Require(f.PC.Verified == 1 && f.Starts(0) == 1, "primary hold not recovered");
         Require(f.World.Timers.Empty(), "completed recovery kept polling");
         f.PC.DeferredFireInputs.Values.clear(); f.Tick();
@@ -222,12 +238,12 @@ int main(int argc, char** argv) {
         Require(f.Starts(0) == 0 && f.Starts(1) == 1, "queued old release blocked current hold");
         Require(!f.PC.DeferredFireInputs.Values.front().bStartFire, "release ordering changed");
     } else if (name == "readiness") {
-        f.PC.State = NAME_Inactive; f.PC.AcknowledgedPawn = nullptr; f.Pawn.Weapon = nullptr;
+        f.BeginClientRestart(); f.Pawn.Weapon = nullptr;
         f.Start(); f.Tick();
         Require(f.PC.Verified == 0 && !f.World.Timers.Empty(), "missing possession was consumed");
-        FPlatformTime::Now = 1.1; f.PC.State = NAME_Playing; f.Tick();
-        Require(f.PC.Verified == 0, "unacknowledged pawn recovered");
-        f.PC.AcknowledgedPawn = &f.Pawn; f.Tick();
+        FPlatformTime::Now = 1.1; f.PC.FixtureAcknowledgePawn(&f.Pawn); f.Tick();
+        Require(f.PC.Verified == 0, "acknowledgment bypassed Playing readiness");
+        f.CompleteClientRestart(); f.Tick();
         Require(f.PC.Verified == 0, "missing weapon recovered");
         f.Pawn.Weapon = &f.Weapon; f.PC.UTCharacter = &f.OtherPawn; f.Tick();
         Require(f.PC.Verified == 0, "stale cached character received verifier input");
@@ -307,7 +323,7 @@ int main(int argc, char** argv) {
     } else if (name == "weapon_lifetime") {
         for (int gate = 0; gate < 5; ++gate) {
             Fixture n;
-            n.PC.AcknowledgedPawn = nullptr;
+            n.BeginClientRestart();
             n.Weapon.HasState = false;
             if (gate == 4) n.Pawn.Weapon = nullptr;
             n.Start(); n.Tick();
@@ -318,8 +334,16 @@ int main(int argc, char** argv) {
             if (gate == 3) n.Weapon.Valid = false;
             n.Tick();
             Require(n.PC.Verified == 0 && n.World.Timers.Empty(), "replacement/switch did not cancel before readiness");
-            n.PC.AcknowledgedPawn = &n.Pawn; n.Weapon.HasState = true; n.Tick();
+            n.CompleteClientRestart(); n.Weapon.HasState = true; n.Tick();
             Require(n.PC.Verified == 0, "canceled weapon recovered later");
+        }
+    } else if (name == "qualified_localplayer") {
+        for (bool menuOpen : {false, true}) {
+            Fixture n; FVirtualMenuTrapLocalPlayer retailPlayer;
+            retailPlayer.ViewportClient = &n.Viewport; retailPlayer.Menus = menuOpen;
+            n.PC.Player = &retailPlayer; n.Start(); n.Tick();
+            Require(n.Starts(0) == (menuOpen ? 0 : 1), "qualified menu check did not use base state");
+            Require(retailPlayer.VirtualMenuCalls == 0, "menu guard used a retail virtual slot");
         }
     } else if (name == "admission") {
         for (int gate = 0; gate < 7; ++gate) {
@@ -382,6 +406,7 @@ class SpawnHeldFireNativeTests(unittest.TestCase):
     def test_pending_queued_firing_or_switching_input_is_not_duplicated(self): self.run_case("normal_input")
     def test_recovery_cannot_cross_ownership_life_or_world(self): self.run_case("ownership")
     def test_menu_pause_and_gameplay_vetoes_cancel(self): self.run_case("blocked")
+    def test_localplayer_menu_guard_bypasses_virtual_override(self): self.run_case("qualified_localplayer")
     def test_weapon_lifetime_is_bound_before_readiness(self): self.run_case("weapon_lifetime")
     def test_nonlocal_invalid_or_dead_restarts_cannot_arm(self): self.run_case("admission")
     def test_canceled_next_tick_callback_cannot_rearm(self): self.run_case("cancel")

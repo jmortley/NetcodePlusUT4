@@ -139,23 +139,34 @@ struct UGameViewportClient {
     bool IgnoreInput() const { return Ignore; }
 };
 struct UPlayer { virtual ~UPlayer() = default; };
+struct FQuickChatWidget { bool Open; bool IsValid() const { return Open; } };
 struct UUTLocalPlayer : UPlayer {
     UGameViewportClient* ViewportClient = nullptr;
     bool MenusOpen = false, QuickChatOpen = false;
-    bool AreMenusOpen() const { return MenusOpen; }
-    bool IsQuickChatOpen() const { return QuickChatOpen; }
+    virtual bool AreMenusOpen() { return MenusOpen; }
+    FQuickChatWidget GetQuickChatWidget();
+};
+FQuickChatWidget UUTLocalPlayer::GetQuickChatWidget() { return {QuickChatOpen}; }
+struct FVirtualMenuTrapLocalPlayer : UUTLocalPlayer {
+    int VirtualMenuCalls = 0;
+    bool AreMenusOpen() override { ++VirtualMenuCalls; return true; }
 };
 struct FDeferredFireInput { uint8 FireMode; bool bStartFire; };
 struct AController { virtual ~AController() = default; };
-struct AUTPlayerController : AController {
+struct APlayerController : AController {
+protected:
+    // Deliberately restrict engine internals so weapon/pawn code cannot depend on them.
+    AUTCharacter* AcknowledgedPawn = nullptr;
+};
+struct AUTPlayerController : APlayerController {
     AUTCharacter* Pawn = nullptr;
     AUTCharacter* UTCharacter = nullptr;
-    AUTCharacter* AcknowledgedPawn = nullptr;
     UInputComponent* InputComponent = nullptr;
     UPlayer* Player = nullptr;
     bool Playing = true, IgnoreMove = false, Spectating = false, Cursor = false;
     const char* StateName = NAME_Playing;
     TArray<FDeferredFireInput> DeferredFireInputs;
+    void FixtureAcknowledgePawn(AUTCharacter* pawn) { AcknowledgedPawn = pawn; }
     AUTCharacter* GetPawn() const { return Pawn; }
     bool IsInState(const char* state) const {
         return state == NAME_Playing ? Playing : state == NAME_Inactive && !Playing && !Spectating;
@@ -460,7 +471,7 @@ struct Fixture {
     Fixture() {
         Pawn.Weapon = &W; W.UTOwner = &Pawn; W.TestWorld = &World;
         Pawn.Controller = &Controller; Controller.Pawn = &Pawn; Controller.InputComponent = &Input;
-        Controller.UTCharacter = &Pawn; Controller.AcknowledgedPawn = &Pawn;
+        Controller.UTCharacter = &Pawn; Controller.FixtureAcknowledgePawn(&Pawn);
         LocalPlayer.ViewportClient = &Viewport; Controller.Player = &LocalPlayer;
         W.RefreshInstagibEquipInput();
         W.ActiveState = &Active; W.EquippingState = &Equip;
@@ -476,11 +487,12 @@ struct Fixture {
     void BeginEquip() { W.BringUp(0.f); }
     void BeforePossession() {
         W.NetMode = NM_Client; Controller.Playing = false;
-        Controller.StateName = NAME_Inactive; Controller.AcknowledgedPawn = nullptr;
+        Controller.StateName = NAME_Inactive; Controller.FixtureAcknowledgePawn(nullptr);
     }
     void Acknowledge() {
+        // ClientRestart acknowledges the pawn before its final Playing transition.
+        Controller.FixtureAcknowledgePawn(&Pawn);
         Controller.Playing = true; Controller.StateName = NAME_Playing;
-        Controller.AcknowledgedPawn = &Pawn;
     }
     void QueuePress(uint8 mode) {
         Controller.DeferredFireInputs.push_back({mode, true}); W.NoteInstagibEquipPress(mode);
@@ -964,7 +976,7 @@ void PossessionGuards() {
         switch (change) {
         case 0: f.Controller.Spectating = true; break;
         case 1: f.W.NetMode = NM_Standalone; break;
-        case 2: f.Controller.AcknowledgedPawn = &f.Pawn; break;
+        case 2: f.Controller.Pawn = nullptr; break;
         case 3: f.Controller.Cursor = true; break;
         case 4: f.World.Paused = true; break;
         case 5: f.Viewport.TestViewport.Focused = false; break;
@@ -1037,9 +1049,23 @@ void PossessionDeadline() {
     }
     Fixture f; f.BeginEquip(); f.BeforePossession(); f.QueuePress(0);
     f.Controller.ApplyDeferredFireInputs(); f.QueueRelease(0); f.Controller.ApplyDeferredFireInputs();
-    f.At(.15f); f.Controller.Playing = true; f.Controller.StateName = NAME_Playing;
-    f.FinishEquip(); f.Count(0); // A Playing state without acknowledgment is not ready.
-    f.At(.2f); f.Controller.AcknowledgedPawn = &f.Pawn; f.W.PumpInstagibEquipTap(); f.Count(1);
+    f.At(.15f); f.Controller.FixtureAcknowledgePawn(&f.Pawn);
+    f.FinishEquip(); f.Count(0); // Acknowledgment alone cannot bypass the Playing gate.
+    f.At(.2f); f.Acknowledge(); f.W.PumpInstagibEquipTap(); f.Count(1);
+}
+void QualifiedLocalPlayerMenuGate() {
+    for (bool menuOpen : {false, true}) {
+        Fixture f; FVirtualMenuTrapLocalPlayer retailPlayer;
+        retailPlayer.ViewportClient = &f.Viewport;
+        retailPlayer.MenusOpen = menuOpen;
+        f.Controller.Player = &retailPlayer;
+        f.BeginEquip(); f.BeforePossession();
+        f.QueuePress(0); f.Controller.ApplyDeferredFireInputs();
+        f.QueueRelease(0); f.Controller.ApplyDeferredFireInputs();
+        f.At(.2f); f.Acknowledge(); f.FinishEquip(); f.W.PumpInstagibEquipTap();
+        f.Count(menuOpen ? 0 : 1);
+        Require(retailPlayer.VirtualMenuCalls == 0, "menu guard used a retail virtual slot");
+    }
 }
 void PossessionCoalescing() {
     for (uint8 last : {uint8(0), uint8(1)}) {
@@ -1102,6 +1128,7 @@ int main(int argc, char** argv) {
     else if (name == "possession_deadline") PossessionDeadline();
     else if (name == "possession_coalescing") PossessionCoalescing();
     else if (name == "possession_held") PossessionHeldRecovery();
+    else if (name == "qualified_localplayer") QualifiedLocalPlayerMenuGate();
     else if (name == "equip_tap") EquipTap();
     else if (name == "equip_hold") EquipHold();
     else if (name == "equip_provenance") EquipProvenance();

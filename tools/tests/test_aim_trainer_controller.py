@@ -135,8 +135,40 @@ void operator delete(void* pointer, FDeferredInputs& inputs) noexcept {
 struct MockPlayerState { bool bOnlySpectator = false; };
 struct MockGameState { bool HasMatchStarted() const { return true; } };
 struct MockWorld { MockGameState State; MockGameState* GetGameState() { return &State; } };
+struct UPlayer { virtual ~UPlayer() = default; };
+struct MockConsole {
+    bool Active = false;
+    bool ConsoleActive() const { return Active; }
+};
+struct MockViewportClient {
+    MockConsole Console;
+    MockConsole* ViewportConsole = &Console;
+};
+struct MockQuickChatWidget {
+    bool Valid;
+    explicit MockQuickChatWidget(bool valid = false) : Valid(valid) {}
+    bool IsValid() const { return Valid; }
+};
+struct UUTLocalPlayer : UPlayer {
+    bool Menus = false, QuickChat = false;
+    int BaseMenuCalls = 0, QuickChatCalls = 0;
+    MockViewportClient Viewport;
+    MockViewportClient* ViewportClient = &Viewport;
+    virtual bool AreMenusOpen() { ++BaseMenuCalls; return Menus; }
+    MockQuickChatWidget GetQuickChatWidget();
+};
+MockQuickChatWidget UUTLocalPlayer::GetQuickChatWidget() {
+    ++QuickChatCalls; return MockQuickChatWidget{QuickChat};
+}
+struct MockRetailLocalPlayer : UUTLocalPlayer {
+    int WrongVirtualCalls = 0;
+    // Emulate an incompatible virtual slot. Only qualified base dispatch may
+    // reach the menu implementation; no IsQuickChatOpen inline shim exists.
+    bool AreMenusOpen() override { ++WrongVirtualCalls; return !Menus; }
+};
 template<class T> T* Cast(APawn* pawn) { return dynamic_cast<T*>(pawn); }
 template<class T> T* Cast(UCharacterMovementComponent* movement) { return dynamic_cast<T*>(movement); }
+template<class T> T* Cast(UPlayer* player) { return dynamic_cast<T*>(player); }
 struct AUTPlayerController {
     int BaseKeys = 0;
     int Jumps = 0, Crouches = 0, CrouchToggles = 0;
@@ -144,6 +176,8 @@ struct AUTPlayerController {
     bool IgnoreLook = false, bFirePressed = false, bAltFirePressed = false;
     bool bPlayerIsWaiting = false, bAutoCam = false;
     bool bIsHoldingFloorSlide = false;
+    MockRetailLocalPlayer LocalPlayer;
+    UPlayer* Player = &LocalPlayer;
     int StateName = NAME_Playing;
     float MovementForwardAxis = 0.f, MovementStrafeAxis = 0.f;
     APawn* Pawn = nullptr;
@@ -188,12 +222,12 @@ struct ANCAimTrainerPlayerController : AUTPlayerController {
     MockAnnouncer* Announcer = nullptr;
     bool bLastPresentedMovementPractice = false;
     bool bTrackingPrimaryHeld = false, bTrackingAltHeld = false;
-    bool InputFocus = true, Local = true;
+    bool Local = true;
     int Role = ROLE_Authority, Selects = 0, Starts = 0, Aborts = 0, NetUpdates = 0, InputUpdates = 0;
     uint8 LastSelection = 255;
     int MovementSelections = 0;
     bool LastMovementSelection = false;
-    bool HasTrainerInputFocus() const { return InputFocus; }
+    bool HasTrainerInputFocus() const;
     bool IsLocalController() const { return Local; }
     bool LastLightningChoice = false;
     void ServerTrainerSelectScenario(uint8 value, bool lightning) { ++Selects; LastSelection = value; LastLightningChoice = lightning; }
@@ -275,12 +309,36 @@ void MenuControls() {
     Require(pc.Selects == selects, "invalid scenario sent");
 }
 void Focus() {
+    for (int blockedBy = 0; blockedBy < 4; ++blockedBy) {
+        ANCAimTrainerPlayerController pc;
+        if (blockedBy == 0) pc.LocalPlayer.Menus = true;
+        if (blockedBy == 1) pc.LocalPlayer.QuickChat = true;
+        if (blockedBy == 2) pc.LocalPlayer.Viewport.Console.Active = true;
+        if (blockedBy == 3) pc.Local = false;
+        for (FKey key : {EKeys::One, EKeys::Enter, EKeys::F6, EKeys::M})
+            Require(!pc.InputKey(key, IE_Pressed, 1.f, false), "stock menu/chat key intercepted");
+        Require(pc.BaseKeys == 4 && pc.Selects == 0 && pc.Starts == 0 && pc.Aborts == 0 && pc.MovementSelections == 0,
+                "focus handoff changed trainer state");
+        Require(pc.LocalPlayer.WrongVirtualCalls == 0, "focus handoff used an unsafe menu virtual slot");
+    }
+}
+void RetailFocus() {
     ANCAimTrainerPlayerController pc;
-    pc.InputFocus = false;
-    for (FKey key : {EKeys::One, EKeys::Enter, EKeys::F6, EKeys::M})
-        Require(!pc.InputKey(key, IE_Pressed, 1.f, false), "stock menu/chat key intercepted");
-    Require(pc.BaseKeys == 4 && pc.Selects == 0 && pc.Starts == 0 && pc.Aborts == 0 && pc.MovementSelections == 0,
-            "focus handoff changed trainer state");
+    Require(pc.HasTrainerInputFocus(), "local gameplay did not retain trainer input");
+    Require(pc.LocalPlayer.BaseMenuCalls == 1 && pc.LocalPlayer.WrongVirtualCalls == 0
+            && pc.LocalPlayer.QuickChatCalls == 1,
+            "trainer focus did not use qualified menu dispatch and exported quick-chat getter");
+    pc.LocalPlayer.Menus = true;
+    Require(!pc.HasTrainerInputFocus(), "open menu did not block trainer input");
+    pc.LocalPlayer.Menus = false; pc.LocalPlayer.QuickChat = true;
+    Require(!pc.HasTrainerInputFocus(), "open quick chat did not block trainer input");
+    pc.LocalPlayer.QuickChat = false; pc.LocalPlayer.Viewport.Console.Active = true;
+    Require(!pc.HasTrainerInputFocus(), "open console did not block trainer input");
+    pc.LocalPlayer.Viewport.Console.Active = false; pc.Local = false;
+    Require(!pc.HasTrainerInputFocus(), "nonlocal controller gained trainer input");
+    pc.Local = true;
+    Require(pc.HasTrainerInputFocus(), "closing UI did not restore local trainer input");
+    Require(pc.LocalPlayer.WrongVirtualCalls == 0, "trainer focus used incompatible menu virtual dispatch");
 }
 void ActiveControls() {
     ANCAimTrainerPlayerController pc;
@@ -563,6 +621,7 @@ int main(int argc, char** argv) {
     if (name == "countdown_audio") CountdownAudio();
     else if (name == "menu") MenuControls();
     else if (name == "focus") Focus();
+    else if (name == "retail_focus") RetailFocus();
     else if (name == "active") ActiveControls();
     else if (name == "fire") FireGates();
     else if (name == "tracking_beam") TrackingBeamHold();
@@ -604,6 +663,7 @@ class AimTrainerControllerTests(unittest.TestCase):
             "void ANCAimTrainerPlayerController::Crouch",
             "void ANCAimTrainerPlayerController::ToggleCrouch",
             "bool ANCAimTrainerPlayerController::IsTrainerMenuVisible",
+            "bool ANCAimTrainerPlayerController::HasTrainerInputFocus",
             "bool ANCAimTrainerPlayerController::InputKey",
             "void ANCAimTrainerPlayerController::OnFire",
             "void ANCAimTrainerPlayerController::OnAltFire",
@@ -641,6 +701,7 @@ class AimTrainerControllerTests(unittest.TestCase):
     def test_menu_controls_and_repeat_suppression(self): self.run_case("menu")
     def test_spoken_countdown_follows_progress_and_selected_local_announcer(self): self.run_case("countdown_audio")
     def test_stock_menu_and_chat_keep_input_focus(self): self.run_case("focus")
+    def test_actual_focus_guard_uses_retail_safe_ui_calls_and_local_readiness(self): self.run_case("retail_focus")
     def test_cannot_replace_active_run_and_can_abort(self): self.run_case("active")
     def test_each_scenario_uses_real_fire_only_during_run(self): self.run_case("fire")
     def test_tracking_buttons_hold_one_real_secondary_beam_until_both_release(self): self.run_case("tracking_beam")
