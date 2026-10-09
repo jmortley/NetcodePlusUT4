@@ -81,6 +81,7 @@ private:
     TArray<float> NextTargetTime;
     TArray<float> TargetExpiry;
     TArray<float> NextWiggleTime;
+    TArray<float> PopupLastMoveHold;
     TArray<float> NextPopupSlideTime;
     TArray<float> NextPopupLongStrafeTime;
     TArray<float> NextPopupDodgeTime;
@@ -109,7 +110,7 @@ private:
     float PracticeFloorZ() const;
     void UpdateTargets(float Now);
     void UpdatePopupDodger(float Now);
-    void ChoosePopupTravel(int32 Index, float Now);
+    void ChoosePopupMovement(int32 Index, float Now);
     void UpdateTrackingMovement(float Now);
     void UpdateShotCount();
     bool HasTrackingContact() const;

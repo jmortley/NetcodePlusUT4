@@ -224,8 +224,9 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     float StrafeDirection=1.f, StrafeRange=800.f, SpawnProtectionStartTime=0.f, AppearanceTime=0.f;
     float WiggleRange=0.f, PopupLongStrafeEndTime=0.f;
     bool bRecenterWiggleAfterSlide=false,bRecenterWiggleAfterDodge=false,bTrainerDodgeSlidePending=false;
-    FVector StrafeCenter,TrainerSlideDirection,StrafeAxis=FVector(0.f,1.f,0.f),PopupDestination;
-    bool bPopupTravel=false,bPopupTravelComplete=false;
+    FVector StrafeCenter,TrainerSlideDirection,StrafeAxis=FVector(0.f,1.f,0.f);
+    FVector PopupMoveMinimum,PopupMoveMaximum,PopupMoveDirection;
+    bool bPopupEvasion=false,bPopupNeedsDecision=false;
     float TrainerHeadshotScale=1.f,NextTrainerTintTime=0.f,TrainerFlightRate=1.f;
     void UpdateTrainerTint() {}
     void SetTrainerHeadshotScale(float);
@@ -246,8 +247,8 @@ struct ANCAimTrainerTarget : ATeamArenaCharacter {
     void ReverseStrafe();
     void ConfigurePopupStrafe(const FVector&,float,float);
     void SetPopupStrafeAxis(const FVector&);
-    bool SetPopupDestination(const FVector&);
-    bool HasReachedPopupDestination() const;
+    bool SetPopupMovement(const FVector&,const FVector&,const FVector&);
+    bool NeedsPopupMovementDecision() const;
     bool TryTrainerDodge(float);
     bool TryTrainerPopupDodge(int32,const FVector&,const FVector&,bool=false);
     bool TryTrainerSlideForward();
@@ -274,39 +275,110 @@ CASES = r'''
 int main(int argc,char**argv) {
     Require(argc==2,"case required"); const std::string name(argv[1]);
     if(name=="popup_travel") {
-        for(float dt:{.008f,.016f,.032f}) for(float direction:{-1.f,1.f}) {
-            auto target=ActivePopup(); target.Position=FVector(1400,direction<0?1030.f:670.f,428);
-            const FVector goal(1400,direction<0?670.f:1030.f,428);
-            Require(target.SetPopupDestination(goal),"valid popup destination rejected");
+        for(float dt:{.008f,.016f,.032f}) for(int slot:{0,1,4,5}) for(int variant:{0,1,2}) {
+            const auto area=NCAimTrainerLayout::PopupEvasionArea(slot,variant);
+            const FVector minimum(area.MinX,area.MinY,0),maximum(area.MaxX,area.MaxY,0);
+            auto target=ActivePopup(); target.Position=(minimum+maximum)*.5f; target.Position.Z=428.f;
             const int teleports=target.Teleports;
-            for(int frame=0;frame<500;++frame) {
+            unsigned seed=unsigned(1+slot*17+variant*31);
+            auto roll=[&]() { seed=1664525u*seed+1013904223u; return float(seed>>8)/16777216.f; };
+            float decision=0.f,lastHold=0.f,minX=target.Position.X,maxX=minX,minY=target.Position.Y,maxY=minY;
+            int decisions=0,fastFrames=0;
+            for(int frame=0;frame<4000;++frame) {
+                const float now=frame*dt;
+                if(now>=decision) {
+                    const float angle=roll()*6.28318530718f;
+                    Require(target.SetPopupMovement(minimum,maximum,FVector(std::cos(angle),std::sin(angle),0)),
+                        "valid popup input rejected");
+                    lastHold=NCAimTrainerScenarioPolicy::PopupMoveHoldSeconds(roll(),roll(),lastHold);
+                    decision=now+lastHold; ++decisions;
+                }
                 const int inputs=target.InputCalls; const FVector before=target.Move.Velocity;
                 target.Tick(dt);
-                if(target.InputCalls>inputs) {
-                    target.Move.Velocity=target.Move.Velocity+target.LastInput*(target.Move.MaxAcceleration*dt);
-                    target.Move.Velocity=target.Move.Velocity.GetClampedToMaxSize(target.Move.MaxWalkSpeed);
-                } else {
-                    const float speed=target.Move.Velocity.Size2D();
-                    target.Move.Velocity=target.Move.Velocity.GetSafeNormal2D()*FMath::Max(0.f,speed-target.Move.BrakingDecelerationWalking*dt);
-                }
+                Require(target.InputCalls==inputs+1,"popup stopped at a waypoint instead of driving native movement");
+                target.Move.Velocity=target.Move.Velocity+target.LastInput*(target.Move.MaxAcceleration*dt);
+                target.Move.Velocity=target.Move.Velocity.GetClampedToMaxSize(target.Move.MaxWalkSpeed);
                 target.Position=target.Position+(before+target.Move.Velocity)*(.5f*dt);
-                Require(target.Position.Y>600.f && target.Position.Y<1100.f,"popup braking lets a capsule leave the upper platform");
+                Require(target.Position.X>=area.MinX-20.f && target.Position.X<=area.MaxX+20.f
+                    &&target.Position.Y>=area.MinY-20.f &&target.Position.Y<=area.MaxY+20.f,
+                    "predictive steering left its capsule-safe area");
+                minX=std::min(minX,target.Position.X); maxX=std::max(maxX,target.Position.X);
+                minY=std::min(minY,target.Position.Y); maxY=std::max(maxY,target.Position.Y);
+                fastFrames+=int(target.Move.Velocity.Size2D()>400.f);
             }
-            Require(target.HasReachedPopupDestination() && target.Teleports==teleports,"destination movement did not finish through native input");
-            Require(std::fabs(target.Position.Y-goal.Y)<120.f,"target stopped too early to traverse its lane");
-            const int inputs=target.InputCalls;
-            target.Position.Y+=direction*50.f; target.Tick(dt); target.Tick(dt);
-            Require(target.InputCalls==inputs,"endpoint overshoot restarted an in-place A/D loop");
+            Require(decisions>20 && fastFrames>2400 && target.Teleports==teleports,"evasion barely moved or teleported");
+            Require(maxX-minX>150.f && maxY-minY>150.f,"target settled onto a fixed strafe line");
             target.HideTarget(); target.ActivateTarget(FVector(-800,0,108),true);
-            Require(!target.bPopupTravel && !target.bPopupTravelComplete && target.StrafeAxis.Y==1.f,
-                "pooled tracking target inherited popup destination or axis");
+            Require(!target.bPopupEvasion && !target.bPopupNeedsDecision && target.StrafeAxis.Y==1.f,
+                "pooled tracking target inherited popup motion");
         }
+        const FVector minimum(100,-1500,0),maximum(2400,-450,0),direction(1,0,0);
         auto target=ActivePopup(); target.Role=1;
-        Require(!target.SetPopupDestination(FVector(1800,-850,108)),"client selected an authority movement path");
+        Require(!target.SetPopupMovement(minimum,maximum,direction),"client selected authority movement");
         target.Role=ROLE_Authority; target.Move.Mode=MOVE_Falling;
-        Require(!target.SetPopupDestination(FVector(1800,-850,108)),"walking destination countersteered a dodge");
+        Require(!target.SetPopupMovement(minimum,maximum,direction),"ground input countersteered a dodge");
         target.Move.Mode=MOVE_Walking; target.Move.bIsFloorSliding=true;
-        Require(!target.SetPopupDestination(FVector(1800,-850,108)),"walking destination interrupted a native slide");
+        Require(!target.SetPopupMovement(minimum,maximum,direction),"ground input interrupted a native slide");
+        target.Move.bIsFloorSliding=false;
+        Require(!target.SetPopupMovement(maximum,minimum,direction),"inverted area accepted");
+        Require(!target.SetPopupMovement(minimum,maximum,FVector()),"zero direction accepted");
+        Require(!target.SetPopupMovement(minimum,maximum,FVector(1,0,1)),"vertical walk input accepted");
+        Require(!target.SetPopupMovement(minimum,maximum,FVector(std::numeric_limits<float>::quiet_NaN(),0,0)),"NaN accepted");
+    }
+    else if(name=="popup_evasion_dodges") {
+        for(float gravity : {-2154.f,-980.f}) for(int slot : {0,1,4,5}) for(int variant : {0,1,2}) {
+            const auto area=NCAimTrainerLayout::PopupEvasionArea(slot,variant);
+            const FVector minimum(area.MinX,area.MinY,0),maximum(area.MaxX,area.MaxY,0);
+            unsigned seed=unsigned(1+slot*17+variant*31);
+            auto roll=[&]() { seed=1664525u*seed+1013904223u; return float(seed>>8)/16777216.f; };
+            int dodges=0,rejected=0,forward=0,backward=0,left=0,right=0,chains=0;
+            for(int sample=0;sample<4000;++sample) {
+                auto target=Active(); target.SimulateNativeDodge=true;
+                target.Move.Gravity=gravity; target.Move.MaxWalkSpeed=940.f; target.Move.MaxAcceleration=5000.f;
+                target.Move.MaxFloorSlideSpeed=1100.f;
+                target.Position=FVector(area.MinX+(area.MaxX-area.MinX)*roll(),area.MinY+(area.MaxY-area.MinY)*roll(),428.f);
+                const float heading=roll()*6.28318530718f;
+                target.Move.Velocity=FVector(std::cos(heading),std::sin(heading),0)*(940.f*roll());
+                Require(target.SetPopupMovement(minimum,maximum,FVector(1,0,0))&&!target.bTrainerWiggle,
+                    "persistent popup did not enter evasion without a wiggle state");
+                const bool chain=sample%5==0 && slot!=1;
+                const float degrees=slot==1 ? 3.f+6.f*roll()
+                    : slot==5 || (slot==4 && variant==1) ? 55.f+70.f*roll() : 8.f+70.f*roll();
+                const float angle=degrees*.01745329252f;
+                const float x=chain ? std::abs(std::cos(angle)) : (roll()<.5f ? -1.f : 1.f)*std::cos(angle);
+                const FVector direction(x,(roll()<.5f ? -1.f : 1.f)*std::sin(angle),0);
+                if(!target.TryTrainerPopupDodge(slot,direction,FVector::ZeroVector,chain)) {
+                    ++rejected; Require(target.DodgeCalls==0,"unsafe trajectory reached native Dodge"); continue;
+                }
+                ++dodges; forward+=int(direction.X<0); backward+=int(direction.X>0);
+                left+=int(direction.Y<0); right+=int(direction.Y>0); chains+=int(chain);
+                Require(target.Move.bIsDodging&&target.Move.IsFalling()&&target.bPopupNeedsDecision
+                    &&!target.NeedsPopupMovementDecision(),"new evasion action did not defer decisions through native flight");
+                const int inputs=target.InputCalls; target.Tick(.016f);
+                Require(target.InputCalls==inputs+int(chain),"ordinary ground input interrupted native flight");
+                Require(!target.SetPopupMovement(minimum,maximum,FVector(0,1,0)),"fresh decision interrupted native dodge");
+                // The normal dodge recovery must request a new decision rather
+                // than returning to the old direction or the old spawn anchor.
+                if(!chain) {
+                    target.Move.MovementTime=10.f; target.Move.ProcessLanded(FHitResult(),0.f,0);
+                    target.Tick(.016f);
+                    Require(!target.NeedsPopupMovementDecision(),"landing cooldown was bypassed");
+                    target.Move.MovementTime=target.Move.DodgeResetTime+.001f; target.Tick(.016f);
+                    Require(target.NeedsPopupMovementDecision()&&target.InputCalls==inputs,
+                        "dodge recovery reused old ground input or lost the next decision");
+                    Require(target.SetPopupMovement(minimum,maximum,FVector(0,1,0))&&!target.NeedsPopupMovementDecision(),
+                        "recovered target could not accept a new independent decision");
+                }
+                Require(target.Teleports==0,"evasion dodge teleported a target");
+            }
+            if(dodges<10 || rejected<10 || !left || !right || !forward || !backward
+                || (gravity==-2154.f && (slot==0 || (slot==4 && variant==0)) && !chains)) {
+                std::cerr<<"slot="<<slot<<" variant="<<variant<<" gravity="<<gravity<<" dodges="<<dodges
+                    <<" rejected="<<rejected<<" forward="<<forward<<" backward="<<backward
+                    <<" left="<<left<<" right="<<right<<" chains="<<chains<<'\n';
+                Require(false,"an evasion area offered no varied native dodge opportunities");
+            }
+        }
     }
     else if(name=="popup_left_dodge") {
         int accepted=0;
@@ -960,9 +1032,12 @@ int main(int argc,char**argv) {
                 "unsafe world bounds, protected target, momentum or chain escaped prediction guard");
         }
     } else if(name=="popup_dodge_slide_chain") {
-        for(bool successfulSlide : {false,true}) {
+        for(bool successfulSlide : {false,true}) for(bool evasion : {false,true}) {
             auto target=ActivePopup();target.SimulateNativeDodge=true;
             target.Position=target.StrafeCenter=FVector(-400.f,-1300.f,103.f);
+            const auto area=NCAimTrainerLayout::PopupEvasionArea(4,0);
+            const FVector minimum(area.MinX,area.MinY,0),maximum(area.MaxX,area.MaxY,0);
+            if(evasion) Require(target.SetPopupMovement(minimum,maximum,FVector(1,0,0)),"evasion chain setup failed");
             const FVector direction(.9797959f,.2f,0.f);
             Require(target.TryTrainerPopupDodge(4,direction,FVector::ZeroVector,true)
                 &&target.bTrainerDodgeSlidePending&&target.Move.bWantsFloorSlide
@@ -999,8 +1074,14 @@ int main(int argc,char**argv) {
             target.Position=FVector(1510.f,-895.f,103.f);
             target.Move.MovementTime=target.Move.DodgeResetTime+.001f;target.Tick(.016f);
             Require(!target.bRecenterWiggleAfterDodge&&target.StrafeCenter.X==1510.f&&target.StrafeCenter.Y==-895.f
-                &&target.LastInput.X==0.f&&target.LastInput.Y==1.f&&target.Teleports==0,
+                &&(evasion ? target.NeedsPopupMovementDecision() : target.LastInput.X==0.f&&target.LastInput.Y==1.f)
+                &&target.Teleports==0,
                 "native dodge-slide chain did not resume bounded walking at its real endpoint");
+            if(evasion) {
+                Require(target.SetPopupMovement(minimum,maximum,FVector(0,-1,0)),"recovered chain rejected fresh movement");
+                target.Tick(.016f);
+                Require(target.LastInput.Y==-1.f&&!target.NeedsPopupMovementDecision(),"slide retained its old movement pattern");
+            }
         }
     } else if(name=="popup_dodge_slide_reuse") {
         for(bool nativeSlide : {false,true}) {
@@ -1267,8 +1348,8 @@ class AimTrainerTargetTests(unittest.TestCase):
             "void ANCAimTrainerTarget::ReverseStrafe",
             "void ANCAimTrainerTarget::ConfigurePopupStrafe",
             "void ANCAimTrainerTarget::SetPopupStrafeAxis",
-            "bool ANCAimTrainerTarget::SetPopupDestination",
-            "bool ANCAimTrainerTarget::HasReachedPopupDestination",
+            "bool ANCAimTrainerTarget::SetPopupMovement",
+            "bool ANCAimTrainerTarget::NeedsPopupMovementDecision",
             "bool ANCAimTrainerTarget::TryTrainerDodge",
             "bool ANCAimTrainerTarget::TryTrainerPopupDodge",
             "bool ANCAimTrainerTarget::TryTrainerSlideForward",
@@ -1302,7 +1383,8 @@ class AimTrainerTargetTests(unittest.TestCase):
         result = subprocess.run([str(self.executable), name], env=self.environment, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_popup_destination_braking_does_not_oscillate_or_leak_on_reuse(self): self.run_case("popup_travel")
+    def test_popup_evasion_keeps_moving_in_two_dimensions_inside_safe_bounds(self): self.run_case("popup_travel")
+    def test_popup_evasion_areas_allow_varied_native_dodges_and_defer_decisions_through_recovery(self): self.run_case("popup_evasion_dodges")
     def test_left_popup_dodger_checks_full_native_landing_path(self): self.run_case("popup_left_dodge")
 
     def test_hard_tracking_slide_turns_early_enough_to_stay_within_beam_range(self): self.run_case("hard_slide_range")

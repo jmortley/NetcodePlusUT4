@@ -29,15 +29,17 @@ namespace NCAimTrainerLayout
 
     struct FPopupTravelArea { float MinX, MaxX, MinY, MaxY; };
 
-    inline FPopupTravelArea PopupTravelArea(int Slot, int Variant)
+    inline FPopupTravelArea PopupEvasionArea(int Slot, int Variant)
     {
-        // Capsule centers, with clearance for native braking. Elevated targets
-        // can travel along the platform instead of oscillating across its width.
-        if (Slot == 1) { return { 200.f, 2200.f, Variant == 1 ? 138.f : -218.f, Variant == 1 ? 218.f : -138.f }; }
-        if (Slot == 2) { return { 1000.f, 2200.f, 670.f, 1030.f }; }
-        if (Variant == 1) { return { -600.f, -350.f, 600.f, 1500.f }; }
-        if (Variant == 2) { return { 800.f, 2450.f, -1550.f, -640.f }; }
-        return { -600.f, 600.f, -1500.f, -640.f };
+        // Capsule-center bounds. Open-floor targets have a two-dimensional
+        // area, not a fixed strafe axis. The elevated middle target stays on
+        // its platform; the protected rear peek and high-right seat opt out.
+        if (Slot == 5) { return { -1350.f, -750.f, -1400.f, 1400.f }; }
+        if (Slot == 1) { return { -90.f, 2290.f, -205.f, 205.f }; }
+        // Share the complete safe floor after landing rather than making a
+        // target walk predictably back to its original corner after every dodge.
+        if (Slot == 4 && Variant == 1) { return { -620.f, -350.f, -1550.f, 1550.f }; }
+        return { -640.f, 2950.f, -1600.f, -430.f };
     }
 
     constexpr float AirborneHazardZ = 20.f;
@@ -177,10 +179,30 @@ namespace NCAimTrainerLayout
         const float MaxX = StartX > EndX ? StartX : EndX;
         const float MinY = (StartY < EndY ? StartY : EndY) - ResumeHalfWidth - WiggleSafetyMargin;
         const float MaxY = (StartY > EndY ? StartY : EndY) + ResumeHalfWidth + WiggleSafetyMargin;
+        if (Slot == 1)
+        {
+            const FBlock Block = PopupPlatform(1);
+            return MinX - CapsuleRadius > Block.CenterX - Block.SizeX * 0.5f
+                && MaxX + CapsuleRadius < Block.CenterX + Block.SizeX * 0.5f
+                && MinY - CapsuleRadius > Block.CenterY - Block.SizeY * 0.5f
+                && MaxY + CapsuleRadius < Block.CenterY + Block.SizeY * 0.5f;
+        }
+        // Foreground and right-floor targets may dodge across open floor in
+        // front of every block, with space reserved for the trainee at X=-1800.
+        if (Slot == 5)
+        {
+            return MinX - CapsuleRadius > -1500.f && MaxX + CapsuleRadius < -680.f
+                && MinY - CapsuleRadius > -1700.f && MaxY + CapsuleRadius < 1700.f;
+        }
+        if (Slot == 4)
+        {
+            if (MinX - CapsuleRadius > -680.f && MaxX + CapsuleRadius < -250.f
+                && MinY - CapsuleRadius > -1700.f && MaxY + CapsuleRadius < 1700.f) { return true; }
+        }
         if (Slot != 0 && Slot != 4) { return false; }
-        // Only the two left variants dodge. The near left appearance can head
-        // away from the trainee; a deeper appearance can choose either X sign.
-        // Reserve both capsules at the permanent dodger's X=-800 plane.
+        // Outside the foreground strips, dodges stay on the open left floor.
+        // A near-left appearance can head away from the trainee; deeper ones
+        // can choose either X sign. Keep clear of the foreground dodger.
         // The left platform is only one unit tall, so native movement can step
         // onto the surrounding floor. Exclude the central 160-unit cover and
         // right platform, rather than confining real dodges to that tiny step.
@@ -190,8 +212,8 @@ namespace NCAimTrainerLayout
 
     inline FSeat PopupDodgerSeat(int Slot = PopupDodgerSlot)
     {
-        // A second persistent target runs/dodges lengthwise down the left lane.
-        // Its small diagonal angle keeps the whole lane left of central cover.
+        // The second persistent target starts in the open left area; its
+        // two-dimensional movement bounds keep it clear of central cover.
         if (Slot == PopupLeftDodgerSlot) { return { 1100.f, 1100.f, -850.f, 0.f, 800.f, 1.f }; }
         // The open foreground lane stays clear of every platform. Its 800-unit
         // walking reversal threshold leaves additional room for native dodges;

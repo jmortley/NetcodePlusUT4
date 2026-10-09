@@ -60,6 +60,7 @@ ANCAimTrainerGame::ANCAimTrainerGame(const FObjectInitializer& ObjectInitializer
     NextTargetTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     TargetExpiry.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextWiggleTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
+    PopupLastMoveHold.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextPopupSlideTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextPopupLongStrafeTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
     NextPopupDodgeTime.SetNumZeroed(NCAimTrainerLayout::TargetCount);
@@ -573,6 +574,7 @@ void ANCAimTrainerGame::BeginActiveRun()
         NextTargetTime[Index] = PhaseStartedAt + (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) ? 0.f : Index * 0.25f);
         TargetExpiry[Index] = 0.f;
         NextWiggleTime[Index] = PhaseStartedAt;
+        PopupLastMoveHold[Index] = 0.f;
         NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = NextPopupDodgeTime[Index] = 0.f;
         PopupSpawnVariants[Index] = PopupDodgeActions[Index] = 0;
         NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
@@ -590,6 +592,7 @@ void ANCAimTrainerGame::HideAllTargets()
     for (int32 Index = 0; Index < NextCrouchTime.Num(); ++Index)
     {
         NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
+        PopupLastMoveHold[Index] = 0.f;
         NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = NextPopupDodgeTime[Index] = 0.f;
         PopupSpawnVariants[Index] = PopupDodgeActions[Index] = 0;
     }
@@ -645,25 +648,14 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     Targets[Index]->ActivateTarget(ArenaOrigin + Position, NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) || bPopupDodger);
     Targets[Index]->SetTrainerSpeedScale(Progress.Scenario == 6 ? 1.3f : 1.f);
     Targets[Index]->SetTrainerHeadshotScale(NCAimTrainerScenarioPolicy::IsHeadshotScenario(Progress.Scenario) ? 1.15f : 1.f);
-    if (bPopupDodger)
-    {
-        const bool bLeft = Index == NCAimTrainerLayout::PopupLeftDodgerSlot;
-        const NCAimTrainerLayout::FSeat Seat = NCAimTrainerLayout::PopupDodgerSeat(Index);
-        Targets[Index]->ConfigurePopupStrafe(ArenaOrigin + FVector(bLeft ? Seat.MinX : Position.X, Seat.CenterY, Position.Z), 800.f, Schedule.FRand());
-        if (bLeft)
-        {
-            const float Angle = Schedule.FRandRange(-8.f, 8.f) * (PI / 180.f);
-            Targets[Index]->SetPopupStrafeAxis(FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.f));
-        }
-    }
     ++LocalAppearances[Index];
     NextCrouchTime[Index] = CrouchEndTime[Index] = 0.f;
     NextPopupSlideTime[Index] = NextPopupLongStrafeTime[Index] = NextPopupDodgeTime[Index] = 0.f;
+    PopupLastMoveHold[Index] = 0.f;
     PopupDodgeActions[Index] = NCAimTrainerScenarioPolicy::PopupStrafe;
     if (bPopupDodger)
     {
-        NextPopupDodgeTime[Index] = Now + NCAimTrainerScenarioPolicy::InstagibFirstDodgeDelay(Schedule.FRand());
-        NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::PopupDodgerStrafeHoldSeconds(Schedule.FRand());
+        ChoosePopupMovement(Index, Now);
     }
     if (NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario))
     {
@@ -675,8 +667,8 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
             ? NCAimTrainerLayout::HeadSeat(Index) : NCAimTrainerLayout::PopupSeat(Index, PopupSpawnVariants[Index], bInstagibPopup);
         Targets[Index]->StartWiggle(Seat.WiggleRange);
         NextWiggleTime[Index] = Now + NCAimTrainerScenarioPolicy::WiggleHoldSeconds(Schedule.FRand());
-        if (bTimedPopup && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index)) { ChoosePopupTravel(Index, Now); }
-        if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario))
+        if (bTimedPopup && NCAimTrainerScenarioPolicy::HasPopupEvasion(Index)) { ChoosePopupMovement(Index, Now); }
+        else if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario))
         {
             // Timed targets independently choose a special movement. The two
             // persistent dodgers have separate recurring timers below.
@@ -705,30 +697,53 @@ void ANCAimTrainerGame::ActivateSlot(int32 Index, float Now)
     }
 }
 
-void ANCAimTrainerGame::ChoosePopupTravel(int32 Index, float Now)
+void ANCAimTrainerGame::ChoosePopupMovement(int32 Index, float Now)
 {
-    const NCAimTrainerLayout::FPopupTravelArea Area = NCAimTrainerLayout::PopupTravelArea(Index, PopupSpawnVariants[Index]);
-    const FVector Current = Targets[Index]->GetActorLocation();
-    FVector Destination;
-    for (int32 Attempt = 0; Attempt < 4; ++Attempt)
+    if (!NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario)
+        || !NCAimTrainerScenarioPolicy::HasPopupEvasion(Index) || !Targets.IsValidIndex(Index)
+        || !Targets[Index] || !Targets[Index]->IsAvailable()) { return; }
+    const NCAimTrainerLayout::FPopupTravelArea Area = NCAimTrainerLayout::PopupEvasionArea(Index, PopupSpawnVariants[Index]);
+    const FVector Velocity = Targets[Index]->GetVelocity();
+    const float Pattern = Schedule.FRand(), Turn = Schedule.FRand(), Sign = Schedule.FRand();
+    const float Heading = Velocity.Size2D() > 50.f
+        ? FMath::Atan2(Velocity.Y, Velocity.X) + (Sign < 0.5f ? -1.f : 1.f)
+            * NCAimTrainerScenarioPolicy::PopupTurnDegrees(Pattern, Turn) * (PI / 180.f)
+        : Turn * 2.f * PI;
+    const FVector Direction(FMath::Cos(Heading), FMath::Sin(Heading), 0.f);
+    if (!Targets[Index]->SetPopupMovement(ArenaOrigin + FVector(Area.MinX, Area.MinY, 0.f),
+        ArenaOrigin + FVector(Area.MaxX, Area.MaxY, 0.f), Direction))
     {
-        Destination = FVector(ArenaOrigin.X + Schedule.FRandRange(Area.MinX, Area.MaxX),
-            ArenaOrigin.Y + Schedule.FRandRange(Area.MinY, Area.MaxY), Current.Z);
-        const float DX = Destination.X - Current.X, DY = Destination.Y - Current.Y;
-        if (DX * DX + DY * DY >= 350.f * 350.f) { break; }
-        if (Attempt == 3)
+        // Native dodge, landing, slide and posture gates own the target until
+        // recovery. A delayed frame never dispatches a backlog of decisions.
+        NextWiggleTime[Index] = Now + Schedule.FRandRange(0.16f, 0.32f);
+        return;
+    }
+    const float Hold = NCAimTrainerScenarioPolicy::PopupMoveHoldSeconds(Schedule.FRand(), Schedule.FRand(), PopupLastMoveHold[Index]);
+    PopupLastMoveHold[Index] = Hold;
+    NextWiggleTime[Index] = Now + Hold;
+
+    // Re-roll on every decision, independently of the walk direction. Targets
+    // need not wiggle first or dodge to the same side after each appearance.
+    const float Action = Schedule.FRand();
+    const bool bSlideOnLanding = Action < 0.12f && Index != 1;
+    const float RequiredTime = (bSlideOnLanding ? 2.05f : 1.05f) + PopupRefireSeconds;
+    if (Action >= 0.55f || TargetExpiry[Index] - Now < RequiredTime || PhaseStartedAt + 60.f - Now < RequiredTime) { return; }
+    for (int32 Attempt = 0; Attempt < 6; ++Attempt)
+    {
+        // The middle platform supports lengthwise diagonals. Open floor uses
+        // a much broader angle range, with both signs rolled independently.
+        const float Angle = (Index == 1 ? Schedule.FRandRange(3.f, 9.f)
+            : Index == 5 || (Index == 4 && PopupSpawnVariants[Index] == 1)
+                ? Schedule.FRandRange(55.f, 125.f) : Schedule.FRandRange(8.f, 78.f)) * (PI / 180.f);
+        const float XSign = bSlideOnLanding || Schedule.FRand() < 0.5f ? 1.f : -1.f;
+        const float YSign = Schedule.FRand() < 0.5f ? -1.f : 1.f;
+        // Backward dodge-to-slide must move away from the trainee (+X).
+        const float X = bSlideOnLanding ? FMath::Abs(FMath::Cos(Angle)) : XSign * FMath::Cos(Angle);
+        if (Targets[Index]->TryTrainerPopupDodge(Index, FVector(X, YSign * FMath::Sin(Angle), 0.f), ArenaOrigin, bSlideOnLanding))
         {
-            // Even unlucky rolls must produce useful travel, not a few units
-            // of A/D. The room's checked rectangles are convex and unobstructed.
-            Destination.X = ArenaOrigin.X + (Current.X - ArenaOrigin.X < (Area.MinX + Area.MaxX) * 0.5f ? Area.MaxX : Area.MinX);
-            Destination.Y = ArenaOrigin.Y + (Current.Y - ArenaOrigin.Y < (Area.MinY + Area.MaxY) * 0.5f ? Area.MaxY : Area.MinY);
+            break;
         }
     }
-    const bool bMoving = Targets[Index]->SetPopupDestination(Destination);
-    // Native dodge/slide ownership wins; retry later instead of steering a
-    // character in midair or imposing a repeated action sequence.
-    NextWiggleTime[Index] = Now + (bMoving ? NCAimTrainerScenarioPolicy::PopupTravelHoldSeconds(Schedule.FRand())
-        : Schedule.FRandRange(0.2f, 0.45f));
 }
 
 void ANCAimTrainerGame::UpdateShotCount()
@@ -1105,11 +1120,11 @@ void ANCAimTrainerGame::UpdateTargets(float Now)
             else { ActivateSlot(Index, Now); }
         }
         if (!NCAimTrainerScenarioPolicy::IsTrackingScenario(Progress.Scenario) && Targets[Index]->IsAvailable()
-            && (Now >= NextWiggleTime[Index] || Targets[Index]->HasReachedPopupDestination()))
+            && (Now >= NextWiggleTime[Index] || Targets[Index]->NeedsPopupMovementDecision()))
         {
-            if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && NCAimTrainerScenarioPolicy::HasVariedPopupMovement(Index))
+            if (NCAimTrainerScenarioPolicy::IsPopupScenario(Progress.Scenario) && NCAimTrainerScenarioPolicy::HasPopupEvasion(Index))
             {
-                ChoosePopupTravel(Index, Now);
+                ChoosePopupMovement(Index, Now);
             }
             else
             {
@@ -1201,21 +1216,9 @@ void ANCAimTrainerGame::UpdatePopupDodger(float Now)
         // random decisions and immediate replacement of either persistent target.
         if (!Targets[Slot]->IsAvailable()) { ActivateSlot(Slot, Now); }
         if (!Targets[Slot]->IsAvailable()) { continue; }
-        if (Now >= NextPopupDodgeTime[Slot])
+        if (Now >= NextWiggleTime[Slot] || Targets[Slot]->NeedsPopupMovementDecision())
         {
-            const bool bInstagibPopup = Progress.Scenario == NCAimTrainerScenarioId::InstagibPopup;
-            const bool bAttempt = !bInstagibPopup || Schedule.FRand() < 0.8f;
-            const bool bDodged = bAttempt && Targets[Slot]->TryTrainerDodge(Schedule.FRand());
-            // Respect native landing/cooldown. A blocked attempt retries later;
-            // stalled frames never queue several impulses.
-            NextPopupDodgeTime[Slot] = Now + (bInstagibPopup
-                ? (bDodged || !bAttempt ? NCAimTrainerScenarioPolicy::InstagibDodgeDelay(Schedule.FRand()) : Schedule.FRandRange(0.25f, 0.6f))
-                : bDodged ? NCAimTrainerScenarioPolicy::PopupDodgeDelaySeconds(Schedule.FRand()) : 0.2f);
-        }
-        if (Now >= NextWiggleTime[Slot])
-        {
-            if (NCAimTrainerScenarioPolicy::ReverseInstagibStrafe(Schedule.FRand())) { Targets[Slot]->ReverseStrafe(); }
-            NextWiggleTime[Slot] = Now + NCAimTrainerScenarioPolicy::PopupDodgerStrafeHoldSeconds(Schedule.FRand());
+            ChoosePopupMovement(Slot, Now);
         }
     }
 }

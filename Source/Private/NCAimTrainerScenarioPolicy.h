@@ -32,8 +32,26 @@ namespace NCAimTrainerScenarioPolicy
     }
 
     inline bool HasVariedPopupMovement(int Slot) { return Slot == 0 || Slot == 1 || Slot == 2 || Slot == 4; }
-    inline float PopupTravelHoldSeconds(float Roll) { return 1.f + 1.2f * UnitRoll(Roll); }
-    inline float PopupDodgerStrafeHoldSeconds(float Roll) { return 0.65f + 1.1f * UnitRoll(Roll); }
+
+    inline bool HasPopupEvasion(int Slot) { return Slot == 0 || Slot == 1 || Slot == 4 || Slot == 5; }
+
+    inline float PopupMoveHoldSeconds(float PatternRoll, float JitterRoll, float PreviousHold)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Jitter = UnitRoll(JitterRoll);
+        // Isolated feints, committed cuts, and long runs. Never chain tiny
+        // reversals that leave the target rocking under a stationary crosshair.
+        if (Pattern < 0.22f && !(PreviousHold > 0.f && PreviousHold < 0.4f)) { return 0.22f + 0.12f * Jitter; }
+        return Pattern < 0.7f ? 0.48f + 0.34f * Jitter : 0.95f + 0.65f * Jitter;
+    }
+
+    inline float PopupTurnDegrees(float PatternRoll, float AngleRoll)
+    {
+        const float Pattern = UnitRoll(PatternRoll), Angle = UnitRoll(AngleRoll);
+        // Continuing, cutting across, and reversing all remain possible. This
+        // is relative to the target's own motion, never the trainee's aim.
+        return Pattern < 0.22f ? 8.f + 22.f * Angle
+            : Pattern < 0.66f ? 50.f + 60.f * Angle : 140.f + 40.f * Angle;
+    }
 
     inline int PopupSpawnVariant(int Slot, float Roll)
     {

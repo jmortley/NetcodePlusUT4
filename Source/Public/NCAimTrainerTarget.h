@@ -45,9 +45,9 @@ public:
     void ConfigurePopupStrafe(const FVector& Center, float HalfWidth, float DirectionRoll);
     /** A persistent pop-up dodger can use a diagonal lane without changing tracking. */
     void SetPopupStrafeAxis(const FVector& Axis);
-    /** Commit to a safe walking destination; brake there instead of bouncing. */
-    bool SetPopupDestination(const FVector& Destination);
-    bool HasReachedPopupDestination() const;
+    /** Native movement input with predictive bounds, not a stop at a waypoint. */
+    bool SetPopupMovement(const FVector& Minimum, const FVector& Maximum, const FVector& Direction);
+    bool NeedsPopupMovementDecision() const;
     bool TryTrainerDodge(float DirectionRoll);
     /** Guarded native diagonal dodge, optionally holding slide through a backward landing. */
     bool TryTrainerPopupDodge(int32 Slot, const FVector& Direction, const FVector& ArenaOrigin, bool bSlideOnLanding = false);
@@ -79,9 +79,11 @@ private:
     bool bTrainerDodgeSlidePending = false;
     FVector StrafeCenter = FVector::ZeroVector;
     FVector StrafeAxis = FVector(0.f, 1.f, 0.f);
-    FVector PopupDestination = FVector::ZeroVector;
-    bool bPopupTravel = false;
-    bool bPopupTravelComplete = false;
+    FVector PopupMoveMinimum = FVector::ZeroVector;
+    FVector PopupMoveMaximum = FVector::ZeroVector;
+    FVector PopupMoveDirection = FVector::ZeroVector;
+    bool bPopupEvasion = false;
+    bool bPopupNeedsDecision = false;
     FVector TrainerSlideDirection = FVector::ZeroVector;
     float AppearanceTime = 0.f;
     struct FTrainerMaterialTint

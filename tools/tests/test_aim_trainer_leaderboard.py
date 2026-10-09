@@ -43,7 +43,7 @@ struct FNCAimTrainerProgress { uint8 Scenario = 0, Phase = 0; bool bMovementPrac
 using Completion = std::function<void(bool, const TArray<FNCAimTrainerLeaderboardRow>&)>;
 struct Request { UWorld* World; int Scenario; bool Local, Movement; Completion Callback; };
 struct FNCAimTrainerOnline {
-    enum { PresetRevision = 14, AirbornePresetRevision = 16, PopupPresetRevision = 17, HeadshotPresetRevision = 18 };
+    enum { PresetRevision = 14, AirbornePresetRevision = 16, PopupPresetRevision = 19, HeadshotPresetRevision = 18 };
     static int32 PresetRevisionForScenario(int32 scenario);
     static const char* ScenarioSlug(int32 scenario);
     static std::vector<Request> Requests;
@@ -215,7 +215,7 @@ void AllScenarioBoards() {
                 const auto& req = FNCAimTrainerOnline::Requests[key];
                 Require(req.Scenario == scenario && req.Local == (local != 0)
                         && req.Movement == (movement != 0), "cache key decoded wrong request");
-                Require(FNCAimTrainerOnline::PresetRevisionForScenario(req.Scenario) == (scenario == 1 || scenario == 4 ? 18 : scenario == 2 || scenario == 3 || scenario == 5 ? 17 : scenario >= 7 ? 16 : 14),
+                Require(FNCAimTrainerOnline::PresetRevisionForScenario(req.Scenario) == (scenario == 1 || scenario == 4 ? 18 : scenario == 2 || scenario == 3 || scenario == 5 ? 19 : scenario >= 7 ? 16 : 14),
                         "airborne score reset selected the wrong scenario/source/movement board");
                 Require(std::string(FNCAimTrainerOnline::ScenarioSlug(req.Scenario)) == slugs[scenario],
                         "scenario ID selected the wrong backend slug");

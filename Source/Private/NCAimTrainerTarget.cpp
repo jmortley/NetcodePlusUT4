@@ -376,8 +376,8 @@ void ANCAimTrainerTarget::ResetTargetMovement()
     bRepFloorSliding = false;
     TrainerSlideDirection = FVector::ZeroVector;
     StrafeAxis = FVector(0.f, 1.f, 0.f);
-    PopupDestination = FVector::ZeroVector;
-    bPopupTravel = bPopupTravelComplete = false;
+    PopupMoveMinimum = PopupMoveMaximum = PopupMoveDirection = FVector::ZeroVector;
+    bPopupEvasion = bPopupNeedsDecision = false;
     PopupLongStrafeEndTime = 0.f;
     WiggleRange = 0.f;
     bRecenterWiggleAfterSlide = false;
@@ -469,28 +469,33 @@ void ANCAimTrainerTarget::SetPopupStrafeAxis(const FVector& Axis)
     StrafeAxis = Axis.GetSafeNormal2D();
 }
 
-bool ANCAimTrainerTarget::SetPopupDestination(const FVector& Destination)
+bool ANCAimTrainerTarget::SetPopupMovement(const FVector& Minimum, const FVector& Maximum, const FVector& Direction)
 {
-    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerWiggle || bTrainerAirborne || IsDead()
-        || Destination.ContainsNaN() || IsTrainerSliding() || IsTrainerLongStrafing() || bRecenterWiggleAfterDodge
+    if (Role != ROLE_Authority || !bTrainerVisible || bTrainerAirborne || IsDead()
+        || Minimum.ContainsNaN() || Maximum.ContainsNaN() || Direction.ContainsNaN()
+        || Minimum.X >= Maximum.X || Minimum.Y >= Maximum.Y || Direction.Z != 0.f || Direction.IsNearlyZero()
+        || IsTrainerSliding() || IsTrainerLongStrafing() || bRecenterWiggleAfterDodge
         || !GetCharacterMovement()->IsMovingOnGround()) { return false; }
-    PopupDestination = Destination;
-    bPopupTravel = true;
-    bPopupTravelComplete = false;
+    PopupMoveMinimum = Minimum;
+    PopupMoveMaximum = Maximum;
+    PopupMoveDirection = Direction.GetSafeNormal2D();
+    bTrainerStrafe = true;
+    bPopupEvasion = true;
+    bPopupNeedsDecision = false;
     return true;
 }
 
-bool ANCAimTrainerTarget::HasReachedPopupDestination() const
+bool ANCAimTrainerTarget::NeedsPopupMovementDecision() const
 {
-    return bTrainerVisible && bPopupTravel && bPopupTravelComplete && !bRecenterWiggleAfterDodge
-        && !IsTrainerSliding() && GetCharacterMovement()->IsMovingOnGround() && GetVelocity().Size2D() < 50.f;
+    return bTrainerVisible && bPopupEvasion && bPopupNeedsDecision && !bRecenterWiggleAfterDodge
+        && !IsTrainerSliding() && GetCharacterMovement()->IsMovingOnGround();
 }
 
 bool ANCAimTrainerTarget::TryTrainerPopupDodge(int32 Slot, const FVector& Direction, const FVector& ArenaOrigin, bool bSlideOnLanding)
 {
     UUTCharacterMovement* Movement = Cast<UUTCharacterMovement>(GetCharacterMovement());
     const float HorizontalSizeSquared = Direction.X * Direction.X + Direction.Y * Direction.Y;
-    if (Role != ROLE_Authority || !bTrainerVisible || !bTrainerWiggle || IsDead()
+    if (Role != ROLE_Authority || !bTrainerVisible || (!bTrainerWiggle && !bPopupEvasion) || IsDead()
         || bIsCrouched || IsTrainerSliding() || IsTrainerLongStrafing() || bRecenterWiggleAfterDodge
         || !Movement || !Movement->IsMovingOnGround() || !Movement->CurrentFloor.IsWalkableFloor()
         || Movement->bIsDodging || Movement->bIsDodgeLanding
@@ -531,16 +536,17 @@ bool ANCAimTrainerTarget::TryTrainerPopupDodge(int32 Slot, const FVector& Direct
     const float Radius = GetCapsuleComponent()->GetScaledCapsuleRadius();
     if (!FMath::IsFinite(Start.X) || !FMath::IsFinite(Start.Y) || !FMath::IsFinite(End.X) || !FMath::IsFinite(End.Y)
         || !FMath::IsFinite(TravelDistance) || TravelDistance <= 0.f
-        || !NCAimTrainerLayout::CanPopupDodgePath(Slot, Start.X, Start.Y, End.X, End.Y, Radius, bPopupTravel ? 0.f : WiggleRange))
+        || !NCAimTrainerLayout::CanPopupDodgePath(Slot, Start.X, Start.Y, End.X, End.Y, Radius, bPopupEvasion ? 0.f : WiggleRange))
     {
         return false;
     }
     if (!Dodge(DodgeDirection, DodgeCross)) { return false; }
     // Native UT owns impulse, airborne motion, cooldown and its movement event.
-    // Resume short strafes at the landing position instead of rushing back to
-    // the old spawn anchor or countersteering the diagonal while it lands.
+    // Choose fresh evasion input after landing instead of returning to an old
+    // spawn anchor or countersteering the diagonal while it lands.
     ConsumeMovementInputVector();
     bRecenterWiggleAfterDodge = true;
+    bPopupNeedsDecision = bPopupEvasion;
     bTrainerDodgeSlidePending = bSlideOnLanding;
     if (bSlideOnLanding)
     {
@@ -698,20 +704,25 @@ void ANCAimTrainerTarget::Tick(float DeltaSeconds)
             // input must not countersteer either a forward or a lateral slide.
             AddMovementInput(TrainerSlideDirection, 1.f, true);
         }
-        else if (bPopupTravel)
+        else if (bPopupEvasion)
         {
-            // Stop at the chosen destination using native ground braking. A
-            // reached endpoint stays reached until the next random decision;
-            // it must not turn into a tiny left/right oscillation after overshoot.
-            if (!bPopupTravelComplete)
+            // Apply the chosen two-dimensional input continuously. Decisions
+            // can cut a run short; reaching a fixed point never makes it stop.
+            // Brake inward before an edge using the actual velocity, including
+            // momentum retained after a diagonal dodge or slide.
+            if (!bPopupNeedsDecision)
             {
-                const FVector Delta = PopupDestination - GetActorLocation();
-                const FVector Direction = Delta.GetSafeNormal2D();
-                const float Speed = FMath::Max(0.f, GetVelocity() | Direction);
-                const float Brake = FMath::Max(1.f, GetCharacterMovement()->BrakingDecelerationWalking);
-                const float StopDistance = Speed * Speed / (2.f * Brake) + Speed * FMath::Max(0.f, DeltaSeconds);
-                bPopupTravelComplete = Delta.Size2D() <= 35.f + StopDistance;
-                if (!bPopupTravelComplete) { AddMovementInput(Direction, 1.f, true); }
+                const FVector Center = (PopupMoveMinimum + PopupMoveMaximum) * 0.5f;
+                const FVector HalfSize = (PopupMoveMaximum - PopupMoveMinimum) * 0.5f;
+                const FVector Offset = GetActorLocation() - Center;
+                const FVector Velocity = GetVelocity();
+                const float Brake = 0.5f * GetCharacterMovement()->MaxAcceleration;
+                PopupMoveDirection.X = NCAimTrainerScenarioPolicy::BoundedStrafeDirection(Offset.X, Velocity.X,
+                    Brake, HalfSize.X, PopupMoveDirection.X, DeltaSeconds);
+                PopupMoveDirection.Y = NCAimTrainerScenarioPolicy::BoundedStrafeDirection(Offset.Y, Velocity.Y,
+                    Brake, HalfSize.Y, PopupMoveDirection.Y, DeltaSeconds);
+                PopupMoveDirection = PopupMoveDirection.GetSafeNormal2D();
+                AddMovementInput(PopupMoveDirection, 1.f, true);
             }
         }
         else

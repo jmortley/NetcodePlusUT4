@@ -32,11 +32,14 @@ struct FMath {
     static float Max(float a, float b) { return a > b ? a : b; }
     static float Cos(float v) { return std::cos(v); }
     static float Sin(float v) { return std::sin(v); }
+    static float Atan2(float y,float x) { return std::atan2(y,x); }
+    static float Abs(float v) { return std::fabs(v); }
 };
 struct FVector {
     float X, Y, Z;
     FVector(float x=0, float y=0, float z=0) : X(x), Y(y), Z(z) {}
     FVector operator+(const FVector& other) const { return FVector(X + other.X, Y + other.Y, Z + other.Z); }
+    float Size2D() const { return std::sqrt(X*X+Y*Y); }
 };
 template<class T> struct TArray : std::vector<T> {
     using std::vector<T>::vector;
@@ -89,12 +92,15 @@ struct ANCAimTrainerTarget : AActor {
     float WiggleRange = 0.f;
     FVector Position;
     FVector StrafeCenter;
-    FVector StrafeAxis=FVector(0,1,0),Destination;
+    FVector StrafeAxis=FVector(0,1,0),Destination,Velocity,Minimum,Maximum;
     int TravelDecisions=0;
     bool CanTravel=true,TravelComplete=false;
     void SetPopupStrafeAxis(const FVector& axis) { StrafeAxis=axis; }
-    bool SetPopupDestination(const FVector& goal) { if(!CanTravel) return false; TravelComplete=false; Destination=goal; ++TravelDecisions; return true; }
-    bool HasReachedPopupDestination() const { return TravelComplete; }
+    bool SetPopupMovement(const FVector& low,const FVector& high,const FVector& direction) {
+        if(!CanTravel) return false; TravelComplete=false; Minimum=low; Maximum=high; Destination=direction; ++TravelDecisions; return true;
+    }
+    bool NeedsPopupMovementDecision() const { return TravelComplete; }
+    FVector GetVelocity() const { return Velocity; }
     void ConfigurePopupStrafe(const FVector& center,float width,float) { StrafeCenter=center; WiggleRange=width; }
     FVector GetActorLocation() const { return Position; }
     void ActivateTarget(const FVector& position, bool strafe) {
@@ -145,9 +151,11 @@ struct ANCAimTrainerGame {
     struct World { float Now = 10.f; float GetTimeSeconds() const { return Now; } } TheWorld;
     struct {
         float Roll = .5f;
+        bool Random=false;
+        mutable unsigned Seed=1;
         int SlotChoice = 0;
-        float FRand() const { return Roll; }
-        float FRandRange(float low, float high) const { return low + (high - low) * Roll; }
+        float FRand() const { if(!Random) return Roll; Seed=1664525u*Seed+1013904223u;return float(Seed>>8)/16777216.f; }
+        float FRandRange(float low, float high) const { return low + (high - low) * FRand(); }
         int RandRange(int low, int high) const { return low + std::min(SlotChoice, high - low); }
     } Schedule;
     ANCAimTrainerPlayerController* Trainee = nullptr;
@@ -164,6 +172,7 @@ struct ANCAimTrainerGame {
     float NextTrackingSlideTime = 0.f;
     float NextTargetTime[NCAimTrainerLayout::TargetCount] = {}, TargetExpiry[NCAimTrainerLayout::TargetCount] = {};
     float NextWiggleTime[NCAimTrainerLayout::TargetCount] = {};
+    float PopupLastMoveHold[NCAimTrainerLayout::TargetCount] = {};
     TArray<float> NextCrouchTime = TArray<float>(NCAimTrainerLayout::TargetCount, 0.f);
     TArray<float> CrouchEndTime = TArray<float>(NCAimTrainerLayout::TargetCount, 0.f);
     bool bRankedRun = true;
@@ -186,7 +195,7 @@ struct ANCAimTrainerGame {
     void ActivateSlot(int32, float);
     void UpdateTargets(float);
     void UpdatePopupDodger(float);
-    void ChoosePopupTravel(int32,float);
+    void ChoosePopupMovement(int32,float);
     void UpdateTrackingMovement(float);
     float RecordTargetHit(ANCAimTrainerTarget*, float, const FDamageEvent&, AController*, AActor*);
 };
@@ -459,8 +468,8 @@ void LayoutAndWiggles() {
                 const float range=seat.WiggleRange;
                 Require(target.Wiggles == 1 && FMath::IsNearlyEqual(target.WiggleRange,range) && !target.Strafing,
                         "precision target did not start its authored wiggle");
-                const float hold=scenario==2 && slot!=3
-                    ?NCAimTrainerScenarioPolicy::PopupTravelHoldSeconds(roll)
+                const float hold=scenario==2 && NCAimTrainerScenarioPolicy::HasPopupEvasion(slot)
+                    ?NCAimTrainerScenarioPolicy::PopupMoveHoldSeconds(roll,roll,0.f)
                     :NCAimTrainerScenarioPolicy::WiggleHoldSeconds(roll);
                 Require(FMath::IsNearlyEqual(f.Game.NextWiggleTime[slot],10.f+hold),
                         "initial wiggle decision deadline lost");
@@ -519,83 +528,83 @@ void CrouchScenarioScope() {
         for (const auto& target:f.Targets) Require(target.CrouchRequests==0, "other scenario executed instagib crouch");
     }
     for (float roll:{0.f,.649f,.65f,1.f}) {
-        Fixture f; f.Game.Schedule.Roll=roll; f.Game.Schedule.SlotChoice=0; f.Start(); f.At(10.f);
+        Fixture f; f.Game.Schedule.Roll=roll; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f);
         const bool selected=roll<.65f;
-        Require((f.Game.NextCrouchTime[1]>10.f)==selected, "instagib crouch selection boundary drifted");
-        if(selected) Require(f.Game.NextCrouchTime[1]>=11.5f && f.Game.NextCrouchTime[1]<=13.5f,
+        Require((f.Game.NextCrouchTime[3]>10.f)==selected, "instagib crouch selection boundary drifted");
+        if(selected) Require(f.Game.NextCrouchTime[3]>=11.5f && f.Game.NextCrouchTime[3]<=13.5f,
                              "crouch does not leave an initial standing opportunity");
     }
 }
 void CrouchOncePerAppearance() {
-    Fixture f; f.Game.Schedule.SlotChoice=0; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
-    const float due=f.Game.NextCrouchTime[1];
+    Fixture f; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+    const float due=f.Game.NextCrouchTime[3];
     f.At(due-.001f);
-    Require(!f.Targets[1].Crouched && f.Targets[1].CrouchRequests==0,"target crouched before deadline");
+    Require(!f.Targets[3].Crouched && f.Targets[3].CrouchRequests==0,"target crouched before deadline");
     f.At(due);
-    Require(f.Targets[1].Crouched && f.Targets[1].CrouchRequests==1 && f.Game.NextCrouchTime[1]==0.f,
+    Require(f.Targets[3].Crouched && f.Targets[3].CrouchRequests==1 && f.Game.NextCrouchTime[3]==0.f,
             "due crouch was missed or left a repeating request");
-    const float end=f.Game.CrouchEndTime[1];
+    const float end=f.Game.CrouchEndTime[3];
     Require(end>=due+.25f && end<=due+.45f,"crouch hold outside its brief exposure interruption");
-    f.At(end-.001f); Require(f.Targets[1].Crouched,"target stood before hold ended");
+    f.At(end-.001f); Require(f.Targets[3].Crouched,"target stood before hold ended");
     f.At(end);
-    Require(!f.Targets[1].Crouched && f.Game.CrouchEndTime[1]==0.f && f.Targets[1].StandRequests==1,
+    Require(!f.Targets[3].Crouched && f.Game.CrouchEndTime[3]==0.f && f.Targets[3].StandRequests==1,
             "completed crouch left the target hidden or standing request active");
     f.At(end+.1f); f.At(end+.3f); f.At(end+.7f);
-    Require(f.Targets[1].CrouchRequests==1 && f.Targets[1].StandRequests==1,"appearance repeated its crouch/stand");
-    Fixture failed; failed.Game.Schedule.SlotChoice=0; failed.Start(); failed.At(10.f); failed.Game.NextPopupTime=10000.f;
-    failed.Targets[1].CanCrouch=false;
-    const float failAt=failed.Game.NextCrouchTime[1]; failed.At(failAt); failed.At(failAt+.1f);
-    Require(failed.Targets[1].CrouchRequests==1 && failed.Game.CrouchEndTime[1]==0.f,
+    Require(f.Targets[3].CrouchRequests==1 && f.Targets[3].StandRequests==1,"appearance repeated its crouch/stand");
+    Fixture failed; failed.Game.Schedule.SlotChoice=2; failed.Start(); failed.At(10.f); failed.Game.NextPopupTime=10000.f;
+    failed.Targets[3].CanCrouch=false;
+    const float failAt=failed.Game.NextCrouchTime[3]; failed.At(failAt); failed.At(failAt+.1f);
+    Require(failed.Targets[3].CrouchRequests==1 && failed.Game.CrouchEndTime[3]==0.f,
             "failed crouch was retried or created a bogus standing deadline");
 }
 void CrouchExpiryGuard() {
     for (float refire:{1.f,1.5f,2.f}) {
         for (float margin:{-.001f,.001f}) {
-            Fixture f; f.Gun.Refire=refire; f.Game.Schedule.SlotChoice=0; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
-            const float due=f.Game.NextCrouchTime[1];
+            Fixture f; f.Gun.Refire=refire; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+            const float due=f.Game.NextCrouchTime[3];
             const float hold=NCAimTrainerScenarioPolicy::CrouchHoldSeconds(f.Game.Schedule.Roll);
-            f.Game.TargetExpiry[1]=due+hold+refire+.1f+margin;
-            const float expiry=f.Game.TargetExpiry[1];
+            f.Game.TargetExpiry[3]=due+hold+refire+.1f+margin;
+            const float expiry=f.Game.TargetExpiry[3];
             f.At(due);
             const bool allowed=margin>0.f;
-            Require(f.Targets[1].Crouched==allowed && f.Targets[1].CrouchRequests==(allowed?1:0),
+            Require(f.Targets[3].Crouched==allowed && f.Targets[3].CrouchRequests==(allowed?1:0),
                     "near-expiry crouch did not preserve one real refire interval plus reaction margin");
-            Require(f.Game.TargetExpiry[1]==expiry && f.Game.NextCrouchTime[1]==0.f,
+            Require(f.Game.TargetExpiry[3]==expiry && f.Game.NextCrouchTime[3]==0.f,
                     "guard changed lifetime or left a doomed crouch queued");
             if(allowed) {
-                f.At(f.Game.CrouchEndTime[1]);
-                Require(!f.Targets[1].Crouched && expiry-f.Game.TheWorld.Now>refire,
+                f.At(f.Game.CrouchEndTime[3]);
+                Require(!f.Targets[3].Crouched && expiry-f.Game.TheWorld.Now>refire,
                         "target stood with less than a rifle interval remaining");
             }
         }
     }
 }
 void BlockedStandingRetry() {
-    Fixture f; f.Game.Schedule.SlotChoice=0; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
-    f.At(f.Game.NextCrouchTime[1]);
-    const float end=f.Game.CrouchEndTime[1]; f.Targets[1].CanStand=false;
+    Fixture f; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+    f.At(f.Game.NextCrouchTime[3]);
+    const float end=f.Game.CrouchEndTime[3]; f.Targets[3].CanStand=false;
     f.At(end); f.At(end+.02f);
-    Require(f.Targets[1].Crouched && f.Game.CrouchEndTime[1]==end && f.Targets[1].StandRequests==2,
+    Require(f.Targets[3].Crouched && f.Game.CrouchEndTime[3]==end && f.Targets[3].StandRequests==2,
             "blocked native uncrouch lost its retry deadline");
-    f.Targets[1].CanStand=true; f.At(end+.04f);
-    Require(!f.Targets[1].Crouched && f.Game.CrouchEndTime[1]==0.f && f.Targets[1].StandRequests==3,
+    f.Targets[3].CanStand=true; f.At(end+.04f);
+    Require(!f.Targets[3].Crouched && f.Game.CrouchEndTime[3]==0.f && f.Targets[3].StandRequests==3,
             "target did not stand after clearance recovered");
     f.At(end+.06f);
-    Require(f.Targets[1].StandRequests==3 && f.Targets[1].CrouchRequests==1,
+    Require(f.Targets[3].StandRequests==3 && f.Targets[3].CrouchRequests==1,
             "standing recovery left repeated state transitions");
 }
 void CrouchReuseReset() {
-    Fixture f; f.Game.Schedule.SlotChoice=0; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
-    f.At(f.Game.NextCrouchTime[1]); Require(f.Targets[1].Crouched,"fixture did not crouch");
-    Require(f.Hit(1)>0.f && !f.Targets[1].Visible,"crouched target hit was not accepted");
+    Fixture f; f.Game.Schedule.SlotChoice=2; f.Start(); f.At(10.f); f.Game.NextPopupTime=10000.f;
+    f.At(f.Game.NextCrouchTime[3]); Require(f.Targets[3].Crouched,"fixture did not crouch");
+    Require(f.Hit(3)>0.f && !f.Targets[3].Visible,"crouched target hit was not accepted");
     f.Game.Schedule.Roll=1.f; // Replacement appearance deliberately skips crouch.
     f.Game.NextPopupTime=f.Game.TheWorld.Now+.1f; f.At(f.Game.NextPopupTime);
-    Require(f.Targets[1].Visible && f.Targets[1].Activations==2 && !f.Targets[1].Crouched
-            && f.Game.NextCrouchTime[1]==0.f && f.Game.CrouchEndTime[1]==0.f,
+    Require(f.Targets[3].Visible && f.Targets[3].Activations==2 && !f.Targets[3].Crouched
+            && f.Game.NextCrouchTime[3]==0.f && f.Game.CrouchEndTime[3]==0.f,
             "reused target inherited old crouch posture or deadlines");
     f.Game.Schedule.Roll=.1f;
-    f.Game.ActivateSlot(1,f.Game.TheWorld.Now+.1f);
-    Require(f.Game.NextCrouchTime[1]>f.Game.TheWorld.Now+1.5f && f.Game.CrouchEndTime[1]==0.f,
+    f.Game.ActivateSlot(3,f.Game.TheWorld.Now+.1f);
+    Require(f.Game.NextCrouchTime[3]>f.Game.TheWorld.Now+1.5f && f.Game.CrouchEndTime[3]==0.f,
             "new appearance cannot schedule a fresh crouch after previous one");
 }
 void PersistentDodgerStartsAndDoesNotExpire() {
@@ -642,45 +651,34 @@ void PersistentDodgerRefillsWithoutConsumingPopupCadence() {
     Require(f.Game.NextCrouchTime[PopupDodgerSlot]==0.f && f.Game.CrouchEndTime[PopupDodgerSlot]==0.f
             && f.Game.TargetExpiry[PopupDodgerSlot]==70.f,
             "permanent target reuse inherited posture or a popup lifetime");
-    const float nextDodge=f.Game.NextPopupDodgeTime[NCAimTrainerLayout::PopupDodgerSlot];
-    Require(nextDodge>=10.55f && nextDodge<=11.952f,
-             "replacement's first dodge lost its varied startup window");
+    Require(f.Game.NextWiggleTime[NCAimTrainerLayout::PopupDodgerSlot]>10.101f
+        && target.TravelDecisions==2,"replacement did not choose fresh movement");
     f.At(deadline);
     Require(f.Activations()==2 && target.Activations==2, "popup deadline stopped after independent dodger refill");
 }
 void PersistentDodgerCadenceAndNativeRejection() {
-    using namespace NCAimTrainerScenarioPolicy;
-    for(float roll:{0.f,.5f,1.f,-1.f,10.f,std::numeric_limits<float>::quiet_NaN()}) {
-        const float delay=PopupDodgeDelaySeconds(roll);
-        Require(std::isfinite(delay) && delay>=1.15f && delay<=2.101f,
-                "persistent dodge cadence left the frequent bounded range");
-        const float initial=PopupFirstDodgeDelaySeconds(roll);
-        Require(std::isfinite(initial) && initial>=.2f && initial<=.551f,
-                "first dodge cannot happen before the next one-second rifle shot");
-    }
-    Fixture f; f.Game.Progress.Scenario=3; f.Gun.Refire=1.3f; f.Start(); auto& target=f.Targets[NCAimTrainerLayout::PopupDodgerSlot];
-    const float first=f.Game.NextPopupDodgeTime[NCAimTrainerLayout::PopupDodgerSlot];
-    Require(first>=10.45f && first<=11.851f,"initial permanent dodger waits through the first rifle interval");
-    f.Game.UpdatePopupDodger(first-.001f); Require(target.DodgeAttempts==0,"dodger attempted before deadline");
-    target.CanDodge=false; f.Game.UpdatePopupDodger(first);
-    Require(target.DodgeAttempts==1 && target.Dodges==0 && FMath::IsNearlyEqual(f.Game.NextPopupDodgeTime[NCAimTrainerLayout::PopupDodgerSlot],first+.2f),
-            "native dodge rejection was bypassed or delayed for a complete interval");
-    f.Game.UpdatePopupDodger(first+.199f); Require(target.DodgeAttempts==1,"native dodge retry busy-looped");
-    target.CanDodge=true; f.Game.UpdatePopupDodger(first+.2f);
-    Require(target.DodgeAttempts==2 && target.Dodges==1
-            && f.Game.NextPopupDodgeTime[NCAimTrainerLayout::PopupDodgerSlot]>=first+.2f+1.15f && f.Game.NextPopupDodgeTime[NCAimTrainerLayout::PopupDodgerSlot]<=first+.2f+2.101f,
-            "recovered native dodge did not establish a fresh bounded interval");
-    const int before=target.DodgeAttempts;
-    f.Game.UpdatePopupDodger(60.f); f.Game.UpdatePopupDodger(60.f);
-    Require(target.DodgeAttempts==before+1 && f.Game.NextPopupDodgeTime[NCAimTrainerLayout::PopupDodgerSlot]>61.14f,
-            "stalled persistent lane replayed multiple missed dodges");
-    const float directionAt=f.Game.NextWiggleTime[NCAimTrainerLayout::PopupDodgerSlot];
-    const int reversals=target.Reversals;
-    f.Game.UpdatePopupDodger(directionAt-.001f);
-    Require(target.Reversals==reversals,"persistent strafe reversed before scheduled decision");
-    f.Game.UpdatePopupDodger(directionAt);
-    Require(target.Reversals==reversals+1 && f.Game.NextWiggleTime[NCAimTrainerLayout::PopupDodgerSlot]>directionAt,
-            "persistent dodger lost random short strafe decisions");
+    Fixture f; f.Game.Progress.Scenario=3; f.Gun.Refire=1.3f; f.Start();
+    auto& target=f.Targets[5];
+    const float due=f.Game.NextWiggleTime[5];
+    const int starts=target.TravelDecisions,dodges=target.PopupDodgeAttempts;
+    f.Game.UpdatePopupDodger(due-.001f);
+    Require(target.TravelDecisions==starts,"persistent decision fired before its own deadline");
+    target.CanTravel=false; f.Game.UpdatePopupDodger(due);
+    Require(target.TravelDecisions==starts && target.PopupDodgeAttempts==dodges
+        && f.Game.NextWiggleTime[5]>due,"native movement ownership did not defer both walk and dodge decisions");
+    const float retry=f.Game.NextWiggleTime[5];
+    f.Game.UpdatePopupDodger(retry-.001f);
+    Require(target.PopupDodgeAttempts==dodges,"busy movement was retried every frame");
+    target.CanTravel=true; target.CanDodge=false;
+    f.Game.UpdatePopupDodger(retry);
+    Require(target.TravelDecisions==starts+1 && target.PopupDodgeAttempts==dodges+6,
+        "native rejection was bypassed or safe direction search was unbounded");
+    target.CanDodge=true;
+    f.Game.UpdatePopupDodger(50.f);
+    const int after=target.TravelDecisions,afterDodge=target.PopupDodgeAttempts;
+    f.Game.UpdatePopupDodger(50.f);
+    Require(after==starts+2 && target.TravelDecisions==after && target.PopupDodgeAttempts==afterDodge,
+        "stalled scheduler replayed a backlog of movement or dodge decisions");
 }
 void PersistentDodgerCannotLeakIntoOtherPhasesOrScenarios() {
     using namespace NCAimTrainerLayout;
@@ -713,6 +711,7 @@ void UpperPlatformSlideScope() {
                 if(scenario==3) f.Gun.Refire=1.3f; if(scenario>=4) f.Gun.Refire=.7f; f.Start(); f.Game.NextPopupTime = 10000.f;
                 f.Game.ActivateSlot(slot, 10.f);
                 const bool selected = NCAimTrainerScenarioPolicy::IsPopupScenario(scenario) && !IsPopupDodgerSlot(slot)
+                    && !NCAimTrainerScenarioPolicy::HasPopupEvasion(slot)
                     && (scenario==2 ? NCAimTrainerScenarioPolicy::InstagibPopupAction(slot,NCAimTrainerScenarioPolicy::PopupSpawnVariant(slot,roll),roll)
                         : NCAimTrainerScenarioPolicy::PopupAction(slot,NCAimTrainerScenarioPolicy::PopupSpawnVariant(slot,roll),roll))
                         == NCAimTrainerScenarioPolicy::PopupSlide;
@@ -737,48 +736,48 @@ void UpperPlatformSlideScope() {
     }
 }
 void PopupTravelLifecycle() {
-    for(int scenario:{2,3,5}) for(int slot:{1,2,4}) for(float roll:{0.f,.15f,.4f,.65f,.9f,1.f}) {
+    for(int scenario:{2,3,5}) for(int slot:{0,1,4,5}) for(float roll:{0.f,.15f,.4f,.65f,.9f,1.f}) {
         Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Roll=roll;
         f.Gun.Refire=scenario==3?1.3f:scenario==5?.7f:1.f; f.Start(); f.Game.NextPopupTime=10000.f;
-        f.Game.ArenaOrigin=FVector(75,-130,50000); f.Game.ActivateSlot(slot,10.f);
-        auto& target=f.Targets[slot];
-        const auto area=NCAimTrainerLayout::PopupTravelArea(slot,f.Game.PopupSpawnVariants[slot]);
+        f.Game.ArenaOrigin=FVector(75,-130,50000); const int before=f.Targets[slot].TravelDecisions;
+        f.Game.ActivateSlot(slot,10.f); auto& target=f.Targets[slot];
+        const auto area=NCAimTrainerLayout::PopupEvasionArea(slot,f.Game.PopupSpawnVariants[slot]);
         auto check=[&]() {
-            const float x=target.Destination.X-f.Game.ArenaOrigin.X,y=target.Destination.Y-f.Game.ArenaOrigin.Y;
-            const float dx=target.Destination.X-target.Position.X,dy=target.Destination.Y-target.Position.Y;
-            Require(x>=area.MinX && x<=area.MaxX && y>=area.MinY && y<=area.MaxY,"walking destination left its safe lane");
-            Require(dx*dx+dy*dy>=350.f*350.f,"random goal still produces short in-place A/D");
-            Require(target.Destination.Z==target.Position.Z,"walking goal changed target height");
+            Require(FMath::IsNearlyEqual(target.Destination.Size2D(),1.f) && target.Destination.Z==0.f,
+                "walk input isn't a planar unit direction");
+            Require(target.Minimum.X==75.f+area.MinX && target.Maximum.X==75.f+area.MaxX
+                &&target.Minimum.Y==-130.f+area.MinY &&target.Maximum.Y==-130.f+area.MaxY,
+                "evasion area lost arena-relative safe geometry");
         };
-        Require(target.TravelDecisions==1 && target.Reversals==0,"spawn failed to start destination movement"); check();
+        Require(target.TravelDecisions==before+1 && target.Reversals==0,"spawn failed to select free movement"); check();
         const float due=f.Game.NextWiggleTime[slot];
-        Require(due>=11.f && due<=12.2f,"path commitment too short to develop motion");
-        target.CanTravel=false; f.Game.ChoosePopupTravel(slot,due);
-        Require(target.TravelDecisions==1 && f.Game.NextWiggleTime[slot]>due,"native action rejection was ignored");
-        target.CanTravel=true; target.Position=target.Destination;
-        f.Game.ChoosePopupTravel(slot,f.Game.NextWiggleTime[slot]); check();
-        Require(target.TravelDecisions==2 && target.Reversals==0,"next decision fell back to wiggle reversal");
-        target.Position=target.Destination; target.TravelComplete=true;
-        f.Game.NextWiggleTime[slot]=30.f; f.At(10.5f);
-        Require(target.TravelDecisions==3 && !target.TravelComplete,"arrived target waited for a long stale timer");
+        Require(due>=10.22f && due<=11.601f,"decision cannot mix feints with committed runs");
+        target.CanTravel=false; f.Game.ChoosePopupMovement(slot,due);
+        Require(target.TravelDecisions==before+1 && f.Game.NextWiggleTime[slot]>due,"busy native action was ignored");
+        target.CanTravel=true; target.Velocity=FVector(650,-240,0);
+        f.Game.ChoosePopupMovement(slot,f.Game.NextWiggleTime[slot]); check();
+        Require(target.TravelDecisions==before+2 && target.Reversals==0,"decision fell back to alternating A/D");
+        target.TravelComplete=true; f.Game.NextWiggleTime[slot]=30.f; f.At(10.5f);
+        Require(target.TravelDecisions==before+3 && !target.TravelComplete,"landing waited for the pre-dodge direction timer");
     }
     Fixture f; f.Game.Progress.Scenario=3; f.Gun.Refire=1.3f; f.Start();
     auto& left=f.Targets[0]; auto& front=f.Targets[5];
-    Require(left.Visible && front.Visible && left.Strafing && left.Wiggles==0,"second persistent dodger missing");
-    Require(left.Position.Y==-850.f && left.StrafeAxis.X>.99f && std::fabs(left.StrafeAxis.Y)<.14f,"left dodger has no safe lengthwise lane");
-    f.Game.NextPopupDodgeTime[0]=11.f; f.Game.NextPopupDodgeTime[5]=12.f;
+    Require(left.Visible && front.Visible && left.TravelDecisions==1 && front.TravelDecisions==1,
+        "second persistent evasive target missing");
+    f.Game.NextWiggleTime[0]=11.f; f.Game.NextWiggleTime[5]=12.f;
     f.Game.UpdatePopupDodger(11.01f);
-    Require(left.Dodges==1 && front.Dodges==0 && f.Game.NextPopupDodgeTime[5]==12.f,"persistent dodgers share a timer");
-    const float nextLeft=f.Game.NextPopupDodgeTime[0]; f.Game.NextPopupDodgeTime[0]=99.f;
-    f.Game.UpdatePopupDodger(12.01f);
-    Require(left.Dodges==1 && front.Dodges==1 && f.Game.NextPopupDodgeTime[0]==99.f,"foreground dodge rescheduled left target");
-    const float nextFront=f.Game.NextPopupDodgeTime[5],spawnDeadline=f.Game.NextPopupTime;
-    Require(f.Hit(0)>0,"left dodger hit did not score"); f.Game.UpdatePopupDodger(12.02f);
-    Require(left.Activations==2 && left.Visible && f.Game.TargetExpiry[0]==70.f
-        &&f.Game.NextPopupDodgeTime[0]>12.02f && nextLeft>11.f,"left target did not refill with fresh state");
-    Require(f.Game.NextPopupDodgeTime[5]==nextFront && f.Game.NextPopupTime==spawnDeadline,"left refill changed other target schedules");
+    Require(left.TravelDecisions==2 && front.TravelDecisions==1 && f.Game.NextWiggleTime[5]==12.f,
+        "persistent targets share a movement timer");
+    f.Game.NextWiggleTime[0]=99.f; f.Game.UpdatePopupDodger(12.01f);
+    Require(left.TravelDecisions==2 && front.TravelDecisions==2,"foreground decision rescheduled left target");
+    const float nextFront=f.Game.NextWiggleTime[5],spawnDeadline=f.Game.NextPopupTime;
+    Require(f.Hit(0)>0,"left hit did not score"); f.Game.UpdatePopupDodger(12.02f);
+    Require(left.Activations==2 && left.Visible && f.Game.TargetExpiry[0]==70.f && f.Game.NextWiggleTime[0]>12.02f,
+        "left target did not refill with fresh movement");
+    Require(f.Game.NextWiggleTime[5]==nextFront && f.Game.NextPopupTime==spawnDeadline,"refill changed unrelated schedules");
     f.Game.HideAllTargets();
-    for(int slot:{0,5}) Require(!f.Targets[slot].Visible && f.Game.NextPopupDodgeTime[slot]==0.f,"cleanup retained a persistent dodge");
+    for(int slot:{0,5}) Require(!f.Targets[slot].Visible && f.Game.NextPopupDodgeTime[slot]==0.f
+        && f.Game.PopupLastMoveHold[slot]==0.f,"cleanup retained a persistent action");
 }
 void PrecisionPopupCadence() {
     for(float refire:{1.f,1.3f,1.5f,std::numeric_limits<float>::quiet_NaN()}) {
@@ -1052,17 +1051,18 @@ void SACTFPresets() {
 }
 void PopupVariety() {
     using namespace NCAimTrainerScenarioPolicy;
-    int actions[6]={},slides=0;
+    int shortMoves=0,longMoves=0,slides=0;
     for(int sample=0;sample<1000;++sample) {
         const float roll=(sample+.5f)/1000.f;
-        ++actions[PopupAction(4,0,roll)]; slides+=int(PopupAction(2,0,roll)==PopupSlide);
-        Require(PopupAction(3,0,roll)==PopupStrafe,"head peek acquired an unsafe special action");
-        Require(PopupAction(4,1,roll)<PopupForwardDodge,"right floor variant acquired a left-lane dodge");
-        Require(PopupTravelHoldSeconds(roll)>=1.f && PopupTravelHoldSeconds(roll)<=2.2f,"popup decision is still rapid A/D");
+        const float hold=PopupMoveHoldSeconds(roll,.5f,0.f);
+        shortMoves+=int(hold<.4f); longMoves+=int(hold>.9f);
+        Require(PopupMoveHoldSeconds(roll,roll,.3f)>=.48f,"two short feints can chain into stationary A/D spam");
+        slides+=int(PopupAction(2,0,roll)==PopupSlide);
+        Require(PopupAction(3,0,roll)==PopupStrafe,"rear peek acquired an unsafe special action");
     }
-    Require(actions[PopupForwardDodge]>0 && actions[PopupBackwardDodge]>0 && actions[PopupDodgeSlide]>0
-        &&actions[PopupStrafe]>0,"left timed target lost independent action choices");
-    Require(slides>200 && slides<500,"upper platform still slides after every spawn");
+    Require(shortMoves>100 && shortMoves<300 && longMoves>200 && longMoves<400,
+        "movement lacks both isolated feints and longer committed runs");
+    Require(slides>200 && slides<500,"upper platform slides after every spawn");
     for(int scenario:{1,2,3,4,5}) for(float roll:{.05f,.22f,.35f,.55f,.75f,.95f}) {
         Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Roll=roll;
         f.Gun.Refire=scenario==3?1.3f:scenario>=4?.7f:1.f; f.Start();
@@ -1070,79 +1070,62 @@ void PopupVariety() {
             f.Game.ActivateSlot(slot,10.f);
             const int specials=int(f.Game.NextPopupDodgeTime[slot]>0)+int(f.Game.NextPopupSlideTime[slot]>0)
                 +int(f.Game.NextPopupLongStrafeTime[slot]>0)+int(f.Game.NextCrouchTime[slot]>0);
-            Require(specials<=1,"special movements compete in one appearance");
-            if(!IsPopupScenario(scenario)) Require(specials==0 && f.Targets[slot].TravelDecisions==0,"headshot scenario gained popup movement");
-            if(IsPopupScenario(scenario) && slot==3) Require(f.Targets[slot].TravelDecisions==0,"head peek abandoned its cover lane");
+            Require(specials<=1,"independent action timers compete");
+            if(!IsPopupScenario(scenario) || slot==2 || slot==3)
+                Require(f.Targets[slot].TravelDecisions==0,"protected platform, peek or headshot gained free movement");
+            if(IsPopupScenario(scenario) && HasPopupEvasion(slot))
+                Require(specials==0,"new movement retained an old scripted action timer");
         }
     }
 }
 void PopupDodgeScheduling() {
-    using namespace NCAimTrainerScenarioPolicy;
-    for(int scenario:{2,3,5}) for(int slot:{4}) for(float roll:{.05f,.31f,.55f}) {
-        for(bool nativeAccepted:{false,true}) {
-            Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Roll=roll;
-            f.Gun.Refire=scenario==3?1.3f:scenario==5?.7f:1.f; f.Start();
-            f.Game.NextPopupTime=10000.f; f.Game.ArenaOrigin=FVector(20.f,70.f,50000.f);
-            f.Game.ActivateSlot(slot,10.f); f.Game.PopupSpawnVariants[slot]=0;
-            f.Game.PopupDodgeActions[slot]=PopupAction(slot,0,roll);
-            f.Game.NextPopupDodgeTime[slot]=10.f+PopupDodgeDelaySecondsForAppearance(roll); f.Game.NextPopupSlideTime[slot]=0.f; f.Targets[slot].CanDodge=nativeAccepted;
-            const float due=f.Game.NextPopupDodgeTime[slot];
-            Require(due>=10.45f&&due<=11.951f,"popup dodge has no bounded random deadline");
-            // Isolate dispatch from the deliberately shorter SACTF window.
-            // Separate deadline tests cover rejection when the chain won't fit.
-            f.Game.TargetExpiry[slot]=due+2.05f+f.Game.PopupRefireSeconds+.1f;
-            f.At(due-.001f); Require(f.Targets[slot].PopupDodgeAttempts==0,"popup dodge fired early");
-            f.At(due);
-            const auto& target=f.Targets[slot];
-            Require(target.PopupDodgeAttempts==1&&target.LastDodgeSlot==slot
-                &&target.LastDodgeOrigin.X==20.f&&target.LastDodgeOrigin.Y==70.f,
-                "due popup dodge lost native dispatch or arena-relative geometry");
-            const auto& direction=target.LastDodgeDirection;
-            Require(std::fabs(direction.X*direction.X+direction.Y*direction.Y-1.f)<.0001f&&direction.Z==0.f,
-                "popup dodge direction isn't a normalized planar impulse");
-            Require((direction.X<0.f)==(roll<.25f)&&target.LastDodgeSlide==(roll>=.5f),
-                "forward/backward choice or backwards landing slide changed");
-            Require(std::fabs(direction.Y)>.2f&&std::fabs(direction.Y)<.5f,"dodge lost varied diagonal angle");
-            f.At(due+.1f); f.At(due+.6f);
-            Require(target.PopupDodgeAttempts==1&&f.Game.NextPopupDodgeTime[slot]==0.f,
-                "accepted/rejected native dodge repeats predictably within an appearance");
-            f.Game.HideAllTargets();
-            Require(f.Game.NextPopupDodgeTime[slot]==0.f&&f.Game.PopupDodgeActions[slot]==0,
-                "abort retained a scheduled dodge or landing-slide action");
-            f.Game.ActivateSlot(slot,due+1.f);
-            Require(f.Game.NextPopupDodgeTime[slot]==0.f || f.Game.NextPopupDodgeTime[slot]>due+1.f,"new appearance kept a stale deadline");
+    for(int scenario:{2,3,5}) for(int slot:{0,1,4,5}) {
+        Fixture f; f.Game.Progress.Scenario=scenario; f.Game.Schedule.Random=true; f.Game.Schedule.Seed=42;
+        f.Gun.Refire=scenario==3?1.3f:scenario==5?.7f:1.f; f.Start(); f.Game.NextPopupTime=10000.f;
+        f.Game.ActivateSlot(slot,10.f); f.Game.TargetExpiry[slot]=70.f;
+        auto& target=f.Targets[slot]; target.Velocity=FVector(650,0,0);
+        int groundOnly=0,forward=0,backward=0,left=0,right=0,slides=0,continued=0,reversed=0;
+        float previousHold=0.f;
+        for(int step=0;step<100;++step) {
+            const float now=10.f+step*.4f; const int before=target.PopupDodgeAttempts;
+            f.Game.ChoosePopupMovement(slot,now);
+            const float hold=f.Game.NextWiggleTime[slot]-now;
+            Require(!(previousHold>0.f && previousHold<.4f && hold<.4f),"short feints repeat without meaningful travel");
+            previousHold=hold;
+            continued+=int(target.Destination.X>.5f); reversed+=int(target.Destination.X<-.5f);
+            if(target.PopupDodgeAttempts==before) { ++groundOnly; continue; }
+            Require(target.PopupDodgeAttempts==before+1 && target.LastDodgeSlot==slot,"one decision accepted multiple dodges");
+            const auto direction=target.LastDodgeDirection;
+            Require(FMath::IsNearlyEqual(direction.Size2D(),1.f) && direction.Z==0.f,"dodge is not a unit planar direction");
+            if(target.LastDodgeSlide) Require(direction.X>0.f,"landing slide is not a backward dodge");
+            forward+=int(direction.X<0); backward+=int(direction.X>0); left+=int(direction.Y<0); right+=int(direction.Y>0);
+            slides+=int(target.LastDodgeSlide);
         }
+        Require(groundOnly>10 && forward>5 && backward>5 && left>5 && right>5 && continued>5 && reversed>5,
+            "seeded decisions lost independent action/direction choices or always reverse");
+        Require(slot==1?slides==0:slides>0,"backward dodge-to-slide availability escaped its safe slots");
     }
 }
 void PopupDodgeDeadlineAndReuse() {
-    for(float roll:{.05f,.55f}) for(bool roundEnd:{false,true}) for(float margin:{-.01f,.01f}) {
+    for(float roll:{.05f,.31f}) for(bool roundEnd:{false,true}) for(float margin:{-.01f,.01f}) {
         Fixture f; f.Game.Schedule.Roll=roll; f.Start(); f.Game.NextPopupTime=10000.f;
-        f.Game.ActivateSlot(4,10.f); f.Game.PopupSpawnVariants[4]=0; f.Game.NextPopupSlideTime[4]=0.f;
-        f.Game.PopupDodgeActions[4]=NCAimTrainerScenarioPolicy::PopupAction(4,0,f.Game.Schedule.Roll);
-        f.Game.NextPopupDodgeTime[4]=10.5f;
-        const float due=f.Game.NextPopupDodgeTime[4];
-        const float required=(roll<.5f?1.05f:2.05f)+f.Game.PopupRefireSeconds;
+        f.Game.ActivateSlot(4,10.f); const float due=10.5f;
+        const float required=(roll<.12f?2.05f:1.05f)+f.Game.PopupRefireSeconds;
         if(roundEnd) f.Game.PhaseStartedAt=due+required+margin-60.f;
         else f.Game.TargetExpiry[4]=due+required+margin;
-        const float expiry=f.Game.TargetExpiry[4];
-        f.At(due);
-        Require(f.Targets[4].PopupDodgeAttempts==int(margin>0.f)&&f.Game.NextPopupDodgeTime[4]==0.f,
-            "dodge didn't reserve complete motion and one rifle refire before expiry/end");
+        const float expiry=f.Game.TargetExpiry[4]; const int before=f.Targets[4].PopupDodgeAttempts;
+        f.Game.ChoosePopupMovement(4,due);
+        Require(f.Targets[4].PopupDodgeAttempts==before+int(margin>0.f),
+            "dodge did not reserve native motion plus one rifle refire before expiry/end");
         Require(f.Game.TargetExpiry[4]==expiry,"dodge extended target life");
     }
-    Fixture f; f.Game.Schedule.Roll=.55f; f.Start(); f.Game.NextPopupTime=10000.f;
-    f.Game.ActivateSlot(4,10.f); f.Game.PopupSpawnVariants[4]=0; f.Game.NextPopupSlideTime[4]=0.f;
-        f.Game.PopupDodgeActions[4]=NCAimTrainerScenarioPolicy::PopupAction(4,0,f.Game.Schedule.Roll);
-        f.Game.NextPopupDodgeTime[4]=10.5f; const float due=f.Game.NextPopupDodgeTime[4];
-    f.Hit(4); f.At(due);
-    Require(f.Targets[4].PopupDodgeAttempts==0,"hit target executed old dodge intent");
-    f.Game.Schedule.Roll=.95f; f.Game.ActivateSlot(4,due);
-    Require(f.Game.NextPopupDodgeTime[4]==0.f&&f.Game.PopupDodgeActions[4]==0,
-        "strafe-only replacement inherited previous dodge/slide action");
-    Fixture right; right.Game.Schedule.Roll=.1f; right.Start(); right.Game.NextPopupTime=10000.f;
-    right.Game.ActivateSlot(4,10.f); right.Game.PopupSpawnVariants[4]=1;
-    right.Game.NextPopupDodgeTime[4]=0.f; right.Game.NextPopupSlideTime[4]=10.5f; right.At(10.5f);
-    Require(right.Targets[4].LastSlideVariant==1,"right-hand lane lost its inward slide direction");
+    Fixture f; f.Game.Schedule.Roll=.05f; f.Start(); f.Game.NextPopupTime=10000.f;
+    f.Game.ActivateSlot(4,10.f); const int before=f.Targets[4].PopupDodgeAttempts;
+    f.Hit(4); f.Game.ChoosePopupMovement(4,10.5f);
+    Require(f.Targets[4].PopupDodgeAttempts==before,"hidden target executed a movement action");
+    f.Game.Schedule.Roll=.95f; f.Game.ActivateSlot(4,10.6f);
+    Require(f.Targets[4].PopupDodgeAttempts==before && f.Game.PopupLastMoveHold[4]>.9f
+        && f.Game.NextPopupDodgeTime[4]==0.f,"new long run inherited an old dodge or short-hold history");
 }
 int main(int argc, char** argv) {
     Require(argc == 2, "case required");
@@ -1160,28 +1143,17 @@ int main(int argc, char** argv) {
         }
         Require(shortCount==200 && mediumCount==350 && longCount==450 && continued==400,
             "instagib decisions lost long commitments or always reverse");
+
         for(float roll:{.05f,.5f,.95f}) {
             Fixture f; f.Game.Schedule.Roll=roll; f.Start();
             auto& front=f.Targets[5];
             Require(front.Position.X>=-1100.f && front.Position.X<=-800.f
-                &&front.Position.Y>=-450.f &&front.Position.Y<=450.f &&front.StrafeCenter.Y==0.f,
-                "instagib foreground spawn ignored variation or shifted safe lane");
-            f.Game.NextPopupTime=10000.f; f.Game.ActivateSlot(0,10.f);
-            Require(f.Targets[0].WiggleRange==800.f && f.Targets[0].Strafing
-                &&f.Game.NextPopupLongStrafeTime[0]==0.f,"instagib wider base run still relies on a scripted long-strafe event");
-            f.Game.NextWiggleTime[0]=10.f;
-            const int before=f.Targets[0].Reversals; f.At(10.f);
-            Require(f.Targets[0].Reversals==before+int(roll<.6f),"actual popup scheduler still reverses every decision");
-            const float first=f.Game.NextPopupDodgeTime[5]; front.CanDodge=false; f.Game.UpdatePopupDodger(first);
-            Require(front.DodgeAttempts==int(roll<.8f) && f.Game.NextPopupDodgeTime[5]>first,
-                "foreground random dodge skip/retry bypassed native rejection or queued a burst");
-            for(int slot=0;slot<5;++slot) for(int variant=0;variant<NCAimTrainerLayout::PopupSeatVariantCount(slot);++variant) {
-                const auto seat=NCAimTrainerLayout::PopupSeat(slot,variant,true);
-                Require(std::fabs(seat.CenterY)+seat.SpawnJitterY+seat.WiggleRange+40.f+15.f<1800.f,
-                    "wider instagib strafe can leave the room");
-                if(slot==0 || (slot==4 && variant!=1)) Require(seat.CenterY+seat.SpawnJitterY+seat.WiggleRange+55.f<-290.f,
-                    "wider left lane walks into the central cover");
-            }
+                &&front.Position.Y>=-450.f &&front.Position.Y<=450.f,"foreground spawn left its safe region");
+            Require(front.TravelDecisions==1 && f.Targets[0].TravelDecisions==1,"persistent actors lack free movement");
+            const int before=f.Targets[0].TravelDecisions;
+            f.Game.NextWiggleTime[0]=10.f; f.Game.UpdatePopupDodger(10.f);
+            Require(f.Targets[0].TravelDecisions==before+1 && f.Targets[0].Reversals==0,
+                "popup still uses alternating strafe-line reversals");
         }
         Fixture reset; for(int i=0;i<8;++i) reset.Game.AirborneSpawnBalance.RecordHit(-1000.f);
         reset.Start(); Require(reset.Game.AirborneSpawnBalance.Count==0,"new run inherited old hit preferences");
@@ -1277,7 +1249,7 @@ class AimTrainerScenarioTests(unittest.TestCase):
             "float ANCAimTrainerGame::RecordTargetHit",
             "void ANCAimTrainerGame::UpdateTargets",
             "void ANCAimTrainerGame::UpdatePopupDodger",
-            "void ANCAimTrainerGame::ChoosePopupTravel",
+            "void ANCAimTrainerGame::ChoosePopupMovement",
             "void ANCAimTrainerGame::UpdateTrackingMovement",
         )
         source = directory / "trainer_scenarios.cpp"

@@ -4,6 +4,30 @@ An opt-in game mode with real animated UT character targets, eleven 60-second
 scenarios, an in-game picker/results HUD and shared UT4Stats top 10 boards.
 It does not enable aim assistance or replace the controller in other modes.
 
+## Pop-up evasion (2026-10-09)
+
+Revision 19 replaces the revision-17 stop-at-destination routes in all three
+pop-up presets. The left and foreground persistent targets, the middle-platform
+target and the alternate floor target choose two-dimensional movement input.
+They mix isolated 0.22–0.34-second feints, 0.48–0.82-second cuts and 0.95–1.60-second
+runs. A short feint cannot be followed by another short feint. Continuing,
+turning across the previous motion, and reversing are independent choices;
+neither a waypoint nor the trainee's crosshair determines the next turn.
+
+Each decision can also attempt a native diagonal dodge, or occasionally a
+backward dodge into a landing slide. Choices repeat throughout an appearance,
+with fresh directions after landing and no forced return to the spawn corner.
+Full trajectory checks include retained
+perpendicular momentum and landing/slide drift. Native cooldown, speed,
+acceleration and posture remain in control; unsafe actions fall back to walking.
+The rear head peek keeps its cover movement. The high-right target keeps its
+short platform strafe and occasional slide, without destination walking.
+
+Deploy Django revision-19 support before these plugin builds. Only pop-up boards
+start fresh; historical results, the five-position headshot rules, tracking and
+Airborne are preserved. No migration or map recook is required. Rebuild and
+playtest the packaged client/server to assess difficulty and movement feel.
+
 ## Headshot line clears (2026-10-09)
 
 Regular Sniper/LG and SACTF headshots use fresh revision-18 boards. Each confirmed
@@ -17,9 +41,9 @@ Deploy the matching Django revision-18 support before the updated plugin. Local
 checkpoints enforce the same five-station rule across checkpoint boundaries; older
 scores remain on their historical boards. Other presets retain their board versions.
 
-## Pop-up travel and a second persistent dodger (2026-10-09)
+## Earlier pop-up travel and a second persistent dodger (2026-10-09)
 
-All three pop-up presets now use revision 17. The left platform target becomes
+Revision 17 introduced fresh pop-up boards. The left platform target becomes
 a second persistent dodger; the total remains six targets (four timed, two
 persistent). It walks and dodges lengthwise along the left side, with a small
 random diagonal angle per appearance and its own direction/dodge timers. Both

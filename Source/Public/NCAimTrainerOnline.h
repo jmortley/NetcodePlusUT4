@@ -10,7 +10,7 @@ class NETCODEPLUS_API FNCAimTrainerOnline
 {
 public:
 	// Changed preset rules use fresh boards; untouched presets keep their scores.
-	enum { PresetRevision = 14, AirbornePresetRevision = 16, PopupPresetRevision = 17, HeadshotPresetRevision = 18 };
+	enum { PresetRevision = 14, AirbornePresetRevision = 16, PopupPresetRevision = 19, HeadshotPresetRevision = 18 };
 	static int32 PresetRevisionForScenario(int32 Scenario);
 	static const TCHAR* ScenarioSlug(int32 Scenario);
 	static void Submit(UWorld* World, const FNCAimTrainerResult& Result,
