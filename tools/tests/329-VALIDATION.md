@@ -73,8 +73,10 @@ every request, receipt and projectile marker. Dropping and re-picking the same
 launcher resets its sequence under a new generation, including when the same
 pawn re-picks it. Old responses cannot cancel the new load. The server controls
 load timing, ammunition and actual projectile count; client counts cannot
-manufacture loads. Firing before the initial generation has replicated is a
-readiness boundary that must be exercised during pickup/equip testing.
+manufacture loads. A local first load press/release can wait up to 250 ms for the
+initial ownership generation, without starting a charge or sending an unnumbered
+request. The normal load clock starts only once ownership is ready. Test this
+boundary during pickup/equip, with both timely and delayed ownership replication.
 
 Owner receipts report accepted/completed/rejected/cancelled volleys and individual
 spawned/resolved/rejected/cancelled rockets. Predictions reconcile with the exact

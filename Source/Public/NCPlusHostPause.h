@@ -22,6 +22,11 @@ class AUTBaseGameMode;
 
 namespace NCPlusHostPause
 {
+	/** Stock local-player menus call SetPause(true) when opened. Reject that
+	 *  automatic pause in standalone play, before consulting stock permissions.
+	 *  Manual pause with menus closed and all networked modes remain unchanged. */
+	NETCODEPLUS_API bool IsStandaloneMenuPause(APlayerController* PC, AUTBaseGameMode* GM);
+
 	/** True when [NetcodePlus] bAllowHostPause is set in the server's Mod.ini
 	 *  and PC is the match host (bIsMatchHost, or direct GetHostId() vs
 	 *  UniqueId compare — the same match the engine host loop uses). */
@@ -46,7 +51,7 @@ namespace NCPlusHostPause
 	/** Call at the TOP of a gamemode's ClearPause() override. Returns true if the
 	 *  unpause was DEFERRED behind a short server-only "Resuming in N..." countdown —
 	 *  the override must then return false (stay paused). Returns false if the caller
-	 *  should proceed with Super::ClearPause() immediately: feature disabled, the world
+	 *  should proceed with Super::ClearPause() immediately: standalone play, feature disabled, the world
 	 *  isn't actually paused (so every non-unpause ClearPause passes straight through),
 	 *  or the countdown just completed and is firing the real clear.
 	 *

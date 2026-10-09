@@ -194,8 +194,15 @@ void AUTPlusWeap_RocketLauncher::GetLifetimeReplicatedProps(TArray<FLifetimeProp
     DOREPLIFETIME_CONDITION(AUTPlusWeap_RocketLauncher, LoadedOwnershipEpoch, COND_OwnerOnly);
 }
 
+void AUTPlusWeap_RocketLauncher::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    ClearLoadedVolleyInput();
+    Super::EndPlay(EndPlayReason);
+}
+
 void AUTPlusWeap_RocketLauncher::Destroyed()
 {
+    ClearLoadedVolleyInput();
     CompleteLoadedVolley(true);
     GetWorldTimerManager().ClearTimer(LoadedRocketReconcileHandle);
     GetWorldTimerManager().ClearTimer(LoadedVolleyBeginHandle);
@@ -1162,6 +1169,7 @@ void AUTPlusWeap_RocketLauncher::FiringInfoUpdated_Implementation(uint8 InFireMo
 void AUTPlusWeap_RocketLauncher::StateChanged()
 {
     Super::StateChanged();
+    if (bPendingLoadedVolleyInput && !CanBeginLoadedVolleyInput()) ClearLoadedVolleyInput();
 
     // Lock acquisition is pointless with alt loading disabled — only loaded
     // (seeking) rockets consume a lock — so skip the timer entirely: no phantom

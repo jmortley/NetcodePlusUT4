@@ -4047,6 +4047,10 @@ void ANCPlusCTFGameMode::CreateGameURLOptions(TArray<TSharedPtr<TAttributeProper
 
 bool ANCPlusCTFGameMode::AllowPausing(APlayerController* PC)
 {
+	if (NCPlusHostPause::IsStandaloneMenuPause(PC, this))
+	{
+		return false;
+	}
 	// Stock permissions (rcon admin / listen with no remotes) are preserved; this ADDS
 	// the ?HostId= match host ([NetcodePlus] bAllowHostPause) AND the two bot-designated
 	// team captains ([NetcodePlus] bAllowCaptainPause, ?Captains=) — see NCPlusHostPause.

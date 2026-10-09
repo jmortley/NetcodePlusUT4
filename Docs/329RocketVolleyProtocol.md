@@ -65,12 +65,24 @@ rejected. Its ordinary collision/lifespan still applies and reconciliation emits
 an expiry diagnostic after 12 seconds. This is not a promise that visuals survive
 arbitrary network loss, actor destruction or invalid custom projectile content.
 
-The first charge is fail-closed until the owning client receives a nonzero
-ownership epoch. An immediate pickup/equip click before that replication is not
-latched and must be pressed again; no predicted volley starts in that window.
-This readiness boundary is covered by the adapter but still needs an actual
-pickup/equip canary. The change does not promise to fix that separate input-latch
-edge case, and it should be checked before widening the rollout.
+The first charge still requires a nonzero server ownership epoch. A locally
+controlled client now retains one initial alt-fire press, plus its release, for
+up to 250 ms of real time while that epoch is zero. It creates no volley ID, RPC,
+pending-fire permission, predicted charge or ammo consumption during the wait.
+Repeated presses do not refresh the active buffer or queue more volleys. An
+expired request is discarded; a later fresh press can start a new request.
+
+After initial epoch cleanup, the buffer is consumed once through the normal
+StartFire path. A retained release applies only to the exact resulting volley
+on the same pawn/controller/world, and the existing first-load boundary still
+applies. Buffered waiting time grants no load progress, cooldown credit or extra
+rockets. An old primary retry does not erase the buffer; a fresh primary press
+does. Death, disabled firing, missing ammo, a pending weapon switch, put-down,
+detach, removal, destruction/end-play, ownership/possession changes or timeout
+cancel it. Only the initial zero-to-nonzero epoch transition preserves the buffer.
+This adds no RPC or replicated fields and does not alter the 329 wire protocol.
+Test immediate pickup/equip taps on matching built clients and servers before
+rollout, including releases while ownership replication is delayed past 250 ms.
 
 ## Diagnostics and validation
 
@@ -130,14 +142,16 @@ weapon, ownership epoch, volley, mode/count, load completion, per-ordinal server
 terminal volley mask, client receipt and reconciliation expiry. It defaults off.
 
 `python -m unittest tools.tests.test_rocket_volley -v` compiles the production
-identity core and 21 actual ownership/RPC/reconciliation/spawn-wrapper methods with a native
+identity core and actual input/ownership/RPC/reconciliation/spawn-wrapper methods with a native
 Unreal adapter. Tests cover wrap, replay, mismatched pawn, handshake rejection,
 empty ammo, cooldown wait, release before state entry, count/refund bounds,
 immutable release, partial cancellation, stale result, receipt before prediction,
 temporarily unavailable actor, independent three-rocket spawn, no shared delay,
 and spawned/resolved/rejected ordinal results. It also exercises same-pawn
 drop/repick with a recreated counter, old-epoch Begin/Release/Mode/outcome rejection,
-zero-epoch readiness, unnumbered charged-spawn rejection, and an initially unmapped
+zero-epoch press/release buffering, fixed real-time expiry, duplicate callbacks,
+local-only admission, lifetime cancellation, primary retry versus fresh input,
+exact release identity after reentrant state changes, unnumbered charged-spawn rejection, and an initially unmapped
 generic grenade resolving later by NetGUID without accepting a foreign instigator.
 
 The adapter does not replace UHT, engine timers/weak references, actor channel

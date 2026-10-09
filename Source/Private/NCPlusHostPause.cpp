@@ -14,6 +14,9 @@
 #include "Containers/Ticker.h"
 #include "Misc/ConfigCacheIni.h"          // GConfig
 #include "Misc/Paths.h"                    // FPaths
+#if !UE_SERVER
+#include "UTLocalPlayer.h"
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogNCHostPause, Log, All);
 
@@ -134,6 +137,20 @@ static bool UnpauseTick(float /*DeltaTime*/)
 
 namespace NCPlusHostPause
 {
+	bool IsStandaloneMenuPause(APlayerController* PC, AUTBaseGameMode* GM)
+	{
+#if !UE_SERVER
+		if (GM != nullptr && GM->GetNetMode() == NM_Standalone && PC != nullptr)
+		{
+			// ShowMenu/OpenDialog install their widget before calling SetPause.
+			// Checking here prevents the pause itself, rather than undoing it later.
+			UUTLocalPlayer* LocalPlayer = Cast<UUTLocalPlayer>(PC->Player);
+			return LocalPlayer != nullptr && LocalPlayer->AreMenusOpen();
+		}
+#endif
+		return false;
+	}
+
 	int32 GetUnpauseCountdownSeconds()
 	{
 		LoadUnpauseConfig();
@@ -245,8 +262,19 @@ namespace NCPlusHostPause
 
 	bool DeferUnpauseForCountdown(AUTBaseGameMode* GM)
 	{
+		if (GM == nullptr)
+		{
+			return false;
+		}
+		if (GM->GetNetMode() == NM_Standalone)
+		{
+			// Offline practice has no remote players to synchronize. This also
+			// makes an explicit console pause resume immediately.
+			CancelDeferredUnpause(GM);
+			return false;
+		}
 		LoadUnpauseConfig();
-		if (GUnpauseSec <= 0 || GM == nullptr)
+		if (GUnpauseSec <= 0)
 		{
 			return false;   // feature disabled -> immediate (stock) unpause
 		}

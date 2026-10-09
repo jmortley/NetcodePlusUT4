@@ -10,6 +10,9 @@ namespace NCRocketVolley
     enum class EResult : uint8_t { Accepted, Completed, Rejected, Cancelled };
     enum class ERocketResult : uint8_t { Spawned, Resolved, Rejected, Cancelled };
     static const uint8_t MaxRockets = 3;
+    // Local input may wait briefly for the initial server-owned epoch. This
+    // is not charge time and never changes the authoritative load schedule.
+    constexpr double OwnershipInputWindowSeconds = 0.25;
 
     inline bool IsNewer(uint32_t Candidate, uint32_t Previous)
     {

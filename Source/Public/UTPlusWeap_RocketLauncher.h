@@ -84,8 +84,12 @@ public:
 
     virtual void PostInitProperties() override;
     virtual void Destroyed() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Removed() override;
     virtual void GivenTo(AUTCharacter* NewOwner, bool bAutoActivate) override;
+    virtual void ClientGivenTo_Internal(bool bAutoActivate) override;
+    virtual bool PutDown() override;
+    virtual void DetachFromOwner_Implementation() override;
     virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
     // === ROCKET LOADING ===
     /** Font used to draw the firemode text (Grenades/Spiral) */
@@ -431,13 +435,26 @@ protected:
     TArray<FNCLoadedVolleyReceipt> LoadedVolleyReceipts;
     FTimerHandle LoadedRocketReconcileHandle;
     FTimerHandle LoadedVolleyBeginHandle;
+    // Local-only first press/release, before the initial ownership epoch maps.
+    // Separate from PendingFire and the numbered volley so it cannot load early.
+    bool bPendingLoadedVolleyInput = false;
+    bool bPendingLoadedVolleyRelease = false;
+    double PendingLoadedVolleyInputAt = 0.0;
+    TWeakObjectPtr<AUTCharacter> PendingLoadedVolleyPawn;
+    TWeakObjectPtr<UWorld> PendingLoadedVolleyWorld;
+    TWeakObjectPtr<AController> PendingLoadedVolleyController;
+    FTimerHandle PendingLoadedVolleyInputHandle;
+    bool CanBeginLoadedVolleyInput();
+    void BufferLoadedVolleyInput();
+    void TryDrainLoadedVolleyInput();
+    void ClearLoadedVolleyInput();
     bool CanBeginLoadedVolley();
     bool IsLoadedVolleyModeValid(uint8 Mode) const;
     void ResetLoadedVolley(uint32 Id);
     void SendLoadedVolleyReceipt(NCRocketVolley::EResult Result);
     void ReconcileLoadedRockets();
     FNCLoadedRocketPrediction& FindOrAddLoadedRocket(uint32 OwnershipEpoch, uint32 Id, uint8 Ordinal);
-    void ResetLoadedOwnershipState();
+    void ResetLoadedOwnershipState(bool bPreservePendingInput = false);
 
     // AI helpers
     UPROPERTY()

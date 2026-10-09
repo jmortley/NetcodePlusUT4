@@ -18,7 +18,7 @@ applicable Mod.ini settings determine the effective configuration.
 | Player | Name, flag, rank/XP decoration | Name and flag; standard board also has host and teammate status presentation |
 | ELO | Original saved rating, with match-end updates | TeamGlicko-based rating, global rank and match delta |
 | DPR or PPR | Historical damage per round, displayed beneath the player name beside ELO | Current-match points per participated round: kills plus damage divided by 100; completed rounds only |
-| Ping | Before the damage and kill columns; also visible before start | Last column; bots display skill |
+| Ping | Before the damage and kill columns; also visible before start | Same position on the Absolute skin, last column on the standard skin; bots and standalone players display a dash, with no Skill column |
 | Damage | Effective credited damage with lethal overkill removed | Overkill-inclusive match damage, capped at 255 per credited hit |
 | Kills | Kills only | Kills plus kill assists in the displayed K column |
 | Deaths | Deaths | Deaths |
@@ -33,13 +33,29 @@ player-name area around offset 260; rank decoration begins at 428. The previous
 C++ skin instead drew `PLAYER | K | D | DMG | ELO | PING`, omitting ElimPlus's PPR,
 LG accuracy, global rank, and ELO delta.
 
-The presentation patch retains the Absolute artwork with the fields
-`PLAYER | K | D | DMG | PPR | ELO | PING`. At the user's request it excludes LG
-accuracy, which remains on the standard skin. Headers, player rows, and totals
-share Absolute-specific column coordinates. Rank and ELO delta
-occupy a second line within the ELO cell. Ping remains visible during ready-up,
-and pending team switches use the existing ready-state display. The normal
-board's team K total now includes the same assists its player rows already show.
+The presentation patch restores the original arrangement:
+`PLAYER | ELO (PPR) | PING | DAMAGE | KILLS | DEATHS`. The rating group is
+centered under its header and vertically within each player/total row, rather
+than resting against the bottom edge. Names fit to the available space before
+the measured rating group so long names cannot overlap the values.
+The banners use large scores facing the center and mirrored Red/Blue names.
+It optionally loads the original stock scoreboard score font, falling back to
+the existing HugeFont if that asset is absent from the installed cook. Headers,
+player rows, and totals share the original column coordinates and top alignment.
+Global rank appears beside the flag; a nonzero match rating delta is included
+in the centered rating group. The obsolete Epic XP/rating badge is not synthesized from
+ElimPlus's different rating data.
+
+At the user's request the Absolute skin excludes LG accuracy, which remains on
+the standard skin. Neither skin displays bot Skill. Ping remains visible during
+ready-up, and pending team switches use the existing ready-state display. Players
+waiting to start are not dimmed as dead. The normal board's team K total includes
+the same assists its player rows already show; team ELO remains an average.
+
+Opening Escape or a menu no longer automatically pauses standalone NCP games.
+Manual console pause with menus closed still uses the existing permissions, and
+standalone resumes without the host countdown. Networked pause behavior is
+unchanged. These native changes do not require a Blueprint/pak recook.
 
 This exposes ElimPlus statistics in the Absolute artwork. It does not recreate
 Absolute's historical DPR. Renaming PPR to DPR would be incorrect: Absolute sums

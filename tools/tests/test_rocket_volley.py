@@ -16,14 +16,28 @@ PLUGIN = Path(os.environ.get("NCP_TEST_SOURCE", Path(__file__).resolve().parents
 class RocketVolleyTests(unittest.TestCase):
     def test_actual_rpc_lifecycle_methods(self):
         compiler, environment, msvc = find_compiler()
-        source = (PLUGIN / "Source/Private/NCRocketVolley.cpp").read_text(encoding="utf-8")
+        source = "\n".join((PLUGIN / path).read_text(encoding="utf-8") for path in (
+            "Source/Private/NCRocketVolley.cpp", "Source/Private/UTPlusWeap_RocketLauncher.cpp"))
         methods = [
             "void AUTPlusWeap_RocketLauncher::ResetLoadedOwnershipState",
             "void AUTPlusWeap_RocketLauncher::GivenTo",
             "void AUTPlusWeap_RocketLauncher::Removed",
             "void AUTPlusWeap_RocketLauncher::OnRep_LoadedOwnershipEpoch",
+            "void AUTPlusWeap_RocketLauncher::StartFire",
+            "void AUTPlusWeap_RocketLauncher::StopFire",
+            "void AUTPlusWeap_RocketLauncher::NotifyLoadedVolleyRelease",
+            "bool AUTPlusWeap_RocketLauncher::CanBeginLoadedVolleyInput",
+            "void AUTPlusWeap_RocketLauncher::BufferLoadedVolleyInput",
+            "void AUTPlusWeap_RocketLauncher::TryDrainLoadedVolleyInput",
+            "void AUTPlusWeap_RocketLauncher::ClearLoadedVolleyInput",
+            "bool AUTPlusWeap_RocketLauncher::PutDown",
+            "void AUTPlusWeap_RocketLauncher::DetachFromOwner_Implementation",
+            "void AUTPlusWeap_RocketLauncher::ClientGivenTo_Internal",
+            "void AUTPlusWeap_RocketLauncher::Destroyed",
+            "void AUTPlusWeap_RocketLauncher::EndPlay",
+            "void AUTPlusWeap_RocketLauncher::StateChanged",
             "bool AUTPlusWeap_RocketLauncher::ObserveLoadedRocketActor",
-            "bool AUTPlusWeap_RocketLauncher::CanBeginLoadedVolley",
+            "bool AUTPlusWeap_RocketLauncher::CanBeginLoadedVolley(",
             "bool AUTPlusWeap_RocketLauncher::IsLoadedVolleyModeValid",
             "void AUTPlusWeap_RocketLauncher::ResetLoadedVolley",
             "void AUTPlusWeap_RocketLauncher::TryBeginLoadedVolley",
